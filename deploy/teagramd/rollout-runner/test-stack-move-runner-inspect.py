@@ -252,8 +252,7 @@ class MoveSecretMigrationTest(unittest.TestCase):
             target_env = target / ".env"
             target_env.write_text(
                 "POSTGRES_PASSWORD=fixture-only\n"
-                "TG_PUBLIC_LINK_PREFIX=https://example.invalid/\n"
-                "TG_BLOB_S3_ACCESS_KEY_ID=fixture-app-access\n",
+                "TG_PUBLIC_LINK_PREFIX=https://example.invalid/\n",
                 encoding="utf-8",
             )
             target_env.chmod(0o600)
@@ -359,6 +358,7 @@ class MoveSecretMigrationTest(unittest.TestCase):
                 target_config = runner.render_compose(
                     "teagram", target, target_env,
                     [target_compose, target_local_overlay, target / "docker-compose.override.yml"],
+                    profiles=("migration",),
                 )
             target_service = target_config["services"]["teagramd"]
             self.assertEqual(
@@ -366,9 +366,10 @@ class MoveSecretMigrationTest(unittest.TestCase):
                 source_service["environment"]["TG_BLOB_DIR"],
             )
             self.assertTrue(all(
-                target_service["environment"].get(name, "") == ""
+                name not in target_service["environment"]
                 for name in runner.S3_BLOB_ENVIRONMENT
             ))
+            self.assertEqual(target_service.get("secrets", []), [])
             self.assertTrue(any(
                 mount.get("source") == "tgblobs"
                 and mount.get("target") == source_service["environment"]["TG_BLOB_DIR"]
@@ -388,15 +389,14 @@ class MoveSecretMigrationTest(unittest.TestCase):
                 pathlib.Path(target_config["secrets"]["teagramd_blob_secret_key"]["file"]),
                 staged_secret.resolve(),
             )
-            for service_name in ("rustfs-init", "teagramd"):
-                self.assertTrue(
-                    any(
-                        secret.get("source") == "teagramd_blob_secret_key"
-                        and secret.get("target") == "teagramd-blob-secret-key"
-                        for secret in target_config["services"][service_name]["secrets"]
-                    ),
-                    f"{service_name} does not mount the staged Teagram blob key",
-                )
+            self.assertTrue(
+                any(
+                    secret.get("source") == "teagramd_blob_secret_key"
+                    and secret.get("target") == "teagramd-blob-secret-key"
+                    for secret in target_config["services"]["rustfs-init"]["secrets"]
+                ),
+                "rustfs-init does not mount the staged Teagram blob key",
+            )
             print("PASS stack move preserves the source blob path and stages the legacy target secret")
 
     def test_s3_authority_is_rejected_by_the_mover_contract(self) -> None:
@@ -420,6 +420,47 @@ class MoveSecretMigrationTest(unittest.TestCase):
         with self.assertRaisesRegex(runner.MoveError, "source blob mode must not select S3 authority"):
             runner.require_local_source_blob_lane(source_config)
         print("PASS stack mover rejects S3 authority before touching the source stack")
+
+
+class MoveRuntimeProfileTest(unittest.TestCase):
+    def test_migration_profile_keeps_rustfs_data_without_runtime_service(self) -> None:
+        runner = load_runner()
+        config = {"services": {"rustfs": {"profiles": ["migration"]}}}
+
+        services, stable_volumes = runner.target_runtime_expectations(config, ())
+
+        self.assertEqual(services, (runner.TARGET_SERVER, "postgres"))
+        self.assertEqual(stable_volumes, ("tgkey", "tgblobs", "rustfsdata"))
+        print("PASS local move preserves the RustFS data volume without requiring migration services")
+
+    def test_enabled_rustfs_profile_keeps_existing_runtime_checks(self) -> None:
+        runner = load_runner()
+        config = {"services": {"rustfs": {"profiles": ["migration"]}}}
+
+        services, stable_volumes = runner.target_runtime_expectations(config, ("migration",))
+
+        self.assertEqual(services, (runner.TARGET_SERVER, "postgres", "rustfs"))
+        self.assertEqual(stable_volumes, ("tgkey", "tgblobs"))
+        print("PASS explicitly enabled migration profile retains RustFS runtime checks")
+
+    def test_inactive_rustfs_volume_must_match_its_copied_inventory(self) -> None:
+        runner = load_runner()
+        inventories = {
+            "rustfsdata": {
+                "target_sha256": runner.hashlib.sha256(b"copied inventory").hexdigest(),
+            },
+        }
+
+        with mock.patch.object(runner, "volume_files", return_value="changed inventory"):
+            with self.assertRaisesRegex(runner.MoveError, "copied rustfsdata inventory"):
+                runner.verify_runtime_volume_inventories(
+                    "postgres:fixture",
+                    runner.SOURCE_VOLUMES,
+                    runner.TARGET_VOLUMES,
+                    inventories,
+                    ("rustfsdata",),
+                )
+        print("PASS inactive RustFS data volume is checked against its copied inventory")
 
 
 class PinnedMoveAuthorityPublicationTest(unittest.TestCase):

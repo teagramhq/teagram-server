@@ -1,18 +1,27 @@
 # Local backend overlay for the guarded initial-local rollout. Select it with
-# COMPOSE_FILE when invoking the runner; it keeps RustFS data available for a
-# later separately reviewed transition.
+# COMPOSE_FILE when invoking the runner. RustFS stays under the migration
+# profile, preserving transition tooling and data without requiring credentials
+# for the local server.
 services:
+  rustfs:
+    profiles: ["migration"]
+  rustfs-init:
+    profiles: ["migration"]
   teagramd:
     environment:
       TG_BLOB_DIR: ${TEAGRAMD_STACK_MOVE_BLOB_DIR:-/var/lib/teagramd-blobs}
-      TG_BLOB_S3_ENDPOINT: ""
-      TG_BLOB_S3_BUCKET: ""
-      TG_BLOB_S3_PREFIX: ""
-      TG_BLOB_S3_REGION: ""
-      TG_BLOB_S3_ACCESS_KEY_ID: ""
-      TG_BLOB_S3_SECRET_ACCESS_KEY: ""
-      TG_BLOB_S3_SECRET_ACCESS_KEY_FILE: ""
-      TG_BLOB_S3_CA_PATH: ""
-      TG_BLOB_S3_ALLOW_INSECURE_HTTP: ""
+      TG_BLOB_S3_ENDPOINT: !reset null
+      TG_BLOB_S3_BUCKET: !reset null
+      TG_BLOB_S3_PREFIX: !reset null
+      TG_BLOB_S3_REGION: !reset null
+      TG_BLOB_S3_ACCESS_KEY_ID: !reset null
+      TG_BLOB_S3_SECRET_ACCESS_KEY: !reset null
+      TG_BLOB_S3_SECRET_ACCESS_KEY_FILE: !reset null
+      TG_BLOB_S3_CA_PATH: !reset null
+      TG_BLOB_S3_ALLOW_INSECURE_HTTP: !reset null
+    depends_on: !override
+      migrate:
+        condition: service_completed_successfully
+    secrets: !reset []
     volumes:
       - tgblobs:${TEAGRAMD_STACK_MOVE_BLOB_DIR:-/var/lib/teagramd-blobs}

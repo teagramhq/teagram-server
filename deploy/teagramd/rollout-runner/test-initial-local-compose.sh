@@ -165,7 +165,7 @@ s3_compose_with_inputs() {
       --file "$REPO_ROOT/docker-compose.yml" --profile migration "$@"
 }
 
-if env \
+if ! env \
   -u COMPOSE_FILE -u COMPOSE_PROFILES -u COMPOSE_PROJECT_NAME \
   -u TG_BLOB_S3_ENDPOINT -u TG_BLOB_S3_BUCKET -u TG_BLOB_S3_PREFIX \
   -u TG_BLOB_S3_REGION -u TG_BLOB_S3_ACCESS_KEY_ID \
@@ -177,10 +177,16 @@ if env \
   RUSTFS_ROOT_SECRET_KEY=fixture-root-secret \
   docker compose --env-file /dev/null --project-directory "$fixture" \
     --file "$REPO_ROOT/docker-compose.yml" --profile migration \
-    config --quiet > /dev/null 2> "$TMP/missing-s3-credential.stderr"; then
-  printf '%s\n' 'S3 Compose selection unexpectedly rendered without an access key' >&2
+    config --format json > "$TMP/s3-compose-missing-access-key.json" \
+    2> "$TMP/missing-s3-credential.stderr"; then
+  printf '%s\n' 'S3 Compose fixture did not render without an access key' >&2
   exit 1
 fi
+jq -e '
+  .services.teagramd.environment.TG_BLOB_S3_ACCESS_KEY_ID == ""
+  and .services["rustfs-init"].environment.TG_BLOB_S3_ACCESS_KEY_ID == ""
+  and .services.teagramd.environment.TG_BLOB_S3_ENDPOINT == "http://rustfs:9000"
+' "$TMP/s3-compose-missing-access-key.json" >/dev/null
 if ! s3_compose_with_inputs config --format json > "$TMP/s3-compose.json" 2> "$TMP/s3-compose.stderr"; then
   printf '%s\n' 'S3 Compose fixture did not render with the complete disposable inputs' >&2
   exit 1
@@ -195,4 +201,4 @@ jq -e '
   and any(.services.teagramd.secrets[]; .source == "teagramd_blob_secret_key")
   and (.secrets.teagramd_blob_secret_key.file | endswith("/.secrets/teagramd-blob-secret-key"))
 ' "$TMP/s3-compose.json" >/dev/null
-printf '%s\n' 'PASS explicit S3 Compose selection still requires credentials and keeps RustFS private'
+printf '%s\n' 'PASS explicit S3 Compose selection renders without credentials and keeps RustFS private'

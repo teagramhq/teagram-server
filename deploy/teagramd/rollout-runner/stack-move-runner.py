@@ -165,8 +165,11 @@ def compose_args(
     project_dir: pathlib.Path,
     env_file: pathlib.Path,
     files: Sequence[pathlib.Path],
+    profiles: Sequence[str] = (),
 ) -> list[str]:
     args = ["docker", "compose"]
+    for profile in profiles:
+        args.extend(("--profile", profile))
     if project is not None:
         args.extend(("--project-name", project))
     args.extend(("--project-directory", str(project_dir), "--env-file", str(env_file)))
@@ -180,8 +183,12 @@ def render_compose(
     project_dir: pathlib.Path,
     env_file: pathlib.Path,
     files: Sequence[pathlib.Path],
+    profiles: Sequence[str] = (),
 ) -> dict[str, object]:
-    rendered = output([*compose_args(project, project_dir, env_file, files), "config", "--format", "json"])
+    rendered = output([
+        *compose_args(project, project_dir, env_file, files, profiles),
+        "config", "--format", "json",
+    ])
     try:
         config = json.loads(rendered)
     except json.JSONDecodeError as error:
@@ -896,6 +903,24 @@ def inspect_target_contract(
         raise MoveError("target rustfs must use only its teagram_rustfsdata persistent volume")
 
 
+def target_runtime_expectations(
+    config: dict[str, object],
+    selected_profiles: Sequence[str],
+) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    services = config.get("services")
+    rustfs = services.get("rustfs") if isinstance(services, dict) else None
+    if not isinstance(rustfs, dict):
+        raise MoveError("target rustfs service is missing")
+    profiles = rustfs.get("profiles", [])
+    if not isinstance(profiles, list) or not all(
+        isinstance(profile, str) and profile for profile in profiles
+    ):
+        raise MoveError("target rustfs profiles are invalid")
+    if profiles and not set(profiles).intersection(selected_profiles):
+        return (TARGET_SERVER, "postgres"), ("tgkey", "tgblobs", "rustfsdata")
+    return (TARGET_SERVER, "postgres", "rustfs"), ("tgkey", "tgblobs")
+
+
 def require_local_source_blob_lane(config: dict[str, object]) -> str:
     require_local_blob_lane(config, SOURCE_SERVER, SOURCE_LOCAL_BLOB_PATH, "source")
     return SOURCE_LOCAL_BLOB_PATH
@@ -1074,6 +1099,23 @@ def asset_inventories(
     return inventories
 
 
+def verify_runtime_volume_inventories(
+    image: str,
+    source_volumes: dict[str, str],
+    target_volumes: dict[str, str],
+    inventories: dict[str, dict[str, str]],
+    stable_volumes: Sequence[str],
+) -> None:
+    for logical in stable_volumes:
+        target_inventory = volume_files(image, target_volumes[logical])
+        if hashlib.sha256(target_inventory.encode()).hexdigest() != inventories[logical]["target_sha256"]:
+            raise MoveError(f"running teagram changed the copied {logical} inventory")
+        if logical in ("tgkey", "tgblobs") and target_inventory != volume_files(
+            image, source_volumes[logical],
+        ):
+            raise MoveError(f"running teagram changed the copied {logical} inventory")
+
+
 def load_blob_mode_helper(helper_path: pathlib.Path):
     helper = regular_file(helper_path, "pinned blob-mode helper")
     loader = importlib.machinery.SourceFileLoader("stack_move_blob_mode_state", str(helper))
@@ -1166,7 +1208,18 @@ def move(args: argparse.Namespace) -> None:
         )
         target_files = [*target_files, target_override]
         target_compose = compose_args(TARGET_PROJECT, target_dir, target_env_file, target_files)
-        target_config = render_compose(TARGET_PROJECT, target_dir, target_env_file, target_files)
+        target_config = render_compose(
+            TARGET_PROJECT, target_dir, target_env_file, target_files,
+            profiles=("migration",),
+        )
+        selected_profiles = tuple(
+            profile.strip()
+            for profile in os.environ.get("COMPOSE_PROFILES", "").split(",")
+            if profile.strip()
+        )
+        runtime_services, runtime_stable_volumes = target_runtime_expectations(
+            target_config, selected_profiles,
+        )
         source_layout = layout(source_layout_config, SOURCE_SERVER)
         target_layout = layout(target_config, TARGET_SERVER)
         if source_layout["project"] != SOURCE_PROJECT:
@@ -1311,20 +1364,20 @@ def move(args: argparse.Namespace) -> None:
             failure_evidence=evidence_dir / "target-compose-up.stderr",
         )
 
-        target_server_ids = output([*target_compose, "ps", "-q", TARGET_SERVER]).splitlines()
-        target_postgres_ids = output([*target_compose, "ps", "-q", "postgres"]).splitlines()
-        target_rustfs_ids = output([*target_compose, "ps", "-q", "rustfs"]).splitlines()
-        if len(target_server_ids) != 1 or len(target_postgres_ids) != 1 or len(target_rustfs_ids) != 1:
-            raise MoveError("teagramd, PostgreSQL, and rustfs must each run as one container")
-        target_server_id = target_server_ids[0] if target_server_ids else ""
-        target_postgres_id = target_postgres_ids[0] if target_postgres_ids else ""
-        target_rustfs_id = target_rustfs_ids[0] if target_rustfs_ids else ""
-        target_ids = (target_server_id, target_postgres_id, target_rustfs_id)
-        if any(re.fullmatch(r"[0-9a-f]{64}", item) is None for item in target_ids):
-            raise MoveError("target teagramd, postgres, or rustfs service did not remain running")
+        target_service_ids: dict[str, str] = {}
+        for service in runtime_services:
+            service_ids = output([*target_compose, "ps", "-q", service]).splitlines()
+            if len(service_ids) != 1:
+                raise MoveError(f"{', '.join(runtime_services)} must each run as one container")
+            service_id = service_ids[0]
+            if re.fullmatch(r"[0-9a-f]{64}", service_id) is None:
+                raise MoveError(f"target {service} service did not remain running")
+            target_service_ids[service] = service_id
+        target_server_id = target_service_ids[TARGET_SERVER]
+        target_postgres_id = target_service_ids["postgres"]
         wait_postgres(target_postgres_id, target_database)
-        target_inspected = inspect_containers(target_ids)
-        for item, service in zip(target_inspected, (TARGET_SERVER, "postgres", "rustfs"), strict=True):
+        target_inspected = inspect_containers(tuple(target_service_ids.values()))
+        for item, service in zip(target_inspected, runtime_services, strict=True):
             config = item.get("Config")
             labels = config.get("Labels") if isinstance(config, dict) else None
             state = item.get("State")
@@ -1371,16 +1424,17 @@ def move(args: argparse.Namespace) -> None:
             for mount in postgres_mounts
         ):
             raise MoveError("running PostgreSQL 18 uses an anonymous mount under PGDATA")
-        rustfs_mounts = target_inspected[2].get("Mounts")
-        if not isinstance(rustfs_mounts, list) or len([
-            mount for mount in rustfs_mounts
-            if isinstance(mount, dict)
-            and mount.get("Type") == "volume"
-            and mount.get("Name") == TARGET_VOLUMES["rustfsdata"]
-            and mount.get("Destination") == "/data"
-            and mount.get("RW") is True
-        ]) != 1:
-            raise MoveError("running rustfs is not using teagram_rustfsdata at /data")
+        if "rustfs" in runtime_services:
+            rustfs_mounts = target_inspected[2].get("Mounts")
+            if not isinstance(rustfs_mounts, list) or len([
+                mount for mount in rustfs_mounts
+                if isinstance(mount, dict)
+                and mount.get("Type") == "volume"
+                and mount.get("Name") == TARGET_VOLUMES["rustfsdata"]
+                and mount.get("Destination") == "/data"
+                and mount.get("RW") is True
+            ]) != 1:
+                raise MoveError("running rustfs is not using teagram_rustfsdata at /data")
         target_counts = table_counts(target_postgres_id, target_database)
         if source_counts != target_counts:
             raise MoveError("PostgreSQL 18 row counts changed after its runtime container was recreated")
@@ -1396,12 +1450,12 @@ def move(args: argparse.Namespace) -> None:
             evidence_dir / "roles.target-runtime.json",
             (json.dumps(target_role_evidence, sort_keys=True, separators=(",", ":")) + "\n").encode(),
         )
-        # RustFS writes internal metadata when it starts. Its data was already
-        # byte-verified immediately after the stopped-volume copy; compare the
-        # application-owned key and blob volumes after service startup.
-        for logical in ("tgkey", "tgblobs"):
-            if volume_files(source_postgres_image, TARGET_VOLUMES[logical]) != volume_files(source_postgres_image, SOURCE_VOLUMES[logical]):
-                raise MoveError(f"running teagram changed the copied {logical} inventory")
+        # RustFS writes internal metadata when its profile is active. Keep its
+        # copied volume byte-stable when the migration service is inactive.
+        verify_runtime_volume_inventories(
+            source_postgres_image, SOURCE_VOLUMES, TARGET_VOLUMES,
+            inventories, runtime_stable_volumes,
+        )
         check_source_volumes_are_stopped(source_volume_names)
         retained_pgdata_inventory = volume_files(source_postgres_image, SOURCE_VOLUMES["pgdata"])
         if source_pgdata_inventory != retained_pgdata_inventory:
