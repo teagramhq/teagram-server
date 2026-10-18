@@ -19,9 +19,11 @@ TG_MAX_FILE_BYTES=16777216
 TG_MAX_USER_STORAGE_BYTES=268435456
 TEAGRAM_DEMO_BLOB_PATH=/srv/teagram-demo-blobs/data
 TEAGRAM_DEMO_TURNSTILE_SITE_KEY=fixture-site-key
-TEAGRAM_DEMO_TURNSTILE_SECRET_KEY=fixture-secret-key
 ENV
+printf 'TEAGRAM_DEMO_TURNSTILE_SECRET_KEY_FILE=%s\n' "$TMP_DIR/turnstile-secret-key" >> "$TMP_DIR/demo.env"
 chmod 0600 "$TMP_DIR/demo.env"
+printf 'fixture-secret-key\n' > "$TMP_DIR/turnstile-secret-key"
+chmod 0600 "$TMP_DIR/turnstile-secret-key"
 
 compose=(
   docker compose
@@ -31,17 +33,25 @@ compose=(
   --file "$SCRIPT_DIR/compose.yaml"
 )
 env -u COMPOSE_FILE -u COMPOSE_PROJECT_NAME -u COMPOSE_PROFILES \
+  -u TEAGRAM_DEMO_TURNSTILE_SITE_KEY -u TEAGRAM_DEMO_TURNSTILE_SECRET_KEY_FILE \
   "${compose[@]}" config --format json > "$TMP_DIR/target.json"
-jq -e '
+jq -e --arg secretFile "$TMP_DIR/turnstile-secret-key" '
   .name == "teagram-demo"
-  and (.services | keys | sort) == ["edge", "migrate", "postgres", "teagramd"]
+  and (.services | keys | sort) == ["edge", "haproxy", "migrate", "postgres", "teagramd"]
   and ((.services.teagramd.ports // []) | length) == 0
   and ((.services.edge.ports | length) == 1)
   and .services.edge.ports[0].host_ip == "127.0.0.1"
   and (.services.edge.ports[0].published | tostring) == "8080"
   and (.services | to_entries | map(.value.ports // []) | add | map(.published | tostring) | index("2443")) == null
+  and ((.services.haproxy.ports // []) | length) == 0
+  and .services.haproxy.platform == "linux/amd64"
+  and .services.haproxy.image == "mirror.gcr.io/library/haproxy:3.2-alpine@sha256:51f173c6825753d9e3a888b1004a1c2cb730936cc9178730a5c555246bd161a2"
+  and .services.haproxy.networks.backend.ipv4_address == "198.18.130.2"
+  and .services.haproxy.healthcheck.test[-1] == "http://127.0.0.1:8404/healthz"
+  and .services.edge.depends_on.haproxy.condition == "service_healthy"
   and (.services.teagramd.networks | keys) == ["backend"]
   and .networks.backend.internal == true
+  and .networks.backend.ipam.config[0].subnet == "198.18.130.0/24"
   and (.services.edge.networks | keys | sort) == ["backend", "edge"]
   and .services.teagramd.environment.TG_REGISTRATION == "open"
   and .services.teagramd.environment.TG_LOG_LOGIN_CODES == "false"
@@ -49,7 +59,11 @@ jq -e '
   and .services.teagramd.environment.TG_MAX_USER_STORAGE_BYTES == "268435456"
   and .services.teagramd.environment.TG_WEBSOCKET_LISTEN_ADDR == ":2446"
   and .services.teagramd.environment.TG_WEBSOCKET_ALLOWED_ORIGINS == "https://web.teagram.io"
-  and .services.teagramd.environment.TG_CLIENT_ADDR_TRUST == "socket"
+  and .services.teagramd.environment.TG_CLIENT_ADDR_TRUST == "proxy-v2"
+  and .services.teagramd.environment.TG_CLIENT_ADDR_PROXY_CIDRS == "198.18.130.2/32"
+  and .services.teagramd.environment.TG_TURNSTILE_SITE_KEY == "fixture-site-key"
+  and .services.teagramd.environment.TG_TURNSTILE_SECRET_KEY_FILE == "/run/secrets/teagram_demo_turnstile"
+  and .secrets.teagram_demo_turnstile.file == $secretFile
   and .services.postgres.environment.PGDATA == "/var/lib/postgresql/18/docker"
   and .services.postgres.platform == "linux/amd64"
   and (.services.postgres.image | endswith("@sha256:d8703cd7fba306b9fec9268ecedfa8a966846c053036a60e3635791957eb2f66"))
@@ -63,15 +77,93 @@ jq -e '
 ' "$TMP_DIR/target.json" >/dev/null
 
 env -u COMPOSE_FILE -u COMPOSE_PROJECT_NAME -u COMPOSE_PROFILES \
-  "${compose[@]}" --file "$SCRIPT_DIR/compose.bootstrap.yaml" config --format json > "$TMP_DIR/bootstrap.json"
+  -u TEAGRAM_DEMO_TURNSTILE_SITE_KEY -u TEAGRAM_DEMO_TURNSTILE_SECRET_KEY_FILE \
+  "${compose[@]}" --file "$SCRIPT_DIR/compose.bootstrap.yaml" \
+  --file "$SCRIPT_DIR/compose.seed.yaml" config --format json > "$TMP_DIR/bootstrap.json"
 jq -e '
   (.services.teagramd.volumes | map(.target) | sort) == ["/var/lib/teagramd", "/var/lib/teagramd-blobs"]
   and .services.teagramd.environment.TG_BLOB_DIR == "/var/lib/teagramd-blobs"
+  and .services.teagramd.environment.TG_CLIENT_ADDR_TRUST == "socket"
+  and .services.teagramd.environment.TG_CLIENT_ADDR_PROXY_CIDRS == ""
+  and .services.teagramd.environment.TG_TURNSTILE_SITE_KEY == ""
+  and .services.teagramd.environment.TG_TURNSTILE_SECRET_KEY_FILE == ""
+  and .services.teagramd.environment.TG_RATE_LIMIT_SIGN_UP_IP == "32"
   and .volumes.tgblobs.driver_opts.device == "/srv/teagram-demo-blobs/data"
 ' "$TMP_DIR/bootstrap.json" >/dev/null
 
+env -u COMPOSE_FILE -u COMPOSE_PROJECT_NAME -u COMPOSE_PROFILES \
+  -u TEAGRAM_DEMO_TURNSTILE_SITE_KEY -u TEAGRAM_DEMO_TURNSTILE_SECRET_KEY_FILE \
+  "${compose[@]}" --file "$SCRIPT_DIR/compose.seed.yaml" config --format json > "$TMP_DIR/seed.json"
+jq -e '
+  .services.teagramd.environment.TG_CLIENT_ADDR_TRUST == "socket"
+  and .services.teagramd.environment.TG_CLIENT_ADDR_PROXY_CIDRS == ""
+  and .services.teagramd.environment.TG_TURNSTILE_SITE_KEY == ""
+  and .services.teagramd.environment.TG_TURNSTILE_SECRET_KEY_FILE == ""
+  and .services.teagramd.environment.TG_RATE_LIMIT_SIGN_UP_IP == "32"
+  and .services.teagramd.environment.TG_RATE_LIMIT_SIGN_UP_IP_WINDOW == "1h"
+  and .services.teagramd.environment.TG_RATE_LIMIT_SEND_CODE_IP == "64"
+  and .services.teagramd.environment.TG_RATE_LIMIT_SEND_CODE_IP_PHONES == "32"
+' "$TMP_DIR/seed.json" >/dev/null
+python3 "$SCRIPT_DIR/../teagramd/rollout-runner/blob-mode-state.py" compose \
+  --checkout "$REPO_ROOT" < "$TMP_DIR/seed.json" > "$TMP_DIR/seed-inventory.json"
+python3 "$SCRIPT_DIR/../teagramd/rollout-runner/blob-mode-state.py" compose \
+  --checkout "$REPO_ROOT" < "$TMP_DIR/bootstrap.json" > "$TMP_DIR/bootstrap-inventory.json"
+jq -e --slurpfile bootstrap "$TMP_DIR/bootstrap-inventory.json" '
+  .services | length == 1
+  and .[0].initial_local_guard_environment == {
+    "TG_REPLICA_COUNT": "1",
+    "TG_CLIENT_ADDR_TRUST": "socket"
+  }
+  and .[0].tg_environment_sha256 == $bootstrap[0].services[0].tg_environment_sha256
+  and .[0].network == $bootstrap[0].services[0].network
+' "$TMP_DIR/seed-inventory.json" >/dev/null
+
 grep -Fq 'location = /apiws {' "$SCRIPT_DIR/nginx.conf"
+# These patterns match literal Nginx variables.
+# shellcheck disable=SC2016
+grep -Fq 'set $teagramd http://haproxy:2446;' "$SCRIPT_DIR/nginx.conf"
+# shellcheck disable=SC2016
+grep -Fq 'proxy_set_header CF-Connecting-IP $http_cf_connecting_ip;' "$SCRIPT_DIR/nginx.conf"
+grep -Fq '"CF-Connecting-IP": "192.0.2.1"' "$SCRIPT_DIR/smoke.py"
 grep -Fq 'location = /admin { return 404; }' "$SCRIPT_DIR/nginx.conf"
 grep -Fq 'location ^~ /admin/ { return 404; }' "$SCRIPT_DIR/nginx.conf"
 grep -Fq 'image: mirror.gcr.io/library/nginx:1.28.0-alpine@sha256:' "$SCRIPT_DIR/compose.yaml"
+grep -Fq 'http-request set-src req.hdr_ip(CF-Connecting-IP)' "$SCRIPT_DIR/haproxy.cfg"
+grep -Fq 'req.hdr_cnt(CF-Connecting-IP) eq 1' "$SCRIPT_DIR/haproxy.cfg"
+grep -Fq 'server teagramd teagramd:2446 check send-proxy-v2' "$SCRIPT_DIR/haproxy.cfg"
+grep -Fq 'http-reuse never' "$SCRIPT_DIR/haproxy.cfg"
+
+python3 - "$SCRIPT_DIR/wipe-weekly.sh" "$SCRIPT_DIR/init-demo.sh" <<'PY'
+from pathlib import Path
+import sys
+
+
+def assert_order(path: Path, fragments: list[str]) -> None:
+    text = path.read_text(encoding="utf-8")
+    positions = [text.find(fragment) for fragment in fragments]
+    if any(position < 0 for position in positions) or positions != sorted(positions):
+        raise SystemExit(f"{path.name}: seed safety steps are missing or out of order")
+
+
+assert_order(Path(sys.argv[1]), [
+    "demo_compose stop edge haproxy teagramd",
+    "dropdb -U postgres --if-exists teagram",
+    "demo_seed_compose up -d teagramd",
+    "demo_prepare_seed_owner \"$TMP_DIR\"",
+    '"$SEED_SCRIPT" --seed',
+    '"$SEED_SCRIPT" --verify-seed --endpoint teagramd:2443',
+    "demo_compose up -d teagramd",
+    '"$SEED_SCRIPT" --verify-turnstile --endpoint teagramd:2443',
+    "demo_compose up -d haproxy edge",
+])
+assert_order(Path(sys.argv[2]), [
+    "demo_compose stop edge haproxy",
+    "demo_seed_compose up -d teagramd",
+    '"$SEED_SCRIPT" --seed',
+    '"$SEED_SCRIPT" --verify-seed --endpoint teagramd:2443',
+    "demo_compose up -d teagramd",
+    '"$SEED_SCRIPT" --verify-turnstile --endpoint teagramd:2443',
+    "demo_compose up -d haproxy edge",
+])
+PY
 printf 'demo Compose contract holds\n'

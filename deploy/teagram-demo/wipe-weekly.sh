@@ -38,7 +38,7 @@ TARGET_INVENTORY="$TMP_DIR/target-inventory.json"
 demo_render_config "$TARGET_RENDER"
 demo_check_blob_mount "$TARGET_RENDER"
 mapfile -t CONTAINER_IDS < <(demo_compose ps -q)
-((${#CONTAINER_IDS[@]} >= 3)) || demo_fail 'demo database, server, or edge container is not running'
+((${#CONTAINER_IDS[@]} >= 4)) || demo_fail 'demo database, server, HAProxy, or edge container is not running'
 docker inspect "${CONTAINER_IDS[@]}" > "$TMP_DIR/containers.raw.json"
 python3 "$DEMO_SCRIPT_DIR/../teagramd/rollout-runner/blob-mode-state.py" containers \
   --checkout "$DEMO_REPO_ROOT" < "$TMP_DIR/containers.raw.json" > "$TMP_DIR/containers.json"
@@ -62,11 +62,14 @@ curl --fail --silent --show-error --max-time 10 \
   https://demo.teagram.io/.well-known/telegramd/client > "$TMP_DIR/public-client.json"
 cmp -s "$CLIENT_CONFIG" "$TMP_DIR/public-client.json" || demo_fail 'public client config differs from the current server identity'
 
-# The seed check and live API probe run before any destructive operation. The
-# separate tgkey volume and .env are deliberately never removed or rewritten.
-demo_compose stop edge teagramd
+# The seed check and public identity probe run before any destructive operation.
+# The separate tgkey volume and .env are deliberately never removed or rewritten.
+# Stop every public path before resetting data. The seed-only overlay never
+# starts HAProxy or edge.
+demo_compose stop edge haproxy teagramd
 demo_compose exec -T postgres dropdb -U postgres --if-exists teagram </dev/null
 demo_compose exec -T postgres createdb -U postgres teagram </dev/null
+demo_reset_seed_owner_marker
 BLOB_PATH=$(jq -er '.volumes.tgblobs.driver_opts.device' "$TARGET_RENDER")
 find "$BLOB_PATH" -mindepth 1 -maxdepth 1 -exec rm -rf -- {} +
 demo_compose rm -sf migrate >/dev/null
@@ -76,9 +79,20 @@ mapfile -t MIGRATE_IDS < <(demo_compose ps -a -q migrate)
 MIGRATE_STATUS=$(docker inspect --format '{{.State.Status}} {{.State.ExitCode}}' "${MIGRATE_IDS[0]}")
 [[ "$MIGRATE_STATUS" == 'exited 0' ]] || demo_fail "post-reset migrations failed ($MIGRATE_STATUS)"
 
-demo_compose up -d teagramd edge
-python3 "$SCRIPT_DIR/smoke.py" "$CLIENT_CONFIG"
-"$SEED_SCRIPT" https://demo.teagram.io
+demo_seed_compose up -d teagramd
+demo_prepare_seed_owner "$TMP_DIR"
+"$SEED_SCRIPT" --seed \
+  --endpoint teagramd:2443 \
+  --owner-username "$DEMO_SEED_OWNER_USERNAME" \
+  --owner-password-file "$DEMO_SEED_PASSWORD_FILE"
+"$SEED_SCRIPT" --verify-seed --endpoint teagramd:2443
+
+# Recreate teagramd from the production config while all public paths are down.
+# A bare API sign-up must prove the configured Turnstile gate is active before
+# either HAProxy or edge is allowed to start.
+demo_compose up -d teagramd
+"$SEED_SCRIPT" --verify-turnstile --endpoint teagramd:2443
+demo_compose up -d haproxy edge
 python3 "$SCRIPT_DIR/smoke.py" "$CLIENT_CONFIG"
 demo_compose run --rm --no-deps teagramd client-config > "$TMP_DIR/client-after-wipe.json"
 AFTER_SPKI=$(jq -er '.mtproto.rsa_spki' "$TMP_DIR/client-after-wipe.json")

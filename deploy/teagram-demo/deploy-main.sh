@@ -9,7 +9,8 @@ source "$SCRIPT_DIR/demo-common.sh"
 readonly SHA=${DEPLOY_SHA:-}
 readonly PREV_SHA=${PREVIOUS_SHA:-}
 readonly MODE_HELPER="$DEMO_SCRIPT_DIR/../teagramd/rollout-runner/blob-mode-state.py"
-readonly TS=$(date -u +%Y%m%dT%H%M%SZ)
+TS=$(date -u +%Y%m%dT%H%M%SZ)
+readonly TS
 TMP_DIR=
 BACKUP_DIR=
 PREV_IMAGE_ID=
@@ -38,11 +39,19 @@ demo_cleanup() {
 }
 trap demo_cleanup EXIT
 
+demo_rollback_stop() {
+  if demo_compose config --services | grep -Fxq haproxy; then
+    demo_compose stop edge haproxy teagramd
+  else
+    demo_compose stop edge teagramd
+  fi
+}
+
 demo_rollback() {
   local rollback_rc=0 migrate_ids migrate_status
   set +e
   if (( SERVICES_STOPPED == 1 || DATABASE_MUTATION == 1 )); then
-    demo_compose stop edge teagramd >/dev/null 2>&1 || rollback_rc=1
+    demo_rollback_stop >/dev/null 2>&1 || rollback_rc=1
   fi
   if (( DATABASE_MUTATION == 1 )); then
     demo_compose exec -T postgres dropdb -U postgres --if-exists teagram </dev/null || rollback_rc=1
@@ -78,7 +87,7 @@ demo_rollback() {
     fi
   fi
   if (( rollback_rc != 0 && SERVICES_STOPPED == 1 )); then
-    demo_compose stop edge teagramd >/dev/null 2>&1 || true
+    demo_rollback_stop >/dev/null 2>&1 || true
   fi
   if (( rollback_rc == 0 )); then
     printf 'demo rollback=verified previous_sha=%s dump=%s\n' "$PREV_SHA" "$DB_DUMP" >&2
@@ -117,7 +126,7 @@ TARGET_INVENTORY="$TMP_DIR/target-inventory.json"
 demo_render_config "$TARGET_RENDER"
 demo_check_blob_mount "$TARGET_RENDER"
 mapfile -t CONTAINER_IDS < <(demo_compose ps -q)
-((${#CONTAINER_IDS[@]} >= 3)) || demo_fail 'demo database, server, or edge container is not running'
+((${#CONTAINER_IDS[@]} >= 4)) || demo_fail 'demo database, server, HAProxy, or edge container is not running'
 docker inspect "${CONTAINER_IDS[@]}" > "$TMP_DIR/containers.raw.json"
 mapfile -t POSTGRES_IDS < <(demo_compose ps -q postgres)
 ((${#POSTGRES_IDS[@]} == 1)) || demo_fail 'running demo database is missing or ambiguous'
@@ -186,7 +195,7 @@ NEW_SPKI=$(jq -er '.mtproto.rsa_spki' "$TMP_DIR/client.json")
 [[ "$NEW_SPKI" == "$OLD_SPKI" ]] || demo_fail 'deployment changed the persistent RSA identity'
 
 SERVICES_STOPPED=1
-demo_compose stop edge teagramd
+demo_compose stop edge haproxy teagramd
 DATABASE_MUTATION=1
 demo_compose up -d migrate
 mapfile -t MIGRATE_IDS < <(demo_compose ps -a -q migrate)
@@ -195,7 +204,8 @@ MIGRATE_STATUS=$(docker inspect --format '{{.State.Status}} {{.State.ExitCode}}'
 [[ "$MIGRATE_STATUS" == 'exited 0' ]] || demo_fail "database migration failed ($MIGRATE_STATUS)"
 install -o root -g root -m 0644 "$TMP_DIR/client.json" "$DEMO_STATE_DIR/client.json.next"
 mv -f -- "$DEMO_STATE_DIR/client.json.next" "$DEMO_STATE_DIR/client.json"
-demo_compose up -d teagramd edge
+demo_compose up -d teagramd
+demo_compose up -d haproxy edge
 python3 "$SCRIPT_DIR/smoke.py" "$DEMO_STATE_DIR/client.json"
 mapfile -t SERVER_IDS < <(demo_compose ps -q teagramd)
 ((${#SERVER_IDS[@]} == 1)) || demo_fail 'deployed server is missing or ambiguous'

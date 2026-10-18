@@ -1,5 +1,5 @@
 [Unit]
-Description=Reset public Teagram demo data and reseed through the public API
+Description=Reset public Teagram demo data and reseed with the public edge stopped
 After=docker.service network-online.target
 Requires=docker.service
 
@@ -19,7 +19,7 @@ ProtectKernelModules=true
 ProtectControlGroups=true
 RestrictSUIDSGID=true
 ProtectSystem=strict
-ReadWritePaths=/opt/teagram-demo/.state /srv/teagram-demo-blobs/data /run/docker.sock /var/run/docker.sock
+ReadWritePaths=/opt/teagram-demo/.state /srv/teagram-demo-blobs/data /var/lib/teagram-demo/secrets /run/docker.sock /var/run/docker.sock
 
 [Install]
 WantedBy=multi-user.target

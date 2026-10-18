@@ -76,17 +76,52 @@ services:
       TG_AUTHKEY_ENC_KEY: ${TG_AUTHKEY_ENC_KEY:?set TG_AUTHKEY_ENC_KEY in deploy/teagram-demo/.env}
       TG_AUTHKEY_ENC_KEY_FILE: ${TG_AUTHKEY_ENC_KEY_FILE:-/var/lib/teagramd/enc_key.hex}
       TG_REPLICA_COUNT: "1"
-      TG_CLIENT_ADDR_TRUST: socket
+      TG_CLIENT_ADDR_TRUST: proxy-v2
+      TG_CLIENT_ADDR_PROXY_CIDRS: 198.18.130.2/32
+      TG_TURNSTILE_SITE_KEY: ${TEAGRAM_DEMO_TURNSTILE_SITE_KEY:?set TEAGRAM_DEMO_TURNSTILE_SITE_KEY in deploy/teagram-demo/.env}
+      TG_TURNSTILE_SECRET_KEY_FILE: /run/secrets/teagram_demo_turnstile
       TG_BLOB_DIR: /var/lib/teagramd-blobs
     read_only: true
     volumes:
       - tgkey:/var/lib/teagramd
       - tgblobs:/var/lib/teagramd-blobs
       - .state/blob-mode:/run/teagramd/blob-mode:ro
+    secrets:
+      - teagram_demo_turnstile
     depends_on:
       migrate:
         condition: service_completed_successfully
     networks: [backend]
+    restart: unless-stopped
+    logging: *logging
+
+  haproxy:
+    image: mirror.gcr.io/library/haproxy:3.2-alpine@sha256:51f173c6825753d9e3a888b1004a1c2cb730936cc9178730a5c555246bd161a2
+    platform: linux/amd64
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    mem_limit: 128m
+    memswap_limit: 128m
+    tmpfs:
+      - /tmp:size=16m,mode=1777
+    volumes:
+      - type: bind
+        source: ./deploy/teagram-demo/haproxy.cfg
+        target: /usr/local/etc/haproxy/haproxy.cfg
+        read_only: true
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8404/healthz"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 10s
+    depends_on:
+      teagramd:
+        condition: service_started
+    networks:
+      backend:
+        ipv4_address: 198.18.130.2
     restart: unless-stopped
     logging: *logging
 
@@ -114,8 +149,8 @@ services:
         target: /usr/share/nginx/html/.well-known/telegramd/client
         read_only: true
     depends_on:
-      teagramd:
-        condition: service_started
+      haproxy:
+        condition: service_healthy
     networks: [backend, edge]
     restart: unless-stopped
     logging: *logging
@@ -132,8 +167,15 @@ volumes:
       o: bind
       device: ${TEAGRAM_DEMO_BLOB_PATH:?set TEAGRAM_DEMO_BLOB_PATH in deploy/teagram-demo/.env}
 
+secrets:
+  teagram_demo_turnstile:
+    file: ${TEAGRAM_DEMO_TURNSTILE_SECRET_KEY_FILE:?set TEAGRAM_DEMO_TURNSTILE_SECRET_KEY_FILE in deploy/teagram-demo/.env}
+
 networks:
   backend:
     internal: true
+    ipam:
+      config:
+        - subnet: 198.18.130.0/24
   edge:
     driver: bridge

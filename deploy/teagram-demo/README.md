@@ -1,17 +1,16 @@
 # Public demo deployment
 
-The demo is a separate Compose project for `demo.teagram.io`. It has its own
-PostgreSQL volume, RSA identity volume, auth-key encryption secret, blob mount,
-Docker networks and forced SSH deploy key. Do not reuse `/opt/teagram`, the dev
-LXC's volumes or its deploy credentials.
+The demo runs in its own `teagram-demo` LXC and Docker engine, separate from the
+dev `teagram` LXC. Its Compose project has its own PostgreSQL volume, RSA
+identity volume, auth-key encryption secret, Turnstile secret file, blob mount,
+Docker networks, checkout, forced SSH deploy key and Cloudflare tunnel. Do not
+reuse `/opt/teagram`, the dev LXC's volumes or its deploy credentials.
 
-The application and Compose stack are ready for an isolated LXC. The install
-script intentionally stops until the public client config exposes
-`wss://demo.teagram.io/apiws` (MAIN-2196). The demo auto-seed, welcome join and
-scheduled group activity must also land as a tracked `seed-demo.sh` before the
-weekly wipe timer can be installed. The application and web sign-up flow also
-need to consume the demo's dedicated Turnstile keys before public launch. No
-live host was changed by this repository change.
+The install script intentionally stops until the public client config exposes
+`wss://demo.teagram.io/apiws` (MAIN-2196) and the tracked API seeder is ready.
+It keeps the edge stopped until it has closed the admin election, seeded and
+verified the content, restored production settings and verified the Turnstile
+gate. No live host was changed by this repository change.
 
 ## LXC prerequisites
 
@@ -40,7 +39,12 @@ policy. Required layout and policy:
 - Run the demo's Cloudflare Tunnel connector in the demo LXC and route only
   `demo.teagram.io` to `http://127.0.0.1:8080`. The edge container publishes
   that origin on loopback only. It serves the client discovery document and
-  `/apiws`, returns 404 for `/admin`, and returns 404 for all other paths.
+  `/apiws`, returns 404 for `/admin`, and returns 404 for all other paths. For
+  `/apiws`, Nginx forwards Cloudflare's `CF-Connecting-IP` to the private
+  HAProxy service. HAProxy validates that there is exactly one IP address,
+  sends it to teagramd in a PROXY-v2 header, and teagramd trusts only HAProxy's
+  fixed `198.18.130.2/32` address. Neither HAProxy nor teagramd publishes a
+  host port.
 - Restrict the Cloudflare Tunnel and DNS configuration to `demo.teagram.io`.
   The demo does not serve the dev hostname or admin dashboard.
 
@@ -49,6 +53,10 @@ The public origin and discovery document advertise
 limited to `https://web.teagram.io`. Registration is open, the existing signup
 limit remains five attempts per IP per hour, login-code logging is disabled,
 and uploads are capped at 16 MiB per file and 256 MiB per account.
+
+`prepare-env.sh` keeps the Turnstile site key in `.env` and writes the secret
+key to `/var/lib/teagram-demo/secrets/turnstile-secret-key` with root ownership
+and mode 0600. Compose mounts that file only into teagramd.
 
 ## First install
 
@@ -64,22 +72,24 @@ deploy/teagram-demo/init-demo.sh
 ```
 
 `prepare-env.sh` prompts for the demo-specific Turnstile site and secret keys,
-then creates root-owned `.env` mode 0600 with those keys and two different
-random 64-hex runtime secrets. It refuses to replace an existing file. Keep
-`POSTGRES_PASSWORD` and `TG_AUTHKEY_ENC_KEY` unchanged during deploys and
-weekly resets. Never display or copy `.env`. The server does not yet consume
-the Turnstile secret, so configuring it does not itself enable signup
-verification.
+then creates root-owned `.env` mode 0600 with the site key, the secret-file
+path and two different random 64-hex runtime secrets. It writes the Turnstile
+secret to a separate root-owned 0600 file outside the checkout and refuses to
+replace either file. Keep `POSTGRES_PASSWORD` and `TG_AUTHKEY_ENC_KEY` unchanged
+during deploys and weekly resets. Never display or copy `.env` or the secret
+file.
 
 `init-demo.sh` validates that the blob path is on the dedicated size-limited
 filesystem, that the volumes and blob directory are fresh, and that Compose
 renders the exposure and storage contract. It creates the RSA identity once,
 generates the discovery document, runs migrations, and uses the existing
 `blob-mode-state.py initialize-local` publisher to record the durable local
-blob authority before it starts the guarded server and edge containers. It
-then checks the loopback discovery route, CORS, WebSocket handshake and admin
-404. A failed partial install is not repaired by deleting volumes; inspect the
-authority and containers before retrying.
+blob authority. It then creates the ordinary seed owner, fills and verifies
+the demo through the internal client API, restores production settings, checks
+Turnstile, and only then starts HAProxy and edge. It checks the loopback
+discovery route, CORS, WebSocket handshake and admin 404. A failed partial
+install keeps the public edge down; inspect the authority and containers
+before retrying.
 
 ## Deploy path
 
@@ -110,7 +120,7 @@ command="/opt/teagram-demo/deploy/teagram-demo/forced-command.sh",restrict ssh-e
 non-main revisions and skips stale deploys. `deploy-main.sh` revalidates the
 blob authority and running containers, writes a root-only PostgreSQL custom
 dump, checks the dump with `pg_restore --list`, builds the tested image,
-preserves the RSA public key, stops the edge and server before migrations,
+preserves the RSA public key, stops edge, HAProxy and teagramd before migrations,
 starts the new image and runs the smoke checks. A failed migration or smoke
 check restores the previous checkout, image, client config and database, then
 restarts and checks the previous server. The backup directory is reported on
@@ -124,8 +134,32 @@ server fingerprint and invalidates existing client authorizations.
 
 `wipe-weekly.sh` drops and recreates only the `teagram` database and removes
 all files below the capped blob mount. It preserves the `tgkey` volume, the
-`.env` encryption key and the RSA public identity, then runs migrations and
-re-seeds through the public API.
+encryption keys and the RSA public identity, then runs migrations and seeds
+through the private API path while the public edge and HAProxy are stopped.
+It creates the ordinary `demo_seed_owner` account through
+`teagramd admin create-user` to close the first-admin election before seeding.
+Its freshly generated password is kept in the root-only
+`/var/lib/teagram-demo/secrets/seed-owner-password` file. After the seed reports
+all expected handles through the API, the wipe recreates teagramd with the
+production proxy and Turnstile settings, requires a bare sign-up probe to
+return `RECAPTCHA_CHECK`, and only then starts HAProxy and the public edge.
+
+The seed script interface is:
+
+```sh
+deploy/teagram-demo/seed-demo.sh --seed \
+  --endpoint teagramd:2443 \
+  --owner-username demo_seed_owner \
+  --owner-password-file /var/lib/teagram-demo/secrets/seed-owner-password
+deploy/teagram-demo/seed-demo.sh --verify-seed --endpoint teagramd:2443
+deploy/teagram-demo/seed-demo.sh --verify-turnstile --endpoint teagramd:2443
+```
+
+The endpoint is available only on the demo's internal Docker network. The seed
+and verification modes use the client API; they do not write account data with
+SQL. The temporary seed Compose overlay relaxes only bounded signup limits and
+disables Turnstile while edge and HAProxy are down. Production Compose settings
+are restored before the edge can start.
 
 The timer is Sunday at 03:00 UTC with a persistent catch-up and randomized
 delay. Install it only after the tracked, executable
@@ -145,7 +179,9 @@ service is a destructive reset of public demo content.
 ## Monitoring
 
 `gatus.yaml` supplies the `teagram-demo` group checks for the discovery JSON,
-the WebSocket listener and the public admin 404, including TLS expiry. Merge
-these endpoints into the existing Gatus status page and attach the alert
-provider already configured there. The alert provider credentials live outside
-this repository, so the snippet does not invent a provider name or secret.
+the WebSocket listener and the public admin 404, including TLS expiry. Compose
+also health-checks HAProxy's private backend monitor; both new and existing
+services use bounded container logs. Merge these endpoints into the existing
+Gatus status page and attach the alert provider already configured there. The
+alert provider credentials live outside this repository, so the snippet does
+not invent a provider name or secret.

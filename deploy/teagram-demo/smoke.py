@@ -65,6 +65,7 @@ def main() -> None:
             headers={
                 "Host": "demo.teagram.io",
                 "Origin": "https://web.teagram.io",
+                "CF-Connecting-IP": "192.0.2.1",
                 "Connection": "Upgrade",
                 "Upgrade": "websocket",
                 "Sec-WebSocket-Key": key,

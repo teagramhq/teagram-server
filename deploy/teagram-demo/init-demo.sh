@@ -16,6 +16,13 @@ trap cleanup EXIT
 
 demo_require_root
 demo_require_env
+SEED_SCRIPT="$SCRIPT_DIR/seed-demo.sh"
+git -C "$DEMO_REPO_ROOT" ls-files --error-unmatch deploy/teagram-demo/seed-demo.sh >/dev/null 2>&1 ||
+  demo_fail 'initial install is disabled until the tracked API seed-demo.sh is supplied'
+[[ -f "$SEED_SCRIPT" && ! -L "$SEED_SCRIPT" && -x "$SEED_SCRIPT" ]] ||
+  demo_fail 'tracked API seed-demo.sh must be executable'
+"$SEED_SCRIPT" --check
+
 git -C "$DEMO_REPO_ROOT" diff --quiet HEAD -- || demo_fail 'checkout has tracked changes'
 [[ "$(git -C "$DEMO_REPO_ROOT" branch --show-current)" == main ]] || demo_fail 'checkout must be on main'
 git -C "$DEMO_REPO_ROOT" fetch -q origin main
@@ -28,20 +35,27 @@ chmod 0755 "$DEMO_STATE_DIR"
 TMP_DIR=$(mktemp -d "$DEMO_REPO_ROOT/.state/teagram-demo/init.XXXXXXXX")
 chmod 0700 "$TMP_DIR"
 TARGET_RENDER="$TMP_DIR/target-render.json"
-TARGET_INVENTORY="$TMP_DIR/target-inventory.json"
+INITIAL_RENDER="$TMP_DIR/initial-render.json"
+INITIAL_INVENTORY="$TMP_DIR/initial-inventory.json"
 MODE_HELPER="$DEMO_SCRIPT_DIR/../teagramd/rollout-runner/blob-mode-state.py"
 
 demo_render_config "$TARGET_RENDER"
 demo_check_blob_mount "$TARGET_RENDER"
 BLOB_PATH=$(jq -er '.volumes.tgblobs.driver_opts.device' "$TARGET_RENDER")
+demo_seed_compose config --format json > "$INITIAL_RENDER"
+chmod 0600 "$INITIAL_RENDER"
+demo_check_blob_mount "$INITIAL_RENDER"
+[[ "$(jq -er '.volumes.tgblobs.driver_opts.device' "$INITIAL_RENDER")" == "$BLOB_PATH" ]] ||
+  demo_fail 'seed and production Compose renders use different blob paths'
 python3 "$MODE_HELPER" compose --checkout "$DEMO_REPO_ROOT" \
-  < "$TARGET_RENDER" > "$TARGET_INVENTORY"
+  < "$INITIAL_RENDER" > "$INITIAL_INVENTORY"
 
 MODE_FILE="$DEMO_AUTHORITY_DIR/mode.json"
 JOURNAL_DIR="$DEMO_AUTHORITY_DIR/journal"
 if [[ -e "$MODE_FILE" || -L "$MODE_FILE" ]]; then
   # Resume a valid, already-published first-install authority after an
   # interrupted switch from the unguarded bootstrap container.
+  demo_compose stop edge haproxy
   mapfile -t CONTAINER_IDS < <(demo_bootstrap_compose ps -q)
   if ((${#CONTAINER_IDS[@]})); then
     docker inspect "${CONTAINER_IDS[@]}" > "$TMP_DIR/containers.raw.json"
@@ -50,20 +64,30 @@ if [[ -e "$MODE_FILE" || -L "$MODE_FILE" ]]; then
   fi
   python3 "$MODE_HELPER" containers \
     --checkout "$DEMO_REPO_ROOT" < "$TMP_DIR/containers.raw.json" > "$TMP_DIR/containers.json"
-  cp "$TARGET_INVENTORY" "$TMP_DIR/target-preflight.json"
+  cp "$INITIAL_INVENTORY" "$TMP_DIR/target-preflight.json"
   python3 "$MODE_HELPER" validate \
     --state-dir "$DEMO_AUTHORITY_DIR" \
     --report-root "$DEMO_STATE_DIR/reports" \
     --containers "$TMP_DIR/containers.json" \
-    --compose "$TARGET_INVENTORY" \
+    --compose "$INITIAL_INVENTORY" \
     --override "$SCRIPT_DIR/compose.empty-overrides.yaml" \
     --checkout "$DEMO_REPO_ROOT" \
     --allow-empty-containers \
     --allow-unguarded-initial-local \
     --allow-unguarded-initial-local-containers
-  demo_compose up -d teagramd edge
+  demo_compose stop teagramd
+  demo_seed_compose up -d teagramd
+  demo_prepare_seed_owner "$TMP_DIR"
+  "$SEED_SCRIPT" --seed \
+    --endpoint teagramd:2443 \
+    --owner-username "$DEMO_SEED_OWNER_USERNAME" \
+    --owner-password-file "$DEMO_SEED_PASSWORD_FILE"
+  "$SEED_SCRIPT" --verify-seed --endpoint teagramd:2443
+  demo_compose up -d teagramd
+  "$SEED_SCRIPT" --verify-turnstile --endpoint teagramd:2443
+  demo_compose up -d haproxy edge
   python3 "$SCRIPT_DIR/smoke.py" "$DEMO_STATE_DIR/client.json"
-  echo "demo install resumed at $SHA"
+  echo "demo install resumed and seeded at $SHA"
   exit 0
 fi
 if [[ -e "$JOURNAL_DIR" || -L "$JOURNAL_DIR" ]]; then
@@ -126,9 +150,7 @@ python3 "$MODE_HELPER" containers --checkout "$DEMO_REPO_ROOT" \
 docker inspect "${CONTAINER_IDS[@]}" > "$TMP_DIR/current-containers.raw.json"
 python3 "$MODE_HELPER" containers --checkout "$DEMO_REPO_ROOT" \
   < "$TMP_DIR/current-containers.raw.json" > "$TMP_DIR/current-containers.json"
-python3 "$MODE_HELPER" compose --checkout "$DEMO_REPO_ROOT" \
-  < "$TARGET_RENDER" > "$TARGET_INVENTORY"
-cp "$TARGET_INVENTORY" "$TMP_DIR/target-preflight.json"
+cp "$INITIAL_INVENTORY" "$TMP_DIR/target-preflight.json"
 TARGET_ARTIFACT_SHA=$(sha256sum "$SCRIPT_DIR/compose.yaml")
 TARGET_ARTIFACT_SHA=${TARGET_ARTIFACT_SHA%% *}
 LOCK_PATH=$(realpath -m "$LOCK_PATH")
@@ -139,7 +161,7 @@ python3 "$MODE_HELPER" initialize-local \
   --baseline-containers "$TMP_DIR/baseline-containers.json" \
   --current-containers "$TMP_DIR/current-containers.json" \
   --preflight-target-compose "$TMP_DIR/target-preflight.json" \
-  --target-compose "$TARGET_INVENTORY" \
+  --target-compose "$INITIAL_INVENTORY" \
   --target-artifact-sha256 "$TARGET_ARTIFACT_SHA" \
   --override "$SCRIPT_DIR/compose.empty-overrides.yaml" \
   --checkout "$DEMO_REPO_ROOT" \
@@ -147,6 +169,16 @@ python3 "$MODE_HELPER" initialize-local \
   --baseline-sha "$SHA" \
   --lock-path "$LOCK_PATH"
 
-demo_compose up -d teagramd edge
+demo_reset_seed_owner_marker
+demo_seed_compose up -d teagramd
+demo_prepare_seed_owner "$TMP_DIR"
+"$SEED_SCRIPT" --seed \
+  --endpoint teagramd:2443 \
+  --owner-username "$DEMO_SEED_OWNER_USERNAME" \
+  --owner-password-file "$DEMO_SEED_PASSWORD_FILE"
+"$SEED_SCRIPT" --verify-seed --endpoint teagramd:2443
+demo_compose up -d teagramd
+"$SEED_SCRIPT" --verify-turnstile --endpoint teagramd:2443
+demo_compose up -d haproxy edge
 python3 "$SCRIPT_DIR/smoke.py" "$DEMO_STATE_DIR/client.json"
-echo "demo install ready sha=$SHA rsa_fingerprint=$FINGERPRINT"
+echo "demo install ready sha=$SHA rsa_fingerprint=$FINGERPRINT seeded=true"

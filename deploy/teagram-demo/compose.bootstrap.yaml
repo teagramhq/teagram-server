@@ -3,6 +3,9 @@
 # publisher records the live local backend before the guarded target starts.
 services:
   teagramd:
+    environment:
+      TG_CLIENT_ADDR_TRUST: socket
+      TG_CLIENT_ADDR_PROXY_CIDRS: ""
     volumes: !override
       - tgkey:/var/lib/teagramd
       - tgblobs:/var/lib/teagramd-blobs

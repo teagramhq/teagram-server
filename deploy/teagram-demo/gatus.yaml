@@ -17,8 +17,9 @@ endpoints:
     url: https://demo.teagram.io/apiws
     interval: 1m
     conditions:
-      # A non-upgrade GET reaches the teagramd WebSocket listener and returns
-      # its fixed bad-handshake status. A 502 means the backend is unavailable.
+      # A non-upgrade GET passes through edge and HAProxy to the teagramd
+      # WebSocket listener and returns its fixed bad-handshake status. A 502
+      # means the backend path is unavailable.
       - "[STATUS] == 400"
       - "[CERTIFICATE_EXPIRATION] > 72h"
 
