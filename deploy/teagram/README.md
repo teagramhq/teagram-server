@@ -42,6 +42,13 @@ ssh teagram-server 'DEPLOY_SHA=<full sha> bash -s' < deploy/teagram/deploy-main.
 
 `deploy/teagram/test-deploy-main.sh` covers the script's target checks.
 
+Immediately after the `move-stack` action, the live container records the
+tracked selection `docker-compose.yml`, `docker-compose.local-blobs.yml`, and
+the remapped `docker-compose.override.yml`. The deploy entrypoint accepts that
+exact selection for the first Teagram rollout, as well as the pinned local
+artifact used by later local-backed rollouts. Keep the file order reported by
+the running container.
+
 ## Initial local rollout
 
 The currently available publication path inspects an already-running local

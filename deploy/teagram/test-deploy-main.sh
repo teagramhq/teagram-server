@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Fixture test for deploy-main.sh's target checks: a fake origin and live
-# checkout, and a fake docker that reports a pinned compose and image id.
+# checkout, and a fake docker that reports an approved local compose and image id.
 set -euo pipefail
 umask 077
 
@@ -118,7 +118,7 @@ cat > "$tmp/bin/docker" <<'DOCKER'
 #!/usr/bin/env bash
 set -euo pipefail
 case "$*" in
-  *config_files*teagram-teagramd-1*) echo "/opt/teagram/.rollout-compose.local-abc.yml,/opt/teagram/docker-compose.override.yml" ;;
+  *config_files*teagram-teagramd-1*) echo "${FIXTURE_COMPOSE_FILES:-$DEPLOY_DIR/.rollout-compose.local-abc.yml,$DEPLOY_DIR/docker-compose.override.yml}" ;;
   *config_files*) echo "unexpected live container name: $*" >&2; exit 98 ;;
   *'{{.Image}}'*) echo "sha256:fixture" ;;
   *'pg_dump'*)
@@ -207,6 +207,18 @@ if [[ "$local_files_after" != "$local_files_before" ]]; then
   echo 'FAIL untracked host-local file owners or modes changed after rollout' >&2
   failures=$((failures + 1))
 fi
+
+unapproved_compose="$tmp/live/docker-compose.yml,$tmp/live/docker-compose.override.yml"
+unapproved_label=${unapproved_compose//,/:}
+expect 1 "live teagramd not on an approved local compose ($unapproved_label); refusing" \
+  FIXTURE_COMPOSE_FILES="$unapproved_compose" DEPLOY_SHA="$third"
+
+fourth=$(commit fourth)
+git -C "$tmp/work" push -q "$tmp/origin.git" main
+moved_compose="$tmp/live/docker-compose.yml,$tmp/live/docker-compose.local-blobs.yml,$tmp/live/docker-compose.override.yml"
+expect 0 "deployed $fourth" --contains \
+  'runner exit 0' FIXTURE_DEPLOY_SUCCESS=1 \
+  FIXTURE_COMPOSE_FILES="$moved_compose" DEPLOY_SHA="$fourth"
 
 if [[ ! -s "$tmp/lock-targets" ]] || grep -Fvxq /tmp/teagram-deploy.lock "$tmp/lock-targets"; then
   echo 'FAIL deploy-main.sh did not use the teagram deploy lock' >&2
