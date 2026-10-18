@@ -35,7 +35,7 @@ async function hostFixture(t) {
   await writeFile(buildIdentity,
     `captured_at_utc=2026-10-13T00:00:00Z source_sha=${serverRevision} image_id=sha256:${"a".repeat(64)} revision_label_json="${serverRevision}"\n`,
     { mode: 0o600 });
-  await writeFile(credential, `127.0.0.1:5432:telegram:browser_acceptance_probe:${privateCanary}\n`, { mode: 0o600 });
+  await writeFile(credential, `127.0.0.1:5432:teagram:browser_acceptance_probe:${privateCanary}\n`, { mode: 0o600 });
   await writeFile(config, '{"userId":"987654321098765432"}', { mode: 0o600 });
   await writeFile(highWaterBefore, "100\n");
   await writeFile(highWaterAfter, "100\n");
@@ -55,11 +55,11 @@ case "$1 $2" in
   'ps --quiet') printf '%s\\n' '${ids.server}'; exit 0 ;;
   'container inspect')
     if [[ "$*" == *'"flags"'* ]]; then
-      printf '%s\\n' '{"id":"${ids.server}","imageId":"sha256:${"a".repeat(64)}","revision":"${serverRevision}","labels":{"com.docker.compose.service":"telegramd","org.opencontainers.image.revision":"${serverRevision}"},"startedAt":"2026-10-13T00:00:00Z","running":true,"flags":["TG_REGISTRATION=closed","TG_LOG_LOGIN_CODES=false","TG_RSA_KEY_FINGERPRINT=81985529216486895",null]}'
+      printf '%s\\n' '{"id":"${ids.server}","imageId":"sha256:${"a".repeat(64)}","revision":"${serverRevision}","labels":{"com.docker.compose.service":"teagramd","org.opencontainers.image.revision":"${serverRevision}"},"startedAt":"2026-10-13T00:00:00Z","running":true,"flags":["TG_REGISTRATION=closed","TG_LOG_LOGIN_CODES=false","TG_RSA_KEY_FINGERPRINT=81985529216486895",null]}'
     elif [[ "$*" == *'"startedAt"'* ]]; then
       printf '%s\\n' '{"id":"${ids.observer}","startedAt":"2026-10-13T00:00:00Z","running":true}'
     else
-      printf '%s\\n' '{"id":"${ids.server}","path":"/usr/local/bin/telegramd","service":"telegramd"}'
+      printf '%s\\n' '{"id":"${ids.server}","path":"/usr/local/bin/teagramd","service":"teagramd"}'
     fi
     exit 0 ;;
   'image inspect') printf '%s\\n' '{"id":"sha256:${"a".repeat(64)}","revision":"${serverRevision}","labels":{"org.opencontainers.image.revision":"${serverRevision}"}}'; exit 0 ;;
@@ -112,7 +112,7 @@ HOST_QUERY_LOG='${queryLog}'
 printf '%s\\n' "psql $*" >> "$HOST_COMMAND_LOG"
 [[ "$PGUSER" == browser_acceptance_probe && "$PGHOST" == 127.0.0.1 ]] || exit 90
 [[ ! -v PGPASSWORD ]] || exit 85
-[[ "$(cat "$PGPASSFILE")" == '127.0.0.1:5432:telegram:browser_acceptance_probe:${privateCanary}' ]] || exit 84
+[[ "$(cat "$PGPASSFILE")" == '127.0.0.1:5432:teagram:browser_acceptance_probe:${privateCanary}' ]] || exit 84
 [[ "$PGOPTIONS" == *default_transaction_read_only=on* ]] || exit 89
 query="$(cat)"
 if [[ -e '${directory}/db-error' ]]; then printf '%s\\n' '${privateCanary}' >&2; exit 86; fi
@@ -262,7 +262,7 @@ test("host config symlinks are rejected without disclosing their contents", asyn
 
 test("the probe refuses a server DSN or arbitrary role in the credential file", async (t) => {
   const paths = await hostFixture(t);
-  await writeFile(paths.credential, `127.0.0.1:5432:telegram:owner:${privateCanary}\n`);
+  await writeFile(paths.credential, `127.0.0.1:5432:teagram:owner:${privateCanary}\n`);
   const result = invoke(paths);
   assert.equal(result.status, 1);
   assert.equal(JSON.parse(result.stdout).code, "database-unavailable");

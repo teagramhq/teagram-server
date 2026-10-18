@@ -2,7 +2,7 @@
 # every serving replica on the initialized local authority; it never performs
 # an S3 mode transition.
 x-local-blob-validation: &local-blob-validation
-  TG_BLOB_DIR: /var/lib/telegramd-blobs
+  TG_BLOB_DIR: /var/lib/teagramd-blobs
   TG_BLOB_S3_ENDPOINT: ""
   TG_BLOB_S3_BUCKET: ""
   TG_BLOB_S3_PREFIX: ""
@@ -14,12 +14,12 @@ x-local-blob-validation: &local-blob-validation
   TG_BLOB_S3_ALLOW_INSECURE_HTTP: ""
 
 services:
-  telegramd-proxy-1:
+  teagramd-proxy-1:
     environment: *local-blob-validation
     volumes:
-      - tgblobs:/var/lib/telegramd-blobs
+      - tgblobs:/var/lib/teagramd-blobs
 
-  telegramd-proxy-2:
+  teagramd-proxy-2:
     environment: *local-blob-validation
     volumes:
-      - tgblobs:/var/lib/telegramd-blobs
+      - tgblobs:/var/lib/teagramd-blobs

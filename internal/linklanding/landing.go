@@ -9,7 +9,7 @@ import (
 )
 
 const (
-	landingPage   = `<!doctype html><html lang="en"><body><main>Open this in Telegramd</main></body></html>`
+	landingPage   = `<!doctype html><html lang="en"><body><main>Open this in Teagramd</main></body></html>`
 	notFoundPage  = `<!doctype html><html lang="en"><body><main>Not found</main></body></html>`
 	methodPage    = `<!doctype html><html lang="en"><body><main>Method not allowed</main></body></html>`
 	contentPolicy = "default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"

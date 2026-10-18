@@ -1,4 +1,4 @@
-// Command linklanding serves the isolated Telegramd link landing page.
+// Command linklanding serves the isolated Teagramd link landing page.
 package main
 
 import (

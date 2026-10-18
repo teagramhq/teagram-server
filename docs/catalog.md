@@ -1,6 +1,6 @@
 # English language catalog
 
-`catalogctl` is the only catalog write command. The normal `telegramd` binary,
+`catalogctl` is the only catalog write command. The normal `teagramd` binary,
 MTProto handlers, API handlers, and admin listener only load a validated
 read-only snapshot.
 
@@ -61,7 +61,7 @@ decremented and no history is deleted.
 
 The runtime snapshot loader uses one repeatable-read, read-only transaction and
 atomically replaces the prior snapshot only after validation. A failed refresh
-keeps the previous snapshot. With no valid snapshot, telegramd retains its
+keeps the previous snapshot. With no valid snapshot, teagramd retains its
 normal built-in English behavior. Anonymous reads use the in-memory snapshot,
 not Postgres.
 

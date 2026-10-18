@@ -21,7 +21,7 @@ const start = "1791878400000000";
 function server(overrides = {}) {
   return {
     id: serverId, imageId, imageRevision: serverRevision, revision: serverRevision,
-    labels: { "com.docker.compose.service": "telegramd", "org.opencontainers.image.revision": serverRevision },
+    labels: { "com.docker.compose.service": "teagramd", "org.opencontainers.image.revision": serverRevision },
     imageLabels: { "org.opencontainers.image.revision": serverRevision },
     startedAt: "2026-10-13T00:00:00Z", running: true,
     flags: ["TG_REGISTRATION=closed", "TG_LOG_LOGIN_CODES=false", `TG_RSA_KEY_FINGERPRINT=${pin}`],
@@ -356,10 +356,10 @@ test("every running replica must provide the protected environment flags", async
 
 for (const [name, runtime] of [
   ["no running server", []],
-  ["missing OCI label", [server({ revision: null, labels: { "com.docker.compose.service": "telegramd" } })]],
+  ["missing OCI label", [server({ revision: null, labels: { "com.docker.compose.service": "teagramd" } })]],
   ["stale image label", [server({ imageRevision: "e".repeat(40), imageLabels: { "org.opencontainers.image.revision": "e".repeat(40) } })]],
-  ["malformed image ID", [server({ imageId: "telegramd:local" })]],
-  ["wrong revision", [server({ revision: "e".repeat(40), labels: { "com.docker.compose.service": "telegramd", "org.opencontainers.image.revision": "e".repeat(40) } })]],
+  ["malformed image ID", [server({ imageId: "teagramd:local" })]],
+  ["wrong revision", [server({ revision: "e".repeat(40), labels: { "com.docker.compose.service": "teagramd", "org.opencontainers.image.revision": "e".repeat(40) } })]],
 ]) {
   test(`${name} fails closed before browser execution`, async () => {
     const f = fixture({ runtimes: [runtime] });
@@ -377,7 +377,7 @@ for (const [name, options] of [
   ["conflicting records for one image", { buildIdentities: [[buildIdentity(), buildIdentity({ sourceSha: "e".repeat(40), evidenceIdentity: "build-record-2" })], [buildIdentity(), buildIdentity({ sourceSha: "e".repeat(40), evidenceIdentity: "build-record-2" })]] }],
   ["container labelled with the web SHA has no matching server record", {
     runtimes: [[server({ revision: webRevision, imageRevision: webRevision,
-      labels: { "com.docker.compose.service": "telegramd", "org.opencontainers.image.revision": webRevision },
+      labels: { "com.docker.compose.service": "teagramd", "org.opencontainers.image.revision": webRevision },
       imageLabels: { "org.opencontainers.image.revision": webRevision } })]],
     buildIdentities: [[], []],
   }],
@@ -399,7 +399,7 @@ test("mixed replica server revisions fail before opening the database", async ()
   const f = fixture({
     runtimes: [[server(), server({ id: otherServer, imageId: otherImage, revision: otherRevision,
       imageRevision: otherRevision,
-      labels: { "com.docker.compose.service": "telegramd", "org.opencontainers.image.revision": otherRevision },
+      labels: { "com.docker.compose.service": "teagramd", "org.opencontainers.image.revision": otherRevision },
       imageLabels: { "org.opencontainers.image.revision": otherRevision } })]],
     buildIdentities: [[buildIdentity(), buildIdentity({ imageId: otherImage, sourceSha: otherRevision,
       revisionLabel: otherRevision, evidenceIdentity: "build-record-2" })]],
@@ -425,7 +425,7 @@ for (const [name, post] of [
 for (const [name, changes] of [
   ["a replaced runner record", { buildIdentities: [[buildIdentity()], [buildIdentity({ evidenceIdentity: "replacement-record" })]] }],
   ["an observer restart", { observers: [observer(), observer({ startedAt: "2026-10-13T01:00:00Z" })] }],
-  ["changed container labels", { runtimes: [[server()], [server({ labels: { "com.docker.compose.service": "telegramd", note: "changed" , "org.opencontainers.image.revision": serverRevision } })]] }],
+  ["changed container labels", { runtimes: [[server()], [server({ labels: { "com.docker.compose.service": "teagramd", note: "changed" , "org.opencontainers.image.revision": serverRevision } })]] }],
   ["changed image labels", { runtimes: [[server()], [server({ imageLabels: { "org.opencontainers.image.revision": serverRevision, note: "changed" } })]] }],
   ["changed registration flag", { runtimes: [[server()], [server({ flags: ["TG_REGISTRATION=open", "TG_LOG_LOGIN_CODES=false", `TG_RSA_KEY_FINGERPRINT=${pin}`] })]] }],
   ["changed login-code flag", { runtimes: [[server()], [server({ flags: ["TG_REGISTRATION=closed", "TG_LOG_LOGIN_CODES=true", `TG_RSA_KEY_FINGERPRINT=${pin}`] })]] }],

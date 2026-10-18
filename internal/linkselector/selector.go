@@ -464,7 +464,7 @@ func isAdminPath(path string) bool {
 }
 
 func isWebPath(path string) bool {
-	if path == "/" || path == "/.well-known/telegram-web/version.txt" {
+	if path == "/" || path == "/.well-known/teagram-web/version.txt" {
 		return true
 	}
 	if strings.ContainsAny(path, "%\\") || strings.HasSuffix(path, "/") || len(path) < 2 {

@@ -62,7 +62,7 @@ busybox realpath --help 2>&1 | grep -Fq "BusyBox v1.37.0"
 printf '%s' package-setup > /phase/current
 apk add --no-cache bash
 printf '%s' path-preflight > /phase/current
-bash deploy/telegramd/rollout-runner/test-compose-path-preflight.sh
+bash deploy/teagramd/rollout-runner/test-compose-path-preflight.sh
 SCRIPT
 )
     ;;

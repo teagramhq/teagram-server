@@ -1,6 +1,6 @@
 # Real server fixture
 
-The fixture starts the requested immutable `telegramd` revision from an owned detached server worktree, applies that revision's migrations to a fresh PostgreSQL database, and exposes the service only at `https://telegramd.test` and `wss://telegramd.test/apiws`. Each run has a fresh identity, RSA key, auth-key encryption key, and two synthetic accounts. The fixture authenticates both accounts and completes its existing browser, worker, and egress checks before reporting `server-ready`. Harness, server, and web revisions are reported separately as full verified SHAs; the requested server revision must be resolvable in the checkout and resolves to a detached worktree owned by the run.
+The fixture starts the requested immutable `teagramd` revision from an owned detached server worktree, applies that revision's migrations to a fresh PostgreSQL database, and exposes the service only at `https://teagramd.test` and `wss://teagramd.test/apiws`. Each run has a fresh identity, RSA key, auth-key encryption key, and two synthetic accounts. The fixture authenticates both accounts and completes its existing browser, worker, and egress checks before reporting `server-ready`. Harness, server, and web revisions are reported separately as full verified SHAs; the requested server revision must be resolvable in the checkout and resolves to a detached worktree owned by the run.
 
 The browser image is selected from the Docker daemon architecture using the corresponding digest pinned in the CI workflow. Unsupported architectures fail before the fixture creates resources.
 
@@ -78,7 +78,7 @@ chmod 600 "$KEY_FILE"
 trap 'rm -f -- "$KEY_FILE"' EXIT
 # Write the mtprotoPublicKeyPEM value from server-ready to "$KEY_FILE".
 MTPROTO_TARGET_MODE=private \
-MTPROTO_PRIVATE_ENDPOINT=wss://telegramd.test/apiws \
+MTPROTO_PRIVATE_ENDPOINT=wss://teagramd.test/apiws \
 MTPROTO_PRIVATE_RSA_PUBLIC_KEY_FILE="$KEY_FILE" \
   corepack pnpm exec vite build --outDir "$ARTIFACT_DIR"
 MTPROTO_TARGET_MODE=private node scripts/check-bundle-mangling.mjs "$ARTIFACT_DIR"

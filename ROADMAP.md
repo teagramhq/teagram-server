@@ -808,7 +808,7 @@ Tracked so shortcuts don't rot into "later means never".
 - The admission transaction consumes the invite, clears the handoff secret,
   creates the provisional username-mode account, claims the username, and binds
   the unbound auth key atomically; a failure rolls the complete admission back.
-- The `telegramd invite issue`, `invite list`, and `invite revoke` commands provide
+- The `teagramd invite issue`, `invite list`, and `invite revoke` commands provide
   the operator issuance and lifecycle surface. `issue` prints the new secret once;
   `list` and `revoke` do not expose stored secrets.
 - `TG_REGISTRATION` accepts `closed`, `invite`, and `open`; M20 added the invite-gated path,

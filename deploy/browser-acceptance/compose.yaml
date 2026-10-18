@@ -1,8 +1,8 @@
-name: telegram-browser-acceptance
+name: teagram-browser-acceptance
 
 services:
   observer:
-    image: telegram-browser-acceptance:local
+    image: teagram-browser-acceptance:local
     entrypoint: ["node", "/opt/browser-acceptance/observer-service.mjs"]
     init: true
     user: "1000:1000"
@@ -11,7 +11,7 @@ services:
       - ALL
     security_opt:
       - no-new-privileges:true
-      - seccomp=${SECCOMP_PROFILE:-/opt/telegram-server/deploy/browser-acceptance/seccomp-browser.json}
+      - seccomp=${SECCOMP_PROFILE:-/opt/teagram/deploy/browser-acceptance/seccomp-browser.json}
     networks:
       browser-internal:
         aliases:
@@ -38,7 +38,7 @@ services:
       start_period: 2s
 
   browser:
-    image: telegram-browser-acceptance:local
+    image: teagram-browser-acceptance:local
     build:
       context: ../..
       dockerfile: deploy/browser-acceptance/Dockerfile
@@ -52,7 +52,7 @@ services:
       - ALL
     security_opt:
       - no-new-privileges:true
-      - seccomp=${SECCOMP_PROFILE:-/opt/telegram-server/deploy/browser-acceptance/seccomp-browser.json}
+      - seccomp=${SECCOMP_PROFILE:-/opt/teagram/deploy/browser-acceptance/seccomp-browser.json}
     depends_on:
       observer:
         condition: service_healthy
@@ -85,8 +85,8 @@ services:
 
 networks:
   browser-internal:
-    name: telegram-browser-acceptance-internal
+    name: teagram-browser-acceptance-internal
     internal: true
   observer-egress:
-    name: telegram-browser-acceptance-egress
+    name: teagram-browser-acceptance-egress
     driver: bridge

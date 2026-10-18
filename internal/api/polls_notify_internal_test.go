@@ -345,3 +345,75 @@ func TestChannelPollVoteNotifiesOnceAndSkipsBannedConnectedMember(t *testing.T) 
 		t.Fatalf("observer poll update = %#v, want poll %d with one vote", update.Update, poll.ID)
 	}
 }
+
+func TestChannelPollVoteRechecksMembershipBeforePush(t *testing.T) {
+	t.Parallel()
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	dsn := pgtest.DSN(t)
+	s, err := store.Open(ctx, dsn, pgtest.EncKey(), store.WithoutBlobStore())
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := s.Close(); err != nil {
+			t.Errorf("close store: %v", err)
+		}
+	})
+
+	creator, err := s.CreateUser(ctx, "+15551802111")
+	if err != nil {
+		t.Fatalf("create creator: %v", err)
+	}
+	voter, err := s.CreateUser(ctx, "+15551802112")
+	if err != nil {
+		t.Fatalf("create voter: %v", err)
+	}
+	observer, err := s.CreateUser(ctx, "+15551802113")
+	if err != nil {
+		t.Fatalf("create observer: %v", err)
+	}
+	channel, err := s.CreateChannel(ctx, creator.ID, "Channel poll ban race", "", true)
+	if err != nil {
+		t.Fatalf("create channel: %v", err)
+	}
+	if _, err = s.AddChannelMembers(ctx, channel.ID, creator.ID, []int64{voter.ID, observer.ID}); err != nil {
+		t.Fatalf("add channel members: %v", err)
+	}
+	message, poll, _, duplicate, err := s.PostChannelPollAs(ctx, channel.ID, creator.ID, 1802111, "", store.PollDraft{
+		Question: []byte("Choose"),
+		Answers: []store.PollAnswer{
+			{Option: []byte("a"), Text: []byte("A")},
+			{Option: []byte("b"), Text: []byte("B")},
+		},
+	})
+	if err != nil || duplicate {
+		t.Fatalf("post channel poll = duplicate %v, err %v", duplicate, err)
+	}
+	ref := store.PollMessageRef{PeerType: store.PeerTypeChannel, PeerID: channel.ID, LocalID: message.LocalID}
+	if _, changed, err := s.CastPollVoteWithChange(ctx, voter.ID, ref, [][]byte{[]byte("b")}); err != nil || !changed {
+		t.Fatalf("cast channel poll vote = changed %v, err %v", changed, err)
+	}
+
+	registry := mtproto.NewSessionRegistry()
+	transport := &recordingNotifyTransport{}
+	conn := mtproto.NewTestConn(transport, retryTestKey(113))
+	conn.SetOwner(observer.ID)
+	if !registry.Add(observer.ID, conn) {
+		t.Fatal("register observer connection")
+	}
+	t.Cleanup(func() { registry.Remove(observer.ID, conn) })
+
+	updater := NewUpdater(s, 2, registry, nil, pgtest.PeerDeriver())
+	updater.channelPollVoteBeforePushHook = func() {
+		if err := s.SetChannelBan(ctx, channel.ID, creator.ID, observer.ID, nil, true); err != nil {
+			t.Fatalf("ban observer after poll authorization: %v", err)
+		}
+	}
+	updater.DeliverChannelPollVote(ctx, channel.ID, poll.ID)
+	updater.channelPollVoteBeforePushHook = nil
+
+	if got := transport.count(); got != 0 {
+		t.Fatalf("removed observer received %d poll push(es), want none", got)
+	}
+}

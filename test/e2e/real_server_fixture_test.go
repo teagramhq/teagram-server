@@ -185,7 +185,7 @@ func TestRealServerFixtureValidatesDockerEndpointBeforeDaemonAccess(t *testing.T
 			dockerHost:        "tcp://multica-dind:2375",
 			contextEndpoint:   "tcp://multica-dind:2375",
 			allowDaemonAccess: true,
-			allowedCalls:      []string{"container inspect telegram-fixture-00000000000000000000000000000000browser"},
+			allowedCalls:      []string{"container inspect teagram-fixture-00000000000000000000000000000000browser"},
 			pinnedDockerEnv:   "tcp://multica-dind:2375|",
 		},
 	}
@@ -249,7 +249,7 @@ exit 89
 				t.Fatalf("fixture endpoint case exit = %v, want exit 2; stderr=%q", err, stderr.String())
 			}
 			if testCase.allowDaemonAccess {
-				if !strings.Contains(stderr.String(), "resource name already exists: telegram-fixture-") {
+				if !strings.Contains(stderr.String(), "resource name already exists: teagram-fixture-") {
 					t.Fatalf("local Docker endpoint did not reach the first resource check: %q", stderr.String())
 				}
 			} else if !strings.Contains(stderr.String(), "fixture requires a local Docker daemon") {
@@ -367,21 +367,21 @@ exit 89
 	if !errors.As(err, &exitErr) || exitErr.ExitCode() != 2 {
 		t.Fatalf("historical revision pair preflight exit = %v, want exit 2; stderr=%q", err, stderr.String())
 	}
-	if !strings.Contains(stderr.String(), "resource name already exists: telegram-fixture-00000000000000000000000000000000browser") {
+	if !strings.Contains(stderr.String(), "resource name already exists: teagram-fixture-00000000000000000000000000000000browser") {
 		t.Fatalf("historical revision pair did not reach the owned-resource boundary: %q", stderr.String())
 	}
 	if stdout.Len() != 0 {
 		t.Fatalf("historical pair preflight wrote readiness output %q", stdout.String())
 	}
 	calls, err := os.ReadFile(callLog)
-	if err != nil || string(calls) != "container inspect telegram-fixture-00000000000000000000000000000000browser\n" {
+	if err != nil || string(calls) != "container inspect teagram-fixture-00000000000000000000000000000000browser\n" {
 		t.Fatalf("historical pair preflight Docker calls = %q, err=%v", calls, err)
 	}
 }
 
 func TestRealServerFixtureRejectsResourceCollisionBeforeMutation(t *testing.T) {
 	runID := newRealFixtureRunID(t)
-	network := "telegram-fixture-" + runID + "edge"
+	network := "teagram-fixture-" + runID + "edge"
 	if output, err := fixtureCommand(context.Background(), "docker", "network", "create", "--driver", "bridge", "--internal", "--ipv6=false", network).CombinedOutput(); err != nil {
 		t.Fatalf("create unowned collision network: %v: %s", err, strings.TrimSpace(string(output)))
 	}
@@ -413,8 +413,8 @@ func TestRealServerFixtureRejectsResourceCollisionBeforeMutation(t *testing.T) {
 	if err := fixtureCommand(context.Background(), "docker", "network", "inspect", network).Run(); err != nil {
 		t.Fatalf("fixture removed an unowned collision network: %v", err)
 	}
-	for _, suffix := range []string{"browser", "tls-front", "telegramd", "database", "client", "atlas"} {
-		if err := fixtureCommand(context.Background(), "docker", "container", "inspect", "telegram-fixture-"+runID+suffix).Run(); err == nil {
+	for _, suffix := range []string{"browser", "tls-front", "teagramd", "database", "client", "atlas"} {
+		if err := fixtureCommand(context.Background(), "docker", "container", "inspect", "teagram-fixture-"+runID+suffix).Run(); err == nil {
 			t.Errorf("fixture created container %s before rejecting the collision", suffix)
 		}
 	}
@@ -902,7 +902,7 @@ func TestRealServerFixtureHistoricalWebArtifactShapeFailsStagingAudit(t *testing
 		"--secret-dir", secretDir,
 		"--build-dir", buildDir,
 		"--repo-root", repositoryRoot,
-		"--endpoint", "wss://telegramd.test/apiws",
+		"--endpoint", "wss://teagramd.test/apiws",
 		"--fingerprint", historicalFingerprint,
 		"--web-revision", historicalWebRevision,
 	)
@@ -1010,7 +1010,7 @@ func TestRealServerFixtureStartupFailureCleanup(t *testing.T) {
 		"--web-revision", realFixtureWebRevision,
 		"--run-id", runID,
 	)
-	command.Env = append(os.Environ(), "TELEGRAM_FIXTURE_TEST_FAIL_AFTER=server-ready")
+	command.Env = append(os.Environ(), "TEAGRAM_FIXTURE_TEST_FAIL_AFTER=server-ready")
 	var stdout, stderr bytes.Buffer
 	command.Stdout = &stdout
 	command.Stderr = &stderr
@@ -1042,7 +1042,7 @@ func TestRealServerFixtureReadinessTimeoutCleanup(t *testing.T) {
 		"--web-revision", realFixtureWebRevision,
 		"--run-id", runID,
 	)
-	command.Env = append(os.Environ(), "TELEGRAM_FIXTURE_TEST_READINESS_TIMEOUT=1")
+	command.Env = append(os.Environ(), "TEAGRAM_FIXTURE_TEST_READINESS_TIMEOUT=1")
 	var stdout, stderr bytes.Buffer
 	command.Stdout = &stdout
 	command.Stderr = &stderr
@@ -1051,7 +1051,7 @@ func TestRealServerFixtureReadinessTimeoutCleanup(t *testing.T) {
 	if !errors.As(err, &exitErr) || exitErr.ExitCode() != 1 {
 		t.Fatalf("injected readiness timeout exit = %v, want exit 1; stderr=%q", err, stderr.String())
 	}
-	if !strings.Contains(stderr.String(), "telegramd readiness timeout") {
+	if !strings.Contains(stderr.String(), "teagramd readiness timeout") {
 		t.Fatalf("readiness timeout diagnostic = %q", stderr.String())
 	}
 	assertFixtureCleanupVerified(t, stderr.String())
@@ -1070,7 +1070,7 @@ func TestRealServerFixtureCleanupFailureIsNonzero(t *testing.T) {
 		"--web-revision", realFixtureWebRevision,
 		"--run-id", runID,
 	)
-	command.Env = append(os.Environ(), "TELEGRAM_FIXTURE_TEST_FAIL_AFTER=server-ready", "TELEGRAM_FIXTURE_TEST_CLEANUP_FAILURE=1")
+	command.Env = append(os.Environ(), "TEAGRAM_FIXTURE_TEST_FAIL_AFTER=server-ready", "TEAGRAM_FIXTURE_TEST_CLEANUP_FAILURE=1")
 	var stdout, stderr bytes.Buffer
 	command.Stdout = &stdout
 	command.Stderr = &stderr
@@ -1103,7 +1103,7 @@ func TestRealServerFixtureRejectsTargetKeyMismatch(t *testing.T) {
 		"--web-revision", realFixtureWebRevision,
 		"--run-id", runID,
 	)
-	command.Env = append(os.Environ(), "TELEGRAM_FIXTURE_TEST_MISMATCH_TARGET=1")
+	command.Env = append(os.Environ(), "TEAGRAM_FIXTURE_TEST_MISMATCH_TARGET=1")
 	var stdout, stderr bytes.Buffer
 	command.Stdout = &stdout
 	command.Stderr = &stderr
@@ -1615,10 +1615,10 @@ func validateRealFixtureReady(t *testing.T, fixture *realFixtureProcess, runID, 
 	if ready.Mode != "private" {
 		t.Fatalf("fixture target mode = %q, want private", ready.Mode)
 	}
-	if ready.EvidenceClass != "production-telegramd" {
-		t.Fatalf("fixture evidence class = %q, want production-telegramd", ready.EvidenceClass)
+	if ready.EvidenceClass != "production-teagramd" {
+		t.Fatalf("fixture evidence class = %q, want production-teagramd", ready.EvidenceClass)
 	}
-	if ready.Endpoint != "https://telegramd.test" || ready.WSSEndpoint != "wss://telegramd.test/apiws" {
+	if ready.Endpoint != "https://teagramd.test" || ready.WSSEndpoint != "wss://teagramd.test/apiws" {
 		t.Fatalf("fixture endpoints = %q / %q, want fixed synthetic origin", ready.Endpoint, ready.WSSEndpoint)
 	}
 	spki, err := base64.StdEncoding.DecodeString(ready.LeafSPKI)
@@ -1671,7 +1671,7 @@ func validateRealFixtureReady(t *testing.T, fixture *realFixtureProcess, runID, 
 	if err != nil {
 		t.Fatalf("parse fixture TLS leaf certificate: %v", err)
 	}
-	if err := tlsCertificate.VerifyHostname("telegramd.test"); err != nil {
+	if err := tlsCertificate.VerifyHostname("teagramd.test"); err != nil {
 		t.Fatalf("fixture TLS certificate hostname: %v", err)
 	}
 	leafSPKI := sha256.Sum256(tlsCertificate.RawSubjectPublicKeyInfo)
@@ -1826,7 +1826,7 @@ func assertServerReadyRecord(t *testing.T, output []byte) {
 }
 
 func fixtureResourcePrefix(runID string) string {
-	return "telegram-fixture-" + runID
+	return "teagram-fixture-" + runID
 }
 
 func fixtureUsername(runID string, index int) string {
@@ -1861,7 +1861,7 @@ func writeFixtureArtifact(t *testing.T, directory string, ready realFixtureReady
 	if err := os.MkdirAll(filepath.Join(directory, "assets"), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	endpoint := "wss://telegramd.test/apiws"
+	endpoint := "wss://teagramd.test/apiws"
 	fingerprint := ready.Fingerprint
 	csp := "default-src 'self'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'; " +
 		"object-src 'none'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; " +
@@ -1962,7 +1962,7 @@ func quoteAll(values []string) []string {
 
 func sendFixtureMessage(ctx context.Context, fixture *realFixtureProcess, recipient, marker string) (string, error) {
 	command := fixtureCommand(ctx, "docker", "exec", fixtureResourcePrefix(fixture.ready.RunID)+"client",
-		"/run/app/fixture-auth-check", "--endpoint", "wss://telegramd.test/apiws",
+		"/run/app/fixture-auth-check", "--endpoint", "wss://teagramd.test/apiws",
 		"--tls-root-file", "/run/secrets/tls.crt",
 		"--public-key", "/run/secrets/server.pub.pem",
 		"--username", fixtureUsername(fixture.ready.RunID, 0),
@@ -1977,7 +1977,7 @@ func sendFixtureMessage(ctx context.Context, fixture *realFixtureProcess, recipi
 func fixtureSQL(ctx context.Context, t *testing.T, fixture *realFixtureProcess, query string) string {
 	t.Helper()
 	command := fixtureCommand(ctx, "docker", "exec", fixtureResourcePrefix(fixture.ready.RunID)+"database",
-		"psql", "-U", "postgres", "-d", "telegram", "-X", "-qAt", "-c", query)
+		"psql", "-U", "postgres", "-d", "teagram", "-X", "-qAt", "-c", query)
 	output, err := command.CombinedOutput()
 	if err != nil {
 		t.Fatalf("fixture database assertion failed: %v: %s", err, strings.TrimSpace(string(output)))
@@ -2001,7 +2001,7 @@ func fixtureContainerVolumeNames(t *testing.T, resourcePrefix string) map[string
 		name   string
 		suffix string
 	}{
-		{name: "backend", suffix: "telegramd"},
+		{name: "backend", suffix: "teagramd"},
 		{name: "client", suffix: "client"},
 	} {
 		command := fixtureCommand(context.Background(), "docker", "inspect", "--format",
@@ -2123,8 +2123,8 @@ func fixtureOutputTail(output []byte) string {
 
 func assertNamedFixtureResourcesAbsent(t *testing.T, runID string, volumeNames ...string) {
 	t.Helper()
-	prefix := "telegram-fixture-" + runID
-	for _, suffix := range []string{"browser", "tls-front", "telegramd", "database", "client", "atlas"} {
+	prefix := "teagram-fixture-" + runID
+	for _, suffix := range []string{"browser", "tls-front", "teagramd", "database", "client", "atlas"} {
 		assertDockerResourceAbsent(t, "container", prefix+suffix)
 	}
 	for _, suffix := range []string{"edge", "server"} {

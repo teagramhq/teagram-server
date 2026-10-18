@@ -20,7 +20,7 @@ class InitTest(unittest.TestCase):
             for name, value in {
                 "rustfs-root-access-key": "root-access",
                 "rustfs-root-secret-key": "root-secret",
-                "telegramd-blob-secret-key": "dummy-app-secret",
+                "teagramd-blob-secret-key": "dummy-app-secret",
             }.items():
                 (secrets / name).write_text(value)
             mc = work / "mc"

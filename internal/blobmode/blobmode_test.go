@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"strconv"
 	"strings"
 	"testing"
@@ -17,7 +18,8 @@ import (
 	"github.com/teagramhq/teagram-server/internal/blobmode"
 )
 
-const localBlobDir = "/var/lib/telegramd-blobs"
+const localBlobDir = "/var/lib/teagramd-blobs"
+const movedBlobDir = "/var/lib/telegramd-blobs"
 
 const (
 	testMaxRecordBytes    = 4096
@@ -48,6 +50,16 @@ func TestValidateAcceptsCurrentBackendRecords(t *testing.T) {
 			outcomes: []string{"initial-local", "s3-accepted", "recovered-local"},
 			config:   blobmode.EffectiveConfig{BlobDir: localBlobDir},
 		},
+		{
+			name:     "stack move preserves the validated local backend",
+			outcomes: []string{"initial-local", "stack-moved-local"},
+			config:   blobmode.EffectiveConfig{BlobDir: movedBlobDir},
+		},
+		{
+			name:     "stack move follows recovered local authority",
+			outcomes: []string{"initial-local", "s3-accepted", "recovered-local", "stack-moved-local"},
+			config:   blobmode.EffectiveConfig{BlobDir: movedBlobDir},
+		},
 	}
 
 	for _, tt := range tests {
@@ -55,6 +67,113 @@ func TestValidateAcceptsCurrentBackendRecords(t *testing.T) {
 			state := testState(t, tt.outcomes...)
 			if err := blobmode.Validate(state.path, tt.config); err != nil {
 				t.Fatalf("validate current record: %v", err)
+			}
+		})
+	}
+}
+
+func TestValidateAcceptsPublisherGeneratedStackMoveJournal(t *testing.T) {
+	if !requireRootFixture(t, "TestValidateAcceptsPublisherGeneratedStackMoveJournal") {
+		return
+	}
+	_, testFile, _, ok := runtime.Caller(0)
+	if !ok {
+		t.Fatal("locate blob-mode package source")
+	}
+	repoRoot := filepath.Clean(filepath.Join(filepath.Dir(testFile), "../.."))
+	fixtureRoot := t.TempDir()
+	// #nosec G204 -- Run the repository-owned publisher fixture with fixed arguments and a private temporary directory.
+	command := exec.CommandContext(
+		t.Context(),
+		"python3",
+		filepath.Join(repoRoot, "internal/blobmode/testdata/publish_stack_move_fixture.py"),
+		repoRoot,
+		fixtureRoot,
+	)
+	if output, err := command.CombinedOutput(); err != nil {
+		t.Fatalf("publish stack-move authority fixture: %v\n%s", err, output)
+	}
+	statePath := filepath.Join(fixtureRoot, "checkout", ".state", "blob-mode")
+	if err := blobmode.Validate(statePath, blobmode.EffectiveConfig{BlobDir: movedBlobDir}); err != nil {
+		t.Fatalf("validate publisher-generated stack-move journal: %v", err)
+	}
+}
+
+func TestValidateRejectsStackMoveWithChangedBackendOrVolumes(t *testing.T) {
+	if !requireRootFixture(t, "TestValidateRejectsStackMoveWithChangedBackendOrVolumes") {
+		return
+	}
+	tests := []struct {
+		name     string
+		outcomes []string
+		wantErr  string
+		mutate   func(*testing.T, map[int][]byte)
+	}{
+		{
+			name:     "changed backend directory",
+			outcomes: []string{"initial-local", "stack-moved-local"},
+			wantErr:  "reason=supersession field=outcome",
+			mutate: func(t *testing.T, records map[int][]byte) {
+				t.Helper()
+				records[1] = mutateRecord(t, records[1], func(record map[string]any) {
+					objectField(t, record, "backend")["dir"] = localBlobDir
+				})
+			},
+		},
+		{
+			name:     "wrong source tgblobs volume",
+			outcomes: []string{"initial-local", "stack-moved-local"},
+			wantErr:  "reason=supersession field=outcome",
+			mutate: func(t *testing.T, records map[int][]byte) {
+				t.Helper()
+				records[1] = mutateRecord(t, records[1], func(record map[string]any) {
+					objectField(t, record, "volumes")["tgblobs"] = "unexpected_tgblobs"
+				})
+			},
+		},
+		{
+			name:     "wrong source rustfsdata volume",
+			outcomes: []string{"initial-local", "s3-accepted", "recovered-local", "stack-moved-local"},
+			wantErr:  "reason=supersession field=outcome",
+			mutate: func(t *testing.T, records map[int][]byte) {
+				t.Helper()
+				records[3] = mutateRecord(t, records[3], func(record map[string]any) {
+					objectField(t, record, "volumes")["rustfsdata"] = "unexpected_rustfsdata"
+				})
+			},
+		},
+		{
+			name:     "wrong target tgblobs volume",
+			outcomes: []string{"initial-local", "stack-moved-local"},
+			wantErr:  "reason=schema field=volumes",
+			mutate: func(t *testing.T, records map[int][]byte) {
+				t.Helper()
+				records[2] = mutateRecord(t, records[2], func(record map[string]any) {
+					objectField(t, record, "volumes")["tgblobs"] = "unexpected_tgblobs"
+				})
+			},
+		},
+		{
+			name:     "wrong target rustfsdata volume",
+			outcomes: []string{"initial-local", "stack-moved-local"},
+			wantErr:  "reason=schema field=volumes",
+			mutate: func(t *testing.T, records map[int][]byte) {
+				t.Helper()
+				records[2] = mutateRecord(t, records[2], func(record map[string]any) {
+					objectField(t, record, "volumes")["rustfsdata"] = "unexpected_rustfsdata"
+				})
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			chain := testChain(t, tt.outcomes...)
+			tt.mutate(t, chain.records)
+			path := writeTestState(t, chain.records, chain.records[len(chain.records)])
+			err := blobmode.Validate(path, blobmode.EffectiveConfig{BlobDir: movedBlobDir})
+			if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+				t.Fatalf("validate error = %v, want %q", err, tt.wantErr)
 			}
 		})
 	}
@@ -275,6 +394,25 @@ func TestValidateRejectsInvalidTreesWithoutChangingThem(t *testing.T) {
 			},
 		},
 		{
+			name: "stack move does not follow S3 authority",
+			setup: func(t *testing.T) (string, blobmode.EffectiveConfig) {
+				t.Helper()
+				chain := testChain(t, "initial-local", "s3-accepted", "stack-moved-local")
+				return writeTestState(t, chain.records, chain.records[3]), blobmode.EffectiveConfig{BlobDir: movedBlobDir}
+			},
+		},
+		{
+			name: "stack move requires matching volume inventories",
+			setup: func(t *testing.T) (string, blobmode.EffectiveConfig) {
+				t.Helper()
+				chain := testChain(t, "initial-local", "stack-moved-local")
+				chain.records[2] = mutateRecord(t, chain.records[2], func(record map[string]any) {
+					objectField(t, record, "evidence")["target_rustfsdata_inventory_sha256"] = digest(99)
+				})
+				return writeTestState(t, chain.records, chain.records[2]), blobmode.EffectiveConfig{BlobDir: movedBlobDir}
+			},
+		},
+		{
 			name: "stale mode record",
 			setup: func(t *testing.T) (string, blobmode.EffectiveConfig) {
 				t.Helper()
@@ -350,7 +488,7 @@ func TestValidateRejectsInvalidTreesWithoutChangingThem(t *testing.T) {
 				t.Helper()
 				state := testState(t, "initial-local", "s3-accepted")
 				changed := mutateRecord(t, state.mode, func(record map[string]any) {
-					objectField(t, record, "backend")["prefix"] = "telegramd"
+					objectField(t, record, "backend")["prefix"] = "teagramd"
 				})
 				return writeTestState(t, withChangedHead(state, changed), changed), blobmode.EffectiveConfig{BlobS3: testS3Config()}
 			},
@@ -468,6 +606,8 @@ func TestValidateRejectsInvalidTreesWithoutChangingThem(t *testing.T) {
 		"unknown field":               "reason=schema field=record",
 		"journal gap":                 "reason=sequence field=journal",
 		"recovered local follows initial local without S3 acceptance": "reason=supersession field=outcome",
+		"stack move does not follow S3 authority":                     "reason=supersession field=outcome",
+		"stack move requires matching volume inventories":             "reason=schema field=evidence",
 		"stale mode record":             "reason=stale field=mode.json",
 		"reused transition id":          "reason=reused field=transition_id",
 		"reused report digest":          "reason=reused field=evidence.report_sha256",
@@ -598,10 +738,23 @@ func testChain(t *testing.T, outcomes ...string) struct{ records map[int][]byte 
 	t.Helper()
 	records := make(map[int][]byte, len(outcomes))
 	previous := ""
+	previousOutcome := ""
 	for index, outcome := range outcomes {
 		generation := index + 1
+		if outcome == "stack-moved-local" && (previousOutcome == "initial-local" || previousOutcome == "recovered-local") {
+			previousGeneration := generation - 1
+			records[previousGeneration] = mutateRecord(t, records[previousGeneration], func(record map[string]any) {
+				objectField(t, record, "backend")["dir"] = movedBlobDir
+				volumes := objectField(t, record, "volumes")
+				volumes["tgblobs"] = "telegram-server_tgblobs"
+				if previousOutcome == "recovered-local" {
+					volumes["rustfsdata"] = "telegram-server_rustfsdata"
+				}
+			})
+		}
 		records[generation] = makeRecord(t, generation, outcome, previous, nil)
 		previous = recordID(generation)
+		previousOutcome = outcome
 	}
 	return struct{ records map[int][]byte }{records: records}
 }
@@ -614,7 +767,7 @@ func makeRecord(t *testing.T, generation int, outcome, supersedes string, change
 	switch outcome {
 	case "initial-local":
 	case "s3-accepted":
-		backend = map[string]any{"kind": "s3", "endpoint": "http://rustfs:9000", "bucket": "telegram", "prefix": "telegramd/"}
+		backend = map[string]any{"kind": "s3", "endpoint": "http://rustfs:9000", "bucket": "teagram", "prefix": "teagramd/"}
 		volumes["rustfsdata"] = "project_rustfsdata"
 		evidence["source_manifest_sha256"] = digest(generation + 10)
 		evidence["destination_manifest_sha256"] = digest(generation + 20)
@@ -629,6 +782,20 @@ func makeRecord(t *testing.T, generation int, outcome, supersedes string, change
 		evidence["byte_total"] = 2048
 		evidence["restore_passes"] = 2
 		evidence["retained_cutover_key_count"] = 1
+	case "stack-moved-local":
+		backend = map[string]any{"kind": "local", "dir": movedBlobDir}
+		volumes["tgblobs"] = "teagram_tgblobs"
+		volumes["rustfsdata"] = "teagram_rustfsdata"
+		evidence["source_tgblobs_volume"] = "telegram-server_tgblobs"
+		evidence["target_tgblobs_volume"] = "teagram_tgblobs"
+		evidence["source_tgblobs_inventory_sha256"] = digest(generation + 10)
+		evidence["target_tgblobs_inventory_sha256"] = digest(generation + 10)
+		evidence["tgblobs_file_count"] = 1
+		evidence["source_rustfsdata_volume"] = "telegram-server_rustfsdata"
+		evidence["target_rustfsdata_volume"] = "teagram_rustfsdata"
+		evidence["source_rustfsdata_inventory_sha256"] = digest(generation + 20)
+		evidence["target_rustfsdata_inventory_sha256"] = digest(generation + 20)
+		evidence["rustfsdata_file_count"] = 1
 	default:
 		t.Fatalf("unknown test outcome %q", outcome)
 	}
@@ -724,7 +891,7 @@ func digest(value int) string {
 }
 
 func testS3Config() *blob.S3Config {
-	return &blob.S3Config{Endpoint: "http://rustfs:9000", Bucket: "telegram", Prefix: "telegramd"}
+	return &blob.S3Config{Endpoint: "http://rustfs:9000", Bucket: "teagram", Prefix: "teagramd"}
 }
 
 func snapshotTree(t *testing.T, root string) map[string]string {

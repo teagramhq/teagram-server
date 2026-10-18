@@ -1,5 +1,5 @@
 {
-  "name": "telegram-server-e2e",
+  "name": "teagram-server-e2e",
   "private": true,
   "scripts": {
     "test": "playwright test",

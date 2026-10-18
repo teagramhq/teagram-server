@@ -1441,8 +1441,11 @@ func TestRealServerFixtureAuthProgressBuildIsTaggedAndProcessScoped(t *testing.T
 	}
 	start := string(startScript)
 	for _, required := range []string{
-		`CGO_ENABLED=0 go build -tags fixtureauthprogress -o "$BUILD_DIR/telegramd" ./cmd/telegramd`,
-		`CGO_ENABLED=0 go build -o "$BUILD_DIR/telegramd" ./cmd/telegramd`,
+		`SERVER_PACKAGE=./cmd/teagramd`,
+		`if [[ ! -d "$SERVER_WORKTREE/cmd/teagramd" && -d "$SERVER_WORKTREE/cmd/telegramd" ]]; then`,
+		`SERVER_PACKAGE=./cmd/telegramd`,
+		`CGO_ENABLED=0 go build -tags fixtureauthprogress -o "$BUILD_DIR/teagramd" "$SERVER_PACKAGE"`,
+		`CGO_ENABLED=0 go build -o "$BUILD_DIR/teagramd" "$SERVER_PACKAGE"`,
 		`TG_FIXTURE_AUTH_PROGRESS=/run/log/$AUTH_PROGRESS_RELATIVE_PATH`,
 		`--env "TG_FIXTURE_AUTH_PROGRESS_RUN_ID=$RUN_ID"`,
 		`--tmpfs /run/log:rw,noexec,nosuid,nodev,size=8m,uid=65532,gid=65532`,

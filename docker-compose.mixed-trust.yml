@@ -1,13 +1,13 @@
 # Explicit opt-in mixed-trust topology for disposable validation and the later
 # forwarding bootstrap. Normal `docker compose up` never loads this file.
 #
-# Keep `telegramd` as the direct socket-trust legacy listener. The two new
+# Keep `teagramd` as the direct socket-trust legacy listener. The two new
 # replicas accept PROXY v2 only from the fixed HAProxy address, and publish no
 # application ports on the host. HAProxy binds only temporary loopback ports;
 # the current tailnet and loopback bindings stay with the legacy listener.
 #
 #   docker compose -f docker-compose.yml -f docker-compose.mixed-trust.yml up -d \
-#     tcp-proxy telegramd-proxy-1 telegramd-proxy-2
+#     tcp-proxy teagramd-proxy-1 teagramd-proxy-2
 
 x-proxy-environment: &proxy-environment
   TG_CLIENT_ADDR_TRUST: proxy-v2
@@ -23,7 +23,7 @@ x-proxy-environment: &proxy-environment
 x-proxy-replica: &proxy-replica
   extends:
     file: docker-compose.yml
-    service: telegramd
+    service: teagramd
   environment: *proxy-environment
   # The base service keeps the direct loopback publication. Replacement
   # listeners remain reachable only on the Compose network behind HAProxy.
@@ -36,7 +36,7 @@ x-proxy-replica: &proxy-replica
       condition: service_started
 
 services:
-  telegramd-proxy-1:
+  teagramd-proxy-1:
     <<: *proxy-replica
     environment:
       <<: *proxy-environment
@@ -45,10 +45,10 @@ services:
       default: {}
       mixed-trust:
         aliases:
-          - telegramd-proxy
+          - teagramd-proxy
         ipv4_address: ${TG_MIXED_TRUST_REPLICA_1_IP:-198.18.129.21}
 
-  telegramd-proxy-2:
+  teagramd-proxy-2:
     <<: *proxy-replica
     environment:
       <<: *proxy-environment
@@ -57,7 +57,7 @@ services:
       default: {}
       mixed-trust:
         aliases:
-          - telegramd-proxy
+          - teagramd-proxy
         ipv4_address: ${TG_MIXED_TRUST_REPLICA_2_IP:-198.18.129.22}
 
   tcp-proxy:
@@ -70,7 +70,7 @@ services:
       - "127.0.0.1:${TG_MIXED_TRUST_TEMP_TCP_PORT:-12443}:2443"
       - "127.0.0.1:${TG_MIXED_TRUST_TEMP_WS_PORT:-12444}:2444"
     volumes:
-      - ./deploy/telegramd/haproxy-mixed-trust.cfg:/usr/local/etc/haproxy/haproxy.cfg:ro
+      - ./deploy/teagramd/haproxy-mixed-trust.cfg:/usr/local/etc/haproxy/haproxy.cfg:ro
     healthcheck:
       # This private monitor requires at least one MTProto backend. The smoke
       # preflight separately checks WebSocket and real application RPCs.

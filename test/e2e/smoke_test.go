@@ -152,6 +152,10 @@ func TestSmoke(t *testing.T) {
 		t.Parallel()
 		testSmokeChannel(t)
 	})
+	t.Run("channel-membership-revocation", func(t *testing.T) {
+		t.Parallel()
+		testSmokeChannelMembershipRevocation(t)
+	})
 	t.Run("mtproto-service-messages", func(t *testing.T) {
 		t.Parallel()
 		testSmokeMTProtoServiceMessages(t)
@@ -3026,6 +3030,137 @@ func testSmokeChannel(t *testing.T) {
 	assertPeerDialog(subscriber, postIDs[posts[0]], posts[0])
 	deleteSmokeChannelPost(t, f, channelID, postIDs[posts[0]])
 	assertPeerDialog(subscriber, 0, "")
+}
+
+func testSmokeChannelMembershipRevocation(t *testing.T) {
+	t.Helper()
+	f := newSmokeFixture(t)
+	const phoneCreator, phoneMember = "+15551048011", "+15551048012"
+	seedSmokeUsers(t, f, phoneCreator, phoneMember)
+	creator := newSmokeClient(t, f, "A1", phoneCreator)
+	member := newSmokeClient(t, f, "B1", phoneMember)
+	memberOtherSession := newSmokeClient(t, f, "B2", phoneMember)
+	waitForDistinctAuthKeys(t, f.ctx, f.registry, member.id, 2, "B sessions", memberOtherSession.lifecycle)
+
+	channelID := createBroadcastChannel(t, f.ctx, creator.cmds, "Revoked channel")
+	hash := exportChannelInvite(t, f.ctx, creator.id, creator.cmds, channelID)
+	if joinedID := importChannelInvite(t, f.ctx, member.cmds, hash); joinedID != channelID {
+		t.Fatalf("member joined channel %d, want %d", joinedID, channelID)
+	}
+
+	execChannel(t, f.ctx, creator.cmds, func(ctx context.Context, client *tg.Client) error {
+		_, err := client.ChannelsEditBanned(ctx, &tg.ChannelsEditBannedRequest{
+			Channel:      inputChannel(creator.id, channelID),
+			Participant:  peerUser(creator.id, member.id),
+			BannedRights: tg.ChatBannedRights{ViewMessages: true},
+		})
+		return err
+	})
+
+	assertForbiddenUpdate := func(client *smokeClient, reason string) {
+		t.Helper()
+		for {
+			update := recvOrCtx(t, f.ctx, client.seen.channelUpdate, client.label+" updateChannel after "+reason)
+			if update.Update.ChannelID != channelID {
+				continue
+			}
+			if len(update.Chats) != 1 {
+				t.Fatalf("%s updateChannel chats = %d, want one metadata peer", client.label, len(update.Chats))
+			}
+			forbidden, ok := update.Chats[0].(*tg.ChannelForbidden)
+			if !ok || forbidden.ID != channelID {
+				continue
+			}
+			if forbidden.Title != "" {
+				t.Fatalf("%s forbidden channel title = %q, want empty metadata", client.label, forbidden.Title)
+			}
+			return
+		}
+	}
+	assertForbiddenUpdate(member, "ban")
+	assertForbiddenUpdate(memberOtherSession, "ban")
+
+	if err := member.call(f.ctx, func(ctx context.Context, client *tg.Client) error {
+		result, err := client.ChannelsGetChannels(ctx, []tg.InputChannelClass{inputChannel(member.id, channelID)})
+		if err != nil {
+			return err
+		}
+		if len(result.GetChats()) != 1 {
+			return fmt.Errorf("getChannels chats = %d, want one forbidden channel", len(result.GetChats()))
+		}
+		if forbidden, ok := result.GetChats()[0].(*tg.ChannelForbidden); !ok || forbidden.ID != channelID {
+			return fmt.Errorf("getChannels peer = %T, want ChannelForbidden for %d", result.GetChats()[0], channelID)
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("member getChannels after ban: %v", err)
+	}
+
+	execChannel(t, f.ctx, creator.cmds, func(ctx context.Context, client *tg.Client) error {
+		_, err := client.MessagesSendMessage(ctx, &tg.MessagesSendMessageRequest{
+			Peer:     peerChannel(creator.id, channelID),
+			Message:  "private-after-revocation",
+			RandomID: 1048011,
+		})
+		return err
+	})
+
+	window := time.NewTimer(time.Second)
+	defer window.Stop()
+	windowOpen := true
+	for windowOpen {
+		select {
+		case update := <-member.seen.newChannelMsg:
+			t.Fatalf("member received post after ban: %q", update.Msg.Message)
+		case update := <-memberOtherSession.seen.newChannelMsg:
+			t.Fatalf("member's other session received post after ban: %q", update.Msg.Message)
+		case <-window.C:
+			windowOpen = false
+		case <-f.ctx.Done():
+			t.Fatalf("waiting for post-revocation delivery window: %s", contextFailureDescription(f.ctx))
+		}
+	}
+
+	execChannel(t, f.ctx, creator.cmds, func(ctx context.Context, client *tg.Client) error {
+		_, err := client.ChannelsEditBanned(ctx, &tg.ChannelsEditBannedRequest{
+			Channel:      inputChannel(creator.id, channelID),
+			Participant:  peerUser(creator.id, member.id),
+			BannedRights: tg.ChatBannedRights{},
+		})
+		return err
+	})
+	if err := member.call(f.ctx, func(ctx context.Context, client *tg.Client) error {
+		result, err := client.ChannelsGetChannels(ctx, []tg.InputChannelClass{inputChannel(member.id, channelID)})
+		if err != nil {
+			return err
+		}
+		if len(result.GetChats()) != 1 {
+			return fmt.Errorf("getChannels after unban chats = %d, want one channel", len(result.GetChats()))
+		}
+		if channel, ok := result.GetChats()[0].(*tg.Channel); !ok || channel.ID != channelID {
+			return fmt.Errorf("getChannels after unban peer = %T, want Channel %d", result.GetChats()[0], channelID)
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("member getChannels after unban: %v", err)
+	}
+	if err := member.call(f.ctx, func(ctx context.Context, client *tg.Client) error {
+		result, err := client.ChannelsLeaveChannel(ctx, inputChannel(member.id, channelID))
+		if err != nil {
+			return err
+		}
+		updates, ok := result.(*tg.Updates)
+		if !ok || len(updates.Updates) != 1 || len(updates.Chats) != 1 {
+			return fmt.Errorf("leaveChannel result = %T, want one channel update and one peer", result)
+		}
+		if _, ok := updates.Chats[0].(*tg.ChannelForbidden); !ok {
+			return fmt.Errorf("leaveChannel peer = %T, want ChannelForbidden", updates.Chats[0])
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("member leaveChannel: %v", err)
+	}
+	assertForbiddenUpdate(memberOtherSession, "leave")
 }
 
 func assertSmokeChannelDifferenceTimeout(t *testing.T, ctx context.Context, client *smokeClient, channelID int64, pts int, wantEmpty bool) {

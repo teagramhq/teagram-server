@@ -4,7 +4,7 @@
 # process starts. Never include this file in a deployment command.
 
 services:
-  telegramd:
+  teagramd:
     environment:
       TG_CLIENT_ADDR_TRUST: socket
       TG_REPLICA_COUNT: ${TG_REPLICA_COUNT:-3}

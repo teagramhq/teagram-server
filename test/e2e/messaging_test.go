@@ -347,6 +347,18 @@ func bootServerWithLimitsAndRegistrationModeAndBlobsAndStatus(
 	regMode config.RegistrationMode, blobs blob.Store, persistStatus bool, photoThumbs ...*photothumb.Supervisor,
 ) (*mtproto.SessionRegistry, func()) {
 	t.Helper()
+	return bootServerWithLimitsAndRegistrationModeAndBlobsAndStatusWithDeliveryHook(
+		t, ctx, key, dcID, st, dsn, log, ln, rateLimits, regMode, blobs, persistStatus, nil, photoThumbs...,
+	)
+}
+
+func bootServerWithLimitsAndRegistrationModeAndBlobsAndStatusWithDeliveryHook(
+	t *testing.T, ctx context.Context, key *rsa.PrivateKey, dcID int, st *store.Store,
+	dsn string, log *slog.Logger, ln net.Listener, rateLimits config.RateLimitsConfig,
+	regMode config.RegistrationMode, blobs blob.Store, persistStatus bool,
+	beforeDelivery func(context.Context, int64), photoThumbs ...*photothumb.Supervisor,
+) (*mtproto.SessionRegistry, func()) {
+	t.Helper()
 	tgcfg := fixtureConfigForListener(t, dcID, ln)
 	// Sign-in here reads the code off the log, so the gated line must be on.
 	dialogFilterSync := api.NewDialogFilterSync()
@@ -369,7 +381,14 @@ func bootServerWithLimitsAndRegistrationModeAndBlobsAndStatus(
 	}
 
 	updater := api.NewUpdaterWithDialogFilterSync(st, dcID, server.Registry(), log, pgtest.PeerDeriver(), dialogFilterSync)
-	_, stopListener, err := store.StartListenerWithDialogPins(ctx, dsn, updater.Deliver, updater.DeliverTyping, updater.Evict, updater.DeliverChannelPost, updater.DeliverEncryption, updater.DeliverStatus, updater.DeliverEncryptedMsg, updater.DeliverReactions, updater.DeliverPinned, updater.MarkDialogFilters, updater.DeliverDialogPins, updater.DialogFilterListenerReconnected, log)
+	deliver := updater.Deliver
+	if beforeDelivery != nil {
+		deliver = func(ctx context.Context, userID int64) {
+			beforeDelivery(ctx, userID)
+			updater.Deliver(ctx, userID)
+		}
+	}
+	_, stopListener, err := store.StartListenerWithDialogPins(ctx, dsn, deliver, updater.DeliverTyping, updater.Evict, updater.DeliverChannelPost, updater.DeliverEncryption, updater.DeliverStatus, updater.DeliverEncryptedMsg, updater.DeliverReactions, updater.DeliverPinned, updater.MarkDialogFilters, updater.DeliverDialogPins, updater.DialogFilterListenerReconnected, log)
 	if err != nil {
 		t.Fatalf("start listener: %v", err)
 	}

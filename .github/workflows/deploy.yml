@@ -3,9 +3,9 @@ name: Deploy.
 run-name: ${{ inputs.issue && format('{0} [{1}]', github.workflow, inputs.issue) || '' }}
 
 # Deploys the exact commit whose CI passed on a push to main to the
-# telegram-server LXC. The job never checks out code: the ssh command is that
+# teagram-server LXC. The job never checks out code: the ssh command is that
 # commit's SHA, and the key's forced command on the host runs the commit's own
-# deploy/telegram-server/deploy-main.sh with DEPLOY_SHA set to it.
+# deploy/teagram/deploy-main.sh with DEPLOY_SHA set to it.
 # .github/scripts/test-deploy-workflow-contract.sh guards these triggers.
 on:
   workflow_run:
@@ -25,12 +25,12 @@ permissions:
 
 # One deploy at a time; GitHub keeps only the newest pending run.
 concurrency:
-  group: deploy-telegram-server
+  group: deploy-teagram-server
   cancel-in-progress: false
 
 jobs:
   deploy:
-    name: deploy telegram-server
+    name: deploy teagram-server
     if: ${{ github.event_name == 'workflow_dispatch' || (github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push') }}
     runs-on: ubuntu-26.04
     timeout-minutes: 60

@@ -18,8 +18,8 @@ import (
 const (
 	// ChannelUpdates carries user update nudges and persisted transient updates.
 	// Payloads are a user id, a sender-suppression tuple, a channel-membership
-	// update, a chat-admin event, a chat-about refresh, or a channel-scoped
-	// poll-vote update.
+	// update, a channel-removal refresh, a chat-admin event, a chat-about refresh,
+	// or a channel-scoped poll-vote update.
 	ChannelUpdates = "tg_updates"
 	ChannelTyping  = "tg_typing"       // payload: legacy user pair or peer id, sender id, peer type, and action
 	ChannelEvict   = "tg_evict"        // payload: "<userID>|<authKeyID>"
@@ -53,6 +53,7 @@ const (
 )
 
 const channelMembershipPayloadPrefix = "channel_membership|"
+const channelRemovalPayloadPrefix = "channel_removal|"
 const chatAdminPayloadPrefix = "chat_admin|"
 const chatAboutPayloadPrefix = "chat_about|"
 const channelPollVotePayloadPrefix = "channel_poll_vote|"
@@ -65,6 +66,7 @@ type notificationAcceptedAtKey struct{}
 type suppressedUpdateKey struct{}
 
 type channelMembershipUpdateKey struct{}
+type channelRemovalUpdateKey struct{}
 type chatAdminUpdateKey struct{}
 type chatAboutUpdateKey struct{}
 type channelPollVoteUpdateKey struct{}
@@ -247,6 +249,22 @@ func ChannelMembershipUpdateFromContext(ctx context.Context) (int64, bool) {
 		return 0, false
 	}
 	channelID, ok := ctx.Value(channelMembershipUpdateKey{}).(int64)
+	return channelID, ok && channelID > 0
+}
+
+// WithChannelRemovalUpdate marks a user-update notification as a prompt to
+// push the named channel's current membership view after a removal.
+func WithChannelRemovalUpdate(ctx context.Context, channelID int64) context.Context {
+	return context.WithValue(ctx, channelRemovalUpdateKey{}, channelID)
+}
+
+// ChannelRemovalUpdateFromContext returns the channel id carried by a removal
+// notification, if this delivery is one.
+func ChannelRemovalUpdateFromContext(ctx context.Context) (int64, bool) {
+	if ctx == nil {
+		return 0, false
+	}
+	channelID, ok := ctx.Value(channelRemovalUpdateKey{}).(int64)
 	return channelID, ok && channelID > 0
 }
 
@@ -730,6 +748,22 @@ func (l *Listener) dispatch(
 				})
 				continue
 			}
+			if strings.HasPrefix(n.Payload, channelRemovalPayloadPrefix) {
+				userID, channelID, perr := parseChannelRemovalPayload(n.Payload)
+				if perr != nil {
+					l.recordInvalidNotification()
+					l.log.Warn("bad tg_updates channel removal payload")
+					continue
+				}
+				l.recordValidNotification(ChannelUpdates)
+				l.schedule("channel-removal:"+strconv.FormatInt(userID, 10)+":"+strconv.FormatInt(channelID, 10), notificationTask{
+					ctx: WithChannelRemovalUpdate(ctx, channelID),
+					run: func(ctx context.Context) {
+						deliver(ctx, userID)
+					},
+				})
+				continue
+			}
 			if strings.HasPrefix(n.Payload, chatAdminPayloadPrefix) {
 				chatID, eventID, perr := parseChatAdminPayload(n.Payload)
 				if perr != nil {
@@ -1090,6 +1124,17 @@ func parseChannelMembershipPayload(payload string) (int64, int64, error) {
 	return userID, channelID, nil
 }
 
+func parseChannelRemovalPayload(payload string) (int64, int64, error) {
+	if !strings.HasPrefix(payload, channelRemovalPayloadPrefix) {
+		return 0, 0, errors.New("invalid channel removal payload prefix")
+	}
+	userID, channelID, err := parsePairPayload(strings.TrimPrefix(payload, channelRemovalPayloadPrefix))
+	if err != nil || userID <= 0 || channelID <= 0 {
+		return 0, 0, errors.New("invalid channel removal payload")
+	}
+	return userID, channelID, nil
+}
+
 func parseChatAdminPayload(payload string) (int64, int64, error) {
 	if !strings.HasPrefix(payload, chatAdminPayloadPrefix) {
 		return 0, 0, errors.New("invalid chat admin payload prefix")
@@ -1183,6 +1228,12 @@ func ChannelPostPayload(channelID int64) string {
 // channelID's viewer-specific membership view to userID.
 func ChannelMembershipPayload(userID, channelID int64) string {
 	return channelMembershipPayloadPrefix + pairPayload(userID, channelID)
+}
+
+// ChannelRemovalPayload formats a tg_updates notification to refresh the
+// removed user's view of channelID after membership has ended.
+func ChannelRemovalPayload(userID, channelID int64) string {
+	return channelRemovalPayloadPrefix + pairPayload(userID, channelID)
 }
 
 // ChatAdminPayload formats a tg_updates notification naming one persisted,

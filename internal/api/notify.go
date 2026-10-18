@@ -35,10 +35,13 @@ type Updater struct {
 	// channelPostSnapshotHook lets tests commit a ban and post after the delivery
 	// snapshot but before its bounded event read. Production leaves it nil.
 	channelPostSnapshotHook func()
-	recoverySlots           chan struct{}
-	recoveryWG              sync.WaitGroup
-	recoveryScanEpoch       uint64
-	recoveryScanRemaining   int
+	// channelPollVoteBeforePushHook lets tests commit a ban after poll results
+	// are prepared but before the transient push. Production leaves it nil.
+	channelPollVoteBeforePushHook func()
+	recoverySlots                 chan struct{}
+	recoveryWG                    sync.WaitGroup
+	recoveryScanEpoch             uint64
+	recoveryScanRemaining         int
 	// recoveryClaimHook pauses a claimed attempt in deterministic concurrency tests.
 	recoveryClaimHook func(*mtproto.Conn)
 }
@@ -271,6 +274,9 @@ func (u *Updater) Deliver(ctx context.Context, userID int64) {
 	if channelID, ok := store.ChannelMembershipUpdateFromContext(ctx); ok {
 		u.deliverChannelMembership(ctx, userID, channelID)
 	}
+	if channelID, ok := store.ChannelRemovalUpdateFromContext(ctx); ok {
+		u.deliverChannelRemoval(ctx, userID, channelID)
+	}
 }
 
 // DeliverNotifySettings reloads the current owner-private value before pushing
@@ -410,7 +416,8 @@ func (u *Updater) DeliverCloudDraft(ctx context.Context, ownerID int64, peer sto
 
 // DeliverChannelPollVote fans one channel-scoped poll change out to locally
 // connected members. Membership and each viewer's poll results are checked
-// again before a transient push; the channel event log and pts are untouched.
+// again immediately before a transient push; the channel event log and pts are
+// untouched.
 func (u *Updater) DeliverChannelPollVote(ctx context.Context, channelID, pollID int64) {
 	members, _, err := u.h.store.ChannelDeliverySnapshot(ctx, channelID)
 	if err != nil {
@@ -454,7 +461,32 @@ func (u *Updater) DeliverChannelPollVote(ctx context.Context, channelID, pollID 
 			})
 		}
 	}
-	u.pushTransientFanout(ctx, pushes)
+	if u.channelPollVoteBeforePushHook != nil {
+		u.channelPollVoteBeforePushHook()
+	}
+	if len(pushes) == 0 {
+		return
+	}
+
+	currentMembers, _, err := u.h.store.ChannelDeliverySnapshot(ctx, channelID)
+	if err != nil {
+		u.log.Error("recheck channel poll vote membership", "channel_id", channelID, "poll_id", pollID, "err", err)
+		return
+	}
+	now = time.Now()
+	active := make(map[int64]struct{}, len(currentMembers))
+	for _, member := range currentMembers {
+		if !member.Banned(now) {
+			active[member.UserID] = struct{}{}
+		}
+	}
+	authorizedPushes := make([]transientPush, 0, len(pushes))
+	for _, push := range pushes {
+		if _, ok := active[push.owner]; ok {
+			authorizedPushes = append(authorizedPushes, push)
+		}
+	}
+	u.pushTransientFanout(ctx, authorizedPushes)
 }
 
 // DeliverChatAdmin pushes one persisted chat-admin event to its currently
@@ -510,6 +542,17 @@ func (u *Updater) DeliverChatAdmin(ctx context.Context, chatID, eventID int64) {
 // hash. Membership is re-read so a ban or removal committed before delivery
 // suppresses the update.
 func (u *Updater) deliverChannelMembership(ctx context.Context, userID, channelID int64) {
+	u.deliverChannelView(ctx, userID, channelID, false)
+}
+
+// deliverChannelRemoval refreshes the removed user's channel peer. It re-reads
+// membership at delivery so a user re-added in the meantime gets the member
+// view instead of a forbidden one.
+func (u *Updater) deliverChannelRemoval(ctx context.Context, userID, channelID int64) {
+	u.deliverChannelView(ctx, userID, channelID, true)
+}
+
+func (u *Updater) deliverChannelView(ctx context.Context, userID, channelID int64, sendForbidden bool) {
 	conns := u.registry.Conns(userID)
 	if len(conns) == 0 {
 		return
@@ -527,11 +570,16 @@ func (u *Updater) deliverChannelMembership(ctx context.Context, userID, channelI
 		u.log.Error("deliver channel membership participant", "channel_id", channelID, "user_id", userID, "err", err)
 		return
 	}
-	if !found || member.Banned(time.Now()) {
+	isMember := found && !member.Banned(time.Now())
+	if !isMember && !sendForbidden {
 		return
 	}
-	chat, ok := u.h.channelToTL(channel, member, true, userID).(*tg.Channel)
-	if !ok {
+	chat := u.h.channelToTL(channel, member, isMember, userID)
+	if isMember {
+		if _, ok := chat.(*tg.Channel); !ok {
+			return
+		}
+	} else if _, ok := chat.(*tg.ChannelForbidden); !ok {
 		return
 	}
 	env := &tg.Updates{

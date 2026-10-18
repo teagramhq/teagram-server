@@ -15,7 +15,7 @@ ACTIVE_DOCKERFILES = (
     "Dockerfile.minio-test",
     "deploy/browser-acceptance/Dockerfile",
     "deploy/link-edge/Dockerfile",
-    "deploy/telegramd/mixed-trust-probe.Dockerfile",
+    "deploy/teagramd/mixed-trust-probe.Dockerfile",
     "test/e2e/real_server_fixture/Dockerfile",
 )
 ACTIVE_IMAGE_CONFIGS = (
@@ -26,17 +26,17 @@ ACTIVE_IMAGE_CONFIGS = (
     "deploy/browser-acceptance/compose.yaml",
     "deploy/link-edge/compose.yaml",
     "deploy/link-edge/control-compose.yaml",
-    "deploy/telegramd/rollout-runner/schema-gate-ci-compose.yml",
+    "deploy/teagramd/rollout-runner/schema-gate-ci-compose.yml",
 )
 ACTIVE_PULL_SCRIPTS = (
     ".github/workflows/ci.yml",
     ".github/scripts/run-busybox-phase-check.sh",
     ".github/scripts/smoke-mixed-trust-compose.sh",
-    "deploy/telegramd/rollout-runner/README.md",
-    "deploy/telegramd/rollout-runner/qualify-rustfs-transition.py",
-    "deploy/telegramd/rollout-runner/test-rustfs-schema-postgres.sh",
-    "deploy/telegramd/rollout-runner/test-isolated-restore-postgres.sh",
-    "deploy/telegramd/rollout-runner/test-stack-move-runner.sh",
+    "deploy/teagramd/rollout-runner/README.md",
+    "deploy/teagramd/rollout-runner/qualify-rustfs-transition.py",
+    "deploy/teagramd/rollout-runner/test-rustfs-schema-postgres.sh",
+    "deploy/teagramd/rollout-runner/test-isolated-restore-postgres.sh",
+    "deploy/teagramd/rollout-runner/test-stack-move-runner.sh",
     "test/e2e/real_server_fixture/start.sh",
 )
 DIRECT_HUB_IMAGE = re.compile(
