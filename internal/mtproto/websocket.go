@@ -435,6 +435,21 @@ func (l *webSocketListener) wait(ctx context.Context) bool {
 // detection, while this endpoint performs the HTTP upgrade and then enters the
 // same per-connection MTProto path.
 func (s *Server) ServeWebSocket(ctx context.Context, l net.Listener) error {
+	return s.serveWebSocket(ctx, l, s.handler, s.webSocketOriginPatterns)
+}
+
+// ServeWebSocketWithHandler serves MTProto over WebSocket with a handler and
+// browser-origin policy selected by the listener owner. The handler is fixed
+// for every connection accepted on this listener and cannot be selected by a
+// request.
+func (s *Server) ServeWebSocketWithHandler(ctx context.Context, l net.Listener, handler Handler, originPatterns []string) error {
+	if handler == nil {
+		return errors.New("WebSocket handler is required")
+	}
+	return s.serveWebSocket(ctx, l, handler, append([]string(nil), originPatterns...))
+}
+
+func (s *Server) serveWebSocket(ctx context.Context, l net.Listener, handler Handler, originPatterns []string) error {
 	s.shutdown.startServing()
 	defer s.shutdown.finishServing()
 	server := &http.Server{
@@ -443,7 +458,7 @@ func (s *Server) ServeWebSocket(ctx context.Context, l net.Listener) error {
 				state.socket.handlerStarted.Store(true)
 				defer state.socket.handlerDone()
 			}
-			s.handleWebSocket(w, r)
+			s.handleWebSocket(w, r, handler, originPatterns)
 		}),
 		// The accepted connection already carries an absolute deadline that
 		// covers address establishment, HTTP parsing, upgrade and codec
@@ -532,7 +547,7 @@ func (s *Server) SetWebSocketOriginPatterns(patterns []string) {
 	s.webSocketOriginPatterns = append([]string(nil), patterns...)
 }
 
-func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
+func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request, handler Handler, originPatterns []string) {
 	state, ok := r.Context().Value(webSocketConnKey{}).(*webSocketConnState)
 	if !ok {
 		http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
@@ -546,7 +561,7 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
-	if !webSocketOriginAllowed(r, s.webSocketOriginPatterns) {
+	if !webSocketOriginAllowed(r, originPatterns) {
 		http.Error(w, http.StatusText(http.StatusForbidden), http.StatusForbidden)
 		return
 	}
@@ -554,7 +569,7 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	ws, err := websocket.Accept(w, r, &websocket.AcceptOptions{
 		Subprotocols:    []string{"binary"},
 		CompressionMode: websocket.CompressionDisabled,
-		OriginPatterns:  s.webSocketOriginPatterns,
+		OriginPatterns:  originPatterns,
 	})
 	if err != nil {
 		s.logNegotiation(err)
@@ -604,9 +619,9 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	drainingConn := webSocketDrainConn{Conn: conn, socket: ws, shutdown: s.shutdown, readDeadline: stream}
-	if err := s.serveConnWithContexts(s.shutdown.requestCtx, s.shutdown.requestCtx, drainingConn, state.addr, state.slot, func() bool {
+	if err := s.serveConnWithHandlerContexts(s.shutdown.requestCtx, s.shutdown.requestCtx, drainingConn, state.addr, state.slot, func() bool {
 		return state.socket.markServing()
-	}); err != nil && !isDisconnect(err) {
+	}, handler); err != nil && !isDisconnect(err) {
 		s.logConnectionFailure(err)
 	}
 }

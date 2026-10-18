@@ -47,6 +47,12 @@ type Config struct {
 	// origins accepted by the WebSocket endpoint. Empty accepts no Origin
 	// header, while clients that send no Origin remain valid.
 	WebSocketOriginPatterns []string
+	// PublicWebSocketListenAddr enables the separate WebSocket listener for
+	// public traffic. Empty disables the endpoint.
+	PublicWebSocketListenAddr string
+	// PublicWebSocketOriginPatterns is the independent browser-origin allowlist
+	// for the public WebSocket endpoint.
+	PublicWebSocketOriginPatterns []string
 	// AdminListenAddr is the address the admin HTTP server binds to.
 	// Empty disables the admin server entirely.
 	AdminListenAddr string
@@ -69,6 +75,10 @@ type Config struct {
 	ExpectedRSAFingerprint *int64
 	// RegistrationMode controls whether auth.signUp is available.
 	RegistrationMode RegistrationMode
+	// PublicRegistrationMode controls auth.signUp on the public WebSocket
+	// listener. It defaults to closed so enabling that listener alone cannot
+	// open registration.
+	PublicRegistrationMode RegistrationMode
 	// AuthKeyEncKey is the 32-byte master key that encrypts auth keys at rest.
 	//
 	// Changing it is a total re-auth event: no stored auth key opens under a new
@@ -727,25 +737,31 @@ func Load(log *slog.Logger) (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
-	originPatterns, err := parseWebSocketOriginPatterns(os.Getenv("TG_WEBSOCKET_ALLOWED_ORIGINS"))
+	originPatterns, err := parseWebSocketOriginPatterns(os.Getenv("TG_WEBSOCKET_ALLOWED_ORIGINS"), "TG_WEBSOCKET_ALLOWED_ORIGINS")
+	if err != nil {
+		return Config{}, err
+	}
+	publicOriginPatterns, err := parseWebSocketOriginPatterns(os.Getenv("TG_PUBLIC_WEBSOCKET_ALLOWED_ORIGINS"), "TG_PUBLIC_WEBSOCKET_ALLOWED_ORIGINS")
 	if err != nil {
 		return Config{}, err
 	}
 	cfg := Config{
-		ListenAddr:              identity.ListenAddr,
-		WebSocketListenAddr:     os.Getenv("TG_WEBSOCKET_LISTEN_ADDR"),
-		WebSocketOriginPatterns: originPatterns,
-		AdminListenAddr:         os.Getenv("TG_ADMIN_LISTEN_ADDR"),
-		AdminOrigin:             os.Getenv("TG_ADMIN_ORIGIN"),
-		ReplicaID:               os.Getenv("TG_REPLICA_ID"),
-		ReplicaCount:            1,
-		PostgresDSN:             os.Getenv("TG_POSTGRES_DSN"),
-		PostgresPool:            store.PoolConfig{MaxConns: 8, MinConns: 2, MaxConnIdleTime: 5 * time.Minute},
-		RSAKeyPath:              identity.RSAKeyPath,
-		AdvertiseHost:           identity.AdvertiseHost,
-		AdvertisePort:           identity.AdvertisePort,
-		DCID:                    identity.DCID,
-		BlobDir:                 envOr("TG_BLOB_DIR", "blobs"),
+		ListenAddr:                    identity.ListenAddr,
+		WebSocketListenAddr:           os.Getenv("TG_WEBSOCKET_LISTEN_ADDR"),
+		WebSocketOriginPatterns:       originPatterns,
+		PublicWebSocketListenAddr:     os.Getenv("TG_PUBLIC_WEBSOCKET_LISTEN_ADDR"),
+		PublicWebSocketOriginPatterns: publicOriginPatterns,
+		AdminListenAddr:               os.Getenv("TG_ADMIN_LISTEN_ADDR"),
+		AdminOrigin:                   os.Getenv("TG_ADMIN_ORIGIN"),
+		ReplicaID:                     os.Getenv("TG_REPLICA_ID"),
+		ReplicaCount:                  1,
+		PostgresDSN:                   os.Getenv("TG_POSTGRES_DSN"),
+		PostgresPool:                  store.PoolConfig{MaxConns: 8, MinConns: 2, MaxConnIdleTime: 5 * time.Minute},
+		RSAKeyPath:                    identity.RSAKeyPath,
+		AdvertiseHost:                 identity.AdvertiseHost,
+		AdvertisePort:                 identity.AdvertisePort,
+		DCID:                          identity.DCID,
+		BlobDir:                       envOr("TG_BLOB_DIR", "blobs"),
 
 		MaxFileBytes:        100 << 20,
 		MaxUserStorageBytes: 2 << 30,
@@ -997,6 +1013,9 @@ func Load(log *slog.Logger) (Config, error) {
 	}
 	// TG_REGISTRATION resolves the registration mode.
 	cfg.RegistrationMode = registrationMode(os.Getenv("TG_REGISTRATION"))
+	// TG_PUBLIC_REGISTRATION defaults closed independently from the tailnet
+	// listeners so enabling the public endpoint cannot inherit an open policy.
+	cfg.PublicRegistrationMode = registrationMode(os.Getenv("TG_PUBLIC_REGISTRATION"))
 	// Zero or unset disables enforcement for a surface; the numbers and why they
 	// are those numbers are on DefaultRateLimits.
 	cfg.RateLimits = DefaultRateLimits()
@@ -1849,13 +1868,13 @@ func parsePrefixes(raw string) ([]netip.Prefix, error) {
 // allowlist. Empty entries are ignored so an unset variable and a trailing
 // comma have the same fail-closed meaning: no cross-origin browser request is
 // accepted.
-func parseWebSocketOriginPatterns(raw string) ([]string, error) {
+func parseWebSocketOriginPatterns(raw, name string) ([]string, error) {
 	var patterns []string
 	for entry := range strings.SplitSeq(raw, ",") {
 		entry = strings.TrimSpace(entry)
 		if entry != "" {
 			if _, err := path.Match(entry, ""); err != nil {
-				return nil, fmt.Errorf("TG_WEBSOCKET_ALLOWED_ORIGINS entry %q is malformed: %w", entry, err)
+				return nil, fmt.Errorf("%s entry %q is malformed: %w", name, entry, err)
 			}
 			patterns = append(patterns, entry)
 		}
@@ -2281,9 +2300,16 @@ func registrationMode(raw string) RegistrationMode {
 // recognized values. It is called after Load to fail the start when an
 // operator names a mode this build does not implement.
 func (c Config) ValidateRegistrationMode() error {
-	switch c.RegistrationMode {
+	if err := validateRegistrationMode("TG_REGISTRATION", c.RegistrationMode); err != nil {
+		return err
+	}
+	return validateRegistrationMode("TG_PUBLIC_REGISTRATION", c.PublicRegistrationMode)
+}
+
+func validateRegistrationMode(name string, mode RegistrationMode) error {
+	switch mode {
 	case RegistrationClosed, RegistrationInvite, RegistrationOpen:
 		return nil
 	}
-	return fmt.Errorf("TG_REGISTRATION must be unset, %q, %q, or %q; got %q", RegistrationClosed, RegistrationInvite, RegistrationOpen, c.RegistrationMode)
+	return fmt.Errorf("%s must be unset, %q, %q, or %q; got %q", name, RegistrationClosed, RegistrationInvite, RegistrationOpen, mode)
 }

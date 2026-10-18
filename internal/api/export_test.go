@@ -65,6 +65,19 @@ func SignInForTestWithLimits(s *store.Store, authKeyID [8]byte, addr netip.Addr,
 	return SignInForTestWithLimitsAndLogger(s, authKeyID, addr, rateLimit, req, slog.New(slog.DiscardHandler))
 }
 
+// SignInForTestWithRegistrationMode invokes the normal sign-in handler with a
+// configured registration mode, matching a handler attached to one listener.
+func SignInForTestWithRegistrationMode(s *store.Store, authKeyID [8]byte, addr netip.Addr, rateLimit store.RateLimitConfig, registrationMode config.RegistrationMode, req *tg.AuthSignInRequest) (bin.Encoder, error) {
+	var buf bin.Buffer
+	if err := req.Encode(&buf); err != nil {
+		return nil, err
+	}
+	h := testHandlers(s)
+	h.rateLimitSignInFailIP = rateLimit
+	h.registrationMode = registrationMode
+	return h.handleSignIn(nil, &mtproto.Request{Ctx: context.Background(), AuthKeyID: authKeyID, ClientAddr: addr, Buf: &buf})
+}
+
 // SignInForTestWithLimitsAndLogger invokes handleSignIn with a caller-supplied
 // logger so refusal tests can assert that rejected credentials are not logged.
 func SignInForTestWithLimitsAndLogger(s *store.Store, authKeyID [8]byte, addr netip.Addr, rateLimit store.RateLimitConfig, req *tg.AuthSignInRequest, log *slog.Logger) (bin.Encoder, error) {

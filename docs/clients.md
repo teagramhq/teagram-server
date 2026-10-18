@@ -23,8 +23,10 @@ Configuration is read from environment variables in `internal/config/config.go`:
 |---------------------|------------------|---------------------------------------------|
 | `TG_LISTEN_ADDR`    | `:2443`          | `host:port` (or `:port`) the server binds   |
 | `TG_WEBSOCKET_LISTEN_ADDR` | *(unset)* | Enables the WebSocket MTProto listener on this address; browser clients connect to `/apiws` |
+| `TG_PUBLIC_WEBSOCKET_LISTEN_ADDR` | *(unset)* | Enables the separate WebSocket MTProto listener for public traffic; use an address such as `:2446` and expose it only through the intended public proxy |
 | `TG_RPC_DEADLINE` | `23s` | Per-request timeout; overrides must be positive and no greater than `45s`. `0s` and values above `45s`, including the former `90s` setting, fail startup so admitted requests fit the fixed shutdown drain |
 | `TG_WEBSOCKET_ALLOWED_ORIGINS` | *(unset)* | Comma-separated browser origins allowed to connect to `/apiws`; unset rejects every request carrying an `Origin` header |
+| `TG_PUBLIC_WEBSOCKET_ALLOWED_ORIGINS` | *(unset)* | Comma-separated origins allowed on the public WebSocket listener; set `https://web.teagram.io` for the public web client, and add the demo origin only when it is deployed |
 | `TG_ADVERTISE_ADDR` | *(derived from `TG_LISTEN_ADDR`)* | `host:port` clients are told to dial, used verbatim. Derived when unset: the listen address with an empty or wildcard host (`:2443`, `0.0.0.0`, `::`) replaced by `127.0.0.1`. A value that is not `host:port`, has no host, or has a port that is not an integer in 1–65535 fails startup |
 | `TG_PUBLIC_LINK_PREFIX` | *(required)* | Lowercase HTTPS origin for client and invite links, with a root path and no port (e.g. `https://links.example.test/`) |
 | `TG_POSTGRES_DSN`   | *(required)*     | Postgres connection string; no default, server fails to start without it |
@@ -53,6 +55,7 @@ Configuration is read from environment variables in `internal/config/config.go`:
 | `TG_RATE_LIMIT_DISCOVERY_IP_WINDOW` | `1m` | Fixed window for the per-network discovery bound; it must be positive while that bound is enabled |
 | `TG_LOG_LOGIN_CODES`| `false`          | Legacy login-code diagnostic. It is not used by Teagram username/password sign-in; leave it disabled. A non-boolean value fails startup |
 | `TG_REGISTRATION`   | `closed`         | Accepted values are `closed`, `invite`, and `open`. `closed` rejects `auth.signUp`, `invite` requires an operator-issued invite, and `open` admits usernames without one. An unrecognized value fails startup. Sign-in for accounts that already exist is unaffected by this setting |
+| `TG_PUBLIC_REGISTRATION` | `closed` | Registration mode for the public WebSocket listener only. Defaults to `closed` even when `TG_REGISTRATION=open`; use `invite` to require an operator-issued invite |
 | `TG_ADMIN_LISTEN_ADDR` | *(unset)* | Enables the separate authenticated admin HTTP listener; must be set with `TG_ADMIN_TOKEN_HASH` and should remain on an operator-only network |
 | `TG_ADMIN_TOKEN_HASH` | *(unset)* | Lowercase SHA-256 hex digest of the raw admin token; never put the raw token in configuration or a URL. See `docs/observability.md` |
 | `TG_ADMIN_ORIGIN` | *(unset)* | Fixed origin for admin login/logout behind a proxy; canonical lowercase ASCII HTTPS origin, or HTTP only for localhost/loopback. Unset, empty, or whitespace-only derives it from the listener. See `docs/observability.md` |
@@ -76,12 +79,19 @@ When `TG_WEBSOCKET_LISTEN_ADDR` is set, configure
 requests carrying one are rejected unless it matches the configured list.
 Keep this listener within the intended network boundary.
 
+The public WebSocket listener has its own address, registration mode, and
+origin allowlist. Its registration mode is bound to the listener in the server;
+client headers and RPC fields cannot select the tailnet policy. `help.getAppConfig`
+reports the mode of the listener that accepted the connection. Existing
+accounts can sign in through either listener.
+
 Before asking for registration details, an unauthenticated client may call
 `help.getAppConfig`. The `help.appConfig` response keeps its standard TL shape;
 its JSON object contains a `registration_mode` string with one of `closed`,
-`invite`, or `open`. The value is the running server configuration, and the
-field is an extension to the JSON object, so clients that do not read it can
-continue to ignore it. This call is also available to provisional sessions.
+`invite`, or `open`. Its value is the policy configured for the listener that
+accepted the connection. The field is an extension to the JSON object, so
+clients that do not read it can continue to ignore it. This call is also
+available to provisional sessions.
 
 ### Static enrollment discovery and local preflight
 
@@ -367,10 +377,12 @@ step. Leave it disabled for Teagram clients.
 
 ### 5a. Registration policy
 
-Account creation through `auth.signUp` is controlled by `TG_REGISTRATION`.
-`closed` (the default) rejects new sign-ups. `invite` requires an
-operator-issued registration invite. `open` allows a username without an
-invite. Existing accounts can sign in in every mode.
+The regular MTProto and WebSocket listeners use `TG_REGISTRATION` for
+`auth.signUp`: `closed` (the default) rejects new sign-ups, `invite` requires an
+operator-issued registration invite, and `open` allows a username without an
+invite. The separately configured public WebSocket listener uses
+`TG_PUBLIC_REGISTRATION`, which defaults to `closed` independently of the
+tailnet policy. Existing accounts can sign in in every mode.
 
 Before a client asks a user to register, it can call `help.getAppConfig` and
 read `registration_mode` to learn whether sign-up is closed, invite-only, or

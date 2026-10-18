@@ -167,7 +167,7 @@ func (s *Server) admitRPC(ctx context.Context) (*rpcAdmission, bool) {
 // beforeDispatch runs after the frame's MAC verifies but before any response or
 // handler side effect. The serving loop uses it to reserve the unbound-key hold
 // before auth.signIn can mark the connection pending.
-func (s *Server) rpcHandle(ctx context.Context, c *Conn, b *bin.Buffer, userID int64, provisional bool, clientAddr netip.Addr, slot *preAuthSlot, beforeDispatch func() error) error {
+func (s *Server) rpcHandle(ctx context.Context, c *Conn, b *bin.Buffer, userID int64, provisional bool, clientAddr netip.Addr, slot *preAuthSlot, handler Handler, beforeDispatch func() error) error {
 	m := &crypto.EncryptedMessage{}
 	if err := m.DecodeWithoutCopy(b); err != nil {
 		return fmt.Errorf("decode encrypted message: %w", err)
@@ -209,7 +209,7 @@ func (s *Server) rpcHandle(ctx context.Context, c *Conn, b *bin.Buffer, userID i
 	b.ResetTo(msg.Data())
 	c.prefetchPeerFrame()
 
-	return s.handle(c, &Request{
+	return s.handleWithHandler(c, &Request{
 		AuthKeyID:   c.authKey.ID,
 		UserID:      userID,
 		Provisional: provisional,
@@ -219,7 +219,7 @@ func (s *Server) rpcHandle(ctx context.Context, c *Conn, b *bin.Buffer, userID i
 		seqNo:       int(msg.SeqNo),
 		Buf:         b,
 		Ctx:         ctx,
-	})
+	}, handler)
 }
 
 func pingDelayDisconnectReadTimeout(disconnectDelay int, fallback time.Duration) time.Duration {
@@ -240,6 +240,10 @@ func pingDelayDisconnectReadTimeout(disconnectDelay int, fallback time.Duration)
 // directly, containers and gzip are unwrapped, and everything else is passed to
 // the RPC handler. Mirrors gotd tgtest/handle.go.
 func (s *Server) handle(c *Conn, req *Request) (err error) {
+	return s.handleWithHandler(c, req, s.handler)
+}
+
+func (s *Server) handleWithHandler(c *Conn, req *Request, handler Handler) (err error) {
 	if c != nil {
 		req.AuthorizationMetadata = c.AuthorizationMetadata()
 	}
@@ -364,7 +368,7 @@ func (s *Server) handle(c *Conn, req *Request) (err error) {
 		}
 		for i := range container.Messages {
 			m := container.Messages[i]
-			if err := s.handle(c, &Request{
+			if err := s.handleWithHandler(c, &Request{
 				AuthKeyID:             req.AuthKeyID,
 				UserID:                req.UserID,
 				Provisional:           req.Provisional,
@@ -377,7 +381,7 @@ func (s *Server) handle(c *Conn, req *Request) (err error) {
 				Ctx:                   req.Ctx,
 				admission:             admission,
 				ackQueued:             true,
-			}); err != nil {
+			}, handler); err != nil {
 				return err
 			}
 		}
@@ -422,18 +426,21 @@ func (s *Server) handle(c *Conn, req *Request) (err error) {
 	req.CompletionCtx = admission.ctx
 
 	if s.rpcTracer == nil || !s.rpcTracer.Enabled() {
-		return s.dispatchRPC(c, req)
+		return s.dispatchRPC(c, req, handler)
 	}
 	span, restore := s.rpcTracer.traceRequest(req)
 	defer restore()
 	defer func() {
 		s.rpcTracer.Finish(span, requestRPCMethod(req), requestRPCResult(req, err))
 	}()
-	return s.dispatchRPC(c, req)
+	return s.dispatchRPC(c, req, handler)
 }
 
-func (s *Server) dispatchRPC(c *Conn, req *Request) error {
-	if err := s.handler.OnMessage(c, req); err != nil {
+func (s *Server) dispatchRPC(c *Conn, req *Request, handler Handler) error {
+	if handler == nil {
+		handler = s.handler
+	}
+	if err := handler.OnMessage(c, req); err != nil {
 		if errors.Is(req.Ctx.Err(), context.Canceled) {
 			return req.Ctx.Err()
 		}

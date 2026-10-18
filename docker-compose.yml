@@ -219,6 +219,11 @@ services:
       # while creating the first account through auth.signUp, then change it
       # back to closed before exposing the stack.
       TG_REGISTRATION: ${TG_REGISTRATION:-closed}
+      # The separately bound public WebSocket endpoint is disabled by default
+      # and keeps sign-up closed unless its own policy is configured.
+      TG_PUBLIC_WEBSOCKET_LISTEN_ADDR: ${TG_PUBLIC_WEBSOCKET_LISTEN_ADDR:-}
+      TG_PUBLIC_REGISTRATION: ${TG_PUBLIC_REGISTRATION:-closed}
+      TG_PUBLIC_WEBSOCKET_ALLOWED_ORIGINS: ${TG_PUBLIC_WEBSOCKET_ALLOWED_ORIGINS:-}
       TG_REPLICA_ID: ${TG_REPLICA_ID:-}
       # Keep the Compose deployment count aligned across the legacy listener
       # and any explicitly enabled replacement replicas. The default remains

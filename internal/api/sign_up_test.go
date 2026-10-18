@@ -345,6 +345,59 @@ func TestSignUpRegistrationModes(t *testing.T) {
 	}
 }
 
+func TestInviteOnlyAllowsTheIssuedUsername(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	s, dsn := openStoreDSN(t)
+
+	const invitedHandle = "invite_target"
+	const otherHandle = "other_target"
+	_, secret, err := s.IssueInvite(ctx, invitedHandle)
+	if err != nil {
+		t.Fatal(err)
+	}
+	invitedHash, _, err := s.IssueCodeForUsername(ctx, invitedHandle)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SetCodeForUsername(ctx, invitedHandle, invitedHash, secret); err != nil {
+		t.Fatal(err)
+	}
+	otherHash, _, err := s.IssueCodeForUsername(ctx, otherHandle)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SetCodeForUsername(ctx, otherHandle, otherHash, secret); err != nil {
+		t.Fatal(err)
+	}
+	for _, keyID := range []int64{1, 2} {
+		if err := s.SaveAuthKey(ctx, keyID, make([]byte, 256)); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	before := countUsers(t, dsn)
+	_, err = api.SignUpForTest(s, [8]byte{1}, netip.MustParseAddr("10.0.0.71"), store.RateLimitConfig{}, config.RegistrationInvite, &tg.AuthSignUpRequest{
+		PhoneNumber: otherHandle, PhoneCodeHash: otherHash, FirstName: "Other",
+	})
+	if got := signUpRPCMessage(err); got != "INVITE_HASH_INVALID" {
+		t.Fatalf("signUp for uninvited username: got %q, want INVITE_HASH_INVALID (err %v)", got, err)
+	}
+	if after := countUsers(t, dsn); after != before {
+		t.Fatalf("wrong-username signUp changed users from %d to %d", before, after)
+	}
+
+	res, err := api.SignUpForTest(s, [8]byte{2}, netip.MustParseAddr("10.0.0.72"), store.RateLimitConfig{}, config.RegistrationInvite, &tg.AuthSignUpRequest{
+		PhoneNumber: invitedHandle, PhoneCodeHash: invitedHash, FirstName: "Invited",
+	})
+	if err != nil {
+		t.Fatalf("signUp for invited username: %v", err)
+	}
+	if _, ok := res.(*tg.AuthAuthorization); !ok {
+		t.Fatalf("signUp result = %T, want *tg.AuthAuthorization", res)
+	}
+}
+
 func TestSignUpRejectsOverlongOrNulDisplayNames(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
