@@ -52,7 +52,13 @@ EXTERNAL_REGISTRIES = (
     "ghcr.io/",
     "mcr.microsoft.com/",
     "mirror.gcr.io/",
+    "public.ecr.aws/",
     "quay.io/",
+)
+RUSTFS_QUALIFICATION_PULL_SCRIPTS = (
+    "deploy/telegramd/rollout-runner/test-rustfs-schema-postgres.sh",
+    "deploy/telegramd/rollout-runner/test-isolated-restore-postgres.sh",
+    "deploy/telegramd/rollout-runner/test-stack-move-runner.sh",
 )
 
 
@@ -113,6 +119,30 @@ class DockerImageMirrorTests(unittest.TestCase):
                     self.fail(
                         f"{relative_path} pulls {match.group(0)} directly from Docker Hub"
                     )
+
+    def test_rustfs_qualification_pulls_avoid_docker_hub(self) -> None:
+        for relative_path in RUSTFS_QUALIFICATION_PULL_SCRIPTS:
+            with self.subTest(path=relative_path):
+                content = (ROOT / relative_path).read_text(encoding="utf-8")
+                self.assertNotIn(
+                    "docker.io/",
+                    content,
+                    f"{relative_path} pulls directly from Docker Hub",
+                )
+                self.assertNotIn(
+                    "mirror.gcr.io/",
+                    content,
+                    f"{relative_path} pulls from the Docker Hub mirror",
+                )
+
+        workflow = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
+        job = re.search(
+            r"(?ms)^  rustfs-transition-qualification:\n(.*?)(?=^  [a-z0-9-]+:|\Z)",
+            workflow,
+        )
+        self.assertIsNotNone(job, "RustFS qualification job is missing")
+        self.assertIn("uses: ariga/setup-atlas@v0.3", job.group(1))
+        self.assertIn("version: v1.2.0", job.group(1))
 
     def test_pinned_images_keep_their_digests(self) -> None:
         workflow = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")

@@ -3,8 +3,8 @@ set -Eeuo pipefail
 umask 077
 
 SCRIPT_DIR=$(cd -P "$(dirname "${BASH_SOURCE[0]}")" && pwd)
-SOURCE_POSTGRES_IMAGE=mirror.gcr.io/library/postgres:16-alpine
-RESTORE_POSTGRES_IMAGE=mirror.gcr.io/library/postgres:18-alpine
+SOURCE_POSTGRES_IMAGE=public.ecr.aws/docker/library/postgres:16-alpine
+RESTORE_POSTGRES_IMAGE=public.ecr.aws/docker/library/postgres:18-alpine
 TEST_ROLE_PASSWORD=$(openssl rand -hex 24)
 ROLE_SQL="CREATE ROLE browser_acceptance_probe LOGIN PASSWORD '$TEST_ROLE_PASSWORD' NOSUPERUSER NOCREATEDB NOCREATEROLE INHERIT NOREPLICATION NOBYPASSRLS"
 TMP=$(mktemp -d "${TMPDIR:-/tmp}/isolated-restore-postgres.XXXXXXXX")
