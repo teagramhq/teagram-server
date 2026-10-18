@@ -135,7 +135,7 @@ sudo env TOOL_SHA="$TOOL_SHA" bash -c '
   set -eu
   umask 077
   [[ "$TOOL_SHA" =~ ^[0-9a-f]{40}$ ]]
-  for name in rollout-runner.sh rollout-verifier.sh schema-result-gate.sh schema-result-gate.py blob-mode-state.py stack-move-runner.py; do
+  for name in rollout-runner.sh rollout-verifier.sh schema-result-gate.sh schema-result-gate.py blob-mode-state.py qualify-rustfs-transition.py stack-move-runner.py; do
     git -C /opt/teagram show \
       "$TOOL_SHA:deploy/teagramd/rollout-runner/$name" \
       > "/root/teagramd-rollout-runner/$name"
@@ -164,7 +164,7 @@ backup or publication. The runner records the runtime source revision and
 artifact SHA-256 in the private `runtime-pins.txt` evidence file. It rejects
 extra Compose files, a missing override, an unpinned artifact, missing required
 PostgreSQL/public-origin inputs, or any source commit that is not reviewed on
-`origin/main` before capturing the live stack. The runner verifies its six
+`origin/main` before capturing the live stack. The runner verifies its seven
 root-only runtime files against `TOOL_SHA`, then advances the application
 checkout only to `TARGET_SHA`; later application commits and migrations remain
 outside this rollout.
@@ -205,7 +205,7 @@ The pinned Compose artifact is
 Keep `TARGET_SHA` fixed even if the separately reviewed runner and artifact
 land in a later source commit. `TOOL_SHA` must be that reviewed full source
 commit, reachable from `origin/main` and descending from `TARGET_SHA`. The
-expected baseline is the live checkout head. Stage the six root-only runner
+expected baseline is the live checkout head. Stage the seven root-only runner
 files and the target-specific artifact from `TOOL_SHA`; the runner verifies
 their bytes against that source revision. The Compose selection must contain
 only the pinned artifact followed by the existing override. The runner rejects
@@ -242,7 +242,7 @@ to the captured baseline keep their existing paths.
 Keep `TARGET_SHA` fixed even though this tool and artifact land after the
 application target. `TOOL_SHA` is the full reviewed source commit, reachable
 from `origin/main` and descending from `TARGET_SHA`. Confirm the expected
-baseline before staging the six root-only runner files and target artifact:
+baseline before staging the seven root-only runner files and target artifact:
 
 ```sh
 TARGET_SHA=598359e900130c307dd84022b0077fd3276f6f36
@@ -263,7 +263,7 @@ sudo env TOOL_SHA="$TOOL_SHA" bash -c '
   set -eu
   umask 077
   [[ "$TOOL_SHA" =~ ^[0-9a-f]{40}$ ]]
-  for name in rollout-runner.sh rollout-verifier.sh schema-result-gate.sh schema-result-gate.py blob-mode-state.py stack-move-runner.py; do
+  for name in rollout-runner.sh rollout-verifier.sh schema-result-gate.sh schema-result-gate.py blob-mode-state.py qualify-rustfs-transition.py stack-move-runner.py; do
     git -C /opt/teagram show \
       "$TOOL_SHA:deploy/teagramd/rollout-runner/$name" \
       > "/root/teagramd-rollout-runner/$name"
@@ -312,7 +312,7 @@ inspect or rotate them. MAIN-1332 reuses those existing files.
 Keep `TARGET_SHA` fixed even though the reviewed runner and artifact land in a
 later source revision. `TOOL_SHA` is the full reviewed source commit reachable
 from `origin/main` and descending from the application target. Confirm the
-expected live baseline before staging the six runtime files and artifact:
+expected live baseline before staging the seven runtime files and artifact:
 
 ```sh
 TARGET_SHA=df9ffe538defd4b99bd9edb2405caacddd1aa1f6
@@ -333,7 +333,7 @@ sudo env TOOL_SHA="$TOOL_SHA" bash -c '
   set -eu
   umask 077
   [[ "$TOOL_SHA" =~ ^[0-9a-f]{40}$ ]]
-  for name in rollout-runner.sh rollout-verifier.sh schema-result-gate.sh schema-result-gate.py blob-mode-state.py stack-move-runner.py; do
+  for name in rollout-runner.sh rollout-verifier.sh schema-result-gate.sh schema-result-gate.py blob-mode-state.py qualify-rustfs-transition.py stack-move-runner.py; do
     git -C /opt/teagram show \
       "$TOOL_SHA:deploy/teagramd/rollout-runner/$name" \
       > "/root/teagramd-rollout-runner/$name"
@@ -388,7 +388,7 @@ sudo mkdir -m 700 -p /root/teagramd-rollout-runner
 sudo env TOOL_SHA="$TOOL_SHA" bash -c '
   set -eu
   umask 077
-  for name in rollout-runner.sh rollout-verifier.sh schema-result-gate.sh schema-result-gate.py blob-mode-state.py stack-move-runner.py; do
+  for name in rollout-runner.sh rollout-verifier.sh schema-result-gate.sh schema-result-gate.py blob-mode-state.py qualify-rustfs-transition.py stack-move-runner.py; do
     git -C /opt/teagram show \
       "$TOOL_SHA:deploy/teagramd/rollout-runner/$name" \
       > "/root/teagramd-rollout-runner/$name"
@@ -450,7 +450,7 @@ sudo env TOOL_SHA="$TOOL_SHA" bash -c '
   set -eu
   umask 077
   [[ "$TOOL_SHA" =~ ^[0-9a-f]{40}$ ]]
-  for name in rollout-runner.sh rollout-verifier.sh schema-result-gate.sh schema-result-gate.py blob-mode-state.py stack-move-runner.py; do
+  for name in rollout-runner.sh rollout-verifier.sh schema-result-gate.sh schema-result-gate.py blob-mode-state.py qualify-rustfs-transition.py stack-move-runner.py; do
     git -C /opt/teagram show \
       "$TOOL_SHA:deploy/teagramd/rollout-runner/$name" \
       > "/root/teagramd-rollout-runner/$name"
@@ -501,7 +501,7 @@ COMPOSE_FILE=$LIVE_COMPOSE_FILES
 sudo env TOOL_SHA="$TOOL_SHA" bash -c '
   set -eu
   umask 077
-  for name in rollout-runner.sh rollout-verifier.sh schema-result-gate.sh schema-result-gate.py blob-mode-state.py stack-move-runner.py; do
+  for name in rollout-runner.sh rollout-verifier.sh schema-result-gate.sh schema-result-gate.py blob-mode-state.py qualify-rustfs-transition.py stack-move-runner.py; do
     git -C /opt/teagram show \
       "$TOOL_SHA:deploy/teagramd/rollout-runner/$name" \
       > "/root/teagramd-rollout-runner/$name"
