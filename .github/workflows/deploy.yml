@@ -4,8 +4,8 @@ run-name: ${{ inputs.issue && format('{0} [{1}]', github.workflow, inputs.issue)
 
 # Deploys the exact commit whose CI passed on a push to main to the
 # teagram-server LXC. The job never checks out code: the ssh command is that
-# commit's SHA, and the key's forced command on the host runs the commit's own
-# deploy/teagram/deploy-main.sh with DEPLOY_SHA set to it.
+# commit's SHA, and the key's forced command runs the stable
+# deploy/telegram-server/deploy-main.sh bridge to that commit's canonical script.
 # .github/scripts/test-deploy-workflow-contract.sh guards these triggers.
 on:
   workflow_run:
