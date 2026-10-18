@@ -19,7 +19,7 @@ SOURCE_PROJECT=telegram-server
 TARGET_PROJECT=teagram
 SOURCE_VOLUMES=(telegram-server_pgdata telegram-server_tgkey telegram-server_tgblobs telegram-server_rustfsdata)
 TARGET_VOLUMES=(teagram_pgdata teagram_tgkey teagram_tgblobs teagram_rustfsdata)
-BUSYBOX_IMAGE=mirror.gcr.io/library/busybox:1.37.0
+BUSYBOX_IMAGE=mirror.gcr.io/library/busybox:1.37
 SOURCE_POSTGRES_IMAGE=mirror.gcr.io/library/postgres:16-alpine
 RUSTFS_IMAGE=mirror.gcr.io/rustfs/rustfs:1.0.1@sha256:1803faef57627e2d9c2e7d89d655d712ddded5389040054987163043fecb6a3c
 AWS_CLI_IMAGE=public.ecr.aws/aws-cli/aws-cli:2.38.1@sha256:733d5be1015825e4038c6016f3fa9954868ddee1f611b73be795a9cc2e706bfd
@@ -254,7 +254,7 @@ services:
 YAML
 
 cat > "$TARGET_DIR/teagramd.Dockerfile" <<'DOCKERFILE'
-FROM mirror.gcr.io/library/busybox:1.37.0
+FROM mirror.gcr.io/library/busybox:1.37
 ARG TELEGRAMD_SOURCE_REVISION
 LABEL org.opencontainers.image.revision="${TELEGRAMD_SOURCE_REVISION}"
 DOCKERFILE
