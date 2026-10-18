@@ -1233,10 +1233,21 @@ func TestSetTypingAcceptsServerIssuedChannelPeer(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create outsider: %v", err)
 	}
+	subscriber, err := s.CreateUser(ctx, "+15551292068")
+	if err != nil {
+		t.Fatalf("create subscriber: %v", err)
+	}
 	channel := createChannel(t, s, creator.ID, &tg.ChannelsCreateChannelRequest{
 		Broadcast: true, Title: "Typing",
 	})
 	peer := &tg.InputPeerChannel{ChannelID: channel.ID, AccessHash: channel.AccessHash}
+	invite, err := s.CreateChannelInvite(ctx, channel.ID, creator.ID)
+	if err != nil {
+		t.Fatalf("create channel invite: %v", err)
+	}
+	if _, _, err := s.JoinChannelByInvite(ctx, invite, subscriber.ID); err != nil {
+		t.Fatalf("join broadcast as subscriber: %v", err)
+	}
 
 	result, err := api.SetTypingForTest(s, creator.ID, &tg.MessagesSetTypingRequest{
 		Peer: peer, Action: &tg.SendMessageTypingAction{},
@@ -1247,6 +1258,10 @@ func TestSetTypingAcceptsServerIssuedChannelPeer(t *testing.T) {
 	if _, ok := result.(*tg.BoolTrue); !ok {
 		t.Fatalf("setTyping result = %T, want *tg.BoolTrue", result)
 	}
+	_, err = api.SetTypingForTest(s, subscriber.ID, &tg.MessagesSetTypingRequest{
+		Peer: api.InputPeerChannel(subscriber.ID, channel.ID), Action: &tg.SendMessageTypingAction{},
+	})
+	rpcError(t, err, "PEER_ID_INVALID")
 
 	_, err = api.SetTypingForTest(s, creator.ID, &tg.MessagesSetTypingRequest{
 		Peer:   &tg.InputPeerChannel{ChannelID: channel.ID, AccessHash: channel.AccessHash + 1},

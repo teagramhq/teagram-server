@@ -1313,8 +1313,20 @@ func (h *handlers) handleSetTyping(r *mtproto.Request) (bin.Encoder, error) {
 		if err != nil {
 			return nil, err
 		}
-		if _, err := h.requireChannelMember(r.Ctx, peerID, r.UserID); err != nil {
+		channel, found, err := h.store.ChannelByID(r.Ctx, peerID)
+		if err != nil {
+			h.log.Error("load typing channel", "user_id", r.UserID, "channel_id", peerID, "err", err)
+			return nil, errInternal
+		}
+		if !found {
+			return nil, errPeerIDInvalid
+		}
+		member, err := h.requireChannelMember(r.Ctx, peerID, r.UserID)
+		if err != nil {
 			return nil, err
+		}
+		if !channel.Megagroup && member.Role < channelRoleAdmin {
+			return nil, errPeerIDInvalid
 		}
 		peerType = store.PeerTypeChannel
 	default:

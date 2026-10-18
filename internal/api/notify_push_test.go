@@ -415,6 +415,43 @@ func TestTransientFanoutSkipsUnattemptedConnections(t *testing.T) {
 	}
 }
 
+func TestBroadcastTypingFanoutRequiresAdminSender(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	s := openStore(t)
+	creator, err := s.CreateUser(ctx, "+15554127401")
+	if err != nil {
+		t.Fatalf("create creator: %v", err)
+	}
+	subscriber, err := s.CreateUser(ctx, "+15554127402")
+	if err != nil {
+		t.Fatalf("create subscriber: %v", err)
+	}
+	channel, err := s.CreateChannel(ctx, creator.ID, "Typing broadcast", "", false)
+	if err != nil {
+		t.Fatalf("create broadcast: %v", err)
+	}
+	invite, err := s.CreateChannelInvite(ctx, channel.ID, creator.ID)
+	if err != nil {
+		t.Fatalf("create invite: %v", err)
+	}
+	if _, _, err := s.JoinChannelByInvite(ctx, invite, subscriber.ID); err != nil {
+		t.Fatalf("join as subscriber: %v", err)
+	}
+
+	registry := mtproto.NewSessionRegistry()
+	updater := api.NewUpdater(s, 2, registry, nil, pgtest.PeerDeriver())
+	_, creatorTransport := newConnFor(t, registry, creator.ID)
+	typingCtx := store.WithTypingEvent(ctx, store.TypingEvent{
+		PeerType: store.PeerTypeChannel,
+		PeerID:   channel.ID,
+	})
+	updater.DeliverTyping(typingCtx, channel.ID, subscriber.ID)
+	if creatorTransport.wasSent() {
+		t.Fatal("broadcast subscriber typing reached the creator")
+	}
+}
+
 func TestSaturatedTypingDoesNotStallUpdates(t *testing.T) {
 	ctx := context.Background()
 	s, dsn := openStoreDSN(t)

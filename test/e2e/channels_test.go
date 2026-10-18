@@ -1189,6 +1189,19 @@ func TestChannelsMegagroup(t *testing.T) {
 		}
 		timer.Stop()
 	}
+	assertChannelRPCError(t, ctx, bCmds, "PEER_ID_INVALID", func(ctx context.Context, c *tg.Client) error {
+		_, err := c.MessagesSetTyping(ctx, &tg.MessagesSetTypingRequest{
+			Peer: peerChannel(bUserID, broadcastID), Action: &tg.SendMessageTypingAction{},
+		})
+		return err
+	})
+	timer := time.NewTimer(75 * time.Millisecond)
+	select {
+	case update := <-collA.channelTyping:
+		t.Fatalf("broadcast creator received subscriber typing update: %+v", update)
+	case <-timer.C:
+	}
+	timer.Stop()
 	assertChannelRPCError(t, ctx, cCmds, "PEER_ID_INVALID", func(ctx context.Context, c *tg.Client) error {
 		_, err := c.MessagesSetTyping(ctx, &tg.MessagesSetTypingRequest{
 			Peer: peerChannel(cUserID, broadcastID), Action: &tg.SendMessageTypingAction{},
