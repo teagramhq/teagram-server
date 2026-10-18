@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"errors"
 	"regexp"
 	"strings"
@@ -212,7 +213,46 @@ func (h *handlers) handleSignUpWithConn(c *mtproto.Conn, r *mtproto.Request) (bi
 	if c != nil {
 		c.RecordAuthorizationBinding(user.ID)
 	}
+	h.joinWelcomeChannel(r.Ctx, user.ID)
 	return &tg.AuthAuthorization{User: h.userTL(user)}, nil
+}
+
+const welcomeChannelJoinTimeout = 3 * time.Second
+
+func (h *handlers) joinWelcomeChannel(ctx context.Context, userID int64) {
+	handle := h.welcomeChannel
+	if handle == "" {
+		h.warnWelcomeChannel(handle, "not configured")
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(ctx, welcomeChannelJoinTimeout)
+	defer cancel()
+
+	resolved, found, err := h.store.UsernameByHandle(ctx, handle)
+	if err != nil {
+		h.log.Warn("welcome channel auto-join failed", "handle", handle, "reason", "lookup failed", "err", err)
+		return
+	}
+	if !found || resolved.Kind != store.UsernameKindChannel {
+		h.warnWelcomeChannel(handle, "not a public broadcast channel")
+		return
+	}
+	channel := resolved.Channel
+	if channel.Megagroup || channel.Username == nil || *channel.Username == "" {
+		h.warnWelcomeChannel(handle, "not a public broadcast channel")
+		return
+	}
+	if _, _, err := h.store.JoinChannelByUsername(ctx, channel.ID, userID); err != nil {
+		h.log.Warn("welcome channel auto-join failed", "handle", handle, "reason", "join failed", "err", err)
+	}
+}
+
+func (h *handlers) warnWelcomeChannel(handle, reason string) {
+	if !h.welcomeChannelWarning.CompareAndSwap(false, true) {
+		return
+	}
+	h.log.Warn("welcome channel auto-join skipped", "handle", handle, "reason", reason)
 }
 
 func (h *handlers) handleSendCode(r *mtproto.Request) (bin.Encoder, error) {

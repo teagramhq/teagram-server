@@ -144,6 +144,11 @@ func (r *SignUpTestRunner) SetRegistrationModeForTest(mode config.RegistrationMo
 	r.handler.registrationMode = mode
 }
 
+// SetWelcomeChannelForTest configures the channel used after account admission.
+func (r *SignUpTestRunner) SetWelcomeChannelForTest(handle string) {
+	r.handler.welcomeChannel = handle
+}
+
 // SetAuthKeyIDForTest changes the request key without resetting sampler state.
 func (r *SignUpTestRunner) SetAuthKeyIDForTest(authKeyID [8]byte) {
 	r.authKeyID = authKeyID

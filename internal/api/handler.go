@@ -4,6 +4,7 @@ import (
 	"errors"
 	"log/slog"
 	"net/netip"
+	"sync/atomic"
 	"time"
 
 	"github.com/gotd/td/bin"
@@ -128,6 +129,9 @@ type handlers struct {
 	rateLimitDiscardEncryption store.RateLimitConfig
 	// registrationMode controls whether auth.signUp is available.
 	registrationMode config.RegistrationMode
+	// welcomeChannel is the operator-configured public broadcast channel new users may join.
+	welcomeChannel        string
+	welcomeChannelWarning atomic.Bool
 	// Sign-up rejection records are sampled independently by fixed reason class.
 	signUpRejectionLogs signUpRejectionSampler
 	// dialogFilterSync coordinates connection-local folder recovery with the
@@ -218,13 +222,23 @@ func NewWithPhotoThumbsAndDialogFilterSync(s *store.Store, dcID int, cfg *tg.Con
 	return NewWithPhotoThumbsAndDialogFilterSyncAndUploadPartTTL(
 		s, dcID, cfg, log, logLoginCodes, maxFileBytes, blobs, maxUserStorageBytes,
 		peers, photos, rateLimits, registrationMode, dialogFilterSync, photoThumbs,
-		config.DefaultUploadPartTTL, rateLimitMetrics...,
+		config.DefaultUploadPartTTL, "", rateLimitMetrics...,
+	)
+}
+
+// NewWithPhotoThumbsAndDialogFilterSyncAndWelcomeChannel builds an RPC handler
+// with the configured public broadcast channel for newly admitted accounts.
+func NewWithPhotoThumbsAndDialogFilterSyncAndWelcomeChannel(s *store.Store, dcID int, cfg *tg.Config, log *slog.Logger, logLoginCodes bool, maxFileBytes int64, blobs blob.Store, maxUserStorageBytes int64, peers *peerhash.Deriver, photos *photohash.Deriver, rateLimits config.RateLimitsConfig, registrationMode config.RegistrationMode, dialogFilterSync *DialogFilterSync, photoThumbs *photothumb.Supervisor, welcomeChannel string, rateLimitMetrics ...*store.NotificationMetrics) mtproto.Handler {
+	return NewWithPhotoThumbsAndDialogFilterSyncAndUploadPartTTL(
+		s, dcID, cfg, log, logLoginCodes, maxFileBytes, blobs, maxUserStorageBytes,
+		peers, photos, rateLimits, registrationMode, dialogFilterSync, photoThumbs,
+		config.DefaultUploadPartTTL, welcomeChannel, rateLimitMetrics...,
 	)
 }
 
 // NewWithPhotoThumbsAndDialogFilterSyncAndUploadPartTTL builds an RPC handler
 // with the configured lifetime for uploadMedia grants.
-func NewWithPhotoThumbsAndDialogFilterSyncAndUploadPartTTL(s *store.Store, dcID int, cfg *tg.Config, log *slog.Logger, logLoginCodes bool, maxFileBytes int64, blobs blob.Store, maxUserStorageBytes int64, peers *peerhash.Deriver, photos *photohash.Deriver, rateLimits config.RateLimitsConfig, registrationMode config.RegistrationMode, dialogFilterSync *DialogFilterSync, photoThumbs *photothumb.Supervisor, uploadPartTTL time.Duration, rateLimitMetrics ...*store.NotificationMetrics) mtproto.Handler {
+func NewWithPhotoThumbsAndDialogFilterSyncAndUploadPartTTL(s *store.Store, dcID int, cfg *tg.Config, log *slog.Logger, logLoginCodes bool, maxFileBytes int64, blobs blob.Store, maxUserStorageBytes int64, peers *peerhash.Deriver, photos *photohash.Deriver, rateLimits config.RateLimitsConfig, registrationMode config.RegistrationMode, dialogFilterSync *DialogFilterSync, photoThumbs *photothumb.Supervisor, uploadPartTTL time.Duration, welcomeChannel string, rateLimitMetrics ...*store.NotificationMetrics) mtproto.Handler {
 	if peers == nil {
 		panic("api: nil peer hash deriver")
 	}
@@ -283,6 +297,7 @@ func NewWithPhotoThumbsAndDialogFilterSyncAndUploadPartTTL(s *store.Store, dcID 
 		rateLimitRequestEncryption:   rateLimits.RequestEncryption,
 		rateLimitDiscardEncryption:   rateLimits.DiscardEncryption,
 		registrationMode:             registrationMode,
+		welcomeChannel:               welcomeChannel,
 		rateLimitMetrics:             denialMetrics,
 		dialogFilterSync:             dialogFilterSync,
 	}
@@ -642,8 +657,8 @@ func (h *handlers) recordRateLimitDenial(surface string) {
 
 // provisionalAllowList holds the method IDs that a provisional session may call.
 // A provisional session is a username-mode account with no verifier: it can
-// read server configuration, set its password, check password state, or log
-// out — but nothing else.
+// read its dialogs and server configuration, set its password, check password
+// state, or log out.
 var provisionalAllowList = map[uint32]bool{
 	tg.HelpGetConfigRequestTypeID:                 true,
 	tg.HelpGetAppConfigRequestTypeID:              true,
@@ -655,6 +670,7 @@ var provisionalAllowList = map[uint32]bool{
 	tg.AccountGetPasswordRequestTypeID:            true,
 	tg.AccountUpdatePasswordSettingsRequestTypeID: true,
 	tg.AuthLogOutRequestTypeID:                    true,
+	tg.MessagesGetDialogsRequestTypeID:            true,
 }
 
 // provisionalBlocked reports whether req hits the provisional gate for a
