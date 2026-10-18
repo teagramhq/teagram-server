@@ -2196,7 +2196,8 @@ run_stack_move() {
     --env-file "$ENV_FILE" --target-env-file "$TARGET_CHECKOUT/.env" \
     --evidence-dir "$TARGET_DIR" \
     --state-dir "$TARGET_CHECKOUT/.state/blob-mode" \
-    --report-root "$EVIDENCE_ROOT" --lock-path "$LOCK_PATH"
+    --report-root "$EVIDENCE_ROOT" --lock-path "$LOCK_PATH" \
+    --blob-mode-helper "$MODE_HELPER"
 }
 
 main() {

@@ -299,8 +299,10 @@ else
 fi
 MOCK_CREATE_TARGET=0
 if [ "$TARGET_COMPOSE_STATUS" -ne 0 ] || \
-    ! has_line 'docker-compose.yml:docker-compose.local-blobs.yml' "$TMP/stack-move-helper-args"; then
-  record_failure 'move-stack did not pass the base Compose and local-blobs overlay to the mover'
+    ! has_line 'docker-compose.yml:docker-compose.local-blobs.yml' "$TMP/stack-move-helper-args" || \
+    ! has_line '--blob-mode-helper' "$TMP/stack-move-helper-args" || \
+    ! has_line "$RUNTIME_DIR/blob-mode-state.pinned" "$TMP/stack-move-helper-args"; then
+  record_failure 'move-stack did not pass the Compose overlay and verified pinned blob-mode helper to the mover'
   cat "$TMP/target-compose.stderr" >&2
 fi
 rm -rf -- "$TARGET_CHECKOUT"

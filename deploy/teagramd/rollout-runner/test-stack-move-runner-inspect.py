@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import importlib.machinery
 import importlib.util
 import io
 import json
@@ -20,8 +21,9 @@ HELPER = pathlib.Path(__file__).with_name("stack-move-runner.py")
 LOCAL_COMPOSE = pathlib.Path(__file__).with_name("local-compose-cce00d1.yml")
 
 
-def load_runner():
-    spec = importlib.util.spec_from_file_location("stack_move_runner", HELPER)
+def load_runner(path: pathlib.Path = HELPER):
+    loader = importlib.machinery.SourceFileLoader("stack_move_runner", str(path))
+    spec = importlib.util.spec_from_loader("stack_move_runner", loader)
     if spec is None or spec.loader is None:
         raise AssertionError("could not load stack-move runner")
     runner = importlib.util.module_from_spec(spec)
@@ -412,6 +414,75 @@ class MoveSecretMigrationTest(unittest.TestCase):
         with self.assertRaisesRegex(runner.MoveError, "source blob mode must not select S3 authority"):
             runner.require_local_source_blob_lane(source_config)
         print("PASS stack mover rejects S3 authority before touching the source stack")
+
+
+class PinnedMoveAuthorityPublicationTest(unittest.TestCase):
+    def test_publishes_move_authority_from_pinned_runtime_layout(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="stack-move-pinned-authority-") as temporary:
+            root = pathlib.Path(temporary)
+            runtime = root / "runtime"
+            runtime.mkdir()
+            pinned_runner = runtime / "stack-move-runner.pinned"
+            pinned_helper = runtime / "blob-mode-state.pinned"
+            shutil.copyfile(HELPER, pinned_runner)
+            shutil.copyfile(HELPER.with_name("blob-mode-state.py"), pinned_helper)
+            runner = load_runner(pinned_runner)
+
+            fixtures_path = HELPER.with_name("test-blob-mode-state.py")
+            fixtures_spec = importlib.util.spec_from_file_location(
+                "stack_move_blob_mode_fixtures", fixtures_path,
+            )
+            if fixtures_spec is None or fixtures_spec.loader is None:
+                self.fail("could not load blob-mode-state test fixtures")
+            fixtures = importlib.util.module_from_spec(fixtures_spec)
+            fixtures_spec.loader.exec_module(fixtures)
+            fixture = fixtures.BlobModeStateTests(
+                "test_local_inventory_preserves_exact_backend_and_volume_names",
+            )
+            fixture.setUp()
+            fixture.volume = "telegram-server_tgblobs"
+            blob_mode = fixtures.blob_mode
+
+            legacy_blob_dir = "/var/lib/telegramd-blobs"
+            layouts = dict(blob_mode.RUNTIME_LAYOUTS)
+            layouts["teagramd"] = {**layouts["teagramd"], "blobs": legacy_blob_dir}
+            with (
+                mock.patch.object(blob_mode, "BLOB_TARGET", legacy_blob_dir),
+                mock.patch.object(blob_mode, "BLOB_TARGETS", {legacy_blob_dir}),
+                mock.patch.object(blob_mode, "RUNTIME_LAYOUTS", layouts),
+            ):
+                state_dir, report_root, lock_path = fixture.create_initial_authority(root)
+
+            evidence_dir = root / "evidence"
+            evidence_dir.mkdir(mode=0o700)
+            for logical in ("tgblobs", "rustfsdata"):
+                inventory_line = blob_mode.hashlib.sha256(f"moved {logical}".encode()).hexdigest()
+                inventory = f"{inventory_line}  ./fixture.bin\n".encode()
+                for side in ("source", "target"):
+                    path = evidence_dir / f"{logical}.{side}.sha256"
+                    path.write_bytes(inventory)
+                    path.chmod(0o600)
+
+            original_load = runner.load_blob_mode_helper
+            with contextlib.ExitStack() as patches:
+                def load_test_helper(path: pathlib.Path):
+                    helper = original_load(path)
+                    patches.enter_context(mock.patch.object(helper, "require_runner_lock"))
+                    patches.enter_context(mock.patch.object(
+                        helper, "file_stat", side_effect=fixture.allow_unowned_private_files,
+                    ))
+                    patches.enter_context(mock.patch.object(helper.os, "fchown"))
+                    patches.enter_context(mock.patch.object(helper.os, "chown"))
+                    return helper
+
+                with mock.patch.object(runner, "load_blob_mode_helper", side_effect=load_test_helper):
+                    record = runner.publish_moved_blob_authority(
+                        state_dir, report_root, lock_path, evidence_dir, pinned_helper,
+                    )
+
+            self.assertEqual(record["outcome"], "stack-moved-local")
+            self.assertEqual(record["volumes"]["tgblobs"], "teagram_tgblobs")
+            self.assertTrue((state_dir / "journal" / "0000000002.json").is_file())
 
 
 if __name__ == "__main__":

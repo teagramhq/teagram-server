@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import importlib.machinery
 import importlib.util
 import json
 import os
@@ -1069,19 +1070,26 @@ def asset_inventories(
     return inventories
 
 
+def load_blob_mode_helper(helper_path: pathlib.Path):
+    helper = regular_file(helper_path, "pinned blob-mode helper")
+    loader = importlib.machinery.SourceFileLoader("stack_move_blob_mode_state", str(helper))
+    spec = importlib.util.spec_from_loader("stack_move_blob_mode_state", loader)
+    if spec is None or spec.loader is None:
+        raise MoveError("blob authority helper is unavailable for the stack move")
+    blob_mode = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(blob_mode)
+    return blob_mode
+
+
 def publish_moved_blob_authority(
     state_dir: pathlib.Path,
     report_root: pathlib.Path,
     lock_path: pathlib.Path,
     evidence_dir: pathlib.Path,
+    blob_mode_helper: pathlib.Path,
 ) -> dict[str, object]:
-    helper = pathlib.Path(__file__).with_name("blob-mode-state.py")
-    spec = importlib.util.spec_from_file_location("stack_move_blob_mode_state", helper)
-    if spec is None or spec.loader is None:
-        raise MoveError("blob authority helper is unavailable for the stack move")
-    blob_mode = importlib.util.module_from_spec(spec)
+    blob_mode = load_blob_mode_helper(blob_mode_helper)
     try:
-        spec.loader.exec_module(blob_mode)
         return blob_mode.publish_local_stack_move(argparse.Namespace(
             state_dir=state_dir,
             report_root=report_root,
@@ -1111,10 +1119,12 @@ def move(args: argparse.Namespace) -> None:
     state_dir_arg = getattr(args, "state_dir", None)
     report_root_arg = getattr(args, "report_root", None)
     lock_path_arg = getattr(args, "lock_path", None)
+    blob_mode_helper_arg = getattr(args, "blob_mode_helper", None)
     if state_dir_arg is None and report_root_arg is None and lock_path_arg is None:
         if (source_dir / ".state" / "blob-mode").exists():
             raise MoveError("durable blob authority paths are required when moving an initialized source")
         state_dir = report_root = lock_path = None
+        blob_mode_helper = None
     elif state_dir_arg is None or report_root_arg is None or lock_path_arg is None:
         raise MoveError("durable blob authority paths must be supplied together")
     else:
@@ -1124,6 +1134,9 @@ def move(args: argparse.Namespace) -> None:
             raise MoveError("target blob authority must come from the copied target checkout state")
         report_root = report_root_arg.resolve(strict=True)
         lock_path = regular_file(lock_path_arg, "shared deploy lock")
+        if blob_mode_helper_arg is None:
+            raise MoveError("pinned blob-mode helper path is required for durable authority publication")
+        blob_mode_helper = regular_file(blob_mode_helper_arg, "pinned blob-mode helper")
     if re.fullmatch(r"[0-9a-f]{40}", args.target_sha) is None:
         raise MoveError("target SHA must be a full commit ID")
     source_files = compose_files(args.source_compose, source_dir)
@@ -1404,8 +1417,9 @@ def move(args: argparse.Namespace) -> None:
 
         authority_record = None
         if state_dir is not None and report_root is not None and lock_path is not None:
+            assert blob_mode_helper is not None
             authority_record = publish_moved_blob_authority(
-                state_dir, report_root, lock_path, evidence_dir,
+                state_dir, report_root, lock_path, evidence_dir, blob_mode_helper,
             )
 
         evidence(evidence_path, {
@@ -1607,6 +1621,7 @@ def main() -> int:
     move_command.add_argument("--state-dir", type=pathlib.Path)
     move_command.add_argument("--report-root", type=pathlib.Path)
     move_command.add_argument("--lock-path", type=pathlib.Path)
+    move_command.add_argument("--blob-mode-helper", type=pathlib.Path)
     args = parser.parse_args()
     try:
         if args.command == "inspect":
