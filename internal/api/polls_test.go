@@ -14,6 +14,7 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/teagramhq/teagram-server/internal/api"
+	"github.com/teagramhq/teagram-server/internal/pgtest"
 	"github.com/teagramhq/teagram-server/internal/store"
 )
 
@@ -163,6 +164,302 @@ func TestSendPollAcceptsInputPollAnswersAndSupportsVotingAndClosing(t *testing.T
 	})
 	if err != nil || !closed {
 		t.Fatalf("close poll = %v, err %v; want closed", closed, err)
+	}
+}
+
+func TestSendPollAnswersPreserveWebPageURLs(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	s, dsn := openStoreDSN(t)
+	creator, err := s.CreateUser(ctx, "+15551401070")
+	if err != nil {
+		t.Fatalf("create creator: %v", err)
+	}
+	member, err := s.CreateUser(ctx, "+15551401071")
+	if err != nil {
+		t.Fatalf("create member: %v", err)
+	}
+	chat, err := s.CreateChat(ctx, creator.ID, "Poll answer links", []int64{member.ID})
+	if err != nil {
+		t.Fatalf("create chat: %v", err)
+	}
+	const firstURL = "https://poll-answer.invalid/example?a=1"
+	const secondURLPrefix = "HTTPS://poll-answer.invalid/"
+	secondURL := secondURLPrefix + strings.Repeat("a", 2048-len(secondURLPrefix))
+	inputMedia := func() *tg.InputMediaPoll {
+		return &tg.InputMediaPoll{Poll: tg.Poll{
+			Question: tg.TextWithEntities{Text: "Which link?"},
+			Answers: []tg.PollAnswerClass{
+				&tg.InputPollAnswer{Text: tg.TextWithEntities{Text: "First"}},
+				&tg.InputPollAnswer{Text: tg.TextWithEntities{Text: "Second"}},
+			},
+		}}
+	}
+	media := inputMedia()
+	inputAnswerAt := func(input *tg.InputMediaPoll, index int) *tg.InputPollAnswer {
+		t.Helper()
+		answer, ok := input.Poll.Answers[index].(*tg.InputPollAnswer)
+		if !ok {
+			t.Fatalf("input answer %d = %T, want inputPollAnswer", index, input.Poll.Answers[index])
+		}
+		return answer
+	}
+	first := inputAnswerAt(media, 0)
+	firstWebPage := &tg.InputMediaWebPage{URL: firstURL}
+	firstWebPage.SetForceLargeMedia(true)
+	firstWebPage.SetForceSmallMedia(true)
+	firstWebPage.SetOptional(true)
+	first.SetMedia(firstWebPage)
+	second := inputAnswerAt(media, 1)
+	second.SetMedia(&tg.InputMediaWebPage{URL: secondURL})
+	const randomID = 1401070
+	request := &tg.MessagesSendMediaRequest{
+		Peer: api.InputPeerChat(creator.ID, chat.ID), Media: media, RandomID: randomID,
+	}
+
+	created, err := api.SendMediaForTest(s, creator.ID, newBlobs(t), api.TestMaxUserStorageBytes, request)
+	if err != nil {
+		t.Fatalf("send poll with answer web pages: %v", err)
+	}
+	createdMessage := messageOf(t, created)
+	assertWebPageAnswers := func(label string, message *tg.Message) []int64 {
+		t.Helper()
+		pollMedia, ok := message.Media.(*tg.MessageMediaPoll)
+		if !ok || len(pollMedia.Poll.Answers) != 2 {
+			t.Fatalf("%s poll media = %#v, want two answers", label, message.Media)
+		}
+		wantURLs := []string{firstURL, secondURL}
+		ids := make([]int64, len(wantURLs))
+		for i, wantURL := range wantURLs {
+			answer, ok := pollMedia.Poll.Answers[i].(*tg.PollAnswer)
+			if !ok {
+				t.Fatalf("%s answer %d = %T, want pollAnswer", label, i, pollMedia.Poll.Answers[i])
+			}
+			if answer.Text.Text != []string{"First", "Second"}[i] || len(answer.Option) == 0 {
+				t.Fatalf("%s answer %d = %#v, want canonical text and option bytes", label, i, pollMedia.Poll.Answers[i])
+			}
+			webPageMedia, ok := answer.Media.(*tg.MessageMediaWebPage)
+			if !ok {
+				t.Fatalf("%s answer %d media = %#v, want messageMediaWebPage", label, i, answer.Media)
+			}
+			if webPageMedia.ForceLargeMedia || webPageMedia.ForceSmallMedia {
+				t.Fatalf("%s answer %d retained input preview flags: %+v", label, i, webPageMedia)
+			}
+			webPage, ok := webPageMedia.Webpage.(*tg.WebPageEmpty)
+			if !ok || webPage.ID == 0 || webPage.URL != wantURL {
+				t.Fatalf("%s answer %d webpage = %#v, want nonzero id and exact URL %q", label, i, webPageMedia.Webpage, wantURL)
+			}
+			ids[i] = webPage.ID
+		}
+		if ids[0] == ids[1] {
+			t.Fatalf("different answer URLs share webPageEmpty.id %d", ids[0])
+		}
+		return ids
+	}
+	createdIDs := assertWebPageAnswers("creation", createdMessage)
+	createdPollMedia, ok := createdMessage.Media.(*tg.MessageMediaPoll)
+	if !ok {
+		t.Fatalf("creation media = %T, want messageMediaPoll", createdMessage.Media)
+	}
+	createdPoll := createdPollMedia.Poll
+	firstCreatedAnswer, ok := createdPoll.Answers[0].(*tg.PollAnswer)
+	if !ok {
+		t.Fatalf("creation answer 0 = %T, want pollAnswer", createdPoll.Answers[0])
+	}
+	secondCreatedAnswer, ok := createdPoll.Answers[1].(*tg.PollAnswer)
+	if !ok {
+		t.Fatalf("creation answer 1 = %T, want pollAnswer", createdPoll.Answers[1])
+	}
+	createdOptions := [][]byte{
+		append([]byte(nil), firstCreatedAnswer.Option...),
+		append([]byte(nil), secondCreatedAnswer.Option...),
+	}
+	if slices.Equal(createdOptions[0], createdOptions[1]) {
+		t.Fatalf("created poll assigned duplicate option bytes %v", createdOptions[0])
+	}
+	assertOptionBytes := func(label string, message *tg.Message) {
+		t.Helper()
+		pollMedia, ok := message.Media.(*tg.MessageMediaPoll)
+		if !ok {
+			t.Fatalf("%s media = %T, want messageMediaPoll", label, message.Media)
+		}
+		answers := pollMedia.Poll.Answers
+		for i, answerClass := range answers {
+			answer, ok := answerClass.(*tg.PollAnswer)
+			if !ok {
+				t.Fatalf("%s answer %d = %T, want pollAnswer", label, i, answerClass)
+			}
+			if !slices.Equal(answer.Option, createdOptions[i]) {
+				t.Fatalf("%s option %d = %v, want original bytes %v", label, i, answer.Option, createdOptions[i])
+			}
+		}
+	}
+
+	history, err := api.GetHistoryForTest(s, member.ID, &tg.MessagesGetHistoryRequest{
+		Peer: api.InputPeerChat(member.ID, chat.ID), Limit: 10,
+	})
+	if err != nil {
+		t.Fatalf("read recipient poll delivery: %v", err)
+	}
+	memberMessage := firstMessageFromResult(t, history)
+	memberIDs := assertWebPageAnswers("recipient delivery", memberMessage)
+	assertOptionBytes("recipient delivery", memberMessage)
+	if !slices.Equal(createdIDs, memberIDs) {
+		t.Fatalf("recipient webpage IDs = %v, want creation IDs %v", memberIDs, createdIDs)
+	}
+
+	retryMedia := inputMedia()
+	inputAnswerAt(retryMedia, 0).SetMedia(&tg.InputMediaWebPage{URL: "https://poll-answer.invalid/retry?a=9"})
+	inputAnswerAt(retryMedia, 1).SetMedia(&tg.InputMediaWebPage{URL: "https://poll-answer.invalid/retry-second?a=8"})
+	retried, err := api.SendMediaForTest(s, creator.ID, newBlobs(t), api.TestMaxUserStorageBytes, &tg.MessagesSendMediaRequest{
+		Peer: api.InputPeerChat(creator.ID, chat.ID), Media: retryMedia, RandomID: randomID,
+	})
+	if err != nil {
+		t.Fatalf("retry poll with changed answer URLs: %v", err)
+	}
+	retryMessage := messageOf(t, retried)
+	retryIDs := assertWebPageAnswers("retry", retryMessage)
+	assertOptionBytes("retry", retryMessage)
+	if !slices.Equal(createdIDs, retryIDs) {
+		t.Fatalf("retry webpage IDs = %v, want original IDs %v", retryIDs, createdIDs)
+	}
+	invalidRetry := inputMedia()
+	inputAnswerAt(invalidRetry, 0).SetMedia(&tg.InputMediaWebPage{URL: "javascript:alert(1)"})
+	if _, err := api.SendMediaForTest(s, creator.ID, newBlobs(t), api.TestMaxUserStorageBytes, &tg.MessagesSendMediaRequest{
+		Peer: api.InputPeerChat(creator.ID, chat.ID), Media: invalidRetry, RandomID: randomID,
+	}); !tgerr.Is(err, "POLL_ANSWERS_INVALID") || strings.Contains(err.Error(), "javascript:alert(1)") {
+		t.Fatalf("retry with unsafe URL error = %v, want generic POLL_ANSWERS_INVALID before dedup", err)
+	}
+	creatorHistory, err := s.History(ctx, creator.ID, store.PeerTypeChat, chat.ID, 0, 10)
+	if err != nil || len(creatorHistory) != 1 {
+		t.Fatalf("creator history after retry = %d messages, err %v; want one message", len(creatorHistory), err)
+	}
+
+	// A separately opened Store has no in-memory poll data to inherit.
+	reloaded, err := store.Open(ctx, dsn, pgtest.EncKey(), store.WithBlobStore(newBlobs(t)))
+	if err != nil {
+		t.Fatalf("reopen store: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := reloaded.Close(); err != nil {
+			t.Errorf("close reloaded store: %v", err)
+		}
+	})
+	reloadedHistory, err := api.GetHistoryForTest(reloaded, creator.ID, &tg.MessagesGetHistoryRequest{
+		Peer: api.InputPeerChat(creator.ID, chat.ID), Limit: 10,
+	})
+	if err != nil {
+		t.Fatalf("get poll history after storage reload: %v", err)
+	}
+	reloadedHistoryMessage := firstMessageFromResult(t, reloadedHistory)
+	reloadedHistoryIDs := assertWebPageAnswers("history after storage reload", reloadedHistoryMessage)
+	assertOptionBytes("history after storage reload", reloadedHistoryMessage)
+	if !slices.Equal(createdIDs, reloadedHistoryIDs) {
+		t.Fatalf("reloaded history webpage IDs = %v, want creation IDs %v", reloadedHistoryIDs, createdIDs)
+	}
+	byID, err := api.GetMessagesForTest(reloaded, creator.ID, &tg.MessagesGetMessagesRequest{
+		ID: []tg.InputMessageClass{&tg.InputMessageID{ID: createdMessage.ID}},
+	})
+	if err != nil {
+		t.Fatalf("get poll after storage reload: %v", err)
+	}
+	reloadedMessage := firstMessageFromResult(t, byID)
+	reloadedIDs := assertWebPageAnswers("getMessages after storage reload", reloadedMessage)
+	assertOptionBytes("getMessages after storage reload", reloadedMessage)
+	if !slices.Equal(createdIDs, reloadedIDs) {
+		t.Fatalf("reloaded webpage IDs = %v, want creation IDs %v", reloadedIDs, createdIDs)
+	}
+}
+
+func TestSendPollRejectsUnsafeAnswerMediaBeforeWrites(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	s, dsn := openStoreDSN(t)
+	conn, err := pgx.Connect(ctx, dsn)
+	if err != nil {
+		t.Fatalf("connect for poll row counts: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := conn.Close(ctx); err != nil {
+			t.Errorf("close poll row count connection: %v", err)
+		}
+	})
+	creator, err := s.CreateUser(ctx, "+15551401072")
+	if err != nil {
+		t.Fatalf("create creator: %v", err)
+	}
+	chat, err := s.CreateChat(ctx, creator.ID, "Invalid poll answer media", nil)
+	if err != nil {
+		t.Fatalf("create chat: %v", err)
+	}
+	oversizedURL := "https://x/" + strings.Repeat("a", 2049-len("https://x/"))
+	legacyAnswer := &tg.PollAnswer{Text: tg.TextWithEntities{Text: "Legacy"}, Option: []byte("legacy")}
+	legacyAnswer.SetMedia(&tg.MessageMediaWebPage{Webpage: &tg.WebPageEmpty{ID: 1}})
+	cases := []struct {
+		name      string
+		media     tg.InputMediaClass
+		legacy    bool
+		sensitive string
+	}{
+		{name: "inputMediaPhoto", media: &tg.InputMediaPhoto{ID: &tg.InputPhotoEmpty{}}},
+		{name: "javascript URL", media: &tg.InputMediaWebPage{URL: "javascript:alert(1)"}, sensitive: "javascript:alert(1)"},
+		{name: "oversized URL", media: &tg.InputMediaWebPage{URL: oversizedURL}, sensitive: oversizedURL},
+		{name: "whitespace URL", media: &tg.InputMediaWebPage{URL: "https://example.invalid/a b"}},
+		{name: "C0 control URL", media: &tg.InputMediaWebPage{URL: "https://example.invalid/a\x01b"}},
+		{name: "DEL URL", media: &tg.InputMediaWebPage{URL: "https://example.invalid/a\x7fb"}},
+		{name: "Unicode whitespace URL", media: &tg.InputMediaWebPage{URL: "https://example.invalid/a\u00a0b"}},
+		{name: "empty URL", media: &tg.InputMediaWebPage{URL: ""}},
+		{name: "userinfo URL", media: &tg.InputMediaWebPage{URL: "https://user@example.invalid/"}, sensitive: "user@"},
+		{name: "empty host URL", media: &tg.InputMediaWebPage{URL: "https:///path"}},
+		{name: "non-http scheme", media: &tg.InputMediaWebPage{URL: "ftp://example.invalid/file"}},
+		{name: "data scheme", media: &tg.InputMediaWebPage{URL: "data:text/plain,hello"}},
+		{name: "invalid UTF-8 URL", media: &tg.InputMediaWebPage{URL: string([]byte{'h', 't', 't', 'p', 's', ':', '/', '/', 'x', '/', 0xff})}},
+		{name: "unknown webpage flag", media: &tg.InputMediaWebPage{Flags: 8, URL: "https://example.invalid/"}},
+		{name: "legacy pollAnswer media", legacy: true},
+	}
+	countRows := func() [3]int64 {
+		t.Helper()
+		var counts [3]int64
+		if err := conn.QueryRow(ctx, "SELECT (SELECT count(*) FROM polls), (SELECT count(*) FROM poll_options), (SELECT count(*) FROM messages)").Scan(&counts[0], &counts[1], &counts[2]); err != nil {
+			t.Fatalf("count poll rows: %v", err)
+		}
+		return counts
+	}
+	before := countRows()
+	for i, tc := range cases {
+		media := &tg.InputMediaPoll{Poll: tg.Poll{Question: tg.TextWithEntities{Text: "Reject this?"}}}
+		if tc.legacy {
+			media.Poll.Answers = []tg.PollAnswerClass{
+				legacyAnswer,
+				&tg.PollAnswer{Text: tg.TextWithEntities{Text: "Other"}, Option: []byte("other")},
+			}
+		} else {
+			media.Poll.Answers = []tg.PollAnswerClass{
+				&tg.InputPollAnswer{Text: tg.TextWithEntities{Text: "First"}},
+				&tg.InputPollAnswer{Text: tg.TextWithEntities{Text: "Second"}},
+			}
+			answer, ok := media.Poll.Answers[0].(*tg.InputPollAnswer)
+			if !ok {
+				t.Fatal("constructed poll answer is not inputPollAnswer")
+			}
+			answer.SetMedia(tc.media)
+		}
+		randomID := int64(1401071 + i)
+		_, sendErr := api.SendMediaForTest(s, creator.ID, newBlobs(t), api.TestMaxUserStorageBytes, &tg.MessagesSendMediaRequest{
+			Peer: api.InputPeerChat(creator.ID, chat.ID), Media: media, RandomID: randomID,
+		})
+		if !tgerr.Is(sendErr, "POLL_ANSWERS_INVALID") {
+			t.Fatalf("send %s error = %v, want POLL_ANSWERS_INVALID", tc.name, sendErr)
+		}
+		if tc.sensitive != "" && strings.Contains(sendErr.Error(), tc.sensitive) {
+			t.Errorf("%s error exposed its input value", tc.name)
+		}
+		if _, found, lookupErr := s.MessageByRandomID(ctx, creator.ID, randomID); lookupErr != nil || found {
+			t.Fatalf("message lookup after rejected %s found=%v err=%v", tc.name, found, lookupErr)
+		}
+	}
+	if after := countRows(); after != before {
+		t.Fatalf("rejected answer media changed poll/option/message counts from %v to %v", before, after)
 	}
 }
 

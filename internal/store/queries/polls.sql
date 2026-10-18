@@ -51,11 +51,11 @@ JOIN poll_message_copies c
 ORDER BY c.poll_id;
 
 -- name: InsertPollOption :exec
-INSERT INTO poll_options (poll_id, option, text, correct, position)
-VALUES ($1, $2, $3, $4, $5);
+INSERT INTO poll_options (poll_id, option, text, media_url, correct, position)
+VALUES ($1, $2, $3, $4, $5, $6);
 
 -- name: PollOptionResults :many
-SELECT o.option, o.text, o.correct, o.position,
+SELECT o.option, o.text, o.media_url, o.correct, o.position,
        count(v.voter_id)::bigint AS voter_count,
        EXISTS (
            SELECT 1 FROM poll_vote_options selected
@@ -67,7 +67,7 @@ FROM poll_options o
 LEFT JOIN poll_vote_options v
   ON v.poll_id = o.poll_id AND v.option = o.option
 WHERE o.poll_id = sqlc.arg(poll_id)
-GROUP BY o.poll_id, o.option, o.text, o.correct, o.position
+GROUP BY o.poll_id, o.option, o.text, o.media_url, o.correct, o.position
 ORDER BY o.position;
 
 -- name: PollVoterCount :one

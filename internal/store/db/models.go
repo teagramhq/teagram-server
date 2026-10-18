@@ -572,6 +572,7 @@ type PollOption struct {
 	Text     []byte
 	Correct  bool
 	Position int16
+	MediaUrl *string
 }
 
 type PollVote struct {

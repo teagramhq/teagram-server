@@ -137,14 +137,15 @@ func (q *Queries) InsertPollMessageCopy(ctx context.Context, arg InsertPollMessa
 }
 
 const insertPollOption = `-- name: InsertPollOption :exec
-INSERT INTO poll_options (poll_id, option, text, correct, position)
-VALUES ($1, $2, $3, $4, $5)
+INSERT INTO poll_options (poll_id, option, text, media_url, correct, position)
+VALUES ($1, $2, $3, $4, $5, $6)
 `
 
 type InsertPollOptionParams struct {
 	PollID   int64
 	Option   []byte
 	Text     []byte
+	MediaUrl *string
 	Correct  bool
 	Position int16
 }
@@ -154,6 +155,7 @@ func (q *Queries) InsertPollOption(ctx context.Context, arg InsertPollOptionPara
 		arg.PollID,
 		arg.Option,
 		arg.Text,
+		arg.MediaUrl,
 		arg.Correct,
 		arg.Position,
 	)
@@ -424,7 +426,7 @@ func (q *Queries) PollOptionExists(ctx context.Context, arg PollOptionExistsPara
 }
 
 const pollOptionResults = `-- name: PollOptionResults :many
-SELECT o.option, o.text, o.correct, o.position,
+SELECT o.option, o.text, o.media_url, o.correct, o.position,
        count(v.voter_id)::bigint AS voter_count,
        EXISTS (
            SELECT 1 FROM poll_vote_options selected
@@ -436,7 +438,7 @@ FROM poll_options o
 LEFT JOIN poll_vote_options v
   ON v.poll_id = o.poll_id AND v.option = o.option
 WHERE o.poll_id = $2
-GROUP BY o.poll_id, o.option, o.text, o.correct, o.position
+GROUP BY o.poll_id, o.option, o.text, o.media_url, o.correct, o.position
 ORDER BY o.position
 `
 
@@ -448,6 +450,7 @@ type PollOptionResultsParams struct {
 type PollOptionResultsRow struct {
 	Option     []byte
 	Text       []byte
+	MediaUrl   *string
 	Correct    bool
 	Position   int16
 	VoterCount int64
@@ -466,6 +469,7 @@ func (q *Queries) PollOptionResults(ctx context.Context, arg PollOptionResultsPa
 		if err := rows.Scan(
 			&i.Option,
 			&i.Text,
+			&i.MediaUrl,
 			&i.Correct,
 			&i.Position,
 			&i.VoterCount,
