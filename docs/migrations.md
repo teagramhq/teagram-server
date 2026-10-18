@@ -8,8 +8,8 @@ Atlas records which files it has applied, so migrations run exactly once — no
 Config is in `atlas.hcl` under `env "local"`:
 
 - `url` — the target database, read from `TG_POSTGRES_DSN`.
-- `dev` — a throwaway Postgres 16 container Atlas spins up to parse/execute SQL
-  for `validate` and `diff` (`docker://postgres/16`). Requires Docker.
+- `dev` — a throwaway Postgres 18 container Atlas spins up to parse/execute SQL
+  for `validate` and `diff` (`docker://postgres/18`). Requires Docker.
 
 ## Add a migration
 
@@ -31,7 +31,7 @@ make migrate-new name=add_sessions   # atlas migrate diff ... --env local
 ```bash
 atlas migrate validate --env local                 # checksum only
 atlas migrate validate --env local \
-  --dev-url "docker://postgres/16/dev?search_path=public"   # + SQL semantics
+  --dev-url "docker://postgres/18/dev?search_path=public"   # + SQL semantics
 ```
 
 ## Apply

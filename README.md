@@ -111,7 +111,7 @@ The development deployment runs `777742c`, deployed on 2026-10-10 through the lo
 
 ## Build
 
-The server requires Go 1.27.1, Docker for the Postgres test harness (`mirror.gcr.io/library/postgres:16-alpine`) and Compose, Atlas for migrations, and `golangci-lint` for linting. `make build`, `make test`, and `make lint` are the standard project commands. The full test suite runs in CI.
+The server requires Go 1.27.1, Docker for the Postgres 18 test harness (`mirror.gcr.io/library/postgres:18-alpine`) and Compose, Atlas for migrations, and `golangci-lint` for linting. `make build`, `make test`, and `make lint` are the standard project commands. The full test suite runs in CI.
 
 ## License and attribution
 

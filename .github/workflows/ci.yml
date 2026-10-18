@@ -536,7 +536,7 @@ jobs:
         run: PARTS_DIR_CEILING_PROBE=1 go test -count=1 -timeout 30m ./internal/blob/ -run TestFlatPartsDirEntryCeiling -v
 
       # Postgres comes from testcontainers inside internal/pgtest, which starts
-      # mirror.gcr.io/library/postgres:16-alpine with its own config. Nothing to
+      # mirror.gcr.io/library/postgres:18-alpine with its own config. Nothing to
       # wire up on the runner beyond the Docker daemon ubuntu-26.04 provides.
       #
       # Keep the cached non-E2E command in the Makefile unchanged. The remaining
@@ -1345,7 +1345,7 @@ jobs:
       # reach the listening log. Published on localhost for both atlas on the
       # runner and the container below; the job waits for the healthcheck.
       postgres:
-        image: mirror.gcr.io/library/postgres:16-alpine
+        image: mirror.gcr.io/library/postgres:18-alpine
         env:
           POSTGRES_PASSWORD: smoketest
           POSTGRES_DB: teagram
@@ -1739,6 +1739,21 @@ jobs:
             return 1
           }
 
+          assert_postgres_settings() {
+            actual=$(docker compose exec -T postgres psql -XAt -U postgres -d teagram \
+              -c 'SHOW shared_buffers' \
+              -c 'SHOW jit' \
+              -c 'SHOW io_method' \
+              -c 'SHOW max_connections' \
+              -c "SELECT extname FROM pg_extension WHERE extname = 'pg_stat_statements'")
+            expected=$(printf '%s\n' '1GB' 'off' 'worker' '40' 'pg_stat_statements')
+            if [ "$actual" != "$expected" ]; then
+              printf 'PostgreSQL settings mismatch: expected:\n%s\nactual:\n%s\n' \
+                "$expected" "$actual" >&2
+              return 1
+            fi
+          }
+
           # The fingerprint is an int64 and may be negative.
           fingerprint() {
             docker compose logs teagramd | sed -n 's/.*fingerprint=\(-\?[0-9]\+\).*/\1/p' | head -1
@@ -1825,6 +1840,7 @@ jobs:
             exit 1
           fi
           wait_listening
+          assert_postgres_settings
           docker compose logs teagramd
 
           # msg=listening is printed whether or not TG_LOG_LOGIN_CODES reaches
@@ -1875,6 +1891,7 @@ jobs:
           docker compose down
           docker compose up -d
           wait_listening
+          assert_postgres_settings
           docker compose logs teagramd
 
           docker compose exec -T postgres psql -U postgres -d teagram -tAc 'SELECT id FROM ci_marker' \
@@ -2543,7 +2560,7 @@ jobs:
           sudo env "PATH=$PATH" TMPDIR=/root python3 -B deploy/teagramd/rollout-runner/test-blob-mode-state.py
           sudo env "PATH=$PATH" TMPDIR=/root python3 -B deploy/teagramd/rollout-runner/test-blob-transition-runner.py
 
-      - name: Prove R69 and R70 SQL evidence against PostgreSQL 16 and Atlas 1.2.0
+      - name: Prove R69 and R70 SQL evidence against PostgreSQL 18 and Atlas 1.2.0
         run: sudo env "PATH=$PATH" TMPDIR=/root bash deploy/teagramd/rollout-runner/test-rustfs-schema-postgres.sh
 
       - name: Prove PostgreSQL 16 to 18 restore and stack move

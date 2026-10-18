@@ -4,8 +4,8 @@ set -Eeuo pipefail
 SCRIPT_DIR=$(cd -P "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 NETWORK="rustfs-schema-${BASHPID}"
 POSTGRES_CONTAINER="rustfs-schema-pg-${BASHPID}"
-POSTGRES_IMAGE="ghcr.io/teagramhq/teagram-server-postgres:16-alpine"
-POSTGRES_IMAGE_DIGEST=sha256:721873c34ceb9f8d8fc265984940dc982404c105f19ad51be9fdc5970a6080ea
+POSTGRES_IMAGE="ghcr.io/teagramhq/teagram-server-postgres:18-alpine"
+POSTGRES_IMAGE_DIGEST=sha256:77f585114c32fbca283dc835b0596f4e52b51b4c6662d7810b2f4084f60a1873
 ATLAS_BIN="${ATLAS_BIN:-atlas}"
 
 command -v "$ATLAS_BIN" >/dev/null 2>&1 || {
@@ -53,7 +53,7 @@ for _ in $(seq 1 60); do
   sleep 1
 done
 if [ "$ready" != true ]; then
-  printf '%s\n' 'PostgreSQL 16 schema fixture did not become ready' >&2
+  printf '%s\n' 'PostgreSQL 18 schema fixture did not become ready' >&2
   exit 1
 fi
 POSTGRES_PORT=$(docker port "$POSTGRES_CONTAINER" 5432/tcp)

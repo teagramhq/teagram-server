@@ -88,7 +88,7 @@ func setup() {
 		return
 	}
 	migrations = migs
-	container, err := postgres.Run(ctx, "postgres:16-alpine", containerOptions()...)
+	container, err := postgres.Run(ctx, "postgres:18-alpine", containerOptions()...)
 	if err != nil {
 		errSetup = fmt.Errorf("start container: %w", err)
 		return

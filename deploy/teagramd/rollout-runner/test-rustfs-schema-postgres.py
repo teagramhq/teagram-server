@@ -209,7 +209,7 @@ def psql(sql: str) -> list[str]:
         check=False,
     )
     if result.returncode != 0:
-        raise AssertionError("PostgreSQL 16 catalog capture failed")
+        raise AssertionError("PostgreSQL 18 catalog capture failed")
     return [line for line in result.stdout.splitlines() if line]
 
 
@@ -222,13 +222,13 @@ def capture(query_source: Path | str, mutation: str = "") -> dict[str, Any]:
     sql = f"BEGIN;\n{mutation}\n{query}\nROLLBACK;\n" if mutation else query
     rows = psql(sql)
     if len(rows) != 1:
-        raise AssertionError("PostgreSQL 16 catalog capture returned an unexpected row count")
+        raise AssertionError("PostgreSQL 18 catalog capture returned an unexpected row count")
     try:
         result = json.loads(rows[0])
     except json.JSONDecodeError as exc:
-        raise AssertionError("PostgreSQL 16 catalog capture was not JSON") from exc
+        raise AssertionError("PostgreSQL 18 catalog capture was not JSON") from exc
     if not isinstance(result, dict):
-        raise AssertionError("PostgreSQL 16 catalog capture was not an object")
+        raise AssertionError("PostgreSQL 18 catalog capture was not an object")
     return result
 
 
@@ -417,7 +417,7 @@ class RustFSCatalogQualification(unittest.TestCase):
         self.assertEqual(inert, {name: False for name in expected_surfaces})
         GATE_MODULE["validate_inert_surfaces"]({"inert_surfaces": inert}, expected_surfaces)
         self.assertEqual(psql("SELECT (NOT EXISTS (SELECT 1 FROM public.files))::text;\n"), ["true"])
-        print(f"postgres16_baseline=passed release_set={RELEASE_SET} public_files=empty")
+        print(f"postgres18_baseline=passed release_set={RELEASE_SET} public_files=empty")
 
     def assert_fixed_overlay_rejected(self, label: str, overlay: str) -> None:
         with tempfile.TemporaryDirectory(prefix="r69-migration-overlay-") as temporary_root:
@@ -790,7 +790,7 @@ if __name__ == "__main__":
         "schema_at_head=not_qualified; rollout_approval=not_granted"
     )
     print(
-        "postgres16_schema_summary="
+        "postgres18_schema_summary="
         f"passed:{result.testsRun - len(result.failures) - len(result.errors)} "
         f"failed:{len(result.failures) + len(result.errors)}"
     )

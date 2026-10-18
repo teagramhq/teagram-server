@@ -113,7 +113,10 @@ SELECT jsonb_build_object(
                           ON referenced_namespace.oid = referenced_relation.relnamespace
                         LEFT JOIN pg_class AS referenced_index
                           ON referenced_index.oid = constraint_row.conindid
+                        -- Postgres 18 records NOT NULL in pg_constraint; columns
+                        -- are qualified separately via attnotnull.
                         WHERE constraint_row.conrelid = to_regclass(format('public.%I', wanted.table_name))
+                          AND constraint_row.contype <> 'n'
                     ), '{}'::jsonb),
                     'index_names', COALESCE((
                         SELECT jsonb_agg(index_relation.relname ORDER BY index_relation.relname)

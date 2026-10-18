@@ -44,7 +44,7 @@ DIRECT_HUB_IMAGE = re.compile(
     r"(?<![A-Za-z0-9._/-])(?:"
     r"golang:1\.27|golang:1\.26|golang:1\.24\.8-alpine|alpine:3\.22|"
     r"node:24-alpine3\.22@sha256:[0-9a-f]{64}|node@sha256:[0-9a-f]{64}|"
-    r"postgres:16-alpine|postgres:18-alpine|arigaio/atlas:1\.2\.0-alpine|"
+    r"postgres:1[68]-alpine|arigaio/atlas:1\.2\.0-alpine|"
     r"rustfs/rustfs:1\.0\.1@sha256:[0-9a-f]{64}|"
     r"haproxy:3\.2-alpine|busybox:1\.37(?:\.0)?)"
 )
@@ -234,10 +234,10 @@ class DockerImageMirrorTests(unittest.TestCase):
             "sha256:bdf57e528e45e4433820e045b29b4597825a1c9e38353532d90a01445013f82e"
         )
         self.assertIn(
-            postgres16,
+            postgres18,
             postgres_schema,
         )
-        self.assertIn(f'POSTGRES_IMAGE_DIGEST={postgres16_digest}', postgres_schema)
+        self.assertIn(f'POSTGRES_IMAGE_DIGEST={postgres18_digest}', postgres_schema)
         self.assertIn('docker pull "$POSTGRES_IMAGE@$POSTGRES_IMAGE_DIGEST"', postgres_schema)
         self.assertIn(
             'docker image tag "$POSTGRES_IMAGE_ID" "$POSTGRES_IMAGE"',
