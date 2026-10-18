@@ -172,13 +172,13 @@ class DockerImageMirrorTests(unittest.TestCase):
         ).read_text(encoding="utf-8")
         self.assertIn("skopeo copy --all --preserve-digests", mirror_script)
         for image in (
-            "mirror.gcr.io/library/postgres:16-alpine@sha256:"
+            "mirror.gcr.io/library/postgres@sha256:"
             "721873c34ceb9f8d8fc265984940dc982404c105f19ad51be9fdc5970a6080ea",
             "ghcr.io/teagramhq/teagram-server-postgres:16-alpine",
-            "mirror.gcr.io/library/postgres:18-alpine@sha256:"
+            "mirror.gcr.io/library/postgres@sha256:"
             "77f585114c32fbca283dc835b0596f4e52b51b4c6662d7810b2f4084f60a1873",
             "ghcr.io/teagramhq/teagram-server-postgres:18-alpine",
-            "mirror.gcr.io/library/busybox:1.37@sha256:"
+            "mirror.gcr.io/library/busybox@sha256:"
             "bdf57e528e45e4433820e045b29b4597825a1c9e38353532d90a01445013f82e",
             "ghcr.io/teagramhq/teagram-server-busybox:1.37",
         ):
