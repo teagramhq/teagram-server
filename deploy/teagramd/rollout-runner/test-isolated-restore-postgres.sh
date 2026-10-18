@@ -75,6 +75,10 @@ trap cleanup EXIT
 
 docker pull "$SOURCE_POSTGRES_IMAGE@$SOURCE_POSTGRES_IMAGE_DIGEST" >/dev/null
 docker pull "$RESTORE_POSTGRES_IMAGE@$RESTORE_POSTGRES_IMAGE_DIGEST" >/dev/null
+SOURCE_POSTGRES_IMAGE_ID=$(docker image inspect --format '{{.Id}}' "$SOURCE_POSTGRES_IMAGE@$SOURCE_POSTGRES_IMAGE_DIGEST")
+RESTORE_POSTGRES_IMAGE_ID=$(docker image inspect --format '{{.Id}}' "$RESTORE_POSTGRES_IMAGE@$RESTORE_POSTGRES_IMAGE_DIGEST")
+docker image tag "$SOURCE_POSTGRES_IMAGE_ID" "$SOURCE_POSTGRES_IMAGE"
+docker image tag "$RESTORE_POSTGRES_IMAGE_ID" "$RESTORE_POSTGRES_IMAGE"
 
 start_container() {
   local name=$1 image=$2 database=$3

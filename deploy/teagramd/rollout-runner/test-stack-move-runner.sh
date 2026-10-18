@@ -125,6 +125,12 @@ docker pull "$BUSYBOX_IMAGE@$BUSYBOX_IMAGE_DIGEST" >/dev/null
 docker pull "$SOURCE_POSTGRES_IMAGE@$SOURCE_POSTGRES_IMAGE_DIGEST" >/dev/null
 docker pull "$RUSTFS_IMAGE" >/dev/null
 docker pull "$TARGET_POSTGRES_IMAGE@$TARGET_POSTGRES_IMAGE_DIGEST" >/dev/null
+BUSYBOX_IMAGE_ID=$(docker image inspect --format '{{.Id}}' "$BUSYBOX_IMAGE@$BUSYBOX_IMAGE_DIGEST")
+SOURCE_POSTGRES_IMAGE_ID=$(docker image inspect --format '{{.Id}}' "$SOURCE_POSTGRES_IMAGE@$SOURCE_POSTGRES_IMAGE_DIGEST")
+TARGET_POSTGRES_IMAGE_ID=$(docker image inspect --format '{{.Id}}' "$TARGET_POSTGRES_IMAGE@$TARGET_POSTGRES_IMAGE_DIGEST")
+docker image tag "$BUSYBOX_IMAGE_ID" "$BUSYBOX_IMAGE"
+docker image tag "$SOURCE_POSTGRES_IMAGE_ID" "$SOURCE_POSTGRES_IMAGE"
+docker image tag "$TARGET_POSTGRES_IMAGE_ID" "$TARGET_POSTGRES_IMAGE"
 docker image tag "$BUSYBOX_IMAGE" telegramd:local
 
 cat > "$SOURCE_COMPOSE" <<'YAML'

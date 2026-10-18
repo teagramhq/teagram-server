@@ -28,6 +28,8 @@ python3 "$SCRIPT_DIR/test-rustfs-schema-postgres.py" --prepare-atlas-input "$ATL
 python3 "$SCRIPT_DIR/test-rustfs-schema-postgres.py" --prepare-atlas-input "$ATLAS_R70_INPUT" 60-70
 
 docker pull "$POSTGRES_IMAGE@$POSTGRES_IMAGE_DIGEST" >/dev/null
+POSTGRES_IMAGE_ID=$(docker image inspect --format '{{.Id}}' "$POSTGRES_IMAGE@$POSTGRES_IMAGE_DIGEST")
+docker image tag "$POSTGRES_IMAGE_ID" "$POSTGRES_IMAGE"
 docker network create "$NETWORK" >/dev/null
 docker run -d \
   --name "$POSTGRES_CONTAINER" \

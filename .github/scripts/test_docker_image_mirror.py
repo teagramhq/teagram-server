@@ -240,6 +240,10 @@ class DockerImageMirrorTests(unittest.TestCase):
         self.assertIn(f'POSTGRES_IMAGE_DIGEST={postgres16_digest}', postgres_schema)
         self.assertIn('docker pull "$POSTGRES_IMAGE@$POSTGRES_IMAGE_DIGEST"', postgres_schema)
         self.assertIn(
+            'docker image tag "$POSTGRES_IMAGE_ID" "$POSTGRES_IMAGE"',
+            postgres_schema,
+        )
+        self.assertIn(
             postgres16,
             isolated_restore,
         )
@@ -251,6 +255,14 @@ class DockerImageMirrorTests(unittest.TestCase):
         )
         self.assertIn(
             'docker pull "$RESTORE_POSTGRES_IMAGE@$RESTORE_POSTGRES_IMAGE_DIGEST"',
+            isolated_restore,
+        )
+        self.assertIn(
+            'docker image tag "$SOURCE_POSTGRES_IMAGE_ID" "$SOURCE_POSTGRES_IMAGE"',
+            isolated_restore,
+        )
+        self.assertIn(
+            'docker image tag "$RESTORE_POSTGRES_IMAGE_ID" "$RESTORE_POSTGRES_IMAGE"',
             isolated_restore,
         )
         self.assertIn(postgres16, stack_move)
@@ -270,6 +282,17 @@ class DockerImageMirrorTests(unittest.TestCase):
         )
         self.assertIn('docker pull "$BUSYBOX_IMAGE@$BUSYBOX_IMAGE_DIGEST"', stack_move)
         self.assertIn("command -v aws >/dev/null", stack_move)
+        self.assertIn(
+            'docker image tag "$BUSYBOX_IMAGE_ID" "$BUSYBOX_IMAGE"', stack_move
+        )
+        self.assertIn(
+            'docker image tag "$SOURCE_POSTGRES_IMAGE_ID" "$SOURCE_POSTGRES_IMAGE"',
+            stack_move,
+        )
+        self.assertIn(
+            'docker image tag "$TARGET_POSTGRES_IMAGE_ID" "$TARGET_POSTGRES_IMAGE"',
+            stack_move,
+        )
 
 
 if __name__ == "__main__":
