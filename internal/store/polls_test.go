@@ -205,6 +205,76 @@ func TestPollDrawUsesControlledSource(t *testing.T) {
 	}
 }
 
+func TestChannelPollAnswerMediaURLSurvivesCreationRetryAndReloadedHistory(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	dsn := pgtest.DSN(t)
+	s := openStore(t, dsn)
+	creator := mustUser(t, s, "+15551400131")
+	channel := mustChannel(t, s, creator.ID, "channel poll answer links")
+	const randomID = 140131
+	mediaURL := "https://poll-answer.invalid/channel?a=1"
+	draft := ordinaryPollDraft()
+	draft.Answers[0].MediaURL = &mediaURL
+
+	createdMessage, created, _, duplicate, err := s.PostChannelPollAs(
+		ctx, channel.ID, creator.ID, randomID, "linked answer", draft,
+	)
+	if err != nil || duplicate {
+		t.Fatalf("create channel poll = duplicate %v, err %v", duplicate, err)
+	}
+	assertMediaURL := func(label string, poll store.Poll) {
+		t.Helper()
+		if len(poll.Answers) == 0 || poll.Answers[0].MediaURL == nil || *poll.Answers[0].MediaURL != mediaURL {
+			t.Fatalf("%s first answer URL = %+v, want %q", label, poll.Answers, mediaURL)
+		}
+	}
+	assertMediaURL("creation", created)
+	if createdMessage.Poll == nil {
+		t.Fatal("created channel message omitted its poll")
+	}
+	assertMediaURL("created message", *createdMessage.Poll)
+
+	retriedMessage, retried, _, duplicate, err := s.ChannelPollRetryAs(ctx, channel.ID, creator.ID, randomID)
+	if err != nil || !duplicate {
+		t.Fatalf("retry channel poll = duplicate %v, err %v; want duplicate", duplicate, err)
+	}
+	if retriedMessage.LocalID != createdMessage.LocalID || retried.ID != created.ID {
+		t.Fatalf(
+			"retry message/poll = %d/%d, want original %d/%d",
+			retriedMessage.LocalID, retried.ID, createdMessage.LocalID, created.ID,
+		)
+	}
+	assertMediaURL("retry", retried)
+	if retriedMessage.Poll == nil {
+		t.Fatal("retried channel message omitted its poll")
+	}
+	assertMediaURL("retried message", *retriedMessage.Poll)
+
+	reloaded := openStore(t, dsn)
+	history, err := reloaded.ChannelHistory(ctx, channel.ID, 0, 10)
+	if err != nil {
+		t.Fatalf("reload channel history: %v", err)
+	}
+	var found bool
+	for _, message := range history {
+		if message.LocalID == createdMessage.LocalID {
+			found = true
+			persisted, pollErr := reloaded.PollForMessage(ctx, creator.ID, store.PollMessageRef{
+				PeerType: store.PeerTypeChannel, PeerID: channel.ID, LocalID: message.LocalID,
+			})
+			if pollErr != nil {
+				t.Fatalf("read poll from reloaded channel history: %v", pollErr)
+			}
+			assertMediaURL("reloaded history", persisted)
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("reloaded channel history omitted poll message %d: %+v", createdMessage.LocalID, history)
+	}
+}
+
 func TestCreatePollValidatesFixedAnswersBeforeRandomIDDedup(t *testing.T) {
 	t.Parallel()
 	s := open(t)

@@ -356,7 +356,7 @@ func createChannelPollTx(
 	for position, answer := range canonical.Answers {
 		if err = q.InsertPollOption(ctx, db.InsertPollOptionParams{
 			PollID: row.ID, Option: answer.Option, Text: answer.Text,
-			Correct: answer.Correct, Position: int16(position),
+			MediaUrl: answer.MediaURL, Correct: answer.Correct, Position: int16(position),
 		}); err != nil {
 			return Poll{}, fmt.Errorf("insert channel poll option %d: %w", position, err)
 		}
