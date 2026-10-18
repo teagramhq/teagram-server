@@ -2256,11 +2256,14 @@ func (h *handlers) handleSearch(r *mtproto.Request) (bin.Encoder, error) {
 		return nil, errMessageTooLong
 	}
 	filterPinned := false
+	filterChatPhotos := false
 	var mediaFilter store.MediaSearchFilter
 	switch req.Filter.(type) {
 	case *tg.InputMessagesFilterEmpty:
 	case *tg.InputMessagesFilterPinned:
 		filterPinned = true
+	case *tg.InputMessagesFilterChatPhotos:
+		filterChatPhotos = true
 	default:
 		var supported bool
 		mediaFilter, supported = mediaSearchFilterFromTL(req.Filter)
@@ -2269,7 +2272,7 @@ func (h *handlers) handleSearch(r *mtproto.Request) (bin.Encoder, error) {
 		}
 	}
 	mediaSearch := mediaFilter != 0
-	if req.Q == "" && !filterPinned && !mediaSearch {
+	if req.Q == "" && !filterPinned && !filterChatPhotos && !mediaSearch {
 		return nil, errSearchQueryEmpty
 	}
 	peerType, peerID, err := h.inputPeer(req.Peer, r.UserID)
@@ -2290,6 +2293,27 @@ func (h *handlers) handleSearch(r *mtproto.Request) (bin.Encoder, error) {
 	if peerType == store.PeerTypeChat {
 		if err = h.requireMember(r.Ctx, peerID, r.UserID); err != nil {
 			return nil, err
+		}
+	}
+	if filterChatPhotos {
+		switch peerType {
+		case store.PeerTypeChannel:
+			if _, err = h.requireChannelMember(r.Ctx, peerID, r.UserID); err != nil {
+				return nil, err
+			}
+			// Channels do not store profile-photo service messages. Returning an
+			// empty channel page keeps a valid ChatPhotos query distinct from an
+			// unrecognised filter without exposing channel state to non-members.
+			return h.channelMessagesWithCount(r, peerID, nil, 0)
+		case store.PeerTypeChat:
+			return h.chatSearch(r, peerID, nil, nil, 0, false)
+		case store.PeerTypeUser:
+			users, err := h.twoUsers(r.Ctx, r.UserID, peerID)
+			if err != nil {
+				h.log.Error("search chat photos users", "user_id", r.UserID, "err", err)
+				return nil, errInternal
+			}
+			return &tg.MessagesMessages{Messages: []tg.MessageClass{}, Users: users}, nil
 		}
 	}
 
