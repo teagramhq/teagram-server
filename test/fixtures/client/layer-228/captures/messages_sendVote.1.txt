@@ -1,0 +1,10 @@
+# source: mtp_15_30.txt line 14839
+        body: { messages_sendVote
+          peer: { inputPeerChat
+            chat_id: <N> [LONG],
+          },
+          msg_id: <N> [INT],
+          options: [ vector<0x-4ad791dc> (1)
+            "<N>" [STRING],
+          ],
+        },

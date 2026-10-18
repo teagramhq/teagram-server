@@ -1,0 +1,21 @@
+{
+  "layer": 228,
+  "client": "Teagram Desktop 7.0.9",
+  "source": "captures/messages_sendVote.1.txt",
+  "method": "messages.sendVote",
+  "request": {
+    "type": "messages.sendVote",
+    "fields": {
+      "peer": {
+        "type": "inputPeerChat",
+        "fields": {
+          "chat_id": "<N>"
+        }
+      },
+      "msg_id": "<N>",
+      "options": [
+        "REDACTED"
+      ]
+    }
+  }
+}

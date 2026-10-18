@@ -445,10 +445,12 @@ func TestSmokeClientRequestFixturesAreLayer228Shapes(t *testing.T) {
 		"messages_deleteHistory.1",
 		"messages_editChatAbout.1",
 		"messages_editChatAbout.2",
+		"messages_editMessage.1",
 		"messages_exportChatInvite.1",
 		"messages_getFullChat.1",
 		"messages_getHistory.1",
 		"messages_getHistory.2",
+		"messages_getHistory.second-account.1",
 		"photos_getUserPhotos.1",
 		"messages_sendMedia.1",
 		"messages_sendMedia.2",
@@ -457,6 +459,7 @@ func TestSmokeClientRequestFixturesAreLayer228Shapes(t *testing.T) {
 		"messages_sendMessage.1",
 		"messages_sendMessage.2",
 		"messages_sendMessage.3",
+		"messages_sendVote.1",
 		"messages_setTyping.1",
 		"upload_saveFilePart.1",
 		"upload_saveFilePart.8",
@@ -480,8 +483,9 @@ func testSmokeClientRequestFixtures(t *testing.T) {
 	const phoneCreator, phoneMember = "+15551048901", "+15551048902"
 	seedSmokeUsers(t, f, phoneCreator, phoneMember)
 	creatorRequests := &clientRequestRecorder{}
+	memberRequests := &clientRequestRecorder{}
 	creator := newSmokeClientWithRequests(t, f, "Client fixture creator", phoneCreator, creatorRequests)
-	member := newSmokeClient(t, f, "Client fixture member", phoneMember)
+	member := newSmokeClientWithRequests(t, f, "Client fixture member", phoneMember, memberRequests)
 	for _, fixtureName := range []string{"auth.sendCode.1", "auth.signIn.1"} {
 		if err := creator.requests.matchFixtureSince(0, fixtureName); err != nil {
 			t.Fatalf("replay login fixture %s: %v", fixtureName, err)
@@ -980,6 +984,8 @@ func testSmokeClientRequestFixtures(t *testing.T) {
 		}
 	}
 
+	replayCapturedPollVoteAndClose(t, creator, member, chatID)
+
 	const answerURL = "https://poll-answer.invalid/example?a=1"
 	request := smokeClientPollRequest(chatID, "Answer link fixture", 1048903)
 	pollMedia, ok := request.Media.(*tg.InputMediaPoll)
@@ -1016,6 +1022,167 @@ func testSmokeClientRequestFixtures(t *testing.T) {
 		return
 	}
 	t.Fatal("poll answer web-page fixture response omitted updateNewMessage")
+}
+
+func replayCapturedPollVoteAndClose(t *testing.T, creator, member *smokeClient, chatID int64) {
+	t.Helper()
+
+	const question = "MAIN1999client-shapepoll"
+	const pollRequestID = int64(1048991)
+	var pollID int64
+	var sendResult tg.UpdatesClass
+	if err := creator.call(creator.lifecycle.ctx, func(ctx context.Context, api *tg.Client) error {
+		var err error
+		sendResult, err = api.MessagesSendMedia(ctx, &tg.MessagesSendMediaRequest{
+			Peer: &tg.InputPeerChat{ChatID: chatID},
+			Media: &tg.InputMediaPoll{Poll: tg.Poll{
+				ID:             pollRequestID,
+				PublicVoters:   true,
+				MultipleChoice: true,
+				ShuffleAnswers: true,
+				Question:       tg.TextWithEntities{Text: question},
+				Answers: []tg.PollAnswerClass{
+					&tg.InputPollAnswer{Text: tg.TextWithEntities{Text: "Yes"}},
+					&tg.InputPollAnswer{Text: tg.TextWithEntities{Text: "No"}},
+				},
+			}},
+			RandomID: pollRequestID + 1,
+		})
+		return err
+	}); err != nil {
+		t.Fatalf("send fixture vote poll: %v", err)
+	}
+	updates, ok := sendResult.(*tg.Updates)
+	if !ok {
+		t.Fatalf("fixture vote poll result = %T, want *tg.Updates", sendResult)
+	}
+	var pollMessage *tg.Message
+	for _, update := range updates.Updates {
+		created, ok := update.(*tg.UpdateNewMessage)
+		if !ok {
+			continue
+		}
+		message, ok := created.Message.(*tg.Message)
+		if !ok {
+			t.Fatalf("fixture vote poll message = %T, want *tg.Message", created.Message)
+		}
+		poll, ok := message.Media.(*tg.MessageMediaPoll)
+		if !ok || poll.Poll.Question.Text != question {
+			t.Fatalf("fixture vote poll media = %#v, want question %q", message.Media, question)
+		}
+		pollID = poll.Poll.ID
+		answer, ok := poll.Poll.Answers[0].(*tg.PollAnswer)
+		if !ok || len(answer.Option) == 0 {
+			t.Fatalf("fixture vote poll first answer = %#v, want server option", poll.Poll.Answers[0])
+		}
+		pollMessage = message
+		break
+	}
+	if pollMessage == nil {
+		t.Fatal("fixture vote poll response omitted updateNewMessage")
+	}
+	var memberPollMessage *tg.Message
+	var firstOption []byte
+	var history tg.MessagesMessagesClass
+	if err := fixtureClientCall(t, member, "messages_getHistory.second-account.1", func(ctx context.Context, api *tg.Client) error {
+		var err error
+		history, err = api.MessagesGetHistory(ctx, &tg.MessagesGetHistoryRequest{
+			Peer:  &tg.InputPeerChat{ChatID: chatID},
+			Limit: 50,
+		})
+		if err != nil {
+			return err
+		}
+		messages, ok := history.(*tg.MessagesMessages)
+		if !ok {
+			return fmt.Errorf("second-account history = %T, want *tg.MessagesMessages", history)
+		}
+		for _, candidate := range messages.Messages {
+			message, ok := candidate.(*tg.Message)
+			if !ok {
+				continue
+			}
+			poll, ok := message.Media.(*tg.MessageMediaPoll)
+			if !ok || poll.Poll.ID != pollID || poll.Poll.Question.Text != question {
+				continue
+			}
+			answer, ok := poll.Poll.Answers[0].(*tg.PollAnswer)
+			if !ok || len(answer.Option) == 0 {
+				return fmt.Errorf("second-account poll first answer = %#v, want server option", poll.Poll.Answers[0])
+			}
+			memberPollMessage, firstOption = message, answer.Option
+			return nil
+		}
+		return fmt.Errorf("second-account history omitted poll %d", pollID)
+	}); err != nil {
+		t.Fatalf("replay second-account history fixture: %v", err)
+	}
+
+	var voteResult tg.UpdatesClass
+	if err := fixtureClientCall(t, member, "messages_sendVote.1", func(ctx context.Context, api *tg.Client) error {
+		var err error
+		voteResult, err = api.MessagesSendVote(ctx, &tg.MessagesSendVoteRequest{
+			Peer: &tg.InputPeerChat{ChatID: chatID}, MsgID: memberPollMessage.ID, Options: [][]byte{firstOption},
+		})
+		return err
+	}); err != nil {
+		t.Fatalf("replay poll vote fixture: %v", err)
+	}
+	voteUpdates, ok := voteResult.(*tg.Updates)
+	if !ok {
+		t.Fatalf("fixture poll vote result = %T, want *tg.Updates", voteResult)
+	}
+	var vote *tg.UpdateMessagePoll
+	for _, update := range voteUpdates.Updates {
+		if result, ok := update.(*tg.UpdateMessagePoll); ok {
+			vote = result
+			break
+		}
+	}
+	if vote == nil || vote.PollID != pollID || len(vote.Results.Results) != 2 || vote.Results.Results[0].Voters != 1 {
+		t.Fatalf("fixture poll vote update = %+v, want poll %d with one first-option vote", vote, pollID)
+	}
+	voted := recvOrCtx(t, member.lifecycle.ctx, member.push.editMsg, "second-account poll vote")
+	votedPoll, ok := voted.Media.(*tg.MessageMediaPoll)
+	if !ok || votedPoll.Poll.ID != pollID || votedPoll.Poll.Closed || len(votedPoll.Results.Results) != 2 || votedPoll.Results.Results[0].Voters != 1 {
+		t.Fatalf("second-account voted poll = %+v, want open poll %d with one first-option vote", voted, pollID)
+	}
+
+	closePoll := tg.Poll{
+		ID:             pollID,
+		PublicVoters:   true,
+		MultipleChoice: true,
+		ShuffleAnswers: true,
+		Question:       tg.TextWithEntities{Text: question},
+		Answers: []tg.PollAnswerClass{
+			&tg.InputPollAnswer{Text: tg.TextWithEntities{Text: "Yes"}},
+			&tg.InputPollAnswer{Text: tg.TextWithEntities{Text: "No"}},
+		},
+	}
+	closePoll.SetClosed(true)
+	var closeResult tg.UpdatesClass
+	if err := fixtureClientCall(t, creator, "messages_editMessage.1", func(ctx context.Context, api *tg.Client) error {
+		var err error
+		closeResult, err = api.MessagesEditMessage(ctx, &tg.MessagesEditMessageRequest{
+			Peer: &tg.InputPeerChat{ChatID: chatID},
+			ID:   pollMessage.ID,
+			Media: &tg.InputMediaPoll{
+				Poll: closePoll,
+			},
+		})
+		return err
+	}); err != nil {
+		t.Fatalf("replay close-poll fixture: %v", err)
+	}
+	if _, ok := closeResult.(*tg.Updates); !ok {
+		t.Fatalf("fixture close poll result = %T, want *tg.Updates", closeResult)
+	}
+	closed := recvOrCtx(t, member.lifecycle.ctx, member.push.editMsg, "second-account poll close")
+	closedPoll, ok := closed.Media.(*tg.MessageMediaPoll)
+	if !ok || closed.ID != memberPollMessage.ID || closedPoll.Poll.ID != pollID || !closedPoll.Poll.Closed ||
+		len(closedPoll.Results.Results) != 2 || closedPoll.Results.Results[0].Voters != 1 {
+		t.Fatalf("second-account closed poll = %+v, want closed poll %d with one first-option vote", closed, pollID)
+	}
 }
 
 func replayFixtureSendMessage(t *testing.T, client *smokeClient, fixtureName string, peer tg.InputPeerClass, message string, randomID int64) {
