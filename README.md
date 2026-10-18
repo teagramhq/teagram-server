@@ -47,9 +47,10 @@ make build
 make run
 ```
 
-On a fresh database, registration is closed by default. Temporarily set
-`TG_REGISTRATION=open` to create the first account, then close registration
-again.
+On a fresh database, registration is closed by default. Keep
+`TG_REGISTRATION=open` on the development server so users can create accounts
+after the first one; do not close registration after initial setup. Other
+deployments can choose a different registration mode for their access policy.
 
 ## Configuration
 

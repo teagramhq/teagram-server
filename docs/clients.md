@@ -387,10 +387,12 @@ mode does not need that secret. The client sets the password with
 `account.updatePasswordSettings`. The account remains provisional until
 password setup succeeds, and it cannot use normal RPCs before then.
 
-For a fresh database, temporarily set `TG_REGISTRATION=open`, complete the
-first account sign-up and password setup, then close registration again. The
-first account committed by the admission transaction becomes the durable server
-administrator. For later invited accounts, issue an invite with
+For a fresh database, set `TG_REGISTRATION=open` and complete the first account
+sign-up and password setup. Keep registration open on the development server so
+users can continue creating accounts; other deployments can close registration
+or switch to invite mode after initial setup. The first account committed by
+the admission transaction becomes the durable server administrator. For later
+invited accounts, issue an invite with
 `teagramd invite issue <username>`; the command prints the secret once.
 Deliver it to the user through a private channel. `teagramd invite list`
 and `teagramd invite revoke <id>` manage outstanding invites.
