@@ -2,6 +2,7 @@ package api_test
 
 import (
 	"context"
+	"reflect"
 	"slices"
 	"strings"
 	"testing"
@@ -1553,7 +1554,7 @@ func TestOpenAnswersPollWithOneOptionIsRejectedBeforeWrites(t *testing.T) {
 	}
 }
 
-func TestSendPollRejectsClientSuppliedCreatorFlagBeforeWrites(t *testing.T) {
+func TestSendPollIgnoresClientSuppliedCreatorFlag(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
 	s := openStore(t)
@@ -1561,23 +1562,168 @@ func TestSendPollRejectsClientSuppliedCreatorFlagBeforeWrites(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create creator: %v", err)
 	}
-	chat, err := s.CreateChat(ctx, creator.ID, "Polls", nil)
+	other, err := s.CreateUser(ctx, "+15551401008")
+	if err != nil {
+		t.Fatalf("create other user: %v", err)
+	}
+	chat, err := s.CreateChat(ctx, creator.ID, "Poll creator flag", nil)
 	if err != nil {
 		t.Fatalf("create chat: %v", err)
 	}
-	media := fixedPollMedia("Creator flag?", "A", "B")
-	media.Poll.SetCreator(true)
-	if _, err = api.SendMediaForTest(s, creator.ID, newBlobs(t), api.TestMaxUserStorageBytes, &tg.MessagesSendMediaRequest{
-		Peer: api.InputPeerChat(creator.ID, chat.ID), Media: media, RandomID: 1401007,
-	}); err == nil {
-		t.Fatal("poll with client-supplied creator flag succeeded")
+	channel := createChannel(t, s, creator.ID, &tg.ChannelsCreateChannelRequest{
+		Megagroup: true,
+		Title:     "Poll creator flag",
+	})
+
+	peers := []struct {
+		name        string
+		peer        tg.InputPeerClass
+		peerType    store.PeerType
+		peerID      int64
+		messageFrom func(*testing.T, any) *tg.Message
+	}{
+		{
+			name:        "basic group",
+			peer:        api.InputPeerChat(creator.ID, chat.ID),
+			peerType:    store.PeerTypeChat,
+			peerID:      chat.ID,
+			messageFrom: messageOf,
+		},
+		{
+			name:        "private chat",
+			peer:        api.InputPeerUser(creator.ID, other.ID),
+			peerType:    store.PeerTypeUser,
+			peerID:      other.ID,
+			messageFrom: messageOf,
+		},
+		{
+			name:        "channel",
+			peer:        api.InputPeerChannel(creator.ID, channel.ID),
+			peerType:    store.PeerTypeChannel,
+			peerID:      channel.ID,
+			messageFrom: channelMessageFromSendResult,
+		},
 	}
-	messages, err := s.History(ctx, creator.ID, store.PeerTypeChat, chat.ID, 0, 10)
+
+	for i, peer := range peers {
+		t.Run(peer.name, func(t *testing.T) {
+			makeRequest := func(withCreator bool) *tg.MessagesSendMediaRequest {
+				poll := tg.Poll{
+					Question: tg.TextWithEntities{Text: "Choose one"},
+					Answers: []tg.PollAnswerClass{
+						&tg.PollAnswer{Text: tg.TextWithEntities{Text: "First"}, Option: []byte("0")},
+						&tg.PollAnswer{Text: tg.TextWithEntities{Text: "Second"}, Option: []byte("1")},
+					},
+				}
+				poll.SetRevotingDisabled(true)
+				if withCreator {
+					poll.SetCreator(true)
+				}
+				return &tg.MessagesSendMediaRequest{
+					Peer:     peer.peer,
+					Message:  "Description stuff",
+					Media:    &tg.InputMediaPoll{Poll: poll},
+					RandomID: 1401007 + int64(i*2),
+				}
+			}
+
+			baselineResult, sendErr := api.SendMediaForTest(s, creator.ID, newBlobs(t), api.TestMaxUserStorageBytes, makeRequest(false))
+			if sendErr != nil {
+				t.Fatalf("send poll without creator flag: %v", sendErr)
+			}
+			baselineMessage := peer.messageFrom(t, baselineResult)
+			flaggedRequest := makeRequest(true)
+			flaggedRequest.RandomID++
+			flaggedResult, sendErr := api.SendMediaForTest(s, creator.ID, newBlobs(t), api.TestMaxUserStorageBytes, flaggedRequest)
+			if sendErr != nil {
+				t.Fatalf("send poll with creator flag: %v", sendErr)
+			}
+			flaggedMessage := peer.messageFrom(t, flaggedResult)
+
+			baselineMedia, ok := baselineMessage.Media.(*tg.MessageMediaPoll)
+			if !ok {
+				t.Fatalf("baseline media = %T, want messageMediaPoll", baselineMessage.Media)
+			}
+			flaggedMedia, ok := flaggedMessage.Media.(*tg.MessageMediaPoll)
+			if !ok {
+				t.Fatalf("creator-flag media = %T, want messageMediaPoll", flaggedMessage.Media)
+			}
+			if baselineMessage.Message != "Description stuff" || flaggedMessage.Message != baselineMessage.Message {
+				t.Fatalf("description baseline=%q creator-flag=%q, want %q", baselineMessage.Message, flaggedMessage.Message, "Description stuff")
+			}
+			if !flaggedMedia.Poll.Creator || !flaggedMedia.Poll.RevotingDisabled {
+				t.Fatalf("creator-flag poll = creator:%v revoting_disabled:%v, want both true", flaggedMedia.Poll.Creator, flaggedMedia.Poll.RevotingDisabled)
+			}
+			if len(flaggedMedia.Poll.Answers) != 2 {
+				t.Fatalf("creator-flag poll has %d answers, want two", len(flaggedMedia.Poll.Answers))
+			}
+			for i, option := range [][]byte{[]byte("0"), []byte("1")} {
+				answer, ok := flaggedMedia.Poll.Answers[i].(*tg.PollAnswer)
+				wantText := []string{"First", "Second"}[i]
+				if !ok || !slices.Equal(answer.Option, option) || answer.Text.Text != wantText {
+					t.Fatalf("creator-flag answer %d = %#v, want text %q and option %q", i, flaggedMedia.Poll.Answers[i], wantText, option)
+				}
+			}
+
+			baselinePoll := baselineMedia.Poll
+			flaggedPoll := flaggedMedia.Poll
+			baselinePoll.ID, flaggedPoll.ID = 0, 0
+			if !reflect.DeepEqual(baselinePoll, flaggedPoll) || !reflect.DeepEqual(baselineMedia.Results, flaggedMedia.Results) {
+				t.Fatalf("creator flag changed returned poll: baseline=%+v creator-flag=%+v", baselineMedia, flaggedMedia)
+			}
+
+			baselineStored, pollErr := s.PollForMessage(ctx, creator.ID, store.PollMessageRef{
+				PeerType: peer.peerType, PeerID: peer.peerID, LocalID: int64(baselineMessage.ID),
+			})
+			if pollErr != nil {
+				t.Fatalf("load baseline stored poll: %v", pollErr)
+			}
+			flaggedStored, pollErr := s.PollForMessage(ctx, creator.ID, store.PollMessageRef{
+				PeerType: peer.peerType, PeerID: peer.peerID, LocalID: int64(flaggedMessage.ID),
+			})
+			if pollErr != nil {
+				t.Fatalf("load creator-flag stored poll: %v", pollErr)
+			}
+			baselineStored.ID, flaggedStored.ID = 0, 0
+			if !reflect.DeepEqual(baselineStored, flaggedStored) {
+				t.Fatalf("creator flag changed stored poll: baseline=%+v creator-flag=%+v", baselineStored, flaggedStored)
+			}
+		})
+	}
+}
+
+func TestSendPollStillRejectsUnsupportedInputFlags(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	s := openStore(t)
+	creator, err := s.CreateUser(ctx, "+15551401009")
 	if err != nil {
-		t.Fatalf("chat history after invalid poll: %v", err)
+		t.Fatalf("create creator: %v", err)
 	}
-	if len(messages) != 0 {
-		t.Fatalf("invalid creator flag wrote %d chat messages", len(messages))
+	chat, err := s.CreateChat(ctx, creator.ID, "Unsupported poll flags", nil)
+	if err != nil {
+		t.Fatalf("create chat: %v", err)
+	}
+	cases := []struct {
+		name string
+		set  func(*tg.Poll)
+	}{
+		{name: "hide_results_until_close", set: func(poll *tg.Poll) { poll.SetHideResultsUntilClose(true) }},
+		{name: "subscribers_only", set: func(poll *tg.Poll) { poll.SetSubscribersOnly(true) }},
+		{name: "countries_iso2", set: func(poll *tg.Poll) { poll.SetCountriesISO2([]string{"US"}) }},
+		{name: "closed_on_create", set: func(poll *tg.Poll) { poll.SetClosed(true) }},
+	}
+	for i, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			media := fixedPollMedia("Unsupported option?", "A", "B")
+			tc.set(&media.Poll)
+			_, sendErr := api.SendMediaForTest(s, creator.ID, newBlobs(t), api.TestMaxUserStorageBytes, &tg.MessagesSendMediaRequest{
+				Peer: api.InputPeerChat(creator.ID, chat.ID), Media: media, RandomID: 1401020 + int64(i),
+			})
+			if !tgerr.Is(sendErr, "POLL_ANSWERS_INVALID") {
+				t.Fatalf("send poll with %s flag error = %v, want POLL_ANSWERS_INVALID", tc.name, sendErr)
+			}
+		})
 	}
 }
 
