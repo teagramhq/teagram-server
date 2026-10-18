@@ -705,7 +705,8 @@ make_fixture() {
   source_root=$(cd "$SCRIPT_DIR/../../.." && pwd -P)
   cp -a "$source_root/migrations" "$checkout/migrations"
   cp "$SCRIPT_DIR/rollout-runner.sh" "$SCRIPT_DIR/rollout-verifier.sh" \
-    "$SCRIPT_DIR/schema-result-gate.sh" "$SCRIPT_DIR/schema-result-gate.py" "$MODE_HELPER" "$STACK_MOVE_HELPER" "$checkout/deploy/teagramd/rollout-runner/"
+    "$SCRIPT_DIR/schema-result-gate.sh" "$SCRIPT_DIR/schema-result-gate.py" "$MODE_HELPER" \
+    "$SCRIPT_DIR/qualify-rustfs-transition.py" "$STACK_MOVE_HELPER" "$checkout/deploy/teagramd/rollout-runner/"
   cp "$SCRIPT_DIR/local-compose-e58ba20.yml" "$SCRIPT_DIR/local-compose-598359e.yml" \
     "$SCRIPT_DIR/local-compose-df9ffe5.yml" "$SCRIPT_DIR/local-compose-5602c7c.yml" \
     "$SCRIPT_DIR/local-compose-cce00d1.yml" \
@@ -714,7 +715,8 @@ make_fixture() {
   target_runtime="$state/target-runtime"
   mkdir -m 700 "$target_runtime"
   cp "$SCRIPT_DIR/rollout-runner.sh" "$SCRIPT_DIR/rollout-verifier.sh" \
-    "$SCRIPT_DIR/schema-result-gate.sh" "$SCRIPT_DIR/schema-result-gate.py" "$MODE_HELPER" "$STACK_MOVE_HELPER" "$target_runtime/"
+    "$SCRIPT_DIR/schema-result-gate.sh" "$SCRIPT_DIR/schema-result-gate.py" "$MODE_HELPER" \
+    "$SCRIPT_DIR/qualify-rustfs-transition.py" "$STACK_MOVE_HELPER" "$target_runtime/"
   cp "$SCRIPT_DIR/local-compose-e58ba20.yml" "$SCRIPT_DIR/local-compose-598359e.yml" \
     "$SCRIPT_DIR/local-compose-df9ffe5.yml" "$SCRIPT_DIR/local-compose-5602c7c.yml" \
     "$SCRIPT_DIR/local-compose-cce00d1.yml" \
@@ -848,7 +850,8 @@ make_real_git_fixture() {
   git -C "$checkout" reset --hard "$baseline_sha" >/dev/null
   mkdir -m 700 "$runtime_dir"
   cp "$SCRIPT_DIR/rollout-runner.sh" "$SCRIPT_DIR/rollout-verifier.sh" \
-    "$SCRIPT_DIR/schema-result-gate.sh" "$SCRIPT_DIR/schema-result-gate.py" "$MODE_HELPER" "$STACK_MOVE_HELPER" "$runtime_dir/"
+    "$SCRIPT_DIR/schema-result-gate.sh" "$SCRIPT_DIR/schema-result-gate.py" "$MODE_HELPER" \
+    "$SCRIPT_DIR/qualify-rustfs-transition.py" "$STACK_MOVE_HELPER" "$runtime_dir/"
   chmod 600 "$runtime_dir/"*.sh "$runtime_dir/"*.py
   if [ "$scenario" = source-mismatch ]; then
     printf '%s\n' '# fixture source mismatch' >> "$runtime_dir/rollout-runner.sh"
@@ -957,7 +960,8 @@ make_fixed_target_transition_fixture() {
   git -C "$checkout" reset --hard "$baseline_sha" >/dev/null
 
   cp "$SCRIPT_DIR/rollout-runner.sh" "$SCRIPT_DIR/rollout-verifier.sh" \
-    "$SCRIPT_DIR/schema-result-gate.sh" "$SCRIPT_DIR/schema-result-gate.py" "$MODE_HELPER" "$STACK_MOVE_HELPER" "$runtime_dir/"
+    "$SCRIPT_DIR/schema-result-gate.sh" "$SCRIPT_DIR/schema-result-gate.py" "$MODE_HELPER" \
+    "$SCRIPT_DIR/qualify-rustfs-transition.py" "$STACK_MOVE_HELPER" "$runtime_dir/"
   chmod 600 "$runtime_dir/"*.sh "$runtime_dir/"*.py
   printf '%s\n' "$baseline_sha" > "$state/head"
   printf '%s\n' "$runtime_source_sha" > "$state/origin"
