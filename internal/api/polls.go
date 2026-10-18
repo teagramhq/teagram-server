@@ -665,7 +665,8 @@ func pollDraftFromInput(media *tg.InputMediaPoll) (store.PollDraft, error) {
 		return store.PollDraft{}, store.ErrPollInvalid
 	}
 	poll := media.Poll
-	const supportedPollFlags = (1 << 1) | (1 << 2) | (1 << 3) | (1 << 4) | (1 << 5) | (1 << 6) | (1 << 7) | (1 << 8)
+	// Creator is server-owned, but clients may echo it on input; accept and ignore it.
+	const supportedPollFlags = (1 << 1) | (1 << 2) | (1 << 3) | (1 << 4) | (1 << 5) | (1 << 6) | (1 << 7) | (1 << 8) | (1 << 10)
 	if uint32(poll.Flags)&^uint32(supportedPollFlags) != 0 || poll.HideResultsUntilClose || poll.SubscribersOnly || len(poll.CountriesISO2) != 0 {
 		return store.PollDraft{}, store.ErrPollInvalid
 	}

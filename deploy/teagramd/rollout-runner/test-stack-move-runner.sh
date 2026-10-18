@@ -19,7 +19,7 @@ SOURCE_PROJECT=telegram-server
 TARGET_PROJECT=teagram
 SOURCE_VOLUMES=(telegram-server_pgdata telegram-server_tgkey telegram-server_tgblobs telegram-server_rustfsdata)
 TARGET_VOLUMES=(teagram_pgdata teagram_tgkey teagram_tgblobs teagram_rustfsdata)
-BUSYBOX_IMAGE=mirror.gcr.io/library/busybox:1.37.0
+BUSYBOX_IMAGE=mirror.gcr.io/library/busybox:1.37
 SOURCE_POSTGRES_IMAGE=mirror.gcr.io/library/postgres:16-alpine
 RUSTFS_IMAGE=mirror.gcr.io/rustfs/rustfs:1.0.1@sha256:1803faef57627e2d9c2e7d89d655d712ddded5389040054987163043fecb6a3c
 TARGET_SHA=1234567890abcdef1234567890abcdef12345678
@@ -215,6 +215,14 @@ YAML
 cat > "$TMP/s3-source.yml" <<'YAML'
 name: telegram-server
 services:
+  postgres:
+    image: mirror.gcr.io/library/postgres:16-alpine
+    environment:
+      POSTGRES_DB: telegram
+      POSTGRES_PASSWORD: fixture-only
+      POSTGRES_HOST_AUTH_METHOD: trust
+    volumes:
+      - pgdata:/var/lib/postgresql/data
   telegramd:
     image: telegramd:local
     environment:

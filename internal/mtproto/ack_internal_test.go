@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"net/netip"
 	"slices"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -270,8 +271,9 @@ func (s *lockedLogSink) WithGroup(string) slog.Handler      { return s }
 // failAfterConn delivers its frames, accepts the first ok sends and fails every
 // later one, while Close always succeeds.
 type failAfterConn struct {
-	frames [][]byte
-	ok     int
+	frames  [][]byte
+	ok      int
+	sendErr error
 
 	mu    sync.Mutex
 	sends int
@@ -291,7 +293,7 @@ func (c *failAfterConn) Send(context.Context, *bin.Buffer) error {
 	defer c.mu.Unlock()
 	c.sends++
 	if c.sends > c.ok {
-		return errors.New("socket write failed")
+		return c.sendErr
 	}
 	return nil
 }
@@ -303,6 +305,7 @@ func (*failAfterConn) Close() error { return nil }
 // than vanish with the connection.
 func TestFailedAckWriteIsLogged(t *testing.T) {
 	t.Parallel()
+	const rawError = "PRIVATE-ACK-WRITE-DETAIL"
 
 	key := ackTestKey()
 	store := NewMemoryAuthKeyStore()
@@ -316,7 +319,11 @@ func TestFailedAckWriteIsLogged(t *testing.T) {
 	sink := &lockedLogSink{}
 	srv := New(exchange.PrivateKey{}, 2, store, handler, slog.New(sink))
 	// new_session_created goes through; the msgs_ack is the first write to fail.
-	conn := &failAfterConn{frames: [][]byte{ackTestFrame(t, key, 1<<32, &tg.HelpGetNearestDCRequest{})}, ok: 1}
+	conn := &failAfterConn{
+		frames:  [][]byte{ackTestFrame(t, key, 1<<32, &tg.HelpGetNearestDCRequest{})},
+		ok:      1,
+		sendErr: errors.New(rawError),
+	}
 	if err := srv.ServeConn(context.Background(), conn); err == nil {
 		t.Fatal("ServeConn returned nil after its writes failed")
 	}
@@ -327,6 +334,19 @@ func TestFailedAckWriteIsLogged(t *testing.T) {
 		if r.message == "server operation failed" && r.attrs["operation"] == "msgs_ack" {
 			if r.attrs["category"] != string(serverFailureRequest) {
 				t.Fatalf("msgs_ack failure category = %v, want %s", r.attrs["category"], serverFailureRequest)
+			}
+			for key, want := range map[string]any{
+				"rpc_method":     UnknownRPCMethod,
+				"request_id":     int64(0),
+				"error_category": string(RPCResultTransportFailure),
+				"error":          "internal",
+			} {
+				if got := r.attrs[key]; got != want {
+					t.Errorf("msgs_ack %s = %v, want %v", key, got, want)
+				}
+			}
+			if strings.Contains(r.message+fmt.Sprint(r.attrs), rawError) {
+				t.Errorf("msgs_ack failure log exposed raw error: %+v", r)
 			}
 			return
 		}

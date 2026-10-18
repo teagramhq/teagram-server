@@ -18,3 +18,18 @@ jobs:
             echo "PR titles must not contain issue identifiers; move the key to the branch or PR body."
             exit 1
           fi
+
+      - name: Require a Conventional Commit title of at most 72 characters
+        env:
+          LC_ALL: C.UTF-8
+          PR_TITLE: ${{ github.event.pull_request.title }}
+        run: |
+          if [[ "${#PR_TITLE}" -gt 72 ]]; then
+            echo "PR titles must be at most 72 characters and use Conventional Commits format: <type>(<scope>): <description> (scope is optional, ! may precede the colon)."
+            exit 1
+          fi
+
+          if ! printf '%s\n' "$PR_TITLE" | grep -Eq '^(feat|fix|perf|refactor|test|docs|build|ci|chore|revert)(\([a-z0-9._/-]+\))?!?: \S.*$'; then
+            echo "PR titles must match ^(feat|fix|perf|refactor|test|docs|build|ci|chore|revert)(\([a-z0-9._/-]+\))?!?: \S.*$ and be at most 72 characters."
+            exit 1
+          fi

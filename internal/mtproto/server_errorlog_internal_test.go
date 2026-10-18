@@ -4,12 +4,14 @@ import (
 	"context"
 	"crypto/rand"
 	"crypto/rsa"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
 	"log/slog"
 	"net"
 	"net/netip"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -20,6 +22,7 @@ import (
 	"github.com/gotd/td/mt"
 	"github.com/gotd/td/proto"
 	"github.com/gotd/td/tg"
+	"github.com/gotd/td/tgerr"
 )
 
 type serverErrorLogRecord struct {
@@ -415,6 +418,16 @@ func TestConnectionFailureLogsUseSampledSafeCategories(t *testing.T) {
 		if record.attrs["suppressed"] != int64(0) {
 			t.Errorf("first %s suppressed count = %v, want 0", test.name, record.attrs["suppressed"])
 		}
+		if test.category == string(serverFailureRequest) {
+			for key, want := range map[string]any{"rpc_method": UnknownRPCMethod, "error": "internal"} {
+				if got := record.attrs[key]; got != want {
+					t.Errorf("request %s = %v, want %v", key, got, want)
+				}
+			}
+			if _, ok := record.attrs["rpc_error_code"]; ok {
+				t.Errorf("request log included an RPC code without an RPC error: %+v", record.attrs)
+			}
+		}
 		if strings.Contains(record.message+fmt.Sprint(record.attrs), rawDetail) {
 			t.Errorf("%s log exposed raw error details: %+v", test.name, record)
 		}
@@ -460,10 +473,14 @@ func TestConnectionFailureLogsAuthKeyLookupWithSampledCategory(t *testing.T) {
 
 func TestRequestHandlingFailureLogsSafeRPCContext(t *testing.T) {
 	const (
-		requestID = int64(0x123456789)
-		payload   = "PRIVATE-SIGN-IN-PAYLOAD"
-		cause     = "PRIVATE-DATABASE-DETAIL"
+		requestID        = int64(0x123456789)
+		privateUserID    = int64(991337)
+		privateSessionID = int64(0x112233445566)
+		phoneNumber      = "+15551239999"
+		payload          = "PRIVATE-SIGN-IN-PAYLOAD +15551239999"
+		cause            = "PRIVATE-DATABASE-DETAIL"
 	)
+	authKeyID := [8]byte{0xde, 0xad, 0xbe, 0xef, 0xfe, 0xed, 0xfa, 0xce}
 	sink := &serverErrorLogSink{}
 	handler := NewDispatcher().HandleFuncNamed(tg.AuthSignInRequestTypeID, "auth.signIn", func(*Conn, *Request) error {
 		return errors.New(cause)
@@ -472,7 +489,14 @@ func TestRequestHandlingFailureLogsSafeRPCContext(t *testing.T) {
 	var body bin.Buffer
 	body.PutID(tg.AuthSignInRequestTypeID)
 	body.PutString(payload)
-	req := &Request{MsgID: requestID, Buf: &body, Ctx: context.Background()}
+	req := &Request{
+		AuthKeyID: authKeyID,
+		UserID:    privateUserID,
+		SessionID: privateSessionID,
+		MsgID:     requestID,
+		Buf:       &body,
+		Ctx:       context.Background(),
+	}
 
 	err := server.handle(nil, req)
 	if err == nil {
@@ -492,12 +516,75 @@ func TestRequestHandlingFailureLogsSafeRPCContext(t *testing.T) {
 		"rpc_method":     "auth.signIn",
 		"request_id":     requestID,
 		"error_category": string(RPCResultInternal),
+		"error":          "internal",
 	} {
 		if got := record.attrs[key]; got != want {
 			t.Errorf("%s = %v, want %v", key, got, want)
 		}
 	}
-	if logged := record.message + fmt.Sprint(record.attrs); strings.Contains(logged, payload) || strings.Contains(logged, cause) {
-		t.Fatalf("failure record exposed request data or raw error: %s", logged)
+	logged := record.message + fmt.Sprint(record.attrs)
+	for _, forbidden := range []string{
+		payload,
+		phoneNumber,
+		cause,
+		strconv.FormatInt(privateUserID, 10),
+		strconv.FormatInt(privateSessionID, 10),
+		hex.EncodeToString(authKeyID[:]),
+		fmt.Sprint(authKeyID),
+	} {
+		if strings.Contains(logged, forbidden) {
+			t.Errorf("failure record exposed private request data %q: %s", forbidden, logged)
+		}
+	}
+}
+
+func TestRequestFailureLogIncludesSafeRPCErrorCode(t *testing.T) {
+	const rawError = "INTERNAL_PRIVATE_DETAIL"
+	sink := &serverErrorLogSink{}
+	server := New(exchange.PrivateKey{}, 2, NewMemoryAuthKeyStore(), nil, slog.New(sink))
+	req := &Request{rpcMethod: "messages.getDialogs"}
+	err := errors.Join(errRequestHandlingFailure, requestFailureContext(req, tgerr.New(500, rawError)))
+
+	server.logConnectionFailure(err)
+	if len(sink.records) != 1 {
+		t.Fatalf("failure records = %d, want 1", len(sink.records))
+	}
+	record := sink.records[0]
+	for key, want := range map[string]any{
+		"rpc_method":     "messages.getDialogs",
+		"error":          "rpc",
+		"rpc_error_code": int64(500),
+	} {
+		if got := record.attrs[key]; got != want {
+			t.Errorf("%s = %v, want %v", key, got, want)
+		}
+	}
+	if logged := record.message + fmt.Sprint(record.attrs); strings.Contains(logged, rawError) {
+		t.Fatalf("failure record exposed raw RPC error: %s", logged)
+	}
+}
+
+func TestRequestFailureLogWithoutContextIncludesSafeRPCCode(t *testing.T) {
+	const rawError = "INTERNAL_PRIVATE_DETAIL"
+	sink := &serverErrorLogSink{}
+	server := New(exchange.PrivateKey{}, 2, NewMemoryAuthKeyStore(), nil, slog.New(sink))
+	err := errors.Join(errRequestHandlingFailure, tgerr.New(500, rawError))
+
+	server.logConnectionFailure(err)
+	if len(sink.records) != 1 {
+		t.Fatalf("failure records = %d, want 1", len(sink.records))
+	}
+	record := sink.records[0]
+	for key, want := range map[string]any{
+		"rpc_method":     UnknownRPCMethod,
+		"error":          "rpc",
+		"rpc_error_code": int64(500),
+	} {
+		if got := record.attrs[key]; got != want {
+			t.Errorf("%s = %v, want %v", key, got, want)
+		}
+	}
+	if logged := record.message + fmt.Sprint(record.attrs); strings.Contains(logged, rawError) {
+		t.Fatalf("failure record exposed raw RPC error: %s", logged)
 	}
 }

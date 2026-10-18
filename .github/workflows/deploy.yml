@@ -1,5 +1,7 @@
 name: Deploy.
 
+run-name: ${{ inputs.issue && format('{0} [{1}]', github.workflow, inputs.issue) || '' }}
+
 # Deploys the exact commit whose CI passed on a push to main to the
 # teagram-server LXC. The job never checks out code: the ssh command is that
 # commit's SHA, and the key's forced command on the host runs the commit's own
@@ -11,6 +13,12 @@ on:
     types: [completed]
     branches: [main]
   workflow_dispatch:
+    inputs:
+      issue:
+        description: "Issue key to report this run to (e.g. MAIN-123). Leave empty for no report."
+        required: false
+        type: string
+        default: ""
 
 permissions:
   contents: read
