@@ -16,7 +16,10 @@ export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1
 # canonical deploy script after the repo's directory rename.
 legacy_script="$(cd "$(dirname "$script")/.." && pwd)/telegram-server/deploy-main.sh"
 bridge_repo="$tmp/bridge"
+bridge_origin="$tmp/bridge-origin.git"
+git init -q --bare "$bridge_origin"
 git init -q -b main "$bridge_repo"
+git -C "$bridge_repo" remote add origin "$bridge_origin"
 mkdir -p "$bridge_repo/deploy/teagram"
 cat > "$bridge_repo/deploy/teagram/deploy-main.sh" <<'TARGET'
 #!/usr/bin/env bash
@@ -25,11 +28,33 @@ TARGET
 git -C "$bridge_repo" add deploy/teagram/deploy-main.sh
 git -C "$bridge_repo" commit -q -m target
 bridge_sha=$(git -C "$bridge_repo" rev-parse HEAD)
+git -C "$bridge_repo" push -q origin HEAD:main
+git -C "$bridge_repo" switch -q -c feature
+cat > "$bridge_repo/deploy/teagram/deploy-main.sh" <<'UNTRUSTED'
+#!/usr/bin/env bash
+printf 'untrusted deploy script executed\n' > "$BRIDGE_EXEC_MARKER"
+UNTRUSTED
+git -C "$bridge_repo" add deploy/teagram/deploy-main.sh
+git -C "$bridge_repo" commit -q -m untrusted
+bridge_feature_sha=$(git -C "$bridge_repo" rev-parse HEAD)
+git -C "$bridge_repo" push -q origin HEAD:feature
+git -C "$bridge_repo" switch -q main
+git -C "$bridge_repo" branch -D feature >/dev/null
+git -C "$bridge_repo" fetch -q origin feature
 bridge_output=$(cd "$bridge_repo" && DEPLOY_SHA="$bridge_sha" bash "$legacy_script")
 if [[ "$bridge_output" != "compatibility target $bridge_sha" ]]; then
   printf 'FAIL legacy deploy entrypoint selected the wrong target: %s\n' "$bridge_output" >&2
   exit 1
 fi
+if (cd "$bridge_repo" && DEPLOY_SHA="$bridge_feature_sha" BRIDGE_EXEC_MARKER="$tmp/bridge-executed" bash "$legacy_script") >"$tmp/bridge-feature.log" 2>&1; then
+  echo 'FAIL legacy deploy entrypoint accepted a non-main SHA' >&2
+  exit 1
+fi
+if [[ -e "$tmp/bridge-executed" ]]; then
+  echo 'FAIL legacy deploy entrypoint executed a non-main script' >&2
+  exit 1
+fi
+grep -Fq "$bridge_feature_sha is not on origin/main; refusing" "$tmp/bridge-feature.log"
 if (cd "$bridge_repo" && DEPLOY_SHA=invalid bash "$legacy_script") >"$tmp/bridge-invalid.log" 2>&1; then
   echo 'FAIL legacy deploy entrypoint accepted an invalid SHA' >&2
   exit 1
