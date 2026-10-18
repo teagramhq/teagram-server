@@ -4,9 +4,15 @@ set -Eeuo pipefail
 SCRIPT_DIR=$(cd -P "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 NETWORK="rustfs-schema-${BASHPID}"
 POSTGRES_CONTAINER="rustfs-schema-pg-${BASHPID}"
-POSTGRES_IMAGE="mirror.gcr.io/library/postgres:18-alpine"
-# The GCR mirror is missing Atlas's OCI attestation descriptor; pull from Docker Hub.
-ATLAS_IMAGE="docker.io/arigaio/atlas:1.2.0-alpine"
+POSTGRES_IMAGE="ghcr.io/teagramhq/teagram-server-postgres:18-alpine"
+POSTGRES_IMAGE_DIGEST=sha256:77f585114c32fbca283dc835b0596f4e52b51b4c6662d7810b2f4084f60a1873
+ATLAS_BIN="${ATLAS_BIN:-atlas}"
+
+command -v "$ATLAS_BIN" >/dev/null 2>&1 || {
+  printf 'Atlas CLI is unavailable: %s\n' "$ATLAS_BIN" >&2
+  exit 1
+}
+
 ATLAS_R69_INPUT=$(mktemp -d "${TMPDIR:-/tmp}/rustfs-schema-r69-atlas.XXXXXX")
 ATLAS_R70_INPUT=$(mktemp -d "${TMPDIR:-/tmp}/rustfs-schema-r70-atlas.XXXXXX")
 chmod 700 "$ATLAS_R69_INPUT" "$ATLAS_R70_INPUT"
@@ -21,11 +27,15 @@ trap cleanup EXIT
 python3 "$SCRIPT_DIR/test-rustfs-schema-postgres.py" --prepare-atlas-input "$ATLAS_R69_INPUT" 60-69
 python3 "$SCRIPT_DIR/test-rustfs-schema-postgres.py" --prepare-atlas-input "$ATLAS_R70_INPUT" 60-70
 
+docker pull "$POSTGRES_IMAGE@$POSTGRES_IMAGE_DIGEST" >/dev/null
+POSTGRES_IMAGE_ID=$(docker image inspect --format '{{.Id}}' "$POSTGRES_IMAGE@$POSTGRES_IMAGE_DIGEST")
+docker image tag "$POSTGRES_IMAGE_ID" "$POSTGRES_IMAGE"
 docker network create "$NETWORK" >/dev/null
 docker run -d \
   --name "$POSTGRES_CONTAINER" \
   --network "$NETWORK" \
   --network-alias postgres \
+  --publish 127.0.0.1::5432 \
   --health-cmd 'pg_isready -U postgres -d teagram' \
   --health-interval 1s \
   --health-timeout 3s \
@@ -46,25 +56,25 @@ if [ "$ready" != true ]; then
   printf '%s\n' 'PostgreSQL 18 schema fixture did not become ready' >&2
   exit 1
 fi
+POSTGRES_PORT=$(docker port "$POSTGRES_CONTAINER" 5432/tcp)
+POSTGRES_PORT=${POSTGRES_PORT##*:}
+[[ "$POSTGRES_PORT" =~ ^[0-9]+$ ]] || {
+  printf 'PostgreSQL fixture has an invalid loopback port: %s\n' "$POSTGRES_PORT" >&2
+  exit 1
+}
 
-docker run --rm \
-  --network "$NETWORK" \
-  -v "$ATLAS_R69_INPUT:/migrations:ro" \
-  "$ATLAS_IMAGE" migrate apply \
-  --dir file:///migrations \
-  --url 'postgres://postgres:rustfs-schema-fixture@postgres:5432/teagram?sslmode=disable' >/dev/null
+"$ATLAS_BIN" migrate apply \
+  --dir "file://$ATLAS_R69_INPUT" \
+  --url "postgres://postgres:rustfs-schema-fixture@127.0.0.1:$POSTGRES_PORT/teagram?sslmode=disable" >/dev/null
 
 RUSTFS_RELEASE_SET=60-69 RUSTFS_ATLAS_INPUT="$ATLAS_R69_INPUT" \
 RUSTFS_POSTGRES_CONTAINER="$POSTGRES_CONTAINER" RUSTFS_POSTGRES_DB=teagram \
   python3 "$SCRIPT_DIR/test-rustfs-schema-postgres.py"
 
 docker exec "$POSTGRES_CONTAINER" createdb -U postgres teagram_r70
-docker run --rm \
-  --network "$NETWORK" \
-  -v "$ATLAS_R70_INPUT:/migrations:ro" \
-  "$ATLAS_IMAGE" migrate apply \
-  --dir file:///migrations \
-  --url 'postgres://postgres:rustfs-schema-fixture@postgres:5432/teagram_r70?sslmode=disable' >/dev/null
+"$ATLAS_BIN" migrate apply \
+  --dir "file://$ATLAS_R70_INPUT" \
+  --url "postgres://postgres:rustfs-schema-fixture@127.0.0.1:$POSTGRES_PORT/teagram_r70?sslmode=disable" >/dev/null
 
 RUSTFS_RELEASE_SET=60-70 RUSTFS_ATLAS_INPUT="$ATLAS_R70_INPUT" \
 RUSTFS_POSTGRES_CONTAINER="$POSTGRES_CONTAINER" RUSTFS_POSTGRES_DB=teagram_r70 \

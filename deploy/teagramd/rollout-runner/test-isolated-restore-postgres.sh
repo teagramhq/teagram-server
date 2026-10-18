@@ -3,8 +3,10 @@ set -Eeuo pipefail
 umask 077
 
 SCRIPT_DIR=$(cd -P "$(dirname "${BASH_SOURCE[0]}")" && pwd)
-SOURCE_POSTGRES_IMAGE=mirror.gcr.io/library/postgres:16-alpine
-RESTORE_POSTGRES_IMAGE=mirror.gcr.io/library/postgres:18-alpine
+SOURCE_POSTGRES_IMAGE=ghcr.io/teagramhq/teagram-server-postgres:16-alpine
+SOURCE_POSTGRES_IMAGE_DIGEST=sha256:721873c34ceb9f8d8fc265984940dc982404c105f19ad51be9fdc5970a6080ea
+RESTORE_POSTGRES_IMAGE=ghcr.io/teagramhq/teagram-server-postgres:18-alpine
+RESTORE_POSTGRES_IMAGE_DIGEST=sha256:77f585114c32fbca283dc835b0596f4e52b51b4c6662d7810b2f4084f60a1873
 TEST_ROLE_PASSWORD=$(openssl rand -hex 24)
 ROLE_SQL="CREATE ROLE browser_acceptance_probe LOGIN PASSWORD '$TEST_ROLE_PASSWORD' NOSUPERUSER NOCREATEDB NOCREATEROLE INHERIT NOREPLICATION NOBYPASSRLS"
 TMP=$(mktemp -d "${TMPDIR:-/tmp}/isolated-restore-postgres.XXXXXXXX")
@@ -70,6 +72,13 @@ cleanup() {
   exit "$status"
 }
 trap cleanup EXIT
+
+docker pull "$SOURCE_POSTGRES_IMAGE@$SOURCE_POSTGRES_IMAGE_DIGEST" >/dev/null
+docker pull "$RESTORE_POSTGRES_IMAGE@$RESTORE_POSTGRES_IMAGE_DIGEST" >/dev/null
+SOURCE_POSTGRES_IMAGE_ID=$(docker image inspect --format '{{.Id}}' "$SOURCE_POSTGRES_IMAGE@$SOURCE_POSTGRES_IMAGE_DIGEST")
+RESTORE_POSTGRES_IMAGE_ID=$(docker image inspect --format '{{.Id}}' "$RESTORE_POSTGRES_IMAGE@$RESTORE_POSTGRES_IMAGE_DIGEST")
+docker image tag "$SOURCE_POSTGRES_IMAGE_ID" "$SOURCE_POSTGRES_IMAGE"
+docker image tag "$RESTORE_POSTGRES_IMAGE_ID" "$RESTORE_POSTGRES_IMAGE"
 
 start_container() {
   local name=$1 image=$2 database=$3

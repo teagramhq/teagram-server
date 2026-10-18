@@ -19,9 +19,15 @@ SOURCE_PROJECT=telegram-server
 TARGET_PROJECT=teagram
 SOURCE_VOLUMES=(telegram-server_pgdata telegram-server_tgkey telegram-server_tgblobs telegram-server_rustfsdata)
 TARGET_VOLUMES=(teagram_pgdata teagram_tgkey teagram_tgblobs teagram_rustfsdata)
-BUSYBOX_IMAGE=mirror.gcr.io/library/busybox:1.37
-SOURCE_POSTGRES_IMAGE=mirror.gcr.io/library/postgres:16-alpine
-RUSTFS_IMAGE=mirror.gcr.io/rustfs/rustfs:1.0.1@sha256:1803faef57627e2d9c2e7d89d655d712ddded5389040054987163043fecb6a3c
+BUSYBOX_IMAGE=ghcr.io/teagramhq/teagram-server-busybox:1.37
+BUSYBOX_IMAGE_DIGEST=sha256:bdf57e528e45e4433820e045b29b4597825a1c9e38353532d90a01445013f82e
+SOURCE_POSTGRES_IMAGE=ghcr.io/teagramhq/teagram-server-postgres:16-alpine
+SOURCE_POSTGRES_IMAGE_DIGEST=sha256:721873c34ceb9f8d8fc265984940dc982404c105f19ad51be9fdc5970a6080ea
+TARGET_POSTGRES_IMAGE=ghcr.io/teagramhq/teagram-server-postgres:18-alpine
+TARGET_POSTGRES_IMAGE_DIGEST=sha256:77f585114c32fbca283dc835b0596f4e52b51b4c6662d7810b2f4084f60a1873
+RUSTFS_IMAGE=ghcr.io/rustfs/rustfs@sha256:1803faef57627e2d9c2e7d89d655d712ddded5389040054987163043fecb6a3c
+RUSTFS_ROOT_ACCESS_KEY=fixture-root-access
+RUSTFS_ROOT_SECRET_KEY=fixture-root-secret
 TARGET_SHA=1234567890abcdef1234567890abcdef12345678
 SERVER_IMAGE_BACKUP=
 CLEANUP_FIXTURE_PROJECTS=0
@@ -35,6 +41,15 @@ fail() {
   printf 'stack move fixture failed: %s\n' "$1" >&2
   exit 1
 }
+
+command -v aws >/dev/null || fail 'AWS CLI is unavailable on the runner'
+cat > "$TMP/aws-config" <<'AWS_CONFIG'
+[default]
+region = us-east-1
+s3 =
+    addressing_style = path
+AWS_CONFIG
+chmod 600 "$TMP/aws-config"
 
 container_ids() {
   docker ps -aq --filter "label=com.docker.compose.project=$1"
@@ -106,16 +121,23 @@ CLEANUP_TARGET_IMAGE=1
 CLEANUP_EXTERNAL_WRITER=1
 CLEANUP_SERVER_IMAGE=1
 
-docker pull "$BUSYBOX_IMAGE" >/dev/null
-docker pull "$SOURCE_POSTGRES_IMAGE" >/dev/null
+docker pull "$BUSYBOX_IMAGE@$BUSYBOX_IMAGE_DIGEST" >/dev/null
+docker pull "$SOURCE_POSTGRES_IMAGE@$SOURCE_POSTGRES_IMAGE_DIGEST" >/dev/null
 docker pull "$RUSTFS_IMAGE" >/dev/null
+docker pull "$TARGET_POSTGRES_IMAGE@$TARGET_POSTGRES_IMAGE_DIGEST" >/dev/null
+BUSYBOX_IMAGE_ID=$(docker image inspect --format '{{.Id}}' "$BUSYBOX_IMAGE@$BUSYBOX_IMAGE_DIGEST")
+SOURCE_POSTGRES_IMAGE_ID=$(docker image inspect --format '{{.Id}}' "$SOURCE_POSTGRES_IMAGE@$SOURCE_POSTGRES_IMAGE_DIGEST")
+TARGET_POSTGRES_IMAGE_ID=$(docker image inspect --format '{{.Id}}' "$TARGET_POSTGRES_IMAGE@$TARGET_POSTGRES_IMAGE_DIGEST")
+docker image tag "$BUSYBOX_IMAGE_ID" "$BUSYBOX_IMAGE"
+docker image tag "$SOURCE_POSTGRES_IMAGE_ID" "$SOURCE_POSTGRES_IMAGE"
+docker image tag "$TARGET_POSTGRES_IMAGE_ID" "$TARGET_POSTGRES_IMAGE"
 docker image tag "$BUSYBOX_IMAGE" telegramd:local
 
 cat > "$SOURCE_COMPOSE" <<'YAML'
 name: telegram-server
 services:
   postgres:
-    image: mirror.gcr.io/library/postgres:16-alpine
+    image: ghcr.io/teagramhq/teagram-server-postgres:16-alpine
     environment:
       POSTGRES_DB: telegram
       POSTGRES_PASSWORD: fixture-only
@@ -131,7 +153,7 @@ services:
       - tgkey:/var/lib/telegramd
       - tgblobs:/var/lib/telegramd-blobs
   rustfs:
-    image: mirror.gcr.io/rustfs/rustfs:1.0.1@sha256:1803faef57627e2d9c2e7d89d655d712ddded5389040054987163043fecb6a3c
+    image: ghcr.io/rustfs/rustfs@sha256:1803faef57627e2d9c2e7d89d655d712ddded5389040054987163043fecb6a3c
     ports:
       - "127.0.0.1::9000"
     environment:
@@ -163,7 +185,7 @@ cat > "$TARGET_COMPOSE" <<'YAML'
 name: teagram
 services:
   postgres:
-    image: mirror.gcr.io/library/postgres:18-alpine
+    image: ghcr.io/teagramhq/teagram-server-postgres:18-alpine
     environment:
       POSTGRES_DB: teagram
       POSTGRES_PASSWORD: fixture-only
@@ -184,7 +206,7 @@ services:
       - tgkey:/var/lib/teagramd
       - tgblobs:/var/lib/telegramd-blobs
   rustfs:
-    image: mirror.gcr.io/rustfs/rustfs:1.0.1@sha256:1803faef57627e2d9c2e7d89d655d712ddded5389040054987163043fecb6a3c
+    image: ghcr.io/rustfs/rustfs@sha256:1803faef57627e2d9c2e7d89d655d712ddded5389040054987163043fecb6a3c
     ports:
       - "127.0.0.1::9000"
     environment:
@@ -216,7 +238,7 @@ cat > "$TMP/s3-source.yml" <<'YAML'
 name: telegram-server
 services:
   postgres:
-    image: mirror.gcr.io/library/postgres:16-alpine
+    image: ghcr.io/teagramhq/teagram-server-postgres:16-alpine
     environment:
       POSTGRES_DB: telegram
       POSTGRES_PASSWORD: fixture-only
@@ -252,7 +274,7 @@ services:
 YAML
 
 cat > "$TARGET_DIR/teagramd.Dockerfile" <<'DOCKERFILE'
-FROM mirror.gcr.io/library/busybox:1.37.0
+FROM ghcr.io/teagramhq/teagram-server-busybox:1.37
 ARG TEAGRAMD_SOURCE_REVISION
 LABEL org.opencontainers.image.revision="${TEAGRAMD_SOURCE_REVISION}"
 DOCKERFILE
@@ -398,6 +420,57 @@ wait_rustfs() {
   fail "RustFS service in $project did not become healthy"
 }
 
+rustfs_endpoint() {
+  local project=$1 project_dir compose_file env_file endpoint
+  if [ "$project" = "$TARGET_PROJECT" ]; then
+    project_dir=$TARGET_DIR
+    compose_file=$TARGET_COMPOSE
+    env_file=$TARGET_ENV
+  else
+    project_dir=$SOURCE_DIR
+    compose_file=$SOURCE_COMPOSE
+    env_file=$SOURCE_ENV
+  fi
+  endpoint=$(docker compose --project-name "$project" --project-directory "$project_dir" \
+    --env-file "$env_file" --file "$compose_file" port rustfs 9000) || \
+    fail "could not resolve RustFS endpoint for $project"
+  [[ "$endpoint" =~ ^127\.0\.0\.1:[0-9]+$ ]] || \
+    fail "RustFS endpoint is not loopback-only for $project: $endpoint"
+  printf 'http://%s' "$endpoint"
+}
+
+aws_cli() {
+  local project=$1 endpoint
+  shift
+  endpoint=$(rustfs_endpoint "$project")
+  AWS_ACCESS_KEY_ID="$RUSTFS_ROOT_ACCESS_KEY" \
+    AWS_SECRET_ACCESS_KEY="$RUSTFS_ROOT_SECRET_KEY" \
+    AWS_DEFAULT_REGION=us-east-1 AWS_CONFIG_FILE="$TMP/aws-config" \
+    aws --endpoint-url "$endpoint" "$@"
+}
+
+aws_cli_upload_stdin() {
+  local project=$1 target=$2
+  aws_cli "$project" s3 cp - "$target"
+}
+
+capture_rustfs_objects() {
+  local project=$1 output_dir=$2 mode=${3:-read}
+  mkdir -m 700 "$output_dir"
+  if [ "$mode" = upload ]; then
+    aws_cli "$project" s3api create-bucket --bucket telegram >/dev/null
+    cat "$TMP/rustfs-upload/object-a" | \
+      aws_cli_upload_stdin "$project" s3://telegram/objects/object-a
+  fi
+  aws_cli "$project" s3api list-objects-v2 --bucket telegram --output json \
+    > "$output_dir/listing.json"
+  aws_cli "$project" s3 cp s3://telegram/objects/object-a - > "$output_dir/object-a"
+  jq '[.Contents[]? | {Key, Size}] | sort_by(.Key)' "$output_dir/listing.json" \
+    > "$output_dir/listing-normalized.json" || fail "RustFS object listing is invalid for $project"
+  sha256sum "$output_dir/object-a" | cut -d ' ' -f1 > "$output_dir/object.sha256" || \
+    fail "RustFS object download is missing for $project"
+}
+
 start_source() {
   local project=${1:-$SOURCE_PROJECT}
   docker compose --project-name "$project" --project-directory "$SOURCE_DIR" \
@@ -541,6 +614,9 @@ docker exec "$source_postgres" psql -X -v ON_ERROR_STOP=1 -U postgres -d postgre
 write_volume_file telegram-server_tgkey enc_key.hex 'fixture-key-material'
 write_volume_file telegram-server_tgblobs objects/blob-a 'fixture-blob-object'
 write_volume_file telegram-server_rustfsdata fixture.marker 'rustfs-volume-preserved'
+mkdir -m 700 "$TMP/rustfs-upload"
+printf '%s' 'rustfs-object-preserved' > "$TMP/rustfs-upload/object-a"
+capture_rustfs_objects "$SOURCE_PROJECT" "$TMP/rustfs-source" upload
 
 docker run --detach --name main1974-stack-move-external-writer --network none \
   --mount type=volume,source=telegram-server_tgkey,target=/data \
@@ -644,6 +720,11 @@ target_server=$(docker compose --project-name "$TARGET_PROJECT" --project-direct
   --env-file "$TARGET_ENV" --file "$TARGET_COMPOSE" \
   --file "$TARGET_DIR/docker-compose.override.yml" ps -q teagramd)
 wait_rustfs "$TARGET_PROJECT"
+capture_rustfs_objects "$TARGET_PROJECT" "$TMP/rustfs-target"
+cmp -s "$TMP/rustfs-source/listing-normalized.json" "$TMP/rustfs-target/listing-normalized.json" || \
+  fail 'RustFS S3 object listing differs after the move'
+cmp -s "$TMP/rustfs-source/object.sha256" "$TMP/rustfs-target/object.sha256" || \
+  fail 'RustFS downloaded object checksum differs after the move'
 docker inspect "$target_server" | jq -e '.[0].HostConfig.PortBindings | has("8080/tcp")' >/dev/null || \
   fail 'target override did not move telegramd service settings onto teagramd'
 docker exec "$target_postgres" grep -Eq '^[[:space:]]*host[[:space:]]+all[[:space:]]+all[[:space:]]+all[[:space:]]+scram-sha-256([[:space:]]|$)' \

@@ -77,23 +77,31 @@ func TestGetPeerDialogsReturnsJoinedChannelWithoutLivePosts(t *testing.T) {
 		},
 	})
 	if err != nil {
-		t.Fatalf("get empty channel dialog: %v", err)
+		t.Fatalf("get channel without live posts: %v", err)
 	}
 	res, ok := enc.(*tg.MessagesPeerDialogs)
-	if !ok || len(res.Dialogs) != 1 || len(res.Messages) != 0 || len(res.Chats) != 1 {
-		t.Fatalf("empty channel result = %T dialogs=%d messages=%d chats=%d, want 1/0/1", enc, len(res.Dialogs), len(res.Messages), len(res.Chats))
+	if !ok || len(res.Dialogs) != 1 || len(res.Messages) != 1 || len(res.Chats) != 1 {
+		t.Fatalf("channel without live posts result = %T dialogs=%d messages=%d chats=%d, want 1/1/1", enc, len(res.Dialogs), len(res.Messages), len(res.Chats))
 	}
 	dialog, ok := res.Dialogs[0].(*tg.Dialog)
-	if !ok || dialog.TopMessage != 0 {
-		t.Fatalf("empty channel dialog = %T/%+v, want top_message=0", res.Dialogs[0], res.Dialogs[0])
+	if !ok || dialog.TopMessage != 1 {
+		t.Fatalf("channel without live posts dialog = %T/%+v, want top_message=1", res.Dialogs[0], res.Dialogs[0])
+	}
+	service, ok := res.Messages[0].(*tg.MessageService)
+	if !ok || service == nil || service.ID != dialog.TopMessage {
+		t.Fatalf("channel without live posts top message = %T/%+v, want creation service message %d", res.Messages[0], res.Messages[0], dialog.TopMessage)
+	}
+	create, ok := service.Action.(*tg.MessageActionChannelCreate)
+	if !ok || create == nil || create.Title != channel.Title {
+		t.Fatalf("channel create action = %T/%+v, want title %q", service.Action, service.Action, channel.Title)
 	}
 	peer, ok := dialog.Peer.(*tg.PeerChannel)
 	if !ok || peer.ChannelID != channel.ID {
-		t.Fatalf("empty channel dialog peer = %T/%+v, want channel %d", dialog.Peer, dialog.Peer, channel.ID)
+		t.Fatalf("channel without live posts dialog peer = %T/%+v, want channel %d", dialog.Peer, dialog.Peer, channel.ID)
 	}
 	peerChannel, ok := res.Chats[0].(*tg.Channel)
 	if !ok || peerChannel.ID != channel.ID || peerChannel.AccessHash != api.DeriveChannelHash(member.ID, channel.ID) {
-		t.Fatalf("empty channel chat = %T/%+v, want viewer-bound channel %d", res.Chats[0], res.Chats[0], channel.ID)
+		t.Fatalf("channel chat = %T/%+v, want viewer-bound channel %d", res.Chats[0], res.Chats[0], channel.ID)
 	}
 	assertEncodes(t, enc)
 }

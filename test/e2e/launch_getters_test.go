@@ -55,6 +55,10 @@ func TestLaunchGetterResults(t *testing.T) {
 }
 
 func checkLaunchGetterResults(ctx context.Context, client *tg.Client) error {
+	if err := checkMAIN2154WebStartupGetters(ctx, client); err != nil {
+		return fmt.Errorf("saved music and emoji keyword getters: %w", err)
+	}
+
 	accountTTL, err := client.AccountGetAccountTTL(ctx)
 	if err != nil {
 		return fmt.Errorf("account.getAccountTTL: %w", err)
@@ -582,6 +586,29 @@ func checkMAIN1505StaticGetters(ctx context.Context, client *tg.Client) error {
 		if !ok || statusResult.Hash != 0 || len(statusResult.Statuses) != 0 {
 			return fmt.Errorf("account.getDefaultEmojiStatuses = %#v, want full empty statuses", statuses)
 		}
+	}
+	return nil
+}
+
+func checkMAIN2154WebStartupGetters(ctx context.Context, client *tg.Client) error {
+	savedMusicIDs, err := client.AccountGetSavedMusicIDs(ctx, 0)
+	if err != nil {
+		return fmt.Errorf("account.getSavedMusicIds: %w", err)
+	}
+	ids, ok := savedMusicIDs.(*tg.AccountSavedMusicIDs)
+	if !ok || len(ids.IDs) != 0 {
+		return fmt.Errorf("account.getSavedMusicIds = %#v, want empty IDs", savedMusicIDs)
+	}
+
+	emojiKeywords, err := client.MessagesGetEmojiKeywordsDifference(ctx, &tg.MessagesGetEmojiKeywordsDifferenceRequest{
+		LangCode:    "en",
+		FromVersion: 0,
+	})
+	if err != nil {
+		return fmt.Errorf("messages.getEmojiKeywordsDifference: %w", err)
+	}
+	if emojiKeywords.LangCode != "en" || emojiKeywords.FromVersion != 0 || emojiKeywords.Version != 0 || len(emojiKeywords.Keywords) != 0 {
+		return fmt.Errorf("messages.getEmojiKeywordsDifference = %+v, want an empty en result at version 0", emojiKeywords)
 	}
 	return nil
 }
