@@ -1739,6 +1739,21 @@ jobs:
             return 1
           }
 
+          assert_postgres_settings() {
+            actual=$(docker compose exec -T postgres psql -XAt -U postgres -d teagram \
+              -c 'SHOW shared_buffers' \
+              -c 'SHOW jit' \
+              -c 'SHOW io_method' \
+              -c 'SHOW max_connections' \
+              -c "SELECT extname FROM pg_extension WHERE extname = 'pg_stat_statements'")
+            expected=$(printf '%s\n' '1GB' 'off' 'worker' '40' 'pg_stat_statements')
+            if [ "$actual" != "$expected" ]; then
+              printf 'PostgreSQL settings mismatch: expected:\n%s\nactual:\n%s\n' \
+                "$expected" "$actual" >&2
+              return 1
+            fi
+          }
+
           # The fingerprint is an int64 and may be negative.
           fingerprint() {
             docker compose logs teagramd | sed -n 's/.*fingerprint=\(-\?[0-9]\+\).*/\1/p' | head -1
@@ -1825,6 +1840,7 @@ jobs:
             exit 1
           fi
           wait_listening
+          assert_postgres_settings
           docker compose logs teagramd
 
           # msg=listening is printed whether or not TG_LOG_LOGIN_CODES reaches
@@ -1875,6 +1891,7 @@ jobs:
           docker compose down
           docker compose up -d
           wait_listening
+          assert_postgres_settings
           docker compose logs teagramd
 
           docker compose exec -T postgres psql -U postgres -d teagram -tAc 'SELECT id FROM ci_marker' \
