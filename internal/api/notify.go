@@ -35,10 +35,13 @@ type Updater struct {
 	// channelPostSnapshotHook lets tests commit a ban and post after the delivery
 	// snapshot but before its bounded event read. Production leaves it nil.
 	channelPostSnapshotHook func()
-	recoverySlots           chan struct{}
-	recoveryWG              sync.WaitGroup
-	recoveryScanEpoch       uint64
-	recoveryScanRemaining   int
+	// channelPollVoteBeforePushHook lets tests commit a ban after poll results
+	// are prepared but before the transient push. Production leaves it nil.
+	channelPollVoteBeforePushHook func()
+	recoverySlots                 chan struct{}
+	recoveryWG                    sync.WaitGroup
+	recoveryScanEpoch             uint64
+	recoveryScanRemaining         int
 	// recoveryClaimHook pauses a claimed attempt in deterministic concurrency tests.
 	recoveryClaimHook func(*mtproto.Conn)
 }
@@ -413,7 +416,8 @@ func (u *Updater) DeliverCloudDraft(ctx context.Context, ownerID int64, peer sto
 
 // DeliverChannelPollVote fans one channel-scoped poll change out to locally
 // connected members. Membership and each viewer's poll results are checked
-// again before a transient push; the channel event log and pts are untouched.
+// again immediately before a transient push; the channel event log and pts are
+// untouched.
 func (u *Updater) DeliverChannelPollVote(ctx context.Context, channelID, pollID int64) {
 	members, _, err := u.h.store.ChannelDeliverySnapshot(ctx, channelID)
 	if err != nil {
@@ -457,7 +461,32 @@ func (u *Updater) DeliverChannelPollVote(ctx context.Context, channelID, pollID 
 			})
 		}
 	}
-	u.pushTransientFanout(ctx, pushes)
+	if u.channelPollVoteBeforePushHook != nil {
+		u.channelPollVoteBeforePushHook()
+	}
+	if len(pushes) == 0 {
+		return
+	}
+
+	currentMembers, _, err := u.h.store.ChannelDeliverySnapshot(ctx, channelID)
+	if err != nil {
+		u.log.Error("recheck channel poll vote membership", "channel_id", channelID, "poll_id", pollID, "err", err)
+		return
+	}
+	now = time.Now()
+	active := make(map[int64]struct{}, len(currentMembers))
+	for _, member := range currentMembers {
+		if !member.Banned(now) {
+			active[member.UserID] = struct{}{}
+		}
+	}
+	authorizedPushes := make([]transientPush, 0, len(pushes))
+	for _, push := range pushes {
+		if _, ok := active[push.owner]; ok {
+			authorizedPushes = append(authorizedPushes, push)
+		}
+	}
+	u.pushTransientFanout(ctx, authorizedPushes)
 }
 
 // DeliverChatAdmin pushes one persisted chat-admin event to its currently
