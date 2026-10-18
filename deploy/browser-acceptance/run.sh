@@ -11,15 +11,15 @@ readonly SERVED_MANIFEST_MAX_BYTES=16384
 # teagram-web opens one client socket per account slot on an unauthenticated load.
 readonly WSS_CONNECTION_CEILING=4
 readonly PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd -P)"
-readonly COMPOSE=(docker compose --env-file /dev/null --project-directory deploy/browser-acceptance --file deploy/browser-acceptance/compose.yaml --project-name telegram-browser-acceptance)
+readonly COMPOSE=(docker compose --env-file /dev/null --project-directory deploy/browser-acceptance --file deploy/browser-acceptance/compose.yaml --project-name teagram-browser-acceptance)
 
 RESULT_JSON=''
 RESULT_STATUS=1
 PROJECT_TOUCHED=0
 MANIFEST_PATH=''
 QA_SCRIPT_PATH=''
-PROBE_CREDENTIAL_PATH='/etc/telegram-browser-acceptance/probe.pgpass'
-PROBE_CONFIG_PATH='/etc/telegram-browser-acceptance/probe-config.json'
+PROBE_CREDENTIAL_PATH='/etc/teagram-browser-acceptance/probe.pgpass'
+PROBE_CONFIG_PATH='/etc/teagram-browser-acceptance/probe-config.json'
 MODE=''
 
 json_error() {
@@ -274,7 +274,7 @@ acquire_runtime_lock() {
     [[ "$(stat -c '%a' -- "$runtime_base" 2>/dev/null)" == "700" ]] || return 1
   fi
 
-  lock_dir="$runtime_base/telegram-browser-acceptance"
+  lock_dir="$runtime_base/teagram-browser-acceptance"
   if [[ -L "$lock_dir" || ( -e "$lock_dir" && ! -d "$lock_dir" ) ]]; then
     return 1
   fi

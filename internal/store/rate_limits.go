@@ -218,7 +218,7 @@ func (s *Store) CheckRateLimitCost(ctx context.Context, subjectID int64, surface
 // SweepExpiredRateLimits deletes rate-limit rows and concurrent-limit leases
 // whose stored expiry deadline has passed. The rate-limit deadline is stored
 // on each row, so the sweep does not need to know per-surface window durations.
-// Wired to a 5-minute background sweep in cmd/telegramd/main.go.
+// Wired to a 5-minute background sweep in cmd/teagramd/main.go.
 func (s *Store) SweepExpiredRateLimits(ctx context.Context) (int64, error) {
 	rates, err := s.q.SweepExpiredRateLimits(ctx)
 	if err != nil {

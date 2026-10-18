@@ -18,7 +18,7 @@ import (
 	"github.com/teagramhq/teagram-server/internal/linklanding"
 )
 
-const admissionLandingBody = `<!doctype html><html lang="en"><body><main>Open this in Telegramd</main></body></html>`
+const admissionLandingBody = `<!doctype html><html lang="en"><body><main>Open this in Teagramd</main></body></html>`
 const realTransportAsset = "real-transport-asset"
 
 func TestWebAssetWaitsForStagingCapacityAndPreservesResponse(t *testing.T) {

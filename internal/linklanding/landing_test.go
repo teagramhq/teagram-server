@@ -15,7 +15,7 @@ import (
 	"github.com/teagramhq/teagram-server/internal/linklanding"
 )
 
-const wantLandingBody = `<!doctype html><html lang="en"><body><main>Open this in Telegramd</main></body></html>`
+const wantLandingBody = `<!doctype html><html lang="en"><body><main>Open this in Teagramd</main></body></html>`
 
 func TestGETPathsReturnIdenticalStaticPageAndSecurityHeaders(t *testing.T) {
 	t.Parallel()

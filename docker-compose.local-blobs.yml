@@ -2,9 +2,9 @@
 # COMPOSE_FILE when invoking the runner; it keeps RustFS data available for a
 # later separately reviewed transition.
 services:
-  telegramd:
+  teagramd:
     environment:
-      TG_BLOB_DIR: /var/lib/telegramd-blobs
+      TG_BLOB_DIR: ${TEAGRAMD_STACK_MOVE_BLOB_DIR:-/var/lib/teagramd-blobs}
       TG_BLOB_S3_ENDPOINT: ""
       TG_BLOB_S3_BUCKET: ""
       TG_BLOB_S3_PREFIX: ""
@@ -15,4 +15,4 @@ services:
       TG_BLOB_S3_CA_PATH: ""
       TG_BLOB_S3_ALLOW_INSECURE_HTTP: ""
     volumes:
-      - tgblobs:/var/lib/telegramd-blobs
+      - tgblobs:${TEAGRAMD_STACK_MOVE_BLOB_DIR:-/var/lib/teagramd-blobs}

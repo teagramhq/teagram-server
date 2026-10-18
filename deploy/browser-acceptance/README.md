@@ -1,6 +1,6 @@
 # Isolated browser acceptance runtime
 
-This is a one-shot Compose project named `telegram-browser-acceptance`. It is
+This is a one-shot Compose project named `teagram-browser-acceptance`. It is
 separate from the server stack and owns two containers: an internal-only
 Chromium runner and the dependency-free CONNECT observer. The browser can reach
 only the observer. The observer is dual-homed and permits CONNECT to the one
@@ -102,7 +102,7 @@ default resolver and connector and must not override them.
 
 ## Credential-free commands
 
-Run from `/opt/telegram-server`. `VERIFIED_MANIFEST` is the nonsecret release
+Run from `/opt/teagram`. `VERIFIED_MANIFEST` is the nonsecret release
 record supplied by the reviewed deployment. It must have exactly these fields:
 
 ```json
@@ -126,7 +126,7 @@ stdin attached to the separately approved host-local credential pipe. Host
 preconditions pass before the QA process receives that pipe.
 
 ```sh
-cd /opt/telegram-server
+cd /opt/teagram
 ./deploy/browser-acceptance/run.sh readiness --manifest "$VERIFIED_MANIFEST" </dev/null
 ./deploy/browser-acceptance/run.sh blocked-control --manifest "$VERIFIED_MANIFEST" </dev/null
 ```
@@ -236,7 +236,7 @@ are the preview gate. Roll back by reverting the PR and using the normal
 deployment path, then run:
 
 ```sh
-docker compose --env-file /dev/null --project-directory deploy/browser-acceptance --file deploy/browser-acceptance/compose.yaml --project-name telegram-browser-acceptance down --rmi local
+docker compose --env-file /dev/null --project-directory deploy/browser-acceptance --file deploy/browser-acceptance/compose.yaml --project-name teagram-browser-acceptance down --rmi local
 ```
 
 ## QA adapter contract
@@ -352,13 +352,13 @@ The host needs Node 24 or newer, `psql`, and the wrapper's existing tools.
 Provision these two host-local files separately, owned by the invoking UID,
 with mode exactly 0600, one hard link, and no final-component symlink:
 
-- `/etc/telegram-browser-acceptance/probe.pgpass`: one
+- `/etc/teagram-browser-acceptance/probe.pgpass`: one
   [Postgres password-file entry](https://www.postgresql.org/docs/current/libpq-pgpass.html),
   `host:port:database:browser_acceptance_probe:password`. Escape colons and
   backslashes with backslashes. Wildcards, additional entries and other roles
   are rejected. The host may be loopback, an RFC1918 address on the LXC's
   private Docker network, or an absolute Unix socket directory.
-- `/etc/telegram-browser-acceptance/probe-config.json`: exactly
+- `/etc/teagram-browser-acceptance/probe-config.json`: exactly
   `{"userId":"<positive decimal bigint>"}` for the existing test account.
 
 Acceptance-only options `--probe-credential` and `--probe-config` override
@@ -373,7 +373,7 @@ transactions and a statement timeout. It has only `EXECUTE` on those functions,
 with no table, sequence, enrollment, trigger-function or write privileges. The
 probe never writes to the database or revokes a key.
 
-Before credential forwarding, every running telegramd process must have
+Before credential forwarding, every running teagramd process must have
 `TG_REGISTRATION=closed` or `TG_REGISTRATION=open`, with the same setting on
 every replica, and `TG_LOG_LOGIN_CODES=false`. Docker's projection returns only
 those two effective flags and
@@ -390,10 +390,10 @@ ID. All selected records must agree, and their source SHA must equal the
 recorded revision label and the inspected image and container revision labels.
 All replicas must share that source. The web release and server source remain
 separate identities; their only join is the target fingerprint. Each
-`TG_RSA_KEY_FINGERPRINT` must be the canonical signed decimal that telegramd
+`TG_RSA_KEY_FINGERPRINT` must be the canonical signed decimal that teagramd
 parses for the same 64 bits as the served hex fingerprint. The image is
 inspected by its immutable image ID. The probe requires
-`telegram-browser-acceptance-internal` to be internal and contain exactly the
+`teagram-browser-acceptance-internal` to be internal and contain exactly the
 browser and observer, and independently fetches the served manifest over
 verified HTTPS without a proxy or redirects to compare fingerprints.
 

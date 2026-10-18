@@ -205,13 +205,13 @@ type Config struct {
 	ClientAddrProxies []netip.Prefix
 	// PreAuth is the deployment-wide budget for connections that have not
 	// authenticated: concurrent sockets, concurrent sockets per client network,
-	// and their maximum lifetime. telegramd divides the two concurrency budgets
+	// and their maximum lifetime. teagramd divides the two concurrency budgets
 	// by ReplicaCount; zero disables a bound.
 	PreAuth mtproto.PreAuthLimits
 	// MaxConnsPerUnboundKey is the deployment-wide bound on concurrent
 	// connections one auth key with nobody signed in on it may hold. It picks up
 	// where PreAuth stops counting and hands over to the per-user connection cap
-	// at sign-in. telegramd divides it by ReplicaCount; zero disables it.
+	// at sign-in. teagramd divides it by ReplicaCount; zero disables it.
 	MaxConnsPerUnboundKey int
 	// MaxPendingLoginConns bounds connections waiting for auth.checkPassword
 	// after SESSION_PASSWORD_NEEDED across the deployment. Postgres leases hold
@@ -369,7 +369,7 @@ type RateLimitsConfig struct {
 	// Postgres rate-limit counter, so concurrent requests for one account are
 	// admitted exactly across connections and replicas.
 	GetFile store.RateLimitConfig
-	// GetFileReplica limits upload.getFile across every telegramd replica through
+	// GetFileReplica limits upload.getFile across every teagramd replica through
 	// the shared Postgres rate-limit counter.
 	GetFileReplica store.RateLimitConfig
 	// SendCodeIP limits auth.sendCode per client network. It is keyed on the

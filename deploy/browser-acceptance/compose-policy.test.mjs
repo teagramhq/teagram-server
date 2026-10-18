@@ -10,7 +10,7 @@ const packageLock = JSON.parse(readFileSync(new URL("./package-lock.json", impor
 const runner = readFileSync(new URL("./run.sh", import.meta.url), "utf8");
 
 test("fixed project contains only the isolated browser and CONNECT observer", () => {
-  assert.equal(compose.name, "telegram-browser-acceptance");
+  assert.equal(compose.name, "teagram-browser-acceptance");
   assert.deepEqual(Object.keys(compose.services).sort(), ["browser", "observer"]);
   assert.equal(compose.networks["browser-internal"].internal, true);
   assert.equal(compose.networks["observer-egress"].driver, "bridge");
@@ -78,7 +78,7 @@ test("image and npm dependencies remain locked to the reviewed versions", () => 
 
 test("wrapper fixes the project, closes stdin for readiness and removes only local images", () => {
   assert.ok(runner.includes("--env-file /dev/null"));
-  assert.ok(runner.includes("--project-name telegram-browser-acceptance"));
+  assert.ok(runner.includes("--project-name teagram-browser-acceptance"));
   assert.ok(runner.includes("run --no-deps --rm -T"));
   assert.ok(runner.includes("exec </dev/null"));
   assert.ok(runner.includes("down --rmi local"));

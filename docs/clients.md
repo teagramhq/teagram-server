@@ -1,6 +1,6 @@
-# Connecting a client to telegramd
+# Connecting a client to teagramd
 
-`telegramd` speaks MTProto and stores accounts, messages, and media metadata in
+`teagramd` speaks MTProto and stores accounts, messages, and media metadata in
 Postgres. Media bodies use local storage by default. Teagram clients sign in
 with a username and password; they do not use phone codes or QR scans.
 
@@ -10,11 +10,11 @@ production data centers and RSA keys, so they cannot connect to this server.
 ## 1. Build and run the server
 
 ```bash
-go build -o telegramd ./cmd/telegramd
-TG_POSTGRES_DSN="postgres://user:pass@localhost:5432/telegramd?sslmode=disable" \
+go build -o teagramd ./cmd/teagramd
+TG_POSTGRES_DSN="postgres://user:pass@localhost:5432/teagram?sslmode=disable" \
   TG_AUTHKEY_ENC_KEY="$(openssl rand -hex 32)" \
   TG_PUBLIC_LINK_PREFIX="https://links.example.test/" \
-  ./telegramd
+  ./teagramd
 ```
 
 Configuration is read from environment variables in `internal/config/config.go`:
@@ -57,7 +57,7 @@ Configuration is read from environment variables in `internal/config/config.go`:
 | `TG_ADMIN_TOKEN_HASH` | *(unset)* | Lowercase SHA-256 hex digest of the raw admin token; never put the raw token in configuration or a URL. See `docs/observability.md` |
 | `TG_ADMIN_ORIGIN` | *(unset)* | Fixed origin for admin login/logout behind a proxy; canonical lowercase ASCII HTTPS origin, or HTTP only for localhost/loopback. Unset, empty, or whitespace-only derives it from the listener. See `docs/observability.md` |
 | `TG_REPLICA_ID`     | *(unset)*        | Optional stable operator-supplied identity shown on authenticated admin metrics; when set, `TG_RSA_KEY_FINGERPRINT` is required. The value must be 1–64 characters from `A-Z`, `a-z`, `0-9`, `.`, `_`, and `-` |
-| `TG_REPLICA_COUNT` | `1` | Maximum number of `telegramd` replicas running at once. Set the same value on every replica; it divides local connection budgets, including the default per-user cap of 20, so the combined cap stays at or below the configured total. A non-zero local budget smaller than this count fails startup. Do not mix replica counts during a rollout |
+| `TG_REPLICA_COUNT` | `1` | Maximum number of `teagramd` replicas running at once. Set the same value on every replica; it divides local connection budgets, including the default per-user cap of 20, so the combined cap stays at or below the configured total. A non-zero local budget smaller than this count fails startup. Do not mix replica counts during a rollout |
 | `TG_RATE_LIMIT_GET_FILE` | `50` | Per-account `upload.getFile` calls in one fixed window. `0` disables this bound; a negative or non-integer value fails startup |
 | `TG_RATE_LIMIT_GET_FILE_WINDOW` | `1s` | Window for the per-account `upload.getFile` bound. It must be positive while that bound is enabled; an invalid or negative duration fails startup |
 | `TG_RATE_LIMIT_GET_FILE_REPLICA` | `400` | Cluster-wide aggregate `upload.getFile` calls across all accounts in one fixed window, counted in Postgres. `0` disables this bound; a negative or non-integer value fails startup |
@@ -85,15 +85,15 @@ continue to ignore it. This call is also available to provisional sessions.
 
 ### Static enrollment discovery and local preflight
 
-The server-side contract in this section is provided by telegram-server
+The server-side contract in this section is provided by teagram-server
 revision `b4b18c12` (`MAIN-736`). Deploy that server revision, or a later
 revision that retains the contract, as the document consumer. The command
 renders the public identity without opening Postgres or loading the auth-key
 master secret:
 
 ```bash
-telegramd bootstrap-identity
-telegramd client-config > client.json
+teagramd bootstrap-identity
+teagramd client-config > client.json
 ```
 
 `bootstrap-identity` writes a new 2048-bit PKCS#1 PEM key to `TG_RSA_KEY_PATH`
@@ -106,7 +106,7 @@ invalid. For a replica deployment, copy the printed fingerprint into
 fingerprint or an auth-key encryption key that cannot decrypt a stored auth
 key. An empty auth-key table is accepted as the explicit first-bootstrap case.
 
-`client-config` loads the same persistent RSA key that `telegramd serve` uses.
+`client-config` loads the same persistent RSA key that `teagramd serve` uses.
 `TG_ADVERTISE_ADDR` and `TG_DC_ID` therefore need
 to resolve to the same values for both commands; both have defaults, and an
 unset advertise address is derived from `TG_LISTEN_ADDR`. The output is one
@@ -119,10 +119,12 @@ SubjectPublicKeyInfo:
 ```
 
 The command does not publish or serve the file. Put `client.json` at
-`/.well-known/telegramd/client` on the selected public HTTPS origin, for
+`/.well-known/teagramd/client` on the selected public HTTPS origin, for
 example with a static web server or object store, and keep the file and its
-HTTPS certificate under the same deployment's control. HTTPS certificate
-serving, web-root publication, and TLS termination are outside telegramd.
+HTTPS certificate under the same deployment's control. The old
+`/.well-known/telegramd/client` path remains served as an alias until a
+Teagram Desktop release uses the new path. HTTPS certificate
+serving, web-root publication, and TLS termination are outside teagramd.
 
 The optional same-endpoint local-direct preflight is a separate TCP
 discriminator. It is checked only on the normal TCP listener, after a trusted
@@ -203,9 +205,9 @@ or compose-only endpoint; startup logs a warning when this escape hatch is
 used. There is no TLS verification bypass setting.
 
 The main Compose file uses RustFS as its default blob store. Generate separate
-RustFS root and `telegramd` credentials on the box, keep `.env` at mode 0600,
+RustFS root and `teagramd` credentials on the box, keep `.env` at mode 0600,
 and let Compose mount those values as read-only files for the services that
-need them. The app key is limited to the `telegram` bucket's `telegramd/`
+need them. The app key is limited to the `teagram` bucket's `teagramd/`
 prefix. RustFS and its console have no published ports. The internal S3 URL is
 plaintext on the private Compose network; the explicit HTTP setting is logged
 at startup.
@@ -221,7 +223,7 @@ docker compose up
 
 The bucket and scoped app user are created idempotently during startup.
 `docker compose down` preserves RustFS data; never use `down -v` on the
-telegram-server LXC.
+teagram-server LXC.
 
 The server and Compose files include an S3 backend, but the available rollout
 runner supports only inspected local initialization and same-backend local
@@ -269,14 +271,14 @@ verifies the schema is current and fails fast otherwise.
 
 The pool defaults budget 8 sessions per process for the 2-vCPU, 4-GiB host.
 Two sessions stay warm and idle sessions above that floor retire after 5 minutes.
-These limits override `pool_*` values in the DSN for `telegramd` and its operator
+These limits override `pool_*` values in the DSN for `teagramd` and its operator
 commands. Budget each replica separately, plus the dedicated notification
 listener and operator connections, against Postgres's connection limit. The
 existing 17-second statement timeout still applies to every pooled session.
 The upload assembly reserve is computed from the configured maximum.
 
 The server does not generate an RSA identity during startup. For a fresh
-installation, run `telegramd bootstrap-identity` once with `TG_RSA_KEY_PATH`
+installation, run `teagramd bootstrap-identity` once with `TG_RSA_KEY_PATH`
 set to the persistent key volume. It writes a 2048-bit PKCS#1 PEM key with
 mode `0600`, atomically publishes the complete file, and refuses to overwrite
 any existing destination. Existing deployments keep their mounted key and do
@@ -301,7 +303,7 @@ At startup the server logs the key it loaded:
 level=INFO msg="server RSA key" key_id=<64 hex chars in 16 dash-separated groups of 4> fingerprint=<int64> path=server_key.pem
 ```
 
-(`cmd/telegramd/main.go`, right after `rsakey.Load`).
+(`cmd/teagramd/main.go`, right after `rsakey.Load`).
 
 - `key_id` is the SHA-256 of the DER SubjectPublicKeyInfo encoding of the
   public key, hex-encoded as 16 dash-separated groups of 4 characters
@@ -331,7 +333,7 @@ passed if `TG_LISTEN_ADDR` was left at default.
 For Teagram Desktop, add the server through the enrollment flow. The client
 discovers its endpoint and RSA identity, verifies and pins them to the account,
 then asks for the username and password. For public DNS, publish the discovery
-document at `/.well-known/telegramd/client`; eligible local endpoints can use
+document at `/.well-known/teagramd/client`; eligible local endpoints can use
 the local-direct preflight described above. See the [server enrollment
 guide](https://github.com/teagramhq/teagram-desktop/blob/dev/docs/server_enrollment.md).
 
@@ -389,9 +391,9 @@ For a fresh database, temporarily set `TG_REGISTRATION=open`, complete the
 first account sign-up and password setup, then close registration again. The
 first account committed by the admission transaction becomes the durable server
 administrator. For later invited accounts, issue an invite with
-`telegramd invite issue <username>`; the command prints the secret once.
-Deliver it to the user through a private channel. `telegramd invite list`
-and `telegramd invite revoke <id>` manage outstanding invites.
+`teagramd invite issue <username>`; the command prints the secret once.
+Deliver it to the user through a private channel. `teagramd invite list`
+and `teagramd invite revoke <id>` manage outstanding invites.
 
 ### 5c. Promote an existing operator after the administration migration
 
@@ -401,7 +403,7 @@ left unassigned. Run this one-shot local maintenance command with the same
 database and encryption-key environment as the deployment:
 
 ```bash
-./telegramd maintenance assign-operator
+./teagramd maintenance assign-operator
 ```
 
 The command takes no user ID. It succeeds only when the database contains
@@ -412,7 +414,7 @@ never created or changed.
 
 ### 5d. Reset an existing username password from the local CLI
 
-`telegramd admin set-password` is a local operator command. It has no RPC or
+`teagramd admin set-password` is a local operator command. It has no RPC or
 admin-dashboard route. Run it inside the deployment container with a protected
 file on stdin; it refuses terminal input, password flags, empty input, and
 multi-line input. The command accepts one line and removes one trailing LF or
@@ -423,12 +425,12 @@ On the LXC, create a root-only directory and credential file, then pass the file
 to the container through stdin:
 
 ```bash
-install -d -o root -g root -m 0700 /root/telegram-password-reset
+install -d -o root -g root -m 0700 /root/teagram-password-reset
 umask 077
-openssl rand -base64 24 > /root/telegram-password-reset/tester1.password
-chmod 0600 /root/telegram-password-reset/tester1.password
-docker compose exec -T telegramd telegramd admin set-password --username tester1 \
-  < /root/telegram-password-reset/tester1.password
+openssl rand -base64 24 > /root/teagram-password-reset/tester1.password
+chmod 0600 /root/teagram-password-reset/tester1.password
+docker compose exec -T teagramd teagramd admin set-password --username tester1 \
+  < /root/teagram-password-reset/tester1.password
 ```
 
 The handle may be supplied with or without `@`, and matching is ASCII

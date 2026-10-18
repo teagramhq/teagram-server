@@ -21,7 +21,7 @@ COPY utils/ ./utils/
 
 # The module has no cgo dependency (pgx is pure Go), so a static binary is both
 # available and required — the distroless static base has no libc to link to.
-RUN CGO_ENABLED=0 go build -o /telegramd ./cmd/telegramd \
+RUN CGO_ENABLED=0 go build -o /teagramd ./cmd/teagramd \
     && CGO_ENABLED=0 go build -o /blob-migrate ./cmd/blob-migrate \
     && CGO_ENABLED=0 go build -o /photothumb ./cmd/photothumb
 
@@ -42,8 +42,8 @@ RUN CGO_ENABLED=0 go build -o /telegramd ./cmd/telegramd \
 # small. Separate mounts keep a disk-full on media from becoming a failure to
 # write the identity key.
 RUN install -d -m 0755 /rootfs/var /rootfs/var/lib \
-    && install -d -m 0700 -o 65532 -g 65532 /rootfs/var/lib/telegramd \
-    && install -d -m 0700 -o 65532 -g 65532 /rootfs/var/lib/telegramd-blobs
+    && install -d -m 0700 -o 65532 -g 65532 /rootfs/var/lib/teagramd \
+    && install -d -m 0700 -o 65532 -g 65532 /rootfs/var/lib/teagramd-blobs
 
 # Build the CI-only probe in its own stage and copy it only into the isolated
 # probe target below. It uses only the standard library.
@@ -67,7 +67,7 @@ FROM gcr.io/distroless/static-debian12:nonroot
 
 # root-owned 0755 on purpose: the process must not be able to rewrite the binary
 # it is executing.
-COPY --from=build /telegramd /usr/local/bin/telegramd
+COPY --from=build /teagramd /usr/local/bin/teagramd
 COPY --from=build /blob-migrate /usr/local/bin/blob-migrate
 COPY --from=build /photothumb /usr/local/bin/photothumb
 
@@ -79,13 +79,13 @@ COPY --from=build /rootfs/ /
 # directory and land in the container's writable layer, giving a fresh server
 # identity on every run and putting a live private key into anything that
 # snapshots the container. Mount a volume here so the identity survives restarts.
-ENV TG_RSA_KEY_PATH=/var/lib/telegramd/server_key.pem
+ENV TG_RSA_KEY_PATH=/var/lib/teagramd/server_key.pem
 
 # Also a path, not a secret. The config default is relative, which is right for
 # a run from a source checkout and wrong here: this image runs read-only, so a
 # relative directory cannot be created and the server refuses to start. Mount a
 # volume here — a separate one from the key volume.
-ENV TG_BLOB_DIR=/var/lib/telegramd-blobs
+ENV TG_BLOB_DIR=/var/lib/teagramd-blobs
 
 # TG_POSTGRES_DSN and TG_AUTHKEY_ENC_KEY are deliberately absent: both are
 # secrets, both are injected at run time, and startup fails loudly without them.
@@ -93,7 +93,7 @@ ENV TG_BLOB_DIR=/var/lib/telegramd-blobs
 
 USER 65532:65532
 EXPOSE 2443
-ENTRYPOINT ["/usr/local/bin/telegramd"]
+ENTRYPOINT ["/usr/local/bin/teagramd"]
 
-ARG TELEGRAMD_SOURCE_REVISION
-LABEL org.opencontainers.image.revision="${TELEGRAMD_SOURCE_REVISION}"
+ARG TEAGRAMD_SOURCE_REVISION
+LABEL org.opencontainers.image.revision="${TEAGRAMD_SOURCE_REVISION}"

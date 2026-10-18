@@ -326,7 +326,7 @@ func passwordResetAuthKeyID(ctx context.Context, sess *session.StorageMemory) (i
 }
 
 func runPasswordResetCLI(ctx context.Context, dsn, username, password string) (string, string, error) {
-	cmd := osexec.CommandContext(ctx, "go", "run", "../../cmd/telegramd", "admin", "set-password", "--username", username) // #nosec G204 -- fixed Go test invocation against local fixture; username is test data.
+	cmd := osexec.CommandContext(ctx, "go", "run", "../../cmd/teagramd", "admin", "set-password", "--username", username) // #nosec G204 -- fixed Go test invocation against local fixture; username is test data.
 	cmd.Env = passwordResetCommandEnvironment(dsn)
 	cmd.Stdin = strings.NewReader(password + "\n")
 	var stdout, stderr bytes.Buffer

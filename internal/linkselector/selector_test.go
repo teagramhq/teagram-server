@@ -19,7 +19,7 @@ import (
 )
 
 const (
-	landingBody = `<!doctype html><html lang="en"><body><main>Open this in Telegramd</main></body></html>`
+	landingBody = `<!doctype html><html lang="en"><body><main>Open this in Teagramd</main></body></html>`
 	webBody     = "web-resource"
 )
 
@@ -49,7 +49,7 @@ func TestAllowlistedWebResourcesAndLinkCollisions(t *testing.T) {
 		"/app.abc.js.map",
 		"/assets/img/example@2x.png",
 		"/changelogs/lang_v1.md",
-		"/.well-known/telegram-web/version.txt",
+		"/.well-known/teagram-web/version.txt",
 	}
 	for _, target := range webTargets {
 		response := serveTarget(handler, http.MethodGet, target, "")
@@ -69,7 +69,7 @@ func TestAllowlistedWebResourcesAndLinkCollisions(t *testing.T) {
 	if got := webRequests[4].requestURI; got != "/assets/img/example@2x.png" {
 		t.Errorf("Web asset target = %q, want unchanged canonical path", got)
 	}
-	if got := webRequests[6].requestURI; got != "/.well-known/telegram-web/version.txt" {
+	if got := webRequests[6].requestURI; got != "/.well-known/teagram-web/version.txt" {
 		t.Errorf("Web version target = %q, want unchanged path", got)
 	}
 	for _, request := range webRequests {

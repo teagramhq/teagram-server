@@ -50,7 +50,7 @@ function consistentRegistrationMode(flags) {
     ? modes[0] : null;
 }
 
-// telegramd pins the key as a signed 64-bit decimal; the manifest serves the same bits as unsigned hex.
+// teagramd pins the key as a signed 64-bit decimal; the manifest serves the same bits as unsigned hex.
 function fingerprintPinned(pin, fingerprint) {
   if (typeof pin !== "string" || !/^-?[0-9]{1,19}$/u.test(pin) ||
       typeof fingerprint !== "string" || !/^[0-9a-f]{16}$/u.test(fingerprint)) return false;
@@ -570,15 +570,15 @@ function projectedArray(value) {
 
 async function runtimeSnapshot() {
   // Enumerate all running containers, including replicas with other image tags.
-  // Classification has no env fields; only telegramd gets the three-key projection.
+  // Classification has no env fields; only teagramd gets the three-key projection.
   const ids = (await command("docker", ["ps", "--quiet", "--no-trunc", "--filter", "status=running"])).trim().split("\n").filter(Boolean);
   const servers = [];
   for (const id of ids) {
     if (!/^[0-9a-f]{64}$/u.test(id)) throw new Error("container identity invalid");
     const classification = JSON.parse(await command("docker", ["container", "inspect", "--format", CLASSIFICATION, id]));
     if (classification.id !== id || typeof classification.path !== "string") throw new Error("container identity invalid");
-    if (classification.path.split("/").at(-1) !== "telegramd" &&
-        !/^telegramd(?:[-_].*)?$/u.test(classification.service ?? "")) continue;
+    if (classification.path.split("/").at(-1) !== "teagramd" &&
+        !/^teagramd(?:[-_].*)?$/u.test(classification.service ?? "")) continue;
     const server = JSON.parse(await command("docker", ["container", "inspect", "--format", PROJECTION, id]));
     if (server.id !== id || !/^sha256:[0-9a-f]{64}$/u.test(server.imageId)) throw new Error("container image invalid");
     server.flags = projectedArray(server.flags);
@@ -758,7 +758,7 @@ async function main() {
     validateRelease(record);
     const directory = dirname(fileURLToPath(import.meta.url));
     const compose = ["compose", "--env-file", "/dev/null", "--project-directory", directory, "--file", `${directory}/compose.yaml`,
-      "--project-name", "telegram-browser-acceptance"];
+      "--project-name", "teagram-browser-acceptance"];
     let containers;
     result = await probeAcceptance(record.sourceCommit, {
       runtimeSnapshot,
@@ -782,7 +782,7 @@ async function main() {
         return containers;
       },
       async networkSnapshot() {
-        const network = JSON.parse(await command("docker", ["network", "inspect", "--format", NETWORK_PROJECTION, "telegram-browser-acceptance-internal"]));
+        const network = JSON.parse(await command("docker", ["network", "inspect", "--format", NETWORK_PROJECTION, "teagram-browser-acceptance-internal"]));
         network.members = projectedArray(network.members);
         return network;
       },

@@ -101,7 +101,7 @@ TG_PUBLIC_LINK_PREFIX=https://links.example.test/
 TG_LOG_LOGIN_CODES=false
 TG_REGISTRATION=closed
 TG_AUTHKEY_ENC_KEY=
-TG_AUTHKEY_ENC_KEY_FILE=/var/lib/telegramd/enc_key.hex
+TG_AUTHKEY_ENC_KEY_FILE=/var/lib/teagramd/enc_key.hex
 TG_REPLICA_ID=legacy
 TG_REPLICA_COUNT=3
 TG_ADVERTISE_ADDR=127.0.0.1:${mixed_ports[2]}
@@ -143,7 +143,7 @@ compose_for_service() {
 	service=$1
 	shift
 	case "$service" in
-		telegramd-proxy-*) compose_mixed "$@" ;;
+		teagramd-proxy-*) compose_mixed "$@" ;;
 		*) compose_base "$@" ;;
 	esac
 }
@@ -173,8 +173,8 @@ if [ "$(stat -c '%a' "$env_file")" != 600 ]; then
 	exit 1
 fi
 
-if ! docker image inspect telegramd:local >/dev/null 2>&1; then
-	docker build -t telegramd:local .
+if ! docker image inspect teagramd:local >/dev/null 2>&1; then
+	docker build -t teagramd:local .
 fi
 
 compose_default_json="$work_dir/default-compose.json"
@@ -188,21 +188,21 @@ import sys
 
 default, legacy = [json.load(open(path, encoding="utf-8")) for path in sys.argv[1:]]
 assert "tcp-proxy" not in default["services"]
-assert "telegramd-proxy-1" not in default["services"]
-assert "telegramd-proxy-2" not in default["services"]
+assert "teagramd-proxy-1" not in default["services"]
+assert "teagramd-proxy-2" not in default["services"]
 assert any(
     port.get("host_ip") == "127.0.0.1"
     and str(port.get("published")) == "2443"
     and str(port.get("target")) == "2443"
-    for port in default["services"]["telegramd"]["ports"]
+    for port in default["services"]["teagramd"]["ports"]
 )
-assert legacy["services"]["telegramd"]["environment"]["TG_CLIENT_ADDR_TRUST"] == "socket"
-assert legacy["services"]["telegramd"]["environment"]["TG_REPLICA_COUNT"] == "3"
-assert legacy["services"]["telegramd"]["environment"]["TG_WEBSOCKET_ALLOWED_ORIGINS"] == "https://web.example.test"
+assert legacy["services"]["teagramd"]["environment"]["TG_CLIENT_ADDR_TRUST"] == "socket"
+assert legacy["services"]["teagramd"]["environment"]["TG_REPLICA_COUNT"] == "3"
+assert legacy["services"]["teagramd"]["environment"]["TG_WEBSOCKET_ALLOWED_ORIGINS"] == "https://web.example.test"
 print("default Compose stays direct; validation legacy is socket-trust")
 PY
 
-bootstrap_output=$(compose_base run --rm --no-deps -T telegramd bootstrap-identity)
+bootstrap_output=$(compose_base run --rm --no-deps -T teagramd bootstrap-identity)
 fingerprint=$(printf '%s\n' "$bootstrap_output" | sed -n 's/^RSA identity bootstrapped: fingerprint=\(-\?[0-9][0-9]*\) path=.*/\1/p')
 unset bootstrap_output
 if [ -z "$fingerprint" ]; then
@@ -211,9 +211,9 @@ if [ -z "$fingerprint" ]; then
 fi
 printf 'TG_RSA_KEY_FINGERPRINT=%s\n' "$fingerprint" >> "$env_file"
 
-compose_base create telegramd >/dev/null
-legacy_container=$(compose_base ps -aq telegramd | head -1)
-key_volume=$(docker inspect "$legacy_container" --format '{{range .Mounts}}{{if and (eq .Type "volume") (eq .Destination "/var/lib/telegramd")}}{{.Name}}{{end}}{{end}}')
+compose_base create teagramd >/dev/null
+legacy_container=$(compose_base ps -aq teagramd | head -1)
+key_volume=$(docker inspect "$legacy_container" --format '{{range .Mounts}}{{if and (eq .Type "volume") (eq .Destination "/var/lib/teagramd")}}{{.Name}}{{end}}{{end}}')
 if [ -z "$key_volume" ]; then
 	echo "legacy service has no test-owned key volume" >&2
 	exit 1
@@ -230,9 +230,9 @@ import sys
 config = json.load(open(sys.argv[1], encoding="utf-8"))
 subnet, proxy_ip, temp_tcp_port, temp_ws_port = sys.argv[2:]
 services = config["services"]
-legacy = services["telegramd"]
-proxy1 = services["telegramd-proxy-1"]
-proxy2 = services["telegramd-proxy-2"]
+legacy = services["teagramd"]
+proxy1 = services["teagramd-proxy-1"]
+proxy2 = services["teagramd-proxy-2"]
 proxy = services["tcp-proxy"]
 assert legacy["environment"]["TG_CLIENT_ADDR_TRUST"] == "socket"
 assert legacy["environment"]["TG_REPLICA_COUNT"] == "3"
@@ -243,16 +243,16 @@ for service in (proxy1, proxy2):
     assert service["environment"]["TG_WEBSOCKET_ALLOWED_ORIGINS"] == "https://web.example.test"
     assert service["environment"]["TG_RSA_KEY_FINGERPRINT"]
     assert service["environment"]["TG_ADVERTISE_ADDR"] == f"127.0.0.1:{temp_tcp_port}"
-    assert service["environment"]["TG_BLOB_DIR"] == "/var/lib/telegramd-blobs"
+    assert service["environment"]["TG_BLOB_DIR"] == "/var/lib/teagramd-blobs"
     assert service["environment"]["TG_BLOB_S3_ENDPOINT"] == ""
     assert any(
         mount["type"] == "bind"
-        and mount["target"] == "/run/telegramd/blob-mode"
+        and mount["target"] == "/run/teagramd/blob-mode"
         and mount["read_only"] is True
         for mount in service["volumes"]
     )
     assert any(
-        mount["target"] == "/var/lib/telegramd-blobs"
+        mount["target"] == "/var/lib/teagramd-blobs"
         and mount["source"] == "tgblobs"
         and mount.get("read_only", False) is False
         for mount in service["volumes"]
@@ -263,12 +263,12 @@ assert {str(port.get("published")) for port in proxy["ports"]} == {temp_tcp_port
 assert config["networks"]["mixed-trust"]["ipam"]["config"][0]["subnet"] == subnet
 for replica in (proxy1, proxy2):
     volume_targets = {mount["target"]: mount["source"] for mount in replica["volumes"]}
-    assert volume_targets["/var/lib/telegramd"] == "tgkey"
-    assert volume_targets["/var/lib/telegramd-blobs"] == "tgblobs"
+    assert volume_targets["/var/lib/teagramd"] == "tgkey"
+    assert volume_targets["/var/lib/teagramd-blobs"] == "tgblobs"
 print("mixed Compose keeps exact trust modes, shared identity volumes, private app ports, and loopback-only temporary ports")
 PY
 
-python3 - deploy/telegramd/haproxy-mixed-trust.cfg <<'PY'
+python3 - deploy/teagramd/haproxy-mixed-trust.cfg <<'PY'
 import sys
 
 path = sys.argv[1]
@@ -297,7 +297,7 @@ for line in content.splitlines():
     if fields and fields[0] == "server-template":
         assert "check" in fields and "send-proxy-v2" in fields
         targets.append(fields[3])
-assert set(targets) == {"telegramd-proxy:2443", "telegramd-proxy:2444"}
+assert set(targets) == {"teagramd-proxy:2443", "teagramd-proxy:2444"}
 print("HAProxy uses TCP passthrough, exact proxy-v2 replacement targets, and private readiness")
 PY
 compose_mixed run --rm --no-deps tcp-proxy haproxy -c -f /usr/local/etc/haproxy/haproxy.cfg
@@ -321,10 +321,10 @@ wait_listening() {
 	return 1
 }
 
-wait_listening telegramd
-legacy_container_before=$(compose_base ps -q telegramd)
+wait_listening teagramd
+legacy_container_before=$(compose_base ps -q teagramd)
 legacy_config="$work_dir/legacy-client-config.json"
-compose_base run --rm --no-deps -T telegramd client-config > "$legacy_config"
+compose_base run --rm --no-deps -T teagramd client-config > "$legacy_config"
 
 probe_binary="$work_dir/mixed-trust-probe"
 go build -o "$probe_binary" ./cmd/mixed-trust-probe
@@ -393,8 +393,8 @@ wait_hold "$legacy_ws_pid" "$work_dir/legacy-ws.log"
 
 proxy_config_1="$work_dir/proxy-1-client-config.json"
 proxy_config_2="$work_dir/proxy-2-client-config.json"
-compose_mixed run --rm --no-deps -T telegramd-proxy-1 client-config > "$proxy_config_1"
-compose_mixed run --rm --no-deps -T telegramd-proxy-2 client-config > "$proxy_config_2"
+compose_mixed run --rm --no-deps -T teagramd-proxy-1 client-config > "$proxy_config_1"
+compose_mixed run --rm --no-deps -T teagramd-proxy-2 client-config > "$proxy_config_2"
 python3 - "$legacy_config" "$proxy_config_1" "$proxy_config_2" "${mixed_ports[2]}" <<'PY'
 import json
 import sys
@@ -412,13 +412,13 @@ expect_identity_refusal() {
 	match=$2
 	shift 2
 	output="$work_dir/$name.log"
-	if docker run --rm --network none --read-only -v "$key_volume:/var/lib/telegramd:ro" \
+	if docker run --rm --network none --read-only -v "$key_volume:/var/lib/teagramd:ro" \
 		-e TG_PUBLIC_LINK_PREFIX=https://links.example.test/ \
-		-e TG_POSTGRES_DSN=postgres://postgres:localdev@localhost:5432/telegram?sslmode=disable \
+		-e TG_POSTGRES_DSN=postgres://postgres:localdev@localhost:5432/teagram?sslmode=disable \
 		-e TG_RSA_KEY_FINGERPRINT="$fingerprint" -e TG_REPLICA_ID=readiness-probe \
-		-e TG_AUTHKEY_ENC_KEY= -e TG_AUTHKEY_ENC_KEY_FILE=/var/lib/telegramd/enc_key.hex \
+		-e TG_AUTHKEY_ENC_KEY= -e TG_AUTHKEY_ENC_KEY_FILE=/var/lib/teagramd/enc_key.hex \
 		-e TG_CLIENT_ADDR_TRUST=proxy-v2 -e TG_CLIENT_ADDR_PROXY_CIDRS="${mixed_network_values[1]}/32" \
-		"$@" telegramd:local > "$output" 2>&1; then
+		"$@" teagramd:local > "$output" 2>&1; then
 		echo "$name unexpectedly reached server startup" >&2
 		cat "$output" >&2
 		return 1
@@ -431,12 +431,12 @@ expect_identity_refusal() {
 	printf '%s refused as required\n' "$name"
 }
 
-expect_identity_refusal missing-rsa 'server_key_missing.pem' -e TG_RSA_KEY_PATH=/var/lib/telegramd/server_key_missing.pem
-expect_identity_refusal missing-encryption-key 'TG_AUTHKEY_ENC_KEY_FILE' -e TG_RSA_KEY_PATH=/var/lib/telegramd/server_key.pem -e TG_AUTHKEY_ENC_KEY_FILE=/var/lib/telegramd/missing_enc_key.hex
+expect_identity_refusal missing-rsa 'server_key_missing.pem' -e TG_RSA_KEY_PATH=/var/lib/teagramd/server_key_missing.pem
+expect_identity_refusal missing-encryption-key 'TG_AUTHKEY_ENC_KEY_FILE' -e TG_RSA_KEY_PATH=/var/lib/teagramd/server_key.pem -e TG_AUTHKEY_ENC_KEY_FILE=/var/lib/teagramd/missing_enc_key.hex
 
 compose_mixed up -d --no-deps tcp-proxy
-compose_mixed up -d --no-deps telegramd-proxy-1 telegramd-proxy-2
-for service in telegramd-proxy-1 telegramd-proxy-2; do
+compose_mixed up -d --no-deps teagramd-proxy-1 teagramd-proxy-2
+for service in teagramd-proxy-1 teagramd-proxy-2; do
 	wait_listening "$service"
 	compose_mixed logs "$service" | grep -F 'auth-key master key loaded from file' >/dev/null
 done
@@ -451,12 +451,12 @@ for _ in $(seq 45); do
 done
 if [ "$proxy_health" != healthy ]; then
 	compose_mixed ps -a
-	compose_mixed logs tcp-proxy telegramd-proxy-1 telegramd-proxy-2
+	compose_mixed logs tcp-proxy teagramd-proxy-1 teagramd-proxy-2
 	echo "temporary HAProxy did not become healthy" >&2
 	exit 1
 fi
 
-legacy_container_after=$(compose_mixed ps -q telegramd)
+legacy_container_after=$(compose_mixed ps -q teagramd)
 if [ "$legacy_container_before" != "$legacy_container_after" ]; then
 	echo "starting the replacement topology recreated the legacy listener" >&2
 	exit 1
@@ -476,7 +476,7 @@ proxy_ws_heartbeats=$(heartbeat_count "$work_dir/proxy-ws.log")
 
 "$probe_binary" origin --address "127.0.0.1:${mixed_ports[3]}" --origin https://evil.example --status 403
 compose_probe --profile validation build mixed-trust-probe
-compose_probe --profile validation run --rm --no-deps mixed-trust-probe forged --address telegramd-proxy-1:2443
+compose_probe --profile validation run --rm --no-deps mixed-trust-probe forged --address teagramd-proxy-1:2443
 
 wait_for_heartbeat_after "$legacy_tcp_pid" "$work_dir/legacy-tcp.log" "$legacy_tcp_heartbeats" "legacy TCP"
 wait_for_heartbeat_after "$legacy_ws_pid" "$work_dir/legacy-ws.log" "$legacy_ws_heartbeats" "legacy WebSocket"

@@ -15,7 +15,7 @@ PHASES = frozenset(
     {"service-start", "migrate-apply", "pre-check", "post-check"}
 )
 CHECKOUT_SHA_RE = re.compile(r"[0-9a-f]{40}")
-GATE_SCRIPT = "deploy/telegramd/rollout-runner/schema-result-gate.sh"
+GATE_SCRIPT = "deploy/teagramd/rollout-runner/schema-result-gate.sh"
 
 
 def shell_status(returncode: int) -> int:
@@ -169,7 +169,7 @@ def run_phase(phase: str, env: dict[str, str] | None = None) -> int:
                     "--dir",
                     "file:///migrations",
                     "--url",
-                    f"postgres://postgres:{password}@postgres:5432/telegram?sslmode=disable",
+                    f"postgres://postgres:{password}@postgres:5432/teagram?sslmode=disable",
                 ],
                 cwd=workspace,
                 env=environment,

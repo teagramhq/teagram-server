@@ -28,7 +28,7 @@ import (
 )
 
 func main() {
-	endpoint := flag.String("endpoint", "wss://telegramd.test/apiws", "fixed fixture MTProto WebSocket endpoint")
+	endpoint := flag.String("endpoint", "wss://teagramd.test/apiws", "fixed fixture MTProto WebSocket endpoint")
 	publicKeyPath := flag.String("public-key", "/run/secrets/server.pub.pem", "fixture server RSA public key")
 	tlsRootPath := flag.String("tls-root-file", "/run/secrets/tls.crt", "per-run TLS leaf certificate")
 	username := flag.String("username", "", "synthetic username")
@@ -46,8 +46,8 @@ func main() {
 		fmt.Printf("%016x\n", uint64(rsakey.Fingerprint(key)))
 		return
 	}
-	if *endpoint != "wss://telegramd.test/apiws" {
-		fatalIf(errors.New("fixture endpoint must be wss://telegramd.test/apiws"))
+	if *endpoint != "wss://teagramd.test/apiws" {
+		fatalIf(errors.New("fixture endpoint must be wss://teagramd.test/apiws"))
 	}
 	rootPEM, err := os.ReadFile(*tlsRootPath)
 	fatalIf(err)
@@ -60,7 +60,7 @@ func main() {
 			MinVersion: tls.VersionTLS12,
 			RootCAs:    roots,
 		}}},
-		HTTPHeader:   http.Header{"Origin": []string{"https://telegramd.test"}},
+		HTTPHeader:   http.Header{"Origin": []string{"https://teagramd.test"}},
 		Subprotocols: []string{"binary"},
 	}})
 
@@ -69,7 +69,7 @@ func main() {
 	client := telegram.NewClient(1, "fixture", telegram.Options{
 		DC: 2,
 		DCList: dcs.List{
-			Options: []tg.DCOption{{ID: 2, IPAddress: "telegramd.test", Port: 443}},
+			Options: []tg.DCOption{{ID: 2, IPAddress: "teagramd.test", Port: 443}},
 			Domains: map[int]string{2: *endpoint},
 		},
 		PublicKeys:     []telegram.PublicKey{{RSA: key}},

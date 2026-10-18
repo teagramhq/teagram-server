@@ -28,7 +28,7 @@ func TestProbePreflightReplaysEveryNonMatchingByte(t *testing.T) {
 
 	server, client := net.Pipe()
 	defer client.Close() //nolint:errcheck // the test owns the peer.
-	input := append([]byte("telegramd-key-v2"), 1, 2, 3, 4, 5)
+	input := append([]byte("teagramd-key-v2"), 1, 2, 3, 4, 5)
 	writeDone := make(chan error, 1)
 	go func() {
 		_, writeErr := client.Write(input)

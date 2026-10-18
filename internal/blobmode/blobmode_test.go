@@ -17,7 +17,7 @@ import (
 	"github.com/teagramhq/teagram-server/internal/blobmode"
 )
 
-const localBlobDir = "/var/lib/telegramd-blobs"
+const localBlobDir = "/var/lib/teagramd-blobs"
 
 const (
 	testMaxRecordBytes    = 4096
@@ -350,7 +350,7 @@ func TestValidateRejectsInvalidTreesWithoutChangingThem(t *testing.T) {
 				t.Helper()
 				state := testState(t, "initial-local", "s3-accepted")
 				changed := mutateRecord(t, state.mode, func(record map[string]any) {
-					objectField(t, record, "backend")["prefix"] = "telegramd"
+					objectField(t, record, "backend")["prefix"] = "teagramd"
 				})
 				return writeTestState(t, withChangedHead(state, changed), changed), blobmode.EffectiveConfig{BlobS3: testS3Config()}
 			},
@@ -614,7 +614,7 @@ func makeRecord(t *testing.T, generation int, outcome, supersedes string, change
 	switch outcome {
 	case "initial-local":
 	case "s3-accepted":
-		backend = map[string]any{"kind": "s3", "endpoint": "http://rustfs:9000", "bucket": "telegram", "prefix": "telegramd/"}
+		backend = map[string]any{"kind": "s3", "endpoint": "http://rustfs:9000", "bucket": "teagram", "prefix": "teagramd/"}
 		volumes["rustfsdata"] = "project_rustfsdata"
 		evidence["source_manifest_sha256"] = digest(generation + 10)
 		evidence["destination_manifest_sha256"] = digest(generation + 20)
@@ -724,7 +724,7 @@ func digest(value int) string {
 }
 
 func testS3Config() *blob.S3Config {
-	return &blob.S3Config{Endpoint: "http://rustfs:9000", Bucket: "telegram", Prefix: "telegramd"}
+	return &blob.S3Config{Endpoint: "http://rustfs:9000", Bucket: "teagram", Prefix: "teagramd"}
 }
 
 func snapshotTree(t *testing.T, root string) map[string]string {

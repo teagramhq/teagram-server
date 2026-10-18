@@ -45,7 +45,7 @@ The channel post summary migration adds hooks and derived-state tables without
 backfilling existing channels. Initialize one channel explicitly with:
 
 ```bash
-telegramd maintenance initialize-channel-post-summaries --channel-id <id>
+teagramd maintenance initialize-channel-post-summaries --channel-id <id>
 ```
 
 The command rebuilds only that channel's summary nodes and readiness in a

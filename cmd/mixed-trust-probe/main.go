@@ -1,5 +1,5 @@
 // Command mixed-trust-probe exercises real Compose listeners during disposable
-// mixed-trust validation. It is not included in the telegramd image.
+// mixed-trust validation. It is not included in the teagramd image.
 package main
 
 import (
@@ -65,7 +65,7 @@ func runHold(args []string) error {
 	flags := flag.NewFlagSet("hold", flag.ContinueOnError)
 	transportName := flags.String("transport", "tcp", "transport to keep open")
 	address := flags.String("address", "", "listener host:port")
-	configPath := flags.String("config", "", "public telegramd client-config JSON")
+	configPath := flags.String("config", "", "public teagramd client-config JSON")
 	origin := flags.String("origin", "https://web.example.test", "WebSocket Origin header")
 	if err := flags.Parse(args); err != nil {
 		return err
