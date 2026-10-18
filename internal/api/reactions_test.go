@@ -338,26 +338,57 @@ func TestGetMessagesReactionsOversizedListPrecedesEntitlement(t *testing.T) {
 	}
 }
 
-// Criterion 6: a channel peer is refused with the same error handleSendReaction
-// returns for one, and never reaches the owner-keyed read.
-func TestGetMessagesReactionsRefusesChannelPeer(t *testing.T) {
+// A channel member can read reaction state for that channel's posts using the
+// access hash returned by the server. Channel posts do not store reactions yet,
+// so each existing post still gets an empty update; nonexistent ids are omitted.
+func TestGetMessagesReactionsChannelPeer(t *testing.T) {
 	t.Parallel()
 	s := openStore(t)
 	ctx := context.Background()
-	p := seedReactionPair(t, s, "+15551345001", "+15551345002", "❤")
-
-	ch, err := s.CreateChannel(ctx, p.a.ID, "Ops", "", false)
+	creator, err := s.CreateUser(ctx, "+15551345001")
 	if err != nil {
-		t.Fatalf("create channel: %v", err)
+		t.Fatalf("create creator: %v", err)
 	}
-	// The caller owns and administers the channel, so the refusal is about the
-	// peer kind rather than about entitlement.
-	_, err = api.GetMessagesReactionsForTest(s, p.a.ID, &tg.MessagesGetMessagesReactionsRequest{
-		Peer: api.InputPeerChannel(p.a.ID, ch.ID), ID: []int{int(p.aLocalID)},
+	outsider, err := s.CreateUser(ctx, "+15551345002")
+	if err != nil {
+		t.Fatalf("create outsider: %v", err)
+	}
+	channel := createChannel(t, s, creator.ID, &tg.ChannelsCreateChannelRequest{
+		Broadcast: true, Title: "Ops",
 	})
-	if got := rpcMessage(t, err); got != "PEER_ID_INVALID" {
-		t.Fatalf("channel peer: err = %v, want PEER_ID_INVALID", err)
+	peer := &tg.InputPeerChannel{ChannelID: channel.ID, AccessHash: channel.AccessHash}
+	post, err := api.SendMessageForTest(s, creator.ID, &tg.MessagesSendMessageRequest{
+		Peer: peer, Message: "channel post", RandomID: 770050,
+	})
+	if err != nil {
+		t.Fatalf("send channel post: %v", err)
 	}
+	postID := int(sentLocalID(t, post))
+
+	ups := getReactions(t, s, creator.ID, peer, postID, postID+100)
+	if len(ups.Updates) != 1 {
+		t.Fatalf("updates = %d, want one for the existing post", len(ups.Updates))
+	}
+	update, ok := ups.Updates[0].(*tg.UpdateMessageReactions)
+	if !ok {
+		t.Fatalf("update type = %T, want *tg.UpdateMessageReactions", ups.Updates[0])
+	}
+	if channelPeer, ok := update.Peer.(*tg.PeerChannel); !ok || channelPeer.ChannelID != channel.ID {
+		t.Fatalf("update peer = %#v, want PeerChannel(%d)", update.Peer, channel.ID)
+	}
+	if update.MsgID != postID || len(update.Reactions.Results) != 0 {
+		t.Fatalf("update message/reactions = %d/%v, want %d/empty", update.MsgID, update.Reactions.Results, postID)
+	}
+
+	_, err = api.GetMessagesReactionsForTest(s, creator.ID, &tg.MessagesGetMessagesReactionsRequest{
+		Peer: &tg.InputPeerChannel{ChannelID: channel.ID, AccessHash: channel.AccessHash + 1}, ID: []int{postID},
+	})
+	rpcError(t, err, "PEER_ID_INVALID")
+
+	_, err = api.GetMessagesReactionsForTest(s, outsider.ID, &tg.MessagesGetMessagesReactionsRequest{
+		Peer: api.InputPeerChannel(outsider.ID, channel.ID), ID: []int{postID},
+	})
+	rpcError(t, err, "PEER_ID_INVALID")
 }
 
 // Criterion 7: the peer argument is an applied filter. A message the caller

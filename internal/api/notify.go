@@ -1200,7 +1200,7 @@ func (u *Updater) DeliverTyping(ctx context.Context, peerID, fromID int64) {
 			u.log.Error("load typing channel", "channel_id", peerID, "err", err)
 			return
 		}
-		if !found || !channel.Megagroup {
+		if !found {
 			return
 		}
 		participants, _, err := u.h.store.ChannelDeliverySnapshot(ctx, peerID)
@@ -1216,6 +1216,9 @@ func (u *Updater) DeliverTyping(ctx context.Context, peerID, fromID int64) {
 				continue
 			}
 			if participant.UserID == fromID {
+				if !channel.Megagroup && participant.Role < channelRoleAdmin {
+					return
+				}
 				senderIsMember = true
 				continue
 			}
