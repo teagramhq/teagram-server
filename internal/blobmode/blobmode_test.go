@@ -99,6 +99,86 @@ func TestValidateAcceptsPublisherGeneratedStackMoveJournal(t *testing.T) {
 	}
 }
 
+func TestValidateRejectsStackMoveWithChangedBackendOrVolumes(t *testing.T) {
+	if !requireRootFixture(t, "TestValidateRejectsStackMoveWithChangedBackendOrVolumes") {
+		return
+	}
+	tests := []struct {
+		name     string
+		outcomes []string
+		wantErr  string
+		mutate   func(*testing.T, map[int][]byte)
+	}{
+		{
+			name:     "changed backend directory",
+			outcomes: []string{"initial-local", "stack-moved-local"},
+			wantErr:  "reason=supersession field=outcome",
+			mutate: func(t *testing.T, records map[int][]byte) {
+				t.Helper()
+				records[1] = mutateRecord(t, records[1], func(record map[string]any) {
+					objectField(t, record, "backend")["dir"] = localBlobDir
+				})
+			},
+		},
+		{
+			name:     "wrong source tgblobs volume",
+			outcomes: []string{"initial-local", "stack-moved-local"},
+			wantErr:  "reason=supersession field=outcome",
+			mutate: func(t *testing.T, records map[int][]byte) {
+				t.Helper()
+				records[1] = mutateRecord(t, records[1], func(record map[string]any) {
+					objectField(t, record, "volumes")["tgblobs"] = "unexpected_tgblobs"
+				})
+			},
+		},
+		{
+			name:     "wrong source rustfsdata volume",
+			outcomes: []string{"initial-local", "s3-accepted", "recovered-local", "stack-moved-local"},
+			wantErr:  "reason=supersession field=outcome",
+			mutate: func(t *testing.T, records map[int][]byte) {
+				t.Helper()
+				records[3] = mutateRecord(t, records[3], func(record map[string]any) {
+					objectField(t, record, "volumes")["rustfsdata"] = "unexpected_rustfsdata"
+				})
+			},
+		},
+		{
+			name:     "wrong target tgblobs volume",
+			outcomes: []string{"initial-local", "stack-moved-local"},
+			wantErr:  "reason=schema field=volumes",
+			mutate: func(t *testing.T, records map[int][]byte) {
+				t.Helper()
+				records[2] = mutateRecord(t, records[2], func(record map[string]any) {
+					objectField(t, record, "volumes")["tgblobs"] = "unexpected_tgblobs"
+				})
+			},
+		},
+		{
+			name:     "wrong target rustfsdata volume",
+			outcomes: []string{"initial-local", "stack-moved-local"},
+			wantErr:  "reason=schema field=volumes",
+			mutate: func(t *testing.T, records map[int][]byte) {
+				t.Helper()
+				records[2] = mutateRecord(t, records[2], func(record map[string]any) {
+					objectField(t, record, "volumes")["rustfsdata"] = "unexpected_rustfsdata"
+				})
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			chain := testChain(t, tt.outcomes...)
+			tt.mutate(t, chain.records)
+			path := writeTestState(t, chain.records, chain.records[len(chain.records)])
+			err := blobmode.Validate(path, blobmode.EffectiveConfig{BlobDir: movedBlobDir})
+			if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+				t.Fatalf("validate error = %v, want %q", err, tt.wantErr)
+			}
+		})
+	}
+}
+
 func TestValidateAbsentGuardKeepsLegacyBehavior(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "blob-mode")
 	if err := blobmode.Validate(path, blobmode.EffectiveConfig{BlobS3: testS3Config()}); err != nil {
