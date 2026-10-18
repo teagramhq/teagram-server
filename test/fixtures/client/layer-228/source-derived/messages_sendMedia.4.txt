@@ -1,0 +1,20 @@
+# source: MAIN-2114 acceptance request shape encoded with layer-228 TL constructors; synthetic identifiers
+body: { messages.sendMedia
+  peer: { inputPeerChat chat_id: <N> },
+  media: { inputMediaPoll
+    poll: { poll
+      question: { textWithEntities text: "Question 1", entities: [] },
+      answers: [
+        { inputPollAnswer
+          text: { textWithEntities text: "Option 1", entities: [] },
+          media: { inputMediaWebPage url: "https://poll-answer.invalid/example?a=1" },
+        },
+        { inputPollAnswer
+          text: { textWithEntities text: "Option 2😁", entities: [] },
+        },
+      ],
+    },
+  },
+  message: "Answer link fixture",
+  random_id: <N>,
+}

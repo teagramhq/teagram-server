@@ -453,6 +453,7 @@ func TestSmokeClientRequestFixturesAreLayer228Shapes(t *testing.T) {
 		"messages_sendMedia.1",
 		"messages_sendMedia.2",
 		"messages_sendMedia.3",
+		"messages_sendMedia.4",
 		"messages_sendMessage.1",
 		"messages_sendMessage.2",
 		"messages_sendMessage.3",
@@ -978,6 +979,43 @@ func testSmokeClientRequestFixtures(t *testing.T) {
 			t.Errorf("poll response for fixture %s: %v", test.fixture, err)
 		}
 	}
+
+	const answerURL = "https://poll-answer.invalid/example?a=1"
+	request := smokeClientPollRequest(chatID, "Answer link fixture", 1048903)
+	pollMedia, ok := request.Media.(*tg.InputMediaPoll)
+	if !ok {
+		t.Fatalf("fixture request media = %T, want inputMediaPoll", request.Media)
+	}
+	answer, ok := pollMedia.Poll.Answers[0].(*tg.InputPollAnswer)
+	if !ok {
+		t.Fatalf("fixture poll answer = %T, want inputPollAnswer", pollMedia.Poll.Answers[0])
+	}
+	answer.SetMedia(&tg.InputMediaWebPage{URL: answerURL})
+	var linkedPoll tg.UpdatesClass
+	if err := fixtureClientCall(t, creator, "messages_sendMedia.4", func(ctx context.Context, api *tg.Client) error {
+		var err error
+		linkedPoll, err = api.MessagesSendMedia(ctx, request)
+		return err
+	}); err != nil {
+		t.Fatalf("replay poll answer web-page fixture: %v", err)
+	}
+	updates, ok := linkedPoll.(*tg.Updates)
+	if !ok {
+		t.Fatalf("poll answer web-page fixture result = %T, want *tg.Updates", linkedPoll)
+	}
+	for _, update := range updates.Updates {
+		created, ok := update.(*tg.UpdateNewMessage)
+		if !ok {
+			continue
+		}
+		message, ok := created.Message.(*tg.Message)
+		if !ok {
+			t.Fatalf("poll answer web-page fixture message = %T, want *tg.Message", created.Message)
+		}
+		assertSmokePollAnswerWebPage(t, "poll answer web-page fixture", message, answerURL)
+		return
+	}
+	t.Fatal("poll answer web-page fixture response omitted updateNewMessage")
 }
 
 func replayFixtureSendMessage(t *testing.T, client *smokeClient, fixtureName string, peer tg.InputPeerClass, message string, randomID int64) {

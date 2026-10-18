@@ -10,8 +10,10 @@ import (
 	"fmt"
 	"math"
 	"math/big"
+	"net/url"
 	"strings"
 	"time"
+	"unicode"
 	"unicode/utf8"
 
 	"github.com/jackc/pgx/v5"
@@ -21,10 +23,11 @@ import (
 )
 
 const (
-	maxPollAnswers     = 10
-	maxPollOptionBytes = 100
-	maxPollTextBytes   = 4096
-	maxPollIDAttempts  = 5
+	maxPollAnswers       = 10
+	maxPollOptionBytes   = 100
+	maxPollTextBytes     = 4096
+	maxPollMediaURLBytes = 2048
+	maxPollIDAttempts    = 5
 )
 
 var (
@@ -67,6 +70,7 @@ type PollDraft struct {
 type PollAnswer struct {
 	Option     []byte
 	Text       []byte
+	MediaURL   *string
 	Correct    bool
 	VoterCount int64
 	Chosen     bool
@@ -263,7 +267,7 @@ func createPollForMessageTx(
 	for position, answer := range canonical.Answers {
 		if err = q.InsertPollOption(ctx, db.InsertPollOptionParams{
 			PollID: row.ID, Option: answer.Option, Text: answer.Text,
-			Correct: answer.Correct, Position: int16(position),
+			MediaUrl: answer.MediaURL, Correct: answer.Correct, Position: int16(position),
 		}); err != nil {
 			return Poll{}, false, fmt.Errorf("insert poll option %d: %w", position, err)
 		}
@@ -1260,6 +1264,14 @@ func normalizePollDraftShape(draft PollDraft) (PollDraft, error) {
 		if len(answer.Option) == 0 || len(answer.Option) > maxPollOptionBytes || len(answer.Text) == 0 || len(answer.Text) > maxPollTextBytes || !utf8.Valid(answer.Text) {
 			return PollDraft{}, ErrPollInvalid
 		}
+		var mediaURL *string
+		if answer.MediaURL != nil {
+			if err := ValidatePollAnswerMediaURL(*answer.MediaURL); err != nil {
+				return PollDraft{}, ErrPollInvalid
+			}
+			value := *answer.MediaURL
+			mediaURL = &value
+		}
 		key := string(answer.Option)
 		if seen[key] {
 			return PollDraft{}, ErrPollInvalid
@@ -1268,7 +1280,10 @@ func normalizePollDraftShape(draft PollDraft) (PollDraft, error) {
 		if answer.Correct {
 			correctCount++
 		}
-		canonical.Answers[i] = PollAnswer{Option: bytes.Clone(answer.Option), Text: bytes.Clone(answer.Text), Correct: answer.Correct}
+		canonical.Answers[i] = PollAnswer{
+			Option: bytes.Clone(answer.Option), Text: bytes.Clone(answer.Text),
+			MediaURL: mediaURL, Correct: answer.Correct,
+		}
 	}
 	if canonical.Quiz {
 		if correctCount == 0 || (!canonical.MultipleChoice && correctCount != 1) {
@@ -1278,6 +1293,24 @@ func normalizePollDraftShape(draft PollDraft) (PollDraft, error) {
 		return PollDraft{}, ErrPollInvalid
 	}
 	return canonical, nil
+}
+
+// ValidatePollAnswerMediaURL checks the stored-link policy without returning
+// parse details that could contain the URL.
+func ValidatePollAnswerMediaURL(value string) error {
+	if len(value) == 0 || len(value) > maxPollMediaURLBytes || !utf8.ValidString(value) {
+		return ErrPollInvalid
+	}
+	for _, r := range value {
+		if r <= 0x1f || r == 0x7f || unicode.IsSpace(r) {
+			return ErrPollInvalid
+		}
+	}
+	parsed, err := url.Parse(value)
+	if err != nil || (!strings.EqualFold(parsed.Scheme, "http") && !strings.EqualFold(parsed.Scheme, "https")) || parsed.Host == "" || parsed.User != nil {
+		return ErrPollInvalid
+	}
+	return nil
 }
 
 func validatePollCloseDate(closeDate *time.Time, now time.Time) error {
@@ -1388,6 +1421,7 @@ func pollView(ctx context.Context, q *db.Queries, row db.Poll, viewerID int64) (
 		poll.Answers = append(poll.Answers, PollAnswer{
 			Option:     bytes.Clone(option.Option),
 			Text:       bytes.Clone(option.Text),
+			MediaURL:   option.MediaUrl,
 			Correct:    reveal && option.Correct,
 			VoterCount: option.VoterCount,
 			Chosen:     option.Chosen,

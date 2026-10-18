@@ -2,6 +2,8 @@ package api
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/binary"
 	"errors"
 	"time"
 
@@ -739,13 +741,21 @@ func pollDraftFromInput(media *tg.InputMediaPoll) (store.PollDraft, error) {
 				Correct: correct[i],
 			}
 		case *tg.InputPollAnswer:
-			if uint32(answer.Flags)&^uint32(1) != 0 || answer.Flags.Has(0) || answer.Media != nil || len(answer.Text.Entities) != 0 || !validText(answer.Text.Text) {
+			if uint32(answer.Flags)&^uint32(1) != 0 || answer.Flags.Has(0) != (answer.Media != nil) || len(answer.Text.Entities) != 0 || !validText(answer.Text.Text) {
 				return store.PollDraft{}, store.ErrPollInvalid
 			}
+			var mediaURL *string
+			if answer.Media != nil {
+				webPage, ok := answer.Media.(*tg.InputMediaWebPage)
+				if !ok || uint32(webPage.Flags)&^uint32(7) != 0 || store.ValidatePollAnswerMediaURL(webPage.URL) != nil {
+					return store.PollDraft{}, store.ErrPollInvalid
+				}
+				value := webPage.URL
+				mediaURL = &value
+			}
 			draft.Answers[i] = store.PollAnswer{
-				Option:  []byte{byte(i + 1)},
-				Text:    []byte(answer.Text.Text),
-				Correct: correct[i],
+				Option: []byte{byte(i + 1)}, Text: []byte(answer.Text.Text),
+				MediaURL: mediaURL, Correct: correct[i],
 			}
 		default:
 			return store.PollDraft{}, store.ErrPollInvalid
@@ -892,13 +902,71 @@ func pollToTL(poll store.Poll) tg.Poll {
 	if poll.CloseDate != nil {
 		result.SetCloseDate(int(poll.CloseDate.Unix()))
 	}
+	webPageIDs := pollAnswerWebPageIDs(poll.Answers)
 	for i, answer := range poll.Answers {
-		result.Answers[i] = &tg.PollAnswer{
+		pollAnswer := &tg.PollAnswer{
 			Text:   tg.TextWithEntities{Text: string(answer.Text)},
 			Option: append([]byte(nil), answer.Option...),
 		}
+		if answer.MediaURL != nil {
+			webPage := &tg.WebPageEmpty{ID: webPageIDs[i]}
+			webPage.SetURL(*answer.MediaURL)
+			pollAnswer.SetMedia(&tg.MessageMediaWebPage{Webpage: webPage})
+		}
+		result.Answers[i] = pollAnswer
 	}
 	return result
+}
+
+func pollAnswerWebPageIDs(answers []store.PollAnswer) []int64 {
+	ids := make([]int64, len(answers))
+	baseIDs := make(map[int64]struct{}, len(answers))
+	for _, answer := range answers {
+		if answer.MediaURL != nil {
+			baseIDs[webPageEmptyID(*answer.MediaURL, 0)] = struct{}{}
+		}
+	}
+	assigned := make(map[int64]string, len(answers))
+	byURL := make(map[string]int64, len(answers))
+	for i, answer := range answers {
+		if answer.MediaURL == nil {
+			continue
+		}
+		value := *answer.MediaURL
+		if id, ok := byURL[value]; ok {
+			ids[i] = id
+			continue
+		}
+		for salt := uint64(0); ; salt++ {
+			id := webPageEmptyID(value, salt)
+			_, used := assigned[id]
+			_, reserved := baseIDs[id]
+			if id == 0 || used || (salt != 0 && reserved) {
+				continue
+			}
+			ids[i] = id
+			assigned[id] = value
+			byURL[value] = id
+			break
+		}
+	}
+	return ids
+}
+
+func webPageEmptyID(value string, salt uint64) int64 {
+	input := []byte(value)
+	if salt != 0 {
+		input = make([]byte, len(value)+9)
+		copy(input, value)
+		input[len(value)] = 0xff
+		binary.BigEndian.PutUint64(input[len(value)+1:], salt)
+	}
+	digest := sha256.Sum256(input)
+	id := int64(binary.BigEndian.Uint64(digest[:8]) & 0x7fffffffffffffff)
+	if id == 0 {
+		return 1
+	}
+	return id
 }
 
 func pollResultsToTL(poll store.Poll) tg.PollResults {

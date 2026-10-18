@@ -2106,6 +2106,7 @@ func testSmokeBasicGroup(t *testing.T) {
 		t.Fatalf("C group message readers after A reads = %v, want A %d with persisted date", readParticipants, a.id)
 	}
 
+	const answerURL = "https://poll-answer.invalid/example?a=1"
 	pollInput := &tg.InputMediaPoll{Poll: tg.Poll{
 		Question: tg.TextWithEntities{Text: "Which smoke option?"},
 		Answers: []tg.PollAnswerClass{
@@ -2113,6 +2114,11 @@ func testSmokeBasicGroup(t *testing.T) {
 			&tg.InputPollAnswer{Text: tg.TextWithEntities{Text: "Second"}},
 		},
 	}}
+	firstInputAnswer, ok := pollInput.Poll.Answers[0].(*tg.InputPollAnswer)
+	if !ok {
+		t.Fatal("constructed group poll answer is not inputPollAnswer")
+	}
+	firstInputAnswer.SetMedia(&tg.InputMediaWebPage{URL: answerURL})
 	const pollDescription = "Description stuff"
 	var pollSend tg.UpdatesClass
 	if err := a.call(f.ctx, func(ctx context.Context, api *tg.Client) error {
@@ -2146,6 +2152,7 @@ func testSmokeBasicGroup(t *testing.T) {
 		t.Fatalf("group poll media = %#v, want canonical poll", pollMessage.Media)
 	}
 	assertSmokePollCaption(t, "group poll send response", pollMessage, pollDescription)
+	answerPageID := assertSmokePollAnswerWebPage(t, "group poll send response", pollMessage, answerURL)
 	firstAnswer, ok := media.Poll.Answers[0].(*tg.PollAnswer)
 	if !ok || len(firstAnswer.Option) == 0 {
 		t.Fatalf("group poll first answer = %#v, want server-assigned option bytes", media.Poll.Answers[0])
@@ -2158,6 +2165,9 @@ func testSmokeBasicGroup(t *testing.T) {
 			t.Fatalf("member %d poll copy = %#v, want shared non-creator poll %d", received.FromID, received.Media, media.Poll.ID)
 		}
 		assertSmokePollCaption(t, fmt.Sprintf("member %d live poll", received.FromID), received, pollDescription)
+		if got := assertSmokePollAnswerWebPage(t, fmt.Sprintf("member %d live poll", received.FromID), received, answerURL); got != answerPageID {
+			t.Fatalf("member %d live webpage id = %d, want %d", received.FromID, got, answerPageID)
+		}
 	}
 	if err := b.call(f.ctx, func(ctx context.Context, api *tg.Client) error {
 		history, err := api.MessagesGetHistory(ctx, &tg.MessagesGetHistoryRequest{Peer: &tg.InputPeerChat{ChatID: chatID}, Limit: 20})
@@ -2173,6 +2183,9 @@ func testSmokeBasicGroup(t *testing.T) {
 			message, ok := candidate.(*tg.Message)
 			if ok && message.ID == bPoll.ID {
 				assertSmokePollCaption(t, "group poll history", message, pollDescription)
+				if got := assertSmokePollAnswerWebPage(t, "group poll history", message, answerURL); got != answerPageID {
+					return fmt.Errorf("group poll history webpage id = %d, want %d", got, answerPageID)
+				}
 				found = true
 			}
 		}
@@ -2192,9 +2205,57 @@ func testSmokeBasicGroup(t *testing.T) {
 			return fmt.Errorf("group poll getMessages item = %T, want *tg.Message", messages.Messages[0])
 		}
 		assertSmokePollCaption(t, "group poll getMessages", message, pollDescription)
+		if got := assertSmokePollAnswerWebPage(t, "group poll getMessages", message, answerURL); got != answerPageID {
+			return fmt.Errorf("group poll getMessages webpage id = %d, want %d", got, answerPageID)
+		}
 		return nil
 	}); err != nil {
 		t.Fatalf("read described group poll: %v", err)
+	}
+
+	invalidAnswerMedia := func(media tg.InputMediaClass) *tg.InputMediaPoll {
+		invalid := &tg.InputMediaPoll{Poll: tg.Poll{
+			Question: tg.TextWithEntities{Text: "Invalid answer media?"},
+			Answers: []tg.PollAnswerClass{
+				&tg.InputPollAnswer{Text: tg.TextWithEntities{Text: "First"}},
+				&tg.InputPollAnswer{Text: tg.TextWithEntities{Text: "Second"}},
+			},
+		}}
+		answer, ok := invalid.Poll.Answers[0].(*tg.InputPollAnswer)
+		if !ok {
+			t.Fatal("constructed invalid poll answer is not inputPollAnswer")
+		}
+		answer.SetMedia(media)
+		return invalid
+	}
+	oversizedURL := "https://x/" + strings.Repeat("a", 2049-len("https://x/"))
+	for i, test := range []struct {
+		name  string
+		media tg.InputMediaClass
+		url   string
+	}{
+		{name: "inputMediaPhoto", media: &tg.InputMediaPhoto{ID: &tg.InputPhotoEmpty{}}},
+		{name: "javascript URL", media: &tg.InputMediaWebPage{URL: "javascript:alert(1)"}, url: "javascript:alert(1)"},
+		{name: "oversized URL", media: &tg.InputMediaWebPage{URL: oversizedURL}, url: oversizedURL},
+	} {
+		err := a.call(f.ctx, func(ctx context.Context, api *tg.Client) error {
+			_, sendErr := api.MessagesSendMedia(ctx, &tg.MessagesSendMediaRequest{
+				Peer: &tg.InputPeerChat{ChatID: chatID}, Media: invalidAnswerMedia(test.media), RandomID: int64(1047006 + i),
+			})
+			if sendErr == nil {
+				return fmt.Errorf("send poll with %s succeeded, want POLL_ANSWERS_INVALID", test.name)
+			}
+			if !tgerr.Is(sendErr, "POLL_ANSWERS_INVALID") {
+				return fmt.Errorf("send poll with %s: %w", test.name, sendErr)
+			}
+			if test.url != "" && strings.Contains(sendErr.Error(), test.url) {
+				return fmt.Errorf("send poll with %s echoed its URL in the error", test.name)
+			}
+			return nil
+		})
+		if err != nil {
+			t.Fatalf("reject poll answer %s: %v", test.name, err)
+		}
 	}
 
 	var voteResult tg.UpdatesClass
@@ -3348,6 +3409,31 @@ func assertSmokePollCaption(t *testing.T, label string, message *tg.Message, wan
 	if !ok || bold.Offset != 0 || bold.Length != 11 {
 		t.Fatalf("%s entity = %#v, want bold over Description", label, entities[0])
 	}
+}
+
+func assertSmokePollAnswerWebPage(t *testing.T, label string, message *tg.Message, wantURL string) int64 {
+	t.Helper()
+	media, ok := message.Media.(*tg.MessageMediaPoll)
+	if !ok || len(media.Poll.Answers) != 2 {
+		t.Fatalf("%s media = %#v, want a poll with two answers", label, message.Media)
+	}
+	first, ok := media.Poll.Answers[0].(*tg.PollAnswer)
+	if !ok {
+		t.Fatalf("%s first answer = %T, want pollAnswer", label, media.Poll.Answers[0])
+	}
+	webPageMedia, ok := first.Media.(*tg.MessageMediaWebPage)
+	if !ok {
+		t.Fatalf("%s first answer media = %#v, want messageMediaWebPage", label, first.Media)
+	}
+	webPage, ok := webPageMedia.Webpage.(*tg.WebPageEmpty)
+	if !ok || webPage.ID == 0 || webPage.URL != wantURL {
+		t.Fatalf("%s webpage = %#v, want nonzero id and exact URL %q", label, webPageMedia.Webpage, wantURL)
+	}
+	second, ok := media.Poll.Answers[1].(*tg.PollAnswer)
+	if !ok || second.Media != nil {
+		t.Fatalf("%s second answer media = %#v, want none", label, media.Poll.Answers[1])
+	}
+	return webPage.ID
 }
 
 func testSmokeChannelPollLifecycle(t *testing.T) {
