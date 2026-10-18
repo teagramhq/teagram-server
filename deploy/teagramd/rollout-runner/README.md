@@ -891,7 +891,7 @@ or `erasure_epoch_completion`, by a nonempty `files` table, or by changed
 migration provenance or migration 71 or later. The read-only qualification
 rejects exhausted states; it does not widen the census or repair the schema.
 Ordinary rollout remains the only migration authority. The immutable pins,
-closed catalog contracts, capture commands and PostgreSQL 16 CI proofs are
+closed catalog contracts, capture commands and PostgreSQL 18 CI proofs are
 documented in `QUALIFICATION.md`.
 
 Run the real PostgreSQL and Atlas qualification locally with:

@@ -23,7 +23,7 @@ invoking `blob-migrate`, then records copy and independent destination-census
 output after each pass and runs the full `check` before publishing authority.
 
 The transition runner freezes writers before relying on caller-supplied freeze
-artifacts. While holding the shared lock with `telegramd*` stopped, it captures
+artifacts. While holding the shared lock with `teagramd*` stopped, it captures
 a fresh database dump, queries the frozen database for applied Atlas revisions
 and the migration schema, captures both exact reference queries, and takes a
 fresh local-volume census. The private `migrations.json.live_capture` records
@@ -334,7 +334,7 @@ contract and ordinary rollout must land, R67 qualification must land, and both
 baseline and applied state must be exactly 60–67. This runner does not apply
 migrations 63–67 or drop 67 indexes on rollback.
 
-The PostgreSQL 16 CI proof applies the actual immutable migration directory with
+The PostgreSQL 18 CI proof applies the actual immutable migration directory with
 Atlas 1.2.0, runs the two capture SQL files, validates the empty catalog, and
 checks isolated SQL mutations for ordered keys, foreign-key actions and MATCH
 types, `SET NULL` column subsets, and `conindid` targets. Each mutation runs in a
