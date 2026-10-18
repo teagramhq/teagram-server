@@ -27,6 +27,7 @@ SOURCE_VOLUMES = {
     "tgblobs": "telegram-server_tgblobs",
     "rustfsdata": "telegram-server_rustfsdata",
 }
+SOURCE_COMPOSE_VOLUMES = ("pgdata", "tgkey", "tgblobs")
 TARGET_VOLUMES = {
     "pgdata": "teagram_pgdata",
     "tgkey": "teagram_tgkey",
@@ -334,6 +335,13 @@ def named_volumes(config: dict[str, object]) -> dict[str, str]:
             raise MoveError(f"Compose volume {logical} has no resolved name")
         result[logical] = item["name"]
     return result
+
+
+def validate_source_compose_volumes(config: dict[str, object]) -> dict[str, str]:
+    expected = {logical: SOURCE_VOLUMES[logical] for logical in SOURCE_COMPOSE_VOLUMES}
+    if named_volumes(config) != expected:
+        raise MoveError("source Compose volume names do not match the expected local telegram-server stack")
+    return expected
 
 
 def database_name(config: dict[str, object]) -> str:
@@ -1127,6 +1135,42 @@ def load_blob_mode_helper(helper_path: pathlib.Path):
     return blob_mode
 
 
+def source_rustfsdata_authority(
+    state_dir: pathlib.Path | None,
+    report_root: pathlib.Path | None,
+    helper_path: pathlib.Path | None,
+) -> str | None:
+    if state_dir is None:
+        return None
+    if report_root is None or helper_path is None:
+        raise MoveError("durable blob authority paths are incomplete")
+    blob_mode = load_blob_mode_helper(helper_path)
+    try:
+        records, head, mode_bytes = blob_mode.read_authority(state_dir, report_root)
+    except (blob_mode.Reject, OSError, ValueError) as error:
+        raise MoveError("source blob mode authority is unavailable") from error
+    if mode_bytes != head or not records:
+        raise MoveError("source blob mode authority is stale")
+    volumes = records[-1].get("volumes")
+    if not isinstance(volumes, dict):
+        raise MoveError("source blob mode volume authority is invalid")
+    rustfsdata = volumes.get("rustfsdata")
+    if rustfsdata not in (None, SOURCE_VOLUMES["rustfsdata"]):
+        raise MoveError("source blob mode RustFS volume authority is invalid")
+    return rustfsdata
+
+
+def ensure_source_rustfsdata_volume(authoritative_volume: str | None) -> None:
+    name = SOURCE_VOLUMES["rustfsdata"]
+    if volume_exists(name):
+        return
+    if authoritative_volume is not None:
+        raise MoveError("authoritative source RustFS volume is missing")
+    created = output(["docker", "volume", "create", name], timeout=30)
+    if created != name:
+        raise MoveError("Docker created an unexpected source RustFS volume")
+
+
 def publish_moved_blob_authority(
     state_dir: pathlib.Path,
     report_root: pathlib.Path,
@@ -1198,6 +1242,9 @@ def move(args: argparse.Namespace) -> None:
     try:
         source_config = render_compose(SOURCE_PROJECT, source_dir, env_file, source_files)
         source_blob_path = require_local_source_blob_lane(source_config)
+        rustfsdata_authority = source_rustfsdata_authority(
+            state_dir, report_root, blob_mode_helper,
+        )
         persist_move_blob_dir(target_env_file, source_blob_path)
         os.environ[MOVE_BLOB_DIR_ENV] = source_blob_path
         stage_legacy_blob_secret(source_dir, target_dir)
@@ -1224,8 +1271,7 @@ def move(args: argparse.Namespace) -> None:
             raise MoveError("source Compose project is not telegram-server")
         if not layout_changed(source_layout, target_layout):
             raise MoveError("project move was requested but the Compose layout did not change")
-        if named_volumes(source_config) != SOURCE_VOLUMES:
-            raise MoveError("source Compose volume names do not match the expected telegram-server stack")
+        validate_source_compose_volumes(source_config)
         inspect_target_contract(target_config, source_blob_path)
         source_database = database_name(source_config)
         target_database = database_name(target_config)
@@ -1238,9 +1284,15 @@ def move(args: argparse.Namespace) -> None:
         _, source_postgres_id = assert_source_running(source_compose, source_config)
         source_postgres_image = get_image_id(source_postgres_id)
         source_volume_names = set(SOURCE_VOLUMES.values())
-        for name in source_volume_names:
+        for logical in SOURCE_COMPOSE_VOLUMES:
+            name = SOURCE_VOLUMES[logical]
             if not volume_exists(name):
                 raise MoveError(f"expected old source volume {name} is missing")
+        if (
+            not volume_exists(SOURCE_VOLUMES["rustfsdata"])
+            and rustfsdata_authority == SOURCE_VOLUMES["rustfsdata"]
+        ):
+            raise MoveError("authoritative source RustFS volume is missing")
         assert_no_external_writers(source_volume_names, set(TARGET_VOLUMES.values()))
         target_postgres_image = target_config["services"]["postgres"]["image"]
         run(
@@ -1293,6 +1345,10 @@ def move(args: argparse.Namespace) -> None:
                 operation="stop old non-PostgreSQL services",
                 failure_evidence=evidence_dir / "source-services-stop.stderr",
             )
+        # The pinned local lane does not declare RustFS. Preserve its historical
+        # volume when present; when authority says it never existed, stage an
+        # empty legacy volume so the move evidence still covers both backends.
+        ensure_source_rustfsdata_volume(rustfsdata_authority)
         check_source_volumes_are_stopped({
             SOURCE_VOLUMES["tgkey"], SOURCE_VOLUMES["tgblobs"], SOURCE_VOLUMES["rustfsdata"],
         })

@@ -248,7 +248,11 @@ class MoveSecretMigrationTest(unittest.TestCase):
             target.mkdir(mode=0o700)
             evidence.mkdir(mode=0o700)
             source_env = source / ".env"
-            source_env.write_text("POSTGRES_PASSWORD=fixture-only\n", encoding="utf-8")
+            source_env.write_text(
+                "POSTGRES_PASSWORD=fixture-only\n"
+                "TG_PUBLIC_LINK_PREFIX=https://example.invalid/\n",
+                encoding="utf-8",
+            )
             target_env = target / ".env"
             target_env.write_text(
                 "POSTGRES_PASSWORD=fixture-only\n"
@@ -257,32 +261,7 @@ class MoveSecretMigrationTest(unittest.TestCase):
             )
             target_env.chmod(0o600)
             source_compose = source / ".rollout-compose.local-cce00d1.yml"
-            source_compose.write_text(
-                "name: telegram-server\n"
-                "services:\n"
-                "  postgres:\n"
-                "    image: postgres:16-alpine\n"
-                "    environment:\n"
-                "      POSTGRES_DB: telegram\n"
-                "      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?required}\n"
-                "    volumes: [pgdata:/var/lib/postgresql/data]\n"
-                "  telegramd:\n"
-                "    image: telegramd:local\n"
-                "    environment:\n"
-                "      TG_BLOB_DIR: /var/lib/telegramd-blobs\n"
-                "    volumes:\n"
-                "      - tgkey:/var/lib/telegramd\n"
-                "      - tgblobs:/var/lib/telegramd-blobs\n"
-                "  rustfs:\n"
-                "    image: rustfs:fixture\n"
-                "    volumes: [rustfsdata:/data]\n"
-                "volumes:\n"
-                "  pgdata: {name: telegram-server_pgdata}\n"
-                "  tgkey: {name: telegram-server_tgkey}\n"
-                "  tgblobs: {name: telegram-server_tgblobs}\n"
-                "  rustfsdata: {name: telegram-server_rustfsdata}\n",
-                encoding="utf-8",
-            )
+            shutil.copyfile(LOCAL_COMPOSE, source_compose)
             (source / "docker-compose.yml").write_text(
                 # Default S3 Compose must not be used for the live local stack.
                 "services:\n"
@@ -358,6 +337,15 @@ class MoveSecretMigrationTest(unittest.TestCase):
             source_config = runner.render_compose(
                 "telegram-server", source, source_env, [source_compose],
             )
+            self.assertEqual(
+                runner.validate_source_compose_volumes(source_config),
+                {
+                    "pgdata": "telegram-server_pgdata",
+                    "tgkey": "telegram-server_tgkey",
+                    "tgblobs": "telegram-server_tgblobs",
+                },
+            )
+            self.assertNotIn("rustfsdata", runner.named_volumes(source_config))
             source_service = source_config["services"]["telegramd"]
             # A new deploy process has no temporary mover environment. The
             # target .env must retain the selected mount layout on its own.
@@ -469,6 +457,33 @@ class MoveRuntimeProfileTest(unittest.TestCase):
                     ("rustfsdata",),
                 )
         print("PASS inactive RustFS data volume is checked against its copied inventory")
+
+
+class OptionalSourceRustFSVolumeTest(unittest.TestCase):
+    def test_absent_rustfs_volume_is_staged_only_without_authoritative_data(self) -> None:
+        runner = load_runner()
+        name = runner.SOURCE_VOLUMES["rustfsdata"]
+        with mock.patch.object(runner, "volume_exists", return_value=False), \
+                mock.patch.object(runner, "output", return_value=name) as docker_output:
+            runner.ensure_source_rustfsdata_volume(None)
+            docker_output.assert_called_once_with(["docker", "volume", "create", name], timeout=30)
+            with self.assertRaisesRegex(runner.MoveError, "authoritative source RustFS volume is missing"):
+                runner.ensure_source_rustfsdata_volume(name)
+        print("PASS absent local RustFS volume is staged empty only when authority permits it")
+
+    def test_source_authority_can_record_no_rustfs_volume(self) -> None:
+        runner = load_runner()
+        authority = mock.Mock()
+        authority.Reject = RuntimeError
+        authority.read_authority.return_value = (
+            [{"volumes": {"rustfsdata": None}}], b"head", b"head",
+        )
+        with mock.patch.object(runner, "load_blob_mode_helper", return_value=authority):
+            result = runner.source_rustfsdata_authority(
+                pathlib.Path("/state"), pathlib.Path("/reports"), pathlib.Path("/helper"),
+            )
+        self.assertIsNone(result)
+        print("PASS move reads the durable RustFS volume authority before creating an empty source volume")
 
 
 class PinnedMoveAuthorityPublicationTest(unittest.TestCase):
