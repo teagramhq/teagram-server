@@ -234,10 +234,10 @@ class DockerImageMirrorTests(unittest.TestCase):
             "sha256:bdf57e528e45e4433820e045b29b4597825a1c9e38353532d90a01445013f82e"
         )
         self.assertIn(
-            postgres16,
+            postgres18,
             postgres_schema,
         )
-        self.assertIn(f'POSTGRES_IMAGE_DIGEST={postgres16_digest}', postgres_schema)
+        self.assertIn(f'POSTGRES_IMAGE_DIGEST={postgres18_digest}', postgres_schema)
         self.assertIn('docker pull "$POSTGRES_IMAGE@$POSTGRES_IMAGE_DIGEST"', postgres_schema)
         self.assertIn(
             'docker image tag "$POSTGRES_IMAGE_ID" "$POSTGRES_IMAGE"',
