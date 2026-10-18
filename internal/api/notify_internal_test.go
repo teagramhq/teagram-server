@@ -2147,6 +2147,141 @@ func TestAccountUpdatePushSkipsUnreadAggregate(t *testing.T) {
 	}
 }
 
+func openChannelRemovalTestStore(t *testing.T) *store.Store {
+	t.Helper()
+	ctx := context.Background()
+	dsn := pgtest.DSN(t)
+	blobs, err := blob.NewLocal(t.TempDir())
+	if err != nil {
+		t.Fatalf("create blob store: %v", err)
+	}
+	s, err := store.Open(ctx, dsn, pgtest.EncKey(), store.WithBlobStore(blobs))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := s.Close(); err != nil {
+			t.Errorf("close store: %v", err)
+		}
+	})
+	return s
+}
+
+func createChannelWithMember(t *testing.T, ctx context.Context, s *store.Store, creatorID, memberID int64, title string, megagroup bool) store.Channel {
+	t.Helper()
+	channel, err := s.CreateChannel(ctx, creatorID, title, "", megagroup)
+	if err != nil {
+		t.Fatalf("create channel: %v", err)
+	}
+	hash, err := s.CreateChannelInvite(ctx, channel.ID, creatorID)
+	if err != nil {
+		t.Fatalf("create channel invite: %v", err)
+	}
+	if _, _, err := s.JoinChannelByInvite(ctx, hash, memberID); err != nil {
+		t.Fatalf("join channel: %v", err)
+	}
+	return channel
+}
+
+func TestDeliverChannelRemovalUsesCurrentMembership(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	s := openChannelRemovalTestStore(t)
+	creator, err := s.CreateUser(ctx, "+15550000401")
+	if err != nil {
+		t.Fatalf("create creator: %v", err)
+	}
+	member, err := s.CreateUser(ctx, "+15550000402")
+	if err != nil {
+		t.Fatalf("create member: %v", err)
+	}
+	channel := createChannelWithMember(t, ctx, s, creator.ID, member.ID, "Membership refresh", true)
+	if err := s.SetChannelBan(ctx, channel.ID, creator.ID, member.ID, nil, true); err != nil {
+		t.Fatalf("ban member: %v", err)
+	}
+	if err := s.SetChannelBan(ctx, channel.ID, creator.ID, member.ID, nil, false); err != nil {
+		t.Fatalf("re-add member before delivery: %v", err)
+	}
+
+	key := replyTestKey()
+	transport := &recordingNotifyTransport{}
+	conn := mtproto.NewTestConn(transport, key)
+	conn.SetOwner(member.ID)
+	registry := mtproto.NewSessionRegistry()
+	if !registry.Add(member.ID, conn) {
+		t.Fatal("register member connection")
+	}
+	t.Cleanup(func() { registry.Remove(member.ID, conn) })
+
+	updater := NewUpdater(s, 2, registry, nil, pgtest.PeerDeriver())
+	updater.Deliver(store.WithChannelRemovalUpdate(ctx, channel.ID), member.ID)
+	decoded := decodeServerFrames(t, key, transport.framesFrom(0))
+	if len(decoded) != 1 || decoded[0].push == nil {
+		t.Fatalf("removal refresh frames = %+v, want one transient updates push", decoded)
+	}
+	push := decoded[0].push
+	if push.Seq != 0 || len(push.Updates) != 1 {
+		t.Fatalf("removal refresh seq/updates = %d/%d, want 0/1", push.Seq, len(push.Updates))
+	}
+	if update, ok := push.Updates[0].(*tg.UpdateChannel); !ok || update.ChannelID != channel.ID {
+		t.Fatalf("removal refresh update = %#v, want UpdateChannel for %d", push.Updates[0], channel.ID)
+	}
+	if len(push.Chats) != 1 || len(push.Users) != 0 {
+		t.Fatalf("removal refresh chats/users = %d/%d, want one channel and no users", len(push.Chats), len(push.Users))
+	}
+	if got, ok := push.Chats[0].(*tg.Channel); !ok || got.ID != channel.ID {
+		t.Fatalf("re-added member chat = %T, want Channel %d", push.Chats[0], channel.ID)
+	}
+}
+
+func TestDeliverChannelRemovalSendsForbiddenMetadataOnly(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	s := openChannelRemovalTestStore(t)
+	creator, err := s.CreateUser(ctx, "+15550000411")
+	if err != nil {
+		t.Fatalf("create creator: %v", err)
+	}
+	member, err := s.CreateUser(ctx, "+15550000412")
+	if err != nil {
+		t.Fatalf("create member: %v", err)
+	}
+	channel := createChannelWithMember(t, ctx, s, creator.ID, member.ID, "Forbidden refresh", false)
+	if err := s.SetChannelBan(ctx, channel.ID, creator.ID, member.ID, nil, true); err != nil {
+		t.Fatalf("ban member: %v", err)
+	}
+
+	key := replyTestKey()
+	transport := &recordingNotifyTransport{}
+	conn := mtproto.NewTestConn(transport, key)
+	conn.SetOwner(member.ID)
+	registry := mtproto.NewSessionRegistry()
+	if !registry.Add(member.ID, conn) {
+		t.Fatal("register member connection")
+	}
+	t.Cleanup(func() { registry.Remove(member.ID, conn) })
+
+	updater := NewUpdater(s, 2, registry, nil, pgtest.PeerDeriver())
+	updater.Deliver(store.WithChannelRemovalUpdate(ctx, channel.ID), member.ID)
+	decoded := decodeServerFrames(t, key, transport.framesFrom(0))
+	if len(decoded) != 1 || decoded[0].push == nil {
+		t.Fatalf("removal refresh frames = %+v, want one transient updates push", decoded)
+	}
+	push := decoded[0].push
+	if push.Seq != 0 || len(push.Updates) != 1 {
+		t.Fatalf("removal refresh seq/updates = %d/%d, want 0/1", push.Seq, len(push.Updates))
+	}
+	if update, ok := push.Updates[0].(*tg.UpdateChannel); !ok || update.ChannelID != channel.ID {
+		t.Fatalf("removal refresh update = %#v, want UpdateChannel for %d", push.Updates[0], channel.ID)
+	}
+	if len(push.Chats) != 1 || len(push.Users) != 0 {
+		t.Fatalf("removal refresh chats/users = %d/%d, want one channel and no users", len(push.Chats), len(push.Users))
+	}
+	if forbidden, ok := push.Chats[0].(*tg.ChannelForbidden); !ok || forbidden.ID != channel.ID || forbidden.Title != "" {
+		t.Fatalf("removed member chat = %#v, want empty-title ChannelForbidden for %d", push.Chats[0], channel.ID)
+	}
+}
+
 // TestBatchAbove pins the slicing rule itself: the suffix strictly above the
 // watermark, no duplicates, empty once caught up.
 func TestBatchAbove(t *testing.T) {

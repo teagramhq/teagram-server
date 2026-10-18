@@ -597,6 +597,7 @@ func (h *handlers) handleLeaveChannel(r *mtproto.Request) (bin.Encoder, error) {
 	if !left {
 		return nil, errPeerIDInvalid
 	}
+	h.notifyChannelRemoval(r.Ctx, r.UserID, id)
 
 	// Rendered after the delete, so the caller is no longer a member and this is
 	// tg.ChannelForbidden — the client's signal to drop the channel's metadata.
@@ -1533,6 +1534,9 @@ func (h *handlers) handleEditBanned(r *mtproto.Request) (bin.Encoder, error) {
 	if err != nil {
 		h.log.Error("edit banned", "channel_id", channelID, "user_id", r.UserID, "err", err)
 		return nil, errInternal
+	}
+	if req.BannedRights.ViewMessages {
+		h.notifyChannelRemoval(r.Ctx, targetID, channelID)
 	}
 	return h.channelMemberUpdate(r, channelID, targetID)
 }

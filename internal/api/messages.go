@@ -100,6 +100,16 @@ func (h *handlers) notifyChannelMembershipWithContext(ctx context.Context, userI
 	}
 }
 
+// notifyChannelRemoval asks every replica to refresh the removed user's view
+// of the channel after the membership mutation commits.
+func (h *handlers) notifyChannelRemoval(ctx context.Context, userID, channelID int64) {
+	notifyCtx, cancel := senderNotifyContext(ctx)
+	defer cancel()
+	if err := h.store.Notify(notifyCtx, store.ChannelUpdates, store.ChannelRemovalPayload(userID, channelID)); err != nil {
+		h.log.Error("notify channel removal", "user_id", userID, "channel_id", channelID, "err", err)
+	}
+}
+
 // notifySend records which authenticated key receives the sender's new-message
 // update in the sendMessage RPC result, so that key can skip only that live echo.
 func (h *handlers) notifySend(ctx context.Context, userID, authKeyID int64, pts int) {
