@@ -135,6 +135,7 @@ case "$*" in
   "show $MOCK_SOURCE_SHA:deploy/teagramd/rollout-runner/schema-result-gate.sh") cat "$MOCK_TARGET_RUNTIME_DIR/schema-result-gate.sh" ;;
   "show $MOCK_SOURCE_SHA:deploy/teagramd/rollout-runner/schema-result-gate.py") cat "$MOCK_TARGET_RUNTIME_DIR/schema-result-gate.py" ;;
   "show $MOCK_SOURCE_SHA:deploy/teagramd/rollout-runner/blob-mode-state.py") cat "$MOCK_TARGET_RUNTIME_DIR/blob-mode-state.py" ;;
+  "show $MOCK_SOURCE_SHA:deploy/teagramd/rollout-runner/qualify-rustfs-transition.py") cat "$MOCK_TARGET_RUNTIME_DIR/qualify-rustfs-transition.py" ;;
   "show $MOCK_SOURCE_SHA:deploy/teagramd/rollout-runner/stack-move-runner.py") cat "$MOCK_TARGET_RUNTIME_DIR/stack-move-runner.py" ;;
   "show $MOCK_SOURCE_SHA:deploy/teagramd/rollout-runner/local-compose-e58ba20.yml") cat "$MOCK_TARGET_RUNTIME_DIR/local-compose-e58ba20.yml" ;;
   "show $MOCK_SOURCE_SHA:deploy/teagramd/rollout-runner/local-compose-598359e.yml") cat "$MOCK_TARGET_RUNTIME_DIR/local-compose-598359e.yml" ;;
