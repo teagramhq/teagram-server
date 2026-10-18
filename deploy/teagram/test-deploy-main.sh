@@ -19,11 +19,18 @@ printf '#!/usr/bin/env bash\n' > "$tmp/work/tracked-script.sh"
 cat > "$tmp/work/deploy/teagramd/rollout-runner/rollout-runner.sh" <<'RUNNER'
 #!/usr/bin/env bash
 set -euo pipefail
+runtime_dir="$DEPLOY_ROOT/teagramd-rollout-runner"
+for file in rollout-runner.sh rollout-verifier.sh schema-result-gate.sh schema-result-gate.py blob-mode-state.py qualify-rustfs-transition.py stack-move-runner.py; do
+  if ! git -C "$DEPLOY_DIR" show "$2:deploy/teagramd/rollout-runner/$file" | cmp - "$runtime_dir/$file"; then
+    printf 'staged runtime is missing or stale: %s\n' "$file" >&2
+    exit 90
+  fi
+done
 git -C "$DEPLOY_DIR" merge --ff-only -q "$2"
 printf 'source_sha=%s image_id=sha256:fixture built_at=fixture\n' "$2" \
   > "$DEPLOY_ROOT/main1238-fixture.build/built-image.identity"
 RUNNER
-for file in rollout-verifier.sh schema-result-gate.sh schema-result-gate.py blob-mode-state.py stack-move-runner.py; do
+for file in rollout-verifier.sh schema-result-gate.sh schema-result-gate.py blob-mode-state.py qualify-rustfs-transition.py stack-move-runner.py; do
   printf 'fixture\n' > "$tmp/work/deploy/teagramd/rollout-runner/$file"
 done
 chmod 644 "$tmp/work/tracked.txt"
@@ -135,6 +142,8 @@ echo "source_sha=$first image_id=sha256:other " > "$tmp/root/main1238-fixture.bu
 expect 99 "unexpected docker call: compose exec -T postgres pg_dump -U postgres teagram" DEPLOY_SHA="$second"
 # A newer commit on main deploys.
 expect 99 "unexpected docker call: compose exec -T postgres pg_dump -U postgres teagram" DEPLOY_SHA="$third"
+mkdir -p "$tmp/root/teagramd-rollout-runner"
+printf 'stale qualifier fixture\n' > "$tmp/root/teagramd-rollout-runner/qualify-rustfs-transition.py"
 expect 0 "deployed $third" --contains \
   'tracked file modes: normalized=1 mismatches=0' FIXTURE_DEPLOY_SUCCESS=1 DEPLOY_SHA="$third"
 if [[ "$(stat -c '%a' "$tmp/live/tracked.txt")" != 644 || \
