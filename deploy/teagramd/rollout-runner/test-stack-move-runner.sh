@@ -698,7 +698,7 @@ jq -e '
   and .target_project == "teagram"
   and .source_database == "telegram"
   and .target_database == "teagram"
-  and .table_row_counts_equal == true
+  and .runtime_row_counts_allow_only_atlas_revision_growth == true
   and .roles_equal == true
   and .volumes.old_volumes_retained == true
   and .volumes.source_pgdata_unchanged == true

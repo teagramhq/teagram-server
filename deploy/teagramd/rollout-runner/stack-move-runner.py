@@ -676,6 +676,42 @@ def table_counts(container: str, database: str) -> str:
     ], input_bytes=query)
 
 
+def runtime_table_counts_compatible(source_counts: str, target_counts: str) -> bool:
+    """Allow migrations to append Atlas revisions while preserving application rows."""
+    def parse(raw: str) -> dict[str, int] | None:
+        counts: dict[str, int] = {}
+        for line in raw.splitlines():
+            table, separator, count = line.partition("|")
+            if (
+                not separator
+                or not table
+                or "|" in count
+                or not count.isascii()
+                or not count.isdecimal()
+                or table in counts
+            ):
+                return None
+            counts[table] = int(count)
+        return counts or None
+
+    source = parse(source_counts)
+    target = parse(target_counts)
+    if source is None or target is None or source.keys() != target.keys():
+        return False
+
+    atlas_revisions = "atlas_schema_revisions.atlas_schema_revisions"
+    if atlas_revisions not in source:
+        return False
+    for table, source_count in source.items():
+        target_count = target[table]
+        if table == atlas_revisions:
+            if target_count < source_count:
+                return False
+        elif target_count != source_count:
+            return False
+    return True
+
+
 def role_rows(container: str) -> tuple[str, list[dict[str, object]]]:
     query = (
         "SELECT rolname, rolsuper, rolinherit, rolcreaterole, rolcreatedb, "
@@ -1436,8 +1472,10 @@ def move(args: argparse.Namespace) -> None:
             ]) != 1:
                 raise MoveError("running rustfs is not using teagram_rustfsdata at /data")
         target_counts = table_counts(target_postgres_id, target_database)
-        if source_counts != target_counts:
-            raise MoveError("PostgreSQL 18 row counts changed after its runtime container was recreated")
+        if not runtime_table_counts_compatible(source_counts, target_counts):
+            raise MoveError(
+                "PostgreSQL 18 application row counts changed after its runtime container was recreated"
+            )
         target_roles, target_role_evidence = role_rows(target_postgres_id)
         if source_roles != target_roles:
             raise MoveError("PostgreSQL roles changed after the runtime container was recreated")
@@ -1494,7 +1532,7 @@ def move(args: argparse.Namespace) -> None:
             "target_postgres_image": target_postgres_image,
             "dump_sha256": dump_sha,
             "globals_sha256": globals_sha,
-            "table_row_counts_equal": True,
+            "runtime_row_counts_allow_only_atlas_revision_growth": True,
             "roles_equal": True,
             "roles": target_role_evidence,
             "volumes": {

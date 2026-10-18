@@ -583,5 +583,51 @@ class PostgresImageReferenceTest(unittest.TestCase):
         print("PASS PostgreSQL image preflight accepts only the required Alpine tags")
 
 
+class RuntimeTableCountsTest(unittest.TestCase):
+    def test_allows_only_atlas_revision_growth_after_runtime_migrations(self) -> None:
+        runner = load_runner()
+        source = (
+            "auth_keys|629\n"
+            "atlas_schema_revisions.atlas_schema_revisions|98\n"
+            "users|26\n"
+        )
+        target = (
+            "auth_keys|629\n"
+            "atlas_schema_revisions.atlas_schema_revisions|100\n"
+            "users|26\n"
+        )
+
+        self.assertTrue(runner.runtime_table_counts_compatible(source, source))
+        self.assertTrue(runner.runtime_table_counts_compatible(source, target))
+
+    def test_rejects_application_changes_and_atlas_revision_decreases(self) -> None:
+        runner = load_runner()
+        source = (
+            "auth_keys|629\n"
+            "atlas_schema_revisions.atlas_schema_revisions|98\n"
+            "users|26\n"
+        )
+        application_change = source.replace("auth_keys|629", "auth_keys|630").replace(
+            "atlas_schema_revisions.atlas_schema_revisions|98",
+            "atlas_schema_revisions.atlas_schema_revisions|100",
+        )
+        revision_decrease = source.replace(
+            "atlas_schema_revisions.atlas_schema_revisions|98",
+            "atlas_schema_revisions.atlas_schema_revisions|97",
+        )
+
+        self.assertFalse(runner.runtime_table_counts_compatible(source, application_change))
+        self.assertFalse(runner.runtime_table_counts_compatible(source, revision_decrease))
+
+    def test_rejects_missing_or_malformed_table_counts(self) -> None:
+        runner = load_runner()
+        source = "auth_keys|629\natlas_schema_revisions.atlas_schema_revisions|98\n"
+
+        self.assertFalse(runner.runtime_table_counts_compatible(source, "auth_keys|629\n"))
+        self.assertFalse(
+            runner.runtime_table_counts_compatible(source, "auth_keys|many\natlas_schema_revisions.atlas_schema_revisions|98\n")
+        )
+
+
 if __name__ == "__main__":
     unittest.main()
