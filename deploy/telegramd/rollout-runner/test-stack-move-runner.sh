@@ -22,7 +22,6 @@ TARGET_VOLUMES=(teagram_pgdata teagram_tgkey teagram_tgblobs teagram_rustfsdata)
 BUSYBOX_IMAGE=mirror.gcr.io/library/busybox:1.37
 SOURCE_POSTGRES_IMAGE=mirror.gcr.io/library/postgres:16-alpine
 RUSTFS_IMAGE=mirror.gcr.io/rustfs/rustfs:1.0.1@sha256:1803faef57627e2d9c2e7d89d655d712ddded5389040054987163043fecb6a3c
-AWS_CLI_IMAGE=public.ecr.aws/aws-cli/aws-cli:2.38.1@sha256:733d5be1015825e4038c6016f3fa9954868ddee1f611b73be795a9cc2e706bfd
 RUSTFS_ROOT_ACCESS_KEY=fixture-root-access
 RUSTFS_ROOT_SECRET_KEY=fixture-root-secret
 TARGET_SHA=1234567890abcdef1234567890abcdef12345678
@@ -37,6 +36,15 @@ fail() {
   printf 'stack move fixture failed: %s\n' "$1" >&2
   exit 1
 }
+
+command -v aws >/dev/null || fail 'AWS CLI is unavailable on the runner'
+cat > "$TMP/aws-config" <<'AWS_CONFIG'
+[default]
+region = us-east-1
+s3 =
+    addressing_style = path
+AWS_CONFIG
+chmod 600 "$TMP/aws-config"
 
 container_ids() {
   docker ps -aq --filter "label=com.docker.compose.project=$1"
@@ -111,7 +119,6 @@ CLEANUP_SERVER_IMAGE=1
 docker pull "$BUSYBOX_IMAGE" >/dev/null
 docker pull "$SOURCE_POSTGRES_IMAGE" >/dev/null
 docker pull "$RUSTFS_IMAGE" >/dev/null
-docker pull "$AWS_CLI_IMAGE" >/dev/null
 docker image tag "$BUSYBOX_IMAGE" telegramd:local
 
 cat > "$SOURCE_COMPOSE" <<'YAML'
@@ -140,6 +147,8 @@ services:
       - tgblobs:/var/lib/telegramd-blobs:ro
   rustfs:
     image: mirror.gcr.io/rustfs/rustfs:1.0.1@sha256:1803faef57627e2d9c2e7d89d655d712ddded5389040054987163043fecb6a3c
+    ports:
+      - "127.0.0.1::9000"
     environment:
       RUSTFS_VOLUMES: /data
       RUSTFS_ADDRESS: 0.0.0.0:9000
@@ -189,6 +198,8 @@ services:
       - tgblobs:/var/lib/telegramd-blobs:ro
   rustfs:
     image: mirror.gcr.io/rustfs/rustfs:1.0.1@sha256:1803faef57627e2d9c2e7d89d655d712ddded5389040054987163043fecb6a3c
+    ports:
+      - "127.0.0.1::9000"
     environment:
       RUSTFS_VOLUMES: /data
       RUSTFS_ADDRESS: 0.0.0.0:9000
@@ -402,31 +413,38 @@ wait_rustfs() {
   fail "RustFS service in $project did not become healthy"
 }
 
+rustfs_endpoint() {
+  local project=$1 project_dir compose_file env_file endpoint
+  if [ "$project" = "$TARGET_PROJECT" ]; then
+    project_dir=$TARGET_DIR
+    compose_file=$TARGET_COMPOSE
+    env_file=$TARGET_ENV
+  else
+    project_dir=$SOURCE_DIR
+    compose_file=$SOURCE_COMPOSE
+    env_file=$SOURCE_ENV
+  fi
+  endpoint=$(docker compose --project-name "$project" --project-directory "$project_dir" \
+    --env-file "$env_file" --file "$compose_file" port rustfs 9000) || \
+    fail "could not resolve RustFS endpoint for $project"
+  [[ "$endpoint" =~ ^127\.0\.0\.1:[0-9]+$ ]] || \
+    fail "RustFS endpoint is not loopback-only for $project: $endpoint"
+  printf 'http://%s' "$endpoint"
+}
+
 aws_cli() {
-  local project=$1
+  local project=$1 endpoint
   shift
-  docker run --rm --network "${project}_default" \
-    --env AWS_ACCESS_KEY_ID="$RUSTFS_ROOT_ACCESS_KEY" \
-    --env AWS_SECRET_ACCESS_KEY="$RUSTFS_ROOT_SECRET_KEY" \
-    --env AWS_DEFAULT_REGION=us-east-1 \
-    --entrypoint /bin/sh "$AWS_CLI_IMAGE" -ec '
-      printf "[default]\nregion = us-east-1\ns3 =\n    addressing_style = path\n" > /tmp/aws-config
-      export AWS_CONFIG_FILE=/tmp/aws-config
-      exec aws --endpoint-url http://rustfs:9000 "$@"
-    ' aws_cli "$@"
+  endpoint=$(rustfs_endpoint "$project")
+  AWS_ACCESS_KEY_ID="$RUSTFS_ROOT_ACCESS_KEY" \
+    AWS_SECRET_ACCESS_KEY="$RUSTFS_ROOT_SECRET_KEY" \
+    AWS_DEFAULT_REGION=us-east-1 AWS_CONFIG_FILE="$TMP/aws-config" \
+    aws --endpoint-url "$endpoint" "$@"
 }
 
 aws_cli_upload_stdin() {
   local project=$1 target=$2
-  docker run --rm -i --network "${project}_default" \
-    --env AWS_ACCESS_KEY_ID="$RUSTFS_ROOT_ACCESS_KEY" \
-    --env AWS_SECRET_ACCESS_KEY="$RUSTFS_ROOT_SECRET_KEY" \
-    --env AWS_DEFAULT_REGION=us-east-1 \
-    --entrypoint /bin/sh "$AWS_CLI_IMAGE" -ec '
-      printf "[default]\nregion = us-east-1\ns3 =\n    addressing_style = path\n" > /tmp/aws-config
-      export AWS_CONFIG_FILE=/tmp/aws-config
-      exec aws --endpoint-url http://rustfs:9000 s3 cp - "$1"
-    ' aws_cli_upload "$target"
+  aws_cli "$project" s3 cp - "$target"
 }
 
 capture_rustfs_objects() {
