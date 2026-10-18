@@ -359,6 +359,20 @@ func bootServerWithLimitsAndRegistrationModeAndBlobsAndStatusWithDeliveryHook(
 	beforeDelivery func(context.Context, int64), photoThumbs ...*photothumb.Supervisor,
 ) (*mtproto.SessionRegistry, func()) {
 	t.Helper()
+	return bootServerWithLimitsAndRegistrationModeAndBlobsAndStatusWithDeliveryHookAndTurnstile(
+		t, ctx, key, dcID, st, dsn, log, ln, rateLimits, regMode, blobs, persistStatus,
+		beforeDelivery, "", nil, photoThumbs...,
+	)
+}
+
+func bootServerWithLimitsAndRegistrationModeAndBlobsAndStatusWithDeliveryHookAndTurnstile(
+	t *testing.T, ctx context.Context, key *rsa.PrivateKey, dcID int, st *store.Store,
+	dsn string, log *slog.Logger, ln net.Listener, rateLimits config.RateLimitsConfig,
+	regMode config.RegistrationMode, blobs blob.Store, persistStatus bool,
+	beforeDelivery func(context.Context, int64), turnstileSiteKey string,
+	turnstileVerifier api.SignUpTurnstileVerifier, photoThumbs ...*photothumb.Supervisor,
+) (*mtproto.SessionRegistry, func()) {
+	t.Helper()
 	tgcfg := fixtureConfigForListener(t, dcID, ln)
 	// Sign-in here reads the code off the log, so the gated line must be on.
 	dialogFilterSync := api.NewDialogFilterSync()
@@ -366,7 +380,16 @@ func bootServerWithLimitsAndRegistrationModeAndBlobsAndStatusWithDeliveryHook(
 	if len(photoThumbs) > 0 {
 		photoThumb = photoThumbs[0]
 	}
-	handler := api.NewWithPhotoThumbsAndDialogFilterSync(st, dcID, tgcfg, log, true, 100<<20, blobs, 2<<30, pgtest.PeerDeriver(), pgtest.PhotoDeriver(), rateLimits, regMode, dialogFilterSync, photoThumb)
+	var handler mtproto.Handler
+	if turnstileVerifier == nil {
+		handler = api.NewWithPhotoThumbsAndDialogFilterSync(st, dcID, tgcfg, log, true, 100<<20, blobs, 2<<30, pgtest.PeerDeriver(), pgtest.PhotoDeriver(), rateLimits, regMode, dialogFilterSync, photoThumb)
+	} else {
+		handler = api.NewWithPhotoThumbsAndDialogFilterSyncAndUploadPartTTLAndTurnstile(
+			st, dcID, tgcfg, log, true, 100<<20, blobs, 2<<30, pgtest.PeerDeriver(), pgtest.PhotoDeriver(),
+			rateLimits, regMode, dialogFilterSync, photoThumb, config.DefaultUploadPartTTL,
+			turnstileSiteKey, turnstileVerifier,
+		)
+	}
 	server := mtproto.New(exchange.PrivateKey{RSA: key}, dcID, mtproto.NewPgAuthKeyStore(st), handler, log)
 	if persistStatus {
 		server.OnStatusChange(func(ctx context.Context, userID int64, online bool) {

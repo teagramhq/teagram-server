@@ -65,10 +65,11 @@ containing secrets can cross that boundary.
 The login shapes come from the pinned desktop source above, rather than a live
 login trace. Replays use isolated, seeded test accounts and synthetic credentials.
 Before retaining a capture, replace account/session identifiers with `<N>` and
-credentials, codes, hashes and payloads with `REDACTED`; upload payloads retain
-only their byte length. Check both the text capture and its JSON fixture for
-unredacted values. The test recorder redacts known login secret fields and byte
-payloads before comparison; it stays in memory and is not saved as a trace.
+credentials, codes, hashes, challenge tokens and payloads with `REDACTED`; upload
+payloads retain only their byte length. Check both the text capture and its JSON
+fixture for unredacted values. The test recorder redacts known login secret
+fields and byte payloads before comparison; it stays in memory and is not saved
+as a trace.
 New sensitive fields need corresponding redaction before adding their fixtures.
 
 Retain only sanitized captures and request shapes in version control, preserving

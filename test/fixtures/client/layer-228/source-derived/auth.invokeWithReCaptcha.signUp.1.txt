@@ -1,0 +1,11 @@
+# source: constructed from gotd v0.162.0 layer-228 TL request types
+request: { invokeWithReCaptcha
+  token: REDACTED [STRING],
+  query: { auth_signUp
+    flags: 0 [INT],
+    phone_number: REDACTED [STRING],
+    phone_code_hash: REDACTED [STRING],
+    first_name: "Turnstile" [STRING],
+    last_name: "Smoke" [STRING],
+  },
+},

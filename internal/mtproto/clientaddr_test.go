@@ -46,10 +46,14 @@ func TestRequestCarriesTheSocketPeerAddress(t *testing.T) {
 				t.Fatalf("save key: %v", err)
 			}
 
-			seen := make(chan netip.Addr, 1)
+			type addressSource struct {
+				addr        netip.Addr
+				fromProxyV2 bool
+			}
+			seen := make(chan addressSource, 1)
 			handler := mtproto.HandlerFunc(func(_ *mtproto.Conn, req *mtproto.Request) error {
 				select {
-				case seen <- req.ClientAddr:
+				case seen <- addressSource{addr: req.ClientAddr, fromProxyV2: req.ClientAddrFromProxyV2}:
 				default:
 				}
 				return nil
@@ -104,8 +108,11 @@ func TestRequestCarriesTheSocketPeerAddress(t *testing.T) {
 
 			select {
 			case got := <-seen:
-				if got != want {
-					t.Errorf("handler saw client address %s, want the connecting socket's %s", got, want)
+				if got.addr != want {
+					t.Errorf("handler saw client address %s, want the connecting socket's %s", got.addr, want)
+				}
+				if got.fromProxyV2 {
+					t.Error("socket peer address was marked as coming from PROXY v2")
 				}
 			case <-ctx.Done():
 				t.Fatal("no request reached the handler")

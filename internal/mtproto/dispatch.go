@@ -32,6 +32,13 @@ type Request struct {
 	// parse — a transport-layer fault a handler must decide about explicitly,
 	// never a bucket to group requests into.
 	ClientAddr netip.Addr
+	// ClientAddrFromProxyV2 is true when ClientAddr came from an allowlisted
+	// PROXY v2 header rather than the socket peer.
+	ClientAddrFromProxyV2 bool
+	// ReCaptchaToken is the client token from invokeWithReCaptcha. It is
+	// populated only for the supported auth.signUp wrapper and must not be
+	// logged or retained after the request.
+	ReCaptchaToken string
 	// AuthorizationMetadata is the bounded initConnection device description
 	// for this connection, copied onto each request until the auth key is bound.
 	AuthorizationMetadata AuthorizationMetadata
@@ -273,6 +280,18 @@ const (
 // application-specific accounting; unknown dependencies have already consumed
 // the connection's unimplemented-method budget.
 func UnpackInvokeWithAfterMsg(next Handler, onRefusal func(*Conn, *Request, uint32, InvokeAfterMsgRefusal, UnimplementedVerdict) error) Handler {
+	return unpackInvokeWithAfterMsg(next, onRefusal, false)
+}
+
+// UnpackInvokeWithAfterMsgAndReCaptcha additionally accepts one direct
+// invokeWithReCaptcha(auth.signUp) wrapper. The application enables it only
+// when a sign-up verifier is configured; every other wrapper retains the
+// existing refusal path.
+func UnpackInvokeWithAfterMsgAndReCaptcha(next Handler, onRefusal func(*Conn, *Request, uint32, InvokeAfterMsgRefusal, UnimplementedVerdict) error) Handler {
+	return unpackInvokeWithAfterMsg(next, onRefusal, true)
+}
+
+func unpackInvokeWithAfterMsg(next Handler, onRefusal func(*Conn, *Request, uint32, InvokeAfterMsgRefusal, UnimplementedVerdict) error, allowReCaptcha bool) Handler {
 	return HandlerFunc(func(c *Conn, req *Request) error {
 		id, err := req.Buf.PeekID()
 		if err != nil {
@@ -390,7 +409,11 @@ func UnpackInvokeWithAfterMsg(next Handler, onRefusal func(*Conn, *Request, uint
 					return err
 				}
 				id = obj.TypeID
-				return refuseUnsupported(id)
+				if !allowReCaptcha || id != tg.AuthSignUpRequestTypeID {
+					return refuseUnsupported(id)
+				}
+				req.ReCaptchaToken = wrapper.Token
+				continue
 			case tg.InvokeWithApnsSecretRequestTypeID:
 				var wrapper tg.InvokeWithApnsSecretRequest
 				wrapper.Query = obj
@@ -408,6 +431,9 @@ func UnpackInvokeWithAfterMsg(next Handler, onRefusal func(*Conn, *Request, uint
 				id = obj.TypeID
 				return refuseUnsupported(id)
 			default:
+				if req.ReCaptchaToken != "" {
+					defer func() { req.ReCaptchaToken = "" }()
+				}
 				return next.OnMessage(c, req)
 			}
 		}
