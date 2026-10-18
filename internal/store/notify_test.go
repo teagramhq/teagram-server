@@ -877,9 +877,14 @@ func TestStartListenerDeliversChannelPost(t *testing.T) {
 
 	delivered := make(chan int64, 1)
 	membership := make(chan [2]int64, 1)
+	removal := make(chan [2]int64, 1)
 	posted := make(chan int64, 1)
 	_, stop, err := store.StartListener(ctx, dsn,
 		func(ctx context.Context, userID int64) {
+			if channelID, ok := store.ChannelRemovalUpdateFromContext(ctx); ok {
+				removal <- [2]int64{userID, channelID}
+				return
+			}
 			if channelID, ok := store.ChannelMembershipUpdateFromContext(ctx); ok {
 				membership <- [2]int64{userID, channelID}
 				return
@@ -931,6 +936,17 @@ func TestStartListenerDeliversChannelPost(t *testing.T) {
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("channel membership delivery not invoked")
+	}
+	if err := s.Notify(ctx, store.ChannelUpdates, store.ChannelRemovalPayload(8, 42)); err != nil {
+		t.Fatalf("notify channel removal: %v", err)
+	}
+	select {
+	case got := <-removal:
+		if got != [2]int64{8, 42} {
+			t.Fatalf("channel removal notification = %v, want [8 42]", got)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("channel removal delivery not invoked")
 	}
 
 	// Valid channel-post payload must reach the callback.

@@ -271,6 +271,9 @@ func (u *Updater) Deliver(ctx context.Context, userID int64) {
 	if channelID, ok := store.ChannelMembershipUpdateFromContext(ctx); ok {
 		u.deliverChannelMembership(ctx, userID, channelID)
 	}
+	if channelID, ok := store.ChannelRemovalUpdateFromContext(ctx); ok {
+		u.deliverChannelRemoval(ctx, userID, channelID)
+	}
 }
 
 // DeliverNotifySettings reloads the current owner-private value before pushing
@@ -510,6 +513,17 @@ func (u *Updater) DeliverChatAdmin(ctx context.Context, chatID, eventID int64) {
 // hash. Membership is re-read so a ban or removal committed before delivery
 // suppresses the update.
 func (u *Updater) deliverChannelMembership(ctx context.Context, userID, channelID int64) {
+	u.deliverChannelView(ctx, userID, channelID, false)
+}
+
+// deliverChannelRemoval refreshes the removed user's channel peer. It re-reads
+// membership at delivery so a user re-added in the meantime gets the member
+// view instead of a forbidden one.
+func (u *Updater) deliverChannelRemoval(ctx context.Context, userID, channelID int64) {
+	u.deliverChannelView(ctx, userID, channelID, true)
+}
+
+func (u *Updater) deliverChannelView(ctx context.Context, userID, channelID int64, sendForbidden bool) {
 	conns := u.registry.Conns(userID)
 	if len(conns) == 0 {
 		return
@@ -527,11 +541,16 @@ func (u *Updater) deliverChannelMembership(ctx context.Context, userID, channelI
 		u.log.Error("deliver channel membership participant", "channel_id", channelID, "user_id", userID, "err", err)
 		return
 	}
-	if !found || member.Banned(time.Now()) {
+	isMember := found && !member.Banned(time.Now())
+	if !isMember && !sendForbidden {
 		return
 	}
-	chat, ok := u.h.channelToTL(channel, member, true, userID).(*tg.Channel)
-	if !ok {
+	chat := u.h.channelToTL(channel, member, isMember, userID)
+	if isMember {
+		if _, ok := chat.(*tg.Channel); !ok {
+			return
+		}
+	} else if _, ok := chat.(*tg.ChannelForbidden); !ok {
 		return
 	}
 	env := &tg.Updates{
