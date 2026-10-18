@@ -26,9 +26,9 @@ ORDER BY chat_id, user_id;
 
 -- PeerChannelDialogsForOwner is the channel counterpart of
 -- PeerDialogsForOwner. A channel has no dialogs row; its current, unbanned
--- membership selects the dialog, and the newest live post is optional. The
--- membership predicate and top-post lookup are in this one statement so the
--- selected post can never come from a channel the viewer is not entitled to
+-- membership selects the dialog, and its newest live message is optional. The
+-- membership predicate and top-message lookup are in this one statement so the
+-- selected message can never come from a channel the viewer is not entitled to
 -- read in the same snapshot.
 -- name: PeerChannelDialogsForOwner :many
 SELECT
@@ -87,7 +87,7 @@ LEFT JOIN LATERAL (
     SELECT cm.local_id, cm.from_id, cm.date, cm.message, cm.edit_date,
            cm.random_id, cm.grouped_id, cm.file_id, cm.reply_to_msg_id, cm.action_type
     FROM channel_messages cm
-    WHERE cm.channel_id = c.id AND cm.deleted = false AND cm.action_type = 0
+    WHERE cm.channel_id = c.id AND cm.deleted = false
     ORDER BY cm.local_id DESC
     LIMIT 1
 ) top ON true

@@ -105,6 +105,18 @@ func hasChannelDialogMessage(messages []tg.MessageClass, id int, text string) bo
 	return false
 }
 
+func hasChannelCreateDialogMessage(messages []tg.MessageClass, id int, title string) bool {
+	for _, class := range messages {
+		service, ok := class.(*tg.MessageService)
+		if !ok || service == nil || service.ID != id {
+			continue
+		}
+		action, ok := service.Action.(*tg.MessageActionChannelCreate)
+		return ok && action != nil && action.Title == title
+	}
+	return false
+}
+
 // execChannel runs fn on cmds, failing the test on error. It is execChat
 // renamed for clarity in tests where a chat-specific name would be misleading,
 // but the mechanics are identical — execChat is defined in chats_test.go.
@@ -2339,7 +2351,7 @@ func TestChannelsInviteToChannelPushesViewerChannelAndLivePosts(t *testing.T) {
 		}
 		return nil
 	})
-	checkInvitedDialogs := func(wantPresent bool, wantListTop, wantPeerTop int, wantText string) {
+	checkInvitedDialogs := func(wantPresent bool, wantTop int, wantText, wantServiceTitle string) {
 		t.Helper()
 		execChannel(t, ctx, bCmds, func(ctx context.Context, c *tg.Client) error {
 			listResult, err := c.MessagesGetDialogs(ctx, &tg.MessagesGetDialogsRequest{
@@ -2376,14 +2388,17 @@ func TestChannelsInviteToChannelPushesViewerChannelAndLivePosts(t *testing.T) {
 				if listDialog == nil {
 					return fmt.Errorf("getDialogs omitted invited channel %d", chID)
 				}
-				if listDialog.TopMessage != wantListTop {
-					return fmt.Errorf("getDialogs top_message = %d, want %d", listDialog.TopMessage, wantListTop)
+				if listDialog.TopMessage != wantTop {
+					return fmt.Errorf("getDialogs top_message = %d, want %d", listDialog.TopMessage, wantTop)
 				}
 				if !hasChannel(listChats, chID) {
 					return fmt.Errorf("getDialogs omitted invited channel %d from chats", chID)
 				}
-				if wantText != "" && !hasChannelDialogMessage(listMessages, wantListTop, wantText) {
-					return fmt.Errorf("getDialogs omitted top post %d with text %q", wantListTop, wantText)
+				if wantServiceTitle != "" && !hasChannelCreateDialogMessage(listMessages, wantTop, wantServiceTitle) {
+					return fmt.Errorf("getDialogs omitted channel create service message %d with title %q", wantTop, wantServiceTitle)
+				}
+				if wantText != "" && !hasChannelDialogMessage(listMessages, wantTop, wantText) {
+					return fmt.Errorf("getDialogs omitted top post %d with text %q", wantTop, wantText)
 				}
 			} else {
 				if listDialog != nil {
@@ -2427,25 +2442,25 @@ func TestChannelsInviteToChannelPushesViewerChannelAndLivePosts(t *testing.T) {
 			if !ok || peer.ChannelID != chID {
 				return fmt.Errorf("getPeerDialogs peer = %+v, want channel %d", peerDialog.Peer, chID)
 			}
-			if peerDialog.TopMessage != wantPeerTop {
-				return fmt.Errorf("getPeerDialogs top_message = %d, want %d", peerDialog.TopMessage, wantPeerTop)
+			if peerDialog.TopMessage != wantTop {
+				return fmt.Errorf("getPeerDialogs top_message = %d, want %d", peerDialog.TopMessage, wantTop)
 			}
 			if !hasChannel(peerResult.Chats, chID) {
 				return fmt.Errorf("getPeerDialogs omitted invited channel %d from chats", chID)
 			}
-			if wantText == "" {
-				if len(peerResult.Messages) != 0 {
-					return fmt.Errorf("getPeerDialogs messages = %d, want none before first post", len(peerResult.Messages))
+			if wantServiceTitle != "" {
+				if len(peerResult.Messages) != 1 || !hasChannelCreateDialogMessage(peerResult.Messages, wantTop, wantServiceTitle) {
+					return fmt.Errorf("getPeerDialogs omitted channel create service message %d with title %q", wantTop, wantServiceTitle)
 				}
 				return nil
 			}
-			if len(peerResult.Messages) != 1 || !hasChannelDialogMessage(peerResult.Messages, wantPeerTop, wantText) {
-				return fmt.Errorf("getPeerDialogs messages = %v, want top post %d with text %q", peerResult.Messages, wantPeerTop, wantText)
+			if len(peerResult.Messages) != 1 || !hasChannelDialogMessage(peerResult.Messages, wantTop, wantText) {
+				return fmt.Errorf("getPeerDialogs messages = %v, want top post %d with text %q", peerResult.Messages, wantTop, wantText)
 			}
 			return nil
 		})
 	}
-	checkInvitedDialogs(true, 1, 0, "")
+	checkInvitedDialogs(true, 1, "", "Direct invite")
 
 	execChannel(t, ctx, aCmds, func(ctx context.Context, c *tg.Client) error {
 		_, err := c.MessagesSendMessage(ctx, &tg.MessagesSendMessageRequest{
@@ -2467,13 +2482,13 @@ func TestChannelsInviteToChannelPushesViewerChannelAndLivePosts(t *testing.T) {
 	case <-ctx.Done():
 		t.Fatalf("B timed out waiting for the post after direct invite: %v", ctx.Err())
 	}
-	checkInvitedDialogs(true, preLeaveUpdate.Msg.ID, preLeaveUpdate.Msg.ID, "direct invite live post")
+	checkInvitedDialogs(true, preLeaveUpdate.Msg.ID, "direct invite live post", "")
 
 	execChannel(t, ctx, bCmds, func(ctx context.Context, c *tg.Client) error {
 		_, err := c.ChannelsLeaveChannel(ctx, inputChannel(bUserID, chID))
 		return err
 	})
-	checkInvitedDialogs(false, 0, 0, "")
+	checkInvitedDialogs(false, 0, "", "")
 	execChannel(t, ctx, aCmds, func(ctx context.Context, c *tg.Client) error {
 		_, err := c.MessagesSendMessage(ctx, &tg.MessagesSendMessageRequest{
 			Peer:     peerChannel(aUserID, chID),
