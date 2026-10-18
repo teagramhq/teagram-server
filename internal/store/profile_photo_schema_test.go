@@ -157,7 +157,7 @@ func TestProfilePhotoGalleryReferenceRestrictsFileDeletion(t *testing.T) {
 	// Forced deletion of a referenced file, bypassing every application path.
 	// RESTRICT is the eraser's backstop: a file a gallery still shows stays.
 	_, err := conn.Exec(ctx, `DELETE FROM files WHERE id = $1`, fileID)
-	if !profilePhotoViolation(err, "23503", "user_photos_file_owned_by_owner") {
+	if !profilePhotoViolation(err, "23001", "user_photos_file_owned_by_owner") {
 		t.Fatalf("forced delete of referenced file err = %v, want user_photos_file_owned_by_owner violation", err)
 	}
 
@@ -220,7 +220,7 @@ func TestProfilePhotoCurrentSelectionNamesOnlyOwnGalleryEntry(t *testing.T) {
 	// RESTRICT is the interlock that makes the writer clear the pointer before it
 	// deletes the entry the pointer names. The order is not a convention.
 	_, err = conn.Exec(ctx, `DELETE FROM user_photos WHERE user_id = $1 AND file_id = $2`, owner, galleryFile)
-	if !profilePhotoViolation(err, "23503", "profile_photo_state_current_is_own_gallery_entry") {
+	if !profilePhotoViolation(err, "23001", "profile_photo_state_current_is_own_gallery_entry") {
 		t.Fatalf("delete pointed gallery entry err = %v, want profile_photo_state_current_is_own_gallery_entry violation", err)
 	}
 

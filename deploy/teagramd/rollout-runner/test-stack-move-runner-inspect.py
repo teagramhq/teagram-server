@@ -298,6 +298,12 @@ class MoveSecretMigrationTest(unittest.TestCase):
             target_local_overlay = target / "docker-compose.local-blobs.yml"
             shutil.copyfile(repository / "docker-compose.yml", target_compose)
             shutil.copyfile(repository / "docker-compose.local-blobs.yml", target_local_overlay)
+            target_postgres_config = target / "deploy" / "postgres" / "postgresql.conf"
+            target_postgres_config.parent.mkdir(parents=True)
+            shutil.copyfile(
+                repository / "deploy" / "postgres" / "postgresql.conf",
+                target_postgres_config,
+            )
             target_compose_selection = os.pathsep.join(
                 (str(target_compose), str(target_local_overlay)),
             )

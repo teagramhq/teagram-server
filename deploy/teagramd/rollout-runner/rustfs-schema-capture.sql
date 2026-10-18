@@ -104,7 +104,10 @@ gallery_schema AS (
                   ON referenced_namespace.oid = referenced_relation.relnamespace
                 LEFT JOIN pg_class AS referenced_index
                   ON referenced_index.oid = constraint_row.conindid
+                -- Postgres 18 adds NOT NULL entries to pg_constraint. The
+                -- attnotnull checks above already qualify those separately.
                 WHERE constraint_row.conrelid = to_regclass(format('public.%I', wanted.table_name))
+                  AND constraint_row.contype <> 'n'
             ), '{}'::jsonb),
             'index_names', COALESCE((
                 SELECT jsonb_agg(index_relation.relname ORDER BY index_relation.relname)

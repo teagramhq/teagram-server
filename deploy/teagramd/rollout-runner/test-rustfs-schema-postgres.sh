@@ -4,7 +4,7 @@ set -Eeuo pipefail
 SCRIPT_DIR=$(cd -P "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 NETWORK="rustfs-schema-${BASHPID}"
 POSTGRES_CONTAINER="rustfs-schema-pg-${BASHPID}"
-POSTGRES_IMAGE="mirror.gcr.io/library/postgres:16-alpine"
+POSTGRES_IMAGE="mirror.gcr.io/library/postgres:18-alpine"
 # The GCR mirror is missing Atlas's OCI attestation descriptor; pull from Docker Hub.
 ATLAS_IMAGE="docker.io/arigaio/atlas:1.2.0-alpine"
 ATLAS_R69_INPUT=$(mktemp -d "${TMPDIR:-/tmp}/rustfs-schema-r69-atlas.XXXXXX")
@@ -43,7 +43,7 @@ for _ in $(seq 1 60); do
   sleep 1
 done
 if [ "$ready" != true ]; then
-  printf '%s\n' 'PostgreSQL 16 schema fixture did not become ready' >&2
+  printf '%s\n' 'PostgreSQL 18 schema fixture did not become ready' >&2
   exit 1
 fi
 

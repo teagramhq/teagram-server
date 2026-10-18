@@ -536,7 +536,7 @@ jobs:
         run: PARTS_DIR_CEILING_PROBE=1 go test -count=1 -timeout 30m ./internal/blob/ -run TestFlatPartsDirEntryCeiling -v
 
       # Postgres comes from testcontainers inside internal/pgtest, which starts
-      # mirror.gcr.io/library/postgres:16-alpine with its own config. Nothing to
+      # mirror.gcr.io/library/postgres:18-alpine with its own config. Nothing to
       # wire up on the runner beyond the Docker daemon ubuntu-26.04 provides.
       #
       # Keep the cached non-E2E command in the Makefile unchanged. The remaining
@@ -1339,7 +1339,7 @@ jobs:
       # reach the listening log. Published on localhost for both atlas on the
       # runner and the container below; the job waits for the healthcheck.
       postgres:
-        image: mirror.gcr.io/library/postgres:16-alpine
+        image: mirror.gcr.io/library/postgres:18-alpine
         env:
           POSTGRES_PASSWORD: smoketest
           POSTGRES_DB: teagram
@@ -2503,7 +2503,7 @@ jobs:
           sudo env "PATH=$PATH" TMPDIR=/root python3 -B deploy/teagramd/rollout-runner/test-blob-mode-state.py
           sudo env "PATH=$PATH" TMPDIR=/root python3 -B deploy/teagramd/rollout-runner/test-blob-transition-runner.py
 
-      - name: Prove R69 and R70 SQL evidence against PostgreSQL 16 and Atlas 1.2.0
+      - name: Prove R69 and R70 SQL evidence against PostgreSQL 18 and Atlas 1.2.0
         run: sudo env "PATH=$PATH" TMPDIR=/root bash deploy/teagramd/rollout-runner/test-rustfs-schema-postgres.sh
 
       - name: Prove PostgreSQL 16 to 18 restore and stack move

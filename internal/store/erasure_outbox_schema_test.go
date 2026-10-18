@@ -1013,7 +1013,7 @@ func TestErasureEpochCompletionRestrictsItsMarker(t *testing.T) {
 	// Removing the marker under a completion is restricted, not cascading: a cascade
 	// would let one row's deletion erase completed-lineage evidence.
 	_, err = conn.Exec(ctx, `DELETE FROM erasure_epoch WHERE epoch = 8 AND lineage_id = $1`, lineage)
-	if !profilePhotoViolation(err, "23503", "erasure_epoch_completion_marker_exists") {
+	if !profilePhotoViolation(err, "23001", "erasure_epoch_completion_marker_exists") {
 		t.Fatalf("deleting the restricted marker = %v, want an erasure_epoch_completion_marker_exists violation", err)
 	}
 

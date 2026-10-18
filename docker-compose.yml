@@ -38,6 +38,10 @@ services:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
       POSTGRES_DB: teagram
       PGDATA: /var/lib/postgresql/18/docker
+    # Match the reviewed 2-vCPU / 4-GiB LXC settings. max_connections reserves
+    # 8 for teagramd, 1 for migrations, 1 for backup/maintenance, and 10 for
+    # administration and operational headroom.
+    command: ["postgres", "-c", "config_file=/etc/postgresql/postgresql.conf"]
     # An open port is not readiness: Postgres accepts connections during its own
     # init and then drops them. migrate waits on this instead of racing it.
     healthcheck:
@@ -51,6 +55,7 @@ services:
     # every interface of the host.
     volumes:
       - pgdata:/var/lib/postgresql
+      - ./deploy/postgres/postgresql.conf:/etc/postgresql/postgresql.conf:ro
 
   # Applies the migrations and exits 0. No restart policy: a re-run against an
   # already migrated database is a no-op, so a restart loop could only hide a
@@ -60,7 +65,7 @@ services:
     # stack and CI cannot apply migrations with different atlas versions.
     image: mirror.gcr.io/arigaio/atlas:1.2.0-alpine
     # The image entrypoint is already atlas, so the command starts at `migrate`.
-    # Not `--env local`: that env's dev database is docker://postgres/16, which
+    # Not `--env local`: that env's dev database is docker://postgres/18, which
     # would need a Docker daemon inside this container. Three slashes in
     # file:///migrations — an absolute path, because the working directory here
     # is not the repo root.

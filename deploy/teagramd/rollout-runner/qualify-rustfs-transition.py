@@ -1956,7 +1956,13 @@ SELECT jsonb_build_object(
   'revision_detail', revision_set.details,
   'migration_66_schema', jsonb_build_object(
     'columns', column_schema.columns,
-    'constraint_count', (SELECT count(*) FROM pg_constraint, target WHERE conrelid = target.relation_oid),
+    'constraint_count', (
+      SELECT count(*)
+      FROM pg_constraint, target
+      WHERE conrelid = target.relation_oid
+      -- Postgres 18's NOT NULL catalog entries are already checked via attnotnull.
+        AND contype <> 'n'
+    ),
     'primary_key', primary_key.columns,
     'foreign_key', foreign_key.value,
     'check', check_constraint.value,
