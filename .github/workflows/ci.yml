@@ -803,7 +803,12 @@ jobs:
       - name: Check deploy script syntax
         run: |
           bash -n deploy/teagram/deploy-main.sh
-          shellcheck deploy/teagram/deploy-main.sh deploy/teagram/test-deploy-main.sh .github/scripts/test-deploy-workflow-contract.sh
+          bash -n deploy/telegram-server/deploy-main.sh
+          shellcheck \
+            deploy/teagram/deploy-main.sh \
+            deploy/telegram-server/deploy-main.sh \
+            deploy/teagram/test-deploy-main.sh \
+            .github/scripts/test-deploy-workflow-contract.sh
 
       - name: Check deploy script target fixtures
         run: deploy/teagram/test-deploy-main.sh
