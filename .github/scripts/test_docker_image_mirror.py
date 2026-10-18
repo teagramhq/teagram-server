@@ -30,6 +30,7 @@ ACTIVE_IMAGE_CONFIGS = (
 )
 ACTIVE_PULL_SCRIPTS = (
     ".github/workflows/ci.yml",
+    ".github/scripts/mirror_rustfs_qualification_images.sh",
     ".github/scripts/run-busybox-phase-check.sh",
     ".github/scripts/smoke-mixed-trust-compose.sh",
     "deploy/teagramd/rollout-runner/README.md",
@@ -56,9 +57,9 @@ EXTERNAL_REGISTRIES = (
     "quay.io/",
 )
 RUSTFS_QUALIFICATION_PULL_SCRIPTS = (
-    "deploy/telegramd/rollout-runner/test-rustfs-schema-postgres.sh",
-    "deploy/telegramd/rollout-runner/test-isolated-restore-postgres.sh",
-    "deploy/telegramd/rollout-runner/test-stack-move-runner.sh",
+    "deploy/teagramd/rollout-runner/test-rustfs-schema-postgres.sh",
+    "deploy/teagramd/rollout-runner/test-isolated-restore-postgres.sh",
+    "deploy/teagramd/rollout-runner/test-stack-move-runner.sh",
 )
 
 
@@ -149,6 +150,40 @@ class DockerImageMirrorTests(unittest.TestCase):
         self.assertIn("uses: ariga/setup-atlas@v0.3", job.group(1))
         self.assertIn("version: v1.2.0", job.group(1))
 
+    def test_rustfs_fixture_mirror_is_digest_pinned_and_precedes_qualification(self) -> None:
+        workflow = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
+        mirror_job = re.search(
+            r"(?ms)^  mirror-rustfs-qualification-images:\n(.*?)(?=^  [a-z0-9-]+:|\Z)",
+            workflow,
+        )
+        qualification_job = re.search(
+            r"(?ms)^  rustfs-transition-qualification:\n(.*?)(?=^  [a-z0-9-]+:|\Z)",
+            workflow,
+        )
+        self.assertIsNotNone(mirror_job, "RustFS fixture mirror job is missing")
+        self.assertIsNotNone(qualification_job, "RustFS qualification job is missing")
+        self.assertIn("packages: write", mirror_job.group(1))
+        self.assertIn("packages: read", qualification_job.group(1))
+        self.assertIn("needs: mirror-rustfs-qualification-images", qualification_job.group(1))
+        self.assertIn("docker login ghcr.io", qualification_job.group(1))
+
+        mirror_script = (
+            ROOT / ".github/scripts/mirror_rustfs_qualification_images.sh"
+        ).read_text(encoding="utf-8")
+        self.assertIn("skopeo copy --all --preserve-digests", mirror_script)
+        for image in (
+            "mirror.gcr.io/library/postgres:16-alpine@sha256:"
+            "721873c34ceb9f8d8fc265984940dc982404c105f19ad51be9fdc5970a6080ea",
+            "ghcr.io/teagramhq/teagram-server-postgres:16-alpine",
+            "mirror.gcr.io/library/postgres:18-alpine@sha256:"
+            "77f585114c32fbca283dc835b0596f4e52b51b4c6662d7810b2f4084f60a1873",
+            "ghcr.io/teagramhq/teagram-server-postgres:18-alpine",
+            "mirror.gcr.io/library/busybox:1.37@sha256:"
+            "bdf57e528e45e4433820e045b29b4597825a1c9e38353532d90a01445013f82e",
+            "ghcr.io/teagramhq/teagram-server-busybox:1.37",
+        ):
+            self.assertIn(image, mirror_script)
+
     def test_pinned_images_keep_their_digests(self) -> None:
         workflow = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
         busybox_runner = (
@@ -178,29 +213,63 @@ class DockerImageMirrorTests(unittest.TestCase):
             compose,
         )
         postgres_schema = (
-            ROOT / "deploy/telegramd/rollout-runner/test-rustfs-schema-postgres.sh"
+            ROOT / "deploy/teagramd/rollout-runner/test-rustfs-schema-postgres.sh"
         ).read_text(encoding="utf-8")
         isolated_restore = (
-            ROOT / "deploy/telegramd/rollout-runner/test-isolated-restore-postgres.sh"
+            ROOT / "deploy/teagramd/rollout-runner/test-isolated-restore-postgres.sh"
         ).read_text(encoding="utf-8")
         stack_move = (
-            ROOT / "deploy/telegramd/rollout-runner/test-stack-move-runner.sh"
+            ROOT / "deploy/teagramd/rollout-runner/test-stack-move-runner.sh"
         ).read_text(encoding="utf-8")
-        self.assertIn(
-            "ghcr.io/immich-app/postgres:16-vectorchord1.1.1@sha256:"
-            "0446995e2b4713ae45d25de7c81c745a63180491018ded84cf13ef4d3c0c5cc9",
-            postgres_schema,
+        postgres16 = "ghcr.io/teagramhq/teagram-server-postgres:16-alpine"
+        postgres16_digest = (
+            "sha256:721873c34ceb9f8d8fc265984940dc982404c105f19ad51be9fdc5970a6080ea"
+        )
+        postgres18 = "ghcr.io/teagramhq/teagram-server-postgres:18-alpine"
+        postgres18_digest = (
+            "sha256:77f585114c32fbca283dc835b0596f4e52b51b4c6662d7810b2f4084f60a1873"
+        )
+        busybox = "ghcr.io/teagramhq/teagram-server-busybox:1.37"
+        busybox_digest = (
+            "sha256:bdf57e528e45e4433820e045b29b4597825a1c9e38353532d90a01445013f82e"
         )
         self.assertIn(
-            "ghcr.io/immich-app/postgres:18-vectorchord1.1.1@sha256:"
-            "a20e21841b21b9c009daf572c844ffedfaef75fce51287bbf080edf171ef0834",
+            postgres16,
+            postgres_schema,
+        )
+        self.assertIn(f'POSTGRES_IMAGE_DIGEST={postgres16_digest}', postgres_schema)
+        self.assertIn('docker pull "$POSTGRES_IMAGE@$POSTGRES_IMAGE_DIGEST"', postgres_schema)
+        self.assertIn(
+            postgres16,
+            isolated_restore,
+        )
+        self.assertIn(f'SOURCE_POSTGRES_IMAGE_DIGEST={postgres16_digest}', isolated_restore)
+        self.assertIn(f'RESTORE_POSTGRES_IMAGE_DIGEST={postgres18_digest}', isolated_restore)
+        self.assertIn(
+            'docker pull "$SOURCE_POSTGRES_IMAGE@$SOURCE_POSTGRES_IMAGE_DIGEST"',
             isolated_restore,
         )
         self.assertIn(
-            "ghcr.io/spacelift-io/aws-cli-alpine:2.36.48@sha256:"
-            "7cda53b1da87e5c6789f653d14e8a04f92f39ee539d0288ab5407d112cb922f7",
+            'docker pull "$RESTORE_POSTGRES_IMAGE@$RESTORE_POSTGRES_IMAGE_DIGEST"',
+            isolated_restore,
+        )
+        self.assertIn(postgres16, stack_move)
+        self.assertIn(postgres18, isolated_restore)
+        self.assertIn(postgres18, stack_move)
+        self.assertIn(busybox, stack_move)
+        self.assertIn(f'SOURCE_POSTGRES_IMAGE_DIGEST={postgres16_digest}', stack_move)
+        self.assertIn(f'TARGET_POSTGRES_IMAGE_DIGEST={postgres18_digest}', stack_move)
+        self.assertIn(f'BUSYBOX_IMAGE_DIGEST={busybox_digest}', stack_move)
+        self.assertIn(
+            'docker pull "$SOURCE_POSTGRES_IMAGE@$SOURCE_POSTGRES_IMAGE_DIGEST"',
             stack_move,
         )
+        self.assertIn(
+            'docker pull "$TARGET_POSTGRES_IMAGE@$TARGET_POSTGRES_IMAGE_DIGEST"',
+            stack_move,
+        )
+        self.assertIn('docker pull "$BUSYBOX_IMAGE@$BUSYBOX_IMAGE_DIGEST"', stack_move)
+        self.assertIn("command -v aws >/dev/null", stack_move)
 
 
 if __name__ == "__main__":

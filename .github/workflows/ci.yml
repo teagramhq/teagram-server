@@ -808,7 +808,8 @@ jobs:
             deploy/teagram/deploy-main.sh \
             deploy/telegram-server/deploy-main.sh \
             deploy/teagram/test-deploy-main.sh \
-            .github/scripts/test-deploy-workflow-contract.sh
+            .github/scripts/test-deploy-workflow-contract.sh \
+            .github/scripts/mirror_rustfs_qualification_images.sh
 
       - name: Check deploy script target fixtures
         run: deploy/teagram/test-deploy-main.sh
@@ -2482,16 +2483,46 @@ jobs:
           fi
           printf 'ok github.com/teagramhq/teagram-server/test/e2e %ss\n' "$summary"
 
+  mirror-rustfs-qualification-images:
+    name: Mirror RustFS qualification images
+    if: ${{ github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository }}
+    runs-on: ubuntu-26.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - uses: actions/checkout@v7.0.1
+
+      - name: Install Skopeo
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends --yes skopeo
+
+      - name: Mirror digest-pinned official images to GHCR
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: bash .github/scripts/mirror_rustfs_qualification_images.sh
+
   rustfs-transition-qualification:
     name: RustFS transition qualification
     runs-on: ubuntu-26.04
+    needs: mirror-rustfs-qualification-images
+    if: ${{ always() && needs.mirror-rustfs-qualification-images.result != 'failure' && needs.mirror-rustfs-qualification-images.result != 'cancelled' }}
     # The complete R69/R70 fixture matrix can exceed 30 minutes on hosted runners.
     timeout-minutes: 45
     permissions:
       contents: read
+      packages: read
 
     steps:
       - uses: actions/checkout@v7.0.1
+
+      - name: Log in to GHCR
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: printf '%s' "$GITHUB_TOKEN" | sudo docker login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
 
       - uses: actions/setup-python@v6.0.0
         with:
