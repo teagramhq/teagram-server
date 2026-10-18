@@ -2640,7 +2640,7 @@ func testSmokeChannel(t *testing.T) {
 		t.Fatalf("subscriber joined channel %d, want %d", joinedID, channelID)
 	}
 	subscriberOtherSession := newSmokeClient(t, f, "B2", phoneSubscriber)
-	assertPeerDialog := func(client *smokeClient, wantTopID int, wantText string) {
+	assertPeerDialog := func(client *smokeClient, wantTopID int, wantText, wantServiceTitle string) {
 		t.Helper()
 		if err := client.call(f.ctx, func(ctx context.Context, api *tg.Client) error {
 			result, err := api.MessagesGetPeerDialogs(ctx, []tg.InputDialogPeerClass{
@@ -2667,9 +2667,9 @@ func testSmokeChannel(t *testing.T) {
 			if dialog.TopMessage != wantTopID {
 				return fmt.Errorf("getPeerDialogs top_message = %d, want %d", dialog.TopMessage, wantTopID)
 			}
-			if wantTopID == 0 {
-				if len(result.Messages) != 0 {
-					return fmt.Errorf("empty getPeerDialogs messages = %d, want none", len(result.Messages))
+			if wantServiceTitle != "" {
+				if len(result.Messages) != 1 || !hasChannelCreateDialogMessage(result.Messages, wantTopID, wantServiceTitle) {
+					return fmt.Errorf("getPeerDialogs omitted channel create service message %d with title %q", wantTopID, wantServiceTitle)
 				}
 				return nil
 			}
@@ -2685,7 +2685,7 @@ func testSmokeChannel(t *testing.T) {
 			t.Fatalf("%s getPeerDialogs: %v", client.label, err)
 		}
 	}
-	assertPeerDialog(subscriber, 0, "")
+	assertPeerDialog(subscriber, 1, "", "Smoke channel")
 
 	posts := []string{"channel-smoke-one", "channel-smoke-two"}
 	postIDs := make(map[string]int, len(posts))
@@ -2715,7 +2715,7 @@ func testSmokeChannel(t *testing.T) {
 	}
 	assertSmokeChannelDifferenceTimeout(t, f.ctx, subscriber, channelID, 0, false)
 	assertSmokeChannelDifferenceTimeout(t, f.ctx, subscriber, channelID, 1_000_000, true)
-	assertPeerDialog(subscriber, postIDs[posts[1]], posts[1])
+	assertPeerDialog(subscriber, postIDs[posts[1]], posts[1], "")
 	noDuplicate := time.NewTimer(50 * time.Millisecond)
 	defer noDuplicate.Stop()
 	select {
@@ -3003,7 +3003,7 @@ func testSmokeChannel(t *testing.T) {
 		len(deleteUpdate.Messages) != 1 || deleteUpdate.Messages[0] != laterUpdate.Msg.ID {
 		t.Fatalf("subscriber channel delete update = %+v, want channel %d post %d at pts %d/count 1", deleteUpdate, channelID, laterUpdate.Msg.ID, deleted.Pts)
 	}
-	assertPeerDialog(subscriber, postIDs[posts[1]], posts[1])
+	assertPeerDialog(subscriber, postIDs[posts[1]], posts[1], "")
 	checkChannelReadState(subscriber, secondPostID, 0)
 	var replayed *tg.MessagesAffectedMessages
 	if err := creator.call(f.ctx, func(ctx context.Context, api *tg.Client) error {
@@ -3027,9 +3027,9 @@ func testSmokeChannel(t *testing.T) {
 		t.Fatalf("waiting for duplicate channel delete update check: %s", contextFailureDescription(f.ctx))
 	}
 	deleteSmokeChannelPost(t, f, channelID, postIDs[posts[1]])
-	assertPeerDialog(subscriber, postIDs[posts[0]], posts[0])
+	assertPeerDialog(subscriber, postIDs[posts[0]], posts[0], "")
 	deleteSmokeChannelPost(t, f, channelID, postIDs[posts[0]])
-	assertPeerDialog(subscriber, 0, "")
+	assertPeerDialog(subscriber, 1, "", "Smoke channel")
 }
 
 func testSmokeChannelMembershipRevocation(t *testing.T) {

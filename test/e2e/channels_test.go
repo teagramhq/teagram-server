@@ -95,6 +95,28 @@ func hasChannel(chats []tg.ChatClass, id int64) bool {
 	return false
 }
 
+func hasChannelDialogMessage(messages []tg.MessageClass, id int, text string) bool {
+	for _, class := range messages {
+		message, ok := class.(*tg.Message)
+		if ok && message.ID == id && message.Message == text {
+			return true
+		}
+	}
+	return false
+}
+
+func hasChannelCreateDialogMessage(messages []tg.MessageClass, id int, title string) bool {
+	for _, class := range messages {
+		service, ok := class.(*tg.MessageService)
+		if !ok || service == nil || service.ID != id {
+			continue
+		}
+		action, ok := service.Action.(*tg.MessageActionChannelCreate)
+		return ok && action != nil && action.Title == title
+	}
+	return false
+}
+
 // execChannel runs fn on cmds, failing the test on error. It is execChat
 // renamed for clarity in tests where a chat-specific name would be misleading,
 // but the mechanics are identical — execChat is defined in chats_test.go.
@@ -2329,6 +2351,116 @@ func TestChannelsInviteToChannelPushesViewerChannelAndLivePosts(t *testing.T) {
 		}
 		return nil
 	})
+	checkInvitedDialogs := func(wantPresent bool, wantTop int, wantText, wantServiceTitle string) {
+		t.Helper()
+		execChannel(t, ctx, bCmds, func(ctx context.Context, c *tg.Client) error {
+			listResult, err := c.MessagesGetDialogs(ctx, &tg.MessagesGetDialogsRequest{
+				OffsetPeer: &tg.InputPeerEmpty{},
+				Limit:      100,
+			})
+			if err != nil {
+				return fmt.Errorf("getDialogs: %w", err)
+			}
+			var listDialogs []tg.DialogClass
+			var listMessages []tg.MessageClass
+			var listChats []tg.ChatClass
+			switch result := listResult.(type) {
+			case *tg.MessagesDialogs:
+				listDialogs, listMessages, listChats = result.Dialogs, result.Messages, result.Chats
+			case *tg.MessagesDialogsSlice:
+				listDialogs, listMessages, listChats = result.Dialogs, result.Messages, result.Chats
+			default:
+				return fmt.Errorf("getDialogs response = %T, want dialogs or dialogsSlice", listResult)
+			}
+			var listDialog *tg.Dialog
+			for _, item := range listDialogs {
+				dialog, ok := item.(*tg.Dialog)
+				if !ok {
+					continue
+				}
+				peer, ok := dialog.Peer.(*tg.PeerChannel)
+				if ok && peer.ChannelID == chID {
+					listDialog = dialog
+					break
+				}
+			}
+			if wantPresent {
+				if listDialog == nil {
+					return fmt.Errorf("getDialogs omitted invited channel %d", chID)
+				}
+				if listDialog.TopMessage != wantTop {
+					return fmt.Errorf("getDialogs top_message = %d, want %d", listDialog.TopMessage, wantTop)
+				}
+				if !hasChannel(listChats, chID) {
+					return fmt.Errorf("getDialogs omitted invited channel %d from chats", chID)
+				}
+				if wantServiceTitle != "" && !hasChannelCreateDialogMessage(listMessages, wantTop, wantServiceTitle) {
+					return fmt.Errorf("getDialogs omitted channel create service message %d with title %q", wantTop, wantServiceTitle)
+				}
+				if wantText != "" && !hasChannelDialogMessage(listMessages, wantTop, wantText) {
+					return fmt.Errorf("getDialogs omitted top post %d with text %q", wantTop, wantText)
+				}
+			} else {
+				if listDialog != nil {
+					return fmt.Errorf("getDialogs retained channel %d after access ended", chID)
+				}
+				for _, item := range listChats {
+					switch chat := item.(type) {
+					case *tg.Channel:
+						if chat.ID == chID {
+							return fmt.Errorf("getDialogs retained channel chat %d after access ended", chID)
+						}
+					case *tg.ChannelForbidden:
+						if chat.ID == chID {
+							return fmt.Errorf("getDialogs returned forbidden channel %d after access ended", chID)
+						}
+					}
+				}
+			}
+
+			peerResult, err := c.MessagesGetPeerDialogs(ctx, []tg.InputDialogPeerClass{
+				&tg.InputDialogPeer{Peer: peerChannel(bUserID, chID)},
+			})
+			if err != nil {
+				return fmt.Errorf("getPeerDialogs: %w", err)
+			}
+			if !wantPresent {
+				if len(peerResult.Dialogs) != 0 || len(peerResult.Messages) != 0 || len(peerResult.Chats) != 0 {
+					return fmt.Errorf("getPeerDialogs after access ended = dialogs:%d messages:%d chats:%d, want none",
+						len(peerResult.Dialogs), len(peerResult.Messages), len(peerResult.Chats))
+				}
+				return nil
+			}
+			if len(peerResult.Dialogs) != 1 || len(peerResult.Chats) != 1 {
+				return fmt.Errorf("getPeerDialogs counts = dialogs:%d chats:%d, want 1/1", len(peerResult.Dialogs), len(peerResult.Chats))
+			}
+			peerDialog, ok := peerResult.Dialogs[0].(*tg.Dialog)
+			if !ok {
+				return fmt.Errorf("getPeerDialogs dialog = %T, want *tg.Dialog", peerResult.Dialogs[0])
+			}
+			peer, ok := peerDialog.Peer.(*tg.PeerChannel)
+			if !ok || peer.ChannelID != chID {
+				return fmt.Errorf("getPeerDialogs peer = %+v, want channel %d", peerDialog.Peer, chID)
+			}
+			if peerDialog.TopMessage != wantTop {
+				return fmt.Errorf("getPeerDialogs top_message = %d, want %d", peerDialog.TopMessage, wantTop)
+			}
+			if !hasChannel(peerResult.Chats, chID) {
+				return fmt.Errorf("getPeerDialogs omitted invited channel %d from chats", chID)
+			}
+			if wantServiceTitle != "" {
+				if len(peerResult.Messages) != 1 || !hasChannelCreateDialogMessage(peerResult.Messages, wantTop, wantServiceTitle) {
+					return fmt.Errorf("getPeerDialogs omitted channel create service message %d with title %q", wantTop, wantServiceTitle)
+				}
+				return nil
+			}
+			if len(peerResult.Messages) != 1 || !hasChannelDialogMessage(peerResult.Messages, wantTop, wantText) {
+				return fmt.Errorf("getPeerDialogs messages = %v, want top post %d with text %q", peerResult.Messages, wantTop, wantText)
+			}
+			return nil
+		})
+	}
+	checkInvitedDialogs(true, 1, "", "Direct invite")
 
 	execChannel(t, ctx, aCmds, func(ctx context.Context, c *tg.Client) error {
 		_, err := c.MessagesSendMessage(ctx, &tg.MessagesSendMessageRequest{
@@ -2350,11 +2482,13 @@ func TestChannelsInviteToChannelPushesViewerChannelAndLivePosts(t *testing.T) {
 	case <-ctx.Done():
 		t.Fatalf("B timed out waiting for the post after direct invite: %v", ctx.Err())
 	}
+	checkInvitedDialogs(true, preLeaveUpdate.Msg.ID, "direct invite live post", "")
 
 	execChannel(t, ctx, bCmds, func(ctx context.Context, c *tg.Client) error {
 		_, err := c.ChannelsLeaveChannel(ctx, inputChannel(bUserID, chID))
 		return err
 	})
+	checkInvitedDialogs(false, 0, "", "")
 	execChannel(t, ctx, aCmds, func(ctx context.Context, c *tg.Client) error {
 		_, err := c.MessagesSendMessage(ctx, &tg.MessagesSendMessageRequest{
 			Peer:     peerChannel(aUserID, chID),
