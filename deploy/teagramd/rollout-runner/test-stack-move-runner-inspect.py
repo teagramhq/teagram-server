@@ -505,5 +505,36 @@ class PinnedMoveAuthorityPublicationTest(unittest.TestCase):
             self.assertTrue((state_dir / "journal" / "0000000002.json").is_file())
 
 
+class PostgresImageReferenceTest(unittest.TestCase):
+    def test_exact_alpine_tags_are_required_for_source_and_target(self) -> None:
+        runner = load_runner()
+        self.assertTrue(
+            runner.postgres_image_matches_tag(
+                "ghcr.io/teagramhq/teagram-server-postgres:16-alpine",
+                "postgres:16-alpine",
+            )
+        )
+        self.assertTrue(
+            runner.postgres_image_matches_tag(
+                "ghcr.io/teagramhq/teagram-server-postgres:18-alpine",
+                "postgres:18-alpine",
+            )
+        )
+        self.assertFalse(
+            runner.postgres_image_matches_tag(
+                "ghcr.io/immich-app/postgres:16-vectorchord1.1.1",
+                "postgres:16-alpine",
+            )
+        )
+        self.assertFalse(
+            runner.postgres_image_matches_tag(
+                "ghcr.io/teagramhq/teagram-server-postgres:18-alpine",
+                "postgres:16-alpine",
+            )
+        )
+        self.assertFalse(runner.postgres_image_matches_tag(None, "postgres:16-alpine"))
+        print("PASS PostgreSQL image preflight accepts only the required Alpine tags")
+
+
 if __name__ == "__main__":
     unittest.main()
