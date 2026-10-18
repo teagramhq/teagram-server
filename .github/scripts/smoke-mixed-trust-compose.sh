@@ -117,24 +117,25 @@ TG_MIXED_TRUST_TEMP_WS_PORT=${mixed_ports[3]}
 EOF
 chmod 600 "$env_file"
 
-# Preserve CI's generated RustFS credentials while overriding test-only values.
+# Preserve CI's generated credentials while applying the local blob override
+# before validation-specific environment and port changes.
 compose_base() {
 	docker compose --project-name "$project" --env-file .env --env-file "$env_file" \
-		-f docker-compose.yml -f docker-compose.mixed-trust.validation.yml \
-		-f docker-compose.local-blobs.yml "$@"
+		-f docker-compose.yml -f docker-compose.local-blobs.yml \
+		-f docker-compose.mixed-trust.validation.yml "$@"
 }
 
 compose_mixed() {
 	docker compose --project-name "$project" --env-file .env --env-file "$env_file" \
-		-f docker-compose.yml -f docker-compose.mixed-trust.validation.yml \
-		-f docker-compose.local-blobs.yml -f docker-compose.mixed-trust.yml \
+		-f docker-compose.yml -f docker-compose.local-blobs.yml \
+		-f docker-compose.mixed-trust.validation.yml -f docker-compose.mixed-trust.yml \
 		-f docker-compose.mixed-trust.local-validation.yml "$@"
 }
 
 compose_probe() {
 	docker compose --project-name "$project" --env-file .env --env-file "$env_file" \
-		-f docker-compose.yml -f docker-compose.mixed-trust.validation.yml \
-		-f docker-compose.local-blobs.yml -f docker-compose.mixed-trust.yml \
+		-f docker-compose.yml -f docker-compose.local-blobs.yml \
+		-f docker-compose.mixed-trust.validation.yml -f docker-compose.mixed-trust.yml \
 		-f docker-compose.mixed-trust.local-validation.yml \
 		-f docker-compose.mixed-trust.probe.yml "$@"
 }
@@ -199,6 +200,8 @@ assert any(
 assert legacy["services"]["teagramd"]["environment"]["TG_CLIENT_ADDR_TRUST"] == "socket"
 assert legacy["services"]["teagramd"]["environment"]["TG_REPLICA_COUNT"] == "3"
 assert legacy["services"]["teagramd"]["environment"]["TG_WEBSOCKET_ALLOWED_ORIGINS"] == "https://web.example.test"
+assert not any(key.startswith("TG_BLOB_S3_") for key in legacy["services"]["teagramd"]["environment"])
+assert not legacy["services"]["teagramd"].get("secrets")
 print("default Compose stays direct; validation legacy is socket-trust")
 PY
 
