@@ -101,7 +101,13 @@ services:
 YAML
 printf '%s\n' 'POSTGRES_PASSWORD=fixture-only' > "$CHECKOUT/.env"
 chmod 600 "$CHECKOUT/.env"
-git -C "$CHECKOUT" add docker-compose.yml docker-compose.override.yml .env
+cp "$SCRIPT_DIR/../../../docker-compose.local-blobs.yml" "$CHECKOUT/docker-compose.local-blobs.yml"
+mkdir -p "$CHECKOUT/deploy/postgres"
+cp "$SCRIPT_DIR/../../../deploy/postgres/postgresql.conf" \
+  "$CHECKOUT/deploy/postgres/postgresql.conf"
+printf '%s\n' '.env' 'docker-compose.override.yml' > "$CHECKOUT/.gitignore"
+git -C "$CHECKOUT" add docker-compose.yml docker-compose.local-blobs.yml \
+  deploy/postgres/postgresql.conf .gitignore
 git -C "$CHECKOUT" commit -q -m 'legacy stack baseline'
 BASELINE_SHA=$(git -C "$CHECKOUT" rev-parse HEAD)
 git -C "$CHECKOUT" push -q origin main
@@ -109,6 +115,9 @@ printf '%s\n' target > "$CHECKOUT/target-marker"
 git -C "$CHECKOUT" add target-marker
 git -C "$CHECKOUT" commit -q -m 'reviewed target'
 TARGET_SHA=$(git -C "$CHECKOUT" rev-parse HEAD)
+if [ "$(git -C "$CHECKOUT" ls-tree -r "$TARGET_SHA" -- deploy/postgres/postgresql.conf | awk '{print $1}')" != 100644 ]; then
+  record_failure 'target checkout fixture must track postgresql.conf with mode 100644'
+fi
 git -C "$CHECKOUT" push -q origin main
 git -C "$CHECKOUT" reset -q --hard "$BASELINE_SHA"
 git -C "$CHECKOUT" fetch -q origin
@@ -219,10 +228,9 @@ git() {
   if [ "${1:-}" = -C ] && [ "${3:-}" = worktree ] && [ "${4:-}" = add ]; then
     printf '%s\n' "$*" > "$TMP/worktree-add-command"
     if [ "${MOCK_CREATE_TARGET:-0}" = 1 ]; then
-      mkdir -m 700 "$TARGET_CHECKOUT"
-      cp "$SCRIPT_DIR/../../../docker-compose.yml" "$TARGET_CHECKOUT/docker-compose.yml"
-      cp "$SCRIPT_DIR/../../../docker-compose.local-blobs.yml" "$TARGET_CHECKOUT/docker-compose.local-blobs.yml"
-      return 0
+      : > "$TMP/target-worktree-created"
+      command git "$@"
+      return $?
     fi
     return 88
   fi
@@ -291,6 +299,7 @@ fi
 rm -f -- "$TARGET_DIR/stack-move-preflight-blob-compose.json" \
   "$TARGET_DIR/stack-move-preflight-blob-containers.json"
 : > "$COMMANDS"
+rm -f "$TMP/target-worktree-created"
 MOCK_CREATE_TARGET=1
 if main move-stack "$TARGET_SHA" "$BASELINE_SHA" >"$TMP/target-compose.stdout" 2>"$TMP/target-compose.stderr"; then
   TARGET_COMPOSE_STATUS=0
@@ -304,6 +313,18 @@ if [ "$TARGET_COMPOSE_STATUS" -ne 0 ] || \
     ! has_line "$RUNTIME_DIR/blob-mode-state.pinned" "$TMP/stack-move-helper-args"; then
   record_failure 'move-stack did not pass the Compose overlay and verified pinned blob-mode helper to the mover'
   cat "$TMP/target-compose.stderr" >&2
+fi
+if [ -e "$TMP/target-worktree-created" ]; then
+  if [ ! -f "$TARGET_CHECKOUT/deploy/postgres/postgresql.conf" ]; then
+    record_failure 'target checkout fixture is missing tracked postgresql.conf'
+  elif [ "$(stat -c '%a' -- "$TARGET_CHECKOUT/deploy/postgres/postgresql.conf")" != 644 ]; then
+    record_failure 'target worktree must check out tracked postgresql.conf as mode 0644, not 0600'
+  fi
+  if [ ! -f "$TARGET_CHECKOUT/.env" ]; then
+    record_failure 'copied target environment file is missing'
+  elif [ "$(stat -c '%a' -- "$TARGET_CHECKOUT/.env")" != 600 ]; then
+    record_failure 'copied target environment file must remain private at mode 0600'
+  fi
 fi
 rm -rf -- "$TARGET_CHECKOUT"
 
