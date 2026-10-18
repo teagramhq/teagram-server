@@ -236,6 +236,8 @@ services:
     volumes:
       - tgblobs:/var/lib/telegramd-blobs:ro
 volumes:
+  pgdata:
+    name: telegram-server_pgdata
   tgblobs:
     name: telegram-server_tgblobs
 YAML
@@ -676,7 +678,10 @@ start_source
 if run_move_restore_failure "$TMP/restore-failure.out"; then
   fail 'move accepted an injected PostgreSQL restore failure'
 fi
-grep -Eq 'PostgreSQL database restore failed with exit 3; diagnostic saved to .*/restore-database\.stderr' "$TMP/restore-failure.out" || fail 'restore failure did not identify its operation and diagnostic'
+grep -Eq 'PostgreSQL database restore failed with exit 3; diagnostic saved to .*/restore-database\.stderr' "$TMP/restore-failure.out" || {
+  cat "$TMP/restore-failure.out" >&2
+  fail 'restore failure did not identify its operation and diagnostic'
+}
 grep -q 'ERROR: injected restore SQL failure' "$EVIDENCE_DIR/restore-database.stderr" || fail 'restore SQL diagnostic was not preserved in private evidence'
 [ "$(stat -c %a "$EVIDENCE_DIR/restore-database.stderr")" = 600 ] || fail 'restore SQL diagnostic evidence is not private'
 jq -e '.result == "failed" and (.reason | contains("PostgreSQL database restore")) and (.reason | contains("restore-database.stderr")) and .rollback == "old-project-restored"' "$EVIDENCE_DIR/stack-move-evidence.json" >/dev/null || fail 'restore failure evidence omitted the operation or rollback result'
