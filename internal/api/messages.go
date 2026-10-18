@@ -1280,8 +1280,8 @@ func (h *handlers) handleDeleteHistory(r *mtproto.Request) (bin.Encoder, error) 
 	}, nil
 }
 
-// handleSetTyping serves messages.setTyping for user, basic-chat, and
-// megagroup peers. Typing is transient and never persisted.
+// handleSetTyping serves messages.setTyping for user, basic-chat, and channel
+// peers. Typing is transient and never persisted.
 func (h *handlers) handleSetTyping(r *mtproto.Request) (bin.Encoder, error) {
 	var req tg.MessagesSetTypingRequest
 	if err := req.Decode(r.Buf); err != nil {
@@ -1313,21 +1313,8 @@ func (h *handlers) handleSetTyping(r *mtproto.Request) (bin.Encoder, error) {
 		if err != nil {
 			return nil, err
 		}
-		channel, found, err := h.store.ChannelByID(r.Ctx, peerID)
-		if err != nil {
-			h.log.Error("load typing channel", "user_id", r.UserID, "channel_id", peerID, "err", err)
-			return nil, errInternal
-		}
-		if !found || !channel.Megagroup {
-			return nil, errPeerIDInvalid
-		}
-		member, found, err := h.store.ChannelMemberOf(r.Ctx, peerID, r.UserID)
-		if err != nil {
-			h.log.Error("check typing channel membership", "user_id", r.UserID, "channel_id", peerID, "err", err)
-			return nil, errInternal
-		}
-		if !found || member.Banned(h.now()) {
-			return nil, errChatWriteForbidden
+		if _, err := h.requireChannelMember(r.Ctx, peerID, r.UserID); err != nil {
+			return nil, err
 		}
 		peerType = store.PeerTypeChannel
 	default:
@@ -1764,15 +1751,12 @@ func (h *handlers) handleSendReaction(r *mtproto.Request) (bin.Encoder, error) {
 const maxReactionMessagesPerCall = 100
 
 // handleGetMessagesReactions serves messages.getMessagesReactions: it returns
-// the current reactions on those of the caller's own message copies that the
-// request names, as one updateMessageReactions each. It is a read — no pts
+// reaction updates for the named, readable messages. It is a read — no pts
 // advance, no event-log write, nothing pushed.
 //
-// Ownership is the whole read predicate, and it is the same one the read paths
-// already apply: messages is keyed (owner_id, local_id), so an id naming a
-// conversation the caller is not part of and an id that was never issued both
-// produce no row under (caller, id) and are omitted identically. Nothing here
-// reports an unreadable id, because doing so would answer whether it exists.
+// User and chat messages are resolved in the caller's own message-id space;
+// channel posts use the channel's shared id space. Unreadable peers are refused,
+// while absent or deleted message ids are omitted so they cannot be probed.
 func (h *handlers) handleGetMessagesReactions(r *mtproto.Request) (bin.Encoder, error) {
 	var req tg.MessagesGetMessagesReactionsRequest
 	if err := req.Decode(r.Buf); err != nil {
@@ -1794,13 +1778,10 @@ func (h *handlers) handleGetMessagesReactions(r *mtproto.Request) (bin.Encoder, 
 	if err != nil {
 		return nil, err
 	}
-	// Channel posts live in one shared row per post, in a global id namespace,
-	// and carry no reaction rows at all. Routing a channel peer into the
-	// owner-keyed read below would resolve the caller's own local ids in the
-	// wrong namespace. handleSendReaction refuses one for the same reason and
-	// with the same error.
 	if peerType == store.PeerTypeChannel {
-		return nil, errPeerIDInvalid
+		if _, err = h.requireChannelMember(r.Ctx, peerID, r.UserID); err != nil {
+			return nil, err
+		}
 	}
 	if peerType == store.PeerTypeChat {
 		if err = h.requireMember(r.Ctx, peerID, r.UserID); err != nil {
@@ -1819,6 +1800,27 @@ func (h *handlers) handleGetMessagesReactions(r *mtproto.Request) (bin.Encoder, 
 		}
 		seen[localID] = true
 		localIDs = append(localIDs, localID)
+	}
+	if peerType == store.PeerTypeChannel {
+		msgs, err := h.store.ChannelMessages(r.Ctx, peerID, localIDs)
+		if err != nil {
+			h.log.Error("get channel message reactions", "user_id", r.UserID, "channel_id", peerID, "err", err)
+			return nil, errInternal
+		}
+		updates := make([]tg.UpdateClass, 0, len(localIDs))
+		for _, localID := range localIDs {
+			m, ok := msgs[localID]
+			if !ok || m.Deleted {
+				continue
+			}
+			updates = append(updates, &tg.UpdateMessageReactions{
+				Peer:  &tg.PeerChannel{ChannelID: peerID},
+				MsgID: int(m.LocalID),
+				// Channel post reactions are not persisted on this server yet.
+				Reactions: reactionsToTL(nil),
+			})
+		}
+		return &tg.Updates{Updates: updates, Date: int(time.Now().Unix())}, nil
 	}
 
 	msgs, err := h.store.MessagesByOwnerLocalIDs(r.Ctx, r.UserID, localIDs)

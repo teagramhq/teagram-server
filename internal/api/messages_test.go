@@ -1221,6 +1221,45 @@ func TestSetTypingAcceptsChatPeers(t *testing.T) {
 	}
 }
 
+func TestSetTypingAcceptsServerIssuedChannelPeer(t *testing.T) {
+	t.Parallel()
+	s := openStore(t)
+	ctx := context.Background()
+	creator, err := s.CreateUser(ctx, "+15551292066")
+	if err != nil {
+		t.Fatalf("create creator: %v", err)
+	}
+	outsider, err := s.CreateUser(ctx, "+15551292067")
+	if err != nil {
+		t.Fatalf("create outsider: %v", err)
+	}
+	channel := createChannel(t, s, creator.ID, &tg.ChannelsCreateChannelRequest{
+		Broadcast: true, Title: "Typing",
+	})
+	peer := &tg.InputPeerChannel{ChannelID: channel.ID, AccessHash: channel.AccessHash}
+
+	result, err := api.SetTypingForTest(s, creator.ID, &tg.MessagesSetTypingRequest{
+		Peer: peer, Action: &tg.SendMessageTypingAction{},
+	})
+	if err != nil {
+		t.Fatalf("setTyping as channel creator: %v", err)
+	}
+	if _, ok := result.(*tg.BoolTrue); !ok {
+		t.Fatalf("setTyping result = %T, want *tg.BoolTrue", result)
+	}
+
+	_, err = api.SetTypingForTest(s, creator.ID, &tg.MessagesSetTypingRequest{
+		Peer:   &tg.InputPeerChannel{ChannelID: channel.ID, AccessHash: channel.AccessHash + 1},
+		Action: &tg.SendMessageTypingAction{},
+	})
+	rpcError(t, err, "PEER_ID_INVALID")
+
+	_, err = api.SetTypingForTest(s, outsider.ID, &tg.MessagesSetTypingRequest{
+		Peer: api.InputPeerChannel(outsider.ID, channel.ID), Action: &tg.SendMessageTypingAction{},
+	})
+	rpcError(t, err, "PEER_ID_INVALID")
+}
+
 func TestSetTypingRejectsChatNonMembers(t *testing.T) {
 	t.Parallel()
 	s := openStore(t)

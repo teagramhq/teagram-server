@@ -1195,12 +1195,12 @@ func (u *Updater) DeliverTyping(ctx context.Context, peerID, fromID int64) {
 		}
 		u.pushTypingToUsers(ctx, members, fromID, update)
 	case store.PeerTypeChannel:
-		channel, found, err := u.h.store.ChannelByID(ctx, peerID)
+		_, found, err := u.h.store.ChannelByID(ctx, peerID)
 		if err != nil {
 			u.log.Error("load typing channel", "channel_id", peerID, "err", err)
 			return
 		}
-		if !found || !channel.Megagroup {
+		if !found {
 			return
 		}
 		participants, _, err := u.h.store.ChannelDeliverySnapshot(ctx, peerID)

@@ -1150,9 +1150,48 @@ func TestChannelsMegagroup(t *testing.T) {
 		}
 		timer.Stop()
 	}
-	assertChannelRPCError(t, ctx, cCmds, "CHAT_WRITE_FORBIDDEN", func(ctx context.Context, c *tg.Client) error {
+	assertChannelRPCError(t, ctx, cCmds, "PEER_ID_INVALID", func(ctx context.Context, c *tg.Client) error {
 		_, err := c.MessagesSetTyping(ctx, &tg.MessagesSetTypingRequest{
 			Peer: peerChannel(cUserID, chID), Action: &tg.SendMessageTypingAction{},
+		})
+		return err
+	})
+
+	// Typing on a broadcast channel uses the same member fan-out.
+	broadcastID := createBroadcastChannel(t, ctx, aCmds, "Typing broadcast")
+	broadcastInvite := exportChannelInvite(t, ctx, aUserID, aCmds, broadcastID)
+	if joinedID := importChannelInvite(t, ctx, bCmds, broadcastInvite); joinedID != broadcastID {
+		t.Fatalf("broadcast joined channel = %d, want %d", joinedID, broadcastID)
+	}
+	execChannel(t, ctx, aCmds, func(ctx context.Context, c *tg.Client) error {
+		ok, err := c.MessagesSetTyping(ctx, &tg.MessagesSetTypingRequest{
+			Peer: peerChannel(aUserID, broadcastID), Action: &tg.SendMessageTypingAction{},
+		})
+		if err == nil && !ok {
+			return errors.New("broadcast setTyping returned false")
+		}
+		return err
+	})
+	broadcastTyping := recvOrCtx(t, ctx, collB.channelTyping, "broadcast typing")
+	from, ok = broadcastTyping.FromID.(*tg.PeerUser)
+	if broadcastTyping.ChannelID != broadcastID || !ok || from.UserID != aUserID {
+		t.Fatalf("broadcast typing update = %+v, want channel %d from A %d", broadcastTyping, broadcastID, aUserID)
+	}
+	for _, nonRecipient := range []struct {
+		name string
+		ch   <-chan *tg.UpdateChannelUserTyping
+	}{{"A sender", collA.channelTyping}, {"C non-member", collC.channelTyping}} {
+		timer := time.NewTimer(75 * time.Millisecond)
+		select {
+		case update := <-nonRecipient.ch:
+			t.Fatalf("%s received unexpected broadcast typing update: %+v", nonRecipient.name, update)
+		case <-timer.C:
+		}
+		timer.Stop()
+	}
+	assertChannelRPCError(t, ctx, cCmds, "PEER_ID_INVALID", func(ctx context.Context, c *tg.Client) error {
+		_, err := c.MessagesSetTyping(ctx, &tg.MessagesSetTypingRequest{
+			Peer: peerChannel(cUserID, broadcastID), Action: &tg.SendMessageTypingAction{},
 		})
 		return err
 	})
