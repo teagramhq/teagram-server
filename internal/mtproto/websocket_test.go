@@ -2,10 +2,12 @@ package mtproto_test
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"crypto/rand"
 	"crypto/rsa"
 	"encoding/binary"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -33,6 +35,7 @@ import (
 	"github.com/gotd/td/tg"
 	"github.com/gotd/td/transport"
 
+	"github.com/teagramhq/teagram-server/internal/discovery"
 	"github.com/teagramhq/teagram-server/internal/mtproto"
 )
 
@@ -396,6 +399,97 @@ func TestServeWebSocketOriginPolicy(t *testing.T) {
 			}
 			closeWebSocket(t, ws)
 		})
+	}
+}
+
+func TestServeWebSocketDiscoveryCORSIsPathScoped(t *testing.T) {
+	t.Parallel()
+
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+	ln := mustListenTCP(t, ctx, "127.0.0.1:0")
+	rsaKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatalf("generate RSA key: %v", err)
+	}
+	doc, err := discovery.NewDocument("configured.example.test:443", 2, &rsaKey.PublicKey)
+	if err != nil {
+		t.Fatalf("build discovery document: %v", err)
+	}
+	srv := mtproto.New(exchange.PrivateKey{}, 2, mtproto.NewMemoryAuthKeyStore(), nil, nil)
+	if err := srv.SetClientDiscoveryDocument(doc); err != nil {
+		t.Fatalf("set discovery document: %v", err)
+	}
+	served := make(chan error, 1)
+	go func() { served <- srv.ServeWebSocket(ctx, ln) }()
+	t.Cleanup(func() {
+		cancel()
+		if err := <-served; err != nil {
+			t.Errorf("serve websocket: %v", err)
+		}
+	})
+
+	request := func(method, requestPath string) *http.Response {
+		t.Helper()
+		req, err := http.NewRequestWithContext(ctx, method, "http://"+ln.Addr().String()+requestPath, nil)
+		if err != nil {
+			t.Fatalf("new %s request: %v", method, err)
+		}
+		req.Header.Set("Origin", "https://attacker.example")
+		req.Host = "forged.example"
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatalf("send %s request to %s: %v", method, requestPath, err)
+		}
+		return resp
+	}
+	getResp := request(http.MethodGet, "/.well-known/telegramd/client")
+	if getResp.StatusCode != http.StatusOK {
+		t.Errorf("GET discovery status = %d, want %d", getResp.StatusCode, http.StatusOK)
+	}
+	if got := getResp.Header.Get("Access-Control-Allow-Origin"); got != "*" {
+		t.Errorf("GET discovery ACAO = %q, want *", got)
+	}
+	if got := getResp.Header.Get("Access-Control-Allow-Credentials"); got != "" {
+		t.Errorf("GET discovery Allow-Credentials = %q, want empty", got)
+	}
+	gotBody, err := io.ReadAll(getResp.Body)
+	if err != nil {
+		t.Errorf("read GET discovery body: %v", err)
+	}
+	if err := getResp.Body.Close(); err != nil {
+		t.Errorf("close GET discovery body: %v", err)
+	}
+	wantBody, err := json.Marshal(doc)
+	if err != nil {
+		t.Fatalf("marshal expected discovery document: %v", err)
+	}
+	if !bytes.Equal(gotBody, wantBody) {
+		t.Errorf("GET discovery body under forged Host = %s, want %s", gotBody, wantBody)
+	}
+
+	optionsResp := request(http.MethodOptions, "/.well-known/telegramd/client")
+	if optionsResp.StatusCode != http.StatusNoContent {
+		t.Errorf("OPTIONS discovery status = %d, want %d", optionsResp.StatusCode, http.StatusNoContent)
+	}
+	if got := optionsResp.Header.Get("Access-Control-Allow-Origin"); got != "*" {
+		t.Errorf("OPTIONS discovery ACAO = %q, want *", got)
+	}
+	if got := optionsResp.Header.Get("Access-Control-Allow-Credentials"); got != "" {
+		t.Errorf("OPTIONS discovery Allow-Credentials = %q, want empty", got)
+	}
+	if err := optionsResp.Body.Close(); err != nil {
+		t.Errorf("close OPTIONS response body: %v", err)
+	}
+
+	for _, requestPath := range []string{"/.well-known/telegramd/client/extra", "/.well-known/telegramd%2Fclient", "/apiws"} {
+		resp := request(http.MethodGet, requestPath)
+		if got := resp.Header.Get("Access-Control-Allow-Origin"); got != "" {
+			t.Errorf("%s ACAO = %q, want empty", requestPath, got)
+		}
+		if err := resp.Body.Close(); err != nil {
+			t.Errorf("close response body for %s: %v", requestPath, err)
+		}
 	}
 }
 

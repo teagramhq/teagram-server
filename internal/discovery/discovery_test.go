@@ -35,7 +35,7 @@ func TestDocumentIsCanonicalAndContainsOnlyPublicIdentity(t *testing.T) {
 	if !bytes.Equal(first, second) {
 		t.Fatalf("document is not deterministic:\n%s\n%s", first, second)
 	}
-	if string(first) != `{"version":1,"mtproto":{"endpoint":"mtproto.example.com:443","dc_id":2,"rsa_spki":"`+doc.MTProto.RSASPKI+`"}}` {
+	if string(first) != `{"version":1,"mtproto":{"endpoint":"mtproto.example.com:443","dc_id":2,"rsa_spki":"`+doc.MTProto.RSASPKI+`"},"websocket":{"endpoint":"wss://mtproto.example.com/apiws"}}` {
 		t.Fatalf("document JSON = %s", first)
 	}
 	if bytes.Contains(first, []byte("private")) {
