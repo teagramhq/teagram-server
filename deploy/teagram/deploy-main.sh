@@ -76,8 +76,13 @@ if [ "$PREV" != "$SHA" ] && git merge-base --is-ancestor "$SHA" "$PREV"; then
   echo "live is newer ($PREV), skipped $SHA"; exit 0
 fi
 C=teagram-teagramd-1
+LIVE_CHECKOUT=$(pwd -P)
 LIVE_CF=$(docker inspect --format '{{index .Config.Labels "com.docker.compose.project.config_files"}}' $C | tr , :)
-case "$LIVE_CF" in *.rollout-compose.local-*:*/docker-compose.override.yml) ;; *) echo "live teagramd not on a pinned local compose ($LIVE_CF); refusing"; exit 1;; esac
+case "$LIVE_CF" in
+  "$LIVE_CHECKOUT"/.rollout-compose.local-*.yml:"$LIVE_CHECKOUT"/docker-compose.override.yml) ;;
+  "$LIVE_CHECKOUT"/docker-compose.yml:"$LIVE_CHECKOUT"/docker-compose.local-blobs.yml:"$LIVE_CHECKOUT"/docker-compose.override.yml) ;;
+  *) echo "live teagramd not on an approved local compose ($LIVE_CF); refusing"; exit 1 ;;
+esac
 export COMPOSE_FILE="$LIVE_CF"   # carry forward the pinned local-blob files live runs from
 IMG=$(docker inspect --format '{{.Image}}' $C)
 if [ "$PREV" = "$SHA" ] && grep -qs "source_sha=$SHA image_id=$IMG " "$R"/main1238-*.build/built-image.identity; then
