@@ -75,13 +75,13 @@ def is_unqualified_hub_image(image: str) -> bool:
 
 
 class DockerImageMirrorTests(unittest.TestCase):
-    def test_testcontainers_prefix_uses_library_mirror(self) -> None:
+    def test_testcontainers_prefix_uses_mirror_without_trailing_slash(self) -> None:
         workflow = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
         match = re.search(
             r"(?m)^  TESTCONTAINERS_HUB_IMAGE_NAME_PREFIX:\s*(\S+)\s*$", workflow
         )
         self.assertIsNotNone(match, "CI has no Testcontainers registry prefix")
-        self.assertEqual("mirror.gcr.io/library", match.group(1))
+        self.assertEqual("mirror.gcr.io", match.group(1))
 
     def test_dockerfile_hub_bases_use_the_mirror(self) -> None:
         for relative_path in ACTIVE_DOCKERFILES:
