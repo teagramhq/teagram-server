@@ -3439,7 +3439,7 @@ jq -c '.services.teagramd.environment.TG_WELCOME_CHANNEL=""' \
 mv -- "$state/target-compose.next.json" "$state/target-compose.json"
 status=$(run_fixture welcome-channel-addition built 0 '' 2 '' '' apply "$APPLY_TARGET_SHA")
 if [ "$status" = 0 ] && \
-   grep -q $'preflight\tconfig_sha256\t.*\tpass' "$root".target/preflight-comparisons.tsv && \
+   grep -q $'preflight\tselected_render_config_sha256\t.*\tpass' "$root".target/preflight-comparisons.tsv && \
    grep -q $'target\tconfig_sha256\t.*\tpass' "$root".target/target-comparisons.tsv && \
    grep -q $'target\tcontainer_env_sha256\t.*\tpass' "$root".target/target-comparisons.tsv && \
    grep -q "rollout=verified sha=$APPLY_TARGET_SHA" "$TMP/welcome-channel-addition.stdout"; then
@@ -3477,7 +3477,7 @@ mv -- "$state/target-compose.next.json" "$state/target-compose.json"
 status=$(run_fixture welcome-channel-active built 0 '' 2 '' '' apply "$APPLY_TARGET_SHA")
 if [ "$status" != 0 ] && \
    ! grep -q 'docker compose up -d$' "$TMP/welcome-channel-active-events" && \
-   grep -q 'resolved Compose has unsafe public environment settings' "$TMP/welcome-channel-active.stderr" && \
+   grep -q 'cannot capture preflight snapshot' "$TMP/welcome-channel-active.stderr" && \
    grep -q 'resolved Compose preflight capture failed; target was not started' "$TMP/welcome-channel-active.stderr"; then
   pass 'ordinary apply rejects an active welcome channel before target startup'
 else
