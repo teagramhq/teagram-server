@@ -15,7 +15,7 @@ const phaseCommandToken = "e".repeat(64);
 const digest = `sha256:${"d".repeat(64)}`;
 // teagram-web opens one client socket per account slot on an unauthenticated load.
 const WSS_CONNECTION_CEILING = 4;
-const approvedQaDigest = "bd846d27cdd3e4a300d556866410c0ca0a3fdad22e6b888a66b8bf6e60a1d36f";
+const approvedQaDigest = "864fc57030af06677434ab41e9034569ade17994fd083747096f628c827710c8";
 const blockedResult = "{\"status\":\"blocked_expected\",\"blocked_telegram_org_attempts\":1,\"telegram_org_upstream_connects\":0,\"payloads_retained\":0}";
 const readyResult = "{\"status\":\"ready\",\"http_status\":200,\"asset_502_count\":0,\"browser_wss_status\":101,\"browser_wss_unique_targets\":1,\"observer_success_hosts\":1,\"observer_target_host\":\"teagram.tailaa4918.ts.net\",\"telegram_org_attempts\":0,\"payloads_retained\":0}";
 const acceptanceResultValue = {

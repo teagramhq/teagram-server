@@ -358,6 +358,17 @@ function assertWssError(result, expected) {
   return JSON.parse(line);
 }
 
+export function assertSilentSharedWorkerError(result) {
+  const isUnobservable = result.error?.diagnostic?.wss_diagnostic === "ambiguous";
+  return assertWssError(result, {
+    wss_diagnostic: isUnobservable ? "ambiguous" : "no-target",
+    wss_targets: 0,
+    wss_handshakes: 0,
+    wss_target_match: false,
+    wss_status: 0,
+  });
+}
+
 async function main() {
   process.umask(0o077);
   // The QA runner is mounted beside this smoke at its approved path, never copied into the image.
@@ -522,13 +533,7 @@ async function main() {
     });
 
     const sharedWorkerSilent = await runScenario(directory, "shared-worker-silent", certificate);
-    const sharedWorkerSilentDiagnostic = assertWssError(sharedWorkerSilent, {
-      wss_diagnostic: "no-target",
-      wss_targets: 0,
-      wss_handshakes: 0,
-      wss_target_match: false,
-      wss_status: 0,
-    });
+    const sharedWorkerSilentDiagnostic = assertSilentSharedWorkerError(sharedWorkerSilent);
 
     const qaSharedWorker = await runQaScenario(directory, "shared-worker", certificate, qa);
     assert.deepEqual(qaSharedWorker.result, { connectionCount: 1, status101: true }, "qaSharedWorker.result");

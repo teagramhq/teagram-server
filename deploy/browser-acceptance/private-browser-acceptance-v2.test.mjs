@@ -191,8 +191,18 @@ function createDependencies(failAt, allowCredentialRead = false) {
   };
 }
 
-function createAcceptancePage({usernameVisible = true, passwordVisible = true, chatListVisible = true, chatRows = 0} = {}) {
+function createAcceptancePage({
+  usernameVisible = true,
+  passwordVisible = true,
+  chatListVisible = true,
+  chatRows = 0,
+  createAccountLinkVisible = false,
+  signupFormVisible = false,
+  signupTitleText = "YourName",
+  stopAtUsernameFocus = false,
+} = {}) {
   const apiMethods = [];
+  let usernameFocused = false;
   const browserWindow = {
     apiManagerProxy: {
       async invoke(_type, payload) {
@@ -203,19 +213,31 @@ function createAcceptancePage({usernameVisible = true, passwordVisible = true, c
   };
   let progressCallback;
 
-  function locator(selector) {
+  function locator(selector, scope) {
     const isUsername = selector === 'input[aria-label="Username"]';
     const isPassword = selector === 'input[name="notsearch_password"]:visible';
     const isChatsPage = selector === "#page-chats";
     const isChatList = selector === "#chatlist-container .chatlist";
     const isChatRow = selector === "#chatlist-container .chatlist-chat";
+    const isSignupText = selector === "signup-text";
+    const isSignupAvatar = selector === "#canvas-avatar";
+    const isSignupHeader = scope === "signup-avatar" && selector === "xpath=../../..";
+    const isSignupTitle = scope === "signup-header" && selector === ".text-overflow-wrap";
     const isVisible = () => isUsername ? usernameVisible
       : isPassword ? passwordVisible
         : isChatsPage ? true
-          : isChatList ? chatListVisible : false;
+          : isChatList ? chatListVisible
+            : isSignupText ? createAccountLinkVisible || signupFormVisible
+              : isSignupAvatar || isSignupHeader ? signupFormVisible
+                : isSignupTitle ? signupFormVisible && signupTitleText.length > 0 : false;
     return {
       first() { return this; },
       filter() { return this; },
+      locator(childSelector) {
+        if (isSignupAvatar && childSelector === "xpath=../../..") return locator(childSelector, "signup-avatar");
+        if (isSignupHeader) return locator(childSelector, "signup-header");
+        return locator(childSelector);
+      },
       async waitFor() {
         if (!isVisible()) throw new Error("fixture element is not visible");
       },
@@ -225,7 +247,11 @@ function createAcceptancePage({usernameVisible = true, passwordVisible = true, c
         if (isChatRow) return chatRows;
         return 0;
       },
-      async focus() {},
+      async focus() {
+        if (!isUsername) return;
+        usernameFocused = true;
+        if (stopAtUsernameFocus) throw new Error("fixture stopped before sign-in");
+      },
     };
   }
 
@@ -233,6 +259,7 @@ function createAcceptancePage({usernameVisible = true, passwordVisible = true, c
     on() {},
     locator,
     getByText() { return locator("signup-text"); },
+    getByRole() { return locator("unknown"); },
     keyboard: {
       async type() {},
       async press() {},
@@ -255,6 +282,7 @@ function createAcceptancePage({usernameVisible = true, passwordVisible = true, c
   return {
     page,
     apiMethods,
+    get usernameFocused() { return usernameFocused; },
     async invokeApi(method) {
       return browserWindow.apiManagerProxy.invoke("manager", {
         name: "apiManager",
@@ -710,6 +738,51 @@ test("username-field-missing reports no submission without making an auth call",
   assert.equal(output.submission, "none");
   assert.equal(output.chatList, "not-reached");
   assert.equal(output.chatListRows, 0);
+  assert.deepEqual(browser.apiMethods, []);
+});
+
+test("a Create account link on the username sign-in screen does not trigger signup guard", async () => {
+  const fixture = createDependencies(undefined, true);
+  const browser = createAcceptancePage({createAccountLinkVisible: true, stopAtUsernameFocus: true});
+  await useRealAcceptanceFlow(fixture, browser);
+
+  const result = await executeMode({mode: "acceptance", releaseRecord: "fixture"}, fixture.dependencies);
+  const output = JSON.parse(result.output);
+
+  assert.equal(result.exitCode, 1);
+  assert.equal(output.qaFailureCode, "unexpected-failure");
+  assert.equal(output.submission, "none");
+  assert.equal(browser.usernameFocused, true);
+  assert.deepEqual(browser.apiMethods, []);
+});
+
+test("active signup title div with YourName triggers signup guard before username entry", async () => {
+  const fixture = createDependencies(undefined, true);
+  const browser = createAcceptancePage({signupFormVisible: true});
+  await useRealAcceptanceFlow(fixture, browser);
+
+  const result = await executeMode({mode: "acceptance", releaseRecord: "fixture"}, fixture.dependencies);
+  const output = JSON.parse(result.output);
+
+  assert.equal(result.exitCode, 1);
+  assert.equal(output.qaFailureCode, "signup-path-shown");
+  assert.equal(output.submission, "none");
+  assert.equal(browser.usernameFocused, false);
+  assert.deepEqual(browser.apiMethods, []);
+});
+
+test("active signup title div keeps triggering the guard after a name is entered", async () => {
+  const fixture = createDependencies(undefined, true);
+  const browser = createAcceptancePage({signupFormVisible: true, signupTitleText: "Ada Lovelace"});
+  await useRealAcceptanceFlow(fixture, browser);
+
+  const result = await executeMode({mode: "acceptance", releaseRecord: "fixture"}, fixture.dependencies);
+  const output = JSON.parse(result.output);
+
+  assert.equal(result.exitCode, 1);
+  assert.equal(output.qaFailureCode, "signup-path-shown");
+  assert.equal(output.submission, "none");
+  assert.equal(browser.usernameFocused, false);
   assert.deepEqual(browser.apiMethods, []);
 });
 
