@@ -2,12 +2,14 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"image/jpeg"
 	"os"
 	"path/filepath"
 	"regexp"
+	"strings"
 	"testing"
 
 	"github.com/gotd/td/tg"
@@ -74,6 +76,52 @@ func TestTurnstileProbeRecognizesOnlySignupCaptchaErrors(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestVerifyTurnstileProbeAcceptsTypedSignupRequiredResponse(t *testing.T) {
+	api := &fakeTurnstileProbeAPI{}
+	const username = "demo_probe_0123456789abcdef"
+
+	if err := verifyTurnstileWithAPI(context.Background(), api, username); err != nil {
+		t.Fatalf("verify Turnstile probe through CAPTCHA challenge: %v", err)
+	}
+	if got, want := strings.Join(api.calls, ","), "send-code,sign-in,sign-up"; got != want {
+		t.Fatalf("probe API calls = %q, want %q", got, want)
+	}
+	if api.sendCodeRequest == nil || api.sendCodeRequest.PhoneNumber != username {
+		t.Fatalf("probe send-code request = %+v, want username %q", api.sendCodeRequest, username)
+	}
+	if api.signInRequest == nil || api.signInRequest.PhoneNumber != username || api.signInRequest.PhoneCodeHash != "probe-hash" {
+		t.Fatalf("probe sign-in request = %+v, want username and returned code hash", api.signInRequest)
+	}
+	if api.signUpRequest == nil || api.signUpRequest.PhoneNumber != username || api.signUpRequest.PhoneCodeHash != "probe-hash" || len(api.signUpRequest.FirstName) != 65 {
+		t.Fatalf("probe sign-up request = %+v, want non-creating probe through CAPTCHA", api.signUpRequest)
+	}
+}
+
+type fakeTurnstileProbeAPI struct {
+	calls           []string
+	sendCodeRequest *tg.AuthSendCodeRequest
+	signInRequest   *tg.AuthSignInRequest
+	signUpRequest   *tg.AuthSignUpRequest
+}
+
+func (api *fakeTurnstileProbeAPI) AuthSendCode(_ context.Context, request *tg.AuthSendCodeRequest) (tg.AuthSentCodeClass, error) {
+	api.calls = append(api.calls, "send-code")
+	api.sendCodeRequest = request
+	return &tg.AuthSentCode{PhoneCodeHash: "probe-hash"}, nil
+}
+
+func (api *fakeTurnstileProbeAPI) AuthSignIn(_ context.Context, request *tg.AuthSignInRequest) (tg.AuthAuthorizationClass, error) {
+	api.calls = append(api.calls, "sign-in")
+	api.signInRequest = request
+	return &tg.AuthAuthorizationSignUpRequired{}, nil
+}
+
+func (api *fakeTurnstileProbeAPI) AuthSignUp(_ context.Context, request *tg.AuthSignUpRequest) (tg.AuthAuthorizationClass, error) {
+	api.calls = append(api.calls, "sign-up")
+	api.signUpRequest = request
+	return nil, &tgerr.Error{Message: "RECAPTCHA_CHECK_signup__site-key"}
 }
 
 func TestExpectedSeedMarkerCounts(t *testing.T) {

@@ -548,6 +548,12 @@ func newProbeUsername() (string, error) {
 	return "demo_probe_" + hex.EncodeToString(value), nil
 }
 
+type turnstileProbeAPI interface {
+	AuthSendCode(context.Context, *tg.AuthSendCodeRequest) (tg.AuthSentCodeClass, error)
+	AuthSignIn(context.Context, *tg.AuthSignInRequest) (tg.AuthAuthorizationClass, error)
+	AuthSignUp(context.Context, *tg.AuthSignUpRequest) (tg.AuthAuthorizationClass, error)
+}
+
 func verifyTurnstile(ctx context.Context, cfg apiConfig) error {
 	username, err := newProbeUsername()
 	if err != nil {
@@ -555,39 +561,43 @@ func verifyTurnstile(ctx context.Context, cfg apiConfig) error {
 	}
 	client := newTelegramClientAt(cfg, trustedProxyHost)
 	return client.Run(ctx, func(runCtx context.Context) error {
-		api := client.API()
-		sent, err := api.AuthSendCode(runCtx, &tg.AuthSendCodeRequest{PhoneNumber: username, APIID: appID, APIHash: appHash})
-		if err != nil {
-			return fmt.Errorf("request sign-up probe code: %w", err)
-		}
-		sentCode, ok := sent.(*tg.AuthSentCode)
-		if !ok {
-			return fmt.Errorf("unexpected sign-up probe response %T", sent)
-		}
-		_, err = api.AuthSignIn(runCtx, &tg.AuthSignInRequest{
-			PhoneNumber: username, PhoneCodeHash: sentCode.PhoneCodeHash, PhoneCode: "00000",
-		})
-		if !isSignUpRequired(err) {
-			if err == nil {
-				return errors.New("sign-up probe unexpectedly authenticated")
-			}
-			return fmt.Errorf("sign-up probe did not reach registration: %w", err)
-		}
-		// Keep the probe non-creating if the CAPTCHA gate is ever missing.
-		_, err = api.AuthSignUp(runCtx, &tg.AuthSignUpRequest{
-			PhoneNumber:   username,
-			PhoneCodeHash: sentCode.PhoneCodeHash,
-			FirstName:     strings.Repeat("x", 65),
-			LastName:      "Probe",
-		})
-		if !isSignupCaptchaRequired(err) {
-			if err == nil {
-				return errors.New("production sign-up gate accepted a probe account")
-			}
-			return fmt.Errorf("production sign-up gate returned an unexpected result: %w", err)
-		}
-		return nil
+		return verifyTurnstileWithAPI(runCtx, client.API(), username)
 	})
+}
+
+func verifyTurnstileWithAPI(ctx context.Context, api turnstileProbeAPI, username string) error {
+	sent, err := api.AuthSendCode(ctx, &tg.AuthSendCodeRequest{PhoneNumber: username, APIID: appID, APIHash: appHash})
+	if err != nil {
+		return fmt.Errorf("request sign-up probe code: %w", err)
+	}
+	sentCode, ok := sent.(*tg.AuthSentCode)
+	if !ok {
+		return fmt.Errorf("unexpected sign-up probe response %T", sent)
+	}
+	signIn, err := api.AuthSignIn(ctx, &tg.AuthSignInRequest{
+		PhoneNumber: username, PhoneCodeHash: sentCode.PhoneCodeHash, PhoneCode: "00000",
+	})
+	_, responseRequiresSignup := signIn.(*tg.AuthAuthorizationSignUpRequired)
+	if !isSignUpRequired(err) && !(err == nil && responseRequiresSignup) {
+		if err == nil {
+			return errors.New("sign-up probe unexpectedly authenticated")
+		}
+		return fmt.Errorf("sign-up probe did not reach registration: %w", err)
+	}
+	// Keep the probe non-creating if the CAPTCHA gate is ever missing.
+	_, err = api.AuthSignUp(ctx, &tg.AuthSignUpRequest{
+		PhoneNumber:   username,
+		PhoneCodeHash: sentCode.PhoneCodeHash,
+		FirstName:     strings.Repeat("x", 65),
+		LastName:      "Probe",
+	})
+	if !isSignupCaptchaRequired(err) {
+		if err == nil {
+			return errors.New("production sign-up gate accepted a probe account")
+		}
+		return fmt.Errorf("production sign-up gate returned an unexpected result: %w", err)
+	}
+	return nil
 }
 
 func isSignupCaptchaRequired(err error) bool {
