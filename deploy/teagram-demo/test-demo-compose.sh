@@ -277,6 +277,13 @@ if "rc != 0" not in cleanup or "PUBLIC_SERVICES_MAY_BE_RUNNING == 1" not in clea
     raise SystemExit("init-demo.sh: failed install must close a possibly public stack")
 if "demo_compose stop edge haproxy" not in cleanup:
     raise SystemExit("init-demo.sh: failed install cleanup must stop edge and HAProxy")
+assert_text_order(init, "init-demo.sh resume lock", [
+    "demo_lock_init() {",
+    "flock -x 9",
+    "demo_lock_init\n",
+    'MODE_FILE="$DEMO_AUTHORITY_DIR/mode.json"',
+    'if [[ -e "$MODE_FILE" || -L "$MODE_FILE" ]]; then',
+])
 assert_order(Path(sys.argv[2]), [
     "PUBLIC_SERVICES_MAY_BE_RUNNING=1",
     "demo_compose up -d haproxy edge",
@@ -306,6 +313,46 @@ if "demo_wait_migration demo_compose 'post-reset migrations'" not in Path(sys.ar
 if "demo_prune_deploy_backups()" not in Path(sys.argv[1]).read_text(encoding="utf-8"):
     raise SystemExit("wipe-weekly.sh: weekly reset must remove old deploy snapshots")
 PY
+
+INIT_LOCK_FUNCTION="$TMP_DIR/init-lock-function.sh"
+sed -n '/^demo_lock_init() {$/,/^}/p' "$SCRIPT_DIR/init-demo.sh" > "$INIT_LOCK_FUNCTION"
+cat > "$TMP_DIR/init-resume-lock-regression.sh" <<'BASH'
+set -Eeuo pipefail
+source "$INIT_LOCK_FUNCTION"
+DEMO_REPO_ROOT="$TMP_DIR/resume-lock-repo"
+LOCK_PATH="$DEMO_REPO_ROOT/.state/deploy.lock"
+mkdir -p "$(dirname "$LOCK_PATH")"
+exec 8> "$LOCK_PATH"
+flock -x 8
+(
+  exec 8>&-
+  : > "$TMP_DIR/resume-attempted"
+  demo_lock_init
+  : > "$TMP_DIR/resume-continued"
+) &
+resume_pid=$!
+for attempt in {1..100}; do
+  [[ -e "$TMP_DIR/resume-attempted" ]] && break
+  sleep 0.01
+done
+[[ -e "$TMP_DIR/resume-attempted" ]] || {
+  printf '%s\n' 'resume lock test did not start its child' >&2
+  kill "$resume_pid" 2>/dev/null || true
+  exit 1
+}
+sleep 0.1
+[[ ! -e "$TMP_DIR/resume-continued" ]] || {
+  printf '%s\n' 'resume continued while the wipe lock was held' >&2
+  exit 1
+}
+flock -u 8
+wait "$resume_pid"
+[[ -e "$TMP_DIR/resume-continued" ]]
+BASH
+env \
+  INIT_LOCK_FUNCTION="$INIT_LOCK_FUNCTION" \
+  TMP_DIR="$TMP_DIR" \
+  bash "$TMP_DIR/init-resume-lock-regression.sh"
 
 PRUNE_FUNCTION="$TMP_DIR/demo-prune-backups.sh"
 sed -n '/^demo_prune_deploy_backups() {$/,/^}/p' "$SCRIPT_DIR/wipe-weekly.sh" > "$PRUNE_FUNCTION"

@@ -3,6 +3,21 @@ set -Eeuo pipefail
 umask 077
 
 SCRIPT_DIR=$(cd -P "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+DEMO_REPO_ROOT=$(cd -P "$SCRIPT_DIR/../.." && pwd)
+
+demo_lock_init() {
+  local lock_path="$DEMO_REPO_ROOT/.state/deploy.lock"
+  mkdir -p "$(dirname "$lock_path")"
+  exec 9> "$lock_path"
+  flock -x 9
+}
+
+if [[ "$EUID" -ne 0 ]]; then
+  echo 'teagram-demo: must run as root on the demo LXC' >&2
+  exit 1
+fi
+demo_lock_init
+
 # shellcheck source=deploy/teagram-demo/demo-common.sh
 source "$SCRIPT_DIR/demo-common.sh"
 
@@ -26,7 +41,6 @@ cleanup() {
 }
 trap cleanup EXIT
 
-demo_require_root
 demo_require_env
 SEED_SCRIPT="$SCRIPT_DIR/seed-demo.sh"
 git -C "$DEMO_REPO_ROOT" ls-files --error-unmatch deploy/teagram-demo/seed-demo.sh >/dev/null 2>&1 ||
@@ -123,11 +137,6 @@ except OSError as error:
 if entries:
     raise SystemExit("demo blob path is not empty; refusing fresh installation")
 PY
-
-LOCK_PATH="$DEMO_REPO_ROOT/.state/deploy.lock"
-mkdir -p "$(dirname "$LOCK_PATH")"
-exec 9> "$LOCK_PATH"
-flock -x 9
 
 export TEAGRAMD_SOURCE_REVISION="$SHA"
 demo_compose build teagramd
