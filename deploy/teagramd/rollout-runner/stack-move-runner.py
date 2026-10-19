@@ -1743,7 +1743,13 @@ def inspect(args: argparse.Namespace) -> None:
         if not isinstance(target_project, str) or not target_project:
             raise MoveError("target Compose project name is missing")
         target["name"] = target_project
-        source_layout = layout(source, SOURCE_SERVER)
+        source_services = source.get("services")
+        source_server_name = (
+            TARGET_SERVER
+            if isinstance(source_services, dict) and TARGET_SERVER in source_services
+            else SOURCE_SERVER
+        )
+        source_layout = layout(source, source_server_name)
         target_server_name = TARGET_SERVER if TARGET_SERVER in target_services else SOURCE_SERVER
         target_layout = layout(target, target_server_name)
         print(json.dumps({
