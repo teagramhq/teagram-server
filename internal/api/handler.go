@@ -128,6 +128,10 @@ type handlers struct {
 	rateLimitDiscardEncryption store.RateLimitConfig
 	// registrationMode controls whether auth.signUp is available.
 	registrationMode config.RegistrationMode
+	// turnstileSiteKey is public and appears only in the challenge-required RPC
+	// error. The verifier secret stays inside the verifier.
+	turnstileSiteKey  string
+	turnstileVerifier SignUpTurnstileVerifier
 	// Sign-up rejection records are sampled independently by fixed reason class.
 	signUpRejectionLogs signUpRejectionSampler
 	// dialogFilterSync coordinates connection-local folder recovery with the
@@ -225,6 +229,24 @@ func NewWithPhotoThumbsAndDialogFilterSync(s *store.Store, dcID int, cfg *tg.Con
 // NewWithPhotoThumbsAndDialogFilterSyncAndUploadPartTTL builds an RPC handler
 // with the configured lifetime for uploadMedia grants.
 func NewWithPhotoThumbsAndDialogFilterSyncAndUploadPartTTL(s *store.Store, dcID int, cfg *tg.Config, log *slog.Logger, logLoginCodes bool, maxFileBytes int64, blobs blob.Store, maxUserStorageBytes int64, peers *peerhash.Deriver, photos *photohash.Deriver, rateLimits config.RateLimitsConfig, registrationMode config.RegistrationMode, dialogFilterSync *DialogFilterSync, photoThumbs *photothumb.Supervisor, uploadPartTTL time.Duration, rateLimitMetrics ...*store.NotificationMetrics) mtproto.Handler {
+	return newWithPhotoThumbsAndDialogFilterSyncAndUploadPartTTLAndTurnstile(
+		s, dcID, cfg, log, logLoginCodes, maxFileBytes, blobs, maxUserStorageBytes,
+		peers, photos, rateLimits, registrationMode, dialogFilterSync, photoThumbs,
+		uploadPartTTL, "", nil, rateLimitMetrics...,
+	)
+}
+
+// NewWithPhotoThumbsAndDialogFilterSyncAndUploadPartTTLAndTurnstile builds an
+// RPC handler with the configured sign-up verifier.
+func NewWithPhotoThumbsAndDialogFilterSyncAndUploadPartTTLAndTurnstile(s *store.Store, dcID int, cfg *tg.Config, log *slog.Logger, logLoginCodes bool, maxFileBytes int64, blobs blob.Store, maxUserStorageBytes int64, peers *peerhash.Deriver, photos *photohash.Deriver, rateLimits config.RateLimitsConfig, registrationMode config.RegistrationMode, dialogFilterSync *DialogFilterSync, photoThumbs *photothumb.Supervisor, uploadPartTTL time.Duration, turnstileSiteKey string, turnstileVerifier SignUpTurnstileVerifier, rateLimitMetrics ...*store.NotificationMetrics) mtproto.Handler {
+	return newWithPhotoThumbsAndDialogFilterSyncAndUploadPartTTLAndTurnstile(
+		s, dcID, cfg, log, logLoginCodes, maxFileBytes, blobs, maxUserStorageBytes,
+		peers, photos, rateLimits, registrationMode, dialogFilterSync, photoThumbs,
+		uploadPartTTL, turnstileSiteKey, turnstileVerifier, rateLimitMetrics...,
+	)
+}
+
+func newWithPhotoThumbsAndDialogFilterSyncAndUploadPartTTLAndTurnstile(s *store.Store, dcID int, cfg *tg.Config, log *slog.Logger, logLoginCodes bool, maxFileBytes int64, blobs blob.Store, maxUserStorageBytes int64, peers *peerhash.Deriver, photos *photohash.Deriver, rateLimits config.RateLimitsConfig, registrationMode config.RegistrationMode, dialogFilterSync *DialogFilterSync, photoThumbs *photothumb.Supervisor, uploadPartTTL time.Duration, turnstileSiteKey string, turnstileVerifier SignUpTurnstileVerifier, rateLimitMetrics ...*store.NotificationMetrics) mtproto.Handler {
 	if peers == nil {
 		panic("api: nil peer hash deriver")
 	}
@@ -283,6 +305,8 @@ func NewWithPhotoThumbsAndDialogFilterSyncAndUploadPartTTL(s *store.Store, dcID 
 		rateLimitRequestEncryption:   rateLimits.RequestEncryption,
 		rateLimitDiscardEncryption:   rateLimits.DiscardEncryption,
 		registrationMode:             registrationMode,
+		turnstileSiteKey:             turnstileSiteKey,
+		turnstileVerifier:            turnstileVerifier,
 		rateLimitMetrics:             denialMetrics,
 		dialogFilterSync:             dialogFilterSync,
 	}
@@ -500,6 +524,9 @@ func NewWithPhotoThumbsAndDialogFilterSyncAndUploadPartTTL(s *store.Store, dcID 
 	register(d, tg.PaymentsGetPremiumGiftCodeOptionsRequestTypeID, h.handleGetPremiumGiftCodeOptions)
 	register(d, tg.CommunitiesGetJoinedCommunitiesRequestTypeID, h.handleGetJoinedCommunities)
 	d.Fallback(mtproto.HandlerFunc(h.handleUnknownGated))
+	if h.turnstileVerifier != nil {
+		return mtproto.UnpackInvokeWithAfterMsgAndReCaptcha(d, h.handleInvokeAfterMsgRefusal)
+	}
 	return mtproto.UnpackInvokeWithAfterMsg(d, h.handleInvokeAfterMsgRefusal)
 }
 

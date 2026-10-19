@@ -56,6 +56,9 @@ Configuration is read from environment variables in `internal/config/config.go`:
 | `TG_LOG_LOGIN_CODES`| `false`          | Legacy login-code diagnostic. It is not used by Teagram username/password sign-in; leave it disabled. A non-boolean value fails startup |
 | `TG_REGISTRATION`   | `closed`         | Accepted values are `closed`, `invite`, and `open`. `closed` rejects `auth.signUp`, `invite` requires an operator-issued invite, and `open` admits usernames without one. An unrecognized value fails startup. Sign-in for accounts that already exist is unaffected by this setting |
 | `TG_PUBLIC_REGISTRATION` | `closed` | Registration mode for the public WebSocket listener only. Defaults to `closed` even when `TG_REGISTRATION=open`; use `invite` to require an operator-issued invite |
+| `TG_TURNSTILE_SITE_KEY` | *(unset)* | Public Cloudflare Turnstile widget key. Required together with one secret source to enable the `auth.signUp` challenge |
+| `TG_TURNSTILE_SECRET_KEY` | *(unset)* | Private Siteverify key supplied directly through the environment; prefer the file form |
+| `TG_TURNSTILE_SECRET_KEY_FILE` | *(unset)* | Preferred file containing the Siteverify key. The gate stays disabled when both secret sources and the site key are unset |
 | `TG_ADMIN_LISTEN_ADDR` | *(unset)* | Enables the separate authenticated admin HTTP listener; must be set with `TG_ADMIN_TOKEN_HASH` and should remain on an operator-only network |
 | `TG_ADMIN_TOKEN_HASH` | *(unset)* | Lowercase SHA-256 hex digest of the raw admin token; never put the raw token in configuration or a URL. See `docs/observability.md` |
 | `TG_ADMIN_ORIGIN` | *(unset)* | Fixed origin for admin login/logout behind a proxy; canonical lowercase ASCII HTTPS origin, or HTTP only for localhost/loopback. Unset, empty, or whitespace-only derives it from the listener. See `docs/observability.md` |
@@ -89,6 +92,13 @@ origin allowlist. Its registration mode is bound to the listener in the server;
 client headers and RPC fields cannot select the tailnet policy. `help.getAppConfig`
 reports the mode of the listener that accepted the connection. Existing
 accounts can sign in through either listener.
+
+When Turnstile is enabled, the server checks every `auth.signUp` token with
+Cloudflare before charging the sign-up IP limit. It requires the `signup` action
+and the `web.teagram.io` hostname; login and all other RPC methods remain
+ungated. Verification failures ask the client to retry with a fresh challenge.
+Startup rejects Cloudflare's always-pass test secret, and a configured secret
+requires the public site key so the server can return the challenge error.
 
 Before asking for registration details, an unauthenticated client may call
 `help.getAppConfig`. The `help.appConfig` response keeps its standard TL shape;

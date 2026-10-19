@@ -157,6 +157,13 @@ func (r *SignUpTestRunner) SetRegistrationModeForTest(mode config.RegistrationMo
 	r.handler.registrationMode = mode
 }
 
+// SetTurnstileVerifierForTest configures the fake challenge verifier used by
+// sign-up tests.
+func (r *SignUpTestRunner) SetTurnstileVerifierForTest(siteKey string, verifier SignUpTurnstileVerifier) {
+	r.handler.turnstileSiteKey = siteKey
+	r.handler.turnstileVerifier = verifier
+}
+
 // SetAuthKeyIDForTest changes the request key without resetting sampler state.
 func (r *SignUpTestRunner) SetAuthKeyIDForTest(authKeyID [8]byte) {
 	r.authKeyID = authKeyID
@@ -174,6 +181,24 @@ func (r *SignUpTestRunner) SignUp(req *tg.AuthSignUpRequest) (bin.Encoder, error
 		return nil, err
 	}
 	return r.SignUpBody(&buf)
+}
+
+// SignUpWithToken dispatches a sign-up with an already-unwrapped challenge
+// token. fromProxyV2 controls whether the fixed request address is trusted for
+// Siteverify's optional remoteip field.
+func (r *SignUpTestRunner) SignUpWithToken(req *tg.AuthSignUpRequest, token string, fromProxyV2 bool) (bin.Encoder, error) {
+	var buf bin.Buffer
+	if err := req.Encode(&buf); err != nil {
+		return nil, err
+	}
+	return r.handler.handleSignUp(&mtproto.Request{
+		Ctx:                   context.Background(),
+		AuthKeyID:             r.authKeyID,
+		ClientAddr:            r.addr,
+		ClientAddrFromProxyV2: fromProxyV2,
+		ReCaptchaToken:        token,
+		Buf:                   &buf,
+	})
 }
 
 // SignUpBody dispatches a raw request body with a background context.

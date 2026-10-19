@@ -776,8 +776,17 @@ func runAtBlobModePath(log *slog.Logger, blobModePath string) error {
 	tgcfg.MeURLPrefix = cfg.PublicLinkPrefix
 	notifyMetrics := store.NewNotificationMetrics()
 	dialogFilterSync := api.NewDialogFilterSync()
+	var turnstileVerifier api.SignUpTurnstileVerifier
+	if cfg.Turnstile.Enabled() {
+		turnstileVerifier = api.NewTurnstileVerifier(cfg.Turnstile.SecretKey)
+	}
 	newHandler := func(registrationMode config.RegistrationMode) mtproto.Handler {
-		return api.NewWithPhotoThumbsAndDialogFilterSyncAndUploadPartTTL(st, cfg.DCID, tgcfg, log, cfg.LogLoginCodes, cfg.MaxFileBytes, blobs, cfg.MaxUserStorageBytes, peers, photos, cfg.RateLimits, registrationMode, dialogFilterSync, photoThumbs, cfg.UploadPartTTL, notifyMetrics)
+		return api.NewWithPhotoThumbsAndDialogFilterSyncAndUploadPartTTLAndTurnstile(
+			st, cfg.DCID, tgcfg, log, cfg.LogLoginCodes, cfg.MaxFileBytes, blobs,
+			cfg.MaxUserStorageBytes, peers, photos, cfg.RateLimits, registrationMode,
+			dialogFilterSync, photoThumbs, cfg.UploadPartTTL, cfg.Turnstile.SiteKey,
+			turnstileVerifier, notifyMetrics,
+		)
 	}
 	handler := newHandler(cfg.RegistrationMode)
 	var publicHandler mtproto.Handler

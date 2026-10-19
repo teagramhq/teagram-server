@@ -210,15 +210,16 @@ func (s *Server) rpcHandle(ctx context.Context, c *Conn, b *bin.Buffer, userID i
 	c.prefetchPeerFrame()
 
 	return s.handleWithHandler(c, &Request{
-		AuthKeyID:   c.authKey.ID,
-		UserID:      userID,
-		Provisional: provisional,
-		ClientAddr:  clientAddr,
-		SessionID:   msg.SessionID,
-		MsgID:       msg.MessageID,
-		seqNo:       int(msg.SeqNo),
-		Buf:         b,
-		Ctx:         ctx,
+		AuthKeyID:             c.authKey.ID,
+		UserID:                userID,
+		Provisional:           provisional,
+		ClientAddr:            clientAddr,
+		ClientAddrFromProxyV2: s.proxyV2 != nil,
+		SessionID:             msg.SessionID,
+		MsgID:                 msg.MessageID,
+		seqNo:                 int(msg.SeqNo),
+		Buf:                   b,
+		Ctx:                   ctx,
 	}, handler)
 }
 
@@ -373,6 +374,8 @@ func (s *Server) handleWithHandler(c *Conn, req *Request, handler Handler) (err 
 				UserID:                req.UserID,
 				Provisional:           req.Provisional,
 				ClientAddr:            req.ClientAddr,
+				ClientAddrFromProxyV2: req.ClientAddrFromProxyV2,
+				ReCaptchaToken:        req.ReCaptchaToken,
 				AuthorizationMetadata: req.AuthorizationMetadata,
 				SessionID:             req.SessionID,
 				MsgID:                 m.ID,
