@@ -586,6 +586,36 @@ class BlobModeStateTests(unittest.TestCase):
             "teagramd", blob_mode.MODE_TARGET, blob_mode.BLOB_TARGET, blob_mode.KEY_TARGET,
         )
 
+    def test_initial_local_environment_ignores_only_disabled_public_websocket_defaults(self) -> None:
+        baseline = {
+            "TG_RSA_KEY_PATH": blob_mode.IMAGE_ENV_DEFAULTS["TG_RSA_KEY_PATH"],
+            "TG_BLOB_DIR": blob_mode.BLOB_TARGET,
+            "TG_SYNTHETIC_FLAG": "fixture",
+        }
+        with_disabled_defaults = {**baseline, **blob_mode.INITIAL_LOCAL_DISABLED_ENV}
+        self.assertEqual(
+            blob_mode.teagramd_environment_sha256(baseline),
+            blob_mode.teagramd_environment_sha256(with_disabled_defaults),
+        )
+
+        active_values = {
+            "TG_PUBLIC_WEBSOCKET_LISTEN_ADDR": "0.0.0.0:2444",
+            "TG_PUBLIC_REGISTRATION": "open",
+            "TG_PUBLIC_WEBSOCKET_ALLOWED_ORIGINS": "https://example.invalid",
+        }
+        for key, disabled_value in blob_mode.INITIAL_LOCAL_DISABLED_ENV.items():
+            with self.subTest(key=key):
+                active = {**baseline, key: active_values[key]}
+                self.assertNotEqual(
+                    blob_mode.teagramd_environment_sha256(baseline),
+                    blob_mode.teagramd_environment_sha256(active),
+                )
+                non_default = {**baseline, key: disabled_value + "changed"}
+                self.assertNotEqual(
+                    blob_mode.teagramd_environment_sha256(baseline),
+                    blob_mode.teagramd_environment_sha256(non_default),
+                )
+
     def test_initial_local_inventory_accepts_live_telegramd_layout(self) -> None:
         # The live stack keeps its historical names until the stack move.
         self.assert_initial_local_inventory(

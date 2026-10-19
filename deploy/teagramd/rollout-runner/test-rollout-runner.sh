@@ -3402,7 +3402,7 @@ fi
 make_fixture public-websocket-defaults public-websocket-defaults
 status=$(run_fixture public-websocket-defaults)
 root=$(cat "$TMP/public-websocket-defaults-root-path")
-if [ "$status" = 0 ] && grep -q $'preflight\tconfig_sha256\t.*\tpass' "$root".target/preflight-comparisons.tsv && \
+if [ "$status" = 0 ] && grep -q $'preflight\tselected_render_config_sha256\t.*\tpass' "$root".target/preflight-comparisons.tsv && \
    grep -q '^docker compose up -d --no-build --no-deps teagramd$' "$TMP/public-websocket-defaults-events"; then
   pass 'disabled public WebSocket Compose defaults can be added without live config drift'
 else
@@ -3415,7 +3415,7 @@ fi
 make_fixture public-websocket-enabled public-websocket-enabled
 status=$(run_fixture public-websocket-enabled)
 root=$(cat "$TMP/public-websocket-enabled-root-path")
-if [ "$status" != 0 ] && grep -q $'preflight\tconfig_sha256\t.*\tfail' "$root".target/preflight-comparisons.tsv && \
+if [ "$status" != 0 ] && grep -q $'preflight\tselected_render_config_sha256\t.*\tfail' "$root".target/preflight-comparisons.tsv && \
    ! grep -q '^docker compose up -d' "$TMP/public-websocket-enabled-events" && \
    grep -q 'target was not started' "$TMP/public-websocket-enabled.stderr"; then
   pass 'enabled public WebSocket Compose settings remain rejected before startup'

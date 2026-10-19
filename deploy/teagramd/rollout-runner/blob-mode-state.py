@@ -43,6 +43,11 @@ STACK_MOVE_TARGET_VOLUMES = {
 NON_SERVING_SERVICES = {"rustfs", "rustfs-init", "migrate", "blob-migrate", "blob-restore"}
 DATABASE_SERVICES = {"postgres"}
 INITIAL_LOCAL_GUARD_ENV = {"TG_REPLICA_COUNT": "1", "TG_CLIENT_ADDR_TRUST": "socket"}
+INITIAL_LOCAL_DISABLED_ENV = {
+    "TG_PUBLIC_WEBSOCKET_LISTEN_ADDR": "",
+    "TG_PUBLIC_REGISTRATION": "closed",
+    "TG_PUBLIC_WEBSOCKET_ALLOWED_ORIGINS": "",
+}
 IMAGE_ENV_DEFAULTS = {"TG_RSA_KEY_PATH": "/var/lib/teagramd/server_key.pem"}
 # In-container paths per serving service name. The moved teagramd service may
 # retain the legacy blob path while its copied local authority remains active.
@@ -293,10 +298,11 @@ def image_environment_defaults(layout: dict[str, str]) -> dict[str, str]:
 
 
 def teagramd_environment_sha256(values: dict[str, str]) -> str:
-    # These settings intentionally change as part of the initial guarded rollout.
+    # These settings change during initial rollout; exact disabled public defaults are inert.
     comparable = {
         key: value for key, value in values.items()
         if key not in INITIAL_LOCAL_GUARD_ENV
+        and INITIAL_LOCAL_DISABLED_ENV.get(key) != value
     }
     encoded = json.dumps(comparable, sort_keys=True, separators=(",", ":")).encode("utf-8")
     return hashlib.sha256(encoded).hexdigest()
