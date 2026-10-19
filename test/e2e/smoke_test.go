@@ -97,6 +97,14 @@ func TestSmoke(t *testing.T) {
 		t.Parallel()
 		testSmokePhotoMedia(t)
 	})
+	t.Run("profile-photo-upload", func(t *testing.T) {
+		t.Parallel()
+		testSmokeProfilePhotoUpload(t)
+	})
+	t.Run("profile-bio", func(t *testing.T) {
+		t.Parallel()
+		testSmokeProfileBio(t)
+	})
 	t.Run("upload-media", func(t *testing.T) {
 		t.Parallel()
 		testSmokeUploadMedia(t)
@@ -3898,7 +3906,7 @@ func testSmokeFullUserProfile(t *testing.T) {
 		t.Fatalf("full user claims a profile photo the server does not store")
 	}
 	if _, ok := searchOnly.FullUser.GetAbout(); ok {
-		t.Fatalf("full user claims a biography the server discards on write")
+		t.Fatalf("full user claims an unset biography")
 	}
 
 	// A forged hash is refused without saying whether B exists.

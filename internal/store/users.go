@@ -359,6 +359,28 @@ func (s *Store) UpdateProfile(ctx context.Context, userID int64, firstName, last
 	return nil
 }
 
+// UpdateUserAbout writes the account's public profile biography. An empty
+// string clears the biography; about is rendered only when it is non-empty.
+func (s *Store) UpdateUserAbout(ctx context.Context, userID int64, about string) error {
+	n, err := s.q.UpdateUserAbout(ctx, db.UpdateUserAboutParams{ID: userID, About: about})
+	if err != nil {
+		return fmt.Errorf("update user about: %w", err)
+	}
+	if n == 0 {
+		return fmt.Errorf("update user about: user %d not found", userID)
+	}
+	return nil
+}
+
+// UserAbout returns the public biography for one account.
+func (s *Store) UserAbout(ctx context.Context, userID int64) (string, error) {
+	about, err := s.q.UserAboutByID(ctx, userID)
+	if err != nil {
+		return "", fmt.Errorf("load user about: %w", err)
+	}
+	return about, nil
+}
+
 // DialogPartners returns the distinct set of user IDs that share a 1:1 dialog
 // row with userID. Used as the fan-out target set for status changes.
 func (s *Store) DialogPartners(ctx context.Context, userID int64) ([]int64, error) {

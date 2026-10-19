@@ -163,6 +163,8 @@ type downloadLocation struct {
 	accessHash      int64
 	thumbSize       string
 	photo           bool
+	peerPhoto       bool
+	peer            tg.InputPeerClass
 	galleryOwnerID  int64
 	hasGalleryOwner bool
 }
@@ -193,6 +195,8 @@ func parseDownloadLocation(loc tg.InputFileLocationClass) (downloadLocation, err
 			galleryOwnerID:  ownerID,
 			hasGalleryOwner: hasGalleryOwner,
 		}, nil
+	case *tg.InputPeerPhotoFileLocation:
+		return downloadLocation{fileID: l.PhotoID, peerPhoto: true, peer: l.Peer}, nil
 	default:
 		return downloadLocation{}, errLocationInvalid
 	}
@@ -368,6 +372,9 @@ func (h *handlers) handleGetFile(r *mtproto.Request) (bin.Encoder, error) {
 	}
 	if err := checkDownloadWindow(req.Offset, req.Limit); err != nil {
 		return nil, err
+	}
+	if loc.peerPhoto {
+		return h.handleGetPeerProfilePhotoFile(r, loc.peer, loc.fileID, req.Offset, req.Limit)
 	}
 	missingBlobIsFault := true
 	gate := h.messageFileGate(loc)

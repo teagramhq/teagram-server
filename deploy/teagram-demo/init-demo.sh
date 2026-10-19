@@ -109,10 +109,11 @@ if [[ -e "$MODE_FILE" || -L "$MODE_FILE" ]]; then
     --owner-username "$DEMO_SEED_OWNER_USERNAME" \
     --owner-password-file "$DEMO_SEED_PASSWORD_FILE"
   "$SEED_SCRIPT" --verify-seed --endpoint teagramd:2443
-  demo_compose up -d teagramd
-  "$SEED_SCRIPT" --verify-turnstile --endpoint teagramd:2443
+  "$SCRIPT_DIR/test-seed-compose.sh"
   PUBLIC_SERVICES_MAY_BE_RUNNING=1
-  demo_compose up -d haproxy edge
+  demo_compose up -d --wait --wait-timeout 120 haproxy
+  "$SEED_SCRIPT" --verify-turnstile --endpoint haproxy:2443
+  demo_compose up -d edge
   python3 "$SCRIPT_DIR/smoke.py" "$DEMO_STATE_DIR/client.json"
   echo "demo install resumed and seeded at $SHA"
   exit 0
@@ -140,6 +141,7 @@ PY
 
 export TEAGRAMD_SOURCE_REVISION="$SHA"
 demo_compose build teagramd
+"$SEED_SCRIPT" --check
 IMAGE_REVISION=$(docker image inspect --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' teagramd:local)
 [[ "$IMAGE_REVISION" == "$SHA" ]] || demo_fail 'built teagramd image does not identify the selected main commit'
 
@@ -196,9 +198,10 @@ demo_prepare_seed_owner "$TMP_DIR"
   --owner-username "$DEMO_SEED_OWNER_USERNAME" \
   --owner-password-file "$DEMO_SEED_PASSWORD_FILE"
 "$SEED_SCRIPT" --verify-seed --endpoint teagramd:2443
-demo_compose up -d teagramd
-"$SEED_SCRIPT" --verify-turnstile --endpoint teagramd:2443
+"$SCRIPT_DIR/test-seed-compose.sh"
 PUBLIC_SERVICES_MAY_BE_RUNNING=1
-demo_compose up -d haproxy edge
+demo_compose up -d --wait --wait-timeout 120 haproxy
+"$SEED_SCRIPT" --verify-turnstile --endpoint haproxy:2443
+demo_compose up -d edge
 python3 "$SCRIPT_DIR/smoke.py" "$DEMO_STATE_DIR/client.json"
 echo "demo install ready sha=$SHA rsa_fingerprint=$FINGERPRINT seeded=true"

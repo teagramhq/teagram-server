@@ -1,0 +1,5 @@
+# source: gotd v0.162.0 request captured by test/e2e/client_request_fixtures_test.go
+body: { account_updateProfile flags:#
+  flags: 4 [#],
+  about: A fictional astronomer charting quiet northern skies. [STRING],
+},

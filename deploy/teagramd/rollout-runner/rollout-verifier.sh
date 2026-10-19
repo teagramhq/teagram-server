@@ -95,6 +95,49 @@ verify_changed_container_environment() {
   return 0
 }
 
+verify_public_websocket_container_environment() {
+  local inspect_json=$1
+  if ! printf '%s\n' "$inspect_json" | jq -e '
+    def item: if type == "array" then .[0] else . end;
+    def safe_setting($env; $name; $allowed):
+      [$env[]
+       | select(type == "string" and startswith($name + "="))
+       | .[($name | length) + 1:]] as $values
+      | ($values | length) <= 1 and
+        all($values[]; . as $value | any($allowed[]; . == $value));
+    (item.Config.Env // null) as $env
+    | if ($env | type) != "array" then false else
+        safe_setting($env; "TG_PUBLIC_WEBSOCKET_LISTEN_ADDR"; [""]) and
+        safe_setting($env; "TG_PUBLIC_REGISTRATION"; ["closed"]) and
+        safe_setting($env; "TG_PUBLIC_WEBSOCKET_ALLOWED_ORIGINS"; [""])
+      end
+  ' >/dev/null; then
+    printf '%s\n' 'container has unsafe public websocket environment settings' >&2
+    return 1
+  fi
+  return 0
+}
+
+verify_public_websocket_compose_environment() {
+  local compose_json=$1
+  if ! printf '%s\n' "$compose_json" | jq -e '
+    def safe_setting($env; $name; $allowed):
+      if ($env | has($name) | not) then true
+      elif ($env[$name] | type) != "string" then false
+      else any($allowed[]; . == $env[$name]) end;
+    .services.teagramd.environment as $env
+    | if ($env | type) != "object" then false else
+        safe_setting($env; "TG_PUBLIC_WEBSOCKET_LISTEN_ADDR"; [""]) and
+        safe_setting($env; "TG_PUBLIC_REGISTRATION"; ["closed"]) and
+        safe_setting($env; "TG_PUBLIC_WEBSOCKET_ALLOWED_ORIGINS"; [""])
+      end
+  ' >/dev/null; then
+    printf '%s\n' 'resolved Compose has unsafe public websocket environment settings' >&2
+    return 1
+  fi
+  return 0
+}
+
 canonical_blob_mode_source() {
   local checkout_path state_dir mode_source
   checkout_path=$(readlink -f "$ROLLOUT_CHECKOUT_PATH") || return 1
@@ -125,6 +168,11 @@ snapshot_from_json() {
   if [ ! -f "$env_file" ] || [ "$(stat -c %a "$env_file")" != 600 ]; then
     printf '%s\n' 'environment file must be a regular mode-0600 file' >&2
     return 1
+  fi
+
+  verify_public_websocket_container_environment "$inspect_json" || return 1
+  if [ "$compose_source" = selected-compose-render ]; then
+    verify_public_websocket_compose_environment "$compose_json" || return 1
   fi
 
   mode_source=$(canonical_blob_mode_source) || return 1
@@ -196,15 +244,11 @@ snapshot_from_json() {
     def item: if type == "array" then .[0] else . end;
     (item.Config.Env // [])
     | if type != "array" then error("container environment must be an array") else
-        # These exact disabled defaults are absent from containers predating
-        # the knobs, so keep them out of the runtime equivalence digest too.
         map(select(type != "string" or (startswith("TG_REPLICA_COUNT=") | not)))
         | map(select(type != "string" or (startswith("TG_CLIENT_ADDR_TRUST=") | not)))
+        | map(select(type != "string" or ((split("=")[0]) as $key | (["TG_PUBLIC_WEBSOCKET_LISTEN_ADDR", "TG_PUBLIC_REGISTRATION", "TG_PUBLIC_WEBSOCKET_ALLOWED_ORIGINS"] | index($key) == null))))
         | map(select(type != "string" or ((split("=")[0]) as $key | any($added[]; . == $key) | not)))
         | map(select(type != "string" or ((split("=")[0]) as $key | any($changed[]; . == $key) | not)))
-        | map(select((. == "TG_PUBLIC_WEBSOCKET_LISTEN_ADDR=" or
-                      . == "TG_PUBLIC_REGISTRATION=closed" or
-                      . == "TG_PUBLIC_WEBSOCKET_ALLOWED_ORIGINS=") | not))
         | sort
       end
   ')
@@ -265,19 +309,13 @@ snapshot_from_json() {
           networks:(($s.networks // {}) | if type == "object" then keys else . end | sort)
         }
     ')
-    # These public WebSocket settings were added with disabled defaults. Ignore
-    # only those exact values so introducing the knobs does not look like live
-    # config drift; enabled values remain part of the pinned Compose digest.
     canonical_compose=$(printf '%s' "$compose_json" | jq -ceS --arg mode_source "$mode_source" '
       if (.services.teagramd.environment | type) != "object" then error("teagramd environment must be an object") else
-        .services.teagramd.environment |= del(.TG_REPLICA_COUNT, .TG_CLIENT_ADDR_TRUST)
+        .services.teagramd.environment |= del(
+          .TG_REPLICA_COUNT, .TG_CLIENT_ADDR_TRUST,
+          .TG_PUBLIC_WEBSOCKET_LISTEN_ADDR, .TG_PUBLIC_REGISTRATION,
+          .TG_PUBLIC_WEBSOCKET_ALLOWED_ORIGINS)
       end
-      | .services.teagramd.environment |= with_entries(
-          select(
-            ((.key == "TG_PUBLIC_WEBSOCKET_LISTEN_ADDR" and .value == "") or
-             (.key == "TG_PUBLIC_REGISTRATION" and .value == "closed") or
-             (.key == "TG_PUBLIC_WEBSOCKET_ALLOWED_ORIGINS" and .value == "")) | not
-          ))
       | .services |= with_entries(
           if (.key | startswith("teagramd")) and (.value.volumes | type) == "array" then
             .value.volumes |= map(select((.type == "bind" and .source == $mode_source and

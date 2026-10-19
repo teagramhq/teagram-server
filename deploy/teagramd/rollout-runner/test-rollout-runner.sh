@@ -3415,9 +3415,9 @@ fi
 make_fixture public-websocket-enabled public-websocket-enabled
 status=$(run_fixture public-websocket-enabled)
 root=$(cat "$TMP/public-websocket-enabled-root-path")
-if [ "$status" != 0 ] && grep -q $'preflight\tselected_render_config_sha256\t.*\tfail' "$root".target/preflight-comparisons.tsv && \
+if [ "$status" != 0 ] && grep -q 'reason=resolved-config-capture-failed' "$root".target/preflight-failure.txt && \
    ! grep -q '^docker compose up -d' "$TMP/public-websocket-enabled-events" && \
-   grep -q 'target was not started' "$TMP/public-websocket-enabled.stderr"; then
+   grep -q 'resolved Compose preflight capture failed; target was not started' "$TMP/public-websocket-enabled.stderr"; then
   pass 'enabled public WebSocket Compose settings remain rejected before startup'
 else
   printf 'public_websocket_enabled_status=%s\npublic_websocket_enabled_stderr=%s\n' \
