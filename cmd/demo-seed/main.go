@@ -33,6 +33,7 @@ const (
 	defaultClientConfig      = "/run/teagram-demo/client.json"
 	defaultOwnerPasswordFile = "/run/secrets/seed-owner-password"
 	defaultAccountInventory  = "/run/secrets/demo-accounts/inventory.json"
+	defaultActivityInventory = "/run/secrets/demo-activity-inventory.json"
 	trustedProxyHost         = "haproxy"
 	trustedProxyEndpoint     = trustedProxyHost + ":2443"
 	appID                    = 1
@@ -52,8 +53,12 @@ type seedOptions struct {
 	seed            bool
 	verifySeed      bool
 	verifyTurnstile bool
+	activity        bool
 	endpoint        string
 	ownerUsername   string
+	activityTarget  string
+	maxActionsHour  int
+	minActivityGap  time.Duration
 }
 
 type apiConfig struct {
@@ -80,6 +85,11 @@ func run(args []string) error {
 	}
 	if options.check {
 		return nil
+	}
+	if options.activity {
+		if err := requireRoot(); err != nil {
+			return err
+		}
 	}
 
 	cfg, err := readClientConfig()
@@ -118,8 +128,18 @@ func run(args []string) error {
 		return verifySeed(ctx, cfg, options, ownerPassword, inventory)
 	case options.verifyTurnstile:
 		return verifyTurnstile(ctx, cfg)
+	case options.activity:
+		account, ok := seededActivityAccount()
+		if !ok {
+			return errors.New("seeded activity account is missing")
+		}
+		password, err := readActivityPasswordAt(defaultActivityInventory, account)
+		if err != nil {
+			return err
+		}
+		return runDemoActivity(ctx, cfg, options, account, password)
 	default:
-		return errors.New("select one of --check, --seed, --verify-seed, or --verify-turnstile")
+		return errors.New("select one of --check, --seed, --verify-seed, --verify-turnstile, or --activity")
 	}
 }
 
@@ -131,8 +151,12 @@ func parseOptions(args []string) (seedOptions, error) {
 	flags.BoolVar(&options.seed, "seed", false, "create demo accounts and content")
 	flags.BoolVar(&options.verifySeed, "verify-seed", false, "verify the seeded public content")
 	flags.BoolVar(&options.verifyTurnstile, "verify-turnstile", false, "verify production sign-up challenge enforcement")
+	flags.BoolVar(&options.activity, "activity", false, "post one fixed demo activity message")
 	flags.StringVar(&options.endpoint, "endpoint", defaultEndpoint, "internal MTProto service endpoint")
 	flags.StringVar(&options.ownerUsername, "owner-username", "demo_seed_owner", "seed-owner login name")
+	flags.StringVar(&options.activityTarget, "target", "river", "seeded megagroup slug for scheduled activity")
+	flags.IntVar(&options.maxActionsHour, "max-actions-per-hour", 6, "activity ceiling, from 1 through 6 actions per hour")
+	flags.DurationVar(&options.minActivityGap, "min-interval", 5*time.Minute, "minimum time between activity actions (at least 5m)")
 	if err := flags.Parse(args); err != nil {
 		return seedOptions{}, err
 	}
@@ -140,16 +164,29 @@ func parseOptions(args []string) (seedOptions, error) {
 		return seedOptions{}, errors.New("unexpected positional arguments")
 	}
 	selected := 0
-	for _, value := range []bool{options.check, options.seed, options.verifySeed, options.verifyTurnstile} {
+	for _, value := range []bool{options.check, options.seed, options.verifySeed, options.verifyTurnstile, options.activity} {
 		if value {
 			selected++
 		}
 	}
 	if selected != 1 {
-		return seedOptions{}, errors.New("select exactly one of --check, --seed, --verify-seed, or --verify-turnstile")
+		return seedOptions{}, errors.New("select exactly one of --check, --seed, --verify-seed, --verify-turnstile, or --activity")
 	}
 	if (options.seed || options.verifySeed) && options.ownerUsername != "demo_seed_owner" {
 		return seedOptions{}, errors.New("seed owner must use the demo_seed_owner account")
+	}
+	if options.activity {
+		switch options.activityTarget {
+		case "river", "garden", "workshop":
+		default:
+			return seedOptions{}, errors.New("activity target must be river, garden, or workshop")
+		}
+		if options.maxActionsHour < 1 || options.maxActionsHour > 6 {
+			return seedOptions{}, errors.New("activity limit must be between 1 and 6 actions per hour")
+		}
+		if options.minActivityGap < 5*time.Minute {
+			return seedOptions{}, errors.New("activity minimum interval must be at least 5m")
+		}
 	}
 	return options, nil
 }
@@ -355,12 +392,20 @@ func newTelegramClient(cfg apiConfig) *telegram.Client {
 }
 
 func newTelegramClientAt(cfg apiConfig, host string) *telegram.Client {
+	return newTelegramClientWithStorageAt(cfg, host, &session.StorageMemory{})
+}
+
+func newTelegramClientWithStorage(cfg apiConfig, storage session.Storage) *telegram.Client {
+	return newTelegramClientWithStorageAt(cfg, defaultEndpointHost, storage)
+}
+
+func newTelegramClientWithStorageAt(cfg apiConfig, host string, storage session.Storage) *telegram.Client {
 	return telegram.NewClient(appID, appHash, telegram.Options{
 		DC:             cfg.dcID,
 		DCList:         dcs.List{Options: []tg.DCOption{{ID: cfg.dcID, IPAddress: host, Port: 2443}}},
 		PublicKeys:     []telegram.PublicKey{{RSA: cfg.key}},
 		Resolver:       dcs.Plain(dcs.PlainOptions{}),
-		SessionStorage: &session.StorageMemory{},
+		SessionStorage: storage,
 	})
 }
 

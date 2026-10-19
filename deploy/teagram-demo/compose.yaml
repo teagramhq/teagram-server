@@ -141,6 +141,25 @@ services:
     networks: [backend]
     logging: *logging
 
+  demo-activity:
+    image: teagramd:local
+    profiles: [activity]
+    entrypoint: ["/usr/local/bin/demo-seed"]
+    user: "0:0"
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    volumes:
+      - type: bind
+        source: ./.state/teagram-demo/client.json
+        target: /run/teagram-demo/client.json
+        read_only: true
+      - type: bind
+        source: /var/lib/teagram-demo-activity
+        target: /var/lib/teagram-demo-activity
+    networks: [backend]
+    logging: *logging
+
   turnstile-egress:
     image: mirror.gcr.io/ubuntu/squid:7.2-26.04_edge@sha256:f6843088c0eab9e63ecb8a1c215d939cd97d0370611bb2bdb65c4a8e48b3c3eb
     platform: linux/amd64

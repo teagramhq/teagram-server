@@ -166,6 +166,77 @@ jq -e '
   and (.services["demo-probe"].environment // {} | length) == 0
   and (.services["demo-probe"].networks | keys) == ["backend"]
 ' "$TMP_DIR/seed-profile.json" >/dev/null
+
+env -u COMPOSE_FILE -u COMPOSE_PROJECT_NAME -u COMPOSE_PROFILES \
+  -u TEAGRAM_DEMO_TURNSTILE_SITE_KEY -u TEAGRAM_DEMO_TURNSTILE_SECRET_KEY_FILE \
+  "${compose[@]}" --profile activity config --format json > "$TMP_DIR/activity-profile.json"
+jq -e '
+  .services["demo-activity"].profiles == ["activity"]
+  and .services["demo-activity"].image == "teagramd:local"
+  and .services["demo-activity"].entrypoint == ["/usr/local/bin/demo-seed"]
+  and .services["demo-activity"].user == "0:0"
+  and .services["demo-activity"].read_only == true
+  and .services["demo-activity"].cap_drop == ["ALL"]
+  and .services["demo-activity"].security_opt == ["no-new-privileges:true"]
+  and (.services["demo-activity"].networks | keys) == ["backend"]
+  and (.services["demo-activity"].ports // [] | length) == 0
+  and (.services["demo-activity"].environment // {} | length) == 0
+  and (.services["demo-activity"].secrets // [] | length) == 0
+  and any(.services["demo-activity"].volumes[]; .target == "/run/teagram-demo/client.json" and .read_only)
+  and any(.services["demo-activity"].volumes[]; .target == "/var/lib/teagram-demo-activity" and (.read_only // false) == false)
+' "$TMP_DIR/activity-profile.json" >/dev/null
+
+python3 - "$SCRIPT_DIR/teagram-demo-activity.service" \
+  "$SCRIPT_DIR/teagram-demo-activity.timer" "$SCRIPT_DIR/install-activity.sh" \
+  "$SCRIPT_DIR/run-activity.sh" "$SCRIPT_DIR/wipe-weekly.sh" \
+  "$SCRIPT_DIR/teagram-demo-weekly-wipe.service" <<'PY'
+from pathlib import Path
+import sys
+
+
+service = Path(sys.argv[1]).read_text(encoding="utf-8")
+timer = Path(sys.argv[2]).read_text(encoding="utf-8")
+installer = Path(sys.argv[3]).read_text(encoding="utf-8")
+runner = Path(sys.argv[4]).read_text(encoding="utf-8")
+wipe = Path(sys.argv[5]).read_text(encoding="utf-8")
+wipe_service = Path(sys.argv[6]).read_text(encoding="utf-8")
+
+
+def assert_text_order(text: str, name: str, fragments: list[str]) -> None:
+    positions = [text.find(fragment) for fragment in fragments]
+    if any(position < 0 for position in positions) or positions != sorted(positions):
+        raise SystemExit(f"{name}: safety steps are missing or out of order")
+
+
+for name, text, fragments in [
+    ("activity service", service, [
+        "LoadCredential=inventory.json:/var/lib/teagram-demo/secrets/demo-accounts/inventory.json",
+        "StateDirectory=teagram-demo-activity",
+        "StateDirectoryMode=0700",
+        "TimeoutStartSec=infinity",
+        "StartLimitBurst=3",
+        "StartLimitIntervalSec=1h",
+        "ProtectSystem=strict",
+    ]),
+    ("activity timer", timer, ["OnBootSec=8m", "OnUnitActiveSec=10m", "Persistent=true", "RandomizedDelaySec=5m"]),
+    ("activity installer", installer, ["enable --now teagram-demo-activity.timer"]),
+    ("activity runner", runner, ["--volume", "demo-activity", "--activity", "--target", "--max-actions-per-hour", "--min-interval"]),
+]:
+    if any(fragment not in text for fragment in fragments):
+        raise SystemExit(f"{name}: missing required activity scheduling or credential setting")
+if "PASSWORD" in runner or "inventory.json" not in runner or "--volume" not in runner:
+    raise SystemExit("activity runner: credential must be mounted from the systemd file, not passed as a value")
+if "TimeoutStartSec=60min" not in wipe_service:
+    raise SystemExit("weekly wipe service: timeout must cover stopping scheduled activity and reseeding")
+assert_text_order(wipe, "wipe-weekly.sh activity gate", [
+    "systemctl stop teagram-demo-activity.timer",
+    "flock -x -w 20m",
+    "dropdb -U postgres --if-exists teagram",
+    "systemctl reset-failed teagram-demo-activity.service",
+    "systemctl start teagram-demo-activity.timer",
+])
+PY
+
 python3 "$SCRIPT_DIR/../teagramd/rollout-runner/blob-mode-state.py" compose \
   --checkout "$REPO_ROOT" < "$TMP_DIR/seed.json" > "$TMP_DIR/seed-inventory.json"
 python3 "$SCRIPT_DIR/../teagramd/rollout-runner/blob-mode-state.py" compose \

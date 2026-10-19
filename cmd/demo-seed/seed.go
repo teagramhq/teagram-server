@@ -19,6 +19,7 @@ type accountSpec struct {
 	about     string
 	avatar    int
 	owner     bool
+	activity  bool
 }
 
 type spaceSpec struct {
@@ -42,7 +43,7 @@ var seedAccounts = []accountSpec{
 	{loginID: "demo_ren", username: "demo_ren", firstName: "Ren", lastName: "Marlow", about: "Keeping a notebook of garden birds and good walking routes.", avatar: 2},
 	{loginID: "demo_sasha", username: "demo_sasha", firstName: "Sasha", lastName: "North", about: "Making paper maps for slow walks and curious detours.", avatar: 3},
 	{loginID: "demo_elio", username: "demo_elio", firstName: "Elio", lastName: "Park", about: "Collecting color studies from parks, bridges, and open sky.", avatar: 4},
-	{loginID: "demo_tavi", username: "demo_tavi", firstName: "Tavi", lastName: "Linden", about: "A patient observer of trees, paths, and changing light.", avatar: 5},
+	{loginID: "demo_tavi", username: "demo_tavi", firstName: "Tavi", lastName: "Linden", about: "A patient observer of trees, paths, and changing light.", avatar: 5, activity: true},
 	{loginID: "demo_nori", username: "demo_nori", firstName: "Nori", lastName: "Wells", about: "Saving useful notes from small trips around the valley.", avatar: 6},
 	{loginID: "demo_ari", username: "demo_ari", firstName: "Ari", lastName: "Sloan", about: "Drawing imaginary gardens and sharing practical route notes.", avatar: 7},
 	{loginID: "demo_kit", username: "demo_kit", firstName: "Kit", lastName: "Rowan", about: "Trading trail observations, sketch prompts, and picnic ideas.", avatar: 8},
@@ -573,7 +574,7 @@ func demoPoll() *tg.InputMediaPoll {
 }
 
 func inviteConversationAccounts(ctx context.Context, api *tg.Client, remote remoteSpace) error {
-	for _, account := range seedAccounts[1:4] {
+	for _, account := range groupMemberAccounts() {
 		user, err := findInputUser(ctx, api, account.username)
 		if err != nil {
 			return fmt.Errorf("find public conversation account: %w", err)
@@ -587,6 +588,16 @@ func inviteConversationAccounts(ctx context.Context, api *tg.Client, remote remo
 		}
 	}
 	return nil
+}
+
+func groupMemberAccounts() []accountSpec {
+	accounts := append([]accountSpec(nil), seedAccounts[1:4]...)
+	for _, account := range seedAccounts {
+		if account.activity {
+			accounts = append(accounts, account)
+		}
+	}
+	return accounts
 }
 
 func findInputUser(ctx context.Context, api *tg.Client, username string) (*tg.InputUser, error) {
