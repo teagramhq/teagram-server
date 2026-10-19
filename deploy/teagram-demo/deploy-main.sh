@@ -14,7 +14,6 @@ readonly TS
 TMP_DIR=
 BACKUP_DIR=
 PREV_IMAGE_ID=
-PREV_IMAGE_TAG=
 DB_DUMP=
 RESTORE_DB=
 RESTORE_DB_CREATED=0
@@ -148,6 +147,12 @@ demo_require_root
 demo_require_env
 [[ "$SHA" =~ ^[0-9a-f]{40}$ ]] || demo_fail 'DEPLOY_SHA must be a full 40-hex commit SHA'
 [[ "$PREV_SHA" =~ ^[0-9a-f]{40}$ ]] || demo_fail 'PREVIOUS_SHA must be a full 40-hex commit SHA'
+LOCK_PATH="$DEMO_REPO_ROOT/.state/deploy.lock"
+if [[ "${DEMO_DEPLOY_LOCK_HELD:-0}" != 1 ]]; then
+  mkdir -p "$(dirname "$LOCK_PATH")"
+  exec 9> "$LOCK_PATH"
+  flock -x 9
+fi
 [[ "$(git -C "$DEMO_REPO_ROOT" rev-parse HEAD)" == "$SHA" ]] || demo_fail 'checkout is not the requested deployment SHA'
 git -C "$DEMO_REPO_ROOT" fetch -q origin +refs/heads/main:refs/remotes/origin/main
 git -C "$DEMO_REPO_ROOT" merge-base --is-ancestor "$SHA" origin/main || demo_fail 'deployment SHA is no longer on origin/main'
@@ -162,11 +167,6 @@ chmod 0700 "$TMP_DIR"
 BACKUP_DIR="$DEMO_STATE_DIR/backups/deploy-${SHA:0:12}-$TS"
 mkdir -m 0700 -- "$BACKUP_DIR"
 chown root:root "$BACKUP_DIR"
-
-LOCK_PATH="$DEMO_REPO_ROOT/.state/deploy.lock"
-mkdir -p "$(dirname "$LOCK_PATH")"
-exec 9> "$LOCK_PATH"
-flock -x 9
 
 TARGET_RENDER="$TMP_DIR/target-render.json"
 TARGET_INVENTORY="$TMP_DIR/target-inventory.json"
@@ -197,8 +197,6 @@ mapfile -t SERVER_IDS < <(demo_compose ps -q teagramd)
 ((${#SERVER_IDS[@]} == 1)) || demo_fail 'running demo server is missing or ambiguous'
 PREV_IMAGE_ID=$(docker inspect --format '{{.Image}}' "${SERVER_IDS[0]}")
 [[ "$PREV_IMAGE_ID" =~ ^sha256:[0-9a-f]{64}$ ]] || demo_fail 'running demo image ID is invalid'
-PREV_IMAGE_TAG="teagramd:rollback-${PREV_SHA:0:12}-$TS"
-docker image tag "$PREV_IMAGE_ID" "$PREV_IMAGE_TAG"
 printf '%s\n' "$PREV_IMAGE_ID" > "$BACKUP_DIR/previous-image-id.txt"
 cp -- "$DEMO_STATE_DIR/client.json" "$BACKUP_DIR/client.json"
 chown root:root "$BACKUP_DIR/previous-image-id.txt" "$BACKUP_DIR/client.json"

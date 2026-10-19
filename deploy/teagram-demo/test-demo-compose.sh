@@ -181,7 +181,8 @@ grep -Fq 'https://demo.teagram.io/healthz' "$SCRIPT_DIR/gatus.yaml"
 grep -Fq 'base_url + "/healthz"' "$SCRIPT_DIR/smoke.py"
 
 python3 - "$SCRIPT_DIR/wipe-weekly.sh" "$SCRIPT_DIR/init-demo.sh" \
-  "$SCRIPT_DIR/deploy-main.sh" "$SCRIPT_DIR/demo-common.sh" <<'PY'
+  "$SCRIPT_DIR/deploy-main.sh" "$SCRIPT_DIR/demo-common.sh" \
+  "$SCRIPT_DIR/forced-command.sh" <<'PY'
 from pathlib import Path
 import sys
 
@@ -243,9 +244,33 @@ if "demo_wait_migration demo_compose 'rollback migrations'" not in rollback:
     raise SystemExit("deploy-main.sh: rollback must wait for migration completion")
 if "MIGRATE_STATUS=$(docker inspect" in deploy:
     raise SystemExit("deploy-main.sh: detached migration status must be checked after waiting")
+if "PREV_IMAGE_TAG" in deploy or "teagramd:rollback-" in deploy:
+    raise SystemExit("deploy-main.sh: rollback image must not get a persistent unique tag")
+if 'docker image tag "$PREV_IMAGE_ID" teagramd:local' not in deploy:
+    raise SystemExit("deploy-main.sh: rollback must restore the previous image tag")
 waiter = Path(sys.argv[4]).read_text(encoding="utf-8")
 if "demo_wait_migration()" not in waiter or 'docker wait "${migration_ids[0]}"' not in waiter:
     raise SystemExit("demo-common.sh: migration helper must wait for the container exit code")
+forced_command = Path(sys.argv[5]).read_text(encoding="utf-8")
+wipe = Path(sys.argv[1]).read_text(encoding="utf-8")
+if 'LOCK_PATH="$DEMO_REPO_ROOT/.state/deploy.lock"' not in wipe:
+    raise SystemExit("wipe-weekly.sh: deploy and wipe must share the deploy lock")
+assert_text_order(forced_command, "forced-command.sh deploy lock", [
+    "unset DEMO_DEPLOY_LOCK_HELD",
+    'LOCK_PATH="$REPO/.state/deploy.lock"',
+    'exec 9> "$LOCK_PATH"',
+    "flock -x 9",
+    'git -C "$REPO" fetch',
+    'git -C "$REPO" reset --hard "$SHA"',
+    'DEMO_DEPLOY_LOCK_HELD=1 DEPLOY_SHA="$SHA" PREVIOUS_SHA="$previous"',
+    'git -C "$REPO" reset --hard "$previous"',
+])
+assert_order(deploy_path, [
+    'LOCK_PATH="$DEMO_REPO_ROOT/.state/deploy.lock"',
+    'if [[ "${DEMO_DEPLOY_LOCK_HELD:-0}" != 1 ]]; then',
+    "flock -x 9",
+    'git -C "$DEMO_REPO_ROOT" fetch',
+])
 init = Path(sys.argv[2]).read_text(encoding="utf-8")
 cleanup = init.split("cleanup() {", 1)[1].split("\n}", 1)[0]
 if "rc != 0" not in cleanup or "PUBLIC_SERVICES_MAY_BE_RUNNING == 1" not in cleanup:
