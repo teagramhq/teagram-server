@@ -221,10 +221,10 @@ func TestSeedActivityAccountIsDedicatedAndOrdinaryGroupMember(t *testing.T) {
 			count++
 		}
 	}
-	if count != 1 || activity.owner || activity.username != "demo_tavi" {
-		t.Fatalf("activity account = %+v, count=%d; want one non-owner demo_tavi", activity, count)
+	if count != 1 || activity.owner || activity.username != "demo_ren" {
+		t.Fatalf("activity account = %+v, count=%d; want one non-owner demo_ren", activity, count)
 	}
-	for _, group := range groupMemberAccounts() {
+	for _, group := range seedAccounts[1:4] {
 		if group.username == activity.username {
 			return
 		}
@@ -235,11 +235,11 @@ func TestSeedActivityAccountIsDedicatedAndOrdinaryGroupMember(t *testing.T) {
 func TestActivityCredentialRequiresPrivateInventoryAndSeedAccount(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "inventory.json")
-	data := []byte(`{"demo_tavi":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"}`)
+	data := []byte(`{"demo_ren":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"}`)
 	if err := os.WriteFile(path, data, 0400); err != nil {
 		t.Fatal(err)
 	}
-	account := accountSpec{loginID: "demo_tavi", activity: true}
+	account := accountSpec{loginID: "demo_ren", activity: true}
 	password, err := readActivityPasswordAt(path, account)
 	if err != nil {
 		t.Fatalf("read activity credential: %v", err)
@@ -262,14 +262,14 @@ func TestActivityCredentialRequiresPrivateInventoryAndSeedAccount(t *testing.T) 
 }
 
 func TestActivitySessionMustBelongToDedicatedSeedAccount(t *testing.T) {
-	account := accountSpec{username: "demo_tavi", activity: true}
-	if !isActivitySessionUser([]tg.UserClass{&tg.User{Username: "demo_tavi"}}, account) {
+	account := accountSpec{username: "demo_ren", activity: true}
+	if !isActivitySessionUser([]tg.UserClass{&tg.User{Username: "demo_ren"}}, account) {
 		t.Fatal("isActivitySessionUser rejected the dedicated seed account")
 	}
-	if isActivitySessionUser([]tg.UserClass{&tg.User{Username: "demo_ren"}}, account) {
+	if isActivitySessionUser([]tg.UserClass{&tg.User{Username: "demo_iona"}}, account) {
 		t.Fatal("isActivitySessionUser accepted a different demo account")
 	}
-	if isActivitySessionUser([]tg.UserClass{&tg.User{Username: "demo_tavi"}}, accountSpec{username: "demo_tavi"}) {
+	if isActivitySessionUser([]tg.UserClass{&tg.User{Username: "demo_ren"}}, accountSpec{username: "demo_ren"}) {
 		t.Fatal("isActivitySessionUser accepted an account without the activity marker")
 	}
 }

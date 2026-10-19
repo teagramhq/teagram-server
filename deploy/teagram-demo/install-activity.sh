@@ -25,7 +25,7 @@ git -C "$REPO_ROOT" ls-files --error-unmatch deploy/teagram-demo/seed-demo.sh >/
   echo 'the root-owned mode 0600 seeded account inventory is required' >&2
   exit 1
 }
-jq -e 'has("demo_tavi") and (.["demo_tavi"] | test("^[0-9a-f]{64}$"))' \
+jq -e 'has("demo_ren") and (.["demo_ren"] | test("^[0-9a-f]{64}$"))' \
   "$ACCOUNT_INVENTORY" >/dev/null 2>&1 || {
   echo 'the seeded activity account credential is missing or invalid' >&2
   exit 1

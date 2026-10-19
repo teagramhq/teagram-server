@@ -224,7 +224,7 @@ sudo deploy/teagram-demo/install-activity.sh
 ```
 
 The timer runs about every ten minutes with a randomized delay. Each run uses
-the seeded `demo_tavi` account to post one fixed fictional message in the
+the seeded `demo_ren` account to post one fixed fictional message in the
 `river` megagroup (`teagramdemoriver`). The root-owned settings file at
 `/etc/default/teagram-demo-activity` can select `river`, `garden`, or
 `workshop`, and set a limit from 1 to 6 posts per hour and a minimum interval
