@@ -22,10 +22,10 @@ Configuration is read from environment variables in `internal/config/config.go`:
 | Variable            | Default          | Notes                                      |
 |---------------------|------------------|---------------------------------------------|
 | `TG_LISTEN_ADDR`    | `:2443`          | `host:port` (or `:port`) the server binds   |
-| `TG_WEBSOCKET_LISTEN_ADDR` | *(unset)* | Enables the WebSocket MTProto listener on this address; browser clients connect to `/apiws` |
+| `TG_WEBSOCKET_LISTEN_ADDR` | *(unset)* | Enables the WebSocket MTProto listener on this address; browser clients connect to `/apiws`, and the listener serves `/.well-known/telegramd/client` |
 | `TG_RPC_DEADLINE` | `23s` | Per-request timeout; overrides must be positive and no greater than `45s`. `0s` and values above `45s`, including the former `90s` setting, fail startup so admitted requests fit the fixed shutdown drain |
 | `TG_WEBSOCKET_ALLOWED_ORIGINS` | *(unset)* | Comma-separated browser origins allowed to connect to `/apiws`; unset rejects every request carrying an `Origin` header |
-| `TG_ADVERTISE_ADDR` | *(derived from `TG_LISTEN_ADDR`)* | `host:port` clients are told to dial, used verbatim. Derived when unset: the listen address with an empty or wildcard host (`:2443`, `0.0.0.0`, `::`) replaced by `127.0.0.1`. A value that is not `host:port`, has no host, or has a port that is not an integer in 1–65535 fails startup |
+| `TG_ADVERTISE_ADDR` | *(derived from `TG_LISTEN_ADDR`)* | `host:port` clients are told to dial, used verbatim. Its host also forms the discovery `websocket.endpoint` as `wss://host/apiws`. Derived when unset: the listen address with an empty or wildcard host (`:2443`, `0.0.0.0`, `::`) replaced by `127.0.0.1`. A value that is not `host:port`, has no host, or has a port that is not an integer in 1–65535 fails startup |
 | `TG_PUBLIC_LINK_PREFIX` | *(required)* | Lowercase HTTPS origin for client and invite links, with a root path and no port (e.g. `https://links.example.test/`) |
 | `TG_POSTGRES_DSN`   | *(required)*     | Postgres connection string; no default, server fails to start without it |
 | `TG_PG_MAX_CONNS` | `8` | Maximum pooled Postgres sessions per process, at least 2 |
@@ -54,6 +54,9 @@ Configuration is read from environment variables in `internal/config/config.go`:
 | `TG_LOG_LOGIN_CODES`| `false`          | Legacy login-code diagnostic. It is not used by Teagram username/password sign-in; leave it disabled. A non-boolean value fails startup |
 | `TG_REGISTRATION`   | `closed`         | Accepted values are `closed`, `invite`, and `open`. `closed` rejects `auth.signUp`, `invite` requires an operator-issued invite, and `open` admits usernames without one. An unrecognized value fails startup. Sign-in for accounts that already exist is unaffected by this setting |
 | `TG_WELCOME_CHANNEL` | *(unset)* | Optional handle of a public broadcast channel joined by new accounts after `auth.signUp`; invalid targets are skipped with a warning |
+| `TG_TURNSTILE_SITE_KEY` | *(unset)* | Public Cloudflare Turnstile widget key. Required together with one secret source to enable the `auth.signUp` challenge |
+| `TG_TURNSTILE_SECRET_KEY` | *(unset)* | Private Siteverify key supplied directly through the environment; prefer the file form |
+| `TG_TURNSTILE_SECRET_KEY_FILE` | *(unset)* | Preferred file containing the Siteverify key. The gate stays disabled when both secret sources and the site key are unset |
 | `TG_ADMIN_LISTEN_ADDR` | *(unset)* | Enables the separate authenticated admin HTTP listener; must be set with `TG_ADMIN_TOKEN_HASH` and should remain on an operator-only network |
 | `TG_ADMIN_TOKEN_HASH` | *(unset)* | Lowercase SHA-256 hex digest of the raw admin token; never put the raw token in configuration or a URL. See `docs/observability.md` |
 | `TG_ADMIN_ORIGIN` | *(unset)* | Fixed origin for admin login/logout behind a proxy; canonical lowercase ASCII HTTPS origin, or HTTP only for localhost/loopback. Unset, empty, or whitespace-only derives it from the listener. See `docs/observability.md` |
@@ -73,9 +76,21 @@ Configuration is read from environment variables in `internal/config/config.go`:
 
 When `TG_WEBSOCKET_LISTEN_ADDR` is set, configure
 `TG_WEBSOCKET_ALLOWED_ORIGINS` with the browser origins that may connect to
-`/apiws`. Requests without an `Origin` header remain valid for native clients;
-requests carrying one are rejected unless it matches the configured list.
-Keep this listener within the intended network boundary.
+`/apiws`. For teagram-web, add the exact origin `https://web.teagram.io`; do
+not use `*` or a wildcard pattern. Requests without an `Origin` header remain
+valid for native clients; requests carrying one are rejected unless it matches
+the configured list. `GET` and `OPTIONS` on exactly
+`/.well-known/telegramd/client` return `Access-Control-Allow-Origin: *` without
+credentials; other routes have no CORS headers. This does not relax the
+WebSocket origin check. Keep this listener within the intended network
+boundary.
+
+When Turnstile is enabled, the server checks every `auth.signUp` token with
+Cloudflare before charging the sign-up IP limit. It requires the `signup` action
+and the `web.teagram.io` hostname; login and all other RPC methods remain
+ungated. Verification failures ask the client to retry with a fresh challenge.
+Startup rejects Cloudflare's always-pass test secret, and a configured secret
+requires the public site key so the server can return the challenge error.
 
 Before asking for registration details, an unauthenticated client may call
 `help.getAppConfig`. The `help.appConfig` response keeps its standard TL shape;
@@ -84,7 +99,7 @@ its JSON object contains a `registration_mode` string with one of `closed`,
 field is an extension to the JSON object, so clients that do not read it can
 continue to ignore it. This call is also available to provisional sessions.
 
-### Static enrollment discovery and local preflight
+### Public enrollment discovery and local preflight
 
 The server-side contract in this section is provided by teagram-server
 revision `b4b18c12` (`MAIN-736`). Deploy that server revision, or a later
@@ -113,19 +128,19 @@ to resolve to the same values for both commands; both have defaults, and an
 unset advertise address is derived from `TG_LISTEN_ADDR`. The output is one
 deterministic UTF-8 JSON
 object with no private-key material and standard padded base64 of DER
-SubjectPublicKeyInfo:
+SubjectPublicKeyInfo. Its `websocket.endpoint` uses the configured advertised
+host and the `/apiws` path:
 
 ```json
-{"version":1,"mtproto":{"endpoint":"mtproto.example.com:443","dc_id":2,"rsa_spki":"<standard-padded-base64-DER-SPKI>"}}
+{"version":1,"mtproto":{"endpoint":"mtproto.example.com:443","dc_id":2,"rsa_spki":"<standard-padded-base64-DER-SPKI>"},"websocket":{"endpoint":"wss://mtproto.example.com/apiws"}}
 ```
 
-The command does not publish or serve the file. Put `client.json` at
-`/.well-known/teagramd/client` on the selected public HTTPS origin, for
-example with a static web server or object store, and keep the file and its
-HTTPS certificate under the same deployment's control. The old
-`/.well-known/telegramd/client` path remains served as an alias until a
-Teagram Desktop release uses the new path. HTTPS certificate
-serving, web-root publication, and TLS termination are outside teagramd.
+`teagramd serve` serves the same configured document at
+`/.well-known/telegramd/client` on the WebSocket listener. Route that path and
+`/apiws` from the public HTTPS origin to this listener. `client-config` still
+does not publish or serve its output; it can be used when a deployment serves
+the document as a static file instead. HTTPS certificate serving, web-root
+publication, and TLS termination are outside teagramd.
 
 The optional same-endpoint local-direct preflight is a separate TCP
 discriminator. It is checked only on the normal TCP listener, after a trusted

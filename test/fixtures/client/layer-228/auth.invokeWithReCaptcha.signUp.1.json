@@ -1,0 +1,22 @@
+{
+  "layer": 228,
+  "client": "gotd v0.162.0",
+  "source": "source-derived/auth.invokeWithReCaptcha.signUp.1.txt",
+  "method": "invokeWithReCaptcha",
+  "request": {
+    "type": "invokeWithReCaptcha",
+    "fields": {
+      "token": "REDACTED",
+      "query": {
+        "type": "auth.signUp",
+        "flags": 0,
+        "fields": {
+          "phone_number": "REDACTED",
+          "phone_code_hash": "REDACTED",
+          "first_name": "Turnstile",
+          "last_name": "Smoke"
+        }
+      }
+    }
+  }
+}

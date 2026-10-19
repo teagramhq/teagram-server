@@ -254,7 +254,7 @@ func bootServerWithChannelMembershipDeliveryGate(
 	gate := &channelMembershipDeliveryGate{}
 	_, stop := bootServerWithLimitsAndRegistrationModeAndBlobsAndStatusWithDeliveryHook(
 		t, ctx, key, dcID, st, dsn, log, ln, config.RateLimitsConfig{}, config.RegistrationClosed,
-		testBlobs(t), false, gate.block, "",
+		testBlobs(t), false, gate.block,
 	)
 	return gate, stop
 }

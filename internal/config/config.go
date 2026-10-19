@@ -71,6 +71,9 @@ type Config struct {
 	RegistrationMode RegistrationMode
 	// WelcomeChannel is the operator-configured public broadcast channel for new accounts.
 	WelcomeChannel string
+	// Turnstile contains the optional sign-up challenge credentials. SecretKey
+	// is consumed only by the RPC verifier and must never be logged or exposed.
+	Turnstile TurnstileConfig `json:"-"`
 	// AuthKeyEncKey is the 32-byte master key that encrypts auth keys at rest.
 	//
 	// Changing it is a total re-auth event: no stored auth key opens under a new
@@ -302,6 +305,16 @@ type Config struct {
 	// account's own avatar.
 	ProfileDeleteOperationRetention time.Duration
 }
+
+// TurnstileConfig holds the public widget key and private Siteverify key. Both
+// are empty when the challenge is disabled.
+type TurnstileConfig struct {
+	SiteKey   string
+	SecretKey string `json:"-"`
+}
+
+// Enabled reports whether the Siteverify gate is configured.
+func (c TurnstileConfig) Enabled() bool { return c.SecretKey != "" }
 
 // ClientConfig contains only the identity settings needed to render the
 // public discovery document. Unlike Config, loading it does not require
@@ -780,6 +793,11 @@ func Load(log *slog.Logger) (Config, error) {
 
 		RegistrationMode: RegistrationClosed,
 	}
+	turnstile, err := loadTurnstileConfig()
+	if err != nil {
+		return Config{}, err
+	}
+	cfg.Turnstile = turnstile
 	if err := validateReplicaID(cfg.ReplicaID); err != nil {
 		return Config{}, err
 	}
@@ -1598,6 +1616,46 @@ func loadBlobS3Secret() (string, error) {
 		return "", errors.New("TG_BLOB_S3_SECRET_ACCESS_KEY_FILE is empty")
 	}
 	return secret, nil
+}
+
+var turnstileKeyPattern = regexp.MustCompile(`^[A-Za-z0-9_-]{1,256}$`)
+
+const turnstileAlwaysPassTestSecret = "1x0000000000000000000000000000000AA"
+
+func loadTurnstileConfig() (TurnstileConfig, error) {
+	secret := os.Getenv("TG_TURNSTILE_SECRET_KEY")
+	secretFile := os.Getenv("TG_TURNSTILE_SECRET_KEY_FILE")
+	siteKey := strings.TrimSpace(os.Getenv("TG_TURNSTILE_SITE_KEY"))
+	if secret != "" && secretFile != "" {
+		return TurnstileConfig{}, errors.New("TG_TURNSTILE_SECRET_KEY and TG_TURNSTILE_SECRET_KEY_FILE are both set: use only one")
+	}
+	if secret == "" && secretFile == "" {
+		if siteKey == "" {
+			return TurnstileConfig{}, nil
+		}
+		return TurnstileConfig{}, errors.New("TG_TURNSTILE_SECRET_KEY or TG_TURNSTILE_SECRET_KEY_FILE is required when TG_TURNSTILE_SITE_KEY is set")
+	}
+	if siteKey == "" || !turnstileKeyPattern.MatchString(siteKey) {
+		return TurnstileConfig{}, errors.New("TG_TURNSTILE_SITE_KEY is required and must contain only letters, digits, '_' or '-' (maximum 256 characters)")
+	}
+
+	if secretFile != "" {
+		data, err := os.ReadFile(secretFile) // #nosec G304,G703 -- operator-configured secret path.
+		if err != nil {
+			return TurnstileConfig{}, fmt.Errorf("TG_TURNSTILE_SECRET_KEY_FILE: read secret file: %w", err)
+		}
+		secret = strings.TrimSpace(string(data))
+		clear(data)
+	} else {
+		secret = strings.TrimSpace(secret)
+	}
+	if secret == "" || !turnstileKeyPattern.MatchString(secret) {
+		return TurnstileConfig{}, errors.New("TG_TURNSTILE_SECRET_KEY must contain only letters, digits, '_' or '-' (maximum 256 characters)")
+	}
+	if secret == turnstileAlwaysPassTestSecret {
+		return TurnstileConfig{}, errors.New("TG_TURNSTILE_SECRET_KEY must not use Cloudflare's always-pass test secret")
+	}
+	return TurnstileConfig{SiteKey: siteKey, SecretKey: secret}, nil
 }
 
 // preAuthLimits resolves the bounds on what an unauthenticated connection may

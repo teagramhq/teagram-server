@@ -20,6 +20,8 @@ const (
 	signUpInviteInvalid
 	signUpHandleOccupied
 	signUpSessionStateInvalid
+	signUpChallengeRequired
+	signUpVerifierBusy
 	signUpInternal
 	signUpRejectionClassCount
 )
@@ -36,6 +38,8 @@ func (c signUpRejectionClass) String() string {
 		"invite_invalid",
 		"handle_occupied",
 		"session_state_invalid",
+		"challenge_required",
+		"verifier_busy",
 		"internal",
 	}[c]
 }

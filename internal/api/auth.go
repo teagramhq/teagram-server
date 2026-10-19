@@ -27,6 +27,10 @@ const (
 	maxSignUpNameCodePoints = 64
 )
 
+func turnstileCheckRequiredError(siteKey string) *tgerr.Error {
+	return tgerr.New(403, "RECAPTCHA_CHECK_signup__"+siteKey)
+}
+
 func authorizationMetadata(r *mtproto.Request) store.AuthorizationMetadata {
 	ip := ""
 	if r.ClientAddr.IsValid() {
@@ -135,9 +139,27 @@ func (h *handlers) handleSignUpWithConn(c *mtproto.Conn, r *mtproto.Request) (bi
 		h.logSignUpRejection(signUpRegistrationModeUnavailable)
 		return nil, errInputRequestInvalid
 	}
+	if h.turnstileVerifier != nil {
+		if r.ReCaptchaToken == "" || len(r.ReCaptchaToken) > turnstileMaxTokenBytes {
+			h.logSignUpRejection(signUpChallengeRequired)
+			return nil, turnstileCheckRequiredError(h.turnstileSiteKey)
+		}
+		remoteIP := ""
+		if r.ClientAddrFromProxyV2 && r.ClientAddr.IsValid() {
+			remoteIP = r.ClientAddr.Unmap().String()
+		}
+		if err := h.turnstileVerifier.Verify(r.Ctx, r.ReCaptchaToken, remoteIP); err != nil {
+			if errors.Is(err, ErrTurnstileBusy) {
+				h.logSignUpRejection(signUpVerifierBusy)
+				return nil, FloodWaitError(1)
+			}
+			h.logSignUpRejection(signUpChallengeRequired)
+			return nil, turnstileCheckRequiredError(h.turnstileSiteKey)
+		}
+	}
 	// Charge every active-mode attempt before any identifier, name, invite, or
-	// code-dependent decision. The budget is deliberately not refunded on a
-	// later rejection.
+	// code-dependent decision. A solved challenge reaches this point; unsolved
+	// attempts never spend the sign-up budget.
 	if err := h.checkAndChargeRateLimitIP(r, "sign_up_ip", h.rateLimitSignUpIP); err != nil {
 		class := signUpInternal
 		var rpcErr *tgerr.Error

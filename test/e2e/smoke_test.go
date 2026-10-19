@@ -34,6 +34,7 @@ import (
 	"github.com/gotd/td/transport"
 	"github.com/jackc/pgx/v5"
 
+	"github.com/teagramhq/teagram-server/internal/api"
 	"github.com/teagramhq/teagram-server/internal/blob"
 	"github.com/teagramhq/teagram-server/internal/catalog"
 	"github.com/teagramhq/teagram-server/internal/catalogpublish"
@@ -48,6 +49,10 @@ import (
 )
 
 func TestSmoke(t *testing.T) {
+	t.Run("turnstile-signup", func(t *testing.T) {
+		t.Parallel()
+		testSmokeTurnstileSignUp(t)
+	})
 	t.Run("unread-acknowledgements", func(t *testing.T) {
 		t.Parallel()
 		testSmokeUnreadAcknowledgements(t)
@@ -4823,6 +4828,8 @@ type smokeFixture struct {
 	stopCleanupRegistered bool
 	regMode               config.RegistrationMode
 	welcomeChannel        string
+	turnstileSiteKey      string
+	turnstileVerifier     api.SignUpTurnstileVerifier
 	persistStatus         bool
 	// rateLimits is the per-surface budget set the booted server gets.
 	// Zero, the fixture default, means no surface is limited, which is what
@@ -5275,7 +5282,10 @@ func (f *smokeFixture) start(t *testing.T, address string) {
 	}
 	f.port = tcpPort(t, ln)
 	f.listener = ln
-	registry, stop := bootServerWithLimitsAndRegistrationModeAndBlobsAndStatusAndWelcomeChannel(t, f.ctx, f.key, f.dcID, f.store, f.dsn, f.codes.Logger(), ln, f.rateLimits, f.regMode, f.blobs, f.persistStatus, f.welcomeChannel, f.photoThumbs)
+	registry, stop := bootServerWithLimitsAndRegistrationModeAndBlobsAndStatusWithDeliveryHookAndTurnstileAndWelcomeChannel(
+		t, f.ctx, f.key, f.dcID, f.store, f.dsn, f.codes.Logger(), ln, f.rateLimits, f.regMode,
+		f.blobs, f.persistStatus, nil, f.turnstileSiteKey, f.turnstileVerifier, f.welcomeChannel, f.photoThumbs,
+	)
 	f.registry = registry
 	f.setServerStop(t.Cleanup, stop)
 }

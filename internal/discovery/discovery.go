@@ -37,8 +37,9 @@ const (
 
 // Document is the canonical v1 public discovery document.
 type Document struct {
-	Version int            `json:"version"`
-	MTProto MTProtoBinding `json:"mtproto"`
+	Version   int              `json:"version"`
+	MTProto   MTProtoBinding   `json:"mtproto"`
+	WebSocket WebSocketBinding `json:"websocket"`
 }
 
 // MTProtoBinding is the endpoint, DC and public RSA identity a server uses.
@@ -46,6 +47,11 @@ type MTProtoBinding struct {
 	Endpoint string `json:"endpoint"`
 	DCID     int    `json:"dc_id"`
 	RSASPKI  string `json:"rsa_spki"`
+}
+
+// WebSocketBinding is the public browser transport endpoint.
+type WebSocketBinding struct {
+	Endpoint string `json:"endpoint"`
 }
 
 // NewDocument constructs the canonical public document from the exact
@@ -61,6 +67,10 @@ func NewDocument(endpoint string, dcID int, pub *rsa.PublicKey) (Document, error
 	if err != nil {
 		return Document{}, err
 	}
+	wsEndpoint, err := webSocketEndpointFor(endpoint)
+	if err != nil {
+		return Document{}, err
+	}
 	return Document{
 		Version: Version,
 		MTProto: MTProtoBinding{
@@ -68,6 +78,7 @@ func NewDocument(endpoint string, dcID int, pub *rsa.PublicKey) (Document, error
 			DCID:     dcID,
 			RSASPKI:  base64.StdEncoding.EncodeToString(der),
 		},
+		WebSocket: WebSocketBinding{Endpoint: wsEndpoint},
 	}, nil
 }
 
@@ -85,6 +96,13 @@ func MarshalDocument(doc Document) ([]byte, error) {
 	if err := ValidateDCID(doc.MTProto.DCID); err != nil {
 		return nil, err
 	}
+	wsEndpoint, err := webSocketEndpointFor(doc.MTProto.Endpoint)
+	if err != nil {
+		return nil, err
+	}
+	if doc.WebSocket.Endpoint != wsEndpoint {
+		return nil, errors.New("document WebSocket endpoint must use the advertised MTProto host")
+	}
 	der, err := base64.StdEncoding.DecodeString(doc.MTProto.RSASPKI)
 	if err != nil {
 		return nil, fmt.Errorf("decode document SPKI: %w", err)
@@ -96,6 +114,17 @@ func MarshalDocument(doc Document) ([]byte, error) {
 		return nil, err
 	}
 	return json.Marshal(doc)
+}
+
+func webSocketEndpointFor(mtprotoEndpoint string) (string, error) {
+	host, _, err := net.SplitHostPort(mtprotoEndpoint)
+	if err != nil || host == "" {
+		return "", errors.New("derive WebSocket endpoint: MTProto endpoint must be host:port")
+	}
+	if strings.Contains(host, ":") {
+		host = "[" + host + "]"
+	}
+	return "wss://" + host + "/apiws", nil
 }
 
 // WriteDocument writes a complete canonical document. The document is

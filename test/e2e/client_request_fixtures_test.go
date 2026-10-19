@@ -237,7 +237,7 @@ func redactClientNumber(fieldName string, value int64) bool {
 
 func redactClientString(fieldName string) bool {
 	switch fieldName {
-	case "api_hash", "phone_number", "phone_code_hash", "phone_code":
+	case "api_hash", "phone_number", "phone_code_hash", "phone_code", "token":
 		return true
 	default:
 		return false
@@ -298,7 +298,7 @@ func TestClientTLValueRedactsAPIIDs(t *testing.T) {
 }
 
 func TestClientTLValueRedactsLoginSecrets(t *testing.T) {
-	for _, field := range []string{"api_hash", "phone_number", "phone_code_hash", "phone_code"} {
+	for _, field := range []string{"api_hash", "phone_number", "phone_code_hash", "phone_code", "token"} {
 		t.Run(field, func(t *testing.T) {
 			got, err := clientTLValue(field, reflect.ValueOf("sensitive"))
 			if err != nil {
@@ -424,6 +424,7 @@ func TestSmokeClientRequestFixturesAreLayer228Shapes(t *testing.T) {
 	for _, name := range []string{
 		"auth.sendCode.1",
 		"auth.signIn.1",
+		"auth.invokeWithReCaptcha.signUp.1",
 		"contacts_getStatuses.1",
 		"channels_checkUsername.1",
 		"channels_createChannel.1",

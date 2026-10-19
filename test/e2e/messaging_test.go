@@ -347,20 +347,8 @@ func bootServerWithLimitsAndRegistrationModeAndBlobsAndStatus(
 	regMode config.RegistrationMode, blobs blob.Store, persistStatus bool, photoThumbs ...*photothumb.Supervisor,
 ) (*mtproto.SessionRegistry, func()) {
 	t.Helper()
-	return bootServerWithLimitsAndRegistrationModeAndBlobsAndStatusAndWelcomeChannel(
-		t, ctx, key, dcID, st, dsn, log, ln, rateLimits, regMode, blobs, persistStatus, "", photoThumbs...,
-	)
-}
-
-func bootServerWithLimitsAndRegistrationModeAndBlobsAndStatusAndWelcomeChannel(
-	t *testing.T, ctx context.Context, key *rsa.PrivateKey, dcID int, st *store.Store,
-	dsn string, log *slog.Logger, ln net.Listener, rateLimits config.RateLimitsConfig,
-	regMode config.RegistrationMode, blobs blob.Store, persistStatus bool, welcomeChannel string,
-	photoThumbs ...*photothumb.Supervisor,
-) (*mtproto.SessionRegistry, func()) {
-	t.Helper()
 	return bootServerWithLimitsAndRegistrationModeAndBlobsAndStatusWithDeliveryHook(
-		t, ctx, key, dcID, st, dsn, log, ln, rateLimits, regMode, blobs, persistStatus, nil, welcomeChannel, photoThumbs...,
+		t, ctx, key, dcID, st, dsn, log, ln, rateLimits, regMode, blobs, persistStatus, nil, photoThumbs...,
 	)
 }
 
@@ -368,7 +356,22 @@ func bootServerWithLimitsAndRegistrationModeAndBlobsAndStatusWithDeliveryHook(
 	t *testing.T, ctx context.Context, key *rsa.PrivateKey, dcID int, st *store.Store,
 	dsn string, log *slog.Logger, ln net.Listener, rateLimits config.RateLimitsConfig,
 	regMode config.RegistrationMode, blobs blob.Store, persistStatus bool,
-	beforeDelivery func(context.Context, int64), welcomeChannel string, photoThumbs ...*photothumb.Supervisor,
+	beforeDelivery func(context.Context, int64), photoThumbs ...*photothumb.Supervisor,
+) (*mtproto.SessionRegistry, func()) {
+	t.Helper()
+	return bootServerWithLimitsAndRegistrationModeAndBlobsAndStatusWithDeliveryHookAndTurnstileAndWelcomeChannel(
+		t, ctx, key, dcID, st, dsn, log, ln, rateLimits, regMode, blobs, persistStatus,
+		beforeDelivery, "", nil, "", photoThumbs...,
+	)
+}
+
+func bootServerWithLimitsAndRegistrationModeAndBlobsAndStatusWithDeliveryHookAndTurnstileAndWelcomeChannel(
+	t *testing.T, ctx context.Context, key *rsa.PrivateKey, dcID int, st *store.Store,
+	dsn string, log *slog.Logger, ln net.Listener, rateLimits config.RateLimitsConfig,
+	regMode config.RegistrationMode, blobs blob.Store, persistStatus bool,
+	beforeDelivery func(context.Context, int64), turnstileSiteKey string,
+	turnstileVerifier api.SignUpTurnstileVerifier, welcomeChannel string,
+	photoThumbs ...*photothumb.Supervisor,
 ) (*mtproto.SessionRegistry, func()) {
 	t.Helper()
 	tgcfg := fixtureConfigForListener(t, dcID, ln)
@@ -378,7 +381,12 @@ func bootServerWithLimitsAndRegistrationModeAndBlobsAndStatusWithDeliveryHook(
 	if len(photoThumbs) > 0 {
 		photoThumb = photoThumbs[0]
 	}
-	handler := api.NewWithPhotoThumbsAndDialogFilterSyncAndWelcomeChannel(st, dcID, tgcfg, log, true, 100<<20, blobs, 2<<30, pgtest.PeerDeriver(), pgtest.PhotoDeriver(), rateLimits, regMode, dialogFilterSync, photoThumb, welcomeChannel)
+	handler := api.NewWithPhotoThumbsAndDialogFilterSyncAndUploadPartTTLAndTurnstileAndWelcomeChannel(
+		st, dcID, tgcfg, log, true, 100<<20, blobs, 2<<30,
+		pgtest.PeerDeriver(), pgtest.PhotoDeriver(), rateLimits, regMode,
+		dialogFilterSync, photoThumb, config.DefaultUploadPartTTL,
+		turnstileSiteKey, turnstileVerifier, welcomeChannel,
+	)
 	server := mtproto.New(exchange.PrivateKey{RSA: key}, dcID, mtproto.NewPgAuthKeyStore(st), handler, log)
 	if persistStatus {
 		server.OnStatusChange(func(ctx context.Context, userID int64, online bool) {
