@@ -1,0 +1,11 @@
+[Unit]
+Description=Weekly reset of the public Teagram demo
+
+[Timer]
+OnCalendar=Sun *-*-* 03:00:00 UTC
+Persistent=true
+RandomizedDelaySec=15m
+Unit=teagram-demo-weekly-wipe.service
+
+[Install]
+WantedBy=timers.target

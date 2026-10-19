@@ -1,0 +1,228 @@
+# Public demo stack. Start only after init-demo.sh has published the guarded
+# local blob-mode authority. The only published host port is the loopback HTTP
+# origin consumed by Cloudflare Tunnel.
+name: teagram-demo
+
+x-dsn: &dsn "postgres://postgres:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in deploy/teagram-demo/.env}@postgres:5432/teagram?sslmode=disable"
+x-logging: &logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
+services:
+  postgres:
+    image: mirror.gcr.io/library/postgres:18-alpine@sha256:d8703cd7fba306b9fec9268ecedfa8a966846c053036a60e3635791957eb2f66
+    platform: linux/amd64
+    environment:
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in deploy/teagram-demo/.env}
+      POSTGRES_DB: teagram
+      PGDATA: /var/lib/postgresql/18/docker
+    command: ["postgres", "-c", "config_file=/etc/postgresql/postgresql.conf"]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d teagram"]
+      interval: 2s
+      timeout: 5s
+      retries: 20
+    volumes:
+      - pgdata:/var/lib/postgresql
+      - type: bind
+        source: ./deploy/postgres/postgresql.conf
+        target: /etc/postgresql/postgresql.conf
+        read_only: true
+    networks: [backend]
+    restart: unless-stopped
+    logging: *logging
+
+  migrate:
+    image: mirror.gcr.io/arigaio/atlas:1.2.0-alpine@sha256:5abea953e8e048d5b27b1b3e2fc83e17fdc1f7cd0d908a8432ed0c7e6394c58f
+    platform: linux/amd64
+    command:
+      - migrate
+      - apply
+      - --dir
+      - file:///migrations
+      - --url
+      - *dsn
+    volumes:
+      - type: bind
+        source: ./migrations
+        target: /migrations
+        read_only: true
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks: [backend]
+    logging: *logging
+
+  teagramd:
+    build:
+      context: .
+      args:
+        TEAGRAMD_SOURCE_REVISION: ${TEAGRAMD_SOURCE_REVISION:-}
+    image: teagramd:local
+    stop_grace_period: 120s
+    environment:
+      TG_POSTGRES_DSN: *dsn
+      TG_PUBLIC_LINK_PREFIX: ${TG_PUBLIC_LINK_PREFIX:?set TG_PUBLIC_LINK_PREFIX in deploy/teagram-demo/.env}
+      TG_ADVERTISE_ADDR: ${TG_ADVERTISE_ADDR:-demo.teagram.io:443}
+      TG_WEBSOCKET_LISTEN_ADDR: ${TG_WEBSOCKET_LISTEN_ADDR:-:2446}
+      TG_WEBSOCKET_ALLOWED_ORIGINS: ${TG_WEBSOCKET_ALLOWED_ORIGINS:-https://web.teagram.io}
+      TG_LOG_LOGIN_CODES: ${TG_LOG_LOGIN_CODES:-false}
+      TG_REGISTRATION: ${TG_REGISTRATION:-open}
+      TG_MAX_FILE_BYTES: ${TG_MAX_FILE_BYTES:-16777216}
+      TG_MAX_USER_STORAGE_BYTES: ${TG_MAX_USER_STORAGE_BYTES:-268435456}
+      TG_RSA_KEY_FINGERPRINT: ${TG_RSA_KEY_FINGERPRINT:-}
+      TG_AUTHKEY_ENC_KEY: ${TG_AUTHKEY_ENC_KEY:?set TG_AUTHKEY_ENC_KEY in deploy/teagram-demo/.env}
+      TG_AUTHKEY_ENC_KEY_FILE: ${TG_AUTHKEY_ENC_KEY_FILE:-/var/lib/teagramd/enc_key.hex}
+      HTTP_PROXY: http://turnstile-egress:3128
+      HTTPS_PROXY: http://turnstile-egress:3128
+      NO_PROXY: localhost,127.0.0.1,postgres,teagramd
+      TG_REPLICA_COUNT: "1"
+      TG_CLIENT_ADDR_TRUST: proxy-v2
+      TG_CLIENT_ADDR_PROXY_CIDRS: 198.18.130.2/32
+      TG_TURNSTILE_SITE_KEY: ${TEAGRAM_DEMO_TURNSTILE_SITE_KEY:?set TEAGRAM_DEMO_TURNSTILE_SITE_KEY in deploy/teagram-demo/.env}
+      TG_TURNSTILE_SECRET_KEY_FILE: /run/secrets/teagram_demo_turnstile
+      TG_BLOB_DIR: /var/lib/teagramd-blobs
+    read_only: true
+    volumes:
+      - tgkey:/var/lib/teagramd
+      - tgblobs:/var/lib/teagramd-blobs
+      - .state/blob-mode:/run/teagramd/blob-mode:ro
+    secrets:
+      - teagram_demo_turnstile
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      turnstile-egress:
+        condition: service_healthy
+    networks:
+      backend:
+        ipv4_address: 198.18.130.253
+    restart: unless-stopped
+    logging: *logging
+
+  turnstile-egress:
+    image: mirror.gcr.io/ubuntu/squid:7.2-26.04_edge@sha256:f6843088c0eab9e63ecb8a1c215d939cd97d0370611bb2bdb65c4a8e48b3c3eb
+    platform: linux/amd64
+    user: "584792:584792"
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    mem_limit: 128m
+    memswap_limit: 128m
+    cpus: "0.25"
+    pids_limit: 64
+    tmpfs:
+      - /run:rw,noexec,nosuid,nodev,size=16m,uid=584792,gid=584792,mode=0755
+      - /tmp:rw,noexec,nosuid,nodev,size=16m,uid=584792,gid=584792,mode=1777
+      - /var/log/squid:rw,noexec,nosuid,nodev,size=16m,uid=584792,gid=584792,mode=0750
+      - /var/spool/squid:rw,noexec,nosuid,nodev,size=32m,uid=584792,gid=584792,mode=0750
+    volumes:
+      - type: bind
+        source: ./deploy/teagram-demo/turnstile-egress.conf
+        target: /etc/squid/squid.conf
+        read_only: true
+      - type: bind
+        source: ./deploy/teagram-demo/pebble-health.yaml
+        target: /var/lib/pebble/default/layers/002-demo-health.yaml
+        read_only: true
+    healthcheck:
+      test: ["CMD", "/usr/bin/pebble", "health"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 10s
+    networks:
+      egress:
+        gw_priority: 1
+      backend:
+        ipv4_address: 198.18.130.252
+    restart: unless-stopped
+    logging: *logging
+
+  haproxy:
+    image: mirror.gcr.io/library/haproxy:3.2-alpine@sha256:51f173c6825753d9e3a888b1004a1c2cb730936cc9178730a5c555246bd161a2
+    platform: linux/amd64
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    mem_limit: 128m
+    memswap_limit: 128m
+    tmpfs:
+      - /tmp:size=16m,mode=1777
+    volumes:
+      - type: bind
+        source: ./deploy/teagram-demo/haproxy.cfg
+        target: /usr/local/etc/haproxy/haproxy.cfg
+        read_only: true
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8404/healthz"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 10s
+    depends_on:
+      teagramd:
+        condition: service_started
+    networks:
+      backend:
+        ipv4_address: 198.18.130.2
+    restart: unless-stopped
+    logging: *logging
+
+  edge:
+    image: mirror.gcr.io/library/nginx:1.28.0-alpine@sha256:09ab424a8c788f8d0fe3a64429f6d19dfa526885c8609b748d0943a75dcb9f8c
+    platform: linux/amd64
+    entrypoint: ["nginx", "-g", "daemon off;"]
+    user: "101:101"
+    ports:
+      - "${TEAGRAM_DEMO_EDGE_BIND:-127.0.0.1:8080}:8080"
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    mem_limit: 128m
+    memswap_limit: 128m
+    tmpfs:
+      - /tmp:size=16m,mode=1777
+    volumes:
+      - type: bind
+        source: ./deploy/teagram-demo/nginx.conf
+        target: /etc/nginx/nginx.conf
+        read_only: true
+      - type: bind
+        source: ./.state/teagram-demo/client.json
+        target: /usr/share/nginx/html/.well-known/telegramd/client
+        read_only: true
+    depends_on:
+      haproxy:
+        condition: service_healthy
+    networks: [backend, edge]
+    restart: unless-stopped
+    logging: *logging
+
+volumes:
+  pgdata:
+  tgkey:
+  # The setup and deploy scripts require this to be a separately mounted,
+  # capacity-limited filesystem. There is no root-filesystem fallback.
+  tgblobs:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: ${TEAGRAM_DEMO_BLOB_PATH:?set TEAGRAM_DEMO_BLOB_PATH in deploy/teagram-demo/.env}
+
+secrets:
+  teagram_demo_turnstile:
+    file: ${TEAGRAM_DEMO_TURNSTILE_SECRET_KEY_FILE:?set TEAGRAM_DEMO_TURNSTILE_SECRET_KEY_FILE in deploy/teagram-demo/.env}
+
+networks:
+  backend:
+    internal: true
+    ipam:
+      config:
+        - subnet: 198.18.130.0/24
+  edge:
+    driver: bridge
+  egress:
+    driver: bridge

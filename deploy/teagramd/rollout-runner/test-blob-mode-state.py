@@ -673,6 +673,22 @@ class BlobModeStateTests(unittest.TestCase):
                 self.volume, self.mode_source,
             )
 
+        # PostgreSQL 18 stores PGDATA below /var/lib/postgresql and needs the
+        # volume mounted at that root. Keep recognizing the PostgreSQL 16
+        # /var/lib/postgresql/data layout used by existing deployments too.
+        compose_18 = json.loads(json.dumps(compose))
+        compose_18["services"]["postgres"]["volumes"][0]["target"] = "/var/lib/postgresql"
+        rendered_18 = blob_mode.compose_inventory(compose_18, pathlib.Path("/srv/teagram-server"))
+        inspected_18 = json.loads(json.dumps(inspected))
+        inspected_18[1]["Mounts"][0]["Destination"] = "/var/lib/postgresql"
+        baseline_18 = blob_mode.container_inventory(inspected_18, pathlib.Path("/srv/teagram-server"))
+        self.assertEqual(baseline_18["containers"][0]["pgdata_mounts"], rendered_18["postgres_mounts"])
+        with patch.object(blob_mode, "docker_volume_exists"):
+            blob_mode.assert_compose_matches_initial(
+                baseline_18, rendered_18, {"kind": "local", "dir": blob_target},
+                self.volume, self.mode_source,
+            )
+
     def test_network_inventory_records_mode_and_attached_networks(self) -> None:
         compose = {
             "services": {

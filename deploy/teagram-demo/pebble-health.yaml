@@ -1,0 +1,11 @@
+checks:
+  squid-listener:
+    override: replace
+    level: ready
+    startup: enabled
+    period: 10s
+    timeout: 3s
+    threshold: 3
+    tcp:
+      host: 127.0.0.1
+      port: 3128

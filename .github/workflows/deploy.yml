@@ -35,6 +35,8 @@ jobs:
     runs-on: ubuntu-26.04
     timeout-minutes: 60
     environment: production
+    outputs:
+      sha: ${{ steps.target.outputs.sha }}
     permissions:
       contents: read
       actions: read
@@ -99,3 +101,50 @@ jobs:
       - name: Remove the deploy key
         if: ${{ always() }}
         run: rm -rf "$RUNNER_TEMP/ssh"
+
+  deploy-demo:
+    name: deploy public demo
+    needs: deploy
+    if: ${{ needs.deploy.result == 'success' && vars.TEAGRAM_DEMO_DEPLOY_ENABLED == 'true' }}
+    runs-on: ubuntu-26.04
+    timeout-minutes: 60
+    environment: demo
+    permissions:
+      contents: read
+
+    steps:
+      - name: Join the tailnet
+        uses: tailscale/github-action@d1b6cd204f8dceda5b3eaad7f1f767be390056cd # v4.2.0
+        with:
+          oauth-client-id: ${{ secrets.TS_OAUTH_CLIENT_ID }}
+          oauth-secret: ${{ secrets.TS_OAUTH_SECRET }}
+          tags: tag:ci-deploy
+          ping: ${{ vars.DEMO_DEPLOY_HOST }}
+
+      - name: Install the demo deploy key
+        env:
+          DEMO_DEPLOY_SSH_KEY: ${{ secrets.DEMO_DEPLOY_SSH_KEY }}
+          DEMO_DEPLOY_KNOWN_HOSTS: ${{ vars.DEMO_DEPLOY_KNOWN_HOSTS }}
+          DEMO_DEPLOY_HOST: ${{ vars.DEMO_DEPLOY_HOST }}
+        run: |
+          [[ -n "$DEMO_DEPLOY_SSH_KEY" && -n "$DEMO_DEPLOY_KNOWN_HOSTS" && -n "$DEMO_DEPLOY_HOST" ]]
+          [[ "$DEMO_DEPLOY_HOST" =~ ^[A-Za-z0-9.-]+$ ]]
+          install -d -m 700 "$RUNNER_TEMP/ssh-demo"
+          (umask 077 && printf '%s\n' "$DEMO_DEPLOY_SSH_KEY" > "$RUNNER_TEMP/ssh-demo/id_deploy")
+          printf '%s\n' "$DEMO_DEPLOY_KNOWN_HOSTS" > "$RUNNER_TEMP/ssh-demo/known_hosts"
+
+      - name: Deploy the tested commit after the dev deploy
+        env:
+          DEPLOY_SHA: ${{ needs.deploy.outputs.sha }}
+          DEMO_DEPLOY_HOST: ${{ vars.DEMO_DEPLOY_HOST }}
+        run: |
+          [[ "$DEPLOY_SHA" =~ ^[0-9a-f]{40}$ ]]
+          ssh -T -i "$RUNNER_TEMP/ssh-demo/id_deploy" \
+            -o IdentitiesOnly=yes -o BatchMode=yes \
+            -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$RUNNER_TEMP/ssh-demo/known_hosts" \
+            -o ServerAliveInterval=30 -o ServerAliveCountMax=10 \
+            "root@$DEMO_DEPLOY_HOST" "$DEPLOY_SHA" </dev/null
+
+      - name: Remove the demo deploy key
+        if: ${{ always() }}
+        run: rm -rf "$RUNNER_TEMP/ssh-demo"
