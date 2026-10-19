@@ -668,7 +668,7 @@ def table_counts(container: str, database: str) -> str:
         "SELECT format('SELECT %L, count(*) FROM %I.%I;', "
         "schemaname || '.' || tablename, schemaname, tablename) "
         "FROM pg_tables WHERE schemaname <> 'information_schema' "
-        "AND left(schemaname, 3) <> 'pg_' ORDER BY 1;\n\\gexec\n"
+        "AND left(schemaname, 3) <> 'pg_' ORDER BY 1\n\\gexec\n"
     ).encode()
     return output([
         "docker", "exec", "-i", container, "psql", "-X", "-A", "-t",

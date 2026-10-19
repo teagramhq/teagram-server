@@ -584,6 +584,19 @@ class PostgresImageReferenceTest(unittest.TestCase):
 
 
 class RuntimeTableCountsTest(unittest.TestCase):
+    def test_table_counts_query_prints_only_count_rows(self) -> None:
+        runner = load_runner()
+        with mock.patch.object(runner, "output", return_value="") as output:
+            runner.table_counts("postgres-id", "teagram")
+
+        query = output.call_args.kwargs["input_bytes"].decode()
+        generator, gexec = query.rstrip("\n").rsplit("\n", 1)
+        self.assertEqual(gexec, "\\gexec")
+        # A terminated generator runs once on its own and prints the generated
+        # SELECT statements ahead of the count rows that \gexec produces.
+        self.assertFalse(generator.rstrip().endswith(";"))
+        print("PASS table counts buffer the generator query for \\gexec only")
+
     def test_allows_unchanged_counts_when_atlas_ledger_is_absent(self) -> None:
         runner = load_runner()
         counts = "public.stack_move_probe|2\n"
