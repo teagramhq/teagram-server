@@ -94,14 +94,15 @@ const (
 // Server is an MTProto server: it accepts transport connections, performs key
 // exchange for new clients, and dispatches decrypted RPC requests to a Handler.
 type Server struct {
-	dcID        int
-	key         exchange.PrivateKey
-	keys        AuthKeyStore
-	handler     Handler
-	rpcTracer   *RPCTracer
-	registry    *SessionRegistry
-	shutdown    *serverShutdown
-	peerCancels *peerCancelBudget
+	dcID                    int
+	key                     exchange.PrivateKey
+	keys                    AuthKeyStore
+	handler                 Handler
+	clientDiscoveryDocument []byte
+	rpcTracer               *RPCTracer
+	registry                *SessionRegistry
+	shutdown                *serverShutdown
+	peerCancels             *peerCancelBudget
 
 	cipher crypto.Cipher
 	clock  clock.Clock

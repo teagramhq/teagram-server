@@ -2188,7 +2188,7 @@ run_stack_move() {
       return 1
       ;;
   esac
-  git -C "$CHECKOUT" worktree add --detach "$TARGET_CHECKOUT" "$TARGET_SHA" >/dev/null || {
+  (umask 022; git -C "$CHECKOUT" worktree add --detach "$TARGET_CHECKOUT" "$TARGET_SHA" >/dev/null) || {
     fail 'cannot create target checkout worktree'
     return 1
   }

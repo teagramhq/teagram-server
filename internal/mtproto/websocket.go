@@ -16,11 +16,15 @@ import (
 
 	"github.com/coder/websocket"
 	"github.com/gotd/td/transport"
+
+	"github.com/teagramhq/teagram-server/internal/discovery"
 )
 
 const (
 	// websocketPath is the endpoint used by Telegram Web's MTProto transport.
 	websocketPath = "/apiws"
+	// clientDiscoveryPath publishes the public identity for browser clients.
+	clientDiscoveryPath = "/.well-known/telegramd/client"
 	// The MTProto codecs reject payloads larger than 16 MiB. The extra bytes
 	// cover the largest transport and obfuscation headers that can share a
 	// WebSocket message with one payload.
@@ -547,6 +551,17 @@ func (s *Server) SetWebSocketOriginPatterns(patterns []string) {
 	s.webSocketOriginPatterns = append([]string(nil), patterns...)
 }
 
+// SetClientDiscoveryDocument configures the public identity served beside the
+// WebSocket endpoint. Call it before ServeWebSocket.
+func (s *Server) SetClientDiscoveryDocument(doc discovery.Document) error {
+	data, err := discovery.MarshalDocument(doc)
+	if err != nil {
+		return fmt.Errorf("marshal client discovery document: %w", err)
+	}
+	s.clientDiscoveryDocument = append([]byte(nil), data...)
+	return nil
+}
+
 func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request, handler Handler, originPatterns []string) {
 	state, ok := r.Context().Value(webSocketConnKey{}).(*webSocketConnState)
 	if !ok {
@@ -556,6 +571,10 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request, handler
 	// Keep the slot tied to the request when the HTTP upgrade fails. The listener
 	// worker closes address-establishment failures before they reach net/http.
 	defer state.slot.clear()
+	if r.URL.EscapedPath() == clientDiscoveryPath {
+		s.handleClientDiscovery(w, r)
+		return
+	}
 	if r.URL.Path != websocketPath {
 		w.Header().Set("Connection", "close")
 		http.NotFound(w, r)
@@ -623,6 +642,28 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request, handler
 		return state.socket.markServing()
 	}, handler); err != nil && !isDisconnect(err) {
 		s.logConnectionFailure(err)
+	}
+}
+
+func (s *Server) handleClientDiscovery(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet && r.Method != http.MethodOptions {
+		w.Header().Set("Allow", "GET, OPTIONS")
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+	if r.Method == http.MethodOptions {
+		w.Header().Set("Access-Control-Allow-Methods", "GET, OPTIONS")
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+	if len(s.clientDiscoveryDocument) == 0 {
+		http.NotFound(w, r)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	if _, err := w.Write(s.clientDiscoveryDocument); err != nil {
+		s.log.Info("write public client discovery document", "err", err)
 	}
 }
 

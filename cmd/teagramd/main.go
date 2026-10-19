@@ -648,7 +648,8 @@ func runAtBlobModePath(log *slog.Logger, blobModePath string) error {
 		return err
 	}
 	advertise := net.JoinHostPort(cfg.AdvertiseHost, strconv.Itoa(cfg.AdvertisePort))
-	if _, err := discovery.NewDocument(advertise, cfg.DCID, &key.PublicKey); err != nil {
+	clientDiscovery, err := discovery.NewDocument(advertise, cfg.DCID, &key.PublicKey)
+	if err != nil {
 		return fmt.Errorf("validate discovery identity: %w", err)
 	}
 	log.Info("server RSA key", "key_id", keyID, "fingerprint", fingerprint, "path", cfg.RSAKeyPath)
@@ -790,6 +791,9 @@ func runAtBlobModePath(log *slog.Logger, blobModePath string) error {
 
 	server := mtproto.New(exchange.PrivateKey{RSA: key}, cfg.DCID, mtproto.NewPgAuthKeyStore(st), handler, log)
 	server.SetWebSocketOriginPatterns(cfg.WebSocketOriginPatterns)
+	if err := server.SetClientDiscoveryDocument(clientDiscovery); err != nil {
+		return fmt.Errorf("set client discovery document: %w", err)
+	}
 	if err := trustClientAddr(server, cfg, log); err != nil {
 		return err
 	}
