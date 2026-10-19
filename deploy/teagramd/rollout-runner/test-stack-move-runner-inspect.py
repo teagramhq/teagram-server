@@ -609,6 +609,22 @@ class RuntimeTableCountsTest(unittest.TestCase):
             )
         )
 
+    def test_allows_a_database_without_tables(self) -> None:
+        runner = load_runner()
+
+        self.assertTrue(runner.runtime_table_counts_compatible("", ""))
+        self.assertTrue(
+            runner.runtime_table_counts_compatible(
+                "", "atlas_schema_revisions.atlas_schema_revisions|72\n"
+            )
+        )
+        self.assertFalse(
+            runner.runtime_table_counts_compatible("", "public.stack_move_probe|0\n")
+        )
+        self.assertFalse(
+            runner.runtime_table_counts_compatible("public.stack_move_probe|2\n", "")
+        )
+
     def test_allows_target_migrations_to_create_the_atlas_ledger(self) -> None:
         runner = load_runner()
         source = "public.stack_move_probe|2\n"

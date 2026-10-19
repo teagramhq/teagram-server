@@ -692,7 +692,7 @@ def runtime_table_counts_compatible(source_counts: str, target_counts: str) -> b
             ):
                 return None
             counts[table] = int(count)
-        return counts or None
+        return counts
 
     source = parse(source_counts)
     target = parse(target_counts)
