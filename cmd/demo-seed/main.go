@@ -578,10 +578,11 @@ func verifyTurnstileWithAPI(ctx context.Context, api turnstileProbeAPI, username
 		PhoneNumber: username, PhoneCodeHash: sentCode.PhoneCodeHash, PhoneCode: "00000",
 	})
 	_, responseRequiresSignup := signIn.(*tg.AuthAuthorizationSignUpRequired)
-	if !isSignUpRequired(err) && !(err == nil && responseRequiresSignup) {
-		if err == nil {
+	if err == nil {
+		if !responseRequiresSignup {
 			return errors.New("sign-up probe unexpectedly authenticated")
 		}
+	} else if !isSignUpRequired(err) {
 		return fmt.Errorf("sign-up probe did not reach registration: %w", err)
 	}
 	// Keep the probe non-creating if the CAPTCHA gate is ever missing.
