@@ -234,6 +234,90 @@ class InspectComposeSelectionTest(unittest.TestCase):
             self.assertEqual(render_selections[2][0].name, "target-docker-compose.yml")
             print("PASS non-pinned Compose selection renders the target SHA layout")
 
+    def test_existing_teagram_project_is_compared_with_teagramd(self) -> None:
+        runner = load_runner()
+        with tempfile.TemporaryDirectory(prefix="stack-move-inspect-teagram-") as temporary:
+            checkout = pathlib.Path(temporary)
+            default_compose = checkout / "docker-compose.yml"
+            default_compose.write_text("name: teagram\n", encoding="utf-8")
+            override = checkout / "docker-compose.override.yml"
+            override.write_text("services:\n  teagramd:\n    ports: []\n", encoding="utf-8")
+            env_file = checkout / ".env"
+            env_file.write_text("POSTGRES_PASSWORD=fixture-only\n", encoding="utf-8")
+            current_config = {
+                "name": "teagram",
+                "services": {
+                    "postgres": {
+                        "environment": {"POSTGRES_DB": "telegram"},
+                        "volumes": [{
+                            "type": "volume",
+                            "source": "pgdata",
+                            "target": "/var/lib/postgresql/18/docker",
+                        }],
+                    },
+                    "teagramd": {
+                        "volumes": [
+                            {"type": "volume", "source": "tgkey", "target": "/var/lib/teagramd"},
+                            {"type": "volume", "source": "tgblobs", "target": "/var/lib/teagramd-blobs"},
+                        ],
+                    },
+                },
+                "volumes": {
+                    "pgdata": {"name": "teagram_pgdata"},
+                    "tgkey": {"name": "teagram_tgkey"},
+                    "tgblobs": {"name": "teagram_tgblobs"},
+                    "rustfsdata": {"name": "teagram_rustfsdata"},
+                },
+            }
+            target_sha = "1234567890abcdef1234567890abcdef12345678"
+
+            def target_compose(
+                target_checkout: pathlib.Path,
+                sha: str,
+                destination: pathlib.Path,
+            ) -> pathlib.Path:
+                self.assertEqual(target_checkout, checkout)
+                self.assertEqual(sha, target_sha)
+                target_path = destination / "target-docker-compose.yml"
+                target_path.write_text("name: teagram\n", encoding="utf-8")
+                return target_path
+
+            def render_compose(
+                _project: str | None,
+                _project_dir: pathlib.Path,
+                _env_file: pathlib.Path,
+                files: list[pathlib.Path],
+                _profiles: object = (),
+            ) -> dict[str, object]:
+                self.assertTrue(files)
+                return current_config
+
+            args = argparse.Namespace(
+                checkout=checkout,
+                target_sha=target_sha,
+                env_file=env_file,
+                override=override,
+            )
+            output = io.StringIO()
+            with mock.patch.dict(
+                os.environ,
+                {
+                    "COMPOSE_FILE": os.pathsep.join((str(default_compose), str(override))),
+                    "PATH": os.environ.get("PATH", os.defpath),
+                },
+                clear=True,
+            ), mock.patch.object(runner, "render_compose", side_effect=render_compose), \
+                    mock.patch.object(runner, "inspect_git_target", side_effect=target_compose), \
+                    contextlib.redirect_stdout(output):
+                runner.inspect(args)
+
+            result = json.loads(output.getvalue())
+            self.assertFalse(result["changed"])
+            self.assertEqual(result["source"], result["target"])
+            self.assertEqual(result["source"]["project"], "teagram")
+            self.assertEqual(result["source"]["server"], "teagramd")
+            print("PASS apply layout preflight accepts the current teagram project")
+
 
 class MoveSecretMigrationTest(unittest.TestCase):
     def test_move_uses_live_compose_and_stages_legacy_secret(self) -> None:
