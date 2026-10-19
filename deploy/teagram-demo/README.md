@@ -235,9 +235,11 @@ The activity session and persistent rate limit live in
 `/var/lib/teagram-demo-activity`, outside the weekly wipe. The wipe pauses the
 timer during reseeding and resumes it only after the seed and public checks
 succeed. It refreshes the systemd credential from the seed's root-only account
-inventory for every run; the password is not passed in arguments, environment
-variables, or logs. The activity container can reach only the internal backend
-network and has no database credentials.
+inventory for every run. The runner stages it in a root-only transient `/run`
+directory for Docker's bind mount, removes the file after the run, and systemd
+removes the directory on stop. The password is not passed in arguments,
+environment variables, or logs. The activity container can reach only the
+internal backend network and has no database credentials.
 
 The three content broadcast channels each contain 32 posts, including text,
 replies, a generated photo, a poll, and a reserved `.invalid` link. The welcome
