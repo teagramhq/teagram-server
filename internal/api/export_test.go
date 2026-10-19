@@ -157,6 +157,11 @@ func (r *SignUpTestRunner) SetRegistrationModeForTest(mode config.RegistrationMo
 	r.handler.registrationMode = mode
 }
 
+// SetWelcomeChannelForTest configures the channel used after account admission.
+func (r *SignUpTestRunner) SetWelcomeChannelForTest(handle string) {
+	r.handler.welcomeChannel = handle
+}
+
 // SetTurnstileVerifierForTest configures the fake challenge verifier used by
 // sign-up tests.
 func (r *SignUpTestRunner) SetTurnstileVerifierForTest(siteKey string, verifier SignUpTurnstileVerifier) {

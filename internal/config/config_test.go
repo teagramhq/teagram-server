@@ -1236,6 +1236,29 @@ func TestLoadRegistrationMode(t *testing.T) {
 	}
 }
 
+func TestLoadWelcomeChannel(t *testing.T) {
+	t.Setenv("TG_POSTGRES_DSN", "postgres://localhost/tg")
+	t.Setenv("TG_AUTHKEY_ENC_KEY", validEncKey)
+	t.Setenv("TG_WELCOME_CHANNEL", "")
+
+	cfg, err := config.Load(discardLog())
+	if err != nil {
+		t.Fatalf("Load with no welcome channel: %v", err)
+	}
+	if cfg.WelcomeChannel != "" {
+		t.Fatalf("WelcomeChannel without TG_WELCOME_CHANNEL = %q, want empty", cfg.WelcomeChannel)
+	}
+
+	t.Setenv("TG_WELCOME_CHANNEL", "Welcome_Demo")
+	cfg, err = config.Load(discardLog())
+	if err != nil {
+		t.Fatalf("Load with configured welcome channel: %v", err)
+	}
+	if cfg.WelcomeChannel != "Welcome_Demo" {
+		t.Errorf("WelcomeChannel = %q, want exact configured handle", cfg.WelcomeChannel)
+	}
+}
+
 func TestLoadNewRateLimits(t *testing.T) {
 	t.Setenv("TG_POSTGRES_DSN", "postgres://localhost/tg")
 	t.Setenv("TG_AUTHKEY_ENC_KEY", validEncKey)

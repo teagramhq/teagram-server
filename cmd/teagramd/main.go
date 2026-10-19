@@ -781,11 +781,11 @@ func runAtBlobModePath(log *slog.Logger, blobModePath string) error {
 		turnstileVerifier = api.NewTurnstileVerifier(cfg.Turnstile.SecretKey)
 	}
 	newHandler := func(registrationMode config.RegistrationMode) mtproto.Handler {
-		return api.NewWithPhotoThumbsAndDialogFilterSyncAndUploadPartTTLAndTurnstile(
+		return api.NewWithPhotoThumbsAndDialogFilterSyncAndUploadPartTTLAndTurnstileAndWelcomeChannel(
 			st, cfg.DCID, tgcfg, log, cfg.LogLoginCodes, cfg.MaxFileBytes, blobs,
 			cfg.MaxUserStorageBytes, peers, photos, cfg.RateLimits, registrationMode,
 			dialogFilterSync, photoThumbs, cfg.UploadPartTTL, cfg.Turnstile.SiteKey,
-			turnstileVerifier, notifyMetrics,
+			turnstileVerifier, cfg.WelcomeChannel, notifyMetrics,
 		)
 	}
 	handler := newHandler(cfg.RegistrationMode)
