@@ -214,6 +214,33 @@ internal backend network with a read-only root filesystem.
 and checks that verified marker counts and search results stay stable. The
 initial install and weekly wipe run this test before the production gate check.
 
+## Scheduled activity
+
+Scheduled activity is disabled until explicitly installed. From
+`/opt/teagram-demo`, enable it with one command:
+
+```sh
+sudo deploy/teagram-demo/install-activity.sh
+```
+
+The timer runs about every ten minutes with a randomized delay. Each run uses
+the seeded `demo_ren` account to post one fixed fictional message in the
+`river` megagroup (`teagramdemoriver`). The root-owned settings file at
+`/etc/default/teagram-demo-activity` can select `river`, `garden`, or
+`workshop`, and set a limit from 1 to 6 posts per hour and a minimum interval
+of at least five minutes. The client checks the resolved peer is one of those
+seeded megagroups before sending. It does not reply or mention anyone.
+
+The activity session and persistent rate limit live in
+`/var/lib/teagram-demo-activity`, outside the weekly wipe. The wipe pauses the
+timer during reseeding and resumes it only after the seed and public checks
+succeed. It refreshes the systemd credential from the seed's root-only account
+inventory for every run. The runner stages it in a root-only transient `/run`
+directory for Docker's bind mount, removes the file after the run, and systemd
+removes the directory on stop. The password is not passed in arguments,
+environment variables, or logs. The activity container can reach only the
+internal backend network and has no database credentials.
+
 The three content broadcast channels each contain 32 posts, including text,
 replies, a generated photo, a poll, and a reserved `.invalid` link. The welcome
 channel has the pinned weekly-wipe note. Three public groups contain fictional

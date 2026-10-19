@@ -78,6 +78,26 @@ cmp -s "$CLIENT_CONFIG" "$TMP_DIR/public-client.json" || demo_fail 'public clien
 
 # The seed check and public identity probe run before any destructive operation.
 # The separate tgkey volume and .env are deliberately never removed or rewritten.
+# Pause scheduled activity and wait for any in-flight API call before the
+# database is reset. Its session and rate state live outside the weekly wipe.
+ACTIVITY_TIMER=/etc/systemd/system/teagram-demo-activity.timer
+ACTIVITY_SERVICE=/etc/systemd/system/teagram-demo-activity.service
+ACTIVITY_TIMER_WAS_ACTIVE=0
+if [[ -f "$ACTIVITY_TIMER" ]]; then
+  if systemctl is-active --quiet teagram-demo-activity.timer; then
+    ACTIVITY_TIMER_WAS_ACTIVE=1
+    systemctl stop teagram-demo-activity.timer
+  fi
+fi
+if [[ -f "$ACTIVITY_SERVICE" ]]; then
+  systemctl stop teagram-demo-activity.service
+fi
+ACTIVITY_LOCK=/var/lib/teagram-demo-activity/activity.lock
+if [[ -d /var/lib/teagram-demo-activity && ! -L /var/lib/teagram-demo-activity && -e "$ACTIVITY_LOCK" ]]; then
+  [[ -f "$ACTIVITY_LOCK" && ! -L "$ACTIVITY_LOCK" && "$(stat -c '%u:%a' "$ACTIVITY_LOCK")" == '0:600' ]] ||
+    demo_fail 'activity lock file is unsafe'
+  flock -x -w 20m "$ACTIVITY_LOCK" true || demo_fail 'timed out waiting for scheduled activity to stop'
+fi
 # Stop every public path before resetting data. The seed-only overlay never
 # starts HAProxy or edge.
 demo_compose stop edge haproxy teagramd turnstile-egress
@@ -112,4 +132,10 @@ python3 "$SCRIPT_DIR/smoke.py" "$CLIENT_CONFIG"
 demo_compose run --rm --no-deps teagramd client-config > "$TMP_DIR/client-after-wipe.json"
 AFTER_SPKI=$(jq -er '.mtproto.rsa_spki' "$TMP_DIR/client-after-wipe.json")
 [[ "$AFTER_SPKI" == "$BEFORE_SPKI" ]] || demo_fail 'weekly wipe changed the persistent RSA identity'
+if [[ -f "$ACTIVITY_SERVICE" ]]; then
+  systemctl reset-failed teagram-demo-activity.service
+  if ((ACTIVITY_TIMER_WAS_ACTIVE)); then
+    systemctl start teagram-demo-activity.timer
+  fi
+fi
 printf 'weekly wipe=verified rsa_identity=preserved blob_mount=%s\n' "$BLOB_PATH"

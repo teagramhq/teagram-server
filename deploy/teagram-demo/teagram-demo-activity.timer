@@ -1,0 +1,12 @@
+[Unit]
+Description=Schedule public demo activity
+
+[Timer]
+OnBootSec=8m
+OnUnitActiveSec=10m
+RandomizedDelaySec=5m
+Persistent=true
+Unit=teagram-demo-activity.service
+
+[Install]
+WantedBy=timers.target

@@ -19,6 +19,7 @@ type accountSpec struct {
 	about     string
 	avatar    int
 	owner     bool
+	activity  bool
 }
 
 type spaceSpec struct {
@@ -39,7 +40,7 @@ type remoteSpace struct {
 var seedAccounts = []accountSpec{
 	{loginID: "demo_seed_owner", username: "demo_seed_owner", firstName: "Mira", lastName: "Wells", about: "A fictional field naturalist collecting quiet paths and cloud maps.", avatar: 0, owner: true},
 	{loginID: "demo_iona", username: "demo_iona", firstName: "Iona", lastName: "Vale", about: "Sketching riverside paths and small changes in the weather.", avatar: 1},
-	{loginID: "demo_ren", username: "demo_ren", firstName: "Ren", lastName: "Marlow", about: "Keeping a notebook of garden birds and good walking routes.", avatar: 2},
+	{loginID: "demo_ren", username: "demo_ren", firstName: "Ren", lastName: "Marlow", about: "Keeping a notebook of garden birds and good walking routes.", avatar: 2, activity: true},
 	{loginID: "demo_sasha", username: "demo_sasha", firstName: "Sasha", lastName: "North", about: "Making paper maps for slow walks and curious detours.", avatar: 3},
 	{loginID: "demo_elio", username: "demo_elio", firstName: "Elio", lastName: "Park", about: "Collecting color studies from parks, bridges, and open sky.", avatar: 4},
 	{loginID: "demo_tavi", username: "demo_tavi", firstName: "Tavi", lastName: "Linden", about: "A patient observer of trees, paths, and changing light.", avatar: 5},
