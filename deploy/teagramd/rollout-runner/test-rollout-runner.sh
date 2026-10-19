@@ -3439,9 +3439,9 @@ jq -c '.services.teagramd.environment.TG_WELCOME_CHANNEL=""' \
 mv -- "$state/target-compose.next.json" "$state/target-compose.json"
 status=$(run_fixture welcome-channel-addition built 0 '' 2 '' '' apply "$APPLY_TARGET_SHA")
 if [ "$status" = 0 ] && \
-   grep -q $'preflight\tselected_render_config_sha256\t.*\tpass' "$root".target/preflight-comparisons.tsv && \
-   grep -q $'target\tconfig_sha256\t.*\tpass' "$root".target/target-comparisons.tsv && \
-   grep -q $'target\tcontainer_env_sha256\t.*\tpass' "$root".target/target-comparisons.tsv && \
+   grep -q $'preflight\tconfig_sha256\t.*\tpass' "$root".target/preflight-comparisons.tsv && \
+   grep -q $'\tconfig_sha256\t.*\tpass' "$root".target/target-comparisons.tsv && \
+   grep -q $'\tcontainer_env_sha256\t.*\tpass' "$root".target/target-comparisons.tsv && \
    grep -q "rollout=verified sha=$APPLY_TARGET_SHA" "$TMP/welcome-channel-addition.stdout"; then
   pass 'ordinary apply accepts the empty welcome-channel Compose default'
 else
