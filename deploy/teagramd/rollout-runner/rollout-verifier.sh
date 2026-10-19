@@ -95,7 +95,7 @@ verify_changed_container_environment() {
   return 0
 }
 
-verify_public_websocket_container_environment() {
+verify_safe_public_container_environment() {
   local inspect_json=$1
   if ! printf '%s\n' "$inspect_json" | jq -e '
     def item: if type == "array" then .[0] else . end;
@@ -109,16 +109,17 @@ verify_public_websocket_container_environment() {
     | if ($env | type) != "array" then false else
         safe_setting($env; "TG_PUBLIC_WEBSOCKET_LISTEN_ADDR"; [""]) and
         safe_setting($env; "TG_PUBLIC_REGISTRATION"; ["closed"]) and
-        safe_setting($env; "TG_PUBLIC_WEBSOCKET_ALLOWED_ORIGINS"; [""])
+        safe_setting($env; "TG_PUBLIC_WEBSOCKET_ALLOWED_ORIGINS"; [""]) and
+        safe_setting($env; "TG_WELCOME_CHANNEL"; [""])
       end
   ' >/dev/null; then
-    printf '%s\n' 'container has unsafe public websocket environment settings' >&2
+    printf '%s\n' 'container has unsafe public environment settings' >&2
     return 1
   fi
   return 0
 }
 
-verify_public_websocket_compose_environment() {
+verify_safe_public_compose_environment() {
   local compose_json=$1
   if ! printf '%s\n' "$compose_json" | jq -e '
     def safe_setting($env; $name; $allowed):
@@ -129,10 +130,11 @@ verify_public_websocket_compose_environment() {
     | if ($env | type) != "object" then false else
         safe_setting($env; "TG_PUBLIC_WEBSOCKET_LISTEN_ADDR"; [""]) and
         safe_setting($env; "TG_PUBLIC_REGISTRATION"; ["closed"]) and
-        safe_setting($env; "TG_PUBLIC_WEBSOCKET_ALLOWED_ORIGINS"; [""])
+        safe_setting($env; "TG_PUBLIC_WEBSOCKET_ALLOWED_ORIGINS"; [""]) and
+        safe_setting($env; "TG_WELCOME_CHANNEL"; [""])
       end
   ' >/dev/null; then
-    printf '%s\n' 'resolved Compose has unsafe public websocket environment settings' >&2
+    printf '%s\n' 'resolved Compose has unsafe public environment settings' >&2
     return 1
   fi
   return 0
@@ -170,9 +172,9 @@ snapshot_from_json() {
     return 1
   fi
 
-  verify_public_websocket_container_environment "$inspect_json" || return 1
+  verify_safe_public_container_environment "$inspect_json" || return 1
   if [ "$compose_source" = selected-compose-render ]; then
-    verify_public_websocket_compose_environment "$compose_json" || return 1
+    verify_safe_public_compose_environment "$compose_json" || return 1
   fi
 
   mode_source=$(canonical_blob_mode_source) || return 1
@@ -246,7 +248,7 @@ snapshot_from_json() {
     | if type != "array" then error("container environment must be an array") else
         map(select(type != "string" or (startswith("TG_REPLICA_COUNT=") | not)))
         | map(select(type != "string" or (startswith("TG_CLIENT_ADDR_TRUST=") | not)))
-        | map(select(type != "string" or ((split("=")[0]) as $key | (["TG_PUBLIC_WEBSOCKET_LISTEN_ADDR", "TG_PUBLIC_REGISTRATION", "TG_PUBLIC_WEBSOCKET_ALLOWED_ORIGINS"] | index($key) == null))))
+        | map(select(type != "string" or ((split("=")[0]) as $key | (["TG_PUBLIC_WEBSOCKET_LISTEN_ADDR", "TG_PUBLIC_REGISTRATION", "TG_PUBLIC_WEBSOCKET_ALLOWED_ORIGINS", "TG_WELCOME_CHANNEL"] | index($key) == null))))
         | map(select(type != "string" or ((split("=")[0]) as $key | any($added[]; . == $key) | not)))
         | map(select(type != "string" or ((split("=")[0]) as $key | any($changed[]; . == $key) | not)))
         | sort
@@ -314,7 +316,7 @@ snapshot_from_json() {
         .services.teagramd.environment |= del(
           .TG_REPLICA_COUNT, .TG_CLIENT_ADDR_TRUST,
           .TG_PUBLIC_WEBSOCKET_LISTEN_ADDR, .TG_PUBLIC_REGISTRATION,
-          .TG_PUBLIC_WEBSOCKET_ALLOWED_ORIGINS)
+          .TG_PUBLIC_WEBSOCKET_ALLOWED_ORIGINS, .TG_WELCOME_CHANNEL)
       end
       | .services |= with_entries(
           if (.key | startswith("teagramd")) and (.value.volumes | type) == "array" then

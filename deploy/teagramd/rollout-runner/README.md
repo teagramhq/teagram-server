@@ -19,6 +19,10 @@ rollout cannot change backend. There is no fresh-S3 or recovered-local
 publisher in this stage, and no manual record-writing path. A default S3 render
 without a matching authority intentionally fails closed.
 
+Preflight treats disabled public WebSocket settings and an empty
+`TG_WELCOME_CHANNEL` as equivalent when they are unset or passed through as
+empty Compose values. Active values fail closed.
+
 For every local-backed rollout, read the running `teagramd` container's
 `com.docker.compose.project.config_files` label and carry that Compose selection
 forward unchanged. With ordinary local authority, it must start with a

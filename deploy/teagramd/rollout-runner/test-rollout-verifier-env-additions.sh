@@ -172,25 +172,28 @@ public_ws_compose=$(jq -c '
   .services.teagramd.environment += {
     TG_PUBLIC_WEBSOCKET_LISTEN_ADDR:"",
     TG_PUBLIC_REGISTRATION:"closed",
-    TG_PUBLIC_WEBSOCKET_ALLOWED_ORIGINS:""
+    TG_PUBLIC_WEBSOCKET_ALLOWED_ORIGINS:"",
+    TG_WELCOME_CHANNEL:""
   }
 ' <<< "$COMPOSE_JSON")
 public_ws_inspect=$(printf '%s' "$legacy_inspect" | jq -c '
   .Config.Env += [
     "TG_PUBLIC_WEBSOCKET_LISTEN_ADDR=",
     "TG_PUBLIC_REGISTRATION=closed",
-    "TG_PUBLIC_WEBSOCKET_ALLOWED_ORIGINS="
+    "TG_PUBLIC_WEBSOCKET_ALLOWED_ORIGINS=",
+    "TG_WELCOME_CHANNEL="
   ]
 ')
 public_ws_snapshot=$(snapshot_from_json \
   "$public_ws_inspect" "$public_ws_compose" "$ENV_FILE" "$OVERRIDE_FILE" selected-compose-render target)
 [ "$(jq -r '.config_sha256' <<< "$legacy_snapshot")" = "$(jq -r '.config_sha256' <<< "$public_ws_snapshot")" ]
 [ "$(jq -r '.container_env_sha256' <<< "$legacy_snapshot")" = "$(jq -r '.container_env_sha256' <<< "$public_ws_snapshot")" ]
-printf '%s\n' 'PASS safe public websocket defaults preserve resolved config and container environment equivalence'
+printf '%s\n' 'PASS safe public defaults preserve resolved config and container environment equivalence'
 
-for setting in TG_PUBLIC_WEBSOCKET_LISTEN_ADDR TG_PUBLIC_REGISTRATION TG_PUBLIC_WEBSOCKET_ALLOWED_ORIGINS; do
+for setting in TG_PUBLIC_WEBSOCKET_LISTEN_ADDR TG_PUBLIC_REGISTRATION TG_PUBLIC_WEBSOCKET_ALLOWED_ORIGINS TG_WELCOME_CHANNEL; do
   case "$setting" in
     TG_PUBLIC_REGISTRATION) unsafe_value=invite ;;
+    TG_WELCOME_CHANNEL) unsafe_value=welcome ;;
     *) unsafe_value=https://public.example ;;
   esac
   unsafe_compose=$(jq -c --arg setting "$setting" --arg value "$unsafe_value" \
