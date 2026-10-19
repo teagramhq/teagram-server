@@ -698,15 +698,19 @@ jq -e '
   and .target_project == "teagram"
   and .source_database == "telegram"
   and .target_database == "teagram"
-  and .table_row_counts_equal == true
+  and .application_table_row_counts_equal == true
   and .roles_equal == true
   and .volumes.old_volumes_retained == true
   and .volumes.source_pgdata_unchanged == true
   and .isolated_restore.row_counts_equal == true
   and .isolated_restore.roles_equal == true
 ' "$evidence_file" >/dev/null || fail 'move evidence is missing required database and volume results'
-cmp -s "$EVIDENCE_DIR/table-row-counts.source.tsv" "$EVIDENCE_DIR/table-row-counts.target-runtime.tsv" || \
-  fail 'per-table counts differ after PostgreSQL 18 container recreation'
+awk -F'|' '$2 ~ /^[0-9]+$/ && $1 != "atlas_schema_revisions.atlas_schema_revisions" {print $1 "|" $2}' \
+  "$EVIDENCE_DIR/table-row-counts.source.tsv" > "$TMP/table-row-counts.source-application.tsv"
+awk -F'|' '$2 ~ /^[0-9]+$/ && $1 != "atlas_schema_revisions.atlas_schema_revisions" {print $1 "|" $2}' \
+  "$EVIDENCE_DIR/table-row-counts.target-runtime.tsv" > "$TMP/table-row-counts.target-runtime-application.tsv"
+cmp -s "$TMP/table-row-counts.source-application.tsv" "$TMP/table-row-counts.target-runtime-application.tsv" || \
+  fail 'application table counts differ after PostgreSQL 18 container recreation'
 cmp -s "$EVIDENCE_DIR/pgdata.source-stopped.sha256" "$EVIDENCE_DIR/pgdata.source-retained.sha256" || \
   fail 'old PostgreSQL 16 volume changed during the move'
 jq -e 'any(.[]; .name == "browser_acceptance_probe" and .login == true and .password_set == true)' \

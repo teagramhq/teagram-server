@@ -687,6 +687,25 @@ def table_counts(container: str, database: str) -> str:
     ], input_bytes=query)
 
 
+def runtime_table_counts_match(source_counts: str, target_counts: str) -> bool:
+    def application_counts(counts: str) -> dict[str, int]:
+        result: dict[str, int] = {}
+        for line in counts.splitlines():
+            if "|" not in line:
+                continue
+            table, count = line.rsplit("|", 1)
+            if not table or not count.isdecimal():
+                raise MoveError("PostgreSQL row-count output is malformed")
+            if table == "atlas_schema_revisions.atlas_schema_revisions":
+                continue
+            if table in result:
+                raise MoveError("PostgreSQL row-count output contains duplicate tables")
+            result[table] = int(count)
+        return result
+
+    return application_counts(source_counts) == application_counts(target_counts)
+
+
 def role_rows(container: str) -> tuple[str, list[dict[str, object]]]:
     query = (
         "SELECT rolname, rolsuper, rolinherit, rolcreaterole, rolcreatedb, "
@@ -1493,12 +1512,13 @@ def move(args: argparse.Namespace) -> None:
             ]) != 1:
                 raise MoveError("running rustfs is not using teagram_rustfsdata at /data")
         target_counts = table_counts(target_postgres_id, target_database)
-        if source_counts != target_counts:
-            raise MoveError("PostgreSQL 18 row counts changed after its runtime container was recreated")
+        write_private(evidence_dir / "table-row-counts.target-runtime.tsv", (target_counts + "\n").encode())
+        # Atlas adds migration-history rows after the isolated restore; compare every application table here.
+        if not runtime_table_counts_match(source_counts, target_counts):
+            raise MoveError("PostgreSQL 18 application table row counts changed after its runtime container was recreated")
         target_roles, target_role_evidence = role_rows(target_postgres_id)
         if source_roles != target_roles:
             raise MoveError("PostgreSQL roles changed after the runtime container was recreated")
-        write_private(evidence_dir / "table-row-counts.target-runtime.tsv", (target_counts + "\n").encode())
         write_private(
             evidence_dir / "roles.source.json",
             (json.dumps(source_role_evidence, sort_keys=True, separators=(",", ":")) + "\n").encode(),
@@ -1551,7 +1571,7 @@ def move(args: argparse.Namespace) -> None:
             "target_postgres_image": target_postgres_image,
             "dump_sha256": dump_sha,
             "globals_sha256": globals_sha,
-            "table_row_counts_equal": True,
+            "application_table_row_counts_equal": True,
             "roles_equal": True,
             "roles": target_role_evidence,
             "volumes": {

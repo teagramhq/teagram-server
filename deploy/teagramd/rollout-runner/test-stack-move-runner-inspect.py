@@ -589,6 +589,36 @@ class PinnedMoveAuthorityPublicationTest(unittest.TestCase):
             self.assertTrue((state_dir / "journal" / "0000000002.json").is_file())
 
 
+class RuntimeTableCountsTest(unittest.TestCase):
+    def test_runtime_counts_allow_atlas_migration_history_growth(self) -> None:
+        runner = load_runner()
+        source = (
+            "SELECT 'atlas_schema_revisions.atlas_schema_revisions', count(*) FROM atlas_schema_revisions.atlas_schema_revisions;\n"
+            "SELECT 'public.users', count(*) FROM public.users;\n"
+            "atlas_schema_revisions.atlas_schema_revisions|98\n"
+            "public.users|26\n"
+        )
+        migrated_target = source.replace(
+            "atlas_schema_revisions.atlas_schema_revisions|98",
+            "atlas_schema_revisions.atlas_schema_revisions|100",
+        )
+        changed_user_data = migrated_target.replace("public.users|26", "public.users|27")
+
+        self.assertTrue(runner.runtime_table_counts_match(source, migrated_target))
+        self.assertFalse(runner.runtime_table_counts_match(source, changed_user_data))
+        print("PASS runtime row counts allow Atlas migration history growth and still detect user-data changes")
+
+    def test_runtime_counts_reject_malformed_or_duplicate_rows(self) -> None:
+        runner = load_runner()
+        with self.assertRaisesRegex(runner.MoveError, "malformed"):
+            runner.runtime_table_counts_match("public.users|many", "public.users|26")
+        with self.assertRaisesRegex(runner.MoveError, "duplicate tables"):
+            runner.runtime_table_counts_match(
+                "public.users|26\npublic.users|26", "public.users|26",
+            )
+        print("PASS runtime row-count comparison rejects malformed and duplicate table rows")
+
+
 class PostgresImageReferenceTest(unittest.TestCase):
     def test_exact_alpine_tags_are_required_for_source_and_target(self) -> None:
         runner = load_runner()
