@@ -1502,6 +1502,13 @@ def read_authority(state_dir: pathlib.Path, report_root: pathlib.Path) -> tuple[
     return records, head, mode_bytes
 
 
+def current_authority(state_dir: pathlib.Path, report_root: pathlib.Path) -> dict[str, object]:
+    records, head, mode_bytes = read_authority(state_dir, report_root)
+    if mode_bytes != head:
+        reject("mode-head-mismatch")
+    return records[-1]
+
+
 def docker_volume_exists(name: str) -> None:
     try:
         result = subprocess.run(["docker", "volume", "inspect", name], check=True, capture_output=True, text=True, timeout=5)
@@ -1659,10 +1666,7 @@ def assert_containers_match(
 
 
 def validate_runtime(args: argparse.Namespace, allow_no_teagramd: bool = False) -> dict[str, object]:
-    records, head, mode_bytes = read_authority(args.state_dir, args.report_root)
-    if mode_bytes != head:
-        reject("mode-head-mismatch")
-    record = records[-1]
+    record = current_authority(args.state_dir, args.report_root)
     containers = read_json(args.containers)
     compose = read_json(args.compose)
     if not isinstance(containers, dict) or not isinstance(compose, dict):
@@ -2394,6 +2398,9 @@ def main() -> int:
     validate.add_argument("--allow-empty-containers", action="store_true")
     validate.add_argument("--allow-unguarded-initial-local", action="store_true")
     validate.add_argument("--allow-unguarded-initial-local-containers", action="store_true")
+    authority = commands.add_parser("authority")
+    authority.add_argument("--state-dir", type=pathlib.Path, required=True)
+    authority.add_argument("--report-root", type=pathlib.Path, required=True)
     def add_initial_local_arguments(command: argparse.ArgumentParser, include_current: bool) -> None:
         command.add_argument("--state-dir", type=pathlib.Path, required=True)
         command.add_argument("--baseline-containers", type=pathlib.Path, required=True)
@@ -2426,6 +2433,9 @@ def main() -> int:
         elif args.command == "validate":
             record = validate_runtime(args, args.allow_empty_containers)
             print(f"blob_mode=valid outcome={record['outcome']} generation={record['generation']} transition_id={record['transition_id']}")
+        elif args.command == "authority":
+            record = current_authority(args.state_dir, args.report_root)
+            print(json.dumps({"outcome": record["outcome"], "backend": record["backend"]}, sort_keys=True, separators=(",", ":")))
         elif args.command == "preflight-initial-local":
             preflight_initial_local(args)
         elif args.command == "initialize-local":
