@@ -366,6 +366,8 @@ if [ "${1:-}" = inspect ]; then
       env_json='["TG_RSA_KEY_PATH=/var/lib/teagramd/server_key.pem","TG_SYNTHETIC_FLAG=fixture","TG_BLOB_DIR=/var/lib/teagramd-blobs","TG_BLOB_S3_ENDPOINT=https://objects.fixture.invalid","TG_BLOB_S3_BUCKET=fixture","TG_BLOB_S3_PREFIX=fixture/","TG_REPLICA_COUNT=1","TG_CLIENT_ADDR_TRUST=socket"]'
     elif { [ "$cfg" = target ] || [ "$cfg" = rollback ]; } && [ "${MOCK_SCENARIO:-success}" = runtime-backend-mismatch ]; then
       env_json='["TG_RSA_KEY_PATH=/var/lib/teagramd/server_key.pem","TG_SYNTHETIC_FLAG=fixture","TG_BLOB_DIR=/unexpected-blob-dir","TG_REPLICA_COUNT=1","TG_CLIENT_ADDR_TRUST=socket"]'
+    elif { [ "$cfg" = target ] || [ "$cfg" = rollback ]; } && [ "${MOCK_SCENARIO:-}" = public-websocket-defaults ]; then
+      env_json='["TG_RSA_KEY_PATH=/var/lib/teagramd/server_key.pem","TG_SYNTHETIC_FLAG=fixture","TG_BLOB_DIR=/var/lib/teagramd-blobs","TG_PUBLIC_WEBSOCKET_LISTEN_ADDR=","TG_PUBLIC_REGISTRATION=closed","TG_PUBLIC_WEBSOCKET_ALLOWED_ORIGINS=","TG_REPLICA_COUNT=1","TG_CLIENT_ADDR_TRUST=socket"]'
     elif { [ "$cfg" = target ] || [ "$cfg" = rollback ]; } && [ "${MOCK_SCENARIO:-success}" != config-drift ]; then
       env_json='["TG_RSA_KEY_PATH=/var/lib/teagramd/server_key.pem","TG_SYNTHETIC_FLAG=fixture","TG_BLOB_DIR=/var/lib/teagramd-blobs","TG_REPLICA_COUNT=1","TG_CLIENT_ADDR_TRUST=socket"]'
     elif { [ "$cfg" = target ] || [ "$cfg" = rollback ]; } && [ "${MOCK_SCENARIO:-success}" = config-drift ]; then
@@ -414,6 +416,8 @@ fi
         printf '%s\n' "$config_count" > "$MOCK_STATE/compose-config-count"
         if [ "${MOCK_SCENARIO:-}" = config-drift ] && [ "$config_count" -ge 3 ]; then
           cat "$MOCK_STATE/target-compose.drift.json"
+        elif [[ "${MOCK_SCENARIO:-}" == public-websocket-* ]] && [ "$config_count" -lt 3 ]; then
+          cat "$MOCK_STATE/base-compose.json"
         elif [ "${MOCK_SCENARIO:-}" = target-local-carry-forward-cce-literal-build-arg ]; then
           jq -c '.services.teagramd.build.args.TEAGRAMD_SOURCE_REVISION="literal-override"' \
             "$MOCK_STATE/target-compose.json"
@@ -683,6 +687,10 @@ write_compose_fixture() {
   ' > "$base_config"
   if [ "$scenario" = config-drift ]; then
     cp -- "$base_config" "$target_config"
+  elif [ "$scenario" = public-websocket-defaults ]; then
+    jq -c '.services.teagramd.environment += {TG_PUBLIC_WEBSOCKET_LISTEN_ADDR:"",TG_PUBLIC_REGISTRATION:"closed",TG_PUBLIC_WEBSOCKET_ALLOWED_ORIGINS:""}' "$base_config" > "$target_config"
+  elif [ "$scenario" = public-websocket-enabled ]; then
+    jq -c '.services.teagramd.environment += {TG_PUBLIC_WEBSOCKET_LISTEN_ADDR:"0.0.0.0:2444",TG_PUBLIC_REGISTRATION:"closed",TG_PUBLIC_WEBSOCKET_ALLOWED_ORIGINS:""}' "$base_config" > "$target_config"
   elif [ "$scenario" = missing-mode-mount ]; then
     jq -c '.services.teagramd.volumes |= map(select(.target != "/run/teagramd/blob-mode"))' "$base_config" > "$target_config"
   elif [ "$scenario" = wrong-blob-backend ]; then
@@ -1184,7 +1192,7 @@ run_fixture() {
     ambient_revision=(TEAGRAMD_SOURCE_REVISION=ambient-revision-must-not-win)
   fi
   runner="$runtime_dir/rollout-runner.sh"
-  case "$scenario" in old-target-image|target-local-598-rollback|target-local-df9-rollback|config-drift|readiness-timeout|logs-failed|runtime-target-exited|target-local-carry-forward-image-reuse-stale-build|target-local-carry-forward-image-reuse-stop-timeout-mismatch|schema-post-failed-69|schema-post-missing-69) require_marker=1 ;; esac
+  case "$scenario" in old-target-image|target-local-598-rollback|target-local-df9-rollback|config-drift|public-websocket-enabled|readiness-timeout|logs-failed|runtime-target-exited|target-local-carry-forward-image-reuse-stale-build|target-local-carry-forward-image-reuse-stop-timeout-mismatch|schema-post-failed-69|schema-post-missing-69) require_marker=1 ;; esac
   [ "$name" = marker-write-failed ] && require_marker=0
   [ -n "$chmod_match" ] && require_marker=1
   if [ "$action" = reconcile ]; then
@@ -3389,6 +3397,33 @@ else
     "$status" "$(cat "$TMP/config-drift.stderr")" "$(cat "$TMP/config-drift-events")"
   cat "$root".target/preflight-comparisons.tsv 2>/dev/null || true
   fail 'configuration drift rejection'
+fi
+
+make_fixture public-websocket-defaults public-websocket-defaults
+status=$(run_fixture public-websocket-defaults)
+root=$(cat "$TMP/public-websocket-defaults-root-path")
+if [ "$status" = 0 ] && grep -q $'preflight\tconfig_sha256\t.*\tpass' "$root".target/preflight-comparisons.tsv && \
+   grep -q '^docker compose up -d --no-build --no-deps teagramd$' "$TMP/public-websocket-defaults-events"; then
+  pass 'disabled public WebSocket Compose defaults can be added without live config drift'
+else
+  printf 'public_websocket_defaults_status=%s\npublic_websocket_defaults_stderr=%s\n' \
+    "$status" "$(cat "$TMP/public-websocket-defaults.stderr")"
+  cat "$root".target/preflight-comparisons.tsv 2>/dev/null || true
+  fail 'disabled public WebSocket default compatibility'
+fi
+
+make_fixture public-websocket-enabled public-websocket-enabled
+status=$(run_fixture public-websocket-enabled)
+root=$(cat "$TMP/public-websocket-enabled-root-path")
+if [ "$status" != 0 ] && grep -q $'preflight\tconfig_sha256\t.*\tfail' "$root".target/preflight-comparisons.tsv && \
+   ! grep -q '^docker compose up -d' "$TMP/public-websocket-enabled-events" && \
+   grep -q 'target was not started' "$TMP/public-websocket-enabled.stderr"; then
+  pass 'enabled public WebSocket Compose settings remain rejected before startup'
+else
+  printf 'public_websocket_enabled_status=%s\npublic_websocket_enabled_stderr=%s\n' \
+    "$status" "$(cat "$TMP/public-websocket-enabled.stderr")"
+  cat "$root".target/preflight-comparisons.tsv 2>/dev/null || true
+  fail 'enabled public WebSocket configuration rejection'
 fi
 
 make_fixture evidence-collision success

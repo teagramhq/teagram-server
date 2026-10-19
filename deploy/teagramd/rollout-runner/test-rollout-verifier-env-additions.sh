@@ -81,6 +81,27 @@ registration_snapshot() {
     "$inspected" "$compose_json" "$ENV_FILE" "$OVERRIDE_FILE" selected-compose-render "$name"
 }
 
+public_websocket_snapshot() {
+  local listen_addr=$1 name=$2 inspected compose_json
+  inspected=$(inspect_json '')
+  inspected=$(jq -c --arg listen "$listen_addr" '
+    .Config.Env += [
+      "TG_PUBLIC_WEBSOCKET_LISTEN_ADDR=" + $listen,
+      "TG_PUBLIC_REGISTRATION=closed",
+      "TG_PUBLIC_WEBSOCKET_ALLOWED_ORIGINS="
+    ]
+  ' <<< "$inspected")
+  compose_json=$(jq -c --arg listen "$listen_addr" '
+    .services.teagramd.environment += {
+      TG_PUBLIC_WEBSOCKET_LISTEN_ADDR:$listen,
+      TG_PUBLIC_REGISTRATION:"closed",
+      TG_PUBLIC_WEBSOCKET_ALLOWED_ORIGINS:""
+    }
+  ' <<< "$COMPOSE_JSON")
+  ROLLOUT_ADDED_ENV= ROLLOUT_CHANGED_ENV= snapshot_from_json \
+    "$inspected" "$compose_json" "$ENV_FILE" "$OVERRIDE_FILE" selected-compose-render "$name"
+}
+
 snapshot=$(target_snapshot 'TG_NEW_FLAG=on')
 [ "$(jq -r '.container_env_added' <<< "$snapshot")" = TG_NEW_FLAG ]
 if [ -e "$JQ_SECRET_ARG_MARKER" ]; then
@@ -164,3 +185,16 @@ if registration_snapshot 'TG_REGISTRATION=open' open closed target \
 fi
 ! grep -Eq 'TG_REGISTRATION=(open|closed)' "$TMP/registration-compose-mismatch.err"
 printf '%s\n' 'PASS target rejects a registration value that differs from resolved Compose'
+
+printf 'TG_NEW_FLAG=on\n' > "$ENV_FILE"
+websocket_baseline=$(snapshot_from_json \
+  "$(inspect_json '')" "$COMPOSE_JSON" "$ENV_FILE" "$OVERRIDE_FILE" selected-compose-render baseline)
+websocket_defaults=$(public_websocket_snapshot '' target)
+[ "$(jq -r '.config_sha256' <<< "$websocket_baseline")" = "$(jq -r '.config_sha256' <<< "$websocket_defaults")" ]
+[ "$(jq -r '.container_env_sha256' <<< "$websocket_baseline")" = "$(jq -r '.container_env_sha256' <<< "$websocket_defaults")" ]
+printf '%s\n' 'PASS disabled public WebSocket defaults preserve Compose and container equivalence'
+
+websocket_enabled=$(public_websocket_snapshot '0.0.0.0:2444' target)
+[ "$(jq -r '.config_sha256' <<< "$websocket_baseline")" != "$(jq -r '.config_sha256' <<< "$websocket_enabled")" ]
+[ "$(jq -r '.container_env_sha256' <<< "$websocket_baseline")" != "$(jq -r '.container_env_sha256' <<< "$websocket_enabled")" ]
+printf '%s\n' 'PASS an enabled public WebSocket listener remains visible to equivalence checks'

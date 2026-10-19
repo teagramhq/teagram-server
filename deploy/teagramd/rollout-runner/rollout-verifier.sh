@@ -196,10 +196,15 @@ snapshot_from_json() {
     def item: if type == "array" then .[0] else . end;
     (item.Config.Env // [])
     | if type != "array" then error("container environment must be an array") else
+        # These exact disabled defaults are absent from containers predating
+        # the knobs, so keep them out of the runtime equivalence digest too.
         map(select(type != "string" or (startswith("TG_REPLICA_COUNT=") | not)))
         | map(select(type != "string" or (startswith("TG_CLIENT_ADDR_TRUST=") | not)))
         | map(select(type != "string" or ((split("=")[0]) as $key | any($added[]; . == $key) | not)))
         | map(select(type != "string" or ((split("=")[0]) as $key | any($changed[]; . == $key) | not)))
+        | map(select((. == "TG_PUBLIC_WEBSOCKET_LISTEN_ADDR=" or
+                      . == "TG_PUBLIC_REGISTRATION=closed" or
+                      . == "TG_PUBLIC_WEBSOCKET_ALLOWED_ORIGINS=") | not))
         | sort
       end
   ')
@@ -260,10 +265,19 @@ snapshot_from_json() {
           networks:(($s.networks // {}) | if type == "object" then keys else . end | sort)
         }
     ')
+    # These public WebSocket settings were added with disabled defaults. Ignore
+    # only those exact values so introducing the knobs does not look like live
+    # config drift; enabled values remain part of the pinned Compose digest.
     canonical_compose=$(printf '%s' "$compose_json" | jq -ceS --arg mode_source "$mode_source" '
       if (.services.teagramd.environment | type) != "object" then error("teagramd environment must be an object") else
         .services.teagramd.environment |= del(.TG_REPLICA_COUNT, .TG_CLIENT_ADDR_TRUST)
       end
+      | .services.teagramd.environment |= with_entries(
+          select(
+            ((.key == "TG_PUBLIC_WEBSOCKET_LISTEN_ADDR" and .value == "") or
+             (.key == "TG_PUBLIC_REGISTRATION" and .value == "closed") or
+             (.key == "TG_PUBLIC_WEBSOCKET_ALLOWED_ORIGINS" and .value == "")) | not
+          ))
       | .services |= with_entries(
           if (.key | startswith("teagramd")) and (.value.volumes | type) == "array" then
             .value.volumes |= map(select((.type == "bind" and .source == $mode_source and
