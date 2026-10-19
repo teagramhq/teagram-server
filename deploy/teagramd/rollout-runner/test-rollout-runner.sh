@@ -1040,6 +1040,9 @@ run_fixture() {
   esac
   compose_file='.rollout-compose.initial-local.yml:docker-compose.override.yml'
   case "$scenario" in
+    stack-move-retained-rustfs-volume)
+      compose_file='.rollout-compose.local-e58ba20.yml:docker-compose.override.yml'
+      ;;
     target-local-source-selection-omits-override)
       compose_file='.rollout-compose.local-5602c7c.yml'
       ;;
@@ -2939,7 +2942,7 @@ state_after=$(sha256sum "$checkout/.state/blob-mode/mode.json" | awk '{print $1}
 if [ "$status" != 0 ] && [ "$state_before" = "$state_after" ] && \
    ! grep -Eq '^docker compose (build|up|stop|down)( |$)' "$TMP/ambiguous-state-events" && \
    [ "$(cat "$(cat "$TMP/ambiguous-state-state-path")/teagramd")" = "$BASE_ID" ] && \
-   grep -q 'state-already-exists' "$TMP/ambiguous-state.stderr"; then
+   grep -q 'cannot inspect durable blob authority volumes' "$TMP/ambiguous-state.stderr"; then
   pass 'ambiguous pre-existing authority rejects without changing its bytes or containers'
 else
   fail 'ambiguous authority must remain byte-identical and running'
