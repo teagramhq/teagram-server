@@ -69,6 +69,8 @@ type Config struct {
 	ExpectedRSAFingerprint *int64
 	// RegistrationMode controls whether auth.signUp is available.
 	RegistrationMode RegistrationMode
+	// WelcomeChannel is the operator-configured public broadcast channel for new accounts.
+	WelcomeChannel string
 	// Turnstile contains the optional sign-up challenge credentials. SecretKey
 	// is consumed only by the RPC verifier and must never be logged or exposed.
 	Turnstile TurnstileConfig `json:"-"`
@@ -1015,6 +1017,8 @@ func Load(log *slog.Logger) (Config, error) {
 	}
 	// TG_REGISTRATION resolves the registration mode.
 	cfg.RegistrationMode = registrationMode(os.Getenv("TG_REGISTRATION"))
+	// TG_WELCOME_CHANNEL is resolved after account admission by the auth handler.
+	cfg.WelcomeChannel = os.Getenv("TG_WELCOME_CHANNEL")
 	// Zero or unset disables enforcement for a surface; the numbers and why they
 	// are those numbers are on DefaultRateLimits.
 	cfg.RateLimits = DefaultRateLimits()

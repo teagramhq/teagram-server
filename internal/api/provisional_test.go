@@ -31,6 +31,7 @@ func TestProvisionalAllowListContainsExpectedMethods(t *testing.T) {
 		tg.AccountGetPasswordRequestTypeID:            true,
 		tg.AccountUpdatePasswordSettingsRequestTypeID: true,
 		tg.AuthLogOutRequestTypeID:                    true,
+		tg.MessagesGetDialogsRequestTypeID:            true,
 	}
 	got := api.ProvisionalAllowList
 	if len(got) != len(want) {
@@ -50,7 +51,6 @@ func TestProvisionalAllowListBlocksOtherMethods(t *testing.T) {
 		tg.MessagesSendMessageRequestTypeID,
 		tg.MessagesUploadMediaRequestTypeID,
 		tg.MessagesSendMultiMediaRequestTypeID,
-		tg.MessagesGetDialogsRequestTypeID,
 		tg.UpdatesGetStateRequestTypeID,
 		tg.UsersGetUsersRequestTypeID,
 		tg.AccountGetAuthorizationsRequestTypeID,
@@ -148,6 +148,7 @@ func TestProvisionalGateAllowsAllowListedMethods(t *testing.T) {
 		uint32(tg.AccountGetPasswordRequestTypeID),
 		uint32(tg.AccountUpdatePasswordSettingsRequestTypeID),
 		uint32(tg.AuthLogOutRequestTypeID),
+		uint32(tg.MessagesGetDialogsRequestTypeID),
 	}
 	for _, id := range allowed {
 		if api.ProvisionalBlocked(id, req) {

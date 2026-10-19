@@ -66,6 +66,7 @@ Configuration is read from environment variables. The full reference is in [docs
 | `TG_PUBLIC_LINK_PREFIX` | required | HTTPS origin for client and invite links |
 | `TG_RSA_KEY_PATH` | `server_key.pem` | Existing server RSA identity |
 | `TG_REGISTRATION` | `closed` | `closed`, `invite`, or `open` account registration |
+| `TG_WELCOME_CHANNEL` | unset | Optional public broadcast channel handle joined by new accounts after sign-up |
 | `TG_BLOB_DIR` | `blobs` | Local media directory |
 | `TG_BLOB_S3_ENDPOINT` | unset | Enables the optional S3-compatible backend with the other `TG_BLOB_S3_*` settings |
 | `TG_RPC_DEADLINE` | `23s` | Per-request timeout; must be positive and at most `45s` |

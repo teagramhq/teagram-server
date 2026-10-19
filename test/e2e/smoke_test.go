@@ -909,8 +909,8 @@ func testSmokeLangpack(t *testing.T) {
 		raw := tg.NewClient(provisionalClient)
 		assertLangpackSmokeCalls(t, ctx, raw, f.dcID, artifact)
 		assertHelpConfigSuggestion(t, ctx, raw)
-		if _, err := raw.MessagesGetDialogs(ctx, &tg.MessagesGetDialogsRequest{OffsetPeer: &tg.InputPeerEmpty{}}); err == nil || !tgerr.Is(err, "AUTH_KEY_UNREGISTERED") {
-			t.Errorf("provisional messages.getDialogs error = %v, want AUTH_KEY_UNREGISTERED", err)
+		if _, err := raw.MessagesGetDialogs(ctx, &tg.MessagesGetDialogsRequest{OffsetPeer: &tg.InputPeerEmpty{}}); err != nil {
+			t.Errorf("provisional messages.getDialogs error = %v, want success", err)
 		}
 		return nil
 	}); err != nil {
@@ -4301,6 +4301,9 @@ const (
 	branchSignupSignUp             smokeRegistrationBranch = "signup-sign-up"
 	branchSignupAuthorization      smokeRegistrationBranch = "signup-authorization"
 	branchSignupUser               smokeRegistrationBranch = "signup-user"
+	branchSignupWelcomeDialogs     smokeRegistrationBranch = "signup-welcome-dialogs"
+	branchSignupWelcomeChannel     smokeRegistrationBranch = "signup-welcome-channel"
+	branchSignupWelcomeMessage     smokeRegistrationBranch = "signup-welcome-message"
 	branchSignupRPCAfter           smokeRegistrationBranch = "signup-rpc-after"
 	branchSignupUnexpectedPassword smokeRegistrationBranch = "signup-unexpected-password"
 	branchSignupPasswordPrepare    smokeRegistrationBranch = "signup-password-prepare"
@@ -4490,8 +4493,25 @@ func smokeReservedUsernameSignUp(f *smokeFixture, username, pendingPhone string)
 
 func testSmokeUsernameRegistration(t *testing.T) {
 	t.Helper()
-	f := newSmokeFixtureWithRegistration(t, config.RegistrationOpen)
-	const username, pendingPhone, password = "smokenewacct", "+15551049003", "smoke-password-1049"
+	const username, pendingPhone, password, welcomeHandle = "smokenewacct", "+15551049003", "smoke-password-1049", "smokewelcome"
+	var welcomeChannelID int64
+	var welcomeLatestMessageID int64
+	f := newSmokeFixtureWithSetup(t, config.RegistrationOpen, func(f *smokeFixture) {
+		f.welcomeChannel = welcomeHandle
+		owner, err := f.store.CreateUser(f.ctx, "+15551049005")
+		if err != nil {
+			t.Fatalf("create welcome channel owner: %v", err)
+		}
+		channel, latest, _, err := f.store.CreateChannelWithServiceMessage(f.ctx, owner.ID, "Teagram demo welcome", "", false)
+		if err != nil {
+			t.Fatalf("create welcome channel: %v", err)
+		}
+		if err := f.store.ClaimChannelUsername(f.ctx, channel.ID, welcomeHandle); err != nil {
+			t.Fatalf("claim welcome channel handle: %v", err)
+		}
+		welcomeChannelID = channel.ID
+		welcomeLatestMessageID = latest.LocalID
+	})
 	if err := smokeReservedUsernameSignUp(f, "PiNg", "+15551049004"); err != nil {
 		branch, detail := smokeRegistrationAttribution(err)
 		switch branch {
@@ -4576,6 +4596,50 @@ func testSmokeUsernameRegistration(t *testing.T) {
 			return smokeRegistrationCheckFailure(branchSignupUser, fmt.Sprintf("%T", authorization.User))
 		}
 		accountID = signupUser.ID
+		dialogResult, err := api.MessagesGetDialogs(ctx, &tg.MessagesGetDialogsRequest{
+			OffsetPeer: &tg.InputPeerEmpty{},
+			Limit:      20,
+		})
+		if err != nil {
+			return smokeRegistrationStepFailure(branchSignupWelcomeDialogs, err)
+		}
+		var dialogs []tg.DialogClass
+		var messages []tg.MessageClass
+		if page, ok := dialogResult.(*tg.MessagesDialogs); ok {
+			dialogs, messages = page.Dialogs, page.Messages
+		} else if page, ok := dialogResult.(*tg.MessagesDialogsSlice); ok {
+			dialogs, messages = page.Dialogs, page.Messages
+		} else {
+			return smokeRegistrationCheckFailure(branchSignupWelcomeDialogs, fmt.Sprintf("%T", dialogResult))
+		}
+		var welcome *tg.Dialog
+		for _, item := range dialogs {
+			dialog, ok := item.(*tg.Dialog)
+			if !ok {
+				continue
+			}
+			peer, ok := dialog.Peer.(*tg.PeerChannel)
+			if ok && peer.ChannelID == welcomeChannelID {
+				welcome = dialog
+				break
+			}
+		}
+		if welcome == nil {
+			return smokeRegistrationCheckFailure(branchSignupWelcomeChannel, "omitted")
+		}
+		if welcome.TopMessage != int(welcomeLatestMessageID) {
+			return smokeRegistrationCheckFailure(branchSignupWelcomeChannel, "wrong latest message")
+		}
+		latestFound := false
+		for _, message := range messages {
+			if message.GetID() == int(welcomeLatestMessageID) {
+				latestFound = true
+				break
+			}
+		}
+		if !latestFound {
+			return smokeRegistrationCheckFailure(branchSignupWelcomeMessage, "latest message omitted")
+		}
 		passwordState, err := api.AccountGetPassword(ctx)
 		if err != nil {
 			return smokeRegistrationStepFailure(branchSignupRPCAfter, err)
@@ -4624,6 +4688,12 @@ func testSmokeUsernameRegistration(t *testing.T) {
 			t.Fatalf("[assert:username-registration.signup-authorization] signUp response, want authorization with a user: %s", detail)
 		case branchSignupUser:
 			t.Fatalf("[assert:username-registration.signup-user] signUp user, want a full user: %s", detail)
+		case branchSignupWelcomeDialogs:
+			t.Fatalf("[assert:username-registration.signup-welcome-dialogs] getDialogs after sign-up: %s", detail)
+		case branchSignupWelcomeChannel:
+			t.Fatalf("[assert:username-registration.signup-welcome-channel] welcome channel missing or not latest in getDialogs: %s", detail)
+		case branchSignupWelcomeMessage:
+			t.Fatalf("[assert:username-registration.signup-welcome-message] latest welcome message missing from getDialogs: %s", detail)
 		case branchSignupRPCAfter:
 			t.Fatalf("[assert:username-registration.signup-rpc-after] usable RPC after signUp: %s", detail)
 		case branchSignupUnexpectedPassword:
@@ -4757,6 +4827,7 @@ type smokeFixture struct {
 	stop                  func()
 	stopCleanupRegistered bool
 	regMode               config.RegistrationMode
+	welcomeChannel        string
 	turnstileSiteKey      string
 	turnstileVerifier     api.SignUpTurnstileVerifier
 	persistStatus         bool
@@ -5211,9 +5282,9 @@ func (f *smokeFixture) start(t *testing.T, address string) {
 	}
 	f.port = tcpPort(t, ln)
 	f.listener = ln
-	registry, stop := bootServerWithLimitsAndRegistrationModeAndBlobsAndStatusWithDeliveryHookAndTurnstile(
+	registry, stop := bootServerWithLimitsAndRegistrationModeAndBlobsAndStatusWithDeliveryHookAndTurnstileAndWelcomeChannel(
 		t, f.ctx, f.key, f.dcID, f.store, f.dsn, f.codes.Logger(), ln, f.rateLimits, f.regMode,
-		f.blobs, f.persistStatus, nil, f.turnstileSiteKey, f.turnstileVerifier, f.photoThumbs,
+		f.blobs, f.persistStatus, nil, f.turnstileSiteKey, f.turnstileVerifier, f.welcomeChannel, f.photoThumbs,
 	)
 	f.registry = registry
 	f.setServerStop(t.Cleanup, stop)

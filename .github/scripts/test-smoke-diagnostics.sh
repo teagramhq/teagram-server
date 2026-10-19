@@ -1955,8 +1955,8 @@ scenario_call_line=$(line_for_text "$scenario_source" 'testSmokeUsernameRegistra
 mapfile -t scenario_assertions < <(
   sed -nE 's/.*\[assert:(username-registration\.[a-z0-9-]+)\].*/\1/p' "$scenario_source"
 )
-if [[ "${#scenario_assertions[@]}" -ne 41 ]]; then
-  printf 'username-registration scenario publishes %s branch assertion IDs, want 41\n' \
+if [[ "${#scenario_assertions[@]}" -ne 44 ]]; then
+  printf 'username-registration scenario publishes %s branch assertion IDs, want 44\n' \
     "${#scenario_assertions[@]}" >&2
   exit 1
 fi

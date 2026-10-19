@@ -774,11 +774,11 @@ func runAtBlobModePath(log *slog.Logger, blobModePath string) error {
 	if cfg.Turnstile.Enabled() {
 		turnstileVerifier = api.NewTurnstileVerifier(cfg.Turnstile.SecretKey)
 	}
-	handler := api.NewWithPhotoThumbsAndDialogFilterSyncAndUploadPartTTLAndTurnstile(
+	handler := api.NewWithPhotoThumbsAndDialogFilterSyncAndUploadPartTTLAndTurnstileAndWelcomeChannel(
 		st, cfg.DCID, tgcfg, log, cfg.LogLoginCodes, cfg.MaxFileBytes, blobs,
 		cfg.MaxUserStorageBytes, peers, photos, cfg.RateLimits, cfg.RegistrationMode,
 		dialogFilterSync, photoThumbs, cfg.UploadPartTTL, cfg.Turnstile.SiteKey,
-		turnstileVerifier, notifyMetrics,
+		turnstileVerifier, cfg.WelcomeChannel, notifyMetrics,
 	)
 	if cfg.LogLoginCodes {
 		log.Warn("TG_LOG_LOGIN_CODES is on: login codes are written to the log in cleartext")

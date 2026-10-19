@@ -219,6 +219,7 @@ services:
       # while creating the first account through auth.signUp, then change it
       # back to closed before exposing the stack.
       TG_REGISTRATION: ${TG_REGISTRATION:-closed}
+      TG_WELCOME_CHANNEL: ${TG_WELCOME_CHANNEL:-}
       TG_REPLICA_ID: ${TG_REPLICA_ID:-}
       # Keep the Compose deployment count aligned across the legacy listener
       # and any explicitly enabled replacement replicas. The default remains
