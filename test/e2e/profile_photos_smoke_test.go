@@ -3,6 +3,7 @@ package e2e_test
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"testing"
 
 	"github.com/gotd/td/tg"
@@ -48,6 +49,136 @@ func seedSmokeProfilePhoto(t *testing.T, f *smokeFixture, ownerID int64, payload
 		t.Fatalf("insert smoke profile photo: %v", err)
 	}
 	return file.ID
+}
+
+func testSmokeProfilePhotoUpload(t *testing.T) {
+	t.Helper()
+	f := newSmokeFixture(t)
+	const phone, viewerPhone = "+15551062001", "+15551062003"
+	seedSmokeUsers(t, f, phone, viewerPhone)
+	owner := newSmokeClient(t, f, "profile photo owner", phone)
+	viewer := newSmokeClient(t, f, "profile photo viewer", viewerPhone)
+	payload := smokeJPEGAtUploadSize(t, smokePhotoPartCount)
+	const fileID = int64(1062001)
+	if err := owner.call(f.ctx, func(ctx context.Context, client *tg.Client) error {
+		for part := range smokePhotoPartCount {
+			start := part * smokePhotoPartSize
+			ok, err := client.UploadSaveFilePart(ctx, &tg.UploadSaveFilePartRequest{
+				FileID: fileID, FilePart: part, Bytes: payload[start : start+smokePhotoPartSize],
+			})
+			if err != nil {
+				return err
+			}
+			if !ok {
+				return fmt.Errorf("profile photo part %d returned false", part)
+			}
+		}
+		request := &tg.PhotosUploadProfilePhotoRequest{}
+		request.SetFile(&tg.InputFile{
+			ID: fileID, Parts: smokePhotoPartCount, Name: "fictional-avatar.jpg", MD5Checksum: smokePhotoMD5(payload),
+		})
+		result, err := client.PhotosUploadProfilePhoto(ctx, request)
+		if err != nil {
+			return err
+		}
+		photo, ok := result.Photo.(*tg.Photo)
+		if !ok {
+			return fmt.Errorf("profile photo = %T, want *tg.Photo", result.Photo)
+		}
+		if photo.ID <= 0 || photo.DCID <= 0 {
+			return fmt.Errorf("profile photo identity = id %d, dc %d", photo.ID, photo.DCID)
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("upload profile photo: %v", err)
+	}
+	var profile *tg.UsersUserFull
+	if err := viewer.call(f.ctx, func(ctx context.Context, client *tg.Client) error {
+		var err error
+		profile, err = client.UsersGetFullUser(ctx, inputUser(viewer.id, owner.id))
+		return err
+	}); err != nil {
+		t.Fatalf("read current profile photo: %v", err)
+	}
+	if len(profile.Users) != 1 {
+		t.Fatalf("full profile returned %d users, want one", len(profile.Users))
+	}
+	profileUser, ok := profile.Users[0].(*tg.User)
+	if !ok {
+		t.Fatalf("full profile user = %T, want *tg.User", profile.Users[0])
+	}
+	userPhoto, ok := profileUser.GetPhoto()
+	if !ok {
+		t.Fatal("full profile omitted the uploaded avatar")
+	}
+	userPhotoID, ok := userPhoto.(*tg.UserProfilePhoto)
+	if !ok || userPhotoID.PhotoID <= 0 {
+		t.Fatalf("full profile photo = %T/%+v, want a selected profile photo", userPhoto, userPhoto)
+	}
+
+	var photos tg.PhotosPhotosClass
+	if err := owner.call(f.ctx, func(ctx context.Context, client *tg.Client) error {
+		var err error
+		photos, err = client.PhotosGetUserPhotos(ctx, &tg.PhotosGetUserPhotosRequest{
+			UserID: &tg.InputUserSelf{}, Limit: 10,
+		})
+		return err
+	}); err != nil {
+		t.Fatalf("list uploaded profile photo: %v", err)
+	}
+	page, ok := photos.(*tg.PhotosPhotosSlice)
+	if !ok || len(page.Photos) != 1 {
+		t.Fatalf("profile gallery = %#v, want one uploaded photo", photos)
+	}
+	photo, ok := page.Photos[0].(*tg.Photo)
+	if !ok {
+		t.Fatalf("profile gallery photo = %T, want *tg.Photo", page.Photos[0])
+	}
+	if photo.ID != userPhotoID.PhotoID {
+		t.Fatalf("gallery photo id = %d, user profile photo id = %d", photo.ID, userPhotoID.PhotoID)
+	}
+	var downloaded tg.UploadFileClass
+	if err := viewer.call(f.ctx, func(ctx context.Context, client *tg.Client) error {
+		var err error
+		downloaded, err = client.UploadGetFile(ctx, &tg.UploadGetFileRequest{
+			Location: &tg.InputPeerPhotoFileLocation{Peer: peerUser(viewer.id, owner.id), PhotoID: userPhotoID.PhotoID, Big: true},
+			Offset:   0, Limit: len(payload),
+		})
+		return err
+	}); err != nil {
+		t.Fatalf("download current profile photo: %v", err)
+	}
+	file, ok := downloaded.(*tg.UploadFile)
+	if !ok || !bytes.Equal(file.Bytes, payload) {
+		t.Fatalf("downloaded profile photo = %T, want original JPEG bytes", downloaded)
+	}
+}
+
+func testSmokeProfileBio(t *testing.T) {
+	t.Helper()
+	f := newSmokeFixture(t)
+	const phone = "+15551062002"
+	seedSmokeUsers(t, f, phone)
+	owner := newSmokeClient(t, f, "profile bio owner", phone)
+	const want = "A fictional naturalist sketching cloud maps and quiet rivers."
+	if err := owner.call(f.ctx, func(ctx context.Context, client *tg.Client) error {
+		request := &tg.AccountUpdateProfileRequest{}
+		request.SetAbout(want)
+		if _, err := client.AccountUpdateProfile(ctx, request); err != nil {
+			return err
+		}
+		profile, err := client.UsersGetFullUser(ctx, &tg.InputUserSelf{})
+		if err != nil {
+			return err
+		}
+		about, ok := profile.FullUser.GetAbout()
+		if !ok || about != want {
+			return fmt.Errorf("profile bio = %q/%t, want %q", about, ok, want)
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("update and read profile bio: %v", err)
+	}
 }
 
 func assertSmokeProfilePhotoSizes(t *testing.T, ctx context.Context, client *smokeClient, photo *tg.Photo, original, preview []byte, label string) {

@@ -1,10 +1,8 @@
 package api_test
 
 import (
-	"bytes"
 	"context"
 	"errors"
-	"log/slog"
 	"reflect"
 	"strings"
 	"sync"
@@ -1180,7 +1178,7 @@ func TestUpdateProfilePeerSeesNewName(t *testing.T) {
 	}
 }
 
-func TestUpdateProfileRejectsAboutByFlag(t *testing.T) {
+func TestUpdateProfileStoresAndClearsAbout(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
 	s := openStore(t)
@@ -1188,73 +1186,37 @@ func TestUpdateProfileRejectsAboutByFlag(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	seed := &tg.AccountUpdateProfileRequest{}
-	seed.SetFirstName("Original")
-	seed.SetLastName("Name")
-	if _, err := api.UpdateProfileForTest(s, user.ID, seed); err != nil {
-		t.Fatalf("seed profile: %v", err)
+	const bio = "Looking for a trail partner: fictional-bio"
+	set := &tg.AccountUpdateProfileRequest{}
+	set.SetFirstName("Changed")
+	set.SetLastName("Profile")
+	set.SetAbout(bio)
+	if _, err := api.UpdateProfileForTest(s, user.ID, set); err != nil {
+		t.Fatalf("set profile and about: %v", err)
 	}
-
-	const bio = "Looking for a trail partner: private-bio-sentinel"
-	cases := []struct {
-		name string
-		set  func(*tg.AccountUpdateProfileRequest)
-	}{
-		{
-			name: "valid combined names",
-			set: func(req *tg.AccountUpdateProfileRequest) {
-				req.SetFirstName("Changed")
-				req.SetLastName("Profile")
-				req.SetAbout(bio)
-			},
-		},
-		{
-			name: "empty clear value",
-			set: func(req *tg.AccountUpdateProfileRequest) {
-				req.SetAbout("")
-			},
-		},
-		{
-			name: "invalid name takes about refusal",
-			set: func(req *tg.AccountUpdateProfileRequest) {
-				req.SetFirstName(strings.Repeat("a", 65))
-				req.SetAbout(bio)
-			},
-		},
+	if got, err := s.UserAbout(ctx, user.ID); err != nil || got != bio {
+		t.Fatalf("stored about = %q, err=%v, want %q", got, err, bio)
 	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			req := &tg.AccountUpdateProfileRequest{}
-			tc.set(req)
-			var logs bytes.Buffer
-			res, err := api.UpdateProfileForTestWithLogger(s, user.ID, req, slog.New(slog.NewTextHandler(&logs, nil)))
-			if res != nil {
-				t.Fatalf("result = %T, want no successful User", res)
-			}
-			var rpc *tgerr.Error
-			if !errors.As(err, &rpc) || rpc.Code != 400 || rpc.Message != "ABOUT_NOT_SUPPORTED" {
-				t.Fatalf("error = %v, want RPC 400 ABOUT_NOT_SUPPORTED", err)
-			}
-			if strings.Contains(logs.String(), bio) {
-				t.Fatalf("captured logs contain supplied bio: %q", logs.String())
-			}
-			got, ok, err := s.UserByID(ctx, user.ID)
-			if err != nil || !ok {
-				t.Fatalf("lookup: ok=%v err=%v", ok, err)
-			}
-			if got.FirstName != "Original" || got.LastName != "Name" {
-				t.Fatalf("rejected update wrote names %q %q", got.FirstName, got.LastName)
-			}
-		})
-	}
-
 	full := getFullUserForTest(t, s, user.ID, &tg.InputUserSelf{})
+	if got, ok := full.FullUser.GetAbout(); !ok || got != bio {
+		t.Fatalf("users.getFullUser about = %q/%t, want %q", got, ok, bio)
+	}
+
+	clearRequest := &tg.AccountUpdateProfileRequest{}
+	clearRequest.SetAbout("")
+	if _, err := api.UpdateProfileForTest(s, user.ID, clearRequest); err != nil {
+		t.Fatalf("clear profile about: %v", err)
+	}
+	if got, err := s.UserAbout(ctx, user.ID); err != nil || got != "" {
+		t.Fatalf("cleared about = %q, err=%v, want empty", got, err)
+	}
+	full = getFullUserForTest(t, s, user.ID, &tg.InputUserSelf{})
 	if _, ok := full.FullUser.GetAbout(); ok {
-		t.Fatal("users.getFullUser reports an about value that is not stored")
+		t.Fatal("users.getFullUser includes an empty about")
 	}
 }
 
-func TestUpdateProfileAboutRefusalDoesNotConsumeNameLimit(t *testing.T) {
+func TestUpdateProfileAboutUsesSharedRateLimit(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
 	s := openStore(t)
@@ -1264,34 +1226,25 @@ func TestUpdateProfileAboutRefusalDoesNotConsumeNameLimit(t *testing.T) {
 	}
 	cfg := store.RateLimitConfig{Limit: 1, Window: time.Minute}
 
-	refused := &tg.AccountUpdateProfileRequest{}
-	refused.SetFirstName("Refused")
-	refused.SetAbout("private")
-	_, err = api.UpdateProfileForTestWithLimits(s, user.ID, cfg, refused)
-	var rpc *tgerr.Error
-	if !errors.As(err, &rpc) || rpc.Code != 400 || rpc.Message != "ABOUT_NOT_SUPPORTED" {
-		t.Fatalf("about update error = %v, want RPC 400 ABOUT_NOT_SUPPORTED", err)
+	about := &tg.AccountUpdateProfileRequest{}
+	about.SetAbout("public profile biography")
+	if _, err := api.UpdateProfileForTestWithLimits(s, user.ID, cfg, about); err != nil {
+		t.Fatalf("about-only update: %v", err)
 	}
 
 	valid := &tg.AccountUpdateProfileRequest{}
 	valid.SetFirstName("Accepted")
-	res, err := api.UpdateProfileForTestWithLimits(s, user.ID, cfg, valid)
-	if err != nil {
-		t.Fatalf("name-only update after refusal: %v", err)
-	}
-	uRes, ok := res.(*tg.User)
-	if !ok {
-		t.Fatalf("result = %T, want *tg.User", res)
-	}
-	if uRes.FirstName != "Accepted" {
-		t.Fatalf("returned first name = %q, want Accepted", uRes.FirstName)
+	_, err = api.UpdateProfileForTestWithLimits(s, user.ID, cfg, valid)
+	var rpc *tgerr.Error
+	if !errors.As(err, &rpc) || rpc.Code != 420 {
+		t.Fatalf("second profile update error = %v, want rate limit", err)
 	}
 	got, ok, err := s.UserByID(ctx, user.ID)
 	if err != nil || !ok {
 		t.Fatalf("lookup: ok=%v err=%v", ok, err)
 	}
-	if got.FirstName != "Accepted" {
-		t.Fatalf("stored first name = %q, want Accepted", got.FirstName)
+	if got.FirstName != "" {
+		t.Fatalf("rate-limited update wrote first name %q", got.FirstName)
 	}
 }
 

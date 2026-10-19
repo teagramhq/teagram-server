@@ -723,6 +723,7 @@ type User struct {
 	NameTsv              interface{}
 	LoginMode            string
 	AuthorizationTtlDays int32
+	About                string
 }
 
 type UserContact struct {

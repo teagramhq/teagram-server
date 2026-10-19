@@ -9,6 +9,101 @@ import (
 	"context"
 )
 
+const currentProfilePhotoForDownload = `-- name: CurrentProfilePhotoForDownload :one
+SELECT f.id, f.uploader_id, f.access_hash, f.size, f.mime_type, f.file_name, f.stored, f.date, f.subtype_rights, f.media_kind, f.width, f.height FROM profile_photo_state s
+JOIN users u ON u.id = s.user_id
+JOIN user_photos up ON up.user_id = s.user_id AND up.file_id = s.current_file_id
+JOIN files f ON f.id = up.file_id AND f.uploader_id = up.user_id
+WHERE s.user_id = $1::bigint
+  AND s.current_file_id = $2::bigint
+  AND f.stored = true
+  AND f.media_kind = 'photo'
+  AND NOT EXISTS (
+      SELECT 1 FROM blocked_users bu
+      WHERE bu.blocker_id = up.user_id AND bu.blocked_id = $3::bigint
+  )
+`
+
+type CurrentProfilePhotoForDownloadParams struct {
+	OwnerID  int64
+	FileID   int64
+	ViewerID int64
+}
+
+// CurrentProfilePhotoForDownload serves the ordinary peer-photo location. That
+// location carries a viewer-bound peer identity and the selected photo id, so
+// this statement requires that id to still be the owner's current selection.
+// Historical gallery entries continue to use the stronger tagged capability
+// emitted by photos.getUserPhotos.
+func (q *Queries) CurrentProfilePhotoForDownload(ctx context.Context, arg CurrentProfilePhotoForDownloadParams) (File, error) {
+	row := q.db.QueryRow(ctx, currentProfilePhotoForDownload, arg.OwnerID, arg.FileID, arg.ViewerID)
+	var i File
+	err := row.Scan(
+		&i.ID,
+		&i.UploaderID,
+		&i.AccessHash,
+		&i.Size,
+		&i.MimeType,
+		&i.FileName,
+		&i.Stored,
+		&i.Date,
+		&i.SubtypeRights,
+		&i.MediaKind,
+		&i.Width,
+		&i.Height,
+	)
+	return i, err
+}
+
+const currentProfilePhotoIDsForViewer = `-- name: CurrentProfilePhotoIDsForViewer :many
+SELECT s.user_id AS owner_id, s.current_file_id AS file_id
+FROM profile_photo_state s
+JOIN users u ON u.id = s.user_id
+JOIN user_photos up ON up.user_id = s.user_id AND up.file_id = s.current_file_id
+JOIN files f ON f.id = up.file_id AND f.uploader_id = up.user_id
+WHERE s.user_id = ANY($1::bigint[])
+  AND s.current_file_id IS NOT NULL
+  AND f.stored = true
+  AND f.media_kind = 'photo'
+  AND NOT EXISTS (
+      SELECT 1 FROM blocked_users bu
+      WHERE bu.blocker_id = up.user_id AND bu.blocked_id = $2::bigint
+  )
+`
+
+type CurrentProfilePhotoIDsForViewerParams struct {
+	OwnerIds []int64
+	ViewerID int64
+}
+
+type CurrentProfilePhotoIDsForViewerRow struct {
+	OwnerID int64
+	FileID  *int64
+}
+
+// CurrentProfilePhotoIDsForViewer hydrates user-profile objects in one bounded
+// query. The selected file id is exposed only while its gallery entry is live,
+// stored and visible to this viewer.
+func (q *Queries) CurrentProfilePhotoIDsForViewer(ctx context.Context, arg CurrentProfilePhotoIDsForViewerParams) ([]CurrentProfilePhotoIDsForViewerRow, error) {
+	rows, err := q.db.Query(ctx, currentProfilePhotoIDsForViewer, arg.OwnerIds, arg.ViewerID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []CurrentProfilePhotoIDsForViewerRow
+	for rows.Next() {
+		var i CurrentProfilePhotoIDsForViewerRow
+		if err := rows.Scan(&i.OwnerID, &i.FileID); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const profilePhotoDerivativeChunkForDownload = `-- name: ProfilePhotoDerivativeChunkForDownload :one
 SELECT substring(d.m_bytes FROM $1::integer + 1 FOR $2::integer)::bytea AS bytes
 FROM user_photos up

@@ -134,9 +134,38 @@ jq -e '
   and .services.teagramd.environment.TG_TURNSTILE_SECRET_KEY_FILE == ""
   and .services.teagramd.environment.TG_RATE_LIMIT_SIGN_UP_IP == "32"
   and .services.teagramd.environment.TG_RATE_LIMIT_SIGN_UP_IP_WINDOW == "1h"
-  and .services.teagramd.environment.TG_RATE_LIMIT_SEND_CODE_IP == "64"
+  and .services.teagramd.environment.TG_RATE_LIMIT_SEND_CODE_IP == "256"
   and .services.teagramd.environment.TG_RATE_LIMIT_SEND_CODE_IP_PHONES == "32"
+  and .services.teagramd.environment.TG_RATE_LIMIT_GET_PASSWORD_IP == "256"
+  and .services.teagramd.environment.TG_RATE_LIMIT_SEND == "0"
 ' "$TMP_DIR/seed.json" >/dev/null
+
+env -u COMPOSE_FILE -u COMPOSE_PROJECT_NAME -u COMPOSE_PROFILES \
+  -u TEAGRAM_DEMO_TURNSTILE_SITE_KEY -u TEAGRAM_DEMO_TURNSTILE_SECRET_KEY_FILE \
+  "${compose[@]}" --profile seed --file "$SCRIPT_DIR/compose.seed.yaml" \
+  config --format json > "$TMP_DIR/seed-profile.json"
+jq -e '
+  .services["demo-seed"].profiles == ["seed"]
+  and .services["demo-seed"].image == "teagramd:local"
+  and .services["demo-seed"].entrypoint == ["/usr/local/bin/demo-seed"]
+  and .services["demo-seed"].user == "0:0"
+  and .services["demo-seed"].read_only == true
+  and .services["demo-seed"].cap_drop == ["ALL"]
+  and .services["demo-seed"].security_opt == ["no-new-privileges:true"]
+  and (.services["demo-seed"].networks | keys) == ["backend"]
+  and (.services["demo-seed"].ports // [] | length) == 0
+  and (.services["demo-seed"].environment // {} | length) == 0
+  and (.services["demo-seed"].secrets // [] | length) == 0
+  and any(.services["demo-seed"].volumes[]; .target == "/run/teagram-demo/client.json" and .read_only)
+  and any(.services["demo-seed"].volumes[]; .target == "/run/secrets/seed-owner-password" and .read_only)
+  and any(.services["demo-seed"].volumes[]; .target == "/run/secrets/demo-accounts" and (.read_only // false) == false)
+  and .services["demo-probe"].read_only == true
+  and (.services["demo-probe"].volumes | length) == 1
+  and .services["demo-probe"].volumes[0].target == "/run/teagram-demo/client.json"
+  and (.services["demo-probe"].volumes[0].read_only == true)
+  and (.services["demo-probe"].environment // {} | length) == 0
+  and (.services["demo-probe"].networks | keys) == ["backend"]
+' "$TMP_DIR/seed-profile.json" >/dev/null
 python3 "$SCRIPT_DIR/../teagramd/rollout-runner/blob-mode-state.py" compose \
   --checkout "$REPO_ROOT" < "$TMP_DIR/seed.json" > "$TMP_DIR/seed-inventory.json"
 python3 "$SCRIPT_DIR/../teagramd/rollout-runner/blob-mode-state.py" compose \

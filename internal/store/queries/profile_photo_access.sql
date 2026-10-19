@@ -64,6 +64,43 @@ WHERE up.user_id = sqlc.arg(owner_id)::bigint
       WHERE bu.blocker_id = up.user_id AND bu.blocked_id = sqlc.arg(viewer_id)::bigint
   );
 
+-- CurrentProfilePhotoForDownload serves the ordinary peer-photo location. That
+-- location carries a viewer-bound peer identity and the selected photo id, so
+-- this statement requires that id to still be the owner's current selection.
+-- Historical gallery entries continue to use the stronger tagged capability
+-- emitted by photos.getUserPhotos.
+-- name: CurrentProfilePhotoForDownload :one
+SELECT f.* FROM profile_photo_state s
+JOIN users u ON u.id = s.user_id
+JOIN user_photos up ON up.user_id = s.user_id AND up.file_id = s.current_file_id
+JOIN files f ON f.id = up.file_id AND f.uploader_id = up.user_id
+WHERE s.user_id = sqlc.arg(owner_id)::bigint
+  AND s.current_file_id = sqlc.arg(file_id)::bigint
+  AND f.stored = true
+  AND f.media_kind = 'photo'
+  AND NOT EXISTS (
+      SELECT 1 FROM blocked_users bu
+      WHERE bu.blocker_id = up.user_id AND bu.blocked_id = sqlc.arg(viewer_id)::bigint
+  );
+
+-- CurrentProfilePhotoIDsForViewer hydrates user-profile objects in one bounded
+-- query. The selected file id is exposed only while its gallery entry is live,
+-- stored and visible to this viewer.
+-- name: CurrentProfilePhotoIDsForViewer :many
+SELECT s.user_id AS owner_id, s.current_file_id AS file_id
+FROM profile_photo_state s
+JOIN users u ON u.id = s.user_id
+JOIN user_photos up ON up.user_id = s.user_id AND up.file_id = s.current_file_id
+JOIN files f ON f.id = up.file_id AND f.uploader_id = up.user_id
+WHERE s.user_id = ANY(sqlc.arg(owner_ids)::bigint[])
+  AND s.current_file_id IS NOT NULL
+  AND f.stored = true
+  AND f.media_kind = 'photo'
+  AND NOT EXISTS (
+      SELECT 1 FROM blocked_users bu
+      WHERE bu.blocker_id = up.user_id AND bu.blocked_id = sqlc.arg(viewer_id)::bigint
+  );
+
 -- ProfilePhotoDerivativeForDownload resolves the advertised m size under the
 -- same live gallery policy as the original. The gallery credential is checked
 -- by the API before this query; the entry, owner, stored photo and directed

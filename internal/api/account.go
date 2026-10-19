@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/gotd/td/bin"
 	"github.com/gotd/td/tg"
@@ -289,7 +290,12 @@ func (h *handlers) handleUpdateUsername(r *mtproto.Request) (bin.Encoder, error)
 	if !ok {
 		return nil, errInternal
 	}
-	return h.userToTL(updatedUser, r.UserID, true, store.Contact{}, store.LastSeenVisibility{}), nil
+	wireUser := h.userToTL(updatedUser, r.UserID, true, store.Contact{}, store.LastSeenVisibility{})
+	if err := h.attachCurrentProfilePhotos(r.Ctx, r.UserID, []store.User{updatedUser}, []*tg.User{wireUser}); err != nil {
+		h.log.Error("update username: load profile photo", "user_id", r.UserID, "err", err)
+		return nil, errInternal
+	}
+	return wireUser, nil
 }
 
 // checkUsernameImmutable answers for a login_mode='username' caller before the
@@ -335,11 +341,12 @@ func (h *handlers) checkUsernameImmutable(ctx context.Context, userID int64, use
 	return errUsernameImmutable
 }
 
+const maxProfileAboutRunes = 70
+
 // handleUpdateProfile serves account.updateProfile. An authenticated caller
-// changes their own first and/or last name. About updates are refused because
-// this server does not store bios. Name validation is the same predicate
-// auth.signUp uses, so a name that registration would accept cannot be rejected
-// here.
+// changes their own display name and public biography. Name validation is the
+// same predicate auth.signUp uses, so a name registration accepts cannot be
+// rejected here.
 func (h *handlers) handleUpdateProfile(r *mtproto.Request) (bin.Encoder, error) {
 	var req tg.AccountUpdateProfileRequest
 	if err := req.Decode(r.Buf); err != nil {
@@ -348,20 +355,20 @@ func (h *handlers) handleUpdateProfile(r *mtproto.Request) (bin.Encoder, error) 
 	if r.UserID == 0 {
 		return nil, errAuthKeyUnreg
 	}
-	if _, hasAbout := req.GetAbout(); hasAbout {
-		return nil, errAboutNotSupported
-	}
-
 	first, hasFirst := req.GetFirstName()
 	last, hasLast := req.GetLastName()
+	about, hasAbout := req.GetAbout()
 	if hasFirst && !validateSignUpName(first) {
 		return nil, errInputRequestInvalid
 	}
 	if hasLast && !validateSignUpName(last) {
 		return nil, errInputRequestInvalid
 	}
+	if hasAbout && (!validText(about) || utf8.RuneCountInString(about) > maxProfileAboutRunes) {
+		return nil, errAboutTooLong
+	}
 
-	if hasFirst || hasLast {
+	if hasFirst || hasLast || hasAbout {
 		if err := h.checkRateLimit(r, "update_profile", h.rateLimitUpdateProfile); err != nil {
 			return nil, err
 		}
@@ -376,6 +383,12 @@ func (h *handlers) handleUpdateProfile(r *mtproto.Request) (bin.Encoder, error) 
 			h.log.Error("update profile", "user_id", r.UserID, "err", err)
 			return nil, errInternal
 		}
+		if hasAbout {
+			if err := h.store.UpdateUserAbout(r.Ctx, r.UserID, about); err != nil {
+				h.log.Error("update profile about", "user_id", r.UserID, "err", err)
+				return nil, errInternal
+			}
+		}
 	}
 
 	updatedUser, ok, err := h.store.UserByID(r.Ctx, r.UserID)
@@ -386,5 +399,10 @@ func (h *handlers) handleUpdateProfile(r *mtproto.Request) (bin.Encoder, error) 
 	if !ok {
 		return nil, errInternal
 	}
-	return h.userToTL(updatedUser, r.UserID, true, store.Contact{}, store.LastSeenVisibility{}), nil
+	wireUser := h.userToTL(updatedUser, r.UserID, true, store.Contact{}, store.LastSeenVisibility{})
+	if err := h.attachCurrentProfilePhotos(r.Ctx, r.UserID, []store.User{updatedUser}, []*tg.User{wireUser}); err != nil {
+		h.log.Error("update profile: load profile photo", "user_id", r.UserID, "err", err)
+		return nil, errInternal
+	}
+	return wireUser, nil
 }

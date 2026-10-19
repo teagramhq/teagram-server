@@ -60,6 +60,10 @@ func (h *handlers) handleGetUserPhotos(r *mtproto.Request) (bin.Encoder, error) 
 		return nil, errInternal
 	}
 	user := h.userToTL(owner, r.UserID, ownerID == r.UserID, contacts[ownerID], visibility[ownerID])
+	if err := h.attachCurrentProfilePhotos(r.Ctx, r.UserID, []store.User{owner}, []*tg.User{user}); err != nil {
+		h.log.Error("get user photos: load profile photo", "user_id", r.UserID, "peer_id", ownerID, "err", err)
+		return nil, errInternal
+	}
 
 	files, total, err := h.store.ProfilePhotosForOwner(r.Ctx, ownerID, r.UserID, req.Offset, req.MaxID, req.Limit)
 	if err != nil {

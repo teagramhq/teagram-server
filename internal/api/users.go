@@ -492,10 +492,9 @@ func (h *handlers) handleGetUsers(r *mtproto.Request) (bin.Encoder, error) {
 // a client needs to render a peer. The caller-scoped access hash is the whole
 // authorization, exactly as in users.getUsers, so a peer reached only through
 // search is readable before any dialog exists and a bare id enumerates nothing.
-// What the server does not store — bio, photos, pins, folders, themes, TTL,
-// calls — stays absent or false, and a phone number rides only on the caller's
-// own record. The common-chat count comes from the same membership query as
-// messages.getCommonChats; a self profile reports zero.
+// A stored bio is shown when non-empty, and a phone number rides only on the
+// caller's own record. The common-chat count comes from the same membership
+// query as messages.getCommonChats; a self profile reports zero.
 func (h *handlers) handleGetFullUser(r *mtproto.Request) (bin.Encoder, error) {
 	// The session is checked before the payload is inspected: an unbound auth key
 	// is owed AUTH_KEY_UNREGISTERED whatever it sends, so a malformed body cannot
@@ -553,15 +552,29 @@ func (h *handlers) handleGetFullUser(r *mtproto.Request) (bin.Encoder, error) {
 		commonChatsCount = commonChats.Count
 	}
 
+	about, err := h.store.UserAbout(r.Ctx, target)
+	if err != nil {
+		h.log.Error("get full user: load profile about", "user_id", r.UserID, "peer_id", target, "err", err)
+		return nil, errInternal
+	}
+	fullUser := tg.UserFull{
+		ID:               target,
+		Blocked:          snapshot.Blocked,
+		Settings:         userPeerSettingsBar(snapshot, r.UserID, target),
+		NotifySettings:   notifySettings,
+		CommonChatsCount: int(commonChatsCount),
+	}
+	if about != "" {
+		fullUser.SetAbout(about)
+	}
+	wireUser := h.userToTL(snapshot.User, r.UserID, self, viewerContactEdge(snapshot, target), visibility[target])
+	if err := h.attachCurrentProfilePhotos(r.Ctx, r.UserID, []store.User{snapshot.User}, []*tg.User{wireUser}); err != nil {
+		h.log.Error("get full user: load profile photo", "user_id", r.UserID, "peer_id", target, "err", err)
+		return nil, errInternal
+	}
 	return &tg.UsersUserFull{
-		FullUser: tg.UserFull{
-			ID:               target,
-			Blocked:          snapshot.Blocked,
-			Settings:         userPeerSettingsBar(snapshot, r.UserID, target),
-			NotifySettings:   notifySettings,
-			CommonChatsCount: int(commonChatsCount),
-		},
-		Chats: []tg.ChatClass{},
-		Users: []tg.UserClass{h.userToTL(snapshot.User, r.UserID, self, viewerContactEdge(snapshot, target), visibility[target])},
+		FullUser: fullUser,
+		Chats:    []tg.ChatClass{},
+		Users:    []tg.UserClass{wireUser},
 	}, nil
 }

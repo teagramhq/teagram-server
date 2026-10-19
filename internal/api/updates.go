@@ -409,6 +409,9 @@ func (h *handlers) usersToTL(ctx context.Context, users []store.User, viewerID i
 	for i, user := range users {
 		out[i] = h.userToTL(user, viewerID, markSelf && user.ID == viewerID, states[user.ID], visibility[user.ID])
 	}
+	if err := h.attachCurrentProfilePhotos(ctx, viewerID, users, out); err != nil {
+		return nil, err
+	}
 	return out, nil
 }
 

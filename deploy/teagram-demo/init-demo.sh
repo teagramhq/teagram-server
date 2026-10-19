@@ -140,6 +140,7 @@ PY
 
 export TEAGRAMD_SOURCE_REVISION="$SHA"
 demo_compose build teagramd
+"$SEED_SCRIPT" --check
 IMAGE_REVISION=$(docker image inspect --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' teagramd:local)
 [[ "$IMAGE_REVISION" == "$SHA" ]] || demo_fail 'built teagramd image does not identify the selected main commit'
 
