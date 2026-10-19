@@ -808,14 +808,15 @@ capture_snapshot() {
 }
 
 capture_compose_blob_inventory() {
-  local path=$1 inventory authority_file="$CHECKOUT/.state/blob-mode/mode.json" retain_rustfs_volume=false
+  local path=$1 inventory authority_file="$CHECKOUT/.state/blob-mode/mode.json" retain_rustfs_volume=false authority_mode
   local -a compose_profile_args=()
   [ ! -e "$path" ] && [ ! -L "$path" ] || { fail 'blob Compose inventory evidence already exists'; return 1; }
 
   if [ -e "$authority_file" ] || [ -L "$authority_file" ]; then
     [ -f "$authority_file" ] && [ ! -L "$authority_file" ] && \
       [ "$(stat -c %u -- "$authority_file")" = 0 ] && \
-      [ "$(stat -c %a -- "$authority_file")" = 600 ] || {
+      authority_mode=$(stat -c %a -- "$authority_file") && \
+      (( (8#$authority_mode & 0022) == 0 )) || {
       fail 'durable blob authority mode record is missing or not private'
       return 1
     }

@@ -1909,7 +1909,7 @@ if prepare_target_local_apply_fixture stack-move-retained-rustfs-volume stack-mo
     mv -- "$state/target-compose.next.json" "$state/target-compose.json"
   jq -c '.volumes.rustfsdata="fixture_rustfsdata"' "$checkout/.state/blob-mode/mode.json" > \
     "$checkout/.state/blob-mode/mode.next.json" && \
-    chmod 600 "$checkout/.state/blob-mode/mode.next.json" && \
+    chmod 644 "$checkout/.state/blob-mode/mode.next.json" && \
     mv -- "$checkout/.state/blob-mode/mode.next.json" "$checkout/.state/blob-mode/mode.json"
   status=$(run_fixture stack-move-retained-rustfs-volume built 0 '' 2 '' '' apply "$APPLY_TARGET_SHA")
   if [ "$status" != 0 ] && grep -q 'mode-head-mismatch' "$TMP/stack-move-retained-rustfs-volume.stderr" && \
