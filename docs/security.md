@@ -41,6 +41,9 @@ The PostgreSQL 18 configuration enables `log_min_duration_statement = 250ms`
 and loads `pg_stat_statements`. Treat both surfaces as sensitive operational
 data because they can expose SQL text and workload metadata.
 
+For the recurring review queries, cadence, and action thresholds, see the
+[PostgreSQL statistics review](postgres-stats-review.md).
+
 ### Sensitive data exposure
 
 Slow-query logs include the SQL text of each completed statement that takes at
