@@ -43,6 +43,8 @@ PINNED_LOCAL_COMPOSE_CONTENT_SHA=
 PINNED_LOCAL_COMPOSE_SOURCE_FILE=
 PINNED_LOCAL_COMPOSE_RUNTIME_FILE=
 PINNED_LOCAL_COMPOSE_CARRIED=0
+STACK_MOVED_TRACKED_COMPOSE=0
+STACK_MOVED_LOCAL_BLOB_DIR=
 BUILD_IDENTITY_REJECTION_REASON=built-image-id-invalid
 
 ROLLOUT_RUNNER_TEST_MODE=${ROLLOUT_RUNNER_TEST_MODE:-0}
@@ -424,9 +426,59 @@ verify_initial_local_compose() {
   }
 }
 
+is_stack_moved_tracked_compose_selection() {
+  local -a compose_files expected_files
+  local index checkout_path expected_path
+  [ "${COMPOSE_FILE+x}" = x ] && [ -n "$COMPOSE_FILE" ] || return 1
+  IFS=: read -r -a compose_files <<< "$COMPOSE_FILE"
+  [ "${#compose_files[@]}" -eq 3 ] || return 1
+  checkout_path=$(cd -P "$CHECKOUT" && pwd -P) || return 1
+  expected_files=(docker-compose.yml docker-compose.local-blobs.yml docker-compose.override.yml)
+  for index in "${!expected_files[@]}"; do
+    [ -f "$CHECKOUT/${expected_files[$index]}" ] && [ ! -L "$CHECKOUT/${expected_files[$index]}" ] || return 1
+    expected_path="$checkout_path/${expected_files[$index]}"
+    [ "${compose_files[$index]}" = "$expected_path" ] || return 1
+  done
+  git -C "$CHECKOUT" ls-files --error-unmatch -- \
+    docker-compose.yml docker-compose.local-blobs.yml >/dev/null 2>&1 || return 1
+  git -C "$CHECKOUT" cat-file -e "$TARGET_SHA:docker-compose.yml" 2>/dev/null && \
+    git -C "$CHECKOUT" cat-file -e "$TARGET_SHA:docker-compose.local-blobs.yml" 2>/dev/null
+}
+
+activate_stack_moved_tracked_compose() {
+  local authority_json outcome backend_kind blob_dir
+  authority_json=$(python3 "$MODE_HELPER" authority \
+    --state-dir "$CHECKOUT/.state/blob-mode" --report-root "$EVIDENCE_ROOT") || {
+    fail 'cannot read durable blob authority for the tracked local Compose selection'
+    return 1
+  }
+  outcome=$(jq -er '.outcome | select(type == "string")' <<< "$authority_json") || {
+    fail 'durable blob authority has no valid outcome for the tracked local Compose selection'
+    return 1
+  }
+  backend_kind=$(jq -er '.backend.kind | select(type == "string")' <<< "$authority_json") || {
+    fail 'durable blob authority has no valid backend for the tracked local Compose selection'
+    return 1
+  }
+  blob_dir=$(jq -er '.backend.dir | select(type == "string" and startswith("/") and . != "/")' <<< "$authority_json") || {
+    fail 'durable blob authority has no valid local blob directory for the tracked Compose selection'
+    return 1
+  }
+  [ "$outcome" = stack-moved-local ] && [ "$backend_kind" = local ] || {
+    fail 'tracked local Compose selection requires stack-moved-local authority'
+    return 1
+  }
+  STACK_MOVED_LOCAL_BLOB_DIR=$blob_dir
+  TEAGRAMD_STACK_MOVE_BLOB_DIR=$blob_dir
+  export TEAGRAMD_STACK_MOVE_BLOB_DIR
+  STACK_MOVED_TRACKED_COMPOSE=1
+}
+
 verify_target_local_compose() {
   local artifact_path artifact_sha artifact_content_sha reviewed_content_sha override_path entry entry_path artifact_count=0 override_count=0
   local -a compose_files
+  STACK_MOVED_TRACKED_COMPOSE=0
+  STACK_MOVED_LOCAL_BLOB_DIR=
   [ "$INITIALIZE_LOCAL" = 1 ] && return 0
   if ! set_target_local_compose_pin; then
     [ "${COMPOSE_FILE+x}" = x ] || return 0
@@ -440,6 +492,9 @@ verify_target_local_compose() {
           ;;
       esac
     done
+    if is_stack_moved_tracked_compose_selection; then
+      activate_stack_moved_tracked_compose || return 1
+    fi
     return 0
   fi
   artifact_path="$CHECKOUT/$PINNED_LOCAL_COMPOSE_RUNTIME_FILE"
@@ -975,6 +1030,11 @@ preflight_target_local_blob_authority() {
   local compose_file="$TARGET_DIR/pre-backup-blob-compose.json"
   local containers_file="$TARGET_DIR/pre-backup-blob-containers.json"
   local compose_sha artifact_sha=not-pinned artifact_content_sha=not-pinned backend
+  local compose_contract=reviewed-artifact blob_dir=not-authoritative
+  if [ "$STACK_MOVED_TRACKED_COMPOSE" = 1 ]; then
+    compose_contract=stack-moved-local-authority
+    blob_dir=$STACK_MOVED_LOCAL_BLOB_DIR
+  fi
   if set_target_local_compose_pin; then
     artifact_sha=$(sha256_file "$CHECKOUT/$PINNED_LOCAL_COMPOSE_RUNTIME_FILE") || {
       fail 'cannot hash target-local Compose artifact before backup'
@@ -1004,14 +1064,15 @@ preflight_target_local_blob_authority() {
     fail 'pre-backup Compose authority render has no single blob backend'
     return 1
   }
-  if [ "$backend" = local ] && [ "$artifact_sha" = not-pinned ]; then
+  if [ "$backend" = local ] && [ "$artifact_sha" = not-pinned ] && \
+     [ "$STACK_MOVED_TRACKED_COMPOSE" != 1 ]; then
     write_immutable "$TARGET_DIR/pre-backup-blob-authority-rejected.txt" \
       "result=rejected target_sha=$TARGET_SHA expected_baseline_sha=$EXPECTED_BASELINE_SHA compose_sha256=not-pinned render_sha256=$compose_sha reason=unpinned-local-target" || return 1
     fail 'local-backend apply requires a reviewed local Compose artifact or unchanged carried-forward content'
     return 1
   fi
   write_immutable "$TARGET_DIR/pre-backup-blob-authority.txt" \
-    "result=pass target_sha=$TARGET_SHA expected_baseline_sha=$EXPECTED_BASELINE_SHA compose_sha256=$artifact_sha compose_content_sha256=$artifact_content_sha render_sha256=$compose_sha backend=$backend"
+    "result=pass target_sha=$TARGET_SHA expected_baseline_sha=$EXPECTED_BASELINE_SHA compose_sha256=$artifact_sha compose_content_sha256=$artifact_content_sha render_sha256=$compose_sha backend=$backend compose_contract=$compose_contract blob_dir=$blob_dir"
 }
 
 validate_baseline() {

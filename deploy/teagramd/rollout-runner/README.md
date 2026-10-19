@@ -21,10 +21,19 @@ without a matching authority intentionally fails closed.
 
 For every local-backed rollout, read the running `teagramd` container's
 `com.docker.compose.project.config_files` label and carry that Compose selection
-forward unchanged. It must start with a `.rollout-compose.local-*` file and
-include the existing `docker-compose.override.yml` after it. Use that same
-`COMPOSE_FILE` for preflight, build, startup, verification, and rollback; never
-rely on the default S3 stack or omit the override.
+forward unchanged. With ordinary local authority, it must start with a
+`.rollout-compose.local-*` file and include the existing
+`docker-compose.override.yml` after it. After a stack move publishes
+`stack-moved-local` authority, the exact tracked
+`docker-compose.yml:docker-compose.local-blobs.yml:docker-compose.override.yml`
+selection is also accepted. The runner gets `TEAGRAMD_STACK_MOVE_BLOB_DIR` from
+the validated authority record before rendering that selection; the rendered
+backend and volume inventory must match the authority before backup and again
+after fast-forward. This tracked selection has no per-commit artifact pin, so
+every `main` commit remains eligible for deployment. A render mismatch still
+rejects before backup. Use the same `COMPOSE_FILE` for preflight, build,
+startup, verification, and rollback; never rely on the default S3 stack or omit
+the override.
 
 A later application target may carry only one of two reviewed Compose bodies.
 The measured non-comment digest `d025a25d3e38…` selects
