@@ -596,6 +596,35 @@ class RuntimeTableCountsTest(unittest.TestCase):
             )
         )
 
+    def test_allows_target_migrations_to_create_the_atlas_ledger(self) -> None:
+        runner = load_runner()
+        source = "public.stack_move_probe|2\n"
+        target = source + "atlas_schema_revisions.atlas_schema_revisions|72\n"
+
+        self.assertTrue(runner.runtime_table_counts_compatible(source, target))
+
+    def test_rejects_target_application_table_addition(self) -> None:
+        runner = load_runner()
+        source = "public.stack_move_probe|2\n"
+        target = (
+            source
+            + "atlas_schema_revisions.atlas_schema_revisions|72\n"
+            + "public.unexpected|0\n"
+        )
+
+        self.assertFalse(runner.runtime_table_counts_compatible(source, target))
+
+    def test_rejects_atlas_ledger_removal(self) -> None:
+        runner = load_runner()
+        source = (
+            "public.stack_move_probe|2\n"
+            "atlas_schema_revisions.atlas_schema_revisions|72\n"
+        )
+
+        self.assertFalse(
+            runner.runtime_table_counts_compatible(source, "public.stack_move_probe|2\n")
+        )
+
     def test_allows_only_atlas_revision_growth_after_runtime_migrations(self) -> None:
         runner = load_runner()
         source = (

@@ -696,17 +696,21 @@ def runtime_table_counts_compatible(source_counts: str, target_counts: str) -> b
 
     source = parse(source_counts)
     target = parse(target_counts)
-    if source is None or target is None or source.keys() != target.keys():
+    if source is None or target is None:
         return False
 
     atlas_revisions = "atlas_schema_revisions.atlas_schema_revisions"
-    for table, source_count in source.items():
-        target_count = target[table]
-        if table == atlas_revisions:
-            if target_count < source_count:
-                return False
-        elif target_count != source_count:
+    source_application_tables = source.keys() - {atlas_revisions}
+    target_application_tables = target.keys() - {atlas_revisions}
+    if source_application_tables != target_application_tables:
+        return False
+    if atlas_revisions in source and atlas_revisions not in target:
+        return False
+    for table in source_application_tables:
+        if source[table] != target[table]:
             return False
+    if atlas_revisions in source and target[atlas_revisions] < source[atlas_revisions]:
+        return False
     return True
 
 
