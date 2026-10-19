@@ -460,6 +460,20 @@ class MoveRuntimeProfileTest(unittest.TestCase):
 
 
 class OptionalSourceRustFSVolumeTest(unittest.TestCase):
+    def test_compose_may_omit_or_pin_the_historical_rustfs_volume(self) -> None:
+        runner = load_runner()
+        volumes = {
+            logical: {"name": name}
+            for logical, name in runner.SOURCE_VOLUMES.items()
+        }
+        config = {"volumes": volumes}
+
+        self.assertEqual(runner.validate_source_compose_volumes(config), runner.SOURCE_VOLUMES)
+        volumes["rustfsdata"] = {"name": "unexpected_rustfs_volume"}
+        with self.assertRaisesRegex(runner.MoveError, "source Compose volume names"):
+            runner.validate_source_compose_volumes(config)
+        print("PASS source Compose validates declared volumes and permits only the pinned optional RustFS volume")
+
     def test_absent_rustfs_volume_is_staged_only_without_authoritative_data(self) -> None:
         runner = load_runner()
         name = runner.SOURCE_VOLUMES["rustfsdata"]

@@ -339,7 +339,10 @@ def named_volumes(config: dict[str, object]) -> dict[str, str]:
 
 def validate_source_compose_volumes(config: dict[str, object]) -> dict[str, str]:
     expected = {logical: SOURCE_VOLUMES[logical] for logical in SOURCE_COMPOSE_VOLUMES}
-    if named_volumes(config) != expected:
+    actual = named_volumes(config)
+    if "rustfsdata" in actual:
+        expected["rustfsdata"] = SOURCE_VOLUMES["rustfsdata"]
+    if actual != expected:
         raise MoveError("source Compose volume names do not match the expected local telegram-server stack")
     return expected
 
