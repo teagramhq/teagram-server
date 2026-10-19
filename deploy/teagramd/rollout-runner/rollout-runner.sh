@@ -808,9 +808,40 @@ capture_snapshot() {
 }
 
 capture_compose_blob_inventory() {
-  local path=$1 inventory
+  local path=$1 inventory authority_file="$CHECKOUT/.state/blob-mode/mode.json" retain_rustfs_volume=false authority_mode
+  local -a compose_profile_args=()
   [ ! -e "$path" ] && [ ! -L "$path" ] || { fail 'blob Compose inventory evidence already exists'; return 1; }
-  inventory=$(docker compose config --format json </dev/null 2>/dev/null | \
+
+  if [ -e "$authority_file" ] || [ -L "$authority_file" ]; then
+    [ -f "$authority_file" ] && [ ! -L "$authority_file" ] && \
+      [ "$(stat -c %u -- "$authority_file")" = 0 ] && \
+      authority_mode=$(stat -c %a -- "$authority_file") && \
+      (( (8#$authority_mode & 0022) == 0 )) || {
+      fail 'durable blob authority mode record is missing or not private'
+      return 1
+    }
+    retain_rustfs_volume=$(jq -r '
+      if type != "object" then error("invalid authority")
+      elif (.volumes | type) != "object" then error("invalid volumes")
+      elif (.volumes | has("rustfsdata") | not) then error("missing rustfsdata")
+      elif .volumes.rustfsdata == null then false
+      elif (.volumes.rustfsdata | type) == "string" then true
+      else error("invalid rustfsdata")
+      end
+    ' "$authority_file") || {
+      fail 'cannot inspect durable blob authority volumes'
+      return 1
+    }
+    case "$retain_rustfs_volume" in
+      true|false) ;;
+      *) fail 'durable blob authority has an invalid RustFS volume selector'; return 1 ;;
+    esac
+  fi
+
+  if [ "$retain_rustfs_volume" = true ]; then
+    compose_profile_args=(--profile migration)
+  fi
+  inventory=$(docker compose "${compose_profile_args[@]}" config --format json </dev/null 2>/dev/null | \
     python3 "$MODE_HELPER" compose --checkout "$CHECKOUT") || {
     fail 'cannot capture the allowlisted blob Compose inventory'
     return 1
