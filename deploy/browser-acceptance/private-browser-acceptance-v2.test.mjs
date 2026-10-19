@@ -195,7 +195,9 @@ function createAcceptancePage({
   usernameVisible = true,
   passwordVisible = true,
   chatListVisible = true,
+  chatListMatches = 1,
   chatRows = 0,
+  visibleChatRows = chatRows,
   createAccountLinkVisible = false,
   signupFormVisible = false,
   signupTitleText = "YourName",
@@ -213,12 +215,12 @@ function createAcceptancePage({
   };
   let progressCallback;
 
-  function locator(selector, scope) {
+  function locator(selector, scope, {visibleOnly = false, firstOnly = false} = {}) {
     const isUsername = selector === 'input[aria-label="Username"]';
     const isPassword = selector === 'input[name="notsearch_password"]:visible';
     const isChatsPage = selector === "#page-chats";
     const isChatList = selector === "#chatlist-container .chatlist";
-    const isChatRow = selector === "#chatlist-container .chatlist-chat";
+    const isChatRow = selector === "#chatlist-container .chatlist-chat" || selector === ".chatlist-chat";
     const isSignupText = selector === "signup-text";
     const isSignupAvatar = selector === "#canvas-avatar";
     const isSignupHeader = scope === "signup-avatar" && selector === "xpath=../../..";
@@ -231,20 +233,35 @@ function createAcceptancePage({
               : isSignupAvatar || isSignupHeader ? signupFormVisible
                 : isSignupTitle ? signupFormVisible && signupTitleText.length > 0 : false;
     return {
-      first() { return this; },
-      filter() { return this; },
+      first() { return locator(selector, scope, {visibleOnly, firstOnly: true}); },
+      filter(options = {}) {
+        if (isChatList && options.visible === true) {
+          return locator(selector, scope, {visibleOnly: true});
+        }
+        return this;
+      },
       locator(childSelector) {
         if (isSignupAvatar && childSelector === "xpath=../../..") return locator(childSelector, "signup-avatar");
         if (isSignupHeader) return locator(childSelector, "signup-header");
+        if (isChatList && childSelector === ".chatlist-chat") {
+          return locator(childSelector, "visible-chat-list", {visibleOnly, firstOnly});
+        }
         return locator(childSelector);
       },
       async waitFor() {
+        const matches = isChatList
+          ? (visibleOnly ? Number(chatListVisible) : chatListMatches)
+          : 1;
+        if (!firstOnly && matches > 1) throw new Error("fixture strict mode violation");
         if (!isVisible()) throw new Error("fixture element is not visible");
       },
       async isVisible() { return isVisible(); },
       async count() {
-        if (isChatList) return chatListVisible ? 1 : 0;
-        if (isChatRow) return chatRows;
+        if (isChatList) {
+          const matches = visibleOnly ? Number(chatListVisible) : chatListMatches;
+          return firstOnly ? Math.min(matches, 1) : matches;
+        }
+        if (isChatRow) return scope === "visible-chat-list" ? visibleChatRows : chatRows;
         return 0;
       },
       async focus() {
@@ -841,6 +858,24 @@ test("broken-chat-list after sign-in is reported and attempts in-band logout", a
   assert.equal(output.chatListRows, 0);
   assert.deepEqual(browser.apiMethods, ["auth.logOut"]);
   assert.equal(browser.apiMethods.includes("auth.signIn"), false);
+});
+
+test("chat-list check ignores hidden list variants and scopes its row count", async () => {
+  const fixture = createDependencies(undefined, true);
+  const browser = createAcceptancePage({
+    chatListMatches: 5,
+    chatRows: 9,
+    visibleChatRows: 0,
+  });
+  await useRealAcceptanceFlow(fixture, browser);
+
+  const result = await executeMode({mode: "acceptance", releaseRecord: "fixture"}, fixture.dependencies);
+  const output = JSON.parse(result.output);
+
+  assert.notEqual(output.qaFailureCode, "broken-chat-list");
+  assert.equal(output.chatList, "rendered");
+  assert.equal(output.chatListRows, 0);
+  assert.deepEqual(browser.apiMethods, ["auth.logOut"]);
 });
 
 test("chat-list row counts clamp at ten in the result line", async () => {

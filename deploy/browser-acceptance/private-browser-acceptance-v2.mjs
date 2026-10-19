@@ -1364,20 +1364,21 @@ export async function performAcceptance(prepared, credentials) {
     if (chatResult.kind !== "signed-in") fail("authentication-failed-once");
     authenticated = true;
 
-    const chatList = page.locator("#chatlist-container .chatlist");
+    const visibleChatLists = page.locator("#chatlist-container .chatlist").filter({visible: true});
+    const chatList = visibleChatLists.first();
     state.chatList = "missing";
     try {
       await waitForVisible(chatList, "broken-chat-list", 30000);
-      const chatListContainers = await page.locator("#chatlist-container .chatlist").count();
-      const chatRows = await page.locator("#chatlist-container .chatlist-chat").count();
-      if (chatListContainers < 1 || !Number.isSafeInteger(chatRows) || chatRows < 0) {
+      const chatListContainers = await visibleChatLists.count();
+      const chatRows = await chatList.locator(".chatlist-chat").count();
+      if (chatListContainers !== 1 || !Number.isSafeInteger(chatRows) || chatRows < 0) {
         fail("broken-chat-list", state);
       }
       state.chatListRows = Math.min(chatRows, 10);
       state.chatList = "rendered";
     } catch (error) {
       latchQaFailure(state, "broken-chat-list");
-      const chatRows = await page.locator("#chatlist-container .chatlist-chat").count();
+      const chatRows = await chatList.locator(".chatlist-chat").count();
       if (Number.isSafeInteger(chatRows) && chatRows >= 0) state.chatListRows = Math.min(chatRows, 10);
       if (error instanceof AcceptanceFailure && error.code === "broken-chat-list") throw error;
       fail("broken-chat-list", state);
