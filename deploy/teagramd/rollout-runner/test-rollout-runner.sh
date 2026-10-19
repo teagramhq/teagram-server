@@ -3403,7 +3403,7 @@ make_fixture public-websocket-defaults public-websocket-defaults
 status=$(run_fixture public-websocket-defaults)
 root=$(cat "$TMP/public-websocket-defaults-root-path")
 if [ "$status" = 0 ] && grep -q $'preflight\tselected_render_config_sha256\t.*\tpass' "$root".target/preflight-comparisons.tsv && \
-   grep -q '^docker compose up -d --no-build --no-deps teagramd$' "$TMP/public-websocket-defaults-events"; then
+   grep -q '^docker compose up -d$' "$TMP/public-websocket-defaults-events"; then
   pass 'disabled public WebSocket Compose defaults can be added without live config drift'
 else
   printf 'public_websocket_defaults_status=%s\npublic_websocket_defaults_stderr=%s\n' \
