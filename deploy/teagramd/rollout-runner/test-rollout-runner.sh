@@ -1593,6 +1593,10 @@ show_fixture_failure() {
   cat "$TMP/$name.stdout" >&2
   printf 'fixture_stderr:\n' >&2
   cat "$TMP/$name.stderr" >&2
+  if [ -f "$root.target/preflight-comparisons.tsv" ]; then
+    printf 'preflight_comparisons:\n' >&2
+    cat "$root.target/preflight-comparisons.tsv" >&2
+  fi
   if [ -f "$root.target/target-comparisons.tsv" ]; then
     printf 'target_comparisons:\n' >&2
     cat "$root.target/target-comparisons.tsv" >&2
@@ -3442,7 +3446,7 @@ if [ "$status" = 0 ] && \
    grep -q $'preflight\tconfig_sha256\t.*\tpass' "$root".target/preflight-comparisons.tsv && \
    grep -q $'\tconfig_sha256\t.*\tpass' "$root".target/target-comparisons.tsv && \
    grep -q $'\tcontainer_env_sha256\t.*\tpass' "$root".target/target-comparisons.tsv && \
-   grep -q "rollout=verified sha=$APPLY_TARGET_SHA" "$TMP/welcome-channel-addition.stdout"; then
+   grep -q "rollout=verified sha=$E58_LOCAL_COMPOSE_TARGET_SHA" "$TMP/welcome-channel-addition.stdout"; then
   pass 'ordinary apply accepts the empty welcome-channel Compose default'
 else
   show_fixture_failure welcome-channel-addition "$status"
