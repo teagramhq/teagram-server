@@ -282,11 +282,14 @@ if "demo_compose stop edge haproxy" not in cleanup:
     raise SystemExit("init-demo.sh: failed install cleanup must stop edge and HAProxy")
 assert_text_order(init, "init-demo.sh resume lock", [
     "demo_lock_init() {",
+    'LOCK_PATH="$DEMO_REPO_ROOT/.state/deploy.lock"',
     "flock -x 9",
     "demo_lock_init\n",
     'MODE_FILE="$DEMO_AUTHORITY_DIR/mode.json"',
     'if [[ -e "$MODE_FILE" || -L "$MODE_FILE" ]]; then',
 ])
+if '  --lock-path "$LOCK_PATH"' not in init:
+    raise SystemExit("init-demo.sh: fresh install must pass its acquired lock path to authority initialization")
 assert_order(Path(sys.argv[2]), [
     "PUBLIC_SERVICES_MAY_BE_RUNNING=1",
     "demo_compose up -d haproxy edge",
@@ -356,6 +359,42 @@ env \
   INIT_LOCK_FUNCTION="$INIT_LOCK_FUNCTION" \
   TMP_DIR="$TMP_DIR" \
   bash "$TMP_DIR/init-resume-lock-regression.sh"
+
+AUTHORITY_INIT_BLOCK="$TMP_DIR/init-authority-publication.sh"
+# The sed range intentionally matches literal shell variables.
+# shellcheck disable=SC2016
+sed -n '/^LOCK_PATH=$(realpath -m "$LOCK_PATH")$/,/^  --lock-path "$LOCK_PATH"$/p' \
+  "$SCRIPT_DIR/init-demo.sh" > "$AUTHORITY_INIT_BLOCK"
+cat > "$TMP_DIR/init-fresh-authority-regression.sh" <<'BASH'
+set -Eeuo pipefail
+source "$INIT_LOCK_FUNCTION"
+DEMO_REPO_ROOT="$TMP_DIR/fresh-install-repo"
+unset LOCK_PATH
+demo_lock_init
+
+MODE_HELPER="$TMP_DIR/blob-mode-state.py"
+DEMO_AUTHORITY_DIR="$TMP_DIR/fresh-authority"
+DEMO_STATE_DIR="$TMP_DIR/fresh-state"
+TMP_DIR="$TMP_DIR/fresh-install-tmp"
+INITIAL_INVENTORY="$TMP_DIR/target-inventory.json"
+TARGET_ARTIFACT_SHA=fixture-artifact-sha
+SCRIPT_DIR="$TMP_DIR/teagram-demo"
+SHA=0123456789abcdef0123456789abcdef01234567
+AUTHORITY_CALLS="$TMP_DIR/authority-calls"
+mkdir -p "$TMP_DIR"
+
+python3() {
+  printf '%s\n' "$*" >> "$AUTHORITY_CALLS"
+}
+source "$AUTHORITY_INIT_BLOCK"
+
+EXPECTED_LOCK_PATH=$(realpath -m "$DEMO_REPO_ROOT/.state/deploy.lock")
+grep -Fq 'initialize-local' "$AUTHORITY_CALLS"
+grep -Fq -- "--lock-path $EXPECTED_LOCK_PATH" "$AUTHORITY_CALLS"
+[[ "$LOCK_PATH" == "$EXPECTED_LOCK_PATH" ]]
+BASH
+env INIT_LOCK_FUNCTION="$INIT_LOCK_FUNCTION" AUTHORITY_INIT_BLOCK="$AUTHORITY_INIT_BLOCK" TMP_DIR="$TMP_DIR" \
+  bash "$TMP_DIR/init-fresh-authority-regression.sh"
 
 PRUNE_FUNCTION="$TMP_DIR/demo-prune-backups.sh"
 sed -n '/^demo_prune_deploy_backups() {$/,/^}/p' "$SCRIPT_DIR/wipe-weekly.sh" > "$PRUNE_FUNCTION"

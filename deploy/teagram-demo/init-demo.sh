@@ -6,9 +6,9 @@ SCRIPT_DIR=$(cd -P "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 DEMO_REPO_ROOT=$(cd -P "$SCRIPT_DIR/../.." && pwd)
 
 demo_lock_init() {
-  local lock_path="$DEMO_REPO_ROOT/.state/deploy.lock"
-  mkdir -p "$(dirname "$lock_path")"
-  exec 9> "$lock_path"
+  LOCK_PATH="$DEMO_REPO_ROOT/.state/deploy.lock"
+  mkdir -p "$(dirname "$LOCK_PATH")"
+  exec 9> "$LOCK_PATH"
   flock -x 9
 }
 
