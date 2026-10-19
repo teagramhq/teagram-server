@@ -66,12 +66,11 @@ is green, the deployed Web and username-reservation prerequisites are current,
 and a fresh count-only claim audit still shows no conflicting claimant. Confirm
 the existing `web` alias on `teagram-web-edge-net`, loopback listeners 8081
 and 8082 are unused, and Serve still has HTTPS `/` to Web on 8080, `/apiws` to
-2444, `/admin` to 2445, and both `/.well-known/telegramd/client` and
-`/.well-known/teagramd/client` to the WebSocket listener on 2444. The served
-discovery document includes `websocket.endpoint`. Keep the legacy
-`/.well-known/telegramd/client` alias routed to the same listener until a
-Teagram Desktop release uses the new path. Keep Funnel off and do not change
-the MTProto listeners.
+2444, `/admin` to 2445, and `/.well-known/telegramd/client` passed through to
+2444. Rewrite `/.well-known/teagramd/client` to
+`http://127.0.0.1:2444/.well-known/telegramd/client`; the WebSocket listener
+serves the document at that path, including `websocket.endpoint`. Keep Funnel
+off and do not change the MTProto listeners.
 
 The rollout starts and stops this project only:
 
