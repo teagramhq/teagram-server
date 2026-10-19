@@ -620,5 +620,121 @@ class PostgresImageReferenceTest(unittest.TestCase):
         print("PASS PostgreSQL image preflight accepts only the required Alpine tags")
 
 
+class RuntimeTableCountsTest(unittest.TestCase):
+    def test_table_counts_query_prints_only_count_rows(self) -> None:
+        runner = load_runner()
+        with mock.patch.object(runner, "output", return_value="") as output:
+            runner.table_counts("postgres-id", "teagram")
+
+        query = output.call_args.kwargs["input_bytes"].decode()
+        generator, gexec = query.rstrip("\n").rsplit("\n", 1)
+        self.assertEqual(gexec, "\\gexec")
+        # A terminated generator runs once on its own and prints the generated
+        # SELECT statements ahead of the count rows that \gexec produces.
+        self.assertFalse(generator.rstrip().endswith(";"))
+        print("PASS table counts buffer the generator query for \\gexec only")
+
+    def test_allows_unchanged_counts_when_atlas_ledger_is_absent(self) -> None:
+        runner = load_runner()
+        counts = "public.stack_move_probe|2\n"
+
+        self.assertTrue(runner.runtime_table_counts_compatible(counts, counts))
+        self.assertFalse(
+            runner.runtime_table_counts_compatible(
+                counts,
+                "public.stack_move_probe|3\n",
+            )
+        )
+
+    def test_allows_a_database_without_tables(self) -> None:
+        runner = load_runner()
+
+        self.assertTrue(runner.runtime_table_counts_compatible("", ""))
+        self.assertTrue(
+            runner.runtime_table_counts_compatible(
+                "", "atlas_schema_revisions.atlas_schema_revisions|72\n"
+            )
+        )
+        self.assertFalse(
+            runner.runtime_table_counts_compatible("", "public.stack_move_probe|0\n")
+        )
+        self.assertFalse(
+            runner.runtime_table_counts_compatible("public.stack_move_probe|2\n", "")
+        )
+
+    def test_allows_target_migrations_to_create_the_atlas_ledger(self) -> None:
+        runner = load_runner()
+        source = "public.stack_move_probe|2\n"
+        target = source + "atlas_schema_revisions.atlas_schema_revisions|72\n"
+
+        self.assertTrue(runner.runtime_table_counts_compatible(source, target))
+
+    def test_rejects_target_application_table_addition(self) -> None:
+        runner = load_runner()
+        source = "public.stack_move_probe|2\n"
+        target = (
+            source
+            + "atlas_schema_revisions.atlas_schema_revisions|72\n"
+            + "public.unexpected|0\n"
+        )
+
+        self.assertFalse(runner.runtime_table_counts_compatible(source, target))
+
+    def test_rejects_atlas_ledger_removal(self) -> None:
+        runner = load_runner()
+        source = (
+            "public.stack_move_probe|2\n"
+            "atlas_schema_revisions.atlas_schema_revisions|72\n"
+        )
+
+        self.assertFalse(
+            runner.runtime_table_counts_compatible(source, "public.stack_move_probe|2\n")
+        )
+
+    def test_allows_only_atlas_revision_growth_after_runtime_migrations(self) -> None:
+        runner = load_runner()
+        source = (
+            "auth_keys|629\n"
+            "atlas_schema_revisions.atlas_schema_revisions|98\n"
+            "users|26\n"
+        )
+        target = (
+            "auth_keys|629\n"
+            "atlas_schema_revisions.atlas_schema_revisions|100\n"
+            "users|26\n"
+        )
+
+        self.assertTrue(runner.runtime_table_counts_compatible(source, source))
+        self.assertTrue(runner.runtime_table_counts_compatible(source, target))
+
+    def test_rejects_application_changes_and_atlas_revision_decreases(self) -> None:
+        runner = load_runner()
+        source = (
+            "auth_keys|629\n"
+            "atlas_schema_revisions.atlas_schema_revisions|98\n"
+            "users|26\n"
+        )
+        application_change = source.replace("auth_keys|629", "auth_keys|630").replace(
+            "atlas_schema_revisions.atlas_schema_revisions|98",
+            "atlas_schema_revisions.atlas_schema_revisions|100",
+        )
+        revision_decrease = source.replace(
+            "atlas_schema_revisions.atlas_schema_revisions|98",
+            "atlas_schema_revisions.atlas_schema_revisions|97",
+        )
+
+        self.assertFalse(runner.runtime_table_counts_compatible(source, application_change))
+        self.assertFalse(runner.runtime_table_counts_compatible(source, revision_decrease))
+
+    def test_rejects_missing_or_malformed_table_counts(self) -> None:
+        runner = load_runner()
+        source = "auth_keys|629\natlas_schema_revisions.atlas_schema_revisions|98\n"
+
+        self.assertFalse(runner.runtime_table_counts_compatible(source, "auth_keys|629\n"))
+        self.assertFalse(
+            runner.runtime_table_counts_compatible(source, "auth_keys|many\natlas_schema_revisions.atlas_schema_revisions|98\n")
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

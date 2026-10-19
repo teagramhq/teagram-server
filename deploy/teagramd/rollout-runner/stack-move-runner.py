@@ -679,12 +679,50 @@ def table_counts(container: str, database: str) -> str:
         "SELECT format('SELECT %L, count(*) FROM %I.%I;', "
         "schemaname || '.' || tablename, schemaname, tablename) "
         "FROM pg_tables WHERE schemaname <> 'information_schema' "
-        "AND left(schemaname, 3) <> 'pg_' ORDER BY 1;\n\\gexec\n"
+        "AND left(schemaname, 3) <> 'pg_' ORDER BY 1\n\\gexec\n"
     ).encode()
     return output([
         "docker", "exec", "-i", container, "psql", "-X", "-A", "-t",
         "-v", "ON_ERROR_STOP=1", "-U", "postgres", "-d", database,
     ], input_bytes=query)
+
+
+def runtime_table_counts_compatible(source_counts: str, target_counts: str) -> bool:
+    """Allow migrations to append Atlas revisions while preserving application rows."""
+    def parse(raw: str) -> dict[str, int] | None:
+        counts: dict[str, int] = {}
+        for line in raw.splitlines():
+            table, separator, count = line.partition("|")
+            if (
+                not separator
+                or not table
+                or "|" in count
+                or not count.isascii()
+                or not count.isdecimal()
+                or table in counts
+            ):
+                return None
+            counts[table] = int(count)
+        return counts
+
+    source = parse(source_counts)
+    target = parse(target_counts)
+    if source is None or target is None:
+        return False
+
+    atlas_revisions = "atlas_schema_revisions.atlas_schema_revisions"
+    source_application_tables = source.keys() - {atlas_revisions}
+    target_application_tables = target.keys() - {atlas_revisions}
+    if source_application_tables != target_application_tables:
+        return False
+    if atlas_revisions in source and atlas_revisions not in target:
+        return False
+    for table in source_application_tables:
+        if source[table] != target[table]:
+            return False
+    if atlas_revisions in source and target[atlas_revisions] < source[atlas_revisions]:
+        return False
+    return True
 
 
 def role_rows(container: str) -> tuple[str, list[dict[str, object]]]:
@@ -1493,8 +1531,10 @@ def move(args: argparse.Namespace) -> None:
             ]) != 1:
                 raise MoveError("running rustfs is not using teagram_rustfsdata at /data")
         target_counts = table_counts(target_postgres_id, target_database)
-        if source_counts != target_counts:
-            raise MoveError("PostgreSQL 18 row counts changed after its runtime container was recreated")
+        if not runtime_table_counts_compatible(source_counts, target_counts):
+            raise MoveError(
+                "PostgreSQL 18 application row counts changed after its runtime container was recreated"
+            )
         target_roles, target_role_evidence = role_rows(target_postgres_id)
         if source_roles != target_roles:
             raise MoveError("PostgreSQL roles changed after the runtime container was recreated")
@@ -1551,7 +1591,7 @@ def move(args: argparse.Namespace) -> None:
             "target_postgres_image": target_postgres_image,
             "dump_sha256": dump_sha,
             "globals_sha256": globals_sha,
-            "table_row_counts_equal": True,
+            "runtime_row_counts_allow_only_atlas_revision_growth": True,
             "roles_equal": True,
             "roles": target_role_evidence,
             "volumes": {
