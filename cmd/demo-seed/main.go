@@ -28,10 +28,13 @@ import (
 )
 
 const (
-	defaultEndpoint          = "teagramd:2443"
+	defaultEndpointHost      = "teagramd"
+	defaultEndpoint          = defaultEndpointHost + ":2443"
 	defaultClientConfig      = "/run/teagram-demo/client.json"
 	defaultOwnerPasswordFile = "/run/secrets/seed-owner-password"
 	defaultAccountInventory  = "/run/secrets/demo-accounts/inventory.json"
+	trustedProxyHost         = "haproxy"
+	trustedProxyEndpoint     = trustedProxyHost + ":2443"
 	appID                    = 1
 	appHash                  = "hash"
 )
@@ -72,7 +75,7 @@ func run(args []string) error {
 	if err != nil {
 		return err
 	}
-	if err := validateEndpoint(options.endpoint); err != nil {
+	if err := validateEndpointForMode(options.endpoint, options.verifyTurnstile); err != nil {
 		return err
 	}
 	if options.check {
@@ -156,6 +159,16 @@ func validateEndpoint(endpoint string) error {
 		return errors.New("endpoint must be the internal teagramd:2443 service")
 	}
 	return nil
+}
+
+func validateEndpointForMode(endpoint string, verifyTurnstile bool) error {
+	if verifyTurnstile {
+		if endpoint != trustedProxyEndpoint {
+			return errors.New("Turnstile verification must use the trusted internal haproxy:2443 service")
+		}
+		return nil
+	}
+	return validateEndpoint(endpoint)
 }
 
 func readClientConfig() (apiConfig, error) {
@@ -338,9 +351,13 @@ func randomPassword() (string, error) {
 }
 
 func newTelegramClient(cfg apiConfig) *telegram.Client {
+	return newTelegramClientAt(cfg, defaultEndpointHost)
+}
+
+func newTelegramClientAt(cfg apiConfig, host string) *telegram.Client {
 	return telegram.NewClient(appID, appHash, telegram.Options{
 		DC:             cfg.dcID,
-		DCList:         dcs.List{Options: []tg.DCOption{{ID: cfg.dcID, IPAddress: "teagramd", Port: 2443}}},
+		DCList:         dcs.List{Options: []tg.DCOption{{ID: cfg.dcID, IPAddress: host, Port: 2443}}},
 		PublicKeys:     []telegram.PublicKey{{RSA: cfg.key}},
 		Resolver:       dcs.Plain(dcs.PlainOptions{}),
 		SessionStorage: &session.StorageMemory{},
@@ -523,16 +540,23 @@ func randomInt64() (int64, error) {
 	return int64(value), nil
 }
 
-func verifyTurnstile(ctx context.Context, cfg apiConfig) error {
-	phoneBytes, err := randomBytes(4)
+func newProbeUsername() (string, error) {
+	value, err := randomBytes(8)
 	if err != nil {
-		return fmt.Errorf("generate sign-up probe identity: %w", err)
+		return "", fmt.Errorf("generate sign-up probe username: %w", err)
 	}
-	phone := fmt.Sprintf("+1555%010d", binary.BigEndian.Uint32(phoneBytes))
-	client := newTelegramClient(cfg)
+	return "demo_probe_" + hex.EncodeToString(value), nil
+}
+
+func verifyTurnstile(ctx context.Context, cfg apiConfig) error {
+	username, err := newProbeUsername()
+	if err != nil {
+		return err
+	}
+	client := newTelegramClientAt(cfg, trustedProxyHost)
 	return client.Run(ctx, func(runCtx context.Context) error {
 		api := client.API()
-		sent, err := api.AuthSendCode(runCtx, &tg.AuthSendCodeRequest{PhoneNumber: phone, APIID: appID, APIHash: appHash})
+		sent, err := api.AuthSendCode(runCtx, &tg.AuthSendCodeRequest{PhoneNumber: username, APIID: appID, APIHash: appHash})
 		if err != nil {
 			return fmt.Errorf("request sign-up probe code: %w", err)
 		}
@@ -541,7 +565,7 @@ func verifyTurnstile(ctx context.Context, cfg apiConfig) error {
 			return fmt.Errorf("unexpected sign-up probe response %T", sent)
 		}
 		_, err = api.AuthSignIn(runCtx, &tg.AuthSignInRequest{
-			PhoneNumber: phone, PhoneCodeHash: sentCode.PhoneCodeHash, PhoneCode: "00000",
+			PhoneNumber: username, PhoneCodeHash: sentCode.PhoneCodeHash, PhoneCode: "00000",
 		})
 		if !isSignUpRequired(err) {
 			if err == nil {
@@ -549,14 +573,14 @@ func verifyTurnstile(ctx context.Context, cfg apiConfig) error {
 			}
 			return fmt.Errorf("sign-up probe did not reach registration: %w", err)
 		}
+		// Keep the probe non-creating if the CAPTCHA gate is ever missing.
 		_, err = api.AuthSignUp(runCtx, &tg.AuthSignUpRequest{
-			PhoneNumber:   phone,
+			PhoneNumber:   username,
 			PhoneCodeHash: sentCode.PhoneCodeHash,
 			FirstName:     strings.Repeat("x", 65),
 			LastName:      "Probe",
 		})
-		var rpcErr *tgerr.Error
-		if !errors.As(err, &rpcErr) || !strings.HasPrefix(rpcErr.Message, "RECAPTCHA_CHECK_signup__") {
+		if !isSignupCaptchaRequired(err) {
 			if err == nil {
 				return errors.New("production sign-up gate accepted a probe account")
 			}
@@ -564,4 +588,9 @@ func verifyTurnstile(ctx context.Context, cfg apiConfig) error {
 		}
 		return nil
 	})
+}
+
+func isSignupCaptchaRequired(err error) bool {
+	var rpcErr *tgerr.Error
+	return errors.As(err, &rpcErr) && strings.HasPrefix(rpcErr.Message, "RECAPTCHA_CHECK_signup__")
 }

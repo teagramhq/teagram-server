@@ -17,7 +17,7 @@ Usage:
   seed-demo.sh --check
   seed-demo.sh --seed [--endpoint teagramd:2443] [--owner-username demo_seed_owner] [--owner-password-file PATH]
   seed-demo.sh --verify-seed [--endpoint teagramd:2443]
-  seed-demo.sh --verify-turnstile [--endpoint teagramd:2443]
+  seed-demo.sh --verify-turnstile --endpoint haproxy:2443
 EOF
 }
 
@@ -55,7 +55,12 @@ while (($#)); do
 done
 
 [[ -n "$MODE" ]] || { usage >&2; demo_fail 'select one mode'; }
-[[ "$ENDPOINT" == teagramd:2443 ]] || demo_fail 'endpoint must be the internal teagramd:2443 service'
+EXPECTED_ENDPOINT=teagramd:2443
+if [[ "$MODE" == --verify-turnstile ]]; then
+  EXPECTED_ENDPOINT=haproxy:2443
+fi
+[[ "$ENDPOINT" == "$EXPECTED_ENDPOINT" ]] ||
+  demo_fail "endpoint for $MODE must be the internal $EXPECTED_ENDPOINT service"
 
 check_dependencies() {
   local command_name version
@@ -80,6 +85,7 @@ check_source_wiring() {
   [[ -f "$DEMO_REPO_ROOT/cmd/demo-seed/main.go" ]] || demo_fail 'demo-seed source is missing'
   [[ -f "$DEMO_REPO_ROOT/cmd/demo-seed/seed.go" ]] || demo_fail 'demo-seed API implementation is missing'
   [[ -f "$DEMO_SCRIPT_DIR/compose.seed.yaml" ]] || demo_fail 'seed Compose overlay is missing'
+  [[ -x "$DEMO_SCRIPT_DIR/test-seed-compose.sh" ]] || demo_fail 'seed convergence Compose API test is missing or not executable'
   grep -Fq 'go build -o /demo-seed ./cmd/demo-seed' "$DEMO_REPO_ROOT/Dockerfile" ||
     demo_fail 'Dockerfile does not build the demo-seed binary'
   grep -Fq 'entrypoint: ["/usr/local/bin/demo-seed"]' "$DEMO_SCRIPT_DIR/compose.yaml" ||

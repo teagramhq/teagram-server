@@ -130,6 +130,7 @@ func seedDemo(ctx context.Context, cfg apiConfig, options seedOptions, ownerPass
 }
 
 func verifySeed(ctx context.Context, cfg apiConfig, options seedOptions, ownerPassword string, inventory map[string]string) error {
+	verifiedMarkers := 0
 	if err := withSeedOwner(ctx, cfg, options, ownerPassword, func(runCtx context.Context, api *tg.Client) error {
 		for _, spec := range publicSpaces {
 			remote, err := resolvePublicSpace(runCtx, api, spec)
@@ -143,6 +144,10 @@ func verifySeed(ctx context.Context, cfg apiConfig, options seedOptions, ownerPa
 			if err != nil {
 				return err
 			}
+			if got, want := countSeedMarkers(markers, spec), expectedSeedMarkerCount(spec); got != want {
+				return fmt.Errorf("space %s has %d seeded content markers, want %d", spec.username, got, want)
+			}
+			verifiedMarkers += countSeedMarkers(markers, spec)
 			if remote.spec.megagroup {
 				for turn := range conversationLines {
 					if _, ok := markers[conversationMarker(spec, turn)]; !ok {
@@ -194,8 +199,8 @@ func verifySeed(ctx context.Context, cfg apiConfig, options seedOptions, ownerPa
 	}); err != nil {
 		return err
 	}
-	fmt.Printf("demo seed verified accounts=%d welcome_posts=1 broadcast_channels=3 posts_per_channel=32 public_groups=3 posts_per_group=%d searchable_spaces=%d reaction_examples=1\n",
-		len(seedAccounts), len(conversationLines), len(publicSpaces))
+	fmt.Printf("demo seed verified accounts=%d welcome_posts=1 broadcast_channels=3 posts_per_channel=32 public_groups=3 posts_per_group=%d searchable_spaces=%d markers=%d search_account=%s reaction_examples=1\n",
+		len(seedAccounts), len(conversationLines), len(publicSpaces), verifiedMarkers, searcher.username)
 	return nil
 }
 
@@ -778,6 +783,28 @@ func historyMarkers(ctx context.Context, api *tg.Client, peer tg.InputPeerClass)
 		}
 	}
 	return markers, nil
+}
+
+func expectedSeedMarkerCount(spec spaceSpec) int {
+	switch {
+	case spec.slug == "welcome":
+		return 1
+	case spec.megagroup:
+		return len(conversationLines)
+	default:
+		return len(broadcastMarkers(spec))
+	}
+}
+
+func countSeedMarkers(markers map[string]int64, spec spaceSpec) int {
+	prefix := fmt.Sprintf("[[teagram-demo:%s:", spec.slug)
+	count := 0
+	for marker := range markers {
+		if strings.HasPrefix(marker, prefix) {
+			count++
+		}
+	}
+	return count
 }
 
 func markerFromText(value string) string {

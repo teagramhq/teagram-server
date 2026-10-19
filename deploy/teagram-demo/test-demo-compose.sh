@@ -193,6 +193,11 @@ grep -Fq 'image: mirror.gcr.io/library/nginx:1.28.0-alpine@sha256:' "$SCRIPT_DIR
 grep -Fq 'http-request set-src req.hdr_ip(CF-Connecting-IP)' "$SCRIPT_DIR/haproxy.cfg"
 grep -Fq 'req.hdr_cnt(CF-Connecting-IP) eq 1' "$SCRIPT_DIR/haproxy.cfg"
 grep -Fq 'server teagramd teagramd:2446 check send-proxy-v2' "$SCRIPT_DIR/haproxy.cfg"
+grep -Fq 'frontend mtproto' "$SCRIPT_DIR/haproxy.cfg"
+grep -Fq 'bind :2443' "$SCRIPT_DIR/haproxy.cfg"
+grep -Fq 'default_backend teagramd_mtproto' "$SCRIPT_DIR/haproxy.cfg"
+grep -Fq 'backend teagramd_mtproto' "$SCRIPT_DIR/haproxy.cfg"
+grep -Fq 'server teagramd-mtproto teagramd:2443 send-proxy-v2' "$SCRIPT_DIR/haproxy.cfg"
 grep -Fq 'http-check send meth CONNECT uri challenges.cloudflare.com:443' "$SCRIPT_DIR/haproxy.cfg"
 grep -Fq 'monitor fail if { nbsrv(turnstile_egress) eq 0 }' "$SCRIPT_DIR/haproxy.cfg"
 grep -Fq 'bind :8404' "$SCRIPT_DIR/haproxy.cfg"
@@ -211,7 +216,7 @@ grep -Fq 'base_url + "/healthz"' "$SCRIPT_DIR/smoke.py"
 
 python3 - "$SCRIPT_DIR/wipe-weekly.sh" "$SCRIPT_DIR/init-demo.sh" \
   "$SCRIPT_DIR/deploy-main.sh" "$SCRIPT_DIR/demo-common.sh" \
-  "$SCRIPT_DIR/forced-command.sh" <<'PY'
+  "$SCRIPT_DIR/forced-command.sh" "$SCRIPT_DIR/test-seed-compose.sh" <<'PY'
 from pathlib import Path
 import sys
 
@@ -234,10 +239,21 @@ assert_order(Path(sys.argv[1]), [
     "demo_prepare_seed_owner \"$TMP_DIR\"",
     '"$SEED_SCRIPT" --seed',
     '"$SEED_SCRIPT" --verify-seed --endpoint teagramd:2443',
-    "demo_compose up -d teagramd",
-    '"$SEED_SCRIPT" --verify-turnstile --endpoint teagramd:2443',
-    "demo_compose up -d haproxy edge",
+    '"$SCRIPT_DIR/test-seed-compose.sh"',
+    "demo_compose up -d --wait --wait-timeout 120 haproxy",
+    '"$SEED_SCRIPT" --verify-turnstile --endpoint haproxy:2443',
+    "demo_compose up -d edge",
 ])
+seed_test = Path(sys.argv[6])
+assert_order(seed_test, [
+    'before=$(capture_seed_report)',
+    '"$SEED_SCRIPT" --seed --endpoint teagramd:2443',
+    'after=$(capture_seed_report)',
+    '[[ "$before" == "$after" ]]',
+])
+seed_test_text = seed_test.read_text(encoding="utf-8")
+if "markers=133" not in seed_test_text or "search_account=demo_searcher" not in seed_test_text:
+    raise SystemExit("test-seed-compose.sh: API convergence check must assert stable marker counts and search account")
 deploy_path = Path(sys.argv[3])
 deploy = deploy_path.read_text(encoding="utf-8")
 deploy_steps = [
@@ -321,13 +337,17 @@ if '  --lock-path "$LOCK_PATH"' not in init:
     raise SystemExit("init-demo.sh: fresh install must pass its acquired lock path to authority initialization")
 assert_order(Path(sys.argv[2]), [
     "PUBLIC_SERVICES_MAY_BE_RUNNING=1",
-    "demo_compose up -d haproxy edge",
+    "demo_compose up -d --wait --wait-timeout 120 haproxy",
+    '"$SEED_SCRIPT" --verify-turnstile --endpoint haproxy:2443',
+    "demo_compose up -d edge",
     'python3 "$SCRIPT_DIR/smoke.py" "$DEMO_STATE_DIR/client.json"',
     "exit 0",
 ])
 assert_order(Path(sys.argv[2]), [
     "PUBLIC_SERVICES_MAY_BE_RUNNING=1",
-    "demo_compose up -d haproxy edge",
+    "demo_compose up -d --wait --wait-timeout 120 haproxy",
+    '"$SEED_SCRIPT" --verify-turnstile --endpoint haproxy:2443',
+    "demo_compose up -d edge",
     'python3 "$SCRIPT_DIR/smoke.py" "$DEMO_STATE_DIR/client.json"',
 ], start=init.index("exit 0") + len("exit 0"))
 assert_order(Path(sys.argv[2]), [
@@ -335,9 +355,10 @@ assert_order(Path(sys.argv[2]), [
     "demo_seed_compose up -d teagramd",
     '"$SEED_SCRIPT" --seed',
     '"$SEED_SCRIPT" --verify-seed --endpoint teagramd:2443',
-    "demo_compose up -d teagramd",
-    '"$SEED_SCRIPT" --verify-turnstile --endpoint teagramd:2443',
-    "demo_compose up -d haproxy edge",
+    '"$SCRIPT_DIR/test-seed-compose.sh"',
+    "demo_compose up -d --wait --wait-timeout 120 haproxy",
+    '"$SEED_SCRIPT" --verify-turnstile --endpoint haproxy:2443',
+    "demo_compose up -d edge",
 ])
 if "demo_wait_migration demo_bootstrap_compose 'bootstrap migrations'" not in init:
     raise SystemExit("init-demo.sh: bootstrap must wait for migration completion")

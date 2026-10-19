@@ -49,8 +49,9 @@ policy. Required layout and policy:
   `/apiws`, Nginx forwards Cloudflare's `CF-Connecting-IP` to the private
   HAProxy service. HAProxy validates that there is exactly one IP address,
   sends it to teagramd in a PROXY-v2 header, and teagramd trusts only HAProxy's
-  fixed `198.18.130.2/32` address. Neither HAProxy nor teagramd publishes a
-  host port.
+  fixed `198.18.130.2/32` address. HAProxy also forwards internal MTProto TCP
+  probes with PROXY-v2; its `2443` listener is available only on the internal
+  backend network. Neither HAProxy nor teagramd publishes a host port.
 - Restrict the Cloudflare Tunnel and DNS configuration to `demo.teagram.io`.
   The demo does not serve the dev hostname or admin dashboard.
 
@@ -193,12 +194,14 @@ deploy/teagram-demo/seed-demo.sh --verify-seed \
   --endpoint teagramd:2443 \
   --owner-username demo_seed_owner \
   --owner-password-file /var/lib/teagram-demo/secrets/seed-owner-password
-deploy/teagram-demo/seed-demo.sh --verify-turnstile --endpoint teagramd:2443
+deploy/teagram-demo/seed-demo.sh --verify-turnstile --endpoint haproxy:2443
 ```
 
-The endpoint is available only on the demo's internal Docker network. The seed
-and verification modes use the client API; they do not write account data with
-SQL. Ten fictional accounts include the ordinary seed owner. Nine generated
+The seed endpoint is available only on the demo's internal Docker network. The
+Turnstile probe uses HAProxy's private MTProto listener so its request reaches
+the production server with an accepted PROXY-v2 header. The seed and verification
+modes use the client API; they do not write account data with SQL. Ten fictional
+accounts include the ordinary seed owner. Nine generated
 passwords are stored in `/var/lib/teagram-demo/secrets/demo-accounts/` as a
 root-owned mode 0600 JSON inventory under a root-owned mode 0700 directory.
 After a weekly database wipe, the accounts receive fresh random passwords;
@@ -206,6 +209,10 @@ password values never appear in process arguments, environment variables,
 logs, or this checkout. The seed container mounts only the client config and
 the credential files it needs, has no database credentials, and runs on the
 internal backend network with a read-only root filesystem.
+
+`test-seed-compose.sh` runs a second seed pass against the private Compose API
+and checks that verified marker counts and search results stay stable. The
+initial install and weekly wipe run this test before the production gate check.
 
 The three content broadcast channels each contain 32 posts, including text,
 replies, a generated photo, a poll, and a reserved `.invalid` link. The welcome

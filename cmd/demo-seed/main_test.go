@@ -7,14 +7,30 @@ import (
 	"image/jpeg"
 	"os"
 	"path/filepath"
+	"regexp"
 	"testing"
 
 	"github.com/gotd/td/tg"
+	"github.com/gotd/td/tgerr"
 )
 
 func TestValidateEndpointAllowsOnlyInternalDemoService(t *testing.T) {
 	if err := validateEndpoint("teagramd:2443"); err != nil {
 		t.Fatalf("internal endpoint: %v", err)
+	}
+	if err := validateEndpointForMode(trustedProxyEndpoint, true); err != nil {
+		t.Fatalf("trusted proxy endpoint for Turnstile probe: %v", err)
+	}
+	for _, test := range []struct {
+		endpoint        string
+		verifyTurnstile bool
+	}{
+		{endpoint: trustedProxyEndpoint},
+		{endpoint: defaultEndpoint, verifyTurnstile: true},
+	} {
+		if err := validateEndpointForMode(test.endpoint, test.verifyTurnstile); err == nil {
+			t.Fatalf("validateEndpointForMode(%q, %t) succeeded", test.endpoint, test.verifyTurnstile)
+		}
 	}
 	for _, endpoint := range []string{
 		"demo.teagram.io:443",
@@ -29,6 +45,61 @@ func TestValidateEndpointAllowsOnlyInternalDemoService(t *testing.T) {
 				t.Fatalf("validateEndpoint(%q) succeeded", endpoint)
 			}
 		})
+	}
+}
+
+func TestProbeUsernameIsValidUsernameModeIdentifier(t *testing.T) {
+	username, err := newProbeUsername()
+	if err != nil {
+		t.Fatalf("generate probe username: %v", err)
+	}
+	if len(username) > 32 || !regexp.MustCompile(`^demo_probe_[a-f0-9]{16}$`).MatchString(username) {
+		t.Fatalf("probe username %q is not a supported throwaway username", username)
+	}
+}
+
+func TestTurnstileProbeRecognizesOnlySignupCaptchaErrors(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{name: "expected challenge", err: &tgerr.Error{Message: "RECAPTCHA_CHECK_signup__site-key"}, want: true},
+		{name: "other RPC error", err: &tgerr.Error{Message: "USERNAME_INVALID"}},
+		{name: "missing error"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if got := isSignupCaptchaRequired(test.err); got != test.want {
+				t.Fatalf("isSignupCaptchaRequired(%v) = %t, want %t", test.err, got, test.want)
+			}
+		})
+	}
+}
+
+func TestExpectedSeedMarkerCounts(t *testing.T) {
+	for _, spec := range publicSpaces {
+		want := 32
+		switch {
+		case spec.slug == "welcome":
+			want = 1
+		case spec.megagroup:
+			want = len(conversationLines)
+		}
+		if got := expectedSeedMarkerCount(spec); got != want {
+			t.Errorf("expectedSeedMarkerCount(%q) = %d, want %d", spec.slug, got, want)
+		}
+	}
+}
+
+func TestCountSeedMarkersForSpace(t *testing.T) {
+	spec := spaceSpec{slug: "maps"}
+	markers := map[string]int64{
+		"[[teagram-demo:maps:text-00]]":  1,
+		"[[teagram-demo:maps:text-01]]":  2,
+		"[[teagram-demo:notes:text-00]]": 3,
+	}
+	if got := countSeedMarkers(markers, spec); got != 2 {
+		t.Fatalf("countSeedMarkers = %d, want 2", got)
 	}
 }
 
