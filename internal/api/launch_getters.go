@@ -215,9 +215,6 @@ func (h *handlers) handleGetAvailableEffects(r *mtproto.Request) (bin.Encoder, e
 	if err := decodeLaunchGetterRequest(r, &req); err != nil {
 		return nil, err
 	}
-	if req.Hash == 0 {
-		return &tg.MessagesAvailableEffectsNotModified{}, nil
-	}
 	return &tg.MessagesAvailableEffects{
 		Hash:      0,
 		Effects:   []tg.AvailableEffect{},
@@ -229,9 +226,6 @@ func (h *handlers) handleGetEmojiStickerGroups(r *mtproto.Request) (bin.Encoder,
 	var req tg.MessagesGetEmojiStickerGroupsRequest
 	if err := decodeLaunchGetterRequest(r, &req); err != nil {
 		return nil, err
-	}
-	if req.Hash == 0 {
-		return &tg.MessagesEmojiGroupsNotModified{}, nil
 	}
 	return &tg.MessagesEmojiGroups{Hash: 0, Groups: []tg.EmojiGroupClass{}}, nil
 }
