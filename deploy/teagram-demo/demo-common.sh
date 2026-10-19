@@ -28,6 +28,28 @@ demo_fail() {
   return 1
 }
 
+demo_wait_migration() {
+  local compose_command="$1" description="$2" exit_code
+  local -a migration_ids=()
+  mapfile -t migration_ids < <("$compose_command" ps -a -q migrate)
+  if ((${#migration_ids[@]} != 1)); then
+    demo_fail "$description container is missing or ambiguous"
+    return 1
+  fi
+  if ! exit_code=$(docker wait "${migration_ids[0]}"); then
+    demo_fail "$description container wait failed"
+    return 1
+  fi
+  if [[ ! "$exit_code" =~ ^[0-9]+$ ]]; then
+    demo_fail "$description returned an invalid exit code"
+    return 1
+  fi
+  if [[ "$exit_code" != 0 ]]; then
+    demo_fail "$description failed (exit code $exit_code)"
+    return 1
+  fi
+}
+
 demo_require_root() {
   [[ "$EUID" -eq 0 ]] || demo_fail 'must run as root on the demo LXC'
 }

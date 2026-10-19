@@ -124,11 +124,12 @@ command="/opt/teagram-demo/deploy/teagram-demo/forced-command.sh",restrict ssh-e
 
 `forced-command.sh` accepts one full commit SHA, fetches `origin/main`, rejects
 non-main revisions and skips stale deploys. `deploy-main.sh` revalidates the
-blob authority and running containers, writes a root-only PostgreSQL custom
-dump, checks the dump with `pg_restore --list`, builds the tested image,
-preserves the RSA public key, stops edge, HAProxy, teagramd and the egress proxy
-before migrations,
-starts the new image and runs the smoke checks. A failed migration or smoke
+blob authority and running containers, closes edge and HAProxy, then stops
+teagramd and the egress proxy before taking the root-only PostgreSQL custom
+dump. This captures the final accepted writes before the deployment pauses the
+demo. The script checks the dump with `pg_restore --list`, validates a restore,
+builds the tested image, preserves the RSA public key, and keeps writers down
+through migration and smoke checks. A failed migration or smoke
 check runs through the edge on loopback port `18080` while the Tunnel target
 remains on `8080`. Only after the smoke and image-revision checks pass does the
 script recreate edge on `8080`. A pre-activation failure restores the previous

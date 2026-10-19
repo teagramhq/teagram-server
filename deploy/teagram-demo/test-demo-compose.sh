@@ -180,16 +180,20 @@ grep -Fq 'location = /healthz {' "$SCRIPT_DIR/nginx.conf"
 grep -Fq 'https://demo.teagram.io/healthz' "$SCRIPT_DIR/gatus.yaml"
 grep -Fq 'base_url + "/healthz"' "$SCRIPT_DIR/smoke.py"
 
-python3 - "$SCRIPT_DIR/wipe-weekly.sh" "$SCRIPT_DIR/init-demo.sh" <<'PY'
+python3 - "$SCRIPT_DIR/wipe-weekly.sh" "$SCRIPT_DIR/init-demo.sh" \
+  "$SCRIPT_DIR/deploy-main.sh" "$SCRIPT_DIR/demo-common.sh" <<'PY'
 from pathlib import Path
 import sys
 
 
-def assert_order(path: Path, fragments: list[str], start: int = 0) -> None:
-    text = path.read_text(encoding="utf-8")
+def assert_text_order(text: str, name: str, fragments: list[str], start: int = 0) -> None:
     positions = [text.find(fragment, start) for fragment in fragments]
     if any(position < 0 for position in positions) or positions != sorted(positions):
-        raise SystemExit(f"{path.name}: seed safety steps are missing or out of order")
+        raise SystemExit(f"{name}: safety steps are missing or out of order")
+
+
+def assert_order(path: Path, fragments: list[str], start: int = 0) -> None:
+    assert_text_order(path.read_text(encoding="utf-8"), path.name, fragments, start)
 
 
 assert_order(Path(sys.argv[1]), [
@@ -203,7 +207,8 @@ assert_order(Path(sys.argv[1]), [
     '"$SEED_SCRIPT" --verify-turnstile --endpoint teagramd:2443',
     "demo_compose up -d haproxy edge",
 ])
-deploy = Path(sys.argv[2]).with_name("deploy-main.sh").read_text(encoding="utf-8")
+deploy_path = Path(sys.argv[3])
+deploy = deploy_path.read_text(encoding="utf-8")
 deploy_steps = [
     "demo_validation_compose up -d haproxy edge",
     'python3 "$SCRIPT_DIR/smoke.py" "$DEMO_STATE_DIR/client.json" 18080',
@@ -214,6 +219,32 @@ if any(position < 0 for position in deploy_positions) or deploy_positions != sor
     raise SystemExit("deploy-main.sh: public edge must start only after private validation smoke")
 if "PUBLIC_ACTIVATION_STARTED=1" not in deploy or "database preserved" not in deploy:
     raise SystemExit("deploy-main.sh: activation failure must not restore a database after public writes")
+backup_function = deploy.split("demo_quiesce_and_backup_database() {", 1)[1].split("\n}", 1)[0]
+assert_text_order(backup_function, "deploy-main.sh backup function", [
+    "SERVICES_STOPPED=1",
+    "demo_compose stop edge haproxy",
+    "demo_compose stop teagramd turnstile-egress",
+    'DB_DUMP="$BACKUP_DIR/postgres.dump"',
+    "demo_compose exec -T postgres pg_dump -U postgres -Fc teagram",
+    "demo_compose_input exec -T postgres pg_restore --list",
+    'BACKUP_READY=1',
+])
+assert_order(deploy_path, [
+    "demo_quiesce_and_backup_database\n",
+    "demo_compose build teagramd",
+])
+rollback = deploy.split("demo_rollback() {", 1)[1].split("\n}", 1)[0]
+if "demo_restore_database || rollback_rc=1" not in rollback:
+    raise SystemExit("deploy-main.sh: rollback must restore the tested database snapshot")
+if "demo_wait_migration demo_compose 'deployment migrations'" not in deploy:
+    raise SystemExit("deploy-main.sh: deployment must wait for migration completion")
+if "demo_wait_migration demo_compose 'rollback migrations'" not in rollback:
+    raise SystemExit("deploy-main.sh: rollback must wait for migration completion")
+if "MIGRATE_STATUS=$(docker inspect" in deploy:
+    raise SystemExit("deploy-main.sh: detached migration status must be checked after waiting")
+waiter = Path(sys.argv[4]).read_text(encoding="utf-8")
+if "demo_wait_migration()" not in waiter or 'docker wait "${migration_ids[0]}"' not in waiter:
+    raise SystemExit("demo-common.sh: migration helper must wait for the container exit code")
 init = Path(sys.argv[2]).read_text(encoding="utf-8")
 cleanup = init.split("cleanup() {", 1)[1].split("\n}", 1)[0]
 if "rc != 0" not in cleanup or "PUBLIC_SERVICES_MAY_BE_RUNNING == 1" not in cleanup:
@@ -240,7 +271,116 @@ assert_order(Path(sys.argv[2]), [
     '"$SEED_SCRIPT" --verify-turnstile --endpoint teagramd:2443',
     "demo_compose up -d haproxy edge",
 ])
+if "demo_wait_migration demo_bootstrap_compose 'bootstrap migrations'" not in init:
+    raise SystemExit("init-demo.sh: bootstrap must wait for migration completion")
+if "MIGRATE_STATUS=$(docker inspect" in init:
+    raise SystemExit("init-demo.sh: detached bootstrap migration status must be checked after waiting")
+if "demo_wait_migration demo_compose 'post-reset migrations'" not in Path(sys.argv[1]).read_text(encoding="utf-8"):
+    raise SystemExit("wipe-weekly.sh: reset must wait for migration completion")
 PY
+
+BACKUP_FUNCTIONS="$TMP_DIR/deploy-backup-functions.sh"
+sed -n \
+  -e '/^demo_quiesce_and_backup_database() {$/,/^}/p' \
+  -e '/^demo_restore_database() {$/,/^}/p' \
+  "$SCRIPT_DIR/deploy-main.sh" > "$BACKUP_FUNCTIONS"
+cat > "$TMP_DIR/deploy-backup-regression.sh" <<'BASH'
+set -Eeuo pipefail
+source "$BACKUP_FUNCTIONS"
+EVENTS="$TMP_DIR/events"
+DATABASE_STATE="$TMP_DIR/database"
+RESTORE_CHECK="$TMP_DIR/restore-check"
+mkdir -p "$BACKUP_DIR" "$TMP_DIR"
+printf 'original-row\n' > "$DATABASE_STATE"
+INGRESS_OPEN=1
+SERVER_RUNNING=1
+demo_fail() { return 1; }
+chown() { :; }
+chmod() { :; }
+demo_compose() {
+  if [[ "$*" == 'stop edge haproxy' ]]; then
+    INGRESS_OPEN=0
+    printf 'ingress-stopped\n' >> "$EVENTS"
+  elif [[ "$*" == 'stop teagramd turnstile-egress' ]]; then
+    [[ "$INGRESS_OPEN" == 0 ]] || return 1
+    # A request accepted as the server drains must be in the rollback snapshot.
+    printf 'acknowledged-during-shutdown\n' >> "$DATABASE_STATE"
+    SERVER_RUNNING=0
+    printf 'server-stopped\n' >> "$EVENTS"
+  elif [[ "$*" == *'pg_dump -U postgres -Fc teagram'* ]]; then
+    [[ "$SERVER_RUNNING" == 0 ]] || return 1
+    printf 'database-dumped\n' >> "$EVENTS"
+    cat "$DATABASE_STATE"
+  elif [[ "$*" == *'psql -U postgres -Atqc'* ]]; then
+    : # The isolated restore database does not exist yet.
+  elif [[ "$*" == *'createdb -U postgres'* || "$*" == *'dropdb -U postgres'* ]]; then
+    :
+  else
+    printf 'unexpected demo_compose call: %s\n' "$*" >&2
+    return 1
+  fi
+}
+demo_compose_input() {
+  if [[ "$*" == *'pg_restore --list'* ]]; then
+    printf 'TABLE DATA\n'
+  elif [[ "$*" == *'-d teagram_restore_'* ]]; then
+    cat > "$RESTORE_CHECK"
+  elif [[ "$*" == *'-d teagram'* ]]; then
+    cat > "$DATABASE_STATE"
+  else
+    printf 'unexpected demo_compose_input call: %s\n' "$*" >&2
+    return 1
+  fi
+}
+demo_quiesce_and_backup_database
+grep -Fxq acknowledged-during-shutdown "$DB_DUMP"
+printf 'partial-migration\n' > "$DATABASE_STATE"
+demo_restore_database
+grep -Fxq acknowledged-during-shutdown "$DATABASE_STATE"
+grep -Fxq original-row "$DATABASE_STATE"
+[[ "$(cat "$EVENTS")" == $'ingress-stopped\nserver-stopped\ndatabase-dumped' ]]
+BASH
+env \
+  BACKUP_DIR="$TMP_DIR/deploy-backup" \
+  TMP_DIR="$TMP_DIR/deploy-backup-tmp" \
+  DB_DUMP='' \
+  RESTORE_DB='' \
+  RESTORE_DB_CREATED=0 \
+  BACKUP_READY=0 \
+  SERVICES_STOPPED=0 \
+  DATABASE_MUTATION=0 \
+  SHA=0123456789abcdef0123456789abcdef01234567 \
+  BACKUP_FUNCTIONS="$BACKUP_FUNCTIONS" \
+  bash "$TMP_DIR/deploy-backup-regression.sh"
+
+MIGRATION_FUNCTION="$TMP_DIR/demo-wait-migration.sh"
+sed -n '/^demo_wait_migration() {$/,/^}/p' "$SCRIPT_DIR/demo-common.sh" > "$MIGRATION_FUNCTION"
+cat > "$TMP_DIR/migration-wait-regression.sh" <<'BASH'
+set -Eeuo pipefail
+source "$MIGRATION_FUNCTION"
+WAIT_COMPLETE="$TMP_DIR/migration-wait-complete"
+MOCK_EXIT_CODE=0
+demo_fail() { return 1; }
+demo_compose() {
+  [[ "$*" == 'ps -a -q migrate' ]]
+  printf 'migration-container\n'
+}
+docker() {
+  [[ "$1" == wait && "$2" == migration-container ]]
+  sleep 0.1
+  : > "$WAIT_COMPLETE"
+  printf '%s\n' "$MOCK_EXIT_CODE"
+}
+demo_wait_migration demo_compose 'fixture migrations'
+[[ -f "$WAIT_COMPLETE" ]]
+MOCK_EXIT_CODE=17
+if demo_wait_migration demo_compose 'fixture migrations'; then
+  printf '%s\n' 'migration wait test accepted a failed migration' >&2
+  exit 1
+fi
+BASH
+env TMP_DIR="$TMP_DIR" MIGRATION_FUNCTION="$MIGRATION_FUNCTION" \
+  bash "$TMP_DIR/migration-wait-regression.sh"
 
 CLEANUP_FUNCTION="$TMP_DIR/init-demo-cleanup.sh"
 COMPOSE_CALLS="$TMP_DIR/init-demo-compose-calls"

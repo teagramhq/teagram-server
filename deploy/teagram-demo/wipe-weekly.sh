@@ -74,10 +74,7 @@ BLOB_PATH=$(jq -er '.volumes.tgblobs.driver_opts.device' "$TARGET_RENDER")
 find "$BLOB_PATH" -mindepth 1 -maxdepth 1 -exec rm -rf -- {} +
 demo_compose rm -sf migrate >/dev/null
 demo_compose up -d migrate
-mapfile -t MIGRATE_IDS < <(demo_compose ps -a -q migrate)
-((${#MIGRATE_IDS[@]} == 1)) || demo_fail 'post-reset migrations container is missing or ambiguous'
-MIGRATE_STATUS=$(docker inspect --format '{{.State.Status}} {{.State.ExitCode}}' "${MIGRATE_IDS[0]}")
-[[ "$MIGRATE_STATUS" == 'exited 0' ]] || demo_fail "post-reset migrations failed ($MIGRATE_STATUS)"
+demo_wait_migration demo_compose 'post-reset migrations'
 
 demo_seed_compose up -d teagramd
 demo_prepare_seed_owner "$TMP_DIR"

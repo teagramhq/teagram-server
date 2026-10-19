@@ -149,10 +149,7 @@ install -o root -g root -m 0644 "$TMP_DIR/client.json" "$DEMO_STATE_DIR/client.j
 mv -f -- "$DEMO_STATE_DIR/client.json.next" "$DEMO_STATE_DIR/client.json"
 
 demo_bootstrap_compose up -d migrate
-mapfile -t MIGRATE_IDS < <(demo_bootstrap_compose ps -a -q migrate)
-((${#MIGRATE_IDS[@]} == 1)) || demo_fail 'bootstrap migration container is missing or ambiguous'
-MIGRATE_STATUS=$(docker inspect --format '{{.State.Status}} {{.State.ExitCode}}' "${MIGRATE_IDS[0]}")
-[[ "$MIGRATE_STATUS" == 'exited 0' ]] || demo_fail "bootstrap migrations did not complete successfully ($MIGRATE_STATUS)"
+demo_wait_migration demo_bootstrap_compose 'bootstrap migrations'
 demo_bootstrap_compose up -d teagramd
 
 mapfile -t CONTAINER_IDS < <(demo_bootstrap_compose ps -q)

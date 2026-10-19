@@ -30,7 +30,7 @@ demo_cleanup() {
     demo_compose exec -T postgres dropdb -U postgres --if-exists "$RESTORE_DB" </dev/null ||
       printf 'could not remove isolated restore database %s\n' "$RESTORE_DB" >&2
   fi
-  if (( rc != 0 && BACKUP_READY == 1 )); then
+  if (( rc != 0 && (BACKUP_READY == 1 || SERVICES_STOPPED == 1) )); then
     if (( PUBLIC_ACTIVATION_STARTED == 1 )); then
       demo_preserve_after_activation_failure ||
         printf 'could not confirm public edge stopped; inspect deployment backup %s\n' "$BACKUP_DIR" >&2
@@ -66,17 +66,51 @@ demo_preserve_after_activation_failure() {
   return "$stop_rc"
 }
 
+demo_quiesce_and_backup_database() {
+  SERVICES_STOPPED=1
+  demo_compose stop edge haproxy
+  demo_compose stop teagramd turnstile-egress
+
+  DB_DUMP="$BACKUP_DIR/postgres.dump"
+  demo_compose exec -T postgres pg_dump -U postgres -Fc teagram </dev/null > "$DB_DUMP"
+  chown root:root "$DB_DUMP"
+  chmod 0600 "$DB_DUMP"
+  [[ -s "$DB_DUMP" ]] || demo_fail 'database backup is empty'
+  demo_compose_input exec -T postgres pg_restore --list < "$DB_DUMP" > "$TMP_DIR/restore.list"
+  grep -q 'TABLE DATA' "$TMP_DIR/restore.list" || demo_fail 'database backup failed its restore-list check'
+  RESTORE_DB="teagram_restore_${SHA:0:12}"
+  RESTORE_DB_EXISTS=$(demo_compose exec -T postgres psql -U postgres -Atqc \
+    "SELECT 1 FROM pg_database WHERE datname = '$RESTORE_DB'" </dev/null)
+  [[ -z "$RESTORE_DB_EXISTS" ]] || demo_fail 'isolated restore database name is already in use'
+  demo_compose exec -T postgres createdb -U postgres "$RESTORE_DB" </dev/null
+  RESTORE_DB_CREATED=1
+  demo_compose_input exec -T postgres pg_restore -U postgres --no-owner --no-privileges --exit-on-error \
+    -d "$RESTORE_DB" < "$DB_DUMP"
+  demo_compose exec -T postgres dropdb -U postgres "$RESTORE_DB" </dev/null
+  RESTORE_DB_CREATED=0
+  sha256sum "$DB_DUMP" > "$BACKUP_DIR/postgres.dump.sha256"
+  chown root:root "$BACKUP_DIR/postgres.dump.sha256"
+  chmod 0600 "$BACKUP_DIR/postgres.dump.sha256"
+  BACKUP_READY=1
+}
+
+demo_restore_database() {
+  local restore_rc=0
+  demo_compose exec -T postgres dropdb -U postgres --if-exists teagram </dev/null || restore_rc=1
+  demo_compose exec -T postgres createdb -U postgres teagram </dev/null || restore_rc=1
+  demo_compose_input exec -T postgres pg_restore -U postgres --no-owner --no-privileges --exit-on-error -d teagram \
+    < "$DB_DUMP" || restore_rc=1
+  return "$restore_rc"
+}
+
 demo_rollback() {
-  local rollback_rc=0 migrate_ids migrate_status
+  local rollback_rc=0
   set +e
   if (( SERVICES_STOPPED == 1 || DATABASE_MUTATION == 1 )); then
     demo_rollback_stop >/dev/null 2>&1 || rollback_rc=1
   fi
   if (( DATABASE_MUTATION == 1 )); then
-    demo_compose exec -T postgres dropdb -U postgres --if-exists teagram </dev/null || rollback_rc=1
-    demo_compose exec -T postgres createdb -U postgres teagram </dev/null || rollback_rc=1
-    demo_compose_input exec -T postgres pg_restore -U postgres --no-owner --no-privileges --exit-on-error -d teagram \
-      < "$DB_DUMP" || rollback_rc=1
+    demo_restore_database || rollback_rc=1
   fi
   git -C "$DEMO_REPO_ROOT" reset --hard "$PREV_SHA" || rollback_rc=1
   docker image tag "$PREV_IMAGE_ID" teagramd:local || rollback_rc=1
@@ -84,23 +118,17 @@ demo_rollback() {
   chown root:root "$DEMO_STATE_DIR/client.json.next" || rollback_rc=1
   chmod 0644 "$DEMO_STATE_DIR/client.json.next" || rollback_rc=1
   mv -f -- "$DEMO_STATE_DIR/client.json.next" "$DEMO_STATE_DIR/client.json" || rollback_rc=1
-  if (( SERVICES_STOPPED == 1 && rollback_rc == 0 )); then
+  if (( SERVICES_STOPPED == 1 && DATABASE_MUTATION == 1 && rollback_rc == 0 )); then
     demo_compose rm -sf migrate >/dev/null 2>&1 || rollback_rc=1
     if (( rollback_rc == 0 )); then
       demo_compose up -d migrate || rollback_rc=1
     fi
     if (( rollback_rc == 0 )); then
-      migrate_ids=$(demo_compose ps -a -q migrate)
-      if [[ -z "$migrate_ids" ]]; then
-        rollback_rc=1
-      else
-        migrate_status=$(docker inspect --format '{{.State.Status}} {{.State.ExitCode}}' "$migrate_ids" 2>/dev/null)
-        [[ "$migrate_status" == 'exited 0' ]] || rollback_rc=1
-      fi
+      demo_wait_migration demo_compose 'rollback migrations' || rollback_rc=1
     fi
-    if (( rollback_rc == 0 )); then
-      demo_compose up -d teagramd edge || rollback_rc=1
-    fi
+  fi
+  if (( SERVICES_STOPPED == 1 && rollback_rc == 0 )); then
+    demo_compose up -d teagramd edge || rollback_rc=1
     if (( rollback_rc == 0 )); then
       python3 "$SCRIPT_DIR/smoke.py" "$DEMO_STATE_DIR/client.json" || rollback_rc=1
     fi
@@ -176,27 +204,7 @@ cp -- "$DEMO_STATE_DIR/client.json" "$BACKUP_DIR/client.json"
 chown root:root "$BACKUP_DIR/previous-image-id.txt" "$BACKUP_DIR/client.json"
 chmod 0600 "$BACKUP_DIR/previous-image-id.txt" "$BACKUP_DIR/client.json"
 
-DB_DUMP="$BACKUP_DIR/postgres.dump"
-demo_compose exec -T postgres pg_dump -U postgres -Fc teagram </dev/null > "$DB_DUMP"
-chown root:root "$DB_DUMP"
-chmod 0600 "$DB_DUMP"
-[[ -s "$DB_DUMP" ]] || demo_fail 'database backup is empty'
-demo_compose_input exec -T postgres pg_restore --list < "$DB_DUMP" > "$TMP_DIR/restore.list"
-grep -q 'TABLE DATA' "$TMP_DIR/restore.list" || demo_fail 'database backup failed its restore-list check'
-RESTORE_DB="teagram_restore_${SHA:0:12}"
-RESTORE_DB_EXISTS=$(demo_compose exec -T postgres psql -U postgres -Atqc \
-  "SELECT 1 FROM pg_database WHERE datname = '$RESTORE_DB'" </dev/null)
-[[ -z "$RESTORE_DB_EXISTS" ]] || demo_fail 'isolated restore database name is already in use'
-demo_compose exec -T postgres createdb -U postgres "$RESTORE_DB" </dev/null
-RESTORE_DB_CREATED=1
-demo_compose_input exec -T postgres pg_restore -U postgres --no-owner --no-privileges --exit-on-error \
-  -d "$RESTORE_DB" < "$DB_DUMP"
-demo_compose exec -T postgres dropdb -U postgres "$RESTORE_DB" </dev/null
-RESTORE_DB_CREATED=0
-sha256sum "$DB_DUMP" > "$BACKUP_DIR/postgres.dump.sha256"
-chown root:root "$BACKUP_DIR/postgres.dump.sha256"
-chmod 0600 "$BACKUP_DIR/postgres.dump.sha256"
-BACKUP_READY=1
+demo_quiesce_and_backup_database
 
 export TEAGRAMD_SOURCE_REVISION="$SHA"
 demo_compose build teagramd
@@ -213,14 +221,9 @@ OLD_SPKI=$(jq -er '.mtproto.rsa_spki' "$BACKUP_DIR/client.json")
 NEW_SPKI=$(jq -er '.mtproto.rsa_spki' "$TMP_DIR/client.json")
 [[ "$NEW_SPKI" == "$OLD_SPKI" ]] || demo_fail 'deployment changed the persistent RSA identity'
 
-SERVICES_STOPPED=1
-demo_compose stop edge haproxy teagramd turnstile-egress
 DATABASE_MUTATION=1
 demo_compose up -d migrate
-mapfile -t MIGRATE_IDS < <(demo_compose ps -a -q migrate)
-((${#MIGRATE_IDS[@]} == 1)) || demo_fail 'migration container is missing or ambiguous'
-MIGRATE_STATUS=$(docker inspect --format '{{.State.Status}} {{.State.ExitCode}}' "${MIGRATE_IDS[0]}")
-[[ "$MIGRATE_STATUS" == 'exited 0' ]] || demo_fail "database migration failed ($MIGRATE_STATUS)"
+demo_wait_migration demo_compose 'deployment migrations'
 install -o root -g root -m 0644 "$TMP_DIR/client.json" "$DEMO_STATE_DIR/client.json.next"
 mv -f -- "$DEMO_STATE_DIR/client.json.next" "$DEMO_STATE_DIR/client.json"
 demo_compose up -d teagramd
