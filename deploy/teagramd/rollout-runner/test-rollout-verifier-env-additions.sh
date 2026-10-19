@@ -164,3 +164,51 @@ if registration_snapshot 'TG_REGISTRATION=open' open closed target \
 fi
 ! grep -Eq 'TG_REGISTRATION=(open|closed)' "$TMP/registration-compose-mismatch.err"
 printf '%s\n' 'PASS target rejects a registration value that differs from resolved Compose'
+
+legacy_inspect=$(inspect_json '')
+legacy_snapshot=$(snapshot_from_json \
+  "$legacy_inspect" "$COMPOSE_JSON" "$ENV_FILE" "$OVERRIDE_FILE" selected-compose-render baseline)
+public_ws_compose=$(jq -c '
+  .services.teagramd.environment += {
+    TG_PUBLIC_WEBSOCKET_LISTEN_ADDR:"",
+    TG_PUBLIC_REGISTRATION:"closed",
+    TG_PUBLIC_WEBSOCKET_ALLOWED_ORIGINS:""
+  }
+' <<< "$COMPOSE_JSON")
+public_ws_inspect=$(printf '%s' "$legacy_inspect" | jq -c '
+  .Config.Env += [
+    "TG_PUBLIC_WEBSOCKET_LISTEN_ADDR=",
+    "TG_PUBLIC_REGISTRATION=closed",
+    "TG_PUBLIC_WEBSOCKET_ALLOWED_ORIGINS="
+  ]
+')
+public_ws_snapshot=$(snapshot_from_json \
+  "$public_ws_inspect" "$public_ws_compose" "$ENV_FILE" "$OVERRIDE_FILE" selected-compose-render target)
+[ "$(jq -r '.config_sha256' <<< "$legacy_snapshot")" = "$(jq -r '.config_sha256' <<< "$public_ws_snapshot")" ]
+[ "$(jq -r '.container_env_sha256' <<< "$legacy_snapshot")" = "$(jq -r '.container_env_sha256' <<< "$public_ws_snapshot")" ]
+printf '%s\n' 'PASS safe public websocket defaults preserve resolved config and container environment equivalence'
+
+for setting in TG_PUBLIC_WEBSOCKET_LISTEN_ADDR TG_PUBLIC_REGISTRATION TG_PUBLIC_WEBSOCKET_ALLOWED_ORIGINS; do
+  case "$setting" in
+    TG_PUBLIC_REGISTRATION) unsafe_value=invite ;;
+    *) unsafe_value=https://public.example ;;
+  esac
+  unsafe_compose=$(jq -c --arg setting "$setting" --arg value "$unsafe_value" \
+    '.services.teagramd.environment[$setting]=$value' <<< "$public_ws_compose")
+  if snapshot_from_json "$public_ws_inspect" "$unsafe_compose" "$ENV_FILE" "$OVERRIDE_FILE" selected-compose-render target \
+    >/dev/null 2>"$TMP/$setting-compose.err"; then
+    printf 'FAIL unsafe resolved Compose setting was accepted: %s\n' "$setting" >&2
+    exit 1
+  fi
+  printf 'PASS unsafe resolved Compose setting is rejected: %s\n' "$setting"
+
+  unsafe_inspect=$(printf '%s' "$public_ws_inspect" | jq -c --arg setting "$setting" --arg value "$unsafe_value" '
+    .Config.Env |= (map(select((startswith($setting + "=")) | not)) + [$setting + "=" + $value])
+  ')
+  if snapshot_from_json "$unsafe_inspect" "$public_ws_compose" "$ENV_FILE" "$OVERRIDE_FILE" selected-compose-render target \
+    >/dev/null 2>"$TMP/$setting-container.err"; then
+    printf 'FAIL unsafe container setting was accepted: %s\n' "$setting" >&2
+    exit 1
+  fi
+  printf 'PASS unsafe container setting is rejected: %s\n' "$setting"
+done
