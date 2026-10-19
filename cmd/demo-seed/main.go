@@ -164,7 +164,7 @@ func validateEndpoint(endpoint string) error {
 func validateEndpointForMode(endpoint string, verifyTurnstile bool) error {
 	if verifyTurnstile {
 		if endpoint != trustedProxyEndpoint {
-			return errors.New("Turnstile verification must use the trusted internal haproxy:2443 service")
+			return errors.New("turnstile verification must use the trusted internal haproxy:2443 service")
 		}
 		return nil
 	}
