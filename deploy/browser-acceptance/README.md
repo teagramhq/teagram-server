@@ -275,10 +275,11 @@ successful probe's exit status of zero.
 The QA v3 result retains the version 2 fields and adds `qaFailureCode`
 (`SAFE_FAILURES` or `none`), `submission` (`none`, `username`, or `password`),
 `chatList` (`not-reached`, `missing`, or `rendered`), `chatListRows` (integer
-0–10, where 10 means ten or more), and `wssEndpointMatched` (boolean). A v3
-success requires `qaFailureCode: "none"`, a password submission, a rendered
-chat list, a matching WSS endpoint, and the existing successful sign-in and
-logout proof.
+0–10, where 10 means ten or more), and `wssEndpointMatched` (boolean). A
+rendered chat list includes the visible empty state, which reports zero rows.
+A v3 success requires `qaFailureCode: "none"`, a password submission, a
+rendered chat list, a matching WSS endpoint, and the existing successful
+sign-in and logout proof.
 Failed QA results keep a non-`none` failure code and their bounded diagnostics.
 The wrapper accepts the exact v3 schema only: a non-success result must have a
 non-`none` failure code, and `password-check` or `signed-in` requires a
