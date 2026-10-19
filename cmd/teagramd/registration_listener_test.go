@@ -77,8 +77,8 @@ func TestRegistrationModesStayBoundToListeners(t *testing.T) {
 	}()
 	t.Cleanup(func() {
 		stopServing()
-		_ = tailnetListener.Close()
-		_ = publicListener.Close()
+		closeRegistrationTestListener(t, tailnetListener)
+		closeRegistrationTestListener(t, publicListener)
 		if err := <-serveErr; err != nil && !errors.Is(err, context.Canceled) && !errors.Is(err, net.ErrClosed) {
 			t.Errorf("serve listeners: %v", err)
 		}
@@ -105,12 +105,20 @@ func TestRegistrationModesStayBoundToListeners(t *testing.T) {
 
 func listenRegistrationTestTCP(t *testing.T) net.Listener {
 	t.Helper()
-	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	var lc net.ListenConfig
+	listener, err := lc.Listen(t.Context(), "tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatalf("listen: %v", err)
 	}
-	t.Cleanup(func() { _ = listener.Close() })
+	t.Cleanup(func() { closeRegistrationTestListener(t, listener) })
 	return listener
+}
+
+func closeRegistrationTestListener(t *testing.T, listener net.Listener) {
+	t.Helper()
+	if err := listener.Close(); err != nil && !errors.Is(err, net.ErrClosed) {
+		t.Errorf("close listener: %v", err)
+	}
 }
 
 func registrationTestClient(t *testing.T, key *rsa.PrivateKey, dcID int, listener net.Listener, websocket bool, spoofMode config.RegistrationMode) *telegram.Client {
@@ -191,8 +199,11 @@ func assertRegistrationClientPolicy(ctx context.Context, client *telegram.Client
 		}
 		return nil
 	}
-	if err == nil || !registrationRPCMessage(err, "INVITE_HASH_INVALID") {
-		return fmt.Errorf("auth.signUp error = %v, want INVITE_HASH_INVALID", err)
+	if err == nil {
+		return errors.New("auth.signUp succeeded, want INVITE_HASH_INVALID")
+	}
+	if !registrationRPCMessage(err, "INVITE_HASH_INVALID") {
+		return fmt.Errorf("auth.signUp: %w, want INVITE_HASH_INVALID", err)
 	}
 	return nil
 }
