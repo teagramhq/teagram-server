@@ -209,6 +209,18 @@ func (f *galleryFixture) addEntry(t *testing.T, ownerID, fileID int64) {
 	}
 }
 
+func (f *galleryFixture) selectCurrentPhoto(t *testing.T, ownerID, fileID int64) {
+	t.Helper()
+	if _, err := f.writer().Exec(context.Background(), `
+INSERT INTO profile_photo_state (user_id, current_file_id, mutation_revision)
+VALUES ($1, $2, 1)
+ON CONFLICT (user_id) DO UPDATE
+SET current_file_id = EXCLUDED.current_file_id,
+    mutation_revision = profile_photo_state.mutation_revision + 1`, ownerID, fileID); err != nil {
+		t.Fatalf("select current profile photo (owner=%d file=%d): %v", ownerID, fileID, err)
+	}
+}
+
 func (f *galleryFixture) deleteEntry(t *testing.T, ownerID, fileID int64) {
 	t.Helper()
 	tag, err := f.writer().Exec(context.Background(),
@@ -321,6 +333,61 @@ func assertGalleryLocationInvalid(t *testing.T, s *store.Store, blobs blob.Store
 	if msg := rpcMessage(t, err); msg != "LOCATION_INVALID" {
 		t.Errorf("%s: got %s, want LOCATION_INVALID", label, msg)
 	}
+}
+
+func assertPeerPhotoLocationInvalid(t *testing.T, f *galleryFixture, location *tg.InputPeerPhotoFileLocation, label string) {
+	t.Helper()
+	result, err := api.GetFileForTest(f.s, f.viewer, f.blobs, &tg.UploadGetFileRequest{
+		Location: location, Limit: len(galleryPayload),
+	})
+	if msg := rpcMessage(t, err); msg != "LOCATION_INVALID" {
+		t.Fatalf("%s: got %s, want LOCATION_INVALID", label, msg)
+	}
+	if result != nil {
+		if file, ok := result.(*tg.UploadFile); ok && len(file.Bytes) > 0 {
+			t.Errorf("%s: returned %d photo bytes on rejection", label, len(file.Bytes))
+		} else {
+			t.Errorf("%s: returned response %T on rejection", label, result)
+		}
+	}
+	if reads := f.blobs.reads.Load(); reads != 0 {
+		t.Errorf("%s: object store read %d times on rejection, want no read", label, reads)
+	}
+}
+
+func TestGetFilePeerProfilePhotoRejectsBlockedViewer(t *testing.T) {
+	t.Parallel()
+	f := newGalleryFixture(t, "+1555144500083", "+1555144500084")
+	f.selectCurrentPhoto(t, f.owner, f.photoID)
+	f.block(t, f.owner, f.viewer)
+
+	assertPeerPhotoLocationInvalid(t, f, &tg.InputPeerPhotoFileLocation{
+		Peer: api.InputPeerUser(f.viewer, f.owner), PhotoID: f.photoID, Big: true,
+	}, "blocked viewer")
+}
+
+func TestGetFilePeerProfilePhotoRejectsNonCurrentGalleryPhoto(t *testing.T) {
+	t.Parallel()
+	f := newGalleryFixture(t, "+1555144500085", "+1555144500086")
+	olderPhotoID := f.addStoredPhoto(t, f.owner)
+	f.addEntry(t, f.owner, olderPhotoID)
+	f.selectCurrentPhoto(t, f.owner, f.photoID)
+
+	assertPeerPhotoLocationInvalid(t, f, &tg.InputPeerPhotoFileLocation{
+		Peer: api.InputPeerUser(f.viewer, f.owner), PhotoID: olderPhotoID, Big: true,
+	}, "non-current gallery photo")
+}
+
+func TestGetFilePeerProfilePhotoRejectsForgedPeerAccessHash(t *testing.T) {
+	t.Parallel()
+	f := newGalleryFixture(t, "+1555144500087", "+1555144500088")
+	f.selectCurrentPhoto(t, f.owner, f.photoID)
+	peer := api.InputPeerUser(f.viewer, f.owner)
+	peer.AccessHash ^= 1
+
+	assertPeerPhotoLocationInvalid(t, f, &tg.InputPeerPhotoFileLocation{
+		Peer: peer, PhotoID: f.photoID, Big: true,
+	}, "forged peer access hash")
 }
 
 func TestGetFileServesEachProfileGalleryPhotoSize(t *testing.T) {

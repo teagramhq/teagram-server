@@ -1,0 +1,29 @@
+{
+  "layer": 228,
+  "client": "gotd v0.162.0",
+  "source": "captures/upload_getFile.1.txt",
+  "method": "upload.getFile",
+  "request": {
+    "type": "upload.getFile",
+    "flags": 0,
+    "fields": {
+      "location": {
+        "type": "inputPeerPhotoFileLocation",
+        "flags": 1,
+        "fields": {
+          "big": true,
+          "peer": {
+            "type": "inputPeerUser",
+            "fields": {
+              "user_id": "<N>",
+              "access_hash": "<N>"
+            }
+          },
+          "photo_id": "<N>"
+        }
+      },
+      "offset": 0,
+      "limit": 262144
+    }
+  }
+}

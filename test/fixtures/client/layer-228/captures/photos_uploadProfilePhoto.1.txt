@@ -1,0 +1,10 @@
+# source: gotd v0.162.0 request captured by test/e2e/client_request_fixtures_test.go
+body: { photos_uploadProfilePhoto flags:#
+  flags: 1 [#],
+  file: { inputFile
+    id: <N> [LONG],
+    parts: 8 [INT],
+    name: fictional-avatar.jpg [STRING],
+    md5_checksum: REDACTED [STRING],
+  },
+},
