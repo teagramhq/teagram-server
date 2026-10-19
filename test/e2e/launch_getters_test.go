@@ -651,15 +651,9 @@ func testMAIN1505PeerGetters(ctx context.Context, client *tg.Client, userID, cha
 }
 
 func assertEmptyReactionsGetter(name string, hash int64, got tg.MessagesReactionsClass) error {
-	if hash == 0 {
-		if _, ok := got.(*tg.MessagesReactionsNotModified); !ok {
-			return fmt.Errorf("%s with matching hash = %T, want not modified", name, got)
-		}
-		return nil
-	}
 	result, ok := got.(*tg.MessagesReactions)
 	if !ok {
-		return fmt.Errorf("%s with stale hash = %T, want empty reactions", name, got)
+		return fmt.Errorf("%s with hash %d = %T, want full empty reactions", name, hash, got)
 	}
 	if result.Hash != 0 || len(result.Reactions) != 0 {
 		return fmt.Errorf("%s = hash %d, %d reactions; want empty", name, result.Hash, len(result.Reactions))
@@ -668,15 +662,9 @@ func assertEmptyReactionsGetter(name string, hash int64, got tg.MessagesReaction
 }
 
 func assertEmptyAvailableEffects(name string, hash int, got tg.MessagesAvailableEffectsClass) error {
-	if hash == 0 {
-		if _, ok := got.(*tg.MessagesAvailableEffectsNotModified); !ok {
-			return fmt.Errorf("%s with matching hash = %T, want not modified", name, got)
-		}
-		return nil
-	}
 	result, ok := got.(*tg.MessagesAvailableEffects)
 	if !ok {
-		return fmt.Errorf("%s with stale hash = %T, want empty effects", name, got)
+		return fmt.Errorf("%s with hash %d = %T, want full empty effects", name, hash, got)
 	}
 	if result.Hash != 0 || len(result.Effects) != 0 || len(result.Documents) != 0 {
 		return fmt.Errorf("%s = hash %d, %d effects and %d documents; want empty", name, result.Hash, len(result.Effects), len(result.Documents))
@@ -685,15 +673,9 @@ func assertEmptyAvailableEffects(name string, hash int, got tg.MessagesAvailable
 }
 
 func assertEmptyEmojiStickerGroups(name string, hash int, got tg.MessagesEmojiGroupsClass) error {
-	if hash == 0 {
-		if _, ok := got.(*tg.MessagesEmojiGroupsNotModified); !ok {
-			return fmt.Errorf("%s with matching hash = %T, want not modified", name, got)
-		}
-		return nil
-	}
 	result, ok := got.(*tg.MessagesEmojiGroups)
 	if !ok {
-		return fmt.Errorf("%s with stale hash = %T, want empty groups", name, got)
+		return fmt.Errorf("%s with hash %d = %T, want full empty groups", name, hash, got)
 	}
 	if result.Hash != 0 || len(result.Groups) != 0 {
 		return fmt.Errorf("%s = hash %d, %d groups; want empty", name, result.Hash, len(result.Groups))

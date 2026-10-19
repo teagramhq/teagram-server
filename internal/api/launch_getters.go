@@ -187,7 +187,7 @@ func (h *handlers) handleGetTopReactions(r *mtproto.Request) (bin.Encoder, error
 	if err := decodeLaunchGetterRequest(r, &req); err != nil {
 		return nil, err
 	}
-	return emptyReactionsForHash(req.Hash), nil
+	return emptyReactions(), nil
 }
 
 func (h *handlers) handleGetRecentReactions(r *mtproto.Request) (bin.Encoder, error) {
@@ -195,7 +195,7 @@ func (h *handlers) handleGetRecentReactions(r *mtproto.Request) (bin.Encoder, er
 	if err := decodeLaunchGetterRequest(r, &req); err != nil {
 		return nil, err
 	}
-	return emptyReactionsForHash(req.Hash), nil
+	return emptyReactions(), nil
 }
 
 func (h *handlers) handleGetDefaultTagReactions(r *mtproto.Request) (bin.Encoder, error) {
@@ -203,13 +203,10 @@ func (h *handlers) handleGetDefaultTagReactions(r *mtproto.Request) (bin.Encoder
 	if err := decodeLaunchGetterRequest(r, &req); err != nil {
 		return nil, err
 	}
-	return emptyReactionsForHash(req.Hash), nil
+	return emptyReactions(), nil
 }
 
-func emptyReactionsForHash(hash int64) tg.MessagesReactionsClass {
-	if hash == 0 {
-		return &tg.MessagesReactionsNotModified{}
-	}
+func emptyReactions() tg.MessagesReactionsClass {
 	return &tg.MessagesReactions{Hash: 0, Reactions: []tg.ReactionClass{}}
 }
 
@@ -217,9 +214,6 @@ func (h *handlers) handleGetAvailableEffects(r *mtproto.Request) (bin.Encoder, e
 	var req tg.MessagesGetAvailableEffectsRequest
 	if err := decodeLaunchGetterRequest(r, &req); err != nil {
 		return nil, err
-	}
-	if req.Hash == 0 {
-		return &tg.MessagesAvailableEffectsNotModified{}, nil
 	}
 	return &tg.MessagesAvailableEffects{
 		Hash:      0,
@@ -232,9 +226,6 @@ func (h *handlers) handleGetEmojiStickerGroups(r *mtproto.Request) (bin.Encoder,
 	var req tg.MessagesGetEmojiStickerGroupsRequest
 	if err := decodeLaunchGetterRequest(r, &req); err != nil {
 		return nil, err
-	}
-	if req.Hash == 0 {
-		return &tg.MessagesEmojiGroupsNotModified{}, nil
 	}
 	return &tg.MessagesEmojiGroups{Hash: 0, Groups: []tg.EmojiGroupClass{}}, nil
 }
