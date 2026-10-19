@@ -6,6 +6,8 @@ services:
     environment:
       TG_CLIENT_ADDR_TRUST: socket
       TG_CLIENT_ADDR_PROXY_CIDRS: ""
+      HTTP_PROXY: ""
+      HTTPS_PROXY: ""
     volumes: !override
       - tgkey:/var/lib/teagramd
       - tgblobs:/var/lib/teagramd-blobs

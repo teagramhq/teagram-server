@@ -3,6 +3,14 @@
 # provider already configured on that status page; this repository does not
 # own the Gatus alerting credentials.
 endpoints:
+  - name: Demo upstream health
+    group: teagram-demo
+    url: https://demo.teagram.io/healthz
+    interval: 1m
+    conditions:
+      - "[STATUS] == 200"
+      - "[CERTIFICATE_EXPIRATION] > 72h"
+
   - name: Client discovery
     group: teagram-demo
     url: https://demo.teagram.io/.well-known/telegramd/client

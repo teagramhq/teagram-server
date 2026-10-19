@@ -75,6 +75,9 @@ services:
       TG_RSA_KEY_FINGERPRINT: ${TG_RSA_KEY_FINGERPRINT:-}
       TG_AUTHKEY_ENC_KEY: ${TG_AUTHKEY_ENC_KEY:?set TG_AUTHKEY_ENC_KEY in deploy/teagram-demo/.env}
       TG_AUTHKEY_ENC_KEY_FILE: ${TG_AUTHKEY_ENC_KEY_FILE:-/var/lib/teagramd/enc_key.hex}
+      HTTP_PROXY: http://turnstile-egress:3128
+      HTTPS_PROXY: http://turnstile-egress:3128
+      NO_PROXY: localhost,127.0.0.1,postgres,teagramd
       TG_REPLICA_COUNT: "1"
       TG_CLIENT_ADDR_TRUST: proxy-v2
       TG_CLIENT_ADDR_PROXY_CIDRS: 198.18.130.2/32
@@ -91,7 +94,49 @@ services:
     depends_on:
       migrate:
         condition: service_completed_successfully
-    networks: [backend]
+      turnstile-egress:
+        condition: service_healthy
+    networks:
+      backend:
+        ipv4_address: 198.18.130.253
+    restart: unless-stopped
+    logging: *logging
+
+  turnstile-egress:
+    image: mirror.gcr.io/ubuntu/squid:7.2-26.04_edge@sha256:f6843088c0eab9e63ecb8a1c215d939cd97d0370611bb2bdb65c4a8e48b3c3eb
+    platform: linux/amd64
+    user: "584792:584792"
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    mem_limit: 128m
+    memswap_limit: 128m
+    cpus: "0.25"
+    pids_limit: 64
+    tmpfs:
+      - /run:rw,noexec,nosuid,nodev,size=16m,uid=584792,gid=584792,mode=0755
+      - /tmp:rw,noexec,nosuid,nodev,size=16m,uid=584792,gid=584792,mode=1777
+      - /var/log/squid:rw,noexec,nosuid,nodev,size=16m,uid=584792,gid=584792,mode=0750
+      - /var/spool/squid:rw,noexec,nosuid,nodev,size=32m,uid=584792,gid=584792,mode=0750
+    volumes:
+      - type: bind
+        source: ./deploy/teagram-demo/turnstile-egress.conf
+        target: /etc/squid/squid.conf
+        read_only: true
+      - type: bind
+        source: ./deploy/teagram-demo/pebble-health.yaml
+        target: /var/lib/pebble/default/layers/002-demo-health.yaml
+        read_only: true
+    healthcheck:
+      test: ["CMD", "/usr/bin/pebble", "health"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 10s
+    networks:
+      egress:
+        gw_priority: 1
+      backend:
+        ipv4_address: 198.18.130.252
     restart: unless-stopped
     logging: *logging
 
@@ -131,7 +176,7 @@ services:
     entrypoint: ["nginx", "-g", "daemon off;"]
     user: "101:101"
     ports:
-      - "127.0.0.1:8080:8080"
+      - "${TEAGRAM_DEMO_EDGE_BIND:-127.0.0.1:8080}:8080"
     read_only: true
     cap_drop: [ALL]
     security_opt: ["no-new-privileges:true"]
@@ -178,4 +223,6 @@ networks:
       config:
         - subnet: 198.18.130.0/24
   edge:
+    driver: bridge
+  egress:
     driver: bridge

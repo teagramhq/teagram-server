@@ -66,7 +66,7 @@ cmp -s "$CLIENT_CONFIG" "$TMP_DIR/public-client.json" || demo_fail 'public clien
 # The separate tgkey volume and .env are deliberately never removed or rewritten.
 # Stop every public path before resetting data. The seed-only overlay never
 # starts HAProxy or edge.
-demo_compose stop edge haproxy teagramd
+demo_compose stop edge haproxy teagramd turnstile-egress
 demo_compose exec -T postgres dropdb -U postgres --if-exists teagram </dev/null
 demo_compose exec -T postgres createdb -U postgres teagram </dev/null
 demo_reset_seed_owner_marker

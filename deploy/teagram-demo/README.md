@@ -36,6 +36,12 @@ policy. Required layout and policy:
   `192.168.0.0/16` and `100.64.0.0/10`, and allows no route between the demo
   and dev LXCs. The LXC is not joined to the tailnet. Do not expose `2443`,
   `2446`, Postgres or Docker.
+- `teagramd` remains attached only to the internal backend network. Its HTTPS
+  verification calls use the `turnstile-egress` Squid proxy; that proxy alone
+  joins the outbound bridge and permits CONNECT from the fixed server and
+  HAProxy health-check addresses to `challenges.cloudflare.com:443`. The TLS
+  tunnel stays end-to-end, and the application sends site-verification
+  requests to `/turnstile/v0/siteverify`. The proxy has no host-published port.
 - Run the demo's Cloudflare Tunnel connector in the demo LXC and route only
   `demo.teagram.io` to `http://127.0.0.1:8080`. The edge container publishes
   that origin on loopback only. It serves the client discovery document and
@@ -120,11 +126,17 @@ command="/opt/teagram-demo/deploy/teagram-demo/forced-command.sh",restrict ssh-e
 non-main revisions and skips stale deploys. `deploy-main.sh` revalidates the
 blob authority and running containers, writes a root-only PostgreSQL custom
 dump, checks the dump with `pg_restore --list`, builds the tested image,
-preserves the RSA public key, stops edge, HAProxy and teagramd before migrations,
+preserves the RSA public key, stops edge, HAProxy, teagramd and the egress proxy
+before migrations,
 starts the new image and runs the smoke checks. A failed migration or smoke
-check restores the previous checkout, image, client config and database, then
-restarts and checks the previous server. The backup directory is reported on
-failure and success under `.state/teagram-demo/backups/`.
+check runs through the edge on loopback port `18080` while the Tunnel target
+remains on `8080`. Only after the smoke and image-revision checks pass does the
+script recreate edge on `8080`. A pre-activation failure restores the previous
+checkout, image, client config and database, then checks the previous server.
+If activation itself fails, the script closes edge and preserves the migrated
+database because public writes may have started; it retains the backup for
+recovery. The backup directory is reported on failure and success under
+`.state/teagram-demo/backups/`.
 
 Do not use `docker compose down -v`. The named `pgdata`, `tgkey` and `tgblobs`
 volumes have independent lifetimes; especially, removing `tgkey` changes the
@@ -135,7 +147,8 @@ server fingerprint and invalidates existing client authorizations.
 `wipe-weekly.sh` drops and recreates only the `teagram` database and removes
 all files below the capped blob mount. It preserves the `tgkey` volume, the
 encryption keys and the RSA public identity, then runs migrations and seeds
-through the private API path while the public edge and HAProxy are stopped.
+through the private API path while the public edge, HAProxy and Turnstile egress
+proxy are stopped.
 It creates the ordinary `demo_seed_owner` account through
 `teagramd admin create-user` to close the first-admin election before seeding.
 Its freshly generated password is kept in the root-only
@@ -178,10 +191,12 @@ service is a destructive reset of public demo content.
 
 ## Monitoring
 
-`gatus.yaml` supplies the `teagram-demo` group checks for the discovery JSON,
-the WebSocket listener and the public admin 404, including TLS expiry. Compose
-also health-checks HAProxy's private backend monitor; both new and existing
-services use bounded container logs. Merge these endpoints into the existing
-Gatus status page and attach the alert provider already configured there. The
-alert provider credentials live outside this repository, so the snippet does
-not invent a provider name or secret.
+`gatus.yaml` supplies the `teagram-demo` group checks for upstream health, the
+discovery JSON, the WebSocket listener and the public admin 404, including TLS
+expiry. Pebble checks Squid's local listener, and the upstream check includes
+HAProxy's server and a CONNECT probe through Squid to Cloudflare, so it alerts
+if the Turnstile egress path is unavailable. Both new and existing services
+use bounded container logs.
+Merge these endpoints into the existing Gatus status page and attach the alert
+provider already configured there. The alert provider credentials live outside
+this repository, so the snippet does not invent a provider name or secret.

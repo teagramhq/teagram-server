@@ -40,18 +40,28 @@ demo_require_env() {
 demo_compose() {
   env -u COMPOSE_FILE -u COMPOSE_PROJECT_NAME -u COMPOSE_PROFILES \
     -u TEAGRAM_DEMO_TURNSTILE_SITE_KEY -u TEAGRAM_DEMO_TURNSTILE_SECRET_KEY_FILE \
+    -u TEAGRAM_DEMO_EDGE_BIND \
+    docker compose "${DEMO_COMPOSE_ARGS[@]}" "$@" </dev/null
+}
+
+demo_validation_compose() {
+  env -u COMPOSE_FILE -u COMPOSE_PROJECT_NAME -u COMPOSE_PROFILES \
+    -u TEAGRAM_DEMO_TURNSTILE_SITE_KEY -u TEAGRAM_DEMO_TURNSTILE_SECRET_KEY_FILE \
+    TEAGRAM_DEMO_EDGE_BIND=127.0.0.1:18080 \
     docker compose "${DEMO_COMPOSE_ARGS[@]}" "$@" </dev/null
 }
 
 demo_compose_input() {
   env -u COMPOSE_FILE -u COMPOSE_PROJECT_NAME -u COMPOSE_PROFILES \
     -u TEAGRAM_DEMO_TURNSTILE_SITE_KEY -u TEAGRAM_DEMO_TURNSTILE_SECRET_KEY_FILE \
+    -u TEAGRAM_DEMO_EDGE_BIND \
     docker compose "${DEMO_COMPOSE_ARGS[@]}" "$@"
 }
 
 demo_bootstrap_compose() {
   env -u COMPOSE_FILE -u COMPOSE_PROJECT_NAME -u COMPOSE_PROFILES \
     -u TEAGRAM_DEMO_TURNSTILE_SITE_KEY -u TEAGRAM_DEMO_TURNSTILE_SECRET_KEY_FILE \
+    -u TEAGRAM_DEMO_EDGE_BIND \
     docker compose "${DEMO_COMPOSE_ARGS[@]}" \
       --file "$DEMO_SCRIPT_DIR/compose.bootstrap.yaml" \
       --file "$DEMO_SCRIPT_DIR/compose.seed.yaml" "$@" </dev/null
@@ -60,6 +70,7 @@ demo_bootstrap_compose() {
 demo_seed_compose() {
   env -u COMPOSE_FILE -u COMPOSE_PROJECT_NAME -u COMPOSE_PROFILES \
     -u TEAGRAM_DEMO_TURNSTILE_SITE_KEY -u TEAGRAM_DEMO_TURNSTILE_SECRET_KEY_FILE \
+    -u TEAGRAM_DEMO_EDGE_BIND \
     docker compose "${DEMO_COMPOSE_ARGS[@]}" \
       --file "$DEMO_SCRIPT_DIR/compose.seed.yaml" "$@" </dev/null
 }
@@ -67,6 +78,7 @@ demo_seed_compose() {
 demo_seed_compose_input() {
   env -u COMPOSE_FILE -u COMPOSE_PROJECT_NAME -u COMPOSE_PROFILES \
     -u TEAGRAM_DEMO_TURNSTILE_SITE_KEY -u TEAGRAM_DEMO_TURNSTILE_SECRET_KEY_FILE \
+    -u TEAGRAM_DEMO_EDGE_BIND \
     docker compose "${DEMO_COMPOSE_ARGS[@]}" \
       --file "$DEMO_SCRIPT_DIR/compose.seed.yaml" "$@"
 }
@@ -95,11 +107,19 @@ demo_render_config() {
     and .services.teagramd.environment.TG_WEBSOCKET_LISTEN_ADDR == ":2446"
     and .services.teagramd.environment.TG_CLIENT_ADDR_TRUST == "proxy-v2"
     and .services.teagramd.environment.TG_CLIENT_ADDR_PROXY_CIDRS == "198.18.130.2/32"
+    and .services.teagramd.environment.HTTP_PROXY == "http://turnstile-egress:3128"
+    and .services.teagramd.environment.HTTPS_PROXY == "http://turnstile-egress:3128"
+    and .services.teagramd.environment.NO_PROXY == "localhost,127.0.0.1,postgres,teagramd"
     and .services.teagramd.environment.TG_TURNSTILE_SITE_KEY != ""
     and .services.teagramd.environment.TG_TURNSTILE_SECRET_KEY_FILE == "/run/secrets/teagram_demo_turnstile"
     and (.services.teagramd.networks | keys) == ["backend"]
+    and .services.teagramd.networks.backend.ipv4_address == "198.18.130.253"
     and .networks.backend.internal == true
     and .networks.backend.ipam.config[0].subnet == "198.18.130.0/24"
+    and .services["turnstile-egress"].networks.backend.ipv4_address == "198.18.130.252"
+    and .services["turnstile-egress"].networks.egress.gw_priority == 1
+    and (.services["turnstile-egress"].ports // [] | length) == 0
+    and .services.teagramd.depends_on["turnstile-egress"].condition == "service_healthy"
     and .services.haproxy.networks.backend.ipv4_address == "198.18.130.2"
     and (.services.haproxy.ports // [] | length) == 0
     and .services.haproxy.image == "mirror.gcr.io/library/haproxy:3.2-alpine@sha256:51f173c6825753d9e3a888b1004a1c2cb730936cc9178730a5c555246bd161a2"

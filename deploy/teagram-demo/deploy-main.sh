@@ -21,6 +21,7 @@ RESTORE_DB_CREATED=0
 BACKUP_READY=0
 DATABASE_MUTATION=0
 SERVICES_STOPPED=0
+PUBLIC_ACTIVATION_STARTED=0
 
 demo_cleanup() {
   local rc=$?
@@ -30,7 +31,12 @@ demo_cleanup() {
       printf 'could not remove isolated restore database %s\n' "$RESTORE_DB" >&2
   fi
   if (( rc != 0 && BACKUP_READY == 1 )); then
-    demo_rollback || printf 'demo rollback failed; keep services stopped and inspect %s\n' "$BACKUP_DIR" >&2
+    if (( PUBLIC_ACTIVATION_STARTED == 1 )); then
+      demo_preserve_after_activation_failure ||
+        printf 'could not confirm public edge stopped; inspect deployment backup %s\n' "$BACKUP_DIR" >&2
+    else
+      demo_rollback || printf 'demo rollback failed; keep services stopped and inspect %s\n' "$BACKUP_DIR" >&2
+    fi
   fi
   if [[ -n "$TMP_DIR" && -d "$TMP_DIR" ]]; then
     rm -rf -- "$TMP_DIR"
@@ -41,10 +47,23 @@ trap demo_cleanup EXIT
 
 demo_rollback_stop() {
   if demo_compose config --services | grep -Fxq haproxy; then
-    demo_compose stop edge haproxy teagramd
+    if demo_compose ps -q turnstile-egress | grep -q .; then
+      demo_compose stop edge haproxy teagramd turnstile-egress
+    else
+      demo_compose stop edge haproxy teagramd
+    fi
   else
     demo_compose stop edge teagramd
   fi
+}
+
+demo_preserve_after_activation_failure() {
+  local stop_rc=0
+  set +e
+  demo_compose stop edge haproxy >/dev/null 2>&1 || stop_rc=1
+  printf 'demo activation failed; public edge stopped and deployed database preserved sha=%s backup=%s\n' \
+    "$SHA" "$DB_DUMP" >&2
+  return "$stop_rc"
 }
 
 demo_rollback() {
@@ -195,7 +214,7 @@ NEW_SPKI=$(jq -er '.mtproto.rsa_spki' "$TMP_DIR/client.json")
 [[ "$NEW_SPKI" == "$OLD_SPKI" ]] || demo_fail 'deployment changed the persistent RSA identity'
 
 SERVICES_STOPPED=1
-demo_compose stop edge haproxy teagramd
+demo_compose stop edge haproxy teagramd turnstile-egress
 DATABASE_MUTATION=1
 demo_compose up -d migrate
 mapfile -t MIGRATE_IDS < <(demo_compose ps -a -q migrate)
@@ -205,12 +224,15 @@ MIGRATE_STATUS=$(docker inspect --format '{{.State.Status}} {{.State.ExitCode}}'
 install -o root -g root -m 0644 "$TMP_DIR/client.json" "$DEMO_STATE_DIR/client.json.next"
 mv -f -- "$DEMO_STATE_DIR/client.json.next" "$DEMO_STATE_DIR/client.json"
 demo_compose up -d teagramd
-demo_compose up -d haproxy edge
-python3 "$SCRIPT_DIR/smoke.py" "$DEMO_STATE_DIR/client.json"
+demo_validation_compose up -d haproxy edge
+python3 "$SCRIPT_DIR/smoke.py" "$DEMO_STATE_DIR/client.json" 18080
 mapfile -t SERVER_IDS < <(demo_compose ps -q teagramd)
 ((${#SERVER_IDS[@]} == 1)) || demo_fail 'deployed server is missing or ambiguous'
 IMAGE_ID=$(docker inspect --format '{{.Image}}' "${SERVER_IDS[0]}")
 [[ "$(docker image inspect --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' "$IMAGE_ID")" == "$SHA" ]] ||
   demo_fail 'running server image does not match the requested SHA'
-printf 'demo deployed sha=%s previous_sha=%s backup=%s\n' "$SHA" "$PREV_SHA" "$DB_DUMP"
+demo_validation_compose stop edge
+PUBLIC_ACTIVATION_STARTED=1
+demo_compose up -d edge
 BACKUP_READY=0
+printf 'demo deployed sha=%s previous_sha=%s backup=%s\n' "$SHA" "$PREV_SHA" "$DB_DUMP"

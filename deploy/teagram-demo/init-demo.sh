@@ -55,7 +55,7 @@ JOURNAL_DIR="$DEMO_AUTHORITY_DIR/journal"
 if [[ -e "$MODE_FILE" || -L "$MODE_FILE" ]]; then
   # Resume a valid, already-published first-install authority after an
   # interrupted switch from the unguarded bootstrap container.
-  demo_compose stop edge haproxy
+  demo_compose stop edge haproxy turnstile-egress
   mapfile -t CONTAINER_IDS < <(demo_bootstrap_compose ps -q)
   if ((${#CONTAINER_IDS[@]})); then
     docker inspect "${CONTAINER_IDS[@]}" > "$TMP_DIR/containers.raw.json"

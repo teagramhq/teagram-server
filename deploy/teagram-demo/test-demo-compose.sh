@@ -37,7 +37,7 @@ env -u COMPOSE_FILE -u COMPOSE_PROJECT_NAME -u COMPOSE_PROFILES \
   "${compose[@]}" config --format json > "$TMP_DIR/target.json"
 jq -e --arg secretFile "$TMP_DIR/turnstile-secret-key" '
   .name == "teagram-demo"
-  and (.services | keys | sort) == ["edge", "haproxy", "migrate", "postgres", "teagramd"]
+  and (.services | keys | sort) == ["edge", "haproxy", "migrate", "postgres", "teagramd", "turnstile-egress"]
   and ((.services.teagramd.ports // []) | length) == 0
   and ((.services.edge.ports | length) == 1)
   and .services.edge.ports[0].host_ip == "127.0.0.1"
@@ -49,6 +49,23 @@ jq -e --arg secretFile "$TMP_DIR/turnstile-secret-key" '
   and .services.haproxy.networks.backend.ipv4_address == "198.18.130.2"
   and .services.haproxy.healthcheck.test[-1] == "http://127.0.0.1:8404/healthz"
   and .services.edge.depends_on.haproxy.condition == "service_healthy"
+  and (.services.teagramd.networks | keys) == ["backend"]
+  and .services.teagramd.networks.backend.ipv4_address == "198.18.130.253"
+  and .services.teagramd.environment.HTTPS_PROXY == "http://turnstile-egress:3128"
+  and .services.teagramd.environment.HTTP_PROXY == "http://turnstile-egress:3128"
+  and .services.teagramd.environment.NO_PROXY == "localhost,127.0.0.1,postgres,teagramd"
+  and .services.teagramd.depends_on["turnstile-egress"].condition == "service_healthy"
+  and .services["turnstile-egress"].platform == "linux/amd64"
+  and .services["turnstile-egress"].image == "mirror.gcr.io/ubuntu/squid:7.2-26.04_edge@sha256:f6843088c0eab9e63ecb8a1c215d939cd97d0370611bb2bdb65c4a8e48b3c3eb"
+  and (.services["turnstile-egress"].ports // [] | length) == 0
+  and .services["turnstile-egress"].networks.backend.ipv4_address == "198.18.130.252"
+  and .services["turnstile-egress"].networks.egress.gw_priority == 1
+  and (.services["turnstile-egress"].networks | keys | sort) == ["backend", "egress"]
+  and .services["turnstile-egress"].healthcheck.test == ["CMD", "/usr/bin/pebble", "health"]
+  and any(.services["turnstile-egress"].volumes[]; .target == "/var/lib/pebble/default/layers/002-demo-health.yaml" and .read_only)
+  and .networks.egress.internal != true
+  and .services["turnstile-egress"].logging.options["max-size"] == "10m"
+  and .services["turnstile-egress"].logging.options["max-file"] == "3"
   and (.services.teagramd.networks | keys) == ["backend"]
   and .networks.backend.internal == true
   and .networks.backend.ipam.config[0].subnet == "198.18.130.0/24"
@@ -78,11 +95,24 @@ jq -e --arg secretFile "$TMP_DIR/turnstile-secret-key" '
 
 env -u COMPOSE_FILE -u COMPOSE_PROJECT_NAME -u COMPOSE_PROFILES \
   -u TEAGRAM_DEMO_TURNSTILE_SITE_KEY -u TEAGRAM_DEMO_TURNSTILE_SECRET_KEY_FILE \
+  TEAGRAM_DEMO_EDGE_BIND=127.0.0.1:18080 \
+  "${compose[@]}" config --format json > "$TMP_DIR/validation.json"
+jq -e '
+  .services.edge.ports | length == 1
+  and .[0].host_ip == "127.0.0.1"
+  and (.[0].published | tostring) == "18080"
+' "$TMP_DIR/validation.json" >/dev/null
+
+env -u COMPOSE_FILE -u COMPOSE_PROJECT_NAME -u COMPOSE_PROFILES \
+  -u TEAGRAM_DEMO_TURNSTILE_SITE_KEY -u TEAGRAM_DEMO_TURNSTILE_SECRET_KEY_FILE \
   "${compose[@]}" --file "$SCRIPT_DIR/compose.bootstrap.yaml" \
   --file "$SCRIPT_DIR/compose.seed.yaml" config --format json > "$TMP_DIR/bootstrap.json"
 jq -e '
   (.services.teagramd.volumes | map(.target) | sort) == ["/var/lib/teagramd", "/var/lib/teagramd-blobs"]
   and .services.teagramd.environment.TG_BLOB_DIR == "/var/lib/teagramd-blobs"
+  and .services.teagramd.environment.HTTP_PROXY == ""
+  and .services.teagramd.environment.HTTPS_PROXY == ""
+  and (.services.teagramd.depends_on | keys) == ["migrate"]
   and .services.teagramd.environment.TG_CLIENT_ADDR_TRUST == "socket"
   and .services.teagramd.environment.TG_CLIENT_ADDR_PROXY_CIDRS == ""
   and .services.teagramd.environment.TG_TURNSTILE_SITE_KEY == ""
@@ -97,6 +127,9 @@ env -u COMPOSE_FILE -u COMPOSE_PROJECT_NAME -u COMPOSE_PROFILES \
 jq -e '
   .services.teagramd.environment.TG_CLIENT_ADDR_TRUST == "socket"
   and .services.teagramd.environment.TG_CLIENT_ADDR_PROXY_CIDRS == ""
+  and .services.teagramd.environment.HTTP_PROXY == ""
+  and .services.teagramd.environment.HTTPS_PROXY == ""
+  and (.services.teagramd.depends_on | keys) == ["migrate"]
   and .services.teagramd.environment.TG_TURNSTILE_SITE_KEY == ""
   and .services.teagramd.environment.TG_TURNSTILE_SECRET_KEY_FILE == ""
   and .services.teagramd.environment.TG_RATE_LIMIT_SIGN_UP_IP == "32"
@@ -131,7 +164,21 @@ grep -Fq 'image: mirror.gcr.io/library/nginx:1.28.0-alpine@sha256:' "$SCRIPT_DIR
 grep -Fq 'http-request set-src req.hdr_ip(CF-Connecting-IP)' "$SCRIPT_DIR/haproxy.cfg"
 grep -Fq 'req.hdr_cnt(CF-Connecting-IP) eq 1' "$SCRIPT_DIR/haproxy.cfg"
 grep -Fq 'server teagramd teagramd:2446 check send-proxy-v2' "$SCRIPT_DIR/haproxy.cfg"
+grep -Fq 'http-check send meth CONNECT uri challenges.cloudflare.com:443' "$SCRIPT_DIR/haproxy.cfg"
+grep -Fq 'monitor fail if { nbsrv(turnstile_egress) eq 0 }' "$SCRIPT_DIR/haproxy.cfg"
+grep -Fq 'bind :8404' "$SCRIPT_DIR/haproxy.cfg"
 grep -Fq 'http-reuse never' "$SCRIPT_DIR/haproxy.cfg"
+grep -Fq 'acl allowed_client src 198.18.130.2/32 198.18.130.253/32' "$SCRIPT_DIR/turnstile-egress.conf"
+grep -Fq 'acl siteverify_host dstdomain challenges.cloudflare.com' "$SCRIPT_DIR/turnstile-egress.conf"
+grep -Fq 'http_access allow allowed_client CONNECT CONNECT_PORT siteverify_host' "$SCRIPT_DIR/turnstile-egress.conf"
+grep -Fq 'http_access deny all' "$SCRIPT_DIR/turnstile-egress.conf"
+grep -Fq 'cache deny all' "$SCRIPT_DIR/turnstile-egress.conf"
+grep -Fq 'level: ready' "$SCRIPT_DIR/pebble-health.yaml"
+grep -Fq 'host: 127.0.0.1' "$SCRIPT_DIR/pebble-health.yaml"
+grep -Fq 'port: 3128' "$SCRIPT_DIR/pebble-health.yaml"
+grep -Fq 'location = /healthz {' "$SCRIPT_DIR/nginx.conf"
+grep -Fq 'https://demo.teagram.io/healthz' "$SCRIPT_DIR/gatus.yaml"
+grep -Fq 'base_url + "/healthz"' "$SCRIPT_DIR/smoke.py"
 
 python3 - "$SCRIPT_DIR/wipe-weekly.sh" "$SCRIPT_DIR/init-demo.sh" <<'PY'
 from pathlib import Path
@@ -146,7 +193,7 @@ def assert_order(path: Path, fragments: list[str]) -> None:
 
 
 assert_order(Path(sys.argv[1]), [
-    "demo_compose stop edge haproxy teagramd",
+    "demo_compose stop edge haproxy teagramd turnstile-egress",
     "dropdb -U postgres --if-exists teagram",
     "demo_seed_compose up -d teagramd",
     "demo_prepare_seed_owner \"$TMP_DIR\"",
@@ -156,6 +203,17 @@ assert_order(Path(sys.argv[1]), [
     '"$SEED_SCRIPT" --verify-turnstile --endpoint teagramd:2443',
     "demo_compose up -d haproxy edge",
 ])
+deploy = Path(sys.argv[2]).with_name("deploy-main.sh").read_text(encoding="utf-8")
+deploy_steps = [
+    "demo_validation_compose up -d haproxy edge",
+    'python3 "$SCRIPT_DIR/smoke.py" "$DEMO_STATE_DIR/client.json" 18080',
+    "demo_compose up -d edge",
+]
+deploy_positions = [deploy.find(step) for step in deploy_steps]
+if any(position < 0 for position in deploy_positions) or deploy_positions != sorted(deploy_positions):
+    raise SystemExit("deploy-main.sh: public edge must start only after private validation smoke")
+if "PUBLIC_ACTIVATION_STARTED=1" not in deploy or "database preserved" not in deploy:
+    raise SystemExit("deploy-main.sh: activation failure must not restore a database after public writes")
 assert_order(Path(sys.argv[2]), [
     "demo_compose stop edge haproxy",
     "demo_seed_compose up -d teagramd",

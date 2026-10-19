@@ -15,7 +15,6 @@ import urllib.error
 import urllib.request
 
 
-BASE_URL = "http://127.0.0.1:8080"
 WS_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
 
 
@@ -25,11 +24,18 @@ def fail(message: str) -> None:
 
 
 def main() -> None:
-    if len(sys.argv) != 2:
-        fail("usage: smoke.py <client-config.json>")
+    if len(sys.argv) not in (2, 3):
+        fail("usage: smoke.py <client-config.json> [loopback-port]")
+    try:
+        port = int(sys.argv[2]) if len(sys.argv) == 3 else 8080
+    except ValueError:
+        fail("loopback-port must be an integer")
+    if not 1 <= port <= 65535:
+        fail("loopback-port must be between 1 and 65535")
+    base_url = f"http://127.0.0.1:{port}"
     expected = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
     request = urllib.request.Request(
-        BASE_URL + "/.well-known/telegramd/client",
+        base_url + "/.well-known/telegramd/client",
         headers={"Origin": "https://web.teagram.io"},
     )
     try:
@@ -47,7 +53,14 @@ def main() -> None:
         fail("discovery WebSocket endpoint is incorrect")
 
     try:
-        with urllib.request.urlopen(BASE_URL + "/admin/", timeout=5) as response:
+        with urllib.request.urlopen(base_url + "/healthz", timeout=5) as response:
+            if response.status != 200:
+                fail(f"upstream health HTTP status is {response.status}")
+    except (OSError, urllib.error.URLError) as error:
+        fail(f"upstream health request failed: {error}")
+
+    try:
+        with urllib.request.urlopen(base_url + "/admin/", timeout=5) as response:
             admin_status = response.status
     except urllib.error.HTTPError as error:
         admin_status = error.code
@@ -57,7 +70,7 @@ def main() -> None:
         fail(f"/admin/ returned HTTP {admin_status}, want 404")
 
     key = base64.b64encode(secrets.token_bytes(16)).decode("ascii")
-    connection = http.client.HTTPConnection("127.0.0.1", 8080, timeout=5)
+    connection = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
     try:
         connection.request(
             "GET",
@@ -82,7 +95,7 @@ def main() -> None:
         fail(f"WebSocket handshake failed: {error}")
     finally:
         connection.close()
-    print("demo smoke=passed discovery=cors websocket=101 admin=404")
+    print("demo smoke=passed discovery=cors health=200 websocket=101 admin=404")
 
 
 if __name__ == "__main__":
