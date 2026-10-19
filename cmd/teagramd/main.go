@@ -788,17 +788,12 @@ func runAtBlobModePath(log *slog.Logger, blobModePath string) error {
 			turnstileVerifier, cfg.WelcomeChannel, notifyMetrics,
 		)
 	}
-	handler := newHandler(cfg.RegistrationMode)
-	var publicHandler mtproto.Handler
-	if cfg.PublicWebSocketListenAddr != "" {
-		publicHandler = newHandler(cfg.PublicRegistrationMode)
-	}
 	if cfg.LogLoginCodes {
 		log.Warn("TG_LOG_LOGIN_CODES is on: login codes are written to the log in cleartext")
 	}
 	cfg.WarnClientAddrTrust(log)
 
-	server := mtproto.New(exchange.PrivateKey{RSA: key}, cfg.DCID, mtproto.NewPgAuthKeyStore(st), handler, log)
+	server, publicHandler := newListenerScopedServer(cfg, exchange.PrivateKey{RSA: key}, st, log, newHandler)
 	server.SetWebSocketOriginPatterns(cfg.WebSocketOriginPatterns)
 	if err := server.SetClientDiscoveryDocument(clientDiscovery); err != nil {
 		return fmt.Errorf("set client discovery document: %w", err)
@@ -947,11 +942,7 @@ func runAtBlobModePath(log *slog.Logger, blobModePath string) error {
 			return errors.Join(fmt.Errorf("public websocket listen: %w", listenErr), closeErr)
 		}
 		log.Info("Public WebSocket MTProto listening", "addr", cfg.PublicWebSocketListenAddr)
-		publicWebSocket = &publicWebSocketListener{
-			listener:       publicLn,
-			handler:        publicHandler,
-			originPatterns: cfg.PublicWebSocketOriginPatterns,
-		}
+		publicWebSocket = newPublicWebSocketListener(cfg, publicLn, publicHandler)
 	}
 
 	return serveMTProto(ctx, server, ln, websocketLn, publicWebSocket)
