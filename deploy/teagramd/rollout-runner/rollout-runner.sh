@@ -428,14 +428,15 @@ verify_initial_local_compose() {
 
 is_stack_moved_tracked_compose_selection() {
   local -a compose_files expected_files
-  local index expected_path
+  local index checkout_path expected_path
   [ "${COMPOSE_FILE+x}" = x ] && [ -n "$COMPOSE_FILE" ] || return 1
   IFS=: read -r -a compose_files <<< "$COMPOSE_FILE"
   [ "${#compose_files[@]}" -eq 3 ] || return 1
+  checkout_path=$(cd -P "$CHECKOUT" && pwd -P) || return 1
   expected_files=(docker-compose.yml docker-compose.local-blobs.yml docker-compose.override.yml)
   for index in "${!expected_files[@]}"; do
     [ -f "$CHECKOUT/${expected_files[$index]}" ] && [ ! -L "$CHECKOUT/${expected_files[$index]}" ] || return 1
-    expected_path="$CHECKOUT/${expected_files[$index]}"
+    expected_path="$checkout_path/${expected_files[$index]}"
     [ "${compose_files[$index]}" = "$expected_path" ] || return 1
   done
   git -C "$CHECKOUT" ls-files --error-unmatch -- \
