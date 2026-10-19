@@ -185,9 +185,9 @@ from pathlib import Path
 import sys
 
 
-def assert_order(path: Path, fragments: list[str]) -> None:
+def assert_order(path: Path, fragments: list[str], start: int = 0) -> None:
     text = path.read_text(encoding="utf-8")
-    positions = [text.find(fragment) for fragment in fragments]
+    positions = [text.find(fragment, start) for fragment in fragments]
     if any(position < 0 for position in positions) or positions != sorted(positions):
         raise SystemExit(f"{path.name}: seed safety steps are missing or out of order")
 
@@ -214,6 +214,23 @@ if any(position < 0 for position in deploy_positions) or deploy_positions != sor
     raise SystemExit("deploy-main.sh: public edge must start only after private validation smoke")
 if "PUBLIC_ACTIVATION_STARTED=1" not in deploy or "database preserved" not in deploy:
     raise SystemExit("deploy-main.sh: activation failure must not restore a database after public writes")
+init = Path(sys.argv[2]).read_text(encoding="utf-8")
+cleanup = init.split("cleanup() {", 1)[1].split("\n}", 1)[0]
+if "rc != 0" not in cleanup or "PUBLIC_SERVICES_MAY_BE_RUNNING == 1" not in cleanup:
+    raise SystemExit("init-demo.sh: failed install must close a possibly public stack")
+if "demo_compose stop edge haproxy" not in cleanup:
+    raise SystemExit("init-demo.sh: failed install cleanup must stop edge and HAProxy")
+assert_order(Path(sys.argv[2]), [
+    "PUBLIC_SERVICES_MAY_BE_RUNNING=1",
+    "demo_compose up -d haproxy edge",
+    'python3 "$SCRIPT_DIR/smoke.py" "$DEMO_STATE_DIR/client.json"',
+    "exit 0",
+])
+assert_order(Path(sys.argv[2]), [
+    "PUBLIC_SERVICES_MAY_BE_RUNNING=1",
+    "demo_compose up -d haproxy edge",
+    'python3 "$SCRIPT_DIR/smoke.py" "$DEMO_STATE_DIR/client.json"',
+], start=init.index("exit 0") + len("exit 0"))
 assert_order(Path(sys.argv[2]), [
     "demo_compose stop edge haproxy",
     "demo_seed_compose up -d teagramd",
@@ -224,4 +241,28 @@ assert_order(Path(sys.argv[2]), [
     "demo_compose up -d haproxy edge",
 ])
 PY
+
+CLEANUP_FUNCTION="$TMP_DIR/init-demo-cleanup.sh"
+COMPOSE_CALLS="$TMP_DIR/init-demo-compose-calls"
+TMP_WORK_DIR="$TMP_DIR/init-demo-work"
+mkdir -p "$TMP_WORK_DIR"
+sed -n '/^cleanup() {$/,/^}/p' "$SCRIPT_DIR/init-demo.sh" > "$CLEANUP_FUNCTION"
+cat > "$TMP_DIR/init-demo-failure.sh" <<'BASH'
+set -Eeuo pipefail
+source "$CLEANUP_FUNCTION"
+demo_compose() {
+  printf '%s\n' "$*" >> "$COMPOSE_CALLS"
+}
+TMP_DIR="$TMP_WORK_DIR"
+PUBLIC_SERVICES_MAY_BE_RUNNING=1
+trap cleanup EXIT
+false # simulate smoke failure after the public stack starts
+BASH
+if CLEANUP_FUNCTION="$CLEANUP_FUNCTION" COMPOSE_CALLS="$COMPOSE_CALLS" \
+  TMP_WORK_DIR="$TMP_WORK_DIR" bash "$TMP_DIR/init-demo-failure.sh"; then
+  printf '%s\n' 'init-demo.sh cleanup test accepted a simulated smoke failure' >&2
+  exit 1
+fi
+grep -Fxq 'stop edge haproxy' "$COMPOSE_CALLS"
+[[ ! -e "$TMP_WORK_DIR" ]]
 printf 'demo Compose contract holds\n'

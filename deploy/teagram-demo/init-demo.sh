@@ -7,10 +7,22 @@ SCRIPT_DIR=$(cd -P "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 source "$SCRIPT_DIR/demo-common.sh"
 
 TMP_DIR=
+PUBLIC_SERVICES_MAY_BE_RUNNING=0
 cleanup() {
-  if [[ -n "$TMP_DIR" && -d "$TMP_DIR" ]]; then
-    rm -rf -- "$TMP_DIR"
+  local rc=$?
+  trap - EXIT
+  if (( rc != 0 && PUBLIC_SERVICES_MAY_BE_RUNNING == 1 )); then
+    if ! demo_compose stop edge haproxy; then
+      printf 'teagram-demo: failed to stop public ingress during install cleanup\n' >&2
+    fi
   fi
+  if [[ -n "$TMP_DIR" && -d "$TMP_DIR" ]]; then
+    if ! rm -rf -- "$TMP_DIR"; then
+      printf 'teagram-demo: failed to remove temporary install state\n' >&2
+      (( rc != 0 )) || rc=1
+    fi
+  fi
+  exit "$rc"
 }
 trap cleanup EXIT
 
@@ -85,6 +97,7 @@ if [[ -e "$MODE_FILE" || -L "$MODE_FILE" ]]; then
   "$SEED_SCRIPT" --verify-seed --endpoint teagramd:2443
   demo_compose up -d teagramd
   "$SEED_SCRIPT" --verify-turnstile --endpoint teagramd:2443
+  PUBLIC_SERVICES_MAY_BE_RUNNING=1
   demo_compose up -d haproxy edge
   python3 "$SCRIPT_DIR/smoke.py" "$DEMO_STATE_DIR/client.json"
   echo "demo install resumed and seeded at $SHA"
@@ -179,6 +192,7 @@ demo_prepare_seed_owner "$TMP_DIR"
 "$SEED_SCRIPT" --verify-seed --endpoint teagramd:2443
 demo_compose up -d teagramd
 "$SEED_SCRIPT" --verify-turnstile --endpoint teagramd:2443
+PUBLIC_SERVICES_MAY_BE_RUNNING=1
 demo_compose up -d haproxy edge
 python3 "$SCRIPT_DIR/smoke.py" "$DEMO_STATE_DIR/client.json"
 echo "demo install ready sha=$SHA rsa_fingerprint=$FINGERPRINT seeded=true"
