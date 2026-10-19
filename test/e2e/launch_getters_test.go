@@ -651,15 +651,9 @@ func testMAIN1505PeerGetters(ctx context.Context, client *tg.Client, userID, cha
 }
 
 func assertEmptyReactionsGetter(name string, hash int64, got tg.MessagesReactionsClass) error {
-	if hash == 0 {
-		if _, ok := got.(*tg.MessagesReactionsNotModified); !ok {
-			return fmt.Errorf("%s with matching hash = %T, want not modified", name, got)
-		}
-		return nil
-	}
 	result, ok := got.(*tg.MessagesReactions)
 	if !ok {
-		return fmt.Errorf("%s with stale hash = %T, want empty reactions", name, got)
+		return fmt.Errorf("%s with hash %d = %T, want full empty reactions", name, hash, got)
 	}
 	if result.Hash != 0 || len(result.Reactions) != 0 {
 		return fmt.Errorf("%s = hash %d, %d reactions; want empty", name, result.Hash, len(result.Reactions))
