@@ -1786,7 +1786,10 @@ run_apply() {
   origin_sha=$(git -C "$CHECKOUT" rev-parse origin/main) || { fail 'cannot read origin/main SHA'; return 1; }
   runtime_source_sha=${ROLLOUT_RUNNER_SOURCE_SHA:-$TARGET_SHA}
   [[ "$runtime_source_sha" =~ ^[0-9a-f]{40}$ ]] || { fail 'rollout runtime source SHA must be a full commit ID'; return 1; }
-  [ "$branch" = main ] || { fail 'deployment checkout is not on main'; return 1; }
+  { [ "$branch" = main ] || [ -z "$branch" ]; } || {
+    fail 'deployment checkout must be on main or detached'
+    return 1
+  }
   [ "$previous_sha" = "$EXPECTED_BASELINE_SHA" ] || { fail 'live checkout differs from the expected baseline SHA'; return 1; }
   git -C "$CHECKOUT" cat-file -e "$TARGET_SHA^{commit}" 2>/dev/null || { fail 'authorized application target is unavailable'; return 1; }
   git -C "$CHECKOUT" cat-file -e "$runtime_source_sha^{commit}" 2>/dev/null || { fail 'reviewed rollout runtime source is unavailable'; return 1; }
