@@ -16,6 +16,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/teagramhq/teagram-server/internal/api"
+	"github.com/teagramhq/teagram-server/internal/config"
 	"github.com/teagramhq/teagram-server/internal/mtproto"
 	tsrp "github.com/teagramhq/teagram-server/internal/srp"
 	"github.com/teagramhq/teagram-server/internal/store"
@@ -252,6 +253,50 @@ func TestSignInUsernameKnownWithVerifierReturnsPasswordNeeded(t *testing.T) {
 	})
 	if !isSessionPasswordNeeded(err) {
 		t.Fatalf("signIn with known user + verifier: expected SESSION_PASSWORD_NEEDED, got %v", err)
+	}
+}
+
+func TestExistingUsernameCanSignInUnderOpenAndInviteModes(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	s := openStore(t)
+	user, err := s.CreateUsernameUser(ctx, "knownuser", "Known", "User")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := api.ClaimUsernameForTest(s, user.ID, "knownuser"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.UpsertPassword(ctx, store.UserPassword{
+		UserID: user.ID, Salt1: []byte{1, 2, 3}, Salt2: []byte{4, 5, 6}, Verifier: []byte{7, 8, 9},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	tests := []struct {
+		mode      config.RegistrationMode
+		keyID     int64
+		authKeyID [8]byte
+	}{
+		{mode: config.RegistrationOpen, keyID: 1, authKeyID: [8]byte{1}},
+		{mode: config.RegistrationInvite, keyID: 2, authKeyID: [8]byte{2}},
+	}
+	for _, tt := range tests {
+		t.Run(string(tt.mode), func(t *testing.T) {
+			if err := s.SaveAuthKey(ctx, tt.keyID, make([]byte, 256)); err != nil {
+				t.Fatal(err)
+			}
+			hash, _, err := s.IssueCodeForUsername(ctx, "knownuser")
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, err = api.SignInForTestWithRegistrationMode(s, tt.authKeyID, netip.MustParseAddr("10.0.0.73"), store.RateLimitConfig{}, tt.mode, &tg.AuthSignInRequest{
+				PhoneNumber: "knownuser", PhoneCodeHash: hash,
+			})
+			if !isSessionPasswordNeeded(err) {
+				t.Fatalf("signIn with %q registration mode: got %v, want SESSION_PASSWORD_NEEDED", tt.mode, err)
+			}
+		})
 	}
 }
 

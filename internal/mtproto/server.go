@@ -800,14 +800,18 @@ func isDisconnect(err error) bool {
 // frame that decrypts under a key this server issued. It is nil for a connection
 // that was never accepted through a listener.
 func (s *Server) serveConn(ctx context.Context, tconn transport.Conn, clientAddr netip.Addr, slot *preAuthSlot) (rErr error) {
-	return s.serveConnMode(ctx, ctx, tconn, clientAddr, slot, nil, false)
+	return s.serveConnMode(ctx, ctx, tconn, clientAddr, slot, nil, false, s.handler)
 }
 
 func (s *Server) serveConnWithContexts(readCtx, requestCtx context.Context, tconn transport.Conn, clientAddr netip.Addr, slot *preAuthSlot, markServing func() bool) (rErr error) {
-	return s.serveConnMode(readCtx, requestCtx, tconn, clientAddr, slot, markServing, true)
+	return s.serveConnWithHandlerContexts(readCtx, requestCtx, tconn, clientAddr, slot, markServing, s.handler)
 }
 
-func (s *Server) serveConnMode(readCtx, requestCtx context.Context, tconn transport.Conn, clientAddr netip.Addr, slot *preAuthSlot, markServing func() bool, monitorPeer bool) (rErr error) {
+func (s *Server) serveConnWithHandlerContexts(readCtx, requestCtx context.Context, tconn transport.Conn, clientAddr netip.Addr, slot *preAuthSlot, markServing func() bool, handler Handler) (rErr error) {
+	return s.serveConnMode(readCtx, requestCtx, tconn, clientAddr, slot, markServing, true, handler)
+}
+
+func (s *Server) serveConnMode(readCtx, requestCtx context.Context, tconn transport.Conn, clientAddr netip.Addr, slot *preAuthSlot, markServing func() bool, monitorPeer bool, handler Handler) (rErr error) {
 	conn := newConn(tconn, s.cipher, s.msgID, s.clock, s.writeTimeout, s.log)
 	conn.shutdown = s.shutdown
 	conn.peerCancels = s.peerCancels
@@ -1134,7 +1138,7 @@ func (s *Server) serveConnMode(readCtx, requestCtx context.Context, tconn transp
 		// connection pending from inside the handler. A hold already charged to
 		// this key skips that reservation so the post-dispatch charge below still
 		// observes a same-frame rebind.
-		if err := s.rpcHandle(requestCtx, conn, b, userID, provisional, clientAddr, slot, func() error {
+		if err := s.rpcHandle(requestCtx, conn, b, userID, provisional, clientAddr, slot, handler, func() error {
 			if hold.signedIn || userID != 0 || (hold.charged && hold.key == authKeyID) {
 				return nil
 			}

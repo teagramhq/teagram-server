@@ -48,9 +48,9 @@ make run
 ```
 
 On a fresh database, registration is closed by default. Keep
-`TG_REGISTRATION=open` on the development server so users can create accounts
-after the first one; do not close registration after initial setup. Other
-deployments can choose a different registration mode for their access policy.
+`TG_REGISTRATION=open` on the development server so tailnet users can create
+accounts after the first one. The optional public WebSocket listener has its
+own registration mode, which remains closed unless configured separately.
 
 ## Configuration
 
@@ -62,6 +62,8 @@ Configuration is read from environment variables. The full reference is in [docs
 | `TG_AUTHKEY_ENC_KEY` or `TG_AUTHKEY_ENC_KEY_FILE` | required | AES-256-GCM master key for stored auth keys |
 | `TG_LISTEN_ADDR` | `:2443` | MTProto listener address |
 | `TG_WEBSOCKET_LISTEN_ADDR` | unset | Optional WebSocket MTProto listener |
+| `TG_PUBLIC_WEBSOCKET_LISTEN_ADDR` | unset | Optional separate public WebSocket MTProto listener |
+| `TG_PUBLIC_REGISTRATION` | `closed` | Public-listener account registration policy |
 | `TG_ADVERTISE_ADDR` | derived | Public `host:port` advertised to clients |
 | `TG_PUBLIC_LINK_PREFIX` | required | HTTPS origin for client and invite links |
 | `TG_RSA_KEY_PATH` | `server_key.pem` | Existing server RSA identity |

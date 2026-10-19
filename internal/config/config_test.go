@@ -294,6 +294,74 @@ func TestLoadWebSocketListenAddr(t *testing.T) {
 	}
 }
 
+func TestLoadPublicWebSocketSettings(t *testing.T) {
+	t.Setenv("TG_POSTGRES_DSN", "postgres://localhost/tg")
+	t.Setenv("TG_AUTHKEY_ENC_KEY", validEncKey)
+	t.Setenv("TG_REGISTRATION", "open")
+	t.Setenv("TG_PUBLIC_WEBSOCKET_LISTEN_ADDR", "127.0.0.1:2446")
+	t.Setenv("TG_PUBLIC_REGISTRATION", "invite")
+	t.Setenv("TG_PUBLIC_WEBSOCKET_ALLOWED_ORIGINS", "https://web.teagram.io")
+
+	cfg, err := config.Load(discardLog())
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if got := cfg.PublicWebSocketListenAddr; got != "127.0.0.1:2446" {
+		t.Errorf("PublicWebSocketListenAddr = %q, want 127.0.0.1:2446", got)
+	}
+	if got := cfg.PublicRegistrationMode; got != config.RegistrationInvite {
+		t.Errorf("PublicRegistrationMode = %q, want invite", got)
+	}
+	if got := cfg.RegistrationMode; got != config.RegistrationOpen {
+		t.Errorf("RegistrationMode = %q, want open on the existing listeners", got)
+	}
+	if got := strings.Join(cfg.PublicWebSocketOriginPatterns, ","); got != "https://web.teagram.io" {
+		t.Errorf("PublicWebSocketOriginPatterns = %v, want [https://web.teagram.io]", cfg.PublicWebSocketOriginPatterns)
+	}
+	if err := cfg.ValidateRegistrationMode(); err != nil {
+		t.Fatalf("ValidateRegistrationMode: %v", err)
+	}
+}
+
+func TestLoadPublicRegistrationDefaultsClosed(t *testing.T) {
+	t.Setenv("TG_POSTGRES_DSN", "postgres://localhost/tg")
+	t.Setenv("TG_AUTHKEY_ENC_KEY", validEncKey)
+	t.Setenv("TG_PUBLIC_REGISTRATION", "")
+
+	cfg, err := config.Load(discardLog())
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if got := cfg.PublicRegistrationMode; got != config.RegistrationClosed {
+		t.Fatalf("PublicRegistrationMode = %q, want closed", got)
+	}
+}
+
+func TestValidateRegistrationModeRejectsInvalidPublicMode(t *testing.T) {
+	t.Setenv("TG_POSTGRES_DSN", "postgres://localhost/tg")
+	t.Setenv("TG_AUTHKEY_ENC_KEY", validEncKey)
+	t.Setenv("TG_PUBLIC_REGISTRATION", "unknown")
+
+	cfg, err := config.Load(discardLog())
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if err := cfg.ValidateRegistrationMode(); err == nil || !strings.Contains(err.Error(), "TG_PUBLIC_REGISTRATION") {
+		t.Fatalf("ValidateRegistrationMode = %v, want error naming TG_PUBLIC_REGISTRATION", err)
+	}
+}
+
+func TestLoadRejectsMalformedPublicWebSocketOriginPattern(t *testing.T) {
+	t.Setenv("TG_POSTGRES_DSN", "postgres://localhost/tg")
+	t.Setenv("TG_AUTHKEY_ENC_KEY", validEncKey)
+	t.Setenv("TG_PUBLIC_WEBSOCKET_ALLOWED_ORIGINS", "https://web.teagram.io,[")
+
+	_, err := config.Load(discardLog())
+	if err == nil || !strings.Contains(err.Error(), "TG_PUBLIC_WEBSOCKET_ALLOWED_ORIGINS") {
+		t.Fatalf("Load error = %v, want malformed public origin variable", err)
+	}
+}
+
 func TestLoadWebSocketOriginPatterns(t *testing.T) {
 	t.Setenv("TG_POSTGRES_DSN", "postgres://localhost/tg")
 	t.Setenv("TG_AUTHKEY_ENC_KEY", validEncKey)

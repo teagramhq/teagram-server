@@ -402,6 +402,90 @@ func TestServeWebSocketOriginPolicy(t *testing.T) {
 	}
 }
 
+func TestServeWebSocketWithHandlerUsesListenerOriginPolicy(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	t.Cleanup(cancel)
+	ln := mustListenTCP(t, ctx, "127.0.0.1:0")
+	rsaKey, err := rsa.GenerateKey(rand.Reader, crypto.RSAKeyBits)
+	if err != nil {
+		t.Fatalf("generate server RSA key: %v", err)
+	}
+	tailnetHandler := mtproto.HandlerFunc(func(c *mtproto.Conn, req *mtproto.Request) error {
+		return c.SendResult(req, &tg.NearestDC{Country: "tailnet"})
+	})
+	srv := mtproto.New(exchange.PrivateKey{RSA: rsaKey}, 2, mtproto.NewMemoryAuthKeyStore(), tailnetHandler, nil)
+	srv.SetWebSocketOriginPatterns([]string{"https://tailnet.teagram.io"})
+	publicHandler := mtproto.HandlerFunc(func(c *mtproto.Conn, req *mtproto.Request) error {
+		return c.SendResult(req, &tg.NearestDC{Country: "public"})
+	})
+
+	server, ok := any(srv).(interface {
+		ServeWebSocketWithHandler(context.Context, net.Listener, mtproto.Handler, []string) error
+	})
+	if !ok {
+		t.Fatal("server does not support listener-scoped WebSocket handlers")
+	}
+	served := make(chan error, 1)
+	go func() {
+		served <- server.ServeWebSocketWithHandler(ctx, ln, publicHandler, []string{"https://web.teagram.io"})
+	}()
+	t.Cleanup(func() {
+		cancel()
+		if err := <-served; err != nil {
+			t.Errorf("serve public websocket: %v", err)
+		}
+	})
+
+	ws, err := dialWebSocketOrigin(ctx, ln.Addr().String(), "https://web.teagram.io")
+	if err != nil {
+		t.Fatalf("public origin handshake: %v", err)
+	}
+	client, err := transport.Intermediate.Handshake(websocket.NetConn(ctx, ws, websocket.MessageBinary))
+	if err != nil {
+		t.Fatalf("intermediate transport handshake: %v", err)
+	}
+	result, err := exchange.NewExchanger(client, 2).
+		Client([]exchange.PublicKey{exchange.PrivateKey{RSA: rsaKey}.Public()}).
+		Run(ctx)
+	if err != nil {
+		t.Fatalf("auth-key exchange: %v", err)
+	}
+	frame := clientFrame(t, result.AuthKey, 42, 1<<32, &tg.HelpGetNearestDCRequest{})
+	if err := client.Send(ctx, &bin.Buffer{Buf: frame}); err != nil {
+		t.Fatalf("send RPC: %v", err)
+	}
+	clientCipher := crypto.NewClientCipher(crypto.DefaultRand())
+	for {
+		var wire bin.Buffer
+		if err := client.Recv(ctx, &wire); err != nil {
+			t.Fatalf("receive RPC response: %v", err)
+		}
+		message, err := clientCipher.DecryptFromBuffer(result.AuthKey, &wire)
+		if err != nil {
+			t.Fatalf("decrypt RPC response: %v", err)
+		}
+		var rpcResult proto.Result
+		if err := rpcResult.Decode(&bin.Buffer{Buf: message.Data()}); err != nil || rpcResult.RequestMessageID != 1<<32 {
+			continue
+		}
+		var got tg.NearestDC
+		if err := got.Decode(&bin.Buffer{Buf: rpcResult.Result}); err != nil {
+			t.Fatalf("decode nearest DC response: %v", err)
+		}
+		if got.Country != "public" {
+			t.Fatalf("public listener returned country %q, want public", got.Country)
+		}
+		break
+	}
+	closeWebSocket(t, ws)
+
+	ws, err = dialWebSocketOrigin(ctx, ln.Addr().String(), "https://tailnet.teagram.io")
+	if err == nil {
+		closeWebSocket(t, ws)
+		t.Fatal("public listener accepted the tailnet listener origin")
+	}
+}
+
 func TestServeWebSocketDiscoveryCORSIsPathScoped(t *testing.T) {
 	t.Parallel()
 

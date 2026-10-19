@@ -60,6 +60,12 @@ const blobModeDirectory = "/run/teagramd/blob-mode"
 // requests to finish before it gives up.
 const adminShutdownTimeout = 5 * time.Second
 
+type publicWebSocketListener struct {
+	listener       net.Listener
+	handler        mtproto.Handler
+	originPatterns []string
+}
+
 func runCommand(args []string, log *slog.Logger, stdout, stderr io.Writer) error {
 	switch {
 	case len(args) == 0:
@@ -611,7 +617,7 @@ func runAtBlobModePath(log *slog.Logger, blobModePath string) error {
 		return err
 	}
 
-	// Validate TG_REGISTRATION immediately after config load, before any
+	// Validate registration modes immediately after config load, before any
 	// resource-intensive init (RSA/DB/blob). A bad value fails fast with a
 	// message naming the variable.
 	if err := cfg.ValidateRegistrationMode(); err != nil {
@@ -774,18 +780,20 @@ func runAtBlobModePath(log *slog.Logger, blobModePath string) error {
 	if cfg.Turnstile.Enabled() {
 		turnstileVerifier = api.NewTurnstileVerifier(cfg.Turnstile.SecretKey)
 	}
-	handler := api.NewWithPhotoThumbsAndDialogFilterSyncAndUploadPartTTLAndTurnstileAndWelcomeChannel(
-		st, cfg.DCID, tgcfg, log, cfg.LogLoginCodes, cfg.MaxFileBytes, blobs,
-		cfg.MaxUserStorageBytes, peers, photos, cfg.RateLimits, cfg.RegistrationMode,
-		dialogFilterSync, photoThumbs, cfg.UploadPartTTL, cfg.Turnstile.SiteKey,
-		turnstileVerifier, cfg.WelcomeChannel, notifyMetrics,
-	)
+	newHandler := func(registrationMode config.RegistrationMode) mtproto.Handler {
+		return api.NewWithPhotoThumbsAndDialogFilterSyncAndUploadPartTTLAndTurnstileAndWelcomeChannel(
+			st, cfg.DCID, tgcfg, log, cfg.LogLoginCodes, cfg.MaxFileBytes, blobs,
+			cfg.MaxUserStorageBytes, peers, photos, cfg.RateLimits, registrationMode,
+			dialogFilterSync, photoThumbs, cfg.UploadPartTTL, cfg.Turnstile.SiteKey,
+			turnstileVerifier, cfg.WelcomeChannel, notifyMetrics,
+		)
+	}
 	if cfg.LogLoginCodes {
 		log.Warn("TG_LOG_LOGIN_CODES is on: login codes are written to the log in cleartext")
 	}
 	cfg.WarnClientAddrTrust(log)
 
-	server := mtproto.New(exchange.PrivateKey{RSA: key}, cfg.DCID, mtproto.NewPgAuthKeyStore(st), handler, log)
+	server, publicHandler := newListenerScopedServer(cfg, exchange.PrivateKey{RSA: key}, st, log, newHandler)
 	server.SetWebSocketOriginPatterns(cfg.WebSocketOriginPatterns)
 	if err := server.SetClientDiscoveryDocument(clientDiscovery); err != nil {
 		return fmt.Errorf("set client discovery document: %w", err)
@@ -917,17 +925,37 @@ func runAtBlobModePath(log *slog.Logger, blobModePath string) error {
 		return err
 	}
 	log.Info("listening", "addr", cfg.ListenAddr, "advertise", advertise, "dc", cfg.DCID)
-	if cfg.WebSocketListenAddr == "" {
-		return serveMTProto(ctx, server, ln, nil)
+	var websocketLn net.Listener
+	if cfg.WebSocketListenAddr != "" {
+		websocketLn, err = lc.Listen(ctx, "tcp", cfg.WebSocketListenAddr)
+		if err != nil {
+			return errors.Join(fmt.Errorf("websocket listen: %w", err), closeListener(ln))
+		}
+		log.Info("WebSocket MTProto listening", "addr", cfg.WebSocketListenAddr)
 	}
 
-	websocketLn, err := lc.Listen(ctx, "tcp", cfg.WebSocketListenAddr)
-	if err != nil {
-		return fmt.Errorf("websocket listen: %w", err)
+	var publicWebSocket *publicWebSocketListener
+	if cfg.PublicWebSocketListenAddr != "" {
+		publicLn, listenErr := lc.Listen(ctx, "tcp", cfg.PublicWebSocketListenAddr)
+		if listenErr != nil {
+			closeErr := errors.Join(closeListener(websocketLn), closeListener(ln))
+			return errors.Join(fmt.Errorf("public websocket listen: %w", listenErr), closeErr)
+		}
+		log.Info("Public WebSocket MTProto listening", "addr", cfg.PublicWebSocketListenAddr)
+		publicWebSocket = newPublicWebSocketListener(cfg, publicLn, publicHandler)
 	}
-	log.Info("WebSocket MTProto listening", "addr", cfg.WebSocketListenAddr)
 
-	return serveMTProto(ctx, server, ln, websocketLn)
+	return serveMTProto(ctx, server, ln, websocketLn, publicWebSocket)
+}
+
+func closeListener(listener net.Listener) error {
+	if listener == nil {
+		return nil
+	}
+	if err := listener.Close(); err != nil && !errors.Is(err, net.ErrClosed) {
+		return err
+	}
+	return nil
 }
 
 func newBlobStore(ctx context.Context, cfg config.Config, log *slog.Logger) (blob.Store, error) {
