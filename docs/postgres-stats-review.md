@@ -19,9 +19,16 @@ docker compose exec postgres psql -X -v ON_ERROR_STOP=1 -U postgres -d teagram
 Paste each SQL query below at the `psql` prompt. The statistics views and
 `pg_stat_statements` query text and identifiers are sensitive; access them only
 as a trusted operator. The top-statement queries return representative SQL
-text. Compare the total-time top-five `queryid` values with the prior review,
-and keep those IDs with the trusted review record; do not paste SQL text into
-the issue. See the
+text. Keep query results in the trusted operator session. For cross-review
+comparisons, use one private snapshot at
+`~/.local/state/teagram/postgres-stats-review/previous-review.txt` on the
+Compose host. Keep the directory accessible only to the operator (`0700`) and
+the snapshot readable and writable only by that operator (`0600`). Store only
+the total-time top-five `queryid` values and per-table dead/live ratios needed
+for comparison; never store SQL text. At each review, compare current results
+with the snapshot, replace it with the current values, and remove any older
+copies before resetting the counters. Retain only this latest snapshot until
+the next review. See the
 [statistics-reader boundary](security.md#statistics-reader-boundary).
 
 ### Top five by total execution time
@@ -171,11 +178,12 @@ WHERE datname = current_database();
 - Record cache hit ratio and temporary-file counts as trends; no additional
   trigger is set for those measures.
 
-End each review with one summary line on its tracking issue: the date, database
-size versus `shared_buffers`, read-time percentage, highest dead/live ratio,
-`message_events` size, cache hit ratio, temporary-file count, the total-time
-top-five `queryid` values, and any ticket opened. Limit that issue to trusted
-readers because the query IDs are sensitive too; keep SQL text out of the line.
+End each review with one summary line on its tracking issue containing only
+aggregate findings (database size versus `shared_buffers`, read-time percentage,
+highest dead/live ratio, `message_events` size, cache hit ratio, and
+temporary-file count), the triggers met, and any follow-up tickets opened. Do
+not include query IDs, per-table names, database or role identifiers, or SQL
+text in the issue note.
 
 ## Reset for the next interval
 
