@@ -1,7 +1,41 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { formatSmokeFailure } from "./readiness-integration-smoke.mjs";
+import { assertSilentSharedWorkerError, formatSmokeFailure } from "./readiness-integration-smoke.mjs";
+
+function silentSharedWorkerResult(diagnostic) {
+  return { error: { code: "websocket-not-ready", diagnostic } };
+}
+
+test("a silent SharedWorker accepts either no target or a safe unobservable result", () => {
+  const noTarget = assertSilentSharedWorkerError(silentSharedWorkerResult({
+    wss_diagnostic: "no-target",
+    wss_targets: 0,
+    wss_handshakes: 0,
+    wss_target_match: false,
+    wss_status: 0,
+  }));
+  assert.equal(noTarget.wss_diagnostic, "no-target");
+
+  const unobservable = assertSilentSharedWorkerError(silentSharedWorkerResult({
+    wss_diagnostic: "ambiguous",
+    wss_targets: 0,
+    wss_handshakes: 0,
+    wss_target_match: false,
+    wss_status: 0,
+  }));
+  assert.equal(unobservable.wss_diagnostic, "ambiguous");
+});
+
+test("a silent SharedWorker rejects any observed WebSocket target", () => {
+  assert.throws(() => assertSilentSharedWorkerError(silentSharedWorkerResult({
+    wss_diagnostic: "ambiguous",
+    wss_targets: 1,
+    wss_handshakes: 0,
+    wss_target_match: false,
+    wss_status: 0,
+  })));
+});
 
 test("smoke failures identify the scenario, expectation and both values", () => {
   let failure;
