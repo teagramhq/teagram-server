@@ -285,8 +285,11 @@ cat > "$TARGET_DIR/deploy/teagramd/rollout-runner/rollout-verifier.sh" <<'SH'
 #!/usr/bin/env bash
 set -euo pipefail
 [ "$#" -eq 4 ] && [ "$1" = ready ] && [ "$2" = target ] || exit 64
-if [ -n "${STACK_MOVE_TEST_READINESS_DELAY:-}" ]; then
-  sleep "$STACK_MOVE_TEST_READINESS_DELAY"
+if [ "${STACK_MOVE_TEST_STOP_TARGET:-}" = 1 ]; then
+  # Stop the target only once the move reaches readiness, after every earlier
+  # runtime check has seen it running.
+  "$REAL_DOCKER" exec "$3" touch /tmp/stack-move-exit || true
+  "$REAL_DOCKER" wait "$3" >/dev/null
 fi
 state=$("$REAL_DOCKER" inspect --format '{{.State.Status}}' "$3") || exit 1
 if [ "$state" != running ]; then
@@ -556,7 +559,7 @@ run_move_dump_failure() {
 run_move_delayed_target_exit() {
   local compose_file=$1 output_file=$2
   rm -f -- "$TARGET_DIR/docker-compose.override.yml"
-  STACK_MOVE_TEST_READINESS_DELAY=8 REAL_DOCKER="$REAL_DOCKER" PATH="$TMP/bin:$PATH" \
+  STACK_MOVE_TEST_STOP_TARGET=1 REAL_DOCKER="$REAL_DOCKER" PATH="$TMP/bin:$PATH" \
     python3 "$HELPER" move \
       --source-dir "$SOURCE_DIR" --target-dir "$TARGET_DIR" \
       --source-compose "$SOURCE_COMPOSE" --target-compose "$compose_file" \
@@ -569,7 +572,7 @@ run_move_delayed_target_exit() {
 run_move_rollback_failure() {
   local compose_file=$1 output_file=$2
   rm -f -- "$TARGET_DIR/docker-compose.override.yml"
-  STACK_MOVE_TEST_READINESS_DELAY=8 STACK_MOVE_FAIL_SOURCE_ROLLBACK=1 \
+  STACK_MOVE_TEST_STOP_TARGET=1 STACK_MOVE_FAIL_SOURCE_ROLLBACK=1 \
     REAL_DOCKER="$REAL_DOCKER" PATH="$TMP/bin:$PATH" \
     python3 "$HELPER" move \
       --source-dir "$SOURCE_DIR" --target-dir "$TARGET_DIR" \
@@ -802,7 +805,7 @@ for name in "${TARGET_VOLUMES[@]}" "${SOURCE_VOLUMES[@]}"; do
 done
 
 rm -f -- "$EVIDENCE_DIR"/*
-sed 's/sleep 3600/sleep 5; exit 23/' "$TARGET_COMPOSE" > "$TMP/target-failing.yml"
+sed 's/sleep 3600/until [ -e \/tmp\/stack-move-exit ]; do sleep 1; done; exit 23/' "$TARGET_COMPOSE" > "$TMP/target-failing.yml"
 start_source
 write_volume_file telegram-server_tgkey enc_key.hex 'rollback-key-material'
 write_volume_file telegram-server_tgblobs objects/blob-a 'rollback-blob-object'
@@ -810,8 +813,10 @@ write_volume_file telegram-server_rustfsdata rollback.marker 'rustfs-rollback-vo
 if run_move_delayed_target_exit "$TMP/target-failing.yml" "$TMP/rollback.out"; then
   fail 'move accepted a target server that exits after startup'
 fi
-grep -q 'target teagramd readiness check failed with exit 1' "$TMP/rollback.out" || \
+if ! grep -q 'target teagramd readiness check failed with exit 1' "$TMP/rollback.out"; then
+  cat "$TMP/rollback.out" >&2
   fail 'delayed target exit was not rejected by the readiness gate'
+fi
 grep -q 'rollback=old-project-restored' "$TMP/rollback.out" || fail 'post-stop failure did not report source rollback'
 grep -q 'target server readiness failed: state=exited' "$EVIDENCE_DIR/target-readiness.stderr" || \
   fail 'target readiness failure diagnostic was not preserved'
@@ -845,8 +850,10 @@ rm -f -- "$EVIDENCE_DIR"/*
 if run_move_rollback_failure "$TMP/target-failing.yml" "$TMP/rollback-command-failure.out"; then
   fail 'move accepted an injected target readiness failure with a broken old-project restart'
 fi
-grep -q 'rollback=old-project-restart-failed' "$TMP/rollback-command-failure.out" || \
+if ! grep -q 'rollback=old-project-restart-failed' "$TMP/rollback-command-failure.out"; then
+  cat "$TMP/rollback-command-failure.out" >&2
   fail 'failed old-project restart was not reported'
+fi
 grep -q 'restart old Compose project during rollback failed with exit 44; diagnostic saved to .*/rollback-source-up.stderr' \
   "$TMP/rollback-command-failure.out" || fail 'rollback output omitted the failed operation and evidence path'
 grep -q 'ERROR: injected source Compose rollback failure' "$EVIDENCE_DIR/rollback-source-up.stderr" || \
