@@ -36,7 +36,7 @@ docker run -d \
   --network "$NETWORK" \
   --network-alias postgres \
   --publish 127.0.0.1::5432 \
-  --health-cmd 'pg_isready -U postgres -d teagram' \
+  --health-cmd 'pg_isready -h 127.0.0.1 -U postgres -d teagram' \
   --health-interval 1s \
   --health-timeout 3s \
   --health-retries 60 \

@@ -150,6 +150,15 @@ class DockerImageMirrorTests(unittest.TestCase):
         self.assertIn("uses: ariga/setup-atlas@v0.3", job.group(1))
         self.assertIn("version: v1.2.0", job.group(1))
 
+    def test_rustfs_schema_fixture_waits_for_postgres_tcp(self) -> None:
+        script = (
+            ROOT / "deploy/teagramd/rollout-runner/test-rustfs-schema-postgres.sh"
+        ).read_text(encoding="utf-8")
+        self.assertIn(
+            "--health-cmd 'pg_isready -h 127.0.0.1 -U postgres -d teagram'",
+            script,
+        )
+
     def test_rustfs_fixture_mirror_is_digest_pinned_and_precedes_qualification(self) -> None:
         workflow = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
         mirror_job = re.search(
