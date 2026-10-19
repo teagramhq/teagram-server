@@ -1253,7 +1253,7 @@ async function waitForVisible(locator, code, timeout = 30000) {
 async function noCodeOrSignup(page) {
   const codeInput = page.locator('input[autocomplete="one-time-code"]:visible');
   if (await visible(codeInput.first())) fail("code-card-shown");
-  const signup = page.getByText(/sign up|create account/iu).filter({visible: true});
+  const signup = page.getByRole("heading", {name: /^(?:sign up|create account)$/iu}).filter({visible: true});
   if (await visible(signup.first())) fail("signup-path-shown");
 }
 
