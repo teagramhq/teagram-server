@@ -325,7 +325,7 @@ if [ "${1:-}" = inspect ]; then
             fi
             ;;
           "$MOCK_TARGET_ID"|"$MOCK_REPLACEMENT_ID")
-            if [ "${MOCK_SCENARIO:-success}" = old-target-image ] || [ "${MOCK_SCENARIO:-}" = target-local-598-rollback ] || [ "${MOCK_SCENARIO:-}" = target-local-df9-rollback ]; then printf '%s\n' "$MOCK_BASE_IMAGE"; else printf '%s\n' "$MOCK_ACTUAL_TARGET_IMAGE"; fi
+            if [ "${MOCK_SCENARIO:-success}" = old-target-image ] || [ "${MOCK_SCENARIO:-}" = target-local-598-rollback ] || [ "${MOCK_SCENARIO:-}" = target-local-df9-rollback ] || [ "${MOCK_SCENARIO:-}" = target-local-welcome-channel-addition-rollback ]; then printf '%s\n' "$MOCK_BASE_IMAGE"; else printf '%s\n' "$MOCK_ACTUAL_TARGET_IMAGE"; fi
             ;;
           *) printf '%s\n' "$MOCK_POSTGRES_IMAGE" ;;
         esac
@@ -339,7 +339,7 @@ if [ "${1:-}" = inspect ]; then
     "$MOCK_TARGET_ID"|"$MOCK_REPLACEMENT_ID")
       id=$subject
       cfg=target
-      if [ "${MOCK_SCENARIO:-success}" = old-target-image ] || [ "${MOCK_SCENARIO:-}" = target-local-598-rollback ] || [ "${MOCK_SCENARIO:-}" = target-local-df9-rollback ]; then image=$MOCK_BASE_IMAGE; else image=$MOCK_ACTUAL_TARGET_IMAGE; fi
+      if [ "${MOCK_SCENARIO:-success}" = old-target-image ] || [ "${MOCK_SCENARIO:-}" = target-local-598-rollback ] || [ "${MOCK_SCENARIO:-}" = target-local-df9-rollback ] || [ "${MOCK_SCENARIO:-}" = target-local-welcome-channel-addition-rollback ]; then image=$MOCK_BASE_IMAGE; else image=$MOCK_ACTUAL_TARGET_IMAGE; fi
       ;;
     "$MOCK_ROLLBACK_ID")
       id=$MOCK_ROLLBACK_ID
@@ -368,6 +368,8 @@ if [ "${1:-}" = inspect ]; then
       env_json='["TG_RSA_KEY_PATH=/var/lib/teagramd/server_key.pem","TG_SYNTHETIC_FLAG=fixture","TG_BLOB_DIR=/unexpected-blob-dir","TG_REPLICA_COUNT=1","TG_CLIENT_ADDR_TRUST=socket"]'
     elif { [ "$cfg" = target ] || [ "$cfg" = rollback ]; } && [ "${MOCK_SCENARIO:-}" = public-websocket-defaults ]; then
       env_json='["TG_RSA_KEY_PATH=/var/lib/teagramd/server_key.pem","TG_SYNTHETIC_FLAG=fixture","TG_BLOB_DIR=/var/lib/teagramd-blobs","TG_PUBLIC_WEBSOCKET_LISTEN_ADDR=","TG_PUBLIC_REGISTRATION=closed","TG_PUBLIC_WEBSOCKET_ALLOWED_ORIGINS=","TG_REPLICA_COUNT=1","TG_CLIENT_ADDR_TRUST=socket"]'
+    elif { [ "$cfg" = target ] || [ "$cfg" = rollback ]; } && [[ "${MOCK_SCENARIO:-}" == target-local-welcome-channel-* ]]; then
+      env_json='["TG_RSA_KEY_PATH=/var/lib/teagramd/server_key.pem","TG_SYNTHETIC_FLAG=fixture","TG_BLOB_DIR=/var/lib/teagramd-blobs","TG_REPLICA_COUNT=1","TG_CLIENT_ADDR_TRUST=socket","TG_WELCOME_CHANNEL="]'
     elif { [ "$cfg" = target ] || [ "$cfg" = rollback ]; } && [ "${MOCK_SCENARIO:-success}" != config-drift ]; then
       env_json='["TG_RSA_KEY_PATH=/var/lib/teagramd/server_key.pem","TG_SYNTHETIC_FLAG=fixture","TG_BLOB_DIR=/var/lib/teagramd-blobs","TG_REPLICA_COUNT=1","TG_CLIENT_ADDR_TRUST=socket"]'
     elif { [ "$cfg" = target ] || [ "$cfg" = rollback ]; } && [ "${MOCK_SCENARIO:-success}" = config-drift ]; then
@@ -418,6 +420,8 @@ fi
           cat "$MOCK_STATE/target-compose.drift.json"
         elif [[ "${MOCK_SCENARIO:-}" == public-websocket-* ]] && [ "$config_count" -lt 3 ]; then
           cat "$MOCK_STATE/base-compose.json"
+        elif [[ "${MOCK_SCENARIO:-}" == target-local-welcome-channel-* ]]; then
+          if [ "$config_count" -ge 3 ]; then cat "$MOCK_STATE/target-compose.json"; else cat "$MOCK_STATE/base-compose.json"; fi
         elif [ "${MOCK_SCENARIO:-}" = target-local-carry-forward-cce-literal-build-arg ]; then
           jq -c '.services.teagramd.build.args.TEAGRAMD_SOURCE_REVISION="literal-override"' \
             "$MOCK_STATE/target-compose.json"
@@ -1192,7 +1196,7 @@ run_fixture() {
     ambient_revision=(TEAGRAMD_SOURCE_REVISION=ambient-revision-must-not-win)
   fi
   runner="$runtime_dir/rollout-runner.sh"
-  case "$scenario" in old-target-image|target-local-598-rollback|target-local-df9-rollback|config-drift|public-websocket-enabled|readiness-timeout|logs-failed|runtime-target-exited|target-local-carry-forward-image-reuse-stale-build|target-local-carry-forward-image-reuse-stop-timeout-mismatch|schema-post-failed-69|schema-post-missing-69) require_marker=1 ;; esac
+  case "$scenario" in old-target-image|target-local-598-rollback|target-local-df9-rollback|target-local-welcome-channel-addition-rollback|config-drift|public-websocket-enabled|readiness-timeout|logs-failed|runtime-target-exited|target-local-carry-forward-image-reuse-stale-build|target-local-carry-forward-image-reuse-stop-timeout-mismatch|schema-post-failed-69|schema-post-missing-69) require_marker=1 ;; esac
   [ "$name" = marker-write-failed ] && require_marker=0
   [ -n "$chmod_match" ] && require_marker=1
   if [ "$action" = reconcile ]; then
@@ -3424,6 +3428,61 @@ else
     "$status" "$(cat "$TMP/public-websocket-enabled.stderr")"
   cat "$root".target/preflight-comparisons.tsv 2>/dev/null || true
   fail 'enabled public WebSocket configuration rejection'
+fi
+
+prepare_target_local_apply_fixture welcome-channel-addition \
+  target-local-welcome-channel-addition "$E58_LOCAL_COMPOSE_TARGET_SHA"
+state=$(cat "$TMP/welcome-channel-addition-state-path")
+root=$(cat "$TMP/welcome-channel-addition-root-path")
+jq -c '.services.teagramd.environment.TG_WELCOME_CHANNEL=""' \
+  "$state/target-compose.json" > "$state/target-compose.next.json"
+mv -- "$state/target-compose.next.json" "$state/target-compose.json"
+status=$(run_fixture welcome-channel-addition built 0 '' 2 '' '' apply "$APPLY_TARGET_SHA")
+if [ "$status" = 0 ] && \
+   grep -q $'preflight\tconfig_sha256\t.*\tpass' "$root".target/preflight-comparisons.tsv && \
+   grep -q $'target\tconfig_sha256\t.*\tpass' "$root".target/target-comparisons.tsv && \
+   grep -q $'target\tcontainer_env_sha256\t.*\tpass' "$root".target/target-comparisons.tsv && \
+   grep -q "rollout=verified sha=$APPLY_TARGET_SHA" "$TMP/welcome-channel-addition.stdout"; then
+  pass 'ordinary apply accepts the empty welcome-channel Compose default'
+else
+  show_fixture_failure welcome-channel-addition "$status"
+  fail 'ordinary apply should preserve equivalence when welcome channel is empty'
+fi
+
+prepare_target_local_apply_fixture welcome-channel-addition-rollback \
+  target-local-welcome-channel-addition-rollback "$E58_LOCAL_COMPOSE_TARGET_SHA"
+state=$(cat "$TMP/welcome-channel-addition-rollback-state-path")
+root=$(cat "$TMP/welcome-channel-addition-rollback-root-path")
+jq -c '.services.teagramd.environment.TG_WELCOME_CHANNEL=""' \
+  "$state/target-compose.json" > "$state/target-compose.next.json"
+mv -- "$state/target-compose.next.json" "$state/target-compose.json"
+status=$(run_fixture welcome-channel-addition-rollback built 0 '' 2 '' '' apply "$APPLY_TARGET_SHA")
+if [ "$status" != 0 ] && \
+   grep -q "rollback=verified baseline_sha=$TARGET_SHA" "$TMP/welcome-channel-addition-rollback.stdout" && \
+   grep -q $'rollback\tconfig_sha256\t.*\tpass' "$root".rollback/rollback-equivalence.tsv && \
+   grep -q $'rollback\tcontainer_env_sha256\t.*\tpass' "$root".rollback/rollback-equivalence.tsv && \
+   grep -q 'baseline_equivalence=pass' "$root".rollback/rollback-result.txt; then
+  pass 'rollback accepts the empty welcome-channel Compose default'
+else
+  show_fixture_failure welcome-channel-addition-rollback "$status"
+  fail 'rollback should preserve equivalence when welcome channel is empty'
+fi
+
+prepare_target_local_apply_fixture welcome-channel-active \
+  target-local-welcome-channel-active "$E58_LOCAL_COMPOSE_TARGET_SHA"
+state=$(cat "$TMP/welcome-channel-active-state-path")
+jq -c '.services.teagramd.environment.TG_WELCOME_CHANNEL="welcome"' \
+  "$state/target-compose.json" > "$state/target-compose.next.json"
+mv -- "$state/target-compose.next.json" "$state/target-compose.json"
+status=$(run_fixture welcome-channel-active built 0 '' 2 '' '' apply "$APPLY_TARGET_SHA")
+if [ "$status" != 0 ] && \
+   ! grep -q 'docker compose up -d$' "$TMP/welcome-channel-active-events" && \
+   grep -q 'resolved Compose has unsafe public environment settings' "$TMP/welcome-channel-active.stderr" && \
+   grep -q 'resolved Compose preflight capture failed; target was not started' "$TMP/welcome-channel-active.stderr"; then
+  pass 'ordinary apply rejects an active welcome channel before target startup'
+else
+  show_fixture_failure welcome-channel-active "$status"
+  fail 'active welcome channel must be rejected before target startup'
 fi
 
 make_fixture evidence-collision success
