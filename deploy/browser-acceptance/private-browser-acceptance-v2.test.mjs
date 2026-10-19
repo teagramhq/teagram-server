@@ -885,7 +885,7 @@ test("client-progress-unavailable reaches the result line", async () => {
 
 test("broken-chat-list after sign-in is reported and attempts in-band logout", async () => {
   const fixture = createDependencies(undefined, true);
-  const browser = createAcceptancePage({chatListVisible: false});
+  const browser = createAcceptancePage({chatListVisible: false, completeSignIn: true});
   await useRealAcceptanceFlow(fixture, browser);
 
   const result = await executeMode({mode: "acceptance", releaseRecord: "fixture"}, fixture.dependencies);
@@ -896,8 +896,9 @@ test("broken-chat-list after sign-in is reported and attempts in-band logout", a
   assert.equal(output.submission, "password");
   assert.equal(output.chatList, "missing");
   assert.equal(output.chatListRows, 0);
-  assert.deepEqual(browser.apiMethods, ["auth.logOut"]);
-  assert.equal(browser.apiMethods.includes("auth.signIn"), false);
+  assert.equal(output.phase, "signed-in");
+  assert.equal(output.logout, "ok");
+  assert.deepEqual(browser.apiMethods, ["auth.sendCode", "auth.signIn", "auth.checkPassword", "auth.logOut"]);
 });
 
 test("empty chats state is accepted as a rendered chat list after sign-in", async () => {
@@ -914,9 +915,36 @@ test("empty chats state is accepted as a rendered chat list after sign-in", asyn
 
   assert.equal(result.exitCode, 0, result.output);
   assert.equal(output.qaFailureCode, "none");
+  assert.equal(output.phase, "signed-in");
   assert.equal(output.logout, "ok");
   assert.equal(output.chatList, "rendered");
   assert.equal(output.chatListRows, 0);
+  assert.deepEqual(browser.apiMethods.filter((method) => method === "auth.logOut"), ["auth.logOut"]);
+});
+
+test("a failure after the empty chats state records sign-in and successful logout", async () => {
+  const fixture = createDependencies(undefined, true);
+  const browser = createAcceptancePage({
+    chatListVisible: false,
+    emptyChatStateVisible: true,
+    completeSignIn: true,
+  });
+  await useRealAcceptanceFlow(fixture, browser);
+  const proveWss = fixture.dependencies.proveWss;
+  fixture.dependencies.proveWss = async (...args) => {
+    const audit = await proveWss(...args);
+    return {...audit, validate() { throw new Error("fixture audit failed after sign-in"); }};
+  };
+
+  const result = await executeMode({mode: "acceptance", releaseRecord: "fixture"}, fixture.dependencies);
+  const output = JSON.parse(result.output);
+
+  assert.equal(result.exitCode, 1);
+  assert.equal(output.qaFailureCode, "unexpected-failure");
+  assert.equal(output.phase, "signed-in");
+  assert.equal(output.logout, "ok");
+  assert.equal(output.chatList, "rendered");
+  assert.deepEqual(browser.apiMethods.filter((method) => method === "auth.logOut"), ["auth.logOut"]);
 });
 
 test("chat-list check ignores hidden list variants and scopes its row count", async () => {
@@ -925,6 +953,7 @@ test("chat-list check ignores hidden list variants and scopes its row count", as
     chatListMatches: 5,
     chatRows: 9,
     visibleChatRows: 0,
+    completeSignIn: true,
   });
   await useRealAcceptanceFlow(fixture, browser);
 
@@ -934,26 +963,27 @@ test("chat-list check ignores hidden list variants and scopes its row count", as
   assert.notEqual(output.qaFailureCode, "broken-chat-list");
   assert.equal(output.chatList, "rendered");
   assert.equal(output.chatListRows, 0);
-  assert.deepEqual(browser.apiMethods, ["auth.logOut"]);
+  assert.deepEqual(browser.apiMethods, ["auth.sendCode", "auth.signIn", "auth.checkPassword", "auth.logOut"]);
 });
 
 test("chat-list row counts clamp at ten in the result line", async () => {
   const fixture = createDependencies(undefined, true);
-  const browser = createAcceptancePage({chatRows: 13});
+  const browser = createAcceptancePage({chatRows: 13, completeSignIn: true});
   await useRealAcceptanceFlow(fixture, browser);
 
   const result = await executeMode({mode: "acceptance", releaseRecord: "fixture"}, fixture.dependencies);
   const output = JSON.parse(result.output);
 
-  assert.equal(result.exitCode, 1);
+  assert.equal(result.exitCode, 0);
   assert.equal(output.chatList, "rendered");
   assert.equal(output.chatListRows, 10);
-  assert.deepEqual(browser.apiMethods, ["auth.logOut"]);
+  assert.equal(output.logout, "ok");
+  assert.deepEqual(browser.apiMethods, ["auth.sendCode", "auth.signIn", "auth.checkPassword", "auth.logOut"]);
 });
 
 test("WSS mismatch is reported as unmatched in the result line", async () => {
   const fixture = createDependencies(undefined, true);
-  const browser = createAcceptancePage();
+  const browser = createAcceptancePage({completeSignIn: true});
   await useRealAcceptanceFlow(fixture, browser);
   fixture.dependencies.installNetworkGuards = async () => ({
     expectedEndpoint: "",
@@ -978,7 +1008,9 @@ test("WSS mismatch is reported as unmatched in the result line", async () => {
   assert.equal(result.exitCode, 1);
   assert.equal(output.qaFailureCode, "endpoint-mismatch");
   assert.equal(output.wssEndpointMatched, false);
-  assert.deepEqual(browser.apiMethods, ["auth.logOut"]);
+  assert.equal(output.phase, "signed-in");
+  assert.equal(output.logout, "ok");
+  assert.deepEqual(browser.apiMethods, ["auth.sendCode", "auth.signIn", "auth.checkPassword", "auth.logOut"]);
 });
 
 function fakeCdpSession({attachFails = false, replies = true, detach = "release", scriptLoaded = "after", log = []} = {}) {
