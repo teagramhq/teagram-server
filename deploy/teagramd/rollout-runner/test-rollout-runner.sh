@@ -127,7 +127,7 @@ if [ "${1:-}" = merge-base ] && [ "${2:-}" = --is-ancestor ]; then
 fi
 case "$*" in
   'fetch -q origin') exit 0 ;;
-  'branch --show-current') printf 'main\n' ;;
+  'branch --show-current') printf '%s\n' "${MOCK_BRANCH-main}" ;;
   'rev-parse HEAD') cat "$MOCK_STATE/head" ;;
   'rev-parse origin/main') cat "$MOCK_STATE/origin" ;;
   "show $MOCK_SOURCE_SHA:deploy/teagramd/rollout-runner/rollout-runner.sh") cat "$MOCK_TARGET_RUNTIME_DIR/rollout-runner.sh" ;;
@@ -1147,6 +1147,7 @@ run_fixture() {
   (cd "$checkout" && timeout --signal=TERM --kill-after=5s 180s env -u TEAGRAMD_SOURCE_REVISION PATH="$bin:$PATH" "${ambient_revision[@]}" \
     MOCK_REAL_BASH="$(command -v bash)" \
     MOCK_STATE="$state" MOCK_EVENTS="$TMP/$name-events" MOCK_COMPOSE_FILE_EVENTS="$TMP/$name-compose-selections" MOCK_SCENARIO="$scenario" \
+    MOCK_BRANCH="${MOCK_BRANCH-main}" \
     MOCK_CHECKOUT="$checkout" MOCK_TARGET_SHA="$target_sha" MOCK_TARGET_RUNTIME_DIR="$target_runtime" MOCK_REAL_GIT="$real_git" \
     MOCK_SOURCE_SHA="$runtime_source_sha" MOCK_ORIGIN_SHA="$APPLY_ORIGIN_SHA" MOCK_BASELINE_SHA="$baseline_sha" ROLLOUT_RUNNER_SOURCE_SHA="$runtime_source_sha" \
     MOCK_BASE_ID="$BASE_ID" MOCK_TARGET_ID="$TARGET_ID" MOCK_REPLACEMENT_ID="$replacement_id" MOCK_ROLLBACK_ID="$ROLLBACK_ID" \
@@ -1405,12 +1406,12 @@ prepare_target_local_uninitialized_fixture() {
 }
 
 assert_target_local_rejected_before_backup() {
-  local name=$1 expected_error=$2 status state root events head_before container_before runtime_source_sha
+  local name=$1 expected_error=$2 branch=${3-main} status state root events head_before container_before runtime_source_sha
   state=$(cat "$TMP/$name-state-path")
   head_before=$(cat "$state/head")
   container_before=$(cat "$state/teagramd")
   runtime_source_sha=$(cat "$TMP/$name-runtime-source-sha-path" 2>/dev/null || printf '%s' "$APPLY_TARGET_SHA")
-  status=$(run_fixture "$name" built 0 '' 2 '' '' apply "$runtime_source_sha")
+  status=$(MOCK_BRANCH="$branch" run_fixture "$name" built 0 '' 2 '' '' apply "$runtime_source_sha")
   root=$(cat "$TMP/$name-root-path")
   events=$(cat "$TMP/$name-events")
   if [ "$status" != 0 ] && grep -q "$expected_error" "$TMP/$name.stderr" && \
@@ -2276,6 +2277,24 @@ else
   show_fixture_failure target-local-carry-forward-apply-success "$status"
   fail 'new local target must reuse the live reviewed Compose content'
 fi
+
+prepare_target_local_apply_fixture target-local-carry-forward-detached-checkout \
+  target-local-carry-forward-detached-checkout "$APPLY_TARGET_SHA"
+state=$(cat "$TMP/target-local-carry-forward-detached-checkout-state-path")
+status=$(MOCK_BRANCH= run_fixture target-local-carry-forward-detached-checkout built 0 '' 2 '' '' apply "$APPLY_TARGET_SHA")
+if [ "$status" = 0 ] && grep -q "rollout=verified sha=$APPLY_TARGET_SHA" \
+  "$TMP/target-local-carry-forward-detached-checkout.stdout" && \
+  [ "$(cat "$state/head")" = "$APPLY_TARGET_SHA" ]; then
+  pass 'apply accepts the detached checkout created by a stack move'
+else
+  show_fixture_failure target-local-carry-forward-detached-checkout "$status"
+  fail 'apply must accept a detached checkout when the reviewed SHA gates pass'
+fi
+
+prepare_target_local_apply_fixture target-local-carry-forward-non-main-checkout \
+  target-local-carry-forward-non-main-checkout "$APPLY_TARGET_SHA"
+assert_target_local_rejected_before_backup target-local-carry-forward-non-main-checkout \
+  'deployment checkout must be on main or detached' feature
 
 write_env_record() {
   local checkout=$1 env_sha
