@@ -215,8 +215,11 @@ deploy_steps = [
     "demo_validation_compose up -d haproxy edge",
     'python3 "$SCRIPT_DIR/smoke.py" "$DEMO_STATE_DIR/client.json" 18080',
     "demo_compose up -d edge",
+    'demo_remove_previous_image "$PREV_IMAGE_ID" "$IMAGE_ID"',
+    "BACKUP_READY=0",
 ]
-deploy_positions = [deploy.find(step) for step in deploy_steps]
+deploy_start = deploy.find(deploy_steps[0])
+deploy_positions = [deploy.find(step, deploy_start) for step in deploy_steps]
 if any(position < 0 for position in deploy_positions) or deploy_positions != sorted(deploy_positions):
     raise SystemExit("deploy-main.sh: public edge must start only after private validation smoke")
 if "PUBLIC_ACTIVATION_STARTED=1" not in deploy or "database preserved" not in deploy:
@@ -385,6 +388,24 @@ env \
   TMP_DIR="$TMP_DIR" \
   PRUNE_FUNCTION="$PRUNE_FUNCTION" \
   bash "$TMP_DIR/backup-prune-regression.sh"
+
+IMAGE_CLEANUP_FUNCTION="$TMP_DIR/demo-remove-previous-image.sh"
+sed -n '/^demo_remove_previous_image() {$/,/^}/p' "$SCRIPT_DIR/deploy-main.sh" > "$IMAGE_CLEANUP_FUNCTION"
+cat > "$TMP_DIR/deploy-image-cleanup-regression.sh" <<'BASH'
+set -Eeuo pipefail
+source "$IMAGE_CLEANUP_FUNCTION"
+DOCKER_CALLS="$TMP_DIR/docker-image-calls"
+docker() { printf '%s\n' "$*" >> "$DOCKER_CALLS"; }
+demo_remove_previous_image sha256:previous sha256:active
+[[ "$(cat "$DOCKER_CALLS")" == 'image rm sha256:previous' ]]
+: > "$DOCKER_CALLS"
+demo_remove_previous_image sha256:active sha256:active
+[[ ! -s "$DOCKER_CALLS" ]]
+BASH
+env \
+  IMAGE_CLEANUP_FUNCTION="$IMAGE_CLEANUP_FUNCTION" \
+  TMP_DIR="$TMP_DIR" \
+  bash "$TMP_DIR/deploy-image-cleanup-regression.sh"
 
 BACKUP_FUNCTIONS="$TMP_DIR/deploy-backup-functions.sh"
 sed -n \

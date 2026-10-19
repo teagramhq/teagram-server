@@ -102,6 +102,12 @@ demo_restore_database() {
   return "$restore_rc"
 }
 
+demo_remove_previous_image() {
+  local previous_image_id="$1" active_image_id="$2"
+  [[ "$previous_image_id" != "$active_image_id" ]] || return 0
+  docker image rm "$previous_image_id"
+}
+
 demo_rollback() {
   local rollback_rc=0
   set +e
@@ -235,5 +241,6 @@ IMAGE_ID=$(docker inspect --format '{{.Image}}' "${SERVER_IDS[0]}")
 demo_validation_compose stop edge
 PUBLIC_ACTIVATION_STARTED=1
 demo_compose up -d edge
+demo_remove_previous_image "$PREV_IMAGE_ID" "$IMAGE_ID"
 BACKUP_READY=0
 printf 'demo deployed sha=%s previous_sha=%s backup=%s\n' "$SHA" "$PREV_SHA" "$DB_DUMP"
