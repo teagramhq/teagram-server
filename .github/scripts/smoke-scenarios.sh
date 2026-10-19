@@ -36,6 +36,7 @@ SMOKE_SCENARIOS=(
   help-countries
   langpack
   username-registration
+  turnstile-signup
   username-password-reset
   pollprobe
   pollprobe-channels

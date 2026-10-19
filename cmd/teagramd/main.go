@@ -770,7 +770,16 @@ func runAtBlobModePath(log *slog.Logger, blobModePath string) error {
 	tgcfg.MeURLPrefix = cfg.PublicLinkPrefix
 	notifyMetrics := store.NewNotificationMetrics()
 	dialogFilterSync := api.NewDialogFilterSync()
-	handler := api.NewWithPhotoThumbsAndDialogFilterSyncAndUploadPartTTL(st, cfg.DCID, tgcfg, log, cfg.LogLoginCodes, cfg.MaxFileBytes, blobs, cfg.MaxUserStorageBytes, peers, photos, cfg.RateLimits, cfg.RegistrationMode, dialogFilterSync, photoThumbs, cfg.UploadPartTTL, notifyMetrics)
+	var turnstileVerifier api.SignUpTurnstileVerifier
+	if cfg.Turnstile.Enabled() {
+		turnstileVerifier = api.NewTurnstileVerifier(cfg.Turnstile.SecretKey)
+	}
+	handler := api.NewWithPhotoThumbsAndDialogFilterSyncAndUploadPartTTLAndTurnstile(
+		st, cfg.DCID, tgcfg, log, cfg.LogLoginCodes, cfg.MaxFileBytes, blobs,
+		cfg.MaxUserStorageBytes, peers, photos, cfg.RateLimits, cfg.RegistrationMode,
+		dialogFilterSync, photoThumbs, cfg.UploadPartTTL, cfg.Turnstile.SiteKey,
+		turnstileVerifier, notifyMetrics,
+	)
 	if cfg.LogLoginCodes {
 		log.Warn("TG_LOG_LOGIN_CODES is on: login codes are written to the log in cleartext")
 	}

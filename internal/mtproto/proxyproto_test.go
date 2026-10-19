@@ -65,6 +65,35 @@ func TestProxyV2UsesTheHeaderAddress(t *testing.T) {
 	}
 }
 
+func TestRequestMarksClientAddressFromTrustedProxyV2(t *testing.T) {
+	t.Parallel()
+	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
+	defer cancel()
+
+	nl := mustListenTCP(t, ctx, "127.0.0.1:0")
+	type addressSource struct {
+		addr        netip.Addr
+		fromProxyV2 bool
+	}
+	seen := make(chan addressSource, 1)
+	handler := mtproto.HandlerFunc(func(_ *mtproto.Conn, req *mtproto.Request) error {
+		seen <- addressSource{addr: req.ClientAddr, fromProxyV2: req.ClientAddrFromProxyV2}
+		return nil
+	})
+	key := serveHandler(t, ctx, nl, loopback, nil, handler)
+	client := netip.MustParseAddr("203.0.113.19")
+	speak(t, ctx, nl.Addr().String(), proxyV2Header(proxyCmdProxy, client), transport.Intermediate, key)
+
+	select {
+	case got := <-seen:
+		if got.addr != client || !got.fromProxyV2 {
+			t.Fatalf("handler address source = %#v, want %s from PROXY v2", got, client)
+		}
+	case <-ctx.Done():
+		t.Fatal("no request reached the handler")
+	}
+}
+
 // TestProxyV2RefusesAllowlistedSenderWithoutAHeader is the fail-closed half of
 // the mode. A connection from the balancer that carries no usable header cannot
 // be served on its socket address — that address is the balancer's, and one
