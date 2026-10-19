@@ -105,7 +105,8 @@ demo_restore_database() {
 demo_remove_previous_image() {
   local previous_image_id="$1" active_image_id="$2"
   [[ "$previous_image_id" != "$active_image_id" ]] || return 0
-  docker image rm "$previous_image_id"
+  docker image rm "$previous_image_id" ||
+    printf 'could not remove previous image %s\n' "$previous_image_id" >&2
 }
 
 demo_rollback() {

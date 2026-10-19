@@ -429,7 +429,10 @@ env \
   bash "$TMP_DIR/backup-prune-regression.sh"
 
 IMAGE_CLEANUP_FUNCTION="$TMP_DIR/demo-remove-previous-image.sh"
-sed -n '/^demo_remove_previous_image() {$/,/^}/p' "$SCRIPT_DIR/deploy-main.sh" > "$IMAGE_CLEANUP_FUNCTION"
+sed -n \
+  -e '/^demo_cleanup() {$/,/^}/p' \
+  -e '/^demo_remove_previous_image() {$/,/^}/p' \
+  "$SCRIPT_DIR/deploy-main.sh" > "$IMAGE_CLEANUP_FUNCTION"
 cat > "$TMP_DIR/deploy-image-cleanup-regression.sh" <<'BASH'
 set -Eeuo pipefail
 source "$IMAGE_CLEANUP_FUNCTION"
@@ -445,6 +448,38 @@ env \
   IMAGE_CLEANUP_FUNCTION="$IMAGE_CLEANUP_FUNCTION" \
   TMP_DIR="$TMP_DIR" \
   bash "$TMP_DIR/deploy-image-cleanup-regression.sh"
+
+cat > "$TMP_DIR/deploy-image-cleanup-failure-regression.sh" <<'BASH'
+set -Eeuo pipefail
+source "$IMAGE_CLEANUP_FUNCTION"
+PUBLIC_ACTIVATION_STARTED=1
+BACKUP_READY=1
+SERVICES_STOPPED=1
+RESTORE_DB=
+RESTORE_DB_CREATED=0
+TEST_TMP_DIR="$TMP_DIR"
+TMP_DIR=
+DEPLOY_CONTINUED="$TEST_TMP_DIR/deploy-continued"
+PRESERVE_CALLED="$TEST_TMP_DIR/preserve-called"
+demo_preserve_after_activation_failure() { : > "$PRESERVE_CALLED"; }
+docker() {
+  [[ "$*" == 'image rm sha256:previous' ]] || return 0
+  return 1
+}
+trap demo_cleanup EXIT
+demo_remove_previous_image sha256:previous sha256:active
+BACKUP_READY=0
+: > "$DEPLOY_CONTINUED"
+BASH
+if ! env \
+  IMAGE_CLEANUP_FUNCTION="$IMAGE_CLEANUP_FUNCTION" \
+  TMP_DIR="$TMP_DIR" \
+  bash "$TMP_DIR/deploy-image-cleanup-failure-regression.sh"; then
+  printf '%s\n' 'deploy failed after previous-image cleanup failed' >&2
+  exit 1
+fi
+[[ -e "$TMP_DIR/deploy-continued" ]]
+[[ ! -e "$TMP_DIR/preserve-called" ]]
 
 BACKUP_FUNCTIONS="$TMP_DIR/deploy-backup-functions.sh"
 sed -n \
