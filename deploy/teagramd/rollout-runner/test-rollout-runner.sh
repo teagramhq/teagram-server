@@ -384,6 +384,12 @@ if [ "${1:-}" = inspect ]; then
 fi
   if [ "${1:-}" = compose ]; then
   shift
+  compose_profile_enabled=0
+  if [ "${1:-}" = --profile ]; then
+    [ "${2:-}" = migration ] || exit 94
+    compose_profile_enabled=1
+    shift 2
+  fi
   case "${1:-}" in
     ps)
       if [ "${2:-}" = -q ] && [ "${3:-}" = teagramd ]; then cat "$MOCK_STATE/teagramd"; exit 0; fi
@@ -405,6 +411,8 @@ fi
         elif [ "${MOCK_SCENARIO:-}" = target-local-carry-forward-cce-wrong-context ]; then
           jq -c --arg context "$MOCK_CHECKOUT/elsewhere" '.services.teagramd.build.context=$context' \
             "$MOCK_STATE/target-compose.json"
+        elif [ "${MOCK_SCENARIO:-}" = stack-move-retained-rustfs-volume ] && [ "$compose_profile_enabled" = 0 ]; then
+          jq -c 'del(.volumes.rustfsdata)' "$MOCK_STATE/target-compose.json"
         elif [ "${TEAGRAMD_SOURCE_REVISION+x}" = x ]; then
           jq -c --arg revision "$TEAGRAMD_SOURCE_REVISION" \
             '.services.teagramd.build.args.TEAGRAMD_SOURCE_REVISION=$revision' "$MOCK_STATE/target-compose.json"
@@ -1889,6 +1897,35 @@ if prepare_target_local_apply_fixture target-local-apply-success target-local-ap
   fi
 else
   fail 'e58ba20 local apply fixture requires a valid initialized local authority'
+fi
+
+if prepare_target_local_apply_fixture stack-move-retained-rustfs-volume stack-move-retained-rustfs-volume; then
+  state=$(cat "$TMP/stack-move-retained-rustfs-volume-state-path")
+  checkout=$(cat "$TMP/stack-move-retained-rustfs-volume-checkout-path")
+  root=$(cat "$TMP/stack-move-retained-rustfs-volume-root-path")
+  head_before=$(cat "$state/head")
+  container_before=$(cat "$state/teagramd")
+  jq -c '.volumes.rustfsdata={name:"fixture_rustfsdata"}' "$state/target-compose.json" > "$state/target-compose.next.json" && \
+    mv -- "$state/target-compose.next.json" "$state/target-compose.json"
+  jq -c '.volumes.rustfsdata="fixture_rustfsdata"' "$checkout/.state/blob-mode/mode.json" > \
+    "$checkout/.state/blob-mode/mode.next.json" && \
+    chmod 600 "$checkout/.state/blob-mode/mode.next.json" && \
+    mv -- "$checkout/.state/blob-mode/mode.next.json" "$checkout/.state/blob-mode/mode.json"
+  status=$(run_fixture stack-move-retained-rustfs-volume built 0 '' 2 '' '' apply "$APPLY_TARGET_SHA")
+  if [ "$status" != 0 ] && grep -q 'mode-head-mismatch' "$TMP/stack-move-retained-rustfs-volume.stderr" && \
+     grep -Fq 'docker compose --profile migration config --format json' "$TMP/stack-move-retained-rustfs-volume-events" && \
+     jq -e '.volumes.rustfsdata == "fixture_rustfsdata"' "$root.target/pre-backup-blob-compose.json" >/dev/null && \
+     ! grep -Eq '^docker compose exec -T postgres pg_dump|^docker compose build|^docker compose up -d' \
+       "$TMP/stack-move-retained-rustfs-volume-events" && \
+     [ "$(cat "$state/head")" = "$head_before" ] && [ "$(cat "$state/teagramd")" = "$container_before" ] && \
+     [ ! -e "$root.backup/backup-manifest.txt" ] && [ ! -e "$root.build/build-result.txt" ]; then
+    pass 'stack-moved authority renders the retained migration-profile RustFS volume before backup'
+  else
+    show_fixture_failure stack-move-retained-rustfs-volume "$status"
+    fail 'stack-moved authority must retain the dormant RustFS volume in its preflight render'
+  fi
+else
+  fail 'stack-moved retained RustFS fixture requires a valid initialized local authority'
 fi
 
 if prepare_target_local_apply_fixture image-reuse-apply-success target-local-carry-forward-image-reuse-success "$APPLY_TARGET_SHA"; then
