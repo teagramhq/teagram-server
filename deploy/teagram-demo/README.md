@@ -20,7 +20,7 @@ policy. Required layout and policy:
 - Root-owned checkout at `/opt/teagram-demo`, branch `main`.
 - Docker Engine and Compose v2.39.4 or later. The bootstrap overlay uses
   Compose's `!override` merge tag.
-- Bash, coreutils, curl, Docker CLI, Git, jq, OpenSSL, Python 3, `flock` and a
+- Bash, coreutils, curl, Docker CLI, Git, `grep`, jq, OpenSSL, Python 3, `flock` and a
   systemd timer service. The included weekly reset installer uses systemd.
 - At least 2 vCPU, 4 GiB memory and 20 GiB root storage.
 - A dedicated filesystem between 3 GiB and 4 GiB, mounted at
@@ -49,8 +49,9 @@ policy. Required layout and policy:
   `/apiws`, Nginx forwards Cloudflare's `CF-Connecting-IP` to the private
   HAProxy service. HAProxy validates that there is exactly one IP address,
   sends it to teagramd in a PROXY-v2 header, and teagramd trusts only HAProxy's
-  fixed `198.18.130.2/32` address. Neither HAProxy nor teagramd publishes a
-  host port.
+  fixed `198.18.130.2/32` address. HAProxy also forwards internal MTProto TCP
+  probes with PROXY-v2; its `2443` listener is available only on the internal
+  backend network. Neither HAProxy nor teagramd publishes a host port.
 - Restrict the Cloudflare Tunnel and DNS configuration to `demo.teagram.io`.
   The demo does not serve the dev hostname or admin dashboard.
 
@@ -189,15 +190,43 @@ deploy/teagram-demo/seed-demo.sh --seed \
   --endpoint teagramd:2443 \
   --owner-username demo_seed_owner \
   --owner-password-file /var/lib/teagram-demo/secrets/seed-owner-password
-deploy/teagram-demo/seed-demo.sh --verify-seed --endpoint teagramd:2443
-deploy/teagram-demo/seed-demo.sh --verify-turnstile --endpoint teagramd:2443
+deploy/teagram-demo/seed-demo.sh --verify-seed \
+  --endpoint teagramd:2443 \
+  --owner-username demo_seed_owner \
+  --owner-password-file /var/lib/teagram-demo/secrets/seed-owner-password
+deploy/teagram-demo/seed-demo.sh --verify-turnstile --endpoint haproxy:2443
 ```
 
-The endpoint is available only on the demo's internal Docker network. The seed
-and verification modes use the client API; they do not write account data with
-SQL. The temporary seed Compose overlay relaxes only bounded signup limits and
-disables Turnstile while edge and HAProxy are down. Production Compose settings
-are restored before the edge can start.
+The seed endpoint is available only on the demo's internal Docker network. The
+Turnstile probe uses HAProxy's private MTProto listener so its request reaches
+the production server with an accepted PROXY-v2 header. The seed and verification
+modes use the client API; they do not write account data with SQL. Ten fictional
+accounts include the ordinary seed owner. Nine generated
+passwords are stored in `/var/lib/teagram-demo/secrets/demo-accounts/` as a
+root-owned mode 0600 JSON inventory under a root-owned mode 0700 directory.
+After a weekly database wipe, the accounts receive fresh random passwords;
+password values never appear in process arguments, environment variables,
+logs, or this checkout. The seed container mounts only the client config and
+the credential files it needs, has no database credentials, and runs on the
+internal backend network with a read-only root filesystem.
+
+`test-seed-compose.sh` runs a second seed pass against the private Compose API
+and checks that verified marker counts and search results stay stable. The
+initial install and weekly wipe run this test before the production gate check.
+
+The three content broadcast channels each contain 32 posts, including text,
+replies, a generated photo, a poll, and a reserved `.invalid` link. The welcome
+channel has the pinned weekly-wipe note. Three public groups contain fictional
+conversations and pinned messages. A sample private note between two demo
+accounts carries a reaction because the server currently supports reactions on
+user and basic-chat messages, not channel messages.
+The fresh `demo_searcher` account verifies that every public channel and group
+appears in search without joining it. Avatar and landscape JPEGs are generated
+deterministically in `cmd/demo-seed/assets.go`; no remote image or external
+license is involved. The temporary seed Compose overlay disables Turnstile,
+uses bounded signup/code limits, and disables the message-send rate limit only
+while edge and HAProxy are down. Production Compose settings are restored
+before the edge can start.
 
 The timer is Sunday at 03:00 UTC with a persistent catch-up and randomized
 delay. Install it only after the tracked, executable

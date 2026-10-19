@@ -134,9 +134,38 @@ jq -e '
   and .services.teagramd.environment.TG_TURNSTILE_SECRET_KEY_FILE == ""
   and .services.teagramd.environment.TG_RATE_LIMIT_SIGN_UP_IP == "32"
   and .services.teagramd.environment.TG_RATE_LIMIT_SIGN_UP_IP_WINDOW == "1h"
-  and .services.teagramd.environment.TG_RATE_LIMIT_SEND_CODE_IP == "64"
+  and .services.teagramd.environment.TG_RATE_LIMIT_SEND_CODE_IP == "256"
   and .services.teagramd.environment.TG_RATE_LIMIT_SEND_CODE_IP_PHONES == "32"
+  and .services.teagramd.environment.TG_RATE_LIMIT_GET_PASSWORD_IP == "256"
+  and .services.teagramd.environment.TG_RATE_LIMIT_SEND == "0"
 ' "$TMP_DIR/seed.json" >/dev/null
+
+env -u COMPOSE_FILE -u COMPOSE_PROJECT_NAME -u COMPOSE_PROFILES \
+  -u TEAGRAM_DEMO_TURNSTILE_SITE_KEY -u TEAGRAM_DEMO_TURNSTILE_SECRET_KEY_FILE \
+  "${compose[@]}" --profile seed --file "$SCRIPT_DIR/compose.seed.yaml" \
+  config --format json > "$TMP_DIR/seed-profile.json"
+jq -e '
+  .services["demo-seed"].profiles == ["seed"]
+  and .services["demo-seed"].image == "teagramd:local"
+  and .services["demo-seed"].entrypoint == ["/usr/local/bin/demo-seed"]
+  and .services["demo-seed"].user == "0:0"
+  and .services["demo-seed"].read_only == true
+  and .services["demo-seed"].cap_drop == ["ALL"]
+  and .services["demo-seed"].security_opt == ["no-new-privileges:true"]
+  and (.services["demo-seed"].networks | keys) == ["backend"]
+  and (.services["demo-seed"].ports // [] | length) == 0
+  and (.services["demo-seed"].environment // {} | length) == 0
+  and (.services["demo-seed"].secrets // [] | length) == 0
+  and any(.services["demo-seed"].volumes[]; .target == "/run/teagram-demo/client.json" and .read_only)
+  and any(.services["demo-seed"].volumes[]; .target == "/run/secrets/seed-owner-password" and .read_only)
+  and any(.services["demo-seed"].volumes[]; .target == "/run/secrets/demo-accounts" and (.read_only // false) == false)
+  and .services["demo-probe"].read_only == true
+  and (.services["demo-probe"].volumes | length) == 1
+  and .services["demo-probe"].volumes[0].target == "/run/teagram-demo/client.json"
+  and (.services["demo-probe"].volumes[0].read_only == true)
+  and (.services["demo-probe"].environment // {} | length) == 0
+  and (.services["demo-probe"].networks | keys) == ["backend"]
+' "$TMP_DIR/seed-profile.json" >/dev/null
 python3 "$SCRIPT_DIR/../teagramd/rollout-runner/blob-mode-state.py" compose \
   --checkout "$REPO_ROOT" < "$TMP_DIR/seed.json" > "$TMP_DIR/seed-inventory.json"
 python3 "$SCRIPT_DIR/../teagramd/rollout-runner/blob-mode-state.py" compose \
@@ -164,6 +193,11 @@ grep -Fq 'image: mirror.gcr.io/library/nginx:1.28.0-alpine@sha256:' "$SCRIPT_DIR
 grep -Fq 'http-request set-src req.hdr_ip(CF-Connecting-IP)' "$SCRIPT_DIR/haproxy.cfg"
 grep -Fq 'req.hdr_cnt(CF-Connecting-IP) eq 1' "$SCRIPT_DIR/haproxy.cfg"
 grep -Fq 'server teagramd teagramd:2446 check send-proxy-v2' "$SCRIPT_DIR/haproxy.cfg"
+grep -Fq 'frontend mtproto' "$SCRIPT_DIR/haproxy.cfg"
+grep -Fq 'bind :2443' "$SCRIPT_DIR/haproxy.cfg"
+grep -Fq 'default_backend teagramd_mtproto' "$SCRIPT_DIR/haproxy.cfg"
+grep -Fq 'backend teagramd_mtproto' "$SCRIPT_DIR/haproxy.cfg"
+grep -Fq 'server teagramd-mtproto teagramd:2443 send-proxy-v2' "$SCRIPT_DIR/haproxy.cfg"
 grep -Fq 'http-check send meth CONNECT uri challenges.cloudflare.com:443' "$SCRIPT_DIR/haproxy.cfg"
 grep -Fq 'monitor fail if { nbsrv(turnstile_egress) eq 0 }' "$SCRIPT_DIR/haproxy.cfg"
 grep -Fq 'bind :8404' "$SCRIPT_DIR/haproxy.cfg"
@@ -182,7 +216,7 @@ grep -Fq 'base_url + "/healthz"' "$SCRIPT_DIR/smoke.py"
 
 python3 - "$SCRIPT_DIR/wipe-weekly.sh" "$SCRIPT_DIR/init-demo.sh" \
   "$SCRIPT_DIR/deploy-main.sh" "$SCRIPT_DIR/demo-common.sh" \
-  "$SCRIPT_DIR/forced-command.sh" <<'PY'
+  "$SCRIPT_DIR/forced-command.sh" "$SCRIPT_DIR/test-seed-compose.sh" <<'PY'
 from pathlib import Path
 import sys
 
@@ -205,10 +239,21 @@ assert_order(Path(sys.argv[1]), [
     "demo_prepare_seed_owner \"$TMP_DIR\"",
     '"$SEED_SCRIPT" --seed',
     '"$SEED_SCRIPT" --verify-seed --endpoint teagramd:2443',
-    "demo_compose up -d teagramd",
-    '"$SEED_SCRIPT" --verify-turnstile --endpoint teagramd:2443',
-    "demo_compose up -d haproxy edge",
+    '"$SCRIPT_DIR/test-seed-compose.sh"',
+    "demo_compose up -d --wait --wait-timeout 120 haproxy",
+    '"$SEED_SCRIPT" --verify-turnstile --endpoint haproxy:2443',
+    "demo_compose up -d edge",
 ])
+seed_test = Path(sys.argv[6])
+assert_order(seed_test, [
+    'before=$(capture_seed_report)',
+    '"$SEED_SCRIPT" --seed --endpoint teagramd:2443',
+    'after=$(capture_seed_report)',
+    '[[ "$before" == "$after" ]]',
+])
+seed_test_text = seed_test.read_text(encoding="utf-8")
+if "markers=133" not in seed_test_text or "search_account=demo_searcher" not in seed_test_text:
+    raise SystemExit("test-seed-compose.sh: API convergence check must assert stable marker counts and search account")
 deploy_path = Path(sys.argv[3])
 deploy = deploy_path.read_text(encoding="utf-8")
 deploy_steps = [
@@ -292,13 +337,17 @@ if '  --lock-path "$LOCK_PATH"' not in init:
     raise SystemExit("init-demo.sh: fresh install must pass its acquired lock path to authority initialization")
 assert_order(Path(sys.argv[2]), [
     "PUBLIC_SERVICES_MAY_BE_RUNNING=1",
-    "demo_compose up -d haproxy edge",
+    "demo_compose up -d --wait --wait-timeout 120 haproxy",
+    '"$SEED_SCRIPT" --verify-turnstile --endpoint haproxy:2443',
+    "demo_compose up -d edge",
     'python3 "$SCRIPT_DIR/smoke.py" "$DEMO_STATE_DIR/client.json"',
     "exit 0",
 ])
 assert_order(Path(sys.argv[2]), [
     "PUBLIC_SERVICES_MAY_BE_RUNNING=1",
-    "demo_compose up -d haproxy edge",
+    "demo_compose up -d --wait --wait-timeout 120 haproxy",
+    '"$SEED_SCRIPT" --verify-turnstile --endpoint haproxy:2443',
+    "demo_compose up -d edge",
     'python3 "$SCRIPT_DIR/smoke.py" "$DEMO_STATE_DIR/client.json"',
 ], start=init.index("exit 0") + len("exit 0"))
 assert_order(Path(sys.argv[2]), [
@@ -306,9 +355,10 @@ assert_order(Path(sys.argv[2]), [
     "demo_seed_compose up -d teagramd",
     '"$SEED_SCRIPT" --seed',
     '"$SEED_SCRIPT" --verify-seed --endpoint teagramd:2443',
-    "demo_compose up -d teagramd",
-    '"$SEED_SCRIPT" --verify-turnstile --endpoint teagramd:2443',
-    "demo_compose up -d haproxy edge",
+    '"$SCRIPT_DIR/test-seed-compose.sh"',
+    "demo_compose up -d --wait --wait-timeout 120 haproxy",
+    '"$SEED_SCRIPT" --verify-turnstile --endpoint haproxy:2443',
+    "demo_compose up -d edge",
 ])
 if "demo_wait_migration demo_bootstrap_compose 'bootstrap migrations'" not in init:
     raise SystemExit("init-demo.sh: bootstrap must wait for migration completion")

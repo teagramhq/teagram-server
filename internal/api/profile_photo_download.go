@@ -109,6 +109,32 @@ func (h *handlers) handleGetProfilePhotoFile(ctx context.Context, viewerID int64
 	)
 }
 
+// handleGetPeerProfilePhotoFile serves the current avatar location included in
+// a normal tg.User object. InputPeerPhotoFileLocation carries no gallery MAC,
+// so its access is limited to the selected photo id for a peer the viewer can
+// already name with their own derived peer hash.
+func (h *handlers) handleGetPeerProfilePhotoFile(
+	r *mtproto.Request, peer tg.InputPeerClass, photoID, offset int64, limit int,
+) (bin.Encoder, error) {
+	ownerID, err := h.peerUserID(peer, r.UserID)
+	if err != nil {
+		return nil, errLocationInvalid
+	}
+	gate := func(ctx context.Context, fileID, viewerID int64) (authorizedDownload, error) {
+		file, err := h.store.CurrentProfilePhotoForDownload(ctx, ownerID, fileID, viewerID)
+		switch {
+		case errors.Is(err, store.ErrFileNotFound):
+			return authorizedDownload{}, errLocationInvalid
+		case err != nil:
+			h.log.Error("current profile photo for download", "user_id", viewerID, "err", err)
+			return authorizedDownload{}, errInternal
+		}
+		return authorizedDownload{file: file}, nil
+	}
+	missingBlobIsFault := false
+	return h.serveFileChunk(r, photoID, offset, limit, gate, &missingBlobIsFault)
+}
+
 // galleryFileGate is the gallery lane's authorization, in the order the checks
 // have to run in: the credential first, because it costs a MAC and a
 // constant-time compare and answers for every forged capability without

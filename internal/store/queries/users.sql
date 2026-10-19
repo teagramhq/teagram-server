@@ -87,6 +87,12 @@ SET first_name = COALESCE(sqlc.narg('first_name'), first_name),
     last_name = COALESCE(sqlc.narg('last_name'), last_name)
 WHERE id = sqlc.arg('id');
 
+-- name: UpdateUserAbout :execrows
+UPDATE users SET about = sqlc.arg(about) WHERE id = sqlc.arg(id);
+
+-- name: UserAboutByID :one
+SELECT about FROM users WHERE id = sqlc.arg(id);
+
 -- name: SetUsername :execrows
 UPDATE users SET username = $2 WHERE id = $1;
 

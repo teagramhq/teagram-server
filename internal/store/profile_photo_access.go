@@ -47,6 +47,42 @@ func (s *Store) ProfilePhotoForDownload(ctx context.Context, ownerID, fileID, vi
 	return fileFromRow(row), nil
 }
 
+// CurrentProfilePhotoForDownload resolves the selected avatar for the ordinary
+// InputPeerPhotoFileLocation path. Unlike gallery downloads, that location has
+// no photo MAC, so the live query requires both the viewer-bound peer identity
+// and that the requested file remains the owner's current selection.
+func (s *Store) CurrentProfilePhotoForDownload(ctx context.Context, ownerID, fileID, viewerID int64) (File, error) {
+	row, err := s.q.CurrentProfilePhotoForDownload(ctx, db.CurrentProfilePhotoForDownloadParams{
+		OwnerID: ownerID, FileID: fileID, ViewerID: viewerID,
+	})
+	switch {
+	case errors.Is(err, pgx.ErrNoRows):
+		return File{}, ErrFileNotFound
+	case err != nil:
+		return File{}, fmt.Errorf("current profile photo for download: %w", err)
+	}
+	return fileFromRow(row), nil
+}
+
+// CurrentProfilePhotoIDsForViewer returns the visible selected avatar IDs for
+// a bounded set of user objects. A blocked viewer and an account with no live
+// selected photo both have no entry in the result.
+func (s *Store) CurrentProfilePhotoIDsForViewer(ctx context.Context, ownerIDs []int64, viewerID int64) (map[int64]int64, error) {
+	rows, err := s.q.CurrentProfilePhotoIDsForViewer(ctx, db.CurrentProfilePhotoIDsForViewerParams{
+		OwnerIds: ownerIDs, ViewerID: viewerID,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("current profile photo ids: %w", err)
+	}
+	out := make(map[int64]int64, len(rows))
+	for _, row := range rows {
+		if row.FileID != nil {
+			out[row.OwnerID] = *row.FileID
+		}
+	}
+	return out, nil
+}
+
 // ProfilePhotoDerivativeForDownload returns an advertised m size only while
 // the photo remains in the owner's gallery and the owner has not blocked the
 // viewer. The query repeats the gallery gate instead of borrowing the message

@@ -968,7 +968,7 @@ func TestGetFileUnauthorizedAnswersBeforeLocationValidity(t *testing.T) {
 		req  *tg.UploadGetFileRequest
 	}{
 		{"valid window", &tg.UploadGetFileRequest{Location: docLoc(), Offset: 0, Limit: 64}},
-		{"unsupported location type", &tg.UploadGetFileRequest{
+		{"peer photo with unrelated peer access hash", &tg.UploadGetFileRequest{
 			Location: &tg.InputPeerPhotoFileLocation{
 				Peer: &tg.InputPeerUser{UserID: doc.ID, AccessHash: doc.AccessHash}, PhotoID: doc.ID,
 			},

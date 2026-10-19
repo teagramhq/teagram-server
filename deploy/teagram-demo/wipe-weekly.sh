@@ -99,12 +99,15 @@ demo_prepare_seed_owner "$TMP_DIR"
   --owner-password-file "$DEMO_SEED_PASSWORD_FILE"
 "$SEED_SCRIPT" --verify-seed --endpoint teagramd:2443
 
-# Recreate teagramd from the production config while all public paths are down.
-# A bare API sign-up must prove the configured Turnstile gate is active before
-# either HAProxy or edge is allowed to start.
-demo_compose up -d teagramd
-"$SEED_SCRIPT" --verify-turnstile --endpoint teagramd:2443
-demo_compose up -d haproxy edge
+# Re-run the API seeder in the private seed lane and compare verified counts.
+"$SCRIPT_DIR/test-seed-compose.sh"
+
+# Recreate teagramd from the production config and start HAProxy's private
+# MTProto path while edge stays down. The probe must prove Turnstile is active
+# before the public edge starts.
+demo_compose up -d --wait --wait-timeout 120 haproxy
+"$SEED_SCRIPT" --verify-turnstile --endpoint haproxy:2443
+demo_compose up -d edge
 python3 "$SCRIPT_DIR/smoke.py" "$CLIENT_CONFIG"
 demo_compose run --rm --no-deps teagramd client-config > "$TMP_DIR/client-after-wipe.json"
 AFTER_SPKI=$(jq -er '.mtproto.rsa_spki' "$TMP_DIR/client-after-wipe.json")

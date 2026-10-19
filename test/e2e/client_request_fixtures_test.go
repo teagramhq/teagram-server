@@ -1,6 +1,7 @@
 package e2e_test
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -228,7 +229,7 @@ func redactClientNumber(fieldName string, value int64) bool {
 		return false
 	}
 	switch fieldName {
-	case "id", "api_id", "file_id", "chat_id", "channel_id", "user_id", "access_hash", "random_id":
+	case "id", "api_id", "file_id", "photo_id", "chat_id", "channel_id", "user_id", "access_hash", "random_id":
 		return true
 	default:
 		return false
@@ -237,7 +238,7 @@ func redactClientNumber(fieldName string, value int64) bool {
 
 func redactClientString(fieldName string) bool {
 	switch fieldName {
-	case "api_hash", "phone_number", "phone_code_hash", "phone_code", "token":
+	case "api_hash", "phone_number", "phone_code_hash", "phone_code", "token", "md5_checksum":
 		return true
 	default:
 		return false
@@ -306,6 +307,30 @@ func TestClientTLValueRedactsLoginSecrets(t *testing.T) {
 			}
 			if got != "REDACTED" {
 				t.Fatalf("redacted %s = %#v, want REDACTED", field, got)
+			}
+		})
+	}
+}
+
+func TestClientTLValueRedactsProfilePhotoIdentifiers(t *testing.T) {
+	for _, field := range []string{"photo_id", "md5_checksum"} {
+		t.Run(field, func(t *testing.T) {
+			var value reflect.Value
+			if field == "photo_id" {
+				value = reflect.ValueOf(int64(42))
+			} else {
+				value = reflect.ValueOf("dynamic-content-checksum")
+			}
+			got, err := clientTLValue(field, value)
+			if err != nil {
+				t.Fatal(err)
+			}
+			want := any("<N>")
+			if field == "md5_checksum" {
+				want = "REDACTED"
+			}
+			if got != want {
+				t.Fatalf("redacted %s = %#v, want %#v", field, got, want)
 			}
 		})
 	}
@@ -453,6 +478,9 @@ func TestSmokeClientRequestFixturesAreLayer228Shapes(t *testing.T) {
 		"messages_getHistory.2",
 		"messages_getHistory.second-account.1",
 		"photos_getUserPhotos.1",
+		"photos_uploadProfilePhoto.1",
+		"account_updateProfile.1",
+		"upload_getFile.1",
 		"messages_sendMedia.1",
 		"messages_sendMedia.2",
 		"messages_sendMedia.3",
@@ -736,6 +764,69 @@ func testSmokeClientRequestFixtures(t *testing.T) {
 			wantPreview = olderProfilePreview
 		}
 		assertSmokeProfilePhotoSizes(t, creator.lifecycle.ctx, creator, photo, wantBytes, wantPreview, fmt.Sprintf("profile photo %d", i))
+	}
+
+	const profileAbout = "A fictional astronomer charting quiet northern skies."
+	if err := fixtureClientCall(t, member, "account_updateProfile.1", func(ctx context.Context, api *tg.Client) error {
+		request := &tg.AccountUpdateProfileRequest{}
+		request.SetAbout(profileAbout)
+		if _, err := api.AccountUpdateProfile(ctx, request); err != nil {
+			return err
+		}
+		profile, err := api.UsersGetFullUser(ctx, &tg.InputUserSelf{})
+		if err != nil {
+			return err
+		}
+		about, ok := profile.FullUser.GetAbout()
+		if !ok || about != profileAbout {
+			return fmt.Errorf("profile about = %q/%t, want %q", about, ok, profileAbout)
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("replay account.updateProfile fixture: %v", err)
+	}
+
+	profilePhotoPayload := smokeJPEGAtUploadSize(t, smokePhotoPartCount)
+	const profilePhotoFileID = int64(13030113)
+	profilePhotoParts := uploadSmokeMediaParts(t, f.ctx, member, profilePhotoFileID, profilePhotoPayload, smokePhotoPartSize)
+	var uploadedProfilePhotoID int64
+	if err := fixtureClientCall(t, member, "photos_uploadProfilePhoto.1", func(ctx context.Context, api *tg.Client) error {
+		request := &tg.PhotosUploadProfilePhotoRequest{}
+		request.SetFile(&tg.InputFile{
+			ID: profilePhotoFileID, Parts: profilePhotoParts, Name: "fictional-avatar.jpg", MD5Checksum: smokePhotoMD5(profilePhotoPayload),
+		})
+		result, err := api.PhotosUploadProfilePhoto(ctx, request)
+		if err != nil {
+			return err
+		}
+		photo, ok := result.Photo.(*tg.Photo)
+		if !ok || photo.ID <= 0 {
+			return fmt.Errorf("uploaded profile photo = %T/%+v, want photo with an id", result.Photo, result.Photo)
+		}
+		uploadedProfilePhotoID = photo.ID
+		return nil
+	}); err != nil {
+		t.Fatalf("replay photos.uploadProfilePhoto fixture: %v", err)
+	}
+
+	if err := fixtureClientCall(t, creator, "upload_getFile.1", func(ctx context.Context, api *tg.Client) error {
+		result, err := api.UploadGetFile(ctx, &tg.UploadGetFileRequest{
+			Location: &tg.InputPeerPhotoFileLocation{
+				Peer: peerUser(creator.id, member.id), PhotoID: uploadedProfilePhotoID, Big: true,
+			},
+			Offset: 0,
+			Limit:  len(profilePhotoPayload),
+		})
+		if err != nil {
+			return err
+		}
+		file, ok := result.(*tg.UploadFile)
+		if !ok || !bytes.Equal(file.Bytes, profilePhotoPayload) {
+			return fmt.Errorf("current profile photo download = %T, want original JPEG bytes", result)
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("replay upload.getFile peer-photo fixture: %v", err)
 	}
 
 	var channelID int64

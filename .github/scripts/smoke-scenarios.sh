@@ -8,6 +8,8 @@ SMOKE_SCENARIOS=(
   one-to-one
   peer-disconnect
   photo-media
+  profile-photo-upload
+  profile-bio
   upload-media
   album-media
   shared-media-search

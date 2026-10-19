@@ -1,0 +1,15 @@
+# source: gotd v0.162.0 request captured by test/e2e/client_request_fixtures_test.go
+body: { upload_getFile flags:#
+  flags: 0 [#],
+  location: { inputPeerPhotoFileLocation flags:#
+    flags: 1 [#],
+    big: true [BOOL],
+    peer: { inputPeerUser
+      user_id: <N> [LONG],
+      access_hash: <N> [LONG],
+    },
+    photo_id: <N> [LONG],
+  },
+  offset: 0 [LONG],
+  limit: 262144 [INT],
+},

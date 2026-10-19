@@ -12,10 +12,12 @@ services:
       TG_TURNSTILE_SECRET_KEY_FILE: ""
       TG_RATE_LIMIT_SIGN_UP_IP: "32"
       TG_RATE_LIMIT_SIGN_UP_IP_WINDOW: 1h
-      TG_RATE_LIMIT_SEND_CODE_IP: "64"
+      TG_RATE_LIMIT_SEND_CODE_IP: "256"
       TG_RATE_LIMIT_SEND_CODE_IP_WINDOW: 1h
       TG_RATE_LIMIT_SEND_CODE_IP_PHONES: "32"
       TG_RATE_LIMIT_SEND_CODE_IP_PHONES_WINDOW: 1h
+      TG_RATE_LIMIT_GET_PASSWORD_IP: "256"
+      TG_RATE_LIMIT_SEND: "0"
     depends_on: !override
       migrate:
         condition: service_completed_successfully

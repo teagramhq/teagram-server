@@ -282,6 +282,23 @@ func (q *Queries) SetUsername(ctx context.Context, arg SetUsernameParams) (int64
 	return result.RowsAffected(), nil
 }
 
+const updateUserAbout = `-- name: UpdateUserAbout :execrows
+UPDATE users SET about = $1 WHERE id = $2
+`
+
+type UpdateUserAboutParams struct {
+	About string
+	ID    int64
+}
+
+func (q *Queries) UpdateUserAbout(ctx context.Context, arg UpdateUserAboutParams) (int64, error) {
+	result, err := q.db.Exec(ctx, updateUserAbout, arg.About, arg.ID)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
 const updateUserProfile = `-- name: UpdateUserProfile :execrows
 UPDATE users
 SET first_name = COALESCE($1, first_name),
@@ -304,6 +321,17 @@ func (q *Queries) UpdateUserProfile(ctx context.Context, arg UpdateUserProfilePa
 		return 0, err
 	}
 	return result.RowsAffected(), nil
+}
+
+const userAboutByID = `-- name: UserAboutByID :one
+SELECT about FROM users WHERE id = $1
+`
+
+func (q *Queries) UserAboutByID(ctx context.Context, id int64) (string, error) {
+	row := q.db.QueryRow(ctx, userAboutByID, id)
+	var about string
+	err := row.Scan(&about)
+	return about, err
 }
 
 const userByID = `-- name: UserByID :one

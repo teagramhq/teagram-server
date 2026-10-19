@@ -23,7 +23,8 @@ COPY utils/ ./utils/
 # available and required — the distroless static base has no libc to link to.
 RUN CGO_ENABLED=0 go build -o /teagramd ./cmd/teagramd \
     && CGO_ENABLED=0 go build -o /blob-migrate ./cmd/blob-migrate \
-    && CGO_ENABLED=0 go build -o /photothumb ./cmd/photothumb
+    && CGO_ENABLED=0 go build -o /photothumb ./cmd/photothumb \
+    && CGO_ENABLED=0 go build -o /demo-seed ./cmd/demo-seed
 
 # The server writes exactly one file, its RSA identity key, and the final image
 # has no shell to mkdir with — so the directory is created here and copied in.
@@ -70,6 +71,7 @@ FROM gcr.io/distroless/static-debian12:nonroot
 COPY --from=build /teagramd /usr/local/bin/teagramd
 COPY --from=build /blob-migrate /usr/local/bin/blob-migrate
 COPY --from=build /photothumb /usr/local/bin/photothumb
+COPY --from=build /demo-seed /usr/local/bin/demo-seed
 
 # No --chown: a stage-to-stage copy preserves the ownership set above, and
 # forcing one here would hand /var and /var/lib to the runtime user too.

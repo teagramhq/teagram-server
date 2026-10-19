@@ -815,6 +815,7 @@ jobs:
           bash -n deploy/teagram-demo/wipe-weekly.sh
           bash -n deploy/teagram-demo/install-weekly-wipe.sh
           bash -n deploy/teagram-demo/test-demo-compose.sh
+          bash -n deploy/teagram-demo/test-seed-compose.sh
           shellcheck \
             deploy/teagram/deploy-main.sh \
             deploy/telegram-server/deploy-main.sh \
@@ -826,6 +827,7 @@ jobs:
             deploy/teagram-demo/wipe-weekly.sh \
             deploy/teagram-demo/install-weekly-wipe.sh \
             deploy/teagram-demo/test-demo-compose.sh \
+            deploy/teagram-demo/test-seed-compose.sh \
             deploy/teagram/test-deploy-main.sh \
             .github/scripts/test-deploy-workflow-contract.sh \
             .github/scripts/mirror_rustfs_qualification_images.sh
