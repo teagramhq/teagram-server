@@ -158,6 +158,30 @@ all expected handles through the API, the wipe recreates teagramd with the
 production proxy and Turnstile settings, requires a bare sign-up probe to
 return `RECAPTCHA_CHECK`, and only then starts HAProxy and the public edge.
 
+## Stack data-retention threat model
+
+MAIN-2203 covers sign-up, auto-join, seeding and scheduled activity; it excludes
+this stack's storage and deploy backups. Demo users control account, message
+and uploaded-file data. Anyone who can read a stale copy can recover that data
+after the live service has been wiped.
+
+The retained copies are the `teagram` database in `pgdata`, uploaded files in
+`tgblobs`, and deploy snapshots under `.state/teagram-demo/backups/`. Each
+snapshot contains a PostgreSQL dump and rollback metadata. Deploy keeps these
+files root-only (`0700` directories and `0600` dump files) for rollback until
+the next weekly wipe. After preflight and stopping every writer, the wipe
+removes all entries in that backup directory before dropping the live database
+and clearing blobs. A prune error aborts before the database or blobs are
+changed. The wipe never restores a pre-wipe snapshot. The `tgkey` volume and
+`.env` keys preserve server identity and encryption; they are not user content
+and must not be removed or exposed.
+
+This policy covers files managed by the demo stack. Do not copy dumps off the
+LXC or take host-level snapshots with longer retention; any external snapshots
+must follow the same weekly erasure window. Docker logs are size-bounded but
+are not cleared by the wipe, so application and deploy logs must not contain
+message bodies, authentication tokens or passwords.
+
 The seed script interface is:
 
 ```sh

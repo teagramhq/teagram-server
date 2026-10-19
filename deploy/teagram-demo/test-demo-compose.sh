@@ -198,6 +198,7 @@ def assert_order(path: Path, fragments: list[str], start: int = 0) -> None:
 
 assert_order(Path(sys.argv[1]), [
     "demo_compose stop edge haproxy teagramd turnstile-egress",
+    "demo_prune_deploy_backups\n",
     "dropdb -U postgres --if-exists teagram",
     "demo_seed_compose up -d teagramd",
     "demo_prepare_seed_owner \"$TMP_DIR\"",
@@ -277,7 +278,41 @@ if "MIGRATE_STATUS=$(docker inspect" in init:
     raise SystemExit("init-demo.sh: detached bootstrap migration status must be checked after waiting")
 if "demo_wait_migration demo_compose 'post-reset migrations'" not in Path(sys.argv[1]).read_text(encoding="utf-8"):
     raise SystemExit("wipe-weekly.sh: reset must wait for migration completion")
+if "demo_prune_deploy_backups()" not in Path(sys.argv[1]).read_text(encoding="utf-8"):
+    raise SystemExit("wipe-weekly.sh: weekly reset must remove old deploy snapshots")
 PY
+
+PRUNE_FUNCTION="$TMP_DIR/demo-prune-backups.sh"
+sed -n '/^demo_prune_deploy_backups() {$/,/^}/p' "$SCRIPT_DIR/wipe-weekly.sh" > "$PRUNE_FUNCTION"
+cat > "$TMP_DIR/backup-prune-regression.sh" <<'BASH'
+set -Eeuo pipefail
+source "$PRUNE_FUNCTION"
+BACKUP_ROOT="$DEMO_STATE_DIR/backups"
+SENTINEL_DIR="$TMP_DIR/retention-outside"
+mkdir -p "$BACKUP_ROOT/deploy-old" "$SENTINEL_DIR"
+printf 'old user records\n' > "$BACKUP_ROOT/deploy-old/postgres.dump"
+printf 'outside state\n' > "$SENTINEL_DIR/keep"
+ln -s "$SENTINEL_DIR" "$BACKUP_ROOT/external-link"
+demo_fail() { return 1; }
+chown() { :; }
+chmod() { :; }
+demo_prune_deploy_backups
+[[ -d "$BACKUP_ROOT" ]]
+[[ -z "$(find "$BACKUP_ROOT" -mindepth 1 -maxdepth 1 -print -quit)" ]]
+[[ -f "$SENTINEL_DIR/keep" ]]
+rm -rf -- "$BACKUP_ROOT"
+ln -s "$SENTINEL_DIR" "$BACKUP_ROOT"
+if demo_prune_deploy_backups; then
+  printf '%s\n' 'backup prune test followed a symlinked backup root' >&2
+  exit 1
+fi
+[[ -f "$SENTINEL_DIR/keep" ]]
+BASH
+env \
+  DEMO_STATE_DIR="$TMP_DIR/retention-state" \
+  TMP_DIR="$TMP_DIR" \
+  PRUNE_FUNCTION="$PRUNE_FUNCTION" \
+  bash "$TMP_DIR/backup-prune-regression.sh"
 
 BACKUP_FUNCTIONS="$TMP_DIR/deploy-backup-functions.sh"
 sed -n \

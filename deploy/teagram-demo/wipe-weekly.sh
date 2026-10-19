@@ -13,6 +13,7 @@ git -C "$DEMO_REPO_ROOT" ls-files --error-unmatch deploy/teagram-demo/seed-demo.
   demo_fail 'weekly wipe is disabled until the tracked API seed-demo.sh is supplied'
 [[ -f "$SEED_SCRIPT" && ! -L "$SEED_SCRIPT" && -x "$SEED_SCRIPT" ]] ||
   demo_fail 'tracked API seed-demo.sh must be executable'
+[[ ! -L "$DEMO_STATE_DIR" ]] || demo_fail 'demo state directory must not be a symlink'
 
 mkdir -p "$DEMO_STATE_DIR/reports"
 chown root:root "$DEMO_STATE_DIR" "$DEMO_STATE_DIR/reports"
@@ -32,6 +33,19 @@ cleanup() {
   exit "$rc"
 }
 trap cleanup EXIT
+
+demo_prune_deploy_backups() {
+  local backup_root="$DEMO_STATE_DIR/backups"
+  [[ ! -L "$backup_root" ]] || { demo_fail 'backup directory must not be a symlink'; return 1; }
+  if [[ -e "$backup_root" && ! -d "$backup_root" ]]; then
+    demo_fail 'backup path is not a directory'
+    return 1
+  fi
+  mkdir -p "$backup_root"
+  chown root:root "$backup_root"
+  chmod 0700 "$backup_root"
+  find "$backup_root" -mindepth 1 -maxdepth 1 -exec rm -rf -- {} +
+}
 
 TARGET_RENDER="$TMP_DIR/target-render.json"
 TARGET_INVENTORY="$TMP_DIR/target-inventory.json"
@@ -67,6 +81,7 @@ cmp -s "$CLIENT_CONFIG" "$TMP_DIR/public-client.json" || demo_fail 'public clien
 # Stop every public path before resetting data. The seed-only overlay never
 # starts HAProxy or edge.
 demo_compose stop edge haproxy teagramd turnstile-egress
+demo_prune_deploy_backups
 demo_compose exec -T postgres dropdb -U postgres --if-exists teagram </dev/null
 demo_compose exec -T postgres createdb -U postgres teagram </dev/null
 demo_reset_seed_owner_marker
