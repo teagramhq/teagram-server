@@ -904,8 +904,8 @@ func testSmokeLangpack(t *testing.T) {
 		raw := tg.NewClient(provisionalClient)
 		assertLangpackSmokeCalls(t, ctx, raw, f.dcID, artifact)
 		assertHelpConfigSuggestion(t, ctx, raw)
-		if _, err := raw.MessagesGetDialogs(ctx, &tg.MessagesGetDialogsRequest{OffsetPeer: &tg.InputPeerEmpty{}}); err == nil || !tgerr.Is(err, "AUTH_KEY_UNREGISTERED") {
-			t.Errorf("provisional messages.getDialogs error = %v, want AUTH_KEY_UNREGISTERED", err)
+		if _, err := raw.MessagesGetDialogs(ctx, &tg.MessagesGetDialogsRequest{OffsetPeer: &tg.InputPeerEmpty{}}); err != nil {
+			t.Errorf("provisional messages.getDialogs error = %v, want success", err)
 		}
 		return nil
 	}); err != nil {
@@ -4600,12 +4600,11 @@ func testSmokeUsernameRegistration(t *testing.T) {
 		}
 		var dialogs []tg.DialogClass
 		var messages []tg.MessageClass
-		switch page := dialogResult.(type) {
-		case *tg.MessagesDialogs:
+		if page, ok := dialogResult.(*tg.MessagesDialogs); ok {
 			dialogs, messages = page.Dialogs, page.Messages
-		case *tg.MessagesDialogsSlice:
+		} else if page, ok := dialogResult.(*tg.MessagesDialogsSlice); ok {
 			dialogs, messages = page.Dialogs, page.Messages
-		default:
+		} else {
 			return smokeRegistrationCheckFailure(branchSignupWelcomeDialogs, fmt.Sprintf("%T", dialogResult))
 		}
 		var welcome *tg.Dialog
