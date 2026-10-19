@@ -196,19 +196,27 @@ function createAcceptancePage({
   passwordVisible = true,
   chatListVisible = true,
   chatListMatches = 1,
+  emptyChatStateVisible = false,
   chatRows = 0,
   visibleChatRows = chatRows,
   createAccountLinkVisible = false,
   signupFormVisible = false,
   signupTitleText = "YourName",
   stopAtUsernameFocus = false,
+  completeSignIn = false,
 } = {}) {
   const apiMethods = [];
   let usernameFocused = false;
+  let passwordFocused = false;
   const browserWindow = {
     apiManagerProxy: {
       async invoke(_type, payload) {
         apiMethods.push(payload.args?.[0]);
+        if (completeSignIn && payload.args?.[0] === "auth.signIn") {
+          const error = new Error("fixture password challenge");
+          error.type = "SESSION_PASSWORD_NEEDED";
+          throw error;
+        }
         return null;
       },
     },
@@ -220,6 +228,7 @@ function createAcceptancePage({
     const isPassword = selector === 'input[name="notsearch_password"]:visible';
     const isChatsPage = selector === "#page-chats";
     const isChatList = selector === "#chatlist-container .chatlist";
+    const isEmptyChatState = selector === "empty-chat-state";
     const isChatRow = selector === "#chatlist-container .chatlist-chat" || selector === ".chatlist-chat";
     const isSignupText = selector === "signup-text";
     const isSignupAvatar = selector === "#canvas-avatar";
@@ -229,7 +238,8 @@ function createAcceptancePage({
       : isPassword ? passwordVisible
         : isChatsPage ? true
           : isChatList ? chatListVisible
-            : isSignupText ? createAccountLinkVisible || signupFormVisible
+            : isEmptyChatState ? emptyChatStateVisible
+              : isSignupText ? createAccountLinkVisible || signupFormVisible
               : isSignupAvatar || isSignupHeader ? signupFormVisible
                 : isSignupTitle ? signupFormVisible && signupTitleText.length > 0 : false;
     return {
@@ -248,6 +258,12 @@ function createAcceptancePage({
         }
         return locator(childSelector);
       },
+      getByText(text, options = {}) {
+        if (isChatsPage && text === "Your chats will appear here" && options.exact === true) {
+          return locator("empty-chat-state");
+        }
+        return locator("unknown");
+      },
       async waitFor() {
         const matches = isChatList
           ? (visibleOnly ? Number(chatListVisible) : chatListMatches)
@@ -265,9 +281,11 @@ function createAcceptancePage({
         return 0;
       },
       async focus() {
-        if (!isUsername) return;
-        usernameFocused = true;
-        if (stopAtUsernameFocus) throw new Error("fixture stopped before sign-in");
+        if (isUsername) {
+          usernameFocused = true;
+          if (stopAtUsernameFocus) throw new Error("fixture stopped before sign-in");
+        }
+        if (isPassword) passwordFocused = true;
       },
     };
   }
@@ -279,7 +297,29 @@ function createAcceptancePage({
     getByRole() { return locator("unknown"); },
     keyboard: {
       async type() {},
-      async press() {},
+      async press(key) {
+        if (!completeSignIn || key !== "Enter") return;
+        if (passwordFocused) {
+          await browserWindow.apiManagerProxy.invoke("manager", {
+            name: "passwordManager",
+            method: "check",
+            args: ["auth.checkPassword"],
+          });
+          return;
+        }
+        if (usernameFocused) {
+          await browserWindow.apiManagerProxy.invoke("manager", {
+            name: "apiManager",
+            method: "invokeApi",
+            args: ["auth.sendCode", {}],
+          });
+          await assert.rejects(browserWindow.apiManagerProxy.invoke("manager", {
+            name: "apiManager",
+            method: "invokeApi",
+            args: ["auth.signIn", {}],
+          }), (error) => error.type === "SESSION_PASSWORD_NEEDED");
+        }
+      },
     },
     async exposeFunction(name, callback) {
       progressCallback = (event) => callback(JSON.parse(JSON.stringify(event)));
@@ -858,6 +898,25 @@ test("broken-chat-list after sign-in is reported and attempts in-band logout", a
   assert.equal(output.chatListRows, 0);
   assert.deepEqual(browser.apiMethods, ["auth.logOut"]);
   assert.equal(browser.apiMethods.includes("auth.signIn"), false);
+});
+
+test("empty chats state is accepted as a rendered chat list after sign-in", async () => {
+  const fixture = createDependencies(undefined, true);
+  const browser = createAcceptancePage({
+    chatListVisible: false,
+    emptyChatStateVisible: true,
+    completeSignIn: true,
+  });
+  await useRealAcceptanceFlow(fixture, browser);
+
+  const result = await executeMode({mode: "acceptance", releaseRecord: "fixture"}, fixture.dependencies);
+  const output = JSON.parse(result.output);
+
+  assert.equal(result.exitCode, 0, result.output);
+  assert.equal(output.qaFailureCode, "none");
+  assert.equal(output.logout, "ok");
+  assert.equal(output.chatList, "rendered");
+  assert.equal(output.chatListRows, 0);
 });
 
 test("chat-list check ignores hidden list variants and scopes its row count", async () => {

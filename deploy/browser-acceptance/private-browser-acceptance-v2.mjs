@@ -1366,22 +1366,33 @@ export async function performAcceptance(prepared, credentials) {
 
     const visibleChatLists = page.locator("#chatlist-container .chatlist").filter({visible: true});
     const chatList = visibleChatLists.first();
+    const emptyChatState = chatsPage.getByText("Your chats will appear here", {exact: true}).first();
     state.chatList = "missing";
-    try {
-      await waitForVisible(chatList, "broken-chat-list", 30000);
-      const chatListContainers = await visibleChatLists.count();
-      const chatRows = await chatList.locator(".chatlist-chat").count();
-      if (chatListContainers !== 1 || !Number.isSafeInteger(chatRows) || chatRows < 0) {
-        fail("broken-chat-list", state);
-      }
-      state.chatListRows = Math.min(chatRows, 10);
+    if (await visibleChatLists.count() === 0 && await visible(emptyChatState)) {
+      state.chatListRows = 0;
       state.chatList = "rendered";
-    } catch (error) {
-      latchQaFailure(state, "broken-chat-list");
-      const chatRows = await chatList.locator(".chatlist-chat").count();
-      if (Number.isSafeInteger(chatRows) && chatRows >= 0) state.chatListRows = Math.min(chatRows, 10);
-      if (error instanceof AcceptanceFailure && error.code === "broken-chat-list") throw error;
-      fail("broken-chat-list", state);
+    } else {
+      try {
+        await waitForVisible(chatList, "broken-chat-list", 30000);
+        const chatListContainers = await visibleChatLists.count();
+        const chatRows = await chatList.locator(".chatlist-chat").count();
+        if (chatListContainers !== 1 || !Number.isSafeInteger(chatRows) || chatRows < 0) {
+          fail("broken-chat-list", state);
+        }
+        state.chatListRows = Math.min(chatRows, 10);
+        state.chatList = "rendered";
+      } catch (error) {
+        if (await visibleChatLists.count() === 0 && await visible(emptyChatState)) {
+          state.chatListRows = 0;
+          state.chatList = "rendered";
+        } else {
+          latchQaFailure(state, "broken-chat-list");
+          const chatRows = await chatList.locator(".chatlist-chat").count();
+          if (Number.isSafeInteger(chatRows) && chatRows >= 0) state.chatListRows = Math.min(chatRows, 10);
+          if (error instanceof AcceptanceFailure && error.code === "broken-chat-list") throw error;
+          fail("broken-chat-list", state);
+        }
+      }
     }
     assertNoUnsafeNetwork(tracker);
     wssAudit.validate();
