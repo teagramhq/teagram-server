@@ -11,6 +11,75 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
+const acknowledgeChatRemovalEventsForState = `-- name: AcknowledgeChatRemovalEventsForState :many
+WITH state_rows AS (
+    SELECT history.chat_id, history.resume_date
+    FROM chat_removal_client_state_history AS history
+    WHERE history.owner_id = $1
+      AND history.auth_key_id = $2
+      AND history.difference_state_date = $3
+      AND history.difference_state_pts <= $4
+      AND history.difference_state_qts <= $5
+    UNION ALL
+    SELECT client_state.chat_id, client_state.resume_date
+    FROM chat_removal_client_state AS client_state
+    WHERE client_state.owner_id = $1
+      AND client_state.auth_key_id = $2
+      AND client_state.difference_state_date = $3
+      AND client_state.difference_state_pts <= $4
+      AND client_state.difference_state_qts <= $5
+), acknowledged AS (
+    UPDATE chat_removal_client_state AS client_state
+    SET acknowledged_at = COALESCE(client_state.acknowledged_at, clock_timestamp())
+    FROM state_rows
+    WHERE client_state.owner_id = $1
+      AND client_state.auth_key_id = $2
+      AND client_state.chat_id = state_rows.chat_id
+    RETURNING client_state.chat_id
+)
+SELECT state_rows.resume_date
+FROM state_rows
+LEFT JOIN acknowledged ON acknowledged.chat_id = state_rows.chat_id
+ORDER BY state_rows.chat_id
+`
+
+type AcknowledgeChatRemovalEventsForStateParams struct {
+	OwnerID             int64
+	AuthKeyID           int64
+	DifferenceStateDate int64
+	RequestPts          int64
+	RequestQts          int64
+}
+
+// A client confirms only rows issued with the Date it presents to
+// updates.getDifference, once its PTS and QTS have reached the returned state.
+// Return the logical Date used before the token so other Date-based streams resume.
+func (q *Queries) AcknowledgeChatRemovalEventsForState(ctx context.Context, arg AcknowledgeChatRemovalEventsForStateParams) ([]int64, error) {
+	rows, err := q.db.Query(ctx, acknowledgeChatRemovalEventsForState,
+		arg.OwnerID,
+		arg.AuthKeyID,
+		arg.DifferenceStateDate,
+		arg.RequestPts,
+		arg.RequestQts,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []int64
+	for rows.Next() {
+		var resume_date int64
+		if err := rows.Scan(&resume_date); err != nil {
+			return nil, err
+		}
+		items = append(items, resume_date)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const bumpChatVersion = `-- name: BumpChatVersion :one
 UPDATE chats SET version = version + 1 WHERE id = $1 RETURNING id, title, creator_id, version, date, pinned_message_id, default_banned_rights, ttl_period
 `
@@ -582,6 +651,115 @@ func (q *Queries) ChatReadParticipantsForMessage(ctx context.Context, arg ChatRe
 	return items, nil
 }
 
+const chatRemovalEventForOwnerChat = `-- name: ChatRemovalEventForOwnerChat :one
+SELECT owner_id, chat_id, version FROM chat_removal_events
+WHERE owner_id = $1 AND chat_id = $2
+`
+
+type ChatRemovalEventForOwnerChatParams struct {
+	OwnerID int64
+	ChatID  int64
+}
+
+// ChatRemovalEventForOwnerChat reloads the immutable event named by a live
+// notification. Owner and chat form its unique identity because a chat is
+// deleted at most once and each current member receives one removal.
+func (q *Queries) ChatRemovalEventForOwnerChat(ctx context.Context, arg ChatRemovalEventForOwnerChatParams) (ChatRemovalEvent, error) {
+	row := q.db.QueryRow(ctx, chatRemovalEventForOwnerChat, arg.OwnerID, arg.ChatID)
+	var i ChatRemovalEvent
+	err := row.Scan(&i.OwnerID, &i.ChatID, &i.Version)
+	return i, err
+}
+
+const chatRemovalResumeDatesForState = `-- name: ChatRemovalResumeDatesForState :many
+SELECT state_rows.resume_date
+FROM (
+    SELECT history.chat_id, history.resume_date
+    FROM chat_removal_client_state_history AS history
+    WHERE history.owner_id = $1
+      AND history.auth_key_id = $2
+      AND history.difference_state_date = $3
+    UNION ALL
+    SELECT client_state.chat_id, client_state.resume_date
+    FROM chat_removal_client_state AS client_state
+    WHERE client_state.owner_id = $1
+      AND client_state.auth_key_id = $2
+      AND client_state.difference_state_date = $3
+) AS state_rows
+ORDER BY state_rows.chat_id
+`
+
+type ChatRemovalResumeDatesForStateParams struct {
+	OwnerID             int64
+	AuthKeyID           int64
+	DifferenceStateDate int64
+}
+
+// ChatRemovalResumeDatesForState maps an issued removal token
+// and superseded tokens back to their logical Date without advancing client
+// acknowledgement state.
+func (q *Queries) ChatRemovalResumeDatesForState(ctx context.Context, arg ChatRemovalResumeDatesForStateParams) ([]int64, error) {
+	rows, err := q.db.Query(ctx, chatRemovalResumeDatesForState, arg.OwnerID, arg.AuthKeyID, arg.DifferenceStateDate)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []int64
+	for rows.Next() {
+		var resume_date int64
+		if err := rows.Scan(&resume_date); err != nil {
+			return nil, err
+		}
+		items = append(items, resume_date)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const chatRemovalSnapshotsForAuthKey = `-- name: ChatRemovalSnapshotsForAuthKey :many
+SELECT event.owner_id, event.chat_id, event.version
+FROM chat_removal_events AS event
+LEFT JOIN chat_removal_client_state AS client_state
+  ON client_state.owner_id = event.owner_id
+ AND client_state.auth_key_id = $1
+ AND client_state.chat_id = event.chat_id
+WHERE event.owner_id = $2
+  AND client_state.acknowledged_at IS NULL
+ORDER BY event.chat_id
+LIMIT $3::int
+`
+
+type ChatRemovalSnapshotsForAuthKeyParams struct {
+	AuthKeyID int64
+	OwnerID   int64
+	Lim       int32
+}
+
+// ChatRemovalSnapshotsForAuthKey returns removals not yet acknowledged by this
+// client's later updates.getDifference request. A prior successful write alone
+// does not suppress replay, because the client may not have applied the reply.
+func (q *Queries) ChatRemovalSnapshotsForAuthKey(ctx context.Context, arg ChatRemovalSnapshotsForAuthKeyParams) ([]ChatRemovalEvent, error) {
+	rows, err := q.db.Query(ctx, chatRemovalSnapshotsForAuthKey, arg.AuthKeyID, arg.OwnerID, arg.Lim)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ChatRemovalEvent
+	for rows.Next() {
+		var i ChatRemovalEvent
+		if err := rows.Scan(&i.OwnerID, &i.ChatID, &i.Version); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const chatsByIDsForMember = `-- name: ChatsByIDsForMember :many
 SELECT c.id, c.title, c.creator_id, c.version, c.date, c.pinned_message_id, c.default_banned_rights, c.ttl_period FROM chats c
 JOIN chat_participants p ON p.chat_id = c.id
@@ -817,6 +995,28 @@ func (q *Queries) InsertChatParticipantIfAbsent(ctx context.Context, arg InsertC
 	return result.RowsAffected(), nil
 }
 
+const insertChatRemovalEvent = `-- name: InsertChatRemovalEvent :one
+INSERT INTO chat_removal_events (owner_id, chat_id, version)
+VALUES ($1, $2, $3)
+RETURNING owner_id, chat_id, version
+`
+
+type InsertChatRemovalEventParams struct {
+	OwnerID int64
+	ChatID  int64
+	Version int32
+}
+
+// InsertChatRemovalEvent keeps the event independently of its pull marker so
+// a delayed pub/sub notification can still reach every live session after one
+// connection consumes the marker through getDifference.
+func (q *Queries) InsertChatRemovalEvent(ctx context.Context, arg InsertChatRemovalEventParams) (ChatRemovalEvent, error) {
+	row := q.db.QueryRow(ctx, insertChatRemovalEvent, arg.OwnerID, arg.ChatID, arg.Version)
+	var i ChatRemovalEvent
+	err := row.Scan(&i.OwnerID, &i.ChatID, &i.Version)
+	return i, err
+}
+
 const isChatMember = `-- name: IsChatMember :one
 SELECT EXISTS(SELECT 1 FROM chat_participants WHERE chat_id = $1 AND user_id = $2)
 `
@@ -831,6 +1031,119 @@ func (q *Queries) IsChatMember(ctx context.Context, arg IsChatMemberParams) (boo
 	var exists bool
 	err := row.Scan(&exists)
 	return exists, err
+}
+
+const markChatRemovalEventsDeliveredForAuthKey = `-- name: MarkChatRemovalEventsDeliveredForAuthKey :exec
+INSERT INTO chat_removal_client_state (
+    owner_id, auth_key_id, chat_id, delivered_at
+)
+SELECT $1::bigint,
+       $2::bigint,
+       pending.chat_id,
+       clock_timestamp()
+FROM unnest($3::bigint[]) AS pending(chat_id)
+ON CONFLICT (owner_id, auth_key_id, chat_id)
+DO UPDATE SET delivered_at = EXCLUDED.delivered_at
+WHERE chat_removal_client_state.acknowledged_at IS NULL
+`
+
+type MarkChatRemovalEventsDeliveredForAuthKeyParams struct {
+	OwnerID   int64
+	AuthKeyID int64
+	ChatIds   []int64
+}
+
+// MarkChatRemovalEventsDeliveredForAuthKey records a live push delivery. A live
+// push has no applied-state cursor, so it remains pending until a difference
+// response carries it and the client presents that response's state.
+func (q *Queries) MarkChatRemovalEventsDeliveredForAuthKey(ctx context.Context, arg MarkChatRemovalEventsDeliveredForAuthKeyParams) error {
+	_, err := q.db.Exec(ctx, markChatRemovalEventsDeliveredForAuthKey, arg.OwnerID, arg.AuthKeyID, arg.ChatIds)
+	return err
+}
+
+const markChatRemovalEventsIssuedForAuthKey = `-- name: MarkChatRemovalEventsIssuedForAuthKey :exec
+INSERT INTO chat_removal_client_state (
+    owner_id, auth_key_id, chat_id, delivered_at,
+    difference_state_pts, difference_state_qts, difference_state_date, resume_date
+)
+SELECT $1::bigint,
+       $2::bigint,
+       pending.chat_id,
+       clock_timestamp(),
+       $3::bigint,
+       $4::bigint,
+       $5::bigint,
+       $6::bigint
+FROM unnest($7::bigint[]) AS pending(chat_id)
+ON CONFLICT (owner_id, auth_key_id, chat_id)
+DO UPDATE SET delivered_at = EXCLUDED.delivered_at,
+              difference_state_pts = EXCLUDED.difference_state_pts,
+              difference_state_qts = EXCLUDED.difference_state_qts,
+              difference_state_date = EXCLUDED.difference_state_date,
+              resume_date = EXCLUDED.resume_date
+`
+
+type MarkChatRemovalEventsIssuedForAuthKeyParams struct {
+	OwnerID             int64
+	AuthKeyID           int64
+	DifferenceStatePts  int64
+	DifferenceStateQts  int64
+	DifferenceStateDate int64
+	ResumeDate          int64
+	ChatIds             []int64
+}
+
+// MarkChatRemovalEventsIssuedForAuthKey records the difference state that
+// included these rows before replying; presenting its Date on a later
+// getDifference is the client's acknowledgement.
+// The history trigger archives the prior token mapping before the row changes.
+func (q *Queries) MarkChatRemovalEventsIssuedForAuthKey(ctx context.Context, arg MarkChatRemovalEventsIssuedForAuthKeyParams) error {
+	_, err := q.db.Exec(ctx, markChatRemovalEventsIssuedForAuthKey,
+		arg.OwnerID,
+		arg.AuthKeyID,
+		arg.DifferenceStatePts,
+		arg.DifferenceStateQts,
+		arg.DifferenceStateDate,
+		arg.ResumeDate,
+		arg.ChatIds,
+	)
+	return err
+}
+
+const reserveChatRemovalDifferenceStateDateForAuthKey = `-- name: ReserveChatRemovalDifferenceStateDateForAuthKey :one
+WITH latest AS (
+    SELECT COALESCE(MAX(difference_state_date), 0)::bigint AS last_state_date
+    FROM chat_removal_client_state
+    WHERE owner_id = $1
+      AND auth_key_id = $2
+)
+INSERT INTO chat_removal_difference_state_tokens AS token_state (
+    owner_id, auth_key_id, last_state_date
+)
+SELECT $1::bigint,
+       $2::bigint,
+       GREATEST($3::bigint, latest.last_state_date + 1)
+FROM latest
+ON CONFLICT (owner_id, auth_key_id)
+DO UPDATE SET last_state_date = GREATEST(token_state.last_state_date + 1, EXCLUDED.last_state_date)
+RETURNING last_state_date
+`
+
+type ReserveChatRemovalDifferenceStateDateForAuthKeyParams struct {
+	OwnerID       int64
+	AuthKeyID     int64
+	CandidateDate int64
+}
+
+// ReserveChatRemovalDifferenceStateDateForAuthKey allocates one Date token
+// atomically for every response using this authorization key. The token row
+// serializes concurrent requests, while the client-state maximum seeds keys
+// that were issued tokens before this allocator was introduced.
+func (q *Queries) ReserveChatRemovalDifferenceStateDateForAuthKey(ctx context.Context, arg ReserveChatRemovalDifferenceStateDateForAuthKeyParams) (int64, error) {
+	row := q.db.QueryRow(ctx, reserveChatRemovalDifferenceStateDateForAuthKey, arg.OwnerID, arg.AuthKeyID, arg.CandidateDate)
+	var last_state_date int64
+	err := row.Scan(&last_state_date)
+	return last_state_date, err
 }
 
 const searchPinnedChatMessageForOwner = `-- name: SearchPinnedChatMessageForOwner :many

@@ -25,6 +25,7 @@ SMOKE_SCENARIOS=(
   notify-settings-reads
   unread-acknowledgements
   basic-group
+  delete-basic-group
   delete-history
   channel
   channel-delete

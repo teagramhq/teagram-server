@@ -72,6 +72,71 @@ func (q *Queries) ActiveOrdinaryMessageInDialog(ctx context.Context, arg ActiveO
 	return i, err
 }
 
+const chatMessageCopiesForDeletion = `-- name: ChatMessageCopiesForDeletion :many
+SELECT owner_id, local_id, peer_id, from_id, date, message, out, edit_date, deleted, random_id, peer_local_id, peer_type, fanout_id, action_type, action_user_id, file_id, reply_to_msg_id, fwd_from_id, fwd_date, fwd_channel_id, fwd_channel_post, message_tsv, reply_to_trusted, grouped_id, fwd_post_author, ttl_period, expires_at FROM messages
+WHERE peer_type = 2
+  AND peer_id = $1::bigint
+  AND owner_id = ANY($2::bigint[])
+  AND deleted = false
+ORDER BY owner_id, local_id
+`
+
+type ChatMessageCopiesForDeletionParams struct {
+	ChatID   int64
+	OwnerIds []int64
+}
+
+// ChatMessageCopiesForDeletion returns active copies owned by participants
+// captured under the chat row lock. Former members are excluded so their
+// frozen copies retain the existing group-revoke behavior.
+func (q *Queries) ChatMessageCopiesForDeletion(ctx context.Context, arg ChatMessageCopiesForDeletionParams) ([]Message, error) {
+	rows, err := q.db.Query(ctx, chatMessageCopiesForDeletion, arg.ChatID, arg.OwnerIds)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []Message
+	for rows.Next() {
+		var i Message
+		if err := rows.Scan(
+			&i.OwnerID,
+			&i.LocalID,
+			&i.PeerID,
+			&i.FromID,
+			&i.Date,
+			&i.Message,
+			&i.Out,
+			&i.EditDate,
+			&i.Deleted,
+			&i.RandomID,
+			&i.PeerLocalID,
+			&i.PeerType,
+			&i.FanoutID,
+			&i.ActionType,
+			&i.ActionUserID,
+			&i.FileID,
+			&i.ReplyToMsgID,
+			&i.FwdFromID,
+			&i.FwdDate,
+			&i.FwdChannelID,
+			&i.FwdChannelPost,
+			&i.MessageTsv,
+			&i.ReplyToTrusted,
+			&i.GroupedID,
+			&i.FwdPostAuthor,
+			&i.TtlPeriod,
+			&i.ExpiresAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const countFilteredMessages = `-- name: CountFilteredMessages :one
 SELECT count(*)::bigint
 FROM messages m
