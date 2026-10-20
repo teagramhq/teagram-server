@@ -7,7 +7,6 @@ import (
 	"strings"
 
 	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/teagramhq/teagram-server/internal/store/db"
 )
@@ -92,8 +91,7 @@ func (s *Store) AdmitUsernameWithMetadata(ctx context.Context, handle, phoneCode
 		OwnerID:   u.ID,
 	})
 	if err != nil {
-		var pgErr *pgconn.PgError
-		if errors.As(err, &pgErr) && pgErr.Code == "23505" {
+		if isUsernameClaimConflict(err) {
 			return User{}, ErrUsernameOccupied
 		}
 		return User{}, fmt.Errorf("admit username: claim username: %w", err)

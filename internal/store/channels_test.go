@@ -1190,6 +1190,56 @@ func TestConcurrentJoinAndRevokeRevokeWins(t *testing.T) {
 	}
 }
 
+func TestJoinChannelByInviteLocksChannelBeforeInvite(t *testing.T) {
+	t.Parallel()
+	s := open(t)
+	ctx := context.Background()
+	creator := mustUser(t, s, "+15551299401")
+	joiner := mustUser(t, s, "+15551299402")
+	ch := mustChannel(t, s, creator.ID, "News")
+
+	hash, err := s.CreateChannelInvite(ctx, ch.ID, creator.ID)
+	if err != nil {
+		t.Fatalf("invite: %v", err)
+	}
+
+	release, err := store.HoldChannelRowLock(ctx, s, ch.ID)
+	if err != nil {
+		t.Fatalf("hold channel lock: %v", err)
+	}
+
+	joinDone := make(chan struct{})
+	var joinErr error
+	go func() {
+		_, _, joinErr = s.JoinChannelByInvite(ctx, hash, joiner.ID)
+		close(joinDone)
+	}()
+	defer func() {
+		release()
+		<-joinDone
+	}()
+
+	if err := store.WaitForLockWaiters(ctx, s, 1); err != nil {
+		t.Fatalf("wait for join to block on channel: %v", err)
+	}
+
+	var lockedHash string
+	if err := store.StorePool(s).QueryRow(ctx,
+		"SELECT hash FROM channel_invites WHERE hash = $1 FOR UPDATE NOWAIT", hash,
+	).Scan(&lockedHash); err != nil {
+		t.Fatalf("join locked invite while waiting for channel: %v", err)
+	}
+	if lockedHash != hash {
+		t.Fatalf("locked invite hash = %q, want %q", lockedHash, hash)
+	}
+
+	release()
+	<-joinDone
+	if joinErr != nil {
+		t.Fatalf("join: %v", joinErr)
+	}
+}
+
 func TestAddChannelMembersPreservesExistingMembershipState(t *testing.T) {
 	t.Parallel()
 	s := open(t)

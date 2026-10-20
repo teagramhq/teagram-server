@@ -837,7 +837,12 @@ func (h *handlers) channelPhotoSendResponse(
 		h.log.Error("load channel photo files", "channel_id", channelID, "err", err)
 		return nil, nil, nil, errInternal
 	}
-	messageTL, err := channelMessageToTL(message, r.UserID, files)
+	broadcast, err := h.channelIsBroadcast(r.Ctx, channelID)
+	if err != nil {
+		h.log.Error("load channel photo kind", "channel_id", channelID, "err", err)
+		return nil, nil, nil, errInternal
+	}
+	messageTL, err := channelMessageToTL(message, r.UserID, files, broadcast)
 	if err != nil {
 		h.log.Error("render channel photo message", "channel_id", channelID, "local_id", message.LocalID, "err", err)
 		return nil, nil, nil, errInternal

@@ -329,6 +329,80 @@ func (s *Store) DeleteChannelMessages(ctx context.Context, channelID, userID int
 	return pts, count, nil
 }
 
+// DeletedChannelPostTombstoneBatch bounds the post cleanup one sweep pass can
+// lock. The job cursor is committed with each batch, so restart resumes after
+// the last visited local id.
+const DeletedChannelPostTombstoneBatch = 1000
+
+// SweepDeletedChannelPosts tombstones one batch of posts from one deleted
+// channel. The channel is already unreadable at its deletion commit; this
+// resumable cleanup retires its stored post rows and allows the existing media
+// eraser to observe the dropped references.
+func (s *Store) SweepDeletedChannelPosts(ctx context.Context) (int, bool, error) {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return 0, false, fmt.Errorf("begin deleted channel post sweep: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }() //nolint:errcheck // no-op after commit
+	qtx := s.q.WithTx(tx)
+
+	job, err := qtx.NextChannelDeletionJob(ctx)
+	switch {
+	case errors.Is(err, pgx.ErrNoRows):
+		if err = tx.Commit(ctx); err != nil {
+			return 0, false, fmt.Errorf("commit empty deleted channel post sweep: %w", err)
+		}
+		return 0, false, nil
+	case err != nil:
+		return 0, false, fmt.Errorf("lock deleted channel post job: %w", err)
+	}
+
+	rows, err := qtx.ChannelPostsForTombstone(ctx, db.ChannelPostsForTombstoneParams{
+		ChannelID:  job.ChannelID,
+		PostCursor: job.PostCursor,
+		Lim:        DeletedChannelPostTombstoneBatch,
+	})
+	if err != nil {
+		return 0, false, fmt.Errorf("read deleted channel post batch: %w", err)
+	}
+	if len(rows) == 0 {
+		updated, updateErr := qtx.CompleteChannelDeletionPosts(ctx, job.ChannelID)
+		if updateErr != nil {
+			return 0, false, fmt.Errorf("complete deleted channel post job: %w", updateErr)
+		}
+		if updated != 1 {
+			return 0, false, fmt.Errorf("complete deleted channel post job: updated %d rows, want 1", updated)
+		}
+		if err = tx.Commit(ctx); err != nil {
+			return 0, false, fmt.Errorf("commit completed deleted channel post job: %w", err)
+		}
+		return 0, true, nil
+	}
+
+	localIDs := make([]int64, len(rows))
+	copy(localIDs, rows)
+	if _, err = qtx.TombstoneDeletedChannelPosts(ctx, db.TombstoneDeletedChannelPostsParams{
+		ChannelID: job.ChannelID,
+		LocalIds:  localIDs,
+	}); err != nil {
+		return 0, false, fmt.Errorf("tombstone deleted channel posts: %w", err)
+	}
+	updated, err := qtx.AdvanceChannelDeletionCursor(ctx, db.AdvanceChannelDeletionCursorParams{
+		ChannelID:  job.ChannelID,
+		PostCursor: localIDs[len(localIDs)-1],
+	})
+	if err != nil {
+		return 0, false, fmt.Errorf("advance deleted channel post cursor: %w", err)
+	}
+	if updated != 1 {
+		return 0, false, fmt.Errorf("advance deleted channel post cursor: updated %d rows, want 1", updated)
+	}
+	if err = tx.Commit(ctx); err != nil {
+		return 0, false, fmt.Errorf("commit deleted channel post batch: %w", err)
+	}
+	return len(localIDs), true, nil
+}
+
 // newChannelPostPts returns the pts at which the channel's localID entered the
 // log. Same contract as newMessagePts, including ErrPtsUnknown.
 func newChannelPostPts(ctx context.Context, q *db.Queries, channelID, localID int64) (int, error) {
