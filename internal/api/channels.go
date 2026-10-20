@@ -612,6 +612,47 @@ func (h *handlers) handleLeaveChannel(r *mtproto.Request) (bin.Encoder, error) {
 	}, nil
 }
 
+// handleDeleteChannel removes a channel from every participant's account and
+// revokes its admission paths. Content cleanup runs later in resumable batches;
+// the store commit already makes every read unauthorized.
+func (h *handlers) handleDeleteChannel(r *mtproto.Request) (bin.Encoder, error) {
+	var req tg.ChannelsDeleteChannelRequest
+	if err := req.Decode(r.Buf); err != nil {
+		return nil, errMethodNotImpl
+	}
+	if r.UserID == 0 {
+		return nil, errAuthKeyUnreg
+	}
+	channelID, err := h.inputChannelID(req.Channel, r.UserID)
+	if err != nil {
+		return nil, err
+	}
+	memberIDs, err := h.store.DeleteChannel(r.Ctx, channelID, r.UserID)
+	switch {
+	case errors.Is(err, store.ErrChannelCreatorRequired):
+		return nil, errChatAdminRequired
+	case errors.Is(err, store.ErrNotMember):
+		return nil, errPeerIDInvalid
+	case err != nil:
+		h.log.Error("delete channel", "channel_id", channelID, "user_id", r.UserID, "err", err)
+		return nil, errInternal
+	}
+	for _, memberID := range memberIDs {
+		h.notifyChannelRemoval(r.Ctx, memberID, channelID)
+	}
+
+	chats, err := h.loadChannels(r.Ctx, map[int64]bool{channelID: true}, r.UserID)
+	if err != nil {
+		h.log.Error("delete channel render", "channel_id", channelID, "user_id", r.UserID, "err", err)
+		return nil, errInternal
+	}
+	return &tg.Updates{
+		Updates: []tg.UpdateClass{&tg.UpdateChannel{ChannelID: channelID}},
+		Chats:   chats,
+		Date:    int(time.Now().Unix()),
+	}, nil
+}
+
 // maxChannelMessagesPerCall caps the ids one channels.getMessages may name, so
 // a single call cannot ask the server to hydrate an unbounded batch.
 const maxChannelMessagesPerCall = 100
@@ -1213,6 +1254,9 @@ func (h *handlers) handleExportChatInvite(r *mtproto.Request) (bin.Encoder, erro
 
 	hash, err := h.store.CreateChannelInvite(r.Ctx, channelID, r.UserID)
 	if err != nil {
+		if errors.Is(err, store.ErrNotMember) {
+			return nil, errPeerIDInvalid
+		}
 		h.log.Error("export chat invite create", "channel_id", channelID, "user_id", r.UserID, "err", err)
 		return nil, errInternal
 	}
@@ -1817,7 +1861,7 @@ func (h *handlers) handleCheckChannelUsername(r *mtproto.Request) (bin.Encoder, 
 		return nil, errInternal
 	}
 
-	_, occupied, err := h.store.UsernameByHandle(r.Ctx, username)
+	occupied, err := h.store.UsernameHandleTaken(r.Ctx, username)
 	if err != nil {
 		h.log.Error("check channel username: lookup", "user_id", r.UserID, "err", err)
 		return nil, errInternal

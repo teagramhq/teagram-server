@@ -725,6 +725,9 @@ func runAtBlobModePath(log *slog.Logger, blobModePath string) error {
 	sweepWG.Go(func() {
 		sweepExpiredSRPChallenges(sweepCtx, st, log)
 	})
+	sweepWG.Go(func() {
+		sweepDeletedChannelPosts(sweepCtx, st, log)
+	})
 	if cfg.MediaErasureReportInterval > 0 {
 		sweepWG.Go(func() {
 			reportMediaErasureCandidates(sweepCtx, st, cfg.MediaErasureMinAge, cfg.BlobScanTempMinAge, cfg.MediaErasureReportInterval, log)
@@ -1484,6 +1487,38 @@ func sweepExpiredSRPChallenges(ctx context.Context, st *store.Store, log *slog.L
 				continue
 			}
 			log.Info("swept expired SRP challenges", "deleted", n)
+		}
+	}
+}
+
+// sweepDeletedChannelPosts drains resumable batches of already-inaccessible
+// channel posts. Each batch commits its cursor, so shutdown or a failed
+// transaction resumes safely on the next process start.
+func sweepDeletedChannelPosts(ctx context.Context, st *store.Store, log *slog.Logger) {
+	ticker := time.NewTicker(sweepInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			var total int
+			for {
+				n, worked, err := st.SweepDeletedChannelPosts(ctx)
+				if err != nil {
+					if ctx.Err() == nil {
+						log.Error("sweep deleted channel posts", "tombstoned", total, "err", err)
+					}
+					break
+				}
+				total += n
+				if !worked {
+					if total > 0 {
+						log.Info("swept deleted channel posts", "tombstoned", total)
+					}
+					break
+				}
+			}
 		}
 	}
 }

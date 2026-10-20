@@ -105,7 +105,8 @@ FROM channel_messages WHERE channel_id = $1 AND random_id = $2 AND random_id <> 
 SELECT channel_id, local_id, from_id, date, message, edit_date, deleted,
        random_id, grouped_id, file_id, reply_to_msg_id, action_type
 FROM channel_messages
-WHERE channel_id = $1 AND local_id = ANY(sqlc.arg(local_ids)::bigint[]) AND deleted = false;
+WHERE channel_id = $1 AND local_id = ANY(sqlc.arg(local_ids)::bigint[]) AND deleted = false
+  AND EXISTS (SELECT 1 FROM channels c WHERE c.id = $1 AND c.deleted_at IS NULL);
 
 -- ChannelMessageTombstonesByLocalIDs returns only identity metadata for deleted
 -- rows. Keeping this separate from the message load means a difference never
@@ -127,6 +128,10 @@ WHERE channel_id = sqlc.arg(channel_id)::bigint
   AND local_id = ANY(sqlc.arg(local_ids)::bigint[])
   AND deleted = false
   AND action_type = 0
+  AND EXISTS (
+      SELECT 1 FROM channels c
+      WHERE c.id = sqlc.arg(channel_id)::bigint AND c.deleted_at IS NULL
+  )
 ORDER BY local_id
 FOR SHARE SKIP LOCKED;
 
@@ -135,6 +140,10 @@ SELECT channel_id, local_id, from_id, date, message, edit_date, deleted,
        random_id, grouped_id, file_id, reply_to_msg_id, action_type
 FROM channel_messages
 WHERE channel_id = sqlc.arg(channel_id) AND deleted = false
+  AND EXISTS (
+      SELECT 1 FROM channels c
+      WHERE c.id = sqlc.arg(channel_id)::bigint AND c.deleted_at IS NULL
+  )
   AND (sqlc.arg(offset_id)::bigint = 0 OR local_id < sqlc.arg(offset_id)::bigint)
 ORDER BY local_id DESC
 LIMIT sqlc.arg(lim)::int;
@@ -149,6 +158,10 @@ WITH page AS (
     FROM channel_messages
     WHERE channel_id = sqlc.arg(channel_id)::bigint
       AND deleted = false
+      AND EXISTS (
+          SELECT 1 FROM channels c
+          WHERE c.id = sqlc.arg(channel_id)::bigint AND c.deleted_at IS NULL
+      )
       AND (sqlc.arg(offset_id)::bigint = 0 OR local_id < sqlc.arg(offset_id)::bigint)
     ORDER BY local_id DESC
     LIMIT sqlc.arg(lim)::int
@@ -171,12 +184,20 @@ WITH page_offset AS (
     ) AS skip
     FROM channel_messages
     WHERE channel_id = sqlc.arg(channel_id)::bigint AND deleted = false
+      AND EXISTS (
+          SELECT 1 FROM channels c
+          WHERE c.id = sqlc.arg(channel_id)::bigint AND c.deleted_at IS NULL
+      )
 ), page AS (
     SELECT channel_id, local_id, from_id, date, message, edit_date, deleted,
            random_id, grouped_id, file_id, reply_to_msg_id, action_type
     FROM channel_messages
     WHERE channel_id = sqlc.arg(channel_id)::bigint
       AND deleted = false
+      AND EXISTS (
+          SELECT 1 FROM channels c
+          WHERE c.id = sqlc.arg(channel_id)::bigint AND c.deleted_at IS NULL
+      )
       AND sqlc.arg(offset_id)::bigint >= 0
     ORDER BY local_id DESC
     LIMIT sqlc.arg(lim)::int
@@ -193,7 +214,11 @@ ORDER BY local_id DESC;
 SELECT count(*)::bigint
 FROM channel_messages
 WHERE channel_id = sqlc.arg(channel_id)::bigint
-  AND deleted = false;
+  AND deleted = false
+  AND EXISTS (
+      SELECT 1 FROM channels c
+      WHERE c.id = sqlc.arg(channel_id)::bigint AND c.deleted_at IS NULL
+  );
 
 -- SearchChannelPostsPage is ChannelHistoryPage narrowed by a full-text match.
 -- It carries no caller predicate: a channel keeps one shared row per post
@@ -205,6 +230,10 @@ SELECT channel_id, local_id, from_id, date, message, edit_date, deleted,
        random_id, grouped_id, file_id, reply_to_msg_id, action_type
 FROM channel_messages
 WHERE channel_id = sqlc.arg(channel_id) AND deleted = false
+  AND EXISTS (
+      SELECT 1 FROM channels c
+      WHERE c.id = sqlc.arg(channel_id)::bigint AND c.deleted_at IS NULL
+  )
   AND action_type = 0
   AND message_tsv @@ plainto_tsquery('simple', sqlc.arg(query))
   AND (sqlc.arg(offset_id)::bigint = 0 OR local_id < sqlc.arg(offset_id)::bigint)
@@ -338,6 +367,7 @@ JOIN channel_messages post
  AND post.deleted = false
  AND post.action_type = 0
 WHERE c.id = sqlc.arg(channel_id)::bigint
+  AND c.deleted_at IS NULL
   AND c.pinned_message_id IS NOT NULL
   AND (sqlc.arg(query)::text = '' OR post.message_tsv @@ plainto_tsquery('simple', sqlc.arg(query)))
   AND (sqlc.arg(offset_id)::bigint = 0 OR post.local_id < sqlc.arg(offset_id)::bigint)

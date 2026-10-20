@@ -497,6 +497,7 @@ func newWithPhotoThumbsAndDialogFilterSyncAndUploadPartTTLAndTurnstile(s *store.
 		return h.handleSendMultiMediaAfterReplyOnConn(c, req)
 	})
 	register(d, tg.ChannelsCreateChannelRequestTypeID, h.handleCreateChannel)
+	register(d, tg.ChannelsDeleteChannelRequestTypeID, h.handleDeleteChannel)
 	register(d, tg.ChannelsEditTitleRequestTypeID, h.handleEditChannelTitle)
 	register(d, tg.ChannelsGetFullChannelRequestTypeID, h.handleGetFullChannel)
 	register(d, tg.ChannelsReadHistoryRequestTypeID, h.handleChannelReadHistory)

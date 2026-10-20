@@ -165,6 +165,10 @@ func TestSmoke(t *testing.T) {
 		t.Parallel()
 		testSmokeChannel(t)
 	})
+	t.Run("channel-delete", func(t *testing.T) {
+		t.Parallel()
+		testSmokeChannelDelete(t)
+	})
 	t.Run("channel-membership-revocation", func(t *testing.T) {
 		t.Parallel()
 		testSmokeChannelMembershipRevocation(t)
