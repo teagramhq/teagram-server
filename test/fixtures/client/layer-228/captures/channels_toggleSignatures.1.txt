@@ -1,0 +1,10 @@
+# source: constructed from gotd v0.162.0 layer-228 request type
+body: { channels_toggleSignatures#418d549c
+  flags: 1 [INT],
+  signatures_enabled: YES [ BY BIT 0 IN FIELD flags ],
+  profiles_enabled: [ SKIPPED BY BIT 1 IN FIELD flags ],
+  channel: { inputChannel
+    channel_id: <N> [LONG],
+    access_hash: <N> [LONG],
+  },
+},

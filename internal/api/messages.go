@@ -1519,6 +1519,7 @@ func (h *handlers) handleForwardMessagesAfterReplyOnConn(c *mtproto.Conn, r *mtp
 				Text:        m.Message,
 				ChannelID:   m.ChannelID,
 				ChannelPost: post,
+				PostAuthor:  m.PostAuthor,
 				FileID:      fileID,
 			})
 		}
