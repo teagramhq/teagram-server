@@ -1062,6 +1062,22 @@ test("a probe code array is rejected as an invalid enum", async (t) => {
   assert.equal(result.stderr, "");
 });
 
+test("acceptance rejects a non-string database failure category", async (t) => {
+  for (const category of [[], ["config"]]) {
+    const paths = await setup(t);
+    const script = join(paths.directory, "approved.mjs");
+    await writeFile(script, "approved fixture\n");
+    const result = invoke(paths, ["acceptance", "--manifest", paths.manifest, "--script", script], {
+      WRAPPER_ACCEPT_QA_FIXTURE: "1", WRAPPER_PROBE_STATUS: "1",
+      WRAPPER_PROBE_OUTPUT: JSON.stringify({ ...probeResultValue, ok: false, code: "database-unavailable",
+        databaseFailureCategory: category }),
+    });
+    assert.equal(result.status, 1);
+    assert.equal(result.stdout, '{"status":"error","code":"runtime-failed"}\n', JSON.stringify(category));
+    assert.equal(result.stderr, "");
+  }
+});
+
 test("browser NUL bytes fail closed without Bash stripping or warning", async (t) => {
   const paths = await setup(t);
   const script = join(paths.directory, "approved.mjs");
@@ -1661,6 +1677,20 @@ test("each probe readiness failure maps to its fixed error without a QA run", as
       : `{"status":"error","code":"${code}"}\n`;
     assert.equal(result.stdout, expected, code);
     assert.doesNotMatch(await readFile(paths.log, "utf8"), /approved-qa\.mjs/u, code);
+  }
+});
+
+test("preflight rejects a non-string database failure category", async (t) => {
+  for (const category of [[], ["config"]]) {
+    const paths = await setup(t);
+    const result = invokePreflight(paths, await preflightScript(paths), {
+      WRAPPER_PROBE_SKIP_BROWSER: "1", WRAPPER_PROBE_STATUS: "1", WRAPPER_PREFLIGHT_OUTPUT: "",
+      WRAPPER_PROBE_OUTPUT: JSON.stringify(preflightProbeValue({ ok: false, code: "database-unavailable",
+        databaseFailureCategory: category })),
+    });
+    assert.equal(result.status, 1);
+    assert.equal(result.stdout, '{"status":"error","code":"runtime-failed"}\n', JSON.stringify(category));
+    assert.equal(result.stderr, "");
   }
 });
 

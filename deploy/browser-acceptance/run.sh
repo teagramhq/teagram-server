@@ -633,8 +633,9 @@ normalize_probe_result() {
           "database-unavailable", "cleanup-unproven", "binding-not-created", "browser-failed",
           "account-created", "account-unproven"] | index($code) != null) and
         (if .code == "database-unavailable" then
+          (.databaseFailureCategory | type == "string") and
           (.databaseFailureCategory as $category |
-            ["config", "connect", "auth", "query", "evidence-invalid", "unknown"] | index($category) != null)
+            (["config", "connect", "auth", "query", "evidence-invalid", "unknown"] | index($category)) != null)
         else (has("databaseFailureCategory") | not) end) and
         (if .ok then
           $exit_status == 0 and .code == "ok" and (.registrationMode == "closed" or .registrationMode == "open") and
