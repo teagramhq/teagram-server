@@ -1,8 +1,9 @@
 -- name: InsertMessage :exec
 INSERT INTO messages (owner_id, local_id, peer_type, peer_id, from_id, message, out, random_id, peer_local_id,
                       fanout_id, action_type, action_user_id, file_id, reply_to_msg_id,
-                      fwd_from_id, fwd_date, fwd_channel_id, fwd_channel_post, fwd_post_author, reply_to_trusted)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20);
+                      fwd_from_id, fwd_date, fwd_channel_id, fwd_channel_post,
+                      fwd_post_author, reply_to_trusted, ttl_period)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21);
 
 -- ActiveOrdinaryMessageInDialog is the authoritative lookup for a client reply.
 -- It deliberately checks owner-local id, exact peer namespace, live state, and
@@ -14,13 +15,28 @@ WHERE owner_id = sqlc.arg(owner_id)::bigint
   AND peer_type = sqlc.arg(peer_type)::smallint
   AND peer_id = sqlc.arg(peer_id)::bigint
   AND deleted = false
+  AND (expires_at IS NULL OR expires_at > statement_timestamp())
   AND action_type = 0;
 
 -- name: MessageByOwnerLocal :one
-SELECT * FROM messages WHERE owner_id = $1 AND local_id = $2;
+SELECT * FROM messages WHERE owner_id = $1 AND local_id = $2
+  AND (expires_at IS NULL OR expires_at > statement_timestamp());
 
 -- name: MessageByRandomID :one
-SELECT * FROM messages WHERE owner_id = $1 AND random_id = $2 AND random_id <> 0;
+SELECT * FROM messages
+WHERE owner_id = $1 AND random_id = $2 AND random_id <> 0
+  AND (expires_at IS NULL OR expires_at > statement_timestamp());
+
+-- MessageRandomIDExpired reports an expired dedup token without loading any
+-- message content, so callers can reject the retry without replaying it.
+-- name: MessageRandomIDExpired :one
+SELECT EXISTS (
+    SELECT 1 FROM messages
+    WHERE owner_id = sqlc.arg(owner_id)::bigint
+      AND random_id = sqlc.arg(random_id)::bigint
+      AND random_id <> 0
+      AND expires_at <= statement_timestamp()
+);
 
 -- NextFanoutID allocates the id shared by every per-member copy of one chat
 -- message. One value per fan-out, never 0.
@@ -37,12 +53,24 @@ SELECT * FROM messages
 WHERE fanout_id = $1 AND fanout_id <> 0
 ORDER BY owner_id;
 
+-- ChatMessageCopiesForDeletion returns active copies owned by participants
+-- captured under the chat row lock. Former members are excluded so their
+-- frozen copies retain the existing group-revoke behavior.
+-- name: ChatMessageCopiesForDeletion :many
+SELECT * FROM messages
+WHERE peer_type = 2
+  AND peer_id = sqlc.arg(chat_id)::bigint
+  AND owner_id = ANY(sqlc.arg(owner_ids)::bigint[])
+  AND deleted = false
+ORDER BY owner_id, local_id;
+
 -- name: HistoryPage :many
 SELECT * FROM messages
 WHERE owner_id = sqlc.arg(owner_id)
   AND peer_type = sqlc.arg(peer_type)
   AND peer_id = sqlc.arg(peer_id)
   AND deleted = false
+  AND (expires_at IS NULL OR expires_at > statement_timestamp())
   AND (sqlc.arg(offset_id)::bigint = 0 OR local_id < sqlc.arg(offset_id)::bigint)
 ORDER BY local_id DESC
 LIMIT sqlc.arg(lim)::int
@@ -58,6 +86,7 @@ WITH page_offset AS (
       AND offset_message.peer_type = sqlc.arg(peer_type)
       AND offset_message.peer_id = sqlc.arg(peer_id)
       AND offset_message.deleted = false
+      AND (offset_message.expires_at IS NULL OR offset_message.expires_at > statement_timestamp())
       AND offset_message.local_id >= sqlc.arg(offset_id)::bigint
 )
 SELECT page_message.* FROM messages AS page_message
@@ -65,6 +94,7 @@ WHERE page_message.owner_id = sqlc.arg(owner_id)
   AND page_message.peer_type = sqlc.arg(peer_type)
   AND page_message.peer_id = sqlc.arg(peer_id)
   AND page_message.deleted = false
+  AND (page_message.expires_at IS NULL OR page_message.expires_at > statement_timestamp())
 ORDER BY page_message.local_id DESC
 LIMIT sqlc.arg(lim)::int
 OFFSET (SELECT skip FROM page_offset);
@@ -114,6 +144,7 @@ WHERE owner_id = sqlc.arg(owner_id)
   AND peer_type = sqlc.arg(peer_type)
   AND peer_id = sqlc.arg(peer_id)
   AND deleted = false
+  AND (expires_at IS NULL OR expires_at > statement_timestamp())
   AND message_tsv @@ plainto_tsquery('simple', sqlc.arg(query))
   AND (sqlc.arg(offset_id)::bigint = 0 OR local_id < sqlc.arg(offset_id)::bigint)
 ORDER BY local_id DESC
@@ -138,6 +169,7 @@ WHERE m.owner_id = sqlc.arg(owner_id)::bigint
   AND m.peer_id = sqlc.arg(peer_id)::bigint
   AND m.peer_type IN (1, 2)
   AND m.deleted = false
+  AND (m.expires_at IS NULL OR m.expires_at > statement_timestamp())
   AND (m.peer_type <> 2 OR EXISTS (
       SELECT 1 FROM chat_participants cp
       WHERE cp.chat_id = m.peer_id AND cp.user_id = m.owner_id
@@ -189,6 +221,7 @@ WITH page AS (
       AND m.peer_id = sqlc.arg(peer_id)::bigint
       AND m.peer_type IN (1, 2)
       AND m.deleted = false
+      AND (m.expires_at IS NULL OR m.expires_at > statement_timestamp())
       AND (m.peer_type <> 2 OR EXISTS (
           SELECT 1 FROM chat_participants cp
           WHERE cp.chat_id = m.peer_id AND cp.user_id = m.owner_id
@@ -243,6 +276,7 @@ JOIN page ON page.local_id = m.local_id
 WHERE m.owner_id = sqlc.arg(owner_id)::bigint
   AND m.peer_type = sqlc.arg(peer_type)::smallint
   AND m.peer_id = sqlc.arg(peer_id)::bigint
+  AND (m.expires_at IS NULL OR m.expires_at > statement_timestamp())
 ORDER BY m.local_id DESC;
 
 -- SearchFilteredMessagesPageAround counts the filter-matched rows before the
@@ -256,6 +290,7 @@ WITH matching AS MATERIALIZED (
       AND m.peer_id = sqlc.arg(peer_id)::bigint
       AND m.peer_type IN (1, 2)
       AND m.deleted = false
+      AND (m.expires_at IS NULL OR m.expires_at > statement_timestamp())
       AND (m.peer_type <> 2 OR EXISTS (
           SELECT 1 FROM chat_participants cp
           WHERE cp.chat_id = m.peer_id AND cp.user_id = m.owner_id
@@ -317,4 +352,5 @@ JOIN page ON page.local_id = m.local_id
 WHERE m.owner_id = sqlc.arg(owner_id)::bigint
   AND m.peer_type = sqlc.arg(peer_type)::smallint
   AND m.peer_id = sqlc.arg(peer_id)::bigint
+  AND (m.expires_at IS NULL OR m.expires_at > statement_timestamp())
 ORDER BY m.local_id DESC;

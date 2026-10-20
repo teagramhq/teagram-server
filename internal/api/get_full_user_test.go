@@ -162,8 +162,8 @@ func fullUserOptionalFieldsPresent(full tg.UserFull) map[string]bool {
 }
 
 // assertFullUserTruthful pins the capability flags and optional fields every
-// caller sees, self or not: the server stores no calls, pins, folders, themes,
-// TTL, notify state, gifts or stories, so it reports none of them.
+// caller sees, self or not. TTL is stored and reported; the remaining optional
+// fields below are not backed by server state.
 func assertFullUserTruthful(t *testing.T, full tg.UserFull, commonChatsCount int) {
 	t.Helper()
 	if full.PhoneCallsAvailable || full.PhoneCallsPrivate || full.VideoCallsAvailable ||
@@ -178,9 +178,12 @@ func assertFullUserTruthful(t *testing.T, full tg.UserFull, commonChatsCount int
 		t.Errorf("full user advertises an unsupported boolean field: %+v", full)
 	}
 	for field, present := range fullUserOptionalFieldsPresent(full) {
-		if present {
+		if field != "ttl_period" && present {
 			t.Errorf("full user advertises optional field %q it does not store", field)
 		}
+	}
+	if ttlPeriod, ok := full.GetTTLPeriod(); !ok || ttlPeriod != 0 {
+		t.Errorf("full user ttl_period = (%d,%v), want (0,true)", ttlPeriod, ok)
 	}
 	if muteUntil, ok := full.NotifySettings.GetMuteUntil(); !ok || muteUntil != 0 {
 		t.Errorf("full user notify settings mute_until=(%d,%v), want (0,true)", muteUntil, ok)

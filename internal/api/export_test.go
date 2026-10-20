@@ -587,6 +587,14 @@ func GetStateForTest(s *store.Store, userID int64) (bin.Encoder, error) {
 	return testHandlers(s).handleGetState(&mtproto.Request{Ctx: context.Background(), UserID: userID})
 }
 
+// GetStateForTestWithAuthKey invokes updates.getState with an authorization ID
+// so tests can cover client-scoped acknowledgements.
+func GetStateForTestWithAuthKey(s *store.Store, userID int64, authKeyID [8]byte) (bin.Encoder, error) {
+	return testHandlers(s).handleGetState(&mtproto.Request{
+		Ctx: context.Background(), UserID: userID, AuthKeyID: authKeyID,
+	})
+}
+
 // PeerUserID exposes the peer-resolution guard for the external api_test package.
 // Uses the test deriver from pgtest.
 func PeerUserID(peer tg.InputPeerClass, viewerID int64) (int64, error) {
@@ -764,15 +772,7 @@ func GetDifferenceForTestWithAuthKeyAndNow(
 	now func() time.Time,
 	req *tg.UpdatesGetDifferenceRequest,
 ) (bin.Encoder, error) {
-	var buf bin.Buffer
-	if err := req.Encode(&buf); err != nil {
-		return nil, err
-	}
-	h := testHandlers(s)
-	h.now = now
-	result, afterReply, err := h.handleGetDifferenceForConn(nil, &mtproto.Request{
-		Ctx: context.Background(), UserID: userID, AuthKeyID: authKeyID, Buf: &buf,
-	})
+	result, afterReply, err := GetDifferenceBeforeReplyForTestWithAuthKeyAndNow(s, userID, authKeyID, now, req)
 	if err != nil {
 		return nil, err
 	}
@@ -780,6 +780,41 @@ func GetDifferenceForTestWithAuthKeyAndNow(
 		afterReply()
 	}
 	return result, nil
+}
+
+// GetDifferenceBeforeReplyForTestWithAuthKeyAndNow leaves the reply-success
+// callback uncalled so tests can interleave replies before they are applied.
+func GetDifferenceBeforeReplyForTestWithAuthKeyAndNow(
+	s *store.Store,
+	userID int64,
+	authKeyID [8]byte,
+	now func() time.Time,
+	req *tg.UpdatesGetDifferenceRequest,
+) (bin.Encoder, func(), error) {
+	return GetDifferenceBeforeReplyForTestWithAuthKeyAndNowAndHook(s, userID, authKeyID, now, req, nil)
+}
+
+// GetDifferenceBeforeReplyForTestWithAuthKeyAndNowAndHook pauses at the
+// removal-token reservation boundary when beforeIssue is non-nil.
+func GetDifferenceBeforeReplyForTestWithAuthKeyAndNowAndHook(
+	s *store.Store,
+	userID int64,
+	authKeyID [8]byte,
+	now func() time.Time,
+	req *tg.UpdatesGetDifferenceRequest,
+	beforeIssue func(),
+) (bin.Encoder, func(), error) {
+	var buf bin.Buffer
+	if err := req.Encode(&buf); err != nil {
+		return nil, nil, err
+	}
+	h := testHandlers(s)
+	h.now = now
+	h.chatRemovalIssueHook = beforeIssue
+	result, afterReply, err := h.handleGetDifferenceForConn(nil, &mtproto.Request{
+		Ctx: context.Background(), UserID: userID, AuthKeyID: authKeyID, Buf: &buf,
+	})
+	return result, afterReply, err
 }
 
 // GetDifferenceForTestWithBlobs invokes getDifference with the supplied blob
@@ -1283,6 +1318,25 @@ func GetFullUserForTest(s *store.Store, userID int64, req *tg.UsersGetFullUserRe
 		return nil, err
 	}
 	return testHandlers(s).handleGetFullUser(&mtproto.Request{Ctx: context.Background(), UserID: userID, Buf: &buf})
+}
+
+// SetHistoryTTLForTest invokes the setHistoryTTL handler without a transport
+// connection so errors can be asserted without writing a wire reply.
+func SetHistoryTTLForTest(s *store.Store, userID int64, req *tg.MessagesSetHistoryTTLRequest) error {
+	var buf bin.Buffer
+	if err := req.Encode(&buf); err != nil {
+		return err
+	}
+	result, reply, afterReply, err := testHandlers(s).handleSetHistoryTTLAfterReplyOnConn(nil, &mtproto.Request{
+		Ctx: context.Background(), UserID: userID, Buf: &buf,
+	})
+	if err != nil {
+		return err
+	}
+	if result != nil || reply != nil || afterReply != nil {
+		return errors.New("invalid setHistoryTTL returned a reply")
+	}
+	return nil
 }
 
 // GetFullUserRawForTest invokes handleGetFullUser with a caller-supplied request

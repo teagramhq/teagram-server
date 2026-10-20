@@ -315,6 +315,7 @@ func (h *handlers) handleGetFullChannel(r *mtproto.Request) (bin.Encoder, error)
 		ChatPhoto:      &tg.PhotoEmpty{},
 		NotifySettings: notifySettings,
 	}
+	full.SetTTLPeriod(snapshot.Channel.TTLPeriod)
 	if pinnedMessageID := snapshot.Channel.PinnedMessageID; pinnedMessageID != nil {
 		full.SetPinnedMsgID(int(*pinnedMessageID))
 	}

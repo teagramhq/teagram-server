@@ -447,6 +447,8 @@ func (h *handlers) handleSendMessageAfterReplyOnConn(c *mtproto.Conn, r *mtproto
 			setSenderRPCPts(attempt, pts)
 			update, afterReply := h.retryReplyAfterSuccess(attempt, r, peerType, pts)
 			return res, update, afterReply, nil
+		} else if errors.Is(err, store.ErrRandomIDExpired) {
+			return nil, nil, nil, errRandomIDDuplicate
 		} else if err != nil {
 			h.log.Error("random_id lookup", "user_id", r.UserID, "err", err)
 			return nil, nil, nil, errInternal
@@ -461,6 +463,10 @@ func (h *handlers) handleSendMessageAfterReplyOnConn(c *mtproto.Conn, r *mtproto
 	attempt := beginSenderRPC(c, r)
 	sender, senderPts, recipientPts, _, err := h.store.SendMessage(r.Ctx, r.UserID, toID, req.Message, req.RandomID, 0, replyToMsgID)
 	if err != nil {
+		if errors.Is(err, store.ErrRandomIDExpired) {
+			clearSenderRPC(attempt)
+			return nil, nil, nil, errRandomIDDuplicate
+		}
 		if errors.Is(err, store.ErrMessageInvalid) {
 			clearSenderRPC(attempt)
 			return nil, nil, nil, errMessageIDInvalid
@@ -571,6 +577,8 @@ func (h *handlers) sendChatMessageAfterReplyOnConn(c *mtproto.Conn, r *mtproto.R
 				Chats: chats,
 				Date:  int(existing.Date.Unix()),
 			}, nil, nil, nil
+		} else if errors.Is(err, store.ErrRandomIDExpired) {
+			return nil, nil, nil, errRandomIDDuplicate
 		} else if err != nil {
 			h.log.Error("random_id lookup", "user_id", r.UserID, "err", err)
 			return nil, nil, nil, errInternal
@@ -590,6 +598,10 @@ func (h *handlers) sendChatMessageAfterReplyOnConn(c *mtproto.Conn, r *mtproto.R
 	if errors.Is(err, store.ErrNotMember) {
 		clearSenderRPC(attempt)
 		return nil, nil, nil, errPeerIDInvalid
+	}
+	if errors.Is(err, store.ErrRandomIDExpired) {
+		clearSenderRPC(attempt)
+		return nil, nil, nil, errRandomIDDuplicate
 	}
 	if errors.Is(err, store.ErrMessageInvalid) {
 		clearSenderRPC(attempt)
@@ -1416,6 +1428,9 @@ func (h *handlers) handleForwardMessagesAfterReplyOnConn(c *mtproto.Conn, r *mtp
 			break
 		}
 		existing, ok, err := h.store.MessageByRandomID(r.Ctx, r.UserID, rid)
+		if errors.Is(err, store.ErrRandomIDExpired) {
+			return nil, nil, nil, errRandomIDDuplicate
+		}
 		if err != nil {
 			h.log.Error("random_id lookup", "user_id", r.UserID, "err", err)
 			return nil, nil, nil, errInternal
@@ -1526,6 +1541,9 @@ func (h *handlers) handleForwardMessagesAfterReplyOnConn(c *mtproto.Conn, r *mtp
 		randomIDs := make([]int64, len(req.RandomID))
 		copy(randomIDs, req.RandomID)
 		perOwner, sentMsgs, err := h.store.ForwardMessages(r.Ctx, r.UserID, destPeerType, destPeerID, sources, randomIDs)
+		if errors.Is(err, store.ErrRandomIDExpired) {
+			return nil, nil, nil, errRandomIDDuplicate
+		}
 		if errors.Is(err, store.ErrMessageInvalid) || errors.Is(err, store.ErrFileMissing) {
 			return nil, nil, nil, errMessageIDInvalid
 		}
@@ -1593,6 +1611,12 @@ func (h *handlers) handleForwardMessagesAfterReplyOnConn(c *mtproto.Conn, r *mtp
 		attempt = beginSenderRPC(c, r)
 	}
 	perOwner, sentMsgs, err := h.store.ForwardMessages(r.Ctx, r.UserID, destPeerType, destPeerID, sources, randomIDs)
+	if errors.Is(err, store.ErrRandomIDExpired) {
+		if attempt.conn != nil {
+			h.clearSenderAfterStoreFailure(attempt, r, err)
+		}
+		return nil, nil, nil, errRandomIDDuplicate
+	}
 	// A source whose file row is gone is a source that can no longer be
 	// forwarded, and it reports as the same invalid message id an already
 	// deleted one does — the caller learns nothing new about a file it was

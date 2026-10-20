@@ -63,6 +63,7 @@ WHERE f.id = $1 AND f.access_hash = $2 AND f.stored = true
       EXISTS (
           SELECT 1 FROM messages m
           WHERE m.owner_id = $3 AND m.file_id = f.id AND m.deleted = false
+            AND (m.expires_at IS NULL OR m.expires_at > statement_timestamp())
       )
       OR EXISTS (
           SELECT 1 FROM channel_messages cm
@@ -71,6 +72,7 @@ WHERE f.id = $1 AND f.access_hash = $2 AND f.stored = true
           WHERE cm.file_id = f.id
             AND cm.deleted = false
             AND cm.local_id > cp.available_min_id
+            AND (cm.expires_at IS NULL OR cm.expires_at > statement_timestamp())
             AND (cp.banned_until IS NULL OR cp.banned_until <= now())
       )
   );
@@ -137,6 +139,7 @@ WHERE f.id = sqlc.arg(id)
       EXISTS (
           SELECT 1 FROM messages m
           WHERE m.owner_id = sqlc.arg(owner_id) AND m.file_id = f.id AND m.deleted = false
+            AND (m.expires_at IS NULL OR m.expires_at > statement_timestamp())
       )
       OR EXISTS (
           SELECT 1 FROM channel_messages cm
@@ -145,6 +148,7 @@ WHERE f.id = sqlc.arg(id)
           WHERE cm.file_id = f.id
             AND cm.deleted = false
             AND cm.local_id > cp.available_min_id
+            AND (cm.expires_at IS NULL OR cm.expires_at > statement_timestamp())
             AND (cp.banned_until IS NULL OR cp.banned_until <= now())
       )
   );
@@ -166,6 +170,7 @@ WHERE f.id = sqlc.arg(id)
       EXISTS (
           SELECT 1 FROM messages m
           WHERE m.owner_id = sqlc.arg(owner_id) AND m.file_id = f.id AND m.deleted = false
+            AND (m.expires_at IS NULL OR m.expires_at > statement_timestamp())
       )
       OR EXISTS (
           SELECT 1 FROM channel_messages cm
@@ -174,6 +179,7 @@ WHERE f.id = sqlc.arg(id)
           WHERE cm.file_id = f.id
             AND cm.deleted = false
             AND cm.local_id > cp.available_min_id
+            AND (cm.expires_at IS NULL OR cm.expires_at > statement_timestamp())
             AND (cp.banned_until IS NULL OR cp.banned_until <= now())
       )
   );

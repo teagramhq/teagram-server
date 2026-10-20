@@ -115,6 +115,7 @@ type ChannelMessage struct {
 	// ReplyToMsgID is the local_id of the post this post replies to; 0 = no reply.
 	ReplyToMsgID int32
 	Action       ChannelMessageAction
+	TTLPeriod    int
 	Poll         *Poll
 	PostAuthor   *string
 }
@@ -140,6 +141,7 @@ const (
 	ChannelMessageActionNone ChannelMessageAction = iota
 	ChannelMessageActionCreate
 	ChannelMessageActionEditTitle
+	ChannelMessageActionSetMessagesTTL
 )
 
 // channelMsgFields is a layout-identical copy of the sqlc channel-message
@@ -159,6 +161,7 @@ type channelMsgFields struct {
 	FileID       *int64
 	ReplyToMsgID *int32
 	ActionType   int16
+	TtlPeriod    int32
 	PostAuthor   *string
 }
 
@@ -189,6 +192,7 @@ func channelMessageFromFields(r channelMsgFields) ChannelMessage {
 		r.FileID,
 		replyToMsgID,
 		ChannelMessageAction(r.ActionType),
+		int(r.TtlPeriod),
 		nil,
 		r.PostAuthor,
 	}
@@ -969,11 +973,12 @@ func channelPostAuthorName(ctx context.Context, qtx *db.Queries, userID int64) (
 func channelMessageRetry(
 	ctx context.Context, qtx *db.Queries, channelID, fromID, randomID int64, pollResult *Poll, textOnly, photoRetry bool,
 ) (ChannelMessage, int, bool, error) {
-	existing, err := qtx.ChannelMessageByRandomID(ctx, db.ChannelMessageByRandomIDParams{
-		ChannelID: channelID, RandomID: randomID,
-	})
+	existing, err := channelMessageRowByRandomID(ctx, qtx, channelID, randomID)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return ChannelMessage{}, 0, false, nil
+	}
+	if errors.Is(err, ErrRandomIDExpired) {
+		return ChannelMessage{}, 0, false, ErrRandomIDDuplicate
 	}
 	if err != nil {
 		return ChannelMessage{}, 0, false, fmt.Errorf("random_id lookup: %w", err)
@@ -1040,6 +1045,25 @@ func channelMessageRetry(
 		message.Poll = retryPoll
 	}
 	return message, pts, true, nil
+}
+
+func channelMessageRowByRandomID(ctx context.Context, qtx *db.Queries, channelID, randomID int64) (db.ChannelMessageByRandomIDRow, error) {
+	row, err := qtx.ChannelMessageByRandomID(ctx, db.ChannelMessageByRandomIDParams{
+		ChannelID: channelID, RandomID: randomID,
+	})
+	if !errors.Is(err, pgx.ErrNoRows) {
+		return row, err
+	}
+	expired, err := qtx.ChannelMessageRandomIDExpired(ctx, db.ChannelMessageRandomIDExpiredParams{
+		ChannelID: channelID, RandomID: randomID,
+	})
+	if err != nil {
+		return db.ChannelMessageByRandomIDRow{}, fmt.Errorf("channel message random id expiry lookup: %w", err)
+	}
+	if expired {
+		return db.ChannelMessageByRandomIDRow{}, ErrRandomIDExpired
+	}
+	return db.ChannelMessageByRandomIDRow{}, pgx.ErrNoRows
 }
 
 // checkChannelMediaPostRights is checkPostRights with the caller's participant
@@ -1304,7 +1328,7 @@ func (s *Store) ChannelRepliesWithOffset(
 			continue
 		}
 		if row.ChannelID == nil || row.FromID == nil || !row.Date.Valid || row.Message == nil ||
-			row.Deleted == nil || row.RandomID == nil || row.ActionType == nil {
+			row.Deleted == nil || row.RandomID == nil || row.ActionType == nil || row.TtlPeriod == nil {
 			return ChannelRepliesSnapshot{}, errors.New("channel replies query returned an incomplete message row")
 		}
 		snapshot.Messages = append(snapshot.Messages, channelMessageFromFields(channelMsgFields{
@@ -1320,6 +1344,7 @@ func (s *Store) ChannelRepliesWithOffset(
 			FileID:       row.FileID,
 			ReplyToMsgID: row.ReplyToMsgID,
 			ActionType:   *row.ActionType,
+			TtlPeriod:    *row.TtlPeriod,
 		}))
 	}
 	return snapshot, nil

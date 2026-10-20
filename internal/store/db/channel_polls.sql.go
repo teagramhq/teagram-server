@@ -71,6 +71,7 @@ JOIN channels c ON c.id = cpm.channel_id AND c.deleted_at IS NULL
 WHERE cpm.channel_id = $1
   AND cpm.local_id = $2
   AND cm.deleted = false
+  AND (cm.expires_at IS NULL OR cm.expires_at > statement_timestamp())
 `
 
 type PollByChannelMessageParams struct {
@@ -109,6 +110,7 @@ JOIN channel_messages cm ON cm.channel_id = cpm.channel_id AND cm.local_id = cpm
 WHERE cpm.poll_id = $1
   AND cp.user_id = $2
   AND cm.deleted = false
+  AND (cm.expires_at IS NULL OR cm.expires_at > statement_timestamp())
   AND cpm.local_id > cp.available_min_id
   AND (cp.banned_until IS NULL OR cp.banned_until <= clock_timestamp())
 `

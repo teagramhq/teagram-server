@@ -69,11 +69,12 @@ func (q *Queries) BumpStateBy(ctx context.Context, arg BumpStateByParams) (BumpS
 
 const channelMessagesByRandomIDs = `-- name: ChannelMessagesByRandomIDs :many
 SELECT channel_id, local_id, from_id, date, message, edit_date, deleted,
-       random_id, grouped_id, file_id, reply_to_msg_id, action_type, post_author
+       random_id, grouped_id, file_id, reply_to_msg_id, action_type, ttl_period, post_author
 FROM channel_messages
 WHERE channel_id = $1::bigint
   AND random_id = ANY($2::bigint[])
   AND random_id <> 0
+  AND (expires_at IS NULL OR expires_at > statement_timestamp())
 ORDER BY local_id
 `
 
@@ -95,6 +96,7 @@ type ChannelMessagesByRandomIDsRow struct {
 	FileID       *int64
 	ReplyToMsgID *int32
 	ActionType   int16
+	TtlPeriod    int32
 	PostAuthor   *string
 }
 
@@ -122,6 +124,7 @@ func (q *Queries) ChannelMessagesByRandomIDs(ctx context.Context, arg ChannelMes
 			&i.FileID,
 			&i.ReplyToMsgID,
 			&i.ActionType,
+			&i.TtlPeriod,
 			&i.PostAuthor,
 		); err != nil {
 			return nil, err
@@ -249,6 +252,78 @@ func (q *Queries) CountGroupedMessagesInRange(ctx context.Context, arg CountGrou
 	var column_1 int64
 	err := row.Scan(&column_1)
 	return column_1, err
+}
+
+const expiredChannelMessageRandomIDs = `-- name: ExpiredChannelMessageRandomIDs :many
+SELECT random_id FROM channel_messages
+WHERE channel_id = $1::bigint
+  AND random_id = ANY($2::bigint[])
+  AND random_id <> 0
+  AND expires_at <= statement_timestamp()
+ORDER BY random_id
+`
+
+type ExpiredChannelMessageRandomIDsParams struct {
+	ChannelID int64
+	RandomIds []int64
+}
+
+// ExpiredChannelMessageRandomIDs returns only dedup tokens, never expired post
+// content, so an album retry can be refused before it loads any stale item.
+func (q *Queries) ExpiredChannelMessageRandomIDs(ctx context.Context, arg ExpiredChannelMessageRandomIDsParams) ([]int64, error) {
+	rows, err := q.db.Query(ctx, expiredChannelMessageRandomIDs, arg.ChannelID, arg.RandomIds)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []int64
+	for rows.Next() {
+		var random_id int64
+		if err := rows.Scan(&random_id); err != nil {
+			return nil, err
+		}
+		items = append(items, random_id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const expiredMessageRandomIDs = `-- name: ExpiredMessageRandomIDs :many
+SELECT random_id FROM messages
+WHERE owner_id = $1::bigint
+  AND random_id = ANY($2::bigint[])
+  AND random_id <> 0
+  AND expires_at <= statement_timestamp()
+ORDER BY random_id
+`
+
+type ExpiredMessageRandomIDsParams struct {
+	OwnerID   int64
+	RandomIds []int64
+}
+
+// ExpiredMessageRandomIDs returns only dedup tokens, never the expired rows'
+// content, so an album retry can be refused before it loads any stale item.
+func (q *Queries) ExpiredMessageRandomIDs(ctx context.Context, arg ExpiredMessageRandomIDsParams) ([]int64, error) {
+	rows, err := q.db.Query(ctx, expiredMessageRandomIDs, arg.OwnerID, arg.RandomIds)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []int64
+	for rows.Next() {
+		var random_id int64
+		if err := rows.Scan(&random_id); err != nil {
+			return nil, err
+		}
+		items = append(items, random_id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
 }
 
 const insertAlbumMessages = `-- name: InsertAlbumMessages :exec
@@ -438,10 +513,11 @@ func (q *Queries) LockUploadGrants(ctx context.Context, arg LockUploadGrantsPara
 }
 
 const messagesByRandomIDs = `-- name: MessagesByRandomIDs :many
-SELECT owner_id, local_id, peer_id, from_id, date, message, out, edit_date, deleted, random_id, peer_local_id, peer_type, fanout_id, action_type, action_user_id, file_id, reply_to_msg_id, fwd_from_id, fwd_date, fwd_channel_id, fwd_channel_post, message_tsv, reply_to_trusted, grouped_id, fwd_post_author FROM messages
+SELECT owner_id, local_id, peer_id, from_id, date, message, out, edit_date, deleted, random_id, peer_local_id, peer_type, fanout_id, action_type, action_user_id, file_id, reply_to_msg_id, fwd_from_id, fwd_date, fwd_channel_id, fwd_channel_post, message_tsv, reply_to_trusted, grouped_id, fwd_post_author, ttl_period, expires_at FROM messages
 WHERE owner_id = $1::bigint
   AND random_id = ANY($2::bigint[])
   AND random_id <> 0
+  AND (expires_at IS NULL OR expires_at > statement_timestamp())
 ORDER BY local_id
 `
 
@@ -487,6 +563,8 @@ func (q *Queries) MessagesByRandomIDs(ctx context.Context, arg MessagesByRandomI
 			&i.ReplyToTrusted,
 			&i.GroupedID,
 			&i.FwdPostAuthor,
+			&i.TtlPeriod,
+			&i.ExpiresAt,
 		); err != nil {
 			return nil, err
 		}

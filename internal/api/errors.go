@@ -218,6 +218,12 @@ var (
 	errChatWriteForbidden = rpcErr(403, "CHAT_WRITE_FORBIDDEN")
 	// errYouBlockedUser rejects a 1:1 send to a user the caller has blocked.
 	errYouBlockedUser = rpcErr(400, "YOU_BLOCKED_USER")
+	// errUserIsBlocked rejects a history-TTL change when the other party has
+	// blocked the caller.
+	errUserIsBlocked = rpcErr(400, "USER_IS_BLOCKED")
+	// errTTLPeriodInvalid rejects a setHistoryTTL period outside the server
+	// allow-list.
+	errTTLPeriodInvalid = rpcErr(400, "TTL_PERIOD_INVALID")
 	// errUsernameInvalid rejects a username that fails validation: wrong length,
 	// invalid characters, digit/underscore leading, or a reserved handle.
 	errUsernameInvalid = rpcErr(400, "USERNAME_INVALID")

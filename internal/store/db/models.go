@@ -66,6 +66,7 @@ type Channel struct {
 	PreHistoryHidden     bool
 	DeletedAt            pgtype.Timestamptz
 	Signatures           bool
+	TtlPeriod            int32
 }
 
 type ChannelDeletionJob struct {
@@ -104,6 +105,8 @@ type ChannelMessage struct {
 	ActionType   int16
 	GroupedID    *int64
 	PostAuthor   *string
+	TtlPeriod    int32
+	ExpiresAt    pgtype.Timestamptz
 }
 
 type ChannelParticipant struct {
@@ -171,6 +174,7 @@ type Chat struct {
 	Date                pgtype.Timestamptz
 	PinnedMessageID     *int32
 	DefaultBannedRights []string
+	TtlPeriod           int32
 }
 
 type ChatAbout struct {
@@ -214,6 +218,40 @@ type ChatReadReceipt struct {
 	ReaderID int64
 	SentAt   pgtype.Timestamptz
 	ReadAt   pgtype.Timestamptz
+}
+
+type ChatRemovalClientState struct {
+	OwnerID             int64
+	ChatID              int64
+	AuthKeyID           int64
+	DeliveredAt         pgtype.Timestamptz
+	AcknowledgedAt      pgtype.Timestamptz
+	DifferenceStatePts  *int64
+	DifferenceStateQts  *int64
+	DifferenceStateDate *int64
+	ResumeDate          *int64
+}
+
+type ChatRemovalClientStateHistory struct {
+	OwnerID             int64
+	AuthKeyID           int64
+	ChatID              int64
+	DifferenceStatePts  int64
+	DifferenceStateQts  int64
+	DifferenceStateDate int64
+	ResumeDate          int64
+}
+
+type ChatRemovalDifferenceStateToken struct {
+	OwnerID       int64
+	AuthKeyID     int64
+	LastStateDate int64
+}
+
+type ChatRemovalEvent struct {
+	OwnerID int64
+	ChatID  int64
+	Version int32
 }
 
 type CloudDraft struct {
@@ -460,6 +498,8 @@ type Message struct {
 	ReplyToTrusted bool
 	GroupedID      *int64
 	FwdPostAuthor  *string
+	TtlPeriod      int32
+	ExpiresAt      pgtype.Timestamptz
 }
 
 type MessageDeleteCapacityRefusal struct {
@@ -783,6 +823,12 @@ type UserDialogFilterState struct {
 	OrderIds         []int16
 	ChangedAt        pgtype.Timestamptz
 	DefaultsSeededAt pgtype.Timestamptz
+}
+
+type UserDialogHistoryTtl struct {
+	UserLowID  int64
+	UserHighID int64
+	TtlPeriod  int32
 }
 
 type UserDialogPin struct {

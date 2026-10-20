@@ -64,6 +64,9 @@ func (h *handlers) handleSendPollAfterReplyOnConn(
 
 	if peerType != store.PeerTypeChannel && req.RandomID != 0 {
 		existing, ok, lookupErr := h.store.MessageByRandomID(r.Ctx, r.UserID, req.RandomID)
+		if errors.Is(lookupErr, store.ErrRandomIDExpired) {
+			return nil, nil, nil, errRandomIDDuplicate
+		}
 		if lookupErr != nil {
 			h.log.Error("poll random id lookup", "user_id", r.UserID, "err", lookupErr)
 			return nil, nil, nil, errInternal
@@ -1004,6 +1007,8 @@ func pollResultsToTL(poll store.Poll) tg.PollResults {
 
 func pollStoreError(err error) error {
 	switch {
+	case errors.Is(err, store.ErrRandomIDExpired):
+		return errRandomIDDuplicate
 	case errors.Is(err, store.ErrPollInvalid):
 		return errPollInvalid
 	case errors.Is(err, store.ErrPollClosed):

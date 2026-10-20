@@ -77,6 +77,18 @@ func (r *clientRequestRecorder) count() int {
 	return len(r.records)
 }
 
+func (r *clientRequestRecorder) countMethod(method string) int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	count := 0
+	for _, record := range r.records {
+		if record.method == method {
+			count++
+		}
+	}
+	return count
+}
+
 func (r *clientRequestRecorder) add(request capturedClientRequest) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -468,6 +480,7 @@ func TestSmokeClientRequestFixturesAreLayer228Shapes(t *testing.T) {
 		"messages_getDialogs.2",
 		"messages_getDialogs.3",
 		"messages_createChat.1",
+		"messages_deleteChat.1",
 		"messages_getCommonChats.1",
 		"messages_deleteHistory.1",
 		"messages_editChatAbout.1",
@@ -1199,6 +1212,36 @@ func testSmokeClientRequestFixtures(t *testing.T) {
 			t.Fatalf("poll answer web-page fixture message = %T, want *tg.Message", created.Message)
 		}
 		assertSmokePollAnswerWebPage(t, "poll answer web-page fixture", message, answerURL)
+		for _, test := range []struct {
+			fixture string
+			peer    tg.InputPeerClass
+			period  int
+		}{
+			{fixture: "messages_setHistoryTTL.1", peer: peerUser(creator.id, member.id), period: 86400},
+			{fixture: "messages_setHistoryTTL.2", peer: &tg.InputPeerChat{ChatID: chatID}, period: 604800},
+			{fixture: "messages_setHistoryTTL.3", peer: peerChannel(creator.id, channelID), period: 2592000},
+		} {
+			if err := fixtureClientCall(t, creator, test.fixture, func(ctx context.Context, api *tg.Client) error {
+				_, err := api.MessagesSetHistoryTTL(ctx, &tg.MessagesSetHistoryTTLRequest{
+					Peer: test.peer, Period: test.period,
+				})
+				return err
+			}); err != nil {
+				t.Fatalf("replay history-TTL fixture %s: %v", test.fixture, err)
+			}
+		}
+		if err := fixtureClientCall(t, creator, "messages_deleteChat.1", func(ctx context.Context, api *tg.Client) error {
+			deleted, err := api.MessagesDeleteChat(ctx, chatID)
+			if err != nil {
+				return err
+			}
+			if !deleted {
+				return errors.New("deleteChat returned false")
+			}
+			return nil
+		}); err != nil {
+			t.Fatalf("replay delete-chat fixture: %v", err)
+		}
 		return
 	}
 	t.Fatal("poll answer web-page fixture response omitted updateNewMessage")

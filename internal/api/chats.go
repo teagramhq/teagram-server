@@ -223,6 +223,47 @@ func (h *handlers) handleCreateChat(r *mtproto.Request) (bin.Encoder, error) {
 	return &tg.MessagesInvitedUsers{Updates: ups, MissingInvitees: missing}, nil
 }
 
+// handleDeleteChat serves messages.deleteChat. The store checks creator
+// ownership under the chat row lock, removes the current member set, and records
+// per-copy delete events in the same commit. Every refused caller gets the same
+// non-PEER_ID_INVALID error because the desktop retries that error by adding
+// itself to the chat.
+func (h *handlers) handleDeleteChat(r *mtproto.Request) (bin.Encoder, error) {
+	var req tg.MessagesDeleteChatRequest
+	if err := req.Decode(r.Buf); err != nil {
+		return nil, errMethodNotImpl
+	}
+	if r.UserID == 0 {
+		return nil, errAuthKeyUnreg
+	}
+
+	deletion, err := h.store.DeleteChat(r.Ctx, req.ChatID, r.UserID)
+	if errors.Is(err, store.ErrChatAdminRequired) {
+		return nil, errChatAdminRequired
+	}
+	if err != nil {
+		h.log.Error("delete chat", "chat_id", req.ChatID, "user_id", r.UserID, "err", err)
+		return nil, errInternal
+	}
+	if len(deletion.OwnerPts) > 0 {
+		h.notifyOwners(r.Ctx, deletion.OwnerPts, 0)
+	}
+	for _, event := range deletion.RemovalEvents {
+		h.notifyChatRemoval(r.Ctx, event.OwnerID, event.ChatID)
+	}
+	return &tg.BoolTrue{}, nil
+}
+
+// notifyChatRemoval pushes the PTS-neutral removal event to every replica with
+// a live session for its owner after the deletion transaction commits.
+func (h *handlers) notifyChatRemoval(ctx context.Context, ownerID, chatID int64) {
+	notifyCtx, cancel := senderNotifyContext(ctx)
+	defer cancel()
+	if err := h.store.Notify(notifyCtx, store.ChannelUpdates, store.ChatRemovalPayload(ownerID, chatID)); err != nil {
+		h.log.Error("notify chat removal", "owner_id", ownerID, "chat_id", chatID, "err", err)
+	}
+}
+
 // handleEditChatTitle serves messages.editChatTitle: one store call renames the
 // chat and announces the rename atomically.
 //
@@ -453,6 +494,7 @@ func (h *handlers) handleGetFullChat(r *mtproto.Request) (bin.Encoder, error) {
 		Participants:   chatParticipantsToTL(chat, participants),
 		NotifySettings: notifySettings,
 	}
+	wireFull.SetTTLPeriod(chat.TTLPeriod)
 	wireFull.SetChatPhoto(&tg.PhotoEmpty{})
 	pinnedMessageID, hasPinnedMessage, err := h.store.ChatPinnedMessageForOwner(r.Ctx, chat.ID, r.UserID)
 	if err != nil {

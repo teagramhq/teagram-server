@@ -6,6 +6,7 @@ SMOKE_SCENARIOS=(
   last-seen-privacy
   contacts-get-statuses
   one-to-one
+  history-ttl
   peer-disconnect
   photo-media
   profile-photo-upload
@@ -24,6 +25,7 @@ SMOKE_SCENARIOS=(
   notify-settings-reads
   unread-acknowledgements
   basic-group
+  delete-basic-group
   delete-history
   channel
   channel-delete

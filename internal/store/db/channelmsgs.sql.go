@@ -98,9 +98,10 @@ func (q *Queries) ChannelEventsWindow(ctx context.Context, arg ChannelEventsWind
 
 const channelHistoryPage = `-- name: ChannelHistoryPage :many
 SELECT channel_id, local_id, from_id, date, message, edit_date, deleted,
-       random_id, grouped_id, file_id, reply_to_msg_id, action_type, post_author
+       random_id, grouped_id, file_id, reply_to_msg_id, action_type, ttl_period, post_author
 FROM channel_messages
 WHERE channel_id = $1 AND deleted = false
+  AND (expires_at IS NULL OR expires_at > statement_timestamp())
   AND EXISTS (
       SELECT 1 FROM channels c
       WHERE c.id = $1::bigint AND c.deleted_at IS NULL
@@ -129,6 +130,7 @@ type ChannelHistoryPageRow struct {
 	FileID       *int64
 	ReplyToMsgID *int32
 	ActionType   int16
+	TtlPeriod    int32
 	PostAuthor   *string
 }
 
@@ -154,6 +156,7 @@ func (q *Queries) ChannelHistoryPage(ctx context.Context, arg ChannelHistoryPage
 			&i.FileID,
 			&i.ReplyToMsgID,
 			&i.ActionType,
+			&i.TtlPeriod,
 			&i.PostAuthor,
 		); err != nil {
 			return nil, err
@@ -174,16 +177,18 @@ WITH page_offset AS (
     ) AS skip
     FROM channel_messages
     WHERE channel_id = $5::bigint AND deleted = false
+      AND (expires_at IS NULL OR expires_at > statement_timestamp())
       AND EXISTS (
           SELECT 1 FROM channels c
           WHERE c.id = $5::bigint AND c.deleted_at IS NULL
       )
 ), page AS (
     SELECT channel_id, local_id, from_id, date, message, edit_date, deleted,
-           random_id, grouped_id, file_id, reply_to_msg_id, action_type, post_author
+           random_id, grouped_id, file_id, reply_to_msg_id, action_type, ttl_period, post_author
     FROM channel_messages
     WHERE channel_id = $5::bigint
       AND deleted = false
+      AND (expires_at IS NULL OR expires_at > statement_timestamp())
       AND EXISTS (
           SELECT 1 FROM channels c
           WHERE c.id = $5::bigint AND c.deleted_at IS NULL
@@ -194,7 +199,7 @@ WITH page_offset AS (
     OFFSET (SELECT skip FROM page_offset)
 )
 SELECT channel_id, local_id, from_id, date, message, edit_date, deleted,
-       random_id, grouped_id, file_id, reply_to_msg_id, action_type, post_author
+       random_id, grouped_id, file_id, reply_to_msg_id, action_type, ttl_period, post_author
 FROM page
 WHERE ($1::bigint <= 0 OR local_id < $1::bigint)
   AND ($2::bigint <= 0 OR local_id > $2::bigint)
@@ -223,6 +228,7 @@ type ChannelHistoryPageAroundRow struct {
 	FileID       *int64
 	ReplyToMsgID *int32
 	ActionType   int16
+	TtlPeriod    int32
 	PostAuthor   *string
 }
 
@@ -257,6 +263,7 @@ func (q *Queries) ChannelHistoryPageAround(ctx context.Context, arg ChannelHisto
 			&i.FileID,
 			&i.ReplyToMsgID,
 			&i.ActionType,
+			&i.TtlPeriod,
 			&i.PostAuthor,
 		); err != nil {
 			return nil, err
@@ -272,10 +279,11 @@ func (q *Queries) ChannelHistoryPageAround(ctx context.Context, arg ChannelHisto
 const channelHistoryPageWithOffset = `-- name: ChannelHistoryPageWithOffset :many
 WITH page AS (
     SELECT channel_id, local_id, from_id, date, message, edit_date, deleted,
-           random_id, grouped_id, file_id, reply_to_msg_id, action_type, post_author
+           random_id, grouped_id, file_id, reply_to_msg_id, action_type, ttl_period, post_author
     FROM channel_messages
     WHERE channel_id = $3::bigint
       AND deleted = false
+      AND (expires_at IS NULL OR expires_at > statement_timestamp())
       AND EXISTS (
           SELECT 1 FROM channels c
           WHERE c.id = $3::bigint AND c.deleted_at IS NULL
@@ -286,7 +294,7 @@ WITH page AS (
     OFFSET GREATEST(0::bigint, $5::bigint)
 )
 SELECT channel_id, local_id, from_id, date, message, edit_date, deleted,
-       random_id, grouped_id, file_id, reply_to_msg_id, action_type, post_author
+       random_id, grouped_id, file_id, reply_to_msg_id, action_type, ttl_period, post_author
 FROM page
 WHERE ($1::bigint <= 0 OR local_id < $1::bigint)
   AND ($2::bigint <= 0 OR local_id > $2::bigint)
@@ -315,6 +323,7 @@ type ChannelHistoryPageWithOffsetRow struct {
 	FileID       *int64
 	ReplyToMsgID *int32
 	ActionType   int16
+	TtlPeriod    int32
 	PostAuthor   *string
 }
 
@@ -350,6 +359,7 @@ func (q *Queries) ChannelHistoryPageWithOffset(ctx context.Context, arg ChannelH
 			&i.FileID,
 			&i.ReplyToMsgID,
 			&i.ActionType,
+			&i.TtlPeriod,
 			&i.PostAuthor,
 		); err != nil {
 			return nil, err
@@ -364,8 +374,9 @@ func (q *Queries) ChannelHistoryPageWithOffset(ctx context.Context, arg ChannelH
 
 const channelMessageByLocal = `-- name: ChannelMessageByLocal :one
 SELECT channel_id, local_id, from_id, date, message, edit_date, deleted,
-       random_id, grouped_id, file_id, reply_to_msg_id, action_type, post_author
+       random_id, grouped_id, file_id, reply_to_msg_id, action_type, ttl_period, post_author
 FROM channel_messages WHERE channel_id = $1 AND local_id = $2
+  AND (expires_at IS NULL OR expires_at > statement_timestamp())
 `
 
 type ChannelMessageByLocalParams struct {
@@ -386,6 +397,7 @@ type ChannelMessageByLocalRow struct {
 	FileID       *int64
 	ReplyToMsgID *int32
 	ActionType   int16
+	TtlPeriod    int32
 	PostAuthor   *string
 }
 
@@ -405,6 +417,7 @@ func (q *Queries) ChannelMessageByLocal(ctx context.Context, arg ChannelMessageB
 		&i.FileID,
 		&i.ReplyToMsgID,
 		&i.ActionType,
+		&i.TtlPeriod,
 		&i.PostAuthor,
 	)
 	return i, err
@@ -412,8 +425,10 @@ func (q *Queries) ChannelMessageByLocal(ctx context.Context, arg ChannelMessageB
 
 const channelMessageByRandomID = `-- name: ChannelMessageByRandomID :one
 SELECT channel_id, local_id, from_id, date, message, edit_date, deleted,
-       random_id, grouped_id, file_id, reply_to_msg_id, action_type, post_author
-FROM channel_messages WHERE channel_id = $1 AND random_id = $2 AND random_id <> 0
+       random_id, grouped_id, file_id, reply_to_msg_id, action_type, ttl_period, post_author
+FROM channel_messages
+WHERE channel_id = $1 AND random_id = $2 AND random_id <> 0
+  AND (expires_at IS NULL OR expires_at > statement_timestamp())
 `
 
 type ChannelMessageByRandomIDParams struct {
@@ -434,6 +449,7 @@ type ChannelMessageByRandomIDRow struct {
 	FileID       *int64
 	ReplyToMsgID *int32
 	ActionType   int16
+	TtlPeriod    int32
 	PostAuthor   *string
 }
 
@@ -453,9 +469,34 @@ func (q *Queries) ChannelMessageByRandomID(ctx context.Context, arg ChannelMessa
 		&i.FileID,
 		&i.ReplyToMsgID,
 		&i.ActionType,
+		&i.TtlPeriod,
 		&i.PostAuthor,
 	)
 	return i, err
+}
+
+const channelMessageRandomIDExpired = `-- name: ChannelMessageRandomIDExpired :one
+SELECT EXISTS (
+    SELECT 1 FROM channel_messages
+    WHERE channel_id = $1::bigint
+      AND random_id = $2::bigint
+      AND random_id <> 0
+      AND expires_at <= statement_timestamp()
+)
+`
+
+type ChannelMessageRandomIDExpiredParams struct {
+	ChannelID int64
+	RandomID  int64
+}
+
+// ChannelMessageRandomIDExpired reports an expired dedup token without loading
+// the post contents, so a retry can be refused without replaying it.
+func (q *Queries) ChannelMessageRandomIDExpired(ctx context.Context, arg ChannelMessageRandomIDExpiredParams) (bool, error) {
+	row := q.db.QueryRow(ctx, channelMessageRandomIDExpired, arg.ChannelID, arg.RandomID)
+	var exists bool
+	err := row.Scan(&exists)
+	return exists, err
 }
 
 const channelMessageTombstonesByLocalIDs = `-- name: ChannelMessageTombstonesByLocalIDs :many
@@ -499,9 +540,10 @@ func (q *Queries) ChannelMessageTombstonesByLocalIDs(ctx context.Context, arg Ch
 
 const channelMessagesByLocalIDs = `-- name: ChannelMessagesByLocalIDs :many
 SELECT channel_id, local_id, from_id, date, message, edit_date, deleted,
-       random_id, grouped_id, file_id, reply_to_msg_id, action_type, post_author
+       random_id, grouped_id, file_id, reply_to_msg_id, action_type, ttl_period, post_author
 FROM channel_messages
 WHERE channel_id = $1 AND local_id = ANY($2::bigint[]) AND deleted = false
+  AND (expires_at IS NULL OR expires_at > statement_timestamp())
   AND EXISTS (SELECT 1 FROM channels c WHERE c.id = $1 AND c.deleted_at IS NULL)
 `
 
@@ -523,6 +565,7 @@ type ChannelMessagesByLocalIDsRow struct {
 	FileID       *int64
 	ReplyToMsgID *int32
 	ActionType   int16
+	TtlPeriod    int32
 	PostAuthor   *string
 }
 
@@ -548,6 +591,7 @@ func (q *Queries) ChannelMessagesByLocalIDs(ctx context.Context, arg ChannelMess
 			&i.FileID,
 			&i.ReplyToMsgID,
 			&i.ActionType,
+			&i.TtlPeriod,
 			&i.PostAuthor,
 		); err != nil {
 			return nil, err
@@ -562,7 +606,7 @@ func (q *Queries) ChannelMessagesByLocalIDs(ctx context.Context, arg ChannelMess
 
 const channelMessagesForDelete = `-- name: ChannelMessagesForDelete :many
 SELECT channel_id, local_id, from_id, date, message, edit_date, deleted,
-       random_id, grouped_id, file_id, reply_to_msg_id, action_type, post_author
+       random_id, grouped_id, file_id, reply_to_msg_id, action_type, ttl_period, post_author
 FROM channel_messages
 WHERE channel_id = $1::bigint
   AND local_id = ANY($2::bigint[])
@@ -588,6 +632,7 @@ type ChannelMessagesForDeleteRow struct {
 	FileID       *int64
 	ReplyToMsgID *int32
 	ActionType   int16
+	TtlPeriod    int32
 	PostAuthor   *string
 }
 
@@ -615,6 +660,7 @@ func (q *Queries) ChannelMessagesForDelete(ctx context.Context, arg ChannelMessa
 			&i.FileID,
 			&i.ReplyToMsgID,
 			&i.ActionType,
+			&i.TtlPeriod,
 			&i.PostAuthor,
 		); err != nil {
 			return nil, err
@@ -629,11 +675,12 @@ func (q *Queries) ChannelMessagesForDelete(ctx context.Context, arg ChannelMessa
 
 const channelMessagesForForward = `-- name: ChannelMessagesForForward :many
 SELECT cm.channel_id, cm.local_id, cm.from_id, cm.date, cm.message, cm.edit_date, cm.deleted,
-       cm.random_id, cm.grouped_id, cm.file_id, cm.reply_to_msg_id, cm.action_type, cm.post_author
+       cm.random_id, cm.grouped_id, cm.file_id, cm.reply_to_msg_id, cm.action_type, cm.ttl_period, cm.post_author
 FROM channel_messages cm
 WHERE cm.channel_id = $1::bigint
   AND cm.local_id = ANY($2::bigint[])
   AND cm.deleted = false
+  AND (cm.expires_at IS NULL OR cm.expires_at > statement_timestamp())
   AND cm.action_type = 0
   AND EXISTS (
       SELECT 1 FROM channel_participants cp
@@ -669,6 +716,7 @@ type ChannelMessagesForForwardRow struct {
 	FileID       *int64
 	ReplyToMsgID *int32
 	ActionType   int16
+	TtlPeriod    int32
 	PostAuthor   *string
 }
 
@@ -698,6 +746,7 @@ func (q *Queries) ChannelMessagesForForward(ctx context.Context, arg ChannelMess
 			&i.FileID,
 			&i.ReplyToMsgID,
 			&i.ActionType,
+			&i.TtlPeriod,
 			&i.PostAuthor,
 		); err != nil {
 			return nil, err
@@ -712,12 +761,13 @@ func (q *Queries) ChannelMessagesForForward(ctx context.Context, arg ChannelMess
 
 const channelMessagesForMember = `-- name: ChannelMessagesForMember :many
 SELECT cm.channel_id, cm.local_id, cm.from_id, cm.date, cm.message, cm.edit_date, cm.deleted,
-       cm.random_id, cm.grouped_id, cm.file_id, cm.reply_to_msg_id, cm.action_type, cm.post_author
+       cm.random_id, cm.grouped_id, cm.file_id, cm.reply_to_msg_id, cm.action_type, cm.ttl_period, cm.post_author
 FROM channel_messages cm
 JOIN channel_participants cp ON cp.channel_id = cm.channel_id AND cp.user_id = $1::bigint
 WHERE cm.channel_id = $2::bigint
   AND cm.local_id = ANY($3::bigint[])
   AND cm.deleted = false
+  AND (cm.expires_at IS NULL OR cm.expires_at > statement_timestamp())
   AND cm.local_id > cp.available_min_id
   AND (cp.banned_until IS NULL OR cp.banned_until <= now())
   AND EXISTS (
@@ -745,6 +795,7 @@ type ChannelMessagesForMemberRow struct {
 	FileID       *int64
 	ReplyToMsgID *int32
 	ActionType   int16
+	TtlPeriod    int32
 	PostAuthor   *string
 }
 
@@ -773,6 +824,7 @@ func (q *Queries) ChannelMessagesForMember(ctx context.Context, arg ChannelMessa
 			&i.FileID,
 			&i.ReplyToMsgID,
 			&i.ActionType,
+			&i.TtlPeriod,
 			&i.PostAuthor,
 		); err != nil {
 			return nil, err
@@ -791,6 +843,7 @@ FROM channel_messages cm
 JOIN channel_participants cp ON cp.channel_id = cm.channel_id AND cp.user_id = $3
 WHERE cm.channel_id = $1 AND cm.local_id = $2
   AND cm.deleted = false AND cm.action_type = 0
+  AND (cm.expires_at IS NULL OR cm.expires_at > statement_timestamp())
   AND cm.local_id > cp.available_min_id
   AND (cp.banned_until IS NULL OR cp.banned_until <= now())
 `
@@ -833,6 +886,7 @@ WITH access AS (
     WHERE cm.channel_id = $2::bigint
       AND cm.local_id = $3::bigint
       AND cm.deleted = false
+      AND (cm.expires_at IS NULL OR cm.expires_at > statement_timestamp())
       AND cm.action_type = 0
 ), eligible AS (
     SELECT cm.local_id
@@ -840,6 +894,7 @@ WITH access AS (
     WHERE cm.channel_id = $2::bigint
       AND cm.reply_to_msg_id = $3::bigint
       AND cm.deleted = false
+      AND (cm.expires_at IS NULL OR cm.expires_at > statement_timestamp())
       AND cm.action_type = 0
       AND EXISTS (SELECT 1 FROM access WHERE megagroup AND is_member)
       AND EXISTS (SELECT 1 FROM root)
@@ -885,7 +940,8 @@ WITH access AS (
            cm.grouped_id,
            cm.file_id,
            cm.reply_to_msg_id,
-           cm.action_type
+           cm.action_type,
+           cm.ttl_period
     FROM page_ids
     JOIN channel_messages cm
       ON cm.channel_id = $2::bigint
@@ -909,7 +965,8 @@ SELECT status.channel_exists,
        selected.grouped_id,
        selected.file_id,
        selected.reply_to_msg_id,
-       selected.action_type
+       selected.action_type,
+       selected.ttl_period
 FROM status
 LEFT JOIN selected ON true
 ORDER BY selected.local_id DESC
@@ -944,6 +1001,7 @@ type ChannelRepliesPageRow struct {
 	FileID        *int64
 	ReplyToMsgID  *int32
 	ActionType    *int16
+	TtlPeriod     *int32
 }
 
 // ChannelRepliesPage reads a direct-reply page and its authorization snapshot
@@ -987,6 +1045,7 @@ func (q *Queries) ChannelRepliesPage(ctx context.Context, arg ChannelRepliesPage
 			&i.FileID,
 			&i.ReplyToMsgID,
 			&i.ActionType,
+			&i.TtlPeriod,
 		); err != nil {
 			return nil, err
 		}
@@ -1003,6 +1062,7 @@ SELECT count(*)::bigint
 FROM channel_messages
 WHERE channel_id = $1::bigint
   AND deleted = false
+  AND (expires_at IS NULL OR expires_at > statement_timestamp())
   AND EXISTS (
       SELECT 1 FROM channels c
       WHERE c.id = $1::bigint AND c.deleted_at IS NULL
@@ -1021,6 +1081,7 @@ SELECT count(*)::bigint
 FROM channel_messages post
 WHERE post.channel_id = $1::bigint
   AND post.deleted = false
+  AND (post.expires_at IS NULL OR post.expires_at > statement_timestamp())
   AND post.action_type = 0
   AND EXISTS (
       SELECT 1 FROM channel_participants cp
@@ -1254,9 +1315,10 @@ func (q *Queries) NewChannelPostPts(ctx context.Context, arg NewChannelPostPtsPa
 
 const searchChannelPostsPage = `-- name: SearchChannelPostsPage :many
 SELECT channel_id, local_id, from_id, date, message, edit_date, deleted,
-       random_id, grouped_id, file_id, reply_to_msg_id, action_type, post_author
+       random_id, grouped_id, file_id, reply_to_msg_id, action_type, ttl_period, post_author
 FROM channel_messages
 WHERE channel_id = $1 AND deleted = false
+  AND (expires_at IS NULL OR expires_at > statement_timestamp())
   AND EXISTS (
       SELECT 1 FROM channels c
       WHERE c.id = $1::bigint AND c.deleted_at IS NULL
@@ -1288,6 +1350,7 @@ type SearchChannelPostsPageRow struct {
 	FileID       *int64
 	ReplyToMsgID *int32
 	ActionType   int16
+	TtlPeriod    int32
 	PostAuthor   *string
 }
 
@@ -1323,6 +1386,7 @@ func (q *Queries) SearchChannelPostsPage(ctx context.Context, arg SearchChannelP
 			&i.FileID,
 			&i.ReplyToMsgID,
 			&i.ActionType,
+			&i.TtlPeriod,
 			&i.PostAuthor,
 		); err != nil {
 			return nil, err
@@ -1338,10 +1402,11 @@ func (q *Queries) SearchChannelPostsPage(ctx context.Context, arg SearchChannelP
 const searchFilteredChannelPostsPage = `-- name: SearchFilteredChannelPostsPage :many
 SELECT post.channel_id, post.local_id, post.from_id, post.date, post.message,
        post.edit_date, post.deleted, post.random_id, post.grouped_id,
-       post.file_id, post.reply_to_msg_id, post.action_type, post.post_author
+       post.file_id, post.reply_to_msg_id, post.action_type, post.ttl_period, post.post_author
 FROM channel_messages post
 WHERE post.channel_id = $1::bigint
   AND post.deleted = false
+  AND (post.expires_at IS NULL OR post.expires_at > statement_timestamp())
   AND post.action_type = 0
   AND EXISTS (
       SELECT 1 FROM channel_participants cp
@@ -1410,6 +1475,7 @@ type SearchFilteredChannelPostsPageRow struct {
 	FileID       *int64
 	ReplyToMsgID *int32
 	ActionType   int16
+	TtlPeriod    int32
 	PostAuthor   *string
 }
 
@@ -1442,6 +1508,7 @@ func (q *Queries) SearchFilteredChannelPostsPage(ctx context.Context, arg Search
 			&i.FileID,
 			&i.ReplyToMsgID,
 			&i.ActionType,
+			&i.TtlPeriod,
 			&i.PostAuthor,
 		); err != nil {
 			return nil, err
@@ -1457,7 +1524,7 @@ func (q *Queries) SearchFilteredChannelPostsPage(ctx context.Context, arg Search
 const searchPinnedChannelPostForMember = `-- name: SearchPinnedChannelPostForMember :many
 SELECT post.channel_id, post.local_id, post.from_id, post.date, post.message,
        post.edit_date, post.deleted, post.random_id, post.grouped_id,
-       post.file_id, post.reply_to_msg_id, post.action_type, post.post_author
+       post.file_id, post.reply_to_msg_id, post.action_type, post.ttl_period, post.post_author
 FROM channels c
 JOIN channel_participants participant
   ON participant.channel_id = c.id
@@ -1467,6 +1534,7 @@ JOIN channel_messages post
   ON post.channel_id = c.id
  AND post.local_id = c.pinned_message_id
  AND post.deleted = false
+ AND (post.expires_at IS NULL OR post.expires_at > statement_timestamp())
  AND post.action_type = 0
 WHERE c.id = $2::bigint
   AND c.deleted_at IS NULL
@@ -1498,6 +1566,7 @@ type SearchPinnedChannelPostForMemberRow struct {
 	FileID       *int64
 	ReplyToMsgID *int32
 	ActionType   int16
+	TtlPeriod    int32
 	PostAuthor   *string
 }
 
@@ -1532,6 +1601,7 @@ func (q *Queries) SearchPinnedChannelPostForMember(ctx context.Context, arg Sear
 			&i.FileID,
 			&i.ReplyToMsgID,
 			&i.ActionType,
+			&i.TtlPeriod,
 			&i.PostAuthor,
 		); err != nil {
 			return nil, err

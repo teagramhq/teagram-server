@@ -179,6 +179,7 @@ WITH covered AS (
       AND m.peer_type = sqlc.arg(peer_type)::smallint
       AND m.peer_id = sqlc.arg(peer_id)::bigint
       AND m.out = false AND m.deleted = false AND m.fanout_id <> 0
+      AND (m.expires_at IS NULL OR m.expires_at > statement_timestamp())
       AND m.local_id > sqlc.arg(after_id)::bigint
       AND m.local_id <= sqlc.arg(max_id)::bigint
       AND m.from_id = ANY(sqlc.arg(member_ids)::bigint[])
@@ -206,6 +207,7 @@ WHERE m.owner_id = sqlc.arg(owner_id)::bigint
   AND m.peer_type = sqlc.arg(peer_type)::smallint
   AND m.peer_id = sqlc.arg(peer_id)::bigint
   AND m.out = false AND m.deleted = false AND m.fanout_id <> 0
+  AND (m.expires_at IS NULL OR m.expires_at > statement_timestamp())
   AND m.local_id > sqlc.arg(after_id)::bigint
   AND m.local_id <= sqlc.arg(max_id)::bigint
   AND m.from_id = ANY(sqlc.arg(member_ids)::bigint[])

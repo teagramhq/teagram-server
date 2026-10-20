@@ -43,6 +43,16 @@ func TestChatAdminPayloadCarriesChatAndEventIDs(t *testing.T) {
 	}
 }
 
+func TestChatRemovalPayloadCarriesOwnerAndChatIDs(t *testing.T) {
+	if got := store.ChatRemovalPayload(7, 19); got != "chat_removal|7|19" {
+		t.Fatalf("chat-removal payload = %q, want chat_removal|7|19", got)
+	}
+	eventID, ok := store.ChatRemovalUpdateFromContext(store.WithChatRemovalUpdate(context.Background(), 19))
+	if !ok || eventID != 19 {
+		t.Fatalf("chat-removal context = %d/%t, want 19/true", eventID, ok)
+	}
+}
+
 func TestChatAboutPayloadCarriesOwnerAndChatIDs(t *testing.T) {
 	if got := store.ChatAboutPayload(7, 19); got != "chat_about|7|19" {
 		t.Fatalf("chat-about payload = %q, want chat_about|7|19", got)

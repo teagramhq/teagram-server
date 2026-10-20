@@ -44,6 +44,9 @@ type handlers struct {
 	// now reads the server clock. help.getConfig stamps its time fields from it
 	// per response, so a long-lived process never serves a config dated at boot.
 	now func() time.Time
+	// chatRemovalIssueHook pauses getDifference after it builds the response
+	// cursor and before it atomically reserves the removal token.
+	chatRemovalIssueHook func()
 	// logLoginCodes gates the one log call that carries credential material.
 	logLoginCodes bool
 	// maxFileBytes is the per-file upload cap the save handlers enforce.
@@ -398,6 +401,9 @@ func newWithPhotoThumbsAndDialogFilterSyncAndUploadPartTTLAndTurnstile(s *store.
 	register(d, tg.MessagesGetSavedDialogsRequestTypeID, h.handleGetSavedDialogs)
 	register(d, tg.MessagesGetPinnedSavedDialogsRequestTypeID, h.handleGetPinnedSavedDialogs)
 	register(d, tg.MessagesGetDefaultHistoryTTLRequestTypeID, h.handleGetDefaultHistoryTTL)
+	registerReplyAfterSuccess(d, tg.MessagesSetHistoryTTLRequestTypeID, func(c *mtproto.Conn, req *mtproto.Request) (bin.Encoder, *replyUpdate, func(), error) {
+		return h.handleSetHistoryTTLAfterReplyOnConn(c, req)
+	})
 	registerReplyAfterSuccess(d, tg.MessagesGetDialogFiltersRequestTypeID, func(c *mtproto.Conn, req *mtproto.Request) (bin.Encoder, *replyUpdate, func(), error) {
 		res, afterReply, err := h.handleGetDialogFilters(c, req)
 		return res, nil, afterReply, err
@@ -474,6 +480,7 @@ func newWithPhotoThumbsAndDialogFilterSyncAndUploadPartTTLAndTurnstile(s *store.
 	register(d, tg.MessagesUpdatePinnedMessageRequestTypeID, h.handleUpdatePinnedMessage)
 	register(d, tg.MessagesUnpinAllMessagesRequestTypeID, h.handleUnpinAllMessages)
 	register(d, tg.MessagesCreateChatRequestTypeID, h.handleCreateChat)
+	register(d, tg.MessagesDeleteChatRequestTypeID, h.handleDeleteChat)
 	register(d, tg.MessagesGetFullChatRequestTypeID, h.handleGetFullChat)
 	register(d, tg.MessagesGetChatsRequestTypeID, h.handleGetChats)
 	register(d, tg.MessagesEditChatTitleRequestTypeID, h.handleEditChatTitle)
