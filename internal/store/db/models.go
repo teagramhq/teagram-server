@@ -63,6 +63,14 @@ type Channel struct {
 	PubliclyDiscoverable bool
 	DefaultBannedRights  []string
 	SlowmodeSeconds      int16
+	PreHistoryHidden     bool
+	DeletedAt            pgtype.Timestamptz
+}
+
+type ChannelDeletionJob struct {
+	ChannelID         int64
+	PostCursor        int64
+	PostsTombstonedAt pgtype.Timestamptz
 }
 
 type ChannelEvent struct {
@@ -105,6 +113,7 @@ type ChannelParticipant struct {
 	Date            pgtype.Timestamptz
 	LastPostAt      pgtype.Timestamptz
 	AdminChangeInfo bool
+	AvailableMinID  int64
 }
 
 type ChannelPollMessage struct {
@@ -845,9 +854,11 @@ type UserPrivacyRuleUser struct {
 }
 
 type Username struct {
-	Handle    string
-	OwnerType string
-	OwnerID   int64
+	Handle        string
+	OwnerType     string
+	OwnerID       int64
+	HoldCreatorID *int64
+	HoldUntil     pgtype.Timestamptz
 }
 
 type UsernameChange struct {

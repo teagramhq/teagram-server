@@ -170,6 +170,10 @@ func TestSmoke(t *testing.T) {
 		t.Parallel()
 		testSmokeChannel(t)
 	})
+	t.Run("channel-delete", func(t *testing.T) {
+		t.Parallel()
+		testSmokeChannelDelete(t)
+	})
 	t.Run("channel-membership-revocation", func(t *testing.T) {
 		t.Parallel()
 		testSmokeChannelMembershipRevocation(t)
@@ -3169,8 +3173,16 @@ func testSmokeChannel(t *testing.T) {
 				return fmt.Errorf("posted getPeerDialogs messages = %d, want 1", len(result.Messages))
 			}
 			message, ok := result.Messages[0].(*tg.Message)
-			if !ok || message.ID != wantTopID || message.Message != wantText {
+			if !ok || message.ID != wantTopID || message.Message != wantText || !message.GetPost() {
 				return fmt.Errorf("getPeerDialogs top message = %T/%+v, want id %d text %q", result.Messages[0], result.Messages[0], wantTopID, wantText)
+			}
+			if from, present := message.GetFromID(); present {
+				return fmt.Errorf("getPeerDialogs broadcast post has sender %+v", from)
+			}
+			for _, user := range result.Users {
+				if user.GetID() == creator.id {
+					return fmt.Errorf("getPeerDialogs exposed broadcast post author %d", creator.id)
+				}
 			}
 			return nil
 		}); err != nil {
@@ -3192,16 +3204,15 @@ func testSmokeChannel(t *testing.T) {
 			return err
 		})
 		update := recvOrCtx(t, f.ctx, subscriber.seen.newChannelMsg, "subscriber channel update")
-		if update.Msg.Message != post || update.Msg.ID <= 0 {
-			t.Fatalf("subscriber channel message = {text:%q id:%d}, want {%q, positive id}", update.Msg.Message, update.Msg.ID, post)
+		if update.Msg.Message != post || update.Msg.ID <= 0 || update.Msg.Out || !update.Msg.GetPost() {
+			t.Fatalf("subscriber channel message = {text:%q id:%d out:%v post:%v}, want {%q, positive id, out:false, post:true}", update.Msg.Message, update.Msg.ID, update.Msg.Out, update.Msg.GetPost(), post)
 		}
 		peer, ok := update.Msg.PeerID.(*tg.PeerChannel)
 		if !ok || peer.ChannelID != channelID {
 			t.Fatalf("subscriber channel peer = %+v, want channel %d", update.Msg.PeerID, channelID)
 		}
-		from, ok := update.Msg.FromID.(*tg.PeerUser)
-		if !ok || from.UserID != creator.id {
-			t.Fatalf("subscriber channel sender = %+v, want creator %d", update.Msg.FromID, creator.id)
+		if from, present := update.Msg.GetFromID(); present {
+			t.Fatalf("subscriber broadcast post has sender %+v", from)
 		}
 		postIDs[post] = update.Msg.ID
 	}
@@ -3248,16 +3259,15 @@ func testSmokeChannel(t *testing.T) {
 				return fmt.Errorf("channel history message = %T, want *tg.Message", class)
 			}
 			wantID, ok := postIDs[message.Message]
-			if !ok || message.ID != wantID || message.Out {
-				return fmt.Errorf("channel history message = {text:%q id:%d out:%v}, want a known post id and out:false", message.Message, message.ID, message.Out)
+			if !ok || message.ID != wantID || message.Out || !message.GetPost() {
+				return fmt.Errorf("channel history message = {text:%q id:%d out:%v post:%v}, want a known post id, out:false, post:true", message.Message, message.ID, message.Out, message.GetPost())
 			}
 			peer, ok := message.PeerID.(*tg.PeerChannel)
 			if !ok || peer.ChannelID != channelID {
 				return fmt.Errorf("channel history peer = %+v, want channel %d", message.PeerID, channelID)
 			}
-			from, ok := message.FromID.(*tg.PeerUser)
-			if !ok || from.UserID != creator.id {
-				return fmt.Errorf("channel history sender = %+v, want creator %d", message.FromID, creator.id)
+			if from, present := message.GetFromID(); present {
+				return fmt.Errorf("channel history broadcast post has sender %+v", from)
 			}
 		}
 		if !sawCreate {
