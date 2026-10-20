@@ -500,6 +500,7 @@ WITH source AS (
       AND message.out = true
       AND message.deleted = false
       AND message.fanout_id <> 0
+      AND (message.expires_at IS NULL OR message.expires_at > statement_timestamp())
     LIMIT 1
 ), eligible_source AS (
     SELECT source.fanout_id
