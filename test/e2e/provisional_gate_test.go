@@ -158,6 +158,21 @@ func TestProvisionalGateProbe(t *testing.T) {
 			t.Log("updates.getState blocked as expected")
 		}
 
+		if _, err := raw.MessagesDeleteScheduledMessages(ctx, &tg.MessagesDeleteScheduledMessagesRequest{
+			Peer: &tg.InputPeerSelf{},
+		}); err == nil {
+			t.Error("messages.deleteScheduledMessages: provisional session reached the handler")
+		} else if !tgerr.Is(err, "AUTH_KEY_UNREGISTERED") {
+			t.Errorf("messages.deleteScheduledMessages: err = %v, want AUTH_KEY_UNREGISTERED", err)
+		}
+		if _, err := raw.MessagesSendScheduledMessages(ctx, &tg.MessagesSendScheduledMessagesRequest{
+			Peer: &tg.InputPeerSelf{}, ID: []int{5},
+		}); err == nil {
+			t.Error("messages.sendScheduledMessages: provisional session reached the handler")
+		} else if !tgerr.Is(err, "AUTH_KEY_UNREGISTERED") {
+			t.Errorf("messages.sendScheduledMessages: err = %v, want AUTH_KEY_UNREGISTERED", err)
+		}
+
 		if _, err := raw.MessagesUploadMedia(ctx, &tg.MessagesUploadMediaRequest{
 			Peer: &tg.InputPeerSelf{},
 			Media: &tg.InputMediaUploadedDocument{
