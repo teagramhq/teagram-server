@@ -63,6 +63,7 @@ type Channel struct {
 	PubliclyDiscoverable bool
 	DefaultBannedRights  []string
 	SlowmodeSeconds      int16
+	PreHistoryHidden     bool
 	DeletedAt            pgtype.Timestamptz
 }
 
@@ -112,6 +113,7 @@ type ChannelParticipant struct {
 	Date            pgtype.Timestamptz
 	LastPostAt      pgtype.Timestamptz
 	AdminChangeInfo bool
+	AvailableMinID  int64
 }
 
 type ChannelPollMessage struct {

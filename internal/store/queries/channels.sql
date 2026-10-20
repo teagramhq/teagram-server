@@ -12,7 +12,8 @@ RETURNING *;
 INSERT INTO channel_state (channel_id) VALUES ($1);
 
 -- name: InsertChannelParticipant :exec
-INSERT INTO channel_participants (channel_id, user_id, role, join_pts) VALUES ($1, $2, $3, $4);
+INSERT INTO channel_participants (channel_id, user_id, role, join_pts, available_min_id)
+VALUES ($1, $2, $3, $4, $5);
 
 -- name: ChannelByID :one
 SELECT * FROM channels WHERE id = $1;
@@ -70,7 +71,7 @@ SELECT * FROM channel_state WHERE channel_id = $1 FOR UPDATE;
 SELECT * FROM channels WHERE id = $1 FOR NO KEY UPDATE;
 
 -- LockChannelInvites follows LockChannel and precedes LockChannelState during
--- deletion, matching JoinChannelByInvite's invite-then-state order.
+-- deletion, matching JoinChannelByInvite's channel/invite/state order.
 -- name: LockChannelInvites :many
 SELECT hash FROM channel_invites
 WHERE channel_id = $1
@@ -255,9 +256,11 @@ SELECT count(*) FROM channel_participants WHERE user_id = $1;
 
 -- InsertChannelParticipantIfAbsent reports 0 rows when the user already holds a
 -- row, which is what makes a repeated join a no-op instead of an error — and in
--- particular never lowers an existing join_pts or clears an existing ban.
+-- particular never lowers an existing join_pts or history floor or clears an
+-- existing ban.
 -- name: InsertChannelParticipantIfAbsent :execrows
-INSERT INTO channel_participants (channel_id, user_id, role, join_pts) VALUES ($1, $2, $3, $4)
+INSERT INTO channel_participants (channel_id, user_id, role, join_pts, available_min_id)
+VALUES ($1, $2, $3, $4, $5)
 ON CONFLICT (channel_id, user_id) DO NOTHING;
 
 -- UpdateChannelParticipantRole and UpdateChannelParticipantBan only ever update:
@@ -370,10 +373,10 @@ INSERT INTO channel_invites (hash, channel_id, creator_id) VALUES ($1, $2, $3);
 -- name: ChannelInviteByHash :one
 SELECT * FROM channel_invites WHERE hash = $1 AND revoked_at IS NULL;
 
--- ChannelInviteByHashForUpdate is the locked variant used by JoinChannelByInvite.
--- The row lock serialises admission against revocation: a concurrent
--- RevokeChannelInvite UPDATE blocks until the join commits or rolls back. The
--- preview path (ChannelByInvite) keeps the unlocked ChannelInviteByHash.
+-- ChannelInviteByHashForUpdate is used after JoinChannelByInvite locks the
+-- channel row, keeping admission and deletion in the same lock order. The row
+-- lock serialises admission against revocation; ChannelByInvite uses the
+-- unlocked ChannelInviteByHash for preview.
 -- name: ChannelInviteByHashForUpdate :one
 SELECT * FROM channel_invites WHERE hash = $1 AND revoked_at IS NULL FOR UPDATE;
 
