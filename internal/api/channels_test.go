@@ -1418,14 +1418,14 @@ func TestSendMessageToChannelAnnouncesTheChannelPost(t *testing.T) {
 	if !ok {
 		t.Fatalf("message = %T, want *tg.Message", nm.Message)
 	}
-	if msg.Message != "first" || msg.ID != 2 || !msg.Out {
-		t.Errorf("message = %+v, want out post 2 %q", msg, "first")
+	if msg.Message != "first" || msg.ID != 2 || !msg.Out || !msg.GetPost() {
+		t.Errorf("message = %+v, want outgoing post 2 %q", msg, "first")
 	}
 	if peer, isChan := msg.PeerID.(*tg.PeerChannel); !isChan || peer.ChannelID != ch.ID {
 		t.Errorf("peer = %+v, want channel %d", msg.PeerID, ch.ID)
 	}
-	if from, isUser := msg.FromID.(*tg.PeerUser); !isUser || from.UserID != creator.ID {
-		t.Errorf("from = %+v, want user %d", msg.FromID, creator.ID)
+	if from, present := msg.GetFromID(); present {
+		t.Errorf("from = %+v, want no sender for broadcast post", from)
 	}
 
 	ups := updatesOf(t, res)
