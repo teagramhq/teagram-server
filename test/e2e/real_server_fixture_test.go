@@ -35,7 +35,7 @@ import (
 
 const (
 	realFixtureServerRevision = "7b5fcc9c68c1b275cad7d076a343d6d476cd447d"
-	realFixtureWebRevision    = "16f12b9f4e0a42b20c3fe3aa340b6b8f8b2e8861"
+	realFixtureWebRevision    = "e947f119ba90d9d87b198c9d7a113cceb1395318"
 )
 
 // The preserved negative-control pair. The harness has to be able to attempt it,
@@ -1864,7 +1864,8 @@ func writeFixtureArtifact(t *testing.T, directory string, ready realFixtureReady
 	endpoint := "wss://teagramd.test/apiws"
 	fingerprint := ready.Fingerprint
 	csp := "default-src 'self'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'; " +
-		"object-src 'none'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; " +
+		"frame-src 'self' https://challenges.cloudflare.com; object-src 'none'; " +
+		"script-src 'self' 'wasm-unsafe-eval' https://challenges.cloudflare.com; style-src 'self' 'unsafe-inline'; " +
 		"img-src 'self' data: blob:; font-src 'self' data:; media-src 'self' blob:; " +
 		"worker-src 'self' blob:; manifest-src 'self'; connect-src 'self' " + endpoint + ";"
 	productLinks := "const productLinks = [" + strings.Join(quoteAll(fixtureProductReferences), ", ") + "];\n"

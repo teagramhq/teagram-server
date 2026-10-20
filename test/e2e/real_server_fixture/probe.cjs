@@ -14,7 +14,7 @@ const targets = [
   { class: 'official_dc_ipv6', url: 'https://[2001:67c:4e8:f002::a]/' },
   { class: 'cgnat_ip', url: 'https://100.64.0.1/' },
 ];
-const PRIVATE_CSP = "default-src 'self'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'; object-src 'none'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; media-src 'self' blob:; worker-src 'self' blob:; manifest-src 'self'; connect-src 'self' wss://teagramd.test/apiws;";
+const PRIVATE_CSP = "default-src 'self'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'; frame-src 'self' https://challenges.cloudflare.com; object-src 'none'; script-src 'self' 'wasm-unsafe-eval' https://challenges.cloudflare.com; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; media-src 'self' blob:; worker-src 'self' blob:; manifest-src 'self'; connect-src 'self' wss://teagramd.test/apiws;";
 const controlledUrls = new Set(targets.map(({ url }) => url));
 // The fixture issues its own probes to those exact URLs before any artifact is
 // attached, so they are exempt there. In artifact mode nothing issues them on
