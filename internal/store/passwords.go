@@ -141,8 +141,37 @@ func (s *Store) PasswordByUser(ctx context.Context, userID int64) (UserPassword,
 	}, true, nil
 }
 
+// InsertPasswordIfAbsent stores p only when the user has no 2FA password. The
+// verifier is encrypted before storage. inserted is false when another request
+// already established the password.
+func (s *Store) InsertPasswordIfAbsent(ctx context.Context, p UserPassword) (inserted bool, err error) {
+	enc, err := s.cipher.Seal(p.Verifier)
+	if err != nil {
+		return false, fmt.Errorf("insert password if absent: %w", err)
+	}
+	var email *string
+	if p.HasRecovery || p.RecoveryEmail != "" {
+		e := p.RecoveryEmail
+		email = &e
+	}
+	rows, err := s.q.InsertPasswordIfAbsent(ctx, db.InsertPasswordIfAbsentParams{
+		UserID:        p.UserID,
+		Salt1:         p.Salt1,
+		Salt2:         p.Salt2,
+		Verifier:      enc,
+		Hint:          p.Hint,
+		RecoveryEmail: email,
+		HasRecovery:   p.HasRecovery,
+	})
+	if err != nil {
+		return false, fmt.Errorf("insert password if absent: %w", err)
+	}
+	return rows == 1, nil
+}
+
 // UpsertPassword inserts or replaces the 2FA password for p.UserID. The verifier
-// is encrypted before storage. Used for both initial set and change.
+// is encrypted before storage. Callers must establish permission to create or
+// replace the password before using it; first setup uses InsertPasswordIfAbsent.
 func (s *Store) UpsertPassword(ctx context.Context, p UserPassword) error {
 	enc, err := s.cipher.Seal(p.Verifier)
 	if err != nil {
