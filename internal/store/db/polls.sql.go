@@ -485,40 +485,6 @@ func (q *Queries) PollOptionResults(ctx context.Context, arg PollOptionResultsPa
 	return items, nil
 }
 
-const pollRecentVoters = `-- name: PollRecentVoters :many
-SELECT voter_id
-FROM poll_votes
-WHERE poll_id = $1
-ORDER BY first_voted_at DESC, voter_id DESC
-LIMIT $2::int
-`
-
-type PollRecentVotersParams struct {
-	PollID int64
-	Lim    int32
-}
-
-// PollRecentVoters returns the latest public voters in stable order.
-func (q *Queries) PollRecentVoters(ctx context.Context, arg PollRecentVotersParams) ([]int64, error) {
-	rows, err := q.db.Query(ctx, pollRecentVoters, arg.PollID, arg.Lim)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	var items []int64
-	for rows.Next() {
-		var voter_id int64
-		if err := rows.Scan(&voter_id); err != nil {
-			return nil, err
-		}
-		items = append(items, voter_id)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	return items, nil
-}
-
 const pollVoteByVoter = `-- name: PollVoteByVoter :one
 SELECT poll_id, voter_id, first_voted_at
 FROM poll_votes

@@ -78,15 +78,13 @@ type PollAnswer struct {
 
 // Poll is one viewer's rendering of the canonical poll and committed results.
 // Correct answers and the solution are present only after this viewer votes or
-// the poll closes. Recent voter identities are returned only for public polls
-// the viewer has voted in or that have been closed.
+// the poll closes. Voter identities are never returned here.
 type Poll struct {
 	ID                  int64
 	Creator             bool
 	Question            []byte
 	DescriptionEntities []PollDescriptionEntity
 	Answers             []PollAnswer
-	RecentVoters        []int64
 	PublicVoters        bool
 	MultipleChoice      bool
 	Quiz                bool
@@ -117,7 +115,6 @@ type PollVoterPage struct {
 const (
 	defaultPollVoterPageSize = 10
 	maxPollVoterPageSize     = 100
-	maxRecentPollVoters      = 3
 )
 
 // CreatePoll stores one canonical poll for every live copy of the outgoing
@@ -1396,20 +1393,12 @@ func pollView(ctx context.Context, q *db.Queries, row db.Poll, viewerID int64) (
 	if err != nil {
 		return Poll{}, fmt.Errorf("poll option results: %w", err)
 	}
-	var recentVoters []int64
-	if row.PublicVoters && (hasVoted || closed) {
-		recentVoters, err = q.PollRecentVoters(ctx, db.PollRecentVotersParams{PollID: row.ID, Lim: maxRecentPollVoters})
-		if err != nil {
-			return Poll{}, fmt.Errorf("poll recent voters: %w", err)
-		}
-	}
 	reveal := closed || hasVoted
 	poll := Poll{
 		ID:                  row.ID,
 		Creator:             row.CreatorID == viewerID,
 		Question:            bytes.Clone(row.Question),
 		DescriptionEntities: decodePollDescriptionEntities(row.DescriptionEntities),
-		RecentVoters:        recentVoters,
 		PublicVoters:        row.PublicVoters,
 		MultipleChoice:      row.MultipleChoice,
 		Quiz:                row.Quiz,

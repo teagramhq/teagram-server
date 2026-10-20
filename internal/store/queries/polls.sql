@@ -87,14 +87,6 @@ WHERE v.poll_id = sqlc.arg(poll_id)
         AND selected.option = sqlc.arg(option)::bytea
   ));
 
--- PollRecentVoters returns the latest public voters in stable order.
--- name: PollRecentVoters :many
-SELECT voter_id
-FROM poll_votes
-WHERE poll_id = sqlc.arg(poll_id)
-ORDER BY first_voted_at DESC, voter_id DESC
-LIMIT sqlc.arg(lim)::int;
-
 -- PollVotersPage returns one row per voter. The composite first-vote timestamp
 -- and voter id cursor is stable even when multiple votes share one timestamp.
 -- name: PollVotersPage :many
