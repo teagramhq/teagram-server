@@ -87,6 +87,8 @@ type Message struct {
 	// FwdChannelPost is the local_id of the channel post when the source is a
 	// channel; 0 otherwise.
 	FwdChannelPost int32
+	// FwdPostAuthor is the source channel post's stored signature, if any.
+	FwdPostAuthor *string
 }
 
 func messageFromRow(r db.Message) Message {
@@ -130,6 +132,7 @@ func messageFromRow(r db.Message) Message {
 	if r.FwdChannelPost != nil {
 		m.FwdChannelPost = *r.FwdChannelPost
 	}
+	m.FwdPostAuthor = r.FwdPostAuthor
 	return m
 }
 
@@ -1680,6 +1683,8 @@ type ForwardSource struct {
 	ChannelID int64
 	// ChannelPost is the local_id of the channel post when the source is a channel.
 	ChannelPost int32
+	// PostAuthor is the stored signature on a broadcast channel post, if any.
+	PostAuthor *string
 	// FileID is the file attached to the source message; 0 = no media.
 	FileID int64
 }
@@ -1858,9 +1863,11 @@ func (s *Store) ForwardMessages(ctx context.Context, fromID int64, destPeerType 
 		fwdDate := pgtype.Timestamptz{Time: src.Date, Valid: true}
 		var fwdChannelID *int64
 		var fwdChannelPost *int32
+		var fwdPostAuthor *string
 		if src.ChannelID != 0 {
 			fwdChannelID = &src.ChannelID
 			fwdChannelPost = &src.ChannelPost
+			fwdPostAuthor = src.PostAuthor
 		}
 
 		if destPeerType == PeerTypeUser {
@@ -1882,6 +1889,7 @@ func (s *Store) ForwardMessages(ctx context.Context, fromID int64, destPeerType 
 				PeerLocalID: rb.LocalID, FanoutID: 0, ActionType: 0, ActionUserID: 0,
 				FileID: src.FileID, ReplyToMsgID: nil,
 				FwdFromID: &fwdFromID, FwdDate: fwdDate, FwdChannelID: fwdChannelID, FwdChannelPost: fwdChannelPost,
+				FwdPostAuthor: fwdPostAuthor,
 			}); err != nil {
 				return nil, nil, fmt.Errorf("insert sender forward: %w", err)
 			}
@@ -1899,6 +1907,7 @@ func (s *Store) ForwardMessages(ctx context.Context, fromID int64, destPeerType 
 					PeerLocalID: sb.LocalID, FanoutID: 0, ActionType: 0, ActionUserID: 0,
 					FileID: src.FileID, ReplyToMsgID: nil,
 					FwdFromID: &fwdFromID, FwdDate: fwdDate, FwdChannelID: fwdChannelID, FwdChannelPost: fwdChannelPost,
+					FwdPostAuthor: fwdPostAuthor,
 				}); err != nil {
 					return nil, nil, fmt.Errorf("insert dest forward: %w", err)
 				}
@@ -1945,6 +1954,7 @@ func (s *Store) ForwardMessages(ctx context.Context, fromID int64, destPeerType 
 					PeerLocalID: 0, FanoutID: fanoutID, ActionType: 0, ActionUserID: 0,
 					FileID: src.FileID, ReplyToMsgID: nil,
 					FwdFromID: &fwdFromID, FwdDate: fwdDate, FwdChannelID: fwdChannelID, FwdChannelPost: fwdChannelPost,
+					FwdPostAuthor: fwdPostAuthor,
 				}); err != nil {
 					return nil, nil, fmt.Errorf("insert forward %d: %w", uid, err)
 				}
@@ -2047,6 +2057,7 @@ func lockChannelForwardSources(ctx context.Context, qtx *db.Queries, fromID int6
 		sources[i].Text = row.Message
 		sources[i].ChannelID = row.ChannelID
 		sources[i].ChannelPost = int32(row.LocalID) //nolint:gosec // G115: channel ids fit int32 on the wire
+		sources[i].PostAuthor = row.PostAuthor
 		sources[i].FileID = 0
 		if row.FileID != nil {
 			sources[i].FileID = *row.FileID

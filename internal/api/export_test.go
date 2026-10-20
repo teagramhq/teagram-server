@@ -1549,6 +1549,24 @@ func UpdateProfileForTestWithLimits(s *store.Store, userID int64, rateLimit stor
 	return h.handleUpdateProfile(&mtproto.Request{Ctx: context.Background(), UserID: userID, Buf: &buf})
 }
 
+// ToggleSignaturesForTest encodes a toggle request and invokes its channel handler.
+func ToggleSignaturesForTest(s *store.Store, userID int64, req *tg.ChannelsToggleSignaturesRequest) (bin.Encoder, error) {
+	var buf bin.Buffer
+	if err := req.Encode(&buf); err != nil {
+		return nil, err
+	}
+	return testHandlers(s).handleToggleSignatures(&mtproto.Request{Ctx: context.Background(), UserID: userID, Buf: &buf})
+}
+
+// GetFullChannelForTest encodes a request and invokes handleGetFullChannel.
+func GetFullChannelForTest(s *store.Store, userID int64, req *tg.ChannelsGetFullChannelRequest) (bin.Encoder, error) {
+	var buf bin.Buffer
+	if err := req.Encode(&buf); err != nil {
+		return nil, err
+	}
+	return testHandlers(s).handleGetFullChannel(&mtproto.Request{Ctx: context.Background(), UserID: userID, Buf: &buf})
+}
+
 // ClaimChannelUsernameForTest claims a username for a channel atomically
 // (both usernames table and channels.username column), so api_test can exercise
 // the username resolution path without the RPC that claims channel usernames
@@ -1843,8 +1861,15 @@ func UpdateProfileForTestWithLimitsAndMetricsContext(ctx context.Context, s *sto
 // UpdatePasswordSettingsForTest invokes handleUpdatePasswordSettings with a
 // pre-encoded request buffer for the caller.
 func UpdatePasswordSettingsForTest(s *store.Store, userID int64, buf *bin.Buffer) (bin.Encoder, error) {
+	return UpdatePasswordSettingsForTestWithContext(context.Background(), s, userID, buf)
+}
+
+// UpdatePasswordSettingsForTestWithContext invokes handleUpdatePasswordSettings
+// with the caller's context so concurrency tests can cancel blocked database
+// work deterministically.
+func UpdatePasswordSettingsForTestWithContext(ctx context.Context, s *store.Store, userID int64, buf *bin.Buffer) (bin.Encoder, error) {
 	h := testHandlers(s)
-	return h.handleUpdatePasswordSettings(&mtproto.Request{Ctx: context.Background(), UserID: userID, Buf: buf})
+	return h.handleUpdatePasswordSettings(&mtproto.Request{Ctx: ctx, UserID: userID, Buf: buf})
 }
 
 // ProvisionalAllowList exposes the allow-list for tests to verify method IDs.

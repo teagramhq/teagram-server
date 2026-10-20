@@ -187,6 +187,7 @@ func (h *handlers) channelToTLPublic(c store.Channel, participants int64, viewer
 	if c.Username != nil {
 		ch.Username = *c.Username
 	}
+	ch.SetSignatures(c.Signatures)
 	return ch
 }
 

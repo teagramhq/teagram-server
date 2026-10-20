@@ -718,6 +718,16 @@ func (s *Store) PostChannelAlbumAs(ctx context.Context, channelID, replyToMsgID 
 	case err != nil:
 		return ChannelAlbumResult{}, fmt.Errorf("channel post defaults: %w", err)
 	}
+	var postAuthor *string
+	if !channel.Megagroup && channel.Signatures {
+		name, nameErr := channelPostAuthorName(ctx, qtx, fromID)
+		if nameErr != nil {
+			return ChannelAlbumResult{}, nameErr
+		}
+		if name != "" {
+			postAuthor = &name
+		}
+	}
 	if channel.Megagroup {
 		for _, itemRights := range rights {
 			if err = checkDefaultMessageRestriction(channel.DefaultBannedRights, role >= channelRoleAdmin, true, itemRights); err != nil {
@@ -772,7 +782,7 @@ func (s *Store) PostChannelAlbumAs(ctx context.Context, channelID, replyToMsgID 
 	}
 	if err = qtx.InsertChannelAlbumMessages(ctx, db.InsertChannelAlbumMessagesParams{
 		ChannelID: channelID, LocalIds: localIDs, FromID: fromID, Texts: texts, RandomIds: randomIDs,
-		FileIds: fileIDs, ReplyToMsgID: replyTo, GroupedID: a.GroupedID,
+		FileIds: fileIDs, ReplyToMsgID: replyTo, GroupedID: a.GroupedID, PostAuthor: postAuthor,
 	}); err != nil {
 		return ChannelAlbumResult{}, fmt.Errorf("insert channel album: %w", err)
 	}

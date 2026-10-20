@@ -1,4 +1,4 @@
-h1:hmHZ04IuLiLn6+sf+jWJY8urePcBiMhPKUxzOxcHk6s=
+h1:9ljz2Xr7gV68zZIA34fw6O7HUPu6gsHHnJhOy3fnkIM=
 20260721000001_baseline.sql h1:cnO6K1z0Uv3goEvecgJixKSio6ziaB1rF7cQLoCWOxs=
 20260721000002_auth_keys.sql h1:+vNabm6vdEAgu3H5ZGw2Wr8D/Y6i4ikAAUO3JbfZQeE=
 20260721000003_code_hardening.sql h1:8pbAqUpqcwOONUfac+qC51QjfC1JnObNCcXa1HC/dr0=
@@ -102,4 +102,5 @@ h1:hmHZ04IuLiLn6+sf+jWJY8urePcBiMhPKUxzOxcHk6s=
 20261019000095_user_about.sql h1:qrOOxHzVA7qX42jNcwnO/RyEozmq5Oq17dxj59Nab4I=
 20261020000096_channel_pre_history_floor.sql h1:TfYhMbGAFOqRvRbbIrljwSyrQ+xJOtl+88bCbB/4lHY=
 20261020000097_channel_deletion.sql h1:Tcc30t+4vcFaU7O95tH41dEZEaOtWzYcMrSqfMNRgHg=
-20261020000098_history_ttl.sql h1:jGTKlE9Yl4sGx4rjR3yomo0sfGkv2kJ26mTLT1XRN9g=
+20261020000098_broadcast_post_signatures.sql h1:FiDhHlMEJI31Sxh/VBzMoYG3r6ra4CZvRbmldc6sSHY=
+20261020000099_history_ttl.sql h1:nDi6fkS81IjeTKXTOHl2Z78LEe0qmHsfQdJ77dtYFqY=

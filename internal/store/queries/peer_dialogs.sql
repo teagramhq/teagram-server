@@ -38,6 +38,7 @@ SELECT
     c.about AS channel_about,
     c.creator_id AS channel_creator_id,
     c.megagroup AS channel_megagroup,
+    c.signatures AS channel_signatures,
     c.version AS channel_version,
     c.date AS channel_date,
     c.pinned_message_id AS channel_pinned_message_id,
@@ -66,7 +67,8 @@ SELECT
     top.file_id AS top_file_id,
     top.reply_to_msg_id AS top_reply_to_msg_id,
     COALESCE(top.action_type, 0)::smallint AS top_action_type,
-    COALESCE(top.ttl_period, 0)::integer AS top_ttl_period
+    COALESCE(top.ttl_period, 0)::integer AS top_ttl_period,
+    top.post_author AS top_post_author
 FROM channels c
 JOIN channel_participants p ON p.channel_id = c.id
 JOIN channel_state cs ON cs.channel_id = c.id
@@ -88,7 +90,8 @@ CROSS JOIN LATERAL (
 ) AS unread
 LEFT JOIN LATERAL (
     SELECT cm.local_id, cm.from_id, cm.date, cm.message, cm.edit_date,
-           cm.random_id, cm.grouped_id, cm.file_id, cm.reply_to_msg_id, cm.action_type, cm.ttl_period
+           cm.random_id, cm.grouped_id, cm.file_id, cm.reply_to_msg_id, cm.action_type,
+           cm.ttl_period, cm.post_author
     FROM channel_messages cm
     WHERE cm.channel_id = c.id AND cm.deleted = false
       AND (cm.expires_at IS NULL OR cm.expires_at > statement_timestamp())

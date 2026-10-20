@@ -73,6 +73,9 @@ type Config struct {
 	// It is optional for legacy single-replica deployments, but required when
 	// TG_REPLICA_ID identifies this process as part of a replica deployment.
 	ExpectedRSAFingerprint *int64
+	// AdvertiseDemoGuestSignUp advertises demo guest sign-up availability in
+	// discovery only; it does not change account registration policy.
+	AdvertiseDemoGuestSignUp bool
 	// RegistrationMode controls whether auth.signUp is available.
 	RegistrationMode RegistrationMode
 	// PublicRegistrationMode controls auth.signUp on the public WebSocket
@@ -337,6 +340,9 @@ type ClientConfig struct {
 	AdvertiseHost string
 	AdvertisePort int
 	DCID          int
+	// AdvertiseDemoGuestSignUp is an availability hint only; registration
+	// policy remains controlled by the server's registration configuration.
+	AdvertiseDemoGuestSignUp bool
 }
 
 // ClientAddrTrust names the source a client address is taken from.
@@ -616,6 +622,13 @@ func LoadClientConfig() (ClientConfig, error) {
 	if cfg.DCID <= 0 || int64(cfg.DCID) > math.MaxInt32 {
 		return ClientConfig{}, errors.New("TG_DC_ID must be positive and fit int32")
 	}
+	if v := os.Getenv("TG_ADVERTISE_DEMO_GUEST_SIGN_UP"); v != "" {
+		enabled, err := strconv.ParseBool(v)
+		if err != nil {
+			return ClientConfig{}, errors.New("TG_ADVERTISE_DEMO_GUEST_SIGN_UP must be a boolean")
+		}
+		cfg.AdvertiseDemoGuestSignUp = enabled
+	}
 	if os.Getenv("TG_ADVERTISE_ADDR") == "" {
 		if _, _, err := net.SplitHostPort(listenAddr); err != nil {
 			return ClientConfig{}, errors.New("TG_LISTEN_ADDR must be host:port when TG_ADVERTISE_ADDR is unset")
@@ -776,6 +789,7 @@ func Load(log *slog.Logger) (Config, error) {
 		RSAKeyPath:                    identity.RSAKeyPath,
 		AdvertiseHost:                 identity.AdvertiseHost,
 		AdvertisePort:                 identity.AdvertisePort,
+		AdvertiseDemoGuestSignUp:      identity.AdvertiseDemoGuestSignUp,
 		DCID:                          identity.DCID,
 		BlobDir:                       envOr("TG_BLOB_DIR", "blobs"),
 

@@ -65,6 +65,7 @@ type Channel struct {
 	SlowmodeSeconds      int16
 	PreHistoryHidden     bool
 	DeletedAt            pgtype.Timestamptz
+	Signatures           bool
 	TtlPeriod            int32
 }
 
@@ -103,6 +104,7 @@ type ChannelMessage struct {
 	ReplyToMsgID *int32
 	ActionType   int16
 	GroupedID    *int64
+	PostAuthor   *string
 	TtlPeriod    int32
 	ExpiresAt    pgtype.Timestamptz
 }
@@ -461,6 +463,7 @@ type Message struct {
 	MessageTsv     interface{}
 	ReplyToTrusted bool
 	GroupedID      *int64
+	FwdPostAuthor  *string
 	TtlPeriod      int32
 	ExpiresAt      pgtype.Timestamptz
 }

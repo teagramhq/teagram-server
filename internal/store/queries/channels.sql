@@ -36,7 +36,15 @@ SELECT megagroup FROM channels WHERE id = $1;
 -- and random_id deduplication. Keep slowmode_seconds out of this projection so
 -- a default-rights refusal takes precedence without observing slow-mode state.
 -- name: ChannelPostDefaults :one
-SELECT megagroup, default_banned_rights FROM channels WHERE id = $1;
+SELECT megagroup, default_banned_rights, signatures FROM channels WHERE id = $1;
+
+-- SetChannelSignatures writes the broadcast setting after the caller's current
+-- membership, role, channel kind and equality have been checked under LockChannel.
+-- name: SetChannelSignatures :one
+UPDATE channels
+SET signatures = $2, version = version + 1
+WHERE id = $1
+RETURNING *;
 
 -- ChannelSlowModePostState is called only after membership, ban, post rights,
 -- deduplication and default restrictions are decided. clock_timestamp() is
@@ -394,7 +402,7 @@ ORDER BY c.id;
 -- channels.username is only a denormalized copy.
 -- name: AdminedPublicChannels :many
 SELECT c.id, c.title, c.about, c.creator_id, c.megagroup, c.version, c.date,
-       c.pinned_message_id, un.handle, p.role
+       c.pinned_message_id, c.signatures, un.handle, p.role
 FROM channel_participants p
 JOIN channels c ON c.id = p.channel_id
 JOIN usernames un ON un.owner_type = 'channel' AND un.owner_id = c.id
@@ -427,6 +435,7 @@ SELECT
     c.about,
     c.creator_id,
     c.megagroup,
+    c.signatures,
     c.version,
     c.username,
     c.default_banned_rights,
@@ -458,6 +467,7 @@ SELECT
     top.reply_to_msg_id        AS top_reply_to_msg_id,
     COALESCE(top.action_type, 0)::smallint AS top_action_type,
     COALESCE(top.ttl_period, 0)::integer AS top_ttl_period,
+    top.post_author AS top_post_author,
     EXISTS (
         SELECT 1 FROM user_dialog_pins pin
         WHERE pin.owner_id = p.user_id AND pin.peer_type = 3
@@ -484,7 +494,8 @@ CROSS JOIN LATERAL (
 ) AS unread
 LEFT JOIN LATERAL (
     SELECT cm.channel_id, cm.local_id, cm.from_id, cm.date, cm.message, cm.edit_date,
-           cm.deleted, cm.random_id, cm.grouped_id, cm.file_id, cm.reply_to_msg_id, cm.action_type, cm.ttl_period
+           cm.deleted, cm.random_id, cm.grouped_id, cm.file_id, cm.reply_to_msg_id, cm.action_type,
+           cm.ttl_period, cm.post_author
     FROM channel_messages cm
     WHERE cm.channel_id = c.id AND cm.deleted = false
       AND (cm.expires_at IS NULL OR cm.expires_at > statement_timestamp())
@@ -596,7 +607,7 @@ RETURNING handle;
 -- usernames primary key.
 -- name: SearchPublicChannels :many
 SELECT c.id, c.title, c.about, c.creator_id, c.megagroup, c.version, c.date,
-       c.pinned_message_id, un.handle,
+       c.pinned_message_id, c.signatures, un.handle,
        (SELECT count(*) FROM channel_participants cp WHERE cp.channel_id = c.id) AS participants_count
 FROM channels c
 JOIN usernames un ON un.owner_type = 'channel' AND un.owner_id = c.id
@@ -660,7 +671,7 @@ LIMIT sqlc.arg(lim)::int;
 -- a per-row aggregate over channel_participants whose result is discarded.
 -- name: SearchMemberChannels :many
 SELECT c.id, c.title, c.about, c.creator_id, c.megagroup, c.version, c.date,
-       c.pinned_message_id, un.handle, p.role
+       c.pinned_message_id, c.signatures, un.handle, p.role
 FROM channels c
 JOIN channel_participants p ON p.channel_id = c.id AND p.user_id = sqlc.arg(viewer_id)::bigint
 LEFT JOIN usernames un ON un.owner_type = 'channel' AND un.owner_id = c.id

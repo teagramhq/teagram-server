@@ -121,6 +121,7 @@ type Channel struct {
 	About           string
 	CreatorID       int64
 	Megagroup       bool
+	Signatures      bool
 	Version         int
 	TTLPeriod       int
 	Date            time.Time
@@ -181,6 +182,7 @@ func channelFromRow(r db.Channel) Channel {
 		About:               r.About,
 		CreatorID:           r.CreatorID,
 		Megagroup:           r.Megagroup,
+		Signatures:          r.Signatures,
 		Version:             int(r.Version),
 		TTLPeriod:           int(r.TtlPeriod),
 		Date:                r.Date.Time,
@@ -1014,6 +1016,46 @@ func (s *Store) beginChannelInfoMutation(
 	return tx, qtx, channel, nil
 }
 
+// SetChannelSignatures replaces a broadcast channel's signature setting after
+// the caller's current change_info authority has been checked under LockChannel.
+func (s *Store) SetChannelSignatures(
+	ctx context.Context, channelID, callerID int64, enabled bool,
+) (Channel, ChannelMember, error) {
+	tx, qtx, locked, err := s.beginChannelInfoMutation(ctx, channelID, callerID)
+	if err != nil {
+		return Channel{}, ChannelMember{}, err
+	}
+	defer func() { _ = tx.Rollback(ctx) }() //nolint:errcheck // no-op after commit
+	if locked.Megagroup {
+		return Channel{}, ChannelMember{}, ErrNotMember
+	}
+	participant, err := qtx.ChannelParticipantByUser(ctx, db.ChannelParticipantByUserParams{
+		ChannelID: channelID,
+		UserID:    callerID,
+	})
+	if err != nil {
+		return Channel{}, ChannelMember{}, fmt.Errorf("caller participant for signatures: %w", err)
+	}
+	member := channelMemberFromRow(participant)
+	if locked.Signatures == enabled {
+		if err = tx.Commit(ctx); err != nil {
+			return Channel{}, ChannelMember{}, fmt.Errorf("commit unchanged channel signatures: %w", err)
+		}
+		return channelFromRow(locked), member, nil
+	}
+	row, err := qtx.SetChannelSignatures(ctx, db.SetChannelSignaturesParams{
+		ID:         channelID,
+		Signatures: enabled,
+	})
+	if err != nil {
+		return Channel{}, ChannelMember{}, fmt.Errorf("set channel signatures: %w", err)
+	}
+	if err = tx.Commit(ctx); err != nil {
+		return Channel{}, ChannelMember{}, fmt.Errorf("commit channel signatures: %w", err)
+	}
+	return channelFromRow(row), member, nil
+}
+
 // SetChannelTitle stores the new title and its service-message event
 // atomically. The channel row lock serializes permissions and title changes;
 // channel_state then allocates the event's existing channel pts slot.
@@ -1526,6 +1568,7 @@ func (s *Store) AdminedPublicChannels(ctx context.Context, userID int64) ([]Admi
 				About:           r.About,
 				CreatorID:       r.CreatorID,
 				Megagroup:       r.Megagroup,
+				Signatures:      r.Signatures,
 				Version:         int(r.Version),
 				Date:            r.Date.Time,
 				PinnedMessageID: r.PinnedMessageID,
@@ -1624,6 +1667,7 @@ func (s *Store) SearchPublicChannels(ctx context.Context, query string, limit in
 				About:           r.About,
 				CreatorID:       r.CreatorID,
 				Megagroup:       r.Megagroup,
+				Signatures:      r.Signatures,
 				Version:         int(r.Version),
 				Date:            r.Date.Time,
 				PinnedMessageID: r.PinnedMessageID,
@@ -1678,6 +1722,7 @@ func (s *Store) SearchMemberChannels(
 				About:           r.About,
 				CreatorID:       r.CreatorID,
 				Megagroup:       r.Megagroup,
+				Signatures:      r.Signatures,
 				Version:         int(r.Version),
 				Date:            r.Date.Time,
 				PinnedMessageID: r.PinnedMessageID,
@@ -1742,6 +1787,7 @@ func (s *Store) ChannelDialogsForUserWithPins(ctx context.Context, userID int64,
 			About:               r.About,
 			CreatorID:           r.CreatorID,
 			Megagroup:           r.Megagroup,
+			Signatures:          r.Signatures,
 			Version:             int(r.Version),
 			TTLPeriod:           int(r.ChannelTtlPeriod),
 			Date:                r.ChannelDate.Time,
@@ -1778,6 +1824,7 @@ func (s *Store) ChannelDialogsForUserWithPins(ctx context.Context, userID int64,
 				r.TopReplyToMsgID,
 				r.TopActionType,
 				r.TopTtlPeriod,
+				r.TopPostAuthor,
 			})
 			row.Top = &top
 		}

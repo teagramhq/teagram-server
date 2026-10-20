@@ -423,7 +423,7 @@ func (h *handlers) handleUpdatePasswordSettings(r *mtproto.Request) (bin.Encoder
 		if len(ns.NewPasswordHash) != srp.PadLen || !srp.ValidVerifier(ns.NewPasswordHash) {
 			return nil, errNewPasswordBad
 		}
-		if err := h.store.UpsertPassword(r.Ctx, store.UserPassword{
+		password := store.UserPassword{
 			UserID:        r.UserID,
 			Salt1:         algo.Salt1,
 			Salt2:         algo.Salt2,
@@ -431,9 +431,21 @@ func (h *handlers) handleUpdatePasswordSettings(r *mtproto.Request) (bin.Encoder
 			Hint:          ns.Hint,
 			RecoveryEmail: ns.Email,
 			HasRecovery:   ns.Email != "",
-		}); err != nil {
-			h.log.Error("update password: upsert", "user_id", r.UserID, "err", err)
-			return nil, errInternal
+		}
+		if hasCur {
+			if err := h.store.UpsertPassword(r.Ctx, password); err != nil {
+				h.log.Error("update password: upsert", "user_id", r.UserID, "err", err)
+				return nil, errInternal
+			}
+		} else {
+			inserted, err := h.store.InsertPasswordIfAbsent(r.Ctx, password)
+			if err != nil {
+				h.log.Error("update password: insert", "user_id", r.UserID, "err", err)
+				return nil, errInternal
+			}
+			if !inserted {
+				return nil, errPasswordHashInvalid
+			}
 		}
 		return &tg.BoolTrue{}, nil
 

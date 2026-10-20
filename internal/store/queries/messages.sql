@@ -1,8 +1,9 @@
 -- name: InsertMessage :exec
 INSERT INTO messages (owner_id, local_id, peer_type, peer_id, from_id, message, out, random_id, peer_local_id,
                       fanout_id, action_type, action_user_id, file_id, reply_to_msg_id,
-                      fwd_from_id, fwd_date, fwd_channel_id, fwd_channel_post, reply_to_trusted, ttl_period)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20);
+                      fwd_from_id, fwd_date, fwd_channel_id, fwd_channel_post,
+                      fwd_post_author, reply_to_trusted, ttl_period)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21);
 
 -- ActiveOrdinaryMessageInDialog is the authoritative lookup for a client reply.
 -- It deliberately checks owner-local id, exact peer namespace, live state, and
