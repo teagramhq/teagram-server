@@ -144,7 +144,7 @@ func (h *handlers) setChatHistoryTTLAfterReply(
 func (h *handlers) setChannelHistoryTTLAfterReply(
 	r *mtproto.Request, channelID int64, period int,
 ) (bin.Encoder, *replyUpdate, func(), error) {
-	_, service, pts, changed, err := h.store.SetChannelHistoryTTL(r.Ctx, channelID, r.UserID, period, historyTTLRateLimit)
+	channel, service, pts, changed, err := h.store.SetChannelHistoryTTL(r.Ctx, channelID, r.UserID, period, historyTTLRateLimit)
 	if err != nil {
 		return nil, nil, nil, h.mapHistoryTTLError(r, "channel", channelID, err)
 	}
@@ -163,7 +163,7 @@ func (h *handlers) setChannelHistoryTTLAfterReply(
 		h.log.Error("set channel history TTL: load user", "user_id", r.UserID, "channel_id", channelID, "err", err)
 		return nil, nil, nil, errInternal
 	}
-	message, err := channelMessageToTL(service, r.UserID, nil)
+	message, err := channelMessageToTL(service, r.UserID, nil, !channel.Megagroup)
 	if err != nil {
 		h.notifyChannelPost(r.Ctx, channelID)
 		h.log.Error("set channel history TTL: render service message", "channel_id", channelID, "local_id", service.LocalID, "err", err)

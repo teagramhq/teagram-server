@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strconv"
 	"strings"
 	"time"
@@ -39,6 +40,17 @@ const (
 	maxChannelInviteTargets         = 100
 	defaultChannelDifferenceTimeout = 30
 )
+
+func (h *handlers) channelIsBroadcast(ctx context.Context, channelID int64) (bool, error) {
+	channel, ok, err := h.store.ChannelByID(ctx, channelID)
+	if err != nil {
+		return false, fmt.Errorf("load channel %d: %w", channelID, err)
+	}
+	if !ok {
+		return false, fmt.Errorf("channel %d not found", channelID)
+	}
+	return !channel.Megagroup, nil
+}
 
 // slowModeSecondsValue maps a client interval to the database representation.
 func slowModeSecondsValue(seconds int) (int16, bool) {
@@ -175,7 +187,7 @@ func (h *handlers) handleCreateChannel(r *mtproto.Request) (bin.Encoder, error) 
 		h.log.Error("create channel users", "channel_id", ch.ID, "err", err)
 		return nil, errInternal
 	}
-	message, err := channelMessageToTL(createMessage, r.UserID, nil)
+	message, err := channelMessageToTL(createMessage, r.UserID, nil, !ch.Megagroup)
 	if err != nil {
 		h.log.Error("render channel create message", "channel_id", ch.ID, "local_id", createMessage.LocalID, "err", err)
 		return nil, errInternal
@@ -211,7 +223,7 @@ func (h *handlers) handleEditChannelTitle(r *mtproto.Request) (bin.Encoder, erro
 		return nil, err
 	}
 
-	_, service, pts, err := h.store.SetChannelTitle(r.Ctx, channelID, r.UserID, title)
+	channel, service, pts, err := h.store.SetChannelTitle(r.Ctx, channelID, r.UserID, title)
 	switch {
 	case errors.Is(err, store.ErrNotMember):
 		return nil, errPeerIDInvalid
@@ -235,7 +247,7 @@ func (h *handlers) handleEditChannelTitle(r *mtproto.Request) (bin.Encoder, erro
 		h.log.Error("edit channel title users", "channel_id", channelID, "err", err)
 		return nil, errInternal
 	}
-	message, err := channelMessageToTL(service, r.UserID, nil)
+	message, err := channelMessageToTL(service, r.UserID, nil, !channel.Megagroup)
 	if err != nil {
 		h.log.Error("render channel title service message", "channel_id", channelID, "local_id", service.LocalID, "err", err)
 		return nil, errInternal
@@ -613,6 +625,47 @@ func (h *handlers) handleLeaveChannel(r *mtproto.Request) (bin.Encoder, error) {
 	}, nil
 }
 
+// handleDeleteChannel removes a channel from every participant's account and
+// revokes its admission paths. Content cleanup runs later in resumable batches;
+// the store commit already makes every read unauthorized.
+func (h *handlers) handleDeleteChannel(r *mtproto.Request) (bin.Encoder, error) {
+	var req tg.ChannelsDeleteChannelRequest
+	if err := req.Decode(r.Buf); err != nil {
+		return nil, errMethodNotImpl
+	}
+	if r.UserID == 0 {
+		return nil, errAuthKeyUnreg
+	}
+	channelID, err := h.inputChannelID(req.Channel, r.UserID)
+	if err != nil {
+		return nil, err
+	}
+	memberIDs, err := h.store.DeleteChannel(r.Ctx, channelID, r.UserID)
+	switch {
+	case errors.Is(err, store.ErrChannelCreatorRequired):
+		return nil, errChatAdminRequired
+	case errors.Is(err, store.ErrNotMember):
+		return nil, errPeerIDInvalid
+	case err != nil:
+		h.log.Error("delete channel", "channel_id", channelID, "user_id", r.UserID, "err", err)
+		return nil, errInternal
+	}
+	for _, memberID := range memberIDs {
+		h.notifyChannelRemoval(r.Ctx, memberID, channelID)
+	}
+
+	chats, err := h.loadChannels(r.Ctx, map[int64]bool{channelID: true}, r.UserID)
+	if err != nil {
+		h.log.Error("delete channel render", "channel_id", channelID, "user_id", r.UserID, "err", err)
+		return nil, errInternal
+	}
+	return &tg.Updates{
+		Updates: []tg.UpdateClass{&tg.UpdateChannel{ChannelID: channelID}},
+		Chats:   chats,
+		Date:    int(time.Now().Unix()),
+	}, nil
+}
+
 // maxChannelMessagesPerCall caps the ids one channels.getMessages may name, so
 // a single call cannot ask the server to hydrate an unbounded batch.
 const maxChannelMessagesPerCall = 100
@@ -663,6 +716,11 @@ func (h *handlers) sendChannelMessage(r *mtproto.Request, channelID int64, req *
 			return nil, errInternal
 		}
 		if duplicate {
+			broadcast, kindErr := h.channelIsBroadcast(r.Ctx, channelID)
+			if kindErr != nil {
+				h.log.Error("load channel kind for retry", "user_id", r.UserID, "channel_id", channelID, "err", kindErr)
+				return nil, errInternal
+			}
 			// Retry: return the stored post, at the pts it occupies, without
 			// rate-limiting. Never the channel's current pts — see
 			// store.ErrPtsUnknown for what a subscriber loses to that.
@@ -676,7 +734,7 @@ func (h *handlers) sendChannelMessage(r *mtproto.Request, channelID int64, req *
 				h.log.Error("load users on retry", "err", err)
 				return nil, errInternal
 			}
-			message, err := channelMessageToTL(existing, r.UserID, nil)
+			message, err := channelMessageToTL(existing, r.UserID, nil, broadcast)
 			if err != nil {
 				h.log.Error("render channel retry message", "channel_id", channelID, "local_id", existing.LocalID, "err", err)
 				return nil, errInternal
@@ -725,6 +783,11 @@ func (h *handlers) sendChannelMessage(r *mtproto.Request, channelID int64, req *
 	if !dup {
 		h.notifyChannelPost(r.Ctx, channelID)
 	}
+	broadcast, kindErr := h.channelIsBroadcast(r.Ctx, channelID)
+	if kindErr != nil {
+		h.log.Error("load channel kind for send", "user_id", r.UserID, "channel_id", channelID, "err", kindErr)
+		return nil, errInternal
+	}
 
 	channels, err := h.loadChannels(r.Ctx, map[int64]bool{channelID: true}, r.UserID)
 	if err != nil {
@@ -736,7 +799,7 @@ func (h *handlers) sendChannelMessage(r *mtproto.Request, channelID int64, req *
 		h.log.Error("send channel message users", "err", err)
 		return nil, errInternal
 	}
-	message, err := channelMessageToTL(msg, r.UserID, nil)
+	message, err := channelMessageToTL(msg, r.UserID, nil, broadcast)
 	if err != nil {
 		h.log.Error("render channel message", "channel_id", channelID, "local_id", msg.LocalID, "err", err)
 		return nil, errInternal
@@ -802,7 +865,12 @@ func (h *handlers) handleGetChannelDifference(r *mtproto.Request) (bin.Encoder, 
 		return empty, nil
 	}
 
-	b, err := h.buildChannelUpdates(r.Ctx, channelID, r.UserID, fromPts, limit, currentPts)
+	broadcast, err := h.channelIsBroadcast(r.Ctx, channelID)
+	if err != nil {
+		h.log.Error("load channel kind for difference", "channel_id", channelID, "err", err)
+		return nil, errInternal
+	}
+	b, err := h.buildChannelUpdates(r.Ctx, channelID, r.UserID, fromPts, limit, currentPts, broadcast)
 	if err != nil {
 		h.log.Error("channel difference build", "channel_id", channelID, "err", err)
 		return nil, errInternal
@@ -1078,6 +1146,11 @@ func (h *handlers) channelMessagesWithCount(
 	msgs []store.ChannelMessage,
 	count int,
 ) (bin.Encoder, error) {
+	broadcast, err := h.channelIsBroadcast(r.Ctx, channelID)
+	if err != nil {
+		h.log.Error("load channel kind for messages", "channel_id", channelID, "err", err)
+		return nil, errInternal
+	}
 	if err := h.attachChannelPollViews(r.Ctx, r.UserID, channelID, msgs); err != nil {
 		h.log.Error("channel poll messages", "user_id", r.UserID, "channel_id", channelID, "err", err)
 		return nil, errInternal
@@ -1092,13 +1165,13 @@ func (h *handlers) channelMessagesWithCount(
 	authors := map[int64]bool{r.UserID: true}
 	tlMsgs := make([]tg.MessageClass, len(msgs))
 	for i, m := range msgs {
-		message, renderErr := channelMessageToTL(m, r.UserID, files)
+		message, renderErr := channelMessageToTL(m, r.UserID, files, broadcast)
 		if renderErr != nil {
 			h.log.Error("render channel history message", "user_id", r.UserID, "channel_id", channelID, "local_id", m.LocalID, "err", renderErr)
 			return nil, errInternal
 		}
 		tlMsgs[i] = message
-		if !m.Deleted {
+		if !m.Deleted && (!broadcast || m.Action != store.ChannelMessageActionNone) {
 			authors[m.FromID] = true
 		}
 	}
@@ -1214,6 +1287,9 @@ func (h *handlers) handleExportChatInvite(r *mtproto.Request) (bin.Encoder, erro
 
 	hash, err := h.store.CreateChannelInvite(r.Ctx, channelID, r.UserID)
 	if err != nil {
+		if errors.Is(err, store.ErrNotMember) {
+			return nil, errPeerIDInvalid
+		}
 		h.log.Error("export chat invite create", "channel_id", channelID, "user_id", r.UserID, "err", err)
 		return nil, errInternal
 	}
@@ -1818,7 +1894,7 @@ func (h *handlers) handleCheckChannelUsername(r *mtproto.Request) (bin.Encoder, 
 		return nil, errInternal
 	}
 
-	_, occupied, err := h.store.UsernameByHandle(r.Ctx, username)
+	occupied, err := h.store.UsernameHandleTaken(r.Ctx, username)
 	if err != nil {
 		h.log.Error("check channel username: lookup", "user_id", r.UserID, "err", err)
 		return nil, errInternal

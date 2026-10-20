@@ -254,6 +254,9 @@ var (
 	ErrPeerBlockedUser         = errors.New("peer blocked caller")
 	ErrHistoryTTLPeerInvalid   = errors.New("history TTL peer invalid")
 	ErrHistoryTTLPeriodInvalid = errors.New("history TTL period invalid")
+	// ErrChannelCreatorRequired is returned when a current channel member is
+	// not the creator attempting to delete the channel.
+	ErrChannelCreatorRequired = errors.New("channel creator required")
 	// ErrChannelTitleNotModified is returned when an authorized channel title
 	// edit repeats the current value.
 	ErrChannelTitleNotModified = errors.New("channel title not modified")

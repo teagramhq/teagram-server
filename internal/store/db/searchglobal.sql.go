@@ -12,7 +12,9 @@ import (
 )
 
 const channelPostDate = `-- name: ChannelPostDate :one
-SELECT date FROM channel_messages WHERE channel_id = $1 AND local_id = $2
+SELECT date FROM channel_messages
+WHERE channel_id = $1 AND local_id = $2
+  AND EXISTS (SELECT 1 FROM channels c WHERE c.id = $1 AND c.deleted_at IS NULL)
 `
 
 type ChannelPostDateParams struct {

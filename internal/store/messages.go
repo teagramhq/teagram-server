@@ -2010,6 +2010,13 @@ func lockChannelForwardSources(ctx context.Context, qtx *db.Queries, fromID int6
 	} else if err != nil {
 		return fmt.Errorf("authorize channel forward source: %w", err)
 	}
+	channel, err := qtx.ChannelByID(ctx, channelID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return ErrNotMember
+	}
+	if err != nil {
+		return fmt.Errorf("load channel forward source kind: %w", err)
+	}
 
 	postIDs := make([]int64, len(sources))
 	for i, src := range sources {
@@ -2033,6 +2040,9 @@ func lockChannelForwardSources(ctx context.Context, qtx *db.Queries, fromID int6
 			return ErrMessageInvalid
 		}
 		sources[i].FromID = row.FromID
+		if !channel.Megagroup {
+			sources[i].FromID = 0
+		}
 		sources[i].Date = row.Date.Time
 		sources[i].Text = row.Message
 		sources[i].ChannelID = row.ChannelID

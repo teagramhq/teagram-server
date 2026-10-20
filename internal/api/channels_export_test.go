@@ -135,6 +135,26 @@ func GetChannelDifferenceForTest(s *store.Store, userID int64, req *tg.UpdatesGe
 	return testHandlers(s).handleGetChannelDifference(&mtproto.Request{Ctx: context.Background(), UserID: userID, Buf: &buf})
 }
 
+// BuildChannelUpdatesForTest renders the next channel update batch the live
+// push path builds for a member.
+func BuildChannelUpdatesForTest(s *store.Store, userID, channelID int64, fromPts, limit int) (bin.Encoder, error) {
+	h := testHandlers(s)
+	ctx := context.Background()
+	currentPts, err := s.ChannelState(ctx, channelID)
+	if err != nil {
+		return nil, err
+	}
+	broadcast, err := h.channelIsBroadcast(ctx, channelID)
+	if err != nil {
+		return nil, err
+	}
+	batch, err := h.buildChannelUpdates(ctx, channelID, userID, fromPts, limit, currentPts, broadcast)
+	if err != nil {
+		return nil, err
+	}
+	return &tg.Updates{Updates: batch.ups, Users: batch.users, Chats: batch.chats}, nil
+}
+
 // RevokeExportedChatInviteForTest invokes handleRevokeExportedChatInvite for the caller.
 func RevokeExportedChatInviteForTest(s *store.Store, userID, channelID int64, hash string, linkPrefixes ...string) (bin.Encoder, error) {
 	return revokeExportedChatInviteForTest(testHandlers(s, linkPrefixes...), userID, channelID, hash)

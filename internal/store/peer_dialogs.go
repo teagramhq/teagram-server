@@ -257,7 +257,7 @@ func (s *Store) peerDialogsSnapshotInTx(ctx context.Context, tx pgx.Tx, ownerID 
 			snapshot.ExplicitUserPeers[peer.PeerID] = true
 		}
 	}
-	userIDs = peerDialogUserIDs(ownerID, snapshot.Dialogs, snapshot.ChatMembers, snapshot.ChatMembership, peers)
+	userIDs = peerDialogUserIDs(ownerID, snapshot.Dialogs, snapshot.ChatMembers, snapshot.ChatMembership, snapshot.Channels, peers)
 	userRows, err := qtx.UsersByID(ctx, userIDs)
 	if err != nil {
 		return PeerDialogsSnapshot{}, fmt.Errorf("peer dialog users: %w", err)
@@ -335,7 +335,7 @@ func selectedChatIDs(dialogs []PeerDialog) []int64 {
 	return ids
 }
 
-func peerDialogUserIDs(ownerID int64, dialogs []PeerDialog, chatMembers map[int64][]Participant, chatMembership map[int64]bool, requestedPeers []PeerDialogKey) []int64 {
+func peerDialogUserIDs(ownerID int64, dialogs []PeerDialog, chatMembers map[int64][]Participant, chatMembership map[int64]bool, channels map[int64]Channel, requestedPeers []PeerDialogKey) []int64 {
 	seen := map[int64]bool{ownerID: true}
 	ids := []int64{ownerID}
 	add := func(id int64) {
@@ -369,7 +369,7 @@ func peerDialogUserIDs(ownerID int64, dialogs []PeerDialog, chatMembers map[int6
 				}
 			}
 		case PeerTypeChannel:
-			if d.ChannelMessage != nil {
+			if d.ChannelMessage != nil && (channels[d.Dialog.PeerID].Megagroup || d.ChannelMessage.Action != ChannelMessageActionNone) {
 				add(d.ChannelMessage.FromID)
 			}
 		}

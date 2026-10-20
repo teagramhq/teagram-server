@@ -67,6 +67,7 @@ SELECT p.id, p.creator_id, p.random_id, p.source_local_id, p.question, p.public_
 FROM polls p
 JOIN channel_poll_messages cpm ON cpm.poll_id = p.id
 JOIN channel_messages cm ON cm.channel_id = cpm.channel_id AND cm.local_id = cpm.local_id
+JOIN channels c ON c.id = cpm.channel_id AND c.deleted_at IS NULL
 WHERE cpm.channel_id = $1
   AND cpm.local_id = $2
   AND cm.deleted = false

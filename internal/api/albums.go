@@ -360,9 +360,14 @@ func (h *handlers) channelAlbumResponse(
 		h.log.Error("load channel album files", "channel_id", channelID, "err", err)
 		return nil, nil, nil, errInternal
 	}
+	broadcast, err := h.channelIsBroadcast(r.Ctx, channelID)
+	if err != nil {
+		h.log.Error("load channel album kind", "channel_id", channelID, "err", err)
+		return nil, nil, nil, errInternal
+	}
 	res := &tg.Updates{Chats: channels, Users: users, Date: int(album.Messages[0].Date.Unix())}
 	for i, message := range album.Messages {
-		messageTL, renderErr := channelMessageToTL(message, r.UserID, files)
+		messageTL, renderErr := channelMessageToTL(message, r.UserID, files, broadcast)
 		if renderErr != nil {
 			h.log.Error("render channel album message", "channel_id", channelID, "local_id", message.LocalID, "err", renderErr)
 			return nil, nil, nil, errInternal
