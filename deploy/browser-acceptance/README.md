@@ -376,6 +376,21 @@ transactions and a statement timeout. It has only `EXECUTE` on those functions,
 with no table, sequence, enrollment, trigger-function or write privileges. The
 probe never writes to the database or revokes a key.
 
+### Database diagnostic threat model
+
+PostgreSQL stderr is untrusted and potentially sensitive: it can contain host,
+database and role names, SQL or function names, and arbitrary server-controlled
+text. On a failed query, the host probe holds at most 16 KiB of stderr in
+memory while mapping recognized SQLSTATEs or messages to a fixed category;
+oversized or unrecognized diagnostics become `unknown`. The captured text is
+discarded after classification. Only the fixed category can cross into probe
+stdout or wrapper JSON, and only with `database-unavailable`. Raw diagnostics,
+SQLSTATEs, connection settings, credential contents and exception causes are
+not written to logs, stdout, stderr or persistent evidence; diagnostics are
+never forwarded into a container. This keeps database-controlled text out of
+logs and evidence consumers; a privileged observer on the host may still
+inspect the probe's memory while it runs.
+
 Before credential forwarding, every running teagramd process must have
 `TG_REGISTRATION=closed` or `TG_REGISTRATION=open`, with the same setting on
 every replica, and `TG_LOG_LOGIN_CODES=false`. Docker's projection returns only
@@ -441,7 +456,7 @@ straddle, or an excess pending count yields `cleanup-unproven`; there is no
 retry or host revocation.
 Counters, witness, epoch and DB cut time never leave probe memory.
 
-Probe stdout is one flat JSON line with exactly `schemaVersion` (4),
+Probe stdout is one flat JSON line with exactly `schemaVersion` (5),
 `serverSourceCommit`, `ok`, `code`, `registrationMode`, `accountEvidence`,
 `accountsUnchanged`,
 `loginCodesDisabled`, `revisionMatched`,

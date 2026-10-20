@@ -120,7 +120,7 @@ if [[ -e '${directory}/db-error-connect' ]]; then
   exit 86
 fi
 if [[ -e '${directory}/db-error-auth' ]]; then
-  printf '%s\\n' 'psql: error: FATAL: password authentication failed for user "browser_acceptance_probe"' >&2
+  printf '%s\\n' 'psql: error: FATAL: password authentication failed for user "browser_acceptance_probe" (${privateCanary})' >&2
   exit 86
 fi
 if [[ -e '${directory}/db-error-query' ]]; then
@@ -374,6 +374,7 @@ test("database probe steps map to fixed redacted categories", async (t) => {
       assert.equal(proof.databaseFailureCategory, category);
       assert.equal(result.stderr, "");
       assert.doesNotMatch(result.stdout, /127[.]0[.]0[.]1|browser_acceptance_probe|browser_acceptance_binding_snapshot_v1/u);
+      assert.doesNotMatch(result.stdout, new RegExp(privateCanary, "u"));
     });
   }
 });
