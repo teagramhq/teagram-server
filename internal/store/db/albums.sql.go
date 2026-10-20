@@ -69,7 +69,7 @@ func (q *Queries) BumpStateBy(ctx context.Context, arg BumpStateByParams) (BumpS
 
 const channelMessagesByRandomIDs = `-- name: ChannelMessagesByRandomIDs :many
 SELECT channel_id, local_id, from_id, date, message, edit_date, deleted,
-       random_id, grouped_id, file_id, reply_to_msg_id, action_type
+       random_id, grouped_id, file_id, reply_to_msg_id, action_type, ttl_period
 FROM channel_messages
 WHERE channel_id = $1::bigint
   AND random_id = ANY($2::bigint[])
@@ -95,6 +95,7 @@ type ChannelMessagesByRandomIDsRow struct {
 	FileID       *int64
 	ReplyToMsgID *int32
 	ActionType   int16
+	TtlPeriod    int32
 }
 
 // ChannelMessagesByRandomIDs returns the posts carrying any of the presented
@@ -121,6 +122,7 @@ func (q *Queries) ChannelMessagesByRandomIDs(ctx context.Context, arg ChannelMes
 			&i.FileID,
 			&i.ReplyToMsgID,
 			&i.ActionType,
+			&i.TtlPeriod,
 		); err != nil {
 			return nil, err
 		}
@@ -431,7 +433,7 @@ func (q *Queries) LockUploadGrants(ctx context.Context, arg LockUploadGrantsPara
 }
 
 const messagesByRandomIDs = `-- name: MessagesByRandomIDs :many
-SELECT owner_id, local_id, peer_id, from_id, date, message, out, edit_date, deleted, random_id, peer_local_id, peer_type, fanout_id, action_type, action_user_id, file_id, reply_to_msg_id, fwd_from_id, fwd_date, fwd_channel_id, fwd_channel_post, message_tsv, reply_to_trusted, grouped_id FROM messages
+SELECT owner_id, local_id, peer_id, from_id, date, message, out, edit_date, deleted, random_id, peer_local_id, peer_type, fanout_id, action_type, action_user_id, file_id, reply_to_msg_id, fwd_from_id, fwd_date, fwd_channel_id, fwd_channel_post, message_tsv, reply_to_trusted, grouped_id, ttl_period, expires_at FROM messages
 WHERE owner_id = $1::bigint
   AND random_id = ANY($2::bigint[])
   AND random_id <> 0
@@ -479,6 +481,8 @@ func (q *Queries) MessagesByRandomIDs(ctx context.Context, arg MessagesByRandomI
 			&i.MessageTsv,
 			&i.ReplyToTrusted,
 			&i.GroupedID,
+			&i.TtlPeriod,
+			&i.ExpiresAt,
 		); err != nil {
 			return nil, err
 		}

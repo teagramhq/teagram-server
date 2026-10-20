@@ -63,6 +63,7 @@ type Channel struct {
 	PubliclyDiscoverable bool
 	DefaultBannedRights  []string
 	SlowmodeSeconds      int16
+	TtlPeriod            int32
 }
 
 type ChannelEvent struct {
@@ -94,6 +95,8 @@ type ChannelMessage struct {
 	ReplyToMsgID *int32
 	ActionType   int16
 	GroupedID    *int64
+	TtlPeriod    int32
+	ExpiresAt    pgtype.Timestamptz
 }
 
 type ChannelParticipant struct {
@@ -160,6 +163,7 @@ type Chat struct {
 	Date                pgtype.Timestamptz
 	PinnedMessageID     *int32
 	DefaultBannedRights []string
+	TtlPeriod           int32
 }
 
 type ChatAbout struct {
@@ -448,6 +452,8 @@ type Message struct {
 	MessageTsv     interface{}
 	ReplyToTrusted bool
 	GroupedID      *int64
+	TtlPeriod      int32
+	ExpiresAt      pgtype.Timestamptz
 }
 
 type MessageDeleteCapacityRefusal struct {
@@ -771,6 +777,12 @@ type UserDialogFilterState struct {
 	OrderIds         []int16
 	ChangedAt        pgtype.Timestamptz
 	DefaultsSeededAt pgtype.Timestamptz
+}
+
+type UserDialogHistoryTtl struct {
+	UserLowID  int64
+	UserHighID int64
+	TtlPeriod  int32
 }
 
 type UserDialogPin struct {

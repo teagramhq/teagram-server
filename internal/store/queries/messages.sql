@@ -1,8 +1,8 @@
 -- name: InsertMessage :exec
 INSERT INTO messages (owner_id, local_id, peer_type, peer_id, from_id, message, out, random_id, peer_local_id,
                       fanout_id, action_type, action_user_id, file_id, reply_to_msg_id,
-                      fwd_from_id, fwd_date, fwd_channel_id, fwd_channel_post, reply_to_trusted)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19);
+                      fwd_from_id, fwd_date, fwd_channel_id, fwd_channel_post, reply_to_trusted, ttl_period)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20);
 
 -- ActiveOrdinaryMessageInDialog is the authoritative lookup for a client reply.
 -- It deliberately checks owner-local id, exact peer namespace, live state, and
@@ -14,10 +14,12 @@ WHERE owner_id = sqlc.arg(owner_id)::bigint
   AND peer_type = sqlc.arg(peer_type)::smallint
   AND peer_id = sqlc.arg(peer_id)::bigint
   AND deleted = false
+  AND (expires_at IS NULL OR expires_at > statement_timestamp())
   AND action_type = 0;
 
 -- name: MessageByOwnerLocal :one
-SELECT * FROM messages WHERE owner_id = $1 AND local_id = $2;
+SELECT * FROM messages WHERE owner_id = $1 AND local_id = $2
+  AND (expires_at IS NULL OR expires_at > statement_timestamp());
 
 -- name: MessageByRandomID :one
 SELECT * FROM messages WHERE owner_id = $1 AND random_id = $2 AND random_id <> 0;
@@ -43,6 +45,7 @@ WHERE owner_id = sqlc.arg(owner_id)
   AND peer_type = sqlc.arg(peer_type)
   AND peer_id = sqlc.arg(peer_id)
   AND deleted = false
+  AND (expires_at IS NULL OR expires_at > statement_timestamp())
   AND (sqlc.arg(offset_id)::bigint = 0 OR local_id < sqlc.arg(offset_id)::bigint)
 ORDER BY local_id DESC
 LIMIT sqlc.arg(lim)::int
@@ -58,6 +61,7 @@ WITH page_offset AS (
       AND offset_message.peer_type = sqlc.arg(peer_type)
       AND offset_message.peer_id = sqlc.arg(peer_id)
       AND offset_message.deleted = false
+      AND (offset_message.expires_at IS NULL OR offset_message.expires_at > statement_timestamp())
       AND offset_message.local_id >= sqlc.arg(offset_id)::bigint
 )
 SELECT page_message.* FROM messages AS page_message
@@ -65,6 +69,7 @@ WHERE page_message.owner_id = sqlc.arg(owner_id)
   AND page_message.peer_type = sqlc.arg(peer_type)
   AND page_message.peer_id = sqlc.arg(peer_id)
   AND page_message.deleted = false
+  AND (page_message.expires_at IS NULL OR page_message.expires_at > statement_timestamp())
 ORDER BY page_message.local_id DESC
 LIMIT sqlc.arg(lim)::int
 OFFSET (SELECT skip FROM page_offset);
@@ -114,6 +119,7 @@ WHERE owner_id = sqlc.arg(owner_id)
   AND peer_type = sqlc.arg(peer_type)
   AND peer_id = sqlc.arg(peer_id)
   AND deleted = false
+  AND (expires_at IS NULL OR expires_at > statement_timestamp())
   AND message_tsv @@ plainto_tsquery('simple', sqlc.arg(query))
   AND (sqlc.arg(offset_id)::bigint = 0 OR local_id < sqlc.arg(offset_id)::bigint)
 ORDER BY local_id DESC
@@ -138,6 +144,7 @@ WHERE m.owner_id = sqlc.arg(owner_id)::bigint
   AND m.peer_id = sqlc.arg(peer_id)::bigint
   AND m.peer_type IN (1, 2)
   AND m.deleted = false
+  AND (m.expires_at IS NULL OR m.expires_at > statement_timestamp())
   AND (m.peer_type <> 2 OR EXISTS (
       SELECT 1 FROM chat_participants cp
       WHERE cp.chat_id = m.peer_id AND cp.user_id = m.owner_id
@@ -189,6 +196,7 @@ WITH page AS (
       AND m.peer_id = sqlc.arg(peer_id)::bigint
       AND m.peer_type IN (1, 2)
       AND m.deleted = false
+      AND (m.expires_at IS NULL OR m.expires_at > statement_timestamp())
       AND (m.peer_type <> 2 OR EXISTS (
           SELECT 1 FROM chat_participants cp
           WHERE cp.chat_id = m.peer_id AND cp.user_id = m.owner_id
@@ -243,6 +251,7 @@ JOIN page ON page.local_id = m.local_id
 WHERE m.owner_id = sqlc.arg(owner_id)::bigint
   AND m.peer_type = sqlc.arg(peer_type)::smallint
   AND m.peer_id = sqlc.arg(peer_id)::bigint
+  AND (m.expires_at IS NULL OR m.expires_at > statement_timestamp())
 ORDER BY m.local_id DESC;
 
 -- SearchFilteredMessagesPageAround counts the filter-matched rows before the
@@ -256,6 +265,7 @@ WITH matching AS MATERIALIZED (
       AND m.peer_id = sqlc.arg(peer_id)::bigint
       AND m.peer_type IN (1, 2)
       AND m.deleted = false
+      AND (m.expires_at IS NULL OR m.expires_at > statement_timestamp())
       AND (m.peer_type <> 2 OR EXISTS (
           SELECT 1 FROM chat_participants cp
           WHERE cp.chat_id = m.peer_id AND cp.user_id = m.owner_id
@@ -317,4 +327,5 @@ JOIN page ON page.local_id = m.local_id
 WHERE m.owner_id = sqlc.arg(owner_id)::bigint
   AND m.peer_type = sqlc.arg(peer_type)::smallint
   AND m.peer_id = sqlc.arg(peer_id)::bigint
+  AND (m.expires_at IS NULL OR m.expires_at > statement_timestamp())
 ORDER BY m.local_id DESC;

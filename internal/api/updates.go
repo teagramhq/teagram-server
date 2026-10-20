@@ -66,6 +66,9 @@ func messageToTL(m store.Message, createUsers []int64, files map[int64]tg.Messag
 	if m.EditDate != nil {
 		msg.EditDate = int(m.EditDate.Unix())
 	}
+	if m.TTLPeriod > 0 {
+		msg.SetTTLPeriod(m.TTLPeriod)
+	}
 	if m.GroupedID != nil {
 		msg.SetGroupedID(*m.GroupedID)
 	}
@@ -155,6 +158,15 @@ func channelMessageToTL(m store.ChannelMessage, viewerID int64, files map[int64]
 			Date:   int(m.Date.Unix()),
 			Action: &tg.MessageActionChatEditTitle{Title: m.Message},
 		}, nil
+	case store.ChannelMessageActionSetMessagesTTL:
+		return &tg.MessageService{
+			ID:     int(m.LocalID),
+			Out:    m.FromID == viewerID,
+			PeerID: &tg.PeerChannel{ChannelID: m.ChannelID},
+			FromID: &tg.PeerUser{UserID: m.FromID},
+			Date:   int(m.Date.Unix()),
+			Action: &tg.MessageActionSetMessagesTTL{Period: m.TTLPeriod},
+		}, nil
 	}
 	msg := &tg.Message{
 		ID:      int(m.LocalID),
@@ -166,6 +178,9 @@ func channelMessageToTL(m store.ChannelMessage, viewerID int64, files map[int64]
 	}
 	if m.EditDate != nil {
 		msg.EditDate = int(m.EditDate.Unix())
+	}
+	if m.TTLPeriod > 0 {
+		msg.SetTTLPeriod(m.TTLPeriod)
 	}
 	if m.GroupedID != nil {
 		msg.SetGroupedID(*m.GroupedID)
@@ -281,6 +296,8 @@ func actionToTL(m store.Message, createUsers []int64) tg.MessageActionClass {
 		return &tg.MessageActionChatDeleteUser{UserID: m.ActionUserID}
 	case store.ChatActionEditTitle:
 		return &tg.MessageActionChatEditTitle{Title: m.Text}
+	case store.ChatActionSetMessagesTTL:
+		return &tg.MessageActionSetMessagesTTL{Period: m.TTLPeriod}
 	default:
 		return &tg.MessageActionEmpty{}
 	}

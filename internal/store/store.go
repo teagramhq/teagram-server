@@ -250,7 +250,10 @@ var (
 	ErrNotMember = errors.New("not a chat member")
 	// ErrChatAdminRequired is returned when a basic-chat control is denied
 	// by current default rights or requires channel administrator rights.
-	ErrChatAdminRequired = errors.New("chat admin required")
+	ErrChatAdminRequired       = errors.New("chat admin required")
+	ErrPeerBlockedUser         = errors.New("peer blocked caller")
+	ErrHistoryTTLPeerInvalid   = errors.New("history TTL peer invalid")
+	ErrHistoryTTLPeriodInvalid = errors.New("history TTL period invalid")
 	// ErrChannelTitleNotModified is returned when an authorized channel title
 	// edit repeats the current value.
 	ErrChannelTitleNotModified = errors.New("channel title not modified")

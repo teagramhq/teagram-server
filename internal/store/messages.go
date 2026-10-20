@@ -54,6 +54,7 @@ type Message struct {
 	PeerID      int64
 	FromID      int64
 	Date        time.Time
+	TTLPeriod   int
 	Text        string
 	Out         bool
 	EditDate    *time.Time
@@ -96,6 +97,7 @@ func messageFromRow(r db.Message) Message {
 		PeerID:      r.PeerID,
 		FromID:      r.FromID,
 		Date:        r.Date.Time,
+		TTLPeriod:   int(r.TtlPeriod),
 		Text:        r.Message,
 		Out:         r.Out,
 		Deleted:     r.Deleted,

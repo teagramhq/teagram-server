@@ -1111,6 +1111,24 @@ func testSmokeClientRequestFixtures(t *testing.T) {
 			t.Fatalf("poll answer web-page fixture message = %T, want *tg.Message", created.Message)
 		}
 		assertSmokePollAnswerWebPage(t, "poll answer web-page fixture", message, answerURL)
+		for _, test := range []struct {
+			fixture string
+			peer    tg.InputPeerClass
+			period  int
+		}{
+			{fixture: "messages_setHistoryTTL.1", peer: peerUser(creator.id, member.id), period: 86400},
+			{fixture: "messages_setHistoryTTL.2", peer: &tg.InputPeerChat{ChatID: chatID}, period: 604800},
+			{fixture: "messages_setHistoryTTL.3", peer: peerChannel(creator.id, channelID), period: 2592000},
+		} {
+			if err := fixtureClientCall(t, creator, test.fixture, func(ctx context.Context, api *tg.Client) error {
+				_, err := api.MessagesSetHistoryTTL(ctx, &tg.MessagesSetHistoryTTLRequest{
+					Peer: test.peer, Period: test.period,
+				})
+				return err
+			}); err != nil {
+				t.Fatalf("replay history-TTL fixture %s: %v", test.fixture, err)
+			}
+		}
 		return
 	}
 	t.Fatal("poll answer web-page fixture response omitted updateNewMessage")

@@ -84,10 +84,11 @@ func (q *Queries) OwnedMessageDate(ctx context.Context, arg OwnedMessageDatePara
 }
 
 const ownedMessagesByLocalIDs = `-- name: OwnedMessagesByLocalIDs :many
-SELECT owner_id, local_id, peer_id, from_id, date, message, out, edit_date, deleted, random_id, peer_local_id, peer_type, fanout_id, action_type, action_user_id, file_id, reply_to_msg_id, fwd_from_id, fwd_date, fwd_channel_id, fwd_channel_post, message_tsv, reply_to_trusted, grouped_id FROM messages
+SELECT owner_id, local_id, peer_id, from_id, date, message, out, edit_date, deleted, random_id, peer_local_id, peer_type, fanout_id, action_type, action_user_id, file_id, reply_to_msg_id, fwd_from_id, fwd_date, fwd_channel_id, fwd_channel_post, message_tsv, reply_to_trusted, grouped_id, ttl_period, expires_at FROM messages
 WHERE owner_id = $1
   AND local_id = ANY($2::bigint[])
   AND deleted = false
+  AND (expires_at IS NULL OR expires_at > statement_timestamp())
 `
 
 type OwnedMessagesByLocalIDsParams struct {
@@ -133,6 +134,8 @@ func (q *Queries) OwnedMessagesByLocalIDs(ctx context.Context, arg OwnedMessages
 			&i.MessageTsv,
 			&i.ReplyToTrusted,
 			&i.GroupedID,
+			&i.TtlPeriod,
+			&i.ExpiresAt,
 		); err != nil {
 			return nil, err
 		}
@@ -154,6 +157,7 @@ WITH owned AS (
     WHERE owner_id = $2
       AND peer_type IN (1, 2)
       AND deleted = false
+      AND (expires_at IS NULL OR expires_at > statement_timestamp())
       AND message_tsv @@ plainto_tsquery('simple', $3)
       AND ($4::bool = false
            OR date < $5::timestamptz
@@ -171,6 +175,7 @@ WITH owned AS (
     FROM channel_messages cm
     WHERE cm.channel_id = ANY($10::bigint[])
       AND cm.deleted = false
+      AND (cm.expires_at IS NULL OR cm.expires_at > statement_timestamp())
       AND cm.action_type = 0
       AND cm.message_tsv @@ plainto_tsquery('simple', $3)
       AND EXISTS (

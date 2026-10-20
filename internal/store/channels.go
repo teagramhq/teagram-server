@@ -111,6 +111,7 @@ type Channel struct {
 	CreatorID       int64
 	Megagroup       bool
 	Version         int
+	TTLPeriod       int
 	Date            time.Time
 	PinnedMessageID *int32
 	// Username is the normalized handle claimed in the usernames table.
@@ -169,6 +170,7 @@ func channelFromRow(r db.Channel) Channel {
 		CreatorID:           r.CreatorID,
 		Megagroup:           r.Megagroup,
 		Version:             int(r.Version),
+		TTLPeriod:           int(r.TtlPeriod),
 		Date:                r.Date.Time,
 		PinnedMessageID:     r.PinnedMessageID,
 		Username:            r.Username,
@@ -1515,6 +1517,7 @@ func (s *Store) ChannelDialogsForUserWithPins(ctx context.Context, userID int64,
 			CreatorID:           r.CreatorID,
 			Megagroup:           r.Megagroup,
 			Version:             int(r.Version),
+			TTLPeriod:           int(r.ChannelTtlPeriod),
 			Date:                r.ChannelDate.Time,
 			Username:            r.Username,
 			DefaultBannedRights: r.DefaultBannedRights,
@@ -1548,6 +1551,7 @@ func (s *Store) ChannelDialogsForUserWithPins(ctx context.Context, userID int64,
 				r.TopFileID,
 				r.TopReplyToMsgID,
 				r.TopActionType,
+				r.TopTtlPeriod,
 			})
 			row.Top = &top
 		}

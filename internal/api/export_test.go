@@ -1285,6 +1285,25 @@ func GetFullUserForTest(s *store.Store, userID int64, req *tg.UsersGetFullUserRe
 	return testHandlers(s).handleGetFullUser(&mtproto.Request{Ctx: context.Background(), UserID: userID, Buf: &buf})
 }
 
+// SetHistoryTTLForTest invokes the setHistoryTTL handler without a transport
+// connection so errors can be asserted without writing a wire reply.
+func SetHistoryTTLForTest(s *store.Store, userID int64, req *tg.MessagesSetHistoryTTLRequest) error {
+	var buf bin.Buffer
+	if err := req.Encode(&buf); err != nil {
+		return err
+	}
+	result, reply, afterReply, err := testHandlers(s).handleSetHistoryTTLAfterReplyOnConn(nil, &mtproto.Request{
+		Ctx: context.Background(), UserID: userID, Buf: &buf,
+	})
+	if err != nil {
+		return err
+	}
+	if result != nil || reply != nil || afterReply != nil {
+		return errors.New("invalid setHistoryTTL returned a reply")
+	}
+	return nil
+}
+
 // GetFullUserRawForTest invokes handleGetFullUser with a caller-supplied request
 // body, for a payload that never decodes.
 func GetFullUserRawForTest(s *store.Store, userID int64, buf *bin.Buffer) (bin.Encoder, error) {

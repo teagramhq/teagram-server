@@ -13,7 +13,8 @@ WHERE owner_id = sqlc.arg(owner_id)::bigint
 SELECT * FROM messages
 WHERE owner_id = sqlc.arg(owner_id)::bigint
   AND local_id = ANY(sqlc.arg(local_ids)::bigint[])
-  AND deleted = false;
+  AND deleted = false
+  AND (expires_at IS NULL OR expires_at > statement_timestamp());
 
 -- name: ChatsByIDs :many
 SELECT * FROM chats
@@ -42,6 +43,7 @@ SELECT
     c.pinned_message_id AS channel_pinned_message_id,
     c.username AS channel_username,
     c.default_banned_rights AS channel_default_banned_rights,
+    c.ttl_period AS channel_ttl_period,
     p.role AS member_role,
     p.banned_until AS member_banned_until,
     p.join_pts AS member_join_pts,
@@ -63,7 +65,8 @@ SELECT
     top.grouped_id AS top_grouped_id,
     top.file_id AS top_file_id,
     top.reply_to_msg_id AS top_reply_to_msg_id,
-    COALESCE(top.action_type, 0)::smallint AS top_action_type
+    COALESCE(top.action_type, 0)::smallint AS top_action_type,
+    COALESCE(top.ttl_period, 0)::integer AS top_ttl_period
 FROM channels c
 JOIN channel_participants p ON p.channel_id = c.id
 JOIN channel_state cs ON cs.channel_id = c.id
@@ -85,9 +88,10 @@ CROSS JOIN LATERAL (
 ) AS unread
 LEFT JOIN LATERAL (
     SELECT cm.local_id, cm.from_id, cm.date, cm.message, cm.edit_date,
-           cm.random_id, cm.grouped_id, cm.file_id, cm.reply_to_msg_id, cm.action_type
+           cm.random_id, cm.grouped_id, cm.file_id, cm.reply_to_msg_id, cm.action_type, cm.ttl_period
     FROM channel_messages cm
     WHERE cm.channel_id = c.id AND cm.deleted = false
+      AND (cm.expires_at IS NULL OR cm.expires_at > statement_timestamp())
     ORDER BY cm.local_id DESC
     LIMIT 1
 ) top ON true

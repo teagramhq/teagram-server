@@ -398,6 +398,9 @@ func newWithPhotoThumbsAndDialogFilterSyncAndUploadPartTTLAndTurnstile(s *store.
 	register(d, tg.MessagesGetSavedDialogsRequestTypeID, h.handleGetSavedDialogs)
 	register(d, tg.MessagesGetPinnedSavedDialogsRequestTypeID, h.handleGetPinnedSavedDialogs)
 	register(d, tg.MessagesGetDefaultHistoryTTLRequestTypeID, h.handleGetDefaultHistoryTTL)
+	registerReplyAfterSuccess(d, tg.MessagesSetHistoryTTLRequestTypeID, func(c *mtproto.Conn, req *mtproto.Request) (bin.Encoder, *replyUpdate, func(), error) {
+		return h.handleSetHistoryTTLAfterReplyOnConn(c, req)
+	})
 	registerReplyAfterSuccess(d, tg.MessagesGetDialogFiltersRequestTypeID, func(c *mtproto.Conn, req *mtproto.Request) (bin.Encoder, *replyUpdate, func(), error) {
 		res, afterReply, err := h.handleGetDialogFilters(c, req)
 		return res, nil, afterReply, err

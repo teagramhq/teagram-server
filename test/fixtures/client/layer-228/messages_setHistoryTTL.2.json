@@ -1,0 +1,18 @@
+{
+  "layer": 228,
+  "client": "gotd v0.162.0",
+  "source": "source-derived/messages_setHistoryTTL.2.txt",
+  "method": "messages.setHistoryTTL",
+  "request": {
+    "type": "messages.setHistoryTTL",
+    "fields": {
+      "peer": {
+        "type": "inputPeerChat",
+        "fields": {
+          "chat_id": "<N>"
+        }
+      },
+      "period": 604800
+    }
+  }
+}

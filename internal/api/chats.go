@@ -453,6 +453,7 @@ func (h *handlers) handleGetFullChat(r *mtproto.Request) (bin.Encoder, error) {
 		Participants:   chatParticipantsToTL(chat, participants),
 		NotifySettings: notifySettings,
 	}
+	wireFull.SetTTLPeriod(chat.TTLPeriod)
 	wireFull.SetChatPhoto(&tg.PhotoEmpty{})
 	pinnedMessageID, hasPinnedMessage, err := h.store.ChatPinnedMessageForOwner(r.Ctx, chat.ID, r.UserID)
 	if err != nil {

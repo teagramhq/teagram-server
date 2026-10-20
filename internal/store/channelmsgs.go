@@ -114,6 +114,7 @@ type ChannelMessage struct {
 	// ReplyToMsgID is the local_id of the post this post replies to; 0 = no reply.
 	ReplyToMsgID int32
 	Action       ChannelMessageAction
+	TTLPeriod    int
 	Poll         *Poll
 }
 
@@ -125,6 +126,7 @@ const (
 	ChannelMessageActionNone ChannelMessageAction = iota
 	ChannelMessageActionCreate
 	ChannelMessageActionEditTitle
+	ChannelMessageActionSetMessagesTTL
 )
 
 // channelMsgFields is a layout-identical copy of the sqlc channel-message
@@ -144,6 +146,7 @@ type channelMsgFields struct {
 	FileID       *int64
 	ReplyToMsgID *int32
 	ActionType   int16
+	TtlPeriod    int32
 }
 
 // channelMessageFromFields is the sole row-to-struct converter for channel
@@ -173,6 +176,7 @@ func channelMessageFromFields(r channelMsgFields) ChannelMessage {
 		r.FileID,
 		replyToMsgID,
 		ChannelMessageAction(r.ActionType),
+		int(r.TtlPeriod),
 		nil,
 	}
 	if message.Deleted {
