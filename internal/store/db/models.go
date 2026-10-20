@@ -65,6 +65,7 @@ type Channel struct {
 	SlowmodeSeconds      int16
 	PreHistoryHidden     bool
 	DeletedAt            pgtype.Timestamptz
+	Signatures           bool
 }
 
 type ChannelDeletionJob struct {
@@ -102,6 +103,7 @@ type ChannelMessage struct {
 	ReplyToMsgID *int32
 	ActionType   int16
 	GroupedID    *int64
+	PostAuthor   *string
 }
 
 type ChannelParticipant struct {
@@ -475,6 +477,7 @@ type Message struct {
 	MessageTsv     interface{}
 	ReplyToTrusted bool
 	GroupedID      *int64
+	FwdPostAuthor  *string
 }
 
 type MessageDeleteCapacityRefusal struct {

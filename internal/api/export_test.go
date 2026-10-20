@@ -1538,6 +1538,24 @@ func UpdateProfileForTestWithLimits(s *store.Store, userID int64, rateLimit stor
 	return h.handleUpdateProfile(&mtproto.Request{Ctx: context.Background(), UserID: userID, Buf: &buf})
 }
 
+// ToggleSignaturesForTest encodes a toggle request and invokes its channel handler.
+func ToggleSignaturesForTest(s *store.Store, userID int64, req *tg.ChannelsToggleSignaturesRequest) (bin.Encoder, error) {
+	var buf bin.Buffer
+	if err := req.Encode(&buf); err != nil {
+		return nil, err
+	}
+	return testHandlers(s).handleToggleSignatures(&mtproto.Request{Ctx: context.Background(), UserID: userID, Buf: &buf})
+}
+
+// GetFullChannelForTest encodes a request and invokes handleGetFullChannel.
+func GetFullChannelForTest(s *store.Store, userID int64, req *tg.ChannelsGetFullChannelRequest) (bin.Encoder, error) {
+	var buf bin.Buffer
+	if err := req.Encode(&buf); err != nil {
+		return nil, err
+	}
+	return testHandlers(s).handleGetFullChannel(&mtproto.Request{Ctx: context.Background(), UserID: userID, Buf: &buf})
+}
+
 // ClaimChannelUsernameForTest claims a username for a channel atomically
 // (both usernames table and channels.username column), so api_test can exercise
 // the username resolution path without the RPC that claims channel usernames

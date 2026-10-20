@@ -1053,7 +1053,7 @@ func (q *Queries) MarkChatRemovalEventsIssuedForAuthKey(ctx context.Context, arg
 }
 
 const searchPinnedChatMessageForOwner = `-- name: SearchPinnedChatMessageForOwner :many
-SELECT viewer_copy.owner_id, viewer_copy.local_id, viewer_copy.peer_id, viewer_copy.from_id, viewer_copy.date, viewer_copy.message, viewer_copy.out, viewer_copy.edit_date, viewer_copy.deleted, viewer_copy.random_id, viewer_copy.peer_local_id, viewer_copy.peer_type, viewer_copy.fanout_id, viewer_copy.action_type, viewer_copy.action_user_id, viewer_copy.file_id, viewer_copy.reply_to_msg_id, viewer_copy.fwd_from_id, viewer_copy.fwd_date, viewer_copy.fwd_channel_id, viewer_copy.fwd_channel_post, viewer_copy.message_tsv, viewer_copy.reply_to_trusted, viewer_copy.grouped_id
+SELECT viewer_copy.owner_id, viewer_copy.local_id, viewer_copy.peer_id, viewer_copy.from_id, viewer_copy.date, viewer_copy.message, viewer_copy.out, viewer_copy.edit_date, viewer_copy.deleted, viewer_copy.random_id, viewer_copy.peer_local_id, viewer_copy.peer_type, viewer_copy.fanout_id, viewer_copy.action_type, viewer_copy.action_user_id, viewer_copy.file_id, viewer_copy.reply_to_msg_id, viewer_copy.fwd_from_id, viewer_copy.fwd_date, viewer_copy.fwd_channel_id, viewer_copy.fwd_channel_post, viewer_copy.message_tsv, viewer_copy.reply_to_trusted, viewer_copy.grouped_id, viewer_copy.fwd_post_author
 FROM chats c
 JOIN chat_participants p
   ON p.chat_id = c.id AND p.user_id = $1::bigint
@@ -1132,6 +1132,7 @@ func (q *Queries) SearchPinnedChatMessageForOwner(ctx context.Context, arg Searc
 			&i.MessageTsv,
 			&i.ReplyToTrusted,
 			&i.GroupedID,
+			&i.FwdPostAuthor,
 		); err != nil {
 			return nil, err
 		}

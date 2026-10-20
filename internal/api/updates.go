@@ -93,6 +93,9 @@ func messageToTL(m store.Message, createUsers []int64, files map[int64]tg.Messag
 			// Channel source: FromID is the channel, not a user.
 			fwd.SetFromID(&tg.PeerChannel{ChannelID: m.FwdChannelID})
 			fwd.SetChannelPost(int(m.FwdChannelPost))
+			if m.FwdPostAuthor != nil {
+				fwd.SetPostAuthor(*m.FwdPostAuthor)
+			}
 		} else if m.FwdFromID != 0 {
 			fwd.SetFromID(&tg.PeerUser{UserID: m.FwdFromID})
 		}
@@ -165,6 +168,9 @@ func channelMessageToTL(m store.ChannelMessage, viewerID int64, files map[int64]
 	}
 	if broadcast {
 		msg.SetPost(true)
+		if m.PostAuthor != nil {
+			msg.SetPostAuthor(*m.PostAuthor)
+		}
 	} else {
 		msg.SetFromID(&tg.PeerUser{UserID: m.FromID})
 	}
@@ -358,6 +364,7 @@ func (h *handlers) channelToTL(c store.Channel, m store.ChannelMember, member bo
 	if c.Username != nil {
 		ch.Username = *c.Username
 	}
+	ch.SetSignatures(c.Signatures)
 	if c.Megagroup {
 		ch.SetDefaultBannedRights(chatDefaultBannedRightsToTL(c.DefaultBannedRights))
 	}

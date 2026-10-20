@@ -37,6 +37,29 @@ func TestBroadcastPostsHideAuthorOnEveryReadSurface(t *testing.T) {
 	if err := s.SetChannelRole(ctx, channel.ID, creator.ID, author.ID, 1); err != nil {
 		t.Fatalf("promote broadcast poster: %v", err)
 	}
+	firstName := "Ann"
+	if err := s.UpdateProfile(ctx, author.ID, &firstName, nil); err != nil {
+		t.Fatalf("set broadcast poster name: %v", err)
+	}
+	toggleReq := &tg.ChannelsToggleSignaturesRequest{
+		Channel: api.InputChannel(creator.ID, channel.ID),
+	}
+	toggleReq.SetSignaturesEnabled(true)
+	toggle, err := api.ToggleSignaturesForTest(s, creator.ID, toggleReq)
+	if err != nil {
+		t.Fatalf("toggle signatures: %v", err)
+	}
+	updated, ok := toggle.(*tg.Updates)
+	if !ok {
+		t.Fatalf("toggle response = %T, want *tg.Updates", toggle)
+	}
+	if len(updated.Chats) != 1 {
+		t.Fatalf("toggle chats = %d, want the updated channel", len(updated.Chats))
+	}
+	updatedChannel, ok := updated.Chats[0].(*tg.Channel)
+	if !ok || !updatedChannel.GetSignatures() {
+		t.Fatalf("toggle channel = %T %+v, want signatures enabled", updated.Chats[0], updated.Chats[0])
+	}
 	member := joinChannelByInvite(t, s, channel, subscriber.ID)
 	post, _, duplicate, err := s.PostChannelMessageAs(ctx, channel.ID, author.ID, "broadcast visibility proof", 224701, nil, 0)
 	if err != nil || duplicate {
@@ -55,6 +78,9 @@ func TestBroadcastPostsHideAuthorOnEveryReadSurface(t *testing.T) {
 		}
 		if found == nil {
 			t.Fatalf("post %d missing from response: %T", post.LocalID, messages)
+		}
+		if got, present := found.GetPostAuthor(); !present || got != "Ann" {
+			t.Fatalf("post_author = %q, present=%v; want stored signature Ann", got, present)
 		}
 		assertEncodes(t, found)
 		if !found.GetPost() {
@@ -273,6 +299,9 @@ func TestBroadcastPostsHideAuthorOnEveryReadSurface(t *testing.T) {
 		if !ok || channelPost != int(post.LocalID) {
 			t.Fatalf("forward channel_post = %d present=%v, want %d", channelPost, ok, post.LocalID)
 		}
+		if got, present := header.GetPostAuthor(); !present || got != "Ann" {
+			t.Fatalf("forward post_author = %q, present=%v; want Ann", got, present)
+		}
 		for _, user := range result.Users {
 			if user.GetID() == author.ID {
 				t.Fatalf("forward users vector contains original author %d", author.ID)
@@ -403,5 +432,265 @@ func TestSearchGlobalRendersMixedChannelKindsFromOnePage(t *testing.T) {
 		if !wantBroadcast && (!hasFromID || fromID.String() != (&tg.PeerUser{UserID: author.ID}).String()) {
 			t.Errorf("megagroup channel %d from_id = %v, present=%v, want author %d", channelID, fromID, hasFromID, author.ID)
 		}
+	}
+}
+
+func TestToggleBroadcastSignaturesChecksAuthorityAndExposesChannelFlag(t *testing.T) {
+	ctx := context.Background()
+	s, _ := openStoreDSN(t)
+	creator, err := s.CreateUser(ctx, "+15551822490")
+	if err != nil {
+		t.Fatalf("create creator: %v", err)
+	}
+	admin, err := s.CreateUser(ctx, "+15551822491")
+	if err != nil {
+		t.Fatalf("create change-info admin: %v", err)
+	}
+	adminWithoutChangeInfo, err := s.CreateUser(ctx, "+15551822492")
+	if err != nil {
+		t.Fatalf("create admin without change-info: %v", err)
+	}
+	member, err := s.CreateUser(ctx, "+15551822493")
+	if err != nil {
+		t.Fatalf("create member: %v", err)
+	}
+	channel, err := s.CreateChannel(ctx, creator.ID, "Signatures", "", false)
+	if err != nil {
+		t.Fatalf("create broadcast channel: %v", err)
+	}
+	joinChannelByInvite(t, s, channel, admin.ID)
+	joinChannelByInvite(t, s, channel, adminWithoutChangeInfo.ID)
+	joinChannelByInvite(t, s, channel, member.ID)
+	if err = s.SetChannelRoleWithRights(ctx, channel.ID, creator.ID, admin.ID, 1, true); err != nil {
+		t.Fatalf("promote change-info admin: %v", err)
+	}
+	if err = s.SetChannelRole(ctx, channel.ID, creator.ID, adminWithoutChangeInfo.ID, 1); err != nil {
+		t.Fatalf("promote admin without change-info: %v", err)
+	}
+
+	on := &tg.ChannelsToggleSignaturesRequest{Channel: api.InputChannel(admin.ID, channel.ID)}
+	on.SetSignaturesEnabled(true)
+	result, err := api.ToggleSignaturesForTest(s, admin.ID, on)
+	if err != nil {
+		t.Fatalf("admin with change_info toggle on: %v", err)
+	}
+	updates, ok := result.(*tg.Updates)
+	if !ok {
+		t.Fatalf("toggle response = %T, want *tg.Updates", result)
+	}
+	if len(updates.Chats) != 1 {
+		t.Fatalf("toggle chats = %d, want one updated channel", len(updates.Chats))
+	}
+	chat, ok := updates.Chats[0].(*tg.Channel)
+	if !ok || !chat.GetSignatures() {
+		t.Fatalf("updated channel = %T %+v, want signatures enabled", updates.Chats[0], updates.Chats[0])
+	}
+
+	fullResult, err := api.GetFullChannelForTest(s, creator.ID, &tg.ChannelsGetFullChannelRequest{
+		Channel: api.InputChannel(creator.ID, channel.ID),
+	})
+	if err != nil {
+		t.Fatalf("get full channel: %v", err)
+	}
+	full, ok := fullResult.(*tg.MessagesChatFull)
+	if !ok {
+		t.Fatalf("full channel response = %T, want *tg.MessagesChatFull", fullResult)
+	}
+	if len(full.Chats) != 1 {
+		t.Fatalf("full channel chats = %d, want one channel", len(full.Chats))
+	}
+	fullChannel, ok := full.Chats[0].(*tg.Channel)
+	if !ok || !fullChannel.GetSignatures() {
+		t.Fatalf("full channel chat = %T %+v, want signatures enabled", full.Chats[0], full.Chats[0])
+	}
+
+	for _, caller := range []struct {
+		name string
+		user store.User
+	}{
+		{name: "admin without change_info", user: adminWithoutChangeInfo},
+		{name: "ordinary member", user: member},
+	} {
+		t.Run(caller.name, func(t *testing.T) {
+			req := &tg.ChannelsToggleSignaturesRequest{Channel: api.InputChannel(caller.user.ID, channel.ID)}
+			if _, callErr := api.ToggleSignaturesForTest(s, caller.user.ID, req); rpcMessage(t, callErr) != "CHAT_ADMIN_REQUIRED" {
+				t.Fatalf("toggle error = %v, want CHAT_ADMIN_REQUIRED", callErr)
+			}
+		})
+	}
+
+	off := &tg.ChannelsToggleSignaturesRequest{Channel: api.InputChannel(creator.ID, channel.ID)}
+	result, err = api.ToggleSignaturesForTest(s, creator.ID, off)
+	if err != nil {
+		t.Fatalf("creator toggle off: %v", err)
+	}
+	updates, ok = result.(*tg.Updates)
+	if !ok || len(updates.Chats) != 1 {
+		t.Fatalf("toggle-off response = %T, want updated channel", result)
+	}
+	chat, ok = updates.Chats[0].(*tg.Channel)
+	if !ok || chat.GetSignatures() {
+		t.Fatalf("toggle-off channel = %T %+v, want signatures disabled", updates.Chats[0], updates.Chats[0])
+	}
+
+	megagroup, err := s.CreateChannel(ctx, creator.ID, "Megagroup", "", true)
+	if err != nil {
+		t.Fatalf("create megagroup: %v", err)
+	}
+	megagroupReq := &tg.ChannelsToggleSignaturesRequest{Channel: api.InputChannel(creator.ID, megagroup.ID)}
+	megagroupReq.SetSignaturesEnabled(true)
+	if _, err = api.ToggleSignaturesForTest(s, creator.ID, megagroupReq); rpcMessage(t, err) != "PEER_ID_INVALID" {
+		t.Fatalf("megagroup toggle error = %v, want PEER_ID_INVALID", err)
+	}
+}
+
+func TestBroadcastSignatureIsCapturedForEachPost(t *testing.T) {
+	ctx := context.Background()
+	s, _ := openStoreDSN(t)
+	creator, err := s.CreateUser(ctx, "+15551822500")
+	if err != nil {
+		t.Fatalf("create creator: %v", err)
+	}
+	admin, err := s.CreateUser(ctx, "+15551822501")
+	if err != nil {
+		t.Fatalf("create admin: %v", err)
+	}
+	subscriber, err := s.CreateUser(ctx, "+15551822502")
+	if err != nil {
+		t.Fatalf("create subscriber: %v", err)
+	}
+	channel, err := s.CreateChannel(ctx, creator.ID, "Signature snapshots", "", false)
+	if err != nil {
+		t.Fatalf("create broadcast channel: %v", err)
+	}
+	joinChannelByInvite(t, s, channel, admin.ID)
+	joinChannelByInvite(t, s, channel, subscriber.ID)
+	if err = s.SetChannelRole(ctx, channel.ID, creator.ID, admin.ID, 1); err != nil {
+		t.Fatalf("promote broadcast poster: %v", err)
+	}
+	firstName := "Ann"
+	if err = s.UpdateProfile(ctx, admin.ID, &firstName, nil); err != nil {
+		t.Fatalf("set admin name: %v", err)
+	}
+	unnamedAdmin, err := s.CreateUser(ctx, "+15551822503")
+	if err != nil {
+		t.Fatalf("create admin without display name: %v", err)
+	}
+	joinChannelByInvite(t, s, channel, unnamedAdmin.ID)
+	if err = s.SetChannelRole(ctx, channel.ID, creator.ID, unnamedAdmin.ID, 1); err != nil {
+		t.Fatalf("promote admin without display name: %v", err)
+	}
+
+	unsigned, _, duplicate, err := s.PostChannelMessageAs(ctx, channel.ID, admin.ID, "before signatures", 225001, nil, 0)
+	if err != nil || duplicate {
+		t.Fatalf("post before enabling signatures: duplicate=%v err=%v", duplicate, err)
+	}
+	if unsigned.PostAuthor != nil {
+		t.Fatalf("unsigned post author = %v, want nil", *unsigned.PostAuthor)
+	}
+
+	enable := &tg.ChannelsToggleSignaturesRequest{Channel: api.InputChannel(creator.ID, channel.ID)}
+	enable.SetSignaturesEnabled(true)
+	if _, err = api.ToggleSignaturesForTest(s, creator.ID, enable); err != nil {
+		t.Fatalf("enable signatures: %v", err)
+	}
+	signed, _, duplicate, err := s.PostChannelMessageAs(ctx, channel.ID, admin.ID, "signed by Ann", 225002, nil, 0)
+	if err != nil || duplicate {
+		t.Fatalf("post with signatures on: duplicate=%v err=%v", duplicate, err)
+	}
+	if signed.PostAuthor == nil || *signed.PostAuthor != "Ann" {
+		t.Fatalf("signed post author = %v, want Ann", signed.PostAuthor)
+	}
+
+	unnamed, _, duplicate, err := s.PostChannelMessageAs(ctx, channel.ID, unnamedAdmin.ID, "signed without a display name", 225005, nil, 0)
+	if err != nil || duplicate {
+		t.Fatalf("post by admin without a display name: duplicate=%v err=%v", duplicate, err)
+	}
+	if unnamed.PostAuthor != nil {
+		t.Fatalf("post author without a display name = %q, want nil", *unnamed.PostAuthor)
+	}
+
+	firstName = "Bea"
+	if err = s.UpdateProfile(ctx, admin.ID, &firstName, nil); err != nil {
+		t.Fatalf("rename admin: %v", err)
+	}
+	disable := &tg.ChannelsToggleSignaturesRequest{Channel: api.InputChannel(creator.ID, channel.ID)}
+	if _, err = api.ToggleSignaturesForTest(s, creator.ID, disable); err != nil {
+		t.Fatalf("disable signatures: %v", err)
+	}
+	unsignedAgain, _, duplicate, err := s.PostChannelMessageAs(ctx, channel.ID, admin.ID, "after signatures", 225003, nil, 0)
+	if err != nil || duplicate {
+		t.Fatalf("post with signatures off: duplicate=%v err=%v", duplicate, err)
+	}
+	if unsignedAgain.PostAuthor != nil {
+		t.Fatalf("post after disabling signatures has author %q, want nil", *unsignedAgain.PostAuthor)
+	}
+
+	stored, err := s.ChannelMessages(ctx, channel.ID, []int64{unsigned.LocalID, signed.LocalID, unsignedAgain.LocalID})
+	if err != nil {
+		t.Fatalf("reload posts: %v", err)
+	}
+	if stored[unsigned.LocalID].PostAuthor != nil {
+		t.Errorf("pre-toggle post was restamped: %v", stored[unsigned.LocalID].PostAuthor)
+	}
+	if stored[signed.LocalID].PostAuthor == nil || *stored[signed.LocalID].PostAuthor != "Ann" {
+		t.Errorf("signed post author after rename and toggle-off = %v, want Ann", stored[signed.LocalID].PostAuthor)
+	}
+	if stored[unsignedAgain.LocalID].PostAuthor != nil {
+		t.Errorf("post after toggle-off has signature %v", stored[unsignedAgain.LocalID].PostAuthor)
+	}
+
+	history, err := api.GetHistoryForTest(s, subscriber.ID, &tg.MessagesGetHistoryRequest{
+		Peer: channelPeer(subscriber.ID, channel.ID), Limit: 10,
+	})
+	if err != nil {
+		t.Fatalf("history after toggle-off: %v", err)
+	}
+	page, ok := history.(*tg.MessagesChannelMessages)
+	if !ok {
+		t.Fatalf("history response = %T", history)
+	}
+	for _, message := range page.Messages {
+		post, ok := message.(*tg.Message)
+		if !ok {
+			continue
+		}
+		if post.ID == int(signed.LocalID) {
+			if got, present := post.GetPostAuthor(); !present || got != "Ann" {
+				t.Fatalf("rendered signed post author = %q, present=%v; want Ann after toggle-off", got, present)
+			}
+		}
+	}
+
+	forwarded, err := api.ForwardMessagesForTest(s, subscriber.ID, &tg.MessagesForwardMessagesRequest{
+		FromPeer: channelPeer(subscriber.ID, channel.ID),
+		ID:       []int{int(signed.LocalID)},
+		ToPeer:   api.InputPeerUser(subscriber.ID, admin.ID),
+		RandomID: []int64{225004},
+	})
+	if err != nil {
+		t.Fatalf("forward signed post: %v", err)
+	}
+	updates, ok := forwarded.(*tg.Updates)
+	if !ok {
+		t.Fatalf("forward response = %T", forwarded)
+	}
+	var forwardedMessage *tg.Message
+	for _, update := range updates.Updates {
+		if added, ok := update.(*tg.UpdateNewMessage); ok {
+			if message, ok := added.Message.(*tg.Message); ok {
+				forwardedMessage = message
+			}
+		}
+	}
+	if forwardedMessage == nil {
+		t.Fatal("forward response has no message")
+	}
+	header, ok := forwardedMessage.GetFwdFrom()
+	if !ok {
+		t.Fatal("forwarded message has no forward header")
+	}
+	if got, present := header.GetPostAuthor(); !present || got != "Ann" {
+		t.Fatalf("forward author = %q, present=%v; want the stored Ann signature", got, present)
 	}
 }

@@ -283,13 +283,19 @@ func TestServeWebSocketProxyAddressDoesNotBlockNextAccept(t *testing.T) {
 func TestServeWebSocketNegotiationUsesOneBudget(t *testing.T) {
 	t.Parallel()
 
+	const (
+		handshakeBudget          = time.Second
+		slowHandshakeDelay       = 400 * time.Millisecond
+		healthyPeerDeadlineAfter = 1200 * time.Millisecond
+	)
+
 	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
 	defer cancel()
 	base := mustListenTCP(t, ctx, "127.0.0.1:0")
 	accepted := make(chan time.Time, 1)
 	ln := &timestampWebSocketListener{Listener: base, accepted: accepted}
 	srv := mtproto.New(exchange.PrivateKey{}, 2, mtproto.NewMemoryAuthKeyStore(), nil, nil)
-	srv.SetHandshakeTimeout(300 * time.Millisecond)
+	srv.SetHandshakeTimeout(handshakeBudget)
 	if err := srv.SetPreAuthLimits(mtproto.PreAuthLimits{MaxConns: 1}); err != nil {
 		t.Fatalf("set pre-auth limits: %v", err)
 	}
@@ -321,7 +327,7 @@ func TestServeWebSocketNegotiationUsesOneBudget(t *testing.T) {
 	if _, err := first.Write(request[:len(request)-2]); err != nil {
 		t.Fatalf("write partial raw WebSocket handshake: %v", err)
 	}
-	time.Sleep(200 * time.Millisecond)
+	time.Sleep(slowHandshakeDelay)
 	if _, err := first.Write(request[len(request)-2:]); err != nil {
 		t.Fatalf("finish raw WebSocket handshake: %v", err)
 	}
@@ -332,12 +338,15 @@ func TestServeWebSocketNegotiationUsesOneBudget(t *testing.T) {
 		t.Fatalf("write partial transport frame: %v", err)
 	}
 
-	dialCtx, stopDial := context.WithDeadline(ctx, acceptedAt.Add(450*time.Millisecond))
+	healthyPeerDeadline := acceptedAt.Add(healthyPeerDeadlineAfter)
+	dialCtx, stopDial := context.WithDeadline(ctx, healthyPeerDeadline)
 	defer stopDial()
 	var healthy *websocket.Conn
+	var healthyConnectedAt time.Time
 	for {
 		healthy, err = dialWebSocket(dialCtx, base.Addr().String())
 		if err == nil {
+			healthyConnectedAt = time.Now()
 			break
 		}
 		select {
@@ -347,8 +356,9 @@ func TestServeWebSocketNegotiationUsesOneBudget(t *testing.T) {
 		}
 	}
 	defer closeWebSocket(t, healthy)
-	if elapsed := time.Since(acceptedAt); elapsed > 450*time.Millisecond {
-		t.Fatalf("slot was released after %s, want one negotiation budget", elapsed)
+	if healthyConnectedAt.After(healthyPeerDeadline) {
+		t.Fatalf("healthy peer completed HTTP upgrade at %s, want by %s after acceptance",
+			healthyConnectedAt.Sub(acceptedAt), healthyPeerDeadlineAfter)
 	}
 }
 
