@@ -261,6 +261,82 @@ func TestDeleteChatPushesRemovalForEveryCurrentMember(t *testing.T) {
 	}
 }
 
+func TestChatRemovalDifferenceReplaysPerAuthKeyUntilGetState(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	s := openStore(t)
+	owner, err := s.CreateUser(ctx, "+15551290101")
+	if err != nil {
+		t.Fatalf("create owner: %v", err)
+	}
+	chat, err := s.CreateChat(ctx, owner.ID, "recover deleted chat", nil)
+	if err != nil {
+		t.Fatalf("create chat: %v", err)
+	}
+	state, err := s.StateWithoutUnread(ctx, owner.ID)
+	if err != nil {
+		t.Fatalf("read initial state: %v", err)
+	}
+	if _, err := s.DeleteChat(ctx, chat.ID, owner.ID); err != nil {
+		t.Fatalf("delete chat: %v", err)
+	}
+
+	keyA := [8]byte{1}
+	keyB := [8]byte{2}
+	request := &tg.UpdatesGetDifferenceRequest{Pts: state.Pts, Qts: state.Qts, Date: state.Date}
+	assertRemoval := func(label string, key [8]byte, want bool) {
+		t.Helper()
+		result, err := api.GetDifferenceForTestWithAuthKey(s, owner.ID, key, request)
+		if err != nil {
+			t.Fatalf("%s getDifference: %v", label, err)
+		}
+		var updates []tg.UpdateClass
+		switch difference := result.(type) {
+		case *tg.UpdatesDifference:
+			updates = difference.OtherUpdates
+		case *tg.UpdatesDifferenceEmpty:
+		default:
+			t.Fatalf("%s getDifference = %T, want a difference result", label, result)
+		}
+		found := false
+		for _, update := range updates {
+			if removal, ok := update.(*tg.UpdateChatParticipantDelete); ok && removal.ChatID == chat.ID {
+				found = true
+			}
+		}
+		if found != want {
+			t.Errorf("%s getDifference removal = %t, want %t; updates=%+v", label, found, want, updates)
+		}
+	}
+
+	if _, err := api.GetStateForTestWithAuthKey(s, owner.ID, keyA); err != nil {
+		t.Fatalf("key A initial getState: %v", err)
+	}
+	assertRemoval("key A after initial getState", keyA, true)
+	if _, err := api.GetStateForTestWithAuthKey(s, owner.ID, keyB); err != nil {
+		t.Fatalf("key B initial getState: %v", err)
+	}
+	assertRemoval("key B after initial getState", keyB, true)
+
+	// Treat key A's first successful reply write as dropped. Since its client
+	// has not asked for state again, it must be able to replay the removal.
+	assertRemoval("key A initial", keyA, true)
+	assertRemoval("key A retry after dropped reply", keyA, true)
+	// A different, offline authorization has an independent acknowledgement.
+	assertRemoval("key B first recovery", keyB, true)
+
+	if _, err := api.GetStateForTestWithAuthKey(s, owner.ID, keyA); err != nil {
+		t.Fatalf("key A getState acknowledgement: %v", err)
+	}
+	assertRemoval("key A after getState", keyA, false)
+	assertRemoval("key B remains unacknowledged", keyB, true)
+
+	if _, err := api.GetStateForTestWithAuthKey(s, owner.ID, keyB); err != nil {
+		t.Fatalf("key B getState acknowledgement: %v", err)
+	}
+	assertRemoval("key B after getState", keyB, false)
+}
+
 func TestGetStateWithoutUpdateStatePreservesBaseline(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()

@@ -663,20 +663,15 @@ func (s *Store) DeleteChat(ctx context.Context, chatID, callerID int64) (ChatDel
 		}
 	}
 
-	// Removal is a durable PTS-neutral marker because UpdateChatParticipantDelete
-	// has no pts fields on the wire. The event row survives marker consumption so
-	// a delayed cross-replica notification can still reach every live session.
+	// Removal is a durable PTS-neutral event because UpdateChatParticipantDelete
+	// has no pts fields on the wire. Per-auth-key delivery and acknowledgement
+	// state lets each client replay it until a later getState request.
 	for _, ownerID := range ownerIDs {
 		event, err := qtx.InsertChatRemovalEvent(ctx, db.InsertChatRemovalEventParams{
 			OwnerID: ownerID, ChatID: chatID, Version: chat.Version,
 		})
 		if err != nil {
 			return ChatDeletion{}, fmt.Errorf("record chat removal for owner %d: %w", ownerID, err)
-		}
-		if err := qtx.InsertChatRemovalStateMarker(ctx, db.InsertChatRemovalStateMarkerParams{
-			OwnerID: ownerID, ChatID: chatID,
-		}); err != nil {
-			return ChatDeletion{}, fmt.Errorf("record pending chat removal for owner %d: %w", ownerID, err)
 		}
 		deletion.RemovalEvents = append(deletion.RemovalEvents, ChatRemovalEvent{
 			OwnerID: ownerID, ChatID: chatID, Version: int(event.Version),

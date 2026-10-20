@@ -24,15 +24,16 @@ func (s *Store) ChatRemovalEventForOwnerChat(ctx context.Context, ownerID, chatI
 	return ChatRemovalEvent{OwnerID: row.OwnerID, ChatID: row.ChatID, Version: int(row.Version)}, true, nil
 }
 
-// ChatRemovalSnapshotsForOwner returns pending PTS-neutral removal events.
-// Their chat IDs are consumed only after a successful difference response.
-func (s *Store) ChatRemovalSnapshotsForOwner(ctx context.Context, ownerID int64, limit int32) ([]ChatRemovalEvent, error) {
-	rows, err := s.q.ChatRemovalSnapshotsForOwner(ctx, db.ChatRemovalSnapshotsForOwnerParams{
-		OwnerID: ownerID,
-		Lim:     limit,
+// ChatRemovalSnapshotsForAuthKey returns unacknowledged PTS-neutral removals
+// for one authorization key. A response write does not acknowledge an update.
+func (s *Store) ChatRemovalSnapshotsForAuthKey(ctx context.Context, ownerID, authKeyID int64, limit int32) ([]ChatRemovalEvent, error) {
+	rows, err := s.q.ChatRemovalSnapshotsForAuthKey(ctx, db.ChatRemovalSnapshotsForAuthKeyParams{
+		OwnerID:   ownerID,
+		AuthKeyID: authKeyID,
+		Lim:       limit,
 	})
 	if err != nil {
-		return nil, fmt.Errorf("chat removal snapshots for owner: %w", err)
+		return nil, fmt.Errorf("chat removal snapshots for auth key: %w", err)
 	}
 	events := make([]ChatRemovalEvent, len(rows))
 	for i, row := range rows {
@@ -43,17 +44,29 @@ func (s *Store) ChatRemovalSnapshotsForOwner(ctx context.Context, ownerID int64,
 	return events, nil
 }
 
-// DeleteChatRemovalStateMarkersForOwnerChats consumes only the removals
-// included in the successful getDifference response.
-func (s *Store) DeleteChatRemovalStateMarkersForOwnerChats(ctx context.Context, ownerID int64, chatIDs []int64) error {
+// MarkChatRemovalEventsDeliveredForAuthKey records events sent to one client.
+// They remain replayable until AcknowledgeDeliveredChatRemovalEvents runs.
+func (s *Store) MarkChatRemovalEventsDeliveredForAuthKey(ctx context.Context, ownerID, authKeyID int64, chatIDs []int64) error {
 	if len(chatIDs) == 0 {
 		return nil
 	}
-	if err := s.q.DeleteChatRemovalStateMarkersForOwnerChats(ctx, db.DeleteChatRemovalStateMarkersForOwnerChatsParams{
-		OwnerID: ownerID,
-		ChatIds: chatIDs,
+	if err := s.q.MarkChatRemovalEventsDeliveredForAuthKey(ctx, db.MarkChatRemovalEventsDeliveredForAuthKeyParams{
+		OwnerID:   ownerID,
+		AuthKeyID: authKeyID,
+		ChatIds:   chatIDs,
 	}); err != nil {
-		return fmt.Errorf("delete chat removal state markers: %w", err)
+		return fmt.Errorf("mark chat removal events delivered: %w", err)
+	}
+	return nil
+}
+
+// AcknowledgeDeliveredChatRemovalEvents retires only removals previously
+// delivered to this authorization key when it later requests updates.getState.
+func (s *Store) AcknowledgeDeliveredChatRemovalEvents(ctx context.Context, ownerID, authKeyID int64) error {
+	if err := s.q.AcknowledgeDeliveredChatRemovalEvents(ctx, db.AcknowledgeDeliveredChatRemovalEventsParams{
+		OwnerID: ownerID, AuthKeyID: authKeyID,
+	}); err != nil {
+		return fmt.Errorf("acknowledge delivered chat removal events: %w", err)
 	}
 	return nil
 }

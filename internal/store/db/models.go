@@ -214,15 +214,18 @@ type ChatReadReceipt struct {
 	ReadAt   pgtype.Timestamptz
 }
 
+type ChatRemovalClientState struct {
+	OwnerID        int64
+	ChatID         int64
+	AuthKeyID      int64
+	DeliveredAt    pgtype.Timestamptz
+	AcknowledgedAt pgtype.Timestamptz
+}
+
 type ChatRemovalEvent struct {
 	OwnerID int64
 	ChatID  int64
 	Version int32
-}
-
-type ChatRemovalStateMarker struct {
-	OwnerID int64
-	ChatID  int64
 }
 
 type CloudDraft struct {

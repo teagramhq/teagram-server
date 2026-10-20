@@ -543,8 +543,8 @@ func (u *Updater) DeliverChatAdmin(ctx context.Context, chatID, eventID int64) {
 }
 
 // DeliverChatRemoval pushes one persisted PTS-neutral chat removal to every
-// live session for its owner. Its separate difference marker is consumed only
-// when getDifference succeeds.
+// live session for its owner. A successful push is recorded per authorization,
+// but remains replayable until that client later requests updates.getState.
 func (u *Updater) DeliverChatRemoval(ctx context.Context, ownerID, chatID int64) {
 	if ownerID <= 0 || chatID <= 0 || u.registry == nil {
 		return
@@ -575,14 +575,21 @@ func (u *Updater) DeliverChatRemoval(ctx context.Context, ownerID, chatID int64)
 	}
 	var pushes []transientPush
 	for _, conn := range u.registry.Conns(ownerID) {
-		pushes = append(pushes, transientPush{
+		push := transientPush{
 			owner: ownerID,
 			conn:  conn,
 			enc:   update,
 			onError: func(err error) {
 				u.log.Info("deliver chat removal push", "chat_id", event.ChatID, "owner_id", ownerID, "err", err)
 			},
-		})
+		}
+		authKeyID := conn.AuthKeyID()
+		push.onSuccess = func() {
+			if err := u.h.store.MarkChatRemovalEventsDeliveredForAuthKey(ctx, ownerID, authKeyID, []int64{event.ChatID}); err != nil {
+				u.log.Error("mark live chat removal delivered", "chat_id", event.ChatID, "owner_id", ownerID, "err", err)
+			}
+		}
+		pushes = append(pushes, push)
 	}
 	u.pushTransientFanout(ctx, pushes)
 }
@@ -829,10 +836,11 @@ const (
 )
 
 type transientPush struct {
-	owner   int64
-	conn    pushConn
-	enc     bin.Encoder
-	onError func(error)
+	owner     int64
+	conn      pushConn
+	enc       bin.Encoder
+	onSuccess func()
+	onError   func(error)
 }
 
 type transientWriteTimeoutConn interface {
@@ -881,8 +889,13 @@ func (u *Updater) pushTransientFanout(ctx context.Context, pushes []transientPus
 					if !ok || ctx.Err() != nil {
 						return
 					}
-					if _, err := u.pushTransientEncoded(ctx, push.owner, push.conn, push.enc, encoders); err != nil && push.onError != nil {
-						push.onError(err)
+					pushed, err := u.pushTransientEncoded(ctx, push.owner, push.conn, push.enc, encoders)
+					if err != nil {
+						if push.onError != nil {
+							push.onError(err)
+						}
+					} else if pushed && push.onSuccess != nil {
+						push.onSuccess()
 					}
 				}
 			}

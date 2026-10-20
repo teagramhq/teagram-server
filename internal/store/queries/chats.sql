@@ -119,9 +119,6 @@ INSERT INTO chat_removal_events (owner_id, chat_id, version)
 VALUES ($1, $2, $3)
 RETURNING owner_id, chat_id, version;
 
--- name: InsertChatRemovalStateMarker :exec
-INSERT INTO chat_removal_state_markers (owner_id, chat_id) VALUES ($1, $2);
-
 -- ChatRemovalEventForOwnerChat reloads the immutable event named by a live
 -- notification. Owner and chat form its unique identity because a chat is
 -- deleted at most once and each current member receives one removal.
@@ -129,22 +126,43 @@ INSERT INTO chat_removal_state_markers (owner_id, chat_id) VALUES ($1, $2);
 SELECT * FROM chat_removal_events
 WHERE owner_id = $1 AND chat_id = $2;
 
--- ChatRemovalSnapshotsForOwner returns pending PTS-neutral chat removals.
--- The chat id is consumed only after the difference response succeeds.
--- name: ChatRemovalSnapshotsForOwner :many
+-- ChatRemovalSnapshotsForAuthKey returns removals not yet acknowledged by this
+-- client's later updates.getState request. A prior successful write alone does
+-- not suppress replay, because the client may not have received the reply.
+-- name: ChatRemovalSnapshotsForAuthKey :many
 SELECT event.owner_id, event.chat_id, event.version
-FROM chat_removal_state_markers AS marker
-JOIN chat_removal_events AS event
-  ON event.owner_id = marker.owner_id
- AND event.chat_id = marker.chat_id
+FROM chat_removal_events AS event
+LEFT JOIN chat_removal_client_state AS client_state
+  ON client_state.owner_id = event.owner_id
+ AND client_state.auth_key_id = sqlc.arg(auth_key_id)
+ AND client_state.chat_id = event.chat_id
 WHERE event.owner_id = sqlc.arg(owner_id)
+  AND client_state.acknowledged_at IS NULL
 ORDER BY event.chat_id
 LIMIT sqlc.arg(lim)::int;
 
--- name: DeleteChatRemovalStateMarkersForOwnerChats :exec
-DELETE FROM chat_removal_state_markers
+-- MarkChatRemovalEventsDeliveredForAuthKey records the client-visible event
+-- set, but keeps every event pending until a later getState acknowledges it.
+-- name: MarkChatRemovalEventsDeliveredForAuthKey :exec
+INSERT INTO chat_removal_client_state (
+    owner_id, auth_key_id, chat_id, delivered_at
+)
+SELECT sqlc.arg(owner_id)::bigint,
+       sqlc.arg(auth_key_id)::bigint,
+       pending.chat_id,
+       clock_timestamp()
+FROM unnest(sqlc.arg(chat_ids)::bigint[]) AS pending(chat_id)
+ON CONFLICT (owner_id, auth_key_id, chat_id)
+DO UPDATE SET delivered_at = EXCLUDED.delivered_at
+WHERE chat_removal_client_state.acknowledged_at IS NULL;
+
+-- A client acknowledges only events that have been delivered to this auth key.
+-- name: AcknowledgeDeliveredChatRemovalEvents :exec
+UPDATE chat_removal_client_state
+SET acknowledged_at = clock_timestamp()
 WHERE owner_id = sqlc.arg(owner_id)
-  AND chat_id = ANY(sqlc.arg(chat_ids)::bigint[]);
+  AND auth_key_id = sqlc.arg(auth_key_id)
+  AND acknowledged_at IS NULL;
 
 -- name: SetChatTitle :one
 UPDATE chats SET title = $2, version = version + 1 WHERE id = $1 RETURNING *;

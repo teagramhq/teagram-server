@@ -587,6 +587,14 @@ func GetStateForTest(s *store.Store, userID int64) (bin.Encoder, error) {
 	return testHandlers(s).handleGetState(&mtproto.Request{Ctx: context.Background(), UserID: userID})
 }
 
+// GetStateForTestWithAuthKey invokes updates.getState with an authorization ID
+// so tests can cover client-scoped acknowledgements.
+func GetStateForTestWithAuthKey(s *store.Store, userID int64, authKeyID [8]byte) (bin.Encoder, error) {
+	return testHandlers(s).handleGetState(&mtproto.Request{
+		Ctx: context.Background(), UserID: userID, AuthKeyID: authKeyID,
+	})
+}
+
 // PeerUserID exposes the peer-resolution guard for the external api_test package.
 // Uses the test deriver from pgtest.
 func PeerUserID(peer tg.InputPeerClass, viewerID int64) (int64, error) {

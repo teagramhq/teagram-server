@@ -1123,6 +1123,10 @@ func (h *handlers) handleGetState(r *mtproto.Request) (bin.Encoder, error) {
 	if err := h.checkChannelUnreadCountRateLimit(r); err != nil {
 		return nil, err
 	}
+	if err := h.store.AcknowledgeDeliveredChatRemovalEvents(r.Ctx, r.UserID, mtproto.AuthKeyIDInt64(r.AuthKeyID)); err != nil {
+		h.log.Error("acknowledge get state chat removals", "user_id", r.UserID, "err", err)
+		return nil, errInternal
+	}
 	st, err := h.store.State(r.Ctx, r.UserID)
 	if err != nil {
 		h.log.Error("get state", "user_id", r.UserID, "err", err)
@@ -1508,8 +1512,10 @@ func (h *handlers) handleGetDifferenceForConn(c *mtproto.Conn, r *mtproto.Reques
 	}
 
 	// Chat removal is durable but PTS-neutral because its wire update has no
-	// pts/pts_count fields. Keep its pending markers independent of the PTS log.
-	chatRemovalSnapshots, err := h.store.ChatRemovalSnapshotsForOwner(r.Ctx, r.UserID, int32(maxDiffEvents+1))
+	// pts/pts_count fields. Keep replay state scoped to this authorization until
+	// a later getState acknowledges a delivery.
+	chatRemovalAuthKeyID := mtproto.AuthKeyIDInt64(r.AuthKeyID)
+	chatRemovalSnapshots, err := h.store.ChatRemovalSnapshotsForAuthKey(r.Ctx, r.UserID, chatRemovalAuthKeyID, int32(maxDiffEvents+1))
 	if err != nil {
 		h.log.Error("get difference chat removal snapshots", "user_id", r.UserID, "err", err)
 		return nil, nil, errInternal
@@ -1547,17 +1553,17 @@ func (h *handlers) handleGetDifferenceForConn(c *mtproto.Conn, r *mtproto.Reques
 		}
 		chatRemovalUsers, chatRemovalChats = users, chats
 	}
-	consumeChatRemovalMarkers := func() {
+	markChatRemovalDelivered := func() {
 		if len(chatRemovalChatIDs) == 0 {
 			return
 		}
-		if err := h.store.DeleteChatRemovalStateMarkersForOwnerChats(r.Ctx, r.UserID, chatRemovalChatIDs); err != nil {
-			h.log.Error("consume get difference chat removal markers", "user_id", r.UserID, "err", err)
+		if err := h.store.MarkChatRemovalEventsDeliveredForAuthKey(r.Ctx, r.UserID, chatRemovalAuthKeyID, chatRemovalChatIDs); err != nil {
+			h.log.Error("mark get difference chat removals delivered", "user_id", r.UserID, "err", err)
 		}
 	}
 	consumeStateMarkers := func() {
 		consumeAdminMarkers()
-		consumeChatRemovalMarkers()
+		markChatRemovalDelivered()
 	}
 
 	// Qts replay retains its independent 500-event cap. A client-ahead qts remains
