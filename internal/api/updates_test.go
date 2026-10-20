@@ -7,6 +7,7 @@ import (
 	"os"
 	"reflect"
 	"slices"
+	"sync"
 	"testing"
 	"time"
 
@@ -374,6 +375,168 @@ func TestChatRemovalDifferenceAcknowledgesOnlyConfirmedDifferenceState(t *testin
 	})
 	if len(keyBConfirmedIDs) != 0 {
 		t.Fatalf("key B after confirming returned state replayed removals %v", keyBConfirmedIDs)
+	}
+}
+
+func TestChatRemovalConcurrentDifferencesReserveDistinctResumeTokens(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	s := openStore(t)
+	owner, err := s.CreateUser(ctx, "+15551290107")
+	if err != nil {
+		t.Fatalf("create owner: %v", err)
+	}
+	peer, err := s.CreateUser(ctx, "+15551290108")
+	if err != nil {
+		t.Fatalf("create peer: %v", err)
+	}
+	chat, err := s.CreateChat(ctx, owner.ID, "concurrent removal difference", nil)
+	if err != nil {
+		t.Fatalf("create group: %v", err)
+	}
+	if _, err := s.DeleteChat(ctx, chat.ID, owner.ID); err != nil {
+		t.Fatalf("delete group: %v", err)
+	}
+	initialState, err := s.StateWithoutChannelUnread(ctx, owner.ID)
+	if err != nil {
+		t.Fatalf("read initial state: %v", err)
+	}
+	key := [8]byte{0x28, 0x10, 0x20, 0x26, 0x10, 0x20, 0x01, 0x03}
+	fixedNow := time.Now().Add(5 * time.Minute)
+	firstRequest := &tg.UpdatesGetDifferenceRequest{
+		Pts: initialState.Pts, Qts: initialState.Qts, Date: initialState.Date,
+	}
+	ready := make(chan struct{}, 2)
+	release := make(chan struct{})
+	var releaseOnce sync.Once
+	releaseRequests := func() { releaseOnce.Do(func() { close(release) }) }
+	defer releaseRequests()
+	beforeIssue := func() {
+		ready <- struct{}{}
+		<-release
+	}
+	type differenceReply struct {
+		result     any
+		afterReply func()
+		err        error
+	}
+	firstDone := make(chan differenceReply, 1)
+	go func() {
+		result, afterReply, err := api.GetDifferenceBeforeReplyForTestWithAuthKeyAndNowAndHook(
+			s, owner.ID, key, func() time.Time { return fixedNow }, firstRequest, beforeIssue,
+		)
+		firstDone <- differenceReply{result: result, afterReply: afterReply, err: err}
+	}()
+	select {
+	case <-ready:
+	case <-time.After(10 * time.Second):
+		t.Fatal("first getDifference did not reach the token reservation boundary")
+	}
+
+	secretChat, _, err := s.CreateSecretChatRequest(ctx, owner.ID, peer.ID, []byte("ga"), []byte("hash"), 991107, store.RateLimitConfig{})
+	if err != nil {
+		t.Fatalf("create secret chat between replies: %v", err)
+	}
+	secondRequest := &tg.UpdatesGetDifferenceRequest{
+		Pts: initialState.Pts, Qts: initialState.Qts, Date: int(secretChat.Date.Add(time.Minute).Unix()),
+	}
+	secondDone := make(chan differenceReply, 1)
+	go func() {
+		result, afterReply, err := api.GetDifferenceBeforeReplyForTestWithAuthKeyAndNowAndHook(
+			s, owner.ID, key, func() time.Time { return fixedNow }, secondRequest, beforeIssue,
+		)
+		secondDone <- differenceReply{result: result, afterReply: afterReply, err: err}
+	}()
+	select {
+	case <-ready:
+	case <-time.After(10 * time.Second):
+		t.Fatal("second getDifference did not reach the token reservation boundary")
+	}
+	releaseRequests()
+
+	firstReply := <-firstDone
+	if firstReply.err != nil {
+		t.Fatalf("get first difference before reply: %v", firstReply.err)
+	}
+	var firstState tg.UpdatesState
+	var firstUpdates []tg.UpdateClass
+	switch difference := firstReply.result.(type) {
+	case *tg.UpdatesDifference:
+		firstState, firstUpdates = difference.State, difference.OtherUpdates
+	case *tg.UpdatesDifferenceSlice:
+		firstState, firstUpdates = difference.IntermediateState, difference.OtherUpdates
+	default:
+		t.Fatalf("first difference = %T, want difference or slice", firstReply.result)
+	}
+	if !slices.ContainsFunc(firstUpdates, func(update tg.UpdateClass) bool {
+		removal, ok := update.(*tg.UpdateChatParticipantDelete)
+		return ok && removal.ChatID == chat.ID
+	}) {
+		t.Fatalf("first difference updates = %+v, want removal for group %d", firstUpdates, chat.ID)
+	}
+
+	secondReply := <-secondDone
+	if secondReply.err != nil {
+		t.Fatalf("get second difference before reply: %v", secondReply.err)
+	}
+	var secondState tg.UpdatesState
+	var secondUpdates []tg.UpdateClass
+	switch difference := secondReply.result.(type) {
+	case *tg.UpdatesDifference:
+		secondState, secondUpdates = difference.State, difference.OtherUpdates
+	case *tg.UpdatesDifferenceSlice:
+		secondState, secondUpdates = difference.IntermediateState, difference.OtherUpdates
+	default:
+		t.Fatalf("second difference = %T, want difference or slice", secondReply.result)
+	}
+	if !slices.ContainsFunc(secondUpdates, func(update tg.UpdateClass) bool {
+		removal, ok := update.(*tg.UpdateChatParticipantDelete)
+		return ok && removal.ChatID == chat.ID
+	}) {
+		t.Fatalf("second difference updates = %+v, want replayed removal for group %d", secondUpdates, chat.ID)
+	}
+	if firstState.Date == secondState.Date {
+		t.Errorf("concurrent removal replies reused date token %d", firstState.Date)
+	}
+
+	// Both requests have built their replies before either successful-write
+	// callback runs, matching the overlap where a later reply used to overwrite
+	// the first reply's resume cursor.
+	if firstReply.afterReply != nil {
+		firstReply.afterReply()
+	}
+	if secondReply.afterReply != nil {
+		secondReply.afterReply()
+	}
+	firstResumeDate, found, err := s.ChatRemovalResumeDateForState(ctx, owner.ID, mtproto.AuthKeyIDInt64(key), firstState.Date)
+	if err != nil {
+		t.Fatalf("read first reply's resume date: %v", err)
+	}
+	if !found {
+		t.Fatalf("first reply token %d has no resume date", firstState.Date)
+	}
+	if !time.Unix(int64(firstResumeDate), 0).Before(secretChat.Date) {
+		t.Errorf("first reply resume date %d is not before interleaved lifecycle row at %s", firstResumeDate, secretChat.Date)
+	}
+
+	confirmedFirst, err := api.GetDifferenceForTestWithAuthKey(s, owner.ID, key, &tg.UpdatesGetDifferenceRequest{
+		Pts: firstState.Pts, Qts: firstState.Qts, Date: firstState.Date,
+	})
+	if err != nil {
+		t.Fatalf("confirm first concurrent reply: %v", err)
+	}
+	var confirmedUpdates []tg.UpdateClass
+	switch difference := confirmedFirst.(type) {
+	case *tg.UpdatesDifference:
+		confirmedUpdates = difference.OtherUpdates
+	case *tg.UpdatesDifferenceSlice:
+		confirmedUpdates = difference.OtherUpdates
+	case *tg.UpdatesDifferenceEmpty:
+	default:
+		t.Fatalf("confirmation difference = %T, want a difference result", confirmedFirst)
+	}
+	if !hasEncryptionUpdateForChat(confirmedUpdates, secretChat.ID) {
+		t.Fatalf("confirming first reply updates = %+v, want secret-chat lifecycle update for chat %d", confirmedUpdates, secretChat.ID)
 	}
 }
 

@@ -1540,8 +1540,8 @@ func (h *handlers) handleGetDifferenceForConn(c *mtproto.Conn, r *mtproto.Reques
 	}
 
 	// Chat removal is durable but PTS-neutral because its wire update has no
-	// pts/pts_count fields. A successful difference reply records its Date token;
-	// only a later getDifference carrying that token acknowledges the page.
+	// pts/pts_count fields. getDifference reserves a Date token before returning;
+	// only a later request carrying that token acknowledges the page.
 	chatRemovalSnapshots, err := h.store.ChatRemovalSnapshotsForAuthKey(r.Ctx, r.UserID, chatRemovalAuthKeyID, int32(maxDiffEvents+1))
 	if err != nil {
 		h.log.Error("get difference chat removal snapshots", "user_id", r.UserID, "err", err)
@@ -1580,26 +1580,6 @@ func (h *handlers) handleGetDifferenceForConn(c *mtproto.Conn, r *mtproto.Reques
 		}
 		chatRemovalUsers, chatRemovalChats = users, chats
 	}
-	var chatRemovalStateDate int
-	var chatRemovalResumeDate int
-	var chatRemovalStatePts int
-	var chatRemovalStateQts int
-	markChatRemovalIssued := func() {
-		if len(chatRemovalChatIDs) == 0 {
-			return
-		}
-		if err := h.store.MarkChatRemovalEventsIssuedForAuthKey(
-			r.Ctx, r.UserID, chatRemovalAuthKeyID, chatRemovalChatIDs,
-			chatRemovalStatePts, chatRemovalStateQts, chatRemovalStateDate, chatRemovalResumeDate,
-		); err != nil {
-			h.log.Error("mark get difference chat removals issued", "user_id", r.UserID, "err", err)
-		}
-	}
-	consumeStateMarkers := func() {
-		consumeAdminMarkers()
-		markChatRemovalIssued()
-	}
-
 	// Qts replay retains its independent 500-event cap. A client-ahead qts remains
 	// clamped to the current state.
 	var encMsgs []tg.EncryptedMessageClass
@@ -1770,20 +1750,14 @@ func (h *handlers) handleGetDifferenceForConn(c *mtproto.Conn, r *mtproto.Reques
 	}
 	dateStreamUpdates := len(draftChanges) > 0 || len(unreadMarkChanges) > 0
 	notifySettingsCursorNeedsDateAck := notifySettingsCursorStateFound && (dateStreamUpdates || draftMore || unreadMarkMore || len(secretChats) > 0)
+	var chatRemovalResumeDate int
 	if len(chatRemovalUpdates) > 0 {
-		// The reserved Date token identifies this PTS-neutral page; preserve its
-		// order even when a stale request replays an already-issued continuation.
-		latestRemovalStateDate, dateErr := h.store.ChatRemovalLatestDifferenceStateDateForAuthKey(r.Ctx, r.UserID, chatRemovalAuthKeyID)
-		if dateErr != nil {
-			h.log.Error("get latest chat removal difference state date", "user_id", r.UserID, "err", dateErr)
-			return nil, nil, errInternal
-		}
+		// Keep a logical Date for the other replay streams, then reserve a unique
+		// removal token after all response cursors have selected their final Date.
 		chatRemovalResumeDate = st.Date
-		st.Date = max(st.Date, req.Date, latestRemovalStateDate, chatRemovalStateDateTokenFloor-1) + 1
-		chatRemovalStatePts = st.Pts
-		chatRemovalStateQts = st.Qts
-		chatRemovalStateDate = st.Date
+		st.Date = max(st.Date, req.Date, chatRemovalStateDateTokenFloor-1) + 1
 	}
+	var notifySettingsCursorToSave *store.NotifySettingsDifferenceCursor
 	if notifySettingsAuthKeyID != 0 && (notifySettingsMore || (notifySettingsCursorStateFound && (len(notifySettingsChanges) > 0 || notifySettingsCursorNeedsDateAck || len(chatRemovalUpdates) > 0))) {
 		// Date acknowledges this page without consuming PTS/QTS. Keep its logical
 		// value separately so the other date-based streams resume at their cursor.
@@ -1824,22 +1798,37 @@ func (h *handlers) handleGetDifferenceForConn(c *mtproto.Conn, r *mtproto.Reques
 			Last:                   last,
 			State:                  store.State{Pts: st.Pts, Qts: st.Qts, Seq: st.Seq, Date: st.Date},
 		}
-		if err := h.store.SaveNotifySettingsDifferenceCursor(r.Ctx, cursor); err != nil {
+		notifySettingsCursorToSave = &cursor
+	}
+	if len(chatRemovalChatIDs) > 0 {
+		if h.chatRemovalIssueHook != nil {
+			h.chatRemovalIssueHook()
+		}
+		// The allocator upsert serializes same-key requests, and the removal
+		// mappings commit before the response can be observed. A dropped reply
+		// remains pending because only a later client state can acknowledge it.
+		stateDate, issueErr := h.store.IssueChatRemovalEventsForAuthKey(
+			r.Ctx, r.UserID, chatRemovalAuthKeyID, chatRemovalChatIDs,
+			st.Date, st.Pts, st.Qts, chatRemovalResumeDate,
+		)
+		if issueErr != nil {
+			h.log.Error("issue get difference chat removals", "user_id", r.UserID, "err", issueErr)
+			return nil, nil, errInternal
+		}
+		st.Date = stateDate
+	}
+	if notifySettingsCursorToSave != nil {
+		notifySettingsCursorToSave.State.Date = st.Date
+		if err := h.store.SaveNotifySettingsDifferenceCursor(r.Ctx, *notifySettingsCursorToSave); err != nil {
 			h.log.Error("save get difference notification settings cursor", "user_id", r.UserID, "err", err)
 			return nil, nil, errInternal
 		}
 	}
-	if len(chatRemovalChatIDs) > 0 {
-		// Notify-settings cursor acknowledgement can advance Date after the
-		// removal token is first allocated. Bind the removal page to the final
-		// state returned to the client so its next request can acknowledge it.
-		chatRemovalStateDate = st.Date
-	}
 
 	if b.more || encMore || adminMore || chatRemovalMore || draftMore || unreadMarkMore || notifySettingsMore {
 		var afterReply func()
-		if len(adminEventIDs) > 0 || len(chatRemovalChatIDs) > 0 {
-			afterReply = consumeStateMarkers
+		if len(adminEventIDs) > 0 {
+			afterReply = consumeAdminMarkers
 		}
 		return &tg.UpdatesDifferenceSlice{
 			NewMessages:          newMessages,
@@ -1859,9 +1848,9 @@ func (h *handlers) handleGetDifferenceForConn(c *mtproto.Conn, r *mtproto.Reques
 		State:                *stateToTL(st),
 	}
 	var afterReply func()
-	if len(adminEventIDs) > 0 || len(chatRemovalChatIDs) > 0 || c != nil && includeFilterRefresh {
+	if len(adminEventIDs) > 0 || c != nil && includeFilterRefresh {
 		afterReply = func() {
-			consumeStateMarkers()
+			consumeAdminMarkers()
 			if c != nil && includeFilterRefresh {
 				h.dialogFilterSync.AcknowledgeDifference(c, r, recovery, true)
 			}

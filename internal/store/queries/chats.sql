@@ -158,8 +158,8 @@ DO UPDATE SET delivered_at = EXCLUDED.delivered_at
 WHERE chat_removal_client_state.acknowledged_at IS NULL;
 
 -- MarkChatRemovalEventsIssuedForAuthKey records the difference state that
--- included these rows. The state is persisted after a successful reply write;
--- presenting its Date on a later getDifference is the client's acknowledgement.
+-- included these rows before replying; presenting its Date on a later
+-- getDifference is the client's acknowledgement.
 -- An update archives the prior unacknowledged token in the history trigger.
 -- name: MarkChatRemovalEventsIssuedForAuthKey :exec
 INSERT INTO chat_removal_client_state (
@@ -177,19 +177,33 @@ SELECT sqlc.arg(owner_id)::bigint,
 FROM unnest(sqlc.arg(chat_ids)::bigint[]) AS pending(chat_id)
 ON CONFLICT (owner_id, auth_key_id, chat_id)
 DO UPDATE SET delivered_at = EXCLUDED.delivered_at,
+              acknowledged_at = NULL,
               difference_state_pts = EXCLUDED.difference_state_pts,
               difference_state_qts = EXCLUDED.difference_state_qts,
               difference_state_date = EXCLUDED.difference_state_date,
-              resume_date = EXCLUDED.resume_date
-WHERE chat_removal_client_state.acknowledged_at IS NULL;
+              resume_date = EXCLUDED.resume_date;
 
--- ChatRemovalLatestDifferenceStateDateForAuthKey keeps newly issued page
--- tokens ahead of earlier tokens, including after those pages are acknowledged.
--- name: ChatRemovalLatestDifferenceStateDateForAuthKey :one
-SELECT COALESCE(MAX(difference_state_date), 0)::bigint
-FROM chat_removal_client_state
-WHERE owner_id = sqlc.arg(owner_id)
-  AND auth_key_id = sqlc.arg(auth_key_id);
+-- ReserveChatRemovalDifferenceStateDateForAuthKey allocates one Date token
+-- atomically for every response using this authorization key. The token row
+-- serializes concurrent requests, while the client-state maximum seeds keys
+-- that were issued tokens before this allocator was introduced.
+-- name: ReserveChatRemovalDifferenceStateDateForAuthKey :one
+WITH latest AS (
+    SELECT COALESCE(MAX(difference_state_date), 0)::bigint AS last_state_date
+    FROM chat_removal_client_state
+    WHERE owner_id = sqlc.arg(owner_id)
+      AND auth_key_id = sqlc.arg(auth_key_id)
+)
+INSERT INTO chat_removal_difference_state_tokens AS token_state (
+    owner_id, auth_key_id, last_state_date
+)
+SELECT sqlc.arg(owner_id)::bigint,
+       sqlc.arg(auth_key_id)::bigint,
+       GREATEST(sqlc.arg(candidate_date)::bigint, latest.last_state_date + 1)
+FROM latest
+ON CONFLICT (owner_id, auth_key_id)
+DO UPDATE SET last_state_date = GREATEST(token_state.last_state_date + 1, EXCLUDED.last_state_date)
+RETURNING last_state_date;
 
 -- ChatRemovalResumeDatesForState maps an issued removal token
 -- and superseded tokens back to their logical Date without advancing client

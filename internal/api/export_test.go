@@ -772,15 +772,7 @@ func GetDifferenceForTestWithAuthKeyAndNow(
 	now func() time.Time,
 	req *tg.UpdatesGetDifferenceRequest,
 ) (bin.Encoder, error) {
-	var buf bin.Buffer
-	if err := req.Encode(&buf); err != nil {
-		return nil, err
-	}
-	h := testHandlers(s)
-	h.now = now
-	result, afterReply, err := h.handleGetDifferenceForConn(nil, &mtproto.Request{
-		Ctx: context.Background(), UserID: userID, AuthKeyID: authKeyID, Buf: &buf,
-	})
+	result, afterReply, err := GetDifferenceBeforeReplyForTestWithAuthKeyAndNow(s, userID, authKeyID, now, req)
 	if err != nil {
 		return nil, err
 	}
@@ -788,6 +780,41 @@ func GetDifferenceForTestWithAuthKeyAndNow(
 		afterReply()
 	}
 	return result, nil
+}
+
+// GetDifferenceBeforeReplyForTestWithAuthKeyAndNow leaves the reply-success
+// callback uncalled so tests can interleave replies before they are applied.
+func GetDifferenceBeforeReplyForTestWithAuthKeyAndNow(
+	s *store.Store,
+	userID int64,
+	authKeyID [8]byte,
+	now func() time.Time,
+	req *tg.UpdatesGetDifferenceRequest,
+) (bin.Encoder, func(), error) {
+	return GetDifferenceBeforeReplyForTestWithAuthKeyAndNowAndHook(s, userID, authKeyID, now, req, nil)
+}
+
+// GetDifferenceBeforeReplyForTestWithAuthKeyAndNowAndHook pauses at the
+// removal-token reservation boundary when beforeIssue is non-nil.
+func GetDifferenceBeforeReplyForTestWithAuthKeyAndNowAndHook(
+	s *store.Store,
+	userID int64,
+	authKeyID [8]byte,
+	now func() time.Time,
+	req *tg.UpdatesGetDifferenceRequest,
+	beforeIssue func(),
+) (bin.Encoder, func(), error) {
+	var buf bin.Buffer
+	if err := req.Encode(&buf); err != nil {
+		return nil, nil, err
+	}
+	h := testHandlers(s)
+	h.now = now
+	h.chatRemovalIssueHook = beforeIssue
+	result, afterReply, err := h.handleGetDifferenceForConn(nil, &mtproto.Request{
+		Ctx: context.Background(), UserID: userID, AuthKeyID: authKeyID, Buf: &buf,
+	})
+	return result, afterReply, err
 }
 
 // GetDifferenceForTestWithBlobs invokes getDifference with the supplied blob

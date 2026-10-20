@@ -60,40 +60,41 @@ func (s *Store) MarkChatRemovalEventsDeliveredForAuthKey(ctx context.Context, ow
 	return nil
 }
 
-// MarkChatRemovalEventsIssuedForAuthKey associates a successful difference
-// reply's Date with the removal rows it carried. resumeDate preserves the
-// logical date boundary used by other difference streams before the unique
-// removal acknowledgement token was issued.
-func (s *Store) MarkChatRemovalEventsIssuedForAuthKey(
+// IssueChatRemovalEventsForAuthKey atomically reserves a unique difference Date
+// token for this authorization key and associates it with the removal rows in
+// the reply. resumeDate preserves the logical boundary used by other streams.
+func (s *Store) IssueChatRemovalEventsForAuthKey(
 	ctx context.Context,
 	ownerID, authKeyID int64,
 	chatIDs []int64,
-	statePts, stateQts, stateDate, resumeDate int,
-) error {
+	candidateDate, statePts, stateQts, resumeDate int,
+) (int, error) {
 	if len(chatIDs) == 0 {
-		return nil
+		return candidateDate, nil
 	}
-	if err := s.q.MarkChatRemovalEventsIssuedForAuthKey(ctx, db.MarkChatRemovalEventsIssuedForAuthKeyParams{
-		OwnerID: ownerID, AuthKeyID: authKeyID, ChatIds: chatIDs,
-		DifferenceStatePts: int64(statePts), DifferenceStateQts: int64(stateQts),
-		DifferenceStateDate: int64(stateDate), ResumeDate: int64(resumeDate),
-	}); err != nil {
-		return fmt.Errorf("mark chat removal events issued: %w", err)
+	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{})
+	if err != nil {
+		return 0, fmt.Errorf("begin chat removal state reservation: %w", err)
 	}
-	return nil
-}
-
-// ChatRemovalLatestDifferenceStateDateForAuthKey returns the latest issued
-// token, including acknowledged pages, so a stale request cannot reuse it for
-// a later continuation page.
-func (s *Store) ChatRemovalLatestDifferenceStateDateForAuthKey(ctx context.Context, ownerID, authKeyID int64) (int, error) {
-	date, err := s.q.ChatRemovalLatestDifferenceStateDateForAuthKey(ctx, db.ChatRemovalLatestDifferenceStateDateForAuthKeyParams{
-		OwnerID: ownerID, AuthKeyID: authKeyID,
+	defer func() { _ = tx.Rollback(ctx) }() //nolint:errcheck // no-op after commit
+	qtx := s.q.WithTx(tx)
+	stateDate, err := qtx.ReserveChatRemovalDifferenceStateDateForAuthKey(ctx, db.ReserveChatRemovalDifferenceStateDateForAuthKeyParams{
+		OwnerID: ownerID, AuthKeyID: authKeyID, CandidateDate: int64(candidateDate),
 	})
 	if err != nil {
-		return 0, fmt.Errorf("latest chat removal difference state date: %w", err)
+		return 0, fmt.Errorf("reserve chat removal difference state date: %w", err)
 	}
-	return int(date), nil
+	if err := qtx.MarkChatRemovalEventsIssuedForAuthKey(ctx, db.MarkChatRemovalEventsIssuedForAuthKeyParams{
+		OwnerID: ownerID, AuthKeyID: authKeyID, ChatIds: chatIDs,
+		DifferenceStatePts: int64(statePts), DifferenceStateQts: int64(stateQts),
+		DifferenceStateDate: stateDate, ResumeDate: int64(resumeDate),
+	}); err != nil {
+		return 0, fmt.Errorf("mark chat removal events issued: %w", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return 0, fmt.Errorf("commit chat removal state reservation: %w", err)
+	}
+	return int(stateDate), nil
 }
 
 // ChatRemovalResumeDateForState translates an issued or superseded removal
