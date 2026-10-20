@@ -142,6 +142,83 @@ func TestBuildUpdatesNewMessage(t *testing.T) {
 	}
 }
 
+func TestDeleteChatPushesRemovalForMemberWithoutActiveCopies(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	s := openStore(t)
+	a, err := s.CreateUser(ctx, "+15551290081")
+	if err != nil {
+		t.Fatalf("create creator: %v", err)
+	}
+	b, err := s.CreateUser(ctx, "+15551290082")
+	if err != nil {
+		t.Fatalf("create member: %v", err)
+	}
+	chat, err := s.CreateChat(ctx, a.ID, "delete after clearing history", []int64{b.ID})
+	if err != nil {
+		t.Fatalf("create chat: %v", err)
+	}
+	if _, _, duplicate, err := s.SendChatMessage(ctx, store.FanOut{
+		ChatID: chat.ID, FromID: a.ID, Text: "history to clear", RandomID: 90081,
+	}); err != nil || duplicate {
+		t.Fatalf("send before clearing member history: duplicate=%v err=%v", duplicate, err)
+	}
+
+	cleared, err := s.DeleteHistoryBatch(ctx, b.ID, store.PeerTypeChat, chat.ID, 0, false, false)
+	if err != nil {
+		t.Fatalf("clear member's active message copies: %v", err)
+	}
+	if cleared.PtsCount != 1 || cleared.Offset != 0 {
+		t.Fatalf("clear history result = %+v, want one deletion and no remaining messages", cleared)
+	}
+
+	before, err := s.StateWithoutUnread(ctx, b.ID)
+	if err != nil {
+		t.Fatalf("state before delete: %v", err)
+	}
+	perOwner, err := s.DeleteChat(ctx, chat.ID, a.ID)
+	if err != nil {
+		t.Fatalf("delete chat: %v", err)
+	}
+	if got, ok := perOwner[b.ID]; !ok || got != before.Pts+1 {
+		t.Fatalf("member pts = %d, present=%v; want removal event at %d", got, ok, before.Pts+1)
+	}
+
+	updates, _, chats, err := api.BuildUpdatesChatsForTest(s, b.ID, before.Pts)
+	if err != nil {
+		t.Fatalf("build member updates: %v", err)
+	}
+	state, err := s.StateWithoutUnread(ctx, b.ID)
+	if err != nil {
+		t.Fatalf("member state after delete: %v", err)
+	}
+	if state.Pts != before.Pts+1 {
+		t.Fatalf("member state pts = %d, want %d", state.Pts, before.Pts+1)
+	}
+	var removal *tg.UpdateChatParticipantDelete
+	for _, update := range updates {
+		if got, ok := update.(*tg.UpdateChatParticipantDelete); ok {
+			removal = got
+		}
+	}
+	if removal == nil {
+		t.Fatalf("updates = %T, want chat participant removal for empty-history member", updates)
+	}
+	if removal.ChatID != chat.ID || removal.UserID != b.ID || removal.Version != chat.Version+1 {
+		t.Fatalf("removal update = %+v, want chat/user/version %d/%d/%d", removal, chat.ID, b.ID, chat.Version+1)
+	}
+	assertEncodes(t, removal)
+	forbidden := false
+	for _, item := range chats {
+		if got, ok := item.(*tg.ChatForbidden); ok && got.ID == chat.ID {
+			forbidden = true
+		}
+	}
+	if !forbidden {
+		t.Fatalf("chats = %+v, want deleted chat %d represented as forbidden", chats, chat.ID)
+	}
+}
+
 func TestGetStateWithoutUpdateStatePreservesBaseline(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()

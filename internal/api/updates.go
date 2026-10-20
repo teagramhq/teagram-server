@@ -723,6 +723,18 @@ func (h *handlers) eventToUpdate(ctx context.Context, userID int64, ev store.Eve
 	case store.EventDelete:
 		return &tg.UpdateDeleteMessages{Messages: []int{int(ev.LocalID)}, Pts: ev.Pts, PtsCount: 1}, nil, nil, nil, nil
 
+	case store.EventChatParticipantDelete:
+		chat, ok, err := h.store.ChatByID(ctx, ev.LocalID)
+		if err != nil {
+			return nil, nil, nil, nil, err
+		}
+		if !ok {
+			return nil, nil, nil, nil, fmt.Errorf("chat %d missing for participant-delete event", ev.LocalID)
+		}
+		return &tg.UpdateChatParticipantDelete{
+			ChatID: chat.ID, UserID: userID, Version: chat.Version,
+		}, []int64{userID}, []int64{chat.ID}, nil, nil
+
 	case store.EventReadIn, store.EventReadOut:
 		if ev.LocalID == 0 {
 			return nil, nil, nil, nil, nil
