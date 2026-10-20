@@ -116,7 +116,7 @@ func (q *Queries) ChannelActiveInviteByChannel(ctx context.Context, channelID in
 }
 
 const channelByID = `-- name: ChannelByID :one
-SELECT id, title, about, creator_id, megagroup, version, date, pinned_message_id, username, title_tsv, publicly_discoverable, default_banned_rights, slowmode_seconds, ttl_period FROM channels WHERE id = $1
+SELECT id, title, about, creator_id, megagroup, version, date, pinned_message_id, username, title_tsv, publicly_discoverable, default_banned_rights, slowmode_seconds, pre_history_hidden, ttl_period FROM channels WHERE id = $1
 `
 
 func (q *Queries) ChannelByID(ctx context.Context, id int64) (Channel, error) {
@@ -136,13 +136,14 @@ func (q *Queries) ChannelByID(ctx context.Context, id int64) (Channel, error) {
 		&i.PubliclyDiscoverable,
 		&i.DefaultBannedRights,
 		&i.SlowmodeSeconds,
+		&i.PreHistoryHidden,
 		&i.TtlPeriod,
 	)
 	return i, err
 }
 
 const channelDeliverySnapshot = `-- name: ChannelDeliverySnapshot :many
-SELECT participant.channel_id, participant.user_id, participant.role, participant.banned_until, participant.join_pts, participant.date, participant.last_post_at, participant.admin_change_info, state.pts
+SELECT participant.channel_id, participant.user_id, participant.role, participant.banned_until, participant.join_pts, participant.date, participant.last_post_at, participant.admin_change_info, participant.available_min_id, state.pts
 FROM channel_participants AS participant
 JOIN channel_state AS state ON state.channel_id = participant.channel_id
 WHERE participant.channel_id = $1
@@ -158,6 +159,7 @@ type ChannelDeliverySnapshotRow struct {
 	Date            pgtype.Timestamptz
 	LastPostAt      pgtype.Timestamptz
 	AdminChangeInfo bool
+	AvailableMinID  int64
 	Pts             int64
 }
 
@@ -182,6 +184,7 @@ func (q *Queries) ChannelDeliverySnapshot(ctx context.Context, channelID int64) 
 			&i.Date,
 			&i.LastPostAt,
 			&i.AdminChangeInfo,
+			&i.AvailableMinID,
 			&i.Pts,
 		); err != nil {
 			return nil, err
@@ -469,7 +472,7 @@ func (q *Queries) ChannelMegagroup(ctx context.Context, id int64) (bool, error) 
 }
 
 const channelParticipantByUser = `-- name: ChannelParticipantByUser :one
-SELECT channel_id, user_id, role, banned_until, join_pts, date, last_post_at, admin_change_info FROM channel_participants WHERE channel_id = $1 AND user_id = $2
+SELECT channel_id, user_id, role, banned_until, join_pts, date, last_post_at, admin_change_info, available_min_id FROM channel_participants WHERE channel_id = $1 AND user_id = $2
 `
 
 type ChannelParticipantByUserParams struct {
@@ -489,12 +492,13 @@ func (q *Queries) ChannelParticipantByUser(ctx context.Context, arg ChannelParti
 		&i.Date,
 		&i.LastPostAt,
 		&i.AdminChangeInfo,
+		&i.AvailableMinID,
 	)
 	return i, err
 }
 
 const channelParticipantForDelete = `-- name: ChannelParticipantForDelete :one
-SELECT channel_id, user_id, role, banned_until, join_pts, date, last_post_at, admin_change_info FROM channel_participants
+SELECT channel_id, user_id, role, banned_until, join_pts, date, last_post_at, admin_change_info, available_min_id FROM channel_participants
 WHERE channel_id = $1 AND user_id = $2
   AND (banned_until IS NULL OR banned_until <= now())
 FOR SHARE
@@ -519,12 +523,13 @@ func (q *Queries) ChannelParticipantForDelete(ctx context.Context, arg ChannelPa
 		&i.Date,
 		&i.LastPostAt,
 		&i.AdminChangeInfo,
+		&i.AvailableMinID,
 	)
 	return i, err
 }
 
 const channelParticipantForForward = `-- name: ChannelParticipantForForward :one
-SELECT channel_id, user_id, role, banned_until, join_pts, date, last_post_at, admin_change_info FROM channel_participants
+SELECT channel_id, user_id, role, banned_until, join_pts, date, last_post_at, admin_change_info, available_min_id FROM channel_participants
 WHERE channel_id = $1 AND user_id = $2
   AND (banned_until IS NULL OR banned_until <= now())
 FOR SHARE
@@ -549,12 +554,13 @@ func (q *Queries) ChannelParticipantForForward(ctx context.Context, arg ChannelP
 		&i.Date,
 		&i.LastPostAt,
 		&i.AdminChangeInfo,
+		&i.AvailableMinID,
 	)
 	return i, err
 }
 
 const channelParticipants = `-- name: ChannelParticipants :many
-SELECT channel_id, user_id, role, banned_until, join_pts, date, last_post_at, admin_change_info FROM channel_participants WHERE channel_id = $1 ORDER BY user_id
+SELECT channel_id, user_id, role, banned_until, join_pts, date, last_post_at, admin_change_info, available_min_id FROM channel_participants WHERE channel_id = $1 ORDER BY user_id
 `
 
 func (q *Queries) ChannelParticipants(ctx context.Context, channelID int64) ([]ChannelParticipant, error) {
@@ -575,6 +581,7 @@ func (q *Queries) ChannelParticipants(ctx context.Context, channelID int64) ([]C
 			&i.Date,
 			&i.LastPostAt,
 			&i.AdminChangeInfo,
+			&i.AvailableMinID,
 		); err != nil {
 			return nil, err
 		}
@@ -587,7 +594,7 @@ func (q *Queries) ChannelParticipants(ctx context.Context, channelID int64) ([]C
 }
 
 const channelParticipantsForViewer = `-- name: ChannelParticipantsForViewer :many
-SELECT channel_id, user_id, role, banned_until, join_pts, date, last_post_at, admin_change_info FROM channel_participants
+SELECT channel_id, user_id, role, banned_until, join_pts, date, last_post_at, admin_change_info, available_min_id FROM channel_participants
 WHERE user_id = $1::bigint
   AND channel_id = ANY($2::bigint[])
 `
@@ -620,6 +627,7 @@ func (q *Queries) ChannelParticipantsForViewer(ctx context.Context, arg ChannelP
 			&i.Date,
 			&i.LastPostAt,
 			&i.AdminChangeInfo,
+			&i.AvailableMinID,
 		); err != nil {
 			return nil, err
 		}
@@ -632,7 +640,7 @@ func (q *Queries) ChannelParticipantsForViewer(ctx context.Context, arg ChannelP
 }
 
 const channelParticipantsPage = `-- name: ChannelParticipantsPage :many
-SELECT cp.channel_id, cp.user_id, cp.role, cp.banned_until, cp.join_pts, cp.date, cp.last_post_at, cp.admin_change_info
+SELECT cp.channel_id, cp.user_id, cp.role, cp.banned_until, cp.join_pts, cp.date, cp.last_post_at, cp.admin_change_info, cp.available_min_id
 FROM channel_participants cp
 JOIN users u ON u.id = cp.user_id
 LEFT JOIN usernames un ON un.owner_type = 'user' AND un.owner_id = cp.user_id
@@ -692,6 +700,7 @@ func (q *Queries) ChannelParticipantsPage(ctx context.Context, arg ChannelPartic
 			&i.Date,
 			&i.LastPostAt,
 			&i.AdminChangeInfo,
+			&i.AvailableMinID,
 		); err != nil {
 			return nil, err
 		}
@@ -752,7 +761,7 @@ func (q *Queries) ChannelParticipantsPageCount(ctx context.Context, arg ChannelP
 }
 
 const channelPollParticipantForUpdate = `-- name: ChannelPollParticipantForUpdate :one
-SELECT channel_id, user_id, role, banned_until, join_pts, date, last_post_at, admin_change_info FROM channel_participants WHERE channel_id = $1 AND user_id = $2 FOR UPDATE
+SELECT channel_id, user_id, role, banned_until, join_pts, date, last_post_at, admin_change_info, available_min_id FROM channel_participants WHERE channel_id = $1 AND user_id = $2 FOR UPDATE
 `
 
 type ChannelPollParticipantForUpdateParams struct {
@@ -774,6 +783,7 @@ func (q *Queries) ChannelPollParticipantForUpdate(ctx context.Context, arg Chann
 		&i.Date,
 		&i.LastPostAt,
 		&i.AdminChangeInfo,
+		&i.AvailableMinID,
 	)
 	return i, err
 }
@@ -911,7 +921,7 @@ func (q *Queries) ChannelStateForUpdate(ctx context.Context, channelID int64) (C
 }
 
 const channelsForUser = `-- name: ChannelsForUser :many
-SELECT c.id, c.title, c.about, c.creator_id, c.megagroup, c.version, c.date, c.pinned_message_id, c.username, c.title_tsv, c.publicly_discoverable, c.default_banned_rights, c.slowmode_seconds, c.ttl_period FROM channels c
+SELECT c.id, c.title, c.about, c.creator_id, c.megagroup, c.version, c.date, c.pinned_message_id, c.username, c.title_tsv, c.publicly_discoverable, c.default_banned_rights, c.slowmode_seconds, c.pre_history_hidden, c.ttl_period FROM channels c
 JOIN channel_participants p ON p.channel_id = c.id
 WHERE p.user_id = $1
 ORDER BY c.id
@@ -940,6 +950,7 @@ func (q *Queries) ChannelsForUser(ctx context.Context, userID int64) ([]Channel,
 			&i.PubliclyDiscoverable,
 			&i.DefaultBannedRights,
 			&i.SlowmodeSeconds,
+			&i.PreHistoryHidden,
 			&i.TtlPeriod,
 		); err != nil {
 			return nil, err
@@ -1007,7 +1018,7 @@ func (q *Queries) GetChannelPinnedMessage(ctx context.Context, id int64) (*int32
 
 const insertChannel = `-- name: InsertChannel :one
 INSERT INTO channels (id, title, about, creator_id, megagroup) VALUES ($1, $2, $3, $4, $5)
-RETURNING id, title, about, creator_id, megagroup, version, date, pinned_message_id, username, title_tsv, publicly_discoverable, default_banned_rights, slowmode_seconds, ttl_period
+RETURNING id, title, about, creator_id, megagroup, version, date, pinned_message_id, username, title_tsv, publicly_discoverable, default_banned_rights, slowmode_seconds, pre_history_hidden, ttl_period
 `
 
 type InsertChannelParams struct {
@@ -1047,6 +1058,7 @@ func (q *Queries) InsertChannel(ctx context.Context, arg InsertChannelParams) (C
 		&i.PubliclyDiscoverable,
 		&i.DefaultBannedRights,
 		&i.SlowmodeSeconds,
+		&i.PreHistoryHidden,
 		&i.TtlPeriod,
 	)
 	return i, err
@@ -1068,14 +1080,16 @@ func (q *Queries) InsertChannelInvite(ctx context.Context, arg InsertChannelInvi
 }
 
 const insertChannelParticipant = `-- name: InsertChannelParticipant :exec
-INSERT INTO channel_participants (channel_id, user_id, role, join_pts) VALUES ($1, $2, $3, $4)
+INSERT INTO channel_participants (channel_id, user_id, role, join_pts, available_min_id)
+VALUES ($1, $2, $3, $4, $5)
 `
 
 type InsertChannelParticipantParams struct {
-	ChannelID int64
-	UserID    int64
-	Role      int16
-	JoinPts   int64
+	ChannelID      int64
+	UserID         int64
+	Role           int16
+	JoinPts        int64
+	AvailableMinID int64
 }
 
 func (q *Queries) InsertChannelParticipant(ctx context.Context, arg InsertChannelParticipantParams) error {
@@ -1084,31 +1098,36 @@ func (q *Queries) InsertChannelParticipant(ctx context.Context, arg InsertChanne
 		arg.UserID,
 		arg.Role,
 		arg.JoinPts,
+		arg.AvailableMinID,
 	)
 	return err
 }
 
 const insertChannelParticipantIfAbsent = `-- name: InsertChannelParticipantIfAbsent :execrows
-INSERT INTO channel_participants (channel_id, user_id, role, join_pts) VALUES ($1, $2, $3, $4)
+INSERT INTO channel_participants (channel_id, user_id, role, join_pts, available_min_id)
+VALUES ($1, $2, $3, $4, $5)
 ON CONFLICT (channel_id, user_id) DO NOTHING
 `
 
 type InsertChannelParticipantIfAbsentParams struct {
-	ChannelID int64
-	UserID    int64
-	Role      int16
-	JoinPts   int64
+	ChannelID      int64
+	UserID         int64
+	Role           int16
+	JoinPts        int64
+	AvailableMinID int64
 }
 
 // InsertChannelParticipantIfAbsent reports 0 rows when the user already holds a
 // row, which is what makes a repeated join a no-op instead of an error — and in
-// particular never lowers an existing join_pts or clears an existing ban.
+// particular never lowers an existing join_pts or history floor or clears an
+// existing ban.
 func (q *Queries) InsertChannelParticipantIfAbsent(ctx context.Context, arg InsertChannelParticipantIfAbsentParams) (int64, error) {
 	result, err := q.db.Exec(ctx, insertChannelParticipantIfAbsent,
 		arg.ChannelID,
 		arg.UserID,
 		arg.Role,
 		arg.JoinPts,
+		arg.AvailableMinID,
 	)
 	if err != nil {
 		return 0, err
@@ -1163,7 +1182,7 @@ func (q *Queries) IsChannelMember(ctx context.Context, arg IsChannelMemberParams
 }
 
 const lockChannel = `-- name: LockChannel :one
-SELECT id, title, about, creator_id, megagroup, version, date, pinned_message_id, username, title_tsv, publicly_discoverable, default_banned_rights, slowmode_seconds, ttl_period FROM channels WHERE id = $1 FOR NO KEY UPDATE
+SELECT id, title, about, creator_id, megagroup, version, date, pinned_message_id, username, title_tsv, publicly_discoverable, default_banned_rights, slowmode_seconds, pre_history_hidden, ttl_period FROM channels WHERE id = $1 FOR NO KEY UPDATE
 `
 
 // LockChannel serialises rights mutations while allowing FK key-share checks on
@@ -1188,6 +1207,7 @@ func (q *Queries) LockChannel(ctx context.Context, id int64) (Channel, error) {
 		&i.PubliclyDiscoverable,
 		&i.DefaultBannedRights,
 		&i.SlowmodeSeconds,
+		&i.PreHistoryHidden,
 		&i.TtlPeriod,
 	)
 	return i, err
@@ -1443,7 +1463,7 @@ func (q *Queries) SearchPublicChannels(ctx context.Context, arg SearchPublicChan
 
 const setChannelAbout = `-- name: SetChannelAbout :one
 UPDATE channels SET about = $2, version = version + 1 WHERE id = $1
-RETURNING id, title, about, creator_id, megagroup, version, date, pinned_message_id, username, title_tsv, publicly_discoverable, default_banned_rights, slowmode_seconds, ttl_period
+RETURNING id, title, about, creator_id, megagroup, version, date, pinned_message_id, username, title_tsv, publicly_discoverable, default_banned_rights, slowmode_seconds, pre_history_hidden, ttl_period
 `
 
 type SetChannelAboutParams struct {
@@ -1468,6 +1488,7 @@ func (q *Queries) SetChannelAbout(ctx context.Context, arg SetChannelAboutParams
 		&i.PubliclyDiscoverable,
 		&i.DefaultBannedRights,
 		&i.SlowmodeSeconds,
+		&i.PreHistoryHidden,
 		&i.TtlPeriod,
 	)
 	return i, err
@@ -1477,7 +1498,7 @@ const setChannelDefaultBannedRights = `-- name: SetChannelDefaultBannedRights :o
 UPDATE channels
 SET default_banned_rights = $2, version = version + 1
 WHERE id = $1
-RETURNING id, title, about, creator_id, megagroup, version, date, pinned_message_id, username, title_tsv, publicly_discoverable, default_banned_rights, slowmode_seconds, ttl_period
+RETURNING id, title, about, creator_id, megagroup, version, date, pinned_message_id, username, title_tsv, publicly_discoverable, default_banned_rights, slowmode_seconds, pre_history_hidden, ttl_period
 `
 
 type SetChannelDefaultBannedRightsParams struct {
@@ -1504,13 +1525,14 @@ func (q *Queries) SetChannelDefaultBannedRights(ctx context.Context, arg SetChan
 		&i.PubliclyDiscoverable,
 		&i.DefaultBannedRights,
 		&i.SlowmodeSeconds,
+		&i.PreHistoryHidden,
 		&i.TtlPeriod,
 	)
 	return i, err
 }
 
 const setChannelPinnedMessage = `-- name: SetChannelPinnedMessage :one
-UPDATE channels SET pinned_message_id = $2, version = version + 1 WHERE id = $1 RETURNING id, title, about, creator_id, megagroup, version, date, pinned_message_id, username, title_tsv, publicly_discoverable, default_banned_rights, slowmode_seconds, ttl_period
+UPDATE channels SET pinned_message_id = $2, version = version + 1 WHERE id = $1 RETURNING id, title, about, creator_id, megagroup, version, date, pinned_message_id, username, title_tsv, publicly_discoverable, default_banned_rights, slowmode_seconds, pre_history_hidden, ttl_period
 `
 
 type SetChannelPinnedMessageParams struct {
@@ -1538,6 +1560,7 @@ func (q *Queries) SetChannelPinnedMessage(ctx context.Context, arg SetChannelPin
 		&i.PubliclyDiscoverable,
 		&i.DefaultBannedRights,
 		&i.SlowmodeSeconds,
+		&i.PreHistoryHidden,
 		&i.TtlPeriod,
 	)
 	return i, err
@@ -1547,7 +1570,7 @@ const setChannelSlowMode = `-- name: SetChannelSlowMode :one
 UPDATE channels
 SET slowmode_seconds = $2
 WHERE id = $1
-RETURNING id, title, about, creator_id, megagroup, version, date, pinned_message_id, username, title_tsv, publicly_discoverable, default_banned_rights, slowmode_seconds, ttl_period
+RETURNING id, title, about, creator_id, megagroup, version, date, pinned_message_id, username, title_tsv, publicly_discoverable, default_banned_rights, slowmode_seconds, pre_history_hidden, ttl_period
 `
 
 type SetChannelSlowModeParams struct {
@@ -1574,6 +1597,7 @@ func (q *Queries) SetChannelSlowMode(ctx context.Context, arg SetChannelSlowMode
 		&i.PubliclyDiscoverable,
 		&i.DefaultBannedRights,
 		&i.SlowmodeSeconds,
+		&i.PreHistoryHidden,
 		&i.TtlPeriod,
 	)
 	return i, err
@@ -1581,7 +1605,7 @@ func (q *Queries) SetChannelSlowMode(ctx context.Context, arg SetChannelSlowMode
 
 const setChannelTitle = `-- name: SetChannelTitle :one
 UPDATE channels SET title = $2, version = version + 1 WHERE id = $1
-RETURNING id, title, about, creator_id, megagroup, version, date, pinned_message_id, username, title_tsv, publicly_discoverable, default_banned_rights, slowmode_seconds, ttl_period
+RETURNING id, title, about, creator_id, megagroup, version, date, pinned_message_id, username, title_tsv, publicly_discoverable, default_banned_rights, slowmode_seconds, pre_history_hidden, ttl_period
 `
 
 type SetChannelTitleParams struct {
@@ -1606,6 +1630,7 @@ func (q *Queries) SetChannelTitle(ctx context.Context, arg SetChannelTitleParams
 		&i.PubliclyDiscoverable,
 		&i.DefaultBannedRights,
 		&i.SlowmodeSeconds,
+		&i.PreHistoryHidden,
 		&i.TtlPeriod,
 	)
 	return i, err

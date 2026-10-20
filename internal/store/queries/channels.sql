@@ -12,7 +12,8 @@ RETURNING *;
 INSERT INTO channel_state (channel_id) VALUES ($1);
 
 -- name: InsertChannelParticipant :exec
-INSERT INTO channel_participants (channel_id, user_id, role, join_pts) VALUES ($1, $2, $3, $4);
+INSERT INTO channel_participants (channel_id, user_id, role, join_pts, available_min_id)
+VALUES ($1, $2, $3, $4, $5);
 
 -- name: ChannelByID :one
 SELECT * FROM channels WHERE id = $1;
@@ -247,9 +248,11 @@ SELECT count(*) FROM channel_participants WHERE user_id = $1;
 
 -- InsertChannelParticipantIfAbsent reports 0 rows when the user already holds a
 -- row, which is what makes a repeated join a no-op instead of an error — and in
--- particular never lowers an existing join_pts or clears an existing ban.
+-- particular never lowers an existing join_pts or history floor or clears an
+-- existing ban.
 -- name: InsertChannelParticipantIfAbsent :execrows
-INSERT INTO channel_participants (channel_id, user_id, role, join_pts) VALUES ($1, $2, $3, $4)
+INSERT INTO channel_participants (channel_id, user_id, role, join_pts, available_min_id)
+VALUES ($1, $2, $3, $4, $5)
 ON CONFLICT (channel_id, user_id) DO NOTHING;
 
 -- UpdateChannelParticipantRole and UpdateChannelParticipantBan only ever update:

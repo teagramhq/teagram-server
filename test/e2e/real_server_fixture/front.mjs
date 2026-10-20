@@ -3,7 +3,7 @@ import https from 'node:https';
 import net from 'node:net';
 
 const PROBE_CSP = "default-src 'self'; connect-src 'self' wss://teagramd.test/apiws; script-src 'self'; worker-src 'self'; object-src 'none'; base-uri 'none'";
-const PRIVATE_CSP = "default-src 'self'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'; object-src 'none'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; media-src 'self' blob:; worker-src 'self' blob:; manifest-src 'self'; connect-src 'self' wss://teagramd.test/apiws;";
+const PRIVATE_CSP = "default-src 'self'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'; frame-src 'self' https://challenges.cloudflare.com; object-src 'none'; script-src 'self' 'wasm-unsafe-eval' https://challenges.cloudflare.com; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; media-src 'self' blob:; worker-src 'self' blob:; manifest-src 'self'; connect-src 'self' wss://teagramd.test/apiws;";
 const PROBE_PREFIX = '/_fixture_probe/';
 const probeTarget = fs.readFileSync('/run/mtproto-target.json');
 const args = process.argv.slice(2);
