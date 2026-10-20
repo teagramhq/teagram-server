@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -115,6 +116,7 @@ type ChannelMessage struct {
 	ReplyToMsgID int32
 	Action       ChannelMessageAction
 	Poll         *Poll
+	PostAuthor   *string
 }
 
 // ChannelMessageAction identifies a service message stored in a channel's
@@ -144,6 +146,7 @@ type channelMsgFields struct {
 	FileID       *int64
 	ReplyToMsgID *int32
 	ActionType   int16
+	PostAuthor   *string
 }
 
 // channelMessageFromFields is the sole row-to-struct converter for channel
@@ -174,6 +177,7 @@ func channelMessageFromFields(r channelMsgFields) ChannelMessage {
 		replyToMsgID,
 		ChannelMessageAction(r.ActionType),
 		nil,
+		r.PostAuthor,
 	}
 	if message.Deleted {
 		message.FromID = 0
@@ -184,6 +188,7 @@ func channelMessageFromFields(r channelMsgFields) ChannelMessage {
 		message.FileID = nil
 		message.ReplyToMsgID = 0
 		message.Action = ChannelMessageActionNone
+		message.PostAuthor = nil
 	}
 	return message
 }
@@ -787,16 +792,15 @@ func (s *Store) postChannelMessage(
 			return message, pts, true, nil
 		}
 	}
-	var megagroup bool
+	channel, err := qtx.ChannelPostDefaults(ctx, channelID)
+	switch {
+	case errors.Is(err, pgx.ErrNoRows):
+		return ChannelMessage{}, 0, false, ErrNotMember
+	case err != nil:
+		return ChannelMessage{}, 0, false, fmt.Errorf("channel post defaults: %w", err)
+	}
+	megagroup := channel.Megagroup
 	if checkRights {
-		channel, e := qtx.ChannelPostDefaults(ctx, channelID)
-		switch {
-		case errors.Is(e, pgx.ErrNoRows):
-			return ChannelMessage{}, 0, false, ErrNotMember
-		case e != nil:
-			return ChannelMessage{}, 0, false, fmt.Errorf("channel post defaults: %w", e)
-		}
-		megagroup = channel.Megagroup
 		if pollDraft != nil && !channel.Megagroup && pollDraft.PublicVoters {
 			return ChannelMessage{}, 0, false, ErrBroadcastPublicVotersForbidden
 		}
@@ -818,6 +822,16 @@ func (s *Store) postChannelMessage(
 			if err = checkDefaultMessageRestriction(channel.DefaultBannedRights, role >= channelRoleAdmin, fileID != nil || pollDraft != nil, mediaRights); err != nil {
 				return ChannelMessage{}, 0, false, err
 			}
+		}
+	}
+	var postAuthor *string
+	if !megagroup && channel.Signatures {
+		name, nameErr := channelPostAuthorName(ctx, qtx, fromID)
+		if nameErr != nil {
+			return ChannelMessage{}, 0, false, nameErr
+		}
+		if name != "" {
+			postAuthor = &name
 		}
 	}
 
@@ -885,7 +899,7 @@ func (s *Store) postChannelMessage(
 	}
 	if err = qtx.InsertChannelMessage(ctx, db.InsertChannelMessageParams{
 		ChannelID: channelID, LocalID: b.LocalID, FromID: fromID,
-		Message: text, RandomID: randomID, FileID: fileID, ReplyToMsgID: replyTo,
+		Message: text, RandomID: randomID, FileID: fileID, ReplyToMsgID: replyTo, PostAuthor: postAuthor,
 	}); err != nil {
 		return ChannelMessage{}, 0, false, fmt.Errorf("insert channel message: %w", err)
 	}
@@ -928,6 +942,15 @@ func (s *Store) postChannelMessage(
 		message.Poll = pollResult
 	}
 	return message, int(b.Pts), false, nil
+}
+
+func channelPostAuthorName(ctx context.Context, qtx *db.Queries, userID int64) (string, error) {
+	user, err := qtx.UserByID(ctx, userID)
+	if err != nil {
+		return "", fmt.Errorf("read channel post author: %w", err)
+	}
+	name := strings.TrimSpace(strings.TrimSpace(user.FirstName) + " " + strings.TrimSpace(user.LastName))
+	return name, nil
 }
 
 func channelMessageRetry(
