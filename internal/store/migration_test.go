@@ -14,6 +14,19 @@ import (
 	"github.com/teagramhq/teagram-server/internal/store"
 )
 
+func lockMigrationReplays(tb testing.TB, ctx context.Context, conn *pgx.Conn) func() {
+	tb.Helper()
+	unlock, err := pgtest.LockMigrations(ctx, conn)
+	if err != nil {
+		tb.Fatalf("lock migration replay: %v", err)
+	}
+	return func() {
+		if err := unlock(); err != nil {
+			tb.Errorf("unlock migration replay: %v", err)
+		}
+	}
+}
+
 // TestOpenRejectsUnmigratedSchema proves Open's fail-fast schema check fires:
 // dropping a table the latest migration created makes Open error at startup
 // instead of failing later with a confusing "relation does not exist".
@@ -756,6 +769,7 @@ func TestOpenRejectsPartBlobMigrationMissing(t *testing.T) {
 		t.Fatalf("connect: %v", err)
 	}
 	defer func() { _ = conn.Close(ctx) }() //nolint:errcheck // best-effort close
+	defer lockMigrationReplays(t, ctx, conn)()
 	for _, e := range migs {
 		if e.IsDir() || !strings.HasSuffix(e.Name(), ".sql") {
 			continue

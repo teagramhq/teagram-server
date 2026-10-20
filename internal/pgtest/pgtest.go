@@ -217,17 +217,22 @@ func dsnHost(dsn string) string {
 // binaries sharing the reusable container.
 // ponytail: old-hash templates from earlier migration sets are left behind;
 // harmless in an ephemeral test container, GC them if they ever pile up.
-func ensureTemplate(ctx context.Context) error {
+func ensureTemplate(ctx context.Context) (retErr error) {
 	conn, err := pgx.Connect(ctx, adminDSN)
 	if err != nil {
 		return fmt.Errorf("admin connect: %w", err)
 	}
 	defer func() { _ = conn.Close(ctx) }() //nolint:errcheck // best-effort close of admin conn
 
-	if _, err := conn.Exec(ctx, `SELECT pg_advisory_lock($1)`, advisoryLockKey); err != nil {
-		return fmt.Errorf("lock: %w", err)
+	unlock, err := LockMigrations(ctx, conn)
+	if err != nil {
+		return err
 	}
-	defer func() { _, _ = conn.Exec(ctx, `SELECT pg_advisory_unlock($1)`, advisoryLockKey) }() //nolint:errcheck // best-effort unlock; conn close releases it anyway
+	defer func() {
+		if err := unlock(); err != nil {
+			retErr = errors.Join(retErr, err)
+		}
+	}()
 
 	var exists bool
 	if err := conn.QueryRow(ctx,
@@ -255,6 +260,27 @@ func ensureTemplate(ctx context.Context) error {
 		return fmt.Errorf("promote template: %w", err)
 	}
 	return nil
+}
+
+// LockMigrations acquires the cluster-wide advisory lock shared by template
+// builds and disposable-schema migration replays. Closing conn also releases
+// the lock if the returned unlock function cannot complete.
+func LockMigrations(ctx context.Context, conn *pgx.Conn) (func() error, error) {
+	if _, err := conn.Exec(ctx, `SELECT pg_advisory_lock($1)`, advisoryLockKey); err != nil {
+		return nil, fmt.Errorf("lock migration replay: %w", err)
+	}
+	return func() error {
+		unlockCtx, cancel := context.WithTimeout(context.Background(), readyProbe)
+		defer cancel()
+		var unlocked bool
+		if err := conn.QueryRow(unlockCtx, `SELECT pg_advisory_unlock($1)`, advisoryLockKey).Scan(&unlocked); err != nil {
+			return fmt.Errorf("unlock migration replay: %w", err)
+		}
+		if !unlocked {
+			return errors.New("migration replay lock was not held")
+		}
+		return nil
+	}, nil
 }
 
 // applyMigrations execs each Atlas migration, in filename order, into db. The

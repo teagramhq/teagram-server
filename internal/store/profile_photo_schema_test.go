@@ -27,6 +27,66 @@ const (
 	profileGallerySchemaMigration  = "20261008000069_profile_photo_gallery.sql"
 )
 
+func TestProfilePhotoDatabaseBeforeSerializesMigrationReplayWithTemplateBuild(t *testing.T) {
+	ctx := context.Background()
+
+	const migrationLockKey = int64(0x7467)
+	admin, err := pgx.Connect(ctx, pgtest.AdminDSN())
+	if err != nil {
+		t.Fatalf("connect admin: %v", err)
+	}
+	defer func() {
+		if err := admin.Close(context.Background()); err != nil {
+			t.Errorf("close admin: %v", err)
+		}
+	}()
+	if _, err := admin.Exec(ctx, `SELECT pg_advisory_lock($1)`, migrationLockKey); err != nil {
+		t.Fatalf("lock migration replay: %v", err)
+	}
+
+	watchCtx, stopWatching := context.WithTimeout(ctx, 10*time.Second)
+	defer stopWatching()
+	waitObserved := make(chan bool, 1)
+	go func() {
+		ticker := time.NewTicker(10 * time.Millisecond)
+		defer ticker.Stop()
+		for {
+			var waiting bool
+			if err := admin.QueryRow(watchCtx, `
+				SELECT EXISTS (
+					SELECT 1 FROM pg_locks AS locks
+					JOIN pg_stat_activity AS activity USING (pid)
+					WHERE locks.locktype = 'advisory' AND locks.classid = 0
+					  AND locks.objid = $1::oid AND locks.objsubid = 1 AND NOT locks.granted
+					  AND activity.application_name = 'store-profile-photo-replay'
+				)
+			`, migrationLockKey).Scan(&waiting); err != nil {
+				waitObserved <- false
+				return
+			}
+			if waiting {
+				unlockCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+				defer cancel()
+				_, err := admin.Exec(unlockCtx, `SELECT pg_advisory_unlock($1)`, migrationLockKey)
+				waitObserved <- err == nil
+				return
+			}
+			select {
+			case <-watchCtx.Done():
+				waitObserved <- false
+				return
+			case <-ticker.C:
+			}
+		}
+	}()
+
+	profilePhotoDatabaseBefore(t, watchCtx, "20260913000040_schema_lock_test.sql")
+	stopWatching()
+	if !<-waitObserved {
+		t.Fatal("migration replay completed without waiting for the template migration lock")
+	}
+}
+
 // profilePhotoTables are the inert tables this slice adds. None
 // of them has a writer: the guarantees below are constraints, and the only thing
 // under test is whether the schema holds them.
@@ -683,7 +743,12 @@ func profilePhotoConn(t *testing.T, ctx context.Context) *pgx.Conn {
 // a second connection can write to it while a migration applies.
 func profilePhotoDatabaseBefore(t *testing.T, ctx context.Context, boundary string) (*pgx.Conn, string) {
 	t.Helper()
-	admin, err := pgx.Connect(ctx, pgtest.AdminDSN())
+	adminConfig, err := pgx.ParseConfig(pgtest.AdminDSN())
+	if err != nil {
+		t.Fatalf("parse admin DSN: %v", err)
+	}
+	adminConfig.RuntimeParams["application_name"] = "store-profile-photo-replay"
+	admin, err := pgx.ConnectConfig(ctx, adminConfig)
 	if err != nil {
 		t.Fatalf("connect admin: %v", err)
 	}
@@ -719,6 +784,7 @@ func profilePhotoDatabaseBefore(t *testing.T, ctx context.Context, boundary stri
 		}
 	})
 
+	defer lockMigrationReplays(t, ctx, admin)()
 	entries, err := os.ReadDir(filepath.Join("..", "..", "migrations"))
 	if err != nil {
 		t.Fatalf("read migrations: %v", err)
