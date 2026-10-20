@@ -1180,6 +1180,25 @@ func (h *handlers) channelMessagesWithCount(
 	msgs []store.ChannelMessage,
 	count int,
 ) (bin.Encoder, error) {
+	return h.channelMessagesWithCountAndCaller(r, channelID, msgs, count, true)
+}
+
+func (h *handlers) channelRepliesWithCount(
+	r *mtproto.Request,
+	channelID int64,
+	msgs []store.ChannelMessage,
+	count int,
+) (bin.Encoder, error) {
+	return h.channelMessagesWithCountAndCaller(r, channelID, msgs, count, false)
+}
+
+func (h *handlers) channelMessagesWithCountAndCaller(
+	r *mtproto.Request,
+	channelID int64,
+	msgs []store.ChannelMessage,
+	count int,
+	includeCaller bool,
+) (bin.Encoder, error) {
 	broadcast, err := h.channelIsBroadcast(r.Ctx, channelID)
 	if err != nil {
 		h.log.Error("load channel kind for messages", "channel_id", channelID, "err", err)
@@ -1195,8 +1214,12 @@ func (h *handlers) channelMessagesWithCount(
 		return nil, errInternal
 	}
 	// A page has as many authors as the channel has posters, so the user list is
-	// collected off the batch itself.
-	authors := map[int64]bool{r.UserID: true}
+	// collected off the batch itself. getReplies includes only authors of returned
+	// replies; channel history also includes the caller as before.
+	authors := make(map[int64]bool, len(msgs)+1)
+	if includeCaller {
+		authors[r.UserID] = true
+	}
 	tlMsgs := make([]tg.MessageClass, len(msgs))
 	for i, m := range msgs {
 		message, renderErr := channelMessageToTL(m, r.UserID, files, broadcast)
