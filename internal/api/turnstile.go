@@ -24,16 +24,16 @@ const (
 var (
 	errTurnstileRejected    = errors.New("turnstile verification rejected")
 	errTurnstileUnavailable = errors.New("turnstile verification unavailable")
-	// ErrTurnstileBusy asks the sign-up handler to return FLOOD_WAIT without
-	// charging the sign-up IP limit.
+	// ErrTurnstileBusy asks auth handlers to return FLOOD_WAIT without charging
+	// their IP limits.
 	ErrTurnstileBusy = errors.New("turnstile verification capacity reached")
 )
 
-// SignUpTurnstileVerifier checks a one-use sign-up challenge. remoteIP is
-// empty unless the request address came from an allowlisted PROXY v2 header.
+// SignUpTurnstileVerifier checks a one-use auth challenge. remoteIP is empty
+// unless the request address came from an allowlisted PROXY v2 header.
 // Implementations return ErrTurnstileBusy when their bounded capacity is full.
 type SignUpTurnstileVerifier interface {
-	Verify(ctx context.Context, token, remoteIP string) error
+	Verify(ctx context.Context, token, action, remoteIP string) error
 }
 
 type turnstileVerifier struct {
@@ -67,7 +67,7 @@ func newTurnstileVerifier(secretKey string) *turnstileVerifier {
 	}
 }
 
-func (v *turnstileVerifier) Verify(ctx context.Context, token, remoteIP string) error {
+func (v *turnstileVerifier) Verify(ctx context.Context, token, action, remoteIP string) error {
 	if token == "" || len(token) > turnstileMaxTokenBytes {
 		return errTurnstileRejected
 	}
@@ -112,7 +112,7 @@ func (v *turnstileVerifier) Verify(ctx context.Context, token, remoteIP string) 
 	if err := json.Unmarshal(body, &result); err != nil {
 		return errTurnstileUnavailable
 	}
-	if !result.Success || result.Action != "signup" {
+	if !result.Success || result.Action != action {
 		return errTurnstileRejected
 	}
 	if _, ok := v.hostnames[strings.ToLower(strings.TrimSuffix(result.Hostname, "."))]; !ok {

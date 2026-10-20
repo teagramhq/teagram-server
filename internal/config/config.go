@@ -85,7 +85,7 @@ type Config struct {
 
 	// WelcomeChannel is the operator-configured public broadcast channel for new accounts.
 	WelcomeChannel string
-	// Turnstile contains the optional sign-up challenge credentials. SecretKey
+	// Turnstile contains the optional public-auth challenge credentials. SecretKey
 	// is consumed only by the RPC verifier and must never be logged or exposed.
 	Turnstile TurnstileConfig `json:"-"`
 	// AuthKeyEncKey is the 32-byte master key that encrypts auth keys at rest.
@@ -320,14 +320,16 @@ type Config struct {
 	ProfileDeleteOperationRetention time.Duration
 }
 
-// TurnstileConfig holds the public widget key and private Siteverify key. Both
-// are empty when the challenge is disabled.
+// TurnstileConfig holds the public widget key, private Siteverify key, and the
+// independent opt-in for signin challenges. Configured credentials continue to
+// protect signup when SignInEnabled is false.
 type TurnstileConfig struct {
-	SiteKey   string
-	SecretKey string `json:"-"`
+	SiteKey       string
+	SecretKey     string `json:"-"`
+	SignInEnabled bool   `json:"-"`
 }
 
-// Enabled reports whether the Siteverify gate is configured.
+// Enabled reports whether the signup Siteverify gate is configured.
 func (c TurnstileConfig) Enabled() bool { return c.SecretKey != "" }
 
 // ClientConfig contains only the identity settings needed to render the
@@ -335,11 +337,12 @@ func (c TurnstileConfig) Enabled() bool { return c.SecretKey != "" }
 // Postgres, the auth-key encryption master key, blob storage, or any other
 // service resource.
 type ClientConfig struct {
-	ListenAddr    string
-	RSAKeyPath    string
-	AdvertiseHost string
-	AdvertisePort int
-	DCID          int
+	ListenAddr       string
+	RSAKeyPath       string
+	AdvertiseHost    string
+	AdvertisePort    int
+	DCID             int
+	TurnstileSiteKey string
 	// AdvertiseDemoGuestSignUp is an availability hint only; registration
 	// policy remains controlled by the server's registration configuration.
 	AdvertiseDemoGuestSignUp bool
@@ -608,9 +611,13 @@ const ProfileIdentifierRetentionFloor = ProfileRestoreCeiling + ProfileBackupCle
 func LoadClientConfig() (ClientConfig, error) {
 	listenAddr := envOr("TG_LISTEN_ADDR", ":2443")
 	cfg := ClientConfig{
-		ListenAddr: listenAddr,
-		RSAKeyPath: RSAKeyPath(),
-		DCID:       2,
+		ListenAddr:       listenAddr,
+		RSAKeyPath:       RSAKeyPath(),
+		DCID:             2,
+		TurnstileSiteKey: strings.TrimSpace(os.Getenv("TG_TURNSTILE_SITE_KEY")),
+	}
+	if cfg.TurnstileSiteKey != "" && !turnstileKeyPattern.MatchString(cfg.TurnstileSiteKey) {
+		return ClientConfig{}, errors.New("TG_TURNSTILE_SITE_KEY must contain only letters, digits, '_' or '-' (maximum 256 characters)")
 	}
 	if v := os.Getenv("TG_DC_ID"); v != "" {
 		id, err := strconv.Atoi(v)
@@ -1660,12 +1667,23 @@ func loadTurnstileConfig() (TurnstileConfig, error) {
 	secret := os.Getenv("TG_TURNSTILE_SECRET_KEY")
 	secretFile := os.Getenv("TG_TURNSTILE_SECRET_KEY_FILE")
 	siteKey := strings.TrimSpace(os.Getenv("TG_TURNSTILE_SITE_KEY"))
+	signInEnabled := false
+	if raw := os.Getenv("TG_TURNSTILE_SIGNIN_ENABLED"); raw != "" {
+		var err error
+		signInEnabled, err = strconv.ParseBool(raw)
+		if err != nil {
+			return TurnstileConfig{}, errors.New("TG_TURNSTILE_SIGNIN_ENABLED must be a boolean")
+		}
+	}
 	if secret != "" && secretFile != "" {
 		return TurnstileConfig{}, errors.New("TG_TURNSTILE_SECRET_KEY and TG_TURNSTILE_SECRET_KEY_FILE are both set: use only one")
 	}
 	if secret == "" && secretFile == "" {
+		if signInEnabled {
+			return TurnstileConfig{}, errors.New("TG_TURNSTILE_SIGNIN_ENABLED requires valid TG_TURNSTILE_SITE_KEY and Siteverify credentials")
+		}
 		if siteKey == "" {
-			return TurnstileConfig{}, nil
+			return TurnstileConfig{SignInEnabled: signInEnabled}, nil
 		}
 		return TurnstileConfig{}, errors.New("TG_TURNSTILE_SECRET_KEY or TG_TURNSTILE_SECRET_KEY_FILE is required when TG_TURNSTILE_SITE_KEY is set")
 	}
@@ -1689,7 +1707,7 @@ func loadTurnstileConfig() (TurnstileConfig, error) {
 	if secret == turnstileAlwaysPassTestSecret {
 		return TurnstileConfig{}, errors.New("TG_TURNSTILE_SECRET_KEY must not use Cloudflare's always-pass test secret")
 	}
-	return TurnstileConfig{SiteKey: siteKey, SecretKey: secret}, nil
+	return TurnstileConfig{SiteKey: siteKey, SecretKey: secret, SignInEnabled: signInEnabled}, nil
 }
 
 // preAuthLimits resolves the bounds on what an unauthenticated connection may

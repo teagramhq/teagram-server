@@ -14,9 +14,12 @@ import (
 	"io"
 	"math"
 	"net"
+	"regexp"
 	"strconv"
 	"strings"
 )
+
+var discoverySiteKeyPattern = regexp.MustCompile(`^[A-Za-z0-9_-]{1,256}$`)
 
 const (
 	// Version is the version of both the static document and the local
@@ -41,6 +44,13 @@ type Document struct {
 	MTProto   MTProtoBinding    `json:"mtproto"`
 	WebSocket WebSocketBinding  `json:"websocket"`
 	Demo      *DemoCapabilities `json:"demo,omitempty"`
+	Turnstile *Turnstile        `json:"turnstile,omitempty"`
+}
+
+// Turnstile advertises the public widget key to clients on an enforcing
+// listener. The Siteverify secret is never part of discovery.
+type Turnstile struct {
+	SiteKey string `json:"site_key"`
 }
 
 // DemoCapabilities advertises optional demo features without changing the
@@ -103,6 +113,9 @@ func MarshalDocument(doc Document) ([]byte, error) {
 	}
 	if doc.Demo != nil && !doc.Demo.GuestSignUp {
 		return nil, errors.New("demo guest sign-up capability must be enabled when present")
+	}
+	if doc.Turnstile != nil && !discoverySiteKeyPattern.MatchString(doc.Turnstile.SiteKey) {
+		return nil, errors.New("Turnstile site key is invalid")
 	}
 	if err := ValidateEndpoint(doc.MTProto.Endpoint); err != nil {
 		return nil, fmt.Errorf("validate document endpoint: %w", err)

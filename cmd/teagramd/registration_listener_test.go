@@ -20,6 +20,7 @@ import (
 	"github.com/teagramhq/teagram-server/internal/api"
 	"github.com/teagramhq/teagram-server/internal/blob"
 	"github.com/teagramhq/teagram-server/internal/config"
+	"github.com/teagramhq/teagram-server/internal/discovery"
 	"github.com/teagramhq/teagram-server/internal/mtproto"
 	"github.com/teagramhq/teagram-server/internal/pgtest"
 	"github.com/teagramhq/teagram-server/internal/rsakey"
@@ -53,6 +54,7 @@ func TestRegistrationModesStayBoundToListeners(t *testing.T) {
 	cfg := config.Config{
 		DCID:                          dcID,
 		RegistrationMode:              config.RegistrationOpen,
+		Turnstile:                     config.TurnstileConfig{SiteKey: "site-key", SecretKey: "secret-key", SignInEnabled: true},
 		PublicWebSocketListenAddr:     "127.0.0.1:0",
 		PublicRegistrationMode:        config.RegistrationInvite,
 		PublicWebSocketOriginPatterns: []string{"https://web.teagram.io"},
@@ -61,15 +63,44 @@ func TestRegistrationModesStayBoundToListeners(t *testing.T) {
 		UploadPartTTL:                 config.DefaultUploadPartTTL,
 	}
 	tgcfg := api.DefaultConfig(dcID, "127.0.0.1", 0)
-	newHandler := func(mode config.RegistrationMode) mtproto.Handler {
+	type turnstileScope struct {
+		signUp bool
+		signIn bool
+	}
+	var turnstileScopes []turnstileScope
+	newHandler := func(mode config.RegistrationMode, signUpEnabled, signInEnabled bool) mtproto.Handler {
+		turnstileScopes = append(turnstileScopes, turnstileScope{signUp: signUpEnabled, signIn: signInEnabled})
 		return api.New(st, dcID, tgcfg, log, false, cfg.MaxFileBytes, blobs,
 			cfg.MaxUserStorageBytes, pgtest.PeerDeriver(), pgtest.PhotoDeriver(), cfg.RateLimits, mode)
 	}
 	server, publicHandler := newListenerScopedServer(cfg, exchange.PrivateKey{RSA: key}, st, log, newHandler)
+	if len(turnstileScopes) != 2 || turnstileScopes[0] != (turnstileScope{}) || turnstileScopes[1] != (turnstileScope{signUp: true, signIn: true}) {
+		t.Fatalf("listener Turnstile scopes = %v, want tailnet disabled and public signup/signin enabled", turnstileScopes)
+	}
+	turnstileScopes = nil
+	singleListenerCfg := cfg
+	singleListenerCfg.PublicWebSocketListenAddr = ""
+	newListenerScopedServer(singleListenerCfg, exchange.PrivateKey{RSA: key}, st, log, newHandler)
+	if len(turnstileScopes) != 1 || turnstileScopes[0] != (turnstileScope{signUp: true, signIn: true}) {
+		t.Fatalf("single-listener Turnstile scopes = %v, want public signup/signin enabled", turnstileScopes)
+	}
+	turnstileScopes = nil
+	singleListenerCfg.Turnstile.SignInEnabled = false
+	newListenerScopedServer(singleListenerCfg, exchange.PrivateKey{RSA: key}, st, log, newHandler)
+	if len(turnstileScopes) != 1 || turnstileScopes[0] != (turnstileScope{signUp: true}) {
+		t.Fatalf("inactive single-listener Turnstile scopes = %v, want signup enabled and signin disabled", turnstileScopes)
+	}
+	clientDiscovery, err := discovery.NewDocument("127.0.0.1:2443", dcID, &key.PublicKey, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := server.SetClientDiscoveryDocument(clientDiscovery); err != nil {
+		t.Fatal(err)
+	}
 
 	tailnetListener := listenRegistrationTestTCP(t)
 	publicListener := listenRegistrationTestTCP(t)
-	public := newPublicWebSocketListener(cfg, publicListener, publicHandler)
+	public := newPublicWebSocketListener(cfg, publicListener, publicHandler, clientDiscovery)
 	serveCtx, stopServing := context.WithCancel(context.Background())
 	serveErr := make(chan error, 1)
 	go func() {

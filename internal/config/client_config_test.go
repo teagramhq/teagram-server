@@ -17,6 +17,7 @@ func TestLoadClientConfigDoesNotRequirePostgresOrAuthKey(t *testing.T) {
 	t.Setenv("TG_LISTEN_ADDR", "0.0.0.0:2443")
 	t.Setenv("TG_ADVERTISE_ADDR", "mtproto.example.com:443")
 	t.Setenv("TG_DC_ID", "7")
+	t.Setenv("TG_TURNSTILE_SITE_KEY", "site-key_123")
 
 	cfg, err := config.LoadClientConfig()
 	if err != nil {
@@ -24,6 +25,16 @@ func TestLoadClientConfigDoesNotRequirePostgresOrAuthKey(t *testing.T) {
 	}
 	if cfg.AdvertiseHost != "mtproto.example.com" || cfg.AdvertisePort != 443 || cfg.DCID != 7 {
 		t.Fatalf("client config = %+v", cfg)
+	}
+	if cfg.TurnstileSiteKey != "site-key_123" {
+		t.Fatalf("client config Turnstile site key = %q, want site-key_123", cfg.TurnstileSiteKey)
+	}
+}
+
+func TestLoadClientConfigRejectsInvalidTurnstileSiteKey(t *testing.T) {
+	t.Setenv("TG_TURNSTILE_SITE_KEY", "invalid site key")
+	if _, err := config.LoadClientConfig(); err == nil || !strings.Contains(err.Error(), "TG_TURNSTILE_SITE_KEY") {
+		t.Fatalf("LoadClientConfig error = %v, want site-key validation error", err)
 	}
 }
 

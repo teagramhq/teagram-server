@@ -71,6 +71,38 @@ func TestRunClientConfigDoesNotCreateMissingIdentity(t *testing.T) {
 	}
 }
 
+func TestRunClientConfigAdvertisesTurnstileWidgetKey(t *testing.T) {
+	t.Setenv("TG_ADVERTISE_ADDR", "mtproto.example.com:443")
+	t.Setenv("TG_DC_ID", "2")
+	t.Setenv("TG_TURNSTILE_SITE_KEY", "public-site-key")
+	t.Setenv("TG_TURNSTILE_SECRET_KEY", "")
+	t.Setenv("TG_TURNSTILE_SECRET_KEY_FILE", "")
+	keyPath := filepath.Join(t.TempDir(), "server-key.pem")
+	t.Setenv("TG_RSA_KEY_PATH", keyPath)
+	var bootstrapOutput bytes.Buffer
+	if err := runCommand([]string{"bootstrap-identity"}, slog.New(slog.DiscardHandler), &bootstrapOutput, &bootstrapOutput); err != nil {
+		t.Fatalf("bootstrap-identity: %v", err)
+	}
+	var stdout bytes.Buffer
+	if err := runCommand([]string{"client-config"}, slog.New(slog.DiscardHandler), &stdout, &stdout); err != nil {
+		t.Fatalf("client-config: %v", err)
+	}
+	var document struct {
+		Turnstile *struct {
+			SiteKey string `json:"site_key"`
+		} `json:"turnstile"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &document); err != nil {
+		t.Fatalf("decode client-config output: %v", err)
+	}
+	if document.Turnstile == nil || document.Turnstile.SiteKey != "public-site-key" {
+		t.Fatalf("client-config Turnstile = %+v, want public-site-key", document.Turnstile)
+	}
+	if strings.Contains(stdout.String(), "secret") {
+		t.Fatalf("client-config output contains private secret material: %q", stdout.String())
+	}
+}
+
 func TestRunClientConfigAdvertisesDemoGuestSignUpOnlyWhenEnabled(t *testing.T) {
 	t.Setenv("TG_ADVERTISE_ADDR", "mtproto.example.com:443")
 	t.Setenv("TG_DC_ID", "2")
