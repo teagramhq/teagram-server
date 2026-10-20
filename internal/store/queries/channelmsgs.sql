@@ -319,7 +319,8 @@ WITH access AS (
            cm.grouped_id,
            cm.file_id,
            cm.reply_to_msg_id,
-           cm.action_type
+           cm.action_type,
+           cm.ttl_period
     FROM page_ids
     JOIN channel_messages cm
       ON cm.channel_id = sqlc.arg(channel_id)::bigint
@@ -343,7 +344,8 @@ SELECT status.channel_exists,
        selected.grouped_id,
        selected.file_id,
        selected.reply_to_msg_id,
-       selected.action_type
+       selected.action_type,
+       selected.ttl_period
 FROM status
 LEFT JOIN selected ON true
 ORDER BY selected.local_id DESC;

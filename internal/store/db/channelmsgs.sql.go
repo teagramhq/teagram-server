@@ -848,7 +848,8 @@ WITH access AS (
            cm.grouped_id,
            cm.file_id,
            cm.reply_to_msg_id,
-           cm.action_type
+           cm.action_type,
+           cm.ttl_period
     FROM page_ids
     JOIN channel_messages cm
       ON cm.channel_id = $2::bigint
@@ -872,7 +873,8 @@ SELECT status.channel_exists,
        selected.grouped_id,
        selected.file_id,
        selected.reply_to_msg_id,
-       selected.action_type
+       selected.action_type,
+       selected.ttl_period
 FROM status
 LEFT JOIN selected ON true
 ORDER BY selected.local_id DESC
@@ -907,6 +909,7 @@ type ChannelRepliesPageRow struct {
 	FileID        *int64
 	ReplyToMsgID  *int32
 	ActionType    *int16
+	TtlPeriod     *int32
 }
 
 // ChannelRepliesPage reads a direct-reply page and its authorization snapshot
@@ -950,6 +953,7 @@ func (q *Queries) ChannelRepliesPage(ctx context.Context, arg ChannelRepliesPage
 			&i.FileID,
 			&i.ReplyToMsgID,
 			&i.ActionType,
+			&i.TtlPeriod,
 		); err != nil {
 			return nil, err
 		}

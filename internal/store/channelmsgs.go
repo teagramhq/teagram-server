@@ -1306,7 +1306,7 @@ func (s *Store) ChannelRepliesWithOffset(
 			continue
 		}
 		if row.ChannelID == nil || row.FromID == nil || !row.Date.Valid || row.Message == nil ||
-			row.Deleted == nil || row.RandomID == nil || row.ActionType == nil {
+			row.Deleted == nil || row.RandomID == nil || row.ActionType == nil || row.TtlPeriod == nil {
 			return ChannelRepliesSnapshot{}, errors.New("channel replies query returned an incomplete message row")
 		}
 		snapshot.Messages = append(snapshot.Messages, channelMessageFromFields(channelMsgFields{
@@ -1322,6 +1322,7 @@ func (s *Store) ChannelRepliesWithOffset(
 			FileID:       row.FileID,
 			ReplyToMsgID: row.ReplyToMsgID,
 			ActionType:   *row.ActionType,
+			TtlPeriod:    *row.TtlPeriod,
 		}))
 	}
 	return snapshot, nil

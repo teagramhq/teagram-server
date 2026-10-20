@@ -94,6 +94,7 @@ func TestMessagesGetRepliesReturnsOnlyDirectLiveReplies(t *testing.T) {
 	for _, userID := range []int64{replier.ID, nestedAuthor.ID, viewer.ID} {
 		joinChannelByInvite(t, s, store.Channel{ID: channel.ID, CreatorID: creator.ID}, userID)
 	}
+	channelExec(t, ctx, dsn, `UPDATE channels SET ttl_period = 86400 WHERE id = $1`, channel.ID)
 	root := sentChannelMessageID(t, mustSendChannelMessage(t, s, creator.ID, channel.ID, "root body", 98001))
 	first := sendChannelReply(t, s, replier.ID, channel.ID, root, "first direct reply", 98002)
 	_ = sendChannelReply(t, s, nestedAuthor.ID, channel.ID, first, "nested reply", 98003)
@@ -117,6 +118,13 @@ func TestMessagesGetRepliesReturnsOnlyDirectLiveReplies(t *testing.T) {
 	}
 	if got, want := getRepliesMessageIDs(t, result), []int{last}; len(got) != len(want) || got[0] != want[0] {
 		t.Fatalf("reply ids = %v, want newest-first %v", got, want)
+	}
+	post, ok := result.Messages[0].(*tg.Message)
+	if !ok {
+		t.Fatalf("reply = %T, want *tg.Message", result.Messages[0])
+	}
+	if ttlPeriod, ok := post.GetTTLPeriod(); !ok || ttlPeriod != 86400 {
+		t.Fatalf("reply TTL period = %d, present=%t; want 86400", ttlPeriod, ok)
 	}
 	if len(result.Users) != 1 {
 		t.Fatalf("users = %d, want only the direct replier", len(result.Users))
