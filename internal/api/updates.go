@@ -925,22 +925,32 @@ func (h *handlers) loadChats(ctx context.Context, ids map[int64]bool, viewerID i
 // Two queries per channel per batch, no cache, for the reason loadChats states:
 // a batch names very few distinct channels.
 func (h *handlers) loadChannels(ctx context.Context, ids map[int64]bool, viewerID int64) ([]tg.ChatClass, error) {
+	channels, _, err := h.loadChannelsWithKinds(ctx, ids, viewerID)
+	return channels, err
+}
+
+// loadChannelsWithKinds returns channel kinds from the same rows used to
+// hydrate the channel chats, so callers that render channel messages do not
+// need a second ChannelByID read for each channel.
+func (h *handlers) loadChannelsWithKinds(ctx context.Context, ids map[int64]bool, viewerID int64) ([]tg.ChatClass, map[int64]bool, error) {
 	channels := make([]tg.ChatClass, 0, len(ids))
+	broadcasts := make(map[int64]bool, len(ids))
 	for id := range ids {
 		ch, ok, err := h.store.ChannelByID(ctx, id)
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		if !ok {
 			continue
 		}
+		broadcasts[id] = !ch.Megagroup
 		member, found, err := h.store.ChannelMemberOf(ctx, id, viewerID)
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		channels = append(channels, h.channelToTL(ch, member, found && !member.Banned(time.Now()), viewerID))
 	}
-	return channels, nil
+	return channels, broadcasts, nil
 }
 
 // channelBatch is one channel's hydrated updates plus everything a client must

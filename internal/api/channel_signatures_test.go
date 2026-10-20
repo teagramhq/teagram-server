@@ -326,3 +326,82 @@ func TestBroadcastPostsHideAuthorOnEveryReadSurface(t *testing.T) {
 		}
 	})
 }
+
+func TestSearchGlobalRendersMixedChannelKindsFromOnePage(t *testing.T) {
+	ctx := context.Background()
+	s, _ := openStoreDSN(t)
+	creator, err := s.CreateUser(ctx, "+15551822480")
+	if err != nil {
+		t.Fatalf("create channel creator: %v", err)
+	}
+	author, err := s.CreateUser(ctx, "+15551822481")
+	if err != nil {
+		t.Fatalf("create author: %v", err)
+	}
+	subscriber, err := s.CreateUser(ctx, "+15551822482")
+	if err != nil {
+		t.Fatalf("create subscriber: %v", err)
+	}
+	broadcast, err := s.CreateChannel(ctx, creator.ID, "Broadcast", "", false)
+	if err != nil {
+		t.Fatalf("create broadcast channel: %v", err)
+	}
+	megagroup, err := s.CreateChannel(ctx, creator.ID, "Megagroup", "", true)
+	if err != nil {
+		t.Fatalf("create megagroup: %v", err)
+	}
+	for _, channel := range []store.Channel{broadcast, megagroup} {
+		joinChannelByInvite(t, s, channel, author.ID)
+		joinChannelByInvite(t, s, channel, subscriber.ID)
+		if channel.ID == broadcast.ID {
+			if err := s.SetChannelRole(ctx, channel.ID, creator.ID, author.ID, 1); err != nil {
+				t.Fatalf("promote broadcast poster: %v", err)
+			}
+		}
+		if _, _, duplicate, postErr := s.PostChannelMessageAs(ctx, channel.ID, author.ID, "channel visibility proof", channel.ID, nil, 0); postErr != nil || duplicate {
+			t.Fatalf("post in channel %d: duplicate=%v err=%v", channel.ID, duplicate, postErr)
+		}
+	}
+
+	enc, err := api.SearchGlobalForTest(s, subscriber.ID, &tg.MessagesSearchGlobalRequest{
+		Q:          "channel visibility proof",
+		Filter:     &tg.InputMessagesFilterEmpty{},
+		OffsetPeer: &tg.InputPeerEmpty{},
+		Limit:      10,
+	})
+	if err != nil {
+		t.Fatalf("searchGlobal: %v", err)
+	}
+	result, ok := enc.(*tg.MessagesMessagesSlice)
+	if !ok {
+		t.Fatalf("searchGlobal response = %T", enc)
+	}
+	posts := map[int64]*tg.Message{}
+	for _, message := range result.Messages {
+		post, ok := message.(*tg.Message)
+		if !ok {
+			t.Fatalf("search result = %T, want *tg.Message", message)
+		}
+		peer, ok := post.PeerID.(*tg.PeerChannel)
+		if !ok {
+			t.Fatalf("search result peer = %T, want *tg.PeerChannel", post.PeerID)
+		}
+		posts[peer.ChannelID] = post
+	}
+	for channelID, wantBroadcast := range map[int64]bool{broadcast.ID: true, megagroup.ID: false} {
+		post, found := posts[channelID]
+		if !found {
+			t.Fatalf("search omitted channel %d", channelID)
+		}
+		if post.GetPost() != wantBroadcast {
+			t.Errorf("channel %d post flag = %v, want %v", channelID, post.GetPost(), wantBroadcast)
+		}
+		fromID, hasFromID := post.GetFromID()
+		if wantBroadcast && hasFromID {
+			t.Errorf("broadcast channel %d exposes from_id %v", channelID, fromID)
+		}
+		if !wantBroadcast && (!hasFromID || fromID.String() != (&tg.PeerUser{UserID: author.ID}).String()) {
+			t.Errorf("megagroup channel %d from_id = %v, present=%v, want author %d", channelID, fromID, hasFromID, author.ID)
+		}
+	}
+}
