@@ -458,6 +458,41 @@ func (h *handlers) handleToggleSlowMode(r *mtproto.Request) (bin.Encoder, error)
 	}, nil
 }
 
+// handleToggleSignatures serves channels.toggleSignatures. The store checks
+// broadcast kind and current change_info authority in its transaction.
+func (h *handlers) handleToggleSignatures(r *mtproto.Request) (bin.Encoder, error) {
+	var req tg.ChannelsToggleSignaturesRequest
+	if err := req.Decode(r.Buf); err != nil {
+		return nil, errMethodNotImpl
+	}
+	if r.UserID == 0 {
+		return nil, errAuthKeyUnreg
+	}
+	if req.ProfilesEnabled {
+		return nil, errMethodNotImpl
+	}
+	channelID, err := h.inputChannelID(req.Channel, r.UserID)
+	if err != nil {
+		return nil, err
+	}
+	channel, member, err := h.store.SetChannelSignatures(r.Ctx, channelID, r.UserID, req.SignaturesEnabled)
+	switch {
+	case errors.Is(err, store.ErrNotMember):
+		return nil, errPeerIDInvalid
+	case errors.Is(err, store.ErrChatAdminRequired):
+		return nil, errChatAdminRequired
+	case err != nil:
+		h.log.Error("toggle channel signatures", "channel_id", channelID, "user_id", r.UserID, "err", err)
+		return nil, errInternal
+	}
+	updatedChannel := h.channelToTL(channel, member, true, r.UserID)
+	return &tg.Updates{
+		Updates: []tg.UpdateClass{&tg.UpdateChannel{ChannelID: channelID}},
+		Chats:   []tg.ChatClass{updatedChannel},
+		Date:    int(time.Now().Unix()),
+	}, nil
+}
+
 // handleGetChannels serves channels.getChannels. Rendering goes through
 // loadChannels with the caller as viewer, which is the whole authorization
 // boundary: a non-member or banned caller gets tg.ChannelForbidden and never a
