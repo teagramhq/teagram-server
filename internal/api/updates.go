@@ -337,7 +337,7 @@ func chatToTL(c store.Chat, participantsCount int, selfID int64) *tg.Chat {
 // restricted, for the same reason chatToTL does.
 func (h *handlers) channelToTL(c store.Channel, m store.ChannelMember, member bool, viewerID int64) tg.ChatClass {
 	ah := h.peers.Derive(viewerID, peerhash.KindChannel, c.ID)
-	if !member {
+	if !member || c.DeletedAt != nil {
 		return &tg.ChannelForbidden{ID: c.ID, AccessHash: ah, Title: ""}
 	}
 	ch := &tg.Channel{

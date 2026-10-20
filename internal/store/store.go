@@ -251,6 +251,9 @@ var (
 	// ErrChatAdminRequired is returned when a basic-chat control is denied
 	// by current default rights or requires channel administrator rights.
 	ErrChatAdminRequired = errors.New("chat admin required")
+	// ErrChannelCreatorRequired is returned when a current channel member is
+	// not the creator attempting to delete the channel.
+	ErrChannelCreatorRequired = errors.New("channel creator required")
 	// ErrChannelTitleNotModified is returned when an authorized channel title
 	// edit repeats the current value.
 	ErrChannelTitleNotModified = errors.New("channel title not modified")

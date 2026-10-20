@@ -19,6 +19,14 @@ import (
 // ErrUsernameFloodWait (rate limit).
 var ErrUsernameOccupied = errors.New("username occupied")
 
+func isUsernameClaimConflict(err error) bool {
+	if errors.Is(err, pgx.ErrNoRows) {
+		return true
+	}
+	var pgErr *pgconn.PgError
+	return errors.As(err, &pgErr) && pgErr.Code == "23505"
+}
+
 // ErrUsernameFloodWait is returned when a user has exceeded the per-account
 // username change rate limit.
 var ErrUsernameFloodWait = errors.New("username change flood wait")
@@ -174,8 +182,7 @@ func (s *Store) CreateUsernameAccountWithPassword(ctx context.Context, handle st
 		OwnerID:   u.ID,
 	})
 	if err != nil {
-		var pgErr *pgconn.PgError
-		if errors.As(err, &pgErr) && pgErr.Code == "23505" {
+		if isUsernameClaimConflict(err) {
 			return User{}, ErrUsernameOccupied
 		}
 		return User{}, fmt.Errorf("create username account: claim username: %w", err)
@@ -494,8 +501,7 @@ func (s *Store) UpdateUsername(ctx context.Context, userID int64, username strin
 			OwnerID:   userID,
 		})
 		if err != nil {
-			var pgErr *pgconn.PgError
-			if errors.As(err, &pgErr) && pgErr.Code == "23505" {
+			if isUsernameClaimConflict(err) {
 				return ErrUsernameOccupied
 			}
 			return fmt.Errorf("claim username: %w", err)
@@ -573,8 +579,7 @@ func (s *Store) ClaimUsername(ctx context.Context, userID int64, handle string) 
 		OwnerID:   userID,
 	})
 	if err != nil {
-		var pgErr *pgconn.PgError
-		if errors.As(err, &pgErr) && pgErr.Code == "23505" {
+		if isUsernameClaimConflict(err) {
 			return ErrUsernameOccupied
 		}
 		return fmt.Errorf("claim username: %w", err)
@@ -603,6 +608,9 @@ func (s *Store) ClaimChannelUsername(ctx context.Context, channelID int64, handl
 		OwnerType: "channel",
 		OwnerID:   channelID,
 	}); err != nil {
+		if isUsernameClaimConflict(err) {
+			return ErrUsernameOccupied
+		}
 		return fmt.Errorf("claim username: %w", err)
 	}
 	if _, err := qtx.SetChannelUsername(ctx, db.SetChannelUsernameParams{

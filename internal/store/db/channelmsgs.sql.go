@@ -101,6 +101,10 @@ SELECT channel_id, local_id, from_id, date, message, edit_date, deleted,
        random_id, grouped_id, file_id, reply_to_msg_id, action_type
 FROM channel_messages
 WHERE channel_id = $1 AND deleted = false
+  AND EXISTS (
+      SELECT 1 FROM channels c
+      WHERE c.id = $1::bigint AND c.deleted_at IS NULL
+  )
   AND ($2::bigint = 0 OR local_id < $2::bigint)
 ORDER BY local_id DESC
 LIMIT $3::int
@@ -168,12 +172,20 @@ WITH page_offset AS (
     ) AS skip
     FROM channel_messages
     WHERE channel_id = $5::bigint AND deleted = false
+      AND EXISTS (
+          SELECT 1 FROM channels c
+          WHERE c.id = $5::bigint AND c.deleted_at IS NULL
+      )
 ), page AS (
     SELECT channel_id, local_id, from_id, date, message, edit_date, deleted,
            random_id, grouped_id, file_id, reply_to_msg_id, action_type
     FROM channel_messages
     WHERE channel_id = $5::bigint
       AND deleted = false
+      AND EXISTS (
+          SELECT 1 FROM channels c
+          WHERE c.id = $5::bigint AND c.deleted_at IS NULL
+      )
       AND $3::bigint >= 0
     ORDER BY local_id DESC
     LIMIT $6::int
@@ -260,6 +272,10 @@ WITH page AS (
     FROM channel_messages
     WHERE channel_id = $3::bigint
       AND deleted = false
+      AND EXISTS (
+          SELECT 1 FROM channels c
+          WHERE c.id = $3::bigint AND c.deleted_at IS NULL
+      )
       AND ($4::bigint = 0 OR local_id < $4::bigint)
     ORDER BY local_id DESC
     LIMIT $6::int
@@ -476,6 +492,7 @@ SELECT channel_id, local_id, from_id, date, message, edit_date, deleted,
        random_id, grouped_id, file_id, reply_to_msg_id, action_type
 FROM channel_messages
 WHERE channel_id = $1 AND local_id = ANY($2::bigint[]) AND deleted = false
+  AND EXISTS (SELECT 1 FROM channels c WHERE c.id = $1 AND c.deleted_at IS NULL)
 `
 
 type ChannelMessagesByLocalIDsParams struct {
@@ -604,6 +621,10 @@ WHERE channel_id = $1::bigint
   AND local_id = ANY($2::bigint[])
   AND deleted = false
   AND action_type = 0
+  AND EXISTS (
+      SELECT 1 FROM channels c
+      WHERE c.id = $1::bigint AND c.deleted_at IS NULL
+  )
 ORDER BY local_id
 FOR SHARE SKIP LOCKED
 `
@@ -694,6 +715,10 @@ SELECT count(*)::bigint
 FROM channel_messages
 WHERE channel_id = $1::bigint
   AND deleted = false
+  AND EXISTS (
+      SELECT 1 FROM channels c
+      WHERE c.id = $1::bigint AND c.deleted_at IS NULL
+  )
 `
 
 func (q *Queries) CountChannelHistory(ctx context.Context, channelID int64) (int64, error) {
@@ -942,6 +967,10 @@ SELECT channel_id, local_id, from_id, date, message, edit_date, deleted,
        random_id, grouped_id, file_id, reply_to_msg_id, action_type
 FROM channel_messages
 WHERE channel_id = $1 AND deleted = false
+  AND EXISTS (
+      SELECT 1 FROM channels c
+      WHERE c.id = $1::bigint AND c.deleted_at IS NULL
+  )
   AND action_type = 0
   AND message_tsv @@ plainto_tsquery('simple', $2)
   AND ($3::bigint = 0 OR local_id < $3::bigint)
@@ -1146,6 +1175,7 @@ JOIN channel_messages post
  AND post.deleted = false
  AND post.action_type = 0
 WHERE c.id = $2::bigint
+  AND c.deleted_at IS NULL
   AND c.pinned_message_id IS NOT NULL
   AND ($3::text = '' OR post.message_tsv @@ plainto_tsquery('simple', $3))
   AND ($4::bigint = 0 OR post.local_id < $4::bigint)

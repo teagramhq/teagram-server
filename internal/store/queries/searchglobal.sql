@@ -115,7 +115,9 @@ SELECT date FROM messages WHERE owner_id = $1 AND local_id = $2;
 -- unless the caller is an unbanned member — so this reads no more than the
 -- search itself would serve.
 -- name: ChannelPostDate :one
-SELECT date FROM channel_messages WHERE channel_id = $1 AND local_id = $2;
+SELECT date FROM channel_messages
+WHERE channel_id = $1 AND local_id = $2
+  AND EXISTS (SELECT 1 FROM channels c WHERE c.id = $1 AND c.deleted_at IS NULL);
 
 -- OwnedMessagesByLocalIDs hydrates the owned arm of a search page. The owner_id
 -- predicate is repeated here rather than trusted from the page query: this is
