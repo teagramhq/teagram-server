@@ -585,6 +585,17 @@ func (s *Store) DeleteChat(ctx context.Context, chatID, callerID int64) (ChatDel
 	if chatID <= 0 || callerID <= 0 {
 		return ChatDeletion{}, ErrChatAdminRequired
 	}
+	// Refuse non-creators before taking the chat lock so a guessed ID cannot
+	// make an outsider wait behind member mutations. Recheck under lock below.
+	precheck, err := s.q.ChatByID(ctx, chatID)
+	switch {
+	case errors.Is(err, pgx.ErrNoRows):
+		return ChatDeletion{}, ErrChatAdminRequired
+	case err != nil:
+		return ChatDeletion{}, fmt.Errorf("check chat owner before deletion: %w", err)
+	case precheck.CreatorID != callerID:
+		return ChatDeletion{}, ErrChatAdminRequired
+	}
 
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
