@@ -16,6 +16,7 @@ import (
 
 type smokeTurnstileVerification struct {
 	token    string
+	action   string
 	remoteIP string
 }
 
@@ -23,8 +24,8 @@ type smokeTurnstileVerifier struct {
 	verified chan smokeTurnstileVerification
 }
 
-func (v *smokeTurnstileVerifier) Verify(_ context.Context, token, remoteIP string) error {
-	v.verified <- smokeTurnstileVerification{token: token, remoteIP: remoteIP}
+func (v *smokeTurnstileVerifier) Verify(_ context.Context, token, action, remoteIP string) error {
+	v.verified <- smokeTurnstileVerification{token: token, action: action, remoteIP: remoteIP}
 	return nil
 }
 
@@ -91,8 +92,8 @@ func testSmokeTurnstileSignUp(t *testing.T) {
 
 	select {
 	case verification := <-verifier.verified:
-		if verification.token != token || verification.remoteIP != "" {
-			t.Fatalf("Turnstile verification = %+v, want token forwarded and socket peer omitted", verification)
+		if verification.token != token || verification.action != "signup" || verification.remoteIP != "" {
+			t.Fatalf("Turnstile verification = %+v, want signup action, token forwarded, and socket peer omitted", verification)
 		}
 	default:
 		t.Fatal("Turnstile verifier was not called")
