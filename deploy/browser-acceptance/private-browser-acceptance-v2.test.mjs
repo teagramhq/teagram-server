@@ -67,6 +67,7 @@ function createDependencies(failAt, allowCredentialRead = false) {
     artifactDigest: contentDigest,
   };
   const contextListeners = new Map();
+  let wssAuditValidationCalls = 0;
   const contextInfo = {
     page: {fixture: true},
     context: {
@@ -94,6 +95,7 @@ function createDependencies(failAt, allowCredentialRead = false) {
     get launchPolicyCalls() { return launchPolicyCalls; },
     get credentialReads() { return credentialReads; },
     get logoutMethod() { return logoutMethod; },
+    get wssAuditValidationCalls() { return wssAuditValidationCalls; },
     dependencies: {
       readReleaseRecord() {
         step("release-record");
@@ -140,14 +142,17 @@ function createDependencies(failAt, allowCredentialRead = false) {
         step("served-manifest");
         return manifest;
       },
-      async proveWss(_context, _release, _manifest, progress) {
+      async proveWss(contextInfo, _release, _manifest, progress) {
         step("wss-101");
         progress.observeWssConnection();
         progress.observeWssHandshake(101);
-        return {connectionCount: 1, status101: true, validate() {}};
+        contextInfo.wssAudit = {validate() { wssAuditValidationCalls += 1; }};
+        contextInfo.wssAudit.validate();
+        return {responseStatus: 200, connectionCount: 1, status101: true};
       },
-      async verifyAssetLoading() {
+      async verifyAssetLoading(contextInfo) {
         step("asset-loading");
+        contextInfo.wssAudit.validate();
       },
       async installClientProgressObserver(_page, _progress, _classifier, state) {
         step("client-progress");
@@ -885,7 +890,7 @@ test("client-progress-unavailable reaches the result line", async () => {
 
 test("broken-chat-list after sign-in is reported and attempts in-band logout", async () => {
   const fixture = createDependencies(undefined, true);
-  const browser = createAcceptancePage({chatListVisible: false});
+  const browser = createAcceptancePage({chatListVisible: false, completeSignIn: true});
   await useRealAcceptanceFlow(fixture, browser);
 
   const result = await executeMode({mode: "acceptance", releaseRecord: "fixture"}, fixture.dependencies);
@@ -896,8 +901,9 @@ test("broken-chat-list after sign-in is reported and attempts in-band logout", a
   assert.equal(output.submission, "password");
   assert.equal(output.chatList, "missing");
   assert.equal(output.chatListRows, 0);
-  assert.deepEqual(browser.apiMethods, ["auth.logOut"]);
-  assert.equal(browser.apiMethods.includes("auth.signIn"), false);
+  assert.equal(output.phase, "signed-in");
+  assert.equal(output.logout, "ok");
+  assert.deepEqual(browser.apiMethods, ["auth.sendCode", "auth.signIn", "auth.checkPassword", "auth.logOut"]);
 });
 
 test("empty chats state is accepted as a rendered chat list after sign-in", async () => {
@@ -914,9 +920,12 @@ test("empty chats state is accepted as a rendered chat list after sign-in", asyn
 
   assert.equal(result.exitCode, 0, result.output);
   assert.equal(output.qaFailureCode, "none");
+  assert.equal(output.phase, "signed-in");
   assert.equal(output.logout, "ok");
   assert.equal(output.chatList, "rendered");
   assert.equal(output.chatListRows, 0);
+  assert.equal(fixture.wssAuditValidationCalls, 3);
+  assert.deepEqual(browser.apiMethods.filter((method) => method === "auth.logOut"), ["auth.logOut"]);
 });
 
 test("chat-list check ignores hidden list variants and scopes its row count", async () => {
@@ -925,6 +934,7 @@ test("chat-list check ignores hidden list variants and scopes its row count", as
     chatListMatches: 5,
     chatRows: 9,
     visibleChatRows: 0,
+    completeSignIn: true,
   });
   await useRealAcceptanceFlow(fixture, browser);
 
@@ -934,26 +944,27 @@ test("chat-list check ignores hidden list variants and scopes its row count", as
   assert.notEqual(output.qaFailureCode, "broken-chat-list");
   assert.equal(output.chatList, "rendered");
   assert.equal(output.chatListRows, 0);
-  assert.deepEqual(browser.apiMethods, ["auth.logOut"]);
+  assert.deepEqual(browser.apiMethods, ["auth.sendCode", "auth.signIn", "auth.checkPassword", "auth.logOut"]);
 });
 
 test("chat-list row counts clamp at ten in the result line", async () => {
   const fixture = createDependencies(undefined, true);
-  const browser = createAcceptancePage({chatRows: 13});
+  const browser = createAcceptancePage({chatRows: 13, completeSignIn: true});
   await useRealAcceptanceFlow(fixture, browser);
 
   const result = await executeMode({mode: "acceptance", releaseRecord: "fixture"}, fixture.dependencies);
   const output = JSON.parse(result.output);
 
-  assert.equal(result.exitCode, 1);
+  assert.equal(result.exitCode, 0);
   assert.equal(output.chatList, "rendered");
   assert.equal(output.chatListRows, 10);
-  assert.deepEqual(browser.apiMethods, ["auth.logOut"]);
+  assert.equal(output.logout, "ok");
+  assert.deepEqual(browser.apiMethods, ["auth.sendCode", "auth.signIn", "auth.checkPassword", "auth.logOut"]);
 });
 
 test("WSS mismatch is reported as unmatched in the result line", async () => {
   const fixture = createDependencies(undefined, true);
-  const browser = createAcceptancePage();
+  const browser = createAcceptancePage({completeSignIn: true});
   await useRealAcceptanceFlow(fixture, browser);
   fixture.dependencies.installNetworkGuards = async () => ({
     expectedEndpoint: "",
@@ -978,7 +989,9 @@ test("WSS mismatch is reported as unmatched in the result line", async () => {
   assert.equal(result.exitCode, 1);
   assert.equal(output.qaFailureCode, "endpoint-mismatch");
   assert.equal(output.wssEndpointMatched, false);
-  assert.deepEqual(browser.apiMethods, ["auth.logOut"]);
+  assert.equal(output.phase, "signed-in");
+  assert.equal(output.logout, "ok");
+  assert.deepEqual(browser.apiMethods, ["auth.sendCode", "auth.signIn", "auth.checkPassword", "auth.logOut"]);
 });
 
 function fakeCdpSession({attachFails = false, replies = true, detach = "release", scriptLoaded = "after", log = []} = {}) {
@@ -1211,11 +1224,12 @@ test("preflight WSS proof fails closed above the ceiling and on any bad connecti
 
 test("acceptance reports a successful sign-in over the client's socket ceiling", async () => {
   const fixture = createDependencies(undefined, true);
-  fixture.dependencies.proveWss = async (_context, _release, _manifest, progress) => {
+  fixture.dependencies.proveWss = async (contextInfo, _release, _manifest, progress) => {
     fixture.events.push("wss-101");
     for (let index = 0; index < WSS_CONNECTION_CEILING; index += 1) progress.observeWssConnection();
     progress.observeWssHandshake(101);
-    return {connectionCount: WSS_CONNECTION_CEILING, status101: true};
+    contextInfo.wssAudit = {validate() {}};
+    return {responseStatus: 200, connectionCount: WSS_CONNECTION_CEILING, status101: true};
   };
   const result = await executeMode({mode: "acceptance", releaseRecord: "fixture"}, fixture.dependencies);
 

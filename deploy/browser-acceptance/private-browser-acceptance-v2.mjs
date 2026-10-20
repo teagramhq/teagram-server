@@ -1320,11 +1320,12 @@ async function logoutWithProgress(prepared, state, progress) {
 }
 
 export async function performAcceptance(prepared, credentials) {
-  const {contextInfo, progress, manifest, tracker, wssAudit} = prepared;
+  const {contextInfo, progress, manifest, tracker} = prepared;
   const page = contextInfo.page;
   const state = prepared.progressState;
   let signedIn = false;
   let authenticated = false;
+  let logoutStarted = false;
   let username = credentials.username;
   let password = credentials.password;
   try {
@@ -1363,6 +1364,8 @@ export async function performAcceptance(prepared, credentials) {
     }
     if (chatResult.kind !== "signed-in") fail("authentication-failed-once");
     authenticated = true;
+    signedIn = progress.markSignedIn();
+    if (!signedIn) fail("authentication-failed-once");
 
     const visibleChatLists = page.locator("#chatlist-container .chatlist").filter({visible: true});
     const chatList = visibleChatLists.first();
@@ -1395,10 +1398,9 @@ export async function performAcceptance(prepared, credentials) {
       }
     }
     assertNoUnsafeNetwork(tracker);
-    wssAudit.validate();
+    contextInfo.wssAudit.validate();
     if (tracker.websocketMismatch) fail("endpoint-mismatch");
-    signedIn = progress.markSignedIn();
-    if (!signedIn) fail("authentication-failed-once");
+    logoutStarted = true;
     return await logoutWithProgress(prepared, state, progress);
   } catch (error) {
     latchQaFailure(state, safeFailureCode(error));
@@ -1411,13 +1413,18 @@ export async function performAcceptance(prepared, credentials) {
       const outcome = rpcOutcomeForPageError(error);
       if (outcome === "timeout" || outcome === "closed") progress.recordClientFailure({kind: outcome});
     }
-    if (authenticated && !signedIn && !prepared.contextClosed) {
+    if (authenticated && !logoutStarted && !prepared.contextClosed) {
       try {
-        const logoutResult = await logoutThroughApp(prepared, state);
-        if (logoutResult.kind === "failure") {
-          recordRpcFailure(progress, prepared.dependencies.acceptanceRpcOutcome, logoutResult.outcome, state);
-        } else if (logoutResult.kind === "timeout" || logoutResult.kind === "closed") {
-          progress.recordClientFailure({kind: logoutResult.kind});
+        logoutStarted = true;
+        if (signedIn) {
+          await logoutWithProgress(prepared, state, progress);
+        } else {
+          const logoutResult = await logoutThroughApp(prepared, state);
+          if (logoutResult.kind === "failure") {
+            recordRpcFailure(progress, prepared.dependencies.acceptanceRpcOutcome, logoutResult.outcome, state);
+          } else if (logoutResult.kind === "timeout" || logoutResult.kind === "closed") {
+            progress.recordClientFailure({kind: logoutResult.kind});
+          }
         }
       } catch {
         progress.recordClientFailure({kind: "closed"});
