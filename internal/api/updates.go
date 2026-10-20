@@ -1285,7 +1285,7 @@ func (h *handlers) handleGetDifferenceForConn(c *mtproto.Conn, r *mtproto.Reques
 		return nil, nil, errAuthKeyUnreg
 	}
 	chatRemovalAuthKeyID := mtproto.AuthKeyIDInt64(r.AuthKeyID)
-	pendingRemovalResumeDate, pendingRemovalStateFound, err := h.store.ChatRemovalPendingResumeDateForState(
+	pendingRemovalResumeDate, pendingRemovalStateFound, err := h.store.ChatRemovalResumeDateForState(
 		r.Ctx, r.UserID, chatRemovalAuthKeyID, req.Date,
 	)
 	if err != nil {

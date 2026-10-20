@@ -160,6 +160,7 @@ WHERE chat_removal_client_state.acknowledged_at IS NULL;
 -- MarkChatRemovalEventsIssuedForAuthKey records the difference state that
 -- included these rows. The state is persisted after a successful reply write;
 -- presenting its Date on a later getDifference is the client's acknowledgement.
+-- An update archives the prior unacknowledged token in the history trigger.
 -- name: MarkChatRemovalEventsIssuedForAuthKey :exec
 INSERT INTO chat_removal_client_state (
     owner_id, auth_key_id, chat_id, delivered_at,
@@ -190,29 +191,59 @@ FROM chat_removal_client_state
 WHERE owner_id = sqlc.arg(owner_id)
   AND auth_key_id = sqlc.arg(auth_key_id);
 
--- ChatRemovalPendingResumeDatesForState maps an unacknowledged removal token
--- back to its logical Date without advancing client acknowledgement state.
--- name: ChatRemovalPendingResumeDatesForState :many
-SELECT resume_date
-FROM chat_removal_client_state
-WHERE owner_id = sqlc.arg(owner_id)
-  AND auth_key_id = sqlc.arg(auth_key_id)
-  AND difference_state_date = sqlc.arg(difference_state_date)
-  AND acknowledged_at IS NULL
-ORDER BY chat_id;
+-- ChatRemovalResumeDatesForState maps an issued removal token
+-- and superseded tokens back to their logical Date without advancing client
+-- acknowledgement state.
+-- name: ChatRemovalResumeDatesForState :many
+SELECT state_rows.resume_date
+FROM (
+    SELECT history.chat_id, history.resume_date
+    FROM chat_removal_client_state_history AS history
+    WHERE history.owner_id = sqlc.arg(owner_id)
+      AND history.auth_key_id = sqlc.arg(auth_key_id)
+      AND history.difference_state_date = sqlc.arg(difference_state_date)
+    UNION ALL
+    SELECT client_state.chat_id, client_state.resume_date
+    FROM chat_removal_client_state AS client_state
+    WHERE client_state.owner_id = sqlc.arg(owner_id)
+      AND client_state.auth_key_id = sqlc.arg(auth_key_id)
+      AND client_state.difference_state_date = sqlc.arg(difference_state_date)
+) AS state_rows
+ORDER BY state_rows.chat_id;
 
 -- A client confirms only rows issued with the Date it presents to
 -- updates.getDifference, once its PTS and QTS have reached the returned state.
 -- Return the logical Date used before the token so other Date-based streams resume.
 -- name: AcknowledgeChatRemovalEventsForState :many
-UPDATE chat_removal_client_state
-SET acknowledged_at = COALESCE(acknowledged_at, clock_timestamp())
-WHERE owner_id = sqlc.arg(owner_id)
-  AND auth_key_id = sqlc.arg(auth_key_id)
-  AND difference_state_date = sqlc.arg(difference_state_date)
-  AND difference_state_pts <= sqlc.arg(request_pts)
-  AND difference_state_qts <= sqlc.arg(request_qts)
-RETURNING resume_date;
+WITH state_rows AS (
+    SELECT history.chat_id, history.resume_date
+    FROM chat_removal_client_state_history AS history
+    WHERE history.owner_id = sqlc.arg(owner_id)
+      AND history.auth_key_id = sqlc.arg(auth_key_id)
+      AND history.difference_state_date = sqlc.arg(difference_state_date)
+      AND history.difference_state_pts <= sqlc.arg(request_pts)
+      AND history.difference_state_qts <= sqlc.arg(request_qts)
+    UNION ALL
+    SELECT client_state.chat_id, client_state.resume_date
+    FROM chat_removal_client_state AS client_state
+    WHERE client_state.owner_id = sqlc.arg(owner_id)
+      AND client_state.auth_key_id = sqlc.arg(auth_key_id)
+      AND client_state.difference_state_date = sqlc.arg(difference_state_date)
+      AND client_state.difference_state_pts <= sqlc.arg(request_pts)
+      AND client_state.difference_state_qts <= sqlc.arg(request_qts)
+), acknowledged AS (
+    UPDATE chat_removal_client_state AS client_state
+    SET acknowledged_at = COALESCE(client_state.acknowledged_at, clock_timestamp())
+    FROM state_rows
+    WHERE client_state.owner_id = sqlc.arg(owner_id)
+      AND client_state.auth_key_id = sqlc.arg(auth_key_id)
+      AND client_state.chat_id = state_rows.chat_id
+    RETURNING client_state.chat_id
+)
+SELECT state_rows.resume_date
+FROM state_rows
+LEFT JOIN acknowledged ON acknowledged.chat_id = state_rows.chat_id
+ORDER BY state_rows.chat_id;
 
 -- name: SetChatTitle :one
 UPDATE chats SET title = $2, version = version + 1 WHERE id = $1 RETURNING *;

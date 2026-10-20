@@ -485,8 +485,33 @@ func TestChatRemovalStaleReplayRecoversSecretChatsWithoutSettingsCursor(t *testi
 		t.Fatal("stale removal replay unexpectedly created a notification settings cursor")
 	}
 
+	secretChatAfterLostReplay, _, err := s.CreateSecretChatRequest(ctx, owner.ID, peer.ID, []byte("ga2"), []byte("hash2"), 991106, store.RateLimitConfig{})
+	if err != nil {
+		t.Fatalf("create secret chat after lost stale replay: %v", err)
+	}
+	// The stale replay's reply is lost, so the client retries the original token.
+	lostReplayRetry, err := api.GetDifferenceForTestWithAuthKey(s, owner.ID, authKeyID, &tg.UpdatesGetDifferenceRequest{
+		Pts: firstState.Pts - 1, Qts: firstState.Qts, Date: firstState.Date,
+	})
+	if err != nil {
+		t.Fatalf("get difference retrying original token after lost stale replay: %v", err)
+	}
+	var lostReplayRetryUpdates []tg.UpdateClass
+	var lostReplayRetryState tg.UpdatesState
+	switch difference := lostReplayRetry.(type) {
+	case *tg.UpdatesDifference:
+		lostReplayRetryUpdates, lostReplayRetryState = difference.OtherUpdates, difference.State
+	case *tg.UpdatesDifferenceSlice:
+		lostReplayRetryUpdates, lostReplayRetryState = difference.OtherUpdates, difference.IntermediateState
+	default:
+		t.Fatalf("lost stale replay retry difference = %T, want a difference result", lostReplayRetry)
+	}
+	if !hasEncryptionUpdateForChat(lostReplayRetryUpdates, secretChatAfterLostReplay.ID) {
+		t.Fatalf("lost stale replay retry updates = %+v, want lifecycle update for chat %d", lostReplayRetryUpdates, secretChatAfterLostReplay.ID)
+	}
+
 	confirmed, err := api.GetDifferenceForTestWithAuthKey(s, owner.ID, authKeyID, &tg.UpdatesGetDifferenceRequest{
-		Pts: staleState.Pts, Qts: staleState.Qts, Date: staleState.Date,
+		Pts: lostReplayRetryState.Pts, Qts: lostReplayRetryState.Qts, Date: lostReplayRetryState.Date,
 	})
 	if err != nil {
 		t.Fatalf("get difference confirming stale replay: %v", err)

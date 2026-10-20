@@ -228,6 +228,16 @@ type ChatRemovalClientState struct {
 	ResumeDate          *int64
 }
 
+type ChatRemovalClientStateHistory struct {
+	OwnerID             int64
+	AuthKeyID           int64
+	ChatID              int64
+	DifferenceStatePts  int64
+	DifferenceStateQts  int64
+	DifferenceStateDate int64
+	ResumeDate          int64
+}
+
 type ChatRemovalEvent struct {
 	OwnerID int64
 	ChatID  int64

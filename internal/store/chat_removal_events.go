@@ -96,25 +96,22 @@ func (s *Store) ChatRemovalLatestDifferenceStateDateForAuthKey(ctx context.Conte
 	return int(date), nil
 }
 
-// ChatRemovalPendingResumeDateForState translates an unacknowledged removal
+// ChatRemovalResumeDateForState translates an issued or superseded removal
 // token to its logical Date without changing the client's acknowledgement.
-func (s *Store) ChatRemovalPendingResumeDateForState(ctx context.Context, ownerID, authKeyID int64, stateDate int) (int, bool, error) {
+func (s *Store) ChatRemovalResumeDateForState(ctx context.Context, ownerID, authKeyID int64, stateDate int) (int, bool, error) {
 	stateDateValue := int64(stateDate)
-	rows, err := s.q.ChatRemovalPendingResumeDatesForState(ctx, db.ChatRemovalPendingResumeDatesForStateParams{
-		OwnerID: ownerID, AuthKeyID: authKeyID, DifferenceStateDate: &stateDateValue,
+	rows, err := s.q.ChatRemovalResumeDatesForState(ctx, db.ChatRemovalResumeDatesForStateParams{
+		OwnerID: ownerID, AuthKeyID: authKeyID, DifferenceStateDate: stateDateValue,
 	})
 	if err != nil {
-		return 0, false, fmt.Errorf("pending chat removal resume date: %w", err)
+		return 0, false, fmt.Errorf("chat removal resume date: %w", err)
 	}
 	if len(rows) == 0 {
 		return 0, false, nil
 	}
-	if rows[0] == nil {
-		return 0, false, fmt.Errorf("chat removal state date %d has no resume date", stateDate)
-	}
-	resumeDate := int(*rows[0])
+	resumeDate := int(rows[0])
 	for _, row := range rows[1:] {
-		if row == nil || int(*row) != resumeDate {
+		if int(row) != resumeDate {
 			return 0, false, fmt.Errorf("chat removal state date %d maps to multiple resume dates", stateDate)
 		}
 	}
@@ -135,7 +132,7 @@ func (s *Store) AcknowledgeChatRemovalEventsForState(
 	stateDateValue := int64(stateDate)
 	rows, err := s.q.AcknowledgeChatRemovalEventsForState(ctx, db.AcknowledgeChatRemovalEventsForStateParams{
 		OwnerID: ownerID, AuthKeyID: authKeyID,
-		RequestPts: &requestPtsValue, RequestQts: &requestQtsValue, DifferenceStateDate: &stateDateValue,
+		RequestPts: requestPtsValue, RequestQts: requestQtsValue, DifferenceStateDate: stateDateValue,
 	})
 	if err != nil {
 		return 0, false, fmt.Errorf("acknowledge chat removal difference state: %w", err)
@@ -143,12 +140,9 @@ func (s *Store) AcknowledgeChatRemovalEventsForState(
 	if len(rows) == 0 {
 		return 0, false, nil
 	}
-	if rows[0] == nil {
-		return 0, false, fmt.Errorf("chat removal state date %d has no resume date", stateDate)
-	}
-	resumeDate := int(*rows[0])
+	resumeDate := int(rows[0])
 	for _, row := range rows[1:] {
-		if row == nil || int(*row) != resumeDate {
+		if int(row) != resumeDate {
 			return 0, false, fmt.Errorf("chat removal state date %d maps to multiple resume dates", stateDate)
 		}
 	}

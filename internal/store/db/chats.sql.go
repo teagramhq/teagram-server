@@ -12,28 +12,49 @@ import (
 )
 
 const acknowledgeChatRemovalEventsForState = `-- name: AcknowledgeChatRemovalEventsForState :many
-UPDATE chat_removal_client_state
-SET acknowledged_at = COALESCE(acknowledged_at, clock_timestamp())
-WHERE owner_id = $1
-  AND auth_key_id = $2
-  AND difference_state_date = $3
-  AND difference_state_pts <= $4
-  AND difference_state_qts <= $5
-RETURNING resume_date
+WITH state_rows AS (
+    SELECT history.chat_id, history.resume_date
+    FROM chat_removal_client_state_history AS history
+    WHERE history.owner_id = $1
+      AND history.auth_key_id = $2
+      AND history.difference_state_date = $3
+      AND history.difference_state_pts <= $4
+      AND history.difference_state_qts <= $5
+    UNION ALL
+    SELECT client_state.chat_id, client_state.resume_date
+    FROM chat_removal_client_state AS client_state
+    WHERE client_state.owner_id = $1
+      AND client_state.auth_key_id = $2
+      AND client_state.difference_state_date = $3
+      AND client_state.difference_state_pts <= $4
+      AND client_state.difference_state_qts <= $5
+), acknowledged AS (
+    UPDATE chat_removal_client_state AS client_state
+    SET acknowledged_at = COALESCE(client_state.acknowledged_at, clock_timestamp())
+    FROM state_rows
+    WHERE client_state.owner_id = $1
+      AND client_state.auth_key_id = $2
+      AND client_state.chat_id = state_rows.chat_id
+    RETURNING client_state.chat_id
+)
+SELECT state_rows.resume_date
+FROM state_rows
+LEFT JOIN acknowledged ON acknowledged.chat_id = state_rows.chat_id
+ORDER BY state_rows.chat_id
 `
 
 type AcknowledgeChatRemovalEventsForStateParams struct {
 	OwnerID             int64
 	AuthKeyID           int64
-	DifferenceStateDate *int64
-	RequestPts          *int64
-	RequestQts          *int64
+	DifferenceStateDate int64
+	RequestPts          int64
+	RequestQts          int64
 }
 
 // A client confirms only rows issued with the Date it presents to
 // updates.getDifference, once its PTS and QTS have reached the returned state.
 // Return the logical Date used before the token so other Date-based streams resume.
-func (q *Queries) AcknowledgeChatRemovalEventsForState(ctx context.Context, arg AcknowledgeChatRemovalEventsForStateParams) ([]*int64, error) {
+func (q *Queries) AcknowledgeChatRemovalEventsForState(ctx context.Context, arg AcknowledgeChatRemovalEventsForStateParams) ([]int64, error) {
 	rows, err := q.db.Query(ctx, acknowledgeChatRemovalEventsForState,
 		arg.OwnerID,
 		arg.AuthKeyID,
@@ -45,9 +66,9 @@ func (q *Queries) AcknowledgeChatRemovalEventsForState(ctx context.Context, arg 
 		return nil, err
 	}
 	defer rows.Close()
-	var items []*int64
+	var items []int64
 	for rows.Next() {
-		var resume_date *int64
+		var resume_date int64
 		if err := rows.Scan(&resume_date); err != nil {
 			return nil, err
 		}
@@ -663,33 +684,42 @@ func (q *Queries) ChatRemovalLatestDifferenceStateDateForAuthKey(ctx context.Con
 	return column_1, err
 }
 
-const chatRemovalPendingResumeDatesForState = `-- name: ChatRemovalPendingResumeDatesForState :many
-SELECT resume_date
-FROM chat_removal_client_state
-WHERE owner_id = $1
-  AND auth_key_id = $2
-  AND difference_state_date = $3
-  AND acknowledged_at IS NULL
-ORDER BY chat_id
+const chatRemovalResumeDatesForState = `-- name: ChatRemovalResumeDatesForState :many
+SELECT state_rows.resume_date
+FROM (
+    SELECT history.chat_id, history.resume_date
+    FROM chat_removal_client_state_history AS history
+    WHERE history.owner_id = $1
+      AND history.auth_key_id = $2
+      AND history.difference_state_date = $3
+    UNION ALL
+    SELECT client_state.chat_id, client_state.resume_date
+    FROM chat_removal_client_state AS client_state
+    WHERE client_state.owner_id = $1
+      AND client_state.auth_key_id = $2
+      AND client_state.difference_state_date = $3
+) AS state_rows
+ORDER BY state_rows.chat_id
 `
 
-type ChatRemovalPendingResumeDatesForStateParams struct {
+type ChatRemovalResumeDatesForStateParams struct {
 	OwnerID             int64
 	AuthKeyID           int64
-	DifferenceStateDate *int64
+	DifferenceStateDate int64
 }
 
-// ChatRemovalPendingResumeDatesForState maps an unacknowledged removal token
-// back to its logical Date without advancing client acknowledgement state.
-func (q *Queries) ChatRemovalPendingResumeDatesForState(ctx context.Context, arg ChatRemovalPendingResumeDatesForStateParams) ([]*int64, error) {
-	rows, err := q.db.Query(ctx, chatRemovalPendingResumeDatesForState, arg.OwnerID, arg.AuthKeyID, arg.DifferenceStateDate)
+// ChatRemovalResumeDatesForState maps an issued removal token
+// and superseded tokens back to their logical Date without advancing client
+// acknowledgement state.
+func (q *Queries) ChatRemovalResumeDatesForState(ctx context.Context, arg ChatRemovalResumeDatesForStateParams) ([]int64, error) {
+	rows, err := q.db.Query(ctx, chatRemovalResumeDatesForState, arg.OwnerID, arg.AuthKeyID, arg.DifferenceStateDate)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	var items []*int64
+	var items []int64
 	for rows.Next() {
-		var resume_date *int64
+		var resume_date int64
 		if err := rows.Scan(&resume_date); err != nil {
 			return nil, err
 		}
@@ -1077,6 +1107,7 @@ type MarkChatRemovalEventsIssuedForAuthKeyParams struct {
 // MarkChatRemovalEventsIssuedForAuthKey records the difference state that
 // included these rows. The state is persisted after a successful reply write;
 // presenting its Date on a later getDifference is the client's acknowledgement.
+// An update archives the prior unacknowledged token in the history trigger.
 func (q *Queries) MarkChatRemovalEventsIssuedForAuthKey(ctx context.Context, arg MarkChatRemovalEventsIssuedForAuthKeyParams) error {
 	_, err := q.db.Exec(ctx, markChatRemovalEventsIssuedForAuthKey,
 		arg.OwnerID,

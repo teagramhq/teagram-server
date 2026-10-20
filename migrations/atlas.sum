@@ -1,4 +1,4 @@
-h1:q/SCsoTPZQjstxaNiurRzKbvk0aeXgwHwEktLItSIa4=
+h1:BL3ZgEaPxjw3rJ2PYqtt/rQhKt13sghnUIxoY86oPCE=
 20260721000001_baseline.sql h1:cnO6K1z0Uv3goEvecgJixKSio6ziaB1rF7cQLoCWOxs=
 20260721000002_auth_keys.sql h1:+vNabm6vdEAgu3H5ZGw2Wr8D/Y6i4ikAAUO3JbfZQeE=
 20260721000003_code_hardening.sql h1:8pbAqUpqcwOONUfac+qC51QjfC1JnObNCcXa1HC/dr0=
@@ -105,3 +105,4 @@ h1:q/SCsoTPZQjstxaNiurRzKbvk0aeXgwHwEktLItSIa4=
 20261020000098_broadcast_post_signatures.sql h1:FiDhHlMEJI31Sxh/VBzMoYG3r6ra4CZvRbmldc6sSHY=
 20261020000099_chat_removal_events.sql h1:OFd15/hrMBxuESHDDwgtnyzGmXv7J7lLb2enCak/VRU=
 20261020000100_chat_removal_difference_state.sql h1:JoDVDuqbzfJuAmOVNYRu2+ezLs4wwm8Gdyj2hYZHnIc=
+20261020000101_chat_removal_state_history.sql h1:3aeHUqpconszWpsXlUUw3ranB88jlqeMJlGx/CzFJPM=
