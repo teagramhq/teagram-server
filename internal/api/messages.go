@@ -2282,7 +2282,7 @@ func mediaSearchFilterFromTL(filter tg.MessagesFilterClass) (store.MediaSearchFi
 // handleSearch serves messages.search: keyword, pinned, or supported shared-media
 // search within a dialog. Results are the caller's messages (both directions) in
 // the named peer, ordered newest-first. A channel peer searches the channel's
-// shared posts instead and is gated on membership, not ownership.
+// shared posts instead and applies the caller's membership, ban and floor.
 func (h *handlers) handleSearch(r *mtproto.Request) (bin.Encoder, error) {
 	var req tg.MessagesSearchRequest
 	if err := req.Decode(r.Buf); err != nil {

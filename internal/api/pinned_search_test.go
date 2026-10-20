@@ -268,7 +268,7 @@ func TestSearchPinnedChannelReturnsPostAndRejectsUnauthorizedViewers(t *testing.
 	if _, err = sendToChannel(t, s, creator.ID, ch.ID, "unpinned channel text", 98202); err != nil {
 		t.Fatalf("send unpinned channel post: %v", err)
 	}
-	posts, err := s.SearchChannelPosts(ctx, ch.ID, "pinned", 0, 10)
+	posts, err := s.SearchChannelPosts(ctx, creator.ID, ch.ID, "pinned", 0, 10)
 	if err != nil || len(posts) != 1 {
 		t.Fatalf("find channel pin target: got %d posts, err %v", len(posts), err)
 	}
@@ -517,7 +517,7 @@ func newPinnedSearchChannelFixture(t *testing.T, memberPhone string) pinnedSearc
 	if _, err = sendToChannel(t, s, creator.ID, ch.ID, "pinned channel text", 98402); err != nil {
 		t.Fatalf("send pinned channel post: %v", err)
 	}
-	posts, err := s.SearchChannelPosts(ctx, ch.ID, "pinned", 0, 10)
+	posts, err := s.SearchChannelPosts(ctx, creator.ID, ch.ID, "pinned", 0, 10)
 	if err != nil || len(posts) != 1 {
 		t.Fatalf("find channel pin target: got %d posts, err %v", len(posts), err)
 	}

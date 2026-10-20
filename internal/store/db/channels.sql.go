@@ -237,7 +237,7 @@ SELECT
     p.role AS member_role,
     p.banned_until AS member_banned_until,
     p.join_pts AS member_join_pts,
-    COALESCE(read_state.read_max_id, 0)::bigint AS read_inbox_max_id,
+    GREATEST(COALESCE(read_state.read_max_id, 0), p.available_min_id)::bigint AS read_inbox_max_id,
     unread.unread_count,
     unread.entitled AS summary_entitled,
     unread.status_exists AS summary_status_exists,
@@ -282,7 +282,7 @@ CROSS JOIN LATERAL (
     FROM channel_post_unread_suffix_counts(
         c.id,
         p.user_id,
-        COALESCE(read_state.read_max_id, 0)
+        GREATEST(COALESCE(read_state.read_max_id, 0), p.available_min_id)
     ) AS summary(entitled, status_exists, summary_version, summary_ready, total_live, author_live)
 ) AS unread
 LEFT JOIN LATERAL (
@@ -291,6 +291,7 @@ LEFT JOIN LATERAL (
            cm.ttl_period, cm.post_author
     FROM channel_messages cm
     WHERE cm.channel_id = c.id AND cm.deleted = false
+      AND cm.local_id > p.available_min_id
       AND (cm.expires_at IS NULL OR cm.expires_at > statement_timestamp())
     ORDER BY cm.local_id DESC
     LIMIT 1
@@ -354,10 +355,10 @@ type ChannelDialogsForUserRow struct {
 }
 
 // ChannelDialogsForUser returns every unbanned channel the user belongs to,
-// including empty channels, alongside the member row, channel pts, and newest
-// non-deleted post (the dialog's top message). Empty channels have top_local_id
-// 0 and still produce a dialog. LEFT JOIN ensures they count toward the bounded
-// 500-channel account cap.
+// including empty or fully floored channels, alongside the member row, channel
+// pts, and newest visible post (the dialog's top message). Empty channels have
+// top_local_id 0 and still produce a dialog. LEFT JOIN ensures they count toward
+// the bounded 500-channel account cap.
 // COALESCE guards against NULL from the lateral join; local_id >= 1 so 0 is
 // a safe sentinel for "no row".
 func (q *Queries) ChannelDialogsForUser(ctx context.Context, arg ChannelDialogsForUserParams) ([]ChannelDialogsForUserRow, error) {
@@ -790,6 +791,44 @@ func (q *Queries) ChannelParticipantsPageCount(ctx context.Context, arg ChannelP
 	var column_1 int64
 	err := row.Scan(&column_1)
 	return column_1, err
+}
+
+const channelPinnedMessageForViewer = `-- name: ChannelPinnedMessageForViewer :one
+SELECT c.pinned_message_id
+FROM channels c
+LEFT JOIN channel_participants participant
+  ON participant.channel_id = c.id
+ AND participant.user_id = $1::bigint
+JOIN channel_messages cm
+  ON cm.channel_id = c.id
+ AND cm.local_id = c.pinned_message_id
+ AND cm.deleted = false
+ AND (cm.expires_at IS NULL OR cm.expires_at > statement_timestamp())
+ AND cm.action_type = 0
+WHERE c.id = $2::bigint
+  AND c.pinned_message_id IS NOT NULL
+  AND (
+      participant.user_id IS NULL
+      OR (
+          (participant.banned_until IS NULL OR participant.banned_until <= now())
+          AND c.pinned_message_id > participant.available_min_id
+      )
+  )
+`
+
+type ChannelPinnedMessageForViewerParams struct {
+	OwnerID   int64
+	ChannelID int64
+}
+
+// ChannelPinnedMessageForViewer only returns an active pin when it is above
+// the viewer's history floor. The participant row supplies membership, ban
+// state and floor in the same statement as the pin decision.
+func (q *Queries) ChannelPinnedMessageForViewer(ctx context.Context, arg ChannelPinnedMessageForViewerParams) (*int32, error) {
+	row := q.db.QueryRow(ctx, channelPinnedMessageForViewer, arg.OwnerID, arg.ChannelID)
+	var pinned_message_id *int32
+	err := row.Scan(&pinned_message_id)
+	return pinned_message_id, err
 }
 
 const channelPollParticipantForUpdate = `-- name: ChannelPollParticipantForUpdate :one

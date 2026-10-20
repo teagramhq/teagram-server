@@ -1209,6 +1209,39 @@ func (s *Store) ChannelMessagesForMember(ctx context.Context, channelID, userID 
 	return out, nil
 }
 
+// ChannelMessagesForMemberIncludingTombstones returns visible posts and
+// payload-free tombstones above the member's history floor. Each query checks
+// membership, ban state and floor with the content or tombstone identity it reads.
+func (s *Store) ChannelMessagesForMemberIncludingTombstones(ctx context.Context, channelID, userID int64, localIDs []int64) (map[int64]ChannelMessage, error) {
+	if len(localIDs) == 0 {
+		return map[int64]ChannelMessage{}, nil
+	}
+	rows, err := s.q.ChannelMessagesForMember(ctx, db.ChannelMessagesForMemberParams{
+		ChannelID: channelID,
+		UserID:    userID,
+		LocalIds:  localIDs,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("channel messages for member: %w", err)
+	}
+	out := make(map[int64]ChannelMessage, len(rows))
+	for _, row := range rows {
+		out[row.LocalID] = channelMessageFromFields(channelMsgFields(row))
+	}
+	tombstones, err := s.q.ChannelMessageTombstonesForMember(ctx, db.ChannelMessageTombstonesForMemberParams{
+		ChannelID: channelID,
+		UserID:    userID,
+		LocalIds:  localIDs,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("channel message tombstones for member: %w", err)
+	}
+	for _, row := range tombstones {
+		out[row.LocalID] = ChannelMessage{ChannelID: row.ChannelID, LocalID: row.LocalID, Deleted: true}
+	}
+	return out, nil
+}
+
 // ChannelHistory returns the channel's posts newest-first, excluding deleted.
 // offsetID > 0 pages strictly older than that local_id (0 = from the newest),
 // the same convention History uses for user peers.
@@ -1229,11 +1262,11 @@ func (s *Store) ChannelHistory(ctx context.Context, channelID int64, offsetID in
 }
 
 // ChannelHistoryWithOffset returns one Telegram-style history page and the
-// channel's total number of non-deleted history entries. Offset position is
-// computed against the unfiltered history; maxID and minID filter the slice.
+// number of active entries above the caller's history floor. Offset position is
+// computed within that visible history; maxID and minID filter the slice.
 func (s *Store) ChannelHistoryWithOffset(
 	ctx context.Context,
-	channelID, offsetID, addOffset, maxID, minID int64,
+	channelID, ownerID, offsetID, addOffset, maxID, minID int64,
 	limit int,
 ) ([]ChannelMessage, int, error) {
 	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{
@@ -1246,7 +1279,10 @@ func (s *Store) ChannelHistoryWithOffset(
 	defer func() { _ = tx.Rollback(ctx) }() //nolint:errcheck // no-op after commit
 	qtx := s.q.WithTx(tx)
 
-	count, err := qtx.CountChannelHistory(ctx, channelID)
+	count, err := qtx.CountChannelHistory(ctx, db.CountChannelHistoryParams{
+		ChannelID: channelID,
+		OwnerID:   ownerID,
+	})
 	if err != nil {
 		return nil, 0, fmt.Errorf("count channel history: %w", err)
 	}
@@ -1254,6 +1290,7 @@ func (s *Store) ChannelHistoryWithOffset(
 	if offsetID > 0 && addOffset < 0 {
 		rows, e := qtx.ChannelHistoryPageAround(ctx, db.ChannelHistoryPageAroundParams{
 			ChannelID: channelID,
+			OwnerID:   ownerID,
 			OffsetID:  offsetID,
 			AddOffset: addOffset,
 			MaxID:     maxID,
@@ -1270,6 +1307,7 @@ func (s *Store) ChannelHistoryWithOffset(
 	} else {
 		rows, e := qtx.ChannelHistoryPageWithOffset(ctx, db.ChannelHistoryPageWithOffsetParams{
 			ChannelID: channelID,
+			OwnerID:   ownerID,
 			OffsetID:  offsetID,
 			AddOffset: addOffset,
 			MaxID:     maxID,
@@ -1350,16 +1388,12 @@ func (s *Store) ChannelRepliesWithOffset(
 	return snapshot, nil
 }
 
-// SearchChannelPosts returns the channel's posts matching query, newest-first
-// and excluding deleted, paged by offsetID exactly as ChannelHistory pages.
-//
-// It takes no caller id on purpose. A channel post is one shared row rather
-// than a per-owner copy, so there is nothing here to scope to the reader:
-// whether this caller may read the channel at all is decided by the membership
-// check the handler runs before calling, and nothing below narrows it further.
-func (s *Store) SearchChannelPosts(ctx context.Context, channelID int64, query string, offsetID int64, limit int) ([]ChannelMessage, error) {
+// SearchChannelPosts returns the caller's visible channel posts matching query,
+// newest-first and excluding deleted, paged by offsetID exactly as ChannelHistory.
+func (s *Store) SearchChannelPosts(ctx context.Context, ownerID, channelID int64, query string, offsetID int64, limit int) ([]ChannelMessage, error) {
 	rows, err := s.q.SearchChannelPostsPage(ctx, db.SearchChannelPostsPageParams{
 		ChannelID: channelID,
+		OwnerID:   ownerID,
 		Query:     query,
 		OffsetID:  offsetID,
 		Lim:       int32(limit), //nolint:gosec // limit is a small validated page size
@@ -1376,7 +1410,8 @@ func (s *Store) SearchChannelPosts(ctx context.Context, channelID int64, query s
 
 // SearchFilteredChannelPosts returns one authorized channel member's matching
 // media page and the exact count from the same database snapshot. Membership is
-// checked here and included in both queries; limit zero requests only the count.
+// checked here, and membership, ban state and floor are repeated in both
+// queries; limit zero requests only the count.
 func (s *Store) SearchFilteredChannelPosts(
 	ctx context.Context,
 	ownerID, channelID int64,
@@ -1470,9 +1505,8 @@ func SetFilteredChannelSearchSnapshotHook(s *Store, fn func()) {
 }
 
 // SearchPinnedChannelPost returns the active pinned post for channelID while
-// ownerID still has an unbanned participant row. The channel membership join
-// and post lookup happen in one statement so a departed or newly banned viewer
-// cannot receive channel content through the pin filter.
+// ownerID still has an unbanned participant row and the pin is above its floor.
+// Membership, ban state, floor and post lookup happen in one statement.
 func (s *Store) SearchPinnedChannelPost(ctx context.Context, ownerID, channelID int64, query string, offsetID int64, limit int) ([]ChannelMessage, error) {
 	rows, err := s.q.SearchPinnedChannelPostForMember(ctx, db.SearchPinnedChannelPostForMemberParams{
 		OwnerID:   ownerID,

@@ -69,10 +69,10 @@ type GlobalSearchHit struct {
 // The result set is the union of two authorized sets and widens neither. Owned
 // rows in user and chat peers are the caller's own copies, which for a chat is
 // already the membership check. Channel posts are shared rows, so they are gated
-// on an unbanned participant row, and that gate is applied twice: once inside
-// the page query, and again here per channel before any post body is read, so a
-// ban landing between the two reads still stops the post. Both re-run on every
-// page — nothing about authorization is carried in the cursor.
+// on an unbanned participant row and that row's history floor. Both checks run
+// in the page query and again before any post body is read, so a ban or floor
+// change between the two reads still stops the post. They re-run on every page;
+// nothing about authorization is carried in the cursor.
 //
 // A caller in no dialogs gets an empty page, not an error.
 //
@@ -201,7 +201,7 @@ func (s *Store) cursorDate(ctx context.Context, userID int64, cursor GlobalSearc
 	)
 	if cursor.PeerType == PeerTypeChannel {
 		at, err = s.q.ChannelPostDate(ctx, db.ChannelPostDateParams{
-			ChannelID: cursor.PeerID, LocalID: cursor.MsgID,
+			OwnerID: userID, ChannelID: cursor.PeerID, LocalID: cursor.MsgID,
 		})
 	} else {
 		at, err = s.q.OwnedMessageDate(ctx, db.OwnedMessageDateParams{
@@ -321,11 +321,8 @@ func (s *Store) ownedHits(ctx context.Context, userID int64, keys []db.SearchGlo
 	return out, nil
 }
 
-// postHits reads the bodies behind the channel keys of a page, one channel at a
-// time, and only for channels this caller is an unbanned member of right now.
-// One membership read plus one post read per distinct channel, no cache: a page
-// names very few distinct channels, the same reason loadChannels gives for its
-// own per-channel loop.
+// postHits reads channel post bodies through the same active-member and floor
+// predicate as the page query, one query per distinct channel.
 func (s *Store) postHits(ctx context.Context, userID int64, keys []db.SearchGlobalPageRow) (map[channelPostKey]ChannelMessage, error) {
 	byChannel := map[int64][]int64{}
 	for _, k := range keys {
@@ -337,26 +334,12 @@ func (s *Store) postHits(ctx context.Context, userID int64, keys []db.SearchGlob
 	if len(byChannel) == 0 {
 		return out, nil
 	}
-	now := time.Now()
 	for channelID, localIDs := range byChannel {
-		member, found, err := s.ChannelMemberOf(ctx, channelID, userID)
-		if err != nil {
-			return nil, err
-		}
-		if !found || member.Banned(now) {
-			continue
-		}
-		msgs, err := s.ChannelMessages(ctx, channelID, localIDs)
+		msgs, err := s.ChannelMessagesForMember(ctx, channelID, userID, localIDs)
 		if err != nil {
 			return nil, err
 		}
 		for localID, m := range msgs {
-			// ChannelMessages serves deleted rows too — it is the hydration read
-			// behind the event log, which has to be able to name a removed post.
-			// A search page may not carry one.
-			if m.Deleted {
-				continue
-			}
 			out[channelPostKey{channelID: channelID, localID: localID}] = m
 		}
 	}
