@@ -18,11 +18,12 @@ import (
 )
 
 // JoinChannelByInvite takes row locks in fixed order: first the channel_invites
-// row (ChannelInviteByHashForUpdate), then the channel_state row
-// (ChannelStateForUpdate), then the account advisory lock. All are held to
-// commit. The invite lock serialises admission against revocation on that hash;
-// the state lock serialises joins to the same channel and anchors the pts
-// snapshot; the account lock serialises quota checks across channels.
+// row (ChannelInviteByHashForUpdate), then the channels row (LockChannel), then
+// channel_state (ChannelStateForUpdate), then the account advisory lock. All
+// are held to commit. The invite lock serialises admission against revocation
+// on that hash; the channel row serialises admission against metadata changes;
+// the state lock anchors the pts and local-id snapshots; the account lock
+// serialises quota checks across channels.
 // CreateChannel takes the account lock before inserting its new channel, which
 // has no existing channel_state row to lock.
 //
@@ -35,10 +36,11 @@ import (
 // on channels for the foreign key; LockChannel's NO KEY UPDATE mode is compatible
 // with that check, so the insert can finish and release channel_state. This
 // preserves serialized role rechecks without a channel_state/channels lock
-// cycle. The invite row lock is never taken alongside LockChannel, so it cannot
-// cycle either. Every admission path takes existing channel-specific locks
-// before account advisory locks; CreateChannel is the only path with no
-// existing channel-specific lock.
+// cycle. Invite joins take the invite row before LockChannel, and no path takes
+// an invite row after LockChannel. Admission to an existing channel takes its
+// channel-specific locks before account advisory locks. CreateChannel takes the
+// creator account lock before inserting a new channel, then locks its new
+// channel_state row before seating the creator or allocating the creation id.
 // ReadChannelHistory takes LockChannel before channel_state, matching rights
 // changes and serializing its membership decision with ban/removal.
 //
@@ -59,6 +61,14 @@ import (
 // Channel-state row locks make the per-channel participant cap exact. Sorted
 // per-account advisory locks make the account channel cap exact across every
 // admission path, including concurrent admissions to different channels.
+
+func channelParticipantHistoryFloor(hidden bool, nextLocalID int64) int64 {
+	if !hidden {
+		return 0
+	}
+	return nextLocalID - 1
+}
+
 const (
 	defaultMaxChannelParticipants = 10000 // per channel
 	defaultMaxChannelsPerUser     = 500   // per account
@@ -301,8 +311,13 @@ func (s *Store) CreateChannelWithServiceMessage(ctx context.Context, creatorID i
 	if err = qtx.InsertChannelState(ctx, row.ID); err != nil {
 		return Channel{}, ChannelMessage{}, 0, fmt.Errorf("insert channel state: %w", err)
 	}
+	state, err := qtx.LockChannelState(ctx, row.ID)
+	if err != nil {
+		return Channel{}, ChannelMessage{}, 0, fmt.Errorf("lock channel state for creator admission: %w", err)
+	}
 	if err = qtx.InsertChannelParticipant(ctx, db.InsertChannelParticipantParams{
 		ChannelID: row.ID, UserID: creatorID, Role: 2, JoinPts: 0,
+		AvailableMinID: channelParticipantHistoryFloor(row.PreHistoryHidden, state.NextLocalID),
 	}); err != nil {
 		return Channel{}, ChannelMessage{}, 0, fmt.Errorf("insert creator participant: %w", err)
 	}
@@ -481,12 +496,12 @@ func (s *Store) RevokeChannelInvite(ctx context.Context, hash string, channelID 
 // minChannelID), which raises the cost of guessing one and decides nothing.
 //
 // Locking: the invite row is taken first (ChannelInviteByHashForUpdate), then
-// the channel's channel_state row (ChannelStateForUpdate), then the account
-// advisory lock. All are held to commit. The invite lock serialises admission
-// against concurrent revocation of the same hash — a revoke UPDATE blocks until
-// the join commits or rolls back. The state lock serialises joins to this
-// channel and anchors the pts snapshot; the account lock serialises the quota
-// check across channels.
+// the channel row (LockChannel), the channel_state row (ChannelStateForUpdate),
+// then the account advisory lock. All are held to commit. The invite lock
+// serialises admission against concurrent revocation of the same hash — a
+// revoke UPDATE blocks until the join commits or rolls back. The channel and
+// state locks serialize the hidden-history flag with the local-id snapshot; the
+// account lock serialises quota checks across channels.
 //
 // Re-joining is idempotent: an existing row is returned untouched, so join_pts
 // never drops and a ban is never cleared by rejoining.
@@ -511,6 +526,16 @@ func (s *Store) JoinChannelByInvite(ctx context.Context, hash string, userID int
 		return Channel{}, ChannelMember{}, fmt.Errorf("channel invite: %w", err)
 	}
 
+	channel, err := qtx.LockChannel(ctx, invite.ChannelID)
+	switch {
+	case errors.Is(err, pgx.ErrNoRows):
+		// An invite outliving its channel is the same rejection as an unknown
+		// hash: it says nothing about which ids exist.
+		return Channel{}, ChannelMember{}, ErrInviteInvalid
+	case err != nil:
+		return Channel{}, ChannelMember{}, fmt.Errorf("lock channel: %w", err)
+	}
+
 	state, err := qtx.ChannelStateForUpdate(ctx, invite.ChannelID)
 	switch {
 	case errors.Is(err, pgx.ErrNoRows):
@@ -520,11 +545,6 @@ func (s *Store) JoinChannelByInvite(ctx context.Context, hash string, userID int
 	case err != nil:
 		return Channel{}, ChannelMember{}, fmt.Errorf("lock channel state: %w", err)
 	}
-	channel, err := qtx.ChannelByID(ctx, invite.ChannelID)
-	if err != nil {
-		return Channel{}, ChannelMember{}, fmt.Errorf("channel by id: %w", err)
-	}
-
 	member, err := qtx.ChannelParticipantByUser(ctx, db.ChannelParticipantByUserParams{
 		ChannelID: invite.ChannelID, UserID: userID,
 	})
@@ -561,6 +581,7 @@ func (s *Store) JoinChannelByInvite(ctx context.Context, hash string, userID int
 
 	n, err := qtx.InsertChannelParticipantIfAbsent(ctx, db.InsertChannelParticipantIfAbsentParams{
 		ChannelID: invite.ChannelID, UserID: userID, Role: 0, JoinPts: state.Pts,
+		AvailableMinID: channelParticipantHistoryFloor(channel.PreHistoryHidden, state.NextLocalID),
 	})
 	if err != nil {
 		return Channel{}, ChannelMember{}, fmt.Errorf("insert participant: %w", err)
@@ -577,6 +598,7 @@ func (s *Store) JoinChannelByInvite(ctx context.Context, hash string, userID int
 	} else {
 		member = db.ChannelParticipant{
 			ChannelID: invite.ChannelID, UserID: userID, Role: 0, JoinPts: state.Pts,
+			AvailableMinID: channelParticipantHistoryFloor(channel.PreHistoryHidden, state.NextLocalID),
 		}
 		if err := insertInitialChannelReadState(ctx, qtx, invite.ChannelID, userID, state.NextLocalID-1); err != nil {
 			return Channel{}, ChannelMember{}, fmt.Errorf("insert initial channel read state: %w", err)
@@ -617,7 +639,7 @@ func (s *Store) AddChannelMembers(ctx context.Context, channelID, callerID int64
 		return nil, ErrNotMember
 	}
 
-	_, err = qtx.LockChannel(ctx, channelID)
+	channel, err := qtx.LockChannel(ctx, channelID)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, ErrNotMember
 	}
@@ -689,6 +711,7 @@ func (s *Store) AddChannelMembers(ctx context.Context, channelID, callerID int64
 
 		n, err := qtx.InsertChannelParticipantIfAbsent(ctx, db.InsertChannelParticipantIfAbsentParams{
 			ChannelID: channelID, UserID: targetID, Role: channelRoleMember, JoinPts: state.Pts,
+			AvailableMinID: channelParticipantHistoryFloor(channel.PreHistoryHidden, state.NextLocalID),
 		})
 		if err != nil {
 			return nil, fmt.Errorf("insert participant: %w", err)
@@ -1721,17 +1744,11 @@ const ChannelUsernameChangeWindow = 24 * time.Hour
 // the API layer (inputChannelID) — this method receives a channelID that has
 // already passed that gate.
 //
-// Locking: the channel_state row is taken first (ChannelStateForUpdate), then
-// the account advisory lock before the quota check; both are held to commit.
-// Under the same transaction the channel row is re-read to verify publicness
-// (username IS NOT NULL). The state lock serialises concurrent joins and anchors
-// the pts snapshot. The channel row lock (LockChannel) is NOT taken
-// here — the re-read of the channels row uses a plain ChannelByID under the
-// state row lock. Since the state row lock serialises all admission paths to
-// this channel, and the channels row is only written by EditChannelUsername
-// (which takes an advisory lock first, then LockChannel), there is no deadlock
-// risk: the advisory lock in EditChannelUsername is keyed on channelID and is
-// taken before LockChannel, while this path never reaches LockChannel.
+// Locking: the channel row is taken first (LockChannel), then channel_state
+// (ChannelStateForUpdate), then the account advisory lock. All are held to
+// commit. The channel row serialises publicness and hidden-history flag reads
+// with metadata changes; the state lock anchors both the pts and local-id
+// snapshots.
 //
 // The admission decision is the re-read of channels.username inside this
 // transaction. An out-of-transaction check races a concurrent
@@ -1755,7 +1772,15 @@ func (s *Store) JoinChannelByUsername(ctx context.Context, channelID, userID int
 	defer func() { _ = tx.Rollback(ctx) }() //nolint:errcheck // no-op after commit
 	qtx := s.q.WithTx(tx)
 
-	// Lock the channel_state row — serialises admission and anchors pts.
+	channel, err := qtx.LockChannel(ctx, channelID)
+	switch {
+	case errors.Is(err, pgx.ErrNoRows):
+		return Channel{}, ChannelMember{}, ErrNotMember
+	case err != nil:
+		return Channel{}, ChannelMember{}, fmt.Errorf("lock channel: %w", err)
+	}
+
+	// Lock channel state after the channel row to serialize the local-id floor.
 	state, err := qtx.ChannelStateForUpdate(ctx, channelID)
 	switch {
 	case errors.Is(err, pgx.ErrNoRows):
@@ -1764,16 +1789,8 @@ func (s *Store) JoinChannelByUsername(ctx context.Context, channelID, userID int
 		return Channel{}, ChannelMember{}, fmt.Errorf("lock channel state: %w", err)
 	}
 
-	// Re-read the channel row under the state lock to verify publicness.
-	// This is the authorization decision: username IS NOT NULL means the
-	// channel is currently public and admits by username.
-	channel, err := qtx.ChannelByID(ctx, channelID)
-	switch {
-	case errors.Is(err, pgx.ErrNoRows):
-		return Channel{}, ChannelMember{}, ErrNotMember
-	case err != nil:
-		return Channel{}, ChannelMember{}, fmt.Errorf("channel by id: %w", err)
-	}
+	// The locked channel row also decides publicness: username IS NOT NULL
+	// means the channel is currently public and admits by username.
 	if channel.Username == nil || *channel.Username == "" {
 		// Channel is private (no username) — same error as everything else.
 		return Channel{}, ChannelMember{}, ErrNotMember
@@ -1818,6 +1835,7 @@ func (s *Store) JoinChannelByUsername(ctx context.Context, channelID, userID int
 
 	n, err := qtx.InsertChannelParticipantIfAbsent(ctx, db.InsertChannelParticipantIfAbsentParams{
 		ChannelID: channelID, UserID: userID, Role: 0, JoinPts: state.Pts,
+		AvailableMinID: channelParticipantHistoryFloor(channel.PreHistoryHidden, state.NextLocalID),
 	})
 	if err != nil {
 		return Channel{}, ChannelMember{}, fmt.Errorf("insert participant: %w", err)
@@ -1833,6 +1851,7 @@ func (s *Store) JoinChannelByUsername(ctx context.Context, channelID, userID int
 	} else {
 		member = db.ChannelParticipant{
 			ChannelID: channelID, UserID: userID, Role: 0, JoinPts: state.Pts,
+			AvailableMinID: channelParticipantHistoryFloor(channel.PreHistoryHidden, state.NextLocalID),
 		}
 		if err := insertInitialChannelReadState(ctx, qtx, channelID, userID, state.NextLocalID-1); err != nil {
 			return Channel{}, ChannelMember{}, fmt.Errorf("insert initial channel read state: %w", err)

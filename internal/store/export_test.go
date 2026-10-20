@@ -432,6 +432,29 @@ func SetChannelPts(ctx context.Context, s *Store, channelID, pts int64) error {
 	return err
 }
 
+// SetChannelPreHistoryHidden sets the admission flag directly so the join
+// floor can be tested before the toggle RPC exists.
+func SetChannelPreHistoryHidden(ctx context.Context, s *Store, channelID int64, hidden bool) error {
+	tag, err := s.pool.Exec(ctx,
+		`UPDATE channels SET pre_history_hidden = $2 WHERE id = $1`, channelID, hidden)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() != 1 {
+		return fmt.Errorf("set channel pre-history flag: updated %d rows, want 1", tag.RowsAffected())
+	}
+	return nil
+}
+
+// ChannelAvailableMinID reads one participant's floor for admission tests.
+func ChannelAvailableMinID(ctx context.Context, s *Store, channelID, userID int64) (int64, error) {
+	var floor int64
+	err := s.pool.QueryRow(ctx,
+		`SELECT available_min_id FROM channel_participants WHERE channel_id = $1 AND user_id = $2`,
+		channelID, userID).Scan(&floor)
+	return floor, err
+}
+
 // SetChannelBan writes a participant's banned_until directly. Ban mutation is a
 // later ticket's RPC; this exists so the read and re-join paths can be tested
 // against a banned row today.
