@@ -4,7 +4,7 @@ import {appendFileSync, chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync
 import {createInterface} from 'node:readline';
 import {join, resolve} from 'node:path';
 import {tmpdir} from 'node:os';
-import {spawnTracked, terminate} from './process_tree.mjs';
+import {FIXTURE_CLEANUP_TIMEOUT_MS, spawnTracked, terminate, terminateFixture} from './process_tree.mjs';
 
 const SCENARIOS = 'sign-in,message,group,channel,poll';
 const REVISION_PATTERN = /^[0-9a-f]{40}$/;
@@ -189,7 +189,7 @@ async function stopFixture({allowNonzeroExit = false} = {}) {
   if(!fixtureProcess) return;
   if(fixtureProcess.exitCode !== null || fixtureProcess.signalCode !== null) {
     const previous = await fixtureExit;
-    const processTreeStopped = await terminate(fixtureProcess, 'SIGTERM');
+    const processTreeStopped = await terminateFixture(fixtureProcess, 'SIGTERM');
     if(!processTreeStopped) throw new FlowError('fixture-cleanup', 'fixture process group did not stop');
     if((previous.code !== 0 && !allowNonzeroExit) || !fixtureCleanupVerified) {
       throw new FlowError('fixture-cleanup', `fixture exited with status ${previous.code ?? previous.signal}`);
@@ -201,19 +201,19 @@ async function stopFixture({allowNonzeroExit = false} = {}) {
     try {
       writeFixtureCommand('stop');
     } catch {
-      void terminate(fixtureProcess, 'SIGTERM');
+      void terminateFixture(fixtureProcess, 'SIGTERM');
     }
   } else {
-    void terminate(fixtureProcess, 'SIGTERM');
+    void terminateFixture(fixtureProcess, 'SIGTERM');
   }
 
   let timer;
   const outcome = await Promise.race([
     fixtureExit.then(async (result) => ({
       ...result,
-      processTreeStopped: await terminate(fixtureProcess, 'SIGTERM')
+      processTreeStopped: await terminateFixture(fixtureProcess, 'SIGTERM')
     })),
-    new Promise((resolvePromise) => { timer = setTimeout(() => resolvePromise(null), 90_000); })
+    new Promise((resolvePromise) => { timer = setTimeout(() => resolvePromise(null), FIXTURE_CLEANUP_TIMEOUT_MS); })
   ]).finally(() => clearTimeout(timer));
   if(!outcome) {
     await terminate(fixtureProcess, 'SIGKILL');

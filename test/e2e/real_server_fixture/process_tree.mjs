@@ -3,6 +3,7 @@ import {spawn} from 'node:child_process';
 const children = new WeakMap();
 const POLL_INTERVAL_MS = 25;
 const DEFAULT_GRACE_MS = 5_000;
+export const FIXTURE_CLEANUP_TIMEOUT_MS = 90_000;
 
 export function spawnTracked(command, args, options) {
   const detached = process.platform !== 'win32';
@@ -56,10 +57,13 @@ export function terminate(child, signal, {graceMs = DEFAULT_GRACE_MS} = {}) {
   if(!child) return Promise.resolve(true);
   const target = children.get(child);
   if(target?.detached && process.platform !== 'win32' && Number.isInteger(target.pid)) {
-    if(!groupExists(target.pid)) return Promise.resolve(true);
-    signalGroup(target.pid, signal);
-    if(signal === 'SIGKILL') return waitForGroupExit(target.pid, graceMs);
+    if(signal === 'SIGKILL') {
+      if(groupExists(target.pid)) signalGroup(target.pid, signal);
+      return waitForGroupExit(target.pid, graceMs);
+    }
     if(!target.termination) {
+      if(!groupExists(target.pid)) return Promise.resolve(true);
+      signalGroup(target.pid, signal);
       target.termination = (async () => {
         if(await waitForGroupExit(target.pid, graceMs)) return true;
         signalGroup(target.pid, 'SIGKILL');
@@ -69,6 +73,7 @@ export function terminate(child, signal, {graceMs = DEFAULT_GRACE_MS} = {}) {
     return target.termination;
   }
 
+  if(signal !== 'SIGKILL' && target?.termination) return target.termination;
   if(!Number.isInteger(child.pid) || !childRunning(child)) return Promise.resolve(true);
   try {
     child.kill(signal);
@@ -89,4 +94,8 @@ export function terminate(child, signal, {graceMs = DEFAULT_GRACE_MS} = {}) {
     })();
   }
   return target.termination;
+}
+
+export function terminateFixture(child, signal) {
+  return terminate(child, signal, {graceMs: FIXTURE_CLEANUP_TIMEOUT_MS});
 }
