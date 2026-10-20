@@ -55,6 +55,7 @@ func (h *handlers) setUserHistoryTTLAfterReply(
 		return nil, nil, nil, h.mapHistoryTTLError(r, "user", peerID, err)
 	}
 	if !changed {
+		clearSenderRPC(attempt)
 		return &tg.Updates{Date: int(h.now().Unix())}, nil, nil, nil
 	}
 	setSenderRPCPts(attempt, senderPts)
@@ -107,6 +108,7 @@ func (h *handlers) setChatHistoryTTLAfterReply(
 		return nil, nil, nil, h.mapHistoryTTLError(r, "chat", chatID, err)
 	}
 	if !changed {
+		clearSenderRPC(attempt)
 		return &tg.Updates{Date: int(h.now().Unix())}, nil, nil, nil
 	}
 	senderPts := perOwner[r.UserID]
