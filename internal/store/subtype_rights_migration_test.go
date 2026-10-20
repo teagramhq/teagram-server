@@ -157,7 +157,7 @@ func TestFileSubtypeRightsMigrationPreservesLegacyAndStoresNewStates(t *testing.
 		t.Fatal("subtype rights check remains unvalidated")
 	}
 	func() {
-		defer lockMigrationReplays(t, ctx, conn)()
+		defer lockMigrationReplays(t, ctx)()
 		for _, entry := range entries {
 			if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".sql") || entry.Name() <= validationMigration {
 				continue

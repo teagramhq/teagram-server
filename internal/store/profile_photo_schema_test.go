@@ -58,7 +58,7 @@ func TestProfilePhotoDatabaseBeforeSerializesMigrationReplayWithTemplateBuild(t 
 					JOIN pg_stat_activity AS activity USING (pid)
 					WHERE locks.locktype = 'advisory' AND locks.classid = 0
 					  AND locks.objid = $1::oid AND locks.objsubid = 1 AND NOT locks.granted
-					  AND activity.application_name = 'store-profile-photo-replay'
+					  AND activity.application_name = 'pgtest-migration-replay'
 				)
 			`, migrationLockKey).Scan(&waiting); err != nil {
 				waitObserved <- false
@@ -743,12 +743,7 @@ func profilePhotoConn(t *testing.T, ctx context.Context) *pgx.Conn {
 // a second connection can write to it while a migration applies.
 func profilePhotoDatabaseBefore(t *testing.T, ctx context.Context, boundary string) (*pgx.Conn, string) {
 	t.Helper()
-	adminConfig, err := pgx.ParseConfig(pgtest.AdminDSN())
-	if err != nil {
-		t.Fatalf("parse admin DSN: %v", err)
-	}
-	adminConfig.RuntimeParams["application_name"] = "store-profile-photo-replay"
-	admin, err := pgx.ConnectConfig(ctx, adminConfig)
+	admin, err := pgx.Connect(ctx, pgtest.AdminDSN())
 	if err != nil {
 		t.Fatalf("connect admin: %v", err)
 	}
@@ -784,7 +779,7 @@ func profilePhotoDatabaseBefore(t *testing.T, ctx context.Context, boundary stri
 		}
 	})
 
-	defer lockMigrationReplays(t, ctx, admin)()
+	defer lockMigrationReplays(t, ctx)()
 	entries, err := os.ReadDir(filepath.Join("..", "..", "migrations"))
 	if err != nil {
 		t.Fatalf("read migrations: %v", err)

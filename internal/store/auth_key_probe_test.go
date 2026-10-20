@@ -299,16 +299,7 @@ func TestBrowserAcceptanceProbeMigrationWorksWithExistingRole(t *testing.T) {
 		t.Fatalf("admin connect: %v", err)
 	}
 	defer func() { _ = admin.Close(ctx) }() //nolint:errcheck // best-effort close
-	lockConn, err := pgx.Connect(ctx, pgtest.AdminDSN())
-	if err != nil {
-		t.Fatalf("migration lock connect: %v", err)
-	}
-	t.Cleanup(func() {
-		if err := lockConn.Close(context.Background()); err != nil {
-			t.Errorf("close migration lock connection: %v", err)
-		}
-	})
-	t.Cleanup(lockMigrationReplays(t, ctx, lockConn))
+	t.Cleanup(lockMigrationReplays(t, ctx))
 	parentRole := "browser_probe_parent_" + pgtest.RandomHex()
 	memberRole := "browser_probe_member_" + pgtest.RandomHex()
 	defaultGrantorRole := "browser_probe_grantor_" + pgtest.RandomHex()
