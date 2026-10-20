@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"slices"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -2759,6 +2760,16 @@ func testSmokeDeleteBasicGroup(t *testing.T) {
 	type deleteEnvelope struct {
 		ownerID int64
 		ids     []int
+		pts     int
+		count   int
+	}
+	ptsBeforeDelete := make(map[int64]int, 3)
+	for _, member := range []*smokeClient{a, b, c} {
+		state, err := f.store.StateWithoutUnread(f.ctx, member.id)
+		if err != nil {
+			t.Fatalf("read member %d pts before chat deletion: %v", member.id, err)
+		}
+		ptsBeforeDelete[member.id] = state.Pts
 	}
 	deleteUpdates := make(chan deleteEnvelope, 64)
 	drainCtx, stopDraining := context.WithCancel(f.ctx)
@@ -2767,8 +2778,8 @@ func testSmokeDeleteBasicGroup(t *testing.T) {
 		drainers.Go(func() {
 			for {
 				select {
-				case ids := <-member.seen.delMsg:
-					deleteUpdates <- deleteEnvelope{ownerID: member.id, ids: ids}
+				case update := <-member.seen.delMsgPts:
+					deleteUpdates <- deleteEnvelope{ownerID: member.id, ids: update.Messages, pts: update.Pts, count: update.PtsCount}
 				case <-drainCtx.Done():
 					return
 				}
@@ -2802,6 +2813,7 @@ func testSmokeDeleteBasicGroup(t *testing.T) {
 	}
 
 	pending := make(map[int64]map[int]bool, len(messageIDs))
+	receivedDeleteUpdates := make(map[int64][]deleteEnvelope, len(messageIDs))
 	for ownerID, ids := range messageIDs {
 		pending[ownerID] = make(map[int]bool, len(ids))
 		for id := range ids {
@@ -2815,11 +2827,37 @@ func testSmokeDeleteBasicGroup(t *testing.T) {
 		case <-f.ctx.Done():
 			t.Fatalf("timed out with deleteChat message copies still pending: %v", pending)
 		}
+		receivedDeleteUpdates[event.ownerID] = append(receivedDeleteUpdates[event.ownerID], event)
 		for _, id := range event.ids {
 			delete(pending[event.ownerID], id)
 		}
 		if len(pending[event.ownerID]) == 0 {
 			delete(pending, event.ownerID)
+		}
+	}
+
+	ptsAfterDelete := make(map[int64]int, 3)
+	for _, member := range []*smokeClient{a, b, c} {
+		state, err := f.store.StateWithoutUnread(f.ctx, member.id)
+		if err != nil {
+			t.Fatalf("read member %d pts after chat deletion: %v", member.id, err)
+		}
+		ptsAfterDelete[member.id] = state.Pts
+		updates := receivedDeleteUpdates[member.id]
+		sort.Slice(updates, func(i, j int) bool { return updates[i].pts < updates[j].pts })
+		wantPts := ptsBeforeDelete[member.id]
+		for _, update := range updates {
+			if update.count <= 0 {
+				t.Errorf("member %d delete update has pts_count %d: %+v", member.id, update.count, update)
+				continue
+			}
+			wantPts += update.count
+			if update.pts != wantPts {
+				t.Errorf("member %d deletion pts jumped to %d, want contiguous pts %d", member.id, update.pts, wantPts)
+			}
+		}
+		if state.Pts != wantPts {
+			t.Errorf("member %d state pts after deletion = %d, want last represented delete pts %d", member.id, state.Pts, wantPts)
 		}
 	}
 
@@ -2881,6 +2919,33 @@ func testSmokeDeleteBasicGroup(t *testing.T) {
 		if got := member.requests.countMethod("messages.getDialogs"); got != getDialogsBeforeRemoval[member.id]+1 {
 			t.Errorf("member %d getDialogs RPC count = %d, want exactly one RPC after receiving removal", member.id, got)
 		}
+	}
+
+	differenceCallsBeforeNextMessage := requestsB.countMethod("updates.getDifference")
+	if err := a.call(f.ctx, func(ctx context.Context, api *tg.Client) error {
+		_, err := api.MessagesSendMessage(ctx, &tg.MessagesSendMessageRequest{
+			Peer: peerUser(a.id, b.id), Message: "post-delete pts continuity", RandomID: 1047498,
+		})
+		return err
+	}); err != nil {
+		t.Fatalf("send direct message after chat deletion: %v", err)
+	}
+	var direct messagePtsUpdate
+	for direct.Message == nil {
+		select {
+		case update := <-b.seen.newMsgPts:
+			if update.Message.Message == "post-delete pts continuity" {
+				direct = update
+			}
+		case <-f.ctx.Done():
+			t.Fatalf("timed out waiting for post-delete direct message update: %v", f.ctx.Err())
+		}
+	}
+	if direct.PtsCount != 1 || direct.Pts != ptsAfterDelete[b.id]+1 {
+		t.Errorf("post-delete direct pts = %d/%d, want contiguous %d/1", direct.Pts, direct.PtsCount, ptsAfterDelete[b.id]+1)
+	}
+	if got := requestsB.countMethod("updates.getDifference"); got != differenceCallsBeforeNextMessage {
+		t.Errorf("member %d invoked updates.getDifference after contiguous post-delete message: before=%d after=%d", b.id, differenceCallsBeforeNextMessage, got)
 	}
 
 	assertChannelRPCError(t, f.ctx, b.cmds, "PEER_ID_INVALID", func(ctx context.Context, api *tg.Client) error {

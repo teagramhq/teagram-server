@@ -237,7 +237,7 @@ func (h *handlers) handleDeleteChat(r *mtproto.Request) (bin.Encoder, error) {
 		return nil, errAuthKeyUnreg
 	}
 
-	perOwner, err := h.store.DeleteChat(r.Ctx, req.ChatID, r.UserID)
+	deletion, err := h.store.DeleteChat(r.Ctx, req.ChatID, r.UserID)
 	if errors.Is(err, store.ErrChatAdminRequired) {
 		return nil, errChatAdminRequired
 	}
@@ -245,10 +245,23 @@ func (h *handlers) handleDeleteChat(r *mtproto.Request) (bin.Encoder, error) {
 		h.log.Error("delete chat", "chat_id", req.ChatID, "user_id", r.UserID, "err", err)
 		return nil, errInternal
 	}
-	if len(perOwner) > 0 {
-		h.notifyOwners(r.Ctx, perOwner, 0)
+	if len(deletion.OwnerPts) > 0 {
+		h.notifyOwners(r.Ctx, deletion.OwnerPts, 0)
+	}
+	for _, event := range deletion.RemovalEvents {
+		h.notifyChatRemoval(r.Ctx, event.OwnerID, event.ChatID)
 	}
 	return &tg.BoolTrue{}, nil
+}
+
+// notifyChatRemoval pushes the PTS-neutral removal event to every replica with
+// a live session for its owner after the deletion transaction commits.
+func (h *handlers) notifyChatRemoval(ctx context.Context, ownerID, chatID int64) {
+	notifyCtx, cancel := senderNotifyContext(ctx)
+	defer cancel()
+	if err := h.store.Notify(notifyCtx, store.ChannelUpdates, store.ChatRemovalPayload(ownerID, chatID)); err != nil {
+		h.log.Error("notify chat removal", "owner_id", ownerID, "chat_id", chatID, "err", err)
+	}
 }
 
 // handleEditChatTitle serves messages.editChatTitle: one store call renames the

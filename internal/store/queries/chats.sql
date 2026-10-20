@@ -111,6 +111,41 @@ SELECT * FROM chat_admin_events
 WHERE id = ANY(sqlc.arg(event_ids)::bigint[])
 ORDER BY id;
 
+-- InsertChatRemovalEvent keeps the event independently of its pull marker so
+-- a delayed pub/sub notification can still reach every live session after one
+-- connection consumes the marker through getDifference.
+-- name: InsertChatRemovalEvent :one
+INSERT INTO chat_removal_events (owner_id, chat_id, version)
+VALUES ($1, $2, $3)
+RETURNING owner_id, chat_id, version;
+
+-- name: InsertChatRemovalStateMarker :exec
+INSERT INTO chat_removal_state_markers (owner_id, chat_id) VALUES ($1, $2);
+
+-- ChatRemovalEventForOwnerChat reloads the immutable event named by a live
+-- notification. Owner and chat form its unique identity because a chat is
+-- deleted at most once and each current member receives one removal.
+-- name: ChatRemovalEventForOwnerChat :one
+SELECT * FROM chat_removal_events
+WHERE owner_id = $1 AND chat_id = $2;
+
+-- ChatRemovalSnapshotsForOwner returns pending PTS-neutral chat removals.
+-- The chat id is consumed only after the difference response succeeds.
+-- name: ChatRemovalSnapshotsForOwner :many
+SELECT event.owner_id, event.chat_id, event.version
+FROM chat_removal_state_markers AS marker
+JOIN chat_removal_events AS event
+  ON event.owner_id = marker.owner_id
+ AND event.chat_id = marker.chat_id
+WHERE event.owner_id = sqlc.arg(owner_id)
+ORDER BY event.chat_id
+LIMIT sqlc.arg(lim)::int;
+
+-- name: DeleteChatRemovalStateMarkersForOwnerChats :exec
+DELETE FROM chat_removal_state_markers
+WHERE owner_id = sqlc.arg(owner_id)
+  AND chat_id = ANY(sqlc.arg(chat_ids)::bigint[]);
+
 -- name: SetChatTitle :one
 UPDATE chats SET title = $2, version = version + 1 WHERE id = $1 RETURNING *;
 

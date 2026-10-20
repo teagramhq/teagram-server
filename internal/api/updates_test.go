@@ -193,54 +193,70 @@ func TestDeleteChatPushesRemovalForEveryCurrentMember(t *testing.T) {
 			t.Fatalf("state before delete for owner %d: %v", ownerID, err)
 		}
 	}
-	perOwner, err := s.DeleteChat(ctx, chat.ID, a.ID)
+	deleted, err := s.DeleteChat(ctx, chat.ID, a.ID)
 	if err != nil {
 		t.Fatalf("delete chat: %v", err)
 	}
+	if len(deleted.RemovalEvents) != 2 {
+		t.Fatalf("deleteChat returned %d durable removal events, want one per current member", len(deleted.RemovalEvents))
+	}
 	for _, ownerID := range []int64{a.ID, b.ID} {
-		if _, ok := perOwner[ownerID]; !ok {
-			t.Errorf("deleteChat result omits current owner %d: %v", ownerID, perOwner)
-		}
-		updates, _, chats, err := api.BuildUpdatesChatsForTest(s, ownerID, before[ownerID].Pts)
+		differenceEnc, err := api.GetDifferenceForTest(s, ownerID, &tg.UpdatesGetDifferenceRequest{Pts: before[ownerID].Pts})
 		if err != nil {
-			t.Fatalf("build updates for owner %d: %v", ownerID, err)
+			t.Fatalf("get difference for owner %d: %v", ownerID, err)
+		}
+		difference, ok := differenceEnc.(*tg.UpdatesDifference)
+		if !ok {
+			t.Fatalf("owner %d difference = %T, want *tg.UpdatesDifference containing durable removal", ownerID, differenceEnc)
 		}
 		state, err := s.StateWithoutUnread(ctx, ownerID)
 		if err != nil {
 			t.Fatalf("state after delete for owner %d: %v", ownerID, err)
 		}
-		if state.Pts <= before[ownerID].Pts || perOwner[ownerID] != state.Pts {
-			t.Errorf("owner %d pts = state %d, result %d; want advancement from %d", ownerID, state.Pts, perOwner[ownerID], before[ownerID].Pts)
+		if difference.State.Pts != state.Pts {
+			t.Errorf("owner %d difference pts = %d, stored state = %d", ownerID, difference.State.Pts, state.Pts)
 		}
 		var removal *tg.UpdateChatParticipantDelete
 		var deletedCopy bool
-		for _, update := range updates {
+		deleteCount := 0
+		for _, update := range difference.OtherUpdates {
 			switch got := update.(type) {
 			case *tg.UpdateChatParticipantDelete:
 				removal = got
 			case *tg.UpdateDeleteMessages:
 				deletedCopy = true
+				deleteCount += got.PtsCount
 			}
 		}
 		if removal == nil {
-			t.Errorf("owner %d updates = %T, want chat participant removal even with active copies", ownerID, updates)
+			t.Errorf("owner %d difference updates = %+v, want durable chat participant removal", ownerID, difference.OtherUpdates)
 		} else {
 			if removal.ChatID != chat.ID || removal.UserID != ownerID || removal.Version != chat.Version+1 {
 				t.Errorf("owner %d removal update = %+v, want chat/user/version %d/%d/%d", ownerID, removal, chat.ID, ownerID, chat.Version+1)
 			}
 			assertEncodes(t, removal)
 		}
+		if state.Pts != before[ownerID].Pts+deleteCount {
+			t.Errorf("owner %d pts advanced from %d to %d for %d represented message deletions", ownerID, before[ownerID].Pts, state.Pts, deleteCount)
+		}
+		if deletionPts, ok := deleted.OwnerPts[ownerID]; ok {
+			if deletionPts != state.Pts || deleteCount == 0 {
+				t.Errorf("owner %d delete pts result = %d, stored pts = %d, deletion count = %d", ownerID, deletionPts, state.Pts, deleteCount)
+			}
+		} else if deleteCount != 0 {
+			t.Errorf("owner %d has %d represented delete updates but is absent from DeleteChat owner pts", ownerID, deleteCount)
+		}
 		if ownerID == a.ID && !deletedCopy {
-			t.Errorf("creator updates = %T, want message-copy deletion in addition to chat removal", updates)
+			t.Errorf("creator difference updates = %+v, want message-copy deletion in addition to chat removal", difference.OtherUpdates)
 		}
 		forbidden := false
-		for _, item := range chats {
+		for _, item := range difference.Chats {
 			if got, ok := item.(*tg.ChatForbidden); ok && got.ID == chat.ID {
 				forbidden = true
 			}
 		}
 		if !forbidden {
-			t.Errorf("owner %d chats = %+v, want deleted chat %d represented as forbidden", ownerID, chats, chat.ID)
+			t.Errorf("owner %d chats = %+v, want deleted chat %d represented as forbidden", ownerID, difference.Chats, chat.ID)
 		}
 	}
 }

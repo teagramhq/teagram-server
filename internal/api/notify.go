@@ -255,6 +255,10 @@ func (u *Updater) Deliver(ctx context.Context, userID int64) {
 		u.DeliverChatAdmin(ctx, chatID, eventID)
 		return
 	}
+	if chatID, ok := store.ChatRemovalUpdateFromContext(ctx); ok {
+		u.DeliverChatRemoval(ctx, userID, chatID)
+		return
+	}
 	if chatID, ok := store.ChatAboutUpdateFromContext(ctx); ok {
 		u.DeliverChatAbout(ctx, userID, chatID)
 		return
@@ -534,6 +538,51 @@ func (u *Updater) DeliverChatAdmin(ctx context.Context, chatID, eventID int64) {
 				},
 			})
 		}
+	}
+	u.pushTransientFanout(ctx, pushes)
+}
+
+// DeliverChatRemoval pushes one persisted PTS-neutral chat removal to every
+// live session for its owner. Its separate difference marker is consumed only
+// when getDifference succeeds.
+func (u *Updater) DeliverChatRemoval(ctx context.Context, ownerID, chatID int64) {
+	if ownerID <= 0 || chatID <= 0 || u.registry == nil {
+		return
+	}
+	event, found, err := u.h.store.ChatRemovalEventForOwnerChat(ctx, ownerID, chatID)
+	if err != nil {
+		u.log.Error("deliver chat removal event", "chat_id", chatID, "owner_id", ownerID, "err", err)
+		return
+	}
+	if !found {
+		u.log.Warn("deliver missing chat removal event", "chat_id", chatID, "owner_id", ownerID)
+		return
+	}
+	chats, err := u.h.loadChats(ctx, map[int64]bool{event.ChatID: true}, ownerID, nil)
+	if err != nil {
+		u.log.Error("deliver chat removal chat", "chat_id", event.ChatID, "owner_id", ownerID, "err", err)
+		return
+	}
+	update := &tg.Updates{
+		Updates: []tg.UpdateClass{&tg.UpdateChatParticipantDelete{
+			ChatID:  event.ChatID,
+			UserID:  ownerID,
+			Version: event.Version,
+		}},
+		Chats: chats,
+		Date:  int(time.Now().Unix()),
+		Seq:   0,
+	}
+	var pushes []transientPush
+	for _, conn := range u.registry.Conns(ownerID) {
+		pushes = append(pushes, transientPush{
+			owner: ownerID,
+			conn:  conn,
+			enc:   update,
+			onError: func(err error) {
+				u.log.Info("deliver chat removal push", "chat_id", event.ChatID, "owner_id", ownerID, "err", err)
+			},
+		})
 	}
 	u.pushTransientFanout(ctx, pushes)
 }

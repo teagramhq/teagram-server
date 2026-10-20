@@ -574,6 +574,64 @@ func (q *Queries) ChatReadParticipantsForMessage(ctx context.Context, arg ChatRe
 	return items, nil
 }
 
+const chatRemovalEventForOwnerChat = `-- name: ChatRemovalEventForOwnerChat :one
+SELECT owner_id, chat_id, version FROM chat_removal_events
+WHERE owner_id = $1 AND chat_id = $2
+`
+
+type ChatRemovalEventForOwnerChatParams struct {
+	OwnerID int64
+	ChatID  int64
+}
+
+// ChatRemovalEventForOwnerChat reloads the immutable event named by a live
+// notification. Owner and chat form its unique identity because a chat is
+// deleted at most once and each current member receives one removal.
+func (q *Queries) ChatRemovalEventForOwnerChat(ctx context.Context, arg ChatRemovalEventForOwnerChatParams) (ChatRemovalEvent, error) {
+	row := q.db.QueryRow(ctx, chatRemovalEventForOwnerChat, arg.OwnerID, arg.ChatID)
+	var i ChatRemovalEvent
+	err := row.Scan(&i.OwnerID, &i.ChatID, &i.Version)
+	return i, err
+}
+
+const chatRemovalSnapshotsForOwner = `-- name: ChatRemovalSnapshotsForOwner :many
+SELECT event.owner_id, event.chat_id, event.version
+FROM chat_removal_state_markers AS marker
+JOIN chat_removal_events AS event
+  ON event.owner_id = marker.owner_id
+ AND event.chat_id = marker.chat_id
+WHERE event.owner_id = $1
+ORDER BY event.chat_id
+LIMIT $2::int
+`
+
+type ChatRemovalSnapshotsForOwnerParams struct {
+	OwnerID int64
+	Lim     int32
+}
+
+// ChatRemovalSnapshotsForOwner returns pending PTS-neutral chat removals.
+// The chat id is consumed only after the difference response succeeds.
+func (q *Queries) ChatRemovalSnapshotsForOwner(ctx context.Context, arg ChatRemovalSnapshotsForOwnerParams) ([]ChatRemovalEvent, error) {
+	rows, err := q.db.Query(ctx, chatRemovalSnapshotsForOwner, arg.OwnerID, arg.Lim)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ChatRemovalEvent
+	for rows.Next() {
+		var i ChatRemovalEvent
+		if err := rows.Scan(&i.OwnerID, &i.ChatID, &i.Version); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const chatsByIDsForMember = `-- name: ChatsByIDsForMember :many
 SELECT c.id, c.title, c.creator_id, c.version, c.date, c.pinned_message_id, c.default_banned_rights FROM chats c
 JOIN chat_participants p ON p.chat_id = c.id
@@ -702,6 +760,22 @@ func (q *Queries) DeleteChatParticipant(ctx context.Context, arg DeleteChatParti
 	return result.RowsAffected(), nil
 }
 
+const deleteChatRemovalStateMarkersForOwnerChats = `-- name: DeleteChatRemovalStateMarkersForOwnerChats :exec
+DELETE FROM chat_removal_state_markers
+WHERE owner_id = $1
+  AND chat_id = ANY($2::bigint[])
+`
+
+type DeleteChatRemovalStateMarkersForOwnerChatsParams struct {
+	OwnerID int64
+	ChatIds []int64
+}
+
+func (q *Queries) DeleteChatRemovalStateMarkersForOwnerChats(ctx context.Context, arg DeleteChatRemovalStateMarkersForOwnerChatsParams) error {
+	_, err := q.db.Exec(ctx, deleteChatRemovalStateMarkersForOwnerChats, arg.OwnerID, arg.ChatIds)
+	return err
+}
+
 const getChatPinnedMessage = `-- name: GetChatPinnedMessage :one
 SELECT pinned_message_id FROM chats WHERE id = $1
 `
@@ -804,6 +878,42 @@ func (q *Queries) InsertChatParticipantIfAbsent(ctx context.Context, arg InsertC
 		return 0, err
 	}
 	return result.RowsAffected(), nil
+}
+
+const insertChatRemovalEvent = `-- name: InsertChatRemovalEvent :one
+INSERT INTO chat_removal_events (owner_id, chat_id, version)
+VALUES ($1, $2, $3)
+RETURNING owner_id, chat_id, version
+`
+
+type InsertChatRemovalEventParams struct {
+	OwnerID int64
+	ChatID  int64
+	Version int32
+}
+
+// InsertChatRemovalEvent keeps the event independently of its pull marker so
+// a delayed pub/sub notification can still reach every live session after one
+// connection consumes the marker through getDifference.
+func (q *Queries) InsertChatRemovalEvent(ctx context.Context, arg InsertChatRemovalEventParams) (ChatRemovalEvent, error) {
+	row := q.db.QueryRow(ctx, insertChatRemovalEvent, arg.OwnerID, arg.ChatID, arg.Version)
+	var i ChatRemovalEvent
+	err := row.Scan(&i.OwnerID, &i.ChatID, &i.Version)
+	return i, err
+}
+
+const insertChatRemovalStateMarker = `-- name: InsertChatRemovalStateMarker :exec
+INSERT INTO chat_removal_state_markers (owner_id, chat_id) VALUES ($1, $2)
+`
+
+type InsertChatRemovalStateMarkerParams struct {
+	OwnerID int64
+	ChatID  int64
+}
+
+func (q *Queries) InsertChatRemovalStateMarker(ctx context.Context, arg InsertChatRemovalStateMarkerParams) error {
+	_, err := q.db.Exec(ctx, insertChatRemovalStateMarker, arg.OwnerID, arg.ChatID)
+	return err
 }
 
 const isChatMember = `-- name: IsChatMember :one

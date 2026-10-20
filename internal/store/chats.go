@@ -49,6 +49,21 @@ type Participant struct {
 	Admin     bool
 }
 
+// ChatRemovalEvent is the durable, PTS-neutral dialog removal sent to one
+// member when a basic group is deleted.
+type ChatRemovalEvent struct {
+	OwnerID int64
+	ChatID  int64
+	Version int
+}
+
+// ChatDeletion separates normal PTS-bearing message deletions from the
+// PTS-neutral participant removal markers.
+type ChatDeletion struct {
+	OwnerPts      map[int64]int
+	RemovalEvents []ChatRemovalEvent
+}
+
 // ChatPinSnapshot contains one committed pin state and each member's copy as
 // observed by the same database statement.
 type ChatPinSnapshot struct {
@@ -566,14 +581,14 @@ func (s *Store) RemoveChatUser(ctx context.Context, chatID, target, callerID int
 // Empty membership is the tombstone state: creators cannot leave, and the chats
 // row remains so its id is never reused. Copies owned by former members are
 // intentionally left frozen, matching group message revoke behavior.
-func (s *Store) DeleteChat(ctx context.Context, chatID, callerID int64) (map[int64]int, error) {
+func (s *Store) DeleteChat(ctx context.Context, chatID, callerID int64) (ChatDeletion, error) {
 	if chatID <= 0 || callerID <= 0 {
-		return nil, ErrChatAdminRequired
+		return ChatDeletion{}, ErrChatAdminRequired
 	}
 
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("begin delete chat: %w", err)
+		return ChatDeletion{}, fmt.Errorf("begin delete chat: %w", err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }() //nolint:errcheck // no-op after commit
 	qtx := s.q.WithTx(tx)
@@ -581,24 +596,24 @@ func (s *Store) DeleteChat(ctx context.Context, chatID, callerID int64) (map[int
 	chat, err := qtx.ChatByIDForUpdate(ctx, chatID)
 	switch {
 	case errors.Is(err, pgx.ErrNoRows):
-		return nil, ErrChatAdminRequired
+		return ChatDeletion{}, ErrChatAdminRequired
 	case err != nil:
-		return nil, fmt.Errorf("lock chat for deletion: %w", err)
+		return ChatDeletion{}, fmt.Errorf("lock chat for deletion: %w", err)
 	case chat.CreatorID != callerID:
-		return nil, ErrChatAdminRequired
+		return ChatDeletion{}, ErrChatAdminRequired
 	}
 
 	parts, err := qtx.ChatParticipants(ctx, chatID)
 	if err != nil {
-		return nil, fmt.Errorf("list chat participants for deletion: %w", err)
+		return ChatDeletion{}, fmt.Errorf("list chat participants for deletion: %w", err)
 	}
 	if len(parts) == 0 {
 		// The creator is never removable, so an empty chat is a completed delete.
 		// Keep repeated calls successful and silent after the tombstone commit.
 		if err := tx.Commit(ctx); err != nil {
-			return nil, fmt.Errorf("commit repeated chat deletion: %w", err)
+			return ChatDeletion{}, fmt.Errorf("commit repeated chat deletion: %w", err)
 		}
-		return map[int64]int{}, nil
+		return ChatDeletion{OwnerPts: map[int64]int{}}, nil
 	}
 
 	ownerIDs := make([]int64, len(parts))
@@ -606,71 +621,77 @@ func (s *Store) DeleteChat(ctx context.Context, chatID, callerID int64) (map[int
 		ownerIDs[i] = part.UserID
 	}
 	if err := lockOwners(ctx, tx, ownerIDs...); err != nil {
-		return nil, err
+		return ChatDeletion{}, err
 	}
 
 	copies, err := qtx.ChatMessageCopiesForDeletion(ctx, db.ChatMessageCopiesForDeletionParams{
 		ChatID: chatID, OwnerIds: ownerIDs,
 	})
 	if err != nil {
-		return nil, fmt.Errorf("load current members' message copies: %w", err)
+		return ChatDeletion{}, fmt.Errorf("load current members' message copies: %w", err)
 	}
 	refs := make([]messageCopyRef, len(copies))
 	for i, copy := range copies {
 		refs[i] = messageCopyRef{ownerID: copy.OwnerID, localID: copy.LocalID}
 	}
 	if err := lockPollsForDeletedMessageCopies(ctx, qtx, refs); err != nil {
-		return nil, err
+		return ChatDeletion{}, err
 	}
 
 	for _, part := range parts {
 		removed, err := removeParticipant(ctx, tx, qtx, chatID, part.UserID)
 		if err != nil {
-			return nil, fmt.Errorf("remove chat participant %d: %w", part.UserID, err)
+			return ChatDeletion{}, fmt.Errorf("remove chat participant %d: %w", part.UserID, err)
 		}
 		if !removed {
-			return nil, fmt.Errorf("remove chat participant %d: row disappeared under chat lock", part.UserID)
+			return ChatDeletion{}, fmt.Errorf("remove chat participant %d: row disappeared under chat lock", part.UserID)
 		}
 	}
-	if _, err := qtx.BumpChatVersion(ctx, chatID); err != nil {
-		return nil, fmt.Errorf("bump chat version after deletion: %w", err)
+	chat, err = qtx.BumpChatVersion(ctx, chatID)
+	if err != nil {
+		return ChatDeletion{}, fmt.Errorf("bump chat version after deletion: %w", err)
 	}
 
-	perOwner := make(map[int64]int, len(ownerIDs))
+	deletion := ChatDeletion{OwnerPts: make(map[int64]int, len(ownerIDs)), RemovalEvents: make([]ChatRemovalEvent, 0, len(ownerIDs))}
 	for _, copy := range copies {
 		pts, changed, err := markMessageCopyDeleted(ctx, qtx, copy.OwnerID, copy.LocalID)
 		if err != nil {
-			return nil, fmt.Errorf("delete chat message copy %d:%d: %w", copy.OwnerID, copy.LocalID, err)
+			return ChatDeletion{}, fmt.Errorf("delete chat message copy %d:%d: %w", copy.OwnerID, copy.LocalID, err)
 		}
 		if changed {
-			perOwner[copy.OwnerID] = pts
+			deletion.OwnerPts[copy.OwnerID] = pts
 		}
 	}
 
-	// Message-copy deletions do not identify the chat, so every current member
-	// also needs the participant-removal event that lets clients drop its dialog.
+	// Removal is a durable PTS-neutral marker because UpdateChatParticipantDelete
+	// has no pts fields on the wire. The event row survives marker consumption so
+	// a delayed cross-replica notification can still reach every live session.
 	for _, ownerID := range ownerIDs {
-		pts, err := bumpPtsOnly(ctx, qtx, ownerID)
+		event, err := qtx.InsertChatRemovalEvent(ctx, db.InsertChatRemovalEventParams{
+			OwnerID: ownerID, ChatID: chatID, Version: chat.Version,
+		})
 		if err != nil {
-			return nil, fmt.Errorf("bump pts for chat removal owner %d: %w", ownerID, err)
+			return ChatDeletion{}, fmt.Errorf("record chat removal for owner %d: %w", ownerID, err)
 		}
-		if err := qtx.InsertEvent(ctx, db.InsertEventParams{
-			OwnerID: ownerID, Pts: pts, Type: int16(EventChatParticipantDelete), LocalID: chatID,
+		if err := qtx.InsertChatRemovalStateMarker(ctx, db.InsertChatRemovalStateMarkerParams{
+			OwnerID: ownerID, ChatID: chatID,
 		}); err != nil {
-			return nil, fmt.Errorf("record chat removal for owner %d: %w", ownerID, err)
+			return ChatDeletion{}, fmt.Errorf("record pending chat removal for owner %d: %w", ownerID, err)
 		}
-		perOwner[ownerID] = int(pts)
+		deletion.RemovalEvents = append(deletion.RemovalEvents, ChatRemovalEvent{
+			OwnerID: ownerID, ChatID: chatID, Version: int(event.Version),
+		})
 		if err := qtx.DeleteDialogForPeer(ctx, db.DeleteDialogForPeerParams{
 			OwnerID: ownerID, PeerType: int16(PeerTypeChat), PeerID: chatID,
 		}); err != nil {
-			return nil, fmt.Errorf("delete chat dialog for owner %d: %w", ownerID, err)
+			return ChatDeletion{}, fmt.Errorf("delete chat dialog for owner %d: %w", ownerID, err)
 		}
 	}
 
 	if err := tx.Commit(ctx); err != nil {
-		return nil, fmt.Errorf("commit delete chat: %w", err)
+		return ChatDeletion{}, fmt.Errorf("commit delete chat: %w", err)
 	}
-	return perOwner, nil
+	return deletion, nil
 }
 
 // SetChatTitle renames the chat and announces it in one transaction. Current
