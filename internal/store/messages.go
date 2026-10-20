@@ -2035,6 +2035,7 @@ func lockChannelForwardSources(ctx context.Context, qtx *db.Queries, fromID int6
 	postIDs = ascendingUnique(postIDs)
 	rows, err := qtx.ChannelMessagesForForward(ctx, db.ChannelMessagesForForwardParams{
 		ChannelID: channelID,
+		UserID:    fromID,
 		LocalIds:  postIDs,
 	})
 	if err != nil {

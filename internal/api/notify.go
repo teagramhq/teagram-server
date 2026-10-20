@@ -431,6 +431,7 @@ func (u *Updater) DeliverChannelPollVote(ctx context.Context, channelID, pollID 
 
 	now := time.Now()
 	var pushes []transientPush
+	pollLocalIDs := make(map[int64]int64)
 	for _, member := range members {
 		if member.Banned(now) {
 			continue
@@ -449,6 +450,7 @@ func (u *Updater) DeliverChannelPollVote(ctx context.Context, channelID, pollID 
 		if ref.PeerType != store.PeerTypeChannel || ref.PeerID != channelID {
 			continue
 		}
+		pollLocalIDs[member.UserID] = ref.LocalID
 		update := &tg.UpdateShort{
 			Update: &tg.UpdateMessagePoll{PollID: poll.ID, Results: pollResultsToTL(poll)},
 			Date:   int(now.Unix()),
@@ -478,15 +480,15 @@ func (u *Updater) DeliverChannelPollVote(ctx context.Context, channelID, pollID 
 		return
 	}
 	now = time.Now()
-	active := make(map[int64]struct{}, len(currentMembers))
+	active := make(map[int64]store.ChannelMember, len(currentMembers))
 	for _, member := range currentMembers {
 		if !member.Banned(now) {
-			active[member.UserID] = struct{}{}
+			active[member.UserID] = member
 		}
 	}
 	authorizedPushes := make([]transientPush, 0, len(pushes))
 	for _, push := range pushes {
-		if _, ok := active[push.owner]; ok {
+		if member, ok := active[push.owner]; ok && pollLocalIDs[push.owner] > member.AvailableMinID {
 			authorizedPushes = append(authorizedPushes, push)
 		}
 	}
@@ -1378,10 +1380,14 @@ func (u *Updater) deliverChannelPost(ctx context.Context, channelID int64, conns
 	if u.channelPostSnapshotHook != nil {
 		u.channelPostSnapshotHook()
 	}
+	availableMinIDs := make(map[int64]int64, len(members))
+	for _, member := range members {
+		availableMinIDs[member.UserID] = member.AvailableMinID
+	}
 
 	u.deliverChannel(ctx, members, time.Now(), connsFor,
 		func(memberID int64, fromPts int) (channelBatch, error) {
-			return u.h.buildChannelUpdates(ctx, channelID, memberID, max(fromPts, currentPts-1), maxDiffEvents, currentPts, broadcast)
+			return u.h.buildChannelUpdates(ctx, channelID, memberID, max(fromPts, currentPts-1), maxDiffEvents, currentPts, broadcast, availableMinIDs[memberID])
 		},
 	)
 }

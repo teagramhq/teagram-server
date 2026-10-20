@@ -1024,7 +1024,7 @@ type channelBatch struct {
 // State is read first, then events are bounded to (fromPts, currentPts], so the
 // advertised pts never runs past an event omitted from the response. This is
 // the same ordering buildUpdates uses for the per-account stream.
-func (h *handlers) buildChannelUpdates(ctx context.Context, channelID, viewerID int64, fromPts, limit, currentPts int, broadcast bool) (channelBatch, error) {
+func (h *handlers) buildChannelUpdates(ctx context.Context, channelID, viewerID int64, fromPts, limit, currentPts int, broadcast bool, availableMinID int64) (channelBatch, error) {
 	// Fetch one past the cap to detect truncation.
 	events, err := h.store.ChannelEventsWindow(ctx, channelID, fromPts, currentPts, limit+1)
 	if err != nil {
@@ -1035,10 +1035,17 @@ func (h *handlers) buildChannelUpdates(ctx context.Context, channelID, viewerID 
 		events = events[:limit]
 		b.more = true
 	}
+	visibleEvents := make([]store.ChannelEvent, 0, len(events))
+	for _, ev := range events {
+		if ev.LocalID > 0 && ev.LocalID <= availableMinID {
+			continue
+		}
+		visibleEvents = append(visibleEvents, ev)
+	}
 
 	// Collect local ids for batched message load.
-	localIDs := make([]int64, 0, len(events))
-	for _, ev := range events {
+	localIDs := make([]int64, 0, len(visibleEvents))
+	for _, ev := range visibleEvents {
 		if ev.Type == store.EventNewMessage || ev.Type == store.EventEdit {
 			localIDs = append(localIDs, ev.LocalID)
 		}
@@ -1065,7 +1072,7 @@ func (h *handlers) buildChannelUpdates(ctx context.Context, channelID, viewerID 
 	}
 
 	peers := map[int64]bool{}
-	for _, ev := range events {
+	for _, ev := range visibleEvents {
 		up, refs, upErr := h.channelEventToUpdate(ctx, channelID, viewerID, ev, msgs, files, broadcast)
 		if upErr != nil {
 			return channelBatch{}, upErr

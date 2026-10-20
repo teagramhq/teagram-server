@@ -28,6 +28,7 @@ JOIN channel_participants cp ON cp.channel_id = cpm.channel_id
 JOIN channel_messages cm ON cm.channel_id = cpm.channel_id AND cm.local_id = cpm.local_id
 WHERE cpm.poll_id = $1
   AND cp.user_id = $2
-  AND (cp.banned_until IS NULL OR cp.banned_until <= clock_timestamp())
   AND cm.deleted = false
-  AND (cm.expires_at IS NULL OR cm.expires_at > statement_timestamp());
+  AND (cm.expires_at IS NULL OR cm.expires_at > statement_timestamp())
+  AND cpm.local_id > cp.available_min_id
+  AND (cp.banned_until IS NULL OR cp.banned_until <= clock_timestamp());

@@ -1839,7 +1839,7 @@ func (h *handlers) handleGetMessagesReactions(r *mtproto.Request) (bin.Encoder, 
 		localIDs = append(localIDs, localID)
 	}
 	if peerType == store.PeerTypeChannel {
-		msgs, err := h.store.ChannelMessages(r.Ctx, peerID, localIDs)
+		msgs, err := h.store.ChannelMessagesForMember(r.Ctx, peerID, r.UserID, localIDs)
 		if err != nil {
 			h.log.Error("get channel message reactions", "user_id", r.UserID, "channel_id", peerID, "err", err)
 			return nil, errInternal

@@ -413,6 +413,57 @@ func TestPostChannelAlbumSharesGroupedIDAndReplays(t *testing.T) {
 	}
 }
 
+func TestPostChannelAlbumReplyRespectsHistoryFloor(t *testing.T) {
+	t.Parallel()
+	f := newAlbumFixture(t)
+	ctx := context.Background()
+	creator := mustUser(t, f.s, "+15559185081")
+	member := mustUser(t, f.s, "+15559185082")
+	channel, err := f.s.CreateChannel(ctx, creator.ID, "album reply history floor", "", true)
+	if err != nil {
+		t.Fatalf("create channel: %v", err)
+	}
+	hidden, _, _, err := f.s.PostChannelMessage(ctx, channel.ID, creator.ID, "hidden reply target", 1581, nil, 0)
+	if err != nil {
+		t.Fatalf("post hidden target: %v", err)
+	}
+	if _, err = f.conn.Exec(ctx, `UPDATE channels SET pre_history_hidden = true WHERE id = $1`, channel.ID); err != nil {
+		t.Fatalf("hide channel history: %v", err)
+	}
+	invite, err := f.s.CreateChannelInvite(ctx, channel.ID, creator.ID)
+	if err != nil {
+		t.Fatalf("create invite: %v", err)
+	}
+	if _, _, err = f.s.JoinChannelByInvite(ctx, invite, member.ID); err != nil {
+		t.Fatalf("join channel: %v", err)
+	}
+	floor, ok, err := f.s.ChannelMemberOf(ctx, channel.ID, member.ID)
+	if err != nil || !ok || floor.AvailableMinID != hidden.LocalID {
+		t.Fatalf("member floor = %+v, ok=%v, err=%v; want %d", floor, ok, err, hidden.LocalID)
+	}
+
+	hiddenFiles := []store.File{f.granted(t, member.ID, true), f.granted(t, member.ID, true)}
+	if _, err = f.s.PostChannelAlbumAs(ctx, channel.ID, hidden.LocalID, albumOf(member.ID, 1582, 1583, hiddenFiles...)); !errors.Is(err, store.ErrMessageInvalid) {
+		t.Fatalf("album reply to floored post = %v, want ErrMessageInvalid", err)
+	}
+	if count := f.grantCount(t, member.ID); count != 2 {
+		t.Fatalf("grants after rejected hidden reply = %d, want 2", count)
+	}
+
+	visible, _, _, err := f.s.PostChannelMessage(ctx, channel.ID, creator.ID, "visible reply target", 1584, nil, 0)
+	if err != nil {
+		t.Fatalf("post visible target: %v", err)
+	}
+	visibleFiles := []store.File{f.granted(t, member.ID, true), f.granted(t, member.ID, true)}
+	result, err := f.s.PostChannelAlbumAs(ctx, channel.ID, visible.LocalID, albumOf(member.ID, 1585, 1586, visibleFiles...))
+	if err != nil {
+		t.Fatalf("album reply to visible post: %v", err)
+	}
+	if result.Duplicate || len(result.Messages) != 2 {
+		t.Fatalf("visible reply album = %+v, want two new messages", result)
+	}
+}
+
 // TestPostChannelAlbumReversedGrantOrderAcrossChannels: two albums from one
 // caller to different channels name the same grants in opposite orders. The
 // channel paths take no shared owner lock, so only the grant lock order keeps

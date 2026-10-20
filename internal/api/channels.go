@@ -905,7 +905,7 @@ func (h *handlers) handleGetChannelDifference(r *mtproto.Request) (bin.Encoder, 
 		h.log.Error("load channel kind for difference", "channel_id", channelID, "err", err)
 		return nil, errInternal
 	}
-	b, err := h.buildChannelUpdates(r.Ctx, channelID, r.UserID, fromPts, limit, currentPts, broadcast)
+	b, err := h.buildChannelUpdates(r.Ctx, channelID, r.UserID, fromPts, limit, currentPts, broadcast, member.AvailableMinID)
 	if err != nil {
 		h.log.Error("channel difference build", "channel_id", channelID, "err", err)
 		return nil, errInternal
