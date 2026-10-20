@@ -506,7 +506,7 @@ func TestServeWebSocketDiscoveryCORSIsPathScoped(t *testing.T) {
 	if err != nil {
 		t.Fatalf("generate RSA key: %v", err)
 	}
-	doc, err := discovery.NewDocument("configured.example.test:443", 2, &rsaKey.PublicKey)
+	doc, err := discovery.NewDocument("configured.example.test:443", 2, &rsaKey.PublicKey, true)
 	if err != nil {
 		t.Fatalf("build discovery document: %v", err)
 	}

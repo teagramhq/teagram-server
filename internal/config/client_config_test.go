@@ -41,6 +41,49 @@ func TestLoadClientConfigRejectsInvalidDC(t *testing.T) {
 	}
 }
 
+func TestLoadClientConfigRejectsInvalidDemoGuestSignUpAdvertisement(t *testing.T) {
+	t.Setenv("TG_ADVERTISE_DEMO_GUEST_SIGN_UP", "sometimes")
+
+	if _, err := config.LoadClientConfig(); err == nil || !strings.Contains(err.Error(), "TG_ADVERTISE_DEMO_GUEST_SIGN_UP") {
+		t.Fatalf("LoadClientConfig error = %v, want a validation error naming TG_ADVERTISE_DEMO_GUEST_SIGN_UP", err)
+	}
+}
+
+func TestLoadConfigCopiesDemoGuestSignUpAdvertisementModes(t *testing.T) {
+	t.Setenv("TG_POSTGRES_DSN", "postgres://localhost/tg")
+	t.Setenv("TG_AUTHKEY_ENC_KEY", validEncKey)
+	t.Setenv("TG_AUTHKEY_ENC_KEY_FILE", "")
+
+	tests := []struct {
+		name    string
+		value   string
+		enabled bool
+	}{
+		{name: "unset"},
+		{name: "disabled", value: "false"},
+		{name: "enabled", value: "true", enabled: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv("TG_ADVERTISE_DEMO_GUEST_SIGN_UP", tt.value)
+			clientCfg, err := config.LoadClientConfig()
+			if err != nil {
+				t.Fatalf("LoadClientConfig: %v", err)
+			}
+			if clientCfg.AdvertiseDemoGuestSignUp != tt.enabled {
+				t.Errorf("client config advertisement = %t, want %t", clientCfg.AdvertiseDemoGuestSignUp, tt.enabled)
+			}
+			cfg, err := config.Load(discardLog())
+			if err != nil {
+				t.Fatalf("Load: %v", err)
+			}
+			if cfg.AdvertiseDemoGuestSignUp != tt.enabled {
+				t.Errorf("server config advertisement = %t, want %t", cfg.AdvertiseDemoGuestSignUp, tt.enabled)
+			}
+		})
+	}
+}
+
 func TestLoadDiscoveryLimits(t *testing.T) {
 	t.Setenv("TG_POSTGRES_DSN", "postgres://localhost/tg")
 	t.Setenv("TG_AUTHKEY_ENC_KEY", strings.Repeat("00", 32))

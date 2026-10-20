@@ -420,7 +420,7 @@ func runClientConfigCommand(stdout io.Writer) error {
 		return err
 	}
 	endpoint := net.JoinHostPort(cfg.AdvertiseHost, strconv.Itoa(cfg.AdvertisePort))
-	doc, err := discovery.NewDocument(endpoint, cfg.DCID, &key.PublicKey)
+	doc, err := discovery.NewDocument(endpoint, cfg.DCID, &key.PublicKey, cfg.AdvertiseDemoGuestSignUp)
 	if err != nil {
 		return err
 	}
@@ -648,7 +648,7 @@ func runAtBlobModePath(log *slog.Logger, blobModePath string) error {
 		return err
 	}
 	advertise := net.JoinHostPort(cfg.AdvertiseHost, strconv.Itoa(cfg.AdvertisePort))
-	clientDiscovery, err := discovery.NewDocument(advertise, cfg.DCID, &key.PublicKey)
+	clientDiscovery, err := discovery.NewDocument(advertise, cfg.DCID, &key.PublicKey, cfg.AdvertiseDemoGuestSignUp)
 	if err != nil {
 		return fmt.Errorf("validate discovery identity: %w", err)
 	}
