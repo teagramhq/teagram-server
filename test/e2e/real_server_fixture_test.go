@@ -1864,7 +1864,8 @@ func writeFixtureArtifact(t *testing.T, directory string, ready realFixtureReady
 	endpoint := "wss://teagramd.test/apiws"
 	fingerprint := ready.Fingerprint
 	csp := "default-src 'self'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'; " +
-		"object-src 'none'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; " +
+		"frame-src 'self' https://challenges.cloudflare.com; object-src 'none'; " +
+		"script-src 'self' 'wasm-unsafe-eval' https://challenges.cloudflare.com; style-src 'self' 'unsafe-inline'; " +
 		"img-src 'self' data: blob:; font-src 'self' data:; media-src 'self' blob:; " +
 		"worker-src 'self' blob:; manifest-src 'self'; connect-src 'self' " + endpoint + ";"
 	productLinks := "const productLinks = [" + strings.Join(quoteAll(fixtureProductReferences), ", ") + "];\n"
