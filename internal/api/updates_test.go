@@ -377,6 +377,80 @@ func TestChatRemovalDifferenceAcknowledgesOnlyConfirmedDifferenceState(t *testin
 	}
 }
 
+func TestChatRemovalDifferenceAcknowledgesFinalNotifySettingsState(t *testing.T) {
+	t.Parallel()
+	const settingCount = maxDiffEventsCount + 1
+	const peerIDBase = int64(1_400_000_000)
+	base := time.Now().Add(-3 * time.Hour).Truncate(time.Second)
+	authKeyID := [8]byte{0x17, 0x26, 0x10, 0x01, 0x0b, 0x0b, 0x0b, 0x0b}
+	ctx := context.Background()
+	s, _, ownerID, _ := seedNotifySettingsPagination(t, "+15551290104", authKeyID, peerIDBase, settingCount, settingCount, base)
+	chat, err := s.CreateChat(ctx, ownerID, "notify settings with removal", nil)
+	if err != nil {
+		t.Fatalf("create chat: %v", err)
+	}
+	if _, err := s.DeleteChat(ctx, chat.ID, ownerID); err != nil {
+		t.Fatalf("delete chat: %v", err)
+	}
+	state, err := s.StateWithoutChannelUnread(ctx, ownerID)
+	if err != nil {
+		t.Fatalf("read state after chat deletion: %v", err)
+	}
+	request := &tg.UpdatesGetDifferenceRequest{
+		Pts: state.Pts, Qts: state.Qts, Date: int(base.Add(time.Minute).Unix()),
+	}
+	first, err := api.GetDifferenceForTestWithAuthKey(s, ownerID, authKeyID, request)
+	if err != nil {
+		t.Fatalf("get difference with notification settings and removal: %v", err)
+	}
+	firstSlice, ok := first.(*tg.UpdatesDifferenceSlice)
+	if !ok {
+		t.Fatalf("first difference = %T, want updates.differenceSlice for pending notification settings", first)
+	}
+	if got := len(notifySettingsPeerIDs(firstSlice.OtherUpdates)); got != maxDiffEventsCount {
+		t.Fatalf("first slice carried %d notification settings, want %d", got, maxDiffEventsCount)
+	}
+	var firstRemovalIDs []int64
+	for _, update := range firstSlice.OtherUpdates {
+		if removal, ok := update.(*tg.UpdateChatParticipantDelete); ok {
+			firstRemovalIDs = append(firstRemovalIDs, removal.ChatID)
+		}
+	}
+	if !slices.Equal(firstRemovalIDs, []int64{chat.ID}) {
+		t.Fatalf("first slice removal IDs = %v, want [%d]", firstRemovalIDs, chat.ID)
+	}
+	cursor, found, err := s.NotifySettingsDifferenceCursorByAuthKey(ctx, mtproto.AuthKeyIDInt64(authKeyID))
+	if err != nil {
+		t.Fatalf("read notification settings cursor: %v", err)
+	}
+	if !found || cursor.State.Date != firstSlice.IntermediateState.Date {
+		t.Fatalf("notification settings cursor state = %+v, found=%v; want returned date %d", cursor.State, found, firstSlice.IntermediateState.Date)
+	}
+
+	second, err := api.GetDifferenceForTestWithAuthKey(s, ownerID, authKeyID, &tg.UpdatesGetDifferenceRequest{
+		Pts:  firstSlice.IntermediateState.Pts,
+		Qts:  firstSlice.IntermediateState.Qts,
+		Date: firstSlice.IntermediateState.Date,
+	})
+	if err != nil {
+		t.Fatalf("get difference after confirming combined page: %v", err)
+	}
+	var secondUpdates []tg.UpdateClass
+	switch difference := second.(type) {
+	case *tg.UpdatesDifference:
+		secondUpdates = difference.OtherUpdates
+	case *tg.UpdatesDifferenceSlice:
+		secondUpdates = difference.OtherUpdates
+	default:
+		t.Fatalf("second difference = %T, want difference or slice", second)
+	}
+	for _, update := range secondUpdates {
+		if removal, ok := update.(*tg.UpdateChatParticipantDelete); ok {
+			t.Fatalf("confirmed removal page replayed chat %d", removal.ChatID)
+		}
+	}
+}
+
 func TestChatRemovalDifferencePaginatesAfterConfirmedState(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()

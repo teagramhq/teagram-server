@@ -1820,6 +1820,12 @@ func (h *handlers) handleGetDifferenceForConn(c *mtproto.Conn, r *mtproto.Reques
 			return nil, nil, errInternal
 		}
 	}
+	if len(chatRemovalChatIDs) > 0 {
+		// Notify-settings cursor acknowledgement can advance Date after the
+		// removal token is first allocated. Bind the removal page to the final
+		// state returned to the client so its next request can acknowledge it.
+		chatRemovalStateDate = st.Date
+	}
 
 	if b.more || encMore || adminMore || chatRemovalMore || draftMore || unreadMarkMore || notifySettingsMore {
 		var afterReply func()
