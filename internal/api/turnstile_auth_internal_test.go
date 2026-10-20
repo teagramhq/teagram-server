@@ -64,7 +64,7 @@ func TestAuthSendCodeRequiresAndConsumesTurnstileToken(t *testing.T) {
 func TestSigninChallengeDoesNotDependOnIdentifier(t *testing.T) {
 	verifier := &replayTurnstileVerifier{seen: make(map[string]bool)}
 	h := &handlers{turnstileSiteKey: "site-key", turnstileVerifier: verifier, turnstileSignInEnabled: true}
-	var messages []string
+	messages := make([]string, 0, 2)
 	for _, identifier := range []string{"taken-identifier", "unused-identifier"} {
 		_, err := h.handleSendCode(turnstileAuthRequest(t, &tg.AuthSendCodeRequest{PhoneNumber: identifier}, ""))
 		assertSigninTurnstileRequired(t, err)
@@ -257,15 +257,14 @@ func turnstileAuthRequest(t *testing.T, request bin.Encoder, token string) *mtpr
 
 func assertSigninTurnstileRequired(t *testing.T, err error) {
 	t.Helper()
-	var rpc *tgerr.Error
-	if !errors.As(err, &rpc) || rpc.Code != 403 || rpc.Message != "RECAPTCHA_CHECK_signin__site-key" {
+	rpc, ok := errors.AsType[*tgerr.Error](err)
+	if !ok || rpc.Code != 403 || rpc.Message != "RECAPTCHA_CHECK_signin__site-key" {
 		t.Fatalf("error = %v, want 403 RECAPTCHA_CHECK_signin__site-key", err)
 	}
 }
 
 func rpcErrorMessage(err error) string {
-	var rpc *tgerr.Error
-	if errors.As(err, &rpc) {
+	if rpc, ok := errors.AsType[*tgerr.Error](err); ok {
 		return rpc.Message
 	}
 	return ""

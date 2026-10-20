@@ -42,7 +42,11 @@ func TestGetAppConfigPublishesTurnstileOnlyWhenEnforced(t *testing.T) {
 			var turnstile *tg.JSONObject
 			for _, value := range object.Value {
 				if value.Key == "turnstile" {
-					turnstile, _ = value.Value.(*tg.JSONObject)
+					var ok bool
+					turnstile, ok = value.Value.(*tg.JSONObject)
+					if !ok {
+						t.Fatalf("Turnstile config = %T, want *tg.JSONObject", value.Value)
+					}
 				}
 			}
 			if !tc.wantSiteKey {

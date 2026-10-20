@@ -632,11 +632,19 @@ func TestServeWebSocketUsesListenerScopedTurnstileDiscovery(t *testing.T) {
 		{name: "public", listener: publicListener, wantKey: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			resp, err := http.Get("http://" + tc.listener.Addr().String() + "/.well-known/telegramd/client")
+			req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, "http://"+tc.listener.Addr().String()+"/.well-known/telegramd/client", nil)
+			if err != nil {
+				t.Fatalf("build discovery request: %v", err)
+			}
+			resp, err := http.DefaultClient.Do(req)
 			if err != nil {
 				t.Fatalf("get discovery: %v", err)
 			}
-			defer resp.Body.Close()
+			defer func() {
+				if err := resp.Body.Close(); err != nil {
+					t.Errorf("close discovery response: %v", err)
+				}
+			}()
 			var got discovery.Document
 			if err := json.NewDecoder(resp.Body).Decode(&got); err != nil {
 				t.Fatalf("decode discovery: %v", err)
