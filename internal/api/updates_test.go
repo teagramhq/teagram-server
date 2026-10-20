@@ -262,6 +262,72 @@ func TestDeleteChatPushesRemovalForEveryCurrentMember(t *testing.T) {
 	}
 }
 
+func TestGetDifferenceDoesNotReplayDeletedChatMessageContent(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	s := openStore(t)
+	creator, err := s.CreateUser(ctx, "+15551290091")
+	if err != nil {
+		t.Fatalf("create creator: %v", err)
+	}
+	member, err := s.CreateUser(ctx, "+15551290092")
+	if err != nil {
+		t.Fatalf("create member: %v", err)
+	}
+	chat, err := s.CreateChat(ctx, creator.ID, "delete before difference", []int64{member.ID})
+	if err != nil {
+		t.Fatalf("create chat: %v", err)
+	}
+	before, err := s.StateWithoutUnread(ctx, member.ID)
+	if err != nil {
+		t.Fatalf("read member state before message: %v", err)
+	}
+	const secretText = "private message deleted with its group"
+	if _, _, duplicate, err := s.SendChatMessage(ctx, store.FanOut{
+		ChatID: chat.ID, FromID: creator.ID, Text: secretText, RandomID: 90091,
+	}); err != nil || duplicate {
+		t.Fatalf("send group message: duplicate=%v err=%v", duplicate, err)
+	}
+	if _, err := s.DeleteChat(ctx, chat.ID, creator.ID); err != nil {
+		t.Fatalf("delete chat: %v", err)
+	}
+
+	result, err := api.GetDifferenceForTest(s, member.ID, &tg.UpdatesGetDifferenceRequest{Pts: before.Pts})
+	if err != nil {
+		t.Fatalf("get difference from before the message: %v", err)
+	}
+	difference, ok := result.(*tg.UpdatesDifference)
+	if !ok {
+		t.Fatalf("difference = %T, want *tg.UpdatesDifference", result)
+	}
+	if len(difference.NewMessages) != 1 {
+		t.Fatalf("new messages = %+v, want the deleted message's PTS-preserving tombstone", difference.NewMessages)
+	}
+	if _, ok := difference.NewMessages[0].(*tg.MessageEmpty); !ok {
+		t.Fatalf("replayed message = %T, want sanitized *tg.MessageEmpty", difference.NewMessages[0])
+	}
+	for _, message := range difference.NewMessages {
+		if got, ok := message.(*tg.Message); ok && got.Message == secretText {
+			t.Fatalf("difference replayed deleted content %q", got.Message)
+		}
+	}
+	deleteUpdateFound := false
+	for _, update := range difference.OtherUpdates {
+		if deleted, ok := update.(*tg.UpdateDeleteMessages); ok {
+			deleteUpdateFound = true
+			if deleted.Pts != before.Pts+2 || deleted.PtsCount != 1 {
+				t.Errorf("delete update PTS = %d/%d, want %d/1", deleted.Pts, deleted.PtsCount, before.Pts+2)
+			}
+		}
+	}
+	if !deleteUpdateFound {
+		t.Errorf("other updates = %+v, want the message deletion PTS update", difference.OtherUpdates)
+	}
+	if difference.State.Pts != before.Pts+2 {
+		t.Errorf("difference state PTS = %d, want message and deletion PTS through %d", difference.State.Pts, before.Pts+2)
+	}
+}
+
 func TestChatRemovalDifferenceAcknowledgesOnlyConfirmedDifferenceState(t *testing.T) {
 	t.Parallel()
 	const removalStateDateFloor = 2_000_000_000

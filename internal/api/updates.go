@@ -675,6 +675,16 @@ func (h *handlers) eventToUpdate(ctx context.Context, userID int64, ev store.Eve
 		if !ok {
 			return nil, nil, nil, nil, nil
 		}
+		if m.Deleted {
+			// Retained timeline events can outlive the message copy's visibility.
+			// Keep their PTS slot in the shared stream, but never serialize the
+			// deleted row's text, media, action, or sender references again.
+			empty := &tg.MessageEmpty{ID: int(m.LocalID)}
+			if ev.Type == store.EventEdit {
+				return &tg.UpdateEditMessage{Message: empty, Pts: ev.Pts, PtsCount: 1}, nil, nil, nil, nil
+			}
+			return &tg.UpdateNewMessage{Message: empty, Pts: ev.Pts, PtsCount: 1}, nil, nil, nil, nil
+		}
 		// The create action's user list is current member ids, so it is the same
 		// disclosure loadChats gates: a viewer removed from the chat still replays
 		// their retained copy of the event, and must not learn who is in it now.
