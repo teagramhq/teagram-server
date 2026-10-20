@@ -786,6 +786,10 @@ jobs:
     steps:
       - uses: actions/checkout@v7.0.1
 
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 24.18.0
+
       - uses: actions/setup-go@v7.0.0
         with:
           go-version-file: go.mod
@@ -797,8 +801,12 @@ jobs:
       - name: Require shellcheck and yq
         run: shellcheck --version && yq --version
 
-      - name: Lint the deploy workflow
-        run: actionlint .github/workflows/deploy.yml
+      - name: Lint deployment and real-client workflows
+        run: |
+          actionlint -ignore 'label "ubuntu-26.04" is unknown' \
+            .github/workflows/deploy.yml \
+            .github/workflows/real-client-browser-flow.yml
+          node --check test/e2e/real_server_fixture/run_real_client_browser_flow.mjs
 
       - name: Check the deploy workflow contract
         run: .github/scripts/test-deploy-workflow-contract.sh

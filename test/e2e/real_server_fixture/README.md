@@ -10,7 +10,7 @@ Start it from the server checkout with full lowercase SHAs and a fresh run ID:
 RUN_ID="$(openssl rand -hex 16)"
 bash test/e2e/real_server_fixture/run.sh \
   --server-revision "$(git rev-parse HEAD)" \
-  --web-revision 16f12b9f4e0a42b20c3fe3aa340b6b8f8b2e8861 \
+  --web-revision e947f119ba90d9d87b198c9d7a113cceb1395318 \
   --run-id "$RUN_ID"
 ```
 
@@ -18,7 +18,7 @@ Keep this command in the foreground. Its first JSON line is `server-ready`, emit
 
 ## Fixture-only auth progress
 
-The opt-in `--auth-progress` mode is for the pinned auth-progress fixture contract only. It requires web source `569529c1f36923c098760ef727808254dcb6a662` and a new absolute output path. The fixture binds the full digest over sorted relative paths and file contents, including every byte of `mtproto-target.json`, into the run identity and verifies that frozen tree before and after each parity leg. It separately audits the manifest's producer digest, which excludes the manifest itself, and supplies that digest to the pinned browser runner when it checks the manifest. The fresh target key makes both digests experiment-specific. The historical digest `sha256:f352e4ef6163855cdbbcc4022386a306b6c768f56e1fa2aa1e35f434ba272f3f` from MAIN-1660/MAIN-1315 is a historical reference only, not a digest attested for a current experiment.
+The opt-in `--auth-progress` mode is for the pinned auth-progress fixture contract only. It requires web source `569529c1f36923c098760ef727808254dcb6a662` and a new absolute output path. The artifact audit checks that revision against its exact historical private CSP; other source revisions use the current private CSP with Turnstile sources. The fixture binds the full digest over sorted relative paths and file contents, including every byte of `mtproto-target.json`, into the run identity and verifies that frozen tree before and after each parity leg. It separately audits the manifest's producer digest, which excludes the manifest itself, and supplies that digest to the pinned browser runner when it checks the manifest. The fresh target key makes both digests experiment-specific. The historical digest `sha256:f352e4ef6163855cdbbcc4022386a306b6c768f56e1fa2aa1e35f434ba272f3f` from MAIN-1660/MAIN-1315 is a historical reference only, not a digest attested for a current experiment.
 
 ```sh
 bash test/e2e/real_server_fixture/run.sh \
@@ -70,7 +70,7 @@ Build the matching production bundle for that run from a clean web checkout at t
 
 ```sh
 cd ../teagram-web
-test "$(git rev-parse HEAD)" = 16f12b9f4e0a42b20c3fe3aa340b6b8f8b2e8861
+test "$(git rev-parse HEAD)" = e947f119ba90d9d87b198c9d7a113cceb1395318
 test -z "$(git status --porcelain --untracked-files=all)"
 ARTIFACT_DIR="$(mktemp -d)/dist-private"
 KEY_FILE="$(mktemp)"
@@ -103,3 +103,27 @@ bash .github/scripts/run-real-server-fixture-gate.sh
 ```
 
 It runs the artifact boundary tests and focused Go fixture cases, then checks Go's JSON test stream for every required case. CI checks the same fixture cases in its end-to-end result stream.
+
+## PR real-client browser flow
+
+The `Real-client browser flow / real-client-browser-flow` check runs for pull requests in both repositories on `ubuntu-26.04`. It builds the production web artifact, starts this disposable fixture, and selects all five scenarios. Its summary names the full server and web revisions, PR head, merge revision tested, cleanup result, and complete job duration. The companion checkout is an immutable full SHA reviewed in the PR.
+
+The selected-suite command is the same one used by the web lane and local runs:
+
+```sh
+corepack pnpm run test:real-client -- \
+  --readiness-file "$READINESS_FILE" \
+  --harness-revision "$HARNESS_REVISION" \
+  --server-revision "$SERVER_REVISION" \
+  --web-revision "$WEB_REVISION" \
+  --run-id "$RUN_ID" \
+  --scenarios sign-in,message,group,channel,poll
+```
+
+For a local run, use the foreground fixture and artifact-build procedure above, keep the same run ID and readiness record through `artifact-ready`, then run that command from the web checkout containing `test:real-client`. Do not reuse the readiness file, public key, artifact, or run ID from another fixture run.
+
+On a browser assertion failure, the workflow uploads `real-client-playwright-trace-<run>-<attempt>`. Download it from the failed workflow run and open `alice.zip` or `bob.zip` with `corepack pnpm exec playwright show-trace <trace-file>`. The trace starts after synthetic sign-in, records screenshots and action timing, and omits DOM snapshots and source files, so password entry is not captured.
+
+The orchestration sends `stop` after the browser runner exits. On failure or cancellation it terminates the foreground fixture and waits for its owned cleanup. A successful cleanup prints `cleanup=verified` after removing only the run's containers, networks, image, temporary credentials, build directory, and detached worktree. For a local run, wait for that line before removing the caller-owned artifact, key, and readiness file as documented above.
+
+When a user-facing feature needs real-client coverage, add a named scenario to the web repository's `scripts/real-client/contract.mjs`, implement its UI flow and assertions in `scripts/real-client/browser.cjs`, then add it to `SCENARIOS` in this repository's `test/e2e/real_server_fixture/run_real_client_browser_flow.mjs`. The check rejects empty, skipped, duplicate, or failed required scenarios.
