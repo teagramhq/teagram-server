@@ -982,6 +982,13 @@ func pollResultsToTL(poll store.Poll) tg.PollResults {
 	results := tg.PollResults{}
 	results.SetResults(answers)
 	results.SetTotalVoters(int(poll.VoterCount))
+	if poll.PublicVoters && (poll.HasVoted || poll.Closed) && len(poll.RecentVoters) != 0 {
+		recentVoters := make([]tg.PeerClass, len(poll.RecentVoters))
+		for i, voterID := range poll.RecentVoters {
+			recentVoters[i] = peerToTL(store.PeerTypeUser, voterID)
+		}
+		results.SetRecentVoters(recentVoters)
+	}
 	if len(poll.Solution) != 0 {
 		results.SetSolution(string(poll.Solution))
 	}

@@ -1574,6 +1574,10 @@ func TestPublicPollVoterListRequiresVotePaginatesAndHidesPhone(t *testing.T) {
 		t.Fatalf("send public poll: %v", err)
 	}
 	creatorMessage := messageOf(t, sent)
+	creatorPoll, ok := creatorMessage.Media.(*tg.MessageMediaPoll)
+	if !ok {
+		t.Fatalf("public poll media = %T, want *tg.MessageMediaPoll", creatorMessage.Media)
+	}
 	memberMessageIDs := map[int64]int{}
 	for _, user := range []struct {
 		id int64
@@ -1598,10 +1602,31 @@ func TestPublicPollVoterListRequiresVotePaginatesAndHidesPhone(t *testing.T) {
 	if _, err = api.GetPollVotesForTest(s, creator.ID, requestFor(creator.ID, "", 10)); err == nil || !strings.Contains(err.Error(), "POLL_VOTE_REQUIRED") {
 		t.Fatalf("non-voter creator voter-list request = %v, want POLL_VOTE_REQUIRED", err)
 	}
-	if _, err = api.SendVoteForTest(s, firstVoter.ID, &tg.MessagesSendVoteRequest{
+	if recent, ok := creatorPoll.Results.GetRecentVoters(); ok && len(recent) != 0 {
+		t.Fatalf("non-voter creator recent voters = %v, want no voter identities", recent)
+	}
+	firstVote, err := api.SendVoteForTest(s, firstVoter.ID, &tg.MessagesSendVoteRequest{
 		Peer: api.InputPeerChat(firstVoter.ID, chat.ID), MsgID: memberMessageIDs[firstVoter.ID], Options: [][]byte{[]byte("first")},
-	}); err != nil {
+	})
+	if err != nil {
 		t.Fatalf("first vote: %v", err)
+	}
+	recent, ok := pollUpdateFromResponse(t, firstVote).Results.GetRecentVoters()
+	if !ok || len(recent) != 1 {
+		t.Fatalf("public poll recent voters = %v (present %v), want the first voter", recent, ok)
+	}
+	peer, ok := recent[0].(*tg.PeerUser)
+	if !ok || peer.UserID != firstVoter.ID {
+		t.Fatalf("public poll recent voter = %T %+v, want user %d", recent[0], recent[0], firstVoter.ID)
+	}
+	creatorResults, err := api.GetPollResultsForTest(s, creator.ID, &tg.MessagesGetPollResultsRequest{
+		Peer: api.InputPeerChat(creator.ID, chat.ID), MsgID: creatorMessage.ID,
+	})
+	if err != nil {
+		t.Fatalf("non-voter creator getPollResults: %v", err)
+	}
+	if recent, ok := pollUpdateFromResponse(t, creatorResults).Results.GetRecentVoters(); ok && len(recent) != 0 {
+		t.Fatalf("non-voter creator getPollResults recent voters = %v, want no voter identities", recent)
 	}
 	if _, err = api.SendVoteForTest(s, secondVoter.ID, &tg.MessagesSendVoteRequest{
 		Peer: api.InputPeerChat(secondVoter.ID, chat.ID), MsgID: memberMessageIDs[secondVoter.ID], Options: [][]byte{[]byte("second")},
@@ -1674,6 +1699,22 @@ func TestPublicPollVoterListRequiresVotePaginatesAndHidesPhone(t *testing.T) {
 		t.Fatalf("send anonymous poll: %v", err)
 	}
 	privateMessage := messageOf(t, privateSent)
+	privateHistory, err := api.GetHistoryForTest(s, firstVoter.ID, &tg.MessagesGetHistoryRequest{
+		Peer: api.InputPeerChat(firstVoter.ID, chat.ID), Limit: 10,
+	})
+	if err != nil {
+		t.Fatalf("anonymous poll voter history: %v", err)
+	}
+	privateMemberMessage := firstMessageFromResult(t, privateHistory)
+	anonymousVote, err := api.SendVoteForTest(s, firstVoter.ID, &tg.MessagesSendVoteRequest{
+		Peer: api.InputPeerChat(firstVoter.ID, chat.ID), MsgID: privateMemberMessage.ID, Options: [][]byte{[]byte("first")},
+	})
+	if err != nil {
+		t.Fatalf("anonymous poll vote: %v", err)
+	}
+	if recent, ok := pollUpdateFromResponse(t, anonymousVote).Results.GetRecentVoters(); ok && len(recent) != 0 {
+		t.Fatalf("anonymous poll recent voters = %v, want no voter identities", recent)
+	}
 	_, err = s.ClosePoll(ctx, creator.ID, store.PollMessageRef{PeerType: store.PeerTypeChat, PeerID: chat.ID, LocalID: int64(privateMessage.ID)})
 	if err != nil {
 		t.Fatalf("close anonymous poll: %v", err)
