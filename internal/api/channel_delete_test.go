@@ -8,6 +8,7 @@ import (
 	"github.com/gotd/td/bin"
 	"github.com/gotd/td/mt"
 	"github.com/gotd/td/tg"
+	"github.com/jackc/pgx/v5"
 
 	"github.com/teagramhq/teagram-server/internal/api"
 	"github.com/teagramhq/teagram-server/internal/mtproto"
@@ -154,5 +155,57 @@ func TestDeletedPublicChannelHoldsUsernameForCreator(t *testing.T) {
 	resolution, found, err := s.UsernameByHandle(ctx, "delme")
 	if err != nil || !found || resolution.Kind != store.UsernameKindChannel || resolution.Channel.ID != newChannel.ID {
 		t.Fatalf("reclaimed username resolution = %+v found=%v err=%v", resolution, found, err)
+	}
+}
+
+func TestExpiredDeletedChannelUsernameHoldCanBeClaimedByDifferentOwner(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	s, dsn := openStoreDSN(t)
+	creator := mustUser(t, s, "+15551499514")
+	stranger := mustUser(t, s, "+15551499515")
+	channel, err := s.CreateChannel(ctx, creator.ID, "Expired held channel", "", false)
+	if err != nil {
+		t.Fatalf("create channel: %v", err)
+	}
+	if err := s.EditChannelUsername(ctx, channel.ID, creator.ID, "expiredhold"); err != nil {
+		t.Fatalf("set channel username: %v", err)
+	}
+	if affected, rpc := deleteChannelRPC(t, fullChannelDispatcher(s), creator.ID, channel.ID); rpc != nil || affected == nil {
+		t.Fatalf("creator delete result = affected %v rpc %v", affected, rpc)
+	}
+
+	conn, err := pgx.Connect(ctx, dsn)
+	if err != nil {
+		t.Fatalf("connect to test database: %v", err)
+	}
+	defer func() {
+		if err := conn.Close(ctx); err != nil {
+			t.Errorf("close test database connection: %v", err)
+		}
+	}()
+	result, err := conn.Exec(ctx, `
+		UPDATE usernames
+		SET hold_until = clock_timestamp() - interval '1 second'
+		WHERE handle = 'expiredhold' AND owner_type = 'channel_hold'
+	`)
+	if err != nil || result.RowsAffected() != 1 {
+		t.Fatalf("expire username hold: rows=%d err=%v, want 1 row", result.RowsAffected(), err)
+	}
+
+	available, rpc := checkChannelUsername(t, s, stranger.ID, false, &tg.ChannelsCheckUsernameRequest{
+		Channel:  &tg.InputChannelEmpty{},
+		Username: "expiredhold",
+	})
+	if rpc != nil || !available {
+		t.Fatalf("expired username availability = %t rpc %v, want available", available, rpc)
+	}
+	if err := s.ClaimUsername(ctx, stranger.ID, "expiredhold"); err != nil {
+		t.Fatalf("claim expired username hold as different owner: %v", err)
+	}
+
+	resolution, found, err := s.UsernameByHandle(ctx, "expiredhold")
+	if err != nil || !found || resolution.Kind != store.UsernameKindUser || resolution.User.ID != stranger.ID {
+		t.Fatalf("claimed expired username = %+v found=%v err=%v, want stranger %d", resolution, found, err, stranger.ID)
 	}
 }
