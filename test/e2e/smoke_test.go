@@ -90,6 +90,10 @@ func TestSmoke(t *testing.T) {
 		t.Parallel()
 		testSmokeOneToOne(t)
 	})
+	t.Run("history-ttl", func(t *testing.T) {
+		t.Parallel()
+		testSmokeHistoryTTL(t)
+	})
 	t.Run("peer-disconnect", func(t *testing.T) {
 		t.Parallel()
 		testSmokePeerDisconnect(t)

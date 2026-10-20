@@ -36,6 +36,7 @@ type Chat struct {
 	Title               string
 	CreatorID           int64
 	Version             int
+	TTLPeriod           int
 	Date                time.Time
 	PinnedMessageID     *int32
 	DefaultBannedRights []string
@@ -97,6 +98,7 @@ func chatFromRow(r db.Chat) Chat {
 		Title:               r.Title,
 		CreatorID:           r.CreatorID,
 		Version:             int(r.Version),
+		TTLPeriod:           int(r.TtlPeriod),
 		Date:                r.Date.Time,
 		PinnedMessageID:     r.PinnedMessageID,
 		DefaultBannedRights: r.DefaultBannedRights,
@@ -222,6 +224,7 @@ func (s *Store) IsMember(ctx context.Context, chatID, userID int64) (bool, error
 type chatMutation struct {
 	tx                  pgx.Tx
 	qtx                 *db.Queries
+	chat                db.Chat
 	creatorID           int64
 	defaultBannedRights []string
 	members             []int64        // ascending, as read under the chats row lock
@@ -312,6 +315,7 @@ func (s *Store) beginChatMutation(ctx context.Context, chatID, callerID int64) (
 	m := &chatMutation{
 		tx:                  tx,
 		qtx:                 qtx,
+		chat:                chat,
 		creatorID:           chat.CreatorID,
 		defaultBannedRights: chat.DefaultBannedRights,
 		members:             make([]int64, len(parts)),

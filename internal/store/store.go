@@ -250,7 +250,10 @@ var (
 	ErrNotMember = errors.New("not a chat member")
 	// ErrChatAdminRequired is returned when a basic-chat control is denied
 	// by current default rights or requires channel administrator rights.
-	ErrChatAdminRequired = errors.New("chat admin required")
+	ErrChatAdminRequired       = errors.New("chat admin required")
+	ErrPeerBlockedUser         = errors.New("peer blocked caller")
+	ErrHistoryTTLPeerInvalid   = errors.New("history TTL peer invalid")
+	ErrHistoryTTLPeriodInvalid = errors.New("history TTL period invalid")
 	// ErrChannelCreatorRequired is returned when a current channel member is
 	// not the creator attempting to delete the channel.
 	ErrChannelCreatorRequired = errors.New("channel creator required")
@@ -284,6 +287,9 @@ var (
 	// post cannot satisfy the current request's author, tombstone, service or
 	// media-kind requirements.
 	ErrRandomIDDuplicate = errors.New("random id belongs to another channel post")
+	// ErrRandomIDExpired rejects a retry whose original message has expired.
+	// Its contents are never returned to the caller.
+	ErrRandomIDExpired = errors.New("random id belongs to an expired message")
 	// ErrMediaInvalid rejects a channel media retry whose stored post carries no
 	// media of the kind the request offers. It is separate from
 	// ErrRandomIDDuplicate because the random id is the caller's own live post:

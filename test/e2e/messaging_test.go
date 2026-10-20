@@ -90,8 +90,8 @@ func (m *multiCodeSink) Handle(_ context.Context, r slog.Record) error {
 
 // --- client-side update collector ---
 
-// serviceMsgEnvelope carries a service message received via updateNewMessage,
-// together with the Chats list of the envelope it arrived in.
+// serviceMsgEnvelope carries a service message from a direct, group, or channel
+// update, together with the Chats list of the envelope it arrived in.
 type serviceMsgEnvelope struct {
 	svc   *tg.MessageService
 	chats []tg.ChatClass
@@ -249,8 +249,11 @@ func (u *updateCollector) dispatch(x tg.UpdateClass, chats []tg.ChatClass) {
 	case *tg.UpdateChannelUserTyping:
 		send(u.channelTyping, up)
 	case *tg.UpdateNewChannelMessage:
-		if m, ok := up.Message.(*tg.Message); ok {
+		switch m := up.Message.(type) {
+		case *tg.Message:
 			send(u.newChannelMsg, chanMsgUpdate{Msg: m, Pts: up.Pts})
+		case *tg.MessageService:
+			send(u.serviceMsg, serviceMsgEnvelope{svc: m, chats: chats})
 		}
 	case *tg.UpdateEditChannelMessage:
 		if m, ok := up.Message.(*tg.Message); ok {

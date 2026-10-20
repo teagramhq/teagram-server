@@ -66,6 +66,7 @@ type Channel struct {
 	PreHistoryHidden     bool
 	DeletedAt            pgtype.Timestamptz
 	Signatures           bool
+	TtlPeriod            int32
 }
 
 type ChannelDeletionJob struct {
@@ -104,6 +105,8 @@ type ChannelMessage struct {
 	ActionType   int16
 	GroupedID    *int64
 	PostAuthor   *string
+	TtlPeriod    int32
+	ExpiresAt    pgtype.Timestamptz
 }
 
 type ChannelParticipant struct {
@@ -171,6 +174,7 @@ type Chat struct {
 	Date                pgtype.Timestamptz
 	PinnedMessageID     *int32
 	DefaultBannedRights []string
+	TtlPeriod           int32
 }
 
 type ChatAbout struct {
@@ -494,6 +498,8 @@ type Message struct {
 	ReplyToTrusted bool
 	GroupedID      *int64
 	FwdPostAuthor  *string
+	TtlPeriod      int32
+	ExpiresAt      pgtype.Timestamptz
 }
 
 type MessageDeleteCapacityRefusal struct {
@@ -817,6 +823,12 @@ type UserDialogFilterState struct {
 	OrderIds         []int16
 	ChangedAt        pgtype.Timestamptz
 	DefaultsSeededAt pgtype.Timestamptz
+}
+
+type UserDialogHistoryTtl struct {
+	UserLowID  int64
+	UserHighID int64
+	TtlPeriod  int32
 }
 
 type UserDialogPin struct {

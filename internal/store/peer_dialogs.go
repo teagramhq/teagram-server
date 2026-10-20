@@ -406,6 +406,7 @@ func channelFromPeerDialogRow(row db.PeerChannelDialogsForOwnerRow) Channel {
 		Megagroup:           row.ChannelMegagroup,
 		Signatures:          row.ChannelSignatures,
 		Version:             int(row.ChannelVersion),
+		TTLPeriod:           int(row.ChannelTtlPeriod),
 		Date:                row.ChannelDate.Time,
 		PinnedMessageID:     row.ChannelPinnedMessageID,
 		Username:            row.ChannelUsername,
@@ -437,6 +438,7 @@ func channelMessageFromPeerDialogRow(row db.PeerChannelDialogsForOwnerRow) Chann
 		FileID:       row.TopFileID,
 		ReplyToMsgID: row.TopReplyToMsgID,
 		ActionType:   row.TopActionType,
+		TtlPeriod:    row.TopTtlPeriod,
 		PostAuthor:   row.TopPostAuthor,
 	})
 }

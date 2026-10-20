@@ -392,6 +392,42 @@ FROM generate_series(1, $3::bigint) AS n`, chat.ID, reader.ID, int64(store.ChatR
 	}
 }
 
+func TestChatReadHistoryDoesNotRecordReceiptForExpiredMessage(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	s := open(t)
+	reader := mustUser(t, s, "+15551930411")
+	sender := mustUser(t, s, "+15551930412")
+	chat, err := s.CreateChat(ctx, sender.ID, "expired receipt", []int64{reader.ID})
+	if err != nil {
+		t.Fatalf("create chat: %v", err)
+	}
+	if _, err := store.StorePool(s).Exec(ctx, `UPDATE chats SET ttl_period=86400 WHERE id=$1`, chat.ID); err != nil {
+		t.Fatalf("set one-day chat TTL: %v", err)
+	}
+
+	message := sendChatReceiptTestMessage(t, s, chat.ID, sender.ID, "expires before read", 1930411)
+	readerCopy := chatReadReceiptCopy(t, s, reader.ID, message.FanoutID)
+	if _, err := store.StorePool(s).Exec(ctx, `UPDATE messages SET expires_at=statement_timestamp()-interval '1 second' WHERE fanout_id=$1`, message.FanoutID); err != nil {
+		t.Fatalf("expire unread message: %v", err)
+	}
+	senderBefore, err := s.State(ctx, sender.ID)
+	if err != nil {
+		t.Fatalf("sender state before expired read: %v", err)
+	}
+	if _, err := s.ReadChatHistory(ctx, reader.ID, chat.ID, readerCopy.LocalID); err != nil {
+		t.Fatalf("advance reader history over expired message: %v", err)
+	}
+	assertNoChatReadReceipt(t, s, chat.ID, message.FanoutID, reader.ID)
+	senderAfter, err := s.State(ctx, sender.ID)
+	if err != nil {
+		t.Fatalf("sender state after expired read: %v", err)
+	}
+	if senderAfter != senderBefore {
+		t.Fatalf("sender state after expired read = %+v, want unchanged %+v", senderAfter, senderBefore)
+	}
+}
+
 func TestChatReadReceiptAndReadAdvanceRollBackTogether(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()

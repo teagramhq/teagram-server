@@ -53,6 +53,7 @@ WITH owned AS (
     WHERE owner_id = sqlc.arg(owner_id)
       AND peer_type IN (1, 2)
       AND deleted = false
+      AND (expires_at IS NULL OR expires_at > statement_timestamp())
       AND message_tsv @@ plainto_tsquery('simple', sqlc.arg(query))
       AND (sqlc.arg(has_cursor)::bool = false
            OR date < sqlc.arg(tie_lo)::timestamptz
@@ -70,6 +71,7 @@ WITH owned AS (
     FROM channel_messages cm
     WHERE cm.channel_id = ANY(sqlc.arg(channel_ids)::bigint[])
       AND cm.deleted = false
+      AND (cm.expires_at IS NULL OR cm.expires_at > statement_timestamp())
       AND cm.action_type = 0
       AND cm.message_tsv @@ plainto_tsquery('simple', sqlc.arg(query))
       AND EXISTS (
@@ -127,4 +129,5 @@ WHERE channel_id = $1 AND local_id = $2
 SELECT * FROM messages
 WHERE owner_id = sqlc.arg(owner_id)
   AND local_id = ANY(sqlc.arg(local_ids)::bigint[])
-  AND deleted = false;
+  AND deleted = false
+  AND (expires_at IS NULL OR expires_at > statement_timestamp());

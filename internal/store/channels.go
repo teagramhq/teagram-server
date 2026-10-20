@@ -123,6 +123,7 @@ type Channel struct {
 	Megagroup       bool
 	Signatures      bool
 	Version         int
+	TTLPeriod       int
 	Date            time.Time
 	DeletedAt       *time.Time
 	PinnedMessageID *int32
@@ -183,6 +184,7 @@ func channelFromRow(r db.Channel) Channel {
 		Megagroup:           r.Megagroup,
 		Signatures:          r.Signatures,
 		Version:             int(r.Version),
+		TTLPeriod:           int(r.TtlPeriod),
 		Date:                r.Date.Time,
 		PinnedMessageID:     r.PinnedMessageID,
 		Username:            r.Username,
@@ -1787,6 +1789,7 @@ func (s *Store) ChannelDialogsForUserWithPins(ctx context.Context, userID int64,
 			Megagroup:           r.Megagroup,
 			Signatures:          r.Signatures,
 			Version:             int(r.Version),
+			TTLPeriod:           int(r.ChannelTtlPeriod),
 			Date:                r.ChannelDate.Time,
 			Username:            r.Username,
 			DefaultBannedRights: r.DefaultBannedRights,
@@ -1820,6 +1823,7 @@ func (s *Store) ChannelDialogsForUserWithPins(ctx context.Context, userID int64,
 				r.TopFileID,
 				r.TopReplyToMsgID,
 				r.TopActionType,
+				r.TopTtlPeriod,
 				r.TopPostAuthor,
 			})
 			row.Top = &top

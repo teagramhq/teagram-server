@@ -21,7 +21,8 @@ WHERE c.owner_id = $1
   AND c.local_id = $2
   AND m.peer_type = $3
   AND m.peer_id = $4
-  AND m.deleted = false;
+  AND m.deleted = false
+  AND (m.expires_at IS NULL OR m.expires_at > statement_timestamp());
 
 -- name: PollMessageCopiesByOwnerLocalIDs :many
 SELECT local_id
@@ -34,7 +35,8 @@ ORDER BY local_id;
 SELECT m.peer_type, m.peer_id, m.local_id
 FROM poll_message_copies c
 JOIN messages m ON m.owner_id = c.owner_id AND m.local_id = c.local_id
-WHERE c.owner_id = $1 AND c.poll_id = $2 AND m.deleted = false;
+WHERE c.owner_id = $1 AND c.poll_id = $2 AND m.deleted = false
+  AND (m.expires_at IS NULL OR m.expires_at > statement_timestamp());
 
 -- name: PollByIDForUpdate :one
 SELECT * FROM polls WHERE id = $1 FOR UPDATE;

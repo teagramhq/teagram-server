@@ -6,6 +6,7 @@ SMOKE_SCENARIOS=(
   last-seen-privacy
   contacts-get-statuses
   one-to-one
+  history-ttl
   peer-disconnect
   photo-media
   profile-photo-upload

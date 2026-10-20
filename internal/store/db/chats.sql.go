@@ -81,7 +81,7 @@ func (q *Queries) AcknowledgeChatRemovalEventsForState(ctx context.Context, arg 
 }
 
 const bumpChatVersion = `-- name: BumpChatVersion :one
-UPDATE chats SET version = version + 1 WHERE id = $1 RETURNING id, title, creator_id, version, date, pinned_message_id, default_banned_rights
+UPDATE chats SET version = version + 1 WHERE id = $1 RETURNING id, title, creator_id, version, date, pinned_message_id, default_banned_rights, ttl_period
 `
 
 func (q *Queries) BumpChatVersion(ctx context.Context, id int64) (Chat, error) {
@@ -95,6 +95,7 @@ func (q *Queries) BumpChatVersion(ctx context.Context, id int64) (Chat, error) {
 		&i.Date,
 		&i.PinnedMessageID,
 		&i.DefaultBannedRights,
+		&i.TtlPeriod,
 	)
 	return i, err
 }
@@ -287,7 +288,7 @@ func (q *Queries) ChatAdminSnapshotsForMember(ctx context.Context, arg ChatAdmin
 }
 
 const chatByID = `-- name: ChatByID :one
-SELECT id, title, creator_id, version, date, pinned_message_id, default_banned_rights FROM chats WHERE id = $1
+SELECT id, title, creator_id, version, date, pinned_message_id, default_banned_rights, ttl_period FROM chats WHERE id = $1
 `
 
 func (q *Queries) ChatByID(ctx context.Context, id int64) (Chat, error) {
@@ -301,12 +302,13 @@ func (q *Queries) ChatByID(ctx context.Context, id int64) (Chat, error) {
 		&i.Date,
 		&i.PinnedMessageID,
 		&i.DefaultBannedRights,
+		&i.TtlPeriod,
 	)
 	return i, err
 }
 
 const chatByIDForUpdate = `-- name: ChatByIDForUpdate :one
-SELECT id, title, creator_id, version, date, pinned_message_id, default_banned_rights FROM chats WHERE id = $1 FOR UPDATE
+SELECT id, title, creator_id, version, date, pinned_message_id, default_banned_rights, ttl_period FROM chats WHERE id = $1 FOR UPDATE
 `
 
 // ChatByIDForUpdate takes the chats row lock that serialises everything touching
@@ -324,6 +326,7 @@ func (q *Queries) ChatByIDForUpdate(ctx context.Context, id int64) (Chat, error)
 		&i.Date,
 		&i.PinnedMessageID,
 		&i.DefaultBannedRights,
+		&i.TtlPeriod,
 	)
 	return i, err
 }
@@ -465,12 +468,14 @@ LEFT JOIN messages creator_copy
  AND creator_copy.peer_id = c.id
  AND creator_copy.fanout_id <> 0
  AND creator_copy.deleted = false
+ AND (creator_copy.expires_at IS NULL OR creator_copy.expires_at > statement_timestamp())
 LEFT JOIN messages viewer_copy
   ON viewer_copy.owner_id = p.user_id
  AND viewer_copy.fanout_id = creator_copy.fanout_id
  AND viewer_copy.peer_type = $1::smallint
  AND viewer_copy.peer_id = c.id
  AND viewer_copy.deleted = false
+ AND (viewer_copy.expires_at IS NULL OR viewer_copy.expires_at > statement_timestamp())
 WHERE c.id = $2::bigint
 ORDER BY p.user_id
 `
@@ -521,12 +526,14 @@ JOIN messages creator_copy
  AND creator_copy.peer_id = c.id
  AND creator_copy.fanout_id <> 0
  AND creator_copy.deleted = false
+ AND (creator_copy.expires_at IS NULL OR creator_copy.expires_at > statement_timestamp())
 JOIN messages viewer_copy
   ON viewer_copy.owner_id = p.user_id
  AND viewer_copy.fanout_id = creator_copy.fanout_id
  AND viewer_copy.peer_type = $2::smallint
  AND viewer_copy.peer_id = c.id
  AND viewer_copy.deleted = false
+ AND (viewer_copy.expires_at IS NULL OR viewer_copy.expires_at > statement_timestamp())
 WHERE c.id = $3::bigint
   AND c.pinned_message_id IS NOT NULL
 `
@@ -562,6 +569,7 @@ WITH source AS (
       AND message.out = true
       AND message.deleted = false
       AND message.fanout_id <> 0
+      AND (message.expires_at IS NULL OR message.expires_at > statement_timestamp())
     LIMIT 1
 ), eligible_source AS (
     SELECT source.fanout_id
@@ -753,7 +761,7 @@ func (q *Queries) ChatRemovalSnapshotsForAuthKey(ctx context.Context, arg ChatRe
 }
 
 const chatsByIDsForMember = `-- name: ChatsByIDsForMember :many
-SELECT c.id, c.title, c.creator_id, c.version, c.date, c.pinned_message_id, c.default_banned_rights FROM chats c
+SELECT c.id, c.title, c.creator_id, c.version, c.date, c.pinned_message_id, c.default_banned_rights, c.ttl_period FROM chats c
 JOIN chat_participants p ON p.chat_id = c.id
 WHERE p.user_id = $1::bigint
   AND c.id = ANY($2::bigint[])
@@ -785,6 +793,7 @@ func (q *Queries) ChatsByIDsForMember(ctx context.Context, arg ChatsByIDsForMemb
 			&i.Date,
 			&i.PinnedMessageID,
 			&i.DefaultBannedRights,
+			&i.TtlPeriod,
 		); err != nil {
 			return nil, err
 		}
@@ -797,7 +806,7 @@ func (q *Queries) ChatsByIDsForMember(ctx context.Context, arg ChatsByIDsForMemb
 }
 
 const chatsForUser = `-- name: ChatsForUser :many
-SELECT c.id, c.title, c.creator_id, c.version, c.date, c.pinned_message_id, c.default_banned_rights FROM chats c
+SELECT c.id, c.title, c.creator_id, c.version, c.date, c.pinned_message_id, c.default_banned_rights, c.ttl_period FROM chats c
 JOIN chat_participants p ON p.chat_id = c.id
 WHERE p.user_id = $1
 ORDER BY c.id
@@ -820,6 +829,7 @@ func (q *Queries) ChatsForUser(ctx context.Context, userID int64) ([]Chat, error
 			&i.Date,
 			&i.PinnedMessageID,
 			&i.DefaultBannedRights,
+			&i.TtlPeriod,
 		); err != nil {
 			return nil, err
 		}
@@ -894,7 +904,7 @@ func (q *Queries) GetChatPinnedMessage(ctx context.Context, id int64) (*int32, e
 
 const insertChat = `-- name: InsertChat :one
 INSERT INTO chats (title, creator_id) VALUES ($1, $2)
-RETURNING id, title, creator_id, version, date, pinned_message_id, default_banned_rights
+RETURNING id, title, creator_id, version, date, pinned_message_id, default_banned_rights, ttl_period
 `
 
 type InsertChatParams struct {
@@ -913,6 +923,7 @@ func (q *Queries) InsertChat(ctx context.Context, arg InsertChatParams) (Chat, e
 		&i.Date,
 		&i.PinnedMessageID,
 		&i.DefaultBannedRights,
+		&i.TtlPeriod,
 	)
 	return i, err
 }
@@ -1136,7 +1147,7 @@ func (q *Queries) ReserveChatRemovalDifferenceStateDateForAuthKey(ctx context.Co
 }
 
 const searchPinnedChatMessageForOwner = `-- name: SearchPinnedChatMessageForOwner :many
-SELECT viewer_copy.owner_id, viewer_copy.local_id, viewer_copy.peer_id, viewer_copy.from_id, viewer_copy.date, viewer_copy.message, viewer_copy.out, viewer_copy.edit_date, viewer_copy.deleted, viewer_copy.random_id, viewer_copy.peer_local_id, viewer_copy.peer_type, viewer_copy.fanout_id, viewer_copy.action_type, viewer_copy.action_user_id, viewer_copy.file_id, viewer_copy.reply_to_msg_id, viewer_copy.fwd_from_id, viewer_copy.fwd_date, viewer_copy.fwd_channel_id, viewer_copy.fwd_channel_post, viewer_copy.message_tsv, viewer_copy.reply_to_trusted, viewer_copy.grouped_id, viewer_copy.fwd_post_author
+SELECT viewer_copy.owner_id, viewer_copy.local_id, viewer_copy.peer_id, viewer_copy.from_id, viewer_copy.date, viewer_copy.message, viewer_copy.out, viewer_copy.edit_date, viewer_copy.deleted, viewer_copy.random_id, viewer_copy.peer_local_id, viewer_copy.peer_type, viewer_copy.fanout_id, viewer_copy.action_type, viewer_copy.action_user_id, viewer_copy.file_id, viewer_copy.reply_to_msg_id, viewer_copy.fwd_from_id, viewer_copy.fwd_date, viewer_copy.fwd_channel_id, viewer_copy.fwd_channel_post, viewer_copy.message_tsv, viewer_copy.reply_to_trusted, viewer_copy.grouped_id, viewer_copy.fwd_post_author, viewer_copy.ttl_period, viewer_copy.expires_at
 FROM chats c
 JOIN chat_participants p
   ON p.chat_id = c.id AND p.user_id = $1::bigint
@@ -1147,12 +1158,14 @@ JOIN messages creator_copy
  AND creator_copy.peer_id = c.id
  AND creator_copy.fanout_id <> 0
  AND creator_copy.deleted = false
+ AND (creator_copy.expires_at IS NULL OR creator_copy.expires_at > statement_timestamp())
 JOIN messages viewer_copy
   ON viewer_copy.owner_id = p.user_id
  AND viewer_copy.fanout_id = creator_copy.fanout_id
  AND viewer_copy.peer_type = $2::smallint
  AND viewer_copy.peer_id = c.id
  AND viewer_copy.deleted = false
+ AND (viewer_copy.expires_at IS NULL OR viewer_copy.expires_at > statement_timestamp())
 WHERE c.id = $3::bigint
   AND c.pinned_message_id IS NOT NULL
   AND ($4::text = '' OR viewer_copy.message_tsv @@ plainto_tsquery('simple', $4))
@@ -1216,6 +1229,8 @@ func (q *Queries) SearchPinnedChatMessageForOwner(ctx context.Context, arg Searc
 			&i.ReplyToTrusted,
 			&i.GroupedID,
 			&i.FwdPostAuthor,
+			&i.TtlPeriod,
+			&i.ExpiresAt,
 		); err != nil {
 			return nil, err
 		}
@@ -1246,7 +1261,7 @@ const setChatDefaultBannedRights = `-- name: SetChatDefaultBannedRights :one
 UPDATE chats
 SET default_banned_rights = $2, version = version + 1
 WHERE id = $1
-RETURNING id, title, creator_id, version, date, pinned_message_id, default_banned_rights
+RETURNING id, title, creator_id, version, date, pinned_message_id, default_banned_rights, ttl_period
 `
 
 type SetChatDefaultBannedRightsParams struct {
@@ -1265,6 +1280,7 @@ func (q *Queries) SetChatDefaultBannedRights(ctx context.Context, arg SetChatDef
 		&i.Date,
 		&i.PinnedMessageID,
 		&i.DefaultBannedRights,
+		&i.TtlPeriod,
 	)
 	return i, err
 }
@@ -1288,7 +1304,7 @@ func (q *Queries) SetChatParticipantAdmin(ctx context.Context, arg SetChatPartic
 }
 
 const setChatPinnedMessage = `-- name: SetChatPinnedMessage :one
-UPDATE chats SET pinned_message_id = $2, version = version + 1 WHERE id = $1 RETURNING id, title, creator_id, version, date, pinned_message_id, default_banned_rights
+UPDATE chats SET pinned_message_id = $2, version = version + 1 WHERE id = $1 RETURNING id, title, creator_id, version, date, pinned_message_id, default_banned_rights, ttl_period
 `
 
 type SetChatPinnedMessageParams struct {
@@ -1310,12 +1326,13 @@ func (q *Queries) SetChatPinnedMessage(ctx context.Context, arg SetChatPinnedMes
 		&i.Date,
 		&i.PinnedMessageID,
 		&i.DefaultBannedRights,
+		&i.TtlPeriod,
 	)
 	return i, err
 }
 
 const setChatTitle = `-- name: SetChatTitle :one
-UPDATE chats SET title = $2, version = version + 1 WHERE id = $1 RETURNING id, title, creator_id, version, date, pinned_message_id, default_banned_rights
+UPDATE chats SET title = $2, version = version + 1 WHERE id = $1 RETURNING id, title, creator_id, version, date, pinned_message_id, default_banned_rights, ttl_period
 `
 
 type SetChatTitleParams struct {
@@ -1334,6 +1351,7 @@ func (q *Queries) SetChatTitle(ctx context.Context, arg SetChatTitleParams) (Cha
 		&i.Date,
 		&i.PinnedMessageID,
 		&i.DefaultBannedRights,
+		&i.TtlPeriod,
 	)
 	return i, err
 }

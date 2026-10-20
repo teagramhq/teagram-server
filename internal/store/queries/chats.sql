@@ -341,12 +341,14 @@ JOIN messages creator_copy
  AND creator_copy.peer_id = c.id
  AND creator_copy.fanout_id <> 0
  AND creator_copy.deleted = false
+ AND (creator_copy.expires_at IS NULL OR creator_copy.expires_at > statement_timestamp())
 JOIN messages viewer_copy
   ON viewer_copy.owner_id = p.user_id
  AND viewer_copy.fanout_id = creator_copy.fanout_id
  AND viewer_copy.peer_type = sqlc.arg(peer_type)::smallint
  AND viewer_copy.peer_id = c.id
  AND viewer_copy.deleted = false
+ AND (viewer_copy.expires_at IS NULL OR viewer_copy.expires_at > statement_timestamp())
 WHERE c.id = sqlc.arg(chat_id)::bigint
   AND c.pinned_message_id IS NOT NULL;
 
@@ -366,12 +368,14 @@ JOIN messages creator_copy
  AND creator_copy.peer_id = c.id
  AND creator_copy.fanout_id <> 0
  AND creator_copy.deleted = false
+ AND (creator_copy.expires_at IS NULL OR creator_copy.expires_at > statement_timestamp())
 JOIN messages viewer_copy
   ON viewer_copy.owner_id = p.user_id
  AND viewer_copy.fanout_id = creator_copy.fanout_id
  AND viewer_copy.peer_type = sqlc.arg(peer_type)::smallint
  AND viewer_copy.peer_id = c.id
  AND viewer_copy.deleted = false
+ AND (viewer_copy.expires_at IS NULL OR viewer_copy.expires_at > statement_timestamp())
 WHERE c.id = sqlc.arg(chat_id)::bigint
   AND c.pinned_message_id IS NOT NULL
   AND (sqlc.arg(query)::text = '' OR viewer_copy.message_tsv @@ plainto_tsquery('simple', sqlc.arg(query)))
@@ -396,12 +400,14 @@ LEFT JOIN messages creator_copy
  AND creator_copy.peer_id = c.id
  AND creator_copy.fanout_id <> 0
  AND creator_copy.deleted = false
+ AND (creator_copy.expires_at IS NULL OR creator_copy.expires_at > statement_timestamp())
 LEFT JOIN messages viewer_copy
   ON viewer_copy.owner_id = p.user_id
  AND viewer_copy.fanout_id = creator_copy.fanout_id
  AND viewer_copy.peer_type = sqlc.arg(peer_type)::smallint
  AND viewer_copy.peer_id = c.id
  AND viewer_copy.deleted = false
+ AND (viewer_copy.expires_at IS NULL OR viewer_copy.expires_at > statement_timestamp())
 WHERE c.id = sqlc.arg(chat_id)::bigint
 ORDER BY p.user_id;
 
@@ -444,6 +450,7 @@ WITH source AS (
       AND message.out = true
       AND message.deleted = false
       AND message.fanout_id <> 0
+      AND (message.expires_at IS NULL OR message.expires_at > statement_timestamp())
     LIMIT 1
 ), eligible_source AS (
     SELECT source.fanout_id
