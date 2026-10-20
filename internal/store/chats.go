@@ -560,6 +560,107 @@ func (s *Store) RemoveChatUser(ctx context.Context, chatID, target, callerID int
 	return true, sender, perOwner, nil
 }
 
+// DeleteChat deactivates a basic chat and clears every current participant's
+// message copies in one transaction. The creator check and member snapshot are
+// made under the chats row lock, before the complete sorted owner-lock pass.
+// Empty membership is the tombstone state: creators cannot leave, and the chats
+// row remains so its id is never reused. Copies owned by former members are
+// intentionally left frozen, matching group message revoke behavior.
+func (s *Store) DeleteChat(ctx context.Context, chatID, callerID int64) (map[int64]int, error) {
+	if chatID <= 0 || callerID <= 0 {
+		return nil, ErrChatAdminRequired
+	}
+
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("begin delete chat: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }() //nolint:errcheck // no-op after commit
+	qtx := s.q.WithTx(tx)
+
+	chat, err := qtx.ChatByIDForUpdate(ctx, chatID)
+	switch {
+	case errors.Is(err, pgx.ErrNoRows):
+		return nil, ErrChatAdminRequired
+	case err != nil:
+		return nil, fmt.Errorf("lock chat for deletion: %w", err)
+	case chat.CreatorID != callerID:
+		return nil, ErrChatAdminRequired
+	}
+
+	parts, err := qtx.ChatParticipants(ctx, chatID)
+	if err != nil {
+		return nil, fmt.Errorf("list chat participants for deletion: %w", err)
+	}
+	if len(parts) == 0 {
+		// The creator is never removable, so an empty chat is a completed delete.
+		// Keep repeated calls successful and silent after the tombstone commit.
+		if err := tx.Commit(ctx); err != nil {
+			return nil, fmt.Errorf("commit repeated chat deletion: %w", err)
+		}
+		return map[int64]int{}, nil
+	}
+
+	ownerIDs := make([]int64, len(parts))
+	for i, part := range parts {
+		ownerIDs[i] = part.UserID
+	}
+	if err := lockOwners(ctx, tx, ownerIDs...); err != nil {
+		return nil, err
+	}
+
+	copies, err := qtx.ChatMessageCopiesForDeletion(ctx, db.ChatMessageCopiesForDeletionParams{
+		ChatID: chatID, OwnerIds: ownerIDs,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("load current members' message copies: %w", err)
+	}
+	refs := make([]messageCopyRef, len(copies))
+	for i, copy := range copies {
+		refs[i] = messageCopyRef{ownerID: copy.OwnerID, localID: copy.LocalID}
+	}
+	if err := lockPollsForDeletedMessageCopies(ctx, qtx, refs); err != nil {
+		return nil, err
+	}
+
+	for _, part := range parts {
+		removed, err := removeParticipant(ctx, tx, qtx, chatID, part.UserID)
+		if err != nil {
+			return nil, fmt.Errorf("remove chat participant %d: %w", part.UserID, err)
+		}
+		if !removed {
+			return nil, fmt.Errorf("remove chat participant %d: row disappeared under chat lock", part.UserID)
+		}
+	}
+	if _, err := qtx.BumpChatVersion(ctx, chatID); err != nil {
+		return nil, fmt.Errorf("bump chat version after deletion: %w", err)
+	}
+
+	perOwner := make(map[int64]int, len(ownerIDs))
+	for _, copy := range copies {
+		pts, changed, err := markMessageCopyDeleted(ctx, qtx, copy.OwnerID, copy.LocalID)
+		if err != nil {
+			return nil, fmt.Errorf("delete chat message copy %d:%d: %w", copy.OwnerID, copy.LocalID, err)
+		}
+		if changed {
+			perOwner[copy.OwnerID] = pts
+		}
+	}
+
+	for _, ownerID := range ownerIDs {
+		if err := qtx.DeleteDialogForPeer(ctx, db.DeleteDialogForPeerParams{
+			OwnerID: ownerID, PeerType: int16(PeerTypeChat), PeerID: chatID,
+		}); err != nil {
+			return nil, fmt.Errorf("delete chat dialog for owner %d: %w", ownerID, err)
+		}
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return nil, fmt.Errorf("commit delete chat: %w", err)
+	}
+	return perOwner, nil
+}
+
 // SetChatTitle renames the chat and announces it in one transaction. Current
 // default rights authorize non-creators under the locked chat row.
 func (s *Store) SetChatTitle(ctx context.Context, chatID, callerID int64, title string) (chat Chat, sender Message, perOwner map[int64]int, err error) {

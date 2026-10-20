@@ -153,7 +153,7 @@ func newUpdateCollector() *updateCollector {
 	return &updateCollector{
 		newMsg:         make(chan *tg.Message, 4),
 		editMsg:        make(chan *tg.Message, 4),
-		delMsg:         make(chan []int, 4),
+		delMsg:         make(chan []int, 64),
 		readInbox:      make(chan *tg.UpdateReadHistoryInbox, 4),
 		readOutbox:     make(chan int, 4),
 		readOutboxPts:  make(chan int, 4),

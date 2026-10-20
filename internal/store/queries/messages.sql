@@ -37,6 +37,17 @@ SELECT * FROM messages
 WHERE fanout_id = $1 AND fanout_id <> 0
 ORDER BY owner_id;
 
+-- ChatMessageCopiesForDeletion returns active copies owned by participants
+-- captured under the chat row lock. Former members are excluded so their
+-- frozen copies retain the existing group-revoke behavior.
+-- name: ChatMessageCopiesForDeletion :many
+SELECT * FROM messages
+WHERE peer_type = 2
+  AND peer_id = sqlc.arg(chat_id)::bigint
+  AND owner_id = ANY(sqlc.arg(owner_ids)::bigint[])
+  AND deleted = false
+ORDER BY owner_id, local_id;
+
 -- name: HistoryPage :many
 SELECT * FROM messages
 WHERE owner_id = sqlc.arg(owner_id)

@@ -157,6 +157,10 @@ func TestSmoke(t *testing.T) {
 		t.Parallel()
 		testSmokeBasicGroup(t)
 	})
+	t.Run("delete-basic-group", func(t *testing.T) {
+		t.Parallel()
+		testSmokeDeleteBasicGroup(t)
+	})
 	t.Run("delete-history", func(t *testing.T) {
 		t.Parallel()
 		testDeleteHistoryKeepsDialogAndOnlyClearsCaller(t)
@@ -2614,6 +2618,321 @@ func testSmokeBasicGroup(t *testing.T) {
 		if !ok || action.Title != "Member renamed group" {
 			t.Fatalf("member %d rename action = %#v", member.id, env.svc.Action)
 		}
+	}
+}
+
+func testSmokeDeleteBasicGroup(t *testing.T) {
+	t.Helper()
+	f := newSmokeFixtureWithDeadline(t, config.RegistrationClosed, nil, 180*time.Second)
+	const phoneA, phoneB, phoneC, phoneD, phoneE = "+15551047401", "+15551047402", "+15551047403", "+15551047404", "+15551047405"
+	seedSmokeUsers(t, f, phoneA, phoneB, phoneC, phoneD, phoneE)
+	a, b, c, d, e := newSmokeClient(t, f, "Delete group A", phoneA), newSmokeClient(t, f, "Delete group B", phoneB), newSmokeClient(t, f, "Delete group C", phoneC), newSmokeClient(t, f, "Delete group former member", phoneD), newSmokeClient(t, f, "Delete group stranger", phoneE)
+
+	var chatID int64
+	if err := a.call(f.ctx, func(ctx context.Context, api *tg.Client) error {
+		created, err := api.MessagesCreateChat(ctx, &tg.MessagesCreateChatRequest{
+			Title: "Delete smoke group",
+			Users: []tg.InputUserClass{inputUser(a.id, b.id), inputUser(a.id, c.id)},
+		})
+		if err != nil {
+			return err
+		}
+		updates, ok := created.Updates.(*tg.Updates)
+		if !ok || len(updates.Chats) != 1 {
+			return fmt.Errorf("createChat result = %T with %d chats, want Updates with one chat", created.Updates, len(updates.Chats))
+		}
+		chat, ok := updates.Chats[0].(*tg.Chat)
+		if !ok {
+			return fmt.Errorf("created chat = %T, want *tg.Chat", updates.Chats[0])
+		}
+		chatID = chat.ID
+		return nil
+	}); err != nil {
+		t.Fatalf("create delete smoke group: %v", err)
+	}
+
+	assertChannelRPCError(t, f.ctx, b.cmds, "CHAT_ADMIN_REQUIRED", func(ctx context.Context, api *tg.Client) error {
+		_, err := api.MessagesDeleteChat(ctx, chatID)
+		return err
+	})
+	if err := a.call(f.ctx, func(ctx context.Context, api *tg.Client) error {
+		_, err := api.MessagesAddChatUser(ctx, &tg.MessagesAddChatUserRequest{
+			ChatID: chatID, UserID: inputUser(a.id, d.id),
+		})
+		return err
+	}); err != nil {
+		t.Fatalf("creator add former member before deletion: %v", err)
+	}
+	if err := d.call(f.ctx, func(ctx context.Context, api *tg.Client) error {
+		_, err := api.MessagesSendMessage(ctx, &tg.MessagesSendMessageRequest{
+			Peer: &tg.InputPeerChat{ChatID: chatID}, Message: "former member copy", RandomID: 1047400,
+		})
+		return err
+	}); err != nil {
+		t.Fatalf("former member send before removal: %v", err)
+	}
+	if err := a.call(f.ctx, func(ctx context.Context, api *tg.Client) error {
+		_, err := api.MessagesDeleteChatUser(ctx, &tg.MessagesDeleteChatUserRequest{
+			ChatID: chatID, UserID: inputUser(a.id, d.id),
+		})
+		return err
+	}); err != nil {
+		t.Fatalf("creator remove former member before deletion: %v", err)
+	}
+	chatBeforeRefusals, found, err := f.store.ChatByID(f.ctx, chatID)
+	if err != nil || !found {
+		t.Fatalf("chat before refusal checks = %+v, found=%v err=%v", chatBeforeRefusals, found, err)
+	}
+	statesBeforeRefusals := make(map[int64]store.State, 5)
+	for _, member := range []*smokeClient{a, b, c, d, e} {
+		statesBeforeRefusals[member.id], err = f.store.StateWithoutUnread(f.ctx, member.id)
+		if err != nil {
+			t.Fatalf("read member %d state before delete refusals: %v", member.id, err)
+		}
+	}
+	assertChannelRPCError(t, f.ctx, d.cmds, "CHAT_ADMIN_REQUIRED", func(ctx context.Context, api *tg.Client) error {
+		_, err := api.MessagesDeleteChat(ctx, chatID)
+		return err
+	})
+	assertChannelRPCError(t, f.ctx, e.cmds, "CHAT_ADMIN_REQUIRED", func(ctx context.Context, api *tg.Client) error {
+		_, err := api.MessagesDeleteChat(ctx, chatID)
+		return err
+	})
+	chatAfterRefusals, found, err := f.store.ChatByID(f.ctx, chatID)
+	if err != nil || !found || chatAfterRefusals.Version != chatBeforeRefusals.Version {
+		t.Fatalf("chat changed after delete refusals: before=%+v after=%+v found=%v err=%v", chatBeforeRefusals, chatAfterRefusals, found, err)
+	}
+	participantsAfterRefusals, err := f.store.Participants(f.ctx, chatID)
+	if err != nil || len(participantsAfterRefusals) != 3 {
+		t.Fatalf("participants after removed-member/stranger refusals = %v, err=%v; want three current members", participantsAfterRefusals, err)
+	}
+	for _, member := range []*smokeClient{a, b, c, d, e} {
+		state, err := f.store.StateWithoutUnread(f.ctx, member.id)
+		if err != nil {
+			t.Fatalf("read member %d state after delete refusals: %v", member.id, err)
+		}
+		if state.Pts != statesBeforeRefusals[member.id].Pts {
+			t.Errorf("member %d pts after delete refusal = %d, want unchanged %d", member.id, state.Pts, statesBeforeRefusals[member.id].Pts)
+		}
+	}
+
+	for i, member := range []*smokeClient{a, b, c} {
+		text := fmt.Sprintf("delete group message %d", i+1)
+		if err := member.call(f.ctx, func(ctx context.Context, api *tg.Client) error {
+			_, err := api.MessagesSendMessage(ctx, &tg.MessagesSendMessageRequest{
+				Peer: &tg.InputPeerChat{ChatID: chatID}, Message: text, RandomID: 1047401 + int64(i),
+			})
+			return err
+		}); err != nil {
+			t.Fatalf("member %d send before deletion: %v", member.id, err)
+		}
+	}
+
+	messageIDs := make(map[int64]map[int]bool, 3)
+	for _, member := range []*smokeClient{a, b, c} {
+		if err := member.call(f.ctx, func(ctx context.Context, api *tg.Client) error {
+			result, err := api.MessagesGetHistory(ctx, &tg.MessagesGetHistoryRequest{
+				Peer: &tg.InputPeerChat{ChatID: chatID}, Limit: 100,
+			})
+			if err != nil {
+				return err
+			}
+			history, ok := result.(*tg.MessagesMessages)
+			if !ok {
+				return fmt.Errorf("getHistory before deletion = %T, want *tg.MessagesMessages", result)
+			}
+			messageIDs[member.id] = make(map[int]bool, len(history.Messages))
+			for _, message := range history.Messages {
+				messageIDs[member.id][message.GetID()] = true
+			}
+			if len(messageIDs[member.id]) < 4 {
+				return fmt.Errorf("member %d history has %d messages, want create/add notices and three messages", member.id, len(messageIDs[member.id]))
+			}
+			return nil
+		}); err != nil {
+			t.Fatalf("read member %d history before deletion: %v", member.id, err)
+		}
+	}
+
+	type deleteEnvelope struct {
+		ownerID int64
+		ids     []int
+	}
+	deleteUpdates := make(chan deleteEnvelope, 64)
+	drainCtx, stopDraining := context.WithCancel(f.ctx)
+	var drainers sync.WaitGroup
+	for _, member := range []*smokeClient{a, b, c} {
+		drainers.Go(func() {
+			for {
+				select {
+				case ids := <-member.seen.delMsg:
+					deleteUpdates <- deleteEnvelope{ownerID: member.id, ids: ids}
+				case <-drainCtx.Done():
+					return
+				}
+			}
+		})
+	}
+	defer func() {
+		stopDraining()
+		drainers.Wait()
+	}()
+	chatBeforeDelete, found, err := f.store.ChatByID(f.ctx, chatID)
+	if err != nil || !found {
+		t.Fatalf("chat before deletion = %+v, found=%v err=%v", chatBeforeDelete, found, err)
+	}
+
+	var deleted bool
+	if err := a.call(f.ctx, func(ctx context.Context, api *tg.Client) error {
+		var err error
+		deleted, err = api.MessagesDeleteChat(ctx, chatID)
+		return err
+	}); err != nil {
+		t.Fatalf("creator deleteChat: %v", err)
+	}
+	if !deleted {
+		t.Fatal("creator deleteChat returned false")
+	}
+
+	pending := make(map[int64]map[int]bool, len(messageIDs))
+	for ownerID, ids := range messageIDs {
+		pending[ownerID] = make(map[int]bool, len(ids))
+		for id := range ids {
+			pending[ownerID][id] = true
+		}
+	}
+	for len(pending) > 0 {
+		var event deleteEnvelope
+		select {
+		case event = <-deleteUpdates:
+		case <-f.ctx.Done():
+			t.Fatalf("timed out with deleteChat message copies still pending: %v", pending)
+		}
+		for _, id := range event.ids {
+			delete(pending[event.ownerID], id)
+		}
+		if len(pending[event.ownerID]) == 0 {
+			delete(pending, event.ownerID)
+		}
+	}
+
+	for _, member := range []*smokeClient{a, b, c} {
+		if err := member.call(f.ctx, func(ctx context.Context, api *tg.Client) error {
+			result, err := api.MessagesGetDialogs(ctx, &tg.MessagesGetDialogsRequest{
+				OffsetPeer: &tg.InputPeerEmpty{}, Limit: 100,
+			})
+			if err != nil {
+				return err
+			}
+			var dialogs []tg.DialogClass
+			switch page := result.(type) {
+			case *tg.MessagesDialogs:
+				dialogs = page.Dialogs
+			case *tg.MessagesDialogsSlice:
+				dialogs = page.Dialogs
+			default:
+				return fmt.Errorf("getDialogs after deletion = %T, want dialogs result", result)
+			}
+			for _, item := range dialogs {
+				dialog, ok := item.(*tg.Dialog)
+				if !ok {
+					continue
+				}
+				peer, ok := dialog.Peer.(*tg.PeerChat)
+				if ok && peer.ChatID == chatID {
+					return fmt.Errorf("member %d still has deleted chat %d in getDialogs", member.id, chatID)
+				}
+			}
+			return nil
+		}); err != nil {
+			t.Fatalf("member %d getDialogs after deletion: %v", member.id, err)
+		}
+	}
+
+	assertChannelRPCError(t, f.ctx, b.cmds, "PEER_ID_INVALID", func(ctx context.Context, api *tg.Client) error {
+		_, err := api.MessagesGetHistory(ctx, &tg.MessagesGetHistoryRequest{
+			Peer: &tg.InputPeerChat{ChatID: chatID}, Limit: 10,
+		})
+		return err
+	})
+	assertChannelRPCError(t, f.ctx, b.cmds, "PEER_ID_INVALID", func(ctx context.Context, api *tg.Client) error {
+		_, err := api.MessagesSendMessage(ctx, &tg.MessagesSendMessageRequest{
+			Peer: &tg.InputPeerChat{ChatID: chatID}, Message: "after delete", RandomID: 1047499,
+		})
+		return err
+	})
+
+	storedChat, found, err := f.store.ChatByID(f.ctx, chatID)
+	if err != nil || !found || storedChat.ID != chatID {
+		t.Fatalf("deleted chat row = %+v, found=%v err=%v; want retained tombstone %d", storedChat, found, err, chatID)
+	}
+	if storedChat.Version != chatBeforeDelete.Version+1 {
+		t.Fatalf("deleted chat version = %d, want one bump from %d", storedChat.Version, chatBeforeDelete.Version)
+	}
+	participants, err := f.store.Participants(f.ctx, chatID)
+	if err != nil || len(participants) != 0 {
+		t.Fatalf("deleted chat participants = %v, err=%v; want none", participants, err)
+	}
+	formerHistory, err := f.store.History(f.ctx, d.id, store.PeerTypeChat, chatID, 0, 100)
+	if err != nil {
+		t.Fatalf("former member history after deletion: %v", err)
+	}
+	var formerCopyRetained bool
+	for _, message := range formerHistory {
+		if message.Text == "former member copy" && !message.Deleted {
+			formerCopyRetained = true
+		}
+	}
+	if !formerCopyRetained {
+		t.Fatalf("former member history = %+v, want frozen copy retained", formerHistory)
+	}
+	if err := b.call(f.ctx, func(ctx context.Context, api *tg.Client) error {
+		result, err := api.MessagesGetChats(ctx, []int64{chatID})
+		if err != nil {
+			return err
+		}
+		chats, ok := result.(*tg.MessagesChats)
+		if !ok || len(chats.Chats) != 1 {
+			return fmt.Errorf("getChats after deletion = %T with %d chats, want one tombstone", result, len(chats.GetChats()))
+		}
+		forbidden, ok := chats.Chats[0].(*tg.ChatForbidden)
+		if !ok || forbidden.ID != chatID || forbidden.Title != "" {
+			return fmt.Errorf("deleted chat = %T/%+v, want empty ChatForbidden %d", chats.Chats[0], chats.Chats[0], chatID)
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("member getChats after deletion: %v", err)
+	}
+
+	states := make(map[int64]store.State, 3)
+	for _, member := range []*smokeClient{a, b, c} {
+		states[member.id], err = f.store.StateWithoutUnread(f.ctx, member.id)
+		if err != nil {
+			t.Fatalf("read member %d state before repeated delete: %v", member.id, err)
+		}
+	}
+	if err := a.call(f.ctx, func(ctx context.Context, api *tg.Client) error {
+		var err error
+		deleted, err = api.MessagesDeleteChat(ctx, chatID)
+		return err
+	}); err != nil {
+		t.Fatalf("repeat creator deleteChat: %v", err)
+	}
+	if !deleted {
+		t.Fatal("repeat creator deleteChat returned false")
+	}
+	for _, member := range []*smokeClient{a, b, c} {
+		state, err := f.store.StateWithoutUnread(f.ctx, member.id)
+		if err != nil {
+			t.Fatalf("read member %d state after repeated delete: %v", member.id, err)
+		}
+		if state.Pts != states[member.id].Pts {
+			t.Errorf("member %d pts after repeated delete = %d, want unchanged %d", member.id, state.Pts, states[member.id].Pts)
+		}
+	}
+	repeatedChat, found, err := f.store.ChatByID(f.ctx, chatID)
+	if err != nil || !found || repeatedChat.Version != storedChat.Version {
+		t.Errorf("chat after repeated delete = %+v, found=%v err=%v; want unchanged version %d", repeatedChat, found, err, storedChat.Version)
 	}
 }
 

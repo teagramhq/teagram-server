@@ -471,6 +471,7 @@ func newWithPhotoThumbsAndDialogFilterSyncAndUploadPartTTLAndTurnstile(s *store.
 	register(d, tg.MessagesUpdatePinnedMessageRequestTypeID, h.handleUpdatePinnedMessage)
 	register(d, tg.MessagesUnpinAllMessagesRequestTypeID, h.handleUnpinAllMessages)
 	register(d, tg.MessagesCreateChatRequestTypeID, h.handleCreateChat)
+	register(d, tg.MessagesDeleteChatRequestTypeID, h.handleDeleteChat)
 	register(d, tg.MessagesGetFullChatRequestTypeID, h.handleGetFullChat)
 	register(d, tg.MessagesGetChatsRequestTypeID, h.handleGetChats)
 	register(d, tg.MessagesEditChatTitleRequestTypeID, h.handleEditChatTitle)

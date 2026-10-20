@@ -223,6 +223,34 @@ func (h *handlers) handleCreateChat(r *mtproto.Request) (bin.Encoder, error) {
 	return &tg.MessagesInvitedUsers{Updates: ups, MissingInvitees: missing}, nil
 }
 
+// handleDeleteChat serves messages.deleteChat. The store checks creator
+// ownership under the chat row lock, removes the current member set, and records
+// per-copy delete events in the same commit. Every refused caller gets the same
+// non-PEER_ID_INVALID error because the desktop retries that error by adding
+// itself to the chat.
+func (h *handlers) handleDeleteChat(r *mtproto.Request) (bin.Encoder, error) {
+	var req tg.MessagesDeleteChatRequest
+	if err := req.Decode(r.Buf); err != nil {
+		return nil, errMethodNotImpl
+	}
+	if r.UserID == 0 {
+		return nil, errAuthKeyUnreg
+	}
+
+	perOwner, err := h.store.DeleteChat(r.Ctx, req.ChatID, r.UserID)
+	if errors.Is(err, store.ErrChatAdminRequired) {
+		return nil, errChatAdminRequired
+	}
+	if err != nil {
+		h.log.Error("delete chat", "chat_id", req.ChatID, "user_id", r.UserID, "err", err)
+		return nil, errInternal
+	}
+	if len(perOwner) > 0 {
+		h.notifyOwners(r.Ctx, perOwner, 0)
+	}
+	return &tg.BoolTrue{}, nil
+}
+
 // handleEditChatTitle serves messages.editChatTitle: one store call renames the
 // chat and announces the rename atomically.
 //
