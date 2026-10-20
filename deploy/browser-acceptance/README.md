@@ -328,7 +328,9 @@ high-water again after its launch. Success prints exactly:
 ```
 
 Failures use the probe's fixed codes, `browser-failed` for a failed QA
-preflight, or the wrapper's fixed errors. A failed QA preflight also includes
+preflight, or the wrapper's fixed errors. `database-unavailable` also includes
+`database_failure_category`, one of `config`, `connect`, `auth`, `query`,
+`evidence-invalid`, or `unknown`. A failed QA preflight also includes
 `qa_failure_code`; missing or unrecognized child codes become `unknown`. If a
 post-run host check also fails, its code remains top-level and the QA code is
 retained. Wrapper cleanup failure replaces the top-level code with
@@ -495,7 +497,7 @@ unsuccessfully. Every other post-launch failure without proven cleanup remains
 `cleanup-unproven`. Failures exit non-zero. No account IDs, key IDs, passwords,
 fingerprints or raw Docker, DB, server or browser errors are emitted or saved.
 
-Once the wrapper validates a v4 probe line in acceptance mode, it prints one
+Once the wrapper validates a v5 probe line in acceptance mode, it prints one
 flat JSON line with exactly these keys: `evidenceVersion` (2), `status`,
 `code`, `teardown`, `targetHost`, `sourceCommit`, `serverSourceCommit`,
 `registrationMode`, `accountEvidence`, `accountsUnchanged`,
@@ -508,7 +510,8 @@ flat JSON line with exactly these keys: `evidenceVersion` (2), `status`,
 `captureTelegramSuffix`, `captureOther`, `captureBlocked`,
 `captureUpstreamFailures`, `qaResult`, `phase`, `outcome`, `logout`,
 `wssConnections`, `wssEndpointMatched`, `submission`, `chatList`,
-`chatListRows`, and `qaFailureCode`. `sourceCommit` comes from the manifest;
+`chatListRows`, and `qaFailureCode`. `databaseFailureCategory` is also present
+only when `code` is `database-unavailable`. `sourceCommit` comes from the manifest;
 all probe fields except `schemaVersion`, `ok`, and `code` are retained. Invalid
 QA fields use `unknown`, zero, or false defaults; malformed, absent, and v2 QA
 lines cannot erase probe evidence. QA v2 is invalid under this contract.
@@ -524,4 +527,5 @@ evidence, and exits non-zero. Code-only output remains for `runtime-failed`
 when no valid probe line exists and for failures before the probe runs.
 Readiness output is unchanged, and wrapper stderr remains suppressed. The
 preflight line reports the proven `registration_mode` and
-`account_evidence_complete`.
+`account_evidence_complete`; database failures also report their fixed
+`database_failure_category`.
