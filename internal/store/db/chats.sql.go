@@ -663,6 +663,44 @@ func (q *Queries) ChatRemovalLatestDifferenceStateDateForAuthKey(ctx context.Con
 	return column_1, err
 }
 
+const chatRemovalPendingResumeDatesForState = `-- name: ChatRemovalPendingResumeDatesForState :many
+SELECT resume_date
+FROM chat_removal_client_state
+WHERE owner_id = $1
+  AND auth_key_id = $2
+  AND difference_state_date = $3
+  AND acknowledged_at IS NULL
+ORDER BY chat_id
+`
+
+type ChatRemovalPendingResumeDatesForStateParams struct {
+	OwnerID             int64
+	AuthKeyID           int64
+	DifferenceStateDate *int64
+}
+
+// ChatRemovalPendingResumeDatesForState maps an unacknowledged removal token
+// back to its logical Date without advancing client acknowledgement state.
+func (q *Queries) ChatRemovalPendingResumeDatesForState(ctx context.Context, arg ChatRemovalPendingResumeDatesForStateParams) ([]*int64, error) {
+	rows, err := q.db.Query(ctx, chatRemovalPendingResumeDatesForState, arg.OwnerID, arg.AuthKeyID, arg.DifferenceStateDate)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []*int64
+	for rows.Next() {
+		var resume_date *int64
+		if err := rows.Scan(&resume_date); err != nil {
+			return nil, err
+		}
+		items = append(items, resume_date)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const chatRemovalSnapshotsForAuthKey = `-- name: ChatRemovalSnapshotsForAuthKey :many
 SELECT event.owner_id, event.chat_id, event.version
 FROM chat_removal_events AS event

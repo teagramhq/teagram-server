@@ -1285,6 +1285,13 @@ func (h *handlers) handleGetDifferenceForConn(c *mtproto.Conn, r *mtproto.Reques
 		return nil, nil, errAuthKeyUnreg
 	}
 	chatRemovalAuthKeyID := mtproto.AuthKeyIDInt64(r.AuthKeyID)
+	pendingRemovalResumeDate, pendingRemovalStateFound, err := h.store.ChatRemovalPendingResumeDateForState(
+		r.Ctx, r.UserID, chatRemovalAuthKeyID, req.Date,
+	)
+	if err != nil {
+		h.log.Error("read pending get difference chat removal state", "user_id", r.UserID, "err", err)
+		return nil, nil, errInternal
+	}
 	confirmedRemovalResumeDate, removalStateConfirmed, err := h.store.AcknowledgeChatRemovalEventsForState(
 		r.Ctx, r.UserID, chatRemovalAuthKeyID, req.Pts, req.Qts, req.Date,
 	)
@@ -1320,6 +1327,8 @@ func (h *handlers) handleGetDifferenceForConn(c *mtproto.Conn, r *mtproto.Reques
 	now := h.now()
 	if removalStateConfirmed {
 		draftReferenceDate = time.Unix(int64(confirmedRemovalResumeDate), 0)
+	} else if pendingRemovalStateFound {
+		draftReferenceDate = time.Unix(int64(pendingRemovalResumeDate), 0)
 	}
 	if now.Before(draftReferenceDate) {
 		draftReferenceDate = now
@@ -1618,7 +1627,7 @@ func (h *handlers) handleGetDifferenceForConn(c *mtproto.Conn, r *mtproto.Reques
 	// guarded overlap and suppress versions already acknowledged by this auth key,
 	// so moved counters and late commits do not skip rows behind the high-water tuple.
 	clientDate := time.Unix(int64(req.Date), 0)
-	if removalStateConfirmed || (notifySettingsCursorStateFound && !notifySettingsCursorFound) {
+	if removalStateConfirmed || pendingRemovalStateFound || (notifySettingsCursorStateFound && !notifySettingsCursorFound) {
 		clientDate = draftReferenceDate
 	}
 	var secretChats []store.SecretChat

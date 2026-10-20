@@ -190,6 +190,17 @@ FROM chat_removal_client_state
 WHERE owner_id = sqlc.arg(owner_id)
   AND auth_key_id = sqlc.arg(auth_key_id);
 
+-- ChatRemovalPendingResumeDatesForState maps an unacknowledged removal token
+-- back to its logical Date without advancing client acknowledgement state.
+-- name: ChatRemovalPendingResumeDatesForState :many
+SELECT resume_date
+FROM chat_removal_client_state
+WHERE owner_id = sqlc.arg(owner_id)
+  AND auth_key_id = sqlc.arg(auth_key_id)
+  AND difference_state_date = sqlc.arg(difference_state_date)
+  AND acknowledged_at IS NULL
+ORDER BY chat_id;
+
 -- A client confirms only rows issued with the Date it presents to
 -- updates.getDifference, once its PTS and QTS have reached the returned state.
 -- Return the logical Date used before the token so other Date-based streams resume.

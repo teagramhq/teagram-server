@@ -377,13 +377,16 @@ func TestChatRemovalDifferenceAcknowledgesOnlyConfirmedDifferenceState(t *testin
 	}
 }
 
-func TestChatRemovalAcknowledgementRecoversSecretChatsWithoutSettingsCursor(t *testing.T) {
+func TestChatRemovalStaleReplayRecoversSecretChatsWithoutSettingsCursor(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
 	s := openStore(t)
 	owner, err := s.CreateUser(ctx, "+15551290105")
 	if err != nil {
 		t.Fatalf("create owner: %v", err)
+	}
+	if _, _, _, _, err := s.SendMessage(ctx, owner.ID, owner.ID, "seed pts", 991104, 0, 0); err != nil {
+		t.Fatalf("seed owner pts: %v", err)
 	}
 	peer, err := s.CreateUser(ctx, "+15551290106")
 	if err != nil {
@@ -445,26 +448,63 @@ func TestChatRemovalAcknowledgementRecoversSecretChatsWithoutSettingsCursor(t *t
 
 	secretChat, _, err := s.CreateSecretChatRequest(ctx, owner.ID, peer.ID, []byte("ga"), []byte("hash"), 991105, store.RateLimitConfig{})
 	if err != nil {
-		t.Fatalf("create secret chat between removal reply and acknowledgement: %v", err)
+		t.Fatalf("create secret chat between removal reply and stale replay: %v", err)
 	}
-	second, err := api.GetDifferenceForTestWithAuthKey(s, owner.ID, authKeyID, &tg.UpdatesGetDifferenceRequest{
-		Pts: firstState.Pts, Qts: firstState.Qts, Date: firstState.Date,
+	staleReplay, err := api.GetDifferenceForTestWithAuthKey(s, owner.ID, authKeyID, &tg.UpdatesGetDifferenceRequest{
+		Pts: firstState.Pts - 1, Qts: firstState.Qts, Date: firstState.Date,
 	})
 	if err != nil {
-		t.Fatalf("get difference acknowledging removal: %v", err)
+		t.Fatalf("get difference replaying removal with stale pts: %v", err)
 	}
-	var secondUpdates []tg.UpdateClass
-	switch difference := second.(type) {
+	var staleUpdates []tg.UpdateClass
+	var staleState tg.UpdatesState
+	switch difference := staleReplay.(type) {
 	case *tg.UpdatesDifference:
-		secondUpdates = difference.OtherUpdates
+		staleUpdates, staleState = difference.OtherUpdates, difference.State
 	case *tg.UpdatesDifferenceSlice:
-		secondUpdates = difference.OtherUpdates
+		staleUpdates, staleState = difference.OtherUpdates, difference.IntermediateState
 	case *tg.UpdatesDifferenceEmpty:
 	default:
-		t.Fatalf("acknowledgement difference = %T, want a difference result", second)
+		t.Fatalf("stale replay difference = %T, want a difference result", staleReplay)
 	}
-	if !hasEncryptionUpdateForChat(secondUpdates, secretChat.ID) {
-		t.Fatalf("acknowledgement updates = %+v, want secret-chat lifecycle update for chat %d", secondUpdates, secretChat.ID)
+	if !slices.ContainsFunc(staleUpdates, func(update tg.UpdateClass) bool {
+		removal, ok := update.(*tg.UpdateChatParticipantDelete)
+		return ok && removal.ChatID == chat.ID
+	}) {
+		t.Fatalf("stale replay updates = %+v, want the unacknowledged removal for group %d", staleUpdates, chat.ID)
+	}
+	if !hasEncryptionUpdateForChat(staleUpdates, secretChat.ID) {
+		t.Fatalf("stale replay updates = %+v, want secret-chat lifecycle update for chat %d", staleUpdates, secretChat.ID)
+	}
+	if staleState.Date <= firstState.Date {
+		t.Fatalf("stale replay date = %d, want a new removal token after %d", staleState.Date, firstState.Date)
+	}
+	if _, found, err := s.NotifySettingsDifferenceCursorByAuthKey(ctx, keyID); err != nil {
+		t.Fatalf("read notification settings cursor after stale replay: %v", err)
+	} else if found {
+		t.Fatal("stale removal replay unexpectedly created a notification settings cursor")
+	}
+
+	confirmed, err := api.GetDifferenceForTestWithAuthKey(s, owner.ID, authKeyID, &tg.UpdatesGetDifferenceRequest{
+		Pts: staleState.Pts, Qts: staleState.Qts, Date: staleState.Date,
+	})
+	if err != nil {
+		t.Fatalf("get difference confirming stale replay: %v", err)
+	}
+	var confirmedUpdates []tg.UpdateClass
+	switch difference := confirmed.(type) {
+	case *tg.UpdatesDifference:
+		confirmedUpdates = difference.OtherUpdates
+	case *tg.UpdatesDifferenceSlice:
+		confirmedUpdates = difference.OtherUpdates
+	case *tg.UpdatesDifferenceEmpty:
+	default:
+		t.Fatalf("confirmation difference = %T, want a difference result", confirmed)
+	}
+	for _, update := range confirmedUpdates {
+		if removal, ok := update.(*tg.UpdateChatParticipantDelete); ok {
+			t.Fatalf("confirmed stale replay repeated chat removal %d", removal.ChatID)
+		}
 	}
 }
 
