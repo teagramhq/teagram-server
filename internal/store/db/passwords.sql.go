@@ -21,6 +21,38 @@ func (q *Queries) DeletePassword(ctx context.Context, userID int64) (int64, erro
 	return result.RowsAffected(), nil
 }
 
+const insertPasswordIfAbsent = `-- name: InsertPasswordIfAbsent :execrows
+INSERT INTO user_passwords (user_id, salt1, salt2, verifier, hint, recovery_email, has_recovery)
+VALUES ($1, $2, $3, $4, $5, $6, $7)
+ON CONFLICT (user_id) DO NOTHING
+`
+
+type InsertPasswordIfAbsentParams struct {
+	UserID        int64
+	Salt1         []byte
+	Salt2         []byte
+	Verifier      []byte
+	Hint          string
+	RecoveryEmail *string
+	HasRecovery   bool
+}
+
+func (q *Queries) InsertPasswordIfAbsent(ctx context.Context, arg InsertPasswordIfAbsentParams) (int64, error) {
+	result, err := q.db.Exec(ctx, insertPasswordIfAbsent,
+		arg.UserID,
+		arg.Salt1,
+		arg.Salt2,
+		arg.Verifier,
+		arg.Hint,
+		arg.RecoveryEmail,
+		arg.HasRecovery,
+	)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
 const passwordByUser = `-- name: PasswordByUser :one
 SELECT user_id, salt1, salt2, verifier, hint, recovery_email, has_recovery, created_at, updated_at FROM user_passwords WHERE user_id = $1
 `
