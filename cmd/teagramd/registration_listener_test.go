@@ -68,10 +68,20 @@ func TestRegistrationModesStayBoundToListeners(t *testing.T) {
 		signIn bool
 	}
 	var turnstileScopes []turnstileScope
+	dialogFilterSync := api.NewDialogFilterSync()
 	newHandler := func(mode config.RegistrationMode, signUpEnabled, signInEnabled bool) mtproto.Handler {
 		turnstileScopes = append(turnstileScopes, turnstileScope{signUp: signUpEnabled, signIn: signInEnabled})
-		return api.New(st, dcID, tgcfg, log, false, cfg.MaxFileBytes, blobs,
-			cfg.MaxUserStorageBytes, pgtest.PeerDeriver(), pgtest.PhotoDeriver(), cfg.RateLimits, mode)
+		var siteKey string
+		var verifier api.SignUpTurnstileVerifier
+		if signUpEnabled {
+			siteKey = cfg.Turnstile.SiteKey
+			verifier = registrationTestTurnstileVerifier{}
+		}
+		return api.NewWithPhotoThumbsAndDialogFilterSyncAndUploadPartTTLAndTurnstileAndWelcomeChannelAndSignIn(
+			st, dcID, tgcfg, log, false, cfg.MaxFileBytes, blobs, cfg.MaxUserStorageBytes,
+			pgtest.PeerDeriver(), pgtest.PhotoDeriver(), cfg.RateLimits, mode, dialogFilterSync, nil,
+			cfg.UploadPartTTL, siteKey, verifier, "", signInEnabled,
+		)
 	}
 	server, publicHandler := newListenerScopedServer(cfg, exchange.PrivateKey{RSA: key}, st, log, newHandler)
 	if len(turnstileScopes) != 2 || turnstileScopes[0] != (turnstileScope{}) || turnstileScopes[1] != (turnstileScope{signUp: true, signIn: true}) {
@@ -119,15 +129,51 @@ func TestRegistrationModesStayBoundToListeners(t *testing.T) {
 	t.Run("tailnet TCP", func(t *testing.T) {
 		client := registrationTestClient(t, key, dcID, tailnetListener, false, config.RegistrationInvite)
 		if err := client.Run(ctx, func(ctx context.Context) error {
-			return assertRegistrationClientPolicy(ctx, client, fmt.Sprintf("dualtcp%d", stamp), config.RegistrationOpen, true)
+			return assertRegistrationClientPolicy(ctx, client, fmt.Sprintf("dualtcp%d", stamp), config.RegistrationOpen, true, false)
 		}); err != nil {
 			t.Fatalf("tailnet registration flow: %v", err)
 		}
 	})
 	t.Run("public WebSocket", func(t *testing.T) {
+		historySession := &session.StorageMemory{}
+		historyClient := registrationTestClientWithStorage(t, key, dcID, tailnetListener, false, config.RegistrationInvite, historySession)
+		historyIdentifier := fmt.Sprintf("history%d", stamp)
+		if err := historyClient.Run(ctx, func(ctx context.Context) error {
+			_, err := historyClient.API().AuthSendCode(ctx, &tg.AuthSendCodeRequest{PhoneNumber: historyIdentifier, APIID: 1, APIHash: "hash"})
+			if err != nil {
+				return fmt.Errorf("tailnet auth.sendCode before listener change: %w", err)
+			}
+			return nil
+		}); err != nil {
+			t.Fatalf("tailnet auth-key history: %v", err)
+		}
+		historyData, err := (&session.Loader{Storage: historySession}).Load(ctx)
+		if err != nil {
+			t.Fatalf("load tailnet client session: %v", err)
+		}
+		if len(historyData.AuthKeyID) != 8 {
+			t.Fatalf("tailnet session auth key ID length = %d, want 8", len(historyData.AuthKeyID))
+		}
+		var historyAuthKeyID [8]byte
+		copy(historyAuthKeyID[:], historyData.AuthKeyID)
+		storedKey, ok, err := st.AuthKeyByID(ctx, mtproto.AuthKeyIDInt64(historyAuthKeyID))
+		if err != nil || !ok {
+			t.Fatalf("tailnet auth key in shared store: ok=%t err=%v", ok, err)
+		}
+		if storedKey.UserID != 0 || storedKey.Provisional {
+			t.Fatalf("tailnet auth key state = user %d, provisional %t; want unbound history", storedKey.UserID, storedKey.Provisional)
+		}
+
+		reusedClient := registrationTestClientWithStorage(t, key, dcID, publicListener, true, config.RegistrationOpen, historySession)
+		if err := reusedClient.Run(ctx, func(ctx context.Context) error {
+			return assertSignInTurnstileChallenge(ctx, reusedClient, historyIdentifier)
+		}); err != nil {
+			t.Fatalf("public listener reused auth-key challenge: %v", err)
+		}
+
 		client := registrationTestClient(t, key, dcID, publicListener, true, config.RegistrationOpen)
 		if err := client.Run(ctx, func(ctx context.Context) error {
-			return assertRegistrationClientPolicy(ctx, client, fmt.Sprintf("dualws%d", stamp), config.RegistrationInvite, false)
+			return assertRegistrationClientPolicy(ctx, client, fmt.Sprintf("dualws%d", stamp), config.RegistrationInvite, false, true)
 		}); err != nil {
 			t.Fatalf("public registration flow: %v", err)
 		}
@@ -154,6 +200,11 @@ func closeRegistrationTestListener(t *testing.T, listener net.Listener) {
 
 func registrationTestClient(t *testing.T, key *rsa.PrivateKey, dcID int, listener net.Listener, websocket bool, spoofMode config.RegistrationMode) *telegram.Client {
 	t.Helper()
+	return registrationTestClientWithStorage(t, key, dcID, listener, websocket, spoofMode, &session.StorageMemory{})
+}
+
+func registrationTestClientWithStorage(t *testing.T, key *rsa.PrivateKey, dcID int, listener net.Listener, websocket bool, spoofMode config.RegistrationMode, storage *session.StorageMemory) *telegram.Client {
+	t.Helper()
 	options := telegram.Options{
 		DC:         dcID,
 		PublicKeys: []telegram.PublicKey{{RSA: &key.PublicKey}},
@@ -161,7 +212,7 @@ func registrationTestClient(t *testing.T, key *rsa.PrivateKey, dcID int, listene
 			Key:   "registration_mode",
 			Value: &tg.JSONString{Value: string(spoofMode)},
 		}}}},
-		SessionStorage: &session.StorageMemory{},
+		SessionStorage: storage,
 	}
 	if websocket {
 		options.DCList = dcs.List{Domains: map[int]string{
@@ -179,7 +230,22 @@ func registrationTestClient(t *testing.T, key *rsa.PrivateKey, dcID int, listene
 	return telegram.NewClient(1, "hash", options)
 }
 
-func assertRegistrationClientPolicy(ctx context.Context, client *telegram.Client, username string, wantMode config.RegistrationMode, wantSignUp bool) error {
+func assertSignInTurnstileChallenge(ctx context.Context, client *telegram.Client, identifier string) error {
+	_, err := client.API().AuthSendCode(ctx, &tg.AuthSendCodeRequest{
+		PhoneNumber: identifier,
+		APIID:       1,
+		APIHash:     "hash",
+	})
+	if err == nil {
+		return errors.New("auth.sendCode with prior auth-key history succeeded, want RECAPTCHA_CHECK_signin__site-key")
+	}
+	if !registrationRPCMessage(err, "RECAPTCHA_CHECK_signin__site-key") {
+		return fmt.Errorf("auth.sendCode with prior auth-key history: %w", err)
+	}
+	return nil
+}
+
+func assertRegistrationClientPolicy(ctx context.Context, client *telegram.Client, username string, wantMode config.RegistrationMode, wantSignUp, wantTurnstile bool) error {
 	appConfig, err := client.API().HelpGetAppConfig(ctx, 0)
 	if err != nil {
 		return fmt.Errorf("help.getAppConfig: %w", err)
@@ -192,11 +258,21 @@ func assertRegistrationClientPolicy(ctx context.Context, client *telegram.Client
 		return fmt.Errorf("help.getAppConfig registration_mode = %q, want %q", mode, wantMode)
 	}
 
-	sent, err := client.API().AuthSendCode(ctx, &tg.AuthSendCodeRequest{
+	sendCodeRequest := &tg.AuthSendCodeRequest{
 		PhoneNumber: username,
 		APIID:       1,
 		APIHash:     "hash",
-	})
+	}
+	sent, err := client.API().AuthSendCode(ctx, sendCodeRequest)
+	if wantTurnstile {
+		if err == nil {
+			return errors.New("bare auth.sendCode succeeded, want RECAPTCHA_CHECK_signin__site-key")
+		}
+		if !registrationRPCMessage(err, "RECAPTCHA_CHECK_signin__site-key") {
+			return fmt.Errorf("bare auth.sendCode: %w", err)
+		}
+		sent, err = sendCodeWithTurnstile(ctx, client, sendCodeRequest, registrationSignInToken)
+	}
 	if err != nil {
 		return fmt.Errorf("auth.sendCode: %w", err)
 	}
@@ -216,11 +292,22 @@ func assertRegistrationClientPolicy(ctx context.Context, client *telegram.Client
 		return fmt.Errorf("auth.signIn response = %T, want *tg.AuthAuthorizationSignUpRequired", signIn)
 	}
 
-	authorization, err := client.API().AuthSignUp(ctx, &tg.AuthSignUpRequest{
+	signUpRequest := &tg.AuthSignUpRequest{
 		PhoneNumber:   username,
 		PhoneCodeHash: code.PhoneCodeHash,
 		FirstName:     "Listener",
-	})
+	}
+	var authorization tg.AuthAuthorizationClass
+	if wantTurnstile {
+		var result tg.AuthAuthorizationBox
+		err = client.API().Invoker().Invoke(ctx, &tg.InvokeWithReCaptchaRequest{
+			Token: registrationSignUpToken,
+			Query: signUpRequest,
+		}, &result)
+		authorization = result.Authorization
+	} else {
+		authorization, err = client.API().AuthSignUp(ctx, signUpRequest)
+	}
 	if wantSignUp {
 		if err != nil {
 			return fmt.Errorf("auth.signUp: %w", err)
@@ -237,6 +324,32 @@ func assertRegistrationClientPolicy(ctx context.Context, client *telegram.Client
 		return fmt.Errorf("auth.signUp: %w, want INVITE_HASH_INVALID", err)
 	}
 	return nil
+}
+
+const (
+	registrationSignInToken = "registration-signin-token"
+	registrationSignUpToken = "registration-signup-token"
+)
+
+type registrationTestTurnstileVerifier struct{}
+
+func (registrationTestTurnstileVerifier) Verify(_ context.Context, token, action, _ string) error {
+	switch {
+	case action == "signin" && token == registrationSignInToken:
+		return nil
+	case action == "signup" && token == registrationSignUpToken:
+		return nil
+	default:
+		return fmt.Errorf("unexpected Turnstile action %q or token", action)
+	}
+}
+
+func sendCodeWithTurnstile(ctx context.Context, client *telegram.Client, request *tg.AuthSendCodeRequest, token string) (tg.AuthSentCodeClass, error) {
+	var result tg.AuthSentCodeBox
+	if err := client.API().Invoker().Invoke(ctx, &tg.InvokeWithReCaptchaRequest{Token: token, Query: request}, &result); err != nil {
+		return nil, err
+	}
+	return result.SentCode, nil
 }
 
 func registrationModeFromAppConfig(appConfig tg.HelpAppConfigClass) (config.RegistrationMode, error) {
