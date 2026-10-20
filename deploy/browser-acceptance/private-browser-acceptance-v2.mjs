@@ -1320,7 +1320,7 @@ async function logoutWithProgress(prepared, state, progress) {
 }
 
 export async function performAcceptance(prepared, credentials) {
-  const {contextInfo, progress, manifest, tracker, wssAudit} = prepared;
+  const {contextInfo, progress, manifest, tracker} = prepared;
   const page = contextInfo.page;
   const state = prepared.progressState;
   let signedIn = false;
@@ -1398,7 +1398,7 @@ export async function performAcceptance(prepared, credentials) {
       }
     }
     assertNoUnsafeNetwork(tracker);
-    wssAudit.validate();
+    contextInfo.wssAudit.validate();
     if (tracker.websocketMismatch) fail("endpoint-mismatch");
     logoutStarted = true;
     return await logoutWithProgress(prepared, state, progress);

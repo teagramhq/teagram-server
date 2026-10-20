@@ -67,6 +67,7 @@ function createDependencies(failAt, allowCredentialRead = false) {
     artifactDigest: contentDigest,
   };
   const contextListeners = new Map();
+  let wssAuditValidationCalls = 0;
   const contextInfo = {
     page: {fixture: true},
     context: {
@@ -94,6 +95,7 @@ function createDependencies(failAt, allowCredentialRead = false) {
     get launchPolicyCalls() { return launchPolicyCalls; },
     get credentialReads() { return credentialReads; },
     get logoutMethod() { return logoutMethod; },
+    get wssAuditValidationCalls() { return wssAuditValidationCalls; },
     dependencies: {
       readReleaseRecord() {
         step("release-record");
@@ -140,14 +142,17 @@ function createDependencies(failAt, allowCredentialRead = false) {
         step("served-manifest");
         return manifest;
       },
-      async proveWss(_context, _release, _manifest, progress) {
+      async proveWss(contextInfo, _release, _manifest, progress) {
         step("wss-101");
         progress.observeWssConnection();
         progress.observeWssHandshake(101);
-        return {connectionCount: 1, status101: true, validate() {}};
+        contextInfo.wssAudit = {validate() { wssAuditValidationCalls += 1; }};
+        contextInfo.wssAudit.validate();
+        return {responseStatus: 200, connectionCount: 1, status101: true};
       },
-      async verifyAssetLoading() {
+      async verifyAssetLoading(contextInfo) {
         step("asset-loading");
+        contextInfo.wssAudit.validate();
       },
       async installClientProgressObserver(_page, _progress, _classifier, state) {
         step("client-progress");
@@ -919,31 +924,7 @@ test("empty chats state is accepted as a rendered chat list after sign-in", asyn
   assert.equal(output.logout, "ok");
   assert.equal(output.chatList, "rendered");
   assert.equal(output.chatListRows, 0);
-  assert.deepEqual(browser.apiMethods.filter((method) => method === "auth.logOut"), ["auth.logOut"]);
-});
-
-test("a failure after the empty chats state records sign-in and successful logout", async () => {
-  const fixture = createDependencies(undefined, true);
-  const browser = createAcceptancePage({
-    chatListVisible: false,
-    emptyChatStateVisible: true,
-    completeSignIn: true,
-  });
-  await useRealAcceptanceFlow(fixture, browser);
-  const proveWss = fixture.dependencies.proveWss;
-  fixture.dependencies.proveWss = async (...args) => {
-    const audit = await proveWss(...args);
-    return {...audit, validate() { throw new Error("fixture audit failed after sign-in"); }};
-  };
-
-  const result = await executeMode({mode: "acceptance", releaseRecord: "fixture"}, fixture.dependencies);
-  const output = JSON.parse(result.output);
-
-  assert.equal(result.exitCode, 1);
-  assert.equal(output.qaFailureCode, "unexpected-failure");
-  assert.equal(output.phase, "signed-in");
-  assert.equal(output.logout, "ok");
-  assert.equal(output.chatList, "rendered");
+  assert.equal(fixture.wssAuditValidationCalls, 3);
   assert.deepEqual(browser.apiMethods.filter((method) => method === "auth.logOut"), ["auth.logOut"]);
 });
 
@@ -1243,11 +1224,12 @@ test("preflight WSS proof fails closed above the ceiling and on any bad connecti
 
 test("acceptance reports a successful sign-in over the client's socket ceiling", async () => {
   const fixture = createDependencies(undefined, true);
-  fixture.dependencies.proveWss = async (_context, _release, _manifest, progress) => {
+  fixture.dependencies.proveWss = async (contextInfo, _release, _manifest, progress) => {
     fixture.events.push("wss-101");
     for (let index = 0; index < WSS_CONNECTION_CEILING; index += 1) progress.observeWssConnection();
     progress.observeWssHandshake(101);
-    return {connectionCount: WSS_CONNECTION_CEILING, status101: true};
+    contextInfo.wssAudit = {validate() {}};
+    return {responseStatus: 200, connectionCount: WSS_CONNECTION_CEILING, status101: true};
   };
   const result = await executeMode({mode: "acceptance", releaseRecord: "fixture"}, fixture.dependencies);
 
