@@ -377,6 +377,97 @@ func TestChatRemovalDifferenceAcknowledgesOnlyConfirmedDifferenceState(t *testin
 	}
 }
 
+func TestChatRemovalAcknowledgementRecoversSecretChatsWithoutSettingsCursor(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	s := openStore(t)
+	owner, err := s.CreateUser(ctx, "+15551290105")
+	if err != nil {
+		t.Fatalf("create owner: %v", err)
+	}
+	peer, err := s.CreateUser(ctx, "+15551290106")
+	if err != nil {
+		t.Fatalf("create peer: %v", err)
+	}
+	chat, err := s.CreateChat(ctx, owner.ID, "recover secret chat after removal", nil)
+	if err != nil {
+		t.Fatalf("create group: %v", err)
+	}
+	if _, err := s.DeleteChat(ctx, chat.ID, owner.ID); err != nil {
+		t.Fatalf("delete group: %v", err)
+	}
+	initialState, err := s.StateWithoutChannelUnread(ctx, owner.ID)
+	if err != nil {
+		t.Fatalf("read initial state: %v", err)
+	}
+	authKeyID := [8]byte{0x15, 0x26, 0x10, 0x01, 0x0b, 0x0b, 0x0b, 0x0b}
+	keyID := mtproto.AuthKeyIDInt64(authKeyID)
+	if _, found, err := s.NotifySettingsDifferenceCursorByAuthKey(ctx, keyID); err != nil {
+		t.Fatalf("read initial notification settings cursor: %v", err)
+	} else if found {
+		t.Fatal("notification settings cursor already exists before removal recovery")
+	}
+
+	request := &tg.UpdatesGetDifferenceRequest{
+		Pts: initialState.Pts, Qts: initialState.Qts, Date: int(time.Now().Add(-time.Hour).Unix()),
+	}
+	first, err := api.GetDifferenceForTestWithAuthKey(s, owner.ID, authKeyID, request)
+	if err != nil {
+		t.Fatalf("get initial difference: %v", err)
+	}
+	var firstUpdates []tg.UpdateClass
+	var firstState tg.UpdatesState
+	switch difference := first.(type) {
+	case *tg.UpdatesDifference:
+		firstUpdates, firstState = difference.OtherUpdates, difference.State
+	case *tg.UpdatesDifferenceSlice:
+		firstUpdates, firstState = difference.OtherUpdates, difference.IntermediateState
+	default:
+		t.Fatalf("initial difference = %T, want a difference result", first)
+	}
+	removalFound := false
+	for _, update := range firstUpdates {
+		if removal, ok := update.(*tg.UpdateChatParticipantDelete); ok && removal.ChatID == chat.ID {
+			removalFound = true
+		}
+	}
+	if !removalFound {
+		t.Fatalf("initial updates = %+v, want removal for group %d", firstUpdates, chat.ID)
+	}
+	if firstState.Date < 2_000_000_000 {
+		t.Fatalf("initial removal date = %d, want a reserved confirmation token", firstState.Date)
+	}
+	if _, found, err := s.NotifySettingsDifferenceCursorByAuthKey(ctx, keyID); err != nil {
+		t.Fatalf("read notification settings cursor after removal: %v", err)
+	} else if found {
+		t.Fatal("removal-only response unexpectedly created a notification settings cursor")
+	}
+
+	secretChat, _, err := s.CreateSecretChatRequest(ctx, owner.ID, peer.ID, []byte("ga"), []byte("hash"), 991105, store.RateLimitConfig{})
+	if err != nil {
+		t.Fatalf("create secret chat between removal reply and acknowledgement: %v", err)
+	}
+	second, err := api.GetDifferenceForTestWithAuthKey(s, owner.ID, authKeyID, &tg.UpdatesGetDifferenceRequest{
+		Pts: firstState.Pts, Qts: firstState.Qts, Date: firstState.Date,
+	})
+	if err != nil {
+		t.Fatalf("get difference acknowledging removal: %v", err)
+	}
+	var secondUpdates []tg.UpdateClass
+	switch difference := second.(type) {
+	case *tg.UpdatesDifference:
+		secondUpdates = difference.OtherUpdates
+	case *tg.UpdatesDifferenceSlice:
+		secondUpdates = difference.OtherUpdates
+	case *tg.UpdatesDifferenceEmpty:
+	default:
+		t.Fatalf("acknowledgement difference = %T, want a difference result", second)
+	}
+	if !hasEncryptionUpdateForChat(secondUpdates, secretChat.ID) {
+		t.Fatalf("acknowledgement updates = %+v, want secret-chat lifecycle update for chat %d", secondUpdates, secretChat.ID)
+	}
+}
+
 func TestChatRemovalDifferenceAcknowledgesFinalNotifySettingsState(t *testing.T) {
 	t.Parallel()
 	const settingCount = maxDiffEventsCount + 1

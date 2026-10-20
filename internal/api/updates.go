@@ -1618,7 +1618,7 @@ func (h *handlers) handleGetDifferenceForConn(c *mtproto.Conn, r *mtproto.Reques
 	// guarded overlap and suppress versions already acknowledged by this auth key,
 	// so moved counters and late commits do not skip rows behind the high-water tuple.
 	clientDate := time.Unix(int64(req.Date), 0)
-	if notifySettingsCursorStateFound && !notifySettingsCursorFound {
+	if removalStateConfirmed || (notifySettingsCursorStateFound && !notifySettingsCursorFound) {
 		clientDate = draftReferenceDate
 	}
 	var secretChats []store.SecretChat
