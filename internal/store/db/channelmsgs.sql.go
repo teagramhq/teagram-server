@@ -776,6 +776,191 @@ func (q *Queries) ChannelPostExistsActive(ctx context.Context, arg ChannelPostEx
 	return local_id, err
 }
 
+const channelRepliesPage = `-- name: ChannelRepliesPage :many
+WITH access AS (
+    SELECT c.megagroup,
+           EXISTS (
+               SELECT 1
+               FROM channel_participants cp
+               WHERE cp.channel_id = c.id
+                 AND cp.user_id = $1::bigint
+                 AND (cp.banned_until IS NULL OR cp.banned_until <= now())
+           ) AS is_member
+    FROM channels c
+    WHERE c.id = $2::bigint
+), root AS (
+    SELECT 1
+    FROM channel_messages cm
+    WHERE cm.channel_id = $2::bigint
+      AND cm.local_id = $3::bigint
+      AND cm.deleted = false
+      AND (cm.expires_at IS NULL OR cm.expires_at > statement_timestamp())
+      AND cm.action_type = 0
+), eligible AS (
+    SELECT cm.local_id
+    FROM channel_messages cm
+    WHERE cm.channel_id = $2::bigint
+      AND cm.reply_to_msg_id = $3::bigint
+      AND cm.deleted = false
+      AND (cm.expires_at IS NULL OR cm.expires_at > statement_timestamp())
+      AND cm.action_type = 0
+      AND EXISTS (SELECT 1 FROM access WHERE megagroup AND is_member)
+      AND EXISTS (SELECT 1 FROM root)
+), reply_count AS (
+    SELECT count(*)::bigint AS total FROM eligible
+), page_ids AS (
+    SELECT local_id
+    FROM eligible
+    WHERE $4::bigint = 0
+       OR ($4::bigint > 0 AND $5::bigint < 0)
+       OR local_id < $4::bigint
+    ORDER BY local_id DESC
+    LIMIT $6::int
+    OFFSET CASE
+        WHEN $4::bigint > 0 AND $5::bigint < 0 THEN
+            GREATEST(
+                0::bigint,
+                (SELECT count(*) FROM eligible WHERE local_id >= $4::bigint)
+                    + $5::bigint
+            )
+        ELSE GREATEST(0::bigint, $5::bigint)
+    END
+), status AS (
+    SELECT EXISTS (
+               SELECT 1 FROM channels WHERE id = $2::bigint
+           ) AS channel_exists,
+           EXISTS (
+               SELECT 1 FROM channels
+               WHERE id = $2::bigint AND megagroup = true
+           ) AS megagroup,
+           EXISTS (SELECT 1 FROM access WHERE is_member) AS is_member,
+           EXISTS (SELECT 1 FROM root) AS root_exists,
+           (SELECT total FROM reply_count) AS reply_count
+), selected AS (
+    SELECT cm.channel_id,
+           cm.local_id,
+           cm.from_id,
+           cm.date,
+           cm.message,
+           cm.edit_date,
+           cm.deleted,
+           cm.random_id,
+           cm.grouped_id,
+           cm.file_id,
+           cm.reply_to_msg_id,
+           cm.action_type
+    FROM page_ids
+    JOIN channel_messages cm
+      ON cm.channel_id = $2::bigint
+     AND cm.local_id = page_ids.local_id
+    WHERE ($7::bigint <= 0 OR cm.local_id < $7::bigint)
+      AND ($8::bigint <= 0 OR cm.local_id > $8::bigint)
+)
+SELECT status.channel_exists,
+       status.megagroup,
+       status.is_member,
+       status.root_exists,
+       status.reply_count,
+       selected.channel_id,
+       selected.local_id,
+       selected.from_id,
+       selected.date,
+       selected.message,
+       selected.edit_date,
+       selected.deleted,
+       selected.random_id,
+       selected.grouped_id,
+       selected.file_id,
+       selected.reply_to_msg_id,
+       selected.action_type
+FROM status
+LEFT JOIN selected ON true
+ORDER BY selected.local_id DESC
+`
+
+type ChannelRepliesPageParams struct {
+	OwnerID   int64
+	ChannelID int64
+	RootID    int64
+	OffsetID  int64
+	AddOffset int64
+	Lim       int32
+	MaxID     int64
+	MinID     int64
+}
+
+type ChannelRepliesPageRow struct {
+	ChannelExists bool
+	Megagroup     bool
+	IsMember      bool
+	RootExists    bool
+	ReplyCount    int64
+	ChannelID     *int64
+	LocalID       *int64
+	FromID        *int64
+	Date          pgtype.Timestamptz
+	Message       *string
+	EditDate      pgtype.Timestamptz
+	Deleted       *bool
+	RandomID      *int64
+	GroupedID     *int64
+	FileID        *int64
+	ReplyToMsgID  *int32
+	ActionType    *int16
+}
+
+// ChannelRepliesPage reads a direct-reply page and its authorization snapshot
+// in one statement. The active-member predicate is part of eligible, so neither
+// the page nor its count can outlive the caller's membership or ban state.
+// page_ids contains only local ids, allowing the reply index to serve the
+// ordered seek before the bounded rows are hydrated.
+func (q *Queries) ChannelRepliesPage(ctx context.Context, arg ChannelRepliesPageParams) ([]ChannelRepliesPageRow, error) {
+	rows, err := q.db.Query(ctx, channelRepliesPage,
+		arg.OwnerID,
+		arg.ChannelID,
+		arg.RootID,
+		arg.OffsetID,
+		arg.AddOffset,
+		arg.Lim,
+		arg.MaxID,
+		arg.MinID,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ChannelRepliesPageRow
+	for rows.Next() {
+		var i ChannelRepliesPageRow
+		if err := rows.Scan(
+			&i.ChannelExists,
+			&i.Megagroup,
+			&i.IsMember,
+			&i.RootExists,
+			&i.ReplyCount,
+			&i.ChannelID,
+			&i.LocalID,
+			&i.FromID,
+			&i.Date,
+			&i.Message,
+			&i.EditDate,
+			&i.Deleted,
+			&i.RandomID,
+			&i.GroupedID,
+			&i.FileID,
+			&i.ReplyToMsgID,
+			&i.ActionType,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const countChannelHistory = `-- name: CountChannelHistory :one
 SELECT count(*)::bigint
 FROM channel_messages

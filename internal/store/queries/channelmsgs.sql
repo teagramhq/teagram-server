@@ -242,6 +242,112 @@ WHERE channel_id = sqlc.arg(channel_id)::bigint
       WHERE c.id = sqlc.arg(channel_id)::bigint AND c.deleted_at IS NULL
   );
 
+-- ChannelRepliesPage reads a direct-reply page and its authorization snapshot
+-- in one statement. The active-member predicate is part of eligible, so neither
+-- the page nor its count can outlive the caller's membership or ban state.
+-- page_ids contains only local ids, allowing the reply index to serve the
+-- ordered seek before the bounded rows are hydrated.
+-- name: ChannelRepliesPage :many
+WITH access AS (
+    SELECT c.megagroup,
+           EXISTS (
+               SELECT 1
+               FROM channel_participants cp
+               WHERE cp.channel_id = c.id
+                 AND cp.user_id = sqlc.arg(owner_id)::bigint
+                 AND (cp.banned_until IS NULL OR cp.banned_until <= now())
+           ) AS is_member
+    FROM channels c
+    WHERE c.id = sqlc.arg(channel_id)::bigint
+), root AS (
+    SELECT 1
+    FROM channel_messages cm
+    WHERE cm.channel_id = sqlc.arg(channel_id)::bigint
+      AND cm.local_id = sqlc.arg(root_id)::bigint
+      AND cm.deleted = false
+      AND (cm.expires_at IS NULL OR cm.expires_at > statement_timestamp())
+      AND cm.action_type = 0
+), eligible AS (
+    SELECT cm.local_id
+    FROM channel_messages cm
+    WHERE cm.channel_id = sqlc.arg(channel_id)::bigint
+      AND cm.reply_to_msg_id = sqlc.arg(root_id)::bigint
+      AND cm.deleted = false
+      AND (cm.expires_at IS NULL OR cm.expires_at > statement_timestamp())
+      AND cm.action_type = 0
+      AND EXISTS (SELECT 1 FROM access WHERE megagroup AND is_member)
+      AND EXISTS (SELECT 1 FROM root)
+), reply_count AS (
+    SELECT count(*)::bigint AS total FROM eligible
+), page_ids AS (
+    SELECT local_id
+    FROM eligible
+    WHERE sqlc.arg(offset_id)::bigint = 0
+       OR (sqlc.arg(offset_id)::bigint > 0 AND sqlc.arg(add_offset)::bigint < 0)
+       OR local_id < sqlc.arg(offset_id)::bigint
+    ORDER BY local_id DESC
+    LIMIT sqlc.arg(lim)::int
+    OFFSET CASE
+        WHEN sqlc.arg(offset_id)::bigint > 0 AND sqlc.arg(add_offset)::bigint < 0 THEN
+            GREATEST(
+                0::bigint,
+                (SELECT count(*) FROM eligible WHERE local_id >= sqlc.arg(offset_id)::bigint)
+                    + sqlc.arg(add_offset)::bigint
+            )
+        ELSE GREATEST(0::bigint, sqlc.arg(add_offset)::bigint)
+    END
+), status AS (
+    SELECT EXISTS (
+               SELECT 1 FROM channels WHERE id = sqlc.arg(channel_id)::bigint
+           ) AS channel_exists,
+           EXISTS (
+               SELECT 1 FROM channels
+               WHERE id = sqlc.arg(channel_id)::bigint AND megagroup = true
+           ) AS megagroup,
+           EXISTS (SELECT 1 FROM access WHERE is_member) AS is_member,
+           EXISTS (SELECT 1 FROM root) AS root_exists,
+           (SELECT total FROM reply_count) AS reply_count
+), selected AS (
+    SELECT cm.channel_id,
+           cm.local_id,
+           cm.from_id,
+           cm.date,
+           cm.message,
+           cm.edit_date,
+           cm.deleted,
+           cm.random_id,
+           cm.grouped_id,
+           cm.file_id,
+           cm.reply_to_msg_id,
+           cm.action_type
+    FROM page_ids
+    JOIN channel_messages cm
+      ON cm.channel_id = sqlc.arg(channel_id)::bigint
+     AND cm.local_id = page_ids.local_id
+    WHERE (sqlc.arg(max_id)::bigint <= 0 OR cm.local_id < sqlc.arg(max_id)::bigint)
+      AND (sqlc.arg(min_id)::bigint <= 0 OR cm.local_id > sqlc.arg(min_id)::bigint)
+)
+SELECT status.channel_exists,
+       status.megagroup,
+       status.is_member,
+       status.root_exists,
+       status.reply_count,
+       selected.channel_id,
+       selected.local_id,
+       selected.from_id,
+       selected.date,
+       selected.message,
+       selected.edit_date,
+       selected.deleted,
+       selected.random_id,
+       selected.grouped_id,
+       selected.file_id,
+       selected.reply_to_msg_id,
+       selected.action_type
+FROM status
+LEFT JOIN selected ON true
+ORDER BY selected.local_id DESC;
+
 -- SearchChannelPostsPage is ChannelHistoryPage narrowed by a full-text match.
 -- It carries no caller predicate: a channel keeps one shared row per post
 -- rather than one copy per member, so there is no owner column to filter on and

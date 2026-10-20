@@ -120,6 +120,19 @@ type ChannelMessage struct {
 	PostAuthor   *string
 }
 
+// ChannelRepliesSnapshot carries the authorization and page result from one
+// channel replies statement. ChannelExists, Megagroup, IsMember and RootExists
+// let the API preserve the protocol's distinct peer and root errors without a
+// second membership read racing the page.
+type ChannelRepliesSnapshot struct {
+	ChannelExists bool
+	Megagroup     bool
+	IsMember      bool
+	RootExists    bool
+	Count         int
+	Messages      []ChannelMessage
+}
+
 // ChannelMessageAction identifies a service message stored in a channel's
 // shared message stream. Zero is a regular post.
 type ChannelMessageAction int16
@@ -1253,6 +1266,65 @@ func (s *Store) ChannelHistoryWithOffset(
 		return nil, 0, fmt.Errorf("commit channel history snapshot: %w", err)
 	}
 	return msgs, int(count), nil
+}
+
+// ChannelRepliesWithOffset returns direct replies to one active supergroup
+// message, with the membership, ban, root, count and page predicates evaluated
+// in the same statement. Pagination matches ChannelHistoryWithOffset.
+func (s *Store) ChannelRepliesWithOffset(
+	ctx context.Context,
+	channelID, ownerID, rootID, offsetID, addOffset, maxID, minID int64,
+	limit int,
+) (ChannelRepliesSnapshot, error) {
+	rows, err := s.q.ChannelRepliesPage(ctx, db.ChannelRepliesPageParams{
+		ChannelID: channelID,
+		OwnerID:   ownerID,
+		RootID:    rootID,
+		OffsetID:  offsetID,
+		AddOffset: addOffset,
+		MaxID:     maxID,
+		MinID:     minID,
+		Lim:       int32(limit), //nolint:gosec // API clamps the page to maxHistoryLimit
+	})
+	if err != nil {
+		return ChannelRepliesSnapshot{}, fmt.Errorf("channel replies page: %w", err)
+	}
+	if len(rows) == 0 {
+		return ChannelRepliesSnapshot{}, errors.New("channel replies query returned no status row")
+	}
+	first := rows[0]
+	snapshot := ChannelRepliesSnapshot{
+		ChannelExists: first.ChannelExists,
+		Megagroup:     first.Megagroup,
+		IsMember:      first.IsMember,
+		RootExists:    first.RootExists,
+		Count:         int(first.ReplyCount),
+		Messages:      make([]ChannelMessage, 0, len(rows)),
+	}
+	for _, row := range rows {
+		if row.LocalID == nil {
+			continue
+		}
+		if row.ChannelID == nil || row.FromID == nil || !row.Date.Valid || row.Message == nil ||
+			row.Deleted == nil || row.RandomID == nil || row.ActionType == nil {
+			return ChannelRepliesSnapshot{}, errors.New("channel replies query returned an incomplete message row")
+		}
+		snapshot.Messages = append(snapshot.Messages, channelMessageFromFields(channelMsgFields{
+			ChannelID:    *row.ChannelID,
+			LocalID:      *row.LocalID,
+			FromID:       *row.FromID,
+			Date:         row.Date,
+			Message:      *row.Message,
+			EditDate:     row.EditDate,
+			Deleted:      *row.Deleted,
+			RandomID:     *row.RandomID,
+			GroupedID:    row.GroupedID,
+			FileID:       row.FileID,
+			ReplyToMsgID: row.ReplyToMsgID,
+			ActionType:   *row.ActionType,
+		}))
+	}
+	return snapshot, nil
 }
 
 // SearchChannelPosts returns the channel's posts matching query, newest-first
