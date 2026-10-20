@@ -1066,7 +1066,6 @@ SELECT $1::bigint,
 FROM unnest($7::bigint[]) AS pending(chat_id)
 ON CONFLICT (owner_id, auth_key_id, chat_id)
 DO UPDATE SET delivered_at = EXCLUDED.delivered_at,
-              acknowledged_at = NULL,
               difference_state_pts = EXCLUDED.difference_state_pts,
               difference_state_qts = EXCLUDED.difference_state_qts,
               difference_state_date = EXCLUDED.difference_state_date,
@@ -1086,7 +1085,7 @@ type MarkChatRemovalEventsIssuedForAuthKeyParams struct {
 // MarkChatRemovalEventsIssuedForAuthKey records the difference state that
 // included these rows before replying; presenting its Date on a later
 // getDifference is the client's acknowledgement.
-// An update archives the prior unacknowledged token in the history trigger.
+// The history trigger archives the prior token mapping before the row changes.
 func (q *Queries) MarkChatRemovalEventsIssuedForAuthKey(ctx context.Context, arg MarkChatRemovalEventsIssuedForAuthKeyParams) error {
 	_, err := q.db.Exec(ctx, markChatRemovalEventsIssuedForAuthKey,
 		arg.OwnerID,

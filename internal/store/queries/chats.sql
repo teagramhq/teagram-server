@@ -160,7 +160,7 @@ WHERE chat_removal_client_state.acknowledged_at IS NULL;
 -- MarkChatRemovalEventsIssuedForAuthKey records the difference state that
 -- included these rows before replying; presenting its Date on a later
 -- getDifference is the client's acknowledgement.
--- An update archives the prior unacknowledged token in the history trigger.
+-- The history trigger archives the prior token mapping before the row changes.
 -- name: MarkChatRemovalEventsIssuedForAuthKey :exec
 INSERT INTO chat_removal_client_state (
     owner_id, auth_key_id, chat_id, delivered_at,
@@ -177,7 +177,6 @@ SELECT sqlc.arg(owner_id)::bigint,
 FROM unnest(sqlc.arg(chat_ids)::bigint[]) AS pending(chat_id)
 ON CONFLICT (owner_id, auth_key_id, chat_id)
 DO UPDATE SET delivered_at = EXCLUDED.delivered_at,
-              acknowledged_at = NULL,
               difference_state_pts = EXCLUDED.difference_state_pts,
               difference_state_qts = EXCLUDED.difference_state_qts,
               difference_state_date = EXCLUDED.difference_state_date,

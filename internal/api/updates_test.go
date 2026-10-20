@@ -540,6 +540,154 @@ func TestChatRemovalConcurrentDifferencesReserveDistinctResumeTokens(t *testing.
 	}
 }
 
+func TestChatRemovalStaleIssuePreservesAcknowledgementAndResumeHistory(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	s := openStore(t)
+	owner, err := s.CreateUser(ctx, "+15551290251")
+	if err != nil {
+		t.Fatalf("create owner: %v", err)
+	}
+	peer, err := s.CreateUser(ctx, "+15551290252")
+	if err != nil {
+		t.Fatalf("create peer: %v", err)
+	}
+	chat, err := s.CreateChat(ctx, owner.ID, "acknowledged removal replay", nil)
+	if err != nil {
+		t.Fatalf("create group: %v", err)
+	}
+	initialState, err := s.StateWithoutChannelUnread(ctx, owner.ID)
+	if err != nil {
+		t.Fatalf("read initial state: %v", err)
+	}
+	if _, err := s.DeleteChat(ctx, chat.ID, owner.ID); err != nil {
+		t.Fatalf("delete group: %v", err)
+	}
+	key := [8]byte{0x28, 0x10, 0x20, 0x26, 0x10, 0x20, 0x02, 0x51}
+	keyID := mtproto.AuthKeyIDInt64(key)
+	initialRequest := &tg.UpdatesGetDifferenceRequest{
+		Pts: initialState.Pts, Qts: initialState.Qts, Date: initialState.Date,
+	}
+	getStateAndUpdates := func(label string, result any) (tg.UpdatesState, []tg.UpdateClass) {
+		t.Helper()
+		switch difference := result.(type) {
+		case *tg.UpdatesDifference:
+			return difference.State, difference.OtherUpdates
+		case *tg.UpdatesDifferenceSlice:
+			return difference.IntermediateState, difference.OtherUpdates
+		case *tg.UpdatesDifferenceEmpty:
+			return tg.UpdatesState{Date: difference.Date, Seq: difference.Seq}, nil
+		default:
+			t.Fatalf("%s getDifference = %T, want a difference result", label, result)
+			return tg.UpdatesState{}, nil
+		}
+	}
+	firstResult, err := api.GetDifferenceForTestWithAuthKey(s, owner.ID, key, initialRequest)
+	if err != nil {
+		t.Fatalf("get initial removal difference: %v", err)
+	}
+	firstState, firstUpdates := getStateAndUpdates("initial", firstResult)
+	if !slices.ContainsFunc(firstUpdates, func(update tg.UpdateClass) bool {
+		removal, ok := update.(*tg.UpdateChatParticipantDelete)
+		return ok && removal.ChatID == chat.ID
+	}) {
+		t.Fatalf("initial difference updates = %+v, want removal for group %d", firstUpdates, chat.ID)
+	}
+
+	ready := make(chan struct{}, 1)
+	release := make(chan struct{})
+	var releaseOnce sync.Once
+	releaseIssue := func() { releaseOnce.Do(func() { close(release) }) }
+	defer releaseIssue()
+	type differenceReply struct {
+		result any
+		err    error
+	}
+	staleDone := make(chan differenceReply, 1)
+	go func() {
+		result, _, err := api.GetDifferenceBeforeReplyForTestWithAuthKeyAndNowAndHook(
+			s, owner.ID, key, time.Now, initialRequest, func() {
+				ready <- struct{}{}
+				<-release
+			},
+		)
+		staleDone <- differenceReply{result: result, err: err}
+	}()
+	select {
+	case <-ready:
+	case <-time.After(10 * time.Second):
+		t.Fatal("stale getDifference did not snapshot the removal before reaching issuance")
+	}
+
+	confirmedResult, err := api.GetDifferenceForTestWithAuthKey(s, owner.ID, key, &tg.UpdatesGetDifferenceRequest{
+		Pts: firstState.Pts, Qts: firstState.Qts, Date: firstState.Date,
+	})
+	if err != nil {
+		t.Fatalf("acknowledge initial removal difference: %v", err)
+	}
+	_, confirmedUpdates := getStateAndUpdates("acknowledgement", confirmedResult)
+	if slices.ContainsFunc(confirmedUpdates, func(update tg.UpdateClass) bool {
+		removal, ok := update.(*tg.UpdateChatParticipantDelete)
+		return ok && removal.ChatID == chat.ID
+	}) {
+		t.Fatalf("acknowledgement difference replayed removal for group %d: %+v", chat.ID, confirmedUpdates)
+	}
+
+	secretChat, _, err := s.CreateSecretChatRequest(ctx, owner.ID, peer.ID, []byte("ga"), []byte("hash"), 992251, store.RateLimitConfig{})
+	if err != nil {
+		t.Fatalf("create secret chat after acknowledgement: %v", err)
+	}
+	releaseIssue()
+	staleReply := <-staleDone
+	if staleReply.err != nil {
+		t.Fatalf("complete stale removal difference: %v", staleReply.err)
+	}
+	staleState, staleUpdates := getStateAndUpdates("stale", staleReply.result)
+	if !slices.ContainsFunc(staleUpdates, func(update tg.UpdateClass) bool {
+		removal, ok := update.(*tg.UpdateChatParticipantDelete)
+		return ok && removal.ChatID == chat.ID
+	}) {
+		t.Fatalf("stale difference updates = %+v, want its snapshotted removal for group %d", staleUpdates, chat.ID)
+	}
+	if staleState.Date == firstState.Date {
+		t.Fatalf("stale removal response reused acknowledged token %d", firstState.Date)
+	}
+
+	pending, err := s.ChatRemovalSnapshotsForAuthKey(ctx, owner.ID, keyID, 10)
+	if err != nil {
+		t.Fatalf("read removal snapshots after stale issuance: %v", err)
+	}
+	if len(pending) != 0 {
+		t.Fatalf("stale issuance resurrected acknowledged removals: %+v", pending)
+	}
+	firstResumeDate, found, err := s.ChatRemovalResumeDateForState(ctx, owner.ID, keyID, firstState.Date)
+	if err != nil {
+		t.Fatalf("read acknowledged token resume date: %v", err)
+	}
+	if !found {
+		t.Fatalf("acknowledged token %d lost its resume mapping after stale issuance", firstState.Date)
+	}
+	if !time.Unix(int64(firstResumeDate), 0).Before(secretChat.Date) {
+		t.Fatalf("acknowledged token resume date %d is not before interleaved lifecycle row at %s", firstResumeDate, secretChat.Date)
+	}
+	if _, found, err := s.ChatRemovalResumeDateForState(ctx, owner.ID, keyID, staleState.Date); err != nil {
+		t.Fatalf("read stale token resume date: %v", err)
+	} else if !found {
+		t.Fatalf("stale token %d has no resume mapping", staleState.Date)
+	}
+
+	retryResult, err := api.GetDifferenceForTestWithAuthKey(s, owner.ID, key, &tg.UpdatesGetDifferenceRequest{
+		Pts: firstState.Pts, Qts: firstState.Qts, Date: firstState.Date,
+	})
+	if err != nil {
+		t.Fatalf("retry acknowledged token after stale issuance: %v", err)
+	}
+	_, retryUpdates := getStateAndUpdates("old-token retry", retryResult)
+	if !hasEncryptionUpdateForChat(retryUpdates, secretChat.ID) {
+		t.Fatalf("retry using acknowledged token updates = %+v, want secret-chat lifecycle update for chat %d", retryUpdates, secretChat.ID)
+	}
+}
+
 func TestChatRemovalStaleReplayRecoversSecretChatsWithoutSettingsCursor(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
