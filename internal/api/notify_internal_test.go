@@ -1876,7 +1876,7 @@ func TestDeliverChannelPostPushesViaRealStore(t *testing.T) {
 	u.deliverChannel(ctx, []store.ChannelMember{member}, time.Now(),
 		func(userID int64) []pushConn { return []pushConn{conn} },
 		func(memberID int64, fromPts int) (channelBatch, error) {
-			return u.h.buildChannelUpdates(ctx, ch.ID, memberID, max(fromPts, currentPts-1), maxDiffEvents, currentPts)
+			return u.h.buildChannelUpdates(ctx, ch.ID, memberID, max(fromPts, currentPts-1), maxDiffEvents, currentPts, !ch.Megagroup)
 		},
 	)
 	if len(conn.got) != 1 {
@@ -1963,7 +1963,7 @@ func TestDeliverChannelPostPushesTombstoneDeletesToEveryMember(t *testing.T) {
 	u.deliverChannel(ctx, members, time.Now(), func(userID int64) []pushConn {
 		return []pushConn{conns[userID]}
 	}, func(memberID int64, fromPts int) (channelBatch, error) {
-		return u.h.buildChannelUpdates(ctx, channel.ID, memberID, max(fromPts, currentPts-1), maxDiffEvents, currentPts)
+		return u.h.buildChannelUpdates(ctx, channel.ID, memberID, max(fromPts, currentPts-1), maxDiffEvents, currentPts, !channel.Megagroup)
 	})
 
 	for userID, pushed := range conns {

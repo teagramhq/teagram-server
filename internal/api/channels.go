@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strconv"
 	"strings"
 	"time"
@@ -39,6 +40,17 @@ const (
 	maxChannelInviteTargets         = 100
 	defaultChannelDifferenceTimeout = 30
 )
+
+func (h *handlers) channelIsBroadcast(ctx context.Context, channelID int64) (bool, error) {
+	channel, ok, err := h.store.ChannelByID(ctx, channelID)
+	if err != nil {
+		return false, fmt.Errorf("load channel %d: %w", channelID, err)
+	}
+	if !ok {
+		return false, fmt.Errorf("channel %d not found", channelID)
+	}
+	return !channel.Megagroup, nil
+}
 
 // slowModeSecondsValue maps a client interval to the database representation.
 func slowModeSecondsValue(seconds int) (int16, bool) {
@@ -175,7 +187,7 @@ func (h *handlers) handleCreateChannel(r *mtproto.Request) (bin.Encoder, error) 
 		h.log.Error("create channel users", "channel_id", ch.ID, "err", err)
 		return nil, errInternal
 	}
-	message, err := channelMessageToTL(createMessage, r.UserID, nil)
+	message, err := channelMessageToTL(createMessage, r.UserID, nil, !ch.Megagroup)
 	if err != nil {
 		h.log.Error("render channel create message", "channel_id", ch.ID, "local_id", createMessage.LocalID, "err", err)
 		return nil, errInternal
@@ -211,7 +223,7 @@ func (h *handlers) handleEditChannelTitle(r *mtproto.Request) (bin.Encoder, erro
 		return nil, err
 	}
 
-	_, service, pts, err := h.store.SetChannelTitle(r.Ctx, channelID, r.UserID, title)
+	channel, service, pts, err := h.store.SetChannelTitle(r.Ctx, channelID, r.UserID, title)
 	switch {
 	case errors.Is(err, store.ErrNotMember):
 		return nil, errPeerIDInvalid
@@ -235,7 +247,7 @@ func (h *handlers) handleEditChannelTitle(r *mtproto.Request) (bin.Encoder, erro
 		h.log.Error("edit channel title users", "channel_id", channelID, "err", err)
 		return nil, errInternal
 	}
-	message, err := channelMessageToTL(service, r.UserID, nil)
+	message, err := channelMessageToTL(service, r.UserID, nil, !channel.Megagroup)
 	if err != nil {
 		h.log.Error("render channel title service message", "channel_id", channelID, "local_id", service.LocalID, "err", err)
 		return nil, errInternal
@@ -703,6 +715,11 @@ func (h *handlers) sendChannelMessage(r *mtproto.Request, channelID int64, req *
 			return nil, errInternal
 		}
 		if duplicate {
+			broadcast, kindErr := h.channelIsBroadcast(r.Ctx, channelID)
+			if kindErr != nil {
+				h.log.Error("load channel kind for retry", "user_id", r.UserID, "channel_id", channelID, "err", kindErr)
+				return nil, errInternal
+			}
 			// Retry: return the stored post, at the pts it occupies, without
 			// rate-limiting. Never the channel's current pts — see
 			// store.ErrPtsUnknown for what a subscriber loses to that.
@@ -716,7 +733,7 @@ func (h *handlers) sendChannelMessage(r *mtproto.Request, channelID int64, req *
 				h.log.Error("load users on retry", "err", err)
 				return nil, errInternal
 			}
-			message, err := channelMessageToTL(existing, r.UserID, nil)
+			message, err := channelMessageToTL(existing, r.UserID, nil, broadcast)
 			if err != nil {
 				h.log.Error("render channel retry message", "channel_id", channelID, "local_id", existing.LocalID, "err", err)
 				return nil, errInternal
@@ -765,6 +782,11 @@ func (h *handlers) sendChannelMessage(r *mtproto.Request, channelID int64, req *
 	if !dup {
 		h.notifyChannelPost(r.Ctx, channelID)
 	}
+	broadcast, kindErr := h.channelIsBroadcast(r.Ctx, channelID)
+	if kindErr != nil {
+		h.log.Error("load channel kind for send", "user_id", r.UserID, "channel_id", channelID, "err", kindErr)
+		return nil, errInternal
+	}
 
 	channels, err := h.loadChannels(r.Ctx, map[int64]bool{channelID: true}, r.UserID)
 	if err != nil {
@@ -776,7 +798,7 @@ func (h *handlers) sendChannelMessage(r *mtproto.Request, channelID int64, req *
 		h.log.Error("send channel message users", "err", err)
 		return nil, errInternal
 	}
-	message, err := channelMessageToTL(msg, r.UserID, nil)
+	message, err := channelMessageToTL(msg, r.UserID, nil, broadcast)
 	if err != nil {
 		h.log.Error("render channel message", "channel_id", channelID, "local_id", msg.LocalID, "err", err)
 		return nil, errInternal
@@ -842,7 +864,12 @@ func (h *handlers) handleGetChannelDifference(r *mtproto.Request) (bin.Encoder, 
 		return empty, nil
 	}
 
-	b, err := h.buildChannelUpdates(r.Ctx, channelID, r.UserID, fromPts, limit, currentPts)
+	broadcast, err := h.channelIsBroadcast(r.Ctx, channelID)
+	if err != nil {
+		h.log.Error("load channel kind for difference", "channel_id", channelID, "err", err)
+		return nil, errInternal
+	}
+	b, err := h.buildChannelUpdates(r.Ctx, channelID, r.UserID, fromPts, limit, currentPts, broadcast)
 	if err != nil {
 		h.log.Error("channel difference build", "channel_id", channelID, "err", err)
 		return nil, errInternal
@@ -1118,6 +1145,11 @@ func (h *handlers) channelMessagesWithCount(
 	msgs []store.ChannelMessage,
 	count int,
 ) (bin.Encoder, error) {
+	broadcast, err := h.channelIsBroadcast(r.Ctx, channelID)
+	if err != nil {
+		h.log.Error("load channel kind for messages", "channel_id", channelID, "err", err)
+		return nil, errInternal
+	}
 	if err := h.attachChannelPollViews(r.Ctx, r.UserID, channelID, msgs); err != nil {
 		h.log.Error("channel poll messages", "user_id", r.UserID, "channel_id", channelID, "err", err)
 		return nil, errInternal
@@ -1132,13 +1164,13 @@ func (h *handlers) channelMessagesWithCount(
 	authors := map[int64]bool{r.UserID: true}
 	tlMsgs := make([]tg.MessageClass, len(msgs))
 	for i, m := range msgs {
-		message, renderErr := channelMessageToTL(m, r.UserID, files)
+		message, renderErr := channelMessageToTL(m, r.UserID, files, broadcast)
 		if renderErr != nil {
 			h.log.Error("render channel history message", "user_id", r.UserID, "channel_id", channelID, "local_id", m.LocalID, "err", renderErr)
 			return nil, errInternal
 		}
 		tlMsgs[i] = message
-		if !m.Deleted {
+		if !m.Deleted && (!broadcast || m.Action != store.ChannelMessageActionNone) {
 			authors[m.FromID] = true
 		}
 	}

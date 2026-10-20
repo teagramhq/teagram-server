@@ -19,7 +19,10 @@ func TestForwardChannelSourceUsesStoredPostData(t *testing.T) {
 	author := mustUser(t, s, "+15559310001")
 	forwarder := mustUser(t, s, "+15559310002")
 	destination := mustUser(t, s, "+15559310003")
-	channel := mustChannel(t, s, author.ID, "source")
+	channel, err := s.CreateChannel(ctx, author.ID, "source", "", true)
+	if err != nil {
+		t.Fatalf("create megagroup: %v", err)
+	}
 	seat(t, s, channel, author.ID, forwarder.ID, 0)
 	file := storedFile(t, s, author.ID)
 	fileID := file.ID
