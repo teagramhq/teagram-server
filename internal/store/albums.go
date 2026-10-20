@@ -684,7 +684,9 @@ func (s *Store) PostChannelAlbumAs(ctx context.Context, channelID, replyToMsgID 
 
 	var replyTo *int32
 	if replyToMsgID > 0 {
-		_, verr := qtx.ChannelPostExistsActive(ctx, db.ChannelPostExistsActiveParams{ChannelID: channelID, LocalID: replyToMsgID})
+		_, verr := qtx.ChannelPostExistsActive(ctx, db.ChannelPostExistsActiveParams{
+			ChannelID: channelID, LocalID: replyToMsgID, UserID: fromID,
+		})
 		if errors.Is(verr, pgx.ErrNoRows) {
 			return ChannelAlbumResult{}, ErrMessageInvalid
 		}

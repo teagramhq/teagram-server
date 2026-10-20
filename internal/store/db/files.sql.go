@@ -247,6 +247,7 @@ WHERE f.id = $1 AND f.access_hash = $2 AND f.stored = true
             ON cp.channel_id = cm.channel_id AND cp.user_id = $3
           WHERE cm.file_id = f.id
             AND cm.deleted = false
+            AND cm.local_id > cp.available_min_id
             AND (cp.banned_until IS NULL OR cp.banned_until <= now())
       )
   )
@@ -747,6 +748,7 @@ WHERE f.id = $3
             ON cp.channel_id = cm.channel_id AND cp.user_id = $5
           WHERE cm.file_id = f.id
             AND cm.deleted = false
+            AND cm.local_id > cp.available_min_id
             AND (cp.banned_until IS NULL OR cp.banned_until <= now())
       )
   )
@@ -796,6 +798,7 @@ WHERE f.id = $1
             ON cp.channel_id = cm.channel_id AND cp.user_id = $3
           WHERE cm.file_id = f.id
             AND cm.deleted = false
+            AND cm.local_id > cp.available_min_id
             AND (cp.banned_until IS NULL OR cp.banned_until <= now())
       )
   )

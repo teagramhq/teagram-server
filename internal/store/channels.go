@@ -145,6 +145,7 @@ type ChannelMember struct {
 	UserID          int64
 	Role            int // 0 member, 1 admin, 2 creator
 	AdminChangeInfo bool
+	AvailableMinID  int64
 	BannedUntil     *time.Time
 	JoinPts         int
 	Date            time.Time
@@ -201,6 +202,7 @@ func channelMemberFromRow(r db.ChannelParticipant) ChannelMember {
 		UserID:          r.UserID,
 		Role:            int(r.Role),
 		AdminChangeInfo: r.AdminChangeInfo,
+		AvailableMinID:  r.AvailableMinID,
 		JoinPts:         int(r.JoinPts),
 		Date:            r.Date.Time,
 	}
@@ -406,6 +408,7 @@ func (s *Store) ChannelDeliverySnapshot(ctx context.Context, channelID int64) ([
 			JoinPts:         r.JoinPts,
 			Date:            r.Date,
 			LastPostAt:      r.LastPostAt,
+			AvailableMinID:  r.AvailableMinID,
 		})
 	}
 	return members, int(rows[0].Pts), nil

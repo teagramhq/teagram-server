@@ -148,7 +148,14 @@ func BuildChannelUpdatesForTest(s *store.Store, userID, channelID int64, fromPts
 	if err != nil {
 		return nil, err
 	}
-	batch, err := h.buildChannelUpdates(ctx, channelID, userID, fromPts, limit, currentPts, broadcast)
+	member, ok, err := s.ChannelMemberOf(ctx, channelID, userID)
+	if err != nil {
+		return nil, err
+	}
+	if !ok {
+		return nil, store.ErrNotMember
+	}
+	batch, err := h.buildChannelUpdates(ctx, channelID, userID, fromPts, limit, currentPts, broadcast, member.AvailableMinID)
 	if err != nil {
 		return nil, err
 	}

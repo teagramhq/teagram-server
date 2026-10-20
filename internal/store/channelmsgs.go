@@ -874,7 +874,7 @@ func (s *Store) postChannelMessage(
 	var replyTo *int32
 	if replyToMsgID > 0 {
 		_, verr := qtx.ChannelPostExistsActive(ctx, db.ChannelPostExistsActiveParams{
-			ChannelID: channelID, LocalID: replyToMsgID,
+			ChannelID: channelID, LocalID: replyToMsgID, UserID: fromID,
 		})
 		if errors.Is(verr, pgx.ErrNoRows) {
 			return ChannelMessage{}, 0, false, ErrMessageInvalid
@@ -1159,6 +1159,28 @@ func (s *Store) ChannelMessages(ctx context.Context, channelID int64, localIDs [
 	}
 	for _, row := range tombstones {
 		out[row.LocalID] = ChannelMessage{ChannelID: row.ChannelID, LocalID: row.LocalID, Deleted: true}
+	}
+	return out, nil
+}
+
+// ChannelMessagesForMember returns only live posts above this member's history
+// floor, keyed by local_id. Membership, ban state and the floor are read in the
+// same query as the posts.
+func (s *Store) ChannelMessagesForMember(ctx context.Context, channelID, userID int64, localIDs []int64) (map[int64]ChannelMessage, error) {
+	if len(localIDs) == 0 {
+		return map[int64]ChannelMessage{}, nil
+	}
+	rows, err := s.q.ChannelMessagesForMember(ctx, db.ChannelMessagesForMemberParams{
+		ChannelID: channelID,
+		UserID:    userID,
+		LocalIds:  localIDs,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("channel messages for member: %w", err)
+	}
+	out := make(map[int64]ChannelMessage, len(rows))
+	for _, row := range rows {
+		out[row.LocalID] = channelMessageFromFields(channelMsgFields(row))
 	}
 	return out, nil
 }

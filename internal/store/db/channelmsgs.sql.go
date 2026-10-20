@@ -628,24 +628,32 @@ func (q *Queries) ChannelMessagesForDelete(ctx context.Context, arg ChannelMessa
 }
 
 const channelMessagesForForward = `-- name: ChannelMessagesForForward :many
-SELECT channel_id, local_id, from_id, date, message, edit_date, deleted,
-       random_id, grouped_id, file_id, reply_to_msg_id, action_type, post_author
-FROM channel_messages
-WHERE channel_id = $1::bigint
-  AND local_id = ANY($2::bigint[])
-  AND deleted = false
-  AND action_type = 0
+SELECT cm.channel_id, cm.local_id, cm.from_id, cm.date, cm.message, cm.edit_date, cm.deleted,
+       cm.random_id, cm.grouped_id, cm.file_id, cm.reply_to_msg_id, cm.action_type, cm.post_author
+FROM channel_messages cm
+WHERE cm.channel_id = $1::bigint
+  AND cm.local_id = ANY($2::bigint[])
+  AND cm.deleted = false
+  AND cm.action_type = 0
+  AND EXISTS (
+      SELECT 1 FROM channel_participants cp
+      WHERE cp.channel_id = cm.channel_id
+        AND cp.user_id = $3::bigint
+        AND cm.local_id > cp.available_min_id
+        AND (cp.banned_until IS NULL OR cp.banned_until <= now())
+  )
   AND EXISTS (
       SELECT 1 FROM channels c
       WHERE c.id = $1::bigint AND c.deleted_at IS NULL
   )
-ORDER BY local_id
-FOR SHARE SKIP LOCKED
+ORDER BY cm.local_id
+FOR SHARE OF cm SKIP LOCKED
 `
 
 type ChannelMessagesForForwardParams struct {
 	ChannelID int64
 	LocalIds  []int64
+	UserID    int64
 }
 
 type ChannelMessagesForForwardRow struct {
@@ -669,7 +677,7 @@ type ChannelMessagesForForwardRow struct {
 // reference locks. SKIP LOCKED makes an in-flight tombstone or edit fail closed
 // instead of forming a cycle with the eraser.
 func (q *Queries) ChannelMessagesForForward(ctx context.Context, arg ChannelMessagesForForwardParams) ([]ChannelMessagesForForwardRow, error) {
-	rows, err := q.db.Query(ctx, channelMessagesForForward, arg.ChannelID, arg.LocalIds)
+	rows, err := q.db.Query(ctx, channelMessagesForForward, arg.ChannelID, arg.LocalIds, arg.UserID)
 	if err != nil {
 		return nil, err
 	}
@@ -702,14 +710,95 @@ func (q *Queries) ChannelMessagesForForward(ctx context.Context, arg ChannelMess
 	return items, nil
 }
 
+const channelMessagesForMember = `-- name: ChannelMessagesForMember :many
+SELECT cm.channel_id, cm.local_id, cm.from_id, cm.date, cm.message, cm.edit_date, cm.deleted,
+       cm.random_id, cm.grouped_id, cm.file_id, cm.reply_to_msg_id, cm.action_type, cm.post_author
+FROM channel_messages cm
+JOIN channel_participants cp ON cp.channel_id = cm.channel_id AND cp.user_id = $1::bigint
+WHERE cm.channel_id = $2::bigint
+  AND cm.local_id = ANY($3::bigint[])
+  AND cm.deleted = false
+  AND cm.local_id > cp.available_min_id
+  AND (cp.banned_until IS NULL OR cp.banned_until <= now())
+  AND EXISTS (
+      SELECT 1 FROM channels c
+      WHERE c.id = cm.channel_id AND c.deleted_at IS NULL
+  )
+`
+
+type ChannelMessagesForMemberParams struct {
+	UserID    int64
+	ChannelID int64
+	LocalIds  []int64
+}
+
+type ChannelMessagesForMemberRow struct {
+	ChannelID    int64
+	LocalID      int64
+	FromID       int64
+	Date         pgtype.Timestamptz
+	Message      string
+	EditDate     pgtype.Timestamptz
+	Deleted      bool
+	RandomID     int64
+	GroupedID    *int64
+	FileID       *int64
+	ReplyToMsgID *int32
+	ActionType   int16
+	PostAuthor   *string
+}
+
+// ChannelMessagesForMember returns only live posts visible to this member. The
+// participant row supplies membership, ban state and the caller's own history
+// floor in the same statement as the post read.
+func (q *Queries) ChannelMessagesForMember(ctx context.Context, arg ChannelMessagesForMemberParams) ([]ChannelMessagesForMemberRow, error) {
+	rows, err := q.db.Query(ctx, channelMessagesForMember, arg.UserID, arg.ChannelID, arg.LocalIds)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ChannelMessagesForMemberRow
+	for rows.Next() {
+		var i ChannelMessagesForMemberRow
+		if err := rows.Scan(
+			&i.ChannelID,
+			&i.LocalID,
+			&i.FromID,
+			&i.Date,
+			&i.Message,
+			&i.EditDate,
+			&i.Deleted,
+			&i.RandomID,
+			&i.GroupedID,
+			&i.FileID,
+			&i.ReplyToMsgID,
+			&i.ActionType,
+			&i.PostAuthor,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const channelPostExistsActive = `-- name: ChannelPostExistsActive :one
-SELECT local_id FROM channel_messages
-WHERE channel_id = $1 AND local_id = $2 AND deleted = false AND action_type = 0
+SELECT cm.local_id
+FROM channel_messages cm
+JOIN channel_participants cp ON cp.channel_id = cm.channel_id AND cp.user_id = $3
+WHERE cm.channel_id = $1 AND cm.local_id = $2
+  AND cm.deleted = false AND cm.action_type = 0
+  AND cm.local_id > cp.available_min_id
+  AND (cp.banned_until IS NULL OR cp.banned_until <= now())
 `
 
 type ChannelPostExistsActiveParams struct {
 	ChannelID int64
 	LocalID   int64
+	UserID    int64
 }
 
 // ChannelPostExistsActive returns the local_id of an existing, non-deleted post
@@ -720,7 +809,7 @@ type ChannelPostExistsActiveParams struct {
 // lock before writing deleted = true, or the snapshot read here can race it and
 // accept a reply reference to a post that is deleted by the time we commit.
 func (q *Queries) ChannelPostExistsActive(ctx context.Context, arg ChannelPostExistsActiveParams) (int64, error) {
-	row := q.db.QueryRow(ctx, channelPostExistsActive, arg.ChannelID, arg.LocalID)
+	row := q.db.QueryRow(ctx, channelPostExistsActive, arg.ChannelID, arg.LocalID, arg.UserID)
 	var local_id int64
 	err := row.Scan(&local_id)
 	return local_id, err

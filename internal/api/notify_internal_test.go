@@ -16,6 +16,7 @@ import (
 	"github.com/gotd/td/bin"
 	"github.com/gotd/td/crypto"
 	"github.com/gotd/td/tg"
+	"github.com/gotd/td/transport"
 	"github.com/jackc/pgx/v5"
 
 	"github.com/teagramhq/teagram-server/internal/blob"
@@ -1876,7 +1877,7 @@ func TestDeliverChannelPostPushesViaRealStore(t *testing.T) {
 	u.deliverChannel(ctx, []store.ChannelMember{member}, time.Now(),
 		func(userID int64) []pushConn { return []pushConn{conn} },
 		func(memberID int64, fromPts int) (channelBatch, error) {
-			return u.h.buildChannelUpdates(ctx, ch.ID, memberID, max(fromPts, currentPts-1), maxDiffEvents, currentPts, !ch.Megagroup)
+			return u.h.buildChannelUpdates(ctx, ch.ID, memberID, max(fromPts, currentPts-1), maxDiffEvents, currentPts, !ch.Megagroup, 0)
 		},
 	)
 	if len(conn.got) != 1 {
@@ -1963,7 +1964,7 @@ func TestDeliverChannelPostPushesTombstoneDeletesToEveryMember(t *testing.T) {
 	u.deliverChannel(ctx, members, time.Now(), func(userID int64) []pushConn {
 		return []pushConn{conns[userID]}
 	}, func(memberID int64, fromPts int) (channelBatch, error) {
-		return u.h.buildChannelUpdates(ctx, channel.ID, memberID, max(fromPts, currentPts-1), maxDiffEvents, currentPts, !channel.Megagroup)
+		return u.h.buildChannelUpdates(ctx, channel.ID, memberID, max(fromPts, currentPts-1), maxDiffEvents, currentPts, !channel.Megagroup, 0)
 	})
 
 	for userID, pushed := range conns {
@@ -1974,6 +1975,110 @@ func TestDeliverChannelPostPushesTombstoneDeletesToEveryMember(t *testing.T) {
 		if !ok || deleted.ChannelID != channel.ID || len(deleted.Messages) != 1 || deleted.Messages[0] != int(post.LocalID) || deleted.Pts != currentPts || deleted.PtsCount != 1 {
 			t.Errorf("member %d update = %#v, want delete for post %d at pts %d", userID, pushed.got[0].Updates[0], post.LocalID, currentPts)
 		}
+	}
+}
+
+type historyFloorCountTransport struct {
+	sends atomic.Int64
+}
+
+func (c *historyFloorCountTransport) Send(context.Context, *bin.Buffer) error {
+	c.sends.Add(1)
+	return nil
+}
+
+func (*historyFloorCountTransport) Recv(context.Context, *bin.Buffer) error {
+	return errors.New("unused")
+}
+func (*historyFloorCountTransport) Close() error { return nil }
+
+var _ transport.Conn = (*historyFloorCountTransport)(nil)
+
+func historyFloorTestAuthKey() crypto.AuthKey {
+	var raw crypto.Key
+	for i := range raw {
+		raw[i] = byte(i + 1)
+	}
+	return raw.WithID()
+}
+
+func TestDeliverChannelPollVoteUsesEachMembersHistoryFloor(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	dsn := pgtest.DSN(t)
+	blobs, err := blob.NewLocal(t.TempDir())
+	if err != nil {
+		t.Fatalf("blob store: %v", err)
+	}
+	s, err := store.Open(ctx, dsn, pgtest.EncKey(), store.WithBlobStore(blobs))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := s.Close(); err != nil {
+			t.Errorf("close store: %v", err)
+		}
+	})
+
+	creator, err := s.CreateUser(ctx, "+15550000241")
+	if err != nil {
+		t.Fatalf("create creator: %v", err)
+	}
+	joiner, err := s.CreateUser(ctx, "+15550000242")
+	if err != nil {
+		t.Fatalf("create joiner: %v", err)
+	}
+	channel, err := s.CreateChannel(ctx, creator.ID, "floored poll push", "", true)
+	if err != nil {
+		t.Fatalf("create channel: %v", err)
+	}
+	post, poll, _, duplicate, err := s.PostChannelPollAs(ctx, channel.ID, creator.ID, 224241, "old poll", store.PollDraft{
+		Question: []byte("Question?"),
+		Answers:  []store.PollAnswer{{Option: []byte("a"), Text: []byte("A")}, {Option: []byte("b"), Text: []byte("B")}},
+	})
+	if err != nil || duplicate {
+		t.Fatalf("post poll: duplicate=%v err=%v", duplicate, err)
+	}
+	conn, err := pgx.Connect(ctx, dsn)
+	if err != nil {
+		t.Fatalf("connect to hide channel history: %v", err)
+	}
+	if _, err = conn.Exec(ctx, `UPDATE channels SET pre_history_hidden = true WHERE id = $1`, channel.ID); err != nil {
+		t.Fatalf("hide channel history: %v", err)
+	}
+	if err = conn.Close(ctx); err != nil {
+		t.Fatalf("close history connection: %v", err)
+	}
+	invite, err := s.CreateChannelInvite(ctx, channel.ID, creator.ID)
+	if err != nil {
+		t.Fatalf("create invite: %v", err)
+	}
+	if _, _, err = s.JoinChannelByInvite(ctx, invite, joiner.ID); err != nil {
+		t.Fatalf("join channel: %v", err)
+	}
+	if _, err = s.CastPollVote(ctx, creator.ID, store.PollMessageRef{
+		PeerType: store.PeerTypeChannel, PeerID: channel.ID, LocalID: post.LocalID,
+	}, [][]byte{poll.Answers[0].Option}); err != nil {
+		t.Fatalf("cast floor-zero vote: %v", err)
+	}
+
+	registry := mtproto.NewSessionRegistry()
+	creatorTransport, joinerTransport := &historyFloorCountTransport{}, &historyFloorCountTransport{}
+	creatorConn := mtproto.NewTestConn(creatorTransport, historyFloorTestAuthKey())
+	joinerConn := mtproto.NewTestConn(joinerTransport, historyFloorTestAuthKey())
+	creatorConn.SetOwner(creator.ID)
+	joinerConn.SetOwner(joiner.ID)
+	if !registry.Add(creator.ID, creatorConn) || !registry.Add(joiner.ID, joinerConn) {
+		t.Fatal("registry rejected a channel member connection")
+	}
+	updater := NewUpdater(s, 2, registry, nil, pgtest.PeerDeriver())
+	updater.DeliverChannelPollVote(ctx, channel.ID, poll.ID)
+
+	if got := creatorTransport.sends.Load(); got != 1 {
+		t.Errorf("floor-zero creator push count = %d, want 1", got)
+	}
+	if got := joinerTransport.sends.Load(); got != 0 {
+		t.Errorf("floored member push count = %d, want 0", got)
 	}
 }
 
