@@ -42,6 +42,7 @@ SMOKE_SCENARIOS=(
   langpack
   username-registration
   turnstile-signup
+  turnstile-signin
   username-password-reset
   pollprobe
   pollprobe-channels

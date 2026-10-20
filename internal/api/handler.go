@@ -135,10 +135,11 @@ type handlers struct {
 	// welcomeChannel is the operator-configured public broadcast channel new users may join.
 	welcomeChannel        string
 	welcomeChannelWarning atomic.Bool
-	// turnstileSiteKey is public and appears only in the challenge-required RPC
-	// error. The verifier secret stays inside the verifier.
-	turnstileSiteKey  string
-	turnstileVerifier SignUpTurnstileVerifier
+	// turnstileSiteKey is public, advertised as signup capability, and included
+	// in action-specific challenge errors. The verifier secret stays private.
+	turnstileSiteKey       string
+	turnstileVerifier      SignUpTurnstileVerifier
+	turnstileSignInEnabled bool
 	// Sign-up rejection records are sampled independently by fixed reason class.
 	signUpRejectionLogs signUpRejectionSampler
 	// dialogFilterSync coordinates connection-local folder recovery with the
@@ -239,7 +240,7 @@ func NewWithPhotoThumbsAndDialogFilterSyncAndWelcomeChannel(s *store.Store, dcID
 	return newWithPhotoThumbsAndDialogFilterSyncAndUploadPartTTLAndTurnstile(
 		s, dcID, cfg, log, logLoginCodes, maxFileBytes, blobs, maxUserStorageBytes,
 		peers, photos, rateLimits, registrationMode, dialogFilterSync, photoThumbs,
-		config.DefaultUploadPartTTL, welcomeChannel, "", nil, rateLimitMetrics...,
+		config.DefaultUploadPartTTL, welcomeChannel, "", nil, false, rateLimitMetrics...,
 	)
 }
 
@@ -249,7 +250,7 @@ func NewWithPhotoThumbsAndDialogFilterSyncAndUploadPartTTL(s *store.Store, dcID 
 	return newWithPhotoThumbsAndDialogFilterSyncAndUploadPartTTLAndTurnstile(
 		s, dcID, cfg, log, logLoginCodes, maxFileBytes, blobs, maxUserStorageBytes,
 		peers, photos, rateLimits, registrationMode, dialogFilterSync, photoThumbs,
-		uploadPartTTL, "", "", nil, rateLimitMetrics...,
+		uploadPartTTL, "", "", nil, false, rateLimitMetrics...,
 	)
 }
 
@@ -259,21 +260,32 @@ func NewWithPhotoThumbsAndDialogFilterSyncAndUploadPartTTLAndTurnstile(s *store.
 	return newWithPhotoThumbsAndDialogFilterSyncAndUploadPartTTLAndTurnstile(
 		s, dcID, cfg, log, logLoginCodes, maxFileBytes, blobs, maxUserStorageBytes,
 		peers, photos, rateLimits, registrationMode, dialogFilterSync, photoThumbs,
-		uploadPartTTL, "", turnstileSiteKey, turnstileVerifier, rateLimitMetrics...,
+		uploadPartTTL, "", turnstileSiteKey, turnstileVerifier, false, rateLimitMetrics...,
 	)
 }
 
 // NewWithPhotoThumbsAndDialogFilterSyncAndUploadPartTTLAndTurnstileAndWelcomeChannel
 // builds an RPC handler with sign-up verification and a welcome channel.
+// Sign-in enforcement remains disabled for compatibility.
 func NewWithPhotoThumbsAndDialogFilterSyncAndUploadPartTTLAndTurnstileAndWelcomeChannel(s *store.Store, dcID int, cfg *tg.Config, log *slog.Logger, logLoginCodes bool, maxFileBytes int64, blobs blob.Store, maxUserStorageBytes int64, peers *peerhash.Deriver, photos *photohash.Deriver, rateLimits config.RateLimitsConfig, registrationMode config.RegistrationMode, dialogFilterSync *DialogFilterSync, photoThumbs *photothumb.Supervisor, uploadPartTTL time.Duration, turnstileSiteKey string, turnstileVerifier SignUpTurnstileVerifier, welcomeChannel string, rateLimitMetrics ...*store.NotificationMetrics) mtproto.Handler {
 	return newWithPhotoThumbsAndDialogFilterSyncAndUploadPartTTLAndTurnstile(
 		s, dcID, cfg, log, logLoginCodes, maxFileBytes, blobs, maxUserStorageBytes,
 		peers, photos, rateLimits, registrationMode, dialogFilterSync, photoThumbs,
-		uploadPartTTL, welcomeChannel, turnstileSiteKey, turnstileVerifier, rateLimitMetrics...,
+		uploadPartTTL, welcomeChannel, turnstileSiteKey, turnstileVerifier, false, rateLimitMetrics...,
 	)
 }
 
-func newWithPhotoThumbsAndDialogFilterSyncAndUploadPartTTLAndTurnstile(s *store.Store, dcID int, cfg *tg.Config, log *slog.Logger, logLoginCodes bool, maxFileBytes int64, blobs blob.Store, maxUserStorageBytes int64, peers *peerhash.Deriver, photos *photohash.Deriver, rateLimits config.RateLimitsConfig, registrationMode config.RegistrationMode, dialogFilterSync *DialogFilterSync, photoThumbs *photothumb.Supervisor, uploadPartTTL time.Duration, welcomeChannel, turnstileSiteKey string, turnstileVerifier SignUpTurnstileVerifier, rateLimitMetrics ...*store.NotificationMetrics) mtproto.Handler {
+// NewWithPhotoThumbsAndDialogFilterSyncAndUploadPartTTLAndTurnstileAndWelcomeChannelAndSignIn
+// builds an RPC handler with signup verification and the configured sign-in gate.
+func NewWithPhotoThumbsAndDialogFilterSyncAndUploadPartTTLAndTurnstileAndWelcomeChannelAndSignIn(s *store.Store, dcID int, cfg *tg.Config, log *slog.Logger, logLoginCodes bool, maxFileBytes int64, blobs blob.Store, maxUserStorageBytes int64, peers *peerhash.Deriver, photos *photohash.Deriver, rateLimits config.RateLimitsConfig, registrationMode config.RegistrationMode, dialogFilterSync *DialogFilterSync, photoThumbs *photothumb.Supervisor, uploadPartTTL time.Duration, turnstileSiteKey string, turnstileVerifier SignUpTurnstileVerifier, welcomeChannel string, turnstileSignInEnabled bool, rateLimitMetrics ...*store.NotificationMetrics) mtproto.Handler {
+	return newWithPhotoThumbsAndDialogFilterSyncAndUploadPartTTLAndTurnstile(
+		s, dcID, cfg, log, logLoginCodes, maxFileBytes, blobs, maxUserStorageBytes,
+		peers, photos, rateLimits, registrationMode, dialogFilterSync, photoThumbs,
+		uploadPartTTL, welcomeChannel, turnstileSiteKey, turnstileVerifier, turnstileSignInEnabled, rateLimitMetrics...,
+	)
+}
+
+func newWithPhotoThumbsAndDialogFilterSyncAndUploadPartTTLAndTurnstile(s *store.Store, dcID int, cfg *tg.Config, log *slog.Logger, logLoginCodes bool, maxFileBytes int64, blobs blob.Store, maxUserStorageBytes int64, peers *peerhash.Deriver, photos *photohash.Deriver, rateLimits config.RateLimitsConfig, registrationMode config.RegistrationMode, dialogFilterSync *DialogFilterSync, photoThumbs *photothumb.Supervisor, uploadPartTTL time.Duration, welcomeChannel, turnstileSiteKey string, turnstileVerifier SignUpTurnstileVerifier, turnstileSignInEnabled bool, rateLimitMetrics ...*store.NotificationMetrics) mtproto.Handler {
 	if peers == nil {
 		panic("api: nil peer hash deriver")
 	}
@@ -335,6 +347,7 @@ func newWithPhotoThumbsAndDialogFilterSyncAndUploadPartTTLAndTurnstile(s *store.
 		welcomeChannel:               welcomeChannel,
 		turnstileSiteKey:             turnstileSiteKey,
 		turnstileVerifier:            turnstileVerifier,
+		turnstileSignInEnabled:       turnstileSignInEnabled,
 		rateLimitMetrics:             denialMetrics,
 		dialogFilterSync:             dialogFilterSync,
 	}

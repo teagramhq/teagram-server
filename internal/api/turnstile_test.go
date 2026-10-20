@@ -18,12 +18,14 @@ import (
 type fakeTurnstileVerifier struct {
 	seen        map[string]bool
 	remoteIPs   []string
+	actions     []string
 	verifyCalls int
 	failure     error
 }
 
-func (f *fakeTurnstileVerifier) Verify(_ context.Context, token, remoteIP string) error {
+func (f *fakeTurnstileVerifier) Verify(_ context.Context, token, action, remoteIP string) error {
 	f.verifyCalls++
+	f.actions = append(f.actions, action)
 	f.remoteIPs = append(f.remoteIPs, remoteIP)
 	if f.failure != nil {
 		return f.failure
@@ -60,6 +62,9 @@ func TestSignUpTurnstileRequiresFreshTokenBeforeChargingIPLimit(t *testing.T) {
 	}
 	if verifier.verifyCalls != 1 {
 		t.Fatalf("valid token made %d verifier calls, want 1", verifier.verifyCalls)
+	}
+	if len(verifier.actions) != 1 || verifier.actions[0] != "signup" {
+		t.Fatalf("verified actions = %v, want [signup]", verifier.actions)
 	}
 	if len(verifier.remoteIPs) != 1 || verifier.remoteIPs[0] != "" {
 		t.Fatalf("socket-trusted address was sent to verifier: %v", verifier.remoteIPs)

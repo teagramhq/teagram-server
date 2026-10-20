@@ -587,6 +587,78 @@ func TestServeWebSocketDiscoveryCORSIsPathScoped(t *testing.T) {
 	}
 }
 
+func TestServeWebSocketUsesListenerScopedTurnstileDiscovery(t *testing.T) {
+	t.Parallel()
+
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	defaultListener := mustListenTCP(t, ctx, "127.0.0.1:0")
+	publicListener := mustListenTCP(t, ctx, "127.0.0.1:0")
+	rsaKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatalf("generate RSA key: %v", err)
+	}
+	defaultDoc, err := discovery.NewDocument("configured.example.test:443", 2, &rsaKey.PublicKey, false)
+	if err != nil {
+		t.Fatalf("build default discovery document: %v", err)
+	}
+	publicDoc := defaultDoc
+	publicDoc.Turnstile = &discovery.Turnstile{SiteKey: "public-site-key"}
+	srv := mtproto.New(exchange.PrivateKey{}, 2, mtproto.NewMemoryAuthKeyStore(), nil, nil)
+	if err := srv.SetClientDiscoveryDocument(defaultDoc); err != nil {
+		t.Fatalf("set default discovery document: %v", err)
+	}
+	publicHandler := mtproto.HandlerFunc(func(*mtproto.Conn, *mtproto.Request) error { return nil })
+	served := make(chan error, 2)
+	go func() { served <- srv.ServeWebSocket(ctx, defaultListener) }()
+	go func() {
+		served <- srv.ServeWebSocketWithHandlerAndDiscovery(ctx, publicListener, publicHandler, nil, publicDoc)
+	}()
+	t.Cleanup(func() {
+		cancel()
+		for range 2 {
+			if err := <-served; err != nil && !errors.Is(err, context.Canceled) && !errors.Is(err, net.ErrClosed) {
+				t.Errorf("serve websocket: %v", err)
+			}
+		}
+	})
+
+	for _, tc := range []struct {
+		name     string
+		listener net.Listener
+		wantKey  bool
+	}{
+		{name: "tailnet", listener: defaultListener},
+		{name: "public", listener: publicListener, wantKey: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, "http://"+tc.listener.Addr().String()+"/.well-known/telegramd/client", nil)
+			if err != nil {
+				t.Fatalf("build discovery request: %v", err)
+			}
+			resp, err := http.DefaultClient.Do(req)
+			if err != nil {
+				t.Fatalf("get discovery: %v", err)
+			}
+			defer func() {
+				if err := resp.Body.Close(); err != nil {
+					t.Errorf("close discovery response: %v", err)
+				}
+			}()
+			var got discovery.Document
+			if err := json.NewDecoder(resp.Body).Decode(&got); err != nil {
+				t.Fatalf("decode discovery: %v", err)
+			}
+			if (got.Turnstile != nil) != tc.wantKey {
+				t.Fatalf("Turnstile discovery = %+v, want enabled %t", got.Turnstile, tc.wantKey)
+			}
+			if tc.wantKey && got.Turnstile.SiteKey != "public-site-key" {
+				t.Fatalf("public site key = %q, want public-site-key", got.Turnstile.SiteKey)
+			}
+		})
+	}
+}
+
 func TestServeWebSocketReportsPersistentAcceptFailures(t *testing.T) {
 	t.Parallel()
 

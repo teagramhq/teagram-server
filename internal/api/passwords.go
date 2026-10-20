@@ -167,6 +167,9 @@ func (h *handlers) handleCheckPasswordWithConn(c *mtproto.Conn, r *mtproto.Reque
 	if err := req.Decode(r.Buf); err != nil {
 		return nil, errMethodNotImpl
 	}
+	if err := h.verifyTurnstile(r, "signin"); err != nil {
+		return nil, err
+	}
 	proof, ok := req.Password.(*tg.InputCheckPasswordSRP)
 	if !ok {
 		return nil, errPasswordHashInvalid

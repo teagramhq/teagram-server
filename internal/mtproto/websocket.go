@@ -439,7 +439,7 @@ func (l *webSocketListener) wait(ctx context.Context) bool {
 // detection, while this endpoint performs the HTTP upgrade and then enters the
 // same per-connection MTProto path.
 func (s *Server) ServeWebSocket(ctx context.Context, l net.Listener) error {
-	return s.serveWebSocket(ctx, l, s.handler, s.webSocketOriginPatterns)
+	return s.serveWebSocket(ctx, l, s.handler, s.webSocketOriginPatterns, s.clientDiscoveryDocument)
 }
 
 // ServeWebSocketWithHandler serves MTProto over WebSocket with a handler and
@@ -450,10 +450,24 @@ func (s *Server) ServeWebSocketWithHandler(ctx context.Context, l net.Listener, 
 	if handler == nil {
 		return errors.New("WebSocket handler is required")
 	}
-	return s.serveWebSocket(ctx, l, handler, append([]string(nil), originPatterns...))
+	return s.serveWebSocket(ctx, l, handler, append([]string(nil), originPatterns...), s.clientDiscoveryDocument)
 }
 
-func (s *Server) serveWebSocket(ctx context.Context, l net.Listener, handler Handler, originPatterns []string) error {
+// ServeWebSocketWithHandlerAndDiscovery serves a listener with its own public
+// discovery document. This keeps public-only client configuration off the
+// default listener's discovery route.
+func (s *Server) ServeWebSocketWithHandlerAndDiscovery(ctx context.Context, l net.Listener, handler Handler, originPatterns []string, doc discovery.Document) error {
+	if handler == nil {
+		return errors.New("WebSocket handler is required")
+	}
+	data, err := discovery.MarshalDocument(doc)
+	if err != nil {
+		return fmt.Errorf("marshal listener client discovery document: %w", err)
+	}
+	return s.serveWebSocket(ctx, l, handler, append([]string(nil), originPatterns...), data)
+}
+
+func (s *Server) serveWebSocket(ctx context.Context, l net.Listener, handler Handler, originPatterns []string, discoveryDocument []byte) error {
 	s.shutdown.startServing()
 	defer s.shutdown.finishServing()
 	server := &http.Server{
@@ -462,7 +476,7 @@ func (s *Server) serveWebSocket(ctx context.Context, l net.Listener, handler Han
 				state.socket.handlerStarted.Store(true)
 				defer state.socket.handlerDone()
 			}
-			s.handleWebSocket(w, r, handler, originPatterns)
+			s.handleWebSocket(w, r, handler, originPatterns, discoveryDocument)
 		}),
 		// The accepted connection already carries an absolute deadline that
 		// covers address establishment, HTTP parsing, upgrade and codec
@@ -562,7 +576,7 @@ func (s *Server) SetClientDiscoveryDocument(doc discovery.Document) error {
 	return nil
 }
 
-func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request, handler Handler, originPatterns []string) {
+func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request, handler Handler, originPatterns []string, discoveryDocument []byte) {
 	state, ok := r.Context().Value(webSocketConnKey{}).(*webSocketConnState)
 	if !ok {
 		http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
@@ -572,7 +586,7 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request, handler
 	// worker closes address-establishment failures before they reach net/http.
 	defer state.slot.clear()
 	if r.URL.EscapedPath() == clientDiscoveryPath {
-		s.handleClientDiscovery(w, r)
+		s.handleClientDiscovery(w, r, discoveryDocument)
 		return
 	}
 	if r.URL.Path != websocketPath {
@@ -645,7 +659,7 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request, handler
 	}
 }
 
-func (s *Server) handleClientDiscovery(w http.ResponseWriter, r *http.Request) {
+func (s *Server) handleClientDiscovery(w http.ResponseWriter, r *http.Request, discoveryDocument []byte) {
 	if r.Method != http.MethodGet && r.Method != http.MethodOptions {
 		w.Header().Set("Allow", "GET, OPTIONS")
 		w.WriteHeader(http.StatusMethodNotAllowed)
@@ -657,12 +671,12 @@ func (s *Server) handleClientDiscovery(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusNoContent)
 		return
 	}
-	if len(s.clientDiscoveryDocument) == 0 {
+	if len(discoveryDocument) == 0 {
 		http.NotFound(w, r)
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
-	if _, err := w.Write(s.clientDiscoveryDocument); err != nil {
+	if _, err := w.Write(discoveryDocument); err != nil {
 		s.log.Info("write public client discovery document", "err", err)
 	}
 }

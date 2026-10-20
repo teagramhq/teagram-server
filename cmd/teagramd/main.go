@@ -64,6 +64,7 @@ type publicWebSocketListener struct {
 	listener       net.Listener
 	handler        mtproto.Handler
 	originPatterns []string
+	discovery      discovery.Document
 }
 
 func runCommand(args []string, log *slog.Logger, stdout, stderr io.Writer) error {
@@ -424,6 +425,9 @@ func runClientConfigCommand(stdout io.Writer) error {
 	if err != nil {
 		return err
 	}
+	if cfg.TurnstileSiteKey != "" {
+		doc.Turnstile = &discovery.Turnstile{SiteKey: cfg.TurnstileSiteKey}
+	}
 	return discovery.WriteDocument(stdout, doc)
 }
 
@@ -652,6 +656,13 @@ func runAtBlobModePath(log *slog.Logger, blobModePath string) error {
 	if err != nil {
 		return fmt.Errorf("validate discovery identity: %w", err)
 	}
+	if cfg.Turnstile.Enabled() && cfg.PublicWebSocketListenAddr == "" {
+		clientDiscovery.Turnstile = &discovery.Turnstile{SiteKey: cfg.Turnstile.SiteKey}
+	}
+	publicClientDiscovery := clientDiscovery
+	if cfg.Turnstile.Enabled() && cfg.PublicWebSocketListenAddr != "" {
+		publicClientDiscovery.Turnstile = &discovery.Turnstile{SiteKey: cfg.Turnstile.SiteKey}
+	}
 	log.Info("server RSA key", "key_id", keyID, "fingerprint", fingerprint, "path", cfg.RSAKeyPath)
 
 	blobs, err := newBlobStore(ctx, cfg, log)
@@ -783,12 +794,18 @@ func runAtBlobModePath(log *slog.Logger, blobModePath string) error {
 	if cfg.Turnstile.Enabled() {
 		turnstileVerifier = api.NewTurnstileVerifier(cfg.Turnstile.SecretKey)
 	}
-	newHandler := func(registrationMode config.RegistrationMode) mtproto.Handler {
-		return api.NewWithPhotoThumbsAndDialogFilterSyncAndUploadPartTTLAndTurnstileAndWelcomeChannel(
+	newHandler := func(registrationMode config.RegistrationMode, turnstileEnabled, turnstileSignInEnabled bool) mtproto.Handler {
+		turnstileSiteKey := ""
+		var verifier api.SignUpTurnstileVerifier
+		if turnstileEnabled && cfg.Turnstile.Enabled() {
+			turnstileSiteKey = cfg.Turnstile.SiteKey
+			verifier = turnstileVerifier
+		}
+		return api.NewWithPhotoThumbsAndDialogFilterSyncAndUploadPartTTLAndTurnstileAndWelcomeChannelAndSignIn(
 			st, cfg.DCID, tgcfg, log, cfg.LogLoginCodes, cfg.MaxFileBytes, blobs,
 			cfg.MaxUserStorageBytes, peers, photos, cfg.RateLimits, registrationMode,
-			dialogFilterSync, photoThumbs, cfg.UploadPartTTL, cfg.Turnstile.SiteKey,
-			turnstileVerifier, cfg.WelcomeChannel, notifyMetrics,
+			dialogFilterSync, photoThumbs, cfg.UploadPartTTL, turnstileSiteKey,
+			verifier, cfg.WelcomeChannel, turnstileSignInEnabled, notifyMetrics,
 		)
 	}
 	if cfg.LogLoginCodes {
@@ -945,7 +962,7 @@ func runAtBlobModePath(log *slog.Logger, blobModePath string) error {
 			return errors.Join(fmt.Errorf("public websocket listen: %w", listenErr), closeErr)
 		}
 		log.Info("Public WebSocket MTProto listening", "addr", cfg.PublicWebSocketListenAddr)
-		publicWebSocket = newPublicWebSocketListener(cfg, publicLn, publicHandler)
+		publicWebSocket = newPublicWebSocketListener(cfg, publicLn, publicHandler, publicClientDiscovery)
 	}
 
 	return serveMTProto(ctx, server, ln, websocketLn, publicWebSocket)
