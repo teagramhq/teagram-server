@@ -1,9 +1,10 @@
 import {randomBytes} from 'node:crypto';
-import {execFileSync, spawn} from 'node:child_process';
+import {execFileSync} from 'node:child_process';
 import {appendFileSync, chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync} from 'node:fs';
 import {createInterface} from 'node:readline';
 import {join, resolve} from 'node:path';
 import {tmpdir} from 'node:os';
+import {spawnTracked, terminate} from './process_tree.mjs';
 
 const SCENARIOS = 'sign-in,message,group,channel,poll';
 const REVISION_PATTERN = /^[0-9a-f]{40}$/;
@@ -69,16 +70,6 @@ function cancelWaiter() {
   };
 }
 
-function terminate(child, signal) {
-  if(!child || child.exitCode !== null || child.signalCode !== null) return;
-  try {
-    if(child.detached && process.platform !== 'win32') process.kill(-child.pid, signal);
-    else child.kill(signal);
-  } catch {
-    // The child may have exited between the status check and the signal.
-  }
-}
-
 for(const signal of ['SIGINT', 'SIGTERM']) {
   process.on(signal, () => {
     if(requestedSignal) return;
@@ -99,7 +90,7 @@ function cleanEnvironment(extra = {}) {
 
 function runCommand(command, args, {cwd, env = cleanEnvironment(), stage, timeoutMs}) {
   if(requestedSignal) return Promise.reject(new FlowError('cancelled', `workflow received ${requestedSignal}`));
-  const child = spawn(command, args, {cwd, env, stdio: 'inherit', detached: process.platform !== 'win32'});
+  const child = spawnTracked(command, args, {cwd, env, stdio: 'inherit'});
   commandChildren.add(child);
   return new Promise((resolvePromise, rejectPromise) => {
     let settled = false;
@@ -109,9 +100,16 @@ function runCommand(command, args, {cwd, env = cleanEnvironment(), stage, timeou
       if(settled) return;
       settled = true;
       clearTimeout(timer);
-      commandChildren.delete(child);
-      if(error) rejectPromise(error);
-      else resolvePromise();
+      void (async () => {
+        const processTreeStopped = await terminate(child, 'SIGTERM');
+        commandChildren.delete(child);
+        if(!processTreeStopped) {
+          const message = `${command} process group did not stop`;
+          error = new FlowError(error?.stage || stage, error ? `${error.message}; ${message}` : message);
+        }
+        if(error) rejectPromise(error);
+        else resolvePromise();
+      })();
     };
 
     child.once('error', () => finish(new FlowError(stage, `${command} could not start`)));
@@ -124,8 +122,7 @@ function runCommand(command, args, {cwd, env = cleanEnvironment(), stage, timeou
     if(timeoutMs) {
       timer = setTimeout(() => {
         timedOut = true;
-        terminate(child, 'SIGTERM');
-        setTimeout(() => terminate(child, 'SIGKILL'), 5000).unref();
+        void terminate(child, 'SIGTERM');
       }, timeoutMs);
     }
   });
@@ -192,6 +189,8 @@ async function stopFixture({allowNonzeroExit = false} = {}) {
   if(!fixtureProcess) return;
   if(fixtureProcess.exitCode !== null || fixtureProcess.signalCode !== null) {
     const previous = await fixtureExit;
+    const processTreeStopped = await terminate(fixtureProcess, 'SIGTERM');
+    if(!processTreeStopped) throw new FlowError('fixture-cleanup', 'fixture process group did not stop');
     if((previous.code !== 0 && !allowNonzeroExit) || !fixtureCleanupVerified) {
       throw new FlowError('fixture-cleanup', `fixture exited with status ${previous.code ?? previous.signal}`);
     }
@@ -202,21 +201,25 @@ async function stopFixture({allowNonzeroExit = false} = {}) {
     try {
       writeFixtureCommand('stop');
     } catch {
-      terminate(fixtureProcess, 'SIGTERM');
+      void terminate(fixtureProcess, 'SIGTERM');
     }
   } else {
-    terminate(fixtureProcess, 'SIGTERM');
+    void terminate(fixtureProcess, 'SIGTERM');
   }
 
   let timer;
   const outcome = await Promise.race([
-    fixtureExit,
+    fixtureExit.then(async (result) => ({
+      ...result,
+      processTreeStopped: await terminate(fixtureProcess, 'SIGTERM')
+    })),
     new Promise((resolvePromise) => { timer = setTimeout(() => resolvePromise(null), 90_000); })
   ]).finally(() => clearTimeout(timer));
   if(!outcome) {
-    terminate(fixtureProcess, 'SIGKILL');
+    await terminate(fixtureProcess, 'SIGKILL');
     throw new FlowError('fixture-cleanup', 'fixture cleanup exceeded its time limit');
   }
+  if(!outcome.processTreeStopped) throw new FlowError('fixture-cleanup', 'fixture process group did not stop');
   if(!fixtureCleanupVerified || (orderlyStop && outcome.code !== 0 && !allowNonzeroExit)) {
     throw new FlowError('fixture-cleanup', `fixture cleanup exited with status ${outcome.code ?? outcome.signal}`);
   }
@@ -314,11 +317,11 @@ async function main() {
 
     const fixtureScript = join(serverRoot, 'test/e2e/real_server_fixture/run.sh');
     if(!existsSync(fixtureScript)) throw new FlowError(runStage, 'real-server fixture entrypoint is missing');
-    fixtureProcess = spawn('bash', [fixtureScript,
+    fixtureProcess = spawnTracked('bash', [fixtureScript,
       '--server-revision', serverRevision,
       '--web-revision', webRevision,
       '--run-id', runId
-    ], {cwd: serverRoot, env: cleanEnvironment(), stdio: ['pipe', 'pipe', 'pipe'], detached: process.platform !== 'win32'});
+    ], {cwd: serverRoot, env: cleanEnvironment(), stdio: ['pipe', 'pipe', 'pipe']});
     fixtureStarted = true;
     const output = createInterface({input: fixtureProcess.stdout});
     output.on('line', receiveFixtureEvent);

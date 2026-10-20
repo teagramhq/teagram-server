@@ -58,6 +58,9 @@ jobs:
           cache: pnpm
           cache-dependency-path: web-source/pnpm-lock.yaml
 
+      - name: Test cancellation and timeout process-group cleanup
+        run: node --test test/e2e/real_server_fixture/process_tree.test.mjs
+
       - name: Install pinned web dependencies
         working-directory: web-source
         run: pnpm install --frozen-lockfile
