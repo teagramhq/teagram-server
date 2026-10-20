@@ -192,6 +192,7 @@ func TestMessagesGetRepliesRejectsUnsupportedPeersAndUnauthorizedMembers(t *test
 	joinChannelByInvite(t, s, store.Channel{ID: group.ID, CreatorID: creator.ID}, member.ID)
 	root := sentChannelMessageID(t, mustSendChannelMessage(t, s, creator.ID, group.ID, "root", 98201))
 	h := fullChannelDispatcher(s)
+	var rpc *mt.RPCError
 
 	for _, tc := range []struct {
 		name string
@@ -219,9 +220,24 @@ func TestMessagesGetRepliesRejectsUnsupportedPeersAndUnauthorizedMembers(t *test
 	}
 
 	broadcast := createChannel(t, s, creator.ID, &tg.ChannelsCreateChannelRequest{Broadcast: true, Title: "No reply threads"})
-	_, rpc := getRepliesViaDispatcher(t, h, creator.ID, &tg.MessagesGetRepliesRequest{Peer: api.InputPeerChannel(creator.ID, broadcast.ID), MsgID: 1, Limit: 10})
-	if rpc == nil || rpc.ErrorMessage != "MSG_ID_INVALID" {
-		t.Fatalf("broadcast getReplies error = %v, want MSG_ID_INVALID", rpc)
+	for _, tc := range []struct {
+		name   string
+		userID int64
+		want   string
+	}{
+		{name: "broadcast member", userID: creator.ID, want: "MSG_ID_INVALID"},
+		{name: "broadcast nonmember with cached valid hash", userID: outsider.ID, want: "PEER_ID_INVALID"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, rpc := getRepliesViaDispatcher(t, h, tc.userID, &tg.MessagesGetRepliesRequest{
+				Peer:  api.InputPeerChannel(tc.userID, broadcast.ID),
+				MsgID: 1,
+				Limit: 10,
+			})
+			if rpc == nil || rpc.ErrorMessage != tc.want {
+				t.Fatalf("broadcast getReplies error = %v, want %s", rpc, tc.want)
+			}
+		})
 	}
 	deletedRoot := sentChannelMessageID(t, mustSendChannelMessage(t, s, creator.ID, group.ID, "deleted root", 98202))
 	if _, _, err := s.DeleteChannelMessages(ctx, group.ID, creator.ID, []int64{int64(deletedRoot)}); err != nil {

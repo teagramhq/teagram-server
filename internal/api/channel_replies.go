@@ -53,11 +53,11 @@ func (h *handlers) handleGetReplies(r *mtproto.Request) (bin.Encoder, error) {
 	if !snapshot.ChannelExists {
 		return nil, errPeerIDInvalid
 	}
-	if !snapshot.Megagroup {
-		return nil, errMsgIDInvalid
-	}
 	if !snapshot.IsMember {
 		return nil, errPeerIDInvalid
+	}
+	if !snapshot.Megagroup {
+		return nil, errMsgIDInvalid
 	}
 	if !snapshot.RootExists {
 		return nil, errMsgIDInvalid
