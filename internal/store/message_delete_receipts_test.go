@@ -434,7 +434,8 @@ func TestMessageDeleteCapacityRefusalStorageConstraints(t *testing.T) {
 }
 
 func TestMessageDeleteReceiptMigrationReplaysOnDisposableSchema(t *testing.T) {
-	t.Parallel()
+	// The migrations before this boundary include migration 79, which changes a
+	// cluster-wide role and cannot run alongside another disposable-schema replay.
 	ctx := context.Background()
 	conn, _ := profilePhotoDatabaseBefore(t, ctx, messageDeleteReceiptMigration)
 	for _, table := range messageDeleteReceiptTables {
