@@ -2626,7 +2626,9 @@ func testSmokeDeleteBasicGroup(t *testing.T) {
 	f := newSmokeFixtureWithDeadline(t, config.RegistrationClosed, nil, 180*time.Second)
 	const phoneA, phoneB, phoneC, phoneD, phoneE = "+15551047401", "+15551047402", "+15551047403", "+15551047404", "+15551047405"
 	seedSmokeUsers(t, f, phoneA, phoneB, phoneC, phoneD, phoneE)
-	a, b, c, d, e := newSmokeClient(t, f, "Delete group A", phoneA), newSmokeClient(t, f, "Delete group B", phoneB), newSmokeClient(t, f, "Delete group C", phoneC), newSmokeClient(t, f, "Delete group former member", phoneD), newSmokeClient(t, f, "Delete group stranger", phoneE)
+	requestsA, requestsB, requestsC := &clientRequestRecorder{}, &clientRequestRecorder{}, &clientRequestRecorder{}
+	a, b, c := newSmokeClientWithRequests(t, f, "Delete group A", phoneA, requestsA), newSmokeClientWithRequests(t, f, "Delete group B", phoneB, requestsB), newSmokeClientWithRequests(t, f, "Delete group C", phoneC, requestsC)
+	d, e := newSmokeClient(t, f, "Delete group former member", phoneD), newSmokeClient(t, f, "Delete group stranger", phoneE)
 
 	var chatID int64
 	if err := a.call(f.ctx, func(ctx context.Context, api *tg.Client) error {
@@ -2781,6 +2783,11 @@ func testSmokeDeleteBasicGroup(t *testing.T) {
 	if err != nil || !found {
 		t.Fatalf("chat before deletion = %+v, found=%v err=%v", chatBeforeDelete, found, err)
 	}
+	getDialogsBeforeRemoval := map[int64]int{
+		a.id: requestsA.countMethod("messages.getDialogs"),
+		b.id: requestsB.countMethod("messages.getDialogs"),
+		c.id: requestsC.countMethod("messages.getDialogs"),
+	}
 
 	var deleted bool
 	if err := a.call(f.ctx, func(ctx context.Context, api *tg.Client) error {
@@ -2817,6 +2824,30 @@ func testSmokeDeleteBasicGroup(t *testing.T) {
 	}
 
 	for _, member := range []*smokeClient{a, b, c} {
+		var event chatParticipantDeleteEnvelope
+		select {
+		case event = <-member.seen.chatRemoval:
+		case <-f.ctx.Done():
+			t.Fatalf("timed out waiting for member %d chat-removal update", member.id)
+		}
+		if event.Update.ChatID != chatID || event.Update.UserID != member.id || event.Update.Version != chatBeforeDelete.Version+1 {
+			t.Errorf("member %d chat-removal update = %+v, want chat/user/version %d/%d/%d", member.id, event.Update, chatID, member.id, chatBeforeDelete.Version+1)
+		}
+		var forbidden bool
+		for _, chat := range event.Chats {
+			if got, ok := chat.(*tg.ChatForbidden); ok && got.ID == chatID {
+				forbidden = true
+			}
+		}
+		if !forbidden {
+			t.Errorf("member %d chat-removal update references = %+v, want ChatForbidden %d", member.id, event.Chats, chatID)
+		}
+		if got := member.requests.countMethod("messages.getDialogs"); got != getDialogsBeforeRemoval[member.id] {
+			t.Errorf("member %d made %d getDialogs RPCs before receiving chat removal; want unchanged count %d", member.id, got, getDialogsBeforeRemoval[member.id])
+		}
+	}
+
+	for _, member := range []*smokeClient{a, b, c} {
 		if err := member.call(f.ctx, func(ctx context.Context, api *tg.Client) error {
 			result, err := api.MessagesGetDialogs(ctx, &tg.MessagesGetDialogsRequest{
 				OffsetPeer: &tg.InputPeerEmpty{}, Limit: 100,
@@ -2846,6 +2877,9 @@ func testSmokeDeleteBasicGroup(t *testing.T) {
 			return nil
 		}); err != nil {
 			t.Fatalf("member %d getDialogs after deletion: %v", member.id, err)
+		}
+		if got := member.requests.countMethod("messages.getDialogs"); got != getDialogsBeforeRemoval[member.id]+1 {
+			t.Errorf("member %d getDialogs RPC count = %d, want exactly one RPC after receiving removal", member.id, got)
 		}
 	}
 

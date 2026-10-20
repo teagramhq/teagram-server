@@ -77,6 +77,18 @@ func (r *clientRequestRecorder) count() int {
 	return len(r.records)
 }
 
+func (r *clientRequestRecorder) countMethod(method string) int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	count := 0
+	for _, record := range r.records {
+		if record.method == method {
+			count++
+		}
+	}
+	return count
+}
+
 func (r *clientRequestRecorder) add(request capturedClientRequest) {
 	r.mu.Lock()
 	defer r.mu.Unlock()

@@ -647,19 +647,19 @@ func (s *Store) DeleteChat(ctx context.Context, chatID, callerID int64) (map[int
 		}
 	}
 
+	// Message-copy deletions do not identify the chat, so every current member
+	// also needs the participant-removal event that lets clients drop its dialog.
 	for _, ownerID := range ownerIDs {
-		if _, notifiedByDeletedCopies := perOwner[ownerID]; !notifiedByDeletedCopies {
-			pts, err := bumpPtsOnly(ctx, qtx, ownerID)
-			if err != nil {
-				return nil, fmt.Errorf("bump pts for chat removal owner %d: %w", ownerID, err)
-			}
-			if err := qtx.InsertEvent(ctx, db.InsertEventParams{
-				OwnerID: ownerID, Pts: pts, Type: int16(EventChatParticipantDelete), LocalID: chatID,
-			}); err != nil {
-				return nil, fmt.Errorf("record chat removal for owner %d: %w", ownerID, err)
-			}
-			perOwner[ownerID] = int(pts)
+		pts, err := bumpPtsOnly(ctx, qtx, ownerID)
+		if err != nil {
+			return nil, fmt.Errorf("bump pts for chat removal owner %d: %w", ownerID, err)
 		}
+		if err := qtx.InsertEvent(ctx, db.InsertEventParams{
+			OwnerID: ownerID, Pts: pts, Type: int16(EventChatParticipantDelete), LocalID: chatID,
+		}); err != nil {
+			return nil, fmt.Errorf("record chat removal for owner %d: %w", ownerID, err)
+		}
+		perOwner[ownerID] = int(pts)
 		if err := qtx.DeleteDialogForPeer(ctx, db.DeleteDialogForPeerParams{
 			OwnerID: ownerID, PeerType: int16(PeerTypeChat), PeerID: chatID,
 		}); err != nil {

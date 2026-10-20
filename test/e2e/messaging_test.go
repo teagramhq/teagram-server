@@ -117,6 +117,11 @@ type chatUpdateEnvelope struct {
 	Chats  []tg.ChatClass
 }
 
+type chatParticipantDeleteEnvelope struct {
+	Update *tg.UpdateChatParticipantDelete
+	Chats  []tg.ChatClass
+}
+
 type updateCollector struct {
 	newMsg         chan *tg.Message
 	editMsg        chan *tg.Message
@@ -134,6 +139,7 @@ type updateCollector struct {
 	delChannelMsg  chan *tg.UpdateDeleteChannelMessages
 	channelUpdate  chan channelUpdateEnvelope
 	chatUpdate     chan chatUpdateEnvelope
+	chatRemoval    chan chatParticipantDeleteEnvelope
 	chatAdmin      chan *tg.UpdateChatParticipantAdmin
 	userStatus     chan *tg.UpdateUserStatus
 	msgReactions   chan *tg.UpdateMessageReactions
@@ -167,6 +173,7 @@ func newUpdateCollector() *updateCollector {
 		delChannelMsg:  make(chan *tg.UpdateDeleteChannelMessages, 4),
 		channelUpdate:  make(chan channelUpdateEnvelope, 4),
 		chatUpdate:     make(chan chatUpdateEnvelope, 4),
+		chatRemoval:    make(chan chatParticipantDeleteEnvelope, 4),
 		chatAdmin:      make(chan *tg.UpdateChatParticipantAdmin, 4),
 		userStatus:     make(chan *tg.UpdateUserStatus, 8),
 		msgReactions:   make(chan *tg.UpdateMessageReactions, 8),
@@ -237,6 +244,8 @@ func (u *updateCollector) dispatch(x tg.UpdateClass, chats []tg.ChatClass) {
 		send(u.channelUpdate, channelUpdateEnvelope{Update: up, Chats: chats})
 	case *tg.UpdateChat:
 		send(u.chatUpdate, chatUpdateEnvelope{Update: up, Chats: chats})
+	case *tg.UpdateChatParticipantDelete:
+		send(u.chatRemoval, chatParticipantDeleteEnvelope{Update: up, Chats: chats})
 	case *tg.UpdateChatParticipantAdmin:
 		send(u.chatAdmin, up)
 	case *tg.UpdateUserStatus:
