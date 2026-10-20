@@ -10,7 +10,7 @@ Start it from the server checkout with full lowercase SHAs and a fresh run ID:
 RUN_ID="$(openssl rand -hex 16)"
 bash test/e2e/real_server_fixture/run.sh \
   --server-revision "$(git rev-parse HEAD)" \
-  --web-revision 16f12b9f4e0a42b20c3fe3aa340b6b8f8b2e8861 \
+  --web-revision e947f119ba90d9d87b198c9d7a113cceb1395318 \
   --run-id "$RUN_ID"
 ```
 
@@ -18,7 +18,7 @@ Keep this command in the foreground. Its first JSON line is `server-ready`, emit
 
 ## Fixture-only auth progress
 
-The opt-in `--auth-progress` mode is for the pinned auth-progress fixture contract only. It requires web source `569529c1f36923c098760ef727808254dcb6a662` and a new absolute output path. The fixture binds the full digest over sorted relative paths and file contents, including every byte of `mtproto-target.json`, into the run identity and verifies that frozen tree before and after each parity leg. It separately audits the manifest's producer digest, which excludes the manifest itself, and supplies that digest to the pinned browser runner when it checks the manifest. The fresh target key makes both digests experiment-specific. The historical digest `sha256:f352e4ef6163855cdbbcc4022386a306b6c768f56e1fa2aa1e35f434ba272f3f` from MAIN-1660/MAIN-1315 is a historical reference only, not a digest attested for a current experiment.
+The opt-in `--auth-progress` mode is for the pinned auth-progress fixture contract only. It requires web source `569529c1f36923c098760ef727808254dcb6a662` and a new absolute output path. The artifact audit checks that revision against its exact historical private CSP; other source revisions use the current private CSP with Turnstile sources. The fixture binds the full digest over sorted relative paths and file contents, including every byte of `mtproto-target.json`, into the run identity and verifies that frozen tree before and after each parity leg. It separately audits the manifest's producer digest, which excludes the manifest itself, and supplies that digest to the pinned browser runner when it checks the manifest. The fresh target key makes both digests experiment-specific. The historical digest `sha256:f352e4ef6163855cdbbcc4022386a306b6c768f56e1fa2aa1e35f434ba272f3f` from MAIN-1660/MAIN-1315 is a historical reference only, not a digest attested for a current experiment.
 
 ```sh
 bash test/e2e/real_server_fixture/run.sh \
@@ -70,7 +70,7 @@ Build the matching production bundle for that run from a clean web checkout at t
 
 ```sh
 cd ../teagram-web
-test "$(git rev-parse HEAD)" = 16f12b9f4e0a42b20c3fe3aa340b6b8f8b2e8861
+test "$(git rev-parse HEAD)" = e947f119ba90d9d87b198c9d7a113cceb1395318
 test -z "$(git status --porcelain --untracked-files=all)"
 ARTIFACT_DIR="$(mktemp -d)/dist-private"
 KEY_FILE="$(mktemp)"

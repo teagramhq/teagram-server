@@ -25,6 +25,7 @@ MAX_ARTIFACT_DEPTH = 64
 MAX_PRODUCT_REFERENCES = 200
 ENDPOINT = "wss://teagramd.test/apiws"
 RESERVED_ROUTES = {"healthz", "_fixture_probe"}
+AUTH_PROGRESS_ARTIFACT_SOURCE_REVISION = "569529c1f36923c098760ef727808254dcb6a662"
 PRODUCTION_IDENTIFIERS = (b"teagram.tailaa4918.ts.net", b"fbb62871f07fae2a")
 PRIVATE_KEY_BLOCK = re.compile(rb"-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----", re.IGNORECASE)
 
@@ -113,25 +114,31 @@ class ArtifactError(ValueError):
     """The supplied bundle cannot cross the fixture trust boundary."""
 
 
-def private_csp(endpoint: str) -> str:
-    return "; ".join(
-        (
-            "default-src 'self'",
-            "base-uri 'self'",
-            "form-action 'self'",
-            "frame-ancestors 'none'",
-            "frame-src 'self' https://challenges.cloudflare.com",
-            "object-src 'none'",
-            "script-src 'self' 'wasm-unsafe-eval' https://challenges.cloudflare.com",
-            "style-src 'self' 'unsafe-inline'",
-            "img-src 'self' data: blob:",
-            "font-src 'self' data:",
-            "media-src 'self' blob:",
-            "worker-src 'self' blob:",
-            "manifest-src 'self'",
-            f"connect-src 'self' {endpoint}",
-        )
-    ) + ";"
+def private_csp(endpoint: str, web_revision: str) -> str:
+    directives = [
+        "default-src 'self'",
+        "base-uri 'self'",
+        "form-action 'self'",
+        "frame-ancestors 'none'",
+    ]
+    if web_revision != AUTH_PROGRESS_ARTIFACT_SOURCE_REVISION:
+        directives.append("frame-src 'self' https://challenges.cloudflare.com")
+    directives.extend((
+        "object-src 'none'",
+        "script-src 'self' 'wasm-unsafe-eval'" + (
+            " https://challenges.cloudflare.com"
+            if web_revision != AUTH_PROGRESS_ARTIFACT_SOURCE_REVISION
+            else ""
+        ),
+        "style-src 'self' 'unsafe-inline'",
+        "img-src 'self' data: blob:",
+        "font-src 'self' data:",
+        "media-src 'self' blob:",
+        "worker-src 'self' blob:",
+        "manifest-src 'self'",
+        f"connect-src 'self' {endpoint}",
+    ))
+    return "; ".join(directives) + ";"
 
 
 class CSPParser(html.parser.HTMLParser):
@@ -551,7 +558,10 @@ def _audit(directory: Path, args: argparse.Namespace) -> dict[str, object]:
     try:
         csp_parser = CSPParser()
         csp_parser.feed(paths["index.html"].read_text(encoding="utf-8"))
-        checks["privateCSP"] = len(csp_parser.policies) == 1 and csp_parser.policies[0] == private_csp(args.endpoint)
+        checks["privateCSP"] = (
+            len(csp_parser.policies) == 1
+            and csp_parser.policies[0] == private_csp(args.endpoint, args.web_revision)
+        )
     except (OSError, UnicodeDecodeError):
         checks["privateCSP"] = False
 
