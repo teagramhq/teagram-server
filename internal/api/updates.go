@@ -132,7 +132,7 @@ func reactionsToTL(reactions []store.Reaction) tg.MessageReactions {
 // files is keyed by file id exactly as messageToTL's is, but the "no media"
 // sentinel differs and the trap is worth naming:
 // channel_messages.file_id is NULL for no media, while messages.file_id is 0.
-func channelMessageToTL(m store.ChannelMessage, viewerID int64, files map[int64]tg.MessageMediaClass) (tg.MessageClass, error) {
+func channelMessageToTL(m store.ChannelMessage, viewerID int64, files map[int64]tg.MessageMediaClass, broadcast bool) (tg.MessageClass, error) {
 	if m.Deleted {
 		return &tg.MessageEmpty{ID: int(m.LocalID)}, nil
 	}
@@ -160,9 +160,13 @@ func channelMessageToTL(m store.ChannelMessage, viewerID int64, files map[int64]
 		ID:      int(m.LocalID),
 		Out:     m.FromID == viewerID,
 		PeerID:  &tg.PeerChannel{ChannelID: m.ChannelID},
-		FromID:  &tg.PeerUser{UserID: m.FromID},
 		Message: m.Message,
 		Date:    int(m.Date.Unix()),
+	}
+	if broadcast {
+		msg.SetPost(true)
+	} else {
+		msg.SetFromID(&tg.PeerUser{UserID: m.FromID})
 	}
 	if m.EditDate != nil {
 		msg.EditDate = int(m.EditDate.Unix())
@@ -959,7 +963,7 @@ type channelBatch struct {
 // State is read first, then events are bounded to (fromPts, currentPts], so the
 // advertised pts never runs past an event omitted from the response. This is
 // the same ordering buildUpdates uses for the per-account stream.
-func (h *handlers) buildChannelUpdates(ctx context.Context, channelID, viewerID int64, fromPts, limit, currentPts int) (channelBatch, error) {
+func (h *handlers) buildChannelUpdates(ctx context.Context, channelID, viewerID int64, fromPts, limit, currentPts int, broadcast bool) (channelBatch, error) {
 	// Fetch one past the cap to detect truncation.
 	events, err := h.store.ChannelEventsWindow(ctx, channelID, fromPts, currentPts, limit+1)
 	if err != nil {
@@ -1001,7 +1005,7 @@ func (h *handlers) buildChannelUpdates(ctx context.Context, channelID, viewerID 
 
 	peers := map[int64]bool{}
 	for _, ev := range events {
-		up, refs, upErr := h.channelEventToUpdate(ctx, channelID, viewerID, ev, msgs, files)
+		up, refs, upErr := h.channelEventToUpdate(ctx, channelID, viewerID, ev, msgs, files, broadcast)
 		if upErr != nil {
 			return channelBatch{}, upErr
 		}
@@ -1035,7 +1039,7 @@ func (h *handlers) buildChannelUpdates(ctx context.Context, channelID, viewerID 
 // the update and the user ids it references. Delete events need no message-row
 // hydration; new and edit events for current tombstones are suppressed. A nil
 // update is also returned when a new/edit message row is not found.
-func (h *handlers) channelEventToUpdate(_ context.Context, channelID, viewerID int64, ev store.ChannelEvent, msgs map[int64]store.ChannelMessage, files map[int64]tg.MessageMediaClass) (tg.UpdateClass, []int64, error) {
+func (h *handlers) channelEventToUpdate(_ context.Context, channelID, viewerID int64, ev store.ChannelEvent, msgs map[int64]store.ChannelMessage, files map[int64]tg.MessageMediaClass, broadcast bool) (tg.UpdateClass, []int64, error) {
 	switch ev.Type {
 	case store.ChannelEventMetadataRefresh:
 		return &tg.UpdateChannel{ChannelID: channelID}, nil, nil
@@ -1060,25 +1064,29 @@ func (h *handlers) channelEventToUpdate(_ context.Context, channelID, viewerID i
 			h.log.Debug("channel message row not found", "local_id", ev.LocalID, "channel_id", channelID, "pts", ev.Pts)
 			return nil, nil, nil
 		}
-		message, err := channelMessageToTL(m, viewerID, files)
+		message, err := channelMessageToTL(m, viewerID, files, broadcast)
 		if err != nil {
 			return nil, nil, err
 		}
 		if m.Deleted {
 			return nil, nil, nil
 		}
+		var refs []int64
+		if !broadcast || m.Action != store.ChannelMessageActionNone {
+			refs = []int64{m.FromID}
+		}
 		if ev.Type == store.EventEdit {
 			return &tg.UpdateEditChannelMessage{
 				Message:  message,
 				Pts:      ev.Pts,
 				PtsCount: 1,
-			}, []int64{m.FromID}, nil
+			}, refs, nil
 		}
 		return &tg.UpdateNewChannelMessage{
 			Message:  message,
 			Pts:      ev.Pts,
 			PtsCount: 1,
-		}, []int64{m.FromID}, nil
+		}, refs, nil
 	default:
 		h.log.Debug("unknown channel event type", "type", ev.Type, "channel_id", channelID, "pts", ev.Pts)
 		return nil, nil, nil

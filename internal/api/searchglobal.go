@@ -200,6 +200,18 @@ func (h *handlers) globalSearchSlice(r *mtproto.Request, hits []store.GlobalSear
 		h.log.Error("search global post files", "user_id", r.UserID, "err", err)
 		return nil, errInternal
 	}
+	broadcasts := make(map[int64]bool, len(posts))
+	for _, post := range posts {
+		if _, ok := broadcasts[post.ChannelID]; ok {
+			continue
+		}
+		broadcast, kindErr := h.channelIsBroadcast(r.Ctx, post.ChannelID)
+		if kindErr != nil {
+			h.log.Error("search global channel kind", "user_id", r.UserID, "channel_id", post.ChannelID, "err", kindErr)
+			return nil, errInternal
+		}
+		broadcasts[post.ChannelID] = broadcast
+	}
 	if err = h.attachChannelPollViewsAcross(r.Ctx, r.UserID, posts); err != nil {
 		h.log.Error("search global channel polls", "user_id", r.UserID, "err", err)
 		return nil, errInternal
@@ -232,13 +244,15 @@ func (h *handlers) globalSearchSlice(r *mtproto.Request, hits []store.GlobalSear
 		case hit.Post != nil:
 			post := *hit.Post
 			post.Poll = channelPolls[channelPollKey{channelID: post.ChannelID, localID: post.LocalID}]
-			message, renderErr := channelMessageToTL(post, r.UserID, postFiles)
+			message, renderErr := channelMessageToTL(post, r.UserID, postFiles, broadcasts[post.ChannelID])
 			if renderErr != nil {
 				h.log.Error("render global channel poll description", "user_id", r.UserID, "channel_id", post.ChannelID, "local_id", post.LocalID, "err", renderErr)
 				return nil, errInternal
 			}
 			msgs = append(msgs, message)
-			users[hit.Post.FromID] = true
+			if !broadcasts[post.ChannelID] {
+				users[hit.Post.FromID] = true
+			}
 			channelIDs[hit.PeerID] = true
 		case hit.Owned != nil:
 			if poll, ok := pollViews[hit.Owned.LocalID]; ok {

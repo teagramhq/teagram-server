@@ -1305,13 +1305,21 @@ func (u *Updater) deliverChannelPost(ctx context.Context, channelID int64, conns
 		u.log.Error("deliver channel post snapshot", "channel_id", channelID, "err", err)
 		return
 	}
+	if len(members) == 0 {
+		return
+	}
+	broadcast, err := u.h.channelIsBroadcast(ctx, channelID)
+	if err != nil {
+		u.log.Error("load channel kind for post delivery", "channel_id", channelID, "err", err)
+		return
+	}
 	if u.channelPostSnapshotHook != nil {
 		u.channelPostSnapshotHook()
 	}
 
 	u.deliverChannel(ctx, members, time.Now(), connsFor,
 		func(memberID int64, fromPts int) (channelBatch, error) {
-			return u.h.buildChannelUpdates(ctx, channelID, memberID, max(fromPts, currentPts-1), maxDiffEvents, currentPts)
+			return u.h.buildChannelUpdates(ctx, channelID, memberID, max(fromPts, currentPts-1), maxDiffEvents, currentPts, broadcast)
 		},
 	)
 }
