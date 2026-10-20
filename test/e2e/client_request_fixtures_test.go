@@ -477,6 +477,7 @@ func TestSmokeClientRequestFixturesAreLayer228Shapes(t *testing.T) {
 		"messages_getHistory.1",
 		"messages_getHistory.2",
 		"messages_getHistory.second-account.1",
+		"messages_getReplies.1",
 		"photos_getUserPhotos.1",
 		"photos_uploadProfilePhoto.1",
 		"account_updateProfile.1",
@@ -909,6 +910,43 @@ func testSmokeClientRequestFixtures(t *testing.T) {
 		}); err != nil {
 			t.Fatalf("replay history fixture %d: %v", i+1, err)
 		}
+	}
+
+	replyChannel, createReplyErr := f.store.CreateChannel(f.ctx, creator.id, "Reply fixture group", "", true)
+	if createReplyErr != nil {
+		t.Fatalf("create reply fixture supergroup: %v", createReplyErr)
+	}
+	root, _, _, seedReplyErr := f.store.PostChannelMessageAs(f.ctx, replyChannel.ID, creator.id, "reply fixture root", 13030201, nil, 0)
+	if seedReplyErr != nil {
+		t.Fatalf("seed reply fixture root: %v", seedReplyErr)
+	}
+	reply, _, _, seedReplyErr := f.store.PostChannelMessageAs(f.ctx, replyChannel.ID, creator.id, "visible fixture reply", 13030202, nil, root.LocalID)
+	if seedReplyErr != nil {
+		t.Fatalf("seed reply fixture reply: %v", seedReplyErr)
+	}
+	if err := fixtureClientCall(t, creator, "messages_getReplies.1", func(ctx context.Context, api *tg.Client) error {
+		result, err := api.MessagesGetReplies(ctx, &tg.MessagesGetRepliesRequest{
+			Peer:  peerChannel(creator.id, replyChannel.ID),
+			MsgID: int(root.LocalID),
+			Limit: 10,
+		})
+		if err != nil {
+			return err
+		}
+		messages, ok := result.(*tg.MessagesChannelMessages)
+		if !ok {
+			return fmt.Errorf("getReplies response = %T, want *tg.MessagesChannelMessages", result)
+		}
+		if messages.Count != 1 || len(messages.Messages) != 1 {
+			return fmt.Errorf("getReplies count/page = %d/%d, want one reply", messages.Count, len(messages.Messages))
+		}
+		message, ok := messages.Messages[0].(*tg.Message)
+		if !ok || message.ID != int(reply.LocalID) || message.Message != "visible fixture reply" {
+			return fmt.Errorf("getReplies message = %#v, want direct reply %d", messages.Messages[0], reply.LocalID)
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("replay getReplies fixture: %v", err)
 	}
 
 	for i, message := range []struct {
