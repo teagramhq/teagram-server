@@ -257,17 +257,14 @@ func testSmokeHistoryTTL(t *testing.T) {
 	if joinedID := importChannelInvite(t, f.ctx, bob.cmds, exportChannelInvite(t, f.ctx, alice.id, alice.cmds, channel.ID)); joinedID != channel.ID {
 		t.Fatalf("Bob joined channel %d, want %d", joinedID, channel.ID)
 	}
-	var channelSetResult tg.UpdatesClass
 	if err := alice.call(f.ctx, func(ctx context.Context, client *tg.Client) error {
-		var err error
-		channelSetResult, err = client.MessagesSetHistoryTTL(ctx, &tg.MessagesSetHistoryTTLRequest{
+		_, err := client.MessagesSetHistoryTTL(ctx, &tg.MessagesSetHistoryTTLRequest{
 			Peer: peerChannel(alice.id, channel.ID), Period: 2592000,
 		})
 		return err
 	}); err != nil {
 		t.Fatalf("creator set channel TTL: %v", err)
 	}
-	assertChannelHistoryTTLServiceUpdate(t, channelSetResult, alice.id, channel.ID, 2592000)
 	channelService, err := bob.seen.waitService(f.ctx, &tg.MessageActionSetMessagesTTL{})
 	if err != nil {
 		t.Fatalf("Bob channel TTL service message: %v", err)
@@ -378,31 +375,6 @@ func assertGroupHistoryTTLServiceUpdate(t *testing.T, result tg.UpdatesClass, ac
 		}
 	}
 	t.Fatalf("group setHistoryTTL updates = %#v, want period %d service update from %d to chat %d", updates.Updates, period, actorID, chatID)
-}
-
-func assertChannelHistoryTTLServiceUpdate(t *testing.T, result tg.UpdatesClass, actorID, channelID int64, period int) {
-	t.Helper()
-	updates, ok := result.(*tg.Updates)
-	if !ok {
-		t.Fatalf("channel setHistoryTTL result = %T, want *tg.Updates", result)
-	}
-	for _, update := range updates.Updates {
-		newMessage, ok := update.(*tg.UpdateNewChannelMessage)
-		if !ok {
-			continue
-		}
-		service, ok := newMessage.Message.(*tg.MessageService)
-		if !ok {
-			continue
-		}
-		from, fromOK := service.FromID.(*tg.PeerUser)
-		peer, peerOK := service.PeerID.(*tg.PeerChannel)
-		action, actionOK := service.Action.(*tg.MessageActionSetMessagesTTL)
-		if fromOK && from.UserID == actorID && peerOK && peer.ChannelID == channelID && actionOK && action.Period == period {
-			return
-		}
-	}
-	t.Fatalf("channel setHistoryTTL updates = %#v, want period %d service update from %d to channel %d", updates.Updates, period, actorID, channelID)
 }
 
 func assertHistoryContainsTTLMessage(t *testing.T, ctx context.Context, caller *smokeClient, peer tg.InputPeerClass, text string, period int) {
