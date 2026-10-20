@@ -97,7 +97,18 @@ SELECT * FROM messages
 WHERE owner_id = sqlc.arg(owner_id)::bigint
   AND random_id = ANY(sqlc.arg(random_ids)::bigint[])
   AND random_id <> 0
+  AND (expires_at IS NULL OR expires_at > statement_timestamp())
 ORDER BY local_id;
+
+-- ExpiredMessageRandomIDs returns only dedup tokens, never the expired rows'
+-- content, so an album retry can be refused before it loads any stale item.
+-- name: ExpiredMessageRandomIDs :many
+SELECT random_id FROM messages
+WHERE owner_id = sqlc.arg(owner_id)::bigint
+  AND random_id = ANY(sqlc.arg(random_ids)::bigint[])
+  AND random_id <> 0
+  AND expires_at <= statement_timestamp()
+ORDER BY random_id;
 
 -- CountGroupedMessagesInRange counts an owner's rows of one album. An album's
 -- rows occupy consecutive local ids, so the caller bounds the scan to the
@@ -146,7 +157,18 @@ FROM channel_messages
 WHERE channel_id = sqlc.arg(channel_id)::bigint
   AND random_id = ANY(sqlc.arg(random_ids)::bigint[])
   AND random_id <> 0
+  AND (expires_at IS NULL OR expires_at > statement_timestamp())
 ORDER BY local_id;
+
+-- ExpiredChannelMessageRandomIDs returns only dedup tokens, never expired post
+-- content, so an album retry can be refused before it loads any stale item.
+-- name: ExpiredChannelMessageRandomIDs :many
+SELECT random_id FROM channel_messages
+WHERE channel_id = sqlc.arg(channel_id)::bigint
+  AND random_id = ANY(sqlc.arg(random_ids)::bigint[])
+  AND random_id <> 0
+  AND expires_at <= statement_timestamp()
+ORDER BY random_id;
 
 -- CountGroupedChannelMessagesInRange is CountGroupedMessagesInRange for a
 -- channel album.

@@ -526,7 +526,9 @@ func (q *Queries) MessageByOwnerLocal(ctx context.Context, arg MessageByOwnerLoc
 }
 
 const messageByRandomID = `-- name: MessageByRandomID :one
-SELECT owner_id, local_id, peer_id, from_id, date, message, out, edit_date, deleted, random_id, peer_local_id, peer_type, fanout_id, action_type, action_user_id, file_id, reply_to_msg_id, fwd_from_id, fwd_date, fwd_channel_id, fwd_channel_post, message_tsv, reply_to_trusted, grouped_id, ttl_period, expires_at FROM messages WHERE owner_id = $1 AND random_id = $2 AND random_id <> 0
+SELECT owner_id, local_id, peer_id, from_id, date, message, out, edit_date, deleted, random_id, peer_local_id, peer_type, fanout_id, action_type, action_user_id, file_id, reply_to_msg_id, fwd_from_id, fwd_date, fwd_channel_id, fwd_channel_post, message_tsv, reply_to_trusted, grouped_id, ttl_period, expires_at FROM messages
+WHERE owner_id = $1 AND random_id = $2 AND random_id <> 0
+  AND (expires_at IS NULL OR expires_at > statement_timestamp())
 `
 
 type MessageByRandomIDParams struct {
@@ -566,6 +568,30 @@ func (q *Queries) MessageByRandomID(ctx context.Context, arg MessageByRandomIDPa
 		&i.ExpiresAt,
 	)
 	return i, err
+}
+
+const messageRandomIDExpired = `-- name: MessageRandomIDExpired :one
+SELECT EXISTS (
+    SELECT 1 FROM messages
+    WHERE owner_id = $1::bigint
+      AND random_id = $2::bigint
+      AND random_id <> 0
+      AND expires_at <= statement_timestamp()
+)
+`
+
+type MessageRandomIDExpiredParams struct {
+	OwnerID  int64
+	RandomID int64
+}
+
+// MessageRandomIDExpired reports an expired dedup token without loading any
+// message content, so callers can reject the retry without replaying it.
+func (q *Queries) MessageRandomIDExpired(ctx context.Context, arg MessageRandomIDExpiredParams) (bool, error) {
+	row := q.db.QueryRow(ctx, messageRandomIDExpired, arg.OwnerID, arg.RandomID)
+	var exists bool
+	err := row.Scan(&exists)
+	return exists, err
 }
 
 const messagesByFanout = `-- name: MessagesByFanout :many

@@ -284,6 +284,9 @@ var (
 	// post cannot satisfy the current request's author, tombstone, service or
 	// media-kind requirements.
 	ErrRandomIDDuplicate = errors.New("random id belongs to another channel post")
+	// ErrRandomIDExpired rejects a retry whose original message has expired.
+	// Its contents are never returned to the caller.
+	ErrRandomIDExpired = errors.New("random id belongs to an expired message")
 	// ErrMediaInvalid rejects a channel media retry whose stored post carries no
 	// media of the kind the request offers. It is separate from
 	// ErrRandomIDDuplicate because the random id is the caller's own live post:

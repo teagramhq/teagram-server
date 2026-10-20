@@ -7,8 +7,6 @@ import (
 	"slices"
 
 	"github.com/jackc/pgx/v5"
-
-	"github.com/teagramhq/teagram-server/internal/store/db"
 )
 
 var chatMediaSubtypeRights = [...]string{
@@ -68,7 +66,7 @@ func (s *Store) CheckChatWritePermission(ctx context.Context, chatID, callerID, 
 	defer func() { _ = m.tx.Rollback(ctx) }() //nolint:errcheck // no-op after commit
 
 	if randomID != 0 {
-		_, err = m.qtx.MessageByRandomID(ctx, db.MessageByRandomIDParams{OwnerID: callerID, RandomID: randomID})
+		_, err = messageRowByRandomID(ctx, m.qtx, callerID, randomID)
 		switch {
 		case err == nil:
 			if err = m.tx.Commit(ctx); err != nil {

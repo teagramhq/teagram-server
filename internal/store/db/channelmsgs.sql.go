@@ -402,7 +402,9 @@ func (q *Queries) ChannelMessageByLocal(ctx context.Context, arg ChannelMessageB
 const channelMessageByRandomID = `-- name: ChannelMessageByRandomID :one
 SELECT channel_id, local_id, from_id, date, message, edit_date, deleted,
        random_id, grouped_id, file_id, reply_to_msg_id, action_type, ttl_period
-FROM channel_messages WHERE channel_id = $1 AND random_id = $2 AND random_id <> 0
+FROM channel_messages
+WHERE channel_id = $1 AND random_id = $2 AND random_id <> 0
+  AND (expires_at IS NULL OR expires_at > statement_timestamp())
 `
 
 type ChannelMessageByRandomIDParams struct {
@@ -445,6 +447,30 @@ func (q *Queries) ChannelMessageByRandomID(ctx context.Context, arg ChannelMessa
 		&i.TtlPeriod,
 	)
 	return i, err
+}
+
+const channelMessageRandomIDExpired = `-- name: ChannelMessageRandomIDExpired :one
+SELECT EXISTS (
+    SELECT 1 FROM channel_messages
+    WHERE channel_id = $1::bigint
+      AND random_id = $2::bigint
+      AND random_id <> 0
+      AND expires_at <= statement_timestamp()
+)
+`
+
+type ChannelMessageRandomIDExpiredParams struct {
+	ChannelID int64
+	RandomID  int64
+}
+
+// ChannelMessageRandomIDExpired reports an expired dedup token without loading
+// the post contents, so a retry can be refused without replaying it.
+func (q *Queries) ChannelMessageRandomIDExpired(ctx context.Context, arg ChannelMessageRandomIDExpiredParams) (bool, error) {
+	row := q.db.QueryRow(ctx, channelMessageRandomIDExpired, arg.ChannelID, arg.RandomID)
+	var exists bool
+	err := row.Scan(&exists)
+	return exists, err
 }
 
 const channelMessageTombstonesByLocalIDs = `-- name: ChannelMessageTombstonesByLocalIDs :many

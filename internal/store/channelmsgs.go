@@ -863,11 +863,12 @@ func (s *Store) postChannelMessage(
 func channelMessageRetry(
 	ctx context.Context, qtx *db.Queries, channelID, fromID, randomID int64, pollResult *Poll, textOnly, photoRetry bool,
 ) (ChannelMessage, int, bool, error) {
-	existing, err := qtx.ChannelMessageByRandomID(ctx, db.ChannelMessageByRandomIDParams{
-		ChannelID: channelID, RandomID: randomID,
-	})
+	existing, err := channelMessageRowByRandomID(ctx, qtx, channelID, randomID)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return ChannelMessage{}, 0, false, nil
+	}
+	if errors.Is(err, ErrRandomIDExpired) {
+		return ChannelMessage{}, 0, false, ErrRandomIDDuplicate
 	}
 	if err != nil {
 		return ChannelMessage{}, 0, false, fmt.Errorf("random_id lookup: %w", err)
@@ -934,6 +935,25 @@ func channelMessageRetry(
 		message.Poll = retryPoll
 	}
 	return message, pts, true, nil
+}
+
+func channelMessageRowByRandomID(ctx context.Context, qtx *db.Queries, channelID, randomID int64) (db.ChannelMessageByRandomIDRow, error) {
+	row, err := qtx.ChannelMessageByRandomID(ctx, db.ChannelMessageByRandomIDParams{
+		ChannelID: channelID, RandomID: randomID,
+	})
+	if !errors.Is(err, pgx.ErrNoRows) {
+		return row, err
+	}
+	expired, err := qtx.ChannelMessageRandomIDExpired(ctx, db.ChannelMessageRandomIDExpiredParams{
+		ChannelID: channelID, RandomID: randomID,
+	})
+	if err != nil {
+		return db.ChannelMessageByRandomIDRow{}, fmt.Errorf("channel message random id expiry lookup: %w", err)
+	}
+	if expired {
+		return db.ChannelMessageByRandomIDRow{}, ErrRandomIDExpired
+	}
+	return db.ChannelMessageByRandomIDRow{}, pgx.ErrNoRows
 }
 
 // checkChannelMediaPostRights is checkPostRights with the caller's participant

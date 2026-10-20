@@ -96,6 +96,9 @@ func (h *handlers) handleSendMultiMediaAfterReplyOnConn(c *mtproto.Conn, r *mtpr
 		}
 	} else {
 		replay, retryErr := h.store.UserAlbumRetry(r.Ctx, r.UserID, peerType, toID, randomIDs)
+		if errors.Is(retryErr, store.ErrRandomIDExpired) {
+			return nil, nil, nil, errRandomIDDuplicate
+		}
 		if errors.Is(retryErr, store.ErrMediaInvalid) {
 			return nil, nil, nil, errMediaInvalid
 		}
@@ -139,6 +142,8 @@ func (h *handlers) handleSendMultiMediaAfterReplyOnConn(c *mtproto.Conn, r *mtpr
 	if err != nil {
 		h.clearSenderAfterStoreFailure(attempt, r, err)
 		switch {
+		case errors.Is(err, store.ErrRandomIDExpired):
+			return nil, nil, nil, errRandomIDDuplicate
 		case errors.Is(err, store.ErrMediaInvalid), errors.Is(err, store.ErrFileMissing):
 			return nil, nil, nil, errMediaInvalid
 		case errors.Is(err, store.ErrNotMember):

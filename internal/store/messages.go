@@ -145,22 +145,40 @@ func (s *Store) MessageByOwnerLocal(ctx context.Context, ownerID, localID int64)
 	return messageFromRow(r), true, nil
 }
 
-// MessageByRandomID returns the sender's own copy of the message carrying
-// randomID; ok=false when absent. It is the read half of the dedup token both
-// send paths write, for a caller that has to know whether a send is a resend
-// before it does work the send itself cannot undo.
+// MessageByRandomID returns the sender's live copy of the message carrying
+// randomID; ok=false when absent. ErrRandomIDExpired identifies a retained
+// dedup row whose content must not be replayed. It is the read half of the
+// dedup token both send paths write, for a caller that has to know whether a
+// send is a resend before it does work the send itself cannot undo.
 func (s *Store) MessageByRandomID(ctx context.Context, ownerID, randomID int64) (Message, bool, error) {
 	if randomID == 0 {
 		return Message{}, false, nil
 	}
-	r, err := s.q.MessageByRandomID(ctx, db.MessageByRandomIDParams{OwnerID: ownerID, RandomID: randomID})
+	r, err := messageRowByRandomID(ctx, s.q, ownerID, randomID)
 	switch {
 	case errors.Is(err, pgx.ErrNoRows):
 		return Message{}, false, nil
+	case errors.Is(err, ErrRandomIDExpired):
+		return Message{}, false, ErrRandomIDExpired
 	case err != nil:
 		return Message{}, false, fmt.Errorf("message by random id: %w", err)
 	}
 	return messageFromRow(r), true, nil
+}
+
+func messageRowByRandomID(ctx context.Context, q *db.Queries, ownerID, randomID int64) (db.Message, error) {
+	r, err := q.MessageByRandomID(ctx, db.MessageByRandomIDParams{OwnerID: ownerID, RandomID: randomID})
+	if !errors.Is(err, pgx.ErrNoRows) {
+		return r, err
+	}
+	expired, err := q.MessageRandomIDExpired(ctx, db.MessageRandomIDExpiredParams{OwnerID: ownerID, RandomID: randomID})
+	if err != nil {
+		return db.Message{}, fmt.Errorf("message random id expiry lookup: %w", err)
+	}
+	if expired {
+		return db.Message{}, ErrRandomIDExpired
+	}
+	return db.Message{}, pgx.ErrNoRows
 }
 
 // SendMessage persists both sides of a 1:1 message in one transaction. Each side
@@ -200,7 +218,7 @@ func (s *Store) SendMessage(ctx context.Context, fromID, toID int64, text string
 	// The client applies updateNewMessage by pts, so an old message carrying a
 	// current pts lands in a newer update's slot and silently displaces it.
 	if randomID != 0 {
-		existing, e := qtx.MessageByRandomID(ctx, db.MessageByRandomIDParams{OwnerID: fromID, RandomID: randomID})
+		existing, e := messageRowByRandomID(ctx, qtx, fromID, randomID)
 		switch {
 		case e == nil:
 			sPts, e2 := newMessagePts(ctx, qtx, fromID, existing.LocalID)
@@ -385,7 +403,7 @@ func (s *Store) SendUserPollMessage(ctx context.Context, fromID, toID, randomID 
 		return Message{}, nil, Poll{}, false, fmt.Errorf("ensure private poll recipient state: %w", err)
 	}
 	if randomID != 0 {
-		existing, lookupErr := qtx.MessageByRandomID(ctx, db.MessageByRandomIDParams{OwnerID: fromID, RandomID: randomID})
+		existing, lookupErr := messageRowByRandomID(ctx, qtx, fromID, randomID)
 		switch {
 		case lookupErr == nil:
 			if existing.Deleted || !existing.Out || existing.FromID != fromID || PeerType(existing.PeerType) != PeerTypeUser || existing.PeerID != toID {
@@ -524,7 +542,7 @@ func (s *Store) SendSavedPollMessage(ctx context.Context, userID, randomID int64
 		return Message{}, 0, Poll{}, false, fmt.Errorf("ensure saved poll state: %w", err)
 	}
 	if randomID != 0 {
-		existing, lookupErr := qtx.MessageByRandomID(ctx, db.MessageByRandomIDParams{OwnerID: userID, RandomID: randomID})
+		existing, lookupErr := messageRowByRandomID(ctx, qtx, userID, randomID)
 		switch {
 		case lookupErr == nil:
 			if !pollMessageMatches(existing, PollMessageRef{PeerType: PeerTypeUser, PeerID: userID, LocalID: existing.LocalID}) {
@@ -1807,9 +1825,7 @@ func (s *Store) ForwardMessages(ctx context.Context, fromID int64, destPeerType 
 		// Dedup: check if this random_id was already used for a forward to this
 		// destination by this sender.
 		if randomID != 0 {
-			existing, e := qtx.MessageByRandomID(ctx, db.MessageByRandomIDParams{
-				OwnerID: fromID, RandomID: randomID,
-			})
+			existing, e := messageRowByRandomID(ctx, qtx, fromID, randomID)
 			switch {
 			case e == nil:
 				// Already forwarded — return the existing message at the pts it

@@ -101,7 +101,20 @@ WHERE channel_id = sqlc.arg(channel_id)::bigint
 -- name: ChannelMessageByRandomID :one
 SELECT channel_id, local_id, from_id, date, message, edit_date, deleted,
        random_id, grouped_id, file_id, reply_to_msg_id, action_type, ttl_period
-FROM channel_messages WHERE channel_id = $1 AND random_id = $2 AND random_id <> 0;
+FROM channel_messages
+WHERE channel_id = $1 AND random_id = $2 AND random_id <> 0
+  AND (expires_at IS NULL OR expires_at > statement_timestamp());
+
+-- ChannelMessageRandomIDExpired reports an expired dedup token without loading
+-- the post contents, so a retry can be refused without replaying it.
+-- name: ChannelMessageRandomIDExpired :one
+SELECT EXISTS (
+    SELECT 1 FROM channel_messages
+    WHERE channel_id = sqlc.arg(channel_id)::bigint
+      AND random_id = sqlc.arg(random_id)::bigint
+      AND random_id <> 0
+      AND expires_at <= statement_timestamp()
+);
 
 -- name: ChannelMessagesByLocalIDs :many
 SELECT channel_id, local_id, from_id, date, message, edit_date, deleted,

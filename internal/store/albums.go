@@ -68,11 +68,19 @@ func (s *Store) UserAlbumRetry(ctx context.Context, ownerID int64, peerType Peer
 
 // userAlbumDedup classifies an album's dedup tokens against the owner's rows.
 // Every token must be absent (a new send) or every token must name a live row
-// of one album to this peer that has exactly these rows (a replay). A deleted
-// row answers ErrMediaInvalid like sendMedia's deleted-original refusal, so a
+// of one album to this peer that has exactly these rows (a replay). An expired
+// token answers ErrRandomIDExpired without loading its content; a deleted row
+// answers ErrMediaInvalid like sendMedia's deleted-original refusal, so a
 // resend cannot say which items a recipient deleted, and any other mix is
 // refused whole rather than sending the remainder.
 func userAlbumDedup(ctx context.Context, q *db.Queries, ownerID int64, peerType PeerType, peerID int64, randomIDs []int64) ([]db.Message, bool, error) {
+	expired, err := q.ExpiredMessageRandomIDs(ctx, db.ExpiredMessageRandomIDsParams{OwnerID: ownerID, RandomIds: randomIDs})
+	if err != nil {
+		return nil, false, fmt.Errorf("album expired random_id lookup: %w", err)
+	}
+	if len(expired) > 0 {
+		return nil, false, ErrRandomIDExpired
+	}
 	rows, err := q.MessagesByRandomIDs(ctx, db.MessagesByRandomIDsParams{OwnerID: ownerID, RandomIds: randomIDs})
 	if err != nil {
 		return nil, false, fmt.Errorf("album random_id lookup: %w", err)
@@ -551,6 +559,13 @@ func (s *Store) ChannelAlbumRetryAs(ctx context.Context, channelID, fromID int64
 // random_id) space. A replayable post is the caller's own live photo post of
 // one album that has exactly these posts.
 func channelAlbumDedup(ctx context.Context, qtx *db.Queries, channelID, fromID int64, randomIDs []int64) (ChannelAlbumResult, error) {
+	expired, err := qtx.ExpiredChannelMessageRandomIDs(ctx, db.ExpiredChannelMessageRandomIDsParams{ChannelID: channelID, RandomIds: randomIDs})
+	if err != nil {
+		return ChannelAlbumResult{}, fmt.Errorf("channel album expired random_id lookup: %w", err)
+	}
+	if len(expired) > 0 {
+		return ChannelAlbumResult{}, ErrRandomIDDuplicate
+	}
 	rows, err := qtx.ChannelMessagesByRandomIDs(ctx, db.ChannelMessagesByRandomIDsParams{ChannelID: channelID, RandomIds: randomIDs})
 	if err != nil {
 		return ChannelAlbumResult{}, fmt.Errorf("channel album random_id lookup: %w", err)

@@ -259,7 +259,7 @@ func fanOut(ctx context.Context, tx pgx.Tx, qtx *db.Queries, log *slog.Logger, f
 	// hears the pts its own copy occupies rather than where its log has since
 	// moved to.
 	if f.RandomID != 0 {
-		existing, e := qtx.MessageByRandomID(ctx, db.MessageByRandomIDParams{OwnerID: f.FromID, RandomID: f.RandomID})
+		existing, e := messageRowByRandomID(ctx, qtx, f.FromID, f.RandomID)
 		switch {
 		case e == nil:
 			pts, e2 := fanoutPts(ctx, qtx, log, f, existing, owners)

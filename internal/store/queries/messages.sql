@@ -22,7 +22,20 @@ SELECT * FROM messages WHERE owner_id = $1 AND local_id = $2
   AND (expires_at IS NULL OR expires_at > statement_timestamp());
 
 -- name: MessageByRandomID :one
-SELECT * FROM messages WHERE owner_id = $1 AND random_id = $2 AND random_id <> 0;
+SELECT * FROM messages
+WHERE owner_id = $1 AND random_id = $2 AND random_id <> 0
+  AND (expires_at IS NULL OR expires_at > statement_timestamp());
+
+-- MessageRandomIDExpired reports an expired dedup token without loading any
+-- message content, so callers can reject the retry without replaying it.
+-- name: MessageRandomIDExpired :one
+SELECT EXISTS (
+    SELECT 1 FROM messages
+    WHERE owner_id = sqlc.arg(owner_id)::bigint
+      AND random_id = sqlc.arg(random_id)::bigint
+      AND random_id <> 0
+      AND expires_at <= statement_timestamp()
+);
 
 -- NextFanoutID allocates the id shared by every per-member copy of one chat
 -- message. One value per fan-out, never 0.
