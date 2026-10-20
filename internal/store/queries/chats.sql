@@ -127,8 +127,8 @@ SELECT * FROM chat_removal_events
 WHERE owner_id = $1 AND chat_id = $2;
 
 -- ChatRemovalSnapshotsForAuthKey returns removals not yet acknowledged by this
--- client's later updates.getState request. A prior successful write alone does
--- not suppress replay, because the client may not have received the reply.
+-- client's later updates.getDifference request. A prior successful write alone
+-- does not suppress replay, because the client may not have applied the reply.
 -- name: ChatRemovalSnapshotsForAuthKey :many
 SELECT event.owner_id, event.chat_id, event.version
 FROM chat_removal_events AS event
@@ -141,8 +141,9 @@ WHERE event.owner_id = sqlc.arg(owner_id)
 ORDER BY event.chat_id
 LIMIT sqlc.arg(lim)::int;
 
--- MarkChatRemovalEventsDeliveredForAuthKey records the client-visible event
--- set, but keeps every event pending until a later getState acknowledges it.
+-- MarkChatRemovalEventsDeliveredForAuthKey records a live push delivery. A live
+-- push has no applied-state cursor, so it remains pending until a difference
+-- response carries it and the client presents that response's state.
 -- name: MarkChatRemovalEventsDeliveredForAuthKey :exec
 INSERT INTO chat_removal_client_state (
     owner_id, auth_key_id, chat_id, delivered_at
@@ -156,13 +157,51 @@ ON CONFLICT (owner_id, auth_key_id, chat_id)
 DO UPDATE SET delivered_at = EXCLUDED.delivered_at
 WHERE chat_removal_client_state.acknowledged_at IS NULL;
 
--- A client acknowledges only events that have been delivered to this auth key.
--- name: AcknowledgeDeliveredChatRemovalEvents :exec
+-- MarkChatRemovalEventsIssuedForAuthKey records the difference state that
+-- included these rows. The state is persisted after a successful reply write;
+-- presenting its Date on a later getDifference is the client's acknowledgement.
+-- name: MarkChatRemovalEventsIssuedForAuthKey :exec
+INSERT INTO chat_removal_client_state (
+    owner_id, auth_key_id, chat_id, delivered_at,
+    difference_state_pts, difference_state_qts, difference_state_date, resume_date
+)
+SELECT sqlc.arg(owner_id)::bigint,
+       sqlc.arg(auth_key_id)::bigint,
+       pending.chat_id,
+       clock_timestamp(),
+       sqlc.arg(difference_state_pts)::bigint,
+       sqlc.arg(difference_state_qts)::bigint,
+       sqlc.arg(difference_state_date)::bigint,
+       sqlc.arg(resume_date)::bigint
+FROM unnest(sqlc.arg(chat_ids)::bigint[]) AS pending(chat_id)
+ON CONFLICT (owner_id, auth_key_id, chat_id)
+DO UPDATE SET delivered_at = EXCLUDED.delivered_at,
+              difference_state_pts = EXCLUDED.difference_state_pts,
+              difference_state_qts = EXCLUDED.difference_state_qts,
+              difference_state_date = EXCLUDED.difference_state_date,
+              resume_date = EXCLUDED.resume_date
+WHERE chat_removal_client_state.acknowledged_at IS NULL;
+
+-- ChatRemovalLatestDifferenceStateDateForAuthKey keeps newly issued page
+-- tokens ahead of earlier tokens, including after those pages are acknowledged.
+-- name: ChatRemovalLatestDifferenceStateDateForAuthKey :one
+SELECT COALESCE(MAX(difference_state_date), 0)::bigint
+FROM chat_removal_client_state
+WHERE owner_id = sqlc.arg(owner_id)
+  AND auth_key_id = sqlc.arg(auth_key_id);
+
+-- A client confirms only rows issued with the Date it presents to
+-- updates.getDifference, once its PTS and QTS have reached the returned state.
+-- Return the logical Date used before the token so other Date-based streams resume.
+-- name: AcknowledgeChatRemovalEventsForState :many
 UPDATE chat_removal_client_state
-SET acknowledged_at = clock_timestamp()
+SET acknowledged_at = COALESCE(acknowledged_at, clock_timestamp())
 WHERE owner_id = sqlc.arg(owner_id)
   AND auth_key_id = sqlc.arg(auth_key_id)
-  AND acknowledged_at IS NULL;
+  AND difference_state_date = sqlc.arg(difference_state_date)
+  AND difference_state_pts <= sqlc.arg(request_pts)
+  AND difference_state_qts <= sqlc.arg(request_qts)
+RETURNING resume_date;
 
 -- name: SetChatTitle :one
 UPDATE chats SET title = $2, version = version + 1 WHERE id = $1 RETURNING *;

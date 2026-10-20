@@ -665,7 +665,7 @@ func (s *Store) DeleteChat(ctx context.Context, chatID, callerID int64) (ChatDel
 
 	// Removal is a durable PTS-neutral event because UpdateChatParticipantDelete
 	// has no pts fields on the wire. Per-auth-key delivery and acknowledgement
-	// state lets each client replay it until a later getState request.
+	// state lets each client replay it until getDifference confirms its state.
 	for _, ownerID := range ownerIDs {
 		event, err := qtx.InsertChatRemovalEvent(ctx, db.InsertChatRemovalEventParams{
 			OwnerID: ownerID, ChatID: chatID, Version: chat.Version,

@@ -500,6 +500,11 @@ func stateToTL(s store.State) *tg.UpdatesState {
 // an intermediate state so the client re-requests the remainder.
 const maxDiffEvents = 500
 
+// chatRemovalStateDateTokenFloor keeps PTS-neutral removal confirmations out
+// of the wall-clock range returned by updates.getState. The unique Date token
+// and non-regressing PTS/QTS together confirm a difference response.
+const chatRemovalStateDateTokenFloor = 2_000_000_000
+
 // updateBatch is one user's hydrated updates plus everything a client must be
 // told alongside them. pts[i] is the pts of ups[i], ascending, so one batch can
 // serve several of the user's connections without re-querying per connection.
@@ -1123,10 +1128,6 @@ func (h *handlers) handleGetState(r *mtproto.Request) (bin.Encoder, error) {
 	if err := h.checkChannelUnreadCountRateLimit(r); err != nil {
 		return nil, err
 	}
-	if err := h.store.AcknowledgeDeliveredChatRemovalEvents(r.Ctx, r.UserID, mtproto.AuthKeyIDInt64(r.AuthKeyID)); err != nil {
-		h.log.Error("acknowledge get state chat removals", "user_id", r.UserID, "err", err)
-		return nil, errInternal
-	}
 	st, err := h.store.State(r.Ctx, r.UserID)
 	if err != nil {
 		h.log.Error("get state", "user_id", r.UserID, "err", err)
@@ -1276,6 +1277,14 @@ func (h *handlers) handleGetDifferenceForConn(c *mtproto.Conn, r *mtproto.Reques
 	if r.UserID == 0 {
 		return nil, nil, errAuthKeyUnreg
 	}
+	chatRemovalAuthKeyID := mtproto.AuthKeyIDInt64(r.AuthKeyID)
+	confirmedRemovalResumeDate, removalStateConfirmed, err := h.store.AcknowledgeChatRemovalEventsForState(
+		r.Ctx, r.UserID, chatRemovalAuthKeyID, req.Pts, req.Qts, req.Date,
+	)
+	if err != nil {
+		h.log.Error("acknowledge get difference chat removals", "user_id", r.UserID, "err", err)
+		return nil, nil, errInternal
+	}
 	var recovery DialogFilterCapture
 	if c != nil {
 		recovery = h.dialogFilterSync.Capture(c, r)
@@ -1302,6 +1311,9 @@ func (h *handlers) handleGetDifferenceForConn(c *mtproto.Conn, r *mtproto.Reques
 	}
 	draftReferenceDate := time.Unix(int64(req.Date), 0)
 	now := h.now()
+	if removalStateConfirmed {
+		draftReferenceDate = time.Unix(int64(confirmedRemovalResumeDate), 0)
+	}
 	if now.Before(draftReferenceDate) {
 		draftReferenceDate = now
 	}
@@ -1512,9 +1524,8 @@ func (h *handlers) handleGetDifferenceForConn(c *mtproto.Conn, r *mtproto.Reques
 	}
 
 	// Chat removal is durable but PTS-neutral because its wire update has no
-	// pts/pts_count fields. Keep replay state scoped to this authorization until
-	// a later getState acknowledges a delivery.
-	chatRemovalAuthKeyID := mtproto.AuthKeyIDInt64(r.AuthKeyID)
+	// pts/pts_count fields. A successful difference reply records its Date token;
+	// only a later getDifference carrying that token acknowledges the page.
 	chatRemovalSnapshots, err := h.store.ChatRemovalSnapshotsForAuthKey(r.Ctx, r.UserID, chatRemovalAuthKeyID, int32(maxDiffEvents+1))
 	if err != nil {
 		h.log.Error("get difference chat removal snapshots", "user_id", r.UserID, "err", err)
@@ -1553,17 +1564,24 @@ func (h *handlers) handleGetDifferenceForConn(c *mtproto.Conn, r *mtproto.Reques
 		}
 		chatRemovalUsers, chatRemovalChats = users, chats
 	}
-	markChatRemovalDelivered := func() {
+	var chatRemovalStateDate int
+	var chatRemovalResumeDate int
+	var chatRemovalStatePts int
+	var chatRemovalStateQts int
+	markChatRemovalIssued := func() {
 		if len(chatRemovalChatIDs) == 0 {
 			return
 		}
-		if err := h.store.MarkChatRemovalEventsDeliveredForAuthKey(r.Ctx, r.UserID, chatRemovalAuthKeyID, chatRemovalChatIDs); err != nil {
-			h.log.Error("mark get difference chat removals delivered", "user_id", r.UserID, "err", err)
+		if err := h.store.MarkChatRemovalEventsIssuedForAuthKey(
+			r.Ctx, r.UserID, chatRemovalAuthKeyID, chatRemovalChatIDs,
+			chatRemovalStatePts, chatRemovalStateQts, chatRemovalStateDate, chatRemovalResumeDate,
+		); err != nil {
+			h.log.Error("mark get difference chat removals issued", "user_id", r.UserID, "err", err)
 		}
 	}
 	consumeStateMarkers := func() {
 		consumeAdminMarkers()
-		markChatRemovalDelivered()
+		markChatRemovalIssued()
 	}
 
 	// Qts replay retains its independent 500-event cap. A client-ahead qts remains
@@ -1736,7 +1754,21 @@ func (h *handlers) handleGetDifferenceForConn(c *mtproto.Conn, r *mtproto.Reques
 	}
 	dateStreamUpdates := len(draftChanges) > 0 || len(unreadMarkChanges) > 0
 	notifySettingsCursorNeedsDateAck := notifySettingsCursorStateFound && (dateStreamUpdates || draftMore || unreadMarkMore || len(secretChats) > 0)
-	if notifySettingsAuthKeyID != 0 && (notifySettingsMore || (notifySettingsCursorStateFound && (len(notifySettingsChanges) > 0 || notifySettingsCursorNeedsDateAck))) {
+	if len(chatRemovalUpdates) > 0 {
+		// The reserved Date token identifies this PTS-neutral page; preserve its
+		// order even when a stale request replays an already-issued continuation.
+		latestRemovalStateDate, dateErr := h.store.ChatRemovalLatestDifferenceStateDateForAuthKey(r.Ctx, r.UserID, chatRemovalAuthKeyID)
+		if dateErr != nil {
+			h.log.Error("get latest chat removal difference state date", "user_id", r.UserID, "err", dateErr)
+			return nil, nil, errInternal
+		}
+		chatRemovalResumeDate = st.Date
+		st.Date = max(st.Date, req.Date, latestRemovalStateDate, chatRemovalStateDateTokenFloor-1) + 1
+		chatRemovalStatePts = st.Pts
+		chatRemovalStateQts = st.Qts
+		chatRemovalStateDate = st.Date
+	}
+	if notifySettingsAuthKeyID != 0 && (notifySettingsMore || (notifySettingsCursorStateFound && (len(notifySettingsChanges) > 0 || notifySettingsCursorNeedsDateAck || len(chatRemovalUpdates) > 0))) {
 		// Date acknowledges this page without consuming PTS/QTS. Keep its logical
 		// value separately so the other date-based streams resume at their cursor.
 		// Retain a cursor for the last page too; the following request acknowledges
