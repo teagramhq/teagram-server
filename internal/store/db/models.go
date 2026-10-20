@@ -216,6 +216,40 @@ type ChatReadReceipt struct {
 	ReadAt   pgtype.Timestamptz
 }
 
+type ChatRemovalClientState struct {
+	OwnerID             int64
+	ChatID              int64
+	AuthKeyID           int64
+	DeliveredAt         pgtype.Timestamptz
+	AcknowledgedAt      pgtype.Timestamptz
+	DifferenceStatePts  *int64
+	DifferenceStateQts  *int64
+	DifferenceStateDate *int64
+	ResumeDate          *int64
+}
+
+type ChatRemovalClientStateHistory struct {
+	OwnerID             int64
+	AuthKeyID           int64
+	ChatID              int64
+	DifferenceStatePts  int64
+	DifferenceStateQts  int64
+	DifferenceStateDate int64
+	ResumeDate          int64
+}
+
+type ChatRemovalDifferenceStateToken struct {
+	OwnerID       int64
+	AuthKeyID     int64
+	LastStateDate int64
+}
+
+type ChatRemovalEvent struct {
+	OwnerID int64
+	ChatID  int64
+	Version int32
+}
+
 type CloudDraft struct {
 	OwnerID      int64
 	PeerType     int16
