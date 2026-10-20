@@ -1978,6 +1978,106 @@ func TestDeliverChannelPostPushesTombstoneDeletesToEveryMember(t *testing.T) {
 	}
 }
 
+func TestDeliverChannelPostSkipsFlooredDeleteForJoiner(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	dsn := pgtest.DSN(t)
+	blobs, err := blob.NewLocal(t.TempDir())
+	if err != nil {
+		t.Fatalf("blob store: %v", err)
+	}
+	s, err := store.Open(ctx, dsn, pgtest.EncKey(), store.WithBlobStore(blobs))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := s.Close(); err != nil {
+			t.Errorf("close store: %v", err)
+		}
+	})
+
+	creator, err := s.CreateUser(ctx, "+15550000251")
+	if err != nil {
+		t.Fatalf("create creator: %v", err)
+	}
+	joiner, err := s.CreateUser(ctx, "+15550000252")
+	if err != nil {
+		t.Fatalf("create joiner: %v", err)
+	}
+	channel, err := s.CreateChannel(ctx, creator.ID, "floored live push", "", true)
+	if err != nil {
+		t.Fatalf("create channel: %v", err)
+	}
+	post, _, duplicate, err := s.PostChannelMessage(ctx, channel.ID, creator.ID, "hidden before join", 99251, nil, 0)
+	if err != nil || duplicate {
+		t.Fatalf("post hidden message: duplicate=%v err=%v", duplicate, err)
+	}
+
+	conn, err := pgx.Connect(ctx, dsn)
+	if err != nil {
+		t.Fatalf("connect to hide channel history: %v", err)
+	}
+	if _, err = conn.Exec(ctx, `UPDATE channels SET pre_history_hidden = true WHERE id = $1`, channel.ID); err != nil {
+		t.Fatalf("hide channel history: %v", err)
+	}
+	if err = conn.Close(ctx); err != nil {
+		t.Fatalf("close history connection: %v", err)
+	}
+	invite, err := s.CreateChannelInvite(ctx, channel.ID, creator.ID)
+	if err != nil {
+		t.Fatalf("create invite: %v", err)
+	}
+	if _, _, err = s.JoinChannelByInvite(ctx, invite, joiner.ID); err != nil {
+		t.Fatalf("join channel: %v", err)
+	}
+
+	members, _, err := s.ChannelDeliverySnapshot(ctx, channel.ID)
+	if err != nil {
+		t.Fatalf("delivery snapshot before delete: %v", err)
+	}
+	floors := make(map[int64]int64, len(members))
+	for _, member := range members {
+		floors[member.UserID] = member.AvailableMinID
+	}
+	if floors[creator.ID] != 0 {
+		t.Fatalf("creator available-min-id = %d, want 0", floors[creator.ID])
+	}
+	if floors[joiner.ID] != post.LocalID {
+		t.Fatalf("joiner available-min-id = %d, want hidden post id %d", floors[joiner.ID], post.LocalID)
+	}
+
+	deletePts, deleted, err := s.DeleteChannelMessages(ctx, channel.ID, creator.ID, []int64{post.LocalID})
+	if err != nil || deleted != 1 {
+		t.Fatalf("delete hidden message: deleted=%d err=%v", deleted, err)
+	}
+	creatorConn, joinerConn := &fakePushConn{}, &fakePushConn{}
+	u := &Updater{
+		h:   &handlers{store: s, log: slog.New(slog.DiscardHandler), peers: pgtest.PeerDeriver()},
+		log: slog.New(slog.DiscardHandler),
+	}
+	u.deliverChannelPost(ctx, channel.ID, func(userID int64) []pushConn {
+		switch userID {
+		case creator.ID:
+			return []pushConn{creatorConn}
+		case joiner.ID:
+			return []pushConn{joinerConn}
+		default:
+			return nil
+		}
+	})
+
+	if len(creatorConn.got) != 1 || len(creatorConn.got[0].Updates) != 1 {
+		t.Fatalf("floor-zero creator pushes = %+v, want one delete update", creatorConn.got)
+	}
+	deletedUpdate, ok := creatorConn.got[0].Updates[0].(*tg.UpdateDeleteChannelMessages)
+	if !ok || deletedUpdate.ChannelID != channel.ID || !slices.Equal(deletedUpdate.Messages, []int{int(post.LocalID)}) || deletedUpdate.Pts != deletePts {
+		t.Fatalf("creator update = %#v, want delete for post %d at pts %d", creatorConn.got[0].Updates[0], post.LocalID, deletePts)
+	}
+	if len(joinerConn.got) != 0 {
+		t.Fatalf("floored joiner got %d pushes for hidden post delete, want none", len(joinerConn.got))
+	}
+}
+
 type historyFloorCountTransport struct {
 	sends atomic.Int64
 }
