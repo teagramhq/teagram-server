@@ -2190,6 +2190,10 @@ jobs:
           app_secret_file=$(mktemp "$RUNNER_TEMP/teagramd-s3-secret.XXXXXX")
           awk -F= '$1 == "TG_BLOB_S3_SECRET_ACCESS_KEY" { print substr($0, index($0, "=") + 1); found=1; exit } END { if (!found) exit 1 }' .env >"$app_secret_file"
           chmod 600 "$app_secret_file"
+          # Testcontainers requests mirror.gcr.io/postgres while Compose pulled
+          # the same image as mirror.gcr.io/library/postgres. Reuse that local
+          # image so the e2e check avoids a second rate-limited mirror pull.
+          docker image tag mirror.gcr.io/library/postgres:18-alpine mirror.gcr.io/postgres:18-alpine
           TG_BLOB_S3_ENDPOINT="http://${rustfs_ip}:9000" \
           TG_BLOB_S3_BUCKET=teagram \
           TG_BLOB_S3_PREFIX=teagramd/ci/ \
