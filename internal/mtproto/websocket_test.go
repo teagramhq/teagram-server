@@ -587,7 +587,7 @@ func TestServeWebSocketDiscoveryCORSIsPathScoped(t *testing.T) {
 	}
 }
 
-func TestServeWebSocketUsesListenerScopedTurnstileDiscovery(t *testing.T) {
+func TestServeWebSocketUsesListenerScopedDiscovery(t *testing.T) {
 	t.Parallel()
 
 	ctx, cancel := context.WithCancel(t.Context())
@@ -598,11 +598,13 @@ func TestServeWebSocketUsesListenerScopedTurnstileDiscovery(t *testing.T) {
 	if err != nil {
 		t.Fatalf("generate RSA key: %v", err)
 	}
-	defaultDoc, err := discovery.NewDocument("configured.example.test:443", 2, &rsaKey.PublicKey, false)
+	defaultDoc, err := discovery.NewDocument("tailnet.example.test:2443", 2, &rsaKey.PublicKey, false)
 	if err != nil {
 		t.Fatalf("build default discovery document: %v", err)
 	}
 	publicDoc := defaultDoc
+	publicDoc.WebSocket.Endpoint = "wss://server.teagram.io/apiws"
+	publicDoc.Demo = &discovery.DemoCapabilities{GuestSignUp: true}
 	publicDoc.Turnstile = &discovery.Turnstile{SiteKey: "public-site-key"}
 	srv := mtproto.New(exchange.PrivateKey{}, 2, mtproto.NewMemoryAuthKeyStore(), nil, nil)
 	if err := srv.SetClientDiscoveryDocument(defaultDoc); err != nil {
@@ -626,16 +628,19 @@ func TestServeWebSocketUsesListenerScopedTurnstileDiscovery(t *testing.T) {
 	for _, tc := range []struct {
 		name     string
 		listener net.Listener
-		wantKey  bool
+		wantDoc  discovery.Document
 	}{
-		{name: "tailnet", listener: defaultListener},
-		{name: "public", listener: publicListener, wantKey: true},
+		{name: "tailnet", listener: defaultListener, wantDoc: defaultDoc},
+		{name: "public", listener: publicListener, wantDoc: publicDoc},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, "http://"+tc.listener.Addr().String()+"/.well-known/telegramd/client", nil)
 			if err != nil {
 				t.Fatalf("build discovery request: %v", err)
 			}
+			req.Host = "spoofed.example.test"
+			req.Header.Set("Origin", "https://spoofed.example.test")
+			req.Header.Set("X-Forwarded-Host", "spoofed.example.test")
 			resp, err := http.DefaultClient.Do(req)
 			if err != nil {
 				t.Fatalf("get discovery: %v", err)
@@ -645,15 +650,16 @@ func TestServeWebSocketUsesListenerScopedTurnstileDiscovery(t *testing.T) {
 					t.Errorf("close discovery response: %v", err)
 				}
 			}()
-			var got discovery.Document
-			if err := json.NewDecoder(resp.Body).Decode(&got); err != nil {
-				t.Fatalf("decode discovery: %v", err)
+			got, err := io.ReadAll(resp.Body)
+			if err != nil {
+				t.Fatalf("read discovery: %v", err)
 			}
-			if (got.Turnstile != nil) != tc.wantKey {
-				t.Fatalf("Turnstile discovery = %+v, want enabled %t", got.Turnstile, tc.wantKey)
+			want, err := discovery.MarshalDocument(tc.wantDoc)
+			if err != nil {
+				t.Fatalf("marshal expected discovery: %v", err)
 			}
-			if tc.wantKey && got.Turnstile.SiteKey != "public-site-key" {
-				t.Fatalf("public site key = %q, want public-site-key", got.Turnstile.SiteKey)
+			if !bytes.Equal(got, want) {
+				t.Fatalf("listener served discovery %s, want %s", got, want)
 			}
 		})
 	}

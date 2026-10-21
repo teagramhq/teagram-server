@@ -102,6 +102,11 @@ type Config struct {
 	// interface still has to name one address a client can reach it by.
 	AdvertiseHost string
 	AdvertisePort int
+	// PublicWebSocketAdvertiseHost and PublicWebSocketAdvertisePort set the
+	// public listener's browser transport host. The MTProto endpoint remains
+	// AdvertiseHost and AdvertisePort.
+	PublicWebSocketAdvertiseHost string
+	PublicWebSocketAdvertisePort int
 	// PublicLinkPrefix is the HTTPS prefix returned by help.getConfig and used
 	// when rendering server-owned invite links. It is validated only for the
 	// MTProto server; administrative commands do not need it.
@@ -785,6 +790,12 @@ func Load(log *slog.Logger) (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
+	publicAdvertiseHost, publicAdvertisePort, err := publicWebSocketAdvertiseAddr(
+		os.Getenv("TG_PUBLIC_WEBSOCKET_ADVERTISE_ADDR"), identity.PublicWebSocketListenAddr,
+	)
+	if err != nil {
+		return Config{}, err
+	}
 	originPatterns, err := parseWebSocketOriginPatterns(os.Getenv("TG_WEBSOCKET_ALLOWED_ORIGINS"), "TG_WEBSOCKET_ALLOWED_ORIGINS")
 	if err != nil {
 		return Config{}, err
@@ -799,6 +810,8 @@ func Load(log *slog.Logger) (Config, error) {
 		WebSocketOriginPatterns:       originPatterns,
 		PublicWebSocketListenAddr:     identity.PublicWebSocketListenAddr,
 		PublicWebSocketOriginPatterns: publicOriginPatterns,
+		PublicWebSocketAdvertiseHost:  publicAdvertiseHost,
+		PublicWebSocketAdvertisePort:  publicAdvertisePort,
 		AdminListenAddr:               os.Getenv("TG_ADMIN_LISTEN_ADDR"),
 		AdminOrigin:                   os.Getenv("TG_ADMIN_ORIGIN"),
 		ReplicaID:                     os.Getenv("TG_REPLICA_ID"),
@@ -2063,19 +2076,33 @@ func advertiseAddr(advertise, listen string) (string, int, error) {
 		host, port := splitHostPort(listen)
 		return host, port, nil
 	}
+	return explicitAdvertiseAddr("TG_ADVERTISE_ADDR", advertise)
+}
+
+func publicWebSocketAdvertiseAddr(advertise, publicListen string) (string, int, error) {
+	if advertise == "" {
+		return "", 0, nil
+	}
+	if publicListen == "" {
+		return "", 0, errors.New("TG_PUBLIC_WEBSOCKET_ADVERTISE_ADDR requires TG_PUBLIC_WEBSOCKET_LISTEN_ADDR")
+	}
+	return explicitAdvertiseAddr("TG_PUBLIC_WEBSOCKET_ADVERTISE_ADDR", advertise)
+}
+
+func explicitAdvertiseAddr(name, advertise string) (string, int, error) {
 	host, portStr, err := net.SplitHostPort(advertise)
 	if err != nil {
-		return "", 0, errors.New("TG_ADVERTISE_ADDR must be host:port")
+		return "", 0, fmt.Errorf("%s must be host:port", name)
 	}
 	if host == "" {
-		return "", 0, errors.New("TG_ADVERTISE_ADDR must name a host clients can reach")
+		return "", 0, fmt.Errorf("%s must name a host clients can reach", name)
 	}
 	port, err := strconv.Atoi(portStr)
 	if err != nil {
-		return "", 0, errors.New("TG_ADVERTISE_ADDR port must be an integer")
+		return "", 0, fmt.Errorf("%s port must be an integer", name)
 	}
 	if port < 1 || port > 65535 {
-		return "", 0, errors.New("TG_ADVERTISE_ADDR port must be between 1 and 65535")
+		return "", 0, fmt.Errorf("%s port must be between 1 and 65535", name)
 	}
 	return host, port, nil
 }

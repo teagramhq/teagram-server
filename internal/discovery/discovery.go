@@ -14,6 +14,7 @@ import (
 	"io"
 	"math"
 	"net"
+	"net/url"
 	"regexp"
 	"strconv"
 	"strings"
@@ -74,8 +75,19 @@ type WebSocketBinding struct {
 // NewDocument constructs the canonical public document from the exact
 // endpoint, DC and key used by the server.
 func NewDocument(endpoint string, dcID int, pub *rsa.PublicKey, advertiseDemoGuestSignUp bool) (Document, error) {
+	return NewDocumentWithWebSocketAdvertiseAddr(endpoint, endpoint, dcID, pub, advertiseDemoGuestSignUp)
+}
+
+// NewDocumentWithWebSocketAdvertiseAddr constructs a discovery document whose
+// MTProto and browser transports may advertise different hosts. The WebSocket
+// address is listener-scoped; the MTProto address remains the deployment's
+// canonical endpoint.
+func NewDocumentWithWebSocketAdvertiseAddr(endpoint, webSocketAdvertiseAddr string, dcID int, pub *rsa.PublicKey, advertiseDemoGuestSignUp bool) (Document, error) {
 	if err := ValidateEndpoint(endpoint); err != nil {
 		return Document{}, fmt.Errorf("validate advertised endpoint: %w", err)
+	}
+	if err := ValidateEndpoint(webSocketAdvertiseAddr); err != nil {
+		return Document{}, fmt.Errorf("validate WebSocket advertised endpoint: %w", err)
 	}
 	if err := ValidateDCID(dcID); err != nil {
 		return Document{}, err
@@ -84,7 +96,7 @@ func NewDocument(endpoint string, dcID int, pub *rsa.PublicKey, advertiseDemoGue
 	if err != nil {
 		return Document{}, err
 	}
-	wsEndpoint, err := webSocketEndpointFor(endpoint)
+	wsEndpoint, err := webSocketEndpointFor(webSocketAdvertiseAddr)
 	if err != nil {
 		return Document{}, err
 	}
@@ -123,12 +135,8 @@ func MarshalDocument(doc Document) ([]byte, error) {
 	if err := ValidateDCID(doc.MTProto.DCID); err != nil {
 		return nil, err
 	}
-	wsEndpoint, err := webSocketEndpointFor(doc.MTProto.Endpoint)
-	if err != nil {
+	if err := validateWebSocketEndpoint(doc.WebSocket.Endpoint); err != nil {
 		return nil, err
-	}
-	if doc.WebSocket.Endpoint != wsEndpoint {
-		return nil, errors.New("document WebSocket endpoint must use the advertised MTProto host")
 	}
 	der, err := base64.StdEncoding.DecodeString(doc.MTProto.RSASPKI)
 	if err != nil {
@@ -152,6 +160,34 @@ func webSocketEndpointFor(mtprotoEndpoint string) (string, error) {
 		host = "[" + host + "]"
 	}
 	return "wss://" + host + "/apiws", nil
+}
+
+func validateWebSocketEndpoint(endpoint string) error {
+	parsed, err := url.Parse(endpoint)
+	if err != nil {
+		return fmt.Errorf("validate WebSocket endpoint: %w", err)
+	}
+	if parsed.Scheme != "wss" || parsed.Host == "" || parsed.User != nil || parsed.Port() != "" ||
+		parsed.Path != "/apiws" || parsed.RawPath != "" || parsed.RawQuery != "" || parsed.ForceQuery ||
+		parsed.Fragment != "" || parsed.RawFragment != "" || parsed.Opaque != "" {
+		return errors.New("WebSocket endpoint must be wss://host/apiws without a port, query, or fragment")
+	}
+	host := parsed.Hostname()
+	if host == "" {
+		return errors.New("WebSocket endpoint must name a host")
+	}
+	advertiseAddr := net.JoinHostPort(host, "443")
+	if err := ValidateEndpoint(advertiseAddr); err != nil {
+		return fmt.Errorf("validate WebSocket endpoint host: %w", err)
+	}
+	canonical, err := webSocketEndpointFor(advertiseAddr)
+	if err != nil {
+		return err
+	}
+	if endpoint != canonical {
+		return errors.New("WebSocket endpoint must use canonical host form")
+	}
+	return nil
 }
 
 // WriteDocument writes a complete canonical document. The document is

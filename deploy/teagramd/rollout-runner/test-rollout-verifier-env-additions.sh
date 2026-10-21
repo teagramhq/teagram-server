@@ -171,6 +171,7 @@ legacy_snapshot=$(snapshot_from_json \
 public_ws_compose=$(jq -c '
   .services.teagramd.environment += {
     TG_PUBLIC_WEBSOCKET_LISTEN_ADDR:"",
+    TG_PUBLIC_WEBSOCKET_ADVERTISE_ADDR:"",
     TG_PUBLIC_REGISTRATION:"closed",
     TG_PUBLIC_WEBSOCKET_ALLOWED_ORIGINS:"",
     TG_WELCOME_CHANNEL:""
@@ -179,6 +180,7 @@ public_ws_compose=$(jq -c '
 public_ws_inspect=$(printf '%s' "$legacy_inspect" | jq -c '
   .Config.Env += [
     "TG_PUBLIC_WEBSOCKET_LISTEN_ADDR=",
+    "TG_PUBLIC_WEBSOCKET_ADVERTISE_ADDR=",
     "TG_PUBLIC_REGISTRATION=closed",
     "TG_PUBLIC_WEBSOCKET_ALLOWED_ORIGINS=",
     "TG_WELCOME_CHANNEL="
@@ -190,10 +192,11 @@ public_ws_snapshot=$(snapshot_from_json \
 [ "$(jq -r '.container_env_sha256' <<< "$legacy_snapshot")" = "$(jq -r '.container_env_sha256' <<< "$public_ws_snapshot")" ]
 printf '%s\n' 'PASS safe public defaults preserve resolved config and container environment equivalence'
 
-for setting in TG_PUBLIC_WEBSOCKET_LISTEN_ADDR TG_PUBLIC_REGISTRATION TG_PUBLIC_WEBSOCKET_ALLOWED_ORIGINS TG_WELCOME_CHANNEL; do
+for setting in TG_PUBLIC_WEBSOCKET_LISTEN_ADDR TG_PUBLIC_WEBSOCKET_ADVERTISE_ADDR TG_PUBLIC_REGISTRATION TG_PUBLIC_WEBSOCKET_ALLOWED_ORIGINS TG_WELCOME_CHANNEL; do
   case "$setting" in
     TG_PUBLIC_REGISTRATION) unsafe_value=invite ;;
     TG_WELCOME_CHANNEL) unsafe_value=welcome ;;
+    TG_PUBLIC_WEBSOCKET_ADVERTISE_ADDR) unsafe_value=server.example.com:443 ;;
     *) unsafe_value=https://public.example ;;
   esac
   unsafe_compose=$(jq -c --arg setting "$setting" --arg value "$unsafe_value" \

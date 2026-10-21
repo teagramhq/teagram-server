@@ -24,6 +24,7 @@ Configuration is read from environment variables in `internal/config/config.go`:
 | `TG_LISTEN_ADDR`    | `:2443`          | `host:port` (or `:port`) the server binds   |
 | `TG_WEBSOCKET_LISTEN_ADDR` | *(unset)* | Enables the WebSocket MTProto listener on this address; browser clients connect to `/apiws`, and the listener serves `/.well-known/telegramd/client` |
 | `TG_PUBLIC_WEBSOCKET_LISTEN_ADDR` | *(unset)* | Enables the separate WebSocket MTProto listener for public traffic; use an address such as `:2446` and expose it only through the intended public proxy |
+| `TG_PUBLIC_WEBSOCKET_ADVERTISE_ADDR` | *(unset)* | Optional `host:port` used only for the public listener's discovery `websocket.endpoint`; its host becomes `wss://host/apiws`, while MTProto and `client-config` keep `TG_ADVERTISE_ADDR`. Requires `TG_PUBLIC_WEBSOCKET_LISTEN_ADDR`; malformed values fail server startup |
 | `TG_RPC_DEADLINE` | `23s` | Per-request timeout; overrides must be positive and no greater than `45s`. `0s` and values above `45s`, including the former `90s` setting, fail startup so admitted requests fit the fixed shutdown drain |
 | `TG_WEBSOCKET_ALLOWED_ORIGINS` | *(unset)* | Comma-separated browser origins allowed to connect to `/apiws`; unset rejects every request carrying an `Origin` header |
 | `TG_PUBLIC_WEBSOCKET_ALLOWED_ORIGINS` | *(unset)* | Comma-separated origins allowed on the public WebSocket listener; set `https://web.teagram.io` for the public web client, and add the demo origin only when it is deployed |
@@ -154,12 +155,18 @@ registration, change password or Turnstile requirements, or grant authentication
 privileges. The server's registration policy and abuse controls remain
 authoritative.
 
-`teagramd serve` serves the same configured document at
-`/.well-known/telegramd/client` on the WebSocket listener. Route that path and
-`/apiws` from the public HTTPS origin to this listener. `client-config` still
+`teagramd serve` serves a configured document at
+`/.well-known/telegramd/client` on each WebSocket listener. Route that path and
+`/apiws` from each HTTPS origin to its intended listener. `client-config` still
 does not publish or serve its output; it can be used when a deployment serves
 the document as a static file instead. HTTPS certificate serving, web-root
 publication, and TLS termination are outside teagramd.
+
+When `TG_PUBLIC_WEBSOCKET_ADVERTISE_ADDR` is set, the public WebSocket listener
+uses that address's host for its discovery `websocket.endpoint`. The listener's
+document keeps the canonical `mtproto.endpoint` and public-only capabilities;
+the default WebSocket listener and `client-config` continue to use
+`TG_ADVERTISE_ADDR`.
 
 The optional same-endpoint local-direct preflight is a separate TCP
 discriminator. It is checked only on the normal TCP listener, after a trusted

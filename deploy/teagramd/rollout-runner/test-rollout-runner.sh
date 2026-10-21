@@ -367,7 +367,7 @@ if [ "${1:-}" = inspect ]; then
     elif { [ "$cfg" = target ] || [ "$cfg" = rollback ]; } && [ "${MOCK_SCENARIO:-success}" = runtime-backend-mismatch ]; then
       env_json='["TG_RSA_KEY_PATH=/var/lib/teagramd/server_key.pem","TG_SYNTHETIC_FLAG=fixture","TG_BLOB_DIR=/unexpected-blob-dir","TG_REPLICA_COUNT=1","TG_CLIENT_ADDR_TRUST=socket"]'
     elif { [ "$cfg" = target ] || [ "$cfg" = rollback ]; } && [ "${MOCK_SCENARIO:-}" = public-websocket-defaults ]; then
-      env_json='["TG_RSA_KEY_PATH=/var/lib/teagramd/server_key.pem","TG_SYNTHETIC_FLAG=fixture","TG_BLOB_DIR=/var/lib/teagramd-blobs","TG_PUBLIC_WEBSOCKET_LISTEN_ADDR=","TG_PUBLIC_REGISTRATION=closed","TG_PUBLIC_WEBSOCKET_ALLOWED_ORIGINS=","TG_REPLICA_COUNT=1","TG_CLIENT_ADDR_TRUST=socket"]'
+      env_json='["TG_RSA_KEY_PATH=/var/lib/teagramd/server_key.pem","TG_SYNTHETIC_FLAG=fixture","TG_BLOB_DIR=/var/lib/teagramd-blobs","TG_PUBLIC_WEBSOCKET_LISTEN_ADDR=","TG_PUBLIC_WEBSOCKET_ADVERTISE_ADDR=","TG_PUBLIC_REGISTRATION=closed","TG_PUBLIC_WEBSOCKET_ALLOWED_ORIGINS=","TG_REPLICA_COUNT=1","TG_CLIENT_ADDR_TRUST=socket"]'
     elif { [ "$cfg" = target ] || [ "$cfg" = rollback ]; } && [[ "${MOCK_SCENARIO:-}" == target-local-welcome-channel-* ]]; then
       env_json='["TG_RSA_KEY_PATH=/var/lib/teagramd/server_key.pem","TG_SYNTHETIC_FLAG=fixture","TG_BLOB_DIR=/var/lib/teagramd-blobs","TG_REPLICA_COUNT=1","TG_CLIENT_ADDR_TRUST=socket","TG_WELCOME_CHANNEL="]'
     elif { [ "$cfg" = target ] || [ "$cfg" = rollback ]; } && [ "${MOCK_SCENARIO:-success}" != config-drift ]; then
@@ -720,9 +720,9 @@ write_compose_fixture() {
   if [ "$scenario" = config-drift ]; then
     cp -- "$base_config" "$target_config"
   elif [ "$scenario" = public-websocket-defaults ]; then
-    jq -c '.services.teagramd.environment += {TG_PUBLIC_WEBSOCKET_LISTEN_ADDR:"",TG_PUBLIC_REGISTRATION:"closed",TG_PUBLIC_WEBSOCKET_ALLOWED_ORIGINS:""}' "$base_config" > "$target_config"
+    jq -c '.services.teagramd.environment += {TG_PUBLIC_WEBSOCKET_LISTEN_ADDR:"",TG_PUBLIC_WEBSOCKET_ADVERTISE_ADDR:"",TG_PUBLIC_REGISTRATION:"closed",TG_PUBLIC_WEBSOCKET_ALLOWED_ORIGINS:""}' "$base_config" > "$target_config"
   elif [ "$scenario" = public-websocket-enabled ]; then
-    jq -c '.services.teagramd.environment += {TG_PUBLIC_WEBSOCKET_LISTEN_ADDR:"0.0.0.0:2444",TG_PUBLIC_REGISTRATION:"closed",TG_PUBLIC_WEBSOCKET_ALLOWED_ORIGINS:""}' "$base_config" > "$target_config"
+    jq -c '.services.teagramd.environment += {TG_PUBLIC_WEBSOCKET_LISTEN_ADDR:"0.0.0.0:2444",TG_PUBLIC_WEBSOCKET_ADVERTISE_ADDR:"",TG_PUBLIC_REGISTRATION:"closed",TG_PUBLIC_WEBSOCKET_ALLOWED_ORIGINS:""}' "$base_config" > "$target_config"
   elif [ "$scenario" = missing-mode-mount ]; then
     jq -c '.services.teagramd.volumes |= map(select(.target != "/run/teagramd/blob-mode"))' "$base_config" > "$target_config"
   elif [ "$scenario" = wrong-blob-backend ]; then
