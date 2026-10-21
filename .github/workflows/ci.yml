@@ -2011,7 +2011,18 @@ jobs:
 
       - name: Boot RustFS and exercise the object-store backend
         run: |
-          export COMPOSE_FILE=docker-compose.yml:docker-compose.local-blobs.yml
+          # Pull the verified upstream GHCR image directly. The Google mirror
+          # can rate-limit this image, which otherwise prevents this runner
+          # lane from reaching its Compose assertions.
+          rustfs_image=ghcr.io/rustfs/rustfs@sha256:1803faef57627e2d9c2e7d89d655d712ddded5389040054987163043fecb6a3c
+          docker pull "$rustfs_image"
+          cat > "$RUNNER_TEMP/rustfs-ci-image.yml" <<'YAML'
+          services:
+            rustfs:
+              image: ghcr.io/rustfs/rustfs@sha256:1803faef57627e2d9c2e7d89d655d712ddded5389040054987163043fecb6a3c
+          YAML
+
+          export COMPOSE_FILE=docker-compose.yml:docker-compose.local-blobs.yml:$RUNNER_TEMP/rustfs-ci-image.yml
           compose() {
             docker compose "$@"
           }
