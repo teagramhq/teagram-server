@@ -163,7 +163,7 @@ WHERE channel_read_state.read_max_id < EXCLUDED.read_max_id;
 -- ChannelReadStateForViewer returns only the entitled member's read state and
 -- exact unread count from the bounded summary suffix lookup.
 -- name: ChannelReadStateForViewer :one
-SELECT COALESCE(read_state.read_max_id, 0)::bigint AS read_max_id,
+SELECT GREATEST(COALESCE(read_state.read_max_id, 0), participant.available_min_id)::bigint AS read_max_id,
        LEAST(GREATEST(unread.total_live - unread.author_live, 0), 1000)::int AS unread_count,
        unread.entitled::boolean AS summary_entitled,
        unread.status_exists::boolean AS summary_status_exists,
@@ -178,7 +178,7 @@ LEFT JOIN channel_read_state read_state
 CROSS JOIN LATERAL channel_post_unread_suffix_counts(
     participant.channel_id,
     participant.user_id,
-    COALESCE(read_state.read_max_id, 0)
+    GREATEST(COALESCE(read_state.read_max_id, 0), participant.available_min_id)
 ) AS unread(entitled, status_exists, summary_version, summary_ready, total_live, author_live)
 WHERE participant.channel_id = sqlc.arg(channel_id)::bigint
   AND participant.user_id = sqlc.arg(user_id)::bigint
