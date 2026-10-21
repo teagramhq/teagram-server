@@ -16,16 +16,18 @@ import (
 	osexec "os/exec"
 	"path/filepath"
 	"strconv"
-	"strings"
 	"syscall"
 	"testing"
 	"time"
 
+	gotdsrp "github.com/gotd/td/crypto/srp"
 	"github.com/jackc/pgx/v5"
 	"golang.org/x/sys/unix"
 
 	"github.com/teagramhq/teagram-server/internal/pgtest"
 	"github.com/teagramhq/teagram-server/internal/rsakey"
+	tsrp "github.com/teagramhq/teagram-server/internal/srp"
+	"github.com/teagramhq/teagram-server/internal/store"
 	restoredrill "github.com/teagramhq/teagram-server/test/e2e/restore_drill"
 )
 
@@ -35,10 +37,11 @@ func TestRestoreDrillActualDaemon(t *testing.T) {
 	t.Run("actual daemon config and synthetic account sign-in", func(t *testing.T) {
 		username := "drillhappyuser"
 		password := "Synthetic-Password-Marker-90214"
-		invocation := fixture.invocation(t, username, password, fixture.publicKeyPEM)
+		identity := fixture.createUser(t, username, password)
+		invocation := fixture.invocation(t, username, password, fixture.publicKeyPEM, &identity)
 
 		var stdout, stderr bytes.Buffer
-		code := restoredrill.RunCLI(fixture.ctx, invocation, fixture.binary, &stdout, &stderr)
+		code := restoredrill.RunCLI(fixture.ctx, invocation, &stdout, &stderr)
 		if code != 0 {
 			t.Fatalf("checker exit code = %d, want success; result: %s", code, stdout.String())
 		}
@@ -62,66 +65,59 @@ func TestRestoreDrillActualDaemon(t *testing.T) {
 				}
 			}
 		}
-		assertRestoreDrillPrivateFilesRemoved(t, invocation)
 	})
 
-	t.Run("identity collision preserves password and recovery settings", func(t *testing.T) {
+	t.Run("checker does not provision or replace an existing identity", func(t *testing.T) {
 		username := "drillcollisionuser"
 		password := "Original-Synthetic-Password-90127"
-		firstInvocation := fixture.invocation(t, username, password, fixture.publicKeyPEM)
-		first := restoredrill.Run(fixture.ctx, firstInvocation, fixture.binary)
-		assertRestoreDrillPass(t, first)
+		identity := fixture.createUser(t, username, password)
 
 		setRestoreDrillRecoverySettings(t, fixture.dsn, username)
 		before := restoreDrillAccountSnapshot(t, fixture.dsn, username)
-		collisionInvocation := fixture.invocation(t, username, "Replacement-Password-Marker-91208", fixture.publicKeyPEM)
-		collision := restoredrill.Run(fixture.ctx, collisionInvocation, fixture.binary)
-		if collision.Category != restoredrill.CategoryIdentityCollision ||
-			collision.HelpGetConfig != restoredrill.AssertionPass ||
-			collision.SyntheticSignin != restoredrill.AssertionNotRun {
-			t.Fatalf("collision result = %q/%q/%q, want identity_collision after config only", collision.Category, collision.HelpGetConfig, collision.SyntheticSignin)
+		replacementInvocation := fixture.invocation(t, username, "Replacement-Password-Marker-91208", fixture.publicKeyPEM, &identity)
+		replacement := restoredrill.Run(fixture.ctx, replacementInvocation)
+		if replacement.Category != restoredrill.CategoryAuthFailure ||
+			replacement.HelpGetConfig != restoredrill.AssertionPass ||
+			replacement.SyntheticSignin != restoredrill.AssertionFail {
+			t.Fatalf("replacement credential result = %q/%q/%q, want auth_failure after config only", replacement.Category, replacement.HelpGetConfig, replacement.SyntheticSignin)
 		}
 		after := restoreDrillAccountSnapshot(t, fixture.dsn, username)
 		if !bytes.Equal(before, after) {
-			t.Fatal("identity collision changed the original synthetic account")
+			t.Fatal("checker changed the existing synthetic account")
 		}
-		id := restoreDrillAccountID(t, fixture.dsn, username)
-		authenticated := restoredrill.CheckSignIn(fixture.ctx, fixture.endpoint, fixture.publicKeyPEM, username, []byte(password), restoredrill.Identity{ID: id, Username: username})
-		if authenticated.Category != restoredrill.CategoryAssertionsPassed || authenticated.SyntheticSignin != restoredrill.AssertionPass {
-			t.Fatalf("original credentials after collision = %q/%q, want pass", authenticated.Category, authenticated.SyntheticSignin)
+		originalInvocation := fixture.invocation(t, username, password, fixture.publicKeyPEM, &identity)
+		if result := restoredrill.Run(fixture.ctx, originalInvocation); result.Category != restoredrill.CategoryAssertionsPassed || result.SyntheticSignin != restoredrill.AssertionPass {
+			t.Fatalf("original credentials after rejected replacement = %q/%q, want pass", result.Category, result.SyntheticSignin)
 		}
-		assertRestoreDrillPrivateFilesRemoved(t, collisionInvocation)
 	})
 
 	t.Run("wrong credentials return fixed auth failure", func(t *testing.T) {
 		username := "drillwrongpassword"
-		password := "Correct-Synthetic-Password-90142"
-		invocation := fixture.invocation(t, username, password, fixture.publicKeyPEM)
-		created := restoredrill.Run(fixture.ctx, invocation, fixture.binary)
-		assertRestoreDrillPass(t, created)
-		id := restoreDrillAccountID(t, fixture.dsn, username)
-		result := restoredrill.CheckSignIn(fixture.ctx, fixture.endpoint, fixture.publicKeyPEM, username, []byte("Wrong-Password-Marker-12870"), restoredrill.Identity{ID: id, Username: username})
-		if result.Category != restoredrill.CategoryAuthFailure || result.SyntheticSignin != restoredrill.AssertionFail {
-			t.Fatalf("wrong-credential result = %q/%q, want auth_failure", result.Category, result.SyntheticSignin)
+		identity := fixture.createUser(t, username, "Correct-Synthetic-Password-90142")
+		invocation := fixture.invocation(t, username, "Wrong-Password-Marker-12870", fixture.publicKeyPEM, &identity)
+		result := restoredrill.Run(fixture.ctx, invocation)
+		if result.Category != restoredrill.CategoryAuthFailure || result.HelpGetConfig != restoredrill.AssertionPass || result.SyntheticSignin != restoredrill.AssertionFail {
+			t.Fatalf("wrong-credential result = %q/%q/%q, want auth_failure", result.Category, result.HelpGetConfig, result.SyntheticSignin)
 		}
 	})
 
-	t.Run("wrong RSA key fails before account creation", func(t *testing.T) {
+	t.Run("wrong RSA key fails before sign-in", func(t *testing.T) {
+		username := "drillwrongrsakey"
+		identity := fixture.createUser(t, username, "Wrong-Key-Synthetic-Password-91730")
 		before := restoreDrillUserCount(t, fixture.dsn)
 		wrongKey, err := rsa.GenerateKey(rand.Reader, 2048)
 		if err != nil {
 			t.Fatal("could not create mismatched test key")
 		}
 		wrongPEM := restoreDrillPublicKeyPEM(t, &wrongKey.PublicKey)
-		invocation := fixture.invocation(t, "drillwrongrsakey", "Wrong-Key-Synthetic-Password-91730", wrongPEM)
-		result := restoredrill.Run(fixture.ctx, invocation, fixture.binary)
+		invocation := fixture.invocation(t, username, "Wrong-Key-Synthetic-Password-91730", wrongPEM, &identity)
+		result := restoredrill.Run(fixture.ctx, invocation)
 		if result.Category != restoredrill.CategoryKeyMismatch || result.HelpGetConfig != restoredrill.AssertionFail || result.SyntheticSignin != restoredrill.AssertionNotRun {
-			t.Fatalf("wrong-key result = %q/%q/%q, want key_mismatch before provisioning", result.Category, result.HelpGetConfig, result.SyntheticSignin)
+			t.Fatalf("wrong-key result = %q/%q/%q, want key_mismatch before sign-in", result.Category, result.HelpGetConfig, result.SyntheticSignin)
 		}
 		if after := restoreDrillUserCount(t, fixture.dsn); after != before {
-			t.Fatal("wrong RSA key provisioned a synthetic account")
+			t.Fatal("wrong RSA key changed the existing synthetic accounts")
 		}
-		assertRestoreDrillPrivateFilesRemoved(t, invocation)
 	})
 
 	t.Run("missing isolation evidence refuses before contact or provisioning", func(t *testing.T) {
@@ -135,14 +131,15 @@ func TestRestoreDrillActualDaemon(t *testing.T) {
 			}
 		}()
 		endpoint := "ws://" + listener.Addr().String() + "/apiws"
-		invocation := fixture.invocation(t, "drillrefuseduser", "Refused-Password-Marker-41590", fixture.publicKeyPEM)
+		identity := restoredrill.Identity{ID: 42, Username: "drillrefuseduser"}
+		invocation := fixture.invocation(t, identity.Username, "Refused-Password-Marker-41590", fixture.publicKeyPEM, &identity)
 		if err := rewriteRestoreDrillInvocation(invocation, func(value *restoredrill.Invocation) {
 			value.Endpoint = endpoint
 			value.NetworkNamespaceIsolated = false
 		}); err != nil {
 			t.Fatal("could not prepare refusal case")
 		}
-		result := restoredrill.Run(fixture.ctx, invocation, "/missing/admin-binary")
+		result := restoredrill.Run(fixture.ctx, invocation)
 		if result.Category != restoredrill.CategoryInvocationInvalid {
 			t.Fatalf("unattested invocation category = %q, want invocation_invalid", result.Category)
 		}
@@ -165,7 +162,6 @@ func TestRestoreDrillActualDaemon(t *testing.T) {
 		if !errors.As(err, &netErr) || !netErr.Timeout() {
 			t.Fatal("refusal sentinel did not finish through its bounded timeout")
 		}
-		assertRestoreDrillPrivateFilesRemoved(t, invocation)
 	})
 
 	t.Run("slow endpoint respects caller deadline", func(t *testing.T) {
@@ -188,39 +184,15 @@ func TestRestoreDrillActualDaemon(t *testing.T) {
 	})
 }
 
-func TestRestoreDrillFailedProvisioningOutputIsPrivate(t *testing.T) {
+func TestRestoreDrillMissingProvisionedIdentityOutputIsPrivate(t *testing.T) {
 	fixture := startRestoreDrillDaemon(t)
 	username := "drillfailedoutputuser"
 	password := "Failed-Provisioning-Private-Password-48217"
-	invocation := fixture.invocation(t, username, password, fixture.publicKeyPEM)
-
-	adminDir := t.TempDir()
-	adminBinary := filepath.Join(adminDir, "diagnostic-admin")
-	adminScript := `#!/bin/sh
-admin_dir=${0%/*}
-printf '%s' called > "$admin_dir/called"
-printf 'username=%s\n' "$4"
-printf 'user id=%s\n' 'restore-drill-private-user-id-marker-73821'
-printf 'database=%s\n' "$TG_POSTGRES_DSN"
-printf '%s\n' '` + fixture.endpoint + `'
-IFS= read -r password
-printf 'password=%s\n' "$password" >&2
-printf '%s\n' 'restore-drill-private-provisioning-error-marker' >&2
-exit 23
-`
-	writeRestoreDrillFile(t, adminDir, "diagnostic-admin", []byte(adminScript), 0o700)
-	if unix.Geteuid() != 0 {
-		sudoDir := t.TempDir()
-		writeRestoreDrillFile(t, sudoDir, "sudo", []byte("#!/bin/sh\nshift 3\nexec \"$@\"\n"), 0o700)
-		t.Setenv("PATH", sudoDir+string(os.PathListSeparator)+os.Getenv("PATH"))
-	}
+	invocation := fixture.invocation(t, username, password, fixture.publicKeyPEM, nil)
 
 	var stdout, stderr bytes.Buffer
-	if code := restoredrill.RunCLI(fixture.ctx, invocation, adminBinary, &stdout, &stderr); code == 0 {
-		t.Fatal("checker accepted failed create-user execution")
-	}
-	if _, err := os.Stat(filepath.Join(adminDir, "called")); err != nil {
-		t.Fatal("diagnostic admin command did not run")
+	if code := restoredrill.RunCLI(fixture.ctx, invocation, &stdout, &stderr); code == 0 {
+		t.Fatal("checker accepted a missing provisioned identity")
 	}
 	var result restoredrill.Result
 	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
@@ -228,38 +200,29 @@ exit 23
 	}
 	if result.Category != restoredrill.CategoryProvisioningFailure ||
 		result.Phase != restoredrill.PhaseProvisioning ||
-		result.HelpGetConfig != restoredrill.AssertionPass ||
+		result.HelpGetConfig != restoredrill.AssertionNotRun ||
 		result.SyntheticSignin != restoredrill.AssertionNotRun {
-		t.Fatal("failed provisioning did not produce the fixed provisioning result")
+		t.Fatal("missing provisioned identity did not produce the fixed provisioning result")
 	}
 	artifact := readRestoreDrillResult(t, invocation)
 	for _, output := range [][]byte{stdout.Bytes(), stderr.Bytes(), artifact} {
-		for _, marker := range []string{
-			username,
-			password,
-			fixture.dsn,
-			fixture.endpoint,
-			"restore-drill-private-user-id-marker-73821",
-			"restore-drill-private-provisioning-error-marker",
-		} {
+		for _, marker := range []string{username, password, fixture.dsn, fixture.endpoint} {
 			if bytes.Contains(output, []byte(marker)) {
-				t.Fatal("failed checker output or artifact exposed private provisioning material")
+				t.Fatal("checker output or artifact exposed private input")
 			}
 		}
 	}
 	if stderr.Len() != 0 {
 		t.Fatal("checker wrote failure diagnostics to stderr")
 	}
-	assertRestoreDrillPrivateFilesRemoved(t, invocation)
 }
 
 type restoreDrillDaemon struct {
 	ctx          context.Context
 	dsn          string
 	endpoint     string
-	binary       string
 	publicKeyPEM []byte
-	authKeyFile  string
+	store        *store.Store
 }
 
 type restoreDrillProcess struct {
@@ -292,7 +255,16 @@ func startRestoreDrillDaemon(t *testing.T) *restoreDrillDaemon {
 	if err := os.WriteFile(authKeyFile, []byte(hex.EncodeToString(authKey)), 0o600); err != nil {
 		t.Fatal("could not protect synthetic auth-key encryption material")
 	}
+	fixtureStore, err := store.Open(ctx, dsn, authKey, store.WithoutBlobStore())
 	clear(authKey)
+	if err != nil {
+		t.Fatal("could not open synthetic fixture store")
+	}
+	t.Cleanup(func() {
+		if err := fixtureStore.Close(); err != nil {
+			t.Error("could not close synthetic fixture store")
+		}
+	})
 
 	tcpPort := reserveRestoreDrillPort(t)
 	websocketPort := reserveRestoreDrillPort(t)
@@ -353,25 +325,29 @@ func startRestoreDrillDaemon(t *testing.T) *restoreDrillDaemon {
 		}
 	})
 	waitRestoreDrillReady(t, ctx, process.done, websocketPort)
-	return &restoreDrillDaemon{ctx: ctx, dsn: dsn, endpoint: endpoint, binary: binary, publicKeyPEM: publicKeyPEM, authKeyFile: authKeyFile}
+	return &restoreDrillDaemon{ctx: ctx, dsn: dsn, endpoint: endpoint, publicKeyPEM: publicKeyPEM, store: fixtureStore}
 }
 
-func (f *restoreDrillDaemon) invocation(t *testing.T, username, password string, key []byte) string {
+func (f *restoreDrillDaemon) invocation(t *testing.T, username, password string, key []byte, identity *restoredrill.Identity) string {
 	t.Helper()
 	dir := t.TempDir()
 	if err := unix.Chmod(dir, 0o700); err != nil {
 		t.Fatal("could not protect synthetic invocation directory")
 	}
 	writeRestoreDrillFile(t, dir, "server.pub.pem", key, 0o400)
-	writeRestoreDrillFile(t, dir, "postgres.dsn", []byte(f.dsn+"\n"), 0o600)
-	keyBytes, err := os.ReadFile(f.authKeyFile)
-	if err != nil {
-		t.Fatal("could not read synthetic test key file")
+	writeRestoreDrillFile(t, dir, "username", []byte(username+"\n"), 0o400)
+	writeRestoreDrillFile(t, dir, "password", []byte(password+"\n"), 0o400)
+	if identity != nil {
+		provisioned, err := json.Marshal(struct {
+			SchemaVersion int    `json:"schema_version"`
+			UserID        int64  `json:"user_id"`
+			Username      string `json:"username"`
+		}{SchemaVersion: 1, UserID: identity.ID, Username: identity.Username})
+		if err != nil {
+			t.Fatal("could not encode provisioned synthetic identity")
+		}
+		writeRestoreDrillFile(t, dir, "provisioned.json", provisioned, 0o400)
 	}
-	writeRestoreDrillFile(t, dir, "authkey.hex", keyBytes, 0o600)
-	clear(keyBytes)
-	writeRestoreDrillFile(t, dir, "username", []byte(username+"\n"), 0o600)
-	writeRestoreDrillFile(t, dir, "password", []byte(password+"\n"), 0o600)
 	invocation := restoredrill.Invocation{
 		SchemaVersion:            1,
 		Mode:                     "synthetic-only",
@@ -387,6 +363,38 @@ func (f *restoreDrillDaemon) invocation(t *testing.T, username, password string,
 	}
 	writeRestoreDrillFile(t, dir, "invocation.json", encoded, 0o600)
 	return filepath.Join(dir, "invocation.json")
+}
+
+func (f *restoreDrillDaemon) createUser(t *testing.T, username, password string) restoredrill.Identity {
+	t.Helper()
+	salt1 := make([]byte, 32)
+	if _, err := rand.Read(salt1); err != nil {
+		t.Fatal("could not create synthetic password salt")
+	}
+	defer clear(salt1)
+	salt2 := make([]byte, 32)
+	if _, err := rand.Read(salt2); err != nil {
+		t.Fatal("could not create synthetic password salt")
+	}
+	defer clear(salt2)
+	passwordBytes := []byte(password)
+	defer clear(passwordBytes)
+	verifier, augmentedSalt1, err := gotdsrp.NewSRP(rand.Reader).NewHash(passwordBytes, gotdsrp.Input{
+		Salt1: salt1,
+		Salt2: salt2,
+		G:     tsrp.G,
+		P:     tsrp.PBytes(),
+	})
+	if err != nil {
+		t.Fatal("could not derive synthetic account password")
+	}
+	defer clear(verifier)
+	defer clear(augmentedSalt1)
+	user, err := f.store.CreateUsernameAccountWithPassword(f.ctx, username, augmentedSalt1, salt2, verifier)
+	if err != nil {
+		t.Fatal("could not provision synthetic account fixture")
+	}
+	return restoredrill.Identity{ID: user.ID, Username: username}
 }
 
 func waitRestoreDrillReady(t *testing.T, ctx context.Context, done <-chan struct{}, port int) {
@@ -464,26 +472,6 @@ func readRestoreDrillResult(t *testing.T, invocation string) []byte {
 	return result
 }
 
-func assertRestoreDrillPrivateFilesRemoved(t *testing.T, invocation string) {
-	t.Helper()
-	entries, err := os.ReadDir(filepath.Dir(invocation))
-	if err != nil {
-		t.Fatal("could not inspect checker-owned temporary material")
-	}
-	for _, entry := range entries {
-		if strings.HasPrefix(entry.Name(), ".restore-drill-private-") {
-			t.Fatal("checker left private create-user output behind")
-		}
-	}
-}
-
-func assertRestoreDrillPass(t *testing.T, result restoredrill.Result) {
-	t.Helper()
-	if result.Category != restoredrill.CategoryAssertionsPassed || result.HelpGetConfig != restoredrill.AssertionPass || result.SyntheticSignin != restoredrill.AssertionPass {
-		t.Fatalf("checker assertions = %q/%q/%q, want all pass", result.Category, result.HelpGetConfig, result.SyntheticSignin)
-	}
-}
-
 func rewriteRestoreDrillInvocation(invocation string, mutate func(*restoredrill.Invocation)) error {
 	data, err := os.ReadFile(invocation)
 	if err != nil {
@@ -502,24 +490,6 @@ func rewriteRestoreDrillInvocation(invocation string, mutate func(*restoredrill.
 		return err
 	}
 	return nil
-}
-
-func restoreDrillAccountID(t *testing.T, dsn, username string) int64 {
-	t.Helper()
-	conn, err := pgx.Connect(context.Background(), dsn)
-	if err != nil {
-		t.Fatal("could not verify synthetic account identity")
-	}
-	defer func() {
-		if err := conn.Close(context.Background()); err != nil {
-			t.Error("could not close synthetic identity check")
-		}
-	}()
-	var id int64
-	if err := conn.QueryRow(context.Background(), `SELECT id FROM users WHERE username = $1`, username).Scan(&id); err != nil {
-		t.Fatal("synthetic account identity was not persisted")
-	}
-	return id
 }
 
 func restoreDrillAccountSnapshot(t *testing.T, dsn, username string) []byte {
