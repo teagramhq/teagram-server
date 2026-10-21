@@ -17,6 +17,7 @@ from unittest.mock import patch
 
 
 SCRIPT = Path(__file__).with_name("restore-readiness.py")
+SHELL_GATE = Path(__file__).with_name("test-restore-readiness.sh")
 SPEC = importlib.util.spec_from_file_location("restore_readiness", SCRIPT)
 if SPEC is None or SPEC.loader is None:
     raise RuntimeError("restore readiness module unavailable")
@@ -109,6 +110,23 @@ def container_fixture() -> tuple[dict[str, Any], dict[str, Any]]:
 
 
 class RestoreReadinessContractTests(unittest.TestCase):
+    def test_suite_work_budget_caps_each_run_and_is_shared_by_shell_gate(self) -> None:
+        self.assertEqual(RESTORE_READINESS.bounded_work_seconds(None, None), 30 * 60)
+        self.assertEqual(RESTORE_READINESS.bounded_work_seconds(None, 300), 300)
+        self.assertEqual(RESTORE_READINESS.bounded_work_seconds("malformed-sql", None), 8 * 60)
+        self.assertEqual(RESTORE_READINESS.bounded_work_seconds("sigkill", 9 * 60), 8 * 60)
+        with self.assertRaises(ValueError):
+            RESTORE_READINESS.bounded_work_seconds(None, 0)
+
+        shell = SHELL_GATE.read_text(encoding="utf-8")
+        self.assertIn("suite_work_deadline=$((SECONDS + 30 * 60))", shell)
+        self.assertIn("suite_teardown_deadline=$((suite_work_deadline + 4 * 60))", shell)
+        run_drill = shell[shell.index("run_drill() {"):shell.index("\nbuild_inputs\n", shell.index("run_drill() {"))]
+        self.assertIn("work_seconds=$(suite_remaining_seconds)", run_drill)
+        self.assertIn('--work-seconds "$work_seconds"', run_drill)
+        self.assertIn('run_suite_command "${build_env[@]}" go build', shell)
+        self.assertIn("run_teardown_command sudo -n -- /usr/bin/find", shell)
+
     def test_docker_executable_must_be_a_trusted_system_binary(self) -> None:
         trusted = RESTORE_READINESS.ensure_trusted_system_executable("/usr/bin/true")
         self.assertEqual(trusted, str(Path("/usr/bin/true").resolve()))

@@ -36,6 +36,7 @@ HEAD_SCHEMA = "20261021000004"
 # Roles the repository migrations create; the restore imports no globals, so the target has none.
 MIGRATION_ROLES = "browser_acceptance_probe"
 WORK_SECONDS = 30 * 60
+FAULT_WORK_SECONDS = 8 * 60
 CLEANUP_SECONDS = 4 * 60
 SUPERVISOR_SECONDS = WORK_SECONDS + CLEANUP_SECONDS
 SAFE_PHASES = {
@@ -73,6 +74,16 @@ PG_MEMORY = 1024 * 1024 * 1024
 CLIENT_MEMORY = 512 * 1024 * 1024
 MAX_CAPTURE = 2 * 1024 * 1024
 MAX_ARCHIVE = 256 * 1024 * 1024
+
+
+def bounded_work_seconds(fault_test: str | None, requested: int | None) -> int:
+    """Keep each run inside its normal or fault-test work budget."""
+    if requested is not None and requested < 1:
+        raise ValueError("work budget must be positive")
+    limit = FAULT_WORK_SECONDS if fault_test else WORK_SECONDS
+    return limit if requested is None else min(limit, requested)
+
+
 ROOT = Path(__file__).resolve().parents[3]
 MIGRATION_HEAD_SQL = "SELECT COALESCE(max(version), '') FROM atlas_schema_revisions.atlas_schema_revisions;"
 
@@ -3928,6 +3939,11 @@ def run_primary(args: argparse.Namespace) -> int:
     except DrillFailure:
         print(json.dumps(report_document("preflight", "preflight_failure", "not_started", 0), separators=(",", ":")))
         return 1
+    try:
+        work_seconds = bounded_work_seconds(args.fault_test, args.work_seconds)
+    except ValueError:
+        print(json.dumps(report_document("preflight", "preflight_failure", "not_started", 0), separators=(",", ":")))
+        return 1
     lock = open_global_lock()
     if lock is None:
         print(json.dumps(report_document("preflight", "isolation_refusal", "not_started", 0), separators=(",", ":")))
@@ -3942,7 +3958,6 @@ def run_primary(args: argparse.Namespace) -> int:
         print(json.dumps(report_document("preflight", "preflight_failure", "not_started", 0), separators=(",", ":")))
         return 1
     started = time.monotonic()
-    work_seconds = 8 * 60 if args.fault_test else WORK_SECONDS
     parent_ticks = process_start_ticks(os.getpid())
     if parent_ticks is None:
         os.close(lock_fd)
@@ -4142,7 +4157,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--build-uid", type=int)
     parser.add_argument("--go-arch")
     parser.add_argument("--fault-test", choices=("malformed-sql", "sigkill"))
+    parser.add_argument("--work-seconds", type=int)
     args = parser.parse_args()
+    if args.work_seconds is not None and args.work_seconds < 1:
+        parser.error("work budget must be positive")
     if args.supervise is not None:
         if args.global_lock_fd is None or args.global_lock_fd < 0:
             parser.error("invalid supervisor descriptor")

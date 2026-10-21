@@ -6,10 +6,36 @@ ulimit -c 0
 script_dir=$(cd -P "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 # Last release before the base-schema migrations; it seeds the fixture at its own schema head.
 seed_commit=7b62b9ab1cad0c459627ad7a2eb736a40382939b
+suite_work_deadline=$((SECONDS + 30 * 60))
+suite_teardown_deadline=$((suite_work_deadline + 4 * 60))
 
 emit_preflight_failure() {
   printf '%s\n' '{"result":"fail","phase":"preflight","category":"preflight_failure","migration_head":"not_reached","help_getConfig":"not_run","synthetic_signin":"not_run","cleanup":"not_started","elapsed_ms":0,"exit":1}'
   exit 1
+}
+
+suite_remaining_seconds() {
+  local remaining=$((suite_work_deadline - SECONDS - 1))
+  (( remaining > 0 )) || return 1
+  printf '%s\n' "$remaining"
+}
+
+suite_remaining_teardown_seconds() {
+  local remaining=$((suite_teardown_deadline - SECONDS - 1))
+  (( remaining > 0 )) || return 1
+  printf '%s\n' "$remaining"
+}
+
+run_suite_command() {
+  local remaining
+  remaining=$(suite_remaining_seconds) || return 124
+  /usr/bin/timeout --signal=TERM --kill-after=15s "${remaining}s" "$@"
+}
+
+run_teardown_command() {
+  local remaining
+  remaining=$(suite_remaining_teardown_seconds) || return 124
+  /usr/bin/timeout --signal=TERM --kill-after=15s "${remaining}s" "$@"
 }
 
 if [[ $# -eq 2 && $1 == "--recover" ]]; then
@@ -42,7 +68,7 @@ if ! sudo -n true >/dev/null 2>&1 || ! command -v go >/dev/null 2>&1 ||
   [[ ! -x /usr/bin/docker ]] || ! atlas_source=$(command -v atlas); then
   emit_preflight_failure
 fi
-if ! go_arch=$("${build_env[@]}" go env GOARCH 2>/dev/null); then
+if ! go_arch=$(run_suite_command "${build_env[@]}" go env GOARCH 2>/dev/null); then
   emit_preflight_failure
 fi
 docker_bin=/usr/bin/docker
@@ -54,7 +80,7 @@ fi
 cleanup_build() {
   status=$?
   trap - EXIT
-  if ! rm -rf -- "$build_dir" 2>/dev/null; then
+  if ! run_teardown_command /usr/bin/rm -rf -- "$build_dir" 2>/dev/null; then
     status=1
   fi
   exit "$status"
@@ -66,6 +92,9 @@ if ! chmod 700 "$build_dir" 2>/dev/null; then
 fi
 atlas_bin="$build_dir/atlas"
 build_inputs() {
+  if ! suite_remaining_seconds >/dev/null; then
+    emit_preflight_failure
+  fi
   if [[ -n ${build_dir_initialized:-} ]]; then
     if ! mkdir -m 700 -- "$build_dir" 2>/dev/null; then
       emit_preflight_failure
@@ -73,31 +102,33 @@ build_inputs() {
   else
     build_dir_initialized=1
   fi
-  if ! /usr/bin/cp -- "$atlas_source" "$atlas_bin" 2>/dev/null ||
-    ! /usr/bin/chmod 500 "$atlas_bin" 2>/dev/null ||
-    ! "${build_env[@]}" go build -trimpath -buildvcs=false -o "$build_dir/teagramd" ./cmd/teagramd >/dev/null 2>&1 ||
-    ! "${build_env[@]}" go build -trimpath -buildvcs=false -o "$build_dir/restore-readiness-launcher" ./deploy/teagramd/rollout-runner/restore-readiness-launcher >/dev/null 2>&1 ||
-    ! "${build_env[@]}" go build -trimpath -buildvcs=false -o "$build_dir/restore-readiness-seed" ./deploy/teagramd/rollout-runner/restore-readiness-seed >/dev/null 2>&1 ||
-    ! "${build_env[@]}" go build -trimpath -buildvcs=false -o "$build_dir/restore-readiness-seed-shim" ./deploy/teagramd/rollout-runner/restore-readiness-seed-shim >/dev/null 2>&1 ||
-    ! "${build_env[@]}" go build -trimpath -buildvcs=false -o "$build_dir/restore-readiness-provisioner" ./deploy/teagramd/rollout-runner/restore-readiness-provisioner >/dev/null 2>&1 ||
-    ! "${build_env[@]}" go build -trimpath -buildvcs=false -o "$build_dir/restore-readiness-probe" ./deploy/teagramd/rollout-runner/restore-readiness-probe >/dev/null 2>&1 ||
-    ! "${build_env[@]}" go build -trimpath -buildvcs=false -o "$build_dir/restore-drill-checker" ./deploy/teagramd/rollout-runner/restore-readiness-checker >/dev/null 2>&1; then
+  if ! run_suite_command /usr/bin/cp -- "$atlas_source" "$atlas_bin" 2>/dev/null ||
+    ! run_suite_command /usr/bin/chmod 500 "$atlas_bin" 2>/dev/null ||
+    ! run_suite_command "${build_env[@]}" go build -trimpath -buildvcs=false -o "$build_dir/teagramd" ./cmd/teagramd >/dev/null 2>&1 ||
+    ! run_suite_command "${build_env[@]}" go build -trimpath -buildvcs=false -o "$build_dir/restore-readiness-launcher" ./deploy/teagramd/rollout-runner/restore-readiness-launcher >/dev/null 2>&1 ||
+    ! run_suite_command "${build_env[@]}" go build -trimpath -buildvcs=false -o "$build_dir/restore-readiness-seed" ./deploy/teagramd/rollout-runner/restore-readiness-seed >/dev/null 2>&1 ||
+    ! run_suite_command "${build_env[@]}" go build -trimpath -buildvcs=false -o "$build_dir/restore-readiness-seed-shim" ./deploy/teagramd/rollout-runner/restore-readiness-seed-shim >/dev/null 2>&1 ||
+    ! run_suite_command "${build_env[@]}" go build -trimpath -buildvcs=false -o "$build_dir/restore-readiness-provisioner" ./deploy/teagramd/rollout-runner/restore-readiness-provisioner >/dev/null 2>&1 ||
+    ! run_suite_command "${build_env[@]}" go build -trimpath -buildvcs=false -o "$build_dir/restore-readiness-probe" ./deploy/teagramd/rollout-runner/restore-readiness-probe >/dev/null 2>&1 ||
+    ! run_suite_command "${build_env[@]}" go build -trimpath -buildvcs=false -o "$build_dir/restore-drill-checker" ./deploy/teagramd/rollout-runner/restore-readiness-checker >/dev/null 2>&1; then
     emit_preflight_failure
   fi
   if ! seed_source=$(mktemp -d "$build_parent/teagram-restore-seed.XXXXXXXX" 2>/dev/null); then
     emit_preflight_failure
   fi
-  if ! git archive "$seed_commit" 2>/dev/null | tar -x -C "$seed_source" 2>/dev/null ||
-    ! (cd "$seed_source" && "${build_env[@]}" go build -trimpath -buildvcs=false -o "$build_dir/teagramd-seed" ./cmd/teagramd >/dev/null 2>&1); then
-    rm -rf -- "$seed_source"
+  if ! run_suite_command git archive "$seed_commit" 2>/dev/null | run_suite_command tar -x -C "$seed_source" 2>/dev/null ||
+    ! (cd "$seed_source" && run_suite_command "${build_env[@]}" go build -trimpath -buildvcs=false -o "$build_dir/teagramd-seed" ./cmd/teagramd >/dev/null 2>&1); then
+    run_teardown_command /usr/bin/rm -rf -- "$seed_source" 2>/dev/null || true
     emit_preflight_failure
   fi
-  if ! rm -rf -- "$seed_source"; then
+  if ! run_teardown_command /usr/bin/rm -rf -- "$seed_source"; then
     emit_preflight_failure
   fi
 }
 
 run_drill() {
+  local work_seconds
+  work_seconds=$(suite_remaining_seconds) || return 124
   sudo -n -- env -i \
     HOME=/root \
     LANG=C \
@@ -110,6 +141,7 @@ run_drill() {
     --build-dir "$build_dir" \
     --build-uid "$build_uid" \
     --go-arch "$go_arch" \
+    --work-seconds "$work_seconds" \
     "$@"
 }
 
@@ -148,22 +180,24 @@ if wait "$recovery_pid"; then
 fi
 recovered=0
 for ((attempt = 0; attempt < 240; attempt++)); do
-  if ! remaining_runs=$(sudo -n -- /usr/bin/find /run -mindepth 1 -maxdepth 1 -type d -name 'restore-readiness-*' -print 2>/dev/null); then
+  if ! remaining_runs=$(run_teardown_command sudo -n -- /usr/bin/find /run -mindepth 1 -maxdepth 1 -type d -name 'restore-readiness-*' -print 2>/dev/null); then
     emit_preflight_failure
   fi
   if [[ -z $remaining_runs ]]; then
     recovered=1
     break
   fi
-  /usr/bin/sleep 1
+  if ! run_teardown_command /usr/bin/sleep 1; then
+    emit_preflight_failure
+  fi
 done
 if [[ $recovered -ne 1 ]]; then
   emit_preflight_failure
 fi
-if ! containers=$("$docker_bin" ps --all --quiet --no-trunc 2>/dev/null) ||
-  ! volumes=$("$docker_bin" volume ls --quiet 2>/dev/null) ||
-  ! networks=$("$docker_bin" network ls --format '{{.Name}}' 2>/dev/null) ||
-  ! owned_images=$("$docker_bin" image ls --all --quiet --no-trunc --filter 'label=com.teagram.restore-readiness.token' 2>/dev/null); then
+if ! containers=$(run_teardown_command "$docker_bin" ps --all --quiet --no-trunc 2>/dev/null) ||
+  ! volumes=$(run_teardown_command "$docker_bin" volume ls --quiet 2>/dev/null) ||
+  ! networks=$(run_teardown_command "$docker_bin" network ls --format '{{.Name}}' 2>/dev/null) ||
+  ! owned_images=$(run_teardown_command "$docker_bin" image ls --all --quiet --no-trunc --filter 'label=com.teagram.restore-readiness.token' 2>/dev/null); then
   emit_preflight_failure
 fi
 if [[ -n $containers || -n $volumes || -n $owned_images ]] ||
@@ -174,7 +208,7 @@ if networks != ["bridge", "host", "none"]:
     raise SystemExit(1)
 ' ||
   [[ -n $(/usr/bin/find "$build_dir" -mindepth 1 -print -quit 2>/dev/null) ]] ||
-  ! /usr/bin/python3 -B -c '
+  ! run_teardown_command /usr/bin/python3 -B -c '
 import runpy, sys
 if runpy.run_path(sys.argv[1])["docker_cli_pids"]():
     raise SystemExit(1)
