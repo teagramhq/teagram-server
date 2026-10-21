@@ -353,7 +353,81 @@ func TestBroadcastPostsHideAuthorOnEveryReadSurface(t *testing.T) {
 		if found.GetPost() || !ok || !peerOK || peer.UserID != author.ID {
 			t.Fatalf("megagroup sender rendering = post:%v from:%T, want user %d and no post flag", found.GetPost(), from, author.ID)
 		}
+
+		forwarded, err := api.ForwardMessagesForTest(s, subscriber.ID, &tg.MessagesForwardMessagesRequest{
+			FromPeer: channelPeer(subscriber.ID, group.ID),
+			ID:       []int{int(groupPost.LocalID)},
+			ToPeer:   api.InputPeerUser(subscriber.ID, destination.ID),
+			RandomID: []int64{224704},
+		})
+		if err != nil {
+			t.Fatalf("forward megagroup post: %v", err)
+		}
+		forwardUpdates, ok := forwarded.(*tg.Updates)
+		if !ok {
+			t.Fatalf("megagroup forward response = %T", forwarded)
+		}
+		for _, user := range forwardUpdates.Users {
+			if user.GetID() == author.ID {
+				t.Fatalf("megagroup forward users vector contains channel source author %d", author.ID)
+			}
+		}
 	})
+}
+
+func TestUnsignedBroadcastForwardDoesNotExposeAuthor(t *testing.T) {
+	ctx := context.Background()
+	s, _ := openStoreDSN(t)
+	author, err := s.CreateUser(ctx, "+15551822474")
+	if err != nil {
+		t.Fatalf("create broadcast author: %v", err)
+	}
+	subscriber, err := s.CreateUser(ctx, "+15551822475")
+	if err != nil {
+		t.Fatalf("create subscriber: %v", err)
+	}
+	destination, err := s.CreateUser(ctx, "+15551822476")
+	if err != nil {
+		t.Fatalf("create forward destination: %v", err)
+	}
+	channel, err := s.CreateChannel(ctx, author.ID, "Unsigned posts", "", false)
+	if err != nil {
+		t.Fatalf("create broadcast channel: %v", err)
+	}
+	joinChannelByInvite(t, s, channel, subscriber.ID)
+	post, _, duplicate, err := s.PostChannelMessageAs(ctx, channel.ID, author.ID, "unsigned broadcast post", 224705, nil, 0)
+	if err != nil || duplicate {
+		t.Fatalf("post to broadcast channel: duplicate=%v err=%v", duplicate, err)
+	}
+	if post.PostAuthor != nil {
+		t.Fatalf("unsigned broadcast post author = %q, want no signature", *post.PostAuthor)
+	}
+
+	enc, err := api.ForwardMessagesForTest(s, subscriber.ID, &tg.MessagesForwardMessagesRequest{
+		FromPeer: channelPeer(subscriber.ID, channel.ID),
+		ID:       []int{int(post.LocalID)},
+		ToPeer:   api.InputPeerUser(subscriber.ID, destination.ID),
+		RandomID: []int64{224706},
+	})
+	if err != nil {
+		t.Fatalf("forward unsigned broadcast post: %v", err)
+	}
+	result, ok := enc.(*tg.Updates)
+	if !ok {
+		t.Fatalf("unsigned broadcast forward response = %T", enc)
+	}
+	for _, user := range result.Users {
+		if user.GetID() == author.ID {
+			t.Fatalf("unsigned broadcast forward users vector contains author %d", author.ID)
+		}
+	}
+	stored, err := s.History(ctx, subscriber.ID, store.PeerTypeUser, destination.ID, 0, 10)
+	if err != nil {
+		t.Fatalf("read stored forward: %v", err)
+	}
+	if len(stored) != 1 || stored[0].FwdFromID != 0 {
+		t.Fatalf("stored unsigned forward source author = %+v, want no user id", stored)
+	}
 }
 
 func TestSearchGlobalRendersMixedChannelKindsFromOnePage(t *testing.T) {
