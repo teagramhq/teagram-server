@@ -136,7 +136,7 @@ func (failure *stageFailureError) Error() string {
 
 var (
 	usernamePattern = regexp.MustCompile(`^[a-z][a-z0-9_]{1,31}$`)
-	dcHostPattern   = regexp.MustCompile(`^[a-zA-Z0-9](?:[a-zA-Z0-9.-]*[a-zA-Z0-9])?$`)
+	dcHostPattern   = regexp.MustCompile(`^[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(?:\.[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)*$`)
 )
 
 // ValidateInvocation rejects any mode that is not an attested synthetic
@@ -427,7 +427,7 @@ func validDCAddress(host string) bool {
 	if address, err := netip.ParseAddr(host); err == nil {
 		return !address.IsUnspecified() && !address.IsMulticast() && address.Zone() == ""
 	}
-	return dcHostPattern.MatchString(host)
+	return len(host) <= 253 && dcHostPattern.MatchString(host)
 }
 
 func parsePublicKey(data []byte) (*rsa.PublicKey, bool) {

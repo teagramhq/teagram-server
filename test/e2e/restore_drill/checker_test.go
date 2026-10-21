@@ -11,6 +11,7 @@ import (
 	"encoding/pem"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -164,6 +165,12 @@ func TestRestoreDrillConfigRequiresFreshValidDaemonContent(t *testing.T) {
 	if !restoredrill.ValidConfig(valid) {
 		t.Fatal("valid daemon configuration was rejected")
 	}
+	hostnameConfig := *valid
+	hostnameConfig.DCOptions = append([]tg.DCOption(nil), valid.DCOptions...)
+	hostnameConfig.DCOptions[0].IPAddress = "dc-1.example"
+	if !restoredrill.ValidConfig(&hostnameConfig) {
+		t.Fatal("valid hostname in daemon configuration was rejected")
+	}
 
 	tests := []struct {
 		name   string
@@ -175,6 +182,11 @@ func TestRestoreDrillConfigRequiresFreshValidDaemonContent(t *testing.T) {
 		{name: "expired configuration", mutate: func(cfg *tg.Config) { cfg.Expires = cfg.Date }},
 		{name: "missing matching data center option", mutate: func(cfg *tg.Config) { cfg.DCOptions = nil }},
 		{name: "invalid data center port", mutate: func(cfg *tg.Config) { cfg.DCOptions[0].Port = 0 }},
+		{name: "empty hostname label", mutate: func(cfg *tg.Config) { cfg.DCOptions[0].IPAddress = "dc..example" }},
+		{name: "hostname label starts with hyphen", mutate: func(cfg *tg.Config) { cfg.DCOptions[0].IPAddress = "-dc.example" }},
+		{name: "hostname label ends with hyphen", mutate: func(cfg *tg.Config) { cfg.DCOptions[0].IPAddress = "dc-.example" }},
+		{name: "hostname label exceeds DNS limit", mutate: func(cfg *tg.Config) { cfg.DCOptions[0].IPAddress = strings.Repeat("a", 64) + ".example" }},
+		{name: "hostname exceeds DNS limit", mutate: func(cfg *tg.Config) { cfg.DCOptions[0].IPAddress = strings.Repeat("a.", 127) + "a" }},
 		{name: "missing size limit", mutate: func(cfg *tg.Config) { cfg.MessageLengthMax = 0 }},
 	}
 	for _, test := range tests {
