@@ -223,6 +223,16 @@ class DrillFailure(Exception):
         self.category = category
 
 
+def write_sigkill_marker(fd: int) -> None:
+    marker = b"SIGKILL_INJECTED\n"
+    try:
+        written = os.write(fd, marker)
+    except OSError as exc:
+        raise DrillFailure("fixture_generation", "fixture_failure") from exc
+    if written != len(marker):
+        raise DrillFailure("fixture_generation", "fixture_failure")
+
+
 def validate_ambient_environment(environment: dict[str, str]) -> bool:
     exact = {
         "DOCKER_HOST",
@@ -4055,6 +4065,7 @@ def run_primary(args: argparse.Namespace) -> int:
         drill.prepare_materials()
         source = drill.create_database("source")
         if args.fault_test == "sigkill":
+            write_sigkill_marker(sys.stdout.fileno())
             os.kill(os.getpid(), signal.SIGKILL)
         drill.migrate_database(
             "source", source, SEED_SCHEMA, "source_migrations", role="seed_migration", keep_env=True

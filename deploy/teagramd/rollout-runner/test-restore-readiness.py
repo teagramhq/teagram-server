@@ -127,6 +127,21 @@ class RestoreReadinessContractTests(unittest.TestCase):
         self.assertIn('run_suite_command "${build_env[@]}" go build', shell)
         self.assertIn("run_teardown_command sudo -n -- /usr/bin/find", shell)
 
+    def test_sigkill_drill_requires_injection_marker_and_signal_status(self) -> None:
+        marker = b"SIGKILL_INJECTED\n"
+        with patch.object(RESTORE_READINESS.os, "write", return_value=len(marker)) as write:
+            RESTORE_READINESS.write_sigkill_marker(17)
+        write.assert_called_once_with(17, marker)
+
+        with patch.object(RESTORE_READINESS.os, "write", return_value=1):
+            with self.assertRaises(RESTORE_READINESS.DrillFailure):
+                RESTORE_READINESS.write_sigkill_marker(17)
+
+        shell = SHELL_GATE.read_text(encoding="utf-8")
+        self.assertIn('run_drill --fault-test sigkill >"$sigkill_output" 2>/dev/null &', shell)
+        self.assertIn('[[ $sigkill_status -ne 137 ]]', shell)
+        self.assertIn('[[ $(<"$sigkill_output") != "SIGKILL_INJECTED" ]]', shell)
+
     def test_docker_executable_must_be_a_trusted_system_binary(self) -> None:
         trusted = RESTORE_READINESS.ensure_trusted_system_executable("/usr/bin/true")
         self.assertEqual(trusted, str(Path("/usr/bin/true").resolve()))

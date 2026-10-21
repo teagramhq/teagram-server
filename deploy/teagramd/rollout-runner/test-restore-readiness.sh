@@ -76,10 +76,14 @@ build_parent=${TMPDIR:-/tmp}
 if ! build_dir=$(mktemp -d "$build_parent/teagram-restore-readiness.XXXXXXXX" 2>/dev/null); then
   emit_preflight_failure
 fi
+sigkill_output=""
 
 cleanup_build() {
   status=$?
   trap - EXIT
+  if [[ -n $sigkill_output ]] && ! run_teardown_command /usr/bin/rm -f -- "$sigkill_output" 2>/dev/null; then
+    status=1
+  fi
   if ! run_teardown_command /usr/bin/rm -rf -- "$build_dir" 2>/dev/null; then
     status=1
   fi
@@ -173,9 +177,18 @@ if not (report.get("result") == "fail" and report.get("phase") == "restore" and 
 fi
 
 build_inputs
-run_drill --fault-test sigkill >/dev/null 2>&1 &
+if ! sigkill_output=$(run_suite_command /usr/bin/mktemp "$build_parent/teagram-restore-sigkill.XXXXXXXX" 2>/dev/null); then
+  emit_preflight_failure
+fi
+run_drill --fault-test sigkill >"$sigkill_output" 2>/dev/null &
 recovery_pid=$!
+sigkill_status=0
 if wait "$recovery_pid"; then
+  emit_preflight_failure
+else
+  sigkill_status=$?
+fi
+if [[ $sigkill_status -ne 137 ]] || [[ $(<"$sigkill_output") != "SIGKILL_INJECTED" ]]; then
   emit_preflight_failure
 fi
 recovered=0
