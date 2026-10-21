@@ -59,7 +59,7 @@ func (q *Queries) ChatParticipantsByChatIDs(ctx context.Context, chatIds []int64
 }
 
 const chatsByIDs = `-- name: ChatsByIDs :many
-SELECT id, title, creator_id, version, date, pinned_message_id, default_banned_rights, ttl_period FROM chats
+SELECT id, title, creator_id, version, date, pinned_message_id, default_banned_rights, ttl_period, current_photo_file_id, current_photo_uploader_id FROM chats
 WHERE id = ANY($1::bigint[])
 `
 
@@ -81,6 +81,8 @@ func (q *Queries) ChatsByIDs(ctx context.Context, chatIds []int64) ([]Chat, erro
 			&i.PinnedMessageID,
 			&i.DefaultBannedRights,
 			&i.TtlPeriod,
+			&i.CurrentPhotoFileID,
+			&i.CurrentPhotoUploaderID,
 		); err != nil {
 			return nil, err
 		}

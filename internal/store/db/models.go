@@ -167,14 +167,16 @@ type ChannelUsernameChange struct {
 }
 
 type Chat struct {
-	ID                  int64
-	Title               string
-	CreatorID           int64
-	Version             int32
-	Date                pgtype.Timestamptz
-	PinnedMessageID     *int32
-	DefaultBannedRights []string
-	TtlPeriod           int32
+	ID                     int64
+	Title                  string
+	CreatorID              int64
+	Version                int32
+	Date                   pgtype.Timestamptz
+	PinnedMessageID        *int32
+	DefaultBannedRights    []string
+	TtlPeriod              int32
+	CurrentPhotoFileID     *int64
+	CurrentPhotoUploaderID *int64
 }
 
 type ChatAbout struct {

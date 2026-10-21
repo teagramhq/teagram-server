@@ -92,6 +92,40 @@ WHERE f.id = $1 AND f.access_hash = $2 AND f.stored = true
 -- name: LockFileForReference :one
 SELECT id FROM files WHERE id = $1 FOR SHARE;
 
+-- LockChatPhotoFileForAttach is the eligibility check and reference-writer
+-- interlock. It runs only after the chat row and sorted member-owner keys are
+-- held; no chat or owner lock is acquired after this file lock.
+-- name: LockChatPhotoFileForAttach :one
+SELECT f.id
+FROM files f
+WHERE f.id = sqlc.arg(file_id)::bigint
+  AND f.uploader_id = sqlc.arg(uploader_id)::bigint
+  AND f.stored = true
+  AND f.media_kind = 'photo'
+  AND f.width BETWEEN 1 AND 10000
+  AND f.height BETWEEN 1 AND 10000
+  AND NOT EXISTS (
+      SELECT 1 FROM messages m WHERE m.file_id = f.id AND m.file_id <> 0
+  )
+  AND NOT EXISTS (
+      SELECT 1 FROM channel_messages cm WHERE cm.file_id = f.id AND cm.file_id IS NOT NULL
+  )
+  AND NOT EXISTS (
+      SELECT 1 FROM user_photos up WHERE up.file_id = f.id
+  )
+  AND NOT EXISTS (
+      SELECT 1 FROM profile_upload_receipt receipt WHERE receipt.file_id = f.id
+  )
+  AND NOT EXISTS (
+      SELECT 1 FROM file_upload_grants grant_row WHERE grant_row.file_id = f.id
+  )
+  AND NOT EXISTS (
+      SELECT 1 FROM chats c
+      WHERE c.current_photo_file_id = f.id
+        AND c.current_photo_file_id IS NOT NULL
+  )
+FOR SHARE OF f;
+
 -- LockFileForUploadGrantCleanup takes the candidate's row exclusively after a
 -- cap refusal. Unlike the eraser's SKIP LOCKED form, cleanup waits for any
 -- in-flight reference writer before deleting its unreturned file.
@@ -262,12 +296,15 @@ SELECT EXISTS (SELECT 1 FROM files WHERE id = $1);
 -- was held back. Filtering those out here would make that count unobservable.
 --
 -- The reference predicate covers non-deleted messages, non-deleted
--- channel_messages, and live profile gallery entries. channel_messages is in
+-- channel_messages, live profile gallery entries, and current basic-group
+-- photos. channel_messages is in
 -- it even though no handler can currently post channel media — omitting it
 -- passes every test that can be written today and starts destroying live
 -- channel media the day channel posts carry a file id. user_photos' unique
 -- file_id index is the reverse-reference path; profile_photo_state points only
--- at a gallery entry and therefore adds no separate file reference.
+-- at a gallery entry and therefore adds no separate file reference. The chat
+-- pointer has its own indexed reverse lookup and is also backed by a RESTRICT
+-- foreign key.
 -- Keep that probe as a parameterized lateral lookup with LIMIT 1. A correlated
 -- EXISTS was planned as one full user_photos scan at 200k entries, while this
 -- shape gives the bounded files walk one user_photos_file_id_key probe per row.
@@ -302,7 +339,8 @@ SELECT f.id, f.size, f.stored,
            SELECT 1 FROM channel_messages cm
            WHERE cm.file_id = f.id AND cm.deleted = false
        ) AS channel_ref,
-       coalesce(gallery.found, false) AS gallery_ref
+       coalesce(gallery.found, false) AS gallery_ref,
+       coalesce(chat_photo.found, false) AS chat_ref
 FROM files f
 LEFT JOIN LATERAL (
     SELECT true AS found
@@ -310,6 +348,13 @@ LEFT JOIN LATERAL (
     WHERE up.file_id = f.id
     LIMIT 1
 ) gallery ON true
+LEFT JOIN LATERAL (
+    SELECT true AS found
+    FROM chats c
+    WHERE c.current_photo_file_id = f.id
+      AND c.current_photo_file_id IS NOT NULL
+    LIMIT 1
+) chat_photo ON true
 WHERE f.id > sqlc.arg(after_id) AND f.id <= sqlc.arg(through_id)
 ORDER BY f.id
 LIMIT sqlc.arg(lim)::int;
@@ -410,6 +455,11 @@ WHERE f.id = sqlc.arg(id)
   )
   AND NOT EXISTS (
       SELECT 1 FROM user_photos up WHERE up.file_id = f.id
+  )
+  AND NOT EXISTS (
+      SELECT 1 FROM chats c
+      WHERE c.current_photo_file_id = f.id
+        AND c.current_photo_file_id IS NOT NULL
   );
 
 -- DeleteUnassembledFile is the crashed-assembly half of the row-driven
@@ -437,4 +487,9 @@ WHERE f.id = sqlc.arg(id)
   )
   AND NOT EXISTS (
       SELECT 1 FROM user_photos up WHERE up.file_id = f.id
+  )
+  AND NOT EXISTS (
+      SELECT 1 FROM chats c
+      WHERE c.current_photo_file_id = f.id
+        AND c.current_photo_file_id IS NOT NULL
   );
