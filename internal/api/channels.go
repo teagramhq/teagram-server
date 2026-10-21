@@ -322,6 +322,7 @@ func (h *handlers) handleGetFullChannel(r *mtproto.Request) (bin.Encoder, error)
 	full.SetParticipantsCount(int(snapshot.ParticipantsCount))
 	canViewParticipants := member && (snapshot.Channel.Megagroup || snapshot.Member.Role >= channelRoleAdmin)
 	full.SetCanViewParticipants(canViewParticipants)
+	full.SetHiddenPrehistory(snapshot.Channel.PreHistoryHidden)
 	if member {
 		full.Pts = snapshot.Pts
 		full.ReadInboxMaxID = int(snapshot.ReadInboxMaxID)
@@ -455,6 +456,43 @@ func (h *handlers) handleToggleSlowMode(r *mtproto.Request) (bin.Encoder, error)
 	}
 	return &tg.Updates{
 		Updates: []tg.UpdateClass{&tg.UpdateChannel{ChannelID: channelID}},
+		Date:    int(time.Now().Unix()),
+	}, nil
+}
+
+// handleTogglePreHistoryHidden serves channels.togglePreHistoryHidden. The
+// store serializes this visibility boundary with admissions and returns the
+// updated channel from the same transaction.
+func (h *handlers) handleTogglePreHistoryHidden(r *mtproto.Request) (bin.Encoder, error) {
+	var req tg.ChannelsTogglePreHistoryHiddenRequest
+	if err := req.Decode(r.Buf); err != nil {
+		return nil, errMethodNotImpl
+	}
+	if r.UserID == 0 {
+		return nil, errAuthKeyUnreg
+	}
+	channelID, err := h.inputChannelID(req.Channel, r.UserID)
+	if err != nil {
+		return nil, err
+	}
+	channel, member, changed, err := h.store.SetChannelPreHistoryHidden(r.Ctx, channelID, r.UserID, req.Enabled)
+	switch {
+	case errors.Is(err, store.ErrNotMember):
+		return nil, errPeerIDInvalid
+	case errors.Is(err, store.ErrChatAdminRequired):
+		return nil, errChatAdminRequired
+	case errors.Is(err, store.ErrChatLinkExists):
+		return nil, errChatLinkExists
+	case err != nil:
+		h.log.Error("toggle channel prehistory visibility", "channel_id", channelID, "user_id", r.UserID, "err", err)
+		return nil, errInternal
+	}
+	if !changed {
+		return nil, errChatNotModified
+	}
+	return &tg.Updates{
+		Updates: []tg.UpdateClass{&tg.UpdateChannel{ChannelID: channelID}},
+		Chats:   []tg.ChatClass{h.channelToTL(channel, member, true, r.UserID)},
 		Date:    int(time.Now().Unix()),
 	}, nil
 }
@@ -1879,6 +1917,8 @@ func (h *handlers) handleEditChannelUsername(r *mtproto.Request) (bin.Encoder, e
 
 	if err := h.store.EditChannelUsername(r.Ctx, channelID, r.UserID, username); err != nil {
 		switch {
+		case errors.Is(err, store.ErrChatAdminRequired):
+			return nil, errChatAdminRequired
 		case errors.Is(err, store.ErrNotMember):
 			// Store re-check failed (demotion/ban between handler check and
 			// transaction). Same wire error as the handler-level check.

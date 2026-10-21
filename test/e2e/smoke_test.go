@@ -3070,10 +3070,11 @@ func waitSmokeChatRefresh(t *testing.T, ctx context.Context, member *smokeClient
 func testSmokeChannel(t *testing.T) {
 	t.Helper()
 	f := newSmokeFixture(t)
-	const phoneCreator, phoneSubscriber = "+15551048001", "+15551048002"
-	seedSmokeUsers(t, f, phoneCreator, phoneSubscriber)
+	const phoneCreator, phoneSubscriber, phoneHiddenJoiner = "+15551048001", "+15551048002", "+15551048003"
+	seedSmokeUsers(t, f, phoneCreator, phoneSubscriber, phoneHiddenJoiner)
 	creator := newSmokeClient(t, f, "A1", phoneCreator)
 	subscriber := newSmokeClient(t, f, "B1", phoneSubscriber)
+	hiddenJoiner := newSmokeClient(t, f, "C1", phoneHiddenJoiner)
 	execChannel(t, f.ctx, creator.cmds, func(ctx context.Context, client *tg.Client) error {
 		cfg, err := client.HelpGetConfig(ctx)
 		if err != nil {
@@ -3540,6 +3541,8 @@ func testSmokeChannel(t *testing.T) {
 	assertPeerDialog(subscriber, postIDs[posts[0]], posts[0], "")
 	deleteSmokeChannelPost(t, f, channelID, postIDs[posts[0]])
 	assertPeerDialog(subscriber, 1, "", "Smoke channel")
+
+	exerciseSmokeChannelPreHistoryHidden(t, f, creator, subscriber, hiddenJoiner, nil)
 }
 
 func testSmokeChannelMembershipRevocation(t *testing.T) {

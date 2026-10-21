@@ -467,6 +467,7 @@ func TestSmokeClientRequestFixturesAreLayer228Shapes(t *testing.T) {
 		"channels_createChannel.1",
 		"channels_editTitle.1",
 		"channels_toggleSignatures.1",
+		"channels_togglePreHistoryHidden.1",
 		"channels_getFullChannel.1",
 		"channels_getFullChannel.2",
 		"channels_getFullChannel.3",
@@ -912,6 +913,41 @@ func testSmokeClientRequestFixtures(t *testing.T) {
 		return nil
 	}); err != nil {
 		t.Fatalf("replay channel signatures fixture: %v", err)
+	}
+	preHistoryChannelID := createMegagroup(t, f.ctx, creator.cmds, "Prehistory fixture")
+	if err := fixtureClientCall(t, creator, "channels_togglePreHistoryHidden.1", func(ctx context.Context, api *tg.Client) error {
+		result, err := api.ChannelsTogglePreHistoryHidden(ctx, &tg.ChannelsTogglePreHistoryHiddenRequest{
+			Channel: inputChannel(creator.id, preHistoryChannelID),
+			Enabled: true,
+		})
+		if err != nil {
+			return err
+		}
+		updates, ok := result.(*tg.Updates)
+		if !ok {
+			return fmt.Errorf("toggle fixture prehistory result = %T, want updated channel %d", result, preHistoryChannelID)
+		}
+		var updated bool
+		for _, chat := range updates.Chats {
+			if channel, ok := chat.(*tg.Channel); ok && channel.ID == preHistoryChannelID {
+				updated = true
+				break
+			}
+		}
+		if !updated {
+			return fmt.Errorf("toggle fixture prehistory omitted updated channel %d", preHistoryChannelID)
+		}
+		full, err := api.ChannelsGetFullChannel(ctx, inputChannel(creator.id, preHistoryChannelID))
+		if err != nil {
+			return err
+		}
+		channelFull, ok := full.FullChat.(*tg.ChannelFull)
+		if !ok || !channelFull.GetHiddenPrehistory() {
+			return fmt.Errorf("full fixture channel hidden_prehistory = %T/%v, want true", full.FullChat, ok && channelFull.GetHiddenPrehistory())
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("replay channel prehistory fixture: %v", err)
 	}
 	if err := fixtureClientCall(t, creator, "messages_editChatAbout.2", func(ctx context.Context, api *tg.Client) error {
 		changed, err := api.MessagesEditChatAbout(ctx, &tg.MessagesEditChatAboutRequest{

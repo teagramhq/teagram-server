@@ -1073,6 +1073,23 @@ func (q *Queries) ChannelsForUser(ctx context.Context, userID int64) ([]Channel,
 	return items, nil
 }
 
+const clearChannelParticipantHistoryFloors = `-- name: ClearChannelParticipantHistoryFloors :execrows
+UPDATE channel_participants
+SET available_min_id = 0
+WHERE channel_id = $1 AND available_min_id <> 0
+`
+
+// ClearChannelParticipantHistoryFloors makes all current members see the full
+// history after prehistory hiding is disabled or the group becomes public.
+// Callers hold the channel row and channel_state locks in that order.
+func (q *Queries) ClearChannelParticipantHistoryFloors(ctx context.Context, channelID int64) (int64, error) {
+	result, err := q.db.Exec(ctx, clearChannelParticipantHistoryFloors, channelID)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
 const completeChannelDeletionPosts = `-- name: CompleteChannelDeletionPosts :execrows
 UPDATE channel_deletion_jobs
 SET posts_tombstoned_at = clock_timestamp()
@@ -1858,6 +1875,46 @@ type SetChannelPinnedMessageParams struct {
 // the pin.
 func (q *Queries) SetChannelPinnedMessage(ctx context.Context, arg SetChannelPinnedMessageParams) (Channel, error) {
 	row := q.db.QueryRow(ctx, setChannelPinnedMessage, arg.ID, arg.PinnedMessageID)
+	var i Channel
+	err := row.Scan(
+		&i.ID,
+		&i.Title,
+		&i.About,
+		&i.CreatorID,
+		&i.Megagroup,
+		&i.Version,
+		&i.Date,
+		&i.PinnedMessageID,
+		&i.Username,
+		&i.TitleTsv,
+		&i.PubliclyDiscoverable,
+		&i.DefaultBannedRights,
+		&i.SlowmodeSeconds,
+		&i.PreHistoryHidden,
+		&i.DeletedAt,
+		&i.Signatures,
+		&i.TtlPeriod,
+	)
+	return i, err
+}
+
+const setChannelPreHistoryHidden = `-- name: SetChannelPreHistoryHidden :one
+UPDATE channels
+SET pre_history_hidden = $2, version = version + 1
+WHERE id = $1
+RETURNING id, title, about, creator_id, megagroup, version, date, pinned_message_id, username, title_tsv, publicly_discoverable, default_banned_rights, slowmode_seconds, pre_history_hidden, deleted_at, signatures, ttl_period
+`
+
+type SetChannelPreHistoryHiddenParams struct {
+	ID               int64
+	PreHistoryHidden bool
+}
+
+// SetChannelPreHistoryHidden writes the megagroup visibility setting after the
+// caller's current membership, role, channel kind and username have been
+// checked under LockChannel and channel_state.
+func (q *Queries) SetChannelPreHistoryHidden(ctx context.Context, arg SetChannelPreHistoryHiddenParams) (Channel, error) {
+	row := q.db.QueryRow(ctx, setChannelPreHistoryHidden, arg.ID, arg.PreHistoryHidden)
 	var i Channel
 	err := row.Scan(
 		&i.ID,

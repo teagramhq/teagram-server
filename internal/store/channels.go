@@ -132,6 +132,7 @@ type Channel struct {
 	Username            *string
 	DefaultBannedRights []string
 	SlowmodeSeconds     int16
+	PreHistoryHidden    bool
 }
 
 // Participant roles, as recorded in the M7 migration.
@@ -191,6 +192,7 @@ func channelFromRow(r db.Channel) Channel {
 		Username:            r.Username,
 		DefaultBannedRights: r.DefaultBannedRights,
 		SlowmodeSeconds:     r.SlowmodeSeconds,
+		PreHistoryHidden:    r.PreHistoryHidden,
 	}
 	if r.DeletedAt.Valid {
 		deletedAt := r.DeletedAt.Time
@@ -1057,6 +1059,79 @@ func (s *Store) SetChannelSignatures(
 		return Channel{}, ChannelMember{}, fmt.Errorf("commit channel signatures: %w", err)
 	}
 	return channelFromRow(row), member, nil
+}
+
+// SetChannelPreHistoryHidden changes who can read channel history by locking
+// the channel and channel_state rows in admission order. Both locks stay held
+// until the flag and, when unhidden, every participant floor commit together.
+func (s *Store) SetChannelPreHistoryHidden(
+	ctx context.Context, channelID, callerID int64, enabled bool,
+) (Channel, ChannelMember, bool, error) {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return Channel{}, ChannelMember{}, false, fmt.Errorf("begin: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }() //nolint:errcheck // no-op after commit
+	qtx := s.q.WithTx(tx)
+
+	locked, err := qtx.LockChannel(ctx, channelID)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return Channel{}, ChannelMember{}, false, ErrNotMember
+		}
+		return Channel{}, ChannelMember{}, false, fmt.Errorf("lock channel: %w", err)
+	}
+	if locked.DeletedAt.Valid || !locked.Megagroup {
+		return Channel{}, ChannelMember{}, false, ErrNotMember
+	}
+
+	participant, err := qtx.ChannelParticipantByUser(ctx, db.ChannelParticipantByUserParams{
+		ChannelID: channelID,
+		UserID:    callerID,
+	})
+	switch {
+	case errors.Is(err, pgx.ErrNoRows):
+		return Channel{}, ChannelMember{}, false, ErrNotMember
+	case err != nil:
+		return Channel{}, ChannelMember{}, false, fmt.Errorf("caller participant: %w", err)
+	}
+	member := channelMemberFromRow(participant)
+	if member.Banned(time.Now()) {
+		return Channel{}, ChannelMember{}, false, ErrNotMember
+	}
+	if member.Role != channelRoleCreator && (member.Role != channelRoleAdmin || !member.AdminChangeInfo) {
+		return Channel{}, ChannelMember{}, false, ErrChatAdminRequired
+	}
+	if enabled && locked.Username != nil {
+		return Channel{}, ChannelMember{}, false, ErrChatLinkExists
+	}
+
+	if _, err = qtx.LockChannelState(ctx, channelID); err != nil {
+		return Channel{}, ChannelMember{}, false, fmt.Errorf("lock channel state: %w", err)
+	}
+	if locked.PreHistoryHidden == enabled {
+		if err = tx.Commit(ctx); err != nil {
+			return Channel{}, ChannelMember{}, false, fmt.Errorf("commit unchanged channel prehistory setting: %w", err)
+		}
+		return channelFromRow(locked), member, false, nil
+	}
+
+	if !enabled {
+		if _, err = qtx.ClearChannelParticipantHistoryFloors(ctx, channelID); err != nil {
+			return Channel{}, ChannelMember{}, false, fmt.Errorf("clear channel participant history floors: %w", err)
+		}
+	}
+	row, err := qtx.SetChannelPreHistoryHidden(ctx, db.SetChannelPreHistoryHiddenParams{
+		ID:               channelID,
+		PreHistoryHidden: enabled,
+	})
+	if err != nil {
+		return Channel{}, ChannelMember{}, false, fmt.Errorf("set channel prehistory setting: %w", err)
+	}
+	if err = tx.Commit(ctx); err != nil {
+		return Channel{}, ChannelMember{}, false, fmt.Errorf("commit channel prehistory setting: %w", err)
+	}
+	return channelFromRow(row), member, true, nil
 }
 
 // SetChannelTitle stores the new title and its service-message event
@@ -2143,6 +2218,8 @@ func (s *Store) JoinChannelByUsername(ctx context.Context, channelID, userID int
 // Failed claims (USERNAME_OCCUPIED) do not consume a rate-limit token.
 //
 // Returns ErrNotMember when the caller is not an admin (role >= 1) or is banned.
+// Returns ErrChatAdminRequired when making a hidden-history megagroup public
+// unless the caller is its creator or an admin with change_info.
 // Returns ErrUsernameOccupied when the handle is already taken.
 // Returns ErrUsernameFloodWait when the per-channel rate limit is exceeded.
 func (s *Store) EditChannelUsername(ctx context.Context, channelID, callerID int64, username string) error {
@@ -2184,6 +2261,11 @@ func (s *Store) EditChannelUsername(ctx context.Context, channelID, callerID int
 	caller := channelMemberFromRow(participant)
 	if caller.Role < 1 || caller.Banned(time.Now()) {
 		return ErrNotMember
+	}
+	clearHiddenHistory := username != "" && lockedChannel.Megagroup && lockedChannel.PreHistoryHidden
+	if clearHiddenHistory && caller.Role != channelRoleCreator &&
+		(caller.Role != channelRoleAdmin || !caller.AdminChangeInfo) {
+		return ErrChatAdminRequired
 	}
 
 	// Prune expired rate-limit rows before counting.
@@ -2249,6 +2331,19 @@ func (s *Store) EditChannelUsername(ctx context.Context, channelID, callerID int
 		// Update the denormalized column on the channels table.
 		if _, err := qtx.SetChannelUsername(ctx, db.SetChannelUsernameParams{ID: channelID, Username: &normalized}); err != nil {
 			return fmt.Errorf("set channel username: %w", err)
+		}
+	}
+	if clearHiddenHistory {
+		if _, err := qtx.LockChannelState(ctx, channelID); err != nil {
+			return fmt.Errorf("lock channel state before making group public: %w", err)
+		}
+		if _, err := qtx.ClearChannelParticipantHistoryFloors(ctx, channelID); err != nil {
+			return fmt.Errorf("clear participant history floors before making group public: %w", err)
+		}
+		if _, err := qtx.SetChannelPreHistoryHidden(ctx, db.SetChannelPreHistoryHiddenParams{
+			ID: channelID, PreHistoryHidden: false,
+		}); err != nil {
+			return fmt.Errorf("clear hidden history before making group public: %w", err)
 		}
 	}
 
