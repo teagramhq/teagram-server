@@ -279,9 +279,17 @@ jobs:
             and .query_mismatch == {"status":"error","code":"websocket-not-ready","wss_diagnostic":"socket-1-target-mismatch","wss_targets":1,"wss_handshakes":1,"wss_target_match":false,"wss_status":101}
             and .no_handshake_held == {"status":"error","code":"websocket-not-ready","wss_diagnostic":"socket-1-no-handshake","wss_targets":1,"wss_handshakes":0,"wss_target_match":true,"wss_status":0}
             and .no_handshake_destroyed == {"status":"error","code":"websocket-not-ready","wss_diagnostic":"socket-1-no-handshake","wss_targets":1,"wss_handshakes":0,"wss_target_match":true,"wss_status":0}
+            and .mixed_status.status == "error"
+            and .mixed_status.code == "websocket-not-ready"
+            and .mixed_status.wss_targets == 2
+            and .mixed_status.wss_target_match == true
             and (
-              .mixed_status == {"status":"error","code":"websocket-not-ready","wss_diagnostic":"socket-2-no-handshake","wss_targets":2,"wss_handshakes":1,"wss_target_match":true,"wss_status":0}
-              or .mixed_status == {"status":"error","code":"websocket-not-ready","wss_diagnostic":"socket-2-handshake-not-101","wss_targets":2,"wss_handshakes":2,"wss_target_match":true,"wss_status":503}
+              ((.mixed_status.wss_diagnostic | test("^socket-[12]-no-handshake$"))
+                and .mixed_status.wss_handshakes == 1
+                and .mixed_status.wss_status == 0)
+              or ((.mixed_status.wss_diagnostic | test("^socket-[12]-handshake-not-101$"))
+                and .mixed_status.wss_handshakes == 2
+                and .mixed_status.wss_status == 503)
             )
             and .mixed_target.status == "error"
             and .mixed_target.code == "websocket-not-ready"

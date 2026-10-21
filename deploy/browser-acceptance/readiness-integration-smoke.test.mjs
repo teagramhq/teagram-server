@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  assertMixedStatusError,
   assertSilentSharedWorkerError,
   assertSocketTargetMismatch,
   formatSmokeFailure,
@@ -10,6 +11,33 @@ import {
 function silentSharedWorkerResult(diagnostic) {
   return { error: { code: "websocket-not-ready", diagnostic } };
 }
+
+test("mixed status diagnostics allow browser socket order to differ from upgrade order", () => {
+  for (const [socket, failure] of [
+    [1, "no-handshake"],
+    [2, "no-handshake"],
+    [1, "handshake-not-101"],
+    [2, "handshake-not-101"],
+  ]) {
+    const noHandshake = failure === "no-handshake";
+    const result = assertMixedStatusError(silentSharedWorkerResult({
+      wss_diagnostic: `socket-${socket}-${failure}`,
+      wss_targets: 2,
+      wss_handshakes: noHandshake ? 1 : 2,
+      wss_target_match: true,
+      wss_status: noHandshake ? 0 : 503,
+    }));
+    assert.equal(result.wss_diagnostic, `socket-${socket}-${failure}`);
+  }
+
+  assert.throws(() => assertMixedStatusError(silentSharedWorkerResult({
+    wss_diagnostic: "socket-1-no-handshake",
+    wss_targets: 2,
+    wss_handshakes: 0,
+    wss_target_match: true,
+    wss_status: 0,
+  })));
+});
 
 test("mixed target diagnostics identify the mismatched socket with either response timing", () => {
   for (const diagnostic of [

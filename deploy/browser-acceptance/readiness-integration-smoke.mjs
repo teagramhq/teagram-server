@@ -372,6 +372,25 @@ export function assertSocketTargetMismatch(result, socket, targets) {
   return JSON.parse(line);
 }
 
+export function assertMixedStatusError(result) {
+  assert.equal(result.error?.code, "websocket-not-ready", "mixedStatus.error?.code");
+  const diagnostic = result.error.diagnostic;
+  assert.equal(diagnostic.wss_targets, 2, "mixedStatus.wss_targets");
+  assert.equal(diagnostic.wss_target_match, true, "mixedStatus.wss_target_match");
+  const failure = /^socket-([12])-(no-handshake|handshake-not-101)$/u.exec(diagnostic.wss_diagnostic);
+  assert.ok(failure, `mixedStatus.wss_diagnostic is a failed socket among two targets (observed ${diagnostic.wss_diagnostic})`);
+  if (failure[2] === "no-handshake") {
+    assert.equal(diagnostic.wss_handshakes, 1, "mixedStatus.wss_handshakes");
+    assert.equal(diagnostic.wss_status, 0, "mixedStatus.wss_status");
+  } else {
+    assert.equal(diagnostic.wss_handshakes, 2, "mixedStatus.wss_handshakes");
+    assert.equal(diagnostic.wss_status, 503, "mixedStatus.wss_status");
+  }
+  const line = errorLine(result);
+  assertNoDiagnosticLeaks(line);
+  return JSON.parse(line);
+}
+
 export function assertSilentSharedWorkerError(result) {
   const isUnobservable = result.error?.diagnostic?.wss_diagnostic === "worker-unobservable";
   return assertWssError(result, {
@@ -497,19 +516,8 @@ async function main() {
     });
 
     const mixedStatus = await runScenario(directory, "mixed-status", certificate);
-    assert.equal(mixedStatus.error?.code, "websocket-not-ready", "mixedStatus.error?.code");
-    assert.equal(mixedStatus.error.diagnostic.wss_targets, 2, "mixedStatus.wss_targets");
-    assert.equal(mixedStatus.error.diagnostic.wss_target_match, true, "mixedStatus.wss_target_match");
-    assert.ok(["socket-2-no-handshake", "socket-2-handshake-not-101"]
-      .includes(mixedStatus.error.diagnostic.wss_diagnostic), "mixedStatus.wss_diagnostic");
-    if (mixedStatus.error.diagnostic.wss_diagnostic === "socket-2-no-handshake") {
-      assert.equal(mixedStatus.error.diagnostic.wss_handshakes, 1, "mixedStatus.wss_handshakes");
-      assert.equal(mixedStatus.error.diagnostic.wss_status, 0, "mixedStatus.wss_status");
-    } else {
-      assert.equal(mixedStatus.error.diagnostic.wss_handshakes, 2, "mixedStatus.wss_handshakes");
-      assert.equal(mixedStatus.error.diagnostic.wss_status, 503, "mixedStatus.wss_status");
-    }
-    const mixedStatusDiagnostic = JSON.parse(errorLine(mixedStatus));
+    assert.equal(mixedStatus.upgrades, 2, "mixedStatus.upgrades");
+    const mixedStatusDiagnostic = assertMixedStatusError(mixedStatus);
 
     const mixedTarget = await runScenario(directory, "mixed-target", certificate);
     const mixedTargetDiagnostic = assertSocketTargetMismatch(mixedTarget, 2, 2);
