@@ -331,9 +331,39 @@ func TestRestoreDrillResultDoesNotClaimOuterDrillOrCleanup(t *testing.T) {
 }
 
 func TestRestoreDrillCheckTimeoutIsBounded(t *testing.T) {
-	ctx, cancel := context.WithTimeout(context.Background(), 25*time.Millisecond)
+	requestStarted := make(chan struct{}, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, request *http.Request) {
+		select {
+		case requestStarted <- struct{}{}:
+		default:
+		}
+		<-request.Context().Done()
+	}))
+	defer server.Close()
+
+	publicKeyPEM := validTestPublicKeyPEM(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
-	result := restoredrill.CheckConfig(ctx, "ws://127.0.0.1:2444/apiws", validTestPublicKeyPEM(t))
+	endpoint := "ws://" + strings.TrimPrefix(server.URL, "http://") + "/apiws"
+	resultChannel := make(chan restoredrill.Result, 1)
+	go func() {
+		resultChannel <- restoredrill.CheckConfig(ctx, endpoint, publicKeyPEM)
+	}()
+
+	select {
+	case <-requestStarted:
+	case result := <-resultChannel:
+		t.Fatalf("check returned before the stalled WebSocket request: %q", result.Category)
+	case <-time.After(time.Second):
+		t.Fatal("check did not reach the stalled WebSocket request")
+	}
+
+	var result restoredrill.Result
+	select {
+	case result = <-resultChannel:
+	case <-time.After(3 * time.Second):
+		t.Fatal("check did not return after its deadline")
+	}
 	if result.Category != restoredrill.CategoryTimeout {
 		t.Fatalf("deadline category = %q, want %q", result.Category, restoredrill.CategoryTimeout)
 	}
