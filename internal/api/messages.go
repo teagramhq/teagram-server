@@ -1949,7 +1949,7 @@ func (h *handlers) forwardReply(r *mtproto.Request, destPeerType store.PeerType,
 			userRefs[m.PeerID] = true
 		}
 		userRefs[m.FromID] = true
-		if m.FwdFromID != 0 {
+		if m.FwdFromID != 0 && m.FwdChannelID == 0 {
 			userRefs[m.FwdFromID] = true
 		}
 		if m.FwdChannelID != 0 {

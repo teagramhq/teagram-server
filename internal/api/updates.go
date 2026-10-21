@@ -142,34 +142,29 @@ func channelMessageToTL(m store.ChannelMessage, viewerID int64, files map[int64]
 	if m.Deleted {
 		return &tg.MessageEmpty{ID: int(m.LocalID)}, nil
 	}
+	var action tg.MessageActionClass
 	switch m.Action {
 	case store.ChannelMessageActionCreate:
-		return &tg.MessageService{
-			ID:     int(m.LocalID),
-			Out:    m.FromID == viewerID,
-			PeerID: &tg.PeerChannel{ChannelID: m.ChannelID},
-			FromID: &tg.PeerUser{UserID: m.FromID},
-			Date:   int(m.Date.Unix()),
-			Action: &tg.MessageActionChannelCreate{Title: m.Message},
-		}, nil
+		action = &tg.MessageActionChannelCreate{Title: m.Message}
 	case store.ChannelMessageActionEditTitle:
-		return &tg.MessageService{
-			ID:     int(m.LocalID),
-			Out:    m.FromID == viewerID,
-			PeerID: &tg.PeerChannel{ChannelID: m.ChannelID},
-			FromID: &tg.PeerUser{UserID: m.FromID},
-			Date:   int(m.Date.Unix()),
-			Action: &tg.MessageActionChatEditTitle{Title: m.Message},
-		}, nil
+		action = &tg.MessageActionChatEditTitle{Title: m.Message}
 	case store.ChannelMessageActionSetMessagesTTL:
-		return &tg.MessageService{
+		action = &tg.MessageActionSetMessagesTTL{Period: m.TTLPeriod}
+	}
+	if action != nil {
+		service := &tg.MessageService{
 			ID:     int(m.LocalID),
 			Out:    m.FromID == viewerID,
 			PeerID: &tg.PeerChannel{ChannelID: m.ChannelID},
-			FromID: &tg.PeerUser{UserID: m.FromID},
 			Date:   int(m.Date.Unix()),
-			Action: &tg.MessageActionSetMessagesTTL{Period: m.TTLPeriod},
-		}, nil
+			Action: action,
+		}
+		if broadcast {
+			service.SetPost(true)
+		} else {
+			service.SetFromID(&tg.PeerUser{UserID: m.FromID})
+		}
+		return service, nil
 	}
 	msg := &tg.Message{
 		ID:      int(m.LocalID),
@@ -1146,7 +1141,7 @@ func (h *handlers) channelEventToUpdate(_ context.Context, channelID, viewerID i
 			return nil, nil, nil
 		}
 		var refs []int64
-		if !broadcast || m.Action != store.ChannelMessageActionNone {
+		if !broadcast {
 			refs = []int64{m.FromID}
 		}
 		if ev.Type == store.EventEdit {

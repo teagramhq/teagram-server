@@ -1254,7 +1254,7 @@ func (h *handlers) channelMessagesWithCountAndCaller(
 			return nil, errInternal
 		}
 		tlMsgs[i] = message
-		if !m.Deleted && (!broadcast || m.Action != store.ChannelMessageActionNone) {
+		if !m.Deleted && !broadcast {
 			authors[m.FromID] = true
 		}
 	}

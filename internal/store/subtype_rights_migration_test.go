@@ -156,14 +156,17 @@ func TestFileSubtypeRightsMigrationPreservesLegacyAndStoresNewStates(t *testing.
 	if !validated {
 		t.Fatal("subtype rights check remains unvalidated")
 	}
-	for _, entry := range entries {
-		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".sql") || entry.Name() <= validationMigration {
-			continue
+	func() {
+		defer lockMigrationReplays(t, ctx)()
+		for _, entry := range entries {
+			if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".sql") || entry.Name() <= validationMigration {
+				continue
+			}
+			if _, err := conn.Exec(ctx, readMigration(entry.Name())); err != nil {
+				t.Fatalf("apply migration %s: %v", entry.Name(), err)
+			}
 		}
-		if _, err := conn.Exec(ctx, readMigration(entry.Name())); err != nil {
-			t.Fatalf("apply migration %s: %v", entry.Name(), err)
-		}
-	}
+	}()
 
 	var mediaKind string
 	var width, height pgtype.Int4

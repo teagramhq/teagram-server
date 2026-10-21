@@ -369,7 +369,7 @@ func peerDialogUserIDs(ownerID int64, dialogs []PeerDialog, chatMembers map[int6
 				}
 			}
 		case PeerTypeChannel:
-			if d.ChannelMessage != nil && (channels[d.Dialog.PeerID].Megagroup || d.ChannelMessage.Action != ChannelMessageActionNone) {
+			if d.ChannelMessage != nil && channels[d.Dialog.PeerID].Megagroup {
 				add(d.ChannelMessage.FromID)
 			}
 		}

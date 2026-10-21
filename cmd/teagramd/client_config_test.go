@@ -14,6 +14,10 @@ func TestRunClientConfigIsIndependentAndAtomicOnWriterFailure(t *testing.T) {
 	t.Setenv("TG_POSTGRES_DSN", "")
 	t.Setenv("TG_AUTHKEY_ENC_KEY", "")
 	t.Setenv("TG_AUTHKEY_ENC_KEY_FILE", "")
+	t.Setenv("TG_TURNSTILE_SITE_KEY", "")
+	t.Setenv("TG_TURNSTILE_SECRET_KEY", "")
+	t.Setenv("TG_TURNSTILE_SECRET_KEY_FILE", "")
+	t.Setenv("TG_TURNSTILE_SIGNIN_ENABLED", "")
 	t.Setenv("TG_ADVERTISE_ADDR", "mtproto.example.com:443")
 	t.Setenv("TG_DC_ID", "2")
 	keyPath := filepath.Join(t.TempDir(), "server-key.pem")
@@ -75,8 +79,10 @@ func TestRunClientConfigAdvertisesTurnstileWidgetKey(t *testing.T) {
 	t.Setenv("TG_ADVERTISE_ADDR", "mtproto.example.com:443")
 	t.Setenv("TG_DC_ID", "2")
 	t.Setenv("TG_TURNSTILE_SITE_KEY", "public-site-key")
-	t.Setenv("TG_TURNSTILE_SECRET_KEY", "")
+	t.Setenv("TG_TURNSTILE_SECRET_KEY", "private-secret-key")
 	t.Setenv("TG_TURNSTILE_SECRET_KEY_FILE", "")
+	t.Setenv("TG_TURNSTILE_SIGNIN_ENABLED", "")
+	t.Setenv("TG_PUBLIC_WEBSOCKET_LISTEN_ADDR", "")
 	keyPath := filepath.Join(t.TempDir(), "server-key.pem")
 	t.Setenv("TG_RSA_KEY_PATH", keyPath)
 	var bootstrapOutput bytes.Buffer
@@ -100,6 +106,37 @@ func TestRunClientConfigAdvertisesTurnstileWidgetKey(t *testing.T) {
 	}
 	if strings.Contains(stdout.String(), "secret") {
 		t.Fatalf("client-config output contains private secret material: %q", stdout.String())
+	}
+}
+
+func TestRunClientConfigDoesNotAdvertiseTurnstileOnTailnetWhenPublicListenerIsConfigured(t *testing.T) {
+	t.Setenv("TG_ADVERTISE_ADDR", "mtproto.example.com:443")
+	t.Setenv("TG_DC_ID", "2")
+	t.Setenv("TG_TURNSTILE_SITE_KEY", "public-site-key")
+	t.Setenv("TG_TURNSTILE_SECRET_KEY", "private-secret-key")
+	t.Setenv("TG_TURNSTILE_SECRET_KEY_FILE", "")
+	t.Setenv("TG_TURNSTILE_SIGNIN_ENABLED", "")
+	t.Setenv("TG_PUBLIC_WEBSOCKET_LISTEN_ADDR", "127.0.0.1:2444")
+	keyPath := filepath.Join(t.TempDir(), "server-key.pem")
+	t.Setenv("TG_RSA_KEY_PATH", keyPath)
+	var bootstrapOutput bytes.Buffer
+	if err := runCommand([]string{"bootstrap-identity"}, slog.New(slog.DiscardHandler), &bootstrapOutput, &bootstrapOutput); err != nil {
+		t.Fatalf("bootstrap-identity: %v", err)
+	}
+	var stdout bytes.Buffer
+	if err := runCommand([]string{"client-config"}, slog.New(slog.DiscardHandler), &stdout, &stdout); err != nil {
+		t.Fatalf("client-config: %v", err)
+	}
+	var document struct {
+		Turnstile *struct {
+			SiteKey string `json:"site_key"`
+		} `json:"turnstile"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &document); err != nil {
+		t.Fatalf("decode client-config output: %v", err)
+	}
+	if document.Turnstile != nil {
+		t.Fatalf("client-config Turnstile = %+v, want no signup key for tailnet discovery", document.Turnstile)
 	}
 }
 

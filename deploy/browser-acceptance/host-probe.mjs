@@ -7,6 +7,25 @@ import { fileURLToPath } from "node:url";
 
 import { ALLOWED_HOST, isValidSnapshot } from "./connect-observer.mjs";
 
+const DATABASE_FAILURE_CATEGORIES = new Set(["config", "connect", "auth", "query", "evidence-invalid", "unknown"]);
+
+class DatabaseProbeFailure extends Error {
+  constructor(category, cause) {
+    super("database probe failed", cause === undefined ? undefined : { cause });
+    this.name = "DatabaseProbeFailure";
+    this.category = DATABASE_FAILURE_CATEGORIES.has(category) ? category : "unknown";
+  }
+}
+
+function databaseProbeFailure(error, fallback = "unknown") {
+  return error instanceof DatabaseProbeFailure ? error : new DatabaseProbeFailure(fallback, error);
+}
+
+function databaseFailureCategory(error) {
+  return error instanceof DatabaseProbeFailure && DATABASE_FAILURE_CATEGORIES.has(error.category)
+    ? error.category : "unknown";
+}
+
 function exactKeys(value, keys) {
   return value !== null && typeof value === "object" && !Array.isArray(value) &&
     JSON.stringify(Object.keys(value).sort()) === JSON.stringify([...keys].sort());
@@ -14,7 +33,7 @@ function exactKeys(value, keys) {
 
 function emptyResult() {
   return {
-    schemaVersion: 4, ok: false, code: "runtime-unavailable", serverSourceCommit: "",
+    schemaVersion: 5, ok: false, code: "runtime-unavailable", serverSourceCommit: "",
     registrationMode: "unknown", accountEvidence: "not-reached", accountsUnchanged: false,
     loginCodesDisabled: false, revisionMatched: false,
     containersStable: false, networkIsolated: false, fingerprintMatched: false,
@@ -289,20 +308,28 @@ export async function probeAcceptance(webRevision, io, { preflight = false } = {
     if (!result.fingerprintMatched) { result.code = failureCode; return result; }
 
     failureCode = "database-unavailable";
-    readBindings = await io.openDatabase();
-    const initial = bindingCut(await readBindings());
+    try { readBindings = await io.openDatabase(); }
+    catch (error) { throw databaseProbeFailure(error); }
+    let initialSnapshot;
+    try { initialSnapshot = await readBindings(); }
+    catch (error) { throw databaseProbeFailure(error); }
+    let initial;
+    try { initial = bindingCut(initialSnapshot); }
+    catch (error) { throw new DatabaseProbeFailure("evidence-invalid", error); }
     const baseline = initial.keys;
     result.boundBefore = Math.min(100, baseline.size);
     result.pendingBefore = Number(initial.pending > 100n ? 100n : initial.pending);
     try {
-      accountHighWaterBefore = int64(await io.readAccountHighWater(readBindings), { nonnegative: true });
+      const accountHighWater = await io.readAccountHighWater(readBindings);
+      try { accountHighWaterBefore = int64(accountHighWater, { nonnegative: true }); }
+      catch (error) { throw new DatabaseProbeFailure("evidence-invalid", error); }
       if (preflight) {
         // Preflight has one sample, so it cannot claim the value was unchanged.
         result.accountEvidence = "complete";
       }
-    } catch {
+    } catch (error) {
       result.accountEvidence = "unavailable";
-      throw new Error("account high-water unavailable");
+      throw databaseProbeFailure(error);
     }
 
     failureCode = "network-unproven";
@@ -411,9 +438,10 @@ export async function probeAcceptance(webRevision, io, { preflight = false } = {
       result.baselineIntact && final.pending <= initial.pending && !result.browserExitOk;
     result.code = bindingNotCreated ? "binding-not-created" :
       result.ok ? "ok" : result.cleanupProven ? "browser-failed" : "cleanup-unproven";
-  } catch {
+  } catch (error) {
     if (browser) await browser.catch(() => undefined);
     result.code = failureCode;
+    if (failureCode === "database-unavailable") result.databaseFailureCategory = databaseFailureCategory(error);
   } finally {
     if (browserLaunchAttempted && !preflight) {
       try {
@@ -429,7 +457,11 @@ export async function probeAcceptance(webRevision, io, { preflight = false } = {
     }
     if (readBindings?.close) {
       try { await readBindings.close(); }
-      catch { result.ok = false; result.code = browserLaunchAttempted ? "cleanup-unproven" : "database-unavailable"; }
+      catch (error) {
+        result.ok = false;
+        result.code = browserLaunchAttempted ? "cleanup-unproven" : "database-unavailable";
+        if (result.code === "database-unavailable") result.databaseFailureCategory = databaseFailureCategory(error);
+      }
     }
     if (accountFailureCode !== null) {
       result.ok = false;
@@ -538,25 +570,53 @@ async function runnerBuildIdentities() {
   }
 }
 
-function command(file, args, { input = "", env = process.env, discard = false, passFd, maxOutput = MAX_OUTPUT } = {}) {
+function classifyDatabaseCommandFailure(stderr) {
+  const sqlState = stderr.match(/(?:^|\n)(?:ERROR|FATAL|PANIC):[ \t]*([0-9A-Z]{5}):/u)?.[1];
+  if (sqlState?.startsWith("28")) return "auth";
+  if (sqlState?.startsWith("08")) return "connect";
+  if (sqlState) return "query";
+  if (/password authentication failed|no password supplied|authentication failed|role "[^"]+" does not exist|no pg_hba\.conf entry/iu.test(stderr)) {
+    return "auth";
+  }
+  if (/could not connect to server|connection to server .* failed|connection refused|connection timed out|timeout expired|could not translate host name|no route to host|network is unreachable|server closed the connection unexpectedly/iu.test(stderr)) {
+    return "connect";
+  }
+  return "unknown";
+}
+
+function command(file, args, { input = "", env = process.env, discard = false, passFd, maxOutput = MAX_OUTPUT,
+  captureStderr = false } = {}) {
   return new Promise((resolveCommand, reject) => {
-    const stdio = [input ? "pipe" : "ignore", discard ? "ignore" : "pipe", "ignore"];
+    const stdio = [input ? "pipe" : "ignore", discard ? "ignore" : "pipe", captureStderr ? "pipe" : "ignore"];
     if (passFd !== undefined) stdio.push("ignore", passFd);
     const child = spawn(file, args, { env, stdio });
     const chunks = [];
+    const errorChunks = [];
     let size = 0;
+    let errorSize = 0;
     let failed = false;
+    let inputFailed = false;
     const timer = setTimeout(() => { failed = true; child.kill("SIGKILL"); }, 5_000);
     child.stdout?.on("data", (chunk) => {
       size += chunk.length;
       if (size > maxOutput) { failed = true; child.kill("SIGKILL"); }
       else chunks.push(chunk);
     });
-    child.stdin?.on("error", () => { failed = true; });
+    child.stderr?.on("data", (chunk) => {
+      errorSize += chunk.length;
+      if (errorSize > 16_384) { failed = true; child.kill("SIGKILL"); }
+      else errorChunks.push(chunk);
+    });
+    child.stdin?.on("error", () => { inputFailed = true; });
     child.once("error", () => { failed = true; });
     child.once("close", (status) => {
       clearTimeout(timer);
-      if (failed || status !== 0) reject(new Error("host command failed"));
+      if (failed || inputFailed || status !== 0) {
+        if (captureStderr) {
+          const category = failed || status === 0 ? "unknown" : classifyDatabaseCommandFailure(Buffer.concat(errorChunks).toString("utf8"));
+          reject(new DatabaseProbeFailure(category));
+        } else reject(new Error("host command failed"));
+      }
       else resolveCommand(Buffer.concat(chunks).toString("utf8"));
     });
     child.stdin?.end(input);
@@ -640,18 +700,26 @@ function passwordEntry(text) {
 }
 
 async function openDatabase(credentialPath, configPath) {
-  const configFile = await privateFile(configPath);
+  let credentialFile;
   let config;
-  try { config = JSON.parse(configFile.text); }
-  finally { await configFile.file.close(); }
-  if (!exactKeys(config, ["userId"]) || typeof config.userId !== "string" ||
-      !/^[1-9][0-9]{0,18}$/u.test(config.userId) || BigInt(config.userId) >= 1n << 63n) {
-    throw new Error("probe database config invalid");
-  }
-  const credentialFile = await privateFile(credentialPath);
   let credential;
-  try { credential = passwordEntry(credentialFile.text); }
-  catch (error) { await credentialFile.file.close(); throw error; }
+  try {
+    const configFile = await privateFile(configPath);
+    try { config = JSON.parse(configFile.text); }
+    finally { await configFile.file.close(); }
+    if (!exactKeys(config, ["userId"]) || typeof config.userId !== "string" ||
+        !/^[1-9][0-9]{0,18}$/u.test(config.userId) || BigInt(config.userId) >= 1n << 63n) {
+      throw new Error("probe database config invalid");
+    }
+    credentialFile = await privateFile(credentialPath);
+    credential = passwordEntry(credentialFile.text);
+  } catch (error) {
+    if (credentialFile) {
+      try { await credentialFile.file.close(); }
+      catch (closeError) { throw new DatabaseProbeFailure("config", closeError); }
+    }
+    throw new DatabaseProbeFailure("config", error);
+  }
   const env = {
     PATH: process.env.PATH, LANG: "C", PGHOST: credential.host, PGPORT: credential.port,
     PGDATABASE: credential.database, PGUSER: "browser_acceptance_probe",
@@ -678,15 +746,25 @@ async function openDatabase(credentialPath, configPath) {
     'db_time', CASE WHEN cut.db_time IS NULL THEN NULL
       ELSE (EXTRACT(EPOCH FROM cut.db_time) * 1000000)::bigint::text END)
   FROM public.browser_acceptance_binding_snapshot_v1(${config.userId}::bigint) AS cut;\n`;
-  const readBindings = async () => JSON.parse(await command("psql", ["-X", "--no-password", "--quiet", "--tuples-only", "--no-align", "--set", "ON_ERROR_STOP=1"],
-    { input: query, env, passFd: credentialFile.file.fd }));
+  const readBindings = async () => {
+    const output = await command("psql", ["-X", "--no-password", "--quiet", "--tuples-only", "--no-align",
+      "--set", "ON_ERROR_STOP=1", "--set", "VERBOSITY=verbose"],
+    { input: query, env, passFd: credentialFile.file.fd, captureStderr: true });
+    try { return JSON.parse(output); }
+    catch (error) { throw new DatabaseProbeFailure("evidence-invalid", error); }
+  };
   readBindings.readAccountHighWater = async () => {
-    const output = await command("psql", ["-X", "--no-password", "--quiet", "--tuples-only", "--no-align", "--set", "ON_ERROR_STOP=1"],
-      { input: "SELECT public.browser_acceptance_account_high_water_v1()::text;\n", env, passFd: credentialFile.file.fd });
-    if (!/^(?:0|-?[1-9][0-9]{0,18})\n$/u.test(output)) throw new Error("account high-water invalid");
+    const output = await command("psql", ["-X", "--no-password", "--quiet", "--tuples-only", "--no-align",
+      "--set", "ON_ERROR_STOP=1", "--set", "VERBOSITY=verbose"],
+    { input: "SELECT public.browser_acceptance_account_high_water_v1()::text;\n", env,
+      passFd: credentialFile.file.fd, captureStderr: true });
+    if (!/^(?:0|-?[1-9][0-9]{0,18})\n$/u.test(output)) throw new DatabaseProbeFailure("evidence-invalid");
     return output.slice(0, -1);
   };
-  readBindings.close = () => credentialFile.file.close();
+  readBindings.close = async () => {
+    try { await credentialFile.file.close(); }
+    catch (error) { throw new DatabaseProbeFailure("config", error); }
+  };
   return readBindings;
 }
 

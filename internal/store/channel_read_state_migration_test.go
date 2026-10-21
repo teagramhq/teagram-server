@@ -196,6 +196,7 @@ func applyMigrationsAfterForTest(t *testing.T, ctx context.Context, conn *pgx.Co
 	if err != nil {
 		t.Fatalf("read migrations directory: %v", err)
 	}
+	defer lockMigrationReplays(t, ctx)()
 	for _, entry := range entries {
 		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".sql") || entry.Name() <= migrationName {
 			continue
@@ -255,6 +256,7 @@ func openPreReadStateDatabase(t *testing.T, ctx context.Context) *pgx.Conn {
 			t.Logf("close pre-migration database: %v", err)
 		}
 	})
+	defer lockMigrationReplays(t, ctx)()
 	for _, migration := range migrations {
 		if migration.IsDir() || !strings.HasSuffix(migration.Name(), ".sql") || migration.Name() >= channelReadStateMigration {
 			continue

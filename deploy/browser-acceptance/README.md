@@ -338,7 +338,9 @@ high-water again after its launch. Success prints exactly:
 ```
 
 Failures use the probe's fixed codes, `browser-failed` for a failed QA
-preflight, or the wrapper's fixed errors. A failed QA preflight also includes
+preflight, or the wrapper's fixed errors. `database-unavailable` also includes
+`database_failure_category`, one of `config`, `connect`, `auth`, `query`,
+`evidence-invalid`, or `unknown`. A failed QA preflight also includes
 `qa_failure_code`; missing or unrecognized child codes become `unknown`. If a
 post-run host check also fails, its code remains top-level and the QA code is
 retained. Wrapper cleanup failure replaces the top-level code with
@@ -383,6 +385,21 @@ the host-private query pipe. The probe calls only
 transactions and a statement timeout. It has only `EXECUTE` on those functions,
 with no table, sequence, enrollment, trigger-function or write privileges. The
 probe never writes to the database or revokes a key.
+
+### Database diagnostic threat model
+
+PostgreSQL stderr is untrusted and potentially sensitive: it can contain host,
+database and role names, SQL or function names, and arbitrary server-controlled
+text. On a failed query, the host probe holds at most 16 KiB of stderr in
+memory while mapping recognized SQLSTATEs or messages to a fixed category;
+oversized or unrecognized diagnostics become `unknown`. The captured text is
+discarded after classification. Only the fixed category can cross into probe
+stdout or wrapper JSON, and only with `database-unavailable`. Raw diagnostics,
+SQLSTATEs, connection settings, credential contents and exception causes are
+not written to logs, stdout, stderr or persistent evidence; diagnostics are
+never forwarded into a container. This keeps database-controlled text out of
+logs and evidence consumers; a privileged observer on the host may still
+inspect the probe's memory while it runs.
 
 Before credential forwarding, every running teagramd process must have
 `TG_REGISTRATION=closed` or `TG_REGISTRATION=open`, with the same setting on
@@ -449,7 +466,7 @@ straddle, or an excess pending count yields `cleanup-unproven`; there is no
 retry or host revocation.
 Counters, witness, epoch and DB cut time never leave probe memory.
 
-Probe stdout is one flat JSON line with exactly `schemaVersion` (4),
+Probe stdout is one flat JSON line with exactly `schemaVersion` (5),
 `serverSourceCommit`, `ok`, `code`, `registrationMode`, `accountEvidence`,
 `accountsUnchanged`,
 `loginCodesDisabled`, `revisionMatched`,
@@ -505,7 +522,7 @@ unsuccessfully. Every other post-launch failure without proven cleanup remains
 `cleanup-unproven`. Failures exit non-zero. No account IDs, key IDs, passwords,
 fingerprints or raw Docker, DB, server or browser errors are emitted or saved.
 
-Once the wrapper validates a v4 probe line in acceptance mode, it prints one
+Once the wrapper validates a v5 probe line in acceptance mode, it prints one
 flat JSON line with exactly these keys: `evidenceVersion` (2), `status`,
 `code`, `teardown`, `targetHost`, `sourceCommit`, `serverSourceCommit`,
 `registrationMode`, `accountEvidence`, `accountsUnchanged`,
@@ -518,7 +535,8 @@ flat JSON line with exactly these keys: `evidenceVersion` (2), `status`,
 `captureTelegramSuffix`, `captureOther`, `captureBlocked`,
 `captureUpstreamFailures`, `qaResult`, `phase`, `outcome`, `logout`,
 `wssConnections`, `wssEndpointMatched`, `submission`, `chatList`,
-`chatListRows`, and `qaFailureCode`. `sourceCommit` comes from the manifest;
+`chatListRows`, and `qaFailureCode`. `databaseFailureCategory` is also present
+only when `code` is `database-unavailable`. `sourceCommit` comes from the manifest;
 all probe fields except `schemaVersion`, `ok`, and `code` are retained. Invalid
 QA fields use `unknown`, zero, or false defaults; malformed, absent, and v2 QA
 lines cannot erase probe evidence. QA v2 is invalid under this contract.
@@ -534,4 +552,5 @@ evidence, and exits non-zero. Code-only output remains for `runtime-failed`
 when no valid probe line exists and for failures before the probe runs.
 Readiness output is unchanged, and wrapper stderr remains suppressed. The
 preflight line reports the proven `registration_mode` and
-`account_evidence_complete`.
+`account_evidence_complete`; database failures also report their fixed
+`database_failure_category`.

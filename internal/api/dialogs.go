@@ -246,7 +246,7 @@ func (h *handlers) handleGetDialogs(r *mtproto.Request) (bin.Encoder, error) {
 				return nil, errInternal
 			}
 			channelMsgs = append(channelMsgs, message)
-			if !channelBroadcasts[m.ChannelID] || m.Action != store.ChannelMessageActionNone {
+			if !channelBroadcasts[m.ChannelID] {
 				peerIDs[m.FromID] = true
 			}
 		}

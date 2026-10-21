@@ -46,6 +46,7 @@ const (
 	containerName   = "tg-test-pg"
 	templatePrefix  = "tg_template_"
 	advisoryLockKey = 0x7467 // "tg"
+	replayAppName   = "pgtest-migration-replay"
 
 	// readyTimeout bounds the wait for Postgres to accept connections, matching
 	// testcontainers' own 60s startup deadline: long enough for a fresh
@@ -213,21 +214,26 @@ func dsnHost(dsn string) string {
 // is applied to a scratch "<name>_building" database that is only renamed to the
 // canonical templateName once fully built. So the canonical name existing always
 // means "complete", closing the partial-init-on-crash window. The whole
-// check-build-rename is serialized by a pg advisory lock across parallel test
-// binaries sharing the reusable container.
+// check-build-rename is serialized by a pg advisory lock in the admin database,
+// shared with migration replays across test binaries using the reusable container.
 // ponytail: old-hash templates from earlier migration sets are left behind;
 // harmless in an ephemeral test container, GC them if they ever pile up.
-func ensureTemplate(ctx context.Context) error {
+func ensureTemplate(ctx context.Context) (retErr error) {
 	conn, err := pgx.Connect(ctx, adminDSN)
 	if err != nil {
 		return fmt.Errorf("admin connect: %w", err)
 	}
 	defer func() { _ = conn.Close(ctx) }() //nolint:errcheck // best-effort close of admin conn
 
-	if _, err := conn.Exec(ctx, `SELECT pg_advisory_lock($1)`, advisoryLockKey); err != nil {
-		return fmt.Errorf("lock: %w", err)
+	unlock, err := lockMigrations(ctx, conn)
+	if err != nil {
+		return err
 	}
-	defer func() { _, _ = conn.Exec(ctx, `SELECT pg_advisory_unlock($1)`, advisoryLockKey) }() //nolint:errcheck // best-effort unlock; conn close releases it anyway
+	defer func() {
+		if err := unlock(); err != nil {
+			retErr = errors.Join(retErr, err)
+		}
+	}()
 
 	var exists bool
 	if err := conn.QueryRow(ctx,
@@ -255,6 +261,60 @@ func ensureTemplate(ctx context.Context) error {
 		return fmt.Errorf("promote template: %w", err)
 	}
 	return nil
+}
+
+// LockMigrations acquires the advisory lock in the admin database, shared by
+// template builds and disposable-schema migration replays. Its returned
+// function unlocks and closes the connection.
+func LockMigrations(ctx context.Context) (func() error, error) {
+	once.Do(setup)
+	if errSetup != nil {
+		return nil, fmt.Errorf("pgtest setup: %w", errSetup)
+	}
+	config, err := pgx.ParseConfig(adminDSN)
+	if err != nil {
+		return nil, fmt.Errorf("parse admin DSN for migration lock: %w", err)
+	}
+	if config.RuntimeParams == nil {
+		config.RuntimeParams = make(map[string]string)
+	}
+	config.RuntimeParams["application_name"] = replayAppName
+	conn, err := pgx.ConnectConfig(ctx, config)
+	if err != nil {
+		return nil, fmt.Errorf("connect admin database for migration lock: %w", err)
+	}
+	unlock, err := lockMigrations(ctx, conn)
+	if err != nil {
+		closeCtx, cancel := context.WithTimeout(context.Background(), readyProbe)
+		defer cancel()
+		return nil, errors.Join(err, conn.Close(closeCtx))
+	}
+	return func() error {
+		unlockErr := unlock()
+		closeCtx, cancel := context.WithTimeout(context.Background(), readyProbe)
+		defer cancel()
+		return errors.Join(unlockErr, conn.Close(closeCtx))
+	}, nil
+}
+
+// lockMigrations uses the supplied connection to serialize template creation
+// during setup and LockMigrations to serialize replays through postgres.
+func lockMigrations(ctx context.Context, conn *pgx.Conn) (func() error, error) {
+	if _, err := conn.Exec(ctx, `SELECT pg_advisory_lock($1)`, advisoryLockKey); err != nil {
+		return nil, fmt.Errorf("lock migration replay: %w", err)
+	}
+	return func() error {
+		unlockCtx, cancel := context.WithTimeout(context.Background(), readyProbe)
+		defer cancel()
+		var unlocked bool
+		if err := conn.QueryRow(unlockCtx, `SELECT pg_advisory_unlock($1)`, advisoryLockKey).Scan(&unlocked); err != nil {
+			return fmt.Errorf("unlock migration replay: %w", err)
+		}
+		if !unlocked {
+			return errors.New("migration replay lock was not held")
+		}
+		return nil
+	}, nil
 }
 
 // applyMigrations execs each Atlas migration, in filename order, into db. The

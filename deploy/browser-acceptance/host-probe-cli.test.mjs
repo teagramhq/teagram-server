@@ -115,6 +115,19 @@ printf '%s\\n' "psql $*" >> "$HOST_COMMAND_LOG"
 [[ "$(cat "$PGPASSFILE")" == '127.0.0.1:5432:teagram:browser_acceptance_probe:${privateCanary}' ]] || exit 84
 [[ "$PGOPTIONS" == *default_transaction_read_only=on* ]] || exit 89
 query="$(cat)"
+if [[ -e '${directory}/db-error-connect' ]]; then
+  printf '%s\\n' 'psql: error: connection to server at "127.0.0.1", port 5432 failed: Connection refused' >&2
+  exit 86
+fi
+if [[ -e '${directory}/db-error-auth' ]]; then
+  printf '%s\\n' 'psql: error: FATAL: password authentication failed for user "browser_acceptance_probe" (${privateCanary})' >&2
+  exit 86
+fi
+if [[ -e '${directory}/db-error-query' ]]; then
+  printf '%s\\n' 'ERROR:  42501: permission denied for function browser_acceptance_binding_snapshot_v1' >&2
+  exit 86
+fi
+if [[ -e '${directory}/db-error-evidence-invalid' ]]; then exit 0; fi
 if [[ -e '${directory}/db-error' ]]; then printf '%s\\n' '${privateCanary}' >&2; exit 86; fi
 printf '%s\\n' "$query" >> "$HOST_QUERY_LOG"
 if [[ "$query" == *public.browser_acceptance_account_high_water_v1* ]]; then
@@ -179,7 +192,7 @@ test("host CLI emits one proof line and forwards browser stdout on a separate de
   await writeFile(paths.highWaterAfter, "9223372036854775806\n");
   const result = invoke(paths, { HOST_READ_STDIN: "1" });
   assert.equal(result.status, 0, `${result.stderr}${result.stdout}\n${await readFile(paths.log, "utf8")}`);
-  assert.match(result.stdout, /^\{"schemaVersion":4,/u, "host CLI must produce an independent proof");
+  assert.match(result.stdout, /^\{"schemaVersion":5,/u, "host CLI must produce an independent proof");
   const proof = JSON.parse(result.stdout);
   assert.equal(proof.ok, true);
   assert.equal(proof.code, "ok");
@@ -242,6 +255,7 @@ for (const mode of [0o644, 0o400, 0o660]) {
     const result = invoke(paths);
     assert.equal(result.status, 1);
     assert.equal(JSON.parse(result.stdout).code, "database-unavailable");
+    assert.equal(JSON.parse(result.stdout).databaseFailureCategory, "config");
     assert.equal(result.output[3], "");
     assert.equal(result.stderr, "");
     assert.doesNotMatch(await readFile(paths.log, "utf8"), /exec --interactive|psql/u);
@@ -256,6 +270,7 @@ test("host config symlinks are rejected without disclosing their contents", asyn
   const result = invoke(paths);
   assert.equal(result.status, 1);
   assert.equal(JSON.parse(result.stdout).code, "database-unavailable");
+  assert.equal(JSON.parse(result.stdout).databaseFailureCategory, "config");
   assert.equal(result.stderr, "");
   assert.equal(result.output[3], "");
 });
@@ -266,6 +281,7 @@ test("the probe refuses a server DSN or arbitrary role in the credential file", 
   const result = invoke(paths);
   assert.equal(result.status, 1);
   assert.equal(JSON.parse(result.stdout).code, "database-unavailable");
+  assert.equal(JSON.parse(result.stdout).databaseFailureCategory, "config");
   assert.doesNotMatch(await readFile(paths.log, "utf8"), /exec --interactive|psql/u);
 });
 
@@ -336,8 +352,31 @@ test("database stderr and connection errors never leave probe memory", async (t)
   const result = invoke(paths);
   assert.equal(result.status, 1);
   assert.equal(JSON.parse(result.stdout).code, "database-unavailable");
+  assert.equal(JSON.parse(result.stdout).databaseFailureCategory, "unknown");
   assert.equal(result.stderr, "");
   assert.doesNotMatch(result.stdout, /private-probe/u);
+});
+
+test("database probe steps map to fixed redacted categories", async (t) => {
+  for (const [name, category, marker] of [
+    ["connect", "connect", "db-error-connect"],
+    ["auth", "auth", "db-error-auth"],
+    ["query", "query", "db-error-query"],
+    ["evidence-invalid", "evidence-invalid", "db-error-evidence-invalid"],
+  ]) {
+    await t.test(name, async (t) => {
+      const paths = await hostFixture(t);
+      await writeFile(join(paths.directory, marker), "");
+      const result = invoke(paths);
+      assert.equal(result.status, 1, result.stdout + result.stderr);
+      const proof = JSON.parse(result.stdout);
+      assert.equal(proof.code, "database-unavailable");
+      assert.equal(proof.databaseFailureCategory, category);
+      assert.equal(result.stderr, "");
+      assert.doesNotMatch(result.stdout, /127[.]0[.]0[.]1|browser_acceptance_probe|browser_acceptance_binding_snapshot_v1/u);
+      assert.doesNotMatch(result.stdout, new RegExp(privateCanary, "u"));
+    });
+  }
 });
 
 test("a non-zero browser exit cannot turn proven cleanup into a pass", async (t) => {
@@ -390,7 +429,7 @@ test("oversized observer output fails closed before credential forwarding", asyn
   assert.equal(commands.split("\n").filter((line) => line.startsWith("psql ")).length, 2);
 });
 
-test("the real wrapper joins the v4 proof and browser pipe and tears down the project", async (t) => {
+test("the real wrapper joins the v5 proof and browser pipe and tears down the project", async (t) => {
   const paths = await hostFixture(t);
   // run.sh strips the runner test gate, so only this fixture shim can restore it for the probe.
   await writeFile(join(paths.bin, "node"), `#!/usr/bin/env bash
@@ -522,8 +561,41 @@ test("the real wrapper preflight stops on probe-credential checks before the QA 
   await chmod(paths.credential, 0o644);
   const result = await invokeRealWrapper(paths, "acceptance-preflight");
   assert.equal(result.status, 1);
-  assert.equal(result.stdout, '{"status":"error","code":"database-unavailable"}\n');
+  assert.equal(result.stdout, '{"status":"error","code":"database-unavailable","database_failure_category":"config"}\n');
   assert.doesNotMatch(await readFile(paths.log, "utf8"), /approved-qa\.mjs --mode|psql/u);
+});
+
+test("preflight wrapper exposes fixed database failure categories", async (t) => {
+  const cases = [
+    ["config", "config", async (paths) => chmod(paths.credential, 0o644)],
+    ["connect", "connect", async (paths) => writeFile(join(paths.directory, "db-error-connect"), "")],
+    ["auth", "auth", async (paths) => writeFile(join(paths.directory, "db-error-auth"), "")],
+    ["query", "query", async (paths) => writeFile(join(paths.directory, "db-error-query"), "")],
+    ["evidence-invalid", "evidence-invalid", async (paths) => writeFile(join(paths.directory, "db-error-evidence-invalid"), "")],
+    ["unknown", "unknown", async (paths) => writeFile(join(paths.directory, "db-error"), "")],
+  ];
+  for (const [name, category, prepare] of cases) {
+    await t.test(name, async (t) => {
+      const paths = await hostFixture(t);
+      await prepare(paths);
+      const result = await invokeRealWrapper(paths, "acceptance-preflight");
+      assert.equal(result.status, 1);
+      assert.equal(result.stdout,
+        `{"status":"error","code":"database-unavailable","database_failure_category":"${category}"}\n`);
+      assert.equal(result.stderr, "");
+    });
+  }
+});
+
+test("acceptance wrapper includes the database category only for database-unavailable", async (t) => {
+  const paths = await hostFixture(t);
+  await writeFile(join(paths.directory, "db-error-query"), "");
+  const result = await invokeRealWrapper(paths, "acceptance");
+  assert.equal(result.status, 1);
+  const evidence = JSON.parse(result.stdout);
+  assert.equal(evidence.code, "database-unavailable");
+  assert.equal(evidence.databaseFailureCategory, "query");
+  assert.doesNotMatch(result.stdout, /127[.]0[.]0[.]1|browser_acceptance_probe|browser_acceptance_binding_snapshot_v1|private-probe/u);
 });
 
 test("a preflight success does not let acceptance skip its own checks", async (t) => {
@@ -537,6 +609,7 @@ test("a preflight success does not let acceptance skip its own checks", async (t
   assert.equal(result.status, 1);
   const evidence = JSON.parse(result.stdout);
   assert.equal(evidence.code, "revision-unproven");
+  assert.equal(Object.hasOwn(evidence, "databaseFailureCategory"), false);
   assert.equal(evidence.qaResult, "absent");
   const commands = await readFile(paths.log, "utf8");
   assert.doesNotMatch(commands, /exec --interactive/u);
