@@ -22,6 +22,9 @@ services:
     depends_on: !override
       migrate:
         condition: service_completed_successfully
-    secrets: !reset []
+    # Keep optional auth while dropping the S3 blob credential.
+    secrets: !override
+      - source: teagramd_turnstile
+        target: teagramd-turnstile
     volumes:
       - tgblobs:${TEAGRAMD_STACK_MOVE_BLOB_DIR:-/var/lib/teagramd-blobs}

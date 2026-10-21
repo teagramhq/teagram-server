@@ -1678,7 +1678,8 @@ jobs:
           jq -e '
             .services.teagramd.environment.TG_BLOB_DIR == "/var/lib/teagramd-blobs"
             and ([.services.teagramd.environment | keys[] | select(startswith("TG_BLOB_S3_"))] | length) == 0
-            and ((.services.teagramd.secrets // []) | length) == 0
+            and ((.services.teagramd.secrets // []) | length) == 1
+            and any(.services.teagramd.secrets[]; .source == "teagramd_turnstile" and .target == "teagramd-turnstile")
             and ((.services.teagramd.depends_on | keys) == ["migrate"])
             and ((.services | has("rustfs")) | not)
             and ((.services | has("rustfs-init")) | not)
