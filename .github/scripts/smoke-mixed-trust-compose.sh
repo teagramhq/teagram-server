@@ -9,6 +9,9 @@ fi
 repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
 cd "$repo_root"
 
+# This disposable local-mode proof must not inherit a real Turnstile secret.
+unset TEAGRAM_TURNSTILE_SITE_KEY TEAGRAM_TURNSTILE_SECRET_KEY_FILE TG_TURNSTILE_SIGNIN_ENABLED
+
 work_dir=$(mktemp -d)
 umask 077
 trap 'rm -rf "$work_dir"' EXIT
@@ -201,7 +204,13 @@ assert legacy["services"]["teagramd"]["environment"]["TG_CLIENT_ADDR_TRUST"] == 
 assert legacy["services"]["teagramd"]["environment"]["TG_REPLICA_COUNT"] == "3"
 assert legacy["services"]["teagramd"]["environment"]["TG_WEBSOCKET_ALLOWED_ORIGINS"] == "https://web.example.test"
 assert not any(key.startswith("TG_BLOB_S3_") for key in legacy["services"]["teagramd"]["environment"])
-assert not legacy["services"]["teagramd"].get("secrets")
+assert legacy["services"]["teagramd"].get("secrets") == [
+    {"source": "teagramd_turnstile", "target": "teagramd-turnstile"}
+]
+assert legacy["services"]["teagramd"]["environment"]["TG_TURNSTILE_SITE_KEY"] == ""
+assert legacy["services"]["teagramd"]["environment"]["TG_TURNSTILE_SECRET_KEY_FILE"] == ""
+assert legacy["services"]["teagramd"]["environment"]["TG_TURNSTILE_SIGNIN_ENABLED"] == "false"
+assert legacy["secrets"]["teagramd_turnstile"]["file"] == "/dev/null"
 print("default Compose stays direct; validation legacy is socket-trust")
 PY
 
