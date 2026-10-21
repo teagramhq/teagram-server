@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"net"
 	"os"
@@ -43,7 +44,7 @@ func main() {
 func parsePort(value string) (int, error) {
 	port, err := strconv.Atoi(value)
 	if err != nil || port < 1 || port > 65535 {
-		return 0, fmt.Errorf("invalid port")
+		return 0, errors.New("invalid port")
 	}
 	return port, nil
 }
@@ -167,9 +168,24 @@ func canResolve(gateway string, port int) (reached bool) {
 func dnsQuery() []byte {
 	query := []byte{0x72, 0x64, 0x01, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00}
 	for _, label := range []string{"restore-readiness-fixture", "invalid"} {
-		query = append(query, byte(len(label)))
+		length, ok := dnsLabelLength(label)
+		if !ok {
+			return nil
+		}
+		query = append(query, length)
 		query = append(query, label...)
 	}
 	query = append(query, 0x00, 0x00, 0x01, 0x00, 0x01)
 	return query
+}
+
+func dnsLabelLength(label string) (byte, bool) {
+	if len(label) == 0 || len(label) > 63 {
+		return 0, false
+	}
+	var length byte
+	for range []byte(label) {
+		length++
+	}
+	return length, true
 }

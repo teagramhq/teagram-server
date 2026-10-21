@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"io"
 	"os"
@@ -9,6 +10,7 @@ import (
 	"regexp"
 	"strings"
 	"syscall"
+	"time"
 
 	"golang.org/x/sys/unix"
 )
@@ -18,6 +20,7 @@ const (
 	dsnPath      = "/run/secrets/postgres.dsn"
 	authKeyPath  = "/run/secrets/authkey.hex"
 	usernamePath = "/run/secrets/username"
+	// #nosec G101 -- a protected input path, not a credential.
 	passwordPath = "/run/secrets/password"
 	rsaKeyPath   = "/run/secrets/server-key.pem"
 )
@@ -35,7 +38,7 @@ func main() {
 }
 
 func run() error {
-	if len(os.Environ()) != 0 {
+	if os.Geteuid() != 0 || len(os.Environ()) != 0 {
 		return errors.New("unexpected environment")
 	}
 	dsnBytes, err := readProtected(dsnPath, 0o400, 256)
@@ -66,7 +69,9 @@ func run() error {
 	input = append(input, '\n')
 	defer clear(input)
 
-	command := exec.Command(serverPath, "admin", "create-user", "--username", strings.TrimSuffix(string(username), "\n")) // #nosec G204 -- fixed binary; the generated synthetic handle is validated above.
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	defer cancel()
+	command := exec.CommandContext(ctx, serverPath, "admin", "create-user", "--username", strings.TrimSuffix(string(username), "\n")) // #nosec G204 -- fixed binary; the generated synthetic handle is validated above.
 	command.Env = []string{
 		"TG_POSTGRES_DSN=" + string(dsnBytes),
 		"TG_AUTHKEY_ENC_KEY_FILE=" + authKeyPath,
@@ -101,7 +106,8 @@ func readProtected(path string, mode os.FileMode, maxBytes int) (contents []byte
 		return nil, errors.New("invalid protected input")
 	}
 	stat, ok := info.Sys().(*syscall.Stat_t)
-	if !ok || stat.Nlink != 1 || stat.Uid != uint32(os.Geteuid()) {
+	uid, uidOK := effectiveUID()
+	if !ok || !uidOK || stat.Nlink != 1 || stat.Uid != uid {
 		return nil, errors.New("invalid protected input owner")
 	}
 	contents, err = io.ReadAll(io.LimitReader(file, int64(maxBytes+1)))
@@ -113,6 +119,18 @@ func readProtected(path string, mode os.FileMode, maxBytes int) (contents []byte
 		return nil, errors.New("protected input too large")
 	}
 	return contents, nil
+}
+
+func effectiveUID() (uint32, bool) {
+	uid := os.Geteuid()
+	if uid < 0 {
+		return 0, false
+	}
+	value := uint64(uid)
+	if value > uint64(^uint32(0)) {
+		return 0, false
+	}
+	return uint32(value), true
 }
 
 func validDSN(dsn string) bool {

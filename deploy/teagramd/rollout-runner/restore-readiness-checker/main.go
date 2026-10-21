@@ -10,13 +10,16 @@ import (
 )
 
 func main() {
+	os.Exit(run())
+}
+
+func run() int {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
-	status := restoredrill.RunCLI(
+	return restoredrill.RunCLI(
 		ctx,
 		"/run/invocation/invocation.json",
 		os.Stdout,
 		io.Discard,
 	)
-	os.Exit(status)
 }

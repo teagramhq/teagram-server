@@ -105,6 +105,21 @@ def container_fixture() -> tuple[dict[str, Any], dict[str, Any]]:
 
 
 class RestoreReadinessContractTests(unittest.TestCase):
+    def test_image_build_contexts_create_the_missing_build_directory(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            work_directory = Path(temporary_directory) / "work"
+            work_directory.mkdir(mode=0o700)
+            build_root = work_directory / "build"
+
+            app_context, tools_context = RESTORE_READINESS.create_image_build_contexts(build_root)
+
+            self.assertEqual(app_context, build_root / "app")
+            self.assertEqual(tools_context, build_root / "tools")
+            self.assertTrue(app_context.is_dir())
+            self.assertTrue(tools_context.is_dir())
+            self.assertEqual(app_context.stat().st_mode & 0o777, 0o700)
+            self.assertEqual(tools_context.stat().st_mode & 0o777, 0o700)
+
     def test_postgres_fixture_images_are_public_and_digest_pinned(self) -> None:
         for image in (RESTORE_READINESS.SOURCE_IMAGE, RESTORE_READINESS.RESTORE_IMAGE):
             with self.subTest(image=image):

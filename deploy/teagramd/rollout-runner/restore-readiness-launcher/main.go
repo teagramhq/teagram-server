@@ -85,7 +85,8 @@ func readDatabaseDSN(path string) (dsn string, resultErr error) {
 		return "", errors.New("invalid database configuration file")
 	}
 	stat, ok := info.Sys().(*syscall.Stat_t)
-	if !ok || stat.Nlink != 1 || stat.Uid != uint32(os.Geteuid()) {
+	uid, uidOK := effectiveUID()
+	if !ok || !uidOK || stat.Nlink != 1 || stat.Uid != uid {
 		return "", errors.New("invalid database configuration owner")
 	}
 	contents, err := io.ReadAll(io.LimitReader(file, 257))
@@ -116,4 +117,16 @@ func validDatabaseDSN(dsn string) bool {
 	query := parsed.Query()
 	return len(query) == 2 && query.Get("host") == "/run/postgres" &&
 		query.Get("sslmode") == "disable"
+}
+
+func effectiveUID() (uint32, bool) {
+	uid := os.Geteuid()
+	if uid < 0 {
+		return 0, false
+	}
+	value := uint64(uid)
+	if value > uint64(^uint32(0)) {
+		return 0, false
+	}
+	return uint32(value), true
 }

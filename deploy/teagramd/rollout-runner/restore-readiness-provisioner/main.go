@@ -11,7 +11,6 @@ import (
 	"os/exec"
 	"regexp"
 	"strconv"
-	"strings"
 	"syscall"
 	"time"
 
@@ -23,6 +22,7 @@ const (
 	dsnPath      = "/run/secrets/postgres.dsn"
 	authKeyPath  = "/run/secrets/authkey.hex"
 	usernamePath = "/run/secrets/username"
+	// #nosec G101 -- a protected input path, not a credential.
 	passwordPath = "/run/secrets/password"
 )
 
@@ -43,15 +43,20 @@ type provisionResult struct {
 }
 
 func main() {
+	os.Exit(runMain())
+}
+
+func runMain() int {
 	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
 	defer cancel()
 	result := run(ctx)
 	if err := json.NewEncoder(os.Stdout).Encode(result); err != nil {
-		os.Exit(1)
+		return 1
 	}
 	if result.Category != "provisioned" {
-		os.Exit(1)
+		return 1
 	}
+	return 0
 }
 
 func run(ctx context.Context) provisionResult {
@@ -137,6 +142,7 @@ func parseCreateUserConfirmation(stderr, username []byte) (int64, bool) {
 
 type boundedBuffer struct {
 	bytes.Buffer
+
 	tooLarge bool
 }
 
@@ -166,14 +172,14 @@ func readProtected(path string, mode os.FileMode, maxBytes int) (contents []byte
 		return nil, errors.New("invalid protected input")
 	}
 	stat, ok := info.Sys().(*syscall.Stat_t)
-	if !ok || stat.Nlink != 1 || stat.Uid != uint32(os.Geteuid()) {
+	if !ok || stat.Nlink != 1 || stat.Uid != 0 {
 		return nil, errors.New("invalid protected input owner")
 	}
 	contents, err = io.ReadAll(io.LimitReader(file, int64(maxBytes+1)))
 	if err != nil {
 		return nil, errors.New("read protected input")
 	}
-	if len(contents) > maxBytes || strings.ContainsAny(string(contents), "\x00\r") {
+	if len(contents) > maxBytes || bytes.ContainsAny(contents, "\x00\r") {
 		clear(contents)
 		return nil, errors.New("protected input too large")
 	}

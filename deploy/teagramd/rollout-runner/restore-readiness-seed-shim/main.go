@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -38,7 +39,7 @@ func run() error {
 		return errors.New("invalid seed socket directory")
 	}
 	stat, ok := directory.Sys().(*syscall.Stat_t)
-	if !ok || stat.Uid != uint32(os.Geteuid()) {
+	if !ok || stat.Uid != 0 {
 		return errors.New("invalid seed socket owner")
 	}
 	if _, err := os.Lstat(socketPath); !errors.Is(err, os.ErrNotExist) {
@@ -58,21 +59,26 @@ func run() error {
 	}
 	socketInfo, err := os.Lstat(socketPath)
 	if err != nil || socketInfo.Mode()&os.ModeSocket == 0 {
-		_ = listener.Close()
+		if closeErr := listener.Close(); closeErr != nil {
+			return errors.New("seed socket unavailable")
+		}
 		return errors.New("seed socket unavailable")
 	}
 	socketStat, ok := socketInfo.Sys().(*syscall.Stat_t)
-	if !ok || socketStat.Uid != uint32(os.Geteuid()) || socketStat.Nlink != 1 {
-		_ = listener.Close()
+	if !ok || socketStat.Uid != 0 || socketStat.Nlink != 1 {
+		if closeErr := listener.Close(); closeErr != nil {
+			return errors.New("seed socket unavailable")
+		}
 		return errors.New("seed socket unavailable")
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	var clients sync.WaitGroup
+	var proxyFailed atomic.Bool
 	acceptDone := make(chan struct{})
-	go acceptClients(ctx, listener, &clients, acceptDone)
-	command := exec.Command(seedPath) // #nosec G204 -- fixed seed helper supplied in the immutable tools image.
+	go acceptClients(ctx, listener, &clients, acceptDone, &proxyFailed)
+	command := exec.CommandContext(ctx, seedPath) // #nosec G204 -- fixed seed helper supplied in the immutable tools image.
 	command.Env = []string{}
 	command.Stdin = os.Stdin
 	command.Stdout = io.Discard
@@ -91,7 +97,7 @@ func run() error {
 	case <-time.After(5 * time.Second):
 		return errors.New("seed connections did not drain")
 	}
-	if closeErr != nil {
+	if closeErr != nil || proxyFailed.Load() {
 		return errors.New("seed socket cleanup failed")
 	}
 	if err := removeOwnedSocket(socketPath, socketInfo); err != nil {
@@ -103,7 +109,7 @@ func run() error {
 	return nil
 }
 
-func acceptClients(ctx context.Context, listener *net.UnixListener, clients *sync.WaitGroup, done chan<- struct{}) {
+func acceptClients(ctx context.Context, listener *net.UnixListener, clients *sync.WaitGroup, done chan<- struct{}, proxyFailed *atomic.Bool) {
 	defer close(done)
 	var active sync.Mutex
 	var count int
@@ -113,7 +119,9 @@ func acceptClients(ctx context.Context, listener *net.UnixListener, clients *syn
 		active.Lock()
 		defer active.Unlock()
 		for connection := range connections {
-			_ = connection.Close()
+			if err := connection.Close(); err != nil {
+				proxyFailed.Store(true)
+			}
 		}
 	}()
 	for {
@@ -124,7 +132,9 @@ func acceptClients(ctx context.Context, listener *net.UnixListener, clients *syn
 		active.Lock()
 		if count >= maxClients || ctx.Err() != nil {
 			active.Unlock()
-			_ = local.Close()
+			if err := local.Close(); err != nil {
+				proxyFailed.Store(true)
+			}
 			continue
 		}
 		count++
@@ -139,35 +149,47 @@ func acceptClients(ctx context.Context, listener *net.UnixListener, clients *syn
 				delete(connections, local)
 				active.Unlock()
 			}()
-			proxyConnection(local, database)
+			if err := proxyConnection(ctx, local, database); err != nil && ctx.Err() == nil {
+				proxyFailed.Store(true)
+			}
 		}()
 	}
 }
 
-func proxyConnection(local net.Conn, address string) {
-	defer local.Close()
-	remote, err := net.DialTimeout("tcp", address, 5*time.Second)
+func proxyConnection(ctx context.Context, local net.Conn, address string) (proxyErr error) {
+	defer func() {
+		if err := local.Close(); err != nil {
+			proxyErr = errors.Join(proxyErr, errors.New("local proxy connection close failed"))
+		}
+	}()
+	remote, err := (&net.Dialer{Timeout: 5 * time.Second}).DialContext(ctx, "tcp", address)
 	if err != nil {
-		return
+		return errors.New("scratch database connection failed")
 	}
-	defer remote.Close()
-	done := make(chan struct{}, 2)
+	defer func() {
+		if err := remote.Close(); err != nil {
+			proxyErr = errors.Join(proxyErr, errors.New("remote proxy connection close failed"))
+		}
+	}()
+	done := make(chan error, 2)
 	go func() {
-		_, _ = io.Copy(remote, local)
+		_, copyErr := io.Copy(remote, local)
+		var closeErr error
 		if half, ok := remote.(*net.TCPConn); ok {
-			_ = half.CloseWrite()
+			closeErr = half.CloseWrite()
 		}
-		done <- struct{}{}
+		done <- errors.Join(copyErr, closeErr)
 	}()
 	go func() {
-		_, _ = io.Copy(local, remote)
+		_, copyErr := io.Copy(local, remote)
+		var closeErr error
 		if half, ok := local.(*net.UnixConn); ok {
-			_ = half.CloseWrite()
+			closeErr = half.CloseWrite()
 		}
-		done <- struct{}{}
+		done <- errors.Join(copyErr, closeErr)
 	}()
-	<-done
-	<-done
+	proxyErr = errors.Join(<-done, <-done)
+	return proxyErr
 }
 
 func removeOwnedSocket(path string, expected os.FileInfo) error {
@@ -182,7 +204,7 @@ func removeOwnedSocket(path string, expected os.FileInfo) error {
 	expectedStat, expectedOK := expected.Sys().(*syscall.Stat_t)
 	if !currentOK || !expectedOK || current.Mode()&os.ModeSocket == 0 ||
 		currentStat.Dev != expectedStat.Dev || currentStat.Ino != expectedStat.Ino ||
-		currentStat.Uid != uint32(os.Geteuid()) || currentStat.Nlink != 1 {
+		currentStat.Uid != 0 || currentStat.Nlink != 1 {
 		return errors.New("seed socket ownership changed")
 	}
 	if err := unix.Unlink(path); err != nil {

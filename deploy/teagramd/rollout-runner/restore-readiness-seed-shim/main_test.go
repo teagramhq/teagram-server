@@ -1,6 +1,8 @@
 package main
 
 import (
+	"context"
+	"errors"
 	"io"
 	"net"
 	"os"
@@ -10,11 +12,16 @@ import (
 )
 
 func TestProxyConnectionRelaysUnixSocketTrafficToScratchLoopback(t *testing.T) {
-	backend, err := net.Listen("tcp", "127.0.0.1:0")
+	t.Setenv("TMPDIR", "/tmp")
+	backend, err := (&net.ListenConfig{}).Listen(context.Background(), "tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal("could not open scratch backend")
 	}
-	defer backend.Close()
+	t.Cleanup(func() {
+		if err := backend.Close(); err != nil {
+			t.Errorf("could not close scratch backend: %v", err)
+		}
+	})
 	backendDone := make(chan error, 1)
 	go func() {
 		connection, acceptErr := backend.Accept()
@@ -22,45 +29,51 @@ func TestProxyConnectionRelaysUnixSocketTrafficToScratchLoopback(t *testing.T) {
 			backendDone <- acceptErr
 			return
 		}
-		defer connection.Close()
+		var backendErr error
 		request, readErr := io.ReadAll(connection)
 		if readErr != nil {
-			backendDone <- readErr
-			return
+			backendErr = readErr
 		}
-		if string(request) != "ping" {
-			backendDone <- io.ErrUnexpectedEOF
-			return
+		if backendErr == nil && string(request) != "ping" {
+			backendErr = io.ErrUnexpectedEOF
 		}
-		_, writeErr := connection.Write([]byte("pong"))
-		backendDone <- writeErr
+		if backendErr == nil {
+			_, backendErr = connection.Write([]byte("pong"))
+		}
+		backendDone <- errors.Join(backendErr, connection.Close())
 	}()
 
-	directory, err := os.MkdirTemp("/tmp", "rr-")
-	if err != nil {
-		t.Fatal("could not create fixture directory")
-	}
-	t.Cleanup(func() { _ = os.RemoveAll(directory) })
+	directory := t.TempDir()
 	socketPath := filepath.Join(directory, "postgres.sock")
 	listener, err := net.ListenUnix("unix", &net.UnixAddr{Name: socketPath, Net: "unix"})
 	if err != nil {
 		t.Fatal("could not create fixture Unix socket: ", err)
 	}
-	defer listener.Close()
-	proxyDone := make(chan struct{})
+	t.Cleanup(func() {
+		if err := listener.Close(); err != nil {
+			t.Errorf("could not close fixture Unix socket: %v", err)
+		}
+	})
+	proxyDone := make(chan error, 1)
 	go func() {
 		connection, acceptErr := listener.AcceptUnix()
 		if acceptErr == nil {
-			proxyConnection(connection, backend.Addr().String())
+			if err := proxyConnection(context.Background(), connection, backend.Addr().String()); err != nil {
+				proxyDone <- err
+				return
+			}
+			proxyDone <- nil
 		}
-		close(proxyDone)
 	}()
 
-	client, err := net.DialTimeout("unix", socketPath, time.Second)
+	client, err := (&net.Dialer{Timeout: time.Second}).DialContext(context.Background(), "unix", socketPath)
 	if err != nil {
 		t.Fatal("could not connect to fixture Unix socket")
 	}
-	unixClient := client.(*net.UnixConn)
+	unixClient, ok := client.(*net.UnixConn)
+	if !ok {
+		t.Fatal("fixture client is not a Unix socket")
+	}
 	if _, err := unixClient.Write([]byte("ping")); err != nil {
 		t.Fatal("could not write through proxy")
 	}
@@ -83,7 +96,10 @@ func TestProxyConnectionRelaysUnixSocketTrafficToScratchLoopback(t *testing.T) {
 		t.Fatal("scratch backend did not finish")
 	}
 	select {
-	case <-proxyDone:
+	case err := <-proxyDone:
+		if err != nil {
+			t.Fatal("Unix socket proxy failed: ", err)
+		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("Unix socket proxy did not finish")
 	}

@@ -1079,6 +1079,15 @@ def load_manifest(path: Path) -> dict[str, Any]:
     return manifest
 
 
+def create_image_build_contexts(build_root: Path) -> tuple[Path, Path]:
+    build_root.mkdir(mode=0o700)
+    app_context = build_root / "app"
+    tools_context = build_root / "tools"
+    app_context.mkdir(mode=0o700)
+    tools_context.mkdir(mode=0o700)
+    return app_context, tools_context
+
+
 class Drill(Docker):
     def __init__(self, args: argparse.Namespace, run_dir: Path, manifest: dict[str, Any]) -> None:
         self.args = args
@@ -1312,10 +1321,7 @@ class Drill(Docker):
     def build_images(self) -> None:
         self.phase = "fixture_generation"
         build_root = self.run_dir / "work" / "build"
-        app_context = build_root / "app"
-        tools_context = build_root / "tools"
-        app_context.mkdir(mode=0o700)
-        tools_context.mkdir(mode=0o700)
+        app_context, tools_context = create_image_build_contexts(build_root)
         artifacts = {
             "teagramd": Path(self.args.build_dir) / "teagramd",
             "launcher": Path(self.args.build_dir) / "restore-readiness-launcher",

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"strings"
 	"testing"
 )
 
@@ -40,9 +41,5 @@ func TestCreateUserConfirmationMustExactlyBindTheSyntheticName(t *testing.T) {
 }
 
 func repeatHex(pair string, count int) string {
-	value := ""
-	for range count {
-		value += pair
-	}
-	return value
+	return strings.Repeat(pair, count)
 }
