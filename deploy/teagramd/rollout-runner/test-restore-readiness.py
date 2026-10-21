@@ -189,53 +189,56 @@ class RestoreReadinessContractTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             RESTORE_READINESS.malformed_sql_fixture("external input")
 
-    def test_malformed_sql_is_sent_through_restore_stream_and_failure_is_sanitized(self) -> None:
+    def test_malformed_sql_stream_rejects_unexpected_success_and_reports_failure(self) -> None:
         token = "a" * 32
         fixture = RESTORE_READINESS.malformed_sql_fixture(token)
-        with tempfile.TemporaryDirectory(prefix="rr-malformed-restore-") as temporary_directory:
-            capture = Path(temporary_directory) / "restore-input.sql"
-            executable = Path(temporary_directory) / "docker-fixture"
-            executable.write_text(
-                "#!/usr/bin/python3\n"
-                "import pathlib, sys\n"
-                "payload = sys.stdin.buffer.read()\n"
-                f"pathlib.Path({str(capture)!r}).write_bytes(payload)\n"
-                f"raise SystemExit(1 if payload == {fixture.encode()!r} else 0)\n",
-                encoding="utf-8",
-            )
-            executable.chmod(0o755)
+        for consumer_status, expected_category in ((0, "schema_failure"), (1, "restore_failure")):
+            with self.subTest(consumer_status=consumer_status), tempfile.TemporaryDirectory(
+                prefix="rr-malformed-restore-"
+            ) as temporary_directory:
+                capture = Path(temporary_directory) / "restore-input.sql"
+                executable = Path(temporary_directory) / "docker-fixture"
+                executable.write_text(
+                    "#!/usr/bin/python3\n"
+                    "import pathlib, sys\n"
+                    "payload = sys.stdin.buffer.read()\n"
+                    f"pathlib.Path({str(capture)!r}).write_bytes(payload)\n"
+                    f"raise SystemExit({consumer_status} if payload == {fixture.encode()!r} else 0)\n",
+                    encoding="utf-8",
+                )
+                executable.chmod(0o755)
 
-            drill = object.__new__(RESTORE_READINESS.Drill)
-            drill.executable = str(executable)
-            drill.environment = {"PATH": "/usr/bin:/bin"}
-            drill.manifest = {"work_deadline": time.monotonic() + 5, "processes": []}
-            drill.save = lambda: None
-            drill.attest_container = lambda *_args: {}
-            drill.sockets = {"target": Path(temporary_directory)}
-            drill.files = {"target_tool_env": Path(temporary_directory) / "target-env"}
-            client_specs: list[dict[str, Any]] = []
+                drill = object.__new__(RESTORE_READINESS.Drill)
+                drill.executable = str(executable)
+                drill.environment = {"PATH": "/usr/bin:/bin"}
+                drill.manifest = {"work_deadline": time.monotonic() + 5, "processes": []}
+                drill.save = lambda: None
+                drill.attest_container = lambda *_args: {}
+                drill.sockets = {"target": Path(temporary_directory)}
+                drill.files = {"target_tool_env": Path(temporary_directory) / "target-env"}
+                client_specs: list[dict[str, Any]] = []
 
-            def create_client(_image: str, **kwargs: Any) -> dict[str, str]:
-                client_specs.append(kwargs)
-                return {"id": "target"}
+                def create_client(_image: str, **kwargs: Any) -> dict[str, str]:
+                    client_specs.append(kwargs)
+                    return {"id": "target"}
 
-            drill.image_container = create_client
+                drill.image_container = create_client
 
-            with self.assertRaises(RESTORE_READINESS.DrillFailure) as failure:
-                drill.restore_fixture({"id": "source"}, {"id": "database"}, malformed_sql=fixture)
+                with self.assertRaises(RESTORE_READINESS.DrillFailure) as failure:
+                    drill.restore_fixture({"id": "source"}, {"id": "database"}, malformed_sql=fixture)
 
-            self.assertEqual(failure.exception.phase, "restore")
-            self.assertEqual(failure.exception.category, "restore_failure")
-            self.assertEqual(capture.read_bytes(), fixture.encode())
-            self.assertEqual(len(client_specs), 1)
-            self.assertEqual(client_specs[0]["entrypoint"], "psql")
-            self.assertEqual(client_specs[0]["command_args"], ["--no-psqlrc", "--set=ON_ERROR_STOP=1", "--dbname=teagram"])
-            self.assertEqual(drill.manifest["processes"], [])
-            report = RESTORE_READINESS.report_document("restore", failure.exception.category, "verified", 1)
-            self.assertEqual(report["result"], "fail")
-            self.assertEqual(report["exit"], 1)
-            self.assertEqual(report["cleanup"], "verified")
-            self.assertNotIn(token, json.dumps(report))
+                self.assertEqual(failure.exception.phase, "restore")
+                self.assertEqual(failure.exception.category, expected_category)
+                self.assertEqual(capture.read_bytes(), fixture.encode())
+                self.assertEqual(len(client_specs), 1)
+                self.assertEqual(client_specs[0]["entrypoint"], "psql")
+                self.assertEqual(client_specs[0]["command_args"], ["--no-psqlrc", "--set=ON_ERROR_STOP=1", "--dbname=teagram"])
+                self.assertEqual(drill.manifest["processes"], [])
+                report = RESTORE_READINESS.report_document("restore", failure.exception.category, "verified", 1)
+                self.assertEqual(report["result"], "fail")
+                self.assertEqual(report["exit"], 1)
+                self.assertEqual(report["cleanup"], "verified")
+                self.assertNotIn(token, json.dumps(report))
 
     def test_image_build_contexts_create_the_missing_build_directory(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
@@ -738,6 +741,63 @@ class RestoreReadinessContractTests(unittest.TestCase):
         self.assertEqual(report["result"], "fail")
         self.assertEqual(report["cleanup"], "unverified")
         self.assertNotIn("private-marker", output.getvalue())
+
+    def test_recovery_refreshes_an_expired_cleanup_deadline_after_lock(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="rr-recovery-deadline-") as directory:
+            lock_path = Path(directory) / "lock"
+            lock_path.write_bytes(b"")
+            descriptor = RESTORE_READINESS.os.open(lock_path, RESTORE_READINESS.os.O_RDWR)
+            lock_info = RESTORE_READINESS.os.fstat(descriptor)
+            lock_record = {"device": lock_info.st_dev, "inode": lock_info.st_ino}
+            original_deadline = time.monotonic() - 1
+            manifest = {"global_lock": lock_record, "cleanup_deadline": original_deadline}
+            observed: dict[str, float] = {}
+
+            class RecoveryDrill:
+                def __init__(self, _args: Any, _run_dir: Path, recovered_manifest: dict[str, Any]) -> None:
+                    self.manifest = recovered_manifest
+
+                def save(self) -> None:
+                    observed["saved_deadline"] = self.manifest["cleanup_deadline"]
+
+                def cleanup_resources(self) -> bool:
+                    observed["cleanup_deadline"] = self.manifest["cleanup_deadline"]
+                    return True
+
+            def acquire_lock() -> tuple[int, dict[str, int]]:
+                self.assertEqual(manifest["cleanup_deadline"], original_deadline)
+                return descriptor, lock_record
+
+            def remove_run(drill: Any, deadline: float) -> bool:
+                observed["remove_deadline"] = deadline
+                self.assertEqual(drill.manifest["cleanup_deadline"], deadline)
+                return True
+
+            started = time.monotonic()
+            output = io.StringIO()
+            with (
+                patch.object(RESTORE_READINESS.os, "geteuid", return_value=0),
+                patch.object(RESTORE_READINESS, "load_manifest", return_value=manifest),
+                patch.object(RESTORE_READINESS, "open_global_lock", side_effect=acquire_lock),
+                patch.object(RESTORE_READINESS, "make_runtime_args", return_value=None),
+                patch.object(RESTORE_READINESS, "Drill", RecoveryDrill),
+                patch.object(RESTORE_READINESS, "remove_finished_run", side_effect=remove_run),
+                redirect_stdout(output),
+            ):
+                status = RESTORE_READINESS.recover(Path(directory) / "ownership.json")
+
+            refreshed_deadline = manifest["cleanup_deadline"]
+            self.assertEqual(status, 1)
+            self.assertGreater(refreshed_deadline, time.monotonic())
+            self.assertGreater(refreshed_deadline, original_deadline)
+            self.assertLessEqual(refreshed_deadline, started + RESTORE_READINESS.CLEANUP_SECONDS + 0.1)
+            self.assertEqual(observed, {
+                "saved_deadline": refreshed_deadline,
+                "cleanup_deadline": refreshed_deadline,
+                "remove_deadline": refreshed_deadline,
+            })
+            report = json.loads(output.getvalue())
+            self.assertEqual(report["cleanup"], "verified")
 
 
 if __name__ == "__main__":

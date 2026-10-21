@@ -2652,7 +2652,10 @@ class Drill(Docker):
             consumer_input=malformed_sql.encode("utf-8") if malformed_sql is not None else None,
         )
         if malformed_sql is not None:
-            raise DrillFailure(self.phase, "restore_failure")
+            # A successful consumer means the malformed stream was accepted.
+            # Keep this distinct from a rejected restore so the shell gate cannot
+            # mistake swallowed stream errors for the expected drill result.
+            raise DrillFailure(self.phase, "schema_failure")
         if source_client is None:
             raise DrillFailure(self.phase, "restore_failure")
         source_state = self.attest_container(source_client, self.phase).get("State") or {}
@@ -4080,10 +4083,12 @@ def recover(manifest_path: Path) -> int:
         if lock is not None:
             descriptor, _ = lock
             if lock[1] == manifest["global_lock"]:
+                manifest["cleanup_deadline"] = time.monotonic() + CLEANUP_SECONDS
                 drill = Drill(make_runtime_args(manifest), manifest_path.parent, manifest)
+                drill.save()
                 clean = drill.cleanup_resources()
                 if clean:
-                    if remove_finished_run(drill, manifest["cleanup_deadline"]):
+                    if remove_finished_run(drill, drill.manifest["cleanup_deadline"]):
                         print(json.dumps(report_document("cleanup", "cleanup_failure", "verified", 0), separators=(",", ":")))
                         return 1
                     drill.manifest["cleanup_verified"] = False
