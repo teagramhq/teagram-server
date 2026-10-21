@@ -73,10 +73,16 @@ function isPlainObject(value) {
 }
 
 function isValidWssDiagnostic(value) {
+  const fixedDiagnostics = [
+    "no-target", "observation-malformed", "untracked-handshake", "worker-unobservable", "worker-pending",
+  ];
+  const socketDiagnostic = typeof value?.wss_diagnostic === "string" &&
+    /^socket-[1-8]-(?:target-mismatch|no-handshake|handshake-not-101|duplicate-handshake)$/u
+      .test(value.wss_diagnostic);
   if (!exactKeys(value, [
     "wss_diagnostic", "wss_targets", "wss_handshakes", "wss_target_match", "wss_status",
-  ]) || !["ambiguous", "no-target", "target-mismatch", "no-handshake", "handshake-not-101"]
-    .includes(value.wss_diagnostic) || ![0, 1, 2].includes(value.wss_targets) ||
+  ]) || !(fixedDiagnostics.includes(value.wss_diagnostic) || socketDiagnostic) ||
+      ![0, 1, 2].includes(value.wss_targets) ||
       ![0, 1, 2].includes(value.wss_handshakes) || typeof value.wss_target_match !== "boolean" ||
       !Number.isInteger(value.wss_status) || (value.wss_status !== 0 &&
         (value.wss_status < 100 || value.wss_status > 599))) {
@@ -84,25 +90,30 @@ function isValidWssDiagnostic(value) {
   }
 
   switch (value.wss_diagnostic) {
-    case "ambiguous":
+    case "observation-malformed":
+    case "untracked-handshake":
+    case "worker-unobservable":
+    case "worker-pending":
       return value.wss_target_match === false && value.wss_status === 0;
     case "no-target":
       return value.wss_targets === 0 && value.wss_handshakes === 0 &&
         value.wss_target_match === false && value.wss_status === 0;
-    case "target-mismatch":
-      return (value.wss_targets === 1 || value.wss_targets === 2) &&
-        (value.wss_handshakes === 0 || value.wss_handshakes === value.wss_targets) &&
-        value.wss_target_match === false &&
-        (value.wss_handshakes === 0 ? value.wss_status === 0 : value.wss_status >= 100);
-    case "no-handshake":
-      return (value.wss_targets === 1 || value.wss_targets === 2) && value.wss_handshakes === 0 &&
-        value.wss_target_match === true && value.wss_status === 0;
-    case "handshake-not-101":
-      return (value.wss_targets === 1 || value.wss_targets === 2) &&
-        value.wss_handshakes === value.wss_targets && value.wss_target_match === true &&
-        value.wss_status >= 100 && value.wss_status !== 101;
     default:
-      return false;
+      if (value.wss_targets === 0) return false;
+      if (value.wss_diagnostic.endsWith("-target-mismatch")) {
+        return value.wss_target_match === false &&
+          (value.wss_status === 0 || (value.wss_handshakes >= 1 && value.wss_status >= 100));
+      }
+      if (value.wss_diagnostic.endsWith("-no-handshake")) {
+        return value.wss_status === 0 && (value.wss_targets !== 1 ||
+          (value.wss_handshakes === 0 && value.wss_target_match));
+      }
+      if (value.wss_diagnostic.endsWith("-handshake-not-101")) {
+        return value.wss_handshakes >= 1 && value.wss_status >= 100 && value.wss_status !== 101 &&
+          (value.wss_targets !== 1 || value.wss_target_match);
+      }
+      return value.wss_handshakes === 2 && value.wss_status >= 100 &&
+        (value.wss_targets !== 1 || value.wss_target_match);
   }
 }
 
@@ -123,36 +134,52 @@ export function createWebSocketObservation() {
   let handshakeCount = 0;
   let pendingWorkers = 0;
   let malformed = false;
+  let workerUnobservable = false;
   let closed = false;
 
-  function isAmbiguous() {
-    if (malformed || orphanCount > 0 || (closed && pendingWorkers > 0)) return true;
-    const entries = [...connections.values()];
-    if (entries.some((connection) => connection.responses >= 2)) return true;
-    if (entries.length < 2) return false;
-    const tuples = new Set(entries.map((connection) => JSON.stringify([
-      connection.match,
-      connection.responses === 1,
-      connection.responses === 1 ? connection.status : 0,
-    ])));
-    return tuples.size > 1;
+  function hasObservedFailure() {
+    if (malformed || orphanCount > 0 || workerUnobservable || (closed && pendingWorkers > 0)) return true;
+    return [...connections.values()].some((connection) => !connection.match || connection.responses >= 2 ||
+      (connection.responses === 1 && connection.status !== 101));
   }
 
   function diagnostic() {
     const targets = connections.size;
     const handshakes = handshakeCount;
-    if (isAmbiguous()) return diagnosticResult("ambiguous", targets, handshakes, false, 0);
-    if (targets === 0) return diagnosticResult("no-target", targets, handshakes, false, 0);
-
     const entries = [...connections.values()];
     const targetMatch = entries.every((connection) => connection.match);
-    const allResponded = entries.every((connection) => connection.responses === 1);
-    const noneResponded = entries.every((connection) => connection.responses === 0);
-    const status = allResponded ? entries[0].status : 0;
-    if (!targetMatch) return diagnosticResult("target-mismatch", targets, handshakes, false, status);
-    if (noneResponded) return diagnosticResult("no-handshake", targets, handshakes, true, 0);
-    if (!allResponded) return diagnosticResult("ambiguous", targets, handshakes, false, 0);
-    if (status !== 101) return diagnosticResult("handshake-not-101", targets, handshakes, true, status);
+    if (malformed) return diagnosticResult("observation-malformed", targets, handshakes, false, 0);
+    if (orphanCount > 0) return diagnosticResult("untracked-handshake", targets, handshakes, false, 0);
+    if (workerUnobservable) return diagnosticResult("worker-unobservable", targets, handshakes, false, 0);
+    if (closed && pendingWorkers > 0) return diagnosticResult("worker-pending", targets, handshakes, false, 0);
+    if (targets === 0) return diagnosticResult("no-target", targets, handshakes, false, 0);
+
+    for (const [index, connection] of entries.entries()) {
+      if (!connection.match) {
+        const socket = index + 1;
+        return diagnosticResult(`socket-${socket}-target-mismatch`, targets, handshakes, targetMatch,
+          connection.responses > 0 ? connection.status : 0);
+      }
+    }
+    for (const [index, connection] of entries.entries()) {
+      const socket = index + 1;
+      if (connection.responses > 1) {
+        return diagnosticResult(`socket-${socket}-duplicate-handshake`, targets, handshakes, targetMatch,
+          connection.status);
+      }
+    }
+    for (const [index, connection] of entries.entries()) {
+      const socket = index + 1;
+      if (connection.responses === 1 && connection.status !== 101) {
+        return diagnosticResult(`socket-${socket}-handshake-not-101`, targets, handshakes, targetMatch,
+          connection.status);
+      }
+    }
+    for (const [index, connection] of entries.entries()) {
+      if (connection.responses === 0) {
+        return diagnosticResult(`socket-${index + 1}-no-handshake`, targets, handshakes, targetMatch, 0);
+      }
+    }
     return null;
   }
 
@@ -223,7 +250,7 @@ export function createWebSocketObservation() {
       if (connection.responses === 1) connection.status = status;
     },
     workerUnobservable() {
-      if (!closed) malformed = true;
+      if (!closed) workerUnobservable = true;
     },
     workerAttached() {
       if (closed) return () => {};
@@ -233,11 +260,11 @@ export function createWebSocketObservation() {
         if (closed || finished) return;
         finished = true;
         pendingWorkers -= 1;
-        if (observable !== true) malformed = true;
+        if (observable !== true) workerUnobservable = true;
       };
     },
     isSettled() {
-      if (closed || isAmbiguous()) return true;
+      if (closed || hasObservedFailure()) return true;
       return pendingWorkers === 0 && connections.size > 0 &&
         [...connections.values()].every((connection) => connection.responses === 1);
     },

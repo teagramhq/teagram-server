@@ -75,23 +75,25 @@ test("a successful sign-in logs out the current session before finish returns", 
   });
 });
 
-// teagram-web opens one client socket per account slot on an unauthenticated load.
-const WSS_CONNECTION_CEILING = 4;
+// teagram-web opens four account-slot sockets on load and reconnects the
+// logged-out slot once before the acceptance context is torn down.
+const WSS_ACCOUNT_SLOT_COUNT = 4;
+const WSS_CONNECTION_CEILING = WSS_ACCOUNT_SLOT_COUNT + 1;
 
-test("a sign-in over the client's socket ceiling succeeds", async () => {
+test("sign-in with all four account-slot sockets succeeds", async () => {
   const progress = createProgress();
   advanceTo(progress, "signed-in");
-  for (let index = 1; index < WSS_CONNECTION_CEILING; index += 1) progress.observeWssConnection();
+  for (let index = 1; index < WSS_ACCOUNT_SLOT_COUNT; index += 1) progress.observeWssConnection();
   const result = await progress.finish(async () => null);
 
-  assert.equal(result.wssConnections, WSS_CONNECTION_CEILING);
+  assert.equal(result.wssConnections, WSS_ACCOUNT_SLOT_COUNT);
   assert.equal(result.ok, true);
 });
 
-test("a WSS connection above the ceiling during logout makes the run unsuccessful", async () => {
+test("one logout reconnect after the four account-slot sockets succeeds", async () => {
   const progress = createProgress();
   advanceTo(progress, "signed-in");
-  for (let index = 1; index < WSS_CONNECTION_CEILING; index += 1) progress.observeWssConnection();
+  for (let index = 1; index < WSS_ACCOUNT_SLOT_COUNT; index += 1) progress.observeWssConnection();
   const result = await progress.finish(async (method) => {
     assert.equal(method, "auth.logOut");
     await Promise.resolve();
@@ -101,10 +103,22 @@ test("a WSS connection above the ceiling during logout makes the run unsuccessfu
   assert.equal(result.phase, "signed-in");
   assert.equal(result.outcome, "ok");
   assert.equal(result.logout, "ok");
-  assert.equal(result.wssConnections, WSS_CONNECTION_CEILING + 1);
-  assert.equal(result.ok, false);
+  assert.equal(result.wssConnections, WSS_CONNECTION_CEILING);
+  assert.equal(result.ok, true);
   assert.equal(progress.observeWssConnection(), false);
-  assert.equal(result.wssConnections, WSS_CONNECTION_CEILING + 1);
+  assert.equal(result.wssConnections, WSS_CONNECTION_CEILING);
+});
+
+test("a fifth socket before logout still fails the four-slot proof", async () => {
+  const progress = createProgress();
+  advanceTo(progress, "signed-in");
+  for (let index = 1; index < WSS_ACCOUNT_SLOT_COUNT; index += 1) progress.observeWssConnection();
+  assert.equal(progress.observeWssConnection(), false);
+  const result = await progress.finish(async () => null);
+
+  assert.equal(result.logout, "ok");
+  assert.equal(result.wssConnections, WSS_CONNECTION_CEILING);
+  assert.equal(result.ok, false);
 });
 
 test("WSS connection counts clamp one above the ceiling and an invalid event cannot advance the phase", async () => {

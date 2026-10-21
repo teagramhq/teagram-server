@@ -358,10 +358,43 @@ function assertWssError(result, expected) {
   return JSON.parse(line);
 }
 
+export function assertSocketTargetMismatch(result, socket, targets) {
+  assert.equal(result.error?.code, "websocket-not-ready", "result.error?.code");
+  const diagnostic = result.error.diagnostic;
+  assert.equal(diagnostic.wss_diagnostic, `socket-${socket}-target-mismatch`, "wss_diagnostic");
+  assert.equal(diagnostic.wss_targets, targets, "wss_targets");
+  assert.equal(diagnostic.wss_target_match, false, "wss_target_match");
+  assert.ok(diagnostic.wss_status === 0 || (diagnostic.wss_status >= 100 && diagnostic.wss_status <= 599),
+    "wss_status is zero or an observed response status");
+  if (diagnostic.wss_status !== 0) assert.ok(diagnostic.wss_handshakes >= 1, "wss_handshakes includes the response");
+  const line = errorLine(result);
+  assertNoDiagnosticLeaks(line);
+  return JSON.parse(line);
+}
+
+export function assertMixedStatusError(result) {
+  assert.equal(result.error?.code, "websocket-not-ready", "mixedStatus.error?.code");
+  const diagnostic = result.error.diagnostic;
+  assert.equal(diagnostic.wss_targets, 2, "mixedStatus.wss_targets");
+  assert.equal(diagnostic.wss_target_match, true, "mixedStatus.wss_target_match");
+  const failure = /^socket-([12])-(no-handshake|handshake-not-101)$/u.exec(diagnostic.wss_diagnostic);
+  assert.ok(failure, `mixedStatus.wss_diagnostic is a failed socket among two targets (observed ${diagnostic.wss_diagnostic})`);
+  if (failure[2] === "no-handshake") {
+    assert.equal(diagnostic.wss_handshakes, 1, "mixedStatus.wss_handshakes");
+    assert.equal(diagnostic.wss_status, 0, "mixedStatus.wss_status");
+  } else {
+    assert.equal(diagnostic.wss_handshakes, 2, "mixedStatus.wss_handshakes");
+    assert.equal(diagnostic.wss_status, 503, "mixedStatus.wss_status");
+  }
+  const line = errorLine(result);
+  assertNoDiagnosticLeaks(line);
+  return JSON.parse(line);
+}
+
 export function assertSilentSharedWorkerError(result) {
-  const isUnobservable = result.error?.diagnostic?.wss_diagnostic === "ambiguous";
+  const isUnobservable = result.error?.diagnostic?.wss_diagnostic === "worker-unobservable";
   return assertWssError(result, {
-    wss_diagnostic: isUnobservable ? "ambiguous" : "no-target",
+    wss_diagnostic: isUnobservable ? "worker-unobservable" : "no-target",
     wss_targets: 0,
     wss_handshakes: 0,
     wss_target_match: false,
@@ -436,18 +469,19 @@ async function main() {
     assert.equal(failedWss.error?.code, "websocket-not-ready", "failedWss.error?.code");
     assert.equal(failedWss.upgrades, 1, "failedWss.upgrades");
     const failedWssLine = errorLine(failedWss);
-    const noHandshakeLine = "{\"status\":\"error\",\"code\":\"websocket-not-ready\",\"wss_diagnostic\":\"no-handshake\",\"wss_targets\":1,\"wss_handshakes\":0,\"wss_target_match\":true,\"wss_status\":0}";
-    const handshakeNot101Line = "{\"status\":\"error\",\"code\":\"websocket-not-ready\",\"wss_diagnostic\":\"handshake-not-101\",\"wss_targets\":1,\"wss_handshakes\":1,\"wss_target_match\":true,\"wss_status\":503}";
+    const noHandshakeLine = "{\"status\":\"error\",\"code\":\"websocket-not-ready\",\"wss_diagnostic\":\"socket-1-no-handshake\",\"wss_targets\":1,\"wss_handshakes\":0,\"wss_target_match\":true,\"wss_status\":0}";
+    const handshakeNot101Line = "{\"status\":\"error\",\"code\":\"websocket-not-ready\",\"wss_diagnostic\":\"socket-1-handshake-not-101\",\"wss_targets\":1,\"wss_handshakes\":1,\"wss_target_match\":true,\"wss_status\":503}";
     assert.ok([noHandshakeLine, handshakeNot101Line].includes(failedWssLine), `failedWssLine must equal ${noHandshakeLine} or ${handshakeNot101Line}; observed ${failedWssLine}`);
     const failedWssDiagnostic = JSON.parse(failedWssLine);
     const failedWssHandshakeEventAvailable = failedWssDiagnostic.wss_handshakes === 1;
-    assert.equal(failedWssHandshakeEventAvailable, failedWssDiagnostic.wss_diagnostic === "handshake-not-101", "failedWssHandshakeEventAvailable");
+    assert.equal(failedWssHandshakeEventAvailable,
+      failedWssDiagnostic.wss_diagnostic === "socket-1-handshake-not-101", "failedWssHandshakeEventAvailable");
     const architecture = process.arch === "arm64" ? "arm64" : process.arch === "x64" ? "amd64" : "unknown";
     if (architecture === "arm64") assert.equal(failedWssLine, noHandshakeLine, "failedWssLine");
 
     const pathMismatch = await runScenario(directory, "path-mismatch", certificate);
     const pathMismatchDiagnostic = assertWssError(pathMismatch, {
-      wss_diagnostic: "target-mismatch",
+      wss_diagnostic: "socket-1-target-mismatch",
       wss_targets: 1,
       wss_handshakes: 1,
       wss_target_match: false,
@@ -456,7 +490,7 @@ async function main() {
 
     const queryMismatch = await runScenario(directory, "query-mismatch", certificate);
     const queryMismatchDiagnostic = assertWssError(queryMismatch, {
-      wss_diagnostic: "target-mismatch",
+      wss_diagnostic: "socket-1-target-mismatch",
       wss_targets: 1,
       wss_handshakes: 1,
       wss_target_match: false,
@@ -465,7 +499,7 @@ async function main() {
 
     const heldWss = await runScenario(directory, "held-wss", certificate);
     const heldWssDiagnostic = assertWssError(heldWss, {
-      wss_diagnostic: "no-handshake",
+      wss_diagnostic: "socket-1-no-handshake",
       wss_targets: 1,
       wss_handshakes: 0,
       wss_target_match: true,
@@ -474,7 +508,7 @@ async function main() {
 
     const destroyedWss = await runScenario(directory, "destroyed-wss", certificate);
     const destroyedWssDiagnostic = assertWssError(destroyedWss, {
-      wss_diagnostic: "no-handshake",
+      wss_diagnostic: "socket-1-no-handshake",
       wss_targets: 1,
       wss_handshakes: 0,
       wss_target_match: true,
@@ -482,22 +516,11 @@ async function main() {
     });
 
     const mixedStatus = await runScenario(directory, "mixed-status", certificate);
-    const mixedStatusDiagnostic = assertWssError(mixedStatus, {
-      wss_diagnostic: "ambiguous",
-      wss_targets: 2,
-      wss_handshakes: 1,
-      wss_target_match: false,
-      wss_status: 0,
-    });
+    assert.equal(mixedStatus.upgrades, 2, "mixedStatus.upgrades");
+    const mixedStatusDiagnostic = assertMixedStatusError(mixedStatus);
 
     const mixedTarget = await runScenario(directory, "mixed-target", certificate);
-    const mixedTargetDiagnostic = assertWssError(mixedTarget, {
-      wss_diagnostic: "ambiguous",
-      wss_targets: 2,
-      wss_handshakes: 2,
-      wss_target_match: false,
-      wss_status: 0,
-    });
+    const mixedTargetDiagnostic = assertSocketTargetMismatch(mixedTarget, 2, 2);
 
     const sharedWorker = await runScenario(directory, "shared-worker", certificate);
     assert.equal(sharedWorker.result?.status, "ready", "sharedWorker.result?.status");
@@ -515,17 +538,11 @@ async function main() {
     assert.equal(nestedWorker.upgrades, 1, "nestedWorker.upgrades");
 
     const nestedWorkerMismatch = await runScenario(directory, "nested-worker-mismatch", certificate);
-    const nestedWorkerMismatchDiagnostic = assertWssError(nestedWorkerMismatch, {
-      wss_diagnostic: "ambiguous",
-      wss_targets: 2,
-      wss_handshakes: 2,
-      wss_target_match: false,
-      wss_status: 0,
-    });
+    const nestedWorkerMismatchDiagnostic = assertSocketTargetMismatch(nestedWorkerMismatch, 2, 2);
 
     const sharedWorkerMismatch = await runScenario(directory, "shared-worker-mismatch", certificate);
     const sharedWorkerMismatchDiagnostic = assertWssError(sharedWorkerMismatch, {
-      wss_diagnostic: "target-mismatch",
+      wss_diagnostic: "socket-1-target-mismatch",
       wss_targets: 1,
       wss_handshakes: 1,
       wss_target_match: false,

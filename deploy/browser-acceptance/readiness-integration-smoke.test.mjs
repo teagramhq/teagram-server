@@ -1,11 +1,73 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { assertSilentSharedWorkerError, formatSmokeFailure } from "./readiness-integration-smoke.mjs";
+import {
+  assertMixedStatusError,
+  assertSilentSharedWorkerError,
+  assertSocketTargetMismatch,
+  formatSmokeFailure,
+} from "./readiness-integration-smoke.mjs";
 
 function silentSharedWorkerResult(diagnostic) {
   return { error: { code: "websocket-not-ready", diagnostic } };
 }
+
+test("mixed status diagnostics allow browser socket order to differ from upgrade order", () => {
+  for (const [socket, failure] of [
+    [1, "no-handshake"],
+    [2, "no-handshake"],
+    [1, "handshake-not-101"],
+    [2, "handshake-not-101"],
+  ]) {
+    const noHandshake = failure === "no-handshake";
+    const result = assertMixedStatusError(silentSharedWorkerResult({
+      wss_diagnostic: `socket-${socket}-${failure}`,
+      wss_targets: 2,
+      wss_handshakes: noHandshake ? 1 : 2,
+      wss_target_match: true,
+      wss_status: noHandshake ? 0 : 503,
+    }));
+    assert.equal(result.wss_diagnostic, `socket-${socket}-${failure}`);
+  }
+
+  assert.throws(() => assertMixedStatusError(silentSharedWorkerResult({
+    wss_diagnostic: "socket-1-no-handshake",
+    wss_targets: 2,
+    wss_handshakes: 0,
+    wss_target_match: true,
+    wss_status: 0,
+  })));
+});
+
+test("mixed target diagnostics identify the mismatched socket with either response timing", () => {
+  for (const diagnostic of [
+    {
+      wss_diagnostic: "socket-2-target-mismatch",
+      wss_targets: 2,
+      wss_handshakes: 1,
+      wss_target_match: false,
+      wss_status: 0,
+    },
+    {
+      wss_diagnostic: "socket-2-target-mismatch",
+      wss_targets: 2,
+      wss_handshakes: 2,
+      wss_target_match: false,
+      wss_status: 101,
+    },
+  ]) {
+    assert.equal(assertSocketTargetMismatch(silentSharedWorkerResult(diagnostic), 2, 2).wss_diagnostic,
+      "socket-2-target-mismatch");
+  }
+
+  assert.throws(() => assertSocketTargetMismatch(silentSharedWorkerResult({
+    wss_diagnostic: "socket-1-no-handshake",
+    wss_targets: 2,
+    wss_handshakes: 1,
+    wss_target_match: false,
+    wss_status: 0,
+  }), 2, 2));
+});
 
 test("a silent SharedWorker accepts either no target or a safe unobservable result", () => {
   const noTarget = assertSilentSharedWorkerError(silentSharedWorkerResult({
@@ -18,18 +80,18 @@ test("a silent SharedWorker accepts either no target or a safe unobservable resu
   assert.equal(noTarget.wss_diagnostic, "no-target");
 
   const unobservable = assertSilentSharedWorkerError(silentSharedWorkerResult({
-    wss_diagnostic: "ambiguous",
+    wss_diagnostic: "worker-unobservable",
     wss_targets: 0,
     wss_handshakes: 0,
     wss_target_match: false,
     wss_status: 0,
   }));
-  assert.equal(unobservable.wss_diagnostic, "ambiguous");
+  assert.equal(unobservable.wss_diagnostic, "worker-unobservable");
 });
 
 test("a silent SharedWorker rejects any observed WebSocket target", () => {
   assert.throws(() => assertSilentSharedWorkerError(silentSharedWorkerResult({
-    wss_diagnostic: "ambiguous",
+    wss_diagnostic: "socket-1-no-handshake",
     wss_targets: 1,
     wss_handshakes: 0,
     wss_target_match: false,

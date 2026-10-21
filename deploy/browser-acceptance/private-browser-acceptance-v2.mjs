@@ -4,15 +4,13 @@ import {mkdtemp, rm} from "node:fs/promises";
 import {statfsSync} from "node:fs";
 import {join, resolve} from "node:path";
 import {fileURLToPath, pathToFileURL} from "node:url";
+import {WSS_ACCOUNT_SLOT_CEILING, WSS_CONNECTION_CEILING} from "./acceptance-result.mjs";
 
 const TARGET_HOST = "teagram.tailaa4918.ts.net";
 const PROXY_BYPASS_RULE = "<-loopback>";
 const PREFLIGHT_READY = "browser acceptance preflight ready";
 const ACCEPTANCE_FAILED = "browser acceptance failed";
-// teagram-web keeps four account slots in its MTProto SharedWorker. On an
-// unauthenticated load each slot opens one client socket to its base DC and
-// nothing else, so a healthy load opens at most this many sockets.
-export const WSS_CONNECTION_CEILING = 4;
+export {WSS_CONNECTION_CEILING};
 const REQUIRED_CHROMIUM_ARGS = [
   "--disable-background-networking",
   "--disable-crash-reporter",
@@ -917,8 +915,7 @@ async function makeWssAudit(contextInfo, progress) {
         return;
       }
       if (connections.size >= WSS_CONNECTION_CEILING) {
-        // The audit is not validated again after sign-in, so a socket above the
-        // ceiling opened during logout must still reach the result.
+        // Keep one overflow event in the count so a sixth opening fails the result.
         malformed = true;
         progress.observeWssConnection();
         return;
@@ -930,7 +927,7 @@ async function makeWssAudit(contextInfo, progress) {
         malformed = true;
       }
       connections.set(params.requestId, {matches, responses: 0, status: 0});
-      progress.observeWssConnection();
+      if (!progress.observeWssConnection()) malformed = true;
     },
     handshakeResponse(params) {
       if (!isRecord(params) || typeof params.requestId !== "string" || !isRecord(params.response) ||
@@ -976,12 +973,20 @@ async function makeWssAudit(contextInfo, progress) {
     },
     validate() {
       const entries = [...connections.values()];
-      if (malformed || pendingWorkers !== 0 || entries.length < 1 || entries.length > WSS_CONNECTION_CEILING ||
+      if (malformed || pendingWorkers !== 0 || entries.length < 1 || entries.length > WSS_ACCOUNT_SLOT_CEILING ||
           handshakeCount !== entries.length || entries.some((item) => !item.matches ||
             item.responses !== 1 || item.status !== 101)) {
         fail("websocket-not-ready");
       }
       return {connectionCount: entries.length, status101: true};
+    },
+    validateAfterLogout() {
+      const entries = [...connections.values()];
+      if (malformed || pendingWorkers !== 0 || entries.length < 1 || entries.length > WSS_CONNECTION_CEILING ||
+          handshakeCount > entries.length || entries.some((item) => !item.matches || item.responses > 1 ||
+            (item.responses === 1 && item.status !== 101))) {
+        fail("websocket-not-ready");
+      }
     },
   };
 }
@@ -1401,7 +1406,11 @@ export async function performAcceptance(prepared, credentials) {
     contextInfo.wssAudit.validate();
     if (tracker.websocketMismatch) fail("endpoint-mismatch");
     logoutStarted = true;
-    return await logoutWithProgress(prepared, state, progress);
+    const result = await logoutWithProgress(prepared, state, progress);
+    if (result.logout === "ok" && typeof contextInfo.wssAudit.validateAfterLogout === "function") {
+      contextInfo.wssAudit.validateAfterLogout();
+    }
+    return result;
   } catch (error) {
     latchQaFailure(state, safeFailureCode(error));
     if (error instanceof AcceptanceFailure && error.code === "authentication-failed-once" &&
