@@ -25,8 +25,9 @@ from pathlib import Path
 from typing import Any
 
 
-SOURCE_IMAGE = "ghcr.io/teagramhq/teagram-server-postgres:16-alpine@sha256:721873c34ceb9f8d8fc265984940dc982404c105f19ad51be9fdc5970a6080ea"
-RESTORE_IMAGE = "ghcr.io/teagramhq/teagram-server-postgres:18-alpine@sha256:77f585114c32fbca283dc835b0596f4e52b51b4c6662d7810b2f4084f60a1873"
+# Use the public, digest-preserving mirror because this gate refuses ambient registry credentials.
+SOURCE_IMAGE = "mirror.gcr.io/library/postgres@sha256:721873c34ceb9f8d8fc265984940dc982404c105f19ad51be9fdc5970a6080ea"
+RESTORE_IMAGE = "mirror.gcr.io/library/postgres@sha256:77f585114c32fbca283dc835b0596f4e52b51b4c6662d7810b2f4084f60a1873"
 BASE_SCHEMA = "20261021000003"
 HEAD_SCHEMA = "20261021000004"
 WORK_SECONDS = 30 * 60

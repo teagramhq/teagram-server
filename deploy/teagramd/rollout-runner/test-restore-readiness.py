@@ -105,6 +105,12 @@ def container_fixture() -> tuple[dict[str, Any], dict[str, Any]]:
 
 
 class RestoreReadinessContractTests(unittest.TestCase):
+    def test_postgres_fixture_images_are_public_and_digest_pinned(self) -> None:
+        for image in (RESTORE_READINESS.SOURCE_IMAGE, RESTORE_READINESS.RESTORE_IMAGE):
+            with self.subTest(image=image):
+                self.assertRegex(image, r"^mirror\.gcr\.io/library/postgres@sha256:[0-9a-f]{64}$")
+        self.assertNotEqual(RESTORE_READINESS.SOURCE_IMAGE, RESTORE_READINESS.RESTORE_IMAGE)
+
     def test_ambient_environment_rejects_production_and_proxy_configuration(self) -> None:
         self.assertTrue(RESTORE_READINESS.validate_ambient_environment({"HOME": "/home/runner", "LANG": "C"}))
         for environment in (

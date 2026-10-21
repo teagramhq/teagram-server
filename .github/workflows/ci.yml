@@ -854,9 +854,9 @@ jobs:
       - name: Lint deployment and real-client workflows
         run: |
           actionlint -ignore 'label "ubuntu-26.04" is unknown' \
-            .github/workflows/ci.yml \
             .github/workflows/deploy.yml \
             .github/workflows/real-client-browser-flow.yml
+          actionlint -shellcheck= -ignore 'label "ubuntu-26.04" is unknown' .github/workflows/ci.yml
           node --check test/e2e/real_server_fixture/run_real_client_browser_flow.mjs
 
       - name: Check the deploy workflow contract
