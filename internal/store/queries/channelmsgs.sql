@@ -103,6 +103,31 @@ WHERE channel_id = sqlc.arg(channel_id)::bigint
   AND local_id = sqlc.arg(local_id)::bigint
   AND deleted = false;
 
+-- ExpiredChannelPostCandidates reads IDs without row locks. The caller takes
+-- channel_state before rechecking and locking the posts, matching the normal
+-- channel post mutation order.
+-- name: ExpiredChannelPostCandidates :many
+SELECT channel_id, local_id
+FROM channel_messages
+WHERE deleted = false
+  AND action_type = 0
+  AND expires_at <= statement_timestamp()
+ORDER BY expires_at, channel_id, local_id
+LIMIT sqlc.arg(lim)::int;
+
+-- ExpiredChannelPostsForDelete rechecks eligibility under the channel state
+-- lock and takes still-expired posts in local-id order.
+-- name: ExpiredChannelPostsForDelete :many
+SELECT post.local_id
+FROM channel_messages AS post
+WHERE post.channel_id = sqlc.arg(channel_id)::bigint
+  AND post.local_id = ANY(sqlc.arg(local_ids)::bigint[])
+  AND post.deleted = false
+  AND post.action_type = 0
+  AND post.expires_at <= statement_timestamp()
+ORDER BY post.local_id
+FOR UPDATE OF post;
+
 -- name: ChannelMessageByRandomID :one
 SELECT channel_id, local_id, from_id, date, message, edit_date, deleted,
        random_id, grouped_id, file_id, reply_to_msg_id, action_type, ttl_period, post_author

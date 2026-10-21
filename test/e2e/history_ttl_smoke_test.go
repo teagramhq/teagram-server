@@ -10,6 +10,8 @@ import (
 	"github.com/gotd/td/tg"
 	"github.com/gotd/td/tgerr"
 	"github.com/jackc/pgx/v5"
+
+	"github.com/teagramhq/teagram-server/internal/store"
 )
 
 func testSmokeHistoryTTL(t *testing.T) {
@@ -156,6 +158,18 @@ func testSmokeHistoryTTL(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("getDifference after expiry: %v", err)
 	}
+	deletedCopies, more, err := f.store.SweepExpiredMessageCopies(f.ctx, store.HistoryTTLSweepBatchSize)
+	if err != nil {
+		t.Fatalf("sweep expired message copies: %v", err)
+	}
+	if deletedCopies != 2 || more {
+		t.Fatalf("expired copy sweep = deleted %d, more %t, want 2, false", deletedCopies, more)
+	}
+	deleteUpdate := recvOrCtx(t, f.ctx, bob.seen.delMsgPts, "Bob's open-session TTL delete update")
+	if len(deleteUpdate.Messages) != 1 || deleteUpdate.Messages[0] != expiringID || deleteUpdate.PtsCount != 1 {
+		t.Fatalf("Bob delete update = %+v, want message %d with pts_count 1", deleteUpdate, expiringID)
+	}
+	assertHistoryOmitsMessage(t, f.ctx, bob, alice.id, expiringText)
 
 	// A repeated value is a no-op and its response carries no new updates.
 	var noOp tg.UpdatesClass
@@ -290,6 +304,7 @@ func testSmokeHistoryTTL(t *testing.T) {
 	}
 
 	const channelText = "channel post with TTL"
+	var channelPostID int
 	if err := alice.call(f.ctx, func(ctx context.Context, client *tg.Client) error {
 		result, err := client.MessagesSendMessage(ctx, &tg.MessagesSendMessageRequest{
 			Peer: peerChannel(alice.id, channel.ID), Message: channelText, RandomID: 2244004,
@@ -304,12 +319,29 @@ func testSmokeHistoryTTL(t *testing.T) {
 		if period, ok := message.GetTTLPeriod(); !ok || period != 2592000 {
 			return fmt.Errorf("sent channel TTL period = %d/%v, want 2592000/true", period, ok)
 		}
+		channelPostID = message.ID
 		return nil
 	}); err != nil {
 		t.Fatalf("send channel TTL post: %v", err)
 	}
 	assertHistoryContainsTTLMessage(t, f.ctx, alice, peerChannel(alice.id, channel.ID), channelText, 2592000)
 	assertHistoryContainsTTLMessage(t, f.ctx, bob, peerChannel(bob.id, channel.ID), channelText, 2592000)
+	if _, err = conn.Exec(f.ctx, `UPDATE channel_messages SET expires_at = clock_timestamp() - interval '1 second'
+		WHERE channel_id = $1 AND local_id = $2`, channel.ID, channelPostID); err != nil {
+		t.Fatalf("advance channel post expiry test seam: %v", err)
+	}
+	deletedPosts, more, err := f.store.SweepExpiredChannelPosts(f.ctx, store.HistoryTTLSweepBatchSize)
+	if err != nil {
+		t.Fatalf("sweep expired channel posts: %v", err)
+	}
+	if deletedPosts != 1 || more {
+		t.Fatalf("expired channel post sweep = deleted %d, more %t, want 1, false", deletedPosts, more)
+	}
+	channelDelete := recvOrCtx(t, f.ctx, bob.seen.delChannelMsg, "Bob's open-session channel TTL delete update")
+	if channelDelete.ChannelID != channel.ID || len(channelDelete.Messages) != 1 || channelDelete.Messages[0] != channelPostID || channelDelete.PtsCount != 1 {
+		t.Fatalf("Bob channel delete update = %+v, want channel %d post %d with pts_count 1", channelDelete, channel.ID, channelPostID)
+	}
+	assertHistoryOmitsPeerMessage(t, f.ctx, bob, peerChannel(bob.id, channel.ID), channelText)
 
 	if _, err := f.store.BlockUser(f.ctx, charlie.id, bob.id); err != nil {
 		t.Fatalf("block Bob for refusal case: %v", err)
@@ -461,18 +493,28 @@ func assertHistoryContainsPlainMessage(t *testing.T, ctx context.Context, caller
 
 func assertHistoryOmitsMessage(t *testing.T, ctx context.Context, caller *smokeClient, peerID int64, text string) {
 	t.Helper()
+	assertHistoryOmitsPeerMessage(t, ctx, caller, peerUser(caller.id, peerID), text)
+}
+
+func assertHistoryOmitsPeerMessage(t *testing.T, ctx context.Context, caller *smokeClient, peer tg.InputPeerClass, text string) {
+	t.Helper()
 	if err := caller.call(ctx, func(ctx context.Context, client *tg.Client) error {
 		history, err := client.MessagesGetHistory(ctx, &tg.MessagesGetHistoryRequest{
-			Peer: peerUser(caller.id, peerID), Limit: 20,
+			Peer: peer, Limit: 20,
 		})
 		if err != nil {
 			return err
 		}
-		messages, ok := history.(*tg.MessagesMessages)
-		if !ok {
-			return fmt.Errorf("history = %T, want *tg.MessagesMessages", history)
+		var messages []tg.MessageClass
+		switch result := history.(type) {
+		case *tg.MessagesMessages:
+			messages = result.Messages
+		case *tg.MessagesChannelMessages:
+			messages = result.Messages
+		default:
+			return fmt.Errorf("history = %T, want messages response", history)
 		}
-		for _, item := range messages.Messages {
+		for _, item := range messages {
 			if message, ok := item.(*tg.Message); ok && message.Message == text {
 				return fmt.Errorf("expired message %q is readable", text)
 			}

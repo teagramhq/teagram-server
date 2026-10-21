@@ -9,6 +9,93 @@ import (
 	"context"
 )
 
+const expiredMessageCopyCandidates = `-- name: ExpiredMessageCopyCandidates :many
+SELECT owner_id, local_id
+FROM messages
+WHERE deleted = false
+  AND expires_at <= statement_timestamp()
+ORDER BY expires_at, owner_id, local_id
+LIMIT $1::int
+`
+
+type ExpiredMessageCopyCandidatesRow struct {
+	OwnerID int64
+	LocalID int64
+}
+
+// ExpiredMessageCopyCandidates reads IDs without row locks. The caller first
+// takes the sorted per-owner advisory locks, then re-reads and locks still
+// expired rows before emitting delete events.
+func (q *Queries) ExpiredMessageCopyCandidates(ctx context.Context, lim int32) ([]ExpiredMessageCopyCandidatesRow, error) {
+	rows, err := q.db.Query(ctx, expiredMessageCopyCandidates, lim)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ExpiredMessageCopyCandidatesRow
+	for rows.Next() {
+		var i ExpiredMessageCopyCandidatesRow
+		if err := rows.Scan(&i.OwnerID, &i.LocalID); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const expiredMessageCopyRowsForDelete = `-- name: ExpiredMessageCopyRowsForDelete :many
+SELECT message.owner_id, message.local_id, message.peer_type, message.peer_id
+FROM messages AS message
+WHERE message.owner_id = $1::bigint
+  AND message.local_id = ANY($2::bigint[])
+  AND message.deleted = false
+  AND message.expires_at <= statement_timestamp()
+ORDER BY message.local_id
+FOR UPDATE OF message
+`
+
+type ExpiredMessageCopyRowsForDeleteParams struct {
+	OwnerID  int64
+	LocalIds []int64
+}
+
+type ExpiredMessageCopyRowsForDeleteRow struct {
+	OwnerID  int64
+	LocalID  int64
+	PeerType int16
+	PeerID   int64
+}
+
+// ExpiredMessageCopyRowsForDelete rechecks eligibility after the owner locks
+// and takes message row locks in a stable order.
+func (q *Queries) ExpiredMessageCopyRowsForDelete(ctx context.Context, arg ExpiredMessageCopyRowsForDeleteParams) ([]ExpiredMessageCopyRowsForDeleteRow, error) {
+	rows, err := q.db.Query(ctx, expiredMessageCopyRowsForDelete, arg.OwnerID, arg.LocalIds)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ExpiredMessageCopyRowsForDeleteRow
+	for rows.Next() {
+		var i ExpiredMessageCopyRowsForDeleteRow
+		if err := rows.Scan(
+			&i.OwnerID,
+			&i.LocalID,
+			&i.PeerType,
+			&i.PeerID,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const insertChannelHistoryTTLChangeMessage = `-- name: InsertChannelHistoryTTLChangeMessage :exec
 INSERT INTO channel_messages (channel_id, local_id, from_id, message, action_type, ttl_period)
 VALUES ($1::bigint, $2::bigint, $3::bigint,

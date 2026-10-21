@@ -281,6 +281,7 @@ func (s *Store) DeleteChannelMessages(ctx context.Context, channelID, userID int
 	if err != nil {
 		return 0, 0, fmt.Errorf("lock channel messages for delete: %w", err)
 	}
+	deleteIDs := make([]int64, 0, len(rows))
 	for _, row := range rows {
 		if row.Deleted {
 			continue
@@ -289,53 +290,52 @@ func (s *Store) DeleteChannelMessages(ctx context.Context, channelID, userID int
 			megagroup && participant.Role == channelRoleMember && row.FromID != userID {
 			return 0, 0, ErrChannelMessageDeleteForbidden
 		}
+		deleteIDs = append(deleteIDs, row.LocalID)
 	}
-	var deletes int64
-	for _, row := range rows {
-		if !row.Deleted {
-			deletes++
-		}
-	}
-	if err = requireChannelStateCapacity(channelID, state.Pts, state.NextLocalID, deletes, 0); err != nil {
+	pts, count, err := tombstoneChannelMessages(ctx, qtx, channelID, state.Pts, state.NextLocalID, deleteIDs)
+	if err != nil {
 		return 0, 0, err
-	}
-
-	pts := int(state.Pts)
-	count := 0
-	for _, row := range rows {
-		if row.Deleted {
-			continue
-		}
-		updated, e := qtx.TombstoneChannelMessage(ctx, db.TombstoneChannelMessageParams{
-			ChannelID: channelID,
-			LocalID:   row.LocalID,
-		})
-		if e != nil {
-			return 0, 0, fmt.Errorf("tombstone channel message %d: %w", row.LocalID, e)
-		}
-		if updated != 1 {
-			return 0, 0, fmt.Errorf("tombstone channel message %d: updated %d rows, want 1", row.LocalID, updated)
-		}
-		newPts, e := bumpChannelPtsOnly(ctx, qtx, channelID)
-		if e != nil {
-			return 0, 0, fmt.Errorf("bump channel pts for delete %d: %w", row.LocalID, e)
-		}
-		if e = qtx.InsertChannelEvent(ctx, db.InsertChannelEventParams{
-			ChannelID: channelID,
-			Pts:       newPts,
-			Type:      int16(EventDelete),
-			LocalID:   row.LocalID,
-		}); e != nil {
-			return 0, 0, fmt.Errorf("insert channel delete event %d: %w", row.LocalID, e)
-		}
-		pts = int(newPts)
-		count++
 	}
 
 	if err := tx.Commit(ctx); err != nil {
 		return 0, 0, fmt.Errorf("commit channel message delete: %w", err)
 	}
 	return pts, count, nil
+}
+
+func tombstoneChannelMessages(
+	ctx context.Context, qtx *db.Queries, channelID, pts, nextLocalID int64, localIDs []int64,
+) (int, int, error) {
+	if err := requireChannelStateCapacity(channelID, pts, nextLocalID, int64(len(localIDs)), 0); err != nil {
+		return 0, 0, err
+	}
+	currentPts := int(pts)
+	for _, localID := range localIDs {
+		updated, err := qtx.TombstoneChannelMessage(ctx, db.TombstoneChannelMessageParams{
+			ChannelID: channelID,
+			LocalID:   localID,
+		})
+		if err != nil {
+			return 0, 0, fmt.Errorf("tombstone channel message %d: %w", localID, err)
+		}
+		if updated != 1 {
+			return 0, 0, fmt.Errorf("tombstone channel message %d: updated %d rows, want 1", localID, updated)
+		}
+		newPts, err := bumpChannelPtsOnly(ctx, qtx, channelID)
+		if err != nil {
+			return 0, 0, fmt.Errorf("bump channel pts for delete %d: %w", localID, err)
+		}
+		if err = qtx.InsertChannelEvent(ctx, db.InsertChannelEventParams{
+			ChannelID: channelID,
+			Pts:       newPts,
+			Type:      int16(EventDelete),
+			LocalID:   localID,
+		}); err != nil {
+			return 0, 0, fmt.Errorf("insert channel delete event %d: %w", localID, err)
+		}
+		currentPts = int(newPts)
+	}
+	return currentPts, len(localIDs), nil
 }
 
 // DeletedChannelPostTombstoneBatch bounds the post cleanup one sweep pass can

@@ -1163,6 +1163,83 @@ func (q *Queries) EnsureChannelState(ctx context.Context, channelID int64) error
 	return err
 }
 
+const expiredChannelPostCandidates = `-- name: ExpiredChannelPostCandidates :many
+SELECT channel_id, local_id
+FROM channel_messages
+WHERE deleted = false
+  AND action_type = 0
+  AND expires_at <= statement_timestamp()
+ORDER BY expires_at, channel_id, local_id
+LIMIT $1::int
+`
+
+type ExpiredChannelPostCandidatesRow struct {
+	ChannelID int64
+	LocalID   int64
+}
+
+// ExpiredChannelPostCandidates reads IDs without row locks. The caller takes
+// channel_state before rechecking and locking the posts, matching the normal
+// channel post mutation order.
+func (q *Queries) ExpiredChannelPostCandidates(ctx context.Context, lim int32) ([]ExpiredChannelPostCandidatesRow, error) {
+	rows, err := q.db.Query(ctx, expiredChannelPostCandidates, lim)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ExpiredChannelPostCandidatesRow
+	for rows.Next() {
+		var i ExpiredChannelPostCandidatesRow
+		if err := rows.Scan(&i.ChannelID, &i.LocalID); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const expiredChannelPostsForDelete = `-- name: ExpiredChannelPostsForDelete :many
+SELECT post.local_id
+FROM channel_messages AS post
+WHERE post.channel_id = $1::bigint
+  AND post.local_id = ANY($2::bigint[])
+  AND post.deleted = false
+  AND post.action_type = 0
+  AND post.expires_at <= statement_timestamp()
+ORDER BY post.local_id
+FOR UPDATE OF post
+`
+
+type ExpiredChannelPostsForDeleteParams struct {
+	ChannelID int64
+	LocalIds  []int64
+}
+
+// ExpiredChannelPostsForDelete rechecks eligibility under the channel state
+// lock and takes still-expired posts in local-id order.
+func (q *Queries) ExpiredChannelPostsForDelete(ctx context.Context, arg ExpiredChannelPostsForDeleteParams) ([]int64, error) {
+	rows, err := q.db.Query(ctx, expiredChannelPostsForDelete, arg.ChannelID, arg.LocalIds)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []int64
+	for rows.Next() {
+		var local_id int64
+		if err := rows.Scan(&local_id); err != nil {
+			return nil, err
+		}
+		items = append(items, local_id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const getChannelState = `-- name: GetChannelState :one
 SELECT channel_id, pts, next_local_id, date FROM channel_state WHERE channel_id = $1
 `
