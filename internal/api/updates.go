@@ -52,7 +52,7 @@ func messageToTL(m store.Message, createUsers []int64, files map[int64]tg.Messag
 			PeerID: peerToTL(m.PeerType, m.PeerID),
 			FromID: &tg.PeerUser{UserID: m.FromID},
 			Date:   int(m.Date.Unix()),
-			Action: actionToTL(m, createUsers),
+			Action: actionToTL(m, createUsers, files),
 		}
 	}
 	msg := &tg.Message{
@@ -296,7 +296,7 @@ func photoSizeType(width, height int) string {
 
 // actionToTL maps a service message's action. Create and EditTitle carry the
 // title in the message text; Add/DeleteUser carry their subject in action_user_id.
-func actionToTL(m store.Message, createUsers []int64) tg.MessageActionClass {
+func actionToTL(m store.Message, createUsers []int64, files map[int64]tg.MessageMediaClass) tg.MessageActionClass {
 	switch m.Action {
 	case store.ChatActionCreate:
 		return &tg.MessageActionChatCreate{Title: m.Text, Users: createUsers}
@@ -308,9 +308,15 @@ func actionToTL(m store.Message, createUsers []int64) tg.MessageActionClass {
 		return &tg.MessageActionChatEditTitle{Title: m.Text}
 	case store.ChatActionSetMessagesTTL:
 		return &tg.MessageActionSetMessagesTTL{Period: m.TTLPeriod}
+	case store.ChatActionEditPhoto:
+		if media, ok := files[m.FileID].(*tg.MessageMediaPhoto); ok {
+			return &tg.MessageActionChatEditPhoto{Photo: media.Photo}
+		}
+	case store.ChatActionDeletePhoto:
+		return &tg.MessageActionChatDeletePhoto{}
 	default:
-		return &tg.MessageActionEmpty{}
 	}
+	return &tg.MessageActionEmpty{}
 }
 
 // chatToTL maps a stored chat to the wire tg.Chat. selfID marks the creator flag
@@ -325,7 +331,7 @@ func actionToTL(m store.Message, createUsers []int64) tg.MessageActionClass {
 //
 // DefaultBannedRights is always set, empty when nothing is restricted: clients
 // read a chat without it as granting a non-creator no rights at all.
-func chatToTL(c store.Chat, participantsCount int, selfID int64) *tg.Chat {
+func chatToTL(c store.Chat, participantsCount int, selfID int64, photo tg.ChatPhotoClass) *tg.Chat {
 	chat := &tg.Chat{
 		ID:                c.ID,
 		Title:             c.Title,
@@ -333,7 +339,7 @@ func chatToTL(c store.Chat, participantsCount int, selfID int64) *tg.Chat {
 		ParticipantsCount: participantsCount,
 		Date:              int(c.Date.Unix()),
 		Version:           c.Version,
-		Photo:             &tg.ChatPhotoEmpty{},
+		Photo:             photo,
 	}
 	chat.SetDefaultBannedRights(chatDefaultBannedRightsToTL(c.DefaultBannedRights))
 	return chat
@@ -636,7 +642,7 @@ func (h *handlers) buildUpdateBatch(ctx context.Context, userID int64, fromPts i
 	if err != nil {
 		return updateBatch{}, err
 	}
-	b.chats, err = h.loadChats(ctx, basicChats, userID, nil)
+	b.chats, err = h.loadChats(ctx, basicChats, userID)
 	if err != nil {
 		return updateBatch{}, err
 	}
@@ -931,39 +937,39 @@ func (h *handlers) entitledUserIDs(ctx context.Context, viewerID int64, ids []in
 // rename the chat, so serving it would leave a writable channel into an account
 // that was ejected.
 //
-// The membership check is one query per chat per batch. A batch references very
-// few distinct chats, so it stays a straight loop with no cache.
-func (h *handlers) loadChats(ctx context.Context, ids map[int64]bool, viewerID int64, cache map[int64]*chatMembership) ([]tg.ChatClass, error) {
-	chats := make([]tg.ChatClass, 0, len(ids))
+// Membership, participant counts, and the selected photo pointer come from one
+// repeatable-read snapshot. A cache populated while rendering a create action
+// cannot authorize metadata read after that member has been removed.
+func (h *handlers) loadChats(ctx context.Context, ids map[int64]bool, viewerID int64) ([]tg.ChatClass, error) {
+	chatIDs := make([]int64, 0, len(ids))
 	for id := range ids {
-		c, ok, err := h.store.ChatByID(ctx, id)
-		if err != nil {
-			return nil, err
-		}
+		chatIDs = append(chatIDs, id)
+	}
+	snapshot, err := h.store.ChatListInfoForMemberSnapshot(ctx, viewerID, chatIDs)
+	if err != nil {
+		return nil, err
+	}
+
+	chats := make([]tg.ChatClass, 0, len(ids))
+	for _, id := range chatIDs {
+		chat, ok := snapshot.Chats[id]
 		if !ok {
-			continue
-		}
-		if cm, cached := cache[id]; cached {
-			if !cm.member {
-				chats = append(chats, &tg.ChatForbidden{ID: c.ID, Title: ""})
-				continue
+			// Keep absent chats omitted. This lookup is used only to distinguish a
+			// deleted chat from an existing chat excluded by the membership snapshot.
+			_, exists, err := h.store.ChatByID(ctx, id)
+			if err != nil {
+				return nil, err
 			}
-			chats = append(chats, chatToTL(c, cm.partCount, viewerID))
+			if exists {
+				chats = append(chats, &tg.ChatForbidden{ID: id, Title: ""})
+			}
 			continue
 		}
-		member, err := h.store.IsMember(ctx, id, viewerID)
+		wireChat, err := h.chatToTL(ctx, chat, int(snapshot.ParticipantCounts[id]), viewerID)
 		if err != nil {
-			return nil, err
+			return nil, fmt.Errorf("load chat %d photo: %w", id, err)
 		}
-		if !member {
-			chats = append(chats, &tg.ChatForbidden{ID: c.ID, Title: ""})
-			continue
-		}
-		parts, err := h.store.Participants(ctx, id)
-		if err != nil {
-			return nil, err
-		}
-		chats = append(chats, chatToTL(c, len(parts), viewerID))
+		chats = append(chats, wireChat)
 	}
 	return chats, nil
 }
@@ -1557,7 +1563,7 @@ func (h *handlers) handleGetDifferenceForConn(c *mtproto.Conn, r *mtproto.Reques
 			h.log.Error("get difference chat admin users", "user_id", r.UserID, "err", uerr)
 			return nil, nil, errInternal
 		}
-		chats, cerr := h.loadChats(r.Ctx, chatIDs, r.UserID, nil)
+		chats, cerr := h.loadChats(r.Ctx, chatIDs, r.UserID)
 		if cerr != nil {
 			h.log.Error("get difference chat admin chats", "user_id", r.UserID, "err", cerr)
 			return nil, nil, errInternal
@@ -1607,7 +1613,7 @@ func (h *handlers) handleGetDifferenceForConn(c *mtproto.Conn, r *mtproto.Reques
 			h.log.Error("get difference chat removal users", "user_id", r.UserID, "err", uerr)
 			return nil, nil, errInternal
 		}
-		chats, cerr := h.loadChats(r.Ctx, chatIDs, r.UserID, nil)
+		chats, cerr := h.loadChats(r.Ctx, chatIDs, r.UserID)
 		if cerr != nil {
 			h.log.Error("get difference chat removal chats", "user_id", r.UserID, "err", cerr)
 			return nil, nil, errInternal

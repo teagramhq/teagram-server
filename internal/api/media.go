@@ -448,7 +448,7 @@ func (h *handlers) handleSendMediaAfterReplyOnConn(c *mtproto.Conn, r *mtproto.R
 				return nil, nil, nil, errInternal
 			}
 			if peerType == store.PeerTypeChat {
-				chats, err := h.loadChats(r.Ctx, map[int64]bool{toID: true}, r.UserID, nil)
+				chats, err := h.loadChats(r.Ctx, map[int64]bool{toID: true}, r.UserID)
 				if err != nil {
 					h.log.Error("load chats on retry", "err", err)
 					return nil, nil, nil, errInternal
@@ -740,7 +740,7 @@ func (h *handlers) sendChatMedia(
 		h.log.Error("send chat media users", "err", err)
 		return nil, nil, nil, errInternal
 	}
-	chats, err := h.loadChats(r.Ctx, map[int64]bool{chatID: true}, r.UserID, nil)
+	chats, err := h.loadChats(r.Ctx, map[int64]bool{chatID: true}, r.UserID)
 	if err != nil {
 		notifyCommitted()
 		h.log.Error("send chat media chats", "err", err)

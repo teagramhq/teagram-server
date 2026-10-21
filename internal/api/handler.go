@@ -47,6 +47,9 @@ type handlers struct {
 	// chatRemovalIssueHook pauses getDifference after it builds the response
 	// cursor and before it atomically reserves the removal token.
 	chatRemovalIssueHook func()
+	// getDialogsBeforeLoadChatsHook is a test-only pause after dialog/create-row
+	// hydration and before current chat metadata is loaded.
+	getDialogsBeforeLoadChatsHook func()
 	// logLoginCodes gates the one log call that carries credential material.
 	logLoginCodes bool
 	// maxFileBytes is the per-file upload cap the save handlers enforce.
@@ -497,6 +500,7 @@ func newWithPhotoThumbsAndDialogFilterSyncAndUploadPartTTLAndTurnstile(s *store.
 	register(d, tg.MessagesGetFullChatRequestTypeID, h.handleGetFullChat)
 	register(d, tg.MessagesGetChatsRequestTypeID, h.handleGetChats)
 	register(d, tg.MessagesEditChatTitleRequestTypeID, h.handleEditChatTitle)
+	register(d, tg.MessagesEditChatPhotoRequestTypeID, h.handleEditChatPhoto)
 	register(d, tg.MessagesEditChatAboutRequestTypeID, h.handleEditChatAbout)
 	register(d, tg.MessagesEditChatAdminRequestTypeID, h.handleEditChatAdmin)
 	register(d, tg.MessagesEditChatDefaultBannedRightsRequestTypeID, h.handleEditChatDefaultBannedRights)

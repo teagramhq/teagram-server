@@ -48,6 +48,124 @@ func chatPhotoFileWithBytes(t *testing.T, s *store.Store, ownerID int64) store.F
 	return file
 }
 
+func chatPhotoFileWithDerivative(t *testing.T, s *store.Store, ownerID int64, original, preview []byte) store.File {
+	t.Helper()
+	ctx := context.Background()
+	file, stored, err := s.AllocateAndCompletePhotoFileWithDerivatives(
+		ctx, ownerID, int64(len(original)), "image/jpeg", "group-photo.jpg", 1<<30,
+		func(file store.File) (store.PhotoAssembly, error) {
+			if _, err := store.BlobsOf(s).Put(ctx, blob.Key(file.ID), bytes.NewReader(original)); err != nil {
+				return store.PhotoAssembly{}, err
+			}
+			return store.PhotoAssembly{
+				Dimensions: store.PhotoDimensions{Width: 640, Height: 480},
+				Derivatives: &store.PhotoDerivativeInput{
+					MWidth: 320, MHeight: 240, MBytes: preview, Stripped: []byte{1, 1, 1},
+				},
+			}, nil
+		},
+	)
+	if err != nil || !stored {
+		t.Fatalf("assemble photo with derivative: stored=%v err=%v", stored, err)
+	}
+	return file
+}
+
+func TestChatPhotoDownloadEntitlementsFollowCurrentMembershipAndFrozenHistory(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	s := open(t)
+	a := mustUser(t, s, "+15559149991")
+	b := mustUser(t, s, "+15559149992")
+	joiner := mustUser(t, s, "+15559149993")
+	outsider := mustUser(t, s, "+15559149994")
+	chat := chatWith(t, s, a, b)
+	original := []byte("group photo original")
+	preview := []byte("bounded group photo preview")
+	photoA := chatPhotoFileWithDerivative(t, s, a.ID, original, preview)
+	if _, _, _, _, err := s.SetChatPhoto(ctx, chat.ID, a.ID, photoA.ID); err != nil {
+		t.Fatalf("select first current photo: %v", err)
+	}
+
+	assertCurrent := func(label string, viewerID int64, file store.File, want bool) {
+		t.Helper()
+		got, err := s.CurrentChatPhotoForDownload(ctx, file.ID, file.AccessHash, viewerID)
+		if want && (err != nil || got.ID != file.ID) {
+			t.Errorf("%s generic current photo = %+v, %v; want file %d", label, got, err, file.ID)
+		}
+		if !want && !errors.Is(err, store.ErrFileNotFound) {
+			t.Errorf("%s generic current photo = %v, want hidden", label, err)
+		}
+		got, err = s.CurrentChatPeerPhotoForDownload(ctx, chat.ID, file.ID, viewerID)
+		if want && (err != nil || got.ID != file.ID) {
+			t.Errorf("%s peer current photo = %+v, %v; want file %d", label, got, err, file.ID)
+		}
+		if !want && !errors.Is(err, store.ErrFileNotFound) {
+			t.Errorf("%s peer current photo = %v, want hidden", label, err)
+		}
+	}
+	assertCurrent("member", b.ID, photoA, true)
+	assertCurrent("outsider", outsider.ID, photoA, false)
+	if _, err := s.CurrentChatPhotoForDownload(ctx, photoA.ID, photoA.AccessHash^1, b.ID); !errors.Is(err, store.ErrFileNotFound) {
+		t.Fatalf("wrong current-photo hash = %v, want hidden", err)
+	}
+	derivatives, err := s.PhotoDerivativeForDownload(ctx, photoA.ID, photoA.AccessHash, b.ID)
+	if err != nil || derivatives.MSize != len(preview) {
+		t.Fatalf("member current derivative = %+v, %v; want %d bytes", derivatives, err, len(preview))
+	}
+	chunk, err := s.PhotoDerivativeChunkForDownload(ctx, photoA.ID, photoA.AccessHash, b.ID, 0, int64(len(preview)))
+	if err != nil || !bytes.Equal(chunk, preview) {
+		t.Fatalf("member current derivative chunk = %q, %v; want %q", chunk, err, preview)
+	}
+	if _, err := s.PhotoDerivativeForDownload(ctx, photoA.ID, photoA.AccessHash, outsider.ID); !errors.Is(err, store.ErrFileNotFound) {
+		t.Fatalf("outsider current derivative = %v, want hidden", err)
+	}
+
+	photoB := chatPhotoFileWithDerivative(t, s, a.ID, []byte("replacement original"), []byte("replacement preview"))
+	if _, _, _, _, err := s.SetChatPhoto(ctx, chat.ID, a.ID, photoB.ID); err != nil {
+		t.Fatalf("replace current photo: %v", err)
+	}
+	assertCurrent("stale first photo", b.ID, photoA, false)
+	if _, err := s.PhotoDerivativeForDownload(ctx, photoA.ID, photoA.AccessHash, joiner.ID); !errors.Is(err, store.ErrFileNotFound) {
+		t.Fatalf("new member stale first derivative = %v, want hidden", err)
+	}
+	if _, err := s.PhotoDerivativeForDownload(ctx, photoA.ID, photoA.AccessHash, b.ID); err != nil {
+		t.Fatalf("member's frozen first-photo derivative: %v", err)
+	}
+	if _, err := s.FileForDownload(ctx, photoA.ID, photoA.AccessHash, b.ID); err != nil {
+		t.Fatalf("member's frozen first-photo service copy: %v", err)
+	}
+
+	added, _, _, err := s.AddChatUser(ctx, chat.ID, joiner.ID, a.ID)
+	if err != nil || !added {
+		t.Fatalf("add new current-photo member: added=%v err=%v", added, err)
+	}
+	assertCurrent("new member current photo", joiner.ID, photoB, true)
+	if _, err := s.FileForDownload(ctx, photoB.ID, photoB.AccessHash, joiner.ID); !errors.Is(err, store.ErrFileNotFound) {
+		t.Fatalf("new member acquired old service-copy access: %v", err)
+	}
+	if _, err := s.PhotoDerivativeForDownload(ctx, photoB.ID, photoB.AccessHash, joiner.ID); err != nil {
+		t.Fatalf("new member current derivative: %v", err)
+	}
+
+	removed, _, _, err := s.RemoveChatUser(ctx, chat.ID, b.ID, a.ID)
+	if err != nil || !removed {
+		t.Fatalf("remove historical member: removed=%v err=%v", removed, err)
+	}
+	assertCurrent("removed member", b.ID, photoB, false)
+	if _, err := s.PhotoDerivativeForDownload(ctx, photoB.ID, photoB.AccessHash, b.ID); err != nil {
+		t.Fatalf("removed member's frozen replacement derivative: %v", err)
+	}
+	if _, err := s.FileForDownload(ctx, photoB.ID, photoB.AccessHash, b.ID); err != nil {
+		t.Fatalf("removed member's frozen replacement service copy: %v", err)
+	}
+
+	if _, _, _, _, err := s.SetChatPhoto(ctx, chat.ID, a.ID, 0); err != nil {
+		t.Fatalf("clear current photo: %v", err)
+	}
+	assertCurrent("joiner after clear", joiner.ID, photoB, false)
+}
+
 func TestSetChatPhotoPersistsCurrentPhotoAndOneHistoryCopyPerMember(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()

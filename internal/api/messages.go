@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strconv"
 	"strings"
 	"time"
@@ -558,7 +559,7 @@ func (h *handlers) sendChatMessageAfterReplyOnConn(c *mtproto.Conn, r *mtproto.R
 				h.log.Error("read stored message pts on retry", "user_id", r.UserID, "err", err)
 				return nil, nil, nil, errInternal
 			}
-			chats, err := h.loadChats(r.Ctx, map[int64]bool{chatID: true}, r.UserID, nil)
+			chats, err := h.loadChats(r.Ctx, map[int64]bool{chatID: true}, r.UserID)
 			if err != nil {
 				h.log.Error("load chats on retry", "err", err)
 				return nil, nil, nil, errInternal
@@ -639,7 +640,7 @@ func (h *handlers) sendChatMessageAfterReplyOnConn(c *mtproto.Conn, r *mtproto.R
 		}
 		return nil, nil, nil, errInternal
 	}
-	chats, err := h.loadChats(r.Ctx, map[int64]bool{chatID: true}, r.UserID, nil)
+	chats, err := h.loadChats(r.Ctx, map[int64]bool{chatID: true}, r.UserID)
 	if err != nil {
 		h.log.Error("send chat message chats", "err", err)
 		if c != nil {
@@ -891,7 +892,11 @@ func (h *handlers) handleGetMessages(r *mtproto.Request) (bin.Encoder, error) {
 		h.log.Error("get messages: render users", "user_id", r.UserID, "err", err)
 		return nil, errInternal
 	}
-	chats := renderMessagesReadChats(snapshot, r.UserID)
+	chats, err := h.renderMessagesReadChats(r.Ctx, snapshot, r.UserID)
+	if err != nil {
+		h.log.Error("get messages: render chats", "user_id", r.UserID, "err", err)
+		return nil, errInternal
+	}
 	tlMessages := make([]tg.MessageClass, len(snapshot.Results))
 	for i, result := range snapshot.Results {
 		if result.Message == nil {
@@ -936,12 +941,16 @@ func renderMessagesReadUsers(ctx context.Context, snapshot store.MessagesReadSna
 	return users, nil
 }
 
-func renderMessagesReadChats(snapshot store.MessagesReadSnapshot, viewerID int64) []tg.ChatClass {
+func (h *handlers) renderMessagesReadChats(ctx context.Context, snapshot store.MessagesReadSnapshot, viewerID int64) ([]tg.ChatClass, error) {
 	chats := make([]tg.ChatClass, 0, len(snapshot.Chats))
 	for id, chat := range snapshot.Chats {
-		chats = append(chats, chatToTL(chat, snapshot.ChatParticipantCounts[id], viewerID))
+		wireChat, err := h.chatToTL(ctx, chat, snapshot.ChatParticipantCounts[id], viewerID)
+		if err != nil {
+			return nil, fmt.Errorf("render chat %d: %w", id, err)
+		}
+		chats = append(chats, wireChat)
 	}
-	return chats
+	return chats, nil
 }
 
 // messageReadFileMedia maps the snapshot's file rows to wire media, photos and
@@ -1018,7 +1027,11 @@ func (h *handlers) chatHistory(r *mtproto.Request, snapshot store.ChatHistorySna
 		h.log.Error("get history users", "err", err)
 		return nil, errInternal
 	}
-	chat := chatToTL(snapshot.Chat, len(snapshot.Participants), r.UserID)
+	chat, err := h.chatToTL(r.Ctx, snapshot.Chat, len(snapshot.Participants), r.UserID)
+	if err != nil {
+		h.log.Error("get chat history photo", "user_id", r.UserID, "chat_id", snapshot.Chat.ID, "err", err)
+		return nil, errInternal
+	}
 	return &tg.MessagesMessages{Messages: tlMsgs, Users: users, Chats: []tg.ChatClass{chat}}, nil
 }
 
@@ -1960,7 +1973,7 @@ func (h *handlers) forwardReply(r *mtproto.Request, destPeerType store.PeerType,
 		basicChatRefs[destPeerID] = true
 		users, err = h.loadUsers(r.Ctx, recipients, r.UserID)
 		if err == nil {
-			chats, err = h.loadChats(r.Ctx, map[int64]bool{destPeerID: true}, r.UserID, nil)
+			chats, err = h.loadChats(r.Ctx, map[int64]bool{destPeerID: true}, r.UserID)
 		}
 	}
 	if err != nil {
@@ -2014,7 +2027,16 @@ func (h *handlers) forwardReply(r *mtproto.Request, destPeerType store.PeerType,
 				}
 				count = len(parts)
 			}
-			chats = append(chats, chatToTL(c, count, r.UserID))
+			if member {
+				wireChat, renderErr := h.chatToTL(r.Ctx, c, count, r.UserID)
+				if renderErr != nil {
+					h.log.Error("forward reply fwd chat photo", "err", renderErr)
+					return nil, errInternal
+				}
+				chats = append(chats, wireChat)
+			} else {
+				chats = append(chats, &tg.ChatForbidden{ID: c.ID, Title: ""})
+			}
 		}
 	}
 	// Load channel references with viewer-aware loader.
@@ -2122,7 +2144,7 @@ func (h *handlers) pinChatMessage(r *mtproto.Request, chatID int64, req *tg.Mess
 	}
 	h.notifyOwners(r.Ctx, change.OwnerPts, 0)
 
-	chats, err := h.loadChats(r.Ctx, map[int64]bool{chat.ID: true}, r.UserID, nil)
+	chats, err := h.loadChats(r.Ctx, map[int64]bool{chat.ID: true}, r.UserID)
 	if err != nil {
 		h.log.Error("pin chat render", "chat_id", chat.ID, "err", err)
 		return nil, 0, errInternal
@@ -2534,7 +2556,7 @@ func (h *handlers) chatSearch(
 		h.log.Error("search messages users", "err", err)
 		return nil, errInternal
 	}
-	chats, err := h.loadChats(r.Ctx, map[int64]bool{chatID: true}, r.UserID, nil)
+	chats, err := h.loadChats(r.Ctx, map[int64]bool{chatID: true}, r.UserID)
 	if err != nil {
 		h.log.Error("search messages chats", "err", err)
 		return nil, errInternal

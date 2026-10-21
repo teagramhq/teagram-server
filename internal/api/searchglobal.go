@@ -160,7 +160,7 @@ func (h *handlers) searchCreateUsers(r *mtproto.Request, hits []store.GlobalSear
 		if _, done := out[hit.PeerID]; done {
 			continue
 		}
-		ids, _, err := h.createUsersForDialog(r.Ctx, hit.PeerID, r.UserID)
+		ids, err := h.createUsersForDialog(r.Ctx, hit.PeerID, r.UserID)
 		if err != nil {
 			return nil, err
 		}
@@ -228,7 +228,7 @@ func (h *handlers) globalSearchSlice(r *mtproto.Request, hits []store.GlobalSear
 		h.log.Error("search global polls", "user_id", r.UserID, "err", err)
 		return nil, errInternal
 	}
-	chats, err := h.loadChats(r.Ctx, chatIDs, r.UserID, nil)
+	chats, err := h.loadChats(r.Ctx, chatIDs, r.UserID)
 	if err != nil {
 		h.log.Error("search global chats", "err", err)
 		return nil, errInternal

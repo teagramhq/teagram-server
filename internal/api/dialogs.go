@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"fmt"
 
 	"github.com/gotd/td/bin"
 	"github.com/gotd/td/tg"
@@ -10,37 +11,26 @@ import (
 	"github.com/teagramhq/teagram-server/internal/store"
 )
 
-// chatMembership holds the precomputed membership and participants result
-// from a create-action user lookup, so loadChats can reuse it and skip
-// duplicate queries.
-type chatMembership struct {
-	member    bool
-	userIDs   []int64
-	partCount int
-}
-
 // createUsersForDialog fetches the participant list for a ChatActionCreate row
 // when the viewer is still a member. A removed viewer gets nil, matching the
-// empty user list getDifference serves for the same event. It also returns
-// the membership result so the caller can thread it into loadChats and avoid
-// a duplicate IsMember + Participants query.
-func (h *handlers) createUsersForDialog(ctx context.Context, chatID, viewerID int64) ([]int64, *chatMembership, error) {
+// empty user list getDifference serves for the same event.
+func (h *handlers) createUsersForDialog(ctx context.Context, chatID, viewerID int64) ([]int64, error) {
 	member, err := h.store.IsMember(ctx, chatID, viewerID)
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 	if !member {
-		return nil, &chatMembership{member: false}, nil
+		return nil, nil
 	}
 	parts, err := h.store.Participants(ctx, chatID)
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 	ids := make([]int64, len(parts))
 	for i, p := range parts {
 		ids[i] = p.UserID
 	}
-	return ids, &chatMembership{member: true, userIDs: ids, partCount: len(parts)}, nil
+	return ids, nil
 }
 
 // maxChannelDialogs caps the channels one getDialogs reply carries.
@@ -142,9 +132,6 @@ func (h *handlers) handleGetDialogs(r *mtproto.Request) (bin.Encoder, error) {
 	topCreateUsers := make([][]int64, 0, len(dialogs))
 	peerIDs := map[int64]bool{r.UserID: true}
 	chatIDs := map[int64]bool{}
-	// Precomputed membership/participants results from create-action lookups,
-	// threaded into loadChats so it skips duplicate queries.
-	chatCache := map[int64]*chatMembership{}
 	for _, d := range dialogs {
 		dialog := &tg.Dialog{
 			Peer:            peerToTL(d.PeerType, d.PeerID),
@@ -178,13 +165,12 @@ func (h *handlers) handleGetDialogs(r *mtproto.Request) (bin.Encoder, error) {
 				// gate is needed — the row exists because fan-out wrote it here.
 				peerIDs[m.ActionUserID] = true
 			case store.ChatActionCreate:
-				cu, cm, cerr := h.createUsersForDialog(r.Ctx, m.PeerID, r.UserID)
+				cu, cerr := h.createUsersForDialog(r.Ctx, m.PeerID, r.UserID)
 				if cerr != nil {
 					h.log.Error("get dialogs create users", "user_id", r.UserID, "err", cerr)
 					return nil, errInternal
 				}
 				createUsers = cu
-				chatCache[m.PeerID] = cm
 				for _, id := range cu {
 					peerIDs[id] = true
 				}
@@ -290,7 +276,10 @@ func (h *handlers) handleGetDialogs(r *mtproto.Request) (bin.Encoder, error) {
 	// passed down — loadChats degrades those to tg.ChatForbidden, which carries
 	// the id and an empty title and nothing else — no live title, version or
 	// participant count reaches a removed member.
-	chats, err := h.loadChats(r.Ctx, chatIDs, r.UserID, chatCache)
+	if h.getDialogsBeforeLoadChatsHook != nil {
+		h.getDialogsBeforeLoadChatsHook()
+	}
+	chats, err := h.loadChats(r.Ctx, chatIDs, r.UserID)
 	if err != nil {
 		h.log.Error("get dialogs chats", "err", err)
 		return nil, errInternal
@@ -502,7 +491,11 @@ func (h *handlers) peerDialogsToTL(ctx context.Context, snapshot store.PeerDialo
 			chats = append(chats, &tg.ChatForbidden{ID: chat.ID, Title: ""})
 			continue
 		}
-		chats = append(chats, chatToTL(chat, len(snapshot.ChatMembers[chatID]), viewerID))
+		wireChat, err := h.chatToTL(ctx, chat, len(snapshot.ChatMembers[chatID]), viewerID)
+		if err != nil {
+			return nil, fmt.Errorf("render dialog chat %d: %w", chatID, err)
+		}
+		chats = append(chats, wireChat)
 	}
 	for _, channelID := range channelIDs {
 		channel, ok := snapshot.Channels[channelID]
