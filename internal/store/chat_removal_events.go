@@ -10,6 +10,8 @@ import (
 	"github.com/teagramhq/teagram-server/internal/store/db"
 )
 
+const chatRemovalClientStateHistoryLimit = 4
+
 func (s *Store) ChatRemovalEventForOwnerChat(ctx context.Context, ownerID, chatID int64) (ChatRemovalEvent, bool, error) {
 	row, err := s.q.ChatRemovalEventForOwnerChat(ctx, db.ChatRemovalEventForOwnerChatParams{
 		OwnerID: ownerID,
@@ -61,8 +63,9 @@ func (s *Store) MarkChatRemovalEventsDeliveredForAuthKey(ctx context.Context, ow
 }
 
 // IssueChatRemovalEventsForAuthKey atomically reserves a unique difference Date
-// token for this authorization key and associates it with the removal rows in
-// the reply. resumeDate preserves the logical boundary used by other streams.
+// token and associates it with the removal rows in the reply. It retains only
+// the latest history mappings per chat; resumeDate preserves the logical
+// boundary used by other streams.
 func (s *Store) IssueChatRemovalEventsForAuthKey(
 	ctx context.Context,
 	ownerID, authKeyID int64,
@@ -90,6 +93,12 @@ func (s *Store) IssueChatRemovalEventsForAuthKey(
 		DifferenceStateDate: stateDate, ResumeDate: int64(resumeDate),
 	}); err != nil {
 		return 0, fmt.Errorf("mark chat removal events issued: %w", err)
+	}
+	if err := qtx.PruneChatRemovalClientStateHistoryForAuthKey(ctx, db.PruneChatRemovalClientStateHistoryForAuthKeyParams{
+		OwnerID: ownerID, AuthKeyID: authKeyID, ChatIds: chatIDs,
+		KeepCount: chatRemovalClientStateHistoryLimit,
+	}); err != nil {
+		return 0, fmt.Errorf("prune chat removal client state history: %w", err)
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return 0, fmt.Errorf("commit chat removal state reservation: %w", err)
