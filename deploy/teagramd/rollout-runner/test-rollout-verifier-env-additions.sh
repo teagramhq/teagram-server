@@ -303,6 +303,18 @@ turnstile_compose=$(jq -c --arg source "$turnstile_secret_source" '
     }]
   | .secrets.teagramd_turnstile = {file:$source}
 ' <<< "$COMPOSE_JSON")
+turnstile_enabled_local_compose=$(jq -c '
+  .services.teagramd.secrets = []
+  | .secrets |= del(.teagramd_turnstile)
+  | if (.secrets | length) == 0 then del(.secrets) else . end
+' <<< "$turnstile_compose")
+if verify_turnstile_compose_configuration "$turnstile_enabled_local_compose" \
+  >/dev/null 2>"$TMP/turnstile-enabled-local.err"; then
+  printf '%s\n' 'FAIL local blob overlay hid an enabled Turnstile secret' >&2
+  exit 1
+fi
+printf '%s\n' 'PASS local blob overlay cannot hide an enabled Turnstile secret'
+
 turnstile_inspect=$(printf '%s' "$turnstile_legacy_inspect" | jq -c --arg source "$turnstile_secret_source" '
   .Config.Env += [
     "TG_TURNSTILE_SITE_KEY=fixture-site-key",
