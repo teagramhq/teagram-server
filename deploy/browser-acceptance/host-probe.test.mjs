@@ -275,6 +275,7 @@ test("invalid account high-water data fails closed before browser launch", async
   const f = fixture({ accountHighWaters: ["9223372036854775808"] });
   const result = await probe(f);
   assert.equal(result.code, "database-unavailable");
+  assert.equal(result.databaseFailureCategory, "evidence-invalid");
   assert.equal(result.accountEvidence, "unavailable");
   assert.equal(f.events.includes("stdin-forwarded"), false);
 });
@@ -290,6 +291,7 @@ test("a failed pre account read stops before browser launch", async () => {
   const f = fixture({ accountHighWaters: [new Error("private-high-water-canary")] });
   const result = await probe(f);
   assert.equal(result.code, "database-unavailable");
+  assert.equal(result.databaseFailureCategory, "unknown");
   assert.equal(result.accountEvidence, "unavailable");
   assert.equal(result.accountsUnchanged, false);
   assert.equal(f.events.includes("stdin-forwarded"), false);
@@ -308,7 +310,7 @@ test("one newly created binding followed by in-band logout proves cleanup", asyn
   const f = fixture();
   const result = await probe(f);
   assert.deepEqual(result, {
-    schemaVersion: 4, ok: true, code: "ok", serverSourceCommit: serverRevision,
+    schemaVersion: 5, ok: true, code: "ok", serverSourceCommit: serverRevision,
     registrationMode: "closed", accountEvidence: "complete", accountsUnchanged: true,
     loginCodesDisabled: true, revisionMatched: true,
     containersStable: true, networkIsolated: true, fingerprintMatched: true,
@@ -747,6 +749,7 @@ test("malformed DB metadata cannot be emitted or used as proof", async () => {
   });
   const result = await probe(f);
   assert.equal(result.code, "database-unavailable");
+  assert.equal(result.databaseFailureCategory, "evidence-invalid");
   assert.ok(!f.events.includes("stdin-forwarded"));
   assert.doesNotMatch(JSON.stringify(result), /private-snapshot-canary/u);
 });
@@ -760,6 +763,7 @@ test("missing trigger coverage fails before browser credential forwarding", asyn
   const f = fixture({ snapshots: [incomplete, successfulCut()] });
   const result = await probe(f);
   assert.equal(result.code, "database-unavailable");
+  assert.equal(result.databaseFailureCategory, "evidence-invalid");
   assert.ok(!f.events.includes("stdin-forwarded"));
 });
 
@@ -767,6 +771,7 @@ test("unsupported evidence version fails before browser credential forwarding", 
   const f = fixture({ snapshots: [bindingSnapshot([1, 2], 0, { evidence_version: 2 }), successfulCut()] });
   const result = await probe(f);
   assert.equal(result.code, "database-unavailable");
+  assert.equal(result.databaseFailureCategory, "evidence-invalid");
   assert.ok(!f.events.includes("stdin-forwarded"));
 });
 
@@ -855,7 +860,7 @@ test("preflight runs every acceptance check in the accepted order and stops afte
   const f = fixture();
   const result = await preflight(f);
   assert.deepEqual(result, {
-    schemaVersion: 4, ok: true, code: "ok", serverSourceCommit: serverRevision,
+    schemaVersion: 5, ok: true, code: "ok", serverSourceCommit: serverRevision,
     registrationMode: "closed", accountEvidence: "complete", accountsUnchanged: false,
     loginCodesDisabled: true, revisionMatched: true,
     containersStable: true, networkIsolated: true, fingerprintMatched: true,

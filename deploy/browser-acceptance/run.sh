@@ -592,7 +592,7 @@ normalize_probe_result() {
   jq -e -c -s --argjson exit_status "$2" --arg mode "$3" '
     def proof:
       if type != "object" then false else
-        (keys | sort) == [
+        (keys | sort) == (([
           "accountEvidence", "accountsUnchanged", "baselineIntact", "bindingAdditions", "bindingEvidence",
           "bindingRemovals", "boundAfter", "boundBefore",
           "browserExitOk", "captureAllowedConnects", "captureBlocked", "captureOther", "captureTelegramSuffix",
@@ -600,7 +600,7 @@ normalize_probe_result() {
           "fingerprintMatched", "loginCodesDisabled", "networkIsolated", "newBindingProven", "ok",
           "pendingAfter", "pendingBefore", "registrationMode", "revisionMatched", "schemaVersion",
           "serverSourceCommit", "topologyIsolated", "witnessInWindow"
-        ] and .schemaVersion == 4 and
+        ] + (if .code == "database-unavailable" then ["databaseFailureCategory"] else [] end)) | sort) and .schemaVersion == 5 and
         (.serverSourceCommit | type == "string" and (. == "" or test("^[0-9a-f]{40}$"))) and
         (if .revisionMatched then (.serverSourceCommit | test("^[0-9a-f]{40}$")) else .serverSourceCommit == "" end) and
         (to_entries | all(.[] | select(.key | IN(
@@ -632,6 +632,11 @@ normalize_probe_result() {
           "revision-unproven", "runtime-changed", "network-unproven", "fingerprint-unproven",
           "database-unavailable", "cleanup-unproven", "binding-not-created", "browser-failed",
           "account-created", "account-unproven"] | index($code) != null) and
+        (if .code == "database-unavailable" then
+          (.databaseFailureCategory | type == "string") and
+          (.databaseFailureCategory as $category |
+            (["config", "connect", "auth", "query", "evidence-invalid", "unknown"] | index($category)) != null)
+        else (has("databaseFailureCategory") | not) end) and
         (if .ok then
           $exit_status == 0 and .code == "ok" and (.registrationMode == "closed" or .registrationMode == "open") and
           .accountEvidence == "complete" and
@@ -736,7 +741,8 @@ run_qa_script() {
       wssConnections: $qa.wssConnections, wssEndpointMatched: $qa.wssEndpointMatched,
       submission: $qa.submission, chatList: $qa.chatList, chatListRows: $qa.chatListRows,
       qaFailureCode: $qa.qaFailureCode
-    }
+    } + (if $proof.code == "database-unavailable" then
+      {databaseFailureCategory: $proof.databaseFailureCategory} else {} end)
   ' 2>/dev/null)" || return 1
   printf '%s' "$normalized"
   return "$status"
@@ -745,7 +751,7 @@ run_qa_script() {
 # Same probe path as acceptance, stopping at the QA preflight. Stdin is already
 # /dev/null and the probe never runs an interactive exec in this mode.
 run_acceptance_preflight() {
-  local output proof status code line web_commit server_commit qa_failure_code
+  local output proof status code line web_commit server_commit qa_failure_code database_failure_category
   local -a lines
   set +e
   output="$(
@@ -770,6 +776,12 @@ run_acceptance_preflight() {
   code="$(jq -r '.code' <<<"$proof")"
   line="$(jq -c -s 'map(select(has("registrationMode") | not)) | select(length == 1) | .[0]' <<<"$output" 2>/dev/null)" || line=''
   if [[ "$code" != ok ]]; then
+    if [[ "$code" == database-unavailable ]]; then
+      database_failure_category="$(jq -r '.databaseFailureCategory' <<<"$proof")"
+      printf '{"status":"error","code":"database-unavailable","database_failure_category":"%s"}' \
+        "$database_failure_category"
+      return 1
+    fi
     qa_failure_code="$(jq -er -s '
       select(length == 1) | .[0] |
       select((keys | sort) == ["qaFailureCode", "qaPreflight"] and .qaPreflight == "failed") |

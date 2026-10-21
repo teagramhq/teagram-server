@@ -40,7 +40,7 @@ const acceptanceV2ResultValue = {
 };
 const acceptanceV2Result = JSON.stringify(acceptanceV2ResultValue);
 const probeResultValue = {
-  schemaVersion: 4, ok: true, code: "ok", serverSourceCommit: "f".repeat(40),
+  schemaVersion: 5, ok: true, code: "ok", serverSourceCommit: "f".repeat(40),
   registrationMode: "open", accountEvidence: "complete", accountsUnchanged: true,
   loginCodesDisabled: true, revisionMatched: true,
   containersStable: true, networkIsolated: true, fingerprintMatched: true,
@@ -53,13 +53,16 @@ const probeResultValue = {
 };
 
 function preflightProbeValue(overrides = {}) {
-  return {
+  const value = {
     ...probeResultValue, accountsUnchanged: false,
     newBindingProven: false, cleanupProven: false, boundAfter: 0, pendingAfter: 0,
     bindingEvidence: "not-reached", bindingAdditions: 0, bindingRemovals: 0,
     witnessInWindow: false, baselineIntact: false,
     ...overrides,
   };
+  if (value.code === "database-unavailable") value.databaseFailureCategory ??= "unknown";
+  else delete value.databaseFailureCategory;
+  return value;
 }
 const preflightReady = `{"status":"acceptance-ready","web_source_commit":"${sourceCommit}","server_source_commit":"${"f".repeat(40)}",` +
   '"registration_mode":"open","login_codes_disabled":true,"server_revision_proven":true,"runtime_stable":true,' +
@@ -90,9 +93,9 @@ function browserFailedProbeValue(overrides = {}) {
   return { ...probeResultValue, ok: false, code: "browser-failed", browserExitOk: false, ...overrides };
 }
 
-const probeV4ResultValue = {
+const probeV5ResultValue = {
   ...probeResultValue,
-  schemaVersion: 4,
+  schemaVersion: 5,
   bindingEvidence: "complete",
   bindingAdditions: 1,
   bindingRemovals: 1,
@@ -106,8 +109,8 @@ const probeV4ResultValue = {
   captureBlocked: 1,
   captureUpstreamFailures: 0,
 };
-const probeV3ResultValue = { ...probeV4ResultValue, schemaVersion: 3 };
-const legacyRegistrationProbeValue = { ...probeV4ResultValue, registrationClosed: true };
+const probeV3ResultValue = { ...probeV5ResultValue, schemaVersion: 3 };
+const legacyRegistrationProbeValue = { ...probeV5ResultValue, registrationClosed: true };
 const qaV3ResultValue = {
   ...acceptanceResultValue,
   schemaVersion: 3,
@@ -177,7 +180,7 @@ function evidenceLine(probe, qa, { qaResult = "valid", teardown = "ok" } = {}) {
 
 function bindingNotCreatedProbe() {
   return {
-    ...probeV4ResultValue,
+    ...probeV5ResultValue,
     ok: false,
     code: "binding-not-created",
     browserExitOk: false,
@@ -191,7 +194,7 @@ function bindingNotCreatedProbe() {
 
 function revisionUnprovenProbe() {
   return {
-    ...probeV4ResultValue,
+    ...probeV5ResultValue,
     ok: false,
     code: "revision-unproven",
     serverSourceCommit: "",
@@ -890,7 +893,7 @@ test("malformed and absent QA output preserve validated probe evidence", async (
   const script = join(paths.dockerRoot, "approved-qa.mjs");
   await writeFile(script, "approved fixture\n");
   const probe = {
-    ...probeV4ResultValue,
+    ...probeV5ResultValue,
     ok: false,
     code: "cleanup-unproven",
     cleanupProven: false,
@@ -923,7 +926,7 @@ test("a valid probe with a QA v2 line emits invalid QA defaults", async (t) => {
   const paths = await setup(t);
   const script = join(paths.dockerRoot, "approved-qa.mjs");
   await writeFile(script, "approved fixture\n");
-  const probe = probeV4ResultValue;
+  const probe = probeV5ResultValue;
   const result = invoke(paths, ["acceptance", "--manifest", paths.manifest, "--script", script], {
     WRAPPER_ACCEPT_QA_FIXTURE: "1",
     WRAPPER_PROBE_OUTPUT: JSON.stringify(probe),
@@ -938,7 +941,7 @@ test("QA invalidity changes accepted to error without changing a successful prob
   const paths = await setup(t);
   const script = join(paths.dockerRoot, "approved-qa.mjs");
   await writeFile(script, "approved fixture\n");
-  const probe = probeV4ResultValue;
+  const probe = probeV5ResultValue;
   const result = invoke(paths, ["acceptance", "--manifest", paths.manifest, "--script", script], {
     WRAPPER_ACCEPT_QA_FIXTURE: "1",
     WRAPPER_PROBE_OUTPUT: JSON.stringify(probe),
@@ -983,7 +986,7 @@ test("account-created is a non-zero error in wrapper evidence", async (t) => {
   const script = join(paths.dockerRoot, "approved-qa.mjs");
   await writeFile(script, "approved fixture\n");
   const probe = {
-    ...probeV4ResultValue,
+    ...probeV5ResultValue,
     ok: false,
     code: "account-created",
     accountsUnchanged: false,
@@ -1003,7 +1006,7 @@ test("the wrapper cannot accept a probe without unchanged account evidence", asy
   const paths = await setup(t);
   const script = join(paths.dockerRoot, "approved-qa.mjs");
   await writeFile(script, "approved fixture\n");
-  const probe = { ...probeV4ResultValue, accountsUnchanged: false };
+  const probe = { ...probeV5ResultValue, accountsUnchanged: false };
   const result = invoke(paths, ["acceptance", "--manifest", paths.manifest, "--script", script], {
     WRAPPER_ACCEPT_QA_FIXTURE: "1",
     WRAPPER_PROBE_OUTPUT: JSON.stringify(probe),
@@ -1057,6 +1060,22 @@ test("a probe code array is rejected as an invalid enum", async (t) => {
   assert.equal(result.status, 1);
   assert.equal(result.stdout, '{"status":"error","code":"runtime-failed"}\n');
   assert.equal(result.stderr, "");
+});
+
+test("acceptance rejects a non-string database failure category", async (t) => {
+  for (const category of [[], ["config"]]) {
+    const paths = await setup(t);
+    const script = join(paths.directory, "approved.mjs");
+    await writeFile(script, "approved fixture\n");
+    const result = invoke(paths, ["acceptance", "--manifest", paths.manifest, "--script", script], {
+      WRAPPER_ACCEPT_QA_FIXTURE: "1", WRAPPER_PROBE_STATUS: "1",
+      WRAPPER_PROBE_OUTPUT: JSON.stringify({ ...probeResultValue, ok: false, code: "database-unavailable",
+        databaseFailureCategory: category }),
+    });
+    assert.equal(result.status, 1);
+    assert.equal(result.stdout, '{"status":"error","code":"runtime-failed"}\n', JSON.stringify(category));
+    assert.equal(result.stderr, "");
+  }
 });
 
 test("browser NUL bytes fail closed without Bash stripping or warning", async (t) => {
@@ -1653,8 +1672,25 @@ test("each probe readiness failure maps to its fixed error without a QA run", as
       WRAPPER_PROBE_OUTPUT: JSON.stringify(preflightProbeValue({ ok: false, code, ...accountEvidence })),
     });
     assert.equal(result.status, 1, code);
-    assert.equal(result.stdout, `{"status":"error","code":"${code}"}\n`, code);
+    const expected = code === "database-unavailable"
+      ? '{"status":"error","code":"database-unavailable","database_failure_category":"unknown"}\n'
+      : `{"status":"error","code":"${code}"}\n`;
+    assert.equal(result.stdout, expected, code);
     assert.doesNotMatch(await readFile(paths.log, "utf8"), /approved-qa\.mjs/u, code);
+  }
+});
+
+test("preflight rejects a non-string database failure category", async (t) => {
+  for (const category of [[], ["config"]]) {
+    const paths = await setup(t);
+    const result = invokePreflight(paths, await preflightScript(paths), {
+      WRAPPER_PROBE_SKIP_BROWSER: "1", WRAPPER_PROBE_STATUS: "1", WRAPPER_PREFLIGHT_OUTPUT: "",
+      WRAPPER_PROBE_OUTPUT: JSON.stringify(preflightProbeValue({ ok: false, code: "database-unavailable",
+        databaseFailureCategory: category })),
+    });
+    assert.equal(result.status, 1);
+    assert.equal(result.stdout, '{"status":"error","code":"runtime-failed"}\n', JSON.stringify(category));
+    assert.equal(result.stderr, "");
   }
 });
 
