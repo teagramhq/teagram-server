@@ -847,15 +847,18 @@ current_service_id() {
 }
 
 capture_snapshot() {
-  local id=$1 dir=$2 name=$3 compose_source=${4:-selected-compose-render} output
+  local id=$1 dir=$2 name=$3 compose_source=${4:-selected-compose-render} output verifier_error
   output="$dir/$name.snapshot.json"
   [ ! -e "$output" ] && [ ! -L "$output" ] || { fail 'snapshot evidence already exists'; return 1; }
-  ROLLOUT_CHECKOUT_PATH="$CHECKOUT" ROLLOUT_ADDED_ENV="$ADDED_ENV" \
+  if ! verifier_error=$(ROLLOUT_CHECKOUT_PATH="$CHECKOUT" ROLLOUT_ADDED_ENV="$ADDED_ENV" \
     ROLLOUT_CHANGED_ENV="$CHANGED_ENV" \
-    bash "$VERIFIER" snapshot "$id" "$dir" "$name" "$ENV_FILE" "$OVERRIDE_FILE" "$compose_source" >/dev/null 2>&1 || {
+    bash "$VERIFIER" snapshot "$id" "$dir" "$name" "$ENV_FILE" "$OVERRIDE_FILE" "$compose_source" 2>&1 >/dev/null); then
+    if [ "$ROLLOUT_RUNNER_TEST_MODE" = 1 ] && [ -n "$verifier_error" ]; then
+      printf 'snapshot verifier: %s\n' "$verifier_error" >&2
+    fi
     fail "cannot capture $name snapshot"
     return 1
-  }
+  fi
   [ -f "$output" ] && [ ! -L "$output" ] && [ "$(stat -c %a -- "$output")" = 600 ] || {
     fail "$name snapshot is not private"
     return 1

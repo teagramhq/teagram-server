@@ -3553,6 +3553,7 @@ status=$(run_fixture public-websocket-enabled)
 root=$(cat "$TMP/public-websocket-enabled-root-path")
 if [ "$status" != 0 ] && grep -q 'reason=resolved-config-capture-failed' "$root".target/preflight-failure.txt && \
    ! grep -q '^docker compose up -d' "$TMP/public-websocket-enabled-events" && \
+   grep -q 'snapshot verifier: resolved Compose has unsafe public environment settings' "$TMP/public-websocket-enabled.stderr" && \
    grep -q 'resolved Compose preflight capture failed; target was not started' "$TMP/public-websocket-enabled.stderr"; then
   pass 'enabled public WebSocket Compose settings remain rejected before startup'
 else
