@@ -983,7 +983,7 @@ func TestChannelPhotoSnapshotAndDownloadsAfterMemberRevocation(t *testing.T) {
 			if err := revoke.apply(ctx, s, channel.ID, creator.ID, member.ID); err != nil {
 				t.Fatalf("revoke member during photo hydration: %v", err)
 			}
-			bodyC := jpegPhotoPayload(t, 640, 640)
+			bodyC := jpegPhotoPayload(t, 1600, 1600)
 			const uploadC = int64(228963)
 			saveParts(t, s, creator.ID, uploadC, bodyC)
 			resultC, err := api.EditChannelPhotoForTest(s, creator.ID, blobs, api.TestMaxUserStorageBytes,
@@ -992,6 +992,11 @@ func TestChannelPhotoSnapshotAndDownloadsAfterMemberRevocation(t *testing.T) {
 				t.Fatalf("select photo C after revocation: %v", err)
 			}
 			_, photoC := channelAvatarEditFromResult(t, resultC)
+			assertChannelAvatarHasMDerivative(t, photoC, "current photo C")
+			assertChannelAvatarFileBytes(t, s, blobs, creator.ID,
+				&tg.InputPhotoFileLocation{ID: photoC.ID, AccessHash: photoC.AccessHash, ThumbSize: "m"}, seededPhotoM, "current photo C derivative for channel owner")
+			assertChannelAvatarFileBytes(t, s, blobs, creator.ID,
+				&tg.InputPeerPhotoFileLocation{Peer: api.InputPeerChannel(creator.ID, channel.ID), PhotoID: photoC.ID, Big: false}, seededPhotoM, "current peer small photo C for channel owner")
 
 			close(release)
 			released = true
