@@ -29,6 +29,7 @@ SMOKE_SCENARIOS=(
   delete-basic-group
   delete-history
   channel
+  channel-edit-photo
   channel-delete
   channel-membership-revocation
   mtproto-service-messages
