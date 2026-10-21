@@ -147,7 +147,7 @@ verify_safe_public_compose_environment() {
 
 verify_turnstile_compose_configuration() {
   local compose_json=$1 checkout_root secret_source file_source secret_dir runtime_uid
-  checkout_root=$(readlink -m "$ROLLOUT_CHECKOUT_PATH") || return 1
+  checkout_root=$(readlink -f "$ROLLOUT_CHECKOUT_PATH") || return 1
   secret_source="$checkout_root/.secrets/teagramd-turnstile"
   if ! printf '%s\n' "$compose_json" | jq -e --arg secret_source "$secret_source" '
     (.services.teagramd.environment // {}) as $env
