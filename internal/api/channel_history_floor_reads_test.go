@@ -343,11 +343,14 @@ func TestChannelFullInfoOmitsFlooredPinnedID(t *testing.T) {
 func TestChannelFullInfoUsesHistoryFloorForUnreadAndReadMarker(t *testing.T) {
 	t.Parallel()
 	f := newChannelReadFloorFixture(t, "225110", "Floor full info read state")
-	posts := make([]store.ChannelMessage, 0, 8)
-	for i := range 8 {
+	posts := make([]store.ChannelMessage, 0, 7)
+	for i := range 7 {
 		posts = append(posts, f.post(t, "full info unread post", int64(225200+i)))
 	}
-	floor := posts[4].LocalID
+	floor := posts[3].LocalID
+	if floor != 5 || posts[len(posts)-1].LocalID != 8 {
+		t.Fatalf("fixture floor and last post id = %d/%d, want 5/8", floor, posts[len(posts)-1].LocalID)
+	}
 	f.joinAt(t, floor)
 	channelExec(t, context.Background(), f.dsn,
 		`DELETE FROM channel_read_state WHERE channel_id = $1 AND user_id = $2`,
