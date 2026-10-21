@@ -62,6 +62,8 @@ type ErasureCounts struct {
 	SkippedGalleryRef int
 	// SkippedChatRef counts files selected as a current basic-group photo.
 	SkippedChatRef int
+	// SkippedChannelPhotoRef counts files selected as a current channel photo.
+	SkippedChannelPhotoRef int
 	// SkippedTooNew counts unreferenced files newer than the cutoff. The age
 	// gate is defence in depth, not the safety control: every media file on the
 	// server passes through "stored, zero live references" exactly once during
@@ -81,6 +83,7 @@ func (c *ErasureCounts) add(o ErasureCounts) {
 	c.SkippedChannelRef += o.SkippedChannelRef
 	c.SkippedGalleryRef += o.SkippedGalleryRef
 	c.SkippedChatRef += o.SkippedChatRef
+	c.SkippedChannelPhotoRef += o.SkippedChannelPhotoRef
 	c.SkippedTooNew += o.SkippedTooNew
 }
 
@@ -147,6 +150,8 @@ func (s *Store) MediaErasureScan(ctx context.Context, olderThan time.Time, after
 		switch {
 		case r.ChatRef:
 			scan.Counts.SkippedChatRef++
+		case r.ChannelPhotoRef:
+			scan.Counts.SkippedChannelPhotoRef++
 		case r.MessageRef:
 			scan.Counts.SkippedMessageRef++
 		case r.ChannelRef:

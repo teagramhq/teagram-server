@@ -170,6 +170,35 @@ func channelMessageToTL(m store.ChannelMessage, viewerID int64, files map[int64]
 			Date:   int(m.Date.Unix()),
 			Action: &tg.MessageActionSetMessagesTTL{Period: m.TTLPeriod},
 		}, nil
+	case store.ChannelMessageActionEditPhoto:
+		if m.FileID == nil {
+			return nil, fmt.Errorf("channel photo service message %d has no file", m.LocalID)
+		}
+		file, ok := files[*m.FileID]
+		if !ok {
+			return nil, fmt.Errorf("channel photo service message %d file %d is unavailable", m.LocalID, *m.FileID)
+		}
+		photo, ok := file.(*tg.MessageMediaPhoto)
+		if !ok || photo.Photo == nil {
+			return nil, fmt.Errorf("channel photo service message %d file %d is not a photo", m.LocalID, *m.FileID)
+		}
+		return &tg.MessageService{
+			ID:     int(m.LocalID),
+			Out:    m.FromID == viewerID,
+			PeerID: &tg.PeerChannel{ChannelID: m.ChannelID},
+			FromID: &tg.PeerUser{UserID: m.FromID},
+			Date:   int(m.Date.Unix()),
+			Action: &tg.MessageActionChatEditPhoto{Photo: photo.Photo},
+		}, nil
+	case store.ChannelMessageActionDeletePhoto:
+		return &tg.MessageService{
+			ID:     int(m.LocalID),
+			Out:    m.FromID == viewerID,
+			PeerID: &tg.PeerChannel{ChannelID: m.ChannelID},
+			FromID: &tg.PeerUser{UserID: m.FromID},
+			Date:   int(m.Date.Unix()),
+			Action: &tg.MessageActionChatDeletePhoto{},
+		}, nil
 	}
 	msg := &tg.Message{
 		ID:      int(m.LocalID),
@@ -373,6 +402,14 @@ func (h *handlers) channelToTL(c store.Channel, m store.ChannelMember, member bo
 	if !member || c.DeletedAt != nil {
 		return &tg.ChannelForbidden{ID: c.ID, AccessHash: ah, Title: ""}
 	}
+	var chatPhoto tg.ChatPhotoClass = &tg.ChatPhotoEmpty{}
+	if c.CurrentPhoto != nil {
+		photo := &tg.ChatPhoto{PhotoID: c.CurrentPhoto.ID, DCID: h.dcID}
+		if derivatives := c.CurrentPhoto.PhotoDerivatives; derivatives != nil && len(derivatives.Stripped) > 0 {
+			photo.SetStrippedThumb(derivatives.Stripped)
+		}
+		chatPhoto = photo
+	}
 	ch := &tg.Channel{
 		ID:         c.ID,
 		Title:      c.Title,
@@ -382,7 +419,7 @@ func (h *handlers) channelToTL(c store.Channel, m store.ChannelMember, member bo
 		Broadcast:  !c.Megagroup,
 		Creator:    m.Role == 2,
 		Left:       false,
-		Photo:      &tg.ChatPhotoEmpty{},
+		Photo:      chatPhoto,
 	}
 	if c.Username != nil {
 		ch.Username = *c.Username
@@ -992,20 +1029,19 @@ func (h *handlers) loadChannels(ctx context.Context, ids map[int64]bool, viewerI
 func (h *handlers) loadChannelsWithKinds(ctx context.Context, ids map[int64]bool, viewerID int64) ([]tg.ChatClass, map[int64]bool, error) {
 	channels := make([]tg.ChatClass, 0, len(ids))
 	broadcasts := make(map[int64]bool, len(ids))
+	channelIDs := make([]int64, 0, len(ids))
 	for id := range ids {
-		ch, ok, err := h.store.ChannelByID(ctx, id)
-		if err != nil {
-			return nil, nil, err
-		}
-		if !ok {
-			continue
-		}
-		broadcasts[id] = !ch.Megagroup
-		member, found, err := h.store.ChannelMemberOf(ctx, id, viewerID)
-		if err != nil {
-			return nil, nil, err
-		}
-		channels = append(channels, h.channelToTL(ch, member, found && !member.Banned(time.Now()), viewerID))
+		channelIDs = append(channelIDs, id)
+	}
+	snapshots, err := h.store.ChannelsForViewer(ctx, channelIDs, viewerID)
+	if err != nil {
+		return nil, nil, err
+	}
+	for _, snapshot := range snapshots {
+		ch := snapshot.Channel
+		member := snapshot.HasMember && !snapshot.Member.Banned(time.Now())
+		broadcasts[ch.ID] = !ch.Megagroup
+		channels = append(channels, h.channelToTL(ch, snapshot.Member, member, viewerID))
 	}
 	return channels, broadcasts, nil
 }

@@ -92,10 +92,20 @@ WHERE f.id = $1 AND f.access_hash = $2 AND f.stored = true
 -- name: LockFileForReference :one
 SELECT id FROM files WHERE id = $1 FOR SHARE;
 
--- LockChatPhotoFileForAttach is the eligibility check and reference-writer
--- interlock. It runs only after the chat row and sorted member-owner keys are
--- held; no chat or owner lock is acquired after this file lock.
--- name: LockChatPhotoFileForAttach :one
+-- LockPhotoFileForAttach serializes fresh-only photo references across chats
+-- and channels. The owning peer row is already held; this must be the terminal
+-- lock class. Eligibility is checked in the following statement so a waiter
+-- observes references committed by the lock holder.
+-- name: LockPhotoFileForAttach :one
+SELECT id
+FROM files
+WHERE id = sqlc.arg(file_id)::bigint
+  AND uploader_id = sqlc.arg(uploader_id)::bigint
+FOR NO KEY UPDATE;
+
+-- FreshPhotoFileForAttach checks ownership, publication, validated photo
+-- dimensions and every prior reference after the caller owns the file row.
+-- name: FreshPhotoFileForAttach :one
 SELECT f.id
 FROM files f
 WHERE f.id = sqlc.arg(file_id)::bigint
@@ -124,7 +134,11 @@ WHERE f.id = sqlc.arg(file_id)::bigint
       WHERE c.current_photo_file_id = f.id
         AND c.current_photo_file_id IS NOT NULL
   )
-FOR SHARE OF f;
+  AND NOT EXISTS (
+      SELECT 1 FROM channels c
+      WHERE c.current_photo_file_id = f.id
+        AND c.current_photo_file_id IS NOT NULL
+  );
 
 -- LockFileForUploadGrantCleanup takes the candidate's row exclusively after a
 -- cap refusal. Unlike the eraser's SKIP LOCKED form, cleanup waits for any
@@ -185,6 +199,33 @@ WHERE c.id = sqlc.arg(chat_id)::bigint
   AND f.stored = true
   AND f.media_kind = 'photo';
 
+-- CurrentChannelPhotoForDownload admits the exact current avatar to an
+-- unbanned member, including a new member whose history floor predates the
+-- photo service message.
+-- name: CurrentChannelPhotoForDownload :one
+SELECT f.*
+FROM channels c
+JOIN channel_participants cp ON cp.channel_id = c.id AND cp.user_id = sqlc.arg(viewer_id)::bigint
+JOIN files f ON f.id = c.current_photo_file_id AND f.uploader_id = c.current_photo_uploader_id
+WHERE c.deleted_at IS NULL
+  AND (cp.banned_until IS NULL OR cp.banned_until <= now())
+  AND c.current_photo_file_id = sqlc.arg(file_id)::bigint
+  AND f.access_hash = sqlc.arg(access_hash)::bigint
+  AND f.stored = true
+  AND f.media_kind = 'photo';
+
+-- name: CurrentChannelPeerPhotoForDownload :one
+SELECT f.*
+FROM channels c
+JOIN channel_participants cp ON cp.channel_id = c.id AND cp.user_id = sqlc.arg(viewer_id)::bigint
+JOIN files f ON f.id = c.current_photo_file_id AND f.uploader_id = c.current_photo_uploader_id
+WHERE c.id = sqlc.arg(channel_id)::bigint
+  AND c.deleted_at IS NULL
+  AND (cp.banned_until IS NULL OR cp.banned_until <= now())
+  AND c.current_photo_file_id = sqlc.arg(file_id)::bigint
+  AND f.stored = true
+  AND f.media_kind = 'photo';
+
 -- PhotoDerivativeForDownload resolves the advertised m size after the normal
 -- file identity and message authorization gate. It returns no thumbnail body.
 -- name: PhotoDerivativeForDownload :one
@@ -217,6 +258,15 @@ WHERE f.id = sqlc.arg(id)
           JOIN chat_participants cp ON cp.chat_id = c.id AND cp.user_id = sqlc.arg(owner_id)::bigint
           WHERE c.current_photo_file_id = f.id
             AND c.current_photo_uploader_id = f.uploader_id
+      )
+      OR EXISTS (
+          SELECT 1 FROM channels c
+          JOIN channel_participants cp ON cp.channel_id = c.id
+            AND cp.user_id = sqlc.arg(owner_id)::bigint
+          WHERE c.current_photo_file_id = f.id
+            AND c.current_photo_uploader_id = f.uploader_id
+            AND c.deleted_at IS NULL
+            AND (cp.banned_until IS NULL OR cp.banned_until <= now())
       )
   );
 
@@ -254,6 +304,15 @@ WHERE f.id = sqlc.arg(id)
           JOIN chat_participants cp ON cp.chat_id = c.id AND cp.user_id = sqlc.arg(owner_id)::bigint
           WHERE c.current_photo_file_id = f.id
             AND c.current_photo_uploader_id = f.uploader_id
+      )
+      OR EXISTS (
+          SELECT 1 FROM channels c
+          JOIN channel_participants cp ON cp.channel_id = c.id
+            AND cp.user_id = sqlc.arg(owner_id)::bigint
+          WHERE c.current_photo_file_id = f.id
+            AND c.current_photo_uploader_id = f.uploader_id
+            AND c.deleted_at IS NULL
+            AND (cp.banned_until IS NULL OR cp.banned_until <= now())
       )
   );
 
@@ -379,7 +438,8 @@ SELECT f.id, f.size, f.stored,
            WHERE cm.file_id = f.id AND cm.deleted = false
        ) AS channel_ref,
        coalesce(gallery.found, false) AS gallery_ref,
-       coalesce(chat_photo.found, false) AS chat_ref
+       coalesce(chat_photo.found, false) AS chat_ref,
+       coalesce(channel_photo.found, false) AS channel_photo_ref
 FROM files f
 LEFT JOIN LATERAL (
     SELECT true AS found
@@ -394,6 +454,13 @@ LEFT JOIN LATERAL (
       AND c.current_photo_file_id IS NOT NULL
     LIMIT 1
 ) chat_photo ON true
+LEFT JOIN LATERAL (
+    SELECT true AS found
+    FROM channels c
+    WHERE c.current_photo_file_id = f.id
+      AND c.current_photo_file_id IS NOT NULL
+    LIMIT 1
+) channel_photo ON true
 WHERE f.id > sqlc.arg(after_id) AND f.id <= sqlc.arg(through_id)
 ORDER BY f.id
 LIMIT sqlc.arg(lim)::int;
@@ -499,6 +566,11 @@ WHERE f.id = sqlc.arg(id)
       SELECT 1 FROM chats c
       WHERE c.current_photo_file_id = f.id
         AND c.current_photo_file_id IS NOT NULL
+  )
+  AND NOT EXISTS (
+      SELECT 1 FROM channels c
+      WHERE c.current_photo_file_id = f.id
+        AND c.current_photo_file_id IS NOT NULL
   );
 
 -- DeleteUnassembledFile is the crashed-assembly half of the row-driven
@@ -529,6 +601,11 @@ WHERE f.id = sqlc.arg(id)
   )
   AND NOT EXISTS (
       SELECT 1 FROM chats c
+      WHERE c.current_photo_file_id = f.id
+        AND c.current_photo_file_id IS NOT NULL
+  )
+  AND NOT EXISTS (
+      SELECT 1 FROM channels c
       WHERE c.current_photo_file_id = f.id
         AND c.current_photo_file_id IS NOT NULL
   );

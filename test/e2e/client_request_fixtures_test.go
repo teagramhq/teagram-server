@@ -466,6 +466,8 @@ func TestSmokeClientRequestFixturesAreLayer228Shapes(t *testing.T) {
 		"channels_checkUsername.1",
 		"channels_createChannel.1",
 		"channels_editTitle.1",
+		"channels_editPhoto.1",
+		"channels_editPhoto.2",
 		"channels_toggleSignatures.1",
 		"channels_togglePreHistoryHidden.1",
 		"channels_getFullChannel.1",
@@ -906,6 +908,68 @@ func testSmokeClientRequestFixtures(t *testing.T) {
 		return errors.New("create fixture channel returned no channel")
 	}); err != nil {
 		t.Fatalf("create fixture channel: %v", err)
+	}
+	channelPhotoBody := smokeJPEGAtUploadSize(t, smokePhotoPartCount)
+	const channelPhotoFileID = int64(13030122)
+	var channelPhotoID int64
+	if err := fixtureClientCall(t, creator, "channels_editPhoto.1", func(ctx context.Context, api *tg.Client) error {
+		for part := range smokePhotoPartCount {
+			start := part * smokePhotoPartSize
+			ok, err := api.UploadSaveFilePart(ctx, &tg.UploadSaveFilePartRequest{
+				FileID: channelPhotoFileID, FilePart: part, Bytes: channelPhotoBody[start : start+smokePhotoPartSize],
+			})
+			if err != nil {
+				return err
+			}
+			if !ok {
+				return fmt.Errorf("channel photo fixture upload part %d returned false", part)
+			}
+		}
+		photo := &tg.InputChatUploadedPhoto{}
+		photo.SetFile(&tg.InputFile{
+			ID: channelPhotoFileID, Parts: smokePhotoPartCount, Name: "channel.jpg", MD5Checksum: smokePhotoMD5(channelPhotoBody),
+		})
+		if _, err := api.ChannelsEditPhoto(ctx, &tg.ChannelsEditPhotoRequest{
+			Channel: inputChannel(creator.id, channelID), Photo: photo,
+		}); err != nil {
+			return err
+		}
+		full, err := api.ChannelsGetFullChannel(ctx, inputChannel(creator.id, channelID))
+		if err != nil {
+			return err
+		}
+		fullPhoto, ok := full.FullChat.(*tg.ChannelFull)
+		if !ok {
+			return fmt.Errorf("channels.getFullChannel full chat = %T, want *tg.ChannelFull", full.FullChat)
+		}
+		currentPhoto, ok := fullPhoto.ChatPhoto.(*tg.Photo)
+		if !ok || currentPhoto.ID <= 0 {
+			return fmt.Errorf("channels.getFullChannel photo = %#v, want non-empty *tg.Photo", fullPhoto.ChatPhoto)
+		}
+		channelPhotoID = currentPhoto.ID
+		if !channelFullPhoto(full, channelID, channelPhotoID) {
+			return errors.New("channels.editPhoto photo was not returned by channels.getFullChannel")
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("replay channel edit-photo upload fixture: %v", err)
+	}
+	if err := fixtureClientCall(t, creator, "channels_editPhoto.2", func(ctx context.Context, api *tg.Client) error {
+		if _, err := api.ChannelsEditPhoto(ctx, &tg.ChannelsEditPhotoRequest{
+			Channel: inputChannel(creator.id, channelID), Photo: &tg.InputChatPhotoEmpty{},
+		}); err != nil {
+			return err
+		}
+		full, err := api.ChannelsGetFullChannel(ctx, inputChannel(creator.id, channelID))
+		if err != nil {
+			return err
+		}
+		if !channelFullPhotoEmpty(full, channelID) {
+			return errors.New("channels.editPhoto clear left a current channel photo")
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("replay channel edit-photo clear fixture: %v", err)
 	}
 	if err := fixtureClientCall(t, creator, "channels_editTitle.1", func(ctx context.Context, api *tg.Client) error {
 		result, err := api.ChannelsEditTitle(ctx, &tg.ChannelsEditTitleRequest{

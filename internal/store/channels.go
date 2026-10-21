@@ -129,10 +129,13 @@ type Channel struct {
 	PinnedMessageID *int32
 	// Username is the normalized handle claimed in the usernames table.
 	// Nil when the channel has no username.
-	Username            *string
-	DefaultBannedRights []string
-	SlowmodeSeconds     int16
-	PreHistoryHidden    bool
+	Username               *string
+	DefaultBannedRights    []string
+	SlowmodeSeconds        int16
+	PreHistoryHidden       bool
+	CurrentPhotoFileID     *int64
+	CurrentPhotoUploaderID *int64
+	CurrentPhoto           *File
 }
 
 // Participant roles, as recorded in the M7 migration.
@@ -179,20 +182,22 @@ func (m ChannelMember) Forever() bool {
 
 func channelFromRow(r db.Channel) Channel {
 	channel := Channel{
-		ID:                  r.ID,
-		Title:               r.Title,
-		About:               r.About,
-		CreatorID:           r.CreatorID,
-		Megagroup:           r.Megagroup,
-		Signatures:          r.Signatures,
-		Version:             int(r.Version),
-		TTLPeriod:           int(r.TtlPeriod),
-		Date:                r.Date.Time,
-		PinnedMessageID:     r.PinnedMessageID,
-		Username:            r.Username,
-		DefaultBannedRights: r.DefaultBannedRights,
-		SlowmodeSeconds:     r.SlowmodeSeconds,
-		PreHistoryHidden:    r.PreHistoryHidden,
+		ID:                     r.ID,
+		Title:                  r.Title,
+		About:                  r.About,
+		CreatorID:              r.CreatorID,
+		Megagroup:              r.Megagroup,
+		Signatures:             r.Signatures,
+		Version:                int(r.Version),
+		TTLPeriod:              int(r.TtlPeriod),
+		Date:                   r.Date.Time,
+		PinnedMessageID:        r.PinnedMessageID,
+		Username:               r.Username,
+		DefaultBannedRights:    r.DefaultBannedRights,
+		SlowmodeSeconds:        r.SlowmodeSeconds,
+		PreHistoryHidden:       r.PreHistoryHidden,
+		CurrentPhotoFileID:     r.CurrentPhotoFileID,
+		CurrentPhotoUploaderID: r.CurrentPhotoUploaderID,
 	}
 	if r.DeletedAt.Valid {
 		deletedAt := r.DeletedAt.Time
@@ -374,6 +379,73 @@ func (s *Store) ChannelByID(ctx context.Context, channelID int64) (Channel, bool
 		return Channel{}, false, fmt.Errorf("channel by id: %w", err)
 	}
 	return channelFromRow(r), true, nil
+}
+
+// ChannelViewerSnapshot carries the channel metadata, viewer membership and
+// current avatar from one repeatable-read snapshot. Photo is populated only for
+// a current unbanned member, so public and former members cannot receive its
+// identity or stripped preview through channel metadata.
+type ChannelViewerSnapshot struct {
+	Channel   Channel
+	Member    ChannelMember
+	HasMember bool
+}
+
+func (s *Store) ChannelsForViewer(ctx context.Context, channelIDs []int64, viewerID int64) ([]ChannelViewerSnapshot, error) {
+	ids := uniqueInt64s(channelIDs)
+	if len(ids) == 0 || viewerID <= 0 {
+		return []ChannelViewerSnapshot{}, nil
+	}
+	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadOnly})
+	if err != nil {
+		return nil, fmt.Errorf("begin channel viewer snapshot: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }() //nolint:errcheck // no-op after commit
+	qtx := s.q.WithTx(tx)
+
+	rows, err := qtx.ChannelsByIDs(ctx, ids)
+	if err != nil {
+		return nil, fmt.Errorf("select channels for viewer: %w", err)
+	}
+	memberRows, err := qtx.ChannelMembersByUserChannelIDs(ctx, db.ChannelMembersByUserChannelIDsParams{
+		UserID: viewerID, ChannelIds: ids,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("select channel viewer memberships: %w", err)
+	}
+	members := make(map[int64]ChannelMember, len(memberRows))
+	for _, row := range memberRows {
+		members[row.ChannelID] = channelMemberFromRow(row)
+	}
+	result := make([]ChannelViewerSnapshot, 0, len(rows))
+	photoIDs := make([]int64, 0, len(rows))
+	for _, row := range rows {
+		channel := channelFromRow(row)
+		member, hasMember := members[row.ID]
+		result = append(result, ChannelViewerSnapshot{Channel: channel, Member: member, HasMember: hasMember})
+		if channel.DeletedAt == nil && hasMember && !member.Banned(time.Now()) && channel.CurrentPhotoFileID != nil {
+			photoIDs = append(photoIDs, *channel.CurrentPhotoFileID)
+		}
+	}
+	photos, err := filesByIDs(ctx, qtx, photoIDs)
+	if err != nil {
+		return nil, fmt.Errorf("load channel viewer photos: %w", err)
+	}
+	for i := range result {
+		channel := &result[i].Channel
+		if channel.DeletedAt != nil || !result[i].HasMember || result[i].Member.Banned(time.Now()) || channel.CurrentPhotoFileID == nil {
+			continue
+		}
+		file, ok := photos[*channel.CurrentPhotoFileID]
+		if !ok || file.Kind != FileKindPhoto || channel.CurrentPhotoUploaderID == nil || file.UploaderID != *channel.CurrentPhotoUploaderID {
+			return nil, fmt.Errorf("channel %d current photo %d is unavailable", channel.ID, *channel.CurrentPhotoFileID)
+		}
+		channel.CurrentPhoto = &file
+	}
+	if err = tx.Commit(ctx); err != nil {
+		return nil, fmt.Errorf("commit channel viewer snapshot: %w", err)
+	}
+	return result, nil
 }
 
 // ChannelMembers lists the channel's participants ordered by user_id ascending.
@@ -1019,6 +1091,96 @@ func (s *Store) beginChannelInfoMutation(
 		return fail(ErrChatAdminRequired)
 	}
 	return tx, qtx, channel, nil
+}
+
+// CheckChannelPhotoEditPermission is the early gate before photo assembly.
+// SetChannelPhoto repeats the same authority check under the channel row lock
+// at the mutation serialization point.
+func (s *Store) CheckChannelPhotoEditPermission(ctx context.Context, channelID, callerID int64) error {
+	tx, _, _, err := s.beginChannelInfoMutation(ctx, channelID, callerID)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback(ctx) }() //nolint:errcheck // read-only preflight
+	return nil
+}
+
+// ErrChannelPhotoUnavailable is the uniform refusal for an unavailable or
+// ineligible channel-photo upload.
+var ErrChannelPhotoUnavailable = errors.New("channel photo upload unavailable")
+
+// SetChannelPhoto is the final, serialized channel-photo mutation. Until a
+// selection exists, an authorized clear is a no-op and consumes no channel
+// state. Photo attachment is added with the persistence and history path below.
+func (s *Store) SetChannelPhoto(
+	ctx context.Context, channelID, callerID, fileID int64,
+) (bool, Channel, ChannelMessage, int, error) {
+	tx, qtx, locked, err := s.beginChannelInfoMutation(ctx, channelID, callerID)
+	if err != nil {
+		return false, Channel{}, ChannelMessage{}, 0, err
+	}
+	defer func() { _ = tx.Rollback(ctx) }() //nolint:errcheck // no-op after commit
+	if fileID < 0 {
+		return false, Channel{}, ChannelMessage{}, 0, ErrChannelPhotoUnavailable
+	}
+	if fileID == 0 && locked.CurrentPhotoFileID == nil {
+		if err = tx.Commit(ctx); err != nil {
+			return false, Channel{}, ChannelMessage{}, 0, fmt.Errorf("commit empty channel photo clear: %w", err)
+		}
+		return false, channelFromRow(locked), ChannelMessage{}, 0, nil
+	}
+	if _, err = qtx.LockChannelState(ctx, channelID); err != nil {
+		return false, Channel{}, ChannelMessage{}, 0, fmt.Errorf("lock channel state for photo: %w", err)
+	}
+	var selectedFileID, uploaderID *int64
+	action := ChannelMessageActionDeletePhoto
+	if fileID > 0 {
+		_, err = qtx.LockPhotoFileForAttach(ctx, db.LockPhotoFileForAttachParams{FileID: fileID, UploaderID: callerID})
+		switch {
+		case errors.Is(err, pgx.ErrNoRows):
+			return false, Channel{}, ChannelMessage{}, 0, ErrChannelPhotoUnavailable
+		case err != nil:
+			return false, Channel{}, ChannelMessage{}, 0, fmt.Errorf("lock channel photo upload: %w", err)
+		}
+		_, err = qtx.FreshPhotoFileForAttach(ctx, db.FreshPhotoFileForAttachParams{FileID: fileID, UploaderID: callerID})
+		switch {
+		case errors.Is(err, pgx.ErrNoRows):
+			return false, Channel{}, ChannelMessage{}, 0, ErrChannelPhotoUnavailable
+		case err != nil:
+			return false, Channel{}, ChannelMessage{}, 0, fmt.Errorf("check channel photo eligibility: %w", err)
+		}
+		selectedFileID = &fileID
+		uploaderID = &callerID
+		action = ChannelMessageActionEditPhoto
+	}
+	b, err := bumpChannelState(ctx, qtx, channelID)
+	if err != nil {
+		return false, Channel{}, ChannelMessage{}, 0, fmt.Errorf("bump channel state for photo: %w", err)
+	}
+	row, err := qtx.SetChannelCurrentPhoto(ctx, db.SetChannelCurrentPhotoParams{
+		ID: channelID, CurrentPhotoFileID: selectedFileID, CurrentPhotoUploaderID: uploaderID,
+	})
+	if err != nil {
+		return false, Channel{}, ChannelMessage{}, 0, fmt.Errorf("set channel current photo: %w", err)
+	}
+	if err = qtx.InsertChannelPhotoChangeMessage(ctx, db.InsertChannelPhotoChangeMessageParams{
+		ChannelID: channelID, LocalID: b.LocalID, FromID: callerID, FileID: selectedFileID, ActionType: int16(action),
+	}); err != nil {
+		return false, Channel{}, ChannelMessage{}, 0, fmt.Errorf("insert channel photo service message: %w", err)
+	}
+	if err = qtx.InsertChannelEvent(ctx, db.InsertChannelEventParams{
+		ChannelID: channelID, Pts: b.Pts, Type: int16(EventNewMessage), LocalID: b.LocalID,
+	}); err != nil {
+		return false, Channel{}, ChannelMessage{}, 0, fmt.Errorf("insert channel photo event: %w", err)
+	}
+	messageRow, err := qtx.ChannelMessageByLocal(ctx, db.ChannelMessageByLocalParams{ChannelID: channelID, LocalID: b.LocalID})
+	if err != nil {
+		return false, Channel{}, ChannelMessage{}, 0, fmt.Errorf("reload channel photo service message: %w", err)
+	}
+	if err = tx.Commit(ctx); err != nil {
+		return false, Channel{}, ChannelMessage{}, 0, fmt.Errorf("commit channel photo: %w", err)
+	}
+	return true, channelFromRow(row), channelMessageFromFields(channelMsgFields(messageRow)), int(b.Pts), nil
 }
 
 // SetChannelSignatures replaces a broadcast channel's signature setting after

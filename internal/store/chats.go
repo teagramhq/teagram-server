@@ -306,7 +306,7 @@ func (s *Store) SetChatPhoto(ctx context.Context, chatID, callerID, fileID int64
 	if fileID == 0 {
 		action = ChatActionDeletePhoto
 	} else {
-		_, err = m.qtx.LockChatPhotoFileForAttach(ctx, db.LockChatPhotoFileForAttachParams{
+		_, err = m.qtx.LockPhotoFileForAttach(ctx, db.LockPhotoFileForAttachParams{
 			FileID: fileID, UploaderID: callerID,
 		})
 		switch {
@@ -314,6 +314,15 @@ func (s *Store) SetChatPhoto(ctx context.Context, chatID, callerID, fileID int64
 			return false, Chat{}, Message{}, nil, ErrChatPhotoUnavailable
 		case err != nil:
 			return false, Chat{}, Message{}, nil, fmt.Errorf("lock chat photo upload: %w", err)
+		}
+		_, err = m.qtx.FreshPhotoFileForAttach(ctx, db.FreshPhotoFileForAttachParams{
+			FileID: fileID, UploaderID: callerID,
+		})
+		switch {
+		case errors.Is(err, pgx.ErrNoRows):
+			return false, Chat{}, Message{}, nil, ErrChatPhotoUnavailable
+		case err != nil:
+			return false, Chat{}, Message{}, nil, fmt.Errorf("check chat photo eligibility: %w", err)
 		}
 		fileIDValue = &fileID
 		uploaderIDValue = &callerID

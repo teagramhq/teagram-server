@@ -263,6 +263,116 @@ func (h *handlers) handleEditChannelTitle(r *mtproto.Request) (bin.Encoder, erro
 	}, nil
 }
 
+func (h *handlers) handleEditChannelPhoto(r *mtproto.Request) (bin.Encoder, error) {
+	var req tg.ChannelsEditPhotoRequest
+	if err := req.Decode(r.Buf); err != nil {
+		return nil, errMethodNotImpl
+	}
+	if r.UserID == 0 {
+		return nil, errAuthKeyUnreg
+	}
+	channelID, err := h.inputChannelID(req.Channel, r.UserID)
+	if err != nil {
+		return nil, err
+	}
+	var fileID, clientFileID int64
+	var uploadParts int
+	var uploadName, uploadChecksum string
+	var hasUpload bool
+	switch photo := req.Photo.(type) {
+	case *tg.InputChatPhotoEmpty:
+	case *tg.InputChatUploadedPhoto:
+		if photo.Flags != 1 {
+			return nil, errInputRequestInvalid
+		}
+		input, ok := photo.GetFile()
+		if !ok || input == nil {
+			return nil, errMediaInvalid
+		}
+		clientFileID, uploadParts, uploadName, uploadChecksum, err = inputPhotoFileParts(input)
+		if err != nil {
+			return nil, err
+		}
+		if int64(uploadParts) > (maxPhotoJPEGBytes+store.MaxPartBytes-1)/store.MaxPartBytes {
+			return nil, errFilePartInvalid
+		}
+		if uploadName = sanitizeFileName(uploadName); uploadName == "" {
+			uploadName = "channel.jpg"
+		}
+		hasUpload = true
+	default:
+		return nil, errInputRequestInvalid
+	}
+	if err := h.checkRateLimit(r, "update_profile", h.rateLimitUpdateProfile); err != nil {
+		return nil, err
+	}
+	if err := h.store.CheckChannelPhotoEditPermission(r.Ctx, channelID, r.UserID); err != nil {
+		switch {
+		case errors.Is(err, store.ErrNotMember):
+			return nil, errPeerIDInvalid
+		case errors.Is(err, store.ErrChatAdminRequired):
+			return nil, errChatAdminRequired
+		default:
+			h.log.Error("check channel photo permission", "channel_id", channelID, "user_id", r.UserID, "err", err)
+			return nil, errInternal
+		}
+	}
+	if hasUpload {
+		file, assembleErr := h.assemblePhotoFile(r.Ctx, r.UserID, clientFileID, uploadParts, uploadName, uploadChecksum)
+		if assembleErr != nil {
+			return nil, assembleErr
+		}
+		fileID = file.ID
+	}
+	changed, channel, service, pts, err := h.store.SetChannelPhoto(r.Ctx, channelID, r.UserID, fileID)
+	if errors.Is(err, store.ErrNotMember) {
+		return nil, errPeerIDInvalid
+	}
+	if errors.Is(err, store.ErrChatAdminRequired) {
+		return nil, errChatAdminRequired
+	}
+	if errors.Is(err, store.ErrChannelPhotoUnavailable) {
+		return nil, errMediaInvalid
+	}
+	if err != nil {
+		h.log.Error("edit channel photo", "channel_id", channelID, "user_id", r.UserID, "err", err)
+		return nil, errInternal
+	}
+	if !changed {
+		return &tg.Updates{Updates: []tg.UpdateClass{}, Date: int(h.now().Unix())}, nil
+	}
+	h.notifyChannelPost(r.Ctx, channelID)
+	chats, err := h.loadChannels(r.Ctx, map[int64]bool{channelID: true}, r.UserID)
+	if err != nil {
+		h.log.Error("edit channel photo render", "channel_id", channelID, "user_id", r.UserID, "err", err)
+		return nil, errInternal
+	}
+	users, err := h.loadUsers(r.Ctx, map[int64]bool{r.UserID: true}, r.UserID)
+	if err != nil {
+		h.log.Error("edit channel photo users", "channel_id", channelID, "err", err)
+		return nil, errInternal
+	}
+	files, err := h.loadChannelFiles(r.Ctx, []store.ChannelMessage{service})
+	if err != nil {
+		h.log.Error("edit channel photo file", "channel_id", channelID, "local_id", service.LocalID, "err", err)
+		return nil, errInternal
+	}
+	message, err := channelMessageToTL(service, r.UserID, files, !channel.Megagroup)
+	if err != nil {
+		h.log.Error("render channel photo service message", "channel_id", channelID, "local_id", service.LocalID, "err", err)
+		return nil, errInternal
+	}
+	return &tg.Updates{
+		Updates: []tg.UpdateClass{
+			&tg.UpdateNewChannelMessage{Message: message, Pts: pts, PtsCount: 1},
+			&tg.UpdateChannel{ChannelID: channelID},
+		},
+		Chats: chats,
+		Users: users,
+		Date:  int(service.Date.Unix()),
+	}, nil
+}
+
 // handleGetFullChannel serves channels.getFullChannel. The store reads channel
 // visibility, membership and full-info metadata from one snapshot so a leave or
 // ban during hydration cannot combine an old authorization decision with a new
@@ -314,6 +424,9 @@ func (h *handlers) handleGetFullChannel(r *mtproto.Request) (bin.Encoder, error)
 		About:          snapshot.Channel.About,
 		ChatPhoto:      &tg.PhotoEmpty{},
 		NotifySettings: notifySettings,
+	}
+	if member && snapshot.CurrentPhoto != nil {
+		full.ChatPhoto = h.photoToTL(*snapshot.CurrentPhoto)
 	}
 	full.SetTTLPeriod(snapshot.Channel.TTLPeriod)
 	if pinnedMessageID := snapshot.Channel.PinnedMessageID; pinnedMessageID != nil {

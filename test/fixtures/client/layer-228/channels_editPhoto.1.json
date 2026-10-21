@@ -1,0 +1,33 @@
+{
+  "layer": 228,
+  "client": "gotd v0.162.0",
+  "source": "source-derived/channels_editPhoto.1.txt",
+  "method": "channels.editPhoto",
+  "request": {
+    "type": "channels.editPhoto",
+    "fields": {
+      "channel": {
+        "type": "inputChannel",
+        "fields": {
+          "channel_id": "<N>",
+          "access_hash": "REDACTED"
+        }
+      },
+      "photo": {
+        "type": "inputChatUploadedPhoto",
+        "flags": 1,
+        "fields": {
+          "file": {
+            "type": "inputFile",
+            "fields": {
+              "id": "<N>",
+              "parts": 8,
+              "name": "channel.jpg",
+              "md5_checksum": "REDACTED"
+            }
+          }
+        }
+      }
+    }
+  }
+}

@@ -169,6 +169,8 @@ SELECT
     c.username AS channel_username,
     c.default_banned_rights AS channel_default_banned_rights,
     c.ttl_period AS channel_ttl_period,
+    c.current_photo_file_id AS channel_current_photo_file_id,
+    c.current_photo_uploader_id AS channel_current_photo_uploader_id,
     p.role AS member_role,
     p.banned_until AS member_banned_until,
     p.join_pts AS member_join_pts,
@@ -234,42 +236,44 @@ type PeerChannelDialogsForOwnerParams struct {
 }
 
 type PeerChannelDialogsForOwnerRow struct {
-	ChannelID                  int64
-	ChannelTitle               string
-	ChannelAbout               string
-	ChannelCreatorID           int64
-	ChannelMegagroup           bool
-	ChannelSignatures          bool
-	ChannelVersion             int32
-	ChannelDate                pgtype.Timestamptz
-	ChannelPinnedMessageID     *int32
-	ChannelUsername            *string
-	ChannelDefaultBannedRights []string
-	ChannelTtlPeriod           int32
-	MemberRole                 int16
-	MemberBannedUntil          pgtype.Timestamptz
-	MemberJoinPts              int64
-	ReadInboxMaxID             int64
-	UnreadCount                int32
-	SummaryEntitled            bool
-	SummaryStatusExists        bool
-	SummaryVersion             int16
-	SummaryReady               bool
-	SummaryTotalLive           int64
-	SummaryAuthorLive          int64
-	ChannelPts                 int64
-	TopLocalID                 int64
-	TopFromID                  int64
-	TopDate                    pgtype.Timestamptz
-	TopMessage                 string
-	TopEditDate                pgtype.Timestamptz
-	TopRandomID                int64
-	TopGroupedID               *int64
-	TopFileID                  *int64
-	TopReplyToMsgID            *int32
-	TopActionType              int16
-	TopTtlPeriod               int32
-	TopPostAuthor              *string
+	ChannelID                     int64
+	ChannelTitle                  string
+	ChannelAbout                  string
+	ChannelCreatorID              int64
+	ChannelMegagroup              bool
+	ChannelSignatures             bool
+	ChannelVersion                int32
+	ChannelDate                   pgtype.Timestamptz
+	ChannelPinnedMessageID        *int32
+	ChannelUsername               *string
+	ChannelDefaultBannedRights    []string
+	ChannelTtlPeriod              int32
+	ChannelCurrentPhotoFileID     *int64
+	ChannelCurrentPhotoUploaderID *int64
+	MemberRole                    int16
+	MemberBannedUntil             pgtype.Timestamptz
+	MemberJoinPts                 int64
+	ReadInboxMaxID                int64
+	UnreadCount                   int32
+	SummaryEntitled               bool
+	SummaryStatusExists           bool
+	SummaryVersion                int16
+	SummaryReady                  bool
+	SummaryTotalLive              int64
+	SummaryAuthorLive             int64
+	ChannelPts                    int64
+	TopLocalID                    int64
+	TopFromID                     int64
+	TopDate                       pgtype.Timestamptz
+	TopMessage                    string
+	TopEditDate                   pgtype.Timestamptz
+	TopRandomID                   int64
+	TopGroupedID                  *int64
+	TopFileID                     *int64
+	TopReplyToMsgID               *int32
+	TopActionType                 int16
+	TopTtlPeriod                  int32
+	TopPostAuthor                 *string
 }
 
 // PeerChannelDialogsForOwner is the channel counterpart of
@@ -299,6 +303,8 @@ func (q *Queries) PeerChannelDialogsForOwner(ctx context.Context, arg PeerChanne
 			&i.ChannelUsername,
 			&i.ChannelDefaultBannedRights,
 			&i.ChannelTtlPeriod,
+			&i.ChannelCurrentPhotoFileID,
+			&i.ChannelCurrentPhotoUploaderID,
 			&i.MemberRole,
 			&i.MemberBannedUntil,
 			&i.MemberJoinPts,

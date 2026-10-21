@@ -69,6 +69,87 @@ func (q *Queries) ClearDeletedChannelFileRefs(ctx context.Context, fileID *int64
 	return result.RowsAffected(), nil
 }
 
+const currentChannelPeerPhotoForDownload = `-- name: CurrentChannelPeerPhotoForDownload :one
+SELECT f.id, f.uploader_id, f.access_hash, f.size, f.mime_type, f.file_name, f.stored, f.date, f.subtype_rights, f.media_kind, f.width, f.height
+FROM channels c
+JOIN channel_participants cp ON cp.channel_id = c.id AND cp.user_id = $1::bigint
+JOIN files f ON f.id = c.current_photo_file_id AND f.uploader_id = c.current_photo_uploader_id
+WHERE c.id = $2::bigint
+  AND c.deleted_at IS NULL
+  AND (cp.banned_until IS NULL OR cp.banned_until <= now())
+  AND c.current_photo_file_id = $3::bigint
+  AND f.stored = true
+  AND f.media_kind = 'photo'
+`
+
+type CurrentChannelPeerPhotoForDownloadParams struct {
+	ViewerID  int64
+	ChannelID int64
+	FileID    int64
+}
+
+func (q *Queries) CurrentChannelPeerPhotoForDownload(ctx context.Context, arg CurrentChannelPeerPhotoForDownloadParams) (File, error) {
+	row := q.db.QueryRow(ctx, currentChannelPeerPhotoForDownload, arg.ViewerID, arg.ChannelID, arg.FileID)
+	var i File
+	err := row.Scan(
+		&i.ID,
+		&i.UploaderID,
+		&i.AccessHash,
+		&i.Size,
+		&i.MimeType,
+		&i.FileName,
+		&i.Stored,
+		&i.Date,
+		&i.SubtypeRights,
+		&i.MediaKind,
+		&i.Width,
+		&i.Height,
+	)
+	return i, err
+}
+
+const currentChannelPhotoForDownload = `-- name: CurrentChannelPhotoForDownload :one
+SELECT f.id, f.uploader_id, f.access_hash, f.size, f.mime_type, f.file_name, f.stored, f.date, f.subtype_rights, f.media_kind, f.width, f.height
+FROM channels c
+JOIN channel_participants cp ON cp.channel_id = c.id AND cp.user_id = $1::bigint
+JOIN files f ON f.id = c.current_photo_file_id AND f.uploader_id = c.current_photo_uploader_id
+WHERE c.deleted_at IS NULL
+  AND (cp.banned_until IS NULL OR cp.banned_until <= now())
+  AND c.current_photo_file_id = $2::bigint
+  AND f.access_hash = $3::bigint
+  AND f.stored = true
+  AND f.media_kind = 'photo'
+`
+
+type CurrentChannelPhotoForDownloadParams struct {
+	ViewerID   int64
+	FileID     int64
+	AccessHash int64
+}
+
+// CurrentChannelPhotoForDownload admits the exact current avatar to an
+// unbanned member, including a new member whose history floor predates the
+// photo service message.
+func (q *Queries) CurrentChannelPhotoForDownload(ctx context.Context, arg CurrentChannelPhotoForDownloadParams) (File, error) {
+	row := q.db.QueryRow(ctx, currentChannelPhotoForDownload, arg.ViewerID, arg.FileID, arg.AccessHash)
+	var i File
+	err := row.Scan(
+		&i.ID,
+		&i.UploaderID,
+		&i.AccessHash,
+		&i.Size,
+		&i.MimeType,
+		&i.FileName,
+		&i.Stored,
+		&i.Date,
+		&i.SubtypeRights,
+		&i.MediaKind,
+		&i.Width,
+		&i.Height,
+	)
+	return i, err
+}
+
 const currentChatPeerPhotoForDownload = `-- name: CurrentChatPeerPhotoForDownload :one
 SELECT f.id, f.uploader_id, f.access_hash, f.size, f.mime_type, f.file_name, f.stored, f.date, f.subtype_rights, f.media_kind, f.width, f.height
 FROM chats c
@@ -189,6 +270,11 @@ WHERE f.id = $1
       WHERE c.current_photo_file_id = f.id
         AND c.current_photo_file_id IS NOT NULL
   )
+  AND NOT EXISTS (
+      SELECT 1 FROM channels c
+      WHERE c.current_photo_file_id = f.id
+        AND c.current_photo_file_id IS NOT NULL
+  )
 `
 
 type DeleteUnassembledFileParams struct {
@@ -232,6 +318,11 @@ WHERE f.id = $1
   )
   AND NOT EXISTS (
       SELECT 1 FROM chats c
+      WHERE c.current_photo_file_id = f.id
+        AND c.current_photo_file_id IS NOT NULL
+  )
+  AND NOT EXISTS (
+      SELECT 1 FROM channels c
       WHERE c.current_photo_file_id = f.id
         AND c.current_photo_file_id IS NOT NULL
   )
@@ -479,6 +570,56 @@ func (q *Queries) FilesByIDs(ctx context.Context, ids []int64) ([]File, error) {
 	return items, nil
 }
 
+const freshPhotoFileForAttach = `-- name: FreshPhotoFileForAttach :one
+SELECT f.id
+FROM files f
+WHERE f.id = $1::bigint
+  AND f.uploader_id = $2::bigint
+  AND f.stored = true
+  AND f.media_kind = 'photo'
+  AND f.width BETWEEN 1 AND 10000
+  AND f.height BETWEEN 1 AND 10000
+  AND NOT EXISTS (
+      SELECT 1 FROM messages m WHERE m.file_id = f.id AND m.file_id <> 0
+  )
+  AND NOT EXISTS (
+      SELECT 1 FROM channel_messages cm WHERE cm.file_id = f.id AND cm.file_id IS NOT NULL
+  )
+  AND NOT EXISTS (
+      SELECT 1 FROM user_photos up WHERE up.file_id = f.id
+  )
+  AND NOT EXISTS (
+      SELECT 1 FROM profile_upload_receipt receipt WHERE receipt.file_id = f.id
+  )
+  AND NOT EXISTS (
+      SELECT 1 FROM file_upload_grants grant_row WHERE grant_row.file_id = f.id
+  )
+  AND NOT EXISTS (
+      SELECT 1 FROM chats c
+      WHERE c.current_photo_file_id = f.id
+        AND c.current_photo_file_id IS NOT NULL
+  )
+  AND NOT EXISTS (
+      SELECT 1 FROM channels c
+      WHERE c.current_photo_file_id = f.id
+        AND c.current_photo_file_id IS NOT NULL
+  )
+`
+
+type FreshPhotoFileForAttachParams struct {
+	FileID     int64
+	UploaderID int64
+}
+
+// FreshPhotoFileForAttach checks ownership, publication, validated photo
+// dimensions and every prior reference after the caller owns the file row.
+func (q *Queries) FreshPhotoFileForAttach(ctx context.Context, arg FreshPhotoFileForAttachParams) (int64, error) {
+	row := q.db.QueryRow(ctx, freshPhotoFileForAttach, arg.FileID, arg.UploaderID)
+	var id int64
+	err := row.Scan(&id)
+	return id, err
+}
+
 const insertFile = `-- name: InsertFile :one
 INSERT INTO files (uploader_id, access_hash, size, mime_type, file_name, subtype_rights)
 VALUES ($1, $2, $3, $4, $5, $6)
@@ -566,53 +707,6 @@ func (q *Queries) InsertPhotoDerivative(ctx context.Context, arg InsertPhotoDeri
 	return err
 }
 
-const lockChatPhotoFileForAttach = `-- name: LockChatPhotoFileForAttach :one
-SELECT f.id
-FROM files f
-WHERE f.id = $1::bigint
-  AND f.uploader_id = $2::bigint
-  AND f.stored = true
-  AND f.media_kind = 'photo'
-  AND f.width BETWEEN 1 AND 10000
-  AND f.height BETWEEN 1 AND 10000
-  AND NOT EXISTS (
-      SELECT 1 FROM messages m WHERE m.file_id = f.id AND m.file_id <> 0
-  )
-  AND NOT EXISTS (
-      SELECT 1 FROM channel_messages cm WHERE cm.file_id = f.id AND cm.file_id IS NOT NULL
-  )
-  AND NOT EXISTS (
-      SELECT 1 FROM user_photos up WHERE up.file_id = f.id
-  )
-  AND NOT EXISTS (
-      SELECT 1 FROM profile_upload_receipt receipt WHERE receipt.file_id = f.id
-  )
-  AND NOT EXISTS (
-      SELECT 1 FROM file_upload_grants grant_row WHERE grant_row.file_id = f.id
-  )
-  AND NOT EXISTS (
-      SELECT 1 FROM chats c
-      WHERE c.current_photo_file_id = f.id
-        AND c.current_photo_file_id IS NOT NULL
-  )
-FOR SHARE OF f
-`
-
-type LockChatPhotoFileForAttachParams struct {
-	FileID     int64
-	UploaderID int64
-}
-
-// LockChatPhotoFileForAttach is the eligibility check and reference-writer
-// interlock. It runs only after the chat row and sorted member-owner keys are
-// held; no chat or owner lock is acquired after this file lock.
-func (q *Queries) LockChatPhotoFileForAttach(ctx context.Context, arg LockChatPhotoFileForAttachParams) (int64, error) {
-	row := q.db.QueryRow(ctx, lockChatPhotoFileForAttach, arg.FileID, arg.UploaderID)
-	var id int64
-	err := row.Scan(&id)
-	return id, err
-}
-
 const lockFileForErase = `-- name: LockFileForErase :one
 SELECT id, size FROM files WHERE id = $1 FOR UPDATE SKIP LOCKED
 `
@@ -698,6 +792,30 @@ func (q *Queries) LockFileForUploadGrantCleanup(ctx context.Context, id int64) (
 	return id_2, err
 }
 
+const lockPhotoFileForAttach = `-- name: LockPhotoFileForAttach :one
+SELECT id
+FROM files
+WHERE id = $1::bigint
+  AND uploader_id = $2::bigint
+FOR NO KEY UPDATE
+`
+
+type LockPhotoFileForAttachParams struct {
+	FileID     int64
+	UploaderID int64
+}
+
+// LockPhotoFileForAttach serializes fresh-only photo references across chats
+// and channels. The owning peer row is already held; this must be the terminal
+// lock class. Eligibility is checked in the following statement so a waiter
+// observes references committed by the lock holder.
+func (q *Queries) LockPhotoFileForAttach(ctx context.Context, arg LockPhotoFileForAttachParams) (int64, error) {
+	row := q.db.QueryRow(ctx, lockPhotoFileForAttach, arg.FileID, arg.UploaderID)
+	var id int64
+	err := row.Scan(&id)
+	return id, err
+}
+
 const markFileStored = `-- name: MarkFileStored :execrows
 UPDATE files SET stored = true WHERE id = $1 AND stored = false
 `
@@ -760,7 +878,8 @@ SELECT f.id, f.size, f.stored,
            WHERE cm.file_id = f.id AND cm.deleted = false
        ) AS channel_ref,
        coalesce(gallery.found, false) AS gallery_ref,
-       coalesce(chat_photo.found, false) AS chat_ref
+       coalesce(chat_photo.found, false) AS chat_ref,
+       coalesce(channel_photo.found, false) AS channel_photo_ref
 FROM files f
 LEFT JOIN LATERAL (
     SELECT true AS found
@@ -775,6 +894,13 @@ LEFT JOIN LATERAL (
       AND c.current_photo_file_id IS NOT NULL
     LIMIT 1
 ) chat_photo ON true
+LEFT JOIN LATERAL (
+    SELECT true AS found
+    FROM channels c
+    WHERE c.current_photo_file_id = f.id
+      AND c.current_photo_file_id IS NOT NULL
+    LIMIT 1
+) channel_photo ON true
 WHERE f.id > $2 AND f.id <= $3
 ORDER BY f.id
 LIMIT $4::int
@@ -788,14 +914,15 @@ type MediaErasureScanParams struct {
 }
 
 type MediaErasureScanRow struct {
-	ID         int64
-	Size       int64
-	Stored     bool
-	Aged       bool
-	MessageRef bool
-	ChannelRef bool
-	GalleryRef bool
-	ChatRef    bool
+	ID              int64
+	Size            int64
+	Stored          bool
+	Aged            bool
+	MessageRef      bool
+	ChannelRef      bool
+	GalleryRef      bool
+	ChatRef         bool
+	ChannelPhotoRef bool
 }
 
 // MediaErasureScan classifies one bounded window of files rows: for each row it
@@ -869,6 +996,7 @@ func (q *Queries) MediaErasureScan(ctx context.Context, arg MediaErasureScanPara
 			&i.ChannelRef,
 			&i.GalleryRef,
 			&i.ChatRef,
+			&i.ChannelPhotoRef,
 		); err != nil {
 			return nil, err
 		}
@@ -911,6 +1039,15 @@ WHERE f.id = $3
           JOIN chat_participants cp ON cp.chat_id = c.id AND cp.user_id = $5::bigint
           WHERE c.current_photo_file_id = f.id
             AND c.current_photo_uploader_id = f.uploader_id
+      )
+      OR EXISTS (
+          SELECT 1 FROM channels c
+          JOIN channel_participants cp ON cp.channel_id = c.id
+            AND cp.user_id = $5::bigint
+          WHERE c.current_photo_file_id = f.id
+            AND c.current_photo_uploader_id = f.uploader_id
+            AND c.deleted_at IS NULL
+            AND (cp.banned_until IS NULL OR cp.banned_until <= now())
       )
   )
 `
@@ -969,6 +1106,15 @@ WHERE f.id = $1
           JOIN chat_participants cp ON cp.chat_id = c.id AND cp.user_id = $3::bigint
           WHERE c.current_photo_file_id = f.id
             AND c.current_photo_uploader_id = f.uploader_id
+      )
+      OR EXISTS (
+          SELECT 1 FROM channels c
+          JOIN channel_participants cp ON cp.channel_id = c.id
+            AND cp.user_id = $3::bigint
+          WHERE c.current_photo_file_id = f.id
+            AND c.current_photo_uploader_id = f.uploader_id
+            AND c.deleted_at IS NULL
+            AND (cp.banned_until IS NULL OR cp.banned_until <= now())
       )
   )
 `

@@ -122,7 +122,7 @@ func (q *Queries) InsertChannelHistoryTTLChangeMessage(ctx context.Context, arg 
 const setChannelHistoryTTL = `-- name: SetChannelHistoryTTL :one
 UPDATE channels SET ttl_period = $1::integer, version = version + 1
 WHERE id = $2::bigint
-RETURNING id, title, about, creator_id, megagroup, version, date, pinned_message_id, username, title_tsv, publicly_discoverable, default_banned_rights, slowmode_seconds, pre_history_hidden, deleted_at, signatures, ttl_period
+RETURNING id, title, about, creator_id, megagroup, version, date, pinned_message_id, username, title_tsv, publicly_discoverable, default_banned_rights, slowmode_seconds, pre_history_hidden, deleted_at, signatures, ttl_period, current_photo_file_id, current_photo_uploader_id
 `
 
 type SetChannelHistoryTTLParams struct {
@@ -151,6 +151,8 @@ func (q *Queries) SetChannelHistoryTTL(ctx context.Context, arg SetChannelHistor
 		&i.DeletedAt,
 		&i.Signatures,
 		&i.TtlPeriod,
+		&i.CurrentPhotoFileID,
+		&i.CurrentPhotoUploaderID,
 	)
 	return i, err
 }

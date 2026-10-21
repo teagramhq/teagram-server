@@ -815,7 +815,7 @@ func TestChatPhotoAttachFailsAfterFileRowIsDeleted(t *testing.T) {
 			SELECT EXISTS (
 				SELECT 1 FROM pg_stat_activity
 				WHERE datname = current_database() AND pid <> pg_backend_pid() AND wait_event_type = 'Lock'
-				  AND query LIKE '%LockChatPhotoFileForAttach%'
+				  AND query LIKE '%LockPhotoFileForAttach%'
 			)
 		`).Scan(&waiting); err != nil {
 			t.Fatalf("check file lock waiter: %v", err)

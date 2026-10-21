@@ -160,9 +160,9 @@ func (h *handlers) channelToTLForResolve(ctx context.Context, c store.Channel, v
 
 // channelToTLPublic is the public view of a channel: what an account that is
 // not a member may be told about one, on resolveUsername and on the discovery
-// arm of contacts.search alike. Title, photo, participant count, username and
-// kind flags; no membership details, and Left is set because the viewer is not
-// a member as far as this rendering knows.
+// arm of contacts.search alike. Title, an empty photo constructor, participant
+// count, username and kind flags; no membership details, and Left is set because
+// the viewer is not a member as far as this rendering knows.
 //
 // AccessHash is derived for (viewerID, c.ID). Handing it to a non-member is
 // what makes the result usable — the hash names a peer and authorizes nothing,

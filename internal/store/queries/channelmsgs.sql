@@ -62,6 +62,12 @@ VALUES ($1, $2, $3, $4, 1);
 INSERT INTO channel_messages (channel_id, local_id, from_id, message, action_type)
 VALUES ($1, $2, $3, $4, 2);
 
+-- Photo actions share the channel log. action_type 4 carries the selected
+-- photo file identity; 5 is an empty clear and carries no file.
+-- name: InsertChannelPhotoChangeMessage :exec
+INSERT INTO channel_messages (channel_id, local_id, from_id, message, file_id, action_type)
+VALUES ($1, $2, $3, '', $4, $5);
+
 -- ChannelPostExistsActive returns the local_id of an existing, non-deleted post
 -- in channelID. Used to validate reply_to_msg_id inside the post transaction.
 --

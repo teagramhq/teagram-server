@@ -1413,6 +1413,32 @@ func (q *Queries) InsertChannelMessage(ctx context.Context, arg InsertChannelMes
 	return err
 }
 
+const insertChannelPhotoChangeMessage = `-- name: InsertChannelPhotoChangeMessage :exec
+INSERT INTO channel_messages (channel_id, local_id, from_id, message, file_id, action_type)
+VALUES ($1, $2, $3, '', $4, $5)
+`
+
+type InsertChannelPhotoChangeMessageParams struct {
+	ChannelID  int64
+	LocalID    int64
+	FromID     int64
+	FileID     *int64
+	ActionType int16
+}
+
+// Photo actions share the channel log. action_type 4 carries the selected
+// photo file identity; 5 is an empty clear and carries no file.
+func (q *Queries) InsertChannelPhotoChangeMessage(ctx context.Context, arg InsertChannelPhotoChangeMessageParams) error {
+	_, err := q.db.Exec(ctx, insertChannelPhotoChangeMessage,
+		arg.ChannelID,
+		arg.LocalID,
+		arg.FromID,
+		arg.FileID,
+		arg.ActionType,
+	)
+	return err
+}
+
 const insertChannelTitleChangeMessage = `-- name: InsertChannelTitleChangeMessage :exec
 INSERT INTO channel_messages (channel_id, local_id, from_id, message, action_type)
 VALUES ($1, $2, $3, $4, 2)

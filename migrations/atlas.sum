@@ -1,4 +1,4 @@
-h1:764c/HMNWGEtFkYPcB8CgFxjsJEWdwJ6+VSfwX20BS8=
+h1:ning/DgQ8wAK6R6GMP3WcDYC/TbTCq99ILupUSX38Es=
 20260721000001_baseline.sql h1:cnO6K1z0Uv3goEvecgJixKSio6ziaB1rF7cQLoCWOxs=
 20260721000002_auth_keys.sql h1:+vNabm6vdEAgu3H5ZGw2Wr8D/Y6i4ikAAUO3JbfZQeE=
 20260721000003_code_hardening.sql h1:8pbAqUpqcwOONUfac+qC51QjfC1JnObNCcXa1HC/dr0=
@@ -114,3 +114,4 @@ h1:764c/HMNWGEtFkYPcB8CgFxjsJEWdwJ6+VSfwX20BS8=
 20261021000002_channel_messages_history_ttl_expiry_idx.sql h1:BeSfcSndZHTL4CeCOL6Hr8wvOwHZi8HfcoDSdV5AWEc=
 20261021000003_basic_group_photos.sql h1:BTKDlMDd63KWSRP5P/7eQiSA/3muuhKEAT0yY+kpTWU=
 20261021000004_profile_upload_receipt_file_idx.sql h1:dADFoGXVhnjT7LgFLw+F941zyLcd9Z7DQiMKzfjffQg=
+20261021000005_channel_photos.sql h1:wang9iJcwkYM6s2RmkjuUcHU/JVQgGPNDUvzmrdOXT8=
