@@ -18,6 +18,9 @@ func TestLoadClientConfigDoesNotRequirePostgresOrAuthKey(t *testing.T) {
 	t.Setenv("TG_ADVERTISE_ADDR", "mtproto.example.com:443")
 	t.Setenv("TG_DC_ID", "7")
 	t.Setenv("TG_TURNSTILE_SITE_KEY", "site-key_123")
+	t.Setenv("TG_TURNSTILE_SECRET_KEY", "secret-key_123")
+	t.Setenv("TG_TURNSTILE_SECRET_KEY_FILE", "")
+	t.Setenv("TG_TURNSTILE_SIGNIN_ENABLED", "")
 
 	cfg, err := config.LoadClientConfig()
 	if err != nil {
@@ -29,10 +32,16 @@ func TestLoadClientConfigDoesNotRequirePostgresOrAuthKey(t *testing.T) {
 	if cfg.TurnstileSiteKey != "site-key_123" {
 		t.Fatalf("client config Turnstile site key = %q, want site-key_123", cfg.TurnstileSiteKey)
 	}
+	if !cfg.TurnstileEnabled {
+		t.Fatal("client config Turnstile disabled with valid credentials")
+	}
 }
 
 func TestLoadClientConfigRejectsInvalidTurnstileSiteKey(t *testing.T) {
 	t.Setenv("TG_TURNSTILE_SITE_KEY", "invalid site key")
+	t.Setenv("TG_TURNSTILE_SECRET_KEY", "secret-key_123")
+	t.Setenv("TG_TURNSTILE_SECRET_KEY_FILE", "")
+	t.Setenv("TG_TURNSTILE_SIGNIN_ENABLED", "")
 	if _, err := config.LoadClientConfig(); err == nil || !strings.Contains(err.Error(), "TG_TURNSTILE_SITE_KEY") {
 		t.Fatalf("LoadClientConfig error = %v, want site-key validation error", err)
 	}

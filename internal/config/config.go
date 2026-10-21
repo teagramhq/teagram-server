@@ -332,17 +332,18 @@ type TurnstileConfig struct {
 // Enabled reports whether the signup Siteverify gate is configured.
 func (c TurnstileConfig) Enabled() bool { return c.SecretKey != "" }
 
-// ClientConfig contains only the identity settings needed to render the
-// public discovery document. Unlike Config, loading it does not require
-// Postgres, the auth-key encryption master key, blob storage, or any other
-// service resource.
+// ClientConfig contains the settings needed to render the public discovery
+// document. Unlike Config, loading it does not require Postgres, the auth-key
+// encryption master key, blob storage, or any other service resource.
 type ClientConfig struct {
-	ListenAddr       string
-	RSAKeyPath       string
-	AdvertiseHost    string
-	AdvertisePort    int
-	DCID             int
-	TurnstileSiteKey string
+	ListenAddr                string
+	PublicWebSocketListenAddr string
+	RSAKeyPath                string
+	AdvertiseHost             string
+	AdvertisePort             int
+	DCID                      int
+	TurnstileSiteKey          string
+	TurnstileEnabled          bool
 	// AdvertiseDemoGuestSignUp is an availability hint only; registration
 	// policy remains controlled by the server's registration configuration.
 	AdvertiseDemoGuestSignUp bool
@@ -605,19 +606,30 @@ const ProfileBackupCleanupGrace = 7 * 24 * time.Hour
 const ProfileIdentifierRetentionFloor = ProfileRestoreCeiling + ProfileBackupCleanupGrace
 
 // LoadClientConfig is the resource-free subset used by the client-config
-// command. Keep it separate from Load: a public document needs only the
-// advertised identity and the RSA key, and must remain usable during a
-// database outage or before the auth-key master secret is provisioned.
+// command. Keep it separate from Load: a public document needs the advertised
+// identity, listener scope, and validated Turnstile settings, but not Postgres,
+// the auth-key master secret, blob storage, or any other service resource.
 func LoadClientConfig() (ClientConfig, error) {
+	cfg, err := loadClientIdentityConfig()
+	if err != nil {
+		return ClientConfig{}, err
+	}
+	turnstile, err := loadTurnstileConfig()
+	if err != nil {
+		return ClientConfig{}, err
+	}
+	cfg.TurnstileSiteKey = turnstile.SiteKey
+	cfg.TurnstileEnabled = turnstile.Enabled()
+	return cfg, nil
+}
+
+func loadClientIdentityConfig() (ClientConfig, error) {
 	listenAddr := envOr("TG_LISTEN_ADDR", ":2443")
 	cfg := ClientConfig{
-		ListenAddr:       listenAddr,
-		RSAKeyPath:       RSAKeyPath(),
-		DCID:             2,
-		TurnstileSiteKey: strings.TrimSpace(os.Getenv("TG_TURNSTILE_SITE_KEY")),
-	}
-	if cfg.TurnstileSiteKey != "" && !turnstileKeyPattern.MatchString(cfg.TurnstileSiteKey) {
-		return ClientConfig{}, errors.New("TG_TURNSTILE_SITE_KEY must contain only letters, digits, '_' or '-' (maximum 256 characters)")
+		ListenAddr:                listenAddr,
+		PublicWebSocketListenAddr: os.Getenv("TG_PUBLIC_WEBSOCKET_LISTEN_ADDR"),
+		RSAKeyPath:                RSAKeyPath(),
+		DCID:                      2,
 	}
 	if v := os.Getenv("TG_DC_ID"); v != "" {
 		id, err := strconv.Atoi(v)
@@ -769,7 +781,7 @@ func Load(log *slog.Logger) (Config, error) {
 			return Config{}, fmt.Errorf("%s is no longer supported", name)
 		}
 	}
-	identity, err := LoadClientConfig()
+	identity, err := loadClientIdentityConfig()
 	if err != nil {
 		return Config{}, err
 	}
@@ -785,7 +797,7 @@ func Load(log *slog.Logger) (Config, error) {
 		ListenAddr:                    identity.ListenAddr,
 		WebSocketListenAddr:           os.Getenv("TG_WEBSOCKET_LISTEN_ADDR"),
 		WebSocketOriginPatterns:       originPatterns,
-		PublicWebSocketListenAddr:     os.Getenv("TG_PUBLIC_WEBSOCKET_LISTEN_ADDR"),
+		PublicWebSocketListenAddr:     identity.PublicWebSocketListenAddr,
 		PublicWebSocketOriginPatterns: publicOriginPatterns,
 		AdminListenAddr:               os.Getenv("TG_ADMIN_LISTEN_ADDR"),
 		AdminOrigin:                   os.Getenv("TG_ADMIN_ORIGIN"),
