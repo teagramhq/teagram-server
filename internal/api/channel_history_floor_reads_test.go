@@ -366,3 +366,79 @@ func TestChannelUpdatesOmitPinnedIDAtOrBelowHistoryFloor(t *testing.T) {
 		}
 	}
 }
+
+func TestChannelPinMutationResponseOmitsFlooredMessageID(t *testing.T) {
+	t.Parallel()
+	f := newChannelReadFloorFixture(t, "225109", "Floor pin mutation response")
+	hidden := f.post(t, "hidden pin target", 225190)
+	channelExec(t, context.Background(), f.dsn,
+		`UPDATE channel_participants SET available_min_id = $1 WHERE channel_id = $2 AND user_id = $3`,
+		hidden.LocalID, f.channel.ID, f.creator.ID,
+	)
+
+	assertPinResponse := func(name string, result bin.Encoder, wantPinned bool, wantIDs []int) {
+		t.Helper()
+		updates, ok := result.(*tg.Updates)
+		if !ok {
+			t.Fatalf("%s response = %T, want *tg.Updates", name, result)
+		}
+		for _, update := range updates.Updates {
+			pin, ok := update.(*tg.UpdatePinnedChannelMessages)
+			if !ok {
+				continue
+			}
+			if pin.Pinned != wantPinned {
+				t.Errorf("%s pinned = %t, want %t", name, pin.Pinned, wantPinned)
+			}
+			if len(pin.Messages) != len(wantIDs) {
+				t.Errorf("%s message ids = %v, want %v", name, pin.Messages, wantIDs)
+				return
+			}
+			for i, id := range wantIDs {
+				if pin.Messages[i] != id {
+					t.Errorf("%s message ids = %v, want %v", name, pin.Messages, wantIDs)
+					return
+				}
+			}
+			if pin.PtsCount != 1 {
+				t.Errorf("%s pts_count = %d, want 1", name, pin.PtsCount)
+			}
+			return
+		}
+		t.Errorf("%s response has no UpdatePinnedChannelMessages", name)
+	}
+
+	peer := api.InputPeerChannel(f.creator.ID, f.channel.ID)
+	result, err := api.UpdatePinnedMessageForTest(f.s, f.creator.ID, &tg.MessagesUpdatePinnedMessageRequest{
+		Peer: peer, ID: int(hidden.LocalID),
+	})
+	if err != nil {
+		t.Fatalf("pin floored post: %v", err)
+	}
+	assertPinResponse("pin floored post", result, true, nil)
+
+	result, err = api.UpdatePinnedMessageForTest(f.s, f.creator.ID, &tg.MessagesUpdatePinnedMessageRequest{
+		Peer: peer, Unpin: true,
+	})
+	if err != nil {
+		t.Fatalf("unpin floored post: %v", err)
+	}
+	assertPinResponse("unpin floored post", result, false, nil)
+
+	visible := f.post(t, "visible pin target", 225191)
+	result, err = api.UpdatePinnedMessageForTest(f.s, f.creator.ID, &tg.MessagesUpdatePinnedMessageRequest{
+		Peer: peer, ID: int(visible.LocalID),
+	})
+	if err != nil {
+		t.Fatalf("pin visible post: %v", err)
+	}
+	assertPinResponse("pin visible post", result, true, []int{int(visible.LocalID)})
+
+	result, err = api.UpdatePinnedMessageForTest(f.s, f.creator.ID, &tg.MessagesUpdatePinnedMessageRequest{
+		Peer: peer, Unpin: true,
+	})
+	if err != nil {
+		t.Fatalf("unpin visible post: %v", err)
+	}
+	assertPinResponse("unpin visible post", result, false, []int{int(visible.LocalID)})
+}

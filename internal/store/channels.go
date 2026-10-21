@@ -1849,11 +1849,14 @@ func (s *Store) ChannelPinnedMessage(ctx context.Context, channelID int64) (*int
 // ChannelPinChange reports what a pin or unpin recorded. Changed is false
 // when the channel already had the requested pin state; then nothing was
 // written and Pts is zero. Otherwise MessageID is the affected post (the new
-// pin, or the cleared one) and Pts is the channel pts of the event.
+// pin, or the cleared one), AvailableMinID is the caller's history floor from
+// the participant row re-read in the transaction, and Pts is the channel pts
+// of the event.
 type ChannelPinChange struct {
-	Changed   bool
-	MessageID int32
-	Pts       int
+	Changed        bool
+	MessageID      int32
+	AvailableMinID int64
+	Pts            int
 }
 
 // SetChannelPinnedMessage sets or clears the pinned message id on channelID.
@@ -1975,7 +1978,12 @@ func (s *Store) SetChannelPinnedMessage(ctx context.Context, channelID, callerID
 	if err = tx.Commit(ctx); err != nil {
 		return Channel{}, ChannelPinChange{}, fmt.Errorf("commit: %w", err)
 	}
-	return channelFromRow(row), ChannelPinChange{Changed: true, MessageID: *target, Pts: int(pts)}, nil
+	return channelFromRow(row), ChannelPinChange{
+		Changed:        true,
+		MessageID:      *target,
+		AvailableMinID: caller.AvailableMinID,
+		Pts:            int(pts),
+	}, nil
 }
 
 // CountChannelParticipants returns the number of participant rows for channelID.
