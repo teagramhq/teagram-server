@@ -83,7 +83,7 @@ func (q *Queries) ClaimUsername(ctx context.Context, arg ClaimUsernameParams) (C
 }
 
 const getChannelByUsername = `-- name: GetChannelByUsername :one
-SELECT c.id, c.title, c.about, c.creator_id, c.megagroup, c.version, c.date, c.pinned_message_id, c.username, c.title_tsv, c.publicly_discoverable, c.default_banned_rights, c.slowmode_seconds, c.pre_history_hidden, c.deleted_at, c.signatures, c.ttl_period FROM channels c
+SELECT c.id, c.title, c.about, c.creator_id, c.megagroup, c.version, c.date, c.pinned_message_id, c.username, c.title_tsv, c.publicly_discoverable, c.default_banned_rights, c.slowmode_seconds, c.pre_history_hidden, c.deleted_at, c.signatures, c.ttl_period, c.current_photo_file_id, c.current_photo_uploader_id FROM channels c
 JOIN usernames un ON un.owner_type = 'channel' AND un.owner_id = c.id
 WHERE un.handle = lower($1) AND c.deleted_at IS NULL
 `
@@ -109,6 +109,8 @@ func (q *Queries) GetChannelByUsername(ctx context.Context, handle string) (Chan
 		&i.DeletedAt,
 		&i.Signatures,
 		&i.TtlPeriod,
+		&i.CurrentPhotoFileID,
+		&i.CurrentPhotoUploaderID,
 	)
 	return i, err
 }

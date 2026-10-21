@@ -11,12 +11,13 @@ import (
 	"github.com/gotd/td/tgerr"
 	"github.com/jackc/pgx/v5"
 
+	"github.com/teagramhq/teagram-server/internal/config"
 	"github.com/teagramhq/teagram-server/internal/store"
 )
 
 func testSmokeHistoryTTL(t *testing.T) {
 	t.Helper()
-	f := newSmokeFixture(t)
+	f := newSmokeFixtureWithDeadline(t, config.RegistrationClosed, nil, 4*time.Minute)
 	const phoneA, phoneB, phoneC = "+15552244001", "+15552244002", "+15552244003"
 	seedSmokeUsers(t, f, phoneA, phoneB, phoneC)
 	alice := newSmokeClient(t, f, "history ttl Alice", phoneA)

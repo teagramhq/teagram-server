@@ -116,6 +116,42 @@ func (h *handlers) handleGetProfilePhotoFile(ctx context.Context, viewerID int64
 func (h *handlers) handleGetPeerProfilePhotoFile(
 	r *mtproto.Request, peer tg.InputPeerClass, photoID int64, big bool, offset int64, limit int,
 ) (bin.Encoder, error) {
+	if _, ok := peer.(*tg.InputPeerChannel); ok {
+		peerType, channelID, err := h.inputPeer(peer, r.UserID)
+		if err != nil || peerType != store.PeerTypeChannel || channelID <= 0 {
+			return nil, errLocationInvalid
+		}
+		gate := func(ctx context.Context, fileID, viewerID int64) (authorizedDownload, error) {
+			file, err := h.store.CurrentChannelPeerPhotoForDownload(ctx, channelID, fileID, viewerID)
+			switch {
+			case errors.Is(err, store.ErrFileNotFound):
+				return authorizedDownload{}, errLocationInvalid
+			case err != nil:
+				h.log.Error("current channel photo for download", "channel_id", channelID, "user_id", viewerID, "err", err)
+				return authorizedDownload{}, errInternal
+			}
+			if !big {
+				derivatives, derivativeErr := h.store.PhotoDerivativeForDownload(ctx, fileID, file.AccessHash, viewerID)
+				switch {
+				case errors.Is(derivativeErr, store.ErrFileNotFound):
+				case derivativeErr != nil:
+					h.log.Error("current channel photo derivative for download", "channel_id", channelID, "user_id", viewerID, "err", derivativeErr)
+					return authorizedDownload{}, errInternal
+				default:
+					file.PhotoDerivatives = derivatives
+					return authorizedDownload{
+						file: file,
+						photoDerivativeChunk: func(ctx context.Context, offset, limit int64) ([]byte, error) {
+							return h.store.PhotoDerivativeChunkForDownload(ctx, fileID, file.AccessHash, viewerID, offset, limit)
+						},
+					}, nil
+				}
+			}
+			return authorizedDownload{file: file}, nil
+		}
+		missingBlobIsFault := true
+		return h.serveFileChunk(r, photoID, offset, limit, gate, &missingBlobIsFault)
+	}
 	if chatPeer, ok := peer.(*tg.InputPeerChat); ok {
 		if chatPeer.ChatID <= 0 {
 			return nil, errLocationInvalid

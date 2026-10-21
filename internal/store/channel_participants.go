@@ -105,6 +105,13 @@ func (s *Store) ChannelParticipantForViewer(
 	default:
 		return snapshot, false, fmt.Errorf("select channel participant target: %w", err)
 	}
+	channels := []Channel{snapshot.Channel}
+	if err := s.hydrateCurrentChannelPhotos(ctx, qtx, channels, map[int64]ChannelMember{
+		channelID: snapshot.Viewer,
+	}); err != nil {
+		return snapshot, false, fmt.Errorf("load channel participant photo: %w", err)
+	}
+	snapshot.Channel = channels[0]
 
 	if err := tx.Commit(ctx); err != nil {
 		return snapshot, false, fmt.Errorf("commit channel participant snapshot: %w", err)
@@ -190,6 +197,13 @@ func (s *Store) ChannelParticipantsPageForViewer(
 	for i, row := range rows {
 		snapshot.Participants[i] = channelMemberFromRow(row)
 	}
+	channels := []Channel{snapshot.Channel}
+	if err := s.hydrateCurrentChannelPhotos(ctx, qtx, channels, map[int64]ChannelMember{
+		channelID: snapshot.Viewer,
+	}); err != nil {
+		return snapshot, false, fmt.Errorf("load channel participants photo: %w", err)
+	}
+	snapshot.Channel = channels[0]
 
 	if err := tx.Commit(ctx); err != nil {
 		return snapshot, false, fmt.Errorf("commit channel participants page snapshot: %w", err)

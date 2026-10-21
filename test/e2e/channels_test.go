@@ -2188,12 +2188,13 @@ func TestChannelsCrossReplica(t *testing.T) {
 	collB := newUpdateCollector()
 	bCmds := make(chan command)
 	bID := make(chan int64, 1)
+	var bUserID int64
 	errB := make(chan error, 1)
 	go func() {
 		errB <- runInteractive(ctx, createClient(port2, key, dcID, collB, nil), flowFor(phoneB, codes), bID, bCmds)
 	}()
 	select {
-	case <-bID:
+	case bUserID = <-bID:
 	case <-ctx.Done():
 		t.Fatalf("B login timeout: %v", ctx.Err())
 	}
@@ -2256,18 +2257,58 @@ func TestChannelsCrossReplica(t *testing.T) {
 
 	// B imports invite on server 2.
 	importChannelInvite(t, ctx, bCmds, hashB)
+	var channelPhotoBasePts int
+	execChannel(t, ctx, bCmds, func(ctx context.Context, client *tg.Client) error {
+		result, err := client.UpdatesGetChannelDifference(ctx, &tg.UpdatesGetChannelDifferenceRequest{
+			Channel: inputChannel(bUserID, chID), Filter: &tg.ChannelMessagesFilterEmpty{}, Pts: 0, Limit: 100,
+		})
+		if err != nil {
+			return err
+		}
+		switch difference := result.(type) {
+		case *tg.UpdatesChannelDifference:
+			channelPhotoBasePts = difference.Pts
+		case *tg.UpdatesChannelDifferenceEmpty:
+			channelPhotoBasePts = difference.Pts
+		case *tg.UpdatesChannelDifferenceTooLong:
+			return fmt.Errorf("initial channel difference is too long: %T", difference)
+		default:
+			return fmt.Errorf("initial channel difference = %T", result)
+		}
+		return nil
+	})
 
-	// A reconnects to server 1, posts a message.
+	// A reconnects to server 1, posts a message and then selects a channel photo.
+	body := smokeJPEGAtUploadSize(t, smokePhotoPartCount)
+	const photoUploadID = int64(1295063)
 	aClient2 := createClient(port1, key, dcID, newUpdateCollector(), sessA)
 	if err := aClient2.Run(ctx, func(ctx context.Context) error {
-		_, err := aClient2.API().MessagesSendMessage(ctx, &tg.MessagesSendMessageRequest{
+		api := aClient2.API()
+		if _, err := api.MessagesSendMessage(ctx, &tg.MessagesSendMessageRequest{
 			Peer:     peerChannel(aUserID, chID),
 			Message:  "cross replica channel",
 			RandomID: 5005001,
+		}); err != nil {
+			return err
+		}
+		for part := range smokePhotoPartCount {
+			start := part * smokePhotoPartSize
+			ok, err := api.UploadSaveFilePart(ctx, &tg.UploadSaveFilePartRequest{
+				FileID: photoUploadID, FilePart: part, Bytes: body[start : start+smokePhotoPartSize],
+			})
+			if err != nil {
+				return err
+			}
+			if !ok {
+				return fmt.Errorf("cross-replica photo upload part %d returned false", part)
+			}
+		}
+		_, err := api.ChannelsEditPhoto(ctx, &tg.ChannelsEditPhotoRequest{
+			Channel: inputChannel(aUserID, chID), Photo: uploadedSmokeGroupPhoto(photoUploadID, smokePhotoPartCount, body),
 		})
 		return err
 	}); err != nil {
-		t.Fatalf("A post: %v", err)
+		t.Fatalf("A post and channel photo: %v", err)
 	}
 
 	// B (on server 2) receives the channel message over LISTEN/NOTIFY.
@@ -2278,6 +2319,42 @@ func TestChannelsCrossReplica(t *testing.T) {
 		}
 	case <-ctx.Done():
 		t.Fatalf("B timed out waiting for cross-replica channel message: %v", ctx.Err())
+	}
+	photoUpdate, err := collB.waitService(ctx, &tg.MessageActionChatEditPhoto{})
+	if err != nil {
+		t.Fatalf("B timed out waiting for cross-replica channel photo: %v", err)
+	}
+	channelPhoto := channelAvatarPhotoFromAction(t, photoUpdate.svc.Action, "cross-replica live photo")
+	assertChannelAvatarService(t, photoUpdate.svc.Action, channelPhoto.ID, "cross-replica live photo")
+
+	var recoveredPhotoID int64
+	execChannel(t, ctx, bCmds, func(ctx context.Context, client *tg.Client) error {
+		difference, err := client.UpdatesGetChannelDifference(ctx, &tg.UpdatesGetChannelDifferenceRequest{
+			Channel: inputChannel(bUserID, chID), Filter: &tg.ChannelMessagesFilterEmpty{}, Pts: channelPhotoBasePts, Limit: 100,
+		})
+		if err != nil {
+			return err
+		}
+		page, ok := difference.(*tg.UpdatesChannelDifference)
+		if !ok {
+			return fmt.Errorf("cross-replica photo difference = %T, want *tg.UpdatesChannelDifference", difference)
+		}
+		for _, message := range page.NewMessages {
+			service, ok := message.(*tg.MessageService)
+			if !ok {
+				continue
+			}
+			if action, ok := service.Action.(*tg.MessageActionChatEditPhoto); ok {
+				photo, ok := action.Photo.(*tg.Photo)
+				if ok {
+					recoveredPhotoID = photo.ID
+				}
+			}
+		}
+		return nil
+	})
+	if recoveredPhotoID != channelPhoto.ID {
+		t.Fatalf("server 2 channel difference photo id = %d, want server 1 photo %d", recoveredPhotoID, channelPhoto.ID)
 	}
 
 	close(bCmds)

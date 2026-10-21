@@ -142,6 +142,8 @@ const (
 	ChannelMessageActionCreate
 	ChannelMessageActionEditTitle
 	ChannelMessageActionSetMessagesTTL
+	ChannelMessageActionEditPhoto
+	ChannelMessageActionDeletePhoto
 )
 
 // channelMsgFields is a layout-identical copy of the sqlc channel-message

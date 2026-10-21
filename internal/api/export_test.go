@@ -602,6 +602,21 @@ func EditChatPhotoForTest(
 	return h.handleEditChatPhoto(&mtproto.Request{Ctx: context.Background(), UserID: userID, Buf: &buf})
 }
 
+// EditChannelPhotoForTest invokes channels.editPhoto with the supplied upload
+// backend and account storage cap.
+func EditChannelPhotoForTest(
+	s *store.Store, userID int64, blobs blob.Store, maxUserStorageBytes int64,
+	req *tg.ChannelsEditPhotoRequest,
+) (bin.Encoder, error) {
+	var buf bin.Buffer
+	if err := req.Encode(&buf); err != nil {
+		return nil, err
+	}
+	h := testHandlersWithBlobs(s, blobs)
+	h.maxUserStorageBytes = maxUserStorageBytes
+	return h.handleEditChannelPhoto(&mtproto.Request{Ctx: context.Background(), UserID: userID, Buf: &buf})
+}
+
 // GetStateForTestWithAuthKey invokes updates.getState with an authorization ID
 // so tests can cover client-scoped acknowledgements.
 func GetStateForTestWithAuthKey(s *store.Store, userID int64, authKeyID [8]byte) (bin.Encoder, error) {
@@ -1394,6 +1409,15 @@ func GetPeerSettingsForTest(s *store.Store, userID int64, req *tg.MessagesGetPee
 		return nil, err
 	}
 	return testHandlers(s).handleGetPeerSettings(&mtproto.Request{Ctx: context.Background(), UserID: userID, Buf: &buf})
+}
+
+// GetCommonChatsForTest invokes handleGetCommonChats for the caller.
+func GetCommonChatsForTest(s *store.Store, userID int64, req *tg.MessagesGetCommonChatsRequest) (bin.Encoder, error) {
+	var buf bin.Buffer
+	if err := req.Encode(&buf); err != nil {
+		return nil, err
+	}
+	return testHandlers(s).handleGetCommonChats(&mtproto.Request{Ctx: context.Background(), UserID: userID, Buf: &buf})
 }
 
 // InputEncryptedChat builds a valid InputEncryptedChat for chatID as seen by

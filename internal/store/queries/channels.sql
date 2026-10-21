@@ -18,8 +18,29 @@ VALUES ($1, $2, $3, $4, $5);
 -- name: ChannelByID :one
 SELECT * FROM channels WHERE id = $1;
 
+-- ChannelsByIDs is used with ChannelMembersByUserChannelIDs and file hydration
+-- inside one repeatable-read viewer snapshot.
+-- name: ChannelsByIDs :many
+SELECT * FROM channels WHERE id = ANY(sqlc.arg(ids)::bigint[]);
+
+-- name: ChannelMembersByUserChannelIDs :many
+SELECT * FROM channel_participants
+WHERE user_id = sqlc.arg(user_id)::bigint
+  AND channel_id = ANY(sqlc.arg(channel_ids)::bigint[]);
+
 -- name: SetChannelTitle :one
 UPDATE channels SET title = $2, version = version + 1 WHERE id = $1
+RETURNING *;
+
+-- SetChannelCurrentPhoto changes the selected avatar and channel version. The
+-- caller holds channels then channel_state, and has checked the upload under
+-- the terminal files-row lock before allocating the service-message identity.
+-- name: SetChannelCurrentPhoto :one
+UPDATE channels
+SET current_photo_file_id = $2,
+    current_photo_uploader_id = $3,
+    version = version + 1
+WHERE id = $1
 RETURNING *;
 
 -- name: SetChannelAbout :one
@@ -329,7 +350,8 @@ WHERE channel_id = $1;
 
 -- name: MarkChannelDeleted :execrows
 UPDATE channels
-SET deleted_at = clock_timestamp(), username = NULL, publicly_discoverable = false
+SET deleted_at = clock_timestamp(), username = NULL, publicly_discoverable = false,
+    current_photo_file_id = NULL, current_photo_uploader_id = NULL
 WHERE id = $1 AND deleted_at IS NULL;
 
 -- name: InsertChannelDeletionJob :exec

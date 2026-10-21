@@ -207,6 +207,28 @@ func (s *Store) peerDialogsSnapshotInTx(ctx context.Context, tx pgx.Tx, ownerID 
 		snapshot.Channels[channel.ID] = channel
 		snapshot.ChannelMembers[channel.ID] = member
 	}
+	channelPhotoIDs := make([]int64, 0, len(channelRows))
+	for _, row := range channelRows {
+		if row.ChannelCurrentPhotoFileID != nil {
+			channelPhotoIDs = append(channelPhotoIDs, *row.ChannelCurrentPhotoFileID)
+		}
+	}
+	channelPhotos, err := filesByIDs(ctx, qtx, channelPhotoIDs)
+	if err != nil {
+		return PeerDialogsSnapshot{}, fmt.Errorf("peer channel photos: %w", err)
+	}
+	for _, row := range channelRows {
+		if row.ChannelCurrentPhotoFileID == nil {
+			continue
+		}
+		channel := snapshot.Channels[row.ChannelID]
+		photo, ok := channelPhotos[*row.ChannelCurrentPhotoFileID]
+		if !ok || photo.Kind != FileKindPhoto || row.ChannelCurrentPhotoUploaderID == nil || photo.UploaderID != *row.ChannelCurrentPhotoUploaderID {
+			return PeerDialogsSnapshot{}, fmt.Errorf("peer channel %d current photo %d is unavailable", row.ChannelID, *row.ChannelCurrentPhotoFileID)
+		}
+		channel.CurrentPhoto = &photo
+		snapshot.Channels[row.ChannelID] = channel
+	}
 
 	snapshot.Dialogs = make([]PeerDialog, 0, len(peers))
 	for _, peer := range peers {
@@ -399,18 +421,20 @@ func peerDialogFileIDs(dialogs []PeerDialog) []int64 {
 
 func channelFromPeerDialogRow(row db.PeerChannelDialogsForOwnerRow) Channel {
 	return Channel{
-		ID:                  row.ChannelID,
-		Title:               row.ChannelTitle,
-		About:               row.ChannelAbout,
-		CreatorID:           row.ChannelCreatorID,
-		Megagroup:           row.ChannelMegagroup,
-		Signatures:          row.ChannelSignatures,
-		Version:             int(row.ChannelVersion),
-		TTLPeriod:           int(row.ChannelTtlPeriod),
-		Date:                row.ChannelDate.Time,
-		PinnedMessageID:     row.ChannelPinnedMessageID,
-		Username:            row.ChannelUsername,
-		DefaultBannedRights: row.ChannelDefaultBannedRights,
+		ID:                     row.ChannelID,
+		Title:                  row.ChannelTitle,
+		About:                  row.ChannelAbout,
+		CreatorID:              row.ChannelCreatorID,
+		Megagroup:              row.ChannelMegagroup,
+		Signatures:             row.ChannelSignatures,
+		Version:                int(row.ChannelVersion),
+		TTLPeriod:              int(row.ChannelTtlPeriod),
+		Date:                   row.ChannelDate.Time,
+		PinnedMessageID:        row.ChannelPinnedMessageID,
+		Username:               row.ChannelUsername,
+		DefaultBannedRights:    row.ChannelDefaultBannedRights,
+		CurrentPhotoFileID:     row.ChannelCurrentPhotoFileID,
+		CurrentPhotoUploaderID: row.ChannelCurrentPhotoUploaderID,
 	}
 }
 

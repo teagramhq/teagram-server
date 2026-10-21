@@ -253,6 +253,8 @@ func mediaErasureScanSQL(tb testing.TB) string {
 		"WHERE up.file_id = f.id",
 		"FROM chats c",
 		"WHERE c.current_photo_file_id = f.id",
+		"FROM channels c",
+		"WHERE c.current_photo_file_id = f.id",
 		"LIMIT 1",
 		"WHERE f.id > $2 AND f.id <= $3",
 	} {
@@ -279,6 +281,14 @@ func TestMediaErasureScanUsesIndexedGalleryProbesAtScale(t *testing.T) {
 	`, owner, other); err != nil {
 		t.Fatalf("seed current chat photo references: %v", err)
 	}
+	if _, err := conn.Exec(ctx, `
+		INSERT INTO channels (id, title, creator_id, megagroup, current_photo_file_id, current_photo_uploader_id)
+		SELECT 2147483647 + row_number() OVER (ORDER BY f.id), 'photo plan', f.uploader_id, true, f.id, f.uploader_id
+		FROM files f
+		WHERE f.uploader_id IN ($1, $2)
+	`, owner, other); err != nil {
+		t.Fatalf("seed current channel photo references: %v", err)
+	}
 	if _, err := conn.Exec(ctx, `ANALYZE files`); err != nil {
 		t.Fatalf("analyze files: %v", err)
 	}
@@ -288,13 +298,16 @@ func TestMediaErasureScanUsesIndexedGalleryProbesAtScale(t *testing.T) {
 	if _, err := conn.Exec(ctx, `ANALYZE chats`); err != nil {
 		t.Fatalf("analyze chats: %v", err)
 	}
+	if _, err := conn.Exec(ctx, `ANALYZE channels`); err != nil {
+		t.Fatalf("analyze channels: %v", err)
+	}
 
 	plan := profilePhotoExplain(t, ctx, conn, mediaErasureScanSQL(t),
 		time.Now().Add(time.Hour), int64(0), throughID, 1000)
-	if !strings.Contains(plan, "user_photos_file_id_key") || !strings.Contains(plan, "chats_current_photo_file_id_idx") || !strings.Contains(plan, "loops=1000") {
-		t.Fatalf("bounded erasure scan does not use indexed gallery and chat-photo probes per candidate:\n%s", plan)
+	if !strings.Contains(plan, "user_photos_file_id_key") || !strings.Contains(plan, "chats_current_photo_file_id_idx") || !strings.Contains(plan, "channels_current_photo_file_id_idx") || !strings.Contains(plan, "loops=1000") {
+		t.Fatalf("bounded erasure scan does not use indexed gallery, chat-photo and channel-photo probes per candidate:\n%s", plan)
 	}
-	if strings.Contains(plan, "Seq Scan on user_photos") || strings.Contains(plan, "Seq Scan on chats") {
+	if strings.Contains(plan, "Seq Scan on user_photos") || strings.Contains(plan, "Seq Scan on chats") || strings.Contains(plan, "Seq Scan on channels") {
 		t.Fatalf("bounded erasure scan reads a reference table sequentially:\n%s", plan)
 	}
 }

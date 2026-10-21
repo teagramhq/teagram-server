@@ -50,6 +50,33 @@ func JoinChannelForTest(s *store.Store, userID int64, req *tg.ChannelsJoinChanne
 	return testHandlers(s).handleJoinChannel(&mtproto.Request{Ctx: context.Background(), UserID: userID, Buf: &buf})
 }
 
+// GetChannelParticipantsForTest encodes req and invokes handleGetParticipants.
+func GetChannelParticipantsForTest(s *store.Store, userID int64, req *tg.ChannelsGetParticipantsRequest) (bin.Encoder, error) {
+	var buf bin.Buffer
+	if err := req.Encode(&buf); err != nil {
+		return nil, err
+	}
+	return testHandlers(s).handleGetParticipants(&mtproto.Request{Ctx: context.Background(), UserID: userID, Buf: &buf})
+}
+
+// GetChannelParticipantForTest encodes req and invokes handleGetParticipant.
+func GetChannelParticipantForTest(s *store.Store, userID int64, req *tg.ChannelsGetParticipantRequest) (bin.Encoder, error) {
+	var buf bin.Buffer
+	if err := req.Encode(&buf); err != nil {
+		return nil, err
+	}
+	return testHandlers(s).handleGetParticipant(&mtproto.Request{Ctx: context.Background(), UserID: userID, Buf: &buf})
+}
+
+// TogglePreHistoryHiddenForTest encodes req and invokes handleTogglePreHistoryHidden.
+func TogglePreHistoryHiddenForTest(s *store.Store, userID int64, req *tg.ChannelsTogglePreHistoryHiddenRequest) (bin.Encoder, error) {
+	var buf bin.Buffer
+	if err := req.Encode(&buf); err != nil {
+		return nil, err
+	}
+	return testHandlers(s).handleTogglePreHistoryHidden(&mtproto.Request{Ctx: context.Background(), UserID: userID, Buf: &buf})
+}
+
 // LeaveChannelForTest encodes req and invokes handleLeaveChannel for the caller.
 func LeaveChannelForTest(s *store.Store, userID int64, req *tg.ChannelsLeaveChannelRequest) (bin.Encoder, error) {
 	var buf bin.Buffer

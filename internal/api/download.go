@@ -403,6 +403,9 @@ func (h *handlers) messageFileGate(loc downloadLocation) downloadGate {
 		file, err := h.store.FileForDownload(ctx, fileID, loc.accessHash, callerID)
 		if errors.Is(err, store.ErrFileNotFound) && loc.photo {
 			file, err = h.store.CurrentChatPhotoForDownload(ctx, fileID, loc.accessHash, callerID)
+			if errors.Is(err, store.ErrFileNotFound) {
+				file, err = h.store.CurrentChannelPhotoForDownload(ctx, fileID, loc.accessHash, callerID)
+			}
 		}
 		switch {
 		case errors.Is(err, store.ErrFileNotFound):

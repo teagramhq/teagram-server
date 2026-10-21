@@ -44,6 +44,8 @@ SELECT
     c.username AS channel_username,
     c.default_banned_rights AS channel_default_banned_rights,
     c.ttl_period AS channel_ttl_period,
+    c.current_photo_file_id AS channel_current_photo_file_id,
+    c.current_photo_uploader_id AS channel_current_photo_uploader_id,
     p.role AS member_role,
     p.banned_until AS member_banned_until,
     p.join_pts AS member_join_pts,

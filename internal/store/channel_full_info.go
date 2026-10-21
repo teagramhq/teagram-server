@@ -16,6 +16,7 @@ import (
 // come from one repeatable-read snapshot.
 type ChannelFullInfoSnapshot struct {
 	Channel           Channel
+	CurrentPhoto      *File
 	Member            ChannelMember
 	HasMember         bool
 	ParticipantsCount int64
@@ -95,6 +96,18 @@ func (s *Store) ChannelFullInfoForViewer(
 			return ChannelFullInfoSnapshot{}, false, fmt.Errorf("commit refused channel full-info snapshot: %w", err)
 		}
 		return snapshot, true, nil
+	}
+	if snapshot.HasMember && snapshot.Channel.CurrentPhotoFileID != nil {
+		photos, err := filesByIDs(ctx, qtx, []int64{*snapshot.Channel.CurrentPhotoFileID})
+		if err != nil {
+			return ChannelFullInfoSnapshot{}, false, fmt.Errorf("load channel full-info photo: %w", err)
+		}
+		photo, ok := photos[*snapshot.Channel.CurrentPhotoFileID]
+		if !ok || photo.Kind != FileKindPhoto || snapshot.Channel.CurrentPhotoUploaderID == nil || photo.UploaderID != *snapshot.Channel.CurrentPhotoUploaderID {
+			return ChannelFullInfoSnapshot{}, false, fmt.Errorf("channel %d current photo %d is unavailable", channelID, *snapshot.Channel.CurrentPhotoFileID)
+		}
+		snapshot.CurrentPhoto = &photo
+		snapshot.Channel.CurrentPhoto = &photo
 	}
 	pinnedID, err := qtx.ChannelPinnedMessageForViewer(ctx, db.ChannelPinnedMessageForViewerParams{
 		ChannelID: channelID,

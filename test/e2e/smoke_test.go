@@ -170,6 +170,10 @@ func TestSmoke(t *testing.T) {
 		t.Parallel()
 		testSmokeBasicGroupPhoto(t)
 	})
+	t.Run("channel-edit-photo", func(t *testing.T) {
+		t.Parallel()
+		testChannelEditPhoto(t)
+	})
 	t.Run("delete-basic-group", func(t *testing.T) {
 		t.Parallel()
 		testSmokeDeleteBasicGroup(t)
