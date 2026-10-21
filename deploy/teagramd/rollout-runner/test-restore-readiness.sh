@@ -66,6 +66,13 @@ if ! chmod 700 "$build_dir" 2>/dev/null; then
 fi
 atlas_bin="$build_dir/atlas"
 build_inputs() {
+  if [[ -n ${build_dir_initialized:-} ]]; then
+    if ! mkdir -m 700 -- "$build_dir" 2>/dev/null; then
+      emit_preflight_failure
+    fi
+  else
+    build_dir_initialized=1
+  fi
   if ! /usr/bin/cp -- "$atlas_source" "$atlas_bin" 2>/dev/null ||
     ! /usr/bin/chmod 500 "$atlas_bin" 2>/dev/null ||
     ! "${build_env[@]}" go build -trimpath -buildvcs=false -o "$build_dir/teagramd" ./cmd/teagramd >/dev/null 2>&1 ||
