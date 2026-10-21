@@ -300,6 +300,7 @@ func TestBrowserAcceptanceProbeMigrationWorksWithExistingRole(t *testing.T) {
 		t.Fatalf("admin connect: %v", err)
 	}
 	defer func() { _ = admin.Close(ctx) }() //nolint:errcheck // best-effort close
+	t.Cleanup(lockMigrationReplays(t, ctx))
 	parentRole := "browser_probe_parent_" + pgtest.RandomHex()
 	memberRole := "browser_probe_member_" + pgtest.RandomHex()
 	defaultGrantorRole := "browser_probe_grantor_" + pgtest.RandomHex()

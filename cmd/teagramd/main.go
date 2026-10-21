@@ -425,7 +425,7 @@ func runClientConfigCommand(stdout io.Writer) error {
 	if err != nil {
 		return err
 	}
-	if cfg.TurnstileSiteKey != "" {
+	if cfg.TurnstileEnabled && cfg.PublicWebSocketListenAddr == "" {
 		doc.Turnstile = &discovery.Turnstile{SiteKey: cfg.TurnstileSiteKey}
 	}
 	return discovery.WriteDocument(stdout, doc)

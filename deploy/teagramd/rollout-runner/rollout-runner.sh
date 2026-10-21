@@ -4,7 +4,7 @@ umask 077
 
 SCRIPT_DIR=$(cd -P "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 SCRIPT_SOURCE="$SCRIPT_DIR/$(basename "${BASH_SOURCE[0]}")"
-readonly APPROVED_VERIFIER_SHA=9249b651c3f7b43bf9960486d5be9b544c6e8da7b366993ed6af130f05cc58bf
+readonly APPROVED_VERIFIER_SHA=fbc3b4e86fbb68a5af311e2bf253655d8744626005852d6425b5426acbb564d6
 readonly APPROVED_SCHEMA_GATE_SHA=ac54d3cf0480383a52414a8bc8b856b5e1d5f6f8d19034c9c576c64627e097c8
 readonly APPROVED_SCHEMA_GATE_HELPER_SHA=7ae06c2872c60b434068b3715a9ddd5e19b03d4be98dc9881c8dd8f294953d41
 readonly APPROVED_INITIAL_LOCAL_COMPOSE_SHA=3a4f158c6e1f2ead6676fba85d8d95cfb15557a0fbd8e82230361e0af988e0f7
@@ -847,15 +847,18 @@ current_service_id() {
 }
 
 capture_snapshot() {
-  local id=$1 dir=$2 name=$3 compose_source=${4:-selected-compose-render} output
+  local id=$1 dir=$2 name=$3 compose_source=${4:-selected-compose-render} output verifier_error
   output="$dir/$name.snapshot.json"
   [ ! -e "$output" ] && [ ! -L "$output" ] || { fail 'snapshot evidence already exists'; return 1; }
-  ROLLOUT_CHECKOUT_PATH="$CHECKOUT" ROLLOUT_ADDED_ENV="$ADDED_ENV" \
+  if ! verifier_error=$(ROLLOUT_CHECKOUT_PATH="$CHECKOUT" ROLLOUT_ADDED_ENV="$ADDED_ENV" \
     ROLLOUT_CHANGED_ENV="$CHANGED_ENV" \
-    bash "$VERIFIER" snapshot "$id" "$dir" "$name" "$ENV_FILE" "$OVERRIDE_FILE" "$compose_source" >/dev/null 2>&1 || {
+    bash "$VERIFIER" snapshot "$id" "$dir" "$name" "$ENV_FILE" "$OVERRIDE_FILE" "$compose_source" 2>&1 >/dev/null); then
+    if [ "$ROLLOUT_RUNNER_TEST_MODE" = 1 ] && [ -n "$verifier_error" ]; then
+      printf 'snapshot verifier: %s\n' "$verifier_error" >&2
+    fi
     fail "cannot capture $name snapshot"
     return 1
-  }
+  fi
   [ -f "$output" ] && [ ! -L "$output" ] && [ "$(stat -c %a -- "$output")" = 600 ] || {
     fail "$name snapshot is not private"
     return 1
@@ -1243,7 +1246,10 @@ validate_env_baseline() {
       [ "${#requested[@]}" -eq 1 ] || { fail 'environment value changes list is empty'; return 1; }
       for name in "${requested[@]}"; do
         [[ "$name" =~ ^[A-Z][A-Z0-9_]*$ ]] || { fail 'environment value changes must be upper-case variable names'; return 1; }
-        [ "$name" = TG_REGISTRATION ] || { fail "environment value change $name is not an approved setting"; return 1; }
+        case "$name" in
+          TG_REGISTRATION|TG_TURNSTILE_SIGNIN_ENABLED) ;;
+          *) fail "environment value change $name is not an approved setting"; return 1 ;;
+        esac
         change_names+="$name "
       done
       [ -f "$PREVIOUS_ENV_FILE" ] && [ ! -L "$PREVIOUS_ENV_FILE" ] && \
@@ -1280,9 +1286,12 @@ validate_env_baseline() {
           }
           old_value=${old_line#*=}
           new_value=${line#*=}
-          case "$old_value:$new_value" in
-            closed:open|open:closed) ;;
-            *) fail 'TG_REGISTRATION may change only between closed and open'; return 1 ;;
+          case "$key:$old_value:$new_value" in
+            TG_REGISTRATION:closed:open|TG_REGISTRATION:open:closed) ;;
+            TG_TURNSTILE_SIGNIN_ENABLED:false:true|TG_TURNSTILE_SIGNIN_ENABLED:true:false) ;;
+            TG_REGISTRATION:*) fail 'TG_REGISTRATION may change only between closed and open'; return 1 ;;
+            TG_TURNSTILE_SIGNIN_ENABLED:*) fail 'TG_TURNSTILE_SIGNIN_ENABLED may change only between true and false'; return 1 ;;
+            *) fail "environment value change $key is not an approved setting"; return 1 ;;
           esac
           [[ "$changed" != *" $key "* ]] || { fail "environment value $key is assigned more than once"; return 1; }
           changed+="$key "

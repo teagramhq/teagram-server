@@ -1078,6 +1078,12 @@ func TestChannelEditPhotoServiceMessageIsRecoveredByChannelDifference(t *testing
 		t.Fatalf("edit channel photo: %v", err)
 	}
 	service, photo := channelAvatarEditFromResult(t, result)
+	if !service.GetPost() || !service.Out {
+		t.Errorf("broadcast photo service flags = post:%v out:%v, want post and outgoing", service.GetPost(), service.Out)
+	}
+	if _, ok := service.GetFromID(); ok {
+		t.Error("broadcast photo service exposes from_id to its author")
+	}
 	diffEnc, err := api.GetChannelDifferenceForTest(s, member.ID, &tg.UpdatesGetChannelDifferenceRequest{
 		Channel: api.InputChannel(member.ID, channel.ID), Filter: &tg.ChannelMessagesFilterEmpty{}, Pts: 0, Limit: 100,
 	})
@@ -1100,6 +1106,12 @@ func TestChannelEditPhotoServiceMessageIsRecoveredByChannelDifference(t *testing
 		}
 		gotPhoto, ok := action.Photo.(*tg.Photo)
 		if ok && gotPhoto.ID == photo.ID && gotPhoto.AccessHash == photo.AccessHash {
+			if !got.GetPost() || got.Out {
+				t.Errorf("subscriber broadcast photo service flags = post:%v out:%v, want post and not outgoing", got.GetPost(), got.Out)
+			}
+			if _, ok := got.GetFromID(); ok {
+				t.Error("broadcast photo service exposes from_id to subscriber")
+			}
 			found = true
 		}
 	}
