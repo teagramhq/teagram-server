@@ -8,6 +8,7 @@ import io
 import json
 import os
 import tempfile
+import time
 import unittest
 from contextlib import redirect_stdout
 from pathlib import Path
@@ -108,6 +109,53 @@ def container_fixture() -> tuple[dict[str, Any], dict[str, Any]]:
 
 
 class RestoreReadinessContractTests(unittest.TestCase):
+    def test_docker_executable_must_be_a_trusted_system_binary(self) -> None:
+        trusted = RESTORE_READINESS.ensure_trusted_system_executable("/usr/bin/true")
+        self.assertEqual(trusted, str(Path("/usr/bin/true").resolve()))
+
+        with tempfile.TemporaryDirectory(prefix="rr-path-shadow-") as temporary_directory:
+            shadow = Path(temporary_directory) / "docker"
+            shadow.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+            shadow.chmod(0o755)
+            with self.assertRaises(RESTORE_READINESS.DrillFailure):
+                RESTORE_READINESS.ensure_trusted_system_executable(str(shadow))
+
+    def test_attached_timeouts_terminate_and_reap_child(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="rr-attach-timeout-") as temporary_directory:
+            executable = Path(temporary_directory) / "docker"
+            executable.write_text("#!/bin/sh\nexec /usr/bin/sleep 30\n", encoding="utf-8")
+            executable.chmod(0o755)
+            real_popen = RESTORE_READINESS.subprocess.Popen
+            for method_name in ("attached", "attached_status"):
+                with self.subTest(method=method_name):
+                    drill = object.__new__(RESTORE_READINESS.Drill)
+                    drill.executable = str(executable)
+                    drill.environment = {"PATH": "/usr/bin:/bin"}
+                    drill.manifest = {"work_deadline": time.monotonic() + 30, "processes": []}
+                    drill.save = lambda: None
+                    drill.attest_container = lambda *_args: {}
+                    children: list[Any] = []
+
+                    def spawn(*args: Any, **kwargs: Any) -> Any:
+                        child = real_popen(*args, **kwargs)
+                        children.append(child)
+                        return child
+
+                    with patch.object(RESTORE_READINESS.subprocess, "Popen", side_effect=spawn):
+                        with self.assertRaises(RESTORE_READINESS.DrillFailure) as failure:
+                            getattr(drill, method_name)({"id": "fixture"}, "restore", "restore_failure", timeout=1)
+
+                    self.assertEqual(failure.exception.category, "timeout")
+                    self.assertEqual(len(children), 1)
+                    self.assertIsNotNone(children[0].returncode)
+                    self.assertEqual(drill.manifest["processes"], [])
+
+    def test_malformed_sql_fixture_is_generated_internally(self) -> None:
+        statement = RESTORE_READINESS.malformed_sql_fixture("a" * 32)
+        self.assertEqual(statement, 'SELEC "restore_readiness_' + "a" * 32 + '";')
+        with self.assertRaises(ValueError):
+            RESTORE_READINESS.malformed_sql_fixture("external input")
+
     def test_image_build_contexts_create_the_missing_build_directory(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             work_directory = Path(temporary_directory) / "work"
@@ -414,15 +462,7 @@ class RestoreReadinessContractTests(unittest.TestCase):
                     ("provisioning_failure", None),
                 )
 
-    def test_malformed_sql_and_restored_target_mismatch_fail_closed(self) -> None:
-        drill = object.__new__(RESTORE_READINESS.Drill)
-        drill.phase = "schema_validation"
-        outputs = iter(("malformed",))
-        drill.sql = lambda _database, _statement, _phase: next(outputs)
-        with self.assertRaises(RESTORE_READINESS.DrillFailure) as failure:
-            drill.verify_schema_state({}, 1, "", "schema_validation")
-        self.assertEqual(failure.exception.category, "schema_failure")
-
+    def test_restored_target_mismatch_fails_closed(self) -> None:
         drill = object.__new__(RESTORE_READINESS.Drill)
         drill.phase = "schema_validation"
         outputs = iter(("0|2||pg_stat_statements,plpgsql|0|0|0|0|0",))

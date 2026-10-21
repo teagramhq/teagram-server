@@ -75,6 +75,14 @@ MAX_CAPTURE = 2 * 1024 * 1024
 MAX_ARCHIVE = 256 * 1024 * 1024
 ROOT = Path(__file__).resolve().parents[3]
 MIGRATION_HEAD_SQL = "SELECT COALESCE(max(version), '') FROM atlas_schema_revisions.atlas_schema_revisions;"
+
+
+def malformed_sql_fixture(token: str) -> str:
+    if not re.fullmatch(r"[0-9a-f]{32}", token):
+        raise ValueError("invalid fixture token")
+    return f'SELEC "restore_readiness_{token}";'
+
+
 FIXTURE_STATE_SQL = """
 SELECT
   (SELECT count(*) FROM public.auth_keys)::text || '|' ||
@@ -639,9 +647,36 @@ def dns_fixture_valid_response(query: bytes, response: bytes) -> bool:
     )
 
 
+def ensure_trusted_system_executable(executable: str) -> str:
+    try:
+        candidate = Path(executable)
+        if not candidate.is_absolute():
+            raise ValueError("executable path is not absolute")
+        resolved = candidate.resolve(strict=True)
+        info = resolved.lstat()
+        if (
+            not stat.S_ISREG(info.st_mode)
+            or info.st_uid != 0
+            or not info.st_mode & 0o111
+            or info.st_mode & 0o022
+        ):
+            raise ValueError("executable is not a trusted system file")
+        for parent in resolved.parents:
+            parent_info = parent.lstat()
+            if (
+                not stat.S_ISDIR(parent_info.st_mode)
+                or parent_info.st_uid != 0
+                or parent_info.st_mode & (stat.S_IWGRP | stat.S_IWOTH)
+            ):
+                raise ValueError("executable has a writable parent")
+        return str(resolved)
+    except (OSError, RuntimeError, ValueError) as exc:
+        raise DrillFailure("preflight", "preflight_failure") from exc
+
+
 class Docker:
     def __init__(self, executable: str, manifest_path: Path, manifest: dict[str, Any]) -> None:
-        self.executable = executable
+        self.executable = ensure_trusted_system_executable(executable)
         self.manifest_path = manifest_path
         self.manifest = manifest
         self.environment = {
@@ -676,6 +711,32 @@ class Docker:
         saver = getattr(self, "save", None)
         if saver is not None:
             saver()
+
+    @staticmethod
+    def _terminate_and_reap(process: subprocess.Popen[bytes]) -> bool:
+        if process.poll() is None:
+            try:
+                process.terminate()
+            except ProcessLookupError:
+                pass
+            except OSError:
+                return False
+        try:
+            process.communicate(timeout=2)
+        except subprocess.TimeoutExpired:
+            try:
+                process.kill()
+            except ProcessLookupError:
+                pass
+            except OSError:
+                return False
+            try:
+                process.communicate(timeout=2)
+            except subprocess.TimeoutExpired:
+                return False
+        except OSError:
+            return False
+        return process.poll() is not None
 
     def _run_child(
         self,
@@ -1193,16 +1254,6 @@ class Drill(Docker):
         )
         if fs_type.returncode != 0 or fs_type.stdout.decode("ascii", "ignore").strip() != "tmpfs":
             raise DrillFailure(self.phase, "preflight_failure")
-        atlas_version = subprocess.run(
-            [self.args.atlas_bin, "version"],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL,
-            env={"PATH": "/usr/bin:/bin", "HOME": "/root", "LC_ALL": "C"},
-            timeout=10,
-            check=False,
-        )
-        if atlas_version.returncode != 0 or not atlas_version.stdout.decode("utf-8", "ignore").splitlines() or atlas_version.stdout.decode("utf-8", "ignore").splitlines()[0].strip() != "atlas version v1.2.0":
-            raise DrillFailure(self.phase, "preflight_failure")
         config_path = Path("/root/.docker/config.json")
         if config_path.exists():
             try:
@@ -1284,6 +1335,7 @@ class Drill(Docker):
             "gid": info.st_gid,
         }
         expected = {
+            "atlas",
             "teagramd",
             "teagramd-seed",
             "restore-readiness-launcher",
@@ -1293,6 +1345,8 @@ class Drill(Docker):
             "restore-drill-checker",
             "restore-readiness-probe",
         }
+        if Path(self.args.atlas_bin) != directory / "atlas":
+            raise DrillFailure(self.phase, "preflight_failure")
         try:
             if {item.name for item in directory.iterdir()} != expected:
                 raise DrillFailure(self.phase, "preflight_failure")
@@ -1415,6 +1469,20 @@ class Drill(Docker):
             f"local/restore-readiness-tools:{self.manifest['token']}",
             "65532:65532",
         )
+        atlas_version = self.image_container(
+            "tools",
+            role="atlas_version",
+            user="65532:65532",
+            memory=CLIENT_MEMORY,
+            pids_limit=32,
+            mounts=[],
+            tmpfs_options={},
+            command_args=["version"],
+            entrypoint="/run/app/atlas",
+        )
+        output = self.utility(atlas_version, "fixture_generation", "fixture_failure")
+        if output.decode("utf-8", "ignore").splitlines()[:1] != ["atlas version v1.2.0"]:
+            raise DrillFailure("fixture_generation", "fixture_failure")
 
     def inspect_container(self, identifier: str, phase: str) -> dict[str, Any]:
         output = self.call(["inspect", "--type", "container", identifier], phase=phase, category="isolation_refusal")
@@ -1652,24 +1720,37 @@ class Drill(Docker):
         max_bytes: int = MAX_CAPTURE,
     ) -> bytes:
         self.attest_container(record, phase)
+        process: subprocess.Popen[bytes] | None = None
+        tracked: dict[str, int] | None = None
         try:
-            with subprocess.Popen(
+            process = subprocess.Popen(
                 [self.executable, "start", "--attach", "--interactive", record["id"]],
                 stdin=stdin if stdin is not None else subprocess.DEVNULL,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.DEVNULL,
                 env=self.environment,
-            ) as process:
+            )
+            tracked = self._track_child(process)
+            try:
                 output, _ = process.communicate(
                     timeout=max(1, min(timeout, self.manifest["work_deadline"] - time.monotonic()))
                 )
-                if process.returncode != 0 or len(output) > max_bytes:
-                    raise DrillFailure(phase, category)
-                return output
+            except subprocess.TimeoutExpired as exc:
+                if not self._terminate_and_reap(process):
+                    raise DrillFailure("cleanup", "cleanup_failure") from exc
+                raise DrillFailure(phase, "timeout") from exc
+            if process.returncode != 0 or len(output) > max_bytes:
+                raise DrillFailure(phase, category)
+            return output
         except subprocess.TimeoutExpired as exc:
             raise DrillFailure(phase, "timeout") from exc
         except OSError as exc:
             raise DrillFailure(phase, category) from exc
+        finally:
+            if process is not None:
+                reaped = process.poll() is not None or self._terminate_and_reap(process)
+                if tracked is not None and reaped:
+                    self._untrack_child(tracked)
 
     def attached_status(
         self,
@@ -1680,24 +1761,37 @@ class Drill(Docker):
         max_bytes: int = MAX_CAPTURE,
     ) -> tuple[int, bytes]:
         self.attest_container(record, phase)
+        process: subprocess.Popen[bytes] | None = None
+        tracked: dict[str, int] | None = None
         try:
-            with subprocess.Popen(
+            process = subprocess.Popen(
                 [self.executable, "start", "--attach", "--interactive", record["id"]],
                 stdin=subprocess.DEVNULL,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.DEVNULL,
                 env=self.environment,
-            ) as process:
+            )
+            tracked = self._track_child(process)
+            try:
                 output, _ = process.communicate(
                     timeout=max(1, min(timeout, self.manifest["work_deadline"] - time.monotonic()))
                 )
-                if len(output) > max_bytes:
-                    raise DrillFailure(phase, category)
-                return int(process.returncode or 0), output
+            except subprocess.TimeoutExpired as exc:
+                if not self._terminate_and_reap(process):
+                    raise DrillFailure("cleanup", "cleanup_failure") from exc
+                raise DrillFailure(phase, "timeout") from exc
+            if len(output) > max_bytes:
+                raise DrillFailure(phase, category)
+            return int(process.returncode or 0), output
         except subprocess.TimeoutExpired as exc:
             raise DrillFailure(phase, "timeout") from exc
         except OSError as exc:
             raise DrillFailure(phase, category) from exc
+        finally:
+            if process is not None:
+                reaped = process.poll() is not None or self._terminate_and_reap(process)
+                if tracked is not None and reaped:
+                    self._untrack_child(tracked)
 
     def stream_containers(
         self,
@@ -3829,6 +3923,11 @@ def run_primary(args: argparse.Namespace) -> int:
     if os.geteuid() != 0:
         print(json.dumps(report_document("preflight", "preflight_failure", "not_started", 0), separators=(",", ":")))
         return 1
+    try:
+        args.docker_bin = ensure_trusted_system_executable(args.docker_bin)
+    except DrillFailure:
+        print(json.dumps(report_document("preflight", "preflight_failure", "not_started", 0), separators=(",", ":")))
+        return 1
     lock = open_global_lock()
     if lock is None:
         print(json.dumps(report_document("preflight", "isolation_refusal", "not_started", 0), separators=(",", ":")))
@@ -3843,6 +3942,7 @@ def run_primary(args: argparse.Namespace) -> int:
         print(json.dumps(report_document("preflight", "preflight_failure", "not_started", 0), separators=(",", ":")))
         return 1
     started = time.monotonic()
+    work_seconds = 8 * 60 if args.fault_test else WORK_SECONDS
     parent_ticks = process_start_ticks(os.getpid())
     if parent_ticks is None:
         os.close(lock_fd)
@@ -3861,8 +3961,8 @@ def run_primary(args: argparse.Namespace) -> int:
         "token": token,
         "run_dir": str(run_dir),
         "started": started,
-        "work_deadline": started + WORK_SECONDS,
-        "cleanup_deadline": started + SUPERVISOR_SECONDS,
+        "work_deadline": started + work_seconds,
+        "cleanup_deadline": started + work_seconds + CLEANUP_SECONDS,
         "parent": {"pid": os.getpid(), "start_ticks": parent_ticks},
         "supervisor": {"pid": 0, "start_ticks": 0},
         "global_lock": lock_record,
@@ -3939,6 +4039,8 @@ def run_primary(args: argparse.Namespace) -> int:
         drill.gateway = None
         drill.prepare_materials()
         source = drill.create_database("source")
+        if args.fault_test == "sigkill":
+            os.kill(os.getpid(), signal.SIGKILL)
         drill.migrate_database(
             "source", source, SEED_SCHEMA, "source_migrations", role="seed_migration", keep_env=True
         )
@@ -3948,6 +4050,14 @@ def run_primary(args: argparse.Namespace) -> int:
         drill.verify_schema_state(source, 1, MIGRATION_ROLES, "source_migrations")
         target = drill.create_database("target")
         drill.restore_fixture(source, target)
+        if args.fault_test == "malformed-sql":
+            try:
+                drill.sql(target, malformed_sql_fixture(token), "restore")
+            except DrillFailure as exc:
+                if exc.category != "schema_failure":
+                    raise
+                raise DrillFailure("restore", "restore_failure") from exc
+            raise DrillFailure("restore", "schema_failure")
         drill.apply_pending_migration(target)
         app = drill.start_application(target)
         drill.run_application_checker(app)
@@ -4031,6 +4141,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--build-dir")
     parser.add_argument("--build-uid", type=int)
     parser.add_argument("--go-arch")
+    parser.add_argument("--fault-test", choices=("malformed-sql", "sigkill"))
     args = parser.parse_args()
     if args.supervise is not None:
         if args.global_lock_fd is None or args.global_lock_fd < 0:
