@@ -188,6 +188,71 @@ func TestRestoreDrillActualDaemon(t *testing.T) {
 	})
 }
 
+func TestRestoreDrillFailedProvisioningOutputIsPrivate(t *testing.T) {
+	fixture := startRestoreDrillDaemon(t)
+	username := "drillfailedoutputuser"
+	password := "Failed-Provisioning-Private-Password-48217"
+	invocation := fixture.invocation(t, username, password, fixture.publicKeyPEM)
+
+	adminDir := t.TempDir()
+	adminBinary := filepath.Join(adminDir, "diagnostic-admin")
+	adminScript := `#!/bin/sh
+admin_dir=${0%/*}
+printf '%s' called > "$admin_dir/called"
+printf 'username=%s\n' "$4"
+printf 'user id=%s\n' 'restore-drill-private-user-id-marker-73821'
+printf 'database=%s\n' "$TG_POSTGRES_DSN"
+printf '%s\n' '` + fixture.endpoint + `'
+IFS= read -r password
+printf 'password=%s\n' "$password" >&2
+printf '%s\n' 'restore-drill-private-provisioning-error-marker' >&2
+exit 23
+`
+	writeRestoreDrillFile(t, adminDir, "diagnostic-admin", []byte(adminScript), 0o700)
+	if unix.Geteuid() != 0 {
+		sudoDir := t.TempDir()
+		writeRestoreDrillFile(t, sudoDir, "sudo", []byte("#!/bin/sh\nshift 3\nexec \"$@\"\n"), 0o700)
+		t.Setenv("PATH", sudoDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	}
+
+	var stdout, stderr bytes.Buffer
+	if code := restoredrill.RunCLI(fixture.ctx, invocation, adminBinary, &stdout, &stderr); code == 0 {
+		t.Fatal("checker accepted failed create-user execution")
+	}
+	if _, err := os.Stat(filepath.Join(adminDir, "called")); err != nil {
+		t.Fatal("diagnostic admin command did not run")
+	}
+	var result restoredrill.Result
+	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+		t.Fatal("checker stdout was not a typed result")
+	}
+	if result.Category != restoredrill.CategoryProvisioningFailure ||
+		result.Phase != restoredrill.PhaseProvisioning ||
+		result.HelpGetConfig != restoredrill.AssertionPass ||
+		result.SyntheticSignin != restoredrill.AssertionNotRun {
+		t.Fatal("failed provisioning did not produce the fixed provisioning result")
+	}
+	artifact := readRestoreDrillResult(t, invocation)
+	for _, output := range [][]byte{stdout.Bytes(), stderr.Bytes(), artifact} {
+		for _, marker := range []string{
+			username,
+			password,
+			fixture.dsn,
+			fixture.endpoint,
+			"restore-drill-private-user-id-marker-73821",
+			"restore-drill-private-provisioning-error-marker",
+		} {
+			if bytes.Contains(output, []byte(marker)) {
+				t.Fatal("failed checker output or artifact exposed private provisioning material")
+			}
+		}
+	}
+	if stderr.Len() != 0 {
+		t.Fatal("checker wrote failure diagnostics to stderr")
+	}
+	assertRestoreDrillPrivateFilesRemoved(t, invocation)
+}
+
 type restoreDrillDaemon struct {
 	ctx          context.Context
 	dsn          string

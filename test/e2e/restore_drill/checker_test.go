@@ -9,9 +9,12 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"encoding/pem"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -198,6 +201,34 @@ func TestRestoreDrillConfigRequiresFreshValidDaemonContent(t *testing.T) {
 				t.Fatal("malformed daemon configuration was accepted")
 			}
 		})
+	}
+}
+
+func TestRestoreDrillConfigDoesNotFollowRedirects(t *testing.T) {
+	var sourceRequests, targetRequests atomic.Int32
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		targetRequests.Add(1)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer target.Close()
+	source := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		sourceRequests.Add(1)
+		http.Redirect(w, r, target.URL+"/apiws", http.StatusFound)
+	}))
+	defer source.Close()
+
+	endpoint := "ws://" + strings.TrimPrefix(source.URL, "http://") + "/apiws"
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	result := restoredrill.CheckConfig(ctx, endpoint, validTestPublicKeyPEM(t))
+	if sourceRequests.Load() == 0 {
+		t.Fatal("loopback WebSocket endpoint did not receive a request")
+	}
+	if got := targetRequests.Load(); got != 0 {
+		t.Fatalf("redirect target received %d request(s), want none", got)
+	}
+	if result.Category == restoredrill.CategoryAssertionsPassed {
+		t.Fatal("redirect response was accepted as a valid daemon configuration")
 	}
 }
 

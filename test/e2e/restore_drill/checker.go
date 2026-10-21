@@ -11,6 +11,7 @@ import (
 	"errors"
 	"io"
 	"net"
+	"net/http"
 	"net/netip"
 	"net/url"
 	"os"
@@ -22,6 +23,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/coder/websocket"
 	"github.com/gotd/td/session"
 	"github.com/gotd/td/telegram"
 	"github.com/gotd/td/telegram/auth"
@@ -481,8 +483,16 @@ func newPinnedClient(endpoint string, key *rsa.PublicKey) (*telegram.Client, *me
 			Options: []tg.DCOption{{ID: 2, IPAddress: parsed.Hostname(), Port: port}},
 			Domains: map[int]string{2: endpoint},
 		},
-		PublicKeys:     []telegram.PublicKey{{RSA: key}},
-		Resolver:       dcs.Websocket(dcs.WebsocketOptions{}),
+		PublicKeys: []telegram.PublicKey{{RSA: key}},
+		Resolver: dcs.Websocket(dcs.WebsocketOptions{
+			DialOptions: &websocket.DialOptions{
+				HTTPClient: &http.Client{
+					CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
+						return http.ErrUseLastResponse
+					},
+				},
+			},
+		}),
 		SessionStorage: storage,
 	})
 	return client, storage, nil
