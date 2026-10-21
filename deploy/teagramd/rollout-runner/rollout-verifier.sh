@@ -202,9 +202,14 @@ verify_turnstile_compose_configuration() {
 }
 
 verify_turnstile_container_configuration() {
-  local inspect_json=$1 compose_json=$2 snapshot_name=$3
-  if ! printf '%s\n' "$inspect_json" "$compose_json" | jq -se --arg snapshot_name "$snapshot_name" '
+  local inspect_json=$1 compose_json=$2 snapshot_name=$3 added_env_names=$4 changed_env_names=$5
+  if ! printf '%s\n' "$inspect_json" "$compose_json" | jq -se --arg snapshot_name "$snapshot_name" \
+    --argjson added "$added_env_names" --argjson changed "$changed_env_names" '
     def item: if type == "array" then .[0] else . end;
+    def runtime_name($name):
+      if $name == "TEAGRAM_TURNSTILE_SITE_KEY" then "TG_TURNSTILE_SITE_KEY"
+      elif $name == "TEAGRAM_TURNSTILE_SECRET_KEY_FILE" then "TG_TURNSTILE_SECRET_KEY_FILE"
+      else $name end;
     .[0] as $inspect
     | .[1] as $compose
     | ($compose.services.teagramd.environment // {}) as $compose_env
@@ -232,11 +237,17 @@ verify_turnstile_container_configuration() {
             ) and
             (
               if ($turnstile_entries | length) == 0 then true else
-                all([
-                  "TG_TURNSTILE_SITE_KEY=" + $compose_env.TG_TURNSTILE_SITE_KEY,
-                  "TG_TURNSTILE_SECRET_KEY_FILE=" + $compose_env.TG_TURNSTILE_SECRET_KEY_FILE,
-                  "TG_TURNSTILE_SIGNIN_ENABLED=" + $compose_env.TG_TURNSTILE_SIGNIN_ENABLED
-                ][]; . as $expected | ($turnstile_entries | index($expected)) != null)
+                # The live container predates this deploy, so settings it
+                # adds or changes may still hold their previous values.
+                [$added[] | runtime_name(.)] as $added_runtime
+                | all(["TG_TURNSTILE_SITE_KEY", "TG_TURNSTILE_SECRET_KEY_FILE", "TG_TURNSTILE_SIGNIN_ENABLED"][];
+                    . as $name
+                    | ([$turnstile_entries[] | select(startswith($name + "="))] | length) == 1 and
+                      (
+                        ($snapshot_name != "target" and
+                         (any($added_runtime[]; . == $name) or any($changed[]; . == $name))) or
+                        ($turnstile_entries | index($name + "=" + $compose_env[$name])) != null
+                      ))
               end
             )
           end
@@ -266,7 +277,8 @@ verify_turnstile_secret_mount() {
         elif ($mounts | length) != 1 then false
         else
           $mounts[0].Type == "bind" and
-          $mounts[0].Source == $expected_source and
+          ($mounts[0].Source == $expected_source or
+           ($snapshot_name != "target" and $mounts[0].Source == "/dev/null")) and
           $mounts[0].RW == false
         end
       end
@@ -309,11 +321,16 @@ snapshot_from_json() {
     return 1
   fi
 
+  # Variables a deploy adds to .env are named by the runner; they are left out
+  # of the environment digest and recorded by name so every other entry stays pinned.
+  added_env_names=$(jq -cn --arg names "${ROLLOUT_ADDED_ENV:-}" '$names | split(",") | map(select(length > 0))')
+  changed_env_names=$(jq -cn --arg names "${ROLLOUT_CHANGED_ENV:-}" '$names | split(",") | map(select(length > 0))')
   verify_safe_public_container_environment "$inspect_json" || return 1
   if [ "$compose_source" = selected-compose-render ]; then
     verify_safe_public_compose_environment "$compose_json" || return 1
     verify_turnstile_compose_configuration "$compose_json" || return 1
-    verify_turnstile_container_configuration "$inspect_json" "$compose_json" "$snapshot_name" || return 1
+    verify_turnstile_container_configuration \
+      "$inspect_json" "$compose_json" "$snapshot_name" "$added_env_names" "$changed_env_names" || return 1
     verify_turnstile_secret_mount "$inspect_json" "$compose_json" "$snapshot_name" || return 1
   fi
 
@@ -363,10 +380,6 @@ snapshot_from_json() {
           else "invalid" end
       end
   ')
-  # Variables a deploy adds to .env are named by the runner; they are left out
-  # of the environment digest and recorded by name so every other entry stays pinned.
-  added_env_names=$(jq -cn --arg names "${ROLLOUT_ADDED_ENV:-}" '$names | split(",") | map(select(length > 0))')
-  changed_env_names=$(jq -cn --arg names "${ROLLOUT_CHANGED_ENV:-}" '$names | split(",") | map(select(length > 0))')
   if [ "$compose_source" = selected-compose-render ] && [ "$snapshot_name" = target ]; then
     verify_added_container_environment "$inspect_json" "$compose_json" "$env_file" "$added_env_names" || return 1
     verify_changed_container_environment "$inspect_json" "$compose_json" "$env_file" "$changed_env_names" || return 1
@@ -377,7 +390,9 @@ snapshot_from_json() {
         if $name == "TEAGRAM_TURNSTILE_SITE_KEY" then "TG_TURNSTILE_SITE_KEY"
         elif $name == "TEAGRAM_TURNSTILE_SECRET_KEY_FILE" then "TG_TURNSTILE_SECRET_KEY_FILE"
         else $name end;
-      [(item.Config.Env // [])[] | select(type == "string") | split("=")[0]] as $keys
+      [(item.Config.Env // [])[] | select(type == "string")
+       | select(IN("TG_TURNSTILE_SITE_KEY=", "TG_TURNSTILE_SECRET_KEY_FILE=", "TG_TURNSTILE_SIGNIN_ENABLED=false") | not)
+       | split("=")[0]] as $keys
       | [$added[] | select(. as $name | ($name | runtime_name($name)) as $runtime | any($keys[]; . == $runtime))]
       | unique
     ') || return 1
@@ -406,13 +421,18 @@ snapshot_from_json() {
         | sort
       end
   ')
-  container_env_added=$(printf '%s' "$inspect_json" | jq -er --argjson added "$added_env_names" '
+  # The disabled Turnstile defaults count as unset in a container that predates
+  # this deploy, so enabling Turnstile can add them; the target must carry them.
+  container_env_added=$(printf '%s' "$inspect_json" | jq -er --argjson added "$added_env_names" --arg snapshot_name "$snapshot_name" '
     def item: if type == "array" then .[0] else . end;
     def runtime_name($name):
       if $name == "TEAGRAM_TURNSTILE_SITE_KEY" then "TG_TURNSTILE_SITE_KEY"
       elif $name == "TEAGRAM_TURNSTILE_SECRET_KEY_FILE" then "TG_TURNSTILE_SECRET_KEY_FILE"
       else $name end;
-    [(item.Config.Env // [])[] | select(type == "string") | split("=")[0]] as $keys
+    [(item.Config.Env // [])[] | select(type == "string")
+     | select($snapshot_name == "target" or
+              (IN("TG_TURNSTILE_SITE_KEY=", "TG_TURNSTILE_SECRET_KEY_FILE=", "TG_TURNSTILE_SIGNIN_ENABLED=false") | not))
+     | split("=")[0]] as $keys
     | [$added[] | select(. as $name | ($name | runtime_name($name)) as $runtime | any($keys[]; . == $runtime))]
     | unique | sort | if length == 0 then "none" else join(",") end
   ')

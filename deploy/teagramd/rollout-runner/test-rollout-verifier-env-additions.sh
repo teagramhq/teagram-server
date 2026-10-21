@@ -369,3 +369,40 @@ turnstile_signin_on=$(turnstile_signin_snapshot true target)
 [ "$(jq -r '.container_env_changed' <<< "$turnstile_signin_on")" = TG_TURNSTILE_SIGNIN_ENABLED ]
 [ "$(jq -r '.container_env_sha256' <<< "$turnstile_signin_off")" = "$(jq -r '.container_env_sha256' <<< "$turnstile_signin_on")" ]
 printf '%s\n' 'PASS named Turnstile sign-in changes accept only boolean values and preserve other environment equivalence'
+
+printf 'TG_TURNSTILE_SIGNIN_ENABLED=false\n' > "$ENV_FILE"
+turnstile_signin_old_inspect=$(printf '%s' "$turnstile_alias_inspect" | jq -c '
+  .Config.Env |= map(if startswith("TG_TURNSTILE_SIGNIN_ENABLED=") then "TG_TURNSTILE_SIGNIN_ENABLED=true" else . end)
+')
+ROLLOUT_CHANGED_ENV=TG_TURNSTILE_SIGNIN_ENABLED \
+  snapshot_from_json "$turnstile_signin_old_inspect" "$turnstile_alias_compose" "$ENV_FILE" "$OVERRIDE_FILE" selected-compose-render baseline >/dev/null
+if ROLLOUT_CHANGED_ENV=TG_TURNSTILE_SIGNIN_ENABLED \
+  snapshot_from_json "$turnstile_signin_old_inspect" "$turnstile_alias_compose" "$ENV_FILE" "$OVERRIDE_FILE" selected-compose-render target \
+  >/dev/null 2>"$TMP/turnstile-signin-old-target.err"; then
+  printf '%s\n' 'FAIL target kept the previous Turnstile sign-in value' >&2
+  exit 1
+fi
+if snapshot_from_json "$turnstile_signin_old_inspect" "$turnstile_alias_compose" "$ENV_FILE" "$OVERRIDE_FILE" selected-compose-render baseline \
+  >/dev/null 2>"$TMP/turnstile-signin-unnamed.err"; then
+  printf '%s\n' 'FAIL baseline accepted an unnamed Turnstile sign-in difference' >&2
+  exit 1
+fi
+printf '%s\n' 'PASS baseline may hold the previous value of a named Turnstile sign-in change; target and unnamed differences may not'
+
+printf 'TEAGRAM_TURNSTILE_SITE_KEY=fixture-site-key\nTEAGRAM_TURNSTILE_SECRET_KEY_FILE=%s\n' \
+  "$turnstile_secret_source" > "$ENV_FILE"
+turnstile_enable_baseline=$(ROLLOUT_ADDED_ENV=TEAGRAM_TURNSTILE_SITE_KEY,TEAGRAM_TURNSTILE_SECRET_KEY_FILE \
+  snapshot_from_json "$turnstile_disabled_inspect" "$turnstile_alias_compose" "$ENV_FILE" "$OVERRIDE_FILE" selected-compose-render baseline)
+[ "$(jq -r '.container_env_added' <<< "$turnstile_enable_baseline")" = none ]
+[ "$(jq -r '.container_env_sha256' <<< "$turnstile_enable_baseline")" = "$(jq -r '.container_env_sha256' <<< "$turnstile_alias_snapshot")" ]
+if ROLLOUT_ADDED_ENV=TEAGRAM_TURNSTILE_SITE_KEY,TEAGRAM_TURNSTILE_SECRET_KEY_FILE \
+  snapshot_from_json "$turnstile_disabled_inspect" "$turnstile_alias_compose" "$ENV_FILE" "$OVERRIDE_FILE" selected-compose-render target \
+  >/dev/null 2>"$TMP/turnstile-enable-target.err"; then
+  printf '%s\n' 'FAIL target kept the disabled Turnstile defaults' >&2
+  exit 1
+fi
+printf 'TG_TURNSTILE_SIGNIN_ENABLED=false\n' > "$ENV_FILE"
+turnstile_signin_add_baseline=$(ROLLOUT_ADDED_ENV=TG_TURNSTILE_SIGNIN_ENABLED \
+  snapshot_from_json "$turnstile_disabled_inspect" "$turnstile_disabled_compose" "$ENV_FILE" "$OVERRIDE_FILE" selected-compose-render baseline)
+[ "$(jq -r '.container_env_added' <<< "$turnstile_signin_add_baseline")" = none ]
+printf '%s\n' 'PASS live disabled Turnstile defaults count as unset when the deploy adds Turnstile settings'

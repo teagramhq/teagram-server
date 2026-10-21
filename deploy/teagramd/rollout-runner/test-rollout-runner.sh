@@ -382,7 +382,9 @@ if [ "${1:-}" = inspect ]; then
     fi
     turnstile_source=''
     if [ "$cfg" = baseline ] || [ "$cfg" = target ] || [ "$cfg" = rollback ]; then
-      if [ "$cfg" = baseline ] || [ "$cfg" = rollback ]; then
+      if [ -f "$MOCK_STATE/started-compose-$id.json" ]; then
+        turnstile_compose="$MOCK_STATE/started-compose-$id.json"
+      elif [ "$cfg" = baseline ] || [ "$cfg" = rollback ]; then
         turnstile_compose="$MOCK_STATE/base-compose.json"
       else
         turnstile_compose="$MOCK_STATE/target-compose.json"
@@ -441,8 +443,6 @@ fi
         if [ "${MOCK_SCENARIO:-}" = config-drift ] && [ "$config_count" -ge 3 ]; then
           cat "$MOCK_STATE/target-compose.drift.json"
         elif [[ "${MOCK_SCENARIO:-}" == public-websocket-* ]] && [ "$config_count" -lt 3 ]; then
-          cat "$MOCK_STATE/base-compose.json"
-        elif [ "${MOCK_SCENARIO:-}" = target-local-carry-forward-env-value-change-signin ] && [ "$config_count" -lt 3 ]; then
           cat "$MOCK_STATE/base-compose.json"
         elif [[ "${MOCK_SCENARIO:-}" == target-local-welcome-channel-* ]]; then
           if [ "$config_count" -ge 3 ]; then cat "$MOCK_STATE/target-compose.json"; else cat "$MOCK_STATE/base-compose.json"; fi
@@ -560,12 +560,16 @@ fi
       exit 95
       ;;
     up)
+      # Record the render each container starts from, so a later run sees
+      # the live container as it was started rather than the new render.
       if [[ " $* " == *' --no-build '* ]]; then
         printf '%s\n' rollback > "$MOCK_STATE/phase"
         printf '%s\n' "$MOCK_ROLLBACK_ID" > "$MOCK_STATE/teagramd"
+        cp -- "$MOCK_STATE/base-compose.json" "$MOCK_STATE/started-compose-$MOCK_ROLLBACK_ID.json" 2>/dev/null || true
       else
         printf '%s\n' target > "$MOCK_STATE/phase"
         printf '%s\n' "$MOCK_REPLACEMENT_ID" > "$MOCK_STATE/teagramd"
+        cp -- "$MOCK_STATE/target-compose.json" "$MOCK_STATE/started-compose-$MOCK_REPLACEMENT_ID.json"
       fi
       exit 0
       ;;
@@ -2664,6 +2668,31 @@ prepare_env_change_fixture() {
   mv -- "$TMP/$name-target-compose.json" "$state/target-compose.json"
 }
 
+# The live container was started from base-compose.json; the new render is
+# target-compose.json.
+record_live_render() {
+  local state=$1
+  cp -- "$state/base-compose.json" "$state/started-compose-$(cat "$state/teagramd").json"
+}
+
+turnstile_defaults_filter='
+  .services.teagramd.environment.TG_TURNSTILE_SITE_KEY="" |
+  .services.teagramd.environment.TG_TURNSTILE_SECRET_KEY_FILE="" |
+  .services.teagramd.environment.TG_TURNSTILE_SIGNIN_ENABLED="false" |
+  .services.teagramd.secrets |= ((. // []) | map(select(.source != "teagramd_turnstile")) + [{source:"teagramd_turnstile",target:"teagramd-turnstile"}]) |
+  .secrets.teagramd_turnstile={file:"/dev/null"}
+'
+
+# Gives the live container the disabled Turnstile defaults that this Compose
+# renders when no Turnstile host settings are configured.
+seed_live_turnstile_defaults() {
+  local name=$1 state
+  state=$(cat "$TMP/$name-state-path")
+  jq -c "$turnstile_defaults_filter" "$state/base-compose.json" > "$TMP/$name-base-compose.json" || return 1
+  mv -- "$TMP/$name-base-compose.json" "$state/base-compose.json" || return 1
+  record_live_render "$state"
+}
+
 prepare_signin_env_change_fixture() {
   local name=$1 old_value=$2 new_value=$3
   local checkout state secret_dir secret_source setup_lines config value
@@ -2689,6 +2718,7 @@ prepare_signin_env_change_fixture() {
     ' "$state/$config-compose.json" > "$TMP/$name-$config-compose.json" || return 1
     mv -- "$TMP/$name-$config-compose.json" "$state/$config-compose.json" || return 1
   done
+  record_live_render "$state"
 }
 
 assert_signin_env_change() {
@@ -2761,22 +2791,15 @@ assert_target_local_rejected_before_backup env-value-change-invalid-value \
 assert_signin_env_change signin-value-change-disable true false
 assert_signin_env_change signin-value-change-enable false true
 
-prepare_env_change_fixture signin-value-change-invalid-value \
-  target-local-carry-forward-env-value-change "$APPLY_TARGET_SHA" "$TARGET_SHA" \
-  TG_TURNSTILE_SIGNIN_ENABLED=maybe '' TG_TURNSTILE_SIGNIN_ENABLED true maybe
+prepare_signin_env_change_fixture signin-value-change-invalid-value true maybe
 assert_target_local_rejected_before_backup signin-value-change-invalid-value \
-  'TG_TURNSTILE_SIGNIN_ENABLED may change only between true and false'
+  'snapshot verifier: resolved Compose Turnstile mapping is incomplete or unsafe'
 
 prepare_env_addition_fixture env-addition-success TG_TURNSTILE_SIGNIN_ENABLED '' \
   'TG_TURNSTILE_SIGNIN_ENABLED=false' ''
+seed_live_turnstile_defaults env-addition-success
 state=$(cat "$TMP/env-addition-success-state-path")
-jq -c '
-  .services.teagramd.environment.TG_TURNSTILE_SITE_KEY="" |
-  .services.teagramd.environment.TG_TURNSTILE_SECRET_KEY_FILE="" |
-  .services.teagramd.environment.TG_TURNSTILE_SIGNIN_ENABLED="false" |
-  .services.teagramd.secrets |= ((. // []) | map(select(.source != "teagramd_turnstile")) + [{source:"teagramd_turnstile",target:"teagramd-turnstile"}]) |
-  .secrets.teagramd_turnstile={file:"/dev/null"}
-' "$state/target-compose.json" > "$TMP/env-addition-success-target-compose.json"
+jq -c "$turnstile_defaults_filter" "$state/target-compose.json" > "$TMP/env-addition-success-target-compose.json"
 mv -- "$TMP/env-addition-success-target-compose.json" "$state/target-compose.json"
 root=$(cat "$TMP/env-addition-success-root-path")
 checkout=$(cat "$TMP/env-addition-success-checkout-path")
@@ -2799,6 +2822,7 @@ fi
 prepare_env_addition_fixture turnstile-env-addition-success \
   TEAGRAM_TURNSTILE_SITE_KEY,TEAGRAM_TURNSTILE_SECRET_KEY_FILE '' \
   $'TEAGRAM_TURNSTILE_SITE_KEY=fixture-site-key\nTEAGRAM_TURNSTILE_SECRET_KEY_FILE=/placeholder' ''
+seed_live_turnstile_defaults turnstile-env-addition-success
 root=$(cat "$TMP/turnstile-env-addition-success-root-path")
 checkout=$(cat "$TMP/turnstile-env-addition-success-checkout-path")
 state=$(cat "$TMP/turnstile-env-addition-success-state-path")

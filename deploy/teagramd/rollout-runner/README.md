@@ -575,7 +575,9 @@ it. Once a release with the variable is live, later deploys pass no names.
 The public server's Turnstile inputs are host-side aliases: name
 `TEAGRAM_TURNSTILE_SITE_KEY` and `TEAGRAM_TURNSTILE_SECRET_KEY_FILE` here;
 the verifier checks their corresponding `TG_TURNSTILE_*` container settings
-and the read-only secret-file mount.
+and the read-only secret-file mount. The disabled defaults this Compose gives a
+live container (empty site key and secret path, sign-in `false`, secret mounted
+from `/dev/null`) count as unset, so a Turnstile name can be added over them.
 
 The runner allows changing `TG_REGISTRATION` between `closed` and `open`, and
 `TG_TURNSTILE_SIGNIN_ENABLED` between `false` and `true`. Back up the verified
