@@ -418,9 +418,23 @@ class MoveSecretMigrationTest(unittest.TestCase):
                 target_env.read_text(encoding="utf-8").splitlines(),
             )
             self.assertEqual(target_env.stat().st_mode & 0o777, 0o600)
-            source_config = runner.render_compose(
-                "telegram-server", source, source_env, [source_compose],
-            )
+            with mock.patch.dict(os.environ, {
+                "TEAGRAM_TURNSTILE_SITE_KEY": "",
+                "TEAGRAM_TURNSTILE_SECRET_KEY_FILE": "",
+                "TG_TURNSTILE_SIGNIN_ENABLED": "",
+            }, clear=False):
+                source_config = runner.render_compose(
+                    "telegram-server", source, source_env, [source_compose],
+                )
+                # A new deploy process has no temporary mover environment. The
+                # target .env must retain the selected mount layout on its own.
+                with mock.patch.dict(os.environ):
+                    os.environ.pop("TEAGRAMD_STACK_MOVE_BLOB_DIR", None)
+                    target_config = runner.render_compose(
+                        "teagram", target, target_env,
+                        [target_compose, target_local_overlay, target / "docker-compose.override.yml"],
+                        profiles=("migration",),
+                    )
             self.assertEqual(
                 runner.validate_source_compose_volumes(source_config),
                 {
@@ -431,15 +445,6 @@ class MoveSecretMigrationTest(unittest.TestCase):
             )
             self.assertNotIn("rustfsdata", runner.named_volumes(source_config))
             source_service = source_config["services"]["telegramd"]
-            # A new deploy process has no temporary mover environment. The
-            # target .env must retain the selected mount layout on its own.
-            with mock.patch.dict(os.environ):
-                os.environ.pop("TEAGRAMD_STACK_MOVE_BLOB_DIR", None)
-                target_config = runner.render_compose(
-                    "teagram", target, target_env,
-                    [target_compose, target_local_overlay, target / "docker-compose.override.yml"],
-                    profiles=("migration",),
-                )
             target_service = target_config["services"]["teagramd"]
             self.assertEqual(
                 target_service["environment"]["TG_BLOB_DIR"],
@@ -449,7 +454,26 @@ class MoveSecretMigrationTest(unittest.TestCase):
                 name not in target_service["environment"]
                 for name in runner.S3_BLOB_ENVIRONMENT
             ))
-            self.assertEqual(target_service.get("secrets", []), [])
+            self.assertEqual(
+                target_service.get("secrets", []),
+                [{"source": "teagramd_turnstile", "target": "teagramd-turnstile"}],
+            )
+            self.assertEqual(
+                target_service["environment"]["TG_TURNSTILE_SITE_KEY"],
+                "",
+            )
+            self.assertEqual(
+                target_service["environment"]["TG_TURNSTILE_SECRET_KEY_FILE"],
+                "",
+            )
+            self.assertEqual(
+                target_service["environment"]["TG_TURNSTILE_SIGNIN_ENABLED"],
+                "false",
+            )
+            self.assertEqual(
+                target_config["secrets"]["teagramd_turnstile"]["file"],
+                "/dev/null",
+            )
             self.assertTrue(any(
                 mount.get("source") == "tgblobs"
                 and mount.get("target") == source_service["environment"]["TG_BLOB_DIR"]
