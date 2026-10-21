@@ -559,7 +559,7 @@ func (h *handlers) sendChatMessageAfterReplyOnConn(c *mtproto.Conn, r *mtproto.R
 				h.log.Error("read stored message pts on retry", "user_id", r.UserID, "err", err)
 				return nil, nil, nil, errInternal
 			}
-			chats, err := h.loadChats(r.Ctx, map[int64]bool{chatID: true}, r.UserID, nil)
+			chats, err := h.loadChats(r.Ctx, map[int64]bool{chatID: true}, r.UserID)
 			if err != nil {
 				h.log.Error("load chats on retry", "err", err)
 				return nil, nil, nil, errInternal
@@ -640,7 +640,7 @@ func (h *handlers) sendChatMessageAfterReplyOnConn(c *mtproto.Conn, r *mtproto.R
 		}
 		return nil, nil, nil, errInternal
 	}
-	chats, err := h.loadChats(r.Ctx, map[int64]bool{chatID: true}, r.UserID, nil)
+	chats, err := h.loadChats(r.Ctx, map[int64]bool{chatID: true}, r.UserID)
 	if err != nil {
 		h.log.Error("send chat message chats", "err", err)
 		if c != nil {
@@ -1973,7 +1973,7 @@ func (h *handlers) forwardReply(r *mtproto.Request, destPeerType store.PeerType,
 		basicChatRefs[destPeerID] = true
 		users, err = h.loadUsers(r.Ctx, recipients, r.UserID)
 		if err == nil {
-			chats, err = h.loadChats(r.Ctx, map[int64]bool{destPeerID: true}, r.UserID, nil)
+			chats, err = h.loadChats(r.Ctx, map[int64]bool{destPeerID: true}, r.UserID)
 		}
 	}
 	if err != nil {
@@ -2144,7 +2144,7 @@ func (h *handlers) pinChatMessage(r *mtproto.Request, chatID int64, req *tg.Mess
 	}
 	h.notifyOwners(r.Ctx, change.OwnerPts, 0)
 
-	chats, err := h.loadChats(r.Ctx, map[int64]bool{chat.ID: true}, r.UserID, nil)
+	chats, err := h.loadChats(r.Ctx, map[int64]bool{chat.ID: true}, r.UserID)
 	if err != nil {
 		h.log.Error("pin chat render", "chat_id", chat.ID, "err", err)
 		return nil, 0, errInternal
@@ -2556,7 +2556,7 @@ func (h *handlers) chatSearch(
 		h.log.Error("search messages users", "err", err)
 		return nil, errInternal
 	}
-	chats, err := h.loadChats(r.Ctx, map[int64]bool{chatID: true}, r.UserID, nil)
+	chats, err := h.loadChats(r.Ctx, map[int64]bool{chatID: true}, r.UserID)
 	if err != nil {
 		h.log.Error("search messages chats", "err", err)
 		return nil, errInternal

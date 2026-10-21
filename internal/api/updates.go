@@ -642,7 +642,7 @@ func (h *handlers) buildUpdateBatch(ctx context.Context, userID int64, fromPts i
 	if err != nil {
 		return updateBatch{}, err
 	}
-	b.chats, err = h.loadChats(ctx, basicChats, userID, nil)
+	b.chats, err = h.loadChats(ctx, basicChats, userID)
 	if err != nil {
 		return updateBatch{}, err
 	}
@@ -937,43 +937,35 @@ func (h *handlers) entitledUserIDs(ctx context.Context, viewerID int64, ids []in
 // rename the chat, so serving it would leave a writable channel into an account
 // that was ejected.
 //
-// The membership check is one query per chat per batch. A batch references very
-// few distinct chats, so it stays a straight loop with no cache.
-func (h *handlers) loadChats(ctx context.Context, ids map[int64]bool, viewerID int64, cache map[int64]*chatMembership) ([]tg.ChatClass, error) {
-	chats := make([]tg.ChatClass, 0, len(ids))
+// Membership, participant counts, and the selected photo pointer come from one
+// repeatable-read snapshot. A cache populated while rendering a create action
+// cannot authorize metadata read after that member has been removed.
+func (h *handlers) loadChats(ctx context.Context, ids map[int64]bool, viewerID int64) ([]tg.ChatClass, error) {
+	chatIDs := make([]int64, 0, len(ids))
 	for id := range ids {
-		c, ok, err := h.store.ChatByID(ctx, id)
-		if err != nil {
-			return nil, err
-		}
+		chatIDs = append(chatIDs, id)
+	}
+	snapshot, err := h.store.ChatListInfoForMemberSnapshot(ctx, viewerID, chatIDs)
+	if err != nil {
+		return nil, err
+	}
+
+	chats := make([]tg.ChatClass, 0, len(ids))
+	for _, id := range chatIDs {
+		chat, ok := snapshot.Chats[id]
 		if !ok {
-			continue
-		}
-		if cm, cached := cache[id]; cached {
-			if !cm.member {
-				chats = append(chats, &tg.ChatForbidden{ID: c.ID, Title: ""})
-				continue
-			}
-			wireChat, err := h.chatToTL(ctx, c, cm.partCount, viewerID)
+			// Keep absent chats omitted. This lookup is used only to distinguish a
+			// deleted chat from an existing chat excluded by the membership snapshot.
+			_, exists, err := h.store.ChatByID(ctx, id)
 			if err != nil {
-				return nil, fmt.Errorf("load chat %d photo: %w", id, err)
+				return nil, err
 			}
-			chats = append(chats, wireChat)
+			if exists {
+				chats = append(chats, &tg.ChatForbidden{ID: id, Title: ""})
+			}
 			continue
 		}
-		member, err := h.store.IsMember(ctx, id, viewerID)
-		if err != nil {
-			return nil, err
-		}
-		if !member {
-			chats = append(chats, &tg.ChatForbidden{ID: c.ID, Title: ""})
-			continue
-		}
-		parts, err := h.store.Participants(ctx, id)
-		if err != nil {
-			return nil, err
-		}
-		wireChat, err := h.chatToTL(ctx, c, len(parts), viewerID)
+		wireChat, err := h.chatToTL(ctx, chat, int(snapshot.ParticipantCounts[id]), viewerID)
 		if err != nil {
 			return nil, fmt.Errorf("load chat %d photo: %w", id, err)
 		}
@@ -1571,7 +1563,7 @@ func (h *handlers) handleGetDifferenceForConn(c *mtproto.Conn, r *mtproto.Reques
 			h.log.Error("get difference chat admin users", "user_id", r.UserID, "err", uerr)
 			return nil, nil, errInternal
 		}
-		chats, cerr := h.loadChats(r.Ctx, chatIDs, r.UserID, nil)
+		chats, cerr := h.loadChats(r.Ctx, chatIDs, r.UserID)
 		if cerr != nil {
 			h.log.Error("get difference chat admin chats", "user_id", r.UserID, "err", cerr)
 			return nil, nil, errInternal
@@ -1621,7 +1613,7 @@ func (h *handlers) handleGetDifferenceForConn(c *mtproto.Conn, r *mtproto.Reques
 			h.log.Error("get difference chat removal users", "user_id", r.UserID, "err", uerr)
 			return nil, nil, errInternal
 		}
-		chats, cerr := h.loadChats(r.Ctx, chatIDs, r.UserID, nil)
+		chats, cerr := h.loadChats(r.Ctx, chatIDs, r.UserID)
 		if cerr != nil {
 			h.log.Error("get difference chat removal chats", "user_id", r.UserID, "err", cerr)
 			return nil, nil, errInternal

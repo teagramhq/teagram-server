@@ -732,7 +732,7 @@ func LoadChatsForTest(s *store.Store, ids []int64, viewerID int64) ([]tg.ChatCla
 	for _, id := range ids {
 		set[id] = true
 	}
-	return testHandlers(s).loadChats(context.Background(), set, viewerID, nil)
+	return testHandlers(s).loadChats(context.Background(), set, viewerID)
 }
 
 // LoadChannelsForTest exposes loadChannels for the external api_test package.
@@ -935,6 +935,19 @@ func GetDialogsForTest(s *store.Store, userID int64) (bin.Encoder, error) {
 		return nil, err
 	}
 	return testHandlers(s).handleGetDialogs(&mtproto.Request{Ctx: context.Background(), UserID: userID, Buf: &buf})
+}
+
+// GetDialogsForTestWithBeforeLoadChatsHook pauses after dialog/create-row
+// hydration and before current chat metadata is loaded.
+func GetDialogsForTestWithBeforeLoadChatsHook(s *store.Store, userID int64, hook func()) (bin.Encoder, error) {
+	var buf bin.Buffer
+	req := &tg.MessagesGetDialogsRequest{OffsetPeer: &tg.InputPeerEmpty{}}
+	if err := req.Encode(&buf); err != nil {
+		return nil, err
+	}
+	h := testHandlers(s)
+	h.getDialogsBeforeLoadChatsHook = hook
+	return h.handleGetDialogs(&mtproto.Request{Ctx: context.Background(), UserID: userID, Buf: &buf})
 }
 
 // GetDialogsForTestWithBlobs invokes getDialogs with the supplied blob store,

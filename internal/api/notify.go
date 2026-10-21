@@ -560,7 +560,7 @@ func (u *Updater) DeliverChatRemoval(ctx context.Context, ownerID, chatID int64)
 		u.log.Warn("deliver missing chat removal event", "chat_id", chatID, "owner_id", ownerID)
 		return
 	}
-	chats, err := u.h.loadChats(ctx, map[int64]bool{event.ChatID: true}, ownerID, nil)
+	chats, err := u.h.loadChats(ctx, map[int64]bool{event.ChatID: true}, ownerID)
 	if err != nil {
 		u.log.Error("deliver chat removal chat", "chat_id", event.ChatID, "owner_id", ownerID, "err", err)
 		return

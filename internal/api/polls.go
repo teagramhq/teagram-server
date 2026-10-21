@@ -485,7 +485,7 @@ func (h *handlers) handleClosePollAfterReplyOnConn(
 		for ownerID := range ownerPts {
 			usersByID[ownerID] = true
 		}
-		chats, err = h.loadChats(r.Ctx, map[int64]bool{peerID: true}, r.UserID, nil)
+		chats, err = h.loadChats(r.Ctx, map[int64]bool{peerID: true}, r.UserID)
 		if err != nil {
 			return nil, nil, nil, errInternal
 		}
@@ -627,7 +627,7 @@ func (h *handlers) pollSendResponseWithAttempt(
 			}
 		}
 		var err error
-		chats, err = h.loadChats(r.Ctx, map[int64]bool{message.PeerID: true}, r.UserID, nil)
+		chats, err = h.loadChats(r.Ctx, map[int64]bool{message.PeerID: true}, r.UserID)
 		if err != nil {
 			h.log.Error("load poll chat", "chat_id", message.PeerID, "err", err)
 			return nil, nil, nil, errInternal

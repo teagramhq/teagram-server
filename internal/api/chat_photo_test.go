@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"sync"
 	"testing"
 	"time"
 
@@ -416,6 +417,106 @@ func TestBasicGroupPeerPhotoReadAdmittedBeforeClearCanFinish(t *testing.T) {
 	})
 	if got := rpcMessage(t, err); got != "LOCATION_INVALID" {
 		t.Fatalf("peer photo read admitted after clear = %s, want LOCATION_INVALID", got)
+	}
+}
+
+func TestGetDialogsDoesNotExposePhotoSelectedAfterRemoval(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	s := openStore(t)
+	blobs := newBlobs(t)
+	creator, err := s.CreateUser(ctx, "+15551228891")
+	if err != nil {
+		t.Fatalf("create creator: %v", err)
+	}
+	member, err := s.CreateUser(ctx, "+15551228892")
+	if err != nil {
+		t.Fatalf("create member: %v", err)
+	}
+	chat, err := s.CreateChat(ctx, creator.ID, "Dialog photo race", []int64{member.ID})
+	if err != nil {
+		t.Fatalf("create group: %v", err)
+	}
+	if _, _, _, err := s.SendChatMessage(ctx, store.FanOut{
+		ChatID: chat.ID, FromID: creator.ID, Text: "Dialog photo race", Action: store.ChatActionCreate,
+	}); err != nil {
+		t.Fatalf("create dialog row: %v", err)
+	}
+
+	createRowHydrated := make(chan struct{})
+	resume := make(chan struct{})
+	finished := make(chan struct{})
+	var resumeOnce sync.Once
+	release := func() { resumeOnce.Do(func() { close(resume) }) }
+	t.Cleanup(func() {
+		release()
+		select {
+		case <-finished:
+		case <-time.After(10 * time.Second):
+			t.Error("getDialogs did not finish after release")
+		}
+	})
+	type dialogsOutcome struct {
+		result any
+		err    error
+	}
+	outcome := make(chan dialogsOutcome, 1)
+	go func() {
+		defer close(finished)
+		result, err := api.GetDialogsForTestWithBeforeLoadChatsHook(s, member.ID, func() {
+			close(createRowHydrated)
+			<-resume
+		})
+		outcome <- dialogsOutcome{result: result, err: err}
+	}()
+	select {
+	case <-createRowHydrated:
+	case <-time.After(10 * time.Second):
+		t.Fatal("getDialogs did not reach the post-create-row hydration boundary")
+	}
+
+	removed, _, _, err := s.RemoveChatUser(ctx, chat.ID, member.ID, creator.ID)
+	if err != nil || !removed {
+		t.Fatalf("remove member while getDialogs is paused: removed=%v err=%v", removed, err)
+	}
+	body := jpegPhotoPayload(t, 640, 480)
+	photo, stored, err := s.AllocateAndCompletePhotoFileWithDerivatives(ctx, creator.ID,
+		int64(len(body)), "image/jpeg", "after-removal.jpg", api.TestMaxUserStorageBytes,
+		func(file store.File) (store.PhotoAssembly, error) {
+			if _, err := blobs.Put(ctx, blob.Key(file.ID), bytes.NewReader(body)); err != nil {
+				return store.PhotoAssembly{}, err
+			}
+			return store.PhotoAssembly{
+				Dimensions: store.PhotoDimensions{Width: 640, Height: 480},
+				Derivatives: &store.PhotoDerivativeInput{
+					MWidth: 320, MHeight: 240, MBytes: []byte{0xff, 0xd8, 0xff, 0xd9},
+					Stripped: []byte{1, 40, 40, 0xff, 0xd8, 0xff, 0xd9},
+				},
+			}, nil
+		},
+	)
+	if err != nil || !stored {
+		t.Fatalf("assemble photo after removal: stored=%v err=%v", stored, err)
+	}
+	if changed, _, _, _, err := s.SetChatPhoto(ctx, chat.ID, creator.ID, photo.ID); err != nil || !changed {
+		t.Fatalf("select photo after removal: changed=%v err=%v", changed, err)
+	}
+	release()
+
+	got := <-outcome
+	if got.err != nil {
+		t.Fatalf("getDialogs after membership change: %v", got.err)
+	}
+	dialogs, ok := got.result.(*tg.MessagesDialogs)
+	if !ok {
+		t.Fatalf("getDialogs result = %T, want *tg.MessagesDialogs", got.result)
+	}
+	if len(dialogs.Chats) != 1 {
+		t.Fatalf("getDialogs chats = %d, want one forbidden chat", len(dialogs.Chats))
+	}
+	forbidden, ok := dialogs.Chats[0].(*tg.ChatForbidden)
+	if !ok || forbidden.ID != chat.ID || forbidden.Title != "" {
+		t.Fatalf("removed member chat = %T/%+v, want empty ChatForbidden %d", dialogs.Chats[0], dialogs.Chats[0], chat.ID)
 	}
 }
 

@@ -318,7 +318,7 @@ func (h *handlers) userAlbumUpdates(r *mtproto.Request, peerType store.PeerType,
 		})
 	}
 	if peerType == store.PeerTypeChat {
-		if res.Chats, err = h.loadChats(r.Ctx, map[int64]bool{toID: true}, r.UserID, nil); err != nil {
+		if res.Chats, err = h.loadChats(r.Ctx, map[int64]bool{toID: true}, r.UserID); err != nil {
 			h.log.Error("load album chat", "chat_id", toID, "err", err)
 			return nil, errInternal
 		}
