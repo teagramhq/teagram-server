@@ -737,6 +737,9 @@ func runAtBlobModePath(log *slog.Logger, blobModePath string) error {
 		sweepExpiredSRPChallenges(sweepCtx, st, log)
 	})
 	sweepWG.Go(func() {
+		sweepExpiredHistoryMessages(sweepCtx, st, log)
+	})
+	sweepWG.Go(func() {
 		sweepDeletedChannelPosts(sweepCtx, st, log)
 	})
 	if cfg.MediaErasureReportInterval > 0 {
@@ -1504,6 +1507,54 @@ func sweepExpiredSRPChallenges(ctx context.Context, st *store.Store, log *slog.L
 				continue
 			}
 			log.Info("swept expired SRP challenges", "deleted", n)
+		}
+	}
+}
+
+// sweepExpiredHistoryMessages deletes stamped message copies and channel posts
+// in bounded transactions. The row stamps are the resume point, so a process
+// restart simply discovers any remaining expired rows on its next interval.
+func sweepExpiredHistoryMessages(ctx context.Context, st *store.Store, log *slog.Logger) {
+	ticker := time.NewTicker(sweepInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			var copies, channelPosts int
+			for {
+				deleted, more, err := st.SweepExpiredMessageCopies(ctx, store.HistoryTTLSweepBatchSize)
+				if err != nil {
+					if ctx.Err() == nil {
+						log.Error("sweep expired message copies", "deleted", copies, "err", err)
+					}
+					break
+				}
+				copies += deleted
+				if !more {
+					break
+				}
+			}
+			for {
+				deleted, more, err := st.SweepExpiredChannelPosts(ctx, store.HistoryTTLSweepBatchSize)
+				if err != nil {
+					if ctx.Err() == nil {
+						log.Error("sweep expired channel posts", "deleted", channelPosts, "err", err)
+					}
+					break
+				}
+				channelPosts += deleted
+				if !more {
+					break
+				}
+			}
+			if ctx.Err() != nil {
+				return
+			}
+			if copies > 0 || channelPosts > 0 {
+				log.Info("swept expired history", "message_copies", copies, "channel_posts", channelPosts)
+			}
 		}
 	}
 }
