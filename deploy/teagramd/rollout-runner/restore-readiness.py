@@ -38,6 +38,8 @@ MIGRATION_ROLES = "browser_acceptance_probe"
 WORK_SECONDS = 30 * 60
 FAULT_WORK_SECONDS = 8 * 60
 CLEANUP_SECONDS = 4 * 60
+CLEANUP_REAP_SECONDS = 1
+CLEANUP_FINALIZE_SECONDS = 0.25
 SUPERVISOR_SECONDS = WORK_SECONDS + CLEANUP_SECONDS
 SAFE_PHASES = {
     "preflight",
@@ -618,7 +620,7 @@ class GatewayFixture:
         if any(hits[name] < 1 for name in ("tcp", "dns", "ipv6")) or hits["errors"] != 0:
             raise DrillFailure("preflight", "isolation_refusal")
 
-    def close(self) -> bool:
+    def close(self, deadline: float | None = None) -> bool:
         self.stop_event.set()
         clean = True
         for sock in self.sockets:
@@ -627,7 +629,8 @@ class GatewayFixture:
             except OSError:
                 clean = False
         for thread in self.threads:
-            thread.join(timeout=1)
+            timeout = 1 if deadline is None else max(0, min(1, deadline - time.monotonic() - CLEANUP_FINALIZE_SECONDS))
+            thread.join(timeout=timeout)
             if thread.is_alive():
                 clean = False
         return clean
@@ -733,6 +736,21 @@ class Docker:
         if saver is not None:
             saver()
 
+    def cleanup_remaining(self) -> float:
+        deadline = self.manifest.get("cleanup_deadline")
+        if not isinstance(deadline, (int, float)):
+            raise DrillFailure("cleanup", "cleanup_failure")
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise DrillFailure("cleanup", "cleanup_failure")
+        return remaining
+
+    def cleanup_budget_available(self) -> bool:
+        try:
+            return self.cleanup_remaining() > CLEANUP_REAP_SECONDS + CLEANUP_FINALIZE_SECONDS
+        except DrillFailure:
+            return False
+
     @staticmethod
     def _terminate_and_reap(process: subprocess.Popen[bytes]) -> bool:
         if process.poll() is None:
@@ -771,6 +789,12 @@ class Docker:
         phase: str,
         category: str,
     ) -> tuple[int, bytes]:
+        cleanup_deadline: float | None = None
+        if phase == "cleanup":
+            timeout = min(timeout, self.cleanup_remaining() - CLEANUP_REAP_SECONDS - CLEANUP_FINALIZE_SECONDS)
+            if timeout <= 0:
+                raise DrillFailure("cleanup", "cleanup_failure")
+            cleanup_deadline = float(self.manifest["cleanup_deadline"])
         try:
             process = subprocess.Popen(
                 args,
@@ -790,17 +814,51 @@ class Docker:
             raise
         try:
             try:
+                if cleanup_deadline is not None:
+                    timeout = min(
+                        timeout,
+                        self.cleanup_remaining() - CLEANUP_REAP_SECONDS - CLEANUP_FINALIZE_SECONDS,
+                    )
+                    if timeout <= 0:
+                        raise DrillFailure("cleanup", "cleanup_failure")
                 output, _ = process.communicate(input_bytes, timeout=timeout)
             except subprocess.TimeoutExpired as exc:
-                process.kill()
-                process.communicate()
-                raise DrillFailure(phase, "timeout") from exc
+                try:
+                    process.kill()
+                except ProcessLookupError:
+                    pass
+                if cleanup_deadline is None:
+                    process.communicate()
+                    raise DrillFailure(phase, "timeout") from exc
+                remaining = max(0.0, cleanup_deadline - time.monotonic() - CLEANUP_FINALIZE_SECONDS)
+                if remaining:
+                    try:
+                        process.wait(timeout=min(CLEANUP_REAP_SECONDS, remaining))
+                    except subprocess.TimeoutExpired:
+                        pass
+                raise DrillFailure("cleanup", "cleanup_failure") from exc
             return process.returncode, output or b""
         finally:
             if process.poll() is None:
-                process.kill()
-                process.communicate()
-            self._untrack_child(tracked)
+                try:
+                    process.kill()
+                except ProcessLookupError:
+                    pass
+                if cleanup_deadline is None:
+                    process.communicate()
+                else:
+                    remaining = max(0.0, cleanup_deadline - time.monotonic() - CLEANUP_FINALIZE_SECONDS)
+                    if remaining:
+                        try:
+                            process.wait(timeout=min(CLEANUP_REAP_SECONDS, remaining))
+                        except subprocess.TimeoutExpired:
+                            pass
+            if cleanup_deadline is not None:
+                for stream in (process.stdin, process.stdout, process.stderr):
+                    if stream is not None:
+                        stream.close()
+            if process.poll() is not None:
+                self._untrack_child(tracked)
 
     def call(
         self,
@@ -1816,14 +1874,18 @@ class Drill(Docker):
 
     def stream_containers(
         self,
-        producer: dict[str, Any],
+        producer: dict[str, Any] | None,
         consumer: dict[str, Any],
         *,
         phase: str,
         category: str,
         max_bytes: int = 256 * 1024 * 1024,
+        consumer_input: bytes | None = None,
     ) -> None:
-        self.attest_container(producer, phase)
+        if (producer is None) == (consumer_input is None):
+            raise DrillFailure(phase, category)
+        if producer is not None:
+            self.attest_container(producer, phase)
         self.attest_container(consumer, phase)
         source: subprocess.Popen[bytes] | None = None
         target: subprocess.Popen[bytes] | None = None
@@ -1831,14 +1893,15 @@ class Drill(Docker):
         target_record: dict[str, int] | None = None
         transferred = 0
         try:
-            source = subprocess.Popen(
-                [self.executable, "start", "--attach", "--interactive", producer["id"]],
-                stdin=subprocess.DEVNULL,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.DEVNULL,
-                env=self.environment,
-            )
-            source_record = self._track_child(source)
+            if producer is not None:
+                source = subprocess.Popen(
+                    [self.executable, "start", "--attach", "--interactive", producer["id"]],
+                    stdin=subprocess.DEVNULL,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.DEVNULL,
+                    env=self.environment,
+                )
+                source_record = self._track_child(source)
             target = subprocess.Popen(
                 [self.executable, "start", "--attach", "--interactive", consumer["id"]],
                 stdin=subprocess.PIPE,
@@ -1847,7 +1910,20 @@ class Drill(Docker):
                 env=self.environment,
             )
             target_record = self._track_child(target)
-            if source.stdout is None or target.stdin is None:
+            if target.stdin is None:
+                raise DrillFailure(phase, category)
+            if consumer_input is not None:
+                if len(consumer_input) > max_bytes:
+                    raise DrillFailure(phase, category)
+                target.stdin.write(consumer_input)
+                target.stdin.close()
+                remaining = self.manifest["work_deadline"] - time.monotonic()
+                if remaining <= 0:
+                    raise DrillFailure(phase, "timeout")
+                if target.wait(timeout=min(600, remaining)) != 0:
+                    raise DrillFailure(phase, category)
+                return
+            if source is None or source.stdout is None:
                 raise DrillFailure(phase, category)
             while True:
                 if time.monotonic() >= self.manifest["work_deadline"] or self.interrupted:
@@ -1867,7 +1943,10 @@ class Drill(Docker):
             target.stdin.close()
             remaining = max(1, self.manifest["work_deadline"] - time.monotonic())
             source_status = source.wait(timeout=min(60, remaining))
-            target_status = target.wait(timeout=min(600, max(1, self.manifest["work_deadline"] - time.monotonic())))
+            remaining = self.manifest["work_deadline"] - time.monotonic()
+            if remaining <= 0:
+                raise DrillFailure(phase, "timeout")
+            target_status = target.wait(timeout=min(600, remaining))
             if source_status != 0 or target_status != 0:
                 raise DrillFailure(phase, category)
         except subprocess.TimeoutExpired as exc:
@@ -2497,33 +2576,41 @@ class Drill(Docker):
         if result != expected or self.gateway.snapshot() != self.gateway.baseline:
             raise DrillFailure(self.phase, "isolation_refusal")
 
-    def create_restore_clients(self, source: dict[str, Any], target: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
+    def create_restore_clients(
+        self,
+        source: dict[str, Any],
+        target: dict[str, Any],
+        *,
+        malformed_sql: str | None = None,
+    ) -> tuple[dict[str, Any] | None, dict[str, Any]]:
         self.phase = "restore"
-        source_client = self.image_container(
-            "source",
-            role="source_client",
-            user="65532:70",
-            memory=CLIENT_MEMORY,
-            pids_limit=96,
-            mounts=[self.mount(self.sockets["source"], "/run/postgres", writable=True)],
-            # Shadow the image's declared volume so no anonymous volume is created.
-            tmpfs_options={
-                "/tmp": "rw,nosuid,nodev,noexec,size=128m,uid=70,gid=70,mode=1777",
-                "/var/lib/postgresql/data": "rw,nosuid,nodev,noexec,size=1m,uid=70,gid=70,mode=0700",
-            },
-            command_args=[
-                "--format=custom",
-                "--no-owner",
-                "--no-acl",
-                "--no-publications",
-                "--no-subscriptions",
-                "--dbname=teagram",
-            ],
-            entrypoint="pg_dump",
-            network_mode=f"container:{source['id']}",
-            env_file=self.files["source_tool_env"],
-            interactive=True,
-        )
+        source_client = None
+        if malformed_sql is None:
+            source_client = self.image_container(
+                "source",
+                role="source_client",
+                user="65532:70",
+                memory=CLIENT_MEMORY,
+                pids_limit=96,
+                mounts=[self.mount(self.sockets["source"], "/run/postgres", writable=True)],
+                # Shadow the image's declared volume so no anonymous volume is created.
+                tmpfs_options={
+                    "/tmp": "rw,nosuid,nodev,noexec,size=128m,uid=70,gid=70,mode=1777",
+                    "/var/lib/postgresql/data": "rw,nosuid,nodev,noexec,size=1m,uid=70,gid=70,mode=0700",
+                },
+                command_args=[
+                    "--format=custom",
+                    "--no-owner",
+                    "--no-acl",
+                    "--no-publications",
+                    "--no-subscriptions",
+                    "--dbname=teagram",
+                ],
+                entrypoint="pg_dump",
+                network_mode=f"container:{source['id']}",
+                env_file=self.files["source_tool_env"],
+                interactive=True,
+            )
         target_client = self.image_container(
             "target",
             role="target_client",
@@ -2535,30 +2622,39 @@ class Drill(Docker):
                 "/tmp": "rw,nosuid,nodev,noexec,size=128m,uid=70,gid=70,mode=1777",
                 "/var/lib/postgresql": "rw,nosuid,nodev,noexec,size=1m,uid=70,gid=70,mode=0700",
             },
-            command_args=[
-                "--exit-on-error",
-                "--no-owner",
-                "--no-acl",
-                "--no-privileges",
-                "--dbname=teagram",
-            ],
-            entrypoint="pg_restore",
+            command_args=(
+                ["--no-psqlrc", "--set=ON_ERROR_STOP=1", "--dbname=teagram"]
+                if malformed_sql is not None
+                else ["--exit-on-error", "--no-owner", "--no-acl", "--no-privileges", "--dbname=teagram"]
+            ),
+            entrypoint="psql" if malformed_sql is not None else "pg_restore",
             network_mode=f"container:{target['id']}",
             env_file=self.files["target_tool_env"],
             interactive=True,
         )
         return source_client, target_client
 
-    def restore_fixture(self, source: dict[str, Any], target: dict[str, Any]) -> None:
+    def restore_fixture(
+        self,
+        source: dict[str, Any],
+        target: dict[str, Any],
+        *,
+        malformed_sql: str | None = None,
+    ) -> None:
         self.phase = "restore"
-        source_client, target_client = self.create_restore_clients(source, target)
+        source_client, target_client = self.create_restore_clients(source, target, malformed_sql=malformed_sql)
         self.stream_containers(
             source_client,
             target_client,
             phase=self.phase,
             category="restore_failure",
             max_bytes=MAX_ARCHIVE,
+            consumer_input=malformed_sql.encode("utf-8") if malformed_sql is not None else None,
         )
+        if malformed_sql is not None:
+            raise DrillFailure(self.phase, "restore_failure")
+        if source_client is None:
+            raise DrillFailure(self.phase, "restore_failure")
         source_state = self.attest_container(source_client, self.phase).get("State") or {}
         target_state = self.attest_container(target_client, self.phase).get("State") or {}
         if source_state.get("Running") or target_state.get("Running") or int(source_state.get("ExitCode", -1)) != 0 or int(target_state.get("ExitCode", -1)) != 0:
@@ -3080,6 +3176,8 @@ class Drill(Docker):
             return False
         clean = True
         for record in list(self.manifest.get("containers", [])):
+            if not self.cleanup_budget_available():
+                return False
             if not re.fullmatch(r"[0-9a-f]{64}", record.get("id", "")):
                 clean = False
                 continue
@@ -3140,6 +3238,8 @@ class Drill(Docker):
             return False
         clean = True
         for record in list(self.manifest.get("images", [])):
+            if not self.cleanup_budget_available():
+                return False
             identifier = record.get("id", "")
             if not re.fullmatch(r"sha256:[0-9a-f]{64}", identifier):
                 clean = False
@@ -3208,6 +3308,8 @@ class Drill(Docker):
         if created_now != expected_created:
             clean = False
         for name in sorted(expected_created & created_now):
+            if not self.cleanup_budget_available():
+                return False
             volume_record = next(
                 (
                     item
@@ -3320,12 +3422,15 @@ class Drill(Docker):
             except PermissionError:
                 unknown = True
                 continue
-        deadline = time.monotonic() + 5
+        deadline = min(
+            time.monotonic() + 5,
+            self.manifest["cleanup_deadline"] - CLEANUP_FINALIZE_SECONDS,
+        )
         while time.monotonic() < deadline:
             alive = [(pid, ticks) for pid, ticks in owned if process_start_ticks(pid) == ticks]
             if not alive:
                 break
-            time.sleep(0.1)
+            time.sleep(min(0.1, deadline - time.monotonic()))
         for pid, start_ticks in owned:
             if process_start_ticks(pid) != start_ticks:
                 continue
@@ -3368,6 +3473,8 @@ class Drill(Docker):
         return {path for path in retained if path}
 
     def remove_unmounted_files(self, *, keep_all: bool) -> bool:
+        if not self.cleanup_budget_available():
+            return False
         retained = self.mounted_sources()
         if retained is None:
             keep_all = True
@@ -3378,6 +3485,8 @@ class Drill(Docker):
         root_device = self.run_dir.stat().st_dev
         retained_paths = {Path(item) for item in retained}
         for record in self.manifest.get("files", []):
+            if not self.cleanup_budget_available():
+                return False
             path = Path(record["path"])
             if any(path == mount or mount in path.parents for mount in retained_paths):
                 continue
@@ -3405,6 +3514,8 @@ class Drill(Docker):
                 clean = False
         preserve = {self.manifest_path, self.manifest_path.with_suffix(".tmp")}
         for current, directories, files in os.walk(self.run_dir, topdown=False, followlinks=False):
+            if not self.cleanup_budget_available():
+                return False
             current_path = Path(current)
             for name in files:
                 candidate = current_path / name
@@ -3454,12 +3565,16 @@ class Drill(Docker):
         return clean
 
     def remove_build_inputs(self) -> bool:
+        if not self.cleanup_budget_available():
+            return False
         record = self.manifest.get("build_directory")
         if record is None:
             return True
         path = Path(record.get("path", ""))
         clean = True
         for item in self.manifest.get("files", []):
+            if not self.cleanup_budget_available():
+                return False
             if not item.get("purpose", "").startswith("build_input_"):
                 continue
             file_path = Path(item["path"])
@@ -3511,12 +3626,28 @@ class Drill(Docker):
         return clean
 
     def cleanup_resources(self) -> bool:
+        if not self.cleanup_budget_available():
+            self.manifest["cleanup_verified"] = False
+            self.save()
+            return False
         clean = True
         if self.gateway is not None:
-            clean = self.gateway.close() and clean
+            clean = self.gateway.close(self.manifest["cleanup_deadline"]) and clean
             self.gateway = None
+        if not self.cleanup_budget_available():
+            self.manifest["cleanup_verified"] = False
+            self.save()
+            return False
         clean = self.cleanup_processes() and clean
+        if not self.cleanup_budget_available():
+            self.manifest["cleanup_verified"] = False
+            self.save()
+            return False
         clean = self.remove_build_inputs() and clean
+        if not self.cleanup_budget_available():
+            self.manifest["cleanup_verified"] = False
+            self.save()
+            return False
         if not self.manifest.get("resource_creation_started"):
             clean = self.remove_unmounted_files(keep_all=False) and clean
             self.manifest["cleanup_verified"] = bool(clean)
@@ -3524,8 +3655,20 @@ class Drill(Docker):
             return clean
         containers_clean = self.cleanup_owned_containers()
         clean = containers_clean and clean
+        if not self.cleanup_budget_available():
+            self.manifest["cleanup_verified"] = False
+            self.save()
+            return False
         clean = self.cleanup_owned_images() and clean
+        if not self.cleanup_budget_available():
+            self.manifest["cleanup_verified"] = False
+            self.save()
+            return False
         clean = self.cleanup_networks_and_volumes() and clean
+        if not self.cleanup_budget_available():
+            self.manifest["cleanup_verified"] = False
+            self.save()
+            return False
         files_clean = self.remove_unmounted_files(keep_all=not containers_clean)
         clean = files_clean and clean
         self.manifest["cleanup_verified"] = bool(clean)
@@ -3766,9 +3909,13 @@ def make_runtime_args(manifest: dict[str, Any]) -> argparse.Namespace:
     )
 
 
-def remove_finished_run(drill: Drill) -> bool:
+def remove_finished_run(drill: Drill, deadline: float | None = None) -> bool:
     if not drill.manifest.get("cleanup_verified"):
         return False
+
+    def within_budget() -> bool:
+        return deadline is None or time.monotonic() < deadline - CLEANUP_FINALIZE_SECONDS
+
     run_dir = drill.run_dir
     manifest_path = drill.manifest_path
     temporary = manifest_path.with_suffix(".tmp")
@@ -3781,6 +3928,8 @@ def remove_finished_run(drill: Drill) -> bool:
         "migrations",
     }
     try:
+        if not within_budget():
+            return False
         root_entries = {entry.name for entry in run_dir.iterdir()}
         # Verified file cleanup may already have removed the emptied directories.
         if "ownership.json" not in root_entries or not root_entries <= expected_directories | {
@@ -3789,6 +3938,8 @@ def remove_finished_run(drill: Drill) -> bool:
         }:
             return False
         for current, directories, files in os.walk(run_dir, topdown=True, followlinks=False):
+            if not within_budget():
+                return False
             current_path = Path(current)
             if current_path == run_dir:
                 continue
@@ -3800,6 +3951,8 @@ def remove_finished_run(drill: Drill) -> bool:
             elif directories:
                 return False
         if temporary.exists():
+            if not within_budget():
+                return False
             info = temporary.lstat()
             if (
                 not stat.S_ISREG(info.st_mode)
@@ -3811,8 +3964,12 @@ def remove_finished_run(drill: Drill) -> bool:
                 return False
             temporary.unlink()
         for name in ("sockets/target", "sockets/source", "migrations", "secrets", "seed", "invocation", "sockets", "work"):
+            if not within_budget():
+                return False
             if (run_dir / name).exists():
                 (run_dir / name).rmdir()
+        if not within_budget():
+            return False
         info = manifest_path.lstat()
         if (
             not stat.S_ISREG(info.st_mode)
@@ -3893,7 +4050,7 @@ def supervise(manifest_path: Path, lock_fd: int) -> int:
             drill.manifest["cleanup_verified"] = False
             drill.save()
             return 1
-        if not remove_finished_run(drill):
+        if not remove_finished_run(drill, manifest["cleanup_deadline"]):
             drill.manifest["cleanup_verified"] = False
             try:
                 drill.save()
@@ -3925,9 +4082,15 @@ def recover(manifest_path: Path) -> int:
             if lock[1] == manifest["global_lock"]:
                 drill = Drill(make_runtime_args(manifest), manifest_path.parent, manifest)
                 clean = drill.cleanup_resources()
-                if clean and remove_finished_run(drill):
-                    print(json.dumps(report_document("cleanup", "cleanup_failure", "verified", 0), separators=(",", ":")))
-                    return 1
+                if clean:
+                    if remove_finished_run(drill, manifest["cleanup_deadline"]):
+                        print(json.dumps(report_document("cleanup", "cleanup_failure", "verified", 0), separators=(",", ":")))
+                        return 1
+                    drill.manifest["cleanup_verified"] = False
+                    try:
+                        drill.save()
+                    except OSError:
+                        pass
     except BaseException:
         pass
     finally:
@@ -4075,15 +4238,10 @@ def run_primary(args: argparse.Namespace) -> int:
         drill.migrate_database("source", source, BASE_SCHEMA, "source_migrations")
         drill.verify_schema_state(source, 1, MIGRATION_ROLES, "source_migrations")
         target = drill.create_database("target")
-        drill.restore_fixture(source, target)
         if args.fault_test == "malformed-sql":
-            try:
-                drill.sql(target, malformed_sql_fixture(token), "restore")
-            except DrillFailure as exc:
-                if exc.category != "schema_failure":
-                    raise
-                raise DrillFailure("restore", "restore_failure") from exc
-            raise DrillFailure("restore", "schema_failure")
+            drill.restore_fixture(source, target, malformed_sql=malformed_sql_fixture(token))
+        else:
+            drill.restore_fixture(source, target)
         drill.apply_pending_migration(target)
         app = drill.start_application(target)
         drill.run_application_checker(app)

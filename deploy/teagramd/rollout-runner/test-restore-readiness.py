@@ -189,6 +189,54 @@ class RestoreReadinessContractTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             RESTORE_READINESS.malformed_sql_fixture("external input")
 
+    def test_malformed_sql_is_sent_through_restore_stream_and_failure_is_sanitized(self) -> None:
+        token = "a" * 32
+        fixture = RESTORE_READINESS.malformed_sql_fixture(token)
+        with tempfile.TemporaryDirectory(prefix="rr-malformed-restore-") as temporary_directory:
+            capture = Path(temporary_directory) / "restore-input.sql"
+            executable = Path(temporary_directory) / "docker-fixture"
+            executable.write_text(
+                "#!/usr/bin/python3\n"
+                "import pathlib, sys\n"
+                "payload = sys.stdin.buffer.read()\n"
+                f"pathlib.Path({str(capture)!r}).write_bytes(payload)\n"
+                f"raise SystemExit(1 if payload == {fixture.encode()!r} else 0)\n",
+                encoding="utf-8",
+            )
+            executable.chmod(0o755)
+
+            drill = object.__new__(RESTORE_READINESS.Drill)
+            drill.executable = str(executable)
+            drill.environment = {"PATH": "/usr/bin:/bin"}
+            drill.manifest = {"work_deadline": time.monotonic() + 5, "processes": []}
+            drill.save = lambda: None
+            drill.attest_container = lambda *_args: {}
+            drill.sockets = {"target": Path(temporary_directory)}
+            drill.files = {"target_tool_env": Path(temporary_directory) / "target-env"}
+            client_specs: list[dict[str, Any]] = []
+
+            def create_client(_image: str, **kwargs: Any) -> dict[str, str]:
+                client_specs.append(kwargs)
+                return {"id": "target"}
+
+            drill.image_container = create_client
+
+            with self.assertRaises(RESTORE_READINESS.DrillFailure) as failure:
+                drill.restore_fixture({"id": "source"}, {"id": "database"}, malformed_sql=fixture)
+
+            self.assertEqual(failure.exception.phase, "restore")
+            self.assertEqual(failure.exception.category, "restore_failure")
+            self.assertEqual(capture.read_bytes(), fixture.encode())
+            self.assertEqual(len(client_specs), 1)
+            self.assertEqual(client_specs[0]["entrypoint"], "psql")
+            self.assertEqual(client_specs[0]["command_args"], ["--no-psqlrc", "--set=ON_ERROR_STOP=1", "--dbname=teagram"])
+            self.assertEqual(drill.manifest["processes"], [])
+            report = RESTORE_READINESS.report_document("restore", failure.exception.category, "verified", 1)
+            self.assertEqual(report["result"], "fail")
+            self.assertEqual(report["exit"], 1)
+            self.assertEqual(report["cleanup"], "verified")
+            self.assertNotIn(token, json.dumps(report))
+
     def test_image_build_contexts_create_the_missing_build_directory(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             work_directory = Path(temporary_directory) / "work"
@@ -572,7 +620,12 @@ class RestoreReadinessContractTests(unittest.TestCase):
 
         document, record = container_fixture()
         drill = object.__new__(RESTORE_READINESS.Drill)
-        drill.manifest = {"containers": [record], "pending_container": None, "baseline": {"containers": []}}
+        drill.manifest = {
+            "containers": [record],
+            "pending_container": None,
+            "baseline": {"containers": []},
+            "cleanup_deadline": time.monotonic() + 10,
+        }
         drill.cleanup_container_inventory = lambda: [(record["id"], record["name"])]
         drill.cleanup_recover_pending_container = lambda _containers: True
         drill.cleanup_container_inspect = lambda _identifier: document
@@ -611,6 +664,58 @@ class RestoreReadinessContractTests(unittest.TestCase):
                 patch.object(RESTORE_READINESS, "remove_finished_run", return_value=True),
             ):
                 self.assertEqual(RESTORE_READINESS.supervise(Path(directory) / "ownership.json", lock_fd), 0)
+
+    def test_supervisor_bounds_delayed_cleanup_command_and_leaves_cleanup_unverified(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="rr-cleanup-deadline-") as directory:
+            lock_path = Path(directory) / "lock"
+            lock_path.write_bytes(b"")
+            lock_fd = RESTORE_READINESS.os.open(lock_path, RESTORE_READINESS.os.O_RDWR)
+            lock_info = RESTORE_READINESS.os.fstat(lock_fd)
+            manifest = {
+                "global_lock": {"device": lock_info.st_dev, "inode": lock_info.st_ino},
+                "supervisor": {"pid": 0, "start_ticks": 0},
+                "parent": {"pid": 999999, "start_ticks": 1},
+                "parent_done": True,
+                "cleanup_deadline": time.monotonic() + 1.5,
+                "processes": [],
+            }
+
+            class DelayedCleanupDrill(RESTORE_READINESS.Drill):
+                def __init__(self, _args: Any, _run_dir: Path, recovered_manifest: dict[str, Any]) -> None:
+                    self.manifest = recovered_manifest
+                    self.executable = "/usr/bin/sleep"
+                    self.environment = {"PATH": "/usr/bin:/bin"}
+                    self.save = lambda: None
+
+                def cleanup_resources(self) -> bool:
+                    try:
+                        self.cleanup_call(["2"], timeout=2)
+                    except RESTORE_READINESS.DrillFailure:
+                        self.manifest["cleanup_verified"] = False
+                        return False
+                    self.manifest["cleanup_verified"] = True
+                    return True
+
+            process_start_ticks = RESTORE_READINESS.process_start_ticks
+
+            def start_ticks(pid: int) -> int | None:
+                if pid == 999999:
+                    return None
+                return process_start_ticks(pid)
+
+            started = time.monotonic()
+            with (
+                patch.object(RESTORE_READINESS, "load_manifest", return_value=manifest),
+                patch.object(RESTORE_READINESS, "process_start_ticks", side_effect=start_ticks),
+                patch.object(RESTORE_READINESS, "make_runtime_args", return_value=None),
+                patch.object(RESTORE_READINESS, "Drill", DelayedCleanupDrill),
+                patch.object(RESTORE_READINESS, "remove_finished_run", return_value=True),
+            ):
+                status = RESTORE_READINESS.supervise(Path(directory) / "ownership.json", lock_fd)
+
+            self.assertEqual(status, 1)
+            self.assertLess(time.monotonic() - started, 1)
+            self.assertFalse(manifest["cleanup_verified"])
 
     def test_disposable_dns_fixture_answers_only_its_query(self) -> None:
         query = RESTORE_READINESS.dns_fixture_query()
