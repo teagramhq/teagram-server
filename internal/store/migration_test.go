@@ -14,6 +14,108 @@ import (
 	"github.com/teagramhq/teagram-server/internal/store"
 )
 
+func lockMigrationReplays(tb testing.TB, ctx context.Context) func() {
+	tb.Helper()
+	unlock, err := pgtest.LockMigrations(ctx)
+	if err != nil {
+		tb.Fatalf("lock migration replay: %v", err)
+	}
+	return func() {
+		if err := unlock(); err != nil {
+			tb.Errorf("unlock migration replay: %v", err)
+		}
+	}
+}
+
+func TestMigrationReplayLockUsesAdminDatabase(t *testing.T) {
+	ctx := context.Background()
+	const migrationLockKey = int64(0x7467)
+	admin, err := pgx.Connect(ctx, pgtest.AdminDSN())
+	if err != nil {
+		t.Fatalf("connect admin: %v", err)
+	}
+	defer func() { _ = admin.Close(ctx) }() //nolint:errcheck // best-effort close
+	if _, err := admin.Exec(ctx, `SELECT pg_advisory_lock($1)`, migrationLockKey); err != nil {
+		t.Fatalf("hold admin migration lock: %v", err)
+	}
+	adminLockHeld := true
+	defer func() {
+		if adminLockHeld {
+			if _, err := admin.Exec(context.Background(), `SELECT pg_advisory_unlock($1)`, migrationLockKey); err != nil {
+				t.Errorf("release admin migration lock during cleanup: %v", err)
+			}
+		}
+	}()
+
+	type lockResult struct {
+		unlock func() error
+		err    error
+	}
+	acquired := make(chan lockResult, 1)
+	go func() {
+		unlock, err := pgtest.LockMigrations(ctx)
+		acquired <- lockResult{unlock: unlock, err: err}
+	}()
+
+	watchCtx, stopWatching := context.WithTimeout(ctx, 3*time.Second)
+	defer stopWatching()
+	ticker := time.NewTicker(10 * time.Millisecond)
+	defer ticker.Stop()
+	waiting := false
+	timedOut := false
+	var early *lockResult
+	for !waiting && early == nil && !timedOut {
+		select {
+		case result := <-acquired:
+			early = &result
+		case <-watchCtx.Done():
+			timedOut = true
+		case <-ticker.C:
+			if err := admin.QueryRow(ctx, `
+				SELECT EXISTS (
+					SELECT 1 FROM pg_locks AS locks
+					JOIN pg_stat_activity AS activity USING (pid)
+					WHERE locks.locktype = 'advisory' AND locks.classid = 0
+					  AND locks.objid = $1::oid AND locks.objsubid = 1 AND NOT locks.granted
+					  AND activity.application_name = 'pgtest-migration-replay'
+				)
+			`, migrationLockKey).Scan(&waiting); err != nil {
+				t.Fatalf("observe admin migration lock wait: %v", err)
+			}
+		}
+	}
+
+	if _, err := admin.Exec(ctx, `SELECT pg_advisory_unlock($1)`, migrationLockKey); err != nil {
+		t.Fatalf("release admin migration lock: %v", err)
+	}
+	adminLockHeld = false
+	if early != nil {
+		if early.err == nil && early.unlock != nil {
+			if err := early.unlock(); err != nil {
+				t.Errorf("release prematurely acquired migration lock: %v", err)
+			}
+		}
+		t.Fatalf("migration replay lock returned before the admin-database lock was released: %v", early.err)
+	}
+	if !waiting {
+		result := <-acquired
+		if result.err == nil && result.unlock != nil {
+			if err := result.unlock(); err != nil {
+				t.Errorf("release migration lock after timeout: %v", err)
+			}
+		}
+		t.Fatalf("migration replay did not wait on the admin-database lock: %v", result.err)
+	}
+
+	result := <-acquired
+	if result.err != nil {
+		t.Fatalf("acquire migration lock after admin lock release: %v", result.err)
+	}
+	if err := result.unlock(); err != nil {
+		t.Fatalf("release migration lock: %v", err)
+	}
+}
+
 // TestOpenRejectsUnmigratedSchema proves Open's fail-fast schema check fires:
 // dropping a table the latest migration created makes Open error at startup
 // instead of failing later with a confusing "relation does not exist".
@@ -788,6 +890,7 @@ func TestOpenRejectsPartBlobMigrationMissing(t *testing.T) {
 		t.Fatalf("connect: %v", err)
 	}
 	defer func() { _ = conn.Close(ctx) }() //nolint:errcheck // best-effort close
+	defer lockMigrationReplays(t, ctx)()
 	for _, e := range migs {
 		if e.IsDir() || !strings.HasSuffix(e.Name(), ".sql") {
 			continue
