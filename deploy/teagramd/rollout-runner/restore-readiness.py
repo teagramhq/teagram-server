@@ -1473,6 +1473,7 @@ class Drill(Docker):
         self.manifest_path = run_dir / "ownership.json"
         super().__init__(args.docker_bin, self.manifest_path, manifest)
         self.phase = "preflight"
+        self.preflight_step = "initialize private run"
         self.started = time.monotonic()
         self.gateway: GatewayFixture | None = None
         self.images: dict[str, dict[str, Any]] = {}
@@ -1549,10 +1550,14 @@ class Drill(Docker):
 
     def preflight(self) -> tuple[str, str]:
         self.phase = "preflight"
+        self.preflight_step = "privileges and environment"
         if os.geteuid() != 0 or not validate_ambient_environment(dict(os.environ)):
             raise DrillFailure(self.phase, "preflight_failure")
+        self.preflight_step = "compiled build inputs"
         self.validate_build_inputs()
+        self.preflight_step = "Docker CLI process inventory"
         baseline_docker_pids = docker_cli_pids()
+        self.preflight_step = "/run tmpfs"
         fs_type = subprocess.run(
             ["stat", "-f", "-c", "%T", "/run"],
             stdout=subprocess.PIPE,
@@ -1563,6 +1568,7 @@ class Drill(Docker):
         )
         if fs_type.returncode != 0 or fs_type.stdout.decode("ascii", "ignore").strip() != "tmpfs":
             raise DrillFailure(self.phase, "preflight_failure")
+        self.preflight_step = "root Docker configuration"
         config_path = Path("/root/.docker/config.json")
         if config_path.exists():
             try:
@@ -1571,9 +1577,11 @@ class Drill(Docker):
                 raise DrillFailure(self.phase, "isolation_refusal") from exc
             if any(config.get(key) for key in ("auths", "credsStore", "credHelpers")):
                 raise DrillFailure(self.phase, "isolation_refusal")
+        self.preflight_step = "default Docker context"
         context = self.call(["context", "show"], phase=self.phase, category="isolation_refusal").decode().strip()
         if context != "default":
             raise DrillFailure(self.phase, "isolation_refusal")
+        self.preflight_step = "Docker daemon security options"
         security = self.call(
             ["info", "--format", "{{json .SecurityOptions}}"],
             phase=self.phase,
@@ -1588,6 +1596,7 @@ class Drill(Docker):
             for item in security_options
         ):
             raise DrillFailure(self.phase, "isolation_refusal")
+        self.preflight_step = "default Docker endpoint"
         endpoint = self.call(
             ["context", "inspect", "default", "--format", "{{json .Endpoints.docker}}"],
             phase=self.phase,
@@ -1599,6 +1608,7 @@ class Drill(Docker):
             raise DrillFailure(self.phase, "isolation_refusal") from exc
         if not isinstance(endpoint_value, dict) or endpoint_value.get("Host") != "unix:///var/run/docker.sock":
             raise DrillFailure(self.phase, "isolation_refusal")
+        self.preflight_step = "Docker bridge gateway"
         gateway = self.call(
             ["network", "inspect", "bridge", "--format", "{{(index .IPAM.Config 0).Gateway}}"],
             phase=self.phase,
@@ -1608,6 +1618,7 @@ class Drill(Docker):
             ipaddress.IPv4Address(gateway)
         except ipaddress.AddressValueError as exc:
             raise DrillFailure(self.phase, "isolation_refusal") from exc
+        self.preflight_step = "baseline Docker resource inventory"
         existing_containers = self.list_containers(self.phase)
         existing_volumes = self.list_volumes(self.phase)
         existing_networks = self.list_networks(self.phase)
@@ -1617,6 +1628,7 @@ class Drill(Docker):
             "networks": sorted(existing_networks),
             "docker_processes": baseline_docker_pids,
         }
+        self.preflight_step = "save baseline Docker inventory"
         self.save()
         if existing_containers or existing_volumes or existing_networks != {"bridge", "host", "none"}:
             raise DrillFailure(self.phase, "isolation_refusal")
@@ -4595,20 +4607,24 @@ def recover(manifest_path: Path) -> int:
 
 def run_primary(args: argparse.Namespace) -> int:
     if os.geteuid() != 0:
+        print("restore readiness preflight check failed: root privileges", file=sys.stderr)
         print(json.dumps(report_document("preflight", "preflight_failure", "not_started", 0), separators=(",", ":")))
         return 1
     try:
         args.docker_bin = ensure_trusted_system_executable(args.docker_bin)
     except DrillFailure:
+        print("restore readiness preflight check failed: trusted Docker executable", file=sys.stderr)
         print(json.dumps(report_document("preflight", "preflight_failure", "not_started", 0), separators=(",", ":")))
         return 1
     try:
         work_seconds = bounded_work_seconds(args.fault_test, args.work_seconds)
     except ValueError:
+        print("restore readiness preflight check failed: work budget", file=sys.stderr)
         print(json.dumps(report_document("preflight", "preflight_failure", "not_started", 0), separators=(",", ":")))
         return 1
     lock = open_global_lock()
     if lock is None:
+        print("restore readiness preflight check failed: global lock", file=sys.stderr)
         print(json.dumps(report_document("preflight", "isolation_refusal", "not_started", 0), separators=(",", ":")))
         return 1
     lock_fd, lock_record = lock
@@ -4618,12 +4634,14 @@ def run_primary(args: argparse.Namespace) -> int:
         os.chmod(run_dir, 0o700)
     except OSError:
         os.close(lock_fd)
+        print("restore readiness preflight check failed: private /run directory", file=sys.stderr)
         print(json.dumps(report_document("preflight", "preflight_failure", "not_started", 0), separators=(",", ":")))
         return 1
     started = time.monotonic()
     parent_ticks = process_start_ticks(os.getpid())
     if parent_ticks is None:
         os.close(lock_fd)
+        print("restore readiness preflight check failed: parent process identity", file=sys.stderr)
         print(json.dumps(report_document("preflight", "preflight_failure", "not_started", 0), separators=(",", ":")))
         return 1
     runtime = {
@@ -4704,6 +4722,7 @@ def run_primary(args: argparse.Namespace) -> int:
             raise DrillFailure("preflight", "preflight_failure")
         manifest["supervisor"] = {"pid": supervisor.pid, "start_ticks": supervisor_ticks}
         drill.save()
+        drill.preflight_step = "private run layout"
         drill.create_private_layout()
         gateway, _ = drill.preflight()
         drill.manifest["resource_creation_started"] = True
@@ -4765,6 +4784,8 @@ def run_primary(args: argparse.Namespace) -> int:
         drill.run_application_checker(app)
     except DrillFailure as exc:
         failure = exc
+        if exc.phase == "preflight":
+            print(f"restore readiness preflight check failed: {drill.preflight_step}", file=sys.stderr)
     except BaseException:
         failure = DrillFailure(drill.phase, "fixture_failure")
     finally:

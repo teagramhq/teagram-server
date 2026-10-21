@@ -10,7 +10,7 @@ import os
 import tempfile
 import time
 import unittest
-from contextlib import redirect_stdout
+from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from typing import Any
 from unittest.mock import Mock, patch
@@ -152,6 +152,22 @@ class RestoreReadinessContractTests(unittest.TestCase):
             shadow.chmod(0o755)
             with self.assertRaises(RESTORE_READINESS.DrillFailure):
                 RESTORE_READINESS.ensure_trusted_system_executable(str(shadow))
+
+    def test_startup_report_names_a_rejected_docker_executable(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="rr-path-shadow-") as temporary_directory:
+            shadow = Path(temporary_directory) / "docker"
+            shadow.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+            shadow.chmod(0o755)
+            output = io.StringIO()
+            error = io.StringIO()
+            args = Mock(docker_bin=str(shadow), fault_test=None, work_seconds=None)
+            with patch.object(RESTORE_READINESS.os, "geteuid", return_value=0):
+                with redirect_stdout(output), redirect_stderr(error):
+                    status = RESTORE_READINESS.run_primary(args)
+
+        self.assertEqual(status, 1)
+        self.assertEqual(json.loads(output.getvalue())["category"], "preflight_failure")
+        self.assertIn("preflight check failed: trusted Docker executable", error.getvalue())
 
     def test_attached_timeouts_terminate_and_reap_child(self) -> None:
         with tempfile.TemporaryDirectory(prefix="rr-attach-timeout-") as temporary_directory:
