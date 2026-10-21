@@ -27,10 +27,9 @@ ORDER BY chat_id, user_id;
 
 -- PeerChannelDialogsForOwner is the channel counterpart of
 -- PeerDialogsForOwner. A channel has no dialogs row; its current, unbanned
--- membership selects the dialog, and its newest live message is optional. The
--- membership predicate and top-message lookup are in this one statement so the
--- selected message can never come from a channel the viewer is not entitled to
--- read in the same snapshot.
+-- membership selects the dialog, and its newest visible message is optional.
+-- The membership, floor and top-message lookup are in this one statement so
+-- the selected post cannot come from a channel history the viewer cannot read.
 -- name: PeerChannelDialogsForOwner :many
 SELECT
     c.id AS channel_id,
@@ -48,7 +47,7 @@ SELECT
     p.role AS member_role,
     p.banned_until AS member_banned_until,
     p.join_pts AS member_join_pts,
-    COALESCE(read_state.read_max_id, 0)::bigint AS read_inbox_max_id,
+    GREATEST(COALESCE(read_state.read_max_id, 0), p.available_min_id)::bigint AS read_inbox_max_id,
     unread.unread_count,
     unread.entitled::boolean AS summary_entitled,
     unread.status_exists::boolean AS summary_status_exists,
@@ -85,7 +84,7 @@ CROSS JOIN LATERAL (
     FROM channel_post_unread_suffix_counts(
         c.id,
         p.user_id,
-        COALESCE(read_state.read_max_id, 0)
+        GREATEST(COALESCE(read_state.read_max_id, 0), p.available_min_id)
     ) AS summary(entitled, status_exists, summary_version, summary_ready, total_live, author_live)
 ) AS unread
 LEFT JOIN LATERAL (
@@ -94,6 +93,7 @@ LEFT JOIN LATERAL (
            cm.ttl_period, cm.post_author
     FROM channel_messages cm
     WHERE cm.channel_id = c.id AND cm.deleted = false
+      AND cm.local_id > p.available_min_id
       AND (cm.expires_at IS NULL OR cm.expires_at > statement_timestamp())
     ORDER BY cm.local_id DESC
     LIMIT 1

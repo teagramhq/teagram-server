@@ -996,7 +996,7 @@ func (h *handlers) handleGetChannelMessages(r *mtproto.Request) (bin.Encoder, er
 		localIDs = append(localIDs, int64(v.ID))
 	}
 
-	found, err := h.store.ChannelMessages(r.Ctx, channelID, localIDs)
+	found, err := h.store.ChannelMessagesForMemberIncludingTombstones(r.Ctx, channelID, r.UserID, localIDs)
 	if err != nil {
 		h.log.Error("channel messages", "user_id", r.UserID, "channel_id", channelID, "err", err)
 		return nil, errInternal
@@ -1063,9 +1063,8 @@ func (h *handlers) handleDeleteChannelMessages(r *mtproto.Request) (bin.Encoder,
 }
 
 // handleExportMessageLink returns an address only for a message that the
-// caller can currently read through channels.getMessages. Channel membership,
-// the per-viewer access hash and bans remain the admission checks; the private
-// channel id in the resulting URL is only an address.
+// caller can currently read through channels.getMessages. The store checks the
+// caller's membership, ban state and history floor with the post read.
 func (h *handlers) handleExportMessageLink(r *mtproto.Request) (bin.Encoder, error) {
 	var req tg.ChannelsExportMessageLinkRequest
 	if err := req.Decode(r.Buf); err != nil {
@@ -1085,7 +1084,7 @@ func (h *handlers) handleExportMessageLink(r *mtproto.Request) (bin.Encoder, err
 		return nil, errPeerIDInvalid
 	}
 
-	messages, err := h.store.ChannelMessages(r.Ctx, channelID, []int64{int64(req.ID)})
+	messages, err := h.store.ChannelMessagesForMemberIncludingTombstones(r.Ctx, channelID, r.UserID, []int64{int64(req.ID)})
 	if err != nil {
 		h.log.Error("export channel message link", "user_id", r.UserID, "channel_id", channelID, "err", err)
 		return nil, errInternal
@@ -1112,17 +1111,13 @@ func (h *handlers) handleExportMessageLink(r *mtproto.Request) (bin.Encoder, err
 	return &tg.ExportedMessageLink{Link: h.cfg.MeURLPrefix + address}, nil
 }
 
-// channelHistory renders one page of a channel's history for the caller, whom
-// requireChannelMember has already established is an unbanned member.
-//
-// A member reads the channel's whole history, including posts from before they
-// joined. That is deliberate: join_pts bounds how far back the difference path
-// will replay, a cost control, and it is NOT a confidentiality control (threat
-// model G5). Nothing may later be built on it as one.
+// channelHistory renders one page of a channel's history. The store reads the
+// caller's active participant row and history floor in each page and count query.
 func (h *handlers) channelHistory(r *mtproto.Request, channelID int64, req *tg.MessagesGetHistoryRequest, limit int) (bin.Encoder, error) {
 	msgs, count, err := h.store.ChannelHistoryWithOffset(
 		r.Ctx,
 		channelID,
+		r.UserID,
 		int64(req.OffsetID),
 		int64(req.AddOffset),
 		int64(req.MaxID),
@@ -1136,18 +1131,10 @@ func (h *handlers) channelHistory(r *mtproto.Request, channelID int64, req *tg.M
 	return h.channelMessagesWithCount(r, channelID, msgs, count)
 }
 
-// channelSearch renders one page of a channel's keyword search for the caller,
-// whom requireChannelMember has already established is an unbanned member.
-//
-// The whole history is searchable, posts from before the caller joined
-// included, for the same reason channelHistory serves them: join_pts bounds the
-// difference path's replay as a cost control and is never a confidentiality one
-// (threat model G5). Search reaches no further than getHistory already does.
-//
-// Membership is re-established by the caller on every page rather than carried
-// in offset_id, so a ban landing between two pages stops the next one.
+// channelSearch renders one page of keyword matches above the caller's history
+// floor. The store rechecks membership, ban state and floor with the post read.
 func (h *handlers) channelSearch(r *mtproto.Request, channelID int64, query string, offsetID int64, limit int) (bin.Encoder, error) {
-	msgs, err := h.store.SearchChannelPosts(r.Ctx, channelID, query, offsetID, limit)
+	msgs, err := h.store.SearchChannelPosts(r.Ctx, r.UserID, channelID, query, offsetID, limit)
 	if err != nil {
 		h.log.Error("channel search", "user_id", r.UserID, "channel_id", channelID, "err", err)
 		return nil, errInternal

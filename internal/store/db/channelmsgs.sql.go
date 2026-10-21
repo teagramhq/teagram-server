@@ -172,30 +172,40 @@ func (q *Queries) ChannelHistoryPage(ctx context.Context, arg ChannelHistoryPage
 const channelHistoryPageAround = `-- name: ChannelHistoryPageAround :many
 WITH page_offset AS (
     SELECT GREATEST(
-        COUNT(*) FILTER (WHERE local_id >= $3::bigint) + $4::bigint,
+        COUNT(*) FILTER (WHERE cm.local_id >= $3::bigint) + $4::bigint,
         0::bigint
     ) AS skip
-    FROM channel_messages
-    WHERE channel_id = $5::bigint AND deleted = false
-      AND (expires_at IS NULL OR expires_at > statement_timestamp())
+    FROM channel_messages cm
+    JOIN channel_participants cp
+      ON cp.channel_id = cm.channel_id
+     AND cp.user_id = $5::bigint
+    WHERE cm.channel_id = $6::bigint AND cm.deleted = false
+      AND (cm.expires_at IS NULL OR cm.expires_at > statement_timestamp())
+      AND cm.local_id > cp.available_min_id
+      AND (cp.banned_until IS NULL OR cp.banned_until <= now())
       AND EXISTS (
           SELECT 1 FROM channels c
-          WHERE c.id = $5::bigint AND c.deleted_at IS NULL
+          WHERE c.id = $6::bigint AND c.deleted_at IS NULL
       )
 ), page AS (
-    SELECT channel_id, local_id, from_id, date, message, edit_date, deleted,
-           random_id, grouped_id, file_id, reply_to_msg_id, action_type, ttl_period, post_author
-    FROM channel_messages
-    WHERE channel_id = $5::bigint
-      AND deleted = false
-      AND (expires_at IS NULL OR expires_at > statement_timestamp())
+    SELECT cm.channel_id, cm.local_id, cm.from_id, cm.date, cm.message, cm.edit_date, cm.deleted,
+           cm.random_id, cm.grouped_id, cm.file_id, cm.reply_to_msg_id, cm.action_type, cm.ttl_period, cm.post_author
+    FROM channel_messages cm
+    JOIN channel_participants cp
+      ON cp.channel_id = cm.channel_id
+     AND cp.user_id = $5::bigint
+    WHERE cm.channel_id = $6::bigint
+      AND cm.deleted = false
+      AND (cm.expires_at IS NULL OR cm.expires_at > statement_timestamp())
+      AND cm.local_id > cp.available_min_id
+      AND (cp.banned_until IS NULL OR cp.banned_until <= now())
       AND EXISTS (
           SELECT 1 FROM channels c
-          WHERE c.id = $5::bigint AND c.deleted_at IS NULL
+          WHERE c.id = $6::bigint AND c.deleted_at IS NULL
       )
       AND $3::bigint >= 0
-    ORDER BY local_id DESC
-    LIMIT $6::int
+    ORDER BY cm.local_id DESC
+    LIMIT $7::int
     OFFSET (SELECT skip FROM page_offset)
 )
 SELECT channel_id, local_id, from_id, date, message, edit_date, deleted,
@@ -211,6 +221,7 @@ type ChannelHistoryPageAroundParams struct {
 	MinID     int64
 	OffsetID  int64
 	AddOffset int64
+	OwnerID   int64
 	ChannelID int64
 	Lim       int32
 }
@@ -240,6 +251,7 @@ func (q *Queries) ChannelHistoryPageAround(ctx context.Context, arg ChannelHisto
 		arg.MinID,
 		arg.OffsetID,
 		arg.AddOffset,
+		arg.OwnerID,
 		arg.ChannelID,
 		arg.Lim,
 	)
@@ -278,20 +290,25 @@ func (q *Queries) ChannelHistoryPageAround(ctx context.Context, arg ChannelHisto
 
 const channelHistoryPageWithOffset = `-- name: ChannelHistoryPageWithOffset :many
 WITH page AS (
-    SELECT channel_id, local_id, from_id, date, message, edit_date, deleted,
-           random_id, grouped_id, file_id, reply_to_msg_id, action_type, ttl_period, post_author
-    FROM channel_messages
-    WHERE channel_id = $3::bigint
-      AND deleted = false
-      AND (expires_at IS NULL OR expires_at > statement_timestamp())
+    SELECT cm.channel_id, cm.local_id, cm.from_id, cm.date, cm.message, cm.edit_date, cm.deleted,
+           cm.random_id, cm.grouped_id, cm.file_id, cm.reply_to_msg_id, cm.action_type, cm.ttl_period, cm.post_author
+    FROM channel_messages cm
+    JOIN channel_participants cp
+      ON cp.channel_id = cm.channel_id
+     AND cp.user_id = $3::bigint
+    WHERE cm.channel_id = $4::bigint
+      AND cm.deleted = false
+      AND (cm.expires_at IS NULL OR cm.expires_at > statement_timestamp())
+      AND cm.local_id > cp.available_min_id
+      AND (cp.banned_until IS NULL OR cp.banned_until <= now())
       AND EXISTS (
           SELECT 1 FROM channels c
-          WHERE c.id = $3::bigint AND c.deleted_at IS NULL
+          WHERE c.id = $4::bigint AND c.deleted_at IS NULL
       )
-      AND ($4::bigint = 0 OR local_id < $4::bigint)
-    ORDER BY local_id DESC
-    LIMIT $6::int
-    OFFSET GREATEST(0::bigint, $5::bigint)
+      AND ($5::bigint = 0 OR cm.local_id < $5::bigint)
+    ORDER BY cm.local_id DESC
+    LIMIT $7::int
+    OFFSET GREATEST(0::bigint, $6::bigint)
 )
 SELECT channel_id, local_id, from_id, date, message, edit_date, deleted,
        random_id, grouped_id, file_id, reply_to_msg_id, action_type, ttl_period, post_author
@@ -304,6 +321,7 @@ ORDER BY local_id DESC
 type ChannelHistoryPageWithOffsetParams struct {
 	MaxID     int64
 	MinID     int64
+	OwnerID   int64
 	ChannelID int64
 	OffsetID  int64
 	AddOffset int64
@@ -334,6 +352,7 @@ func (q *Queries) ChannelHistoryPageWithOffset(ctx context.Context, arg ChannelH
 	rows, err := q.db.Query(ctx, channelHistoryPageWithOffset,
 		arg.MaxID,
 		arg.MinID,
+		arg.OwnerID,
 		arg.ChannelID,
 		arg.OffsetID,
 		arg.AddOffset,
@@ -527,6 +546,55 @@ func (q *Queries) ChannelMessageTombstonesByLocalIDs(ctx context.Context, arg Ch
 	var items []ChannelMessageTombstonesByLocalIDsRow
 	for rows.Next() {
 		var i ChannelMessageTombstonesByLocalIDsRow
+		if err := rows.Scan(&i.ChannelID, &i.LocalID); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const channelMessageTombstonesForMember = `-- name: ChannelMessageTombstonesForMember :many
+SELECT cm.channel_id, cm.local_id
+FROM channel_messages cm
+JOIN channel_participants cp ON cp.channel_id = cm.channel_id AND cp.user_id = $1::bigint
+WHERE cm.channel_id = $2::bigint
+  AND cm.local_id = ANY($3::bigint[])
+  AND cm.deleted = true
+  AND cm.local_id > cp.available_min_id
+  AND (cp.banned_until IS NULL OR cp.banned_until <= now())
+  AND EXISTS (
+      SELECT 1 FROM channels c
+      WHERE c.id = cm.channel_id AND c.deleted_at IS NULL
+  )
+`
+
+type ChannelMessageTombstonesForMemberParams struct {
+	UserID    int64
+	ChannelID int64
+	LocalIds  []int64
+}
+
+type ChannelMessageTombstonesForMemberRow struct {
+	ChannelID int64
+	LocalID   int64
+}
+
+// ChannelMessageTombstonesForMember preserves MessageEmpty responses for
+// deleted ids while applying membership, ban and floor in the same statement.
+// It returns identity metadata only, without hydrating deleted content.
+func (q *Queries) ChannelMessageTombstonesForMember(ctx context.Context, arg ChannelMessageTombstonesForMemberParams) ([]ChannelMessageTombstonesForMemberRow, error) {
+	rows, err := q.db.Query(ctx, channelMessageTombstonesForMember, arg.UserID, arg.ChannelID, arg.LocalIds)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ChannelMessageTombstonesForMemberRow
+	for rows.Next() {
+		var i ChannelMessageTombstonesForMemberRow
 		if err := rows.Scan(&i.ChannelID, &i.LocalID); err != nil {
 			return nil, err
 		}
@@ -871,14 +939,12 @@ func (q *Queries) ChannelPostExistsActive(ctx context.Context, arg ChannelPostEx
 const channelRepliesPage = `-- name: ChannelRepliesPage :many
 WITH access AS (
     SELECT c.megagroup,
-           EXISTS (
-               SELECT 1
-               FROM channel_participants cp
-               WHERE cp.channel_id = c.id
-                 AND cp.user_id = $1::bigint
-                 AND (cp.banned_until IS NULL OR cp.banned_until <= now())
-           ) AS is_member
+           cp.available_min_id,
+           (cp.user_id IS NOT NULL AND (cp.banned_until IS NULL OR cp.banned_until <= now())) AS is_member
     FROM channels c
+    LEFT JOIN channel_participants cp
+      ON cp.channel_id = c.id
+     AND cp.user_id = $1::bigint
     WHERE c.id = $2::bigint
 ), root AS (
     SELECT 1
@@ -888,6 +954,10 @@ WITH access AS (
       AND cm.deleted = false
       AND (cm.expires_at IS NULL OR cm.expires_at > statement_timestamp())
       AND cm.action_type = 0
+      AND EXISTS (
+          SELECT 1 FROM access
+          WHERE is_member AND cm.local_id > available_min_id
+      )
 ), eligible AS (
     SELECT cm.local_id
     FROM channel_messages cm
@@ -896,7 +966,10 @@ WITH access AS (
       AND cm.deleted = false
       AND (cm.expires_at IS NULL OR cm.expires_at > statement_timestamp())
       AND cm.action_type = 0
-      AND EXISTS (SELECT 1 FROM access WHERE megagroup AND is_member)
+      AND EXISTS (
+          SELECT 1 FROM access
+          WHERE megagroup AND is_member AND cm.local_id > available_min_id
+      )
       AND EXISTS (SELECT 1 FROM root)
 ), reply_count AS (
     SELECT count(*)::bigint AS total FROM eligible
@@ -1005,8 +1078,8 @@ type ChannelRepliesPageRow struct {
 }
 
 // ChannelRepliesPage reads a direct-reply page and its authorization snapshot
-// in one statement. The active-member predicate is part of eligible, so neither
-// the page nor its count can outlive the caller's membership or ban state.
+// in one statement. Membership, ban state and floor gate the root, page and
+// count, so the result cannot outlive the caller's history visibility.
 // page_ids contains only local ids, allowing the reply index to serve the
 // ordered seek before the bounded rows are hydrated.
 func (q *Queries) ChannelRepliesPage(ctx context.Context, arg ChannelRepliesPageParams) ([]ChannelRepliesPageRow, error) {
@@ -1059,18 +1132,28 @@ func (q *Queries) ChannelRepliesPage(ctx context.Context, arg ChannelRepliesPage
 
 const countChannelHistory = `-- name: CountChannelHistory :one
 SELECT count(*)::bigint
-FROM channel_messages
-WHERE channel_id = $1::bigint
-  AND deleted = false
-  AND (expires_at IS NULL OR expires_at > statement_timestamp())
+FROM channel_messages cm
+JOIN channel_participants cp
+  ON cp.channel_id = cm.channel_id
+ AND cp.user_id = $1::bigint
+WHERE cm.channel_id = $2::bigint
+  AND cm.deleted = false
+  AND (cm.expires_at IS NULL OR cm.expires_at > statement_timestamp())
+  AND cm.local_id > cp.available_min_id
+  AND (cp.banned_until IS NULL OR cp.banned_until <= now())
   AND EXISTS (
       SELECT 1 FROM channels c
-      WHERE c.id = $1::bigint AND c.deleted_at IS NULL
+      WHERE c.id = $2::bigint AND c.deleted_at IS NULL
   )
 `
 
-func (q *Queries) CountChannelHistory(ctx context.Context, channelID int64) (int64, error) {
-	row := q.db.QueryRow(ctx, countChannelHistory, channelID)
+type CountChannelHistoryParams struct {
+	OwnerID   int64
+	ChannelID int64
+}
+
+func (q *Queries) CountChannelHistory(ctx context.Context, arg CountChannelHistoryParams) (int64, error) {
+	row := q.db.QueryRow(ctx, countChannelHistory, arg.OwnerID, arg.ChannelID)
 	var column_1 int64
 	err := row.Scan(&column_1)
 	return column_1, err
@@ -1087,6 +1170,7 @@ WHERE post.channel_id = $1::bigint
       SELECT 1 FROM channel_participants cp
       WHERE cp.channel_id = post.channel_id
         AND cp.user_id = $2::bigint
+        AND post.local_id > cp.available_min_id
         AND (cp.banned_until IS NULL OR cp.banned_until <= now())
   )
   AND CASE $3::smallint
@@ -1132,9 +1216,9 @@ type CountFilteredChannelPostsParams struct {
 	Query     string
 }
 
-// Filtered shared-media channel searches keep admission in both the count and
-// page query. Channel posts are shared rows, so membership is the authorized
-// scope; an access hash alone never widens it. subtype_rights is the sender's
+// Filtered shared-media channel searches keep membership, ban and floor in both
+// the count and page query. Channel posts are shared rows, so membership is the
+// authorized scope; an access hash alone never widens it. subtype_rights is the sender's
 // declared classification, not an authorization signal. Unknown (NULL),
 // generic and unstored files never match a subtype filter. The two file-backed
 // tabs are split on files.media_kind, exactly as the private-chat search does,
@@ -1391,23 +1475,30 @@ func (q *Queries) NewChannelPostPts(ctx context.Context, arg NewChannelPostPtsPa
 }
 
 const searchChannelPostsPage = `-- name: SearchChannelPostsPage :many
-SELECT channel_id, local_id, from_id, date, message, edit_date, deleted,
-       random_id, grouped_id, file_id, reply_to_msg_id, action_type, ttl_period, post_author
-FROM channel_messages
-WHERE channel_id = $1 AND deleted = false
-  AND (expires_at IS NULL OR expires_at > statement_timestamp())
+SELECT post.channel_id, post.local_id, post.from_id, post.date, post.message,
+       post.edit_date, post.deleted, post.random_id, post.grouped_id, post.file_id,
+       post.reply_to_msg_id, post.action_type, post.ttl_period, post.post_author
+FROM channel_messages post
+JOIN channel_participants cp
+  ON cp.channel_id = post.channel_id
+ AND cp.user_id = $1::bigint
+WHERE post.channel_id = $2::bigint AND post.deleted = false
+  AND (post.expires_at IS NULL OR post.expires_at > statement_timestamp())
+  AND post.local_id > cp.available_min_id
+  AND (cp.banned_until IS NULL OR cp.banned_until <= now())
   AND EXISTS (
       SELECT 1 FROM channels c
-      WHERE c.id = $1::bigint AND c.deleted_at IS NULL
+      WHERE c.id = $2::bigint AND c.deleted_at IS NULL
   )
-  AND action_type = 0
-  AND message_tsv @@ plainto_tsquery('simple', $2)
-  AND ($3::bigint = 0 OR local_id < $3::bigint)
-ORDER BY local_id DESC
-LIMIT $4::int
+  AND post.action_type = 0
+  AND post.message_tsv @@ plainto_tsquery('simple', $3)
+  AND ($4::bigint = 0 OR post.local_id < $4::bigint)
+ORDER BY post.local_id DESC
+LIMIT $5::int
 `
 
 type SearchChannelPostsPageParams struct {
+	OwnerID   int64
 	ChannelID int64
 	Query     string
 	OffsetID  int64
@@ -1432,12 +1523,12 @@ type SearchChannelPostsPageRow struct {
 }
 
 // SearchChannelPostsPage is ChannelHistoryPage narrowed by a full-text match.
-// It carries no caller predicate: a channel keeps one shared row per post
-// rather than one copy per member, so there is no owner column to filter on and
-// membership is the caller's whole gate, checked before this runs.
+// The caller's membership, ban state and history floor are read from one
+// participant row in the same statement as the shared post content.
 // message_tsv is index-backed (GIN), so the match is not a sequential scan.
 func (q *Queries) SearchChannelPostsPage(ctx context.Context, arg SearchChannelPostsPageParams) ([]SearchChannelPostsPageRow, error) {
 	rows, err := q.db.Query(ctx, searchChannelPostsPage,
+		arg.OwnerID,
 		arg.ChannelID,
 		arg.Query,
 		arg.OffsetID,
@@ -1489,6 +1580,7 @@ WHERE post.channel_id = $1::bigint
       SELECT 1 FROM channel_participants cp
       WHERE cp.channel_id = post.channel_id
         AND cp.user_id = $2::bigint
+        AND post.local_id > cp.available_min_id
         AND (cp.banned_until IS NULL OR cp.banned_until <= now())
   )
   AND CASE $3::smallint
@@ -1613,6 +1705,7 @@ JOIN channel_messages post
  AND post.deleted = false
  AND (post.expires_at IS NULL OR post.expires_at > statement_timestamp())
  AND post.action_type = 0
+  AND post.local_id > participant.available_min_id
 WHERE c.id = $2::bigint
   AND c.deleted_at IS NULL
   AND c.pinned_message_id IS NOT NULL
@@ -1648,8 +1741,8 @@ type SearchPinnedChannelPostForMemberRow struct {
 }
 
 // SearchPinnedChannelPostForMember returns the active pinned post only while
-// the viewer still has an unbanned participant row for the channel. Posts are
-// shared, so unlike chat pins the channel local_id is already the wire id.
+// the viewer has an unbanned participant row and the pin is above its history
+// floor. Posts are shared, so unlike chat pins the channel local_id is the wire id.
 func (q *Queries) SearchPinnedChannelPostForMember(ctx context.Context, arg SearchPinnedChannelPostForMemberParams) ([]SearchPinnedChannelPostForMemberRow, error) {
 	rows, err := q.db.Query(ctx, searchPinnedChannelPostForMember,
 		arg.OwnerID,

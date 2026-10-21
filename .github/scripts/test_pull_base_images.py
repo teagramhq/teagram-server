@@ -102,6 +102,22 @@ class PullBaseImagesTests(unittest.TestCase):
             f"::error::pull of {IMAGES[0]} failed after 4 attempts", result.stdout
         )
 
+    def test_real_client_workflow_pulls_fixture_bases_before_starting(self) -> None:
+        workflow = (
+            ROOT / ".github/workflows/real-client-browser-flow.yml"
+        ).read_text(encoding="utf-8")
+        pull_step = (
+            "run: bash .github/scripts/pull-base-images.sh "
+            "test/e2e/real_server_fixture/Dockerfile"
+        )
+        fixture_step = (
+            "run: node test/e2e/real_server_fixture/"
+            "run_real_client_browser_flow.mjs"
+        )
+
+        self.assertIn(pull_step, workflow)
+        self.assertLess(workflow.index(pull_step), workflow.index(fixture_step))
+
     def test_dockerfile_without_base_images_fails(self) -> None:
         self.dockerfile.write_text("RUN true\n", encoding="utf-8")
         result = self.run_script(failures=0)
