@@ -166,13 +166,22 @@ verify_turnstile_compose_configuration() {
         ($env.TG_TURNSTILE_SECRET_KEY_FILE | type == "string") and
         ($env.TG_TURNSTILE_SIGNIN_ENABLED | IN("false", "true")) and
         ($env | has("TG_TURNSTILE_SECRET_KEY") | not) and
-        ($file_source == "/dev/null" or $file_source == $secret_source) and
-        ([$service_secrets[]? | select(.source == "teagramd_turnstile" and .target == "teagramd-turnstile")] | length) == 1 and
+        (
+          if $env.TG_TURNSTILE_SITE_KEY == "" then
+            ($file_source == "/dev/null" and
+             ([$service_secrets[]? | select(.source == "teagramd_turnstile" and .target == "teagramd-turnstile")] | length) == 1) or
+            ($file_source == "" and
+             ([$service_secrets[]? | select(.source == "teagramd_turnstile")] | length) == 0)
+          else
+            $file_source == $secret_source and
+            ([$service_secrets[]? | select(.source == "teagramd_turnstile" and .target == "teagramd-turnstile")] | length) == 1
+          end
+        ) and
         (
           if $env.TG_TURNSTILE_SITE_KEY == "" then
             $env.TG_TURNSTILE_SECRET_KEY_FILE == "" and
             $env.TG_TURNSTILE_SIGNIN_ENABLED == "false" and
-            $file_source == "/dev/null"
+            ($file_source == "/dev/null" or $file_source == "")
           else
             ($env.TG_TURNSTILE_SITE_KEY | test("^[A-Za-z0-9_-]{1,256}$")) and
             $env.TG_TURNSTILE_SECRET_KEY_FILE == "/run/secrets/teagramd-turnstile" and
