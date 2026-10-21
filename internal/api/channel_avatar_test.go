@@ -544,6 +544,21 @@ func assertChannelAvatarHasMDerivative(t *testing.T, photo *tg.Photo, label stri
 	t.Fatalf("%s sizes = %#v, want published 320x320 m derivative of %d bytes", label, photo.Sizes, len(seededPhotoM))
 }
 
+func assertChannelAvatarOriginalBytes(t *testing.T, s *store.Store, blobs blob.Store, viewerID int64, photo *tg.Photo, want []byte, label string) string {
+	t.Helper()
+	for _, class := range photo.Sizes {
+		size, ok := class.(*tg.PhotoSize)
+		if !ok || size.Type != "w" {
+			continue
+		}
+		assertChannelAvatarFileBytes(t, s, blobs, viewerID,
+			&tg.InputPhotoFileLocation{ID: photo.ID, AccessHash: photo.AccessHash, ThumbSize: size.Type}, want, label)
+		return size.Type
+	}
+	t.Fatalf("%s sizes = %#v, want advertised w original", label, photo.Sizes)
+	return ""
+}
+
 func TestChannelEditPhotoRejectsUnsupportedAndUnavailableInputs(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
@@ -949,6 +964,8 @@ func TestChannelPhotoSnapshotAndDownloadsAfterMemberRevocation(t *testing.T) {
 				&tg.InputPhotoFileLocation{ID: photoA.ID, AccessHash: photoA.AccessHash, ThumbSize: "m"}, seededPhotoM, "historical photo A derivative")
 			assertChannelAvatarFileBytes(t, s, blobs, member.ID,
 				&tg.InputPhotoFileLocation{ID: photoB.ID, AccessHash: photoB.AccessHash, ThumbSize: "m"}, seededPhotoM, "current photo B derivative")
+			photoAOriginalType := assertChannelAvatarOriginalBytes(t, s, blobs, member.ID, photoA, bodyA, "historical photo A original")
+			photoBOriginalType := assertChannelAvatarOriginalBytes(t, s, blobs, member.ID, photoB, bodyB, "current photo B original")
 			assertChannelAvatarFileBytes(t, s, blobs, member.ID,
 				&tg.InputPeerPhotoFileLocation{Peer: api.InputPeerChannel(member.ID, channel.ID), PhotoID: photoB.ID, Big: false}, seededPhotoM, "current peer small photo B")
 
@@ -993,6 +1010,7 @@ func TestChannelPhotoSnapshotAndDownloadsAfterMemberRevocation(t *testing.T) {
 			}
 			_, photoC := channelAvatarEditFromResult(t, resultC)
 			assertChannelAvatarHasMDerivative(t, photoC, "current photo C")
+			photoCOriginalType := assertChannelAvatarOriginalBytes(t, s, blobs, creator.ID, photoC, bodyC, "current photo C original for channel owner")
 			assertChannelAvatarFileBytes(t, s, blobs, creator.ID,
 				&tg.InputPhotoFileLocation{ID: photoC.ID, AccessHash: photoC.AccessHash, ThumbSize: "m"}, seededPhotoM, "current photo C derivative for channel owner")
 			assertChannelAvatarFileBytes(t, s, blobs, creator.ID,
@@ -1020,11 +1038,11 @@ func TestChannelPhotoSnapshotAndDownloadsAfterMemberRevocation(t *testing.T) {
 				name     string
 				location tg.InputFileLocationClass
 			}{
-				{name: "historical A original", location: &tg.InputPhotoFileLocation{ID: photoA.ID, AccessHash: photoA.AccessHash, ThumbSize: "x"}},
+				{name: "historical A original", location: &tg.InputPhotoFileLocation{ID: photoA.ID, AccessHash: photoA.AccessHash, ThumbSize: photoAOriginalType}},
 				{name: "historical A derivative", location: &tg.InputPhotoFileLocation{ID: photoA.ID, AccessHash: photoA.AccessHash, ThumbSize: "m"}},
-				{name: "historical B original", location: &tg.InputPhotoFileLocation{ID: photoB.ID, AccessHash: photoB.AccessHash, ThumbSize: "x"}},
+				{name: "historical B original", location: &tg.InputPhotoFileLocation{ID: photoB.ID, AccessHash: photoB.AccessHash, ThumbSize: photoBOriginalType}},
 				{name: "historical B derivative", location: &tg.InputPhotoFileLocation{ID: photoB.ID, AccessHash: photoB.AccessHash, ThumbSize: "m"}},
-				{name: "current C original", location: &tg.InputPhotoFileLocation{ID: photoC.ID, AccessHash: photoC.AccessHash, ThumbSize: "x"}},
+				{name: "current C original", location: &tg.InputPhotoFileLocation{ID: photoC.ID, AccessHash: photoC.AccessHash, ThumbSize: photoCOriginalType}},
 				{name: "current C derivative", location: &tg.InputPhotoFileLocation{ID: photoC.ID, AccessHash: photoC.AccessHash, ThumbSize: "m"}},
 				{name: "historical peer photo", location: &tg.InputPeerPhotoFileLocation{Peer: api.InputPeerChannel(member.ID, channel.ID), PhotoID: photoA.ID, Big: true}},
 				{name: "historical peer small photo", location: &tg.InputPeerPhotoFileLocation{Peer: api.InputPeerChannel(member.ID, channel.ID), PhotoID: photoB.ID, Big: false}},
