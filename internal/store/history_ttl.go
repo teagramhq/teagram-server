@@ -255,6 +255,13 @@ func (s *Store) SetUserHistoryTTL(
 		return Message{}, 0, 0, false, err
 	}
 	qtx := s.q.WithTx(tx)
+	current, err := qtx.UserHistoryTTL(ctx, db.UserHistoryTTLParams{UserID: callerID, PeerID: peerID})
+	if err != nil {
+		return Message{}, 0, 0, false, fmt.Errorf("read current user history TTL: %w", err)
+	}
+	if int(current) == period {
+		return Message{}, 0, 0, false, nil
+	}
 	callerBlockedPeer, err := qtx.IsBlocked(ctx, db.IsBlockedParams{BlockerID: callerID, BlockedID: peerID})
 	if err != nil {
 		return Message{}, 0, 0, false, fmt.Errorf("check caller block for history TTL: %w", err)
@@ -268,13 +275,6 @@ func (s *Store) SetUserHistoryTTL(
 	}
 	if peerBlockedCaller {
 		return Message{}, 0, 0, false, ErrPeerBlockedUser
-	}
-	current, err := qtx.UserHistoryTTL(ctx, db.UserHistoryTTLParams{UserID: callerID, PeerID: peerID})
-	if err != nil {
-		return Message{}, 0, 0, false, fmt.Errorf("read current user history TTL: %w", err)
-	}
-	if int(current) == period {
-		return Message{}, 0, 0, false, nil
 	}
 	if err = s.consumeRateLimitTx(ctx, qtx, callerID,
 		fmt.Sprintf("history_ttl_user_%d", peerID), budget, 1); err != nil {

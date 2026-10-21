@@ -346,6 +346,24 @@ func testSmokeHistoryTTL(t *testing.T) {
 	if _, err := f.store.BlockUser(f.ctx, charlie.id, bob.id); err != nil {
 		t.Fatalf("block Bob for refusal case: %v", err)
 	}
+	var blockedNoOp tg.UpdatesClass
+	if err := bob.call(f.ctx, func(ctx context.Context, client *tg.Client) error {
+		var err error
+		blockedNoOp, err = client.MessagesSetHistoryTTL(ctx, &tg.MessagesSetHistoryTTLRequest{
+			Peer: peerUser(bob.id, charlie.id), Period: 0,
+		})
+		return err
+	}); err != nil {
+		t.Fatalf("set current TTL when peer blocked caller: %v", err)
+	}
+	if updates, ok := blockedNoOp.(*tg.Updates); !ok || len(updates.Updates) != 0 {
+		t.Fatalf("blocked peer same-value response = %#v, want empty updates", blockedNoOp)
+	}
+	blockedQuietCtx, cancelBlockedQuiet := context.WithTimeout(f.ctx, 150*time.Millisecond)
+	defer cancelBlockedQuiet()
+	if err := charlie.seen.waitNoService(blockedQuietCtx, &tg.MessageActionSetMessagesTTL{}); err != nil {
+		t.Fatalf("same-value request sent a service message to blocked peer: %v", err)
+	}
 	if err := bob.call(f.ctx, func(ctx context.Context, client *tg.Client) error {
 		_, err := client.MessagesSetHistoryTTL(ctx, &tg.MessagesSetHistoryTTLRequest{
 			Peer: peerUser(bob.id, charlie.id), Period: 86400,
