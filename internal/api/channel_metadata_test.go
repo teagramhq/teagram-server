@@ -97,6 +97,186 @@ func TestChannelsEditTitleStoresAndAnnouncesTitleChange(t *testing.T) {
 	}
 }
 
+func TestBroadcastEditTitleHidesAdminFromSubscriber(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	s := openStore(t)
+	creator := chatUser(t, s, 202271)
+	admin := chatUser(t, s, 202272)
+	subscriber := chatUser(t, s, 202273)
+	channel, err := s.CreateChannel(ctx, creator.ID, "Ops", "", false)
+	if err != nil {
+		t.Fatalf("create broadcast channel: %v", err)
+	}
+	joinChannelByInvite(t, s, channel, admin.ID)
+	subscriberMember := joinChannelByInvite(t, s, channel, subscriber.ID)
+
+	adminRightsBody := dispatchChatMethod(t, fullChannelDispatcher(s), creator.ID, "channels.editAdmin", &tg.ChannelsEditAdminRequest{
+		Channel:     api.InputChannel(creator.ID, channel.ID),
+		UserID:      api.InputUser(creator.ID, admin.ID),
+		AdminRights: tg.ChatAdminRights{ChangeInfo: true},
+	})
+	var adminUpdates tg.Updates
+	if err := adminUpdates.Decode(&bin.Buffer{Buf: adminRightsBody}); err != nil {
+		t.Fatalf("promote title admin: %v", err)
+	}
+
+	const newTitle = "Ops secure"
+	titleBody := dispatchChatMethod(t, fullChannelDispatcher(s), admin.ID, "channels.editTitle", &tg.ChannelsEditTitleRequest{
+		Channel: api.InputChannel(admin.ID, channel.ID),
+		Title:   newTitle,
+	})
+	var titleUpdates tg.Updates
+	if err := titleUpdates.Decode(&bin.Buffer{Buf: titleBody}); err != nil {
+		t.Fatalf("admin edit title: %v", err)
+	}
+	var titleMessageID int
+	for _, update := range titleUpdates.Updates {
+		if added, ok := update.(*tg.UpdateNewChannelMessage); ok {
+			if service, ok := added.Message.(*tg.MessageService); ok {
+				if action, ok := service.Action.(*tg.MessageActionChatEditTitle); ok && action.Title == newTitle {
+					titleMessageID = service.ID
+					if !service.GetPost() || !service.Out {
+						t.Errorf("admin title service flags = post:%v out:%v, want post and outgoing", service.GetPost(), service.Out)
+					}
+					if _, ok := service.GetFromID(); ok {
+						t.Error("broadcast title service exposes from_id to its author")
+					}
+				}
+			}
+		}
+	}
+	if titleMessageID == 0 {
+		t.Fatal("admin edit response omitted the title service message")
+	}
+
+	assertSubscriberView := func(t *testing.T, messages []tg.MessageClass, users []tg.UserClass) {
+		t.Helper()
+		var found *tg.MessageService
+		for _, message := range messages {
+			service, ok := message.(*tg.MessageService)
+			if !ok {
+				continue
+			}
+			action, ok := service.Action.(*tg.MessageActionChatEditTitle)
+			if ok && action.Title == newTitle {
+				found = service
+				break
+			}
+		}
+		if found == nil {
+			t.Fatalf("title service message %q missing from response", newTitle)
+		}
+		assertEncodes(t, found)
+		if !found.GetPost() {
+			t.Error("broadcast title service has no post flag")
+		}
+		if _, ok := found.GetFromID(); ok {
+			t.Error("broadcast title service exposes from_id to subscriber")
+		}
+		if found.Out {
+			t.Error("subscriber sees admin's title service message as outgoing")
+		}
+		for _, user := range users {
+			if user.GetID() == admin.ID {
+				t.Errorf("users vector contains title admin %d", admin.ID)
+			}
+		}
+	}
+
+	t.Run("getHistory", func(t *testing.T) {
+		enc, err := api.GetHistoryForTest(s, subscriber.ID, &tg.MessagesGetHistoryRequest{
+			Peer: channelPeer(subscriber.ID, channel.ID), Limit: 10,
+		})
+		if err != nil {
+			t.Fatalf("getHistory: %v", err)
+		}
+		result, ok := enc.(*tg.MessagesChannelMessages)
+		if !ok {
+			t.Fatalf("getHistory response = %T", enc)
+		}
+		assertSubscriberView(t, result.Messages, result.Users)
+	})
+
+	t.Run("channels.getMessages", func(t *testing.T) {
+		enc, err := api.GetChannelMessagesForTest(s, subscriber.ID, &tg.ChannelsGetMessagesRequest{
+			Channel: api.InputChannel(subscriber.ID, channel.ID),
+			ID:      []tg.InputMessageClass{&tg.InputMessageID{ID: titleMessageID}},
+		})
+		if err != nil {
+			t.Fatalf("channels.getMessages: %v", err)
+		}
+		result, ok := enc.(*tg.MessagesChannelMessages)
+		if !ok {
+			t.Fatalf("channels.getMessages response = %T", enc)
+		}
+		assertSubscriberView(t, result.Messages, result.Users)
+	})
+
+	t.Run("getChannelDifference", func(t *testing.T) {
+		enc, err := api.GetChannelDifferenceForTest(s, subscriber.ID, &tg.UpdatesGetChannelDifferenceRequest{
+			Channel: api.InputChannel(subscriber.ID, channel.ID),
+			Filter:  &tg.ChannelMessagesFilterEmpty{},
+			Pts:     subscriberMember.JoinPts,
+			Limit:   10,
+		})
+		if err != nil {
+			t.Fatalf("getChannelDifference: %v", err)
+		}
+		result, ok := enc.(*tg.UpdatesChannelDifference)
+		if !ok {
+			t.Fatalf("getChannelDifference response = %T", enc)
+		}
+		assertSubscriberView(t, result.NewMessages, result.Users)
+	})
+
+	t.Run("live push", func(t *testing.T) {
+		enc, err := api.BuildChannelUpdatesForTest(s, subscriber.ID, channel.ID, subscriberMember.JoinPts, 10)
+		if err != nil {
+			t.Fatalf("build live channel updates: %v", err)
+		}
+		result, ok := enc.(*tg.Updates)
+		if !ok {
+			t.Fatalf("live push response = %T", enc)
+		}
+		var messages []tg.MessageClass
+		for _, update := range result.Updates {
+			if added, ok := update.(*tg.UpdateNewChannelMessage); ok {
+				messages = append(messages, added.Message)
+			}
+		}
+		assertSubscriberView(t, messages, result.Users)
+	})
+
+	t.Run("dialog top message", func(t *testing.T) {
+		enc, err := api.GetDialogsForTest(s, subscriber.ID)
+		if err != nil {
+			t.Fatalf("get dialogs: %v", err)
+		}
+		result, ok := enc.(*tg.MessagesDialogs)
+		if !ok {
+			t.Fatalf("get dialogs response = %T", enc)
+		}
+		assertSubscriberView(t, result.Messages, result.Users)
+	})
+
+	t.Run("peer dialog top message", func(t *testing.T) {
+		enc, err := api.GetPeerDialogsForTest(s, subscriber.ID, &tg.MessagesGetPeerDialogsRequest{
+			Peers: []tg.InputDialogPeerClass{
+				&tg.InputDialogPeer{Peer: channelPeer(subscriber.ID, channel.ID)},
+			},
+		})
+		if err != nil {
+			t.Fatalf("get peer dialogs: %v", err)
+		}
+		result, ok := enc.(*tg.MessagesPeerDialogs)
+		if !ok {
+			t.Fatalf("get peer dialogs response = %T", enc)
+		}
+		assertSubscriberView(t, result.Messages, result.Users)
+	})
+}
+
 func TestMessagesEditChatAboutStoresAndReadsDescription(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
