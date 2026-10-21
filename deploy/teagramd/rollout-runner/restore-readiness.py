@@ -29,7 +29,12 @@ from typing import Any
 SOURCE_IMAGE = "mirror.gcr.io/library/postgres@sha256:721873c34ceb9f8d8fc265984940dc982404c105f19ad51be9fdc5970a6080ea"
 RESTORE_IMAGE = "mirror.gcr.io/library/postgres@sha256:77f585114c32fbca283dc835b0596f4e52b51b4c6662d7810b2f4084f60a1873"
 BASE_SCHEMA = "20261021000003"
+# The base migrations landed with the head store check, so the fixture is seeded by the
+# last release before them and then migrated to BASE_SCHEMA.
+SEED_SCHEMA = "20261021000002"
 HEAD_SCHEMA = "20261021000004"
+# Roles the repository migrations create; the restore imports no globals, so the target has none.
+MIGRATION_ROLES = "browser_acceptance_probe"
 WORK_SECONDS = 30 * 60
 CLEANUP_SECONDS = 4 * 60
 SUPERVISOR_SECONDS = WORK_SECONDS + CLEANUP_SECONDS
@@ -87,7 +92,7 @@ SELECT
 OBJECT_INVENTORY_SQL = r"""
 WITH objects AS (
   SELECT 'relation'::text AS kind,
-         n.nspname || '.' || c.relname || '|' || c.relkind || '|' ||
+         n.nspname || '.' || c.relname || '|' || c.relkind::text || '|' ||
          pg_get_userbyid(c.relowner) || '|' || COALESCE(array_to_string(c.reloptions, ','), '') AS detail
   FROM pg_class AS c
   JOIN pg_namespace AS n ON n.oid = c.relnamespace
@@ -100,7 +105,7 @@ WITH objects AS (
   UNION ALL
   SELECT 'column', n.nspname || '.' || c.relname || '.' || a.attname || '|' ||
          format_type(a.atttypid, a.atttypmod) || '|' || a.attnotnull || '|' ||
-         a.attidentity || '|' || a.attgenerated || '|' || COALESCE(pg_get_expr(d.adbin, d.adrelid), '')
+         a.attidentity::text || '|' || a.attgenerated::text || '|' || COALESCE(pg_get_expr(d.adbin, d.adrelid), '')
   FROM pg_attribute AS a
   JOIN pg_class AS c ON c.oid = a.attrelid
   JOIN pg_namespace AS n ON n.oid = c.relnamespace
@@ -125,11 +130,12 @@ WITH objects AS (
     )
   UNION ALL
   SELECT 'constraint', n.nspname || '.' || c.relname || '.' || con.conname || '|' ||
-         con.contype || '|' || con.convalidated || '|' || pg_get_constraintdef(con.oid, true)
+         con.contype::text || '|' || con.convalidated || '|' || pg_get_constraintdef(con.oid, true)
   FROM pg_constraint AS con
   JOIN pg_class AS c ON c.oid = con.conrelid
   JOIN pg_namespace AS n ON n.oid = c.relnamespace
-  WHERE n.nspname = 'public'
+  -- PG18 also catalogs NOT NULL as constraints; column rows already compare nullability.
+  WHERE n.nspname = 'public' AND con.contype <> 'n'
     AND NOT EXISTS (
       SELECT 1 FROM pg_depend AS d
       WHERE d.classid = 'pg_class'::regclass AND d.objid = c.oid
@@ -137,8 +143,8 @@ WITH objects AS (
     )
   UNION ALL
   SELECT 'function', n.nspname || '.' || p.proname || '(' || pg_get_function_identity_arguments(p.oid) || ')|' ||
-         pg_get_userbyid(p.proowner) || '|' || p.prosecdef || '|' || p.provolatile || '|' ||
-         p.proparallel || '|' || p.proleakproof || '|' || p.proisstrict || '|' ||
+         pg_get_userbyid(p.proowner) || '|' || p.prosecdef || '|' || p.provolatile::text || '|' ||
+         p.proparallel::text || '|' || p.proleakproof || '|' || p.proisstrict || '|' ||
          COALESCE(array_to_string(p.proconfig, ','), '') || '|' || pg_get_functiondef(p.oid)
   FROM pg_proc AS p
   JOIN pg_namespace AS n ON n.oid = p.pronamespace
@@ -150,7 +156,7 @@ WITH objects AS (
     )
   UNION ALL
   SELECT 'trigger', n.nspname || '.' || c.relname || '.' || t.tgname || '|' ||
-         t.tgenabled || '|' || pg_get_triggerdef(t.oid, true)
+         t.tgenabled::text || '|' || pg_get_triggerdef(t.oid, true)
   FROM pg_trigger AS t
   JOIN pg_class AS c ON c.oid = t.tgrelid
   JOIN pg_namespace AS n ON n.oid = c.relnamespace
@@ -285,6 +291,7 @@ def validate_container_inspect(document: dict[str, Any], record: dict[str, Any])
         "readiness_probe",
         "migration",
         "source_migration",
+        "seed_migration",
         "target_migration",
         "restore_client",
         "source_client",
@@ -299,7 +306,8 @@ def validate_container_inspect(document: dict[str, Any], record: dict[str, Any])
         return False
     if config.get("Tty") or bool(config.get("OpenStdin")) != bool(record.get("open_stdin")):
         return False
-    if config.get("AttachStdout") or config.get("AttachStderr") or config.get("AttachStdin"):
+    # `docker create` always records stdout/stderr attach defaults; only stdin follows the request.
+    if bool(config.get("AttachStdin")) != bool(record.get("open_stdin")):
         return False
     try:
         actual_env = env_map(config.get("Env"))
@@ -349,6 +357,8 @@ def validate_container_inspect(document: dict[str, Any], record: dict[str, Any])
     if int(host.get("CpuQuota") or 0) != record.get("cpu_quota"):
         return False
     if int(host.get("CpuPeriod") or 0) != record.get("cpu_period"):
+        return False
+    if int(host.get("NanoCpus") or 0) != 0:
         return False
     core_limits = [
         item
@@ -1275,6 +1285,7 @@ class Drill(Docker):
         }
         expected = {
             "teagramd",
+            "teagramd-seed",
             "restore-readiness-launcher",
             "restore-readiness-seed",
             "restore-readiness-seed-shim",
@@ -1324,6 +1335,7 @@ class Drill(Docker):
         app_context, tools_context = create_image_build_contexts(build_root)
         artifacts = {
             "teagramd": Path(self.args.build_dir) / "teagramd",
+            "teagramd_seed": Path(self.args.build_dir) / "teagramd-seed",
             "launcher": Path(self.args.build_dir) / "restore-readiness-launcher",
             "seed": Path(self.args.build_dir) / "restore-readiness-seed",
             "seed_shim": Path(self.args.build_dir) / "restore-readiness-seed-shim",
@@ -1338,7 +1350,7 @@ class Drill(Docker):
             shutil.copyfile(source, target, follow_symlinks=False)
             os.chmod(target, 0o555)
             self.register_file(target, f"app_image_input_{name}")
-        for name in ("teagramd", "seed", "seed_shim", "provisioner", "checker", "probe"):
+        for name in ("teagramd", "teagramd_seed", "seed", "seed_shim", "provisioner", "checker", "probe"):
             source = artifacts[name]
             ensure_executable_file(source)
             target = tools_context / name
@@ -1355,6 +1367,9 @@ class Drill(Docker):
         self.register_file(empty, "app_image_input_empty")
         private_file(tools_context / "empty", b"", 0o444)
         self.register_file(tools_context / "empty", "tools_image_input_empty")
+        # Atlas reads the DSN from the protected env file only through a project config.
+        private_file(tools_context / "atlas.hcl", b'env "drill" {\n  url = getenv("DATABASE_URL")\n}\n', 0o444)
+        self.register_file(tools_context / "atlas.hcl", "tools_image_input_atlas_config")
         (app_context / "Dockerfile").write_text(
             "FROM scratch\n"
             "COPY teagramd /run/app/teagramd\n"
@@ -1370,12 +1385,14 @@ class Drill(Docker):
         (tools_context / "Dockerfile").write_text(
             "FROM scratch\n"
             "COPY teagramd /run/app/teagramd\n"
+            "COPY teagramd_seed /run/app/teagramd-seed\n"
             "COPY seed /run/app/restore-readiness-seed\n"
             "COPY seed_shim /run/app/restore-readiness-seed-shim\n"
             "COPY provisioner /run/app/restore-readiness-provisioner\n"
             "COPY checker /run/app/restore-drill-checker\n"
             "COPY probe /run/app/restore-readiness-probe\n"
             "COPY atlas /run/app/atlas\n"
+            "COPY atlas.hcl /run/app/atlas.hcl\n"
             "COPY empty /run/postgres/.keep\n"
             "COPY empty /run/invocation/.keep\n"
             "COPY empty /run/secrets/.keep\n"
@@ -1536,8 +1553,10 @@ class Drill(Docker):
             str(memory),
             "--memory-swap",
             str(memory),
-            "--cpus",
-            "1.0",
+            "--cpu-period",
+            "100000",
+            "--cpu-quota",
+            "100000",
             "--ulimit",
             "core=0:0",
             "--log-driver",
@@ -2100,8 +2119,9 @@ class Drill(Docker):
                     "70:70",
                     database["id"],
                     "pg_isready",
+                    # Only the final server listens on TCP; the entrypoint's init server shares the socket.
                     "-h",
-                    "/run/postgres",
+                    "127.0.0.1",
                     "-U",
                     "postgres",
                     "-d",
@@ -2143,6 +2163,15 @@ class Drill(Docker):
         socket_mount = self.mount(socket_path, "/run/postgres", writable=True)
         mounts = [secret_mount, socket_mount]
         listen_address = "127.0.0.1"
+        # The image entrypoint initialises through the default socket directory, kept private on tmpfs.
+        tmpfs_options = {
+            "/run/postgresql": "rw,nosuid,nodev,noexec,size=1m,uid=70,gid=70,mode=0700",
+            "/tmp": "rw,nosuid,nodev,noexec,size=64m,uid=70,gid=70,mode=1777",
+            "/var/lib/postgresql": "rw,nosuid,nodev,noexec,size=1200m,uid=70,gid=70,mode=0700",
+        }
+        if name == "source":
+            # PG16 declares its data directory as a volume; PG18 refuses a mount there.
+            tmpfs_options["/var/lib/postgresql/data"] = "rw,nosuid,nodev,noexec,size=16m,uid=70,gid=70,mode=0700"
         record = self.image_container(
             name,
             role=f"{name}_postgres",
@@ -2150,17 +2179,13 @@ class Drill(Docker):
             memory=PG_MEMORY,
             pids_limit=128,
             mounts=mounts,
-            tmpfs_options={
-                "/tmp": "rw,nosuid,nodev,noexec,size=64m,uid=70,gid=70,mode=1777",
-                "/var/lib/postgresql/data": "rw,nosuid,nodev,noexec,size=16m,uid=70,gid=70,mode=0700",
-                "/var/lib/postgresql": "rw,nosuid,nodev,noexec,size=1200m,uid=70,gid=70,mode=0700",
-            },
+            tmpfs_options=tmpfs_options,
             command_args=[
                 "postgres",
                 "-c",
                 f"listen_addresses={listen_address}",
                 "-c",
-                "unix_socket_directories=/run/postgres",
+                "unix_socket_directories=/run/postgres,/run/postgresql",
                 "-c",
                 "max_connections=20",
                 "-c",
@@ -2202,7 +2227,7 @@ class Drill(Docker):
     def verify_database_settings(self, database: dict[str, Any], phase: str) -> None:
         settings = (
             ("listen_addresses", "127.0.0.1"),
-            ("unix_socket_directories", "/run/postgres"),
+            ("unix_socket_directories", "/run/postgres,/run/postgresql"),
             ("shared_preload_libraries", "pg_stat_statements"),
             ("pg_stat_statements.track", "none"),
             ("log_statement", "none"),
@@ -2216,14 +2241,23 @@ class Drill(Docker):
             if self.sql(database, f"SHOW {name};", phase) != expected:
                 raise DrillFailure(phase, "isolation_refusal")
 
-    def migrate_database(self, name: str, database: dict[str, Any], version: str, phase: str) -> None:
+    def migrate_database(
+        self,
+        name: str,
+        database: dict[str, Any],
+        version: str,
+        phase: str,
+        *,
+        role: str | None = None,
+        keep_env: bool = False,
+    ) -> None:
         self.phase = phase
         env_file = self.files[f"{name}_atlas_env"]
         socket_mount = self.mount(self.sockets[name], "/run/postgres", writable=True)
         migration_mount = self.mount(self.run_dir / "migrations", "/migrations", writable=False)
         record = self.image_container(
             "tools",
-            role=f"{name}_migration",
+            role=role or f"{name}_migration",
             user="65532:70",
             memory=CLIENT_MEMORY,
             pids_limit=96,
@@ -2234,10 +2268,10 @@ class Drill(Docker):
                 "apply",
                 "--dir",
                 "file:///migrations",
-                "--url",
-                "env://DATABASE_URL",
-                "--tx-mode",
-                "none",
+                "--config",
+                "file:///run/app/atlas.hcl",
+                "--env",
+                "drill",
                 "--to-version",
                 version,
             ],
@@ -2247,7 +2281,8 @@ class Drill(Docker):
             interactive=True,
         )
         self.utility(record, phase, "migration_failure", timeout=900)
-        self.delete_private_file(env_file)
+        if not keep_env:
+            self.delete_private_file(env_file)
 
     def fixture_state(self, database: dict[str, Any], phase: str) -> list[str]:
         value = self.sql(database, FIXTURE_STATE_SQL, phase)
@@ -2270,12 +2305,19 @@ class Drill(Docker):
             raise DrillFailure(phase, "schema_failure")
         return int(parts[0]), parts[1]
 
-    def verify_schema_state(self, database: dict[str, Any], expected_users: int, phase: str) -> None:
+    def verify_schema_state(
+        self,
+        database: dict[str, Any],
+        expected_users: int,
+        expected_roles: str,
+        phase: str,
+        expected_head: str = BASE_SCHEMA,
+    ) -> None:
         state = self.fixture_state(database, phase)
-        if state != ["0", str(expected_users), "", "pg_stat_statements,plpgsql", "0", "0", "0", "0", "0"]:
+        if state != ["0", str(expected_users), expected_roles, "pg_stat_statements,plpgsql", "0", "0", "0", "0", "0"]:
             raise DrillFailure(phase, "schema_failure")
         head = self.sql(database, MIGRATION_HEAD_SQL, phase)
-        if head != BASE_SCHEMA:
+        if head != expected_head:
             raise DrillFailure(phase, "schema_failure")
 
     def seed_source_fixture(self, database: dict[str, Any]) -> None:
@@ -2301,7 +2343,7 @@ class Drill(Docker):
             network_mode=f"container:{database['id']}",
         )
         self.utility(record, self.phase, "fixture_failure")
-        self.verify_schema_state(database, 1, self.phase)
+        self.verify_schema_state(database, 1, MIGRATION_ROLES, self.phase, SEED_SCHEMA)
         for key in ("source_dsn", "seed_authkey", "seed_username", "seed_password"):
             self.delete_private_file(self.files[key])
 
@@ -2349,7 +2391,11 @@ class Drill(Docker):
             memory=CLIENT_MEMORY,
             pids_limit=96,
             mounts=[self.mount(self.sockets["source"], "/run/postgres", writable=True)],
-            tmpfs_options={"/tmp": "rw,nosuid,nodev,noexec,size=128m,uid=70,gid=70,mode=1777"},
+            # Shadow the image's declared volume so no anonymous volume is created.
+            tmpfs_options={
+                "/tmp": "rw,nosuid,nodev,noexec,size=128m,uid=70,gid=70,mode=1777",
+                "/var/lib/postgresql/data": "rw,nosuid,nodev,noexec,size=1m,uid=70,gid=70,mode=0700",
+            },
             command_args=[
                 "--format=custom",
                 "--no-owner",
@@ -2370,7 +2416,10 @@ class Drill(Docker):
             memory=CLIENT_MEMORY,
             pids_limit=96,
             mounts=[self.mount(self.sockets["target"], "/run/postgres", writable=True)],
-            tmpfs_options={"/tmp": "rw,nosuid,nodev,noexec,size=128m,uid=70,gid=70,mode=1777"},
+            tmpfs_options={
+                "/tmp": "rw,nosuid,nodev,noexec,size=128m,uid=70,gid=70,mode=1777",
+                "/var/lib/postgresql": "rw,nosuid,nodev,noexec,size=1m,uid=70,gid=70,mode=0700",
+            },
             command_args=[
                 "--exit-on-error",
                 "--no-owner",
@@ -2405,7 +2454,7 @@ class Drill(Docker):
         self.delete_private_file(self.files["target_tool_env"])
 
         self.phase = "schema_validation"
-        self.verify_schema_state(target, 1, self.phase)
+        self.verify_schema_state(target, 1, "", self.phase)
         source_inventory = self.object_inventory(source, self.phase)
         target_inventory = self.object_inventory(target, self.phase)
         source_rows = self.table_counts(source, self.phase)
@@ -3388,13 +3437,12 @@ class Drill(Docker):
             status, _ = self._run_child(
                 [
                     "/usr/bin/openssl",
-                    "genpkey",
-                    "-algorithm",
-                    "RSA",
-                    "-pkeyopt",
-                    "rsa_keygen_bits:2048",
+                    "genrsa",
+                    # The server loads only PKCS#1 keys.
+                    "-traditional",
                     "-out",
                     str(key_path),
+                    "2048",
                 ],
                 timeout=20,
                 stdin=subprocess.DEVNULL,
@@ -3619,7 +3667,11 @@ def remove_finished_run(drill: Drill) -> bool:
     }
     try:
         root_entries = {entry.name for entry in run_dir.iterdir()}
-        if root_entries != expected_directories | {"ownership.json", "ownership.tmp"} and root_entries != expected_directories | {"ownership.json"}:
+        # Verified file cleanup may already have removed the emptied directories.
+        if "ownership.json" not in root_entries or not root_entries <= expected_directories | {
+            "ownership.json",
+            "ownership.tmp",
+        }:
             return False
         for current, directories, files in os.walk(run_dir, topdown=True, followlinks=False):
             current_path = Path(current)
@@ -3628,7 +3680,7 @@ def remove_finished_run(drill: Drill) -> bool:
             if files:
                 return False
             if current_path == run_dir / "sockets":
-                if set(directories) != {"source", "target"}:
+                if not set(directories) <= {"source", "target"}:
                     return False
             elif directories:
                 return False
@@ -3643,10 +3695,9 @@ def remove_finished_run(drill: Drill) -> bool:
             ):
                 return False
             temporary.unlink()
-        for name in ("target", "source"):
-            (run_dir / "sockets" / name).rmdir()
-        for name in ("migrations", "secrets", "seed", "invocation", "sockets", "work"):
-            (run_dir / name).rmdir()
+        for name in ("sockets/target", "sockets/source", "migrations", "secrets", "seed", "invocation", "sockets", "work"):
+            if (run_dir / name).exists():
+                (run_dir / name).rmdir()
         info = manifest_path.lstat()
         if (
             not stat.S_ISREG(info.st_mode)
@@ -3888,10 +3939,13 @@ def run_primary(args: argparse.Namespace) -> int:
         drill.gateway = None
         drill.prepare_materials()
         source = drill.create_database("source")
-        drill.migrate_database("source", source, BASE_SCHEMA, "source_migrations")
-        drill.verify_schema_state(source, 0, "source_migrations")
-        drill.delete_private_file(drill.files["source_atlas_env"])
+        drill.migrate_database(
+            "source", source, SEED_SCHEMA, "source_migrations", role="seed_migration", keep_env=True
+        )
+        drill.verify_schema_state(source, 0, MIGRATION_ROLES, "source_migrations", SEED_SCHEMA)
         drill.seed_source_fixture(source)
+        drill.migrate_database("source", source, BASE_SCHEMA, "source_migrations")
+        drill.verify_schema_state(source, 1, MIGRATION_ROLES, "source_migrations")
         target = drill.create_database("target")
         drill.restore_fixture(source, target)
         drill.apply_pending_migration(target)

@@ -36,6 +36,10 @@ var allowedEnvironment = map[string]struct{}{
 	"TG_MEDIA_ERASURE_INTERVAL_MAX":    {},
 	"TG_MEDIA_ERASURE_REPORT_INTERVAL": {},
 	"TG_BLOB_SCAN_REPORT_INTERVAL":     {},
+	// Docker injects these into every container.
+	"PATH":     {},
+	"HOSTNAME": {},
+	"HOME":     {},
 }
 
 func main() {
@@ -45,14 +49,8 @@ func main() {
 }
 
 func run() error {
-	for _, entry := range os.Environ() {
-		name, _, ok := strings.Cut(entry, "=")
-		if !ok {
-			return errors.New("invalid environment")
-		}
-		if _, allowed := allowedEnvironment[name]; !allowed {
-			return errors.New("unexpected environment")
-		}
+	if !validEnvironment(os.Environ()) {
+		return errors.New("unexpected environment")
 	}
 
 	dsn, err := readDatabaseDSN(dsnFile)
@@ -129,4 +127,17 @@ func effectiveUID() (uint32, bool) {
 		return 0, false
 	}
 	return uint32(value), true
+}
+
+func validEnvironment(entries []string) bool {
+	for _, entry := range entries {
+		name, _, ok := strings.Cut(entry, "=")
+		if !ok {
+			return false
+		}
+		if _, allowed := allowedEnvironment[name]; !allowed {
+			return false
+		}
+	}
+	return true
 }

@@ -126,3 +126,17 @@ func TestRemoveOwnedSocketRejectsReplacement(t *testing.T) {
 		t.Fatal("replacement at the owned socket path was removed")
 	}
 }
+
+func TestRuntimeEnvironmentAllowsOnlyDockerDefaults(t *testing.T) {
+	if !runtimeDefaultsOnly([]string{"PATH=/usr/bin:/bin", "HOSTNAME=abc", "HOME=/root"}) {
+		t.Fatal("rejected the environment Docker injects into every container")
+	}
+	if !runtimeDefaultsOnly(nil) {
+		t.Fatal("rejected an empty environment")
+	}
+	for _, entries := range [][]string{{"TG_POSTGRES_DSN=x"}, {"PATH=/bin", "PGPASSWORD=x"}, {"PATH"}} {
+		if runtimeDefaultsOnly(entries) {
+			t.Fatalf("accepted unreviewed environment %q", entries)
+		}
+	}
+}

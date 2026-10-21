@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"syscall"
@@ -31,7 +32,7 @@ func main() {
 }
 
 func run() error {
-	if os.Geteuid() != 0 || len(os.Environ()) != 0 || filepath.Dir(socketPath) != socketDir {
+	if os.Geteuid() != 0 || !runtimeDefaultsOnly(os.Environ()) || filepath.Dir(socketPath) != socketDir {
 		return errors.New("invalid seed-shim runtime")
 	}
 	directory, err := os.Lstat(socketDir)
@@ -211,4 +212,15 @@ func removeOwnedSocket(path string, expected os.FileInfo) error {
 		return errors.New("seed socket cleanup failed")
 	}
 	return nil
+}
+
+// runtimeDefaultsOnly accepts only the variables Docker injects into every container.
+func runtimeDefaultsOnly(entries []string) bool {
+	for _, entry := range entries {
+		name, _, ok := strings.Cut(entry, "=")
+		if !ok || (name != "PATH" && name != "HOSTNAME" && name != "HOME") {
+			return false
+		}
+	}
+	return true
 }

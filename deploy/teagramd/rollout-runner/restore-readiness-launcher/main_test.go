@@ -27,3 +27,14 @@ func TestRejectsDatabaseDSNsOutsideScratchTarget(t *testing.T) {
 		}
 	}
 }
+
+func TestEnvironmentAllowsDockerDefaultsAndReviewedSettings(t *testing.T) {
+	if !validEnvironment([]string{"PATH=/usr/bin:/bin", "HOSTNAME=abc", "HOME=/", "TG_REGISTRATION=closed"}) {
+		t.Fatal("rejected Docker defaults alongside reviewed settings")
+	}
+	for _, entries := range [][]string{{"TG_POSTGRES_DSN=x"}, {"PATH"}, {"S3_BUCKET=x"}} {
+		if validEnvironment(entries) {
+			t.Fatalf("accepted unreviewed environment %q", entries)
+		}
+	}
+}

@@ -4,6 +4,8 @@ umask 077
 ulimit -c 0
 
 script_dir=$(cd -P "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+# Last release before the base-schema migrations; it seeds the fixture at its own schema head.
+seed_commit=7b62b9ab1cad0c459627ad7a2eb736a40382939b
 
 emit_preflight_failure() {
   printf '%s\n' '{"result":"fail","phase":"preflight","category":"preflight_failure","migration_head":"not_reached","help_getConfig":"not_run","synthetic_signin":"not_run","cleanup":"not_started","elapsed_ms":0,"exit":1}'
@@ -73,6 +75,18 @@ if ! "${build_env[@]}" go build -trimpath -buildvcs=false -o "$build_dir/teagram
   ! "${build_env[@]}" go build -trimpath -buildvcs=false -o "$build_dir/restore-readiness-provisioner" ./deploy/teagramd/rollout-runner/restore-readiness-provisioner >/dev/null 2>&1 ||
   ! "${build_env[@]}" go build -trimpath -buildvcs=false -o "$build_dir/restore-readiness-probe" ./deploy/teagramd/rollout-runner/restore-readiness-probe >/dev/null 2>&1 ||
   ! "${build_env[@]}" go build -trimpath -buildvcs=false -o "$build_dir/restore-drill-checker" ./deploy/teagramd/rollout-runner/restore-readiness-checker >/dev/null 2>&1; then
+  emit_preflight_failure
+fi
+
+if ! seed_source=$(mktemp -d "$build_parent/teagram-restore-seed.XXXXXXXX" 2>/dev/null); then
+  emit_preflight_failure
+fi
+if ! git archive "$seed_commit" 2>/dev/null | tar -x -C "$seed_source" 2>/dev/null ||
+  ! (cd "$seed_source" && "${build_env[@]}" go build -trimpath -buildvcs=false -o "$build_dir/teagramd-seed" ./cmd/teagramd >/dev/null 2>&1); then
+  rm -rf -- "$seed_source"
+  emit_preflight_failure
+fi
+if ! rm -rf -- "$seed_source"; then
   emit_preflight_failure
 fi
 

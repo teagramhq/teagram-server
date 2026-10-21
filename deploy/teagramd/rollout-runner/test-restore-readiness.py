@@ -6,6 +6,7 @@ from __future__ import annotations
 import importlib.util
 import io
 import json
+import os
 import tempfile
 import unittest
 from contextlib import redirect_stdout
@@ -60,8 +61,9 @@ def container_fixture() -> tuple[dict[str, Any], dict[str, Any]]:
             "Cmd": record["command"],
             "Tty": False,
             "OpenStdin": False,
-            "AttachStdout": False,
-            "AttachStderr": False,
+            # `docker create` records these stdout/stderr attach defaults on every container.
+            "AttachStdout": True,
+            "AttachStderr": True,
             "AttachStdin": False,
             "Env": [f"{key}={value}" for key, value in environment.items()],
         },
@@ -95,6 +97,7 @@ def container_fixture() -> tuple[dict[str, Any], dict[str, Any]]:
             "ShmSize": record["shm_size"],
             "CpuQuota": record["cpu_quota"],
             "CpuPeriod": record["cpu_period"],
+            "NanoCpus": 0,
             "Ulimits": [{"Name": "core", "Soft": 0, "Hard": 0}],
             "Tmpfs": record["tmpfs_options"],
         },
@@ -238,6 +241,84 @@ class RestoreReadinessContractTests(unittest.TestCase):
         document["Mounts"] = [{"Type": "volume", "Name": "unexpected", "Source": "/var/lib/docker", "Destination": "/data", "RW": True}]
         self.assertFalse(RESTORE_READINESS.validate_container_inspect(document, record))
 
+    def test_container_attestation_rejects_cpu_and_stdin_drift(self) -> None:
+        document, record = container_fixture()
+        document["HostConfig"].update({"NanoCpus": 1_000_000_000, "CpuQuota": 0, "CpuPeriod": 0})
+        self.assertFalse(RESTORE_READINESS.validate_container_inspect(document, record))
+
+        document, record = container_fixture()
+        document["Config"]["AttachStdin"] = True
+        self.assertFalse(RESTORE_READINESS.validate_container_inspect(document, record))
+
+    def test_created_container_passes_its_own_attestation(self) -> None:
+        document, record = container_fixture()
+        document["HostConfig"]["ShmSize"] = 16 * 1024 * 1024
+        drill = RESTORE_READINESS.Drill.__new__(RESTORE_READINESS.Drill)
+        drill.manifest = {"token": record["token"], "containers": []}
+        drill.save = lambda: None
+        drill.list_containers = lambda phase: []
+        drill.list_volumes = lambda phase: set()
+        drill.list_networks = lambda phase: {"none"}
+        drill.inspect_container = lambda identifier, phase: created_document
+        created_args: list[str] = []
+
+        def create(args: list[str], **_kwargs: Any) -> bytes:
+            created_args.extend(args)
+            # Docker stores the requested CPU flags verbatim, so derive the inspect view from them.
+            host = document["HostConfig"]
+            host["CpuQuota"] = int(args[args.index("--cpu-quota") + 1]) if "--cpu-quota" in args else 0
+            host["CpuPeriod"] = int(args[args.index("--cpu-period") + 1]) if "--cpu-period" in args else 0
+            host["NanoCpus"] = int(float(args[args.index("--cpus") + 1]) * 1e9) if "--cpus" in args else 0
+            return (record["id"] + "\n").encode()
+
+        created_document = document
+        drill.call = create
+        created = drill.create_container(
+            role=record["role"],
+            image_id=record["image_id"],
+            name=record["name"],
+            user=record["user"],
+            memory=record["memory"],
+            pids_limit=record["pids_limit"],
+            mounts=[],
+            tmpfs_options=record["tmpfs_options"],
+            environment={"LANG": "C", "PATH": "/usr/bin:/bin"},
+            explicit_environment={},
+            command_args=[],
+            expected_entrypoint=record["entrypoint"],
+            expected_command=record["command"],
+        )
+        self.assertTrue(RESTORE_READINESS.validate_container_inspect(document, created))
+        self.assertNotIn("--cpus", created_args)
+
+    def test_finished_run_removal_accepts_directories_already_cleaned(self) -> None:
+        class RootOwnedPath(type(Path())):
+            def lstat(self) -> os.stat_result:  # type: ignore[override]
+                info = super().lstat()
+                return os.stat_result((info.st_mode, info.st_ino, info.st_dev, info.st_nlink, 0, 0, info.st_size, 0, 0, 0))
+
+        for layout in ("emptied", "removed", "leftover"):
+            with self.subTest(layout=layout), tempfile.TemporaryDirectory() as temporary_directory:
+                run_dir = Path(temporary_directory) / "run"
+                run_dir.mkdir(mode=0o700)
+                manifest_path = RootOwnedPath(run_dir / "ownership.json")
+                manifest_path.write_text("{}", encoding="utf-8")
+                manifest_path.chmod(0o600)
+                if layout != "removed":
+                    for name in ("work", "invocation", "seed", "secrets", "migrations", "sockets/source", "sockets/target"):
+                        (run_dir / name).mkdir(parents=True)
+                if layout == "leftover":
+                    (run_dir / "secrets" / "left").write_bytes(b"x")
+                drill = RESTORE_READINESS.Drill.__new__(RESTORE_READINESS.Drill)
+                drill.run_dir = run_dir
+                drill.manifest_path = manifest_path
+                drill.manifest = {"cleanup_verified": True}
+
+                removed = RESTORE_READINESS.remove_finished_run(drill)
+
+                self.assertEqual(removed, layout != "leftover")
+                self.assertEqual(run_dir.exists(), layout == "leftover")
+
     def test_only_one_shot_provisioners_may_be_root_with_secret_mounts(self) -> None:
         document, record = container_fixture()
         provisioner_mounts = [
@@ -339,7 +420,7 @@ class RestoreReadinessContractTests(unittest.TestCase):
         outputs = iter(("malformed",))
         drill.sql = lambda _database, _statement, _phase: next(outputs)
         with self.assertRaises(RESTORE_READINESS.DrillFailure) as failure:
-            drill.verify_schema_state({}, 1, "schema_validation")
+            drill.verify_schema_state({}, 1, "", "schema_validation")
         self.assertEqual(failure.exception.category, "schema_failure")
 
         drill = object.__new__(RESTORE_READINESS.Drill)
@@ -347,7 +428,7 @@ class RestoreReadinessContractTests(unittest.TestCase):
         outputs = iter(("0|2||pg_stat_statements,plpgsql|0|0|0|0|0",))
         drill.sql = lambda _database, _statement, _phase: next(outputs)
         with self.assertRaises(RESTORE_READINESS.DrillFailure) as failure:
-            drill.verify_schema_state({}, 1, "schema_validation")
+            drill.verify_schema_state({}, 1, "", "schema_validation")
         self.assertEqual(failure.exception.category, "schema_failure")
 
     def test_signin_failure_startup_failure_and_output_leaks_cannot_pass(self) -> None:

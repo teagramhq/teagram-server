@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -57,5 +58,16 @@ func TestSyntheticCredentialPatternsRejectOtherIdentities(t *testing.T) {
 		if usernameRE.MatchString(username) {
 			t.Fatal("accepted a non-synthetic username")
 		}
+	}
+}
+
+func TestDatabaseDSNAcceptsTheProtectedFileLayout(t *testing.T) {
+	dsn := "postgres://postgres:" + strings.Repeat("a", 64) + "@/teagram?host=/run/postgres&sslmode=disable"
+	parsed, ok := parseDSN([]byte(dsn + "\n"))
+	if !ok || parsed != dsn {
+		t.Fatal("rejected the newline-terminated DSN the drill writes")
+	}
+	if _, ok := parseDSN([]byte(dsn + "\n\n")); ok {
+		t.Fatal("accepted extra trailing content")
 	}
 }

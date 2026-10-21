@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"regexp"
 	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
@@ -61,7 +62,7 @@ func runMain() int {
 
 func run(ctx context.Context) provisionResult {
 	result := provisionResult{SchemaVersion: 1, Category: "provisioning_failure"}
-	if os.Geteuid() != 0 || len(os.Environ()) != 0 {
+	if os.Geteuid() != 0 || !runtimeDefaultsOnly(os.Environ()) {
 		return result
 	}
 	dsn, err := readProtected(dsnPath, 0o400, 256)
@@ -184,4 +185,15 @@ func readProtected(path string, mode os.FileMode, maxBytes int) (contents []byte
 		return nil, errors.New("protected input too large")
 	}
 	return contents, nil
+}
+
+// runtimeDefaultsOnly accepts only the variables Docker injects into every container.
+func runtimeDefaultsOnly(entries []string) bool {
+	for _, entry := range entries {
+		name, _, ok := strings.Cut(entry, "=")
+		if !ok || (name != "PATH" && name != "HOSTNAME" && name != "HOME") {
+			return false
+		}
+	}
+	return true
 }

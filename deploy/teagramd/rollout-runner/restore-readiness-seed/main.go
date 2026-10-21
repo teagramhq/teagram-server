@@ -16,7 +16,7 @@ import (
 )
 
 const (
-	serverPath   = "/run/app/teagramd"
+	serverPath   = "/run/app/teagramd-seed"
 	dsnPath      = "/run/secrets/postgres.dsn"
 	authKeyPath  = "/run/secrets/authkey.hex"
 	usernamePath = "/run/secrets/username"
@@ -42,11 +42,11 @@ func run() error {
 		return errors.New("unexpected environment")
 	}
 	dsnBytes, err := readProtected(dsnPath, 0o400, 256)
-	if err != nil || !validDSN(string(dsnBytes)) {
-		clear(dsnBytes)
+	defer clear(dsnBytes)
+	dsn, ok := parseDSN(dsnBytes)
+	if err != nil || !ok {
 		return errors.New("invalid database configuration")
 	}
-	defer clear(dsnBytes)
 	key, err := readProtected(authKeyPath, 0o400, 128)
 	if err != nil || !authKeyRE.MatchString(strings.TrimSuffix(string(key), "\n")) {
 		clear(key)
@@ -73,7 +73,7 @@ func run() error {
 	defer cancel()
 	command := exec.CommandContext(ctx, serverPath, "admin", "create-user", "--username", strings.TrimSuffix(string(username), "\n")) // #nosec G204 -- fixed binary; the generated synthetic handle is validated above.
 	command.Env = []string{
-		"TG_POSTGRES_DSN=" + string(dsnBytes),
+		"TG_POSTGRES_DSN=" + dsn,
 		"TG_AUTHKEY_ENC_KEY_FILE=" + authKeyPath,
 		"TG_RSA_KEY_PATH=" + rsaKeyPath,
 		"TG_REGISTRATION=closed",
@@ -131,6 +131,12 @@ func effectiveUID() (uint32, bool) {
 		return 0, false
 	}
 	return uint32(value), true
+}
+
+// parseDSN accepts the protected file layout: one DSN line.
+func parseDSN(contents []byte) (string, bool) {
+	dsn := string(bytes.TrimSuffix(contents, []byte("\n")))
+	return dsn, validDSN(dsn)
 }
 
 func validDSN(dsn string) bool {

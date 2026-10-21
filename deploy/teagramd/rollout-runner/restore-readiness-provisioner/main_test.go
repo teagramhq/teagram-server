@@ -43,3 +43,14 @@ func TestCreateUserConfirmationMustExactlyBindTheSyntheticName(t *testing.T) {
 func repeatHex(pair string, count int) string {
 	return strings.Repeat(pair, count)
 }
+
+func TestRuntimeEnvironmentAllowsOnlyDockerDefaults(t *testing.T) {
+	if !runtimeDefaultsOnly([]string{"PATH=/usr/bin:/bin", "HOSTNAME=abc", "HOME=/root"}) {
+		t.Fatal("rejected the environment Docker injects into every container")
+	}
+	for _, entries := range [][]string{{"TG_POSTGRES_DSN=x"}, {"PATH=/bin", "PGPASSWORD=x"}, {"PATH"}} {
+		if runtimeDefaultsOnly(entries) {
+			t.Fatalf("accepted unreviewed environment %q", entries)
+		}
+	}
+}

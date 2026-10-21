@@ -785,6 +785,8 @@ jobs:
       - uses: actions/checkout@v7.0.1
         with:
           persist-credentials: false
+          # The gate builds its fixture seeder from a pinned earlier commit.
+          fetch-depth: 0
 
       - uses: actions/setup-go@v7.0.0
         with:
