@@ -37,6 +37,25 @@ UPDATE chat_participants SET is_admin = $3 WHERE chat_id = $1 AND user_id = $2;
 -- name: BumpChatVersion :one
 UPDATE chats SET version = version + 1 WHERE id = $1 RETURNING *;
 
+-- SetChatCurrentPhoto changes the current pointer and its group version in the
+-- same statement. A NULL pair clears the pointer; authorization and no-op
+-- checks are made by the caller under ChatByIDForUpdate first.
+-- name: SetChatCurrentPhoto :one
+UPDATE chats
+SET current_photo_file_id = $2,
+    current_photo_uploader_id = $3,
+    version = version + 1
+WHERE id = $1
+RETURNING *;
+
+-- ClearChatCurrentPhoto runs inside DeleteChat's transaction. The deletion
+-- already bumps the chat version once after the membership tombstone is written.
+-- name: ClearChatCurrentPhoto :execrows
+UPDATE chats
+SET current_photo_file_id = NULL,
+    current_photo_uploader_id = NULL
+WHERE id = $1 AND current_photo_file_id IS NOT NULL;
+
 -- name: InsertChatAdminEvent :one
 INSERT INTO chat_admin_events (chat_id, user_id, is_admin, version)
 VALUES ($1, $2, $3, $4)

@@ -32,14 +32,16 @@ const maxChatParticipants = 200
 
 // Chat is a basic group chat.
 type Chat struct {
-	ID                  int64
-	Title               string
-	CreatorID           int64
-	Version             int
-	TTLPeriod           int
-	Date                time.Time
-	PinnedMessageID     *int32
-	DefaultBannedRights []string
+	ID                     int64
+	Title                  string
+	CreatorID              int64
+	Version                int
+	TTLPeriod              int
+	Date                   time.Time
+	PinnedMessageID        *int32
+	DefaultBannedRights    []string
+	CurrentPhotoFileID     *int64
+	CurrentPhotoUploaderID *int64
 }
 
 // Participant is one member of a chat.
@@ -94,16 +96,23 @@ type ChatPinChange struct {
 
 func chatFromRow(r db.Chat) Chat {
 	return Chat{
-		ID:                  r.ID,
-		Title:               r.Title,
-		CreatorID:           r.CreatorID,
-		Version:             int(r.Version),
-		TTLPeriod:           int(r.TtlPeriod),
-		Date:                r.Date.Time,
-		PinnedMessageID:     r.PinnedMessageID,
-		DefaultBannedRights: r.DefaultBannedRights,
+		ID:                     r.ID,
+		Title:                  r.Title,
+		CreatorID:              r.CreatorID,
+		Version:                int(r.Version),
+		TTLPeriod:              int(r.TtlPeriod),
+		Date:                   r.Date.Time,
+		PinnedMessageID:        r.PinnedMessageID,
+		DefaultBannedRights:    r.DefaultBannedRights,
+		CurrentPhotoFileID:     r.CurrentPhotoFileID,
+		CurrentPhotoUploaderID: r.CurrentPhotoUploaderID,
 	}
 }
+
+// ErrChatPhotoUnavailable is the uniform result for a missing, foreign,
+// unstored, invalid, or previously referenced upload. Those states do not
+// describe an eligible fresh photo for this selection operation.
+var ErrChatPhotoUnavailable = errors.New("chat photo upload unavailable")
 
 // CreateChat creates a chat owned by creatorID with the creator and each
 // unblocked memberID as participants, all in one transaction. Duplicate ids in
@@ -234,6 +243,99 @@ type chatMutation struct {
 
 func (m *chatMutation) canChangeInfo(callerID int64) bool {
 	return callerID == m.creatorID || !hasChatRight(m.defaultBannedRights, "change_info")
+}
+
+// CheckChatPhotoEditPermission is the early authorization check for a photo
+// upload. The upload assembly runs after it with no chat or owner lock held;
+// SetChatPhoto repeats this check at the final mutation serialization point.
+func (s *Store) CheckChatPhotoEditPermission(ctx context.Context, chatID, callerID int64) error {
+	m, err := s.beginChatMutation(ctx, chatID, callerID)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = m.tx.Rollback(ctx) }() //nolint:errcheck // read-only preflight
+	if !m.canChangeInfo(callerID) {
+		return ErrChatAdminRequired
+	}
+	return nil
+}
+
+// SetChatPhoto replaces or clears a basic group's current photo and stores one
+// immutable service-message copy per member in the same transaction. fileID is
+// zero to clear. A changed selection bumps the chat version and every recipient's
+// local message id, event and PTS together; an authorized retry of the same
+// selection, or a clear of an already-empty selection, is a no-op.
+//
+// A replacement accepts only a caller-owned, validated, stored photo that has
+// no prior media, gallery, grant, receipt, or chat reference. The upload assembly
+// caller must run before this method, so JPEG and blob I/O never hold chat or
+// member-owner locks. The final eligibility check runs after those locks and
+// holds the terminal file reference lock through commit.
+func (s *Store) SetChatPhoto(ctx context.Context, chatID, callerID, fileID int64) (changed bool, chat Chat, sender Message, perOwner map[int64]int, err error) {
+	m, err := s.beginChatMutation(ctx, chatID, callerID)
+	if err != nil {
+		return false, Chat{}, Message{}, nil, err
+	}
+	defer func() { _ = m.tx.Rollback(ctx) }() //nolint:errcheck // no-op after commit
+
+	if !m.canChangeInfo(callerID) {
+		return false, Chat{}, Message{}, nil, ErrChatAdminRequired
+	}
+	if fileID < 0 {
+		return false, Chat{}, Message{}, nil, ErrChatPhotoUnavailable
+	}
+
+	if fileID == 0 {
+		if m.chat.CurrentPhotoFileID == nil {
+			return false, chatFromRow(m.chat), Message{}, nil, nil
+		}
+	} else if m.chat.CurrentPhotoFileID != nil && *m.chat.CurrentPhotoFileID == fileID {
+		if m.chat.CurrentPhotoUploaderID == nil || *m.chat.CurrentPhotoUploaderID != callerID {
+			return false, Chat{}, Message{}, nil, ErrChatPhotoUnavailable
+		}
+		return false, chatFromRow(m.chat), Message{}, nil, nil
+	}
+
+	// Authority was decided before the recipient-sized lock set. Keep the lock
+	// order chat row -> sorted member-owner keys -> terminal file row.
+	if err = m.lockOwners(ctx); err != nil {
+		return false, Chat{}, Message{}, nil, err
+	}
+	action := ChatActionEditPhoto
+	var fileIDValue, uploaderIDValue *int64
+	if fileID == 0 {
+		action = ChatActionDeletePhoto
+	} else {
+		_, err = m.qtx.LockChatPhotoFileForAttach(ctx, db.LockChatPhotoFileForAttachParams{
+			FileID: fileID, UploaderID: callerID,
+		})
+		switch {
+		case errors.Is(err, pgx.ErrNoRows):
+			return false, Chat{}, Message{}, nil, ErrChatPhotoUnavailable
+		case err != nil:
+			return false, Chat{}, Message{}, nil, fmt.Errorf("lock chat photo upload: %w", err)
+		}
+		fileIDValue = &fileID
+		uploaderIDValue = &callerID
+	}
+
+	row, err := m.qtx.SetChatCurrentPhoto(ctx, db.SetChatCurrentPhotoParams{
+		ID: chatID, CurrentPhotoFileID: fileIDValue, CurrentPhotoUploaderID: uploaderIDValue,
+	})
+	if err != nil {
+		return false, Chat{}, Message{}, nil, fmt.Errorf("set chat current photo: %w", err)
+	}
+	sender, perOwner, _, err = fanOut(ctx, m.tx, m.qtx, s.log, FanOut{
+		ChatID: chatID, FromID: callerID, Action: action, FileID: fileID,
+		chatPhotoAuthorized: true,
+	})
+	if err != nil {
+		return false, Chat{}, Message{}, nil, err
+	}
+	if err = m.tx.Commit(ctx); err != nil {
+		return false, Chat{}, Message{}, nil, fmt.Errorf("commit chat photo: %w", err)
+	}
+	return true, chatFromRow(row), sender, perOwner, nil
 }
 
 // beginChatMutation opens the transaction AddChatUser, RemoveChatUser and
@@ -637,6 +739,11 @@ func (s *Store) DeleteChat(ctx context.Context, chatID, callerID int64) (ChatDel
 	}
 	if err := lockOwners(ctx, tx, ownerIDs...); err != nil {
 		return ChatDeletion{}, err
+	}
+	if chat.CurrentPhotoFileID != nil {
+		if _, err := qtx.ClearChatCurrentPhoto(ctx, chatID); err != nil {
+			return ChatDeletion{}, fmt.Errorf("clear deleted chat photo: %w", err)
+		}
 	}
 
 	copies, err := qtx.ChatMessageCopiesForDeletion(ctx, db.ChatMessageCopiesForDeletionParams{

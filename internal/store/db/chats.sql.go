@@ -81,7 +81,7 @@ func (q *Queries) AcknowledgeChatRemovalEventsForState(ctx context.Context, arg 
 }
 
 const bumpChatVersion = `-- name: BumpChatVersion :one
-UPDATE chats SET version = version + 1 WHERE id = $1 RETURNING id, title, creator_id, version, date, pinned_message_id, default_banned_rights, ttl_period
+UPDATE chats SET version = version + 1 WHERE id = $1 RETURNING id, title, creator_id, version, date, pinned_message_id, default_banned_rights, ttl_period, current_photo_file_id, current_photo_uploader_id
 `
 
 func (q *Queries) BumpChatVersion(ctx context.Context, id int64) (Chat, error) {
@@ -96,6 +96,8 @@ func (q *Queries) BumpChatVersion(ctx context.Context, id int64) (Chat, error) {
 		&i.PinnedMessageID,
 		&i.DefaultBannedRights,
 		&i.TtlPeriod,
+		&i.CurrentPhotoFileID,
+		&i.CurrentPhotoUploaderID,
 	)
 	return i, err
 }
@@ -288,7 +290,7 @@ func (q *Queries) ChatAdminSnapshotsForMember(ctx context.Context, arg ChatAdmin
 }
 
 const chatByID = `-- name: ChatByID :one
-SELECT id, title, creator_id, version, date, pinned_message_id, default_banned_rights, ttl_period FROM chats WHERE id = $1
+SELECT id, title, creator_id, version, date, pinned_message_id, default_banned_rights, ttl_period, current_photo_file_id, current_photo_uploader_id FROM chats WHERE id = $1
 `
 
 func (q *Queries) ChatByID(ctx context.Context, id int64) (Chat, error) {
@@ -303,12 +305,14 @@ func (q *Queries) ChatByID(ctx context.Context, id int64) (Chat, error) {
 		&i.PinnedMessageID,
 		&i.DefaultBannedRights,
 		&i.TtlPeriod,
+		&i.CurrentPhotoFileID,
+		&i.CurrentPhotoUploaderID,
 	)
 	return i, err
 }
 
 const chatByIDForUpdate = `-- name: ChatByIDForUpdate :one
-SELECT id, title, creator_id, version, date, pinned_message_id, default_banned_rights, ttl_period FROM chats WHERE id = $1 FOR UPDATE
+SELECT id, title, creator_id, version, date, pinned_message_id, default_banned_rights, ttl_period, current_photo_file_id, current_photo_uploader_id FROM chats WHERE id = $1 FOR UPDATE
 `
 
 // ChatByIDForUpdate takes the chats row lock that serialises everything touching
@@ -327,6 +331,8 @@ func (q *Queries) ChatByIDForUpdate(ctx context.Context, id int64) (Chat, error)
 		&i.PinnedMessageID,
 		&i.DefaultBannedRights,
 		&i.TtlPeriod,
+		&i.CurrentPhotoFileID,
+		&i.CurrentPhotoUploaderID,
 	)
 	return i, err
 }
@@ -761,7 +767,7 @@ func (q *Queries) ChatRemovalSnapshotsForAuthKey(ctx context.Context, arg ChatRe
 }
 
 const chatsByIDsForMember = `-- name: ChatsByIDsForMember :many
-SELECT c.id, c.title, c.creator_id, c.version, c.date, c.pinned_message_id, c.default_banned_rights, c.ttl_period FROM chats c
+SELECT c.id, c.title, c.creator_id, c.version, c.date, c.pinned_message_id, c.default_banned_rights, c.ttl_period, c.current_photo_file_id, c.current_photo_uploader_id FROM chats c
 JOIN chat_participants p ON p.chat_id = c.id
 WHERE p.user_id = $1::bigint
   AND c.id = ANY($2::bigint[])
@@ -794,6 +800,8 @@ func (q *Queries) ChatsByIDsForMember(ctx context.Context, arg ChatsByIDsForMemb
 			&i.PinnedMessageID,
 			&i.DefaultBannedRights,
 			&i.TtlPeriod,
+			&i.CurrentPhotoFileID,
+			&i.CurrentPhotoUploaderID,
 		); err != nil {
 			return nil, err
 		}
@@ -806,7 +814,7 @@ func (q *Queries) ChatsByIDsForMember(ctx context.Context, arg ChatsByIDsForMemb
 }
 
 const chatsForUser = `-- name: ChatsForUser :many
-SELECT c.id, c.title, c.creator_id, c.version, c.date, c.pinned_message_id, c.default_banned_rights, c.ttl_period FROM chats c
+SELECT c.id, c.title, c.creator_id, c.version, c.date, c.pinned_message_id, c.default_banned_rights, c.ttl_period, c.current_photo_file_id, c.current_photo_uploader_id FROM chats c
 JOIN chat_participants p ON p.chat_id = c.id
 WHERE p.user_id = $1
 ORDER BY c.id
@@ -830,6 +838,8 @@ func (q *Queries) ChatsForUser(ctx context.Context, userID int64) ([]Chat, error
 			&i.PinnedMessageID,
 			&i.DefaultBannedRights,
 			&i.TtlPeriod,
+			&i.CurrentPhotoFileID,
+			&i.CurrentPhotoUploaderID,
 		); err != nil {
 			return nil, err
 		}
@@ -839,6 +849,23 @@ func (q *Queries) ChatsForUser(ctx context.Context, userID int64) ([]Chat, error
 		return nil, err
 	}
 	return items, nil
+}
+
+const clearChatCurrentPhoto = `-- name: ClearChatCurrentPhoto :execrows
+UPDATE chats
+SET current_photo_file_id = NULL,
+    current_photo_uploader_id = NULL
+WHERE id = $1 AND current_photo_file_id IS NOT NULL
+`
+
+// ClearChatCurrentPhoto runs inside DeleteChat's transaction. The deletion
+// already bumps the chat version once after the membership tombstone is written.
+func (q *Queries) ClearChatCurrentPhoto(ctx context.Context, id int64) (int64, error) {
+	result, err := q.db.Exec(ctx, clearChatCurrentPhoto, id)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
 }
 
 const deleteChatAbout = `-- name: DeleteChatAbout :execrows
@@ -904,7 +931,7 @@ func (q *Queries) GetChatPinnedMessage(ctx context.Context, id int64) (*int32, e
 
 const insertChat = `-- name: InsertChat :one
 INSERT INTO chats (title, creator_id) VALUES ($1, $2)
-RETURNING id, title, creator_id, version, date, pinned_message_id, default_banned_rights, ttl_period
+RETURNING id, title, creator_id, version, date, pinned_message_id, default_banned_rights, ttl_period, current_photo_file_id, current_photo_uploader_id
 `
 
 type InsertChatParams struct {
@@ -924,6 +951,8 @@ func (q *Queries) InsertChat(ctx context.Context, arg InsertChatParams) (Chat, e
 		&i.PinnedMessageID,
 		&i.DefaultBannedRights,
 		&i.TtlPeriod,
+		&i.CurrentPhotoFileID,
+		&i.CurrentPhotoUploaderID,
 	)
 	return i, err
 }
@@ -1257,11 +1286,47 @@ func (q *Queries) SetChatAbout(ctx context.Context, arg SetChatAboutParams) erro
 	return err
 }
 
+const setChatCurrentPhoto = `-- name: SetChatCurrentPhoto :one
+UPDATE chats
+SET current_photo_file_id = $2,
+    current_photo_uploader_id = $3,
+    version = version + 1
+WHERE id = $1
+RETURNING id, title, creator_id, version, date, pinned_message_id, default_banned_rights, ttl_period, current_photo_file_id, current_photo_uploader_id
+`
+
+type SetChatCurrentPhotoParams struct {
+	ID                     int64
+	CurrentPhotoFileID     *int64
+	CurrentPhotoUploaderID *int64
+}
+
+// SetChatCurrentPhoto changes the current pointer and its group version in the
+// same statement. A NULL pair clears the pointer; authorization and no-op
+// checks are made by the caller under ChatByIDForUpdate first.
+func (q *Queries) SetChatCurrentPhoto(ctx context.Context, arg SetChatCurrentPhotoParams) (Chat, error) {
+	row := q.db.QueryRow(ctx, setChatCurrentPhoto, arg.ID, arg.CurrentPhotoFileID, arg.CurrentPhotoUploaderID)
+	var i Chat
+	err := row.Scan(
+		&i.ID,
+		&i.Title,
+		&i.CreatorID,
+		&i.Version,
+		&i.Date,
+		&i.PinnedMessageID,
+		&i.DefaultBannedRights,
+		&i.TtlPeriod,
+		&i.CurrentPhotoFileID,
+		&i.CurrentPhotoUploaderID,
+	)
+	return i, err
+}
+
 const setChatDefaultBannedRights = `-- name: SetChatDefaultBannedRights :one
 UPDATE chats
 SET default_banned_rights = $2, version = version + 1
 WHERE id = $1
-RETURNING id, title, creator_id, version, date, pinned_message_id, default_banned_rights, ttl_period
+RETURNING id, title, creator_id, version, date, pinned_message_id, default_banned_rights, ttl_period, current_photo_file_id, current_photo_uploader_id
 `
 
 type SetChatDefaultBannedRightsParams struct {
@@ -1281,6 +1346,8 @@ func (q *Queries) SetChatDefaultBannedRights(ctx context.Context, arg SetChatDef
 		&i.PinnedMessageID,
 		&i.DefaultBannedRights,
 		&i.TtlPeriod,
+		&i.CurrentPhotoFileID,
+		&i.CurrentPhotoUploaderID,
 	)
 	return i, err
 }
@@ -1304,7 +1371,7 @@ func (q *Queries) SetChatParticipantAdmin(ctx context.Context, arg SetChatPartic
 }
 
 const setChatPinnedMessage = `-- name: SetChatPinnedMessage :one
-UPDATE chats SET pinned_message_id = $2, version = version + 1 WHERE id = $1 RETURNING id, title, creator_id, version, date, pinned_message_id, default_banned_rights, ttl_period
+UPDATE chats SET pinned_message_id = $2, version = version + 1 WHERE id = $1 RETURNING id, title, creator_id, version, date, pinned_message_id, default_banned_rights, ttl_period, current_photo_file_id, current_photo_uploader_id
 `
 
 type SetChatPinnedMessageParams struct {
@@ -1327,12 +1394,14 @@ func (q *Queries) SetChatPinnedMessage(ctx context.Context, arg SetChatPinnedMes
 		&i.PinnedMessageID,
 		&i.DefaultBannedRights,
 		&i.TtlPeriod,
+		&i.CurrentPhotoFileID,
+		&i.CurrentPhotoUploaderID,
 	)
 	return i, err
 }
 
 const setChatTitle = `-- name: SetChatTitle :one
-UPDATE chats SET title = $2, version = version + 1 WHERE id = $1 RETURNING id, title, creator_id, version, date, pinned_message_id, default_banned_rights, ttl_period
+UPDATE chats SET title = $2, version = version + 1 WHERE id = $1 RETURNING id, title, creator_id, version, date, pinned_message_id, default_banned_rights, ttl_period, current_photo_file_id, current_photo_uploader_id
 `
 
 type SetChatTitleParams struct {
@@ -1352,6 +1421,8 @@ func (q *Queries) SetChatTitle(ctx context.Context, arg SetChatTitleParams) (Cha
 		&i.PinnedMessageID,
 		&i.DefaultBannedRights,
 		&i.TtlPeriod,
+		&i.CurrentPhotoFileID,
+		&i.CurrentPhotoUploaderID,
 	)
 	return i, err
 }

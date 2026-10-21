@@ -23,6 +23,8 @@ const (
 	ChatActionDeleteUser     ChatAction = 3
 	ChatActionEditTitle      ChatAction = 4
 	ChatActionSetMessagesTTL ChatAction = 5
+	ChatActionEditPhoto      ChatAction = 6
+	ChatActionDeletePhoto    ChatAction = 7
 )
 
 // FanOut is one chat write to deliver to every member.
@@ -64,6 +66,11 @@ type FanOut struct {
 	FwdChannelID *int64
 	// FwdChannelPost is the local_id of the source channel post.
 	FwdChannelPost *int32
+
+	// chatPhotoAuthorized is set only by SetChatPhoto after it checked current
+	// membership and change_info under the chats row lock. Keeping it private
+	// prevents callers of SendChatMessage from forging a photo service action.
+	chatPhotoAuthorized bool
 }
 
 // SendChatMessage writes one chat message to every member of the chat: one
@@ -173,6 +180,16 @@ func fanOut(ctx context.Context, tx pgx.Tx, qtx *db.Queries, log *slog.Logger, f
 	if f.Action == ChatActionSetMessagesTTL && !ValidHistoryTTLPeriod(f.TTLPeriod) {
 		return Message{}, nil, false, ErrHistoryTTLPeriodInvalid
 	}
+	switch f.Action {
+	case ChatActionEditPhoto:
+		if !f.chatPhotoAuthorized || f.FileID <= 0 {
+			return Message{}, nil, false, ErrMessageInvalid
+		}
+	case ChatActionDeletePhoto:
+		if !f.chatPhotoAuthorized || f.FileID != 0 {
+			return Message{}, nil, false, ErrMessageInvalid
+		}
+	}
 
 	// Early reject, ahead of the chats row lock, for the one fan-out a client
 	// causes directly. A non-member that takes that lock holds it to commit, which
@@ -248,7 +265,8 @@ func fanOut(ctx context.Context, tx pgx.Tx, qtx *db.Queries, log *slog.Logger, f
 	// One lock for the whole fan-out, taken before the first per-member insert,
 	// which is what makes the fan-out all-or-nothing with respect to the file:
 	// every copy carries the reference or the transaction writes none of them.
-	// Service messages carry no file id and reach no query here.
+	// Photo-edit service messages are the only service action that carries a
+	// file id, and SetChatPhoto has already checked its ownership and metadata.
 	if err = lockFileRefs(ctx, qtx, f.FileID); err != nil {
 		return Message{}, nil, false, err
 	}

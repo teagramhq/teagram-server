@@ -251,6 +251,8 @@ func mediaErasureScanSQL(tb testing.TB) string {
 	for _, want := range []string{
 		"FROM user_photos up",
 		"WHERE up.file_id = f.id",
+		"FROM chats c",
+		"WHERE c.current_photo_file_id = f.id",
 		"LIMIT 1",
 		"WHERE f.id > $2 AND f.id <= $3",
 	} {
@@ -269,20 +271,31 @@ func TestMediaErasureScanUsesIndexedGalleryProbesAtScale(t *testing.T) {
 	other := profilePhotoUser(t, ctx, conn)
 	const galleryEntries = 200_000
 	throughID := profilePhotoSeedInterleavedGallery(t, ctx, conn, owner, other, galleryEntries)
+	if _, err := conn.Exec(ctx, `
+		INSERT INTO chats (title, creator_id, current_photo_file_id, current_photo_uploader_id)
+		SELECT 'photo plan', f.uploader_id, f.id, f.uploader_id
+		FROM files f
+		WHERE f.uploader_id IN ($1, $2)
+	`, owner, other); err != nil {
+		t.Fatalf("seed current chat photo references: %v", err)
+	}
 	if _, err := conn.Exec(ctx, `ANALYZE files`); err != nil {
 		t.Fatalf("analyze files: %v", err)
 	}
 	if _, err := conn.Exec(ctx, `ANALYZE user_photos`); err != nil {
 		t.Fatalf("analyze gallery: %v", err)
 	}
+	if _, err := conn.Exec(ctx, `ANALYZE chats`); err != nil {
+		t.Fatalf("analyze chats: %v", err)
+	}
 
 	plan := profilePhotoExplain(t, ctx, conn, mediaErasureScanSQL(t),
 		time.Now().Add(time.Hour), int64(0), throughID, 1000)
-	if !strings.Contains(plan, "user_photos_file_id_key") || !strings.Contains(plan, "loops=1000") {
-		t.Fatalf("bounded erasure scan does not use one indexed gallery probe per candidate:\n%s", plan)
+	if !strings.Contains(plan, "user_photos_file_id_key") || !strings.Contains(plan, "chats_current_photo_file_id_idx") || !strings.Contains(plan, "loops=1000") {
+		t.Fatalf("bounded erasure scan does not use indexed gallery and chat-photo probes per candidate:\n%s", plan)
 	}
-	if strings.Contains(plan, "Seq Scan on user_photos") {
-		t.Fatalf("bounded erasure scan reads the gallery sequentially:\n%s", plan)
+	if strings.Contains(plan, "Seq Scan on user_photos") || strings.Contains(plan, "Seq Scan on chats") {
+		t.Fatalf("bounded erasure scan reads a reference table sequentially:\n%s", plan)
 	}
 }
 
@@ -555,6 +568,18 @@ func TestMediaErasureSummaryWalksEveryClass(t *testing.T) {
 	`, a.ID, gallery.ID); err != nil {
 		t.Fatalf("insert gallery reference for file %d: %v", gallery.ID, err)
 	}
+	chatRef := storedFile(t, s, a.ID)
+	chat, err := s.CreateChat(ctx, a.ID, "Photo reference", nil)
+	if err != nil {
+		t.Fatalf("create photo-reference chat: %v", err)
+	}
+	if _, err := conn.Exec(ctx, `
+		UPDATE chats
+		SET current_photo_file_id = $2, current_photo_uploader_id = $3
+		WHERE id = $1
+	`, chat.ID, chatRef.ID, a.ID); err != nil {
+		t.Fatalf("insert current chat photo reference for file %d: %v", chatRef.ID, err)
+	}
 
 	// A batch of one forces the walk to page, so a summary that only ever read
 	// its first batch would come back short here.
@@ -562,8 +587,8 @@ func TestMediaErasureSummaryWalksEveryClass(t *testing.T) {
 	if err != nil {
 		t.Fatalf("erasure summary: %v", err)
 	}
-	if counts.Scanned != 4 {
-		t.Fatalf("Scanned = %d, want 4; counts = %+v", counts.Scanned, counts)
+	if counts.Scanned != 5 {
+		t.Fatalf("Scanned = %d, want 5; counts = %+v", counts.Scanned, counts)
 	}
 	if counts.Unreferenced != 1 || counts.UnreferencedBytes != dead.Size {
 		t.Fatalf("unreferenced = %d/%d bytes, want 1/%d; counts = %+v",
@@ -579,18 +604,19 @@ func TestMediaErasureSummaryWalksEveryClass(t *testing.T) {
 	if counts.SkippedGalleryRef != 1 {
 		t.Fatalf("SkippedGalleryRef = %d, want 1; counts = %+v", counts.SkippedGalleryRef, counts)
 	}
+	if counts.SkippedChatRef != 1 {
+		t.Fatalf("SkippedChatRef = %d, want 1; counts = %+v", counts.SkippedChatRef, counts)
+	}
 	// Every row is accounted for exactly once, so the outcome counts are a
-	// partition of what was scanned rather than overlapping tallies. Four of the
-	// six classes reach a row in this fixture (unreferenced, unassembled, a live
-	// message reference, a gallery reference) and each is pinned non-zero above,
-	// so dropping its term from this sum breaks the sum. The other two are 0 here
-	// by construction: no channel post exists, and the cutoff is past every file,
-	// so SkippedChannelRef and SkippedTooNew are asserted non-zero by
-	// TestMediaErasureScanSkipsLiveChannelReference and
-	// TestMediaErasureScanSkipsFilesNewerThanCutoff.
+	// partition of what was scanned rather than overlapping tallies. Five of the
+	// seven classes reach a row in this fixture (unreferenced, unassembled, a live
+	// message reference, a gallery reference, and a current chat photo) and each
+	// is pinned non-zero above, so dropping its term from this sum breaks it. No
+	// channel post exists and the cutoff is past every file, so those two classes
+	// are covered by their focused tests.
 	sum := counts.Unreferenced + counts.Unassembled +
 		counts.SkippedMessageRef + counts.SkippedChannelRef +
-		counts.SkippedGalleryRef + counts.SkippedTooNew
+		counts.SkippedGalleryRef + counts.SkippedChatRef + counts.SkippedTooNew
 	if sum != counts.Scanned {
 		t.Fatalf("classes sum to %d, scanned %d; counts = %+v", sum, counts.Scanned, counts)
 	}
