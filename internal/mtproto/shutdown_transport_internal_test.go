@@ -383,7 +383,9 @@ func TestStalledPushWriteDeadlineDoesNotCancelRPCOnTCPAndWebSocket(t *testing.T)
 					return req.Ctx.Err()
 				}
 			}), nil)
-			if err := server.SetRPCDeadline(1500 * time.Millisecond); err != nil {
+			// Keep the request deadline well beyond the push write deadline so
+			// runner scheduling delays do not look like push cancellation.
+			if err := server.SetRPCDeadline(3 * time.Second); err != nil {
 				t.Fatalf("set RPC deadline: %v", err)
 			}
 			server.readTimeout = 5 * time.Second

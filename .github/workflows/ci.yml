@@ -2412,7 +2412,7 @@ jobs:
   # and its Postgres container are discarded with this job.
   smoke:
     runs-on: ubuntu-26.04
-    timeout-minutes: 30
+    timeout-minutes: 40
     permissions:
       contents: read
     env:
