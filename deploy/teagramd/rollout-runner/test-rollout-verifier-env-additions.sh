@@ -253,6 +253,15 @@ turnstile_disabled_snapshot=$(snapshot_from_json \
 [ "$(jq -r '.container_env_sha256' <<< "$turnstile_legacy_snapshot")" = "$(jq -r '.container_env_sha256' <<< "$turnstile_disabled_snapshot")" ]
 printf '%s\n' 'PASS disabled Turnstile defaults and its exact read-only secret mount preserve rollout equivalence'
 
+busybox_readlink() {
+  [ "$1" = -f ] || { printf 'readlink: unrecognized option: %s\n' "$1" >&2; return 1; }
+  command readlink -f "$2"
+}
+readlink() { busybox_readlink "$@"; }
+verify_turnstile_compose_configuration "$turnstile_disabled_compose"
+unset -f readlink busybox_readlink
+printf '%s\n' 'PASS Turnstile path validation supports BusyBox readlink'
+
 turnstile_secret_dir="$ROLLOUT_CHECKOUT_PATH/.secrets"
 mkdir -m 700 "$turnstile_secret_dir"
 turnstile_secret_source="$turnstile_secret_dir/teagramd-turnstile"
