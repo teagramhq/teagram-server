@@ -229,7 +229,7 @@ func (p *commandRemoveProbe) Remove(ctx context.Context, key string) error {
 	return p.Store.Remove(ctx, key)
 }
 
-func TestMediaErasureLogsGalleryReferencesInReports(t *testing.T) {
+func TestMediaErasureReportsAccountForAllOutcomes(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
 	dsn := pgtest.DSN(t)
@@ -255,6 +255,14 @@ func TestMediaErasureLogsGalleryReferencesInReports(t *testing.T) {
 	if err != nil {
 		t.Fatalf("allocate gallery file: %v", err)
 	}
+	chatPhoto, err := s.AllocateFile(ctx, u.ID, 1, "image/jpeg", "group-photo.jpg", 1<<20)
+	if err != nil {
+		t.Fatalf("allocate group photo file: %v", err)
+	}
+	chat, err := s.CreateChat(ctx, u.ID, "Photo reference", nil)
+	if err != nil {
+		t.Fatalf("create photo-reference chat: %v", err)
+	}
 	conn, err := pgx.Connect(ctx, dsn)
 	if err != nil {
 		t.Fatalf("connect to insert gallery reference: %v", err)
@@ -271,6 +279,60 @@ func TestMediaErasureLogsGalleryReferencesInReports(t *testing.T) {
 	if err := conn.Close(ctx); err != nil {
 		t.Fatalf("close gallery reference connection: %v", err)
 	}
+	conn, err = pgx.Connect(ctx, dsn)
+	if err != nil {
+		t.Fatalf("connect to insert chat photo reference: %v", err)
+	}
+	if _, err := conn.Exec(ctx, `
+		UPDATE chats
+		SET current_photo_file_id = $2, current_photo_uploader_id = $3
+		WHERE id = $1
+	`, chat.ID, chatPhoto.ID, u.ID); err != nil {
+		if closeErr := conn.Close(ctx); closeErr != nil {
+			t.Errorf("close chat photo reference connection after update failure: %v", closeErr)
+		}
+		t.Fatalf("insert current chat photo reference: %v", err)
+	}
+	if err := conn.Close(ctx); err != nil {
+		t.Fatalf("close chat photo reference connection: %v", err)
+	}
+
+	assertOutcomePartition := func(t *testing.T, output, unreferencedKey, unassembledKey string) {
+		t.Helper()
+		fields := make(map[string]int)
+		for field := range strings.FieldsSeq(output) {
+			key, value, ok := strings.Cut(field, "=")
+			if !ok {
+				continue
+			}
+			count, err := strconv.Atoi(value)
+			if err == nil {
+				fields[key] = count
+			}
+		}
+		scanned, ok := fields["scanned"]
+		if !ok {
+			t.Fatalf("report log = %q, missing scanned count", output)
+		}
+		if fields["skipped_gallery_ref"] != 1 || fields["skipped_chat_ref"] != 1 {
+			t.Fatalf("report log = %q, want one gallery and one current chat photo reference", output)
+		}
+		outcomes := []string{
+			unreferencedKey, unassembledKey,
+			"skipped_message_ref", "skipped_channel_ref", "skipped_gallery_ref", "skipped_chat_ref", "skipped_too_new",
+		}
+		total := 0
+		for _, key := range outcomes {
+			count, present := fields[key]
+			if !present {
+				t.Errorf("report log = %q, missing outcome %s", output, key)
+			}
+			total += count
+		}
+		if total != scanned {
+			t.Errorf("reported outcome total = %d, scanned = %d; log = %q", total, scanned, output)
+		}
+	}
 
 	cutoff := config.Config{
 		MediaErasureMinAge: time.Hour,
@@ -278,9 +340,7 @@ func TestMediaErasureLogsGalleryReferencesInReports(t *testing.T) {
 	}
 	var sweepLog bytes.Buffer
 	sweepMediaErasurePass(ctx, s, cutoff, slog.New(slog.NewTextHandler(&sweepLog, nil)))
-	if got := sweepLog.String(); !strings.Contains(got, "skipped_gallery_ref=1") {
-		t.Errorf("reporting-only sweep log = %q, want skipped_gallery_ref=1", got)
-	}
+	assertOutcomePartition(t, sweepLog.String(), "would_erase", "would_erase_unassembled")
 
 	logCtx, cancel := context.WithCancel(ctx)
 	candidateLog := &cancelOnLogBuffer{cancel: cancel}
@@ -296,9 +356,7 @@ func TestMediaErasureLogsGalleryReferencesInReports(t *testing.T) {
 		<-done
 		t.Fatal("candidate summary did not log before timeout")
 	}
-	if got := candidateLog.String(); !strings.Contains(got, "skipped_gallery_ref=1") {
-		t.Fatalf("candidate summary log = %q, want skipped_gallery_ref=1", got)
-	}
+	assertOutcomePartition(t, candidateLog.String(), "unreferenced", "unassembled")
 }
 
 // The destructive off-switch is decided in cmd/teagramd, not in the Store.
