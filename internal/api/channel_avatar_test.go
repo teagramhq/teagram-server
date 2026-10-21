@@ -521,15 +521,6 @@ func assertChannelAvatarPeerBytes(t *testing.T, s *store.Store, blobs blob.Store
 	}
 }
 
-func channelAvatarHistoryCount(t *testing.T, s *store.Store, channelID int64) int {
-	t.Helper()
-	rows, err := s.ChannelHistory(context.Background(), channelID, 0, 50)
-	if err != nil {
-		t.Fatalf("channel history: %v", err)
-	}
-	return len(rows)
-}
-
 func TestChannelEditPhotoRejectsUnsupportedAndUnavailableInputs(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
