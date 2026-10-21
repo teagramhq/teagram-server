@@ -5,7 +5,6 @@ import (
 	"context"
 	"crypto/rsa"
 	"crypto/x509"
-	"encoding/hex"
 	"encoding/json"
 	"encoding/pem"
 	"errors"
@@ -15,7 +14,6 @@ import (
 	"net/netip"
 	"net/url"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strconv"
@@ -37,18 +35,12 @@ import (
 )
 
 const (
-	// DefaultAdminBinary is the fixed application binary mounted by the trusted
-	// scratch orchestrator for the one-shot insert-only provisioning command.
-	DefaultAdminBinary = "/run/app/teagramd"
-
-	checkTimeout        = 45 * time.Second
-	checkerRunTimeout   = 2 * checkTimeout
-	maxInvocationBytes  = 4096
-	maxDatabaseDSNBytes = 2048
-	maxPublicKeyBytes   = 4096
-	maxPasswordBytes    = 1024
-	maxUsernameBytes    = 32
-	maxAdminOutputBytes = 64 * 1024
+	checkTimeout       = 45 * time.Second
+	checkerRunTimeout  = 2 * checkTimeout
+	maxInvocationBytes = 4096
+	maxPublicKeyBytes  = 4096
+	maxPasswordBytes   = 1024
+	maxUsernameBytes   = 32
 )
 
 type Phase string
@@ -122,8 +114,6 @@ type invocationFiles struct {
 	endpoint     string
 	publicKey    *rsa.PublicKey
 	publicPEM    []byte
-	databaseDSN  string
-	authKeyPath  string
 	username     string
 	password     []byte
 	passwordLine []byte
@@ -332,10 +322,9 @@ func CheckSignIn(parent context.Context, endpoint string, publicKeyPEM []byte, u
 	return result
 }
 
-// Run loads one protected invocation, checks the actual daemon configuration,
-// provisions one new account through teagramd admin create-user, then signs in
-// as exactly the identity returned by that command.
-func Run(parent context.Context, invocationPath, adminBinary string) (result Result) {
+// Run checks the actual daemon configuration and signs in as the synthetic
+// identity created by the separate one-shot provisioner.
+func Run(parent context.Context, invocationPath string) (result Result) {
 	result = newResult(PhaseInvocation, CategoryInvocationInvalid)
 	loaded, category := loadInvocation(invocationPath)
 	if loaded == nil {
@@ -364,29 +353,18 @@ func Run(parent context.Context, invocationPath, adminBinary string) (result Res
 	if category != CategoryAssertionsPassed {
 		return newResult(PhaseInvocation, category)
 	}
-	if !validAdminBinary(adminBinary) {
-		return newResult(PhaseProvisioning, CategoryProvisioningFailure)
-	}
-
 	if parent == nil {
 		parent = context.Background()
 	}
 	ctx, cancel := context.WithTimeout(parent, checkerRunTimeout)
 	defer cancel()
+	identity, category := readProvisionedIdentity(loaded.dir, loaded.username)
+	if category != CategoryAssertionsPassed {
+		return newResult(PhaseProvisioning, category)
+	}
 	configuration := CheckConfig(ctx, loaded.endpoint, loaded.publicPEM)
 	if configuration.Category != CategoryAssertionsPassed {
 		return configuration
-	}
-
-	identity, category := createSyntheticUser(ctx, loaded, adminBinary)
-	if category != CategoryAssertionsPassed {
-		phase := PhaseProvisioning
-		if category == CategoryCheckerCleanupFailure {
-			phase = PhaseCheckerCleanup
-		}
-		result = newResult(phase, category)
-		result.HelpGetConfig = AssertionPass
-		return result
 	}
 
 	result = CheckSignIn(ctx, loaded.endpoint, loaded.publicPEM, loaded.username, loaded.password, identity)
@@ -399,8 +377,12 @@ func Run(parent context.Context, invocationPath, adminBinary string) (result Res
 
 // RunCLI emits the typed result on stdout and never emits raw diagnostics. The
 // caller decides how to publish or clean up the protected invocation directory.
-func RunCLI(ctx context.Context, invocationPath, adminBinary string, stdout, stderr io.Writer) int {
-	result := Run(ctx, invocationPath, adminBinary)
+func RunCLI(ctx context.Context, invocationPath string, stdout, stderr io.Writer) int {
+	result := Run(ctx, invocationPath)
+	return writeCLIResult(result, stdout)
+}
+
+func writeCLIResult(result Result, stdout io.Writer) int {
 	encoder := json.NewEncoder(stdout)
 	if err := encoder.Encode(result); err != nil {
 		return 1
@@ -627,35 +609,7 @@ func loadInvocation(path string) (*invocationFiles, Category) {
 	if artifactExists(dir.Fd(), "result.json") {
 		return loaded, CategoryInvocationInvalid
 	}
-	dsnData, ok := readRecordAt(dir.Fd(), "postgres.dsn", 0o600, maxDatabaseDSNBytes)
-	if !ok {
-		return loaded, CategoryInvocationInvalid
-	}
-	loaded.databaseDSN = string(trimOneNewline(dsnData))
-	clear(dsnData)
-	if !validPostgresDSN(loaded.databaseDSN) {
-		return loaded, CategoryInvocationInvalid
-	}
-	keyData, ok := readRecordAt(dir.Fd(), "authkey.hex", 0o600, 128)
-	if !ok {
-		return loaded, CategoryInvocationInvalid
-	}
-	keyText := append([]byte(nil), bytes.TrimSpace(keyData)...)
-	clear(keyData)
-	defer clear(keyText)
-	if len(keyText) != 64 {
-		return loaded, CategoryInvocationInvalid
-	}
-	keyBytes := make([]byte, hex.DecodedLen(len(keyText)))
-	decoded, err := hex.Decode(keyBytes, keyText)
-	keyBytes = keyBytes[:decoded]
-	if err != nil || len(keyBytes) != 32 {
-		clear(keyBytes)
-		return loaded, CategoryInvocationInvalid
-	}
-	clear(keyBytes)
-	loaded.authKeyPath = filepath.Join(directory, "authkey.hex")
-	usernameData, ok := readRecordAt(dir.Fd(), "username", 0o600, maxUsernameBytes+1)
+	usernameData, ok := readRecordAt(dir.Fd(), "username", 0o400, maxUsernameBytes+1)
 	if !ok {
 		return loaded, CategoryInvocationInvalid
 	}
@@ -665,7 +619,7 @@ func loadInvocation(path string) (*invocationFiles, Category) {
 	if !usernamePattern.MatchString(loaded.username) {
 		return loaded, CategoryInvocationInvalid
 	}
-	loaded.passwordLine, ok = readRecordAt(dir.Fd(), "password", 0o600, maxPasswordBytes+1)
+	loaded.passwordLine, ok = readRecordAt(dir.Fd(), "password", 0o400, maxPasswordBytes+1)
 	if !ok {
 		return loaded, CategoryInvocationInvalid
 	}
@@ -683,6 +637,74 @@ func loadInvocation(path string) (*invocationFiles, Category) {
 		return loaded, CategoryKeyMismatch
 	}
 	return loaded, CategoryAssertionsPassed
+}
+
+type provisionedIdentityDocument struct {
+	SchemaVersion int    `json:"schema_version"`
+	UserID        int64  `json:"user_id"`
+	Username      string `json:"username"`
+}
+
+func readProvisionedIdentity(directory *os.File, expectedUsername string) (Identity, Category) {
+	data, ok := readRecordAt(directory.Fd(), "provisioned.json", 0o400, 1024)
+	if !ok {
+		return Identity{}, CategoryProvisioningFailure
+	}
+	defer clear(data)
+	var document provisionedIdentityDocument
+	if !decodeProvisionedIdentity(data, &document) || document.SchemaVersion != 1 ||
+		document.UserID <= 0 || document.Username != expectedUsername || !usernamePattern.MatchString(document.Username) {
+		return Identity{}, CategoryProvisioningFailure
+	}
+	return Identity{ID: document.UserID, Username: document.Username}, CategoryAssertionsPassed
+}
+
+func decodeProvisionedIdentity(data []byte, document *provisionedIdentityDocument) bool {
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	opening, err := decoder.Token()
+	if err != nil || opening != json.Delim('{') {
+		return false
+	}
+	seen := make(map[string]struct{}, 3)
+	for decoder.More() {
+		keyToken, err := decoder.Token()
+		if err != nil {
+			return false
+		}
+		key, ok := keyToken.(string)
+		if !ok {
+			return false
+		}
+		if _, exists := seen[key]; exists {
+			return false
+		}
+		seen[key] = struct{}{}
+		var value json.RawMessage
+		if err := decoder.Decode(&value); err != nil {
+			return false
+		}
+		var valid bool
+		switch key {
+		case "schema_version":
+			valid = json.Unmarshal(value, &document.SchemaVersion) == nil
+		case "user_id":
+			valid = json.Unmarshal(value, &document.UserID) == nil
+		case "username":
+			valid = json.Unmarshal(value, &document.Username) == nil
+		default:
+			return false
+		}
+		clear(value)
+		if !valid {
+			return false
+		}
+	}
+	closing, err := decoder.Token()
+	if err != nil || closing != json.Delim('}') || len(seen) != 3 {
+		return false
+	}
+	var trailing any
+	return errors.Is(decoder.Decode(&trailing), io.EOF)
 }
 
 func decodeInvocation(data []byte, invocation *Invocation) bool {
@@ -742,15 +764,6 @@ func decodeInvocationField(key string, value []byte, invocation *Invocation) boo
 	default:
 		return false
 	}
-}
-
-func validPostgresDSN(dsn string) bool {
-	if dsn == "" || strings.TrimSpace(dsn) != dsn || strings.ContainsAny(dsn, "\r\n\x00") {
-		return false
-	}
-	parsed, err := url.Parse(dsn)
-	return err == nil && (parsed.Scheme == "postgres" || parsed.Scheme == "postgresql") &&
-		parsed.User != nil && parsed.Hostname() != "" && strings.Trim(parsed.Path, "/") != ""
 }
 
 func trimOneNewline(data []byte) []byte {
@@ -870,160 +883,6 @@ func finishResultArtifact(file *os.File, result Result) error {
 		return errors.New("result artifact unavailable")
 	}
 	return nil
-}
-
-func validAdminBinary(path string) bool {
-	if !filepath.IsAbs(path) {
-		return false
-	}
-	info, err := os.Lstat(path)
-	if err != nil || !info.Mode().IsRegular() || info.Mode()&0o111 == 0 || info.Mode()&0o022 != 0 {
-		return false
-	}
-	return true
-}
-
-func createSyntheticUser(ctx context.Context, loaded *invocationFiles, adminBinary string) (identity Identity, category Category) {
-	directory, err := os.MkdirTemp(loaded.directory, ".restore-drill-private-")
-	if err != nil {
-		return Identity{}, CategoryProvisioningFailure
-	}
-	defer func() {
-		if err := os.RemoveAll(directory); err != nil {
-			identity = Identity{}
-			category = CategoryCheckerCleanupFailure
-		}
-	}()
-	privateDir, err := openProtectedDirectory(directory)
-	if err != nil {
-		return Identity{}, CategoryProvisioningFailure
-	}
-	defer func() {
-		if err := privateDir.Close(); err != nil {
-			identity = Identity{}
-			category = CategoryCheckerCleanupFailure
-		}
-	}()
-	stdout, err := createPrivateOutput(privateDir, "stdout")
-	if err != nil {
-		return Identity{}, CategoryProvisioningFailure
-	}
-	stderr, err := createPrivateOutput(privateDir, "stderr")
-	if err != nil {
-		if closeErr := stdout.Close(); closeErr != nil {
-			return Identity{}, CategoryCheckerCleanupFailure
-		}
-		return Identity{}, CategoryProvisioningFailure
-	}
-	command, category := adminCreateUserCommand(ctx, adminBinary, loaded.databaseDSN, loaded.authKeyPath, loaded.username, loaded.passwordLine)
-	if category != CategoryAssertionsPassed {
-		if closeOutErr := stdout.Close(); closeOutErr != nil {
-			if closeErr := stderr.Close(); closeErr != nil {
-				return Identity{}, CategoryProvisioningFailure
-			}
-			return Identity{}, CategoryProvisioningFailure
-		}
-		if closeErr := stderr.Close(); closeErr != nil {
-			return Identity{}, CategoryProvisioningFailure
-		}
-		return Identity{}, category
-	}
-	command.Stdin = bytes.NewReader(loaded.passwordLine)
-	command.Stdout = stdout
-	command.Stderr = stderr
-	runErr := command.Run()
-	closeOutErr := stdout.Close()
-	closeErr := stderr.Close()
-	if closeOutErr != nil || closeErr != nil {
-		return Identity{}, CategoryProvisioningFailure
-	}
-	stdoutBytes, stdoutRead := readRecordAt(privateDir.Fd(), "stdout", 0o600, maxAdminOutputBytes)
-	stderrBytes, stderrRead := readRecordAt(privateDir.Fd(), "stderr", 0o600, maxAdminOutputBytes)
-	defer clear(stdoutBytes)
-	defer clear(stderrBytes)
-	if !stdoutRead || !stderrRead {
-		return Identity{}, CategoryProvisioningFailure
-	}
-	if runErr != nil {
-		if errors.Is(ctx.Err(), context.DeadlineExceeded) || errors.Is(ctx.Err(), context.Canceled) {
-			return Identity{}, CategoryTimeout
-		}
-		if bytes.Contains(stderrBytes, []byte("username occupied")) {
-			return Identity{}, CategoryIdentityCollision
-		}
-		return Identity{}, CategoryProvisioningFailure
-	}
-	if len(stdoutBytes) != 0 {
-		return Identity{}, CategoryProvisioningFailure
-	}
-	userID, ok := parseCreateUserConfirmation(stderrBytes, loaded.username)
-	if !ok {
-		return Identity{}, CategoryProvisioningFailure
-	}
-	return Identity{ID: userID, Username: loaded.username}, CategoryAssertionsPassed
-}
-
-func createPrivateOutput(directory *os.File, name string) (*os.File, error) {
-	fd, err := unix.Openat(int(directory.Fd()), name, unix.O_CREAT|unix.O_EXCL|unix.O_WRONLY|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0o600)
-	if err != nil {
-		return nil, errors.New("private output unavailable")
-	}
-	if err := unix.Fchmod(fd, 0o600); err != nil {
-		closeErr := unix.Close(fd)
-		if closeErr != nil {
-			return nil, errors.New("private output unavailable")
-		}
-		return nil, errors.New("private output unavailable")
-	}
-	return os.NewFile(uintptr(fd), "restore-drill-private-output"), nil
-}
-
-func adminCreateUserCommand(ctx context.Context, binary, dsn, authKeyPath, username string, password []byte) (*exec.Cmd, Category) {
-	if ctx.Err() != nil {
-		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
-			return nil, CategoryTimeout
-		}
-		return nil, CategoryProvisioningFailure
-	}
-	args := []string{binary, "admin", "create-user", "--username", username}
-	environment := []string{
-		"TG_POSTGRES_DSN=" + dsn,
-		"TG_AUTHKEY_ENC_KEY_FILE=" + authKeyPath,
-		"TG_AUTHKEY_ENC_KEY=",
-		"TG_REGISTRATION=closed",
-	}
-	if unix.Geteuid() == 0 {
-		command := exec.CommandContext(ctx, args[0], args[1:]...) // #nosec G204 -- fixed teagramd admin command with validated synthetic username.
-		command.Env = environment
-		command.Stdin = bytes.NewReader(password)
-		return command, CategoryAssertionsPassed
-	}
-	sudo, err := exec.LookPath("sudo")
-	if err != nil {
-		return nil, CategoryProvisioningFailure
-	}
-	sudoArgs := make([]string, 0, 3+len(args))
-	sudoArgs = append(sudoArgs,
-		"-n",
-		"--preserve-env=TG_POSTGRES_DSN,TG_AUTHKEY_ENC_KEY,TG_AUTHKEY_ENC_KEY_FILE,TG_REGISTRATION",
-		"--",
-	)
-	sudoArgs = append(sudoArgs, args...)
-	command := exec.CommandContext(ctx, sudo, sudoArgs...) // #nosec G204 -- fixed teagramd admin command with validated synthetic username.
-	command.Env = environment
-	command.Stdin = bytes.NewReader(password)
-	return command, CategoryAssertionsPassed
-}
-
-var createUserConfirmation = regexp.MustCompile(`^User created: ([a-z][a-z0-9_]{1,31}) \(user id: ([1-9][0-9]*)\)\n$`)
-
-func parseCreateUserConfirmation(stderr []byte, username string) (int64, bool) {
-	match := createUserConfirmation.FindSubmatch(stderr)
-	if len(match) != 3 || string(match[1]) != username {
-		return 0, false
-	}
-	id, err := strconv.ParseInt(string(match[2]), 10, 64)
-	return id, err == nil && id > 0
 }
 
 type memorySession struct {

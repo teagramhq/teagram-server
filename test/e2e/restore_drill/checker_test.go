@@ -6,7 +6,6 @@ import (
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/x509"
-	"encoding/hex"
 	"encoding/json"
 	"encoding/pem"
 	"net/http"
@@ -98,7 +97,7 @@ func TestRestoreDrillInvocationRequiresSyntheticOwnedLoopbackEvidence(t *testing
 
 func TestRestoreDrillLoadsProtectedInvocation(t *testing.T) {
 	invocationPath := protectedTestInvocation(t)
-	result := restoredrill.Run(context.Background(), invocationPath, filepath.Join(t.TempDir(), "missing-teagramd"))
+	result := restoredrill.Run(context.Background(), invocationPath)
 	if result.Category != restoredrill.CategoryProvisioningFailure || result.Phase != restoredrill.PhaseProvisioning {
 		t.Fatalf("valid protected invocation result = %q/%q, want provisioning_failure after validation", result.Phase, result.Category)
 	}
@@ -115,13 +114,52 @@ func TestRestoreDrillLoadsProtectedInvocation(t *testing.T) {
 	}
 }
 
+func TestRestoreDrillConsumesProvisionedIdentityWithoutDatabaseSecrets(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusBadRequest)
+	}))
+	defer server.Close()
+
+	invocationPath := protectedTestInvocation(t)
+	directory := filepath.Dir(invocationPath)
+	invocation := invocationForEndpoint("ws://" + strings.TrimPrefix(server.URL, "http://") + "/apiws")
+	encodedInvocation, err := json.Marshal(invocation)
+	if err != nil {
+		t.Fatal("could not encode checker invocation")
+	}
+	if err := os.WriteFile(invocationPath, encodedInvocation, 0o600); err != nil { // #nosec G703 -- test input is inside t.TempDir.
+		t.Fatal("could not update checker invocation")
+	}
+	provisioned, err := json.Marshal(map[string]any{"schema_version": 1, "user_id": int64(42), "username": "scratch_user"})
+	if err != nil {
+		t.Fatal("could not encode provisioned identity")
+	}
+	writeProtectedTestFile(t, directory, "provisioned.json", provisioned, 0o400)
+
+	result := restoredrill.Run(context.Background(), invocationPath)
+	if result.Phase != restoredrill.PhaseConfiguration || result.Category != restoredrill.CategoryConnectionFailure {
+		t.Fatalf("preprovisioned assertion result = %q/%q, want connection failure after identity validation", result.Phase, result.Category)
+	}
+}
+
+func TestRestoreDrillRejectsAmbiguousProvisionedIdentity(t *testing.T) {
+	invocationPath := protectedTestInvocation(t)
+	const duplicateIdentity = `{"schema_version":1,"user_id":41,"user_id":42,"username":"scratch_user"}`
+	writeProtectedTestFile(t, filepath.Dir(invocationPath), "provisioned.json", []byte(duplicateIdentity), 0o400)
+
+	result := restoredrill.Run(context.Background(), invocationPath)
+	if result.Phase != restoredrill.PhaseProvisioning || result.Category != restoredrill.CategoryProvisioningFailure {
+		t.Fatalf("ambiguous identity result = %q/%q, want provisioning_failure", result.Phase, result.Category)
+	}
+}
+
 func TestRestoreDrillRejectsUnprotectedInvocationFiles(t *testing.T) {
 	t.Run("directory permissions", func(t *testing.T) {
 		invocationPath := protectedTestInvocation(t)
 		if err := unix.Chmod(filepath.Dir(invocationPath), 0o755); err != nil {
 			t.Fatal("could not weaken test invocation directory")
 		}
-		result := restoredrill.Run(context.Background(), invocationPath, filepath.Join(t.TempDir(), "missing-teagramd"))
+		result := restoredrill.Run(context.Background(), invocationPath)
 		if result.Category != restoredrill.CategoryInvocationInvalid {
 			t.Fatalf("unprotected directory category = %q, want invocation_invalid", result.Category)
 		}
@@ -131,7 +169,7 @@ func TestRestoreDrillRejectsUnprotectedInvocationFiles(t *testing.T) {
 		if err := unix.Chmod(filepath.Join(filepath.Dir(invocationPath), "password"), 0o644); err != nil {
 			t.Fatal("could not weaken test password permissions")
 		}
-		result := restoredrill.Run(context.Background(), invocationPath, filepath.Join(t.TempDir(), "missing-teagramd"))
+		result := restoredrill.Run(context.Background(), invocationPath)
 		if result.Category != restoredrill.CategoryInvocationInvalid {
 			t.Fatalf("unprotected password category = %q, want invocation_invalid", result.Category)
 		}
@@ -144,7 +182,7 @@ func TestRestoreDrillRejectsAmbiguousInvocationJSON(t *testing.T) {
 	if err := os.WriteFile(invocationPath, []byte(ambiguousInvocation), 0o600); err != nil { // #nosec G703 -- test file is inside the private invocation directory.
 		t.Fatal("could not prepare ambiguous invocation")
 	}
-	result := restoredrill.Run(context.Background(), invocationPath, filepath.Join(t.TempDir(), "missing-teagramd"))
+	result := restoredrill.Run(context.Background(), invocationPath)
 	if result.Category != restoredrill.CategoryInvocationInvalid {
 		t.Fatalf("duplicate invocation keys category = %q, want invocation_invalid", result.Category)
 	}
@@ -324,10 +362,8 @@ func protectedTestInvocation(t *testing.T) string {
 		t.Fatal("could not encode test invocation")
 	}
 	writeProtectedTestFile(t, directory, "invocation.json", encoded, 0o600)
-	writeProtectedTestFile(t, directory, "postgres.dsn", []byte("postgres://scratch:secret@127.0.0.1:5432/scratch?sslmode=disable\n"), 0o600)
-	writeProtectedTestFile(t, directory, "authkey.hex", []byte(hex.EncodeToString(bytes.Repeat([]byte{0x42}, 32))), 0o600)
-	writeProtectedTestFile(t, directory, "username", []byte("scratch_user\n"), 0o600)
-	writeProtectedTestFile(t, directory, "password", []byte("Synthetic-Password\n"), 0o600)
+	writeProtectedTestFile(t, directory, "username", []byte("scratch_user\n"), 0o400)
+	writeProtectedTestFile(t, directory, "password", []byte("Synthetic-Password\n"), 0o400)
 	writeProtectedTestFile(t, directory, "server.pub.pem", validTestPublicKeyPEM(t), 0o400)
 	return filepath.Join(directory, "invocation.json")
 }
