@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"reflect"
 	"testing"
 	"time"
 
@@ -308,6 +309,11 @@ func TestChannelPhotoShowsOnCurrentMemberResponses(t *testing.T) {
 func selectChannelAvatarForTest(t *testing.T, s *store.Store, blobs blob.Store, userID, channelID, uploadID int64) int64 {
 	t.Helper()
 	body := jpegPhotoPayload(t, 320, 240)
+	return selectChannelAvatarWithBodyForTest(t, s, blobs, userID, channelID, uploadID, body)
+}
+
+func selectChannelAvatarWithBodyForTest(t *testing.T, s *store.Store, blobs blob.Store, userID, channelID, uploadID int64, body []byte) int64 {
+	t.Helper()
 	saveParts(t, s, userID, uploadID, body)
 	result, err := api.EditChannelPhotoForTest(s, userID, blobs, api.TestMaxUserStorageBytes,
 		&tg.ChannelsEditPhotoRequest{
@@ -588,7 +594,9 @@ func TestChannelEditPhotoRejectsUnsupportedAndUnavailableInputs(t *testing.T) {
 	if parts, _, _, partErr := s.UploadPartsSummary(ctx, member.ID, foreignUpload); partErr != nil || parts != 1 {
 		t.Fatalf("foreign upload attempt consumed owner parts: parts=%d err=%v", parts, partErr)
 	}
-	ownBody := jpegPhotoPayload(t, 640, 480)
+	// The numeric upload ID collides, but the bytes must not: otherwise the
+	// wrong account's parts could accidentally satisfy the caller's selection.
+	ownBody := jpegPhotoPayload(t, 480, 640)
 	saveParts(t, s, creator.ID, foreignUpload, ownBody)
 	ownedResult, err := api.EditChannelPhotoForTest(s, creator.ID, blobs, api.TestMaxUserStorageBytes,
 		&tg.ChannelsEditPhotoRequest{Channel: api.InputChannel(creator.ID, channel.ID), Photo: uploadedGroupPhoto(foreignUpload, ownBody)})
@@ -596,9 +604,18 @@ func TestChannelEditPhotoRejectsUnsupportedAndUnavailableInputs(t *testing.T) {
 		t.Fatalf("same numeric upload id under caller account: %v", err)
 	}
 	_, ownedPhoto := channelAvatarEditFromResult(t, ownedResult)
-	assertChannelAvatarBytes(t, s, blobs, member.ID, channel.ID, ownedPhoto.ID, ownedPhoto.AccessHash, ownBody, true)
+	selected, ok, err := s.ChannelByID(ctx, channel.ID)
+	if err != nil || !ok || selected.CurrentPhotoFileID == nil || *selected.CurrentPhotoFileID != ownedPhoto.ID || selected.CurrentPhotoUploaderID == nil || *selected.CurrentPhotoUploaderID != creator.ID {
+		t.Fatalf("selected photo from colliding upload = %v/%v, ok=%v err=%v; want caller %d photo %d",
+			selected.CurrentPhotoFileID, selected.CurrentPhotoUploaderID, ok, err, creator.ID, ownedPhoto.ID)
+	}
+	assertChannelAvatarBytes(t, s, blobs, creator.ID, channel.ID, ownedPhoto.ID, ownedPhoto.AccessHash, ownBody, true)
 	if parts, _, _, partErr := s.UploadPartsSummary(ctx, member.ID, foreignUpload); partErr != nil || parts != 1 {
 		t.Fatalf("same numeric upload id changed foreign owner's parts: parts=%d err=%v", parts, partErr)
+	}
+	foreignBytes, found, partErr := s.UploadPart(ctx, member.ID, foreignUpload, 0)
+	if partErr != nil || !found || !bytes.Equal(foreignBytes, body) {
+		t.Fatalf("same numeric upload id changed foreign owner's bytes: found=%v bytes=%d err=%v", found, len(foreignBytes), partErr)
 	}
 	if _, _, err := s.SetChannelDefaultBannedRights(ctx, channel.ID, creator.ID, []string{"change_info"}); err != nil {
 		t.Fatalf("restrict supergroup change_info: %v", err)
@@ -708,69 +725,275 @@ func TestChannelEditPhotoPublicNonmembersKeepEmptyPhotoAndPublicMetadata(t *test
 
 func TestChannelEditPhotoRechecksRightsAfterPausedPut(t *testing.T) {
 	t.Parallel()
+	for _, tc := range []struct {
+		name    string
+		prepare func(context.Context, *store.Store, int64, int64, int64) error
+		mutate  func(context.Context, *store.Store, int64, int64, int64) error
+		wantRPC string
+	}{
+		{
+			name: "default rights",
+			mutate: func(ctx context.Context, s *store.Store, channelID, creatorID, _ int64) error {
+				_, _, err := s.SetChannelDefaultBannedRights(ctx, channelID, creatorID, []string{"change_info"})
+				return err
+			},
+			wantRPC: "CHAT_ADMIN_REQUIRED",
+		},
+		{
+			name: "demotion",
+			prepare: func(ctx context.Context, s *store.Store, channelID, creatorID, memberID int64) error {
+				if _, _, err := s.SetChannelDefaultBannedRights(ctx, channelID, creatorID, []string{"change_info"}); err != nil {
+					return err
+				}
+				return s.SetChannelRoleWithRights(ctx, channelID, creatorID, memberID, 1, true)
+			},
+			mutate: func(ctx context.Context, s *store.Store, channelID, creatorID, memberID int64) error {
+				return s.SetChannelRoleWithRights(ctx, channelID, creatorID, memberID, 0, false)
+			},
+			wantRPC: "CHAT_ADMIN_REQUIRED",
+		},
+		{
+			name: "ban",
+			mutate: func(ctx context.Context, s *store.Store, channelID, creatorID, memberID int64) error {
+				return s.SetChannelBan(ctx, channelID, creatorID, memberID, nil, true)
+			},
+			wantRPC: "PEER_ID_INVALID",
+		},
+		{
+			name: "leave",
+			mutate: func(ctx context.Context, s *store.Store, channelID, _, memberID int64) error {
+				left, err := s.LeaveChannel(ctx, channelID, memberID)
+				if err == nil && !left {
+					return errors.New("member did not leave")
+				}
+				return err
+			},
+			wantRPC: "PEER_ID_INVALID",
+		},
+		{
+			name: "channel deletion",
+			mutate: func(ctx context.Context, s *store.Store, channelID, creatorID, _ int64) error {
+				_, err := s.DeleteChannel(ctx, channelID, creatorID)
+				return err
+			},
+			wantRPC: "PEER_ID_INVALID",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			ctx := context.Background()
+			s := openStore(t)
+			creator := mustUser(t, s, "+15551228941")
+			member := mustUser(t, s, "+15551228942")
+			channel, err := s.CreateChannel(ctx, creator.ID, "Avatar rights race", "", true)
+			if err != nil {
+				t.Fatalf("create supergroup: %v", err)
+			}
+			joinChannelByInvite(t, s, channel, member.ID)
+			blobs := newBlobs(t)
+			const selectedUpload = int64(228940)
+			selectedBody := jpegPhotoPayload(t, 320, 240)
+			selectedFileID := selectChannelAvatarWithBodyForTest(t, s, blobs, creator.ID, channel.ID, selectedUpload, selectedBody)
+			if tc.prepare != nil {
+				if err := tc.prepare(ctx, s, channel.ID, creator.ID, member.ID); err != nil {
+					t.Fatalf("prepare authority before upload: %v", err)
+				}
+			}
+			if err := s.CheckChannelPhotoEditPermission(ctx, channel.ID, member.ID); err != nil {
+				t.Fatalf("member cannot start authorized upload: %v", err)
+			}
+
+			pausedBlobs := &blockingAssembledPut{Store: blobs, started: make(chan struct{}), release: make(chan struct{})}
+			t.Cleanup(pausedBlobs.unblock)
+			body := jpegPhotoPayload(t, 640, 480)
+			const uploadID = int64(228941)
+			saveParts(t, s, member.ID, uploadID, body)
+			result := make(chan error, 1)
+			go func() {
+				_, err := api.EditChannelPhotoForTest(s, member.ID, pausedBlobs, api.TestMaxUserStorageBytes,
+					&tg.ChannelsEditPhotoRequest{Channel: api.InputChannel(member.ID, channel.ID), Photo: uploadedGroupPhoto(uploadID, body)})
+				result <- err
+			}()
+			select {
+			case <-pausedBlobs.started:
+			case <-time.After(10 * time.Second):
+				t.Fatal("photo assembly never reached the paused original-blob write")
+			}
+			if err := tc.mutate(ctx, s, channel.ID, creator.ID, member.ID); err != nil {
+				t.Fatalf("revoke edit authority during upload: %v", err)
+			}
+			baseline := channelAvatarMutationState(t, s, channel.ID)
+			if tc.name != "channel deletion" && (baseline.channel.CurrentPhotoFileID == nil || *baseline.channel.CurrentPhotoFileID != selectedFileID) {
+				t.Fatalf("authority mutation changed selected photo: got %v, want %d", baseline.channel.CurrentPhotoFileID, selectedFileID)
+			}
+
+			pausedBlobs.unblock()
+			select {
+			case err = <-result:
+			case <-time.After(10 * time.Second):
+				t.Fatal("channel photo edit stayed blocked after releasing blob write")
+			}
+			if got := rpcMessage(t, err); got != tc.wantRPC {
+				t.Fatalf("member edit after %s = %s, want %s", tc.name, got, tc.wantRPC)
+			}
+			after := channelAvatarMutationState(t, s, channel.ID)
+			if !reflect.DeepEqual(after, baseline) {
+				t.Fatalf("refused edit changed selected photo, version, history, PTS, or events:\nbefore: %#v\nafter:  %#v", baseline, after)
+			}
+		})
+	}
+}
+
+type channelAvatarMutationSnapshot struct {
+	channel store.Channel
+	pts     int
+	history []store.ChannelMessage
+	events  []store.ChannelEvent
+}
+
+func channelAvatarMutationState(t *testing.T, s *store.Store, channelID int64) channelAvatarMutationSnapshot {
+	t.Helper()
 	ctx := context.Background()
-	s := openStore(t)
-	creator := mustUser(t, s, "+15551228941")
-	member := mustUser(t, s, "+15551228942")
-	channel, err := s.CreateChannel(ctx, creator.ID, "Avatar rights race", "", true)
+	channel, ok, err := s.ChannelByID(ctx, channelID)
+	if err != nil || !ok {
+		t.Fatalf("load channel mutation state: ok=%v err=%v", ok, err)
+	}
+	pts, err := s.ChannelState(ctx, channelID)
 	if err != nil {
-		t.Fatalf("create supergroup: %v", err)
+		t.Fatalf("load channel PTS: %v", err)
 	}
-	joinChannelByInvite(t, s, channel, member.ID)
-	blobs := &blockingAssembledPut{Store: newBlobs(t), started: make(chan struct{}), release: make(chan struct{})}
-	t.Cleanup(blobs.unblock)
-	body := jpegPhotoPayload(t, 640, 480)
-	const uploadID = int64(228941)
-	saveParts(t, s, member.ID, uploadID, body)
-	beforeChannel, ok, err := s.ChannelByID(ctx, channel.ID)
-	if err != nil || !ok {
-		t.Fatalf("load channel before upload: ok=%v err=%v", ok, err)
-	}
-	beforePts, err := s.ChannelState(ctx, channel.ID)
+	history, err := s.ChannelHistory(ctx, channelID, 0, 50)
 	if err != nil {
-		t.Fatalf("channel state before upload: %v", err)
+		t.Fatalf("load channel history: %v", err)
 	}
-	beforeHistory := channelAvatarHistoryCount(t, s, channel.ID)
-	result := make(chan error, 1)
-	go func() {
-		_, err := api.EditChannelPhotoForTest(s, member.ID, blobs, api.TestMaxUserStorageBytes,
-			&tg.ChannelsEditPhotoRequest{Channel: api.InputChannel(member.ID, channel.ID), Photo: uploadedGroupPhoto(uploadID, body)})
-		result <- err
-	}()
-	select {
-	case <-blobs.started:
-	case <-time.After(10 * time.Second):
-		t.Fatal("photo assembly never reached the paused original-blob write")
+	events, err := s.ChannelEventsWindow(ctx, channelID, 0, pts, 100)
+	if err != nil {
+		t.Fatalf("load channel events: %v", err)
 	}
-	if _, _, err := s.SetChannelDefaultBannedRights(ctx, channel.ID, creator.ID, []string{"change_info"}); err != nil {
-		t.Fatalf("restrict supergroup change_info during upload: %v", err)
-	}
-	afterRestriction, ok, err := s.ChannelByID(ctx, channel.ID)
-	if err != nil || !ok {
-		t.Fatalf("load channel after restriction: ok=%v err=%v", ok, err)
-	}
-	blobs.unblock()
-	select {
-	case err = <-result:
-	case <-time.After(10 * time.Second):
-		t.Fatal("channel photo edit stayed blocked after releasing blob write")
-	}
-	if rpcMessage(t, err) != "CHAT_ADMIN_REQUIRED" {
-		t.Fatalf("member edit after default-right change = %v, want CHAT_ADMIN_REQUIRED", err)
-	}
-	after, ok, err := s.ChannelByID(ctx, channel.ID)
-	if err != nil || !ok {
-		t.Fatalf("load channel after refused edit: ok=%v err=%v", ok, err)
-	}
-	if after.CurrentPhotoFileID != nil || after.CurrentPhotoUploaderID != nil || after.Version != afterRestriction.Version || after.Version != beforeChannel.Version+1 {
-		t.Fatalf("refused edit changed channel photo/version: photo=%v uploader=%v version=%d before=%d after restriction=%d",
-			after.CurrentPhotoFileID, after.CurrentPhotoUploaderID, after.Version, beforeChannel.Version, afterRestriction.Version)
-	}
-	if pts, err := s.ChannelState(ctx, channel.ID); err != nil || pts != beforePts {
-		t.Fatalf("refused edit channel pts=%d err=%v, want unchanged %d", pts, err, beforePts)
-	}
-	if got := channelAvatarHistoryCount(t, s, channel.ID); got != beforeHistory {
-		t.Fatalf("refused edit left %d history rows, want %d", got, beforeHistory)
+	return channelAvatarMutationSnapshot{channel: channel, pts: pts, history: history, events: events}
+}
+
+func TestChannelPhotoSnapshotAndDownloadsAfterMemberRevocation(t *testing.T) {
+	t.Parallel()
+	for _, revoke := range []struct {
+		name  string
+		apply func(context.Context, *store.Store, int64, int64, int64) error
+	}{
+		{
+			name: "ban",
+			apply: func(ctx context.Context, s *store.Store, channelID, creatorID, memberID int64) error {
+				return s.SetChannelBan(ctx, channelID, creatorID, memberID, nil, true)
+			},
+		},
+		{
+			name: "leave",
+			apply: func(ctx context.Context, s *store.Store, channelID, _, memberID int64) error {
+				left, err := s.LeaveChannel(ctx, channelID, memberID)
+				if err == nil && !left {
+					return errors.New("member did not leave")
+				}
+				return err
+			},
+		},
+	} {
+		t.Run(revoke.name, func(t *testing.T) {
+			t.Parallel()
+			ctx := context.Background()
+			s := openStore(t)
+			creator := mustUser(t, s, "+15551228961")
+			member := mustUser(t, s, "+15551228962")
+			channel, err := s.CreateChannel(ctx, creator.ID, "Avatar read snapshot", "", true)
+			if err != nil {
+				t.Fatalf("create supergroup: %v", err)
+			}
+			joinChannelByInvite(t, s, channel, member.ID)
+			blobs := newBlobs(t)
+
+			bodyA := jpegPhotoPayload(t, 640, 480)
+			const uploadA = int64(228961)
+			saveParts(t, s, creator.ID, uploadA, bodyA)
+			resultA, err := api.EditChannelPhotoForTest(s, creator.ID, blobs, api.TestMaxUserStorageBytes,
+				&tg.ChannelsEditPhotoRequest{Channel: api.InputChannel(creator.ID, channel.ID), Photo: uploadedGroupPhoto(uploadA, bodyA)})
+			if err != nil {
+				t.Fatalf("select photo A: %v", err)
+			}
+			_, photoA := channelAvatarEditFromResult(t, resultA)
+
+			entered, release := make(chan struct{}), make(chan struct{})
+			released := false
+			store.SetChannelFullInfoSnapshotHook(s, func() {
+				close(entered)
+				<-release
+			})
+			defer func() {
+				if !released {
+					close(release)
+				}
+				store.SetChannelFullInfoSnapshotHook(s, nil)
+			}()
+
+			type fullResult struct {
+				response any
+				err      error
+			}
+			done := make(chan fullResult, 1)
+			go func() {
+				response, err := api.GetFullChannelForTest(s, member.ID, &tg.ChannelsGetFullChannelRequest{Channel: api.InputChannel(member.ID, channel.ID)})
+				done <- fullResult{response: response, err: err}
+			}()
+			select {
+			case <-entered:
+			case <-time.After(10 * time.Second):
+				t.Fatal("full-channel photo hydration did not reach its snapshot pause")
+			}
+
+			if err := revoke.apply(ctx, s, channel.ID, creator.ID, member.ID); err != nil {
+				t.Fatalf("revoke member during photo hydration: %v", err)
+			}
+			bodyB := jpegPhotoPayload(t, 480, 640)
+			const uploadB = int64(228962)
+			saveParts(t, s, creator.ID, uploadB, bodyB)
+			resultB, err := api.EditChannelPhotoForTest(s, creator.ID, blobs, api.TestMaxUserStorageBytes,
+				&tg.ChannelsEditPhotoRequest{Channel: api.InputChannel(creator.ID, channel.ID), Photo: uploadedGroupPhoto(uploadB, bodyB)})
+			if err != nil {
+				t.Fatalf("select photo B after revocation: %v", err)
+			}
+			_, photoB := channelAvatarEditFromResult(t, resultB)
+
+			close(release)
+			released = true
+			var result fullResult
+			select {
+			case result = <-done:
+			case <-time.After(10 * time.Second):
+				t.Fatal("full-channel photo hydration did not finish after release")
+			}
+			if result.err != nil {
+				t.Fatalf("in-flight full-channel snapshot: %v", result.err)
+			}
+			response, ok := result.response.(*tg.MessagesChatFull)
+			if !ok {
+				t.Fatalf("in-flight full-channel response = %T, want *tg.MessagesChatFull", result.response)
+			}
+			assertChannelAvatarChatPhoto(t, "in-flight full-channel chat", fullChatChannel(t, response).Photo, photoA.ID)
+			assertChannelAvatarPhoto(t, "in-flight full-channel photo", fullChannelInfo(t, response).ChatPhoto, photoA.ID)
+
+			for _, tc := range []struct {
+				name     string
+				location tg.InputFileLocationClass
+			}{
+				{name: "historical original", location: &tg.InputPhotoFileLocation{ID: photoA.ID, AccessHash: photoA.AccessHash, ThumbSize: "x"}},
+				{name: "historical derivative", location: &tg.InputPhotoFileLocation{ID: photoA.ID, AccessHash: photoA.AccessHash, ThumbSize: "m"}},
+				{name: "current original", location: &tg.InputPhotoFileLocation{ID: photoB.ID, AccessHash: photoB.AccessHash, ThumbSize: "x"}},
+				{name: "current derivative", location: &tg.InputPhotoFileLocation{ID: photoB.ID, AccessHash: photoB.AccessHash, ThumbSize: "m"}},
+				{name: "historical peer photo", location: &tg.InputPeerPhotoFileLocation{Peer: api.InputPeerChannel(member.ID, channel.ID), PhotoID: photoA.ID, Big: true}},
+				{name: "current peer photo", location: &tg.InputPeerPhotoFileLocation{Peer: api.InputPeerChannel(member.ID, channel.ID), PhotoID: photoB.ID, Big: true}},
+			} {
+				if _, err := api.GetFileForTest(s, member.ID, blobs, &tg.UploadGetFileRequest{Location: tc.location, Limit: 1 << 20}); rpcMessage(t, err) != "LOCATION_INVALID" {
+					t.Errorf("revoked member %s download = %v, want LOCATION_INVALID", tc.name, err)
+				}
+			}
+		})
 	}
 }
 
