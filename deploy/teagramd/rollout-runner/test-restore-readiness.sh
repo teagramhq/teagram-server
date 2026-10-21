@@ -157,7 +157,7 @@ fi
 if ! printf '%s' "$success_report" | /usr/bin/python3 -c '
 import json, sys
 report = json.load(sys.stdin)
-if not (report.get("result") == "pass" and report.get("cleanup") == "verified" and report.get("exit") == 0):
+if not (report.get("result") == "pass" and report.get("cleanup") == "verified" and report.get("auth_keys_cleared") == "pass" and report.get("exit") == 0):
     raise SystemExit(1)
 '; then
   emit_preflight_failure
@@ -171,6 +171,32 @@ if ! printf '%s' "$malformed_report" | /usr/bin/python3 -c '
 import json, sys
 report = json.load(sys.stdin)
 if not (report.get("result") == "fail" and report.get("phase") == "restore" and report.get("category") == "restore_failure" and report.get("cleanup") == "verified" and report.get("exit") == 1):
+    raise SystemExit(1)
+'; then
+  emit_preflight_failure
+fi
+
+build_inputs
+if auth_clear_failure_report=$(run_drill --fault-test auth-clear-failure 2>/dev/null); then
+  emit_preflight_failure
+fi
+if ! printf '%s' "$auth_clear_failure_report" | /usr/bin/python3 -c '
+import json, sys
+report = json.load(sys.stdin)
+if not (report.get("result") == "fail" and report.get("phase") == "auth_key_clearing" and report.get("category") == "auth_key_clear_failure" and report.get("cleanup") == "verified" and report.get("exit") == 1):
+    raise SystemExit(1)
+'; then
+  emit_preflight_failure
+fi
+
+build_inputs
+if auth_clear_signal_report=$(run_drill --fault-test auth-clear-signal 2>/dev/null); then
+  emit_preflight_failure
+fi
+if ! printf '%s' "$auth_clear_signal_report" | /usr/bin/python3 -c '
+import json, sys
+report = json.load(sys.stdin)
+if not (report.get("result") == "fail" and report.get("phase") == "auth_key_clearing" and report.get("category") == "interrupted" and report.get("cleanup") == "verified" and report.get("exit") == 1):
     raise SystemExit(1)
 '; then
   emit_preflight_failure

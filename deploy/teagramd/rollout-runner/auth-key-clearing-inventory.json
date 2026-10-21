@@ -1,0 +1,83 @@
+{
+  "base_commit": "bdb89970bbd40fb57fdb89f3aa8fafb78925ce93",
+  "schema_head": "20261021000004",
+  "foreign_keys": [
+    {
+      "name": "auth_keys_pending_user_id_fkey",
+      "table": "public.auth_keys",
+      "columns": ["pending_user_id"],
+      "references": "public.users",
+      "referenced_columns": ["id"],
+      "on_delete": "NO ACTION",
+      "on_update": "NO ACTION",
+      "match": "SIMPLE",
+      "deferrable": false,
+      "initially_deferred": false,
+      "validated": true
+    },
+    {
+      "name": "auth_keys_user_id_fkey",
+      "table": "public.auth_keys",
+      "columns": ["user_id"],
+      "references": "public.users",
+      "referenced_columns": ["id"],
+      "on_delete": "NO ACTION",
+      "on_update": "NO ACTION",
+      "match": "SIMPLE",
+      "deferrable": false,
+      "initially_deferred": false,
+      "validated": true
+    },
+    {
+      "name": "notify_settings_difference_cursors_auth_key_id_fkey",
+      "table": "public.notify_settings_difference_cursors",
+      "columns": ["auth_key_id"],
+      "references": "public.auth_keys",
+      "referenced_columns": ["id"],
+      "on_delete": "CASCADE",
+      "on_update": "NO ACTION",
+      "match": "SIMPLE",
+      "deferrable": false,
+      "initially_deferred": false,
+      "validated": true
+    },
+    {
+      "name": "srp_challenges_auth_key_id_fkey",
+      "table": "public.srp_challenges",
+      "columns": ["auth_key_id"],
+      "references": "public.auth_keys",
+      "referenced_columns": ["id"],
+      "on_delete": "CASCADE",
+      "on_update": "NO ACTION",
+      "match": "SIMPLE",
+      "deferrable": false,
+      "initially_deferred": false,
+      "validated": true
+    }
+  ],
+  "triggers": [
+    {
+      "name": "AA_browser_acceptance_binding_evidence",
+      "table": "public.auth_keys",
+      "timing": "AFTER",
+      "level": "ROW",
+      "events": ["INSERT", "DELETE", "UPDATE"],
+      "enabled": "ALWAYS",
+      "function": "public.browser_acceptance_record_binding_evidence"
+    },
+    {
+      "name": "browser_acceptance_auth_keys_reject_truncate",
+      "table": "public.auth_keys",
+      "timing": "BEFORE",
+      "level": "STATEMENT",
+      "events": ["TRUNCATE"],
+      "enabled": "ALWAYS",
+      "function": "public.browser_acceptance_reject_auth_keys_truncate"
+    }
+  ],
+  "effects": {
+    "srp_challenges": "DELETE CASCADE",
+    "notify_settings_difference_cursors": "DELETE CASCADE",
+    "browser_acceptance_binding_evidence": "row trigger retains the enrollment row and records removals"
+  }
+}
