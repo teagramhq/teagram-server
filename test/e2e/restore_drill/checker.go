@@ -24,6 +24,7 @@ import (
 	"time"
 
 	"github.com/coder/websocket"
+	"github.com/gotd/td/exchange"
 	"github.com/gotd/td/session"
 	"github.com/gotd/td/telegram"
 	"github.com/gotd/td/telegram/auth"
@@ -132,6 +133,28 @@ type stageFailureError struct {
 	category Category
 }
 
+type connectionErrorCapture struct {
+	mu  sync.Mutex
+	err error
+}
+
+func (capture *connectionErrorCapture) record(err error) {
+	if err == nil {
+		return
+	}
+	capture.mu.Lock()
+	defer capture.mu.Unlock()
+	if capture.err == nil || errors.Is(err, exchange.ErrKeyFingerprintNotFound) {
+		capture.err = err
+	}
+}
+
+func (capture *connectionErrorCapture) get() error {
+	capture.mu.Lock()
+	defer capture.mu.Unlock()
+	return capture.err
+}
+
 func (failure *stageFailureError) Error() string {
 	return string(failure.category)
 }
@@ -206,7 +229,8 @@ func CheckConfig(parent context.Context, endpoint string, publicKeyPEM []byte) R
 		return result
 	}
 
-	client, sessionStore, err := newPinnedClient(endpoint, key)
+	connectionError := &connectionErrorCapture{}
+	client, sessionStore, err := newPinnedClient(endpoint, key, connectionError.record)
 	if err != nil {
 		result.Category = CategoryConnectionFailure
 		return result
@@ -222,7 +246,7 @@ func CheckConfig(parent context.Context, endpoint string, publicKeyPEM []byte) R
 		return nil
 	})
 	if err != nil {
-		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+		if errors.Is(ctx.Err(), context.DeadlineExceeded) && (entered || connectionError.get() == nil) {
 			result.Category = CategoryTimeout
 			return result
 		}
@@ -234,7 +258,7 @@ func CheckConfig(parent context.Context, endpoint string, publicKeyPEM []byte) R
 		if entered {
 			result.Category = CategoryConfigurationInvalid
 		} else {
-			result.Category = CategoryKeyMismatch
+			result.Category = connectionFailureCategory(connectionError.get())
 		}
 		result.HelpGetConfig = AssertionFail
 		return result
@@ -274,7 +298,8 @@ func CheckSignIn(parent context.Context, endpoint string, publicKeyPEM []byte, u
 
 	secret := append([]byte(nil), password...)
 	defer clear(secret)
-	client, sessionStore, err := newPinnedClient(endpoint, key)
+	connectionError := &connectionErrorCapture{}
+	client, sessionStore, err := newPinnedClient(endpoint, key, connectionError.record)
 	if err != nil {
 		result.Category = CategoryConnectionFailure
 		return result
@@ -286,7 +311,7 @@ func CheckSignIn(parent context.Context, endpoint string, publicKeyPEM []byte, u
 		return signIn(ctx, client, username, secret, expected)
 	})
 	if err != nil {
-		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+		if errors.Is(ctx.Err(), context.DeadlineExceeded) && (entered || connectionError.get() == nil) {
 			result.Category = CategoryTimeout
 			result.SyntheticSignin = AssertionFail
 			return result
@@ -297,7 +322,7 @@ func CheckSignIn(parent context.Context, endpoint string, publicKeyPEM []byte, u
 		case entered:
 			result.Category = CategoryAuthFailure
 		default:
-			result.Category = CategoryKeyMismatch
+			result.Category = connectionFailureCategory(connectionError.get())
 		}
 		result.SyntheticSignin = AssertionFail
 		return result
@@ -467,7 +492,7 @@ func parsePublicKey(data []byte) (*rsa.PublicKey, bool) {
 	return key, true
 }
 
-func newPinnedClient(endpoint string, key *rsa.PublicKey) (*telegram.Client, *memorySession, error) {
+func newPinnedClient(endpoint string, key *rsa.PublicKey, onDead func(error)) (*telegram.Client, *memorySession, error) {
 	parsed, err := url.Parse(endpoint)
 	if err != nil {
 		return nil, nil, errors.New("endpoint invalid")
@@ -484,6 +509,7 @@ func newPinnedClient(endpoint string, key *rsa.PublicKey) (*telegram.Client, *me
 			Domains: map[int]string{2: endpoint},
 		},
 		PublicKeys: []telegram.PublicKey{{RSA: key}},
+		OnDead:     onDead,
 		Resolver: dcs.Websocket(dcs.WebsocketOptions{
 			DialOptions: &websocket.DialOptions{
 				HTTPClient: &http.Client{
@@ -496,6 +522,13 @@ func newPinnedClient(endpoint string, key *rsa.PublicKey) (*telegram.Client, *me
 		SessionStorage: storage,
 	})
 	return client, storage, nil
+}
+
+func connectionFailureCategory(err error) Category {
+	if errors.Is(err, exchange.ErrKeyFingerprintNotFound) {
+		return CategoryKeyMismatch
+	}
+	return CategoryConnectionFailure
 }
 
 func probeLoopback(ctx context.Context, endpoint string) error {

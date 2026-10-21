@@ -230,6 +230,9 @@ func TestRestoreDrillConfigDoesNotFollowRedirects(t *testing.T) {
 	if result.Category == restoredrill.CategoryAssertionsPassed {
 		t.Fatal("redirect response was accepted as a valid daemon configuration")
 	}
+	if result.Category != restoredrill.CategoryConnectionFailure {
+		t.Fatalf("redirect response category = %q, want %q", result.Category, restoredrill.CategoryConnectionFailure)
+	}
 }
 
 func TestRestoreDrillIdentityMustMatchCreateUserConfirmation(t *testing.T) {
