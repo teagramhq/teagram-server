@@ -521,6 +521,29 @@ func assertChannelAvatarPeerBytes(t *testing.T, s *store.Store, blobs blob.Store
 	}
 }
 
+func assertChannelAvatarFileBytes(t *testing.T, s *store.Store, blobs blob.Store, viewerID int64, location tg.InputFileLocationClass, want []byte, label string) {
+	t.Helper()
+	result, err := api.GetFileForTest(s, viewerID, blobs, &tg.UploadGetFileRequest{Location: location, Limit: len(want)})
+	if err != nil {
+		t.Fatalf("viewer %d %s download: %v", viewerID, label, err)
+	}
+	file, ok := result.(*tg.UploadFile)
+	if !ok || !bytes.Equal(file.Bytes, want) {
+		t.Fatalf("viewer %d %s bytes = %#v, want %d bytes", viewerID, label, result, len(want))
+	}
+}
+
+func assertChannelAvatarHasMDerivative(t *testing.T, photo *tg.Photo, label string) {
+	t.Helper()
+	for _, class := range photo.Sizes {
+		size, ok := class.(*tg.PhotoSize)
+		if ok && size.Type == "m" && size.W == 320 && size.H == 320 && size.Size == len(seededPhotoM) {
+			return
+		}
+	}
+	t.Fatalf("%s sizes = %#v, want published 320x320 m derivative of %d bytes", label, photo.Sizes, len(seededPhotoM))
+}
+
 func TestChannelEditPhotoRejectsUnsupportedAndUnavailableInputs(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
@@ -890,7 +913,7 @@ func TestChannelPhotoSnapshotAndDownloadsAfterMemberRevocation(t *testing.T) {
 		t.Run(revoke.name, func(t *testing.T) {
 			t.Parallel()
 			ctx := context.Background()
-			s := openStore(t)
+			s, dsn := openStoreDSN(t)
 			creator := mustUser(t, s, "+15551228961")
 			member := mustUser(t, s, "+15551228962")
 			channel, err := s.CreateChannel(ctx, creator.ID, "Avatar read snapshot", "", true)
@@ -899,8 +922,9 @@ func TestChannelPhotoSnapshotAndDownloadsAfterMemberRevocation(t *testing.T) {
 			}
 			joinChannelByInvite(t, s, channel, member.ID)
 			blobs := newBlobs(t)
+			seedPhotoDerivativesBeforePublication(t, dsn)
 
-			bodyA := jpegPhotoPayload(t, 640, 480)
+			bodyA := jpegPhotoPayload(t, 1600, 1600)
 			const uploadA = int64(228961)
 			saveParts(t, s, creator.ID, uploadA, bodyA)
 			resultA, err := api.EditChannelPhotoForTest(s, creator.ID, blobs, api.TestMaxUserStorageBytes,
@@ -909,6 +933,24 @@ func TestChannelPhotoSnapshotAndDownloadsAfterMemberRevocation(t *testing.T) {
 				t.Fatalf("select photo A: %v", err)
 			}
 			_, photoA := channelAvatarEditFromResult(t, resultA)
+
+			bodyB := jpegPhotoPayload(t, 1600, 1600)
+			const uploadB = int64(228962)
+			saveParts(t, s, creator.ID, uploadB, bodyB)
+			resultB, err := api.EditChannelPhotoForTest(s, creator.ID, blobs, api.TestMaxUserStorageBytes,
+				&tg.ChannelsEditPhotoRequest{Channel: api.InputChannel(creator.ID, channel.ID), Photo: uploadedGroupPhoto(uploadB, bodyB)})
+			if err != nil {
+				t.Fatalf("select photo B before revocation: %v", err)
+			}
+			_, photoB := channelAvatarEditFromResult(t, resultB)
+			assertChannelAvatarHasMDerivative(t, photoA, "historical photo A")
+			assertChannelAvatarHasMDerivative(t, photoB, "current photo B")
+			assertChannelAvatarFileBytes(t, s, blobs, member.ID,
+				&tg.InputPhotoFileLocation{ID: photoA.ID, AccessHash: photoA.AccessHash, ThumbSize: "m"}, seededPhotoM, "historical photo A derivative")
+			assertChannelAvatarFileBytes(t, s, blobs, member.ID,
+				&tg.InputPhotoFileLocation{ID: photoB.ID, AccessHash: photoB.AccessHash, ThumbSize: "m"}, seededPhotoM, "current photo B derivative")
+			assertChannelAvatarFileBytes(t, s, blobs, member.ID,
+				&tg.InputPeerPhotoFileLocation{Peer: api.InputPeerChannel(member.ID, channel.ID), PhotoID: photoB.ID, Big: false}, seededPhotoM, "current peer small photo B")
 
 			entered, release := make(chan struct{}), make(chan struct{})
 			released := false
@@ -941,15 +983,15 @@ func TestChannelPhotoSnapshotAndDownloadsAfterMemberRevocation(t *testing.T) {
 			if err := revoke.apply(ctx, s, channel.ID, creator.ID, member.ID); err != nil {
 				t.Fatalf("revoke member during photo hydration: %v", err)
 			}
-			bodyB := jpegPhotoPayload(t, 480, 640)
-			const uploadB = int64(228962)
-			saveParts(t, s, creator.ID, uploadB, bodyB)
-			resultB, err := api.EditChannelPhotoForTest(s, creator.ID, blobs, api.TestMaxUserStorageBytes,
-				&tg.ChannelsEditPhotoRequest{Channel: api.InputChannel(creator.ID, channel.ID), Photo: uploadedGroupPhoto(uploadB, bodyB)})
+			bodyC := jpegPhotoPayload(t, 640, 640)
+			const uploadC = int64(228963)
+			saveParts(t, s, creator.ID, uploadC, bodyC)
+			resultC, err := api.EditChannelPhotoForTest(s, creator.ID, blobs, api.TestMaxUserStorageBytes,
+				&tg.ChannelsEditPhotoRequest{Channel: api.InputChannel(creator.ID, channel.ID), Photo: uploadedGroupPhoto(uploadC, bodyC)})
 			if err != nil {
-				t.Fatalf("select photo B after revocation: %v", err)
+				t.Fatalf("select photo C after revocation: %v", err)
 			}
-			_, photoB := channelAvatarEditFromResult(t, resultB)
+			_, photoC := channelAvatarEditFromResult(t, resultC)
 
 			close(release)
 			released = true
@@ -966,19 +1008,24 @@ func TestChannelPhotoSnapshotAndDownloadsAfterMemberRevocation(t *testing.T) {
 			if !ok {
 				t.Fatalf("in-flight full-channel response = %T, want *tg.MessagesChatFull", result.response)
 			}
-			assertChannelAvatarChatPhoto(t, "in-flight full-channel chat", fullChatChannel(t, response).Photo, photoA.ID)
-			assertChannelAvatarPhoto(t, "in-flight full-channel photo", fullChannelInfo(t, response).ChatPhoto, photoA.ID)
+			assertChannelAvatarChatPhoto(t, "in-flight full-channel chat", fullChatChannel(t, response).Photo, photoB.ID)
+			assertChannelAvatarPhoto(t, "in-flight full-channel photo", fullChannelInfo(t, response).ChatPhoto, photoB.ID)
 
 			for _, tc := range []struct {
 				name     string
 				location tg.InputFileLocationClass
 			}{
-				{name: "historical original", location: &tg.InputPhotoFileLocation{ID: photoA.ID, AccessHash: photoA.AccessHash, ThumbSize: "x"}},
-				{name: "historical derivative", location: &tg.InputPhotoFileLocation{ID: photoA.ID, AccessHash: photoA.AccessHash, ThumbSize: "m"}},
-				{name: "current original", location: &tg.InputPhotoFileLocation{ID: photoB.ID, AccessHash: photoB.AccessHash, ThumbSize: "x"}},
-				{name: "current derivative", location: &tg.InputPhotoFileLocation{ID: photoB.ID, AccessHash: photoB.AccessHash, ThumbSize: "m"}},
+				{name: "historical A original", location: &tg.InputPhotoFileLocation{ID: photoA.ID, AccessHash: photoA.AccessHash, ThumbSize: "x"}},
+				{name: "historical A derivative", location: &tg.InputPhotoFileLocation{ID: photoA.ID, AccessHash: photoA.AccessHash, ThumbSize: "m"}},
+				{name: "historical B original", location: &tg.InputPhotoFileLocation{ID: photoB.ID, AccessHash: photoB.AccessHash, ThumbSize: "x"}},
+				{name: "historical B derivative", location: &tg.InputPhotoFileLocation{ID: photoB.ID, AccessHash: photoB.AccessHash, ThumbSize: "m"}},
+				{name: "current C original", location: &tg.InputPhotoFileLocation{ID: photoC.ID, AccessHash: photoC.AccessHash, ThumbSize: "x"}},
+				{name: "current C derivative", location: &tg.InputPhotoFileLocation{ID: photoC.ID, AccessHash: photoC.AccessHash, ThumbSize: "m"}},
 				{name: "historical peer photo", location: &tg.InputPeerPhotoFileLocation{Peer: api.InputPeerChannel(member.ID, channel.ID), PhotoID: photoA.ID, Big: true}},
-				{name: "current peer photo", location: &tg.InputPeerPhotoFileLocation{Peer: api.InputPeerChannel(member.ID, channel.ID), PhotoID: photoB.ID, Big: true}},
+				{name: "historical peer small photo", location: &tg.InputPeerPhotoFileLocation{Peer: api.InputPeerChannel(member.ID, channel.ID), PhotoID: photoB.ID, Big: false}},
+				{name: "historical peer big photo", location: &tg.InputPeerPhotoFileLocation{Peer: api.InputPeerChannel(member.ID, channel.ID), PhotoID: photoB.ID, Big: true}},
+				{name: "current peer small photo", location: &tg.InputPeerPhotoFileLocation{Peer: api.InputPeerChannel(member.ID, channel.ID), PhotoID: photoC.ID, Big: false}},
+				{name: "current peer big photo", location: &tg.InputPeerPhotoFileLocation{Peer: api.InputPeerChannel(member.ID, channel.ID), PhotoID: photoC.ID, Big: true}},
 			} {
 				if _, err := api.GetFileForTest(s, member.ID, blobs, &tg.UploadGetFileRequest{Location: tc.location, Limit: 1 << 20}); rpcMessage(t, err) != "LOCATION_INVALID" {
 					t.Errorf("revoked member %s download = %v, want LOCATION_INVALID", tc.name, err)
