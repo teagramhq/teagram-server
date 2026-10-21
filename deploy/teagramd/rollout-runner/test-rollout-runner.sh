@@ -2682,7 +2682,8 @@ sed -i 's/^TG_REGISTRATION=open$/TG_REGISTRATION=unknown/' "$checkout/.env"
 assert_target_local_rejected_before_backup env-value-change-invalid-value \
   'TG_REGISTRATION may change only between closed and open'
 
-prepare_env_addition_fixture env-addition-success TG_NEW_FLAG '' 'TG_NEW_FLAG=on' TG_NEW_FLAG=on
+prepare_env_addition_fixture env-addition-success TG_TURNSTILE_SIGNIN_ENABLED '' \
+  'TG_TURNSTILE_SIGNIN_ENABLED=true' TG_TURNSTILE_SIGNIN_ENABLED=true
 root=$(cat "$TMP/env-addition-success-root-path")
 checkout=$(cat "$TMP/env-addition-success-checkout-path")
 status=$(run_fixture env-addition-success built 0 '' 2 '' '' apply "$APPLY_TARGET_SHA")
@@ -2690,10 +2691,10 @@ previous_env_sha=$(sha256sum "$TMP/env-addition-success-previous.env" | awk '{pr
 current_env_sha=$(sha256sum "$checkout/.env" | awk '{print $1}')
 if [ "$status" = 0 ] && grep -q "rollout=verified sha=$APPLY_TARGET_SHA" "$TMP/env-addition-success.stdout" && \
    [ "$previous_env_sha" != "$current_env_sha" ] && \
-   grep -qx "recorded_env_sha256=$previous_env_sha recorded_from=record env_sha256=$current_env_sha added=TG_NEW_FLAG" "$root.baseline/env-baseline.txt" && \
+   grep -qx "recorded_env_sha256=$previous_env_sha recorded_from=record env_sha256=$current_env_sha added=TG_TURNSTILE_SIGNIN_ENABLED" "$root.baseline/env-baseline.txt" && \
    grep -qx "env_sha256=$current_env_sha source_sha=$APPLY_TARGET_SHA" "$checkout/.state/rollout-env" && \
    [ "$(jq -r '.container_env_added' "$root.baseline/baseline.snapshot.json")" = none ] && \
-   [ "$(jq -r '.container_env_added' "$root.target/target.snapshot.json")" = TG_NEW_FLAG ] && \
+   [ "$(jq -r '.container_env_added' "$root.target/target.snapshot.json")" = TG_TURNSTILE_SIGNIN_ENABLED ] && \
    grep -q $'\tcontainer_env_sha256\t.*\tpass' "$root.target/target-comparisons.tsv"; then
   pass 'named .env addition deploys and records the previous and new .env digests'
 else

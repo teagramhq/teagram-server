@@ -6,6 +6,21 @@ the existing bootstrap. Credential values live in `.env` (mode 0600); the app
 key is written to `.secrets/teagramd-blob-secret-key` (mode 0444 in a
 mode-0700 directory). Never copy these files off the deployment or commit them.
 
+The optional public auth Turnstile secret is also mounted as a file. Because
+local Compose file secrets preserve the source file's permissions, stage the
+existing root-only credential under `.secrets/` with mode 0444 inside that
+mode-0700 directory, then set `TEAGRAM_TURNSTILE_SECRET_KEY_FILE` in the
+protected `.env` to that path. For example, from `/opt/teagram`:
+
+```sh
+install -d -o root -g root -m 0700 .secrets
+install -o root -g root -m 0444 /root/turnstile-teagram-web.secret .secrets/teagramd-turnstile
+```
+
+The application receives only `/run/secrets/teagramd-turnstile`; the source
+path and secret value are not added to its environment. Leave the host variable
+unset when Turnstile is not configured. The sign-in gate defaults off.
+
 Do not run `deploy/bootstrap-rustfs-secrets.sh`, add RustFS keys, or change the
 serving backend before the MAIN-1332 cutover. The server reads the root-owned
 durable authority mounted at `/run/teagramd/blob-mode`; starting the default

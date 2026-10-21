@@ -1968,6 +1968,29 @@ jobs:
             and (.secrets.teagramd_blob_secret_key.file | endswith("/.secrets/teagramd-blob-secret-key"))
           ' "$RUNNER_TEMP/teagram-server-compose.json"
 
+          env -u TEAGRAM_TURNSTILE_SITE_KEY -u TEAGRAM_TURNSTILE_SECRET_KEY_FILE \
+            -u TG_TURNSTILE_SIGNIN_ENABLED docker compose config --format json \
+            >"$RUNNER_TEMP/teagram-server-compose-turnstile-default.json"
+          jq -e '
+            (.services.teagramd.environment.TG_TURNSTILE_SITE_KEY == "")
+            and (.services.teagramd.environment.TG_TURNSTILE_SECRET_KEY_FILE == "")
+            and (.services.teagramd.environment.TG_TURNSTILE_SIGNIN_ENABLED == "false")
+            and any(.services.teagramd.secrets[]; .target == "teagramd-turnstile")
+            and (.secrets.teagramd_turnstile.file == "/dev/null")
+          ' "$RUNNER_TEMP/teagram-server-compose-turnstile-default.json"
+
+          env TEAGRAM_TURNSTILE_SITE_KEY=turnstile-site-key \
+            TEAGRAM_TURNSTILE_SECRET_KEY_FILE="$PWD/.secrets/teagramd-blob-secret-key" \
+            TG_TURNSTILE_SIGNIN_ENABLED=true docker compose config --format json \
+            >"$RUNNER_TEMP/teagram-server-compose-turnstile-enabled.json"
+          jq -e --arg secret_file "$PWD/.secrets/teagramd-blob-secret-key" '
+            (.services.teagramd.environment.TG_TURNSTILE_SITE_KEY == "turnstile-site-key")
+            and (.services.teagramd.environment.TG_TURNSTILE_SECRET_KEY_FILE == "/run/secrets/teagramd-turnstile")
+            and (.services.teagramd.environment.TG_TURNSTILE_SIGNIN_ENABLED == "true")
+            and any(.services.teagramd.secrets[]; .target == "teagramd-turnstile")
+            and (.secrets.teagramd_turnstile.file == $secret_file)
+          ' "$RUNNER_TEMP/teagram-server-compose-turnstile-enabled.json"
+
           env -u TEAGRAMD_SOURCE_REVISION docker compose --profile migration config --format json \
             >"$RUNNER_TEMP/teagram-server-compose-no-revision.json"
           jq -e '
