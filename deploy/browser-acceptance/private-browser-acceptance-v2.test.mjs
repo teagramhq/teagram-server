@@ -1125,7 +1125,7 @@ async function proveSharedWorkerWss(t, {socketUrl, pageSocket = false, childSock
   const progress = createAcceptanceProgress({sourceCommit});
   try {
     const result = await proveWss(contextInfo, {url: `https://${targetHost}/private/`}, {endpoint}, progress, tracker);
-    return {result, log, progress, browserSession};
+    return {result, log, progress, browserSession, wssAudit: contextInfo.wssAudit};
   } catch (error) {
     return {code: error.code, browserSession, relatedSession};
   }
@@ -1189,14 +1189,14 @@ test("preflight WSS proof fails closed for worker sockets elsewhere, silent work
 });
 
 // teagram-web opens one client socket per account slot on an unauthenticated load.
-const WSS_CONNECTION_CEILING = 4;
+const WSS_ACCOUNT_SLOT_CEILING = 4;
 
 function workerSockets(count, overrides = {}) {
   return Array.from({length: count}, (_, index) => ({url: `wss://${targetHost}/apiws`, ...overrides[index]}));
 }
 
 test("preflight WSS proof accepts every count from one through the client's socket ceiling", async (t) => {
-  for (let count = 1; count <= WSS_CONNECTION_CEILING; count += 1) {
+  for (let count = 1; count <= WSS_ACCOUNT_SLOT_CEILING; count += 1) {
     await t.test(`${count} worker sockets`, async (t) => {
       const {result} = await proveSharedWorkerWss(t, {workerSockets: workerSockets(count)});
       assert.deepEqual(result, {responseStatus: 200, connectionCount: count, status101: true});
@@ -1206,13 +1206,13 @@ test("preflight WSS proof accepts every count from one through the client's sock
 
 test("preflight WSS proof fails closed above the ceiling and on any bad connection at the ceiling", async (t) => {
   const cases = {
-    "one more than the ceiling": {workerSockets: workerSockets(WSS_CONNECTION_CEILING + 1)},
-    "a non-matching endpoint": {workerSockets: workerSockets(WSS_CONNECTION_CEILING, {3: {url: `wss://${targetHost}/apiws-other`}})},
-    "a non-101 status": {workerSockets: workerSockets(WSS_CONNECTION_CEILING, {2: {statuses: [503]}})},
-    "a duplicate handshake": {workerSockets: workerSockets(WSS_CONNECTION_CEILING, {1: {statuses: [101, 101]}})},
-    "a missing handshake": {workerSockets: workerSockets(WSS_CONNECTION_CEILING, {0: {statuses: []}})},
-    "an unobservable worker": {workerSockets: workerSockets(WSS_CONNECTION_CEILING), scriptLoaded: "before"},
-    "a pending worker": {workerSockets: workerSockets(WSS_CONNECTION_CEILING), detach: "unanswered", pageSocket: true},
+    "one more than the account-slot ceiling": {workerSockets: workerSockets(WSS_ACCOUNT_SLOT_CEILING + 1)},
+    "a non-matching endpoint": {workerSockets: workerSockets(WSS_ACCOUNT_SLOT_CEILING, {3: {url: `wss://${targetHost}/apiws-other`}})},
+    "a non-101 status": {workerSockets: workerSockets(WSS_ACCOUNT_SLOT_CEILING, {2: {statuses: [503]}})},
+    "a duplicate handshake": {workerSockets: workerSockets(WSS_ACCOUNT_SLOT_CEILING, {1: {statuses: [101, 101]}})},
+    "a missing handshake": {workerSockets: workerSockets(WSS_ACCOUNT_SLOT_CEILING, {0: {statuses: []}})},
+    "an unobservable worker": {workerSockets: workerSockets(WSS_ACCOUNT_SLOT_CEILING), scriptLoaded: "before"},
+    "a pending worker": {workerSockets: workerSockets(WSS_ACCOUNT_SLOT_CEILING), detach: "unanswered", pageSocket: true},
   };
   for (const [name, options] of Object.entries(cases)) {
     await t.test(name, async (t) => {
@@ -1222,27 +1222,27 @@ test("preflight WSS proof fails closed above the ceiling and on any bad connecti
   }
 });
 
-test("acceptance reports a successful sign-in over the client's socket ceiling", async () => {
+test("acceptance reports a successful sign-in with all four account slots", async () => {
   const fixture = createDependencies(undefined, true);
   fixture.dependencies.proveWss = async (contextInfo, _release, _manifest, progress) => {
     fixture.events.push("wss-101");
-    for (let index = 0; index < WSS_CONNECTION_CEILING; index += 1) progress.observeWssConnection();
+    for (let index = 0; index < WSS_ACCOUNT_SLOT_CEILING; index += 1) progress.observeWssConnection();
     progress.observeWssHandshake(101);
     contextInfo.wssAudit = {validate() {}};
-    return {responseStatus: 200, connectionCount: WSS_CONNECTION_CEILING, status101: true};
+    return {responseStatus: 200, connectionCount: WSS_ACCOUNT_SLOT_CEILING, status101: true};
   };
   const result = await executeMode({mode: "acceptance", releaseRecord: "fixture"}, fixture.dependencies);
 
   assert.equal(result.exitCode, 0);
   assert.equal(JSON.parse(result.output).ok, true);
-  assert.equal(JSON.parse(result.output).wssConnections, WSS_CONNECTION_CEILING);
+  assert.equal(JSON.parse(result.output).wssConnections, WSS_ACCOUNT_SLOT_CEILING);
 });
 
-test("a socket above the ceiling opened during logout makes the run unsuccessful", async (t) => {
-  const {result, progress, browserSession} = await proveSharedWorkerWss(t, {
-    workerSockets: workerSockets(WSS_CONNECTION_CEILING),
+test("one logout reconnect after the four account-slot sockets is accepted", async (t) => {
+  const {result, progress, browserSession, wssAudit} = await proveSharedWorkerWss(t, {
+    workerSockets: workerSockets(4),
   });
-  assert.equal(result.connectionCount, WSS_CONNECTION_CEILING);
+  assert.equal(result.connectionCount, 4);
   for (const event of ["req-dh-params", "set-client-dh", "init-connection", "password-challenge", "password-check"]) {
     assert.equal(progress.observeClientEvent(event), true);
   }
@@ -1254,11 +1254,77 @@ test("a socket above the ceiling opened during logout makes the run unsuccessful
       method: "Network.webSocketCreated",
       params: {requestId: "worker-socket-logout", url: `wss://${targetHost}/apiws`},
     });
+    browserSession.workerMessage("observer-worker", {
+      method: "Network.webSocketHandshakeResponseReceived",
+      params: {requestId: "worker-socket-logout", response: {status: 101}},
+    });
     return null;
   });
 
   assert.equal(output.logout, "ok");
-  assert.equal(output.wssConnections, WSS_CONNECTION_CEILING + 1);
+  assert.equal(output.wssConnections, 5);
+  assert.equal(output.ok, true);
+  assert.doesNotThrow(() => wssAudit.validateAfterLogout());
+});
+
+test("a logout reconnect must use the validated endpoint and may be observed before its handshake", async (t) => {
+  for (const scenario of [
+    {name: "matching opening without a response", url: `wss://${targetHost}/apiws`, status: null, valid: true},
+    {name: "a different endpoint", url: `wss://${targetHost}/apiws-other`, status: 101, valid: false},
+    {name: "a rejected handshake", url: `wss://${targetHost}/apiws`, status: 503, valid: false},
+  ]) {
+    await t.test(scenario.name, async (t) => {
+      const {progress, browserSession, wssAudit} = await proveSharedWorkerWss(t, {
+        workerSockets: workerSockets(4),
+      });
+      for (const event of ["req-dh-params", "set-client-dh", "init-connection", "password-challenge", "password-check"]) {
+        assert.equal(progress.observeClientEvent(event), true);
+      }
+      assert.equal(progress.markSignedIn(), true);
+
+      await progress.finish(async () => {
+        browserSession.workerMessage("observer-worker", {
+          method: "Network.webSocketCreated",
+          params: {requestId: "worker-socket-logout", url: scenario.url},
+        });
+        if (scenario.status !== null) {
+          browserSession.workerMessage("observer-worker", {
+            method: "Network.webSocketHandshakeResponseReceived",
+            params: {requestId: "worker-socket-logout", response: {status: scenario.status}},
+          });
+        }
+        return null;
+      });
+
+      if (scenario.valid) {
+        assert.doesNotThrow(() => wssAudit.validateAfterLogout());
+      } else {
+        assert.throws(() => wssAudit.validateAfterLogout(), {code: "websocket-not-ready"});
+      }
+    });
+  }
+});
+
+test("a fifth socket before logout keeps the browser acceptance result failed", async (t) => {
+  const {progress, browserSession} = await proveSharedWorkerWss(t, {
+    workerSockets: workerSockets(4),
+  });
+  for (const event of ["req-dh-params", "set-client-dh", "init-connection", "password-challenge", "password-check"]) {
+    assert.equal(progress.observeClientEvent(event), true);
+  }
+  assert.equal(progress.markSignedIn(), true);
+  browserSession.workerMessage("observer-worker", {
+    method: "Network.webSocketCreated",
+    params: {requestId: "worker-socket-before-logout", url: `wss://${targetHost}/apiws`},
+  });
+  browserSession.workerMessage("observer-worker", {
+    method: "Network.webSocketHandshakeResponseReceived",
+    params: {requestId: "worker-socket-before-logout", response: {status: 101}},
+  });
+
+  const output = await progress.finish(async () => null);
+  assert.equal(output.logout, "ok");
+  assert.equal(output.wssConnections, 5);
   assert.equal(output.ok, false);
 });
 

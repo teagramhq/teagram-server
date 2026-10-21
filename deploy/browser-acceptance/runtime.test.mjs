@@ -69,7 +69,7 @@ test("readiness diagnostics distinguish missing, mismatched, and rejected handsh
   createConnection(mismatch, "query", `${expectedEndpoint}?canary=private-value`);
   handshake(mismatch, "query", 101);
   assert.deepEqual(mismatch.diagnostic(), {
-    wss_diagnostic: "target-mismatch",
+    wss_diagnostic: "socket-1-target-mismatch",
     wss_targets: 1,
     wss_handshakes: 1,
     wss_target_match: false,
@@ -80,7 +80,7 @@ test("readiness diagnostics distinguish missing, mismatched, and rejected handsh
   const noHandshake = observation();
   createConnection(noHandshake, "pending");
   assert.deepEqual(noHandshake.diagnostic(), {
-    wss_diagnostic: "no-handshake",
+    wss_diagnostic: "socket-1-no-handshake",
     wss_targets: 1,
     wss_handshakes: 0,
     wss_target_match: true,
@@ -91,7 +91,7 @@ test("readiness diagnostics distinguish missing, mismatched, and rejected handsh
   createConnection(rejected, "rejected");
   handshake(rejected, "rejected", 503);
   assert.deepEqual(rejected.diagnostic(), {
-    wss_diagnostic: "handshake-not-101",
+    wss_diagnostic: "socket-1-handshake-not-101",
     wss_targets: 1,
     wss_handshakes: 1,
     wss_target_match: true,
@@ -99,34 +99,82 @@ test("readiness diagnostics distinguish missing, mismatched, and rejected handsh
   });
 });
 
-test("ambiguous and malformed CDP observations fail closed", () => {
+test("readiness diagnostics identify the failing socket in a mixed handshake observation", () => {
+  const mixed = observation();
+  createConnection(mixed, "first-private-id");
+  handshake(mixed, "first-private-id", 101);
+  createConnection(mixed, "second-private-id");
+  handshake(mixed, "second-private-id", 503);
+
+  assert.deepEqual(mixed.diagnostic(), {
+    wss_diagnostic: "socket-2-handshake-not-101",
+    wss_targets: 2,
+    wss_handshakes: 2,
+    wss_target_match: true,
+    wss_status: 503,
+  });
+  assert.doesNotMatch(JSON.stringify(mixed.diagnostic()), /first-private-id|second-private-id/u);
+});
+
+test("a later target mismatch is identified while an earlier matching socket is pending", () => {
+  const mixed = observation();
+  createConnection(mixed, "first-private-id");
+  createConnection(mixed, "second-private-id", `${expectedEndpoint}?private-value`);
+
+  assert.equal(mixed.isSettled(), true);
+  assert.deepEqual(mixed.diagnostic(), {
+    wss_diagnostic: "socket-2-target-mismatch",
+    wss_targets: 2,
+    wss_handshakes: 0,
+    wss_target_match: false,
+    wss_status: 0,
+  });
+});
+
+test("a later rejected handshake is identified while an earlier matching socket is pending", () => {
+  const mixed = observation();
+  createConnection(mixed, "first-private-id");
+  createConnection(mixed, "second-private-id");
+  handshake(mixed, "second-private-id", 503);
+
+  assert.equal(mixed.isSettled(), true);
+  assert.deepEqual(mixed.diagnostic(), {
+    wss_diagnostic: "socket-2-handshake-not-101",
+    wss_targets: 2,
+    wss_handshakes: 1,
+    wss_target_match: true,
+    wss_status: 503,
+  });
+});
+
+test("malformed CDP observations fail closed with a bounded reason", () => {
   const orphan = observation();
   handshake(orphan, "orphan", 101);
-  assert.equal(orphan.diagnostic().wss_diagnostic, "ambiguous");
+  assert.equal(orphan.diagnostic().wss_diagnostic, "untracked-handshake");
 
   const duplicate = observation();
   createConnection(duplicate, "same");
   createConnection(duplicate, "same");
-  assert.equal(duplicate.diagnostic().wss_diagnostic, "ambiguous");
+  assert.equal(duplicate.diagnostic().wss_diagnostic, "observation-malformed");
 
   const badRequestId = observation();
   createConnection(badRequestId, "bad/request-id");
-  assert.equal(badRequestId.diagnostic().wss_diagnostic, "ambiguous");
+  assert.equal(badRequestId.diagnostic().wss_diagnostic, "observation-malformed");
 
   const invalidUrl = observation();
   invalidUrl.created({ requestId: "bad-url", url: 17 });
-  assert.equal(invalidUrl.diagnostic().wss_diagnostic, "ambiguous");
+  assert.equal(invalidUrl.diagnostic().wss_diagnostic, "observation-malformed");
 
   const invalidParams = observation();
   invalidParams.created([]);
-  assert.equal(invalidParams.diagnostic().wss_diagnostic, "ambiguous");
+  assert.equal(invalidParams.diagnostic().wss_diagnostic, "observation-malformed");
 
   for (const status of [99, 600, "101", 101.5]) {
     const invalidStatus = observation();
     createConnection(invalidStatus, "invalid-status");
     handshake(invalidStatus, "invalid-status", status);
     const diagnostic = invalidStatus.diagnostic();
-    assert.equal(diagnostic.wss_diagnostic, "ambiguous");
+    assert.equal(diagnostic.wss_diagnostic, "observation-malformed");
     assert.equal(diagnostic.wss_handshakes, 0);
   }
 
@@ -134,24 +182,24 @@ test("ambiguous and malformed CDP observations fail closed", () => {
   createConnection(duplicateResponse, "twice");
   handshake(duplicateResponse, "twice", 101);
   handshake(duplicateResponse, "twice", 101);
-  assert.equal(duplicateResponse.diagnostic().wss_diagnostic, "ambiguous");
+  assert.equal(duplicateResponse.diagnostic().wss_diagnostic, "socket-1-duplicate-handshake");
   assert.equal(duplicateResponse.diagnostic().wss_handshakes, 2);
 
   const beforeExpected = createWebSocketObservation();
   createConnection(beforeExpected, "early");
   beforeExpected.setExpectedEndpoint(expectedEndpoint);
-  assert.equal(beforeExpected.diagnostic().wss_diagnostic, "ambiguous");
+  assert.equal(beforeExpected.diagnostic().wss_diagnostic, "observation-malformed");
 
   const afterClose = observation();
   createConnection(afterClose, "closed");
   afterClose.close();
   handshake(afterClose, "closed", 101);
-  assert.equal(afterClose.diagnostic().wss_diagnostic, "no-handshake");
+  assert.equal(afterClose.diagnostic().wss_diagnostic, "socket-1-no-handshake");
   assert.equal(afterClose.diagnostic().wss_handshakes, 0);
 
   const overflow = observation();
   for (let index = 0; index < 9; index += 1) createConnection(overflow, `connection-${index}`);
-  assert.equal(overflow.diagnostic().wss_diagnostic, "ambiguous");
+  assert.equal(overflow.diagnostic().wss_diagnostic, "observation-malformed");
   assert.equal(overflow.diagnostic().wss_targets, 2);
 });
 
@@ -355,7 +403,7 @@ test("worker sockets to another endpoint fail closed", async () => {
     params: { requestId: "worker-1", response: { status: 101 } },
   });
   assert.deepEqual(value.diagnostic(), {
-    wss_diagnostic: "target-mismatch",
+    wss_diagnostic: "socket-1-target-mismatch",
     wss_targets: 1,
     wss_handshakes: 1,
     wss_target_match: false,
@@ -373,19 +421,19 @@ test("worker sockets to another endpoint fail closed", async () => {
     method: "Network.webSocketHandshakeResponseReceived",
     params: { requestId: "worker-1", response: { status: 101 } },
   });
-  assert.equal(mixed.value.diagnostic().wss_diagnostic, "ambiguous");
+  assert.equal(mixed.value.diagnostic().wss_diagnostic, "socket-2-target-mismatch");
 });
 
 test("a worker target that cannot be observed fails closed", async () => {
   const attachFailure = await sharedWorkerObservation({ attachFails: true });
-  assert.equal(attachFailure.value.diagnostic().wss_diagnostic, "ambiguous");
+  assert.equal(attachFailure.value.diagnostic().wss_diagnostic, "worker-unobservable");
   assert.deepEqual(attachFailure.browser.sent.at(-1), {
     method: "Target.detachFromTarget",
     params: { sessionId: "paused-worker" },
   });
 
   const enableFailure = await sharedWorkerObservation({ enableFails: true });
-  assert.equal(enableFailure.value.diagnostic().wss_diagnostic, "ambiguous");
+  assert.equal(enableFailure.value.diagnostic().wss_diagnostic, "worker-unobservable");
   assert.equal(enableFailure.browser.sent.some((entry) => entry.method === "Runtime.runIfWaitingForDebugger"), false);
 
   const unanswered = await sharedWorkerObservation({ replies: false });
@@ -393,18 +441,18 @@ test("a worker target that cannot be observed fails closed", async () => {
   handshake(unanswered.value, "page-1", 101);
   assert.equal(unanswered.value.isSettled(), false);
   unanswered.value.close();
-  assert.equal(unanswered.value.diagnostic().wss_diagnostic, "ambiguous");
+  assert.equal(unanswered.value.diagnostic().wss_diagnostic, "worker-pending");
 
   const malformed = await sharedWorkerObservation();
   malformed.browser.emit("Target.receivedMessageFromTarget", { sessionId: "observer-worker", message: "{" });
-  assert.equal(malformed.value.diagnostic().wss_diagnostic, "ambiguous");
+  assert.equal(malformed.value.diagnostic().wss_diagnostic, "worker-unobservable");
 
   const missingTarget = observation();
   const browser = fakeCdpSession();
   await registerWorkerWebSocketObservation(fakeBrowser(browser, fakeCdpSession()), fakeCdpSession(), missingTarget);
   browser.emit("Target.attachedToTarget", { sessionId: "paused", targetInfo: {} });
   await settle();
-  assert.equal(missingTarget.diagnostic().wss_diagnostic, "ambiguous");
+  assert.equal(missingTarget.diagnostic().wss_diagnostic, "worker-unobservable");
 });
 
 test("a worker stays pending until its hold is released", async () => {
@@ -414,7 +462,8 @@ test("a worker stays pending until its hold is released", async () => {
     handshake(value, "page-1", 101);
     assert.equal(value.isSettled(), detach === "reject", detach);
     value.close();
-    assert.equal(value.diagnostic().wss_diagnostic, "ambiguous", detach);
+    assert.equal(value.diagnostic().wss_diagnostic,
+      detach === "reject" ? "worker-unobservable" : "worker-pending", detach);
   }
 
   const released = await sharedWorkerObservation();
@@ -442,7 +491,7 @@ test("a child a running SharedWorker started before the watch began fails closed
   await settle();
   assert.equal(browser.sent.some((entry) => entry.params?.targetId === "child"), true);
   value.close();
-  assert.equal(value.diagnostic().wss_diagnostic, "ambiguous");
+  assert.equal(value.diagnostic().wss_diagnostic, "worker-unobservable");
 });
 
 test("a worker whose script ran before observation began fails closed", async () => {
@@ -451,7 +500,8 @@ test("a worker whose script ran before observation began fails closed", async ()
     createConnection(value, "page-1");
     handshake(value, "page-1", 101);
     value.close();
-    assert.equal(value.diagnostic().wss_diagnostic, "ambiguous", scriptLoaded);
+    assert.equal(value.diagnostic().wss_diagnostic,
+      scriptLoaded === "before" ? "worker-unobservable" : "worker-pending", scriptLoaded);
   }
 });
 
@@ -485,7 +535,7 @@ test("workers started by a worker are held and observed before the parent runs",
     method: "Network.webSocketHandshakeResponseReceived",
     params: { requestId: "child-1", response: { status: 101 } },
   });
-  assert.equal(value.diagnostic().wss_diagnostic, "ambiguous");
+  assert.equal(value.diagnostic().wss_diagnostic, "socket-2-target-mismatch");
 
   const relatedFailure = observation();
   const failingRelated = fakeCdpSession();
@@ -501,7 +551,7 @@ test("workers started by a worker are held and observed before the parent runs",
     waitingForDebugger: true,
   });
   await settle();
-  assert.equal(relatedFailure.diagnostic().wss_diagnostic, "ambiguous");
+  assert.equal(relatedFailure.diagnostic().wss_diagnostic, "worker-unobservable");
   assert.equal(parentBrowser.sent.some((entry) => entry.method === "Runtime.runIfWaitingForDebugger"), false);
 });
 
@@ -519,17 +569,17 @@ test("a worker that opens no socket in the window stays not ready", async () => 
 
 test("runtime error emission revalidates the exact diagnostic consistency table", () => {
   const valid = {
-    wss_diagnostic: "handshake-not-101",
+    wss_diagnostic: "socket-1-handshake-not-101",
     wss_targets: 1,
     wss_handshakes: 1,
     wss_target_match: true,
     wss_status: 503,
   };
   assert.equal(JSON.stringify(runtimeErrorOutput({ code: "websocket-not-ready", wssDiagnostic: valid })),
-    '{"status":"error","code":"websocket-not-ready","wss_diagnostic":"handshake-not-101","wss_targets":1,"wss_handshakes":1,"wss_target_match":true,"wss_status":503}');
+    '{"status":"error","code":"websocket-not-ready","wss_diagnostic":"socket-1-handshake-not-101","wss_targets":1,"wss_handshakes":1,"wss_target_match":true,"wss_status":503}');
   assert.deepEqual(runtimeErrorOutput({
     code: "websocket-not-ready",
-    wssDiagnostic: { ...valid, wss_target_match: false },
+    wssDiagnostic: { ...valid, wss_status: 101 },
   }), { status: "error", code: "websocket-not-ready" });
   assert.deepEqual(runtimeErrorOutput({
     code: "websocket-not-ready",

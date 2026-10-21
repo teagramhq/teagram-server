@@ -1085,6 +1085,10 @@ test("the QA runner mount resolves Playwright from the image package tree", asyn
   const marker = join(root, "playwright-loaded");
   const stub = join(root, packageDirectory, "node_modules", "playwright");
   await mkdir(stub, { recursive: true });
+  await copyFile(new URL("./connect-observer.mjs", import.meta.url),
+    join(root, packageDirectory, "connect-observer.mjs"));
+  await copyFile(new URL("./acceptance-result.mjs", import.meta.url),
+    join(root, packageDirectory, "acceptance-result.mjs"));
   await writeFile(join(stub, "package.json"), '{"name":"playwright","type":"module","exports":"./index.mjs"}');
   await writeFile(join(stub, "index.mjs"),
     `import { writeFileSync } from "node:fs";\nwriteFileSync(${JSON.stringify(marker)}, "");\nexport const chromium = {};\n`);

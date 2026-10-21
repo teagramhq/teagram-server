@@ -155,17 +155,19 @@ The wrapper rejects extra or malformed output and maps failures to
 all other modes and errors keep the two-field form:
 
 ```json
-{"status":"error","code":"websocket-not-ready","wss_diagnostic":"handshake-not-101","wss_targets":1,"wss_handshakes":1,"wss_target_match":true,"wss_status":503}
+{"status":"error","code":"websocket-not-ready","wss_diagnostic":"socket-1-handshake-not-101","wss_targets":1,"wss_handshakes":1,"wss_target_match":true,"wss_status":503}
 ```
 
-The diagnostic enum is `ambiguous`, `no-target`, `target-mismatch`,
-`no-handshake`, or `handshake-not-101`. Counts are clamped to `0`, `1`, or
-`2` (two or more). Target comparison is a boolean against the validated full
-endpoint; observed URL text is discarded. The observation starts at app
-`DOMContentLoaded`, waits at least one second, then stops when all observed
-connections have one handshake response or the observations are ambiguous,
-with a ten-second total limit. Readiness uses only the created and handshake
-response events; it does not infer a rejection status from server output.
+The diagnostic identifies a safe fixed condition such as `socket-1-no-handshake`,
+`socket-2-handshake-not-101`, `worker-unobservable`, or `untracked-handshake`.
+Socket numbers are one-based creation order, not CDP IDs. Counts are clamped to
+`0`, `1`, or `2` (two or more). Target comparison is a boolean against the
+validated full endpoint; observed URL text is discarded. The observation starts
+at app `DOMContentLoaded`, waits at least one second, then stops when all
+observed connections have one handshake response or a failing socket/worker
+state is identified, with a ten-second total limit. Readiness uses only the
+created and handshake response events; it does not infer a rejection status
+from server output.
 Those events come from the page and from every worker it starts: shared and
 service workers are auto-attached at the browser target, dedicated workers at
 the page target, and the workers any worker starts, at any depth, before that
@@ -175,15 +177,22 @@ whose script finished loading before its Network domain was enabled is
 unobservable. A worker's descendants are watched before its own session is
 attached, so its script only counts as loaded after both, and children it
 already started are reported when the watch begins. A worker stays pending
-until its hold is released and its script has loaded. A worker that cannot be attached and enabled, or is
-still attaching when the window closes, makes the observation `ambiguous`.
-The QA runner's WSS proof observes the same targets. It accepts one to four
-connections, every one matching the endpoint with exactly one 101 handshake
-response. Four is the web client's ceiling: its MTProto SharedWorker keeps four
-account slots, and on an unauthenticated load each opens one client socket to
-its base DC. A fifth connection fails the proof. `run.sh` and the progress
-helper use the same ceiling. The host probe's CONNECT window caps allowed tunnels
-only at the counter clamp of 100.
+until its hold is released and its script has loaded. A worker that cannot be
+attached and enabled, or is still attaching when the window closes, is
+reported as `worker-unobservable` or `worker-pending`. The QA runner's preflight
+proof accepts up to four connections, each matching the endpoint with exactly
+one 101 response. The web client's SharedWorker keeps four account slots, and
+an unauthenticated page load opens one base-DC socket for each slot. Sign-in and
+chat-list rendering reuse those transports. At the end, `auth.logOut` revokes
+its own auth key; the server evicts that socket after replying, and the still-
+open client slot reconnects once before teardown. The full acceptance lifecycle
+therefore allows five connection openings, but the fifth is valid only during
+logout, must use the validated endpoint, and may have no handshake response if
+teardown interrupts it; any observed response must be a single 101. An extra
+connection during page load, sign-in or chat-list rendering, or a sixth opening
+fails the proof. `run.sh` and the progress helper enforce the same lifecycle
+budget. The host probe's CONNECT window caps allowed tunnels only at the counter
+clamp of 100.
 
 The wrapper suppresses Compose and container stderr. The one-shot lock
 serializes this fixed project; preflight requires at least 2 GiB free under
@@ -264,8 +273,9 @@ closed-connection signals map to `timeout` and `closed`.
 The result is one JSON line with exactly `schemaVersion`, `ok`, `phase`,
 `outcome`, `logout`, `targetHost`, `sourceCommit`, and `wssConnections`.
 Version 2 binds the compiled host and mounted source revision, and clamps the
-WSS count at five. A successful sign-in requires one to four WSS connections
-and waits for its own `auth.logOut` call before teardown. The pinned QA v2
+WSS count at six to represent five observed openings or an overflow. A
+successful sign-in allows four initial account-slot sockets and one reconnect
+during its own `auth.logOut` call before teardown. The pinned QA v2
 script still emits this version 2 shape. Acceptance mode now validates QA v3;
 until the v3 script and pin are installed, a QA v2 line is marked invalid in
 the wrapper result below. This does not change the host probe code or process

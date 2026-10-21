@@ -1,8 +1,9 @@
 import { ALLOWED_HOST } from "./connect-observer.mjs";
 
-// teagram-web opens one client socket per account slot, four in all, on an
-// unauthenticated load. The approved QA runner and run.sh use the same ceiling.
-export const WSS_CONNECTION_CEILING = 4;
+// The web client opens four account-slot sockets on load and reconnects the
+// logged-out slot once before the acceptance context is torn down.
+export const WSS_ACCOUNT_SLOT_CEILING = 4;
+export const WSS_CONNECTION_CEILING = WSS_ACCOUNT_SLOT_CEILING + 1;
 
 const PHASES = new Set([
   "wss-not-opened",
@@ -90,6 +91,8 @@ export function createAcceptanceProgress({ sourceCommit }) {
   let outcome = "other";
   let outcomeIsFinal = false;
   let wssConnections = 0;
+  let unexpectedWssConnection = false;
+  let logoutStarted = false;
   let logout = "not-attempted";
   let finishPromise;
   let finished = false;
@@ -104,7 +107,7 @@ export function createAcceptanceProgress({ sourceCommit }) {
   function makeResult() {
     finished = true;
     const success = phase === "signed-in" && outcome === "ok" && logout === "ok" &&
-      wssConnections >= 1 && wssConnections <= WSS_CONNECTION_CEILING;
+      wssConnections >= 1 && wssConnections <= WSS_CONNECTION_CEILING && !unexpectedWssConnection;
     return {
       schemaVersion: 2,
       ok: success,
@@ -121,6 +124,14 @@ export function createAcceptanceProgress({ sourceCommit }) {
     observeWssConnection() {
       if (finished || (outcomeIsFinal && phase !== "signed-in")) return false;
       wssConnections = Math.min(WSS_CONNECTION_CEILING + 1, wssConnections + 1);
+      if (wssConnections > WSS_ACCOUNT_SLOT_CEILING && !logoutStarted) {
+        unexpectedWssConnection = true;
+        return false;
+      }
+      if (wssConnections > WSS_CONNECTION_CEILING) {
+        unexpectedWssConnection = true;
+        return false;
+      }
       if (phase === "wss-not-opened") phase = "wss-not-101";
       return true;
     },
@@ -164,6 +175,7 @@ export function createAcceptanceProgress({ sourceCommit }) {
           return makeResult();
         }
 
+        logoutStarted = true;
         let timer;
         const timedOut = Symbol("logout-timeout");
         const timeout = new Promise((_, reject) => {

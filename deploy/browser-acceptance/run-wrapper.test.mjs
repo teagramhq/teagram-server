@@ -13,9 +13,9 @@ const busyboxPhaseScript = join(repoRoot, ".github/scripts/run-busybox-phase-che
 const sourceCommit = "c".repeat(40);
 const phaseCommandToken = "e".repeat(64);
 const digest = `sha256:${"d".repeat(64)}`;
-// teagram-web opens one client socket per account slot on an unauthenticated load.
-const WSS_CONNECTION_CEILING = 4;
-const approvedQaDigest = "5de43f8105a783f460d78ab9d8ca028b00fa9e902f275050369ff9eb874d2005";
+// Four account-slot sockets on load plus the logout reconnect.
+const WSS_CONNECTION_CEILING = 5;
+const approvedQaDigest = "7fa033c93bdf521977faf9b485506e50441240a3cc91ecc8f5a52ad9d338aa69";
 const blockedResult = "{\"status\":\"blocked_expected\",\"blocked_telegram_org_attempts\":1,\"telegram_org_upstream_connects\":0,\"payloads_retained\":0}";
 const readyResult = "{\"status\":\"ready\",\"http_status\":200,\"asset_502_count\":0,\"browser_wss_status\":101,\"browser_wss_unique_targets\":1,\"observer_success_hosts\":1,\"observer_target_host\":\"teagram.tailaa4918.ts.net\",\"telegram_org_attempts\":0,\"payloads_retained\":0}";
 const acceptanceResultValue = {
@@ -1466,12 +1466,17 @@ function wssError(diagnostic, targets, handshakes, targetMatch, status) {
 test("readiness wrapper re-emits every valid WSS diagnostic row byte-for-byte", async (t) => {
   const paths = await setup(t);
   const rows = [
-    ["ambiguous", 0, 2, false, 0],
+    ["observation-malformed", 0, 0, false, 0],
+    ["untracked-handshake", 0, 1, false, 0],
+    ["worker-unobservable", 1, 0, false, 0],
+    ["worker-pending", 1, 1, false, 0],
     ["no-target", 0, 0, false, 0],
-    ["target-mismatch", 2, 2, false, 101],
-    ["no-handshake", 1, 0, true, 0],
-    ["handshake-not-101", 1, 1, true, 503],
-    ["handshake-not-101", 2, 2, true, 503],
+    ["socket-2-target-mismatch", 2, 2, false, 101],
+    ["socket-1-no-handshake", 1, 0, true, 0],
+    ["socket-2-no-handshake", 2, 1, true, 0],
+    ["socket-1-handshake-not-101", 1, 1, true, 503],
+    ["socket-2-handshake-not-101", 2, 2, true, 503],
+    ["socket-1-duplicate-handshake", 1, 2, true, 101],
   ];
 
   for (const row of rows) {
@@ -1498,19 +1503,19 @@ test("readiness wrapper rejects malformed, inconsistent, and multiline diagnosti
     valid.replace('"wss_status":0', '"wss_status":600'),
     valid.replace('"wss_status":0', '"wss_status":099'),
     valid.replace('"wss_targets":0', '"wss_targets":3'),
-    wssError("ambiguous", 1, 0, true, 0),
+    wssError("observation-malformed", 1, 0, true, 0),
     wssError("no-target", 1, 0, false, 0),
-    wssError("target-mismatch", 0, 0, false, 0),
-    wssError("target-mismatch", 2, 1, false, 503),
-    wssError("target-mismatch", 1, 1, true, 503),
-    wssError("target-mismatch", 1, 0, false, 101),
-    wssError("no-handshake", 0, 0, true, 0),
-    wssError("no-handshake", 1, 1, true, 0),
-    wssError("no-handshake", 1, 0, false, 0),
-    wssError("handshake-not-101", 0, 0, true, 503),
-    wssError("handshake-not-101", 2, 1, true, 503),
-    wssError("handshake-not-101", 1, 1, false, 503),
-    wssError("handshake-not-101", 1, 1, true, 101),
+    wssError("socket-1-target-mismatch", 0, 0, false, 0),
+    wssError("socket-1-target-mismatch", 1, 1, true, 503),
+    wssError("socket-1-target-mismatch", 1, 0, false, 101),
+    wssError("socket-1-no-handshake", 0, 0, true, 0),
+    wssError("socket-1-no-handshake", 1, 1, true, 0),
+    wssError("socket-1-no-handshake", 1, 0, false, 0),
+    wssError("socket-1-handshake-not-101", 0, 0, true, 503),
+    wssError("socket-1-handshake-not-101", 1, 1, false, 503),
+    wssError("socket-1-handshake-not-101", 1, 1, true, 101),
+    wssError("socket-1-duplicate-handshake", 1, 1, true, 101),
+    wssError("socket-1-duplicate-handshake", 1, 2, true, 0),
     valid.replace('"code":"websocket-not-ready"', '"code":"origin-not-ready"'),
     `${valid}\n${valid}`,
     `${valid}\n`,
@@ -1540,7 +1545,7 @@ test("wrapper does not echo canary URLs, headers, or cookies from malformed runt
   const injected = JSON.stringify({
     status: "error",
     code: "websocket-not-ready",
-    wss_diagnostic: "handshake-not-101",
+    wss_diagnostic: "socket-1-handshake-not-101",
     wss_targets: 1,
     wss_handshakes: 1,
     wss_target_match: true,

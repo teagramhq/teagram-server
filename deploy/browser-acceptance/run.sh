@@ -4,12 +4,12 @@ set +x
 umask 077
 
 readonly TARGET_HOST="teagram.tailaa4918.ts.net"
-readonly APPROVED_QA_SCRIPT_SHA256="5de43f8105a783f460d78ab9d8ca028b00fa9e902f275050369ff9eb874d2005"
+readonly APPROVED_QA_SCRIPT_SHA256="7fa033c93bdf521977faf9b485506e50441240a3cc91ecc8f5a52ad9d338aa69"
 readonly IMAGE_ARM64="mcr.microsoft.com/playwright:v1.61.1-noble@sha256:824f1a789072e648c62541c2cfa4479c4061a290d5c27766d67dc1dcbc19b321"
 readonly IMAGE_AMD64="mcr.microsoft.com/playwright:v1.61.1-noble@sha256:cf0daee9b994042e011bc29f20cdff1a9f682a039b43fcd738f7d8a9d3bcd9d6"
 readonly SERVED_MANIFEST_MAX_BYTES=16384
-# teagram-web opens one client socket per account slot on an unauthenticated load.
-readonly WSS_CONNECTION_CEILING=4
+# Four account-slot sockets on load plus the logout reconnect.
+readonly WSS_CONNECTION_CEILING=5
 readonly PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd -P)"
 readonly COMPOSE=(docker compose --env-file /dev/null --project-directory deploy/browser-acceptance --file deploy/browser-acceptance/compose.yaml --project-name teagram-browser-acceptance)
 
@@ -348,37 +348,40 @@ safe_runtime_error() {
 normalize_wss_diagnostic() {
   local line="$1"
   local diagnostic targets handshakes target_match status
-  local pattern='^\{"status":"error","code":"websocket-not-ready","wss_diagnostic":"(ambiguous|no-target|target-mismatch|no-handshake|handshake-not-101)","wss_targets":([012]),"wss_handshakes":([012]),"wss_target_match":(true|false),"wss_status":(0|[1-5][0-9]{2})\}$'
+  local pattern='^\{"status":"error","code":"websocket-not-ready","wss_diagnostic":"(no-target|observation-malformed|untracked-handshake|worker-unobservable|worker-pending|socket-[1-8]-(target-mismatch|no-handshake|handshake-not-101|duplicate-handshake))","wss_targets":([012]),"wss_handshakes":([012]),"wss_target_match":(true|false),"wss_status":(0|[1-5][0-9]{2})\}$'
   [[ "$line" != *$'\n'* && "$line" =~ $pattern ]] || return 1
   diagnostic="${BASH_REMATCH[1]}"
-  targets="${BASH_REMATCH[2]}"
-  handshakes="${BASH_REMATCH[3]}"
-  target_match="${BASH_REMATCH[4]}"
-  status="${BASH_REMATCH[5]}"
+  targets="${BASH_REMATCH[3]}"
+  handshakes="${BASH_REMATCH[4]}"
+  target_match="${BASH_REMATCH[5]}"
+  status="${BASH_REMATCH[6]}"
 
   case "$diagnostic" in
-    ambiguous)
+    observation-malformed|untracked-handshake|worker-unobservable|worker-pending)
       [[ "$target_match" == false && "$status" == 0 ]] || return 1
       ;;
     no-target)
       [[ "$targets" == 0 && "$handshakes" == 0 && "$target_match" == false && "$status" == 0 ]] || return 1
       ;;
-    target-mismatch)
+    socket-[1-8]-target-mismatch)
       [[ "$targets" == 1 || "$targets" == 2 ]] || return 1
       [[ "$target_match" == false ]] || return 1
-      if [[ "$handshakes" == 0 ]]; then
-        [[ "$status" == 0 ]] || return 1
-      else
-        [[ "$handshakes" == "$targets" && "$status" != 0 ]] || return 1
+      if [[ "$status" != 0 ]]; then [[ "$handshakes" != 0 ]] || return 1; fi
+      ;;
+    socket-[1-8]-no-handshake)
+      [[ ( "$targets" == 1 || "$targets" == 2 ) && "$status" == 0 ]] || return 1
+      if [[ "$targets" == 1 ]]; then
+        [[ "$handshakes" == 0 && "$target_match" == true ]] || return 1
       fi
       ;;
-    no-handshake)
-      [[ ( "$targets" == 1 || "$targets" == 2 ) && "$handshakes" == 0 &&
-        "$target_match" == true && "$status" == 0 ]] || return 1
+    socket-[1-8]-handshake-not-101)
+      [[ ( "$targets" == 1 || "$targets" == 2 ) && "$handshakes" != 0 &&
+        "$status" != 0 && "$status" != 101 ]] || return 1
+      if [[ "$targets" == 1 ]]; then [[ "$target_match" == true ]] || return 1; fi
       ;;
-    handshake-not-101)
-      [[ ( "$targets" == 1 || "$targets" == 2 ) && "$handshakes" == "$targets" &&
-        "$target_match" == true && "$status" != 0 && "$status" != 101 ]] || return 1
+    socket-[1-8]-duplicate-handshake)
+      [[ ( "$targets" == 1 || "$targets" == 2 ) && "$handshakes" == 2 && "$status" != 0 ]] || return 1
+      if [[ "$targets" == 1 ]]; then [[ "$target_match" == true ]] || return 1; fi
       ;;
   esac
 
