@@ -340,6 +340,44 @@ func TestChannelFullInfoOmitsFlooredPinnedID(t *testing.T) {
 	}
 }
 
+func TestChannelFullInfoUsesHistoryFloorForUnreadAndReadMarker(t *testing.T) {
+	t.Parallel()
+	f := newChannelReadFloorFixture(t, "225110", "Floor full info read state")
+	posts := make([]store.ChannelMessage, 0, 7)
+	for i := range 7 {
+		posts = append(posts, f.post(t, "full info unread post", int64(225200+i)))
+	}
+	floor := posts[3].LocalID
+	if floor != 5 || posts[len(posts)-1].LocalID != 8 {
+		t.Fatalf("fixture floor and last post id = %d/%d, want 5/8", floor, posts[len(posts)-1].LocalID)
+	}
+	f.joinAt(t, floor)
+	channelExec(t, context.Background(), f.dsn,
+		`DELETE FROM channel_read_state WHERE channel_id = $1 AND user_id = $2`,
+		f.channel.ID, f.reader.ID,
+	)
+
+	dialog := channelDialogForTest(t, f.s, f.reader.ID, f.channel.ID)
+	if dialog.ReadInboxMaxID != int(floor) || dialog.UnreadCount != 3 {
+		t.Fatalf("dialog read/unread = %d/%d, want %d/3", dialog.ReadInboxMaxID, dialog.UnreadCount, floor)
+	}
+	result, err := api.GetFullChannelForTest(f.s, f.reader.ID, &tg.ChannelsGetFullChannelRequest{
+		Channel: api.InputChannel(f.reader.ID, f.channel.ID),
+	})
+	if err != nil {
+		t.Fatalf("channels.getFullChannel: %v", err)
+	}
+	fullResponse, ok := result.(*tg.MessagesChatFull)
+	if !ok {
+		t.Fatalf("getFullChannel response = %T, want *tg.MessagesChatFull", result)
+	}
+	full := fullChannelInfo(t, fullResponse)
+	if full.ReadInboxMaxID != dialog.ReadInboxMaxID || full.UnreadCount != dialog.UnreadCount {
+		t.Errorf("channelFull read/unread = %d/%d, want dialog values %d/%d",
+			full.ReadInboxMaxID, full.UnreadCount, dialog.ReadInboxMaxID, dialog.UnreadCount)
+	}
+}
+
 func TestChannelUpdatesOmitPinnedIDAtOrBelowHistoryFloor(t *testing.T) {
 	t.Parallel()
 	f := newChannelReadFloorFixture(t, "225108", "Floor pin updates")
