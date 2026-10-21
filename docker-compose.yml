@@ -230,6 +230,12 @@ services:
       # and any explicitly enabled replacement replicas. The default remains
       # the existing single-replica behavior.
       TG_REPLICA_COUNT: ${TG_REPLICA_COUNT:-1}
+      # Public auth Turnstile is optional on this stack. Only the app-facing
+      # site key and mounted-file path enter the container; the host secret
+      # source path stays on the Compose side.
+      TG_TURNSTILE_SITE_KEY: ${TEAGRAM_TURNSTILE_SITE_KEY:-}
+      TG_TURNSTILE_SECRET_KEY_FILE: ${TEAGRAM_TURNSTILE_SECRET_KEY_FILE:+/run/secrets/teagramd-turnstile}
+      TG_TURNSTILE_SIGNIN_ENABLED: ${TG_TURNSTILE_SIGNIN_ENABLED:-false}
       # The ordinary listener trusts its direct socket peer. The opt-in proxy
       # overlay changes only its replacement services to proxy-v2 trust.
       TG_CLIENT_ADDR_TRUST: socket
@@ -265,6 +271,8 @@ services:
     secrets:
       - source: teagramd_blob_secret_key
         target: teagramd-blob-secret-key
+      - source: teagramd_turnstile
+        target: teagramd-turnstile
     # store.Open refuses to start against an unmigrated schema
     # (internal/store/store.go:69), so the ordering is load-bearing, not cosmetic.
     depends_on:
@@ -289,3 +297,9 @@ secrets:
   teagramd_blob_secret_key:
     # File-backed so Compose can mount the key into teagramd's read-only root.
     file: ./.secrets/teagramd-blob-secret-key
+  teagramd_turnstile:
+    # /dev/null keeps the default-off stack renderable when no public auth
+    # credentials are configured. When set, the source file must be readable
+    # by the non-root teagramd uid (65532); keep it under a mode-0700 .secrets
+    # directory and use mode 0444, as for the existing app secret.
+    file: ${TEAGRAM_TURNSTILE_SECRET_KEY_FILE:-/dev/null}
