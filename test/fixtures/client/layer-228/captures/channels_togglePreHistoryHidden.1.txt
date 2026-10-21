@@ -1,0 +1,8 @@
+# source: constructed from gotd v0.162.0 layer-228 request type
+body: { channels_togglePreHistoryHidden#eabbb94c
+  channel: { inputChannel
+    channel_id: <N> [LONG],
+    access_hash: <N> [LONG],
+  },
+  enabled: YES [BOOL],
+},

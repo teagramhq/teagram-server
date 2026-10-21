@@ -46,6 +46,23 @@ SET signatures = $2, version = version + 1
 WHERE id = $1
 RETURNING *;
 
+-- SetChannelPreHistoryHidden writes the megagroup visibility setting after the
+-- caller's current membership, role, channel kind and username have been
+-- checked under LockChannel and channel_state.
+-- name: SetChannelPreHistoryHidden :one
+UPDATE channels
+SET pre_history_hidden = $2, version = version + 1
+WHERE id = $1
+RETURNING *;
+
+-- ClearChannelParticipantHistoryFloors makes all current members see the full
+-- history after prehistory hiding is disabled or the group becomes public.
+-- Callers hold the channel row and channel_state locks in that order.
+-- name: ClearChannelParticipantHistoryFloors :execrows
+UPDATE channel_participants
+SET available_min_id = 0
+WHERE channel_id = $1 AND available_min_id <> 0;
+
 -- ChannelSlowModePostState is called only after membership, ban, post rights,
 -- deduplication and default restrictions are decided. clock_timestamp() is
 -- sampled after the caller took channel_state FOR UPDATE, so a transaction that

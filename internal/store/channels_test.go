@@ -365,6 +365,120 @@ func TestJoinAndHistoryFlagChangeSerializeByChannelThenStateLock(t *testing.T) {
 	}
 }
 
+func TestSetChannelPreHistoryHiddenRequiresCreatorOrChangeInfoAdmin(t *testing.T) {
+	t.Parallel()
+	s := open(t)
+	ctx := context.Background()
+	creator := mustUser(t, s, "+15551291120")
+	admin := mustUser(t, s, "+15551291121")
+	adminWithoutChangeInfo := mustUser(t, s, "+15551291122")
+	member := mustUser(t, s, "+15551291123")
+	channel, err := s.CreateChannel(ctx, creator.ID, "Prehistory rights", "", true)
+	if err != nil {
+		t.Fatalf("create megagroup: %v", err)
+	}
+	hash, err := s.CreateChannelInvite(ctx, channel.ID, creator.ID)
+	if err != nil {
+		t.Fatalf("create invite: %v", err)
+	}
+	for _, user := range []store.User{admin, adminWithoutChangeInfo, member} {
+		if _, _, err := s.JoinChannelByInvite(ctx, hash, user.ID); err != nil {
+			t.Fatalf("join user %d: %v", user.ID, err)
+		}
+	}
+	if err := s.SetChannelRoleWithRights(ctx, channel.ID, creator.ID, admin.ID, 1, true); err != nil {
+		t.Fatalf("promote change-info admin: %v", err)
+	}
+	if err := s.SetChannelRoleWithRights(ctx, channel.ID, creator.ID, adminWithoutChangeInfo.ID, 1, false); err != nil {
+		t.Fatalf("promote admin without change_info: %v", err)
+	}
+
+	for _, callerID := range []int64{member.ID, adminWithoutChangeInfo.ID} {
+		if _, _, _, err := s.SetChannelPreHistoryHidden(ctx, channel.ID, callerID, true); !errors.Is(err, store.ErrChatAdminRequired) {
+			t.Errorf("caller %d toggle error = %v, want ErrChatAdminRequired", callerID, err)
+		}
+	}
+	updated, _, changed, err := s.SetChannelPreHistoryHidden(ctx, channel.ID, admin.ID, true)
+	if err != nil || !changed || !updated.PreHistoryHidden {
+		t.Fatalf("change-info admin toggle = %+v, changed=%v, err=%v; want enabled", updated, changed, err)
+	}
+	if _, _, _, err := s.SetChannelPreHistoryHidden(ctx, channel.ID, creator.ID, false); err != nil {
+		t.Fatalf("creator toggle off: %v", err)
+	}
+
+	broadcast := mustChannel(t, s, creator.ID, "Broadcast")
+	if _, _, _, err := s.SetChannelPreHistoryHidden(ctx, broadcast.ID, creator.ID, true); !errors.Is(err, store.ErrNotMember) {
+		t.Fatalf("broadcast toggle error = %v, want ErrNotMember", err)
+	}
+}
+
+func TestJoinAfterPreHistoryToggleReturnsGetsTheNewFloor(t *testing.T) {
+	t.Parallel()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	dsn := pgtest.DSN(t)
+	s := openStore(t, dsn)
+	owner := mustUser(t, s, "+15551291124")
+	joiner := mustUser(t, s, "+15551291125")
+	channel, err := s.CreateChannel(ctx, owner.ID, "Prehistory toggle race", "", true)
+	if err != nil {
+		t.Fatalf("create megagroup: %v", err)
+	}
+	postChannelThroughLocalIDFive(t, s, channel.ID, owner.ID)
+	hash, err := s.CreateChannelInvite(ctx, channel.ID, owner.ID)
+	if err != nil {
+		t.Fatalf("create invite: %v", err)
+	}
+
+	conn, err := pgx.Connect(ctx, dsn)
+	if err != nil {
+		t.Fatalf("connect state-lock transaction: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := conn.Close(context.Background()); err != nil {
+			t.Errorf("close state-lock transaction: %v", err)
+		}
+	})
+	tx, err := conn.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin state-lock transaction: %v", err)
+	}
+	defer func() { _ = tx.Rollback(context.Background()) }() //nolint:errcheck // no-op after commit
+	var lockedChannelID int64
+	if err := tx.QueryRow(ctx, `SELECT channel_id FROM channel_state WHERE channel_id = $1 FOR UPDATE`, channel.ID).Scan(&lockedChannelID); err != nil {
+		t.Fatalf("lock channel state: %v", err)
+	}
+
+	toggleDone := make(chan error, 1)
+	go func() {
+		_, _, _, err := s.SetChannelPreHistoryHidden(ctx, channel.ID, owner.ID, true)
+		toggleDone <- err
+	}()
+	if err := store.WaitForLockWaiters(ctx, s, 1); err != nil {
+		t.Fatalf("wait for toggle to reach state lock: %v", err)
+	}
+	joinDone := make(chan error, 1)
+	go func() {
+		_, _, err := s.JoinChannelByInvite(ctx, hash, joiner.ID)
+		joinDone <- err
+	}()
+	if err := store.WaitForLockWaiters(ctx, s, 2); err != nil {
+		t.Fatalf("wait for join to block behind toggle: %v", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		t.Fatalf("release state lock: %v", err)
+	}
+	if err := <-toggleDone; err != nil {
+		t.Fatalf("toggle hidden history: %v", err)
+	}
+	if err := <-joinDone; err != nil {
+		t.Fatalf("join after toggle: %v", err)
+	}
+	if floor, err := store.ChannelAvailableMinID(ctx, s, channel.ID, joiner.ID); err != nil || floor != 5 {
+		t.Fatalf("history floor after toggle returned before join = %d, err %v; want 5", floor, err)
+	}
+}
+
 func TestJoinChannelByInviteRejectsAnUnknownHash(t *testing.T) {
 	t.Parallel()
 	s := open(t)
