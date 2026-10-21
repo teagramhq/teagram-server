@@ -1139,6 +1139,47 @@ func (q *Queries) MarkChatRemovalEventsIssuedForAuthKey(ctx context.Context, arg
 	return err
 }
 
+const pruneChatRemovalClientStateHistoryForAuthKey = `-- name: PruneChatRemovalClientStateHistoryForAuthKey :exec
+WITH ranked AS (
+    SELECT history.owner_id, history.auth_key_id, history.chat_id,
+           history.difference_state_date,
+           row_number() OVER (
+               PARTITION BY history.owner_id, history.auth_key_id, history.chat_id
+               ORDER BY history.difference_state_date DESC
+           ) AS token_rank
+    FROM chat_removal_client_state_history AS history
+    WHERE history.owner_id = $2
+      AND history.auth_key_id = $3
+      AND history.chat_id = ANY($4::bigint[])
+)
+DELETE FROM chat_removal_client_state_history AS history
+USING ranked
+WHERE history.owner_id = ranked.owner_id
+  AND history.auth_key_id = ranked.auth_key_id
+  AND history.chat_id = ranked.chat_id
+  AND history.difference_state_date = ranked.difference_state_date
+  AND ranked.token_rank > $1::bigint
+`
+
+type PruneChatRemovalClientStateHistoryForAuthKeyParams struct {
+	KeepCount int64
+	OwnerID   int64
+	AuthKeyID int64
+	ChatIds   []int64
+}
+
+// PruneChatRemovalClientStateHistoryForAuthKey keeps a small retry window for
+// each chat while the current token remains on chat_removal_client_state.
+func (q *Queries) PruneChatRemovalClientStateHistoryForAuthKey(ctx context.Context, arg PruneChatRemovalClientStateHistoryForAuthKeyParams) error {
+	_, err := q.db.Exec(ctx, pruneChatRemovalClientStateHistoryForAuthKey,
+		arg.KeepCount,
+		arg.OwnerID,
+		arg.AuthKeyID,
+		arg.ChatIds,
+	)
+	return err
+}
+
 const reserveChatRemovalDifferenceStateDateForAuthKey = `-- name: ReserveChatRemovalDifferenceStateDateForAuthKey :one
 WITH latest AS (
     SELECT COALESCE(MAX(difference_state_date), 0)::bigint AS last_state_date

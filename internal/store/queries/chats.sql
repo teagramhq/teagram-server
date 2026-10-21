@@ -201,6 +201,29 @@ DO UPDATE SET delivered_at = EXCLUDED.delivered_at,
               difference_state_date = EXCLUDED.difference_state_date,
               resume_date = EXCLUDED.resume_date;
 
+-- PruneChatRemovalClientStateHistoryForAuthKey keeps a small retry window for
+-- each chat while the current token remains on chat_removal_client_state.
+-- name: PruneChatRemovalClientStateHistoryForAuthKey :exec
+WITH ranked AS (
+    SELECT history.owner_id, history.auth_key_id, history.chat_id,
+           history.difference_state_date,
+           row_number() OVER (
+               PARTITION BY history.owner_id, history.auth_key_id, history.chat_id
+               ORDER BY history.difference_state_date DESC
+           ) AS token_rank
+    FROM chat_removal_client_state_history AS history
+    WHERE history.owner_id = sqlc.arg(owner_id)
+      AND history.auth_key_id = sqlc.arg(auth_key_id)
+      AND history.chat_id = ANY(sqlc.arg(chat_ids)::bigint[])
+)
+DELETE FROM chat_removal_client_state_history AS history
+USING ranked
+WHERE history.owner_id = ranked.owner_id
+  AND history.auth_key_id = ranked.auth_key_id
+  AND history.chat_id = ranked.chat_id
+  AND history.difference_state_date = ranked.difference_state_date
+  AND ranked.token_rank > sqlc.arg(keep_count)::bigint;
+
 -- ReserveChatRemovalDifferenceStateDateForAuthKey allocates one Date token
 -- atomically for every response using this authorization key. The token row
 -- serializes concurrent requests, while the client-state maximum seeds keys
