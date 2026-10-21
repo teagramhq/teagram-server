@@ -128,6 +128,7 @@ WHERE m.owner_id = $2::bigint
   AND m.peer_type = $3::smallint
   AND m.peer_id = $1::bigint
   AND m.out = false AND m.deleted = false AND m.fanout_id <> 0
+  AND (m.expires_at IS NULL OR m.expires_at > statement_timestamp())
   AND m.local_id > $4::bigint
   AND m.local_id <= $5::bigint
   AND m.from_id = ANY($6::bigint[])
@@ -178,6 +179,7 @@ WITH covered AS (
       AND m.peer_type = $1::smallint
       AND m.peer_id = $2::bigint
       AND m.out = false AND m.deleted = false AND m.fanout_id <> 0
+      AND (m.expires_at IS NULL OR m.expires_at > statement_timestamp())
       AND m.local_id > $4::bigint
       AND m.local_id <= $5::bigint
       AND m.from_id = ANY($6::bigint[])

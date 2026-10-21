@@ -187,6 +187,7 @@ func (h *handlers) channelToTLPublic(c store.Channel, participants int64, viewer
 	if c.Username != nil {
 		ch.Username = *c.Username
 	}
+	ch.SetSignatures(c.Signatures)
 	return ch
 }
 
@@ -557,6 +558,11 @@ func (h *handlers) handleGetFullUser(r *mtproto.Request) (bin.Encoder, error) {
 		h.log.Error("get full user: load profile about", "user_id", r.UserID, "peer_id", target, "err", err)
 		return nil, errInternal
 	}
+	ttlPeriod, err := h.store.UserHistoryTTL(r.Ctx, r.UserID, target)
+	if err != nil {
+		h.log.Error("get full user: load history TTL", "user_id", r.UserID, "peer_id", target, "err", err)
+		return nil, errInternal
+	}
 	fullUser := tg.UserFull{
 		ID:               target,
 		Blocked:          snapshot.Blocked,
@@ -564,6 +570,7 @@ func (h *handlers) handleGetFullUser(r *mtproto.Request) (bin.Encoder, error) {
 		NotifySettings:   notifySettings,
 		CommonChatsCount: int(commonChatsCount),
 	}
+	fullUser.SetTTLPeriod(ttlPeriod)
 	if about != "" {
 		fullUser.SetAbout(about)
 	}

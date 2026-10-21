@@ -71,6 +71,8 @@ func TestHotQueryPlansAtScale(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer pool.Close()
+	// This fixture has no history TTL settings and checks read plans, so skip
+	// row-wise TTL stamping while bulk-seeding message rows.
 	// Different owners/channels interleave on disk, as independent traffic
 	// does. Expired fleet generations dominate retained telemetry; four are live.
 	for _, sql := range []string{
@@ -83,9 +85,11 @@ func TestHotQueryPlansAtScale(t *testing.T) {
 		 SELECT n, n, decode(repeat('ab', 32), 'hex') FROM generate_series(1, 10000) n`,
 		`INSERT INTO update_state (user_id, pts, next_local_id)
 		 SELECT n, 100, 101 FROM generate_series(1, 10000) n`,
+		`ALTER TABLE messages DISABLE TRIGGER messages_stamp_history_ttl`,
 		`INSERT INTO messages (owner_id, local_id, peer_type, peer_id, from_id, message, out)
 		 SELECT u, m, 1, (u + m % 10) % 10000 + 1, u, 'scale message', true
 		 FROM generate_series(1, 100) m CROSS JOIN generate_series(1, 10000) u`,
+		`ALTER TABLE messages ENABLE TRIGGER messages_stamp_history_ttl`,
 		`INSERT INTO message_events (owner_id, pts, type, local_id)
 		 SELECT u, m, 1, m FROM generate_series(1, 100) m CROSS JOIN generate_series(1, 10000) u`,
 		`INSERT INTO dialogs (owner_id, peer_type, peer_id, top_message)
@@ -99,9 +103,11 @@ func TestHotQueryPlansAtScale(t *testing.T) {
 		`INSERT INTO channel_participants (channel_id, user_id)
 		 SELECT (u + p) % 10000 + 1, u
 		 FROM generate_series(0, 9) p CROSS JOIN generate_series(1, 10000) u`,
+		`ALTER TABLE channel_messages DISABLE TRIGGER channel_messages_stamp_history_ttl`,
 		`INSERT INTO channel_messages (channel_id, local_id, from_id, message)
 		 SELECT c, m, 1, 'scale channel post'
 		 FROM generate_series(1, 100) m CROSS JOIN generate_series(1, 100) c`,
+		`ALTER TABLE channel_messages ENABLE TRIGGER channel_messages_stamp_history_ttl`,
 		`INSERT INTO channel_events (channel_id, pts, type, local_id)
 		 SELECT c, m, 1, m FROM generate_series(1, 100) m CROSS JOIN generate_series(1, 100) c`,
 		`INSERT INTO fleet_process_snapshots

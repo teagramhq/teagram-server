@@ -16,7 +16,8 @@ from pathlib import Path
 
 
 SCRIPT = Path(__file__).with_name("artifact.py")
-WEB_REVISION = "16f12b9f4e0a42b20c3fe3aa340b6b8f8b2e8861"
+WEB_REVISION = "e947f119ba90d9d87b198c9d7a113cceb1395318"
+AUTH_PROGRESS_WEB_REVISION = "569529c1f36923c098760ef727808254dcb6a662"
 ENDPOINT = "wss://teagramd.test/apiws"
 FINGERPRINT = "1234567890abcdef"
 # Ordinary product references the accepted private release carries in executable assets.
@@ -26,6 +27,13 @@ PRODUCT_REFERENCES = (
     "https://t.me/botfather",
 )
 CSP = (
+    "default-src 'self'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'; "
+    "frame-src 'self' https://challenges.cloudflare.com; object-src 'none'; "
+    "script-src 'self' 'wasm-unsafe-eval' https://challenges.cloudflare.com; style-src 'self' 'unsafe-inline'; "
+    "img-src 'self' data: blob:; font-src 'self' data:; media-src 'self' blob:; "
+    "worker-src 'self' blob:; manifest-src 'self'; connect-src 'self' " + ENDPOINT + ";"
+)
+AUTH_PROGRESS_CSP = (
     "default-src 'self'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'; "
     "object-src 'none'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; "
     "img-src 'self' data: blob:; font-src 'self' data:; media-src 'self' blob:; "
@@ -121,7 +129,14 @@ def make_artifact(directory: Path, **overrides: str) -> None:
     write_manifest(directory, **overrides)
 
 
-def stage(source: Path, destination: Path, secrets: Path, build: Path, repository: Path) -> subprocess.CompletedProcess[str]:
+def stage(
+    source: Path,
+    destination: Path,
+    secrets: Path,
+    build: Path,
+    repository: Path,
+    web_revision: str = WEB_REVISION,
+) -> subprocess.CompletedProcess[str]:
     if destination.exists():
         for current, directories, names in os.walk(destination, topdown=True):
             os.chmod(current, 0o700)
@@ -148,7 +163,7 @@ def stage(source: Path, destination: Path, secrets: Path, build: Path, repositor
             "--fingerprint",
             FINGERPRINT,
             "--web-revision",
-            WEB_REVISION,
+            web_revision,
         ],
         capture_output=True,
         text=True,
@@ -213,6 +228,57 @@ class ArtifactBoundaryTests(unittest.TestCase):
         self.assertEqual(report["productReferenceCount"], len(PRODUCT_REFERENCES))
         (self.source / "index.html").write_text("caller changed after attach", encoding="utf-8")
         self.assertEqual(hashlib.sha256((self.destination / "index.html").read_bytes()).hexdigest(), expected_index)
+
+    def test_rejects_unreviewed_csp_network_sources(self) -> None:
+        index_path = self.source / "index.html"
+        index_path.write_text(
+            index_path.read_text(encoding="utf-8").replace(
+                f"connect-src 'self' {ENDPOINT}",
+                f"connect-src 'self' {ENDPOINT} https://unexpected.invalid",
+            ),
+            encoding="utf-8",
+        )
+        write_manifest(self.source)
+
+        result = stage(self.source, self.destination, self.secrets, self.build, self.repository)
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("privateCSP", result.stderr)
+        self.assertFalse(self.destination.exists())
+
+    def test_accepts_exact_historical_auth_progress_csp(self) -> None:
+        index_path = self.source / "index.html"
+        index_path.write_text(
+            index_path.read_text(encoding="utf-8").replace(CSP, AUTH_PROGRESS_CSP),
+            encoding="utf-8",
+        )
+        write_manifest(self.source, sourceCommit=AUTH_PROGRESS_WEB_REVISION)
+
+        result = stage(
+            self.source,
+            self.destination,
+            self.secrets,
+            self.build,
+            self.repository,
+            web_revision=AUTH_PROGRESS_WEB_REVISION,
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertTrue(json.loads(result.stdout)["checks"]["privateCSP"])
+
+    def test_rejects_historical_auth_progress_csp_for_current_revision(self) -> None:
+        index_path = self.source / "index.html"
+        index_path.write_text(
+            index_path.read_text(encoding="utf-8").replace(CSP, AUTH_PROGRESS_CSP),
+            encoding="utf-8",
+        )
+        write_manifest(self.source)
+
+        result = stage(self.source, self.destination, self.secrets, self.build, self.repository)
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("privateCSP", result.stderr)
+        self.assertFalse(self.destination.exists())
 
     def test_frozen_digest_changes_when_target_manifest_bytes_change(self) -> None:
         original = self.root / "frozen-original"

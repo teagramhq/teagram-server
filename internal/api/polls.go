@@ -64,6 +64,9 @@ func (h *handlers) handleSendPollAfterReplyOnConn(
 
 	if peerType != store.PeerTypeChannel && req.RandomID != 0 {
 		existing, ok, lookupErr := h.store.MessageByRandomID(r.Ctx, r.UserID, req.RandomID)
+		if errors.Is(lookupErr, store.ErrRandomIDExpired) {
+			return nil, nil, nil, errRandomIDDuplicate
+		}
 		if lookupErr != nil {
 			h.log.Error("poll random id lookup", "user_id", r.UserID, "err", lookupErr)
 			return nil, nil, nil, errInternal
@@ -199,7 +202,12 @@ func (h *handlers) channelPollSendResponse(
 		h.log.Error("load channel poll sender", "user_id", r.UserID, "err", err)
 		return nil, nil, nil, errInternal
 	}
-	messageTL, err := channelMessageToTL(message, r.UserID, nil)
+	broadcast, err := h.channelIsBroadcast(r.Ctx, channelID)
+	if err != nil {
+		h.log.Error("load channel poll kind", "channel_id", channelID, "err", err)
+		return nil, nil, nil, errInternal
+	}
+	messageTL, err := channelMessageToTL(message, r.UserID, nil, broadcast)
 	if err != nil {
 		h.log.Error("render channel poll description", "user_id", r.UserID, "channel_id", channelID, "local_id", message.LocalID, "err", err)
 		return nil, nil, nil, errInternal
@@ -399,7 +407,16 @@ func (h *handlers) handleClosePollAfterReplyOnConn(
 			h.log.Error("render closed channel poll", "channel_id", peerID, "local_id", localID, "err", loadErr)
 			return nil, nil, nil, errInternal
 		}
-		users, userErr := h.loadUsers(r.Ctx, map[int64]bool{message.FromID: true}, r.UserID)
+		broadcast, kindErr := h.channelIsBroadcast(r.Ctx, peerID)
+		if kindErr != nil {
+			h.log.Error("load closed channel poll kind", "channel_id", peerID, "err", kindErr)
+			return nil, nil, nil, errInternal
+		}
+		userRefs := map[int64]bool{}
+		if !broadcast {
+			userRefs[message.FromID] = true
+		}
+		users, userErr := h.loadUsers(r.Ctx, userRefs, r.UserID)
 		if userErr != nil {
 			h.log.Error("load closed channel poll author", "channel_id", peerID, "err", userErr)
 			return nil, nil, nil, errInternal
@@ -409,7 +426,7 @@ func (h *handlers) handleClosePollAfterReplyOnConn(
 			h.log.Error("load closed channel poll channel", "channel_id", peerID, "err", channelErr)
 			return nil, nil, nil, errInternal
 		}
-		messageTL, renderErr := channelMessageToTL(channelMessages[0], r.UserID, nil)
+		messageTL, renderErr := channelMessageToTL(channelMessages[0], r.UserID, nil, broadcast)
 		if renderErr != nil {
 			h.log.Error("render closed channel poll message", "channel_id", peerID, "local_id", localID, "err", renderErr)
 			return nil, nil, nil, errInternal
@@ -468,7 +485,7 @@ func (h *handlers) handleClosePollAfterReplyOnConn(
 		for ownerID := range ownerPts {
 			usersByID[ownerID] = true
 		}
-		chats, err = h.loadChats(r.Ctx, map[int64]bool{peerID: true}, r.UserID, nil)
+		chats, err = h.loadChats(r.Ctx, map[int64]bool{peerID: true}, r.UserID)
 		if err != nil {
 			return nil, nil, nil, errInternal
 		}
@@ -610,7 +627,7 @@ func (h *handlers) pollSendResponseWithAttempt(
 			}
 		}
 		var err error
-		chats, err = h.loadChats(r.Ctx, map[int64]bool{message.PeerID: true}, r.UserID, nil)
+		chats, err = h.loadChats(r.Ctx, map[int64]bool{message.PeerID: true}, r.UserID)
 		if err != nil {
 			h.log.Error("load poll chat", "chat_id", message.PeerID, "err", err)
 			return nil, nil, nil, errInternal
@@ -990,6 +1007,8 @@ func pollResultsToTL(poll store.Poll) tg.PollResults {
 
 func pollStoreError(err error) error {
 	switch {
+	case errors.Is(err, store.ErrRandomIDExpired):
+		return errRandomIDDuplicate
 	case errors.Is(err, store.ErrPollInvalid):
 		return errPollInvalid
 	case errors.Is(err, store.ErrPollClosed):

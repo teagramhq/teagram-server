@@ -96,19 +96,17 @@ func (s *Store) ChannelFullInfoForViewer(
 		}
 		return snapshot, true, nil
 	}
-	if pinnedID := snapshot.Channel.PinnedMessageID; pinnedID != nil {
-		post, err := qtx.ChannelMessageByLocal(ctx, db.ChannelMessageByLocalParams{
-			ChannelID: channelID,
-			LocalID:   int64(*pinnedID),
-		})
-		switch {
-		case errors.Is(err, pgx.ErrNoRows):
-			snapshot.Channel.PinnedMessageID = nil
-		case err != nil:
-			return ChannelFullInfoSnapshot{}, false, fmt.Errorf("select channel pinned post for full info: %w", err)
-		case post.Deleted || post.ActionType != int16(ChannelMessageActionNone):
-			snapshot.Channel.PinnedMessageID = nil
-		}
+	pinnedID, err := qtx.ChannelPinnedMessageForViewer(ctx, db.ChannelPinnedMessageForViewerParams{
+		ChannelID: channelID,
+		OwnerID:   viewerID,
+	})
+	switch {
+	case errors.Is(err, pgx.ErrNoRows):
+		snapshot.Channel.PinnedMessageID = nil
+	case err != nil:
+		return ChannelFullInfoSnapshot{}, false, fmt.Errorf("select channel pinned post for full info: %w", err)
+	default:
+		snapshot.Channel.PinnedMessageID = pinnedID
 	}
 
 	stats, err := qtx.ChannelFullInfoStats(ctx, channelID)

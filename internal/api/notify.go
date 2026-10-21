@@ -255,6 +255,10 @@ func (u *Updater) Deliver(ctx context.Context, userID int64) {
 		u.DeliverChatAdmin(ctx, chatID, eventID)
 		return
 	}
+	if chatID, ok := store.ChatRemovalUpdateFromContext(ctx); ok {
+		u.DeliverChatRemoval(ctx, userID, chatID)
+		return
+	}
 	if chatID, ok := store.ChatAboutUpdateFromContext(ctx); ok {
 		u.DeliverChatAbout(ctx, userID, chatID)
 		return
@@ -427,6 +431,7 @@ func (u *Updater) DeliverChannelPollVote(ctx context.Context, channelID, pollID 
 
 	now := time.Now()
 	var pushes []transientPush
+	pollLocalIDs := make(map[int64]int64)
 	for _, member := range members {
 		if member.Banned(now) {
 			continue
@@ -445,6 +450,7 @@ func (u *Updater) DeliverChannelPollVote(ctx context.Context, channelID, pollID 
 		if ref.PeerType != store.PeerTypeChannel || ref.PeerID != channelID {
 			continue
 		}
+		pollLocalIDs[member.UserID] = ref.LocalID
 		update := &tg.UpdateShort{
 			Update: &tg.UpdateMessagePoll{PollID: poll.ID, Results: pollResultsToTL(poll)},
 			Date:   int(now.Unix()),
@@ -474,15 +480,15 @@ func (u *Updater) DeliverChannelPollVote(ctx context.Context, channelID, pollID 
 		return
 	}
 	now = time.Now()
-	active := make(map[int64]struct{}, len(currentMembers))
+	active := make(map[int64]store.ChannelMember, len(currentMembers))
 	for _, member := range currentMembers {
 		if !member.Banned(now) {
-			active[member.UserID] = struct{}{}
+			active[member.UserID] = member
 		}
 	}
 	authorizedPushes := make([]transientPush, 0, len(pushes))
 	for _, push := range pushes {
-		if _, ok := active[push.owner]; ok {
+		if member, ok := active[push.owner]; ok && pollLocalIDs[push.owner] > member.AvailableMinID {
 			authorizedPushes = append(authorizedPushes, push)
 		}
 	}
@@ -534,6 +540,58 @@ func (u *Updater) DeliverChatAdmin(ctx context.Context, chatID, eventID int64) {
 				},
 			})
 		}
+	}
+	u.pushTransientFanout(ctx, pushes)
+}
+
+// DeliverChatRemoval pushes one persisted PTS-neutral chat removal to every
+// live session for its owner. A successful push is recorded per authorization,
+// but remains replayable until that client later requests updates.getState.
+func (u *Updater) DeliverChatRemoval(ctx context.Context, ownerID, chatID int64) {
+	if ownerID <= 0 || chatID <= 0 || u.registry == nil {
+		return
+	}
+	event, found, err := u.h.store.ChatRemovalEventForOwnerChat(ctx, ownerID, chatID)
+	if err != nil {
+		u.log.Error("deliver chat removal event", "chat_id", chatID, "owner_id", ownerID, "err", err)
+		return
+	}
+	if !found {
+		u.log.Warn("deliver missing chat removal event", "chat_id", chatID, "owner_id", ownerID)
+		return
+	}
+	chats, err := u.h.loadChats(ctx, map[int64]bool{event.ChatID: true}, ownerID)
+	if err != nil {
+		u.log.Error("deliver chat removal chat", "chat_id", event.ChatID, "owner_id", ownerID, "err", err)
+		return
+	}
+	update := &tg.Updates{
+		Updates: []tg.UpdateClass{&tg.UpdateChatParticipantDelete{
+			ChatID:  event.ChatID,
+			UserID:  ownerID,
+			Version: event.Version,
+		}},
+		Chats: chats,
+		Date:  int(time.Now().Unix()),
+		Seq:   0,
+	}
+	var pushes []transientPush
+	for _, conn := range u.registry.Conns(ownerID) {
+		push := transientPush{
+			owner: ownerID,
+			conn:  conn,
+			enc:   update,
+			onError: func(err error) {
+				u.log.Info("deliver chat removal push", "chat_id", event.ChatID, "owner_id", ownerID, "err", err)
+			},
+		}
+		authKeyID := conn.AuthKeyID()
+		push.onSuccess = func() {
+			if err := u.h.store.MarkChatRemovalEventsDeliveredForAuthKey(ctx, ownerID, authKeyID, []int64{event.ChatID}); err != nil {
+				u.log.Error("mark live chat removal delivered", "chat_id", event.ChatID, "owner_id", ownerID, "err", err)
+			}
+		}
+		pushes = append(pushes, push)
 	}
 	u.pushTransientFanout(ctx, pushes)
 }
@@ -622,9 +680,14 @@ func (u *Updater) DeliverChatAbout(ctx context.Context, userID, chatID int64) {
 	if !found {
 		return
 	}
+	wireChat, err := u.h.chatToTL(ctx, chat, int(snapshot.ParticipantCounts[chatID]), userID)
+	if err != nil {
+		u.log.Error("deliver chat about photo", "chat_id", chatID, "user_id", userID, "err", err)
+		return
+	}
 	update := &tg.Updates{
 		Updates: []tg.UpdateClass{&tg.UpdateChat{ChatID: chatID}},
-		Chats:   []tg.ChatClass{chatToTL(chat, int(snapshot.ParticipantCounts[chatID]), userID)},
+		Chats:   []tg.ChatClass{wireChat},
 		Date:    int(time.Now().Unix()),
 		Seq:     0,
 	}
@@ -780,10 +843,11 @@ const (
 )
 
 type transientPush struct {
-	owner   int64
-	conn    pushConn
-	enc     bin.Encoder
-	onError func(error)
+	owner     int64
+	conn      pushConn
+	enc       bin.Encoder
+	onSuccess func()
+	onError   func(error)
 }
 
 type transientWriteTimeoutConn interface {
@@ -832,8 +896,13 @@ func (u *Updater) pushTransientFanout(ctx context.Context, pushes []transientPus
 					if !ok || ctx.Err() != nil {
 						return
 					}
-					if _, err := u.pushTransientEncoded(ctx, push.owner, push.conn, push.enc, encoders); err != nil && push.onError != nil {
-						push.onError(err)
+					pushed, err := u.pushTransientEncoded(ctx, push.owner, push.conn, push.enc, encoders)
+					if err != nil {
+						if push.onError != nil {
+							push.onError(err)
+						}
+					} else if pushed && push.onSuccess != nil {
+						push.onSuccess()
 					}
 				}
 			}
@@ -1305,13 +1374,25 @@ func (u *Updater) deliverChannelPost(ctx context.Context, channelID int64, conns
 		u.log.Error("deliver channel post snapshot", "channel_id", channelID, "err", err)
 		return
 	}
+	if len(members) == 0 {
+		return
+	}
+	broadcast, err := u.h.channelIsBroadcast(ctx, channelID)
+	if err != nil {
+		u.log.Error("load channel kind for post delivery", "channel_id", channelID, "err", err)
+		return
+	}
 	if u.channelPostSnapshotHook != nil {
 		u.channelPostSnapshotHook()
+	}
+	availableMinIDs := make(map[int64]int64, len(members))
+	for _, member := range members {
+		availableMinIDs[member.UserID] = member.AvailableMinID
 	}
 
 	u.deliverChannel(ctx, members, time.Now(), connsFor,
 		func(memberID int64, fromPts int) (channelBatch, error) {
-			return u.h.buildChannelUpdates(ctx, channelID, memberID, max(fromPts, currentPts-1), maxDiffEvents, currentPts)
+			return u.h.buildChannelUpdates(ctx, channelID, memberID, max(fromPts, currentPts-1), maxDiffEvents, currentPts, broadcast, availableMinIDs[memberID])
 		},
 	)
 }

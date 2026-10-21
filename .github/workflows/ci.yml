@@ -786,6 +786,10 @@ jobs:
     steps:
       - uses: actions/checkout@v7.0.1
 
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 24.18.0
+
       - uses: actions/setup-go@v7.0.0
         with:
           go-version-file: go.mod
@@ -797,8 +801,12 @@ jobs:
       - name: Require shellcheck and yq
         run: shellcheck --version && yq --version
 
-      - name: Lint the deploy workflow
-        run: actionlint .github/workflows/deploy.yml
+      - name: Lint deployment and real-client workflows
+        run: |
+          actionlint -ignore 'label "ubuntu-26.04" is unknown' \
+            .github/workflows/deploy.yml \
+            .github/workflows/real-client-browser-flow.yml
+          node --check test/e2e/real_server_fixture/run_real_client_browser_flow.mjs
 
       - name: Check the deploy workflow contract
         run: .github/scripts/test-deploy-workflow-contract.sh
@@ -1960,6 +1968,29 @@ jobs:
             and (.secrets.teagramd_blob_secret_key.file | endswith("/.secrets/teagramd-blob-secret-key"))
           ' "$RUNNER_TEMP/teagram-server-compose.json"
 
+          env -u TEAGRAM_TURNSTILE_SITE_KEY -u TEAGRAM_TURNSTILE_SECRET_KEY_FILE \
+            -u TG_TURNSTILE_SIGNIN_ENABLED docker compose config --format json \
+            >"$RUNNER_TEMP/teagram-server-compose-turnstile-default.json"
+          jq -e '
+            (.services.teagramd.environment.TG_TURNSTILE_SITE_KEY == "")
+            and (.services.teagramd.environment.TG_TURNSTILE_SECRET_KEY_FILE == "")
+            and (.services.teagramd.environment.TG_TURNSTILE_SIGNIN_ENABLED == "false")
+            and any(.services.teagramd.secrets[]; .target == "teagramd-turnstile")
+            and (.secrets.teagramd_turnstile.file == "/dev/null")
+          ' "$RUNNER_TEMP/teagram-server-compose-turnstile-default.json"
+
+          env TEAGRAM_TURNSTILE_SITE_KEY=turnstile-site-key \
+            TEAGRAM_TURNSTILE_SECRET_KEY_FILE="$PWD/.secrets/teagramd-blob-secret-key" \
+            TG_TURNSTILE_SIGNIN_ENABLED=true docker compose config --format json \
+            >"$RUNNER_TEMP/teagram-server-compose-turnstile-enabled.json"
+          jq -e --arg secret_file "$PWD/.secrets/teagramd-blob-secret-key" '
+            (.services.teagramd.environment.TG_TURNSTILE_SITE_KEY == "turnstile-site-key")
+            and (.services.teagramd.environment.TG_TURNSTILE_SECRET_KEY_FILE == "/run/secrets/teagramd-turnstile")
+            and (.services.teagramd.environment.TG_TURNSTILE_SIGNIN_ENABLED == "true")
+            and any(.services.teagramd.secrets[]; .target == "teagramd-turnstile")
+            and (.secrets.teagramd_turnstile.file == $secret_file)
+          ' "$RUNNER_TEMP/teagram-server-compose-turnstile-enabled.json"
+
           env -u TEAGRAMD_SOURCE_REVISION docker compose --profile migration config --format json \
             >"$RUNNER_TEMP/teagram-server-compose-no-revision.json"
           jq -e '
@@ -1980,7 +2011,18 @@ jobs:
 
       - name: Boot RustFS and exercise the object-store backend
         run: |
-          export COMPOSE_FILE=docker-compose.yml:docker-compose.local-blobs.yml
+          # Pull the verified upstream GHCR image directly. The Google mirror
+          # can rate-limit this image, which otherwise prevents this runner
+          # lane from reaching its Compose assertions.
+          rustfs_image=ghcr.io/rustfs/rustfs@sha256:1803faef57627e2d9c2e7d89d655d712ddded5389040054987163043fecb6a3c
+          docker pull "$rustfs_image"
+          cat > "$RUNNER_TEMP/rustfs-ci-image.yml" <<'YAML'
+          services:
+            rustfs:
+              image: ghcr.io/rustfs/rustfs@sha256:1803faef57627e2d9c2e7d89d655d712ddded5389040054987163043fecb6a3c
+          YAML
+
+          export COMPOSE_FILE=docker-compose.yml:docker-compose.local-blobs.yml:$RUNNER_TEMP/rustfs-ci-image.yml
           compose() {
             docker compose "$@"
           }
@@ -2159,6 +2201,10 @@ jobs:
           app_secret_file=$(mktemp "$RUNNER_TEMP/teagramd-s3-secret.XXXXXX")
           awk -F= '$1 == "TG_BLOB_S3_SECRET_ACCESS_KEY" { print substr($0, index($0, "=") + 1); found=1; exit } END { if (!found) exit 1 }' .env >"$app_secret_file"
           chmod 600 "$app_secret_file"
+          # Testcontainers requests mirror.gcr.io/postgres while Compose pulled
+          # the same image as mirror.gcr.io/library/postgres. Reuse that local
+          # image so the e2e check avoids a second rate-limited mirror pull.
+          docker image tag mirror.gcr.io/library/postgres:18-alpine mirror.gcr.io/postgres:18-alpine
           TG_BLOB_S3_ENDPOINT="http://${rustfs_ip}:9000" \
           TG_BLOB_S3_BUCKET=teagram \
           TG_BLOB_S3_PREFIX=teagramd/ci/ \

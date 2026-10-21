@@ -25,6 +25,10 @@ verify_added_container_environment() {
     printf '%s\n' "$inspect_json" "$compose_json"
   } | jq -se --argjson added "$added_env_names" --rawfile env_content "$env_file" '
     def item: if type == "array" then .[0] else . end;
+    def runtime_name($name):
+      if $name == "TEAGRAM_TURNSTILE_SITE_KEY" then "TG_TURNSTILE_SITE_KEY"
+      elif $name == "TEAGRAM_TURNSTILE_SECRET_KEY_FILE" then "TG_TURNSTILE_SECRET_KEY_FILE"
+      else $name end;
     .[0] as $inspect
     | .[1] as $compose
     | ($inspect | item | .Config.Env // []) as $container_env
@@ -33,19 +37,20 @@ verify_added_container_environment() {
         ($env_content | split("\n")) as $env_lines
         | all($added[];
             . as $name
+            | ($name | runtime_name($name)) as $runtime_name
             | [ $env_lines[] as $line
                 | ($line | index("=")) as $separator
                 | select($separator != null and $line[:$separator] == $name)
               ] as $assignments
             | [ $container_env[]
-                | select(type == "string" and startswith($name + "="))
-                | .[($name | length) + 1:]
+                | select(type == "string" and startswith($runtime_name + "="))
+                | .[($runtime_name | length) + 1:]
               ] as $actual
             | ($assignments | length) == 1 and
-              ($compose_env | has($name)) and
-              ($compose_env[$name] | type) == "string" and
+              ($compose_env | has($runtime_name)) and
+              ($compose_env[$runtime_name] | type) == "string" and
               ($actual | length) == 1 and
-              $actual[0] == $compose_env[$name]
+              $actual[0] == $compose_env[$runtime_name]
           )
       end
   ' >/dev/null; then
@@ -79,9 +84,9 @@ verify_changed_container_environment() {
                 | select(type == "string" and startswith($name + "="))
                 | .[($name | length) + 1:]
               ] as $actual
-            | ($name == "TG_REGISTRATION") and
+            | (($name == "TG_REGISTRATION" and ($assignments[0] | IN("open","closed"))) or
+               ($name == "TG_TURNSTILE_SIGNIN_ENABLED" and ($assignments[0] | IN("true","false")))) and
               ($assignments | length) == 1 and
-              ($assignments[0] | IN("open","closed")) and
               ($compose_env | has($name)) and
               ($compose_env[$name] == $assignments[0]) and
               ($actual | length) == 1 and
@@ -140,6 +145,150 @@ verify_safe_public_compose_environment() {
   return 0
 }
 
+verify_turnstile_compose_configuration() {
+  local compose_json=$1 checkout_root secret_source file_source secret_dir runtime_uid
+  checkout_root=$(readlink -m "$ROLLOUT_CHECKOUT_PATH") || return 1
+  secret_source="$checkout_root/.secrets/teagramd-turnstile"
+  if ! printf '%s\n' "$compose_json" | jq -e --arg secret_source "$secret_source" '
+    (.services.teagramd.environment // {}) as $env
+    | (.services.teagramd.secrets // []) as $service_secrets
+    | (.secrets // {}) as $secrets
+    | ($secrets.teagramd_turnstile.file // "") as $file_source
+    | (
+        ($env | has("TG_TURNSTILE_SITE_KEY")) or
+        ($env | has("TG_TURNSTILE_SECRET_KEY_FILE")) or
+        ($env | has("TG_TURNSTILE_SIGNIN_ENABLED")) or
+        any($service_secrets[]?; .source == "teagramd_turnstile") or
+        ($secrets | has("teagramd_turnstile"))
+      ) as $configured
+    | if ($configured | not) then true else
+        ($env.TG_TURNSTILE_SITE_KEY | type == "string") and
+        ($env.TG_TURNSTILE_SECRET_KEY_FILE | type == "string") and
+        ($env.TG_TURNSTILE_SIGNIN_ENABLED | IN("false", "true")) and
+        ($env | has("TG_TURNSTILE_SECRET_KEY") | not) and
+        ($file_source == "/dev/null" or $file_source == $secret_source) and
+        ([$service_secrets[]? | select(.source == "teagramd_turnstile" and .target == "teagramd-turnstile")] | length) == 1 and
+        (
+          if $env.TG_TURNSTILE_SITE_KEY == "" then
+            $env.TG_TURNSTILE_SECRET_KEY_FILE == "" and
+            $env.TG_TURNSTILE_SIGNIN_ENABLED == "false" and
+            $file_source == "/dev/null"
+          else
+            ($env.TG_TURNSTILE_SITE_KEY | test("^[A-Za-z0-9_-]{1,256}$")) and
+            $env.TG_TURNSTILE_SECRET_KEY_FILE == "/run/secrets/teagramd-turnstile" and
+            $file_source == $secret_source
+          end
+        ) and
+        ($env.TG_TURNSTILE_SIGNIN_ENABLED != "true" or $env.TG_TURNSTILE_SITE_KEY != "")
+      end
+  ' >/dev/null; then
+    printf '%s\n' 'resolved Compose Turnstile mapping is incomplete or unsafe' >&2
+    return 1
+  fi
+  file_source=$(printf '%s\n' "$compose_json" | jq -er '.secrets.teagramd_turnstile.file // ""') || return 1
+  if [ -n "$file_source" ] && [ "$file_source" != "/dev/null" ]; then
+    secret_dir=$(dirname -- "$file_source")
+    runtime_uid=$(id -u)
+    [ "$file_source" = "$secret_source" ] && [ -f "$file_source" ] && [ ! -L "$file_source" ] && \
+      [ ! -L "$secret_dir" ] && [ "$(stat -c %a -- "$file_source")" = 444 ] && \
+      [ "$(stat -c %u -- "$file_source")" = "$runtime_uid" ] && \
+      [ "$(stat -c %a -- "$secret_dir")" = 700 ] && \
+      [ "$(stat -c %u -- "$secret_dir")" = "$runtime_uid" ] || {
+      printf '%s\n' 'Turnstile secret source must be a root-owned mode-0444 file in a root-only mode-0700 directory' >&2
+      return 1
+    }
+  fi
+  return 0
+}
+
+verify_turnstile_container_configuration() {
+  local inspect_json=$1 compose_json=$2 snapshot_name=$3 added_env_names=$4 changed_env_names=$5
+  if ! printf '%s\n' "$inspect_json" "$compose_json" | jq -se --arg snapshot_name "$snapshot_name" \
+    --argjson added "$added_env_names" --argjson changed "$changed_env_names" '
+    def item: if type == "array" then .[0] else . end;
+    def runtime_name($name):
+      if $name == "TEAGRAM_TURNSTILE_SITE_KEY" then "TG_TURNSTILE_SITE_KEY"
+      elif $name == "TEAGRAM_TURNSTILE_SECRET_KEY_FILE" then "TG_TURNSTILE_SECRET_KEY_FILE"
+      else $name end;
+    .[0] as $inspect
+    | .[1] as $compose
+    | ($compose.services.teagramd.environment // {}) as $compose_env
+    | ($inspect | item | .Config.Env // []) as $container_env
+    | if ($container_env | type) != "array" then false else
+        [
+          $container_env[] | select(type == "string") |
+          select(
+            startswith("TG_TURNSTILE_SITE_KEY=") or
+            startswith("TG_TURNSTILE_SECRET_KEY_FILE=") or
+            startswith("TG_TURNSTILE_SIGNIN_ENABLED=") or
+            startswith("TG_TURNSTILE_SECRET_KEY=")
+          )
+        ] as $turnstile_entries
+        | if ($compose_env | has("TG_TURNSTILE_SITE_KEY") | not) then
+            ($turnstile_entries | length) == 0
+          else
+            ([$turnstile_entries[] | select(startswith("TG_TURNSTILE_SECRET_KEY="))] | length) == 0 and
+            (
+              if $snapshot_name == "target" then
+                ($turnstile_entries | length) == 3
+              else
+                ($turnstile_entries | length) == 0 or ($turnstile_entries | length) == 3
+              end
+            ) and
+            (
+              if ($turnstile_entries | length) == 0 then true else
+                # The live container predates this deploy, so settings it
+                # adds or changes may still hold their previous values.
+                [$added[] | runtime_name(.)] as $added_runtime
+                | all(["TG_TURNSTILE_SITE_KEY", "TG_TURNSTILE_SECRET_KEY_FILE", "TG_TURNSTILE_SIGNIN_ENABLED"][];
+                    . as $name
+                    | ([$turnstile_entries[] | select(startswith($name + "="))] | length) == 1 and
+                      (
+                        ($snapshot_name != "target" and
+                         (any($added_runtime[]; . == $name) or any($changed[]; . == $name))) or
+                        ($turnstile_entries | index($name + "=" + $compose_env[$name])) != null
+                      ))
+              end
+            )
+          end
+      end
+  ' >/dev/null; then
+    printf '%s\n' 'container Turnstile environment does not match the resolved Compose mapping' >&2
+    return 1
+  fi
+  return 0
+}
+
+verify_turnstile_secret_mount() {
+  local inspect_json=$1 compose_json=$2 snapshot_name=$3
+  if ! printf '%s\n' "$inspect_json" "$compose_json" | jq -se --arg snapshot_name "$snapshot_name" '
+    def item: if type == "array" then .[0] else . end;
+    .[0] as $inspect
+    | .[1] as $compose
+    | ($compose.secrets.teagramd_turnstile.file // null) as $expected_source
+    | [
+        (($inspect | item | .Mounts // [])[])
+        | select(.Destination == "/run/secrets/teagramd-turnstile")
+      ] as $mounts
+    | if $expected_source == null then
+        ($mounts | length) == 0
+      else
+        if ($mounts | length) == 0 then $snapshot_name != "target"
+        elif ($mounts | length) != 1 then false
+        else
+          $mounts[0].Type == "bind" and
+          ($mounts[0].Source == $expected_source or
+           ($snapshot_name != "target" and $mounts[0].Source == "/dev/null")) and
+          $mounts[0].RW == false
+        end
+      end
+  ' >/dev/null; then
+    printf '%s\n' 'container Turnstile secret mount does not match the resolved Compose mapping' >&2
+    return 1
+  fi
+  return 0
+}
+
 canonical_blob_mode_source() {
   local checkout_path state_dir mode_source
   checkout_path=$(readlink -f "$ROLLOUT_CHECKOUT_PATH") || return 1
@@ -172,19 +321,29 @@ snapshot_from_json() {
     return 1
   fi
 
+  # Variables a deploy adds to .env are named by the runner; they are left out
+  # of the environment digest and recorded by name so every other entry stays pinned.
+  added_env_names=$(jq -cn --arg names "${ROLLOUT_ADDED_ENV:-}" '$names | split(",") | map(select(length > 0))')
+  changed_env_names=$(jq -cn --arg names "${ROLLOUT_CHANGED_ENV:-}" '$names | split(",") | map(select(length > 0))')
   verify_safe_public_container_environment "$inspect_json" || return 1
   if [ "$compose_source" = selected-compose-render ]; then
     verify_safe_public_compose_environment "$compose_json" || return 1
+    verify_turnstile_compose_configuration "$compose_json" || return 1
+    verify_turnstile_container_configuration \
+      "$inspect_json" "$compose_json" "$snapshot_name" "$added_env_names" "$changed_env_names" || return 1
+    verify_turnstile_secret_mount "$inspect_json" "$compose_json" "$snapshot_name" || return 1
   fi
 
   mode_source=$(canonical_blob_mode_source) || return 1
 
-  mounts=$(printf '%s' "$inspect_json" | jq -ce --arg mode_source "$mode_source" '
+  mounts=$(printf '%s' "$inspect_json" | jq -ce --arg mode_source "$mode_source" --arg compose_source "$compose_source" '
     def item: if type == "array" then .[0] else . end;
     (item.Mounts // [])
     | map({type:(.Type // ""), name:(.Name // ""), source:(.Source // ""),
            destination:(.Destination // ""), mode:(.Mode // ""),
            rw:(.RW // false), propagation:(.Propagation // "")})
+    | map(select((.destination == "/run/secrets/teagramd-turnstile" and
+                  $compose_source == "selected-compose-render") | not))
     | map(select((.type == "bind" and .source == $mode_source and
                   .destination == "/run/teagramd/blob-mode" and .rw == false) | not))
     | sort_by(.type, .name, .source, .destination, .mode, .rw, .propagation)
@@ -221,21 +380,20 @@ snapshot_from_json() {
           else "invalid" end
       end
   ')
-  # Variables a deploy adds to .env are named by the runner; they are left out
-  # of the environment digest and recorded by name so every other entry stays pinned.
-  added_env_names=$(jq -cn --arg names "${ROLLOUT_ADDED_ENV:-}" '$names | split(",") | map(select(length > 0))')
-  changed_env_names=$(jq -cn --arg names "${ROLLOUT_CHANGED_ENV:-}" '$names | split(",") | map(select(length > 0))')
   if [ "$compose_source" = selected-compose-render ] && [ "$snapshot_name" = target ]; then
     verify_added_container_environment "$inspect_json" "$compose_json" "$env_file" "$added_env_names" || return 1
     verify_changed_container_environment "$inspect_json" "$compose_json" "$env_file" "$changed_env_names" || return 1
   elif [ "$compose_source" = selected-compose-render ] && [ "$snapshot_name" = rollback ]; then
     retained_added_env_names=$(printf '%s' "$inspect_json" | jq -c --argjson added "$added_env_names" '
       def item: if type == "array" then .[0] else . end;
-      [(item.Config.Env // [])[]
-       | select(type == "string")
-       | split("=")[0] as $key
-       | select(any($added[]; . == $key))
-       | $key]
+      def runtime_name($name):
+        if $name == "TEAGRAM_TURNSTILE_SITE_KEY" then "TG_TURNSTILE_SITE_KEY"
+        elif $name == "TEAGRAM_TURNSTILE_SECRET_KEY_FILE" then "TG_TURNSTILE_SECRET_KEY_FILE"
+        else $name end;
+      [(item.Config.Env // [])[] | select(type == "string")
+       | select(IN("TG_TURNSTILE_SITE_KEY=", "TG_TURNSTILE_SECRET_KEY_FILE=", "TG_TURNSTILE_SIGNIN_ENABLED=false") | not)
+       | split("=")[0]] as $keys
+      | [$added[] | select(. as $name | ($name | runtime_name($name)) as $runtime | any($keys[]; . == $runtime))]
       | unique
     ') || return 1
     verify_added_container_environment \
@@ -244,20 +402,39 @@ snapshot_from_json() {
   fi
   container_env=$(printf '%s' "$inspect_json" | jq -ce --argjson added "$added_env_names" --argjson changed "$changed_env_names" '
     def item: if type == "array" then .[0] else . end;
+    def runtime_name($name):
+      if $name == "TEAGRAM_TURNSTILE_SITE_KEY" then "TG_TURNSTILE_SITE_KEY"
+      elif $name == "TEAGRAM_TURNSTILE_SECRET_KEY_FILE" then "TG_TURNSTILE_SECRET_KEY_FILE"
+      else $name end;
     (item.Config.Env // [])
     | if type != "array" then error("container environment must be an array") else
         map(select(type != "string" or (startswith("TG_REPLICA_COUNT=") | not)))
         | map(select(type != "string" or (startswith("TG_CLIENT_ADDR_TRUST=") | not)))
         | map(select(type != "string" or ((split("=")[0]) as $key | (["TG_PUBLIC_WEBSOCKET_LISTEN_ADDR", "TG_PUBLIC_REGISTRATION", "TG_PUBLIC_WEBSOCKET_ALLOWED_ORIGINS", "TG_WELCOME_CHANNEL"] | index($key) == null))))
-        | map(select(type != "string" or ((split("=")[0]) as $key | any($added[]; . == $key) | not)))
+        | map(select(type != "string" or ((split("=")[0]) as $key | any($added[]; runtime_name(.) == $key) | not)))
         | map(select(type != "string" or ((split("=")[0]) as $key | any($changed[]; . == $key) | not)))
+        | map(select(type != "string" or (
+            (. == "TG_TURNSTILE_SITE_KEY=" or
+             . == "TG_TURNSTILE_SECRET_KEY_FILE=" or
+             . == "TG_TURNSTILE_SIGNIN_ENABLED=false") | not
+          )))
         | sort
       end
   ')
-  container_env_added=$(printf '%s' "$inspect_json" | jq -er --argjson added "$added_env_names" '
+  # The disabled Turnstile defaults count as unset in a container that predates
+  # this deploy, so enabling Turnstile can add them; the target must carry them.
+  container_env_added=$(printf '%s' "$inspect_json" | jq -er --argjson added "$added_env_names" --arg snapshot_name "$snapshot_name" '
     def item: if type == "array" then .[0] else . end;
-    [(item.Config.Env // [])[] | select(type == "string") | split("=")[0] | select(. as $key | any($added[]; . == $key))]
-    | unique | if length == 0 then "none" else join(",") end
+    def runtime_name($name):
+      if $name == "TEAGRAM_TURNSTILE_SITE_KEY" then "TG_TURNSTILE_SITE_KEY"
+      elif $name == "TEAGRAM_TURNSTILE_SECRET_KEY_FILE" then "TG_TURNSTILE_SECRET_KEY_FILE"
+      else $name end;
+    [(item.Config.Env // [])[] | select(type == "string")
+     | select($snapshot_name == "target" or
+              (IN("TG_TURNSTILE_SITE_KEY=", "TG_TURNSTILE_SECRET_KEY_FILE=", "TG_TURNSTILE_SIGNIN_ENABLED=false") | not))
+     | split("=")[0]] as $keys
+    | [$added[] | select(. as $name | ($name | runtime_name($name)) as $runtime | any($keys[]; . == $runtime))]
+    | unique | sort | if length == 0 then "none" else join(",") end
   ')
   container_env_changed=none
   if { [ "$snapshot_name" = target ] || [ "$snapshot_name" = rollback ]; } && [ "$changed_env_names" != "[]" ]; then
@@ -316,8 +493,18 @@ snapshot_from_json() {
         .services.teagramd.environment |= del(
           .TG_REPLICA_COUNT, .TG_CLIENT_ADDR_TRUST,
           .TG_PUBLIC_WEBSOCKET_LISTEN_ADDR, .TG_PUBLIC_REGISTRATION,
-          .TG_PUBLIC_WEBSOCKET_ALLOWED_ORIGINS, .TG_WELCOME_CHANNEL)
+          .TG_PUBLIC_WEBSOCKET_ALLOWED_ORIGINS, .TG_WELCOME_CHANNEL,
+          .TG_TURNSTILE_SITE_KEY, .TG_TURNSTILE_SECRET_KEY_FILE,
+          .TG_TURNSTILE_SIGNIN_ENABLED)
       end
+      | if (.services.teagramd.secrets | type) == "array" then
+          .services.teagramd.secrets |= map(select(.source != "teagramd_turnstile"))
+        else . end
+      | if (.services.teagramd.secrets | type) == "array" and (.services.teagramd.secrets | length) == 0 then
+          del(.services.teagramd.secrets)
+        else . end
+      | if (.secrets | type) == "object" then .secrets |= del(.teagramd_turnstile) else . end
+      | if (.secrets | type) == "object" and (.secrets | length) == 0 then del(.secrets) else . end
       | .services |= with_entries(
           if (.key | startswith("teagramd")) and (.value.volumes | type) == "array" then
             .value.volumes |= map(select((.type == "bind" and .source == $mode_source and

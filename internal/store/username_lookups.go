@@ -114,6 +114,17 @@ func (s *Store) CheckAndChargeUsernameLookup(ctx context.Context, callerID int64
 	return nil
 }
 
+// UsernameHandleTaken reports whether a handle has a live owner or an active
+// post-deletion hold. Held handles are unavailable without resolving to the
+// deleted channel.
+func (s *Store) UsernameHandleTaken(ctx context.Context, handle string) (bool, error) {
+	taken, err := s.q.UsernameHandleTaken(ctx, handle)
+	if err != nil {
+		return false, fmt.Errorf("username availability: %w", err)
+	}
+	return taken, nil
+}
+
 // UsernameByHandle looks up a normalized handle in the usernames table and
 // returns the resolved entity. It returns the user or channel along with
 // whether it was found. A handle with no row returns ok=false.

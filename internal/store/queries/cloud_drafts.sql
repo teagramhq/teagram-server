@@ -46,6 +46,7 @@ SELECT draft.peer_type,
                WHERE target.channel_id = draft.peer_id
                  AND target.local_id = draft.reply_to_msg_id
                  AND target.deleted = false
+                 AND (target.expires_at IS NULL OR target.expires_at > statement_timestamp())
                  AND target.action_type = 0
            ) THEN draft.reply_to_msg_id
            WHEN draft.peer_type <> 3 AND EXISTS (
@@ -55,6 +56,7 @@ SELECT draft.peer_type,
                  AND target.peer_id = draft.peer_id
                  AND target.local_id = draft.reply_to_msg_id
                  AND target.deleted = false
+                 AND (target.expires_at IS NULL OR target.expires_at > statement_timestamp())
                  AND target.action_type = 0
            ) THEN draft.reply_to_msg_id
            ELSE 0::bigint
@@ -101,6 +103,7 @@ SELECT changed.peer_type,
                WHERE target.channel_id = draft.peer_id
                  AND target.local_id = draft.reply_to_msg_id
                  AND target.deleted = false
+                 AND (target.expires_at IS NULL OR target.expires_at > statement_timestamp())
                  AND target.action_type = 0
            ) THEN draft.reply_to_msg_id
            WHEN draft.peer_type <> 3 AND EXISTS (
@@ -110,6 +113,7 @@ SELECT changed.peer_type,
                  AND target.peer_id = draft.peer_id
                  AND target.local_id = draft.reply_to_msg_id
                  AND target.deleted = false
+                 AND (target.expires_at IS NULL OR target.expires_at > statement_timestamp())
                  AND target.action_type = 0
            ) THEN draft.reply_to_msg_id
            ELSE 0::bigint
@@ -159,6 +163,7 @@ SELECT changed.peer_type,
                WHERE target.channel_id = draft.peer_id
                  AND target.local_id = draft.reply_to_msg_id
                  AND target.deleted = false
+                 AND (target.expires_at IS NULL OR target.expires_at > statement_timestamp())
                  AND target.action_type = 0
            ) THEN draft.reply_to_msg_id
            WHEN draft.peer_type <> 3 AND EXISTS (
@@ -168,6 +173,7 @@ SELECT changed.peer_type,
                  AND target.peer_id = draft.peer_id
                  AND target.local_id = draft.reply_to_msg_id
                  AND target.deleted = false
+                 AND (target.expires_at IS NULL OR target.expires_at > statement_timestamp())
                  AND target.action_type = 0
            ) THEN draft.reply_to_msg_id
            ELSE 0::bigint

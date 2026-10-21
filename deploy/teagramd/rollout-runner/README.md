@@ -572,11 +572,17 @@ recorded and current `.env` digests. Snapshots leave the named variables out of
 target and rollback containers still match the baseline on every other entry.
 A variable reaches `teagramd` only when the reviewed local Compose content maps
 it. Once a release with the variable is live, later deploys pass no names.
+The public server's Turnstile inputs are host-side aliases: name
+`TEAGRAM_TURNSTILE_SITE_KEY` and `TEAGRAM_TURNSTILE_SECRET_KEY_FILE` here;
+the verifier checks their corresponding `TG_TURNSTILE_*` container settings
+and the read-only secret-file mount. The disabled defaults this Compose gives a
+live container (empty site key and secret path, sign-in `false`, secret mounted
+from `/dev/null`) count as unset, so a Turnstile name can be added over them.
 
-The only existing value this runner currently allows changing is
-`TG_REGISTRATION`, between `closed` and `open`. Back up the verified `.env` to
-a root-owned mode-0600 file, change only that assignment in place, then pass
-the changed name and backup to the same `apply`:
+The runner allows changing `TG_REGISTRATION` between `closed` and `open`, and
+`TG_TURNSTILE_SIGNIN_ENABLED` between `false` and `true`. Back up the verified
+`.env` to a root-owned mode-0600 file, change only that assignment in place,
+then pass the changed name and backup to the same `apply`:
 
 ```sh
 sudo env ROLLOUT_RUNNER_SOURCE_SHA="$TOOL_SHA" COMPOSE_FILE="$COMPOSE_FILE" \
@@ -587,13 +593,16 @@ sudo env ROLLOUT_RUNNER_SOURCE_SHA="$TOOL_SHA" COMPOSE_FILE="$COMPOSE_FILE" \
 ```
 
 The backup digest must match the record; every other line must remain
-byte-for-byte identical, and the value must change between `closed` and
-`open`. Target and rollback snapshots verify that the running container
+byte-for-byte identical, and the named value must switch between its two
+listed values. Target and rollback snapshots verify that the running container
 receives the value from resolved Compose, record `container_env_changed`, and
 omit that one named value from `container_env_sha256` so all other entries
 remain pinned. A successful target records the changed `.env` digest. A
 verified rollback records that digest only when the old Compose render also
 retains the changed value; otherwise rollback verification fails closed.
+To deactivate public sign-in after activation, set
+`ROLLOUT_RUNNER_CHANGED_ENV=TG_TURNSTILE_SIGNIN_ENABLED` and change only its
+assignment from `true` to `false`; the signup credentials remain in place.
 
 ## Registration-open threat model
 

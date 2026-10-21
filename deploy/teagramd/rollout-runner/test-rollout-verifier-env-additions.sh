@@ -215,3 +215,194 @@ for setting in TG_PUBLIC_WEBSOCKET_LISTEN_ADDR TG_PUBLIC_REGISTRATION TG_PUBLIC_
   fi
   printf 'PASS unsafe container setting is rejected: %s\n' "$setting"
 done
+
+turnstile_legacy_inspect=$(inspect_json '')
+turnstile_legacy_snapshot=$(snapshot_from_json \
+  "$turnstile_legacy_inspect" "$COMPOSE_JSON" "$ENV_FILE" "$OVERRIDE_FILE" selected-compose-render baseline)
+turnstile_disabled_compose=$(jq -c '
+  .services.teagramd.environment += {
+    TG_TURNSTILE_SITE_KEY:"",
+    TG_TURNSTILE_SECRET_KEY_FILE:"",
+    TG_TURNSTILE_SIGNIN_ENABLED:"false"
+  }
+  | .services.teagramd.secrets = [{
+      source:"teagramd_turnstile",
+      target:"teagramd-turnstile"
+    }]
+  | .secrets.teagramd_turnstile = {file:"/dev/null"}
+' <<< "$COMPOSE_JSON")
+turnstile_disabled_inspect=$(printf '%s' "$turnstile_legacy_inspect" | jq -c '
+  .Config.Env += [
+    "TG_TURNSTILE_SITE_KEY=",
+    "TG_TURNSTILE_SECRET_KEY_FILE=",
+    "TG_TURNSTILE_SIGNIN_ENABLED=false"
+  ]
+  | .Mounts += [{
+      Type:"bind",
+      Source:"/dev/null",
+      Destination:"/run/secrets/teagramd-turnstile",
+      Mode:"ro",
+      RW:false,
+      Propagation:"rprivate"
+    }]
+')
+turnstile_disabled_snapshot=$(snapshot_from_json \
+  "$turnstile_disabled_inspect" "$turnstile_disabled_compose" "$ENV_FILE" "$OVERRIDE_FILE" selected-compose-render target)
+[ "$(jq -r '.config_sha256' <<< "$turnstile_legacy_snapshot")" = "$(jq -r '.config_sha256' <<< "$turnstile_disabled_snapshot")" ]
+[ "$(jq -r '.mounts_sha256' <<< "$turnstile_legacy_snapshot")" = "$(jq -r '.mounts_sha256' <<< "$turnstile_disabled_snapshot")" ]
+[ "$(jq -r '.container_env_sha256' <<< "$turnstile_legacy_snapshot")" = "$(jq -r '.container_env_sha256' <<< "$turnstile_disabled_snapshot")" ]
+printf '%s\n' 'PASS disabled Turnstile defaults and its exact read-only secret mount preserve rollout equivalence'
+
+turnstile_secret_dir="$ROLLOUT_CHECKOUT_PATH/.secrets"
+mkdir -m 700 "$turnstile_secret_dir"
+turnstile_secret_source="$turnstile_secret_dir/teagramd-turnstile"
+: > "$turnstile_secret_source"
+chmod 444 "$turnstile_secret_source"
+turnstile_compose=$(jq -c --arg source "$turnstile_secret_source" '
+  .services.teagramd.environment += {
+    TG_TURNSTILE_SITE_KEY:"fixture-site-key",
+    TG_TURNSTILE_SECRET_KEY_FILE:"/run/secrets/teagramd-turnstile",
+    TG_TURNSTILE_SIGNIN_ENABLED:"false"
+  }
+  | .services.teagramd.secrets = [{
+      source:"teagramd_turnstile",
+      target:"teagramd-turnstile"
+    }]
+  | .secrets.teagramd_turnstile = {file:$source}
+' <<< "$COMPOSE_JSON")
+turnstile_inspect=$(printf '%s' "$turnstile_legacy_inspect" | jq -c --arg source "$turnstile_secret_source" '
+  .Config.Env += [
+    "TG_TURNSTILE_SITE_KEY=fixture-site-key",
+    "TG_TURNSTILE_SECRET_KEY_FILE=/run/secrets/teagramd-turnstile",
+    "TG_TURNSTILE_SIGNIN_ENABLED=false"
+  ]
+  | .Mounts += [{
+      Type:"bind",
+      Source:$source,
+      Destination:"/run/secrets/teagramd-turnstile",
+      Mode:"ro",
+      RW:false,
+      Propagation:"rprivate"
+    }]
+')
+turnstile_enabled_snapshot=$(snapshot_from_json \
+  "$turnstile_inspect" "$turnstile_compose" "$ENV_FILE" "$OVERRIDE_FILE" selected-compose-render target)
+[ "$(jq -r '.config_sha256' <<< "$turnstile_legacy_snapshot")" = "$(jq -r '.config_sha256' <<< "$turnstile_enabled_snapshot")" ]
+[ "$(jq -r '.mounts_sha256' <<< "$turnstile_legacy_snapshot")" = "$(jq -r '.mounts_sha256' <<< "$turnstile_enabled_snapshot")" ]
+printf '%s\n' 'PASS mapped Turnstile credentials use a read-only file mount without changing rollout equivalence'
+
+turnstile_writable_inspect=$(printf '%s' "$turnstile_inspect" | jq -c '.Mounts[0].RW=true')
+if snapshot_from_json "$turnstile_writable_inspect" "$turnstile_compose" "$ENV_FILE" "$OVERRIDE_FILE" selected-compose-render target \
+  >/dev/null 2>"$TMP/turnstile-writable-mount.err"; then
+  printf '%s\n' 'FAIL writable Turnstile secret mount was accepted' >&2
+  exit 1
+fi
+printf '%s\n' 'PASS writable Turnstile secret mount is rejected'
+
+turnstile_unsafe_source_compose=$(printf '%s' "$turnstile_compose" | jq -c '.secrets.teagramd_turnstile.file="/etc/passwd"')
+turnstile_unsafe_source_inspect=$(printf '%s' "$turnstile_inspect" | jq -c '.Mounts[0].Source="/etc/passwd"')
+if snapshot_from_json "$turnstile_unsafe_source_inspect" "$turnstile_unsafe_source_compose" "$ENV_FILE" "$OVERRIDE_FILE" selected-compose-render target \
+  >/dev/null 2>"$TMP/turnstile-unsafe-source.err"; then
+  printf '%s\n' 'FAIL unapproved Turnstile secret source was accepted' >&2
+  exit 1
+fi
+printf '%s\n' 'PASS unapproved Turnstile secret source is rejected'
+
+turnstile_secret_env_inspect=$(printf '%s' "$turnstile_inspect" | jq -c '.Config.Env += ["TG_TURNSTILE_SECRET_KEY=fixture-secret"]')
+if snapshot_from_json "$turnstile_secret_env_inspect" "$turnstile_compose" "$ENV_FILE" "$OVERRIDE_FILE" selected-compose-render target \
+  >/dev/null 2>"$TMP/turnstile-secret-env.err"; then
+  printf '%s\n' 'FAIL Turnstile secret in container environment was accepted' >&2
+  exit 1
+fi
+printf '%s\n' 'PASS Turnstile secret in container environment is rejected'
+
+printf 'TEAGRAM_TURNSTILE_SITE_KEY=fixture-site-key\nTEAGRAM_TURNSTILE_SECRET_KEY_FILE=%s\n' \
+  "$turnstile_secret_source" > "$ENV_FILE"
+turnstile_alias_compose=$(jq -c --arg source "$turnstile_secret_source" '
+  .services.teagramd.environment += {
+    TG_TURNSTILE_SITE_KEY:"fixture-site-key",
+    TG_TURNSTILE_SECRET_KEY_FILE:"/run/secrets/teagramd-turnstile",
+    TG_TURNSTILE_SIGNIN_ENABLED:"false"
+  }
+  | .services.teagramd.secrets = [{source:"teagramd_turnstile",target:"teagramd-turnstile"}]
+  | .secrets.teagramd_turnstile = {file:$source}
+' <<< "$COMPOSE_JSON")
+turnstile_alias_inspect=$(printf '%s' "$turnstile_legacy_inspect" | jq -c --arg source "$turnstile_secret_source" '
+  .Config.Env += [
+    "TG_TURNSTILE_SITE_KEY=fixture-site-key",
+    "TG_TURNSTILE_SECRET_KEY_FILE=/run/secrets/teagramd-turnstile",
+    "TG_TURNSTILE_SIGNIN_ENABLED=false"
+  ]
+  | .Mounts += [{
+      Type:"bind",
+      Source:$source,
+      Destination:"/run/secrets/teagramd-turnstile",
+      Mode:"ro",
+      RW:false,
+      Propagation:"rprivate"
+    }]
+')
+turnstile_alias_snapshot=$(ROLLOUT_ADDED_ENV=TEAGRAM_TURNSTILE_SITE_KEY,TEAGRAM_TURNSTILE_SECRET_KEY_FILE \
+  snapshot_from_json "$turnstile_alias_inspect" "$turnstile_alias_compose" "$ENV_FILE" "$OVERRIDE_FILE" selected-compose-render target)
+[ "$(jq -r '.config_sha256' <<< "$turnstile_legacy_snapshot")" = "$(jq -r '.config_sha256' <<< "$turnstile_alias_snapshot")" ]
+[ "$(jq -r '.mounts_sha256' <<< "$turnstile_legacy_snapshot")" = "$(jq -r '.mounts_sha256' <<< "$turnstile_alias_snapshot")" ]
+[ "$(jq -r '.container_env_sha256' <<< "$turnstile_legacy_snapshot")" = "$(jq -r '.container_env_sha256' <<< "$turnstile_alias_snapshot")" ]
+[ "$(jq -r '.container_env_added' <<< "$turnstile_alias_snapshot")" = "TEAGRAM_TURNSTILE_SECRET_KEY_FILE,TEAGRAM_TURNSTILE_SITE_KEY" ]
+printf '%s\n' 'PASS named TEAGRAM host additions verify their mapped TG container settings'
+
+turnstile_signin_snapshot() {
+  local value=$1 name=$2 inspected compose
+  printf 'TEAGRAM_TURNSTILE_SITE_KEY=fixture-site-key\nTEAGRAM_TURNSTILE_SECRET_KEY_FILE=%s\nTG_TURNSTILE_SIGNIN_ENABLED=%s\n' \
+    "$turnstile_secret_source" "$value" > "$ENV_FILE"
+  inspected=$(printf '%s' "$turnstile_alias_inspect" | jq -c --arg value "$value" '
+    .Config.Env |= map(if startswith("TG_TURNSTILE_SIGNIN_ENABLED=") then "TG_TURNSTILE_SIGNIN_ENABLED=" + $value else . end)
+  ')
+  compose=$(printf '%s' "$turnstile_alias_compose" | jq -c --arg value "$value" \
+    '.services.teagramd.environment.TG_TURNSTILE_SIGNIN_ENABLED=$value')
+  ROLLOUT_CHANGED_ENV=TG_TURNSTILE_SIGNIN_ENABLED \
+    snapshot_from_json "$inspected" "$compose" "$ENV_FILE" "$OVERRIDE_FILE" selected-compose-render "$name"
+}
+
+turnstile_signin_off=$(turnstile_signin_snapshot false baseline)
+turnstile_signin_on=$(turnstile_signin_snapshot true target)
+[ "$(jq -r '.container_env_changed' <<< "$turnstile_signin_off")" = none ]
+[ "$(jq -r '.container_env_changed' <<< "$turnstile_signin_on")" = TG_TURNSTILE_SIGNIN_ENABLED ]
+[ "$(jq -r '.container_env_sha256' <<< "$turnstile_signin_off")" = "$(jq -r '.container_env_sha256' <<< "$turnstile_signin_on")" ]
+printf '%s\n' 'PASS named Turnstile sign-in changes accept only boolean values and preserve other environment equivalence'
+
+printf 'TG_TURNSTILE_SIGNIN_ENABLED=false\n' > "$ENV_FILE"
+turnstile_signin_old_inspect=$(printf '%s' "$turnstile_alias_inspect" | jq -c '
+  .Config.Env |= map(if startswith("TG_TURNSTILE_SIGNIN_ENABLED=") then "TG_TURNSTILE_SIGNIN_ENABLED=true" else . end)
+')
+ROLLOUT_CHANGED_ENV=TG_TURNSTILE_SIGNIN_ENABLED \
+  snapshot_from_json "$turnstile_signin_old_inspect" "$turnstile_alias_compose" "$ENV_FILE" "$OVERRIDE_FILE" selected-compose-render baseline >/dev/null
+if ROLLOUT_CHANGED_ENV=TG_TURNSTILE_SIGNIN_ENABLED \
+  snapshot_from_json "$turnstile_signin_old_inspect" "$turnstile_alias_compose" "$ENV_FILE" "$OVERRIDE_FILE" selected-compose-render target \
+  >/dev/null 2>"$TMP/turnstile-signin-old-target.err"; then
+  printf '%s\n' 'FAIL target kept the previous Turnstile sign-in value' >&2
+  exit 1
+fi
+if snapshot_from_json "$turnstile_signin_old_inspect" "$turnstile_alias_compose" "$ENV_FILE" "$OVERRIDE_FILE" selected-compose-render baseline \
+  >/dev/null 2>"$TMP/turnstile-signin-unnamed.err"; then
+  printf '%s\n' 'FAIL baseline accepted an unnamed Turnstile sign-in difference' >&2
+  exit 1
+fi
+printf '%s\n' 'PASS baseline may hold the previous value of a named Turnstile sign-in change; target and unnamed differences may not'
+
+printf 'TEAGRAM_TURNSTILE_SITE_KEY=fixture-site-key\nTEAGRAM_TURNSTILE_SECRET_KEY_FILE=%s\n' \
+  "$turnstile_secret_source" > "$ENV_FILE"
+turnstile_enable_baseline=$(ROLLOUT_ADDED_ENV=TEAGRAM_TURNSTILE_SITE_KEY,TEAGRAM_TURNSTILE_SECRET_KEY_FILE \
+  snapshot_from_json "$turnstile_disabled_inspect" "$turnstile_alias_compose" "$ENV_FILE" "$OVERRIDE_FILE" selected-compose-render baseline)
+[ "$(jq -r '.container_env_added' <<< "$turnstile_enable_baseline")" = none ]
+[ "$(jq -r '.container_env_sha256' <<< "$turnstile_enable_baseline")" = "$(jq -r '.container_env_sha256' <<< "$turnstile_alias_snapshot")" ]
+if ROLLOUT_ADDED_ENV=TEAGRAM_TURNSTILE_SITE_KEY,TEAGRAM_TURNSTILE_SECRET_KEY_FILE \
+  snapshot_from_json "$turnstile_disabled_inspect" "$turnstile_alias_compose" "$ENV_FILE" "$OVERRIDE_FILE" selected-compose-render target \
+  >/dev/null 2>"$TMP/turnstile-enable-target.err"; then
+  printf '%s\n' 'FAIL target kept the disabled Turnstile defaults' >&2
+  exit 1
+fi
+printf 'TG_TURNSTILE_SIGNIN_ENABLED=false\n' > "$ENV_FILE"
+turnstile_signin_add_baseline=$(ROLLOUT_ADDED_ENV=TG_TURNSTILE_SIGNIN_ENABLED \
+  snapshot_from_json "$turnstile_disabled_inspect" "$turnstile_disabled_compose" "$ENV_FILE" "$OVERRIDE_FILE" selected-compose-render baseline)
+[ "$(jq -r '.container_env_added' <<< "$turnstile_signin_add_baseline")" = none ]
+printf '%s\n' 'PASS live disabled Turnstile defaults count as unset when the deploy adds Turnstile settings'

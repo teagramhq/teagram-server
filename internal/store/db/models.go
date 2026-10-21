@@ -63,6 +63,16 @@ type Channel struct {
 	PubliclyDiscoverable bool
 	DefaultBannedRights  []string
 	SlowmodeSeconds      int16
+	PreHistoryHidden     bool
+	DeletedAt            pgtype.Timestamptz
+	Signatures           bool
+	TtlPeriod            int32
+}
+
+type ChannelDeletionJob struct {
+	ChannelID         int64
+	PostCursor        int64
+	PostsTombstonedAt pgtype.Timestamptz
 }
 
 type ChannelEvent struct {
@@ -94,6 +104,9 @@ type ChannelMessage struct {
 	ReplyToMsgID *int32
 	ActionType   int16
 	GroupedID    *int64
+	PostAuthor   *string
+	TtlPeriod    int32
+	ExpiresAt    pgtype.Timestamptz
 }
 
 type ChannelParticipant struct {
@@ -105,6 +118,7 @@ type ChannelParticipant struct {
 	Date            pgtype.Timestamptz
 	LastPostAt      pgtype.Timestamptz
 	AdminChangeInfo bool
+	AvailableMinID  int64
 }
 
 type ChannelPollMessage struct {
@@ -153,13 +167,16 @@ type ChannelUsernameChange struct {
 }
 
 type Chat struct {
-	ID                  int64
-	Title               string
-	CreatorID           int64
-	Version             int32
-	Date                pgtype.Timestamptz
-	PinnedMessageID     *int32
-	DefaultBannedRights []string
+	ID                     int64
+	Title                  string
+	CreatorID              int64
+	Version                int32
+	Date                   pgtype.Timestamptz
+	PinnedMessageID        *int32
+	DefaultBannedRights    []string
+	TtlPeriod              int32
+	CurrentPhotoFileID     *int64
+	CurrentPhotoUploaderID *int64
 }
 
 type ChatAbout struct {
@@ -203,6 +220,40 @@ type ChatReadReceipt struct {
 	ReaderID int64
 	SentAt   pgtype.Timestamptz
 	ReadAt   pgtype.Timestamptz
+}
+
+type ChatRemovalClientState struct {
+	OwnerID             int64
+	ChatID              int64
+	AuthKeyID           int64
+	DeliveredAt         pgtype.Timestamptz
+	AcknowledgedAt      pgtype.Timestamptz
+	DifferenceStatePts  *int64
+	DifferenceStateQts  *int64
+	DifferenceStateDate *int64
+	ResumeDate          *int64
+}
+
+type ChatRemovalClientStateHistory struct {
+	OwnerID             int64
+	AuthKeyID           int64
+	ChatID              int64
+	DifferenceStatePts  int64
+	DifferenceStateQts  int64
+	DifferenceStateDate int64
+	ResumeDate          int64
+}
+
+type ChatRemovalDifferenceStateToken struct {
+	OwnerID       int64
+	AuthKeyID     int64
+	LastStateDate int64
+}
+
+type ChatRemovalEvent struct {
+	OwnerID int64
+	ChatID  int64
+	Version int32
 }
 
 type CloudDraft struct {
@@ -448,6 +499,9 @@ type Message struct {
 	MessageTsv     interface{}
 	ReplyToTrusted bool
 	GroupedID      *int64
+	FwdPostAuthor  *string
+	TtlPeriod      int32
+	ExpiresAt      pgtype.Timestamptz
 }
 
 type MessageDeleteCapacityRefusal struct {
@@ -773,6 +827,12 @@ type UserDialogFilterState struct {
 	DefaultsSeededAt pgtype.Timestamptz
 }
 
+type UserDialogHistoryTtl struct {
+	UserLowID  int64
+	UserHighID int64
+	TtlPeriod  int32
+}
+
 type UserDialogPin struct {
 	OwnerID   int64
 	PeerType  int16
@@ -834,9 +894,11 @@ type UserPrivacyRuleUser struct {
 }
 
 type Username struct {
-	Handle    string
-	OwnerType string
-	OwnerID   int64
+	Handle        string
+	OwnerType     string
+	OwnerID       int64
+	HoldCreatorID *int64
+	HoldUntil     pgtype.Timestamptz
 }
 
 type UsernameChange struct {

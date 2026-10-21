@@ -52,7 +52,7 @@ func messageToTL(m store.Message, createUsers []int64, files map[int64]tg.Messag
 			PeerID: peerToTL(m.PeerType, m.PeerID),
 			FromID: &tg.PeerUser{UserID: m.FromID},
 			Date:   int(m.Date.Unix()),
-			Action: actionToTL(m, createUsers),
+			Action: actionToTL(m, createUsers, files),
 		}
 	}
 	msg := &tg.Message{
@@ -65,6 +65,9 @@ func messageToTL(m store.Message, createUsers []int64, files map[int64]tg.Messag
 	}
 	if m.EditDate != nil {
 		msg.EditDate = int(m.EditDate.Unix())
+	}
+	if m.TTLPeriod > 0 {
+		msg.SetTTLPeriod(m.TTLPeriod)
 	}
 	if m.GroupedID != nil {
 		msg.SetGroupedID(*m.GroupedID)
@@ -93,6 +96,9 @@ func messageToTL(m store.Message, createUsers []int64, files map[int64]tg.Messag
 			// Channel source: FromID is the channel, not a user.
 			fwd.SetFromID(&tg.PeerChannel{ChannelID: m.FwdChannelID})
 			fwd.SetChannelPost(int(m.FwdChannelPost))
+			if m.FwdPostAuthor != nil {
+				fwd.SetPostAuthor(*m.FwdPostAuthor)
+			}
 		} else if m.FwdFromID != 0 {
 			fwd.SetFromID(&tg.PeerUser{UserID: m.FwdFromID})
 		}
@@ -132,7 +138,7 @@ func reactionsToTL(reactions []store.Reaction) tg.MessageReactions {
 // files is keyed by file id exactly as messageToTL's is, but the "no media"
 // sentinel differs and the trap is worth naming:
 // channel_messages.file_id is NULL for no media, while messages.file_id is 0.
-func channelMessageToTL(m store.ChannelMessage, viewerID int64, files map[int64]tg.MessageMediaClass) (tg.MessageClass, error) {
+func channelMessageToTL(m store.ChannelMessage, viewerID int64, files map[int64]tg.MessageMediaClass, broadcast bool) (tg.MessageClass, error) {
 	if m.Deleted {
 		return &tg.MessageEmpty{ID: int(m.LocalID)}, nil
 	}
@@ -155,17 +161,36 @@ func channelMessageToTL(m store.ChannelMessage, viewerID int64, files map[int64]
 			Date:   int(m.Date.Unix()),
 			Action: &tg.MessageActionChatEditTitle{Title: m.Message},
 		}, nil
+	case store.ChannelMessageActionSetMessagesTTL:
+		return &tg.MessageService{
+			ID:     int(m.LocalID),
+			Out:    m.FromID == viewerID,
+			PeerID: &tg.PeerChannel{ChannelID: m.ChannelID},
+			FromID: &tg.PeerUser{UserID: m.FromID},
+			Date:   int(m.Date.Unix()),
+			Action: &tg.MessageActionSetMessagesTTL{Period: m.TTLPeriod},
+		}, nil
 	}
 	msg := &tg.Message{
 		ID:      int(m.LocalID),
 		Out:     m.FromID == viewerID,
 		PeerID:  &tg.PeerChannel{ChannelID: m.ChannelID},
-		FromID:  &tg.PeerUser{UserID: m.FromID},
 		Message: m.Message,
 		Date:    int(m.Date.Unix()),
 	}
+	if broadcast {
+		msg.SetPost(true)
+		if m.PostAuthor != nil {
+			msg.SetPostAuthor(*m.PostAuthor)
+		}
+	} else {
+		msg.SetFromID(&tg.PeerUser{UserID: m.FromID})
+	}
 	if m.EditDate != nil {
 		msg.EditDate = int(m.EditDate.Unix())
+	}
+	if m.TTLPeriod > 0 {
+		msg.SetTTLPeriod(m.TTLPeriod)
 	}
 	if m.GroupedID != nil {
 		msg.SetGroupedID(*m.GroupedID)
@@ -271,7 +296,7 @@ func photoSizeType(width, height int) string {
 
 // actionToTL maps a service message's action. Create and EditTitle carry the
 // title in the message text; Add/DeleteUser carry their subject in action_user_id.
-func actionToTL(m store.Message, createUsers []int64) tg.MessageActionClass {
+func actionToTL(m store.Message, createUsers []int64, files map[int64]tg.MessageMediaClass) tg.MessageActionClass {
 	switch m.Action {
 	case store.ChatActionCreate:
 		return &tg.MessageActionChatCreate{Title: m.Text, Users: createUsers}
@@ -281,9 +306,17 @@ func actionToTL(m store.Message, createUsers []int64) tg.MessageActionClass {
 		return &tg.MessageActionChatDeleteUser{UserID: m.ActionUserID}
 	case store.ChatActionEditTitle:
 		return &tg.MessageActionChatEditTitle{Title: m.Text}
+	case store.ChatActionSetMessagesTTL:
+		return &tg.MessageActionSetMessagesTTL{Period: m.TTLPeriod}
+	case store.ChatActionEditPhoto:
+		if media, ok := files[m.FileID].(*tg.MessageMediaPhoto); ok {
+			return &tg.MessageActionChatEditPhoto{Photo: media.Photo}
+		}
+	case store.ChatActionDeletePhoto:
+		return &tg.MessageActionChatDeletePhoto{}
 	default:
-		return &tg.MessageActionEmpty{}
 	}
+	return &tg.MessageActionEmpty{}
 }
 
 // chatToTL maps a stored chat to the wire tg.Chat. selfID marks the creator flag
@@ -298,7 +331,7 @@ func actionToTL(m store.Message, createUsers []int64) tg.MessageActionClass {
 //
 // DefaultBannedRights is always set, empty when nothing is restricted: clients
 // read a chat without it as granting a non-creator no rights at all.
-func chatToTL(c store.Chat, participantsCount int, selfID int64) *tg.Chat {
+func chatToTL(c store.Chat, participantsCount int, selfID int64, photo tg.ChatPhotoClass) *tg.Chat {
 	chat := &tg.Chat{
 		ID:                c.ID,
 		Title:             c.Title,
@@ -306,7 +339,7 @@ func chatToTL(c store.Chat, participantsCount int, selfID int64) *tg.Chat {
 		ParticipantsCount: participantsCount,
 		Date:              int(c.Date.Unix()),
 		Version:           c.Version,
-		Photo:             &tg.ChatPhotoEmpty{},
+		Photo:             photo,
 	}
 	chat.SetDefaultBannedRights(chatDefaultBannedRightsToTL(c.DefaultBannedRights))
 	return chat
@@ -337,7 +370,7 @@ func chatToTL(c store.Chat, participantsCount int, selfID int64) *tg.Chat {
 // restricted, for the same reason chatToTL does.
 func (h *handlers) channelToTL(c store.Channel, m store.ChannelMember, member bool, viewerID int64) tg.ChatClass {
 	ah := h.peers.Derive(viewerID, peerhash.KindChannel, c.ID)
-	if !member {
+	if !member || c.DeletedAt != nil {
 		return &tg.ChannelForbidden{ID: c.ID, AccessHash: ah, Title: ""}
 	}
 	ch := &tg.Channel{
@@ -354,6 +387,7 @@ func (h *handlers) channelToTL(c store.Channel, m store.ChannelMember, member bo
 	if c.Username != nil {
 		ch.Username = *c.Username
 	}
+	ch.SetSignatures(c.Signatures)
 	if c.Megagroup {
 		ch.SetDefaultBannedRights(chatDefaultBannedRightsToTL(c.DefaultBannedRights))
 	}
@@ -496,6 +530,11 @@ func stateToTL(s store.State) *tg.UpdatesState {
 // an intermediate state so the client re-requests the remainder.
 const maxDiffEvents = 500
 
+// chatRemovalStateDateTokenFloor keeps PTS-neutral removal confirmations out
+// of the wall-clock range returned by updates.getState. The unique Date token
+// and non-regressing PTS/QTS together confirm a difference response.
+const chatRemovalStateDateTokenFloor = 2_000_000_000
+
 // updateBatch is one user's hydrated updates plus everything a client must be
 // told alongside them. pts[i] is the pts of ups[i], ascending, so one batch can
 // serve several of the user's connections without re-querying per connection.
@@ -603,7 +642,7 @@ func (h *handlers) buildUpdateBatch(ctx context.Context, userID int64, fromPts i
 	if err != nil {
 		return updateBatch{}, err
 	}
-	b.chats, err = h.loadChats(ctx, basicChats, userID, nil)
+	b.chats, err = h.loadChats(ctx, basicChats, userID)
 	if err != nil {
 		return updateBatch{}, err
 	}
@@ -658,6 +697,16 @@ func (h *handlers) eventToUpdate(ctx context.Context, userID int64, ev store.Eve
 		m, ok := msgs[ev.LocalID]
 		if !ok {
 			return nil, nil, nil, nil, nil
+		}
+		if m.Deleted {
+			// Retained timeline events can outlive the message copy's visibility.
+			// Keep their PTS slot in the shared stream, but never serialize the
+			// deleted row's text, media, action, or sender references again.
+			empty := &tg.MessageEmpty{ID: int(m.LocalID)}
+			if ev.Type == store.EventEdit {
+				return &tg.UpdateEditMessage{Message: empty, Pts: ev.Pts, PtsCount: 1}, nil, nil, nil, nil
+			}
+			return &tg.UpdateNewMessage{Message: empty, Pts: ev.Pts, PtsCount: 1}, nil, nil, nil, nil
 		}
 		// The create action's user list is current member ids, so it is the same
 		// disclosure loadChats gates: a viewer removed from the chat still replays
@@ -722,6 +771,18 @@ func (h *handlers) eventToUpdate(ctx context.Context, userID int64, ev store.Eve
 
 	case store.EventDelete:
 		return &tg.UpdateDeleteMessages{Messages: []int{int(ev.LocalID)}, Pts: ev.Pts, PtsCount: 1}, nil, nil, nil, nil
+
+	case store.EventChatParticipantDelete:
+		chat, ok, err := h.store.ChatByID(ctx, ev.LocalID)
+		if err != nil {
+			return nil, nil, nil, nil, err
+		}
+		if !ok {
+			return nil, nil, nil, nil, fmt.Errorf("chat %d missing for participant-delete event", ev.LocalID)
+		}
+		return &tg.UpdateChatParticipantDelete{
+			ChatID: chat.ID, UserID: userID, Version: chat.Version,
+		}, []int64{userID}, []int64{chat.ID}, nil, nil
 
 	case store.EventReadIn, store.EventReadOut:
 		if ev.LocalID == 0 {
@@ -876,39 +937,39 @@ func (h *handlers) entitledUserIDs(ctx context.Context, viewerID int64, ids []in
 // rename the chat, so serving it would leave a writable channel into an account
 // that was ejected.
 //
-// The membership check is one query per chat per batch. A batch references very
-// few distinct chats, so it stays a straight loop with no cache.
-func (h *handlers) loadChats(ctx context.Context, ids map[int64]bool, viewerID int64, cache map[int64]*chatMembership) ([]tg.ChatClass, error) {
-	chats := make([]tg.ChatClass, 0, len(ids))
+// Membership, participant counts, and the selected photo pointer come from one
+// repeatable-read snapshot. A cache populated while rendering a create action
+// cannot authorize metadata read after that member has been removed.
+func (h *handlers) loadChats(ctx context.Context, ids map[int64]bool, viewerID int64) ([]tg.ChatClass, error) {
+	chatIDs := make([]int64, 0, len(ids))
 	for id := range ids {
-		c, ok, err := h.store.ChatByID(ctx, id)
-		if err != nil {
-			return nil, err
-		}
+		chatIDs = append(chatIDs, id)
+	}
+	snapshot, err := h.store.ChatListInfoForMemberSnapshot(ctx, viewerID, chatIDs)
+	if err != nil {
+		return nil, err
+	}
+
+	chats := make([]tg.ChatClass, 0, len(ids))
+	for _, id := range chatIDs {
+		chat, ok := snapshot.Chats[id]
 		if !ok {
-			continue
-		}
-		if cm, cached := cache[id]; cached {
-			if !cm.member {
-				chats = append(chats, &tg.ChatForbidden{ID: c.ID, Title: ""})
-				continue
+			// Keep absent chats omitted. This lookup is used only to distinguish a
+			// deleted chat from an existing chat excluded by the membership snapshot.
+			_, exists, err := h.store.ChatByID(ctx, id)
+			if err != nil {
+				return nil, err
 			}
-			chats = append(chats, chatToTL(c, cm.partCount, viewerID))
+			if exists {
+				chats = append(chats, &tg.ChatForbidden{ID: id, Title: ""})
+			}
 			continue
 		}
-		member, err := h.store.IsMember(ctx, id, viewerID)
+		wireChat, err := h.chatToTL(ctx, chat, int(snapshot.ParticipantCounts[id]), viewerID)
 		if err != nil {
-			return nil, err
+			return nil, fmt.Errorf("load chat %d photo: %w", id, err)
 		}
-		if !member {
-			chats = append(chats, &tg.ChatForbidden{ID: c.ID, Title: ""})
-			continue
-		}
-		parts, err := h.store.Participants(ctx, id)
-		if err != nil {
-			return nil, err
-		}
-		chats = append(chats, chatToTL(c, len(parts), viewerID))
+		chats = append(chats, wireChat)
 	}
 	return chats, nil
 }
@@ -921,22 +982,32 @@ func (h *handlers) loadChats(ctx context.Context, ids map[int64]bool, viewerID i
 // Two queries per channel per batch, no cache, for the reason loadChats states:
 // a batch names very few distinct channels.
 func (h *handlers) loadChannels(ctx context.Context, ids map[int64]bool, viewerID int64) ([]tg.ChatClass, error) {
+	channels, _, err := h.loadChannelsWithKinds(ctx, ids, viewerID)
+	return channels, err
+}
+
+// loadChannelsWithKinds returns channel kinds from the same rows used to
+// hydrate the channel chats, so callers that render channel messages do not
+// need a second ChannelByID read for each channel.
+func (h *handlers) loadChannelsWithKinds(ctx context.Context, ids map[int64]bool, viewerID int64) ([]tg.ChatClass, map[int64]bool, error) {
 	channels := make([]tg.ChatClass, 0, len(ids))
+	broadcasts := make(map[int64]bool, len(ids))
 	for id := range ids {
 		ch, ok, err := h.store.ChannelByID(ctx, id)
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		if !ok {
 			continue
 		}
+		broadcasts[id] = !ch.Megagroup
 		member, found, err := h.store.ChannelMemberOf(ctx, id, viewerID)
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		channels = append(channels, h.channelToTL(ch, member, found && !member.Banned(time.Now()), viewerID))
 	}
-	return channels, nil
+	return channels, broadcasts, nil
 }
 
 // channelBatch is one channel's hydrated updates plus everything a client must
@@ -959,7 +1030,7 @@ type channelBatch struct {
 // State is read first, then events are bounded to (fromPts, currentPts], so the
 // advertised pts never runs past an event omitted from the response. This is
 // the same ordering buildUpdates uses for the per-account stream.
-func (h *handlers) buildChannelUpdates(ctx context.Context, channelID, viewerID int64, fromPts, limit, currentPts int) (channelBatch, error) {
+func (h *handlers) buildChannelUpdates(ctx context.Context, channelID, viewerID int64, fromPts, limit, currentPts int, broadcast bool, availableMinID int64) (channelBatch, error) {
 	// Fetch one past the cap to detect truncation.
 	events, err := h.store.ChannelEventsWindow(ctx, channelID, fromPts, currentPts, limit+1)
 	if err != nil {
@@ -970,10 +1041,17 @@ func (h *handlers) buildChannelUpdates(ctx context.Context, channelID, viewerID 
 		events = events[:limit]
 		b.more = true
 	}
+	visibleEvents := make([]store.ChannelEvent, 0, len(events))
+	for _, ev := range events {
+		if ev.LocalID > 0 && ev.LocalID <= availableMinID {
+			continue
+		}
+		visibleEvents = append(visibleEvents, ev)
+	}
 
 	// Collect local ids for batched message load.
-	localIDs := make([]int64, 0, len(events))
-	for _, ev := range events {
+	localIDs := make([]int64, 0, len(visibleEvents))
+	for _, ev := range visibleEvents {
 		if ev.Type == store.EventNewMessage || ev.Type == store.EventEdit {
 			localIDs = append(localIDs, ev.LocalID)
 		}
@@ -1000,8 +1078,8 @@ func (h *handlers) buildChannelUpdates(ctx context.Context, channelID, viewerID 
 	}
 
 	peers := map[int64]bool{}
-	for _, ev := range events {
-		up, refs, upErr := h.channelEventToUpdate(ctx, channelID, viewerID, ev, msgs, files)
+	for _, ev := range visibleEvents {
+		up, refs, upErr := h.channelEventToUpdate(ctx, channelID, viewerID, ev, msgs, files, broadcast)
 		if upErr != nil {
 			return channelBatch{}, upErr
 		}
@@ -1035,7 +1113,7 @@ func (h *handlers) buildChannelUpdates(ctx context.Context, channelID, viewerID 
 // the update and the user ids it references. Delete events need no message-row
 // hydration; new and edit events for current tombstones are suppressed. A nil
 // update is also returned when a new/edit message row is not found.
-func (h *handlers) channelEventToUpdate(_ context.Context, channelID, viewerID int64, ev store.ChannelEvent, msgs map[int64]store.ChannelMessage, files map[int64]tg.MessageMediaClass) (tg.UpdateClass, []int64, error) {
+func (h *handlers) channelEventToUpdate(_ context.Context, channelID, viewerID int64, ev store.ChannelEvent, msgs map[int64]store.ChannelMessage, files map[int64]tg.MessageMediaClass, broadcast bool) (tg.UpdateClass, []int64, error) {
 	switch ev.Type {
 	case store.ChannelEventMetadataRefresh:
 		return &tg.UpdateChannel{ChannelID: channelID}, nil, nil
@@ -1060,25 +1138,29 @@ func (h *handlers) channelEventToUpdate(_ context.Context, channelID, viewerID i
 			h.log.Debug("channel message row not found", "local_id", ev.LocalID, "channel_id", channelID, "pts", ev.Pts)
 			return nil, nil, nil
 		}
-		message, err := channelMessageToTL(m, viewerID, files)
+		message, err := channelMessageToTL(m, viewerID, files, broadcast)
 		if err != nil {
 			return nil, nil, err
 		}
 		if m.Deleted {
 			return nil, nil, nil
 		}
+		var refs []int64
+		if !broadcast || m.Action != store.ChannelMessageActionNone {
+			refs = []int64{m.FromID}
+		}
 		if ev.Type == store.EventEdit {
 			return &tg.UpdateEditChannelMessage{
 				Message:  message,
 				Pts:      ev.Pts,
 				PtsCount: 1,
-			}, []int64{m.FromID}, nil
+			}, refs, nil
 		}
 		return &tg.UpdateNewChannelMessage{
 			Message:  message,
 			Pts:      ev.Pts,
 			PtsCount: 1,
-		}, []int64{m.FromID}, nil
+		}, refs, nil
 	default:
 		h.log.Debug("unknown channel event type", "type", ev.Type, "channel_id", channelID, "pts", ev.Pts)
 		return nil, nil, nil
@@ -1242,6 +1324,21 @@ func (h *handlers) handleGetDifferenceForConn(c *mtproto.Conn, r *mtproto.Reques
 	if r.UserID == 0 {
 		return nil, nil, errAuthKeyUnreg
 	}
+	chatRemovalAuthKeyID := mtproto.AuthKeyIDInt64(r.AuthKeyID)
+	pendingRemovalResumeDate, pendingRemovalStateFound, err := h.store.ChatRemovalResumeDateForState(
+		r.Ctx, r.UserID, chatRemovalAuthKeyID, req.Date,
+	)
+	if err != nil {
+		h.log.Error("read pending get difference chat removal state", "user_id", r.UserID, "err", err)
+		return nil, nil, errInternal
+	}
+	confirmedRemovalResumeDate, removalStateConfirmed, err := h.store.AcknowledgeChatRemovalEventsForState(
+		r.Ctx, r.UserID, chatRemovalAuthKeyID, req.Pts, req.Qts, req.Date,
+	)
+	if err != nil {
+		h.log.Error("acknowledge get difference chat removals", "user_id", r.UserID, "err", err)
+		return nil, nil, errInternal
+	}
 	var recovery DialogFilterCapture
 	if c != nil {
 		recovery = h.dialogFilterSync.Capture(c, r)
@@ -1268,6 +1365,11 @@ func (h *handlers) handleGetDifferenceForConn(c *mtproto.Conn, r *mtproto.Reques
 	}
 	draftReferenceDate := time.Unix(int64(req.Date), 0)
 	now := h.now()
+	if removalStateConfirmed {
+		draftReferenceDate = time.Unix(int64(confirmedRemovalResumeDate), 0)
+	} else if pendingRemovalStateFound {
+		draftReferenceDate = time.Unix(int64(pendingRemovalResumeDate), 0)
+	}
 	if now.Before(draftReferenceDate) {
 		draftReferenceDate = now
 	}
@@ -1461,7 +1563,7 @@ func (h *handlers) handleGetDifferenceForConn(c *mtproto.Conn, r *mtproto.Reques
 			h.log.Error("get difference chat admin users", "user_id", r.UserID, "err", uerr)
 			return nil, nil, errInternal
 		}
-		chats, cerr := h.loadChats(r.Ctx, chatIDs, r.UserID, nil)
+		chats, cerr := h.loadChats(r.Ctx, chatIDs, r.UserID)
 		if cerr != nil {
 			h.log.Error("get difference chat admin chats", "user_id", r.UserID, "err", cerr)
 			return nil, nil, errInternal
@@ -1477,6 +1579,47 @@ func (h *handlers) handleGetDifferenceForConn(c *mtproto.Conn, r *mtproto.Reques
 		}
 	}
 
+	// Chat removal is durable but PTS-neutral because its wire update has no
+	// pts/pts_count fields. getDifference reserves a Date token before returning;
+	// only a later request carrying that token acknowledges the page.
+	chatRemovalSnapshots, err := h.store.ChatRemovalSnapshotsForAuthKey(r.Ctx, r.UserID, chatRemovalAuthKeyID, int32(maxDiffEvents+1))
+	if err != nil {
+		h.log.Error("get difference chat removal snapshots", "user_id", r.UserID, "err", err)
+		return nil, nil, errInternal
+	}
+	chatRemovalMore := len(chatRemovalSnapshots) > maxDiffEvents
+	if chatRemovalMore {
+		chatRemovalSnapshots = chatRemovalSnapshots[:maxDiffEvents]
+	}
+	var chatRemovalUpdates []tg.UpdateClass
+	chatRemovalChatIDs := make([]int64, 0, len(chatRemovalSnapshots))
+	var chatRemovalUsers []tg.UserClass
+	var chatRemovalChats []tg.ChatClass
+	if len(chatRemovalSnapshots) > 0 {
+		userIDs := make(map[int64]bool, len(chatRemovalSnapshots))
+		chatIDs := make(map[int64]bool, len(chatRemovalSnapshots))
+		for _, snapshot := range chatRemovalSnapshots {
+			chatRemovalChatIDs = append(chatRemovalChatIDs, snapshot.ChatID)
+			userIDs[snapshot.OwnerID] = true
+			chatIDs[snapshot.ChatID] = true
+			chatRemovalUpdates = append(chatRemovalUpdates, &tg.UpdateChatParticipantDelete{
+				ChatID:  snapshot.ChatID,
+				UserID:  snapshot.OwnerID,
+				Version: snapshot.Version,
+			})
+		}
+		users, uerr := h.loadUsers(r.Ctx, userIDs, r.UserID)
+		if uerr != nil {
+			h.log.Error("get difference chat removal users", "user_id", r.UserID, "err", uerr)
+			return nil, nil, errInternal
+		}
+		chats, cerr := h.loadChats(r.Ctx, chatIDs, r.UserID)
+		if cerr != nil {
+			h.log.Error("get difference chat removal chats", "user_id", r.UserID, "err", cerr)
+			return nil, nil, errInternal
+		}
+		chatRemovalUsers, chatRemovalChats = users, chats
+	}
 	// Qts replay retains its independent 500-event cap. A client-ahead qts remains
 	// clamped to the current state.
 	var encMsgs []tg.EncryptedMessageClass
@@ -1504,7 +1647,7 @@ func (h *handlers) handleGetDifferenceForConn(c *mtproto.Conn, r *mtproto.Reques
 	// guarded overlap and suppress versions already acknowledged by this auth key,
 	// so moved counters and late commits do not skip rows behind the high-water tuple.
 	clientDate := time.Unix(int64(req.Date), 0)
-	if notifySettingsCursorStateFound && !notifySettingsCursorFound {
+	if removalStateConfirmed || pendingRemovalStateFound || (notifySettingsCursorStateFound && !notifySettingsCursorFound) {
 		clientDate = draftReferenceDate
 	}
 	var secretChats []store.SecretChat
@@ -1539,8 +1682,10 @@ func (h *handlers) handleGetDifferenceForConn(c *mtproto.Conn, r *mtproto.Reques
 	}
 	b.users = appendUniqueDifferenceUsers(b.users, adminUsers)
 	b.chats = appendUniqueDifferenceChats(b.chats, adminChats)
+	b.users = appendUniqueDifferenceUsers(b.users, chatRemovalUsers)
+	b.chats = appendUniqueDifferenceChats(b.chats, chatRemovalChats)
 
-	if !b.more && !encMore && !adminMore && !draftMore && !unreadMarkMore && !notifySettingsMore && len(b.ups) == 0 && len(adminUpdates) == 0 && len(encMsgs) == 0 && len(secretChats) == 0 && len(draftChanges) == 0 && len(unreadMarkChanges) == 0 && len(notifySettingsChanges) == 0 && !includeFilterRefresh && !includePinRefresh {
+	if !b.more && !encMore && !adminMore && !chatRemovalMore && !draftMore && !unreadMarkMore && !notifySettingsMore && len(b.ups) == 0 && len(adminUpdates) == 0 && len(chatRemovalUpdates) == 0 && len(encMsgs) == 0 && len(secretChats) == 0 && len(draftChanges) == 0 && len(unreadMarkChanges) == 0 && len(notifySettingsChanges) == 0 && !includeFilterRefresh && !includePinRefresh {
 		emptyDate := max(b.state.Date, requestDate)
 		if notifySettingsCursorDateFound {
 			emptyDate = max(emptyDate, notifySettingsCursorStateDate)
@@ -1572,6 +1717,7 @@ func (h *handlers) handleGetDifferenceForConn(c *mtproto.Conn, r *mtproto.Reques
 		}
 	}
 	other = append(other, adminUpdates...)
+	other = append(other, chatRemovalUpdates...)
 	for _, change := range draftChanges {
 		date := change.Draft.UpdatedAt
 		if !change.HasDraft {
@@ -1644,7 +1790,15 @@ func (h *handlers) handleGetDifferenceForConn(c *mtproto.Conn, r *mtproto.Reques
 	}
 	dateStreamUpdates := len(draftChanges) > 0 || len(unreadMarkChanges) > 0
 	notifySettingsCursorNeedsDateAck := notifySettingsCursorStateFound && (dateStreamUpdates || draftMore || unreadMarkMore || len(secretChats) > 0)
-	if notifySettingsAuthKeyID != 0 && (notifySettingsMore || (notifySettingsCursorStateFound && (len(notifySettingsChanges) > 0 || notifySettingsCursorNeedsDateAck))) {
+	var chatRemovalResumeDate int
+	if len(chatRemovalUpdates) > 0 {
+		// Keep a logical Date for the other replay streams, then reserve a unique
+		// removal token after all response cursors have selected their final Date.
+		chatRemovalResumeDate = st.Date
+		st.Date = max(st.Date, req.Date, chatRemovalStateDateTokenFloor-1) + 1
+	}
+	var notifySettingsCursorToSave *store.NotifySettingsDifferenceCursor
+	if notifySettingsAuthKeyID != 0 && (notifySettingsMore || (notifySettingsCursorStateFound && (len(notifySettingsChanges) > 0 || notifySettingsCursorNeedsDateAck || len(chatRemovalUpdates) > 0))) {
 		// Date acknowledges this page without consuming PTS/QTS. Keep its logical
 		// value separately so the other date-based streams resume at their cursor.
 		// Retain a cursor for the last page too; the following request acknowledges
@@ -1684,13 +1838,34 @@ func (h *handlers) handleGetDifferenceForConn(c *mtproto.Conn, r *mtproto.Reques
 			Last:                   last,
 			State:                  store.State{Pts: st.Pts, Qts: st.Qts, Seq: st.Seq, Date: st.Date},
 		}
-		if err := h.store.SaveNotifySettingsDifferenceCursor(r.Ctx, cursor); err != nil {
+		notifySettingsCursorToSave = &cursor
+	}
+	if len(chatRemovalChatIDs) > 0 {
+		if h.chatRemovalIssueHook != nil {
+			h.chatRemovalIssueHook()
+		}
+		// The allocator upsert serializes same-key requests, and the removal
+		// mappings commit before the response can be observed. A dropped reply
+		// remains pending because only a later client state can acknowledge it.
+		stateDate, issueErr := h.store.IssueChatRemovalEventsForAuthKey(
+			r.Ctx, r.UserID, chatRemovalAuthKeyID, chatRemovalChatIDs,
+			st.Date, st.Pts, st.Qts, chatRemovalResumeDate,
+		)
+		if issueErr != nil {
+			h.log.Error("issue get difference chat removals", "user_id", r.UserID, "err", issueErr)
+			return nil, nil, errInternal
+		}
+		st.Date = stateDate
+	}
+	if notifySettingsCursorToSave != nil {
+		notifySettingsCursorToSave.State.Date = st.Date
+		if err := h.store.SaveNotifySettingsDifferenceCursor(r.Ctx, *notifySettingsCursorToSave); err != nil {
 			h.log.Error("save get difference notification settings cursor", "user_id", r.UserID, "err", err)
 			return nil, nil, errInternal
 		}
 	}
 
-	if b.more || encMore || adminMore || draftMore || unreadMarkMore || notifySettingsMore {
+	if b.more || encMore || adminMore || chatRemovalMore || draftMore || unreadMarkMore || notifySettingsMore {
 		var afterReply func()
 		if len(adminEventIDs) > 0 {
 			afterReply = consumeAdminMarkers

@@ -1,0 +1,19 @@
+{
+  "layer": 228,
+  "client": "gotd v0.162.0",
+  "source": "captures/channels_togglePreHistoryHidden.1.txt",
+  "method": "channels.togglePreHistoryHidden",
+  "request": {
+    "type": "channels.togglePreHistoryHidden",
+    "fields": {
+      "channel": {
+        "type": "inputChannel",
+        "fields": {
+          "channel_id": "<N>",
+          "access_hash": "<N>"
+        }
+      },
+      "enabled": true
+    }
+  }
+}

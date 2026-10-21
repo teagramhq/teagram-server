@@ -17,11 +17,14 @@ import (
 type ChatAction int16
 
 const (
-	ChatActionNone       ChatAction = 0
-	ChatActionCreate     ChatAction = 1
-	ChatActionAddUser    ChatAction = 2
-	ChatActionDeleteUser ChatAction = 3
-	ChatActionEditTitle  ChatAction = 4
+	ChatActionNone           ChatAction = 0
+	ChatActionCreate         ChatAction = 1
+	ChatActionAddUser        ChatAction = 2
+	ChatActionDeleteUser     ChatAction = 3
+	ChatActionEditTitle      ChatAction = 4
+	ChatActionSetMessagesTTL ChatAction = 5
+	ChatActionEditPhoto      ChatAction = 6
+	ChatActionDeletePhoto    ChatAction = 7
 )
 
 // FanOut is one chat write to deliver to every member.
@@ -31,6 +34,7 @@ type FanOut struct {
 	Text         string // message body, or the title for Create/EditTitle
 	Action       ChatAction
 	ActionUserID int64 // subject of AddUser/DeleteUser; 0 otherwise
+	TTLPeriod    int   // period carried by a set-messages-TTL service action
 	RandomID     int64 // sender dedup token; 0 for service messages
 	// FileID attaches an uploaded file to every per-member copy. 0 = no media.
 	FileID int64
@@ -62,6 +66,11 @@ type FanOut struct {
 	FwdChannelID *int64
 	// FwdChannelPost is the local_id of the source channel post.
 	FwdChannelPost *int32
+
+	// chatPhotoAuthorized is set only by SetChatPhoto after it checked current
+	// membership and change_info under the chats row lock. Keeping it private
+	// prevents callers of SendChatMessage from forging a photo service action.
+	chatPhotoAuthorized bool
 }
 
 // SendChatMessage writes one chat message to every member of the chat: one
@@ -168,6 +177,19 @@ func fanOut(ctx context.Context, tx pgx.Tx, qtx *db.Queries, log *slog.Logger, f
 	if f.ChatID == 0 || f.FromID == 0 {
 		return Message{}, nil, false, ErrMessageInvalid
 	}
+	if f.Action == ChatActionSetMessagesTTL && !ValidHistoryTTLPeriod(f.TTLPeriod) {
+		return Message{}, nil, false, ErrHistoryTTLPeriodInvalid
+	}
+	switch f.Action {
+	case ChatActionEditPhoto:
+		if !f.chatPhotoAuthorized || f.FileID <= 0 {
+			return Message{}, nil, false, ErrMessageInvalid
+		}
+	case ChatActionDeletePhoto:
+		if !f.chatPhotoAuthorized || f.FileID != 0 {
+			return Message{}, nil, false, ErrMessageInvalid
+		}
+	}
 
 	// Early reject, ahead of the chats row lock, for the one fan-out a client
 	// causes directly. A non-member that takes that lock holds it to commit, which
@@ -243,7 +265,8 @@ func fanOut(ctx context.Context, tx pgx.Tx, qtx *db.Queries, log *slog.Logger, f
 	// One lock for the whole fan-out, taken before the first per-member insert,
 	// which is what makes the fan-out all-or-nothing with respect to the file:
 	// every copy carries the reference or the transaction writes none of them.
-	// Service messages carry no file id and reach no query here.
+	// Photo-edit service messages are the only service action that carries a
+	// file id, and SetChatPhoto has already checked its ownership and metadata.
 	if err = lockFileRefs(ctx, qtx, f.FileID); err != nil {
 		return Message{}, nil, false, err
 	}
@@ -254,7 +277,7 @@ func fanOut(ctx context.Context, tx pgx.Tx, qtx *db.Queries, log *slog.Logger, f
 	// hears the pts its own copy occupies rather than where its log has since
 	// moved to.
 	if f.RandomID != 0 {
-		existing, e := qtx.MessageByRandomID(ctx, db.MessageByRandomIDParams{OwnerID: f.FromID, RandomID: f.RandomID})
+		existing, e := messageRowByRandomID(ctx, qtx, f.FromID, f.RandomID)
 		switch {
 		case e == nil:
 			pts, e2 := fanoutPts(ctx, qtx, log, f, existing, owners)
@@ -349,6 +372,7 @@ func fanOut(ctx context.Context, tx pgx.Tx, qtx *db.Queries, log *slog.Logger, f
 			OwnerID: owner, LocalID: b.LocalID, PeerType: int16(PeerTypeChat), PeerID: f.ChatID, FromID: f.FromID,
 			Message: f.Text, Out: out, RandomID: randomID, PeerLocalID: 0,
 			FanoutID: fanoutID, ActionType: int16(f.Action), ActionUserID: f.ActionUserID, FileID: f.FileID,
+			TtlPeriod:      historyTTLPeriodValue(f.TTLPeriod),
 			ReplyToMsgID:   replyToMsgID,
 			ReplyToTrusted: replyToTrusted,
 			FwdFromID:      f.FwdFromID,

@@ -33,8 +33,8 @@ type settingsHandler struct {
 
 func assertAppConfig(t *testing.T, got *tg.HelpAppConfig, mode config.RegistrationMode) {
 	t.Helper()
-	if got.Hash != 3 {
-		t.Fatalf("app config hash = %d, want 3", got.Hash)
+	if got.Hash != 4 {
+		t.Fatalf("app config hash = %d, want 4", got.Hash)
 	}
 	object, ok := got.Config.(*tg.JSONObject)
 	if !ok {

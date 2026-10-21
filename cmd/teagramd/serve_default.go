@@ -31,7 +31,7 @@ func serveMTProto(ctx context.Context, server *mtproto.Server, tcp net.Listener,
 	}
 	if public != nil {
 		group.Go(func(ctx context.Context) error {
-			return server.ServeWebSocketWithHandler(ctx, public.listener, public.handler, public.originPatterns)
+			return server.ServeWebSocketWithHandlerAndDiscovery(ctx, public.listener, public.handler, public.originPatterns, public.discovery)
 		})
 	}
 	return group.Wait()

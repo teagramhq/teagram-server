@@ -12,20 +12,32 @@ import (
 )
 
 const channelPostDate = `-- name: ChannelPostDate :one
-SELECT date FROM channel_messages WHERE channel_id = $1 AND local_id = $2
+SELECT cm.date
+FROM channel_messages cm
+JOIN channel_participants cp
+  ON cp.channel_id = cm.channel_id
+ AND cp.user_id = $1::bigint
+WHERE cm.channel_id = $2::bigint
+  AND cm.local_id = $3::bigint
+  AND cm.local_id > cp.available_min_id
+  AND (cp.banned_until IS NULL OR cp.banned_until <= now())
+  AND EXISTS (
+      SELECT 1 FROM channels c
+      WHERE c.id = cm.channel_id AND c.deleted_at IS NULL
+  )
 `
 
 type ChannelPostDateParams struct {
+	OwnerID   int64
 	ChannelID int64
 	LocalID   int64
 }
 
 // ChannelPostDate is OwnedMessageDate for a channel cursor. The caller's right
-// to hold this cursor is settled before it runs — a channel cursor is refused
-// unless the caller is an unbanned member — so this reads no more than the
-// search itself would serve.
+// to hold this cursor is settled in this statement: a channel cursor resolves
+// only for an active member and a post above that member's history floor.
 func (q *Queries) ChannelPostDate(ctx context.Context, arg ChannelPostDateParams) (pgtype.Timestamptz, error) {
-	row := q.db.QueryRow(ctx, channelPostDate, arg.ChannelID, arg.LocalID)
+	row := q.db.QueryRow(ctx, channelPostDate, arg.OwnerID, arg.ChannelID, arg.LocalID)
 	var date pgtype.Timestamptz
 	err := row.Scan(&date)
 	return date, err
@@ -84,10 +96,11 @@ func (q *Queries) OwnedMessageDate(ctx context.Context, arg OwnedMessageDatePara
 }
 
 const ownedMessagesByLocalIDs = `-- name: OwnedMessagesByLocalIDs :many
-SELECT owner_id, local_id, peer_id, from_id, date, message, out, edit_date, deleted, random_id, peer_local_id, peer_type, fanout_id, action_type, action_user_id, file_id, reply_to_msg_id, fwd_from_id, fwd_date, fwd_channel_id, fwd_channel_post, message_tsv, reply_to_trusted, grouped_id FROM messages
+SELECT owner_id, local_id, peer_id, from_id, date, message, out, edit_date, deleted, random_id, peer_local_id, peer_type, fanout_id, action_type, action_user_id, file_id, reply_to_msg_id, fwd_from_id, fwd_date, fwd_channel_id, fwd_channel_post, message_tsv, reply_to_trusted, grouped_id, fwd_post_author, ttl_period, expires_at FROM messages
 WHERE owner_id = $1
   AND local_id = ANY($2::bigint[])
   AND deleted = false
+  AND (expires_at IS NULL OR expires_at > statement_timestamp())
 `
 
 type OwnedMessagesByLocalIDsParams struct {
@@ -133,6 +146,9 @@ func (q *Queries) OwnedMessagesByLocalIDs(ctx context.Context, arg OwnedMessages
 			&i.MessageTsv,
 			&i.ReplyToTrusted,
 			&i.GroupedID,
+			&i.FwdPostAuthor,
+			&i.TtlPeriod,
+			&i.ExpiresAt,
 		); err != nil {
 			return nil, err
 		}
@@ -154,6 +170,7 @@ WITH owned AS (
     WHERE owner_id = $2
       AND peer_type IN (1, 2)
       AND deleted = false
+      AND (expires_at IS NULL OR expires_at > statement_timestamp())
       AND message_tsv @@ plainto_tsquery('simple', $3)
       AND ($4::bool = false
            OR date < $5::timestamptz
@@ -171,12 +188,14 @@ WITH owned AS (
     FROM channel_messages cm
     WHERE cm.channel_id = ANY($10::bigint[])
       AND cm.deleted = false
+      AND (cm.expires_at IS NULL OR cm.expires_at > statement_timestamp())
       AND cm.action_type = 0
       AND cm.message_tsv @@ plainto_tsquery('simple', $3)
       AND EXISTS (
           SELECT 1 FROM channel_participants cp
           WHERE cp.channel_id = cm.channel_id
             AND cp.user_id = $2
+            AND cm.local_id > cp.available_min_id
             AND (cp.banned_until IS NULL OR cp.banned_until <= now())
       )
       AND ($4::bool = false
@@ -223,9 +242,9 @@ type SearchGlobalPageRow struct {
 // to make the composition uniform. Owned rows (peer_type 1 = user, 2 = chat) are
 // filtered by owner_id: a chat keeps one copy per member, so ownership already
 // is the membership check. Channel posts keep one shared row per post, so they
-// carry the membership predicate explicitly, as an EXISTS over
-// channel_participants including the banned_until clause — a plain join on
-// membership would keep serving posts to a banned member.
+// carry the membership, ban and floor predicates explicitly in an EXISTS over
+// channel_participants — a plain join on membership would keep serving posts to
+// a banned or floored member.
 //
 // channel_ids is a scope, never the authorization. It carries the caller's own
 // unbanned channel ids, read separately off the index on channel_participants
@@ -235,7 +254,8 @@ type SearchGlobalPageRow struct {
 // strips no stopwords, so the caller picks the frequency — that plan is a
 // parallel sequential scan of every post on the server. The EXISTS stays and
 // stays authoritative: a stale or wrong id list can only narrow this arm, never
-// widen it past the membership the EXISTS re-checks in the same statement.
+// widen it past the membership and floor the EXISTS re-checks in the same
+// statement.
 //
 // Ordering is newest-first by (date, peer, id), on the full stored timestamp
 // rather than on the whole second offset_rate carries. That is what keeps a page

@@ -8,6 +8,7 @@ import (
 	"encoding/base64"
 	"encoding/binary"
 	"encoding/json"
+	"strings"
 	"testing"
 
 	"github.com/teagramhq/teagram-server/internal/discovery"
@@ -20,7 +21,7 @@ func TestDocumentIsCanonicalAndContainsOnlyPublicIdentity(t *testing.T) {
 	if err != nil {
 		t.Fatalf("generate key: %v", err)
 	}
-	doc, err := discovery.NewDocument("mtproto.example.com:443", 2, &key.PublicKey)
+	doc, err := discovery.NewDocument("mtproto.example.com:443", 2, &key.PublicKey, false)
 	if err != nil {
 		t.Fatalf("new document: %v", err)
 	}
@@ -51,6 +52,73 @@ func TestDocumentIsCanonicalAndContainsOnlyPublicIdentity(t *testing.T) {
 	}
 	if got, ok := parsed.(*rsa.PublicKey); !ok || got.N.Cmp(key.N) != 0 || got.E != key.E {
 		t.Fatal("document SPKI does not identify the loaded public key")
+	}
+}
+
+func TestDocumentAdvertisesDemoGuestSignUpAsLiteralTrue(t *testing.T) {
+	t.Parallel()
+
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatalf("generate key: %v", err)
+	}
+	doc, err := discovery.NewDocument("mtproto.example.com:443", 2, &key.PublicKey, true)
+	if err != nil {
+		t.Fatalf("new document: %v", err)
+	}
+	data, err := discovery.MarshalDocument(doc)
+	if err != nil {
+		t.Fatalf("marshal document: %v", err)
+	}
+	if !bytes.HasSuffix(data, []byte(`,"demo":{"guest_sign_up":true}}`)) {
+		t.Fatalf("document does not contain the exact enabled capability: %s", data)
+	}
+	if doc.MTProto.Endpoint != "mtproto.example.com:443" || doc.MTProto.DCID != 2 || doc.WebSocket.Endpoint != "wss://mtproto.example.com/apiws" {
+		t.Fatalf("identity or transport changed when demo capability was enabled: %+v", doc)
+	}
+}
+
+func TestMarshalDocumentRejectsDisabledDemoCapability(t *testing.T) {
+	t.Parallel()
+
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatalf("generate key: %v", err)
+	}
+	doc, err := discovery.NewDocument("mtproto.example.com:443", 2, &key.PublicKey, false)
+	if err != nil {
+		t.Fatalf("new document: %v", err)
+	}
+	doc.Demo = &discovery.DemoCapabilities{}
+	if _, err := discovery.MarshalDocument(doc); err == nil {
+		t.Fatal("marshal document succeeded with a false demo capability")
+	}
+}
+
+func TestMarshalDocumentAdvertisesOnlyValidatedTurnstileSiteKey(t *testing.T) {
+	t.Parallel()
+
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatalf("generate key: %v", err)
+	}
+	doc, err := discovery.NewDocument("mtproto.example.com:443", 2, &key.PublicKey, false)
+	if err != nil {
+		t.Fatalf("new document: %v", err)
+	}
+	doc.Turnstile = &discovery.Turnstile{SiteKey: "public_site-key123"}
+	data, err := discovery.MarshalDocument(doc)
+	if err != nil {
+		t.Fatalf("marshal document with site key: %v", err)
+	}
+	if !bytes.HasSuffix(data, []byte(`,"turnstile":{"site_key":"public_site-key123"}}`)) {
+		t.Fatalf("document does not contain the public widget key: %s", data)
+	}
+	for _, invalid := range []string{"", "private key", strings.Repeat("a", 257)} {
+		doc.Turnstile = &discovery.Turnstile{SiteKey: invalid}
+		if _, err := discovery.MarshalDocument(doc); err == nil {
+			t.Fatalf("marshal document succeeded with invalid site key %q", invalid)
+		}
 	}
 }
 

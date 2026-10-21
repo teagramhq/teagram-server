@@ -951,6 +951,9 @@ func (s *Store) closeChannelPollWithUpdates(ctx context.Context, callerID int64,
 	if member.Banned(time.Now()) {
 		return false, nil, ErrNotMember
 	}
+	if ref.LocalID <= member.AvailableMinID {
+		return false, nil, ErrMessageInvalid
+	}
 	message, err := qtx.ChannelMessageByLocal(ctx, db.ChannelMessageByLocalParams{ChannelID: ref.PeerID, LocalID: ref.LocalID})
 	switch {
 	case errors.Is(err, pgx.ErrNoRows) || err == nil && (message.Deleted || message.ActionType != int16(ChannelMessageActionNone)):
@@ -1043,8 +1046,12 @@ func pollPeerAccess(ctx context.Context, q *db.Queries, viewerID int64, ref Poll
 		case err != nil:
 			return fmt.Errorf("poll channel membership: %w", err)
 		}
-		if channelMemberFromRow(row).Banned(time.Now()) {
+		member := channelMemberFromRow(row)
+		if member.Banned(time.Now()) {
 			return ErrNotMember
+		}
+		if ref.LocalID <= member.AvailableMinID {
+			return ErrMessageInvalid
 		}
 		return nil
 	}
@@ -1175,8 +1182,12 @@ func lockChannelPollForMutation(ctx context.Context, q *db.Queries, viewerID int
 	case err != nil:
 		return db.Poll{}, fmt.Errorf("lock poll channel membership: %w", err)
 	}
-	if channelMemberFromRow(participant).Banned(time.Now()) {
+	member := channelMemberFromRow(participant)
+	if member.Banned(time.Now()) {
 		return db.Poll{}, ErrNotMember
+	}
+	if ref.LocalID <= member.AvailableMinID {
+		return db.Poll{}, ErrMessageInvalid
 	}
 	row, err := q.PollByChannelMessage(ctx, db.PollByChannelMessageParams{
 		ChannelID: ref.PeerID,

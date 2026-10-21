@@ -25,6 +25,8 @@ const (
 	// message whose pin state changed.
 	EventPin   EventType = 6
 	EventUnpin EventType = 7
+	// EventChatParticipantDelete carries a deleted chat ID in Event.LocalID.
+	EventChatParticipantDelete EventType = 8
 )
 
 // State is a user's current update sequence, mirroring updates.State on the
@@ -41,7 +43,7 @@ type State struct {
 type Event struct {
 	Pts     int
 	Type    EventType
-	LocalID int64
+	LocalID int64 // Message ID, or chat ID for EventChatParticipantDelete.
 }
 
 // ErrPtsUnknown reports that the pts a stored message occupies cannot be

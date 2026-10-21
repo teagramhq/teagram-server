@@ -8,7 +8,7 @@ import (
 	"github.com/teagramhq/teagram-server/internal/store"
 )
 
-const appConfigHash = 3
+const appConfigHash = 4
 
 func (h *handlers) handleGetContentSettings(r *mtproto.Request) (bin.Encoder, error) {
 	var req tg.AccountGetContentSettingsRequest
@@ -50,35 +50,45 @@ func (h *handlers) handleGetAppConfig(r *mtproto.Request) (bin.Encoder, error) {
 	}
 	// help.appConfig carries an extensible JSON object, so the registration mode
 	// does not change the fixed TL response shape that stock clients decode.
+	values := []tg.JSONObjectValue{{
+		Key:   "chat_read_mark_expire_period",
+		Value: &tg.JSONNumber{Value: store.ChatReadMarkExpirePeriod},
+	}, {
+		Key:   "chat_read_mark_size_threshold",
+		Value: &tg.JSONNumber{Value: store.ChatReadMarkSizeThreshold},
+	}, {
+		Key:   "dialog_filters_chats_limit_default",
+		Value: &tg.JSONNumber{Value: 100},
+	}, {
+		Key:   "dialog_filters_enabled",
+		Value: &tg.JSONBool{Value: true},
+	}, {
+		Key:   "dialog_filters_limit_default",
+		Value: &tg.JSONNumber{Value: 10},
+	}, {
+		Key:   "dialog_filters_tooltip",
+		Value: &tg.JSONBool{Value: false},
+	}, {
+		Key:   "dialogs_folder_pinned_limit_default",
+		Value: &tg.JSONNumber{Value: 100},
+	}, {
+		Key:   "dialogs_pinned_limit_default",
+		Value: &tg.JSONNumber{Value: 5},
+	}, {
+		Key:   "registration_mode",
+		Value: &tg.JSONString{Value: string(h.registrationMode)},
+	}}
+	if h.turnstileSiteKey != "" && h.turnstileVerifier != nil {
+		values = append(values, tg.JSONObjectValue{
+			Key: "turnstile",
+			Value: &tg.JSONObject{Value: []tg.JSONObjectValue{{
+				Key:   "site_key",
+				Value: &tg.JSONString{Value: h.turnstileSiteKey},
+			}}},
+		})
+	}
 	return &tg.HelpAppConfig{
-		Hash: appConfigHash,
-		Config: &tg.JSONObject{Value: []tg.JSONObjectValue{{
-			Key:   "chat_read_mark_expire_period",
-			Value: &tg.JSONNumber{Value: store.ChatReadMarkExpirePeriod},
-		}, {
-			Key:   "chat_read_mark_size_threshold",
-			Value: &tg.JSONNumber{Value: store.ChatReadMarkSizeThreshold},
-		}, {
-			Key:   "dialog_filters_chats_limit_default",
-			Value: &tg.JSONNumber{Value: 100},
-		}, {
-			Key:   "dialog_filters_enabled",
-			Value: &tg.JSONBool{Value: true},
-		}, {
-			Key:   "dialog_filters_limit_default",
-			Value: &tg.JSONNumber{Value: 10},
-		}, {
-			Key:   "dialog_filters_tooltip",
-			Value: &tg.JSONBool{Value: false},
-		}, {
-			Key:   "dialogs_folder_pinned_limit_default",
-			Value: &tg.JSONNumber{Value: 100},
-		}, {
-			Key:   "dialogs_pinned_limit_default",
-			Value: &tg.JSONNumber{Value: 5},
-		}, {
-			Key:   "registration_mode",
-			Value: &tg.JSONString{Value: string(h.registrationMode)},
-		}}},
+		Hash:   appConfigHash,
+		Config: &tg.JSONObject{Value: values},
 	}, nil
 }

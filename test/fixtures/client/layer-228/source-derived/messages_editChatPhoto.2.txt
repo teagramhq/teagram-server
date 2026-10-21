@@ -1,0 +1,5 @@
+# source: constructed from gotd v0.162.0 layer-228 TL request types
+request: { messages.editChatPhoto
+  chat_id: <N> [LONG],
+  photo: { inputChatPhotoEmpty },
+},

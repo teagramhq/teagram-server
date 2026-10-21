@@ -283,13 +283,19 @@ func TestServeWebSocketProxyAddressDoesNotBlockNextAccept(t *testing.T) {
 func TestServeWebSocketNegotiationUsesOneBudget(t *testing.T) {
 	t.Parallel()
 
+	const (
+		handshakeBudget          = time.Second
+		slowHandshakeDelay       = 400 * time.Millisecond
+		healthyPeerDeadlineAfter = 1200 * time.Millisecond
+	)
+
 	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
 	defer cancel()
 	base := mustListenTCP(t, ctx, "127.0.0.1:0")
 	accepted := make(chan time.Time, 1)
 	ln := &timestampWebSocketListener{Listener: base, accepted: accepted}
 	srv := mtproto.New(exchange.PrivateKey{}, 2, mtproto.NewMemoryAuthKeyStore(), nil, nil)
-	srv.SetHandshakeTimeout(300 * time.Millisecond)
+	srv.SetHandshakeTimeout(handshakeBudget)
 	if err := srv.SetPreAuthLimits(mtproto.PreAuthLimits{MaxConns: 1}); err != nil {
 		t.Fatalf("set pre-auth limits: %v", err)
 	}
@@ -321,7 +327,7 @@ func TestServeWebSocketNegotiationUsesOneBudget(t *testing.T) {
 	if _, err := first.Write(request[:len(request)-2]); err != nil {
 		t.Fatalf("write partial raw WebSocket handshake: %v", err)
 	}
-	time.Sleep(200 * time.Millisecond)
+	time.Sleep(slowHandshakeDelay)
 	if _, err := first.Write(request[len(request)-2:]); err != nil {
 		t.Fatalf("finish raw WebSocket handshake: %v", err)
 	}
@@ -332,12 +338,15 @@ func TestServeWebSocketNegotiationUsesOneBudget(t *testing.T) {
 		t.Fatalf("write partial transport frame: %v", err)
 	}
 
-	dialCtx, stopDial := context.WithDeadline(ctx, acceptedAt.Add(450*time.Millisecond))
+	healthyPeerDeadline := acceptedAt.Add(healthyPeerDeadlineAfter)
+	dialCtx, stopDial := context.WithDeadline(ctx, healthyPeerDeadline)
 	defer stopDial()
 	var healthy *websocket.Conn
+	var healthyConnectedAt time.Time
 	for {
 		healthy, err = dialWebSocket(dialCtx, base.Addr().String())
 		if err == nil {
+			healthyConnectedAt = time.Now()
 			break
 		}
 		select {
@@ -347,8 +356,9 @@ func TestServeWebSocketNegotiationUsesOneBudget(t *testing.T) {
 		}
 	}
 	defer closeWebSocket(t, healthy)
-	if elapsed := time.Since(acceptedAt); elapsed > 450*time.Millisecond {
-		t.Fatalf("slot was released after %s, want one negotiation budget", elapsed)
+	if healthyConnectedAt.After(healthyPeerDeadline) {
+		t.Fatalf("healthy peer completed HTTP upgrade at %s, want by %s after acceptance",
+			healthyConnectedAt.Sub(acceptedAt), healthyPeerDeadlineAfter)
 	}
 }
 
@@ -496,7 +506,7 @@ func TestServeWebSocketDiscoveryCORSIsPathScoped(t *testing.T) {
 	if err != nil {
 		t.Fatalf("generate RSA key: %v", err)
 	}
-	doc, err := discovery.NewDocument("configured.example.test:443", 2, &rsaKey.PublicKey)
+	doc, err := discovery.NewDocument("configured.example.test:443", 2, &rsaKey.PublicKey, true)
 	if err != nil {
 		t.Fatalf("build discovery document: %v", err)
 	}
@@ -574,6 +584,78 @@ func TestServeWebSocketDiscoveryCORSIsPathScoped(t *testing.T) {
 		if err := resp.Body.Close(); err != nil {
 			t.Errorf("close response body for %s: %v", requestPath, err)
 		}
+	}
+}
+
+func TestServeWebSocketUsesListenerScopedTurnstileDiscovery(t *testing.T) {
+	t.Parallel()
+
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	defaultListener := mustListenTCP(t, ctx, "127.0.0.1:0")
+	publicListener := mustListenTCP(t, ctx, "127.0.0.1:0")
+	rsaKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatalf("generate RSA key: %v", err)
+	}
+	defaultDoc, err := discovery.NewDocument("configured.example.test:443", 2, &rsaKey.PublicKey, false)
+	if err != nil {
+		t.Fatalf("build default discovery document: %v", err)
+	}
+	publicDoc := defaultDoc
+	publicDoc.Turnstile = &discovery.Turnstile{SiteKey: "public-site-key"}
+	srv := mtproto.New(exchange.PrivateKey{}, 2, mtproto.NewMemoryAuthKeyStore(), nil, nil)
+	if err := srv.SetClientDiscoveryDocument(defaultDoc); err != nil {
+		t.Fatalf("set default discovery document: %v", err)
+	}
+	publicHandler := mtproto.HandlerFunc(func(*mtproto.Conn, *mtproto.Request) error { return nil })
+	served := make(chan error, 2)
+	go func() { served <- srv.ServeWebSocket(ctx, defaultListener) }()
+	go func() {
+		served <- srv.ServeWebSocketWithHandlerAndDiscovery(ctx, publicListener, publicHandler, nil, publicDoc)
+	}()
+	t.Cleanup(func() {
+		cancel()
+		for range 2 {
+			if err := <-served; err != nil && !errors.Is(err, context.Canceled) && !errors.Is(err, net.ErrClosed) {
+				t.Errorf("serve websocket: %v", err)
+			}
+		}
+	})
+
+	for _, tc := range []struct {
+		name     string
+		listener net.Listener
+		wantKey  bool
+	}{
+		{name: "tailnet", listener: defaultListener},
+		{name: "public", listener: publicListener, wantKey: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, "http://"+tc.listener.Addr().String()+"/.well-known/telegramd/client", nil)
+			if err != nil {
+				t.Fatalf("build discovery request: %v", err)
+			}
+			resp, err := http.DefaultClient.Do(req)
+			if err != nil {
+				t.Fatalf("get discovery: %v", err)
+			}
+			defer func() {
+				if err := resp.Body.Close(); err != nil {
+					t.Errorf("close discovery response: %v", err)
+				}
+			}()
+			var got discovery.Document
+			if err := json.NewDecoder(resp.Body).Decode(&got); err != nil {
+				t.Fatalf("decode discovery: %v", err)
+			}
+			if (got.Turnstile != nil) != tc.wantKey {
+				t.Fatalf("Turnstile discovery = %+v, want enabled %t", got.Turnstile, tc.wantKey)
+			}
+			if tc.wantKey && got.Turnstile.SiteKey != "public-site-key" {
+				t.Fatalf("public site key = %q, want public-site-key", got.Turnstile.SiteKey)
+			}
+		})
 	}
 }
 

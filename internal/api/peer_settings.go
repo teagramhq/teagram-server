@@ -72,7 +72,12 @@ func (h *handlers) handleGetPeerSettings(r *mtproto.Request) (bin.Encoder, error
 		result.Settings = userPeerSettingsBar(snapshot, r.UserID, peerID)
 		result.Users = append(result.Users, h.userToTL(snapshot.User, r.UserID, peerID == r.UserID, viewerContactEdge(snapshot, peerID), visibility[peerID]))
 	case store.PeerTypeChat:
-		result.Chats = append(result.Chats, chatToTL(snapshot.Chat, int(snapshot.ChatParticipantCount), r.UserID))
+		wireChat, err := h.chatToTL(r.Ctx, snapshot.Chat, int(snapshot.ChatParticipantCount), r.UserID)
+		if err != nil {
+			h.log.Error("get peer settings chat photo", "chat_id", peerID, "user_id", r.UserID, "err", err)
+			return nil, errInternal
+		}
+		result.Chats = append(result.Chats, wireChat)
 	case store.PeerTypeChannel:
 		result.Chats = append(result.Chats, h.channelToTL(snapshot.Channel, snapshot.ChannelMember, true, r.UserID))
 	}

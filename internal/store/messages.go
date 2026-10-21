@@ -54,6 +54,7 @@ type Message struct {
 	PeerID      int64
 	FromID      int64
 	Date        time.Time
+	TTLPeriod   int
 	Text        string
 	Out         bool
 	EditDate    *time.Time
@@ -86,6 +87,8 @@ type Message struct {
 	// FwdChannelPost is the local_id of the channel post when the source is a
 	// channel; 0 otherwise.
 	FwdChannelPost int32
+	// FwdPostAuthor is the source channel post's stored signature, if any.
+	FwdPostAuthor *string
 }
 
 func messageFromRow(r db.Message) Message {
@@ -96,6 +99,7 @@ func messageFromRow(r db.Message) Message {
 		PeerID:      r.PeerID,
 		FromID:      r.FromID,
 		Date:        r.Date.Time,
+		TTLPeriod:   int(r.TtlPeriod),
 		Text:        r.Message,
 		Out:         r.Out,
 		Deleted:     r.Deleted,
@@ -128,6 +132,7 @@ func messageFromRow(r db.Message) Message {
 	if r.FwdChannelPost != nil {
 		m.FwdChannelPost = *r.FwdChannelPost
 	}
+	m.FwdPostAuthor = r.FwdPostAuthor
 	return m
 }
 
@@ -143,22 +148,40 @@ func (s *Store) MessageByOwnerLocal(ctx context.Context, ownerID, localID int64)
 	return messageFromRow(r), true, nil
 }
 
-// MessageByRandomID returns the sender's own copy of the message carrying
-// randomID; ok=false when absent. It is the read half of the dedup token both
-// send paths write, for a caller that has to know whether a send is a resend
-// before it does work the send itself cannot undo.
+// MessageByRandomID returns the sender's live copy of the message carrying
+// randomID; ok=false when absent. ErrRandomIDExpired identifies a retained
+// dedup row whose content must not be replayed. It is the read half of the
+// dedup token both send paths write, for a caller that has to know whether a
+// send is a resend before it does work the send itself cannot undo.
 func (s *Store) MessageByRandomID(ctx context.Context, ownerID, randomID int64) (Message, bool, error) {
 	if randomID == 0 {
 		return Message{}, false, nil
 	}
-	r, err := s.q.MessageByRandomID(ctx, db.MessageByRandomIDParams{OwnerID: ownerID, RandomID: randomID})
+	r, err := messageRowByRandomID(ctx, s.q, ownerID, randomID)
 	switch {
 	case errors.Is(err, pgx.ErrNoRows):
 		return Message{}, false, nil
+	case errors.Is(err, ErrRandomIDExpired):
+		return Message{}, false, ErrRandomIDExpired
 	case err != nil:
 		return Message{}, false, fmt.Errorf("message by random id: %w", err)
 	}
 	return messageFromRow(r), true, nil
+}
+
+func messageRowByRandomID(ctx context.Context, q *db.Queries, ownerID, randomID int64) (db.Message, error) {
+	r, err := q.MessageByRandomID(ctx, db.MessageByRandomIDParams{OwnerID: ownerID, RandomID: randomID})
+	if !errors.Is(err, pgx.ErrNoRows) {
+		return r, err
+	}
+	expired, err := q.MessageRandomIDExpired(ctx, db.MessageRandomIDExpiredParams{OwnerID: ownerID, RandomID: randomID})
+	if err != nil {
+		return db.Message{}, fmt.Errorf("message random id expiry lookup: %w", err)
+	}
+	if expired {
+		return db.Message{}, ErrRandomIDExpired
+	}
+	return db.Message{}, pgx.ErrNoRows
 }
 
 // SendMessage persists both sides of a 1:1 message in one transaction. Each side
@@ -198,7 +221,7 @@ func (s *Store) SendMessage(ctx context.Context, fromID, toID int64, text string
 	// The client applies updateNewMessage by pts, so an old message carrying a
 	// current pts lands in a newer update's slot and silently displaces it.
 	if randomID != 0 {
-		existing, e := qtx.MessageByRandomID(ctx, db.MessageByRandomIDParams{OwnerID: fromID, RandomID: randomID})
+		existing, e := messageRowByRandomID(ctx, qtx, fromID, randomID)
 		switch {
 		case e == nil:
 			sPts, e2 := newMessagePts(ctx, qtx, fromID, existing.LocalID)
@@ -383,7 +406,7 @@ func (s *Store) SendUserPollMessage(ctx context.Context, fromID, toID, randomID 
 		return Message{}, nil, Poll{}, false, fmt.Errorf("ensure private poll recipient state: %w", err)
 	}
 	if randomID != 0 {
-		existing, lookupErr := qtx.MessageByRandomID(ctx, db.MessageByRandomIDParams{OwnerID: fromID, RandomID: randomID})
+		existing, lookupErr := messageRowByRandomID(ctx, qtx, fromID, randomID)
 		switch {
 		case lookupErr == nil:
 			if existing.Deleted || !existing.Out || existing.FromID != fromID || PeerType(existing.PeerType) != PeerTypeUser || existing.PeerID != toID {
@@ -522,7 +545,7 @@ func (s *Store) SendSavedPollMessage(ctx context.Context, userID, randomID int64
 		return Message{}, 0, Poll{}, false, fmt.Errorf("ensure saved poll state: %w", err)
 	}
 	if randomID != 0 {
-		existing, lookupErr := qtx.MessageByRandomID(ctx, db.MessageByRandomIDParams{OwnerID: userID, RandomID: randomID})
+		existing, lookupErr := messageRowByRandomID(ctx, qtx, userID, randomID)
 		switch {
 		case lookupErr == nil:
 			if !pollMessageMatches(existing, PollMessageRef{PeerType: PeerTypeUser, PeerID: userID, LocalID: existing.LocalID}) {
@@ -1660,6 +1683,8 @@ type ForwardSource struct {
 	ChannelID int64
 	// ChannelPost is the local_id of the channel post when the source is a channel.
 	ChannelPost int32
+	// PostAuthor is the stored signature on a broadcast channel post, if any.
+	PostAuthor *string
 	// FileID is the file attached to the source message; 0 = no media.
 	FileID int64
 }
@@ -1805,9 +1830,7 @@ func (s *Store) ForwardMessages(ctx context.Context, fromID int64, destPeerType 
 		// Dedup: check if this random_id was already used for a forward to this
 		// destination by this sender.
 		if randomID != 0 {
-			existing, e := qtx.MessageByRandomID(ctx, db.MessageByRandomIDParams{
-				OwnerID: fromID, RandomID: randomID,
-			})
+			existing, e := messageRowByRandomID(ctx, qtx, fromID, randomID)
 			switch {
 			case e == nil:
 				// Already forwarded — return the existing message at the pts it
@@ -1840,9 +1863,11 @@ func (s *Store) ForwardMessages(ctx context.Context, fromID int64, destPeerType 
 		fwdDate := pgtype.Timestamptz{Time: src.Date, Valid: true}
 		var fwdChannelID *int64
 		var fwdChannelPost *int32
+		var fwdPostAuthor *string
 		if src.ChannelID != 0 {
 			fwdChannelID = &src.ChannelID
 			fwdChannelPost = &src.ChannelPost
+			fwdPostAuthor = src.PostAuthor
 		}
 
 		if destPeerType == PeerTypeUser {
@@ -1864,6 +1889,7 @@ func (s *Store) ForwardMessages(ctx context.Context, fromID int64, destPeerType 
 				PeerLocalID: rb.LocalID, FanoutID: 0, ActionType: 0, ActionUserID: 0,
 				FileID: src.FileID, ReplyToMsgID: nil,
 				FwdFromID: &fwdFromID, FwdDate: fwdDate, FwdChannelID: fwdChannelID, FwdChannelPost: fwdChannelPost,
+				FwdPostAuthor: fwdPostAuthor,
 			}); err != nil {
 				return nil, nil, fmt.Errorf("insert sender forward: %w", err)
 			}
@@ -1881,6 +1907,7 @@ func (s *Store) ForwardMessages(ctx context.Context, fromID int64, destPeerType 
 					PeerLocalID: sb.LocalID, FanoutID: 0, ActionType: 0, ActionUserID: 0,
 					FileID: src.FileID, ReplyToMsgID: nil,
 					FwdFromID: &fwdFromID, FwdDate: fwdDate, FwdChannelID: fwdChannelID, FwdChannelPost: fwdChannelPost,
+					FwdPostAuthor: fwdPostAuthor,
 				}); err != nil {
 					return nil, nil, fmt.Errorf("insert dest forward: %w", err)
 				}
@@ -1927,6 +1954,7 @@ func (s *Store) ForwardMessages(ctx context.Context, fromID int64, destPeerType 
 					PeerLocalID: 0, FanoutID: fanoutID, ActionType: 0, ActionUserID: 0,
 					FileID: src.FileID, ReplyToMsgID: nil,
 					FwdFromID: &fwdFromID, FwdDate: fwdDate, FwdChannelID: fwdChannelID, FwdChannelPost: fwdChannelPost,
+					FwdPostAuthor: fwdPostAuthor,
 				}); err != nil {
 					return nil, nil, fmt.Errorf("insert forward %d: %w", uid, err)
 				}
@@ -1992,6 +2020,13 @@ func lockChannelForwardSources(ctx context.Context, qtx *db.Queries, fromID int6
 	} else if err != nil {
 		return fmt.Errorf("authorize channel forward source: %w", err)
 	}
+	channel, err := qtx.ChannelByID(ctx, channelID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return ErrNotMember
+	}
+	if err != nil {
+		return fmt.Errorf("load channel forward source kind: %w", err)
+	}
 
 	postIDs := make([]int64, len(sources))
 	for i, src := range sources {
@@ -2000,6 +2035,7 @@ func lockChannelForwardSources(ctx context.Context, qtx *db.Queries, fromID int6
 	postIDs = ascendingUnique(postIDs)
 	rows, err := qtx.ChannelMessagesForForward(ctx, db.ChannelMessagesForForwardParams{
 		ChannelID: channelID,
+		UserID:    fromID,
 		LocalIds:  postIDs,
 	})
 	if err != nil {
@@ -2015,10 +2051,14 @@ func lockChannelForwardSources(ctx context.Context, qtx *db.Queries, fromID int6
 			return ErrMessageInvalid
 		}
 		sources[i].FromID = row.FromID
+		if !channel.Megagroup {
+			sources[i].FromID = 0
+		}
 		sources[i].Date = row.Date.Time
 		sources[i].Text = row.Message
 		sources[i].ChannelID = row.ChannelID
 		sources[i].ChannelPost = int32(row.LocalID) //nolint:gosec // G115: channel ids fit int32 on the wire
+		sources[i].PostAuthor = row.PostAuthor
 		sources[i].FileID = 0
 		if row.FileID != nil {
 			sources[i].FileID = *row.FileID
