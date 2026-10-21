@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"errors"
+	"fmt"
 	"slices"
 	"strings"
 	"unicode/utf8"
@@ -116,6 +117,10 @@ func (h *handlers) addMissingCreatedChatInvitees(ctx context.Context, chatID int
 // only — never echoed to the caller. Only perOwner[callerID] leaves this
 // function, and its key set is used as the member set.
 func (h *handlers) chatUpdate(ctx context.Context, callerID int64, chat store.Chat, sender store.Message, perOwner map[int64]int, createUsers []int64) (*tg.Updates, error) {
+	files, err := h.loadFiles(ctx, []store.Message{sender})
+	if err != nil {
+		return nil, err
+	}
 	ids := make(map[int64]bool, len(perOwner))
 	for uid := range perOwner {
 		ids[uid] = true
@@ -124,19 +129,52 @@ func (h *handlers) chatUpdate(ctx context.Context, callerID int64, chat store.Ch
 	if err != nil {
 		return nil, err
 	}
+	wireChat, err := h.chatToTL(ctx, chat, len(perOwner), callerID)
+	if err != nil {
+		return nil, err
+	}
 	return &tg.Updates{
 		Updates: []tg.UpdateClass{
 			&tg.UpdateNewMessage{
-				// A service message never carries media.
-				Message:  messageToTL(sender, createUsers, nil, nil, nil),
+				Message:  messageToTL(sender, createUsers, files, nil, nil),
 				Pts:      perOwner[callerID],
 				PtsCount: 1,
 			},
 		},
 		Users: users,
-		Chats: []tg.ChatClass{chatToTL(chat, len(perOwner), callerID)},
+		Chats: []tg.ChatClass{wireChat},
 		Date:  int(sender.Date.Unix()),
 	}, nil
+}
+
+func (h *handlers) currentChatPhoto(ctx context.Context, chat store.Chat) (tg.ChatPhotoClass, tg.PhotoClass, error) {
+	if chat.CurrentPhotoFileID == nil {
+		return &tg.ChatPhotoEmpty{}, &tg.PhotoEmpty{}, nil
+	}
+	if chat.CurrentPhotoUploaderID == nil {
+		return nil, nil, fmt.Errorf("chat %d current photo has no uploader", chat.ID)
+	}
+	files, err := h.store.FilesByIDs(ctx, []int64{*chat.CurrentPhotoFileID})
+	if err != nil {
+		return nil, nil, fmt.Errorf("load chat %d current photo: %w", chat.ID, err)
+	}
+	file, ok := files[*chat.CurrentPhotoFileID]
+	if !ok || file.Kind != store.FileKindPhoto || file.UploaderID != *chat.CurrentPhotoUploaderID {
+		return nil, nil, fmt.Errorf("chat %d current photo %d is unavailable", chat.ID, *chat.CurrentPhotoFileID)
+	}
+	chatPhoto := &tg.ChatPhoto{PhotoID: file.ID, DCID: h.dcID}
+	if derivatives := file.PhotoDerivatives; derivatives != nil && len(derivatives.Stripped) > 0 {
+		chatPhoto.SetStrippedThumb(derivatives.Stripped)
+	}
+	return chatPhoto, h.photoToTL(file), nil
+}
+
+func (h *handlers) chatToTL(ctx context.Context, chat store.Chat, participantsCount int, selfID int64) (*tg.Chat, error) {
+	photo, _, err := h.currentChatPhoto(ctx, chat)
+	if err != nil {
+		return nil, err
+	}
+	return chatToTL(chat, participantsCount, selfID, photo), nil
 }
 
 // memberIDs returns the fan-out's owners in ascending order, matching the order
@@ -302,6 +340,103 @@ func (h *handlers) handleEditChatTitle(r *mtproto.Request) (bin.Encoder, error) 
 		return nil, errInternal
 	}
 	return ups, nil
+}
+
+// handleEditChatPhoto assembles a caller-owned uploaded JPEG without holding a
+// chat or member lock, then lets the store re-check membership and change_info
+// rights at the final mutation serialization point.
+func (h *handlers) handleEditChatPhoto(r *mtproto.Request) (bin.Encoder, error) {
+	var req tg.MessagesEditChatPhotoRequest
+	if err := req.Decode(r.Buf); err != nil {
+		return nil, errMethodNotImpl
+	}
+	if r.UserID == 0 {
+		return nil, errAuthKeyUnreg
+	}
+	if req.ChatID <= 0 {
+		return nil, errPeerIDInvalid
+	}
+
+	var fileID, clientFileID int64
+	var uploadParts int
+	var uploadName, uploadChecksum string
+	var hasUpload bool
+	switch photo := req.Photo.(type) {
+	case *tg.InputChatPhotoEmpty:
+		fileID = 0
+	case *tg.InputChatUploadedPhoto:
+		// Only the ordinary file flag is supported. Exact flag equality also
+		// rejects unknown future bits instead of silently accepting a mode this
+		// server does not implement.
+		if photo.Flags != 1 {
+			return nil, errInputRequestInvalid
+		}
+		input, ok := photo.GetFile()
+		if !ok || input == nil {
+			return nil, errMediaInvalid
+		}
+		var parseErr error
+		clientFileID, uploadParts, uploadName, uploadChecksum, parseErr = inputPhotoFileParts(input)
+		if parseErr != nil {
+			return nil, parseErr
+		}
+		if int64(uploadParts) > (maxPhotoJPEGBytes+store.MaxPartBytes-1)/store.MaxPartBytes {
+			return nil, errFilePartInvalid
+		}
+		if uploadName = sanitizeFileName(uploadName); uploadName == "" {
+			uploadName = "group.jpg"
+		}
+		hasUpload = true
+	default:
+		return nil, errInputRequestInvalid
+	}
+	if err := h.checkRateLimit(r, "update_profile", h.rateLimitUpdateProfile); err != nil {
+		return nil, err
+	}
+	if err := h.store.CheckChatPhotoEditPermission(r.Ctx, req.ChatID, r.UserID); err != nil {
+		switch {
+		case errors.Is(err, store.ErrNotMember):
+			return nil, errPeerIDInvalid
+		case errors.Is(err, store.ErrChatAdminRequired):
+			return nil, errChatAdminRequired
+		default:
+			h.log.Error("check chat photo permission", "chat_id", req.ChatID, "user_id", r.UserID, "err", err)
+			return nil, errInternal
+		}
+	}
+	if hasUpload {
+		file, err := h.assemblePhotoFile(r.Ctx, r.UserID, clientFileID, uploadParts, uploadName, uploadChecksum)
+		if err != nil {
+			return nil, err
+		}
+		// The stored file id is allocated by the server, not the client upload id.
+		fileID = file.ID
+	}
+
+	changed, chat, sender, perOwner, err := h.store.SetChatPhoto(r.Ctx, req.ChatID, r.UserID, fileID)
+	if errors.Is(err, store.ErrNotMember) {
+		return nil, errPeerIDInvalid
+	}
+	if errors.Is(err, store.ErrChatAdminRequired) {
+		return nil, errChatAdminRequired
+	}
+	if errors.Is(err, store.ErrChatPhotoUnavailable) {
+		return nil, errMediaInvalid
+	}
+	if err != nil {
+		h.log.Error("edit chat photo", "chat_id", req.ChatID, "user_id", r.UserID, "err", err)
+		return nil, errInternal
+	}
+	if !changed {
+		return &tg.Updates{Updates: []tg.UpdateClass{}, Date: int(h.now().Unix())}, nil
+	}
+	h.notifyOwners(r.Ctx, perOwner, 0)
+	updates, err := h.chatUpdate(r.Ctx, r.UserID, chat, sender, perOwner, nil)
+	if err != nil {
+		h.log.Error("edit chat photo updates", "chat_id", req.ChatID, "err", err)
+		return nil, errInternal
+	}
+	return updates, nil
 }
 
 // handleEditChatAbout serves messages.editChatAbout for basic groups and channels.
@@ -495,7 +630,12 @@ func (h *handlers) handleGetFullChat(r *mtproto.Request) (bin.Encoder, error) {
 		NotifySettings: notifySettings,
 	}
 	wireFull.SetTTLPeriod(chat.TTLPeriod)
-	wireFull.SetChatPhoto(&tg.PhotoEmpty{})
+	chatPhoto, fullPhoto, err := h.currentChatPhoto(r.Ctx, chat)
+	if err != nil {
+		h.log.Error("get full chat photo", "chat_id", chat.ID, "user_id", r.UserID, "err", err)
+		return nil, errInternal
+	}
+	wireFull.SetChatPhoto(fullPhoto)
 	pinnedMessageID, hasPinnedMessage, err := h.store.ChatPinnedMessageForOwner(r.Ctx, chat.ID, r.UserID)
 	if err != nil {
 		h.log.Error("get full chat pin", "chat_id", chat.ID, "user_id", r.UserID, "err", err)
@@ -510,9 +650,10 @@ func (h *handlers) handleGetFullChat(r *mtproto.Request) (bin.Encoder, error) {
 		return nil, errInternal
 	}
 
+	wireChat := chatToTL(chat, len(participants), r.UserID, chatPhoto)
 	return &tg.MessagesChatFull{
 		FullChat: wireFull,
-		Chats:    []tg.ChatClass{chatToTL(chat, len(participants), r.UserID)},
+		Chats:    []tg.ChatClass{wireChat},
 		Users:    users,
 	}, nil
 }
@@ -551,7 +692,12 @@ func (h *handlers) handleGetChats(r *mtproto.Request) (bin.Encoder, error) {
 			chats = append(chats, &tg.ChatForbidden{ID: id, Title: ""})
 			continue
 		}
-		chats = append(chats, chatToTL(chat, int(snapshot.ParticipantCounts[id]), r.UserID))
+		wireChat, err := h.chatToTL(r.Ctx, chat, int(snapshot.ParticipantCounts[id]), r.UserID)
+		if err != nil {
+			h.log.Error("get chats photo", "chat_id", id, "user_id", r.UserID, "err", err)
+			return nil, errInternal
+		}
+		chats = append(chats, wireChat)
 	}
 	return &tg.MessagesChats{Chats: chats}, nil
 }

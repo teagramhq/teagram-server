@@ -921,8 +921,38 @@ func (s *Store) FileForDownload(ctx context.Context, fileID, accessHash, callerI
 	return fileFromRow(row), nil
 }
 
+// CurrentChatPhotoForDownload resolves an InputPhotoFileLocation through the
+// live current-photo selection of a group the caller still belongs to.
+func (s *Store) CurrentChatPhotoForDownload(ctx context.Context, fileID, accessHash, callerID int64) (File, error) {
+	row, err := s.q.CurrentChatPhotoForDownload(ctx, db.CurrentChatPhotoForDownloadParams{
+		ViewerID: callerID, FileID: fileID, AccessHash: accessHash,
+	})
+	switch {
+	case errors.Is(err, pgx.ErrNoRows):
+		return File{}, ErrFileNotFound
+	case err != nil:
+		return File{}, fmt.Errorf("current chat photo for download: %w", err)
+	}
+	return fileFromRow(row), nil
+}
+
+// CurrentChatPeerPhotoForDownload resolves the exact current photo named by an
+// InputPeerPhotoFileLocation after checking the caller's group membership.
+func (s *Store) CurrentChatPeerPhotoForDownload(ctx context.Context, chatID, fileID, callerID int64) (File, error) {
+	row, err := s.q.CurrentChatPeerPhotoForDownload(ctx, db.CurrentChatPeerPhotoForDownloadParams{
+		ViewerID: callerID, ChatID: chatID, FileID: fileID,
+	})
+	switch {
+	case errors.Is(err, pgx.ErrNoRows):
+		return File{}, ErrFileNotFound
+	case err != nil:
+		return File{}, fmt.Errorf("current chat peer photo for download: %w", err)
+	}
+	return fileFromRow(row), nil
+}
+
 // PhotoDerivativeForDownload returns an advertised m size after checking the
-// same live message or current unbanned channel entitlement as FileForDownload.
+// live message, current chat-photo or current unbanned channel entitlement.
 func (s *Store) PhotoDerivativeForDownload(ctx context.Context, fileID, accessHash, callerID int64) (*PhotoDerivatives, error) {
 	row, err := s.q.PhotoDerivativeForDownload(ctx, db.PhotoDerivativeForDownloadParams{
 		ID: fileID, AccessHash: accessHash, OwnerID: callerID,

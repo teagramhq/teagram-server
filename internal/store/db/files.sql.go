@@ -69,6 +69,87 @@ func (q *Queries) ClearDeletedChannelFileRefs(ctx context.Context, fileID *int64
 	return result.RowsAffected(), nil
 }
 
+const currentChatPeerPhotoForDownload = `-- name: CurrentChatPeerPhotoForDownload :one
+SELECT f.id, f.uploader_id, f.access_hash, f.size, f.mime_type, f.file_name, f.stored, f.date, f.subtype_rights, f.media_kind, f.width, f.height
+FROM chats c
+JOIN chat_participants cp ON cp.chat_id = c.id AND cp.user_id = $1::bigint
+JOIN files f ON f.id = c.current_photo_file_id AND f.uploader_id = c.current_photo_uploader_id
+WHERE c.id = $2::bigint
+  AND c.current_photo_file_id = $3::bigint
+  AND f.stored = true
+  AND f.media_kind = 'photo'
+`
+
+type CurrentChatPeerPhotoForDownloadParams struct {
+	ViewerID int64
+	ChatID   int64
+	FileID   int64
+}
+
+// CurrentChatPeerPhotoForDownload serves the identity carried by
+// InputPeerPhotoFileLocation. It requires the exact current photo and a live
+// membership row for the peer named in the request.
+func (q *Queries) CurrentChatPeerPhotoForDownload(ctx context.Context, arg CurrentChatPeerPhotoForDownloadParams) (File, error) {
+	row := q.db.QueryRow(ctx, currentChatPeerPhotoForDownload, arg.ViewerID, arg.ChatID, arg.FileID)
+	var i File
+	err := row.Scan(
+		&i.ID,
+		&i.UploaderID,
+		&i.AccessHash,
+		&i.Size,
+		&i.MimeType,
+		&i.FileName,
+		&i.Stored,
+		&i.Date,
+		&i.SubtypeRights,
+		&i.MediaKind,
+		&i.Width,
+		&i.Height,
+	)
+	return i, err
+}
+
+const currentChatPhotoForDownload = `-- name: CurrentChatPhotoForDownload :one
+SELECT f.id, f.uploader_id, f.access_hash, f.size, f.mime_type, f.file_name, f.stored, f.date, f.subtype_rights, f.media_kind, f.width, f.height
+FROM chats c
+JOIN chat_participants cp ON cp.chat_id = c.id AND cp.user_id = $1::bigint
+JOIN files f ON f.id = c.current_photo_file_id AND f.uploader_id = c.current_photo_uploader_id
+WHERE c.current_photo_file_id = $2::bigint
+  AND f.access_hash = $3::bigint
+  AND f.stored = true
+  AND f.media_kind = 'photo'
+`
+
+type CurrentChatPhotoForDownloadParams struct {
+	ViewerID   int64
+	FileID     int64
+	AccessHash int64
+}
+
+// CurrentChatPhotoForDownload is the live basic-group photo entitlement for
+// InputPhotoFileLocation, which carries the file id and access hash but no peer.
+// Membership and current selection are checked in this one statement so the
+// decision is admitted at one committed database snapshot.
+func (q *Queries) CurrentChatPhotoForDownload(ctx context.Context, arg CurrentChatPhotoForDownloadParams) (File, error) {
+	row := q.db.QueryRow(ctx, currentChatPhotoForDownload, arg.ViewerID, arg.FileID, arg.AccessHash)
+	var i File
+	err := row.Scan(
+		&i.ID,
+		&i.UploaderID,
+		&i.AccessHash,
+		&i.Size,
+		&i.MimeType,
+		&i.FileName,
+		&i.Stored,
+		&i.Date,
+		&i.SubtypeRights,
+		&i.MediaKind,
+		&i.Width,
+		&i.Height,
+	)
+	return i, err
+}
+
 const deleteExpiredFileUploadGrants = `-- name: DeleteExpiredFileUploadGrants :exec
 DELETE FROM file_upload_grants
 WHERE owner_id = $1 AND created_at < $2
@@ -825,6 +906,12 @@ WHERE f.id = $3
             AND (cm.expires_at IS NULL OR cm.expires_at > statement_timestamp())
             AND (cp.banned_until IS NULL OR cp.banned_until <= now())
       )
+      OR EXISTS (
+          SELECT 1 FROM chats c
+          JOIN chat_participants cp ON cp.chat_id = c.id AND cp.user_id = $5::bigint
+          WHERE c.current_photo_file_id = f.id
+            AND c.current_photo_uploader_id = f.uploader_id
+      )
   )
 `
 
@@ -876,6 +963,12 @@ WHERE f.id = $1
             AND cm.local_id > cp.available_min_id
             AND (cm.expires_at IS NULL OR cm.expires_at > statement_timestamp())
             AND (cp.banned_until IS NULL OR cp.banned_until <= now())
+      )
+      OR EXISTS (
+          SELECT 1 FROM chats c
+          JOIN chat_participants cp ON cp.chat_id = c.id AND cp.user_id = $3::bigint
+          WHERE c.current_photo_file_id = f.id
+            AND c.current_photo_uploader_id = f.uploader_id
       )
   )
 `

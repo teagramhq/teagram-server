@@ -481,6 +481,8 @@ func TestSmokeClientRequestFixturesAreLayer228Shapes(t *testing.T) {
 		"messages_getDialogs.3",
 		"messages_createChat.1",
 		"messages_deleteChat.1",
+		"messages_editChatPhoto.1",
+		"messages_editChatPhoto.2",
 		"messages_getCommonChats.1",
 		"messages_deleteHistory.1",
 		"messages_editChatAbout.1",
@@ -690,6 +692,44 @@ func testSmokeClientRequestFixtures(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("create fixture group: %v", err)
 	}
+	groupPhotoBody := smokeJPEGAtUploadSize(t, smokePhotoPartCount)
+	const groupPhotoFileID = int64(13030121)
+	var groupPhotoResult tg.UpdatesClass
+	if err := fixtureClientCall(t, creator, "messages_editChatPhoto.1", func(ctx context.Context, api *tg.Client) error {
+		for part := range smokePhotoPartCount {
+			start := part * smokePhotoPartSize
+			ok, err := api.UploadSaveFilePart(ctx, &tg.UploadSaveFilePartRequest{
+				FileID: groupPhotoFileID, FilePart: part, Bytes: groupPhotoBody[start : start+smokePhotoPartSize],
+			})
+			if err != nil {
+				return err
+			}
+			if !ok {
+				return fmt.Errorf("group photo fixture upload part %d returned false", part)
+			}
+		}
+		photo := &tg.InputChatUploadedPhoto{}
+		photo.SetFile(&tg.InputFile{
+			ID: groupPhotoFileID, Parts: smokePhotoPartCount, Name: "group.jpg", MD5Checksum: smokePhotoMD5(groupPhotoBody),
+		})
+		var err error
+		groupPhotoResult, err = api.MessagesEditChatPhoto(ctx, &tg.MessagesEditChatPhotoRequest{ChatID: chatID, Photo: photo})
+		return err
+	}); err != nil {
+		t.Fatalf("replay edit-chat-photo upload fixture: %v", err)
+	}
+	photoFromEditUpdates(t, groupPhotoResult)
+	var groupPhotoClear tg.UpdatesClass
+	if err := fixtureClientCall(t, creator, "messages_editChatPhoto.2", func(ctx context.Context, api *tg.Client) error {
+		var err error
+		groupPhotoClear, err = api.MessagesEditChatPhoto(ctx, &tg.MessagesEditChatPhotoRequest{
+			ChatID: chatID, Photo: &tg.InputChatPhotoEmpty{},
+		})
+		return err
+	}); err != nil {
+		t.Fatalf("replay edit-chat-photo clear fixture: %v", err)
+	}
+	assertDeletePhotoAction(t, groupPhotoClear, "fixture clear")
 	if err := fixtureClientCall(t, creator, "messages_getCommonChats.1", func(ctx context.Context, api *tg.Client) error {
 		result, err := api.MessagesGetCommonChats(ctx, &tg.MessagesGetCommonChatsRequest{
 			UserID: inputUser(creator.id, member.id),

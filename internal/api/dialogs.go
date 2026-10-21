@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"fmt"
 
 	"github.com/gotd/td/bin"
 	"github.com/gotd/td/tg"
@@ -502,7 +503,11 @@ func (h *handlers) peerDialogsToTL(ctx context.Context, snapshot store.PeerDialo
 			chats = append(chats, &tg.ChatForbidden{ID: chat.ID, Title: ""})
 			continue
 		}
-		chats = append(chats, chatToTL(chat, len(snapshot.ChatMembers[chatID]), viewerID))
+		wireChat, err := h.chatToTL(ctx, chat, len(snapshot.ChatMembers[chatID]), viewerID)
+		if err != nil {
+			return nil, fmt.Errorf("render dialog chat %d: %w", chatID, err)
+		}
+		chats = append(chats, wireChat)
 	}
 	for _, channelID := range channelIDs {
 		channel, ok := snapshot.Channels[channelID]

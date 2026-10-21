@@ -164,6 +164,7 @@ type downloadLocation struct {
 	thumbSize       string
 	photo           bool
 	peerPhoto       bool
+	peerPhotoBig    bool
 	peer            tg.InputPeerClass
 	galleryOwnerID  int64
 	hasGalleryOwner bool
@@ -196,7 +197,7 @@ func parseDownloadLocation(loc tg.InputFileLocationClass) (downloadLocation, err
 			hasGalleryOwner: hasGalleryOwner,
 		}, nil
 	case *tg.InputPeerPhotoFileLocation:
-		return downloadLocation{fileID: l.PhotoID, peerPhoto: true, peer: l.Peer}, nil
+		return downloadLocation{fileID: l.PhotoID, peerPhoto: true, peerPhotoBig: l.Big, peer: l.Peer}, nil
 	default:
 		return downloadLocation{}, errLocationInvalid
 	}
@@ -374,7 +375,7 @@ func (h *handlers) handleGetFile(r *mtproto.Request) (bin.Encoder, error) {
 		return nil, err
 	}
 	if loc.peerPhoto {
-		return h.handleGetPeerProfilePhotoFile(r, loc.peer, loc.fileID, req.Offset, req.Limit)
+		return h.handleGetPeerProfilePhotoFile(r, loc.peer, loc.fileID, loc.peerPhotoBig, req.Offset, req.Limit)
 	}
 	missingBlobIsFault := true
 	gate := h.messageFileGate(loc)
@@ -400,6 +401,9 @@ func (h *handlers) handleGetFile(r *mtproto.Request) (bin.Encoder, error) {
 func (h *handlers) messageFileGate(loc downloadLocation) downloadGate {
 	return func(ctx context.Context, fileID, callerID int64) (authorizedDownload, error) {
 		file, err := h.store.FileForDownload(ctx, fileID, loc.accessHash, callerID)
+		if errors.Is(err, store.ErrFileNotFound) && loc.photo {
+			file, err = h.store.CurrentChatPhotoForDownload(ctx, fileID, loc.accessHash, callerID)
+		}
 		switch {
 		case errors.Is(err, store.ErrFileNotFound):
 			// A rejection is a client mistake, not a server event, and this path is

@@ -587,6 +587,21 @@ func GetStateForTest(s *store.Store, userID int64) (bin.Encoder, error) {
 	return testHandlers(s).handleGetState(&mtproto.Request{Ctx: context.Background(), UserID: userID})
 }
 
+// EditChatPhotoForTest invokes messages.editChatPhoto against the supplied
+// assembled-file backend and account storage cap.
+func EditChatPhotoForTest(
+	s *store.Store, userID int64, blobs blob.Store, maxUserStorageBytes int64,
+	req *tg.MessagesEditChatPhotoRequest,
+) (bin.Encoder, error) {
+	var buf bin.Buffer
+	if err := req.Encode(&buf); err != nil {
+		return nil, err
+	}
+	h := testHandlersWithBlobs(s, blobs)
+	h.maxUserStorageBytes = maxUserStorageBytes
+	return h.handleEditChatPhoto(&mtproto.Request{Ctx: context.Background(), UserID: userID, Buf: &buf})
+}
+
 // GetStateForTestWithAuthKey invokes updates.getState with an authorization ID
 // so tests can cover client-scoped acknowledgements.
 func GetStateForTestWithAuthKey(s *store.Store, userID int64, authKeyID [8]byte) (bin.Encoder, error) {
@@ -606,8 +621,13 @@ func PeerUserID(peer tg.InputPeerClass, viewerID int64) (int64, error) {
 // InputPeer and InputUserID use the test deriver from pgtest.
 var (
 	PeerToTL = peerToTL
-	ChatToTL = chatToTL
 )
+
+// ChatToTL exposes the historical media-free chat mapper signature for pure
+// mapping tests. Production chat reads hydrate the current photo first.
+func ChatToTL(c store.Chat, participantsCount int, selfID int64) *tg.Chat {
+	return chatToTL(c, participantsCount, selfID, &tg.ChatPhotoEmpty{})
+}
 
 func UserStatusToTL(u store.User, self bool) tg.UserStatusClass {
 	visibility := store.LastSeenVisibility{Level: store.LastSeenAccessExact}

@@ -52,7 +52,7 @@ func messageToTL(m store.Message, createUsers []int64, files map[int64]tg.Messag
 			PeerID: peerToTL(m.PeerType, m.PeerID),
 			FromID: &tg.PeerUser{UserID: m.FromID},
 			Date:   int(m.Date.Unix()),
-			Action: actionToTL(m, createUsers),
+			Action: actionToTL(m, createUsers, files),
 		}
 	}
 	msg := &tg.Message{
@@ -296,7 +296,7 @@ func photoSizeType(width, height int) string {
 
 // actionToTL maps a service message's action. Create and EditTitle carry the
 // title in the message text; Add/DeleteUser carry their subject in action_user_id.
-func actionToTL(m store.Message, createUsers []int64) tg.MessageActionClass {
+func actionToTL(m store.Message, createUsers []int64, files map[int64]tg.MessageMediaClass) tg.MessageActionClass {
 	switch m.Action {
 	case store.ChatActionCreate:
 		return &tg.MessageActionChatCreate{Title: m.Text, Users: createUsers}
@@ -308,9 +308,15 @@ func actionToTL(m store.Message, createUsers []int64) tg.MessageActionClass {
 		return &tg.MessageActionChatEditTitle{Title: m.Text}
 	case store.ChatActionSetMessagesTTL:
 		return &tg.MessageActionSetMessagesTTL{Period: m.TTLPeriod}
+	case store.ChatActionEditPhoto:
+		if media, ok := files[m.FileID].(*tg.MessageMediaPhoto); ok {
+			return &tg.MessageActionChatEditPhoto{Photo: media.Photo}
+		}
+	case store.ChatActionDeletePhoto:
+		return &tg.MessageActionChatDeletePhoto{}
 	default:
-		return &tg.MessageActionEmpty{}
 	}
+	return &tg.MessageActionEmpty{}
 }
 
 // chatToTL maps a stored chat to the wire tg.Chat. selfID marks the creator flag
@@ -325,7 +331,7 @@ func actionToTL(m store.Message, createUsers []int64) tg.MessageActionClass {
 //
 // DefaultBannedRights is always set, empty when nothing is restricted: clients
 // read a chat without it as granting a non-creator no rights at all.
-func chatToTL(c store.Chat, participantsCount int, selfID int64) *tg.Chat {
+func chatToTL(c store.Chat, participantsCount int, selfID int64, photo tg.ChatPhotoClass) *tg.Chat {
 	chat := &tg.Chat{
 		ID:                c.ID,
 		Title:             c.Title,
@@ -333,7 +339,7 @@ func chatToTL(c store.Chat, participantsCount int, selfID int64) *tg.Chat {
 		ParticipantsCount: participantsCount,
 		Date:              int(c.Date.Unix()),
 		Version:           c.Version,
-		Photo:             &tg.ChatPhotoEmpty{},
+		Photo:             photo,
 	}
 	chat.SetDefaultBannedRights(chatDefaultBannedRightsToTL(c.DefaultBannedRights))
 	return chat
@@ -948,7 +954,11 @@ func (h *handlers) loadChats(ctx context.Context, ids map[int64]bool, viewerID i
 				chats = append(chats, &tg.ChatForbidden{ID: c.ID, Title: ""})
 				continue
 			}
-			chats = append(chats, chatToTL(c, cm.partCount, viewerID))
+			wireChat, err := h.chatToTL(ctx, c, cm.partCount, viewerID)
+			if err != nil {
+				return nil, fmt.Errorf("load chat %d photo: %w", id, err)
+			}
+			chats = append(chats, wireChat)
 			continue
 		}
 		member, err := h.store.IsMember(ctx, id, viewerID)
@@ -963,7 +973,11 @@ func (h *handlers) loadChats(ctx context.Context, ids map[int64]bool, viewerID i
 		if err != nil {
 			return nil, err
 		}
-		chats = append(chats, chatToTL(c, len(parts), viewerID))
+		wireChat, err := h.chatToTL(ctx, c, len(parts), viewerID)
+		if err != nil {
+			return nil, fmt.Errorf("load chat %d photo: %w", id, err)
+		}
+		chats = append(chats, wireChat)
 	}
 	return chats, nil
 }

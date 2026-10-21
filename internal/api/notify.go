@@ -680,9 +680,14 @@ func (u *Updater) DeliverChatAbout(ctx context.Context, userID, chatID int64) {
 	if !found {
 		return
 	}
+	wireChat, err := u.h.chatToTL(ctx, chat, int(snapshot.ParticipantCounts[chatID]), userID)
+	if err != nil {
+		u.log.Error("deliver chat about photo", "chat_id", chatID, "user_id", userID, "err", err)
+		return
+	}
 	update := &tg.Updates{
 		Updates: []tg.UpdateClass{&tg.UpdateChat{ChatID: chatID}},
-		Chats:   []tg.ChatClass{chatToTL(chat, int(snapshot.ParticipantCounts[chatID]), userID)},
+		Chats:   []tg.ChatClass{wireChat},
 		Date:    int(time.Now().Unix()),
 		Seq:     0,
 	}

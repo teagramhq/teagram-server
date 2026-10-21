@@ -158,6 +158,33 @@ SELECT file_id, m_width, m_height, m_size, stripped
 FROM photo_derivatives
 WHERE file_id = ANY(sqlc.arg(ids)::bigint[]);
 
+-- CurrentChatPhotoForDownload is the live basic-group photo entitlement for
+-- InputPhotoFileLocation, which carries the file id and access hash but no peer.
+-- Membership and current selection are checked in this one statement so the
+-- decision is admitted at one committed database snapshot.
+-- name: CurrentChatPhotoForDownload :one
+SELECT f.*
+FROM chats c
+JOIN chat_participants cp ON cp.chat_id = c.id AND cp.user_id = sqlc.arg(viewer_id)::bigint
+JOIN files f ON f.id = c.current_photo_file_id AND f.uploader_id = c.current_photo_uploader_id
+WHERE c.current_photo_file_id = sqlc.arg(file_id)::bigint
+  AND f.access_hash = sqlc.arg(access_hash)::bigint
+  AND f.stored = true
+  AND f.media_kind = 'photo';
+
+-- CurrentChatPeerPhotoForDownload serves the identity carried by
+-- InputPeerPhotoFileLocation. It requires the exact current photo and a live
+-- membership row for the peer named in the request.
+-- name: CurrentChatPeerPhotoForDownload :one
+SELECT f.*
+FROM chats c
+JOIN chat_participants cp ON cp.chat_id = c.id AND cp.user_id = sqlc.arg(viewer_id)::bigint
+JOIN files f ON f.id = c.current_photo_file_id AND f.uploader_id = c.current_photo_uploader_id
+WHERE c.id = sqlc.arg(chat_id)::bigint
+  AND c.current_photo_file_id = sqlc.arg(file_id)::bigint
+  AND f.stored = true
+  AND f.media_kind = 'photo';
+
 -- PhotoDerivativeForDownload resolves the advertised m size after the normal
 -- file identity and message authorization gate. It returns no thumbnail body.
 -- name: PhotoDerivativeForDownload :one
@@ -184,6 +211,12 @@ WHERE f.id = sqlc.arg(id)
             AND cm.local_id > cp.available_min_id
             AND (cm.expires_at IS NULL OR cm.expires_at > statement_timestamp())
             AND (cp.banned_until IS NULL OR cp.banned_until <= now())
+      )
+      OR EXISTS (
+          SELECT 1 FROM chats c
+          JOIN chat_participants cp ON cp.chat_id = c.id AND cp.user_id = sqlc.arg(owner_id)::bigint
+          WHERE c.current_photo_file_id = f.id
+            AND c.current_photo_uploader_id = f.uploader_id
       )
   );
 
@@ -215,6 +248,12 @@ WHERE f.id = sqlc.arg(id)
             AND cm.local_id > cp.available_min_id
             AND (cm.expires_at IS NULL OR cm.expires_at > statement_timestamp())
             AND (cp.banned_until IS NULL OR cp.banned_until <= now())
+      )
+      OR EXISTS (
+          SELECT 1 FROM chats c
+          JOIN chat_participants cp ON cp.chat_id = c.id AND cp.user_id = sqlc.arg(owner_id)::bigint
+          WHERE c.current_photo_file_id = f.id
+            AND c.current_photo_uploader_id = f.uploader_id
       )
   );
 
