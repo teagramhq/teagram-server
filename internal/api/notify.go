@@ -615,24 +615,20 @@ func (u *Updater) deliverChannelView(ctx context.Context, userID, channelID int6
 	if len(conns) == 0 {
 		return
 	}
-	channel, found, err := u.h.store.ChannelByID(ctx, channelID)
+	snapshots, err := u.h.store.ChannelsForViewer(ctx, []int64{channelID}, userID)
 	if err != nil {
-		u.log.Error("deliver channel membership channel", "channel_id", channelID, "user_id", userID, "err", err)
+		u.log.Error("deliver channel membership snapshot", "channel_id", channelID, "user_id", userID, "err", err)
 		return
 	}
-	if !found {
+	if len(snapshots) == 0 {
 		return
 	}
-	member, found, err := u.h.store.ChannelMemberOf(ctx, channelID, userID)
-	if err != nil {
-		u.log.Error("deliver channel membership participant", "channel_id", channelID, "user_id", userID, "err", err)
-		return
-	}
-	isMember := found && !member.Banned(time.Now())
+	snapshot := snapshots[0]
+	isMember := snapshot.HasMember && !snapshot.Member.Banned(time.Now())
 	if !isMember && !sendForbidden {
 		return
 	}
-	chat := u.h.channelToTL(channel, member, isMember, userID)
+	chat := u.h.channelToTL(snapshot.Channel, snapshot.Member, isMember, userID)
 	if isMember {
 		if _, ok := chat.(*tg.Channel); !ok {
 			return

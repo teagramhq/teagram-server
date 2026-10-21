@@ -1839,17 +1839,22 @@ func (h *handlers) handleCheckChatInvite(r *mtproto.Request) (bin.Encoder, error
 		return nil, errInternal
 	}
 
-	member, found, err := h.store.ChannelMemberOf(r.Ctx, ch.ID, r.UserID)
+	snapshots, err := h.store.ChannelsForViewer(r.Ctx, []int64{ch.ID}, r.UserID)
 	if err != nil {
-		h.log.Error("check chat invite membership", "channel_id", ch.ID, "user_id", r.UserID, "err", err)
+		h.log.Error("check chat invite viewer snapshot", "channel_id", ch.ID, "user_id", r.UserID, "err", err)
 		return nil, errInternal
 	}
-	if found {
+	if len(snapshots) == 0 {
+		return nil, errPeerIDInvalid
+	}
+	snapshot := snapshots[0]
+	ch = snapshot.Channel
+	if snapshot.HasMember {
 		// A banned member holds a participant row, so it is still "already" — but
 		// the channel it gets back is the forbidden form, the same answer
 		// loadChannels gives. A ban that still served the live title would be
 		// cosmetic.
-		return &tg.ChatInviteAlready{Chat: h.channelToTL(ch, member, !member.Banned(time.Now()), r.UserID)}, nil
+		return &tg.ChatInviteAlready{Chat: h.channelToTL(ch, snapshot.Member, !snapshot.Member.Banned(time.Now()), r.UserID)}, nil
 	}
 	// No participants and no photo: M7 stores neither, and a preview naming who
 	// is inside a private channel would give away more than the title does.

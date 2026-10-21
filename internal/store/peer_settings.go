@@ -134,6 +134,12 @@ func (s *Store) PeerSettingsForViewer(ctx context.Context, ownerID int64, peer P
 		if snapshot.ChannelMember.Banned(s.now()) {
 			return finish(false)
 		}
+		channels := []Channel{snapshot.Channel}
+		members := map[int64]ChannelMember{peer.PeerID: snapshot.ChannelMember}
+		if err := s.hydrateCurrentChannelPhotos(ctx, qtx, channels, members); err != nil {
+			return PeerSettingsSnapshot{}, false, fmt.Errorf("load peer settings channel photo: %w", err)
+		}
+		snapshot.Channel = channels[0]
 		return finish(true)
 
 	default:

@@ -160,6 +160,179 @@ func TestChannelEditPhotoUsesSharedChannelHistoryForBothKinds(t *testing.T) {
 	}
 }
 
+func TestChannelPhotoShowsOnCurrentMemberResponses(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	s := openStore(t)
+	creator := mustUser(t, s, "+15551228911")
+	member := mustUser(t, s, "+15551228912")
+	participant := mustUser(t, s, "+15551228913")
+	joiner := mustUser(t, s, "+15551228914")
+	blobs := newBlobs(t)
+
+	channel, err := s.CreateChannel(ctx, creator.ID, "AvatarResponseGroup", "", true)
+	if err != nil {
+		t.Fatalf("create channel: %v", err)
+	}
+	if err := s.ClaimChannelUsername(ctx, channel.ID, "avatarresponsegroup"); err != nil {
+		t.Fatalf("make channel public: %v", err)
+	}
+	joinChannelByInvite(t, s, channel, member.ID)
+	joinChannelByInvite(t, s, channel, participant.ID)
+	fileID := selectChannelAvatarForTest(t, s, blobs, creator.ID, channel.ID, 228911)
+
+	joinResult, err := api.JoinChannelForTest(s, joiner.ID, &tg.ChannelsJoinChannelRequest{
+		Channel: api.InputChannel(joiner.ID, channel.ID),
+	})
+	if err != nil {
+		t.Fatalf("join public channel: %v", err)
+	}
+	join, ok := joinResult.(*tg.MessagesChatInviteJoinResultOk)
+	if !ok || join.Updates == nil {
+		t.Fatalf("join result = %T, want successful channel join", joinResult)
+	}
+	joinUpdates, ok := join.Updates.(*tg.Updates)
+	if !ok {
+		t.Fatalf("join updates = %T, want *tg.Updates", join.Updates)
+	}
+	assertChannelAvatarInChats(t, "channels.joinChannel", joinUpdates.Chats, channel.ID, fileID)
+
+	searchResult, err := api.ContactsSearchForTest(s, member.ID, &tg.ContactsSearchRequest{Q: "AvatarResponseGroup", Limit: 10})
+	if err != nil {
+		t.Fatalf("contacts.search: %v", err)
+	}
+	search, ok := searchResult.(*tg.ContactsFound)
+	if !ok {
+		t.Fatalf("contacts.search result = %T, want *tg.ContactsFound", searchResult)
+	}
+	assertChannelAvatarInChats(t, "contacts.search", search.Chats, channel.ID, fileID)
+
+	inputChannel := api.InputChannel(creator.ID, channel.ID)
+	participantsResult, err := api.GetChannelParticipantsForTest(s, creator.ID, &tg.ChannelsGetParticipantsRequest{
+		Channel: inputChannel,
+		Filter:  &tg.ChannelParticipantsRecent{},
+		Limit:   10,
+	})
+	if err != nil {
+		t.Fatalf("channels.getParticipants: %v", err)
+	}
+	participantsPage, ok := participantsResult.(*tg.ChannelsChannelParticipants)
+	if !ok {
+		t.Fatalf("channels.getParticipants result = %T, want *tg.ChannelsChannelParticipants", participantsResult)
+	}
+	assertChannelAvatarInChats(t, "channels.getParticipants", participantsPage.Chats, channel.ID, fileID)
+
+	participantResult, err := api.GetChannelParticipantForTest(s, creator.ID, &tg.ChannelsGetParticipantRequest{
+		Channel:     inputChannel,
+		Participant: api.InputPeerUser(creator.ID, member.ID),
+	})
+	if err != nil {
+		t.Fatalf("channels.getParticipant: %v", err)
+	}
+	participantInfo, ok := participantResult.(*tg.ChannelsChannelParticipant)
+	if !ok {
+		t.Fatalf("channels.getParticipant result = %T, want *tg.ChannelsChannelParticipant", participantResult)
+	}
+	assertChannelAvatarInChats(t, "channels.getParticipant", participantInfo.Chats, channel.ID, fileID)
+
+	peerSettingsResult, err := api.GetPeerSettingsForTest(s, member.ID, &tg.MessagesGetPeerSettingsRequest{
+		Peer: api.InputPeerChannel(member.ID, channel.ID),
+	})
+	if err != nil {
+		t.Fatalf("messages.getPeerSettings: %v", err)
+	}
+	peerSettings, ok := peerSettingsResult.(*tg.MessagesPeerSettings)
+	if !ok {
+		t.Fatalf("messages.getPeerSettings result = %T, want *tg.MessagesPeerSettings", peerSettingsResult)
+	}
+	assertChannelAvatarInChats(t, "messages.getPeerSettings", peerSettings.Chats, channel.ID, fileID)
+
+	commonChatsResult, err := api.GetCommonChatsForTest(s, member.ID, &tg.MessagesGetCommonChatsRequest{
+		UserID: api.InputUser(member.ID, participant.ID),
+		Limit:  10,
+	})
+	if err != nil {
+		t.Fatalf("messages.getCommonChats: %v", err)
+	}
+	commonChats, ok := commonChatsResult.(*tg.MessagesChatsSlice)
+	if !ok {
+		t.Fatalf("messages.getCommonChats result = %T, want *tg.MessagesChatsSlice", commonChatsResult)
+	}
+	assertChannelAvatarInChats(t, "messages.getCommonChats", commonChats.Chats, channel.ID, fileID)
+
+	dialogsResult, err := api.GetDialogsForTest(s, member.ID)
+	if err != nil {
+		t.Fatalf("messages.getDialogs: %v", err)
+	}
+	dialogs, ok := dialogsResult.(*tg.MessagesDialogs)
+	if !ok {
+		t.Fatalf("messages.getDialogs result = %T, want *tg.MessagesDialogs", dialogsResult)
+	}
+	assertChannelAvatarInChats(t, "messages.getDialogs", dialogs.Chats, channel.ID, fileID)
+
+	privateChannel, err := s.CreateChannel(ctx, creator.ID, "PrivateAvatarToggle", "", true)
+	if err != nil {
+		t.Fatalf("create private channel: %v", err)
+	}
+	privateFileID := selectChannelAvatarForTest(t, s, blobs, creator.ID, privateChannel.ID, 228912)
+	toggleResult, err := api.TogglePreHistoryHiddenForTest(s, creator.ID, &tg.ChannelsTogglePreHistoryHiddenRequest{
+		Channel: api.InputChannel(creator.ID, privateChannel.ID), Enabled: true,
+	})
+	if err != nil {
+		t.Fatalf("channels.togglePreHistoryHidden: %v", err)
+	}
+	toggle, ok := toggleResult.(*tg.Updates)
+	if !ok {
+		t.Fatalf("channels.togglePreHistoryHidden result = %T, want *tg.Updates", toggleResult)
+	}
+	assertChannelAvatarInChats(t, "channels.togglePreHistoryHidden", toggle.Chats, privateChannel.ID, privateFileID)
+
+	broadcast, err := s.CreateChannel(ctx, creator.ID, "SignatureAvatarToggle", "", false)
+	if err != nil {
+		t.Fatalf("create broadcast: %v", err)
+	}
+	broadcastFileID := selectChannelAvatarForTest(t, s, blobs, creator.ID, broadcast.ID, 228913)
+	signaturesResult, err := api.ToggleSignaturesForTest(s, creator.ID, &tg.ChannelsToggleSignaturesRequest{
+		Channel: api.InputChannel(creator.ID, broadcast.ID), SignaturesEnabled: true,
+	})
+	if err != nil {
+		t.Fatalf("channels.toggleSignatures: %v", err)
+	}
+	signatures, ok := signaturesResult.(*tg.Updates)
+	if !ok {
+		t.Fatalf("channels.toggleSignatures result = %T, want *tg.Updates", signaturesResult)
+	}
+	assertChannelAvatarInChats(t, "channels.toggleSignatures", signatures.Chats, broadcast.ID, broadcastFileID)
+}
+
+func selectChannelAvatarForTest(t *testing.T, s *store.Store, blobs blob.Store, userID, channelID, uploadID int64) int64 {
+	t.Helper()
+	body := jpegPhotoPayload(t, 320, 240)
+	saveParts(t, s, userID, uploadID, body)
+	result, err := api.EditChannelPhotoForTest(s, userID, blobs, api.TestMaxUserStorageBytes,
+		&tg.ChannelsEditPhotoRequest{
+			Channel: api.InputChannel(userID, channelID),
+			Photo:   uploadedGroupPhoto(uploadID, body),
+		})
+	if err != nil {
+		t.Fatalf("select channel photo: %v", err)
+	}
+	_, photo := channelAvatarEditFromResult(t, result)
+	return photo.ID
+}
+
+func assertChannelAvatarInChats(t *testing.T, source string, chats []tg.ChatClass, channelID, fileID int64) {
+	t.Helper()
+	for _, candidate := range chats {
+		channel, ok := candidate.(*tg.Channel)
+		if ok && channel.ID == channelID {
+			assertChannelAvatarChatPhoto(t, source, channel.Photo, fileID)
+			return
+		}
+	}
+	t.Fatalf("%s chats did not contain channel %d: %#v", source, channelID, chats)
+}
+
 func assertChannelAvatarMetadata(t *testing.T, s *store.Store, viewerID, channelID, fileID int64) {
 	t.Helper()
 	channelsResult, err := api.GetChannelsForTest(s, viewerID, &tg.ChannelsGetChannelsRequest{ID: []tg.InputChannelClass{api.InputChannel(viewerID, channelID)}})

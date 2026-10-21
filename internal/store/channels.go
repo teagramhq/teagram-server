@@ -391,6 +391,42 @@ type ChannelViewerSnapshot struct {
 	HasMember bool
 }
 
+// hydrateCurrentChannelPhotos attaches current avatars to channels already
+// paired with their viewer membership inside q's transaction. Callers pass only
+// membership rows from that same snapshot; banned members receive no photo.
+func (s *Store) hydrateCurrentChannelPhotos(
+	ctx context.Context,
+	q *db.Queries,
+	channels []Channel,
+	members map[int64]ChannelMember,
+) error {
+	now := s.now()
+	photoIDs := make([]int64, 0, len(channels))
+	for _, channel := range channels {
+		member, ok := members[channel.ID]
+		if ok && channel.DeletedAt == nil && !member.Banned(now) && channel.CurrentPhotoFileID != nil {
+			photoIDs = append(photoIDs, *channel.CurrentPhotoFileID)
+		}
+	}
+	photos, err := filesByIDs(ctx, q, photoIDs)
+	if err != nil {
+		return fmt.Errorf("load current channel photos: %w", err)
+	}
+	for i := range channels {
+		channel := &channels[i]
+		member, ok := members[channel.ID]
+		if !ok || channel.DeletedAt != nil || member.Banned(now) || channel.CurrentPhotoFileID == nil {
+			continue
+		}
+		file, ok := photos[*channel.CurrentPhotoFileID]
+		if !ok || file.Kind != FileKindPhoto || channel.CurrentPhotoUploaderID == nil || file.UploaderID != *channel.CurrentPhotoUploaderID {
+			return fmt.Errorf("channel %d current photo %d is unavailable", channel.ID, *channel.CurrentPhotoFileID)
+		}
+		channel.CurrentPhoto = &file
+	}
+	return nil
+}
+
 func (s *Store) ChannelsForViewer(ctx context.Context, channelIDs []int64, viewerID int64) ([]ChannelViewerSnapshot, error) {
 	ids := uniqueInt64s(channelIDs)
 	if len(ids) == 0 || viewerID <= 0 {
@@ -418,29 +454,18 @@ func (s *Store) ChannelsForViewer(ctx context.Context, channelIDs []int64, viewe
 		members[row.ChannelID] = channelMemberFromRow(row)
 	}
 	result := make([]ChannelViewerSnapshot, 0, len(rows))
-	photoIDs := make([]int64, 0, len(rows))
+	channels := make([]Channel, len(rows))
 	for _, row := range rows {
 		channel := channelFromRow(row)
 		member, hasMember := members[row.ID]
 		result = append(result, ChannelViewerSnapshot{Channel: channel, Member: member, HasMember: hasMember})
-		if channel.DeletedAt == nil && hasMember && !member.Banned(time.Now()) && channel.CurrentPhotoFileID != nil {
-			photoIDs = append(photoIDs, *channel.CurrentPhotoFileID)
-		}
+		channels[len(result)-1] = channel
 	}
-	photos, err := filesByIDs(ctx, qtx, photoIDs)
-	if err != nil {
+	if err := s.hydrateCurrentChannelPhotos(ctx, qtx, channels, members); err != nil {
 		return nil, fmt.Errorf("load channel viewer photos: %w", err)
 	}
 	for i := range result {
-		channel := &result[i].Channel
-		if channel.DeletedAt != nil || !result[i].HasMember || result[i].Member.Banned(time.Now()) || channel.CurrentPhotoFileID == nil {
-			continue
-		}
-		file, ok := photos[*channel.CurrentPhotoFileID]
-		if !ok || file.Kind != FileKindPhoto || channel.CurrentPhotoUploaderID == nil || file.UploaderID != *channel.CurrentPhotoUploaderID {
-			return nil, fmt.Errorf("channel %d current photo %d is unavailable", channel.ID, *channel.CurrentPhotoFileID)
-		}
-		channel.CurrentPhoto = &file
+		result[i].Channel = channels[i]
 	}
 	if err = tx.Commit(ctx); err != nil {
 		return nil, fmt.Errorf("commit channel viewer snapshot: %w", err)
@@ -687,10 +712,18 @@ func (s *Store) JoinChannelByInvite(ctx context.Context, hash string, userID int
 	case err == nil:
 		// Already a member. Nothing is written — not the caps' business either,
 		// since the count does not move.
+		resultChannel := channelFromRow(channel)
+		resultMember := channelMemberFromRow(member)
+		channels := []Channel{resultChannel}
+		if err := s.hydrateCurrentChannelPhotos(ctx, qtx, channels, map[int64]ChannelMember{
+			invite.ChannelID: resultMember,
+		}); err != nil {
+			return Channel{}, ChannelMember{}, fmt.Errorf("load joined channel photo: %w", err)
+		}
 		if err = tx.Commit(ctx); err != nil {
 			return Channel{}, ChannelMember{}, fmt.Errorf("commit: %w", err)
 		}
-		return channelFromRow(channel), channelMemberFromRow(member), nil
+		return channels[0], resultMember, nil
 	case !errors.Is(err, pgx.ErrNoRows):
 		return Channel{}, ChannelMember{}, fmt.Errorf("channel participant: %w", err)
 	}
@@ -739,11 +772,19 @@ func (s *Store) JoinChannelByInvite(ctx context.Context, hash string, userID int
 			return Channel{}, ChannelMember{}, fmt.Errorf("insert initial channel read state: %w", err)
 		}
 	}
+	resultChannel := channelFromRow(channel)
+	resultMember := channelMemberFromRow(member)
+	channels := []Channel{resultChannel}
+	if err := s.hydrateCurrentChannelPhotos(ctx, qtx, channels, map[int64]ChannelMember{
+		invite.ChannelID: resultMember,
+	}); err != nil {
+		return Channel{}, ChannelMember{}, fmt.Errorf("load joined channel photo: %w", err)
+	}
 
 	if err = tx.Commit(ctx); err != nil {
 		return Channel{}, ChannelMember{}, fmt.Errorf("commit: %w", err)
 	}
-	return channelFromRow(channel), channelMemberFromRow(member), nil
+	return channels[0], resultMember, nil
 }
 
 // AddChannelMembers directly admits targets to channelID when callerID is a
@@ -1205,10 +1246,14 @@ func (s *Store) SetChannelSignatures(
 	}
 	member := channelMemberFromRow(participant)
 	if locked.Signatures == enabled {
+		channels := []Channel{channelFromRow(locked)}
+		if err := s.hydrateCurrentChannelPhotos(ctx, qtx, channels, map[int64]ChannelMember{channelID: member}); err != nil {
+			return Channel{}, ChannelMember{}, fmt.Errorf("load channel signatures photo: %w", err)
+		}
 		if err = tx.Commit(ctx); err != nil {
 			return Channel{}, ChannelMember{}, fmt.Errorf("commit unchanged channel signatures: %w", err)
 		}
-		return channelFromRow(locked), member, nil
+		return channels[0], member, nil
 	}
 	row, err := qtx.SetChannelSignatures(ctx, db.SetChannelSignaturesParams{
 		ID:         channelID,
@@ -1217,10 +1262,14 @@ func (s *Store) SetChannelSignatures(
 	if err != nil {
 		return Channel{}, ChannelMember{}, fmt.Errorf("set channel signatures: %w", err)
 	}
+	channels := []Channel{channelFromRow(row)}
+	if err := s.hydrateCurrentChannelPhotos(ctx, qtx, channels, map[int64]ChannelMember{channelID: member}); err != nil {
+		return Channel{}, ChannelMember{}, fmt.Errorf("load channel signatures photo: %w", err)
+	}
 	if err = tx.Commit(ctx); err != nil {
 		return Channel{}, ChannelMember{}, fmt.Errorf("commit channel signatures: %w", err)
 	}
-	return channelFromRow(row), member, nil
+	return channels[0], member, nil
 }
 
 // SetChannelPreHistoryHidden changes who can read channel history by locking
@@ -1272,10 +1321,14 @@ func (s *Store) SetChannelPreHistoryHidden(
 		return Channel{}, ChannelMember{}, false, fmt.Errorf("lock channel state: %w", err)
 	}
 	if locked.PreHistoryHidden == enabled {
+		channels := []Channel{channelFromRow(locked)}
+		if err := s.hydrateCurrentChannelPhotos(ctx, qtx, channels, map[int64]ChannelMember{channelID: member}); err != nil {
+			return Channel{}, ChannelMember{}, false, fmt.Errorf("load channel prehistory photo: %w", err)
+		}
 		if err = tx.Commit(ctx); err != nil {
 			return Channel{}, ChannelMember{}, false, fmt.Errorf("commit unchanged channel prehistory setting: %w", err)
 		}
-		return channelFromRow(locked), member, false, nil
+		return channels[0], member, false, nil
 	}
 
 	if !enabled {
@@ -1290,10 +1343,14 @@ func (s *Store) SetChannelPreHistoryHidden(
 	if err != nil {
 		return Channel{}, ChannelMember{}, false, fmt.Errorf("set channel prehistory setting: %w", err)
 	}
+	channels := []Channel{channelFromRow(row)}
+	if err := s.hydrateCurrentChannelPhotos(ctx, qtx, channels, map[int64]ChannelMember{channelID: member}); err != nil {
+		return Channel{}, ChannelMember{}, false, fmt.Errorf("load channel prehistory photo: %w", err)
+	}
 	if err = tx.Commit(ctx); err != nil {
 		return Channel{}, ChannelMember{}, false, fmt.Errorf("commit channel prehistory setting: %w", err)
 	}
-	return channelFromRow(row), member, true, nil
+	return channels[0], member, true, nil
 }
 
 // SetChannelTitle stores the new title and its service-message event
@@ -1794,28 +1851,57 @@ type AdminedPublicChannel struct {
 // authoritative usernames row, and the participant predicate scopes the
 // result to this account.
 func (s *Store) AdminedPublicChannels(ctx context.Context, userID int64) ([]AdminedPublicChannel, error) {
-	rows, err := s.q.AdminedPublicChannels(ctx, userID)
+	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{
+		IsoLevel:   pgx.RepeatableRead,
+		AccessMode: pgx.ReadOnly,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("begin admined public channels snapshot: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }() //nolint:errcheck // no-op after commit
+	qtx := s.q.WithTx(tx)
+	rows, err := qtx.AdminedPublicChannels(ctx, userID)
 	if err != nil {
 		return nil, fmt.Errorf("admined public channels: %w", err)
 	}
+	ids := make([]int64, len(rows))
+	for i, row := range rows {
+		ids[i] = row.ID
+	}
+	channelRows, err := qtx.ChannelsByIDs(ctx, ids)
+	if err != nil {
+		return nil, fmt.Errorf("select admined public channel avatars: %w", err)
+	}
+	channelsByID := make(map[int64]Channel, len(channelRows))
+	for _, row := range channelRows {
+		channelsByID[row.ID] = channelFromRow(row)
+	}
+	channels := make([]Channel, len(rows))
+	members := make(map[int64]ChannelMember, len(rows))
 	out := make([]AdminedPublicChannel, len(rows))
 	for i, r := range rows {
-		handle := r.Handle
-		out[i] = AdminedPublicChannel{
-			Channel: Channel{
-				ID:              r.ID,
-				Title:           r.Title,
-				About:           r.About,
-				CreatorID:       r.CreatorID,
-				Megagroup:       r.Megagroup,
-				Signatures:      r.Signatures,
-				Version:         int(r.Version),
-				Date:            r.Date.Time,
-				PinnedMessageID: r.PinnedMessageID,
-				Username:        &handle,
-			},
-			Role: int(r.Role),
+		channel, ok := channelsByID[r.ID]
+		if !ok {
+			return nil, fmt.Errorf("admined public channel %d disappeared in snapshot", r.ID)
 		}
+		handle := r.Handle
+		channel.Username = &handle
+		channels[i] = channel
+		member := ChannelMember{UserID: userID, Role: int(r.Role)}
+		members[r.ID] = member
+		out[i] = AdminedPublicChannel{
+			Channel: channels[i],
+			Role:    member.Role,
+		}
+	}
+	if err := s.hydrateCurrentChannelPhotos(ctx, qtx, channels, members); err != nil {
+		return nil, fmt.Errorf("hydrate admined public channel photos: %w", err)
+	}
+	for i := range out {
+		out[i].Channel = channels[i]
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, fmt.Errorf("commit admined public channels snapshot: %w", err)
 	}
 	return out, nil
 }
@@ -1936,14 +2022,24 @@ func (s *Store) SearchPublicChannels(ctx context.Context, query string, limit in
 func (s *Store) SearchMemberChannels(
 	ctx context.Context, viewerID int64, query string, limit int32,
 ) ([]MemberChannelMatch, error) {
-	channelIDs, err := s.q.MemberChannelIDs(ctx, viewerID)
+	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{
+		IsoLevel:   pgx.RepeatableRead,
+		AccessMode: pgx.ReadOnly,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("begin member channel search snapshot: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }() //nolint:errcheck // no-op after commit
+	qtx := s.q.WithTx(tx)
+
+	channelIDs, err := qtx.MemberChannelIDs(ctx, viewerID)
 	if err != nil {
 		return nil, fmt.Errorf("member channel ids: %w", err)
 	}
 	if channelIDs == nil {
 		channelIDs = []int64{}
 	}
-	rows, err := s.q.SearchMemberChannels(ctx, db.SearchMemberChannelsParams{
+	rows, err := qtx.SearchMemberChannels(ctx, db.SearchMemberChannelsParams{
 		ViewerID:   viewerID,
 		ChannelIds: channelIDs,
 		Query:      query,
@@ -1953,26 +2049,45 @@ func (s *Store) SearchMemberChannels(
 	if err != nil {
 		return nil, fmt.Errorf("search member channels: %w", err)
 	}
+	matchedIDs := make([]int64, len(rows))
+	for i, row := range rows {
+		matchedIDs[i] = row.ID
+	}
+	channelRows, err := qtx.ChannelsByIDs(ctx, matchedIDs)
+	if err != nil {
+		return nil, fmt.Errorf("select matched member channels: %w", err)
+	}
+	channelsByID := make(map[int64]Channel, len(channelRows))
+	for _, row := range channelRows {
+		channelsByID[row.ID] = channelFromRow(row)
+	}
+	channels := make([]Channel, len(rows))
+	members := make(map[int64]ChannelMember, len(rows))
 	out := make([]MemberChannelMatch, len(rows))
 	for i, r := range rows {
+		channel, ok := channelsByID[r.ID]
+		if !ok {
+			return nil, fmt.Errorf("matched member channel %d disappeared in snapshot", r.ID)
+		}
+		channel.Username = r.Handle
+		channels[i] = channel
+		members[r.ID] = ChannelMember{UserID: viewerID, Role: int(r.Role)}
 		out[i] = MemberChannelMatch{
-			Channel: Channel{
-				ID:              r.ID,
-				Title:           r.Title,
-				About:           r.About,
-				CreatorID:       r.CreatorID,
-				Megagroup:       r.Megagroup,
-				Signatures:      r.Signatures,
-				Version:         int(r.Version),
-				Date:            r.Date.Time,
-				PinnedMessageID: r.PinnedMessageID,
-				Username:        r.Handle,
-			},
+			Channel: channels[i],
 			// The query already excluded banned rows, so BannedUntil is left
 			// nil rather than re-read: nothing downstream may treat this value
 			// as the ban record.
-			Member: ChannelMember{UserID: viewerID, Role: int(r.Role)},
+			Member: members[r.ID],
 		}
+	}
+	if err := s.hydrateCurrentChannelPhotos(ctx, qtx, channels, members); err != nil {
+		return nil, fmt.Errorf("hydrate member channel search photos: %w", err)
+	}
+	for i := range out {
+		out[i].Channel = channels[i]
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, fmt.Errorf("commit member channel search snapshot: %w", err)
 	}
 	return out, nil
 }
@@ -2001,7 +2116,16 @@ func (s *Store) ChannelDialogsForUser(ctx context.Context, userID int64) ([]Chan
 // ChannelDialogsForUserWithPins optionally excludes active default-folder pins
 // before the first-page channel block is assembled.
 func (s *Store) ChannelDialogsForUserWithPins(ctx context.Context, userID int64, excludePinned bool) ([]ChannelDialogRow, error) {
-	rows, err := s.q.ChannelDialogsForUser(ctx, db.ChannelDialogsForUserParams{UserID: userID, ExcludePinned: excludePinned})
+	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{
+		IsoLevel:   pgx.RepeatableRead,
+		AccessMode: pgx.ReadOnly,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("begin channel dialogs snapshot: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }() //nolint:errcheck // no-op after commit
+	qtx := s.q.WithTx(tx)
+	rows, err := qtx.ChannelDialogsForUser(ctx, db.ChannelDialogsForUserParams{UserID: userID, ExcludePinned: excludePinned})
 	if err != nil {
 		return nil, fmt.Errorf("channel dialogs for user: %w", err)
 	}
@@ -2069,6 +2193,39 @@ func (s *Store) ChannelDialogsForUserWithPins(ctx context.Context, userID int64,
 			row.Top = &top
 		}
 		out[i] = row
+	}
+	channelIDs := make([]int64, len(out))
+	for i := range out {
+		channelIDs[i] = out[i].Channel.ID
+	}
+	channelRows, err := qtx.ChannelsByIDs(ctx, channelIDs)
+	if err != nil {
+		return nil, fmt.Errorf("select channel dialog avatars: %w", err)
+	}
+	channelByID := make(map[int64]Channel, len(channelRows))
+	for _, row := range channelRows {
+		channelByID[row.ID] = channelFromRow(row)
+	}
+	channels := make([]Channel, len(out))
+	members := make(map[int64]ChannelMember, len(out))
+	for i := range out {
+		avatar, ok := channelByID[out[i].Channel.ID]
+		if !ok {
+			return nil, fmt.Errorf("channel dialog %d disappeared in snapshot", out[i].Channel.ID)
+		}
+		channels[i] = out[i].Channel
+		channels[i].CurrentPhotoFileID = avatar.CurrentPhotoFileID
+		channels[i].CurrentPhotoUploaderID = avatar.CurrentPhotoUploaderID
+		members[out[i].Channel.ID] = out[i].Member
+	}
+	if err := s.hydrateCurrentChannelPhotos(ctx, qtx, channels, members); err != nil {
+		return nil, fmt.Errorf("hydrate channel dialog photos: %w", err)
+	}
+	for i := range out {
+		out[i].Channel = channels[i]
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, fmt.Errorf("commit channel dialogs snapshot: %w", err)
 	}
 	return out, nil
 }
@@ -2308,10 +2465,14 @@ func (s *Store) JoinChannelByUsername(ctx context.Context, channelID, userID int
 		if m.Banned(time.Now()) {
 			return Channel{}, ChannelMember{}, ErrNotMember
 		}
+		channels := []Channel{channelFromRow(channel)}
+		if err := s.hydrateCurrentChannelPhotos(ctx, qtx, channels, map[int64]ChannelMember{channelID: m}); err != nil {
+			return Channel{}, ChannelMember{}, fmt.Errorf("load joined channel photo: %w", err)
+		}
 		if err = tx.Commit(ctx); err != nil {
 			return Channel{}, ChannelMember{}, fmt.Errorf("commit: %w", err)
 		}
-		return channelFromRow(channel), m, nil
+		return channels[0], m, nil
 	case !errors.Is(err, pgx.ErrNoRows):
 		return Channel{}, ChannelMember{}, fmt.Errorf("channel participant: %w", err)
 	}
@@ -2359,11 +2520,16 @@ func (s *Store) JoinChannelByUsername(ctx context.Context, channelID, userID int
 			return Channel{}, ChannelMember{}, fmt.Errorf("insert initial channel read state: %w", err)
 		}
 	}
+	resultMember := channelMemberFromRow(member)
+	channels := []Channel{channelFromRow(channel)}
+	if err := s.hydrateCurrentChannelPhotos(ctx, qtx, channels, map[int64]ChannelMember{channelID: resultMember}); err != nil {
+		return Channel{}, ChannelMember{}, fmt.Errorf("load joined channel photo: %w", err)
+	}
 
 	if err = tx.Commit(ctx); err != nil {
 		return Channel{}, ChannelMember{}, fmt.Errorf("commit: %w", err)
 	}
-	return channelFromRow(channel), channelMemberFromRow(member), nil
+	return channels[0], resultMember, nil
 }
 
 // EditChannelUsername atomically sets or clears the username of a channel.

@@ -4,8 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"maps"
 	"strings"
+	"time"
 
 	"github.com/gotd/td/bin"
 	"github.com/gotd/td/tg"
@@ -337,24 +337,29 @@ func (h *handlers) handleContactsSearch(r *mtproto.Request) (bin.Encoder, error)
 	// The member arm is itself capped at limit, so a caller in more matching
 	// channels than that has memberships it never returned — and a public match
 	// outside its page would render as Left for a channel the caller is in, the
-	// same defect one level down. Membership for the channels Results names is
-	// therefore answered directly, in one bounded query rather than one per row.
+	// same defect one level down. Resolve every public result through one viewer
+	// snapshot so current membership and its channel metadata stay coherent.
 	//
-	// It is a separate query and not a viewer joined into the discovery arm on
-	// purpose: which rows Results contains stays caller-independent, and
-	// membership is applied afterwards, as a rendering input only.
-	unknown := make([]int64, 0, len(resultChannels))
+	// Discovery remains caller-independent. The viewer snapshot is used only
+	// while rendering the already-selected public result rows.
+	resultChannelIDs := make([]int64, 0, len(resultChannels))
 	for _, p := range resultChannels {
-		if _, ok := memberOf[p.Channel.ID]; !ok {
-			unknown = append(unknown, p.Channel.ID)
-		}
+		resultChannelIDs = append(resultChannelIDs, p.Channel.ID)
 	}
-	extra, err := h.store.ChannelMembershipsOf(r.Ctx, r.UserID, unknown)
+	viewerChannels, err := h.store.ChannelsForViewer(r.Ctx, resultChannelIDs, r.UserID)
 	if err != nil {
-		h.log.Error("contacts.search: memberships", "user_id", r.UserID, "err", err)
+		h.log.Error("contacts.search: channel viewer snapshot", "user_id", r.UserID, "err", err)
 		return nil, errInternal
 	}
-	maps.Copy(memberOf, extra)
+	channelForViewer := make(map[int64]store.Channel, len(viewerChannels))
+	for _, snapshot := range viewerChannels {
+		channelForViewer[snapshot.Channel.ID] = snapshot.Channel
+		if snapshot.HasMember && !snapshot.Member.Banned(time.Now()) {
+			memberOf[snapshot.Channel.ID] = snapshot.Member
+		} else {
+			delete(memberOf, snapshot.Channel.ID)
+		}
+	}
 
 	budget := max(int(limit)-len(contacts), 0)
 	namedChannels := myChannels
@@ -396,7 +401,11 @@ func (h *handlers) handleContactsSearch(r *mtproto.Request) (bin.Encoder, error)
 		}
 		rendered[p.Channel.ID] = true
 		if m, ok := memberOf[p.Channel.ID]; ok {
-			chats = append(chats, h.channelToTL(p.Channel, m, true, r.UserID))
+			channel := p.Channel
+			if snapshot, exists := channelForViewer[p.Channel.ID]; exists {
+				channel = snapshot
+			}
+			chats = append(chats, h.channelToTL(channel, m, true, r.UserID))
 			continue
 		}
 		chats = append(chats, h.channelToTLPublic(p.Channel, p.ParticipantsCount, r.UserID))

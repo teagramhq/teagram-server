@@ -1411,6 +1411,15 @@ func GetPeerSettingsForTest(s *store.Store, userID int64, req *tg.MessagesGetPee
 	return testHandlers(s).handleGetPeerSettings(&mtproto.Request{Ctx: context.Background(), UserID: userID, Buf: &buf})
 }
 
+// GetCommonChatsForTest invokes handleGetCommonChats for the caller.
+func GetCommonChatsForTest(s *store.Store, userID int64, req *tg.MessagesGetCommonChatsRequest) (bin.Encoder, error) {
+	var buf bin.Buffer
+	if err := req.Encode(&buf); err != nil {
+		return nil, err
+	}
+	return testHandlers(s).handleGetCommonChats(&mtproto.Request{Ctx: context.Background(), UserID: userID, Buf: &buf})
+}
+
 // InputEncryptedChat builds a valid InputEncryptedChat for chatID as seen by
 // viewerID, using the test deriver.
 func InputEncryptedChat(viewerID int64, chatID int32) tg.InputEncryptedChat {
