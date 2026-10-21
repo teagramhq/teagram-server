@@ -253,6 +253,30 @@ turnstile_disabled_snapshot=$(snapshot_from_json \
 [ "$(jq -r '.container_env_sha256' <<< "$turnstile_legacy_snapshot")" = "$(jq -r '.container_env_sha256' <<< "$turnstile_disabled_snapshot")" ]
 printf '%s\n' 'PASS disabled Turnstile defaults and its exact read-only secret mount preserve rollout equivalence'
 
+turnstile_local_compose=$(jq -c '
+  .services.teagramd.environment += {
+    TG_TURNSTILE_SITE_KEY:"",
+    TG_TURNSTILE_SECRET_KEY_FILE:"",
+    TG_TURNSTILE_SIGNIN_ENABLED:"false"
+  }
+  | .services.teagramd.secrets = []
+  | .secrets |= del(.teagramd_turnstile)
+  | if (.secrets | length) == 0 then del(.secrets) else . end
+' <<< "$turnstile_disabled_compose")
+turnstile_local_inspect=$(printf '%s' "$turnstile_legacy_inspect" | jq -c '
+  .Config.Env += [
+    "TG_TURNSTILE_SITE_KEY=",
+    "TG_TURNSTILE_SECRET_KEY_FILE=",
+    "TG_TURNSTILE_SIGNIN_ENABLED=false"
+  ]
+')
+turnstile_local_snapshot=$(snapshot_from_json \
+  "$turnstile_local_inspect" "$turnstile_local_compose" "$ENV_FILE" "$OVERRIDE_FILE" selected-compose-render target)
+[ "$(jq -r '.config_sha256' <<< "$turnstile_legacy_snapshot")" = "$(jq -r '.config_sha256' <<< "$turnstile_local_snapshot")" ]
+[ "$(jq -r '.mounts_sha256' <<< "$turnstile_legacy_snapshot")" = "$(jq -r '.mounts_sha256' <<< "$turnstile_local_snapshot")" ]
+[ "$(jq -r '.container_env_sha256' <<< "$turnstile_legacy_snapshot")" = "$(jq -r '.container_env_sha256' <<< "$turnstile_local_snapshot")" ]
+printf '%s\n' 'PASS disabled Turnstile defaults tolerate the local blob overlay resetting service secrets'
+
 busybox_readlink() {
   [ "$1" = -f ] || { printf 'readlink: unrecognized option: %s\n' "$1" >&2; return 1; }
   command readlink -f "$2"
