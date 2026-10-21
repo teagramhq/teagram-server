@@ -2218,6 +2218,8 @@ func (s *Store) JoinChannelByUsername(ctx context.Context, channelID, userID int
 // Failed claims (USERNAME_OCCUPIED) do not consume a rate-limit token.
 //
 // Returns ErrNotMember when the caller is not an admin (role >= 1) or is banned.
+// Returns ErrChatAdminRequired when making a hidden-history megagroup public
+// unless the caller is its creator or an admin with change_info.
 // Returns ErrUsernameOccupied when the handle is already taken.
 // Returns ErrUsernameFloodWait when the per-channel rate limit is exceeded.
 func (s *Store) EditChannelUsername(ctx context.Context, channelID, callerID int64, username string) error {
@@ -2261,6 +2263,10 @@ func (s *Store) EditChannelUsername(ctx context.Context, channelID, callerID int
 		return ErrNotMember
 	}
 	clearHiddenHistory := username != "" && lockedChannel.Megagroup && lockedChannel.PreHistoryHidden
+	if clearHiddenHistory && caller.Role != channelRoleCreator &&
+		(caller.Role != channelRoleAdmin || !caller.AdminChangeInfo) {
+		return ErrChatAdminRequired
+	}
 
 	// Prune expired rate-limit rows before counting.
 	cutoff := pgtype.Timestamptz{Time: time.Now().Add(-ChannelUsernameChangeWindow), Valid: true}

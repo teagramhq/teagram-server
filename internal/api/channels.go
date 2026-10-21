@@ -1917,6 +1917,8 @@ func (h *handlers) handleEditChannelUsername(r *mtproto.Request) (bin.Encoder, e
 
 	if err := h.store.EditChannelUsername(r.Ctx, channelID, r.UserID, username); err != nil {
 		switch {
+		case errors.Is(err, store.ErrChatAdminRequired):
+			return nil, errChatAdminRequired
 		case errors.Is(err, store.ErrNotMember):
 			// Store re-check failed (demotion/ban between handler check and
 			// transaction). Same wire error as the handler-level check.

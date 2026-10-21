@@ -412,6 +412,103 @@ func TestSetChannelPreHistoryHiddenRequiresCreatorOrChangeInfoAdmin(t *testing.T
 	}
 }
 
+func TestEditChannelUsernameRequiresChangeInfoToMakeMegagroupPublic(t *testing.T) {
+	t.Parallel()
+	s := open(t)
+	ctx := context.Background()
+	creator := mustUser(t, s, "+15551291130")
+	admin := mustUser(t, s, "+15551291131")
+	member := mustUser(t, s, "+15551291132")
+	channel, err := s.CreateChannel(ctx, creator.ID, "Public history rights", "", true)
+	if err != nil {
+		t.Fatalf("create megagroup: %v", err)
+	}
+	if err := s.EditChannelUsername(ctx, channel.ID, creator.ID, "oldhistoryhandle"); err != nil {
+		t.Fatalf("set initial username: %v", err)
+	}
+	postChannelThroughLocalIDFive(t, s, channel.ID, creator.ID)
+	if err := store.SetChannelPreHistoryHidden(ctx, s, channel.ID, true); err != nil {
+		t.Fatalf("enable hidden history: %v", err)
+	}
+	hash, err := s.CreateChannelInvite(ctx, channel.ID, creator.ID)
+	if err != nil {
+		t.Fatalf("create invite: %v", err)
+	}
+	for _, user := range []store.User{admin, member} {
+		if _, _, err := s.JoinChannelByInvite(ctx, hash, user.ID); err != nil {
+			t.Fatalf("join user %d: %v", user.ID, err)
+		}
+	}
+	if err := s.SetChannelRoleWithRights(ctx, channel.ID, creator.ID, admin.ID, 1, false); err != nil {
+		t.Fatalf("promote admin without change_info: %v", err)
+	}
+
+	participants, err := s.ChannelMembers(ctx, channel.ID)
+	if err != nil {
+		t.Fatalf("list participants: %v", err)
+	}
+	if len(participants) != 3 {
+		t.Fatalf("participant count = %d, want creator, admin, and member", len(participants))
+	}
+	floors := make(map[int64]int64, len(participants))
+	for _, participant := range participants {
+		floor, err := store.ChannelAvailableMinID(ctx, s, channel.ID, participant.UserID)
+		if err != nil {
+			t.Fatalf("read history floor for user %d: %v", participant.UserID, err)
+		}
+		floors[participant.UserID] = floor
+	}
+	if floors[admin.ID] != 5 || floors[member.ID] != 5 {
+		t.Fatalf("admitted participant floors = admin:%d member:%d, want 5 for both", floors[admin.ID], floors[member.ID])
+	}
+
+	if err := s.EditChannelUsername(ctx, channel.ID, admin.ID, "newhistoryhandle"); !errors.Is(err, store.ErrChatAdminRequired) {
+		t.Fatalf("username update = %v, want ErrChatAdminRequired", err)
+	}
+	updated, ok, err := s.ChannelByID(ctx, channel.ID)
+	if err != nil || !ok {
+		t.Fatalf("read updated channel: ok=%v err=%v", ok, err)
+	}
+	if updated.Username == nil || *updated.Username != "oldhistoryhandle" {
+		t.Errorf("username = %v, want oldhistoryhandle", updated.Username)
+	}
+	if !updated.PreHistoryHidden {
+		t.Errorf("pre-history hidden = false, want true")
+	}
+	for userID, wantFloor := range floors {
+		gotFloor, err := store.ChannelAvailableMinID(ctx, s, channel.ID, userID)
+		if err != nil {
+			t.Fatalf("read history floor for user %d after refusal: %v", userID, err)
+		}
+		if gotFloor != wantFloor {
+			t.Errorf("history floor for user %d = %d, want preserved floor %d", userID, gotFloor, wantFloor)
+		}
+	}
+
+	if err := s.SetChannelRoleWithRights(ctx, channel.ID, creator.ID, admin.ID, 1, true); err != nil {
+		t.Fatalf("grant change_info: %v", err)
+	}
+	if err := s.EditChannelUsername(ctx, channel.ID, admin.ID, "authorizedhistoryhandle"); err != nil {
+		t.Fatalf("change-info admin username update: %v", err)
+	}
+	public, ok, err := s.ChannelByID(ctx, channel.ID)
+	if err != nil || !ok {
+		t.Fatalf("read public channel: ok=%v err=%v", ok, err)
+	}
+	if public.Username == nil || *public.Username != "authorizedhistoryhandle" || public.PreHistoryHidden {
+		t.Errorf("public channel = username %v, hidden %v; want authorizedhistoryhandle/false", public.Username, public.PreHistoryHidden)
+	}
+	for userID := range floors {
+		floor, err := store.ChannelAvailableMinID(ctx, s, channel.ID, userID)
+		if err != nil {
+			t.Fatalf("read public history floor for user %d: %v", userID, err)
+		}
+		if floor != 0 {
+			t.Errorf("history floor for user %d after authorized transition = %d, want 0", userID, floor)
+		}
+	}
+}
+
 func TestJoinAfterPreHistoryToggleReturnsGetsTheNewFloor(t *testing.T) {
 	t.Parallel()
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
