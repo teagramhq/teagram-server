@@ -1047,6 +1047,9 @@ jobs:
     steps:
       - uses: actions/checkout@v7.0.1
 
+      - name: Pre-pull the shared PostgreSQL test image with retry
+        run: bash .github/scripts/pull-base-images.sh --image mirror.gcr.io/postgres:18-alpine
+
       # internal/pgtest reads migrations/ at run time to build its template
       # database, so the same mtime pinning the ci job does applies here — the
       # admin server goes through that harness.
@@ -2490,6 +2493,9 @@ jobs:
       # reject the stream on a cold runner.
       - name: Download Go modules
         run: go mod download
+
+      - name: Pre-pull the shared PostgreSQL test image with retry
+        run: bash .github/scripts/pull-base-images.sh --image mirror.gcr.io/postgres:18-alpine
 
       - name: Run isolated link landing process smoke
         run: bash .github/scripts/smoke-linklanding.sh
