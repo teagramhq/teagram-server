@@ -16,6 +16,8 @@ import (
 	"github.com/teagramhq/teagram-server/internal/store"
 )
 
+const chatPhotoConcurrencyTimeout = 30 * time.Second
+
 func chatPhotoFile(t *testing.T, s *store.Store, ownerID int64) store.File {
 	t.Helper()
 	file, err := s.AllocateAndCompletePhotoFile(
@@ -440,9 +442,16 @@ func TestChatPhotoLosesToConcurrentChangeInfoRestriction(t *testing.T) {
 	if err != nil {
 		t.Fatalf("connect to test database: %v", err)
 	}
+	observer, err := pgx.Connect(ctx, dsn)
+	if err != nil {
+		t.Fatalf("connect observer to test database: %v", err)
+	}
 	t.Cleanup(func() {
 		if err := conn.Close(context.Background()); err != nil {
 			t.Errorf("close test database connection: %v", err)
+		}
+		if err := observer.Close(context.Background()); err != nil {
+			t.Errorf("close test database observer: %v", err)
 		}
 	})
 	tx, err := conn.Begin(ctx)
@@ -460,10 +469,10 @@ func TestChatPhotoLosesToConcurrentChangeInfoRestriction(t *testing.T) {
 		_, _, _, _, err := s.SetChatPhoto(ctx, chat.ID, b.ID, photo.ID)
 		done <- err
 	}()
-	deadline := time.Now().Add(3 * time.Second)
+	deadline := time.Now().Add(chatPhotoConcurrencyTimeout)
 	waiting := false
 	for time.Now().Before(deadline) {
-		if err := conn.QueryRow(ctx, `
+		if err := observer.QueryRow(ctx, `
 			SELECT EXISTS (
 				SELECT 1 FROM pg_stat_activity
 				WHERE datname = current_database() AND pid <> pg_backend_pid() AND wait_event_type = 'Lock'
@@ -478,7 +487,24 @@ func TestChatPhotoLosesToConcurrentChangeInfoRestriction(t *testing.T) {
 		time.Sleep(10 * time.Millisecond)
 	}
 	if !waiting {
-		t.Fatal("photo mutation did not wait on the held chat row")
+		select {
+		case err := <-done:
+			t.Fatalf("photo mutation returned before waiting on the held chat row: %v", err)
+		default:
+		}
+		var activity string
+		if err := observer.QueryRow(ctx, `
+			SELECT COALESCE(string_agg(format('pid=%s state=%s wait=%s/%s blockers=%s query=%s blocker_query=%s', activity.pid, activity.state,
+			       COALESCE(activity.wait_event_type, ''), COALESCE(activity.wait_event, ''), pg_blocking_pids(activity.pid)::text, activity.query,
+			       COALESCE((SELECT string_agg(blocker.pid::text || ':' || blocker.query, '; ')
+			                 FROM pg_stat_activity AS blocker
+			                 WHERE blocker.pid = ANY(pg_blocking_pids(activity.pid))), '')), E'\n'), '<none>')
+			FROM pg_stat_activity AS activity
+			WHERE activity.datname = current_database() AND activity.pid <> pg_backend_pid()
+		`).Scan(&activity); err != nil {
+			t.Fatalf("photo mutation did not wait on the held chat row; inspect activity: %v", err)
+		}
+		t.Fatalf("photo mutation did not wait on the held chat row; activity:\n%s", activity)
 	}
 	if _, err := tx.Exec(ctx, `UPDATE chats SET default_banned_rights = ARRAY['change_info']::text[], version = version + 1 WHERE id = $1`, chat.ID); err != nil {
 		t.Fatalf("restrict change_info under chat lock: %v", err)
@@ -491,7 +517,7 @@ func TestChatPhotoLosesToConcurrentChangeInfoRestriction(t *testing.T) {
 		if !errors.Is(err, store.ErrChatAdminRequired) {
 			t.Fatalf("serialized photo mutation = %v, want ErrChatAdminRequired", err)
 		}
-	case <-time.After(3 * time.Second):
+	case <-time.After(chatPhotoConcurrencyTimeout):
 		t.Fatal("photo mutation did not finish after the rights transaction committed")
 	}
 	unchanged, ok, err := s.ChatByID(ctx, chat.ID)
@@ -500,6 +526,128 @@ func TestChatPhotoLosesToConcurrentChangeInfoRestriction(t *testing.T) {
 	}
 	if unchanged.CurrentPhotoFileID != nil || ptsOf(t, s, a.ID) != 0 || ptsOf(t, s, b.ID) != 0 {
 		t.Fatalf("photo won after restriction: current=%v pts=%d/%d", unchanged.CurrentPhotoFileID, ptsOf(t, s, a.ID), ptsOf(t, s, b.ID))
+	}
+}
+
+func TestChatPhotoConcurrentSelectAndClearSerialize(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	dsn := pgtest.DSN(t)
+	s := openStore(t, dsn)
+	s2 := openStore(t, dsn)
+	a := mustUser(t, s, "+15559150075")
+	b := mustUser(t, s, "+15559150076")
+	chat := chatWith(t, s, a, b)
+	photoA := chatPhotoFile(t, s, a.ID)
+	photoB := chatPhotoFile(t, s, b.ID)
+	changed, selected, initial, perOwner, err := s.SetChatPhoto(ctx, chat.ID, a.ID, photoA.ID)
+	if err != nil || !changed {
+		t.Fatalf("select initial photo: %v", err)
+	}
+	if initial.Action != store.ChatActionEditPhoto || initial.FileID != photoA.ID || len(perOwner) != 2 {
+		t.Fatalf("initial photo history = %+v, PTS %v", initial, perOwner)
+	}
+	opCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	type mutationResult struct {
+		operation string
+		changed   bool
+		sender    store.Message
+		perOwner  map[int64]int
+		err       error
+	}
+	done := make(chan mutationResult, 2)
+	start := make(chan struct{})
+	ready := make(chan struct{}, 2)
+	go func() {
+		ready <- struct{}{}
+		<-start
+		changed, _, sender, perOwner, err := s.SetChatPhoto(opCtx, chat.ID, a.ID, 0)
+		done <- mutationResult{operation: "clear", changed: changed, sender: sender, perOwner: perOwner, err: err}
+	}()
+	go func() {
+		ready <- struct{}{}
+		<-start
+		changed, _, sender, perOwner, err := s2.SetChatPhoto(opCtx, chat.ID, b.ID, photoB.ID)
+		done <- mutationResult{operation: "replace", changed: changed, sender: sender, perOwner: perOwner, err: err}
+	}()
+	<-ready
+	<-ready
+	close(start)
+
+	results := make(map[string]mutationResult, 2)
+	for range 2 {
+		select {
+		case result := <-done:
+			if result.err != nil || !result.changed {
+				t.Fatalf("%s photo mutation = changed %v, err %v", result.operation, result.changed, result.err)
+			}
+			results[result.operation] = result
+		case <-time.After(chatPhotoConcurrencyTimeout):
+			t.Fatal("serialized photo mutations did not finish")
+		}
+	}
+	clearResult, replaceResult := results["clear"], results["replace"]
+	for _, result := range []mutationResult{clearResult, replaceResult} {
+		wantPTS := int(result.sender.LocalID)
+		if len(result.perOwner) != 2 || result.perOwner[a.ID] != wantPTS || result.perOwner[b.ID] != wantPTS {
+			t.Errorf("%s per-owner PTS = %v, want both members at %d", result.operation, result.perOwner, wantPTS)
+		}
+	}
+	if clearResult.sender.Action != store.ChatActionDeletePhoto || clearResult.sender.FileID != 0 {
+		t.Fatalf("clear history record = %+v", clearResult.sender)
+	}
+	if replaceResult.sender.Action != store.ChatActionEditPhoto || replaceResult.sender.FileID != photoB.ID {
+		t.Fatalf("replacement history record = %+v", replaceResult.sender)
+	}
+
+	clearFirst := clearResult.sender.LocalID < replaceResult.sender.LocalID
+	wantMiddleAction, wantMiddleFile := store.ChatActionDeletePhoto, int64(0)
+	wantLastAction, wantLastFile := store.ChatActionEditPhoto, photoB.ID
+	wantMiddleFanout, wantLastFanout := clearResult.sender.FanoutID, replaceResult.sender.FanoutID
+	wantCurrentFile, wantUploader := photoB.ID, b.ID
+	if !clearFirst {
+		wantMiddleAction, wantMiddleFile = store.ChatActionEditPhoto, photoB.ID
+		wantLastAction, wantLastFile = store.ChatActionDeletePhoto, 0
+		wantMiddleFanout, wantLastFanout = replaceResult.sender.FanoutID, clearResult.sender.FanoutID
+		wantCurrentFile, wantUploader = 0, 0
+	}
+	for _, member := range []store.User{a, b} {
+		if ptsOf(t, s, member.ID) != 3 {
+			t.Errorf("owner %d PTS = %d, want 3 serialized photo events", member.ID, ptsOf(t, s, member.ID))
+		}
+		for _, want := range []struct {
+			localID int64
+			action  store.ChatAction
+			fileID  int64
+			fanout  int64
+		}{
+			{localID: 2, action: wantMiddleAction, fileID: wantMiddleFile, fanout: wantMiddleFanout},
+			{localID: 3, action: wantLastAction, fileID: wantLastFile, fanout: wantLastFanout},
+		} {
+			message, found, err := s.MessageByOwnerLocal(ctx, member.ID, want.localID)
+			if err != nil || !found {
+				t.Fatalf("owner %d photo history %d: found=%v err=%v", member.ID, want.localID, found, err)
+			}
+			if message.Action != want.action || message.FileID != want.fileID || message.FanoutID != want.fanout {
+				t.Errorf("owner %d history %d = action/file/fanout %d/%d/%d, want %d/%d/%d", member.ID, want.localID, message.Action, message.FileID, message.FanoutID, want.action, want.fileID, want.fanout)
+			}
+		}
+	}
+	current, found, err := s.ChatByID(ctx, chat.ID)
+	if err != nil || !found {
+		t.Fatalf("reload chat: found=%v err=%v", found, err)
+	}
+	if current.Version != selected.Version+2 {
+		t.Errorf("chat version = %d, want %d", current.Version, selected.Version+2)
+	}
+	if wantCurrentFile == 0 {
+		if current.CurrentPhotoFileID != nil || current.CurrentPhotoUploaderID != nil {
+			t.Errorf("final clear left current photo %v/%v", current.CurrentPhotoFileID, current.CurrentPhotoUploaderID)
+		}
+	} else if current.CurrentPhotoFileID == nil || *current.CurrentPhotoFileID != wantCurrentFile || current.CurrentPhotoUploaderID == nil || *current.CurrentPhotoUploaderID != wantUploader {
+		t.Errorf("final photo = %v/%v, want %d/%d", current.CurrentPhotoFileID, current.CurrentPhotoUploaderID, wantCurrentFile, wantUploader)
 	}
 }
 
@@ -516,9 +664,16 @@ func TestChatPhotoAttachFailsAfterFileRowIsDeleted(t *testing.T) {
 	if err != nil {
 		t.Fatalf("connect to test database: %v", err)
 	}
+	observer, err := pgx.Connect(ctx, dsn)
+	if err != nil {
+		t.Fatalf("connect observer to test database: %v", err)
+	}
 	t.Cleanup(func() {
 		if err := conn.Close(context.Background()); err != nil {
 			t.Errorf("close test database connection: %v", err)
+		}
+		if err := observer.Close(context.Background()); err != nil {
+			t.Errorf("close test database observer: %v", err)
 		}
 	})
 	tx, err := conn.Begin(ctx)
@@ -535,10 +690,10 @@ func TestChatPhotoAttachFailsAfterFileRowIsDeleted(t *testing.T) {
 		_, _, _, _, err := s.SetChatPhoto(ctx, chat.ID, a.ID, photo.ID)
 		done <- err
 	}()
-	deadline := time.Now().Add(3 * time.Second)
+	deadline := time.Now().Add(chatPhotoConcurrencyTimeout)
 	waiting := false
 	for time.Now().Before(deadline) {
-		if err := conn.QueryRow(ctx, `
+		if err := observer.QueryRow(ctx, `
 			SELECT EXISTS (
 				SELECT 1 FROM pg_stat_activity
 				WHERE datname = current_database() AND pid <> pg_backend_pid() AND wait_event_type = 'Lock'
@@ -558,7 +713,21 @@ func TestChatPhotoAttachFailsAfterFileRowIsDeleted(t *testing.T) {
 			t.Fatalf("photo mutation returned before acquiring the held file row: %v", err)
 		default:
 		}
-		t.Fatal("photo mutation did not wait on the held file row")
+		var activity string
+		if err := observer.QueryRow(ctx, `
+			SELECT COALESCE(string_agg(format('pid=%s state=%s wait=%s/%s blockers=%s query=%s blocker_query=%s', activity.pid, activity.state,
+			       COALESCE(activity.wait_event_type, ''), COALESCE(activity.wait_event, ''), pg_blocking_pids(activity.pid)::text, activity.query,
+			       COALESCE((SELECT string_agg(blocker.pid::text || ':' || blocker.query, '; ')
+			                 FROM pg_stat_activity AS blocker
+			                 WHERE blocker.pid = ANY(pg_blocking_pids(activity.pid))), '')), E'\n'), '<none>')
+			FROM pg_stat_activity AS activity
+			WHERE activity.datname = current_database() AND activity.pid <> pg_backend_pid()
+		`).Scan(&activity); err != nil {
+			t.Fatalf("photo mutation did not wait on the held file row; inspect activity: %v", err)
+		}
+		pool := store.StorePool(s).Stat()
+		t.Fatalf("photo mutation did not wait on the held file row; pool total/acquired/idle/max/constructing=%d/%d/%d/%d/%d; activity:\n%s",
+			pool.TotalConns(), pool.AcquiredConns(), pool.IdleConns(), pool.MaxConns(), pool.ConstructingConns(), activity)
 	}
 	if _, err := tx.Exec(ctx, `DELETE FROM files WHERE id = $1`, photo.ID); err != nil {
 		t.Fatalf("erase unreferenced photo row: %v", err)
@@ -571,7 +740,7 @@ func TestChatPhotoAttachFailsAfterFileRowIsDeleted(t *testing.T) {
 		if !errors.Is(err, store.ErrChatPhotoUnavailable) {
 			t.Fatalf("photo attachment after erase = %v, want unavailable", err)
 		}
-	case <-time.After(3 * time.Second):
+	case <-time.After(chatPhotoConcurrencyTimeout):
 		t.Fatal("photo mutation did not finish after file erasure")
 	}
 	unchanged, ok, err := s.ChatByID(ctx, chat.ID)
