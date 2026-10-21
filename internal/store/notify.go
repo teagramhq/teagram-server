@@ -55,6 +55,7 @@ const (
 const channelMembershipPayloadPrefix = "channel_membership|"
 const channelRemovalPayloadPrefix = "channel_removal|"
 const chatAdminPayloadPrefix = "chat_admin|"
+const chatRemovalPayloadPrefix = "chat_removal|"
 const chatAboutPayloadPrefix = "chat_about|"
 const channelPollVotePayloadPrefix = "channel_poll_vote|"
 const cloudDraftPayloadPrefix = "cloud_draft|"
@@ -68,6 +69,7 @@ type suppressedUpdateKey struct{}
 type channelMembershipUpdateKey struct{}
 type channelRemovalUpdateKey struct{}
 type chatAdminUpdateKey struct{}
+type chatRemovalUpdateKey struct{}
 type chatAboutUpdateKey struct{}
 type channelPollVoteUpdateKey struct{}
 type cloudDraftUpdateKey struct{}
@@ -284,6 +286,22 @@ func ChatAdminUpdateFromContext(ctx context.Context) (chatID, eventID int64, ok 
 	}
 	update, ok := ctx.Value(chatAdminUpdateKey{}).(chatAdminUpdate)
 	return update.chatID, update.eventID, ok && update.chatID > 0 && update.eventID > 0
+}
+
+// WithChatRemovalUpdate marks an owner-scoped notification as a prompt to push
+// one persisted PTS-neutral removal for chatID.
+func WithChatRemovalUpdate(ctx context.Context, chatID int64) context.Context {
+	return context.WithValue(ctx, chatRemovalUpdateKey{}, chatID)
+}
+
+// ChatRemovalUpdateFromContext returns the chat id carried by a removal
+// notification.
+func ChatRemovalUpdateFromContext(ctx context.Context) (int64, bool) {
+	if ctx == nil {
+		return 0, false
+	}
+	chatID, ok := ctx.Value(chatRemovalUpdateKey{}).(int64)
+	return chatID, ok && chatID > 0
 }
 
 // WithChatAboutUpdate marks an owner-scoped notification to refresh a basic
@@ -780,6 +798,22 @@ func (l *Listener) dispatch(
 				})
 				continue
 			}
+			if strings.HasPrefix(n.Payload, chatRemovalPayloadPrefix) {
+				ownerID, chatID, perr := parseChatRemovalPayload(n.Payload)
+				if perr != nil {
+					l.recordInvalidNotification()
+					l.log.Warn("bad tg_updates chat removal payload")
+					continue
+				}
+				l.recordValidNotification(ChannelUpdates)
+				l.schedule("chat-removal:"+strconv.FormatInt(ownerID, 10)+":"+strconv.FormatInt(chatID, 10), notificationTask{
+					ctx: WithChatRemovalUpdate(ctx, chatID),
+					run: func(ctx context.Context) {
+						deliver(ctx, ownerID)
+					},
+				})
+				continue
+			}
 			if strings.HasPrefix(n.Payload, chatAboutPayloadPrefix) {
 				userID, chatID, perr := parseChatAboutPayload(n.Payload)
 				if perr != nil {
@@ -1146,6 +1180,17 @@ func parseChatAdminPayload(payload string) (int64, int64, error) {
 	return chatID, eventID, nil
 }
 
+func parseChatRemovalPayload(payload string) (int64, int64, error) {
+	if !strings.HasPrefix(payload, chatRemovalPayloadPrefix) {
+		return 0, 0, errors.New("invalid chat removal payload prefix")
+	}
+	ownerID, chatID, err := parsePairPayload(strings.TrimPrefix(payload, chatRemovalPayloadPrefix))
+	if err != nil || ownerID <= 0 || chatID <= 0 {
+		return 0, 0, errors.New("invalid chat removal payload")
+	}
+	return ownerID, chatID, nil
+}
+
 func parseChatAboutPayload(payload string) (int64, int64, error) {
 	if !strings.HasPrefix(payload, chatAboutPayloadPrefix) {
 		return 0, 0, errors.New("invalid chat-about payload prefix")
@@ -1240,6 +1285,12 @@ func ChannelRemovalPayload(userID, channelID int64) string {
 // transient chat-admin update event.
 func ChatAdminPayload(chatID, eventID int64) string {
 	return chatAdminPayloadPrefix + pairPayload(chatID, eventID)
+}
+
+// ChatRemovalPayload formats a tg_updates notification naming one persisted
+// PTS-neutral removal and its owner.
+func ChatRemovalPayload(ownerID, chatID int64) string {
+	return chatRemovalPayloadPrefix + pairPayload(ownerID, chatID)
 }
 
 // ChatAboutPayload formats a tg_updates notification for one member's basic-

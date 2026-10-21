@@ -67,9 +67,11 @@ SELECT p.id, p.creator_id, p.random_id, p.source_local_id, p.question, p.public_
 FROM polls p
 JOIN channel_poll_messages cpm ON cpm.poll_id = p.id
 JOIN channel_messages cm ON cm.channel_id = cpm.channel_id AND cm.local_id = cpm.local_id
+JOIN channels c ON c.id = cpm.channel_id AND c.deleted_at IS NULL
 WHERE cpm.channel_id = $1
   AND cpm.local_id = $2
   AND cm.deleted = false
+  AND (cm.expires_at IS NULL OR cm.expires_at > statement_timestamp())
 `
 
 type PollByChannelMessageParams struct {
@@ -104,8 +106,12 @@ const pollChannelMessageForViewer = `-- name: PollChannelMessageForViewer :one
 SELECT cpm.channel_id, cpm.local_id
 FROM channel_poll_messages cpm
 JOIN channel_participants cp ON cp.channel_id = cpm.channel_id
+JOIN channel_messages cm ON cm.channel_id = cpm.channel_id AND cm.local_id = cpm.local_id
 WHERE cpm.poll_id = $1
   AND cp.user_id = $2
+  AND cm.deleted = false
+  AND (cm.expires_at IS NULL OR cm.expires_at > statement_timestamp())
+  AND cpm.local_id > cp.available_min_id
   AND (cp.banned_until IS NULL OR cp.banned_until <= clock_timestamp())
 `
 

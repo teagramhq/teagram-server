@@ -62,6 +62,8 @@ var (
 	errNewPasswordBad = rpcErr(400, "NEW_PASSWORD_BAD")
 	// errMessageIDInvalid rejects edit/delete of an absent or non-owned message.
 	errMessageIDInvalid = rpcErr(400, "MESSAGE_ID_INVALID")
+	// errMsgIDInvalid rejects an absent, deleted or unsupported channel reply root.
+	errMsgIDInvalid = rpcErr(400, "MSG_ID_INVALID")
 	// errMessageDeleteForbidden rejects a channel-delete batch containing a live
 	// post the caller's current role may not remove.
 	errMessageDeleteForbidden = rpcErr(403, "MESSAGE_DELETE_FORBIDDEN")
@@ -86,6 +88,8 @@ var (
 	// errChatNotModified answers an authorized setting save whose value already
 	// matches the stored setting.
 	errChatNotModified = rpcErr(400, "CHAT_NOT_MODIFIED")
+	// errChatLinkExists rejects hiding history while a channel has a public link.
+	errChatLinkExists = rpcErr(400, "CHAT_LINK_EXISTS")
 	// errChatAboutNotModified answers an editChatAbout request whose description
 	// already matches the stored value.
 	errChatAboutNotModified = rpcErr(400, "CHAT_ABOUT_NOT_MODIFIED")
@@ -216,6 +220,12 @@ var (
 	errChatWriteForbidden = rpcErr(403, "CHAT_WRITE_FORBIDDEN")
 	// errYouBlockedUser rejects a 1:1 send to a user the caller has blocked.
 	errYouBlockedUser = rpcErr(400, "YOU_BLOCKED_USER")
+	// errUserIsBlocked rejects a history-TTL change when the other party has
+	// blocked the caller.
+	errUserIsBlocked = rpcErr(400, "USER_IS_BLOCKED")
+	// errTTLPeriodInvalid rejects a setHistoryTTL period outside the server
+	// allow-list.
+	errTTLPeriodInvalid = rpcErr(400, "TTL_PERIOD_INVALID")
 	// errUsernameInvalid rejects a username that fails validation: wrong length,
 	// invalid characters, digit/underscore leading, or a reserved handle.
 	errUsernameInvalid = rpcErr(400, "USERNAME_INVALID")

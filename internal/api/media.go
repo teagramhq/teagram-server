@@ -429,6 +429,9 @@ func (h *handlers) handleSendMediaAfterReplyOnConn(c *mtproto.Conn, r *mtproto.R
 	// the send and the retry, which is not a transport retry.
 	if req.RandomID != 0 && peerType != store.PeerTypeChannel {
 		existing, ok, err := h.store.MessageByRandomID(r.Ctx, r.UserID, req.RandomID)
+		if errors.Is(err, store.ErrRandomIDExpired) {
+			return nil, nil, nil, errRandomIDDuplicate
+		}
 		if err != nil {
 			h.log.Error("random_id lookup", "user_id", r.UserID, "err", err)
 			return nil, nil, nil, errInternal
@@ -445,7 +448,7 @@ func (h *handlers) handleSendMediaAfterReplyOnConn(c *mtproto.Conn, r *mtproto.R
 				return nil, nil, nil, errInternal
 			}
 			if peerType == store.PeerTypeChat {
-				chats, err := h.loadChats(r.Ctx, map[int64]bool{toID: true}, r.UserID, nil)
+				chats, err := h.loadChats(r.Ctx, map[int64]bool{toID: true}, r.UserID)
 				if err != nil {
 					h.log.Error("load chats on retry", "err", err)
 					return nil, nil, nil, errInternal
@@ -524,6 +527,9 @@ func (h *handlers) handleSendMediaAfterReplyOnConn(c *mtproto.Conn, r *mtproto.R
 	duplicate := false
 	if peerType == store.PeerTypeChat {
 		duplicate, err = h.store.CheckChatWritePermission(r.Ctx, toID, r.UserID, req.RandomID, mediaRights)
+		if errors.Is(err, store.ErrRandomIDExpired) {
+			return nil, nil, nil, errRandomIDDuplicate
+		}
 		if errors.Is(err, store.ErrNotMember) {
 			return nil, nil, nil, errPeerIDInvalid
 		}
@@ -608,6 +614,10 @@ func (h *handlers) handleSendMediaAfterReplyOnConn(c *mtproto.Conn, r *mtproto.R
 
 	attempt := beginSenderRPC(c, r)
 	sender, senderPts, recipientPts, _, err := h.store.SendMessage(r.Ctx, r.UserID, toID, req.Message, req.RandomID, fileID, 0)
+	if errors.Is(err, store.ErrRandomIDExpired) {
+		h.clearSenderAfterStoreFailure(attempt, r, err)
+		return nil, nil, nil, errRandomIDDuplicate
+	}
 	// The file this send names is gone: the send wrote nothing, and the caller
 	// hears that rather than an internal error for a state that is theirs to
 	// retry from.
@@ -701,6 +711,10 @@ func (h *handlers) sendChatMedia(
 		h.clearSenderAfterStoreFailure(attempt, r, err)
 		return nil, nil, nil, errMediaInvalid
 	}
+	if errors.Is(err, store.ErrRandomIDExpired) {
+		h.clearSenderAfterStoreFailure(attempt, r, err)
+		return nil, nil, nil, errRandomIDDuplicate
+	}
 	if err != nil {
 		h.clearSenderAfterStoreFailure(attempt, r, err)
 		h.log.Error("send chat media", "user_id", r.UserID, "chat_id", chatID, "err", err)
@@ -726,7 +740,7 @@ func (h *handlers) sendChatMedia(
 		h.log.Error("send chat media users", "err", err)
 		return nil, nil, nil, errInternal
 	}
-	chats, err := h.loadChats(r.Ctx, map[int64]bool{chatID: true}, r.UserID, nil)
+	chats, err := h.loadChats(r.Ctx, map[int64]bool{chatID: true}, r.UserID)
 	if err != nil {
 		notifyCommitted()
 		h.log.Error("send chat media chats", "err", err)
@@ -837,7 +851,12 @@ func (h *handlers) channelPhotoSendResponse(
 		h.log.Error("load channel photo files", "channel_id", channelID, "err", err)
 		return nil, nil, nil, errInternal
 	}
-	messageTL, err := channelMessageToTL(message, r.UserID, files)
+	broadcast, err := h.channelIsBroadcast(r.Ctx, channelID)
+	if err != nil {
+		h.log.Error("load channel photo kind", "channel_id", channelID, "err", err)
+		return nil, nil, nil, errInternal
+	}
+	messageTL, err := channelMessageToTL(message, r.UserID, files, broadcast)
 	if err != nil {
 		h.log.Error("render channel photo message", "channel_id", channelID, "local_id", message.LocalID, "err", err)
 		return nil, nil, nil, errInternal
@@ -862,6 +881,9 @@ func (h *handlers) resendFileID(ctx context.Context, userID, randomID int64) (in
 		return 0, false, nil
 	}
 	existing, ok, err := h.store.MessageByRandomID(ctx, userID, randomID)
+	if errors.Is(err, store.ErrRandomIDExpired) {
+		return 0, false, errRandomIDDuplicate
+	}
 	if err != nil {
 		h.log.Error("send media random id", "user_id", userID, "err", err)
 		return 0, false, errInternal

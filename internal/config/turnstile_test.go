@@ -33,6 +33,7 @@ func TestLoadTurnstileSecretFileEnablesSignUpChallenge(t *testing.T) {
 	t.Setenv("TG_AUTHKEY_ENC_KEY", validEncKey)
 	t.Setenv("TG_TURNSTILE_SITE_KEY", "site-key_123")
 	t.Setenv("TG_TURNSTILE_SECRET_KEY", "")
+	t.Setenv("TG_TURNSTILE_SIGNIN_ENABLED", "")
 	secretPath := filepath.Join(t.TempDir(), "turnstile-secret")
 	if err := os.WriteFile(secretPath, []byte("private-key-123\n"), 0o600); err != nil {
 		t.Fatal(err)
@@ -43,8 +44,8 @@ func TestLoadTurnstileSecretFileEnablesSignUpChallenge(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
-	if !cfg.Turnstile.Enabled() || cfg.Turnstile.SiteKey != "site-key_123" || cfg.Turnstile.SecretKey != "private-key-123" {
-		t.Fatalf("Turnstile config enabled=%v site-key-match=%v secret-loaded=%v, want all true", cfg.Turnstile.Enabled(), cfg.Turnstile.SiteKey == "site-key_123", cfg.Turnstile.SecretKey == "private-key-123")
+	if !cfg.Turnstile.Enabled() || cfg.Turnstile.SiteKey != "site-key_123" || cfg.Turnstile.SecretKey != "private-key-123" || cfg.Turnstile.SignInEnabled {
+		t.Fatalf("Turnstile config enabled=%v site-key-match=%v secret-loaded=%v signin-enabled=%v, want signup enabled and signin disabled", cfg.Turnstile.Enabled(), cfg.Turnstile.SiteKey == "site-key_123", cfg.Turnstile.SecretKey == "private-key-123", cfg.Turnstile.SignInEnabled)
 	}
 	encoded, err := json.Marshal(struct {
 		Config any `json:"config"`
@@ -63,13 +64,48 @@ func TestLoadWithoutTurnstileKeepsChallengeDisabled(t *testing.T) {
 	t.Setenv("TG_TURNSTILE_SITE_KEY", "")
 	t.Setenv("TG_TURNSTILE_SECRET_KEY", "")
 	t.Setenv("TG_TURNSTILE_SECRET_KEY_FILE", "")
+	t.Setenv("TG_TURNSTILE_SIGNIN_ENABLED", "")
 
 	cfg, err := config.Load(discardLog())
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
-	if cfg.Turnstile.Enabled() || cfg.Turnstile.SiteKey != "" || cfg.Turnstile.SecretKey != "" {
+	if cfg.Turnstile.Enabled() || cfg.Turnstile.SiteKey != "" || cfg.Turnstile.SecretKey != "" || cfg.Turnstile.SignInEnabled {
 		t.Fatalf("Turnstile config = %#v, want disabled", cfg.Turnstile)
+	}
+}
+
+func TestLoadEnablesSigninOnlyWithConfiguredCredentials(t *testing.T) {
+	t.Setenv("TG_POSTGRES_DSN", "postgres://localhost/tg")
+	t.Setenv("TG_AUTHKEY_ENC_KEY", validEncKey)
+	t.Setenv("TG_TURNSTILE_SITE_KEY", "site-key_123")
+	t.Setenv("TG_TURNSTILE_SECRET_KEY", "private-key-123")
+	t.Setenv("TG_TURNSTILE_SECRET_KEY_FILE", "")
+	t.Setenv("TG_TURNSTILE_SIGNIN_ENABLED", "true")
+
+	cfg, err := config.Load(discardLog())
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if !cfg.Turnstile.Enabled() || !cfg.Turnstile.SignInEnabled {
+		t.Fatalf("Turnstile config = %#v, want signup and signin enabled", cfg.Turnstile)
+	}
+}
+
+func TestLoadDisablesSigninWithoutRemovingSignupCredentials(t *testing.T) {
+	t.Setenv("TG_POSTGRES_DSN", "postgres://localhost/tg")
+	t.Setenv("TG_AUTHKEY_ENC_KEY", validEncKey)
+	t.Setenv("TG_TURNSTILE_SITE_KEY", "site-key_123")
+	t.Setenv("TG_TURNSTILE_SECRET_KEY", "private-key-123")
+	t.Setenv("TG_TURNSTILE_SECRET_KEY_FILE", "")
+	t.Setenv("TG_TURNSTILE_SIGNIN_ENABLED", "false")
+
+	cfg, err := config.Load(discardLog())
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if !cfg.Turnstile.Enabled() || cfg.Turnstile.SignInEnabled || cfg.Turnstile.SiteKey != "site-key_123" || cfg.Turnstile.SecretKey != "private-key-123" {
+		t.Fatalf("Turnstile config = %#v, want signup credentials retained and signin disabled", cfg.Turnstile)
 	}
 }
 
@@ -86,5 +122,33 @@ func TestLoadRejectsTurnstileSiteKeyWithoutSecret(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "TG_TURNSTILE_SECRET_KEY") {
 		t.Fatalf("Load error = %q, want it to name the missing secret setting", err)
+	}
+}
+
+func TestLoadRejectsInvalidTurnstileSigninSetting(t *testing.T) {
+	t.Setenv("TG_POSTGRES_DSN", "postgres://localhost/tg")
+	t.Setenv("TG_AUTHKEY_ENC_KEY", validEncKey)
+	t.Setenv("TG_TURNSTILE_SITE_KEY", "")
+	t.Setenv("TG_TURNSTILE_SECRET_KEY", "")
+	t.Setenv("TG_TURNSTILE_SECRET_KEY_FILE", "")
+	t.Setenv("TG_TURNSTILE_SIGNIN_ENABLED", "sometimes")
+
+	_, err := config.Load(discardLog())
+	if err == nil || !strings.Contains(err.Error(), "TG_TURNSTILE_SIGNIN_ENABLED") {
+		t.Fatalf("Load error = %v, want invalid TG_TURNSTILE_SIGNIN_ENABLED error", err)
+	}
+}
+
+func TestLoadRejectsTurnstileSigninWithoutCredentials(t *testing.T) {
+	t.Setenv("TG_POSTGRES_DSN", "postgres://localhost/tg")
+	t.Setenv("TG_AUTHKEY_ENC_KEY", validEncKey)
+	t.Setenv("TG_TURNSTILE_SITE_KEY", "")
+	t.Setenv("TG_TURNSTILE_SECRET_KEY", "")
+	t.Setenv("TG_TURNSTILE_SECRET_KEY_FILE", "")
+	t.Setenv("TG_TURNSTILE_SIGNIN_ENABLED", "true")
+
+	_, err := config.Load(discardLog())
+	if err == nil || !strings.Contains(err.Error(), "TG_TURNSTILE_SIGNIN_ENABLED") {
+		t.Fatalf("Load error = %v, want signin credentials error", err)
 	}
 }

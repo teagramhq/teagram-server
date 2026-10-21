@@ -1,0 +1,5 @@
+# source: gotd/td v0.162.0 layer-228 TL request type
+body: { messages.setHistoryTTL
+  peer: { inputPeerChannel channel_id: <N>, access_hash: <N> },
+  period: 2592000,
+}

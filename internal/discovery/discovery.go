@@ -14,9 +14,12 @@ import (
 	"io"
 	"math"
 	"net"
+	"regexp"
 	"strconv"
 	"strings"
 )
+
+var discoverySiteKeyPattern = regexp.MustCompile(`^[A-Za-z0-9_-]{1,256}$`)
 
 const (
 	// Version is the version of both the static document and the local
@@ -37,9 +40,23 @@ const (
 
 // Document is the canonical v1 public discovery document.
 type Document struct {
-	Version   int              `json:"version"`
-	MTProto   MTProtoBinding   `json:"mtproto"`
-	WebSocket WebSocketBinding `json:"websocket"`
+	Version   int               `json:"version"`
+	MTProto   MTProtoBinding    `json:"mtproto"`
+	WebSocket WebSocketBinding  `json:"websocket"`
+	Demo      *DemoCapabilities `json:"demo,omitempty"`
+	Turnstile *Turnstile        `json:"turnstile,omitempty"`
+}
+
+// Turnstile advertises the public widget key to clients on an enforcing
+// listener. The Siteverify secret is never part of discovery.
+type Turnstile struct {
+	SiteKey string `json:"site_key"`
+}
+
+// DemoCapabilities advertises optional demo features without changing the
+// server's authentication or registration policy.
+type DemoCapabilities struct {
+	GuestSignUp bool `json:"guest_sign_up"`
 }
 
 // MTProtoBinding is the endpoint, DC and public RSA identity a server uses.
@@ -56,7 +73,7 @@ type WebSocketBinding struct {
 
 // NewDocument constructs the canonical public document from the exact
 // endpoint, DC and key used by the server.
-func NewDocument(endpoint string, dcID int, pub *rsa.PublicKey) (Document, error) {
+func NewDocument(endpoint string, dcID int, pub *rsa.PublicKey, advertiseDemoGuestSignUp bool) (Document, error) {
 	if err := ValidateEndpoint(endpoint); err != nil {
 		return Document{}, fmt.Errorf("validate advertised endpoint: %w", err)
 	}
@@ -71,7 +88,7 @@ func NewDocument(endpoint string, dcID int, pub *rsa.PublicKey) (Document, error
 	if err != nil {
 		return Document{}, err
 	}
-	return Document{
+	doc := Document{
 		Version: Version,
 		MTProto: MTProtoBinding{
 			Endpoint: endpoint,
@@ -79,7 +96,11 @@ func NewDocument(endpoint string, dcID int, pub *rsa.PublicKey) (Document, error
 			RSASPKI:  base64.StdEncoding.EncodeToString(der),
 		},
 		WebSocket: WebSocketBinding{Endpoint: wsEndpoint},
-	}, nil
+	}
+	if advertiseDemoGuestSignUp {
+		doc.Demo = &DemoCapabilities{GuestSignUp: true}
+	}
+	return doc, nil
 }
 
 // MarshalDocument returns one deterministic compact JSON document. Encoding
@@ -89,6 +110,12 @@ func NewDocument(endpoint string, dcID int, pub *rsa.PublicKey) (Document, error
 func MarshalDocument(doc Document) ([]byte, error) {
 	if doc.Version != Version {
 		return nil, fmt.Errorf("unsupported discovery document version %d", doc.Version)
+	}
+	if doc.Demo != nil && !doc.Demo.GuestSignUp {
+		return nil, errors.New("demo guest sign-up capability must be enabled when present")
+	}
+	if doc.Turnstile != nil && !discoverySiteKeyPattern.MatchString(doc.Turnstile.SiteKey) {
+		return nil, errors.New("Turnstile site key is invalid")
 	}
 	if err := ValidateEndpoint(doc.MTProto.Endpoint); err != nil {
 		return nil, fmt.Errorf("validate document endpoint: %w", err)

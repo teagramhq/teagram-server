@@ -178,7 +178,7 @@ func (h *handlers) handleGetNotifyExceptions(r *mtproto.Request) (bin.Encoder, e
 		h.log.Error("get notification settings exception users", "user_id", r.UserID, "err", err)
 		return nil, errInternal
 	}
-	chats, err := h.loadChats(r.Ctx, chatIDs, r.UserID, nil)
+	chats, err := h.loadChats(r.Ctx, chatIDs, r.UserID)
 	if err != nil {
 		h.log.Error("get notification settings exception chats", "user_id", r.UserID, "err", err)
 		return nil, errInternal

@@ -36,7 +36,32 @@ SELECT megagroup FROM channels WHERE id = $1;
 -- and random_id deduplication. Keep slowmode_seconds out of this projection so
 -- a default-rights refusal takes precedence without observing slow-mode state.
 -- name: ChannelPostDefaults :one
-SELECT megagroup, default_banned_rights FROM channels WHERE id = $1;
+SELECT megagroup, default_banned_rights, signatures FROM channels WHERE id = $1;
+
+-- SetChannelSignatures writes the broadcast setting after the caller's current
+-- membership, role, channel kind and equality have been checked under LockChannel.
+-- name: SetChannelSignatures :one
+UPDATE channels
+SET signatures = $2, version = version + 1
+WHERE id = $1
+RETURNING *;
+
+-- SetChannelPreHistoryHidden writes the megagroup visibility setting after the
+-- caller's current membership, role, channel kind and username have been
+-- checked under LockChannel and channel_state.
+-- name: SetChannelPreHistoryHidden :one
+UPDATE channels
+SET pre_history_hidden = $2, version = version + 1
+WHERE id = $1
+RETURNING *;
+
+-- ClearChannelParticipantHistoryFloors makes all current members see the full
+-- history after prehistory hiding is disabled or the group becomes public.
+-- Callers hold the channel row and channel_state locks in that order.
+-- name: ClearChannelParticipantHistoryFloors :execrows
+UPDATE channel_participants
+SET available_min_id = 0
+WHERE channel_id = $1 AND available_min_id <> 0;
 
 -- ChannelSlowModePostState is called only after membership, ban, post rights,
 -- deduplication and default restrictions are decided. clock_timestamp() is
@@ -69,6 +94,14 @@ SELECT * FROM channel_state WHERE channel_id = $1 FOR UPDATE;
 -- demotion cannot interleave with the promotion it revokes. See channels.go.
 -- name: LockChannel :one
 SELECT * FROM channels WHERE id = $1 FOR NO KEY UPDATE;
+
+-- LockChannelInvites follows LockChannel and precedes LockChannelState during
+-- deletion, matching JoinChannelByInvite's channel/invite/state order.
+-- name: LockChannelInvites :many
+SELECT hash FROM channel_invites
+WHERE channel_id = $1
+ORDER BY hash
+FOR UPDATE;
 
 -- name: ChannelParticipants :many
 SELECT * FROM channel_participants WHERE channel_id = $1 ORDER BY user_id;
@@ -286,6 +319,74 @@ SET last_post_at = EXCLUDED.last_post_at;
 -- name: DeleteChannelParticipant :execrows
 DELETE FROM channel_participants WHERE channel_id = $1 AND user_id = $2;
 
+-- name: DeleteAllChannelParticipants :execrows
+DELETE FROM channel_participants WHERE channel_id = $1;
+
+-- name: RevokeAllChannelInvites :execrows
+UPDATE channel_invites
+SET revoked_at = COALESCE(revoked_at, clock_timestamp())
+WHERE channel_id = $1;
+
+-- name: MarkChannelDeleted :execrows
+UPDATE channels
+SET deleted_at = clock_timestamp(), username = NULL, publicly_discoverable = false
+WHERE id = $1 AND deleted_at IS NULL;
+
+-- name: InsertChannelDeletionJob :exec
+INSERT INTO channel_deletion_jobs (channel_id) VALUES ($1)
+ON CONFLICT (channel_id) DO NOTHING;
+
+-- name: DeleteChannelDialogs :execrows
+DELETE FROM dialogs WHERE peer_type = 3 AND peer_id = $1;
+
+-- name: DeleteChannelPins :execrows
+DELETE FROM user_dialog_pins WHERE peer_type = 3 AND peer_id = $1;
+
+-- name: DeleteChannelUnreadMarks :execrows
+DELETE FROM user_dialog_unread_marks WHERE peer_type = 3 AND peer_id = $1;
+
+-- name: DeleteChannelFilterPeers :execrows
+DELETE FROM user_dialog_filter_peers WHERE peer_type = 3 AND peer_id = $1;
+
+-- NextChannelDeletionJob locks one durable tombstoning cursor. SKIP LOCKED
+-- lets multiple replicas drain separate channels without duplicating work.
+-- name: NextChannelDeletionJob :one
+SELECT job.channel_id, job.post_cursor
+FROM channel_deletion_jobs AS job
+JOIN channels AS channel ON channel.id = job.channel_id
+WHERE channel.deleted_at IS NOT NULL AND job.posts_tombstoned_at IS NULL
+ORDER BY job.channel_id
+LIMIT 1
+FOR UPDATE OF job SKIP LOCKED;
+
+-- name: ChannelPostsForTombstone :many
+SELECT local_id
+FROM channel_messages
+WHERE channel_id = sqlc.arg(channel_id)::bigint
+  AND local_id > sqlc.arg(post_cursor)::bigint
+ORDER BY local_id
+LIMIT sqlc.arg(lim)::int
+FOR UPDATE;
+
+-- name: TombstoneDeletedChannelPosts :execrows
+UPDATE channel_messages
+SET deleted = true
+WHERE channel_id = sqlc.arg(channel_id)::bigint
+  AND local_id = ANY(sqlc.arg(local_ids)::bigint[])
+  AND deleted = false;
+
+-- name: AdvanceChannelDeletionCursor :execrows
+UPDATE channel_deletion_jobs
+SET post_cursor = sqlc.arg(post_cursor)::bigint
+WHERE channel_id = sqlc.arg(channel_id)::bigint
+  AND posts_tombstoned_at IS NULL;
+
+-- name: CompleteChannelDeletionPosts :execrows
+UPDATE channel_deletion_jobs
+SET posts_tombstoned_at = clock_timestamp()
+WHERE channel_id = sqlc.arg(channel_id)::bigint
+  AND posts_tombstoned_at IS NULL;
+
 -- name: InsertChannelInvite :exec
 INSERT INTO channel_invites (hash, channel_id, creator_id) VALUES ($1, $2, $3);
 
@@ -297,10 +398,10 @@ INSERT INTO channel_invites (hash, channel_id, creator_id) VALUES ($1, $2, $3);
 -- name: ChannelInviteByHash :one
 SELECT * FROM channel_invites WHERE hash = $1 AND revoked_at IS NULL;
 
--- ChannelInviteByHashForUpdate is the locked variant used by JoinChannelByInvite.
--- The row lock serialises admission against revocation: a concurrent
--- RevokeChannelInvite UPDATE blocks until the join commits or rolls back. The
--- preview path (ChannelByInvite) keeps the unlocked ChannelInviteByHash.
+-- ChannelInviteByHashForUpdate is used after JoinChannelByInvite locks the
+-- channel row, keeping admission and deletion in the same lock order. The row
+-- lock serialises admission against revocation; ChannelByInvite uses the
+-- unlocked ChannelInviteByHash for preview.
 -- name: ChannelInviteByHashForUpdate :one
 SELECT * FROM channel_invites WHERE hash = $1 AND revoked_at IS NULL FOR UPDATE;
 
@@ -310,7 +411,7 @@ UPDATE channel_invites SET revoked_at = COALESCE(revoked_at, now()) WHERE hash =
 -- name: ChannelsForUser :many
 SELECT c.* FROM channels c
 JOIN channel_participants p ON p.channel_id = c.id
-WHERE p.user_id = $1
+WHERE p.user_id = $1 AND c.deleted_at IS NULL
 ORDER BY c.id;
 
 -- AdminedPublicChannels is scoped to the caller's own current admin rows. The
@@ -318,7 +419,7 @@ ORDER BY c.id;
 -- channels.username is only a denormalized copy.
 -- name: AdminedPublicChannels :many
 SELECT c.id, c.title, c.about, c.creator_id, c.megagroup, c.version, c.date,
-       c.pinned_message_id, un.handle, p.role
+       c.pinned_message_id, c.signatures, un.handle, p.role
 FROM channel_participants p
 JOIN channels c ON c.id = p.channel_id
 JOIN usernames un ON un.owner_type = 'channel' AND un.owner_id = c.id
@@ -337,11 +438,36 @@ UPDATE channels SET pinned_message_id = $2, version = version + 1 WHERE id = $1 
 -- name: GetChannelPinnedMessage :one
 SELECT pinned_message_id FROM channels WHERE id = $1;
 
+-- ChannelPinnedMessageForViewer only returns an active pin when it is above
+-- the viewer's history floor. The participant row supplies membership, ban
+-- state and floor in the same statement as the pin decision.
+-- name: ChannelPinnedMessageForViewer :one
+SELECT c.pinned_message_id
+FROM channels c
+LEFT JOIN channel_participants participant
+  ON participant.channel_id = c.id
+ AND participant.user_id = sqlc.arg(owner_id)::bigint
+JOIN channel_messages cm
+  ON cm.channel_id = c.id
+ AND cm.local_id = c.pinned_message_id
+ AND cm.deleted = false
+ AND (cm.expires_at IS NULL OR cm.expires_at > statement_timestamp())
+ AND cm.action_type = 0
+WHERE c.id = sqlc.arg(channel_id)::bigint
+  AND c.pinned_message_id IS NOT NULL
+  AND (
+      participant.user_id IS NULL
+      OR (
+          (participant.banned_until IS NULL OR participant.banned_until <= now())
+          AND c.pinned_message_id > participant.available_min_id
+      )
+  );
+
 -- ChannelDialogsForUser returns every unbanned channel the user belongs to,
--- including empty channels, alongside the member row, channel pts, and newest
--- non-deleted post (the dialog's top message). Empty channels have top_local_id
--- 0 and still produce a dialog. LEFT JOIN ensures they count toward the bounded
--- 500-channel account cap.
+-- including empty or fully floored channels, alongside the member row, channel
+-- pts, and newest visible post (the dialog's top message). Empty channels have
+-- top_local_id 0 and still produce a dialog. LEFT JOIN ensures they count toward
+-- the bounded 500-channel account cap.
 -- COALESCE guards against NULL from the lateral join; local_id >= 1 so 0 is
 -- a safe sentinel for "no row".
 -- name: ChannelDialogsForUser :many
@@ -351,14 +477,16 @@ SELECT
     c.about,
     c.creator_id,
     c.megagroup,
+    c.signatures,
     c.version,
     c.username,
     c.default_banned_rights,
+    c.ttl_period AS channel_ttl_period,
     c.date AS channel_date,
     p.role AS member_role,
     p.banned_until AS member_banned_until,
     p.join_pts AS member_join_pts,
-    COALESCE(read_state.read_max_id, 0)::bigint AS read_inbox_max_id,
+    GREATEST(COALESCE(read_state.read_max_id, 0), p.available_min_id)::bigint AS read_inbox_max_id,
     unread.unread_count,
     unread.entitled AS summary_entitled,
     unread.status_exists AS summary_status_exists,
@@ -380,6 +508,8 @@ SELECT
     top.file_id                AS top_file_id,
     top.reply_to_msg_id        AS top_reply_to_msg_id,
     COALESCE(top.action_type, 0)::smallint AS top_action_type,
+    COALESCE(top.ttl_period, 0)::integer AS top_ttl_period,
+    top.post_author AS top_post_author,
     EXISTS (
         SELECT 1 FROM user_dialog_pins pin
         WHERE pin.owner_id = p.user_id AND pin.peer_type = 3
@@ -401,18 +531,22 @@ CROSS JOIN LATERAL (
     FROM channel_post_unread_suffix_counts(
         c.id,
         p.user_id,
-        COALESCE(read_state.read_max_id, 0)
+        GREATEST(COALESCE(read_state.read_max_id, 0), p.available_min_id)
     ) AS summary(entitled, status_exists, summary_version, summary_ready, total_live, author_live)
 ) AS unread
 LEFT JOIN LATERAL (
     SELECT cm.channel_id, cm.local_id, cm.from_id, cm.date, cm.message, cm.edit_date,
-           cm.deleted, cm.random_id, cm.grouped_id, cm.file_id, cm.reply_to_msg_id, cm.action_type
+           cm.deleted, cm.random_id, cm.grouped_id, cm.file_id, cm.reply_to_msg_id, cm.action_type,
+           cm.ttl_period, cm.post_author
     FROM channel_messages cm
     WHERE cm.channel_id = c.id AND cm.deleted = false
+      AND cm.local_id > p.available_min_id
+      AND (cm.expires_at IS NULL OR cm.expires_at > statement_timestamp())
     ORDER BY cm.local_id DESC
     LIMIT 1
 ) top ON true
 WHERE p.user_id = $1
+  AND c.deleted_at IS NULL
   AND (p.banned_until IS NULL OR p.banned_until <= now())
   AND (NOT sqlc.arg(exclude_pinned)::boolean OR NOT EXISTS (
         SELECT 1 FROM user_dialog_pins pin
@@ -462,7 +596,15 @@ SET username = sqlc.arg(username),
         SELECT 1 FROM usernames un
         WHERE un.owner_type = 'channel' AND un.owner_id = c.id
     )
-WHERE c.id = sqlc.arg(id);
+WHERE c.id = sqlc.arg(id) AND c.deleted_at IS NULL;
+
+-- name: HoldChannelUsername :one
+UPDATE usernames
+SET owner_type = 'channel_hold',
+    hold_creator_id = sqlc.arg(creator_id)::bigint,
+    hold_until = clock_timestamp() + interval '2160 hours'
+WHERE owner_type = 'channel' AND owner_id = sqlc.arg(channel_id)::bigint
+RETURNING handle;
 
 -- SearchPublicChannels finds the channels any account may discover by title or
 -- by handle: exactly those owning a row in usernames.
@@ -508,13 +650,15 @@ WHERE c.id = sqlc.arg(id);
 -- usernames primary key.
 -- name: SearchPublicChannels :many
 SELECT c.id, c.title, c.about, c.creator_id, c.megagroup, c.version, c.date,
-       c.pinned_message_id, un.handle,
+       c.pinned_message_id, c.signatures, un.handle,
        (SELECT count(*) FROM channel_participants cp WHERE cp.channel_id = c.id) AS participants_count
 FROM channels c
 JOIN usernames un ON un.owner_type = 'channel' AND un.owner_id = c.id
-WHERE c.id IN (
+WHERE c.deleted_at IS NULL
+  AND c.id IN (
     SELECT tc.id FROM channels tc
-    WHERE tc.publicly_discoverable
+    WHERE tc.deleted_at IS NULL
+      AND tc.publicly_discoverable
       AND tc.title_tsv @@ plainto_tsquery('simple', sqlc.arg(query))
     UNION
     SELECT hu.owner_id FROM usernames hu WHERE hu.owner_type = 'channel' AND hu.handle = sqlc.arg(handle)
@@ -570,17 +714,19 @@ LIMIT sqlc.arg(lim)::int;
 -- a per-row aggregate over channel_participants whose result is discarded.
 -- name: SearchMemberChannels :many
 SELECT c.id, c.title, c.about, c.creator_id, c.megagroup, c.version, c.date,
-       c.pinned_message_id, un.handle, p.role
+       c.pinned_message_id, c.signatures, un.handle, p.role
 FROM channels c
 JOIN channel_participants p ON p.channel_id = c.id AND p.user_id = sqlc.arg(viewer_id)::bigint
 LEFT JOIN usernames un ON un.owner_type = 'channel' AND un.owner_id = c.id
 WHERE c.id IN (
     SELECT tc.id FROM channels tc
     WHERE tc.id = ANY(sqlc.arg(channel_ids)::bigint[])
+      AND tc.deleted_at IS NULL
       AND tc.title_tsv @@ plainto_tsquery('simple', sqlc.arg(query))
     UNION
     SELECT hu.owner_id FROM usernames hu WHERE hu.owner_type = 'channel' AND hu.handle = sqlc.arg(handle)
 )
+  AND c.deleted_at IS NULL
   AND (p.banned_until IS NULL OR p.banned_until <= now())
 ORDER BY c.id
 LIMIT sqlc.arg(lim)::int;

@@ -234,6 +234,38 @@ func TestChatAdminMarkerIndexesSupportParticipantCascades(t *testing.T) {
 	}
 }
 
+func TestOpenRejectsMissingCurrentChatPhotoIndex(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	dsn := pgtest.DSN(t)
+	conn, err := pgx.Connect(ctx, dsn)
+	if err != nil {
+		t.Fatalf("connect to test database: %v", err)
+	}
+	defer func() { _ = conn.Close(ctx) }() //nolint:errcheck // best-effort close
+	if _, err := conn.Exec(ctx, `DROP INDEX chats_current_photo_file_id_idx`); err != nil {
+		t.Fatalf("drop current-photo reverse index: %v", err)
+	}
+
+	requireOpenMigrationError(t, ctx, dsn)
+}
+
+func TestOpenRejectsMissingChatPhotoReceiptIndex(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	dsn := pgtest.DSN(t)
+	conn, err := pgx.Connect(ctx, dsn)
+	if err != nil {
+		t.Fatalf("connect to test database: %v", err)
+	}
+	defer func() { _ = conn.Close(ctx) }() //nolint:errcheck // best-effort close
+	if _, err := conn.Exec(ctx, `DROP INDEX profile_upload_receipt_file_id_idx`); err != nil {
+		t.Fatalf("drop profile-upload receipt reverse index: %v", err)
+	}
+
+	requireOpenMigrationError(t, ctx, dsn)
+}
+
 func TestServerAdministrationMigrationClosesNonEmptyDatabase(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()

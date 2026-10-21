@@ -96,6 +96,9 @@ func (h *handlers) handleSendMultiMediaAfterReplyOnConn(c *mtproto.Conn, r *mtpr
 		}
 	} else {
 		replay, retryErr := h.store.UserAlbumRetry(r.Ctx, r.UserID, peerType, toID, randomIDs)
+		if errors.Is(retryErr, store.ErrRandomIDExpired) {
+			return nil, nil, nil, errRandomIDDuplicate
+		}
 		if errors.Is(retryErr, store.ErrMediaInvalid) {
 			return nil, nil, nil, errMediaInvalid
 		}
@@ -139,6 +142,8 @@ func (h *handlers) handleSendMultiMediaAfterReplyOnConn(c *mtproto.Conn, r *mtpr
 	if err != nil {
 		h.clearSenderAfterStoreFailure(attempt, r, err)
 		switch {
+		case errors.Is(err, store.ErrRandomIDExpired):
+			return nil, nil, nil, errRandomIDDuplicate
 		case errors.Is(err, store.ErrMediaInvalid), errors.Is(err, store.ErrFileMissing):
 			return nil, nil, nil, errMediaInvalid
 		case errors.Is(err, store.ErrNotMember):
@@ -313,7 +318,7 @@ func (h *handlers) userAlbumUpdates(r *mtproto.Request, peerType store.PeerType,
 		})
 	}
 	if peerType == store.PeerTypeChat {
-		if res.Chats, err = h.loadChats(r.Ctx, map[int64]bool{toID: true}, r.UserID, nil); err != nil {
+		if res.Chats, err = h.loadChats(r.Ctx, map[int64]bool{toID: true}, r.UserID); err != nil {
 			h.log.Error("load album chat", "chat_id", toID, "err", err)
 			return nil, errInternal
 		}
@@ -355,9 +360,14 @@ func (h *handlers) channelAlbumResponse(
 		h.log.Error("load channel album files", "channel_id", channelID, "err", err)
 		return nil, nil, nil, errInternal
 	}
+	broadcast, err := h.channelIsBroadcast(r.Ctx, channelID)
+	if err != nil {
+		h.log.Error("load channel album kind", "channel_id", channelID, "err", err)
+		return nil, nil, nil, errInternal
+	}
 	res := &tg.Updates{Chats: channels, Users: users, Date: int(album.Messages[0].Date.Unix())}
 	for i, message := range album.Messages {
-		messageTL, renderErr := channelMessageToTL(message, r.UserID, files)
+		messageTL, renderErr := channelMessageToTL(message, r.UserID, files, broadcast)
 		if renderErr != nil {
 			h.log.Error("render channel album message", "channel_id", channelID, "local_id", message.LocalID, "err", renderErr)
 			return nil, nil, nil, errInternal

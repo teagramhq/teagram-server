@@ -32,13 +32,16 @@ const maxChatParticipants = 200
 
 // Chat is a basic group chat.
 type Chat struct {
-	ID                  int64
-	Title               string
-	CreatorID           int64
-	Version             int
-	Date                time.Time
-	PinnedMessageID     *int32
-	DefaultBannedRights []string
+	ID                     int64
+	Title                  string
+	CreatorID              int64
+	Version                int
+	TTLPeriod              int
+	Date                   time.Time
+	PinnedMessageID        *int32
+	DefaultBannedRights    []string
+	CurrentPhotoFileID     *int64
+	CurrentPhotoUploaderID *int64
 }
 
 // Participant is one member of a chat.
@@ -47,6 +50,21 @@ type Participant struct {
 	InviterID int64
 	Date      time.Time
 	Admin     bool
+}
+
+// ChatRemovalEvent is the durable, PTS-neutral dialog removal sent to one
+// member when a basic group is deleted.
+type ChatRemovalEvent struct {
+	OwnerID int64
+	ChatID  int64
+	Version int
+}
+
+// ChatDeletion separates normal PTS-bearing message deletions from the
+// PTS-neutral participant removal markers.
+type ChatDeletion struct {
+	OwnerPts      map[int64]int
+	RemovalEvents []ChatRemovalEvent
 }
 
 // ChatPinSnapshot contains one committed pin state and each member's copy as
@@ -78,15 +96,23 @@ type ChatPinChange struct {
 
 func chatFromRow(r db.Chat) Chat {
 	return Chat{
-		ID:                  r.ID,
-		Title:               r.Title,
-		CreatorID:           r.CreatorID,
-		Version:             int(r.Version),
-		Date:                r.Date.Time,
-		PinnedMessageID:     r.PinnedMessageID,
-		DefaultBannedRights: r.DefaultBannedRights,
+		ID:                     r.ID,
+		Title:                  r.Title,
+		CreatorID:              r.CreatorID,
+		Version:                int(r.Version),
+		TTLPeriod:              int(r.TtlPeriod),
+		Date:                   r.Date.Time,
+		PinnedMessageID:        r.PinnedMessageID,
+		DefaultBannedRights:    r.DefaultBannedRights,
+		CurrentPhotoFileID:     r.CurrentPhotoFileID,
+		CurrentPhotoUploaderID: r.CurrentPhotoUploaderID,
 	}
 }
+
+// ErrChatPhotoUnavailable is the uniform result for a missing, foreign,
+// unstored, invalid, or previously referenced upload. Those states do not
+// describe an eligible fresh photo for this selection operation.
+var ErrChatPhotoUnavailable = errors.New("chat photo upload unavailable")
 
 // CreateChat creates a chat owned by creatorID with the creator and each
 // unblocked memberID as participants, all in one transaction. Duplicate ids in
@@ -207,6 +233,7 @@ func (s *Store) IsMember(ctx context.Context, chatID, userID int64) (bool, error
 type chatMutation struct {
 	tx                  pgx.Tx
 	qtx                 *db.Queries
+	chat                db.Chat
 	creatorID           int64
 	defaultBannedRights []string
 	members             []int64        // ascending, as read under the chats row lock
@@ -216,6 +243,99 @@ type chatMutation struct {
 
 func (m *chatMutation) canChangeInfo(callerID int64) bool {
 	return callerID == m.creatorID || !hasChatRight(m.defaultBannedRights, "change_info")
+}
+
+// CheckChatPhotoEditPermission is the early authorization check for a photo
+// upload. The upload assembly runs after it with no chat or owner lock held;
+// SetChatPhoto repeats this check at the final mutation serialization point.
+func (s *Store) CheckChatPhotoEditPermission(ctx context.Context, chatID, callerID int64) error {
+	m, err := s.beginChatMutation(ctx, chatID, callerID)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = m.tx.Rollback(ctx) }() //nolint:errcheck // read-only preflight
+	if !m.canChangeInfo(callerID) {
+		return ErrChatAdminRequired
+	}
+	return nil
+}
+
+// SetChatPhoto replaces or clears a basic group's current photo and stores one
+// immutable service-message copy per member in the same transaction. fileID is
+// zero to clear. A changed selection bumps the chat version and every recipient's
+// local message id, event and PTS together; an authorized retry of the same
+// selection, or a clear of an already-empty selection, is a no-op.
+//
+// A replacement accepts only a caller-owned, validated, stored photo that has
+// no prior media, gallery, grant, receipt, or chat reference. The upload assembly
+// caller must run before this method, so JPEG and blob I/O never hold chat or
+// member-owner locks. The final eligibility check runs after those locks and
+// holds the terminal file reference lock through commit.
+func (s *Store) SetChatPhoto(ctx context.Context, chatID, callerID, fileID int64) (changed bool, chat Chat, sender Message, perOwner map[int64]int, err error) {
+	m, err := s.beginChatMutation(ctx, chatID, callerID)
+	if err != nil {
+		return false, Chat{}, Message{}, nil, err
+	}
+	defer func() { _ = m.tx.Rollback(ctx) }() //nolint:errcheck // no-op after commit
+
+	if !m.canChangeInfo(callerID) {
+		return false, Chat{}, Message{}, nil, ErrChatAdminRequired
+	}
+	if fileID < 0 {
+		return false, Chat{}, Message{}, nil, ErrChatPhotoUnavailable
+	}
+
+	if fileID == 0 {
+		if m.chat.CurrentPhotoFileID == nil {
+			return false, chatFromRow(m.chat), Message{}, nil, nil
+		}
+	} else if m.chat.CurrentPhotoFileID != nil && *m.chat.CurrentPhotoFileID == fileID {
+		if m.chat.CurrentPhotoUploaderID == nil || *m.chat.CurrentPhotoUploaderID != callerID {
+			return false, Chat{}, Message{}, nil, ErrChatPhotoUnavailable
+		}
+		return false, chatFromRow(m.chat), Message{}, nil, nil
+	}
+
+	// Authority was decided before the recipient-sized lock set. Keep the lock
+	// order chat row -> sorted member-owner keys -> terminal file row.
+	if err = m.lockOwners(ctx); err != nil {
+		return false, Chat{}, Message{}, nil, err
+	}
+	action := ChatActionEditPhoto
+	var fileIDValue, uploaderIDValue *int64
+	if fileID == 0 {
+		action = ChatActionDeletePhoto
+	} else {
+		_, err = m.qtx.LockChatPhotoFileForAttach(ctx, db.LockChatPhotoFileForAttachParams{
+			FileID: fileID, UploaderID: callerID,
+		})
+		switch {
+		case errors.Is(err, pgx.ErrNoRows):
+			return false, Chat{}, Message{}, nil, ErrChatPhotoUnavailable
+		case err != nil:
+			return false, Chat{}, Message{}, nil, fmt.Errorf("lock chat photo upload: %w", err)
+		}
+		fileIDValue = &fileID
+		uploaderIDValue = &callerID
+	}
+
+	row, err := m.qtx.SetChatCurrentPhoto(ctx, db.SetChatCurrentPhotoParams{
+		ID: chatID, CurrentPhotoFileID: fileIDValue, CurrentPhotoUploaderID: uploaderIDValue,
+	})
+	if err != nil {
+		return false, Chat{}, Message{}, nil, fmt.Errorf("set chat current photo: %w", err)
+	}
+	sender, perOwner, _, err = fanOut(ctx, m.tx, m.qtx, s.log, FanOut{
+		ChatID: chatID, FromID: callerID, Action: action, FileID: fileID,
+		chatPhotoAuthorized: true,
+	})
+	if err != nil {
+		return false, Chat{}, Message{}, nil, err
+	}
+	if err = m.tx.Commit(ctx); err != nil {
+		return false, Chat{}, Message{}, nil, fmt.Errorf("commit chat photo: %w", err)
+	}
+	return true, chatFromRow(row), sender, perOwner, nil
 }
 
 // beginChatMutation opens the transaction AddChatUser, RemoveChatUser and
@@ -297,6 +417,7 @@ func (s *Store) beginChatMutation(ctx context.Context, chatID, callerID int64) (
 	m := &chatMutation{
 		tx:                  tx,
 		qtx:                 qtx,
+		chat:                chat,
 		creatorID:           chat.CreatorID,
 		defaultBannedRights: chat.DefaultBannedRights,
 		members:             make([]int64, len(parts)),
@@ -558,6 +679,136 @@ func (s *Store) RemoveChatUser(ctx context.Context, chatID, target, callerID int
 		return false, Message{}, nil, fmt.Errorf("commit: %w", err)
 	}
 	return true, sender, perOwner, nil
+}
+
+// DeleteChat deactivates a basic chat and clears every current participant's
+// message copies in one transaction. The creator check and member snapshot are
+// made under the chats row lock, before the complete sorted owner-lock pass.
+// Empty membership is the tombstone state: creators cannot leave, and the chats
+// row remains so its id is never reused. Copies owned by former members are
+// intentionally left frozen, matching group message revoke behavior.
+func (s *Store) DeleteChat(ctx context.Context, chatID, callerID int64) (ChatDeletion, error) {
+	if chatID <= 0 || callerID <= 0 {
+		return ChatDeletion{}, ErrChatAdminRequired
+	}
+	// Refuse non-creators before taking the chat lock so a guessed ID cannot
+	// make an outsider wait behind member mutations. Recheck under lock below.
+	precheck, err := s.q.ChatByID(ctx, chatID)
+	switch {
+	case errors.Is(err, pgx.ErrNoRows):
+		return ChatDeletion{}, ErrChatAdminRequired
+	case err != nil:
+		return ChatDeletion{}, fmt.Errorf("check chat owner before deletion: %w", err)
+	case precheck.CreatorID != callerID:
+		return ChatDeletion{}, ErrChatAdminRequired
+	}
+
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return ChatDeletion{}, fmt.Errorf("begin delete chat: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }() //nolint:errcheck // no-op after commit
+	qtx := s.q.WithTx(tx)
+
+	chat, err := qtx.ChatByIDForUpdate(ctx, chatID)
+	switch {
+	case errors.Is(err, pgx.ErrNoRows):
+		return ChatDeletion{}, ErrChatAdminRequired
+	case err != nil:
+		return ChatDeletion{}, fmt.Errorf("lock chat for deletion: %w", err)
+	case chat.CreatorID != callerID:
+		return ChatDeletion{}, ErrChatAdminRequired
+	}
+
+	parts, err := qtx.ChatParticipants(ctx, chatID)
+	if err != nil {
+		return ChatDeletion{}, fmt.Errorf("list chat participants for deletion: %w", err)
+	}
+	if len(parts) == 0 {
+		// The creator is never removable, so an empty chat is a completed delete.
+		// Keep repeated calls successful and silent after the tombstone commit.
+		if err := tx.Commit(ctx); err != nil {
+			return ChatDeletion{}, fmt.Errorf("commit repeated chat deletion: %w", err)
+		}
+		return ChatDeletion{OwnerPts: map[int64]int{}}, nil
+	}
+
+	ownerIDs := make([]int64, len(parts))
+	for i, part := range parts {
+		ownerIDs[i] = part.UserID
+	}
+	if err := lockOwners(ctx, tx, ownerIDs...); err != nil {
+		return ChatDeletion{}, err
+	}
+	if chat.CurrentPhotoFileID != nil {
+		if _, err := qtx.ClearChatCurrentPhoto(ctx, chatID); err != nil {
+			return ChatDeletion{}, fmt.Errorf("clear deleted chat photo: %w", err)
+		}
+	}
+
+	copies, err := qtx.ChatMessageCopiesForDeletion(ctx, db.ChatMessageCopiesForDeletionParams{
+		ChatID: chatID, OwnerIds: ownerIDs,
+	})
+	if err != nil {
+		return ChatDeletion{}, fmt.Errorf("load current members' message copies: %w", err)
+	}
+	refs := make([]messageCopyRef, len(copies))
+	for i, copy := range copies {
+		refs[i] = messageCopyRef{ownerID: copy.OwnerID, localID: copy.LocalID}
+	}
+	if err := lockPollsForDeletedMessageCopies(ctx, qtx, refs); err != nil {
+		return ChatDeletion{}, err
+	}
+
+	for _, part := range parts {
+		removed, err := removeParticipant(ctx, tx, qtx, chatID, part.UserID)
+		if err != nil {
+			return ChatDeletion{}, fmt.Errorf("remove chat participant %d: %w", part.UserID, err)
+		}
+		if !removed {
+			return ChatDeletion{}, fmt.Errorf("remove chat participant %d: row disappeared under chat lock", part.UserID)
+		}
+	}
+	chat, err = qtx.BumpChatVersion(ctx, chatID)
+	if err != nil {
+		return ChatDeletion{}, fmt.Errorf("bump chat version after deletion: %w", err)
+	}
+
+	deletion := ChatDeletion{OwnerPts: make(map[int64]int, len(ownerIDs)), RemovalEvents: make([]ChatRemovalEvent, 0, len(ownerIDs))}
+	for _, copy := range copies {
+		pts, changed, err := markMessageCopyDeleted(ctx, qtx, copy.OwnerID, copy.LocalID)
+		if err != nil {
+			return ChatDeletion{}, fmt.Errorf("delete chat message copy %d:%d: %w", copy.OwnerID, copy.LocalID, err)
+		}
+		if changed {
+			deletion.OwnerPts[copy.OwnerID] = pts
+		}
+	}
+
+	// Removal is a durable PTS-neutral event because UpdateChatParticipantDelete
+	// has no pts fields on the wire. Per-auth-key delivery and acknowledgement
+	// state lets each client replay it until getDifference confirms its state.
+	for _, ownerID := range ownerIDs {
+		event, err := qtx.InsertChatRemovalEvent(ctx, db.InsertChatRemovalEventParams{
+			OwnerID: ownerID, ChatID: chatID, Version: chat.Version,
+		})
+		if err != nil {
+			return ChatDeletion{}, fmt.Errorf("record chat removal for owner %d: %w", ownerID, err)
+		}
+		deletion.RemovalEvents = append(deletion.RemovalEvents, ChatRemovalEvent{
+			OwnerID: ownerID, ChatID: chatID, Version: int(event.Version),
+		})
+		if err := qtx.DeleteDialogForPeer(ctx, db.DeleteDialogForPeerParams{
+			OwnerID: ownerID, PeerType: int16(PeerTypeChat), PeerID: chatID,
+		}); err != nil {
+			return ChatDeletion{}, fmt.Errorf("delete chat dialog for owner %d: %w", ownerID, err)
+		}
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return ChatDeletion{}, fmt.Errorf("commit delete chat: %w", err)
+	}
+	return deletion, nil
 }
 
 // SetChatTitle renames the chat and announces it in one transaction. Current

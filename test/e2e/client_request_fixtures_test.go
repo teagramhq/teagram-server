@@ -77,6 +77,18 @@ func (r *clientRequestRecorder) count() int {
 	return len(r.records)
 }
 
+func (r *clientRequestRecorder) countMethod(method string) int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	count := 0
+	for _, record := range r.records {
+		if record.method == method {
+			count++
+		}
+	}
+	return count
+}
+
 func (r *clientRequestRecorder) add(request capturedClientRequest) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -454,6 +466,8 @@ func TestSmokeClientRequestFixturesAreLayer228Shapes(t *testing.T) {
 		"channels_checkUsername.1",
 		"channels_createChannel.1",
 		"channels_editTitle.1",
+		"channels_toggleSignatures.1",
+		"channels_togglePreHistoryHidden.1",
 		"channels_getFullChannel.1",
 		"channels_getFullChannel.2",
 		"channels_getFullChannel.3",
@@ -467,6 +481,9 @@ func TestSmokeClientRequestFixturesAreLayer228Shapes(t *testing.T) {
 		"messages_getDialogs.2",
 		"messages_getDialogs.3",
 		"messages_createChat.1",
+		"messages_deleteChat.1",
+		"messages_editChatPhoto.1",
+		"messages_editChatPhoto.2",
 		"messages_getCommonChats.1",
 		"messages_deleteHistory.1",
 		"messages_editChatAbout.1",
@@ -477,6 +494,7 @@ func TestSmokeClientRequestFixturesAreLayer228Shapes(t *testing.T) {
 		"messages_getHistory.1",
 		"messages_getHistory.2",
 		"messages_getHistory.second-account.1",
+		"messages_getReplies.1",
 		"photos_getUserPhotos.1",
 		"photos_uploadProfilePhoto.1",
 		"account_updateProfile.1",
@@ -675,6 +693,44 @@ func testSmokeClientRequestFixtures(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("create fixture group: %v", err)
 	}
+	groupPhotoBody := smokeJPEGAtUploadSize(t, smokePhotoPartCount)
+	const groupPhotoFileID = int64(13030121)
+	var groupPhotoResult tg.UpdatesClass
+	if err := fixtureClientCall(t, creator, "messages_editChatPhoto.1", func(ctx context.Context, api *tg.Client) error {
+		for part := range smokePhotoPartCount {
+			start := part * smokePhotoPartSize
+			ok, err := api.UploadSaveFilePart(ctx, &tg.UploadSaveFilePartRequest{
+				FileID: groupPhotoFileID, FilePart: part, Bytes: groupPhotoBody[start : start+smokePhotoPartSize],
+			})
+			if err != nil {
+				return err
+			}
+			if !ok {
+				return fmt.Errorf("group photo fixture upload part %d returned false", part)
+			}
+		}
+		photo := &tg.InputChatUploadedPhoto{}
+		photo.SetFile(&tg.InputFile{
+			ID: groupPhotoFileID, Parts: smokePhotoPartCount, Name: "group.jpg", MD5Checksum: smokePhotoMD5(groupPhotoBody),
+		})
+		var err error
+		groupPhotoResult, err = api.MessagesEditChatPhoto(ctx, &tg.MessagesEditChatPhotoRequest{ChatID: chatID, Photo: photo})
+		return err
+	}); err != nil {
+		t.Fatalf("replay edit-chat-photo upload fixture: %v", err)
+	}
+	photoFromEditUpdates(t, groupPhotoResult)
+	var groupPhotoClear tg.UpdatesClass
+	if err := fixtureClientCall(t, creator, "messages_editChatPhoto.2", func(ctx context.Context, api *tg.Client) error {
+		var err error
+		groupPhotoClear, err = api.MessagesEditChatPhoto(ctx, &tg.MessagesEditChatPhotoRequest{
+			ChatID: chatID, Photo: &tg.InputChatPhotoEmpty{},
+		})
+		return err
+	}); err != nil {
+		t.Fatalf("replay edit-chat-photo clear fixture: %v", err)
+	}
+	assertDeletePhotoAction(t, groupPhotoClear, "fixture clear")
 	if err := fixtureClientCall(t, creator, "messages_getCommonChats.1", func(ctx context.Context, api *tg.Client) error {
 		result, err := api.MessagesGetCommonChats(ctx, &tg.MessagesGetCommonChatsRequest{
 			UserID: inputUser(creator.id, member.id),
@@ -873,6 +929,66 @@ func testSmokeClientRequestFixtures(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("replay channel title fixture: %v", err)
 	}
+	if err := fixtureClientCall(t, creator, "channels_toggleSignatures.1", func(ctx context.Context, api *tg.Client) error {
+		request := &tg.ChannelsToggleSignaturesRequest{Channel: inputChannel(creator.id, channelID)}
+		request.SetSignaturesEnabled(true)
+		result, err := api.ChannelsToggleSignatures(ctx, request)
+		if err != nil {
+			return err
+		}
+		updates, ok := result.(*tg.Updates)
+		if !ok {
+			return fmt.Errorf("toggle fixture channel signatures result = %T, want *tg.Updates", result)
+		}
+		if !channelSignaturesEnabled(updates.Chats, channelID) {
+			return errors.New("toggle fixture channel signatures did not return the enabled channel")
+		}
+		full, err := api.ChannelsGetFullChannel(ctx, inputChannel(creator.id, channelID))
+		if err != nil {
+			return err
+		}
+		if !channelSignaturesEnabled(full.Chats, channelID) {
+			return errors.New("full fixture channel omitted enabled signatures")
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("replay channel signatures fixture: %v", err)
+	}
+	preHistoryChannelID := createMegagroup(t, f.ctx, creator.cmds, "Prehistory fixture")
+	if err := fixtureClientCall(t, creator, "channels_togglePreHistoryHidden.1", func(ctx context.Context, api *tg.Client) error {
+		result, err := api.ChannelsTogglePreHistoryHidden(ctx, &tg.ChannelsTogglePreHistoryHiddenRequest{
+			Channel: inputChannel(creator.id, preHistoryChannelID),
+			Enabled: true,
+		})
+		if err != nil {
+			return err
+		}
+		updates, ok := result.(*tg.Updates)
+		if !ok {
+			return fmt.Errorf("toggle fixture prehistory result = %T, want updated channel %d", result, preHistoryChannelID)
+		}
+		var updated bool
+		for _, chat := range updates.Chats {
+			if channel, ok := chat.(*tg.Channel); ok && channel.ID == preHistoryChannelID {
+				updated = true
+				break
+			}
+		}
+		if !updated {
+			return fmt.Errorf("toggle fixture prehistory omitted updated channel %d", preHistoryChannelID)
+		}
+		full, err := api.ChannelsGetFullChannel(ctx, inputChannel(creator.id, preHistoryChannelID))
+		if err != nil {
+			return err
+		}
+		channelFull, ok := full.FullChat.(*tg.ChannelFull)
+		if !ok || !channelFull.GetHiddenPrehistory() {
+			return fmt.Errorf("full fixture channel hidden_prehistory = %T/%v, want true", full.FullChat, ok && channelFull.GetHiddenPrehistory())
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("replay channel prehistory fixture: %v", err)
+	}
 	if err := fixtureClientCall(t, creator, "messages_editChatAbout.2", func(ctx context.Context, api *tg.Client) error {
 		changed, err := api.MessagesEditChatAbout(ctx, &tg.MessagesEditChatAboutRequest{
 			Peer:  peerChannel(creator.id, channelID),
@@ -911,6 +1027,43 @@ func testSmokeClientRequestFixtures(t *testing.T) {
 		}
 	}
 
+	replyChannel, createReplyErr := f.store.CreateChannel(f.ctx, creator.id, "Reply fixture group", "", true)
+	if createReplyErr != nil {
+		t.Fatalf("create reply fixture supergroup: %v", createReplyErr)
+	}
+	root, _, _, seedReplyErr := f.store.PostChannelMessageAs(f.ctx, replyChannel.ID, creator.id, "reply fixture root", 13030201, nil, 0)
+	if seedReplyErr != nil {
+		t.Fatalf("seed reply fixture root: %v", seedReplyErr)
+	}
+	reply, _, _, seedReplyErr := f.store.PostChannelMessageAs(f.ctx, replyChannel.ID, creator.id, "visible fixture reply", 13030202, nil, root.LocalID)
+	if seedReplyErr != nil {
+		t.Fatalf("seed reply fixture reply: %v", seedReplyErr)
+	}
+	if err := fixtureClientCall(t, creator, "messages_getReplies.1", func(ctx context.Context, api *tg.Client) error {
+		result, err := api.MessagesGetReplies(ctx, &tg.MessagesGetRepliesRequest{
+			Peer:  peerChannel(creator.id, replyChannel.ID),
+			MsgID: int(root.LocalID),
+			Limit: 10,
+		})
+		if err != nil {
+			return err
+		}
+		messages, ok := result.(*tg.MessagesChannelMessages)
+		if !ok {
+			return fmt.Errorf("getReplies response = %T, want *tg.MessagesChannelMessages", result)
+		}
+		if messages.Count != 1 || len(messages.Messages) != 1 {
+			return fmt.Errorf("getReplies count/page = %d/%d, want one reply", messages.Count, len(messages.Messages))
+		}
+		message, ok := messages.Messages[0].(*tg.Message)
+		if !ok || message.ID != int(reply.LocalID) || message.Message != "visible fixture reply" {
+			return fmt.Errorf("getReplies message = %#v, want direct reply %d", messages.Messages[0], reply.LocalID)
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("replay getReplies fixture: %v", err)
+	}
+
 	for i, message := range []struct {
 		fixture string
 		peer    tg.InputPeerClass
@@ -920,7 +1073,31 @@ func testSmokeClientRequestFixtures(t *testing.T) {
 		{fixture: "messages_sendMessage.2", peer: &tg.InputPeerChat{ChatID: chatID}, text: "Hello"},
 		{fixture: "messages_sendMessage.3", peer: peerChannel(creator.id, channelID), text: "Hello followers!"},
 	} {
-		replayFixtureSendMessage(t, creator, message.fixture, message.peer, message.text, int64(13030101+i))
+		result := replayFixtureSendMessage(t, creator, message.fixture, message.peer, message.text, int64(13030101+i))
+		if message.fixture == "messages_sendMessage.3" {
+			updates, ok := result.(*tg.Updates)
+			if !ok {
+				t.Fatalf("channel post result = %T, want *tg.Updates", result)
+			}
+			var posted *tg.Message
+			for _, update := range updates.Updates {
+				created, ok := update.(*tg.UpdateNewChannelMessage)
+				if !ok {
+					continue
+				}
+				message, ok := created.Message.(*tg.Message)
+				if ok {
+					posted = message
+					break
+				}
+			}
+			if posted == nil {
+				t.Fatal("channel post result omitted updateNewChannelMessage")
+			}
+			if author, present := posted.GetPostAuthor(); !present || author != "Smoke" {
+				t.Fatalf("channel post_author = %q, present=%v; want the send-time display name Smoke", author, present)
+			}
+		}
 	}
 	if err := fixtureClientCall(t, creator, "messages_deleteHistory.1", func(ctx context.Context, api *tg.Client) error {
 		request := &tg.MessagesDeleteHistoryRequest{Peer: peerUser(creator.id, member.id)}
@@ -1111,9 +1288,49 @@ func testSmokeClientRequestFixtures(t *testing.T) {
 			t.Fatalf("poll answer web-page fixture message = %T, want *tg.Message", created.Message)
 		}
 		assertSmokePollAnswerWebPage(t, "poll answer web-page fixture", message, answerURL)
+		for _, test := range []struct {
+			fixture string
+			peer    tg.InputPeerClass
+			period  int
+		}{
+			{fixture: "messages_setHistoryTTL.1", peer: peerUser(creator.id, member.id), period: 86400},
+			{fixture: "messages_setHistoryTTL.2", peer: &tg.InputPeerChat{ChatID: chatID}, period: 604800},
+			{fixture: "messages_setHistoryTTL.3", peer: peerChannel(creator.id, channelID), period: 2592000},
+		} {
+			if err := fixtureClientCall(t, creator, test.fixture, func(ctx context.Context, api *tg.Client) error {
+				_, err := api.MessagesSetHistoryTTL(ctx, &tg.MessagesSetHistoryTTLRequest{
+					Peer: test.peer, Period: test.period,
+				})
+				return err
+			}); err != nil {
+				t.Fatalf("replay history-TTL fixture %s: %v", test.fixture, err)
+			}
+		}
+		if err := fixtureClientCall(t, creator, "messages_deleteChat.1", func(ctx context.Context, api *tg.Client) error {
+			deleted, err := api.MessagesDeleteChat(ctx, chatID)
+			if err != nil {
+				return err
+			}
+			if !deleted {
+				return errors.New("deleteChat returned false")
+			}
+			return nil
+		}); err != nil {
+			t.Fatalf("replay delete-chat fixture: %v", err)
+		}
 		return
 	}
 	t.Fatal("poll answer web-page fixture response omitted updateNewMessage")
+}
+
+func channelSignaturesEnabled(chats []tg.ChatClass, channelID int64) bool {
+	for _, chat := range chats {
+		channel, ok := chat.(*tg.Channel)
+		if ok && channel.ID == channelID {
+			return channel.GetSignatures()
+		}
+	}
+	return false
 }
 
 func replayCapturedPollVoteAndClose(t *testing.T, creator, member *smokeClient, chatID int64) {
@@ -1277,7 +1494,7 @@ func replayCapturedPollVoteAndClose(t *testing.T, creator, member *smokeClient, 
 	}
 }
 
-func replayFixtureSendMessage(t *testing.T, client *smokeClient, fixtureName string, peer tg.InputPeerClass, message string, randomID int64) {
+func replayFixtureSendMessage(t *testing.T, client *smokeClient, fixtureName string, peer tg.InputPeerClass, message string, randomID int64) tg.UpdatesClass {
 	t.Helper()
 	request := &tg.MessagesSendMessageRequest{Peer: peer, Message: message, RandomID: randomID}
 	request.SetClearDraft(true)
@@ -1292,6 +1509,7 @@ func replayFixtureSendMessage(t *testing.T, client *smokeClient, fixtureName str
 	if _, ok := result.(*tg.Updates); !ok {
 		t.Fatalf("text fixture %s result = %T, want *tg.Updates", fixtureName, result)
 	}
+	return result
 }
 
 func fixtureClientCall(t *testing.T, client *smokeClient, fixtureName string, call func(context.Context, *tg.Client) error) error {

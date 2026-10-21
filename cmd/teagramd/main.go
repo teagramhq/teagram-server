@@ -64,6 +64,7 @@ type publicWebSocketListener struct {
 	listener       net.Listener
 	handler        mtproto.Handler
 	originPatterns []string
+	discovery      discovery.Document
 }
 
 func runCommand(args []string, log *slog.Logger, stdout, stderr io.Writer) error {
@@ -420,9 +421,12 @@ func runClientConfigCommand(stdout io.Writer) error {
 		return err
 	}
 	endpoint := net.JoinHostPort(cfg.AdvertiseHost, strconv.Itoa(cfg.AdvertisePort))
-	doc, err := discovery.NewDocument(endpoint, cfg.DCID, &key.PublicKey)
+	doc, err := discovery.NewDocument(endpoint, cfg.DCID, &key.PublicKey, cfg.AdvertiseDemoGuestSignUp)
 	if err != nil {
 		return err
+	}
+	if cfg.TurnstileSiteKey != "" {
+		doc.Turnstile = &discovery.Turnstile{SiteKey: cfg.TurnstileSiteKey}
 	}
 	return discovery.WriteDocument(stdout, doc)
 }
@@ -648,9 +652,16 @@ func runAtBlobModePath(log *slog.Logger, blobModePath string) error {
 		return err
 	}
 	advertise := net.JoinHostPort(cfg.AdvertiseHost, strconv.Itoa(cfg.AdvertisePort))
-	clientDiscovery, err := discovery.NewDocument(advertise, cfg.DCID, &key.PublicKey)
+	clientDiscovery, err := discovery.NewDocument(advertise, cfg.DCID, &key.PublicKey, cfg.AdvertiseDemoGuestSignUp)
 	if err != nil {
 		return fmt.Errorf("validate discovery identity: %w", err)
+	}
+	if cfg.Turnstile.Enabled() && cfg.PublicWebSocketListenAddr == "" {
+		clientDiscovery.Turnstile = &discovery.Turnstile{SiteKey: cfg.Turnstile.SiteKey}
+	}
+	publicClientDiscovery := clientDiscovery
+	if cfg.Turnstile.Enabled() && cfg.PublicWebSocketListenAddr != "" {
+		publicClientDiscovery.Turnstile = &discovery.Turnstile{SiteKey: cfg.Turnstile.SiteKey}
 	}
 	log.Info("server RSA key", "key_id", keyID, "fingerprint", fingerprint, "path", cfg.RSAKeyPath)
 
@@ -725,6 +736,12 @@ func runAtBlobModePath(log *slog.Logger, blobModePath string) error {
 	sweepWG.Go(func() {
 		sweepExpiredSRPChallenges(sweepCtx, st, log)
 	})
+	sweepWG.Go(func() {
+		sweepExpiredHistoryMessages(sweepCtx, st, log)
+	})
+	sweepWG.Go(func() {
+		sweepDeletedChannelPosts(sweepCtx, st, log)
+	})
 	if cfg.MediaErasureReportInterval > 0 {
 		sweepWG.Go(func() {
 			reportMediaErasureCandidates(sweepCtx, st, cfg.MediaErasureMinAge, cfg.BlobScanTempMinAge, cfg.MediaErasureReportInterval, log)
@@ -780,12 +797,18 @@ func runAtBlobModePath(log *slog.Logger, blobModePath string) error {
 	if cfg.Turnstile.Enabled() {
 		turnstileVerifier = api.NewTurnstileVerifier(cfg.Turnstile.SecretKey)
 	}
-	newHandler := func(registrationMode config.RegistrationMode) mtproto.Handler {
-		return api.NewWithPhotoThumbsAndDialogFilterSyncAndUploadPartTTLAndTurnstileAndWelcomeChannel(
+	newHandler := func(registrationMode config.RegistrationMode, turnstileEnabled, turnstileSignInEnabled bool) mtproto.Handler {
+		turnstileSiteKey := ""
+		var verifier api.SignUpTurnstileVerifier
+		if turnstileEnabled && cfg.Turnstile.Enabled() {
+			turnstileSiteKey = cfg.Turnstile.SiteKey
+			verifier = turnstileVerifier
+		}
+		return api.NewWithPhotoThumbsAndDialogFilterSyncAndUploadPartTTLAndTurnstileAndWelcomeChannelAndSignIn(
 			st, cfg.DCID, tgcfg, log, cfg.LogLoginCodes, cfg.MaxFileBytes, blobs,
 			cfg.MaxUserStorageBytes, peers, photos, cfg.RateLimits, registrationMode,
-			dialogFilterSync, photoThumbs, cfg.UploadPartTTL, cfg.Turnstile.SiteKey,
-			turnstileVerifier, cfg.WelcomeChannel, notifyMetrics,
+			dialogFilterSync, photoThumbs, cfg.UploadPartTTL, turnstileSiteKey,
+			verifier, cfg.WelcomeChannel, turnstileSignInEnabled, notifyMetrics,
 		)
 	}
 	if cfg.LogLoginCodes {
@@ -942,7 +965,7 @@ func runAtBlobModePath(log *slog.Logger, blobModePath string) error {
 			return errors.Join(fmt.Errorf("public websocket listen: %w", listenErr), closeErr)
 		}
 		log.Info("Public WebSocket MTProto listening", "addr", cfg.PublicWebSocketListenAddr)
-		publicWebSocket = newPublicWebSocketListener(cfg, publicLn, publicHandler)
+		publicWebSocket = newPublicWebSocketListener(cfg, publicLn, publicHandler, publicClientDiscovery)
 	}
 
 	return serveMTProto(ctx, server, ln, websocketLn, publicWebSocket)
@@ -1179,6 +1202,7 @@ func reportMediaErasureCandidates(ctx context.Context, st *store.Store, minAge, 
 				"skipped_message_ref", c.SkippedMessageRef,
 				"skipped_channel_ref", c.SkippedChannelRef,
 				"skipped_gallery_ref", c.SkippedGalleryRef,
+				"skipped_chat_ref", c.SkippedChatRef,
 				"skipped_too_new", c.SkippedTooNew,
 				"blob_orphans", b.Orphans,
 				"blob_orphan_bytes", b.OrphanBytes,
@@ -1320,6 +1344,7 @@ func sweepMediaErasurePass(ctx context.Context, st *store.Store, cfg config.Conf
 			"skipped_message_ref", c.SkippedMessageRef,
 			"skipped_channel_ref", c.SkippedChannelRef,
 			"skipped_gallery_ref", c.SkippedGalleryRef,
+			"skipped_chat_ref", c.SkippedChatRef,
 			"skipped_too_new", c.SkippedTooNew,
 			"would_erase_blob_orphans", b.Orphans,
 			"would_free_blob_orphan_bytes", b.OrphanBytes,
@@ -1484,6 +1509,86 @@ func sweepExpiredSRPChallenges(ctx context.Context, st *store.Store, log *slog.L
 				continue
 			}
 			log.Info("swept expired SRP challenges", "deleted", n)
+		}
+	}
+}
+
+// sweepExpiredHistoryMessages deletes stamped message copies and channel posts
+// in bounded transactions. The row stamps are the resume point, so a process
+// restart simply discovers any remaining expired rows on its next interval.
+func sweepExpiredHistoryMessages(ctx context.Context, st *store.Store, log *slog.Logger) {
+	ticker := time.NewTicker(sweepInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			var copies, channelPosts int
+			for {
+				deleted, more, err := st.SweepExpiredMessageCopies(ctx, store.HistoryTTLSweepBatchSize)
+				if err != nil {
+					if ctx.Err() == nil {
+						log.Error("sweep expired message copies", "deleted", copies, "err", err)
+					}
+					break
+				}
+				copies += deleted
+				if !more {
+					break
+				}
+			}
+			for {
+				deleted, more, err := st.SweepExpiredChannelPosts(ctx, store.HistoryTTLSweepBatchSize)
+				if err != nil {
+					if ctx.Err() == nil {
+						log.Error("sweep expired channel posts", "deleted", channelPosts, "err", err)
+					}
+					break
+				}
+				channelPosts += deleted
+				if !more {
+					break
+				}
+			}
+			if ctx.Err() != nil {
+				return
+			}
+			if copies > 0 || channelPosts > 0 {
+				log.Info("swept expired history", "message_copies", copies, "channel_posts", channelPosts)
+			}
+		}
+	}
+}
+
+// sweepDeletedChannelPosts drains resumable batches of already-inaccessible
+// channel posts. Each batch commits its cursor, so shutdown or a failed
+// transaction resumes safely on the next process start.
+func sweepDeletedChannelPosts(ctx context.Context, st *store.Store, log *slog.Logger) {
+	ticker := time.NewTicker(sweepInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			var total int
+			for {
+				n, worked, err := st.SweepDeletedChannelPosts(ctx)
+				if err != nil {
+					if ctx.Err() == nil {
+						log.Error("sweep deleted channel posts", "tombstoned", total, "err", err)
+					}
+					break
+				}
+				total += n
+				if !worked {
+					if total > 0 {
+						log.Info("swept deleted channel posts", "tombstoned", total)
+					}
+					break
+				}
+			}
 		}
 	}
 }

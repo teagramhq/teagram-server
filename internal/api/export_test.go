@@ -587,6 +587,29 @@ func GetStateForTest(s *store.Store, userID int64) (bin.Encoder, error) {
 	return testHandlers(s).handleGetState(&mtproto.Request{Ctx: context.Background(), UserID: userID})
 }
 
+// EditChatPhotoForTest invokes messages.editChatPhoto against the supplied
+// assembled-file backend and account storage cap.
+func EditChatPhotoForTest(
+	s *store.Store, userID int64, blobs blob.Store, maxUserStorageBytes int64,
+	req *tg.MessagesEditChatPhotoRequest,
+) (bin.Encoder, error) {
+	var buf bin.Buffer
+	if err := req.Encode(&buf); err != nil {
+		return nil, err
+	}
+	h := testHandlersWithBlobs(s, blobs)
+	h.maxUserStorageBytes = maxUserStorageBytes
+	return h.handleEditChatPhoto(&mtproto.Request{Ctx: context.Background(), UserID: userID, Buf: &buf})
+}
+
+// GetStateForTestWithAuthKey invokes updates.getState with an authorization ID
+// so tests can cover client-scoped acknowledgements.
+func GetStateForTestWithAuthKey(s *store.Store, userID int64, authKeyID [8]byte) (bin.Encoder, error) {
+	return testHandlers(s).handleGetState(&mtproto.Request{
+		Ctx: context.Background(), UserID: userID, AuthKeyID: authKeyID,
+	})
+}
+
 // PeerUserID exposes the peer-resolution guard for the external api_test package.
 // Uses the test deriver from pgtest.
 func PeerUserID(peer tg.InputPeerClass, viewerID int64) (int64, error) {
@@ -598,8 +621,13 @@ func PeerUserID(peer tg.InputPeerClass, viewerID int64) (int64, error) {
 // InputPeer and InputUserID use the test deriver from pgtest.
 var (
 	PeerToTL = peerToTL
-	ChatToTL = chatToTL
 )
+
+// ChatToTL exposes the historical media-free chat mapper signature for pure
+// mapping tests. Production chat reads hydrate the current photo first.
+func ChatToTL(c store.Chat, participantsCount int, selfID int64) *tg.Chat {
+	return chatToTL(c, participantsCount, selfID, &tg.ChatPhotoEmpty{})
+}
 
 func UserStatusToTL(u store.User, self bool) tg.UserStatusClass {
 	visibility := store.LastSeenVisibility{Level: store.LastSeenAccessExact}
@@ -704,7 +732,7 @@ func LoadChatsForTest(s *store.Store, ids []int64, viewerID int64) ([]tg.ChatCla
 	for _, id := range ids {
 		set[id] = true
 	}
-	return testHandlers(s).loadChats(context.Background(), set, viewerID, nil)
+	return testHandlers(s).loadChats(context.Background(), set, viewerID)
 }
 
 // LoadChannelsForTest exposes loadChannels for the external api_test package.
@@ -764,15 +792,7 @@ func GetDifferenceForTestWithAuthKeyAndNow(
 	now func() time.Time,
 	req *tg.UpdatesGetDifferenceRequest,
 ) (bin.Encoder, error) {
-	var buf bin.Buffer
-	if err := req.Encode(&buf); err != nil {
-		return nil, err
-	}
-	h := testHandlers(s)
-	h.now = now
-	result, afterReply, err := h.handleGetDifferenceForConn(nil, &mtproto.Request{
-		Ctx: context.Background(), UserID: userID, AuthKeyID: authKeyID, Buf: &buf,
-	})
+	result, afterReply, err := GetDifferenceBeforeReplyForTestWithAuthKeyAndNow(s, userID, authKeyID, now, req)
 	if err != nil {
 		return nil, err
 	}
@@ -780,6 +800,41 @@ func GetDifferenceForTestWithAuthKeyAndNow(
 		afterReply()
 	}
 	return result, nil
+}
+
+// GetDifferenceBeforeReplyForTestWithAuthKeyAndNow leaves the reply-success
+// callback uncalled so tests can interleave replies before they are applied.
+func GetDifferenceBeforeReplyForTestWithAuthKeyAndNow(
+	s *store.Store,
+	userID int64,
+	authKeyID [8]byte,
+	now func() time.Time,
+	req *tg.UpdatesGetDifferenceRequest,
+) (bin.Encoder, func(), error) {
+	return GetDifferenceBeforeReplyForTestWithAuthKeyAndNowAndHook(s, userID, authKeyID, now, req, nil)
+}
+
+// GetDifferenceBeforeReplyForTestWithAuthKeyAndNowAndHook pauses at the
+// removal-token reservation boundary when beforeIssue is non-nil.
+func GetDifferenceBeforeReplyForTestWithAuthKeyAndNowAndHook(
+	s *store.Store,
+	userID int64,
+	authKeyID [8]byte,
+	now func() time.Time,
+	req *tg.UpdatesGetDifferenceRequest,
+	beforeIssue func(),
+) (bin.Encoder, func(), error) {
+	var buf bin.Buffer
+	if err := req.Encode(&buf); err != nil {
+		return nil, nil, err
+	}
+	h := testHandlers(s)
+	h.now = now
+	h.chatRemovalIssueHook = beforeIssue
+	result, afterReply, err := h.handleGetDifferenceForConn(nil, &mtproto.Request{
+		Ctx: context.Background(), UserID: userID, AuthKeyID: authKeyID, Buf: &buf,
+	})
+	return result, afterReply, err
 }
 
 // GetDifferenceForTestWithBlobs invokes getDifference with the supplied blob
@@ -880,6 +935,19 @@ func GetDialogsForTest(s *store.Store, userID int64) (bin.Encoder, error) {
 		return nil, err
 	}
 	return testHandlers(s).handleGetDialogs(&mtproto.Request{Ctx: context.Background(), UserID: userID, Buf: &buf})
+}
+
+// GetDialogsForTestWithBeforeLoadChatsHook pauses after dialog/create-row
+// hydration and before current chat metadata is loaded.
+func GetDialogsForTestWithBeforeLoadChatsHook(s *store.Store, userID int64, hook func()) (bin.Encoder, error) {
+	var buf bin.Buffer
+	req := &tg.MessagesGetDialogsRequest{OffsetPeer: &tg.InputPeerEmpty{}}
+	if err := req.Encode(&buf); err != nil {
+		return nil, err
+	}
+	h := testHandlers(s)
+	h.getDialogsBeforeLoadChatsHook = hook
+	return h.handleGetDialogs(&mtproto.Request{Ctx: context.Background(), UserID: userID, Buf: &buf})
 }
 
 // GetDialogsForTestWithBlobs invokes getDialogs with the supplied blob store,
@@ -1285,6 +1353,25 @@ func GetFullUserForTest(s *store.Store, userID int64, req *tg.UsersGetFullUserRe
 	return testHandlers(s).handleGetFullUser(&mtproto.Request{Ctx: context.Background(), UserID: userID, Buf: &buf})
 }
 
+// SetHistoryTTLForTest invokes the setHistoryTTL handler without a transport
+// connection so errors can be asserted without writing a wire reply.
+func SetHistoryTTLForTest(s *store.Store, userID int64, req *tg.MessagesSetHistoryTTLRequest) error {
+	var buf bin.Buffer
+	if err := req.Encode(&buf); err != nil {
+		return err
+	}
+	result, reply, afterReply, err := testHandlers(s).handleSetHistoryTTLAfterReplyOnConn(nil, &mtproto.Request{
+		Ctx: context.Background(), UserID: userID, Buf: &buf,
+	})
+	if err != nil {
+		return err
+	}
+	if result != nil || reply != nil || afterReply != nil {
+		return errors.New("invalid setHistoryTTL returned a reply")
+	}
+	return nil
+}
+
 // GetFullUserRawForTest invokes handleGetFullUser with a caller-supplied request
 // body, for a payload that never decodes.
 func GetFullUserRawForTest(s *store.Store, userID int64, buf *bin.Buffer) (bin.Encoder, error) {
@@ -1528,6 +1615,24 @@ func UpdateProfileForTestWithLimits(s *store.Store, userID int64, rateLimit stor
 	h := testHandlers(s)
 	h.rateLimitUpdateProfile = rateLimit
 	return h.handleUpdateProfile(&mtproto.Request{Ctx: context.Background(), UserID: userID, Buf: &buf})
+}
+
+// ToggleSignaturesForTest encodes a toggle request and invokes its channel handler.
+func ToggleSignaturesForTest(s *store.Store, userID int64, req *tg.ChannelsToggleSignaturesRequest) (bin.Encoder, error) {
+	var buf bin.Buffer
+	if err := req.Encode(&buf); err != nil {
+		return nil, err
+	}
+	return testHandlers(s).handleToggleSignatures(&mtproto.Request{Ctx: context.Background(), UserID: userID, Buf: &buf})
+}
+
+// GetFullChannelForTest encodes a request and invokes handleGetFullChannel.
+func GetFullChannelForTest(s *store.Store, userID int64, req *tg.ChannelsGetFullChannelRequest) (bin.Encoder, error) {
+	var buf bin.Buffer
+	if err := req.Encode(&buf); err != nil {
+		return nil, err
+	}
+	return testHandlers(s).handleGetFullChannel(&mtproto.Request{Ctx: context.Background(), UserID: userID, Buf: &buf})
 }
 
 // ClaimChannelUsernameForTest claims a username for a channel atomically
@@ -1824,8 +1929,15 @@ func UpdateProfileForTestWithLimitsAndMetricsContext(ctx context.Context, s *sto
 // UpdatePasswordSettingsForTest invokes handleUpdatePasswordSettings with a
 // pre-encoded request buffer for the caller.
 func UpdatePasswordSettingsForTest(s *store.Store, userID int64, buf *bin.Buffer) (bin.Encoder, error) {
+	return UpdatePasswordSettingsForTestWithContext(context.Background(), s, userID, buf)
+}
+
+// UpdatePasswordSettingsForTestWithContext invokes handleUpdatePasswordSettings
+// with the caller's context so concurrency tests can cancel blocked database
+// work deterministically.
+func UpdatePasswordSettingsForTestWithContext(ctx context.Context, s *store.Store, userID int64, buf *bin.Buffer) (bin.Encoder, error) {
 	h := testHandlers(s)
-	return h.handleUpdatePasswordSettings(&mtproto.Request{Ctx: context.Background(), UserID: userID, Buf: buf})
+	return h.handleUpdatePasswordSettings(&mtproto.Request{Ctx: ctx, UserID: userID, Buf: buf})
 }
 
 // ProvisionalAllowList exposes the allow-list for tests to verify method IDs.

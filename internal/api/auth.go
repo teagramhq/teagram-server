@@ -27,8 +27,34 @@ const (
 	maxSignUpNameCodePoints = 64
 )
 
-func turnstileCheckRequiredError(siteKey string) *tgerr.Error {
-	return tgerr.New(403, "RECAPTCHA_CHECK_signup__"+siteKey)
+func turnstileCheckRequiredError(action, siteKey string) *tgerr.Error {
+	return tgerr.New(403, "RECAPTCHA_CHECK_"+action+"__"+siteKey)
+}
+
+func (h *handlers) verifyTurnstile(r *mtproto.Request, action string) error {
+	if action == "signin" && !h.turnstileSignInEnabled {
+		return nil
+	}
+	if h.turnstileVerifier == nil {
+		if action == "signin" {
+			return turnstileCheckRequiredError(action, h.turnstileSiteKey)
+		}
+		return nil
+	}
+	if r.ReCaptchaToken == "" || len(r.ReCaptchaToken) > turnstileMaxTokenBytes {
+		return turnstileCheckRequiredError(action, h.turnstileSiteKey)
+	}
+	remoteIP := ""
+	if r.ClientAddrFromProxyV2 && r.ClientAddr.IsValid() {
+		remoteIP = r.ClientAddr.Unmap().String()
+	}
+	if err := h.turnstileVerifier.Verify(r.Ctx, r.ReCaptchaToken, action, remoteIP); err != nil {
+		if errors.Is(err, ErrTurnstileBusy) {
+			return FloodWaitError(1)
+		}
+		return turnstileCheckRequiredError(action, h.turnstileSiteKey)
+	}
+	return nil
 }
 
 func authorizationMetadata(r *mtproto.Request) store.AuthorizationMetadata {
@@ -142,19 +168,19 @@ func (h *handlers) handleSignUpWithConn(c *mtproto.Conn, r *mtproto.Request) (bi
 	if h.turnstileVerifier != nil {
 		if r.ReCaptchaToken == "" || len(r.ReCaptchaToken) > turnstileMaxTokenBytes {
 			h.logSignUpRejection(signUpChallengeRequired)
-			return nil, turnstileCheckRequiredError(h.turnstileSiteKey)
+			return nil, turnstileCheckRequiredError("signup", h.turnstileSiteKey)
 		}
 		remoteIP := ""
 		if r.ClientAddrFromProxyV2 && r.ClientAddr.IsValid() {
 			remoteIP = r.ClientAddr.Unmap().String()
 		}
-		if err := h.turnstileVerifier.Verify(r.Ctx, r.ReCaptchaToken, remoteIP); err != nil {
+		if err := h.turnstileVerifier.Verify(r.Ctx, r.ReCaptchaToken, "signup", remoteIP); err != nil {
 			if errors.Is(err, ErrTurnstileBusy) {
 				h.logSignUpRejection(signUpVerifierBusy)
 				return nil, FloodWaitError(1)
 			}
 			h.logSignUpRejection(signUpChallengeRequired)
-			return nil, turnstileCheckRequiredError(h.turnstileSiteKey)
+			return nil, turnstileCheckRequiredError("signup", h.turnstileSiteKey)
 		}
 	}
 	// Charge every active-mode attempt before any identifier, name, invite, or
@@ -281,6 +307,9 @@ func (h *handlers) handleSendCode(r *mtproto.Request) (bin.Encoder, error) {
 	var req tg.AuthSendCodeRequest
 	if err := req.Decode(r.Buf); err != nil {
 		return nil, errMethodNotImpl
+	}
+	if err := h.verifyTurnstile(r, "signin"); err != nil {
+		return nil, err
 	}
 
 	// Phone-shaped identifiers are unsupported. Refuse them before applying

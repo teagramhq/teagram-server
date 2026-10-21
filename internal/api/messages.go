@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strconv"
 	"strings"
 	"time"
@@ -447,6 +448,8 @@ func (h *handlers) handleSendMessageAfterReplyOnConn(c *mtproto.Conn, r *mtproto
 			setSenderRPCPts(attempt, pts)
 			update, afterReply := h.retryReplyAfterSuccess(attempt, r, peerType, pts)
 			return res, update, afterReply, nil
+		} else if errors.Is(err, store.ErrRandomIDExpired) {
+			return nil, nil, nil, errRandomIDDuplicate
 		} else if err != nil {
 			h.log.Error("random_id lookup", "user_id", r.UserID, "err", err)
 			return nil, nil, nil, errInternal
@@ -461,6 +464,10 @@ func (h *handlers) handleSendMessageAfterReplyOnConn(c *mtproto.Conn, r *mtproto
 	attempt := beginSenderRPC(c, r)
 	sender, senderPts, recipientPts, _, err := h.store.SendMessage(r.Ctx, r.UserID, toID, req.Message, req.RandomID, 0, replyToMsgID)
 	if err != nil {
+		if errors.Is(err, store.ErrRandomIDExpired) {
+			clearSenderRPC(attempt)
+			return nil, nil, nil, errRandomIDDuplicate
+		}
 		if errors.Is(err, store.ErrMessageInvalid) {
 			clearSenderRPC(attempt)
 			return nil, nil, nil, errMessageIDInvalid
@@ -552,7 +559,7 @@ func (h *handlers) sendChatMessageAfterReplyOnConn(c *mtproto.Conn, r *mtproto.R
 				h.log.Error("read stored message pts on retry", "user_id", r.UserID, "err", err)
 				return nil, nil, nil, errInternal
 			}
-			chats, err := h.loadChats(r.Ctx, map[int64]bool{chatID: true}, r.UserID, nil)
+			chats, err := h.loadChats(r.Ctx, map[int64]bool{chatID: true}, r.UserID)
 			if err != nil {
 				h.log.Error("load chats on retry", "err", err)
 				return nil, nil, nil, errInternal
@@ -571,6 +578,8 @@ func (h *handlers) sendChatMessageAfterReplyOnConn(c *mtproto.Conn, r *mtproto.R
 				Chats: chats,
 				Date:  int(existing.Date.Unix()),
 			}, nil, nil, nil
+		} else if errors.Is(err, store.ErrRandomIDExpired) {
+			return nil, nil, nil, errRandomIDDuplicate
 		} else if err != nil {
 			h.log.Error("random_id lookup", "user_id", r.UserID, "err", err)
 			return nil, nil, nil, errInternal
@@ -590,6 +599,10 @@ func (h *handlers) sendChatMessageAfterReplyOnConn(c *mtproto.Conn, r *mtproto.R
 	if errors.Is(err, store.ErrNotMember) {
 		clearSenderRPC(attempt)
 		return nil, nil, nil, errPeerIDInvalid
+	}
+	if errors.Is(err, store.ErrRandomIDExpired) {
+		clearSenderRPC(attempt)
+		return nil, nil, nil, errRandomIDDuplicate
 	}
 	if errors.Is(err, store.ErrMessageInvalid) {
 		clearSenderRPC(attempt)
@@ -627,7 +640,7 @@ func (h *handlers) sendChatMessageAfterReplyOnConn(c *mtproto.Conn, r *mtproto.R
 		}
 		return nil, nil, nil, errInternal
 	}
-	chats, err := h.loadChats(r.Ctx, map[int64]bool{chatID: true}, r.UserID, nil)
+	chats, err := h.loadChats(r.Ctx, map[int64]bool{chatID: true}, r.UserID)
 	if err != nil {
 		h.log.Error("send chat message chats", "err", err)
 		if c != nil {
@@ -879,7 +892,11 @@ func (h *handlers) handleGetMessages(r *mtproto.Request) (bin.Encoder, error) {
 		h.log.Error("get messages: render users", "user_id", r.UserID, "err", err)
 		return nil, errInternal
 	}
-	chats := renderMessagesReadChats(snapshot, r.UserID)
+	chats, err := h.renderMessagesReadChats(r.Ctx, snapshot, r.UserID)
+	if err != nil {
+		h.log.Error("get messages: render chats", "user_id", r.UserID, "err", err)
+		return nil, errInternal
+	}
 	tlMessages := make([]tg.MessageClass, len(snapshot.Results))
 	for i, result := range snapshot.Results {
 		if result.Message == nil {
@@ -924,12 +941,16 @@ func renderMessagesReadUsers(ctx context.Context, snapshot store.MessagesReadSna
 	return users, nil
 }
 
-func renderMessagesReadChats(snapshot store.MessagesReadSnapshot, viewerID int64) []tg.ChatClass {
+func (h *handlers) renderMessagesReadChats(ctx context.Context, snapshot store.MessagesReadSnapshot, viewerID int64) ([]tg.ChatClass, error) {
 	chats := make([]tg.ChatClass, 0, len(snapshot.Chats))
 	for id, chat := range snapshot.Chats {
-		chats = append(chats, chatToTL(chat, snapshot.ChatParticipantCounts[id], viewerID))
+		wireChat, err := h.chatToTL(ctx, chat, snapshot.ChatParticipantCounts[id], viewerID)
+		if err != nil {
+			return nil, fmt.Errorf("render chat %d: %w", id, err)
+		}
+		chats = append(chats, wireChat)
 	}
-	return chats
+	return chats, nil
 }
 
 // messageReadFileMedia maps the snapshot's file rows to wire media, photos and
@@ -1006,7 +1027,11 @@ func (h *handlers) chatHistory(r *mtproto.Request, snapshot store.ChatHistorySna
 		h.log.Error("get history users", "err", err)
 		return nil, errInternal
 	}
-	chat := chatToTL(snapshot.Chat, len(snapshot.Participants), r.UserID)
+	chat, err := h.chatToTL(r.Ctx, snapshot.Chat, len(snapshot.Participants), r.UserID)
+	if err != nil {
+		h.log.Error("get chat history photo", "user_id", r.UserID, "chat_id", snapshot.Chat.ID, "err", err)
+		return nil, errInternal
+	}
 	return &tg.MessagesMessages{Messages: tlMsgs, Users: users, Chats: []tg.ChatClass{chat}}, nil
 }
 
@@ -1416,6 +1441,9 @@ func (h *handlers) handleForwardMessagesAfterReplyOnConn(c *mtproto.Conn, r *mtp
 			break
 		}
 		existing, ok, err := h.store.MessageByRandomID(r.Ctx, r.UserID, rid)
+		if errors.Is(err, store.ErrRandomIDExpired) {
+			return nil, nil, nil, errRandomIDDuplicate
+		}
 		if err != nil {
 			h.log.Error("random_id lookup", "user_id", r.UserID, "err", err)
 			return nil, nil, nil, errInternal
@@ -1519,12 +1547,16 @@ func (h *handlers) handleForwardMessagesAfterReplyOnConn(c *mtproto.Conn, r *mtp
 				Text:        m.Message,
 				ChannelID:   m.ChannelID,
 				ChannelPost: post,
+				PostAuthor:  m.PostAuthor,
 				FileID:      fileID,
 			})
 		}
 		randomIDs := make([]int64, len(req.RandomID))
 		copy(randomIDs, req.RandomID)
 		perOwner, sentMsgs, err := h.store.ForwardMessages(r.Ctx, r.UserID, destPeerType, destPeerID, sources, randomIDs)
+		if errors.Is(err, store.ErrRandomIDExpired) {
+			return nil, nil, nil, errRandomIDDuplicate
+		}
 		if errors.Is(err, store.ErrMessageInvalid) || errors.Is(err, store.ErrFileMissing) {
 			return nil, nil, nil, errMessageIDInvalid
 		}
@@ -1592,6 +1624,12 @@ func (h *handlers) handleForwardMessagesAfterReplyOnConn(c *mtproto.Conn, r *mtp
 		attempt = beginSenderRPC(c, r)
 	}
 	perOwner, sentMsgs, err := h.store.ForwardMessages(r.Ctx, r.UserID, destPeerType, destPeerID, sources, randomIDs)
+	if errors.Is(err, store.ErrRandomIDExpired) {
+		if attempt.conn != nil {
+			h.clearSenderAfterStoreFailure(attempt, r, err)
+		}
+		return nil, nil, nil, errRandomIDDuplicate
+	}
 	// A source whose file row is gone is a source that can no longer be
 	// forwarded, and it reports as the same invalid message id an already
 	// deleted one does — the caller learns nothing new about a file it was
@@ -1814,7 +1852,7 @@ func (h *handlers) handleGetMessagesReactions(r *mtproto.Request) (bin.Encoder, 
 		localIDs = append(localIDs, localID)
 	}
 	if peerType == store.PeerTypeChannel {
-		msgs, err := h.store.ChannelMessages(r.Ctx, peerID, localIDs)
+		msgs, err := h.store.ChannelMessagesForMember(r.Ctx, peerID, r.UserID, localIDs)
 		if err != nil {
 			h.log.Error("get channel message reactions", "user_id", r.UserID, "channel_id", peerID, "err", err)
 			return nil, errInternal
@@ -1935,7 +1973,7 @@ func (h *handlers) forwardReply(r *mtproto.Request, destPeerType store.PeerType,
 		basicChatRefs[destPeerID] = true
 		users, err = h.loadUsers(r.Ctx, recipients, r.UserID)
 		if err == nil {
-			chats, err = h.loadChats(r.Ctx, map[int64]bool{destPeerID: true}, r.UserID, nil)
+			chats, err = h.loadChats(r.Ctx, map[int64]bool{destPeerID: true}, r.UserID)
 		}
 	}
 	if err != nil {
@@ -1989,7 +2027,16 @@ func (h *handlers) forwardReply(r *mtproto.Request, destPeerType store.PeerType,
 				}
 				count = len(parts)
 			}
-			chats = append(chats, chatToTL(c, count, r.UserID))
+			if member {
+				wireChat, renderErr := h.chatToTL(r.Ctx, c, count, r.UserID)
+				if renderErr != nil {
+					h.log.Error("forward reply fwd chat photo", "err", renderErr)
+					return nil, errInternal
+				}
+				chats = append(chats, wireChat)
+			} else {
+				chats = append(chats, &tg.ChatForbidden{ID: c.ID, Title: ""})
+			}
 		}
 	}
 	// Load channel references with viewer-aware loader.
@@ -2097,7 +2144,7 @@ func (h *handlers) pinChatMessage(r *mtproto.Request, chatID int64, req *tg.Mess
 	}
 	h.notifyOwners(r.Ctx, change.OwnerPts, 0)
 
-	chats, err := h.loadChats(r.Ctx, map[int64]bool{chat.ID: true}, r.UserID, nil)
+	chats, err := h.loadChats(r.Ctx, map[int64]bool{chat.ID: true}, r.UserID)
 	if err != nil {
 		h.log.Error("pin chat render", "chat_id", chat.ID, "err", err)
 		return nil, 0, errInternal
@@ -2157,11 +2204,15 @@ func (h *handlers) pinChannelMessage(r *mtproto.Request, channelID int64, req *t
 		h.log.Error("pin channel render", "channel_id", ch.ID, "err", err)
 		return nil, 0, errInternal
 	}
+	messageIDs := []int{int(change.MessageID)}
+	if int64(change.MessageID) <= change.AvailableMinID {
+		messageIDs = nil
+	}
 	return &tg.Updates{
 		Updates: []tg.UpdateClass{&tg.UpdatePinnedChannelMessages{
 			Pinned:    pinnedID != nil,
 			ChannelID: ch.ID,
-			Messages:  []int{int(change.MessageID)},
+			Messages:  messageIDs,
 			Pts:       change.Pts,
 			PtsCount:  1,
 		}},
@@ -2257,7 +2308,7 @@ func mediaSearchFilterFromTL(filter tg.MessagesFilterClass) (store.MediaSearchFi
 // handleSearch serves messages.search: keyword, pinned, or supported shared-media
 // search within a dialog. Results are the caller's messages (both directions) in
 // the named peer, ordered newest-first. A channel peer searches the channel's
-// shared posts instead and is gated on membership, not ownership.
+// shared posts instead and applies the caller's membership, ban and floor.
 func (h *handlers) handleSearch(r *mtproto.Request) (bin.Encoder, error) {
 	var req tg.MessagesSearchRequest
 	if err := req.Decode(r.Buf); err != nil {
@@ -2505,7 +2556,7 @@ func (h *handlers) chatSearch(
 		h.log.Error("search messages users", "err", err)
 		return nil, errInternal
 	}
-	chats, err := h.loadChats(r.Ctx, map[int64]bool{chatID: true}, r.UserID, nil)
+	chats, err := h.loadChats(r.Ctx, map[int64]bool{chatID: true}, r.UserID)
 	if err != nil {
 		h.log.Error("search messages chats", "err", err)
 		return nil, errInternal

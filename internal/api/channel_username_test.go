@@ -467,6 +467,39 @@ func TestHandleEditChannelUsernameAdminCanSet(t *testing.T) {
 	}
 }
 
+func TestHandleEditChannelUsernameRequiresChangeInfoToMakeMegagroupPublic(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	s, dsn := openStoreDSN(t)
+	creator, err := s.CreateUser(ctx, "+15551295115")
+	if err != nil {
+		t.Fatalf("creator: %v", err)
+	}
+	admin, err := s.CreateUser(ctx, "+15551295116")
+	if err != nil {
+		t.Fatalf("admin: %v", err)
+	}
+	ch, err := s.CreateChannel(ctx, creator.ID, "Hidden history", "", true)
+	if err != nil {
+		t.Fatalf("create megagroup: %v", err)
+	}
+	joinChannel(t, ctx, dsn, ch.ID, admin.ID)
+	if err := s.SetChannelRoleWithRights(ctx, ch.ID, creator.ID, admin.ID, 1, false); err != nil {
+		t.Fatalf("promote admin without change_info: %v", err)
+	}
+	if _, _, changed, err := s.SetChannelPreHistoryHidden(ctx, ch.ID, creator.ID, true); err != nil || !changed {
+		t.Fatalf("enable hidden history: changed=%v err=%v", changed, err)
+	}
+
+	_, err = api.EditChannelUsernameForTest(s, admin.ID, &tg.ChannelsUpdateUsernameRequest{
+		Channel:  api.InputChannel(admin.ID, ch.ID),
+		Username: "publichistory",
+	})
+	if msg := rpcMessage(t, err); msg != "CHAT_ADMIN_REQUIRED" {
+		t.Fatalf("got %s, want CHAT_ADMIN_REQUIRED", msg)
+	}
+}
+
 // TestHandleEditChannelUsernameBannedAdminRejected covers that a banned admin
 // cannot change the channel's username.
 func TestHandleEditChannelUsernameBannedAdminRejected(t *testing.T) {

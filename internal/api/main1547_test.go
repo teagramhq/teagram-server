@@ -243,6 +243,49 @@ func TestMAIN1594GetMessageReadParticipantsUsesStoredReadDates(t *testing.T) {
 	}
 }
 
+func TestMAIN1594GetMessageReadParticipantsRejectsExpiredMessages(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	s, dsn := openStoreDSN(t)
+	pool := readParticipantsTestPool(t, ctx, dsn)
+	users, chat := chatWith(t, s, "+15551547501", "+15551547502", "+15551547503")
+	sender, reader := users[1], users[2]
+	if _, err := pool.Exec(ctx, `UPDATE chats SET ttl_period=86400 WHERE id=$1`, chat.ID); err != nil {
+		t.Fatalf("set one-day chat TTL: %v", err)
+	}
+
+	message := sendChatForReadHistory(t, s, chat.ID, sender.ID, 154751)
+	readerHistory, err := s.History(ctx, reader.ID, store.PeerTypeChat, chat.ID, 0, 20)
+	if err != nil {
+		t.Fatalf("reader history: %v", err)
+	}
+	var readerMessageID int64
+	for _, item := range readerHistory {
+		if item.FanoutID == message.FanoutID {
+			readerMessageID = item.LocalID
+			break
+		}
+	}
+	if readerMessageID == 0 {
+		t.Fatal("reader message copy missing")
+	}
+	if _, err := s.ReadChatHistory(ctx, reader.ID, chat.ID, readerMessageID); err != nil {
+		t.Fatalf("read live message: %v", err)
+	}
+	h := fullChannelDispatcher(s)
+	result, rpc := getMessageReadParticipantsViaDispatcher(t, h, sender.ID, chat.ID, int(message.LocalID))
+	if rpc != nil || len(result) != 1 || result[0].UserID != reader.ID {
+		t.Fatalf("live message participants = %v rpc=%v, want reader %d", result, rpc, reader.ID)
+	}
+	if _, err := pool.Exec(ctx, `UPDATE messages SET expires_at=statement_timestamp()-interval '1 second' WHERE fanout_id=$1`, message.FanoutID); err != nil {
+		t.Fatalf("expire message: %v", err)
+	}
+	result, rpc = getMessageReadParticipantsViaDispatcher(t, h, sender.ID, chat.ID, int(message.LocalID))
+	if rpc == nil || rpc.ErrorMessage != "PEER_ID_INVALID" || len(result) != 0 {
+		t.Fatalf("expired message participants = %v rpc=%v, want PEER_ID_INVALID without reader data", result, rpc)
+	}
+}
+
 func TestMAIN1594ReadParticipantEligibilityBoundaries(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()

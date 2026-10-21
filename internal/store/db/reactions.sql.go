@@ -26,9 +26,10 @@ func (q *Queries) DeleteReaction(ctx context.Context, arg DeleteReactionParams) 
 }
 
 const messagesByOwnerLocalIDs = `-- name: MessagesByOwnerLocalIDs :many
-SELECT owner_id, local_id, peer_id, from_id, date, message, out, edit_date, deleted, random_id, peer_local_id, peer_type, fanout_id, action_type, action_user_id, file_id, reply_to_msg_id, fwd_from_id, fwd_date, fwd_channel_id, fwd_channel_post, message_tsv, reply_to_trusted, grouped_id FROM messages
+SELECT owner_id, local_id, peer_id, from_id, date, message, out, edit_date, deleted, random_id, peer_local_id, peer_type, fanout_id, action_type, action_user_id, file_id, reply_to_msg_id, fwd_from_id, fwd_date, fwd_channel_id, fwd_channel_post, message_tsv, reply_to_trusted, grouped_id, fwd_post_author, ttl_period, expires_at FROM messages
 WHERE owner_id = $1
   AND local_id = ANY($2::bigint[])
+  AND (expires_at IS NULL OR expires_at > statement_timestamp())
 `
 
 type MessagesByOwnerLocalIDsParams struct {
@@ -70,6 +71,9 @@ func (q *Queries) MessagesByOwnerLocalIDs(ctx context.Context, arg MessagesByOwn
 			&i.MessageTsv,
 			&i.ReplyToTrusted,
 			&i.GroupedID,
+			&i.FwdPostAuthor,
+			&i.TtlPeriod,
+			&i.ExpiresAt,
 		); err != nil {
 			return nil, err
 		}
@@ -83,7 +87,12 @@ func (q *Queries) MessagesByOwnerLocalIDs(ctx context.Context, arg MessagesByOwn
 
 const reactionsByMessage = `-- name: ReactionsByMessage :many
 SELECT owner_id, local_id, reactor_id, reaction, created_at FROM message_reactions
-WHERE owner_id = $1 AND local_id = $2
+WHERE message_reactions.owner_id = $1 AND message_reactions.local_id = $2
+  AND EXISTS (
+      SELECT 1 FROM messages m
+      WHERE m.owner_id = message_reactions.owner_id AND m.local_id = message_reactions.local_id
+        AND (m.expires_at IS NULL OR m.expires_at > statement_timestamp())
+  )
 ORDER BY reactor_id
 `
 
@@ -120,8 +129,13 @@ func (q *Queries) ReactionsByMessage(ctx context.Context, arg ReactionsByMessage
 
 const reactionsByMessages = `-- name: ReactionsByMessages :many
 SELECT owner_id, local_id, reactor_id, reaction, created_at FROM message_reactions
-WHERE owner_id = $1
-  AND local_id = ANY($2::bigint[])
+WHERE message_reactions.owner_id = $1
+  AND message_reactions.local_id = ANY($2::bigint[])
+  AND EXISTS (
+      SELECT 1 FROM messages m
+      WHERE m.owner_id = message_reactions.owner_id AND m.local_id = message_reactions.local_id
+        AND (m.expires_at IS NULL OR m.expires_at > statement_timestamp())
+  )
 ORDER BY local_id, reactor_id
 `
 

@@ -44,6 +44,12 @@ type handlers struct {
 	// now reads the server clock. help.getConfig stamps its time fields from it
 	// per response, so a long-lived process never serves a config dated at boot.
 	now func() time.Time
+	// chatRemovalIssueHook pauses getDifference after it builds the response
+	// cursor and before it atomically reserves the removal token.
+	chatRemovalIssueHook func()
+	// getDialogsBeforeLoadChatsHook is a test-only pause after dialog/create-row
+	// hydration and before current chat metadata is loaded.
+	getDialogsBeforeLoadChatsHook func()
 	// logLoginCodes gates the one log call that carries credential material.
 	logLoginCodes bool
 	// maxFileBytes is the per-file upload cap the save handlers enforce.
@@ -132,10 +138,11 @@ type handlers struct {
 	// welcomeChannel is the operator-configured public broadcast channel new users may join.
 	welcomeChannel        string
 	welcomeChannelWarning atomic.Bool
-	// turnstileSiteKey is public and appears only in the challenge-required RPC
-	// error. The verifier secret stays inside the verifier.
-	turnstileSiteKey  string
-	turnstileVerifier SignUpTurnstileVerifier
+	// turnstileSiteKey is public, advertised as signup capability, and included
+	// in action-specific challenge errors. The verifier secret stays private.
+	turnstileSiteKey       string
+	turnstileVerifier      SignUpTurnstileVerifier
+	turnstileSignInEnabled bool
 	// Sign-up rejection records are sampled independently by fixed reason class.
 	signUpRejectionLogs signUpRejectionSampler
 	// dialogFilterSync coordinates connection-local folder recovery with the
@@ -236,7 +243,7 @@ func NewWithPhotoThumbsAndDialogFilterSyncAndWelcomeChannel(s *store.Store, dcID
 	return newWithPhotoThumbsAndDialogFilterSyncAndUploadPartTTLAndTurnstile(
 		s, dcID, cfg, log, logLoginCodes, maxFileBytes, blobs, maxUserStorageBytes,
 		peers, photos, rateLimits, registrationMode, dialogFilterSync, photoThumbs,
-		config.DefaultUploadPartTTL, welcomeChannel, "", nil, rateLimitMetrics...,
+		config.DefaultUploadPartTTL, welcomeChannel, "", nil, false, rateLimitMetrics...,
 	)
 }
 
@@ -246,7 +253,7 @@ func NewWithPhotoThumbsAndDialogFilterSyncAndUploadPartTTL(s *store.Store, dcID 
 	return newWithPhotoThumbsAndDialogFilterSyncAndUploadPartTTLAndTurnstile(
 		s, dcID, cfg, log, logLoginCodes, maxFileBytes, blobs, maxUserStorageBytes,
 		peers, photos, rateLimits, registrationMode, dialogFilterSync, photoThumbs,
-		uploadPartTTL, "", "", nil, rateLimitMetrics...,
+		uploadPartTTL, "", "", nil, false, rateLimitMetrics...,
 	)
 }
 
@@ -256,21 +263,32 @@ func NewWithPhotoThumbsAndDialogFilterSyncAndUploadPartTTLAndTurnstile(s *store.
 	return newWithPhotoThumbsAndDialogFilterSyncAndUploadPartTTLAndTurnstile(
 		s, dcID, cfg, log, logLoginCodes, maxFileBytes, blobs, maxUserStorageBytes,
 		peers, photos, rateLimits, registrationMode, dialogFilterSync, photoThumbs,
-		uploadPartTTL, "", turnstileSiteKey, turnstileVerifier, rateLimitMetrics...,
+		uploadPartTTL, "", turnstileSiteKey, turnstileVerifier, false, rateLimitMetrics...,
 	)
 }
 
 // NewWithPhotoThumbsAndDialogFilterSyncAndUploadPartTTLAndTurnstileAndWelcomeChannel
 // builds an RPC handler with sign-up verification and a welcome channel.
+// Sign-in enforcement remains disabled for compatibility.
 func NewWithPhotoThumbsAndDialogFilterSyncAndUploadPartTTLAndTurnstileAndWelcomeChannel(s *store.Store, dcID int, cfg *tg.Config, log *slog.Logger, logLoginCodes bool, maxFileBytes int64, blobs blob.Store, maxUserStorageBytes int64, peers *peerhash.Deriver, photos *photohash.Deriver, rateLimits config.RateLimitsConfig, registrationMode config.RegistrationMode, dialogFilterSync *DialogFilterSync, photoThumbs *photothumb.Supervisor, uploadPartTTL time.Duration, turnstileSiteKey string, turnstileVerifier SignUpTurnstileVerifier, welcomeChannel string, rateLimitMetrics ...*store.NotificationMetrics) mtproto.Handler {
 	return newWithPhotoThumbsAndDialogFilterSyncAndUploadPartTTLAndTurnstile(
 		s, dcID, cfg, log, logLoginCodes, maxFileBytes, blobs, maxUserStorageBytes,
 		peers, photos, rateLimits, registrationMode, dialogFilterSync, photoThumbs,
-		uploadPartTTL, welcomeChannel, turnstileSiteKey, turnstileVerifier, rateLimitMetrics...,
+		uploadPartTTL, welcomeChannel, turnstileSiteKey, turnstileVerifier, false, rateLimitMetrics...,
 	)
 }
 
-func newWithPhotoThumbsAndDialogFilterSyncAndUploadPartTTLAndTurnstile(s *store.Store, dcID int, cfg *tg.Config, log *slog.Logger, logLoginCodes bool, maxFileBytes int64, blobs blob.Store, maxUserStorageBytes int64, peers *peerhash.Deriver, photos *photohash.Deriver, rateLimits config.RateLimitsConfig, registrationMode config.RegistrationMode, dialogFilterSync *DialogFilterSync, photoThumbs *photothumb.Supervisor, uploadPartTTL time.Duration, welcomeChannel, turnstileSiteKey string, turnstileVerifier SignUpTurnstileVerifier, rateLimitMetrics ...*store.NotificationMetrics) mtproto.Handler {
+// NewWithPhotoThumbsAndDialogFilterSyncAndUploadPartTTLAndTurnstileAndWelcomeChannelAndSignIn
+// builds an RPC handler with signup verification and the configured sign-in gate.
+func NewWithPhotoThumbsAndDialogFilterSyncAndUploadPartTTLAndTurnstileAndWelcomeChannelAndSignIn(s *store.Store, dcID int, cfg *tg.Config, log *slog.Logger, logLoginCodes bool, maxFileBytes int64, blobs blob.Store, maxUserStorageBytes int64, peers *peerhash.Deriver, photos *photohash.Deriver, rateLimits config.RateLimitsConfig, registrationMode config.RegistrationMode, dialogFilterSync *DialogFilterSync, photoThumbs *photothumb.Supervisor, uploadPartTTL time.Duration, turnstileSiteKey string, turnstileVerifier SignUpTurnstileVerifier, welcomeChannel string, turnstileSignInEnabled bool, rateLimitMetrics ...*store.NotificationMetrics) mtproto.Handler {
+	return newWithPhotoThumbsAndDialogFilterSyncAndUploadPartTTLAndTurnstile(
+		s, dcID, cfg, log, logLoginCodes, maxFileBytes, blobs, maxUserStorageBytes,
+		peers, photos, rateLimits, registrationMode, dialogFilterSync, photoThumbs,
+		uploadPartTTL, welcomeChannel, turnstileSiteKey, turnstileVerifier, turnstileSignInEnabled, rateLimitMetrics...,
+	)
+}
+
+func newWithPhotoThumbsAndDialogFilterSyncAndUploadPartTTLAndTurnstile(s *store.Store, dcID int, cfg *tg.Config, log *slog.Logger, logLoginCodes bool, maxFileBytes int64, blobs blob.Store, maxUserStorageBytes int64, peers *peerhash.Deriver, photos *photohash.Deriver, rateLimits config.RateLimitsConfig, registrationMode config.RegistrationMode, dialogFilterSync *DialogFilterSync, photoThumbs *photothumb.Supervisor, uploadPartTTL time.Duration, welcomeChannel, turnstileSiteKey string, turnstileVerifier SignUpTurnstileVerifier, turnstileSignInEnabled bool, rateLimitMetrics ...*store.NotificationMetrics) mtproto.Handler {
 	if peers == nil {
 		panic("api: nil peer hash deriver")
 	}
@@ -332,6 +350,7 @@ func newWithPhotoThumbsAndDialogFilterSyncAndUploadPartTTLAndTurnstile(s *store.
 		welcomeChannel:               welcomeChannel,
 		turnstileSiteKey:             turnstileSiteKey,
 		turnstileVerifier:            turnstileVerifier,
+		turnstileSignInEnabled:       turnstileSignInEnabled,
 		rateLimitMetrics:             denialMetrics,
 		dialogFilterSync:             dialogFilterSync,
 	}
@@ -398,6 +417,9 @@ func newWithPhotoThumbsAndDialogFilterSyncAndUploadPartTTLAndTurnstile(s *store.
 	register(d, tg.MessagesGetSavedDialogsRequestTypeID, h.handleGetSavedDialogs)
 	register(d, tg.MessagesGetPinnedSavedDialogsRequestTypeID, h.handleGetPinnedSavedDialogs)
 	register(d, tg.MessagesGetDefaultHistoryTTLRequestTypeID, h.handleGetDefaultHistoryTTL)
+	registerReplyAfterSuccess(d, tg.MessagesSetHistoryTTLRequestTypeID, func(c *mtproto.Conn, req *mtproto.Request) (bin.Encoder, *replyUpdate, func(), error) {
+		return h.handleSetHistoryTTLAfterReplyOnConn(c, req)
+	})
 	registerReplyAfterSuccess(d, tg.MessagesGetDialogFiltersRequestTypeID, func(c *mtproto.Conn, req *mtproto.Request) (bin.Encoder, *replyUpdate, func(), error) {
 		res, afterReply, err := h.handleGetDialogFilters(c, req)
 		return res, nil, afterReply, err
@@ -415,6 +437,7 @@ func newWithPhotoThumbsAndDialogFilterSyncAndUploadPartTTLAndTurnstile(s *store.
 	register(d, tg.MessagesGetMessagesRequestTypeID, h.handleGetMessages)
 	register(d, tg.MessagesGetMessagesViewsRequestTypeID, h.handleGetMessagesViews)
 	register(d, tg.MessagesGetHistoryRequestTypeID, h.handleGetHistory)
+	register(d, tg.MessagesGetRepliesRequestTypeID, h.handleGetReplies)
 	register(d, tg.MessagesGetWebPageRequestTypeID, h.handleGetWebPage)
 	register(d, tg.MessagesGetWebPagePreviewRequestTypeID, h.handleGetWebPagePreview)
 	register(d, tg.MessagesGetMessageReadParticipantsRequestTypeID, h.handleGetMessageReadParticipants)
@@ -473,9 +496,11 @@ func newWithPhotoThumbsAndDialogFilterSyncAndUploadPartTTLAndTurnstile(s *store.
 	register(d, tg.MessagesUpdatePinnedMessageRequestTypeID, h.handleUpdatePinnedMessage)
 	register(d, tg.MessagesUnpinAllMessagesRequestTypeID, h.handleUnpinAllMessages)
 	register(d, tg.MessagesCreateChatRequestTypeID, h.handleCreateChat)
+	register(d, tg.MessagesDeleteChatRequestTypeID, h.handleDeleteChat)
 	register(d, tg.MessagesGetFullChatRequestTypeID, h.handleGetFullChat)
 	register(d, tg.MessagesGetChatsRequestTypeID, h.handleGetChats)
 	register(d, tg.MessagesEditChatTitleRequestTypeID, h.handleEditChatTitle)
+	register(d, tg.MessagesEditChatPhotoRequestTypeID, h.handleEditChatPhoto)
 	register(d, tg.MessagesEditChatAboutRequestTypeID, h.handleEditChatAbout)
 	register(d, tg.MessagesEditChatAdminRequestTypeID, h.handleEditChatAdmin)
 	register(d, tg.MessagesEditChatDefaultBannedRightsRequestTypeID, h.handleEditChatDefaultBannedRights)
@@ -497,10 +522,13 @@ func newWithPhotoThumbsAndDialogFilterSyncAndUploadPartTTLAndTurnstile(s *store.
 		return h.handleSendMultiMediaAfterReplyOnConn(c, req)
 	})
 	register(d, tg.ChannelsCreateChannelRequestTypeID, h.handleCreateChannel)
+	register(d, tg.ChannelsDeleteChannelRequestTypeID, h.handleDeleteChannel)
 	register(d, tg.ChannelsEditTitleRequestTypeID, h.handleEditChannelTitle)
 	register(d, tg.ChannelsGetFullChannelRequestTypeID, h.handleGetFullChannel)
 	register(d, tg.ChannelsReadHistoryRequestTypeID, h.handleChannelReadHistory)
 	register(d, tg.ChannelsReadMessageContentsRequestTypeID, h.handleChannelReadMessageContents)
+	register(d, tg.ChannelsTogglePreHistoryHiddenRequestTypeID, h.handleTogglePreHistoryHidden)
+	register(d, tg.ChannelsToggleSignaturesRequestTypeID, h.handleToggleSignatures)
 	register(d, tg.ChannelsToggleSlowModeRequestTypeID, h.handleToggleSlowMode)
 	register(d, tg.ChannelsGetParticipantsRequestTypeID, h.handleGetParticipants)
 	register(d, tg.ChannelsGetParticipantRequestTypeID, h.handleGetParticipant)

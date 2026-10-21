@@ -220,7 +220,8 @@ func TestBrowserAcceptanceProbeRoleCanOnlyReadBoundedAuthKeyData(t *testing.T) {
 }
 
 func TestBrowserAcceptanceProbeMigrationRejectsOwnedObjects(t *testing.T) {
-	t.Parallel()
+	// Migration 79 changes a cluster-wide role, so keep its replays serial with
+	// the other tests that apply migrations to disposable databases.
 	migration, err := os.ReadFile(filepath.Join("..", "..", "migrations", "20261013000079_browser_acceptance_probe.sql"))
 	if err != nil {
 		t.Fatalf("read probe migration: %v", err)

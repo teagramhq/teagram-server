@@ -251,6 +251,15 @@ var (
 	// ErrChatAdminRequired is returned when a basic-chat control is denied
 	// by current default rights or requires channel administrator rights.
 	ErrChatAdminRequired = errors.New("chat admin required")
+	// ErrChatLinkExists is returned when a public channel username conflicts
+	// with hidden prehistory.
+	ErrChatLinkExists          = errors.New("chat link exists")
+	ErrPeerBlockedUser         = errors.New("peer blocked caller")
+	ErrHistoryTTLPeerInvalid   = errors.New("history TTL peer invalid")
+	ErrHistoryTTLPeriodInvalid = errors.New("history TTL period invalid")
+	// ErrChannelCreatorRequired is returned when a current channel member is
+	// not the creator attempting to delete the channel.
+	ErrChannelCreatorRequired = errors.New("channel creator required")
 	// ErrChannelTitleNotModified is returned when an authorized channel title
 	// edit repeats the current value.
 	ErrChannelTitleNotModified = errors.New("channel title not modified")
@@ -281,6 +290,9 @@ var (
 	// post cannot satisfy the current request's author, tombstone, service or
 	// media-kind requirements.
 	ErrRandomIDDuplicate = errors.New("random id belongs to another channel post")
+	// ErrRandomIDExpired rejects a retry whose original message has expired.
+	// Its contents are never returned to the caller.
+	ErrRandomIDExpired = errors.New("random id belongs to an expired message")
 	// ErrMediaInvalid rejects a channel media retry whose stored post carries no
 	// media of the kind the request offers. It is separate from
 	// ErrRandomIDDuplicate because the random id is the caller's own live post:
@@ -473,7 +485,7 @@ type queryRower interface {
 // silently degrades to a per-row Seq Scan of messages — so either state is
 // exactly the un-migrated state this is here to refuse.
 func (s *Store) checkSchema(ctx context.Context, q queryRower) error {
-	var hasParticipants, hasFanoutID, hasEvents, hasUserStatus, hasEncryptedEvents, hasFwdFromID, hasReactions, hasPinnedChat, hasPinnedChannel, hasNameTsv, hasRateLimits, hasNotifySettings, hasSendCodeIP, hasSignInFail, hasLoginMode, hasAuthorizationTTL, hasAdminSessions, hasPartSize, hasPartBlobKey, hasPartPayload, hasMessageFileIdx, hasPartBlobKeyIdx, hasBlockedUsers, hasRegistrationInvites, hasRegistrationInviteLiveIdx, hasServerAdministration, hasFileSubtypeRights, hasValidatedFileSubtypeRights, hasFileMediaMetadata, hasValidatedFileMediaMetadata, hasLanguageCatalog, hasChannelReadState, hasFleetSnapshots, hasFleetLiveAccounts, hasSRPChallenges bool
+	var hasParticipants, hasFanoutID, hasEvents, hasUserStatus, hasEncryptedEvents, hasFwdFromID, hasReactions, hasPinnedChat, hasPinnedChannel, hasNameTsv, hasRateLimits, hasNotifySettings, hasSendCodeIP, hasSignInFail, hasLoginMode, hasAuthorizationTTL, hasAdminSessions, hasPartSize, hasPartBlobKey, hasPartPayload, hasMessageFileIdx, hasPartBlobKeyIdx, hasBlockedUsers, hasRegistrationInvites, hasRegistrationInviteLiveIdx, hasServerAdministration, hasFileSubtypeRights, hasValidatedFileSubtypeRights, hasFileMediaMetadata, hasValidatedFileMediaMetadata, hasLanguageCatalog, hasChannelReadState, hasFleetSnapshots, hasFleetLiveAccounts, hasSRPChallenges, hasChatPhotoColumns, hasChatPhotoPair, hasChatPhotoOwnership, hasChatPhotoIndex, hasChatPhotoReceiptIndex bool
 	err := q.QueryRow(ctx, `
 		SELECT to_regclass('public.chat_participants') IS NOT NULL,
 		       EXISTS(SELECT 1 FROM information_schema.columns
@@ -535,12 +547,28 @@ func (s *Store) checkSchema(ctx context.Context, q queryRower) error {
 	       to_regclass('public.channel_read_state') IS NOT NULL,
 	       to_regclass('public.fleet_process_snapshots') IS NOT NULL,
 	       to_regclass('public.fleet_live_accounts') IS NOT NULL,
-	       to_regclass('public.srp_challenges') IS NOT NULL`,
-	).Scan(&hasParticipants, &hasFanoutID, &hasEvents, &hasUserStatus, &hasEncryptedEvents, &hasFwdFromID, &hasReactions, &hasPinnedChat, &hasPinnedChannel, &hasNameTsv, &hasRateLimits, &hasNotifySettings, &hasSendCodeIP, &hasSignInFail, &hasLoginMode, &hasAuthorizationTTL, &hasAdminSessions, &hasPartSize, &hasPartBlobKey, &hasPartPayload, &hasMessageFileIdx, &hasPartBlobKeyIdx, &hasBlockedUsers, &hasRegistrationInvites, &hasRegistrationInviteLiveIdx, &hasServerAdministration, &hasFileSubtypeRights, &hasValidatedFileSubtypeRights, &hasFileMediaMetadata, &hasValidatedFileMediaMetadata, &hasLanguageCatalog, &hasChannelReadState, &hasFleetSnapshots, &hasFleetLiveAccounts, &hasSRPChallenges)
+	       to_regclass('public.srp_challenges') IS NOT NULL,
+	       (EXISTS(SELECT 1 FROM information_schema.columns WHERE table_name = 'chats' AND column_name = 'current_photo_file_id')
+	        AND EXISTS(SELECT 1 FROM information_schema.columns WHERE table_name = 'chats' AND column_name = 'current_photo_uploader_id')),
+	       EXISTS(SELECT 1 FROM pg_catalog.pg_constraint
+	              WHERE conrelid = to_regclass('public.chats')
+	                AND conname = 'chats_current_photo_fields_paired'
+	                AND convalidated),
+	       EXISTS(SELECT 1 FROM pg_catalog.pg_constraint
+	              WHERE conrelid = to_regclass('public.chats')
+	                AND conname = 'chats_current_photo_file_owned_by_uploader'
+	                AND convalidated),
+	       EXISTS(SELECT 1 FROM pg_catalog.pg_index
+	              WHERE indexrelid = to_regclass('public.chats_current_photo_file_id_idx')
+	                AND indisvalid),
+	       EXISTS(SELECT 1 FROM pg_catalog.pg_index
+	              WHERE indexrelid = to_regclass('public.profile_upload_receipt_file_id_idx')
+	                AND indisvalid)`,
+	).Scan(&hasParticipants, &hasFanoutID, &hasEvents, &hasUserStatus, &hasEncryptedEvents, &hasFwdFromID, &hasReactions, &hasPinnedChat, &hasPinnedChannel, &hasNameTsv, &hasRateLimits, &hasNotifySettings, &hasSendCodeIP, &hasSignInFail, &hasLoginMode, &hasAuthorizationTTL, &hasAdminSessions, &hasPartSize, &hasPartBlobKey, &hasPartPayload, &hasMessageFileIdx, &hasPartBlobKeyIdx, &hasBlockedUsers, &hasRegistrationInvites, &hasRegistrationInviteLiveIdx, &hasServerAdministration, &hasFileSubtypeRights, &hasValidatedFileSubtypeRights, &hasFileMediaMetadata, &hasValidatedFileMediaMetadata, &hasLanguageCatalog, &hasChannelReadState, &hasFleetSnapshots, &hasFleetLiveAccounts, &hasSRPChallenges, &hasChatPhotoColumns, &hasChatPhotoPair, &hasChatPhotoOwnership, &hasChatPhotoIndex, &hasChatPhotoReceiptIndex)
 	if err != nil {
 		return fmt.Errorf("schema check: %w", err)
 	}
-	if !hasParticipants || !hasFanoutID || !hasEvents || !hasUserStatus || !hasEncryptedEvents || !hasFwdFromID || !hasReactions || !hasPinnedChat || !hasPinnedChannel || !hasNameTsv || !hasRateLimits || !hasNotifySettings || !hasSendCodeIP || !hasSignInFail || !hasLoginMode || !hasAuthorizationTTL || !hasAdminSessions || !hasPartSize || !hasPartBlobKey || hasPartPayload || !hasMessageFileIdx || !hasPartBlobKeyIdx || !hasBlockedUsers || !hasRegistrationInvites || !hasRegistrationInviteLiveIdx || !hasServerAdministration || !hasFileSubtypeRights || !hasValidatedFileSubtypeRights || !hasFileMediaMetadata || !hasValidatedFileMediaMetadata || !hasLanguageCatalog || !hasChannelReadState || !hasFleetSnapshots || !hasFleetLiveAccounts || !hasSRPChallenges {
+	if !hasParticipants || !hasFanoutID || !hasEvents || !hasUserStatus || !hasEncryptedEvents || !hasFwdFromID || !hasReactions || !hasPinnedChat || !hasPinnedChannel || !hasNameTsv || !hasRateLimits || !hasNotifySettings || !hasSendCodeIP || !hasSignInFail || !hasLoginMode || !hasAuthorizationTTL || !hasAdminSessions || !hasPartSize || !hasPartBlobKey || hasPartPayload || !hasMessageFileIdx || !hasPartBlobKeyIdx || !hasBlockedUsers || !hasRegistrationInvites || !hasRegistrationInviteLiveIdx || !hasServerAdministration || !hasFileSubtypeRights || !hasValidatedFileSubtypeRights || !hasFileMediaMetadata || !hasValidatedFileMediaMetadata || !hasLanguageCatalog || !hasChannelReadState || !hasFleetSnapshots || !hasFleetLiveAccounts || !hasSRPChallenges || !hasChatPhotoColumns || !hasChatPhotoPair || !hasChatPhotoOwnership || !hasChatPhotoIndex || !hasChatPhotoReceiptIndex {
 		return errors.New("database schema is not migrated; run: atlas migrate apply --env local")
 	}
 	return nil

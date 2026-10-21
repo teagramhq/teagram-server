@@ -57,7 +57,12 @@ func (h *handlers) handleGetCommonChats(r *mtproto.Request) (bin.Encoder, error)
 	for _, common := range page.Chats {
 		switch common.PeerType {
 		case store.PeerTypeChat:
-			chats = append(chats, chatToTL(common.BasicGroup, int(common.ParticipantCount), r.UserID))
+			wireChat, err := h.chatToTL(r.Ctx, common.BasicGroup, int(common.ParticipantCount), r.UserID)
+			if err != nil {
+				h.log.Error("get common chats photo", "chat_id", common.BasicGroup.ID, "user_id", r.UserID, "err", err)
+				return nil, errInternal
+			}
+			chats = append(chats, wireChat)
 		case store.PeerTypeChannel:
 			chats = append(chats, h.channelToTL(common.Supergroup, store.ChannelMember{Role: common.SupergroupRole}, true, r.UserID))
 		}

@@ -269,6 +269,79 @@ func TestSendUserAlbumResendRules(t *testing.T) {
 	}
 }
 
+func TestExpiredRandomIDRetriesDoNotReturnMessageContents(t *testing.T) {
+	t.Parallel()
+	f := newAlbumFixture(t)
+	ctx := context.Background()
+	owner := mustUser(t, f.s, "+15559185071")
+	peer := mustUser(t, f.s, "+15559185072")
+
+	const directRandomID = int64(15001)
+	if _, _, _, _, err := f.s.SendMessage(ctx, owner.ID, peer.ID, "expired text", directRandomID, 0, 0); err != nil {
+		t.Fatalf("send direct message: %v", err)
+	}
+	if _, err := f.conn.Exec(ctx, `UPDATE messages SET expires_at = statement_timestamp() - interval '1 second' WHERE owner_id = $1 AND random_id = $2`, owner.ID, directRandomID); err != nil {
+		t.Fatalf("expire direct message: %v", err)
+	}
+	message, found, err := f.s.MessageByRandomID(ctx, owner.ID, directRandomID)
+	if err == nil || found || message.LocalID != 0 || message.Text != "" || message.FileID != 0 {
+		t.Fatalf("expired direct lookup = (%+v, found=%v, err=%v), want refusal without row contents", message, found, err)
+	}
+	if _, _, _, duplicate, sendErr := f.s.SendMessage(ctx, owner.ID, peer.ID, "replacement", directRandomID, 0, 0); !errors.Is(sendErr, store.ErrRandomIDExpired) || duplicate {
+		t.Fatalf("expired direct send retry = duplicate=%v err=%v, want expired refusal", duplicate, sendErr)
+	}
+
+	const channelTextRandomID = int64(15002)
+	channel := mustChannel(t, f.s, owner.ID, "expired retry channel")
+	if _, _, _, err = f.s.PostChannelMessageAs(ctx, channel.ID, owner.ID, "expired channel text", channelTextRandomID, nil, 0); err != nil {
+		t.Fatalf("post channel text: %v", err)
+	}
+	if _, err = f.conn.Exec(ctx, `UPDATE channel_messages SET expires_at = statement_timestamp() - interval '1 second' WHERE channel_id = $1 AND random_id = $2`, channel.ID, channelTextRandomID); err != nil {
+		t.Fatalf("expire channel text: %v", err)
+	}
+	channelMessage, _, duplicate, err := f.s.ChannelTextMessageRetryAs(ctx, channel.ID, owner.ID, channelTextRandomID)
+	if err == nil || duplicate || channelMessage.LocalID != 0 || channelMessage.Message != "" {
+		t.Fatalf("expired channel text retry = (%+v, duplicate=%v, err=%v), want refusal without post contents", channelMessage, duplicate, err)
+	}
+	if _, _, _, postErr := f.s.PostChannelMessageAs(ctx, channel.ID, owner.ID, "replacement", channelTextRandomID, nil, 0); !errors.Is(postErr, store.ErrRandomIDDuplicate) {
+		t.Fatalf("expired channel text send retry = %v, want duplicate refusal", postErr)
+	}
+
+	userAlbumFiles := []store.File{f.granted(t, owner.ID, true), f.granted(t, owner.ID, true)}
+	const userAlbumRandomID = int64(15100)
+	if _, err = f.s.SendUserAlbum(ctx, peer.ID, albumOf(owner.ID, 151, userAlbumRandomID, userAlbumFiles...)); err != nil {
+		t.Fatalf("send user album: %v", err)
+	}
+	if _, err = f.conn.Exec(ctx, `UPDATE messages SET expires_at = statement_timestamp() - interval '1 second' WHERE owner_id = $1 AND random_id = ANY($2)`, owner.ID, []int64{userAlbumRandomID, userAlbumRandomID + 1}); err != nil {
+		t.Fatalf("expire user album: %v", err)
+	}
+	userAlbum, err := f.s.UserAlbumRetry(ctx, owner.ID, store.PeerTypeUser, peer.ID, []int64{userAlbumRandomID, userAlbumRandomID + 1})
+	if err == nil || userAlbum.Duplicate || len(userAlbum.Messages) != 0 {
+		t.Fatalf("expired user album retry = (%+v, err=%v), want refusal without album contents", userAlbum, err)
+	}
+	userRetryFiles := []store.File{f.granted(t, owner.ID, true), f.granted(t, owner.ID, true)}
+	if _, sendErr := f.s.SendUserAlbum(ctx, peer.ID, albumOf(owner.ID, 153, userAlbumRandomID, userRetryFiles...)); !errors.Is(sendErr, store.ErrRandomIDExpired) {
+		t.Fatalf("expired user album send retry = %v, want expired refusal", sendErr)
+	}
+
+	channelAlbumFiles := []store.File{f.granted(t, owner.ID, true), f.granted(t, owner.ID, true)}
+	const channelAlbumRandomID = int64(15200)
+	if _, err = f.s.PostChannelAlbumAs(ctx, channel.ID, 0, albumOf(owner.ID, 152, channelAlbumRandomID, channelAlbumFiles...)); err != nil {
+		t.Fatalf("post channel album: %v", err)
+	}
+	if _, err = f.conn.Exec(ctx, `UPDATE channel_messages SET expires_at = statement_timestamp() - interval '1 second' WHERE channel_id = $1 AND random_id = ANY($2)`, channel.ID, []int64{channelAlbumRandomID, channelAlbumRandomID + 1}); err != nil {
+		t.Fatalf("expire channel album: %v", err)
+	}
+	channelAlbum, err := f.s.ChannelAlbumRetryAs(ctx, channel.ID, owner.ID, []int64{channelAlbumRandomID, channelAlbumRandomID + 1})
+	if err == nil || channelAlbum.Duplicate || len(channelAlbum.Messages) != 0 {
+		t.Fatalf("expired channel album retry = (%+v, err=%v), want refusal without album contents", channelAlbum, err)
+	}
+	channelRetryFiles := []store.File{f.granted(t, owner.ID, true), f.granted(t, owner.ID, true)}
+	if _, sendErr := f.s.PostChannelAlbumAs(ctx, channel.ID, 0, albumOf(owner.ID, 154, channelAlbumRandomID, channelRetryFiles...)); !errors.Is(sendErr, store.ErrRandomIDDuplicate) {
+		t.Fatalf("expired channel album send retry = %v, want duplicate refusal", sendErr)
+	}
+}
+
 func TestSendChatAlbumFansOutAndChecksEveryItemsRights(t *testing.T) {
 	t.Parallel()
 	f := newAlbumFixture(t)
@@ -337,6 +410,57 @@ func TestPostChannelAlbumSharesGroupedIDAndReplays(t *testing.T) {
 	doc := f.granted(t, owner.ID, false)
 	if _, err = f.s.PostChannelAlbumAs(ctx, channel.ID, 0, albumOf(owner.ID, 32, 1400, f.granted(t, owner.ID, true), doc)); !errors.Is(err, store.ErrMediaInvalid) {
 		t.Fatalf("document in channel album = %v, want ErrMediaInvalid", err)
+	}
+}
+
+func TestPostChannelAlbumReplyRespectsHistoryFloor(t *testing.T) {
+	t.Parallel()
+	f := newAlbumFixture(t)
+	ctx := context.Background()
+	creator := mustUser(t, f.s, "+15559185081")
+	member := mustUser(t, f.s, "+15559185082")
+	channel, err := f.s.CreateChannel(ctx, creator.ID, "album reply history floor", "", true)
+	if err != nil {
+		t.Fatalf("create channel: %v", err)
+	}
+	hidden, _, _, err := f.s.PostChannelMessage(ctx, channel.ID, creator.ID, "hidden reply target", 1581, nil, 0)
+	if err != nil {
+		t.Fatalf("post hidden target: %v", err)
+	}
+	if _, err = f.conn.Exec(ctx, `UPDATE channels SET pre_history_hidden = true WHERE id = $1`, channel.ID); err != nil {
+		t.Fatalf("hide channel history: %v", err)
+	}
+	invite, err := f.s.CreateChannelInvite(ctx, channel.ID, creator.ID)
+	if err != nil {
+		t.Fatalf("create invite: %v", err)
+	}
+	if _, _, err = f.s.JoinChannelByInvite(ctx, invite, member.ID); err != nil {
+		t.Fatalf("join channel: %v", err)
+	}
+	floor, ok, err := f.s.ChannelMemberOf(ctx, channel.ID, member.ID)
+	if err != nil || !ok || floor.AvailableMinID != hidden.LocalID {
+		t.Fatalf("member floor = %+v, ok=%v, err=%v; want %d", floor, ok, err, hidden.LocalID)
+	}
+
+	hiddenFiles := []store.File{f.granted(t, member.ID, true), f.granted(t, member.ID, true)}
+	if _, err = f.s.PostChannelAlbumAs(ctx, channel.ID, hidden.LocalID, albumOf(member.ID, 1582, 1583, hiddenFiles...)); !errors.Is(err, store.ErrMessageInvalid) {
+		t.Fatalf("album reply to floored post = %v, want ErrMessageInvalid", err)
+	}
+	if count := f.grantCount(t, member.ID); count != 2 {
+		t.Fatalf("grants after rejected hidden reply = %d, want 2", count)
+	}
+
+	visible, _, _, err := f.s.PostChannelMessage(ctx, channel.ID, creator.ID, "visible reply target", 1584, nil, 0)
+	if err != nil {
+		t.Fatalf("post visible target: %v", err)
+	}
+	visibleFiles := []store.File{f.granted(t, member.ID, true), f.granted(t, member.ID, true)}
+	result, err := f.s.PostChannelAlbumAs(ctx, channel.ID, visible.LocalID, albumOf(member.ID, 1585, 1586, visibleFiles...))
+	if err != nil {
+		t.Fatalf("album reply to visible post: %v", err)
+	}
+	if result.Duplicate || len(result.Messages) != 2 {
+		t.Fatalf("visible reply album = %+v, want two new messages", result)
 	}
 }
 

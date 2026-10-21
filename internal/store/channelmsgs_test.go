@@ -210,7 +210,7 @@ func TestChannelHistoryWithOffsetUsesOrdinalAnchor(t *testing.T) {
 		post(t, s, ch, author.ID, "post", i)
 	}
 
-	history, count, err := s.ChannelHistoryWithOffset(ctx, ch, 20, 0, 0, 0, 10)
+	history, count, err := s.ChannelHistoryWithOffset(ctx, ch, author.ID, 20, 0, 0, 0, 10)
 	if err != nil {
 		t.Fatalf("history at offset 20: %v", err)
 	}
@@ -226,7 +226,7 @@ func TestChannelHistoryWithOffsetUsesOrdinalAnchor(t *testing.T) {
 		}
 	}
 
-	history, count, err = s.ChannelHistoryWithOffset(ctx, ch, 20, 1, 0, 0, 10)
+	history, count, err = s.ChannelHistoryWithOffset(ctx, ch, author.ID, 20, 1, 0, 0, 10)
 	if err != nil {
 		t.Fatalf("history after offset 20: %v", err)
 	}
@@ -242,7 +242,7 @@ func TestChannelHistoryWithOffsetUsesOrdinalAnchor(t *testing.T) {
 		}
 	}
 
-	history, count, err = s.ChannelHistoryWithOffset(ctx, ch, 20, -10, 0, 0, 10)
+	history, count, err = s.ChannelHistoryWithOffset(ctx, ch, author.ID, 20, -10, 0, 0, 10)
 	if err != nil {
 		t.Fatalf("history around offset 20: %v", err)
 	}
@@ -261,7 +261,7 @@ func TestChannelHistoryWithOffsetUsesOrdinalAnchor(t *testing.T) {
 	if err := store.SetChannelPostDeleted(ctx, s, ch, 2); err != nil {
 		t.Fatalf("delete channel post: %v", err)
 	}
-	_, count, err = s.ChannelHistoryWithOffset(ctx, ch, 0, 0, 0, 0, 10)
+	_, count, err = s.ChannelHistoryWithOffset(ctx, ch, author.ID, 0, 0, 0, 0, 10)
 	if err != nil {
 		t.Fatalf("history after delete: %v", err)
 	}
@@ -284,7 +284,7 @@ func TestChannelHistoryCountWithoutActiveCreateServiceEntry(t *testing.T) {
 		t.Fatalf("delete channel creation entry: %v", err)
 	}
 
-	history, count, err := s.ChannelHistoryWithOffset(ctx, ch, 0, 0, 0, 0, 10)
+	history, count, err := s.ChannelHistoryWithOffset(ctx, ch, author.ID, 0, 0, 0, 0, 10)
 	if err != nil {
 		t.Fatalf("channel history: %v", err)
 	}
@@ -828,7 +828,7 @@ func TestSearchChannelPostsScopedToOneChannel(t *testing.T) {
 		t.Fatalf("mark deleted: %v", err)
 	}
 
-	hits, err := s.SearchChannelPosts(ctx, ch, "budget", 0, 10)
+	hits, err := s.SearchChannelPosts(ctx, author.ID, ch, "budget", 0, 10)
 	if err != nil {
 		t.Fatalf("search: %v", err)
 	}
@@ -842,7 +842,7 @@ func TestSearchChannelPostsScopedToOneChannel(t *testing.T) {
 	}
 
 	// offsetID pages strictly older.
-	hits, err = s.SearchChannelPosts(ctx, ch, "budget", 4, 10)
+	hits, err = s.SearchChannelPosts(ctx, author.ID, ch, "budget", 4, 10)
 	if err != nil {
 		t.Fatalf("search page: %v", err)
 	}
@@ -851,7 +851,7 @@ func TestSearchChannelPostsScopedToOneChannel(t *testing.T) {
 	}
 
 	// limit bounds the page.
-	hits, err = s.SearchChannelPosts(ctx, ch, "budget", 0, 1)
+	hits, err = s.SearchChannelPosts(ctx, author.ID, ch, "budget", 0, 1)
 	if err != nil {
 		t.Fatalf("search limited: %v", err)
 	}
@@ -860,7 +860,7 @@ func TestSearchChannelPostsScopedToOneChannel(t *testing.T) {
 	}
 
 	// A word no post carries is an empty result, not an error.
-	hits, err = s.SearchChannelPosts(ctx, ch, "zzzznothingmatchesthis", 0, 10)
+	hits, err = s.SearchChannelPosts(ctx, author.ID, ch, "zzzznothingmatchesthis", 0, 10)
 	if err != nil {
 		t.Fatalf("search miss: %v", err)
 	}

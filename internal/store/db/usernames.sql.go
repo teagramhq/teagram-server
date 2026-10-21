@@ -11,9 +11,55 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
+const claimHeldChannelUsername = `-- name: ClaimHeldChannelUsername :execrows
+UPDATE usernames AS held_username
+SET owner_type = 'channel',
+    owner_id = $1::bigint,
+    hold_creator_id = NULL,
+    hold_until = NULL
+WHERE held_username.handle = lower($2)
+  AND held_username.owner_type = 'channel_hold'
+  AND held_username.hold_creator_id = $3::bigint
+  AND held_username.hold_until > clock_timestamp()
+  AND EXISTS (
+      SELECT 1
+      FROM channels AS deleted_channel
+      JOIN channels AS target_channel
+        ON target_channel.id = $1::bigint
+      WHERE deleted_channel.id = held_username.owner_id
+        AND deleted_channel.deleted_at IS NOT NULL
+        AND target_channel.deleted_at IS NULL
+        AND target_channel.creator_id = held_username.hold_creator_id
+        AND target_channel.date > deleted_channel.deleted_at
+  )
+`
+
+type ClaimHeldChannelUsernameParams struct {
+	ChannelID int64
+	Handle    string
+	CreatorID int64
+}
+
+// ClaimHeldChannelUsername transfers an active held handle only to a channel
+// created after the deletion by the same creator account, in one statement.
+func (q *Queries) ClaimHeldChannelUsername(ctx context.Context, arg ClaimHeldChannelUsernameParams) (int64, error) {
+	result, err := q.db.Exec(ctx, claimHeldChannelUsername, arg.ChannelID, arg.Handle, arg.CreatorID)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
 const claimUsername = `-- name: ClaimUsername :one
 INSERT INTO usernames (handle, owner_type, owner_id)
 VALUES (lower($1), $2, $3)
+ON CONFLICT (handle) DO UPDATE
+SET owner_type = EXCLUDED.owner_type,
+    owner_id = EXCLUDED.owner_id,
+    hold_creator_id = NULL,
+    hold_until = NULL
+WHERE usernames.owner_type = 'channel_hold'
+  AND usernames.hold_until <= clock_timestamp()
 RETURNING handle, owner_type, owner_id
 `
 
@@ -23,17 +69,23 @@ type ClaimUsernameParams struct {
 	OwnerID   int64
 }
 
-func (q *Queries) ClaimUsername(ctx context.Context, arg ClaimUsernameParams) (Username, error) {
+type ClaimUsernameRow struct {
+	Handle    string
+	OwnerType string
+	OwnerID   int64
+}
+
+func (q *Queries) ClaimUsername(ctx context.Context, arg ClaimUsernameParams) (ClaimUsernameRow, error) {
 	row := q.db.QueryRow(ctx, claimUsername, arg.Handle, arg.OwnerType, arg.OwnerID)
-	var i Username
+	var i ClaimUsernameRow
 	err := row.Scan(&i.Handle, &i.OwnerType, &i.OwnerID)
 	return i, err
 }
 
 const getChannelByUsername = `-- name: GetChannelByUsername :one
-SELECT c.id, c.title, c.about, c.creator_id, c.megagroup, c.version, c.date, c.pinned_message_id, c.username, c.title_tsv, c.publicly_discoverable, c.default_banned_rights, c.slowmode_seconds, c.pre_history_hidden FROM channels c
+SELECT c.id, c.title, c.about, c.creator_id, c.megagroup, c.version, c.date, c.pinned_message_id, c.username, c.title_tsv, c.publicly_discoverable, c.default_banned_rights, c.slowmode_seconds, c.pre_history_hidden, c.deleted_at, c.signatures, c.ttl_period FROM channels c
 JOIN usernames un ON un.owner_type = 'channel' AND un.owner_id = c.id
-WHERE un.handle = lower($1)
+WHERE un.handle = lower($1) AND c.deleted_at IS NULL
 `
 
 func (q *Queries) GetChannelByUsername(ctx context.Context, handle string) (Channel, error) {
@@ -54,6 +106,9 @@ func (q *Queries) GetChannelByUsername(ctx context.Context, handle string) (Chan
 		&i.DefaultBannedRights,
 		&i.SlowmodeSeconds,
 		&i.PreHistoryHidden,
+		&i.DeletedAt,
+		&i.Signatures,
+		&i.TtlPeriod,
 	)
 	return i, err
 }
@@ -136,12 +191,21 @@ func (q *Queries) GetUserByUsernameWithLoginMode(ctx context.Context, handle str
 }
 
 const getUsernameByHandle = `-- name: GetUsernameByHandle :one
-SELECT handle, owner_type, owner_id FROM usernames WHERE handle = lower($1)
+SELECT handle, owner_type, owner_id
+FROM usernames
+WHERE handle = lower($1)
+  AND owner_type IN ('user', 'channel')
 `
 
-func (q *Queries) GetUsernameByHandle(ctx context.Context, handle string) (Username, error) {
+type GetUsernameByHandleRow struct {
+	Handle    string
+	OwnerType string
+	OwnerID   int64
+}
+
+func (q *Queries) GetUsernameByHandle(ctx context.Context, handle string) (GetUsernameByHandleRow, error) {
 	row := q.db.QueryRow(ctx, getUsernameByHandle, handle)
-	var i Username
+	var i GetUsernameByHandleRow
 	err := row.Scan(&i.Handle, &i.OwnerType, &i.OwnerID)
 	return i, err
 }
@@ -182,4 +246,25 @@ func (q *Queries) ReleaseUsernameByOwner(ctx context.Context, arg ReleaseUsernam
 		return 0, err
 	}
 	return result.RowsAffected(), nil
+}
+
+const usernameHandleTaken = `-- name: UsernameHandleTaken :one
+SELECT EXISTS (
+    SELECT 1
+    FROM usernames un
+    WHERE un.handle = lower($1)
+      AND (
+          un.owner_type IN ('user', 'channel')
+          OR (un.owner_type = 'channel_hold' AND un.hold_until > clock_timestamp())
+      )
+)
+`
+
+// UsernameHandleTaken includes active channel holds without making a held
+// channel handle resolvable to its tombstoned channel row.
+func (q *Queries) UsernameHandleTaken(ctx context.Context, handle string) (bool, error) {
+	row := q.db.QueryRow(ctx, usernameHandleTaken, handle)
+	var exists bool
+	err := row.Scan(&exists)
+	return exists, err
 }

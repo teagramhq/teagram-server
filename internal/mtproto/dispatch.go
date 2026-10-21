@@ -36,8 +36,8 @@ type Request struct {
 	// PROXY v2 header rather than the socket peer.
 	ClientAddrFromProxyV2 bool
 	// ReCaptchaToken is the client token from invokeWithReCaptcha. It is
-	// populated only for the supported auth.signUp wrapper and must not be
-	// logged or retained after the request.
+	// populated only for supported auth methods and must not be logged or
+	// retained after the request.
 	ReCaptchaToken string
 	// AuthorizationMetadata is the bounded initConnection device description
 	// for this connection, copied onto each request until the auth key is bound.
@@ -409,7 +409,7 @@ func unpackInvokeWithAfterMsg(next Handler, onRefusal func(*Conn, *Request, uint
 					return err
 				}
 				id = obj.TypeID
-				if !allowReCaptcha || id != tg.AuthSignUpRequestTypeID {
+				if !allowReCaptcha || (id != tg.AuthSendCodeRequestTypeID && id != tg.AuthCheckPasswordRequestTypeID && id != tg.AuthSignUpRequestTypeID) {
 					return refuseUnsupported(id)
 				}
 				req.ReCaptchaToken = wrapper.Token

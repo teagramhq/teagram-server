@@ -1,0 +1,16 @@
+{
+  "layer": 228,
+  "client": "gotd v0.162.0",
+  "source": "source-derived/messages_editChatPhoto.2.txt",
+  "method": "messages.editChatPhoto",
+  "request": {
+    "type": "messages.editChatPhoto",
+    "fields": {
+      "chat_id": "<N>",
+      "photo": {
+        "type": "inputChatPhotoEmpty",
+        "fields": {}
+      }
+    }
+  }
+}

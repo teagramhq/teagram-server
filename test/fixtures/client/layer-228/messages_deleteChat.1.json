@@ -1,0 +1,12 @@
+{
+  "layer": 228,
+  "client": "gotd v0.162.0",
+  "source": "source-derived/messages_deleteChat.1.txt",
+  "method": "messages.deleteChat",
+  "request": {
+    "type": "messages.deleteChat",
+    "fields": {
+      "chat_id": "<N>"
+    }
+  }
+}

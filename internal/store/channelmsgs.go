@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -114,7 +115,22 @@ type ChannelMessage struct {
 	// ReplyToMsgID is the local_id of the post this post replies to; 0 = no reply.
 	ReplyToMsgID int32
 	Action       ChannelMessageAction
+	TTLPeriod    int
 	Poll         *Poll
+	PostAuthor   *string
+}
+
+// ChannelRepliesSnapshot carries the authorization and page result from one
+// channel replies statement. ChannelExists, Megagroup, IsMember and RootExists
+// let the API preserve the protocol's distinct peer and root errors without a
+// second membership read racing the page.
+type ChannelRepliesSnapshot struct {
+	ChannelExists bool
+	Megagroup     bool
+	IsMember      bool
+	RootExists    bool
+	Count         int
+	Messages      []ChannelMessage
 }
 
 // ChannelMessageAction identifies a service message stored in a channel's
@@ -125,6 +141,7 @@ const (
 	ChannelMessageActionNone ChannelMessageAction = iota
 	ChannelMessageActionCreate
 	ChannelMessageActionEditTitle
+	ChannelMessageActionSetMessagesTTL
 )
 
 // channelMsgFields is a layout-identical copy of the sqlc channel-message
@@ -144,6 +161,8 @@ type channelMsgFields struct {
 	FileID       *int64
 	ReplyToMsgID *int32
 	ActionType   int16
+	TtlPeriod    int32
+	PostAuthor   *string
 }
 
 // channelMessageFromFields is the sole row-to-struct converter for channel
@@ -173,7 +192,9 @@ func channelMessageFromFields(r channelMsgFields) ChannelMessage {
 		r.FileID,
 		replyToMsgID,
 		ChannelMessageAction(r.ActionType),
+		int(r.TtlPeriod),
 		nil,
+		r.PostAuthor,
 	}
 	if message.Deleted {
 		message.FromID = 0
@@ -184,6 +205,7 @@ func channelMessageFromFields(r channelMsgFields) ChannelMessage {
 		message.FileID = nil
 		message.ReplyToMsgID = 0
 		message.Action = ChannelMessageActionNone
+		message.PostAuthor = nil
 	}
 	return message
 }
@@ -259,6 +281,7 @@ func (s *Store) DeleteChannelMessages(ctx context.Context, channelID, userID int
 	if err != nil {
 		return 0, 0, fmt.Errorf("lock channel messages for delete: %w", err)
 	}
+	deleteIDs := make([]int64, 0, len(rows))
 	for _, row := range rows {
 		if row.Deleted {
 			continue
@@ -267,53 +290,126 @@ func (s *Store) DeleteChannelMessages(ctx context.Context, channelID, userID int
 			megagroup && participant.Role == channelRoleMember && row.FromID != userID {
 			return 0, 0, ErrChannelMessageDeleteForbidden
 		}
+		deleteIDs = append(deleteIDs, row.LocalID)
 	}
-	var deletes int64
-	for _, row := range rows {
-		if !row.Deleted {
-			deletes++
-		}
-	}
-	if err = requireChannelStateCapacity(channelID, state.Pts, state.NextLocalID, deletes, 0); err != nil {
+	pts, count, err := tombstoneChannelMessages(ctx, qtx, channelID, state.Pts, state.NextLocalID, deleteIDs)
+	if err != nil {
 		return 0, 0, err
-	}
-
-	pts := int(state.Pts)
-	count := 0
-	for _, row := range rows {
-		if row.Deleted {
-			continue
-		}
-		updated, e := qtx.TombstoneChannelMessage(ctx, db.TombstoneChannelMessageParams{
-			ChannelID: channelID,
-			LocalID:   row.LocalID,
-		})
-		if e != nil {
-			return 0, 0, fmt.Errorf("tombstone channel message %d: %w", row.LocalID, e)
-		}
-		if updated != 1 {
-			return 0, 0, fmt.Errorf("tombstone channel message %d: updated %d rows, want 1", row.LocalID, updated)
-		}
-		newPts, e := bumpChannelPtsOnly(ctx, qtx, channelID)
-		if e != nil {
-			return 0, 0, fmt.Errorf("bump channel pts for delete %d: %w", row.LocalID, e)
-		}
-		if e = qtx.InsertChannelEvent(ctx, db.InsertChannelEventParams{
-			ChannelID: channelID,
-			Pts:       newPts,
-			Type:      int16(EventDelete),
-			LocalID:   row.LocalID,
-		}); e != nil {
-			return 0, 0, fmt.Errorf("insert channel delete event %d: %w", row.LocalID, e)
-		}
-		pts = int(newPts)
-		count++
 	}
 
 	if err := tx.Commit(ctx); err != nil {
 		return 0, 0, fmt.Errorf("commit channel message delete: %w", err)
 	}
 	return pts, count, nil
+}
+
+func tombstoneChannelMessages(
+	ctx context.Context, qtx *db.Queries, channelID, pts, nextLocalID int64, localIDs []int64,
+) (int, int, error) {
+	if err := requireChannelStateCapacity(channelID, pts, nextLocalID, int64(len(localIDs)), 0); err != nil {
+		return 0, 0, err
+	}
+	currentPts := int(pts)
+	for _, localID := range localIDs {
+		updated, err := qtx.TombstoneChannelMessage(ctx, db.TombstoneChannelMessageParams{
+			ChannelID: channelID,
+			LocalID:   localID,
+		})
+		if err != nil {
+			return 0, 0, fmt.Errorf("tombstone channel message %d: %w", localID, err)
+		}
+		if updated != 1 {
+			return 0, 0, fmt.Errorf("tombstone channel message %d: updated %d rows, want 1", localID, updated)
+		}
+		newPts, err := bumpChannelPtsOnly(ctx, qtx, channelID)
+		if err != nil {
+			return 0, 0, fmt.Errorf("bump channel pts for delete %d: %w", localID, err)
+		}
+		if err = qtx.InsertChannelEvent(ctx, db.InsertChannelEventParams{
+			ChannelID: channelID,
+			Pts:       newPts,
+			Type:      int16(EventDelete),
+			LocalID:   localID,
+		}); err != nil {
+			return 0, 0, fmt.Errorf("insert channel delete event %d: %w", localID, err)
+		}
+		currentPts = int(newPts)
+	}
+	return currentPts, len(localIDs), nil
+}
+
+// DeletedChannelPostTombstoneBatch bounds the post cleanup one sweep pass can
+// lock. The job cursor is committed with each batch, so restart resumes after
+// the last visited local id.
+const DeletedChannelPostTombstoneBatch = 1000
+
+// SweepDeletedChannelPosts tombstones one batch of posts from one deleted
+// channel. The channel is already unreadable at its deletion commit; this
+// resumable cleanup retires its stored post rows and allows the existing media
+// eraser to observe the dropped references.
+func (s *Store) SweepDeletedChannelPosts(ctx context.Context) (int, bool, error) {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return 0, false, fmt.Errorf("begin deleted channel post sweep: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }() //nolint:errcheck // no-op after commit
+	qtx := s.q.WithTx(tx)
+
+	job, err := qtx.NextChannelDeletionJob(ctx)
+	switch {
+	case errors.Is(err, pgx.ErrNoRows):
+		if err = tx.Commit(ctx); err != nil {
+			return 0, false, fmt.Errorf("commit empty deleted channel post sweep: %w", err)
+		}
+		return 0, false, nil
+	case err != nil:
+		return 0, false, fmt.Errorf("lock deleted channel post job: %w", err)
+	}
+
+	rows, err := qtx.ChannelPostsForTombstone(ctx, db.ChannelPostsForTombstoneParams{
+		ChannelID:  job.ChannelID,
+		PostCursor: job.PostCursor,
+		Lim:        DeletedChannelPostTombstoneBatch,
+	})
+	if err != nil {
+		return 0, false, fmt.Errorf("read deleted channel post batch: %w", err)
+	}
+	if len(rows) == 0 {
+		updated, updateErr := qtx.CompleteChannelDeletionPosts(ctx, job.ChannelID)
+		if updateErr != nil {
+			return 0, false, fmt.Errorf("complete deleted channel post job: %w", updateErr)
+		}
+		if updated != 1 {
+			return 0, false, fmt.Errorf("complete deleted channel post job: updated %d rows, want 1", updated)
+		}
+		if err = tx.Commit(ctx); err != nil {
+			return 0, false, fmt.Errorf("commit completed deleted channel post job: %w", err)
+		}
+		return 0, true, nil
+	}
+
+	localIDs := make([]int64, len(rows))
+	copy(localIDs, rows)
+	if _, err = qtx.TombstoneDeletedChannelPosts(ctx, db.TombstoneDeletedChannelPostsParams{
+		ChannelID: job.ChannelID,
+		LocalIds:  localIDs,
+	}); err != nil {
+		return 0, false, fmt.Errorf("tombstone deleted channel posts: %w", err)
+	}
+	updated, err := qtx.AdvanceChannelDeletionCursor(ctx, db.AdvanceChannelDeletionCursorParams{
+		ChannelID:  job.ChannelID,
+		PostCursor: localIDs[len(localIDs)-1],
+	})
+	if err != nil {
+		return 0, false, fmt.Errorf("advance deleted channel post cursor: %w", err)
+	}
+	if updated != 1 {
+		return 0, false, fmt.Errorf("advance deleted channel post cursor: updated %d rows, want 1", updated)
+	}
+	if err = tx.Commit(ctx); err != nil {
+		return 0, false, fmt.Errorf("commit deleted channel post batch: %w", err)
+	}
+	return len(localIDs), true, nil
 }
 
 // newChannelPostPts returns the pts at which the channel's localID entered the
@@ -713,16 +809,15 @@ func (s *Store) postChannelMessage(
 			return message, pts, true, nil
 		}
 	}
-	var megagroup bool
+	channel, err := qtx.ChannelPostDefaults(ctx, channelID)
+	switch {
+	case errors.Is(err, pgx.ErrNoRows):
+		return ChannelMessage{}, 0, false, ErrNotMember
+	case err != nil:
+		return ChannelMessage{}, 0, false, fmt.Errorf("channel post defaults: %w", err)
+	}
+	megagroup := channel.Megagroup
 	if checkRights {
-		channel, e := qtx.ChannelPostDefaults(ctx, channelID)
-		switch {
-		case errors.Is(e, pgx.ErrNoRows):
-			return ChannelMessage{}, 0, false, ErrNotMember
-		case e != nil:
-			return ChannelMessage{}, 0, false, fmt.Errorf("channel post defaults: %w", e)
-		}
-		megagroup = channel.Megagroup
 		if pollDraft != nil && !channel.Megagroup && pollDraft.PublicVoters {
 			return ChannelMessage{}, 0, false, ErrBroadcastPublicVotersForbidden
 		}
@@ -744,6 +839,16 @@ func (s *Store) postChannelMessage(
 			if err = checkDefaultMessageRestriction(channel.DefaultBannedRights, role >= channelRoleAdmin, fileID != nil || pollDraft != nil, mediaRights); err != nil {
 				return ChannelMessage{}, 0, false, err
 			}
+		}
+	}
+	var postAuthor *string
+	if !megagroup && channel.Signatures {
+		name, nameErr := channelPostAuthorName(ctx, qtx, fromID)
+		if nameErr != nil {
+			return ChannelMessage{}, 0, false, nameErr
+		}
+		if name != "" {
+			postAuthor = &name
 		}
 	}
 
@@ -773,7 +878,7 @@ func (s *Store) postChannelMessage(
 	var replyTo *int32
 	if replyToMsgID > 0 {
 		_, verr := qtx.ChannelPostExistsActive(ctx, db.ChannelPostExistsActiveParams{
-			ChannelID: channelID, LocalID: replyToMsgID,
+			ChannelID: channelID, LocalID: replyToMsgID, UserID: fromID,
 		})
 		if errors.Is(verr, pgx.ErrNoRows) {
 			return ChannelMessage{}, 0, false, ErrMessageInvalid
@@ -811,7 +916,7 @@ func (s *Store) postChannelMessage(
 	}
 	if err = qtx.InsertChannelMessage(ctx, db.InsertChannelMessageParams{
 		ChannelID: channelID, LocalID: b.LocalID, FromID: fromID,
-		Message: text, RandomID: randomID, FileID: fileID, ReplyToMsgID: replyTo,
+		Message: text, RandomID: randomID, FileID: fileID, ReplyToMsgID: replyTo, PostAuthor: postAuthor,
 	}); err != nil {
 		return ChannelMessage{}, 0, false, fmt.Errorf("insert channel message: %w", err)
 	}
@@ -856,14 +961,24 @@ func (s *Store) postChannelMessage(
 	return message, int(b.Pts), false, nil
 }
 
+func channelPostAuthorName(ctx context.Context, qtx *db.Queries, userID int64) (string, error) {
+	user, err := qtx.UserByID(ctx, userID)
+	if err != nil {
+		return "", fmt.Errorf("read channel post author: %w", err)
+	}
+	name := strings.TrimSpace(strings.TrimSpace(user.FirstName) + " " + strings.TrimSpace(user.LastName))
+	return name, nil
+}
+
 func channelMessageRetry(
 	ctx context.Context, qtx *db.Queries, channelID, fromID, randomID int64, pollResult *Poll, textOnly, photoRetry bool,
 ) (ChannelMessage, int, bool, error) {
-	existing, err := qtx.ChannelMessageByRandomID(ctx, db.ChannelMessageByRandomIDParams{
-		ChannelID: channelID, RandomID: randomID,
-	})
+	existing, err := channelMessageRowByRandomID(ctx, qtx, channelID, randomID)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return ChannelMessage{}, 0, false, nil
+	}
+	if errors.Is(err, ErrRandomIDExpired) {
+		return ChannelMessage{}, 0, false, ErrRandomIDDuplicate
 	}
 	if err != nil {
 		return ChannelMessage{}, 0, false, fmt.Errorf("random_id lookup: %w", err)
@@ -930,6 +1045,25 @@ func channelMessageRetry(
 		message.Poll = retryPoll
 	}
 	return message, pts, true, nil
+}
+
+func channelMessageRowByRandomID(ctx context.Context, qtx *db.Queries, channelID, randomID int64) (db.ChannelMessageByRandomIDRow, error) {
+	row, err := qtx.ChannelMessageByRandomID(ctx, db.ChannelMessageByRandomIDParams{
+		ChannelID: channelID, RandomID: randomID,
+	})
+	if !errors.Is(err, pgx.ErrNoRows) {
+		return row, err
+	}
+	expired, err := qtx.ChannelMessageRandomIDExpired(ctx, db.ChannelMessageRandomIDExpiredParams{
+		ChannelID: channelID, RandomID: randomID,
+	})
+	if err != nil {
+		return db.ChannelMessageByRandomIDRow{}, fmt.Errorf("channel message random id expiry lookup: %w", err)
+	}
+	if expired {
+		return db.ChannelMessageByRandomIDRow{}, ErrRandomIDExpired
+	}
+	return db.ChannelMessageByRandomIDRow{}, pgx.ErrNoRows
 }
 
 // checkChannelMediaPostRights is checkPostRights with the caller's participant
@@ -1053,6 +1187,61 @@ func (s *Store) ChannelMessages(ctx context.Context, channelID int64, localIDs [
 	return out, nil
 }
 
+// ChannelMessagesForMember returns only live posts above this member's history
+// floor, keyed by local_id. Membership, ban state and the floor are read in the
+// same query as the posts.
+func (s *Store) ChannelMessagesForMember(ctx context.Context, channelID, userID int64, localIDs []int64) (map[int64]ChannelMessage, error) {
+	if len(localIDs) == 0 {
+		return map[int64]ChannelMessage{}, nil
+	}
+	rows, err := s.q.ChannelMessagesForMember(ctx, db.ChannelMessagesForMemberParams{
+		ChannelID: channelID,
+		UserID:    userID,
+		LocalIds:  localIDs,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("channel messages for member: %w", err)
+	}
+	out := make(map[int64]ChannelMessage, len(rows))
+	for _, row := range rows {
+		out[row.LocalID] = channelMessageFromFields(channelMsgFields(row))
+	}
+	return out, nil
+}
+
+// ChannelMessagesForMemberIncludingTombstones returns visible posts and
+// payload-free tombstones above the member's history floor. Each query checks
+// membership, ban state and floor with the content or tombstone identity it reads.
+func (s *Store) ChannelMessagesForMemberIncludingTombstones(ctx context.Context, channelID, userID int64, localIDs []int64) (map[int64]ChannelMessage, error) {
+	if len(localIDs) == 0 {
+		return map[int64]ChannelMessage{}, nil
+	}
+	rows, err := s.q.ChannelMessagesForMember(ctx, db.ChannelMessagesForMemberParams{
+		ChannelID: channelID,
+		UserID:    userID,
+		LocalIds:  localIDs,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("channel messages for member: %w", err)
+	}
+	out := make(map[int64]ChannelMessage, len(rows))
+	for _, row := range rows {
+		out[row.LocalID] = channelMessageFromFields(channelMsgFields(row))
+	}
+	tombstones, err := s.q.ChannelMessageTombstonesForMember(ctx, db.ChannelMessageTombstonesForMemberParams{
+		ChannelID: channelID,
+		UserID:    userID,
+		LocalIds:  localIDs,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("channel message tombstones for member: %w", err)
+	}
+	for _, row := range tombstones {
+		out[row.LocalID] = ChannelMessage{ChannelID: row.ChannelID, LocalID: row.LocalID, Deleted: true}
+	}
+	return out, nil
+}
+
 // ChannelHistory returns the channel's posts newest-first, excluding deleted.
 // offsetID > 0 pages strictly older than that local_id (0 = from the newest),
 // the same convention History uses for user peers.
@@ -1073,11 +1262,11 @@ func (s *Store) ChannelHistory(ctx context.Context, channelID int64, offsetID in
 }
 
 // ChannelHistoryWithOffset returns one Telegram-style history page and the
-// channel's total number of non-deleted history entries. Offset position is
-// computed against the unfiltered history; maxID and minID filter the slice.
+// number of active entries above the caller's history floor. Offset position is
+// computed within that visible history; maxID and minID filter the slice.
 func (s *Store) ChannelHistoryWithOffset(
 	ctx context.Context,
-	channelID, offsetID, addOffset, maxID, minID int64,
+	channelID, ownerID, offsetID, addOffset, maxID, minID int64,
 	limit int,
 ) ([]ChannelMessage, int, error) {
 	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{
@@ -1090,7 +1279,10 @@ func (s *Store) ChannelHistoryWithOffset(
 	defer func() { _ = tx.Rollback(ctx) }() //nolint:errcheck // no-op after commit
 	qtx := s.q.WithTx(tx)
 
-	count, err := qtx.CountChannelHistory(ctx, channelID)
+	count, err := qtx.CountChannelHistory(ctx, db.CountChannelHistoryParams{
+		ChannelID: channelID,
+		OwnerID:   ownerID,
+	})
 	if err != nil {
 		return nil, 0, fmt.Errorf("count channel history: %w", err)
 	}
@@ -1098,6 +1290,7 @@ func (s *Store) ChannelHistoryWithOffset(
 	if offsetID > 0 && addOffset < 0 {
 		rows, e := qtx.ChannelHistoryPageAround(ctx, db.ChannelHistoryPageAroundParams{
 			ChannelID: channelID,
+			OwnerID:   ownerID,
 			OffsetID:  offsetID,
 			AddOffset: addOffset,
 			MaxID:     maxID,
@@ -1114,6 +1307,7 @@ func (s *Store) ChannelHistoryWithOffset(
 	} else {
 		rows, e := qtx.ChannelHistoryPageWithOffset(ctx, db.ChannelHistoryPageWithOffsetParams{
 			ChannelID: channelID,
+			OwnerID:   ownerID,
 			OffsetID:  offsetID,
 			AddOffset: addOffset,
 			MaxID:     maxID,
@@ -1134,16 +1328,72 @@ func (s *Store) ChannelHistoryWithOffset(
 	return msgs, int(count), nil
 }
 
-// SearchChannelPosts returns the channel's posts matching query, newest-first
-// and excluding deleted, paged by offsetID exactly as ChannelHistory pages.
-//
-// It takes no caller id on purpose. A channel post is one shared row rather
-// than a per-owner copy, so there is nothing here to scope to the reader:
-// whether this caller may read the channel at all is decided by the membership
-// check the handler runs before calling, and nothing below narrows it further.
-func (s *Store) SearchChannelPosts(ctx context.Context, channelID int64, query string, offsetID int64, limit int) ([]ChannelMessage, error) {
+// ChannelRepliesWithOffset returns direct replies to one active supergroup
+// message, with the membership, ban, root, count and page predicates evaluated
+// in the same statement. Pagination matches ChannelHistoryWithOffset.
+func (s *Store) ChannelRepliesWithOffset(
+	ctx context.Context,
+	channelID, ownerID, rootID, offsetID, addOffset, maxID, minID int64,
+	limit int,
+) (ChannelRepliesSnapshot, error) {
+	rows, err := s.q.ChannelRepliesPage(ctx, db.ChannelRepliesPageParams{
+		ChannelID: channelID,
+		OwnerID:   ownerID,
+		RootID:    rootID,
+		OffsetID:  offsetID,
+		AddOffset: addOffset,
+		MaxID:     maxID,
+		MinID:     minID,
+		Lim:       int32(limit), //nolint:gosec // API clamps the page to maxHistoryLimit
+	})
+	if err != nil {
+		return ChannelRepliesSnapshot{}, fmt.Errorf("channel replies page: %w", err)
+	}
+	if len(rows) == 0 {
+		return ChannelRepliesSnapshot{}, errors.New("channel replies query returned no status row")
+	}
+	first := rows[0]
+	snapshot := ChannelRepliesSnapshot{
+		ChannelExists: first.ChannelExists,
+		Megagroup:     first.Megagroup,
+		IsMember:      first.IsMember,
+		RootExists:    first.RootExists,
+		Count:         int(first.ReplyCount),
+		Messages:      make([]ChannelMessage, 0, len(rows)),
+	}
+	for _, row := range rows {
+		if row.LocalID == nil {
+			continue
+		}
+		if row.ChannelID == nil || row.FromID == nil || !row.Date.Valid || row.Message == nil ||
+			row.Deleted == nil || row.RandomID == nil || row.ActionType == nil || row.TtlPeriod == nil {
+			return ChannelRepliesSnapshot{}, errors.New("channel replies query returned an incomplete message row")
+		}
+		snapshot.Messages = append(snapshot.Messages, channelMessageFromFields(channelMsgFields{
+			ChannelID:    *row.ChannelID,
+			LocalID:      *row.LocalID,
+			FromID:       *row.FromID,
+			Date:         row.Date,
+			Message:      *row.Message,
+			EditDate:     row.EditDate,
+			Deleted:      *row.Deleted,
+			RandomID:     *row.RandomID,
+			GroupedID:    row.GroupedID,
+			FileID:       row.FileID,
+			ReplyToMsgID: row.ReplyToMsgID,
+			ActionType:   *row.ActionType,
+			TtlPeriod:    *row.TtlPeriod,
+		}))
+	}
+	return snapshot, nil
+}
+
+// SearchChannelPosts returns the caller's visible channel posts matching query,
+// newest-first and excluding deleted, paged by offsetID exactly as ChannelHistory.
+func (s *Store) SearchChannelPosts(ctx context.Context, ownerID, channelID int64, query string, offsetID int64, limit int) ([]ChannelMessage, error) {
 	rows, err := s.q.SearchChannelPostsPage(ctx, db.SearchChannelPostsPageParams{
 		ChannelID: channelID,
+		OwnerID:   ownerID,
 		Query:     query,
 		OffsetID:  offsetID,
 		Lim:       int32(limit), //nolint:gosec // limit is a small validated page size
@@ -1160,7 +1410,8 @@ func (s *Store) SearchChannelPosts(ctx context.Context, channelID int64, query s
 
 // SearchFilteredChannelPosts returns one authorized channel member's matching
 // media page and the exact count from the same database snapshot. Membership is
-// checked here and included in both queries; limit zero requests only the count.
+// checked here, and membership, ban state and floor are repeated in both
+// queries; limit zero requests only the count.
 func (s *Store) SearchFilteredChannelPosts(
 	ctx context.Context,
 	ownerID, channelID int64,
@@ -1254,9 +1505,8 @@ func SetFilteredChannelSearchSnapshotHook(s *Store, fn func()) {
 }
 
 // SearchPinnedChannelPost returns the active pinned post for channelID while
-// ownerID still has an unbanned participant row. The channel membership join
-// and post lookup happen in one statement so a departed or newly banned viewer
-// cannot receive channel content through the pin filter.
+// ownerID still has an unbanned participant row and the pin is above its floor.
+// Membership, ban state, floor and post lookup happen in one statement.
 func (s *Store) SearchPinnedChannelPost(ctx context.Context, ownerID, channelID int64, query string, offsetID int64, limit int) ([]ChannelMessage, error) {
 	rows, err := s.q.SearchPinnedChannelPostForMember(ctx, db.SearchPinnedChannelPostForMemberParams{
 		OwnerID:   ownerID,

@@ -83,6 +83,46 @@ class DockerImageMirrorTests(unittest.TestCase):
         self.assertIsNotNone(match, "CI has no Testcontainers registry prefix")
         self.assertEqual("mirror.gcr.io", match.group(1))
 
+    def test_compose_e2e_reuses_the_loaded_testcontainers_postgres_image(self) -> None:
+        workflow = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
+        compose_job = re.search(
+            r"(?ms)^  compose:\n(.*?)(?=^  [a-z0-9-]+:|\Z)", workflow
+        )
+        self.assertIsNotNone(compose_job, "Compose job is missing")
+        job = compose_job.group(1)
+        alias = (
+            "docker image tag mirror.gcr.io/library/postgres:18-alpine "
+            "mirror.gcr.io/postgres:18-alpine"
+        )
+        e2e = (
+            "go test -race -count=1 -timeout 15m "
+            "./test/e2e -run '^TestMediaRoundTrip$'"
+        )
+        self.assertLess(job.index(alias), job.index(e2e))
+
+    def test_compose_rustfs_lane_uses_digest_pinned_ghcr_image(self) -> None:
+        workflow = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
+        compose_job = re.search(
+            r"(?ms)^  compose:\n(.*?)(?=^  [a-z0-9-]+:|\Z)", workflow
+        )
+        self.assertIsNotNone(compose_job, "Compose job is missing")
+        job = compose_job.group(1)
+        image = (
+            "ghcr.io/rustfs/rustfs@sha256:"
+            "1803faef57627e2d9c2e7d89d655d712ddded5389040054987163043fecb6a3c"
+        )
+        self.assertIn('docker pull "$rustfs_image"', job)
+        self.assertIn(f"image: {image}", job)
+        self.assertIn(
+            "export COMPOSE_FILE=docker-compose.yml:docker-compose.local-blobs.yml:"
+            "$RUNNER_TEMP/rustfs-ci-image.yml",
+            job,
+        )
+        self.assertLess(
+            job.index('docker pull "$rustfs_image"'),
+            job.index("compose up -d postgres migrate teagramd rustfs rustfs-init"),
+        )
+
     def test_dockerfile_hub_bases_use_the_mirror(self) -> None:
         for relative_path in ACTIVE_DOCKERFILES:
             with self.subTest(path=relative_path):

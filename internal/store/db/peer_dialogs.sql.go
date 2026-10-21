@@ -59,7 +59,7 @@ func (q *Queries) ChatParticipantsByChatIDs(ctx context.Context, chatIds []int64
 }
 
 const chatsByIDs = `-- name: ChatsByIDs :many
-SELECT id, title, creator_id, version, date, pinned_message_id, default_banned_rights FROM chats
+SELECT id, title, creator_id, version, date, pinned_message_id, default_banned_rights, ttl_period, current_photo_file_id, current_photo_uploader_id FROM chats
 WHERE id = ANY($1::bigint[])
 `
 
@@ -80,6 +80,9 @@ func (q *Queries) ChatsByIDs(ctx context.Context, chatIds []int64) ([]Chat, erro
 			&i.Date,
 			&i.PinnedMessageID,
 			&i.DefaultBannedRights,
+			&i.TtlPeriod,
+			&i.CurrentPhotoFileID,
+			&i.CurrentPhotoUploaderID,
 		); err != nil {
 			return nil, err
 		}
@@ -92,10 +95,11 @@ func (q *Queries) ChatsByIDs(ctx context.Context, chatIds []int64) ([]Chat, erro
 }
 
 const messagesByOwnerLocals = `-- name: MessagesByOwnerLocals :many
-SELECT owner_id, local_id, peer_id, from_id, date, message, out, edit_date, deleted, random_id, peer_local_id, peer_type, fanout_id, action_type, action_user_id, file_id, reply_to_msg_id, fwd_from_id, fwd_date, fwd_channel_id, fwd_channel_post, message_tsv, reply_to_trusted, grouped_id FROM messages
+SELECT owner_id, local_id, peer_id, from_id, date, message, out, edit_date, deleted, random_id, peer_local_id, peer_type, fanout_id, action_type, action_user_id, file_id, reply_to_msg_id, fwd_from_id, fwd_date, fwd_channel_id, fwd_channel_post, message_tsv, reply_to_trusted, grouped_id, fwd_post_author, ttl_period, expires_at FROM messages
 WHERE owner_id = $1::bigint
   AND local_id = ANY($2::bigint[])
   AND deleted = false
+  AND (expires_at IS NULL OR expires_at > statement_timestamp())
 `
 
 type MessagesByOwnerLocalsParams struct {
@@ -137,6 +141,9 @@ func (q *Queries) MessagesByOwnerLocals(ctx context.Context, arg MessagesByOwner
 			&i.MessageTsv,
 			&i.ReplyToTrusted,
 			&i.GroupedID,
+			&i.FwdPostAuthor,
+			&i.TtlPeriod,
+			&i.ExpiresAt,
 		); err != nil {
 			return nil, err
 		}
@@ -155,15 +162,17 @@ SELECT
     c.about AS channel_about,
     c.creator_id AS channel_creator_id,
     c.megagroup AS channel_megagroup,
+    c.signatures AS channel_signatures,
     c.version AS channel_version,
     c.date AS channel_date,
     c.pinned_message_id AS channel_pinned_message_id,
     c.username AS channel_username,
     c.default_banned_rights AS channel_default_banned_rights,
+    c.ttl_period AS channel_ttl_period,
     p.role AS member_role,
     p.banned_until AS member_banned_until,
     p.join_pts AS member_join_pts,
-    COALESCE(read_state.read_max_id, 0)::bigint AS read_inbox_max_id,
+    GREATEST(COALESCE(read_state.read_max_id, 0), p.available_min_id)::bigint AS read_inbox_max_id,
     unread.unread_count,
     unread.entitled::boolean AS summary_entitled,
     unread.status_exists::boolean AS summary_status_exists,
@@ -181,7 +190,9 @@ SELECT
     top.grouped_id AS top_grouped_id,
     top.file_id AS top_file_id,
     top.reply_to_msg_id AS top_reply_to_msg_id,
-    COALESCE(top.action_type, 0)::smallint AS top_action_type
+    COALESCE(top.action_type, 0)::smallint AS top_action_type,
+    COALESCE(top.ttl_period, 0)::integer AS top_ttl_period,
+    top.post_author AS top_post_author
 FROM channels c
 JOIN channel_participants p ON p.channel_id = c.id
 JOIN channel_state cs ON cs.channel_id = c.id
@@ -198,14 +209,17 @@ CROSS JOIN LATERAL (
     FROM channel_post_unread_suffix_counts(
         c.id,
         p.user_id,
-        COALESCE(read_state.read_max_id, 0)
+        GREATEST(COALESCE(read_state.read_max_id, 0), p.available_min_id)
     ) AS summary(entitled, status_exists, summary_version, summary_ready, total_live, author_live)
 ) AS unread
 LEFT JOIN LATERAL (
     SELECT cm.local_id, cm.from_id, cm.date, cm.message, cm.edit_date,
-           cm.random_id, cm.grouped_id, cm.file_id, cm.reply_to_msg_id, cm.action_type
+           cm.random_id, cm.grouped_id, cm.file_id, cm.reply_to_msg_id, cm.action_type,
+           cm.ttl_period, cm.post_author
     FROM channel_messages cm
     WHERE cm.channel_id = c.id AND cm.deleted = false
+      AND cm.local_id > p.available_min_id
+      AND (cm.expires_at IS NULL OR cm.expires_at > statement_timestamp())
     ORDER BY cm.local_id DESC
     LIMIT 1
 ) top ON true
@@ -225,11 +239,13 @@ type PeerChannelDialogsForOwnerRow struct {
 	ChannelAbout               string
 	ChannelCreatorID           int64
 	ChannelMegagroup           bool
+	ChannelSignatures          bool
 	ChannelVersion             int32
 	ChannelDate                pgtype.Timestamptz
 	ChannelPinnedMessageID     *int32
 	ChannelUsername            *string
 	ChannelDefaultBannedRights []string
+	ChannelTtlPeriod           int32
 	MemberRole                 int16
 	MemberBannedUntil          pgtype.Timestamptz
 	MemberJoinPts              int64
@@ -252,14 +268,15 @@ type PeerChannelDialogsForOwnerRow struct {
 	TopFileID                  *int64
 	TopReplyToMsgID            *int32
 	TopActionType              int16
+	TopTtlPeriod               int32
+	TopPostAuthor              *string
 }
 
 // PeerChannelDialogsForOwner is the channel counterpart of
 // PeerDialogsForOwner. A channel has no dialogs row; its current, unbanned
-// membership selects the dialog, and its newest live message is optional. The
-// membership predicate and top-message lookup are in this one statement so the
-// selected message can never come from a channel the viewer is not entitled to
-// read in the same snapshot.
+// membership selects the dialog, and its newest visible message is optional.
+// The membership, floor and top-message lookup are in this one statement so
+// the selected post cannot come from a channel history the viewer cannot read.
 func (q *Queries) PeerChannelDialogsForOwner(ctx context.Context, arg PeerChannelDialogsForOwnerParams) ([]PeerChannelDialogsForOwnerRow, error) {
 	rows, err := q.db.Query(ctx, peerChannelDialogsForOwner, arg.ChannelIds, arg.OwnerID)
 	if err != nil {
@@ -275,11 +292,13 @@ func (q *Queries) PeerChannelDialogsForOwner(ctx context.Context, arg PeerChanne
 			&i.ChannelAbout,
 			&i.ChannelCreatorID,
 			&i.ChannelMegagroup,
+			&i.ChannelSignatures,
 			&i.ChannelVersion,
 			&i.ChannelDate,
 			&i.ChannelPinnedMessageID,
 			&i.ChannelUsername,
 			&i.ChannelDefaultBannedRights,
+			&i.ChannelTtlPeriod,
 			&i.MemberRole,
 			&i.MemberBannedUntil,
 			&i.MemberJoinPts,
@@ -302,6 +321,8 @@ func (q *Queries) PeerChannelDialogsForOwner(ctx context.Context, arg PeerChanne
 			&i.TopFileID,
 			&i.TopReplyToMsgID,
 			&i.TopActionType,
+			&i.TopTtlPeriod,
+			&i.TopPostAuthor,
 		); err != nil {
 			return nil, err
 		}

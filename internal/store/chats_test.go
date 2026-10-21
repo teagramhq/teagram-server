@@ -577,6 +577,28 @@ func TestChatMutationsRejectNonMemberBeforeTheRowLock(t *testing.T) {
 	}
 }
 
+func TestDeleteChatRejectsOutsiderBeforeTheRowLock(t *testing.T) {
+	t.Parallel()
+	s := open(t)
+	ctx := context.Background()
+	creator := mustUser(t, s, "+15551276011")
+	member := mustUser(t, s, "+15551276012")
+	outsider := mustUser(t, s, "+15551276013")
+	chat := chatWith(t, s, creator, member)
+
+	release, err := store.HoldChatRowLock(ctx, s, chat.ID)
+	if err != nil {
+		t.Fatalf("hold victim chat row lock: %v", err)
+	}
+	defer release()
+
+	callCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	if _, err := s.DeleteChat(callCtx, chat.ID, outsider.ID); !errors.Is(err, store.ErrChatAdminRequired) {
+		t.Fatalf("outsider delete under a held victim chat row lock: want ErrChatAdminRequired without waiting, got %v", err)
+	}
+}
+
 func TestChatMutationAuthorityRefusalDoesNotTakeOwnerLock(t *testing.T) {
 	t.Parallel()
 	s := open(t)

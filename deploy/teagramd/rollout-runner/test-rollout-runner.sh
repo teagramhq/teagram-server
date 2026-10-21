@@ -380,17 +380,41 @@ if [ "${1:-}" = inspect ]; then
     elif [ "$id" = "$MOCK_ROLLBACK_ID" ] && [ -n "${MOCK_ROLLBACK_ENV_EXTRA:-}" ]; then
       env_json=$(jq -c --arg extra "$MOCK_ROLLBACK_ENV_EXTRA" '. + [$extra]' <<< "$env_json")
     fi
+    turnstile_source=''
+    if [ "$cfg" = baseline ] || [ "$cfg" = target ] || [ "$cfg" = rollback ]; then
+      if [ -f "$MOCK_STATE/started-compose-$id.json" ]; then
+        turnstile_compose="$MOCK_STATE/started-compose-$id.json"
+      elif [ "$cfg" = baseline ] || [ "$cfg" = rollback ]; then
+        turnstile_compose="$MOCK_STATE/base-compose.json"
+      else
+        turnstile_compose="$MOCK_STATE/target-compose.json"
+      fi
+      turnstile_env=$(jq -c '
+        .services.teagramd.environment as $env
+        | if ($env | has("TG_TURNSTILE_SITE_KEY")) then [
+            "TG_TURNSTILE_SITE_KEY=" + $env.TG_TURNSTILE_SITE_KEY,
+            "TG_TURNSTILE_SECRET_KEY_FILE=" + $env.TG_TURNSTILE_SECRET_KEY_FILE,
+            "TG_TURNSTILE_SIGNIN_ENABLED=" + $env.TG_TURNSTILE_SIGNIN_ENABLED
+          ] else [] end
+      ' "$turnstile_compose")
+      if [ "$(jq -er 'length' <<< "$turnstile_env")" -gt 0 ]; then
+        env_json=$(jq -c --argjson turnstile "$turnstile_env" '
+          map(select(type != "string" or ((split("=")[0]) as $key | (["TG_TURNSTILE_SITE_KEY", "TG_TURNSTILE_SECRET_KEY_FILE", "TG_TURNSTILE_SIGNIN_ENABLED"] | index($key) == null)))) + $turnstile
+        ' <<< "$env_json")
+      fi
+      turnstile_source=$(jq -r '.secrets.teagramd_turnstile.file // ""' "$turnstile_compose")
+    fi
     jq -nc \
       --arg id "$id" --arg base_id "$MOCK_BASE_ID" --arg image "$image" --argjson env "$env_json" \
       --arg cfg "$cfg" --arg source "$MOCK_CHECKOUT/.state/blob-mode" \
-      --arg scenario "${MOCK_SCENARIO:-}" --arg phase "$phase" \
+      --arg scenario "${MOCK_SCENARIO:-}" --arg phase "$phase" --arg turnstile_source "$turnstile_source" \
       '{
         Id:$id,Image:$image,
         Config:{Env:$env,StopTimeout:(if $scenario == "target-local-carry-forward-image-reuse-stop-timeout-mismatch" and $cfg == "target" and $phase == "target" then 60 else 120 end),Labels:{"com.docker.compose.project":"fixture","com.docker.compose.service":"teagramd"}},
         State:{Status:(if $scenario == "runtime-target-exited" and $cfg == "target" then "exited" else "running" end),ExitCode:(if $scenario == "runtime-target-exited" and $cfg == "target" then 1 else 0 end),StartedAt:"2026-10-06T12:00:00Z",FinishedAt:(if $scenario == "runtime-target-exited" and $cfg == "target" then "2026-10-06T12:00:01Z" else "0001-01-01T00:00:00Z" end)},
         HostConfig:{PortBindings:{"2443/tcp":[{HostIp:"127.0.0.1",HostPort:"2443"}]},NetworkMode:"fixture_teagram_server"},
         NetworkSettings:{Networks:({fixture_teagram_server:{}} + if $scenario == "initial-local-replica-network-drift" and $id != $base_id then {edge:{}} else {} end)},
-        Mounts:(if ($scenario == "moved-stack-9ef1110-to-da0107d" or $scenario == "moved-stack-9ef1110-to-da0107d-render-mismatch") then [{Type:"volume",Name:"identity",Source:"/synthetic/identity",Destination:"/var/lib/teagramd",Mode:"rw",RW:true,Propagation:"rprivate"},{Type:"volume",Name:"teagram_tgblobs",Source:"/synthetic/blobs",Destination:"/var/lib/teagramd-blobs",Mode:"ro",RW:false,Propagation:"rprivate"},{Type:"volume",Name:"teagram_tgblobs",Source:"/synthetic/blobs",Destination:"/var/lib/telegramd-blobs",Mode:"rw",RW:true,Propagation:"rprivate"},{Type:"bind",Name:"",Source:$source,Destination:"/run/teagramd/blob-mode",Mode:"ro",RW:false,Propagation:"rprivate"}] else ([{Type:"volume",Name:"identity",Source:"/synthetic/identity",Destination:"/var/lib/teagramd",Mode:"rw",RW:true,Propagation:"rprivate"},{Type:"volume",Name:(if $scenario == "runtime-volume-mismatch" and $cfg == "target" then "unexpected_tgblobs" else "fixture_tgblobs" end),Source:"/synthetic/blobs",Destination:"/var/lib/teagramd-blobs",Mode:"rw",RW:true,Propagation:"rprivate"}] + if ($cfg == "target" and $scenario != "runtime-mode-unmounted") or $cfg == "rollback" then [{Type:"bind",Name:"",Source:$source,Destination:"/run/teagramd/blob-mode",Mode:"ro",RW:false,Propagation:"rprivate"}] else [] end) end)
+        Mounts:((if ($scenario == "moved-stack-9ef1110-to-da0107d" or $scenario == "moved-stack-9ef1110-to-da0107d-render-mismatch") then [{Type:"volume",Name:"identity",Source:"/synthetic/identity",Destination:"/var/lib/teagramd",Mode:"rw",RW:true,Propagation:"rprivate"},{Type:"volume",Name:"teagram_tgblobs",Source:"/synthetic/blobs",Destination:"/var/lib/teagramd-blobs",Mode:"ro",RW:false,Propagation:"rprivate"},{Type:"volume",Name:"teagram_tgblobs",Source:"/synthetic/blobs",Destination:"/var/lib/telegramd-blobs",Mode:"rw",RW:true,Propagation:"rprivate"},{Type:"bind",Name:"",Source:$source,Destination:"/run/teagramd/blob-mode",Mode:"ro",RW:false,Propagation:"rprivate"}] else ([{Type:"volume",Name:"identity",Source:"/synthetic/identity",Destination:"/var/lib/teagramd",Mode:"rw",RW:true,Propagation:"rprivate"},{Type:"volume",Name:(if $scenario == "runtime-volume-mismatch" and $cfg == "target" then "unexpected_tgblobs" else "fixture_tgblobs" end),Source:"/synthetic/blobs",Destination:"/var/lib/teagramd-blobs",Mode:"rw",RW:true,Propagation:"rprivate"}] + if ($cfg == "target" and $scenario != "runtime-mode-unmounted") or $cfg == "rollback" then [{Type:"bind",Name:"",Source:$source,Destination:"/run/teagramd/blob-mode",Mode:"ro",RW:false,Propagation:"rprivate"}] else [] end) end) + if $turnstile_source == "" then [] else [{Type:"bind",Name:"",Source:$turnstile_source,Destination:"/run/secrets/teagramd-turnstile",Mode:"ro",RW:false,Propagation:"rprivate"}] end)
       }'
   fi
   exit 0
@@ -536,12 +560,16 @@ fi
       exit 95
       ;;
     up)
+      # Record the render each container starts from, so a later run sees
+      # the live container as it was started rather than the new render.
       if [[ " $* " == *' --no-build '* ]]; then
         printf '%s\n' rollback > "$MOCK_STATE/phase"
         printf '%s\n' "$MOCK_ROLLBACK_ID" > "$MOCK_STATE/teagramd"
+        cp -- "$MOCK_STATE/base-compose.json" "$MOCK_STATE/started-compose-$MOCK_ROLLBACK_ID.json" 2>/dev/null || true
       else
         printf '%s\n' target > "$MOCK_STATE/phase"
         printf '%s\n' "$MOCK_REPLACEMENT_ID" > "$MOCK_STATE/teagramd"
+        cp -- "$MOCK_STATE/target-compose.json" "$MOCK_STATE/started-compose-$MOCK_REPLACEMENT_ID.json"
       fi
       exit 0
       ;;
@@ -2618,23 +2646,101 @@ prepare_env_addition_fixture() {
 prepare_env_change_fixture() {
   local name=$1 scenario=${2:-target-local-carry-forward-env-value-change}
   local target_sha=${3:-$APPLY_TARGET_SHA} baseline_sha=${4:-$TARGET_SHA}
-  local target_extra=${5:-TG_REGISTRATION=open} rollback_extra=${6:-}
+  local target_extra=${5-TG_REGISTRATION=open} rollback_extra=${6-}
+  local key=${7:-TG_REGISTRATION} old_value=${8:-closed} new_value=${9:-open}
+  local setup_lines=${10:-}
   local checkout state previous
   prepare_target_local_apply_fixture "$name" "$scenario" "$target_sha" "$baseline_sha" || return 1
   state=$(cat "$TMP/$name-state-path")
   checkout=$(cat "$TMP/$name-checkout-path")
-  printf 'TG_REGISTRATION=closed\n' >> "$checkout/.env"
+  printf '%s=%s\n' "$key" "$old_value" >> "$checkout/.env"
+  [ -z "$setup_lines" ] || printf '%s\n' "$setup_lines" >> "$checkout/.env"
   write_env_record "$checkout" || return 1
   previous="$TMP/$name-previous.env"
   cp -p -- "$checkout/.env" "$previous" || return 1
-  sed -i 's/^TG_REGISTRATION=closed$/TG_REGISTRATION=open/' "$checkout/.env" || return 1
-  printf '%s\n' TG_REGISTRATION > "$TMP/$name-changed-env"
+  sed -i "s/^${key}=${old_value}$/${key}=${new_value}/" "$checkout/.env" || return 1
+  printf '%s\n' "$key" > "$TMP/$name-changed-env"
   printf '%s\n' "$previous" > "$TMP/$name-previous-env-path"
   [ -z "$target_extra" ] || printf '%s\n' "$target_extra" > "$TMP/$name-target-env-extra"
   [ -z "$rollback_extra" ] || printf '%s\n' "$rollback_extra" > "$TMP/$name-rollback-env-extra"
-  jq -c '.services.teagramd.environment.TG_REGISTRATION="open"' \
+  jq -c --arg key "$key" --arg value "$new_value" '.services.teagramd.environment[$key]=$value' \
     "$state/target-compose.json" > "$TMP/$name-target-compose.json" || return 1
   mv -- "$TMP/$name-target-compose.json" "$state/target-compose.json"
+}
+
+# The live container was started from base-compose.json; the new render is
+# target-compose.json.
+record_live_render() {
+  local state=$1
+  cp -- "$state/base-compose.json" "$state/started-compose-$(cat "$state/teagramd").json"
+}
+
+turnstile_defaults_filter='
+  .services.teagramd.environment.TG_TURNSTILE_SITE_KEY="" |
+  .services.teagramd.environment.TG_TURNSTILE_SECRET_KEY_FILE="" |
+  .services.teagramd.environment.TG_TURNSTILE_SIGNIN_ENABLED="false" |
+  .services.teagramd.secrets |= ((. // []) | map(select(.source != "teagramd_turnstile")) + [{source:"teagramd_turnstile",target:"teagramd-turnstile"}]) |
+  .secrets.teagramd_turnstile={file:"/dev/null"}
+'
+
+# Gives the live container the disabled Turnstile defaults that this Compose
+# renders when no Turnstile host settings are configured.
+seed_live_turnstile_defaults() {
+  local name=$1 state
+  state=$(cat "$TMP/$name-state-path")
+  jq -c "$turnstile_defaults_filter" "$state/base-compose.json" > "$TMP/$name-base-compose.json" || return 1
+  mv -- "$TMP/$name-base-compose.json" "$state/base-compose.json" || return 1
+  record_live_render "$state"
+}
+
+prepare_signin_env_change_fixture() {
+  local name=$1 old_value=$2 new_value=$3
+  local checkout state secret_dir secret_source setup_lines config value
+  setup_lines=$'TEAGRAM_TURNSTILE_SITE_KEY=fixture-site-key\nTEAGRAM_TURNSTILE_SECRET_KEY_FILE=.secrets/teagramd-turnstile'
+  prepare_env_change_fixture "$name" target-local-carry-forward-env-value-change-signin \
+    "$APPLY_TARGET_SHA" "$TARGET_SHA" '' '' TG_TURNSTILE_SIGNIN_ENABLED \
+    "$old_value" "$new_value" "$setup_lines" || return 1
+  checkout=$(cat "$TMP/$name-checkout-path")
+  state=$(cat "$TMP/$name-state-path")
+  secret_dir="$checkout/.secrets"
+  secret_source="$secret_dir/teagramd-turnstile"
+  mkdir -m 700 "$secret_dir"
+  : > "$secret_source"
+  chmod 444 "$secret_source"
+  for config in base target; do
+    if [ "$config" = base ]; then value=$old_value; else value=$new_value; fi
+    jq -c --arg source "$secret_source" --arg signin "$value" '
+      .services.teagramd.environment.TG_TURNSTILE_SITE_KEY="fixture-site-key" |
+      .services.teagramd.environment.TG_TURNSTILE_SECRET_KEY_FILE="/run/secrets/teagramd-turnstile" |
+      .services.teagramd.environment.TG_TURNSTILE_SIGNIN_ENABLED=$signin |
+      .services.teagramd.secrets |= ((. // []) | map(select(.source != "teagramd_turnstile")) + [{source:"teagramd_turnstile",target:"teagramd-turnstile"}]) |
+      .secrets.teagramd_turnstile={file:$source}
+    ' "$state/$config-compose.json" > "$TMP/$name-$config-compose.json" || return 1
+    mv -- "$TMP/$name-$config-compose.json" "$state/$config-compose.json" || return 1
+  done
+  record_live_render "$state"
+}
+
+assert_signin_env_change() {
+  local name=$1 old_value=$2 new_value=$3
+  local root checkout previous_env_sha current_env_sha status
+  prepare_signin_env_change_fixture "$name" "$old_value" "$new_value" || return 1
+  root=$(cat "$TMP/$name-root-path")
+  checkout=$(cat "$TMP/$name-checkout-path")
+  previous_env_sha=$(sha256sum "$TMP/$name-previous.env" | awk '{print $1}')
+  current_env_sha=$(sha256sum "$checkout/.env" | awk '{print $1}')
+  status=$(run_fixture "$name" built 0 '' 2 '' '' apply "$APPLY_TARGET_SHA")
+  if [ "$status" = 0 ] && grep -q "rollout=verified sha=$APPLY_TARGET_SHA" "$TMP/$name.stdout" && \
+     [ "$previous_env_sha" != "$current_env_sha" ] && \
+     grep -qx "recorded_env_sha256=$previous_env_sha recorded_from=record env_sha256=$current_env_sha added=none changed=TG_TURNSTILE_SIGNIN_ENABLED" "$root.baseline/env-baseline.txt" && \
+     grep -qx "env_sha256=$current_env_sha source_sha=$APPLY_TARGET_SHA" "$checkout/.state/rollout-env" && \
+     [ "$(jq -r '.container_env_changed' "$root.target/target.snapshot.json")" = TG_TURNSTILE_SIGNIN_ENABLED ] && \
+     grep -q $'\tcontainer_env_sha256\t.*\tpass' "$root.target/target-comparisons.tsv"; then
+    pass "TG_TURNSTILE_SIGNIN_ENABLED changes from $old_value to $new_value and records the new .env digest"
+  else
+    show_fixture_failure "$name" "$status"
+    fail "TG_TURNSTILE_SIGNIN_ENABLED change from $old_value to $new_value must deploy through apply"
+  fi
 }
 
 prepare_env_change_fixture env-value-change-success
@@ -2682,7 +2788,19 @@ sed -i 's/^TG_REGISTRATION=open$/TG_REGISTRATION=unknown/' "$checkout/.env"
 assert_target_local_rejected_before_backup env-value-change-invalid-value \
   'TG_REGISTRATION may change only between closed and open'
 
-prepare_env_addition_fixture env-addition-success TG_NEW_FLAG '' 'TG_NEW_FLAG=on' TG_NEW_FLAG=on
+assert_signin_env_change signin-value-change-disable true false
+assert_signin_env_change signin-value-change-enable false true
+
+prepare_signin_env_change_fixture signin-value-change-invalid-value true maybe
+assert_target_local_rejected_before_backup signin-value-change-invalid-value \
+  'snapshot verifier: resolved Compose Turnstile mapping is incomplete or unsafe'
+
+prepare_env_addition_fixture env-addition-success TG_TURNSTILE_SIGNIN_ENABLED '' \
+  'TG_TURNSTILE_SIGNIN_ENABLED=false' ''
+seed_live_turnstile_defaults env-addition-success
+state=$(cat "$TMP/env-addition-success-state-path")
+jq -c "$turnstile_defaults_filter" "$state/target-compose.json" > "$TMP/env-addition-success-target-compose.json"
+mv -- "$TMP/env-addition-success-target-compose.json" "$state/target-compose.json"
 root=$(cat "$TMP/env-addition-success-root-path")
 checkout=$(cat "$TMP/env-addition-success-checkout-path")
 status=$(run_fixture env-addition-success built 0 '' 2 '' '' apply "$APPLY_TARGET_SHA")
@@ -2690,15 +2808,49 @@ previous_env_sha=$(sha256sum "$TMP/env-addition-success-previous.env" | awk '{pr
 current_env_sha=$(sha256sum "$checkout/.env" | awk '{print $1}')
 if [ "$status" = 0 ] && grep -q "rollout=verified sha=$APPLY_TARGET_SHA" "$TMP/env-addition-success.stdout" && \
    [ "$previous_env_sha" != "$current_env_sha" ] && \
-   grep -qx "recorded_env_sha256=$previous_env_sha recorded_from=record env_sha256=$current_env_sha added=TG_NEW_FLAG" "$root.baseline/env-baseline.txt" && \
+   grep -qx "recorded_env_sha256=$previous_env_sha recorded_from=record env_sha256=$current_env_sha added=TG_TURNSTILE_SIGNIN_ENABLED" "$root.baseline/env-baseline.txt" && \
    grep -qx "env_sha256=$current_env_sha source_sha=$APPLY_TARGET_SHA" "$checkout/.state/rollout-env" && \
    [ "$(jq -r '.container_env_added' "$root.baseline/baseline.snapshot.json")" = none ] && \
-   [ "$(jq -r '.container_env_added' "$root.target/target.snapshot.json")" = TG_NEW_FLAG ] && \
+   [ "$(jq -r '.container_env_added' "$root.target/target.snapshot.json")" = TG_TURNSTILE_SIGNIN_ENABLED ] && \
    grep -q $'\tcontainer_env_sha256\t.*\tpass' "$root.target/target-comparisons.tsv"; then
   pass 'named .env addition deploys and records the previous and new .env digests'
 else
   show_fixture_failure env-addition-success "$status"
   fail 'named .env addition must deploy through apply'
+fi
+
+prepare_env_addition_fixture turnstile-env-addition-success \
+  TEAGRAM_TURNSTILE_SITE_KEY,TEAGRAM_TURNSTILE_SECRET_KEY_FILE '' \
+  $'TEAGRAM_TURNSTILE_SITE_KEY=fixture-site-key\nTEAGRAM_TURNSTILE_SECRET_KEY_FILE=/placeholder' ''
+seed_live_turnstile_defaults turnstile-env-addition-success
+root=$(cat "$TMP/turnstile-env-addition-success-root-path")
+checkout=$(cat "$TMP/turnstile-env-addition-success-checkout-path")
+state=$(cat "$TMP/turnstile-env-addition-success-state-path")
+secret_dir="$checkout/.secrets"
+secret_source="$secret_dir/teagramd-turnstile"
+mkdir -m 700 "$secret_dir"
+: > "$secret_source"
+chmod 444 "$secret_source"
+sed -i "s|^TEAGRAM_TURNSTILE_SECRET_KEY_FILE=.*|TEAGRAM_TURNSTILE_SECRET_KEY_FILE=$secret_source|" "$checkout/.env"
+jq -c --arg source "$secret_source" '
+  .services.teagramd.environment |= del(.TEAGRAM_TURNSTILE_SITE_KEY, .TEAGRAM_TURNSTILE_SECRET_KEY_FILE) |
+  .services.teagramd.environment.TG_TURNSTILE_SITE_KEY="fixture-site-key" |
+  .services.teagramd.environment.TG_TURNSTILE_SECRET_KEY_FILE="/run/secrets/teagramd-turnstile" |
+  .services.teagramd.environment.TG_TURNSTILE_SIGNIN_ENABLED="false" |
+  .services.teagramd.secrets |= ((. // []) | map(select(.source != "teagramd_turnstile")) + [{source:"teagramd_turnstile",target:"teagramd-turnstile"}]) |
+  .secrets.teagramd_turnstile={file:$source}
+' "$state/target-compose.json" > "$TMP/turnstile-env-addition-success-target-compose.json"
+mv -- "$TMP/turnstile-env-addition-success-target-compose.json" "$state/target-compose.json"
+status=$(run_fixture turnstile-env-addition-success built 0 '' 2 '' '' apply "$APPLY_TARGET_SHA")
+current_env_sha=$(sha256sum "$checkout/.env" | awk '{print $1}')
+if [ "$status" = 0 ] && grep -q "rollout=verified sha=$APPLY_TARGET_SHA" "$TMP/turnstile-env-addition-success.stdout" && \
+   grep -qx "env_sha256=$current_env_sha source_sha=$APPLY_TARGET_SHA" "$checkout/.state/rollout-env" && \
+   [ "$(jq -r '.container_env_added' "$root.target/target.snapshot.json")" = TEAGRAM_TURNSTILE_SECRET_KEY_FILE,TEAGRAM_TURNSTILE_SITE_KEY ] && \
+   grep -q $'\tcontainer_env_sha256\t.*\tpass' "$root.target/target-comparisons.tsv"; then
+  pass 'named TEAGRAM Turnstile host additions deploy through their mapped container settings'
+else
+  show_fixture_failure turnstile-env-addition-success "$status"
+  fail 'mapped Turnstile .env additions must deploy through apply'
 fi
 
 prepare_env_addition_fixture env-addition-rollback TG_NEW_FLAG '' 'TG_NEW_FLAG=on' TG_NEW_FLAG=on \
@@ -3425,6 +3577,7 @@ status=$(run_fixture public-websocket-enabled)
 root=$(cat "$TMP/public-websocket-enabled-root-path")
 if [ "$status" != 0 ] && grep -q 'reason=resolved-config-capture-failed' "$root".target/preflight-failure.txt && \
    ! grep -q '^docker compose up -d' "$TMP/public-websocket-enabled-events" && \
+   grep -q 'snapshot verifier: resolved Compose has unsafe public environment settings' "$TMP/public-websocket-enabled.stderr" && \
    grep -q 'resolved Compose preflight capture failed; target was not started' "$TMP/public-websocket-enabled.stderr"; then
   pass 'enabled public WebSocket Compose settings remain rejected before startup'
 else

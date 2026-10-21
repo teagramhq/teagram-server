@@ -114,8 +114,46 @@ func (h *handlers) handleGetProfilePhotoFile(ctx context.Context, viewerID int64
 // so its access is limited to the selected photo id for a peer the viewer can
 // already name with their own derived peer hash.
 func (h *handlers) handleGetPeerProfilePhotoFile(
-	r *mtproto.Request, peer tg.InputPeerClass, photoID, offset int64, limit int,
+	r *mtproto.Request, peer tg.InputPeerClass, photoID int64, big bool, offset int64, limit int,
 ) (bin.Encoder, error) {
+	if chatPeer, ok := peer.(*tg.InputPeerChat); ok {
+		if chatPeer.ChatID <= 0 {
+			return nil, errLocationInvalid
+		}
+		gate := func(ctx context.Context, fileID, viewerID int64) (authorizedDownload, error) {
+			file, err := h.store.CurrentChatPeerPhotoForDownload(ctx, chatPeer.ChatID, fileID, viewerID)
+			switch {
+			case errors.Is(err, store.ErrFileNotFound):
+				return authorizedDownload{}, errLocationInvalid
+			case err != nil:
+				h.log.Error("current chat photo for download", "chat_id", chatPeer.ChatID, "user_id", viewerID, "err", err)
+				return authorizedDownload{}, errInternal
+			}
+			if !big {
+				derivatives, derivativeErr := h.store.PhotoDerivativeForDownload(ctx, fileID, file.AccessHash, viewerID)
+				switch {
+				case errors.Is(derivativeErr, store.ErrFileNotFound):
+					// The photo remains usable at its original size when no m derivative
+					// was produced for it.
+				case derivativeErr != nil:
+					h.log.Error("current chat photo derivative for download", "chat_id", chatPeer.ChatID, "user_id", viewerID, "err", derivativeErr)
+					return authorizedDownload{}, errInternal
+				default:
+					file.PhotoDerivatives = derivatives
+					return authorizedDownload{
+						file: file,
+						photoDerivativeChunk: func(ctx context.Context, offset, limit int64) ([]byte, error) {
+							return h.store.PhotoDerivativeChunkForDownload(ctx, fileID, file.AccessHash, viewerID, offset, limit)
+						},
+					}, nil
+				}
+			}
+			return authorizedDownload{file: file}, nil
+		}
+		missingBlobIsFault := true
+		return h.serveFileChunk(r, photoID, offset, limit, gate, &missingBlobIsFault)
+	}
+
 	ownerID, err := h.peerUserID(peer, r.UserID)
 	if err != nil {
 		return nil, errLocationInvalid

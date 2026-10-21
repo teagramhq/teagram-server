@@ -6,6 +6,7 @@ SMOKE_SCENARIOS=(
   last-seen-privacy
   contacts-get-statuses
   one-to-one
+  history-ttl
   peer-disconnect
   photo-media
   profile-photo-upload
@@ -24,8 +25,11 @@ SMOKE_SCENARIOS=(
   notify-settings-reads
   unread-acknowledgements
   basic-group
+  basic-group-photo
+  delete-basic-group
   delete-history
   channel
+  channel-delete
   channel-membership-revocation
   mtproto-service-messages
   channel-polls
@@ -39,6 +43,7 @@ SMOKE_SCENARIOS=(
   langpack
   username-registration
   turnstile-signup
+  turnstile-signin
   username-password-reset
   pollprobe
   pollprobe-channels

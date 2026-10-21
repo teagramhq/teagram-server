@@ -262,6 +262,7 @@ WHERE c.owner_id = $1
   AND m.peer_type = $3
   AND m.peer_id = $4
   AND m.deleted = false
+  AND (m.expires_at IS NULL OR m.expires_at > statement_timestamp())
 `
 
 type PollByMessageParams struct {
@@ -389,6 +390,7 @@ SELECT m.peer_type, m.peer_id, m.local_id
 FROM poll_message_copies c
 JOIN messages m ON m.owner_id = c.owner_id AND m.local_id = c.local_id
 WHERE c.owner_id = $1 AND c.poll_id = $2 AND m.deleted = false
+  AND (m.expires_at IS NULL OR m.expires_at > statement_timestamp())
 `
 
 type PollMessageForOwnerParams struct {

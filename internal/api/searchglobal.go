@@ -160,7 +160,7 @@ func (h *handlers) searchCreateUsers(r *mtproto.Request, hits []store.GlobalSear
 		if _, done := out[hit.PeerID]; done {
 			continue
 		}
-		ids, _, err := h.createUsersForDialog(r.Ctx, hit.PeerID, r.UserID)
+		ids, err := h.createUsersForDialog(r.Ctx, hit.PeerID, r.UserID)
 		if err != nil {
 			return nil, err
 		}
@@ -182,12 +182,18 @@ func (h *handlers) searchCreateUsers(r *mtproto.Request, hits []store.GlobalSear
 func (h *handlers) globalSearchSlice(r *mtproto.Request, hits []store.GlobalSearchHit) (bin.Encoder, error) {
 	var owned []store.Message
 	var posts []store.ChannelMessage
+	channelIDs := map[int64]bool{}
+	chatIDs := map[int64]bool{}
 	for _, hit := range hits {
 		switch {
 		case hit.Owned != nil:
 			owned = append(owned, *hit.Owned)
+			if hit.PeerType == store.PeerTypeChat {
+				chatIDs[hit.PeerID] = true
+			}
 		case hit.Post != nil:
 			posts = append(posts, *hit.Post)
+			channelIDs[hit.PeerID] = true
 		}
 	}
 	ownedFiles, err := h.loadFiles(r.Ctx, owned)
@@ -222,24 +228,39 @@ func (h *handlers) globalSearchSlice(r *mtproto.Request, hits []store.GlobalSear
 		h.log.Error("search global polls", "user_id", r.UserID, "err", err)
 		return nil, errInternal
 	}
+	chats, err := h.loadChats(r.Ctx, chatIDs, r.UserID)
+	if err != nil {
+		h.log.Error("search global chats", "err", err)
+		return nil, errInternal
+	}
+	channels, broadcasts, err := h.loadChannelsWithKinds(r.Ctx, channelIDs, r.UserID)
+	if err != nil {
+		h.log.Error("search global channels", "user_id", r.UserID, "err", err)
+		return nil, errInternal
+	}
+	for _, post := range posts {
+		if _, ok := broadcasts[post.ChannelID]; !ok {
+			h.log.Error("search global channel kind", "user_id", r.UserID, "channel_id", post.ChannelID, "err", errors.New("channel not found"))
+			return nil, errInternal
+		}
+	}
 
 	msgs := make([]tg.MessageClass, 0, len(hits))
 	users := map[int64]bool{r.UserID: true}
-	chatIDs := map[int64]bool{}
-	channelIDs := map[int64]bool{}
 	for _, hit := range hits {
 		switch {
 		case hit.Post != nil:
 			post := *hit.Post
 			post.Poll = channelPolls[channelPollKey{channelID: post.ChannelID, localID: post.LocalID}]
-			message, renderErr := channelMessageToTL(post, r.UserID, postFiles)
+			message, renderErr := channelMessageToTL(post, r.UserID, postFiles, broadcasts[post.ChannelID])
 			if renderErr != nil {
 				h.log.Error("render global channel poll description", "user_id", r.UserID, "channel_id", post.ChannelID, "local_id", post.LocalID, "err", renderErr)
 				return nil, errInternal
 			}
 			msgs = append(msgs, message)
-			users[hit.Post.FromID] = true
-			channelIDs[hit.PeerID] = true
+			if !broadcasts[post.ChannelID] {
+				users[hit.Post.FromID] = true
+			}
 		case hit.Owned != nil:
 			if poll, ok := pollViews[hit.Owned.LocalID]; ok {
 				message, renderErr := messageToTLWithPoll(*hit.Owned, createUsers[hit.PeerID], ownedFiles, nil, nil, poll)
@@ -262,9 +283,7 @@ func (h *handlers) globalSearchSlice(r *mtproto.Request, hits []store.GlobalSear
 					users[id] = true
 				}
 			}
-			if hit.PeerType == store.PeerTypeChat {
-				chatIDs[hit.PeerID] = true
-			} else {
+			if hit.PeerType != store.PeerTypeChat {
 				users[hit.PeerID] = true
 			}
 		}
@@ -275,17 +294,6 @@ func (h *handlers) globalSearchSlice(r *mtproto.Request, hits []store.GlobalSear
 		h.log.Error("search global users", "err", err)
 		return nil, errInternal
 	}
-	chats, err := h.loadChats(r.Ctx, chatIDs, r.UserID, nil)
-	if err != nil {
-		h.log.Error("search global chats", "err", err)
-		return nil, errInternal
-	}
-	channels, err := h.loadChannels(r.Ctx, channelIDs, r.UserID)
-	if err != nil {
-		h.log.Error("search global channels", "err", err)
-		return nil, errInternal
-	}
-
 	res := &tg.MessagesMessagesSlice{
 		Inexact:  true,
 		Count:    len(msgs),

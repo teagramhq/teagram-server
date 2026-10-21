@@ -12,12 +12,13 @@ import (
 )
 
 const activeOrdinaryMessageInDialog = `-- name: ActiveOrdinaryMessageInDialog :one
-SELECT owner_id, local_id, peer_id, from_id, date, message, out, edit_date, deleted, random_id, peer_local_id, peer_type, fanout_id, action_type, action_user_id, file_id, reply_to_msg_id, fwd_from_id, fwd_date, fwd_channel_id, fwd_channel_post, message_tsv, reply_to_trusted, grouped_id FROM messages
+SELECT owner_id, local_id, peer_id, from_id, date, message, out, edit_date, deleted, random_id, peer_local_id, peer_type, fanout_id, action_type, action_user_id, file_id, reply_to_msg_id, fwd_from_id, fwd_date, fwd_channel_id, fwd_channel_post, message_tsv, reply_to_trusted, grouped_id, fwd_post_author, ttl_period, expires_at FROM messages
 WHERE owner_id = $1::bigint
   AND local_id = $2::bigint
   AND peer_type = $3::smallint
   AND peer_id = $4::bigint
   AND deleted = false
+  AND (expires_at IS NULL OR expires_at > statement_timestamp())
   AND action_type = 0
 `
 
@@ -64,8 +65,76 @@ func (q *Queries) ActiveOrdinaryMessageInDialog(ctx context.Context, arg ActiveO
 		&i.MessageTsv,
 		&i.ReplyToTrusted,
 		&i.GroupedID,
+		&i.FwdPostAuthor,
+		&i.TtlPeriod,
+		&i.ExpiresAt,
 	)
 	return i, err
+}
+
+const chatMessageCopiesForDeletion = `-- name: ChatMessageCopiesForDeletion :many
+SELECT owner_id, local_id, peer_id, from_id, date, message, out, edit_date, deleted, random_id, peer_local_id, peer_type, fanout_id, action_type, action_user_id, file_id, reply_to_msg_id, fwd_from_id, fwd_date, fwd_channel_id, fwd_channel_post, message_tsv, reply_to_trusted, grouped_id, fwd_post_author, ttl_period, expires_at FROM messages
+WHERE peer_type = 2
+  AND peer_id = $1::bigint
+  AND owner_id = ANY($2::bigint[])
+  AND deleted = false
+ORDER BY owner_id, local_id
+`
+
+type ChatMessageCopiesForDeletionParams struct {
+	ChatID   int64
+	OwnerIds []int64
+}
+
+// ChatMessageCopiesForDeletion returns active copies owned by participants
+// captured under the chat row lock. Former members are excluded so their
+// frozen copies retain the existing group-revoke behavior.
+func (q *Queries) ChatMessageCopiesForDeletion(ctx context.Context, arg ChatMessageCopiesForDeletionParams) ([]Message, error) {
+	rows, err := q.db.Query(ctx, chatMessageCopiesForDeletion, arg.ChatID, arg.OwnerIds)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []Message
+	for rows.Next() {
+		var i Message
+		if err := rows.Scan(
+			&i.OwnerID,
+			&i.LocalID,
+			&i.PeerID,
+			&i.FromID,
+			&i.Date,
+			&i.Message,
+			&i.Out,
+			&i.EditDate,
+			&i.Deleted,
+			&i.RandomID,
+			&i.PeerLocalID,
+			&i.PeerType,
+			&i.FanoutID,
+			&i.ActionType,
+			&i.ActionUserID,
+			&i.FileID,
+			&i.ReplyToMsgID,
+			&i.FwdFromID,
+			&i.FwdDate,
+			&i.FwdChannelID,
+			&i.FwdChannelPost,
+			&i.MessageTsv,
+			&i.ReplyToTrusted,
+			&i.GroupedID,
+			&i.FwdPostAuthor,
+			&i.TtlPeriod,
+			&i.ExpiresAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
 }
 
 const countFilteredMessages = `-- name: CountFilteredMessages :one
@@ -76,6 +145,7 @@ WHERE m.owner_id = $1::bigint
   AND m.peer_id = $3::bigint
   AND m.peer_type IN (1, 2)
   AND m.deleted = false
+  AND (m.expires_at IS NULL OR m.expires_at > statement_timestamp())
   AND (m.peer_type <> 2 OR EXISTS (
       SELECT 1 FROM chat_participants cp
       WHERE cp.chat_id = m.peer_id AND cp.user_id = m.owner_id
@@ -152,7 +222,7 @@ func (q *Queries) CountFilteredMessages(ctx context.Context, arg CountFilteredMe
 }
 
 const deleteHistoryBatch = `-- name: DeleteHistoryBatch :many
-SELECT owner_id, local_id, peer_id, from_id, date, message, out, edit_date, deleted, random_id, peer_local_id, peer_type, fanout_id, action_type, action_user_id, file_id, reply_to_msg_id, fwd_from_id, fwd_date, fwd_channel_id, fwd_channel_post, message_tsv, reply_to_trusted, grouped_id FROM messages
+SELECT owner_id, local_id, peer_id, from_id, date, message, out, edit_date, deleted, random_id, peer_local_id, peer_type, fanout_id, action_type, action_user_id, file_id, reply_to_msg_id, fwd_from_id, fwd_date, fwd_channel_id, fwd_channel_post, message_tsv, reply_to_trusted, grouped_id, fwd_post_author, ttl_period, expires_at FROM messages
 WHERE owner_id = $1::bigint
   AND peer_type = $2::smallint
   AND peer_id = $3::bigint
@@ -214,6 +284,9 @@ func (q *Queries) DeleteHistoryBatch(ctx context.Context, arg DeleteHistoryBatch
 			&i.MessageTsv,
 			&i.ReplyToTrusted,
 			&i.GroupedID,
+			&i.FwdPostAuthor,
+			&i.TtlPeriod,
+			&i.ExpiresAt,
 		); err != nil {
 			return nil, err
 		}
@@ -257,11 +330,12 @@ func (q *Queries) DeleteHistoryRemaining(ctx context.Context, arg DeleteHistoryR
 }
 
 const historyPage = `-- name: HistoryPage :many
-SELECT owner_id, local_id, peer_id, from_id, date, message, out, edit_date, deleted, random_id, peer_local_id, peer_type, fanout_id, action_type, action_user_id, file_id, reply_to_msg_id, fwd_from_id, fwd_date, fwd_channel_id, fwd_channel_post, message_tsv, reply_to_trusted, grouped_id FROM messages
+SELECT owner_id, local_id, peer_id, from_id, date, message, out, edit_date, deleted, random_id, peer_local_id, peer_type, fanout_id, action_type, action_user_id, file_id, reply_to_msg_id, fwd_from_id, fwd_date, fwd_channel_id, fwd_channel_post, message_tsv, reply_to_trusted, grouped_id, fwd_post_author, ttl_period, expires_at FROM messages
 WHERE owner_id = $1
   AND peer_type = $2
   AND peer_id = $3
   AND deleted = false
+  AND (expires_at IS NULL OR expires_at > statement_timestamp())
   AND ($4::bigint = 0 OR local_id < $4::bigint)
 ORDER BY local_id DESC
 LIMIT $6::int
@@ -318,6 +392,9 @@ func (q *Queries) HistoryPage(ctx context.Context, arg HistoryPageParams) ([]Mes
 			&i.MessageTsv,
 			&i.ReplyToTrusted,
 			&i.GroupedID,
+			&i.FwdPostAuthor,
+			&i.TtlPeriod,
+			&i.ExpiresAt,
 		); err != nil {
 			return nil, err
 		}
@@ -337,13 +414,15 @@ WITH page_offset AS (
       AND offset_message.peer_type = $2
       AND offset_message.peer_id = $3
       AND offset_message.deleted = false
+      AND (offset_message.expires_at IS NULL OR offset_message.expires_at > statement_timestamp())
       AND offset_message.local_id >= $6::bigint
 )
-SELECT page_message.owner_id, page_message.local_id, page_message.peer_id, page_message.from_id, page_message.date, page_message.message, page_message.out, page_message.edit_date, page_message.deleted, page_message.random_id, page_message.peer_local_id, page_message.peer_type, page_message.fanout_id, page_message.action_type, page_message.action_user_id, page_message.file_id, page_message.reply_to_msg_id, page_message.fwd_from_id, page_message.fwd_date, page_message.fwd_channel_id, page_message.fwd_channel_post, page_message.message_tsv, page_message.reply_to_trusted, page_message.grouped_id FROM messages AS page_message
+SELECT page_message.owner_id, page_message.local_id, page_message.peer_id, page_message.from_id, page_message.date, page_message.message, page_message.out, page_message.edit_date, page_message.deleted, page_message.random_id, page_message.peer_local_id, page_message.peer_type, page_message.fanout_id, page_message.action_type, page_message.action_user_id, page_message.file_id, page_message.reply_to_msg_id, page_message.fwd_from_id, page_message.fwd_date, page_message.fwd_channel_id, page_message.fwd_channel_post, page_message.message_tsv, page_message.reply_to_trusted, page_message.grouped_id, page_message.fwd_post_author, page_message.ttl_period, page_message.expires_at FROM messages AS page_message
 WHERE page_message.owner_id = $1
   AND page_message.peer_type = $2
   AND page_message.peer_id = $3
   AND page_message.deleted = false
+  AND (page_message.expires_at IS NULL OR page_message.expires_at > statement_timestamp())
 ORDER BY page_message.local_id DESC
 LIMIT $4::int
 OFFSET (SELECT skip FROM page_offset)
@@ -401,6 +480,9 @@ func (q *Queries) HistoryPageAround(ctx context.Context, arg HistoryPageAroundPa
 			&i.MessageTsv,
 			&i.ReplyToTrusted,
 			&i.GroupedID,
+			&i.FwdPostAuthor,
+			&i.TtlPeriod,
+			&i.ExpiresAt,
 		); err != nil {
 			return nil, err
 		}
@@ -415,8 +497,9 @@ func (q *Queries) HistoryPageAround(ctx context.Context, arg HistoryPageAroundPa
 const insertMessage = `-- name: InsertMessage :exec
 INSERT INTO messages (owner_id, local_id, peer_type, peer_id, from_id, message, out, random_id, peer_local_id,
                       fanout_id, action_type, action_user_id, file_id, reply_to_msg_id,
-                      fwd_from_id, fwd_date, fwd_channel_id, fwd_channel_post, reply_to_trusted)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19)
+                      fwd_from_id, fwd_date, fwd_channel_id, fwd_channel_post,
+                      fwd_post_author, reply_to_trusted, ttl_period)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21)
 `
 
 type InsertMessageParams struct {
@@ -438,7 +521,9 @@ type InsertMessageParams struct {
 	FwdDate        pgtype.Timestamptz
 	FwdChannelID   *int64
 	FwdChannelPost *int32
+	FwdPostAuthor  *string
 	ReplyToTrusted bool
+	TtlPeriod      int32
 }
 
 func (q *Queries) InsertMessage(ctx context.Context, arg InsertMessageParams) error {
@@ -461,13 +546,16 @@ func (q *Queries) InsertMessage(ctx context.Context, arg InsertMessageParams) er
 		arg.FwdDate,
 		arg.FwdChannelID,
 		arg.FwdChannelPost,
+		arg.FwdPostAuthor,
 		arg.ReplyToTrusted,
+		arg.TtlPeriod,
 	)
 	return err
 }
 
 const messageByOwnerLocal = `-- name: MessageByOwnerLocal :one
-SELECT owner_id, local_id, peer_id, from_id, date, message, out, edit_date, deleted, random_id, peer_local_id, peer_type, fanout_id, action_type, action_user_id, file_id, reply_to_msg_id, fwd_from_id, fwd_date, fwd_channel_id, fwd_channel_post, message_tsv, reply_to_trusted, grouped_id FROM messages WHERE owner_id = $1 AND local_id = $2
+SELECT owner_id, local_id, peer_id, from_id, date, message, out, edit_date, deleted, random_id, peer_local_id, peer_type, fanout_id, action_type, action_user_id, file_id, reply_to_msg_id, fwd_from_id, fwd_date, fwd_channel_id, fwd_channel_post, message_tsv, reply_to_trusted, grouped_id, fwd_post_author, ttl_period, expires_at FROM messages WHERE owner_id = $1 AND local_id = $2
+  AND (expires_at IS NULL OR expires_at > statement_timestamp())
 `
 
 type MessageByOwnerLocalParams struct {
@@ -503,12 +591,17 @@ func (q *Queries) MessageByOwnerLocal(ctx context.Context, arg MessageByOwnerLoc
 		&i.MessageTsv,
 		&i.ReplyToTrusted,
 		&i.GroupedID,
+		&i.FwdPostAuthor,
+		&i.TtlPeriod,
+		&i.ExpiresAt,
 	)
 	return i, err
 }
 
 const messageByRandomID = `-- name: MessageByRandomID :one
-SELECT owner_id, local_id, peer_id, from_id, date, message, out, edit_date, deleted, random_id, peer_local_id, peer_type, fanout_id, action_type, action_user_id, file_id, reply_to_msg_id, fwd_from_id, fwd_date, fwd_channel_id, fwd_channel_post, message_tsv, reply_to_trusted, grouped_id FROM messages WHERE owner_id = $1 AND random_id = $2 AND random_id <> 0
+SELECT owner_id, local_id, peer_id, from_id, date, message, out, edit_date, deleted, random_id, peer_local_id, peer_type, fanout_id, action_type, action_user_id, file_id, reply_to_msg_id, fwd_from_id, fwd_date, fwd_channel_id, fwd_channel_post, message_tsv, reply_to_trusted, grouped_id, fwd_post_author, ttl_period, expires_at FROM messages
+WHERE owner_id = $1 AND random_id = $2 AND random_id <> 0
+  AND (expires_at IS NULL OR expires_at > statement_timestamp())
 `
 
 type MessageByRandomIDParams struct {
@@ -544,12 +637,39 @@ func (q *Queries) MessageByRandomID(ctx context.Context, arg MessageByRandomIDPa
 		&i.MessageTsv,
 		&i.ReplyToTrusted,
 		&i.GroupedID,
+		&i.FwdPostAuthor,
+		&i.TtlPeriod,
+		&i.ExpiresAt,
 	)
 	return i, err
 }
 
+const messageRandomIDExpired = `-- name: MessageRandomIDExpired :one
+SELECT EXISTS (
+    SELECT 1 FROM messages
+    WHERE owner_id = $1::bigint
+      AND random_id = $2::bigint
+      AND random_id <> 0
+      AND expires_at <= statement_timestamp()
+)
+`
+
+type MessageRandomIDExpiredParams struct {
+	OwnerID  int64
+	RandomID int64
+}
+
+// MessageRandomIDExpired reports an expired dedup token without loading any
+// message content, so callers can reject the retry without replaying it.
+func (q *Queries) MessageRandomIDExpired(ctx context.Context, arg MessageRandomIDExpiredParams) (bool, error) {
+	row := q.db.QueryRow(ctx, messageRandomIDExpired, arg.OwnerID, arg.RandomID)
+	var exists bool
+	err := row.Scan(&exists)
+	return exists, err
+}
+
 const messagesByFanout = `-- name: MessagesByFanout :many
-SELECT owner_id, local_id, peer_id, from_id, date, message, out, edit_date, deleted, random_id, peer_local_id, peer_type, fanout_id, action_type, action_user_id, file_id, reply_to_msg_id, fwd_from_id, fwd_date, fwd_channel_id, fwd_channel_post, message_tsv, reply_to_trusted, grouped_id FROM messages
+SELECT owner_id, local_id, peer_id, from_id, date, message, out, edit_date, deleted, random_id, peer_local_id, peer_type, fanout_id, action_type, action_user_id, file_id, reply_to_msg_id, fwd_from_id, fwd_date, fwd_channel_id, fwd_channel_post, message_tsv, reply_to_trusted, grouped_id, fwd_post_author, ttl_period, expires_at FROM messages
 WHERE fanout_id = $1 AND fanout_id <> 0
 ORDER BY owner_id
 `
@@ -593,6 +713,9 @@ func (q *Queries) MessagesByFanout(ctx context.Context, fanoutID int64) ([]Messa
 			&i.MessageTsv,
 			&i.ReplyToTrusted,
 			&i.GroupedID,
+			&i.FwdPostAuthor,
+			&i.TtlPeriod,
+			&i.ExpiresAt,
 		); err != nil {
 			return nil, err
 		}
@@ -626,6 +749,7 @@ WITH page AS (
       AND m.peer_id = $3::bigint
       AND m.peer_type IN (1, 2)
       AND m.deleted = false
+      AND (m.expires_at IS NULL OR m.expires_at > statement_timestamp())
       AND (m.peer_type <> 2 OR EXISTS (
           SELECT 1 FROM chat_participants cp
           WHERE cp.chat_id = m.peer_id AND cp.user_id = m.owner_id
@@ -674,12 +798,13 @@ WITH page AS (
     LIMIT $10::int
     OFFSET GREATEST(0::bigint, $9::bigint)
 )
-SELECT m.owner_id, m.local_id, m.peer_id, m.from_id, m.date, m.message, m.out, m.edit_date, m.deleted, m.random_id, m.peer_local_id, m.peer_type, m.fanout_id, m.action_type, m.action_user_id, m.file_id, m.reply_to_msg_id, m.fwd_from_id, m.fwd_date, m.fwd_channel_id, m.fwd_channel_post, m.message_tsv, m.reply_to_trusted, m.grouped_id
+SELECT m.owner_id, m.local_id, m.peer_id, m.from_id, m.date, m.message, m.out, m.edit_date, m.deleted, m.random_id, m.peer_local_id, m.peer_type, m.fanout_id, m.action_type, m.action_user_id, m.file_id, m.reply_to_msg_id, m.fwd_from_id, m.fwd_date, m.fwd_channel_id, m.fwd_channel_post, m.message_tsv, m.reply_to_trusted, m.grouped_id, m.fwd_post_author, m.ttl_period, m.expires_at
 FROM messages m
 JOIN page ON page.local_id = m.local_id
 WHERE m.owner_id = $1::bigint
   AND m.peer_type = $2::smallint
   AND m.peer_id = $3::bigint
+  AND (m.expires_at IS NULL OR m.expires_at > statement_timestamp())
 ORDER BY m.local_id DESC
 `
 
@@ -741,6 +866,9 @@ func (q *Queries) SearchFilteredMessagesPage(ctx context.Context, arg SearchFilt
 			&i.MessageTsv,
 			&i.ReplyToTrusted,
 			&i.GroupedID,
+			&i.FwdPostAuthor,
+			&i.TtlPeriod,
+			&i.ExpiresAt,
 		); err != nil {
 			return nil, err
 		}
@@ -761,6 +889,7 @@ WITH matching AS MATERIALIZED (
       AND m.peer_id = $3::bigint
       AND m.peer_type IN (1, 2)
       AND m.deleted = false
+      AND (m.expires_at IS NULL OR m.expires_at > statement_timestamp())
       AND (m.peer_type <> 2 OR EXISTS (
           SELECT 1 FROM chat_participants cp
           WHERE cp.chat_id = m.peer_id AND cp.user_id = m.owner_id
@@ -816,12 +945,13 @@ WITH matching AS MATERIALIZED (
     LIMIT $10::int
     OFFSET (SELECT skip FROM page_offset)
 )
-SELECT m.owner_id, m.local_id, m.peer_id, m.from_id, m.date, m.message, m.out, m.edit_date, m.deleted, m.random_id, m.peer_local_id, m.peer_type, m.fanout_id, m.action_type, m.action_user_id, m.file_id, m.reply_to_msg_id, m.fwd_from_id, m.fwd_date, m.fwd_channel_id, m.fwd_channel_post, m.message_tsv, m.reply_to_trusted, m.grouped_id
+SELECT m.owner_id, m.local_id, m.peer_id, m.from_id, m.date, m.message, m.out, m.edit_date, m.deleted, m.random_id, m.peer_local_id, m.peer_type, m.fanout_id, m.action_type, m.action_user_id, m.file_id, m.reply_to_msg_id, m.fwd_from_id, m.fwd_date, m.fwd_channel_id, m.fwd_channel_post, m.message_tsv, m.reply_to_trusted, m.grouped_id, m.fwd_post_author, m.ttl_period, m.expires_at
 FROM messages m
 JOIN page ON page.local_id = m.local_id
 WHERE m.owner_id = $1::bigint
   AND m.peer_type = $2::smallint
   AND m.peer_id = $3::bigint
+  AND (m.expires_at IS NULL OR m.expires_at > statement_timestamp())
 ORDER BY m.local_id DESC
 `
 
@@ -885,6 +1015,9 @@ func (q *Queries) SearchFilteredMessagesPageAround(ctx context.Context, arg Sear
 			&i.MessageTsv,
 			&i.ReplyToTrusted,
 			&i.GroupedID,
+			&i.FwdPostAuthor,
+			&i.TtlPeriod,
+			&i.ExpiresAt,
 		); err != nil {
 			return nil, err
 		}
@@ -897,11 +1030,12 @@ func (q *Queries) SearchFilteredMessagesPageAround(ctx context.Context, arg Sear
 }
 
 const searchMessages = `-- name: SearchMessages :many
-SELECT owner_id, local_id, peer_id, from_id, date, message, out, edit_date, deleted, random_id, peer_local_id, peer_type, fanout_id, action_type, action_user_id, file_id, reply_to_msg_id, fwd_from_id, fwd_date, fwd_channel_id, fwd_channel_post, message_tsv, reply_to_trusted, grouped_id FROM messages
+SELECT owner_id, local_id, peer_id, from_id, date, message, out, edit_date, deleted, random_id, peer_local_id, peer_type, fanout_id, action_type, action_user_id, file_id, reply_to_msg_id, fwd_from_id, fwd_date, fwd_channel_id, fwd_channel_post, message_tsv, reply_to_trusted, grouped_id, fwd_post_author, ttl_period, expires_at FROM messages
 WHERE owner_id = $1
   AND peer_type = $2
   AND peer_id = $3
   AND deleted = false
+  AND (expires_at IS NULL OR expires_at > statement_timestamp())
   AND message_tsv @@ plainto_tsquery('simple', $4)
   AND ($5::bigint = 0 OR local_id < $5::bigint)
 ORDER BY local_id DESC
@@ -958,6 +1092,9 @@ func (q *Queries) SearchMessages(ctx context.Context, arg SearchMessagesParams) 
 			&i.MessageTsv,
 			&i.ReplyToTrusted,
 			&i.GroupedID,
+			&i.FwdPostAuthor,
+			&i.TtlPeriod,
+			&i.ExpiresAt,
 		); err != nil {
 			return nil, err
 		}
