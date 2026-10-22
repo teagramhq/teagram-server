@@ -21,7 +21,18 @@ without a matching authority intentionally fails closed.
 
 Preflight treats disabled public WebSocket settings and an empty
 `TG_WELCOME_CHANNEL` as equivalent when they are unset or passed through as
-empty Compose values. Active values fail closed.
+empty Compose values. An active value for `TG_PUBLIC_WEBSOCKET_LISTEN_ADDR`,
+`TG_PUBLIC_WEBSOCKET_ADVERTISE_ADDR`, `TG_PUBLIC_REGISTRATION`, or
+`TG_PUBLIC_WEBSOCKET_ALLOWED_ORIGINS` is accepted only when the operator names
+that setting in `ROLLOUT_RUNNER_ADDED_ENV` and adds one assignment to the
+verified `.env`. The resolved Compose value and replacement container must
+match. `TG_PUBLIC_REGISTRATION` accepts `invite` or `closed`; `open` is always
+rejected. Active Compose defaults without a named `.env` addition still fail
+closed, as does any non-empty `TG_WELCOME_CHANNEL`. After an addition is
+verified, ordinary rollouts retain its exact value without repeating the name.
+Change a retained value only through `ROLLOUT_RUNNER_CHANGED_ENV` with the
+previous `.env` backup. If a rollout that added public settings rolls back, the
+runner restores that previous `.env` before recreating the previous container.
 
 For every local-backed rollout, read the running `teagramd` container's
 `com.docker.compose.project.config_files` label and carry that Compose selection
@@ -579,10 +590,14 @@ and the read-only secret-file mount. The disabled defaults this Compose gives a
 live container (empty site key and secret path, sign-in `false`, secret mounted
 from `/dev/null`) count as unset, so a Turnstile name can be added over them.
 
-The runner allows changing `TG_REGISTRATION` between `closed` and `open`, and
-`TG_TURNSTILE_SIGNIN_ENABLED` between `false` and `true`. Back up the verified
-`.env` to a root-owned mode-0600 file, change only that assignment in place,
-then pass the changed name and backup to the same `apply`:
+The runner allows changing `TG_REGISTRATION` between `closed` and `open`,
+`TG_TURNSTILE_SIGNIN_ENABLED` between `false` and `true`, and public WebSocket
+settings through the same named path. `TG_PUBLIC_REGISTRATION` may change only
+between `closed` and `invite`; the other three public settings accept a new
+string value, including empty to disable them. `open` is never accepted for
+`TG_PUBLIC_REGISTRATION`. Back up the verified `.env` to a root-owned
+mode-0600 file, change only that assignment in place, then pass the changed
+name and backup to the same `apply`:
 
 ```sh
 sudo env ROLLOUT_RUNNER_SOURCE_SHA="$TOOL_SHA" COMPOSE_FILE="$COMPOSE_FILE" \

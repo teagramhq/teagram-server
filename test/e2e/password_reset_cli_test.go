@@ -165,7 +165,7 @@ func testSmokeUsernamePasswordReset(t *testing.T) {
 		if err != nil {
 			return fmt.Errorf("authenticated account.getPassword after reset: %w", err)
 		}
-		if !passwordState.HasPassword || passwordState.Hint != "" || !passwordState.HasRecovery {
+		if !passwordState.HasPassword || passwordState.Hint != "" || passwordState.HasRecovery {
 			return fmt.Errorf("authenticated account.getPassword returned unexpected state: %+v", passwordState)
 		}
 		history, err := api.MessagesGetHistory(ctx, &tg.MessagesGetHistoryRequest{Peer: &tg.InputPeerSelf{}, Limit: 10})

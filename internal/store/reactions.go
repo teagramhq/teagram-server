@@ -233,11 +233,35 @@ func (s *Store) ClearReaction(ctx context.Context, ownerID, localID int64) ([]Re
 // sendChatReaction records the caller's reaction on every current member's
 // copy of the chat message. Returns the (ownerID, localID) pairs affected.
 //
-// Follows the editChatMessage pattern: get copies → lock owners → reload
-// message → check membership → write. The per-owner advisory locks make the
-// chatMembers read authoritative: a concurrent removal is either visible or
-// blocked behind this transaction.
+// Takes the chats row lock before the member-owner advisory locks so a
+// concurrent settings or membership change is serialized with this write.
 func sendChatReaction(ctx context.Context, tx pgx.Tx, qtx *db.Queries, reactorID int64, pre db.Message, reaction string) ([]ReactionTarget, error) {
+	member, err := chatHasMember(ctx, qtx, pre.PeerID, reactorID)
+	if err != nil {
+		return nil, err
+	}
+	if !member {
+		return nil, ErrNotMember
+	}
+	if err = lockChatForReaction(ctx, qtx, pre.PeerID); err != nil {
+		return nil, err
+	}
+
+	members, err := chatMembers(ctx, qtx, pre.PeerID)
+	if err != nil {
+		return nil, err
+	}
+	if !members[reactorID] {
+		return nil, ErrNotMember
+	}
+	available, err := chatAvailableReactions(ctx, qtx, pre.PeerID)
+	if err != nil {
+		return nil, err
+	}
+	if !available.Allows(reaction) {
+		return nil, ErrReactionInvalid
+	}
+
 	copies, err := chatCopies(ctx, qtx, pre)
 	if err != nil {
 		return nil, err
@@ -258,7 +282,7 @@ func sendChatReaction(ctx context.Context, tx pgx.Tx, qtx *db.Queries, reactorID
 		return nil, ErrMessageInvalid
 	}
 
-	members, err := chatMembers(ctx, qtx, pre.PeerID)
+	members, err = chatMembers(ctx, qtx, pre.PeerID)
 	if err != nil {
 		return nil, err
 	}

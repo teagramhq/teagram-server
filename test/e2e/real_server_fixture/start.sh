@@ -178,7 +178,7 @@ if [[ -z $BUILD_ROOT || ! -d $BUILD_ROOT || ! -w $BUILD_ROOT ]]; then BUILD_ROOT
 SECRET_DIR="$(mktemp -d "$SECRET_ROOT/$PREFIX.XXXXXXXX")"
 BUILD_DIR="$(mktemp -d "$BUILD_ROOT/$PREFIX-build.XXXXXXXX")"
 chmod 0700 "$SECRET_DIR" "$BUILD_DIR"
-SERVER_WORKTREE="$BUILD_DIR/server-worktree"
+SERVER_WORKTREE="$BUILD_DIR/server-worktree-$OWNER_TOKEN"
 SERVER_WORKTREE_ADDED=0
 
 cleanup_failed=0

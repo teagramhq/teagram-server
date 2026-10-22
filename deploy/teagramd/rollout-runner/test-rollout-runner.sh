@@ -375,7 +375,9 @@ if [ "${1:-}" = inspect ]; then
     elif { [ "$cfg" = target ] || [ "$cfg" = rollback ]; } && [ "${MOCK_SCENARIO:-success}" = config-drift ]; then
       env_json='["TG_RSA_KEY_PATH=/var/lib/teagramd/server_key.pem","TG_SYNTHETIC_FLAG=fixture","TG_BLOB_DIR=/var/lib/teagramd-blobs","TG_REPLICA_COUNT=1","TG_CLIENT_ADDR_TRUST=socket","TG_UNRELATED=drift"]'
     fi
-    if [ "$id" = "$MOCK_REPLACEMENT_ID" ] && [ -n "${MOCK_TARGET_ENV_EXTRA:-}" ]; then
+    if [ "$id" = "$MOCK_BASE_ID" ] && [ -n "${MOCK_BASE_ENV_EXTRA:-}" ]; then
+      env_json=$(jq -c --arg extra "$MOCK_BASE_ENV_EXTRA" '. + [$extra]' <<< "$env_json")
+    elif [ "$id" = "$MOCK_REPLACEMENT_ID" ] && [ -n "${MOCK_TARGET_ENV_EXTRA:-}" ]; then
       env_json=$(jq -c --arg extra "$MOCK_TARGET_ENV_EXTRA" '. + [$extra]' <<< "$env_json")
     elif [ "$id" = "$MOCK_ROLLBACK_ID" ] && [ -n "${MOCK_ROLLBACK_ENV_EXTRA:-}" ]; then
       env_json=$(jq -c --arg extra "$MOCK_ROLLBACK_ENV_EXTRA" '. + [$extra]' <<< "$env_json")
@@ -440,7 +442,20 @@ fi
         [ ! -f "$MOCK_STATE/compose-config-count" ] || config_count=$(cat "$MOCK_STATE/compose-config-count")
         config_count=$((config_count + 1))
         printf '%s\n' "$config_count" > "$MOCK_STATE/compose-config-count"
-        if [ "${MOCK_SCENARIO:-}" = config-drift ] && [ "$config_count" -ge 3 ]; then
+        if [ -f "$MOCK_STATE/public-websocket-addition" ]; then
+          if [ "$phase" = baseline ] || [ "$phase" = rollback ]; then config_file="$MOCK_STATE/base-compose.json"; else config_file="$MOCK_STATE/target-compose.json"; fi
+          public_compose=$(cat "$config_file")
+          while IFS= read -r env_line; do
+            key=${env_line%%=*}
+            case "$key" in
+              TG_PUBLIC_WEBSOCKET_LISTEN_ADDR|TG_PUBLIC_WEBSOCKET_ADVERTISE_ADDR|TG_PUBLIC_REGISTRATION|TG_PUBLIC_WEBSOCKET_ALLOWED_ORIGINS)
+                public_compose=$(jq -c --arg key "$key" --arg value "${env_line#*=}" \
+                  '.services.teagramd.environment[$key]=$value' <<< "$public_compose")
+                ;;
+            esac
+          done < "$MOCK_CHECKOUT/.env"
+          printf '%s\n' "$public_compose"
+        elif [ "${MOCK_SCENARIO:-}" = config-drift ] && [ "$config_count" -ge 3 ]; then
           cat "$MOCK_STATE/target-compose.drift.json"
         elif [[ "${MOCK_SCENARIO:-}" == public-websocket-* ]] && [ "$config_count" -lt 3 ]; then
           cat "$MOCK_STATE/base-compose.json"
@@ -1082,11 +1097,12 @@ run_fixture() {
   local branch=main
   local state bin checkout root stamp scenario status require_marker=0 runner runtime_dir target_runtime target_sha baseline_sha real_git compose_file
   local -a runner_args=() ambient_revision=()
-  local replacement_id=$TARGET_ID added_env='' changed_env='' previous_env_file='' target_env_extra='' rollback_env_extra='' adopt_env=0
+  local replacement_id=$TARGET_ID added_env='' changed_env='' previous_env_file='' baseline_env_extra='' target_env_extra='' rollback_env_extra='' adopt_env=0
   [ ! -f "$TMP/$name-adopt-env" ] || adopt_env=$(cat "$TMP/$name-adopt-env")
   [ ! -f "$TMP/$name-added-env" ] || added_env=$(cat "$TMP/$name-added-env")
   [ ! -f "$TMP/$name-changed-env" ] || changed_env=$(cat "$TMP/$name-changed-env")
   [ ! -f "$TMP/$name-previous-env-path" ] || previous_env_file=$(cat "$TMP/$name-previous-env-path")
+  [ ! -f "$TMP/$name-baseline-env-extra" ] || baseline_env_extra=$(cat "$TMP/$name-baseline-env-extra")
   [ ! -f "$TMP/$name-target-env-extra" ] || target_env_extra=$(cat "$TMP/$name-target-env-extra")
   [ ! -f "$TMP/$name-rollback-env-extra" ] || rollback_env_extra=$(cat "$TMP/$name-rollback-env-extra")
   state=$(cat "$TMP/$name-state-path")
@@ -1244,7 +1260,7 @@ run_fixture() {
     MOCK_POSTGRES_ID="$POSTGRES_ID" MOCK_MIGRATE_ID="$MIGRATE_ID" \
     MOCK_BASE_IMAGE="$BASE_IMAGE" MOCK_BUILT_IMAGE="$BUILT_IMAGE" MOCK_ACTUAL_TARGET_IMAGE="$BUILT_IMAGE" MOCK_POSTGRES_IMAGE="$POSTGRES_IMAGE" \
     MOCK_CAPTURE_IMAGE="$capture" MOCK_FAIL_SYNC="$fail_sync" MOCK_FAIL_CHMOD_MATCH="$chmod_match" MOCK_FAIL_LN_MATCH="$ln_match" MOCK_FAIL_SYNC_MATCH="$sync_match" \
-    MOCK_REQUIRE_FAILURE_MARKER="$require_marker" MOCK_EVIDENCE_ROOT="$root" MOCK_TARGET_ENV_EXTRA="$target_env_extra" MOCK_ROLLBACK_ENV_EXTRA="$rollback_env_extra" \
+    MOCK_REQUIRE_FAILURE_MARKER="$require_marker" MOCK_EVIDENCE_ROOT="$root" MOCK_BASE_ENV_EXTRA="$baseline_env_extra" MOCK_TARGET_ENV_EXTRA="$target_env_extra" MOCK_ROLLBACK_ENV_EXTRA="$rollback_env_extra" \
     MOCK_REAL_PYTHON3="$(command -v python3)" MOCK_REAL_CHMOD="$(command -v chmod)" MOCK_REAL_LN="$(command -v ln)" MOCK_REAL_DATE="$(command -v date)" MOCK_STAMP="$stamp" \
     ROLLOUT_RUNNER_TEST_MODE=1 ROLLOUT_RUNNER_CHECKOUT="$checkout" ROLLOUT_RUNNER_EVIDENCE_ROOT=/root \
     ROLLOUT_RUNNER_TEST_CHECKOUT="$checkout" \
@@ -2648,7 +2664,7 @@ prepare_env_change_fixture() {
   local target_sha=${3:-$APPLY_TARGET_SHA} baseline_sha=${4:-$TARGET_SHA}
   local target_extra=${5-TG_REGISTRATION=open} rollback_extra=${6-}
   local key=${7:-TG_REGISTRATION} old_value=${8:-closed} new_value=${9:-open}
-  local setup_lines=${10:-}
+  local setup_lines=${10:-} baseline_extra=${11:-}
   local checkout state previous
   prepare_target_local_apply_fixture "$name" "$scenario" "$target_sha" "$baseline_sha" || return 1
   state=$(cat "$TMP/$name-state-path")
@@ -2661,6 +2677,7 @@ prepare_env_change_fixture() {
   sed -i "s/^${key}=${old_value}$/${key}=${new_value}/" "$checkout/.env" || return 1
   printf '%s\n' "$key" > "$TMP/$name-changed-env"
   printf '%s\n' "$previous" > "$TMP/$name-previous-env-path"
+  [ -z "$baseline_extra" ] || printf '%s\n' "$baseline_extra" > "$TMP/$name-baseline-env-extra"
   [ -z "$target_extra" ] || printf '%s\n' "$target_extra" > "$TMP/$name-target-env-extra"
   [ -z "$rollback_extra" ] || printf '%s\n' "$rollback_extra" > "$TMP/$name-rollback-env-extra"
   jq -c --arg key "$key" --arg value "$new_value" '.services.teagramd.environment[$key]=$value' \
@@ -2761,6 +2778,23 @@ else
   fail 'named TG_REGISTRATION value change must deploy through apply'
 fi
 
+prepare_env_change_fixture public-registration-value-change \
+  target-local-carry-forward-env-value-change "$APPLY_TARGET_SHA" "$TARGET_SHA" \
+  TG_PUBLIC_REGISTRATION=closed '' TG_PUBLIC_REGISTRATION invite closed '' TG_PUBLIC_REGISTRATION=invite
+root=$(cat "$TMP/public-registration-value-change-root-path")
+checkout=$(cat "$TMP/public-registration-value-change-checkout-path")
+sed -i 's/^TG_PUBLIC_REGISTRATION=closed$/TG_PUBLIC_REGISTRATION="closed"/' "$checkout/.env"
+current_env_sha=$(sha256sum "$checkout/.env" | awk '{print $1}')
+status=$(run_fixture public-registration-value-change built 0 '' 2 '' '' apply "$APPLY_TARGET_SHA")
+if [ "$status" = 0 ] && grep -q "rollout=verified sha=$APPLY_TARGET_SHA" "$TMP/public-registration-value-change.stdout" && \
+   [ "$(jq -r '.container_env_changed' "$root.target/target.snapshot.json")" = TG_PUBLIC_REGISTRATION ] && \
+   grep -qx "env_sha256=$current_env_sha source_sha=$APPLY_TARGET_SHA" "$checkout/.state/rollout-env"; then
+  pass 'quoted TG_PUBLIC_REGISTRATION changes from invite to closed through the named change path'
+else
+  show_fixture_failure public-registration-value-change "$status"
+  fail 'quoted TG_PUBLIC_REGISTRATION change from invite to closed must use the named change path'
+fi
+
 prepare_env_change_fixture env-value-change-rollback target-local-df9-rollback "$APPLY_TARGET_SHA" \
   "$TARGET_LOCAL_COMPOSE_TARGET_SHA" TG_REGISTRATION=open TG_REGISTRATION=open
 root=$(cat "$TMP/env-value-change-rollback-root-path")
@@ -2851,6 +2885,43 @@ if [ "$status" = 0 ] && grep -q "rollout=verified sha=$APPLY_TARGET_SHA" "$TMP/t
 else
   show_fixture_failure turnstile-env-addition-success "$status"
   fail 'mapped Turnstile .env additions must deploy through apply'
+fi
+
+prepare_env_addition_fixture public-websocket-addition-rollback TG_PUBLIC_WEBSOCKET_LISTEN_ADDR '' \
+  'TG_PUBLIC_WEBSOCKET_LISTEN_ADDR=0.0.0.0:2444' TG_PUBLIC_WEBSOCKET_LISTEN_ADDR=0.0.0.0:2444 \
+  target-local-df9-rollback "$DF9_LOCAL_COMPOSE_TARGET_SHA" "$TARGET_LOCAL_COMPOSE_TARGET_SHA"
+state=$(cat "$TMP/public-websocket-addition-rollback-state-path")
+checkout=$(cat "$TMP/public-websocket-addition-rollback-checkout-path")
+root=$(cat "$TMP/public-websocket-addition-rollback-root-path")
+jq -c '.services.teagramd.environment += {
+  TG_PUBLIC_WEBSOCKET_LISTEN_ADDR:"",
+  TG_PUBLIC_WEBSOCKET_ADVERTISE_ADDR:"",
+  TG_PUBLIC_REGISTRATION:"closed",
+  TG_PUBLIC_WEBSOCKET_ALLOWED_ORIGINS:"",
+  TG_WELCOME_CHANNEL:""
+}' "$state/base-compose.json" > "$TMP/public-websocket-addition-rollback-base-compose.json"
+mv -- "$TMP/public-websocket-addition-rollback-base-compose.json" "$state/base-compose.json"
+jq -c '.services.teagramd.environment += {
+  TG_PUBLIC_WEBSOCKET_ADVERTISE_ADDR:"",
+  TG_PUBLIC_REGISTRATION:"closed",
+  TG_PUBLIC_WEBSOCKET_ALLOWED_ORIGINS:"",
+  TG_WELCOME_CHANNEL:""
+}' "$state/target-compose.json" > "$TMP/public-websocket-addition-rollback-target-compose.json"
+mv -- "$TMP/public-websocket-addition-rollback-target-compose.json" "$state/target-compose.json"
+: > "$state/public-websocket-addition"
+previous_env_sha=$(sha256sum "$TMP/public-websocket-addition-rollback-previous.env" | awk '{print $1}')
+status=$(run_fixture public-websocket-addition-rollback built 0 '' 2 '' '' apply "$APPLY_TARGET_SHA")
+if [ "$status" != 0 ] && grep -q "rollback=verified baseline_sha=$TARGET_LOCAL_COMPOSE_TARGET_SHA" "$TMP/public-websocket-addition-rollback.stdout" && \
+   [ "$(jq -r '.container_env_added' "$root.target/target.snapshot.json")" = TG_PUBLIC_WEBSOCKET_LISTEN_ADDR ] && \
+   [ "$(jq -r '.container_env_added' "$root.rollback/rollback.snapshot.json")" = none ] && \
+   [ "$(sha256sum "$checkout/.env" | awk '{print $1}')" = "$previous_env_sha" ] && \
+   grep -qx "env_sha256=$previous_env_sha source_sha=$TARGET_LOCAL_COMPOSE_TARGET_SHA" "$checkout/.state/rollout-env" && \
+   grep -q $'rollback\tenv_sha256\t.*\tpass' "$root.rollback/rollback-equivalence.tsv" && \
+   grep -q $'rollback\tcontainer_env_sha256\t.*\tpass' "$root.rollback/rollback-equivalence.tsv"; then
+  pass 'rollback restores the previous .env and container environment after a public listener addition'
+else
+  show_fixture_failure public-websocket-addition-rollback "$status"
+  fail 'public listener addition rollback must restore the previous environment'
 fi
 
 prepare_env_addition_fixture env-addition-rollback TG_NEW_FLAG '' 'TG_NEW_FLAG=on' TG_NEW_FLAG=on \

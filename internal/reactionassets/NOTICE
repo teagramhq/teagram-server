@@ -1,0 +1,9 @@
+Twemoji graphics
+
+Copyright 2019 Twitter, Inc and other contributors.
+Licensed under Creative Commons Attribution 4.0 International (CC BY 4.0):
+https://creativecommons.org/licenses/by/4.0/
+
+Source: Twemoji v14.0.2, https://github.com/twitter/twemoji
+Source commit: 7a3dad4a4da30497093dab22eafba135f02308e1
+The source SVGs are converted to 512x512 WebP images and still TGS animations.

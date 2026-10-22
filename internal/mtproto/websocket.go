@@ -24,7 +24,7 @@ const (
 	// websocketPath is the endpoint used by Telegram Web's MTProto transport.
 	websocketPath = "/apiws"
 	// clientDiscoveryPath publishes the public identity for browser clients.
-	clientDiscoveryPath = "/.well-known/telegramd/client"
+	clientDiscoveryPath = "/.well-known/teagramd/client"
 	// The MTProto codecs reject payloads larger than 16 MiB. The extra bytes
 	// cover the largest transport and obfuscation headers that can share a
 	// WebSocket message with one payload.
@@ -585,7 +585,8 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request, handler
 	// Keep the slot tied to the request when the HTTP upgrade fails. The listener
 	// worker closes address-establishment failures before they reach net/http.
 	defer state.slot.clear()
-	if r.URL.EscapedPath() == clientDiscoveryPath {
+	requestPath := r.URL.EscapedPath()
+	if requestPath == clientDiscoveryPath {
 		s.handleClientDiscovery(w, r, discoveryDocument)
 		return
 	}

@@ -1103,6 +1103,13 @@ func (h *handlers) buildChannelUpdates(ctx context.Context, channelID, viewerID 
 		if up == nil {
 			continue
 		}
+		if ev.Type == store.EventNewMessage {
+			if message := msgs[ev.LocalID]; !message.Deleted && message.FromID == viewerID && message.RandomID != 0 {
+				// The sender needs the random_id mapping before the post so a live
+				// echo can replace its pending send. Other members get only the post.
+				b.ups = append(b.ups, &tg.UpdateMessageID{ID: int(message.LocalID), RandomID: message.RandomID})
+			}
+		}
 		b.ups = append(b.ups, up)
 		b.pts = append(b.pts, ev.Pts)
 		for _, id := range refs {

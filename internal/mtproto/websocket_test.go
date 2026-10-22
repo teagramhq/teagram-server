@@ -537,53 +537,176 @@ func TestServeWebSocketDiscoveryCORSIsPathScoped(t *testing.T) {
 		}
 		return resp
 	}
-	getResp := request(http.MethodGet, "/.well-known/telegramd/client")
-	if getResp.StatusCode != http.StatusOK {
-		t.Errorf("GET discovery status = %d, want %d", getResp.StatusCode, http.StatusOK)
-	}
-	if got := getResp.Header.Get("Access-Control-Allow-Origin"); got != "*" {
-		t.Errorf("GET discovery ACAO = %q, want *", got)
-	}
-	if got := getResp.Header.Get("Access-Control-Allow-Credentials"); got != "" {
-		t.Errorf("GET discovery Allow-Credentials = %q, want empty", got)
-	}
-	gotBody, err := io.ReadAll(getResp.Body)
-	if err != nil {
-		t.Errorf("read GET discovery body: %v", err)
-	}
-	if err := getResp.Body.Close(); err != nil {
-		t.Errorf("close GET discovery body: %v", err)
+	discoveryPaths := []string{
+		"/.well-known/teagramd/client",
 	}
 	wantBody, err := json.Marshal(doc)
 	if err != nil {
 		t.Fatalf("marshal expected discovery document: %v", err)
 	}
-	if !bytes.Equal(gotBody, wantBody) {
-		t.Errorf("GET discovery body under forged Host = %s, want %s", gotBody, wantBody)
+	for _, requestPath := range discoveryPaths {
+		t.Run(requestPath, func(t *testing.T) {
+			getResp := request(http.MethodGet, requestPath)
+			if getResp.StatusCode != http.StatusOK {
+				t.Errorf("GET discovery status = %d, want %d", getResp.StatusCode, http.StatusOK)
+			}
+			if got := getResp.Header.Get("Access-Control-Allow-Origin"); got != "*" {
+				t.Errorf("GET discovery ACAO = %q, want *", got)
+			}
+			if got := getResp.Header.Get("Access-Control-Allow-Credentials"); got != "" {
+				t.Errorf("GET discovery Allow-Credentials = %q, want empty", got)
+			}
+			gotBody, err := io.ReadAll(getResp.Body)
+			if err != nil {
+				t.Errorf("read GET discovery body: %v", err)
+			}
+			if err := getResp.Body.Close(); err != nil {
+				t.Errorf("close GET discovery body: %v", err)
+			}
+			if !bytes.Equal(gotBody, wantBody) {
+				t.Errorf("GET discovery body under forged Host = %s, want %s", gotBody, wantBody)
+			}
+
+			optionsResp := request(http.MethodOptions, requestPath)
+			if optionsResp.StatusCode != http.StatusNoContent {
+				t.Errorf("OPTIONS discovery status = %d, want %d", optionsResp.StatusCode, http.StatusNoContent)
+			}
+			if got := optionsResp.Header.Get("Access-Control-Allow-Origin"); got != "*" {
+				t.Errorf("OPTIONS discovery ACAO = %q, want *", got)
+			}
+			if got := optionsResp.Header.Get("Access-Control-Allow-Methods"); got != "GET, OPTIONS" {
+				t.Errorf("OPTIONS discovery methods = %q, want GET, OPTIONS", got)
+			}
+			if got := optionsResp.Header.Get("Access-Control-Allow-Credentials"); got != "" {
+				t.Errorf("OPTIONS discovery Allow-Credentials = %q, want empty", got)
+			}
+			if err := optionsResp.Body.Close(); err != nil {
+				t.Errorf("close OPTIONS response body: %v", err)
+			}
+
+			postResp := request(http.MethodPost, requestPath)
+			if postResp.StatusCode != http.StatusMethodNotAllowed {
+				t.Errorf("POST discovery status = %d, want %d", postResp.StatusCode, http.StatusMethodNotAllowed)
+			}
+			if got := postResp.Header.Get("Allow"); got != "GET, OPTIONS" {
+				t.Errorf("POST discovery Allow = %q, want GET, OPTIONS", got)
+			}
+			if err := postResp.Body.Close(); err != nil {
+				t.Errorf("close POST response body: %v", err)
+			}
+		})
 	}
 
-	optionsResp := request(http.MethodOptions, "/.well-known/telegramd/client")
-	if optionsResp.StatusCode != http.StatusNoContent {
-		t.Errorf("OPTIONS discovery status = %d, want %d", optionsResp.StatusCode, http.StatusNoContent)
+	legacyResp := request(http.MethodGet, "/.well-known/telegramd/client")
+	if legacyResp.StatusCode != http.StatusNotFound {
+		t.Errorf("GET legacy discovery status = %d, want %d", legacyResp.StatusCode, http.StatusNotFound)
 	}
-	if got := optionsResp.Header.Get("Access-Control-Allow-Origin"); got != "*" {
-		t.Errorf("OPTIONS discovery ACAO = %q, want *", got)
+	if got := legacyResp.Header.Get("Access-Control-Allow-Origin"); got != "" {
+		t.Errorf("GET legacy discovery ACAO = %q, want empty", got)
 	}
-	if got := optionsResp.Header.Get("Access-Control-Allow-Credentials"); got != "" {
-		t.Errorf("OPTIONS discovery Allow-Credentials = %q, want empty", got)
-	}
-	if err := optionsResp.Body.Close(); err != nil {
-		t.Errorf("close OPTIONS response body: %v", err)
+	if err := legacyResp.Body.Close(); err != nil {
+		t.Errorf("close legacy discovery response body: %v", err)
 	}
 
-	for _, requestPath := range []string{"/.well-known/telegramd/client/extra", "/.well-known/telegramd%2Fclient", "/apiws"} {
+	for _, requestPath := range []string{
+		"/.well-known/telegramd/client/extra",
+		"/.well-known/telegramd%2Fclient",
+		"/.well-known/teagramd%2Fclient",
+		"/.well-known/TEAGRAMD/client",
+		"/.well-known/teagramd/client/",
+		"/.well-known/teagramd/../telegramd/client",
+	} {
 		resp := request(http.MethodGet, requestPath)
+		if resp.StatusCode != http.StatusNotFound {
+			t.Errorf("GET %s status = %d, want %d", requestPath, resp.StatusCode, http.StatusNotFound)
+		}
 		if got := resp.Header.Get("Access-Control-Allow-Origin"); got != "" {
 			t.Errorf("%s ACAO = %q, want empty", requestPath, got)
 		}
 		if err := resp.Body.Close(); err != nil {
 			t.Errorf("close response body for %s: %v", requestPath, err)
 		}
+	}
+	apiwsResp := request(http.MethodGet, "/apiws")
+	if apiwsResp.StatusCode != http.StatusForbidden {
+		t.Errorf("GET /apiws status = %d, want %d", apiwsResp.StatusCode, http.StatusForbidden)
+	}
+	if got := apiwsResp.Header.Get("Access-Control-Allow-Origin"); got != "" {
+		t.Errorf("/apiws ACAO = %q, want empty", got)
+	}
+	if err := apiwsResp.Body.Close(); err != nil {
+		t.Errorf("close /apiws response body: %v", err)
+	}
+}
+
+func TestServeWebSocketDiscoveryPathsWithoutDocument(t *testing.T) {
+	t.Parallel()
+
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+	ln := mustListenTCP(t, ctx, "127.0.0.1:0")
+	srv := mtproto.New(exchange.PrivateKey{}, 2, mtproto.NewMemoryAuthKeyStore(), nil, nil)
+	served := make(chan error, 1)
+	go func() { served <- srv.ServeWebSocket(ctx, ln) }()
+	t.Cleanup(func() {
+		cancel()
+		if err := <-served; err != nil {
+			t.Errorf("serve websocket: %v", err)
+		}
+	})
+
+	for _, requestPath := range []string{
+		"/.well-known/teagramd/client",
+	} {
+		for _, tc := range []struct {
+			method string
+			status int
+			allow  string
+			acao   string
+		}{
+			{method: http.MethodGet, status: http.StatusNotFound, acao: "*"},
+			{method: http.MethodOptions, status: http.StatusNoContent, acao: "*"},
+			{method: http.MethodPost, status: http.StatusMethodNotAllowed, allow: "GET, OPTIONS"},
+		} {
+			req, err := http.NewRequestWithContext(ctx, tc.method, "http://"+ln.Addr().String()+requestPath, nil)
+			if err != nil {
+				t.Fatalf("new %s request: %v", tc.method, err)
+			}
+			resp, err := http.DefaultClient.Do(req)
+			if err != nil {
+				t.Fatalf("send %s request to %s: %v", tc.method, requestPath, err)
+			}
+			if resp.StatusCode != tc.status {
+				t.Errorf("%s %s status = %d, want %d", tc.method, requestPath, resp.StatusCode, tc.status)
+			}
+			if got := resp.Header.Get("Access-Control-Allow-Origin"); got != tc.acao {
+				t.Errorf("%s %s ACAO = %q, want %q", tc.method, requestPath, got, tc.acao)
+			}
+			if got := resp.Header.Get("Allow"); got != tc.allow {
+				t.Errorf("%s %s Allow = %q, want %q", tc.method, requestPath, got, tc.allow)
+			}
+			if err := resp.Body.Close(); err != nil {
+				t.Errorf("close %s %s response body: %v", tc.method, requestPath, err)
+			}
+		}
+	}
+
+	legacyReq, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://"+ln.Addr().String()+"/.well-known/telegramd/client", nil)
+	if err != nil {
+		t.Fatalf("new legacy discovery request: %v", err)
+	}
+	legacyResp, err := http.DefaultClient.Do(legacyReq)
+	if err != nil {
+		t.Fatalf("send legacy discovery request: %v", err)
+	}
+	if legacyResp.StatusCode != http.StatusNotFound {
+		t.Errorf("GET legacy discovery status = %d, want %d", legacyResp.StatusCode, http.StatusNotFound)
+	}
+	if got := legacyResp.Header.Get("Access-Control-Allow-Origin"); got != "" {
+		t.Errorf("GET legacy discovery ACAO = %q, want empty", got)
+	}
+	if err := legacyResp.Body.Close(); err != nil {
+		t.Errorf("close legacy discovery response body: %v", err)
 	}
 }
 
@@ -634,32 +757,37 @@ func TestServeWebSocketUsesListenerScopedDiscovery(t *testing.T) {
 		{name: "public", listener: publicListener, wantDoc: publicDoc},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, "http://"+tc.listener.Addr().String()+"/.well-known/telegramd/client", nil)
-			if err != nil {
-				t.Fatalf("build discovery request: %v", err)
-			}
-			req.Host = "spoofed.example.test"
-			req.Header.Set("Origin", "https://spoofed.example.test")
-			req.Header.Set("X-Forwarded-Host", "spoofed.example.test")
-			resp, err := http.DefaultClient.Do(req)
-			if err != nil {
-				t.Fatalf("get discovery: %v", err)
-			}
-			defer func() {
+			for _, requestPath := range []string{
+				"/.well-known/teagramd/client",
+			} {
+				req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, "http://"+tc.listener.Addr().String()+requestPath, nil)
+				if err != nil {
+					t.Fatalf("build discovery request: %v", err)
+				}
+				req.Host = "spoofed.example.test"
+				req.Header.Set("Origin", "https://spoofed.example.test")
+				req.Header.Set("X-Forwarded-Host", "spoofed.example.test")
+				resp, err := http.DefaultClient.Do(req)
+				if err != nil {
+					t.Fatalf("get discovery from %s: %v", requestPath, err)
+				}
+				got, err := io.ReadAll(resp.Body)
+				if err != nil {
+					t.Errorf("read discovery from %s: %v", requestPath, err)
+				}
 				if err := resp.Body.Close(); err != nil {
 					t.Errorf("close discovery response: %v", err)
 				}
-			}()
-			got, err := io.ReadAll(resp.Body)
-			if err != nil {
-				t.Fatalf("read discovery: %v", err)
-			}
-			want, err := discovery.MarshalDocument(tc.wantDoc)
-			if err != nil {
-				t.Fatalf("marshal expected discovery: %v", err)
-			}
-			if !bytes.Equal(got, want) {
-				t.Fatalf("listener served discovery %s, want %s", got, want)
+				want, err := discovery.MarshalDocument(tc.wantDoc)
+				if err != nil {
+					t.Fatalf("marshal expected discovery: %v", err)
+				}
+				if resp.StatusCode != http.StatusOK {
+					t.Errorf("GET %s status = %d, want %d", requestPath, resp.StatusCode, http.StatusOK)
+				}
+				if !bytes.Equal(got, want) {
+					t.Errorf("listener served discovery %s on %s, want %s", got, requestPath, want)
+				}
 			}
 		})
 	}
