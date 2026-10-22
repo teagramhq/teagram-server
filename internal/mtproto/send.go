@@ -85,14 +85,15 @@ func classifySendError(classification, err error) error {
 // Conn is a single served MTProto connection: the transport plus the crypto and
 // message-ID state needed to encrypt and send responses on the active session.
 type Conn struct {
-	transport    transport.Conn
-	shutdown     *serverShutdown
-	peerCancels  *peerCancelBudget
-	cipher       crypto.Cipher
-	msgID        mtproto.MessageIDSource
-	clock        clock.Clock
-	writeTimeout time.Duration
-	log          *slog.Logger
+	transport       transport.Conn
+	shutdown        *serverShutdown
+	peerCancels     *peerCancelBudget
+	cipher          crypto.Cipher
+	msgID           mtproto.MessageIDSource
+	clock           clock.Clock
+	writeTimeout    time.Duration
+	log             *slog.Logger
+	sessionRegistry *SessionRegistry
 
 	// writeMu serializes socket writes and guards the mutable session state
 	// (authKey, sessionID, owner) it reads, so a server-initiated push from the
@@ -1266,6 +1267,25 @@ func (c *Conn) PushTo(ctx context.Context, owner int64, enc bin.Encoder, pts int
 		return false, fmt.Errorf("push [%T]: %w", enc, sendErr)
 	}
 	return pushed, nil
+}
+
+// PushToOtherSessions snapshots the owner's live connections and sends a
+// transient update to every connection except the caller. PushTo's owner check
+// protects each write if a connection rebinds after the snapshot.
+func (c *Conn) PushToOtherSessions(ctx context.Context, owner int64, enc bin.Encoder) error {
+	if c.sessionRegistry == nil {
+		return nil
+	}
+	var pushErrors []error
+	for _, other := range c.sessionRegistry.Conns(owner) {
+		if other == c {
+			continue
+		}
+		if _, err := other.PushTo(ctx, owner, enc, 0); err != nil {
+			pushErrors = append(pushErrors, err)
+		}
+	}
+	return errors.Join(pushErrors...)
 }
 
 // PushDialogFilterRecovery writes a claimed recovery nudge only while the

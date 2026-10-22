@@ -1,0 +1,17 @@
+{
+  "layer": 228,
+  "client": "gotd v0.162.0",
+  "source": "source-derived/messages_uninstallStickerSet.1.txt",
+  "method": "messages.uninstallStickerSet",
+  "request": {
+    "type": "messages.uninstallStickerSet",
+    "fields": {
+      "stickerset": {
+        "type": "inputStickerSetShortName",
+        "fields": {
+          "short_name": "twemoji_reactions"
+        }
+      }
+    }
+  }
+}

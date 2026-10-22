@@ -94,6 +94,9 @@ var (
 	// errReactionInvalid rejects reactions outside the server's standard set or
 	// a basic group's allowed reaction set.
 	errReactionInvalid = rpcErr(400, "REACTION_INVALID")
+	// errStickerSetInvalid rejects every input set reference that does not match
+	// the built-in catalogue exactly, including special and partially valid IDs.
+	errStickerSetInvalid = rpcErr(400, "STICKERSET_INVALID")
 	// errChatLinkExists rejects hiding history while a channel has a public link.
 	errChatLinkExists = rpcErr(400, "CHAT_LINK_EXISTS")
 	// errChatAboutNotModified answers an editChatAbout request whose description

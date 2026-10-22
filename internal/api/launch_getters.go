@@ -70,14 +70,6 @@ func (h *handlers) handleSearchEmojiStickerSets(r *mtproto.Request) (bin.Encoder
 	return &tg.MessagesFoundStickerSets{Hash: 0, Sets: []tg.StickerSetCoveredClass{}}, nil
 }
 
-func (h *handlers) handleGetAllStickers(r *mtproto.Request) (bin.Encoder, error) {
-	var req tg.MessagesGetAllStickersRequest
-	if err := decodeLaunchGetterRequest(r, &req); err != nil {
-		return nil, err
-	}
-	return &tg.MessagesAllStickers{Hash: 0, Sets: []tg.StickerSet{}}, nil
-}
-
 func (h *handlers) handleGetRecentStickers(r *mtproto.Request) (bin.Encoder, error) {
 	var req tg.MessagesGetRecentStickersRequest
 	if err := decodeLaunchGetterRequest(r, &req); err != nil {

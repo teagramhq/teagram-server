@@ -387,7 +387,7 @@ func (h *handlers) handleGetFile(r *mtproto.Request) (bin.Encoder, error) {
 	missingBlobIsFault := true
 	gate := h.messageFileGate(loc)
 	if loc.fileID < 0 && !loc.photo {
-		gate = h.builtInReactionFileGate(loc)
+		gate = h.builtInDocumentFileGate(loc)
 	}
 	if loc.photo && loc.hasGalleryOwner {
 		galleryGate := h.galleryPhotoFileGate(loc.galleryOwnerID, loc.accessHash, loc.thumbSize)

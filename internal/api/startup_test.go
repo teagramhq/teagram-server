@@ -77,7 +77,9 @@ func startupMethods() []startupMethod {
 		{
 			name:       "sticker set",
 			repeatable: true,
-			request:    func() bin.Encoder { return &tg.MessagesGetStickerSetRequest{Stickerset: &tg.InputStickerSetEmpty{}} },
+			request: func() bin.Encoder {
+				return &tg.MessagesGetStickerSetRequest{Stickerset: &tg.InputStickerSetShortName{ShortName: "twemoji_reactions"}}
+			},
 			response: func() bin.Decoder {
 				return &tg.MessagesStickerSetBox{}
 			},
@@ -87,8 +89,12 @@ func startupMethods() []startupMethod {
 				if !ok {
 					t.Fatalf("response = %T, want *tg.MessagesStickerSetBox", response)
 				}
-				if _, ok := box.StickerSet.(*tg.MessagesStickerSetNotModified); !ok {
-					t.Fatalf("sticker set = %T, want *tg.MessagesStickerSetNotModified", box.StickerSet)
+				full, ok := box.StickerSet.(*tg.MessagesStickerSet)
+				if !ok {
+					t.Fatalf("sticker set = %T, want *tg.MessagesStickerSet", box.StickerSet)
+				}
+				if full.Set.ShortName != "twemoji_reactions" || full.Set.Count != 73 || len(full.Documents) != 73 || len(full.Packs) != 73 {
+					t.Fatalf("sticker set = %q count %d, %d documents and %d packs; want the 73-sticker catalogue", full.Set.ShortName, full.Set.Count, len(full.Documents), len(full.Packs))
 				}
 			},
 		},

@@ -610,6 +610,96 @@ func testSmokeClientRequestFixtures(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("replay get-all-drafts fixture: %v", err)
 	}
+	const stickerSetShortName = "twemoji_reactions"
+	stickerSetRef := &tg.InputStickerSetShortName{ShortName: stickerSetShortName}
+	var stickerSet tg.StickerSet
+	if err := fixtureClientCall(t, creator, "messages_getAllStickers.1", func(ctx context.Context, api *tg.Client) error {
+		result, err := api.MessagesGetAllStickers(ctx, 0)
+		if err != nil {
+			return err
+		}
+		if _, ok := result.(*tg.MessagesAllStickers); !ok {
+			return fmt.Errorf("getAllStickers result = %T, want *tg.MessagesAllStickers", result)
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("replay get-all-stickers fixture: %v", err)
+	}
+	if err := fixtureClientCall(t, creator, "messages_getStickerSet.1", func(ctx context.Context, api *tg.Client) error {
+		result, err := api.MessagesGetStickerSet(ctx, &tg.MessagesGetStickerSetRequest{Stickerset: stickerSetRef})
+		if err != nil {
+			return err
+		}
+		full, ok := result.(*tg.MessagesStickerSet)
+		if !ok {
+			return fmt.Errorf("getStickerSet result = %T, want *tg.MessagesStickerSet", result)
+		}
+		stickerSet = full.Set
+		return nil
+	}); err != nil {
+		t.Fatalf("replay get-sticker-set fixture: %v", err)
+	}
+	stickerSetIDRef := &tg.InputStickerSetID{ID: stickerSet.ID, AccessHash: stickerSet.AccessHash}
+	if err := fixtureClientCall(t, creator, "messages_getStickerSet.2", func(ctx context.Context, api *tg.Client) error {
+		result, err := api.MessagesGetStickerSet(ctx, &tg.MessagesGetStickerSetRequest{Stickerset: stickerSetIDRef})
+		if err != nil {
+			return err
+		}
+		if _, ok := result.(*tg.MessagesStickerSet); !ok {
+			return fmt.Errorf("getStickerSet by id result = %T, want *tg.MessagesStickerSet", result)
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("replay get-sticker-set-by-id fixture: %v", err)
+	}
+	if err := fixtureClientCall(t, creator, "messages_installStickerSet.1", func(ctx context.Context, api *tg.Client) error {
+		result, err := api.MessagesInstallStickerSet(ctx, &tg.MessagesInstallStickerSetRequest{Stickerset: stickerSetRef})
+		if err != nil {
+			return err
+		}
+		if _, ok := result.(*tg.MessagesStickerSetInstallResultSuccess); !ok {
+			return fmt.Errorf("installStickerSet result = %T, want success", result)
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("replay install-sticker-set fixture: %v", err)
+	}
+	if err := fixtureClientCall(t, creator, "messages_installStickerSet.2", func(ctx context.Context, api *tg.Client) error {
+		result, err := api.MessagesInstallStickerSet(ctx, &tg.MessagesInstallStickerSetRequest{Stickerset: stickerSetIDRef, Archived: true})
+		if err != nil {
+			return err
+		}
+		if _, ok := result.(*tg.MessagesStickerSetInstallResultSuccess); !ok {
+			return fmt.Errorf("repeated installStickerSet result = %T, want success", result)
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("replay install-sticker-set-by-id fixture: %v", err)
+	}
+	if err := fixtureClientCall(t, creator, "messages_uninstallStickerSet.1", func(ctx context.Context, api *tg.Client) error {
+		removed, err := api.MessagesUninstallStickerSet(ctx, stickerSetRef)
+		if err != nil {
+			return err
+		}
+		if !removed {
+			return errors.New("uninstallStickerSet returned false")
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("replay uninstall-sticker-set fixture: %v", err)
+	}
+	if err := fixtureClientCall(t, creator, "messages_uninstallStickerSet.2", func(ctx context.Context, api *tg.Client) error {
+		removed, err := api.MessagesUninstallStickerSet(ctx, stickerSetIDRef)
+		if err != nil {
+			return err
+		}
+		if !removed {
+			return errors.New("uninstallStickerSet by id returned false")
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("replay uninstall-sticker-set-by-id fixture: %v", err)
+	}
 	const recoveryPassword, recoveryEmail = "fixture recovery password", "contact@example.invalid"
 	if err := fixtureClientCall(t, checker, "account_updatePasswordSettings.contact.1", func(ctx context.Context, api *tg.Client) error {
 		return setFirstPasswordWithEmail(ctx, api, recoveryPassword, recoveryEmail)

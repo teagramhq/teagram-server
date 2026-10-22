@@ -903,6 +903,12 @@ type UserPrivacyRuleUser struct {
 	EntryType  string
 }
 
+type UserStickerSet struct {
+	UserID      int64
+	SetID       int64
+	InstalledAt pgtype.Timestamptz
+}
+
 type Username struct {
 	Handle        string
 	OwnerType     string

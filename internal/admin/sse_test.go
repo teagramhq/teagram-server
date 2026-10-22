@@ -1073,7 +1073,7 @@ func TestSSE_rateLimitDenialTelemetryHasFixedJSONSchema(t *testing.T) {
 		"create_channel", "create_chat", "dialog_filter_mutation", "get_password", "get_password_ip",
 		"message_send", "messages_search", "messages_search_global", "password_proof",
 		"save_file_part", "send_code_ip_calls", "send_code_ip_distinct_numbers",
-		"sign_in_fail_ip", "sign_up_ip", "update_profile", "upload_get_file",
+		"sign_in_fail_ip", "sign_up_ip", "sticker_set_mutation", "update_profile", "upload_get_file",
 	}
 	for _, render := range []func(admin.MetricsResponse) ([]admin.Fragment, error){
 		admin.DefaultFragmentRenderer,

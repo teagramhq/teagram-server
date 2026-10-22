@@ -18,7 +18,7 @@ const (
 	pushOutcomeCount            = 4
 	pushLatencyFiniteBuckets    = 15
 	pushLatencyBucketCount      = pushLatencyFiniteBuckets + 1
-	rateLimitDenialSurfaceCount = 25 // twenty-four fixed surfaces plus dropped
+	rateLimitDenialSurfaceCount = 26 // twenty-five fixed surfaces plus dropped
 	rateLimitDenialDroppedIndex = rateLimitDenialSurfaceCount - 1
 )
 
@@ -104,6 +104,7 @@ type RateLimitDenialSurfaceCounts struct {
 	MessagesGetMessages       int64
 	SecretChatRequest         int64
 	SecretChatDiscard         int64
+	StickerSetMutation        int64
 }
 
 // PushOutcomeCounts holds one count for every possible result of an attempted
@@ -464,6 +465,7 @@ func (m *NotificationMetrics) Snapshot() NotificationMetricsSnapshot {
 				MessagesGetMessages:       rateLimitDenials[21],
 				SecretChatRequest:         rateLimitDenials[22],
 				SecretChatDiscard:         rateLimitDenials[23],
+				StickerSetMutation:        rateLimitDenials[24],
 			},
 			Dropped: rateLimitDenials[rateLimitDenialDroppedIndex],
 		},
@@ -659,6 +661,8 @@ func rateLimitDenialSurfaceIndex(surface string) int {
 		return 22
 	case "secret_chat_discard":
 		return 23
+	case "sticker_set_mutation":
+		return 24
 	default:
 		return -1
 	}

@@ -1,0 +1,19 @@
+{
+  "layer": 228,
+  "client": "gotd v0.162.0",
+  "source": "source-derived/messages_getStickerSet.2.txt",
+  "method": "messages.getStickerSet",
+  "request": {
+    "type": "messages.getStickerSet",
+    "fields": {
+      "stickerset": {
+        "type": "inputStickerSetID",
+        "fields": {
+          "id": "<N>",
+          "access_hash": "<N>"
+        }
+      },
+      "hash": 0
+    }
+  }
+}

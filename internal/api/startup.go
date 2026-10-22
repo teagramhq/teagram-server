@@ -35,17 +35,6 @@ func (h *handlers) handleGetAttachMenuBots(r *mtproto.Request) (bin.Encoder, err
 	}, nil
 }
 
-func (h *handlers) handleGetStickerSet(r *mtproto.Request) (bin.Encoder, error) {
-	var req tg.MessagesGetStickerSetRequest
-	if err := req.Decode(r.Buf); err != nil {
-		return nil, errMethodNotImpl
-	}
-	if r.UserID == 0 {
-		return nil, errAuthKeyUnreg
-	}
-	return &tg.MessagesStickerSetNotModified{}, nil
-}
-
 func (h *handlers) handleGetAllDrafts(r *mtproto.Request) (bin.Encoder, error) {
 	var req tg.MessagesGetAllDraftsRequest
 	if err := req.Decode(r.Buf); err != nil {

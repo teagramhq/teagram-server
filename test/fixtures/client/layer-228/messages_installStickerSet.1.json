@@ -1,0 +1,18 @@
+{
+  "layer": 228,
+  "client": "gotd v0.162.0",
+  "source": "source-derived/messages_installStickerSet.1.txt",
+  "method": "messages.installStickerSet",
+  "request": {
+    "type": "messages.installStickerSet",
+    "fields": {
+      "stickerset": {
+        "type": "inputStickerSetShortName",
+        "fields": {
+          "short_name": "twemoji_reactions"
+        }
+      },
+      "archived": false
+    }
+  }
+}

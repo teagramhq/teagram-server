@@ -67,6 +67,10 @@ func TestSmoke(t *testing.T) {
 		t.Parallel()
 		testSmokeLaunchGetters(t)
 	})
+	t.Run("sticker-set-catalogue", func(t *testing.T) {
+		t.Parallel()
+		testSmokeStickerSetCatalogue(t)
+	})
 	t.Run("help-countries", func(t *testing.T) {
 		t.Parallel()
 		testSmokeHelpCountries(t)

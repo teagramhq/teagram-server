@@ -905,6 +905,7 @@ func dashboardDenials(m MetricsResponse, capabilities dashboardCapabilities) Das
 		{ID: "denial-get_password", Label: "get_password", Value: safeCount(m.RateLimitDenialsBySurface.GetPassword)},
 		{ID: "denial-update_profile", Label: "update_profile", Value: safeCount(m.RateLimitDenialsBySurface.UpdateProfile)},
 		{ID: "denial-dialog_filter_mutation", Label: "dialog_filter_mutation", Value: safeCount(m.RateLimitDenialsBySurface.DialogFilterMutation)},
+		{ID: "denial-sticker_set_mutation", Label: "sticker_set_mutation", Value: safeCount(m.RateLimitDenialsBySurface.StickerSetMutation)},
 	}
 	if capabilities.unavailable("rate_limit_denials_by_surface") {
 		markUninstrumentedRows(data.Rows)
