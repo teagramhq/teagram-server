@@ -201,80 +201,93 @@ func TestDisabledSessionDeviceLabelsStopFutureWrites(t *testing.T) {
 	}
 }
 
-func TestSessionIPEnabledStaleTouchCannotRestoreMetadataAfterUnbindOrRebind(t *testing.T) {
+func TestStaleSessionTouchCannotRestoreMetadataAfterUnbindOrRebind(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
 	dsn := pgtest.DSN(t)
-	s, err := store.Open(ctx, dsn, pgtest.EncKey(), store.WithBlobStore(testBlobs(t)), store.WithSessionIP(true))
-	if err != nil {
-		t.Fatalf("open store with session IP enabled: %v", err)
-	}
-	t.Cleanup(func() {
-		if err := s.Close(); err != nil {
-			t.Errorf("close store: %v", err)
-		}
-	})
-	conn := openSessionMetadataConn(t, dsn)
-	ownerA, err := s.CreateUser(ctx, "+15551296004")
-	if err != nil {
-		t.Fatalf("create owner A: %v", err)
-	}
-	ownerB, err := s.CreateUser(ctx, "+15551296005")
-	if err != nil {
-		t.Fatalf("create owner B: %v", err)
-	}
-
-	for _, unbind := range []struct {
-		name string
-		run  func(int64) error
+	for _, mode := range []struct {
+		name        string
+		sessionIP   bool
+		ownerAPhone string
+		ownerBPhone string
+		keyBase     int64
 	}{
-		{name: "logout", run: func(id int64) error { _, _, err := s.LogOutAuthKey(ctx, id); return err }},
-		{name: "reset", run: func(id int64) error { _, err := s.ResetAuthorization(ctx, ownerA.ID, id); return err }},
+		{name: "session_ip_off", ownerAPhone: "+15551296004", ownerBPhone: "+15551296005", keyBase: 0x7320},
+		{name: "session_ip_on", sessionIP: true, ownerAPhone: "+15551296006", ownerBPhone: "+15551296007", keyBase: 0x7330},
 	} {
-		t.Run(unbind.name, func(t *testing.T) {
-			id := int64(0x7320)
-			if unbind.name == "reset" {
-				id++
+		t.Run(mode.name, func(t *testing.T) {
+			s, err := store.Open(ctx, dsn, pgtest.EncKey(), store.WithBlobStore(testBlobs(t)), store.WithSessionIP(mode.sessionIP))
+			if err != nil {
+				t.Fatalf("open store: %v", err)
 			}
-			if err := s.SaveAuthKey(ctx, id, []byte("auth key")); err != nil {
-				t.Fatalf("save key: %v", err)
+			t.Cleanup(func() {
+				if err := s.Close(); err != nil {
+					t.Errorf("close store: %v", err)
+				}
+			})
+			conn := openSessionMetadataConn(t, dsn)
+			ownerA, err := s.CreateUser(ctx, mode.ownerAPhone)
+			if err != nil {
+				t.Fatalf("create owner A: %v", err)
 			}
-			oldMetadata := store.AuthorizationMetadata{
-				DeviceModel: "Owner A device", Platform: "owner A platform", SystemVersion: "owner A OS",
-				APIID: 1, AppVersion: "1.0", IP: "203.0.113.10",
-			}
-			if err := s.BindAuthKeyUserWithMetadata(ctx, id, ownerA.ID, oldMetadata); err != nil {
-				t.Fatalf("bind owner A: %v", err)
-			}
-			seedStoredSessionMetadata(t, conn, id, ownerA.ID, oldMetadata)
-			if err := unbind.run(id); err != nil {
-				t.Fatalf("unbind owner A: %v", err)
-			}
-			stale := &store.AuthorizationMetadata{
-				DeviceModel: "stale device", Platform: "stale platform", SystemVersion: "stale OS",
-				APIID: 9, AppVersion: "stale app",
-			}
-			if err := s.TouchAuthKeyWithIP(ctx, id, netip.MustParseAddr("203.0.113.99"), ownerA.ID, stale); err != nil {
-				t.Fatalf("stale touch after unbind: %v", err)
-			}
-			cleared := readStoredSessionMetadata(t, conn, id)
-			if cleared.userID != nil || cleared.pendingUserID != nil || cleared.ip != nil || cleared.deviceModel != nil ||
-				cleared.platform != nil || cleared.systemVersion != nil || cleared.apiID != nil || cleared.appVersion != nil {
-				t.Fatalf("stale touch restored unbound metadata: %+v", cleared)
+			ownerB, err := s.CreateUser(ctx, mode.ownerBPhone)
+			if err != nil {
+				t.Fatalf("create owner B: %v", err)
 			}
 
-			newMetadata := store.AuthorizationMetadata{
-				DeviceModel: "Owner B device", Platform: "owner B platform", SystemVersion: "owner B OS",
-				APIID: 2, AppVersion: "2.0", IP: "203.0.113.20",
+			for _, unbind := range []struct {
+				name string
+				run  func(int64) error
+			}{
+				{name: "logout", run: func(id int64) error { _, _, err := s.LogOutAuthKey(ctx, id); return err }},
+				{name: "reset", run: func(id int64) error { _, err := s.ResetAuthorization(ctx, ownerA.ID, id); return err }},
+			} {
+				t.Run(unbind.name, func(t *testing.T) {
+					id := mode.keyBase
+					if unbind.name == "reset" {
+						id++
+					}
+					if err := s.SaveAuthKey(ctx, id, []byte("auth key")); err != nil {
+						t.Fatalf("save key: %v", err)
+					}
+					oldMetadata := store.AuthorizationMetadata{
+						DeviceModel: "Owner A device", Platform: "owner A platform", SystemVersion: "owner A OS",
+						APIID: 1, AppVersion: "1.0", IP: "203.0.113.10",
+					}
+					if err := s.BindAuthKeyUserWithMetadata(ctx, id, ownerA.ID, oldMetadata); err != nil {
+						t.Fatalf("bind owner A: %v", err)
+					}
+					seedStoredSessionMetadata(t, conn, id, ownerA.ID, oldMetadata)
+					if err := unbind.run(id); err != nil {
+						t.Fatalf("unbind owner A: %v", err)
+					}
+					stale := &store.AuthorizationMetadata{
+						DeviceModel: "stale device", Platform: "stale platform", SystemVersion: "stale OS",
+						APIID: 9, AppVersion: "stale app",
+					}
+					if err := s.TouchAuthKeyWithIP(ctx, id, netip.MustParseAddr("203.0.113.99"), ownerA.ID, stale); err != nil {
+						t.Fatalf("stale touch after unbind: %v", err)
+					}
+					cleared := readStoredSessionMetadata(t, conn, id)
+					if cleared.userID != nil || cleared.pendingUserID != nil || cleared.ip != nil || cleared.deviceModel != nil ||
+						cleared.platform != nil || cleared.systemVersion != nil || cleared.apiID != nil || cleared.appVersion != nil {
+						t.Fatalf("stale touch restored unbound metadata: %+v", cleared)
+					}
+
+					newMetadata := store.AuthorizationMetadata{
+						DeviceModel: "Owner B device", Platform: "owner B platform", SystemVersion: "owner B OS",
+						APIID: 2, AppVersion: "2.0", IP: "203.0.113.20",
+					}
+					if err := s.BindAuthKeyUserWithMetadata(ctx, id, ownerB.ID, newMetadata); err != nil {
+						t.Fatalf("bind owner B: %v", err)
+					}
+					if err := s.TouchAuthKeyWithIP(ctx, id, netip.MustParseAddr("203.0.113.99"), ownerA.ID, stale); err != nil {
+						t.Fatalf("stale touch after rebind: %v", err)
+					}
+					rebound := readStoredSessionMetadata(t, conn, id)
+					assertStoredSessionMetadataValues(t, rebound, ownerB.ID, newMetadata, mode.sessionIP, true)
+				})
 			}
-			if err := s.BindAuthKeyUserWithMetadata(ctx, id, ownerB.ID, newMetadata); err != nil {
-				t.Fatalf("bind owner B: %v", err)
-			}
-			if err := s.TouchAuthKeyWithIP(ctx, id, netip.MustParseAddr("203.0.113.99"), ownerA.ID, stale); err != nil {
-				t.Fatalf("stale touch after rebind: %v", err)
-			}
-			rebound := readStoredSessionMetadata(t, conn, id)
-			assertStoredSessionMetadataValues(t, rebound, ownerB.ID, newMetadata, true, true)
 		})
 	}
 }
