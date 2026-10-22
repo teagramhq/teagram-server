@@ -27,6 +27,7 @@ SMOKE_SCENARIOS=(
   basic-group
   basic-group-reactions
   channel-reactions
+  available-reactions
   basic-group-photo
   delete-basic-group
   delete-history

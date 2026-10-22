@@ -71,6 +71,31 @@ func sanitizeAuthorizationMetadata(metadata AuthorizationMetadata) Authorization
 	return metadata
 }
 
+type authorizationMetadataParams struct {
+	deviceModel   *string
+	platform      *string
+	systemVersion *string
+	apiID         *int32
+	appVersion    *string
+	ip            *string
+}
+
+func (s *Store) authorizationMetadataParams(metadata AuthorizationMetadata) authorizationMetadataParams {
+	metadata = sanitizeAuthorizationMetadata(metadata)
+	var params authorizationMetadataParams
+	if s.sessionDeviceLabels {
+		params.deviceModel = &metadata.DeviceModel
+		params.platform = &metadata.Platform
+		params.systemVersion = &metadata.SystemVersion
+		params.apiID = &metadata.APIID
+		params.appVersion = &metadata.AppVersion
+	}
+	if s.sessionIP {
+		params.ip = &metadata.IP
+	}
+	return params
+}
+
 func sanitizeAuthorizationString(value string) string {
 	var result strings.Builder
 	result.Grow(min(len(value), 128))
@@ -179,13 +204,11 @@ func (s *Store) BindAuthKeyUser(ctx context.Context, id, userID int64) error {
 // BindAuthKeyUserWithMetadata binds an unbound auth key and stores its
 // connection-local initConnection metadata and trusted client socket address.
 func (s *Store) BindAuthKeyUserWithMetadata(ctx context.Context, id, userID int64, metadata AuthorizationMetadata) error {
-	metadata = sanitizeAuthorizationMetadata(metadata)
-	deviceModel, platform := metadata.DeviceModel, metadata.Platform
-	systemVersion, appVersion, ip := metadata.SystemVersion, metadata.AppVersion, metadata.IP
-	apiID := metadata.APIID
+	metadataParams := s.authorizationMetadataParams(metadata)
 	rows, err := s.q.BindAuthKeyUserWithMetadata(ctx, db.BindAuthKeyUserWithMetadataParams{
-		ID: id, UserID: &userID, DeviceModel: &deviceModel, Platform: &platform,
-		SystemVersion: &systemVersion, ApiID: &apiID, AppVersion: &appVersion, Ip: &ip,
+		ID: id, UserID: &userID, DeviceModel: metadataParams.deviceModel, Platform: metadataParams.platform,
+		SystemVersion: metadataParams.systemVersion, ApiID: metadataParams.apiID,
+		AppVersion: metadataParams.appVersion, Ip: metadataParams.ip,
 	})
 	if err != nil {
 		return fmt.Errorf("bind auth key with metadata: %w", err)
@@ -284,10 +307,7 @@ func (s *Store) PromotePendingUser(ctx context.Context, id, userID int64, starte
 // PromotePendingUserWithMetadata completes the pending password login and
 // stores the device metadata for the connection that proved the password.
 func (s *Store) PromotePendingUserWithMetadata(ctx context.Context, id, userID int64, startedAt time.Time, lifetime time.Duration, metadata AuthorizationMetadata) error {
-	metadata = sanitizeAuthorizationMetadata(metadata)
-	deviceModel, platform := metadata.DeviceModel, metadata.Platform
-	systemVersion, appVersion, ip := metadata.SystemVersion, metadata.AppVersion, metadata.IP
-	apiID := metadata.APIID
+	metadataParams := s.authorizationMetadataParams(metadata)
 	// Lock separately: PostgreSQL may not recheck UPDATE predicates for an
 	// unchanged row after it waits for the row lock.
 	tx, err := s.pool.Begin(ctx)
@@ -309,12 +329,12 @@ func (s *Store) PromotePendingUserWithMetadata(ctx context.Context, id, userID i
 		UserID:         &userID,
 		StartedAt:      started,
 		LifetimeMicros: int64(lifetime / time.Microsecond),
-		DeviceModel:    &deviceModel,
-		Platform:       &platform,
-		SystemVersion:  &systemVersion,
-		ApiID:          &apiID,
-		AppVersion:     &appVersion,
-		Ip:             &ip,
+		DeviceModel:    metadataParams.deviceModel,
+		Platform:       metadataParams.platform,
+		SystemVersion:  metadataParams.systemVersion,
+		ApiID:          metadataParams.apiID,
+		AppVersion:     metadataParams.appVersion,
+		Ip:             metadataParams.ip,
 	})
 	if err != nil {
 		return fmt.Errorf("promote pending user: %w", err)
@@ -333,7 +353,7 @@ func (s *Store) PromotePendingUserWithMetadata(ctx context.Context, id, userID i
 // loop throttles calls so this is not written on every frame. Touching a missing
 // id is a no-op.
 func (s *Store) TouchAuthKey(ctx context.Context, id int64) error {
-	if err := s.q.TouchAuthKey(ctx, id); err != nil {
+	if err := s.q.TouchAuthKey(ctx, db.TouchAuthKeyParams{ID: id, StoreIp: s.sessionIP}); err != nil {
 		return fmt.Errorf("touch auth key: %w", err)
 	}
 	return nil
@@ -344,12 +364,15 @@ func (s *Store) TouchAuthKey(ctx context.Context, id int64) error {
 // updated for the same expected owner. Its MTProto caller applies the existing
 // per-connection throttle.
 func (s *Store) TouchAuthKeyWithIP(ctx context.Context, id int64, addr netip.Addr, expectedUserID int64, metadata *AuthorizationMetadata) error {
-	ip := ""
-	if addr.IsValid() {
-		ip = addr.Unmap().String()
+	params := db.TouchAuthKeyWithIPParams{ID: id, ExpectedUserID: expectedUserID}
+	if s.sessionIP {
+		ip := ""
+		if addr.IsValid() {
+			ip = addr.Unmap().String()
+		}
+		params.Ip = &ip
 	}
-	params := db.TouchAuthKeyWithIPParams{ID: id, ExpectedUserID: expectedUserID, Ip: &ip}
-	if metadata != nil {
+	if metadata != nil && s.sessionDeviceLabels {
 		cleaned := sanitizeAuthorizationMetadata(*metadata)
 		params.UpdateMetadata = true
 		params.DeviceModel = cleaned.DeviceModel

@@ -80,7 +80,7 @@ func TestRegistrationModesStayBoundToListeners(t *testing.T) {
 		return api.NewWithPhotoThumbsAndDialogFilterSyncAndUploadPartTTLAndTurnstileAndWelcomeChannelAndSignIn(
 			st, dcID, tgcfg, log, false, cfg.MaxFileBytes, blobs, cfg.MaxUserStorageBytes,
 			pgtest.PeerDeriver(), pgtest.PhotoDeriver(), cfg.RateLimits, mode, dialogFilterSync, nil,
-			cfg.UploadPartTTL, siteKey, verifier, "", signInEnabled,
+			cfg.UploadPartTTL, siteKey, verifier, "", signInEnabled, config.RecoveryEmailOff,
 		)
 	}
 	server, publicHandler := newListenerScopedServer(cfg, exchange.PrivateKey{RSA: key}, st, log, newHandler)

@@ -174,6 +174,10 @@ func TestSmoke(t *testing.T) {
 		t.Parallel()
 		testSmokeChannelReactions(t)
 	})
+	t.Run("available-reactions", func(t *testing.T) {
+		t.Parallel()
+		testSmokeAvailableReactions(t)
+	})
 	t.Run("basic-group-photo", func(t *testing.T) {
 		t.Parallel()
 		testSmokeBasicGroupPhoto(t)
@@ -843,8 +847,8 @@ func testSmokeAuthorizationDeviceMetadata(t *testing.T) {
 		wantDeviceModel := "MacBook" + strings.Repeat("X", 121)
 		if auth.DeviceModel != wantDeviceModel || auth.SystemVersion != strings.Repeat("a", 127) ||
 			auth.AppVersion != "6.1" || auth.Platform != "tdesktop" || auth.APIID != 1 ||
-			auth.AppName != "" || auth.IP != "127.0.0.1" || auth.Country != "" || auth.Region != "" {
-			return fmt.Errorf("authorization metadata = %+v, want sanitized initConnection fields and socket IP", auth)
+			auth.AppName != "" || auth.IP != "" || auth.Country != "" || auth.Region != "" {
+			return fmt.Errorf("authorization metadata = %+v, want sanitized labels and no session IP by default", auth)
 		}
 		return nil
 	}); err != nil {
@@ -5274,27 +5278,29 @@ func requireSmokeFullUser(users []tg.UserClass, userID int64, source string) (*t
 }
 
 type smokeFixture struct {
-	ctx                    context.Context
-	failures               *clientFailureSignal
-	key                    *rsa.PrivateKey
-	dsn                    string
-	store                  *store.Store
-	blobs                  blob.Store
-	photoThumbs            *photothumb.Supervisor
-	codes                  *multiCodeSink
-	authHandles            map[string]string
-	dcID                   int
-	port                   int
-	listener               *acceptCountingListener
-	registry               *mtproto.SessionRegistry
-	stop                   func()
-	stopCleanupRegistered  bool
-	regMode                config.RegistrationMode
-	welcomeChannel         string
-	turnstileSiteKey       string
-	turnstileVerifier      api.SignUpTurnstileVerifier
-	turnstileSignInEnabled bool
-	persistStatus          bool
+	ctx                         context.Context
+	failures                    *clientFailureSignal
+	key                         *rsa.PrivateKey
+	dsn                         string
+	store                       *store.Store
+	blobs                       blob.Store
+	photoThumbs                 *photothumb.Supervisor
+	codes                       *multiCodeSink
+	authHandles                 map[string]string
+	dcID                        int
+	port                        int
+	listener                    *acceptCountingListener
+	registry                    *mtproto.SessionRegistry
+	stop                        func()
+	stopCleanupRegistered       bool
+	suppressChannelPostDelivery func(channelID int64) bool
+	regMode                     config.RegistrationMode
+	welcomeChannel              string
+	turnstileSiteKey            string
+	turnstileVerifier           api.SignUpTurnstileVerifier
+	turnstileSignInEnabled      bool
+	recoveryEmailMode           config.RecoveryEmailMode
+	persistStatus               bool
 	// rateLimits is the per-surface budget set the booted server gets.
 	// Zero, the fixture default, means no surface is limited, which is what
 	// every existing scenario assumes. A scenario that exists to prove a shipped
@@ -5724,7 +5730,11 @@ func newSmokeFixtureWithDeadline(t *testing.T, regMode config.RegistrationMode, 
 			t.Errorf("store close: %v", err)
 		}
 	})
-	f := &smokeFixture{ctx: ctx, failures: newClientFailureSignal(cancelFailure), key: key, dsn: dsn, store: st, blobs: blobs, codes: newMultiCodeSink(), dcID: 2, regMode: regMode}
+	f := &smokeFixture{
+		ctx: ctx, failures: newClientFailureSignal(cancelFailure), key: key, dsn: dsn,
+		store: st, blobs: blobs, codes: newMultiCodeSink(), dcID: 2,
+		regMode: regMode, recoveryEmailMode: config.RecoveryEmailOff,
+	}
 	if beforeStart != nil {
 		beforeStart(f)
 	}
@@ -5749,7 +5759,7 @@ func (f *smokeFixture) start(t *testing.T, address string) {
 	registry, stop := bootServerWithLimitsAndRegistrationModeAndBlobsAndStatusWithDeliveryHookAndTurnstileAndWelcomeChannel(
 		t, f.ctx, f.key, f.dcID, f.store, f.dsn, f.codes.Logger(), ln, f.rateLimits, f.regMode,
 		f.blobs, f.persistStatus, nil, f.turnstileSiteKey, f.turnstileVerifier, f.welcomeChannel,
-		f.turnstileSignInEnabled, f.photoThumbs,
+		f.turnstileSignInEnabled, f.recoveryEmailMode, f.suppressChannelPostDelivery, f.photoThumbs,
 	)
 	f.registry = registry
 	f.setServerStop(t.Cleanup, stop)

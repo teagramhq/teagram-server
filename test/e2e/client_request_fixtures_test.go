@@ -21,6 +21,8 @@ import (
 	"github.com/gotd/td/telegram/updates"
 	"github.com/gotd/td/tg"
 	"github.com/gotd/td/tgerr"
+
+	"github.com/teagramhq/teagram-server/internal/config"
 )
 
 const clientFixtureDirectory = "../fixtures/client/layer-228"
@@ -464,6 +466,7 @@ func TestSmokeClientRequestFixturesAreLayer228Shapes(t *testing.T) {
 	for _, name := range []string{
 		"auth.sendCode.1",
 		"auth.signIn.1",
+		"account_updatePasswordSettings.contact.1",
 		"auth.invokeWithReCaptcha.signUp.1",
 		"contacts_getStatuses.1",
 		"channels_checkUsername.1",
@@ -501,11 +504,14 @@ func TestSmokeClientRequestFixturesAreLayer228Shapes(t *testing.T) {
 		"messages_getHistory.second-account.1",
 		"messages_getReplies.1",
 		"photos_getUserPhotos.1",
+		"photos_deletePhotos.1",
 		"photos_updateProfilePhoto.1",
 		"photos_uploadProfilePhoto.1",
 		"account_updateProfile.1",
 		"account_checkUsername.1",
+		"messages_getAvailableReactions.1",
 		"upload_getFile.1",
+		"upload_getFile.2",
 		"messages_sendMedia.1",
 		"messages_sendMedia.2",
 		"messages_sendMedia.3",
@@ -579,7 +585,9 @@ func newSmokePhoneClientWithRequests(
 
 func testSmokeClientRequestFixtures(t *testing.T) {
 	t.Helper()
-	f := newSmokeFixture(t)
+	f := newSmokeFixtureWithSetup(t, config.RegistrationClosed, func(f *smokeFixture) {
+		f.recoveryEmailMode = config.RecoveryEmailContact
+	})
 	const phoneCreator, phoneMember = "+15551048901", "+15551048902"
 	seedSmokeUsers(t, f, phoneCreator, phoneMember)
 	creatorRequests := &clientRequestRecorder{}
@@ -592,6 +600,38 @@ func testSmokeClientRequestFixtures(t *testing.T) {
 		if err := creator.requests.matchFixtureSince(0, fixtureName); err != nil {
 			t.Fatalf("replay login fixture %s: %v", fixtureName, err)
 		}
+	}
+	const recoveryPassword, recoveryEmail = "fixture recovery password", "contact@example.invalid"
+	if err := fixtureClientCall(t, checker, "account_updatePasswordSettings.contact.1", func(ctx context.Context, api *tg.Client) error {
+		return setFirstPasswordWithEmail(ctx, api, recoveryPassword, recoveryEmail)
+	}); err != nil {
+		t.Fatalf("set contact password: %v", err)
+	}
+	storedPassword, hasPassword, err := f.store.PasswordByUser(f.ctx, checker.id)
+	if err != nil || !hasPassword {
+		t.Fatalf("load contact password: has_password=%t err=%v", hasPassword, err)
+	}
+	if storedPassword.RecoveryEmail != recoveryEmail || storedPassword.HasRecovery {
+		t.Fatalf("contact password state = {email:%q has_recovery:%t}, want contact email and false recovery flag", storedPassword.RecoveryEmail, storedPassword.HasRecovery)
+	}
+	if err := checker.call(f.ctx, func(ctx context.Context, api *tg.Client) error {
+		state, err := api.AccountGetPassword(ctx)
+		if err != nil {
+			return err
+		}
+		if state.HasRecovery {
+			return errors.New("account.getPassword advertised recovery in contact mode")
+		}
+		settings, err := getPasswordSettingsWithProof(ctx, api, recoveryPassword)
+		if err != nil {
+			return err
+		}
+		if email, present := settings.GetEmail(); !present || email != recoveryEmail {
+			return fmt.Errorf("proved account.getPasswordSettings email = %q (present=%t), want %q", email, present, recoveryEmail)
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("proved contact settings smoke: %v", err)
 	}
 	for _, tc := range []struct {
 		username string
@@ -642,6 +682,48 @@ func testSmokeClientRequestFixtures(t *testing.T) {
 		return nil
 	}); err != nil {
 		t.Fatalf("replay contacts.getStatuses fixture: %v", err)
+	}
+
+	var reactionDocument *tg.Document
+	if err := fixtureClientCall(t, creator, "messages_getAvailableReactions.1", func(ctx context.Context, api *tg.Client) error {
+		result, err := api.MessagesGetAvailableReactions(ctx, 0)
+		if err != nil {
+			return err
+		}
+		available, ok := result.(*tg.MessagesAvailableReactions)
+		if !ok || len(available.Reactions) == 0 {
+			return fmt.Errorf("available reactions = %T, want non-empty *tg.MessagesAvailableReactions", result)
+		}
+		staticIcon, ok := available.Reactions[0].StaticIcon.(*tg.Document)
+		if !ok {
+			return fmt.Errorf("first available reaction static_icon = %T, want *tg.Document", available.Reactions[0].StaticIcon)
+		}
+		reactionDocument = staticIcon
+		return nil
+	}); err != nil {
+		t.Fatalf("replay available-reactions fixture: %v", err)
+	}
+	if err := fixtureClientCall(t, creator, "upload_getFile.2", func(ctx context.Context, api *tg.Client) error {
+		if reactionDocument == nil {
+			return errors.New("available reaction did not provide a document")
+		}
+		result, err := api.UploadGetFile(ctx, &tg.UploadGetFileRequest{
+			Location: &tg.InputDocumentFileLocation{
+				ID: reactionDocument.ID, AccessHash: reactionDocument.AccessHash, FileReference: reactionDocument.FileReference,
+			},
+			Offset: 0,
+			Limit:  262144,
+		})
+		if err != nil {
+			return err
+		}
+		file, ok := result.(*tg.UploadFile)
+		if !ok || len(file.Bytes) == 0 {
+			return fmt.Errorf("reaction upload.getFile = %T, want non-empty *tg.UploadFile", result)
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("replay reaction upload.getFile fixture: %v", err)
 	}
 
 	const savedNote = "client fixture Saved Messages note"
@@ -1376,7 +1458,7 @@ func testSmokeClientRequestFixtures(t *testing.T) {
 	}
 
 	var photoErr error
-	err := fixtureClientCall(t, creator, "messages_sendMedia.3", func(ctx context.Context, api *tg.Client) error {
+	err = fixtureClientCall(t, creator, "messages_sendMedia.3", func(ctx context.Context, api *tg.Client) error {
 		_, photoErr = api.MessagesSendMedia(ctx, &tg.MessagesSendMediaRequest{
 			Peer: peerUser(creator.id, member.id),
 			Media: &tg.InputMediaUploadedPhoto{File: &tg.InputFile{

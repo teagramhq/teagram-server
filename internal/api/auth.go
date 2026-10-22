@@ -487,7 +487,7 @@ func (h *handlers) handleSignInUsername(c *mtproto.Conn, r *mtproto.Request, use
 	}
 
 	// Check whether the user has a verifier (cloud password).
-	_, hasVerifier, err := h.store.PasswordByUser(r.Ctx, resolved.ID)
+	_, hasVerifier, err := h.store.PasswordForAuthenticationByUser(r.Ctx, resolved.ID)
 	if err != nil {
 		h.log.Error("sign in: password lookup", "user_id", resolved.ID, "err", err)
 		return nil, errInternal

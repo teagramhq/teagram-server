@@ -223,6 +223,7 @@ func checkDownloadWindow(offset int64, limit int) error {
 // of them are client mistakes worth no log line.
 type authorizedDownload struct {
 	file                 store.File
+	readChunk            func(ctx context.Context, offset, limit int64) ([]byte, error)
 	photoDerivativeChunk func(ctx context.Context, offset, limit int64) ([]byte, error)
 }
 
@@ -230,10 +231,9 @@ type downloadGate func(ctx context.Context, fileID, callerID int64) (authorizedD
 
 // serveFileChunk is the plumbing every download lane shares: the per-account
 // in-flight slot and its renewal, the lane's authorization, the window, the
-// account and replica rate limits, and one blob read. It is one function so a
-// lane cannot be added that ships half the resource discipline, and so the two
-// lanes' answers to a bad window, an exhausted budget and a busy slot stay
-// identical by construction.
+// account and replica rate limits, and one file read. It is one function so a
+// lane cannot be added that ships half the resource discipline, and so every
+// lane returns the same errors for a bad window, exhausted budget or busy slot.
 //
 // missingBlobIsFault is what a body missing under a row that says stored means
 // on this lane. On the message lane it is a server fault: a file a live message
@@ -316,7 +316,14 @@ func (h *handlers) serveFileChunk(
 	}
 
 	var b []byte
-	if file.PhotoDerivatives != nil {
+	switch {
+	case authorized.readChunk != nil:
+		b, err = authorized.readChunk(operationCtx, offset, n)
+		if err != nil {
+			h.log.Error("read built-in file", "file_id", file.ID, "err", err)
+			return nil, errInternal
+		}
+	case file.PhotoDerivatives != nil:
 		b, err = authorized.photoDerivativeChunk(operationCtx, offset, n)
 		if errors.Is(err, store.ErrFileNotFound) {
 			return nil, errLocationInvalid
@@ -325,7 +332,7 @@ func (h *handlers) serveFileChunk(
 			h.log.Error("read photo derivative", "file_id", file.ID, "err", err)
 			return nil, errInternal
 		}
-	} else {
+	default:
 		b, err = h.blobs.ReadAt(operationCtx, blob.Key(file.ID), offset, n)
 		if err != nil {
 			if *missingBlobIsFault || !errors.Is(err, blob.ErrNotFound) {
@@ -354,8 +361,8 @@ func (h *handlers) serveFileChunk(
 	}, nil
 }
 
-// handleGetFile serves upload.getFile: one byte range of one stored file, to a
-// caller entitled through a live message or a profile-photo gallery entry.
+// handleGetFile serves upload.getFile: one byte range from a built-in reaction
+// document, a live message file or a profile-photo gallery entry.
 func (h *handlers) handleGetFile(r *mtproto.Request) (bin.Encoder, error) {
 	var req tg.UploadGetFileRequest
 	if err := req.Decode(r.Buf); err != nil {
@@ -379,6 +386,9 @@ func (h *handlers) handleGetFile(r *mtproto.Request) (bin.Encoder, error) {
 	}
 	missingBlobIsFault := true
 	gate := h.messageFileGate(loc)
+	if loc.fileID < 0 && !loc.photo {
+		gate = h.builtInReactionFileGate(loc)
+	}
 	if loc.photo && loc.hasGalleryOwner {
 		galleryGate := h.galleryPhotoFileGate(loc.galleryOwnerID, loc.accessHash, loc.thumbSize)
 		messageGate := gate

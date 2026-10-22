@@ -489,11 +489,19 @@ func (q *Queries) SweepExpiredAuthorizationBatch(ctx context.Context, batch int3
 }
 
 const touchAuthKey = `-- name: TouchAuthKey :exec
-UPDATE auth_keys SET last_seen_at = now() WHERE id = $1
+UPDATE auth_keys
+SET last_seen_at = now(),
+    ip = CASE WHEN $1::boolean THEN ip ELSE NULL END
+WHERE id = $2
 `
 
-func (q *Queries) TouchAuthKey(ctx context.Context, id int64) error {
-	_, err := q.db.Exec(ctx, touchAuthKey, id)
+type TouchAuthKeyParams struct {
+	StoreIp bool
+	ID      int64
+}
+
+func (q *Queries) TouchAuthKey(ctx context.Context, arg TouchAuthKeyParams) error {
+	_, err := q.db.Exec(ctx, touchAuthKey, arg.StoreIp, arg.ID)
 	return err
 }
 
@@ -501,36 +509,37 @@ const touchAuthKeyWithIP = `-- name: TouchAuthKeyWithIP :exec
 UPDATE auth_keys
 SET last_seen_at = now(),
     ip = CASE
+        WHEN $1::text IS NULL THEN NULL
         WHEN user_id IS NULL THEN NULL
-        WHEN user_id = NULLIF($1::bigint, 0) THEN $2
+        WHEN user_id = NULLIF($2::bigint, 0) THEN $1::text
         ELSE ip
     END,
     device_model = CASE
-        WHEN user_id = NULLIF($1::bigint, 0)
+        WHEN user_id = NULLIF($2::bigint, 0)
             AND $3::boolean
             AND device_model IS DISTINCT FROM $4::text
         THEN $4::text ELSE device_model
     END,
     platform = CASE
-        WHEN user_id = NULLIF($1::bigint, 0)
+        WHEN user_id = NULLIF($2::bigint, 0)
             AND $3::boolean
             AND platform IS DISTINCT FROM $5::text
         THEN $5::text ELSE platform
     END,
     system_version = CASE
-        WHEN user_id = NULLIF($1::bigint, 0)
+        WHEN user_id = NULLIF($2::bigint, 0)
             AND $3::boolean
             AND system_version IS DISTINCT FROM $6::text
         THEN $6::text ELSE system_version
     END,
     api_id = CASE
-        WHEN user_id = NULLIF($1::bigint, 0)
+        WHEN user_id = NULLIF($2::bigint, 0)
             AND $3::boolean
             AND api_id IS DISTINCT FROM $7::integer
         THEN $7::integer ELSE api_id
     END,
     app_version = CASE
-        WHEN user_id = NULLIF($1::bigint, 0)
+        WHEN user_id = NULLIF($2::bigint, 0)
             AND $3::boolean
             AND app_version IS DISTINCT FROM $8::text
         THEN $8::text ELSE app_version
@@ -539,8 +548,8 @@ WHERE id = $9
 `
 
 type TouchAuthKeyWithIPParams struct {
-	ExpectedUserID int64
 	Ip             *string
+	ExpectedUserID int64
 	UpdateMetadata bool
 	DeviceModel    string
 	Platform       string
@@ -552,8 +561,8 @@ type TouchAuthKeyWithIPParams struct {
 
 func (q *Queries) TouchAuthKeyWithIP(ctx context.Context, arg TouchAuthKeyWithIPParams) error {
 	_, err := q.db.Exec(ctx, touchAuthKeyWithIP,
-		arg.ExpectedUserID,
 		arg.Ip,
+		arg.ExpectedUserID,
 		arg.UpdateMetadata,
 		arg.DeviceModel,
 		arg.Platform,

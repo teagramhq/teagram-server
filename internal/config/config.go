@@ -30,11 +30,16 @@ import (
 // RegistrationMode controls whether new accounts can be created via auth.signUp.
 type RegistrationMode string
 
+// RecoveryEmailMode controls whether client-supplied recovery emails are retained.
+type RecoveryEmailMode string
+
 const (
-	RegistrationClosed   RegistrationMode = "closed"
-	RegistrationInvite   RegistrationMode = "invite"
-	RegistrationOpen     RegistrationMode = "open"
-	DefaultUploadPartTTL                  = 6 * time.Hour
+	RegistrationClosed   RegistrationMode  = "closed"
+	RegistrationInvite   RegistrationMode  = "invite"
+	RegistrationOpen     RegistrationMode  = "open"
+	RecoveryEmailOff     RecoveryEmailMode = "off"
+	RecoveryEmailContact RecoveryEmailMode = "contact"
+	DefaultUploadPartTTL                   = 6 * time.Hour
 )
 
 // Config holds server configuration.
@@ -78,6 +83,8 @@ type Config struct {
 	AdvertiseDemoGuestSignUp bool
 	// RegistrationMode controls whether auth.signUp is available.
 	RegistrationMode RegistrationMode
+	// RecoveryEmailMode controls whether password changes retain a contact email.
+	RecoveryEmailMode RecoveryEmailMode
 	// PublicRegistrationMode controls auth.signUp on the public WebSocket
 	// listener. It defaults to closed so enabling that listener alone cannot
 	// open registration.
@@ -117,6 +124,13 @@ type Config struct {
 	// process output, and the code alone signs in any account that has no
 	// 2FA cloud password — one with a password still needs the SRP step.
 	LogLoginCodes bool
+	// SessionIP controls whether client addresses are stored on authorization
+	// rows and returned by account.getAuthorizations. It defaults off.
+	SessionIP bool
+	// SessionDeviceLabels controls whether initConnection device and app labels
+	// are stored on authorization rows and returned by account.getAuthorizations.
+	// It defaults on for compatibility with existing device management behavior.
+	SessionDeviceLabels bool
 	// MaxFileBytes caps one uploaded file. A user's outstanding unassembled
 	// bytes are capped at twice this, which is two concurrent max-size uploads.
 	MaxFileBytes int64
@@ -773,6 +787,20 @@ func LoadServerConfig(log *slog.Logger) (Config, error) {
 	return cfg, nil
 }
 
+func loadRecoveryEmailMode() (RecoveryEmailMode, error) {
+	raw, ok := os.LookupEnv("TG_RECOVERY_EMAIL")
+	if !ok {
+		return RecoveryEmailOff, nil
+	}
+	mode := RecoveryEmailMode(raw)
+	switch mode {
+	case RecoveryEmailOff, RecoveryEmailContact:
+		return mode, nil
+	default:
+		return "", errors.New("TG_RECOVERY_EMAIL must be exactly off or contact")
+	}
+}
+
 // Load reads configuration from environment variables, applying defaults. The
 // logger is used only when a missing auth-key master key file is generated for
 // a non-replica development start, which has to be logged as such.
@@ -785,6 +813,10 @@ func Load(log *slog.Logger) (Config, error) {
 		if _, ok := os.LookupEnv(name); ok {
 			return Config{}, fmt.Errorf("%s is no longer supported", name)
 		}
+	}
+	recoveryEmailMode, err := loadRecoveryEmailMode()
+	if err != nil {
+		return Config{}, err
 	}
 	identity, err := loadClientIdentityConfig()
 	if err != nil {
@@ -854,7 +886,9 @@ func Load(log *slog.Logger) (Config, error) {
 		ProfileReceiptRetention:         ProfileIdentifierRetentionFloor,
 		ProfileDeleteOperationRetention: ProfileIdentifierRetentionFloor,
 
-		RegistrationMode: RegistrationClosed,
+		RegistrationMode:    RegistrationClosed,
+		RecoveryEmailMode:   recoveryEmailMode,
+		SessionDeviceLabels: true,
 	}
 	turnstile, err := loadTurnstileConfig()
 	if err != nil {
@@ -1077,6 +1111,20 @@ func Load(log *slog.Logger) (Config, error) {
 			return Config{}, errors.New("TG_LOG_LOGIN_CODES must be a boolean")
 		}
 		cfg.LogLoginCodes = on
+	}
+	if v := os.Getenv("TG_SESSION_IP"); v != "" {
+		on, err := strconv.ParseBool(v)
+		if err != nil {
+			return Config{}, errors.New("TG_SESSION_IP must be a boolean")
+		}
+		cfg.SessionIP = on
+	}
+	if v := os.Getenv("TG_SESSION_DEVICE_LABELS"); v != "" {
+		on, err := strconv.ParseBool(v)
+		if err != nil {
+			return Config{}, errors.New("TG_SESSION_DEVICE_LABELS must be a boolean")
+		}
+		cfg.SessionDeviceLabels = on
 	}
 	// TG_REGISTRATION resolves the registration mode.
 	cfg.RegistrationMode = registrationMode(os.Getenv("TG_REGISTRATION"))

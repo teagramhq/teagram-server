@@ -56,9 +56,12 @@ Configuration is read from environment variables in `internal/config/config.go`:
 | `TG_RATE_LIMIT_DISCOVERY_IP` | `10` | Valid local-direct preflight response attempts per client network (`/32` for IPv4 or `/64` for IPv6) per fixed window, shared through Postgres; `0` disables this bound |
 | `TG_RATE_LIMIT_DISCOVERY_IP_WINDOW` | `1m` | Fixed window for the per-network discovery bound; it must be positive while that bound is enabled |
 | `TG_LOG_LOGIN_CODES`| `false`          | Legacy login-code diagnostic. It is not used by Teagram username/password sign-in; leave it disabled. A non-boolean value fails startup |
+| `TG_SESSION_IP` | `false` | Store session IPs and return them in `account.getAuthorizations`. Unset means no session IP stored by default; a non-boolean value fails startup |
+| `TG_SESSION_DEVICE_LABELS` | `true` | Store and return device model, platform, OS version, API ID, and app version for sessions. A non-boolean value fails startup |
 | `TG_REGISTRATION`   | `closed`         | Accepted values are `closed`, `invite`, and `open`. `closed` rejects `auth.signUp`, `invite` requires an operator-issued invite, and `open` admits usernames without one. An unrecognized value fails startup. Sign-in for accounts that already exist is unaffected by this setting |
 | `TG_PUBLIC_REGISTRATION` | `closed` | Registration mode for the public WebSocket listener only. Defaults to `closed` even when `TG_REGISTRATION=open`; use `invite` to require an operator-issued invite |
 | `TG_WELCOME_CHANNEL` | *(unset)* | Optional handle of a public broadcast channel joined by new accounts after `auth.signUp`; invalid targets are skipped with a warning |
+| `TG_RECOVERY_EMAIL` | `off` | Exact lowercase `off` or `contact`; any other set value, including empty or whitespace, fails startup. `off` discards emails sent with a password set/change. `contact` retains them for operator-assisted reset; no mail transport or automated recovery RPC is provided |
 | `TG_TURNSTILE_SITE_KEY` | *(unset)* | Public Cloudflare Turnstile widget key. Required together with one secret source to enable the `auth.signUp` challenge |
 | `TG_TURNSTILE_SECRET_KEY` | *(unset)* | Private Siteverify key supplied directly through the environment; prefer the file form |
 | `TG_TURNSTILE_SECRET_KEY_FILE` | *(unset)* | Preferred file containing the Siteverify key. The gate stays disabled when both secret sources and the site key are unset |
@@ -78,6 +81,30 @@ Configuration is read from environment variables in `internal/config/config.go`:
 | `TG_MAX_CONNS_PER_UNBOUND_KEY`| `8`  | Concurrent connections one auth key with nobody signed in on it may hold, divided by `TG_REPLICA_COUNT` and enforced in each replica's memory. It covers the population between pre-auth connections and signed-in sessions. A connection is charged only once a frame has decrypted under the key. Past the cap the frame in hand is answered and the socket is then closed. `0` disables it; a negative or non-integer value fails startup |
 | `TG_MAX_PENDING_LOGIN_CONNS`| `1024` | Cluster-wide concurrent connections waiting for `auth.checkPassword` after `SESSION_PASSWORD_NEEDED`, held in Postgres leases. A pending connection remains counted in the unbound-key hold and this cap, and receives a single ten-minute absolute read lease (`2 × srp.DefaultTTL`); activity never refreshes it. The SRP challenge still expires after five minutes. Past the cap the connection is closed immediately. `0` disables it; a negative or non-integer value fails startup |
 | `TG_CLIENT_ADDR_PROXY_CIDRS`| *(unset)* | Comma-separated addresses or CIDRs (`10.0.0.0/8, 192.0.2.7`) of the balancers a PROXY protocol v2 header is accepted from. An IPv4-mapped entry takes its IPv4 meaning (`::ffff:192.0.2.0/120` is `192.0.2.0/24`), since peer addresses are matched unmapped; one too short to name an IPv4 network fails startup rather than starting and matching nothing. Required by, and only read in, `TG_CLIENT_ADDR_TRUST=proxy-v2`: an empty list there fails startup, and a list set in `socket` mode does too, since it means the balancer is in place but every client is being keyed on its address. Both directions then fail closed — a connection from a listed balancer without a valid v2 header is dropped rather than served on the balancer's address, and a header from anywhere else is dropped rather than believed. Only v2: the v1 text form is refused. An address is read only from `PROXY` over `AF_INET`/`AF_INET6` with the `STREAM` transport; the two headers that name no client — the `LOCAL` command a health check sends, and `AF_UNSPEC` — connect but carry no address and so cannot call `auth.sendCode`; every other family or transport is refused. Keep this list to the balancer addresses, not a VPC or subnet range: a connection whose header names no client is charged to no bucket, so anything inside an allowlisted CIDR can send a `LOCAL`/`AF_UNSPEC` header and sit outside `TG_MAX_PREAUTH_CONNS_PER_IP` entirely — with `10.0.0.0/8` that is every workload in the network, with the balancer's own addresses it is the balancer |
+
+The session metadata settings are deployment-wide and must have the same values
+on every replica. With `TG_SESSION_IP=false`, the accurate claim is **no session
+IP stored by default**, not “no IP collected”: the server still processes
+addresses in memory for pre-auth connection caps, PROXY-v2 parsing, and
+IP-keyed abuse counters. Those counters retain `/32` IPv4 or `/64` IPv6 prefixes
+for their configured windows (including the 1-hour and 24-hour abuse counters);
+the deterministic `rate_limits` FNV key is enumerable for IPv4 and is
+pseudonymous, not anonymous. In `proxy-v2` mode, enabled Turnstile verification
+still sends the client IP to Cloudflare.
+
+Disabling session IP collection hides stored IPs from `account.getAuthorizations`
+immediately and clears them on the next activity touch, logout, revocation, or
+inactivity expiry. An idle session that is never touched again can retain its
+historical IP at rest until its normal lifecycle clears it. The switch does not
+bulk erase or backfill rows. Slow-query logs that include bind values (default
+threshold 250 ms) and pre-deploy database dumps can also retain values written
+before the switch.
+
+Device and app labels, including the API ID, are stored and visible to the
+operator while `TG_SESSION_DEVICE_LABELS=true`. Turning it off hides those
+fields in `account.getAuthorizations` and stops future writes; it does not bulk
+erase historical labels. Turning either setting back on resumes collection for
+new writes without backfilling older rows.
 
 When `TG_WEBSOCKET_LISTEN_ADDR` is set, configure
 `TG_WEBSOCKET_ALLOWED_ORIGINS` with the browser origins that may connect to
@@ -404,6 +431,31 @@ phone code is used.
 
 `TG_LOG_LOGIN_CODES` is a legacy diagnostic option, not a Teagram sign-in
 step. Leave it disabled for Teagram clients.
+
+### Recovery-email retention
+
+`TG_RECOVERY_EMAIL` defaults to `off`. In that mode, setting or changing a
+password writes a NULL recovery email, and password settings never return an
+email. `account.getPassword` always reports `has_recovery=false`. Set
+`TG_RECOVERY_EMAIL=contact` to retain the email supplied with a password set or
+change. It is unverified, stored in plaintext, and returned only by
+`account.getPasswordSettings` after a valid SRP proof. The server sends no mail
+and has no automated recovery RPC.
+
+Email-only `account.updatePasswordSettings` calls remain accepted no-ops. They
+cannot add, replace, or remove an email, and they do not change the password.
+Switching to `off` stops future email writes and responses while preserving
+existing rows; switching back to `contact` exposes any retained row again and
+does not backfill missing emails. The local `teagramd admin set-password`
+command changes the password verifier and leaves its recovery-email row
+untouched.
+
+An operator can read `contact` emails from the database. The verifier is sealed
+at rest; the email is not. The email is not proof of identity: authenticate a
+reset requester through a separate channel or factor before using
+`teagramd admin set-password`. A database dump made before switching to `off`
+continues to contain emails stored at dump time. A slow password upsert can
+also include bound values in the slow-query log.
 
 ## 5. Register a username account
 

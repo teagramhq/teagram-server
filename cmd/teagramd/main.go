@@ -170,6 +170,8 @@ func runAdminCommandWithEUID(args []string, stdin io.Reader, stderr io.Writer, e
 		store.WithLogger(quietLog),
 		store.WithPoolConfig(cfg.PostgresPool),
 		store.WithStatementTimeout(cfg.StatementTimeout),
+		store.WithSessionIP(cfg.SessionIP),
+		store.WithSessionDeviceLabels(cfg.SessionDeviceLabels),
 		store.WithoutBlobStore(),
 	)
 	if err != nil {
@@ -272,6 +274,8 @@ func runAdminCreateUserCommand(args []string, stdin io.Reader, stderr io.Writer)
 		store.WithLogger(quietLog),
 		store.WithPoolConfig(cfg.PostgresPool),
 		store.WithStatementTimeout(cfg.StatementTimeout),
+		store.WithSessionIP(cfg.SessionIP),
+		store.WithSessionDeviceLabels(cfg.SessionDeviceLabels),
 		store.WithoutBlobStore(),
 	)
 	if err != nil {
@@ -372,6 +376,8 @@ func runMaintenanceCommand(args []string, log *slog.Logger, _ io.Writer, stderr 
 		store.WithLogger(log),
 		store.WithPoolConfig(cfg.PostgresPool),
 		store.WithStatementTimeout(cfg.StatementTimeout),
+		store.WithSessionIP(cfg.SessionIP),
+		store.WithSessionDeviceLabels(cfg.SessionDeviceLabels),
 		store.WithoutBlobStore(),
 	)
 	if err != nil {
@@ -495,6 +501,8 @@ func runInviteCommand(args []string, log *slog.Logger, stdout, stderr io.Writer)
 		store.WithLogger(log),
 		store.WithPoolConfig(cfg.PostgresPool),
 		store.WithStatementTimeout(cfg.StatementTimeout),
+		store.WithSessionIP(cfg.SessionIP),
+		store.WithSessionDeviceLabels(cfg.SessionDeviceLabels),
 		store.WithoutBlobStore(),
 	)
 	if err != nil {
@@ -666,7 +674,9 @@ func runAtBlobModePath(log *slog.Logger, blobModePath string) error {
 
 	st, err := store.Open(ctx, cfg.PostgresDSN, cfg.AuthKeyEncKey, store.WithLogger(log), store.WithBlobStore(blobs),
 		store.WithPoolConfig(cfg.PostgresPool),
-		store.WithStatementTimeout(cfg.StatementTimeout))
+		store.WithStatementTimeout(cfg.StatementTimeout),
+		store.WithSessionIP(cfg.SessionIP),
+		store.WithSessionDeviceLabels(cfg.SessionDeviceLabels))
 	if err != nil {
 		return err
 	}
@@ -802,7 +812,7 @@ func runAtBlobModePath(log *slog.Logger, blobModePath string) error {
 			st, cfg.DCID, tgcfg, log, cfg.LogLoginCodes, cfg.MaxFileBytes, blobs,
 			cfg.MaxUserStorageBytes, peers, photos, cfg.RateLimits, registrationMode,
 			dialogFilterSync, photoThumbs, cfg.UploadPartTTL, turnstileSiteKey,
-			verifier, cfg.WelcomeChannel, turnstileSignInEnabled, notifyMetrics,
+			verifier, cfg.WelcomeChannel, turnstileSignInEnabled, cfg.RecoveryEmailMode, notifyMetrics,
 		)
 	}
 	if cfg.LogLoginCodes {

@@ -1037,6 +1037,55 @@ func TestProfileUploadReceiptPrecedesPartsAllocationAndCap(t *testing.T) {
 	}
 }
 
+func TestDeletingCurrentProfilePhotoFreesGalleryCapacity(t *testing.T) {
+	t.Parallel()
+	f := newProfileFixture(t)
+	ctx := context.Background()
+
+	profilePartsT(t, f.s, f.owner, 7, part('a', 100), part('b', 100))
+	first, err := f.upload(7, 2, 2, 1<<30)
+	if err != nil {
+		t.Fatalf("upload first photo: %v", err)
+	}
+	profilePartsT(t, f.s, f.owner, 8, part('c', 100), part('d', 100))
+	second, err := f.upload(8, 2, 2, 1<<30)
+	if err != nil {
+		t.Fatalf("upload second photo: %v", err)
+	}
+
+	profilePartsT(t, f.s, f.owner, 9, part('e', 100), part('f', 100))
+	if _, err := f.upload(9, 2, 2, 1<<30); !errors.Is(err, store.ErrProfileGalleryCap) {
+		t.Fatalf("upload at gallery cap: want ErrProfileGalleryCap, got %v", err)
+	}
+
+	deleted, err := f.s.DeleteProfilePhotos(ctx, f.owner, []int64{second.File.ID})
+	if err != nil {
+		t.Fatalf("delete current photo: %v", err)
+	}
+	if len(deleted) != 1 || deleted[0] != second.File.ID {
+		t.Fatalf("deleted ids = %v, want [%d]", deleted, second.File.ID)
+	}
+	cleared := profileSnapshot(t, ctx, f.dsn, f.owner, 8)
+	if cleared.galleryRows != 1 || cleared.currentFile.Valid {
+		t.Fatalf("deleting the current photo promoted another entry: %+v", cleared)
+	}
+	if cleared.receiptState != 2 || cleared.fileRows != 2 || cleared.chargedBytes != 2*profilePhotoSize || !f.blobHas(second.File.ID) {
+		t.Fatalf("deletion did not terminalize the receipt while retaining file bytes: %+v", cleared)
+	}
+
+	third, err := f.upload(9, 2, 2, 1<<30)
+	if err != nil {
+		t.Fatalf("retry upload after a gallery slot was freed: %v", err)
+	}
+	if third.File.ID == first.File.ID || third.File.ID == second.File.ID {
+		t.Fatalf("new photo reused a deleted or existing file id: %d", third.File.ID)
+	}
+	after := profileSnapshot(t, ctx, f.dsn, f.owner, 9)
+	if after.galleryRows != 2 || after.currentFile.Int64 != third.File.ID {
+		t.Fatalf("freed gallery slot was not reusable: %+v", after)
+	}
+}
+
 // TestProfileUploadFailedPutLeavesNoLiveGallery is the failure criterion: the
 // blob write fails and nothing about the upload is visible. No gallery entry, no
 // selection change, no stored row, no object in the blob store.
