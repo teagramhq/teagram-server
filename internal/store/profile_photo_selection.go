@@ -26,26 +26,36 @@ func (s *Store) SelectProfilePhoto(ctx context.Context, ownerID, fileID int64) (
 	if !ok || fileID < 1 {
 		return File{}, false, ErrProfilePhotoUnavailable
 	}
-	conn, err := s.pool.Acquire(ctx)
+	lockCtx, cancel := context.WithTimeout(ctx, profilePhotoSelectionLockWait)
+	defer cancel()
+	lockWaitExpired := func() bool {
+		return ctx.Err() == nil && errors.Is(lockCtx.Err(), context.DeadlineExceeded)
+	}
+
+	conn, err := s.pool.Acquire(lockCtx)
 	if err != nil {
+		if lockWaitExpired() {
+			return File{}, false, ErrProfilePhotoBusy
+		}
 		return File{}, false, fmt.Errorf("profile photo selection: acquire connection: %w", err)
 	}
 	defer conn.Release()
 
-	tx, err := conn.Begin(ctx)
+	tx, err := conn.Begin(lockCtx)
 	if err != nil {
+		if lockWaitExpired() {
+			return File{}, false, ErrProfilePhotoBusy
+		}
 		return File{}, false, fmt.Errorf("profile photo selection: begin transaction: %w", err)
 	}
 	defer func() { _ = tx.Rollback(context.Background()) }() //nolint:errcheck // no-op after commit
 
-	lockCtx, cancel := context.WithTimeout(ctx, profilePhotoSelectionLockWait)
-	defer cancel()
 	for {
 		var acquired bool
 		if err := tx.QueryRow(lockCtx,
 			`SELECT pg_try_advisory_xact_lock($1::int, $2::int)`, class, obj,
 		).Scan(&acquired); err != nil {
-			if ctx.Err() == nil && errors.Is(lockCtx.Err(), context.DeadlineExceeded) {
+			if lockWaitExpired() {
 				return File{}, false, ErrProfilePhotoBusy
 			}
 			return File{}, false, fmt.Errorf("profile photo selection: acquire profile-domain lock: %w", err)

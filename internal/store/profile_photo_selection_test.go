@@ -8,7 +8,9 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/teagramhq/teagram-server/internal/pgtest"
 	"github.com/teagramhq/teagram-server/internal/store"
 )
 
@@ -173,6 +175,75 @@ func TestProfilePhotoSelectionTimesOutOnProfileLockWithoutMessagingLock(t *testi
 	if _, changed, err := f.s.SelectProfilePhoto(ctx, f.owner, photo.File.ID); err != nil || changed {
 		t.Fatalf("selection after profile lock release = changed %t, err %v; want a usable pool connection and a no-op", changed, err)
 	}
+}
+
+func TestProfilePhotoSelectionBoundsPoolAcquireWithProfileLockHeld(t *testing.T) {
+	t.Parallel()
+	f := newProfileFixtureWithPool(t, 2)
+	ctx := context.Background()
+
+	holder, err := pgx.Connect(ctx, f.dsn)
+	if err != nil {
+		t.Fatalf("connect profile-lock holder: %v", err)
+	}
+	defer func() {
+		if err := holder.Close(context.Background()); err != nil {
+			t.Errorf("close profile-lock holder: %v", err)
+		}
+	}()
+	if _, err := holder.Exec(ctx, `SELECT pg_advisory_lock($1::int, $2::int)`, store.ProfileLockDomain, f.owner); err != nil {
+		t.Fatalf("hold profile-domain lock: %v", err)
+	}
+
+	pool := store.StorePool(f.s)
+	held := make([]*pgxpool.Conn, 0, pool.Config().MaxConns)
+	defer func() {
+		for _, conn := range held {
+			conn.Release()
+		}
+	}()
+	for range pool.Config().MaxConns {
+		conn, err := pool.Acquire(ctx)
+		if err != nil {
+			t.Fatalf("saturate profile selection pool: %v", err)
+		}
+		held = append(held, conn)
+	}
+
+	selectionCtx, cancel := context.WithTimeout(ctx, 750*time.Millisecond)
+	defer cancel()
+	started := time.Now()
+	_, _, err = f.s.SelectProfilePhoto(selectionCtx, f.owner, 1)
+	if !errors.Is(err, store.ErrProfilePhotoBusy) {
+		t.Fatalf("selection while the pool and profile lock are held = %v, want ErrProfilePhotoBusy", err)
+	}
+	if elapsed := time.Since(started); elapsed >= 750*time.Millisecond {
+		t.Fatalf("pool-pressure selection waited %s, want less than its caller deadline", elapsed)
+	}
+}
+
+func newProfileFixtureWithPool(t *testing.T, maxConns int32) *profileFixture {
+	t.Helper()
+	ctx := context.Background()
+	dsn := pgtest.DSN(t)
+	blobs := newProfileBlobs(t)
+	s, err := store.Open(ctx, dsn, pgtest.EncKey(),
+		store.WithBlobStore(blobs),
+		store.WithPoolConfig(store.PoolConfig{MaxConns: maxConns, MaxConnIdleTime: time.Minute}),
+	)
+	if err != nil {
+		t.Fatalf("open store with %d pool connections: %v", maxConns, err)
+	}
+	t.Cleanup(func() {
+		if err := s.Close(); err != nil {
+			t.Errorf("close: %v", err)
+		}
+	})
+	owner, err := s.CreateUser(ctx, "+15559300131")
+	if err != nil {
+		t.Fatalf("create owner: %v", err)
+	}
+	return &profileFixture{t: t, dsn: dsn, s: s, blobs: blobs, owner: owner.ID}
 }
 
 func profileMessagingOwnerLocks(t *testing.T, ctx context.Context, conn *pgx.Conn, ownerID int64) int {
