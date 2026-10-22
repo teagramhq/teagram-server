@@ -514,15 +514,21 @@ if [ "${{1:-}}" = inspect ] && [[ " $* " == *"project.config_files"* ]]; then
 fi
 if [ "${{1:-}}" = inspect ] && [[ " $* " == *"{{json .}}"* ]]; then
   shift 3
+  inspect_fixture="${{MOCK_AUTHORITY_INSPECT:?}}"
+  if [[ "${{COMPOSE_FILE:-}}" != *docker-compose.local-blobs.yml* ]] \
+    && [ -n "${{MOCK_S3_AUTHORITY_INSPECT:-}}" ]; then
+    inspect_fixture="$MOCK_S3_AUTHORITY_INSPECT"
+  fi
   python3 -c '
 import json, os, sys
-wanted = sys.argv[1:]
-rows = [json.loads(line) for line in open(os.environ["MOCK_AUTHORITY_INSPECT"], encoding="utf-8") if line]
+inspect_fixture = sys.argv[1]
+wanted = sys.argv[2:]
+rows = [json.loads(line) for line in open(inspect_fixture, encoding="utf-8") if line]
 for item in wanted:
     for row in rows:
         if row.get("Id") == item:
             print(json.dumps(row, separators=(",", ":")))
-' "$@"
+' "$inspect_fixture" "$@"
   exit 0
 fi
 if [ "${{1:-}}" = network ] && [ "${{2:-}}" = inspect ]; then
@@ -959,7 +965,17 @@ class BlobTransitionRunnerFixtures(unittest.TestCase):
             else self.local_compose_json
         )
         live_authority_inspect = self.write_live_authority_inspect(
-            live_compose_path, live_ps, scenario
+            live_compose_path, live_ps, scenario, "live-authority-inspect.jsonl"
+        )
+        s3_authority_inspect = (
+            live_authority_inspect
+            if current_outcome == "s3-accepted"
+            else self.write_live_authority_inspect(
+                self.bundle / "candidate-compose.json",
+                live_ps,
+                scenario,
+                "s3-authority-inspect.jsonl",
+            )
         )
         live_names = (
             ("docker-compose.yml", "docker-compose.override.yml")
@@ -985,6 +1001,7 @@ class BlobTransitionRunnerFixtures(unittest.TestCase):
         environment["MOCK_FROZEN_INSPECT"] = str(frozen_inspect)
         environment["MOCK_LIVE_PS"] = str(live_ps)
         environment["MOCK_AUTHORITY_INSPECT"] = str(live_authority_inspect)
+        environment["MOCK_S3_AUTHORITY_INSPECT"] = str(s3_authority_inspect)
         environment["MOCK_LIVE_COMPOSE_FILES"] = live_compose_files.read_text(encoding="utf-8").rstrip("\n")
         environment["MOCK_SOURCE_VOLUME_MOUNTPOINT"] = (
             "/var/lib/docker/volumes/teagram-server_tgblobs/_data"
@@ -1077,6 +1094,7 @@ class BlobTransitionRunnerFixtures(unittest.TestCase):
         compose_path: Path,
         live_ps_path: Path,
         scenario: str,
+        filename: str = "live-authority-inspect.jsonl",
     ) -> Path:
         compose = json.loads(compose_path.read_text(encoding="utf-8"))
         project = compose["name"]
@@ -1161,7 +1179,7 @@ class BlobTransitionRunnerFixtures(unittest.TestCase):
                 "Mounts": mounts,
                 "NetworkSettings": {"Networks": attached, "Ports": {}},
             })
-        path = self.root / "live-authority-inspect.jsonl"
+        path = self.root / filename
         path.write_text(
             "".join(json.dumps(container, sort_keys=True) + "\n" for container in containers),
             encoding="utf-8",
@@ -1410,7 +1428,7 @@ class BlobTransitionRunnerFixtures(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("running-rustfs-network", result.stderr)
         events = self.events.read_text(encoding="utf-8")
-        self.assertNotIn("compose run --rm --no-deps blob-migrate", events)
+        self.assertNotIn("blob-migrate --manifest stdout", events)
         self.assertIn("compose stop rustfs", events)
         records, _head, _mode = mode_fixtures.blob_mode.read_authority(self.state_dir, self.report_root)
         self.assertEqual(records[-1]["outcome"], "initial-local")

@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import os
+import re
 import subprocess
 import tempfile
 import unittest
@@ -66,6 +67,21 @@ class PlaywrightAptCacheTests(unittest.TestCase):
             "bash .github/scripts/prepare-playwright-apt-cache.sh .apt-cache",
             workflow,
         )
+
+    def test_network_install_retry_budget_covers_slow_archive_mirrors(self) -> None:
+        workflow = WORKFLOW.read_text(encoding="utf-8")
+        job = re.search(
+            r"(?ms)^  e2e-admin:\n(.*?)(?=^  [a-z0-9-]+:|\Z)", workflow
+        )
+        self.assertIsNotNone(job, "e2e-admin job is missing")
+        step = re.search(
+            r"(?ms)^      - name: Install the system dependencies from the network\n(.*?)(?=^      - name:|\Z)",
+            job.group(1),
+        )
+        self.assertIsNotNone(step, "network dependency install step is missing")
+        self.assertIn("timeout-minutes: 20", step.group(1))
+        self.assertIn("timeout --signal=KILL 9m", step.group(1))
+        self.assertIn("timeout-minutes: 35", job.group(1))
 
 
 if __name__ == "__main__":

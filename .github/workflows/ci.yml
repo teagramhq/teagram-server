@@ -2325,7 +2325,7 @@ jobs:
           trap cleanup_rustfs_e2e_forwarder EXIT
           docker run --detach --rm --name "$forwarder_name" \
             --network "$rustfs_network" --publish 127.0.0.1::9009 \
-            mirror.gcr.io/library/busybox:1.37 \
+            "$BUSYBOX_IMAGE" \
             sh -c 'while true; do nc -lk -p 9009 -e nc rustfs 9000; done' >/dev/null
           docker network connect "$default_network" "$forwarder_name"
           rustfs_proxy_port=$(docker inspect "$forwarder_name" \
