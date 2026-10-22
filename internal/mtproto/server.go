@@ -523,8 +523,11 @@ acceptLoop:
 func (s *Server) serveSocket(sock net.Conn, slot *preAuthSlot) {
 	closeDiagnostics := newTransportCloseDiagnostics(transportTCP)
 	var closeErr error
+	logCloseDiagnostics := true
 	defer func() {
-		s.logTransportClose(closeDiagnostics, closeErr)
+		if logCloseDiagnostics {
+			s.logTransportClose(closeDiagnostics, closeErr)
+		}
 	}()
 	defer slot.clear()
 
@@ -639,6 +642,7 @@ func (s *Server) serveSocket(sock net.Conn, slot *preAuthSlot) {
 		return
 	}
 	if probe.matched {
+		logCloseDiagnostics = false
 		discoveryCtx, cancel := context.WithDeadline(readCtx, handshakeDeadline)
 		allowed, err := s.discovery.allowContext(discoveryCtx, addr)
 		cancel()

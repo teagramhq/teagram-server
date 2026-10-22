@@ -2,7 +2,10 @@ package mtproto
 
 import (
 	"context"
+	"crypto/rand"
+	"crypto/rsa"
 	"errors"
+	"io"
 	"log/slog"
 	"net"
 	"testing"
@@ -10,6 +13,8 @@ import (
 
 	"github.com/coder/websocket"
 	"github.com/gotd/td/exchange"
+
+	"github.com/teagramhq/teagram-server/internal/discovery"
 )
 
 func TestServeSocketLogsCloseBeforeCodecDetection(t *testing.T) {
@@ -140,6 +145,83 @@ func TestServeWebSocketLogsCloseBeforeCodecDetection(t *testing.T) {
 				t.Fatalf("transport close records = %d, want one: %+v", len(closeRecords), closeRecords)
 			}
 			return
+		}
+	}
+}
+
+func TestServeSocketSkipsTransportCloseLogForDiscoveryPreflight(t *testing.T) {
+	rsaKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatalf("generate RSA key: %v", err)
+	}
+	sink := &serverErrorLogSink{}
+	server := New(exchange.PrivateKey{RSA: rsaKey}, 2, NewMemoryAuthKeyStore(), nil, slog.New(sink))
+	listener, err := (&net.ListenConfig{}).Listen(t.Context(), "tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := listener.Close(); err != nil && !errors.Is(err, net.ErrClosed) {
+			t.Errorf("close listener: %v", err)
+		}
+	})
+
+	client, err := (&net.Dialer{}).DialContext(t.Context(), "tcp", listener.Addr().String())
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := client.Close(); err != nil && !errors.Is(err, net.ErrClosed) {
+			t.Errorf("close client: %v", err)
+		}
+	})
+	serverSocket, err := listener.Accept()
+	if err != nil {
+		t.Fatalf("accept: %v", err)
+	}
+	slot, ok := server.preAuth.admit()
+	if !ok {
+		t.Fatal("pre-auth slot unavailable")
+	}
+	served := make(chan struct{})
+	go func() {
+		server.serveSocket(serverSocket, slot)
+		close(served)
+	}()
+
+	nonce := make([]byte, discovery.NonceSize)
+	request, err := discovery.BuildPreflightRequest(nonce)
+	if err != nil {
+		t.Fatalf("build discovery request: %v", err)
+	}
+	if _, err := client.Write(request); err != nil {
+		t.Fatalf("write discovery request: %v", err)
+	}
+	tcpClient, ok := client.(*net.TCPConn)
+	if !ok {
+		t.Fatalf("client connection type = %T, want *net.TCPConn", client)
+	}
+	if err := tcpClient.CloseWrite(); err != nil {
+		t.Fatalf("close client write side: %v", err)
+	}
+	if err := client.SetReadDeadline(time.Now().Add(3 * time.Second)); err != nil {
+		t.Fatalf("set client read deadline: %v", err)
+	}
+	response, err := io.ReadAll(client)
+	if err != nil {
+		t.Fatalf("read discovery response: %v", err)
+	}
+	if _, _, err := discovery.ParsePreflightResponse(response, nonce); err != nil {
+		t.Fatalf("parse discovery response: %v", err)
+	}
+	select {
+	case <-served:
+	case <-time.After(3 * time.Second):
+		t.Fatal("serveSocket did not return after discovery preflight")
+	}
+	for _, record := range sink.records {
+		if record.message == "transport connection closed" {
+			t.Fatalf("discovery preflight emitted an MTProto transport-close record: %+v", record)
 		}
 	}
 }
