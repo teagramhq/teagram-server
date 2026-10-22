@@ -1411,6 +1411,7 @@ func (s *Store) ChannelRepliesWithOffset(
 			ReplyToMsgID: row.ReplyToMsgID,
 			ActionType:   *row.ActionType,
 			TtlPeriod:    *row.TtlPeriod,
+			Entities:     row.Entities,
 		}))
 	}
 	return snapshot, nil

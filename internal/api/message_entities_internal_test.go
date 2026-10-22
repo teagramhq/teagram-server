@@ -94,3 +94,44 @@ func TestTrimMessageURLSuffixHandlesLongUnmatchedClosingBrackets(t *testing.T) {
 		t.Fatalf("trimMessageURLSuffix = %q, want %q", got, url)
 	}
 }
+
+func TestAddDetectedMessageURLsSeparatesUnicodeWhitespace(t *testing.T) {
+	tests := []struct {
+		name string
+		text string
+		urls []string
+	}{
+		{
+			name: "scheme URLs",
+			text: "https://t.me/+first\u00a0https://t.me/+second",
+			urls: []string{"https://t.me/+first", "https://t.me/+second"},
+		},
+		{
+			name: "bare domains",
+			text: "t.me/+first\u00a0t.me/+second",
+			urls: []string{"t.me/+first", "t.me/+second"},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			entities, err := addDetectedMessageURLs(test.text, nil)
+			if err != nil {
+				t.Fatalf("addDetectedMessageURLs: %v", err)
+			}
+			if len(entities) != len(test.urls) {
+				t.Fatalf("detected %d URLs, want %d: %#v", len(entities), len(test.urls), entities)
+			}
+			for i, url := range test.urls {
+				byteOffset := strings.Index(test.text, url)
+				if byteOffset < 0 {
+					t.Fatalf("URL %q missing from test text %q", url, test.text)
+				}
+				wantOffset := utf16Length(test.text[:byteOffset])
+				wantLength := utf16Length(url)
+				if got := entities[i]; got.Type != store.PollDescriptionEntityURL || got.Offset != wantOffset || got.Length != wantLength {
+					t.Errorf("entity %d = %#v, want URL at (%d, %d)", i, got, wantOffset, wantLength)
+				}
+			}
+		})
+	}
+}

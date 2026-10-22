@@ -12,7 +12,7 @@ import (
 	"github.com/teagramhq/teagram-server/internal/store"
 )
 
-var messageURLPattern = regexp.MustCompile(`(?i)(?:https?://|tg://)[^\s<>"']+|(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,}(?::[0-9]{1,5})?(?:[/?#][^\s<>"']*)?`)
+var messageURLPattern = regexp.MustCompile(`(?i)(?:https?://|tg://)[^\s\v\x{85}\p{Z}<>"']+|(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,}(?::[0-9]{1,5})?(?:[/?#][^\s\v\x{85}\p{Z}<>"']*)?`)
 
 func (h *handlers) encodeMessageEntitiesWithURLs(viewerID int64, text string, entities []tg.MessageEntityClass) ([]store.PollDescriptionEntity, error) {
 	encoded, err := h.encodeMessageEntities(viewerID, text, entities)
