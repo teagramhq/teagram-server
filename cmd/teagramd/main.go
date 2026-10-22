@@ -5,6 +5,7 @@ import (
 	"bufio"
 	"context"
 	cryptorand "crypto/rand"
+	"crypto/rsa"
 	"errors"
 	"fmt"
 	"io"
@@ -652,16 +653,9 @@ func runAtBlobModePath(log *slog.Logger, blobModePath string) error {
 		return err
 	}
 	advertise := net.JoinHostPort(cfg.AdvertiseHost, strconv.Itoa(cfg.AdvertisePort))
-	clientDiscovery, err := discovery.NewDocument(advertise, cfg.DCID, &key.PublicKey, cfg.AdvertiseDemoGuestSignUp)
+	clientDiscovery, publicClientDiscovery, err := listenerDiscoveryDocuments(cfg, &key.PublicKey)
 	if err != nil {
-		return fmt.Errorf("validate discovery identity: %w", err)
-	}
-	if cfg.Turnstile.Enabled() && cfg.PublicWebSocketListenAddr == "" {
-		clientDiscovery.Turnstile = &discovery.Turnstile{SiteKey: cfg.Turnstile.SiteKey}
-	}
-	publicClientDiscovery := clientDiscovery
-	if cfg.Turnstile.Enabled() && cfg.PublicWebSocketListenAddr != "" {
-		publicClientDiscovery.Turnstile = &discovery.Turnstile{SiteKey: cfg.Turnstile.SiteKey}
+		return err
 	}
 	log.Info("server RSA key", "key_id", keyID, "fingerprint", fingerprint, "path", cfg.RSAKeyPath)
 
@@ -969,6 +963,35 @@ func runAtBlobModePath(log *slog.Logger, blobModePath string) error {
 	}
 
 	return serveMTProto(ctx, server, ln, websocketLn, publicWebSocket)
+}
+
+func listenerDiscoveryDocuments(cfg config.Config, pub *rsa.PublicKey) (discovery.Document, discovery.Document, error) {
+	advertise := net.JoinHostPort(cfg.AdvertiseHost, strconv.Itoa(cfg.AdvertisePort))
+	clientDiscovery, err := discovery.NewDocument(advertise, cfg.DCID, pub, cfg.AdvertiseDemoGuestSignUp)
+	if err != nil {
+		return discovery.Document{}, discovery.Document{}, fmt.Errorf("validate discovery identity: %w", err)
+	}
+	if cfg.PublicWebSocketListenAddr == "" {
+		if cfg.Turnstile.Enabled() {
+			clientDiscovery.Turnstile = &discovery.Turnstile{SiteKey: cfg.Turnstile.SiteKey}
+		}
+		return clientDiscovery, clientDiscovery, nil
+	}
+
+	publicClientDiscovery := clientDiscovery
+	if cfg.PublicWebSocketAdvertiseHost != "" {
+		publicAdvertise := net.JoinHostPort(cfg.PublicWebSocketAdvertiseHost, strconv.Itoa(cfg.PublicWebSocketAdvertisePort))
+		publicClientDiscovery, err = discovery.NewDocumentWithWebSocketAdvertiseAddr(
+			advertise, publicAdvertise, cfg.DCID, pub, cfg.AdvertiseDemoGuestSignUp,
+		)
+		if err != nil {
+			return discovery.Document{}, discovery.Document{}, fmt.Errorf("validate public WebSocket discovery identity: %w", err)
+		}
+	}
+	if cfg.Turnstile.Enabled() {
+		publicClientDiscovery.Turnstile = &discovery.Turnstile{SiteKey: cfg.Turnstile.SiteKey}
+	}
+	return clientDiscovery, publicClientDiscovery, nil
 }
 
 func closeListener(listener net.Listener) error {

@@ -323,6 +323,50 @@ func TestLoadPublicWebSocketSettings(t *testing.T) {
 	}
 }
 
+func TestLoadPublicWebSocketAdvertiseAddr(t *testing.T) {
+	t.Setenv("TG_POSTGRES_DSN", "postgres://localhost/tg")
+	t.Setenv("TG_AUTHKEY_ENC_KEY", validEncKey)
+	t.Setenv("TG_AUTHKEY_ENC_KEY_FILE", "")
+	t.Setenv("TG_LISTEN_ADDR", ":2443")
+	t.Setenv("TG_ADVERTISE_ADDR", "tailnet.example.test:2443")
+
+	tests := []struct {
+		name      string
+		listen    string
+		advertise string
+		wantHost  string
+		wantPort  int
+		wantErr   string
+	}{
+		{name: "unset", advertise: ""},
+		{name: "valid", listen: "127.0.0.1:2446", advertise: "server.teagram.io:443", wantHost: "server.teagram.io", wantPort: 443},
+		{name: "missing public listener", advertise: "server.teagram.io:443", wantErr: "TG_PUBLIC_WEBSOCKET_ADVERTISE_ADDR requires TG_PUBLIC_WEBSOCKET_LISTEN_ADDR"},
+		{name: "not host port", listen: "127.0.0.1:2446", advertise: "server.teagram.io", wantErr: "TG_PUBLIC_WEBSOCKET_ADVERTISE_ADDR"},
+		{name: "empty host", listen: "127.0.0.1:2446", advertise: ":443", wantErr: "TG_PUBLIC_WEBSOCKET_ADVERTISE_ADDR"},
+		{name: "non-integer port", listen: "127.0.0.1:2446", advertise: "server.teagram.io:https", wantErr: "TG_PUBLIC_WEBSOCKET_ADVERTISE_ADDR"},
+		{name: "port out of range", listen: "127.0.0.1:2446", advertise: "server.teagram.io:65536", wantErr: "TG_PUBLIC_WEBSOCKET_ADVERTISE_ADDR"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv("TG_PUBLIC_WEBSOCKET_LISTEN_ADDR", tt.listen)
+			t.Setenv("TG_PUBLIC_WEBSOCKET_ADVERTISE_ADDR", tt.advertise)
+			cfg, err := config.Load(discardLog())
+			if tt.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+					t.Fatalf("Load error = %v, want error containing %q", err, tt.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("Load: %v", err)
+			}
+			if cfg.PublicWebSocketAdvertiseHost != tt.wantHost || cfg.PublicWebSocketAdvertisePort != tt.wantPort {
+				t.Fatalf("public WebSocket advertise = %s:%d, want %s:%d", cfg.PublicWebSocketAdvertiseHost, cfg.PublicWebSocketAdvertisePort, tt.wantHost, tt.wantPort)
+			}
+		})
+	}
+}
+
 func TestLoadPublicRegistrationDefaultsClosed(t *testing.T) {
 	t.Setenv("TG_POSTGRES_DSN", "postgres://localhost/tg")
 	t.Setenv("TG_AUTHKEY_ENC_KEY", validEncKey)

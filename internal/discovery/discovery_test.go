@@ -8,6 +8,7 @@ import (
 	"encoding/base64"
 	"encoding/binary"
 	"encoding/json"
+	"net/url"
 	"strings"
 	"testing"
 
@@ -75,6 +76,74 @@ func TestDocumentAdvertisesDemoGuestSignUpAsLiteralTrue(t *testing.T) {
 	}
 	if doc.MTProto.Endpoint != "mtproto.example.com:443" || doc.MTProto.DCID != 2 || doc.WebSocket.Endpoint != "wss://mtproto.example.com/apiws" {
 		t.Fatalf("identity or transport changed when demo capability was enabled: %+v", doc)
+	}
+}
+
+func TestMarshalDocumentAllowsListenerSpecificWebSocketHost(t *testing.T) {
+	t.Parallel()
+
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatalf("generate key: %v", err)
+	}
+	doc, err := discovery.NewDocument("tailnet.example.test:2443", 2, &key.PublicKey, true)
+	if err != nil {
+		t.Fatalf("new document: %v", err)
+	}
+	doc.WebSocket.Endpoint = "wss://server.teagram.io/apiws"
+	doc.Turnstile = &discovery.Turnstile{SiteKey: "public-site-key"}
+
+	data, err := discovery.MarshalDocument(doc)
+	if err != nil {
+		t.Fatalf("marshal listener-scoped document: %v", err)
+	}
+	var served discovery.Document
+	if err := json.Unmarshal(data, &served); err != nil {
+		t.Fatalf("decode listener-scoped document: %v", err)
+	}
+	if served.MTProto.Endpoint != "tailnet.example.test:2443" {
+		t.Fatalf("MTProto endpoint = %q, want tailnet.example.test:2443", served.MTProto.Endpoint)
+	}
+	if served.WebSocket.Endpoint != "wss://server.teagram.io/apiws" {
+		t.Fatalf("WebSocket endpoint = %q, want public host", served.WebSocket.Endpoint)
+	}
+	endpoint, err := url.Parse(served.WebSocket.Endpoint)
+	if err != nil {
+		t.Fatalf("parse WebSocket endpoint: %v", err)
+	}
+	enteredHost := "server.teagram.io"
+	if endpoint.Hostname() != enteredHost {
+		t.Fatalf("WebSocket host = %q, want entered host %q", endpoint.Hostname(), enteredHost)
+	}
+	if served.Demo == nil || !served.Demo.GuestSignUp || served.Turnstile == nil || served.Turnstile.SiteKey != "public-site-key" {
+		t.Fatalf("public discovery capabilities were lost: %+v", served)
+	}
+}
+
+func TestMarshalDocumentRejectsMalformedWebSocketEndpoints(t *testing.T) {
+	t.Parallel()
+
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatalf("generate key: %v", err)
+	}
+	doc, err := discovery.NewDocument("tailnet.example.test:2443", 2, &key.PublicKey, false)
+	if err != nil {
+		t.Fatalf("new document: %v", err)
+	}
+	for _, endpoint := range []string{
+		"https://server.teagram.io/apiws",
+		"wss://server.teagram.io:443/apiws",
+		"wss://server.teagram.io/other",
+		"wss://user@server.teagram.io/apiws",
+		"wss://server.teagram.io/apiws?host=other.example.test",
+	} {
+		t.Run(endpoint, func(t *testing.T) {
+			doc.WebSocket.Endpoint = endpoint
+			if _, err := discovery.MarshalDocument(doc); err == nil {
+				t.Fatalf("marshal document accepted malformed WebSocket endpoint %q", endpoint)
+			}
+		})
 	}
 }
 

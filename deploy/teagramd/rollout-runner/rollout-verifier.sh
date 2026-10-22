@@ -113,6 +113,7 @@ verify_safe_public_container_environment() {
     (item.Config.Env // null) as $env
     | if ($env | type) != "array" then false else
         safe_setting($env; "TG_PUBLIC_WEBSOCKET_LISTEN_ADDR"; [""]) and
+        safe_setting($env; "TG_PUBLIC_WEBSOCKET_ADVERTISE_ADDR"; [""]) and
         safe_setting($env; "TG_PUBLIC_REGISTRATION"; ["closed"]) and
         safe_setting($env; "TG_PUBLIC_WEBSOCKET_ALLOWED_ORIGINS"; [""]) and
         safe_setting($env; "TG_WELCOME_CHANNEL"; [""])
@@ -134,6 +135,7 @@ verify_safe_public_compose_environment() {
     .services.teagramd.environment as $env
     | if ($env | type) != "object" then false else
         safe_setting($env; "TG_PUBLIC_WEBSOCKET_LISTEN_ADDR"; [""]) and
+        safe_setting($env; "TG_PUBLIC_WEBSOCKET_ADVERTISE_ADDR"; [""]) and
         safe_setting($env; "TG_PUBLIC_REGISTRATION"; ["closed"]) and
         safe_setting($env; "TG_PUBLIC_WEBSOCKET_ALLOWED_ORIGINS"; [""]) and
         safe_setting($env; "TG_WELCOME_CHANNEL"; [""])
@@ -419,7 +421,7 @@ snapshot_from_json() {
     | if type != "array" then error("container environment must be an array") else
         map(select(type != "string" or (startswith("TG_REPLICA_COUNT=") | not)))
         | map(select(type != "string" or (startswith("TG_CLIENT_ADDR_TRUST=") | not)))
-        | map(select(type != "string" or ((split("=")[0]) as $key | (["TG_PUBLIC_WEBSOCKET_LISTEN_ADDR", "TG_PUBLIC_REGISTRATION", "TG_PUBLIC_WEBSOCKET_ALLOWED_ORIGINS", "TG_WELCOME_CHANNEL"] | index($key) == null))))
+        | map(select(type != "string" or ((split("=")[0]) as $key | (["TG_PUBLIC_WEBSOCKET_LISTEN_ADDR", "TG_PUBLIC_WEBSOCKET_ADVERTISE_ADDR", "TG_PUBLIC_REGISTRATION", "TG_PUBLIC_WEBSOCKET_ALLOWED_ORIGINS", "TG_WELCOME_CHANNEL"] | index($key) == null))))
         | map(select(type != "string" or ((split("=")[0]) as $key | any($added[]; runtime_name(.) == $key) | not)))
         | map(select(type != "string" or ((split("=")[0]) as $key | any($changed[]; . == $key) | not)))
         | map(select(type != "string" or (
@@ -502,6 +504,7 @@ snapshot_from_json() {
         .services.teagramd.environment |= del(
           .TG_REPLICA_COUNT, .TG_CLIENT_ADDR_TRUST,
           .TG_PUBLIC_WEBSOCKET_LISTEN_ADDR, .TG_PUBLIC_REGISTRATION,
+          .TG_PUBLIC_WEBSOCKET_ADVERTISE_ADDR,
           .TG_PUBLIC_WEBSOCKET_ALLOWED_ORIGINS, .TG_WELCOME_CHANNEL,
           .TG_TURNSTILE_SITE_KEY, .TG_TURNSTILE_SECRET_KEY_FILE,
           .TG_TURNSTILE_SIGNIN_ENABLED)
