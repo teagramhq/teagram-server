@@ -508,6 +508,9 @@ func TestSmokeClientRequestFixturesAreLayer228Shapes(t *testing.T) {
 		"messages_sendMessage.1",
 		"messages_sendMessage.2",
 		"messages_sendMessage.3",
+		"messages_sendReaction.1",
+		"messages_setChatAvailableReactions.1",
+		"messages_getMessagesReactions.1",
 		"messages_sendVote.1",
 		"messages_setTyping.1",
 		"upload_saveFilePart.1",
@@ -1128,6 +1131,7 @@ func testSmokeClientRequestFixtures(t *testing.T) {
 		t.Fatalf("replay getReplies fixture: %v", err)
 	}
 
+	var groupMessageID int
 	for i, message := range []struct {
 		fixture string
 		peer    tg.InputPeerClass
@@ -1138,6 +1142,13 @@ func testSmokeClientRequestFixtures(t *testing.T) {
 		{fixture: "messages_sendMessage.3", peer: peerChannel(creator.id, channelID), text: "Hello followers!"},
 	} {
 		result := replayFixtureSendMessage(t, creator, message.fixture, message.peer, message.text, int64(13030101+i))
+		if message.fixture == "messages_sendMessage.2" {
+			outgoing, _, ok := outgoingMessage(t, result, message.text)
+			if !ok {
+				t.Fatal("group send-message fixture omitted its outgoing message")
+			}
+			groupMessageID = outgoing.ID
+		}
 		if message.fixture == "messages_sendMessage.3" {
 			updates, ok := result.(*tg.Updates)
 			if !ok {
@@ -1162,6 +1173,52 @@ func testSmokeClientRequestFixtures(t *testing.T) {
 				t.Fatalf("channel post_author = %q, present=%v; want the send-time display name Smoke", author, present)
 			}
 		}
+	}
+	if groupMessageID <= 0 {
+		t.Fatalf("fixture group message id = %d, want positive", groupMessageID)
+	}
+	if err := fixtureClientCall(t, creator, "messages_setChatAvailableReactions.1", func(ctx context.Context, api *tg.Client) error {
+		result, err := api.MessagesSetChatAvailableReactions(ctx, &tg.MessagesSetChatAvailableReactionsRequest{
+			Peer: &tg.InputPeerChat{ChatID: chatID},
+			AvailableReactions: &tg.ChatReactionsSome{Reactions: []tg.ReactionClass{
+				&tg.ReactionEmoji{Emoticon: "❤"},
+			}},
+		})
+		if err == nil && result == nil {
+			return errors.New("setChatAvailableReactions returned nil Updates")
+		}
+		return err
+	}); err != nil {
+		t.Fatalf("replay set-available-reactions fixture: %v", err)
+	}
+	if err := fixtureClientCall(t, creator, "messages_sendReaction.1", func(ctx context.Context, api *tg.Client) error {
+		result, err := api.MessagesSendReaction(ctx, &tg.MessagesSendReactionRequest{
+			Peer: &tg.InputPeerChat{ChatID: chatID}, MsgID: groupMessageID,
+			Reaction: []tg.ReactionClass{&tg.ReactionEmoji{Emoticon: "❤"}},
+		})
+		if err == nil {
+			if _, ok := result.(*tg.Updates); !ok {
+				return fmt.Errorf("sendReaction result = %T, want *tg.Updates", result)
+			}
+		}
+		return err
+	}); err != nil {
+		t.Fatalf("replay send-reaction fixture: %v", err)
+	}
+	if err := fixtureClientCall(t, creator, "messages_getMessagesReactions.1", func(ctx context.Context, api *tg.Client) error {
+		result, err := api.MessagesGetMessagesReactions(ctx, &tg.MessagesGetMessagesReactionsRequest{
+			Peer: &tg.InputPeerChat{ChatID: chatID}, ID: []int{groupMessageID},
+		})
+		if err != nil {
+			return err
+		}
+		updates, ok := result.(*tg.Updates)
+		if !ok || len(updates.Updates) != 1 {
+			return fmt.Errorf("getMessagesReactions result = %#v, want one reaction update", result)
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("replay get-message-reactions fixture: %v", err)
 	}
 	if err := fixtureClientCall(t, creator, "messages_deleteHistory.1", func(ctx context.Context, api *tg.Client) error {
 		request := &tg.MessagesDeleteHistoryRequest{Peer: peerUser(creator.id, member.id)}

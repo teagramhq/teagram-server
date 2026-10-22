@@ -1764,15 +1764,15 @@ func (h *handlers) handleSendReaction(r *mtproto.Request) (bin.Encoder, error) {
 		// Clear reaction.
 		affected, err = h.store.ClearReaction(r.Ctx, r.UserID, localID)
 	} else {
-		// Set reaction — use the first (and only) reaction emoji.
-		var reactionStr string
-		if emoji, ok := reactions[0].(*tg.ReactionEmoji); ok {
-			reactionStr = emoji.Emoticon
+		// One standard emoji is the only reaction this server can store per user.
+		if len(reactions) != 1 {
+			return nil, errReactionInvalid
 		}
-		if reactionStr == "" {
-			return nil, errPeerIDInvalid
+		emoji, ok := reactions[0].(*tg.ReactionEmoji)
+		if !ok || !isStandardReactionEmoji(emoji.Emoticon) {
+			return nil, errReactionInvalid
 		}
-		affected, err = h.store.SendReaction(r.Ctx, r.UserID, localID, reactionStr)
+		affected, err = h.store.SendReaction(r.Ctx, r.UserID, localID, emoji.Emoticon)
 	}
 	if errors.Is(err, store.ErrMessageInvalid) {
 		return nil, errMessageIDInvalid
@@ -1782,6 +1782,9 @@ func (h *handlers) handleSendReaction(r *mtproto.Request) (bin.Encoder, error) {
 	}
 	if errors.Is(err, store.ErrYouBlockedUser) {
 		return nil, errYouBlockedUser
+	}
+	if errors.Is(err, store.ErrReactionInvalid) {
+		return nil, errReactionInvalid
 	}
 	if err != nil {
 		h.log.Error("send reaction", "user_id", r.UserID, "err", err)

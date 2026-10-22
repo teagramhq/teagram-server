@@ -88,6 +88,9 @@ var (
 	// errChatNotModified answers an authorized setting save whose value already
 	// matches the stored setting.
 	errChatNotModified = rpcErr(400, "CHAT_NOT_MODIFIED")
+	// errReactionInvalid rejects reactions outside the server's standard set or
+	// a basic group's allowed reaction set.
+	errReactionInvalid = rpcErr(400, "REACTION_INVALID")
 	// errChatLinkExists rejects hiding history while a channel has a public link.
 	errChatLinkExists = rpcErr(400, "CHAT_LINK_EXISTS")
 	// errChatAboutNotModified answers an editChatAbout request whose description

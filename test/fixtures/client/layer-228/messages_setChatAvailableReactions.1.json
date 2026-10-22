@@ -1,0 +1,31 @@
+{
+  "layer": 228,
+  "client": "gotd v0.162.0",
+  "source": "captures/messages_setChatAvailableReactions.1.txt",
+  "method": "messages.setChatAvailableReactions",
+  "request": {
+    "type": "messages.setChatAvailableReactions",
+    "flags": 0,
+    "fields": {
+      "peer": {
+        "type": "inputPeerChat",
+        "fields": {
+          "chat_id": "<N>"
+        }
+      },
+      "available_reactions": {
+        "type": "chatReactionsSome",
+        "fields": {
+          "reactions": [
+            {
+              "type": "reactionEmoji",
+              "fields": {
+                "emoticon": "❤"
+              }
+            }
+          ]
+        }
+      }
+    }
+  }
+}
