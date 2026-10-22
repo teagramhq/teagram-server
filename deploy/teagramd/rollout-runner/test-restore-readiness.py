@@ -508,8 +508,8 @@ class RestoreReadinessContractTests(unittest.TestCase):
         self.assertIn("obj_description(namespace.oid, 'pg_namespace')", source)
         self.assertIn('"synthetic_local_dump_fixture"}', source)
         self.assertIn("            LOCAL_DUMP_LEAK_MARKER,", source)
-        self.assertIn('role="local_restore_client",\n            user="0:0"', source)
-        self.assertIn('"checker_provisioner", "local_restore_client"', source)
+        self.assertIn('role="local_restore_client",\n            user="0:70"', source)
+        self.assertIn('"local_restore_client": "0:70"', source)
 
         tree = ast.parse(source)
         restore_method = next(
@@ -1106,6 +1106,39 @@ class RestoreReadinessContractTests(unittest.TestCase):
             for item in provisioner_mounts
         ]
         self.assertTrue(RESTORE_READINESS.validate_container_inspect(seed_document, seed_record))
+
+    def test_local_restore_client_is_root_in_the_socket_group(self) -> None:
+        # Root owns the 0600 dump; the scratch socket directory is 70:70 0770 and no capability overrides it.
+        document, record = container_fixture()
+        mounts = [
+            {"type": "bind", "source": "/run/dump.sql", "destination": "/run/local-dump/input.sql", "rw": False},
+            {"type": "bind", "source": "/run/sockets/target", "destination": "/run/postgres", "rw": True},
+        ]
+        record.update(
+            {
+                "role": "local_restore_client",
+                "user": "0:70",
+                "entrypoint": ["/bin/sh"],
+                "mounts": mounts,
+                "network_mode": "container:" + "d" * 64,
+            }
+        )
+        document["Config"]["User"] = "0:70"
+        document["Config"]["Entrypoint"] = record["entrypoint"]
+        document["Config"]["Labels"][RESTORE_READINESS.IMAGE_ROLE_LABEL] = "local_restore_client"
+        document["HostConfig"]["NetworkMode"] = record["network_mode"]
+        document["Mounts"] = [
+            {"Type": "bind", "Source": item["source"], "Destination": item["destination"], "RW": item["rw"]}
+            for item in mounts
+        ]
+        self.assertTrue(RESTORE_READINESS.validate_container_inspect(document, record))
+
+        for user in ("0:0", "65532:70"):
+            wrong_document = json.loads(json.dumps(document))
+            wrong_record = json.loads(json.dumps(record))
+            wrong_document["Config"]["User"] = user
+            wrong_record["user"] = user
+            self.assertFalse(RESTORE_READINESS.validate_container_inspect(wrong_document, wrong_record))
 
     def test_application_checker_must_stay_non_root(self) -> None:
         document, record = container_fixture()

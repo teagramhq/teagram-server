@@ -982,10 +982,11 @@ def validate_container_inspect(document: dict[str, Any], record: dict[str, Any])
         return False
     if config.get("User", "") != record.get("user", ""):
         return False
-    root_roles = {"source_seed", "checker_provisioner", "local_restore_client"}
+    # The local restore client reads the root-owned dump and reaches the scratch socket through group 70.
+    root_roles = {"source_seed": "0:0", "checker_provisioner": "0:0", "local_restore_client": "0:70"}
     if record.get("role") not in root_roles and config.get("User", "").startswith("0"):
         return False
-    if record.get("role") in root_roles and config.get("User", "") != "0:0":
+    if record.get("role") in root_roles and config.get("User", "") != root_roles[record["role"]]:
         return False
     if record.get("role") in {
         "application",
@@ -3798,7 +3799,7 @@ dump_path=$2
         client = self.image_container(
             "target",
             role="local_restore_client",
-            user="0:0",
+            user="0:70",
             memory=CLIENT_MEMORY,
             pids_limit=96,
             mounts=[
