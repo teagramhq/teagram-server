@@ -391,7 +391,7 @@ func bootServerWithLimitsAndRegistrationModeAndBlobsAndStatusWithDeliveryHook(
 	t.Helper()
 	return bootServerWithLimitsAndRegistrationModeAndBlobsAndStatusWithDeliveryHookAndTurnstileAndWelcomeChannel(
 		t, ctx, key, dcID, st, dsn, log, ln, rateLimits, regMode, blobs, persistStatus,
-		beforeDelivery, "", nil, "", false, config.RecoveryEmailOff, photoThumbs...,
+		beforeDelivery, "", nil, "", false, config.RecoveryEmailOff, nil, photoThumbs...,
 	)
 }
 
@@ -402,6 +402,7 @@ func bootServerWithLimitsAndRegistrationModeAndBlobsAndStatusWithDeliveryHookAnd
 	beforeDelivery func(context.Context, int64), turnstileSiteKey string,
 	turnstileVerifier api.SignUpTurnstileVerifier, welcomeChannel string, turnstileSignInEnabled bool,
 	recoveryEmailMode config.RecoveryEmailMode,
+	suppressChannelPostDelivery func(channelID int64) bool,
 	photoThumbs ...*photothumb.Supervisor,
 ) (*mtproto.SessionRegistry, func()) {
 	t.Helper()
@@ -432,6 +433,15 @@ func bootServerWithLimitsAndRegistrationModeAndBlobsAndStatusWithDeliveryHookAnd
 	}
 
 	updater := api.NewUpdaterWithDialogFilterSync(st, dcID, server.Registry(), log, pgtest.PeerDeriver(), dialogFilterSync)
+	deliverChannelPost := updater.DeliverChannelPost
+	if suppressChannelPostDelivery != nil {
+		deliverChannelPost = func(ctx context.Context, channelID int64) {
+			if suppressChannelPostDelivery(channelID) {
+				return
+			}
+			updater.DeliverChannelPost(ctx, channelID)
+		}
+	}
 	deliver := updater.Deliver
 	if beforeDelivery != nil {
 		deliver = func(ctx context.Context, userID int64) {
@@ -439,7 +449,7 @@ func bootServerWithLimitsAndRegistrationModeAndBlobsAndStatusWithDeliveryHookAnd
 			updater.Deliver(ctx, userID)
 		}
 	}
-	_, stopListener, err := store.StartListenerWithDialogPins(ctx, dsn, deliver, updater.DeliverTyping, updater.Evict, updater.DeliverChannelPost, updater.DeliverEncryption, updater.DeliverStatus, updater.DeliverEncryptedMsg, updater.DeliverReactions, updater.DeliverPinned, updater.MarkDialogFilters, updater.DeliverDialogPins, updater.DialogFilterListenerReconnected, log)
+	_, stopListener, err := store.StartListenerWithDialogPins(ctx, dsn, deliver, updater.DeliverTyping, updater.Evict, deliverChannelPost, updater.DeliverEncryption, updater.DeliverStatus, updater.DeliverEncryptedMsg, updater.DeliverReactions, updater.DeliverPinned, updater.MarkDialogFilters, updater.DeliverDialogPins, updater.DialogFilterListenerReconnected, log)
 	if err != nil {
 		t.Fatalf("start listener: %v", err)
 	}
