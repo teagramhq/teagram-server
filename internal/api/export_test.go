@@ -35,6 +35,12 @@ var (
 	IsGeneratedCodeForTest = isGeneratedCode
 )
 
+// ProfilePhotoMutationWaitContextForTest extends a clear request deadline for
+// tests that hold its database locks while starting a production-bound replay.
+func ProfilePhotoMutationWaitContextForTest(ctx context.Context, wait time.Duration) context.Context {
+	return context.WithValue(ctx, profilePhotoMutationWaitForTestContextKey{}, wait)
+}
+
 // SendCodeForTest invokes handleSendCode for a request arriving from addr,
 // against the per-IP limits given. The address is the one the serve loop reads
 // off the socket in production, so a test supplies it the same way a connection

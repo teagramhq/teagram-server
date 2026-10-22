@@ -409,6 +409,44 @@ func waitForConcurrentProfilePhotoActivity(
 	}
 }
 
+func waitForProfilePhotoReceiptLock(t *testing.T, f *galleryFixture, firstDone <-chan []byte) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	ticker := time.NewTicker(10 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		var receiptBlocked bool
+		err := f.observer().QueryRow(ctx, `
+			SELECT EXISTS (
+				SELECT 1
+				FROM pg_stat_activity
+				WHERE datname = current_database()
+				  AND pid <> pg_backend_pid()
+				  AND query LIKE '%LockProfileUploadReceiptsForDeletion%'
+				  AND state = 'active'
+				  AND wait_event_type = 'Lock'
+			)
+		`).Scan(&receiptBlocked)
+		if err != nil {
+			t.Fatalf("read first profile-photo clear activity: %v", err)
+		}
+		if receiptBlocked {
+			return
+		}
+		select {
+		case <-firstDone:
+			t.Fatal("first clear returned before reaching the upload-receipt lock")
+		default:
+		}
+		select {
+		case <-ctx.Done():
+			t.Fatal("timed out waiting for the first clear to reach the upload-receipt lock")
+		case <-ticker.C:
+		}
+	}
+}
+
 func keepConcurrentProfilePhotoActivityBlocked(
 	t *testing.T,
 	firstDone, replayDone <-chan []byte,
@@ -474,21 +512,22 @@ func TestUpdateProfilePhotoEmptyConcurrentReplayDoesNotSpendRateLimit(t *testing
 	if _, err := observer.Exec(context.Background(), `SELECT 1`); err != nil {
 		t.Fatalf("warm profile-photo activity observer: %v", err)
 	}
-	start := make(chan struct{})
 	firstDone := make(chan []byte, 1)
+	requestCtx := api.ProfilePhotoMutationWaitContextForTest(context.Background(), 30*time.Second)
 	go func() {
-		<-start
-		firstDone <- dispatchProfilePhotoMutation(t, h, f.owner, key, sessionID, clearMsgID, clearRequest)
+		firstDone <- dispatchProfilePhotoMutationWithContext(
+			t, h, f.owner, key, sessionID, clearMsgID, requestCtx, clearRequest,
+		)
 	}()
+	waitForProfilePhotoReceiptLock(t, f, firstDone)
+
 	replayDone := make(chan []byte, 1)
 	go func() {
-		<-start
 		replayDone <- dispatchProfilePhotoMutation(t, h, f.owner, key, sessionID, clearMsgID, clearRequest)
 	}()
-	close(start)
-	// Start both calls together, then release the upload-receipt lock only once
-	// PostgreSQL shows one clear paused there and the other waiting on the owner
-	// lock. The normal handler deadline must outlast the selection wait.
+	// Let the first clear reach the held receipt lock before starting the replay,
+	// so only the replay uses the production one-second bound. Keep both lock
+	// waits blocked beyond the shorter selection deadline before releasing them.
 	waitForConcurrentProfilePhotoActivity(t, f, firstDone, replayDone)
 	keepConcurrentProfilePhotoActivityBlocked(t, firstDone, replayDone)
 	if err := blocker.Commit(context.Background()); err != nil {
