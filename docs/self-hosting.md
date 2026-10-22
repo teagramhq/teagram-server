@@ -253,15 +253,19 @@ regularly test restoring them on an isolated machine.
 
 ```sh
 set -eu
+backup_dir="/var/backups/teagram/$(date -u +%Y%m%dT%H%M%SZ)"
+restart_teagramd() { sudo systemctl start teagramd; }
+trap restart_teagramd EXIT
 sudo systemctl stop teagramd
 sudo sh -c 'set -eu
 umask 077
-backup_dir="/var/backups/teagram/$(date -u +%Y%m%dT%H%M%SZ)"
+backup_dir="$1"
 install -d -m 0700 "$backup_dir"
 docker exec teagram-postgres pg_dump -U postgres -d teagram --format=custom > "$backup_dir/database.dump"
 tar --numeric-owner -C / -cpf "$backup_dir/files.tar" var/lib/teagram etc/teagram
-printf "Backup saved to %s\n" "$backup_dir"'
+printf "Backup saved to %s\n" "$backup_dir"' sh "$backup_dir"
 sudo systemctl start teagramd
+trap - EXIT
 ```
 
 To restore, stop the server first. Restoring replaces the current database and
@@ -295,10 +299,24 @@ server starts and passes the discovery check.
 ```sh
 set -eu
 cd /opt/teagram
+backup_dir="/var/backups/teagram/$(date -u +%Y%m%dT%H%M%SZ)"
+restart_teagramd=1
+restart_teagramd_on_backup_failure() {
+  if [ "$restart_teagramd" -eq 1 ]; then
+    sudo systemctl start teagramd
+  fi
+}
+trap restart_teagramd_on_backup_failure EXIT
 sudo systemctl stop teagramd
-# Run the backup block above without its first stop or final start command.
-# Set backup_dir to the timestamp printed by that block.
-backup_dir='/var/backups/teagram/REPLACE_WITH_TIMESTAMP'
+sudo sh -c 'set -eu
+umask 077
+backup_dir="$1"
+install -d -m 0700 "$backup_dir"
+docker exec teagram-postgres pg_dump -U postgres -d teagram --format=custom > "$backup_dir/database.dump"
+tar --numeric-owner -C / -cpf "$backup_dir/files.tar" var/lib/teagram etc/teagram
+printf "Backup saved to %s\n" "$backup_dir"' sh "$backup_dir"
+# The update keeps teagramd stopped after the backup succeeds.
+restart_teagramd=0
 sudo cp -p /opt/teagram/bin/teagramd "$backup_dir/teagramd.previous"
 sudo sh -c 'cd /opt/teagram && git rev-parse HEAD > "$1"' sh "$backup_dir/source.previous"
 sudo git fetch --tags origin
@@ -309,6 +327,7 @@ sudo sh -c 'set -a; . /etc/teagram/teagram.env; set +a; cd /opt/teagram && make 
 sudo install -o root -g root -m 0755 /tmp/teagramd.new /opt/teagram/bin/teagramd
 sudo systemctl start teagramd
 curl --fail --show-error https://server.example.net/.well-known/telegramd/client
+trap - EXIT
 ```
 
 If the migration or startup fails, stop the service, restore the complete
