@@ -58,6 +58,16 @@ Configuration is read from environment variables in `internal/config/config.go`:
 | `TG_LOG_LOGIN_CODES`| `false`          | Legacy login-code diagnostic. It is not used by Teagram username/password sign-in; leave it disabled. A non-boolean value fails startup |
 | `TG_SESSION_IP` | `false` | Store session IPs and return them in `account.getAuthorizations`. Unset means no session IP stored by default; a non-boolean value fails startup |
 | `TG_SESSION_DEVICE_LABELS` | `true` | Store and return device model, platform, OS version, API ID, and app version for sessions. A non-boolean value fails startup |
+| `TG_RATE_LIMIT_SEND_CODE_IP` | `10` | `auth.sendCode` calls per client network per window; `0` disables this counter |
+| `TG_RATE_LIMIT_SEND_CODE_IP_WINDOW` | `1h` | Window for the per-network `auth.sendCode` call counter; `0` or a negative window also disables this counter |
+| `TG_RATE_LIMIT_SEND_CODE_IP_PHONES` | `20` | Distinct `auth.sendCode` identifiers per client network per window; `0` disables this counter |
+| `TG_RATE_LIMIT_SEND_CODE_IP_PHONES_WINDOW` | `24h` | Window for distinct `auth.sendCode` identifiers; `0` or a negative window also disables this counter |
+| `TG_RATE_LIMIT_CHECK_PASSWORD_IP` | `10` | Failed `auth.checkPassword` attempts per client network per window; `0` disables this counter |
+| `TG_RATE_LIMIT_CHECK_PASSWORD_IP_WINDOW` | `1h` | Window for the per-network `auth.checkPassword` counter; `0` or a negative window also disables this counter |
+| `TG_RATE_LIMIT_GET_PASSWORD_IP` | `20` | Unauthenticated `account.getPassword` calls per client network per window; `0` disables this counter |
+| `TG_RATE_LIMIT_GET_PASSWORD_IP_WINDOW` | `1h` | Window for the per-network `account.getPassword` counter; `0` or a negative window also disables this counter |
+| `TG_RATE_LIMIT_SIGN_UP_IP` | `5` | `auth.signUp` calls per client network per window; `0` disables this counter |
+| `TG_RATE_LIMIT_SIGN_UP_IP_WINDOW` | `1h` | Window for the per-network `auth.signUp` counter; `0` or a negative window also disables this counter |
 | `TG_REGISTRATION`   | `closed`         | Accepted values are `closed`, `invite`, and `open`. `closed` rejects `auth.signUp`, `invite` requires an operator-issued invite, and `open` admits usernames without one. An unrecognized value fails startup. Sign-in for accounts that already exist is unaffected by this setting |
 | `TG_PUBLIC_REGISTRATION` | `closed` | Registration mode for the public WebSocket listener only. Defaults to `closed` even when `TG_REGISTRATION=open`; use `invite` to require an operator-issued invite |
 | `TG_WELCOME_CHANNEL` | *(unset)* | Optional handle of a public broadcast channel joined by new accounts after `auth.signUp`; invalid targets are skipped with a warning |
@@ -65,6 +75,7 @@ Configuration is read from environment variables in `internal/config/config.go`:
 | `TG_TURNSTILE_SITE_KEY` | *(unset)* | Public Cloudflare Turnstile widget key. Required together with one secret source to enable the `auth.signUp` challenge |
 | `TG_TURNSTILE_SECRET_KEY` | *(unset)* | Private Siteverify key supplied directly through the environment; prefer the file form |
 | `TG_TURNSTILE_SECRET_KEY_FILE` | *(unset)* | Preferred file containing the Siteverify key. The gate stays disabled when both secret sources and the site key are unset |
+| `TG_TURNSTILE_SIGNIN_ENABLED` | `false` | Also challenge username sign-in at `auth.sendCode`; requires a valid site key and Siteverify secret |
 | `TG_ADMIN_LISTEN_ADDR` | *(unset)* | Enables the separate authenticated admin HTTP listener; must be set with `TG_ADMIN_TOKEN_HASH` and should remain on an operator-only network |
 | `TG_ADMIN_TOKEN_HASH` | *(unset)* | Lowercase SHA-256 hex digest of the raw admin token; never put the raw token in configuration or a URL. See `docs/observability.md` |
 | `TG_ADMIN_ORIGIN` | *(unset)* | Fixed origin for admin login/logout behind a proxy; canonical lowercase ASCII HTTPS origin, or HTTP only for localhost/loopback. Unset, empty, or whitespace-only derives it from the listener. See `docs/observability.md` |
@@ -82,29 +93,55 @@ Configuration is read from environment variables in `internal/config/config.go`:
 | `TG_MAX_PENDING_LOGIN_CONNS`| `1024` | Cluster-wide concurrent connections waiting for `auth.checkPassword` after `SESSION_PASSWORD_NEEDED`, held in Postgres leases. A pending connection remains counted in the unbound-key hold and this cap, and receives a single ten-minute absolute read lease (`2 × srp.DefaultTTL`); activity never refreshes it. The SRP challenge still expires after five minutes. Past the cap the connection is closed immediately. `0` disables it; a negative or non-integer value fails startup |
 | `TG_CLIENT_ADDR_PROXY_CIDRS`| *(unset)* | Comma-separated addresses or CIDRs (`10.0.0.0/8, 192.0.2.7`) of the balancers a PROXY protocol v2 header is accepted from. An IPv4-mapped entry takes its IPv4 meaning (`::ffff:192.0.2.0/120` is `192.0.2.0/24`), since peer addresses are matched unmapped; one too short to name an IPv4 network fails startup rather than starting and matching nothing. Required by, and only read in, `TG_CLIENT_ADDR_TRUST=proxy-v2`: an empty list there fails startup, and a list set in `socket` mode does too, since it means the balancer is in place but every client is being keyed on its address. Both directions then fail closed — a connection from a listed balancer without a valid v2 header is dropped rather than served on the balancer's address, and a header from anywhere else is dropped rather than believed. Only v2: the v1 text form is refused. An address is read only from `PROXY` over `AF_INET`/`AF_INET6` with the `STREAM` transport; the two headers that name no client — the `LOCAL` command a health check sends, and `AF_UNSPEC` — connect but carry no address and so cannot call `auth.sendCode`; every other family or transport is refused. Keep this list to the balancer addresses, not a VPC or subnet range: a connection whose header names no client is charged to no bucket, so anything inside an allowlisted CIDR can send a `LOCAL`/`AF_UNSPEC` header and sit outside `TG_MAX_PREAUTH_CONNS_PER_IP` entirely — with `10.0.0.0/8` that is every workload in the network, with the balancer's own addresses it is the balancer |
 
+### Session data and request processing
+
 The session metadata settings are deployment-wide and must have the same values
-on every replica. With `TG_SESSION_IP=false`, the accurate claim is **no session
-IP stored by default**, not “no IP collected”: the server still processes
-addresses in memory for pre-auth connection caps, PROXY-v2 parsing, and
-IP-keyed abuse counters. Those counters retain `/32` IPv4 or `/64` IPv6 prefixes
-for their configured windows (including the 1-hour and 24-hour abuse counters);
-the deterministic `rate_limits` FNV key is enumerable for IPv4 and is
-pseudonymous, not anonymous. In `proxy-v2` mode, enabled Turnstile verification
-still sends the client IP to Cloudflare.
+on every replica. By default, no session IP, recovery email, or phone number is
+kept as account or session data: `TG_SESSION_IP=false`,
+`TG_RECOVERY_EMAIL=off`, and Teagram sign-in uses a username rather than a
+phone number. Device and app labels are stored by default with
+`TG_SESSION_DEVICE_LABELS=true`, and the server operator can read them.
+
+The session IP setting controls session metadata only. Every connection's IP is
+still processed in memory for pre-auth connection caps, PROXY-v2 parsing, and
+per-network abuse limits. These limits are deployment-wide by default: 10
+`auth.sendCode` calls per network per hour, 20 distinct `auth.sendCode`
+identifiers per network per 24 hours, 10 failed `auth.signIn` attempts per
+network per hour, 10 failed `auth.checkPassword` attempts per network per hour,
+20 unauthenticated `account.getPassword` calls per network per hour, and 5
+`auth.signUp` calls per network per hour. The `TG_RATE_LIMIT_*` settings above
+can change their limits and windows; setting a configurable limit to `0`
+disables only that counter. The failed `auth.signIn` counter has no environment
+override. Teagram puts a username in the protocol's `phone_number` field and
+rejects phone-shaped identifiers. Its `auth.sendCode` distinct-identifier
+counter may retain those usernames in Postgres for the configured window
+(24h by default), plus up to five minutes before the sweep removes them.
+
+Per-network counters use an IPv4 `/32` or IPv6 `/64` bucket based on
+`TG_CLIENT_ADDR_TRUST`. The `auth.sendCode` tables store that network prefix;
+other IP rate-limit rows store a deterministic FNV-derived key, which is
+enumerable for IPv4 and pseudonymous rather than anonymous. Counter rows expire
+with their configured windows and are pruned by the limiter or its sweeper.
+Slow-query logs that include bind values (default threshold 250 ms) and
+pre-deploy database dumps can hold older values beyond those windows.
+
+An operator with access to the database can read its contents, messages
+included. Messages are not end-to-end encrypted. These settings do not erase
+database dumps or slow-query logs, and turning a setting off does not bulk-erase
+historical rows.
 
 Disabling session IP collection hides stored IPs from `account.getAuthorizations`
 immediately and clears them on the next activity touch, logout, revocation, or
 inactivity expiry. An idle session that is never touched again can retain its
 historical IP at rest until its normal lifecycle clears it. The switch does not
-bulk erase or backfill rows. Slow-query logs that include bind values (default
-threshold 250 ms) and pre-deploy database dumps can also retain values written
-before the switch.
+bulk erase or backfill rows.
 
 Device and app labels, including the API ID, are stored and visible to the
 operator while `TG_SESSION_DEVICE_LABELS=true`. Turning it off hides those
-fields in `account.getAuthorizations` and stops future writes; it does not bulk
-erase historical labels. Turning either setting back on resumes collection for
-new writes without backfilling older rows.
+fields in `account.getAuthorizations` and stops future writes; historical
+labels remain until overwritten or the session is logged out or revoked. It
+does not bulk erase them. Turning either session setting back on resumes
+collection for new writes without backfilling older rows.
 
 When `TG_WEBSOCKET_LISTEN_ADDR` is set, configure
 `TG_WEBSOCKET_ALLOWED_ORIGINS` with the browser origins that may connect to
@@ -123,12 +160,17 @@ client headers and RPC fields cannot select the tailnet policy. `help.getAppConf
 reports the mode of the listener that accepted the connection. Existing
 accounts can sign in through either listener.
 
-When Turnstile is enabled, the server checks every `auth.signUp` token with
-Cloudflare before charging the sign-up IP limit. It requires the `signup` action
-and the `web.teagram.io` hostname; login and all other RPC methods remain
-ungated. Verification failures ask the client to retry with a fresh challenge.
-Startup rejects Cloudflare's always-pass test secret, and a configured secret
-requires the public site key so the server can return the challenge error.
+Turnstile is disabled by default. Set a site key and a Siteverify secret to
+challenge each `auth.signUp`; users complete a Cloudflare challenge and Cloudflare
+processes its token.
+The server requires the `signup` action and `web.teagram.io` hostname before
+charging the sign-up IP limit. Set `TG_TURNSTILE_SIGNIN_ENABLED=true` to also
+challenge username sign-in at `auth.sendCode`; this switch defaults to `false`,
+and other RPCs remain ungated. Behind `TG_CLIENT_ADDR_TRUST=proxy-v2`, the
+server also sends the client IP to Cloudflare for verification. Verification
+failures ask the client to retry with a fresh challenge. Startup rejects
+Cloudflare's always-pass test secret, and configured credentials require the
+public site key so the server can return the challenge error.
 
 Before asking for registration details, an unauthenticated client may call
 `help.getAppConfig`. The `help.appConfig` response keeps its standard TL shape;
@@ -445,8 +487,9 @@ and has no automated recovery RPC.
 Email-only `account.updatePasswordSettings` calls remain accepted no-ops. They
 cannot add, replace, or remove an email, and they do not change the password.
 Switching to `off` stops future email writes and responses while preserving
-existing rows; switching back to `contact` exposes any retained row again and
-does not backfill missing emails. The local `teagramd admin set-password`
+existing rows; a later password set or change can overwrite the row with NULL.
+Switching back to `contact` exposes any retained row again and does not backfill
+missing emails. There is no bulk erase. The local `teagramd admin set-password`
 command changes the password verifier and leaves its recovery-email row
 untouched.
 
