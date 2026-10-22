@@ -1396,6 +1396,7 @@ def compose_environment(checkout: pathlib.Path, local: bool = False) -> dict[str
             "MOCK_LIVE_R70_INERT_SURFACES", "MOCK_FROZEN_PS",
             "MOCK_FROZEN_INSPECT", "MOCK_SOURCE_VOLUME_MOUNTPOINT",
             "MOCK_WRITER_RUNNING", "MOCK_LIVE_PS", "MOCK_LIVE_COMPOSE_FILES",
+            "MOCK_AUTHORITY_INSPECT",
             "MOCK_DUMP_RESTORE_FAIL",
         ):
             if os.environ.get(key):
@@ -1981,6 +1982,86 @@ def live_compose_services(compose: object, reason: str) -> list[str]:
     return names
 
 
+def assert_live_teagramd_matches_authority(
+    mode: Any,
+    project: str,
+    services: list[str],
+    authority: dict[str, Any],
+    mode_source: str,
+    output_dir: pathlib.Path,
+    checkout: pathlib.Path,
+    environment: dict[str, str],
+    name: str,
+) -> None:
+    running = run_command(
+        [
+            "docker", "ps", "--no-trunc", "--filter",
+            f"label=com.docker.compose.project={project}", "--format",
+            '{{.ID}}\t{{.Label "com.docker.compose.service"}}',
+        ],
+        output_dir,
+        f"{name}-containers",
+        cwd=checkout,
+        env=environment,
+    )
+    try:
+        rows = [line.split("\t") for line in running.decode("utf-8").splitlines() if line]
+    except UnicodeDecodeError:
+        reject("running-inventory-invalid")
+    if any(
+        len(row) != 2
+        or re.fullmatch(r"[0-9a-f]{64}", row[0]) is None
+        or not row[1]
+        for row in rows
+    ):
+        reject("running-inventory-invalid")
+    serving = [row for row in rows if mode.is_runtime_service(row[1])]
+    identifiers = [row[0] for row in serving]
+    if (
+        not serving
+        or len(identifiers) != len(set(identifiers))
+        or {row[1] for row in serving} != set(services)
+    ):
+        reject("running-service-mismatch")
+    inspected_rows = [row for row in rows if mode.is_runtime_service(row[1]) or row[1] == "rustfs"]
+    inspected_ids = [row[0] for row in inspected_rows]
+    if len(inspected_ids) != len(set(inspected_ids)):
+        reject("running-inventory-invalid")
+
+    inspected_output = run_command(
+        ["docker", "inspect", "--format", "{{json .}}", *inspected_ids],
+        output_dir,
+        f"{name}-inspect",
+        cwd=checkout,
+        env=environment,
+    )
+    try:
+        inspected = [
+            json.loads(line, object_pairs_hook=mode.strict_pairs)
+            for line in inspected_output.decode("utf-8").splitlines()
+            if line
+        ]
+    except (UnicodeDecodeError, json.JSONDecodeError, ValueError, mode.Reject):
+        reject("running-inventory-invalid")
+    if len(inspected) != len(inspected_ids):
+        reject("running-inventory-invalid")
+    for row, container in zip(inspected_rows, inspected, strict=True):
+        config = container.get("Config") if isinstance(container, dict) else None
+        labels = config.get("Labels") if isinstance(config, dict) else None
+        state = container.get("State") if isinstance(container, dict) else None
+        if (
+            not isinstance(labels, dict)
+            or labels.get("com.docker.compose.project") != project
+            or labels.get("com.docker.compose.service") != row[1]
+            or container.get("Id") != row[0]
+            or not isinstance(state, dict)
+            or state.get("Status") != "running"
+        ):
+            reject("running-inventory-invalid")
+    inventory = mode.container_inventory(inspected, checkout)
+    mode.assert_containers_match(inventory, authority, mode_source)
+
+
 def run_current_cutover(args: argparse.Namespace) -> None:
     checkout = args.checkout.absolute()
     state_dir = args.state_dir.absolute()
@@ -2117,6 +2198,17 @@ def run_current_cutover(args: argparse.Namespace) -> None:
         running_services = set(local_running.decode("utf-8").splitlines())
         if "postgres" not in running_services or not set(local_services) <= running_services:
             reject("local-serving-not-ready")
+        assert_live_teagramd_matches_authority(
+            mode,
+            project,
+            local_services,
+            previous,
+            os.path.realpath(checkout / ".state" / "blob-mode"),
+            output_dir,
+            checkout,
+            local_env,
+            "verify-local-authority-before-freeze",
+        )
         candidate_running = run_command(
             ["docker", "compose", "ps", "--status", "running", "--services"],
             output_dir,
@@ -2394,6 +2486,17 @@ def run_simple_recovery(args: argparse.Namespace) -> None:
         running = set(before.decode("utf-8").splitlines())
         if not ({"postgres", "rustfs"} | set(s3_services)) <= running:
             reject("s3-serving-not-ready")
+        assert_live_teagramd_matches_authority(
+            mode,
+            project,
+            s3_services,
+            previous,
+            os.path.realpath(checkout / ".state" / "blob-mode"),
+            output_dir,
+            checkout,
+            s3_env,
+            "verify-s3-authority-before-freeze",
+        )
 
         writers_may_be_stopped = True
         run_command(

@@ -386,6 +386,7 @@ class BlobModeStateTests(unittest.TestCase):
         report_root: pathlib.Path,
         *,
         exposed: bool = False,
+        external_network: bool = False,
         mismatched_destination: bool = False,
     ) -> pathlib.Path:
         phase_dir = report_root / f"simple-transition-proof-{len(list(report_root.iterdir()))}"
@@ -394,9 +395,24 @@ class BlobModeStateTests(unittest.TestCase):
         destination = b"01/1\t10\t" + b"b" * 64 + b"\n" if mismatched_destination else manifest
         dump = b"-- PostgreSQL database dump complete\n"
         dump_sha256 = blob_mode.hashlib.sha256(dump).hexdigest()
+        candidate_compose = {
+            "name": "teagram",
+            "services": {
+                "rustfs": {
+                    "ports": [{"target": 9000, "published": "9000"}] if exposed else [],
+                    "networks": {"default": None, "edge": None} if external_network else None,
+                },
+            },
+            "networks": {
+                "default": {"name": "teagram_default"},
+                **({"edge": {"name": "edge", "external": True}} if external_network else {}),
+            },
+        }
+        if candidate_compose["services"]["rustfs"]["networks"] is None:
+            candidate_compose["services"]["rustfs"].pop("networks")
         contents = {
             "candidate_compose_sha256": json.dumps(
-                {"services": {"rustfs": {"ports": [{"target": 9000, "published": "9000"}] if exposed else []}}},
+                candidate_compose,
                 sort_keys=True,
                 separators=(",", ":"),
             ).encode("utf-8"),
@@ -1335,6 +1351,32 @@ class BlobModeStateTests(unittest.TestCase):
             root = pathlib.Path(temporary)
             state_dir, report_root, lock_path = self.create_initial_authority(root)
             proof_path = self.simple_s3_proof_file(root, report_root, exposed=True)
+            args = SimpleNamespace(
+                outcome="s3-accepted", proof=proof_path, state_dir=state_dir,
+                report_root=report_root, lock_path=lock_path,
+            )
+            state_before = {
+                path.relative_to(state_dir): path.read_bytes()
+                for path in state_dir.rglob("*") if path.is_file()
+            }
+            with (
+                patch.object(blob_mode, "require_runner_lock"),
+                patch.object(blob_mode, "file_stat", side_effect=self.allow_unowned_private_files),
+                patch.object(blob_mode.os, "fchown"),
+                patch.object(blob_mode.os, "chown"),
+            ):
+                self.assert_rejects(lambda: blob_mode.publish_transition(args), "transition-report-evidence")
+            state_after = {
+                path.relative_to(state_dir): path.read_bytes()
+                for path in state_dir.rglob("*") if path.is_file()
+            }
+            self.assertEqual(state_after, state_before)
+
+    def test_simple_s3_transition_rejects_external_rustfs_network(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = pathlib.Path(temporary)
+            state_dir, report_root, lock_path = self.create_initial_authority(root)
+            proof_path = self.simple_s3_proof_file(root, report_root, external_network=True)
             args = SimpleNamespace(
                 outcome="s3-accepted", proof=proof_path, state_dir=state_dir,
                 report_root=report_root, lock_path=lock_path,

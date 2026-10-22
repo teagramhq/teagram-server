@@ -100,6 +100,32 @@ or volume does not match, it stops without replacing the current containers.
 
 ## RustFS cutover and recovery
 
+### Threat model
+
+The protected assets are users' private media, the RustFS data volume, the
+durable blob-mode authority, and the RustFS root and application credentials.
+The LXC host, its root account, and Docker daemon are trusted administrators;
+container isolation does not protect these assets from a host or daemon
+compromise. `teagramd` receives only the scoped application credential through
+the read-only `/run/secrets/teagramd-blob-secret-key` file. RustFS root
+credentials are file secrets available only to RustFS and its initializer.
+Keep source secrets in protected files, never in application environment
+variables, command arguments, logs, or Git.
+
+RustFS listens on its internal S3 port with its console disabled. The service
+must use only the Compose project's private `default` network, and neither port
+may be published. External clients reach media through the application edge;
+other Docker networks must not gain direct access to RustFS. Host root and
+services on the private project network remain inside the trusted boundary.
+
+Cutover freezes `teagramd` writers and checks the copied media before changing
+the durable authority. A validation failure before `s3-accepted` is published
+keeps local authority and resumes local serving. After S3 authority is
+published, stop serving and use `recover-local` to restore and verify media in
+the retained `tgblobs` volume before publishing local authority. Keep that
+volume intact; it is the rollback copy. Verify local serving after recovery,
+then repeat the cutover only after the RustFS path passes its checks.
+
 The reviewed live path runs from `/opt/teagram` as root with
 `deploy/teagramd/rollout-runner/blob-transition-runner.py accept-s3`. It checks
 the running local Compose selection, freezes `teagramd*`, verifies a fresh

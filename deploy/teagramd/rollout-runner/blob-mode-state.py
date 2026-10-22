@@ -1130,6 +1130,32 @@ def validate_private_rustfs_render(compose: object) -> None:
         or rustfs.get("network_mode") not in (None, "")
     ):
         reject("transition-rustfs-exposed")
+    project = compose.get("name") if isinstance(compose, dict) else None
+    networks = compose.get("networks") if isinstance(compose, dict) else None
+    service_networks = rustfs.get("networks")
+    if service_networks is None:
+        service_networks = {"default": None}
+    if (
+        not isinstance(project, str)
+        or re.fullmatch(r"[a-z0-9][a-z0-9_-]*", project) is None
+        or not isinstance(networks, dict)
+        or not isinstance(service_networks, dict)
+        or set(service_networks) != {"default"}
+    ):
+        reject("transition-rustfs-exposed")
+    private_network = networks.get("default")
+    if (
+        not isinstance(private_network, dict)
+        or private_network.get("name") != f"{project}_default"
+        or private_network.get("external") not in (None, False)
+    ):
+        reject("transition-rustfs-exposed")
+    try:
+        network = compose_network(rustfs, compose)
+    except Reject:
+        reject("transition-rustfs-exposed")
+    if network != {"mode": "networks", "networks": [f"{project}_default"]}:
+        reject("transition-rustfs-exposed")
 
 
 def validate_transition_artifacts(
