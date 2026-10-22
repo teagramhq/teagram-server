@@ -11,6 +11,7 @@ import (
 	"github.com/gotd/td/tg"
 	"github.com/gotd/td/tgerr"
 
+	"github.com/teagramhq/teagram-server/internal/config"
 	"github.com/teagramhq/teagram-server/internal/mtproto"
 	"github.com/teagramhq/teagram-server/internal/srp"
 	"github.com/teagramhq/teagram-server/internal/store"
@@ -71,7 +72,7 @@ func (h *handlers) handleGetPassword(r *mtproto.Request) (bin.Encoder, error) {
 
 	// Look up password state early so the rate limit only fires when a
 	// modexp will actually run.
-	pw, hasPw, err := h.store.PasswordByUser(r.Ctx, target)
+	pw, hasPw, err := h.store.PasswordForAuthenticationByUser(r.Ctx, target)
 	if err != nil {
 		h.log.Error("get password: lookup", "user_id", target, "err", err)
 		return nil, errInternal
@@ -132,7 +133,6 @@ func (h *handlers) handleGetPassword(r *mtproto.Request) (bin.Encoder, error) {
 		resp.SetSRPB(srpB)
 		resp.SetSRPID(srpID)
 		resp.SetHint(pw.Hint)
-		resp.HasRecovery = pw.HasRecovery
 	}
 	return resp, nil
 }
@@ -338,7 +338,7 @@ func (h *handlers) consumeAndVerify(ctx context.Context, authKeyID int64, proof 
 	if !ok {
 		return 0, errSRPIDInvalid
 	}
-	pw, ok, err := h.store.PasswordByUser(ctx, pending.UserID)
+	pw, ok, err := h.store.PasswordForAuthenticationByUser(ctx, pending.UserID)
 	if err != nil {
 		h.log.Error("srp verify: load password", "user_id", pending.UserID, "err", err)
 		return 0, errInternal
@@ -365,7 +365,7 @@ func (h *handlers) handleUpdatePasswordSettings(r *mtproto.Request) (bin.Encoder
 		return nil, errMethodNotImpl
 	}
 
-	_, hasCur, err := h.store.PasswordByUser(r.Ctx, r.UserID)
+	_, hasCur, err := h.store.PasswordForAuthenticationByUser(r.Ctx, r.UserID)
 	if err != nil {
 		h.log.Error("update password: lookup current", "user_id", r.UserID, "err", err)
 		return nil, errInternal
@@ -426,14 +426,18 @@ func (h *handlers) handleUpdatePasswordSettings(r *mtproto.Request) (bin.Encoder
 		if len(ns.NewPasswordHash) != srp.PadLen || !srp.ValidVerifier(ns.NewPasswordHash) {
 			return nil, errNewPasswordBad
 		}
+		recoveryEmail := ""
+		if h.recoveryEmailMode == config.RecoveryEmailContact {
+			recoveryEmail = ns.Email
+		}
 		password := store.UserPassword{
 			UserID:        r.UserID,
 			Salt1:         algo.Salt1,
 			Salt2:         algo.Salt2,
 			Verifier:      ns.NewPasswordHash,
 			Hint:          ns.Hint,
-			RecoveryEmail: ns.Email,
-			HasRecovery:   ns.Email != "",
+			RecoveryEmail: recoveryEmail,
+			HasRecovery:   false,
 		}
 		if hasCur {
 			if err := h.store.UpsertPassword(r.Ctx, password); err != nil {
@@ -481,14 +485,16 @@ func (h *handlers) handleGetPasswordSettings(r *mtproto.Request) (bin.Encoder, e
 	if uid != r.UserID {
 		return nil, errPasswordHashInvalid
 	}
-	pw, hasPw, err := h.store.PasswordByUser(r.Ctx, r.UserID)
-	if err != nil {
-		h.log.Error("get password settings: lookup", "user_id", r.UserID, "err", err)
-		return nil, errInternal
-	}
 	settings := &tg.AccountPasswordSettings{}
-	if hasPw && pw.HasRecovery {
-		settings.SetEmail(pw.RecoveryEmail)
+	if h.recoveryEmailMode == config.RecoveryEmailContact {
+		pw, hasPw, err := h.store.PasswordByUser(r.Ctx, r.UserID)
+		if err != nil {
+			h.log.Error("get password settings: lookup", "user_id", r.UserID, "err", err)
+			return nil, errInternal
+		}
+		if hasPw && pw.RecoveryEmail != "" {
+			settings.SetEmail(pw.RecoveryEmail)
+		}
 	}
 	return settings, nil
 }
