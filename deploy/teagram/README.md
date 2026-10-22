@@ -68,6 +68,13 @@ exact selection for the first Teagram rollout, as well as the pinned local
 artifact used by later local-backed rollouts. Keep the file order reported by
 the running container.
 
+After `accept-s3` publishes `s3-accepted`, the live selection is exactly
+`docker-compose.yml` plus `docker-compose.override.yml`. Ordinary deploys accept
+that pair only after the transition helper validates the durable S3 authority
+and the parked credential file against the mounted app key. Compose receives
+the checkout `.env` followed by `.env.rustfs-parked`; the deploy script never
+prints those values. Keep the running container's file order unchanged.
+
 ## Initial local rollout
 
 The currently available publication path inspects an already-running local
@@ -148,9 +155,12 @@ The operation and exact command are documented in
 
 Use `blob-transition-runner.py recover-local` to restore S3 objects into the
 retained `tgblobs` volume and publish `recovered-local` before starting the
-local backend. Run `accept-s3` again to move back to RustFS. Both paths use the
-same shared deployment lock and publish authority only through
-`blob-mode-state.py`.
+local backend. Recovery preserves the local blob directory from the authority
+record immediately before cutover and verifies that the Compose render uses
+that directory, including the persisted
+`TEAGRAMD_STACK_MOVE_BLOB_DIR=/var/lib/telegramd-blobs` setting from `move-stack`.
+Run `accept-s3` again to move back to RustFS. Both paths use the same shared
+deployment lock and publish authority only through `blob-mode-state.py`.
 
 Never remove `tgblobs` or run `docker compose down -v` on the deployment. The
 volume remains the local rollback copy and is written only when `recover-local`

@@ -1726,6 +1726,7 @@ def build_recovery_proof(
     output_dir: pathlib.Path,
     report_root: pathlib.Path,
     phase_paths: dict[str, pathlib.Path],
+    backend: dict[str, str],
 ) -> pathlib.Path:
     mode = import_mode_helper()
     all_paths = {
@@ -1742,7 +1743,7 @@ def build_recovery_proof(
     proof = {
         "schema": mode.TRANSITION_PROOF_SCHEMA,
         "outcome": "recovered-local",
-        "backend": {"kind": "local", "dir": "/var/lib/teagramd-blobs"},
+        "backend": backend,
         "volumes": {
             "tgblobs": json.loads((output_dir / "authority-before.json").read_text(encoding="utf-8"))["volumes"]["tgblobs"],
             "rustfsdata": json.loads((output_dir / "authority-before.json").read_text(encoding="utf-8"))["volumes"]["rustfsdata"],
@@ -1899,6 +1900,7 @@ def build_simple_recovery_proof(
     report_root: pathlib.Path,
     previous: dict[str, Any],
     phase_paths: dict[str, pathlib.Path],
+    backend: dict[str, str],
 ) -> pathlib.Path:
     mode = import_mode_helper()
     all_paths = {
@@ -1915,7 +1917,7 @@ def build_simple_recovery_proof(
     proof = {
         "schema": mode.SIMPLE_TRANSITION_PROOF_SCHEMA,
         "outcome": "recovered-local",
-        "backend": {"kind": "local", "dir": mode.BLOB_TARGET},
+        "backend": backend,
         "volumes": {
             "tgblobs": previous["volumes"]["tgblobs"],
             "rustfsdata": previous["volumes"]["rustfsdata"],
@@ -1993,6 +1995,21 @@ def assert_compose_matches_authority(
         mode.assert_compose_matches(inventory, authority, mode_source, override_path)
     except mode.Reject as error:
         reject(str(error))
+
+
+def recovery_local_backend(mode: Any, records: list[dict[str, Any]]) -> dict[str, str]:
+    if len(records) < 2:
+        reject("recovery-local-authority-missing")
+    local = records[-2]
+    backend = local.get("backend")
+    if (
+        local.get("outcome") not in ("initial-local", "recovered-local", mode.STACK_MOVE_OUTCOME)
+        or not isinstance(backend, dict)
+        or backend.get("kind") != "local"
+        or backend.get("dir") not in mode.BLOB_TARGETS
+    ):
+        reject("recovery-local-authority-invalid")
+    return {"kind": "local", "dir": backend["dir"]}
 
 
 def assert_live_teagramd_matches_authority(
@@ -2606,7 +2623,7 @@ def run_simple_recovery(args: argparse.Namespace) -> None:
         local_services = live_compose_services(local_compose, "local-compose-invalid")
         local_record = dict(previous)
         local_record["outcome"] = "recovered-local"
-        local_record["backend"] = {"kind": "local", "dir": mode.BLOB_TARGET}
+        local_record["backend"] = recovery_local_backend(mode, records)
         assert_compose_matches_authority(
             mode,
             mode.compose_inventory(local_compose, checkout),
@@ -2738,7 +2755,9 @@ def run_simple_recovery(args: argparse.Namespace) -> None:
         current_records, current_head, current_bytes = mode.read_authority(state_dir, report_root)
         if current_head != head or current_bytes != mode_bytes or len(current_records) != len(records):
             reject("transition-authority-changed")
-        proof_path = build_simple_recovery_proof(output_dir, report_root, previous, phase_paths)
+        proof_path = build_simple_recovery_proof(
+            output_dir, report_root, previous, phase_paths, local_record["backend"]
+        )
         publication = invoke_publisher(
             proof_path, state_dir, report_root, lock_path, outcome="recovered-local"
         )
@@ -3205,7 +3224,7 @@ def run_recovery(args: argparse.Namespace) -> None:
         local_inventory = mode.compose_inventory(local_compose, checkout)
         local_record = dict(previous)
         local_record["outcome"] = "recovered-local"
-        local_record["backend"] = {"kind": "local", "dir": mode.BLOB_TARGET}
+        local_record["backend"] = recovery_local_backend(mode, records)
         assert_compose_matches_authority(
             mode, local_inventory, local_record, os.path.realpath(checkout / ".state" / "blob-mode"), checkout / "docker-compose.override.yml"
         )
@@ -3325,7 +3344,9 @@ def run_recovery(args: argparse.Namespace) -> None:
             project, source_volume, output_dir, checkout, local_environment,
             "writers-before-recovery-publication",
         )
-        proof_path = build_recovery_proof(working_bundle, output_dir, report_root, phase_paths)
+        proof_path = build_recovery_proof(
+            working_bundle, output_dir, report_root, phase_paths, local_record["backend"]
+        )
         published = invoke_publisher(
             proof_path, args.state_dir, report_root, lock_path, outcome="recovered-local"
         )
@@ -3384,9 +3405,61 @@ def run_recovery(args: argparse.Namespace) -> None:
         raise failure
 
 
+def deployment_environment(args: argparse.Namespace) -> None:
+    checkout = args.checkout.absolute()
+    state_dir = args.state_dir.absolute()
+    report_root = args.report_root.absolute()
+    lock_path = args.lock_path.absolute()
+    if checkout.is_symlink() or report_root.is_symlink():
+        reject("transition-input-invalid")
+    try:
+        checkout = checkout.resolve(strict=True)
+        report_root = report_root.resolve(strict=True)
+    except OSError:
+        reject("transition-input-unavailable")
+    if not checkout.is_dir():
+        reject("candidate-checkout-invalid")
+    if not TEST_MODE and (
+        os.geteuid() != 0
+        or checkout != pathlib.Path("/opt/teagram")
+        or str(lock_path) != "/tmp/teagram-deploy.lock"
+        or pathlib.Path.cwd().resolve(strict=True) != checkout
+    ):
+        reject("production-path-invalid")
+
+    mode = import_mode_helper()
+    try:
+        mode.require_runner_lock(lock_path)
+        record = mode.current_authority(state_dir, report_root)
+    except mode.Reject as error:
+        reject(str(error))
+    backend = record.get("backend")
+    if (
+        record.get("outcome") != "s3-accepted"
+        or not isinstance(backend, dict)
+        or backend.get("kind") != "s3"
+    ):
+        reject("deploy-s3-authority-invalid")
+    environment_files = rustfs_compose_environment_files(checkout)
+    if environment_files[0] != str(checkout / ".env"):
+        reject("rustfs-credentials-invalid")
+    print(json.dumps(
+        {"outcome": "s3-accepted", "env_files": environment_files},
+        sort_keys=True,
+        separators=(",", ":"),
+    ))
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     commands = parser.add_subparsers(dest="action", required=True)
+    deployment_env = commands.add_parser("deployment-env")
+    deployment_env.add_argument("--checkout", type=pathlib.Path, required=True)
+    deployment_env.add_argument("--state-dir", type=pathlib.Path, required=True)
+    deployment_env.add_argument("--report-root", type=pathlib.Path, required=True)
+    deployment_env.add_argument(
+        "--lock-path", type=pathlib.Path, default=pathlib.Path("/tmp/teagram-deploy.lock")
+    )
     accept = commands.add_parser("accept-s3")
     accept.add_argument("--checkout", type=pathlib.Path, required=True)
     accept.add_argument("--state-dir", type=pathlib.Path, required=True)
@@ -3411,7 +3484,9 @@ def main() -> int:
     qualified_recover.add_argument("--lock-path", type=pathlib.Path, default=pathlib.Path("/tmp/teagram-deploy.lock"))
     args = parser.parse_args()
     try:
-        if args.action == "accept-s3":
+        if args.action == "deployment-env":
+            deployment_environment(args)
+        elif args.action == "accept-s3":
             run_current_cutover(args)
         elif args.action == "accept-s3-qualified":
             run_cutover(args)

@@ -2517,7 +2517,15 @@ def publish_transition(args: argparse.Namespace) -> None:
         if set(evidence) != expected or evidence.get("copy_passes") != expected_passes:
             reject("transition-proof-invalid")
     else:
-        if set(backend) != {"kind", "dir"} or backend != {"kind": "local", "dir": BLOB_TARGET}:
+        local_record = records[-2] if len(records) >= 2 else None
+        expected_backend = local_record.get("backend") if isinstance(local_record, dict) else None
+        if (
+            set(backend) != {"kind", "dir"}
+            or not isinstance(expected_backend, dict)
+            or expected_backend.get("kind") != "local"
+            or expected_backend.get("dir") not in BLOB_TARGETS
+            or backend != expected_backend
+        ):
             reject("transition-backend")
         expected = {
             "s3_census_manifest_sha256", "restored_manifest_sha256", "object_count", "byte_total",
