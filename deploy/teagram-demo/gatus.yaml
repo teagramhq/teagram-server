@@ -13,7 +13,7 @@ endpoints:
 
   - name: Client discovery
     group: teagram-demo
-    url: https://demo.teagram.io/.well-known/telegramd/client
+    url: https://demo.teagram.io/.well-known/teagramd/client
     interval: 1m
     conditions:
       - "[STATUS] == 200"

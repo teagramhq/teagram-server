@@ -538,7 +538,6 @@ func TestServeWebSocketDiscoveryCORSIsPathScoped(t *testing.T) {
 		return resp
 	}
 	discoveryPaths := []string{
-		"/.well-known/telegramd/client",
 		"/.well-known/teagramd/client",
 	}
 	wantBody, err := json.Marshal(doc)
@@ -598,6 +597,17 @@ func TestServeWebSocketDiscoveryCORSIsPathScoped(t *testing.T) {
 		})
 	}
 
+	legacyResp := request(http.MethodGet, "/.well-known/telegramd/client")
+	if legacyResp.StatusCode != http.StatusNotFound {
+		t.Errorf("GET legacy discovery status = %d, want %d", legacyResp.StatusCode, http.StatusNotFound)
+	}
+	if got := legacyResp.Header.Get("Access-Control-Allow-Origin"); got != "" {
+		t.Errorf("GET legacy discovery ACAO = %q, want empty", got)
+	}
+	if err := legacyResp.Body.Close(); err != nil {
+		t.Errorf("close legacy discovery response body: %v", err)
+	}
+
 	for _, requestPath := range []string{
 		"/.well-known/telegramd/client/extra",
 		"/.well-known/telegramd%2Fclient",
@@ -646,7 +656,6 @@ func TestServeWebSocketDiscoveryPathsWithoutDocument(t *testing.T) {
 	})
 
 	for _, requestPath := range []string{
-		"/.well-known/telegramd/client",
 		"/.well-known/teagramd/client",
 	} {
 		for _, tc := range []struct {
@@ -680,6 +689,24 @@ func TestServeWebSocketDiscoveryPathsWithoutDocument(t *testing.T) {
 				t.Errorf("close %s %s response body: %v", tc.method, requestPath, err)
 			}
 		}
+	}
+
+	legacyReq, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://"+ln.Addr().String()+"/.well-known/telegramd/client", nil)
+	if err != nil {
+		t.Fatalf("new legacy discovery request: %v", err)
+	}
+	legacyResp, err := http.DefaultClient.Do(legacyReq)
+	if err != nil {
+		t.Fatalf("send legacy discovery request: %v", err)
+	}
+	if legacyResp.StatusCode != http.StatusNotFound {
+		t.Errorf("GET legacy discovery status = %d, want %d", legacyResp.StatusCode, http.StatusNotFound)
+	}
+	if got := legacyResp.Header.Get("Access-Control-Allow-Origin"); got != "" {
+		t.Errorf("GET legacy discovery ACAO = %q, want empty", got)
+	}
+	if err := legacyResp.Body.Close(); err != nil {
+		t.Errorf("close legacy discovery response body: %v", err)
 	}
 }
 
@@ -731,7 +758,6 @@ func TestServeWebSocketUsesListenerScopedDiscovery(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			for _, requestPath := range []string{
-				"/.well-known/telegramd/client",
 				"/.well-known/teagramd/client",
 			} {
 				req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, "http://"+tc.listener.Addr().String()+requestPath, nil)
