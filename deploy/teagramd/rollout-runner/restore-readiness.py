@@ -88,6 +88,7 @@ MAX_LOCAL_DUMP_BYTES = 512 * 1024 * 1024
 MAX_LOCAL_AUTH_KEYS = 100_000
 LOCAL_DUMP_NAME = re.compile(r"^pgdump-pre-[0-9a-f]{7,40}\.sql$")
 LOCAL_DUMP_LEAK_MARKER = b"RESTORE_READINESS_LOCAL_DUMP_LEAK_MARKER"
+RESTORE_BOOTSTRAP_ROLE = "restore_bootstrap"
 
 
 def bounded_work_seconds(fault_test: str | None, requested: int | None) -> int:
@@ -218,6 +219,15 @@ def local_dump_identity(info: os.stat_result) -> dict[str, int]:
         "mtime_ns": info.st_mtime_ns,
         "ctime_ns": info.st_ctime_ns,
     }
+
+
+def bootstrap_postgres_role_sql(password: str) -> str:
+    if not re.fullmatch(r"[0-9a-f]{64}", password):
+        raise ValueError("invalid scratch database password")
+    return (
+        "CREATE ROLE postgres WITH LOGIN SUPERUSER CREATEDB CREATEROLE "
+        f"REPLICATION BYPASSRLS PASSWORD '{password}';"
+    )
 
 
 def validate_local_dump_metadata(info: os.stat_result, name: str) -> bool:
@@ -3116,7 +3126,7 @@ class Drill(Docker):
                     "-h",
                     "127.0.0.1",
                     "-U",
-                    "postgres",
+                    RESTORE_BOOTSTRAP_ROLE,
                     "-d",
                     "teagram",
                 ],
@@ -3140,7 +3150,7 @@ class Drill(Docker):
         env_values = {
             "PGDATA": "/var/lib/postgresql/18/docker",
             "POSTGRES_DB": "teagram",
-            "POSTGRES_USER": "postgres",
+            "POSTGRES_USER": RESTORE_BOOTSTRAP_ROLE,
             "POSTGRES_PASSWORD_FILE": "/run/secrets/init-password",
             "POSTGRES_HOST_AUTH_METHOD": "scram-sha-256",
         }
@@ -3209,6 +3219,12 @@ class Drill(Docker):
         self.databases[name] = record
         self.start_container(record, self.phase, "fixture_failure")
         self.wait_database(record, self.phase)
+        try:
+            bootstrap_password = self.private_read(secret, max_bytes=128).decode("ascii").strip()
+            role_sql = bootstrap_postgres_role_sql(bootstrap_password)
+        except (UnicodeDecodeError, ValueError) as exc:
+            raise DrillFailure(self.phase, "fixture_failure") from exc
+        self.sql(record, role_sql, self.phase, database_user=RESTORE_BOOTSTRAP_ROLE)
         self.truncate_private(secret)
         if self.private_read(secret) != b"":
             raise DrillFailure(self.phase, "fixture_failure")
@@ -5325,14 +5341,14 @@ dump_path=$2
             ("source_database_env", {
                 "PGDATA": "/var/lib/postgresql/18/docker",
                 "POSTGRES_DB": "teagram",
-                "POSTGRES_USER": "postgres",
+                "POSTGRES_USER": RESTORE_BOOTSTRAP_ROLE,
                 "POSTGRES_PASSWORD_FILE": "/run/secrets/init-password",
                 "POSTGRES_HOST_AUTH_METHOD": "scram-sha-256",
             }),
             ("target_database_env", {
                 "PGDATA": "/var/lib/postgresql/18/docker",
                 "POSTGRES_DB": "teagram",
-                "POSTGRES_USER": "postgres",
+                "POSTGRES_USER": RESTORE_BOOTSTRAP_ROLE,
                 "POSTGRES_PASSWORD_FILE": "/run/secrets/init-password",
                 "POSTGRES_HOST_AUTH_METHOD": "scram-sha-256",
             }),

@@ -178,6 +178,34 @@ class RestoreReadinessContractTests(unittest.TestCase):
         self.assertIn("/var/lib/postgresql", tmpfs_paths)
         self.assertNotIn("/var/lib/postgresql/data", tmpfs_paths)
 
+    def test_postgres_restore_role_is_not_the_pg18_bootstrap_superuser(self) -> None:
+        role = RESTORE_READINESS.RESTORE_BOOTSTRAP_ROLE
+        self.assertNotEqual(role, "postgres")
+        self.assertEqual(
+            RESTORE_READINESS.bootstrap_postgres_role_sql("a" * 64),
+            "CREATE ROLE postgres WITH LOGIN SUPERUSER CREATEDB CREATEROLE "
+            "REPLICATION BYPASSRLS PASSWORD '" + "a" * 64 + "';",
+        )
+        with self.assertRaises(ValueError):
+            RESTORE_READINESS.bootstrap_postgres_role_sql("a' SUPERUSER; --")
+
+        tree = ast.parse(SCRIPT.read_text(encoding="utf-8"))
+        create_database = next(
+            node
+            for node in ast.walk(tree)
+            if isinstance(node, ast.FunctionDef) and node.name == "create_database"
+        )
+        create_database_source = ast.unparse(create_database)
+        self.assertIn("database_user=RESTORE_BOOTSTRAP_ROLE", create_database_source)
+        self.assertIn("self.sql(record, role_sql, self.phase", create_database_source)
+
+        prepare_materials = next(
+            node
+            for node in ast.walk(tree)
+            if isinstance(node, ast.FunctionDef) and node.name == "prepare_materials"
+        )
+        self.assertEqual(ast.unparse(prepare_materials).count("'POSTGRES_USER': RESTORE_BOOTSTRAP_ROLE"), 2)
+
     def test_sigkill_drill_requires_injection_marker_and_signal_status(self) -> None:
         marker = b"SIGKILL_INJECTED\n"
         with patch.object(RESTORE_READINESS.os, "write", return_value=len(marker)) as write:
