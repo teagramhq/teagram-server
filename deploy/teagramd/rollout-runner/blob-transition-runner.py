@@ -2058,8 +2058,11 @@ def assert_live_teagramd_matches_authority(
             or state.get("Status") != "running"
         ):
             reject("running-inventory-invalid")
-    inventory = mode.container_inventory(inspected, checkout)
-    mode.assert_containers_match(inventory, authority, mode_source)
+    try:
+        inventory = mode.container_inventory(inspected, checkout)
+        mode.assert_containers_match(inventory, authority, mode_source)
+    except mode.Reject as error:
+        reject(str(error))
 
 
 def run_current_cutover(args: argparse.Namespace) -> None:

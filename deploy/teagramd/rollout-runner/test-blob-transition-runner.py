@@ -71,6 +71,49 @@ class BlobTransitionEnvironmentTests(unittest.TestCase):
 
         self.assertEqual(environment["MOCK_SOURCE_VOLUME_MOUNTPOINT"], "/host/source-volume")
 
+    def test_live_authority_rejection_keeps_its_reason(self) -> None:
+        runner = import_from_path("blob_transition_runner_authority_rejection", RUNNER)
+        mode = import_from_path("blob_mode_authority_rejection", RUNNER.parent / "blob-mode-state.py")
+        container_id = "a" * 64
+        inspected = {
+            "Id": container_id,
+            "Config": {
+                "Labels": {
+                    "com.docker.compose.project": "teagram",
+                    "com.docker.compose.service": "teagramd",
+                }
+            },
+            "State": {"Status": "running"},
+        }
+        with tempfile.TemporaryDirectory(prefix="live-authority-rejection.") as temporary:
+            with (
+                patch.object(
+                    runner,
+                    "run_command",
+                    side_effect=[
+                        f"{container_id}\tteagramd\n".encode("ascii"),
+                        (json.dumps(inspected) + "\n").encode("ascii"),
+                    ],
+                ),
+                patch.object(
+                    mode,
+                    "container_inventory",
+                    side_effect=mode.Reject("running-backend-mismatch"),
+                ),
+            ):
+                with self.assertRaisesRegex(runner.TransitionReject, "^running-backend-mismatch$"):
+                    runner.assert_live_teagramd_matches_authority(
+                        mode,
+                        "teagram",
+                        ["teagramd"],
+                        {},
+                        "/checkout/.state/blob-mode",
+                        Path(temporary),
+                        Path("/checkout"),
+                        {},
+                        "test-live-authority",
+                    )
+
     def test_rustfs_commands_load_parked_credentials_after_the_checkout_env(self) -> None:
         if os.geteuid() != 0:
             self.skipTest("RustFS environment fixture requires root ownership checks")
