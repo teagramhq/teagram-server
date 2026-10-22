@@ -35,6 +35,7 @@ SEED_SCHEMA = "20261021000002"
 HEAD_SCHEMA = "20261021000004"
 AUTH_KEY_INVENTORY_PATH = Path(__file__).with_name("auth-key-clearing-inventory.json")
 AUTH_KEY_FIXTURE_COUNT = 3
+LOCAL_UNENROLLED_AUTH_KEY_FIXTURE_COUNT = 2
 AUTH_KEY_FIXTURE_STATE = ["3", "2", "3", "1", "2", "0"]
 AUTH_KEY_CLEARED_STATE = ["0", "0", "0", "1", "2", "2"]
 AUTH_KEY_CLEAR_ACK = b"RESTORE_READINESS_AUTH_KEY_DELETE_APPLIED"
@@ -388,7 +389,7 @@ $auth_key_fixture$;
 
 def local_unenrolled_auth_key_fixture_sql(auth_key_ids: list[int] | tuple[int, ...], token: str) -> str:
     if (
-        len(auth_key_ids) != 2
+        len(auth_key_ids) != LOCAL_UNENROLLED_AUTH_KEY_FIXTURE_COUNT
         or any(
             isinstance(identifier, bool)
             or not isinstance(identifier, int)
@@ -396,7 +397,7 @@ def local_unenrolled_auth_key_fixture_sql(auth_key_ids: list[int] | tuple[int, .
             or identifier <= -(1 << 63)
             for identifier in auth_key_ids
         )
-        or len(set(auth_key_ids)) != 2
+        or len(set(auth_key_ids)) != LOCAL_UNENROLLED_AUTH_KEY_FIXTURE_COUNT
         or not re.fullmatch(r"[0-9a-f]{32}", token)
     ):
         raise ValueError("invalid local auth-key fixture")
@@ -424,6 +425,11 @@ BEGIN
 END
 $local_unenrolled_auth_key_fixture$;
 """
+
+
+def source_fixture_counts(local_fixture_test: bool) -> tuple[int, int]:
+    extra_count = LOCAL_UNENROLLED_AUTH_KEY_FIXTURE_COUNT if local_fixture_test else 0
+    return 1 + extra_count, AUTH_KEY_FIXTURE_COUNT + extra_count
 
 
 def auth_key_clear_transaction_sql(
@@ -3619,7 +3625,7 @@ class Drill(Docker):
         token = self.manifest["token"]
         used_ids = set(self.synthetic_auth_key_ids)
         unenrolled_ids: list[int] = []
-        while len(unenrolled_ids) < 2:
+        while len(unenrolled_ids) < LOCAL_UNENROLLED_AUTH_KEY_FIXTURE_COUNT:
             candidate = -(secrets.randbelow(9_000_000_000_000_000_000) + 1)
             if candidate not in used_ids:
                 used_ids.add(candidate)
@@ -3627,7 +3633,8 @@ class Drill(Docker):
         self.sql(source, local_unenrolled_auth_key_fixture_sql(unenrolled_ids, token), self.phase)
         if (
             self.sql(source, AUTH_KEY_STATE_SQL, self.phase).split("|") != ["5", "2", "3", "1", "2", "0"]
-            or self.sql(source, UNENROLLED_BOUND_AUTH_KEY_COUNT_SQL, self.phase) != "2"
+            or self.sql(source, UNENROLLED_BOUND_AUTH_KEY_COUNT_SQL, self.phase)
+            != str(LOCAL_UNENROLLED_AUTH_KEY_FIXTURE_COUNT)
         ):
             raise DrillFailure(self.phase, "fixture_failure")
         self.sql(source, f"COMMENT ON SCHEMA public IS '{marker}';", self.phase)
@@ -5924,13 +5931,14 @@ def run_primary(args: argparse.Namespace) -> int:
             drill.promote_local_restore_owner(target)
             drill.verify_local_schema_state(source, target, "schema_validation")
             drill.migrate_database("source", source, HEAD_SCHEMA, "source_migrations")
+            expected_users, expected_auth_keys = source_fixture_counts(args.local_fixture_test)
             drill.verify_schema_state(
                 source,
-                1,
+                expected_users,
                 MIGRATION_ROLES,
                 "source_migrations",
                 expected_head=HEAD_SCHEMA,
-                expected_auth_keys=AUTH_KEY_FIXTURE_COUNT,
+                expected_auth_keys=expected_auth_keys,
             )
             drill.apply_pending_migration(target)
             drill.verify_local_schema_state(source, target, "schema_validation", expected_head=HEAD_SCHEMA)

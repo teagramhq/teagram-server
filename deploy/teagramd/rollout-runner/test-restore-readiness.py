@@ -187,6 +187,10 @@ class RestoreReadinessContractTests(unittest.TestCase):
         self.assertIn("/var/lib/postgresql", tmpfs_paths)
         self.assertNotIn("/var/lib/postgresql/data", tmpfs_paths)
 
+    def test_local_fixture_source_migration_allows_added_users_and_auth_keys(self) -> None:
+        self.assertEqual(RESTORE_READINESS.source_fixture_counts(False), (1, 3))
+        self.assertEqual(RESTORE_READINESS.source_fixture_counts(True), (3, 5))
+
     def test_postgres_restore_role_is_not_the_pg18_bootstrap_superuser(self) -> None:
         role = RESTORE_READINESS.RESTORE_BOOTSTRAP_ROLE
         self.assertNotEqual(role, "postgres")
