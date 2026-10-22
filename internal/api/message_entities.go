@@ -79,6 +79,7 @@ func hasKnownMessageURLSuffix(candidate string) bool {
 	if candidate == "" {
 		return false
 	}
+	candidate = strings.ToLower(candidate)
 	suffix, icann := publicsuffix.PublicSuffix(candidate)
 	// Telegram also accepts the special-use .onion and TON .ton suffixes.
 	return icann || strings.Contains(suffix, ".") || suffix == "onion" || suffix == "ton"

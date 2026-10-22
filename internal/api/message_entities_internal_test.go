@@ -136,6 +136,28 @@ func TestAddDetectedMessageURLsSeparatesUnicodeWhitespace(t *testing.T) {
 	}
 }
 
+func TestAddDetectedMessageURLsHandlesCaseInsensitiveSuffixLookup(t *testing.T) {
+	tests := []string{
+		"T.ME/+hash",
+		"example.COM",
+		"ExAmPlE.CoM/path",
+	}
+	for _, text := range tests {
+		t.Run(text, func(t *testing.T) {
+			entities, err := addDetectedMessageURLs(text, nil)
+			if err != nil {
+				t.Fatalf("addDetectedMessageURLs: %v", err)
+			}
+			if len(entities) != 1 {
+				t.Fatalf("detected %d URLs, want 1: %#v", len(entities), entities)
+			}
+			if got := entities[0]; got.Type != store.PollDescriptionEntityURL || got.Offset != 0 || got.Length != utf16Length(text) {
+				t.Errorf("entity = %#v, want URL preserving original span (0, %d)", got, utf16Length(text))
+			}
+		})
+	}
+}
+
 func TestAddDetectedMessageURLsStopsAtEntityLimit(t *testing.T) {
 	const url = "https://example.com"
 	text := strings.TrimSpace(strings.Repeat(url+" ", store.MaxPollDescriptionEntities+1))
