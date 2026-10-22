@@ -31,7 +31,8 @@ const (
 	// sendCodeIPLockClass namespaces this limiter's advisory locks. Two-argument
 	// advisory locks occupy a space of their own, disjoint from the
 	// single-argument ones CheckAndChargeLookup takes.
-	sendCodeIPLockClass = 0x74674950 // "tgIP"
+	sendCodeIPLockClass       = 0x74674950 // "tgIP"
+	publicSendCodeIPLockClass = 0x74674951 // "tgIQ"
 )
 
 // SendCodeIPLimits holds the two counters that bound auth.sendCode per client
@@ -106,6 +107,16 @@ func (s *Store) CheckIPRateLimit(
 // transaction takes and the only one held across both tables; nothing else in
 // the package touches either table, so it cannot participate in a cycle.
 func (s *Store) CheckAndChargeSendCodeIP(ctx context.Context, addr netip.Addr, phone string, cfg SendCodeIPLimits) (*RateLimitResult, error) {
+	return s.CheckAndChargeSendCodeIPForListener(ctx, addr, phone, cfg, RateLimitListenerTailnet)
+}
+
+// CheckAndChargeSendCodeIPForListener checks and charges the counters for the
+// listener that accepted the request. Public and tailnet budgets use separate
+// tables and lock classes; tailnet continues using the existing rows.
+func (s *Store) CheckAndChargeSendCodeIPForListener(ctx context.Context, addr netip.Addr, phone string, cfg SendCodeIPLimits, listener RateLimitListener) (*RateLimitResult, error) {
+	if listener != RateLimitListenerTailnet && listener != RateLimitListenerPublic {
+		return nil, fmt.Errorf("unknown sendCode rate-limit listener %d", listener)
+	}
 	if !cfg.Enabled() {
 		return nil, nil //nolint:nilnil // disabled config is not an error
 	}
@@ -121,9 +132,13 @@ func (s *Store) CheckAndChargeSendCodeIP(ctx context.Context, addr netip.Addr, p
 	}
 	defer func() { _ = tx.Rollback(ctx) }() //nolint:errcheck // no-op after commit
 
+	lockClass := sendCodeIPLockClass
+	if listener == RateLimitListenerPublic {
+		lockClass = publicSendCodeIPLockClass
+	}
 	if _, err := tx.Exec(ctx,
 		"SELECT pg_advisory_xact_lock($1, hashtext($2))",
-		sendCodeIPLockClass, key.String(),
+		lockClass, key.String(),
 	); err != nil {
 		return nil, fmt.Errorf("advisory lock: %w", err)
 	}
@@ -131,7 +146,7 @@ func (s *Store) CheckAndChargeSendCodeIP(ctx context.Context, addr netip.Addr, p
 
 	// Call counter first, then distinct numbers: the order decides which wait a
 	// call over both limits is told, and the call window is the shorter one.
-	denied, err := chargeSendCodeIPCall(ctx, qtx, key, cfg.Calls)
+	denied, err := chargeSendCodeIPCall(ctx, qtx, key, cfg.Calls, listener)
 	if err != nil {
 		return nil, err
 	}
@@ -142,7 +157,7 @@ func (s *Store) CheckAndChargeSendCodeIP(ctx context.Context, addr netip.Addr, p
 		return denied, nil
 	}
 
-	denied, err = chargeSendCodeIPPhone(ctx, qtx, key, phone, cfg.Phones)
+	denied, err = chargeSendCodeIPPhone(ctx, qtx, key, phone, cfg.Phones, listener)
 	if err != nil {
 		return nil, err
 	}
@@ -160,15 +175,22 @@ func (s *Store) CheckAndChargeSendCodeIP(ctx context.Context, addr netip.Addr, p
 
 // chargeSendCodeIPCall consumes one token from the key's fixed-window call
 // counter, returning the remaining wait when the window is already spent.
-func chargeSendCodeIPCall(ctx context.Context, q *db.Queries, key netip.Prefix, cfg RateLimitConfig) (*RateLimitResult, error) {
+func chargeSendCodeIPCall(ctx context.Context, q *db.Queries, key netip.Prefix, cfg RateLimitConfig, listener RateLimitListener) (*RateLimitResult, error) {
 	if !cfg.enabled() {
 		return nil, nil //nolint:nilnil // disabled counter is not an error
 	}
-	_, err := q.TryConsumeSendCodeIPCall(ctx, db.TryConsumeSendCodeIPCallParams{
-		IpKey:      key,
-		Column2:    pgtype.Interval{Microseconds: cfg.Window.Microseconds(), Valid: true},
-		TokenCount: int32(cfg.Limit), //nolint:gosec // rate limits are small positive ints
-	})
+	window := pgtype.Interval{Microseconds: cfg.Window.Microseconds(), Valid: true}
+	limit := int32(cfg.Limit) //nolint:gosec // rate limits are small positive ints
+	var err error
+	if listener == RateLimitListenerPublic {
+		_, err = q.TryConsumePublicSendCodeIPCall(ctx, db.TryConsumePublicSendCodeIPCallParams{
+			IpKey: key, Column2: window, TokenCount: limit,
+		})
+	} else {
+		_, err = q.TryConsumeSendCodeIPCall(ctx, db.TryConsumeSendCodeIPCallParams{
+			IpKey: key, Column2: window, TokenCount: limit,
+		})
+	}
 	if err == nil {
 		return nil, nil //nolint:nilnil // allowed is not an error
 	}
@@ -178,7 +200,12 @@ func chargeSendCodeIPCall(ctx context.Context, q *db.Queries, key netip.Prefix, 
 	// The upsert above locked the row that refused it and holds that lock to
 	// the end of this transaction, so the deadline read here is the one that
 	// denied the call and cannot be swept out from under it.
-	expiresAt, err := q.GetSendCodeIPCallExpiry(ctx, key)
+	var expiresAt pgtype.Timestamptz
+	if listener == RateLimitListenerPublic {
+		expiresAt, err = q.GetPublicSendCodeIPCallExpiry(ctx, key)
+	} else {
+		expiresAt, err = q.GetSendCodeIPCallExpiry(ctx, key)
+	}
 	if err != nil {
 		return nil, fmt.Errorf("send code ip call expiry: %w", err)
 	}
@@ -187,38 +214,66 @@ func chargeSendCodeIPCall(ctx context.Context, q *db.Queries, key netip.Prefix, 
 
 // chargeSendCodeIPPhone charges one distinct phone number to the key, returning
 // the wait until the key's oldest number frees a slot when the quota is spent.
-func chargeSendCodeIPPhone(ctx context.Context, q *db.Queries, key netip.Prefix, phone string, cfg RateLimitConfig) (*RateLimitResult, error) {
+func chargeSendCodeIPPhone(ctx context.Context, q *db.Queries, key netip.Prefix, phone string, cfg RateLimitConfig, listener RateLimitListener) (*RateLimitResult, error) {
 	if !cfg.enabled() {
 		return nil, nil //nolint:nilnil // disabled counter is not an error
 	}
 	// Prune before counting, so retention is the window itself rather than
 	// whatever the periodic sweep last reached.
-	if err := q.DeleteExpiredSendCodeIPPhones(ctx, key); err != nil {
+	var err error
+	if listener == RateLimitListenerPublic {
+		err = q.DeleteExpiredPublicSendCodeIPPhones(ctx, key)
+	} else {
+		err = q.DeleteExpiredSendCodeIPPhones(ctx, key)
+	}
+	if err != nil {
 		return nil, fmt.Errorf("prune send code ip phones: %w", err)
 	}
-	usage, err := q.GetSendCodeIPPhoneUsage(ctx, db.GetSendCodeIPPhoneUsageParams{IpKey: key, Phone: phone})
-	if err != nil {
-		return nil, fmt.Errorf("send code ip phone usage: %w", err)
+	var used int32
+	var counted bool
+	if listener == RateLimitListenerPublic {
+		usage, err := q.GetPublicSendCodeIPPhoneUsage(ctx, db.GetPublicSendCodeIPPhoneUsageParams{IpKey: key, Phone: phone})
+		if err != nil {
+			return nil, fmt.Errorf("send code ip phone usage: %w", err)
+		}
+		used, counted = usage.Used, usage.Counted
+	} else {
+		usage, err := q.GetSendCodeIPPhoneUsage(ctx, db.GetSendCodeIPPhoneUsageParams{IpKey: key, Phone: phone})
+		if err != nil {
+			return nil, fmt.Errorf("send code ip phone usage: %w", err)
+		}
+		used, counted = usage.Used, usage.Counted
 	}
 	// Already charged inside the window: repeating a number the key has spent a
 	// slot on costs nothing. Its deadline is deliberately left alone — moving it
 	// would keep the row, and the network-to-number pair it records, alive past
 	// the window it was recorded in.
-	if usage.Counted {
+	if counted {
 		return nil, nil //nolint:nilnil // allowed is not an error
 	}
-	if int(usage.Used) >= cfg.Limit {
-		next, err := q.GetSendCodeIPPhoneNextExpiry(ctx, key)
+	if int(used) >= cfg.Limit {
+		var next pgtype.Timestamptz
+		if listener == RateLimitListenerPublic {
+			next, err = q.GetPublicSendCodeIPPhoneNextExpiry(ctx, key)
+		} else {
+			next, err = q.GetSendCodeIPPhoneNextExpiry(ctx, key)
+		}
 		if err != nil {
 			return nil, fmt.Errorf("send code ip phone expiry: %w", err)
 		}
 		return &RateLimitResult{Wait: waitUntil(time.Now(), next.Time)}, nil
 	}
-	if err := q.InsertSendCodeIPPhone(ctx, db.InsertSendCodeIPPhoneParams{
-		IpKey:   key,
-		Phone:   phone,
-		Column3: pgtype.Interval{Microseconds: cfg.Window.Microseconds(), Valid: true},
-	}); err != nil {
+	phoneWindow := pgtype.Interval{Microseconds: cfg.Window.Microseconds(), Valid: true}
+	if listener == RateLimitListenerPublic {
+		err = q.InsertPublicSendCodeIPPhone(ctx, db.InsertPublicSendCodeIPPhoneParams{
+			IpKey: key, Phone: phone, Column3: phoneWindow,
+		})
+	} else {
+		err = q.InsertSendCodeIPPhone(ctx, db.InsertSendCodeIPPhoneParams{
+			IpKey: key, Phone: phone, Column3: phoneWindow,
+		})
+	}
+	if err != nil {
 		return nil, fmt.Errorf("insert send code ip phone: %w", err)
 	}
 	return nil, nil //nolint:nilnil // allowed is not an error
@@ -233,11 +288,19 @@ func (s *Store) SweepExpiredSendCodeIPLimits(ctx context.Context) (int64, error)
 	if err != nil {
 		return 0, fmt.Errorf("sweep send code ip calls: %w", err)
 	}
+	publicCalls, err := s.q.SweepExpiredPublicSendCodeIPCalls(ctx)
+	if err != nil {
+		return calls, fmt.Errorf("sweep public send code ip calls: %w", err)
+	}
 	phones, err := s.q.SweepExpiredSendCodeIPPhones(ctx)
 	if err != nil {
-		return calls, fmt.Errorf("sweep send code ip phones: %w", err)
+		return calls + publicCalls, fmt.Errorf("sweep send code ip phones: %w", err)
 	}
-	return calls + phones, nil
+	publicPhones, err := s.q.SweepExpiredPublicSendCodeIPPhones(ctx)
+	if err != nil {
+		return calls + publicCalls + phones, fmt.Errorf("sweep public send code ip phones: %w", err)
+	}
+	return calls + publicCalls + phones + publicPhones, nil
 }
 
 // waitUntil is the client-visible wait for a deadline: whole seconds, rounded

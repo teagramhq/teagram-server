@@ -90,3 +90,63 @@ WHERE expires_at <= now();
 -- their own rows on write; this is what clears the ones that go quiet.
 DELETE FROM send_code_ip_phones
 WHERE expires_at <= now();
+
+-- Public-listener counters are stored separately so their usage cannot spend
+-- the tailnet listener's budget for the same observed client network.
+
+-- name: TryConsumePublicSendCodeIPCall :one
+INSERT INTO public_send_code_ip_calls (ip_key, token_count, window_start, expires_at)
+VALUES ($1, 1, now(), now() + $2::INTERVAL)
+ON CONFLICT (ip_key) DO UPDATE SET
+    token_count = CASE
+        WHEN public_send_code_ip_calls.expires_at <= now() THEN 1
+        ELSE public_send_code_ip_calls.token_count + 1
+    END,
+    window_start = CASE
+        WHEN public_send_code_ip_calls.expires_at <= now() THEN now()
+        ELSE public_send_code_ip_calls.window_start
+    END,
+    expires_at = CASE
+        WHEN public_send_code_ip_calls.expires_at <= now() THEN now() + $2::INTERVAL
+        ELSE public_send_code_ip_calls.expires_at
+    END
+WHERE public_send_code_ip_calls.expires_at <= now()
+   OR public_send_code_ip_calls.token_count < $3
+RETURNING token_count, expires_at;
+
+-- name: GetPublicSendCodeIPCallExpiry :one
+SELECT expires_at
+FROM public_send_code_ip_calls
+WHERE ip_key = $1;
+
+-- name: DeleteExpiredPublicSendCodeIPPhones :exec
+DELETE FROM public_send_code_ip_phones
+WHERE ip_key = $1
+  AND expires_at <= now();
+
+-- name: GetPublicSendCodeIPPhoneUsage :one
+SELECT
+    count(*)::INT AS used,
+    coalesce(bool_or(phone = $2), FALSE)::BOOLEAN AS counted
+FROM public_send_code_ip_phones
+WHERE ip_key = $1;
+
+-- name: GetPublicSendCodeIPPhoneNextExpiry :one
+SELECT expires_at
+FROM public_send_code_ip_phones
+WHERE ip_key = $1
+ORDER BY expires_at
+LIMIT 1;
+
+-- name: InsertPublicSendCodeIPPhone :exec
+INSERT INTO public_send_code_ip_phones (ip_key, phone, expires_at)
+VALUES ($1, $2, now() + $3::INTERVAL)
+ON CONFLICT (ip_key, phone) DO NOTHING;
+
+-- name: SweepExpiredPublicSendCodeIPCalls :execrows
+DELETE FROM public_send_code_ip_calls
+WHERE expires_at <= now();
+
+-- name: SweepExpiredPublicSendCodeIPPhones :execrows
+DELETE FROM public_send_code_ip_phones
+WHERE expires_at <= now();

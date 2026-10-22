@@ -115,29 +115,34 @@ type preAuthLimiter struct {
 
 	mu     sync.Mutex
 	conns  int
-	perNet map[netip.Prefix]int
+	perNet map[preAuthNetwork]int
+}
+
+type preAuthNetwork struct {
+	listener store.RateLimitListener
+	network  netip.Prefix
 }
 
 func newPreAuthLimiter(limits PreAuthLimits) *preAuthLimiter {
-	return &preAuthLimiter{limits: limits, perNet: map[netip.Prefix]int{}}
+	return &preAuthLimiter{limits: limits, perNet: map[preAuthNetwork]int{}}
 }
 
 // admit takes the global slot for a freshly accepted socket and reports whether
 // one was free. Above the cap nothing is allocated and nothing is counted, so a
 // refusal costs the caller a close and nothing else.
-func (l *preAuthLimiter) admit() (*preAuthSlot, bool) {
+func (l *preAuthLimiter) admit(listener store.RateLimitListener) (*preAuthSlot, bool) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	if l.limits.MaxConns > 0 && l.conns >= l.limits.MaxConns {
 		return nil, false
 	}
 	l.conns++
-	return &preAuthSlot{lim: l}, true
+	return &preAuthSlot{lim: l, listener: listener}, true
 }
 
 // acquireNet takes the slot for one client network, reporting whether one was
 // free.
-func (l *preAuthLimiter) acquireNet(bucket netip.Prefix) bool {
+func (l *preAuthLimiter) acquireNet(bucket preAuthNetwork) bool {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	if l.limits.MaxConnsPerNet > 0 && l.perNet[bucket] >= l.limits.MaxConnsPerNet {
@@ -151,11 +156,11 @@ func (l *preAuthLimiter) acquireNet(bucket netip.Prefix) bool {
 // one, the network slot. The map holds an entry only while a network has live
 // pre-auth connections, so it is bounded by the caps above rather than by how
 // many networks have ever connected.
-func (l *preAuthLimiter) release(bucket netip.Prefix) {
+func (l *preAuthLimiter) release(bucket preAuthNetwork) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	l.conns--
-	if !bucket.IsValid() {
+	if !bucket.network.IsValid() {
 		return
 	}
 	if n := l.perNet[bucket] - 1; n > 0 {
@@ -175,12 +180,20 @@ func (l *preAuthLimiter) release(bucket netip.Prefix) {
 // proves the key, and once by the deferred cleanup that runs whatever ends the
 // connection.
 type preAuthSlot struct {
-	lim *preAuthLimiter
+	lim      *preAuthLimiter
+	listener store.RateLimitListener
 	// bucket is the client network this slot is charged to, invalid when the
 	// connection carries no address the server may key on.
-	bucket netip.Prefix
+	bucket preAuthNetwork
 	timer  *time.Timer
 	once   sync.Once
+}
+
+func (s *preAuthSlot) rateLimitListener() store.RateLimitListener {
+	if s == nil {
+		return store.RateLimitListenerTailnet
+	}
+	return s.listener
 }
 
 // keyAddr charges the slot to the network of the client address the connection
@@ -200,10 +213,11 @@ type preAuthSlot struct {
 // bucket with every transport fault. Those connections stay bounded by the
 // global cap and the lifetime ceiling.
 func (s *preAuthSlot) keyAddr(addr netip.Addr) bool {
-	bucket, ok := store.IPBucketKey(addr)
+	network, ok := store.IPBucketKey(addr)
 	if !ok {
 		return true
 	}
+	bucket := preAuthNetwork{listener: s.listener, network: network}
 	if !s.lim.acquireNet(bucket) {
 		return false
 	}

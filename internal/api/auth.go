@@ -354,7 +354,7 @@ func (h *handlers) checkSendCodeIP(r *mtproto.Request, phone string) error {
 	if !h.rateLimitSendCodeIP.Enabled() {
 		return nil
 	}
-	res, err := h.store.CheckAndChargeSendCodeIP(r.Ctx, r.ClientAddr, phone, h.rateLimitSendCodeIP)
+	res, err := h.store.CheckAndChargeSendCodeIPForListener(r.Ctx, r.ClientAddr, phone, h.rateLimitSendCodeIP, r.RateLimitListener)
 	if err != nil {
 		if errors.Is(err, store.ErrNoClientAddr) {
 			// The connection carries no address to attribute the call to, so the
