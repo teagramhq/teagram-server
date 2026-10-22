@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"errors"
 
 	"github.com/gotd/td/bin"
@@ -32,16 +33,19 @@ func (h *handlers) handleUpdateProfilePhoto(r *mtproto.Request) (bin.Encoder, er
 	if !ok || input == nil || !h.photos.Verify(r.UserID, r.UserID, input.ID, input.AccessHash) {
 		return nil, errPhotoIDInvalid
 	}
-	if err := h.checkRateLimit(r, "update_profile", h.rateLimitUpdateProfile); err != nil {
+	selectionCtx, cancel := context.WithTimeout(r.Ctx, store.ProfilePhotoSelectionWait)
+	defer cancel()
+	if err := h.checkRateLimitCostWithDeadline(r, selectionCtx, "update_profile", h.rateLimitUpdateProfile, 1); err != nil {
 		return nil, err
 	}
 
-	file, _, err := h.store.SelectProfilePhoto(r.Ctx, r.UserID, input.ID)
+	file, _, err := h.store.SelectProfilePhoto(selectionCtx, r.UserID, input.ID)
 	if err != nil {
 		switch {
 		case errors.Is(err, store.ErrProfilePhotoUnavailable):
 			return nil, errPhotoIDInvalid
-		case errors.Is(err, store.ErrProfilePhotoBusy):
+		case errors.Is(err, store.ErrProfilePhotoBusy),
+			r.Ctx.Err() == nil && errors.Is(selectionCtx.Err(), context.DeadlineExceeded):
 			return nil, FloodWaitError(1)
 		default:
 			h.log.Error("update profile photo", "user_id", r.UserID, "photo_id", input.ID, "err", err)

@@ -501,13 +501,21 @@ func UpdateProfilePhotoForTest(
 func UpdateProfilePhotoForTestWithRateLimit(
 	s *store.Store, userID int64, req *tg.PhotosUpdateProfilePhotoRequest, limit store.RateLimitConfig,
 ) (bin.Encoder, error) {
+	return UpdateProfilePhotoForTestWithContext(context.Background(), s, userID, req, limit)
+}
+
+// UpdateProfilePhotoForTestWithContext invokes photos.updateProfilePhoto with
+// a caller-supplied context and update_profile rate budget.
+func UpdateProfilePhotoForTestWithContext(
+	ctx context.Context, s *store.Store, userID int64, req *tg.PhotosUpdateProfilePhotoRequest, limit store.RateLimitConfig,
+) (bin.Encoder, error) {
 	var buf bin.Buffer
 	if err := req.Encode(&buf); err != nil {
 		return nil, err
 	}
 	h := testHandlers(s)
 	h.rateLimitUpdateProfile = limit
-	return h.handleUpdateProfilePhoto(&mtproto.Request{Ctx: context.Background(), UserID: userID, Buf: &buf})
+	return h.handleUpdateProfilePhoto(&mtproto.Request{Ctx: ctx, UserID: userID, Buf: &buf})
 }
 
 // ProfilePhotoSeq is one gallery lane, reusable across calls.

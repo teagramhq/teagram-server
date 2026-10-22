@@ -199,3 +199,116 @@ func TestUpdateProfilePhotoLockContentionReturnsFloodWaitWithoutChanges(t *testi
 		t.Fatalf("release profile-domain lock: unlocked=%t err=%v", unlocked, err)
 	}
 }
+
+func TestUpdateProfilePhotoRateAdmissionBoundsPoolWait(t *testing.T) {
+	t.Parallel()
+	f := newGalleryFixtureWithPool(t, "+1555144600401", "+1555144600402", 2)
+	selected := f.addStoredPhoto(t, f.owner)
+	f.addEntry(t, f.owner, selected)
+	before := f.selectionSnapshot(f.owner)
+	rate := store.RateLimitConfig{Limit: 10, Window: time.Hour}
+	if _, err := f.s.CheckRateLimit(context.Background(), f.owner, "update_profile", rate); err != nil {
+		t.Fatalf("seed update-profile limiter: %v", err)
+	}
+
+	if _, err := f.writer().Exec(context.Background(),
+		`SELECT pg_advisory_lock($1::int, $2::int)`, profilePhotoLockDomainForTest, f.owner); err != nil {
+		t.Fatalf("hold profile-domain lock for paused upload: %v", err)
+	}
+	profileLockHeld := true
+	defer func() {
+		if profileLockHeld {
+			if _, err := f.writer().Exec(context.Background(),
+				`SELECT pg_advisory_unlock($1::int, $2::int)`, profilePhotoLockDomainForTest, f.owner); err != nil {
+				t.Errorf("release profile-domain lock: %v", err)
+			}
+		}
+	}()
+
+	lockConn := f.rawConn("rate-limit-locker")
+	rateLock, err := lockConn.Begin(context.Background())
+	if err != nil {
+		t.Fatalf("begin rate-limit row lock: %v", err)
+	}
+	defer func() { _ = rateLock.Rollback(context.Background()) }() //nolint:errcheck // cleanup after commit/rollback
+	var lockedSubject int64
+	if err := rateLock.QueryRow(context.Background(), `
+		SELECT subject_id FROM rate_limits WHERE subject_id = $1 AND surface = 'update_profile' FOR UPDATE`,
+		f.owner).Scan(&lockedSubject); err != nil {
+		t.Fatalf("lock update-profile rate row: %v", err)
+	}
+
+	blockCtx, cancelBlockers := context.WithCancel(context.Background())
+	blockersDone := make(chan error, 2)
+	for range 2 {
+		go func() {
+			_, err := f.s.CheckRateLimit(blockCtx, f.owner, "update_profile", rate)
+			blockersDone <- err
+		}()
+	}
+	blocked, waitErr := waitForRateLimitLockWaiters(f)
+	if waitErr != nil {
+		cancelBlockers()
+		if err := rateLock.Rollback(context.Background()); err != nil {
+			t.Errorf("release rate-limit row lock: %v", err)
+		}
+		for range 2 {
+			<-blockersDone
+		}
+		t.Fatalf("wait for both store-pool connections to block on the rate row (observed %d): %v", blocked, waitErr)
+	}
+
+	requestCtx, cancelRequest := context.WithTimeout(context.Background(), time.Second)
+	started := time.Now()
+	_, requestErr := api.UpdateProfilePhotoForTestWithContext(requestCtx, f.s, f.owner,
+		&tg.PhotosUpdateProfilePhotoRequest{ID: &tg.InputPhoto{
+			ID: selected, AccessHash: f.credential(f.owner, f.owner, selected),
+		}}, rate)
+	cancelRequest()
+
+	if err := rateLock.Rollback(context.Background()); err != nil {
+		t.Errorf("release rate-limit row lock: %v", err)
+	}
+	for range 2 {
+		if err := <-blockersDone; err != nil {
+			t.Errorf("release pool-saturation query: %v", err)
+		}
+	}
+	cancelBlockers()
+	if _, err := f.writer().Exec(context.Background(),
+		`SELECT pg_advisory_unlock($1::int, $2::int)`, profilePhotoLockDomainForTest, f.owner); err != nil {
+		t.Fatalf("release profile-domain lock: %v", err)
+	}
+	profileLockHeld = false
+
+	if got := rpcMessage(t, requestErr); got != "FLOOD_WAIT_1" {
+		t.Fatalf("profile selection with an enabled limiter and exhausted pool = %s, want FLOOD_WAIT_1", got)
+	}
+	if elapsed := time.Since(started); elapsed >= time.Second {
+		t.Fatalf("rate-admission refusal took %s, want less than the caller deadline", elapsed)
+	}
+	if after := f.selectionSnapshot(f.owner); after != before {
+		t.Fatalf("rate-admission refusal changed profile state: before=%+v after=%+v", before, after)
+	}
+}
+
+func waitForRateLimitLockWaiters(f *galleryFixture) (int, error) {
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		var count int
+		err := f.observer().QueryRow(context.Background(), `
+			SELECT count(*)
+			FROM pg_stat_activity
+			WHERE datname = current_database()
+			  AND wait_event_type = 'Lock'
+			  AND query LIKE '%INSERT INTO rate_limits%'`).Scan(&count)
+		if err != nil {
+			return count, err
+		}
+		if count >= 2 {
+			return count, nil
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	return 0, context.DeadlineExceeded
+}

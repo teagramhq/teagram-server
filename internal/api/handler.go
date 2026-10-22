@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"errors"
 	"log/slog"
 	"net/netip"
@@ -606,6 +607,23 @@ func (h *handlers) checkRateLimit(r *mtproto.Request, surface string, cfg store.
 // given token cost. Returns nil when allowed, or a FLOOD_WAIT error when denied.
 func (h *handlers) checkRateLimitCost(r *mtproto.Request, surface string, cfg store.RateLimitConfig, cost int) error {
 	result, err := h.store.CheckRateLimitCost(r.Ctx, r.UserID, surface, cfg, cost)
+	return h.finishRateLimitCost(r, surface, result, err)
+}
+
+// checkRateLimitCostWithDeadline maps expiry of a request-local admission
+// deadline to the retry response for a bounded operation. Caller cancellation
+// keeps the regular storage-error behavior.
+func (h *handlers) checkRateLimitCostWithDeadline(
+	r *mtproto.Request, ctx context.Context, surface string, cfg store.RateLimitConfig, cost int,
+) error {
+	result, err := h.store.CheckRateLimitCost(ctx, r.UserID, surface, cfg, cost)
+	if err != nil && r.Ctx.Err() == nil && errors.Is(ctx.Err(), context.DeadlineExceeded) {
+		return FloodWaitError(1)
+	}
+	return h.finishRateLimitCost(r, surface, result, err)
+}
+
+func (h *handlers) finishRateLimitCost(r *mtproto.Request, surface string, result *store.RateLimitResult, err error) error {
 	if err != nil {
 		h.log.Error("rate limit check", "user_id", r.UserID, "surface", surface, "err", err)
 		return errInternal

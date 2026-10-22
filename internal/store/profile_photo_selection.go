@@ -12,8 +12,10 @@ import (
 )
 
 const (
-	profilePhotoSelectionLockWait = 250 * time.Millisecond
-	profilePhotoSelectionPoll     = 10 * time.Millisecond
+	// ProfilePhotoSelectionWait bounds rate admission and profile-lock waiting
+	// for one profile-photo selection request.
+	ProfilePhotoSelectionWait = 250 * time.Millisecond
+	profilePhotoSelectionPoll = 10 * time.Millisecond
 )
 
 // SelectProfilePhoto makes one live photo in the owner's gallery current. The
@@ -26,7 +28,7 @@ func (s *Store) SelectProfilePhoto(ctx context.Context, ownerID, fileID int64) (
 	if !ok || fileID < 1 {
 		return File{}, false, ErrProfilePhotoUnavailable
 	}
-	lockCtx, cancel := context.WithTimeout(ctx, profilePhotoSelectionLockWait)
+	lockCtx, cancel := context.WithTimeout(ctx, ProfilePhotoSelectionWait)
 	defer cancel()
 	lockWaitExpired := func() bool {
 		return ctx.Err() == nil && errors.Is(lockCtx.Err(), context.DeadlineExceeded)
