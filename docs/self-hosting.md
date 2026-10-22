@@ -73,13 +73,18 @@ Choose a release tag or a full commit SHA from
 [teagram-server](https://github.com/teagramhq/teagram-server), then build that
 source revision. If no release tag is available, use a selected full commit
 SHA. The repository does not require a project registry or private deployment
-credentials.
+credentials. Run clone, fetch, checkout, and build commands as the same
+unprivileged operator account; the checkout belongs to that account, and the
+binary is installed with `sudo`.
 
 ```sh
-sudo git clone https://github.com/teagramhq/teagram-server.git /opt/teagram
+operator="$(id -un)"
+operator_group="$(id -gn)"
+sudo install -d -o "$operator" -g "$operator_group" -m 0755 /opt/teagram
+git clone https://github.com/teagramhq/teagram-server.git /opt/teagram
 cd /opt/teagram
 release_ref=FULL_COMMIT_SHA
-sudo git checkout "$release_ref"
+git checkout "$release_ref"
 go build -trimpath -o /tmp/teagramd ./cmd/teagramd
 sudo install -d -o root -g root -m 0755 /opt/teagram/bin
 sudo install -o root -g root -m 0755 /tmp/teagramd /opt/teagram/bin/teagramd
@@ -169,7 +174,11 @@ server.example.net {
 }
 ```
 
-Load the Caddy configuration, then enable the server:
+Before starting `teagramd`, use the host or cloud firewall to restrict inbound
+TCP ports 443 and 2443 to the operator's public IP addresses, including both
+IPv4 and IPv6 if the host has both. Keep this restriction until the first
+account is created and registration is closed. Then load the Caddy configuration
+and enable the server:
 
 ```sh
 sudo systemctl reload caddy
@@ -203,10 +212,10 @@ flow. A Teagram Web build must allow its own exact origin in
 `http://localhost:8080` when testing from the local Web development server.
 The client discovers the server over HTTPS, then connects to its WSS endpoint.
 
-Before opening registration, temporarily restrict inbound TCP 443 and 2443 to
-the operator's public IP. This keeps another network user from claiming the
-first administrator account. Remove the restriction after the account exists
-and registration is closed.
+Keep the temporary firewall restriction in place through enrollment so another
+network user cannot claim the first administrator account. After registration
+is closed and the service is restarted, remove the restriction if clients should
+connect publicly.
 
 Create an account with a username, display name, and password. The first
 account committed to the empty database becomes the server administrator. As
@@ -317,10 +326,11 @@ tar --numeric-owner -C / -cpf "$backup_dir/files.tar" var/lib/teagram etc/teagra
 printf "Backup saved to %s\n" "$backup_dir"' sh "$backup_dir"
 # The update keeps teagramd stopped after the backup succeeds.
 sudo cp -p /opt/teagram/bin/teagramd "$backup_dir/teagramd.previous"
-sudo sh -c 'cd /opt/teagram && git rev-parse HEAD > "$1"' sh "$backup_dir/source.previous"
-sudo git fetch --tags origin
+source_ref="$(git rev-parse HEAD)"
+printf '%s\n' "$source_ref" | sudo tee "$backup_dir/source.previous" >/dev/null
+git fetch --tags origin
 release_ref=FULL_COMMIT_SHA
-sudo git checkout "$release_ref"
+git checkout "$release_ref"
 go build -trimpath -o /tmp/teagramd.new ./cmd/teagramd
 # Disable automatic restart before migrations may change the database.
 restart_teagramd=0
