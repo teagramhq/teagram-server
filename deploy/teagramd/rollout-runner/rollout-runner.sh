@@ -4,7 +4,7 @@ umask 077
 
 SCRIPT_DIR=$(cd -P "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 SCRIPT_SOURCE="$SCRIPT_DIR/$(basename "${BASH_SOURCE[0]}")"
-readonly APPROVED_VERIFIER_SHA=d21d2cef214fa2205cd17dcfc34bf61905fd66019eaa1dc866e20de09916f065
+readonly APPROVED_VERIFIER_SHA=0597262c79fe73b80d02cd745dab23805ddfb31b89bb750b139a1f3ff59065dc
 readonly APPROVED_SCHEMA_GATE_SHA=ac54d3cf0480383a52414a8bc8b856b5e1d5f6f8d19034c9c576c64627e097c8
 readonly APPROVED_SCHEMA_GATE_HELPER_SHA=7ae06c2872c60b434068b3715a9ddd5e19b03d4be98dc9881c8dd8f294953d41
 readonly APPROVED_INITIAL_LOCAL_COMPOSE_SHA=3a4f158c6e1f2ead6676fba85d8d95cfb15557a0fbd8e82230361e0af988e0f7
@@ -1122,6 +1122,18 @@ protected_env_name() {
   return 1
 }
 
+unquote_dotenv_value() {
+  local value=$1 length=${#1}
+  if (( length >= 2 )); then
+    case "$value" in
+      \"*\"|\'*\')
+        value=${value:1:$((length - 2))}
+        ;;
+    esac
+  fi
+  printf '%s' "$value"
+}
+
 public_env_addition_requested() {
   local name
   local -a requested
@@ -1332,6 +1344,12 @@ validate_env_baseline() {
           }
           old_value=${old_line#*=}
           new_value=${line#*=}
+          case "$key" in
+            TG_REGISTRATION|TG_PUBLIC_REGISTRATION)
+              old_value=$(unquote_dotenv_value "$old_value")
+              new_value=$(unquote_dotenv_value "$new_value")
+              ;;
+          esac
           case "$key:$old_value:$new_value" in
             TG_REGISTRATION:closed:open|TG_REGISTRATION:open:closed) ;;
             TG_TURNSTILE_SIGNIN_ENABLED:false:true|TG_TURNSTILE_SIGNIN_ENABLED:true:false) ;;

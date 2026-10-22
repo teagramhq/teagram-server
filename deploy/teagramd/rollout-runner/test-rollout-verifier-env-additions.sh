@@ -328,6 +328,16 @@ public_listen_quoted_change_target=$(ROLLOUT_CHANGED_ENV=TG_PUBLIC_WEBSOCKET_LIS
 [ "$(jq -r '.container_env_changed' <<< "$public_listen_quoted_change_target")" = TG_PUBLIC_WEBSOCKET_LISTEN_ADDR ]
 printf '%s\n' 'PASS quoted changed public WebSocket value matches the target container'
 
+printf 'TG_PUBLIC_REGISTRATION="closed"\n' > "$ENV_FILE"
+public_registration_closed_compose=$(jq -c '.services.teagramd.environment.TG_PUBLIC_REGISTRATION="closed"' <<< "$public_ws_compose")
+public_registration_closed_inspect=$(printf '%s' "$legacy_inspect" | jq -c \
+  '.Config.Env += ["TG_PUBLIC_REGISTRATION=closed"]')
+public_registration_quoted_change_target=$(ROLLOUT_CHANGED_ENV=TG_PUBLIC_REGISTRATION snapshot_from_json \
+  "$public_registration_closed_inspect" "$public_registration_closed_compose" \
+  "$ENV_FILE" "$OVERRIDE_FILE" selected-compose-render target)
+[ "$(jq -r '.container_env_changed' <<< "$public_registration_quoted_change_target")" = TG_PUBLIC_REGISTRATION ]
+printf '%s\n' 'PASS quoted TG_PUBLIC_REGISTRATION change matches the target container'
+
 printf '%s\n' \
   'TG_PUBLIC_WEBSOCKET_LISTEN_ADDR=0.0.0.0:2444' \
   'TG_PUBLIC_WEBSOCKET_ADVERTISE_ADDR=server.example.com:443' \

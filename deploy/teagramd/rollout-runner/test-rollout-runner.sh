@@ -375,7 +375,9 @@ if [ "${1:-}" = inspect ]; then
     elif { [ "$cfg" = target ] || [ "$cfg" = rollback ]; } && [ "${MOCK_SCENARIO:-success}" = config-drift ]; then
       env_json='["TG_RSA_KEY_PATH=/var/lib/teagramd/server_key.pem","TG_SYNTHETIC_FLAG=fixture","TG_BLOB_DIR=/var/lib/teagramd-blobs","TG_REPLICA_COUNT=1","TG_CLIENT_ADDR_TRUST=socket","TG_UNRELATED=drift"]'
     fi
-    if [ "$id" = "$MOCK_REPLACEMENT_ID" ] && [ -n "${MOCK_TARGET_ENV_EXTRA:-}" ]; then
+    if [ "$id" = "$MOCK_BASE_ID" ] && [ -n "${MOCK_BASE_ENV_EXTRA:-}" ]; then
+      env_json=$(jq -c --arg extra "$MOCK_BASE_ENV_EXTRA" '. + [$extra]' <<< "$env_json")
+    elif [ "$id" = "$MOCK_REPLACEMENT_ID" ] && [ -n "${MOCK_TARGET_ENV_EXTRA:-}" ]; then
       env_json=$(jq -c --arg extra "$MOCK_TARGET_ENV_EXTRA" '. + [$extra]' <<< "$env_json")
     elif [ "$id" = "$MOCK_ROLLBACK_ID" ] && [ -n "${MOCK_ROLLBACK_ENV_EXTRA:-}" ]; then
       env_json=$(jq -c --arg extra "$MOCK_ROLLBACK_ENV_EXTRA" '. + [$extra]' <<< "$env_json")
@@ -1095,11 +1097,12 @@ run_fixture() {
   local branch=main
   local state bin checkout root stamp scenario status require_marker=0 runner runtime_dir target_runtime target_sha baseline_sha real_git compose_file
   local -a runner_args=() ambient_revision=()
-  local replacement_id=$TARGET_ID added_env='' changed_env='' previous_env_file='' target_env_extra='' rollback_env_extra='' adopt_env=0
+  local replacement_id=$TARGET_ID added_env='' changed_env='' previous_env_file='' baseline_env_extra='' target_env_extra='' rollback_env_extra='' adopt_env=0
   [ ! -f "$TMP/$name-adopt-env" ] || adopt_env=$(cat "$TMP/$name-adopt-env")
   [ ! -f "$TMP/$name-added-env" ] || added_env=$(cat "$TMP/$name-added-env")
   [ ! -f "$TMP/$name-changed-env" ] || changed_env=$(cat "$TMP/$name-changed-env")
   [ ! -f "$TMP/$name-previous-env-path" ] || previous_env_file=$(cat "$TMP/$name-previous-env-path")
+  [ ! -f "$TMP/$name-baseline-env-extra" ] || baseline_env_extra=$(cat "$TMP/$name-baseline-env-extra")
   [ ! -f "$TMP/$name-target-env-extra" ] || target_env_extra=$(cat "$TMP/$name-target-env-extra")
   [ ! -f "$TMP/$name-rollback-env-extra" ] || rollback_env_extra=$(cat "$TMP/$name-rollback-env-extra")
   state=$(cat "$TMP/$name-state-path")
@@ -1257,7 +1260,7 @@ run_fixture() {
     MOCK_POSTGRES_ID="$POSTGRES_ID" MOCK_MIGRATE_ID="$MIGRATE_ID" \
     MOCK_BASE_IMAGE="$BASE_IMAGE" MOCK_BUILT_IMAGE="$BUILT_IMAGE" MOCK_ACTUAL_TARGET_IMAGE="$BUILT_IMAGE" MOCK_POSTGRES_IMAGE="$POSTGRES_IMAGE" \
     MOCK_CAPTURE_IMAGE="$capture" MOCK_FAIL_SYNC="$fail_sync" MOCK_FAIL_CHMOD_MATCH="$chmod_match" MOCK_FAIL_LN_MATCH="$ln_match" MOCK_FAIL_SYNC_MATCH="$sync_match" \
-    MOCK_REQUIRE_FAILURE_MARKER="$require_marker" MOCK_EVIDENCE_ROOT="$root" MOCK_TARGET_ENV_EXTRA="$target_env_extra" MOCK_ROLLBACK_ENV_EXTRA="$rollback_env_extra" \
+    MOCK_REQUIRE_FAILURE_MARKER="$require_marker" MOCK_EVIDENCE_ROOT="$root" MOCK_BASE_ENV_EXTRA="$baseline_env_extra" MOCK_TARGET_ENV_EXTRA="$target_env_extra" MOCK_ROLLBACK_ENV_EXTRA="$rollback_env_extra" \
     MOCK_REAL_PYTHON3="$(command -v python3)" MOCK_REAL_CHMOD="$(command -v chmod)" MOCK_REAL_LN="$(command -v ln)" MOCK_REAL_DATE="$(command -v date)" MOCK_STAMP="$stamp" \
     ROLLOUT_RUNNER_TEST_MODE=1 ROLLOUT_RUNNER_CHECKOUT="$checkout" ROLLOUT_RUNNER_EVIDENCE_ROOT=/root \
     ROLLOUT_RUNNER_TEST_CHECKOUT="$checkout" \
@@ -2661,7 +2664,7 @@ prepare_env_change_fixture() {
   local target_sha=${3:-$APPLY_TARGET_SHA} baseline_sha=${4:-$TARGET_SHA}
   local target_extra=${5-TG_REGISTRATION=open} rollback_extra=${6-}
   local key=${7:-TG_REGISTRATION} old_value=${8:-closed} new_value=${9:-open}
-  local setup_lines=${10:-}
+  local setup_lines=${10:-} baseline_extra=${11:-}
   local checkout state previous
   prepare_target_local_apply_fixture "$name" "$scenario" "$target_sha" "$baseline_sha" || return 1
   state=$(cat "$TMP/$name-state-path")
@@ -2674,6 +2677,7 @@ prepare_env_change_fixture() {
   sed -i "s/^${key}=${old_value}$/${key}=${new_value}/" "$checkout/.env" || return 1
   printf '%s\n' "$key" > "$TMP/$name-changed-env"
   printf '%s\n' "$previous" > "$TMP/$name-previous-env-path"
+  [ -z "$baseline_extra" ] || printf '%s\n' "$baseline_extra" > "$TMP/$name-baseline-env-extra"
   [ -z "$target_extra" ] || printf '%s\n' "$target_extra" > "$TMP/$name-target-env-extra"
   [ -z "$rollback_extra" ] || printf '%s\n' "$rollback_extra" > "$TMP/$name-rollback-env-extra"
   jq -c --arg key "$key" --arg value "$new_value" '.services.teagramd.environment[$key]=$value' \
@@ -2776,18 +2780,19 @@ fi
 
 prepare_env_change_fixture public-registration-value-change \
   target-local-carry-forward-env-value-change "$APPLY_TARGET_SHA" "$TARGET_SHA" \
-  TG_PUBLIC_REGISTRATION=invite '' TG_PUBLIC_REGISTRATION closed invite
+  TG_PUBLIC_REGISTRATION=closed '' TG_PUBLIC_REGISTRATION invite closed '' TG_PUBLIC_REGISTRATION=invite
 root=$(cat "$TMP/public-registration-value-change-root-path")
 checkout=$(cat "$TMP/public-registration-value-change-checkout-path")
+sed -i 's/^TG_PUBLIC_REGISTRATION=closed$/TG_PUBLIC_REGISTRATION="closed"/' "$checkout/.env"
 current_env_sha=$(sha256sum "$checkout/.env" | awk '{print $1}')
 status=$(run_fixture public-registration-value-change built 0 '' 2 '' '' apply "$APPLY_TARGET_SHA")
 if [ "$status" = 0 ] && grep -q "rollout=verified sha=$APPLY_TARGET_SHA" "$TMP/public-registration-value-change.stdout" && \
    [ "$(jq -r '.container_env_changed' "$root.target/target.snapshot.json")" = TG_PUBLIC_REGISTRATION ] && \
    grep -qx "env_sha256=$current_env_sha source_sha=$APPLY_TARGET_SHA" "$checkout/.state/rollout-env"; then
-  pass 'TG_PUBLIC_REGISTRATION changes from closed to invite through the named change path'
+  pass 'quoted TG_PUBLIC_REGISTRATION changes from invite to closed through the named change path'
 else
   show_fixture_failure public-registration-value-change "$status"
-  fail 'TG_PUBLIC_REGISTRATION value changes must use the named change path'
+  fail 'quoted TG_PUBLIC_REGISTRATION change from invite to closed must use the named change path'
 fi
 
 prepare_env_change_fixture env-value-change-rollback target-local-df9-rollback "$APPLY_TARGET_SHA" \

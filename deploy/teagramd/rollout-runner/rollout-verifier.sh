@@ -99,9 +99,9 @@ verify_changed_container_environment() {
                 | select(type == "string" and startswith($name + "="))
                 | .[($name | length) + 1:]
               ] as $actual
-            | (($name == "TG_REGISTRATION" and ($assignments[0] | IN("open","closed"))) or
+            | (($name == "TG_REGISTRATION" and (dotenv_value($assignments[0]) | IN("open","closed"))) or
                ($name == "TG_TURNSTILE_SIGNIN_ENABLED" and ($assignments[0] | IN("true","false"))) or
-               ($name == "TG_PUBLIC_REGISTRATION" and ($assignments[0] | IN("invite","closed"))) or
+               ($name == "TG_PUBLIC_REGISTRATION" and (dotenv_value($assignments[0]) | IN("invite","closed"))) or
                ($name | IN("TG_PUBLIC_WEBSOCKET_LISTEN_ADDR", "TG_PUBLIC_WEBSOCKET_ADVERTISE_ADDR", "TG_PUBLIC_WEBSOCKET_ALLOWED_ORIGINS"))) and
               ($assignments | length) == 1 and
               ($compose_env | has($name)) and
