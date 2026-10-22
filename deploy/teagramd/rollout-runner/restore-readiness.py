@@ -37,6 +37,7 @@ AUTH_KEY_INVENTORY_PATH = Path(__file__).with_name("auth-key-clearing-inventory.
 AUTH_KEY_FIXTURE_COUNT = 3
 AUTH_KEY_FIXTURE_STATE = ["3", "2", "3", "1", "2", "0"]
 AUTH_KEY_CLEARED_STATE = ["0", "0", "0", "1", "2", "2"]
+AUTH_KEY_CLEAR_ACK = b"RESTORE_READINESS_AUTH_KEY_DELETE_APPLIED"
 # Roles the repository migrations create; the restore imports no globals, so the target has none.
 MIGRATION_ROLES = "browser_acceptance_probe"
 WORK_SECONDS = 30 * 60
@@ -70,6 +71,7 @@ SAFE_CATEGORIES = {
     "auth_failure",
     "assertion_failure",
     "auth_key_clear_failure",
+    "fault_test_failure",
     "timeout",
     "interrupted",
     "cleanup_failure",
@@ -320,12 +322,44 @@ BEGIN
 END
 $auth_key_clear$;""",
     ]
+    if inject_failure or wait_for_signal:
+        statements.append(r"\echo RESTORE_READINESS_AUTH_KEY_DELETE_APPLIED")
     if inject_failure:
         statements.append("SELECT 1 / 0;")
     if wait_for_signal:
         statements.append("SELECT pg_sleep(30);")
     statements.append("COMMIT;")
     return "\n".join(statements) + "\n"
+
+
+def auth_key_clear_fault_category(
+    fault_kind: str,
+    before: list[str],
+    after: list[str],
+    *,
+    client_status: int | None = None,
+    container_status: int | None = None,
+    stdout: bytes = b"",
+    stderr: bytes = b"",
+    interrupt_acknowledged: bool = False,
+) -> str:
+    if before != after:
+        return "fault_test_failure"
+    if fault_kind == "signal":
+        return "interrupted" if interrupt_acknowledged else "fault_test_failure"
+    if fault_kind != "failure":
+        return "fault_test_failure"
+    expected_error = re.search(
+        rb"(?:^|\n)ERROR:[ \t]+division by zero(?:\r?\n|$)", stdout + stderr
+    )
+    if (
+        AUTH_KEY_CLEAR_ACK in stdout
+        and client_status == 3
+        and container_status == 3
+        and expected_error is not None
+    ):
+        return "auth_key_clear_failure"
+    return "fault_test_failure"
 
 
 FIXTURE_STATE_SQL = """
@@ -2054,36 +2088,64 @@ class Drill(Docker):
         stdin: Any = None,
         input_bytes: bytes | None = None,
         interrupt_signal: int | None = None,
-        interrupt_delay: float = 2,
+        interrupt_ack: bytes | None = None,
+        accept_nonzero: bool = False,
+        capture_stderr: bool = False,
         timeout: float = 600,
         max_bytes: int = MAX_CAPTURE,
     ) -> bytes:
         self.attest_container(record, phase)
+        self.last_attached_status: int | None = None
+        self.last_attached_stderr = b""
+        self.last_attached_interrupt_acknowledged = False
         process: subprocess.Popen[bytes] | None = None
         tracked: dict[str, int] | None = None
         interrupt_finished = threading.Event()
         interrupt_thread: threading.Thread | None = None
+        stdout_capture: Any = None
+        stderr_capture: Any = None
         try:
+            if interrupt_signal is None and interrupt_ack is not None:
+                raise DrillFailure(phase, "preflight_failure")
+            if interrupt_signal is not None:
+                if interrupt_signal not in {signal.SIGINT, signal.SIGTERM} or not interrupt_ack:
+                    raise DrillFailure(phase, "preflight_failure")
+                stdout_capture = tempfile.TemporaryFile()
+                stderr_capture = tempfile.TemporaryFile()
             process = subprocess.Popen(
                 [self.executable, "start", "--attach", "--interactive", record["id"]],
                 stdin=subprocess.PIPE if input_bytes is not None else stdin if stdin is not None else subprocess.DEVNULL,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.DEVNULL,
+                stdout=stdout_capture if stdout_capture is not None else subprocess.PIPE,
+                stderr=(
+                    stderr_capture
+                    if stderr_capture is not None
+                    else subprocess.PIPE if capture_stderr else subprocess.DEVNULL
+                ),
                 env=self.environment,
             )
             tracked = self._track_child(process)
             if interrupt_signal is not None:
-                if interrupt_signal not in {signal.SIGINT, signal.SIGTERM} or interrupt_delay < 0:
-                    raise DrillFailure(phase, "preflight_failure")
+                def interrupt_after_ack() -> None:
+                    assert stdout_capture is not None and interrupt_ack is not None
+                    while not interrupt_finished.wait(0.02):
+                        try:
+                            output = os.pread(stdout_capture.fileno(), max_bytes + 1, 0)
+                        except OSError:
+                            return
+                        if interrupt_ack in output:
+                            self.last_attached_interrupt_acknowledged = True
+                            try:
+                                os.kill(os.getpid(), interrupt_signal)
+                            except OSError:
+                                return
+                            return
+                        if process is not None and process.poll() is not None:
+                            return
 
-                def interrupt_after_delay() -> None:
-                    if not interrupt_finished.wait(interrupt_delay):
-                        os.kill(os.getpid(), interrupt_signal)
-
-                interrupt_thread = threading.Thread(target=interrupt_after_delay, daemon=True)
+                interrupt_thread = threading.Thread(target=interrupt_after_ack, daemon=True)
                 interrupt_thread.start()
             try:
-                output, _ = process.communicate(
+                output, error = process.communicate(
                     input=input_bytes,
                     timeout=max(1, min(timeout, self.manifest["work_deadline"] - time.monotonic()))
                 )
@@ -2091,7 +2153,14 @@ class Drill(Docker):
                 if not self._terminate_and_reap(process):
                     raise DrillFailure("cleanup", "cleanup_failure") from exc
                 raise DrillFailure(phase, "timeout") from exc
-            if process.returncode != 0 or len(output) > max_bytes:
+            if stdout_capture is not None:
+                output = os.pread(stdout_capture.fileno(), max_bytes + 1, 0)
+                error = os.pread(stderr_capture.fileno(), max_bytes + 1, 0) if stderr_capture is not None else b""
+            output = output or b""
+            error = error or b""
+            self.last_attached_status = int(process.returncode or 0)
+            self.last_attached_stderr = error
+            if (process.returncode != 0 and not accept_nonzero) or len(output) > max_bytes or len(error) > max_bytes:
                 raise DrillFailure(phase, category)
             return output
         except subprocess.TimeoutExpired as exc:
@@ -2101,11 +2170,15 @@ class Drill(Docker):
         finally:
             interrupt_finished.set()
             if interrupt_thread is not None:
-                interrupt_thread.join(timeout=max(1, interrupt_delay + 1))
+                interrupt_thread.join(timeout=1)
             if process is not None:
                 reaped = process.poll() is not None or self._terminate_and_reap(process)
                 if tracked is not None and reaped:
                     self._untrack_child(tracked)
+            if stdout_capture is not None:
+                stdout_capture.close()
+            if stderr_capture is not None:
+                stderr_capture.close()
 
     def attached_status(
         self,
@@ -3179,39 +3252,56 @@ class Drill(Docker):
                 inject_failure=inject_failure,
                 wait_for_signal=interrupt_signal is not None,
             ).encode()
+            fault_kind = "failure" if inject_failure else "signal" if interrupt_signal is not None else None
+            failure_category = "fault_test_failure" if fault_kind is not None else "auth_key_clear_failure"
             output = self.attached(
                 client,
                 phase,
-                "auth_key_clear_failure",
+                failure_category,
                 input_bytes=transaction,
                 interrupt_signal=interrupt_signal,
-                interrupt_delay=2,
+                interrupt_ack=AUTH_KEY_CLEAR_ACK if interrupt_signal is not None else None,
+                accept_nonzero=inject_failure,
+                capture_stderr=inject_failure,
                 timeout=60,
             )
-            if output:
-                raise DrillFailure(phase, "auth_key_clear_failure")
         except DrillFailure as exc:
             if interrupt_signal is not None and exc.phase == phase and exc.category == "interrupted":
+                acknowledged = self.last_attached_interrupt_acknowledged
                 self.remove_interrupted_auth_key_client(client)
                 after = self.auth_key_state(target, phase, allow_interrupted=True)
-                if after != before:
-                    raise DrillFailure(phase, "auth_key_clear_failure") from exc
-                raise DrillFailure(phase, "interrupted") from exc
-            if inject_failure and exc.phase == phase and exc.category == "auth_key_clear_failure":
-                self.discard_container(client, phase, "auth_key_clear_failure")
-                after = self.auth_key_state(target, phase)
-                if after != before:
-                    raise DrillFailure(phase, "auth_key_clear_failure") from exc
-                raise DrillFailure(phase, "auth_key_clear_failure") from exc
+                result_category = auth_key_clear_fault_category(
+                    "signal",
+                    before,
+                    after,
+                    interrupt_acknowledged=acknowledged,
+                )
+                raise DrillFailure(phase, result_category) from exc
             raise
 
         document = self.attest_container(client, phase)
-        if (document.get("State") or {}).get("Running") or int((document.get("State") or {}).get("ExitCode", -1)) != 0:
+        state = document.get("State") or {}
+        container_status = int(state.get("ExitCode", -1))
+        if fault_kind is not None:
+            if state.get("Running"):
+                raise DrillFailure(phase, "fault_test_failure")
+            self.discard_container(client, phase, failure_category)
+            after = self.auth_key_state(target, phase)
+            result_category = auth_key_clear_fault_category(
+                fault_kind,
+                before,
+                after,
+                client_status=self.last_attached_status,
+                container_status=container_status,
+                stdout=output,
+                stderr=self.last_attached_stderr,
+                interrupt_acknowledged=self.last_attached_interrupt_acknowledged,
+            )
+            raise DrillFailure(phase, result_category)
+        if state.get("Running") or container_status != 0:
             raise DrillFailure(phase, "auth_key_clear_failure")
         self.discard_container(client, phase, "auth_key_clear_failure")
-        if self.auth_key_state(target, phase) != AUTH_KEY_CLEARED_STATE:
-            raise DrillFailure(phase, "auth_key_clear_failure")
-        if inject_failure or interrupt_signal is not None:
+        if output or self.auth_key_state(target, phase) != AUTH_KEY_CLEARED_STATE:
             raise DrillFailure(phase, "auth_key_clear_failure")
         self.auth_keys_cleared = True
 

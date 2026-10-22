@@ -414,10 +414,141 @@ class RestoreReadinessContractTests(unittest.TestCase):
 
         failed = RESTORE_READINESS.auth_key_clear_transaction_sql((-101, -202, -303), inject_failure=True)
         self.assertLess(failed.index("DELETE FROM public.auth_keys"), failed.index("SELECT 1 / 0"))
+        self.assertLess(failed.index("DELETE FROM public.auth_keys"), failed.index("\\echo RESTORE_READINESS_AUTH_KEY_DELETE_APPLIED"))
+        self.assertLess(failed.index("remaining_auth_keys <> 0"), failed.index("\\echo RESTORE_READINESS_AUTH_KEY_DELETE_APPLIED"))
         self.assertLess(failed.index("SELECT 1 / 0"), failed.index("COMMIT"))
         interrupted = RESTORE_READINESS.auth_key_clear_transaction_sql((-101, -202, -303), wait_for_signal=True)
         self.assertLess(interrupted.index("DELETE FROM public.auth_keys"), interrupted.index("pg_sleep(30)"))
+        self.assertLess(interrupted.index("\\echo RESTORE_READINESS_AUTH_KEY_DELETE_APPLIED"), interrupted.index("pg_sleep(30)"))
         self.assertLess(interrupted.index("pg_sleep(30)"), interrupted.index("COMMIT"))
+
+    def test_auth_key_clear_fault_results_require_acknowledged_rollback(self) -> None:
+        before = ["3", "2", "3", "1", "2", "0"]
+        ack = RESTORE_READINESS.AUTH_KEY_CLEAR_ACK + b"\n"
+        expected_error = b"ERROR:  division by zero\n"
+
+        self.assertEqual(
+            RESTORE_READINESS.auth_key_clear_fault_category(
+                "failure",
+                before,
+                before,
+                client_status=3,
+                container_status=3,
+                stdout=ack,
+                stderr=expected_error,
+            ),
+            "auth_key_clear_failure",
+        )
+        for result in (
+            RESTORE_READINESS.auth_key_clear_fault_category(
+                "failure",
+                before,
+                ["0", "0", "0", "1", "2", "2"],
+                client_status=3,
+                container_status=3,
+                stdout=ack,
+                stderr=expected_error,
+            ),
+            RESTORE_READINESS.auth_key_clear_fault_category(
+                "failure",
+                before,
+                ["0", "0", "0", "1", "2", "2"],
+                client_status=0,
+                container_status=0,
+                stdout=ack,
+            ),
+            RESTORE_READINESS.auth_key_clear_fault_category(
+                "failure",
+                before,
+                before,
+                client_status=3,
+                container_status=3,
+                stdout=ack,
+                stderr=b"ERROR: unrelated SQL failure\n",
+            ),
+            RESTORE_READINESS.auth_key_clear_fault_category(
+                "failure",
+                before,
+                before,
+                client_status=3,
+                container_status=3,
+                stderr=expected_error,
+            ),
+        ):
+            self.assertEqual(result, "fault_test_failure")
+
+        self.assertEqual(
+            RESTORE_READINESS.auth_key_clear_fault_category(
+                "signal", before, before, interrupt_acknowledged=True
+            ),
+            "interrupted",
+        )
+        self.assertEqual(
+            RESTORE_READINESS.auth_key_clear_fault_category(
+                "signal", before, before, interrupt_acknowledged=False
+            ),
+            "fault_test_failure",
+        )
+        self.assertEqual(
+            RESTORE_READINESS.auth_key_clear_fault_category(
+                "signal", before, ["0", "0", "0", "1", "2", "2"], interrupt_acknowledged=True
+            ),
+            "fault_test_failure",
+        )
+
+    def test_attached_interrupt_is_sent_only_after_transaction_acknowledgment(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            fake_docker = Path(temporary_directory) / "docker"
+            fake_docker.write_text(
+                "#!/usr/bin/python3\n"
+                "import os, sys, time\n"
+                "sys.stdin.buffer.read()\n"
+                "if os.environ.get('ACK_MODE') == 'ack':\n"
+                f"    os.write(1, {RESTORE_READINESS.AUTH_KEY_CLEAR_ACK!r} + b'\\n')\n"
+                "time.sleep(10)\n",
+                encoding="utf-8",
+            )
+            fake_docker.chmod(0o700)
+
+            for ack_mode, expected_ack in (("missing", False), ("ack", True)):
+                drill = object.__new__(RESTORE_READINESS.Drill)
+                drill.executable = str(fake_docker)
+                drill.environment = {"PATH": "/usr/bin:/bin", "ACK_MODE": ack_mode}
+                drill.manifest = {"work_deadline": time.monotonic() + 10, "processes": []}
+                drill.attest_container = Mock(return_value={"State": {"Running": True}})
+                drill._track_child = lambda _process: {}
+                drill._untrack_child = Mock()
+
+                parent_pid = RESTORE_READINESS.os.getpid()
+                real_kill = RESTORE_READINESS.os.kill
+                parent_signals: list[tuple[int, int]] = []
+
+                def record_parent_signal(pid: int, signum: int) -> None:
+                    if pid == parent_pid:
+                        parent_signals.append((pid, signum))
+                    else:
+                        real_kill(pid, signum)
+
+                with patch.object(RESTORE_READINESS.os, "kill", side_effect=record_parent_signal):
+                    with self.assertRaises(RESTORE_READINESS.DrillFailure) as timeout_failure:
+                        drill.attached(
+                            {"id": "f" * 64},
+                            "auth_key_clearing",
+                            "fault_test_failure",
+                            input_bytes=b"transaction",
+                            interrupt_signal=RESTORE_READINESS.signal.SIGTERM,
+                            interrupt_ack=RESTORE_READINESS.AUTH_KEY_CLEAR_ACK,
+                            timeout=1,
+                        )
+                self.assertEqual(timeout_failure.exception.category, "timeout")
+                self.assertEqual(drill.last_attached_interrupt_acknowledged, expected_ack)
+                if expected_ack:
+                    self.assertEqual(
+                        parent_signals,
+                        [(parent_pid, RESTORE_READINESS.signal.SIGTERM)],
+                    )
+                else:
+                    self.assertEqual(parent_signals, [])
 
     def test_auth_key_clear_refuses_wrong_target_and_missing_marker_before_sql(self) -> None:
         target = {"id": "a" * 64, "role": "target_postgres", "removed": False}
