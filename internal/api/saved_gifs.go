@@ -49,7 +49,7 @@ func (h *handlers) handleGetSavedGifs(r *mtproto.Request) (bin.Encoder, error) {
 		return nil, err
 	}
 	hash := savedGIFsHash(files)
-	if req.Hash == hash {
+	if req.Hash != 0 && req.Hash == hash {
 		return &tg.MessagesSavedGifsNotModified{}, nil
 	}
 	gifs := make([]tg.DocumentClass, 0, len(files))
@@ -60,6 +60,10 @@ func (h *handlers) handleGetSavedGifs(r *mtproto.Request) (bin.Encoder, error) {
 }
 
 func savedGIFsHash(files []store.File) int64 {
+	if len(files) == 0 {
+		return 0
+	}
+
 	const (
 		offset = uint64(14695981039346656037)
 		prime  = uint64(1099511628211)

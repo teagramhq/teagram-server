@@ -104,6 +104,15 @@ func TestSavedGIFHandlersSaveListHashAndUnsave(t *testing.T) {
 	file := savedGIFTestFile(t, s, conn, uploader.ID, owner.ID, "video/mp4", []string{"send_gifs"}, true)
 	h := testHandlers(s)
 
+	empty, err := callGetSavedGIFs(t, h, owner.ID, 0)
+	if err != nil {
+		t.Fatalf("messages.getSavedGifs for empty list: %v", err)
+	}
+	emptyList, ok := empty.(*tg.MessagesSavedGifs)
+	if !ok || emptyList.Hash != 0 || len(emptyList.Gifs) != 0 {
+		t.Fatalf("empty saved GIF response = %#v, want full empty list with zero hash", empty)
+	}
+
 	result, err := callSaveGIF(t, h, owner.ID, &tg.InputDocument{
 		ID: file.ID, AccessHash: file.AccessHash, FileReference: []byte("ignored-reference"),
 	}, false)
