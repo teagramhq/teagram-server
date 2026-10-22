@@ -407,7 +407,7 @@ if [ "${1:-}" = inspect ]; then
       turnstile_source=$(jq -r '.secrets.teagramd_turnstile.file // ""' "$turnstile_compose")
     fi
     jq -nc \
-      --arg id "$id" --arg base_id "$MOCK_BASE_ID" --arg image "$image" --argjson env "$env_json" \
+      --arg id "$id" --arg base_id "$MOCK_BASE_ID" --arg replacement_id "$MOCK_REPLACEMENT_ID" --arg image "$image" --argjson env "$env_json" \
       --arg cfg "$cfg" --arg source "$MOCK_CHECKOUT/.state/blob-mode" \
       --arg scenario "${MOCK_SCENARIO:-}" --arg phase "$phase" --arg turnstile_source "$turnstile_source" \
       '{
@@ -415,7 +415,7 @@ if [ "${1:-}" = inspect ]; then
         Config:{Env:$env,StopTimeout:(if $scenario == "target-local-carry-forward-image-reuse-stop-timeout-mismatch" and $cfg == "target" and $phase == "target" then 60 else 120 end),Labels:{"com.docker.compose.project":"fixture","com.docker.compose.service":"teagramd"}},
         State:{Status:(if $scenario == "runtime-target-exited" and $cfg == "target" then "exited" else "running" end),ExitCode:(if $scenario == "runtime-target-exited" and $cfg == "target" then 1 else 0 end),StartedAt:"2026-10-06T12:00:00Z",FinishedAt:(if $scenario == "runtime-target-exited" and $cfg == "target" then "2026-10-06T12:00:01Z" else "0001-01-01T00:00:00Z" end)},
         HostConfig:{PortBindings:({"2443/tcp":[{HostIp:"127.0.0.1",HostPort:"2443"}]} +
-          if $scenario == "target-local-carry-forward-public-listener-addition" and $phase == "target" then
+          if $scenario == "target-local-carry-forward-public-listener-addition" and $id == $replacement_id then
             {"2446/tcp":[{HostIp:"127.0.0.1",HostPort:"2446"}]}
           else {} end),NetworkMode:"fixture_teagram_server"},
         NetworkSettings:{Networks:({fixture_teagram_server:{}} + if $scenario == "initial-local-replica-network-drift" and $id != $base_id then {edge:{}} else {} end)},
@@ -463,7 +463,7 @@ fi
         elif [[ "${MOCK_SCENARIO:-}" == public-websocket-* ]] && [ "$config_count" -lt 3 ]; then
           cat "$MOCK_STATE/base-compose.json"
         elif [[ "${MOCK_SCENARIO:-}" == *public-listener-* ]]; then
-          if [ "$config_count" -lt 3 ]; then cat "$MOCK_STATE/base-compose.json"; else cat "$MOCK_STATE/target-compose.json"; fi
+          if [ "$phase" = baseline ] || [ "$phase" = rollback ]; then cat "$MOCK_STATE/base-compose.json"; else cat "$MOCK_STATE/target-compose.json"; fi
         elif [[ "${MOCK_SCENARIO:-}" == target-local-welcome-channel-* ]]; then
           if [ "$config_count" -ge 3 ]; then cat "$MOCK_STATE/target-compose.json"; else cat "$MOCK_STATE/base-compose.json"; fi
         elif [ "${MOCK_SCENARIO:-}" = target-local-carry-forward-cce-literal-build-arg ]; then
