@@ -1620,6 +1620,8 @@ jobs:
   # docker-compose.yml is edited from, so this job is the only place it ever
   # runs — the gate that stops it rotting.
   compose:
+    needs: mirror-rustfs-qualification-images
+    if: ${{ always() && needs.mirror-rustfs-qualification-images.result != 'failure' && needs.mirror-rustfs-qualification-images.result != 'cancelled' }}
     runs-on: ubuntu-26.04
     # The image build plus RustFS and media verification, which is the slow part
     # at roughly a minute; this only catches a hang before it
@@ -1631,9 +1633,11 @@ jobs:
     permissions:
       contents: read
       actions: write
+      packages: read
 
     env:
       TEAGRAMD_SOURCE_REVISION: ${{ github.sha }}
+      BUSYBOX_IMAGE: ghcr.io/teagramhq/teagram-server-busybox:1.37@sha256:bdf57e528e45e4433820e045b29b4597825a1c9e38353532d90a01445013f82e
       # The remote media gate below uses the same testcontainers Postgres
       # harness as `make test`; the runner is disposable, so its reaper only
       # adds a way to kill the shared test database mid-suite.
@@ -1641,6 +1645,14 @@ jobs:
 
     steps:
       - uses: actions/checkout@v7.0.1
+
+      - name: Log in to GHCR
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: printf '%s' "$GITHUB_TOKEN" | docker login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
+
+      - name: Pull pinned BusyBox fixture image
+        run: docker pull "$BUSYBOX_IMAGE"
 
       - name: Check compose lane failure diagnostics
         run: bash deploy/teagramd/rollout-runner/test-compose-lane-diagnostics.sh
@@ -1863,11 +1875,11 @@ jobs:
           # cannot touch the volume. A throwaway busybox mounting the same named
           # volume can, and it is the volume that is under test either way.
           blob_write() {
-            docker run --rm -v "$1":/blobs mirror.gcr.io/library/busybox:1.37 sh -c 'echo canary > /blobs/ci_canary'
+            docker run --rm -v "$1":/blobs "$BUSYBOX_IMAGE" sh -c 'echo canary > /blobs/ci_canary'
           }
 
           blob_read() {
-            docker run --rm -v "$1":/blobs mirror.gcr.io/library/busybox:1.37 cat /blobs/ci_canary
+            docker run --rm -v "$1":/blobs "$BUSYBOX_IMAGE" cat /blobs/ci_canary
           }
 
           # The master key, read off the tgkey volume — teagramd is distroless
@@ -1879,7 +1891,7 @@ jobs:
           }
 
           key_file() {
-            docker run --rm -v "$1":/key mirror.gcr.io/library/busybox:1.37 cat /key/enc_key.hex
+            docker run --rm -v "$1":/key "$BUSYBOX_IMAGE" cat /key/enc_key.hex
           }
 
           # No --build: the Build image step already loaded teagramd:local, which
@@ -1897,7 +1909,7 @@ jobs:
           docker compose create teagramd
           keyvol=$(key_volume)
           [ -n "$keyvol" ] || { echo "no named volume at /var/lib/teagramd"; exit 1; }
-          docker run --rm --user 65532:65532 -v "$keyvol":/key mirror.gcr.io/library/busybox:1.37 sh -c \
+          docker run --rm --user 65532:65532 -v "$keyvol":/key "$BUSYBOX_IMAGE" sh -c \
             'printf %s "$1" > /key/enc_key.hex && chmod 600 /key/enc_key.hex' \
             sh 000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f
 
@@ -2237,7 +2249,7 @@ jobs:
             and .[1].bytes == 7
             and .[1].source_manifest_sha256 == .[1].destination_manifest_sha256
           ' "$migration_report" >/dev/null
-          legacy_after_migration=$(docker run --rm -v "$legacy_volume":/blobs mirror.gcr.io/library/busybox:1.37 cat /blobs/ci_canary)
+          legacy_after_migration=$(docker run --rm -v "$legacy_volume":/blobs "$BUSYBOX_IMAGE" cat /blobs/ci_canary)
           [ "$legacy_after_migration" = canary ] \
             || { echo "blob migration modified the source volume"; exit 1; }
           migrated_canary=$(authenticated_mc \
@@ -2333,7 +2345,7 @@ jobs:
             || { echo "RustFS restore report has no assembled TestMediaRoundTrip object"; exit 1; }
           rollback_media_sha=$(jq -r -s --arg key "$rollback_media_key" \
             '.[] | select(.type == "object" and .key == $key) | .source_sha256' "$restore_report")
-          restored_media_sha=$(docker run --rm -v "$legacy_volume":/blobs mirror.gcr.io/library/busybox:1.37 \
+          restored_media_sha=$(docker run --rm -v "$legacy_volume":/blobs "$BUSYBOX_IMAGE" \
             sha256sum "/blobs/$rollback_media_key" | awk '{print $1}')
           [ "$restored_media_sha" = "$rollback_media_sha" ] \
             || { echo "restored media $rollback_media_key does not match the RustFS checksum"; exit 1; }
@@ -2350,10 +2362,10 @@ jobs:
             | sed -n 's/^TG_BLOB_S3_ENDPOINT=//p' | head -1)
           [ -z "$rollback_endpoint" ] \
             || { echo "filesystem rollback still has S3 endpoint $rollback_endpoint"; exit 1; }
-          docker run --rm -v "$legacy_volume":/blobs mirror.gcr.io/library/busybox:1.37 \
+          docker run --rm -v "$legacy_volume":/blobs "$BUSYBOX_IMAGE" \
             sh -c 'printf rollback-canary > /blobs/rollback_canary'
           rollback_canary=$(docker run --rm -v "$legacy_volume":/blobs \
-            mirror.gcr.io/library/busybox:1.37 cat /blobs/rollback_canary)
+            "$BUSYBOX_IMAGE" cat /blobs/rollback_canary)
           [ "$rollback_canary" = rollback-canary ] \
             || { echo "filesystem rollback could not read its local canary"; exit 1; }
           compose up -d teagramd

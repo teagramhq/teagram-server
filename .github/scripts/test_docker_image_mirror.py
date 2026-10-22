@@ -123,6 +123,25 @@ class DockerImageMirrorTests(unittest.TestCase):
             job.index("compose up -d postgres migrate teagramd rustfs rustfs-init"),
         )
 
+    def test_compose_lane_uses_the_pinned_ghcr_busybox_mirror(self) -> None:
+        workflow = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
+        compose_job = re.search(
+            r"(?ms)^  compose:\n(.*?)(?=^  [a-z0-9-]+:|\Z)", workflow
+        )
+        self.assertIsNotNone(compose_job, "Compose job is missing")
+        job = compose_job.group(1)
+        image = (
+            "ghcr.io/teagramhq/teagram-server-busybox:1.37@sha256:"
+            "bdf57e528e45e4433820e045b29b4597825a1c9e38353532d90a01445013f82e"
+        )
+        self.assertIn("needs: mirror-rustfs-qualification-images", job)
+        self.assertIn("packages: read", job)
+        self.assertIn("docker login ghcr.io", job)
+        self.assertIn(f"BUSYBOX_IMAGE: {image}", job)
+        self.assertIn('docker pull "$BUSYBOX_IMAGE"', job)
+        self.assertIn('docker run --rm -v "$1":/blobs "$BUSYBOX_IMAGE"', job)
+        self.assertNotIn("mirror.gcr.io/library/busybox:1.37", job)
+
     def test_dockerfile_hub_bases_use_the_mirror(self) -> None:
         for relative_path in ACTIVE_DOCKERFILES:
             with self.subTest(path=relative_path):
