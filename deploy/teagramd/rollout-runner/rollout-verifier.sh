@@ -29,6 +29,11 @@ verify_added_container_environment() {
       if $name == "TEAGRAM_TURNSTILE_SITE_KEY" then "TG_TURNSTILE_SITE_KEY"
       elif $name == "TEAGRAM_TURNSTILE_SECRET_KEY_FILE" then "TG_TURNSTILE_SECRET_KEY_FILE"
       else $name end;
+    def dotenv_value($value):
+      if ($value | length) >= 2 and
+         ((($value | startswith("\"")) and ($value | endswith("\""))) or
+          (($value | startswith("\u0027")) and ($value | endswith("\u0027")))) then $value[1:-1]
+      else $value end;
     .[0] as $inspect
     | .[1] as $compose
     | ($inspect | item | .Config.Env // []) as $container_env
@@ -41,6 +46,7 @@ verify_added_container_environment() {
             | [ $env_lines[] as $line
                 | ($line | index("=")) as $separator
                 | select($separator != null and $line[:$separator] == $name)
+                | $line[($separator + 1):]
               ] as $assignments
             | [ $container_env[]
                 | select(type == "string" and startswith($runtime_name + "="))
@@ -50,7 +56,11 @@ verify_added_container_environment() {
               ($compose_env | has($runtime_name)) and
               ($compose_env[$runtime_name] | type) == "string" and
               ($actual | length) == 1 and
-              $actual[0] == $compose_env[$runtime_name]
+              $actual[0] == $compose_env[$runtime_name] and
+              (($name | IN(
+                "TG_PUBLIC_WEBSOCKET_LISTEN_ADDR", "TG_PUBLIC_WEBSOCKET_ADVERTISE_ADDR",
+                "TG_PUBLIC_REGISTRATION", "TG_PUBLIC_WEBSOCKET_ALLOWED_ORIGINS"
+              )) | not or dotenv_value($assignments[0]) == $compose_env[$runtime_name])
           )
       end
   ' >/dev/null; then
@@ -67,6 +77,11 @@ verify_changed_container_environment() {
     printf '%s\n' "$inspect_json" "$compose_json"
   } | jq -se --argjson changed "$changed_env_names" --rawfile env_content "$env_file" '
     def item: if type == "array" then .[0] else . end;
+    def dotenv_value($value):
+      if ($value | length) >= 2 and
+         ((($value | startswith("\"")) and ($value | endswith("\""))) or
+          (($value | startswith("\u0027")) and ($value | endswith("\u0027")))) then $value[1:-1]
+      else $value end;
     .[0] as $inspect
     | .[1] as $compose
     | ($inspect | item | .Config.Env // []) as $container_env
@@ -85,10 +100,12 @@ verify_changed_container_environment() {
                 | .[($name | length) + 1:]
               ] as $actual
             | (($name == "TG_REGISTRATION" and ($assignments[0] | IN("open","closed"))) or
-               ($name == "TG_TURNSTILE_SIGNIN_ENABLED" and ($assignments[0] | IN("true","false")))) and
+               ($name == "TG_TURNSTILE_SIGNIN_ENABLED" and ($assignments[0] | IN("true","false"))) or
+               ($name == "TG_PUBLIC_REGISTRATION" and ($assignments[0] | IN("invite","closed"))) or
+               ($name | IN("TG_PUBLIC_WEBSOCKET_LISTEN_ADDR", "TG_PUBLIC_WEBSOCKET_ADVERTISE_ADDR", "TG_PUBLIC_WEBSOCKET_ALLOWED_ORIGINS"))) and
               ($assignments | length) == 1 and
               ($compose_env | has($name)) and
-              ($compose_env[$name] == $assignments[0]) and
+              ($compose_env[$name] == dotenv_value($assignments[0])) and
               ($actual | length) == 1 and
               ($actual[0] == $assignments[0])
           )
@@ -100,48 +117,84 @@ verify_changed_container_environment() {
   return 0
 }
 
-verify_safe_public_container_environment() {
-  local inspect_json=$1
-  if ! printf '%s\n' "$inspect_json" | jq -e '
+verify_safe_public_environment() {
+  local inspect_json=$1 compose_json=$2 env_file=$3 added_env_names=$4 changed_env_names=$5
+  local snapshot_name=$6 compose_source=$7
+  if ! printf '%s\n' "$inspect_json" "$compose_json" | jq -se \
+    --argjson added "$added_env_names" --argjson changed "$changed_env_names" \
+    --arg snapshot_name "$snapshot_name" --arg compose_source "$compose_source" \
+    --rawfile env_content "$env_file" '
     def item: if type == "array" then .[0] else . end;
-    def safe_setting($env; $name; $allowed):
+    def values($env; $name):
       [$env[]
        | select(type == "string" and startswith($name + "="))
-       | .[($name | length) + 1:]] as $values
-      | ($values | length) <= 1 and
-        all($values[]; . as $value | any($allowed[]; . == $value));
-    (item.Config.Env // null) as $env
-    | if ($env | type) != "array" then false else
-        safe_setting($env; "TG_PUBLIC_WEBSOCKET_LISTEN_ADDR"; [""]) and
-        safe_setting($env; "TG_PUBLIC_WEBSOCKET_ADVERTISE_ADDR"; [""]) and
-        safe_setting($env; "TG_PUBLIC_REGISTRATION"; ["closed"]) and
-        safe_setting($env; "TG_PUBLIC_WEBSOCKET_ALLOWED_ORIGINS"; [""]) and
-        safe_setting($env; "TG_WELCOME_CHANNEL"; [""])
+       | .[($name | length) + 1:]];
+    def assignments($lines; $name):
+      [$lines[] as $line
+       | ($line | index("=")) as $separator
+       | select($separator != null and $line[:$separator] == $name)
+       | $line[($separator + 1):]];
+    def dotenv_value($value):
+      if ($value | length) >= 2 and
+         ((($value | startswith("\"")) and ($value | endswith("\""))) or
+          (($value | startswith("\u0027")) and ($value | endswith("\u0027")))) then $value[1:-1]
+      else $value end;
+    def default_value($name):
+      if $name == "TG_PUBLIC_REGISTRATION" then "closed" else "" end;
+    def is_default($name; $value): $value == default_value($name);
+    def valid_value($name; $value):
+      if $name == "TG_PUBLIC_REGISTRATION" then $value == "invite" or $value == "closed"
+      else true end;
+    .[0] as $inspect
+    | .[1] as $compose
+    | ($inspect | item | .Config.Env // null) as $container_env
+    | ($compose.services.teagramd.environment // null) as $compose_env
+    | ($env_content | split("\n")) as $env_lines
+    | if ($container_env | type) != "array" then false
+      elif $compose_source == "selected-compose-render" and ($compose_env | type) != "object" then false
+      else
+        all([
+          "TG_PUBLIC_WEBSOCKET_LISTEN_ADDR",
+          "TG_PUBLIC_WEBSOCKET_ADVERTISE_ADDR",
+          "TG_PUBLIC_REGISTRATION",
+          "TG_PUBLIC_WEBSOCKET_ALLOWED_ORIGINS",
+          "TG_WELCOME_CHANNEL"
+        ][];
+          . as $name
+          | default_value($name) as $default
+          | values($container_env; $name) as $container_values
+          | (($compose_source == "selected-compose-render") and ($compose_env | has($name))) as $compose_has
+          | (if $compose_has then $compose_env[$name] else $default end) as $compose_value
+          | (if ($container_values | length) == 0 then $default else $container_values[0] end) as $container_value
+          | assignments($env_lines; $name) as $env_assignments
+          | if ($container_values | length) > 1 or
+               ($compose_has and ($compose_value | type) != "string") then false
+            elif $compose_source == "live-container-inspection" then
+              is_default($name; $container_value)
+            elif is_default($name; $compose_value) and is_default($name; $container_value) then true
+            elif $name == "TG_WELCOME_CHANNEL" or
+                 (valid_value($name; $compose_value) | not) or
+                 (valid_value($name; $container_value) | not) or
+                 ($env_assignments | length) != 1 then false
+            elif dotenv_value($env_assignments[0]) != $compose_value then false
+            elif any($added[]; . == $name) then
+              if $snapshot_name == "target" then $container_value == $compose_value
+              elif $snapshot_name == "baseline" or $snapshot_name == "preflight" then
+                is_default($name; $container_value) or $container_value == $compose_value
+              else false end
+            elif any($changed[]; . == $name) then
+              if $snapshot_name == "baseline" or $snapshot_name == "preflight" then true
+              else $container_value == $compose_value end
+            else $container_value == $compose_value
+            end
+        )
       end
   ' >/dev/null; then
-    printf '%s\n' 'container has unsafe public environment settings' >&2
-    return 1
-  fi
-  return 0
-}
-
-verify_safe_public_compose_environment() {
-  local compose_json=$1
-  if ! printf '%s\n' "$compose_json" | jq -e '
-    def safe_setting($env; $name; $allowed):
-      if ($env | has($name) | not) then true
-      elif ($env[$name] | type) != "string" then false
-      else any($allowed[]; . == $env[$name]) end;
-    .services.teagramd.environment as $env
-    | if ($env | type) != "object" then false else
-        safe_setting($env; "TG_PUBLIC_WEBSOCKET_LISTEN_ADDR"; [""]) and
-        safe_setting($env; "TG_PUBLIC_WEBSOCKET_ADVERTISE_ADDR"; [""]) and
-        safe_setting($env; "TG_PUBLIC_REGISTRATION"; ["closed"]) and
-        safe_setting($env; "TG_PUBLIC_WEBSOCKET_ALLOWED_ORIGINS"; [""]) and
-        safe_setting($env; "TG_WELCOME_CHANNEL"; [""])
-      end
-  ' >/dev/null; then
-    printf '%s\n' 'resolved Compose has unsafe public environment settings' >&2
+    if [ "$compose_source" = selected-compose-render ]; then
+      printf '%s\n' 'resolved Compose has unsafe public environment settings or does not match its container' >&2
+    else
+      printf '%s\n' 'container has unsafe public environment settings' >&2
+    fi
     return 1
   fi
   return 0
@@ -336,9 +389,10 @@ snapshot_from_json() {
   # of the environment digest and recorded by name so every other entry stays pinned.
   added_env_names=$(jq -cn --arg names "${ROLLOUT_ADDED_ENV:-}" '$names | split(",") | map(select(length > 0))')
   changed_env_names=$(jq -cn --arg names "${ROLLOUT_CHANGED_ENV:-}" '$names | split(",") | map(select(length > 0))')
-  verify_safe_public_container_environment "$inspect_json" || return 1
+  verify_safe_public_environment \
+    "$inspect_json" "$compose_json" "$env_file" "$added_env_names" "$changed_env_names" \
+    "$snapshot_name" "$compose_source" || return 1
   if [ "$compose_source" = selected-compose-render ]; then
-    verify_safe_public_compose_environment "$compose_json" || return 1
     verify_turnstile_compose_configuration "$compose_json" || return 1
     verify_turnstile_container_configuration \
       "$inspect_json" "$compose_json" "$snapshot_name" "$added_env_names" "$changed_env_names" || return 1
@@ -402,7 +456,11 @@ snapshot_from_json() {
         elif $name == "TEAGRAM_TURNSTILE_SECRET_KEY_FILE" then "TG_TURNSTILE_SECRET_KEY_FILE"
         else $name end;
       [(item.Config.Env // [])[] | select(type == "string")
-       | select(IN("TG_TURNSTILE_SITE_KEY=", "TG_TURNSTILE_SECRET_KEY_FILE=", "TG_TURNSTILE_SIGNIN_ENABLED=false") | not)
+       | select(IN(
+           "TG_TURNSTILE_SITE_KEY=", "TG_TURNSTILE_SECRET_KEY_FILE=", "TG_TURNSTILE_SIGNIN_ENABLED=false",
+           "TG_PUBLIC_WEBSOCKET_LISTEN_ADDR=", "TG_PUBLIC_WEBSOCKET_ADVERTISE_ADDR=",
+           "TG_PUBLIC_REGISTRATION=closed", "TG_PUBLIC_WEBSOCKET_ALLOWED_ORIGINS="
+         ) | not)
        | split("=")[0]] as $keys
       | [$added[] | select(. as $name | ($name | runtime_name($name)) as $runtime | any($keys[]; . == $runtime))]
       | unique
@@ -432,8 +490,8 @@ snapshot_from_json() {
         | sort
       end
   ')
-  # The disabled Turnstile defaults count as unset in a container that predates
-  # this deploy, so enabling Turnstile can add them; the target must carry them.
+  # Disabled Turnstile and public listener defaults count as unset before the
+  # target, so a named addition can introduce them and the target must carry it.
   container_env_added=$(printf '%s' "$inspect_json" | jq -er --argjson added "$added_env_names" --arg snapshot_name "$snapshot_name" '
     def item: if type == "array" then .[0] else . end;
     def runtime_name($name):
@@ -442,7 +500,11 @@ snapshot_from_json() {
       else $name end;
     [(item.Config.Env // [])[] | select(type == "string")
      | select($snapshot_name == "target" or
-              (IN("TG_TURNSTILE_SITE_KEY=", "TG_TURNSTILE_SECRET_KEY_FILE=", "TG_TURNSTILE_SIGNIN_ENABLED=false") | not))
+              (IN(
+                "TG_TURNSTILE_SITE_KEY=", "TG_TURNSTILE_SECRET_KEY_FILE=", "TG_TURNSTILE_SIGNIN_ENABLED=false",
+                "TG_PUBLIC_WEBSOCKET_LISTEN_ADDR=", "TG_PUBLIC_WEBSOCKET_ADVERTISE_ADDR=",
+                "TG_PUBLIC_REGISTRATION=closed", "TG_PUBLIC_WEBSOCKET_ALLOWED_ORIGINS="
+              ) | not))
      | split("=")[0]] as $keys
     | [$added[] | select(. as $name | ($name | runtime_name($name)) as $runtime | any($keys[]; . == $runtime))]
     | unique | sort | if length == 0 then "none" else join(",") end

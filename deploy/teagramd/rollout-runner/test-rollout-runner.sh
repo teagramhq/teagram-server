@@ -440,7 +440,20 @@ fi
         [ ! -f "$MOCK_STATE/compose-config-count" ] || config_count=$(cat "$MOCK_STATE/compose-config-count")
         config_count=$((config_count + 1))
         printf '%s\n' "$config_count" > "$MOCK_STATE/compose-config-count"
-        if [ "${MOCK_SCENARIO:-}" = config-drift ] && [ "$config_count" -ge 3 ]; then
+        if [ -f "$MOCK_STATE/public-websocket-addition" ]; then
+          if [ "$phase" = baseline ]; then config_file="$MOCK_STATE/base-compose.json"; else config_file="$MOCK_STATE/target-compose.json"; fi
+          public_compose=$(cat "$config_file")
+          while IFS= read -r env_line; do
+            key=${env_line%%=*}
+            case "$key" in
+              TG_PUBLIC_WEBSOCKET_LISTEN_ADDR|TG_PUBLIC_WEBSOCKET_ADVERTISE_ADDR|TG_PUBLIC_REGISTRATION|TG_PUBLIC_WEBSOCKET_ALLOWED_ORIGINS)
+                public_compose=$(jq -c --arg key "$key" --arg value "${env_line#*=}" \
+                  '.services.teagramd.environment[$key]=$value' <<< "$public_compose")
+                ;;
+            esac
+          done < "$MOCK_CHECKOUT/.env"
+          printf '%s\n' "$public_compose"
+        elif [ "${MOCK_SCENARIO:-}" = config-drift ] && [ "$config_count" -ge 3 ]; then
           cat "$MOCK_STATE/target-compose.drift.json"
         elif [[ "${MOCK_SCENARIO:-}" == public-websocket-* ]] && [ "$config_count" -lt 3 ]; then
           cat "$MOCK_STATE/base-compose.json"
@@ -2761,6 +2774,22 @@ else
   fail 'named TG_REGISTRATION value change must deploy through apply'
 fi
 
+prepare_env_change_fixture public-registration-value-change \
+  target-local-carry-forward-env-value-change "$APPLY_TARGET_SHA" "$TARGET_SHA" \
+  TG_PUBLIC_REGISTRATION=invite '' TG_PUBLIC_REGISTRATION closed invite
+root=$(cat "$TMP/public-registration-value-change-root-path")
+checkout=$(cat "$TMP/public-registration-value-change-checkout-path")
+current_env_sha=$(sha256sum "$checkout/.env" | awk '{print $1}')
+status=$(run_fixture public-registration-value-change built 0 '' 2 '' '' apply "$APPLY_TARGET_SHA")
+if [ "$status" = 0 ] && grep -q "rollout=verified sha=$APPLY_TARGET_SHA" "$TMP/public-registration-value-change.stdout" && \
+   [ "$(jq -r '.container_env_changed' "$root.target/target.snapshot.json")" = TG_PUBLIC_REGISTRATION ] && \
+   grep -qx "env_sha256=$current_env_sha source_sha=$APPLY_TARGET_SHA" "$checkout/.state/rollout-env"; then
+  pass 'TG_PUBLIC_REGISTRATION changes from closed to invite through the named change path'
+else
+  show_fixture_failure public-registration-value-change "$status"
+  fail 'TG_PUBLIC_REGISTRATION value changes must use the named change path'
+fi
+
 prepare_env_change_fixture env-value-change-rollback target-local-df9-rollback "$APPLY_TARGET_SHA" \
   "$TARGET_LOCAL_COMPOSE_TARGET_SHA" TG_REGISTRATION=open TG_REGISTRATION=open
 root=$(cat "$TMP/env-value-change-rollback-root-path")
@@ -2851,6 +2880,42 @@ if [ "$status" = 0 ] && grep -q "rollout=verified sha=$APPLY_TARGET_SHA" "$TMP/t
 else
   show_fixture_failure turnstile-env-addition-success "$status"
   fail 'mapped Turnstile .env additions must deploy through apply'
+fi
+
+prepare_env_addition_fixture public-websocket-addition-rollback TG_PUBLIC_WEBSOCKET_LISTEN_ADDR '' \
+  'TG_PUBLIC_WEBSOCKET_LISTEN_ADDR=0.0.0.0:2444' TG_PUBLIC_WEBSOCKET_LISTEN_ADDR=0.0.0.0:2444 \
+  target-local-df9-rollback "$DF9_LOCAL_COMPOSE_TARGET_SHA" "$TARGET_LOCAL_COMPOSE_TARGET_SHA"
+state=$(cat "$TMP/public-websocket-addition-rollback-state-path")
+checkout=$(cat "$TMP/public-websocket-addition-rollback-checkout-path")
+root=$(cat "$TMP/public-websocket-addition-rollback-root-path")
+jq -c '.services.teagramd.environment += {
+  TG_PUBLIC_WEBSOCKET_LISTEN_ADDR:"",
+  TG_PUBLIC_WEBSOCKET_ADVERTISE_ADDR:"",
+  TG_PUBLIC_REGISTRATION:"closed",
+  TG_PUBLIC_WEBSOCKET_ALLOWED_ORIGINS:"",
+  TG_WELCOME_CHANNEL:""
+}' "$state/base-compose.json" > "$TMP/public-websocket-addition-rollback-base-compose.json"
+mv -- "$TMP/public-websocket-addition-rollback-base-compose.json" "$state/base-compose.json"
+jq -c '.services.teagramd.environment += {
+  TG_PUBLIC_WEBSOCKET_ADVERTISE_ADDR:"",
+  TG_PUBLIC_REGISTRATION:"closed",
+  TG_PUBLIC_WEBSOCKET_ALLOWED_ORIGINS:"",
+  TG_WELCOME_CHANNEL:""
+}' "$state/target-compose.json" > "$TMP/public-websocket-addition-rollback-target-compose.json"
+mv -- "$TMP/public-websocket-addition-rollback-target-compose.json" "$state/target-compose.json"
+: > "$state/public-websocket-addition"
+previous_env_sha=$(sha256sum "$TMP/public-websocket-addition-rollback-previous.env" | awk '{print $1}')
+status=$(run_fixture public-websocket-addition-rollback built 0 '' 2 '' '' apply "$APPLY_TARGET_SHA")
+if [ "$status" != 0 ] && grep -q "rollback=verified baseline_sha=$TARGET_LOCAL_COMPOSE_TARGET_SHA" "$TMP/public-websocket-addition-rollback.stdout" && \
+   [ "$(jq -r '.container_env_added' "$root.target/target.snapshot.json")" = TG_PUBLIC_WEBSOCKET_LISTEN_ADDR ] && \
+   [ "$(jq -r '.container_env_added' "$root.rollback/rollback.snapshot.json")" = none ] && \
+   [ "$(sha256sum "$checkout/.env" | awk '{print $1}')" = "$previous_env_sha" ] && \
+   grep -qx "env_sha256=$previous_env_sha source_sha=$TARGET_LOCAL_COMPOSE_TARGET_SHA" "$checkout/.state/rollout-env" && \
+   grep -q $'rollback\tcontainer_env_sha256\t.*\tpass' "$root.rollback/rollback-equivalence.tsv"; then
+  pass 'rollback restores the previous .env and container environment after a public listener addition'
+else
+  show_fixture_failure public-websocket-addition-rollback "$status"
+  fail 'public listener addition rollback must restore the previous environment'
 fi
 
 prepare_env_addition_fixture env-addition-rollback TG_NEW_FLAG '' 'TG_NEW_FLAG=on' TG_NEW_FLAG=on \
