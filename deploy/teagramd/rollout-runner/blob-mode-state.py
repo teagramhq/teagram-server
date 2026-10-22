@@ -1188,10 +1188,10 @@ def validate_private_rustfs_render(compose: object) -> None:
 
 def rustfs_private_network_name(record: dict[str, object]) -> str:
     volumes = record.get("volumes")
-    volume = volumes.get("tgblobs") if isinstance(volumes, dict) else None
+    volume = volumes.get("rustfsdata") if isinstance(volumes, dict) else None
     if not isinstance(volume, str):
         reject("running-rustfs-network")
-    match = re.fullmatch(r"([a-z0-9][a-z0-9_-]*)_tgblobs", volume)
+    match = re.fullmatch(r"([a-z0-9][a-z0-9_-]*)_rustfsdata", volume)
     if match is None:
         reject("running-rustfs-network")
     return f"{match.group(1)}_rustfs_private"

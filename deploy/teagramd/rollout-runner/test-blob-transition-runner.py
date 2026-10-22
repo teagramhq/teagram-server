@@ -114,6 +114,23 @@ class BlobTransitionEnvironmentTests(unittest.TestCase):
                         "test-live-authority",
                     )
 
+    def test_compose_authority_rejection_keeps_its_reason(self) -> None:
+        runner = import_from_path("blob_transition_runner_compose_rejection", RUNNER)
+        mode = import_from_path(
+            "blob_mode_compose_rejection", RUNNER.parent / "blob-mode-state.py"
+        )
+        with patch.object(
+            mode,
+            "assert_compose_matches",
+            side_effect=mode.Reject("render-teagramd-rustfs-network"),
+        ):
+            with self.assertRaisesRegex(
+                runner.TransitionReject, "^render-teagramd-rustfs-network$"
+            ):
+                runner.assert_compose_matches_authority(
+                    mode, {}, {}, "/checkout/.state/blob-mode", Path("/checkout/docker-compose.override.yml")
+                )
+
     def test_rustfs_commands_load_parked_credentials_after_the_checkout_env(self) -> None:
         if os.geteuid() != 0:
             self.skipTest("RustFS environment fixture requires root ownership checks")

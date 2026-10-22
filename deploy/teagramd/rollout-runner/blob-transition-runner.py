@@ -1982,6 +1982,19 @@ def live_compose_services(compose: object, reason: str) -> list[str]:
     return names
 
 
+def assert_compose_matches_authority(
+    mode: Any,
+    inventory: dict[str, Any],
+    authority: dict[str, Any],
+    mode_source: str,
+    override_path: pathlib.Path,
+) -> None:
+    try:
+        mode.assert_compose_matches(inventory, authority, mode_source, override_path)
+    except mode.Reject as error:
+        reject(str(error))
+
+
 def assert_live_teagramd_matches_authority(
     mode: Any,
     project: str,
@@ -2242,7 +2255,8 @@ def run_current_cutover(args: argparse.Namespace) -> None:
         local_compose, local_compose_path = read_compose_render(
             checkout, output_dir, "local", local_env
         )
-        mode.assert_compose_matches(
+        assert_compose_matches_authority(
+            mode,
             mode.compose_inventory(local_compose, checkout),
             previous,
             os.path.realpath(checkout / ".state" / "blob-mode"),
@@ -2274,7 +2288,8 @@ def run_current_cutover(args: argparse.Namespace) -> None:
                 reject("compose-volumes-invalid")
             s3_volumes[name] = value
         s3_record["volumes"] = s3_volumes
-        mode.assert_compose_matches(
+        assert_compose_matches_authority(
+            mode,
             mode.compose_inventory(candidate_compose, checkout),
             s3_record,
             os.path.realpath(checkout / ".state" / "blob-mode"),
@@ -2573,7 +2588,8 @@ def run_simple_recovery(args: argparse.Namespace) -> None:
         if s3_compose.get("name") != project:
             reject("compose-project-invalid")
         s3_services = live_compose_services(s3_compose, "s3-compose-invalid")
-        mode.assert_compose_matches(
+        assert_compose_matches_authority(
+            mode,
             mode.compose_inventory(s3_compose, checkout),
             previous,
             os.path.realpath(checkout / ".state" / "blob-mode"),
@@ -2591,7 +2607,8 @@ def run_simple_recovery(args: argparse.Namespace) -> None:
         local_record = dict(previous)
         local_record["outcome"] = "recovered-local"
         local_record["backend"] = {"kind": "local", "dir": mode.BLOB_TARGET}
-        mode.assert_compose_matches(
+        assert_compose_matches_authority(
+            mode,
             mode.compose_inventory(local_compose, checkout),
             local_record,
             os.path.realpath(checkout / ".state" / "blob-mode"),
@@ -2886,7 +2903,8 @@ def run_cutover(args: argparse.Namespace) -> None:
         if not isinstance(local_compose, dict) or not isinstance(local_compose.get("services"), dict):
             reject("compose-render-invalid")
         local_inventory = mode.compose_inventory(local_compose, checkout)
-        mode.assert_compose_matches(
+        assert_compose_matches_authority(
+            mode,
             local_inventory,
             records[-1],
             os.path.realpath(checkout / ".state" / "blob-mode"),
@@ -3148,8 +3166,8 @@ def run_recovery(args: argparse.Namespace) -> None:
             reject("compose-render-invalid")
         write_synced(output_dir / "s3-compose.json", s3_render_bytes)
         s3_inventory = mode.compose_inventory(s3_compose, checkout)
-        mode.assert_compose_matches(
-            s3_inventory, previous, os.path.realpath(checkout / ".state" / "blob-mode"), checkout / "docker-compose.override.yml"
+        assert_compose_matches_authority(
+            mode, s3_inventory, previous, os.path.realpath(checkout / ".state" / "blob-mode"), checkout / "docker-compose.override.yml"
         )
         project = s3_compose.get("name")
         if not isinstance(project, str) or re.fullmatch(r"[a-z0-9][a-z0-9_-]*", project) is None:
@@ -3188,8 +3206,8 @@ def run_recovery(args: argparse.Namespace) -> None:
         local_record = dict(previous)
         local_record["outcome"] = "recovered-local"
         local_record["backend"] = {"kind": "local", "dir": mode.BLOB_TARGET}
-        mode.assert_compose_matches(
-            local_inventory, local_record, os.path.realpath(checkout / ".state" / "blob-mode"), checkout / "docker-compose.override.yml"
+        assert_compose_matches_authority(
+            mode, local_inventory, local_record, os.path.realpath(checkout / ".state" / "blob-mode"), checkout / "docker-compose.override.yml"
         )
         local_services = sorted(
             name for name in local_compose["services"] if name.startswith("teagramd")

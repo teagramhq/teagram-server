@@ -50,6 +50,19 @@ class BlobModeStateTests(unittest.TestCase):
         }
         self.override = pathlib.Path("/dev/null")
 
+    def test_private_rustfs_network_name_comes_from_rustfs_volume(self) -> None:
+        record = {
+            "volumes": {
+                "tgblobs": "teagram-server_tgblobs",
+                "rustfsdata": "candidate-checkout_rustfsdata",
+            },
+        }
+
+        self.assertEqual(
+            blob_mode.rustfs_private_network_name(record),
+            "candidate-checkout_rustfs_private",
+        )
+
     def local_compose(self, *, proxy_guard: bool = True) -> dict[str, object]:
         def service(name: str, guarded: bool = True) -> dict[str, object]:
             volumes: list[dict[str, object]] = [
