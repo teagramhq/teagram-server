@@ -15,7 +15,8 @@ access to trusted operators, and keep encrypted backups off the host.
 - [Docker Engine](https://docs.docker.com/engine/install/), Go 1.27.1 or
   newer from the [Go install guide](https://go.dev/doc/install), GNU make,
   Atlas (see the [migration guide](migrations.md)), Git, OpenSSL, and Caddy 2
-  from the [Caddy install guide](https://caddyserver.com/docs/install).
+  from the [Caddy install guide](https://caddyserver.com/docs/install), plus
+  HAProxy 2.8 or newer from your Linux distribution.
 - Inbound TCP ports 80 and 443 for ACME certificate issuance and HTTPS/WSS.
   Port 2443 is also needed for clients using the direct MTProto TCP transport.
 - A Teagram client configured to use this server. Teagram Web discovers a
@@ -104,9 +105,11 @@ umask 077
     "TG_RSA_KEY_PATH=/var/lib/teagram/server_key.pem" \
     "TG_BLOB_DIR=/var/lib/teagram/blobs" \
     "TG_PUBLIC_LINK_PREFIX=https://server.example.net/" \
-    "TG_LISTEN_ADDR=:2443" \
+    "TG_LISTEN_ADDR=127.0.0.1:2445" \
     "TG_ADVERTISE_ADDR=server.example.net:2443" \
     "TG_WEBSOCKET_LISTEN_ADDR=127.0.0.1:2444" \
+    "TG_CLIENT_ADDR_TRUST=proxy-v2" \
+    "TG_CLIENT_ADDR_PROXY_CIDRS=127.0.0.1/32,::1/128" \
     "TG_WEBSOCKET_ALLOWED_ORIGINS=https://web.example.net" \
     "TG_REGISTRATION=open" \
     "TG_LOG_LOGIN_CODES=false"
@@ -161,40 +164,71 @@ ReadWritePaths=/var/lib/teagram
 WantedBy=multi-user.target
 ```
 
-## Put HTTPS and WSS in front of the server
+## Put the client transports behind proxies
 
 Caddy obtains and renews a certificate for the public host name. Add this site
 to the Caddyfile so that discovery and WebSocket requests reach the server's
-loopback-only listener:
+loopback-only listener. The HTTP transport sends a PROXY protocol v2 header so
+the server can apply per-IP limits to each Web client's address instead of
+Caddy's loopback address:
 
 ```caddyfile
 server.example.net {
     @teagram path /apiws /.well-known/teagramd/client /.well-known/telegramd/client
-    reverse_proxy @teagram 127.0.0.1:2444
+    reverse_proxy @teagram 127.0.0.1:2444 {
+        transport http {
+            keepalive off
+            proxy_protocol v2
+        }
+    }
 }
 ```
+
+The same address-trust setting applies to the direct MTProto listener. Add this
+TCP listener to the distribution's existing `/etc/haproxy/haproxy.cfg`, keeping
+its `global` and `defaults` sections, to accept public connections on port 2443
+and forward them, with their client addresses, to teagramd's loopback listener:
+
+```haproxy
+listen teagramd_mtproto
+    mode tcp
+    bind ipv4@:2443
+    bind ipv6@:2443
+    timeout connect 5s
+    timeout client 1h
+    timeout server 1h
+    server teagramd 127.0.0.1:2445 send-proxy-v2
+```
+
+Keep the proxy allowlist limited to the local proxy addresses. Do not expose
+teagramd's port 2445 or 2444 directly.
 
 Before starting `teagramd`, use the host or cloud firewall to restrict inbound
 TCP ports 443 and 2443 to the operator's public IP addresses, including both
 IPv4 and IPv6 if the host has both. Keep this restriction until the first
-account is created and registration is closed. Then load the Caddy configuration
-and enable the server:
+account is created and registration is closed. Validate the HAProxy
+configuration, then load Caddy and enable both proxies and the server:
 
 ```sh
-sudo systemctl reload caddy
+sudo haproxy -c -f /etc/haproxy/haproxy.cfg
 sudo systemctl daemon-reload
+sudo systemctl enable --now haproxy
+sudo systemctl reload caddy
 sudo systemctl enable --now teagramd
 ```
 
 The WebSocket listener advertises `wss://server.example.net/apiws` from the
 host in `TG_ADVERTISE_ADDR`. Caddy terminates TLS on port 443. Port 2443 is the
-separate direct MTProto TCP listener for native clients; MTProto encrypts that
-transport, but it is not TLS. Keep the database port private.
+public MTProto TCP endpoint for native clients; HAProxy forwards it to the
+loopback-only teagramd listener. MTProto encrypts that transport, but it is not
+TLS. Keep the database port private.
 
 Check the service and the public discovery document:
 
 ```sh
 sudo systemctl is-active teagramd
+sudo systemctl is-active haproxy
+sudo ss -lntp '( sport = :2443 )'
 curl --fail --show-error https://server.example.net/.well-known/telegramd/client
 sudo journalctl -u teagramd --since=-10m
 ```
