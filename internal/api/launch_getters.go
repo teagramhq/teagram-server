@@ -11,11 +11,11 @@ import (
 )
 
 func decodeLaunchGetterRequest(r *mtproto.Request, req bin.Decoder) error {
-	if err := req.Decode(r.Buf); err != nil {
-		return errMethodNotImpl
-	}
 	if r.UserID == 0 {
 		return errAuthKeyUnreg
+	}
+	if err := req.Decode(r.Buf); err != nil {
+		return errMethodNotImpl
 	}
 	return nil
 }
@@ -135,14 +135,6 @@ func (h *handlers) handleGetFeaturedEmojiStickers(r *mtproto.Request) (bin.Encod
 		Sets:   []tg.StickerSetCoveredClass{},
 		Unread: []int64{},
 	}, nil
-}
-
-func (h *handlers) handleGetSavedGifs(r *mtproto.Request) (bin.Encoder, error) {
-	var req tg.MessagesGetSavedGifsRequest
-	if err := decodeLaunchGetterRequest(r, &req); err != nil {
-		return nil, err
-	}
-	return &tg.MessagesSavedGifs{Hash: 0, Gifs: []tg.DocumentClass{}}, nil
 }
 
 func (h *handlers) handleGetEmojiGroups(r *mtproto.Request) (bin.Encoder, error) {

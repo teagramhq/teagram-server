@@ -479,8 +479,9 @@ func dispatchStartup(t *testing.T, h mtproto.Handler, method startupMethod, user
 }
 
 func TestStartupMethodsThroughDispatcher(t *testing.T) {
+	s := openStore(t)
 	h := api.New(
-		nil,
+		s,
 		2,
 		&tg.Config{},
 		slog.New(slog.DiscardHandler),

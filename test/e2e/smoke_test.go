@@ -118,6 +118,10 @@ func TestSmoke(t *testing.T) {
 		t.Parallel()
 		testSmokeUploadMedia(t)
 	})
+	t.Run("saved-gifs", func(t *testing.T) {
+		t.Parallel()
+		testSmokeSavedGIFs(t)
+	})
 	t.Run("album-media", func(t *testing.T) {
 		t.Parallel()
 		testSmokeAlbumMedia(t)

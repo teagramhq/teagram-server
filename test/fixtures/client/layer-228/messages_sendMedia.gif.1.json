@@ -1,0 +1,43 @@
+{
+  "layer": 228,
+  "client": "gotd/td v0.162.0",
+  "source": "source-derived/messages_sendMedia.gif.1.txt",
+  "method": "messages.sendMedia",
+  "request": {
+    "type": "messages.sendMedia",
+    "flags": 0,
+    "fields": {
+      "peer": {
+        "type": "inputPeerUser",
+        "fields": {
+          "user_id": "<N>",
+          "access_hash": "<N>"
+        }
+      },
+      "media": {
+        "type": "inputMediaUploadedDocument",
+        "flags": 0,
+        "fields": {
+          "file": {
+            "type": "inputFile",
+            "fields": {
+              "id": "<N>",
+              "parts": 1,
+              "name": "smoke.gif",
+              "md5_checksum": "REDACTED"
+            }
+          },
+          "mime_type": "video/mp4",
+          "attributes": [
+            {
+              "type": "documentAttributeAnimated",
+              "fields": {}
+            }
+          ]
+        }
+      },
+      "message": "fixture animated GIF",
+      "random_id": "<N>"
+    }
+  }
+}

@@ -699,6 +699,12 @@ type RegistrationInvite struct {
 	RevokedAt    pgtype.Timestamptz
 }
 
+type SavedGif struct {
+	OwnerID int64
+	FileID  int64
+	SavedAt pgtype.Timestamptz
+}
+
 type SecretChat struct {
 	ID             int32
 	AdminID        int64
