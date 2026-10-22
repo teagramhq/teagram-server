@@ -53,6 +53,12 @@ var (
 	// errPasswordHashInvalid rejects a bad SRP proof (wrong password) on
 	// checkPassword, updatePasswordSettings, and getPasswordSettings.
 	errPasswordHashInvalid = rpcErr(400, "PASSWORD_HASH_INVALID")
+	// errPasswordRecoveryNotAvailable tells clients that automated email recovery
+	// is not available, without disclosing whether the account has a stored email.
+	errPasswordRecoveryNotAvailable = rpcErr(400, "PASSWORD_RECOVERY_NA")
+	// errRecoveryCodeInvalid rejects recovery-code validation and password reset;
+	// this server never issues a recovery code.
+	errRecoveryCodeInvalid = rpcErr(400, "CODE_INVALID")
 	// errSRPIDInvalid rejects an unknown, expired, or already-consumed SRP
 	// challenge id.
 	errSRPIDInvalid = rpcErr(400, "SRP_ID_INVALID")
