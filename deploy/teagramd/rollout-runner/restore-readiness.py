@@ -3087,33 +3087,52 @@ class Drill(Docker):
 
     def remove_interrupted_auth_key_client(self, record: dict[str, Any], signum: int) -> None:
         signal_name = "SIGINT" if signum == signal.SIGINT else "SIGTERM"
-        kill_status, _ = self.cleanup_call(
-            ["kill", f"--signal={signal_name}", record["id"]], timeout=10
+        def cleanup_call(args: list[str], timeout: int) -> tuple[int, bytes]:
+            try:
+                return self.cleanup_call(args, timeout=timeout)
+            except DrillFailure:
+                print(f"restore readiness signal cleanup failed during Docker {args[0]}", file=sys.stderr)
+                raise
+
+        kill_status, _ = cleanup_call(["kill", f"--signal={signal_name}", record["id"]], 10)
+        wait_status, wait_output = cleanup_call(["wait", record["id"]], 15)
+        inspect_status, inspect_output = cleanup_call(
+            ["inspect", "--format", "{{.State.Running}}", record["id"]], 10
         )
-        wait_status, wait_output = self.cleanup_call(["wait", record["id"]], timeout=15)
-        inspect_status, inspect_output = self.cleanup_call(
-            ["inspect", "--format", "{{.State.Running}}", record["id"]], timeout=10
-        )
+        wait_exit_valid = wait_output.strip().isdigit()
+        stopped = inspect_output.strip() == b"false"
         if (
             kill_status != 0
             and wait_status == 0
             and inspect_status == 0
-            and inspect_output.strip() == b"false"
+            and stopped
         ):
             kill_status = 0
         if (
             kill_status != 0
             or wait_status != 0
-            or not wait_output.strip().isdigit()
+            or not wait_exit_valid
             or inspect_status != 0
-            or inspect_output.strip() != b"false"
+            or not stopped
         ):
+            print(
+                "restore readiness signal cleanup failed while stopping Docker client "
+                f"(kill_status={kill_status}, wait_status={wait_status}, "
+                f"wait_exit_valid={wait_exit_valid}, inspect_status={inspect_status}, stopped={stopped})",
+                file=sys.stderr,
+            )
             raise DrillFailure("cleanup", "cleanup_failure")
-        remove_status, _ = self.cleanup_call(["rm", record["id"]], timeout=10)
+        remove_status, _ = cleanup_call(["rm", record["id"]], 10)
         if remove_status != 0:
+            print("restore readiness signal cleanup failed during Docker rm", file=sys.stderr)
             raise DrillFailure("cleanup", "cleanup_failure")
-        list_status, output = self.cleanup_call(["ps", "--all", "--quiet", "--no-trunc"], timeout=10)
+        list_status, output = cleanup_call(["ps", "--all", "--quiet", "--no-trunc"], 10)
         if list_status != 0 or record["id"].encode() in output.splitlines():
+            print(
+                "restore readiness signal cleanup failed verifying Docker client removal "
+                f"(list_status={list_status}, still_listed={record['id'].encode() in output.splitlines()})",
+                file=sys.stderr,
+            )
             raise DrillFailure("cleanup", "cleanup_failure")
         record["removed"] = True
         self.save()

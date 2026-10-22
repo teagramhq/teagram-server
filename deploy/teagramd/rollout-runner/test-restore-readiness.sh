@@ -209,7 +209,7 @@ fi
 
 build_inputs
 preflight_stage="run auth key signal drill"
-if auth_clear_signal_report=$(run_drill --fault-test auth-clear-signal 2>/dev/null); then
+if auth_clear_signal_report=$(run_drill --fault-test auth-clear-signal); then
   printf 'restore readiness signal fault unexpectedly passed: %s\n' "$auth_clear_signal_report" >&2
   emit_preflight_failure
 fi
