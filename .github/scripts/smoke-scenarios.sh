@@ -26,6 +26,7 @@ SMOKE_SCENARIOS=(
   unread-acknowledgements
   basic-group
   basic-group-reactions
+  channel-reactions
   basic-group-photo
   delete-basic-group
   delete-history
