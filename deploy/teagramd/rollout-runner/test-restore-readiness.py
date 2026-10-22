@@ -360,6 +360,21 @@ class RestoreReadinessContractTests(unittest.TestCase):
         self.assertEqual(inventory["base_commit"], "bdb89970bbd40fb57fdb89f3aa8fafb78925ce93")
         self.assertEqual(inventory["schema_head"], RESTORE_READINESS.HEAD_SCHEMA)
         self.assertEqual(
+            inventory["trigger_tables"],
+            [
+                "public.auth_keys",
+                "public.browser_acceptance_binding_evidence",
+                "public.notify_settings_difference_cursors",
+                "public.srp_challenges",
+            ],
+        )
+        for table in inventory["trigger_tables"]:
+            self.assertIn(f"'{table}'::regclass", RESTORE_READINESS.AUTH_KEY_INVENTORY_SQL)
+        self.assertIn(
+            "tg.tgrelid IN (SELECT relation FROM clearing_relations)",
+            RESTORE_READINESS.AUTH_KEY_INVENTORY_SQL,
+        )
+        self.assertEqual(
             {item["name"] for item in inventory["foreign_keys"]},
             {
                 "auth_keys_pending_user_id_fkey",
@@ -430,6 +445,62 @@ class RestoreReadinessContractTests(unittest.TestCase):
         self.assertEqual(wrong_target.exception.category, "isolation_refusal")
         drill.sql.assert_not_called()
         drill.auth_key_clear_client.assert_not_called()
+
+    def test_dependent_table_trigger_refuses_auth_key_clear_before_write(self) -> None:
+        expected_inventory = RESTORE_READINESS.load_auth_key_inventory()
+        for table in expected_inventory["trigger_tables"]:
+            if table == "public.auth_keys":
+                continue
+            with self.subTest(table=table):
+                actual_inventory = json.loads(json.dumps(expected_inventory))
+                actual_inventory["triggers"].append(
+                    {"name": "unexpected_dependent_trigger", "table": table}
+                )
+                target = {"id": "a" * 64, "role": "target_postgres", "removed": False}
+                marker = {
+                    "target_container_id": target["id"],
+                    "migration_head": RESTORE_READINESS.HEAD_SCHEMA,
+                    "database_identity": "fixture-db",
+                    "table_counts": ["fixture-counts"],
+                }
+                drill = object.__new__(RESTORE_READINESS.Drill)
+                drill.phase = "auth_key_clearing"
+                drill.databases = {"target": target}
+                drill.manifest = {"containers": [target], "processes": []}
+                drill.post_restore_marker = marker
+                drill.auth_keys_cleared = False
+                drill.synthetic_auth_key_ids = (-101, -202, -303)
+                drill.run_dir = Path("/unused")
+                drill.private_read = Mock(return_value=json.dumps(marker).encode())
+                drill.attest_container = Mock(return_value={"State": {"Running": True}})
+                drill.table_counts = Mock(return_value=([], marker["table_counts"]))
+                drill.auth_key_clear_client = Mock()
+
+                def read_sql(_target: Any, statement: str, _phase: str, **_kwargs: Any) -> str:
+                    if statement == "SELECT current_database();":
+                        return "teagram"
+                    if statement == RESTORE_READINESS.MIGRATION_HEAD_SQL:
+                        return RESTORE_READINESS.HEAD_SCHEMA
+                    if statement == RESTORE_READINESS.DATABASE_IDENTITY_SQL:
+                        return marker["database_identity"]
+                    if statement == RESTORE_READINESS.AUTH_KEY_INVENTORY_SQL:
+                        return json.dumps(actual_inventory)
+                    raise AssertionError(f"unexpected query before inventory refusal: {statement}")
+
+                drill.sql = Mock(side_effect=read_sql)
+
+                with self.assertRaises(RESTORE_READINESS.DrillFailure) as failure:
+                    drill.clear_auth_keys(target)
+
+                self.assertEqual(failure.exception.phase, "auth_key_clearing")
+                self.assertEqual(failure.exception.category, "schema_failure")
+                drill.auth_key_clear_client.assert_not_called()
+                self.assertTrue(
+                    all(
+                        call.args[1].lstrip().upper().startswith(("SELECT", "WITH"))
+                        for call in drill.sql.call_args_list
+                    )
+                )
 
     def test_interrupted_auth_key_client_is_cancelled_not_terminated(self) -> None:
         # psql is PID 1 in the clearer, so it ignores SIGTERM; only SIGINT (query cancel) or SIGKILL stops it.

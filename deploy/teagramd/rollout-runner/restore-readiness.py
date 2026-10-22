@@ -102,6 +102,11 @@ SELECT current_database() || '|' || current_setting('server_version_num') || '|'
 AUTH_KEY_INVENTORY_SQL = r"""
 WITH auth_keys AS (
   SELECT 'public.auth_keys'::regclass AS relation
+), clearing_relations AS (
+  SELECT relation FROM auth_keys
+  UNION SELECT 'public.srp_challenges'::regclass
+  UNION SELECT 'public.notify_settings_difference_cursors'::regclass
+  UNION SELECT 'public.browser_acceptance_binding_evidence'::regclass
 ), foreign_keys AS (
   SELECT con.conname AS name,
          jsonb_build_object(
@@ -165,10 +170,19 @@ WITH auth_keys AS (
   JOIN pg_namespace AS table_ns ON table_ns.oid = relation.relnamespace
   JOIN pg_proc AS proc ON proc.oid = tg.tgfoid
   JOIN pg_namespace AS function_ns ON function_ns.oid = proc.pronamespace
-  WHERE tg.tgrelid = (SELECT relation FROM auth_keys)
+  WHERE tg.tgrelid IN (SELECT relation FROM clearing_relations)
     AND NOT tg.tgisinternal
 )
 SELECT jsonb_build_object(
+  'trigger_tables', COALESCE((
+    SELECT jsonb_agg(
+      format('%I.%I', table_ns.nspname, relation.relname)
+      ORDER BY table_ns.nspname, relation.relname
+    )
+    FROM clearing_relations
+    JOIN pg_class AS relation ON relation.oid = clearing_relations.relation
+    JOIN pg_namespace AS table_ns ON table_ns.oid = relation.relnamespace
+  ), '[]'::jsonb),
   'foreign_keys', COALESCE((SELECT jsonb_agg(entry ORDER BY name) FROM foreign_keys), '[]'::jsonb),
   'triggers', COALESCE((SELECT jsonb_agg(entry ORDER BY name) FROM triggers), '[]'::jsonb)
 )::text;
@@ -216,6 +230,7 @@ def load_auth_key_inventory() -> dict[str, Any]:
         or inventory.get("schema_head") != HEAD_SCHEMA
         or not isinstance(inventory.get("foreign_keys"), list)
         or not isinstance(inventory.get("triggers"), list)
+        or not isinstance(inventory.get("trigger_tables"), list)
     ):
         raise ValueError("auth-key inventory is invalid")
     return inventory
@@ -2975,7 +2990,7 @@ class Drill(Docker):
             actual = json.loads(self.sql(database, AUTH_KEY_INVENTORY_SQL, phase))
         except (ValueError, json.JSONDecodeError) as exc:
             raise DrillFailure(phase, "schema_failure") from exc
-        expected_inventory = {key: expected[key] for key in ("foreign_keys", "triggers")}
+        expected_inventory = {key: expected[key] for key in ("trigger_tables", "foreign_keys", "triggers")}
         if actual != expected_inventory:
             raise DrillFailure(phase, "schema_failure")
 
