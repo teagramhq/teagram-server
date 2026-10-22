@@ -266,7 +266,7 @@ acquire_runtime_lock() {
   lock_mode="$(stat -c '%a' -- "$lock_file" 2>/dev/null)" || return 1
   [[ "$lock_mode" == "666" ]] || return 1
 
-  exec 9<>"$lock_file" || return 1
+  exec 9<"$lock_file" || return 1
   flock -n 9 || return 2
 }
 

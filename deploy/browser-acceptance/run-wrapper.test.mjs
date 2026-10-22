@@ -516,10 +516,9 @@ function lockFdFlags(stderr) {
   return Number.parseInt(match[1], 8);
 }
 
-function assertLockFdIsReadWriteWithoutAppend(stderr) {
+function assertLockFdIsReadOnly(stderr) {
   const flags = lockFdFlags(stderr);
-  assert.equal(flags & 0o3, 0o2, "lock descriptor should be opened read-write");
-  assert.equal(flags & 0o2000, 0, "lock descriptor should not use O_APPEND");
+  assert.equal(flags & 0o3, 0o0, "lock descriptor should be opened read-only");
 }
 
 async function invokeBusyboxPhase(t, lane, { phase = "", mode = "valid", status = 1, outputMode = "standard" } = {}) {
@@ -1610,7 +1609,7 @@ test("a killed lock holder leaves a reusable shared lock file", async (t) => {
   assert.equal(result.stdout, `${blockedResult}\n`);
 });
 
-test("browser lock opens a sticky /tmp inode read-write without append", async (t) => {
+test("browser lock opens an existing sticky /tmp inode read-only", async (t) => {
   const paths = await setup(t);
   const lockFile = join("/tmp", `teagram-browser-acceptance-${process.pid}-${randomUUID()}.lock`);
   t.after(() => rm(lockFile, { force: true }));
@@ -1626,10 +1625,30 @@ test("browser lock opens a sticky /tmp inode read-write without append", async (
   const result = invoke(paths, ["blocked-control", "--manifest", missingManifest]);
   assert.equal(result.status, 1);
   assert.equal(result.stdout, '{"status":"error","code":"manifest-invalid"}\n');
-  assertLockFdIsReadWriteWithoutAppend(result.stderr);
+  assertLockFdIsReadOnly(result.stderr);
 });
 
-test("browser acceptance reports contention and reuses a sticky /tmp lock across UIDs", async (t) => {
+test("browser acceptance reports contention and reuses a sticky /tmp lock across UIDs with protected_regular", async (t) => {
+  if (process.platform !== "linux") {
+    t.skip("cross-UID fixture requires Linux fs.protected_regular");
+    return;
+  }
+  let protectedRegular;
+  try {
+    protectedRegular = Number.parseInt((await readFile("/proc/sys/fs/protected_regular", "utf8")).trim(), 10);
+  } catch {
+    const message = "cross-UID fixture requires readable /proc/sys/fs/protected_regular";
+    if (process.env.CI) assert.fail(message);
+    t.skip(message);
+    return;
+  }
+  if (!Number.isInteger(protectedRegular) || protectedRegular < 1) {
+    const message = "cross-UID fixture requires fs.protected_regular >= 1";
+    if (process.env.CI) assert.fail(message);
+    t.skip(message);
+    return;
+  }
+
   const paths = await setup(t);
   const lockFile = join("/tmp", `teagram-browser-acceptance-${process.pid}-${randomUUID()}.lock`);
   const fixtureRoot = join("/tmp", `teagram-browser-acceptance-cross-uid-${process.pid}-${randomUUID()}`);
@@ -1661,7 +1680,9 @@ test("browser acceptance reports contention and reuses a sticky /tmp lock across
       env: { PATH: "/usr/bin:/bin" },
     });
     if (available.status !== 0 || available.stdout.trim() !== String(uid)) {
-      t.skip("cross-UID fixture requires root or passwordless sudo with setpriv");
+      const message = "cross-UID fixture requires root or passwordless sudo with setpriv";
+      if (process.env.CI) assert.fail(message);
+      t.skip(message);
       return;
     }
   }
@@ -1708,7 +1729,7 @@ test("browser acceptance reports contention and reuses a sticky /tmp lock across
       });
     assert.equal(contention.status, 1);
     assert.equal(contention.stdout, '{"status":"error","code":"runtime-busy"}\n');
-    assertLockFdIsReadWriteWithoutAppend(contention.stderr);
+    assertLockFdIsReadOnly(contention.stderr);
 
     holder.stdin.end("release\n");
     assert.deepEqual(await closed, { status: 0, signal: null });
@@ -1721,7 +1742,7 @@ test("browser acceptance reports contention and reuses a sticky /tmp lock across
       });
     assert.equal(reuse.status, 1);
     assert.equal(reuse.stdout, '{"status":"error","code":"manifest-invalid"}\n');
-    assertLockFdIsReadWriteWithoutAppend(reuse.stderr);
+    assertLockFdIsReadOnly(reuse.stderr);
   } finally {
     if (holder.exitCode === null && holder.signalCode === null) {
       const didClose = closed.then(() => true);
