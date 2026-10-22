@@ -189,3 +189,202 @@ func testSmokeBasicGroupReactions(t *testing.T) {
 	}
 	readCount(0)
 }
+
+func testSmokeChannelReactions(t *testing.T) {
+	t.Helper()
+	f := newSmokeFixture(t)
+	const phoneA, phoneB = "+15551047021", "+15551047022"
+	seedSmokeUsers(t, f, phoneA, phoneB)
+	a, b := newSmokeClient(t, f, "Channel reaction creator", phoneA), newSmokeClient(t, f, "Channel reaction member", phoneB)
+
+	for _, megagroup := range []bool{false, true} {
+		name := "broadcast"
+		if megagroup {
+			name = "megagroup"
+		}
+		t.Run(name, func(t *testing.T) {
+			var channelID int64
+			if megagroup {
+				channelID = createMegagroup(t, f.ctx, a.cmds, "Megagroup reactions")
+			} else {
+				channelID = createBroadcastChannel(t, f.ctx, a.cmds, "Broadcast reactions")
+			}
+			invite := exportChannelInvite(t, f.ctx, a.id, a.cmds, channelID)
+			if joined := importChannelInvite(t, f.ctx, b.cmds, invite); joined != channelID {
+				t.Fatalf("joined channel = %d, want %d", joined, channelID)
+			}
+			peerA, peerB := peerChannel(a.id, channelID), peerChannel(b.id, channelID)
+
+			if err := b.call(f.ctx, func(ctx context.Context, client *tg.Client) error {
+				full, err := client.ChannelsGetFullChannel(ctx, inputChannel(b.id, channelID))
+				if err != nil {
+					return err
+				}
+				info, ok := full.FullChat.(*tg.ChannelFull)
+				if !ok {
+					return fmt.Errorf("full channel = %T, want *tg.ChannelFull", full.FullChat)
+				}
+				available, ok := info.GetAvailableReactions()
+				if !ok {
+					return errors.New("default channel full info omitted available_reactions")
+				}
+				if _, ok := available.(*tg.ChatReactionsAll); !ok {
+					return fmt.Errorf("default channel reactions = %T, want *tg.ChatReactionsAll", available)
+				}
+				return nil
+			}); err != nil {
+				t.Fatalf("read default channel reactions: %v", err)
+			}
+
+			const messageText = "channel reaction smoke post"
+			var messageID int
+			if err := a.call(f.ctx, func(ctx context.Context, client *tg.Client) error {
+				result, err := client.MessagesSendMessage(ctx, &tg.MessagesSendMessageRequest{
+					Peer: peerA, Message: messageText, RandomID: 1047021 + channelID%1000,
+				})
+				if err != nil {
+					return err
+				}
+				updates, ok := result.(*tg.Updates)
+				if !ok {
+					return fmt.Errorf("channel post result = %T, want *tg.Updates", result)
+				}
+				for _, update := range updates.Updates {
+					created, ok := update.(*tg.UpdateNewChannelMessage)
+					if !ok {
+						continue
+					}
+					message, ok := created.Message.(*tg.Message)
+					if ok && message.Message == messageText {
+						messageID = message.ID
+						return nil
+					}
+				}
+				return errors.New("channel post result omitted the new post")
+			}); err != nil {
+				t.Fatalf("send channel reaction target: %v", err)
+			}
+
+			if err := b.call(f.ctx, func(ctx context.Context, client *tg.Client) error {
+				result, err := client.MessagesSendReaction(ctx, &tg.MessagesSendReactionRequest{
+					Peer: peerB, MsgID: messageID,
+					Reaction: []tg.ReactionClass{&tg.ReactionEmoji{Emoticon: "🔥"}},
+				})
+				if err != nil {
+					return err
+				}
+				updates, ok := result.(*tg.Updates)
+				if !ok || len(updates.Updates) != 1 {
+					return fmt.Errorf("sendReaction result = %#v, want one reaction update", result)
+				}
+				update, ok := updates.Updates[0].(*tg.UpdateMessageReactions)
+				if !ok {
+					return fmt.Errorf("sendReaction update = %T, want *tg.UpdateMessageReactions", updates.Updates[0])
+				}
+				return checkSmokeChannelReactionCounts(update.Reactions, 1, true)
+			}); err != nil {
+				t.Fatalf("member reacts to channel post: %v", err)
+			}
+
+			readAsA := func(wantCount int) func(context.Context, *tg.Client) error {
+				return func(ctx context.Context, client *tg.Client) error {
+					result, err := client.MessagesGetMessagesReactions(ctx, &tg.MessagesGetMessagesReactionsRequest{
+						Peer: peerA, ID: []int{messageID},
+					})
+					if err != nil {
+						return err
+					}
+					updates, ok := result.(*tg.Updates)
+					if !ok || len(updates.Updates) != 1 {
+						return fmt.Errorf("getMessagesReactions = %#v, want one update", result)
+					}
+					update, ok := updates.Updates[0].(*tg.UpdateMessageReactions)
+					if !ok {
+						return fmt.Errorf("reaction update = %T, want *tg.UpdateMessageReactions", updates.Updates[0])
+					}
+					return checkSmokeChannelReactionCounts(update.Reactions, wantCount, false)
+				}
+			}
+			if err := a.call(f.ctx, readAsA(1)); err != nil {
+				t.Fatalf("creator reads channel reaction count: %v", err)
+			}
+
+			for _, source := range []string{"history", "channels.getMessages"} {
+				if err := a.call(f.ctx, func(ctx context.Context, client *tg.Client) error {
+					var result tg.MessagesMessagesClass
+					var err error
+					if source == "history" {
+						result, err = client.MessagesGetHistory(ctx, &tg.MessagesGetHistoryRequest{Peer: peerA, Limit: 10})
+					} else {
+						result, err = client.ChannelsGetMessages(ctx, &tg.ChannelsGetMessagesRequest{
+							Channel: inputChannel(a.id, channelID),
+							ID:      []tg.InputMessageClass{&tg.InputMessageID{ID: messageID}},
+						})
+					}
+					if err != nil {
+						return err
+					}
+					page, ok := result.(*tg.MessagesChannelMessages)
+					if !ok {
+						return fmt.Errorf("%s result = %T, want *tg.MessagesChannelMessages", source, result)
+					}
+					for _, item := range page.Messages {
+						message, ok := item.(*tg.Message)
+						if ok && message.ID == messageID {
+							reactions, ok := message.GetReactions()
+							if !ok {
+								return fmt.Errorf("%s message omitted reactions", source)
+							}
+							return checkSmokeChannelReactionCounts(reactions, 1, false)
+						}
+					}
+					return fmt.Errorf("%s omitted message %d", source, messageID)
+				}); err != nil {
+					t.Fatalf("read channel post through %s: %v", source, err)
+				}
+			}
+
+			if err := b.call(f.ctx, func(ctx context.Context, client *tg.Client) error {
+				result, err := client.MessagesSendReaction(ctx, &tg.MessagesSendReactionRequest{Peer: peerB, MsgID: messageID})
+				if err != nil {
+					return err
+				}
+				updates, ok := result.(*tg.Updates)
+				if !ok || len(updates.Updates) != 1 {
+					return fmt.Errorf("clear reaction result = %#v, want one reaction update", result)
+				}
+				update, ok := updates.Updates[0].(*tg.UpdateMessageReactions)
+				if !ok {
+					return fmt.Errorf("clear reaction update = %T, want *tg.UpdateMessageReactions", updates.Updates[0])
+				}
+				return checkSmokeChannelReactionCounts(update.Reactions, 0, false)
+			}); err != nil {
+				t.Fatalf("clear channel reaction: %v", err)
+			}
+			if err := a.call(f.ctx, readAsA(0)); err != nil {
+				t.Fatalf("creator reads cleared channel reaction: %v", err)
+			}
+		})
+	}
+}
+
+func checkSmokeChannelReactionCounts(reactions tg.MessageReactions, wantCount int, chosen bool) error {
+	if wantCount == 0 {
+		if len(reactions.Results) != 0 {
+			return fmt.Errorf("reaction results = %d, want empty", len(reactions.Results))
+		}
+		return nil
+	}
+	if len(reactions.Results) != 1 || reactions.Results[0].Count != wantCount {
+		return fmt.Errorf("reaction results = %+v, want one count of %d", reactions.Results, wantCount)
+	}
+	emoji, ok := reactions.Results[0].Reaction.(*tg.ReactionEmoji)
+	if !ok || emoji.Emoticon != "🔥" {
+		return fmt.Errorf("reaction = %#v, want fire", reactions.Results[0].Reaction)
+	}
+	_, hasChosen := reactions.Results[0].GetChosenOrder()
+	if hasChosen != chosen {
+		return fmt.Errorf("reaction chosen = %v, want %v", hasChosen, chosen)
+	}
+	return nil
+}

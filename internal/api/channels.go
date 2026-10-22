@@ -425,6 +425,12 @@ func (h *handlers) handleGetFullChannel(r *mtproto.Request) (bin.Encoder, error)
 		ChatPhoto:      &tg.PhotoEmpty{},
 		NotifySettings: notifySettings,
 	}
+	availableReactions, err := chatAvailableReactionsToTL(snapshot.AvailableReactions)
+	if err != nil {
+		h.log.Error("get full channel available reactions", "channel_id", channelID, "err", err)
+		return nil, errInternal
+	}
+	full.SetAvailableReactions(availableReactions)
 	if member && snapshot.CurrentPhoto != nil {
 		full.ChatPhoto = h.photoToTL(*snapshot.CurrentPhoto)
 	}
@@ -1352,6 +1358,20 @@ func (h *handlers) channelMessagesWithCountAndCaller(
 		h.log.Error("channel messages files", "user_id", r.UserID, "channel_id", channelID, "err", err)
 		return nil, errInternal
 	}
+	reactionIDs := make([]int64, 0, len(msgs))
+	for _, m := range msgs {
+		if !m.Deleted && m.Action == store.ChannelMessageActionNone {
+			reactionIDs = append(reactionIDs, m.LocalID)
+		}
+	}
+	channelReactions := map[int64][]store.ChannelReactionCount{}
+	if len(reactionIDs) > 0 {
+		channelReactions, err = h.store.ChannelMessageReactionsByMessageIDs(r.Ctx, channelID, r.UserID, reactionIDs)
+		if err != nil {
+			h.log.Error("channel message reactions", "user_id", r.UserID, "channel_id", channelID, "err", err)
+			return nil, errInternal
+		}
+	}
 	// A page has as many authors as the channel has posters, so the user list is
 	// collected off the batch itself. getReplies includes only authors of returned
 	// replies; channel history also includes the caller as before.
@@ -1365,6 +1385,9 @@ func (h *handlers) channelMessagesWithCountAndCaller(
 		if renderErr != nil {
 			h.log.Error("render channel history message", "user_id", r.UserID, "channel_id", channelID, "local_id", m.LocalID, "err", renderErr)
 			return nil, errInternal
+		}
+		if rendered, ok := message.(*tg.Message); ok && m.Action == store.ChannelMessageActionNone {
+			rendered.SetReactions(channelReactionsToTL(channelReactions[m.LocalID]))
 		}
 		tlMsgs[i] = message
 		if !m.Deleted && !broadcast {

@@ -323,6 +323,12 @@ func tombstoneChannelMessages(
 		if updated != 1 {
 			return 0, 0, fmt.Errorf("tombstone channel message %d: updated %d rows, want 1", localID, updated)
 		}
+		if err := qtx.DeleteChannelMessageReactions(ctx, db.DeleteChannelMessageReactionsParams{
+			ChannelID: channelID,
+			LocalIds:  []int64{localID},
+		}); err != nil {
+			return 0, 0, fmt.Errorf("delete reactions for tombstoned channel message %d: %w", localID, err)
+		}
 		newPts, err := bumpChannelPtsOnly(ctx, qtx, channelID)
 		if err != nil {
 			return 0, 0, fmt.Errorf("bump channel pts for delete %d: %w", localID, err)
@@ -397,6 +403,12 @@ func (s *Store) SweepDeletedChannelPosts(ctx context.Context) (int, bool, error)
 		LocalIds:  localIDs,
 	}); err != nil {
 		return 0, false, fmt.Errorf("tombstone deleted channel posts: %w", err)
+	}
+	if err = qtx.DeleteChannelMessageReactions(ctx, db.DeleteChannelMessageReactionsParams{
+		ChannelID: job.ChannelID,
+		LocalIds:  localIDs,
+	}); err != nil {
+		return 0, false, fmt.Errorf("delete reactions for tombstoned channel posts: %w", err)
 	}
 	updated, err := qtx.AdvanceChannelDeletionCursor(ctx, db.AdvanceChannelDeletionCursorParams{
 		ChannelID:  job.ChannelID,

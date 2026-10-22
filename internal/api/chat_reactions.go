@@ -84,7 +84,7 @@ func (h *handlers) handleSetChatAvailableReactions(r *mtproto.Request) (bin.Enco
 	if err != nil {
 		return nil, err
 	}
-	if peerType != store.PeerTypeChat || peerID <= 0 {
+	if (peerType != store.PeerTypeChat && peerType != store.PeerTypeChannel) || peerID <= 0 {
 		return nil, errPeerIDInvalid
 	}
 	if _, ok := req.GetReactionsLimit(); ok {
@@ -97,7 +97,12 @@ func (h *handlers) handleSetChatAvailableReactions(r *mtproto.Request) (bin.Enco
 	if err != nil {
 		return nil, err
 	}
-	if err = h.store.SetChatAvailableReactions(r.Ctx, peerID, r.UserID, available); err != nil {
+	if peerType == store.PeerTypeChat {
+		err = h.store.SetChatAvailableReactions(r.Ctx, peerID, r.UserID, available)
+	} else {
+		err = h.store.SetChannelAvailableReactions(r.Ctx, peerID, r.UserID, available)
+	}
+	if err != nil {
 		switch {
 		case errors.Is(err, store.ErrNotMember):
 			return nil, errPeerIDInvalid

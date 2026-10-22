@@ -130,6 +130,21 @@ func reactionsToTL(reactions []store.Reaction) tg.MessageReactions {
 	return mr
 }
 
+func channelReactionsToTL(reactions []store.ChannelReactionCount) tg.MessageReactions {
+	mr := tg.MessageReactions{Results: make([]tg.ReactionCount, len(reactions))}
+	for i, reaction := range reactions {
+		result := tg.ReactionCount{
+			Reaction: &tg.ReactionEmoji{Emoticon: reaction.Reaction},
+			Count:    reaction.Count,
+		}
+		if reaction.Chosen {
+			result.SetChosenOrder(1)
+		}
+		mr.Results[i] = result
+	}
+	return mr
+}
+
 // channelMessageToTL maps a stored channel message to the wire message, the
 // channel counterpart of messageToTL. A channel keeps one row per message
 // rather than one per member, so Out is derived from the viewer here instead of

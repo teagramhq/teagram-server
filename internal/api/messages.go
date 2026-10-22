@@ -1746,18 +1746,46 @@ func (h *handlers) handleSendReaction(r *mtproto.Request) (bin.Encoder, error) {
 	if err != nil {
 		return nil, err
 	}
-	// Reactions on channel messages are out of scope.
+	localID := int64(req.MsgID)
+	reactions, hasReactions := req.GetReaction()
 	if peerType == store.PeerTypeChannel {
-		return nil, errPeerIDInvalid
+		reaction := ""
+		if hasReactions && len(reactions) > 0 {
+			if len(reactions) != 1 {
+				return nil, errReactionInvalid
+			}
+			emoji, ok := reactions[0].(*tg.ReactionEmoji)
+			if !ok || !isStandardReactionEmoji(emoji.Emoticon) {
+				return nil, errReactionInvalid
+			}
+			reaction = emoji.Emoticon
+		}
+		counts, err := h.store.SetChannelMessageReaction(r.Ctx, peerID, r.UserID, localID, reaction)
+		switch {
+		case errors.Is(err, store.ErrMessageInvalid):
+			return nil, errMessageIDInvalid
+		case errors.Is(err, store.ErrNotMember):
+			return nil, errPeerIDInvalid
+		case errors.Is(err, store.ErrReactionInvalid):
+			return nil, errReactionInvalid
+		case err != nil:
+			h.log.Error("send channel reaction", "user_id", r.UserID, "channel_id", peerID, "err", err)
+			return nil, errInternal
+		}
+		return &tg.Updates{
+			Updates: []tg.UpdateClass{&tg.UpdateMessageReactions{
+				Peer:      &tg.PeerChannel{ChannelID: peerID},
+				MsgID:     req.MsgID,
+				Reactions: channelReactionsToTL(counts),
+			}},
+			Date: int(time.Now().Unix()),
+		}, nil
 	}
 	if peerType == store.PeerTypeChat {
 		if err = h.requireMember(r.Ctx, peerID, r.UserID); err != nil {
 			return nil, err
 		}
 	}
-
-	localID := int64(req.MsgID)
-	reactions, hasReactions := req.GetReaction()
 
 	var affected []store.ReactionTarget
 	if !hasReactions || len(reactions) == 0 {
@@ -1860,6 +1888,17 @@ func (h *handlers) handleGetMessagesReactions(r *mtproto.Request) (bin.Encoder, 
 			h.log.Error("get channel message reactions", "user_id", r.UserID, "channel_id", peerID, "err", err)
 			return nil, errInternal
 		}
+		visibleIDs := make([]int64, 0, len(msgs))
+		for _, localID := range localIDs {
+			if m, ok := msgs[localID]; ok && !m.Deleted {
+				visibleIDs = append(visibleIDs, m.LocalID)
+			}
+		}
+		byMessage, err := h.store.ChannelMessageReactionsByMessageIDs(r.Ctx, peerID, r.UserID, visibleIDs)
+		if err != nil {
+			h.log.Error("load channel reaction counts", "user_id", r.UserID, "channel_id", peerID, "err", err)
+			return nil, errInternal
+		}
 		updates := make([]tg.UpdateClass, 0, len(localIDs))
 		for _, localID := range localIDs {
 			m, ok := msgs[localID]
@@ -1867,10 +1906,9 @@ func (h *handlers) handleGetMessagesReactions(r *mtproto.Request) (bin.Encoder, 
 				continue
 			}
 			updates = append(updates, &tg.UpdateMessageReactions{
-				Peer:  &tg.PeerChannel{ChannelID: peerID},
-				MsgID: int(m.LocalID),
-				// Channel post reactions are not persisted on this server yet.
-				Reactions: reactionsToTL(nil),
+				Peer:      &tg.PeerChannel{ChannelID: peerID},
+				MsgID:     int(m.LocalID),
+				Reactions: channelReactionsToTL(byMessage[m.LocalID]),
 			})
 		}
 		return &tg.Updates{Updates: updates, Date: int(time.Now().Unix())}, nil
