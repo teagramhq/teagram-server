@@ -24,7 +24,7 @@ func (s *Store) AdmitUsername(ctx context.Context, handle, phoneCodeHash string,
 // binds the initiating auth key with its connection-local metadata.
 func (s *Store) AdmitUsernameWithMetadata(ctx context.Context, handle, phoneCodeHash string, authKeyID int64, firstName, lastName string, requireInvite bool, metadata AuthorizationMetadata) (User, error) {
 	handle = strings.ToLower(handle)
-	metadata = sanitizeAuthorizationMetadata(metadata)
+	metadataParams := s.authorizationMetadataParams(metadata)
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return User{}, fmt.Errorf("admit username: begin: %w", err)
@@ -104,8 +104,9 @@ func (s *Store) AdmitUsernameWithMetadata(ctx context.Context, handle, phoneCode
 	}
 
 	rows, err := qtx.BindAuthKeyUserWithMetadata(ctx, db.BindAuthKeyUserWithMetadataParams{
-		ID: authKeyID, UserID: &u.ID, DeviceModel: &metadata.DeviceModel, Platform: &metadata.Platform,
-		SystemVersion: &metadata.SystemVersion, ApiID: &metadata.APIID, AppVersion: &metadata.AppVersion, Ip: &metadata.IP,
+		ID: authKeyID, UserID: &u.ID, DeviceModel: metadataParams.deviceModel, Platform: metadataParams.platform,
+		SystemVersion: metadataParams.systemVersion, ApiID: metadataParams.apiID,
+		AppVersion: metadataParams.appVersion, Ip: metadataParams.ip,
 	})
 	if err != nil {
 		return User{}, fmt.Errorf("admit username: bind auth key with metadata: %w", err)
