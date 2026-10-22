@@ -1143,26 +1143,30 @@ func (p *probe) recoverAndRestrictSupergroup(ctx context.Context, owner, voter, 
 		return err
 	}
 
-	if err := p.banChannelMember(ctx, owner, observer, supergroupChannelName, "channel_removal_capture_suppressed"); err != nil {
-		return err
-	}
-	// Updates captured while the observer was a member are valid. Use the
-	// post-removal snapshot as the baseline for checking later poll changes.
-	postRemovalCaptureBaseline := p.channelUpdateSnapshot(observer.username)
-	aVote, err := p.castChannelVote(ctx, owner, supergroupChannelName, p4MessageID, p4PollID, []byte("A"), "channel_removal_capture_suppressed")
+	removalMessageID, removalPollID, err := p.sendChannelPoll(ctx, owner, supergroupChannelName, "Supergroup removal probe", false, false, "channel_removal_capture_suppressed")
 	if err != nil {
 		return err
 	}
-	if !anonymousChannelVoteMatches(aVote, p4PollID, 2, map[string]int{"A": 1, "B": 1}) {
+	if err := p.banChannelMember(ctx, owner, observer, supergroupChannelName, "channel_removal_capture_suppressed"); err != nil {
+		return err
+	}
+	// Use a fresh poll so a delayed update from the earlier recovery vote cannot
+	// be mistaken for a post-removal update.
+	postRemovalCaptureBaseline := p.channelUpdateSnapshot(observer.username)
+	aVote, err := p.castChannelVote(ctx, owner, supergroupChannelName, removalMessageID, removalPollID, []byte("A"), "channel_removal_capture_suppressed")
+	if err != nil {
+		return err
+	}
+	if !anonymousChannelVoteMatches(aVote, removalPollID, 1, map[string]int{"A": 1, "B": 0}) {
 		return failure("channel_removal_capture_suppressed", "VOTE_UPDATE_MISMATCH")
 	}
-	if err := p.waitForNoCapturedPoll(ctx, observer, p4PollID, len(postRemovalCaptureBaseline), channelNegativeWindow, "channel_removal_capture_suppressed"); err != nil {
+	if err := p.waitForNoCapturedPoll(ctx, observer, removalPollID, len(postRemovalCaptureBaseline), channelNegativeWindow, "channel_removal_capture_suppressed"); err != nil {
 		return err
 	}
 	if err := p.pass("channel_removal_capture_suppressed", "updates=0"); err != nil {
 		return err
 	}
-	if err := p.expectDeniedChannelPollRPCs(ctx, observer, supergroupChannelName, observer.username, p4MessageID, p4PollID, "channel_removed_member_denied"); err != nil {
+	if err := p.expectDeniedChannelPollRPCs(ctx, observer, supergroupChannelName, observer.username, removalMessageID, removalPollID, "channel_removed_member_denied"); err != nil {
 		return err
 	}
 	if err := p.pass("channel_removed_member_denied", "rpcs=5", "rpc_error=PEER_ID_INVALID", "rpc_code=400"); err != nil {
