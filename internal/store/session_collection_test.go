@@ -201,11 +201,19 @@ func TestDisabledSessionDeviceLabelsStopFutureWrites(t *testing.T) {
 	}
 }
 
-func TestStaleSessionTouchCannotRestoreMetadataAfterUnbindOrRebind(t *testing.T) {
+func TestSessionIPEnabledStaleTouchCannotRestoreMetadataAfterUnbindOrRebind(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
 	dsn := pgtest.DSN(t)
-	s := openStore(t, dsn)
+	s, err := store.Open(ctx, dsn, pgtest.EncKey(), store.WithBlobStore(testBlobs(t)), store.WithSessionIP(true))
+	if err != nil {
+		t.Fatalf("open store with session IP enabled: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := s.Close(); err != nil {
+			t.Errorf("close store: %v", err)
+		}
+	})
 	conn := openSessionMetadataConn(t, dsn)
 	ownerA, err := s.CreateUser(ctx, "+15551296004")
 	if err != nil {
@@ -266,7 +274,7 @@ func TestStaleSessionTouchCannotRestoreMetadataAfterUnbindOrRebind(t *testing.T)
 				t.Fatalf("stale touch after rebind: %v", err)
 			}
 			rebound := readStoredSessionMetadata(t, conn, id)
-			assertStoredSessionMetadataValues(t, rebound, ownerB.ID, newMetadata, false, true)
+			assertStoredSessionMetadataValues(t, rebound, ownerB.ID, newMetadata, true, true)
 		})
 	}
 }
