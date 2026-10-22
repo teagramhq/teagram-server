@@ -3780,8 +3780,9 @@ dump_path=$2
         next
       }
       if ($0 !~ /^[[:space:]]*$/ && $0 !~ /^[[:space:]]*--/) sql_started = 1
-      if (pending != "") print pending
+      if (has_pending) print pending
       pending = $0
+      has_pending = 1
       if ($0 == "-- PostgreSQL database dump complete") dump_complete = 1
     }
     END {

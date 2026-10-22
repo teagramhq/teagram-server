@@ -554,6 +554,23 @@ class RestoreReadinessContractTests(unittest.TestCase):
                 self.assertEqual(filtered.returncode, expected_status)
                 self.assertNotIn("\\unrestrict", filtered.stdout)
 
+        # Blank lines are SQL content: function bodies and empty-string COPY rows must reach psql unchanged.
+        body = "CREATE FUNCTION public.f() RETURNS integer LANGUAGE plpgsql AS $$\nBEGIN\n\n  RETURN 1;\nEND\n$$;\n"
+        copy = "COPY public.t (note) FROM stdin;\n\nkept\n\\.\n"
+        dump_with_blank_lines = valid_pg18_dump.replace(
+            "SET statement_timeout = 0;\n",
+            "SET statement_timeout = 0;\n" + body + copy,
+        )
+        filtered = subprocess.run(
+            ["awk", awk_program, "-"],
+            input=dump_with_blank_lines,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        self.assertEqual(filtered.returncode, 0)
+        self.assertIn("SET statement_timeout = 0;\n" + body + copy, filtered.stdout)
+
     def test_local_success_report_adds_only_its_mode_marker(self) -> None:
         report = RESTORE_READINESS.report_document(
             "application_assertions",
