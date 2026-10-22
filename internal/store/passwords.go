@@ -141,6 +141,30 @@ func (s *Store) PasswordByUser(ctx context.Context, userID int64) (UserPassword,
 	}, true, nil
 }
 
+// PasswordForAuthenticationByUser returns only the fields needed for password
+// verification. Recovery email data stays out of login, challenge, and update
+// paths; PasswordByUser is reserved for the proved password-settings response.
+func (s *Store) PasswordForAuthenticationByUser(ctx context.Context, userID int64) (UserPassword, bool, error) {
+	row, err := s.q.PasswordForAuthenticationByUser(ctx, userID)
+	switch {
+	case errors.Is(err, pgx.ErrNoRows):
+		return UserPassword{}, false, nil
+	case err != nil:
+		return UserPassword{}, false, fmt.Errorf("password for authentication by user: %w", err)
+	}
+	verifier, err := s.cipher.Open(row.Verifier)
+	if err != nil {
+		return UserPassword{}, false, fmt.Errorf("decrypt verifier for user %d: %w", userID, err)
+	}
+	return UserPassword{
+		UserID:   row.UserID,
+		Salt1:    row.Salt1,
+		Salt2:    row.Salt2,
+		Verifier: verifier,
+		Hint:     row.Hint,
+	}, true, nil
+}
+
 // InsertPasswordIfAbsent stores p only when the user has no 2FA password. The
 // verifier is encrypted before storage. inserted is false when another request
 // already established the password.

@@ -629,6 +629,16 @@ func (h *handlers) handleGetFullChat(r *mtproto.Request) (bin.Encoder, error) {
 		Participants:   chatParticipantsToTL(chat, participants),
 		NotifySettings: notifySettings,
 	}
+	availableReactions := store.ChatAvailableReactions{Mode: store.ChatAvailableReactionsAll}
+	if stored, ok := snapshot.AvailableReactions[chat.ID]; ok {
+		availableReactions = stored
+	}
+	wireReactions, err := chatAvailableReactionsToTL(availableReactions)
+	if err != nil {
+		h.log.Error("get full chat available reactions", "chat_id", chat.ID, "user_id", r.UserID, "err", err)
+		return nil, errInternal
+	}
+	wireFull.SetAvailableReactions(wireReactions)
 	wireFull.SetTTLPeriod(chat.TTLPeriod)
 	chatPhoto, fullPhoto, err := h.currentChatPhoto(r.Ctx, chat)
 	if err != nil {

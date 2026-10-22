@@ -1040,7 +1040,8 @@ test.describe('admin dashboard acceptance states', () => {
     await page.screenshot({ path: testInfo.outputPath('fleet-two-real-replicas-initial-html.png'), fullPage: true });
 
     await setFleetConnections(page, 'http://127.0.0.1:2445', [918273646, 918273647, 918273647]);
-    await expect(page.locator('#v-fleet-connections')).toHaveText(/^5/, { timeout: 30_000 });
+    // Fleet publishing, the admin metrics cache, and SSE each refresh on a 10s cadence.
+    await expect(page.locator('#v-fleet-connections')).toHaveText(/^5/, { timeout: 45_000 });
     await expect(page.locator('#v-fleet-accounts')).toHaveText(/^3/, { timeout: 5_000 });
     await expect(page.locator('#fleet-replicas-tbody tr')).toHaveCount(2);
     await expect(page.locator('#fleet-replicas-tbody')).toContainText('edge-2');

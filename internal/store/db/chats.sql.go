@@ -289,6 +289,35 @@ func (q *Queries) ChatAdminSnapshotsForMember(ctx context.Context, arg ChatAdmin
 	return items, nil
 }
 
+const chatAvailableReactionsByIDs = `-- name: ChatAvailableReactionsByIDs :many
+SELECT chat_id, mode, reactions
+FROM chat_available_reactions
+WHERE chat_id = ANY($1::bigint[])
+ORDER BY chat_id
+`
+
+// ChatAvailableReactionsByIDs reads explicit settings only. A missing row is
+// the inherited all-reactions setting for old and new basic groups.
+func (q *Queries) ChatAvailableReactionsByIDs(ctx context.Context, chatIds []int64) ([]ChatAvailableReaction, error) {
+	rows, err := q.db.Query(ctx, chatAvailableReactionsByIDs, chatIds)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ChatAvailableReaction
+	for rows.Next() {
+		var i ChatAvailableReaction
+		if err := rows.Scan(&i.ChatID, &i.Mode, &i.Reactions); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const chatByID = `-- name: ChatByID :one
 SELECT id, title, creator_id, version, date, pinned_message_id, default_banned_rights, ttl_period, current_photo_file_id, current_photo_uploader_id FROM chats WHERE id = $1
 `
@@ -1324,6 +1353,24 @@ type SetChatAboutParams struct {
 
 func (q *Queries) SetChatAbout(ctx context.Context, arg SetChatAboutParams) error {
 	_, err := q.db.Exec(ctx, setChatAbout, arg.ChatID, arg.About)
+	return err
+}
+
+const setChatAvailableReactions = `-- name: SetChatAvailableReactions :exec
+INSERT INTO chat_available_reactions (chat_id, mode, reactions)
+VALUES ($1::bigint, $2::text, $3::text[])
+ON CONFLICT (chat_id)
+DO UPDATE SET mode = EXCLUDED.mode, reactions = EXCLUDED.reactions
+`
+
+type SetChatAvailableReactionsParams struct {
+	ChatID    int64
+	Mode      string
+	Reactions []string
+}
+
+func (q *Queries) SetChatAvailableReactions(ctx context.Context, arg SetChatAvailableReactionsParams) error {
+	_, err := q.db.Exec(ctx, setChatAvailableReactions, arg.ChatID, arg.Mode, arg.Reactions)
 	return err
 }
 

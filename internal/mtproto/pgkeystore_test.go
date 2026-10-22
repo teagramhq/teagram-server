@@ -31,7 +31,7 @@ func TestPersistedAuthKeyReconnectAndRevocation(t *testing.T) {
 	if err != nil {
 		t.Fatalf("blob store: %v", err)
 	}
-	st, err := store.Open(ctx, pgtest.DSN(t), pgtest.EncKey(), store.WithBlobStore(blobs))
+	st, err := store.Open(ctx, pgtest.DSN(t), pgtest.EncKey(), store.WithBlobStore(blobs), store.WithSessionIP(true))
 	if err != nil {
 		t.Fatalf("open store: %v", err)
 	}

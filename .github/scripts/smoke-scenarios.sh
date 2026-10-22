@@ -26,6 +26,7 @@ SMOKE_SCENARIOS=(
   notify-settings-reads
   unread-acknowledgements
   basic-group
+  basic-group-reactions
   basic-group-photo
   delete-basic-group
   delete-history

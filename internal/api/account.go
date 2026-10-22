@@ -40,19 +40,25 @@ func (h *handlers) handleGetAuthorizations(r *mtproto.Request) (bin.Encoder, err
 		return nil, errInternal
 	}
 	current := mtproto.AuthKeyIDInt64(r.AuthKeyID)
+	showIP := h.store.SessionIPEnabled()
+	showDeviceLabels := h.store.SessionDeviceLabelsEnabled()
 	auths := make([]tg.Authorization, len(keys))
 	for i, k := range keys {
 		auths[i] = tg.Authorization{
-			Current:       k.ID == current,
-			Hash:          k.ID,
-			DeviceModel:   k.DeviceModel,
-			Platform:      k.Platform,
-			SystemVersion: k.SystemVersion,
-			APIID:         k.APIID,
-			AppVersion:    k.AppVersion,
-			DateCreated:   int(k.CreatedAt.Unix()),
-			DateActive:    int(k.LastSeenAt.Unix()),
-			IP:            k.IP,
+			Current:     k.ID == current,
+			Hash:        k.ID,
+			DateCreated: int(k.CreatedAt.Unix()),
+			DateActive:  int(k.LastSeenAt.Unix()),
+		}
+		if showIP {
+			auths[i].IP = k.IP
+		}
+		if showDeviceLabels {
+			auths[i].DeviceModel = k.DeviceModel
+			auths[i].Platform = k.Platform
+			auths[i].SystemVersion = k.SystemVersion
+			auths[i].APIID = k.APIID
+			auths[i].AppVersion = k.AppVersion
 		}
 	}
 	return &tg.AccountAuthorizations{

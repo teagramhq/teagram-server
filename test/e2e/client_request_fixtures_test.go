@@ -21,6 +21,8 @@ import (
 	"github.com/gotd/td/telegram/updates"
 	"github.com/gotd/td/tg"
 	"github.com/gotd/td/tgerr"
+
+	"github.com/teagramhq/teagram-server/internal/config"
 )
 
 const clientFixtureDirectory = "../fixtures/client/layer-228"
@@ -464,6 +466,7 @@ func TestSmokeClientRequestFixturesAreLayer228Shapes(t *testing.T) {
 	for _, name := range []string{
 		"auth.sendCode.1",
 		"auth.signIn.1",
+		"account_updatePasswordSettings.contact.1",
 		"auth.invokeWithReCaptcha.signUp.1",
 		"contacts_getStatuses.1",
 		"channels_checkUsername.1",
@@ -501,6 +504,7 @@ func TestSmokeClientRequestFixturesAreLayer228Shapes(t *testing.T) {
 		"messages_getHistory.second-account.1",
 		"messages_getReplies.1",
 		"photos_getUserPhotos.1",
+		"photos_deletePhotos.1",
 		"photos_updateProfilePhoto.1",
 		"photos_uploadProfilePhoto.1",
 		"account_updateProfile.1",
@@ -513,6 +517,9 @@ func TestSmokeClientRequestFixturesAreLayer228Shapes(t *testing.T) {
 		"messages_sendMessage.1",
 		"messages_sendMessage.2",
 		"messages_sendMessage.3",
+		"messages_sendReaction.1",
+		"messages_setChatAvailableReactions.1",
+		"messages_getMessagesReactions.1",
 		"messages_sendVote.1",
 		"messages_setTyping.1",
 		"upload_saveFilePart.1",
@@ -573,7 +580,9 @@ func newSmokePhoneClientWithRequests(
 
 func testSmokeClientRequestFixtures(t *testing.T) {
 	t.Helper()
-	f := newSmokeFixture(t)
+	f := newSmokeFixtureWithSetup(t, config.RegistrationClosed, func(f *smokeFixture) {
+		f.recoveryEmailMode = config.RecoveryEmailContact
+	})
 	const phoneCreator, phoneMember = "+15551048901", "+15551048902"
 	seedSmokeUsers(t, f, phoneCreator, phoneMember)
 	creatorRequests := &clientRequestRecorder{}
@@ -598,6 +607,38 @@ func testSmokeClientRequestFixtures(t *testing.T) {
 		return nil
 	}); err != nil {
 		t.Fatalf("replay get-all-drafts fixture: %v", err)
+	}
+	const recoveryPassword, recoveryEmail = "fixture recovery password", "contact@example.invalid"
+	if err := fixtureClientCall(t, checker, "account_updatePasswordSettings.contact.1", func(ctx context.Context, api *tg.Client) error {
+		return setFirstPasswordWithEmail(ctx, api, recoveryPassword, recoveryEmail)
+	}); err != nil {
+		t.Fatalf("set contact password: %v", err)
+	}
+	storedPassword, hasPassword, err := f.store.PasswordByUser(f.ctx, checker.id)
+	if err != nil || !hasPassword {
+		t.Fatalf("load contact password: has_password=%t err=%v", hasPassword, err)
+	}
+	if storedPassword.RecoveryEmail != recoveryEmail || storedPassword.HasRecovery {
+		t.Fatalf("contact password state = {email:%q has_recovery:%t}, want contact email and false recovery flag", storedPassword.RecoveryEmail, storedPassword.HasRecovery)
+	}
+	if err := checker.call(f.ctx, func(ctx context.Context, api *tg.Client) error {
+		state, err := api.AccountGetPassword(ctx)
+		if err != nil {
+			return err
+		}
+		if state.HasRecovery {
+			return errors.New("account.getPassword advertised recovery in contact mode")
+		}
+		settings, err := getPasswordSettingsWithProof(ctx, api, recoveryPassword)
+		if err != nil {
+			return err
+		}
+		if email, present := settings.GetEmail(); !present || email != recoveryEmail {
+			return fmt.Errorf("proved account.getPasswordSettings email = %q (present=%t), want %q", email, present, recoveryEmail)
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("proved contact settings smoke: %v", err)
 	}
 	for _, tc := range []struct {
 		username string
@@ -1212,6 +1253,7 @@ func testSmokeClientRequestFixtures(t *testing.T) {
 		t.Fatalf("replay getReplies fixture: %v", err)
 	}
 
+	var groupMessageID int
 	for i, message := range []struct {
 		fixture string
 		peer    tg.InputPeerClass
@@ -1222,6 +1264,13 @@ func testSmokeClientRequestFixtures(t *testing.T) {
 		{fixture: "messages_sendMessage.3", peer: peerChannel(creator.id, channelID), text: "Hello followers!"},
 	} {
 		result := replayFixtureSendMessage(t, creator, message.fixture, message.peer, message.text, int64(13030101+i))
+		if message.fixture == "messages_sendMessage.2" {
+			outgoing, _, ok := outgoingMessage(t, result, message.text)
+			if !ok {
+				t.Fatal("group send-message fixture omitted its outgoing message")
+			}
+			groupMessageID = outgoing.ID
+		}
 		if message.fixture == "messages_sendMessage.3" {
 			updates, ok := result.(*tg.Updates)
 			if !ok {
@@ -1246,6 +1295,52 @@ func testSmokeClientRequestFixtures(t *testing.T) {
 				t.Fatalf("channel post_author = %q, present=%v; want the send-time display name Smoke", author, present)
 			}
 		}
+	}
+	if groupMessageID <= 0 {
+		t.Fatalf("fixture group message id = %d, want positive", groupMessageID)
+	}
+	if err := fixtureClientCall(t, creator, "messages_setChatAvailableReactions.1", func(ctx context.Context, api *tg.Client) error {
+		result, err := api.MessagesSetChatAvailableReactions(ctx, &tg.MessagesSetChatAvailableReactionsRequest{
+			Peer: &tg.InputPeerChat{ChatID: chatID},
+			AvailableReactions: &tg.ChatReactionsSome{Reactions: []tg.ReactionClass{
+				&tg.ReactionEmoji{Emoticon: "❤"},
+			}},
+		})
+		if err == nil && result == nil {
+			return errors.New("setChatAvailableReactions returned nil Updates")
+		}
+		return err
+	}); err != nil {
+		t.Fatalf("replay set-available-reactions fixture: %v", err)
+	}
+	if err := fixtureClientCall(t, creator, "messages_sendReaction.1", func(ctx context.Context, api *tg.Client) error {
+		result, err := api.MessagesSendReaction(ctx, &tg.MessagesSendReactionRequest{
+			Peer: &tg.InputPeerChat{ChatID: chatID}, MsgID: groupMessageID,
+			Reaction: []tg.ReactionClass{&tg.ReactionEmoji{Emoticon: "❤"}},
+		})
+		if err == nil {
+			if _, ok := result.(*tg.Updates); !ok {
+				return fmt.Errorf("sendReaction result = %T, want *tg.Updates", result)
+			}
+		}
+		return err
+	}); err != nil {
+		t.Fatalf("replay send-reaction fixture: %v", err)
+	}
+	if err := fixtureClientCall(t, creator, "messages_getMessagesReactions.1", func(ctx context.Context, api *tg.Client) error {
+		result, err := api.MessagesGetMessagesReactions(ctx, &tg.MessagesGetMessagesReactionsRequest{
+			Peer: &tg.InputPeerChat{ChatID: chatID}, ID: []int{groupMessageID},
+		})
+		if err != nil {
+			return err
+		}
+		updates, ok := result.(*tg.Updates)
+		if !ok || len(updates.Updates) != 1 {
+			return fmt.Errorf("getMessagesReactions result = %#v, want one reaction update", result)
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("replay get-message-reactions fixture: %v", err)
 	}
 	if err := fixtureClientCall(t, creator, "messages_deleteHistory.1", func(ctx context.Context, api *tg.Client) error {
 		request := &tg.MessagesDeleteHistoryRequest{Peer: peerUser(creator.id, member.id)}
@@ -1283,7 +1378,7 @@ func testSmokeClientRequestFixtures(t *testing.T) {
 	}
 
 	var photoErr error
-	err := fixtureClientCall(t, creator, "messages_sendMedia.3", func(ctx context.Context, api *tg.Client) error {
+	err = fixtureClientCall(t, creator, "messages_sendMedia.3", func(ctx context.Context, api *tg.Client) error {
 		_, photoErr = api.MessagesSendMedia(ctx, &tg.MessagesSendMediaRequest{
 			Peer: peerUser(creator.id, member.id),
 			Media: &tg.InputMediaUploadedPhoto{File: &tg.InputFile{

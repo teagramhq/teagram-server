@@ -238,16 +238,33 @@ func testSmokeProfilePhotoUpload(t *testing.T) {
 	if !ok || len(viewerPage.Photos) != 2 {
 		t.Fatalf("viewer profile gallery = %#v, want both retained photos", viewerPhotos)
 	}
-	var retained *tg.Photo
+	var retained, deletedGalleryPhoto *tg.Photo
 	for _, item := range viewerPage.Photos {
 		photo, ok := item.(*tg.Photo)
-		if ok && photo.ID == second.ID {
-			retained = photo
-			break
+		if ok {
+			switch photo.ID {
+			case second.ID:
+				retained = photo
+			case first.ID:
+				deletedGalleryPhoto = photo
+			}
 		}
 	}
 	if retained == nil {
 		t.Fatalf("old current photo %d is missing from the gallery", second.ID)
+	}
+	if deletedGalleryPhoto == nil {
+		t.Fatalf("reselected photo %d is missing from the viewer gallery", first.ID)
+	}
+	deletedGalleryOriginalType := ""
+	for _, class := range deletedGalleryPhoto.Sizes {
+		if size, ok := class.(*tg.PhotoSize); ok && size.Type != "m" {
+			deletedGalleryOriginalType = size.Type
+			break
+		}
+	}
+	if deletedGalleryOriginalType == "" {
+		t.Fatalf("reselected photo %d has no original size", first.ID)
 	}
 	var retainedSize *tg.PhotoSize
 	for _, class := range retained.Sizes {
@@ -276,6 +293,88 @@ func testSmokeProfilePhotoUpload(t *testing.T) {
 	file, ok := downloaded.(*tg.UploadFile)
 	if !ok || !bytes.Equal(file.Bytes, payload) {
 		t.Fatalf("gallery download = %T, want original JPEG bytes", downloaded)
+	}
+
+	deleteStart := ownerRequests.count()
+	var deletedIDs []int64
+	if err := owner.call(f.ctx, func(ctx context.Context, client *tg.Client) error {
+		var err error
+		deletedIDs, err = client.PhotosDeletePhotos(ctx, []tg.InputPhotoClass{&tg.InputPhoto{
+			ID: gallery[1].ID, AccessHash: gallery[1].AccessHash,
+			FileReference: gallery[1].FileReference,
+		}})
+		return err
+	}); err != nil {
+		t.Fatalf("delete reselected profile photo: %v", err)
+	}
+	if len(deletedIDs) != 1 || deletedIDs[0] != first.ID {
+		t.Fatalf("photos.deletePhotos returned %v, want [%d]", deletedIDs, first.ID)
+	}
+	if err := ownerRequests.matchFixtureSince(deleteStart, "photos_deletePhotos.1"); err != nil {
+		t.Fatalf("match profile-photo deletion request fixture: %v", err)
+	}
+
+	if err := viewer.call(f.ctx, func(ctx context.Context, client *tg.Client) error {
+		_, err := client.UploadGetFile(ctx, &tg.UploadGetFileRequest{
+			Location: &tg.InputPeerPhotoFileLocation{Peer: peerUser(viewer.id, owner.id), PhotoID: first.ID, Big: true},
+			Offset:   0, Limit: len(payload),
+		})
+		if err == nil || !tgErrorIs(err, "LOCATION_INVALID") {
+			return fmt.Errorf("download deleted current photo: %w, want LOCATION_INVALID", err)
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("deleted current-photo location: %v", err)
+	}
+	if err := viewer.call(f.ctx, func(ctx context.Context, client *tg.Client) error {
+		_, err := client.UploadGetFile(ctx, &tg.UploadGetFileRequest{
+			Location: &tg.InputPhotoFileLocation{
+				ID: deletedGalleryPhoto.ID, AccessHash: deletedGalleryPhoto.AccessHash,
+				FileReference: deletedGalleryPhoto.FileReference, ThumbSize: deletedGalleryOriginalType,
+			},
+			Offset: 0, Limit: len(payload),
+		})
+		if err == nil || !tgErrorIs(err, "LOCATION_INVALID") {
+			return fmt.Errorf("download deleted gallery photo: %w, want LOCATION_INVALID", err)
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("deleted gallery-photo location: %v", err)
+	}
+	var remainingPhotos tg.PhotosPhotosClass
+	if err := viewer.call(f.ctx, func(ctx context.Context, client *tg.Client) error {
+		var err error
+		remainingPhotos, err = client.PhotosGetUserPhotos(ctx, &tg.PhotosGetUserPhotosRequest{
+			UserID: inputUser(viewer.id, owner.id), Limit: 10,
+		})
+		return err
+	}); err != nil {
+		t.Fatalf("read profile gallery after delete: %v", err)
+	}
+	remainingPage, ok := remainingPhotos.(*tg.PhotosPhotosSlice)
+	if !ok || remainingPage.Count != 1 || len(remainingPage.Photos) != 1 {
+		t.Fatalf("gallery after delete = %#v, want one retained photo", remainingPhotos)
+	}
+	remainingPhoto, ok := remainingPage.Photos[0].(*tg.Photo)
+	if !ok || remainingPhoto.ID != second.ID {
+		t.Fatalf("remaining gallery photo = %T/%+v, want retained photo %d", remainingPage.Photos[0], remainingPage.Photos[0], second.ID)
+	}
+	if err := viewer.call(f.ctx, func(ctx context.Context, client *tg.Client) error {
+		var err error
+		users, err = client.UsersGetUsers(ctx, []tg.InputUserClass{inputUser(viewer.id, owner.id)})
+		return err
+	}); err != nil {
+		t.Fatalf("read owner after deleting current photo: %v", err)
+	}
+	if len(users) != 1 {
+		t.Fatalf("users.getUsers after delete returned %d users, want one", len(users))
+	}
+	ownerAfterDelete, ok := users[0].(*tg.User)
+	if !ok {
+		t.Fatalf("users.getUsers after delete item = %T, want *tg.User", users[0])
+	}
+	if photo, hasPhoto := ownerAfterDelete.GetPhoto(); hasPhoto {
+		t.Fatalf("owner still has a current profile photo after delete: %T/%+v", photo, photo)
 	}
 }
 

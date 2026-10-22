@@ -1,6 +1,11 @@
 -- name: PasswordByUser :one
 SELECT * FROM user_passwords WHERE user_id = $1;
 
+-- name: PasswordForAuthenticationByUser :one
+SELECT user_id, salt1, salt2, verifier, hint
+FROM user_passwords
+WHERE user_id = $1;
+
 -- name: UpsertPassword :exec
 INSERT INTO user_passwords (user_id, salt1, salt2, verifier, hint, recovery_email, has_recovery)
 VALUES ($1, $2, $3, $4, $5, $6, $7)

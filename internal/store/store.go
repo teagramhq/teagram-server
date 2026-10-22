@@ -38,6 +38,12 @@ type Store struct {
 	// rather than silence.
 	log *slog.Logger
 
+	// sessionIP and sessionDeviceLabels independently control which authorization
+	// metadata is persisted and exposed. Session IP is privacy-sensitive and
+	// defaults off; labels preserve the existing default-on device view.
+	sessionIP           bool
+	sessionDeviceLabels bool
+
 	// Channel bounds, seeded from the defaults in channels.go. They are fields
 	// rather than constants only so a test can exercise the cap branches without
 	// writing 10 000 rows; a test lowering them on its own Store cannot disturb
@@ -251,6 +257,9 @@ var (
 	// ErrChatAdminRequired is returned when a basic-chat control is denied
 	// by current default rights or requires channel administrator rights.
 	ErrChatAdminRequired = errors.New("chat admin required")
+	// ErrReactionInvalid is returned when a message reaction is outside the
+	// standard set or the basic group's current allowed set.
+	ErrReactionInvalid = errors.New("reaction invalid")
 	// ErrChatLinkExists is returned when a public channel username conflicts
 	// with hidden prehistory.
 	ErrChatLinkExists          = errors.New("chat link exists")
@@ -329,6 +338,22 @@ func WithStatementTimeout(d time.Duration) Option {
 	}
 }
 
+// WithSessionIP enables storage and exposure of client addresses on
+// authorization rows. The default is disabled.
+func WithSessionIP(enabled bool) Option {
+	return func(s *Store) {
+		s.sessionIP = enabled
+	}
+}
+
+// WithSessionDeviceLabels enables storage and exposure of device and app labels
+// on authorization rows. It defaults on to preserve current device management.
+func WithSessionDeviceLabels(enabled bool) Option {
+	return func(s *Store) {
+		s.sessionDeviceLabels = enabled
+	}
+}
+
 // WithBlobStore wires the blob backend the Store uses for in-flight upload
 // part bytes.
 func WithBlobStore(blobs blob.Store) Option {
@@ -374,6 +399,7 @@ func Open(ctx context.Context, dsn string, encKey []byte, opts ...Option) (*Stor
 		newChannelID:           randomChannelID,
 		newPollID:              randomPollID,
 		log:                    slog.Default(),
+		sessionDeviceLabels:    true,
 		now:                    time.Now,
 	}
 	for _, opt := range opts {
@@ -457,6 +483,13 @@ func Open(ctx context.Context, dsn string, encKey []byte, opts ...Option) (*Stor
 	}
 	return s, nil
 }
+
+// SessionIPEnabled reports whether the Store stores and exposes session IPs.
+func (s *Store) SessionIPEnabled() bool { return s.sessionIP }
+
+// SessionDeviceLabelsEnabled reports whether the Store stores and exposes
+// device and app labels for sessions.
+func (s *Store) SessionDeviceLabelsEnabled() bool { return s.sessionDeviceLabels }
 
 // AssemblyConcurrencyLimit returns the startup-derived cap on in-flight
 // assembled uploads. It is surfaced for the command's startup diagnostic.

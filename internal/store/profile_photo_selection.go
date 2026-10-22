@@ -13,7 +13,7 @@ import (
 
 const (
 	// ProfilePhotoSelectionWait bounds rate admission and profile-lock waiting
-	// for one profile-photo selection request.
+	// for one profile-photo mutation request.
 	ProfilePhotoSelectionWait = 250 * time.Millisecond
 	profilePhotoSelectionPoll = 10 * time.Millisecond
 )
@@ -24,56 +24,15 @@ const (
 // upload lane holds. This operation only changes the current pointer and its
 // revision.
 func (s *Store) SelectProfilePhoto(ctx context.Context, ownerID, fileID int64) (File, bool, error) {
-	class, obj, ok := profileOwnerLockKey(ownerID)
-	if !ok || fileID < 1 {
+	if fileID < 1 {
 		return File{}, false, ErrProfilePhotoUnavailable
 	}
-	lockCtx, cancel := context.WithTimeout(ctx, ProfilePhotoSelectionWait)
-	defer cancel()
-	lockWaitExpired := func() bool {
-		return ctx.Err() == nil && errors.Is(lockCtx.Err(), context.DeadlineExceeded)
-	}
-
-	conn, err := s.pool.Acquire(lockCtx)
+	conn, tx, err := s.beginProfilePhotoMutation(ctx, ownerID)
 	if err != nil {
-		if lockWaitExpired() {
-			return File{}, false, ErrProfilePhotoBusy
-		}
-		return File{}, false, fmt.Errorf("profile photo selection: acquire connection: %w", err)
+		return File{}, false, err
 	}
 	defer conn.Release()
-
-	tx, err := conn.Begin(lockCtx)
-	if err != nil {
-		if lockWaitExpired() {
-			return File{}, false, ErrProfilePhotoBusy
-		}
-		return File{}, false, fmt.Errorf("profile photo selection: begin transaction: %w", err)
-	}
 	defer func() { _ = tx.Rollback(context.Background()) }() //nolint:errcheck // no-op after commit
-
-	for {
-		var acquired bool
-		if err := tx.QueryRow(lockCtx,
-			`SELECT pg_try_advisory_xact_lock($1::int, $2::int)`, class, obj,
-		).Scan(&acquired); err != nil {
-			if lockWaitExpired() {
-				return File{}, false, ErrProfilePhotoBusy
-			}
-			return File{}, false, fmt.Errorf("profile photo selection: acquire profile-domain lock: %w", err)
-		}
-		if acquired {
-			break
-		}
-		select {
-		case <-lockCtx.Done():
-			if ctx.Err() != nil {
-				return File{}, false, ctx.Err()
-			}
-			return File{}, false, ErrProfilePhotoBusy
-		case <-time.After(profilePhotoSelectionPoll):
-		}
-	}
 
 	qtx := s.q.WithTx(tx)
 	state, err := qtx.LockProfilePhotoState(ctx, ownerID)
