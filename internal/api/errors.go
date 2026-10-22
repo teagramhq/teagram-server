@@ -62,6 +62,9 @@ var (
 	errNewPasswordBad = rpcErr(400, "NEW_PASSWORD_BAD")
 	// errMessageIDInvalid rejects edit/delete of an absent or non-owned message.
 	errMessageIDInvalid = rpcErr(400, "MESSAGE_ID_INVALID")
+	// errPhotoIDInvalid is uniform for every profile-photo input that is not
+	// the caller's own live gallery entry with its self-bound access hash.
+	errPhotoIDInvalid = rpcErr(400, "PHOTO_ID_INVALID")
 	// errMsgIDInvalid rejects an absent, deleted or unsupported channel reply root.
 	errMsgIDInvalid = rpcErr(400, "MSG_ID_INVALID")
 	// errMessageDeleteForbidden rejects a channel-delete batch containing a live

@@ -1,0 +1,20 @@
+{
+  "layer": 228,
+  "client": "gotd v0.162.0",
+  "source": "captures/photos_updateProfilePhoto.1.txt",
+  "method": "photos.updateProfilePhoto",
+  "request": {
+    "type": "photos.updateProfilePhoto",
+    "flags": 0,
+    "fields": {
+      "id": {
+        "type": "inputPhoto",
+        "fields": {
+          "id": "<N>",
+          "access_hash": "<N>",
+          "file_reference": "REDACTED"
+        }
+      }
+    }
+  }
+}

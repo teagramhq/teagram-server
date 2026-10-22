@@ -31,24 +31,28 @@ func (s *Store) ProfilePhotosForOwner(ctx context.Context, ownerID, viewerID int
 		if !row.HasPhoto {
 			continue
 		}
-		file := fileFromRow(db.File{
-			ID:            row.ID,
-			UploaderID:    row.UploaderID,
-			AccessHash:    row.AccessHash,
-			Size:          row.Size,
-			MimeType:      row.MimeType,
-			FileName:      row.FileName,
-			Stored:        row.Stored,
-			Date:          row.Date,
-			SubtypeRights: row.SubtypeRights,
-			MediaKind:     row.MediaKind,
-			Width:         row.Width,
-			Height:        row.Height,
-		})
-		if row.DerivativeFileID != nil {
-			file.PhotoDerivatives = photoDerivativesFromRow(row.MWidth, row.MHeight, row.MSize, row.Stripped)
-		}
-		files = append(files, file)
+		files = append(files, profilePhotoFileFromRow(row))
 	}
 	return files, total, nil
+}
+
+func profilePhotoFileFromRow(row db.ProfilePhotosByOwnerRow) File {
+	file := fileFromRow(db.File{
+		ID:            row.ID,
+		UploaderID:    row.UploaderID,
+		AccessHash:    row.AccessHash,
+		Size:          row.Size,
+		MimeType:      row.MimeType,
+		FileName:      row.FileName,
+		Stored:        row.Stored,
+		Date:          row.Date,
+		SubtypeRights: row.SubtypeRights,
+		MediaKind:     row.MediaKind,
+		Width:         row.Width,
+		Height:        row.Height,
+	})
+	if row.DerivativeFileID != nil {
+		file.PhotoDerivatives = photoDerivativesFromRow(row.MWidth, row.MHeight, row.MSize, row.Stripped)
+	}
+	return file
 }

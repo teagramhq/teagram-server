@@ -73,6 +73,10 @@ var ErrProfileUploadConflict = errors.New("profile upload request does not match
 // refused rather than re-uploading a photo its owner deleted.
 var ErrProfilePhotoUnavailable = errors.New("profile photo unavailable")
 
+// ErrProfilePhotoBusy means the owner's profile-domain lock did not become
+// available before the selection lane's bounded wait expired.
+var ErrProfilePhotoBusy = errors.New("profile photo selection is busy")
+
 // ErrProfileGalleryCap is returned when admitting a new gallery entry would take
 // the owner past the gallery cap.
 var ErrProfileGalleryCap = errors.New("profile gallery cap reached")

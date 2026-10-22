@@ -56,41 +56,52 @@ func testSmokeProfilePhotoUpload(t *testing.T) {
 	f := newSmokeFixture(t)
 	const phone, viewerPhone = "+15551062001", "+15551062003"
 	seedSmokeUsers(t, f, phone, viewerPhone)
-	owner := newSmokeClient(t, f, "profile photo owner", phone)
+	ownerRequests := &clientRequestRecorder{}
+	owner := newSmokeClientWithRequests(t, f, "profile photo owner", phone, ownerRequests)
 	viewer := newSmokeClient(t, f, "profile photo viewer", viewerPhone)
 	payload := smokeJPEGAtUploadSize(t, smokePhotoPartCount)
-	const fileID = int64(1062001)
-	if err := owner.call(f.ctx, func(ctx context.Context, client *tg.Client) error {
-		for part := range smokePhotoPartCount {
-			start := part * smokePhotoPartSize
-			ok, err := client.UploadSaveFilePart(ctx, &tg.UploadSaveFilePartRequest{
-				FileID: fileID, FilePart: part, Bytes: payload[start : start+smokePhotoPartSize],
+	upload := func(fileID int64) (*tg.Photo, error) {
+		var uploaded *tg.Photo
+		err := owner.call(f.ctx, func(ctx context.Context, client *tg.Client) error {
+			for part := range smokePhotoPartCount {
+				start := part * smokePhotoPartSize
+				ok, err := client.UploadSaveFilePart(ctx, &tg.UploadSaveFilePartRequest{
+					FileID: fileID, FilePart: part, Bytes: payload[start : start+smokePhotoPartSize],
+				})
+				if err != nil {
+					return err
+				}
+				if !ok {
+					return fmt.Errorf("profile photo part %d returned false", part)
+				}
+			}
+			request := &tg.PhotosUploadProfilePhotoRequest{}
+			request.SetFile(&tg.InputFile{
+				ID: fileID, Parts: smokePhotoPartCount, Name: "fictional-avatar.jpg", MD5Checksum: smokePhotoMD5(payload),
 			})
+			result, err := client.PhotosUploadProfilePhoto(ctx, request)
 			if err != nil {
 				return err
 			}
+			photo, ok := result.Photo.(*tg.Photo)
 			if !ok {
-				return fmt.Errorf("profile photo part %d returned false", part)
+				return fmt.Errorf("profile photo = %T, want *tg.Photo", result.Photo)
 			}
-		}
-		request := &tg.PhotosUploadProfilePhotoRequest{}
-		request.SetFile(&tg.InputFile{
-			ID: fileID, Parts: smokePhotoPartCount, Name: "fictional-avatar.jpg", MD5Checksum: smokePhotoMD5(payload),
+			if photo.ID <= 0 || photo.DCID <= 0 {
+				return fmt.Errorf("profile photo identity = id %d, dc %d", photo.ID, photo.DCID)
+			}
+			uploaded = photo
+			return nil
 		})
-		result, err := client.PhotosUploadProfilePhoto(ctx, request)
-		if err != nil {
-			return err
-		}
-		photo, ok := result.Photo.(*tg.Photo)
-		if !ok {
-			return fmt.Errorf("profile photo = %T, want *tg.Photo", result.Photo)
-		}
-		if photo.ID <= 0 || photo.DCID <= 0 {
-			return fmt.Errorf("profile photo identity = id %d, dc %d", photo.ID, photo.DCID)
-		}
-		return nil
-	}); err != nil {
-		t.Fatalf("upload profile photo: %v", err)
+		return uploaded, err
+	}
+	first, err := upload(1062001)
+	if err != nil {
+		t.Fatalf("upload first profile photo: %v", err)
+	}
+	second, err := upload(1062002)
+	if err != nil {
+		t.Fatalf("upload second profile photo: %v", err)
 	}
 	var profile *tg.UsersUserFull
 	if err := viewer.call(f.ctx, func(ctx context.Context, client *tg.Client) error {
@@ -115,6 +126,9 @@ func testSmokeProfilePhotoUpload(t *testing.T) {
 	if !ok || userPhotoID.PhotoID <= 0 {
 		t.Fatalf("full profile photo = %T/%+v, want a selected profile photo", userPhoto, userPhoto)
 	}
+	if userPhotoID.PhotoID != second.ID {
+		t.Fatalf("current profile photo id = %d, want latest upload %d", userPhotoID.PhotoID, second.ID)
+	}
 
 	var photos tg.PhotosPhotosClass
 	if err := owner.call(f.ctx, func(ctx context.Context, client *tg.Client) error {
@@ -127,30 +141,141 @@ func testSmokeProfilePhotoUpload(t *testing.T) {
 		t.Fatalf("list uploaded profile photo: %v", err)
 	}
 	page, ok := photos.(*tg.PhotosPhotosSlice)
-	if !ok || len(page.Photos) != 1 {
-		t.Fatalf("profile gallery = %#v, want one uploaded photo", photos)
+	if !ok || len(page.Photos) != 2 {
+		t.Fatalf("profile gallery = %#v, want both uploaded photos", photos)
 	}
-	photo, ok := page.Photos[0].(*tg.Photo)
+	gallery := make([]*tg.Photo, len(page.Photos))
+	for i, item := range page.Photos {
+		photo, ok := item.(*tg.Photo)
+		if !ok {
+			t.Fatalf("profile gallery photo %d = %T, want *tg.Photo", i, item)
+		}
+		gallery[i] = photo
+	}
+	if gallery[0].ID != second.ID || gallery[1].ID != first.ID {
+		t.Fatalf("profile gallery order = [%d %d], want [%d %d]", gallery[0].ID, gallery[1].ID, second.ID, first.ID)
+	}
+
+	selectionStart := ownerRequests.count()
+	var selected *tg.PhotosPhoto
+	if err := owner.call(f.ctx, func(ctx context.Context, client *tg.Client) error {
+		var err error
+		selected, err = client.PhotosUpdateProfilePhoto(ctx, &tg.PhotosUpdateProfilePhotoRequest{
+			ID: &tg.InputPhoto{
+				ID: gallery[1].ID, AccessHash: gallery[1].AccessHash,
+				FileReference: gallery[1].FileReference,
+			},
+		})
+		return err
+	}); err != nil {
+		t.Fatalf("reselect earlier profile photo: %v", err)
+	}
+	if err := ownerRequests.matchFixtureSince(selectionStart, "photos_updateProfilePhoto.1"); err != nil {
+		t.Fatalf("match profile-photo reselection request fixture: %v", err)
+	}
+	selectedPhoto, ok := selected.Photo.(*tg.Photo)
+	if !ok || selectedPhoto.ID != first.ID {
+		t.Fatalf("reselection response photo = %T/%+v, want earlier photo %d", selected.Photo, selected.Photo, first.ID)
+	}
+	if len(selected.Users) != 1 {
+		t.Fatalf("reselection returned %d users, want the owner", len(selected.Users))
+	}
+	selectedUser, ok := selected.Users[0].(*tg.User)
 	if !ok {
-		t.Fatalf("profile gallery photo = %T, want *tg.Photo", page.Photos[0])
+		t.Fatalf("reselection user = %T, want *tg.User", selected.Users[0])
 	}
-	if photo.ID != userPhotoID.PhotoID {
-		t.Fatalf("gallery photo id = %d, user profile photo id = %d", photo.ID, userPhotoID.PhotoID)
+	selectedUserPhoto, hasPhoto := selectedUser.GetPhoto()
+	selectedUserProfile, ok := selectedUserPhoto.(*tg.UserProfilePhoto)
+	if !hasPhoto || !ok || selectedUserProfile.PhotoID != first.ID {
+		t.Fatalf("reselection user photo = %T/%+v, want earlier photo %d", selectedUserPhoto, selectedUserPhoto, first.ID)
+	}
+
+	var users []tg.UserClass
+	if err := viewer.call(f.ctx, func(ctx context.Context, client *tg.Client) error {
+		var err error
+		users, err = client.UsersGetUsers(ctx, []tg.InputUserClass{inputUser(viewer.id, owner.id)})
+		return err
+	}); err != nil {
+		t.Fatalf("read current profile photo through users.getUsers: %v", err)
+	}
+	if len(users) != 1 {
+		t.Fatalf("users.getUsers returned %d users, want the owner", len(users))
+	}
+	updatedUser, ok := users[0].(*tg.User)
+	if !ok {
+		t.Fatalf("users.getUsers user = %T, want *tg.User", users[0])
+	}
+	updatedUserPhoto, hasPhoto := updatedUser.GetPhoto()
+	updatedProfilePhoto, ok := updatedUserPhoto.(*tg.UserProfilePhoto)
+	if !hasPhoto || !ok || updatedProfilePhoto.PhotoID != first.ID {
+		t.Fatalf("users.getUsers photo = %T/%+v, want selected photo %d", updatedUserPhoto, updatedUserPhoto, first.ID)
+	}
+
+	if err := viewer.call(f.ctx, func(ctx context.Context, client *tg.Client) error {
+		_, err := client.UploadGetFile(ctx, &tg.UploadGetFileRequest{
+			Location: &tg.InputPeerPhotoFileLocation{Peer: peerUser(viewer.id, owner.id), PhotoID: second.ID, Big: true},
+			Offset:   0, Limit: len(payload),
+		})
+		if err == nil || !tgErrorIs(err, "LOCATION_INVALID") {
+			return fmt.Errorf("download old current photo: %w, want LOCATION_INVALID", err)
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("old current peer-photo location: %v", err)
+	}
+
+	var viewerPhotos tg.PhotosPhotosClass
+	if err := viewer.call(f.ctx, func(ctx context.Context, client *tg.Client) error {
+		var err error
+		viewerPhotos, err = client.PhotosGetUserPhotos(ctx, &tg.PhotosGetUserPhotosRequest{
+			UserID: inputUser(viewer.id, owner.id), Limit: 10,
+		})
+		return err
+	}); err != nil {
+		t.Fatalf("read retained profile photo gallery: %v", err)
+	}
+	viewerPage, ok := viewerPhotos.(*tg.PhotosPhotosSlice)
+	if !ok || len(viewerPage.Photos) != 2 {
+		t.Fatalf("viewer profile gallery = %#v, want both retained photos", viewerPhotos)
+	}
+	var retained *tg.Photo
+	for _, item := range viewerPage.Photos {
+		photo, ok := item.(*tg.Photo)
+		if ok && photo.ID == second.ID {
+			retained = photo
+			break
+		}
+	}
+	if retained == nil {
+		t.Fatalf("old current photo %d is missing from the gallery", second.ID)
+	}
+	var retainedSize *tg.PhotoSize
+	for _, class := range retained.Sizes {
+		if size, ok := class.(*tg.PhotoSize); ok && size.Type != "m" {
+			retainedSize = size
+			break
+		}
+	}
+	if retainedSize == nil {
+		t.Fatalf("old current photo %d has no original size", second.ID)
 	}
 	var downloaded tg.UploadFileClass
 	if err := viewer.call(f.ctx, func(ctx context.Context, client *tg.Client) error {
 		var err error
 		downloaded, err = client.UploadGetFile(ctx, &tg.UploadGetFileRequest{
-			Location: &tg.InputPeerPhotoFileLocation{Peer: peerUser(viewer.id, owner.id), PhotoID: userPhotoID.PhotoID, Big: true},
-			Offset:   0, Limit: len(payload),
+			Location: &tg.InputPhotoFileLocation{
+				ID: retained.ID, AccessHash: retained.AccessHash,
+				FileReference: retained.FileReference, ThumbSize: retainedSize.Type,
+			},
+			Offset: 0, Limit: retainedSize.Size,
 		})
 		return err
 	}); err != nil {
-		t.Fatalf("download current profile photo: %v", err)
+		t.Fatalf("download retained photo through gallery lane: %v", err)
 	}
 	file, ok := downloaded.(*tg.UploadFile)
 	if !ok || !bytes.Equal(file.Bytes, payload) {
-		t.Fatalf("downloaded profile photo = %T, want original JPEG bytes", downloaded)
+		t.Fatalf("gallery download = %T, want original JPEG bytes", downloaded)
 	}
 }
 

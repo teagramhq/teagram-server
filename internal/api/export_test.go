@@ -488,6 +488,28 @@ func ProfilePhotoGetSeqForTestWithLogger(
 	return profilePhotoHandlers(s, blobs, log, time.Now, perAccount, perReplica)
 }
 
+// UpdateProfilePhotoForTest invokes photos.updateProfilePhoto with the default
+// disabled rate limit, through the same handler used by the RPC dispatcher.
+func UpdateProfilePhotoForTest(
+	s *store.Store, userID int64, req *tg.PhotosUpdateProfilePhotoRequest,
+) (bin.Encoder, error) {
+	return UpdateProfilePhotoForTestWithRateLimit(s, userID, req, store.RateLimitConfig{})
+}
+
+// UpdateProfilePhotoForTestWithRateLimit invokes photos.updateProfilePhoto with
+// a caller-supplied update_profile rate budget.
+func UpdateProfilePhotoForTestWithRateLimit(
+	s *store.Store, userID int64, req *tg.PhotosUpdateProfilePhotoRequest, limit store.RateLimitConfig,
+) (bin.Encoder, error) {
+	var buf bin.Buffer
+	if err := req.Encode(&buf); err != nil {
+		return nil, err
+	}
+	h := testHandlers(s)
+	h.rateLimitUpdateProfile = limit
+	return h.handleUpdateProfilePhoto(&mtproto.Request{Ctx: context.Background(), UserID: userID, Buf: &buf})
+}
+
 // ProfilePhotoSeq is one gallery lane, reusable across calls.
 type ProfilePhotoSeq func(ctx context.Context, viewerID int64, req ProfilePhotoGet) (bin.Encoder, error)
 

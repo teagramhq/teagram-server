@@ -373,6 +373,7 @@ func newWithPhotoThumbsAndDialogFilterSyncAndUploadPartTTLAndTurnstile(s *store.
 	register(d, tg.UsersGetFullUserRequestTypeID, h.handleGetFullUser)
 	register(d, tg.PhotosGetUserPhotosRequestTypeID, h.handleGetUserPhotos)
 	register(d, tg.PhotosUploadProfilePhotoRequestTypeID, h.handleUploadProfilePhoto)
+	register(d, tg.PhotosUpdateProfilePhotoRequestTypeID, h.handleUpdateProfilePhoto)
 	register(d, tg.UsersGetSavedMusicRequestTypeID, h.handleGetSavedMusic)
 	register(d, tg.AccountGetSavedMusicIDsRequestTypeID, h.handleGetSavedMusicIDs)
 	register(d, tg.AccountGetAuthorizationsRequestTypeID, h.handleGetAuthorizations)
