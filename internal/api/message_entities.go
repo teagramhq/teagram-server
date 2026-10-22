@@ -1,12 +1,105 @@
 package api
 
 import (
+	"regexp"
+	"strings"
+	"unicode"
 	"unicode/utf16"
+	"unicode/utf8"
 
 	"github.com/gotd/td/tg"
 
 	"github.com/teagramhq/teagram-server/internal/store"
 )
+
+var messageURLPattern = regexp.MustCompile(`(?i)(?:https?://|tg://)[^\s<>"']+|(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,}(?::[0-9]{1,5})?(?:[/?#][^\s<>"']*)?`)
+
+func (h *handlers) encodeMessageEntitiesWithURLs(viewerID int64, text string, entities []tg.MessageEntityClass) ([]store.PollDescriptionEntity, error) {
+	encoded, err := h.encodeMessageEntities(viewerID, text, entities)
+	if err != nil {
+		return nil, err
+	}
+	return addDetectedMessageURLs(text, encoded)
+}
+
+func addDetectedMessageURLs(text string, entities []store.PollDescriptionEntity) ([]store.PollDescriptionEntity, error) {
+	merged := append([]store.PollDescriptionEntity(nil), entities...)
+	for _, match := range messageURLPattern.FindAllStringIndex(text, -1) {
+		start, end := match[0], match[1]
+		if start > 0 {
+			previous, _ := utf8.DecodeLastRuneInString(text[:start])
+			if isMessageURLWordRune(previous) || previous == '@' || previous == '.' {
+				continue
+			}
+		}
+		candidate := trimMessageURLSuffix(text[start:end])
+		if candidate == "" {
+			continue
+		}
+		end = start + len(candidate)
+		offset := utf16Length(text[:start])
+		length := utf16Length(text[start:end])
+		if overlapsMessageEntity(offset, length, merged) {
+			continue
+		}
+		if len(merged) >= store.MaxPollDescriptionEntities {
+			return nil, errEntitiesTooLong
+		}
+		merged = append(merged, store.PollDescriptionEntity{
+			Type: store.PollDescriptionEntityURL, Offset: offset, Length: length,
+		})
+	}
+	return merged, nil
+}
+
+func isMessageURLWordRune(r rune) bool {
+	return r == '_' || r == '-' || unicode.IsLetter(r) || unicode.IsDigit(r)
+}
+
+func trimMessageURLSuffix(value string) string {
+	value = strings.TrimRight(value, ".,!?;:")
+	for len(value) > 0 {
+		last := value[len(value)-1]
+		var opening, closing byte
+		switch last {
+		case ')':
+			opening, closing = '(', ')'
+		case ']':
+			opening, closing = '[', ']'
+		case '}':
+			opening, closing = '{', '}'
+		default:
+			return value
+		}
+		if strings.Count(value, string(closing)) <= strings.Count(value, string(opening)) {
+			return value
+		}
+		value = value[:len(value)-1]
+	}
+	return value
+}
+
+func overlapsMessageEntity(offset, length int, entities []store.PollDescriptionEntity) bool {
+	end := offset + length
+	for _, entity := range entities {
+		switch entity.Type {
+		case store.PollDescriptionEntityURL,
+			store.PollDescriptionEntityTextURL,
+			store.PollDescriptionEntityCode,
+			store.PollDescriptionEntityPre:
+		default:
+			continue
+		}
+		if offset < entity.Offset+entity.Length && entity.Offset < end {
+			return true
+		}
+	}
+	return false
+}
+
+func utf16Length(text string) int {
+	return len(utf16.Encode([]rune(text)))
+}
 
 func (h *handlers) encodeMessageEntities(viewerID int64, text string, entities []tg.MessageEntityClass) ([]store.PollDescriptionEntity, error) {
 	if len(entities) > store.MaxPollDescriptionEntities {

@@ -1551,7 +1551,7 @@ func TestBasicGroupPhotoSendFailureRepushesUpdateSkippedBehindBarrier(t *testing
 	done := make(chan sendOutcome, 1)
 	go func() {
 		result, update, after, sendErr := h.sendChatMedia(
-			originConn, req, chat.ID, &tg.MessagesSendMediaRequest{Message: "photo", RandomID: randomID}, missingFileID, []string{"send_photos"},
+			originConn, req, chat.ID, &tg.MessagesSendMediaRequest{Message: "photo", RandomID: randomID}, missingFileID, []string{"send_photos"}, nil,
 		)
 		done <- sendOutcome{result: result, update: update, after: after, err: sendErr}
 	}()

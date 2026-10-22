@@ -1994,7 +1994,7 @@ func TestDeliverChannelPostMapsSenderRandomIDBeforeSendResult(t *testing.T) {
 	// This is the later RPC result for the same already-committed send.
 	if _, err := h.sendChannelMessage(&mtproto.Request{Ctx: ctx, UserID: alice.ID}, ch.ID, &tg.MessagesSendMessageRequest{
 		Message: "pending post", RandomID: randomID,
-	}, 0); err != nil {
+	}, 0, nil); err != nil {
 		t.Fatalf("sendMessage retry result after live push: %v", err)
 	}
 }

@@ -56,7 +56,7 @@ RETURNING pts, (next_local_id - 1)::bigint AS local_id;
 -- statement. The arrays are parallel, one element per row.
 -- name: InsertAlbumMessages :exec
 INSERT INTO messages (owner_id, local_id, peer_type, peer_id, from_id, message, out, random_id, peer_local_id,
-                      fanout_id, file_id, grouped_id)
+                      fanout_id, file_id, grouped_id, entities)
 SELECT unnest(sqlc.arg(owner_ids)::bigint[]),
        unnest(sqlc.arg(local_ids)::bigint[]),
        sqlc.arg(peer_type)::smallint,
@@ -68,7 +68,8 @@ SELECT unnest(sqlc.arg(owner_ids)::bigint[]),
        unnest(sqlc.arg(peer_local_ids)::bigint[]),
        unnest(sqlc.arg(fanout_ids)::bigint[]),
        unnest(sqlc.arg(file_ids)::bigint[]),
-       sqlc.arg(grouped_id)::bigint;
+       sqlc.arg(grouped_id)::bigint,
+       NULLIF(unnest(sqlc.arg(entities)::text[]), '')::jsonb;
 
 -- InsertNewMessageEvents writes one new-message event per album row.
 -- name: InsertNewMessageEvents :exec
@@ -131,7 +132,7 @@ RETURNING pts, (next_local_id - 1)::bigint AS local_id;
 -- InsertChannelAlbumMessages writes every post of one channel album.
 -- name: InsertChannelAlbumMessages :exec
 INSERT INTO channel_messages (
-    channel_id, local_id, from_id, message, random_id, file_id, reply_to_msg_id, grouped_id, post_author
+    channel_id, local_id, from_id, message, random_id, file_id, reply_to_msg_id, grouped_id, post_author, entities
 )
 SELECT sqlc.arg(channel_id)::bigint,
        unnest(sqlc.arg(local_ids)::bigint[]),
@@ -141,7 +142,8 @@ SELECT sqlc.arg(channel_id)::bigint,
        unnest(sqlc.arg(file_ids)::bigint[]),
        sqlc.narg(reply_to_msg_id)::int,
        sqlc.arg(grouped_id)::bigint,
-       sqlc.narg(post_author)::text;
+       sqlc.narg(post_author)::text,
+       NULLIF(unnest(sqlc.arg(entities)::text[]), '')::jsonb;
 
 -- InsertChannelNewMessageEvents writes one new-message event per album post.
 -- name: InsertChannelNewMessageEvents :exec
@@ -155,7 +157,7 @@ SELECT sqlc.arg(channel_id)::bigint,
 -- dedup tokens in this channel's own random_id space.
 -- name: ChannelMessagesByRandomIDs :many
 SELECT channel_id, local_id, from_id, date, message, edit_date, deleted,
-       random_id, grouped_id, file_id, reply_to_msg_id, action_type, ttl_period, post_author
+       random_id, grouped_id, file_id, reply_to_msg_id, action_type, ttl_period, post_author, entities
 FROM channel_messages
 WHERE channel_id = sqlc.arg(channel_id)::bigint
   AND random_id = ANY(sqlc.arg(random_ids)::bigint[])

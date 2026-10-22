@@ -84,6 +84,25 @@ func encodePollDescriptionEntities(entities []PollDescriptionEntity) (string, er
 	return string(encoded), nil
 }
 
+// EncodeMessageEntities validates and encodes formatting attached to a message
+// row. It shares the versioned representation used for poll descriptions.
+func EncodeMessageEntities(entities []PollDescriptionEntity) (string, error) {
+	canonical, err := normalizePollDescriptionEntities(entities)
+	if err != nil {
+		return "", err
+	}
+	if len(canonical) == 0 {
+		return "", nil
+	}
+	return encodePollDescriptionEntities(canonical)
+}
+
+// DecodeMessageEntities treats invalid stored entity metadata as absent so a
+// corrupt formatting payload cannot make a message unreadable.
+func DecodeMessageEntities(encoded []byte) []PollDescriptionEntity {
+	return decodePollDescriptionEntities(encoded)
+}
+
 // decodePollDescriptionEntities treats invalid stored metadata as absent
 // formatting. A bad entity must not prevent its containing message or poll
 // from being delivered through history, differences, dialogs, or search.

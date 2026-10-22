@@ -25,6 +25,7 @@ type AlbumItem struct {
 	Photo      bool
 	RandomID   int64
 	Text       string
+	Entities   []PollDescriptionEntity
 }
 
 // AlbumSend is one album send. GroupedID is drawn by the caller, never taken
@@ -271,11 +272,11 @@ func bumpStateBy(ctx context.Context, q *db.Queries, ownerID int64, n int) (firs
 // albumRows accumulates the parallel arrays of one batched album write.
 type albumRows struct {
 	owners, localIDs, peerIDs, randomIDs, peerLocalIDs, fanoutIDs, fileIDs, pts []int64
-	texts                                                                       []string
+	texts, entities                                                             []string
 	outs                                                                        []bool
 }
 
-func (r *albumRows) add(owner, localID, peerID, randomID, peerLocalID, fanoutID, fileID, pts int64, text string, out bool) {
+func (r *albumRows) add(owner, localID, peerID, randomID, peerLocalID, fanoutID, fileID, pts int64, text, entities string, out bool) {
 	r.owners = append(r.owners, owner)
 	r.localIDs = append(r.localIDs, localID)
 	r.peerIDs = append(r.peerIDs, peerID)
@@ -285,6 +286,7 @@ func (r *albumRows) add(owner, localID, peerID, randomID, peerLocalID, fanoutID,
 	r.fileIDs = append(r.fileIDs, fileID)
 	r.pts = append(r.pts, pts)
 	r.texts = append(r.texts, text)
+	r.entities = append(r.entities, entities)
 	r.outs = append(r.outs, out)
 }
 
@@ -292,7 +294,7 @@ func (r *albumRows) write(ctx context.Context, qtx *db.Queries, peerType PeerTyp
 	if err := qtx.InsertAlbumMessages(ctx, db.InsertAlbumMessagesParams{
 		OwnerIds: r.owners, LocalIds: r.localIDs, PeerType: int16(peerType), PeerIds: r.peerIDs, FromID: fromID,
 		Texts: r.texts, Outs: r.outs, RandomIds: r.randomIDs, PeerLocalIds: r.peerLocalIDs,
-		FanoutIds: r.fanoutIDs, FileIds: r.fileIDs, GroupedID: groupedID,
+		FanoutIds: r.fanoutIDs, FileIds: r.fileIDs, GroupedID: groupedID, Entities: r.entities,
 	}); err != nil {
 		return fmt.Errorf("insert album messages: %w", err)
 	}
@@ -312,11 +314,19 @@ func albumRandomIDs(items []AlbumItem) []int64 {
 	return ids
 }
 
-func validAlbum(a AlbumSend) error {
+func albumEntityPayloads(a AlbumSend) ([]string, error) {
 	if a.FromID == 0 || a.GroupedID == 0 || len(a.Items) < 2 || len(a.Items) > MaxAlbumItems {
-		return ErrMediaInvalid
+		return nil, ErrMediaInvalid
 	}
-	return nil
+	payloads := make([]string, len(a.Items))
+	for i, item := range a.Items {
+		payload, err := EncodeMessageEntities(item.Entities)
+		if err != nil {
+			return nil, ErrMediaInvalid
+		}
+		payloads[i] = payload
+	}
+	return payloads, nil
 }
 
 // SendUserAlbum writes a 1:1 album: every grant consumed and every copy of
@@ -324,7 +334,8 @@ func validAlbum(a AlbumSend) error {
 // SendMessage takes: both owners' advisory locks, then the files rows. Blocks
 // decide a new album as they decide SendMessage.
 func (s *Store) SendUserAlbum(ctx context.Context, toID int64, a AlbumSend) (AlbumResult, error) {
-	if err := validAlbum(a); err != nil {
+	entityPayloads, err := albumEntityPayloads(a)
+	if err != nil {
 		return AlbumResult{}, err
 	}
 	fromID, n := a.FromID, len(a.Items)
@@ -374,16 +385,16 @@ func (s *Store) SendUserAlbum(ctx context.Context, toID int64, a AlbumSend) (Alb
 		offset := int64(i)
 		senderLocal := firstLocal[fromID] + offset
 		if toID == fromID {
-			rows.add(fromID, senderLocal, fromID, item.RandomID, 0, 0, item.FileID, firstPts[fromID]+offset, item.Text, true)
+			rows.add(fromID, senderLocal, fromID, item.RandomID, 0, 0, item.FileID, firstPts[fromID]+offset, item.Text, entityPayloads[i], true)
 			continue
 		}
 		if withhold {
-			rows.add(fromID, senderLocal, toID, item.RandomID, 0, 0, item.FileID, firstPts[fromID]+offset, item.Text, true)
+			rows.add(fromID, senderLocal, toID, item.RandomID, 0, 0, item.FileID, firstPts[fromID]+offset, item.Text, entityPayloads[i], true)
 			continue
 		}
 		recipientLocal := firstLocal[toID] + offset
-		rows.add(fromID, senderLocal, toID, item.RandomID, recipientLocal, 0, item.FileID, firstPts[fromID]+offset, item.Text, true)
-		rows.add(toID, recipientLocal, fromID, 0, senderLocal, 0, item.FileID, firstPts[toID]+offset, item.Text, false)
+		rows.add(fromID, senderLocal, toID, item.RandomID, recipientLocal, 0, item.FileID, firstPts[fromID]+offset, item.Text, entityPayloads[i], true)
+		rows.add(toID, recipientLocal, fromID, 0, senderLocal, 0, item.FileID, firstPts[toID]+offset, item.Text, entityPayloads[i], false)
 	}
 	if err = rows.write(ctx, qtx, PeerTypeUser, fromID, a.GroupedID); err != nil {
 		return AlbumResult{}, err
@@ -422,7 +433,8 @@ func (s *Store) SendUserAlbum(ctx context.Context, toID int64, a AlbumSend) (Alb
 // album's grouped_id. Default restrictions are judged item by item on each
 // file's stored rights, so the album is refused when any item would be.
 func (s *Store) SendChatAlbum(ctx context.Context, chatID int64, a AlbumSend) (AlbumResult, error) {
-	if err := validAlbum(a); err != nil {
+	entityPayloads, err := albumEntityPayloads(a)
+	if err != nil {
 		return AlbumResult{}, err
 	}
 	if chatID == 0 {
@@ -514,7 +526,7 @@ func (s *Store) SendChatAlbum(ctx context.Context, chatID int64, a AlbumSend) (A
 				randomID = item.RandomID
 			}
 			offset := int64(i)
-			rows.add(owner, firstLocal[owner]+offset, chatID, randomID, 0, fanoutIDs[i], item.FileID, firstPts[owner]+offset, item.Text, out)
+			rows.add(owner, firstLocal[owner]+offset, chatID, randomID, 0, fanoutIDs[i], item.FileID, firstPts[owner]+offset, item.Text, entityPayloads[i], out)
 		}
 		dialogPeers[j] = chatID
 		tops[j] = firstLocal[owner] + int64(n) - 1
@@ -669,7 +681,8 @@ func channelAlbumDedup(ctx context.Context, qtx *db.Queries, channelID, fromID i
 // taken after channel_state and the participant row as in the single-photo
 // path.
 func (s *Store) PostChannelAlbumAs(ctx context.Context, channelID, replyToMsgID int64, a AlbumSend) (ChannelAlbumResult, error) {
-	if err := validAlbum(a); err != nil {
+	entityPayloads, err := albumEntityPayloads(a)
+	if err != nil {
 		return ChannelAlbumResult{}, err
 	}
 	if channelID == 0 {
@@ -777,14 +790,15 @@ func (s *Store) PostChannelAlbumAs(ctx context.Context, channelID, replyToMsgID 
 	localIDs := make([]int64, n)
 	pts := make([]int64, n)
 	texts := make([]string, n)
+	entities := make([]string, n)
 	fileIDs := make([]int64, n)
 	for i, item := range a.Items {
 		localIDs[i], pts[i] = firstLocal+int64(i), firstPts+int64(i)
-		texts[i], fileIDs[i] = item.Text, item.FileID
+		texts[i], entities[i], fileIDs[i] = item.Text, entityPayloads[i], item.FileID
 	}
 	if err = qtx.InsertChannelAlbumMessages(ctx, db.InsertChannelAlbumMessagesParams{
 		ChannelID: channelID, LocalIds: localIDs, FromID: fromID, Texts: texts, RandomIds: randomIDs,
-		FileIds: fileIDs, ReplyToMsgID: replyTo, GroupedID: a.GroupedID, PostAuthor: postAuthor,
+		FileIds: fileIDs, ReplyToMsgID: replyTo, GroupedID: a.GroupedID, PostAuthor: postAuthor, Entities: entities,
 	}); err != nil {
 		return ChannelAlbumResult{}, fmt.Errorf("insert channel album: %w", err)
 	}
