@@ -118,6 +118,10 @@ class RestoreReadinessContractTests(unittest.TestCase):
         self.assertEqual(RESTORE_READINESS.bounded_work_seconds(None, 300), 300)
         self.assertEqual(RESTORE_READINESS.bounded_work_seconds("malformed-sql", None), 8 * 60)
         self.assertEqual(RESTORE_READINESS.bounded_work_seconds("sigkill", 9 * 60), 8 * 60)
+        self.assertEqual(
+            RESTORE_READINESS.bounded_work_seconds("sigkill", 20 * 60, local_fixture_test=True),
+            20 * 60,
+        )
         with self.assertRaises(ValueError):
             RESTORE_READINESS.bounded_work_seconds(None, 0)
 
@@ -131,9 +135,55 @@ class RestoreReadinessContractTests(unittest.TestCase):
         self.assertIn("run_teardown_command sudo -n -- /usr/bin/find", shell)
         self.assertIn('local_args=(--local-dump "$2")', shell)
         self.assertIn('local_args=(--local-fixture-test)', shell)
+        self.assertIn('time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())', SCRIPT.read_text(encoding="utf-8"))
         self.assertLess(shell.index("--validate-local-dump"), shell.index("build_inputs\n"))
         workflow = Path(__file__).parents[3] / ".github" / "workflows" / "ci.yml"
         self.assertIn("test-restore-readiness.sh --local-fixture-test", workflow.read_text(encoding="utf-8"))
+        self.assertIn("--local-fixture-test --fault-test auth-clear-signal", shell)
+        self.assertIn("--local-fixture-test --fault-test sigkill", shell)
+
+    def test_local_dump_head_is_known_and_uses_the_latest_repo_migration(self) -> None:
+        versions = RESTORE_READINESS.repo_migration_versions()
+        self.assertTrue(versions)
+        self.assertEqual(RESTORE_READINESS.HEAD_SCHEMA, versions[-1])
+        self.assertGreater(RESTORE_READINESS.HEAD_SCHEMA, "20261021000004")
+        self.assertEqual(
+            RESTORE_READINESS.resolve_local_dump_migration_head(RESTORE_READINESS.HEAD_SCHEMA),
+            RESTORE_READINESS.HEAD_SCHEMA,
+        )
+        with self.assertRaises(ValueError):
+            RESTORE_READINESS.resolve_local_dump_migration_head("20990101000000")
+
+    def test_local_fault_injection_is_limited_to_fixture_signal_and_sigkill(self) -> None:
+        runtime_args = [
+            "--docker-bin", "/usr/bin/docker",
+            "--atlas-bin", "/run/atlas",
+            "--build-dir", "/run/build",
+            "--build-uid", "1000",
+            "--go-arch", "amd64",
+        ]
+        for fault in ("auth-clear-signal", "sigkill"):
+            with self.subTest(fault=fault), patch.object(
+                RESTORE_READINESS.sys,
+                "argv",
+                [str(SCRIPT), *runtime_args, "--local-fixture-test", "--fault-test", fault],
+            ):
+                parsed = RESTORE_READINESS.parse_args()
+            self.assertTrue(parsed.local_fixture_test)
+            self.assertEqual(parsed.fault_test, fault)
+
+        invalid_local_inputs = (
+            [*runtime_args, "--local-fixture-test", "--fault-test", "malformed-sql"],
+            [*runtime_args, "--local-fixture-test", "--fault-test", "auth-clear-failure"],
+            [*runtime_args, "--local-dump", "/root/pgdump-pre-abcdef0-20261022T211333Z.sql", "--fault-test", "sigkill"],
+        )
+        for arguments in invalid_local_inputs:
+            with self.subTest(arguments=arguments), patch.object(
+                RESTORE_READINESS.sys,
+                "argv",
+                [str(SCRIPT), *arguments],
+            ), redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+                RESTORE_READINESS.parse_args()
 
     def test_local_dump_preflight_is_a_single_metadata_only_mode(self) -> None:
         arguments = [
@@ -250,7 +300,7 @@ class RestoreReadinessContractTests(unittest.TestCase):
                 RESTORE_READINESS.write_sigkill_marker(17)
 
         shell = SHELL_GATE.read_text(encoding="utf-8")
-        self.assertIn('run_drill --fault-test sigkill >"$sigkill_output" 2>/dev/null &', shell)
+        self.assertIn("run_sigkill_recovery_drill --fault-test sigkill", shell)
         self.assertIn('[[ $sigkill_status -ne 137 ]]', shell)
         self.assertIn('[[ $(<"$sigkill_output") != "SIGKILL_INJECTED" ]]', shell)
 
@@ -493,6 +543,8 @@ class RestoreReadinessContractTests(unittest.TestCase):
             return os.stat_result((mode, 1, 2, links, uid, gid, size, 0, 0, 0))
 
         self.assertTrue(RESTORE_READINESS.validate_local_dump_metadata(file_info(), name))
+        deploy_name = "pgdump-pre-abcdef0-20261022T211333Z.sql"
+        self.assertTrue(RESTORE_READINESS.validate_local_dump_metadata(file_info(), deploy_name))
         for info, candidate in (
             (file_info(mode=stat.S_IFLNK | 0o600), name),
             (file_info(uid=1), name),
@@ -502,6 +554,7 @@ class RestoreReadinessContractTests(unittest.TestCase):
             (file_info(size=0), name),
             (file_info(size=RESTORE_READINESS.MAX_LOCAL_DUMP_BYTES + 1), name),
             (file_info(), "pgdump-pre-" + "A" * 40 + ".sql"),
+            (file_info(), "pgdump-pre-abcdef0-20261022T21133Z.sql"),
         ):
             with self.subTest(info=info, name=candidate):
                 self.assertFalse(RESTORE_READINESS.validate_local_dump_metadata(info, candidate))
@@ -566,6 +619,12 @@ class RestoreReadinessContractTests(unittest.TestCase):
         self.assertIn("            LOCAL_DUMP_LEAK_MARKER,", source)
         self.assertIn('role="local_restore_client",\n            user="0:70"', source)
         self.assertIn('"local_restore_client": "0:70"', source)
+        self.assertIn("MIGRATION_HEAD_RELATION_SAFE_SQL", source)
+        self.assertIn("database_user=LOCAL_ATTESTATION_ROLE", source)
+        self.assertIn("pinned_search_path=True", source)
+        self.assertIn("restore_readiness_copy_to_program", source)
+        self.assertIn("ALTER ROLE postgres SET search_path = public, pg_catalog", source)
+        self.assertIn("CREATE FUNCTION public.md5(text)", source)
 
         tree = ast.parse(source)
         restore_method = next(
@@ -627,6 +686,69 @@ class RestoreReadinessContractTests(unittest.TestCase):
         self.assertEqual(filtered.returncode, 0)
         self.assertIn("SET statement_timeout = 0;\n" + body + copy, filtered.stdout)
 
+    def test_local_schema_snapshot_uses_pinned_non_superuser_queries(self) -> None:
+        target = {"id": "a" * 64}
+        drill = object.__new__(RESTORE_READINESS.Drill)
+        drill.local_admin_role = None
+
+        def query(_database: dict[str, Any], statement: str, _phase: str, **_kwargs: Any) -> str:
+            if statement == RESTORE_READINESS.LOCAL_OBJECT_INVENTORY_SQL:
+                return "1|" + "a" * 32
+            if statement == RESTORE_READINESS.ROLE_STATE_SQL:
+                return json.dumps({"roles": [], "memberships": [], "settings": []})
+            if statement in (RESTORE_READINESS.DATABASE_STATE_SQL, RESTORE_READINESS.EXTENSION_STATE_SQL):
+                return "{}"
+            raise AssertionError(f"unexpected local snapshot query: {statement}")
+
+        drill.sql = Mock(side_effect=query)
+        drill.local_schema_snapshot(target, "schema_validation")
+        self.assertEqual(drill.sql.call_count, 4)
+        for call in drill.sql.call_args_list:
+            self.assertEqual(call.kwargs["database_user"], RESTORE_READINESS.LOCAL_ATTESTATION_ROLE)
+            self.assertTrue(call.kwargs["pinned_search_path"])
+
+    def test_local_migration_head_is_guarded_by_catalog_shape_before_read(self) -> None:
+        target = {"id": "b" * 64, "role": "target_postgres"}
+        drill = object.__new__(RESTORE_READINESS.Drill)
+        drill.databases = {"target": target}
+
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            migration_dir = Path(temporary_directory) / "migrations"
+            migration_dir.mkdir()
+            (migration_dir / f"{RESTORE_READINESS.HEAD_SCHEMA}_fixture.sql").write_text("-- fixture\n")
+            drill.run_dir = Path(temporary_directory)
+            calls: list[tuple[str, dict[str, Any]]] = []
+            outputs = iter(("false", "safe", "reviewed-shape", "reviewed-shape", RESTORE_READINESS.HEAD_SCHEMA))
+
+            def query(_database: dict[str, Any], statement: str, _phase: str, **kwargs: Any) -> str:
+                calls.append((statement, kwargs))
+                return next(outputs)
+
+            drill.sql = Mock(side_effect=query)
+            self.assertEqual(
+                drill.local_dump_migration_head({"id": "c" * 64}, target, "schema_validation"),
+                RESTORE_READINESS.HEAD_SCHEMA,
+            )
+            self.assertEqual(
+                [statement for statement, _ in calls],
+                [
+                    "SELECT rolsuper::text FROM pg_catalog.pg_roles WHERE rolname = CURRENT_USER;",
+                    RESTORE_READINESS.MIGRATION_HEAD_RELATION_SAFE_SQL,
+                    RESTORE_READINESS.MIGRATION_HEAD_RELATION_SHAPE_SQL,
+                    RESTORE_READINESS.MIGRATION_HEAD_RELATION_SHAPE_SQL,
+                    RESTORE_READINESS.MIGRATION_HEAD_SQL,
+                ],
+            )
+            self.assertTrue(all(kwargs["pinned_search_path"] for _, kwargs in calls))
+            self.assertEqual(calls[1][1]["database_user"], RESTORE_READINESS.LOCAL_ATTESTATION_ROLE)
+            self.assertEqual(calls[-1][1]["database_user"], "postgres")
+
+            drill.sql = Mock(side_effect=("false", "unsafe"))
+            with self.assertRaises(RESTORE_READINESS.DrillFailure) as unsafe_relation:
+                drill.local_dump_migration_head({"id": "c" * 64}, target, "schema_validation")
+            self.assertEqual(unsafe_relation.exception.category, "schema_failure")
+            self.assertEqual(drill.sql.call_count, 2)
+
     def test_local_success_report_adds_only_its_mode_marker(self) -> None:
         report = RESTORE_READINESS.report_document(
             "application_assertions",
@@ -654,7 +776,8 @@ class RestoreReadinessContractTests(unittest.TestCase):
     def test_auth_key_inventory_and_bounded_fixture_transactions(self) -> None:
         inventory = RESTORE_READINESS.load_auth_key_inventory()
         self.assertEqual(inventory["base_commit"], "bdb89970bbd40fb57fdb89f3aa8fafb78925ce93")
-        self.assertEqual(inventory["schema_head"], RESTORE_READINESS.HEAD_SCHEMA)
+        self.assertEqual(inventory["schema_head"], "20261021000004")
+        self.assertIn(inventory["schema_head"], RESTORE_READINESS.repo_migration_versions())
         self.assertEqual(
             inventory["trigger_tables"],
             [
@@ -720,6 +843,12 @@ class RestoreReadinessContractTests(unittest.TestCase):
             "JOIN public.browser_acceptance_binding_evidence AS evidence",
             local_transaction,
         )
+        local_interrupted = RESTORE_READINESS.local_auth_key_clear_transaction_sql(wait_for_signal=True)
+        self.assertLess(
+            local_interrupted.index("\\echo RESTORE_READINESS_AUTH_KEY_DELETE_APPLIED"),
+            local_interrupted.index("pg_sleep(30)"),
+        )
+        self.assertLess(local_interrupted.index("pg_sleep(30)"), local_interrupted.index("COMMIT"))
 
         transaction = RESTORE_READINESS.auth_key_clear_transaction_sql((-101, -202, -303))
         self.assertIn("LOCK TABLE public.auth_keys, public.srp_challenges", transaction)
@@ -1036,6 +1165,18 @@ class RestoreReadinessContractTests(unittest.TestCase):
         )
         self.assertEqual(report["category"], "restore_failure")
         self.assertNotIn("raw", str(report))
+        later_migration_failure = RESTORE_READINESS.report_document(
+            "schema_validation",
+            "schema_failure",
+            "verified",
+            7,
+            migration_head="20261022000002",
+        )
+        self.assertEqual(later_migration_failure["migration_head"], "20261022000002")
+        with self.assertRaises(ValueError):
+            RESTORE_READINESS.report_document(
+                "schema_validation", "schema_failure", "verified", 7, migration_head="20990101000000"
+            )
         with self.assertRaises(ValueError):
             RESTORE_READINESS.report_document("restore", "raw-database-error", "verified", 7)
 

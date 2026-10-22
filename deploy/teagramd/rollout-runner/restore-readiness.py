@@ -28,11 +28,33 @@ from typing import Any
 # Use the public, digest-preserving mirror because this gate refuses ambient registry credentials.
 SOURCE_IMAGE = "mirror.gcr.io/library/postgres@sha256:721873c34ceb9f8d8fc265984940dc982404c105f19ad51be9fdc5970a6080ea"
 RESTORE_IMAGE = "mirror.gcr.io/library/postgres@sha256:77f585114c32fbca283dc835b0596f4e52b51b4c6662d7810b2f4084f60a1873"
+ROOT = Path(__file__).resolve().parents[3]
 BASE_SCHEMA = "20261021000003"
 # The base migrations landed with the head store check, so the fixture is seeded by the
 # last release before them and then migrated to BASE_SCHEMA.
 SEED_SCHEMA = "20261021000002"
-HEAD_SCHEMA = "20261021000004"
+
+
+def repo_migration_versions(migration_dir: Path | None = None) -> tuple[str, ...]:
+    directory = migration_dir or ROOT / "migrations"
+    try:
+        entries = sorted(directory.glob("*.sql"))
+    except OSError as exc:
+        raise ValueError("repository migrations are unavailable") from exc
+    versions: list[str] = []
+    for entry in entries:
+        if entry.is_symlink() or not entry.is_file():
+            raise ValueError("invalid repository migration")
+        match = re.fullmatch(r"([0-9]{14})_[A-Za-z0-9_-]+\.sql", entry.name)
+        if match is None:
+            raise ValueError("invalid repository migration")
+        versions.append(match.group(1))
+    if not versions or len(versions) != len(set(versions)):
+        raise ValueError("invalid repository migration set")
+    return tuple(versions)
+
+
+HEAD_SCHEMA = repo_migration_versions()[-1]
 AUTH_KEY_INVENTORY_PATH = Path(__file__).with_name("auth-key-clearing-inventory.json")
 AUTH_KEY_FIXTURE_COUNT = 3
 LOCAL_UNENROLLED_AUTH_KEY_FIXTURE_COUNT = 2
@@ -41,6 +63,7 @@ AUTH_KEY_CLEARED_STATE = ["0", "0", "0", "1", "2", "2"]
 AUTH_KEY_CLEAR_ACK = b"RESTORE_READINESS_AUTH_KEY_DELETE_APPLIED"
 # Roles the repository migrations create; the restore imports no globals, so the target has none.
 MIGRATION_ROLES = "browser_acceptance_probe"
+LOCAL_ATTESTATION_ROLE = "browser_acceptance_probe"
 WORK_SECONDS = 30 * 60
 FAULT_WORK_SECONDS = 8 * 60
 CLEANUP_SECONDS = 4 * 60
@@ -87,21 +110,114 @@ MAX_CAPTURE = 2 * 1024 * 1024
 MAX_ARCHIVE = 256 * 1024 * 1024
 MAX_LOCAL_DUMP_BYTES = 512 * 1024 * 1024
 MAX_LOCAL_AUTH_KEYS = 100_000
-LOCAL_DUMP_NAME = re.compile(r"^pgdump-pre-[0-9a-f]{7,40}\.sql$")
+LOCAL_DUMP_NAME = re.compile(r"^pgdump-pre-(?:[0-9a-f]{7,40}|[0-9a-f]{7}-[0-9]{8}T[0-9]{6}Z)\.sql$")
 LOCAL_DUMP_LEAK_MARKER = b"RESTORE_READINESS_LOCAL_DUMP_LEAK_MARKER"
 RESTORE_BOOTSTRAP_ROLE = "restore_bootstrap"
 
 
-def bounded_work_seconds(fault_test: str | None, requested: int | None) -> int:
+def bounded_work_seconds(
+    fault_test: str | None,
+    requested: int | None,
+    *,
+    local_fixture_test: bool = False,
+) -> int:
     """Keep each run inside its normal or fault-test work budget."""
     if requested is not None and requested < 1:
         raise ValueError("work budget must be positive")
-    limit = FAULT_WORK_SECONDS if fault_test else WORK_SECONDS
+    limit = FAULT_WORK_SECONDS if fault_test and not local_fixture_test else WORK_SECONDS
     return limit if requested is None else min(limit, requested)
 
 
-ROOT = Path(__file__).resolve().parents[3]
-MIGRATION_HEAD_SQL = "SELECT COALESCE(max(version), '') FROM atlas_schema_revisions.atlas_schema_revisions;"
+def resolve_local_dump_migration_head(version: str, migration_dir: Path | None = None) -> str:
+    if not re.fullmatch(r"[0-9]{14}", version):
+        raise ValueError("invalid local dump migration head")
+    if version < BASE_SCHEMA or version not in repo_migration_versions(migration_dir):
+        raise ValueError("unsupported local dump migration head")
+    return version
+
+
+MIGRATION_HEAD_SQL = "SELECT COALESCE(pg_catalog.max(version), '') FROM atlas_schema_revisions.atlas_schema_revisions;"
+MIGRATION_HEAD_RELATION_SAFE_SQL = r"""
+SELECT CASE WHEN relation.relkind = 'r'
+  AND NOT relation.relrowsecurity
+  AND NOT relation.relforcerowsecurity
+  AND pg_catalog.pg_get_userbyid(relation.relowner) = 'postgres'
+  AND EXISTS (
+    SELECT 1 FROM pg_catalog.pg_attribute AS attribute
+    JOIN pg_catalog.pg_type AS data_type ON data_type.oid = attribute.atttypid
+    JOIN pg_catalog.pg_namespace AS type_namespace ON type_namespace.oid = data_type.typnamespace
+    WHERE attribute.attrelid = relation.oid
+      AND attribute.attname = 'version'
+      AND type_namespace.nspname = 'pg_catalog'
+      AND data_type.typname IN ('text', 'varchar')
+      AND attribute.attnum > 0
+      AND NOT attribute.attisdropped
+      AND attribute.attgenerated = ''
+      AND attribute.attidentity = ''
+  )
+  AND NOT EXISTS (
+    SELECT 1 FROM pg_catalog.pg_policy AS policy
+    WHERE policy.polrelid = relation.oid
+  )
+  AND NOT EXISTS (
+    SELECT 1 FROM pg_catalog.pg_rewrite AS rewrite
+    WHERE rewrite.ev_class = relation.oid
+  )
+  AND NOT EXISTS (
+    SELECT 1 FROM pg_catalog.pg_trigger AS trigger_row
+    WHERE trigger_row.tgrelid = relation.oid AND NOT trigger_row.tgisinternal
+  )
+  THEN 'safe' ELSE 'unsafe' END
+FROM pg_catalog.pg_class AS relation
+JOIN pg_catalog.pg_namespace AS namespace ON namespace.oid = relation.relnamespace
+WHERE namespace.nspname = 'atlas_schema_revisions'
+  AND relation.relname = 'atlas_schema_revisions';
+"""
+MIGRATION_HEAD_RELATION_SHAPE_SQL = r"""
+SELECT jsonb_build_object(
+  'kind', relation.relkind,
+  'owner', pg_catalog.pg_get_userbyid(relation.relowner),
+  'persistence', relation.relpersistence,
+  'columns', COALESCE((
+    SELECT jsonb_agg(jsonb_build_object(
+      'name', attribute.attname,
+      'type', pg_catalog.format_type(attribute.atttypid, attribute.atttypmod),
+      'not_null', attribute.attnotnull,
+      'identity', attribute.attidentity,
+      'generated', attribute.attgenerated,
+      'default', COALESCE(pg_catalog.pg_get_expr(default_value.adbin, default_value.adrelid), '')
+    ) ORDER BY attribute.attnum)
+    FROM pg_catalog.pg_attribute AS attribute
+    LEFT JOIN pg_catalog.pg_attrdef AS default_value
+      ON default_value.adrelid = attribute.attrelid AND default_value.adnum = attribute.attnum
+    WHERE attribute.attrelid = relation.oid
+      AND attribute.attnum > 0
+      AND NOT attribute.attisdropped
+  ), '[]'::jsonb),
+  'constraints', COALESCE((
+    SELECT jsonb_agg(pg_catalog.pg_get_constraintdef(constraint_row.oid, true) ORDER BY constraint_row.conname)
+    FROM pg_catalog.pg_constraint AS constraint_row
+    WHERE constraint_row.conrelid = relation.oid AND constraint_row.contype <> 'n'
+  ), '[]'::jsonb),
+  'rules', COALESCE((
+    SELECT jsonb_agg(rewrite.rulename ORDER BY rewrite.rulename)
+    FROM pg_catalog.pg_rewrite AS rewrite WHERE rewrite.ev_class = relation.oid
+  ), '[]'::jsonb),
+  'policies', COALESCE((
+    SELECT jsonb_agg(policy.polname ORDER BY policy.polname)
+    FROM pg_catalog.pg_policy AS policy WHERE policy.polrelid = relation.oid
+  ), '[]'::jsonb),
+  'triggers', COALESCE((
+    SELECT jsonb_agg(pg_catalog.pg_get_triggerdef(trigger_row.oid, true) ORDER BY trigger_row.tgname)
+    FROM pg_catalog.pg_trigger AS trigger_row
+    WHERE trigger_row.tgrelid = relation.oid AND NOT trigger_row.tgisinternal
+  ), '[]'::jsonb)
+)::text
+FROM pg_catalog.pg_class AS relation
+JOIN pg_catalog.pg_namespace AS namespace ON namespace.oid = relation.relnamespace
+WHERE namespace.nspname = 'atlas_schema_revisions'
+  AND relation.relname = 'atlas_schema_revisions';
+"""
 DATABASE_IDENTITY_SQL = r"""
 SELECT current_database() || '|' || current_setting('server_version_num') || '|' ||
        (SELECT oid::text FROM pg_database WHERE datname = current_database()) || '|' ||
@@ -337,7 +453,8 @@ def load_auth_key_inventory() -> dict[str, Any]:
         raise ValueError("auth-key inventory is unavailable") from exc
     if (
         not isinstance(inventory, dict)
-        or inventory.get("schema_head") != HEAD_SCHEMA
+        or inventory.get("schema_head") not in repo_migration_versions()
+        or inventory.get("schema_head") < BASE_SCHEMA
         or not isinstance(inventory.get("foreign_keys"), list)
         or not isinstance(inventory.get("triggers"), list)
         or not isinstance(inventory.get("trigger_tables"), list)
@@ -485,7 +602,12 @@ $auth_key_clear$;""",
     return "\n".join(statements) + "\n"
 
 
-def local_auth_key_clear_transaction_sql() -> str:
+def local_auth_key_clear_transaction_sql(*, wait_for_signal: bool = False) -> str:
+    wait = (
+        f"\\echo {AUTH_KEY_CLEAR_ACK.decode('ascii')}\nSELECT pg_sleep(30);\n"
+        if wait_for_signal
+        else ""
+    )
     return f"""
 BEGIN;
 SET LOCAL lock_timeout = '5s';
@@ -530,7 +652,7 @@ BEGIN
   END IF;
 END
 $local_auth_key_clear$;
-COMMIT;
+{wait}COMMIT;
 """.lstrip()
 
 
@@ -1258,7 +1380,7 @@ def report_document(
         raise ValueError("invalid report value")
     if cleanup not in {"verified", "unverified", "not_started"}:
         raise ValueError("invalid cleanup value")
-    if migration_head not in {"not_reached", BASE_SCHEMA, HEAD_SCHEMA}:
+    if migration_head != "not_reached" and migration_head not in repo_migration_versions():
         raise ValueError("invalid migration head")
     if help_get_config not in {"pass", "fail", "not_run"}:
         raise ValueError("invalid config assertion")
@@ -3162,15 +3284,15 @@ class Drill(Docker):
         *,
         allow_interrupted: bool = False,
         database_user: str = "postgres",
+        pinned_search_path: bool = False,
     ) -> str:
         if not re.fullmatch(r"[a-z][a-z0-9_]{0,63}", database_user):
             raise DrillFailure(phase, "isolation_refusal")
-        output = self.call(
-            [
-                "exec",
-                "--interactive",
-                "--user",
-                "70:70",
+        command = ["exec", "--interactive", "--user", "70:70"]
+        if pinned_search_path:
+            command.extend(("--env", "PGOPTIONS=-c search_path=pg_catalog"))
+        command.extend(
+            (
                 database["id"],
                 "psql",
                 "-X",
@@ -3183,7 +3305,10 @@ class Drill(Docker):
                 database_user,
                 "-d",
                 "teagram",
-            ],
+            )
+        )
+        output = self.call(
+            command,
             phase=phase,
             category="schema_failure",
             input_bytes=statement.encode("utf-8"),
@@ -3379,8 +3504,17 @@ class Drill(Docker):
         if not keep_env:
             self.delete_private_file(env_file)
 
-    def fixture_state(self, database: dict[str, Any], phase: str) -> list[str]:
-        value = self.sql(database, FIXTURE_STATE_SQL, phase)
+    def fixture_state(
+        self,
+        database: dict[str, Any],
+        phase: str,
+        *,
+        pinned_search_path: bool = False,
+    ) -> list[str]:
+        if pinned_search_path:
+            value = self.sql(database, FIXTURE_STATE_SQL, phase, pinned_search_path=True)
+        else:
+            value = self.sql(database, FIXTURE_STATE_SQL, phase)
         parts = value.split("|")
         if len(parts) != 9 or not all(part.isdigit() for part in (parts[0], parts[1], *parts[4:])):
             raise DrillFailure(phase, "schema_failure")
@@ -3394,11 +3528,126 @@ class Drill(Docker):
         return int(parts[0]), parts[1]
 
     def local_object_inventory(self, database: dict[str, Any], phase: str) -> tuple[int, str]:
-        value = self.sql(database, LOCAL_OBJECT_INVENTORY_SQL, phase)
+        value = self.sql(
+            database,
+            LOCAL_OBJECT_INVENTORY_SQL,
+            phase,
+            database_user=LOCAL_ATTESTATION_ROLE,
+            pinned_search_path=True,
+        )
         parts = value.split("|")
         if len(parts) != 2 or not parts[0].isdigit() or not re.fullmatch(r"[0-9a-f]{32}", parts[1]):
             raise DrillFailure(phase, "schema_failure")
         return int(parts[0]), parts[1]
+
+    def local_schema_snapshot(self, database: dict[str, Any], phase: str) -> tuple[Any, ...]:
+        return (
+            self.local_object_inventory(database, phase),
+            self.local_role_state(database, phase),
+            self.sql(
+                database,
+                DATABASE_STATE_SQL,
+                phase,
+                database_user=LOCAL_ATTESTATION_ROLE,
+                pinned_search_path=True,
+            ),
+            self.sql(
+                database,
+                EXTENSION_STATE_SQL,
+                phase,
+                database_user=LOCAL_ATTESTATION_ROLE,
+                pinned_search_path=True,
+            ),
+        )
+
+    def local_role_state(self, database: dict[str, Any], phase: str) -> str:
+        try:
+            state = json.loads(
+                self.sql(
+                    database,
+                    ROLE_STATE_SQL,
+                    phase,
+                    database_user=LOCAL_ATTESTATION_ROLE,
+                    pinned_search_path=True,
+                )
+            )
+        except (json.JSONDecodeError, TypeError) as exc:
+            raise DrillFailure(phase, "schema_failure") from exc
+        if not isinstance(state, dict) or not all(isinstance(state.get(key), list) for key in ("roles", "memberships", "settings")):
+            raise DrillFailure(phase, "schema_failure")
+        local_admin = self.local_admin_role
+        state["roles"] = [role for role in state["roles"] if role.get("name") != local_admin]
+        for role in state["roles"]:
+            if role.get("name") == "postgres":
+                role.update(
+                    superuser=False,
+                    create_role=False,
+                    create_database=False,
+                    replication=False,
+                    bypass_rls=False,
+                )
+        state["memberships"] = [
+            membership
+            for membership in state["memberships"]
+            if membership.get("member") != local_admin
+            and membership.get("role") != local_admin
+            and membership.get("grantor") != local_admin
+        ]
+        state["settings"] = [setting for setting in state["settings"] if setting.get("role") != local_admin]
+        return json.dumps(state, separators=(",", ":"), sort_keys=True)
+
+    def local_dump_migration_head(
+        self,
+        source: dict[str, Any],
+        target: dict[str, Any],
+        phase: str,
+    ) -> str:
+        if target is not self.databases.get("target"):
+            raise DrillFailure(phase, "isolation_refusal")
+        if self.sql(
+            target,
+            "SELECT rolsuper::text FROM pg_catalog.pg_roles WHERE rolname = CURRENT_USER;",
+            phase,
+            database_user="postgres",
+            pinned_search_path=True,
+        ) != "false":
+            raise DrillFailure(phase, "schema_failure")
+        safe = self.sql(
+            target,
+            MIGRATION_HEAD_RELATION_SAFE_SQL,
+            phase,
+            database_user=LOCAL_ATTESTATION_ROLE,
+            pinned_search_path=True,
+        )
+        if safe != "safe":
+            raise DrillFailure(phase, "schema_failure")
+        target_shape = self.sql(
+            target,
+            MIGRATION_HEAD_RELATION_SHAPE_SQL,
+            phase,
+            database_user=LOCAL_ATTESTATION_ROLE,
+            pinned_search_path=True,
+        )
+        source_shape = self.sql(
+            source,
+            MIGRATION_HEAD_RELATION_SHAPE_SQL,
+            phase,
+            database_user=LOCAL_ATTESTATION_ROLE,
+            pinned_search_path=True,
+        )
+        if not target_shape or target_shape != source_shape:
+            raise DrillFailure(phase, "schema_failure")
+        version = self.sql(
+            target,
+            MIGRATION_HEAD_SQL,
+            phase,
+            database_user="postgres",
+            pinned_search_path=True,
+        )
+        try:
+            return resolve_local_dump_migration_head(version, self.run_dir / "migrations")
+        except ValueError as exc:
+            raise DrillFailure(phase, "schema_failure") from exc
 
     def table_counts(self, database: dict[str, Any], phase: str) -> tuple[int, str]:
         value = self.sql(database, TABLE_COUNTS_SQL, phase)
@@ -3638,7 +3887,8 @@ class Drill(Docker):
         ):
             raise DrillFailure(self.phase, "fixture_failure")
         self.sql(source, f"COMMENT ON SCHEMA public IS '{marker}';", self.phase)
-        fixture_path = self.run_dir / "work" / f"pgdump-pre-{token}{token[:8]}.sql"
+        fixture_timestamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
+        fixture_path = self.run_dir / "work" / f"pgdump-pre-{token[:7]}-{fixture_timestamp}.sql"
         self.private_write(
             fixture_path,
             b"",
@@ -3740,21 +3990,17 @@ class Drill(Docker):
         self.phase = return_phase
         return status, output
 
-    def run_local_hostile_fixture_tests(self, source: dict[str, Any], target: dict[str, Any]) -> None:
+    def run_local_hostile_fixture_tests(
+        self,
+        source: dict[str, Any],
+        target: dict[str, Any],
+        expected_head: str,
+    ) -> None:
         if not self.args.local_fixture_test:
             return
         self.phase = "schema_validation"
-        baseline = (
-            self.local_object_inventory(target, self.phase),
-            self.sql(target, ROLE_STATE_SQL, self.phase),
-            self.sql(target, DATABASE_STATE_SQL, self.phase),
-            self.sql(target, EXTENSION_STATE_SQL, self.phase),
-        )
-        if (
-            baseline[0] != self.local_object_inventory(source, self.phase)
-            or baseline[2] != self.sql(source, DATABASE_STATE_SQL, self.phase)
-            or baseline[3] != self.sql(source, EXTENSION_STATE_SQL, self.phase)
-        ):
+        baseline = self.local_schema_snapshot(target, self.phase)
+        if baseline != self.local_schema_snapshot(source, self.phase):
             raise DrillFailure(self.phase, "schema_failure")
         marker = LOCAL_DUMP_LEAK_MARKER.decode("ascii")
         refused_inputs = (
@@ -3823,12 +4069,74 @@ class Drill(Docker):
         if status != 0:
             raise DrillFailure(self.phase, "schema_failure")
         current = (
-            self.local_object_inventory(target, self.phase),
-            self.sql(target, ROLE_STATE_SQL, self.phase),
-            self.sql(target, DATABASE_STATE_SQL, self.phase),
-            self.sql(target, EXTENSION_STATE_SQL, self.phase),
+            *self.local_schema_snapshot(target, self.phase),
         )
         if current != baseline:
+            raise DrillFailure(self.phase, "schema_failure")
+
+        program_marker = "/tmp/restore-readiness-local-copy-to"
+        status, _ = self.run_local_fixture_sql(
+            target,
+            "ALTER TABLE atlas_schema_revisions.atlas_schema_revisions "
+            "RENAME TO restore_readiness_saved_revisions; "
+            "CREATE FUNCTION public.restore_readiness_copy_to_program() RETURNS text "
+            "LANGUAGE plpgsql AS $$ BEGIN "
+            "EXECUTE 'COPY (SELECT 1) TO PROGRAM ''touch /tmp/restore-readiness-local-copy-to'''; "
+            f"RETURN '{expected_head}'; END $$; "
+            "CREATE VIEW atlas_schema_revisions.atlas_schema_revisions AS "
+            "SELECT public.restore_readiness_copy_to_program() AS version;",
+        )
+        if status != 0:
+            raise DrillFailure(self.phase, "schema_failure")
+        try:
+            self.verify_local_schema_state(source, target, self.phase, expected_head=expected_head)
+        except DrillFailure as exc:
+            if exc.phase != self.phase or exc.category != "schema_failure":
+                raise
+        else:
+            raise DrillFailure(self.phase, "schema_failure")
+        self.call(
+            ["exec", "--user", "70:70", target["id"], "test", "!", "-e", program_marker],
+            phase=self.phase,
+            category="schema_failure",
+        )
+        status, _ = self.run_local_fixture_sql(
+            target,
+            "DROP VIEW atlas_schema_revisions.atlas_schema_revisions; "
+            "DROP FUNCTION public.restore_readiness_copy_to_program(); "
+            "ALTER TABLE atlas_schema_revisions.restore_readiness_saved_revisions "
+            "RENAME TO atlas_schema_revisions;",
+        )
+        if status != 0:
+            raise DrillFailure(self.phase, "schema_failure")
+
+        status, _ = self.run_local_fixture_sql(
+            target,
+            "ALTER ROLE postgres SET search_path = public, pg_catalog; "
+            "CREATE FUNCTION public.md5(text) RETURNS text LANGUAGE plpgsql IMMUTABLE "
+            "AS $$ BEGIN RAISE EXCEPTION 'shadow md5 executed'; END $$;",
+        )
+        if status != 0:
+            raise DrillFailure(self.phase, "schema_failure")
+        try:
+            self.verify_local_schema_state(source, target, self.phase, expected_head=expected_head)
+        except DrillFailure as exc:
+            if exc.phase != self.phase or exc.category != "schema_failure":
+                raise
+        else:
+            raise DrillFailure(self.phase, "schema_failure")
+        self.call(
+            ["exec", "--user", "70:70", target["id"], "test", "!", "-e", program_marker],
+            phase=self.phase,
+            category="schema_failure",
+        )
+        status, _ = self.run_local_fixture_sql(
+            target,
+            "ALTER ROLE postgres RESET search_path; DROP FUNCTION public.md5(text);",
+        )
+        if status != 0:
+            raise DrillFailure(self.phase, "schema_failure")
+        if self.local_schema_snapshot(target, self.phase) != baseline:
             raise DrillFailure(self.phase, "schema_failure")
 
     def prepare_local_restore_target(self, target: dict[str, Any]) -> None:
@@ -3940,16 +4248,16 @@ dump_path=$2
         source: dict[str, Any],
         target: dict[str, Any],
         phase: str,
-        expected_head: str = BASE_SCHEMA,
+        expected_head: str,
     ) -> None:
+        target_snapshot = self.local_schema_snapshot(target, phase)
+        source_snapshot = self.local_schema_snapshot(source, phase)
         if (
-            self.sql(target, MIGRATION_HEAD_SQL, phase) != expected_head
-            or self.sql(source, MIGRATION_HEAD_SQL, phase) != expected_head
-            or self.fixture_state(target, phase)[2:] != self.fixture_state(source, phase)[2:]
-            or self.local_object_inventory(target, phase) != self.local_object_inventory(source, phase)
-            or self.sql(target, ROLE_STATE_SQL, phase) != self.sql(source, ROLE_STATE_SQL, phase)
-            or self.sql(target, DATABASE_STATE_SQL, phase) != self.sql(source, DATABASE_STATE_SQL, phase)
-            or self.sql(target, EXTENSION_STATE_SQL, phase) != self.sql(source, EXTENSION_STATE_SQL, phase)
+            target_snapshot != source_snapshot
+            or self.sql(target, MIGRATION_HEAD_SQL, phase, pinned_search_path=True) != expected_head
+            or self.sql(source, MIGRATION_HEAD_SQL, phase, pinned_search_path=True) != expected_head
+            or self.fixture_state(target, phase, pinned_search_path=True)[2:]
+            != self.fixture_state(source, phase, pinned_search_path=True)[2:]
         ):
             raise DrillFailure(phase, "schema_failure")
         self.verify_database_settings(target, phase)
@@ -3976,12 +4284,28 @@ dump_path=$2
 
     def apply_pending_migration(self, target: dict[str, Any]) -> None:
         self.migrate_database("target", target, HEAD_SCHEMA, "pending_migration")
-        self.migration_head = self.sql(target, MIGRATION_HEAD_SQL, "pending_migration")
-        if self.migration_head != HEAD_SCHEMA or self.sql(target, INDEX_VALID_SQL, "pending_migration") != "valid":
+        self.migration_head = self.sql(
+            target,
+            MIGRATION_HEAD_SQL,
+            "pending_migration",
+            pinned_search_path=self.input_mode == "local",
+        )
+        if self.migration_head != HEAD_SCHEMA or self.sql(
+            target,
+            INDEX_VALID_SQL,
+            "pending_migration",
+            pinned_search_path=self.input_mode == "local",
+        ) != "valid":
             raise DrillFailure("pending_migration", "schema_failure")
 
     def auth_key_state(self, database: dict[str, Any], phase: str, *, allow_interrupted: bool = False) -> list[str]:
-        state = self.sql(database, AUTH_KEY_STATE_SQL, phase, allow_interrupted=allow_interrupted).split("|")
+        state = self.sql(
+            database,
+            AUTH_KEY_STATE_SQL,
+            phase,
+            allow_interrupted=allow_interrupted,
+            pinned_search_path=self.input_mode == "local",
+        ).split("|")
         if len(state) != 6 or any(not value.isdigit() for value in state):
             raise DrillFailure(phase, "schema_failure")
         return state
@@ -3989,7 +4313,14 @@ dump_path=$2
     def verify_auth_key_inventory(self, database: dict[str, Any], phase: str) -> None:
         try:
             expected = load_auth_key_inventory()
-            actual = json.loads(self.sql(database, AUTH_KEY_INVENTORY_SQL, phase))
+            actual = json.loads(
+                self.sql(
+                    database,
+                    AUTH_KEY_INVENTORY_SQL,
+                    phase,
+                    pinned_search_path=self.input_mode == "local",
+                )
+            )
         except (ValueError, json.JSONDecodeError) as exc:
             raise DrillFailure(phase, "schema_failure") from exc
         expected_inventory = {key: expected[key] for key in ("trigger_tables", "foreign_keys", "triggers")}
@@ -4006,7 +4337,12 @@ dump_path=$2
             raise DrillFailure(self.phase, "isolation_refusal")
         document = self.attest_container(target, self.phase)
         require_container_running(document, self.phase, "schema_failure")
-        if self.sql(target, MIGRATION_HEAD_SQL, self.phase) != HEAD_SCHEMA:
+        if self.sql(
+            target,
+            MIGRATION_HEAD_SQL,
+            self.phase,
+            pinned_search_path=self.input_mode == "local",
+        ) != HEAD_SCHEMA:
             raise DrillFailure(self.phase, "schema_failure")
         self.verify_auth_key_inventory(target, self.phase)
         auth_key_state = self.auth_key_state(target, self.phase)
@@ -4017,7 +4353,12 @@ dump_path=$2
                 "schema_version": 1,
                 "input_mode": self.input_mode,
                 "target_container_id": target["id"],
-                "database_identity": self.sql(target, DATABASE_IDENTITY_SQL, self.phase),
+                "database_identity": self.sql(
+                    target,
+                    DATABASE_IDENTITY_SQL,
+                    self.phase,
+                    pinned_search_path=self.input_mode == "local",
+                ),
                 "migration_head": HEAD_SCHEMA,
                 "table_counts": self.table_counts(target, self.phase)[1],
                 "auth_key_state": auth_key_state,
@@ -4025,7 +4366,9 @@ dump_path=$2
         else:
             try:
                 auth_key_count = int(auth_key_state[0])
-                evidence_bound_key_count = int(self.sql(target, AUTH_KEY_EVIDENCE_BOUND_COUNT_SQL, self.phase))
+                evidence_bound_key_count = int(
+                    self.sql(target, AUTH_KEY_EVIDENCE_BOUND_COUNT_SQL, self.phase, pinned_search_path=True)
+                )
             except ValueError as exc:
                 raise DrillFailure(self.phase, "schema_failure") from exc
             if auth_key_count > MAX_LOCAL_AUTH_KEYS or evidence_bound_key_count > auth_key_count:
@@ -4034,7 +4377,12 @@ dump_path=$2
                 "schema_version": 1,
                 "input_mode": self.input_mode,
                 "target_container_id": target["id"],
-                "database_identity": self.sql(target, DATABASE_IDENTITY_SQL, self.phase),
+                "database_identity": self.sql(
+                    target,
+                    DATABASE_IDENTITY_SQL,
+                    self.phase,
+                    pinned_search_path=self.input_mode == "local",
+                ),
                 "migration_head": HEAD_SCHEMA,
                 "auth_key_state": auth_key_state,
                 "auth_key_evidence_bound_count": evidence_bound_key_count,
@@ -4084,9 +4432,24 @@ dump_path=$2
         document = self.attest_container(target, phase)
         require_container_running(document, phase, "isolation_refusal")
         if (
-            self.sql(target, "SELECT current_database();", phase) != "teagram"
-            or self.sql(target, MIGRATION_HEAD_SQL, phase) != marker["migration_head"]
-            or self.sql(target, DATABASE_IDENTITY_SQL, phase) != marker["database_identity"]
+            self.sql(
+                target,
+                "SELECT current_database();",
+                phase,
+                pinned_search_path=self.input_mode == "local",
+            ) != "teagram"
+            or self.sql(
+                target,
+                MIGRATION_HEAD_SQL,
+                phase,
+                pinned_search_path=self.input_mode == "local",
+            ) != marker["migration_head"]
+            or self.sql(
+                target,
+                DATABASE_IDENTITY_SQL,
+                phase,
+                pinned_search_path=self.input_mode == "local",
+            ) != marker["database_identity"]
         ):
             raise DrillFailure(phase, "isolation_refusal")
         self.verify_auth_key_inventory(target, phase)
@@ -4096,7 +4459,9 @@ dump_path=$2
                 raise DrillFailure(phase, "schema_failure")
         else:
             try:
-                evidence_bound_key_count = int(self.sql(target, AUTH_KEY_EVIDENCE_BOUND_COUNT_SQL, phase))
+                evidence_bound_key_count = int(
+                    self.sql(target, AUTH_KEY_EVIDENCE_BOUND_COUNT_SQL, phase, pinned_search_path=True)
+                )
             except ValueError as exc:
                 raise DrillFailure(phase, "schema_failure") from exc
             if (
@@ -4111,6 +4476,7 @@ dump_path=$2
             "WHERE datname = current_database() AND backend_type = 'client backend' "
             "AND pid <> pg_backend_pid();",
             phase,
+            pinned_search_path=self.input_mode == "local",
         ) != "0":
             raise DrillFailure(phase, "isolation_refusal")
         return marker
@@ -4210,7 +4576,9 @@ dump_path=$2
         if self.input_mode == "local":
             try:
                 auth_key_count = int(before[0])
-                evidence_bound_key_count = int(self.sql(target, AUTH_KEY_EVIDENCE_BOUND_COUNT_SQL, phase))
+                evidence_bound_key_count = int(
+                    self.sql(target, AUTH_KEY_EVIDENCE_BOUND_COUNT_SQL, phase, pinned_search_path=True)
+                )
             except ValueError as exc:
                 raise DrillFailure(phase, "schema_failure") from exc
             marker = self.post_restore_marker or {}
@@ -4224,9 +4592,11 @@ dump_path=$2
         client = self.auth_key_clear_client(target)
         try:
             if self.input_mode == "local":
-                if inject_failure or interrupt_signal is not None:
+                if inject_failure:
                     raise DrillFailure(phase, "fault_test_failure")
-                transaction = local_auth_key_clear_transaction_sql().encode()
+                transaction = local_auth_key_clear_transaction_sql(
+                    wait_for_signal=interrupt_signal is not None
+                ).encode()
             else:
                 transaction = auth_key_clear_transaction_sql(
                     self.synthetic_auth_key_ids,
@@ -5753,7 +6123,11 @@ def run_primary(args: argparse.Namespace) -> int:
         print(json.dumps(report_document("preflight", "preflight_failure", "not_started", 0), separators=(",", ":")))
         return 1
     try:
-        work_seconds = bounded_work_seconds(args.fault_test, args.work_seconds)
+        work_seconds = bounded_work_seconds(
+            args.fault_test,
+            args.work_seconds,
+            local_fixture_test=args.local_fixture_test,
+        )
     except ValueError:
         print("restore readiness preflight check failed: work budget", file=sys.stderr)
         print(json.dumps(report_document("preflight", "preflight_failure", "not_started", 0), separators=(",", ":")))
@@ -5896,7 +6270,7 @@ def run_primary(args: argparse.Namespace) -> int:
         drill.gateway = None
         drill.prepare_materials()
         source = drill.create_database("source")
-        if args.fault_test == "sigkill":
+        if args.fault_test == "sigkill" and not args.local_fixture_test:
             write_sigkill_marker(sys.stdout.fileno())
             os.kill(os.getpid(), signal.SIGKILL)
         drill.migrate_database(
@@ -5920,18 +6294,9 @@ def run_primary(args: argparse.Namespace) -> int:
             "source_migrations",
             expected_auth_keys=AUTH_KEY_FIXTURE_COUNT,
         )
-        target = drill.create_database("target")
-        if drill.input_mode == "local":
-            if args.local_fixture_test:
-                drill.create_local_dump_fixture(source)
-            drill.delete_private_file(drill.files["source_tool_env"])
-            drill.prepare_local_restore_target(target)
-            drill.restore_local_dump(target)
-            drill.run_local_hostile_fixture_tests(source, target)
-            drill.promote_local_restore_owner(target)
-            drill.verify_local_schema_state(source, target, "schema_validation")
+        if args.local_fixture_test:
             drill.migrate_database("source", source, HEAD_SCHEMA, "source_migrations")
-            expected_users, expected_auth_keys = source_fixture_counts(args.local_fixture_test)
+            expected_users, expected_auth_keys = source_fixture_counts(True)
             drill.verify_schema_state(
                 source,
                 expected_users,
@@ -5940,8 +6305,59 @@ def run_primary(args: argparse.Namespace) -> int:
                 expected_head=HEAD_SCHEMA,
                 expected_auth_keys=expected_auth_keys,
             )
-            drill.apply_pending_migration(target)
+        target = drill.create_database("target")
+        if drill.input_mode == "local":
+            if args.local_fixture_test:
+                drill.create_local_dump_fixture(source)
+            drill.delete_private_file(drill.files["source_tool_env"])
+            drill.prepare_local_restore_target(target)
+            drill.restore_local_dump(target)
+            if args.fault_test == "sigkill":
+                write_sigkill_marker(sys.stdout.fileno())
+                os.kill(os.getpid(), signal.SIGKILL)
+            dump_head = drill.local_dump_migration_head(source, target, "schema_validation")
+            try:
+                source_head = resolve_local_dump_migration_head(
+                    drill.sql(source, MIGRATION_HEAD_SQL, "schema_validation", pinned_search_path=True),
+                    drill.run_dir / "migrations",
+                )
+            except ValueError as exc:
+                raise DrillFailure("schema_validation", "schema_failure") from exc
+            if source_head > dump_head:
+                raise DrillFailure("schema_validation", "schema_failure")
+            if source_head != dump_head:
+                drill.migrate_database(
+                    "source",
+                    source,
+                    dump_head,
+                    "source_migrations",
+                    keep_env=dump_head != HEAD_SCHEMA,
+                )
+            expected_users, expected_auth_keys = source_fixture_counts(args.local_fixture_test)
+            drill.verify_schema_state(
+                source,
+                expected_users,
+                MIGRATION_ROLES,
+                "source_migrations",
+                expected_head=dump_head,
+                expected_auth_keys=expected_auth_keys,
+            )
+            drill.verify_local_schema_state(source, target, "schema_validation", expected_head=dump_head)
+            drill.run_local_hostile_fixture_tests(source, target, dump_head)
+            if dump_head != HEAD_SCHEMA:
+                drill.migrate_database("source", source, HEAD_SCHEMA, "source_migrations")
+                drill.verify_schema_state(
+                    source,
+                    expected_users,
+                    MIGRATION_ROLES,
+                    "source_migrations",
+                    expected_head=HEAD_SCHEMA,
+                    expected_auth_keys=expected_auth_keys,
+                )
+                drill.apply_pending_migration(target)
             drill.verify_local_schema_state(source, target, "schema_validation", expected_head=HEAD_SCHEMA)
+            drill.migration_head = HEAD_SCHEMA
+            drill.promote_local_restore_owner(target)
         elif args.fault_test == "malformed-sql":
             drill.restore_fixture(source, target, malformed_sql=malformed_sql_fixture(token))
         else:
@@ -6099,8 +6515,10 @@ def parse_args() -> argparse.Namespace:
         if args.local_dump is not None or args.local_fixture_test or args.fault_test is not None:
             parser.error("invalid recovery input")
         return args
-    if (args.local_dump is not None or args.local_fixture_test) and args.fault_test is not None:
-        parser.error("local mode cannot use fault injection")
+    if args.local_dump is not None and args.fault_test is not None:
+        parser.error("local dump mode cannot use fault injection")
+    if args.local_fixture_test and args.fault_test not in (None, "auth-clear-signal", "sigkill"):
+        parser.error("unsupported local fixture fault injection")
     if not all((args.docker_bin, args.atlas_bin, args.build_dir, args.go_arch)) or args.build_uid is None:
         parser.error("missing confined drill input")
     return args
