@@ -30,6 +30,8 @@ SCHEMA = "teagram.blob-mode/v1"
 REPORT_SCHEMA = "teagram.blob-mode-report/v1"
 TRANSITION_REPORT_SCHEMA = "teagram.blob-mode-report/v2"
 TRANSITION_PROOF_SCHEMA = "teagram.blob-transition-proof/v2"
+SIMPLE_TRANSITION_REPORT_SCHEMA = "teagram.blob-mode-report/v3"
+SIMPLE_TRANSITION_PROOF_SCHEMA = "teagram.blob-transition-proof/v3"
 STACK_MOVE_REPORT_SCHEMA = "teagram.blob-mode-stack-move-report/v1"
 STACK_MOVE_OUTCOME = "stack-moved-local"
 STACK_MOVE_SOURCE_VOLUMES = {
@@ -93,6 +95,28 @@ S3_TRANSITION_PHASES = {
     "copy_pass_2_sha256",
     "destination_census_pass_1_sha256",
     "destination_census_pass_2_sha256",
+}
+SIMPLE_S3_TRANSITION_PHASES = {
+    "candidate_compose_sha256",
+    "local_compose_sha256",
+    "frozen_inventory_sha256",
+    "dump_sha256",
+    "dump_restore_sha256",
+    "source_frozen_sha256",
+    "copy_manifest_sha256",
+    "destination_census_sha256",
+}
+SIMPLE_RECOVERY_TRANSITION_PHASES = {
+    "s3_compose_sha256",
+    "local_compose_sha256",
+    "frozen_inventory_sha256",
+    "dump_sha256",
+    "dump_restore_sha256",
+    "s3_census_sha256",
+    "local_before_restore_sha256",
+    "restore_manifest_sha256",
+    "destination_census_sha256",
+    "retained_keys_sha256",
 }
 RECOVERY_TRANSITION_PHASES_V1 = {
     "frozen_inventory_sha256",
@@ -745,7 +769,7 @@ def valid_outcome(record: object, expected_generation: int, previous_id: str | N
             reject("record-evidence")
     elif outcome == "s3-accepted":
         expected = {"report_sha256", "source_manifest_sha256", "destination_manifest_sha256", "object_count", "byte_total", "copy_passes"}
-        if set(evidence) != expected or type(evidence.get("copy_passes")) is not int or evidence.get("copy_passes") != 2:
+        if set(evidence) != expected or type(evidence.get("copy_passes")) is not int or evidence.get("copy_passes") not in (1, 2):
             reject("record-evidence")
         if not all(digest(evidence.get(key)) for key in ("source_manifest_sha256", "destination_manifest_sha256")):
             reject("record-evidence")
@@ -753,7 +777,7 @@ def valid_outcome(record: object, expected_generation: int, previous_id: str | N
             reject("record-evidence")
     elif outcome == "recovered-local":
         expected = {"report_sha256", "s3_census_manifest_sha256", "restored_manifest_sha256", "object_count", "byte_total", "restore_passes", "retained_cutover_key_count"}
-        if set(evidence) != expected or type(evidence.get("restore_passes")) is not int or evidence.get("restore_passes") != 2:
+        if set(evidence) != expected or type(evidence.get("restore_passes")) is not int or evidence.get("restore_passes") not in (1, 2):
             reject("record-evidence")
         if not all(digest(evidence.get(key)) for key in ("s3_census_manifest_sha256", "restored_manifest_sha256")):
             reject("record-evidence")
@@ -1097,6 +1121,17 @@ def validate_restored_union(
     return retained_count
 
 
+def validate_private_rustfs_render(compose: object) -> None:
+    services = compose.get("services") if isinstance(compose, dict) else None
+    rustfs = services.get("rustfs") if isinstance(services, dict) else None
+    if (
+        not isinstance(rustfs, dict)
+        or rustfs.get("ports") not in (None, [])
+        or rustfs.get("network_mode") not in (None, "")
+    ):
+        reject("transition-rustfs-exposed")
+
+
 def validate_transition_artifacts(
     report_root: pathlib.Path,
     outcome: str,
@@ -1106,6 +1141,79 @@ def validate_transition_artifacts(
     sync: bool = False,
 ) -> None:
     paths = validate_phase_files(report_root, phase_digests, phase_files, sync=sync)
+    simple_cutover = set(phase_digests) == SIMPLE_S3_TRANSITION_PHASES
+    simple_recovery = set(phase_digests) == SIMPLE_RECOVERY_TRANSITION_PHASES
+    if simple_cutover or simple_recovery:
+        if (simple_cutover and outcome != "s3-accepted") or (simple_recovery and outcome != "recovered-local"):
+            reject("transition-report-evidence")
+        try:
+            restore_result = paths["dump_restore_sha256"].read_bytes()
+        except OSError:
+            reject("transition-report-evidence")
+        restore_match = re.fullmatch(
+            rb"restore=pass database=blob_restore_[0-9a-f]{32} dump_sha256=([0-9a-f]{64})\n",
+            restore_result,
+        )
+        if restore_match is None or restore_match.group(1).decode("ascii") != phase_digests.get("dump_sha256"):
+            reject("transition-report-evidence")
+        if simple_cutover:
+            compose = read_json(paths["candidate_compose_sha256"])
+            try:
+                validate_private_rustfs_render(compose)
+            except Reject:
+                reject("transition-report-evidence")
+            manifest_sha, objects, total_bytes = compare_manifest_summaries(
+                [
+                    paths["source_frozen_sha256"],
+                    paths["copy_manifest_sha256"],
+                    paths["destination_census_sha256"],
+                ]
+            )
+            if (
+                manifest_sha != evidence.get("source_manifest_sha256")
+                or manifest_sha != evidence.get("destination_manifest_sha256")
+                or type(evidence.get("object_count")) is not int
+                or evidence.get("object_count") != objects
+                or type(evidence.get("byte_total")) is not int
+                or evidence.get("byte_total") != total_bytes
+                or evidence.get("copy_passes") != 1
+            ):
+                reject("transition-report-evidence")
+        else:
+            compose = read_json(paths["s3_compose_sha256"])
+            try:
+                validate_private_rustfs_render(compose)
+            except Reject:
+                reject("transition-report-evidence")
+            s3_sha, _s3_objects, _s3_bytes = compare_manifest_summaries(
+                [paths["s3_census_sha256"], paths["restore_manifest_sha256"]]
+            )
+            before_sha, _before_objects, _before_bytes = manifest_summary(
+                paths["local_before_restore_sha256"]
+            )
+            retained_sha, _retained_objects, _retained_bytes = manifest_summary(
+                paths["retained_keys_sha256"]
+            )
+            local_sha, objects, total_bytes = manifest_summary(paths["destination_census_sha256"])
+            retained_count = validate_restored_union(
+                paths["local_before_restore_sha256"],
+                paths["s3_census_sha256"],
+                paths["retained_keys_sha256"],
+                paths["destination_census_sha256"],
+            )
+            if (
+                s3_sha != evidence.get("s3_census_manifest_sha256")
+                or local_sha != evidence.get("restored_manifest_sha256")
+                or objects != evidence.get("object_count")
+                or total_bytes != evidence.get("byte_total")
+                or retained_count != evidence.get("retained_cutover_key_count")
+                or retained_sha != phase_digests.get("retained_keys_sha256")
+                or before_sha != phase_digests.get("local_before_restore_sha256")
+                or evidence.get("restore_passes") != 1
+            ):
+                reject("transition-report-evidence")
+        return
+
     release_set = validate_live_schema_dump_binding(paths, phase_digests)
     if outcome == "s3-accepted":
         manifest_names = (
@@ -1266,7 +1374,7 @@ def validate_report(
         reject("report-digest")
     report = read_json(report_file)
     if not isinstance(report, dict) or report.get("schema") not in (
-        REPORT_SCHEMA, TRANSITION_REPORT_SCHEMA, STACK_MOVE_REPORT_SCHEMA,
+        REPORT_SCHEMA, TRANSITION_REPORT_SCHEMA, SIMPLE_TRANSITION_REPORT_SCHEMA, STACK_MOVE_REPORT_SCHEMA,
     ):
         reject("report-schema")
     if (
@@ -1376,7 +1484,15 @@ def validate_report(
     elif record["outcome"] == STACK_MOVE_OUTCOME:
         validate_stack_move_report(report_root, record, report, previous_record)
     else:
-        if report.get("schema") == TRANSITION_REPORT_SCHEMA:
+        simple_report = report.get("schema") == SIMPLE_TRANSITION_REPORT_SCHEMA
+        if simple_report:
+            if record["outcome"] == "s3-accepted":
+                expected_phases = SIMPLE_S3_TRANSITION_PHASES
+            elif record["outcome"] == "recovered-local":
+                expected_phases = SIMPLE_RECOVERY_TRANSITION_PHASES
+            else:
+                reject("report-schema")
+        elif report.get("schema") == TRANSITION_REPORT_SCHEMA:
             expected_phases = S3_TRANSITION_PHASES if record["outcome"] == "s3-accepted" else RECOVERY_TRANSITION_PHASES
         elif record["outcome"] == "s3-accepted":
             expected_phases = S3_TRANSITION_PHASES
@@ -1398,7 +1514,7 @@ def validate_report(
             reject("transition-report-evidence")
         validate_transition_artifacts(report_root, record["outcome"], expected_evidence, phases, phase_files)
         if record["outcome"] == "s3-accepted":
-            if (
+            if report.get("schema") != SIMPLE_TRANSITION_REPORT_SCHEMA and (
                 phases.get("copy_pass_1_sha256") != phases.get("copy_pass_2_sha256")
                 or phases.get("source_provisional_sha256") != phases.get("source_frozen_sha256")
                 or phases.get("source_frozen_sha256") != phases.get("destination_census_pass_1_sha256")
@@ -1407,7 +1523,7 @@ def validate_report(
                 or record["evidence"]["source_manifest_sha256"] != record["evidence"]["destination_manifest_sha256"]
             ):
                 reject("transition-report-evidence")
-        elif (
+        elif report.get("schema") != SIMPLE_TRANSITION_REPORT_SCHEMA and (
             phases.get("s3_census_pass_1_sha256") != phases.get("s3_census_pass_2_sha256")
             or phases.get("s3_census_pass_1_sha256") != record["evidence"]["s3_census_manifest_sha256"]
             or phases.get("restore_pass_1_sha256") != phases.get("restore_pass_2_sha256")
@@ -2234,14 +2350,24 @@ def publish_transition(args: argparse.Namespace) -> None:
     if proof_path.stat().st_size > 1_048_576:
         reject("transition-proof-oversize")
     proof = read_json(proof_path)
+    proof_schema = proof.get("schema") if isinstance(proof, dict) else None
     if (
         not isinstance(proof, dict)
         or set(proof) != {"schema", "outcome", "backend", "volumes", "evidence", "phase_digests", "phase_files"}
-        or proof.get("schema") != TRANSITION_PROOF_SCHEMA
+        or proof_schema not in (TRANSITION_PROOF_SCHEMA, SIMPLE_TRANSITION_PROOF_SCHEMA)
         or proof.get("outcome") != args.outcome
     ):
         reject("transition-proof-invalid")
-    expected_phases = S3_TRANSITION_PHASES if args.outcome == "s3-accepted" else RECOVERY_TRANSITION_PHASES
+    simple_transition = proof_schema == SIMPLE_TRANSITION_PROOF_SCHEMA
+    if simple_transition and args.outcome not in ("s3-accepted", "recovered-local"):
+        reject("transition-proof-invalid")
+    expected_phases = (
+        SIMPLE_S3_TRANSITION_PHASES
+        if simple_transition and args.outcome == "s3-accepted"
+        else SIMPLE_RECOVERY_TRANSITION_PHASES
+        if simple_transition and args.outcome == "recovered-local"
+        else S3_TRANSITION_PHASES if args.outcome == "s3-accepted" else RECOVERY_TRANSITION_PHASES
+    )
     phases = proof.get("phase_digests")
     phase_files = proof.get("phase_files")
     if (
@@ -2272,7 +2398,8 @@ def publish_transition(args: argparse.Namespace) -> None:
         }:
             reject("transition-backend")
         expected = {"source_manifest_sha256", "destination_manifest_sha256", "object_count", "byte_total", "copy_passes"}
-        if set(evidence) != expected:
+        expected_passes = 1 if simple_transition else 2
+        if set(evidence) != expected or evidence.get("copy_passes") != expected_passes:
             reject("transition-proof-invalid")
     else:
         if set(backend) != {"kind", "dir"} or backend != {"kind": "local", "dir": BLOB_TARGET}:
@@ -2281,13 +2408,14 @@ def publish_transition(args: argparse.Namespace) -> None:
             "s3_census_manifest_sha256", "restored_manifest_sha256", "object_count", "byte_total",
             "restore_passes", "retained_cutover_key_count",
         }
-        if set(evidence) != expected:
+        expected_passes = 1 if simple_transition else 2
+        if set(evidence) != expected or evidence.get("restore_passes") != expected_passes:
             reject("transition-proof-invalid")
 
     generation = len(records) + 1
     transition_id = str(uuid.uuid4())
     report = {
-        "schema": TRANSITION_REPORT_SCHEMA,
+        "schema": SIMPLE_TRANSITION_REPORT_SCHEMA if simple_transition else TRANSITION_REPORT_SCHEMA,
         "generation": generation,
         "transition_id": transition_id,
         "outcome": args.outcome,

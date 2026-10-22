@@ -604,13 +604,13 @@ func validateEvidence(outcome string, evidence evidence) error {
 	case "s3-accepted":
 		if !lowerHexDigest(evidence.SourceManifestSHA256) || !lowerHexDigest(evidence.DestinationManifestSHA256) ||
 			evidence.ObjectCount == nil || *evidence.ObjectCount < 0 || evidence.ByteTotal == nil || *evidence.ByteTotal < 0 ||
-			evidence.CopyPasses == nil || *evidence.CopyPasses != 2 {
+			evidence.CopyPasses == nil || (*evidence.CopyPasses != 1 && *evidence.CopyPasses != 2) {
 			return reject("schema", "evidence")
 		}
 	case "recovered-local":
 		if !lowerHexDigest(evidence.S3CensusManifestSHA256) || !lowerHexDigest(evidence.RestoredManifestSHA256) ||
 			evidence.ObjectCount == nil || *evidence.ObjectCount < 0 || evidence.ByteTotal == nil || *evidence.ByteTotal < 0 ||
-			evidence.RestorePasses == nil || *evidence.RestorePasses != 2 ||
+			evidence.RestorePasses == nil || (*evidence.RestorePasses != 1 && *evidence.RestorePasses != 2) ||
 			evidence.RetainedCutoverKeyCount == nil || *evidence.RetainedCutoverKeyCount < 0 {
 			return reject("schema", "evidence")
 		}

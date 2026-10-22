@@ -72,6 +72,43 @@ func TestValidateAcceptsCurrentBackendRecords(t *testing.T) {
 	}
 }
 
+func TestValidateAcceptsSinglePassTransitions(t *testing.T) {
+	if !requireRootFixture(t, "TestValidateAcceptsSinglePassTransitions") {
+		return
+	}
+	tests := []struct {
+		name     string
+		outcomes []string
+		field    string
+		config   blobmode.EffectiveConfig
+	}{
+		{
+			name:     "S3 cutover",
+			outcomes: []string{"initial-local", "s3-accepted"},
+			field:    "copy_passes",
+			config:   blobmode.EffectiveConfig{BlobS3: testS3Config()},
+		},
+		{
+			name:     "local recovery",
+			outcomes: []string{"initial-local", "s3-accepted", "recovered-local"},
+			field:    "restore_passes",
+			config:   blobmode.EffectiveConfig{BlobDir: localBlobDir},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			state := testState(t, tt.outcomes...)
+			changed := mutateRecord(t, state.mode, func(record map[string]any) {
+				objectField(t, record, "evidence")[tt.field] = 1
+			})
+			path := writeTestState(t, withChangedHead(state, changed), changed)
+			if err := blobmode.Validate(path, tt.config); err != nil {
+				t.Fatalf("validate one-pass transition evidence: %v", err)
+			}
+		})
+	}
+}
+
 func TestValidateAcceptsPublisherGeneratedStackMoveJournal(t *testing.T) {
 	if !requireRootFixture(t, "TestValidateAcceptsPublisherGeneratedStackMoveJournal") {
 		return
@@ -566,23 +603,23 @@ func TestValidateRejectsInvalidTreesWithoutChangingThem(t *testing.T) {
 			},
 		},
 		{
-			name: "copy pass count is not two",
+			name: "copy pass count is invalid",
 			setup: func(t *testing.T) (string, blobmode.EffectiveConfig) {
 				t.Helper()
 				state := testState(t, "initial-local", "s3-accepted")
 				changed := mutateRecord(t, state.mode, func(record map[string]any) {
-					objectField(t, record, "evidence")["copy_passes"] = 1
+					objectField(t, record, "evidence")["copy_passes"] = 0
 				})
 				return writeTestState(t, withChangedHead(state, changed), changed), blobmode.EffectiveConfig{BlobS3: testS3Config()}
 			},
 		},
 		{
-			name: "restore pass count is not two",
+			name: "restore pass count is invalid",
 			setup: func(t *testing.T) (string, blobmode.EffectiveConfig) {
 				t.Helper()
 				state := testState(t, "initial-local", "s3-accepted", "recovered-local")
 				changed := mutateRecord(t, state.mode, func(record map[string]any) {
-					objectField(t, record, "evidence")["restore_passes"] = 1
+					objectField(t, record, "evidence")["restore_passes"] = 0
 				})
 				return writeTestState(t, withChangedHead(state, changed), changed), blobmode.EffectiveConfig{BlobDir: localBlobDir}
 			},
@@ -623,8 +660,8 @@ func TestValidateRejectsInvalidTreesWithoutChangingThem(t *testing.T) {
 		"missing mandatory evidence":                          "reason=schema field=evidence",
 		"missing mandatory restore evidence":                  "reason=schema field=evidence",
 		"S3 null rustfsdata volume":                           "reason=schema field=volumes.rustfsdata",
-		"copy pass count is not two":                          "reason=schema field=evidence",
-		"restore pass count is not two":                       "reason=schema field=evidence",
+		"copy pass count is invalid":                          "reason=schema field=evidence",
+		"restore pass count is invalid":                       "reason=schema field=evidence",
 	}
 
 	for _, tt := range tests {

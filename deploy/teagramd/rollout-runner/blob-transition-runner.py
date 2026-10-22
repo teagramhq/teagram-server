@@ -27,6 +27,7 @@ MODE_HELPER = SCRIPT_DIR / "blob-mode-state.py"
 TEST_MODE = os.environ.get("BLOB_TRANSITION_TEST_MODE") == "1"
 TEST_FIXTURE_ROOT: pathlib.Path | None = None
 TEST_FIXTURE_DOCKER: pathlib.Path | None = None
+BLOB_TRANSITION_COMPOSE_ENV_FILES = "BLOB_TRANSITION_COMPOSE_ENV_FILES"
 RECOVERY_BUNDLE_FILES = {
     "recovery.json",
     "frozen-containers.json",
@@ -288,6 +289,21 @@ def acquire_lock(path: pathlib.Path) -> None:
         reject("shared-lock-unavailable")
 
 
+def compose_command(args: list[str], env: dict[str, str] | None) -> list[str]:
+    if args[:2] != ["docker", "compose"] or env is None:
+        return args
+    configured = env.get(BLOB_TRANSITION_COMPOSE_ENV_FILES)
+    if not configured:
+        return args
+    files = configured.split(os.pathsep)
+    if not files or any(not item for item in files):
+        reject("compose-environment-files-invalid")
+    prefix = ["docker", "compose"]
+    for path in files:
+        prefix.extend(("--env-file", path))
+    return [*prefix, *args[2:]]
+
+
 def run_command(
     args: list[str],
     output_dir: pathlib.Path,
@@ -295,25 +311,68 @@ def run_command(
     *,
     cwd: pathlib.Path | None = None,
     env: dict[str, str] | None = None,
+    persist_output: bool = True,
 ) -> bytes:
     stdout_path = output_dir / f"{name}.stdout"
     stderr_path = output_dir / f"{name}.stderr"
     try:
-        command = args
+        command = compose_command(args, env)
         if TEST_MODE and args and args[0] == "docker":
             if TEST_FIXTURE_DOCKER is None:
                 reject("synthetic-fixture-scope-required")
-            command = [str(TEST_FIXTURE_DOCKER), *args[1:]]
+            command = [str(TEST_FIXTURE_DOCKER), *command[1:]]
         result = subprocess.run(
             command, cwd=cwd, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False
         )
     except OSError:
         reject(f"{name}-unavailable")
+    if persist_output:
+        try:
+            write_synced(stdout_path, result.stdout)
+            write_synced(stderr_path, result.stderr)
+        except TransitionReject:
+            reject(f"{name}-evidence-write-failed")
+    if result.returncode != 0:
+        reject(f"{name}-failed")
+    return result.stdout
+
+
+def run_command_with_input_file(
+    args: list[str],
+    input_path: pathlib.Path,
+    output_dir: pathlib.Path,
+    name: str,
+    *,
+    cwd: pathlib.Path | None = None,
+    env: dict[str, str] | None = None,
+    persist_output: bool = True,
+) -> bytes:
+    stdout_path = output_dir / f"{name}.stdout"
+    stderr_path = output_dir / f"{name}.stderr"
+    command = compose_command(args, env)
+    if TEST_MODE and args and args[0] == "docker":
+        if TEST_FIXTURE_DOCKER is None:
+            reject("synthetic-fixture-scope-required")
+        command = [str(TEST_FIXTURE_DOCKER), *command[1:]]
     try:
-        write_synced(stdout_path, result.stdout)
-        write_synced(stderr_path, result.stderr)
-    except TransitionReject:
-        reject(f"{name}-evidence-write-failed")
+        with input_path.open("rb") as input_stream:
+            result = subprocess.run(
+                command,
+                cwd=cwd,
+                env=env,
+                stdin=input_stream,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                check=False,
+            )
+    except OSError:
+        reject(f"{name}-unavailable")
+    if persist_output:
+        try:
+            write_synced(stdout_path, result.stdout)
+            write_synced(stderr_path, result.stderr)
+        except TransitionReject:
+            reject(f"{name}-evidence-write-failed")
     if result.returncode != 0:
         reject(f"{name}-failed")
     return result.stdout
@@ -329,11 +388,11 @@ def run_private_command(
 ) -> pathlib.Path:
     stdout_path = output_dir / f"{name}.stdout"
     stderr_path = output_dir / f"{name}.stderr"
-    command = args
+    command = compose_command(args, env)
     if TEST_MODE and args and args[0] == "docker":
         if TEST_FIXTURE_DOCKER is None:
             reject("synthetic-fixture-scope-required")
-        command = [str(TEST_FIXTURE_DOCKER), *args[1:]]
+        command = [str(TEST_FIXTURE_DOCKER), *command[1:]]
     try:
         fd = os.open(
             stdout_path,
@@ -738,6 +797,72 @@ def capture_fresh_database_dump(
     if sha256_file(path) != expected_sha256:
         reject("fresh-database-dump-mismatch")
     return path
+
+
+def capture_pre_cutover_database_dump(
+    output_dir: pathlib.Path,
+    checkout: pathlib.Path,
+    environment: dict[str, str],
+) -> pathlib.Path:
+    path = run_private_command(
+        ["docker", "compose", "exec", "-T", "postgres", "pg_dump", "-U", "postgres", "teagram"],
+        output_dir,
+        "pre-cutover-postgres-dump",
+        cwd=checkout,
+        env=environment,
+    )
+    try:
+        with path.open("rb") as stream:
+            stream.seek(max(0, path.stat().st_size - 200))
+            tail = stream.read(200)
+    except OSError:
+        reject("pre-cutover-database-dump-unavailable")
+    if not re.search(rb"dump complete", tail, re.IGNORECASE):
+        reject("pre-cutover-database-dump-incomplete")
+    return path
+
+
+def verify_pre_cutover_database_dump(
+    dump_path: pathlib.Path,
+    output_dir: pathlib.Path,
+    checkout: pathlib.Path,
+    environment: dict[str, str],
+) -> pathlib.Path:
+    database = f"blob_restore_{uuid.uuid4().hex}"
+    run_command(
+        ["docker", "compose", "exec", "-T", "postgres", "createdb", "-U", "postgres", database],
+        output_dir,
+        "create-dump-restore-database",
+        cwd=checkout,
+        env=environment,
+    )
+    try:
+        run_command_with_input_file(
+            [
+                "docker", "compose", "exec", "-T", "postgres", "psql", "-X",
+                "-v", "ON_ERROR_STOP=1", "-U", "postgres", "-d", database,
+            ],
+            dump_path,
+            output_dir,
+            "restore-pre-cutover-dump",
+            cwd=checkout,
+            env=environment,
+        )
+    finally:
+        run_command(
+            ["docker", "compose", "exec", "-T", "postgres", "dropdb", "-U", "postgres", database],
+            output_dir,
+            "drop-dump-restore-database",
+            cwd=checkout,
+            env=environment,
+        )
+    dump_sha256 = sha256_file(dump_path)
+    result_path = output_dir / "dump-restore-result.txt"
+    write_synced(
+        result_path,
+        f"restore=pass database={database} dump_sha256={dump_sha256}\n".encode("ascii"),
+    )
+    return result_path
 
 
 def capture_baseline_live_migration_schema(
@@ -1270,11 +1395,191 @@ def compose_environment(checkout: pathlib.Path, local: bool = False) -> dict[str
             "MOCK_REFERENCE_BUNDLE", "MOCK_LIVE_SCHEMA",
             "MOCK_LIVE_R70_INERT_SURFACES", "MOCK_FROZEN_PS",
             "MOCK_FROZEN_INSPECT", "MOCK_SOURCE_VOLUME_MOUNTPOINT",
-            "MOCK_WRITER_RUNNING",
+            "MOCK_WRITER_RUNNING", "MOCK_LIVE_PS", "MOCK_LIVE_COMPOSE_FILES",
+            "MOCK_DUMP_RESTORE_FAIL",
         ):
             if os.environ.get(key):
                 environment[key] = os.environ[key]
     return environment
+
+
+def private_root_file(path: pathlib.Path, expected_mode: int) -> bytes:
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW)
+    except OSError:
+        reject("rustfs-credentials-unavailable")
+    try:
+        info = os.fstat(fd)
+        if (
+            not stat.S_ISREG(info.st_mode)
+            or info.st_uid != 0
+            or stat.S_IMODE(info.st_mode) != expected_mode
+            or info.st_size > 65_536
+        ):
+            reject("rustfs-credentials-permissions")
+        with os.fdopen(fd, "rb") as stream:
+            fd = -1
+            return stream.read()
+    except OSError:
+        reject("rustfs-credentials-unavailable")
+    finally:
+        if fd >= 0:
+            os.close(fd)
+
+
+def parse_compose_env_file(path: pathlib.Path) -> dict[str, list[str]]:
+    try:
+        lines = private_root_file(path, 0o600).decode("utf-8").splitlines()
+    except UnicodeDecodeError:
+        reject("rustfs-credentials-invalid")
+    values: dict[str, list[str]] = {}
+    for line in lines:
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        values.setdefault(key, []).append(value)
+    return values
+
+
+def rustfs_compose_environment_files(checkout: pathlib.Path) -> list[str]:
+    rustfs_keys = (
+        "RUSTFS_ROOT_ACCESS_KEY",
+        "RUSTFS_ROOT_SECRET_KEY",
+        "TG_BLOB_S3_ACCESS_KEY_ID",
+        "TG_BLOB_S3_SECRET_ACCESS_KEY",
+    )
+    required_keys = rustfs_keys
+    base_env = checkout / ".env"
+    base_values = parse_compose_env_file(base_env)
+    if any(key in base_values for key in rustfs_keys):
+        reject("rustfs-credentials-conflict")
+    candidates = [
+        checkout / ".env.rustfs-parked",
+        checkout.parent / "telegram-server" / ".env.rustfs-parked",
+        pathlib.Path("/root/.env.rustfs-parked"),
+    ]
+    parked = [path for path in dict.fromkeys(candidates) if path.exists() or path.is_symlink()]
+    if len(parked) != 1:
+        reject("rustfs-credentials-unavailable" if not parked else "rustfs-credentials-ambiguous")
+    parked_path = parked[0]
+    values = parse_compose_env_file(parked_path)
+    if any(len(values.get(key, [])) != 1 for key in required_keys):
+        reject("rustfs-credentials-invalid")
+    credentials = {key: values[key][0] for key in required_keys}
+    if (
+        re.fullmatch(r"[0-9a-f]{20}", credentials["RUSTFS_ROOT_ACCESS_KEY"]) is None
+        or re.fullmatch(r"[0-9a-f]{64}", credentials["RUSTFS_ROOT_SECRET_KEY"]) is None
+        or re.fullmatch(r"[0-9a-f]{20}", credentials["TG_BLOB_S3_ACCESS_KEY_ID"]) is None
+        or credentials["RUSTFS_ROOT_ACCESS_KEY"] == credentials["TG_BLOB_S3_ACCESS_KEY_ID"]
+    ):
+        reject("rustfs-credentials-invalid")
+    secret_dir = checkout / ".secrets"
+    try:
+        dir_info = secret_dir.lstat()
+    except OSError:
+        reject("rustfs-credentials-unavailable")
+    if (
+        not stat.S_ISDIR(dir_info.st_mode)
+        or stat.S_ISLNK(dir_info.st_mode)
+        or dir_info.st_uid != 0
+        or stat.S_IMODE(dir_info.st_mode) != 0o700
+    ):
+        reject("rustfs-credentials-permissions")
+    app_secret = private_root_file(secret_dir / "teagramd-blob-secret-key", 0o444)
+    try:
+        app_secret_text = app_secret.decode("ascii")
+    except UnicodeDecodeError:
+        reject("rustfs-credentials-invalid")
+    if re.fullmatch(r"[0-9a-f]{64}", app_secret_text) is None:
+        reject("rustfs-credentials-invalid")
+    if app_secret_text != credentials["TG_BLOB_S3_SECRET_ACCESS_KEY"]:
+        reject("rustfs-credentials-mismatch")
+    return [str(base_env), str(parked_path.resolve(strict=True))]
+
+
+def compose_environment_for_files(
+    checkout: pathlib.Path,
+    files: list[str],
+    *,
+    include_rustfs_credentials: bool = False,
+) -> dict[str, str]:
+    paths = []
+    for name in files:
+        path = checkout / name
+        try:
+            info = path.lstat()
+        except OSError:
+            reject("compose-file-unavailable")
+        if not stat.S_ISREG(info.st_mode) or stat.S_ISLNK(info.st_mode):
+            reject("compose-file-invalid")
+        paths.append(str(path))
+    environment = compose_environment(checkout)
+    environment["COMPOSE_FILE"] = ":".join(paths)
+    if include_rustfs_credentials and not TEST_MODE:
+        environment[BLOB_TRANSITION_COMPOSE_ENV_FILES] = os.pathsep.join(
+            rustfs_compose_environment_files(checkout)
+        )
+    return environment
+
+
+def read_live_compose_files(
+    checkout: pathlib.Path,
+    project: str,
+    output_dir: pathlib.Path,
+    environment: dict[str, str],
+    expected_files: list[str] | None = None,
+) -> list[str]:
+    running = run_command(
+        [
+            "docker", "ps", "--no-trunc", "--filter",
+            f"label=com.docker.compose.project={project}", "--format",
+            '{{.ID}}\t{{.Label "com.docker.compose.service"}}',
+        ],
+        output_dir,
+        "live-compose-containers",
+        cwd=checkout,
+        env=environment,
+    )
+    try:
+        rows = [line.split("\t") for line in running.decode("utf-8").splitlines() if line]
+    except UnicodeDecodeError:
+        reject("live-compose-selection-invalid")
+    if not rows or any(
+        len(row) != 2
+        or re.fullmatch(r"[0-9a-f]{64}", row[0]) is None
+        or not row[1]
+        for row in rows
+    ):
+        reject("live-compose-selection-invalid")
+    identifiers = [row[0] for row in rows if row[1].startswith("teagramd")]
+    if not identifiers or len(identifiers) != len(set(identifiers)):
+        reject("live-compose-selection-invalid")
+    labels = run_command(
+        [
+            "docker", "inspect", "--format",
+            '{{index .Config.Labels "com.docker.compose.project.config_files"}}',
+            *identifiers,
+        ],
+        output_dir,
+        "live-compose-labels",
+        cwd=checkout,
+        env=environment,
+    )
+    try:
+        selections = [line.split(",") for line in labels.decode("utf-8").splitlines() if line]
+        expected_files = expected_files or [
+            "docker-compose.yml",
+            "docker-compose.local-blobs.yml",
+            "docker-compose.override.yml",
+        ]
+        expected = [str(checkout / name) for name in expected_files]
+        resolved = [[str(pathlib.Path(value).resolve(strict=True)) for value in selection] for selection in selections]
+        expected_resolved = [str(pathlib.Path(value).resolve(strict=True)) for value in expected]
+    except (UnicodeDecodeError, OSError):
+        reject("live-compose-selection-invalid")
+    if len(resolved) != len(identifiers) or any(selection != expected_resolved for selection in resolved):
+        reject("live-compose-selection-invalid")
+    return expected
 
 
 def parse_utc(value: Any, reason: str) -> Any:
@@ -1522,6 +1827,737 @@ def build_s3_proof(
     proof_path = output_dir / "transition-proof.json"
     write_synced(proof_path, (json.dumps(proof, sort_keys=True, separators=(",", ":")) + "\n").encode("utf-8"))
     return proof_path
+
+
+def build_simple_s3_proof(
+    output_dir: pathlib.Path,
+    report_root: pathlib.Path,
+    previous: dict[str, Any],
+) -> pathlib.Path:
+    mode = import_mode_helper()
+    candidate = mode.read_json(output_dir / "candidate-compose.json")
+    volumes_config = candidate.get("volumes") if isinstance(candidate, dict) else None
+    if not isinstance(volumes_config, dict):
+        reject("compose-volumes-invalid")
+    volumes: dict[str, str] = {}
+    for name in ("tgblobs", "rustfsdata"):
+        item = volumes_config.get(name)
+        volume_name = item.get("name") if isinstance(item, dict) else None
+        if not isinstance(volume_name, str) or not volume_name:
+            reject("compose-volumes-invalid")
+        volumes[name] = volume_name
+    if (
+        volumes["tgblobs"] != previous["volumes"]["tgblobs"]
+        or (
+            previous["volumes"]["rustfsdata"] is not None
+            and volumes["rustfsdata"] != previous["volumes"]["rustfsdata"]
+        )
+        or volumes["tgblobs"] == volumes["rustfsdata"]
+    ):
+        reject("transition-volume-changed")
+
+    phase_paths = {
+        "candidate_compose_sha256": output_dir / "candidate-compose.json",
+        "local_compose_sha256": output_dir / "local-compose.json",
+        "frozen_inventory_sha256": output_dir / "frozen-inventory.json",
+        "dump_sha256": output_dir / "pre-cutover-postgres-dump.stdout",
+        "dump_restore_sha256": output_dir / "dump-restore-result.txt",
+        "source_frozen_sha256": output_dir / "source-census.tsv",
+        "copy_manifest_sha256": output_dir / "copy-manifest.tsv",
+        "destination_census_sha256": output_dir / "destination-census.tsv",
+    }
+    phase_digests = {name: sha256_file(path) for name, path in phase_paths.items()}
+    summary = mode.manifest_summary(phase_paths["source_frozen_sha256"])
+    proof = {
+        "schema": mode.SIMPLE_TRANSITION_PROOF_SCHEMA,
+        "outcome": "s3-accepted",
+        "backend": {
+            "kind": "s3",
+            "endpoint": "http://rustfs:9000",
+            "bucket": "teagram",
+            "prefix": "teagramd/",
+        },
+        "volumes": volumes,
+        "evidence": {
+            "source_manifest_sha256": summary[0],
+            "destination_manifest_sha256": summary[0],
+            "object_count": summary[1],
+            "byte_total": summary[2],
+            "copy_passes": 1,
+        },
+        "phase_digests": phase_digests,
+        "phase_files": relative_phase_paths(report_root, phase_paths),
+    }
+    proof_path = output_dir / "transition-proof.json"
+    write_synced(proof_path, (json.dumps(proof, sort_keys=True, separators=(",", ":")) + "\n").encode("utf-8"))
+    return proof_path
+
+
+def build_simple_recovery_proof(
+    output_dir: pathlib.Path,
+    report_root: pathlib.Path,
+    previous: dict[str, Any],
+    phase_paths: dict[str, pathlib.Path],
+) -> pathlib.Path:
+    mode = import_mode_helper()
+    all_paths = {
+        "s3_compose_sha256": output_dir / "s3-compose.json",
+        "local_compose_sha256": output_dir / "local-compose.json",
+        "frozen_inventory_sha256": output_dir / "frozen-inventory.json",
+        "dump_sha256": output_dir / "pre-cutover-postgres-dump.stdout",
+        "dump_restore_sha256": output_dir / "dump-restore-result.txt",
+        **phase_paths,
+    }
+    phase_digests = {name: sha256_file(path) for name, path in all_paths.items()}
+    s3_summary = mode.manifest_summary(all_paths["s3_census_sha256"])
+    restored_summary = mode.manifest_summary(all_paths["destination_census_sha256"])
+    proof = {
+        "schema": mode.SIMPLE_TRANSITION_PROOF_SCHEMA,
+        "outcome": "recovered-local",
+        "backend": {"kind": "local", "dir": mode.BLOB_TARGET},
+        "volumes": {
+            "tgblobs": previous["volumes"]["tgblobs"],
+            "rustfsdata": previous["volumes"]["rustfsdata"],
+        },
+        "evidence": {
+            "s3_census_manifest_sha256": s3_summary[0],
+            "restored_manifest_sha256": restored_summary[0],
+            "object_count": restored_summary[1],
+            "byte_total": restored_summary[2],
+            "restore_passes": 1,
+            "retained_cutover_key_count": sum(
+                1 for _ in mode.iter_manifest(all_paths["retained_keys_sha256"])
+            ),
+        },
+        "phase_digests": phase_digests,
+        "phase_files": relative_phase_paths(report_root, all_paths),
+    }
+    proof_path = output_dir / "transition-proof.json"
+    write_synced(proof_path, (json.dumps(proof, sort_keys=True, separators=(",", ":")) + "\n").encode("utf-8"))
+    return proof_path
+
+
+def read_compose_render(
+    checkout: pathlib.Path,
+    output_dir: pathlib.Path,
+    name: str,
+    environment: dict[str, str],
+) -> tuple[dict[str, Any], pathlib.Path]:
+    raw = run_command(
+        ["docker", "compose", "config", "--format", "json"],
+        output_dir,
+        f"{name}-render",
+        cwd=checkout,
+        env=environment,
+        persist_output=False,
+    )
+    try:
+        compose = json.loads(raw, object_pairs_hook=import_mode_helper().strict_pairs)
+    except (UnicodeDecodeError, json.JSONDecodeError, ValueError):
+        reject("compose-render-invalid")
+    if not isinstance(compose, dict):
+        reject("compose-render-invalid")
+    path = output_dir / f"{name}-compose.json"
+    safe_compose = json.loads(json.dumps(compose))
+    services = safe_compose.get("services")
+    if isinstance(services, dict):
+        for service in services.values():
+            if isinstance(service, dict):
+                service.pop("environment", None)
+    write_synced(
+        path,
+        (json.dumps(safe_compose, sort_keys=True, separators=(",", ":")) + "\n").encode("utf-8"),
+    )
+    return compose, path
+
+
+def live_compose_services(compose: object, reason: str) -> list[str]:
+    services = compose.get("services") if isinstance(compose, dict) else None
+    if not isinstance(services, dict):
+        reject(reason)
+    names = sorted(name for name in services if isinstance(name, str) and name.startswith("teagramd"))
+    if not names:
+        reject("serving-services-missing")
+    return names
+
+
+def run_current_cutover(args: argparse.Namespace) -> None:
+    checkout = args.checkout.absolute()
+    state_dir = args.state_dir.absolute()
+    report_root = args.report_root.absolute()
+    lock_path = args.lock_path.absolute()
+    secure_directory(report_root)
+    if checkout.is_symlink():
+        reject("candidate-checkout-invalid")
+    try:
+        checkout = checkout.resolve(strict=True)
+        report_root = report_root.resolve(strict=True)
+    except OSError:
+        reject("transition-input-unavailable")
+    if not checkout.is_dir():
+        reject("candidate-checkout-invalid")
+    if not TEST_MODE and (
+        os.geteuid() != 0
+        or checkout != pathlib.Path("/opt/teagram")
+        or str(lock_path) != "/tmp/teagram-deploy.lock"
+        or pathlib.Path.cwd().resolve(strict=True) != checkout
+    ):
+        reject("production-path-invalid")
+
+    acquire_lock(lock_path)
+    run_id = uuid.uuid4().hex
+    output_dir = report_root / f".blob-cutover-{run_id}"
+    try:
+        output_dir.mkdir(mode=0o700)
+    except OSError:
+        reject("runner-evidence-directory-create-failed")
+    secure_directory(output_dir)
+    require_synthetic_fixture_scope(args, output_dir, checkout, report_root)
+
+    mode = import_mode_helper()
+    inspector_env = compose_environment(checkout)
+    records, head, mode_bytes = mode.read_authority(state_dir, report_root)
+    if (
+        not records
+        or mode_bytes != head
+        or records[-1]["outcome"] not in ("initial-local", "recovered-local", mode.STACK_MOVE_OUTCOME)
+    ):
+        reject("transition-authority-not-local")
+    previous = records[-1]
+    source_volume = previous["volumes"]["tgblobs"]
+    volume_match = re.fullmatch(r"([a-z0-9][a-z0-9_-]*)_tgblobs", source_volume)
+    if volume_match is None:
+        reject("transition-volume-invalid")
+    project = volume_match.group(1)
+
+    local_files = read_live_compose_files(checkout, project, output_dir, inspector_env)
+    local_env = compose_environment_for_files(
+        checkout,
+        [
+            "docker-compose.yml",
+            "docker-compose.local-blobs.yml",
+            "docker-compose.override.yml",
+        ],
+    )
+    candidate_env = compose_environment_for_files(
+        checkout,
+        ["docker-compose.yml", "docker-compose.override.yml"],
+        include_rustfs_credentials=True,
+    )
+    if local_files != [str(checkout / name) for name in (
+        "docker-compose.yml", "docker-compose.local-blobs.yml", "docker-compose.override.yml"
+    )]:
+        reject("live-compose-selection-invalid")
+
+    local_services: list[str] = []
+    rustfs_may_be_running = False
+    writers_may_be_stopped = False
+    authority_published = False
+    try:
+        local_compose, local_compose_path = read_compose_render(
+            checkout, output_dir, "local", local_env
+        )
+        mode.assert_compose_matches(
+            mode.compose_inventory(local_compose, checkout),
+            previous,
+            os.path.realpath(checkout / ".state" / "blob-mode"),
+            checkout / "docker-compose.override.yml",
+        )
+        local_services = live_compose_services(local_compose, "local-compose-invalid")
+        if local_compose.get("name") != project:
+            reject("compose-project-invalid")
+
+        candidate_compose, candidate_compose_path = read_compose_render(
+            checkout, output_dir, "candidate", candidate_env
+        )
+        candidate_services = live_compose_services(candidate_compose, "compose-services-invalid")
+        if candidate_services != local_services or candidate_compose.get("name") != project:
+            reject("serving-services-changed")
+        candidate_volumes = candidate_compose.get("volumes")
+        if not isinstance(candidate_volumes, dict):
+            reject("compose-volumes-invalid")
+        s3_record = dict(previous)
+        s3_record["outcome"] = "s3-accepted"
+        s3_record["backend"] = {
+            "kind": "s3", "endpoint": "http://rustfs:9000", "bucket": "teagram", "prefix": "teagramd/"
+        }
+        s3_volumes: dict[str, str] = {}
+        for name in ("tgblobs", "rustfsdata"):
+            item = candidate_volumes.get(name)
+            value = item.get("name") if isinstance(item, dict) else None
+            if not isinstance(value, str) or not value:
+                reject("compose-volumes-invalid")
+            s3_volumes[name] = value
+        s3_record["volumes"] = s3_volumes
+        mode.assert_compose_matches(
+            mode.compose_inventory(candidate_compose, checkout),
+            s3_record,
+            os.path.realpath(checkout / ".state" / "blob-mode"),
+            checkout / "docker-compose.override.yml",
+        )
+        try:
+            mode.validate_private_rustfs_render(candidate_compose)
+        except mode.Reject:
+            reject("rustfs-exposed")
+        if (
+            s3_volumes["tgblobs"] != source_volume
+            or (previous["volumes"]["rustfsdata"] is not None
+                and s3_volumes["rustfsdata"] != previous["volumes"]["rustfsdata"])
+            or s3_volumes["tgblobs"] == s3_volumes["rustfsdata"]
+        ):
+            reject("transition-volume-changed")
+
+        local_running = run_command(
+            ["docker", "compose", "ps", "--status", "running", "--services"],
+            output_dir,
+            "verify-local-serving-before-freeze",
+            cwd=checkout,
+            env=local_env,
+        )
+        running_services = set(local_running.decode("utf-8").splitlines())
+        if "postgres" not in running_services or not set(local_services) <= running_services:
+            reject("local-serving-not-ready")
+        candidate_running = run_command(
+            ["docker", "compose", "ps", "--status", "running", "--services"],
+            output_dir,
+            "verify-project-before-transition",
+            cwd=checkout,
+            env=candidate_env,
+        )
+        if "rustfs" in candidate_running.decode("utf-8").splitlines():
+            rustfs_may_be_running = True
+            run_command(
+                ["docker", "compose", "stop", "rustfs"], output_dir, "stop-prior-rustfs",
+                cwd=checkout, env=candidate_env,
+            )
+            rustfs_may_be_running = False
+
+        writers_may_be_stopped = True
+        run_command(
+            ["docker", "compose", "stop", "--timeout", "120", *local_services],
+            output_dir,
+            "freeze-local-serving",
+            cwd=checkout,
+            env=local_env,
+        )
+        frozen_containers = live_host_inventory(
+            project, source_volume, output_dir, checkout, local_env, "frozen-inventory"
+        )
+        frozen_services = {item["service"] for item in frozen_containers}
+        if "postgres" not in frozen_services or frozen_services.intersection(local_services):
+            reject("writer-freeze-not-held")
+        frozen_path = output_dir / "frozen-inventory.json"
+        write_synced(
+            frozen_path,
+            (json.dumps(
+                {
+                    "complete": True,
+                    "captured_at": utc_timestamp(),
+                    "containers": sorted(frozen_containers, key=lambda item: (item["service"], item["id"])),
+                },
+                sort_keys=True,
+                separators=(",", ":"),
+            ) + "\n").encode("utf-8"),
+        )
+
+        dump_path = capture_pre_cutover_database_dump(output_dir, checkout, local_env)
+        restore_path = verify_pre_cutover_database_dump(
+            dump_path, output_dir, checkout, local_env
+        )
+        source_manifest = manifest_command(
+            output_dir,
+            output_dir,
+            "source-census",
+            "local-census",
+            artifact_dir=output_dir,
+            cwd=checkout,
+            env=candidate_env,
+        )
+
+        rustfs_may_be_running = True
+        run_command(
+            ["docker", "compose", "up", "-d", "--wait", "rustfs"],
+            output_dir,
+            "start-rustfs",
+            cwd=checkout,
+            env=candidate_env,
+        )
+        run_command(
+            ["docker", "compose", "run", "--rm", "--no-deps", "rustfs-init"],
+            output_dir,
+            "initialize-rustfs",
+            cwd=checkout,
+            env=candidate_env,
+        )
+        copy_manifest = manifest_command(
+            output_dir,
+            output_dir,
+            "copy-manifest",
+            artifact_dir=output_dir,
+            cwd=checkout,
+            env=candidate_env,
+        )
+        destination_manifest = manifest_command(
+            output_dir,
+            output_dir,
+            "destination-census",
+            "s3-census",
+            artifact_dir=output_dir,
+            cwd=checkout,
+            env=candidate_env,
+        )
+        summary = mode.compare_manifest_summaries(
+            [source_manifest, copy_manifest, destination_manifest]
+        )
+
+        # The writer freeze must still hold at the authority publication boundary.
+        live_host_inventory(
+            project, source_volume, output_dir, checkout, candidate_env, "writers-before-publication"
+        )
+        current_records, current_head, current_bytes = mode.read_authority(state_dir, report_root)
+        if current_head != head or current_bytes != mode_bytes or len(current_records) != len(records):
+            reject("transition-authority-changed")
+        proof_path = build_simple_s3_proof(output_dir, report_root, previous)
+        publication = invoke_publisher(proof_path, state_dir, report_root, lock_path)
+        if not publication.startswith("blob_mode=published outcome=s3-accepted "):
+            reject("authority-publication-invalid")
+        authority_published = True
+
+        run_command(
+            ["docker", "compose", "up", "-d", "--no-deps", *candidate_services],
+            output_dir,
+            "activate-s3-serving",
+            cwd=checkout,
+            env=candidate_env,
+        )
+        running = run_command(
+            ["docker", "compose", "ps", "--status", "running", "--services"],
+            output_dir,
+            "verify-s3-serving",
+            cwd=checkout,
+            env=candidate_env,
+        )
+        if not set(candidate_services) <= set(running.decode("utf-8").splitlines()):
+            reject("s3-serving-not-ready")
+        final_records, final_head, final_bytes = mode.read_authority(state_dir, report_root)
+        if final_head != final_bytes or final_records[-1]["outcome"] != "s3-accepted":
+            reject("s3-authority-invalid")
+        result = {
+            "outcome": "s3-accepted",
+            "generation": final_records[-1]["generation"],
+            "object_count": summary[1],
+            "byte_total": summary[2],
+        }
+        write_synced(output_dir / "result.json", (json.dumps(result, sort_keys=True, separators=(",", ":")) + "\n").encode("ascii"))
+        print(
+            f"transition=accepted outcome=s3-accepted generation={final_records[-1]['generation']} "
+            f"objects={summary[1]} bytes={summary[2]}"
+        )
+    except Exception as error:
+        failure = error if isinstance(error, TransitionReject) else TransitionReject("transition-failed")
+        if not authority_published:
+            rustfs_stopped = True
+            if rustfs_may_be_running:
+                try:
+                    run_command(
+                        ["docker", "compose", "stop", "rustfs"], output_dir,
+                        "stop-rustfs-after-rejection", cwd=checkout, env=candidate_env,
+                    )
+                except TransitionReject:
+                    failure = TransitionReject("transition-rejected-rustfs-stop-failed")
+                    rustfs_stopped = False
+            if writers_may_be_stopped and rustfs_stopped:
+                try:
+                    run_command(
+                        ["docker", "compose", "up", "-d", "--no-deps", *local_services],
+                        output_dir,
+                        "resume-local-serving-after-rejection",
+                        cwd=checkout,
+                        env=local_env,
+                    )
+                    running = run_command(
+                        ["docker", "compose", "ps", "--status", "running", "--services"],
+                        output_dir,
+                        "verify-local-resumed-after-rejection",
+                        cwd=checkout,
+                        env=local_env,
+                    )
+                    if not set(local_services) <= set(running.decode("utf-8").splitlines()):
+                        reject("transition-rejected-local-resume-failed")
+                except TransitionReject:
+                    failure = TransitionReject("transition-rejected-local-resume-failed")
+        raise failure
+
+
+def run_simple_recovery(args: argparse.Namespace) -> None:
+    checkout = args.checkout.absolute()
+    state_dir = args.state_dir.absolute()
+    report_root = args.report_root.absolute()
+    lock_path = args.lock_path.absolute()
+    secure_directory(report_root)
+    if checkout.is_symlink():
+        reject("candidate-checkout-invalid")
+    try:
+        checkout = checkout.resolve(strict=True)
+        report_root = report_root.resolve(strict=True)
+    except OSError:
+        reject("transition-input-unavailable")
+    if not checkout.is_dir():
+        reject("candidate-checkout-invalid")
+    if not TEST_MODE and (
+        os.geteuid() != 0
+        or checkout != pathlib.Path("/opt/teagram")
+        or str(lock_path) != "/tmp/teagram-deploy.lock"
+        or pathlib.Path.cwd().resolve(strict=True) != checkout
+    ):
+        reject("production-path-invalid")
+
+    acquire_lock(lock_path)
+    output_dir = report_root / f".blob-recovery-{uuid.uuid4().hex}"
+    try:
+        output_dir.mkdir(mode=0o700)
+    except OSError:
+        reject("runner-evidence-directory-create-failed")
+    secure_directory(output_dir)
+    require_synthetic_fixture_scope(args, output_dir, checkout, report_root)
+
+    mode = import_mode_helper()
+    inspector_env = compose_environment(checkout)
+    records, head, mode_bytes = mode.read_authority(state_dir, report_root)
+    if not records or mode_bytes != head or records[-1]["outcome"] != "s3-accepted":
+        reject("recovery-authority-not-s3")
+    previous = records[-1]
+    source_volume = previous["volumes"]["tgblobs"]
+    volume_match = re.fullmatch(r"([a-z0-9][a-z0-9_-]*)_tgblobs", source_volume)
+    if volume_match is None:
+        reject("transition-volume-invalid")
+    project = volume_match.group(1)
+    s3_files = ["docker-compose.yml", "docker-compose.override.yml"]
+    live_files = read_live_compose_files(
+        checkout, project, output_dir, inspector_env, expected_files=s3_files
+    )
+    if live_files != [str(checkout / name) for name in s3_files]:
+        reject("live-compose-selection-invalid")
+    s3_env = compose_environment_for_files(
+        checkout, s3_files, include_rustfs_credentials=True
+    )
+    local_files = [
+        "docker-compose.yml",
+        "docker-compose.local-blobs.yml",
+        "docker-compose.override.yml",
+    ]
+    local_env = compose_environment_for_files(checkout, local_files)
+
+    s3_services: list[str] = []
+    local_services: list[str] = []
+    writers_may_be_stopped = False
+    authority_published = False
+    try:
+        s3_compose, _s3_compose_path = read_compose_render(checkout, output_dir, "s3", s3_env)
+        if s3_compose.get("name") != project:
+            reject("compose-project-invalid")
+        s3_services = live_compose_services(s3_compose, "s3-compose-invalid")
+        mode.assert_compose_matches(
+            mode.compose_inventory(s3_compose, checkout),
+            previous,
+            os.path.realpath(checkout / ".state" / "blob-mode"),
+            checkout / "docker-compose.override.yml",
+        )
+        try:
+            mode.validate_private_rustfs_render(s3_compose)
+        except mode.Reject:
+            reject("rustfs-exposed")
+
+        local_compose, _local_compose_path = read_compose_render(
+            checkout, output_dir, "local", local_env
+        )
+        local_services = live_compose_services(local_compose, "local-compose-invalid")
+        local_record = dict(previous)
+        local_record["outcome"] = "recovered-local"
+        local_record["backend"] = {"kind": "local", "dir": mode.BLOB_TARGET}
+        mode.assert_compose_matches(
+            mode.compose_inventory(local_compose, checkout),
+            local_record,
+            os.path.realpath(checkout / ".state" / "blob-mode"),
+            checkout / "docker-compose.override.yml",
+        )
+        if local_compose.get("name") != project or local_services != s3_services:
+            reject("serving-services-changed")
+
+        before = run_command(
+            ["docker", "compose", "ps", "--status", "running", "--services"],
+            output_dir,
+            "verify-s3-serving-before-recovery",
+            cwd=checkout,
+            env=s3_env,
+        )
+        running = set(before.decode("utf-8").splitlines())
+        if not ({"postgres", "rustfs"} | set(s3_services)) <= running:
+            reject("s3-serving-not-ready")
+
+        writers_may_be_stopped = True
+        run_command(
+            ["docker", "compose", "stop", "--timeout", "120", *s3_services],
+            output_dir,
+            "freeze-s3-serving",
+            cwd=checkout,
+            env=s3_env,
+        )
+        frozen_containers = live_host_inventory(
+            project, source_volume, output_dir, checkout, s3_env, "frozen-inventory"
+        )
+        frozen_services = {item["service"] for item in frozen_containers}
+        if "postgres" not in frozen_services or "rustfs" not in frozen_services or frozen_services.intersection(s3_services):
+            reject("writer-freeze-not-held")
+        write_synced(
+            output_dir / "frozen-inventory.json",
+            (json.dumps(
+                {
+                    "complete": True,
+                    "captured_at": utc_timestamp(),
+                    "containers": sorted(frozen_containers, key=lambda item: (item["service"], item["id"])),
+                },
+                sort_keys=True,
+                separators=(",", ":"),
+            ) + "\n").encode("utf-8"),
+        )
+
+        dump_path = capture_pre_cutover_database_dump(output_dir, checkout, s3_env)
+        verify_pre_cutover_database_dump(dump_path, output_dir, checkout, s3_env)
+        phase_paths = {
+            "s3_census_sha256": manifest_command(
+                output_dir,
+                output_dir,
+                "s3-census",
+                "s3-census",
+                service="blob-restore",
+                extra_args=("--source", "/destination"),
+                artifact_dir=output_dir,
+                cwd=checkout,
+                env=s3_env,
+            ),
+            "local_before_restore_sha256": manifest_command(
+                output_dir,
+                output_dir,
+                "local-before-restore",
+                "local-census",
+                service="blob-restore",
+                extra_args=("--source", "/destination"),
+                artifact_dir=output_dir,
+                cwd=checkout,
+                env=s3_env,
+            ),
+            "restore_manifest_sha256": manifest_command(
+                output_dir,
+                output_dir,
+                "restore-manifest",
+                "s3-to-local",
+                service="blob-restore",
+                extra_args=("--destination", "/destination"),
+                artifact_dir=output_dir,
+                cwd=checkout,
+                env=s3_env,
+            ),
+            "destination_census_sha256": manifest_command(
+                output_dir,
+                output_dir,
+                "destination-census",
+                "local-census",
+                service="blob-restore",
+                extra_args=("--source", "/destination"),
+                artifact_dir=output_dir,
+                cwd=checkout,
+                env=s3_env,
+            ),
+        }
+        phase_paths["retained_keys_sha256"] = write_retained_manifest(
+            mode,
+            phase_paths["local_before_restore_sha256"],
+            phase_paths["s3_census_sha256"],
+            output_dir,
+        )
+        s3_summary = mode.compare_manifest_summaries(
+            [phase_paths["s3_census_sha256"], phase_paths["restore_manifest_sha256"]]
+        )
+        retained_count = mode.validate_restored_union(
+            phase_paths["local_before_restore_sha256"],
+            phase_paths["s3_census_sha256"],
+            phase_paths["retained_keys_sha256"],
+            phase_paths["destination_census_sha256"],
+        )
+        if s3_summary[1] <= 0:
+            reject("recovery-empty-source")
+
+        live_host_inventory(
+            project, source_volume, output_dir, checkout, s3_env, "writers-before-recovery-publication"
+        )
+        current_records, current_head, current_bytes = mode.read_authority(state_dir, report_root)
+        if current_head != head or current_bytes != mode_bytes or len(current_records) != len(records):
+            reject("transition-authority-changed")
+        proof_path = build_simple_recovery_proof(output_dir, report_root, previous, phase_paths)
+        publication = invoke_publisher(
+            proof_path, state_dir, report_root, lock_path, outcome="recovered-local"
+        )
+        if not publication.startswith("blob_mode=published outcome=recovered-local "):
+            reject("authority-publication-invalid")
+        authority_published = True
+
+        run_command(
+            ["docker", "compose", "up", "-d", "--no-deps", *local_services],
+            output_dir,
+            "activate-recovered-local-serving",
+            cwd=checkout,
+            env=local_env,
+        )
+        running = run_command(
+            ["docker", "compose", "ps", "--status", "running", "--services"],
+            output_dir,
+            "verify-recovered-local-serving",
+            cwd=checkout,
+            env=local_env,
+        )
+        if not set(local_services) <= set(running.decode("utf-8").splitlines()):
+            reject("local-serving-not-ready")
+        final_records, final_head, final_bytes = mode.read_authority(state_dir, report_root)
+        if final_head != final_bytes or final_records[-1]["outcome"] != "recovered-local":
+            reject("local-authority-invalid")
+        result = {
+            "outcome": "recovered-local",
+            "generation": final_records[-1]["generation"],
+            "object_count": mode.manifest_summary(phase_paths["destination_census_sha256"])[1],
+            "retained_cutover_key_count": retained_count,
+        }
+        write_synced(
+            output_dir / "result.json",
+            (json.dumps(result, sort_keys=True, separators=(",", ":")) + "\n").encode("ascii"),
+        )
+        print(
+            f"transition=accepted outcome=recovered-local generation={final_records[-1]['generation']} "
+            f"objects={result['object_count']} retained={retained_count}"
+        )
+    except Exception as error:
+        failure = error if isinstance(error, TransitionReject) else TransitionReject("recovery-failed")
+        if not authority_published and writers_may_be_stopped:
+            try:
+                run_command(
+                    ["docker", "compose", "up", "-d", "--no-deps", *s3_services],
+                    output_dir,
+                    "resume-s3-serving-after-rejection",
+                    cwd=checkout,
+                    env=s3_env,
+                )
+                running = run_command(
+                    ["docker", "compose", "ps", "--status", "running", "--services"],
+                    output_dir,
+                    "verify-s3-resumed-after-rejection",
+                    cwd=checkout,
+                    env=s3_env,
+                )
+                if not set(s3_services) <= set(running.decode("utf-8").splitlines()):
+                    reject("recovery-rejected-s3-resume-failed")
+            except TransitionReject:
+                failure = TransitionReject("recovery-rejected-s3-resume-failed")
+        raise failure
 
 
 def invoke_publisher(
@@ -2107,21 +3143,35 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     commands = parser.add_subparsers(dest="action", required=True)
     accept = commands.add_parser("accept-s3")
-    accept.add_argument("--bundle", type=pathlib.Path, required=True)
     accept.add_argument("--checkout", type=pathlib.Path, required=True)
     accept.add_argument("--state-dir", type=pathlib.Path, required=True)
     accept.add_argument("--report-root", type=pathlib.Path, required=True)
     accept.add_argument("--lock-path", type=pathlib.Path, default=pathlib.Path("/tmp/teagram-deploy.lock"))
+    qualified = commands.add_parser("accept-s3-qualified")
+    qualified.add_argument("--bundle", type=pathlib.Path, required=True)
+    qualified.add_argument("--checkout", type=pathlib.Path, required=True)
+    qualified.add_argument("--state-dir", type=pathlib.Path, required=True)
+    qualified.add_argument("--report-root", type=pathlib.Path, required=True)
+    qualified.add_argument("--lock-path", type=pathlib.Path, default=pathlib.Path("/tmp/teagram-deploy.lock"))
     recover = commands.add_parser("recover-local")
-    recover.add_argument("--bundle", type=pathlib.Path, required=True)
     recover.add_argument("--checkout", type=pathlib.Path, required=True)
     recover.add_argument("--state-dir", type=pathlib.Path, required=True)
     recover.add_argument("--report-root", type=pathlib.Path, required=True)
     recover.add_argument("--lock-path", type=pathlib.Path, default=pathlib.Path("/tmp/teagram-deploy.lock"))
+    qualified_recover = commands.add_parser("recover-local-qualified")
+    qualified_recover.add_argument("--bundle", type=pathlib.Path, required=True)
+    qualified_recover.add_argument("--checkout", type=pathlib.Path, required=True)
+    qualified_recover.add_argument("--state-dir", type=pathlib.Path, required=True)
+    qualified_recover.add_argument("--report-root", type=pathlib.Path, required=True)
+    qualified_recover.add_argument("--lock-path", type=pathlib.Path, default=pathlib.Path("/tmp/teagram-deploy.lock"))
     args = parser.parse_args()
     try:
         if args.action == "accept-s3":
+            run_current_cutover(args)
+        elif args.action == "accept-s3-qualified":
             run_cutover(args)
+        elif args.action == "recover-local":
+            run_simple_recovery(args)
         else:
             run_recovery(args)
     except TransitionReject as error:

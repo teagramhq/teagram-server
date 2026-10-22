@@ -380,6 +380,65 @@ class BlobModeStateTests(unittest.TestCase):
         blob_mode.publish_transition(args)
         return proof_path
 
+    def simple_s3_proof_file(
+        self,
+        root: pathlib.Path,
+        report_root: pathlib.Path,
+        *,
+        exposed: bool = False,
+        mismatched_destination: bool = False,
+    ) -> pathlib.Path:
+        phase_dir = report_root / f"simple-transition-proof-{len(list(report_root.iterdir()))}"
+        phase_dir.mkdir(mode=0o700)
+        manifest = b"01/1\t10\t" + b"a" * 64 + b"\n"
+        destination = b"01/1\t10\t" + b"b" * 64 + b"\n" if mismatched_destination else manifest
+        dump = b"-- PostgreSQL database dump complete\n"
+        dump_sha256 = blob_mode.hashlib.sha256(dump).hexdigest()
+        contents = {
+            "candidate_compose_sha256": json.dumps(
+                {"services": {"rustfs": {"ports": [{"target": 9000, "published": "9000"}] if exposed else []}}},
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8"),
+            "local_compose_sha256": b"local compose\n",
+            "frozen_inventory_sha256": b"writer freeze verified\n",
+            "dump_sha256": dump,
+            "dump_restore_sha256": (
+                f"restore=pass database=blob_restore_{'a' * 32} dump_sha256={dump_sha256}\n"
+            ).encode("ascii"),
+            "source_frozen_sha256": manifest,
+            "copy_manifest_sha256": manifest,
+            "destination_census_sha256": destination,
+        }
+        phase_files: dict[str, str] = {}
+        phase_digests: dict[str, str] = {}
+        for name, content in contents.items():
+            path = phase_dir / f"{name}.artifact"
+            path.write_bytes(content)
+            path.chmod(0o600)
+            phase_files[name] = f"{phase_dir.name}/{path.name}"
+            phase_digests[name] = blob_mode.hashlib.sha256(content).hexdigest()
+        summary = blob_mode.manifest_summary(phase_dir / "source_frozen_sha256.artifact")
+        proof = {
+            "schema": blob_mode.SIMPLE_TRANSITION_PROOF_SCHEMA,
+            "outcome": "s3-accepted",
+            "backend": {"kind": "s3", "endpoint": "http://rustfs:9000", "bucket": "teagram", "prefix": "teagramd/"},
+            "volumes": {"tgblobs": self.volume, "rustfsdata": "teagram-server_rustfsdata"},
+            "evidence": {
+                "source_manifest_sha256": summary[0],
+                "destination_manifest_sha256": summary[0],
+                "object_count": summary[1],
+                "byte_total": summary[2],
+                "copy_passes": 1,
+            },
+            "phase_digests": phase_digests,
+            "phase_files": phase_files,
+        }
+        proof_path = root / "simple-s3-proof.json"
+        proof_path.write_text(json.dumps(proof), encoding="utf-8")
+        proof_path.chmod(0o600)
+        return proof_path
+
     def test_local_inventory_preserves_exact_backend_and_volume_names(self) -> None:
         inventory = self.local_compose()
         blob_mode.assert_compose_matches(inventory, self.record, self.mode_source, self.override)
@@ -1249,6 +1308,70 @@ class BlobModeStateTests(unittest.TestCase):
                 self.assertEqual(records[-1]["outcome"], "recovered-local")
                 self.assertEqual(records[-1]["evidence"]["retained_cutover_key_count"], 1)
                 self.assertEqual(head, mode_bytes)
+
+    def test_simple_s3_transition_accepts_current_migrations_and_one_verified_copy(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = pathlib.Path(temporary)
+            state_dir, report_root, lock_path = self.create_initial_authority(root)
+            proof_path = self.simple_s3_proof_file(root, report_root)
+            args = SimpleNamespace(
+                outcome="s3-accepted", proof=proof_path, state_dir=state_dir,
+                report_root=report_root, lock_path=lock_path,
+            )
+            with (
+                patch.object(blob_mode, "require_runner_lock"),
+                patch.object(blob_mode, "file_stat", side_effect=self.allow_unowned_private_files),
+                patch.object(blob_mode.os, "fchown"),
+                patch.object(blob_mode.os, "chown"),
+            ):
+                blob_mode.publish_transition(args)
+                records, head, mode_bytes = blob_mode.read_authority(state_dir, report_root)
+            self.assertEqual(records[-1]["outcome"], "s3-accepted")
+            self.assertEqual(records[-1]["evidence"]["copy_passes"], 1)
+            self.assertEqual(head, mode_bytes)
+
+    def test_simple_s3_transition_rejects_published_rustfs_port(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = pathlib.Path(temporary)
+            state_dir, report_root, lock_path = self.create_initial_authority(root)
+            proof_path = self.simple_s3_proof_file(root, report_root, exposed=True)
+            args = SimpleNamespace(
+                outcome="s3-accepted", proof=proof_path, state_dir=state_dir,
+                report_root=report_root, lock_path=lock_path,
+            )
+            state_before = {
+                path.relative_to(state_dir): path.read_bytes()
+                for path in state_dir.rglob("*") if path.is_file()
+            }
+            with (
+                patch.object(blob_mode, "require_runner_lock"),
+                patch.object(blob_mode, "file_stat", side_effect=self.allow_unowned_private_files),
+                patch.object(blob_mode.os, "fchown"),
+                patch.object(blob_mode.os, "chown"),
+            ):
+                self.assert_rejects(lambda: blob_mode.publish_transition(args), "transition-report-evidence")
+            state_after = {
+                path.relative_to(state_dir): path.read_bytes()
+                for path in state_dir.rglob("*") if path.is_file()
+            }
+            self.assertEqual(state_after, state_before)
+
+    def test_simple_s3_transition_rejects_object_manifest_mismatch(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = pathlib.Path(temporary)
+            state_dir, report_root, lock_path = self.create_initial_authority(root)
+            proof_path = self.simple_s3_proof_file(root, report_root, mismatched_destination=True)
+            args = SimpleNamespace(
+                outcome="s3-accepted", proof=proof_path, state_dir=state_dir,
+                report_root=report_root, lock_path=lock_path,
+            )
+            with (
+                patch.object(blob_mode, "require_runner_lock"),
+                patch.object(blob_mode, "file_stat", side_effect=self.allow_unowned_private_files),
+                patch.object(blob_mode.os, "fchown"),
+                patch.object(blob_mode.os, "chown"),
+            ):
+                self.assert_rejects(lambda: blob_mode.publish_transition(args), "transition-report-evidence")
 
     def test_r70_recovery_publisher_rejects_nonempty_files(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
