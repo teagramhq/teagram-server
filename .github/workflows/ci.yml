@@ -2294,13 +2294,51 @@ jobs:
           assert_forbidden "unauthenticated LIST" \
             "http://127.0.0.1:9000/teagram?list-type=2"
 
-          # The e2e process runs on the host, so it targets the RustFS bridge
-          # address without publishing the S3 port. Its credential is a file,
-          # matching the deployed _FILE configuration.
+          # RustFS must stay unreachable from the runner through its private
+          # container address. The e2e test process itself runs on the runner,
+          # so give this test a temporary loopback-only relay attached to the
+          # private and default Compose networks. The relay is removed as soon
+          # as this step exits; production Compose publishes no RustFS port.
           rustfs_cid=$(compose ps -q rustfs)
-          rustfs_ip=$(docker inspect "$rustfs_cid" \
-            --format '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}')
+          rustfs_networks=$(docker inspect "$rustfs_cid" --format '{{json .NetworkSettings.Networks}}')
+          [ "$(jq 'length' <<<"$rustfs_networks")" -eq 1 ] \
+            || { echo "RustFS is attached to more than its private Compose network"; exit 1; }
+          rustfs_network=$(jq -er 'keys[0]' <<<"$rustfs_networks")
+          [ "$(docker network inspect "$rustfs_network" --format '{{ index .Labels "com.docker.compose.network" }}')" = rustfs_private ] \
+            || { echo "RustFS is not attached to the private Compose network"; exit 1; }
+          rustfs_ip=$(jq -er 'to_entries[0].value.IPAddress' <<<"$rustfs_networks")
           [ -n "$rustfs_ip" ] || { echo "RustFS has no private bridge address"; exit 1; }
+          if curl --noproxy '*' --silent --output /dev/null --fail \
+            --connect-timeout 2 --max-time 3 "http://${rustfs_ip}:9000/health/ready"; then
+            echo "runner reached RustFS through its private container address"
+            exit 1
+          fi
+          app_cid=$(compose ps -q teagramd)
+          app_networks=$(docker inspect "$app_cid" --format '{{json .NetworkSettings.Networks}}')
+          default_network=$(jq -er --arg private "$rustfs_network" \
+            'keys | map(select(. != $private)) | if length == 1 then .[0] else error("teagramd network inventory mismatch") end' \
+            <<<"$app_networks")
+          [ "$(docker network inspect "$default_network" --format '{{ index .Labels "com.docker.compose.network" }}')" = default ] \
+            || { echo "teagramd default network inventory mismatch"; exit 1; }
+          forwarder_name=teagram-rustfs-e2e-forwarder
+          app_secret_file=
+          cleanup_rustfs_e2e_forwarder() {
+            [ -z "$forwarder_name" ] || docker rm -f "$forwarder_name" >/dev/null 2>&1 || true
+            [ -z "$app_secret_file" ] || rm -f "$app_secret_file"
+          }
+          trap cleanup_rustfs_e2e_forwarder EXIT
+          docker run --detach --rm --name "$forwarder_name" \
+            --network "$rustfs_network" --publish 127.0.0.1::9009 \
+            mirror.gcr.io/library/busybox:1.37 \
+            sh -c 'while true; do nc -lk -p 9009 -e nc rustfs 9000; done' >/dev/null
+          docker network connect "$default_network" "$forwarder_name"
+          rustfs_proxy_port=$(docker inspect "$forwarder_name" \
+            | jq -er '.[0].NetworkSettings.Ports["9009/tcp"][0].HostPort')
+          [ -n "$rustfs_proxy_port" ] || { echo "RustFS test relay has no loopback port"; exit 1; }
+          rustfs_test_endpoint="http://127.0.0.1:${rustfs_proxy_port}"
+          curl --noproxy '*' --silent --show-error --output /dev/null --fail \
+            --retry 10 --retry-connrefused --retry-delay 1 --max-time 2 \
+            "$rustfs_test_endpoint/health/ready"
           app_access_key=$(awk -F= '$1 == "TG_BLOB_S3_ACCESS_KEY_ID" { print substr($0, index($0, "=") + 1); exit }' .env)
           test -n "$app_access_key"
           app_secret_file=$(mktemp "$RUNNER_TEMP/teagramd-s3-secret.XXXXXX")
@@ -2310,7 +2348,7 @@ jobs:
           # the same image as mirror.gcr.io/library/postgres. Reuse that local
           # image so the e2e check avoids a second rate-limited mirror pull.
           docker image tag mirror.gcr.io/library/postgres:18-alpine mirror.gcr.io/postgres:18-alpine
-          TG_BLOB_S3_ENDPOINT="http://${rustfs_ip}:9000" \
+          TG_BLOB_S3_ENDPOINT="$rustfs_test_endpoint" \
           TG_BLOB_S3_BUCKET=teagram \
           TG_BLOB_S3_PREFIX=teagramd/ci/ \
           TG_BLOB_S3_REGION=us-east-1 \
@@ -2318,8 +2356,6 @@ jobs:
           TG_BLOB_S3_SECRET_ACCESS_KEY_FILE="$app_secret_file" \
           TG_BLOB_S3_ALLOW_INSECURE_HTTP=true \
             go test -race -count=1 -timeout 15m ./test/e2e -run '^TestMediaRoundTrip$'
-          rm -f "$app_secret_file"
-
           app_media=$(authenticated_mc \
             'mc alias set app http://rustfs:9000 "$TG_BLOB_S3_ACCESS_KEY_ID" \
                "$(cat /run/secrets/teagramd-blob-secret-key)" >/dev/null &&
