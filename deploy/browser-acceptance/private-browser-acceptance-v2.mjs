@@ -823,6 +823,8 @@ async function observeWorkerWebSockets(browser, pageSession, handlers) {
       handlers.created(message.params);
     } else if (message.method === "Network.webSocketHandshakeResponseReceived") {
       handlers.handshakeResponse(message.params);
+    } else if (message.method === "Network.webSocketClosed") {
+      handlers.closed(message.params);
     }
   }
 
@@ -913,6 +915,7 @@ async function observeWorkerWebSockets(browser, pageSession, handlers) {
 
 async function makeWssAudit(contextInfo, progress) {
   const connections = new Map();
+  let accountSlotCount = null;
   let malformed = false;
   let handshakeCount = 0;
   let pendingWorkers = 0;
@@ -938,7 +941,7 @@ async function makeWssAudit(contextInfo, progress) {
       } catch {
         malformed = true;
       }
-      connections.set(params.requestId, {matches, responses: 0, status: 0});
+      connections.set(params.requestId, {matches, responses: 0, status: 0, closed: false});
       if (!progress.observeWssConnection()) malformed = true;
     },
     handshakeResponse(params) {
@@ -956,6 +959,20 @@ async function makeWssAudit(contextInfo, progress) {
       connection.responses += 1;
       if (connection.responses === 1) connection.status = params.response.status;
       progress.observeWssHandshake(params.response.status);
+    },
+    closed(params) {
+      if (!isRecord(params) || typeof params.requestId !== "string" ||
+          !/^[0-9A-Za-z._-]{1,64}$/u.test(params.requestId)) {
+        malformed = true;
+        return;
+      }
+      const connection = connections.get(params.requestId);
+      if (!connection || connection.closed) {
+        malformed = true;
+        return;
+      }
+      connection.closed = true;
+      if (!progress.observeWssClosed()) malformed = true;
     },
     unobservable() {
       workerUnobservable = true;
@@ -975,11 +992,13 @@ async function makeWssAudit(contextInfo, progress) {
   await session.send("Network.enable");
   session.on("Network.webSocketCreated", handlers.created);
   session.on("Network.webSocketHandshakeResponseReceived", handlers.handshakeResponse);
+  session.on("Network.webSocketClosed", handlers.closed);
   await observeWorkerWebSockets(contextInfo.context.browser(), session, handlers);
   function diagnostic() {
     const entries = [...connections.values()];
     const targets = connections.size;
     const handshakes = handshakeCount;
+    const activeConnections = entries.filter((item) => !item.closed).length;
     const targetMatch = targets > 0 && entries.every((item) => item.matches);
     const result = (name, matches = false, status = 0) => ({
       wss_diagnostic: name,
@@ -994,7 +1013,11 @@ async function makeWssAudit(contextInfo, progress) {
     if (workerUnobservable) return result("worker-unobservable");
     if (pendingWorkers > 0) return result("worker-pending");
     if (targets === 0) return result("no-target");
-    if (targets > WSS_ACCOUNT_SLOT_CEILING) return result("observation-malformed");
+    const connectionCeiling = progress.isSignedIn() ? WSS_CONNECTION_CEILING : WSS_ACCOUNT_SLOT_CEILING;
+    if (targets > connectionCeiling) return result("observation-malformed");
+    if (accountSlotCount !== null && activeConnections !== accountSlotCount) {
+      return result("observation-malformed");
+    }
 
     for (const [index, item] of entries.entries()) {
       if (!item.matches) {
@@ -1029,16 +1052,23 @@ async function makeWssAudit(contextInfo, progress) {
     },
     validate() {
       const entries = [...connections.values()];
-      if (malformed || orphanHandshake || workerUnobservable || pendingWorkers !== 0 || entries.length < 1 || entries.length > WSS_ACCOUNT_SLOT_CEILING ||
+      const activeConnections = entries.filter((item) => !item.closed).length;
+      const connectionCeiling = progress.isSignedIn() ? WSS_CONNECTION_CEILING : WSS_ACCOUNT_SLOT_CEILING;
+      if (malformed || orphanHandshake || workerUnobservable || pendingWorkers !== 0 || entries.length < 1 ||
+          activeConnections < 1 || entries.length > connectionCeiling ||
           handshakeCount !== entries.length || entries.some((item) => !item.matches ||
-            item.responses !== 1 || item.status !== 101)) {
+            item.responses !== 1 || item.status !== 101) ||
+          (accountSlotCount !== null && activeConnections !== accountSlotCount)) {
         fail("websocket-not-ready", undefined, diagnostic());
       }
+      if (accountSlotCount === null) accountSlotCount = activeConnections;
       return {connectionCount: entries.length, status101: true};
     },
     validateAfterLogout() {
       const entries = [...connections.values()];
+      const activeConnections = entries.filter((item) => !item.closed).length;
       if (malformed || orphanHandshake || workerUnobservable || pendingWorkers !== 0 || entries.length < 1 || entries.length > WSS_CONNECTION_CEILING ||
+          activeConnections < accountSlotCount || activeConnections > accountSlotCount + 1 ||
           handshakeCount > entries.length || entries.some((item) => !item.matches || item.responses > 1 ||
             (item.responses === 1 && item.status !== 101))) {
         fail("websocket-not-ready", undefined, diagnostic());

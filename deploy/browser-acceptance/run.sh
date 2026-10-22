@@ -4,12 +4,12 @@ set +x
 umask 077
 
 readonly TARGET_HOST="teagram.tailaa4918.ts.net"
-readonly APPROVED_QA_SCRIPT_SHA256="6e12f6c9b14a127a08ed133b4ff6d1b7fa0ba60bd59939876cc0ef738dfe8133"
+readonly APPROVED_QA_SCRIPT_SHA256="44e03c43bc1344a5c1d61dc58480843765dd04324872f0190fec557b0836907d"
 readonly IMAGE_ARM64="mcr.microsoft.com/playwright:v1.61.1-noble@sha256:824f1a789072e648c62541c2cfa4479c4061a290d5c27766d67dc1dcbc19b321"
 readonly IMAGE_AMD64="mcr.microsoft.com/playwright:v1.61.1-noble@sha256:cf0daee9b994042e011bc29f20cdff1a9f682a039b43fcd738f7d8a9d3bcd9d6"
 readonly SERVED_MANIFEST_MAX_BYTES=16384
-# Four account-slot sockets on load plus the logout reconnect.
-readonly WSS_CONNECTION_CEILING=5
+# Four account-slot sockets, one authenticated replacement, and one logout reconnect.
+readonly WSS_CONNECTION_CEILING=6
 readonly PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd -P)"
 readonly COMPOSE=(docker compose --env-file /dev/null --project-directory deploy/browser-acceptance --file deploy/browser-acceptance/compose.yaml --project-name teagram-browser-acceptance)
 
