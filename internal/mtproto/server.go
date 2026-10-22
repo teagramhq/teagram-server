@@ -521,6 +521,11 @@ acceptLoop:
 // loop. It is given back here whatever ends the connection, and given back early
 // by the frame that authenticates it.
 func (s *Server) serveSocket(sock net.Conn, slot *preAuthSlot) {
+	closeDiagnostics := newTransportCloseDiagnostics(transportTCP)
+	var closeErr error
+	defer func() {
+		s.logTransportClose(closeDiagnostics, closeErr)
+	}()
 	defer slot.clear()
 
 	readCtx := s.shutdown.requestCtx
@@ -608,6 +613,7 @@ func (s *Server) serveSocket(sock net.Conn, slot *preAuthSlot) {
 	handshakeDeadline := time.Now().Add(s.handshakeTimeout)
 	addr, err := s.clientAddrUntil(sock, handshakeDeadline)
 	if err != nil {
+		closeErr = err
 		if !s.shutdown.draining() {
 			s.logNegotiation(err)
 		}
@@ -627,6 +633,7 @@ func (s *Server) serveSocket(sock net.Conn, slot *preAuthSlot) {
 	}
 	probe, err := probePreflight(sock, handshakeDeadline)
 	if err != nil {
+		closeErr = err
 		s.dropRefused(sock)
 		s.logNegotiation(errors.Join(errors.New("detect discovery preflight"), err))
 		return
@@ -636,6 +643,7 @@ func (s *Server) serveSocket(sock net.Conn, slot *preAuthSlot) {
 		allowed, err := s.discovery.allowContext(discoveryCtx, addr)
 		cancel()
 		if err != nil {
+			closeErr = err
 			s.dropRefused(sock)
 			s.log.Error("check discovery rate limit", "err", err)
 			return
@@ -648,8 +656,9 @@ func (s *Server) serveSocket(sock net.Conn, slot *preAuthSlot) {
 			}
 			return
 		}
-		if err := s.servePreflight(readCtx, sock, probe.nonce, handshakeDeadline); err != nil && !isDisconnect(err) && !s.shutdown.draining() {
-			s.logNegotiation(errors.Join(errors.New("serve discovery preflight"), err))
+		closeErr = s.servePreflight(readCtx, sock, probe.nonce, handshakeDeadline)
+		if closeErr != nil && !isDisconnect(closeErr) && !s.shutdown.draining() {
+			s.logNegotiation(errors.Join(errors.New("serve discovery preflight"), closeErr))
 		}
 		return
 	}
@@ -659,13 +668,17 @@ func (s *Server) serveSocket(sock net.Conn, slot *preAuthSlot) {
 	}
 	conn, err := s.detectCodec(probe.stream)
 	if err != nil {
+		closeErr = err
 		if !s.shutdown.draining() {
 			s.logNegotiation(err)
 		}
 		return
 	}
-	if err := s.serveConnWithContexts(readCtx, s.shutdown.requestCtx, conn, addr, slot, markServing); err != nil && !isDisconnect(err) {
-		s.logConnectionFailure(err)
+	closeErr = s.serveConnWithHandlerContextsAndTransportDiagnostics(
+		readCtx, s.shutdown.requestCtx, conn, addr, slot, markServing, transportTCP, s.handler, closeDiagnostics,
+	)
+	if closeErr != nil && !isDisconnect(closeErr) {
+		s.logConnectionFailure(closeErr)
 	}
 }
 
@@ -835,6 +848,17 @@ func (s *Server) serveConnMode(readCtx, requestCtx context.Context, tconn transp
 	defer func() {
 		s.logTransportClose(closeDiagnostics, rErr)
 	}()
+	return s.serveConnModeWithDiagnostics(readCtx, requestCtx, tconn, clientAddr, slot, markServing, monitorPeer, handler, closeDiagnostics)
+}
+
+func (s *Server) serveConnWithHandlerContextsAndTransportDiagnostics(readCtx, requestCtx context.Context, tconn transport.Conn, clientAddr netip.Addr, slot *preAuthSlot, markServing func() bool, transportName string, handler Handler, closeDiagnostics *transportCloseDiagnostics) (rErr error) {
+	if closeDiagnostics == nil {
+		closeDiagnostics = newTransportCloseDiagnostics(transportName)
+	}
+	return s.serveConnModeWithDiagnostics(readCtx, requestCtx, tconn, clientAddr, slot, markServing, true, handler, closeDiagnostics)
+}
+
+func (s *Server) serveConnModeWithDiagnostics(readCtx, requestCtx context.Context, tconn transport.Conn, clientAddr netip.Addr, slot *preAuthSlot, markServing func() bool, monitorPeer bool, handler Handler, closeDiagnostics *transportCloseDiagnostics) (rErr error) {
 	conn := newConn(tconn, s.cipher, s.msgID, s.clock, s.writeTimeout, s.log)
 	conn.shutdown = s.shutdown
 	conn.peerCancels = s.peerCancels

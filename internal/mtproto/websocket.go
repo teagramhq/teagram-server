@@ -609,6 +609,11 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request, handler
 		s.logNegotiation(err)
 		return
 	}
+	closeDiagnostics := newTransportCloseDiagnostics(websocketPath)
+	var closeErr error
+	defer func() {
+		s.logTransportClose(closeDiagnostics, closeErr)
+	}()
 	defer func() {
 		if err := ws.CloseNow(); err != nil && !isDisconnect(err) {
 			s.log.Info("close WebSocket connection", "err", err)
@@ -623,6 +628,7 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request, handler
 	// detection; serveConn replaces it with the normal per-frame deadlines after
 	// detection succeeds.
 	if err := state.socket.SetDeadline(state.deadline); err != nil {
+		closeErr = err
 		s.logNegotiation(errors.Join(errors.New("set WebSocket negotiation deadline"), err))
 		return
 	}
@@ -645,18 +651,21 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request, handler
 		<-hardCutoffDone
 	}
 	if err != nil {
+		closeErr = err
 		s.logNegotiation(err)
 		return
 	}
 	if err := state.socket.SetDeadline(time.Time{}); err != nil {
+		closeErr = err
 		s.logNegotiation(errors.Join(errors.New("clear WebSocket negotiation deadline"), err))
 		return
 	}
 	drainingConn := webSocketDrainConn{Conn: conn, socket: ws, shutdown: s.shutdown, readDeadline: stream}
-	if err := s.serveConnWithHandlerContextsAndTransport(s.shutdown.requestCtx, s.shutdown.requestCtx, drainingConn, state.addr, state.slot, func() bool {
+	closeErr = s.serveConnWithHandlerContextsAndTransportDiagnostics(s.shutdown.requestCtx, s.shutdown.requestCtx, drainingConn, state.addr, state.slot, func() bool {
 		return state.socket.markServing()
-	}, websocketPath, handler); err != nil && !isDisconnect(err) {
-		s.logConnectionFailure(err)
+	}, websocketPath, handler, closeDiagnostics)
+	if closeErr != nil && !isDisconnect(closeErr) {
+		s.logConnectionFailure(closeErr)
 	}
 }
 
