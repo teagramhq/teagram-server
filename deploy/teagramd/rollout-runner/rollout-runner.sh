@@ -4,7 +4,7 @@ umask 077
 
 SCRIPT_DIR=$(cd -P "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 SCRIPT_SOURCE="$SCRIPT_DIR/$(basename "${BASH_SOURCE[0]}")"
-readonly APPROVED_VERIFIER_SHA=0597262c79fe73b80d02cd745dab23805ddfb31b89bb750b139a1f3ff59065dc
+readonly APPROVED_VERIFIER_SHA=b1542952e543e3b960204bbdbbdd98d516cb4ae7a824ac6b8b6d0dfb815038b8
 readonly APPROVED_SCHEMA_GATE_SHA=ac54d3cf0480383a52414a8bc8b856b5e1d5f6f8d19034c9c576c64627e097c8
 readonly APPROVED_SCHEMA_GATE_HELPER_SHA=7ae06c2872c60b434068b3715a9ddd5e19b03d4be98dc9881c8dd8f294953d41
 readonly APPROVED_INITIAL_LOCAL_COMPOSE_SHA=3a4f158c6e1f2ead6676fba85d8d95cfb15557a0fbd8e82230361e0af988e0f7
@@ -1666,7 +1666,7 @@ compare_initial_local_target() {
   local results="$TARGET_DIR/target-comparisons.tsv"
   local failures=0 field before after result expected_image
   local baseline_fields=(mounts_sha256 container_stop_timeout exposure_sha256 container_env_sha256)
-  local render_fields=(config_sha256 env_sha256 override_sha256 stop_grace_period compose_replica_count compose_client_addr_trust)
+  local render_fields=(config_sha256 env_sha256 override_sha256 stop_grace_period compose_replica_count compose_client_addr_trust compose_public_ws_2446)
   write_immutable "$results" '' || return 1
   [ "$(jq -er '.provenance.compose_source' "$baseline_file")" = live-container-inspection ] && \
     [ "$(jq -er '.provenance.compose_source' "$render_file")" = selected-compose-render ] && \
@@ -1680,6 +1680,15 @@ compare_initial_local_target() {
     if [ "$before" = "$after" ]; then result=pass; else result=fail; failures=$((failures + 1)); fi
     append_evidence_row "$results" target "live_baseline_$field" "$before" "$after" "$result" || return 1
   done
+  before=$(jq -er '.exposure_public_ws_2446' "$baseline_file") || { fail 'initial-local baseline is missing its inspected public WebSocket port'; return 1; }
+  after=$(jq -er '.exposure_public_ws_2446' "$target_file") || { fail 'initial-local target is missing its inspected public WebSocket port'; return 1; }
+  if [ "$before" = "$after" ] || { [ "$before" = false ] && [ "$after" = true ]; }; then
+    result=pass
+  else
+    result=fail
+    failures=$((failures + 1))
+  fi
+  append_evidence_row "$results" target live_baseline_exposure_public_ws_2446 "$before" "$after" "$result" || return 1
   for field in "${render_fields[@]}"; do
     before=$(jq -er --arg field "$field" '.[$field]' "$render_file") || { fail "initial-local target render is missing $field"; return 1; }
     after=$(jq -er --arg field "$field" '.[$field]' "$target_file") || { fail "initial-local target is missing $field"; return 1; }
@@ -1735,7 +1744,7 @@ compare_resolved_preflight() {
   local field before after result expected failures=0
   if [ "$INITIALIZE_LOCAL" = 1 ]; then
     local render_file="$BASELINE_DIR/initial-local-target-render.snapshot.json"
-    local live_fields=(container_id image_id state mounts_sha256 container_stop_timeout exposure_sha256 container_env_sha256 container_replica_count container_client_addr_trust)
+    local live_fields=(container_id image_id state mounts_sha256 container_stop_timeout exposure_sha256 exposure_public_ws_2446 container_env_sha256 container_replica_count container_client_addr_trust)
     [ "$(jq -er '.provenance.compose_source' "$old_file")" = live-container-inspection ] && \
       [ "$(jq -er '.provenance.compose_source' "$render_file")" = selected-compose-render ] && \
       [ "$(jq -er '.provenance.compose_source' "$target_file")" = selected-compose-render ] || {
@@ -1749,6 +1758,10 @@ compare_resolved_preflight() {
       if [ "$before" = "$after" ]; then result=pass; else result=fail; failures=$((failures + 1)); fi
       append_evidence_row "$results" preflight "selected_render_$field" "$before" "$after" "$result" || return 1
     done
+    before=$(jq -er '.compose_public_ws_2446' "$render_file") || { fail 'pinned target render is missing the public WebSocket port policy'; return 1; }
+    after=$(jq -er '.compose_public_ws_2446' "$target_file") || { fail 'resolved target is missing the public WebSocket port policy'; return 1; }
+    if [ "$before" = "$after" ]; then result=pass; else result=fail; failures=$((failures + 1)); fi
+    append_evidence_row "$results" preflight selected_render_compose_public_ws_2446 "$before" "$after" "$result" || return 1
     for field in "${live_fields[@]}"; do
       before=$(jq -er --arg field "$field" '.[$field]' "$old_file") || { fail 'live baseline is missing an inspected preflight comparison field'; return 1; }
       after=$(jq -er --arg field "$field" '.[$field]' "$target_file") || { fail 'preflight snapshot is missing an inspected baseline field'; return 1; }
@@ -1771,6 +1784,19 @@ compare_resolved_preflight() {
     if [ "$before" = "$after" ]; then result=pass; else result=fail; failures=$((failures + 1)); fi
     append_evidence_row "$results" preflight "$field" "$before" "$after" "$result" || return 1
   done
+  for field in compose_public_ws_2446 exposure_public_ws_2446; do
+    before=$(jq -er --arg field "$field" '.[$field]' "$old_file") || { fail "baseline is missing $field"; return 1; }
+    after=$(jq -er --arg field "$field" '.[$field]' "$target_file") || { fail "resolved target is missing $field"; return 1; }
+    if [ "$before" = "$after" ] || {
+      [ "$field" = compose_public_ws_2446 ] && [ "$before" = false ] && [ "$after" = true ];
+    }; then
+      result=pass
+    else
+      result=fail
+      failures=$((failures + 1))
+    fi
+    append_evidence_row "$results" preflight "$field" "$before" "$after" "$result" || return 1
+  done
   for field in compose_replica_count compose_client_addr_trust; do
     after=$(jq -er --arg field "$field" '.[$field]' "$target_file") || { fail 'resolved target is missing an approved environment setting'; return 1; }
     if [ "$field" = compose_replica_count ]; then expected=1; else expected=socket; fi
@@ -1784,7 +1810,7 @@ compare_rollback_to_baseline() {
   local baseline_file="$ROLLBACK_DIR/baseline.snapshot.json"
   local rollback_file="$ROLLBACK_DIR/rollback.snapshot.json"
   local results="$ROLLBACK_DIR/rollback-equivalence.tsv"
-  local fields=(image_id mounts_sha256 stop_grace_period container_stop_timeout config_sha256 env_sha256 override_sha256 exposure_sha256 container_env_sha256 compose_replica_count compose_client_addr_trust container_replica_count container_client_addr_trust)
+  local fields=(image_id mounts_sha256 stop_grace_period container_stop_timeout config_sha256 env_sha256 override_sha256 exposure_sha256 container_env_sha256 compose_replica_count compose_client_addr_trust container_replica_count container_client_addr_trust compose_public_ws_2446 exposure_public_ws_2446)
   local field before after state timeout_value grace
   local expected_count=${#fields[@]}
   ROLLBACK_COMPARE_FAILURES=0
@@ -1792,8 +1818,8 @@ compare_rollback_to_baseline() {
   if [ "$INITIALIZE_LOCAL" = 1 ]; then
     local render_file="$ROLLBACK_DIR/initial-local-target-render.snapshot.json"
     local target_render="$BASELINE_DIR/initial-local-target-render.snapshot.json"
-    local live_fields=(image_id mounts_sha256 container_stop_timeout exposure_sha256 container_env_sha256)
-    local render_fields=(config_sha256 env_sha256 override_sha256 stop_grace_period compose_replica_count compose_client_addr_trust)
+    local live_fields=(image_id mounts_sha256 container_stop_timeout exposure_sha256 exposure_public_ws_2446 container_env_sha256)
+    local render_fields=(config_sha256 env_sha256 override_sha256 stop_grace_period compose_replica_count compose_client_addr_trust compose_public_ws_2446)
     [ "$(jq -er '.provenance.compose_source' "$baseline_file")" = live-container-inspection ] && \
       [ "$(jq -er '.provenance.compose_source' "$target_render")" = selected-compose-render ] && \
       [ "$(jq -er '.provenance.compose_source' "$rollback_file")" = selected-compose-render ] || {
@@ -1846,7 +1872,7 @@ compare_rollback_to_baseline() {
   record_rollback_row "$results" rollback_grace_policy 2m0s "$grace" || return 1
   timeout_value=$(jq -er '.container_stop_timeout' "$rollback_file") || { fail 'rollback inspected timeout is missing'; return 1; }
   record_rollback_row "$results" rollback_inspected_stop_timeout 120 "$timeout_value" || return 1
-  [ "$expected_count" -eq 13 ] || { fail 'internal rollback equivalence field count changed'; return 1; }
+  [ "$expected_count" -eq 15 ] || { fail 'internal rollback equivalence field count changed'; return 1; }
   [ "$ROLLBACK_COMPARE_FAILURES" -eq 0 ] || { fail 'rollback does not match the captured baseline'; return 1; }
 }
 
