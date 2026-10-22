@@ -49,10 +49,39 @@ if [[ $# -eq 2 && $1 == "--recover" ]]; then
     /usr/bin/python3 "$script_dir/restore-readiness.py" --recover "$2"
 fi
 
-preflight_stage="validate runner prerequisites"
-if [[ $# -ne 0 || $(id -u) -eq 0 ]]; then
+local_mode=""
+local_args=()
+if [[ $# -eq 2 && $1 == "--local-dump" && -n $2 ]]; then
+  local_mode="local-dump"
+  local_args=(--local-dump "$2")
+elif [[ $# -eq 1 && $1 == "--local-fixture-test" ]]; then
+  local_mode="local-fixture-test"
+  local_args=(--local-fixture-test)
+elif [[ $# -ne 0 ]]; then
   printf '%s\n' '{"result":"fail","phase":"preflight","category":"preflight_failure","migration_head":"not_reached","help_getConfig":"not_run","synthetic_signin":"not_run","cleanup":"not_started","elapsed_ms":0,"exit":1}'
   exit 1
+fi
+
+preflight_stage="validate runner prerequisites"
+if [[ $(id -u) -eq 0 ]]; then
+  printf '%s\n' '{"result":"fail","phase":"preflight","category":"preflight_failure","migration_head":"not_reached","help_getConfig":"not_run","synthetic_signin":"not_run","cleanup":"not_started","elapsed_ms":0,"exit":1}'
+  exit 1
+fi
+
+if [[ $local_mode == "local-dump" ]]; then
+  if ! command -v sudo >/dev/null 2>&1; then
+    emit_preflight_failure
+  fi
+  if ! sudo -n -- env -i \
+    HOME=/root \
+    LANG=C \
+    LC_ALL=C \
+    PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
+    PYTHONDONTWRITEBYTECODE=1 \
+    /usr/bin/python3 "$script_dir/restore-readiness.py" \
+    --validate-local-dump "${local_args[1]}"; then
+    exit 1
+  fi
 fi
 
 build_uid=$(id -u)
@@ -163,6 +192,25 @@ run_drill() {
     --work-seconds "$work_seconds" \
     "$@"
 }
+
+if [[ -n $local_mode ]]; then
+  build_inputs
+  preflight_stage="run local-dump restore drill"
+  if ! local_report=$(run_drill "${local_args[@]}"); then
+    printf '%s\n' "$local_report"
+    exit 1
+  fi
+  if ! printf '%s' "$local_report" | /usr/bin/python3 -c '
+import json, sys
+report = json.load(sys.stdin)
+if not (report.get("result") == "pass" and report.get("input_mode") == "local" and report.get("cleanup") == "verified" and report.get("auth_keys_cleared") == "pass" and report.get("exit") == 0):
+    raise SystemExit(1)
+'; then
+    emit_preflight_failure
+  fi
+  printf '%s\n' "$local_report"
+  exit 0
+fi
 
 build_inputs
 preflight_stage="run primary synthetic restore drill"

@@ -810,7 +810,7 @@ jobs:
   restore-readiness:
     name: confined restore-to-application
     runs-on: ubuntu-26.04
-    timeout-minutes: 45
+    timeout-minutes: 80
     permissions:
       contents: read
 
@@ -858,6 +858,9 @@ jobs:
 
       - name: Run the bounded synthetic restore-to-application gate
         run: timeout --signal=TERM --kill-after=15s 35m bash deploy/teagramd/rollout-runner/test-restore-readiness.sh
+
+      - name: Run local-dump mode with a harness-generated synthetic SQL dump
+        run: timeout --signal=TERM --kill-after=15s 35m bash deploy/teagramd/rollout-runner/test-restore-readiness.sh --local-fixture-test
 
   # Keep the existing required check context while making every verification
   # lane mandatory. `always()` runs this when a lane fails or is skipped.

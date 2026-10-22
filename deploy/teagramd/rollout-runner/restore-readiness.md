@@ -1,4 +1,6 @@
-# Synthetic restore readiness drill
+# Restore readiness drill
+
+## Synthetic mode
 
 Run the gate only on a disposable Linux CI runner with Docker, Go modules already downloaded, Atlas v1.2.0, and passwordless `sudo`. From the repository root, run:
 
@@ -6,7 +8,7 @@ Run the gate only on a disposable Linux CI runner with Docker, Go modules alread
 timeout --signal=TERM --kill-after=15s 35m bash deploy/teagramd/rollout-runner/test-restore-readiness.sh
 ```
 
-The command accepts no dump, DSN, account, or service configuration. It creates a fresh fixture from the repository migrations with three synthetic auth keys, two dependent SRP challenges, three dependent notify cursors, and a binding-evidence row enrolled for the synthetic account and updated by the reviewed auth-key trigger. It restores that fixture into the pinned PostgreSQL 18 image and applies the pending migration.
+With no arguments the command accepts no dump, DSN, account, or service configuration. It creates a fresh fixture from the repository migrations with three synthetic auth keys, two dependent SRP challenges, three dependent notify cursors, and a binding-evidence row enrolled for the synthetic account and updated by the reviewed auth-key trigger. It restores that fixture into the pinned PostgreSQL 18 image and applies the pending migration.
 
 Before starting the daemon, the gate re-attests the exact scratch database, verifies its post-restore marker and migration head, and compares its auth-key foreign-key inventory and triggers on `auth_keys`, `srp_challenges`, `notify_settings_difference_cursors`, and `browser_acceptance_binding_evidence` with `auth-key-clearing-inventory.json`. It confirms the daemon is off and no other database client is connected, then runs a schema-qualified, bounded `DELETE` for the generated key IDs in one transaction. The transaction checks the auth-key count before commit; aggregate counts verify the declared cascades and binding-evidence trigger effect. A second zero-key count runs immediately before daemon startup. Key values, rows, and identifiers are not read back or reported.
 
@@ -24,4 +26,25 @@ bash deploy/teagramd/rollout-runner/test-restore-readiness.sh --recover /run/res
 
 Recovery rechecks the manifest and global lock, then removes only objects whose immutable IDs and configuration still match. A recovery command always returns nonzero because it repairs cleanup state after a failed drill; rerun the synthetic gate to obtain fresh passing evidence. Never copy a manifest, dump, database files, or container diagnostics into artifacts or logs.
 
-The claim is limited to restored synthetic schema compatibility after scratch auth-key clearing, `help.getConfig`, sign-in by the newly created synthetic account, and verified teardown. Restored sessions, SRP challenges, and notify cursors are discarded. The gate covers configuration and new-account sign-in only; it makes no claim about restoring existing sessions, keys, challenges, cursors, or media.
+The synthetic-mode claim is limited to restored synthetic schema compatibility after scratch auth-key clearing, `help.getConfig`, sign-in by the newly created synthetic account, and verified teardown. Restored sessions, SRP challenges, and notify cursors are discarded. The gate covers configuration and new-account sign-in only; it makes no claim about restoring existing sessions, keys, challenges, cursors, or media.
+
+## Local dump mode
+
+To run the drill against one local PostgreSQL plain-SQL dump, set the target commit SHA and use the protected invocation from the repository root:
+
+```sh
+target_sha=0123456789abcdef0123456789abcdef01234567
+timeout --signal=TERM --kill-after=15s 35m bash deploy/teagramd/rollout-runner/test-restore-readiness.sh --local-dump "/opt/teagram/backups/pgdump-pre-${target_sha}.sql"
+```
+
+The path must name one regular, non-symlink file matching `pgdump-pre-<7-to-40-lowercase-hex>.sql`. Preflight checks metadata only: root ownership, mode `0600`, one hard link, a nonzero size no larger than 512 MiB, and root-owned parent directories that are not group- or world-writable. A metadata mismatch returns the fixed `isolation_refusal` category before creating the run lock or scratch resources. The invocation accepts no DSN, URL, standard input, globals dump, or second input. The host does not read, hash, print, copy, or upload the dump bytes; only the confined restore client reads the read-only bind mount.
+
+The local dump is restored transactionally by a confined PostgreSQL client inside the scratch database's no-egress namespace. The client runs as container UID 0 so it can read the root-owned `0600` bind mount; it has no Linux capabilities, a read-only root filesystem, and only the dump and scratch socket mounts. A random psql restricted-mode key blocks dump-supplied psql commands; the gate strips the expected `pg_dump` restriction framing and refuses unexpected `\restrict` or `\unrestrict` commands. The scratch `postgres` role is demoted during restore so SQL cannot create or alter roles, use server-file or program COPY, install untrusted extensions or languages, or change server settings. The gate then checks the migration head, schemas, executable objects, extensions, roles, database ACLs and settings against the reviewed synthetic baseline before applying the pending migration. The auth-key clearing transaction is mandatory and refuses more than 100,000 rows. Application checks run only after the zero-key check. A pass adds `input_mode=local` to the enumerated success object; failure output contains only fixed categories.
+
+CI qualifies this mode with a harness-generated, synthetic SQL dump written with the accepted production filename and metadata. For that test-only path, CI runs:
+
+```sh
+timeout --signal=TERM --kill-after=15s 35m bash deploy/teagramd/rollout-runner/test-restore-readiness.sh --local-fixture-test
+```
+
+Local mode uses the same protected recovery command documented above. The claim is limited to schema compatibility after scratch auth-key clearing, `help.getConfig`, sign-in by a newly created synthetic account, and verified teardown. Existing sessions, auth keys, challenges, cursors, and media are not recovered. This ticket does not run against a real dump or access the LXC.

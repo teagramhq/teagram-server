@@ -1,12 +1,15 @@
 #!/usr/bin/env python3
-"""Focused tests for the synthetic restore gate's public safety contract."""
+"""Focused tests for the restore readiness gate's public safety contract."""
 
 from __future__ import annotations
 
+import ast
 import importlib.util
 import io
 import json
 import os
+import stat
+import subprocess
 import tempfile
 import time
 import unittest
@@ -126,6 +129,32 @@ class RestoreReadinessContractTests(unittest.TestCase):
         self.assertIn('--work-seconds "$work_seconds"', run_drill)
         self.assertIn('run_suite_command "${build_env[@]}" go build', shell)
         self.assertIn("run_teardown_command sudo -n -- /usr/bin/find", shell)
+        self.assertIn('local_args=(--local-dump "$2")', shell)
+        self.assertIn('local_args=(--local-fixture-test)', shell)
+        self.assertLess(shell.index("--validate-local-dump"), shell.index("build_inputs\n"))
+        workflow = Path(__file__).parents[3] / ".github" / "workflows" / "ci.yml"
+        self.assertIn("test-restore-readiness.sh --local-fixture-test", workflow.read_text(encoding="utf-8"))
+
+    def test_local_dump_preflight_is_a_single_metadata_only_mode(self) -> None:
+        arguments = [
+            "--validate-local-dump",
+            "/opt/teagram/backups/pgdump-pre-" + "a" * 40 + ".sql",
+        ]
+        with patch.object(RESTORE_READINESS.sys, "argv", [str(SCRIPT), *arguments]):
+            parsed = RESTORE_READINESS.parse_args()
+        self.assertEqual(parsed.validate_local_dump, Path(arguments[1]))
+        self.assertIsNone(parsed.local_dump)
+        self.assertFalse(parsed.local_fixture_test)
+
+        for invalid in (
+            [*arguments, "extra.sql"],
+            [*arguments, "--local-dump", arguments[1]],
+            [*arguments, "--docker-bin", "/usr/bin/docker"],
+        ):
+            with self.subTest(invalid=invalid), patch.object(
+                RESTORE_READINESS.sys, "argv", [str(SCRIPT), *invalid]
+            ), redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+                RESTORE_READINESS.parse_args()
 
     def test_sigkill_drill_requires_injection_marker_and_signal_status(self) -> None:
         marker = b"SIGKILL_INJECTED\n"
@@ -320,6 +349,18 @@ class RestoreReadinessContractTests(unittest.TestCase):
                 "exit": 0,
             },
         )
+        local_passed = RESTORE_READINESS.report_document(
+            "application_assertions",
+            "assertions_passed",
+            "verified",
+            123,
+            migration_head=RESTORE_READINESS.HEAD_SCHEMA,
+            help_get_config="pass",
+            synthetic_signin="pass",
+            auth_keys_cleared="pass",
+            input_mode="local",
+        )
+        self.assertEqual(local_passed, dict(passed, input_mode="local"))
         cleanup_failure = RESTORE_READINESS.report_document(
             "application_assertions",
             "assertions_passed",
@@ -354,6 +395,118 @@ class RestoreReadinessContractTests(unittest.TestCase):
                 synthetic_signin="pass",
                 auth_keys_cleared="pass",
             )
+
+    def test_local_dump_metadata_and_restore_contract_are_bounded(self) -> None:
+        name = "pgdump-pre-" + "a" * 40 + ".sql"
+
+        def file_info(
+            *,
+            mode: int = stat.S_IFREG | 0o600,
+            uid: int = 0,
+            gid: int = 0,
+            links: int = 1,
+            size: int = 4096,
+        ) -> os.stat_result:
+            return os.stat_result((mode, 1, 2, links, uid, gid, size, 0, 0, 0))
+
+        self.assertTrue(RESTORE_READINESS.validate_local_dump_metadata(file_info(), name))
+        for info, candidate in (
+            (file_info(mode=stat.S_IFLNK | 0o600), name),
+            (file_info(uid=1), name),
+            (file_info(gid=1), name),
+            (file_info(mode=stat.S_IFREG | 0o640), name),
+            (file_info(links=2), name),
+            (file_info(size=0), name),
+            (file_info(size=RESTORE_READINESS.MAX_LOCAL_DUMP_BYTES + 1), name),
+            (file_info(), "pgdump-pre-" + "A" * 40 + ".sql"),
+        ):
+            with self.subTest(info=info, name=candidate):
+                self.assertFalse(RESTORE_READINESS.validate_local_dump_metadata(info, candidate))
+
+        source = SCRIPT.read_text(encoding="utf-8")
+        self.assertIn("self.mount(self.local_dump_path, \"/run/local-dump/input.sql\", writable=False)", source)
+        self.assertIn("--single-transaction --file=-", source)
+        self.assertIn("\\\\restrict", source)
+        self.assertIn("-- PostgreSQL database dump complete", source)
+        self.assertIn("printf 'SELECT 1 / 0;\\n'", source)
+        self.assertIn('entrypoint="/bin/sh"', source)
+        self.assertIn("LIMIT {MAX_LOCAL_AUTH_KEYS}", source)
+        self.assertIn("IF deleted_keys <> original_keys", source)
+        self.assertIn("def validate_local_dump_argument", source)
+        self.assertIn("LOCAL_OBJECT_INVENTORY_SQL", source)
+        self.assertIn("COMMENT ON SCHEMA public IS", source)
+        self.assertIn("obj_description(namespace.oid, 'pg_namespace')", source)
+        self.assertIn('"synthetic_local_dump_fixture"}', source)
+        self.assertIn("            LOCAL_DUMP_LEAK_MARKER,", source)
+        self.assertIn('role="local_restore_client",\n            user="0:0"', source)
+        self.assertIn('"checker_provisioner", "local_restore_client"', source)
+
+        tree = ast.parse(source)
+        restore_method = next(
+            node
+            for node in ast.walk(tree)
+            if isinstance(node, ast.FunctionDef) and node.name == "restore_local_dump"
+        )
+        assignment = next(
+            node
+            for node in restore_method.body
+            if isinstance(node, ast.Assign)
+            and any(isinstance(target, ast.Name) and target.id == "restore_script" for target in node.targets)
+        )
+        restore_script = ast.literal_eval(assignment.value)
+        awk_program = restore_script.split("  if awk '\n", 1)[1].split('\n  \' "$dump_path"; then', 1)[0]
+        valid_pg16_dump = (
+            "SET statement_timeout = 0;\n"
+            "--\n-- PostgreSQL database dump complete\n--\n\n"
+        )
+        valid_pg18_dump = (
+            "\\restrict sourcekey\nSET statement_timeout = 0;\n"
+            "--\n-- PostgreSQL database dump complete\n--\n\n"
+            "\\unrestrict sourcekey\n\n"
+        )
+        hostile_dump = valid_pg18_dump.replace(
+            "--\n-- PostgreSQL database dump complete",
+            "\\unrestrict injectedkey\n--\n-- PostgreSQL database dump complete",
+        )
+        for dump, expected_status in (
+            (valid_pg16_dump, 0),
+            (valid_pg18_dump, 0),
+            (hostile_dump, 42),
+        ):
+            with self.subTest(expected_status=expected_status):
+                filtered = subprocess.run(
+                    ["awk", awk_program, "-"],
+                    input=dump,
+                    text=True,
+                    capture_output=True,
+                    check=False,
+                )
+                self.assertEqual(filtered.returncode, expected_status)
+                self.assertNotIn("\\unrestrict", filtered.stdout)
+
+    def test_local_success_report_adds_only_its_mode_marker(self) -> None:
+        report = RESTORE_READINESS.report_document(
+            "application_assertions",
+            "assertions_passed",
+            "verified",
+            3,
+            migration_head=RESTORE_READINESS.HEAD_SCHEMA,
+            help_get_config="pass",
+            synthetic_signin="pass",
+            auth_keys_cleared="pass",
+            input_mode="local",
+        )
+        self.assertEqual(set(report) - {"input_mode"}, {
+            "result",
+            "migration_head",
+            "help_getConfig",
+            "synthetic_signin",
+            "auth_keys_cleared",
+            "cleanup",
+            "elapsed_ms",
+            "exit",
+        })
+        self.assertEqual(report["input_mode"], "local")
 
     def test_auth_key_inventory_and_bounded_fixture_transactions(self) -> None:
         inventory = RESTORE_READINESS.load_auth_key_inventory()
@@ -553,6 +706,7 @@ class RestoreReadinessContractTests(unittest.TestCase):
     def test_auth_key_clear_refuses_wrong_target_and_missing_marker_before_sql(self) -> None:
         target = {"id": "a" * 64, "role": "target_postgres", "removed": False}
         drill = object.__new__(RESTORE_READINESS.Drill)
+        drill.input_mode = "synthetic"
         drill.phase = "auth_key_clearing"
         drill.databases = {"target": target}
         drill.manifest = {"containers": [target], "processes": [], "files": []}
@@ -589,12 +743,14 @@ class RestoreReadinessContractTests(unittest.TestCase):
                 )
                 target = {"id": "a" * 64, "role": "target_postgres", "removed": False}
                 marker = {
+                    "input_mode": "synthetic",
                     "target_container_id": target["id"],
                     "migration_head": RESTORE_READINESS.HEAD_SCHEMA,
                     "database_identity": "fixture-db",
                     "table_counts": ["fixture-counts"],
                 }
                 drill = object.__new__(RESTORE_READINESS.Drill)
+                drill.input_mode = "synthetic"
                 drill.phase = "auth_key_clearing"
                 drill.databases = {"target": target}
                 drill.manifest = {"containers": [target], "processes": []}
