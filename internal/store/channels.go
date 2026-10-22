@@ -2189,6 +2189,7 @@ func (s *Store) ChannelDialogsForUserWithPins(ctx context.Context, userID int64,
 				r.TopActionType,
 				r.TopTtlPeriod,
 				r.TopPostAuthor,
+				r.TopEntities,
 			})
 			row.Top = &top
 		}

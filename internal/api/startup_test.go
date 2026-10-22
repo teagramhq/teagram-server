@@ -480,7 +480,7 @@ func dispatchStartup(t *testing.T, h mtproto.Handler, method startupMethod, user
 
 func TestStartupMethodsThroughDispatcher(t *testing.T) {
 	h := api.New(
-		nil,
+		openStore(t),
 		2,
 		&tg.Config{},
 		slog.New(slog.DiscardHandler),

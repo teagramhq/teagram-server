@@ -115,6 +115,7 @@ type ChannelMessage struct {
 	PostAuthor   *string
 	TtlPeriod    int32
 	ExpiresAt    pgtype.Timestamptz
+	Entities     []byte
 }
 
 type ChannelMessageReaction struct {
@@ -523,6 +524,7 @@ type Message struct {
 	FwdPostAuthor  *string
 	TtlPeriod      int32
 	ExpiresAt      pgtype.Timestamptz
+	Entities       []byte
 }
 
 type MessageDeleteCapacityRefusal struct {
