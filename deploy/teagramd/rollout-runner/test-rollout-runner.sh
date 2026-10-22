@@ -3641,8 +3641,19 @@ else
   fail 'configuration drift rejection'
 fi
 
-make_fixture public-listener-addition public-listener-addition
-status=$(run_fixture public-listener-addition)
+prepare_public_listener_apply_fixture() {
+  local name=$1 scenario=$2 port=$3 host_ip=$4 state
+  prepare_apply_fixture "$name" "$scenario" || return 1
+  state=$(cat "$TMP/$name-state-path")
+  jq -c --arg port "$port" --arg host_ip "$host_ip" \
+    '.services.teagramd.ports += [{target:($port | tonumber),published:$port,host_ip:$host_ip,protocol:"tcp",mode:"ingress"}]' \
+    "$state/target-compose.json" > "$TMP/$name-target-compose.json" || return 1
+  mv -- "$TMP/$name-target-compose.json" "$state/target-compose.json" || return 1
+  printf '%s\n' "$scenario" > "$TMP/$name-scenario"
+}
+
+prepare_public_listener_apply_fixture public-listener-addition public-listener-addition 2446 127.0.0.1
+status=$(run_fixture public-listener-addition built 0 '' 2 '' '' apply "$APPLY_TARGET_SHA")
 root=$(cat "$TMP/public-listener-addition-root-path")
 if [ "$status" = 0 ] && grep -q "rollout=verified sha=$APPLY_TARGET_SHA" "$TMP/public-listener-addition.stdout" && \
    grep -q $'preflight\tconfig_sha256\t.*\tpass' "$root".target/preflight-comparisons.tsv && \
@@ -3657,8 +3668,9 @@ else
 fi
 
 for scenario in public-listener-wide-host public-listener-other-port; do
-  make_fixture "$scenario" "$scenario"
-  status=$(run_fixture "$scenario")
+  if [ "$scenario" = public-listener-wide-host ]; then port=2446; host_ip=0.0.0.0; else port=2450; host_ip=127.0.0.1; fi
+  prepare_public_listener_apply_fixture "$scenario" "$scenario" "$port" "$host_ip"
+  status=$(run_fixture "$scenario" built 0 '' 2 '' '' apply "$APPLY_TARGET_SHA")
   root=$(cat "$TMP/$scenario-root-path")
   if [ "$status" != 0 ] && \
      grep -q $'preflight\tconfig_sha256\t.*\tfail' "$root".target/preflight-comparisons.tsv && \
