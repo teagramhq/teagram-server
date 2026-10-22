@@ -38,6 +38,9 @@ jobs:
       - name: Test Playwright apt install budget
         run: python3 .github/scripts/test_playwright_apt_timeout.py
 
+      - name: Test Playwright apt retry cache
+        run: python3 .github/scripts/test_playwright_apt_cache.py
+
       - uses: actions/setup-go@v7.0.0
         with:
           go-version-file: go.mod
@@ -1327,14 +1330,7 @@ jobs:
             # install and report the attempt as a success.
             set -e
             if [ "$MODE" = "packages" ]; then
-              # sudo, because an attempt killed mid-download leaves the
-              # directory owned by _apt and the runner user cannot unlink what
-              # is inside it. As a plain rm this exits 1 under `set -e` and the
-              # second attempt dies before it reaches apt, which would leave the
-              # retry that guards the mirror with one usable attempt.
-              sudo rm -rf .apt-cache
-              mkdir -p .apt-cache/partial
-              sudo chown -R _apt:root .apt-cache
+              bash .github/scripts/prepare-playwright-apt-cache.sh .apt-cache
               sudo apt-get update
               # The first dry-run used the apt indexes baked into the runner
               # image. Refreshing those indexes can change the package names
