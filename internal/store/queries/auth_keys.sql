@@ -50,14 +50,18 @@ WHERE id = $1 AND user_id IS NULL
 FOR UPDATE;
 
 -- name: TouchAuthKey :exec
-UPDATE auth_keys SET last_seen_at = now() WHERE id = $1;
+UPDATE auth_keys
+SET last_seen_at = now(),
+    ip = CASE WHEN sqlc.arg(store_ip)::boolean THEN ip ELSE NULL END
+WHERE id = sqlc.arg(id);
 
 -- name: TouchAuthKeyWithIP :exec
 UPDATE auth_keys
 SET last_seen_at = now(),
     ip = CASE
+        WHEN sqlc.narg(ip)::text IS NULL THEN NULL
         WHEN user_id IS NULL THEN NULL
-        WHEN user_id = NULLIF(sqlc.arg(expected_user_id)::bigint, 0) THEN sqlc.arg(ip)
+        WHEN user_id = NULLIF(sqlc.arg(expected_user_id)::bigint, 0) THEN sqlc.narg(ip)::text
         ELSE ip
     END,
     device_model = CASE

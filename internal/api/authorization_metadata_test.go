@@ -15,7 +15,7 @@ import (
 func TestGetAuthorizationsReturnsDeviceMetadataOnlyToOwner(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
-	s, dsn := openStoreDSN(t)
+	s, dsn := openStoreDSNWithOptions(t, store.WithSessionIP(true))
 	owner, err := s.CreateUser(ctx, "+15551296081")
 	if err != nil {
 		t.Fatalf("create owner: %v", err)
@@ -72,7 +72,7 @@ func TestGetAuthorizationsReturnsDeviceMetadataOnlyToOwner(t *testing.T) {
 func TestAuthorizationMetadataDoesNotCarryAcrossLogoutAndRebind(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
-	s, _ := openStoreDSN(t)
+	s, _ := openStoreDSNWithOptions(t, store.WithSessionIP(true))
 	owner, err := s.CreateUser(ctx, "+15551296083")
 	if err != nil {
 		t.Fatalf("create first owner: %v", err)

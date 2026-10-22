@@ -839,8 +839,8 @@ func testSmokeAuthorizationDeviceMetadata(t *testing.T) {
 		wantDeviceModel := "MacBook" + strings.Repeat("X", 121)
 		if auth.DeviceModel != wantDeviceModel || auth.SystemVersion != strings.Repeat("a", 127) ||
 			auth.AppVersion != "6.1" || auth.Platform != "tdesktop" || auth.APIID != 1 ||
-			auth.AppName != "" || auth.IP != "127.0.0.1" || auth.Country != "" || auth.Region != "" {
-			return fmt.Errorf("authorization metadata = %+v, want sanitized initConnection fields and socket IP", auth)
+			auth.AppName != "" || auth.IP != "" || auth.Country != "" || auth.Region != "" {
+			return fmt.Errorf("authorization metadata = %+v, want sanitized labels and no session IP by default", auth)
 		}
 		return nil
 	}); err != nil {
