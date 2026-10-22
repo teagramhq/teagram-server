@@ -1,0 +1,19 @@
+{
+  "layer": 228,
+  "client": "gotd v0.162.0",
+  "source": "source-derived/messages_getMessagesReactions.channel.1.txt",
+  "method": "messages.getMessagesReactions",
+  "request": {
+    "type": "messages.getMessagesReactions",
+    "fields": {
+      "peer": {
+        "type": "inputPeerChannel",
+        "fields": {
+          "channel_id": "<N>",
+          "access_hash": "<N>"
+        }
+      },
+      "id": ["<N>"]
+    }
+  }
+}

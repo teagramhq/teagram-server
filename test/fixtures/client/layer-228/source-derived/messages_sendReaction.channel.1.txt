@@ -1,0 +1,14 @@
+# source: gotd v0.162.0 TL layer 228 generated request schema; synthetic identifiers
+body: { messages_sendReaction flags:#
+  flags: 1 [INT],
+  peer: { inputPeerChannel
+    channel_id: <N> [LONG],
+    access_hash: <N> [LONG],
+  },
+  msg_id: <N> [INT],
+  reaction: [ vector<Reaction> (1)
+    { reactionEmoji
+      emoticon: "❤" [STRING],
+    },
+  ],
+},

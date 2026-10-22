@@ -71,6 +71,12 @@ type Channel struct {
 	CurrentPhotoUploaderID *int64
 }
 
+type ChannelAvailableReaction struct {
+	ChannelID int64
+	Mode      string
+	Reactions []string
+}
+
 type ChannelDeletionJob struct {
 	ChannelID         int64
 	PostCursor        int64
@@ -110,6 +116,13 @@ type ChannelMessage struct {
 	TtlPeriod    int32
 	ExpiresAt    pgtype.Timestamptz
 	Entities     []byte
+}
+
+type ChannelMessageReaction struct {
+	ChannelID int64
+	LocalID   int64
+	ReactorID int64
+	Reaction  string
 }
 
 type ChannelParticipant struct {
