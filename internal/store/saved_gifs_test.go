@@ -216,6 +216,24 @@ func TestSaveGIFMovesToFrontCapsAt200AndUnsaveIsIdempotent(t *testing.T) {
 			t.Fatalf("save GIF %d: %v", i, err)
 		}
 	}
+	var savedCount int64
+	if err := store.StorePool(s).QueryRow(ctx,
+		`SELECT count(*) FROM saved_gifs WHERE owner_id = $1`, owner.ID,
+	).Scan(&savedCount); err != nil {
+		t.Fatalf("count saved GIF rows: %v", err)
+	}
+	if savedCount != 200 {
+		t.Fatalf("saved GIF row count = %d, want 200", savedCount)
+	}
+	var oldestPresent bool
+	if err := store.StorePool(s).QueryRow(ctx,
+		`SELECT EXISTS (SELECT 1 FROM saved_gifs WHERE owner_id = $1 AND file_id = $2)`, owner.ID, files[1].ID,
+	).Scan(&oldestPresent); err != nil {
+		t.Fatalf("check oldest saved GIF row: %v", err)
+	}
+	if oldestPresent {
+		t.Fatalf("oldest non-resaved GIF %d remains in saved_gifs after reaching the cap", files[1].ID)
+	}
 
 	got, err := s.SavedGIFs(ctx, owner.ID)
 	if err != nil {
