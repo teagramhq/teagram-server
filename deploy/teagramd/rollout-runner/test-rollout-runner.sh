@@ -441,7 +441,7 @@ fi
         config_count=$((config_count + 1))
         printf '%s\n' "$config_count" > "$MOCK_STATE/compose-config-count"
         if [ -f "$MOCK_STATE/public-websocket-addition" ]; then
-          if [ "$phase" = baseline ]; then config_file="$MOCK_STATE/base-compose.json"; else config_file="$MOCK_STATE/target-compose.json"; fi
+          if [ "$phase" = baseline ] || [ "$phase" = rollback ]; then config_file="$MOCK_STATE/base-compose.json"; else config_file="$MOCK_STATE/target-compose.json"; fi
           public_compose=$(cat "$config_file")
           while IFS= read -r env_line; do
             key=${env_line%%=*}
