@@ -3542,7 +3542,7 @@ class Drill(Docker):
             ],
             tmpfs_options={
                 "/tmp": "rw,nosuid,nodev,noexec,size=64m,uid=70,gid=70,mode=1777",
-                "/var/lib/postgresql/data": "rw,nosuid,nodev,noexec,size=1m,uid=70,gid=70,mode=0700",
+                "/var/lib/postgresql": "rw,nosuid,nodev,noexec,size=1m,uid=70,gid=70,mode=0700",
             },
             command_args=[
                 "--format=plain",

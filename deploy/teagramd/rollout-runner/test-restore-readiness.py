@@ -156,6 +156,28 @@ class RestoreReadinessContractTests(unittest.TestCase):
             ), redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
                 RESTORE_READINESS.parse_args()
 
+    def test_local_dump_fixture_shadows_postgres_18_declared_volume(self) -> None:
+        tree = ast.parse(SCRIPT.read_text(encoding="utf-8"))
+        fixture_method = next(
+            node
+            for node in ast.walk(tree)
+            if isinstance(node, ast.FunctionDef) and node.name == "create_local_dump_fixture"
+        )
+        image_container_call = next(
+            node
+            for node in ast.walk(fixture_method)
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr == "image_container"
+        )
+        tmpfs_options = next(
+            keyword.value for keyword in image_container_call.keywords if keyword.arg == "tmpfs_options"
+        )
+        tmpfs_paths = ast.literal_eval(tmpfs_options)
+
+        self.assertIn("/var/lib/postgresql", tmpfs_paths)
+        self.assertNotIn("/var/lib/postgresql/data", tmpfs_paths)
+
     def test_sigkill_drill_requires_injection_marker_and_signal_status(self) -> None:
         marker = b"SIGKILL_INJECTED\n"
         with patch.object(RESTORE_READINESS.os, "write", return_value=len(marker)) as write:
