@@ -443,6 +443,13 @@ def container_network(container: dict[str, object]) -> dict[str, object]:
     return {"mode": "networks", "networks": sorted(attached)}
 
 
+def network_includes(network: object, expected_name: str) -> bool:
+    if not isinstance(network, dict) or network.get("mode") != "networks":
+        return False
+    attached = network.get("networks")
+    return isinstance(attached, list) and expected_name in attached
+
+
 def compose_named_mounts(
     service: dict[str, object], compose: dict[str, object], volume_key: str,
     target_roots: str | tuple[str, ...],
@@ -1162,6 +1169,21 @@ def validate_private_rustfs_render(compose: object) -> None:
         reject("transition-rustfs-exposed")
     if network != {"mode": "networks", "networks": [f"{project}_rustfs_private"]}:
         reject("transition-rustfs-exposed")
+    serving_services = [
+        (name, service) for name, service in services.items()
+        if is_runtime_service(name)
+    ]
+    if not serving_services:
+        reject("transition-teagramd-rustfs-network")
+    for name, service in serving_services:
+        if not isinstance(service, dict):
+            reject("transition-teagramd-rustfs-network")
+        try:
+            serving_network = compose_network(service, compose)
+        except Reject:
+            reject("transition-teagramd-rustfs-network")
+        if not network_includes(serving_network, f"{project}_rustfs_private"):
+            reject("transition-teagramd-rustfs-network")
 
 
 def rustfs_private_network_name(record: dict[str, object]) -> str:
@@ -1734,11 +1756,20 @@ def assert_compose_matches(
         reject("compose-teagramd-missing")
     names = {service.get("name") for service in services if isinstance(service, dict)}
     expected_backend = record["backend"]
+    expected_private_network = (
+        rustfs_private_network_name(record)
+        if expected_backend.get("kind") == "s3"
+        else None
+    )
     expected_read_only = expected_mount_read_only(record)
     expected_target = expected_blob_target(record)
     for service in services:
         if not isinstance(service, dict) or service.get("backend") != expected_backend:
             reject("render-backend-mismatch")
+        if expected_private_network is not None and not network_includes(
+            service.get("network"), expected_private_network
+        ):
+            reject("render-teagramd-rustfs-network")
         mode_mounts = service.get("blob_mode_mounts", [])
         if allow_unguarded_initial_local and record["outcome"] == "initial-local" and not mode_mounts:
             pass
@@ -1824,6 +1855,10 @@ def assert_containers_match(
     for container in teagramd:
         if container.get("backend") != record["backend"]:
             reject("running-backend-mismatch")
+        if record.get("outcome") == "s3-accepted" and not network_includes(
+            container.get("network"), rustfs_private_network_name(record)
+        ):
+            reject("running-teagramd-rustfs-network")
         mounts = container.get("tgblobs_mounts", [])
         if not isinstance(mounts, list):
             reject("running-tgblobs-mount")

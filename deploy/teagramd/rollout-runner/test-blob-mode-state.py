@@ -398,6 +398,9 @@ class BlobModeStateTests(unittest.TestCase):
         candidate_compose = {
             "name": "teagram",
             "services": {
+                "teagramd": {
+                    "networks": {"default": None, "rustfs_private": None},
+                },
                 "rustfs": {
                     "ports": [{"target": 9000, "published": "9000"}] if exposed else [],
                     "networks": (
@@ -1004,8 +1007,12 @@ class BlobModeStateTests(unittest.TestCase):
     def test_private_rustfs_render_requires_an_isolated_project_network(self) -> None:
         compose = {
             "name": "teagram",
-            "services": {"rustfs": {"networks": {"rustfs_private": None}}},
+            "services": {
+                "rustfs": {"networks": {"rustfs_private": None}},
+                "teagramd": {"networks": {"default": None, "rustfs_private": None}},
+            },
             "networks": {
+                "default": {"name": "teagram_default"},
                 "rustfs_private": {
                     "name": "teagram_rustfs_private",
                     "driver": "bridge",
@@ -1039,6 +1046,58 @@ class BlobModeStateTests(unittest.TestCase):
                     lambda candidate=candidate: blob_mode.validate_private_rustfs_render(candidate),
                     "transition-rustfs-exposed",
                 )
+
+        app_missing_private_network = json.loads(json.dumps(compose))
+        app_missing_private_network["services"]["teagramd"]["networks"].pop("rustfs_private")
+        self.assert_rejects(
+            lambda: blob_mode.validate_private_rustfs_render(app_missing_private_network),
+            "transition-teagramd-rustfs-network",
+        )
+
+    def test_running_s3_teagramd_requires_the_private_rustfs_network(self) -> None:
+        record = {
+            "outcome": "s3-accepted",
+            "backend": {
+                "kind": "s3", "endpoint": "http://rustfs:9000",
+                "bucket": "teagram", "prefix": "teagramd/",
+            },
+            "volumes": {"tgblobs": "teagram_tgblobs", "rustfsdata": "teagram_rustfsdata"},
+        }
+        network = {"mode": "networks", "networks": ["teagram_default", "teagram_rustfs_private"]}
+        inventory = {
+            "containers": [
+                {
+                    "service": "teagramd",
+                    "backend": record["backend"],
+                    "mode_mounts": blob_mode.guarded_mode_mounts("teagramd", self.mode_source),
+                    "tgblobs_mounts": [{
+                        "type": "volume", "name": "teagram_tgblobs",
+                        "target": blob_mode.BLOB_TARGET, "rw": False,
+                    }],
+                    "network": network,
+                },
+                {
+                    "service": "rustfs",
+                    "mode_mounts": [],
+                    "rustfs_mounts": [{
+                        "type": "volume", "name": "teagram_rustfsdata",
+                        "target": "/data", "rw": True,
+                    }],
+                    "ports": [],
+                    "network": {"mode": "networks", "networks": ["teagram_rustfs_private"]},
+                },
+            ],
+        }
+        with patch.object(blob_mode, "docker_volume_exists"):
+            blob_mode.assert_containers_match(inventory, record, self.mode_source)
+
+            inventory["containers"][0]["network"] = {
+                "mode": "networks", "networks": ["teagram_default"],
+            }
+            self.assert_rejects(
+                lambda: blob_mode.assert_containers_match(inventory, record, self.mode_source),
+                "running-teagramd-rustfs-network",
+            )
 
     def test_running_s3_rustfs_rejects_ports_extra_networks_and_unisolated_networks(self) -> None:
         record = {

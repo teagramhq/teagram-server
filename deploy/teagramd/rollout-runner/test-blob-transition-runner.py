@@ -716,7 +716,10 @@ class BlobTransitionAuthorityTests(unittest.TestCase):
                     "Destination": mode.MODE_TARGET, "RW": False,
                 },
             ],
-            "NetworkSettings": {"Networks": {"teagram_default": {}}, "Ports": {}},
+            "NetworkSettings": {
+                "Networks": {"teagram_default": {}, "teagram_rustfs_private": {}},
+                "Ports": {},
+            },
         }
         rustfs = {
             "Id": "b" * 64,
@@ -1167,6 +1170,12 @@ class BlobTransitionRunnerFixtures(unittest.TestCase):
             raw_networks = service.get("networks") or {"default": None}
             attached = {}
             for network_key in raw_networks:
+                if (
+                    scenario == "live-teagramd-rustfs-network-missing"
+                    and mode_fixtures.blob_mode.is_runtime_service(service_name)
+                    and network_key == "rustfs_private"
+                ):
+                    continue
                 network = declared_networks.get(network_key, {})
                 network_name = network.get("name", f"{project}_{network_key}")
                 attached[network_name] = {}
@@ -1408,6 +1417,30 @@ class BlobTransitionRunnerFixtures(unittest.TestCase):
             self.assertNotIn(credential.encode("ascii"), compose_bytes)
         self.assertFalse(compose_path.with_name("candidate-render.stdout").exists())
 
+    def test_current_cutover_rejects_teagramd_without_rustfs_network_before_freeze(self) -> None:
+        candidate_path = self.bundle / "candidate-compose.json"
+        candidate = json.loads(candidate_path.read_text(encoding="utf-8"))
+        for name, service in candidate["services"].items():
+            if not mode_fixtures.blob_mode.is_runtime_service(name):
+                continue
+            networks = service.get("networks")
+            if isinstance(networks, dict):
+                networks.pop("rustfs_private", None)
+            elif isinstance(networks, list):
+                service["networks"] = [network for network in networks if network != "rustfs_private"]
+        candidate_path.write_text(json.dumps(candidate, sort_keys=True), encoding="utf-8")
+        candidate_path.chmod(0o600)
+
+        result = self.run_current_cutover()
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("render-teagramd-rustfs-network", result.stderr)
+        events = self.events.read_text(encoding="utf-8")
+        self.assertNotIn("compose stop --timeout 120 teagramd teagramd-proxy", events)
+        self.assertNotIn("blob-migrate --manifest stdout", events)
+        records, _head, _mode = mode_fixtures.blob_mode.read_authority(self.state_dir, self.report_root)
+        self.assertEqual(records[-1]["outcome"], "initial-local")
+
     def test_current_cutover_rejects_mismatch_and_resumes_local(self) -> None:
         before = self.state_snapshot()
         result = self.run_current_cutover("mismatched-destination-census")
@@ -1510,6 +1543,20 @@ class BlobTransitionRunnerFixtures(unittest.TestCase):
 
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("running-volume-mismatch", result.stderr)
+        later_events = self.events.read_text(encoding="utf-8").splitlines()[event_count:]
+        self.assertNotIn("docker compose stop --timeout 120 teagramd teagramd-proxy", later_events)
+        records, _head, _mode = mode_fixtures.blob_mode.read_authority(self.state_dir, self.report_root)
+        self.assertEqual(records[-1]["outcome"], "s3-accepted")
+
+    def test_current_recovery_rejects_teagramd_missing_rustfs_network_before_freeze(self) -> None:
+        cutover = self.run_current_cutover()
+        self.assertEqual(cutover.returncode, 0, cutover.stderr)
+        event_count = len(self.events.read_text(encoding="utf-8").splitlines())
+
+        result = self.run_current_recovery("live-teagramd-rustfs-network-missing")
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("running-teagramd-rustfs-network", result.stderr)
         later_events = self.events.read_text(encoding="utf-8").splitlines()[event_count:]
         self.assertNotIn("docker compose stop --timeout 120 teagramd teagramd-proxy", later_events)
         records, _head, _mode = mode_fixtures.blob_mode.read_authority(self.state_dir, self.report_root)
