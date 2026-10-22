@@ -592,6 +592,19 @@ class BlobModeStateTests(unittest.TestCase):
             "TG_BLOB_DIR": blob_mode.BLOB_TARGET,
             "TG_SYNTHETIC_FLAG": "fixture",
         }
+        with_empty_advertise = {**baseline, "TG_PUBLIC_WEBSOCKET_ADVERTISE_ADDR": ""}
+        self.assertEqual(
+            blob_mode.teagramd_environment_sha256(baseline),
+            blob_mode.teagramd_environment_sha256(with_empty_advertise),
+        )
+        with_public_advertise = {
+            **baseline,
+            "TG_PUBLIC_WEBSOCKET_ADVERTISE_ADDR": "server.teagram.io:443",
+        }
+        self.assertNotEqual(
+            blob_mode.teagramd_environment_sha256(baseline),
+            blob_mode.teagramd_environment_sha256(with_public_advertise),
+        )
         with_disabled_defaults = {**baseline, **blob_mode.INITIAL_LOCAL_DISABLED_ENV}
         self.assertEqual(
             blob_mode.teagramd_environment_sha256(baseline),
@@ -600,6 +613,7 @@ class BlobModeStateTests(unittest.TestCase):
 
         active_values = {
             "TG_PUBLIC_WEBSOCKET_LISTEN_ADDR": "0.0.0.0:2444",
+            "TG_PUBLIC_WEBSOCKET_ADVERTISE_ADDR": "server.teagram.io:443",
             "TG_PUBLIC_REGISTRATION": "open",
             "TG_PUBLIC_WEBSOCKET_ALLOWED_ORIGINS": "https://example.invalid",
         }
