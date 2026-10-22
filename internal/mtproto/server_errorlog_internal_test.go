@@ -443,6 +443,72 @@ func TestConnectionFailureLogsUseSampledSafeCategories(t *testing.T) {
 	}
 }
 
+func TestTransportCloseLogReportsLastKeyExchangeStepWithoutSensitiveFields(t *testing.T) {
+	rsaKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatalf("generate RSA key: %v", err)
+	}
+	sink := &serverErrorLogSink{}
+	server := New(exchange.PrivateKey{RSA: rsaKey}, 2, NewMemoryAuthKeyStore(), nil, slog.New(sink))
+	conn := &exchangeScriptConn{recv: [][]byte{exchangeRequestFrame(t)}}
+
+	if err := server.serveConn(context.Background(), conn, netip.Addr{}, nil); err == nil {
+		t.Fatal("serveConn returned nil after the client closed during key exchange")
+	}
+
+	var closeRecords []serverErrorLogRecord
+	for _, record := range sink.records {
+		if record.message == "transport connection closed" {
+			closeRecords = append(closeRecords, record)
+		}
+	}
+	if len(closeRecords) != 1 {
+		t.Fatalf("transport close records = %d, want one; all records: %+v", len(closeRecords), sink.records)
+	}
+	record := closeRecords[0]
+	if record.attrs["transport"] != "TCP" || record.attrs["step"] != "resPQ sent" || record.attrs["reason"] != "client close" {
+		t.Fatalf("transport close record = %+v, want TCP/resPQ sent/client close", record)
+	}
+	for key := range record.attrs {
+		if key != "transport" && key != "step" && key != "reason" {
+			t.Errorf("transport close record contains unexpected attribute %q: %+v", key, record.attrs)
+		}
+	}
+}
+
+func TestTransportCloseReasonClassifiesClientCloseTimeoutAndServerError(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		err  error
+		want transportCloseReason
+	}{
+		{name: "peer EOF", err: io.EOF, want: transportCloseReasonClientClose},
+		{name: "truncated peer frame", err: io.ErrUnexpectedEOF, want: transportCloseReasonClientClose},
+		{name: "timeout", err: context.DeadlineExceeded, want: transportCloseReasonTimeout},
+		{name: "server failure", err: errors.New("write failed"), want: transportCloseReasonServerError},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if got := classifyTransportCloseReason(test.err); got != test.want {
+				t.Fatalf("close reason = %q, want %q", got, test.want)
+			}
+		})
+	}
+}
+
+func TestTransportCloseDiagnosticsTracksLatestHandshakeProgress(t *testing.T) {
+	diagnostics := newTransportCloseDiagnostics("/apiws")
+	diagnostics.observeRequest(mt.ReqPqMultiRequestTypeID)
+	diagnostics.observeResponse(mt.ResPQTypeID)
+	diagnostics.observeRequest(mt.ReqDHParamsRequestTypeID)
+	diagnostics.markDHComplete()
+	diagnostics.markAuthorized()
+	diagnostics.observeRequest(mt.ReqPqMultiRequestTypeID)
+
+	if diagnostics.transport != "/apiws" || diagnostics.step != transportCloseStepReqPQReceived {
+		t.Fatalf("diagnostics after a new exchange = %+v, want /apiws/req_pq received", diagnostics)
+	}
+}
+
 func TestConnectionFailureLogsAuthKeyLookupWithSampledCategory(t *testing.T) {
 	sink := &serverErrorLogSink{}
 	server := New(exchange.PrivateKey{}, 2, NewMemoryAuthKeyStore(), nil, slog.New(sink))

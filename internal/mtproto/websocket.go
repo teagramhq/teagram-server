@@ -653,9 +653,9 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request, handler
 		return
 	}
 	drainingConn := webSocketDrainConn{Conn: conn, socket: ws, shutdown: s.shutdown, readDeadline: stream}
-	if err := s.serveConnWithHandlerContexts(s.shutdown.requestCtx, s.shutdown.requestCtx, drainingConn, state.addr, state.slot, func() bool {
+	if err := s.serveConnWithHandlerContextsAndTransport(s.shutdown.requestCtx, s.shutdown.requestCtx, drainingConn, state.addr, state.slot, func() bool {
 		return state.socket.markServing()
-	}, handler); err != nil && !isDisconnect(err) {
+	}, websocketPath, handler); err != nil && !isDisconnect(err) {
 		s.logConnectionFailure(err)
 	}
 }

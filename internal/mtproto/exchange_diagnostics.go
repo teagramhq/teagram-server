@@ -57,6 +57,71 @@ type exchangeDiagnostics struct {
 	operation exchangeOperation
 }
 
+type transportCloseStep string
+
+const (
+	transportCloseStepNone          transportCloseStep = "none"
+	transportCloseStepReqPQReceived transportCloseStep = "req_pq received"
+	transportCloseStepResPQSent     transportCloseStep = "resPQ sent"
+	transportCloseStepReqDHParams   transportCloseStep = "req_DH_params received"
+	transportCloseStepDHComplete    transportCloseStep = "DH complete"
+	transportCloseStepAuthorized    transportCloseStep = "authorized"
+)
+
+type transportCloseDiagnostics struct {
+	transport string
+	step      transportCloseStep
+}
+
+type transportCloseReason string
+
+const (
+	transportCloseReasonClientClose transportCloseReason = "client close"
+	transportCloseReasonServerError transportCloseReason = "server error"
+	transportCloseReasonTimeout     transportCloseReason = "timeout"
+)
+
+func classifyTransportCloseReason(err error) transportCloseReason {
+	var netErr net.Error
+	if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, os.ErrDeadlineExceeded) {
+		return transportCloseReasonTimeout
+	}
+	if errors.As(err, &netErr) && netErr.Timeout() {
+		return transportCloseReasonTimeout
+	}
+	if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) || errors.Is(err, io.ErrClosedPipe) || isDisconnect(err) {
+		return transportCloseReasonClientClose
+	}
+	return transportCloseReasonServerError
+}
+
+func newTransportCloseDiagnostics(transport string) *transportCloseDiagnostics {
+	return &transportCloseDiagnostics{transport: transport, step: transportCloseStepNone}
+}
+
+func (d *transportCloseDiagnostics) observeRequest(id uint32) {
+	switch id {
+	case mt.ReqPqMultiRequestTypeID:
+		d.step = transportCloseStepReqPQReceived
+	case mt.ReqDHParamsRequestTypeID:
+		d.step = transportCloseStepReqDHParams
+	}
+}
+
+func (d *transportCloseDiagnostics) observeResponse(id uint32) {
+	if id == mt.ResPQTypeID {
+		d.step = transportCloseStepResPQSent
+	}
+}
+
+func (d *transportCloseDiagnostics) markDHComplete() {
+	d.step = transportCloseStepDHComplete
+}
+
+func (d *transportCloseDiagnostics) markAuthorized() {
+	d.step = transportCloseStepAuthorized
+}
+
 func newExchangeDiagnostics() *exchangeDiagnostics {
 	return &exchangeDiagnostics{stage: exchangeStageReadReqPQ}
 }
@@ -68,6 +133,7 @@ type exchangeDiagnosticConn struct {
 	transport.Conn
 
 	diagnostics *exchangeDiagnostics
+	closeState  *transportCloseDiagnostics
 }
 
 func (c exchangeDiagnosticConn) Recv(ctx context.Context, b *bin.Buffer) error {
@@ -78,6 +144,9 @@ func (c exchangeDiagnosticConn) Recv(ctx context.Context, b *bin.Buffer) error {
 	id, ok := unencryptedConstructor(b)
 	if !ok {
 		return nil
+	}
+	if c.closeState != nil {
+		c.closeState.observeRequest(id)
 	}
 	switch id {
 	case mt.ReqDHParamsRequestTypeID:
@@ -112,6 +181,9 @@ func (c exchangeDiagnosticConn) Send(ctx context.Context, b *bin.Buffer) error {
 	err := c.Conn.Send(ctx, b)
 	if err == nil && next != "" {
 		c.diagnostics.stage = next
+	}
+	if err == nil && c.closeState != nil {
+		c.closeState.observeResponse(id)
 	}
 	return err
 }

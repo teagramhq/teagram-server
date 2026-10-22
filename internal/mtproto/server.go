@@ -28,6 +28,8 @@ import (
 )
 
 const (
+	transportTCP = "TCP"
+
 	defaultReadTimeout  = 30 * time.Second
 	defaultWriteTimeout = 30 * time.Second
 	// defaultAuthenticatedReadTimeout gives authenticated clients enough time
@@ -700,6 +702,19 @@ func (s *Server) logConnectionFailure(err error) {
 	s.logServerFailure(category, details...)
 }
 
+func (s *Server) logTransportClose(diagnostics *transportCloseDiagnostics, err error) {
+	reason := classifyTransportCloseReason(err)
+	level := slog.LevelInfo
+	if diagnostics.step == transportCloseStepAuthorized && reason == transportCloseReasonClientClose {
+		level = slog.LevelDebug
+	}
+	s.log.Log(context.Background(), level, "transport connection closed",
+		"transport", diagnostics.transport,
+		"step", string(diagnostics.step),
+		"reason", string(reason),
+	)
+}
+
 func (s *Server) logServerFailure(category serverFailureCategory, details ...any) {
 	var sampler *logSampler
 	switch category {
@@ -800,7 +815,7 @@ func isDisconnect(err error) bool {
 // frame that decrypts under a key this server issued. It is nil for a connection
 // that was never accepted through a listener.
 func (s *Server) serveConn(ctx context.Context, tconn transport.Conn, clientAddr netip.Addr, slot *preAuthSlot) (rErr error) {
-	return s.serveConnMode(ctx, ctx, tconn, clientAddr, slot, nil, false, s.handler)
+	return s.serveConnMode(ctx, ctx, tconn, clientAddr, slot, nil, false, transportTCP, s.handler)
 }
 
 func (s *Server) serveConnWithContexts(readCtx, requestCtx context.Context, tconn transport.Conn, clientAddr netip.Addr, slot *preAuthSlot, markServing func() bool) (rErr error) {
@@ -808,10 +823,18 @@ func (s *Server) serveConnWithContexts(readCtx, requestCtx context.Context, tcon
 }
 
 func (s *Server) serveConnWithHandlerContexts(readCtx, requestCtx context.Context, tconn transport.Conn, clientAddr netip.Addr, slot *preAuthSlot, markServing func() bool, handler Handler) (rErr error) {
-	return s.serveConnMode(readCtx, requestCtx, tconn, clientAddr, slot, markServing, true, handler)
+	return s.serveConnWithHandlerContextsAndTransport(readCtx, requestCtx, tconn, clientAddr, slot, markServing, transportTCP, handler)
 }
 
-func (s *Server) serveConnMode(readCtx, requestCtx context.Context, tconn transport.Conn, clientAddr netip.Addr, slot *preAuthSlot, markServing func() bool, monitorPeer bool, handler Handler) (rErr error) {
+func (s *Server) serveConnWithHandlerContextsAndTransport(readCtx, requestCtx context.Context, tconn transport.Conn, clientAddr netip.Addr, slot *preAuthSlot, markServing func() bool, transportName string, handler Handler) (rErr error) {
+	return s.serveConnMode(readCtx, requestCtx, tconn, clientAddr, slot, markServing, true, transportName, handler)
+}
+
+func (s *Server) serveConnMode(readCtx, requestCtx context.Context, tconn transport.Conn, clientAddr netip.Addr, slot *preAuthSlot, markServing func() bool, monitorPeer bool, transportName string, handler Handler) (rErr error) {
+	closeDiagnostics := newTransportCloseDiagnostics(transportName)
+	defer func() {
+		s.logTransportClose(closeDiagnostics, rErr)
+	}()
 	conn := newConn(tconn, s.cipher, s.msgID, s.clock, s.writeTimeout, s.log)
 	conn.shutdown = s.shutdown
 	conn.peerCancels = s.peerCancels
@@ -1062,7 +1085,7 @@ func (s *Server) serveConnMode(readCtx, requestCtx context.Context, tconn transp
 			if peerReader != nil {
 				exchangeTransport = peerQueueConn{Conn: tconn, reader: peerReader}
 			}
-			if err := s.runExchange(readCtx, exchangeTransport, b, clientAddr); err != nil {
+			if err := s.runExchangeWithCloseDiagnostics(readCtx, exchangeTransport, b, clientAddr, closeDiagnostics); err != nil {
 				unexpected, ok := errors.AsType[*exchange.UnexpectedEncryptedError](err)
 				if !ok {
 					return err
@@ -1139,6 +1162,9 @@ func (s *Server) serveConnMode(readCtx, requestCtx context.Context, tconn transp
 		// this key skips that reservation so the post-dispatch charge below still
 		// observes a same-frame rebind.
 		if err := s.rpcHandle(requestCtx, conn, b, userID, provisional, clientAddr, slot, handler, func() error {
+			if userID != 0 {
+				closeDiagnostics.markAuthorized()
+			}
 			if hold.signedIn || userID != 0 || (hold.charged && hold.key == authKeyID) {
 				return nil
 			}
@@ -1215,6 +1241,9 @@ func (s *Server) serveConnMode(readCtx, requestCtx context.Context, tconn transp
 			}
 			return nil
 		}
+		if chargeUser != 0 || hold.signedIn {
+			closeDiagnostics.markAuthorized()
+		}
 		// Register the conn for the key's current binding, which s.keys.Get
 		// re-reads every frame. A changed binding was removed before dispatch;
 		// this adds the resolved user after the frame has been handled.
@@ -1268,6 +1297,10 @@ func (s *Server) touch(ctx context.Context, id [8]byte, clientAddr netip.Addr, e
 // persists the resulting auth key. A ServerExchangeError is reported to the
 // client as a protocol error and ends the connection.
 func (s *Server) runExchange(ctx context.Context, tconn transport.Conn, first *bin.Buffer, clientAddr netip.Addr) error {
+	return s.runExchangeWithCloseDiagnostics(ctx, tconn, first, clientAddr, nil)
+}
+
+func (s *Server) runExchangeWithCloseDiagnostics(ctx context.Context, tconn transport.Conn, first *bin.Buffer, clientAddr netip.Addr, closeDiagnostics *transportCloseDiagnostics) error {
 	bc := newBufferedConn(tconn)
 	bc.Push(first)
 	diagnostics := newExchangeDiagnostics()
@@ -1276,6 +1309,7 @@ func (s *Server) runExchange(ctx context.Context, tconn transport.Conn, first *b
 		Conn: exchangeDiagnosticConn{
 			Conn:        bc,
 			diagnostics: diagnostics,
+			closeState:  closeDiagnostics,
 		},
 		keys:            s.keys,
 		pendingLifetime: s.pendingLoginLifetime,
@@ -1301,6 +1335,9 @@ func (s *Server) runExchange(ctx context.Context, tconn transport.Conn, first *b
 			stage: diagnostics.stage,
 			cause: classifyExchangeFailure(err, diagnostics.operation),
 		}
+	}
+	if closeDiagnostics != nil {
+		closeDiagnostics.markDHComplete()
 	}
 
 	if err := s.persistAuthKey(ctx, key); err != nil {

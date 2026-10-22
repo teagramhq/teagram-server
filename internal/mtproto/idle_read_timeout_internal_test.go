@@ -255,7 +255,13 @@ func TestPingDelayDisconnectExpiresAfterRequestedDelay(t *testing.T) {
 		t.Fatalf("idle connection closed after %s, want about the requested 1 second", elapsed)
 	}
 	server.logConnectionFailure(err)
-	if len(sink.records) != 1 || sink.records[0].attrs["category"] != "idle_timeout" {
+	var idleTimeoutRecords []serverErrorLogRecord
+	for _, record := range sink.records {
+		if record.message == "server operation failed" && record.attrs["category"] == "idle_timeout" {
+			idleTimeoutRecords = append(idleTimeoutRecords, record)
+		}
+	}
+	if len(idleTimeoutRecords) != 1 {
 		t.Fatalf("idle read log = %+v, want category idle_timeout", sink.records)
 	}
 }
