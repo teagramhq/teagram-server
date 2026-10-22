@@ -18,11 +18,16 @@ func (s *Store) beginProfilePhotoMutation(ctx context.Context, ownerID int64) (*
 }
 
 func (s *Store) beginProfilePhotoMutationWithWait(
-	ctx context.Context, ownerID int64, wait time.Duration,
+	ctx context.Context,
+	ownerID int64,
+	wait time.Duration,
 ) (*pgxpool.Conn, pgx.Tx, error) {
 	class, object, ok := profileOwnerLockKey(ownerID)
 	if !ok {
 		return nil, nil, ErrProfilePhotoUnavailable
+	}
+	if wait <= 0 {
+		wait = ProfilePhotoSelectionWait
 	}
 	lockCtx, cancel := context.WithTimeout(ctx, wait)
 	defer cancel()

@@ -14,6 +14,15 @@ import (
 
 const maxProfilePhotoDeleteInputs = 100
 
+type profilePhotoMutationWaitForTestContextKey struct{}
+
+func profilePhotoMutationWait(ctx context.Context) time.Duration {
+	if wait, ok := ctx.Value(profilePhotoMutationWaitForTestContextKey{}).(time.Duration); ok && wait > 0 {
+		return wait
+	}
+	return store.ProfilePhotoClearWait
+}
+
 // handleDeleteProfilePhotos removes only live gallery entries authorized by
 // the caller's self-bound photo hash. Invalid elements are omitted uniformly,
 // while the fixed vector cap is checked before rate admission or database work.
@@ -68,11 +77,12 @@ func (h *handlers) handleDeleteProfilePhotos(r *mtproto.Request) (bin.Encoder, e
 // check with rate admission, so a retry cannot remove a later selection or
 // spend another token while the first clear is still committing.
 func (h *handlers) handleClearProfilePhoto(r *mtproto.Request) (bin.Encoder, error) {
-	mutationCtx, cancel := context.WithTimeout(r.Ctx, store.ProfilePhotoClearWait)
+	mutationWait := profilePhotoMutationWait(r.Ctx)
+	mutationCtx, cancel := context.WithTimeout(r.Ctx, mutationWait)
 	defer cancel()
 	authKeyID := mtproto.AuthKeyIDInt64(r.AuthKeyID)
-	if err := h.store.ClearCurrentProfilePhoto(
-		mutationCtx, r.UserID, authKeyID, r.SessionID, r.MsgID, h.rateLimitUpdateProfile,
+	if err := h.store.ClearCurrentProfilePhotoWithWait(
+		mutationCtx, r.UserID, authKeyID, r.SessionID, r.MsgID, h.rateLimitUpdateProfile, mutationWait,
 	); err != nil {
 		if errors.Is(err, store.ErrProfilePhotoBusy) ||
 			(r.Ctx.Err() == nil && errors.Is(mutationCtx.Err(), context.DeadlineExceeded)) {
