@@ -1,0 +1,4 @@
+# source: gotd v0.162.0 request captured by test/e2e/client_request_fixtures_test.go
+body: { account_checkUsername
+  username: "REDACTED" [STRING],
+},
