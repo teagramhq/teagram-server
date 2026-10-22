@@ -22,7 +22,7 @@ Configuration is read from environment variables in `internal/config/config.go`:
 | Variable            | Default          | Notes                                      |
 |---------------------|------------------|---------------------------------------------|
 | `TG_LISTEN_ADDR`    | `:2443`          | `host:port` (or `:port`) the server binds   |
-| `TG_WEBSOCKET_LISTEN_ADDR` | *(unset)* | Enables the WebSocket MTProto listener on this address; browser clients connect to `/apiws`, and the listener serves `/.well-known/telegramd/client` |
+| `TG_WEBSOCKET_LISTEN_ADDR` | *(unset)* | Enables the WebSocket MTProto listener on this address; browser clients connect to `/apiws`, and the listener serves `/.well-known/teagramd/client` |
 | `TG_PUBLIC_WEBSOCKET_LISTEN_ADDR` | *(unset)* | Enables the separate WebSocket MTProto listener for public traffic; use an address such as `:2446` and expose it only through the intended public proxy |
 | `TG_PUBLIC_WEBSOCKET_ADVERTISE_ADDR` | *(unset)* | Optional `host:port` used only for the public listener's discovery `websocket.endpoint`; its host becomes `wss://host/apiws`, while MTProto and `client-config` keep `TG_ADVERTISE_ADDR`. Requires `TG_PUBLIC_WEBSOCKET_LISTEN_ADDR`; malformed values fail server startup |
 | `TG_RPC_DEADLINE` | `23s` | Per-request timeout; overrides must be positive and no greater than `45s`. `0s` and values above `45s`, including the former `90s` setting, fail startup so admitted requests fit the fixed shutdown drain |
@@ -85,7 +85,7 @@ When `TG_WEBSOCKET_LISTEN_ADDR` is set, configure
 not use `*` or a wildcard pattern. Requests without an `Origin` header remain
 valid for native clients; requests carrying one are rejected unless it matches
 the configured list. `GET` and `OPTIONS` on exactly
-`/.well-known/telegramd/client` return `Access-Control-Allow-Origin: *` without
+`/.well-known/teagramd/client` return `Access-Control-Allow-Origin: *` without
 credentials; other routes have no CORS headers. This does not relax the
 WebSocket origin check. Keep this listener within the intended network
 boundary.
@@ -156,7 +156,7 @@ privileges. The server's registration policy and abuse controls remain
 authoritative.
 
 `teagramd serve` serves a configured document at
-`/.well-known/telegramd/client` on each WebSocket listener. Route that path and
+`/.well-known/teagramd/client` on each WebSocket listener. Route that path and
 `/apiws` from each HTTPS origin to its intended listener. `client-config` still
 does not publish or serve its output; it can be used when a deployment serves
 the document as a static file instead. HTTPS certificate serving, web-root

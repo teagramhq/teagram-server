@@ -249,7 +249,7 @@ services:
         read_only: true
       - type: bind
         source: ./.state/teagram-demo/client.json
-        target: /usr/share/nginx/html/.well-known/telegramd/client
+        target: /usr/share/nginx/html/.well-known/teagramd/client
         read_only: true
     depends_on:
       haproxy:

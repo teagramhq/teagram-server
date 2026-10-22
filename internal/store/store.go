@@ -251,6 +251,9 @@ var (
 	// ErrChatAdminRequired is returned when a basic-chat control is denied
 	// by current default rights or requires channel administrator rights.
 	ErrChatAdminRequired = errors.New("chat admin required")
+	// ErrReactionInvalid is returned when a message reaction is outside the
+	// standard set or the basic group's current allowed set.
+	ErrReactionInvalid = errors.New("reaction invalid")
 	// ErrChatLinkExists is returned when a public channel username conflicts
 	// with hidden prehistory.
 	ErrChatLinkExists          = errors.New("chat link exists")

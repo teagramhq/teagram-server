@@ -13,11 +13,12 @@ import (
 // ChatInfoSnapshot is the complete read set for a member-only basic-chat info
 // response. Each map is populated from one repeatable-read snapshot.
 type ChatInfoSnapshot struct {
-	Chats         map[int64]Chat
-	Abouts        map[int64]string
-	Participants  map[int64][]Participant
-	Users         map[int64]User
-	EntitledUsers map[int64]bool
+	Chats              map[int64]Chat
+	Abouts             map[int64]string
+	AvailableReactions map[int64]ChatAvailableReactions
+	Participants       map[int64][]Participant
+	Users              map[int64]User
+	EntitledUsers      map[int64]bool
 }
 
 // ChatListInfoSnapshot is the bounded read set for messages.getChats.
@@ -101,11 +102,12 @@ func (s *Store) ChatListInfoForMemberSnapshot(ctx context.Context, viewerID int6
 // rows. The membership decision and all hydration share one read-only snapshot.
 func (s *Store) ChatInfoForMemberSnapshot(ctx context.Context, viewerID int64, chatIDs []int64) (ChatInfoSnapshot, error) {
 	snapshot := ChatInfoSnapshot{
-		Chats:         map[int64]Chat{},
-		Abouts:        map[int64]string{},
-		Participants:  map[int64][]Participant{},
-		Users:         map[int64]User{},
-		EntitledUsers: map[int64]bool{},
+		Chats:              map[int64]Chat{},
+		Abouts:             map[int64]string{},
+		AvailableReactions: map[int64]ChatAvailableReactions{},
+		Participants:       map[int64][]Participant{},
+		Users:              map[int64]User{},
+		EntitledUsers:      map[int64]bool{},
 	}
 	if len(chatIDs) == 0 {
 		return snapshot, nil
@@ -152,6 +154,15 @@ func (s *Store) ChatInfoForMemberSnapshot(ctx context.Context, viewerID int64, c
 	}
 	for _, row := range aboutRows {
 		snapshot.Abouts[row.ChatID] = row.About
+	}
+	reactionRows, err := qtx.ChatAvailableReactionsByIDs(ctx, selectedIDs)
+	if err != nil {
+		return ChatInfoSnapshot{}, fmt.Errorf("select chat available reactions: %w", err)
+	}
+	for _, row := range reactionRows {
+		snapshot.AvailableReactions[row.ChatID] = ChatAvailableReactions{
+			Mode: row.Mode, Emoticons: row.Reactions,
+		}
 	}
 
 	participantRows, err := qtx.ChatParticipantsByChatIDs(ctx, selectedIDs)

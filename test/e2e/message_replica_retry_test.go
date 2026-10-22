@@ -9,6 +9,7 @@ import (
 	"net"
 	"path/filepath"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -292,7 +293,8 @@ func TestMessagingCatchUpAcrossReplicas(t *testing.T) {
 	}
 	close(disconnectA)
 	// The socket reader can report EOF before the callback cancels the client.
-	if err := recvOrCtx(t, ctx, aRunErr, "A disconnected from replica 1"); err != nil && !errors.Is(err, context.Canceled) && !errors.Is(err, io.EOF) {
+	if err := recvOrCtx(t, ctx, aRunErr, "A disconnected from replica 1"); err != nil &&
+		!errors.Is(err, context.Canceled) && !errors.Is(err, io.EOF) && !errors.Is(err, syscall.ECONNRESET) {
 		t.Fatalf("A run after intentional disconnect: %v", err)
 	}
 	manager.Reset()

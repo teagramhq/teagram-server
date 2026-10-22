@@ -35,7 +35,7 @@ def main() -> None:
     base_url = f"http://127.0.0.1:{port}"
     expected = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
     request = urllib.request.Request(
-        base_url + "/.well-known/telegramd/client",
+        base_url + "/.well-known/teagramd/client",
         headers={"Origin": "https://web.teagram.io"},
     )
     try:

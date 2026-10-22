@@ -209,6 +209,12 @@ type ChatAdminStateMarker struct {
 	EventID  int64
 }
 
+type ChatAvailableReaction struct {
+	ChatID    int64
+	Mode      string
+	Reactions []string
+}
+
 type ChatParticipant struct {
 	ChatID    int64
 	UserID    int64
