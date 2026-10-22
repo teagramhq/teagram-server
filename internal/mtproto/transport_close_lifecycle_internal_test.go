@@ -72,7 +72,7 @@ func TestServeSocketLogsPreAuthLifetimeExpiryAsTimeout(t *testing.T) {
 	if err != nil {
 		t.Fatalf("generate RSA key: %v", err)
 	}
-	sink := &serverErrorLogSink{}
+	sink := &transportCloseEventSink{events: make(chan serverErrorLogRecord, 16)}
 	server := New(exchange.PrivateKey{RSA: rsaKey}, 2, NewMemoryAuthKeyStore(), nil, slog.New(sink))
 	const lifetime = time.Second
 	if err := server.SetPreAuthLimits(PreAuthLimits{Lifetime: lifetime}); err != nil {
@@ -130,12 +130,24 @@ func TestServeSocketLogsPreAuthLifetimeExpiryAsTimeout(t *testing.T) {
 		t.Fatalf("read resPQ: %v", err)
 	}
 
-	select {
-	case <-served:
-	case <-ctx.Done():
-		t.Fatal("serveSocket did not close after the pre-auth lifetime")
+	var records []serverErrorLogRecord
+	servedCh := (<-chan struct{})(served)
+	servedReturned, ceilingLogged := false, false
+	for !servedReturned || !ceilingLogged {
+		select {
+		case <-servedCh:
+			servedReturned = true
+			servedCh = nil
+		case record := <-sink.events:
+			records = append(records, record)
+			if record.message == "connection closed at the pre-auth lifetime ceiling" {
+				ceilingLogged = true
+			}
+		case <-ctx.Done():
+			t.Fatal("serveSocket did not finish the pre-auth lifetime close")
+		}
 	}
-	assertSingleTransportCloseRecord(t, sink.records, "TCP", "resPQ sent", "timeout")
+	assertSingleTransportCloseRecord(t, records, "TCP", "resPQ sent", "timeout")
 }
 
 func TestServeWebSocketLogsCloseBeforeCodecDetection(t *testing.T) {
