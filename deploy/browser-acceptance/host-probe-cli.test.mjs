@@ -29,6 +29,9 @@ async function hostFixture(t) {
   const evidenceRoot = join(directory, "runner-evidence");
   const buildDirectory = join(evidenceRoot, "run-20261013.build");
   const buildIdentity = join(buildDirectory, "built-image.identity");
+  const runnerSource = await readFile(join(repoRoot, "deploy/browser-acceptance/run.sh"), "utf8");
+  const approvedQaDigest = runnerSource.match(/^readonly APPROVED_QA_SCRIPT_SHA256="([0-9a-f]{64})"$/mu)?.[1];
+  assert.ok(approvedQaDigest, "runner must pin the approved QA script digest");
   await mkdir(bin);
   await mkdir(evidenceRoot, { mode: 0o700 });
   await mkdir(buildDirectory, { mode: 0o700 });
@@ -165,7 +168,7 @@ printf '%s\\n' '{"mode":"private","endpoint":"wss://teagram.tailaa4918.ts.net/ap
 printf '%s\\n' 'Filesystem 1024-blocks Used Available Capacity Mounted on' 'fake 5000000 0 3000000 0% ${directory}'
 `);
   await writeFile(join(bin, "sha256sum"), `#!/usr/bin/env bash
-printf '%s\\n' '6e12f6c9b14a127a08ed133b4ff6d1b7fa0ba60bd59939876cc0ef738dfe8133  approved-fixture'
+printf '%s\\n' '${approvedQaDigest}  approved-fixture'
 `);
   await Promise.all(["docker", "psql", "curl", "df", "sha256sum"].map((name) => chmod(join(bin, name), 0o755)));
   t.after(() => rm(directory, { recursive: true, force: true }));
