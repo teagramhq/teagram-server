@@ -272,6 +272,13 @@ def base_server_service(service_name: str) -> dict[str, Any]:
 
 
 def compose_documents(candidate_root: Path) -> tuple[dict[str, Any], dict[str, Any]]:
+    private_network = {
+        "name": f"{candidate_root.name}_rustfs_private",
+        "driver": "bridge",
+        "internal": True,
+        "enable_ipv6": False,
+        "driver_opts": {"com.docker.network.bridge.gateway_mode_ipv4": "isolated"},
+    }
     baseline = {
         "services": {
             "postgres": {
@@ -287,6 +294,10 @@ def compose_documents(candidate_root: Path) -> tuple[dict[str, Any], dict[str, A
         "networks": {"default": {"name": "teagram-server_default"}},
     }
     candidate = json.loads(json.dumps(baseline))
+    candidate["networks"]["rustfs_private"] = private_network
+    for name, service in candidate["services"].items():
+        if name.startswith("teagramd"):
+            service["networks"] = {"default": {}, "rustfs_private": {}}
     candidate["services"]["rustfs"] = {
         "image": PINNED_IMAGE,
         "environment": {
@@ -323,6 +334,7 @@ def compose_documents(candidate_root: Path) -> tuple[dict[str, Any], dict[str, A
         },
         "restart": "unless-stopped",
         "logging": {"driver": "json-file", "options": {"max-size": "10m", "max-file": "3"}},
+        "networks": {"rustfs_private": {}},
     }
     policy = os.path.realpath(candidate_root / "deploy" / "rustfs" / "teagramd-blob.json")
     candidate["services"]["rustfs-init"] = {
@@ -345,6 +357,7 @@ def compose_documents(candidate_root: Path) -> tuple[dict[str, Any], dict[str, A
             {"source": "teagramd_blob_secret_key", "target": "teagramd-blob-secret-key"},
         ],
         "depends_on": {"rustfs": {"condition": "service_healthy"}},
+        "networks": {"rustfs_private": {}},
     }
     s3_environment = {
         "TG_BLOB_S3_ENDPOINT": "http://rustfs:9000",
@@ -371,6 +384,7 @@ def compose_documents(candidate_root: Path) -> tuple[dict[str, Any], dict[str, A
                 {"type": "volume", "source": "tgblobs", "target": target, "read_only": read_only}
             ],
             "depends_on": {"rustfs-init": {"condition": "service_completed_successfully"}},
+            "networks": {"rustfs_private": {}},
         }
     candidate["volumes"]["rustfsdata"] = {"name": f"{candidate_root.name}_rustfsdata"}
     candidate["secrets"] = {

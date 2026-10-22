@@ -112,11 +112,23 @@ credentials are file secrets available only to RustFS and its initializer.
 Keep source secrets in protected files, never in application environment
 variables, command arguments, logs, or Git.
 
-RustFS listens on its internal S3 port with its console disabled. The service
-must use only the Compose project's private `default` network, and neither port
-may be published. External clients reach media through the application edge;
-other Docker networks must not gain direct access to RustFS. Host root and
-services on the private project network remain inside the trusted boundary.
+RustFS listens on its internal S3 port with its console disabled. RustFS and its
+initialization and migration helpers use only the Compose project's
+`rustfs_private` network. It is an internal bridge with IPv6 disabled and the
+isolated IPv4 gateway mode, which removes the host route to container IPs.
+RustFS has no published ports or other network attachments. `teagramd` also
+joins this network to reach RustFS, and uses the ordinary project network for its other
+connections. External clients reach media through the application edge; host
+root and the Docker daemon remain inside the trusted boundary.
+
+After the cutover, verify the exposure boundary from the LXC host and another
+tailnet node. On the LXC, obtain the RustFS container IP with `docker inspect`
+and confirm TCP connections to that IP on ports 9000 and 9001 fail. From a
+different tailnet node, probe the LXC's Tailscale IPv4 address on the same
+ports; both connections must fail. Record the two probe results with the
+cutover evidence. The runner also inspects the live RustFS port bindings,
+network attachments, and isolated network options before copying media and
+before recovery.
 
 Cutover freezes `teagramd` writers and checks the copied media before changing
 the durable authority. A validation failure before `s3-accepted` is published

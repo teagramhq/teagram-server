@@ -689,6 +689,8 @@ def container_inventory(inspected: object, checkout: pathlib.Path, allow_empty: 
             record["tg_environment_sha256"] = teagramd_environment_sha256(container_tg_environment(item))
         elif service == "rustfs":
             record["rustfs_mounts"] = rustfs_mounts
+            record["ports"] = container_ports(item)
+            record["network"] = container_network(item)
         elif service == "postgres":
             record["pgdata_mounts"] = pgdata_mounts
         result.append(record)
@@ -1133,20 +1135,24 @@ def validate_private_rustfs_render(compose: object) -> None:
     project = compose.get("name") if isinstance(compose, dict) else None
     networks = compose.get("networks") if isinstance(compose, dict) else None
     service_networks = rustfs.get("networks")
-    if service_networks is None:
-        service_networks = {"default": None}
     if (
         not isinstance(project, str)
         or re.fullmatch(r"[a-z0-9][a-z0-9_-]*", project) is None
         or not isinstance(networks, dict)
         or not isinstance(service_networks, dict)
-        or set(service_networks) != {"default"}
+        or set(service_networks) != {"rustfs_private"}
     ):
         reject("transition-rustfs-exposed")
-    private_network = networks.get("default")
+    private_network = networks.get("rustfs_private")
     if (
         not isinstance(private_network, dict)
-        or private_network.get("name") != f"{project}_default"
+        or private_network.get("name") != f"{project}_rustfs_private"
+        or private_network.get("driver") != "bridge"
+        or private_network.get("internal") is not True
+        or private_network.get("enable_ipv6") is not False
+        or private_network.get("driver_opts") != {
+            "com.docker.network.bridge.gateway_mode_ipv4": "isolated"
+        }
         or private_network.get("external") not in (None, False)
     ):
         reject("transition-rustfs-exposed")
@@ -1154,8 +1160,33 @@ def validate_private_rustfs_render(compose: object) -> None:
         network = compose_network(rustfs, compose)
     except Reject:
         reject("transition-rustfs-exposed")
-    if network != {"mode": "networks", "networks": [f"{project}_default"]}:
+    if network != {"mode": "networks", "networks": [f"{project}_rustfs_private"]}:
         reject("transition-rustfs-exposed")
+
+
+def rustfs_private_network_name(record: dict[str, object]) -> str:
+    volumes = record.get("volumes")
+    volume = volumes.get("tgblobs") if isinstance(volumes, dict) else None
+    if not isinstance(volume, str):
+        reject("running-rustfs-network")
+    match = re.fullmatch(r"([a-z0-9][a-z0-9_-]*)_tgblobs", volume)
+    if match is None:
+        reject("running-rustfs-network")
+    return f"{match.group(1)}_rustfs_private"
+
+
+def validate_private_rustfs_network(network: object, expected_name: str) -> None:
+    if not isinstance(network, dict):
+        reject("running-rustfs-network")
+    options = network.get("Options")
+    if (
+        network.get("Name") != expected_name
+        or network.get("Driver") != "bridge"
+        or network.get("Internal") is not True
+        or network.get("EnableIPv6") is not False
+        or options != {"com.docker.network.bridge.gateway_mode_ipv4": "isolated"}
+    ):
+        reject("running-rustfs-network")
 
 
 def validate_transition_artifacts(
@@ -1748,6 +1779,28 @@ def assert_compose_matches(
         reject("compose-teagramd-missing")
 
 
+def assert_rustfs_containers_match(rustfs: list[dict[str, object]], record: dict[str, object]) -> None:
+    if record.get("outcome") != "s3-accepted":
+        return
+    volume_name = record.get("volumes", {}).get("rustfsdata") if isinstance(record.get("volumes"), dict) else None
+    if not isinstance(volume_name, str) or not volume_name:
+        reject("running-rustfs-mount-missing")
+    if len(rustfs) != 1:
+        reject("running-rustfs-missing")
+    container = rustfs[0]
+    if container.get("ports") != []:
+        reject("running-rustfs-exposed")
+    if container.get("network") != {
+        "mode": "networks",
+        "networks": [rustfs_private_network_name(record)],
+    }:
+        reject("running-rustfs-network")
+    if container.get("rustfs_mounts") != [{
+        "type": "volume", "name": volume_name, "target": "/data", "rw": True,
+    }]:
+        reject("running-rustfs-mount-missing")
+
+
 def assert_containers_match(
     inventory: dict[str, object],
     record: dict[str, object],
@@ -1764,6 +1817,7 @@ def assert_containers_match(
         reject("running-mode-mount-helper")
     if not teagramd and not allow_no_teagramd:
         reject("running-teagramd-missing")
+    assert_rustfs_containers_match(rustfs, record)
     read_only = expected_mount_read_only(record)
     expected_target = expected_blob_target(record)
     names = set()

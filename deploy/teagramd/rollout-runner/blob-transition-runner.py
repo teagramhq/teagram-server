@@ -2063,6 +2063,107 @@ def assert_live_teagramd_matches_authority(
         mode.assert_containers_match(inventory, authority, mode_source)
     except mode.Reject as error:
         reject(str(error))
+    if authority.get("outcome") == "s3-accepted":
+        assert_live_rustfs_network(mode, authority, output_dir, checkout, environment, name)
+
+
+def assert_live_rustfs_network(
+    mode: Any,
+    authority: dict[str, Any],
+    output_dir: pathlib.Path,
+    checkout: pathlib.Path,
+    environment: dict[str, str],
+    name: str,
+) -> None:
+    expected_name = mode.rustfs_private_network_name(authority)
+    raw = run_command(
+        ["docker", "network", "inspect", "--format", "{{json .}}", expected_name],
+        output_dir,
+        f"{name}-rustfs-network",
+        cwd=checkout,
+        env=environment,
+    )
+    try:
+        network = json.loads(raw, object_pairs_hook=mode.strict_pairs)
+        if isinstance(network, list):
+            if len(network) != 1:
+                reject("running-rustfs-network")
+            network = network[0]
+        mode.validate_private_rustfs_network(network, expected_name)
+    except (UnicodeDecodeError, json.JSONDecodeError, ValueError, mode.Reject) as error:
+        if isinstance(error, mode.Reject):
+            reject(str(error))
+        reject("running-rustfs-network")
+
+
+def assert_live_rustfs_matches_authority(
+    mode: Any,
+    project: str,
+    authority: dict[str, Any],
+    output_dir: pathlib.Path,
+    checkout: pathlib.Path,
+    environment: dict[str, str],
+    name: str,
+) -> None:
+    running = run_command(
+        [
+            "docker", "ps", "--no-trunc", "--filter",
+            f"label=com.docker.compose.project={project}", "--filter",
+            "label=com.docker.compose.service=rustfs", "--format", "{{.ID}}",
+        ],
+        output_dir,
+        f"{name}-containers",
+        cwd=checkout,
+        env=environment,
+    )
+    try:
+        identifiers = [line for line in running.decode("utf-8").splitlines() if line]
+    except UnicodeDecodeError:
+        reject("running-inventory-invalid")
+    if (
+        len(identifiers) != 1
+        or re.fullmatch(r"[0-9a-f]{64}", identifiers[0]) is None
+    ):
+        reject("running-rustfs-missing")
+    inspected_output = run_command(
+        ["docker", "inspect", "--format", "{{json .}}", identifiers[0]],
+        output_dir,
+        f"{name}-inspect",
+        cwd=checkout,
+        env=environment,
+    )
+    try:
+        inspected = [
+            json.loads(line, object_pairs_hook=mode.strict_pairs)
+            for line in inspected_output.decode("utf-8").splitlines()
+            if line
+        ]
+    except (UnicodeDecodeError, json.JSONDecodeError, ValueError, mode.Reject):
+        reject("running-inventory-invalid")
+    matches = [item for item in inspected if isinstance(item, dict) and item.get("Id") == identifiers[0]]
+    if len(matches) != 1:
+        reject("running-inventory-invalid")
+    container = matches[0]
+    config = container.get("Config")
+    labels = config.get("Labels") if isinstance(config, dict) else None
+    state = container.get("State")
+    if (
+        not isinstance(labels, dict)
+        or labels.get("com.docker.compose.project") != project
+        or labels.get("com.docker.compose.service") != "rustfs"
+        or not isinstance(state, dict)
+        or state.get("Status") != "running"
+    ):
+        reject("running-inventory-invalid")
+    try:
+        inventory = mode.container_inventory([container], checkout, allow_empty=True)
+        rustfs = inventory.get("containers")
+        if not isinstance(rustfs, list):
+            reject("running-inventory-invalid")
+        mode.assert_rustfs_containers_match(rustfs, authority)
+    except mode.Reject as error:
+        reject(str(error))
+    assert_live_rustfs_network(mode, authority, output_dir, checkout, environment, name)
 
 
 def run_current_cutover(args: argparse.Namespace) -> None:
@@ -2277,6 +2378,15 @@ def run_current_cutover(args: argparse.Namespace) -> None:
             cwd=checkout,
             env=candidate_env,
         )
+        assert_live_rustfs_matches_authority(
+            mode,
+            project,
+            s3_record,
+            output_dir,
+            checkout,
+            candidate_env,
+            "verify-rustfs-before-copy",
+        )
         run_command(
             ["docker", "compose", "run", "--rm", "--no-deps", "rustfs-init"],
             output_dir,
@@ -2334,6 +2444,17 @@ def run_current_cutover(args: argparse.Namespace) -> None:
         )
         if not set(candidate_services) <= set(running.decode("utf-8").splitlines()):
             reject("s3-serving-not-ready")
+        assert_live_teagramd_matches_authority(
+            mode,
+            project,
+            candidate_services,
+            s3_record,
+            os.path.realpath(checkout / ".state" / "blob-mode"),
+            output_dir,
+            checkout,
+            candidate_env,
+            "verify-s3-authority-after-activation",
+        )
         final_records, final_head, final_bytes = mode.read_authority(state_dir, report_root)
         if final_head != final_bytes or final_records[-1]["outcome"] != "s3-accepted":
             reject("s3-authority-invalid")

@@ -400,16 +400,24 @@ class BlobModeStateTests(unittest.TestCase):
             "services": {
                 "rustfs": {
                     "ports": [{"target": 9000, "published": "9000"}] if exposed else [],
-                    "networks": {"default": None, "edge": None} if external_network else None,
+                    "networks": (
+                        {"rustfs_private": None, "edge": None}
+                        if external_network else {"rustfs_private": None}
+                    ),
                 },
             },
             "networks": {
                 "default": {"name": "teagram_default"},
+                "rustfs_private": {
+                    "name": "teagram_rustfs_private",
+                    "driver": "bridge",
+                    "internal": True,
+                    "enable_ipv6": False,
+                    "driver_opts": {"com.docker.network.bridge.gateway_mode_ipv4": "isolated"},
+                },
                 **({"edge": {"name": "edge", "external": True}} if external_network else {}),
             },
         }
-        if candidate_compose["services"]["rustfs"]["networks"] is None:
-            candidate_compose["services"]["rustfs"].pop("networks")
         contents = {
             "candidate_compose_sha256": json.dumps(
                 candidate_compose,
@@ -991,6 +999,82 @@ class BlobModeStateTests(unittest.TestCase):
                 allow_unguarded_initial_local=True,
             ),
             "render-backend-mismatch",
+        )
+
+    def test_private_rustfs_render_requires_an_isolated_project_network(self) -> None:
+        compose = {
+            "name": "teagram",
+            "services": {"rustfs": {"networks": {"rustfs_private": None}}},
+            "networks": {
+                "rustfs_private": {
+                    "name": "teagram_rustfs_private",
+                    "driver": "bridge",
+                    "internal": True,
+                    "enable_ipv6": False,
+                    "driver_opts": {
+                        "com.docker.network.bridge.gateway_mode_ipv4": "isolated",
+                    },
+                },
+            },
+        }
+        blob_mode.validate_private_rustfs_render(compose)
+
+        invalid_renders = []
+        plain_bridge = json.loads(json.dumps(compose))
+        plain_bridge["networks"]["rustfs_private"]["driver_opts"][
+            "com.docker.network.bridge.gateway_mode_ipv4"
+        ] = "nat"
+        invalid_renders.append(plain_bridge)
+        external = json.loads(json.dumps(compose))
+        external["networks"]["rustfs_private"]["external"] = True
+        invalid_renders.append(external)
+        extra_network = json.loads(json.dumps(compose))
+        extra_network["services"]["rustfs"]["networks"]["edge"] = None
+        extra_network["networks"]["edge"] = {"name": "edge", "external": True}
+        invalid_renders.append(extra_network)
+
+        for candidate in invalid_renders:
+            with self.subTest(networks=candidate["services"]["rustfs"]["networks"]):
+                self.assert_rejects(
+                    lambda candidate=candidate: blob_mode.validate_private_rustfs_render(candidate),
+                    "transition-rustfs-exposed",
+                )
+
+    def test_running_s3_rustfs_rejects_ports_extra_networks_and_unisolated_networks(self) -> None:
+        record = {
+            "outcome": "s3-accepted",
+            "volumes": {"tgblobs": "teagram_tgblobs", "rustfsdata": "teagram_rustfsdata"},
+        }
+        rustfs = {
+            "ports": [],
+            "network": {"mode": "networks", "networks": ["teagram_rustfs_private"]},
+            "rustfs_mounts": [{
+                "type": "volume", "name": "teagram_rustfsdata", "target": "/data", "rw": True,
+            }],
+        }
+        blob_mode.assert_rustfs_containers_match([rustfs], record)
+
+        exposed = json.loads(json.dumps(rustfs))
+        exposed["ports"] = [{"target": "9000", "published": "9000", "host_ip": "0.0.0.0", "protocol": "tcp"}]
+        self.assert_rejects(
+            lambda: blob_mode.assert_rustfs_containers_match([exposed], record),
+            "running-rustfs-exposed",
+        )
+        attached_elsewhere = json.loads(json.dumps(rustfs))
+        attached_elsewhere["network"]["networks"].append("untrusted_bridge")
+        self.assert_rejects(
+            lambda: blob_mode.assert_rustfs_containers_match([attached_elsewhere], record),
+            "running-rustfs-network",
+        )
+        self.assert_rejects(
+            lambda: blob_mode.validate_private_rustfs_network({
+                "Name": "teagram_rustfs_private",
+                "Driver": "bridge",
+                "Internal": True,
+                "EnableIPv6": False,
+                "Options": {"com.docker.network.bridge.gateway_mode_ipv4": "nat"},
+            }, "teagram_rustfs_private"),
+            "running-rustfs-network",
         )
 
     def test_initial_local_record_rejects_wrong_generation_type_or_backend_path(self) -> None:

@@ -513,7 +513,28 @@ if [ "${{1:-}}" = inspect ] && [[ " $* " == *"project.config_files"* ]]; then
   exit 0
 fi
 if [ "${{1:-}}" = inspect ] && [[ " $* " == *"{{json .}}"* ]]; then
-  cat "${{MOCK_AUTHORITY_INSPECT:?}}"
+  shift 3
+  python3 -c '
+import json, os, sys
+wanted = sys.argv[1:]
+rows = [json.loads(line) for line in open(os.environ["MOCK_AUTHORITY_INSPECT"], encoding="utf-8") if line]
+for item in wanted:
+    for row in rows:
+        if row.get("Id") == item:
+            print(json.dumps(row, separators=(",", ":")))
+' "$@"
+  exit 0
+fi
+if [ "${{1:-}}" = network ] && [ "${{2:-}}" = inspect ]; then
+  if [ {shlex.quote(scenario)} = live-rustfs-network-not-isolated ]; then
+    gateway_mode=nat
+  else
+    gateway_mode=isolated
+  fi
+  printf '%s\\n' \\
+    '{{"Name":"teagram_rustfs_private","Driver":"bridge",'\\
+    '"Internal":true,"EnableIPv6":false,"Options":'\\
+    '{{"com.docker.network.bridge.gateway_mode_ipv4":"'"$gateway_mode"'"}}}}'
   exit 0
 fi
 if [ "${{1:-}}" = inspect ]; then
@@ -529,8 +550,18 @@ if [ "${{1:-}}" = volume ] && [ "${{2:-}}" = inspect ]; then
   exit 0
 fi
 if [ "${{1:-}}" = ps ]; then
+  if [[ " $* " == *"label=com.docker.compose.service=rustfs"* ]]; then
+    if ! awk -F '\t' '$2 == "rustfs" {{ found=1; print $1 }} END {{ exit found ? 0 : 1 }}' "${{MOCK_LIVE_PS:?}}"; then
+      if [ -f {shlex.quote(str(state / 'rustfs'))} ]; then printf '%s\\n' "{'e' * 64}"; fi
+    fi
+    exit 0
+  fi
   if [[ " $* " == *"--filter label=com.docker.compose.project="* ]]; then
     cat "${{MOCK_LIVE_PS:?}}"
+    if [ -f {shlex.quote(str(state / 'rustfs'))} ] \\
+      && ! awk -F '\t' '$2 == "rustfs" {{ found=1 }} END {{ exit found ? 0 : 1 }}' "${{MOCK_LIVE_PS:?}}"; then
+      printf '%s\\trustfs\\n' "{'e' * 64}"
+    fi
     exit 0
   fi
   if [[ " $* " == *"{{.ID}}"* ]]; then
@@ -683,13 +714,25 @@ class BlobTransitionAuthorityTests(unittest.TestCase):
                 "Type": "volume", "Name": "teagram_rustfsdata", "Source": "",
                 "Destination": "/data", "RW": True,
             }],
+            "HostConfig": {"NetworkMode": "teagram_rustfs_private", "PortBindings": {}},
+            "NetworkSettings": {"Networks": {"teagram_rustfs_private": {}}, "Ports": {}},
         }
         inspected = (json.dumps(serving) + "\n" + json.dumps(rustfs) + "\n").encode("utf-8")
         with (
             patch.object(
                 runner,
                 "run_command",
-                side_effect=[b"a" * 64 + b"\tteagramd\n" + b"b" * 64 + b"\trustfs\n", inspected],
+                side_effect=[
+                    b"a" * 64 + b"\tteagramd\n" + b"b" * 64 + b"\trustfs\n",
+                    inspected,
+                    json.dumps({
+                        "Name": "teagram_rustfs_private",
+                        "Driver": "bridge",
+                        "Internal": True,
+                        "EnableIPv6": False,
+                        "Options": {"com.docker.network.bridge.gateway_mode_ipv4": "isolated"},
+                    }).encode("utf-8"),
+                ],
             ),
             patch.object(mode, "docker_volume_exists"),
         ):
@@ -1044,6 +1087,8 @@ class BlobTransitionRunnerFixtures(unittest.TestCase):
             for line in live_ps_path.read_text(encoding="utf-8").splitlines()
             if line
         ]
+        if "rustfs" in compose.get("services", {}) and not any(service == "rustfs" for _identifier, service in rows):
+            rows.append(["e" * 64, "rustfs"])
         containers = []
         for identifier, service_name in rows:
             service = compose["services"][service_name]
@@ -1095,7 +1140,12 @@ class BlobTransitionRunnerFixtures(unittest.TestCase):
                 network = declared_networks.get(network_key, {})
                 network_name = network.get("name", f"{project}_{network_key}")
                 attached[network_name] = {}
+            if service_name == "rustfs" and scenario == "live-rustfs-extra-network":
+                attached["untrusted_bridge"] = {}
             network_mode = next(iter(attached), "bridge")
+            port_bindings = {}
+            if service_name == "rustfs" and scenario == "live-rustfs-port-binding":
+                port_bindings = {"9000/tcp": [{"HostIp": "0.0.0.0", "HostPort": "9000"}]}
             containers.append({
                 "Id": identifier,
                 "Name": f"/{service_name}-1",
@@ -1107,7 +1157,7 @@ class BlobTransitionRunnerFixtures(unittest.TestCase):
                     },
                     "Env": [f"{key}={value}" for key, value in environment.items()],
                 },
-                "HostConfig": {"NetworkMode": network_mode, "PortBindings": {}},
+                "HostConfig": {"NetworkMode": network_mode, "PortBindings": port_bindings},
                 "Mounts": mounts,
                 "NetworkSettings": {"Networks": attached, "Ports": {}},
             })
@@ -1125,6 +1175,8 @@ class BlobTransitionRunnerFixtures(unittest.TestCase):
         networks = model.get("networks")
         if isinstance(networks, dict) and isinstance(networks.get("default"), dict):
             networks["default"]["name"] = "teagram_default"
+        if isinstance(networks, dict) and isinstance(networks.get("rustfs_private"), dict):
+            networks["rustfs_private"]["name"] = "teagram_rustfs_private"
         volumes = model.get("volumes")
         if isinstance(volumes, dict):
             if isinstance(volumes.get("tgblobs"), dict):
@@ -1353,6 +1405,17 @@ class BlobTransitionRunnerFixtures(unittest.TestCase):
         records, _head, _mode = mode_fixtures.blob_mode.read_authority(self.state_dir, self.report_root)
         self.assertEqual(records[-1]["outcome"], "initial-local")
 
+    def test_current_cutover_rejects_nonisolated_rustfs_before_copy(self) -> None:
+        result = self.run_current_cutover("live-rustfs-network-not-isolated")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("running-rustfs-network", result.stderr)
+        events = self.events.read_text(encoding="utf-8")
+        self.assertNotIn("compose run --rm --no-deps blob-migrate", events)
+        self.assertIn("compose stop rustfs", events)
+        records, _head, _mode = mode_fixtures.blob_mode.read_authority(self.state_dir, self.report_root)
+        self.assertEqual(records[-1]["outcome"], "initial-local")
+        self.assertEqual((self.root / "serving-backend").read_text(encoding="ascii").strip(), "local")
+
     def test_current_cutover_requires_a_restorable_database_dump(self) -> None:
         result = self.run_current_cutover("dump-restore-failed")
         self.assertNotEqual(result.returncode, 0)
@@ -1421,6 +1484,35 @@ class BlobTransitionRunnerFixtures(unittest.TestCase):
         self.assertNotIn("docker compose stop --timeout 120 teagramd teagramd-proxy", later_events)
         records, _head, _mode = mode_fixtures.blob_mode.read_authority(self.state_dir, self.report_root)
         self.assertEqual(records[-1]["outcome"], "s3-accepted")
+
+    def assert_current_recovery_rejects_rustfs_drift(self, scenario: str, reason: str) -> None:
+        cutover = self.run_current_cutover()
+        self.assertEqual(cutover.returncode, 0, cutover.stderr)
+        event_count = len(self.events.read_text(encoding="utf-8").splitlines())
+
+        result = self.run_current_recovery(scenario)
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn(reason, result.stderr)
+        later_events = self.events.read_text(encoding="utf-8").splitlines()[event_count:]
+        self.assertNotIn("docker compose stop --timeout 120 teagramd teagramd-proxy", later_events)
+        records, _head, _mode = mode_fixtures.blob_mode.read_authority(self.state_dir, self.report_root)
+        self.assertEqual(records[-1]["outcome"], "s3-accepted")
+
+    def test_current_recovery_rejects_live_rustfs_port_binding_before_freeze(self) -> None:
+        self.assert_current_recovery_rejects_rustfs_drift(
+            "live-rustfs-port-binding", "running-rustfs-exposed"
+        )
+
+    def test_current_recovery_rejects_live_rustfs_extra_network_before_freeze(self) -> None:
+        self.assert_current_recovery_rejects_rustfs_drift(
+            "live-rustfs-extra-network", "running-rustfs-network"
+        )
+
+    def test_current_recovery_rejects_live_rustfs_nonisolated_network_before_freeze(self) -> None:
+        self.assert_current_recovery_rejects_rustfs_drift(
+            "live-rustfs-network-not-isolated", "running-rustfs-network"
+        )
 
     def test_current_recovery_requires_a_restorable_database_dump(self) -> None:
         cutover = self.run_current_cutover()

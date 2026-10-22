@@ -24,7 +24,7 @@ x-blob-s3: &blob-s3
   TG_BLOB_S3_REGION: us-east-1
   TG_BLOB_S3_ACCESS_KEY_ID: ${TG_BLOB_S3_ACCESS_KEY_ID:-}
   TG_BLOB_S3_SECRET_ACCESS_KEY_FILE: /run/secrets/teagramd-blob-secret-key
-  # RustFS is reachable only through this private Compose network. The server
+  # RustFS is reachable only through its isolated Compose network. The server
   # rejects plaintext S3 endpoints unless this explicit private-network opt-in
   # is set; no RustFS port is published on the host.
   TG_BLOB_S3_ALLOW_INSECURE_HTTP: "true"
@@ -107,6 +107,8 @@ services:
         mode: 0400
     volumes:
       - rustfsdata:/data
+    networks:
+      - rustfs_private
     # Ready is checked before the idempotent bucket and user initialization.
     healthcheck:
       test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:9000/health/ready"]
@@ -144,6 +146,8 @@ services:
     depends_on:
       rustfs:
         condition: service_healthy
+    networks:
+      - rustfs_private
 
   # Explicit one-time migration service. It reads tgblobs read-only and writes
   # only to the configured RustFS namespace. It is never part of `compose up`.
@@ -158,6 +162,8 @@ services:
     volumes:
       - tgblobs:/source:ro
     profiles: ["migration"]
+    networks:
+      - rustfs_private
     depends_on:
       rustfs-init:
         condition: service_completed_successfully
@@ -176,6 +182,8 @@ services:
     volumes:
       - tgblobs:/destination
     profiles: ["migration"]
+    networks:
+      - rustfs_private
     depends_on:
       rustfs-init:
         condition: service_completed_successfully
@@ -194,6 +202,9 @@ services:
     # container alive long enough for that drain to complete before Docker's
     # final kill.
     stop_grace_period: 120s
+    networks:
+      - default
+      - rustfs_private
     environment:
       TG_POSTGRES_DSN: *dsn
       # Required so the stack never falls back to an official public origin.
@@ -291,6 +302,17 @@ volumes:
   # default S3 render mounts it read-only; the local overlay writes it.
   tgblobs:
   rustfsdata:
+
+networks:
+  # `internal` blocks external routing from attached containers. The isolated
+  # gateway mode also removes the host bridge address, so host processes cannot
+  # reach RustFS by its container IP.
+  rustfs_private:
+    driver: bridge
+    internal: true
+    enable_ipv6: false
+    driver_opts:
+      com.docker.network.bridge.gateway_mode_ipv4: isolated
 
 secrets:
   rustfs_root_access_key:

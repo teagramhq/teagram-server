@@ -714,8 +714,11 @@ the exact local selection `docker-compose.yml`,
 `docker-compose.local-blobs.yml`, then `docker-compose.override.yml`. It renders
 that local selection and the S3 candidate (`docker-compose.yml` plus the
 existing override), checking both against blob-mode authority before stopping
-a writer. RustFS must stay on the private Compose network with no published
-port or host network.
+a writer. RustFS must stay on `rustfs_private`, an internal bridge using the
+isolated IPv4 gateway mode with IPv6 disabled, with no published ports or extra
+network attachments. The runner inspects the live RustFS container and Docker network
+before copying media and before recovery; after activation it checks the live
+backend, mounts, port bindings, and network attachments against authority.
 
 Under `/tmp/teagram-deploy.lock`, the runner stops every `teagramd*` service,
 checks the host for remaining writers, captures `pg_dump` and verifies it by
