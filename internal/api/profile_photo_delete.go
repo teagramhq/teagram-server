@@ -68,7 +68,7 @@ func (h *handlers) handleDeleteProfilePhotos(r *mtproto.Request) (bin.Encoder, e
 // check with rate admission, so a retry cannot remove a later selection or
 // spend another token while the first clear is still committing.
 func (h *handlers) handleClearProfilePhoto(r *mtproto.Request) (bin.Encoder, error) {
-	mutationCtx, cancel := context.WithTimeout(r.Ctx, store.ProfilePhotoSelectionWait)
+	mutationCtx, cancel := context.WithTimeout(r.Ctx, store.ProfilePhotoClearWait)
 	defer cancel()
 	authKeyID := mtproto.AuthKeyIDInt64(r.AuthKeyID)
 	if err := h.store.ClearCurrentProfilePhoto(

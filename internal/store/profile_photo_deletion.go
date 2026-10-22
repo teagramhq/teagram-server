@@ -97,7 +97,7 @@ func (s *Store) ClearCurrentProfilePhoto(
 	if authKeyID == 0 || msgID <= 0 {
 		return errors.New("profile photo clear: invalid transport request identity")
 	}
-	conn, tx, err := s.beginProfilePhotoMutation(ctx, ownerID)
+	conn, tx, err := s.beginProfilePhotoMutationWithWait(ctx, ownerID, ProfilePhotoClearWait)
 	if err != nil {
 		return err
 	}

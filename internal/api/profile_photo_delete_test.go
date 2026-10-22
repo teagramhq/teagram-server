@@ -66,6 +66,10 @@ func decodePhotosPhoto(t *testing.T, body []byte) *tg.PhotosPhoto {
 	t.Helper()
 	var result tg.PhotosPhoto
 	if err := result.Decode(&bin.Buffer{Buf: body}); err != nil {
+		var rpc mt.RPCError
+		if rpcErr := rpc.Decode(&bin.Buffer{Buf: body}); rpcErr == nil {
+			t.Fatalf("decode profile-photo response: got RPC error %d %q", rpc.ErrorCode, rpc.ErrorMessage)
+		}
 		t.Fatalf("decode profile-photo response: %v", err)
 	}
 	return &result
@@ -418,6 +422,10 @@ func TestUpdateProfilePhotoEmptyConcurrentReplayDoesNotSpendRateLimit(t *testing
 	// paused. The replay must wait there before rate admission as well as before
 	// mutating the gallery.
 	waitForProfilePhotoActivity(t, f, deadline, "pg_try_advisory_xact_lock", "idle in transaction", "")
+	// Keep the receipt lock held beyond the regular selection wait after the
+	// replay is known to be queued. A clear and its replay need enough time to
+	// finish this in-flight transaction under race-instrumented package load.
+	time.Sleep(store.ProfilePhotoSelectionWait + 50*time.Millisecond)
 	if err := blocker.Commit(context.Background()); err != nil {
 		t.Fatalf("release upload-receipt lock: %v", err)
 	}
