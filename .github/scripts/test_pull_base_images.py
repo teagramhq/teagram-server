@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import os
+import re
 import subprocess
 import tempfile
 import unittest
@@ -72,6 +73,18 @@ class PullBaseImagesTests(unittest.TestCase):
             check=False,
         )
 
+    def run_image(
+        self, failures: int, image: str
+    ) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            ["bash", str(SCRIPT), "--image", image],
+            env={**self.env, "FAKE_DOCKER_FAILURES": str(failures)},
+            capture_output=True,
+            text=True,
+            timeout=60,
+            check=False,
+        )
+
     def calls(self) -> list[str]:
         return (self.dir / "calls").read_text(encoding="utf-8").splitlines()
 
@@ -92,6 +105,33 @@ class PullBaseImagesTests(unittest.TestCase):
                     f"::warning::pull of {image} failed (attempt {attempt}); retrying",
                     result.stdout,
                 )
+
+    def test_explicit_image_pull_retries_transient_failures(self) -> None:
+        image = "mirror.gcr.io/postgres:18-alpine"
+        result = self.run_image(failures=2, image=image)
+        self.assertEqual(0, result.returncode, result.stdout + result.stderr)
+        self.assertEqual([image] * 3, self.calls())
+        self.assertEqual(2, result.stderr.count(REGISTRY_ERROR))
+        for attempt in (1, 2):
+            self.assertIn(
+                f"::warning::pull of {image} failed (attempt {attempt}); retrying",
+                result.stdout,
+            )
+
+    def test_testcontainers_jobs_preload_postgres_with_retry(self) -> None:
+        workflow = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
+        command = (
+            "run: bash .github/scripts/pull-base-images.sh "
+            "--image mirror.gcr.io/postgres:18-alpine"
+        )
+        for job_name in ("smoke", "e2e-admin"):
+            with self.subTest(job=job_name):
+                job = re.search(
+                    rf"(?ms)^  {re.escape(job_name)}:\n(.*?)(?=^  [a-z0-9-]+:|\Z)",
+                    workflow,
+                )
+                self.assertIsNotNone(job, f"{job_name} job is missing")
+                self.assertIn(command, job.group(1))
 
     def test_persistent_failure_fails_with_the_registry_error(self) -> None:
         result = self.run_script(failures=4)

@@ -801,6 +801,58 @@ jobs:
           WEB_PERMANENT_WEB_ROOT: ${{ github.workspace }}/web-client
         run: bash .github/scripts/run-websocket-permanent-exchange.sh
 
+  restore-readiness:
+    name: confined restore-to-application
+    runs-on: ubuntu-26.04
+    timeout-minutes: 45
+    permissions:
+      contents: read
+
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          persist-credentials: false
+          # The gate builds its fixture seeder from a pinned earlier commit.
+          fetch-depth: 0
+
+      - uses: actions/setup-go@v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: false
+
+      - uses: actions/setup-python@v6.0.0
+        with:
+          python-version: "3.12.15"
+
+      - uses: ariga/setup-atlas@v0.3
+        with:
+          version: v1.2.0
+
+      - name: Download locked Go modules
+        run: go mod download
+
+      - name: Test the restore checker and confinement helpers
+        run: >-
+          go test -count=1
+          ./test/e2e/restore_drill
+          ./deploy/teagramd/rollout-runner/restore-readiness-checker
+          ./deploy/teagramd/rollout-runner/restore-readiness-launcher
+          ./deploy/teagramd/rollout-runner/restore-readiness-provisioner
+          ./deploy/teagramd/rollout-runner/restore-readiness-probe
+          ./deploy/teagramd/rollout-runner/restore-readiness-seed
+          ./deploy/teagramd/rollout-runner/restore-readiness-seed-shim
+
+      - name: Test sanitized reports and ownership policy
+        run: python3 -B deploy/teagramd/rollout-runner/test-restore-readiness.py
+
+      - name: Check restore drill shell syntax and lint
+        run: |
+          bash -n deploy/teagramd/rollout-runner/test-restore-readiness.sh
+          shellcheck deploy/teagramd/rollout-runner/test-restore-readiness.sh
+
+      - name: Run the bounded synthetic restore-to-application gate
+        run: timeout --signal=TERM --kill-after=15s 35m bash deploy/teagramd/rollout-runner/test-restore-readiness.sh
+
   # Keep the existing required check context while making every verification
   # lane mandatory. `always()` runs this when a lane fails or is skipped.
   deploy-workflow:
@@ -833,6 +885,7 @@ jobs:
           actionlint -ignore 'label "ubuntu-26.04" is unknown' \
             .github/workflows/deploy.yml \
             .github/workflows/real-client-browser-flow.yml
+          actionlint -shellcheck= -ignore 'label "ubuntu-26.04" is unknown' .github/workflows/ci.yml
           node --check test/e2e/real_server_fixture/run_real_client_browser_flow.mjs
 
       - name: Check the deploy workflow contract
@@ -895,6 +948,7 @@ jobs:
       - rustfs-transition-qualification
       - schema-gate-postgres
       - deploy-workflow
+      - restore-readiness
     runs-on: ubuntu-26.04
     timeout-minutes: 5
 
@@ -913,9 +967,10 @@ jobs:
           RUSTFS_TRANSITION_RESULT: ${{ needs.rustfs-transition-qualification.result }}
           SCHEMA_GATE_POSTGRES_RESULT: ${{ needs.schema-gate-postgres.result }}
           DEPLOY_WORKFLOW_RESULT: ${{ needs.deploy-workflow.result }}
+          RESTORE_READINESS_RESULT: ${{ needs.restore-readiness.result }}
         run: |
-          if [[ "$CI_MAIN_RESULT" != "success" || "$PHOTOTHUMB_RUNTIME_RESULT" != "success" || "$REAL_SERVER_FIXTURES_RESULT" != "success" || "$WEBSOCKET_D1_RESULT" != "success" || "$WEB_PERMANENT_EXCHANGE_RESULT" != "success" || "$SQL_LINT_RESULT" != "success" || "$CSS_RESULT" != "success" || "$BROWSER_ACCEPTANCE_RESULT" != "success" || "$BROWSER_ACCEPTANCE_IMAGE_RESULT" != "success" || "$RUSTFS_TRANSITION_RESULT" != "success" || "$SCHEMA_GATE_POSTGRES_RESULT" != "success" || "$DEPLOY_WORKFLOW_RESULT" != "success" ]]; then
-            echo "::error::Required CI lanes did not pass (ci-main=$CI_MAIN_RESULT, photothumb-runtime=$PHOTOTHUMB_RUNTIME_RESULT, real-server-fixtures=$REAL_SERVER_FIXTURES_RESULT, websocket-d1=$WEBSOCKET_D1_RESULT, websocket-permanent-exchange=$WEB_PERMANENT_EXCHANGE_RESULT, sql-lint=$SQL_LINT_RESULT, css=$CSS_RESULT, browser-acceptance=$BROWSER_ACCEPTANCE_RESULT, browser-acceptance-image=$BROWSER_ACCEPTANCE_IMAGE_RESULT, rustfs-transition-qualification=$RUSTFS_TRANSITION_RESULT, schema-gate-postgres=$SCHEMA_GATE_POSTGRES_RESULT, deploy-workflow=$DEPLOY_WORKFLOW_RESULT)"
+          if [[ "$CI_MAIN_RESULT" != "success" || "$PHOTOTHUMB_RUNTIME_RESULT" != "success" || "$REAL_SERVER_FIXTURES_RESULT" != "success" || "$WEBSOCKET_D1_RESULT" != "success" || "$WEB_PERMANENT_EXCHANGE_RESULT" != "success" || "$SQL_LINT_RESULT" != "success" || "$CSS_RESULT" != "success" || "$BROWSER_ACCEPTANCE_RESULT" != "success" || "$BROWSER_ACCEPTANCE_IMAGE_RESULT" != "success" || "$RUSTFS_TRANSITION_RESULT" != "success" || "$SCHEMA_GATE_POSTGRES_RESULT" != "success" || "$DEPLOY_WORKFLOW_RESULT" != "success" || "$RESTORE_READINESS_RESULT" != "success" ]]; then
+            echo "::error::Required CI lanes did not pass (ci-main=$CI_MAIN_RESULT, photothumb-runtime=$PHOTOTHUMB_RUNTIME_RESULT, real-server-fixtures=$REAL_SERVER_FIXTURES_RESULT, websocket-d1=$WEBSOCKET_D1_RESULT, websocket-permanent-exchange=$WEB_PERMANENT_EXCHANGE_RESULT, sql-lint=$SQL_LINT_RESULT, css=$CSS_RESULT, browser-acceptance=$BROWSER_ACCEPTANCE_RESULT, browser-acceptance-image=$BROWSER_ACCEPTANCE_IMAGE_RESULT, rustfs-transition-qualification=$RUSTFS_TRANSITION_RESULT, schema-gate-postgres=$SCHEMA_GATE_POSTGRES_RESULT, deploy-workflow=$DEPLOY_WORKFLOW_RESULT, restore-readiness=$RESTORE_READINESS_RESULT)"
             exit 1
           fi
           echo "All required CI lanes passed"
@@ -1018,6 +1073,9 @@ jobs:
 
     steps:
       - uses: actions/checkout@v7.0.1
+
+      - name: Pre-pull the shared PostgreSQL test image with retry
+        run: bash .github/scripts/pull-base-images.sh --image mirror.gcr.io/postgres:18-alpine
 
       # internal/pgtest reads migrations/ at run time to build its template
       # database, so the same mtime pinning the ci job does applies here — the
@@ -2501,6 +2559,9 @@ jobs:
       # reject the stream on a cold runner.
       - name: Download Go modules
         run: go mod download
+
+      - name: Pre-pull the shared PostgreSQL test image with retry
+        run: bash .github/scripts/pull-base-images.sh --image mirror.gcr.io/postgres:18-alpine
 
       - name: Run isolated link landing process smoke
         run: bash .github/scripts/smoke-linklanding.sh
