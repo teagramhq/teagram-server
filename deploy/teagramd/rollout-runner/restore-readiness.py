@@ -204,7 +204,19 @@ SELECT
   (SELECT COALESCE(sum(removals), 0) FROM public.browser_acceptance_binding_evidence)::text;
 """
 AUTH_KEY_COUNT_SQL = "SELECT count(*)::text FROM public.auth_keys;"
-AUTH_KEY_BOUND_COUNT_SQL = "SELECT count(*)::text FROM public.auth_keys WHERE user_id IS NOT NULL;"
+AUTH_KEY_EVIDENCE_BOUND_COUNT_SQL = """
+SELECT count(*)::text
+FROM public.auth_keys AS auth_key
+JOIN public.browser_acceptance_binding_evidence AS evidence
+  ON evidence.user_id = auth_key.user_id;
+"""
+UNENROLLED_BOUND_AUTH_KEY_COUNT_SQL = """
+SELECT count(*)::text
+FROM public.auth_keys AS auth_key
+LEFT JOIN public.browser_acceptance_binding_evidence AS evidence
+  ON evidence.user_id = auth_key.user_id
+WHERE auth_key.user_id IS NOT NULL AND evidence.user_id IS NULL;
+"""
 
 
 def local_dump_identity(info: os.stat_result) -> dict[str, int]:
@@ -374,6 +386,46 @@ $auth_key_fixture$;
 """
 
 
+def local_unenrolled_auth_key_fixture_sql(auth_key_ids: list[int] | tuple[int, ...], token: str) -> str:
+    if (
+        len(auth_key_ids) != 2
+        or any(
+            isinstance(identifier, bool)
+            or not isinstance(identifier, int)
+            or identifier >= 0
+            or identifier <= -(1 << 63)
+            for identifier in auth_key_ids
+        )
+        or len(set(auth_key_ids)) != 2
+        or not re.fullmatch(r"[0-9a-f]{32}", token)
+    ):
+        raise ValueError("invalid local auth-key fixture")
+    first, second = auth_key_ids
+    return f"""
+DO $local_unenrolled_auth_key_fixture$
+DECLARE
+  first_unenrolled_user_id BIGINT;
+  second_unenrolled_user_id BIGINT;
+BEGIN
+  IF (SELECT count(*) FROM public.auth_keys) <> {AUTH_KEY_FIXTURE_COUNT}
+     OR (SELECT count(*) FROM public.browser_acceptance_binding_evidence) <> 1 THEN
+    RAISE EXCEPTION 'unexpected local auth-key fixture state';
+  END IF;
+  INSERT INTO public.users (phone, first_name)
+  VALUES ('restore-readiness-{token}-unenrolled-a', 'Unenrolled fixture user A')
+  RETURNING id INTO STRICT first_unenrolled_user_id;
+  INSERT INTO public.users (phone, first_name)
+  VALUES ('restore-readiness-{token}-unenrolled-b', 'Unenrolled fixture user B')
+  RETURNING id INTO STRICT second_unenrolled_user_id;
+  INSERT INTO public.auth_keys (id, key_value, user_id, pending_user_id)
+  VALUES
+    ({first}, decode(repeat('c3', 256), 'hex'), first_unenrolled_user_id, NULL),
+    ({second}, decode(repeat('d4', 256), 'hex'), second_unenrolled_user_id, NULL);
+END
+$local_unenrolled_auth_key_fixture$;
+"""
+
+
 def auth_key_clear_transaction_sql(
     auth_key_ids: list[int] | tuple[int, ...], *, inject_failure: bool = False, wait_for_signal: bool = False
 ) -> str:
@@ -438,14 +490,17 @@ LOCK TABLE public.auth_keys, public.srp_challenges,
 DO $local_auth_key_clear$
 DECLARE
   original_keys BIGINT;
-  bound_keys BIGINT;
+  evidence_bound_keys BIGINT;
   original_evidence BIGINT;
   original_additions BIGINT;
   original_removals BIGINT;
   deleted_keys BIGINT;
 BEGIN
-  SELECT count(*), count(*) FILTER (WHERE user_id IS NOT NULL)
-    INTO original_keys, bound_keys FROM public.auth_keys;
+  SELECT count(*) INTO original_keys FROM public.auth_keys;
+  SELECT count(*) INTO evidence_bound_keys
+    FROM public.auth_keys AS auth_key
+    JOIN public.browser_acceptance_binding_evidence AS evidence
+      ON evidence.user_id = auth_key.user_id;
   IF original_keys > {MAX_LOCAL_AUTH_KEYS} THEN
     RAISE EXCEPTION 'auth-key clearing bound exceeded';
   END IF;
@@ -464,7 +519,7 @@ BEGIN
      OR (SELECT count(*) FROM public.notify_settings_difference_cursors) <> 0
      OR (SELECT count(*) FROM public.browser_acceptance_binding_evidence) <> original_evidence
      OR (SELECT COALESCE(sum(additions), 0) FROM public.browser_acceptance_binding_evidence) <> original_additions
-     OR (SELECT COALESCE(sum(removals), 0) FROM public.browser_acceptance_binding_evidence) <> original_removals + bound_keys THEN
+     OR (SELECT COALESCE(sum(removals), 0) FROM public.browser_acceptance_binding_evidence) <> original_removals + evidence_bound_keys THEN
     RAISE EXCEPTION 'auth-key clearing aggregate mismatch';
   END IF;
 END
@@ -3561,8 +3616,21 @@ class Drill(Docker):
         if not self.args.local_fixture_test or self.local_dump_path is not None:
             raise DrillFailure(self.phase, "isolation_refusal")
         marker = LOCAL_DUMP_LEAK_MARKER.decode("ascii")
-        self.sql(source, f"COMMENT ON SCHEMA public IS '{marker}';", self.phase)
         token = self.manifest["token"]
+        used_ids = set(self.synthetic_auth_key_ids)
+        unenrolled_ids: list[int] = []
+        while len(unenrolled_ids) < 2:
+            candidate = -(secrets.randbelow(9_000_000_000_000_000_000) + 1)
+            if candidate not in used_ids:
+                used_ids.add(candidate)
+                unenrolled_ids.append(candidate)
+        self.sql(source, local_unenrolled_auth_key_fixture_sql(unenrolled_ids, token), self.phase)
+        if (
+            self.sql(source, AUTH_KEY_STATE_SQL, self.phase).split("|") != ["5", "2", "3", "1", "2", "0"]
+            or self.sql(source, UNENROLLED_BOUND_AUTH_KEY_COUNT_SQL, self.phase) != "2"
+        ):
+            raise DrillFailure(self.phase, "fixture_failure")
+        self.sql(source, f"COMMENT ON SCHEMA public IS '{marker}';", self.phase)
         fixture_path = self.run_dir / "work" / f"pgdump-pre-{token}{token[:8]}.sql"
         self.private_write(
             fixture_path,
@@ -3950,10 +4018,10 @@ dump_path=$2
         else:
             try:
                 auth_key_count = int(auth_key_state[0])
-                bound_key_count = int(self.sql(target, AUTH_KEY_BOUND_COUNT_SQL, self.phase))
+                evidence_bound_key_count = int(self.sql(target, AUTH_KEY_EVIDENCE_BOUND_COUNT_SQL, self.phase))
             except ValueError as exc:
                 raise DrillFailure(self.phase, "schema_failure") from exc
-            if auth_key_count > MAX_LOCAL_AUTH_KEYS or bound_key_count > auth_key_count:
+            if auth_key_count > MAX_LOCAL_AUTH_KEYS or evidence_bound_key_count > auth_key_count:
                 raise DrillFailure(self.phase, "schema_failure")
             marker = {
                 "schema_version": 1,
@@ -3962,7 +4030,7 @@ dump_path=$2
                 "database_identity": self.sql(target, DATABASE_IDENTITY_SQL, self.phase),
                 "migration_head": HEAD_SCHEMA,
                 "auth_key_state": auth_key_state,
-                "auth_key_bound_count": bound_key_count,
+                "auth_key_evidence_bound_count": evidence_bound_key_count,
             }
         encoded = (json.dumps(marker, separators=(",", ":"), sort_keys=True) + "\n").encode()
         self.private_write(
@@ -4021,13 +4089,13 @@ dump_path=$2
                 raise DrillFailure(phase, "schema_failure")
         else:
             try:
-                bound_key_count = int(self.sql(target, AUTH_KEY_BOUND_COUNT_SQL, phase))
+                evidence_bound_key_count = int(self.sql(target, AUTH_KEY_EVIDENCE_BOUND_COUNT_SQL, phase))
             except ValueError as exc:
                 raise DrillFailure(phase, "schema_failure") from exc
             if (
                 state != marker["auth_key_state"]
                 or int(state[0]) > MAX_LOCAL_AUTH_KEYS
-                or bound_key_count != marker["auth_key_bound_count"]
+                or evidence_bound_key_count != marker["auth_key_evidence_bound_count"]
             ):
                 raise DrillFailure(phase, "schema_failure")
         if self.sql(
@@ -4135,15 +4203,15 @@ dump_path=$2
         if self.input_mode == "local":
             try:
                 auth_key_count = int(before[0])
-                bound_key_count = int(self.sql(target, AUTH_KEY_BOUND_COUNT_SQL, phase))
+                evidence_bound_key_count = int(self.sql(target, AUTH_KEY_EVIDENCE_BOUND_COUNT_SQL, phase))
             except ValueError as exc:
                 raise DrillFailure(phase, "schema_failure") from exc
             marker = self.post_restore_marker or {}
             if (
                 auth_key_count > MAX_LOCAL_AUTH_KEYS
-                or bound_key_count > auth_key_count
+                or evidence_bound_key_count > auth_key_count
                 or before != marker.get("auth_key_state")
-                or bound_key_count != marker.get("auth_key_bound_count")
+                or evidence_bound_key_count != marker.get("auth_key_evidence_bound_count")
             ):
                 raise DrillFailure(phase, "schema_failure")
         client = self.auth_key_clear_client(target)
@@ -4216,7 +4284,7 @@ dump_path=$2
                 "0",
                 before[3],
                 before[4],
-                str(int(before[5]) + bound_key_count),
+                str(int(before[5]) + evidence_bound_key_count),
             ]
         if output or self.auth_key_state(target, phase) != expected_state:
             raise DrillFailure(phase, "auth_key_clear_failure")

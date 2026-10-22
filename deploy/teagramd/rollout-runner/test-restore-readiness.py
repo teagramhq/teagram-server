@@ -163,6 +163,15 @@ class RestoreReadinessContractTests(unittest.TestCase):
             for node in ast.walk(tree)
             if isinstance(node, ast.FunctionDef) and node.name == "create_local_dump_fixture"
         )
+        self.assertTrue(
+            any(
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Name)
+                and node.func.id == "local_unenrolled_auth_key_fixture_sql"
+                for node in ast.walk(fixture_method)
+            )
+        )
+        self.assertIn("UNENROLLED_BOUND_AUTH_KEY_COUNT_SQL", ast.unparse(fixture_method))
         image_container_call = next(
             node
             for node in ast.walk(fixture_method)
@@ -684,6 +693,29 @@ class RestoreReadinessContractTests(unittest.TestCase):
         self.assertIn("INSERT INTO public.notify_settings_difference_cursors", fixture_sql)
         self.assertIn("decode(repeat('a5', 256), 'hex')", fixture_sql)
         self.assertNotIn("SELECT key_value", fixture_sql)
+
+        local_fixture_sql = RESTORE_READINESS.local_unenrolled_auth_key_fixture_sql((-404, -505), "a" * 32)
+        self.assertIn("INSERT INTO public.users", local_fixture_sql)
+        self.assertIn("INSERT INTO public.auth_keys", local_fixture_sql)
+        self.assertNotIn("browser_acceptance_enroll_binding_evidence", local_fixture_sql)
+        self.assertIn(
+            "JOIN public.browser_acceptance_binding_evidence AS evidence\n  ON evidence.user_id = auth_key.user_id",
+            RESTORE_READINESS.AUTH_KEY_EVIDENCE_BOUND_COUNT_SQL,
+        )
+        self.assertIn(
+            "LEFT JOIN public.browser_acceptance_binding_evidence AS evidence",
+            RESTORE_READINESS.UNENROLLED_BOUND_AUTH_KEY_COUNT_SQL,
+        )
+        with self.assertRaises(ValueError):
+            RESTORE_READINESS.local_unenrolled_auth_key_fixture_sql((-404, -404), "a" * 32)
+
+        local_transaction = RESTORE_READINESS.local_auth_key_clear_transaction_sql()
+        self.assertIn("INTO evidence_bound_keys", local_transaction)
+        self.assertIn("original_removals + evidence_bound_keys", local_transaction)
+        self.assertIn(
+            "JOIN public.browser_acceptance_binding_evidence AS evidence",
+            local_transaction,
+        )
 
         transaction = RESTORE_READINESS.auth_key_clear_transaction_sql((-101, -202, -303))
         self.assertIn("LOCK TABLE public.auth_keys, public.srp_challenges", transaction)
