@@ -86,6 +86,62 @@ WHERE draft.owner_id = sqlc.arg(owner_id)
   )
 ORDER BY draft.peer_type, draft.peer_id;
 
+-- CloudDraftsForOwner returns every current draft the owner can still read.
+-- Membership and dialog access are checked in the same statement as the text.
+-- name: CloudDraftsForOwner :many
+SELECT draft.peer_type,
+       draft.peer_id,
+       draft.message,
+       draft.no_webpage,
+       CASE
+           WHEN draft.reply_to_msg_id IS NULL THEN 0::bigint
+           WHEN draft.peer_type = 3 AND EXISTS (
+               SELECT 1 FROM channel_messages AS target
+               WHERE target.channel_id = draft.peer_id
+                 AND target.local_id = draft.reply_to_msg_id
+                 AND target.deleted = false
+                 AND (target.expires_at IS NULL OR target.expires_at > statement_timestamp())
+                 AND target.action_type = 0
+           ) THEN draft.reply_to_msg_id
+           WHEN draft.peer_type <> 3 AND EXISTS (
+               SELECT 1 FROM messages AS target
+               WHERE target.owner_id = draft.owner_id
+                 AND target.peer_type = draft.peer_type
+                 AND target.peer_id = draft.peer_id
+                 AND target.local_id = draft.reply_to_msg_id
+                 AND target.deleted = false
+                 AND (target.expires_at IS NULL OR target.expires_at > statement_timestamp())
+                 AND target.action_type = 0
+           ) THEN draft.reply_to_msg_id
+           ELSE 0::bigint
+       END AS reply_to_msg_id,
+       draft.updated_at
+FROM cloud_drafts AS draft
+WHERE draft.owner_id = sqlc.arg(owner_id)
+  AND (
+      (draft.peer_type = 1 AND EXISTS (
+          SELECT 1 FROM dialogs AS dialog
+          WHERE dialog.owner_id = draft.owner_id
+            AND dialog.peer_type = draft.peer_type
+            AND dialog.peer_id = draft.peer_id
+      ))
+      OR (draft.peer_type = 2 AND EXISTS (
+          SELECT 1 FROM chat_participants AS participant
+          JOIN chats AS chat ON chat.id = participant.chat_id
+          WHERE participant.chat_id = draft.peer_id
+            AND participant.user_id = draft.owner_id
+      ))
+      OR (draft.peer_type = 3 AND EXISTS (
+          SELECT 1 FROM channel_participants AS participant
+          JOIN channels AS channel ON channel.id = participant.channel_id
+          WHERE participant.channel_id = draft.peer_id
+            AND participant.user_id = draft.owner_id
+            AND (participant.banned_until IS NULL OR participant.banned_until <= now())
+            AND channel.deleted_at IS NULL
+      ))
+  )
+ORDER BY draft.peer_type, draft.peer_id;
+
 -- CloudDraftStateForPeer delivers the latest owner-visible value or clear
 -- tombstone after a peer-free NOTIFY. Access is checked with the same statement
 -- as the state read so a removal that committed first suppresses delivery.
