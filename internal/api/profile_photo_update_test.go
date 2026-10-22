@@ -114,7 +114,6 @@ func TestUpdateProfilePhotoRejectsEveryNonOwnedCapabilityUniformly(t *testing.T)
 		{name: "own id with wrong hash", id: &tg.InputPhoto{ID: older, AccessHash: selfHash ^ 1}},
 		{name: "own id with another viewer's hash", id: &tg.InputPhoto{ID: older, AccessHash: f.credential(f.viewer, f.owner, older)}},
 		{name: "own deleted id", id: &tg.InputPhoto{ID: deleted, AccessHash: f.credential(f.owner, f.owner, deleted)}},
-		{name: "inputPhotoEmpty clear", id: &tg.InputPhotoEmpty{}},
 	}
 	ownerBefore := f.selectionSnapshot(f.owner)
 	viewerBefore := f.selectionSnapshot(f.viewer)

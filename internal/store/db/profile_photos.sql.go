@@ -50,6 +50,55 @@ func (q *Queries) CountUserPhotos(ctx context.Context, userID int64) (int64, err
 	return entries, err
 }
 
+const deleteExpiredProfilePhotoDeleteOperations = `-- name: DeleteExpiredProfilePhotoDeleteOperations :execrows
+DELETE FROM profile_delete_operation
+WHERE user_id = $1 AND created_at < now() - INTERVAL '90 days'
+`
+
+// ExpiredProfilePhotoDeleteOperations bounds the dedup table by the accepted
+// 90-day request-replay retention. Older retries are fresh self-only clears.
+// The per-owner primary-key prefix scopes this cleanup to one owner's rows.
+func (q *Queries) DeleteExpiredProfilePhotoDeleteOperations(ctx context.Context, userID int64) (int64, error) {
+	result, err := q.db.Exec(ctx, deleteExpiredProfilePhotoDeleteOperations, userID)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
+const deleteUserPhotosByIDs = `-- name: DeleteUserPhotosByIDs :many
+DELETE FROM user_photos
+WHERE user_id = $1 AND file_id = ANY($2::bigint[])
+RETURNING file_id
+`
+
+type DeleteUserPhotosByIDsParams struct {
+	UserID  int64
+	FileIds []int64
+}
+
+// DeleteUserPhotosByIDs is reference removal only. Files, bytes and unrelated
+// message/chat/channel references are outside this statement by design.
+func (q *Queries) DeleteUserPhotosByIDs(ctx context.Context, arg DeleteUserPhotosByIDsParams) ([]int64, error) {
+	rows, err := q.db.Query(ctx, deleteUserPhotosByIDs, arg.UserID, arg.FileIds)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []int64
+	for rows.Next() {
+		var file_id int64
+		if err := rows.Scan(&file_id); err != nil {
+			return nil, err
+		}
+		items = append(items, file_id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const ensureProfilePhotoState = `-- name: EnsureProfilePhotoState :exec
 INSERT INTO profile_photo_state (user_id, current_file_id, mutation_revision)
 VALUES ($1, NULL, 0)
@@ -79,6 +128,50 @@ func (q *Queries) GetProfilePhotoState(ctx context.Context, userID int64) (Profi
 	var i ProfilePhotoState
 	err := row.Scan(&i.UserID, &i.CurrentFileID, &i.MutationRevision)
 	return i, err
+}
+
+const insertProfilePhotoDeleteOperation = `-- name: InsertProfilePhotoDeleteOperation :execrows
+INSERT INTO profile_delete_operation (
+    user_id, auth_key_id, session_id, msg_id, operation_key,
+    target_file_id, client_file_id, clear_revision
+)
+VALUES (
+    $1, $2, $3, $4, $5,
+    $6::bigint,
+    $7::bigint,
+    $8::bigint
+)
+`
+
+type InsertProfilePhotoDeleteOperationParams struct {
+	UserID        int64
+	AuthKeyID     int64
+	SessionID     int64
+	MsgID         int64
+	OperationKey  []byte
+	TargetFileID  *int64
+	ClientFileID  *int64
+	ClearRevision *int64
+}
+
+// InsertProfilePhotoDeleteOperation binds the transport request to the target
+// resolved in the same transaction. Nullable target fields also record that a
+// first clear ran while the owner had no current photo.
+func (q *Queries) InsertProfilePhotoDeleteOperation(ctx context.Context, arg InsertProfilePhotoDeleteOperationParams) (int64, error) {
+	result, err := q.db.Exec(ctx, insertProfilePhotoDeleteOperation,
+		arg.UserID,
+		arg.AuthKeyID,
+		arg.SessionID,
+		arg.MsgID,
+		arg.OperationKey,
+		arg.TargetFileID,
+		arg.ClientFileID,
+		arg.ClearRevision,
+	)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
 }
 
 const insertProfileUploadReceipt = `-- name: InsertProfileUploadReceipt :one
@@ -168,6 +261,41 @@ func (q *Queries) InsertUserPhoto(ctx context.Context, arg InsertUserPhotoParams
 	return i, err
 }
 
+const liveProfilePhotosForDeletion = `-- name: LiveProfilePhotosForDeletion :many
+SELECT file_id
+FROM user_photos
+WHERE user_id = $1 AND file_id = ANY($2::bigint[])
+ORDER BY array_position($2::bigint[], file_id)
+`
+
+type LiveProfilePhotosForDeletionParams struct {
+	UserID  int64
+	FileIds []int64
+}
+
+// LiveProfilePhotosForDeletion resolves only the caller's current gallery rows.
+// The profile-domain advisory lock held by the caller makes this read stable
+// against upload, selection and other deletion requests until commit.
+func (q *Queries) LiveProfilePhotosForDeletion(ctx context.Context, arg LiveProfilePhotosForDeletionParams) ([]int64, error) {
+	rows, err := q.db.Query(ctx, liveProfilePhotosForDeletion, arg.UserID, arg.FileIds)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []int64
+	for rows.Next() {
+		var file_id int64
+		if err := rows.Scan(&file_id); err != nil {
+			return nil, err
+		}
+		items = append(items, file_id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const lockProfilePhotoState = `-- name: LockProfilePhotoState :one
 SELECT user_id, current_file_id, mutation_revision
 FROM profile_photo_state
@@ -220,6 +348,50 @@ func (q *Queries) LockProfileUploadReceipt(ctx context.Context, arg LockProfileU
 	return i, err
 }
 
+const lockProfileUploadReceiptsForDeletion = `-- name: LockProfileUploadReceiptsForDeletion :many
+SELECT r.client_file_id, r.state
+FROM user_photos up
+JOIN profile_upload_receipt r
+  ON r.user_id = up.user_id AND r.client_file_id = up.client_file_id
+WHERE up.user_id = $1 AND up.file_id = ANY($2::bigint[])
+ORDER BY r.client_file_id
+FOR UPDATE OF r
+`
+
+type LockProfileUploadReceiptsForDeletionParams struct {
+	UserID  int64
+	FileIds []int64
+}
+
+type LockProfileUploadReceiptsForDeletionRow struct {
+	ClientFileID int64
+	State        int16
+}
+
+// LockProfileUploadReceiptsForDeletion follows the gallery writer's lock order:
+// the receipt rows are locked before profile_photo_state. A current gallery row
+// normally has one receipt; the inner join keeps legacy or synthetic entries
+// removable without fabricating receipt state.
+func (q *Queries) LockProfileUploadReceiptsForDeletion(ctx context.Context, arg LockProfileUploadReceiptsForDeletionParams) ([]LockProfileUploadReceiptsForDeletionRow, error) {
+	rows, err := q.db.Query(ctx, lockProfileUploadReceiptsForDeletion, arg.UserID, arg.FileIds)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []LockProfileUploadReceiptsForDeletionRow
+	for rows.Next() {
+		var i LockProfileUploadReceiptsForDeletionRow
+		if err := rows.Scan(&i.ClientFileID, &i.State); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const profileFileForOwner = `-- name: ProfileFileForOwner :one
 SELECT id, uploader_id, access_hash, size, mime_type, file_name, media_kind,
        width, height, subtype_rights, stored, date
@@ -269,6 +441,34 @@ func (q *Queries) ProfileFileForOwner(ctx context.Context, arg ProfileFileForOwn
 		&i.Date,
 	)
 	return i, err
+}
+
+const profilePhotoDeleteOperation = `-- name: ProfilePhotoDeleteOperation :one
+SELECT 1::bigint
+FROM profile_delete_operation
+WHERE user_id = $1 AND auth_key_id = $2 AND session_id = $3 AND msg_id = $4
+`
+
+type ProfilePhotoDeleteOperationParams struct {
+	UserID    int64
+	AuthKeyID int64
+	SessionID int64
+	MsgID     int64
+}
+
+// ProfilePhotoDeleteOperation is the durable idempotency lookup for clearing the
+// current avatar. The tuple is copied only from the authenticated MTProto
+// request. A found row means the resolved target must not be looked up again.
+func (q *Queries) ProfilePhotoDeleteOperation(ctx context.Context, arg ProfilePhotoDeleteOperationParams) (int64, error) {
+	row := q.db.QueryRow(ctx, profilePhotoDeleteOperation,
+		arg.UserID,
+		arg.AuthKeyID,
+		arg.SessionID,
+		arg.MsgID,
+	)
+	var column_1 int64
+	err := row.Scan(&column_1)
+	return column_1, err
 }
 
 const profilePhotosByOwner = `-- name: ProfilePhotosByOwner :many
@@ -450,6 +650,33 @@ func (q *Queries) ProfileUploadReceipt(ctx context.Context, arg ProfileUploadRec
 	return i, err
 }
 
+const removeProfilePhotoStateEntries = `-- name: RemoveProfilePhotoStateEntries :one
+UPDATE profile_photo_state
+SET current_file_id = CASE
+        WHEN current_file_id = ANY($2::bigint[]) THEN NULL
+        ELSE current_file_id
+    END,
+    mutation_revision = mutation_revision + cardinality($2::bigint[])
+WHERE user_id = $1
+RETURNING user_id, current_file_id, mutation_revision
+`
+
+type RemoveProfilePhotoStateEntriesParams struct {
+	UserID  int64
+	FileIds []int64
+}
+
+// RemoveProfilePhotoStateEntries clears the current pointer only when it is in
+// this deletion set and advances the per-owner revision once per removed entry.
+// It runs after receipt locks and the state row lock, before gallery rows are
+// deleted so the composite RESTRICT foreign key stays satisfied.
+func (q *Queries) RemoveProfilePhotoStateEntries(ctx context.Context, arg RemoveProfilePhotoStateEntriesParams) (ProfilePhotoState, error) {
+	row := q.db.QueryRow(ctx, removeProfilePhotoStateEntries, arg.UserID, arg.FileIds)
+	var i ProfilePhotoState
+	err := row.Scan(&i.UserID, &i.CurrentFileID, &i.MutationRevision)
+	return i, err
+}
+
 const selectProfilePhoto = `-- name: SelectProfilePhoto :one
 UPDATE profile_photo_state
 SET current_file_id = $2, mutation_revision = mutation_revision + 1
@@ -491,6 +718,29 @@ type SetProfileUploadReceiptFileParams struct {
 // 0 in the predicate means a completed receipt can never be re-pointed.
 func (q *Queries) SetProfileUploadReceiptFile(ctx context.Context, arg SetProfileUploadReceiptFileParams) (int64, error) {
 	result, err := q.db.Exec(ctx, setProfileUploadReceiptFile, arg.UserID, arg.ClientFileID, arg.FileID)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
+const terminalizeProfileUploadReceiptsForDeletion = `-- name: TerminalizeProfileUploadReceiptsForDeletion :execrows
+UPDATE profile_upload_receipt
+SET state = 2, updated_at = now()
+WHERE user_id = $1
+  AND client_file_id = ANY($2::bigint[])
+  AND state <> 2
+`
+
+type TerminalizeProfileUploadReceiptsForDeletionParams struct {
+	UserID        int64
+	ClientFileIds []int64
+}
+
+// TerminalizeProfileUploadReceiptsForDeletion leaves a durable retry denial
+// after the live gallery reference is removed. The receipt and file row remain.
+func (q *Queries) TerminalizeProfileUploadReceiptsForDeletion(ctx context.Context, arg TerminalizeProfileUploadReceiptsForDeletionParams) (int64, error) {
+	result, err := q.db.Exec(ctx, terminalizeProfileUploadReceiptsForDeletion, arg.UserID, arg.ClientFileIds)
 	if err != nil {
 		return 0, err
 	}

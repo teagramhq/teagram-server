@@ -30,7 +30,13 @@ func (h *handlers) handleUpdateProfilePhoto(r *mtproto.Request) (bin.Encoder, er
 		return nil, errInputRequestInvalid
 	}
 	input, ok := req.GetIDAsNotEmpty()
-	if !ok || input == nil || !h.photos.Verify(r.UserID, r.UserID, input.ID, input.AccessHash) {
+	if !ok {
+		if _, isEmpty := req.GetID().(*tg.InputPhotoEmpty); isEmpty {
+			return h.handleClearProfilePhoto(r)
+		}
+		return nil, errPhotoIDInvalid
+	}
+	if input == nil || !h.photos.Verify(r.UserID, r.UserID, input.ID, input.AccessHash) {
 		return nil, errPhotoIDInvalid
 	}
 	selectionCtx, cancel := context.WithTimeout(r.Ctx, store.ProfilePhotoSelectionWait)
