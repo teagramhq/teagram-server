@@ -1285,6 +1285,7 @@ test.describe('admin dashboard acceptance states', () => {
       'send_code_ip_calls', 'send_code_ip_distinct_numbers', 'sign_in_fail_ip',
       'check_password', 'check_password_ip', 'get_password_ip', 'sign_up_ip',
       'password_proof', 'get_password', 'update_profile', 'dialog_filter_mutation',
+      'sticker_set_mutation',
     ]);
   });
 
