@@ -42,7 +42,7 @@ func testSmokeAlbumMedia(t *testing.T) {
 		multi[i] = tg.InputSingleMedia{
 			Media:    &tg.InputMediaPhoto{ID: &tg.InputPhoto{ID: photo.ID, AccessHash: photo.AccessHash, FileReference: photo.FileReference}},
 			RandomID: int64(1048601 + i),
-			Message:  fmt.Sprintf("album caption %d", i),
+			Message:  smokeAlbumCaption(i),
 		}
 	}
 
@@ -161,8 +161,11 @@ func assertSmokeAlbumMessages(t *testing.T, classes []tg.MessageClass, body []by
 		if got, ok := message.GetGroupedID(); !ok || got != groupedID {
 			t.Fatalf("%s item %d grouped_id = (%d, %v), want %d", label, i, got, ok, groupedID)
 		}
-		if message.Message != fmt.Sprintf("album caption %d", i) {
+		if message.Message != smokeAlbumCaption(i) {
 			t.Fatalf("%s item %d caption = %q", label, i, message.Message)
+		}
+		if i == 0 {
+			assertSmokeURLEntity(t, message, message.Message, "https://t.me/+album")
 		}
 		photo := smokeAlbumPhoto(t, message.Media, label)
 		if original, ok := photo.Sizes[len(photo.Sizes)-1].(*tg.PhotoSize); !ok || original.Size != len(body) {
@@ -170,4 +173,11 @@ func assertSmokeAlbumMessages(t *testing.T, classes []tg.MessageClass, body []by
 		}
 	}
 	return album
+}
+
+func smokeAlbumCaption(index int) string {
+	if index == 0 {
+		return "album caption 0 😀 https://t.me/+album"
+	}
+	return fmt.Sprintf("album caption %d", index)
 }

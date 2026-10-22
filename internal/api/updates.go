@@ -64,6 +64,9 @@ func messageToTL(m store.Message, createUsers []int64, files map[int64]tg.Messag
 		Message: m.Text,
 		Date:    int(m.Date.Unix()),
 	}
+	if entities := decodeMessageEntities(store.DecodeMessageEntities([]byte(m.Entities))); len(entities) > 0 {
+		msg.SetEntities(entities)
+	}
 	if m.EditDate != nil {
 		msg.EditDate = int(m.EditDate.Unix())
 	}
@@ -188,6 +191,9 @@ func channelMessageToTL(m store.ChannelMessage, viewerID int64, files map[int64]
 		PeerID:  &tg.PeerChannel{ChannelID: m.ChannelID},
 		Message: m.Message,
 		Date:    int(m.Date.Unix()),
+	}
+	if entities := decodeMessageEntities(store.DecodeMessageEntities([]byte(m.Entities))); len(entities) > 0 {
+		msg.SetEntities(entities)
 	}
 	if broadcast {
 		msg.SetPost(true)

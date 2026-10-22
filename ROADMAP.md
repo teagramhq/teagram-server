@@ -814,6 +814,36 @@ Tracked so shortcuts don't rot into "later means never".
 - `TG_REGISTRATION` accepts `closed`, `invite`, and `open`; M20 added the invite-gated path,
   while `open` uses the same admission flow without an invite.
 
+### Operator privacy controls (MAIN-2331, MAIN-2332)
+
+- [PR #785](https://github.com/teagramhq/teagram-server/pull/785) made recovery
+  email retention optional. `TG_RECOVERY_EMAIL=off` is the default and discards
+  emails supplied with password set/change; `contact` stores an unverified,
+  plaintext contact for operator-assisted reset. Turning it off stops future
+  writes and responses but preserves existing rows until overwritten. No mail
+  transport or automated recovery RPC is provided.
+- [PR #788](https://github.com/teagramhq/teagram-server/pull/788) added session
+  metadata controls. `TG_SESSION_IP=false` is the default; the server does not
+  keep a session IP by default. `TG_SESSION_DEVICE_LABELS=true` is the default;
+  device and app labels remain stored and visible in `account.getAuthorizations`
+  to the account owner and to the server operator. Turning either setting off
+  hides the fields and changes future writes; historical rows remain until
+  overwritten or the session is logged out or revoked. There is no bulk erase.
+  Re-enabling does not backfill old rows.
+- No phone number or recovery email is kept as account data by default. Every
+  connection IP is still processed in memory and in per-network abuse counters.
+  Defaults include 10 `auth.sendCode` calls/hour and 20 distinct identifiers/24h,
+  10 failed `auth.signIn` attempts/hour, 10 failed `auth.checkPassword`
+  attempts/hour, 20 unauthenticated `account.getPassword` calls/hour, and 5
+  `auth.signUp` calls/hour. Turnstile credentials are unset by default;
+  `TG_TURNSTILE_SIGNIN_ENABLED=false` leaves sign-in unchallenged. When enabled,
+  Cloudflare processes the challenge, and a PROXY-v2 deployment also sends it
+  the client IP.
+- Operators can read the database, including messages. Messages are not
+  end-to-end encrypted. Slow-query logs and database dumps can retain older
+  values after a setting changes. Deployment details and exact environment
+  variables are in `docs/clients.md`.
+
 ## Engineering invariants
 
 Apply to every milestone.

@@ -19,6 +19,7 @@ import (
 	"sync"
 	"testing"
 	"time"
+	"unicode/utf16"
 
 	"github.com/gotd/td/bin"
 	"github.com/gotd/td/crypto"
@@ -393,13 +394,39 @@ func testSmokeOneToOne(t *testing.T) {
 	assertObservedReadMarker(t, f.ctx, a1.push, aToB.ID, 4, "A1 read receipt push")
 	assertObservedReadMarker(t, f.ctx, a2.push, aToB.ID, 4, "A2 read receipt push")
 
+	const urlText = "smoke link 😀 https://t.me/+smoke"
+	var urlResult tg.UpdatesClass
+	if err := a1.call(f.ctx, func(ctx context.Context, api *tg.Client) error {
+		var err error
+		urlResult, err = api.MessagesSendMessage(ctx, &tg.MessagesSendMessageRequest{
+			Peer: peerUser(a1.id, b1.id), Message: urlText, RandomID: 1046004,
+		})
+		return err
+	}); err != nil {
+		t.Fatalf("send URL message: %v", err)
+	}
+	urlMessage, urlPts, ok := outgoingMessage(t, urlResult, urlText)
+	if !ok || urlMessage.ID != 4 || urlPts != 5 {
+		t.Fatalf("URL send = message %#v pts %d, want message id 4 pts 5", urlMessage, urlPts)
+	}
+	assertSmokeURLEntity(t, urlMessage, urlText, "https://t.me/+smoke")
+	assertObservedMessage(t, f.ctx, a1.seen, urlText, 4, true, b1.id, 5, "A1 URL sender echo", true)
+	assertObservedMessage(t, f.ctx, a2.seen, urlText, 4, true, b1.id, 5, "A2 URL sender echo", true)
+	assertObservedMessage(t, f.ctx, b1.seen, urlText, 3, false, a1.id, 4, "B1 URL incoming", true)
+	assertObservedMessage(t, f.ctx, b2.seen, urlText, 3, false, a1.id, 4, "B2 URL incoming", true)
+	assertObservedMessage(t, f.ctx, a2.push, urlText, 4, true, b1.id, 5, "A2 URL sender push")
+	assertObservedMessage(t, f.ctx, b1.push, urlText, 3, false, a1.id, 4, "B1 URL incoming push")
+	assertObservedMessage(t, f.ctx, b2.push, urlText, 3, false, a1.id, 4, "B2 URL incoming push")
+
 	wantA := map[string]smokeHistoryMessage{
 		"a-to-b-smoke": {id: 2, out: true},
 		"b-to-a-smoke": {id: 3, out: false},
+		urlText:        {id: 4, out: true, url: "https://t.me/+smoke"},
 	}
 	wantB := map[string]smokeHistoryMessage{
 		"a-to-b-smoke": {id: 1, out: false},
 		"b-to-a-smoke": {id: 2, out: true},
+		urlText:        {id: 3, out: false, url: "https://t.me/+smoke"},
 	}
 	for _, check := range []struct {
 		client *smokeClient
@@ -6061,6 +6088,7 @@ func assertSmokeSendResult(t *testing.T, result tg.UpdatesClass, text string, wa
 type smokeHistoryMessage struct {
 	id  int
 	out bool
+	url string
 }
 
 func verifySmokeHistory(
@@ -6098,6 +6126,11 @@ func verifySmokeHistory(
 		if message.ID != expect.id || message.Out != expect.out {
 			return fmt.Errorf("history %q = {id:%d out:%v}, want {id:%d out:%v}", message.Message, message.ID, message.Out, expect.id, expect.out)
 		}
+		if expect.url != "" {
+			if err := smokeURLEntity(message, message.Message, expect.url); err != nil {
+				return fmt.Errorf("history %q URL entity: %w", message.Message, err)
+			}
+		}
 		peer, ok := message.PeerID.(*tg.PeerUser)
 		if !ok || peer.UserID != peerID {
 			return fmt.Errorf("history %q peer = %+v, want user %d", message.Message, message.PeerID, peerID)
@@ -6107,6 +6140,37 @@ func verifySmokeHistory(
 		if !seen[text] {
 			return fmt.Errorf("history is missing %q", text)
 		}
+	}
+	return nil
+}
+
+func assertSmokeURLEntity(t *testing.T, message *tg.Message, text, link string) {
+	t.Helper()
+	if err := smokeURLEntity(message, text, link); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func smokeURLEntity(message *tg.Message, text, link string) error {
+	if message == nil || message.Message != text {
+		return fmt.Errorf("message = %#v, want text %q", message, text)
+	}
+	entities, present := message.GetEntities()
+	if !present || len(entities) != 1 {
+		return fmt.Errorf("entities = %#v present=%v, want one URL", entities, present)
+	}
+	urlEntity, ok := entities[0].(*tg.MessageEntityURL)
+	if !ok {
+		return fmt.Errorf("entity type = %T, want MessageEntityUrl", entities[0])
+	}
+	prefix, _, ok := strings.Cut(text, link)
+	if !ok {
+		return fmt.Errorf("message text does not contain URL %q", link)
+	}
+	wantOffset := len(utf16.Encode([]rune(prefix)))
+	wantLength := len(utf16.Encode([]rune(link)))
+	if urlEntity.Offset != wantOffset || urlEntity.Length != wantLength {
+		return fmt.Errorf("URL span = (%d,%d), want (%d,%d)", urlEntity.Offset, urlEntity.Length, wantOffset, wantLength)
 	}
 	return nil
 }
