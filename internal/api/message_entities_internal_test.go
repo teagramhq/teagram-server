@@ -135,3 +135,55 @@ func TestAddDetectedMessageURLsSeparatesUnicodeWhitespace(t *testing.T) {
 		})
 	}
 }
+
+func TestAddDetectedMessageURLsStopsAtEntityLimit(t *testing.T) {
+	const url = "https://example.com"
+	text := strings.TrimSpace(strings.Repeat(url+" ", store.MaxPollDescriptionEntities+1))
+	entities, err := addDetectedMessageURLs(text, nil)
+	if err != nil {
+		t.Fatalf("addDetectedMessageURLs: %v", err)
+	}
+	if len(entities) != store.MaxPollDescriptionEntities {
+		t.Fatalf("detected %d URLs, want the %d entity cap", len(entities), store.MaxPollDescriptionEntities)
+	}
+
+	text = strings.Repeat("x ", store.MaxPollDescriptionEntities) + url
+	clientEntities := make([]tg.MessageEntityClass, 0, store.MaxPollDescriptionEntities)
+	for i := range store.MaxPollDescriptionEntities {
+		clientEntities = append(clientEntities, &tg.MessageEntityBold{Offset: i * 2, Length: 1})
+	}
+	entities, err = testHandlers(nil).encodeMessageEntitiesWithURLs(100, text, clientEntities)
+	if err != nil {
+		t.Fatalf("encode 100 client entities with a URL: %v", err)
+	}
+	if len(entities) != store.MaxPollDescriptionEntities {
+		t.Fatalf("got %d entities, want the %d client entities unchanged", len(entities), store.MaxPollDescriptionEntities)
+	}
+}
+
+func TestMessageEntitiesSupportTextPastPollLengthLimit(t *testing.T) {
+	const url = "https://example.com"
+	text := strings.Repeat("x", 4097) + " " + url
+	clientEntityOffset := 4096
+	entities, err := testHandlers(nil).encodeMessageEntitiesWithURLs(101, text, []tg.MessageEntityClass{
+		&tg.MessageEntityBold{Offset: clientEntityOffset, Length: 1},
+	})
+	if err != nil {
+		t.Fatalf("encode entities for long message: %v", err)
+	}
+	encoded, err := store.EncodeMessageEntities(entities)
+	if err != nil {
+		t.Fatalf("store message entities for long message: %v", err)
+	}
+	decoded := store.DecodeMessageEntities([]byte(encoded))
+	if len(decoded) != 2 {
+		t.Fatalf("decoded %d entities, want bold and URL: %#v", len(decoded), decoded)
+	}
+	if decoded[0].Type != store.PollDescriptionEntityBold || decoded[0].Offset != clientEntityOffset {
+		t.Errorf("decoded client entity = %#v, want bold at %d", decoded[0], clientEntityOffset)
+	}
+	const wantURLOffset = 4098
+	if decoded[1].Type != store.PollDescriptionEntityURL || decoded[1].Offset != wantURLOffset {
+		t.Errorf("decoded URL entity = %#v, want URL at %d", decoded[1], wantURLOffset)
+	}
+}

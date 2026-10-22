@@ -192,19 +192,23 @@ func TestSendMessageWithoutURLsAddsNoEntities(t *testing.T) {
 	if err != nil {
 		t.Fatalf("user b: %v", err)
 	}
-	result, err := api.SendMessageForTest(s, a.ID, &tg.MessagesSendMessageRequest{
-		Peer: api.InputPeerUser(a.ID, b.ID), Message: "plain text 😀", RandomID: 423002,
-	})
-	if err != nil {
-		t.Fatalf("send: %v", err)
-	}
-	updates, ok := result.(*tg.Updates)
-	if !ok {
-		t.Fatalf("send result = %T, want *tg.Updates", result)
-	}
-	message := firstNewMessage(t, updates.Updates)
-	if entities, present := message.GetEntities(); present && len(entities) != 0 {
-		t.Fatalf("plain message entities = %#v, want none", entities)
+	for i, text := range []string{"plain text 😀", "file.txt", "node.js", "config.yaml"} {
+		t.Run(text, func(t *testing.T) {
+			result, err := api.SendMessageForTest(s, a.ID, &tg.MessagesSendMessageRequest{
+				Peer: api.InputPeerUser(a.ID, b.ID), Message: text, RandomID: int64(423002 + i),
+			})
+			if err != nil {
+				t.Fatalf("send: %v", err)
+			}
+			updates, ok := result.(*tg.Updates)
+			if !ok {
+				t.Fatalf("send result = %T, want *tg.Updates", result)
+			}
+			message := firstNewMessage(t, updates.Updates)
+			if entities, present := message.GetEntities(); present && len(entities) != 0 {
+				t.Fatalf("message %q entities = %#v, want none", text, entities)
+			}
+		})
 	}
 }
 
