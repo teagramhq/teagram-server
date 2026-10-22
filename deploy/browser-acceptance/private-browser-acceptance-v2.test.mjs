@@ -952,6 +952,40 @@ test("empty chats state is accepted as a rendered chat list after sign-in", asyn
   assert.deepEqual(browser.apiMethods.filter((method) => method === "auth.logOut"), ["auth.logOut"]);
 });
 
+test("socket-close events during context teardown do not invalidate the logout WSS proof", async (t) => {
+  const fixture = createDependencies(undefined, true);
+  const browser = createAcceptancePage({completeSignIn: true});
+  await useRealAcceptanceFlow(fixture, browser);
+  let wssFixture;
+  fixture.dependencies.proveWss = async (contextInfo, _release, _manifest, progress, tracker) => {
+    wssFixture = await proveSharedWorkerWss(t, {
+      workerSockets: workerSockets(4),
+      contextInfo,
+      progress,
+      tracker,
+    });
+    return wssFixture.result;
+  };
+  fixture.dependencies.closeContext = async () => {
+    fixture.events.push("close-context");
+    for (let index = 0; index < 4; index += 1) {
+      wssFixture.browserSession.workerMessage("observer-worker", {
+        method: "Network.webSocketClosed",
+        params: {requestId: `worker-socket-${index}`, timestamp: index + 1},
+      });
+    }
+  };
+
+  const result = await executeMode({mode: "acceptance", releaseRecord: "fixture"}, fixture.dependencies);
+  const output = JSON.parse(result.output);
+
+  assert.equal(result.exitCode, 0, result.output);
+  assert.equal(output.ok, true);
+  assert.equal(output.logout, "ok");
+  assert.equal(output.wssConnections, 4);
+  assert.deepEqual(browser.apiMethods, ["auth.sendCode", "auth.signIn", "auth.checkPassword", "auth.logOut"]);
+});
+
 test("chat-list check ignores hidden list variants and scopes its row count", async () => {
   const fixture = createDependencies(undefined, true);
   const browser = createAcceptancePage({
@@ -1067,7 +1101,17 @@ function fakeCdpSession({attachFails = false, replies = true, detach = "release"
   return session;
 }
 
-async function proveSharedWorkerWss(t, {socketUrl, pageSocket = false, childSocketUrl, delayedChild = false, workerSockets = [], ...sessionOptions}) {
+async function proveSharedWorkerWss(t, {
+  socketUrl,
+  pageSocket = false,
+  childSocketUrl,
+  delayedChild = false,
+  workerSockets = [],
+  contextInfo: suppliedContextInfo,
+  progress: suppliedProgress,
+  tracker: suppliedTracker,
+  ...sessionOptions
+}) {
   t.mock.timers.enable({apis: ["Date"]});
   const endpoint = `wss://${targetHost}/apiws`;
   const log = [];
@@ -1138,18 +1182,21 @@ async function proveSharedWorkerWss(t, {socketUrl, pageSocket = false, childSock
       await new Promise((resolve) => setImmediate(resolve));
     },
   };
-  const contextInfo = {
-    page,
-    context: {
-      async newCDPSession() { return pageSession; },
-      browser() { return {async newBrowserCDPSession() { return browserSessions.shift(); }}; },
-    },
+  const contextInfo = suppliedContextInfo ?? {page, context: {}};
+  if (suppliedContextInfo) Object.assign(contextInfo.page, page);
+  Object.assign(contextInfo.context, {
+    async newCDPSession() { return pageSession; },
+    browser() { return {async newBrowserCDPSession() { return browserSessions.shift(); }}; },
+  });
+  const tracker = suppliedTracker ?? {
+    telegramOrgAttemptCount: 0,
+    telegramOrgWebSocketAttemptCount: 0,
+    websocketMismatch: false,
   };
-  const tracker = {telegramOrgAttemptCount: 0, telegramOrgWebSocketAttemptCount: 0, websocketMismatch: false};
-  const progress = createAcceptanceProgress({sourceCommit});
+  const progress = suppliedProgress ?? createAcceptanceProgress({sourceCommit});
   try {
     const result = await proveWss(contextInfo, {url: `https://${targetHost}/private/`}, {endpoint}, progress, tracker);
-    return {result, log, progress, browserSession, wssAudit: contextInfo.wssAudit};
+    return {result, log, progress, browserSession, wssAudit: contextInfo.wssAudit, contextInfo};
   } catch (error) {
     return {code: error.code, wssDiagnostic: error.wssDiagnostic, browserSession, relatedSession};
   }

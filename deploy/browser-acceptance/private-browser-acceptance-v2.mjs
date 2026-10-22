@@ -916,6 +916,7 @@ async function observeWorkerWebSockets(browser, pageSession, handlers) {
 async function makeWssAudit(contextInfo, progress) {
   const connections = new Map();
   let accountSlotCount = null;
+  let activeConnectionsAtContextTeardown = null;
   let malformed = false;
   let handshakeCount = 0;
   let pendingWorkers = 0;
@@ -926,6 +927,10 @@ async function makeWssAudit(contextInfo, progress) {
       if (!isRecord(params) || typeof params.requestId !== "string" ||
           !/^[0-9A-Za-z._-]{1,64}$/u.test(params.requestId) || typeof params.url !== "string" ||
           connections.has(params.requestId)) {
+        malformed = true;
+        return;
+      }
+      if (activeConnectionsAtContextTeardown !== null) {
         malformed = true;
         return;
       }
@@ -1066,13 +1071,21 @@ async function makeWssAudit(contextInfo, progress) {
     },
     validateAfterLogout() {
       const entries = [...connections.values()];
-      const activeConnections = entries.filter((item) => !item.closed).length;
+      const activeConnections = activeConnectionsAtContextTeardown ??
+        entries.filter((item) => !item.closed).length;
       if (malformed || orphanHandshake || workerUnobservable || pendingWorkers !== 0 || entries.length < 1 || entries.length > WSS_CONNECTION_CEILING ||
           activeConnections < accountSlotCount || activeConnections > accountSlotCount + 1 ||
           handshakeCount > entries.length || entries.some((item) => !item.matches || item.responses > 1 ||
             (item.responses === 1 && item.status !== 101))) {
         fail("websocket-not-ready", undefined, diagnostic());
       }
+    },
+    beginContextTeardown() {
+      if (activeConnectionsAtContextTeardown !== null) {
+        malformed = true;
+        return;
+      }
+      activeConnectionsAtContextTeardown = [...connections.values()].filter((item) => !item.closed).length;
     },
   };
 }
@@ -1390,6 +1403,7 @@ async function logoutThroughApp(prepared, state) {
     return {kind: "closed"};
   }
   try {
+    prepared.contextInfo.wssAudit?.beginContextTeardown?.();
     await prepared.dependencies.closeContext(prepared.contextInfo);
     prepared.contextClosed = true;
     return {kind: "complete"};
