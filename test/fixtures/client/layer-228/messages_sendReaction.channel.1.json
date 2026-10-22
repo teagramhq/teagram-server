@@ -1,0 +1,28 @@
+{
+  "layer": 228,
+  "client": "gotd v0.162.0",
+  "source": "source-derived/messages_sendReaction.channel.1.txt",
+  "method": "messages.sendReaction",
+  "request": {
+    "type": "messages.sendReaction",
+    "flags": 1,
+    "fields": {
+      "peer": {
+        "type": "inputPeerChannel",
+        "fields": {
+          "channel_id": "<N>",
+          "access_hash": "<N>"
+        }
+      },
+      "msg_id": "<N>",
+      "reaction": [
+        {
+          "type": "reactionEmoji",
+          "fields": {
+            "emoticon": "❤"
+          }
+        }
+      ]
+    }
+  }
+}
