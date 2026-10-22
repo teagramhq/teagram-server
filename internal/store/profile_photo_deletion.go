@@ -83,31 +83,17 @@ func (s *Store) DeleteProfilePhotos(ctx context.Context, ownerID int64, fileIDs 
 	return live, nil
 }
 
-// HasProfilePhotoClearReceipt reports whether the request has a durable clear
-// receipt within the supported replay window. The handler uses this
-// before rate admission; ClearCurrentProfilePhoto repeats the lookup under the
-// profile-domain lock before resolving a target.
-func (s *Store) HasProfilePhotoClearReceipt(ctx context.Context, ownerID, authKeyID, sessionID, msgID int64) (bool, error) {
-	if authKeyID == 0 || msgID <= 0 {
-		return false, errors.New("profile photo clear: invalid transport request identity")
-	}
-	_, err := s.q.ProfilePhotoDeleteOperation(ctx, db.ProfilePhotoDeleteOperationParams{
-		UserID: ownerID, AuthKeyID: authKeyID, SessionID: sessionID, MsgID: msgID,
-	})
-	if err == nil {
-		return true, nil
-	}
-	if errors.Is(err, pgx.ErrNoRows) {
-		return false, nil
-	}
-	return false, fmt.Errorf("profile photo clear: read request receipt: %w", err)
-}
-
 // ClearCurrentProfilePhoto removes the current entry and records the resolved
 // target against the authenticated transport request in the same transaction.
-// Replaying the same tuple returns without resolving current again; a new msg_id
-// remains a fresh clear.
-func (s *Store) ClearCurrentProfilePhoto(ctx context.Context, ownerID, authKeyID, sessionID, msgID int64) error {
+// The owner lock serializes receipt detection with rate admission across
+// connections, and the charge commits with the clear. Replaying the same tuple
+// returns without resolving current again or spending another token; a new
+// msg_id remains a fresh clear.
+func (s *Store) ClearCurrentProfilePhoto(
+	ctx context.Context,
+	ownerID, authKeyID, sessionID, msgID int64,
+	rateLimit RateLimitConfig,
+) error {
 	if authKeyID == 0 || msgID <= 0 {
 		return errors.New("profile photo clear: invalid transport request identity")
 	}
@@ -203,6 +189,12 @@ func (s *Store) ClearCurrentProfilePhoto(ctx context.Context, ownerID, authKeyID
 		ClientFileID: clientFileID, ClearRevision: clearRevision,
 	}); err != nil {
 		return fmt.Errorf("profile photo clear: record request receipt: %w", err)
+	}
+	// Charge after acquiring the profile and receipt locks so this transaction
+	// never holds the limiter row while acquiring another lock class. A denial
+	// rolls back the prepared clear and its receipt with the token charge.
+	if err := s.consumeRateLimitTx(ctx, qtx, ownerID, "update_profile", rateLimit, 1); err != nil {
+		return fmt.Errorf("profile photo clear: charge rate limit: %w", err)
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return fmt.Errorf("profile photo clear: commit: %w", err)

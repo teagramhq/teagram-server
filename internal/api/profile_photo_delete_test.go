@@ -337,6 +337,119 @@ func TestUpdateProfilePhotoEmptyReplayDoesNotSpendRateLimit(t *testing.T) {
 	}
 }
 
+func waitForProfilePhotoActivity(
+	t *testing.T,
+	f *galleryFixture,
+	deadline time.Time,
+	queryFragment, state, waitEvent string,
+) {
+	t.Helper()
+	for time.Now().Before(deadline) {
+		var count int64
+		err := f.observer().QueryRow(context.Background(), `
+			SELECT count(*)
+			FROM pg_stat_activity
+			WHERE datname = current_database()
+			  AND pid <> pg_backend_pid()
+			  AND query LIKE '%' || $1 || '%'
+			  AND ($2 = '' OR state = $2)
+			  AND ($3 = '' OR wait_event_type = $3)
+		`, queryFragment, state, waitEvent).Scan(&count)
+		if err != nil {
+			t.Fatalf("read pg_stat_activity for %q: %v", queryFragment, err)
+		}
+		if count > 0 {
+			return
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+	t.Fatalf("timed out waiting for pg_stat_activity query %q (state %q, wait event %q)",
+		queryFragment, state, waitEvent)
+}
+
+func TestUpdateProfilePhotoEmptyConcurrentReplayDoesNotSpendRateLimit(t *testing.T) {
+	t.Parallel()
+	f := newGalleryFixture(t, "+1555144700131", "+1555144700132")
+	addCompleteProfilePhotoReceipt(t, f, f.owner, f.photoID)
+	f.selectCurrentPhoto(t, f.owner, f.photoID)
+	before := f.selectionSnapshot(f.owner)
+	h := profilePhotoDispatcherWithUpdateLimit(f.s, store.RateLimitConfig{Limit: 2, Window: time.Hour})
+	key := testKey()
+	const sessionID = int64(123)
+	const clearMsgID = int64(1 << 32)
+	clearRequest := &tg.PhotosUpdateProfilePhotoRequest{ID: &tg.InputPhotoEmpty{}}
+
+	blocker, err := f.writer().Begin(context.Background())
+	if err != nil {
+		t.Fatalf("begin upload-receipt lock: %v", err)
+	}
+	var lockedClientFileID int64
+	if err := blocker.QueryRow(context.Background(), `
+		SELECT client_file_id FROM profile_upload_receipt
+		WHERE user_id = $1 AND client_file_id = $2
+		FOR UPDATE
+	`, f.owner, f.photoID).Scan(&lockedClientFileID); err != nil {
+		t.Fatalf("lock current upload receipt: %v", err)
+	}
+	if lockedClientFileID != f.photoID {
+		t.Fatalf("locked client file id = %d, want %d", lockedClientFileID, f.photoID)
+	}
+	blockerOpen := true
+	defer func() {
+		if blockerOpen {
+			if err := blocker.Rollback(context.Background()); err != nil {
+				t.Errorf("release upload-receipt lock: %v", err)
+			}
+		}
+	}()
+
+	deadline := time.Now().Add(store.ProfilePhotoSelectionWait - 25*time.Millisecond)
+	firstDone := make(chan []byte, 1)
+	go func() {
+		firstDone <- dispatchProfilePhotoMutation(t, h, f.owner, key, sessionID, clearMsgID, clearRequest)
+	}()
+	waitForProfilePhotoActivity(t, f, deadline, "LockProfileUploadReceiptsForDeletion", "active", "Lock")
+
+	replayDone := make(chan []byte, 1)
+	go func() {
+		replayDone <- dispatchProfilePhotoMutation(t, h, f.owner, key, sessionID, clearMsgID, clearRequest)
+	}()
+	// Both implementations reach the per-owner lock while the first clear is
+	// paused. The replay must wait there before rate admission as well as before
+	// mutating the gallery.
+	waitForProfilePhotoActivity(t, f, deadline, "pg_try_advisory_xact_lock", "idle in transaction", "")
+	if err := blocker.Commit(context.Background()); err != nil {
+		t.Fatalf("release upload-receipt lock: %v", err)
+	}
+	blockerOpen = false
+
+	awaitReply := func(name string, done <-chan []byte) []byte {
+		t.Helper()
+		select {
+		case body := <-done:
+			return body
+		case <-time.After(2 * time.Second):
+			t.Fatalf("timed out waiting for %s clear reply", name)
+			return nil
+		}
+	}
+	assertPhotoEmptyResponse(t, awaitReply("first", firstDone))
+	assertPhotoEmptyResponse(t, awaitReply("replay", replayDone))
+
+	var tokenCount int32
+	if err := f.writer().QueryRow(context.Background(), `
+		SELECT token_count FROM rate_limits WHERE subject_id = $1 AND surface = 'update_profile'
+	`, f.owner).Scan(&tokenCount); err != nil {
+		t.Fatalf("read clear rate-limit count: %v", err)
+	}
+	if tokenCount != 1 {
+		t.Fatalf("concurrent same-tuple clears consumed %d tokens, want one", tokenCount)
+	}
+	if after := f.selectionSnapshot(f.owner); after.galleryRows != before.galleryRows-1 || after.current != 0 || after.revision != before.revision+1 {
+		t.Fatalf("profile after concurrent clear replay = %+v, want one removed entry, no current, revision +1 from %+v", after, before)
+	}
+}
+
 func TestUpdateProfilePhotoEmptyRejectsFallbackAndBotBeforeRateOrLock(t *testing.T) {
 	t.Parallel()
 	f := newGalleryFixture(t, "+1555144700151", "+1555144700152")

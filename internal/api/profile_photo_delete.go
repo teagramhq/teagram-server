@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"errors"
+	"time"
 
 	"github.com/gotd/td/bin"
 	"github.com/gotd/td/tg"
@@ -63,29 +64,28 @@ func (h *handlers) handleDeleteProfilePhotos(r *mtproto.Request) (bin.Encoder, e
 }
 
 // handleClearProfilePhoto removes exactly the current entry. The store binds
-// this clear to the authenticated transport request so a retry cannot resolve
-// and remove a later selection.
+// this clear to the authenticated transport request and serializes its receipt
+// check with rate admission, so a retry cannot remove a later selection or
+// spend another token while the first clear is still committing.
 func (h *handlers) handleClearProfilePhoto(r *mtproto.Request) (bin.Encoder, error) {
 	mutationCtx, cancel := context.WithTimeout(r.Ctx, store.ProfilePhotoSelectionWait)
 	defer cancel()
 	authKeyID := mtproto.AuthKeyIDInt64(r.AuthKeyID)
-	hasReceipt, err := h.store.HasProfilePhotoClearReceipt(mutationCtx, r.UserID, authKeyID, r.SessionID, r.MsgID)
-	if err != nil {
-		if r.Ctx.Err() == nil && errors.Is(mutationCtx.Err(), context.DeadlineExceeded) {
-			return nil, FloodWaitError(1)
-		}
-		h.log.Error("clear profile photo: read request receipt", "user_id", r.UserID, "err", err)
-		return nil, errInternal
-	}
-	if !hasReceipt {
-		if err := h.checkRateLimitCostWithDeadline(r, mutationCtx, "update_profile", h.rateLimitUpdateProfile, 1); err != nil {
-			return nil, err
-		}
-	}
-	if err := h.store.ClearCurrentProfilePhoto(mutationCtx, r.UserID, authKeyID, r.SessionID, r.MsgID); err != nil {
+	if err := h.store.ClearCurrentProfilePhoto(
+		mutationCtx, r.UserID, authKeyID, r.SessionID, r.MsgID, h.rateLimitUpdateProfile,
+	); err != nil {
 		if errors.Is(err, store.ErrProfilePhotoBusy) ||
 			(r.Ctx.Err() == nil && errors.Is(mutationCtx.Err(), context.DeadlineExceeded)) {
 			return nil, FloodWaitError(1)
+		}
+		if rateLimited, ok := errors.AsType[*store.RateLimitedError](err); ok {
+			h.recordRateLimitDenial(rateLimited.Surface)
+			return nil, FloodWaitError(int(rateLimited.Wait / time.Second))
+		}
+		if errors.Is(err, store.ErrRateLimitStorage) {
+			h.log.Error("clear profile photo: rate limit charge", "user_id", r.UserID,
+				"surface", "update_profile", "err", err)
+			return nil, errInternal
 		}
 		h.log.Error("clear profile photo", "user_id", r.UserID, "err", err)
 		return nil, errInternal
