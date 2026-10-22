@@ -14,9 +14,9 @@ access to trusted operators, and keep encrypted backups off the host.
   and enough disk space for the database, uploaded media, and backups.
 - [Docker Engine](https://docs.docker.com/engine/install/), Go 1.27.1 or
   newer from the [Go install guide](https://go.dev/doc/install), GNU make,
-  Atlas (see the [migration guide](migrations.md)), Git, OpenSSL, and Caddy 2
-  from the [Caddy install guide](https://caddyserver.com/docs/install), plus
-  HAProxy 2.8 or newer from your Linux distribution.
+  Atlas (see the [migration guide](migrations.md)), Git, OpenSSL, and Caddy 2.8
+  or newer from the [Caddy install guide](https://caddyserver.com/docs/install),
+  plus HAProxy 2.8 or newer from your Linux distribution.
 - Inbound TCP ports 80 and 443 for ACME certificate issuance and HTTPS/WSS.
   Port 2443 is also needed for clients using the direct MTProto TCP transport.
 - A Teagram client configured to use this server. Teagram Web discovers a
