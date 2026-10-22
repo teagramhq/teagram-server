@@ -45,9 +45,23 @@ func sentChannelMessageID(t *testing.T, enc bin.Encoder) int {
 
 func sendChannelReply(t *testing.T, s *store.Store, userID, channelID int64, replyTo int, text string, randomID int64) int {
 	t.Helper()
+	return sendChannelReplyWithEntities(t, s, userID, channelID, replyTo, text, randomID, nil)
+}
+
+func sendChannelReplyWithEntities(
+	t *testing.T,
+	s *store.Store,
+	userID, channelID int64,
+	replyTo int,
+	text string,
+	randomID int64,
+	entities []tg.MessageEntityClass,
+) int {
+	t.Helper()
 	result, err := api.SendMessageForTest(s, userID, &tg.MessagesSendMessageRequest{
 		Peer:     channelPeer(userID, channelID),
 		Message:  text,
+		Entities: entities,
 		RandomID: randomID,
 		ReplyTo:  &tg.InputReplyToMessage{ReplyToMsgID: replyTo},
 	})
@@ -98,7 +112,9 @@ func TestMessagesGetRepliesReturnsOnlyDirectLiveReplies(t *testing.T) {
 	root := sentChannelMessageID(t, mustSendChannelMessage(t, s, creator.ID, channel.ID, "root body", 98001))
 	first := sendChannelReply(t, s, replier.ID, channel.ID, root, "first direct reply", 98002)
 	_ = sendChannelReply(t, s, nestedAuthor.ID, channel.ID, first, "nested reply", 98003)
-	last := sendChannelReply(t, s, replier.ID, channel.ID, root, "last direct reply", 98004)
+	last := sendChannelReplyWithEntities(t, s, replier.ID, channel.ID, root, "last https://t.me/+direct", 98004, []tg.MessageEntityClass{
+		&tg.MessageEntityBold{Offset: 0, Length: 4},
+	})
 	deleted := sendChannelReply(t, s, creator.ID, channel.ID, root, "deleted direct reply", 98005)
 	if _, _, err := s.DeleteChannelMessages(ctx, channel.ID, creator.ID, []int64{int64(deleted)}); err != nil {
 		t.Fatalf("delete direct reply: %v", err)
@@ -125,6 +141,22 @@ func TestMessagesGetRepliesReturnsOnlyDirectLiveReplies(t *testing.T) {
 	}
 	if ttlPeriod, ok := post.GetTTLPeriod(); !ok || ttlPeriod != 86400 {
 		t.Fatalf("reply TTL period = %d, present=%t; want 86400", ttlPeriod, ok)
+	}
+	entities, present := post.GetEntities()
+	if !present || len(entities) != 2 {
+		t.Fatalf("reply entities = %#v present=%t, want client bold and detected URL", entities, present)
+	}
+	gotBold, gotURL := false, false
+	for _, entity := range entities {
+		switch entity := entity.(type) {
+		case *tg.MessageEntityBold:
+			gotBold = entity.Offset == 0 && entity.Length == 4
+		case *tg.MessageEntityURL:
+			gotURL = entity.Offset == 5 && entity.Length == len("https://t.me/+direct")
+		}
+	}
+	if !gotBold || !gotURL {
+		t.Fatalf("reply entities = %#v, want bold (0,4) and URL (5,%d)", entities, len("https://t.me/+direct"))
 	}
 	if len(result.Users) != 1 {
 		t.Fatalf("users = %d, want only the direct replier", len(result.Users))

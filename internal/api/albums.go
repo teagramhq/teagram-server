@@ -53,7 +53,7 @@ func (h *handlers) handleSendMultiMediaAfterReplyOnConn(c *mtproto.Conn, r *mtpr
 	if err != nil {
 		return nil, nil, nil, err
 	}
-	items, err := albumItems(req.MultiMedia)
+	items, err := albumItems(h, r.UserID, req.MultiMedia)
 	if err != nil {
 		return nil, nil, nil, err
 	}
@@ -203,12 +203,16 @@ func (h *handlers) handleSendMultiMediaAfterReplyOnConn(c *mtproto.Conn, r *mtpr
 // uploadMedia first, and spoilers, timers, covers and live photos are not
 // served. Every item needs its own non-zero random_id, and no file may appear
 // twice.
-func albumItems(multi []tg.InputSingleMedia) ([]store.AlbumItem, error) {
+func albumItems(h *handlers, viewerID int64, multi []tg.InputSingleMedia) ([]store.AlbumItem, error) {
 	items := make([]store.AlbumItem, 0, len(multi))
 	seenFiles := make(map[int64]bool, len(multi))
 	seenRandom := make(map[int64]bool, len(multi))
 	for _, single := range multi {
-		item := store.AlbumItem{RandomID: single.RandomID, Text: single.Message}
+		entities, err := h.encodeMessageEntitiesWithURLs(viewerID, single.Message, single.Entities)
+		if err != nil {
+			return nil, err
+		}
+		item := store.AlbumItem{RandomID: single.RandomID, Text: single.Message, Entities: entities}
 		switch media := single.Media.(type) {
 		case *tg.InputMediaPhoto:
 			photo, ok := media.ID.(*tg.InputPhoto)

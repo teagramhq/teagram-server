@@ -69,7 +69,7 @@ func (q *Queries) BumpStateBy(ctx context.Context, arg BumpStateByParams) (BumpS
 
 const channelMessagesByRandomIDs = `-- name: ChannelMessagesByRandomIDs :many
 SELECT channel_id, local_id, from_id, date, message, edit_date, deleted,
-       random_id, grouped_id, file_id, reply_to_msg_id, action_type, ttl_period, post_author
+       random_id, grouped_id, file_id, reply_to_msg_id, action_type, ttl_period, post_author, entities
 FROM channel_messages
 WHERE channel_id = $1::bigint
   AND random_id = ANY($2::bigint[])
@@ -98,6 +98,7 @@ type ChannelMessagesByRandomIDsRow struct {
 	ActionType   int16
 	TtlPeriod    int32
 	PostAuthor   *string
+	Entities     []byte
 }
 
 // ChannelMessagesByRandomIDs returns the posts carrying any of the presented
@@ -126,6 +127,7 @@ func (q *Queries) ChannelMessagesByRandomIDs(ctx context.Context, arg ChannelMes
 			&i.ActionType,
 			&i.TtlPeriod,
 			&i.PostAuthor,
+			&i.Entities,
 		); err != nil {
 			return nil, err
 		}
@@ -328,7 +330,7 @@ func (q *Queries) ExpiredMessageRandomIDs(ctx context.Context, arg ExpiredMessag
 
 const insertAlbumMessages = `-- name: InsertAlbumMessages :exec
 INSERT INTO messages (owner_id, local_id, peer_type, peer_id, from_id, message, out, random_id, peer_local_id,
-                      fanout_id, file_id, grouped_id)
+                      fanout_id, file_id, grouped_id, entities)
 SELECT unnest($1::bigint[]),
        unnest($2::bigint[]),
        $3::smallint,
@@ -340,7 +342,8 @@ SELECT unnest($1::bigint[]),
        unnest($9::bigint[]),
        unnest($10::bigint[]),
        unnest($11::bigint[]),
-       $12::bigint
+       $12::bigint,
+       NULLIF(unnest($13::text[]), '')::jsonb
 `
 
 type InsertAlbumMessagesParams struct {
@@ -356,6 +359,7 @@ type InsertAlbumMessagesParams struct {
 	FanoutIds    []int64
 	FileIds      []int64
 	GroupedID    int64
+	Entities     []string
 }
 
 // InsertAlbumMessages writes every owner copy of every album item in one
@@ -374,13 +378,14 @@ func (q *Queries) InsertAlbumMessages(ctx context.Context, arg InsertAlbumMessag
 		arg.FanoutIds,
 		arg.FileIds,
 		arg.GroupedID,
+		arg.Entities,
 	)
 	return err
 }
 
 const insertChannelAlbumMessages = `-- name: InsertChannelAlbumMessages :exec
 INSERT INTO channel_messages (
-    channel_id, local_id, from_id, message, random_id, file_id, reply_to_msg_id, grouped_id, post_author
+    channel_id, local_id, from_id, message, random_id, file_id, reply_to_msg_id, grouped_id, post_author, entities
 )
 SELECT $1::bigint,
        unnest($2::bigint[]),
@@ -390,7 +395,8 @@ SELECT $1::bigint,
        unnest($6::bigint[]),
        $7::int,
        $8::bigint,
-       $9::text
+       $9::text,
+       NULLIF(unnest($10::text[]), '')::jsonb
 `
 
 type InsertChannelAlbumMessagesParams struct {
@@ -403,6 +409,7 @@ type InsertChannelAlbumMessagesParams struct {
 	ReplyToMsgID *int32
 	GroupedID    int64
 	PostAuthor   *string
+	Entities     []string
 }
 
 // InsertChannelAlbumMessages writes every post of one channel album.
@@ -417,6 +424,7 @@ func (q *Queries) InsertChannelAlbumMessages(ctx context.Context, arg InsertChan
 		arg.ReplyToMsgID,
 		arg.GroupedID,
 		arg.PostAuthor,
+		arg.Entities,
 	)
 	return err
 }
@@ -513,7 +521,7 @@ func (q *Queries) LockUploadGrants(ctx context.Context, arg LockUploadGrantsPara
 }
 
 const messagesByRandomIDs = `-- name: MessagesByRandomIDs :many
-SELECT owner_id, local_id, peer_id, from_id, date, message, out, edit_date, deleted, random_id, peer_local_id, peer_type, fanout_id, action_type, action_user_id, file_id, reply_to_msg_id, fwd_from_id, fwd_date, fwd_channel_id, fwd_channel_post, message_tsv, reply_to_trusted, grouped_id, fwd_post_author, ttl_period, expires_at FROM messages
+SELECT owner_id, local_id, peer_id, from_id, date, message, out, edit_date, deleted, random_id, peer_local_id, peer_type, fanout_id, action_type, action_user_id, file_id, reply_to_msg_id, fwd_from_id, fwd_date, fwd_channel_id, fwd_channel_post, message_tsv, reply_to_trusted, grouped_id, fwd_post_author, ttl_period, expires_at, entities FROM messages
 WHERE owner_id = $1::bigint
   AND random_id = ANY($2::bigint[])
   AND random_id <> 0
@@ -565,6 +573,7 @@ func (q *Queries) MessagesByRandomIDs(ctx context.Context, arg MessagesByRandomI
 			&i.FwdPostAuthor,
 			&i.TtlPeriod,
 			&i.ExpiresAt,
+			&i.Entities,
 		); err != nil {
 			return nil, err
 		}

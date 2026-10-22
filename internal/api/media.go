@@ -303,12 +303,19 @@ func (h *handlers) handleSendMediaAfterReplyOnConn(c *mtproto.Conn, r *mtproto.R
 		return nil, nil, nil, errMessageEmpty
 	}
 	var descriptionEntities []store.PollDescriptionEntity
+	var messageEntities []store.PollDescriptionEntity
 	if isPoll {
 		if !validText(req.Message) {
 			return nil, nil, nil, errMessageEmpty
 		}
 		var entityErr error
 		descriptionEntities, entityErr = h.encodeMessageEntities(r.UserID, req.Message, req.Entities)
+		if entityErr != nil {
+			return nil, nil, nil, entityErr
+		}
+	} else {
+		var entityErr error
+		messageEntities, entityErr = h.encodeMessageEntitiesWithURLs(r.UserID, req.Message, req.Entities)
 		if entityErr != nil {
 			return nil, nil, nil, entityErr
 		}
@@ -606,14 +613,14 @@ func (h *handlers) handleSendMediaAfterReplyOnConn(c *mtproto.Conn, r *mtproto.R
 	}
 
 	if peerType == store.PeerTypeChat {
-		return h.sendChatMedia(c, r, toID, &req, fileID, mediaRights)
+		return h.sendChatMedia(c, r, toID, &req, fileID, mediaRights, messageEntities)
 	}
 	if peerType == store.PeerTypeChannel {
-		return h.sendChannelPhoto(r, toID, &req, fileID, replyToMsgID)
+		return h.sendChannelPhoto(r, toID, &req, fileID, replyToMsgID, messageEntities)
 	}
 
 	attempt := beginSenderRPC(c, r)
-	sender, senderPts, recipientPts, _, err := h.store.SendMessage(r.Ctx, r.UserID, toID, req.Message, req.RandomID, fileID, 0)
+	sender, senderPts, recipientPts, _, err := h.store.SendMessageWithEntities(r.Ctx, r.UserID, toID, req.Message, req.RandomID, fileID, 0, messageEntities)
 	if errors.Is(err, store.ErrRandomIDExpired) {
 		h.clearSenderAfterStoreFailure(attempt, r, err)
 		return nil, nil, nil, errRandomIDDuplicate
@@ -687,12 +694,13 @@ func (h *handlers) handleSendMediaAfterReplyOnConn(c *mtproto.Conn, r *mtproto.R
 // and a hook that publishes the fan-out only after the RPC result is written.
 func (h *handlers) sendChatMedia(
 	c *mtproto.Conn, r *mtproto.Request, chatID int64, req *tg.MessagesSendMediaRequest, fileID int64, mediaRights []string,
+	entities []store.PollDescriptionEntity,
 ) (bin.Encoder, *replyUpdate, func(), error) {
 	// Rate limit already checked in handleSendMedia before the peer split.
 	attempt := beginSenderRPC(c, r)
 	sender, perOwner, _, err := h.store.SendChatMessage(r.Ctx, store.FanOut{
 		ChatID: chatID, FromID: r.UserID, Text: req.Message, RandomID: req.RandomID, FileID: fileID,
-		MediaRights: mediaRights,
+		MediaRights: mediaRights, Entities: entities,
 	})
 	// Every exit below releases a barrier that held this connection's generic
 	// delivery back for the whole send, so an unrelated update that landed during
@@ -789,8 +797,9 @@ func (h *handlers) sendChatMedia(
 // accepted erasure policy, exactly as a refused basic-group send leaves it.
 func (h *handlers) sendChannelPhoto(
 	r *mtproto.Request, channelID int64, req *tg.MessagesSendMediaRequest, fileID, replyToMsgID int64,
+	entities []store.PollDescriptionEntity,
 ) (bin.Encoder, *replyUpdate, func(), error) {
-	message, pts, duplicate, err := h.store.PostChannelPhotoAs(r.Ctx, channelID, r.UserID, req.RandomID, req.Message, fileID, replyToMsgID)
+	message, pts, duplicate, err := h.store.PostChannelPhotoAsWithEntities(r.Ctx, channelID, r.UserID, req.RandomID, req.Message, fileID, replyToMsgID, entities)
 	if slowModeWait, ok := errors.AsType[*store.SlowModeWaitError](err); ok {
 		return nil, nil, nil, rpcErr(420, slowModeWait.Error())
 	}
