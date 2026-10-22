@@ -417,7 +417,8 @@ func TestUpdateProfilePhotoEmptyConcurrentReplayDoesNotSpendRateLimit(t *testing
 	// Both implementations reach the per-owner lock while the first clear is
 	// paused. The replay must wait there before rate admission as well as before
 	// mutating the gallery.
-	waitForProfilePhotoActivity(t, f, deadline, "pg_try_advisory_xact_lock", "idle in transaction", "")
+	// The lock query alternates between active and idle-in-transaction while it retries.
+	waitForProfilePhotoActivity(t, f, deadline, "pg_try_advisory_xact_lock", "", "")
 	if err := blocker.Commit(context.Background()); err != nil {
 		t.Fatalf("release upload-receipt lock: %v", err)
 	}
