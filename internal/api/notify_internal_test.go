@@ -1473,6 +1473,9 @@ func chanPtsOf(t *testing.T, up *tg.Updates) []int {
 	t.Helper()
 	out := make([]int, 0, len(up.Updates))
 	for _, u := range up.Updates {
+		if _, ok := u.(*tg.UpdateMessageID); ok {
+			continue
+		}
 		nm, ok := u.(*tg.UpdateNewChannelMessage)
 		if !ok {
 			t.Fatalf("update type = %T, want *tg.UpdateNewChannelMessage", u)
@@ -1891,6 +1894,108 @@ func TestDeliverChannelPostPushesViaRealStore(t *testing.T) {
 	}
 	if !gotChannel {
 		t.Fatal("push contained no UpdateNewChannelMessage")
+	}
+}
+
+func TestDeliverChannelPostMapsSenderRandomIDBeforeSendResult(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	dsn := pgtest.DSN(t)
+	b, err := blob.NewLocal(t.TempDir())
+	if err != nil {
+		t.Fatalf("blob store: %v", err)
+	}
+	s, err := store.Open(ctx, dsn, pgtest.EncKey(), store.WithBlobStore(b))
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := s.Close(); err != nil {
+			t.Errorf("store close: %v", err)
+		}
+	})
+
+	alice, err := s.CreateUser(ctx, "+15550000202")
+	if err != nil {
+		t.Fatalf("create sender: %v", err)
+	}
+	bob, err := s.CreateUser(ctx, "+15550000203")
+	if err != nil {
+		t.Fatalf("create recipient: %v", err)
+	}
+	ch, err := s.CreateChannel(ctx, alice.ID, "sender echo", "", false)
+	if err != nil {
+		t.Fatalf("create channel: %v", err)
+	}
+	if _, err = s.AddChannelMembers(ctx, ch.ID, alice.ID, []int64{bob.ID}); err != nil {
+		t.Fatalf("add recipient: %v", err)
+	}
+
+	const randomID = 990021
+	if _, _, duplicate, err := s.PostChannelMessageAs(ctx, ch.ID, alice.ID, "pending post", randomID, nil, 0); err != nil {
+		t.Fatalf("commit pending post: %v", err)
+	} else if duplicate {
+		t.Fatal("first post was reported as a duplicate")
+	}
+
+	aliceConnOne := &fakePushConn{}
+	aliceConnTwo := &fakePushConn{}
+	bobConn := &fakePushConn{}
+	connections := map[int64][]pushConn{
+		alice.ID: {aliceConnOne, aliceConnTwo},
+		bob.ID:   {bobConn},
+	}
+	h := &handlers{store: s, log: slog.New(slog.DiscardHandler), peers: pgtest.PeerDeriver()}
+	u := &Updater{h: h, log: slog.New(slog.DiscardHandler)}
+
+	// Deliver the committed event before the sendMessage RPC result, matching
+	// the ordering that exposed duplicate optimistic posts in the web client.
+	u.deliverChannelPost(ctx, ch.ID, func(userID int64) []pushConn {
+		return connections[userID]
+	})
+
+	assertPendingChannelPostEcho := func(name string, got *tg.Updates) {
+		t.Helper()
+		if len(got.Updates) != 2 {
+			t.Fatalf("%s update count = %d, want UpdateMessageID and UpdateNewChannelMessage", name, len(got.Updates))
+		}
+		mapping, ok := got.Updates[0].(*tg.UpdateMessageID)
+		if !ok || mapping.RandomID != randomID {
+			t.Fatalf("%s first update = %#v, want UpdateMessageID for random_id %d", name, got.Updates[0], randomID)
+		}
+		message, ok := got.Updates[1].(*tg.UpdateNewChannelMessage)
+		if !ok {
+			t.Fatalf("%s second update = %T, want UpdateNewChannelMessage", name, got.Updates[1])
+		}
+		post, ok := message.Message.(*tg.Message)
+		if !ok {
+			t.Fatalf("%s live post message = %T, want *tg.Message", name, message.Message)
+		}
+		if mapping.ID != post.ID {
+			t.Errorf("%s mapped message id = %d, live post id = %d", name, mapping.ID, post.ID)
+		}
+	}
+	for i, conn := range []*fakePushConn{aliceConnOne, aliceConnTwo} {
+		if len(conn.got) != 1 {
+			t.Fatalf("sender session %d push count = %d, want 1", i+1, len(conn.got))
+		}
+		assertPendingChannelPostEcho("sender session "+strconv.Itoa(i+1), conn.got[0])
+	}
+	if len(bobConn.got) != 1 {
+		t.Fatalf("recipient push count = %d, want 1", len(bobConn.got))
+	}
+	if len(bobConn.got[0].Updates) != 1 {
+		t.Fatalf("recipient update count = %d, want only UpdateNewChannelMessage", len(bobConn.got[0].Updates))
+	}
+	if _, ok := bobConn.got[0].Updates[0].(*tg.UpdateNewChannelMessage); !ok {
+		t.Fatalf("recipient update = %T, want UpdateNewChannelMessage", bobConn.got[0].Updates[0])
+	}
+
+	// This is the later RPC result for the same already-committed send.
+	if _, err := h.sendChannelMessage(&mtproto.Request{Ctx: ctx, UserID: alice.ID}, ch.ID, &tg.MessagesSendMessageRequest{
+		Message: "pending post", RandomID: randomID,
+	}, 0); err != nil {
+		t.Fatalf("sendMessage retry result after live push: %v", err)
 	}
 }
 
@@ -2344,11 +2449,14 @@ func TestAccountUpdatePushSkipsUnreadAggregate(t *testing.T) {
 	if len(decoded) != 2 || decoded[1].push == nil {
 		t.Fatalf("decoded channel push frames = %+v, want two pushes", decoded)
 	}
-	if len(decoded[1].push.Updates) != 1 {
-		t.Fatalf("channel push updates = %d, want one", len(decoded[1].push.Updates))
+	if len(decoded[1].push.Updates) != 2 {
+		t.Fatalf("channel push updates = %d, want sender mapping and post", len(decoded[1].push.Updates))
 	}
-	if _, ok := decoded[1].push.Updates[0].(*tg.UpdateNewChannelMessage); !ok {
-		t.Fatalf("channel push update type = %T, want *tg.UpdateNewChannelMessage", decoded[1].push.Updates[0])
+	if _, ok := decoded[1].push.Updates[0].(*tg.UpdateMessageID); !ok {
+		t.Fatalf("first channel push update type = %T, want *tg.UpdateMessageID", decoded[1].push.Updates[0])
+	}
+	if _, ok := decoded[1].push.Updates[1].(*tg.UpdateNewChannelMessage); !ok {
+		t.Fatalf("second channel push update type = %T, want *tg.UpdateNewChannelMessage", decoded[1].push.Updates[1])
 	}
 }
 

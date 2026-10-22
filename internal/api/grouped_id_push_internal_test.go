@@ -118,25 +118,33 @@ func pushedMessage(t *testing.T, conn *fakePushConn, updateName string) *tg.Mess
 	if len(conn.got) != 1 {
 		t.Fatalf("%s push batches = %d, want 1", updateName, len(conn.got))
 	}
-	if len(conn.got[0].Updates) != 1 {
-		t.Fatalf("%s updates = %d, want 1", updateName, len(conn.got[0].Updates))
-	}
 	var messageClass tg.MessageClass
-	switch updateName {
-	case "updateNewMessage":
-		update, ok := conn.got[0].Updates[0].(*tg.UpdateNewMessage)
-		if !ok {
-			t.Fatalf("push update = %T, want *tg.UpdateNewMessage", conn.got[0].Updates[0])
+	messageCount := 0
+	for _, pushed := range conn.got[0].Updates {
+		switch updateName {
+		case "updateNewMessage":
+			update, ok := pushed.(*tg.UpdateNewMessage)
+			if !ok {
+				t.Fatalf("push update = %T, want *tg.UpdateNewMessage", pushed)
+			}
+			messageClass = update.Message
+			messageCount++
+		case "updateNewChannelMessage":
+			if _, ok := pushed.(*tg.UpdateMessageID); ok {
+				continue
+			}
+			update, ok := pushed.(*tg.UpdateNewChannelMessage)
+			if !ok {
+				t.Fatalf("push update = %T, want *tg.UpdateNewChannelMessage", pushed)
+			}
+			messageClass = update.Message
+			messageCount++
+		default:
+			t.Fatalf("unexpected update name %q", updateName)
 		}
-		messageClass = update.Message
-	case "updateNewChannelMessage":
-		update, ok := conn.got[0].Updates[0].(*tg.UpdateNewChannelMessage)
-		if !ok {
-			t.Fatalf("push update = %T, want *tg.UpdateNewChannelMessage", conn.got[0].Updates[0])
-		}
-		messageClass = update.Message
-	default:
-		t.Fatalf("unexpected update name %q", updateName)
+	}
+	if messageCount != 1 {
+		t.Fatalf("%s updates = %d, want one message update", updateName, messageCount)
 	}
 	message, ok := messageClass.(*tg.Message)
 	if !ok {
