@@ -598,6 +598,18 @@ func testSmokeClientRequestFixtures(t *testing.T) {
 			t.Fatalf("replay login fixture %s: %v", fixtureName, err)
 		}
 	}
+	if err := fixtureClientCall(t, creator, "messages_getAllDrafts.1", func(ctx context.Context, api *tg.Client) error {
+		response, err := api.MessagesGetAllDrafts(ctx)
+		if err != nil {
+			return err
+		}
+		if _, ok := response.(*tg.Updates); !ok {
+			return fmt.Errorf("getAllDrafts response = %T, want *tg.Updates", response)
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("replay get-all-drafts fixture: %v", err)
+	}
 	const recoveryPassword, recoveryEmail = "fixture recovery password", "contact@example.invalid"
 	if err := fixtureClientCall(t, checker, "account_updatePasswordSettings.contact.1", func(ctx context.Context, api *tg.Client) error {
 		return setFirstPasswordWithEmail(ctx, api, recoveryPassword, recoveryEmail)

@@ -146,6 +146,10 @@ func TestSmoke(t *testing.T) {
 		t.Parallel()
 		testSmokeCloudDrafts(t)
 	})
+	t.Run("get-all-drafts", func(t *testing.T) {
+		t.Parallel()
+		testSmokeGetAllDrafts(t)
+	})
 	t.Run("manual-dialog-unread-mark", func(t *testing.T) {
 		t.Parallel()
 		testSmokeManualDialogUnreadMark(t)
@@ -1137,6 +1141,44 @@ func testSmokeCloudDrafts(t *testing.T) {
 		t.Fatalf("getDialogs with cloud draft: %v", err)
 	}
 	assertCloudDraftInDialogs(t, listed, b.ID, "smoke cloud draft", false, 0)
+}
+
+func testSmokeGetAllDrafts(t *testing.T) {
+	t.Helper()
+	f := newSmokeFixture(t)
+	const phoneA, phoneB = "+15551049131", "+15551049132"
+	seedSmokeUsers(t, f, phoneA, phoneB)
+	a := newSmokeClient(t, f, "get all drafts owner", phoneA)
+	peer := dialogPinUser(t, f, phoneB)
+	seedDialogPinDM(t, f, a.id, peer.ID, 1049131)
+
+	if err := saveCloudDraft(a, f.ctx, &tg.MessagesSaveDraftRequest{
+		Peer: peerUser(a.id, peer.ID), Message: "persisted draft for fresh session",
+	}); err != nil {
+		t.Fatalf("save cloud draft: %v", err)
+	}
+
+	b := newSmokeClient(t, f, "get all drafts fresh session", phoneA)
+	var got tg.UpdatesClass
+	if err := b.call(f.ctx, func(ctx context.Context, client *tg.Client) error {
+		var err error
+		got, err = client.MessagesGetAllDrafts(ctx)
+		return err
+	}); err != nil {
+		t.Fatalf("getAllDrafts in fresh session: %v", err)
+	}
+	updates, ok := got.(*tg.Updates)
+	if !ok {
+		t.Fatalf("getAllDrafts response = %T, want *tg.Updates", got)
+	}
+	if len(updates.Updates) != 1 {
+		t.Fatalf("getAllDrafts returned %d updates, want one persisted draft", len(updates.Updates))
+	}
+	update, ok := updates.Updates[0].(*tg.UpdateDraftMessage)
+	if !ok {
+		t.Fatalf("getAllDrafts update = %T, want *tg.UpdateDraftMessage", updates.Updates[0])
+	}
+	assertCloudDraftUpdate(t, update, peer.ID, "persisted draft for fresh session", false, 0)
 }
 
 func testSmokeDefaultDialogFilter(t *testing.T) {
