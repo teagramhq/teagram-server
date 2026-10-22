@@ -68,6 +68,26 @@ func TestEchoLifecycleDiagnostics(t *testing.T) {
 		}
 	})
 
+	t.Run("unsolicited server disconnect remains a client failure", func(t *testing.T) {
+		failures := newClientFailureSignal(nil)
+		lifecycle := startClientLifecycle(context.Background(), "unexpected disconnect", failures, func(phase *clientPhaseState) error {
+			phase.set("idle")
+			return io.EOF
+		})
+
+		select {
+		case <-failures.done:
+		case <-time.After(time.Second):
+			t.Fatal("unsolicited remote close was not reported as a client failure")
+		}
+		if got := failures.message(); !strings.Contains(got, "unexpected disconnect idle") || !strings.Contains(got, "cause=net closed/EOF") {
+			t.Fatalf("diagnostic = %q, want labelled unsolicited remote close", got)
+		}
+		if err := lifecycle.result.error(); !errors.Is(err, io.EOF) {
+			t.Fatalf("remote-close result = %v, want EOF", err)
+		}
+	})
+
 	t.Run("unexpected idle exit fails shared client teardown", func(t *testing.T) {
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
