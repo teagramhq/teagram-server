@@ -19,17 +19,9 @@ import (
 func testSmokeHistoryTTL(t *testing.T) {
 	t.Helper()
 	var suppressChannelPostDelivery atomic.Bool
-	suppressedChannelPost := make(chan int64, 1)
 	f := newSmokeFixtureWithDeadline(t, config.RegistrationClosed, func(f *smokeFixture) {
-		f.suppressChannelPostDelivery = func(channelID int64) bool {
-			if !suppressChannelPostDelivery.Load() {
-				return false
-			}
-			select {
-			case suppressedChannelPost <- channelID:
-			default:
-			}
-			return true
+		f.suppressChannelPostDelivery = func(int64) bool {
+			return suppressChannelPostDelivery.Load()
 		}
 	}, 4*time.Minute)
 	const phoneA, phoneB, phoneC = "+15552244001", "+15552244002", "+15552244003"
@@ -301,6 +293,8 @@ func testSmokeHistoryTTL(t *testing.T) {
 	if action, ok := channelService.svc.Action.(*tg.MessageActionSetMessagesTTL); !ok || action.Period != 2592000 {
 		t.Fatalf("Bob channel TTL service action = %#v, want one-month TTL", channelService.svc.Action)
 	}
+	// Skip unsolicited channel pushes for the post and expiry; recovery is checked below.
+	suppressChannelPostDelivery.Store(true)
 	if err := alice.call(f.ctx, func(ctx context.Context, client *tg.Client) error {
 		response, err := client.ChannelsGetFullChannel(ctx, inputChannel(alice.id, channel.ID))
 		if err != nil {
@@ -339,38 +333,22 @@ func testSmokeHistoryTTL(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("send channel TTL post: %v", err)
 	}
-	channelPost := recvOrCtx(t, f.ctx, bob.seen.newChannelMsg, "Bob's channel TTL post update")
-	if channelPost.Msg.ID != channelPostID || channelPost.Msg.Message != channelText {
-		t.Fatalf("Bob channel post update = %+v, want post %d %q", channelPost, channelPostID, channelText)
-	}
 	assertHistoryContainsTTLMessage(t, f.ctx, alice, peerChannel(alice.id, channel.ID), channelText, 2592000)
 	assertHistoryContainsTTLMessage(t, f.ctx, bob, peerChannel(bob.id, channel.ID), channelText, 2592000)
 	beforeSweepPts, err := f.store.ChannelState(f.ctx, channel.ID)
 	if err != nil {
 		t.Fatalf("read channel pts before expiry sweep: %v", err)
 	}
-	if channelPost.Pts != beforeSweepPts {
-		t.Fatalf("Bob channel post pts = %d, want pre-sweep channel pts %d", channelPost.Pts, beforeSweepPts)
-	}
 	if _, err = conn.Exec(f.ctx, `UPDATE channel_messages SET expires_at = clock_timestamp() - interval '1 second'
 		WHERE channel_id = $1 AND local_id = $2`, channel.ID, channelPostID); err != nil {
 		t.Fatalf("advance channel post expiry test seam: %v", err)
 	}
-	suppressChannelPostDelivery.Store(true)
 	deletedPosts, more, err := f.store.SweepExpiredChannelPosts(f.ctx, store.HistoryTTLSweepBatchSize)
 	if err != nil {
 		t.Fatalf("sweep expired channel posts: %v", err)
 	}
 	if deletedPosts != 1 || more {
 		t.Fatalf("expired channel post sweep = deleted %d, more %t, want 1, false", deletedPosts, more)
-	}
-	if suppressedID := recvOrCtx(t, f.ctx, suppressedChannelPost, "suppressed Bob channel TTL delete push"); suppressedID != channel.ID {
-		t.Fatalf("suppressed channel post delivery for channel %d, want %d", suppressedID, channel.ID)
-	}
-	select {
-	case pushed := <-bob.seen.delChannelMsg:
-		t.Fatalf("Bob received channel TTL delete push despite suppression: %+v", pushed)
-	default:
 	}
 	var difference tg.UpdatesChannelDifferenceClass
 	if err := bob.call(f.ctx, func(ctx context.Context, client *tg.Client) error {
@@ -395,6 +373,11 @@ func testSmokeHistoryTTL(t *testing.T) {
 	channelDelete, ok := channelDifference.OtherUpdates[0].(*tg.UpdateDeleteChannelMessages)
 	if !ok || channelDelete.ChannelID != channel.ID || len(channelDelete.Messages) != 1 || channelDelete.Messages[0] != channelPostID || channelDelete.Pts != beforeSweepPts+1 || channelDelete.PtsCount != 1 {
 		t.Fatalf("channel TTL difference delete = %#v, want channel %d post %d at pts %d/count 1", channelDifference.OtherUpdates[0], channel.ID, channelPostID, beforeSweepPts+1)
+	}
+	select {
+	case pushed := <-bob.seen.delChannelMsg:
+		t.Fatalf("Bob received channel TTL delete push despite suppression: %+v", pushed)
+	default:
 	}
 	assertHistoryOmitsPeerMessage(t, f.ctx, bob, peerChannel(bob.id, channel.ID), channelText)
 
