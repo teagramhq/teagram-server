@@ -107,8 +107,32 @@ type galleryFixture struct {
 
 func newGalleryFixture(t *testing.T, ownerPhone, viewerPhone string) *galleryFixture {
 	t.Helper()
-	ctx := context.Background()
 	s, dsn := openStoreDSN(t)
+	return newGalleryFixtureWithStore(t, s, dsn, ownerPhone, viewerPhone)
+}
+
+func newGalleryFixtureWithPool(t *testing.T, ownerPhone, viewerPhone string, maxConns int32) *galleryFixture {
+	t.Helper()
+	ctx := context.Background()
+	dsn := pgtest.DSN(t)
+	s, err := store.Open(ctx, dsn, pgtest.EncKey(),
+		store.WithBlobStore(newBlobs(t)),
+		store.WithPoolConfig(store.PoolConfig{MaxConns: maxConns, MaxConnIdleTime: time.Minute}),
+	)
+	if err != nil {
+		t.Fatalf("open store with pool max %d: %v", maxConns, err)
+	}
+	t.Cleanup(func() {
+		if err := s.Close(); err != nil {
+			t.Errorf("close: %v", err)
+		}
+	})
+	return newGalleryFixtureWithStore(t, s, dsn, ownerPhone, viewerPhone)
+}
+
+func newGalleryFixtureWithStore(t *testing.T, s *store.Store, dsn, ownerPhone, viewerPhone string) *galleryFixture {
+	t.Helper()
+	ctx := context.Background()
 	f := &galleryFixture{t: t, s: s, dsn: dsn, blobs: &galleryBlobs{Store: newBlobs(t)}, deriver: pgtest.PhotoDeriver()}
 	owner, err := s.CreateUser(ctx, ownerPhone)
 	if err != nil {

@@ -487,13 +487,22 @@ func (h *handlers) handleGetUsers(r *mtproto.Request) (bin.Encoder, error) {
 	}
 
 	out := make([]tg.UserClass, len(ids))
+	renderedOwners := make([]store.User, 0, len(ids))
+	renderedUsers := make([]*tg.User, 0, len(ids))
 	for i, id := range ids {
 		user, ok := users[id]
 		if !ok {
 			out[i] = &tg.UserEmpty{ID: id}
 			continue
 		}
-		out[i] = h.userToTL(user, r.UserID, id == r.UserID, contactStates[id], visibility[id])
+		rendered := h.userToTL(user, r.UserID, id == r.UserID, contactStates[id], visibility[id])
+		out[i] = rendered
+		renderedOwners = append(renderedOwners, user)
+		renderedUsers = append(renderedUsers, rendered)
+	}
+	if err := h.attachCurrentProfilePhotos(r.Ctx, r.UserID, renderedOwners, renderedUsers); err != nil {
+		h.log.Error("get users: load profile photos", "user_id", r.UserID, "err", err)
+		return nil, errInternal
 	}
 	return &tg.UserClassVector{Elems: out}, nil
 }

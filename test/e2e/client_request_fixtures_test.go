@@ -501,6 +501,7 @@ func TestSmokeClientRequestFixturesAreLayer228Shapes(t *testing.T) {
 		"messages_getHistory.second-account.1",
 		"messages_getReplies.1",
 		"photos_getUserPhotos.1",
+		"photos_updateProfilePhoto.1",
 		"photos_uploadProfilePhoto.1",
 		"account_updateProfile.1",
 		"account_checkUsername.1",
