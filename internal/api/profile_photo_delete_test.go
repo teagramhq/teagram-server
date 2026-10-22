@@ -474,22 +474,21 @@ func TestUpdateProfilePhotoEmptyConcurrentReplayDoesNotSpendRateLimit(t *testing
 	if _, err := observer.Exec(context.Background(), `SELECT 1`); err != nil {
 		t.Fatalf("warm profile-photo activity observer: %v", err)
 	}
-	requestCtx := api.ProfilePhotoMutationWaitContextForTest(context.Background(), 30*time.Second)
 	start := make(chan struct{})
 	firstDone := make(chan []byte, 1)
 	go func() {
 		<-start
-		firstDone <- dispatchProfilePhotoMutationWithContext(t, h, f.owner, key, sessionID, clearMsgID, requestCtx, clearRequest)
+		firstDone <- dispatchProfilePhotoMutation(t, h, f.owner, key, sessionID, clearMsgID, clearRequest)
 	}()
 	replayDone := make(chan []byte, 1)
 	go func() {
 		<-start
-		replayDone <- dispatchProfilePhotoMutationWithContext(t, h, f.owner, key, sessionID, clearMsgID, requestCtx, clearRequest)
+		replayDone <- dispatchProfilePhotoMutation(t, h, f.owner, key, sessionID, clearMsgID, clearRequest)
 	}()
 	close(start)
 	// Start both calls together, then release the upload-receipt lock only once
 	// PostgreSQL shows one clear paused there and the other waiting on the owner
-	// lock. Their test-only deadline stays well beyond the observer watchdog.
+	// lock. The normal handler deadline must outlast the selection wait.
 	waitForConcurrentProfilePhotoActivity(t, f, firstDone, replayDone)
 	keepConcurrentProfilePhotoActivityBlocked(t, firstDone, replayDone)
 	if err := blocker.Commit(context.Background()); err != nil {
