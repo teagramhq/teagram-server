@@ -619,7 +619,7 @@ class BlobTransitionAuthorityTests(unittest.TestCase):
                             Path("/output"), checkout, {}, "test-live-authority",
                         )
                     else:
-                        with self.assertRaisesRegex(mode.Reject, expected_error):
+                        with self.assertRaisesRegex(runner.TransitionReject, expected_error):
                             runner.assert_live_teagramd_matches_authority(
                                 mode, project, ["teagramd"], authority, mode_source,
                                 Path("/output"), checkout, {}, "test-live-authority",
