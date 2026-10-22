@@ -1144,10 +1144,10 @@ func holdChannelStateBarrier(t *testing.T, ctx context.Context, dsn string, chan
 // photo at the same pts, and the loser's assembly left behind as an unreferenced
 // file the eraser reclaims while the post's own photo stays downloadable.
 //
-// channel_state is held FOR UPDATE on a side connection for the whole
-// window. That is what makes this the transactional duplicate rather than the
-// cheap pre-assembly lookup: neither send can post, so both assemble, and the
-// decision is made by the dedup read under the lock once the barrier lifts.
+// A post-commit rendezvous holds both requests after their empty retry reads
+// and before permission checks or assembly. That makes this the transactional
+// duplicate rather than the cheap pre-assembly lookup: both requests assemble,
+// and the decision is made by the dedup read in the post transaction.
 func TestChannelPhotoConcurrentSameRandomIDPostsOnce(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
@@ -1191,8 +1191,6 @@ func TestChannelPhotoConcurrentSameRandomIDPostsOnce(t *testing.T) {
 	before := channelWriteStats(t, conn, channel.ID)
 	filesBefore := countFiles(t, ctx, dsn)
 
-	barrier := holdChannelStateBarrier(t, ctx, dsn, channel.ID)
-
 	// Two different uploads, so which photo a response names is observable and a
 	// reply that rendered the loser's file instead of the stored post cannot pass.
 	firstBody, secondBody := jpegPhotoPayload(t, 640, 480), jpegPhotoPayload(t, 800, 600)
@@ -1206,58 +1204,114 @@ func TestChannelPhotoConcurrentSameRandomIDPostsOnce(t *testing.T) {
 		photo *tg.Photo
 		err   error
 	}
-	send := func(fileID int64, body []byte) chan result {
-		done := make(chan result, 1)
-		go func() {
-			sent, err := api.SendMediaForTest(s, member.ID, blobs, api.TestMaxUserStorageBytes, &tg.MessagesSendMediaRequest{
+	completedEarlyReads := make(chan struct{}, 2)
+	releaseEarlyReads := make(chan struct{})
+	var releaseOnce sync.Once
+	release := func() { releaseOnce.Do(func() { close(releaseEarlyReads) }) }
+	store.SetChannelPhotoRetryAfterCommitHook(s, func(hookCtx context.Context, gotChannelID, _, gotRandomID int64) error {
+		if gotChannelID != channel.ID || gotRandomID != 97911 {
+			return nil
+		}
+		select {
+		case completedEarlyReads <- struct{}{}:
+		case <-hookCtx.Done():
+			return hookCtx.Err()
+		}
+		select {
+		case <-releaseEarlyReads:
+			return nil
+		case <-hookCtx.Done():
+			return hookCtx.Err()
+		}
+	})
+	sendCtx, cancelSends := context.WithTimeout(ctx, 3*time.Minute)
+	completedSends := make(chan result, 2)
+	var sendWG sync.WaitGroup
+	defer func() {
+		cancelSends()
+		release()
+		sendWG.Wait()
+		store.SetChannelPhotoRetryAfterCommitHook(s, nil)
+	}()
+	send := func(fileID int64, body []byte) {
+		sendWG.Go(func() {
+			sent, err := api.SendMediaForTestWithContext(sendCtx, s, member.ID, blobs, api.TestMaxUserStorageBytes, &tg.MessagesSendMediaRequest{
 				Peer:     channelPeer(member.ID, channel.ID),
 				Media:    uploadedPhoto(fileID, 1, "219343.jpg", jpegPhotoMD5(body)),
 				Message:  "same random id",
 				RandomID: 97911,
 			})
 			if err != nil {
-				done <- result{err: err}
+				completedSends <- result{err: err}
 				return
 			}
 			post, pts, photo, parseErr := parseChannelPhotoPost(sent)
 			if parseErr != nil {
-				done <- result{err: parseErr}
+				completedSends <- result{err: parseErr}
 				return
 			}
-			done <- result{post: post, pts: pts, photo: photo}
-		}()
-		return done
+			got := result{post: post, pts: pts, photo: photo}
+			completedSends <- got
+		})
 	}
-	firstSend, secondSend := send(firstFileID, firstBody), send(secondFileID, secondBody)
+	send(firstFileID, firstBody)
+	send(secondFileID, secondBody)
 
-	// Both sends park at the channel_state lock their dedup lookup takes, which
-	// is the first thing either does. Lifting the barrier there means neither
-	// sees the other's post in that lookup, so both go on to assemble and the
-	// duplicate is decided inside the post transaction.
-	waitForChannelStateWaiters(t, ctx, conn, 2)
-	if _, err = barrier.Exec(ctx, `COMMIT`); err != nil {
-		t.Fatalf("release the barrier: %v", err)
+	// Both arrivals prove ChannelPhotoRetryAs committed an empty lookup. The
+	// hook waits outside that transaction, so neither a transaction nor the
+	// channel-state lock is held while both requests rendezvous.
+	rendezvousCtx, cancelRendezvous := context.WithTimeout(ctx, 20*time.Second)
+	arrived := 0
+	var rendezvousErr error
+	both := make([]result, 0, 2)
+	for arrived < 2 {
+		select {
+		case <-completedEarlyReads:
+			arrived++
+		case got := <-completedSends:
+			both = append(both, got)
+			rendezvousErr = errors.New("a send completed before both committed empty retry reads")
+		case <-rendezvousCtx.Done():
+			rendezvousErr = fmt.Errorf("waiting for both committed empty retry reads: %w", rendezvousCtx.Err())
+		}
+		if rendezvousErr != nil {
+			break
+		}
 	}
+	cancelRendezvous()
+	if rendezvousErr != nil {
+		cancelSends()
+	}
+	release()
 
 	// The wait is bounded: ctx carries no deadline, so a send that never reports
 	// would otherwise hang the package until its overall timeout.
 	collectCtx, cancelCollect := context.WithTimeout(ctx, 2*time.Minute)
 	defer cancelCollect()
-	both := make([]result, 0, 2)
-	for range 2 {
+	var collectErr error
+	for len(both) < 2 {
 		select {
-		case got := <-firstSend:
-			if got.err != nil {
-				t.Fatalf("first concurrent photo send: %v", got.err)
-			}
-			both = append(both, got)
-		case got := <-secondSend:
-			if got.err != nil {
-				t.Fatalf("second concurrent photo send: %v", got.err)
-			}
+		case got := <-completedSends:
 			both = append(both, got)
 		case <-collectCtx.Done():
-			t.Fatalf("waiting for the concurrent photo sends: %s", collectCtx.Err())
+			collectErr = fmt.Errorf("waiting for the concurrent photo sends: %w", collectCtx.Err())
+			cancelSends()
+			// Cancellation releases requests still waiting on the post-commit hook
+			// or a database call. Wait for both buffered results before reporting.
+			for len(both) < 2 {
+				both = append(both, <-completedSends)
+			}
+		}
+	}
+	if rendezvousErr != nil {
+		t.Fatalf("concurrent send ordering was not established: %v", rendezvousErr)
+	}
+	if collectErr != nil {
+		t.Fatal(collectErr)
+	}
+	for i, got := range both {
+		if got.err != nil {
+			t.Fatalf("concurrent photo send %d: %v", i+1, got.err)
 		}
 	}
 	a, b := both[0], both[1]
