@@ -107,7 +107,7 @@ verify_changed_container_environment() {
               ($compose_env | has($name)) and
               ($compose_env[$name] == dotenv_value($assignments[0])) and
               ($actual | length) == 1 and
-              ($actual[0] == $assignments[0])
+              ($actual[0] == dotenv_value($assignments[0]))
           )
       end
   ' >/dev/null; then

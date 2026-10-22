@@ -321,6 +321,13 @@ public_listen_change_target=$(ROLLOUT_CHANGED_ENV=TG_PUBLIC_WEBSOCKET_LISTEN_ADD
 [ "$(jq -r '.container_env_changed' <<< "$public_listen_change_target")" = TG_PUBLIC_WEBSOCKET_LISTEN_ADDR ]
 printf '%s\n' 'PASS changed public WebSocket value requires and accepts the named change path'
 
+printf 'TG_PUBLIC_WEBSOCKET_LISTEN_ADDR="127.0.0.1:2444"\n' > "$ENV_FILE"
+public_listen_quoted_change_target=$(ROLLOUT_CHANGED_ENV=TG_PUBLIC_WEBSOCKET_LISTEN_ADDR snapshot_from_json \
+  "$public_listen_change_target_inspect" "$public_listen_changed_compose" \
+  "$ENV_FILE" "$OVERRIDE_FILE" selected-compose-render target)
+[ "$(jq -r '.container_env_changed' <<< "$public_listen_quoted_change_target")" = TG_PUBLIC_WEBSOCKET_LISTEN_ADDR ]
+printf '%s\n' 'PASS quoted changed public WebSocket value matches the target container'
+
 printf '%s\n' \
   'TG_PUBLIC_WEBSOCKET_LISTEN_ADDR=0.0.0.0:2444' \
   'TG_PUBLIC_WEBSOCKET_ADVERTISE_ADDR=server.example.com:443' \
