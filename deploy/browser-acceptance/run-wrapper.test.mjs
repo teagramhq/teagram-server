@@ -1,14 +1,15 @@
 import assert from "node:assert/strict";
 import { createServer } from "node:http";
-import { chmod, mkdtemp, mkdir, readFile, rm, stat, symlink, writeFile } from "node:fs/promises";
+import { access, chmod, copyFile, mkdtemp, mkdir, readFile, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { spawn, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import test from "node:test";
 
 const repoRoot = new URL("../..", import.meta.url).pathname;
 const runScript = join(repoRoot, "deploy/browser-acceptance/run.sh");
+const sharedRuntimeLockPath = "/tmp/teagram-browser-acceptance.lock";
 const busyboxPhaseScript = join(repoRoot, ".github/scripts/run-busybox-phase-check.sh");
 const sourceCommit = "c".repeat(40);
 const phaseCommandToken = "e".repeat(64);
@@ -233,7 +234,9 @@ async function setup(t) {
   const bin = join(directory, "bin");
   const dockerRoot = join(directory, "docker-root");
   const runtimeDir = join(directory, "runtime");
-  const lockDir = join(runtimeDir, "teagram-browser-acceptance");
+  const checkoutRoot = join(directory, "checkout");
+  const fixtureRunScript = join(checkoutRoot, "deploy/browser-acceptance/run.sh");
+  const sharedRuntimeLock = join(directory, "shared-browser-acceptance.lock");
   const manifest = join(directory, "release-record.json");
   const servedManifest = join(directory, "served-manifest.json");
   const log = join(directory, "docker-calls.log");
@@ -241,6 +244,11 @@ async function setup(t) {
   await mkdir(bin);
   await mkdir(dockerRoot);
   await mkdir(runtimeDir, { mode: 0o700 });
+  await mkdir(dirname(fixtureRunScript), { recursive: true });
+  const wrapperSource = await readFile(runScript, "utf8");
+  assert.equal(wrapperSource.split(sharedRuntimeLockPath).length - 1, 1);
+  await writeFile(fixtureRunScript,
+    wrapperSource.replace(sharedRuntimeLockPath, sharedRuntimeLock), { mode: 0o755 });
   await writeFile(manifest, JSON.stringify({
     sourceCommit,
     archiveSha256: digest,
@@ -263,6 +271,14 @@ if [[ "$1" == "info" ]]; then
 fi
 if [[ "$1" == "compose" ]]; then
   if [[ "$*" == *"version"* ]]; then exit 0; fi
+  if [[ "$*" == *" build --pull browser"* && -n "\${WRAPPER_BUILD_STARTED_FILE:-}" ]]; then
+    : >"$WRAPPER_BUILD_STARTED_FILE"
+    while [[ ! -e "\${WRAPPER_RELEASE_BUILD_FILE:?}" ]]; do sleep 0.01; done
+  fi
+  if [[ "$*" == *" down --rmi local"* && -n "\${WRAPPER_CLEANUP_STARTED_FILE:-}" ]]; then
+    : >"$WRAPPER_CLEANUP_STARTED_FILE"
+    while [[ ! -e "\${WRAPPER_RELEASE_CLEANUP_FILE:?}" ]]; do sleep 0.01; done
+  fi
   if [[ "$*" == *" build "* && "\${WRAPPER_BUILD_FAILURE:-0}" == "1" ]]; then exit 1; fi
   if [[ "$*" == *" down --rmi local"* && "\${WRAPPER_CLEANUP_FAILURE:-0}" == "1" ]]; then exit 1; fi
   if [[ "$*" == *" run "* ]]; then
@@ -377,11 +393,16 @@ exit "\${WRAPPER_PROBE_STATUS:-\${WRAPPER_ACCEPTANCE_STATUS:-0}}"
     chmod(join(bin, "node"), 0o755),
   ]));
   t.after(async () => rm(directory, { recursive: true, force: true }));
-  return { bin, directory, dockerRoot, runtimeDir, lockDir, manifest, servedManifest, log, curlLog };
+  return { bin, directory, dockerRoot, runtimeDir, runScript: fixtureRunScript, sharedRuntimeLock,
+    manifest, servedManifest, log, curlLog };
 }
 
 function invoke(paths, args, extraEnv = {}, input, cwd = repoRoot) {
-  return spawnSync("bash", [runScript, ...args], {
+  return invokeScript(paths, paths.runScript, args, extraEnv, input, cwd);
+}
+
+function invokeScript(paths, script, args, extraEnv = {}, input, cwd = repoRoot) {
+  return spawnSync("bash", [script, ...args], {
     cwd,
     encoding: "utf8",
     ...(input === undefined ? {} : { input }),
@@ -396,6 +417,55 @@ function invoke(paths, args, extraEnv = {}, input, cwd = repoRoot) {
       ...extraEnv,
     },
   });
+}
+
+function spawnScript(paths, script, args, extraEnv = {}, cwd = repoRoot) {
+  const child = spawn("bash", [script, ...args], {
+    cwd,
+    env: {
+      ...process.env,
+      PATH: `${paths.bin}:${process.env.PATH}`,
+      WRAPPER_DOCKER_LOG: paths.log,
+      WRAPPER_DOCKER_ROOT: paths.dockerRoot,
+      WRAPPER_CURL_LOG: paths.curlLog,
+      WRAPPER_SERVED_MANIFEST: paths.servedManifest,
+      XDG_RUNTIME_DIR: paths.runtimeDir,
+      ...extraEnv,
+    },
+  });
+  let stdout = "";
+  let stderr = "";
+  child.stdout.setEncoding("utf8").on("data", (chunk) => { stdout += chunk; });
+  child.stderr.setEncoding("utf8").on("data", (chunk) => { stderr += chunk; });
+  const result = new Promise((resolve, reject) => {
+    child.on("error", reject);
+    child.on("close", (status, signal) => resolve({ status, signal, stdout, stderr }));
+  });
+  return { child, result };
+}
+
+async function waitForFile(path) {
+  const deadline = Date.now() + 5000;
+  while (Date.now() < deadline) {
+    try {
+      await access(path);
+      return;
+    } catch {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+  }
+  throw new Error(`timed out waiting for fixture file ${path}`);
+}
+
+async function ensureSharedLockFile(path) {
+  let created = false;
+  try {
+    await writeFile(path, "", { flag: "wx", mode: 0o666 });
+    created = true;
+  } catch (error) {
+    if (error.code !== "EEXIST") throw error;
+  }
+  if (created) await chmod(path, 0o666);
 }
 
 async function invokeBusyboxPhase(t, lane, { phase = "", mode = "valid", status = 1, outputMode = "standard" } = {}) {
@@ -1393,34 +1463,97 @@ test("curl older than 8.4 is rejected before manifest download", async (t) => {
   await assert.rejects(readFile(paths.log));
 });
 
-test("a symlink at the private runtime lock path is rejected without touching its target", async (t) => {
+test("browser acceptance serializes different checkouts and sessions through failed teardown", async (t) => {
   const paths = await setup(t);
-  const targetDir = join(paths.runtimeDir, "target");
-  const sentinel = join(targetDir, "sentinel");
-  await mkdir(targetDir, { mode: 0o700 });
-  await writeFile(sentinel, "preserve this file");
-  await symlink(targetDir, paths.lockDir, "dir");
+  const alternateRoot = join(paths.directory, "alternate-checkout");
+  const alternateRunScript = join(alternateRoot, "deploy/browser-acceptance/run.sh");
+  const alternateRuntime = join(paths.directory, "alternate-runtime");
+  const buildStarted = join(paths.directory, "build-started");
+  const releaseBuild = join(paths.directory, "release-build");
+  const cleanupStarted = join(paths.directory, "cleanup-started");
+  const releaseCleanup = join(paths.directory, "release-cleanup");
+  await mkdir(dirname(alternateRunScript), { recursive: true });
+  await mkdir(alternateRuntime, { mode: 0o700 });
+  await copyFile(paths.runScript, alternateRunScript);
 
-  const result = invoke(paths, ["readiness", "--manifest", paths.manifest]);
-  assert.equal(result.status, 1);
-  assert.equal(result.stdout, '{"status":"error","code":"runtime-unavailable"}\n');
-  assert.equal(result.stderr, "");
-  assert.equal(await readFile(sentinel, "utf8"), "preserve this file");
-  await assert.rejects(readFile(paths.log));
+  const first = spawnScript(paths, paths.runScript, ["blocked-control", "--manifest", paths.manifest], {
+    WRAPPER_BUILD_STARTED_FILE: buildStarted,
+    WRAPPER_RELEASE_BUILD_FILE: releaseBuild,
+    WRAPPER_CLEANUP_STARTED_FILE: cleanupStarted,
+    WRAPPER_RELEASE_CLEANUP_FILE: releaseCleanup,
+    WRAPPER_RUNTIME_FAILURE: "1",
+  });
+  try {
+    await waitForFile(buildStarted);
+    const beforeBuildContention = await readFile(paths.log, "utf8");
+    const buildContention = invokeScript(paths, alternateRunScript,
+      ["blocked-control", "--manifest", paths.manifest],
+      { XDG_RUNTIME_DIR: alternateRuntime, HOME: alternateRoot }, undefined, alternateRoot);
+    assert.equal(buildContention.status, 1);
+    assert.equal(buildContention.stdout, '{"status":"error","code":"runtime-busy"}\n');
+    assert.equal(buildContention.stderr, "");
+    assert.equal(await readFile(paths.log, "utf8"), beforeBuildContention);
+    assert.equal((await stat(paths.sharedRuntimeLock)).mode & 0o777, 0o666);
+
+    await writeFile(releaseBuild, "continue\n");
+    await waitForFile(cleanupStarted);
+    const beforeCleanupContention = await readFile(paths.log, "utf8");
+    const cleanupContention = invokeScript(paths, alternateRunScript,
+      ["blocked-control", "--manifest", paths.manifest],
+      { XDG_RUNTIME_DIR: alternateRuntime, HOME: alternateRoot }, undefined, alternateRoot);
+    assert.equal(cleanupContention.status, 1);
+    assert.equal(cleanupContention.stdout, '{"status":"error","code":"runtime-busy"}\n');
+    assert.equal(cleanupContention.stderr, "");
+    assert.equal(await readFile(paths.log, "utf8"), beforeCleanupContention);
+
+    await writeFile(releaseCleanup, "continue\n");
+    const completion = await first.result;
+    assert.equal(completion.status, 1, completion.stderr);
+    assert.equal(completion.stdout, '{"status":"error","code":"observer-unhealthy"}\n');
+  } finally {
+    await writeFile(releaseBuild, "continue\n");
+    await writeFile(releaseCleanup, "continue\n");
+    if (first.child.exitCode === null && first.child.signalCode === null) first.child.kill("SIGKILL");
+    await first.result;
+  }
 });
 
-test("the home runtime fallback creates an owner-only lock directory", async (t) => {
+test("a killed lock holder leaves a reusable shared lock file", async (t) => {
   const paths = await setup(t);
-  const homeDir = join(paths.runtimeDir, "home");
-  const lockDir = join(homeDir, ".local", "run", "teagram-browser-acceptance");
-  await mkdir(homeDir, { mode: 0o700 });
+  const alternateRuntime = join(paths.directory, "alternate-runtime");
+  await mkdir(alternateRuntime, { mode: 0o700 });
+  await ensureSharedLockFile(paths.sharedRuntimeLock);
 
-  const result = invoke(paths, ["readiness", "--manifest", paths.manifest], {
-    HOME: homeDir,
-    XDG_RUNTIME_DIR: "",
+  const holder = spawn("bash", ["-c", 'exec 9>>"$1"; flock -n 9 || exit; printf locked; IFS= read -r _',
+    "lock-holder", paths.sharedRuntimeLock], {
+    stdio: ["pipe", "pipe", "ignore"],
+  });
+  let holderOutput = "";
+  holder.stdout.setEncoding("utf8").on("data", (chunk) => { holderOutput += chunk; });
+  const ready = new Promise((resolve, reject) => {
+    const timeout = setTimeout(() => reject(new Error("lock holder did not acquire the fixture lock")), 5000);
+    holder.stdout.on("data", () => {
+      if (holderOutput.includes("locked")) {
+        clearTimeout(timeout);
+        resolve();
+      }
+    });
+    holder.on("error", reject);
+  });
+  await ready;
+  const closed = new Promise((resolve, reject) => {
+    holder.on("error", reject);
+    holder.on("close", (status, signal) => resolve({ status, signal }));
+  });
+  holder.kill("SIGKILL");
+  const killed = await closed;
+  assert.equal(killed.signal, "SIGKILL");
+
+  const result = invoke(paths, ["blocked-control", "--manifest", paths.manifest], {
+    XDG_RUNTIME_DIR: alternateRuntime,
   });
   assert.equal(result.status, 0, result.stderr);
-  assert.equal((await stat(lockDir)).mode & 0o777, 0o700);
+  assert.equal(result.stdout, `${blockedResult}\n`);
 });
 
 test("blocked control emits one fixed line and cleans the project on success", async (t) => {
@@ -1651,10 +1784,17 @@ test("the reviewed QA v3 artifact matches the pinned digest", async () => {
   assert.equal(pinned, approvedQaDigest);
 });
 
-test("acceptance preflight takes the runtime lock before reading either manifest", async (t) => {
+test("acceptance preflight takes the shared lock before reading either manifest", async (t) => {
   const paths = await setup(t);
-  await mkdir(paths.lockDir, { mode: 0o700 });
-  const holder = spawn("flock", ["--nonblock", paths.lockDir, "sleep", "5"], { stdio: "ignore" });
+  let createdLockFile = false;
+  try {
+    await writeFile(paths.sharedRuntimeLock, "", { flag: "wx", mode: 0o666 });
+    createdLockFile = true;
+  } catch (error) {
+    if (error.code !== "EEXIST") throw error;
+  }
+  if (createdLockFile) await chmod(paths.sharedRuntimeLock, 0o666);
+  const holder = spawn("flock", ["--nonblock", "--close", paths.sharedRuntimeLock, "sleep", "0.25"], { stdio: "ignore" });
   t.after(() => holder.kill());
   await new Promise((resolve) => setTimeout(resolve, 200));
   const result = invokePreflight(paths, await preflightScript(paths));
