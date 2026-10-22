@@ -1,0 +1,12 @@
+{
+  "layer": 228,
+  "client": "gotd v0.162.0",
+  "source": "captures/account_checkUsername.1.txt",
+  "method": "account.checkUsername",
+  "request": {
+    "type": "account.checkUsername",
+    "fields": {
+      "username": "REDACTED"
+    }
+  }
+}

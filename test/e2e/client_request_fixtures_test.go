@@ -15,9 +15,12 @@ import (
 	"testing"
 
 	"github.com/gotd/td/bin"
+	"github.com/gotd/td/session"
 	"github.com/gotd/td/tdp"
 	"github.com/gotd/td/telegram"
+	"github.com/gotd/td/telegram/updates"
 	"github.com/gotd/td/tg"
+	"github.com/gotd/td/tgerr"
 )
 
 const clientFixtureDirectory = "../fixtures/client/layer-228"
@@ -500,6 +503,7 @@ func TestSmokeClientRequestFixturesAreLayer228Shapes(t *testing.T) {
 		"photos_getUserPhotos.1",
 		"photos_uploadProfilePhoto.1",
 		"account_updateProfile.1",
+		"account_checkUsername.1",
 		"upload_getFile.1",
 		"messages_sendMedia.1",
 		"messages_sendMedia.2",
@@ -526,6 +530,46 @@ func TestSmokeClientRequestFixtures(t *testing.T) {
 	testSmokeClientRequestFixtures(t)
 }
 
+func newSmokePhoneClientWithRequests(
+	t *testing.T, f *smokeFixture, label, phone string, requests *clientRequestRecorder,
+) *smokeClient {
+	t.Helper()
+	seedPhoneUsers(t, f.ctx, f.store, phone)
+	user, ok, err := f.store.UserByPhone(f.ctx, phone)
+	if err != nil || !ok {
+		t.Fatalf("load phone account for %s: ok=%t err=%v", label, ok, err)
+	}
+
+	sess := &session.StorageMemory{}
+	seen, push := newUpdateCollector(), newUpdateCollector()
+	manager := updates.New(updates.Config{Handler: seen})
+	clientCtx, cancelClient := context.WithCancel(f.ctx)
+	client := &smokeClient{
+		client:   f.managedClientWithDevice(sess, seen, push, manager, telegram.DeviceConfig{}, requests),
+		requests: requests,
+		cancel:   cancelClient,
+		session:  sess,
+		manager:  manager,
+		seen:     seen,
+		push:     push,
+		cmds:     make(chan command),
+		label:    label,
+	}
+	ids := make(chan int64, 1)
+	client.lifecycle = startClientLifecycle(clientCtx, label, f.failures, func(*clientPhaseState) error {
+		return runBoundInteractive(clientCtx, client.client, sess, f.store, user.ID, ids, client.cmds)
+	})
+	t.Cleanup(func() { client.stopClient(t) })
+	select {
+	case client.id = <-ids:
+	case <-f.ctx.Done():
+		t.Fatalf("%s login timeout", label)
+	case <-client.lifecycle.result.done:
+		t.Fatalf("%s login failed: %v", label, client.lifecycle.result.error())
+	}
+	return client
+}
+
 func testSmokeClientRequestFixtures(t *testing.T) {
 	t.Helper()
 	f := newSmokeFixture(t)
@@ -533,12 +577,39 @@ func testSmokeClientRequestFixtures(t *testing.T) {
 	seedSmokeUsers(t, f, phoneCreator, phoneMember)
 	creatorRequests := &clientRequestRecorder{}
 	memberRequests := &clientRequestRecorder{}
+	checkerRequests := &clientRequestRecorder{}
 	creator := newSmokeClientWithRequests(t, f, "Client fixture creator", phoneCreator, creatorRequests)
 	member := newSmokeClientWithRequests(t, f, "Client fixture member", phoneMember, memberRequests)
+	checker := newSmokePhoneClientWithRequests(t, f, "Client fixture username checker", "+15551048903", checkerRequests)
 	for _, fixtureName := range []string{"auth.sendCode.1", "auth.signIn.1"} {
 		if err := creator.requests.matchFixtureSince(0, fixtureName); err != nil {
 			t.Fatalf("replay login fixture %s: %v", fixtureName, err)
 		}
+	}
+	for _, tc := range []struct {
+		username string
+		want     bool
+	}{
+		{username: "clientfixturefree", want: true},
+		{username: smokeUsernameForPhone(phoneMember), want: false},
+	} {
+		var available bool
+		if err := fixtureClientCall(t, checker, "account_checkUsername.1", func(ctx context.Context, api *tg.Client) error {
+			var err error
+			available, err = api.AccountCheckUsername(ctx, tc.username)
+			return err
+		}); err != nil {
+			t.Fatalf("check username %q: %v", tc.username, err)
+		}
+		if available != tc.want {
+			t.Errorf("account.checkUsername(%q) = %t, want %t", tc.username, available, tc.want)
+		}
+	}
+	if err := fixtureClientCall(t, checker, "account_checkUsername.1", func(ctx context.Context, api *tg.Client) error {
+		_, err := api.AccountCheckUsername(ctx, "bad-name")
+		return err
+	}); !tgerr.Is(err, "USERNAME_INVALID") {
+		t.Fatalf("invalid account.checkUsername error = %v, want USERNAME_INVALID", err)
 	}
 	if err := fixtureClientCall(t, creator, "messages_hidePeerSettingsBar.1", func(ctx context.Context, api *tg.Client) error {
 		hidden, err := api.MessagesHidePeerSettingsBar(ctx, peerUser(creator.id, member.id))

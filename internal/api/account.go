@@ -298,6 +298,49 @@ func (h *handlers) handleUpdateUsername(r *mtproto.Request) (bin.Encoder, error)
 	return wireUser, nil
 }
 
+// handleCheckUsername reports whether a valid username is available to the
+// authenticated account. A username held by the caller is available to them;
+// login-mode handles keep the same immutable answers as account.updateUsername.
+func (h *handlers) handleCheckUsername(r *mtproto.Request) (bin.Encoder, error) {
+	var req tg.AccountCheckUsernameRequest
+	if err := req.Decode(r.Buf); err != nil {
+		return nil, errMethodNotImpl
+	}
+	if r.UserID == 0 {
+		return nil, errAuthKeyUnreg
+	}
+	if !validateUsername(req.Username) || isReservedUsername(req.Username) {
+		return nil, errUsernameInvalid
+	}
+	if err := h.checkUsernameImmutable(r.Ctx, r.UserID, req.Username); err != nil {
+		return nil, err
+	}
+
+	username := strings.ToLower(req.Username)
+	if err := h.checkUsernameClaimQuota(r.Ctx, r.UserID, username); err != nil {
+		return nil, err
+	}
+
+	taken, err := h.store.UsernameHandleTaken(r.Ctx, username)
+	if err != nil {
+		h.log.Error("check account username: lookup availability", "user_id", r.UserID, "err", err)
+		return nil, errInternal
+	}
+	if !taken {
+		return &tg.BoolTrue{}, nil
+	}
+
+	resolved, found, err := h.store.UsernameByHandle(r.Ctx, username)
+	if err != nil {
+		h.log.Error("check account username: resolve owner", "user_id", r.UserID, "err", err)
+		return nil, errInternal
+	}
+	if found && resolved.Kind == store.UsernameKindUser && resolved.User.ID == r.UserID {
+		return &tg.BoolTrue{}, nil
+	}
+	return &tg.BoolFalse{}, nil
+}
+
 // checkUsernameImmutable answers for a login_mode='username' caller before the
 // change is attempted, and returns nil for every other account.
 //
