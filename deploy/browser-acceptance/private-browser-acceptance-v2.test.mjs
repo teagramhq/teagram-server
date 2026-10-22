@@ -486,6 +486,30 @@ test("preflight preserves allow-listed codes from ordinary runtime adapter error
   assert.doesNotMatch(unknownResult.output, /private-canary|private adapter detail/u);
 });
 
+test("preflight emits a validated WSS diagnostic without reading credentials", async () => {
+  const fixture = createDependencies();
+  fixture.dependencies.proveWss = () => {
+    const error = new Error("private websocket detail");
+    error.code = "websocket-not-ready";
+    error.wssDiagnostic = {
+      wss_diagnostic: "socket-2-target-mismatch",
+      wss_targets: 2,
+      wss_handshakes: 2,
+      wss_target_match: false,
+      wss_status: 101,
+    };
+    throw error;
+  };
+
+  const result = await executeMode({mode: "preflight", releaseRecord: "fixture"}, fixture.dependencies);
+
+  assert.deepEqual(result, {
+    output: '{"status":"error","code":"websocket-not-ready","wss_diagnostic":"socket-2-target-mismatch","wss_targets":2,"wss_handshakes":2,"wss_target_match":false,"wss_status":101}',
+    exitCode: 1,
+  });
+  assert.equal(fixture.credentialReads, 0);
+});
+
 test("preflight preserves codes from real observer and target address failures", async (t) => {
   await t.test("observer fetch failure", async (t) => {
     t.mock.method(globalThis, "fetch", async () => {
@@ -1127,7 +1151,7 @@ async function proveSharedWorkerWss(t, {socketUrl, pageSocket = false, childSock
     const result = await proveWss(contextInfo, {url: `https://${targetHost}/private/`}, {endpoint}, progress, tracker);
     return {result, log, progress, browserSession, wssAudit: contextInfo.wssAudit};
   } catch (error) {
-    return {code: error.code, browserSession, relatedSession};
+    return {code: error.code, wssDiagnostic: error.wssDiagnostic, browserSession, relatedSession};
   }
 }
 
@@ -1148,12 +1172,26 @@ test("preflight WSS proof observes a socket opened by a worker's child worker", 
 
 test("preflight WSS proof fails closed for worker sockets elsewhere, silent workers, and unattachable workers", async (t) => {
   await t.test("another endpoint", async (t) => {
-    const {code} = await proveSharedWorkerWss(t, {socketUrl: `wss://${targetHost}/apiws-other`});
+    const {code, wssDiagnostic} = await proveSharedWorkerWss(t, {socketUrl: `wss://${targetHost}/apiws-other`});
     assert.equal(code, "websocket-not-ready");
+    assert.deepEqual(wssDiagnostic, {
+      wss_diagnostic: "socket-1-target-mismatch",
+      wss_targets: 1,
+      wss_handshakes: 1,
+      wss_target_match: false,
+      wss_status: 101,
+    });
   });
   await t.test("no socket", async (t) => {
-    const {code} = await proveSharedWorkerWss(t, {});
+    const {code, wssDiagnostic} = await proveSharedWorkerWss(t, {});
     assert.equal(code, "websocket-not-ready");
+    assert.deepEqual(wssDiagnostic, {
+      wss_diagnostic: "no-target",
+      wss_targets: 0,
+      wss_handshakes: 0,
+      wss_target_match: false,
+      wss_status: 0,
+    });
   });
   await t.test("attach failure", async (t) => {
     const {code, browserSession} = await proveSharedWorkerWss(t, {
@@ -1175,8 +1213,15 @@ test("preflight WSS proof fails closed for worker sockets elsewhere, silent work
     assert.equal(code, "websocket-not-ready");
   });
   await t.test("a child worker's socket elsewhere beside a valid page socket", async (t) => {
-    const {code} = await proveSharedWorkerWss(t, {pageSocket: true, childSocketUrl: `wss://${targetHost}/apiws-other`});
+    const {code, wssDiagnostic} = await proveSharedWorkerWss(t, {pageSocket: true, childSocketUrl: `wss://${targetHost}/apiws-other`});
     assert.equal(code, "websocket-not-ready");
+    assert.deepEqual(wssDiagnostic, {
+      wss_diagnostic: "socket-2-target-mismatch",
+      wss_targets: 2,
+      wss_handshakes: 2,
+      wss_target_match: false,
+      wss_status: 101,
+    });
   });
   await t.test("a worker that ran before observation, beside a valid page socket", async (t) => {
     const {code} = await proveSharedWorkerWss(t, {scriptLoaded: "before", pageSocket: true});

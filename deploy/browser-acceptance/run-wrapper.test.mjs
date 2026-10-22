@@ -15,7 +15,7 @@ const phaseCommandToken = "e".repeat(64);
 const digest = `sha256:${"d".repeat(64)}`;
 // Four account-slot sockets on load plus the logout reconnect.
 const WSS_CONNECTION_CEILING = 5;
-const approvedQaDigest = "7fa033c93bdf521977faf9b485506e50441240a3cc91ecc8f5a52ad9d338aa69";
+const approvedQaDigest = "6e12f6c9b14a127a08ed133b4ff6d1b7fa0ba60bd59939876cc0ef738dfe8133";
 const blockedResult = "{\"status\":\"blocked_expected\",\"blocked_telegram_org_attempts\":1,\"telegram_org_upstream_connects\":0,\"payloads_retained\":0}";
 const readyResult = "{\"status\":\"ready\",\"http_status\":200,\"asset_502_count\":0,\"browser_wss_status\":101,\"browser_wss_unique_targets\":1,\"observer_success_hosts\":1,\"observer_target_host\":\"teagram.tailaa4918.ts.net\",\"telegram_org_attempts\":0,\"payloads_retained\":0}";
 const acceptanceResultValue = {
@@ -1726,6 +1726,39 @@ test("a failed QA preflight exposes only its allow-listed failure code", async (
       assert.doesNotMatch(result.stdout, /private-canary/u);
     });
   }
+});
+
+test("QA WSS diagnostics survive nested host failures and teardown", async (t) => {
+  const qaOutput = wssError("socket-2-target-mismatch", 2, 2, false, 101);
+  const expectedDiagnostic = '"qa_failure_code":"websocket-not-ready","wss_diagnostic":"socket-2-target-mismatch",' +
+    '"wss_targets":2,"wss_handshakes":2,"wss_target_match":false,"wss_status":101';
+
+  for (const code of ["browser-failed", "runtime-changed"]) {
+    const paths = await setup(t);
+    const result = invokePreflight(paths, await preflightScript(paths), {
+      WRAPPER_PREFLIGHT_OUTPUT: qaOutput,
+      WRAPPER_PROBE_STATUS: "1",
+      WRAPPER_PROBE_OUTPUT: JSON.stringify(preflightProbeValue({ ok: false, code, browserExitOk: false })),
+    });
+    assert.equal(result.status, 1, code);
+    assert.equal(result.stdout,
+      `{"status":"error","code":"${code}",${expectedDiagnostic}}\n`, code);
+    assert.equal(result.stderr, "", code);
+  }
+
+  const paths = await setup(t);
+  const result = invokePreflight(paths, await preflightScript(paths), {
+    WRAPPER_PREFLIGHT_OUTPUT: qaOutput,
+    WRAPPER_PROBE_STATUS: "1",
+    WRAPPER_PROBE_OUTPUT: JSON.stringify(preflightProbeValue({
+      ok: false, code: "browser-failed", browserExitOk: false,
+    })),
+    WRAPPER_CLEANUP_FAILURE: "1",
+  });
+  assert.equal(result.status, 1);
+  assert.equal(result.stdout,
+    `{"status":"error","code":"cleanup-failed",${expectedDiagnostic}}\n`);
+  assert.equal(result.stderr, "");
 });
 
 test("a failed QA preflight code survives a later host stability or network failure", async (t) => {

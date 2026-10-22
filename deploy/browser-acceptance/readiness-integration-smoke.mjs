@@ -105,6 +105,17 @@ async function createFixture(directory, scenario, certificate) {
       }
       const script = (() => {
         if (["missing-wss", "manifest-mismatch", "manifest-mismatch-app-404"].includes(scenario)) return "";
+        if (scenario === "private-client-worker") {
+          const entryUrl = `https://${ALLOWED_HOST}/client/worker.js`;
+          const bootstrap = [
+            "const pendingConnects=[];",
+            "const holdConnect=(event)=>pendingConnects.push(event);",
+            "globalThis.addEventListener('connect',holdConnect);",
+            `try{await import(${JSON.stringify(entryUrl)});}finally{globalThis.removeEventListener('connect',holdConnect);}`,
+            "for(const event of pendingConnects){const source=event.ports?.[0]||event.source;globalThis.dispatchEvent(new MessageEvent('connect',{data:event.data,source}));}",
+          ].join("");
+          return `<script>const source=${JSON.stringify(bootstrap)};const url=URL.createObjectURL(new Blob([source],{type:"application/javascript"}));new SharedWorker(url,{type:"module"}).port.postMessage("request");</script>`;
+        }
         if (scenario === "shared-worker") {
           // The private web client starts its MTProto SharedWorker from a blob URL.
           return "<script>fetch(\"/client/worker.js\").then((response) => response.blob()).then((blob) => { new SharedWorker(URL.createObjectURL(blob), { type: \"module\" }).port.postMessage(\"request\"); });</script>";
@@ -167,7 +178,9 @@ async function createFixture(directory, scenario, certificate) {
       // opens its socket for the page's first request. Playwright resumes shared
       // workers itself, so only dedicated workers are held from their first statement.
       let body = socket;
-      if (scenario.startsWith("shared-worker")) {
+      if (scenario === "private-client-worker") {
+        body = `self.addEventListener("connect",(event)=>{const port=event.ports?.[0]||event.source;port.onmessage=()=>{for(const url of ${JSON.stringify(Array(4).fill(endpoint))}){const socket=new WebSocket(url);socket.onerror=()=>{};}};});`;
+      } else if (scenario.startsWith("shared-worker")) {
         body = pathname === "/client/worker.js"
           ? `import ${JSON.stringify(`https://${ALLOWED_HOST}/client/worker-chunk.js`)};`
           : `self.onconnect = (event) => { event.ports[0].onmessage = () => { ${socket} }; };`;
@@ -421,7 +434,7 @@ async function main() {
     const certificate = { key: await readFile(keyPath), cert: await readFile(certPath) };
 
     const positive = await runScenario(directory, "positive", certificate);
-    assert.equal(positive.result?.status, "ready", "positive.result?.status");
+    assert.equal(positive.result?.status, "ready", `positive.result?.status (${positive.error?.code ?? "no error code"})`);
     assert.equal(positive.result.http_status, 200, "positive.result.http_status");
     assert.equal(positive.result.browser_wss_status, 101, "positive.result.browser_wss_status");
     assert.equal(JSON.stringify(positive.result), READY_LINE, "JSON.stringify(positive.result)");
@@ -554,6 +567,9 @@ async function main() {
 
     const qaSharedWorker = await runQaScenario(directory, "shared-worker", certificate, qa);
     assert.deepEqual(qaSharedWorker.result, { connectionCount: 1, status101: true }, "qaSharedWorker.result");
+    const qaPrivateClientWorker = await runQaScenario(directory, "private-client-worker", certificate, qa);
+    assert.deepEqual(qaPrivateClientWorker.result, { connectionCount: 4, status101: true }, "qaPrivateClientWorker.result");
+    assert.equal(qaPrivateClientWorker.upgrades, 4, "qaPrivateClientWorker.upgrades");
     const qaDedicatedWorker = await runQaScenario(directory, "dedicated-worker", certificate, qa);
     assert.deepEqual(qaDedicatedWorker.result, { connectionCount: 1, status101: true }, "qaDedicatedWorker.result");
     const qaNestedWorker = await runQaScenario(directory, "nested-worker", certificate, qa);
@@ -602,6 +618,7 @@ async function main() {
       shared_worker_mismatch: sharedWorkerMismatchDiagnostic,
       shared_worker_silent: sharedWorkerSilentDiagnostic,
       qa_shared_worker: qaSharedWorker.result.connectionCount === 1 ? "ready" : "unexpected",
+      qa_private_client_worker: qaPrivateClientWorker.result.connectionCount === 4 ? "ready" : "unexpected",
       qa_dedicated_worker: qaDedicatedWorker.result.connectionCount === 1 ? "ready" : "unexpected",
       qa_nested_worker: qaNestedWorker.result.connectionCount === 1 ? "ready" : "unexpected",
       qa_nested_worker_mismatch: qaNestedWorkerMismatch.error.code,

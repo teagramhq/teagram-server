@@ -296,6 +296,13 @@ non-`none` failure code, and `password-check` or `signed-in` requires a
 password submission. Any schema, enum, range, or consistency failure makes
 the QA result invalid.
 
+For credential-free acceptance preflight, a QA `websocket-not-ready` result
+also carries the same validated `wss_*` fields in the wrapper error, including
+when the host probe reports a nested failure such as `browser-failed` or
+`runtime-changed`. A teardown failure changes the wrapper code to
+`cleanup-failed` while retaining a valid WSS diagnostic. Malformed diagnostics
+are discarded.
+
 The adapter's `snapshot`, `startIndependentCapture`, and `cleanupNewBinding`
 remain unprivileged and fail closed. Protected checks live in `host-probe.mjs`,
 which is neither copied into the image nor mounted into either container. The
