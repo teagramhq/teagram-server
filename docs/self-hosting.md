@@ -174,7 +174,7 @@ Caddy's loopback address:
 
 ```caddyfile
 server.example.net {
-    @teagram path /apiws /.well-known/teagramd/client /.well-known/telegramd/client
+    @teagram path /apiws /.well-known/teagramd/client
     reverse_proxy @teagram 127.0.0.1:2444 {
         transport http {
             keepalive off
@@ -229,7 +229,7 @@ Check the service and the public discovery document:
 sudo systemctl is-active teagramd
 sudo systemctl is-active haproxy
 sudo ss -lntp '( sport = :2443 )'
-curl --fail --show-error https://server.example.net/.well-known/telegramd/client
+curl --fail --show-error https://server.example.net/.well-known/teagramd/client
 sudo journalctl -u teagramd --since=-10m
 ```
 
@@ -371,7 +371,7 @@ restart_teagramd=0
 sudo sh -c 'set -a; . /etc/teagram/teagram.env; set +a; cd /opt/teagram && make migrate'
 sudo install -o root -g root -m 0755 /tmp/teagramd.new /opt/teagram/bin/teagramd
 sudo systemctl start teagramd
-curl --fail --show-error https://server.example.net/.well-known/telegramd/client
+curl --fail --show-error https://server.example.net/.well-known/teagramd/client
 trap - EXIT
 ```
 
