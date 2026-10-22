@@ -8,7 +8,7 @@ import (
 	"github.com/teagramhq/teagram-server/internal/store"
 )
 
-const appConfigHash = 4
+const appConfigHash = 5
 
 func (h *handlers) handleGetContentSettings(r *mtproto.Request) (bin.Encoder, error) {
 	var req tg.AccountGetContentSettingsRequest
@@ -77,6 +77,15 @@ func (h *handlers) handleGetAppConfig(r *mtproto.Request) (bin.Encoder, error) {
 	}, {
 		Key:   "registration_mode",
 		Value: &tg.JSONString{Value: string(h.registrationMode)},
+	}, {
+		Key:   "reactions_uniq_max",
+		Value: &tg.JSONNumber{Value: 11},
+	}, {
+		Key:   "reactions_user_max_default",
+		Value: &tg.JSONNumber{Value: 1},
+	}, {
+		Key:   "reactions_user_max_premium",
+		Value: &tg.JSONNumber{Value: 1},
 	}}
 	if h.turnstileSiteKey != "" && h.turnstileVerifier != nil {
 		values = append(values, tg.JSONObjectValue{

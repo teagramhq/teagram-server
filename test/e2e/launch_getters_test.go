@@ -251,8 +251,8 @@ func checkLaunchGetterResults(ctx context.Context, client *tg.Client) error {
 		if err := assertFullGetterVariant("messages.getAvailableReactions", availableReactions, &tg.MessagesAvailableReactions{}); err != nil {
 			return err
 		}
-		if result, ok := availableReactions.(*tg.MessagesAvailableReactions); ok && (result.Hash != 0 || len(result.Reactions) != 0) {
-			return fmt.Errorf("messages.getAvailableReactions = hash %d, %d reactions; want empty", result.Hash, len(result.Reactions))
+		if result, ok := availableReactions.(*tg.MessagesAvailableReactions); ok && (result.Hash == 0 || len(result.Reactions) == 0) {
+			return fmt.Errorf("messages.getAvailableReactions = hash %d, %d reactions; want non-empty", result.Hash, len(result.Reactions))
 		}
 
 		quickReplies, err := client.MessagesGetQuickReplies(ctx, hash)

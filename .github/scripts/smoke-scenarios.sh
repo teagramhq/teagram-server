@@ -20,6 +20,7 @@ SMOKE_SCENARIOS=(
   dialog-pins
   dialog-filters
   cloud-drafts
+  get-all-drafts
   manual-dialog-unread-mark
   notify-settings
   notify-settings-recovery
@@ -27,6 +28,7 @@ SMOKE_SCENARIOS=(
   unread-acknowledgements
   basic-group
   basic-group-reactions
+  available-reactions
   basic-group-photo
   delete-basic-group
   delete-history

@@ -1,0 +1,23 @@
+{
+  "layer": 228,
+  "client": "gotd v0.162.0",
+  "source": "captures/upload_getFile.2.txt",
+  "method": "upload.getFile",
+  "request": {
+    "type": "upload.getFile",
+    "flags": 0,
+    "fields": {
+      "location": {
+        "type": "inputDocumentFileLocation",
+        "fields": {
+          "id": "<N>",
+          "access_hash": "<N>",
+          "file_reference": "REDACTED",
+          "thumb_size": ""
+        }
+      },
+      "offset": 0,
+      "limit": 262144
+    }
+  }
+}

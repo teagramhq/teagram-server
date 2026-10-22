@@ -150,6 +150,10 @@ func TestSmoke(t *testing.T) {
 		t.Parallel()
 		testSmokeCloudDrafts(t)
 	})
+	t.Run("get-all-drafts", func(t *testing.T) {
+		t.Parallel()
+		testSmokeGetAllDrafts(t)
+	})
 	t.Run("manual-dialog-unread-mark", func(t *testing.T) {
 		t.Parallel()
 		testSmokeManualDialogUnreadMark(t)
@@ -173,6 +177,10 @@ func TestSmoke(t *testing.T) {
 	t.Run("basic-group-reactions", func(t *testing.T) {
 		t.Parallel()
 		testSmokeBasicGroupReactions(t)
+	})
+	t.Run("available-reactions", func(t *testing.T) {
+		t.Parallel()
+		testSmokeAvailableReactions(t)
 	})
 	t.Run("basic-group-photo", func(t *testing.T) {
 		t.Parallel()
@@ -843,8 +851,8 @@ func testSmokeAuthorizationDeviceMetadata(t *testing.T) {
 		wantDeviceModel := "MacBook" + strings.Repeat("X", 121)
 		if auth.DeviceModel != wantDeviceModel || auth.SystemVersion != strings.Repeat("a", 127) ||
 			auth.AppVersion != "6.1" || auth.Platform != "tdesktop" || auth.APIID != 1 ||
-			auth.AppName != "" || auth.IP != "127.0.0.1" || auth.Country != "" || auth.Region != "" {
-			return fmt.Errorf("authorization metadata = %+v, want sanitized initConnection fields and socket IP", auth)
+			auth.AppName != "" || auth.IP != "" || auth.Country != "" || auth.Region != "" {
+			return fmt.Errorf("authorization metadata = %+v, want sanitized labels and no session IP by default", auth)
 		}
 		return nil
 	}); err != nil {
@@ -1137,6 +1145,44 @@ func testSmokeCloudDrafts(t *testing.T) {
 		t.Fatalf("getDialogs with cloud draft: %v", err)
 	}
 	assertCloudDraftInDialogs(t, listed, b.ID, "smoke cloud draft", false, 0)
+}
+
+func testSmokeGetAllDrafts(t *testing.T) {
+	t.Helper()
+	f := newSmokeFixture(t)
+	const phoneA, phoneB = "+15551049131", "+15551049132"
+	seedSmokeUsers(t, f, phoneA, phoneB)
+	a := newSmokeClient(t, f, "get all drafts owner", phoneA)
+	peer := dialogPinUser(t, f, phoneB)
+	seedDialogPinDM(t, f, a.id, peer.ID, 1049131)
+
+	if err := saveCloudDraft(a, f.ctx, &tg.MessagesSaveDraftRequest{
+		Peer: peerUser(a.id, peer.ID), Message: "persisted draft for fresh session",
+	}); err != nil {
+		t.Fatalf("save cloud draft: %v", err)
+	}
+
+	b := newSmokeClient(t, f, "get all drafts fresh session", phoneA)
+	var got tg.UpdatesClass
+	if err := b.call(f.ctx, func(ctx context.Context, client *tg.Client) error {
+		var err error
+		got, err = client.MessagesGetAllDrafts(ctx)
+		return err
+	}); err != nil {
+		t.Fatalf("getAllDrafts in fresh session: %v", err)
+	}
+	updates, ok := got.(*tg.Updates)
+	if !ok {
+		t.Fatalf("getAllDrafts response = %T, want *tg.Updates", got)
+	}
+	if len(updates.Updates) != 1 {
+		t.Fatalf("getAllDrafts returned %d updates, want one persisted draft", len(updates.Updates))
+	}
+	update, ok := updates.Updates[0].(*tg.UpdateDraftMessage)
+	if !ok {
+		t.Fatalf("getAllDrafts update = %T, want *tg.UpdateDraftMessage", updates.Updates[0])
+	}
+	assertCloudDraftUpdate(t, update, peer.ID, "persisted draft for fresh session", false, 0)
 }
 
 func testSmokeDefaultDialogFilter(t *testing.T) {
@@ -5274,28 +5320,29 @@ func requireSmokeFullUser(users []tg.UserClass, userID int64, source string) (*t
 }
 
 type smokeFixture struct {
-	ctx                    context.Context
-	failures               *clientFailureSignal
-	key                    *rsa.PrivateKey
-	dsn                    string
-	store                  *store.Store
-	blobs                  blob.Store
-	photoThumbs            *photothumb.Supervisor
-	codes                  *multiCodeSink
-	authHandles            map[string]string
-	dcID                   int
-	port                   int
-	listener               *acceptCountingListener
-	registry               *mtproto.SessionRegistry
-	stop                   func()
-	stopCleanupRegistered  bool
-	regMode                config.RegistrationMode
-	welcomeChannel         string
-	turnstileSiteKey       string
-	turnstileVerifier      api.SignUpTurnstileVerifier
-	turnstileSignInEnabled bool
-	recoveryEmailMode      config.RecoveryEmailMode
-	persistStatus          bool
+	ctx                         context.Context
+	failures                    *clientFailureSignal
+	key                         *rsa.PrivateKey
+	dsn                         string
+	store                       *store.Store
+	blobs                       blob.Store
+	photoThumbs                 *photothumb.Supervisor
+	codes                       *multiCodeSink
+	authHandles                 map[string]string
+	dcID                        int
+	port                        int
+	listener                    *acceptCountingListener
+	registry                    *mtproto.SessionRegistry
+	stop                        func()
+	stopCleanupRegistered       bool
+	suppressChannelPostDelivery func(channelID int64) bool
+	regMode                     config.RegistrationMode
+	welcomeChannel              string
+	turnstileSiteKey            string
+	turnstileVerifier           api.SignUpTurnstileVerifier
+	turnstileSignInEnabled      bool
+	recoveryEmailMode           config.RecoveryEmailMode
+	persistStatus               bool
 	// rateLimits is the per-surface budget set the booted server gets.
 	// Zero, the fixture default, means no surface is limited, which is what
 	// every existing scenario assumes. A scenario that exists to prove a shipped
@@ -5754,7 +5801,7 @@ func (f *smokeFixture) start(t *testing.T, address string) {
 	registry, stop := bootServerWithLimitsAndRegistrationModeAndBlobsAndStatusWithDeliveryHookAndTurnstileAndWelcomeChannel(
 		t, f.ctx, f.key, f.dcID, f.store, f.dsn, f.codes.Logger(), ln, f.rateLimits, f.regMode,
 		f.blobs, f.persistStatus, nil, f.turnstileSiteKey, f.turnstileVerifier, f.welcomeChannel,
-		f.turnstileSignInEnabled, f.recoveryEmailMode, f.photoThumbs,
+		f.turnstileSignInEnabled, f.recoveryEmailMode, f.suppressChannelPostDelivery, f.photoThumbs,
 	)
 	f.registry = registry
 	f.setServerStop(t.Cleanup, stop)

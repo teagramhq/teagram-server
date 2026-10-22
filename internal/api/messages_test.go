@@ -74,8 +74,14 @@ func openStore(t *testing.T) *store.Store {
 // a fresh database, so the DSN has to come from the same call as the store.
 func openStoreDSN(t *testing.T) (*store.Store, string) {
 	t.Helper()
+	return openStoreDSNWithOptions(t)
+}
+
+func openStoreDSNWithOptions(t *testing.T, options ...store.Option) (*store.Store, string) {
+	t.Helper()
 	dsn := pgtest.DSN(t)
-	s, err := store.Open(context.Background(), dsn, pgtest.EncKey(), store.WithBlobStore(testBlobs(t)))
+	options = append([]store.Option{store.WithBlobStore(testBlobs(t))}, options...)
+	s, err := store.Open(context.Background(), dsn, pgtest.EncKey(), options...)
 	if err != nil {
 		t.Fatalf("open: %v", err)
 	}
