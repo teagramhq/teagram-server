@@ -1396,7 +1396,7 @@ def compose_environment(checkout: pathlib.Path, local: bool = False) -> dict[str
             "MOCK_LIVE_R70_INERT_SURFACES", "MOCK_FROZEN_PS",
             "MOCK_FROZEN_INSPECT", "MOCK_SOURCE_VOLUME_MOUNTPOINT",
             "MOCK_WRITER_RUNNING", "MOCK_LIVE_PS", "MOCK_LIVE_COMPOSE_FILES",
-            "MOCK_AUTHORITY_INSPECT",
+            "MOCK_AUTHORITY_INSPECT", "MOCK_S3_AUTHORITY_INSPECT",
             "MOCK_DUMP_RESTORE_FAIL",
         ):
             if os.environ.get(key):

@@ -594,6 +594,18 @@ exit 90
 
 
 class BlobTransitionAuthorityTests(unittest.TestCase):
+    def test_compose_environment_forwards_s3_authority_inspector(self) -> None:
+        runner = import_from_path("blob_transition_runner_compose_environment", RUNNER)
+        inspector = "/fixtures/s3-authority-inspect.jsonl"
+        with (
+            patch.object(runner, "TEST_MODE", True),
+            patch.object(runner, "TEST_FIXTURE_DOCKER", Path("/fixtures/docker")),
+            patch.dict(os.environ, {"MOCK_S3_AUTHORITY_INSPECT": inspector}),
+        ):
+            environment = runner.compose_environment(Path("/checkout"))
+
+        self.assertEqual(environment["MOCK_S3_AUTHORITY_INSPECT"], inspector)
+
     def test_live_teagramd_inventory_must_match_authority(self) -> None:
         runner = import_from_path("blob_transition_runner_live_authority", RUNNER)
         mode = mode_fixtures.blob_mode
