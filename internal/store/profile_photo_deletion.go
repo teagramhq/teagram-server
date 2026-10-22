@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 
@@ -83,21 +84,34 @@ func (s *Store) DeleteProfilePhotos(ctx context.Context, ownerID int64, fileIDs 
 	return live, nil
 }
 
-// ClearCurrentProfilePhoto removes the current entry and records the resolved
-// target against the authenticated transport request in the same transaction.
-// The owner lock serializes receipt detection with rate admission across
-// connections, and the charge commits with the clear. Replaying the same tuple
-// returns without resolving current again or spending another token; a new
-// msg_id remains a fresh clear.
+// ClearCurrentProfilePhoto removes the current entry with the production wait
+// bound.
 func (s *Store) ClearCurrentProfilePhoto(
 	ctx context.Context,
 	ownerID, authKeyID, sessionID, msgID int64,
 	rateLimit RateLimitConfig,
 ) error {
+	return s.ClearCurrentProfilePhotoWithWait(
+		ctx, ownerID, authKeyID, sessionID, msgID, rateLimit, ProfilePhotoSelectionWait,
+	)
+}
+
+// ClearCurrentProfilePhotoWithWait removes the current entry and records the resolved
+// target against the authenticated transport request in the same transaction.
+// The owner lock serializes receipt detection with rate admission across
+// connections, and the charge commits with the clear. Replaying the same tuple
+// returns without resolving current again or spending another token; a new
+// msg_id remains a fresh clear. wait bounds connection admission and lock wait.
+func (s *Store) ClearCurrentProfilePhotoWithWait(
+	ctx context.Context,
+	ownerID, authKeyID, sessionID, msgID int64,
+	rateLimit RateLimitConfig,
+	wait time.Duration,
+) error {
 	if authKeyID == 0 || msgID <= 0 {
 		return errors.New("profile photo clear: invalid transport request identity")
 	}
-	conn, tx, err := s.beginProfilePhotoMutation(ctx, ownerID)
+	conn, tx, err := s.beginProfilePhotoMutationWithWait(ctx, ownerID, wait)
 	if err != nil {
 		return err
 	}

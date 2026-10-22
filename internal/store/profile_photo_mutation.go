@@ -14,11 +14,22 @@ import (
 // profile-domain advisory lock. It never touches the messaging owner lock, and
 // both pool admission and lock contention share the same bounded wait.
 func (s *Store) beginProfilePhotoMutation(ctx context.Context, ownerID int64) (*pgxpool.Conn, pgx.Tx, error) {
+	return s.beginProfilePhotoMutationWithWait(ctx, ownerID, ProfilePhotoSelectionWait)
+}
+
+func (s *Store) beginProfilePhotoMutationWithWait(
+	ctx context.Context,
+	ownerID int64,
+	wait time.Duration,
+) (*pgxpool.Conn, pgx.Tx, error) {
 	class, object, ok := profileOwnerLockKey(ownerID)
 	if !ok {
 		return nil, nil, ErrProfilePhotoUnavailable
 	}
-	lockCtx, cancel := context.WithTimeout(ctx, ProfilePhotoSelectionWait)
+	if wait <= 0 {
+		wait = ProfilePhotoSelectionWait
+	}
+	lockCtx, cancel := context.WithTimeout(ctx, wait)
 	defer cancel()
 	lockWaitExpired := func() bool {
 		return ctx.Err() == nil && errors.Is(lockCtx.Err(), context.DeadlineExceeded)
