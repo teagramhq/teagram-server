@@ -33,6 +33,11 @@ BASE_SCHEMA = "20261021000003"
 # last release before them and then migrated to BASE_SCHEMA.
 SEED_SCHEMA = "20261021000002"
 HEAD_SCHEMA = "20261021000004"
+AUTH_KEY_INVENTORY_PATH = Path(__file__).with_name("auth-key-clearing-inventory.json")
+AUTH_KEY_FIXTURE_COUNT = 3
+AUTH_KEY_FIXTURE_STATE = ["3", "2", "3", "1", "2", "0"]
+AUTH_KEY_CLEARED_STATE = ["0", "0", "0", "1", "2", "2"]
+AUTH_KEY_CLEAR_ACK = b"RESTORE_READINESS_AUTH_KEY_DELETE_APPLIED"
 # Roles the repository migrations create; the restore imports no globals, so the target has none.
 MIGRATION_ROLES = "browser_acceptance_probe"
 WORK_SECONDS = 30 * 60
@@ -48,6 +53,7 @@ SAFE_PHASES = {
     "restore",
     "schema_validation",
     "pending_migration",
+    "auth_key_clearing",
     "daemon_startup",
     "application_assertions",
     "cleanup",
@@ -64,6 +70,8 @@ SAFE_CATEGORIES = {
     "provisioning_failure",
     "auth_failure",
     "assertion_failure",
+    "auth_key_clear_failure",
+    "fault_test_failure",
     "timeout",
     "interrupted",
     "cleanup_failure",
@@ -88,12 +96,270 @@ def bounded_work_seconds(fault_test: str | None, requested: int | None) -> int:
 
 ROOT = Path(__file__).resolve().parents[3]
 MIGRATION_HEAD_SQL = "SELECT COALESCE(max(version), '') FROM atlas_schema_revisions.atlas_schema_revisions;"
+DATABASE_IDENTITY_SQL = r"""
+SELECT current_database() || '|' || current_setting('server_version_num') || '|' ||
+       (SELECT oid::text FROM pg_database WHERE datname = current_database()) || '|' ||
+       (SELECT system_identifier::text FROM pg_control_system());
+"""
+AUTH_KEY_INVENTORY_SQL = r"""
+WITH auth_keys AS (
+  SELECT 'public.auth_keys'::regclass AS relation
+), clearing_relations AS (
+  SELECT relation FROM auth_keys
+  UNION SELECT 'public.srp_challenges'::regclass
+  UNION SELECT 'public.notify_settings_difference_cursors'::regclass
+  UNION SELECT 'public.browser_acceptance_binding_evidence'::regclass
+), foreign_keys AS (
+  SELECT con.conname AS name,
+         jsonb_build_object(
+           'name', con.conname,
+           'table', format('%I.%I', child_ns.nspname, child.relname),
+           'columns', (
+             SELECT jsonb_agg(attribute.attname ORDER BY key_column.ordinality)
+             FROM unnest(con.conkey) WITH ORDINALITY AS key_column(attnum, ordinality)
+             JOIN pg_attribute AS attribute
+               ON attribute.attrelid = child.oid AND attribute.attnum = key_column.attnum
+           ),
+           'references', format('%I.%I', parent_ns.nspname, parent.relname),
+           'referenced_columns', (
+             SELECT jsonb_agg(attribute.attname ORDER BY key_column.ordinality)
+             FROM unnest(con.confkey) WITH ORDINALITY AS key_column(attnum, ordinality)
+             JOIN pg_attribute AS attribute
+               ON attribute.attrelid = parent.oid AND attribute.attnum = key_column.attnum
+           ),
+           'on_delete', CASE con.confdeltype
+             WHEN 'a' THEN 'NO ACTION' WHEN 'r' THEN 'RESTRICT' WHEN 'c' THEN 'CASCADE'
+             WHEN 'n' THEN 'SET NULL' WHEN 'd' THEN 'SET DEFAULT' END,
+           'on_update', CASE con.confupdtype
+             WHEN 'a' THEN 'NO ACTION' WHEN 'r' THEN 'RESTRICT' WHEN 'c' THEN 'CASCADE'
+             WHEN 'n' THEN 'SET NULL' WHEN 'd' THEN 'SET DEFAULT' END,
+           'match', CASE con.confmatchtype
+             WHEN 's' THEN 'SIMPLE' WHEN 'f' THEN 'FULL' WHEN 'p' THEN 'PARTIAL' END,
+           'deferrable', con.condeferrable,
+           'initially_deferred', con.condeferred,
+           'validated', con.convalidated
+         ) AS entry
+  FROM pg_constraint AS con
+  JOIN pg_class AS child ON child.oid = con.conrelid
+  JOIN pg_namespace AS child_ns ON child_ns.oid = child.relnamespace
+  JOIN pg_class AS parent ON parent.oid = con.confrelid
+  JOIN pg_namespace AS parent_ns ON parent_ns.oid = parent.relnamespace
+  WHERE con.contype = 'f'
+    AND (child.oid = (SELECT relation FROM auth_keys)
+      OR parent.oid = (SELECT relation FROM auth_keys))
+), triggers AS (
+  SELECT tg.tgname AS name,
+         jsonb_build_object(
+           'name', tg.tgname,
+           'table', format('%I.%I', table_ns.nspname, relation.relname),
+           'timing', CASE WHEN (tg.tgtype & 2) <> 0 THEN 'BEFORE'
+                          WHEN (tg.tgtype & 64) <> 0 THEN 'INSTEAD OF'
+                          ELSE 'AFTER' END,
+           'level', CASE WHEN (tg.tgtype & 1) <> 0 THEN 'ROW' ELSE 'STATEMENT' END,
+           'events', array_remove(ARRAY[
+             CASE WHEN (tg.tgtype & 4) <> 0 THEN 'INSERT' END,
+             CASE WHEN (tg.tgtype & 8) <> 0 THEN 'DELETE' END,
+             CASE WHEN (tg.tgtype & 16) <> 0 THEN 'UPDATE' END,
+             CASE WHEN (tg.tgtype & 32) <> 0 THEN 'TRUNCATE' END
+           ]::text[], NULL),
+           'enabled', CASE tg.tgenabled WHEN 'A' THEN 'ALWAYS'
+                                        WHEN 'R' THEN 'REPLICA'
+                                        WHEN 'O' THEN 'ORIGIN' ELSE 'DISABLED' END,
+           'function', function_ns.nspname || '.' || proc.proname
+         ) AS entry
+  FROM pg_trigger AS tg
+  JOIN pg_class AS relation ON relation.oid = tg.tgrelid
+  JOIN pg_namespace AS table_ns ON table_ns.oid = relation.relnamespace
+  JOIN pg_proc AS proc ON proc.oid = tg.tgfoid
+  JOIN pg_namespace AS function_ns ON function_ns.oid = proc.pronamespace
+  WHERE tg.tgrelid IN (SELECT relation FROM clearing_relations)
+    AND NOT tg.tgisinternal
+)
+SELECT jsonb_build_object(
+  'trigger_tables', COALESCE((
+    SELECT jsonb_agg(
+      format('%I.%I', table_ns.nspname, relation.relname)
+      ORDER BY table_ns.nspname, relation.relname
+    )
+    FROM clearing_relations
+    JOIN pg_class AS relation ON relation.oid = clearing_relations.relation
+    JOIN pg_namespace AS table_ns ON table_ns.oid = relation.relnamespace
+  ), '[]'::jsonb),
+  'foreign_keys', COALESCE((SELECT jsonb_agg(entry ORDER BY name) FROM foreign_keys), '[]'::jsonb),
+  'triggers', COALESCE((SELECT jsonb_agg(entry ORDER BY name) FROM triggers), '[]'::jsonb)
+)::text;
+"""
+AUTH_KEY_STATE_SQL = r"""
+SELECT
+  (SELECT count(*) FROM public.auth_keys)::text || '|' ||
+  (SELECT count(*) FROM public.srp_challenges)::text || '|' ||
+  (SELECT count(*) FROM public.notify_settings_difference_cursors)::text || '|' ||
+  (SELECT count(*) FROM public.browser_acceptance_binding_evidence)::text || '|' ||
+  (SELECT COALESCE(sum(additions), 0) FROM public.browser_acceptance_binding_evidence)::text || '|' ||
+  (SELECT COALESCE(sum(removals), 0) FROM public.browser_acceptance_binding_evidence)::text;
+"""
+AUTH_KEY_COUNT_SQL = "SELECT count(*)::text FROM public.auth_keys;"
 
 
 def malformed_sql_fixture(token: str) -> str:
     if not re.fullmatch(r"[0-9a-f]{32}", token):
         raise ValueError("invalid fixture token")
     return f'SELEC "restore_readiness_{token}";'
+
+
+def validate_synthetic_auth_key_ids(auth_key_ids: list[int] | tuple[int, ...]) -> tuple[int, ...]:
+    if (
+        len(auth_key_ids) != AUTH_KEY_FIXTURE_COUNT
+        or any(
+            type(identifier) is not int
+            or identifier >= 0
+            or identifier <= -(1 << 63)
+            for identifier in auth_key_ids
+        )
+        or len(set(auth_key_ids)) != AUTH_KEY_FIXTURE_COUNT
+    ):
+        raise ValueError("invalid synthetic auth-key identifiers")
+    return tuple(auth_key_ids)
+
+
+def load_auth_key_inventory() -> dict[str, Any]:
+    try:
+        inventory = json.loads(AUTH_KEY_INVENTORY_PATH.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError, UnicodeDecodeError) as exc:
+        raise ValueError("auth-key inventory is unavailable") from exc
+    if (
+        not isinstance(inventory, dict)
+        or inventory.get("schema_head") != HEAD_SCHEMA
+        or not isinstance(inventory.get("foreign_keys"), list)
+        or not isinstance(inventory.get("triggers"), list)
+        or not isinstance(inventory.get("trigger_tables"), list)
+    ):
+        raise ValueError("auth-key inventory is invalid")
+    return inventory
+
+
+def synthetic_auth_key_fixture_sql(auth_key_ids: list[int] | tuple[int, ...]) -> str:
+    first, second, pending = validate_synthetic_auth_key_ids(auth_key_ids)
+    srp_first = abs(first)
+    srp_second = abs(second)
+    values = ",\n    ".join(
+        (
+            f"({first}, decode(repeat('a5', 256), 'hex'), fixture_user_id, NULL)",
+            f"({second}, decode(repeat('5a', 256), 'hex'), fixture_user_id, NULL)",
+            f"({pending}, decode(repeat('3c', 256), 'hex'), NULL, fixture_user_id)",
+        )
+    )
+    return f"""
+DO $auth_key_fixture$
+DECLARE
+  fixture_user_id BIGINT;
+BEGIN
+  SELECT id INTO STRICT fixture_user_id FROM public.users;
+  IF (SELECT count(*) FROM public.auth_keys) <> 0 THEN
+    RAISE EXCEPTION 'unexpected auth-key fixture state';
+  END IF;
+  PERFORM public.browser_acceptance_enroll_binding_evidence(fixture_user_id);
+  INSERT INTO public.auth_keys (id, key_value, user_id, pending_user_id)
+  VALUES
+    {values};
+  INSERT INTO public.srp_challenges (srp_id, auth_key_id, user_id, b_secret, b_public, expires_at)
+  VALUES
+    ({srp_first}, {first}, fixture_user_id, decode(repeat('11', 32), 'hex'), decode(repeat('22', 32), 'hex'), now() + interval '1 hour'),
+    ({srp_second}, {second}, fixture_user_id, decode(repeat('33', 32), 'hex'), decode(repeat('44', 32), 'hex'), now() + interval '1 hour');
+  INSERT INTO public.notify_settings_difference_cursors (
+    auth_key_id, user_id, cutoff, resume_date, secret_chat_resume_at,
+    last_changed_at, last_scope, last_peer_type, last_peer_id,
+    state_pts, state_qts, state_date, state_seq
+  )
+  SELECT auth_key.id, fixture_user_id, now(), 0, now(), now(), 0, 0, 0, 0, 0, 0, 0
+  FROM public.auth_keys AS auth_key
+  WHERE auth_key.id IN ({first}, {second}, {pending});
+END
+$auth_key_fixture$;
+"""
+
+
+def auth_key_clear_transaction_sql(
+    auth_key_ids: list[int] | tuple[int, ...], *, inject_failure: bool = False, wait_for_signal: bool = False
+) -> str:
+    identifiers = validate_synthetic_auth_key_ids(auth_key_ids)
+    expected_fixture_state = ", ".join(AUTH_KEY_FIXTURE_STATE)
+    statements = [
+        "BEGIN;",
+        "LOCK TABLE public.auth_keys, public.srp_challenges, "
+        "public.notify_settings_difference_cursors, public.browser_acceptance_binding_evidence "
+        "IN ACCESS EXCLUSIVE MODE;",
+        f"""DO $auth_key_preclear$
+DECLARE
+  auth_key_count BIGINT;
+  srp_challenge_count BIGINT;
+  cursor_count BIGINT;
+  evidence_count BIGINT;
+  addition_count BIGINT;
+  removal_count BIGINT;
+BEGIN
+  SELECT count(*) INTO auth_key_count FROM public.auth_keys;
+  SELECT count(*) INTO srp_challenge_count FROM public.srp_challenges;
+  SELECT count(*) INTO cursor_count FROM public.notify_settings_difference_cursors;
+  SELECT count(*) INTO evidence_count FROM public.browser_acceptance_binding_evidence;
+  SELECT COALESCE(sum(additions), 0) INTO addition_count FROM public.browser_acceptance_binding_evidence;
+  SELECT COALESCE(sum(removals), 0) INTO removal_count FROM public.browser_acceptance_binding_evidence;
+  IF (auth_key_count, srp_challenge_count, cursor_count, evidence_count, addition_count, removal_count)
+     IS DISTINCT FROM ({expected_fixture_state}) THEN
+    RAISE EXCEPTION 'auth-key clearing precondition mismatch';
+  END IF;
+END
+$auth_key_preclear$;""",
+        f"DELETE FROM public.auth_keys WHERE id IN ({', '.join(str(identifier) for identifier in identifiers)});",
+        """DO $auth_key_clear$
+DECLARE
+  remaining_auth_keys BIGINT;
+BEGIN
+  SELECT count(*) INTO remaining_auth_keys FROM public.auth_keys;
+  IF remaining_auth_keys <> 0 THEN
+    RAISE EXCEPTION 'auth-key clearing count mismatch';
+  END IF;
+END
+$auth_key_clear$;""",
+    ]
+    if inject_failure or wait_for_signal:
+        statements.append(r"\echo RESTORE_READINESS_AUTH_KEY_DELETE_APPLIED")
+    if inject_failure:
+        statements.append("SELECT 1 / 0;")
+    if wait_for_signal:
+        statements.append("SELECT pg_sleep(30);")
+    statements.append("COMMIT;")
+    return "\n".join(statements) + "\n"
+
+
+def auth_key_clear_fault_category(
+    fault_kind: str,
+    before: list[str],
+    after: list[str],
+    *,
+    client_status: int | None = None,
+    container_status: int | None = None,
+    stdout: bytes = b"",
+    stderr: bytes = b"",
+    interrupt_acknowledged: bool = False,
+) -> str:
+    if before != after:
+        return "fault_test_failure"
+    if fault_kind == "signal":
+        return "interrupted" if interrupt_acknowledged else "fault_test_failure"
+    if fault_kind != "failure":
+        return "fault_test_failure"
+    expected_error = re.search(
+        rb"(?:^|\n)ERROR:[ \t]+division by zero(?:\r?\n|$)", stdout + stderr
+    )
+    if (
+        AUTH_KEY_CLEAR_ACK in stdout
+        and client_status == 3
+        and container_status == 3
+        and expected_error is not None
+    ):
+        return "auth_key_clear_failure"
+    return "fault_test_failure"
 
 
 FIXTURE_STATE_SQL = """
@@ -462,6 +728,7 @@ def report_document(
     migration_head: str = "not_reached",
     help_get_config: str = "not_run",
     synthetic_signin: str = "not_run",
+    auth_keys_cleared: str = "not_run",
 ) -> dict[str, Any]:
     if phase not in SAFE_PHASES | {"preflight"} or category not in SAFE_CATEGORIES:
         raise ValueError("invalid report value")
@@ -473,15 +740,23 @@ def report_document(
         raise ValueError("invalid config assertion")
     if synthetic_signin not in {"pass", "fail", "not_run"}:
         raise ValueError("invalid sign-in assertion")
+    if auth_keys_cleared not in {"pass", "not_run"}:
+        raise ValueError("invalid auth-key clearing assertion")
     success = category == "assertions_passed" and cleanup == "verified"
     if success:
-        if migration_head != HEAD_SCHEMA or help_get_config != "pass" or synthetic_signin != "pass":
+        if (
+            migration_head != HEAD_SCHEMA
+            or help_get_config != "pass"
+            or synthetic_signin != "pass"
+            or auth_keys_cleared != "pass"
+        ):
             raise ValueError("incomplete success report")
         return {
             "result": "pass",
             "migration_head": migration_head,
             "help_getConfig": help_get_config,
             "synthetic_signin": synthetic_signin,
+            "auth_keys_cleared": auth_keys_cleared,
             "cleanup": cleanup,
             "elapsed_ms": max(0, int(elapsed_ms)),
             "exit": 0,
@@ -868,6 +1143,7 @@ class Docker:
         category: str,
         timeout: float = 30,
         input_bytes: bytes | None = None,
+        allow_interrupted: bool = False,
     ) -> bytes:
         if time.monotonic() >= self.manifest["work_deadline"]:
             raise DrillFailure(phase, "timeout")
@@ -879,7 +1155,7 @@ class Docker:
             phase=phase,
             category=category,
         )
-        if getattr(self, "interrupted", None):
+        if getattr(self, "interrupted", None) and not allow_interrupted:
             raise DrillFailure(phase, "interrupted")
         if len(output) > MAX_CAPTURE:
             raise DrillFailure(phase, category)
@@ -1246,6 +1522,7 @@ class Drill(Docker):
         self.manifest_path = run_dir / "ownership.json"
         super().__init__(args.docker_bin, self.manifest_path, manifest)
         self.phase = "preflight"
+        self.preflight_step = "initialize private run"
         self.started = time.monotonic()
         self.gateway: GatewayFixture | None = None
         self.images: dict[str, dict[str, Any]] = {}
@@ -1254,6 +1531,9 @@ class Drill(Docker):
         self.databases: dict[str, dict[str, Any]] = {}
         self.checker_result = {"help_getConfig": "not_run", "synthetic_signin": "not_run"}
         self.migration_head = "not_reached"
+        self.synthetic_auth_key_ids: tuple[int, ...] = ()
+        self.post_restore_marker: dict[str, Any] | None = None
+        self.auth_keys_cleared = False
         self.supervisor: subprocess.Popen[bytes] | None = None
         self.interrupted: str | None = None
 
@@ -1319,10 +1599,14 @@ class Drill(Docker):
 
     def preflight(self) -> tuple[str, str]:
         self.phase = "preflight"
+        self.preflight_step = "privileges and environment"
         if os.geteuid() != 0 or not validate_ambient_environment(dict(os.environ)):
             raise DrillFailure(self.phase, "preflight_failure")
+        self.preflight_step = "compiled build inputs"
         self.validate_build_inputs()
+        self.preflight_step = "Docker CLI process inventory"
         baseline_docker_pids = docker_cli_pids()
+        self.preflight_step = "/run tmpfs"
         fs_type = subprocess.run(
             ["stat", "-f", "-c", "%T", "/run"],
             stdout=subprocess.PIPE,
@@ -1333,6 +1617,7 @@ class Drill(Docker):
         )
         if fs_type.returncode != 0 or fs_type.stdout.decode("ascii", "ignore").strip() != "tmpfs":
             raise DrillFailure(self.phase, "preflight_failure")
+        self.preflight_step = "root Docker configuration"
         config_path = Path("/root/.docker/config.json")
         if config_path.exists():
             try:
@@ -1341,9 +1626,11 @@ class Drill(Docker):
                 raise DrillFailure(self.phase, "isolation_refusal") from exc
             if any(config.get(key) for key in ("auths", "credsStore", "credHelpers")):
                 raise DrillFailure(self.phase, "isolation_refusal")
+        self.preflight_step = "default Docker context"
         context = self.call(["context", "show"], phase=self.phase, category="isolation_refusal").decode().strip()
         if context != "default":
             raise DrillFailure(self.phase, "isolation_refusal")
+        self.preflight_step = "Docker daemon security options"
         security = self.call(
             ["info", "--format", "{{json .SecurityOptions}}"],
             phase=self.phase,
@@ -1358,6 +1645,7 @@ class Drill(Docker):
             for item in security_options
         ):
             raise DrillFailure(self.phase, "isolation_refusal")
+        self.preflight_step = "default Docker endpoint"
         endpoint = self.call(
             ["context", "inspect", "default", "--format", "{{json .Endpoints.docker}}"],
             phase=self.phase,
@@ -1369,6 +1657,7 @@ class Drill(Docker):
             raise DrillFailure(self.phase, "isolation_refusal") from exc
         if not isinstance(endpoint_value, dict) or endpoint_value.get("Host") != "unix:///var/run/docker.sock":
             raise DrillFailure(self.phase, "isolation_refusal")
+        self.preflight_step = "Docker bridge gateway"
         gateway = self.call(
             ["network", "inspect", "bridge", "--format", "{{(index .IPAM.Config 0).Gateway}}"],
             phase=self.phase,
@@ -1378,6 +1667,7 @@ class Drill(Docker):
             ipaddress.IPv4Address(gateway)
         except ipaddress.AddressValueError as exc:
             raise DrillFailure(self.phase, "isolation_refusal") from exc
+        self.preflight_step = "baseline Docker resource inventory"
         existing_containers = self.list_containers(self.phase)
         existing_volumes = self.list_volumes(self.phase)
         existing_networks = self.list_networks(self.phase)
@@ -1387,6 +1677,7 @@ class Drill(Docker):
             "networks": sorted(existing_networks),
             "docker_processes": baseline_docker_pids,
         }
+        self.preflight_step = "save baseline Docker inventory"
         self.save()
         if existing_containers or existing_volumes or existing_networks != {"bridge", "host", "none"}:
             raise DrillFailure(self.phase, "isolation_refusal")
@@ -1795,30 +2086,81 @@ class Drill(Docker):
         phase: str,
         category: str,
         stdin: Any = None,
+        input_bytes: bytes | None = None,
+        interrupt_signal: int | None = None,
+        interrupt_ack: bytes | None = None,
+        accept_nonzero: bool = False,
+        capture_stderr: bool = False,
         timeout: float = 600,
         max_bytes: int = MAX_CAPTURE,
     ) -> bytes:
         self.attest_container(record, phase)
+        self.last_attached_status: int | None = None
+        self.last_attached_stderr = b""
+        self.last_attached_interrupt_acknowledged = False
         process: subprocess.Popen[bytes] | None = None
         tracked: dict[str, int] | None = None
+        interrupt_finished = threading.Event()
+        interrupt_thread: threading.Thread | None = None
+        stdout_capture: Any = None
+        stderr_capture: Any = None
         try:
+            if interrupt_signal is None and interrupt_ack is not None:
+                raise DrillFailure(phase, "preflight_failure")
+            if interrupt_signal is not None:
+                if interrupt_signal not in {signal.SIGINT, signal.SIGTERM} or not interrupt_ack:
+                    raise DrillFailure(phase, "preflight_failure")
+                stdout_capture = tempfile.TemporaryFile()
+                stderr_capture = tempfile.TemporaryFile()
             process = subprocess.Popen(
                 [self.executable, "start", "--attach", "--interactive", record["id"]],
-                stdin=stdin if stdin is not None else subprocess.DEVNULL,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.DEVNULL,
+                stdin=subprocess.PIPE if input_bytes is not None else stdin if stdin is not None else subprocess.DEVNULL,
+                stdout=stdout_capture if stdout_capture is not None else subprocess.PIPE,
+                stderr=(
+                    stderr_capture
+                    if stderr_capture is not None
+                    else subprocess.PIPE if capture_stderr else subprocess.DEVNULL
+                ),
                 env=self.environment,
             )
             tracked = self._track_child(process)
+            if interrupt_signal is not None:
+                def interrupt_after_ack() -> None:
+                    assert stdout_capture is not None and interrupt_ack is not None
+                    while not interrupt_finished.wait(0.02):
+                        try:
+                            output = os.pread(stdout_capture.fileno(), max_bytes + 1, 0)
+                        except OSError:
+                            return
+                        if interrupt_ack in output:
+                            self.last_attached_interrupt_acknowledged = True
+                            try:
+                                os.kill(os.getpid(), interrupt_signal)
+                            except OSError:
+                                return
+                            return
+                        if process is not None and process.poll() is not None:
+                            return
+
+                interrupt_thread = threading.Thread(target=interrupt_after_ack, daemon=True)
+                interrupt_thread.start()
             try:
-                output, _ = process.communicate(
+                output, error = process.communicate(
+                    input=input_bytes,
                     timeout=max(1, min(timeout, self.manifest["work_deadline"] - time.monotonic()))
                 )
             except subprocess.TimeoutExpired as exc:
                 if not self._terminate_and_reap(process):
                     raise DrillFailure("cleanup", "cleanup_failure") from exc
                 raise DrillFailure(phase, "timeout") from exc
-            if process.returncode != 0 or len(output) > max_bytes:
+            if stdout_capture is not None:
+                output = os.pread(stdout_capture.fileno(), max_bytes + 1, 0)
+                error = os.pread(stderr_capture.fileno(), max_bytes + 1, 0) if stderr_capture is not None else b""
+            output = output or b""
+            error = error or b""
+            self.last_attached_status = int(process.returncode or 0)
+            self.last_attached_stderr = error
+            if (process.returncode != 0 and not accept_nonzero) or len(output) > max_bytes or len(error) > max_bytes:
                 raise DrillFailure(phase, category)
             return output
         except subprocess.TimeoutExpired as exc:
@@ -1826,10 +2168,17 @@ class Drill(Docker):
         except OSError as exc:
             raise DrillFailure(phase, category) from exc
         finally:
+            interrupt_finished.set()
+            if interrupt_thread is not None:
+                interrupt_thread.join(timeout=1)
             if process is not None:
                 reaped = process.poll() is not None or self._terminate_and_reap(process)
                 if tracked is not None and reaped:
                     self._untrack_child(tracked)
+            if stdout_capture is not None:
+                stdout_capture.close()
+            if stderr_capture is not None:
+                stderr_capture.close()
 
     def attached_status(
         self,
@@ -2270,7 +2619,9 @@ class Drill(Docker):
         record["removed"] = True
         self.save()
 
-    def sql(self, database: dict[str, Any], statement: str, phase: str) -> str:
+    def sql(
+        self, database: dict[str, Any], statement: str, phase: str, *, allow_interrupted: bool = False
+    ) -> str:
         output = self.call(
             [
                 "exec",
@@ -2294,6 +2645,7 @@ class Drill(Docker):
             category="schema_failure",
             input_bytes=statement.encode("utf-8"),
             timeout=60,
+            allow_interrupted=allow_interrupted,
         )
         try:
             return output.decode("ascii", "strict").strip()
@@ -2506,9 +2858,10 @@ class Drill(Docker):
         expected_roles: str,
         phase: str,
         expected_head: str = BASE_SCHEMA,
+        expected_auth_keys: int = 0,
     ) -> None:
         state = self.fixture_state(database, phase)
-        if state != ["0", str(expected_users), expected_roles, "pg_stat_statements,plpgsql", "0", "0", "0", "0", "0"]:
+        if state != [str(expected_auth_keys), str(expected_users), expected_roles, "pg_stat_statements,plpgsql", "0", "0", "0", "0", "0"]:
             raise DrillFailure(phase, "schema_failure")
         head = self.sql(database, MIGRATION_HEAD_SQL, phase)
         if head != expected_head:
@@ -2540,6 +2893,18 @@ class Drill(Docker):
         self.verify_schema_state(database, 1, MIGRATION_ROLES, self.phase, SEED_SCHEMA)
         for key in ("source_dsn", "seed_authkey", "seed_username", "seed_password"):
             self.delete_private_file(self.files[key])
+
+    def seed_source_auth_key_fixture(self, database: dict[str, Any]) -> None:
+        self.phase = "fixture_generation"
+        generated_ids: list[int] = []
+        while len(generated_ids) < AUTH_KEY_FIXTURE_COUNT:
+            candidate = -(secrets.randbelow(9_000_000_000_000_000_000) + 1)
+            if candidate not in generated_ids:
+                generated_ids.append(candidate)
+        self.synthetic_auth_key_ids = validate_synthetic_auth_key_ids(generated_ids)
+        self.sql(database, synthetic_auth_key_fixture_sql(self.synthetic_auth_key_ids), self.phase)
+        if self.sql(database, AUTH_KEY_STATE_SQL, self.phase).split("|") != AUTH_KEY_FIXTURE_STATE:
+            raise DrillFailure(self.phase, "fixture_failure")
 
     def create_egress_probe(self, gateway: str) -> None:
         self.phase = "preflight"
@@ -2665,10 +3030,9 @@ class Drill(Docker):
         self.discard_container(source_client, self.phase, "restore_failure")
         self.discard_container(target_client, self.phase, "restore_failure")
         self.delete_private_file(self.files["source_tool_env"])
-        self.delete_private_file(self.files["target_tool_env"])
 
         self.phase = "schema_validation"
-        self.verify_schema_state(target, 1, "", self.phase)
+        self.verify_schema_state(target, 1, "", self.phase, expected_auth_keys=AUTH_KEY_FIXTURE_COUNT)
         source_inventory = self.object_inventory(source, self.phase)
         target_inventory = self.object_inventory(target, self.phase)
         source_rows = self.table_counts(source, self.phase)
@@ -2687,8 +3051,264 @@ class Drill(Docker):
         if self.migration_head != HEAD_SCHEMA or self.sql(target, INDEX_VALID_SQL, "pending_migration") != "valid":
             raise DrillFailure("pending_migration", "schema_failure")
 
+    def auth_key_state(self, database: dict[str, Any], phase: str, *, allow_interrupted: bool = False) -> list[str]:
+        state = self.sql(database, AUTH_KEY_STATE_SQL, phase, allow_interrupted=allow_interrupted).split("|")
+        if len(state) != 6 or any(not value.isdigit() for value in state):
+            raise DrillFailure(phase, "schema_failure")
+        return state
+
+    def verify_auth_key_inventory(self, database: dict[str, Any], phase: str) -> None:
+        try:
+            expected = load_auth_key_inventory()
+            actual = json.loads(self.sql(database, AUTH_KEY_INVENTORY_SQL, phase))
+        except (ValueError, json.JSONDecodeError) as exc:
+            raise DrillFailure(phase, "schema_failure") from exc
+        expected_inventory = {key: expected[key] for key in ("trigger_tables", "foreign_keys", "triggers")}
+        if actual != expected_inventory:
+            raise DrillFailure(phase, "schema_failure")
+
+    @staticmethod
+    def auth_key_clear_marker_path(run_dir: Path) -> Path:
+        return run_dir / "work" / "post-restore-marker.json"
+
+    def write_post_restore_marker(self, target: dict[str, Any]) -> None:
+        self.phase = "schema_validation"
+        if target is not self.databases.get("target"):
+            raise DrillFailure(self.phase, "isolation_refusal")
+        document = self.attest_container(target, self.phase)
+        require_container_running(document, self.phase, "schema_failure")
+        if self.sql(target, MIGRATION_HEAD_SQL, self.phase) != HEAD_SCHEMA:
+            raise DrillFailure(self.phase, "schema_failure")
+        self.verify_auth_key_inventory(target, self.phase)
+        auth_key_state = self.auth_key_state(target, self.phase)
+        if auth_key_state != AUTH_KEY_FIXTURE_STATE:
+            raise DrillFailure(self.phase, "schema_failure")
+        marker = {
+            "schema_version": 1,
+            "target_container_id": target["id"],
+            "database_identity": self.sql(target, DATABASE_IDENTITY_SQL, self.phase),
+            "migration_head": HEAD_SCHEMA,
+            "table_counts": self.table_counts(target, self.phase)[1],
+            "auth_key_state": auth_key_state,
+        }
+        encoded = (json.dumps(marker, separators=(",", ":"), sort_keys=True) + "\n").encode()
+        self.private_write(
+            self.auth_key_clear_marker_path(self.run_dir),
+            encoded,
+            mode=0o400,
+            purpose="post_restore_marker",
+        )
+        self.post_restore_marker = marker
+
+    def validate_auth_key_clear_target(self, target: dict[str, Any]) -> dict[str, Any]:
+        phase = "auth_key_clearing"
+        if (
+            target is not self.databases.get("target")
+            or target.get("role") != "target_postgres"
+            or target.get("removed")
+            or self.manifest.get("processes")
+            or self.auth_keys_cleared
+        ):
+            raise DrillFailure(phase, "isolation_refusal")
+        owned = next(
+            (record for record in self.manifest.get("containers", []) if record.get("id") == target.get("id")),
+            None,
+        )
+        if owned is not target or any(
+            not record.get("removed") and record.get("role") not in {"source_postgres", "target_postgres"}
+            for record in self.manifest.get("containers", [])
+        ):
+            raise DrillFailure(phase, "isolation_refusal")
+        marker_path = self.auth_key_clear_marker_path(self.run_dir)
+        try:
+            raw_marker = self.private_read(marker_path, max_bytes=4096)
+            marker = json.loads(raw_marker, object_pairs_hook=unique_json_object)
+        except (DrillFailure, OSError, ValueError, json.JSONDecodeError) as exc:
+            raise DrillFailure(phase, "isolation_refusal") from exc
+        if (
+            self.post_restore_marker is None
+            or marker != self.post_restore_marker
+            or marker.get("target_container_id") != target.get("id")
+            or marker.get("migration_head") != HEAD_SCHEMA
+        ):
+            raise DrillFailure(phase, "isolation_refusal")
+        document = self.attest_container(target, phase)
+        require_container_running(document, phase, "isolation_refusal")
+        if (
+            self.sql(target, "SELECT current_database();", phase) != "teagram"
+            or self.sql(target, MIGRATION_HEAD_SQL, phase) != marker["migration_head"]
+            or self.sql(target, DATABASE_IDENTITY_SQL, phase) != marker["database_identity"]
+            or self.table_counts(target, phase)[1] != marker["table_counts"]
+        ):
+            raise DrillFailure(phase, "isolation_refusal")
+        self.verify_auth_key_inventory(target, phase)
+        if self.auth_key_state(target, phase) != AUTH_KEY_FIXTURE_STATE:
+            raise DrillFailure(phase, "schema_failure")
+        if self.sql(
+            target,
+            "SELECT count(*)::text FROM pg_stat_activity "
+            "WHERE datname = current_database() AND backend_type = 'client backend' "
+            "AND pid <> pg_backend_pid();",
+            phase,
+        ) != "0":
+            raise DrillFailure(phase, "isolation_refusal")
+        return marker
+
+    def auth_key_clear_client(self, target: dict[str, Any]) -> dict[str, Any]:
+        return self.image_container(
+            "target",
+            role="auth_key_clearer",
+            user="65532:70",
+            memory=CLIENT_MEMORY,
+            pids_limit=64,
+            mounts=[self.mount(self.sockets["target"], "/run/postgres", writable=True)],
+            tmpfs_options={
+                "/tmp": "rw,nosuid,nodev,noexec,size=64m,uid=70,gid=70,mode=1777",
+                "/var/lib/postgresql": "rw,nosuid,nodev,noexec,size=1m,uid=70,gid=70,mode=0700",
+            },
+            command_args=["-X", "-qAt", "-v", "ON_ERROR_STOP=1", "-U", "postgres", "-d", "teagram"],
+            entrypoint="psql",
+            network_mode=f"container:{target['id']}",
+            env_file=self.files["target_tool_env"],
+            interactive=True,
+        )
+
+    def remove_interrupted_auth_key_client(self, record: dict[str, Any]) -> None:
+        def cleanup_call(args: list[str], timeout: int) -> tuple[int, bytes]:
+            try:
+                return self.cleanup_call(args, timeout=timeout)
+            except DrillFailure:
+                print(f"restore readiness signal cleanup failed during Docker {args[0]}", file=sys.stderr)
+                raise
+
+        # psql runs as PID 1, which ignores SIGTERM; SIGINT cancels the open transaction so it rolls back.
+        kill_status, _ = cleanup_call(["kill", "--signal=SIGINT", record["id"]], 10)
+        wait_status, wait_output = cleanup_call(["wait", record["id"]], 15)
+        if wait_status != 0:
+            kill_status, _ = cleanup_call(["kill", "--signal=SIGKILL", record["id"]], 10)
+            wait_status, wait_output = cleanup_call(["wait", record["id"]], 15)
+        inspect_status, inspect_output = cleanup_call(
+            ["inspect", "--format", "{{.State.Running}}", record["id"]], 10
+        )
+        wait_exit_valid = wait_output.strip().isdigit()
+        stopped = inspect_output.strip() == b"false"
+        if (
+            kill_status != 0
+            and wait_status == 0
+            and inspect_status == 0
+            and stopped
+        ):
+            kill_status = 0
+        if (
+            kill_status != 0
+            or wait_status != 0
+            or not wait_exit_valid
+            or inspect_status != 0
+            or not stopped
+        ):
+            print(
+                "restore readiness signal cleanup failed while stopping Docker client "
+                f"(kill_status={kill_status}, wait_status={wait_status}, "
+                f"wait_exit_valid={wait_exit_valid}, inspect_status={inspect_status}, stopped={stopped})",
+                file=sys.stderr,
+            )
+            raise DrillFailure("cleanup", "cleanup_failure")
+        remove_status, _ = cleanup_call(["rm", record["id"]], 10)
+        if remove_status != 0:
+            print("restore readiness signal cleanup failed during Docker rm", file=sys.stderr)
+            raise DrillFailure("cleanup", "cleanup_failure")
+        list_status, output = cleanup_call(["ps", "--all", "--quiet", "--no-trunc"], 10)
+        if list_status != 0 or record["id"].encode() in output.splitlines():
+            print(
+                "restore readiness signal cleanup failed verifying Docker client removal "
+                f"(list_status={list_status}, still_listed={record['id'].encode() in output.splitlines()})",
+                file=sys.stderr,
+            )
+            raise DrillFailure("cleanup", "cleanup_failure")
+        record["removed"] = True
+        self.save()
+
+    def clear_auth_keys(
+        self,
+        target: dict[str, Any],
+        *,
+        inject_failure: bool = False,
+        interrupt_signal: int | None = None,
+    ) -> None:
+        phase = "auth_key_clearing"
+        self.phase = phase
+        try:
+            self.synthetic_auth_key_ids = validate_synthetic_auth_key_ids(self.synthetic_auth_key_ids)
+        except (TypeError, ValueError) as exc:
+            raise DrillFailure(phase, "isolation_refusal") from exc
+        self.validate_auth_key_clear_target(target)
+        before = self.auth_key_state(target, phase)
+        if before != AUTH_KEY_FIXTURE_STATE:
+            raise DrillFailure(phase, "schema_failure")
+        client = self.auth_key_clear_client(target)
+        try:
+            transaction = auth_key_clear_transaction_sql(
+                self.synthetic_auth_key_ids,
+                inject_failure=inject_failure,
+                wait_for_signal=interrupt_signal is not None,
+            ).encode()
+            fault_kind = "failure" if inject_failure else "signal" if interrupt_signal is not None else None
+            failure_category = "fault_test_failure" if fault_kind is not None else "auth_key_clear_failure"
+            output = self.attached(
+                client,
+                phase,
+                failure_category,
+                input_bytes=transaction,
+                interrupt_signal=interrupt_signal,
+                interrupt_ack=AUTH_KEY_CLEAR_ACK if interrupt_signal is not None else None,
+                accept_nonzero=inject_failure,
+                capture_stderr=inject_failure,
+                timeout=60,
+            )
+        except DrillFailure as exc:
+            if interrupt_signal is not None and exc.phase == phase and exc.category == "interrupted":
+                acknowledged = self.last_attached_interrupt_acknowledged
+                self.remove_interrupted_auth_key_client(client)
+                after = self.auth_key_state(target, phase, allow_interrupted=True)
+                result_category = auth_key_clear_fault_category(
+                    "signal",
+                    before,
+                    after,
+                    interrupt_acknowledged=acknowledged,
+                )
+                raise DrillFailure(phase, result_category) from exc
+            raise
+
+        document = self.attest_container(client, phase)
+        state = document.get("State") or {}
+        container_status = int(state.get("ExitCode", -1))
+        if fault_kind is not None:
+            if state.get("Running"):
+                raise DrillFailure(phase, "fault_test_failure")
+            self.discard_container(client, phase, failure_category)
+            after = self.auth_key_state(target, phase)
+            result_category = auth_key_clear_fault_category(
+                fault_kind,
+                before,
+                after,
+                client_status=self.last_attached_status,
+                container_status=container_status,
+                stdout=output,
+                stderr=self.last_attached_stderr,
+                interrupt_acknowledged=self.last_attached_interrupt_acknowledged,
+            )
+            raise DrillFailure(phase, result_category)
+        if state.get("Running") or container_status != 0:
+            raise DrillFailure(phase, "auth_key_clear_failure")
+        self.discard_container(client, phase, "auth_key_clear_failure")
+        if output or self.auth_key_state(target, phase) != AUTH_KEY_CLEARED_STATE:
+            raise DrillFailure(phase, "auth_key_clear_failure")
+        self.auth_keys_cleared = True
+
     def start_application(self, target: dict[str, Any]) -> dict[str, Any]:
         self.phase = "daemon_startup"
+        if not self.auth_keys_cleared or target is not self.databases.get("target"):
+            raise DrillFailure(self.phase, "startup_failure")
         mounts = [
             self.mount(self.sockets["target"], "/run/postgres", writable=True),
             self.mount(self.files["target_dsn_app"], "/run/secrets/postgres.dsn", writable=False),
@@ -2726,7 +3346,11 @@ class Drill(Docker):
             },
             explicit_environment=environment,
         )
-        self.start_container(app, self.phase, "startup_failure")
+        self.attest_container(app, self.phase)
+        self.attest_container(target, self.phase)
+        if self.sql(target, AUTH_KEY_COUNT_SQL, self.phase) != "0":
+            raise DrillFailure(self.phase, "startup_failure")
+        self.call(["start", app["id"]], phase=self.phase, category="startup_failure")
         document = self.attest_container(app, self.phase)
         require_container_running(document, self.phase, "startup_failure")
 
@@ -4110,20 +4734,24 @@ def recover(manifest_path: Path) -> int:
 
 def run_primary(args: argparse.Namespace) -> int:
     if os.geteuid() != 0:
+        print("restore readiness preflight check failed: root privileges", file=sys.stderr)
         print(json.dumps(report_document("preflight", "preflight_failure", "not_started", 0), separators=(",", ":")))
         return 1
     try:
         args.docker_bin = ensure_trusted_system_executable(args.docker_bin)
     except DrillFailure:
+        print("restore readiness preflight check failed: trusted Docker executable", file=sys.stderr)
         print(json.dumps(report_document("preflight", "preflight_failure", "not_started", 0), separators=(",", ":")))
         return 1
     try:
         work_seconds = bounded_work_seconds(args.fault_test, args.work_seconds)
     except ValueError:
+        print("restore readiness preflight check failed: work budget", file=sys.stderr)
         print(json.dumps(report_document("preflight", "preflight_failure", "not_started", 0), separators=(",", ":")))
         return 1
     lock = open_global_lock()
     if lock is None:
+        print("restore readiness preflight check failed: global lock", file=sys.stderr)
         print(json.dumps(report_document("preflight", "isolation_refusal", "not_started", 0), separators=(",", ":")))
         return 1
     lock_fd, lock_record = lock
@@ -4133,12 +4761,14 @@ def run_primary(args: argparse.Namespace) -> int:
         os.chmod(run_dir, 0o700)
     except OSError:
         os.close(lock_fd)
+        print("restore readiness preflight check failed: private /run directory", file=sys.stderr)
         print(json.dumps(report_document("preflight", "preflight_failure", "not_started", 0), separators=(",", ":")))
         return 1
     started = time.monotonic()
     parent_ticks = process_start_ticks(os.getpid())
     if parent_ticks is None:
         os.close(lock_fd)
+        print("restore readiness preflight check failed: parent process identity", file=sys.stderr)
         print(json.dumps(report_document("preflight", "preflight_failure", "not_started", 0), separators=(",", ":")))
         return 1
     runtime = {
@@ -4219,6 +4849,7 @@ def run_primary(args: argparse.Namespace) -> int:
             raise DrillFailure("preflight", "preflight_failure")
         manifest["supervisor"] = {"pid": supervisor.pid, "start_ticks": supervisor_ticks}
         drill.save()
+        drill.preflight_step = "private run layout"
         drill.create_private_layout()
         gateway, _ = drill.preflight()
         drill.manifest["resource_creation_started"] = True
@@ -4242,16 +4873,46 @@ def run_primary(args: argparse.Namespace) -> int:
         drill.seed_source_fixture(source)
         drill.migrate_database("source", source, BASE_SCHEMA, "source_migrations")
         drill.verify_schema_state(source, 1, MIGRATION_ROLES, "source_migrations")
+        drill.seed_source_auth_key_fixture(source)
+        drill.verify_schema_state(
+            source,
+            1,
+            MIGRATION_ROLES,
+            "source_migrations",
+            expected_auth_keys=AUTH_KEY_FIXTURE_COUNT,
+        )
         target = drill.create_database("target")
         if args.fault_test == "malformed-sql":
             drill.restore_fixture(source, target, malformed_sql=malformed_sql_fixture(token))
         else:
             drill.restore_fixture(source, target)
         drill.apply_pending_migration(target)
+        if args.fault_test == "malformed-sql":
+            raise DrillFailure("auth_key_clearing", "schema_failure")
+        drill.write_post_restore_marker(target)
+        if args.fault_test == "auth-clear-failure":
+            drill.clear_auth_keys(target, inject_failure=True)
+        elif args.fault_test == "auth-clear-signal":
+            for signum in (signal.SIGINT, signal.SIGTERM):
+                try:
+                    drill.clear_auth_keys(target, interrupt_signal=signum)
+                except DrillFailure as exc:
+                    if exc.phase != "auth_key_clearing" or exc.category != "interrupted" or drill.interrupted != str(signum):
+                        raise
+                    drill.interrupted = None
+                    signal_failure = None
+                else:
+                    raise DrillFailure("auth_key_clearing", "auth_key_clear_failure")
+            raise DrillFailure("auth_key_clearing", "interrupted")
+        else:
+            drill.clear_auth_keys(target)
+            drill.delete_private_file(drill.files["target_tool_env"])
         app = drill.start_application(target)
         drill.run_application_checker(app)
     except DrillFailure as exc:
         failure = exc
+        if exc.phase == "preflight":
+            print(f"restore readiness preflight check failed: {drill.preflight_step}", file=sys.stderr)
     except BaseException:
         failure = DrillFailure(drill.phase, "fixture_failure")
     finally:
@@ -4314,6 +4975,7 @@ def run_primary(args: argparse.Namespace) -> int:
         migration_head=drill.migration_head,
         help_get_config=drill.checker_result["help_getConfig"],
         synthetic_signin=drill.checker_result["synthetic_signin"],
+        auth_keys_cleared="pass" if drill.auth_keys_cleared else "not_run",
     )
     print(json.dumps(report, separators=(",", ":"), sort_keys=True))
     return report["exit"]
@@ -4330,7 +4992,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--build-dir")
     parser.add_argument("--build-uid", type=int)
     parser.add_argument("--go-arch")
-    parser.add_argument("--fault-test", choices=("malformed-sql", "sigkill"))
+    parser.add_argument(
+        "--fault-test",
+        choices=("malformed-sql", "auth-clear-failure", "auth-clear-signal", "sigkill"),
+    )
     parser.add_argument("--work-seconds", type=int)
     args = parser.parse_args()
     if args.work_seconds is not None and args.work_seconds < 1:

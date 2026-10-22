@@ -10,10 +10,10 @@ import os
 import tempfile
 import time
 import unittest
-from contextlib import redirect_stdout
+from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from typing import Any
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 
 SCRIPT = Path(__file__).with_name("restore-readiness.py")
@@ -153,6 +153,22 @@ class RestoreReadinessContractTests(unittest.TestCase):
             with self.assertRaises(RESTORE_READINESS.DrillFailure):
                 RESTORE_READINESS.ensure_trusted_system_executable(str(shadow))
 
+    def test_startup_report_names_a_rejected_docker_executable(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="rr-path-shadow-") as temporary_directory:
+            shadow = Path(temporary_directory) / "docker"
+            shadow.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+            shadow.chmod(0o755)
+            output = io.StringIO()
+            error = io.StringIO()
+            args = Mock(docker_bin=str(shadow), fault_test=None, work_seconds=None)
+            with patch.object(RESTORE_READINESS.os, "geteuid", return_value=0):
+                with redirect_stdout(output), redirect_stderr(error):
+                    status = RESTORE_READINESS.run_primary(args)
+
+        self.assertEqual(status, 1)
+        self.assertEqual(json.loads(output.getvalue())["category"], "preflight_failure")
+        self.assertIn("preflight check failed: trusted Docker executable", error.getvalue())
+
     def test_attached_timeouts_terminate_and_reap_child(self) -> None:
         with tempfile.TemporaryDirectory(prefix="rr-attach-timeout-") as temporary_directory:
             executable = Path(temporary_directory) / "docker"
@@ -289,6 +305,7 @@ class RestoreReadinessContractTests(unittest.TestCase):
             migration_head=RESTORE_READINESS.HEAD_SCHEMA,
             help_get_config="pass",
             synthetic_signin="pass",
+            auth_keys_cleared="pass",
         )
         self.assertEqual(
             passed,
@@ -297,6 +314,7 @@ class RestoreReadinessContractTests(unittest.TestCase):
                 "migration_head": RESTORE_READINESS.HEAD_SCHEMA,
                 "help_getConfig": "pass",
                 "synthetic_signin": "pass",
+                "auth_keys_cleared": "pass",
                 "cleanup": "verified",
                 "elapsed_ms": 123,
                 "exit": 0,
@@ -310,6 +328,7 @@ class RestoreReadinessContractTests(unittest.TestCase):
             migration_head=RESTORE_READINESS.HEAD_SCHEMA,
             help_get_config="pass",
             synthetic_signin="pass",
+            auth_keys_cleared="pass",
         )
         self.assertEqual(cleanup_failure["result"], "fail")
         self.assertEqual(cleanup_failure["exit"], 1)
@@ -320,10 +339,356 @@ class RestoreReadinessContractTests(unittest.TestCase):
                 "assertions_passed",
                 "verified",
                 123,
-                migration_head=RESTORE_READINESS.BASE_SCHEMA,
+                migration_head=RESTORE_READINESS.HEAD_SCHEMA,
                 help_get_config="pass",
                 synthetic_signin="pass",
             )
+        with self.assertRaises(ValueError):
+            RESTORE_READINESS.report_document(
+                "application_assertions",
+                "assertions_passed",
+                "verified",
+                123,
+                migration_head=RESTORE_READINESS.BASE_SCHEMA,
+                help_get_config="pass",
+                synthetic_signin="pass",
+                auth_keys_cleared="pass",
+            )
+
+    def test_auth_key_inventory_and_bounded_fixture_transactions(self) -> None:
+        inventory = RESTORE_READINESS.load_auth_key_inventory()
+        self.assertEqual(inventory["base_commit"], "bdb89970bbd40fb57fdb89f3aa8fafb78925ce93")
+        self.assertEqual(inventory["schema_head"], RESTORE_READINESS.HEAD_SCHEMA)
+        self.assertEqual(
+            inventory["trigger_tables"],
+            [
+                "public.auth_keys",
+                "public.browser_acceptance_binding_evidence",
+                "public.notify_settings_difference_cursors",
+                "public.srp_challenges",
+            ],
+        )
+        for table in inventory["trigger_tables"]:
+            self.assertIn(f"'{table}'::regclass", RESTORE_READINESS.AUTH_KEY_INVENTORY_SQL)
+        self.assertIn(
+            "tg.tgrelid IN (SELECT relation FROM clearing_relations)",
+            RESTORE_READINESS.AUTH_KEY_INVENTORY_SQL,
+        )
+        self.assertEqual(
+            {item["name"] for item in inventory["foreign_keys"]},
+            {
+                "auth_keys_pending_user_id_fkey",
+                "auth_keys_user_id_fkey",
+                "notify_settings_difference_cursors_auth_key_id_fkey",
+                "srp_challenges_auth_key_id_fkey",
+            },
+        )
+        self.assertEqual(
+            {item["name"] for item in inventory["triggers"]},
+            {"AA_browser_acceptance_binding_evidence", "browser_acceptance_auth_keys_reject_truncate"},
+        )
+        self.assertEqual(
+            RESTORE_READINESS.validate_synthetic_auth_key_ids((-101, -202, -303)),
+            (-101, -202, -303),
+        )
+        for invalid in ((-1, -1, -2), (1, -2, -3), (-1, -2, "-3"), (-1, -2), (-(1 << 63), -2, -3)):
+            with self.subTest(invalid=invalid), self.assertRaises(ValueError):
+                RESTORE_READINESS.validate_synthetic_auth_key_ids(invalid)
+
+        fixture_sql = RESTORE_READINESS.synthetic_auth_key_fixture_sql((-101, -202, -303))
+        self.assertIn("public.browser_acceptance_enroll_binding_evidence", fixture_sql)
+        self.assertIn("INSERT INTO public.srp_challenges", fixture_sql)
+        self.assertIn("INSERT INTO public.notify_settings_difference_cursors", fixture_sql)
+        self.assertIn("decode(repeat('a5', 256), 'hex')", fixture_sql)
+        self.assertNotIn("SELECT key_value", fixture_sql)
+
+        transaction = RESTORE_READINESS.auth_key_clear_transaction_sql((-101, -202, -303))
+        self.assertIn("LOCK TABLE public.auth_keys, public.srp_challenges", transaction)
+        self.assertLess(transaction.index("auth-key clearing precondition mismatch"), transaction.index("DELETE FROM public.auth_keys"))
+        self.assertIn("DELETE FROM public.auth_keys WHERE id IN (-101, -202, -303)", transaction)
+        self.assertIn("SELECT count(*) INTO remaining_auth_keys FROM public.auth_keys", transaction)
+        self.assertLess(transaction.index("remaining_auth_keys <> 0"), transaction.index("COMMIT"))
+        self.assertNotIn("TRUNCATE", transaction.upper())
+        self.assertNotIn("CASCADE", transaction.upper())
+        self.assertNotIn("DISABLE TRIGGER", transaction.upper())
+
+        failed = RESTORE_READINESS.auth_key_clear_transaction_sql((-101, -202, -303), inject_failure=True)
+        self.assertLess(failed.index("DELETE FROM public.auth_keys"), failed.index("SELECT 1 / 0"))
+        self.assertLess(failed.index("DELETE FROM public.auth_keys"), failed.index("\\echo RESTORE_READINESS_AUTH_KEY_DELETE_APPLIED"))
+        self.assertLess(failed.index("remaining_auth_keys <> 0"), failed.index("\\echo RESTORE_READINESS_AUTH_KEY_DELETE_APPLIED"))
+        self.assertLess(failed.index("SELECT 1 / 0"), failed.index("COMMIT"))
+        interrupted = RESTORE_READINESS.auth_key_clear_transaction_sql((-101, -202, -303), wait_for_signal=True)
+        self.assertLess(interrupted.index("DELETE FROM public.auth_keys"), interrupted.index("pg_sleep(30)"))
+        self.assertLess(interrupted.index("\\echo RESTORE_READINESS_AUTH_KEY_DELETE_APPLIED"), interrupted.index("pg_sleep(30)"))
+        self.assertLess(interrupted.index("pg_sleep(30)"), interrupted.index("COMMIT"))
+
+    def test_auth_key_clear_fault_results_require_acknowledged_rollback(self) -> None:
+        before = ["3", "2", "3", "1", "2", "0"]
+        ack = RESTORE_READINESS.AUTH_KEY_CLEAR_ACK + b"\n"
+        expected_error = b"ERROR:  division by zero\n"
+
+        self.assertEqual(
+            RESTORE_READINESS.auth_key_clear_fault_category(
+                "failure",
+                before,
+                before,
+                client_status=3,
+                container_status=3,
+                stdout=ack,
+                stderr=expected_error,
+            ),
+            "auth_key_clear_failure",
+        )
+        for result in (
+            RESTORE_READINESS.auth_key_clear_fault_category(
+                "failure",
+                before,
+                ["0", "0", "0", "1", "2", "2"],
+                client_status=3,
+                container_status=3,
+                stdout=ack,
+                stderr=expected_error,
+            ),
+            RESTORE_READINESS.auth_key_clear_fault_category(
+                "failure",
+                before,
+                ["0", "0", "0", "1", "2", "2"],
+                client_status=0,
+                container_status=0,
+                stdout=ack,
+            ),
+            RESTORE_READINESS.auth_key_clear_fault_category(
+                "failure",
+                before,
+                before,
+                client_status=3,
+                container_status=3,
+                stdout=ack,
+                stderr=b"ERROR: unrelated SQL failure\n",
+            ),
+            RESTORE_READINESS.auth_key_clear_fault_category(
+                "failure",
+                before,
+                before,
+                client_status=3,
+                container_status=3,
+                stderr=expected_error,
+            ),
+        ):
+            self.assertEqual(result, "fault_test_failure")
+
+        self.assertEqual(
+            RESTORE_READINESS.auth_key_clear_fault_category(
+                "signal", before, before, interrupt_acknowledged=True
+            ),
+            "interrupted",
+        )
+        self.assertEqual(
+            RESTORE_READINESS.auth_key_clear_fault_category(
+                "signal", before, before, interrupt_acknowledged=False
+            ),
+            "fault_test_failure",
+        )
+        self.assertEqual(
+            RESTORE_READINESS.auth_key_clear_fault_category(
+                "signal", before, ["0", "0", "0", "1", "2", "2"], interrupt_acknowledged=True
+            ),
+            "fault_test_failure",
+        )
+
+    def test_attached_interrupt_is_sent_only_after_transaction_acknowledgment(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            fake_docker = Path(temporary_directory) / "docker"
+            fake_docker.write_text(
+                "#!/usr/bin/python3\n"
+                "import os, sys, time\n"
+                "sys.stdin.buffer.read()\n"
+                "if os.environ.get('ACK_MODE') == 'ack':\n"
+                f"    os.write(1, {RESTORE_READINESS.AUTH_KEY_CLEAR_ACK!r} + b'\\n')\n"
+                "time.sleep(10)\n",
+                encoding="utf-8",
+            )
+            fake_docker.chmod(0o700)
+
+            for ack_mode, expected_ack in (("missing", False), ("ack", True)):
+                drill = object.__new__(RESTORE_READINESS.Drill)
+                drill.executable = str(fake_docker)
+                drill.environment = {"PATH": "/usr/bin:/bin", "ACK_MODE": ack_mode}
+                drill.manifest = {"work_deadline": time.monotonic() + 10, "processes": []}
+                drill.attest_container = Mock(return_value={"State": {"Running": True}})
+                drill._track_child = lambda _process: {}
+                drill._untrack_child = Mock()
+
+                parent_pid = RESTORE_READINESS.os.getpid()
+                real_kill = RESTORE_READINESS.os.kill
+                parent_signals: list[tuple[int, int]] = []
+
+                def record_parent_signal(pid: int, signum: int) -> None:
+                    if pid == parent_pid:
+                        parent_signals.append((pid, signum))
+                    else:
+                        real_kill(pid, signum)
+
+                with patch.object(RESTORE_READINESS.os, "kill", side_effect=record_parent_signal):
+                    with self.assertRaises(RESTORE_READINESS.DrillFailure) as timeout_failure:
+                        drill.attached(
+                            {"id": "f" * 64},
+                            "auth_key_clearing",
+                            "fault_test_failure",
+                            input_bytes=b"transaction",
+                            interrupt_signal=RESTORE_READINESS.signal.SIGTERM,
+                            interrupt_ack=RESTORE_READINESS.AUTH_KEY_CLEAR_ACK,
+                            timeout=1,
+                        )
+                self.assertEqual(timeout_failure.exception.category, "timeout")
+                self.assertEqual(drill.last_attached_interrupt_acknowledged, expected_ack)
+                if expected_ack:
+                    self.assertEqual(
+                        parent_signals,
+                        [(parent_pid, RESTORE_READINESS.signal.SIGTERM)],
+                    )
+                else:
+                    self.assertEqual(parent_signals, [])
+
+    def test_auth_key_clear_refuses_wrong_target_and_missing_marker_before_sql(self) -> None:
+        target = {"id": "a" * 64, "role": "target_postgres", "removed": False}
+        drill = object.__new__(RESTORE_READINESS.Drill)
+        drill.phase = "auth_key_clearing"
+        drill.databases = {"target": target}
+        drill.manifest = {"containers": [target], "processes": [], "files": []}
+        drill.post_restore_marker = None
+        drill.auth_keys_cleared = False
+        drill.synthetic_auth_key_ids = (-101, -202, -303)
+        drill.sql = Mock()
+        drill.auth_key_clear_client = Mock()
+
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            drill.run_dir = Path(temporary_directory)
+            with self.assertRaises(RESTORE_READINESS.DrillFailure) as missing_marker:
+                drill.clear_auth_keys(target)
+            self.assertEqual(missing_marker.exception.phase, "auth_key_clearing")
+            self.assertEqual(missing_marker.exception.category, "isolation_refusal")
+            drill.sql.assert_not_called()
+            drill.auth_key_clear_client.assert_not_called()
+
+        with self.assertRaises(RESTORE_READINESS.DrillFailure) as wrong_target:
+            drill.clear_auth_keys({**target})
+        self.assertEqual(wrong_target.exception.category, "isolation_refusal")
+        drill.sql.assert_not_called()
+        drill.auth_key_clear_client.assert_not_called()
+
+    def test_dependent_table_trigger_refuses_auth_key_clear_before_write(self) -> None:
+        expected_inventory = RESTORE_READINESS.load_auth_key_inventory()
+        for table in expected_inventory["trigger_tables"]:
+            if table == "public.auth_keys":
+                continue
+            with self.subTest(table=table):
+                actual_inventory = json.loads(json.dumps(expected_inventory))
+                actual_inventory["triggers"].append(
+                    {"name": "unexpected_dependent_trigger", "table": table}
+                )
+                target = {"id": "a" * 64, "role": "target_postgres", "removed": False}
+                marker = {
+                    "target_container_id": target["id"],
+                    "migration_head": RESTORE_READINESS.HEAD_SCHEMA,
+                    "database_identity": "fixture-db",
+                    "table_counts": ["fixture-counts"],
+                }
+                drill = object.__new__(RESTORE_READINESS.Drill)
+                drill.phase = "auth_key_clearing"
+                drill.databases = {"target": target}
+                drill.manifest = {"containers": [target], "processes": []}
+                drill.post_restore_marker = marker
+                drill.auth_keys_cleared = False
+                drill.synthetic_auth_key_ids = (-101, -202, -303)
+                drill.run_dir = Path("/unused")
+                drill.private_read = Mock(return_value=json.dumps(marker).encode())
+                drill.attest_container = Mock(return_value={"State": {"Running": True}})
+                drill.table_counts = Mock(return_value=([], marker["table_counts"]))
+                drill.auth_key_clear_client = Mock()
+
+                def read_sql(_target: Any, statement: str, _phase: str, **_kwargs: Any) -> str:
+                    if statement == "SELECT current_database();":
+                        return "teagram"
+                    if statement == RESTORE_READINESS.MIGRATION_HEAD_SQL:
+                        return RESTORE_READINESS.HEAD_SCHEMA
+                    if statement == RESTORE_READINESS.DATABASE_IDENTITY_SQL:
+                        return marker["database_identity"]
+                    if statement == RESTORE_READINESS.AUTH_KEY_INVENTORY_SQL:
+                        return json.dumps(actual_inventory)
+                    raise AssertionError(f"unexpected query before inventory refusal: {statement}")
+
+                drill.sql = Mock(side_effect=read_sql)
+
+                with self.assertRaises(RESTORE_READINESS.DrillFailure) as failure:
+                    drill.clear_auth_keys(target)
+
+                self.assertEqual(failure.exception.phase, "auth_key_clearing")
+                self.assertEqual(failure.exception.category, "schema_failure")
+                drill.auth_key_clear_client.assert_not_called()
+                self.assertTrue(
+                    all(
+                        call.args[1].lstrip().upper().startswith(("SELECT", "WITH"))
+                        for call in drill.sql.call_args_list
+                    )
+                )
+
+    def test_interrupted_auth_key_client_is_cancelled_not_terminated(self) -> None:
+        # psql is PID 1 in the clearer, so it ignores SIGTERM; only SIGINT (query cancel) or SIGKILL stops it.
+        record = {"id": "d" * 64, "removed": False}
+        drill = object.__new__(RESTORE_READINESS.Drill)
+        drill.save = Mock()
+        running = [True]
+        calls: list[list[str]] = []
+
+        def cleanup_call(args: list[str], *, timeout: float = 30, input_bytes: bytes | None = None):
+            calls.append(args)
+            if args[0] == "kill":
+                if args[1] in {"--signal=SIGINT", "--signal=SIGKILL"}:
+                    running[0] = False
+                return 0, b""
+            if args[0] == "wait":
+                return (1, b"") if running[0] else (0, b"3\n")
+            if args[0] == "inspect":
+                return 0, b"true\n" if running[0] else b"false\n"
+            return 0, b""
+
+        drill.cleanup_call = cleanup_call
+        drill.remove_interrupted_auth_key_client(record)
+
+        self.assertEqual(calls[0], ["kill", "--signal=SIGINT", record["id"]])
+        self.assertNotIn(["kill", "--signal=SIGTERM", record["id"]], calls)
+        self.assertNotIn(["kill", "--signal=SIGKILL", record["id"]], calls)
+        self.assertTrue(record["removed"])
+
+    def test_interrupted_auth_key_client_escalates_to_sigkill_when_cancel_is_ignored(self) -> None:
+        record = {"id": "e" * 64, "removed": False}
+        drill = object.__new__(RESTORE_READINESS.Drill)
+        drill.save = Mock()
+        running = [True]
+        calls: list[list[str]] = []
+
+        def cleanup_call(args: list[str], *, timeout: float = 30, input_bytes: bytes | None = None):
+            calls.append(args)
+            if args[0] == "kill":
+                if args[1] == "--signal=SIGKILL":
+                    running[0] = False
+                return 0, b""
+            if args[0] == "wait":
+                return (1, b"") if running[0] else (0, b"137\n")
+            if args[0] == "inspect":
+                return 0, b"true\n" if running[0] else b"false\n"
+            return 0, b""
+
+        drill.cleanup_call = cleanup_call
+        drill.remove_interrupted_auth_key_client(record)
+
+        self.assertIn(["kill", "--signal=SIGKILL", record["id"]], calls)
+        self.assertLess(
+            calls.index(["kill", "--signal=SIGINT", record["id"]]),
+            calls.index(["kill", "--signal=SIGKILL", record["id"]]),
+        )
+        self.assertTrue(record["removed"])
 
     def test_failure_report_is_allowlisted_and_does_not_include_raw_errors(self) -> None:
         report = RESTORE_READINESS.report_document(

@@ -10,6 +10,7 @@ suite_work_deadline=$((SECONDS + 30 * 60))
 suite_teardown_deadline=$((suite_work_deadline + 4 * 60))
 
 emit_preflight_failure() {
+  printf 'restore readiness gate failed at stage: %s\n' "${preflight_stage:-unknown}" >&2
   printf '%s\n' '{"result":"fail","phase":"preflight","category":"preflight_failure","migration_head":"not_reached","help_getConfig":"not_run","synthetic_signin":"not_run","cleanup":"not_started","elapsed_ms":0,"exit":1}'
   exit 1
 }
@@ -48,6 +49,7 @@ if [[ $# -eq 2 && $1 == "--recover" ]]; then
     /usr/bin/python3 "$script_dir/restore-readiness.py" --recover "$2"
 fi
 
+preflight_stage="validate runner prerequisites"
 if [[ $# -ne 0 || $(id -u) -eq 0 ]]; then
   printf '%s\n' '{"result":"fail","phase":"preflight","category":"preflight_failure","migration_head":"not_reached","help_getConfig":"not_run","synthetic_signin":"not_run","cleanup":"not_started","elapsed_ms":0,"exit":1}'
   exit 1
@@ -64,15 +66,18 @@ build_env=(
   GOSUMDB=off
   CGO_ENABLED=0
 )
+preflight_stage="check required tools and sudo"
 if ! sudo -n true >/dev/null 2>&1 || ! command -v go >/dev/null 2>&1 ||
   [[ ! -x /usr/bin/docker ]] || ! atlas_source=$(command -v atlas); then
   emit_preflight_failure
 fi
+preflight_stage="read Go target architecture"
 if ! go_arch=$(run_suite_command "${build_env[@]}" go env GOARCH 2>/dev/null); then
   emit_preflight_failure
 fi
 docker_bin=/usr/bin/docker
 build_parent=${TMPDIR:-/tmp}
+preflight_stage="create build directory"
 if ! build_dir=$(mktemp -d "$build_parent/teagram-restore-readiness.XXXXXXXX" 2>/dev/null); then
   emit_preflight_failure
 fi
@@ -91,24 +96,31 @@ cleanup_build() {
 }
 trap cleanup_build EXIT
 
+preflight_stage="secure build directory"
 if ! chmod 700 "$build_dir" 2>/dev/null; then
   emit_preflight_failure
 fi
 atlas_bin="$build_dir/atlas"
 build_inputs() {
+  preflight_stage="build pinned runtime inputs"
   if ! suite_remaining_seconds >/dev/null; then
     emit_preflight_failure
   fi
   if [[ -n ${build_dir_initialized:-} ]]; then
+    preflight_stage="recreate runtime input directory"
     if ! mkdir -m 700 -- "$build_dir" 2>/dev/null; then
       emit_preflight_failure
     fi
   else
     build_dir_initialized=1
   fi
+  preflight_stage="copy Atlas CLI"
   if ! run_suite_command /usr/bin/cp -- "$atlas_source" "$atlas_bin" 2>/dev/null ||
-    ! run_suite_command /usr/bin/chmod 500 "$atlas_bin" 2>/dev/null ||
-    ! run_suite_command "${build_env[@]}" go build -trimpath -buildvcs=false -o "$build_dir/teagramd" ./cmd/teagramd >/dev/null 2>&1 ||
+    ! run_suite_command /usr/bin/chmod 500 "$atlas_bin" 2>/dev/null; then
+    emit_preflight_failure
+  fi
+  preflight_stage="build pinned runtime binaries"
+  if ! run_suite_command "${build_env[@]}" go build -trimpath -buildvcs=false -o "$build_dir/teagramd" ./cmd/teagramd >/dev/null 2>&1 ||
     ! run_suite_command "${build_env[@]}" go build -trimpath -buildvcs=false -o "$build_dir/restore-readiness-launcher" ./deploy/teagramd/rollout-runner/restore-readiness-launcher >/dev/null 2>&1 ||
     ! run_suite_command "${build_env[@]}" go build -trimpath -buildvcs=false -o "$build_dir/restore-readiness-seed" ./deploy/teagramd/rollout-runner/restore-readiness-seed >/dev/null 2>&1 ||
     ! run_suite_command "${build_env[@]}" go build -trimpath -buildvcs=false -o "$build_dir/restore-readiness-seed-shim" ./deploy/teagramd/rollout-runner/restore-readiness-seed-shim >/dev/null 2>&1 ||
@@ -117,14 +129,17 @@ build_inputs() {
     ! run_suite_command "${build_env[@]}" go build -trimpath -buildvcs=false -o "$build_dir/restore-drill-checker" ./deploy/teagramd/rollout-runner/restore-readiness-checker >/dev/null 2>&1; then
     emit_preflight_failure
   fi
+  preflight_stage="create historical seed directory"
   if ! seed_source=$(mktemp -d "$build_parent/teagram-restore-seed.XXXXXXXX" 2>/dev/null); then
     emit_preflight_failure
   fi
+  preflight_stage="build pinned historical seed"
   if ! run_suite_command git archive "$seed_commit" 2>/dev/null | run_suite_command tar -x -C "$seed_source" 2>/dev/null ||
     ! (cd "$seed_source" && run_suite_command "${build_env[@]}" go build -trimpath -buildvcs=false -o "$build_dir/teagramd-seed" ./cmd/teagramd >/dev/null 2>&1); then
     run_teardown_command /usr/bin/rm -rf -- "$seed_source" 2>/dev/null || true
     emit_preflight_failure
   fi
+  preflight_stage="remove historical seed source"
   if ! run_teardown_command /usr/bin/rm -rf -- "$seed_source"; then
     emit_preflight_failure
   fi
@@ -150,6 +165,7 @@ run_drill() {
 }
 
 build_inputs
+preflight_stage="run primary synthetic restore drill"
 if ! success_report=$(run_drill); then
   printf '%s\n' "$success_report"
   exit 1
@@ -157,13 +173,14 @@ fi
 if ! printf '%s' "$success_report" | /usr/bin/python3 -c '
 import json, sys
 report = json.load(sys.stdin)
-if not (report.get("result") == "pass" and report.get("cleanup") == "verified" and report.get("exit") == 0):
+if not (report.get("result") == "pass" and report.get("cleanup") == "verified" and report.get("auth_keys_cleared") == "pass" and report.get("exit") == 0):
     raise SystemExit(1)
 '; then
   emit_preflight_failure
 fi
 
 build_inputs
+preflight_stage="run malformed SQL fault drill"
 if malformed_report=$(run_drill --fault-test malformed-sql 2>/dev/null); then
   emit_preflight_failure
 fi
@@ -177,6 +194,37 @@ if not (report.get("result") == "fail" and report.get("phase") == "restore" and 
 fi
 
 build_inputs
+preflight_stage="run auth key failure drill"
+if auth_clear_failure_report=$(run_drill --fault-test auth-clear-failure 2>/dev/null); then
+  emit_preflight_failure
+fi
+if ! printf '%s' "$auth_clear_failure_report" | /usr/bin/python3 -c '
+import json, sys
+report = json.load(sys.stdin)
+if not (report.get("result") == "fail" and report.get("phase") == "auth_key_clearing" and report.get("category") == "auth_key_clear_failure" and report.get("cleanup") == "verified" and report.get("exit") == 1):
+    raise SystemExit(1)
+'; then
+  emit_preflight_failure
+fi
+
+build_inputs
+preflight_stage="run auth key signal drill"
+if auth_clear_signal_report=$(run_drill --fault-test auth-clear-signal); then
+  printf 'restore readiness signal fault unexpectedly passed: %s\n' "$auth_clear_signal_report" >&2
+  emit_preflight_failure
+fi
+if ! printf '%s' "$auth_clear_signal_report" | /usr/bin/python3 -c '
+import json, sys
+report = json.load(sys.stdin)
+if not (report.get("result") == "fail" and report.get("phase") == "auth_key_clearing" and report.get("category") == "interrupted" and report.get("cleanup") == "verified" and report.get("exit") == 1):
+    raise SystemExit(1)
+'; then
+  printf 'restore readiness signal fault returned unexpected report: %s\n' "$auth_clear_signal_report" >&2
+  emit_preflight_failure
+fi
+
+build_inputs
+preflight_stage="run SIGKILL recovery drill"
 if ! sigkill_output=$(run_suite_command /usr/bin/mktemp "$build_parent/teagram-restore-sigkill.XXXXXXXX" 2>/dev/null); then
   emit_preflight_failure
 fi
