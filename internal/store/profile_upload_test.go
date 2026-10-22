@@ -265,7 +265,9 @@ type profileSession struct {
 }
 
 // profileUploadSession returns the session that holds the profile-domain hold,
-// with its current statement and wait state.
+// with its current statement and wait state. pg_locks is instance-wide and
+// cloned test databases reuse owner ids, so the session must be in this test's
+// database.
 func profileUploadSession(t *testing.T, ctx context.Context, conn *pgx.Conn, owner int64) profileSession {
 	t.Helper()
 	var s profileSession
@@ -275,8 +277,7 @@ func profileUploadSession(t *testing.T, ctx context.Context, conn *pgx.Conn, own
 		JOIN pg_locks l
 		  ON l.pid = a.pid AND l.locktype = 'advisory' AND l.objsubid = 2
 		 AND l.classid::bigint = $1 AND l.objid::bigint = $2 AND l.granted
-		WHERE a.pid <> pg_backend_pid()
-		  AND a.datname = current_database()`,
+		WHERE a.datname = current_database() AND a.pid <> pg_backend_pid()`,
 		int64(store.ProfileLockDomain), owner).
 		Scan(&s.Pid, &s.State, &s.WaitType, &s.WaitEvent, &s.Query)
 	if errors.Is(err, pgx.ErrNoRows) {

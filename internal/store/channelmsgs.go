@@ -118,6 +118,7 @@ type ChannelMessage struct {
 	TTLPeriod    int
 	Poll         *Poll
 	PostAuthor   *string
+	Entities     string
 }
 
 // ChannelRepliesSnapshot carries the authorization and page result from one
@@ -165,6 +166,7 @@ type channelMsgFields struct {
 	ActionType   int16
 	TtlPeriod    int32
 	PostAuthor   *string
+	Entities     []byte
 }
 
 // channelMessageFromFields is the sole row-to-struct converter for channel
@@ -197,6 +199,7 @@ func channelMessageFromFields(r channelMsgFields) ChannelMessage {
 		int(r.TtlPeriod),
 		nil,
 		r.PostAuthor,
+		string(r.Entities),
 	}
 	if message.Deleted {
 		message.FromID = 0
@@ -208,6 +211,7 @@ func channelMessageFromFields(r channelMsgFields) ChannelMessage {
 		message.ReplyToMsgID = 0
 		message.Action = ChannelMessageActionNone
 		message.PostAuthor = nil
+		message.Entities = ""
 	}
 	return message
 }
@@ -456,7 +460,7 @@ func (s *Store) ChannelPostPts(ctx context.Context, channelID, localID int64) (i
 func (s *Store) PostChannelMessage(
 	ctx context.Context, channelID, fromID int64, text string, randomID int64, fileID *int64, replyToMsgID int64,
 ) (ChannelMessage, int, bool, error) {
-	return s.postChannelMessage(ctx, channelID, fromID, text, randomID, fileID, replyToMsgID, false, nil, nil, false)
+	return s.postChannelMessage(ctx, channelID, fromID, text, randomID, fileID, replyToMsgID, false, nil, nil, false, nil)
 }
 
 // PostChannelMessageAs is PostChannelMessage with the post-rights check
@@ -485,7 +489,16 @@ func (s *Store) PostChannelMessage(
 func (s *Store) PostChannelMessageAs(
 	ctx context.Context, channelID, fromID int64, text string, randomID int64, fileID *int64, replyToMsgID int64,
 ) (ChannelMessage, int, bool, error) {
-	return s.postChannelMessage(ctx, channelID, fromID, text, randomID, fileID, replyToMsgID, true, nil, nil, false)
+	return s.PostChannelMessageAsWithEntities(ctx, channelID, fromID, text, randomID, fileID, replyToMsgID, nil)
+}
+
+// PostChannelMessageAsWithEntities stores the original text spans with the
+// channel row in the same post transaction.
+func (s *Store) PostChannelMessageAsWithEntities(
+	ctx context.Context, channelID, fromID int64, text string, randomID int64, fileID *int64, replyToMsgID int64,
+	entities []PollDescriptionEntity,
+) (ChannelMessage, int, bool, error) {
+	return s.postChannelMessage(ctx, channelID, fromID, text, randomID, fileID, replyToMsgID, true, nil, nil, false, entities)
 }
 
 // ChannelPhotoRetryAs resolves a photo-send retry only after the caller's
@@ -630,11 +643,20 @@ func (s *Store) CheckChannelPhotoPostPermission(ctx context.Context, channelID, 
 func (s *Store) PostChannelPhotoAs(
 	ctx context.Context, channelID, fromID, randomID int64, text string, fileID int64, replyToMsgID int64,
 ) (ChannelMessage, int, bool, error) {
+	return s.PostChannelPhotoAsWithEntities(ctx, channelID, fromID, randomID, text, fileID, replyToMsgID, nil)
+}
+
+// PostChannelPhotoAsWithEntities stores the photo caption's entity spans with
+// the channel post.
+func (s *Store) PostChannelPhotoAsWithEntities(
+	ctx context.Context, channelID, fromID, randomID int64, text string, fileID int64, replyToMsgID int64,
+	entities []PollDescriptionEntity,
+) (ChannelMessage, int, bool, error) {
 	if fileID == 0 {
 		return ChannelMessage{}, 0, false, ErrFileMissing
 	}
 	id := fileID
-	return s.postChannelMessage(ctx, channelID, fromID, text, randomID, &id, replyToMsgID, true, nil, nil, true)
+	return s.postChannelMessage(ctx, channelID, fromID, text, randomID, &id, replyToMsgID, true, nil, nil, true, entities)
 }
 
 // ChannelTextMessageRetryAs resolves a text-send retry only after checking the
@@ -688,7 +710,7 @@ func (s *Store) PostChannelPollAs(
 	ctx context.Context, channelID, fromID, randomID int64, text string, draft PollDraft,
 ) (ChannelMessage, Poll, int, bool, error) {
 	var poll Poll
-	message, pts, duplicate, err := s.postChannelMessage(ctx, channelID, fromID, text, randomID, nil, 0, true, &draft, &poll, false)
+	message, pts, duplicate, err := s.postChannelMessage(ctx, channelID, fromID, text, randomID, nil, 0, true, &draft, &poll, false, nil)
 	return message, poll, pts, duplicate, err
 }
 
@@ -738,10 +760,14 @@ func (s *Store) ChannelPollRetryAs(
 
 func (s *Store) postChannelMessage(
 	ctx context.Context, channelID, fromID int64, text string, randomID int64, fileID *int64, replyToMsgID int64, checkRights bool,
-	pollDraft *PollDraft, pollResult *Poll, photoMedia bool,
+	pollDraft *PollDraft, pollResult *Poll, photoMedia bool, entities []PollDescriptionEntity,
 ) (ChannelMessage, int, bool, error) {
 	if channelID == 0 || fromID == 0 {
 		return ChannelMessage{}, 0, false, ErrMessageInvalid
+	}
+	entityData, err := EncodeMessageEntities(entities)
+	if err != nil {
+		return ChannelMessage{}, 0, false, fmt.Errorf("encode channel message entities: %w", err)
 	}
 	if pollDraft != nil {
 		if _, err := normalizePollDraftShape(*pollDraft); err != nil {
@@ -918,7 +944,7 @@ func (s *Store) postChannelMessage(
 	}
 	if err = qtx.InsertChannelMessage(ctx, db.InsertChannelMessageParams{
 		ChannelID: channelID, LocalID: b.LocalID, FromID: fromID,
-		Message: text, RandomID: randomID, FileID: fileID, ReplyToMsgID: replyTo, PostAuthor: postAuthor,
+		Message: text, RandomID: randomID, FileID: fileID, ReplyToMsgID: replyTo, PostAuthor: postAuthor, Entities: entityData,
 	}); err != nil {
 		return ChannelMessage{}, 0, false, fmt.Errorf("insert channel message: %w", err)
 	}
@@ -1385,6 +1411,7 @@ func (s *Store) ChannelRepliesWithOffset(
 			ReplyToMsgID: row.ReplyToMsgID,
 			ActionType:   *row.ActionType,
 			TtlPeriod:    *row.TtlPeriod,
+			Entities:     row.Entities,
 		}))
 	}
 	return snapshot, nil

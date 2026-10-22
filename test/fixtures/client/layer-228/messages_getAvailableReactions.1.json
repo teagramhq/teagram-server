@@ -1,0 +1,12 @@
+{
+  "layer": 228,
+  "client": "gotd v0.162.0",
+  "source": "captures/messages_getAvailableReactions.1.txt",
+  "method": "messages.getAvailableReactions",
+  "request": {
+    "type": "messages.getAvailableReactions",
+    "fields": {
+      "hash": 0
+    }
+  }
+}

@@ -253,58 +253,20 @@ preflight_storage_and_arch() {
   docker compose version >/dev/null 2>&1 || return 1
 }
 
-owner_controlled_directory() {
-  local path="$1" owner mode uid
-  [[ -d "$path" && ! -L "$path" ]] || return 1
-  uid="$(id -u 2>/dev/null)" || return 1
-  owner="$(stat -c '%u' -- "$path" 2>/dev/null)" || return 1
-  [[ "$owner" == "$uid" ]] || return 1
-  mode="$(stat -c '%a' -- "$path" 2>/dev/null)" || return 1
-  [[ "$mode" =~ ^[0-7]{3,4}$ ]] || return 1
-  (( (8#$mode & 0022) == 0 ))
-}
-
 acquire_runtime_lock() {
-  local runtime_base home local_dir lock_dir
-  if [[ -n "${XDG_RUNTIME_DIR:-}" ]]; then
-    runtime_base="$XDG_RUNTIME_DIR"
-    [[ "$runtime_base" == /* ]] || return 1
-    owner_controlled_directory "$runtime_base" || return 1
-  else
-    home="${HOME:-}"
-    [[ "$home" == /* ]] || return 1
-    owner_controlled_directory "$home" || return 1
-    local_dir="$home/.local"
-    if [[ -L "$local_dir" || ( -e "$local_dir" && ! -d "$local_dir" ) ]]; then
-      return 1
-    fi
-    if [[ ! -d "$local_dir" ]]; then
-      mkdir -m 755 -- "$local_dir" 2>/dev/null || return 1
-    fi
-    owner_controlled_directory "$local_dir" || return 1
-    runtime_base="$local_dir/run"
-    if [[ -L "$runtime_base" || ( -e "$runtime_base" && ! -d "$runtime_base" ) ]]; then
-      return 1
-    fi
-    if [[ ! -d "$runtime_base" ]]; then
-      mkdir -m 700 -- "$runtime_base" 2>/dev/null || return 1
-    fi
-    owner_controlled_directory "$runtime_base" || return 1
-    [[ "$(stat -c '%a' -- "$runtime_base" 2>/dev/null)" == "700" ]] || return 1
-  fi
-
-  lock_dir="$runtime_base/teagram-browser-acceptance"
-  if [[ -L "$lock_dir" || ( -e "$lock_dir" && ! -d "$lock_dir" ) ]]; then
+  local lock_file='/tmp/teagram-browser-acceptance.lock' lock_mode
+  if [[ -L "$lock_file" || ( -e "$lock_file" && ! -f "$lock_file" ) ]]; then
     return 1
   fi
-  if [[ ! -d "$lock_dir" ]]; then
-    mkdir -m 700 -- "$lock_dir" 2>/dev/null ||
-      [[ -d "$lock_dir" && ! -L "$lock_dir" ]] || return 1
+  if [[ ! -e "$lock_file" ]]; then
+    # Create the inode once; another uid may win this race in sticky /tmp.
+    (umask 0111; set -o noclobber; : >"$lock_file") 2>/dev/null || [[ -e "$lock_file" ]] || return 1
   fi
-  owner_controlled_directory "$lock_dir" || return 1
-  [[ "$(stat -c '%a' -- "$lock_dir" 2>/dev/null)" == "700" ]] || return 1
+  [[ -f "$lock_file" && ! -L "$lock_file" ]] || return 1
+  lock_mode="$(stat -c '%a' -- "$lock_file" 2>/dev/null)" || return 1
+  [[ "$lock_mode" == "666" ]] || return 1
 
-  exec 9<"$lock_dir" || return 1
+  exec 9<"$lock_file" || return 1
   flock -n 9 || return 2
 }
 

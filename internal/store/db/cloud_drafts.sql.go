@@ -242,6 +242,99 @@ func (q *Queries) CloudDraftUserDialogExists(ctx context.Context, arg CloudDraft
 	return exists, err
 }
 
+const cloudDraftsForOwner = `-- name: CloudDraftsForOwner :many
+SELECT draft.peer_type,
+       draft.peer_id,
+       draft.message,
+       draft.no_webpage,
+       CASE
+           WHEN draft.reply_to_msg_id IS NULL THEN 0::bigint
+           WHEN draft.peer_type = 3 AND EXISTS (
+               SELECT 1 FROM channel_messages AS target
+               WHERE target.channel_id = draft.peer_id
+                 AND target.local_id = draft.reply_to_msg_id
+                 AND target.deleted = false
+                 AND (target.expires_at IS NULL OR target.expires_at > statement_timestamp())
+                 AND target.action_type = 0
+           ) THEN draft.reply_to_msg_id
+           WHEN draft.peer_type <> 3 AND EXISTS (
+               SELECT 1 FROM messages AS target
+               WHERE target.owner_id = draft.owner_id
+                 AND target.peer_type = draft.peer_type
+                 AND target.peer_id = draft.peer_id
+                 AND target.local_id = draft.reply_to_msg_id
+                 AND target.deleted = false
+                 AND (target.expires_at IS NULL OR target.expires_at > statement_timestamp())
+                 AND target.action_type = 0
+           ) THEN draft.reply_to_msg_id
+           ELSE 0::bigint
+       END AS reply_to_msg_id,
+       draft.updated_at
+FROM cloud_drafts AS draft
+WHERE draft.owner_id = $1
+  AND (
+      (draft.peer_type = 1 AND EXISTS (
+          SELECT 1 FROM dialogs AS dialog
+          WHERE dialog.owner_id = draft.owner_id
+            AND dialog.peer_type = draft.peer_type
+            AND dialog.peer_id = draft.peer_id
+      ))
+      OR (draft.peer_type = 2 AND EXISTS (
+          SELECT 1 FROM chat_participants AS participant
+          JOIN chats AS chat ON chat.id = participant.chat_id
+          WHERE participant.chat_id = draft.peer_id
+            AND participant.user_id = draft.owner_id
+      ))
+      OR (draft.peer_type = 3 AND EXISTS (
+          SELECT 1 FROM channel_participants AS participant
+          JOIN channels AS channel ON channel.id = participant.channel_id
+          WHERE participant.channel_id = draft.peer_id
+            AND participant.user_id = draft.owner_id
+            AND (participant.banned_until IS NULL OR participant.banned_until <= now())
+            AND channel.deleted_at IS NULL
+      ))
+  )
+ORDER BY draft.peer_type, draft.peer_id
+`
+
+type CloudDraftsForOwnerRow struct {
+	PeerType     int16
+	PeerID       int64
+	Message      string
+	NoWebpage    bool
+	ReplyToMsgID int64
+	UpdatedAt    pgtype.Timestamptz
+}
+
+// CloudDraftsForOwner returns every current draft the owner can still read.
+// Membership and dialog access are checked in the same statement as the text.
+func (q *Queries) CloudDraftsForOwner(ctx context.Context, ownerID int64) ([]CloudDraftsForOwnerRow, error) {
+	rows, err := q.db.Query(ctx, cloudDraftsForOwner, ownerID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []CloudDraftsForOwnerRow
+	for rows.Next() {
+		var i CloudDraftsForOwnerRow
+		if err := rows.Scan(
+			&i.PeerType,
+			&i.PeerID,
+			&i.Message,
+			&i.NoWebpage,
+			&i.ReplyToMsgID,
+			&i.UpdatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const cloudDraftsForPeers = `-- name: CloudDraftsForPeers :many
 WITH selected AS (
     SELECT peer_types.peer_type, peer_ids.peer_id

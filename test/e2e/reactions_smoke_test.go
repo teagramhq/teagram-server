@@ -189,3 +189,68 @@ func testSmokeBasicGroupReactions(t *testing.T) {
 	}
 	readCount(0)
 }
+
+func testSmokeAvailableReactions(t *testing.T) {
+	t.Helper()
+	f := newSmokeFixture(t)
+	const phone = "+15551048021"
+	seedSmokeUsers(t, f, phone)
+	client := newSmokeClient(t, f, "available reactions", phone)
+	if err := client.call(f.ctx, func(ctx context.Context, api *tg.Client) error {
+		result, err := api.MessagesGetAvailableReactions(ctx, 0)
+		if err != nil {
+			return fmt.Errorf("messages.getAvailableReactions: %w", err)
+		}
+		available, ok := result.(*tg.MessagesAvailableReactions)
+		if !ok || len(available.Reactions) == 0 {
+			return fmt.Errorf("messages.getAvailableReactions = %T, want non-empty availableReactions", result)
+		}
+		var heart *tg.AvailableReaction
+		for _, reaction := range available.Reactions {
+			if reaction.Reaction == "❤" {
+				heart = &reaction
+				break
+			}
+		}
+		if heart == nil {
+			return errors.New("available reactions omitted ❤")
+		}
+		for _, item := range []struct {
+			name     string
+			document tg.DocumentClass
+			webp     bool
+		}{
+			{name: "static_icon", document: heart.StaticIcon, webp: true},
+			{name: "select_animation", document: heart.SelectAnimation},
+		} {
+			document, ok := item.document.(*tg.Document)
+			if !ok {
+				return fmt.Errorf("❤ %s = %T, want *tg.Document", item.name, item.document)
+			}
+			fileResult, err := api.UploadGetFile(ctx, &tg.UploadGetFileRequest{
+				Location: &tg.InputDocumentFileLocation{
+					ID: document.ID, AccessHash: document.AccessHash, FileReference: document.FileReference,
+				},
+				Offset: 0,
+				Limit:  256 * 1024,
+			})
+			if err != nil {
+				return fmt.Errorf("upload.getFile for ❤ %s: %w", item.name, err)
+			}
+			file, ok := fileResult.(*tg.UploadFile)
+			if !ok {
+				return fmt.Errorf("upload.getFile for ❤ %s = %T, want *tg.UploadFile", item.name, fileResult)
+			}
+			if item.webp {
+				if len(file.Bytes) < 12 || string(file.Bytes[:4]) != "RIFF" || string(file.Bytes[8:12]) != "WEBP" {
+					return errors.New("❤ static_icon does not have WebP magic bytes")
+				}
+			} else if len(file.Bytes) < 2 || file.Bytes[0] != 0x1f || file.Bytes[1] != 0x8b {
+				return errors.New("❤ select_animation does not have gzip magic bytes")
+			}
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("available reaction assets smoke: %v", err)
+	}
+}

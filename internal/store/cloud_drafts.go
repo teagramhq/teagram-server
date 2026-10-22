@@ -172,6 +172,23 @@ func (s *Store) CloudDraftsForPeers(ctx context.Context, ownerID int64, peers []
 	return cloudDraftsForPeers(ctx, s.q, ownerID, peers)
 }
 
+// CloudDraftsForOwner returns all current drafts whose peers the owner can
+// still read. The query checks access alongside the draft contents.
+func (s *Store) CloudDraftsForOwner(ctx context.Context, ownerID int64) ([]CloudDraft, error) {
+	rows, err := s.q.CloudDraftsForOwner(ctx, ownerID)
+	if err != nil {
+		return nil, fmt.Errorf("read owner cloud drafts: %w", err)
+	}
+	drafts := make([]CloudDraft, 0, len(rows))
+	for _, row := range rows {
+		drafts = append(drafts, CloudDraft{
+			PeerType: PeerType(row.PeerType), PeerID: row.PeerID, Message: row.Message,
+			NoWebpage: row.NoWebpage, ReplyToMsgID: row.ReplyToMsgID, UpdatedAt: row.UpdatedAt.Time,
+		})
+	}
+	return drafts, nil
+}
+
 func cloudDraftsForPeers(ctx context.Context, q *db.Queries, ownerID int64, peers []PeerDialogKey) (map[PeerDialogKey]CloudDraft, error) {
 	out := make(map[PeerDialogKey]CloudDraft)
 	if len(peers) == 0 {

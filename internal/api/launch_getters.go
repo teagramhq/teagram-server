@@ -179,7 +179,23 @@ func (h *handlers) handleGetAvailableReactions(r *mtproto.Request) (bin.Encoder,
 	if err := decodeLaunchGetterRequest(r, &req); err != nil {
 		return nil, err
 	}
-	return &tg.MessagesAvailableReactions{Hash: 0, Reactions: []tg.AvailableReaction{}}, nil
+	catalog, err := getReactionDocumentCatalog()
+	if err != nil {
+		h.log.Error("load reaction documents", "err", err)
+		return nil, errInternal
+	}
+	if req.Hash == catalog.hash {
+		return &tg.MessagesAvailableReactionsNotModified{}, nil
+	}
+	reactions, err := catalog.responseReactions(h.dcID)
+	if err != nil {
+		h.log.Error("build available reactions response", "err", err)
+		return nil, errInternal
+	}
+	return &tg.MessagesAvailableReactions{
+		Hash:      catalog.hash,
+		Reactions: reactions,
+	}, nil
 }
 
 func (h *handlers) handleGetTopReactions(r *mtproto.Request) (bin.Encoder, error) {

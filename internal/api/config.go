@@ -15,7 +15,7 @@ const configTTL = time.Hour
 // It carries no date or expires: handleGetConfig stamps both from the clock on
 // every response, since a value stored here would be the process start time.
 func DefaultConfig(dcID int, host string, port int) *tg.Config {
-	return &tg.Config{
+	config := &tg.Config{
 		ThisDC:   dcID,
 		TestMode: false,
 		DCOptions: []tg.DCOption{{
@@ -39,4 +39,6 @@ func DefaultConfig(dcID int, host string, port int) *tg.Config {
 		MessageLengthMax:     4096,
 		WebfileDCID:          dcID,
 	}
+	config.SetReactionsDefault(&tg.ReactionEmoji{Emoticon: "👍"})
+	return config
 }

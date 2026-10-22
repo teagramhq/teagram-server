@@ -41,6 +41,8 @@ type FanOut struct {
 	// MediaRights names the document subtype flags derived from the input
 	// document attributes. The handler only supplies values it recognizes.
 	MediaRights []string
+	// Entities are the canonical spans persisted with each ordinary message copy.
+	Entities []PollDescriptionEntity
 
 	// ReplyToMsgID is the message-local-id the message should quote in this chat.
 	// Non-zero to link; 0 means the message is not a reply.
@@ -176,6 +178,10 @@ func (s *Store) SendChatPollMessage(ctx context.Context, f FanOut, draft PollDra
 func fanOut(ctx context.Context, tx pgx.Tx, qtx *db.Queries, log *slog.Logger, f FanOut) (sender Message, perOwner map[int64]int, dup bool, err error) {
 	if f.ChatID == 0 || f.FromID == 0 {
 		return Message{}, nil, false, ErrMessageInvalid
+	}
+	entityData, err := EncodeMessageEntities(f.Entities)
+	if err != nil {
+		return Message{}, nil, false, fmt.Errorf("encode message entities: %w", err)
 	}
 	if f.Action == ChatActionSetMessagesTTL && !ValidHistoryTTLPeriod(f.TTLPeriod) {
 		return Message{}, nil, false, ErrHistoryTTLPeriodInvalid
@@ -379,6 +385,7 @@ func fanOut(ctx context.Context, tx pgx.Tx, qtx *db.Queries, log *slog.Logger, f
 			FwdDate:        f.FwdDate,
 			FwdChannelID:   f.FwdChannelID,
 			FwdChannelPost: f.FwdChannelPost,
+			Entities:       entityData,
 		}); err != nil {
 			return Message{}, nil, false, fmt.Errorf("insert message %d: %w", owner, err)
 		}

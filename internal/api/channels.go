@@ -887,7 +887,7 @@ func (h *handlers) requireChannelMember(ctx context.Context, channelID, userID i
 // ride. store.ErrNotMember covers "not a member", "banned", "may not post in a
 // broadcast" and "no such channel" alike, and all four must stay one wire error
 // so channel ids are not enumerable.
-func (h *handlers) sendChannelMessage(r *mtproto.Request, channelID int64, req *tg.MessagesSendMessageRequest, replyToMsgID int64) (bin.Encoder, error) {
+func (h *handlers) sendChannelMessage(r *mtproto.Request, channelID int64, req *tg.MessagesSendMessageRequest, replyToMsgID int64, entities []store.PollDescriptionEntity) (bin.Encoder, error) {
 	// Check for a transport retry before the rate limit.
 	if req.RandomID != 0 {
 		existing, pts, duplicate, err := h.store.ChannelTextMessageRetryAs(r.Ctx, channelID, r.UserID, req.RandomID)
@@ -944,7 +944,7 @@ func (h *handlers) sendChannelMessage(r *mtproto.Request, channelID int64, req *
 
 	// PostChannelMessageAs, never PostChannelMessage: the latter is the
 	// unchecked primitive and trusts its caller to have decided post rights.
-	msg, pts, dup, err := h.store.PostChannelMessageAs(r.Ctx, channelID, r.UserID, req.Message, req.RandomID, nil, replyToMsgID)
+	msg, pts, dup, err := h.store.PostChannelMessageAsWithEntities(r.Ctx, channelID, r.UserID, req.Message, req.RandomID, nil, replyToMsgID, entities)
 	if slowModeWait, ok := errors.AsType[*store.SlowModeWaitError](err); ok {
 		return nil, rpcErr(420, slowModeWait.Error())
 	}

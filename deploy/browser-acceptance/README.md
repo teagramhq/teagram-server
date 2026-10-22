@@ -16,9 +16,11 @@ profile, HOME, `/tmp`, and `/dev/shm` are bounded tmpfs mounts with `noexec`,
 `nosuid`, and `nodev`. Chromium binaries and Node modules stay in the image.
 
 The host runner requires curl 8.4.0 or newer so unknown-length responses are
-stopped during transfer at 16 KiB plus one byte. Its project lock is held on a
-mode-0700 directory under `XDG_RUNTIME_DIR`, or `$HOME/.local/run` when that
-variable is unset.
+stopped during transfer at 16 KiB plus one byte. Its project lock is held on
+`/tmp/teagram-browser-acceptance.lock`, shared across checkouts and user
+sessions on the host. The empty lock file remains after a run; `flock` releases
+the lock when the last process holding its descriptor exits, including after a
+forced kill.
 
 Existing input files are checked as regular files with final-component symlinks
 rejected, then canonicalized with plain `realpath` so both GNU and BusyBox

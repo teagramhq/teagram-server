@@ -509,7 +509,9 @@ func TestSmokeClientRequestFixturesAreLayer228Shapes(t *testing.T) {
 		"photos_uploadProfilePhoto.1",
 		"account_updateProfile.1",
 		"account_checkUsername.1",
+		"messages_getAvailableReactions.1",
 		"upload_getFile.1",
+		"upload_getFile.2",
 		"messages_sendMedia.1",
 		"messages_sendMedia.2",
 		"messages_sendMedia.3",
@@ -596,6 +598,18 @@ func testSmokeClientRequestFixtures(t *testing.T) {
 			t.Fatalf("replay login fixture %s: %v", fixtureName, err)
 		}
 	}
+	if err := fixtureClientCall(t, creator, "messages_getAllDrafts.1", func(ctx context.Context, api *tg.Client) error {
+		response, err := api.MessagesGetAllDrafts(ctx)
+		if err != nil {
+			return err
+		}
+		if _, ok := response.(*tg.Updates); !ok {
+			return fmt.Errorf("getAllDrafts response = %T, want *tg.Updates", response)
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("replay get-all-drafts fixture: %v", err)
+	}
 	const recoveryPassword, recoveryEmail = "fixture recovery password", "contact@example.invalid"
 	if err := fixtureClientCall(t, checker, "account_updatePasswordSettings.contact.1", func(ctx context.Context, api *tg.Client) error {
 		return setFirstPasswordWithEmail(ctx, api, recoveryPassword, recoveryEmail)
@@ -677,6 +691,48 @@ func testSmokeClientRequestFixtures(t *testing.T) {
 		return nil
 	}); err != nil {
 		t.Fatalf("replay contacts.getStatuses fixture: %v", err)
+	}
+
+	var reactionDocument *tg.Document
+	if err := fixtureClientCall(t, creator, "messages_getAvailableReactions.1", func(ctx context.Context, api *tg.Client) error {
+		result, err := api.MessagesGetAvailableReactions(ctx, 0)
+		if err != nil {
+			return err
+		}
+		available, ok := result.(*tg.MessagesAvailableReactions)
+		if !ok || len(available.Reactions) == 0 {
+			return fmt.Errorf("available reactions = %T, want non-empty *tg.MessagesAvailableReactions", result)
+		}
+		staticIcon, ok := available.Reactions[0].StaticIcon.(*tg.Document)
+		if !ok {
+			return fmt.Errorf("first available reaction static_icon = %T, want *tg.Document", available.Reactions[0].StaticIcon)
+		}
+		reactionDocument = staticIcon
+		return nil
+	}); err != nil {
+		t.Fatalf("replay available-reactions fixture: %v", err)
+	}
+	if err := fixtureClientCall(t, creator, "upload_getFile.2", func(ctx context.Context, api *tg.Client) error {
+		if reactionDocument == nil {
+			return errors.New("available reaction did not provide a document")
+		}
+		result, err := api.UploadGetFile(ctx, &tg.UploadGetFileRequest{
+			Location: &tg.InputDocumentFileLocation{
+				ID: reactionDocument.ID, AccessHash: reactionDocument.AccessHash, FileReference: reactionDocument.FileReference,
+			},
+			Offset: 0,
+			Limit:  262144,
+		})
+		if err != nil {
+			return err
+		}
+		file, ok := result.(*tg.UploadFile)
+		if !ok || len(file.Bytes) == 0 {
+			return fmt.Errorf("reaction upload.getFile = %T, want non-empty *tg.UploadFile", result)
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("replay reaction upload.getFile fixture: %v", err)
 	}
 
 	const savedNote = "client fixture Saved Messages note"
