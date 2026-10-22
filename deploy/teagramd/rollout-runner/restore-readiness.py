@@ -243,6 +243,15 @@ def validate_local_dump_metadata(info: os.stat_result, name: str) -> bool:
     )
 
 
+def validate_local_dump_parent(info: os.stat_result) -> bool:
+    return (
+        stat.S_ISDIR(info.st_mode)
+        and info.st_uid == 0
+        and info.st_gid == 0
+        and (info.st_mode & 0o022) == 0
+    )
+
+
 def open_local_dump(path: Path) -> tuple[int, dict[str, int]]:
     """Open a protected dump without following path components or reading its bytes."""
     if not path.is_absolute() or str(path) != os.path.normpath(str(path)) or not LOCAL_DUMP_NAME.fullmatch(path.name):
@@ -251,6 +260,9 @@ def open_local_dump(path: Path) -> tuple[int, dict[str, int]]:
     directory_fd = os.open("/", os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
     descriptor = -1
     try:
+        if not validate_local_dump_parent(os.fstat(directory_fd)):
+            raise ValueError("invalid local dump parent")
+
         for component in path.parts[1:-1]:
             if component in {"", ".", ".."}:
                 raise ValueError("invalid local dump path")
@@ -260,12 +272,7 @@ def open_local_dump(path: Path) -> tuple[int, dict[str, int]]:
                 dir_fd=directory_fd,
             )
             parent_info = os.fstat(next_fd)
-            if (
-                not stat.S_ISDIR(parent_info.st_mode)
-                or parent_info.st_uid != 0
-                or parent_info.st_gid != 0
-                or parent_info.st_mode & 0o022
-            ):
+            if not validate_local_dump_parent(parent_info):
                 os.close(next_fd)
                 raise ValueError("invalid local dump parent")
             os.close(directory_fd)
@@ -663,9 +670,16 @@ WITH objects AS (
          COALESCE((SELECT string_agg(entry, ',' ORDER BY entry) FROM (SELECT CASE WHEN acl.grantee = 0 THEN 'PUBLIC' ELSE pg_get_userbyid(acl.grantee) END || '=' || acl.privilege_type || CASE WHEN acl.is_grantable THEN '*' ELSE '' END || '/' || pg_get_userbyid(acl.grantor) AS entry FROM aclexplode(c.relacl) AS acl WHERE acl.grantee <> c.relowner) AS entries), '') || '|' ||
          COALESCE(array_to_string(c.reloptions, ','), '') || '|' || c.relpersistence::text || '|' ||
          c.relrowsecurity::text || '|' || c.relforcerowsecurity::text || '|' ||
+         CASE WHEN c.relkind = 'S' THEN
+           COALESCE(format_type(seq.seqtypid, NULL) || '|' || seq.seqstart::text || '|' ||
+                    seq.seqincrement::text || '|' || seq.seqmax::text || '|' ||
+                    seq.seqmin::text || '|' || seq.seqcache::text || '|' ||
+                    seq.seqcycle::text, 'missing')
+         ELSE '' END || '|' ||
          CASE WHEN c.relkind IN ('v', 'm') THEN pg_get_viewdef(c.oid, true) ELSE '' END AS detail
   FROM pg_class AS c
   JOIN pg_namespace AS n ON n.oid = c.relnamespace
+  LEFT JOIN pg_sequence AS seq ON seq.seqrelid = c.oid
   WHERE n.nspname NOT IN ('pg_catalog', 'information_schema')
     AND n.nspname NOT LIKE 'pg_toast%'
     AND n.nspname NOT LIKE 'pg_temp_%'
@@ -3693,6 +3707,28 @@ class Drill(Docker):
             raise DrillFailure(self.phase, "schema_failure")
         status, _ = self.run_local_fixture_sql(target, "ALTER DATABASE teagram RESET work_mem;")
         if status != 0 or self.sql(target, DATABASE_STATE_SQL, self.phase) != baseline[2]:
+            raise DrillFailure(self.phase, "schema_failure")
+
+        sequence_increment = self.sql(
+            target,
+            "SELECT seqincrement::text FROM pg_sequence "
+            "WHERE seqrelid = 'public.users_id_seq'::regclass;",
+            self.phase,
+        )
+        if not re.fullmatch(r"-?[1-9][0-9]*", sequence_increment):
+            raise DrillFailure(self.phase, "schema_failure")
+        test_increment = "19" if sequence_increment == "17" else "17"
+        status, _ = self.run_local_fixture_sql(
+            target,
+            f"ALTER SEQUENCE public.users_id_seq INCREMENT BY {test_increment};",
+        )
+        if status != 0 or self.local_object_inventory(target, self.phase) == baseline[0]:
+            raise DrillFailure(self.phase, "schema_failure")
+        status, _ = self.run_local_fixture_sql(
+            target,
+            f"ALTER SEQUENCE public.users_id_seq INCREMENT BY {sequence_increment};",
+        )
+        if status != 0 or self.local_object_inventory(target, self.phase) != baseline[0]:
             raise DrillFailure(self.phase, "schema_failure")
 
         status, _ = self.run_local_fixture_sql(

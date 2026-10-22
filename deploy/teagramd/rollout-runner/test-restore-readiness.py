@@ -466,7 +466,7 @@ class RestoreReadinessContractTests(unittest.TestCase):
                 auth_keys_cleared="pass",
             )
 
-    def test_local_dump_metadata_and_restore_contract_are_bounded(self) -> None:
+    def test_local_dump_metadata_is_bounded(self) -> None:
         name = "pgdump-pre-" + "a" * 40 + ".sql"
 
         def file_info(
@@ -493,7 +493,50 @@ class RestoreReadinessContractTests(unittest.TestCase):
             with self.subTest(info=info, name=candidate):
                 self.assertFalse(RESTORE_READINESS.validate_local_dump_metadata(info, candidate))
 
+    def test_local_dump_walk_rejects_an_untrusted_root_directory_fd(self) -> None:
+        name = "pgdump-pre-" + "a" * 40 + ".sql"
+        path = Path("/tmp") / name
+        cases = (
+            (stat.S_IFDIR | 0o755, 1000, 0),
+            (stat.S_IFDIR | 0o755, 0, 1000),
+            (stat.S_IFDIR | 0o775, 0, 0),
+            (stat.S_IFDIR | 0o757, 0, 0),
+            (stat.S_IFREG | 0o755, 0, 0),
+        )
+        for mode, uid, gid in cases:
+            info = os.stat_result((mode, 1, 2, 1, uid, gid, 0, 0, 0, 0))
+            with (
+                self.subTest(mode=oct(mode), uid=uid, gid=gid),
+                patch.object(RESTORE_READINESS.os, "open", return_value=41) as open_directory,
+                patch.object(RESTORE_READINESS.os, "fstat", return_value=info),
+                patch.object(RESTORE_READINESS.os, "close") as close_directory,
+                self.assertRaises(ValueError),
+            ):
+                RESTORE_READINESS.open_local_dump(path)
+
+            open_directory.assert_called_once()
+            self.assertEqual(open_directory.call_args.args[0], "/")
+            close_directory.assert_called_once_with(41)
+
+    def test_local_inventory_and_restore_contracts_are_bounded(self) -> None:
+        inventory = RESTORE_READINESS.LOCAL_OBJECT_INVENTORY_SQL
+        self.assertIn("LEFT JOIN pg_sequence AS seq ON seq.seqrelid = c.oid", inventory)
+        for parameter in (
+            "seqtypid",
+            "seqstart",
+            "seqincrement",
+            "seqmax",
+            "seqmin",
+            "seqcache",
+            "seqcycle",
+        ):
+            with self.subTest(parameter=parameter):
+                self.assertIn(f"seq.{parameter}", inventory)
+
         source = SCRIPT.read_text(encoding="utf-8")
+        self.assertIn("ALTER SEQUENCE public.users_id_seq INCREMENT BY", source)
+        self.assertIn("seqincrement::text FROM pg_sequence", source)
+
         self.assertIn("self.mount(self.local_dump_path, \"/run/local-dump/input.sql\", writable=False)", source)
         self.assertIn("--single-transaction --file=-", source)
         self.assertIn("\\\\restrict", source)
