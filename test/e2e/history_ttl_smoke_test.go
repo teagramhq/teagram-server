@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -17,7 +18,20 @@ import (
 
 func testSmokeHistoryTTL(t *testing.T) {
 	t.Helper()
-	f := newSmokeFixtureWithDeadline(t, config.RegistrationClosed, nil, 4*time.Minute)
+	var suppressChannelPostDelivery atomic.Bool
+	suppressedChannelPost := make(chan int64, 1)
+	f := newSmokeFixtureWithDeadline(t, config.RegistrationClosed, func(f *smokeFixture) {
+		f.suppressChannelPostDelivery = func(channelID int64) bool {
+			if !suppressChannelPostDelivery.Load() {
+				return false
+			}
+			select {
+			case suppressedChannelPost <- channelID:
+			default:
+			}
+			return true
+		}
+	}, 4*time.Minute)
 	const phoneA, phoneB, phoneC = "+15552244001", "+15552244002", "+15552244003"
 	seedSmokeUsers(t, f, phoneA, phoneB, phoneC)
 	alice := newSmokeClient(t, f, "history ttl Alice", phoneA)
@@ -325,12 +339,24 @@ func testSmokeHistoryTTL(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("send channel TTL post: %v", err)
 	}
+	channelPost := recvOrCtx(t, f.ctx, bob.seen.newChannelMsg, "Bob's channel TTL post update")
+	if channelPost.Msg.ID != channelPostID || channelPost.Msg.Message != channelText {
+		t.Fatalf("Bob channel post update = %+v, want post %d %q", channelPost, channelPostID, channelText)
+	}
 	assertHistoryContainsTTLMessage(t, f.ctx, alice, peerChannel(alice.id, channel.ID), channelText, 2592000)
 	assertHistoryContainsTTLMessage(t, f.ctx, bob, peerChannel(bob.id, channel.ID), channelText, 2592000)
+	beforeSweepPts, err := f.store.ChannelState(f.ctx, channel.ID)
+	if err != nil {
+		t.Fatalf("read channel pts before expiry sweep: %v", err)
+	}
+	if channelPost.Pts != beforeSweepPts {
+		t.Fatalf("Bob channel post pts = %d, want pre-sweep channel pts %d", channelPost.Pts, beforeSweepPts)
+	}
 	if _, err = conn.Exec(f.ctx, `UPDATE channel_messages SET expires_at = clock_timestamp() - interval '1 second'
 		WHERE channel_id = $1 AND local_id = $2`, channel.ID, channelPostID); err != nil {
 		t.Fatalf("advance channel post expiry test seam: %v", err)
 	}
+	suppressChannelPostDelivery.Store(true)
 	deletedPosts, more, err := f.store.SweepExpiredChannelPosts(f.ctx, store.HistoryTTLSweepBatchSize)
 	if err != nil {
 		t.Fatalf("sweep expired channel posts: %v", err)
@@ -338,9 +364,37 @@ func testSmokeHistoryTTL(t *testing.T) {
 	if deletedPosts != 1 || more {
 		t.Fatalf("expired channel post sweep = deleted %d, more %t, want 1, false", deletedPosts, more)
 	}
-	channelDelete := recvOrCtx(t, f.ctx, bob.seen.delChannelMsg, "Bob's open-session channel TTL delete update")
-	if channelDelete.ChannelID != channel.ID || len(channelDelete.Messages) != 1 || channelDelete.Messages[0] != channelPostID || channelDelete.PtsCount != 1 {
-		t.Fatalf("Bob channel delete update = %+v, want channel %d post %d with pts_count 1", channelDelete, channel.ID, channelPostID)
+	if suppressedID := recvOrCtx(t, f.ctx, suppressedChannelPost, "suppressed Bob channel TTL delete push"); suppressedID != channel.ID {
+		t.Fatalf("suppressed channel post delivery for channel %d, want %d", suppressedID, channel.ID)
+	}
+	select {
+	case pushed := <-bob.seen.delChannelMsg:
+		t.Fatalf("Bob received channel TTL delete push despite suppression: %+v", pushed)
+	default:
+	}
+	var difference tg.UpdatesChannelDifferenceClass
+	if err := bob.call(f.ctx, func(ctx context.Context, client *tg.Client) error {
+		var err error
+		difference, err = client.UpdatesGetChannelDifference(ctx, &tg.UpdatesGetChannelDifferenceRequest{
+			Channel: inputChannel(bob.id, channel.ID),
+			Filter:  &tg.ChannelMessagesFilterEmpty{},
+			Pts:     beforeSweepPts,
+			Limit:   10,
+		})
+		return err
+	}); err != nil {
+		t.Fatalf("get channel difference after expiry sweep: %v", err)
+	}
+	channelDifference, ok := difference.(*tg.UpdatesChannelDifference)
+	if !ok {
+		t.Fatalf("channel TTL difference = %T, want *tg.UpdatesChannelDifference", difference)
+	}
+	if channelDifference.Pts != beforeSweepPts+1 || len(channelDifference.NewMessages) != 0 || len(channelDifference.OtherUpdates) != 1 {
+		t.Fatalf("channel TTL difference pts/new/other = %d/%d/%d, want %d/0/1", channelDifference.Pts, len(channelDifference.NewMessages), len(channelDifference.OtherUpdates), beforeSweepPts+1)
+	}
+	channelDelete, ok := channelDifference.OtherUpdates[0].(*tg.UpdateDeleteChannelMessages)
+	if !ok || channelDelete.ChannelID != channel.ID || len(channelDelete.Messages) != 1 || channelDelete.Messages[0] != channelPostID || channelDelete.Pts != beforeSweepPts+1 || channelDelete.PtsCount != 1 {
+		t.Fatalf("channel TTL difference delete = %#v, want channel %d post %d at pts %d/count 1", channelDifference.OtherUpdates[0], channel.ID, channelPostID, beforeSweepPts+1)
 	}
 	assertHistoryOmitsPeerMessage(t, f.ctx, bob, peerChannel(bob.id, channel.ID), channelText)
 

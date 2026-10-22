@@ -5266,27 +5266,28 @@ func requireSmokeFullUser(users []tg.UserClass, userID int64, source string) (*t
 }
 
 type smokeFixture struct {
-	ctx                    context.Context
-	failures               *clientFailureSignal
-	key                    *rsa.PrivateKey
-	dsn                    string
-	store                  *store.Store
-	blobs                  blob.Store
-	photoThumbs            *photothumb.Supervisor
-	codes                  *multiCodeSink
-	authHandles            map[string]string
-	dcID                   int
-	port                   int
-	listener               *acceptCountingListener
-	registry               *mtproto.SessionRegistry
-	stop                   func()
-	stopCleanupRegistered  bool
-	regMode                config.RegistrationMode
-	welcomeChannel         string
-	turnstileSiteKey       string
-	turnstileVerifier      api.SignUpTurnstileVerifier
-	turnstileSignInEnabled bool
-	persistStatus          bool
+	ctx                         context.Context
+	failures                    *clientFailureSignal
+	key                         *rsa.PrivateKey
+	dsn                         string
+	store                       *store.Store
+	blobs                       blob.Store
+	photoThumbs                 *photothumb.Supervisor
+	codes                       *multiCodeSink
+	authHandles                 map[string]string
+	dcID                        int
+	port                        int
+	listener                    *acceptCountingListener
+	registry                    *mtproto.SessionRegistry
+	stop                        func()
+	stopCleanupRegistered       bool
+	suppressChannelPostDelivery func(channelID int64) bool
+	regMode                     config.RegistrationMode
+	welcomeChannel              string
+	turnstileSiteKey            string
+	turnstileVerifier           api.SignUpTurnstileVerifier
+	turnstileSignInEnabled      bool
+	persistStatus               bool
 	// rateLimits is the per-surface budget set the booted server gets.
 	// Zero, the fixture default, means no surface is limited, which is what
 	// every existing scenario assumes. A scenario that exists to prove a shipped
@@ -5741,7 +5742,7 @@ func (f *smokeFixture) start(t *testing.T, address string) {
 	registry, stop := bootServerWithLimitsAndRegistrationModeAndBlobsAndStatusWithDeliveryHookAndTurnstileAndWelcomeChannel(
 		t, f.ctx, f.key, f.dcID, f.store, f.dsn, f.codes.Logger(), ln, f.rateLimits, f.regMode,
 		f.blobs, f.persistStatus, nil, f.turnstileSiteKey, f.turnstileVerifier, f.welcomeChannel,
-		f.turnstileSignInEnabled, f.photoThumbs,
+		f.turnstileSignInEnabled, f.suppressChannelPostDelivery, f.photoThumbs,
 	)
 	f.registry = registry
 	f.setServerStop(t.Cleanup, stop)
