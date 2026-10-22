@@ -241,6 +241,30 @@ class RestoreReadinessContractTests(unittest.TestCase):
         self.assertEqual(RESTORE_READINESS.source_fixture_counts(False), (1, 3))
         self.assertEqual(RESTORE_READINESS.source_fixture_counts(True), (3, 5))
 
+        tree = ast.parse(SCRIPT.read_text(encoding="utf-8"))
+        run_primary = next(
+            node
+            for node in ast.walk(tree)
+            if isinstance(node, ast.FunctionDef) and node.name == "run_primary"
+        )
+        count_calls = sorted(
+            (node.lineno, ast.unparse(node.args[0]))
+            for node in ast.walk(run_primary)
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id == "source_fixture_counts"
+        )
+        fixture_call_line = next(
+            node.lineno
+            for node in ast.walk(run_primary)
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr == "create_local_dump_fixture"
+        )
+        self.assertEqual([argument for _, argument in count_calls], ["False", "args.local_fixture_test"])
+        self.assertLess(count_calls[0][0], fixture_call_line)
+        self.assertGreater(count_calls[1][0], fixture_call_line)
+
     def test_postgres_restore_role_is_not_the_pg18_bootstrap_superuser(self) -> None:
         role = RESTORE_READINESS.RESTORE_BOOTSTRAP_ROLE
         self.assertNotEqual(role, "postgres")

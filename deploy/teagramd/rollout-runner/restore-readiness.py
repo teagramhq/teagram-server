@@ -6296,7 +6296,7 @@ def run_primary(args: argparse.Namespace) -> int:
         )
         if args.local_fixture_test:
             drill.migrate_database("source", source, HEAD_SCHEMA, "source_migrations")
-            expected_users, expected_auth_keys = source_fixture_counts(True)
+            expected_users, expected_auth_keys = source_fixture_counts(False)
             drill.verify_schema_state(
                 source,
                 expected_users,
