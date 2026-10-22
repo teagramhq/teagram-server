@@ -4,7 +4,7 @@ import { access, chmod, copyFile, mkdtemp, mkdir, readFile, rm, stat, symlink, w
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { spawn, spawnSync } from "node:child_process";
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import test from "node:test";
 
 const repoRoot = new URL("../..", import.meta.url).pathname;
@@ -466,6 +466,60 @@ async function ensureSharedLockFile(path) {
     if (error.code !== "EEXIST") throw error;
   }
   if (created) await chmod(path, 0o666);
+}
+
+async function setFixtureLockPath(paths, lockFile) {
+  const source = await readFile(paths.runScript, "utf8");
+  assert.equal(source.split(paths.sharedRuntimeLock).length - 1, 1);
+  await writeFile(paths.runScript, source.replace(paths.sharedRuntimeLock, lockFile), { mode: 0o755 });
+}
+
+async function installLockFdProbe(paths) {
+  const flockPath = join(paths.bin, "flock");
+  await writeFile(flockPath, `#!/usr/bin/env bash
+set -eu
+flags="$(awk '$1 == "flags:" { print $2 }' /proc/$$/fdinfo/9)"
+printf 'LOCK_FD_FLAGS=%s\\n' "$flags" >&2
+exec /usr/bin/flock "$@"
+`, { mode: 0o755 });
+}
+
+function asUser(uid, gid, command, args, options = {}) {
+  const env = options.env ?? process.env;
+  if (uid === process.getuid() && gid === process.getgid()) {
+    return { command, args, options: { ...options, env } };
+  }
+  const assignments = Object.entries(env)
+    .filter(([, value]) => value !== undefined)
+    .map(([name, value]) => `${name}=${value}`);
+  const setprivArgs = ["--reuid", String(uid), "--regid", String(gid), "--clear-groups", "--",
+    "env", ...assignments, command, ...args];
+  if (process.getuid() === 0) {
+    return { command: "/usr/bin/setpriv", args: setprivArgs, options: { ...options, env: process.env } };
+  }
+  return { command: "sudo", args: ["-n", "setpriv", ...setprivArgs], options: { ...options, env: process.env } };
+}
+
+function spawnAsUser(uid, gid, command, args, options = {}) {
+  const invocation = asUser(uid, gid, command, args, options);
+  return spawn(invocation.command, invocation.args, invocation.options);
+}
+
+function spawnSyncAsUser(uid, gid, command, args, options = {}) {
+  const invocation = asUser(uid, gid, command, args, options);
+  return spawnSync(invocation.command, invocation.args, invocation.options);
+}
+
+function lockFdFlags(stderr) {
+  const match = stderr.match(/LOCK_FD_FLAGS=([0-7]+)/u);
+  assert.ok(match, `expected lock descriptor flags in stderr, got: ${stderr}`);
+  return Number.parseInt(match[1], 8);
+}
+
+function assertLockFdIsReadWriteWithoutAppend(stderr) {
+  const flags = lockFdFlags(stderr);
+  assert.equal(flags & 0o3, 0o2, "lock descriptor should be opened read-write");
+  assert.equal(flags & 0o2000, 0, "lock descriptor should not use O_APPEND");
 }
 
 async function invokeBusyboxPhase(t, lane, { phase = "", mode = "valid", status = 1, outputMode = "standard" } = {}) {
@@ -1554,6 +1608,127 @@ test("a killed lock holder leaves a reusable shared lock file", async (t) => {
   });
   assert.equal(result.status, 0, result.stderr);
   assert.equal(result.stdout, `${blockedResult}\n`);
+});
+
+test("browser lock opens a sticky /tmp inode read-write without append", async (t) => {
+  const paths = await setup(t);
+  const lockFile = join("/tmp", `teagram-browser-acceptance-${process.pid}-${randomUUID()}.lock`);
+  t.after(() => rm(lockFile, { force: true }));
+  const tempDirectory = await stat("/tmp");
+  assert.equal(tempDirectory.uid, 0);
+  assert.equal(tempDirectory.mode & 0o1000, 0o1000);
+
+  await setFixtureLockPath(paths, lockFile);
+  await ensureSharedLockFile(lockFile);
+  await installLockFdProbe(paths);
+
+  const missingManifest = join(paths.directory, "missing-manifest.json");
+  const result = invoke(paths, ["blocked-control", "--manifest", missingManifest]);
+  assert.equal(result.status, 1);
+  assert.equal(result.stdout, '{"status":"error","code":"manifest-invalid"}\n');
+  assertLockFdIsReadWriteWithoutAppend(result.stderr);
+});
+
+test("browser acceptance reports contention and reuses a sticky /tmp lock across UIDs", async (t) => {
+  const paths = await setup(t);
+  const lockFile = join("/tmp", `teagram-browser-acceptance-${process.pid}-${randomUUID()}.lock`);
+  const fixtureRoot = join("/tmp", `teagram-browser-acceptance-cross-uid-${process.pid}-${randomUUID()}`);
+  const fixtureRunScript = join(fixtureRoot, "deploy/browser-acceptance/run.sh");
+  const fixtureBin = join(fixtureRoot, "bin");
+  t.after(() => rm(lockFile, { force: true }));
+  t.after(() => rm(fixtureRoot, { recursive: true, force: true }));
+  const tempDirectory = await stat("/tmp");
+  assert.equal(tempDirectory.uid, 0);
+  assert.equal(tempDirectory.mode & 0o1000, 0o1000);
+
+  await mkdir(dirname(fixtureRunScript), { recursive: true, mode: 0o755 });
+  await mkdir(fixtureBin, { mode: 0o755 });
+  await chmod(fixtureRoot, 0o755);
+  const wrapperSource = await readFile(paths.runScript, "utf8");
+  assert.equal(wrapperSource.split(paths.sharedRuntimeLock).length - 1, 1);
+  await writeFile(fixtureRunScript, wrapperSource.replace(paths.sharedRuntimeLock, lockFile), { mode: 0o755 });
+  await installLockFdProbe({ bin: fixtureBin });
+
+  const currentUid = process.getuid();
+  const currentGid = process.getgid();
+  const ownerUid = currentUid === 0 ? 65533 : currentUid;
+  const ownerGid = currentUid === 0 ? 65533 : currentGid;
+  const callerUid = ownerUid === 65534 ? 65533 : 65534;
+  const callerGid = currentUid === 0 ? callerUid : 65534;
+  for (const [uid, gid] of [[ownerUid, ownerGid], [callerUid, callerGid]]) {
+    const available = spawnSyncAsUser(uid, gid, "id", ["-u"], {
+      encoding: "utf8",
+      env: { PATH: "/usr/bin:/bin" },
+    });
+    if (available.status !== 0 || available.stdout.trim() !== String(uid)) {
+      t.skip("cross-UID fixture requires root or passwordless sudo with setpriv");
+      return;
+    }
+  }
+
+  const ownerEnv = { PATH: "/usr/bin:/bin" };
+  const createLock = spawnSyncAsUser(ownerUid, ownerGid, "bash", ["-c",
+    'umask 0111; : > "$1"; chmod 666 -- "$1"', "lock-file", lockFile], {
+    encoding: "utf8",
+    env: ownerEnv,
+  });
+  assert.equal(createLock.status, 0, createLock.stderr);
+  assert.equal((await stat(lockFile)).uid, ownerUid);
+  assert.equal((await stat(lockFile)).mode & 0o777, 0o666);
+
+  const holder = spawnAsUser(ownerUid, ownerGid, "bash", ["-c",
+    'exec 9<> "$1"; /usr/bin/flock -n 9 || exit; printf locked; IFS= read -r _',
+    "lock-holder", lockFile], {
+    stdio: ["pipe", "pipe", "ignore"],
+    env: ownerEnv,
+  });
+  let holderOutput = "";
+  holder.stdout.setEncoding("utf8").on("data", (chunk) => { holderOutput += chunk; });
+  const closed = new Promise((resolve) => holder.once("close", (status, signal) => resolve({ status, signal })));
+  try {
+    await new Promise((resolve, reject) => {
+      const timeout = setTimeout(() => reject(new Error("cross-UID lock holder did not acquire the fixture lock")), 5000);
+      holder.stdout.on("data", () => {
+        if (holderOutput.includes("locked")) {
+          clearTimeout(timeout);
+          resolve();
+        }
+      });
+      holder.on("error", reject);
+      holder.once("close", () => reject(new Error("cross-UID lock holder exited before acquiring the fixture lock")));
+    });
+
+    const wrapperEnv = { PATH: `${fixtureBin}:/usr/bin:/bin`, HOME: fixtureRoot, XDG_RUNTIME_DIR: fixtureRoot };
+    const missingManifest = join(fixtureRoot, "missing-manifest.json");
+    const contention = spawnSyncAsUser(callerUid, callerGid, "bash",
+      [fixtureRunScript, "blocked-control", "--manifest", missingManifest], {
+        cwd: fixtureRoot,
+        encoding: "utf8",
+        env: wrapperEnv,
+      });
+    assert.equal(contention.status, 1);
+    assert.equal(contention.stdout, '{"status":"error","code":"runtime-busy"}\n');
+    assertLockFdIsReadWriteWithoutAppend(contention.stderr);
+
+    holder.stdin.end("release\n");
+    assert.deepEqual(await closed, { status: 0, signal: null });
+
+    const reuse = spawnSyncAsUser(callerUid, callerGid, "bash",
+      [fixtureRunScript, "blocked-control", "--manifest", missingManifest], {
+        cwd: fixtureRoot,
+        encoding: "utf8",
+        env: wrapperEnv,
+      });
+    assert.equal(reuse.status, 1);
+    assert.equal(reuse.stdout, '{"status":"error","code":"manifest-invalid"}\n');
+    assertLockFdIsReadWriteWithoutAppend(reuse.stderr);
+  } finally {
+    if (holder.exitCode === null && holder.signalCode === null) {
+      const didClose = closed.then(() => true);
+      holder.kill("SIGKILL");
+      await didClose;
+    }
+  }
 });
 
 test("blocked control emits one fixed line and cleans the project on success", async (t) => {
