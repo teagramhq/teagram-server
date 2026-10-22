@@ -49,7 +49,6 @@ func TestSendMessageDetectsURLsAndPreservesEntitiesAcrossReadPaths(t *testing.T)
 		entitySpan("bold", urlStart, urlLength),
 		entitySpan("text_url", linkStart, 4),
 		entitySpan("code", wrappedStart, utf16LengthForTest("t.me/+skip")),
-		entitySpan("url", utf16LengthBeforeForTest(t, text, "https://"), utf16LengthForTest("https://teagram.tailaa4918.ts.net/+abc")),
 		entitySpan("url", utf16LengthBeforeForTest(t, text, "t.me/+def"), utf16LengthForTest("t.me/+def")),
 		entitySpan("url", utf16LengthBeforeForTest(t, text, "tg://"), utf16LengthForTest("tg://join?invite=ghi")),
 	}

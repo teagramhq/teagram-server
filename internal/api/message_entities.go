@@ -82,14 +82,6 @@ func trimMessageURLSuffix(value string) string {
 func overlapsMessageEntity(offset, length int, entities []store.PollDescriptionEntity) bool {
 	end := offset + length
 	for _, entity := range entities {
-		switch entity.Type {
-		case store.PollDescriptionEntityURL,
-			store.PollDescriptionEntityTextURL,
-			store.PollDescriptionEntityCode,
-			store.PollDescriptionEntityPre:
-		default:
-			continue
-		}
 		if offset < entity.Offset+entity.Length && entity.Offset < end {
 			return true
 		}
