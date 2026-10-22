@@ -79,26 +79,36 @@ func TestPasswordRecoveryUnavailable(t *testing.T) {
 				newSettings := firstPasswordRPCRequest(account.replacement).NewSettings
 				newSettings.Email = "recovery-email-input-marker"
 				recoverRequest.SetNewSettings(newSettings)
-				for _, tc := range []struct {
-					name string
-					req  bin.Encoder
-					want string
+				for _, caller := range []struct {
+					name   string
+					userID int64
 				}{
-					{name: "requestPasswordRecovery", req: &tg.AuthRequestPasswordRecoveryRequest{}, want: "PASSWORD_RECOVERY_NA"},
-					{name: "checkRecoveryPassword", req: &tg.AuthCheckRecoveryPasswordRequest{Code: "recovery-code-marker"}, want: "CODE_INVALID"},
-					{name: "recoverPassword", req: recoverRequest, want: "CODE_INVALID"},
+					{name: "authorized", userID: account.userID},
+					{name: "pendingLogin", userID: 0},
 				} {
-					t.Run(tc.name, func(t *testing.T) {
-						code, message := dispatchPasswordRecoveryError(t, dispatcher, account.userID, tc.req)
-						if code != 400 || message != tc.want {
-							t.Errorf("%s returned %d %s, want 400 %s", tc.name, code, message, tc.want)
+					t.Run(caller.name, func(t *testing.T) {
+						for _, tc := range []struct {
+							name string
+							req  bin.Encoder
+							want string
+						}{
+							{name: "requestPasswordRecovery", req: &tg.AuthRequestPasswordRecoveryRequest{}, want: "PASSWORD_RECOVERY_NA"},
+							{name: "checkRecoveryPassword", req: &tg.AuthCheckRecoveryPasswordRequest{Code: "recovery-code-marker"}, want: "CODE_INVALID"},
+							{name: "recoverPassword", req: recoverRequest, want: "CODE_INVALID"},
+						} {
+							t.Run(tc.name, func(t *testing.T) {
+								code, message := dispatchPasswordRecoveryError(t, dispatcher, caller.userID, tc.req)
+								if code != 400 || message != tc.want {
+									t.Errorf("%s returned %d %s, want 400 %s", tc.name, code, message, tc.want)
+								}
+							})
+						}
+
+						after, ok, err := s.PasswordByUser(ctx, account.userID)
+						if err != nil || !ok || !reflect.DeepEqual(after, before) {
+							t.Errorf("%s recovery calls changed password state for user %d: before=%+v after=%+v ok=%t err=%v", caller.name, account.userID, before, after, ok, err)
 						}
 					})
-				}
-
-				after, ok, err := s.PasswordByUser(ctx, account.userID)
-				if err != nil || !ok || !reflect.DeepEqual(after, before) {
-					t.Errorf("recovery calls changed password state for user %d: before=%+v after=%+v ok=%t err=%v", account.userID, before, after, ok, err)
 				}
 			}
 
