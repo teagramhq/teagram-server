@@ -524,30 +524,37 @@ func (s *Server) serveSocket(sock net.Conn, slot *preAuthSlot) {
 	closeDiagnostics := newTransportCloseDiagnostics(transportTCP)
 	var closeErr error
 	logCloseDiagnostics := true
+	readCtx := s.shutdown.requestCtx
+	var servingMu sync.Mutex
+	var serving, preAuthClosing bool
+	var lifecycleCloseCause error
 	defer func() {
 		if logCloseDiagnostics {
+			servingMu.Lock()
+			if lifecycleCloseCause != nil {
+				closeErr = lifecycleCloseCause
+			}
+			servingMu.Unlock()
 			s.logTransportClose(closeDiagnostics, closeErr)
 		}
 	}()
 	defer slot.clear()
 
-	readCtx := s.shutdown.requestCtx
-	var servingMu sync.Mutex
-	var serving, preAuthClosing bool
-	closePreAuth := func() bool {
+	closePreAuth := func(cause error) bool {
 		servingMu.Lock()
 		if serving || preAuthClosing {
 			servingMu.Unlock()
 			return false
 		}
 		preAuthClosing = true
+		lifecycleCloseCause = cause
 		servingMu.Unlock()
 		return true
 	}
 	hardCutoffDone := make(chan struct{})
 	stopHardCutoff := context.AfterFunc(s.shutdown.requestCtx, func() {
 		defer close(hardCutoffDone)
-		if !closePreAuth() {
+		if !closePreAuth(nil) {
 			return
 		}
 		if err := sock.Close(); err != nil && !isDisconnect(err) {
@@ -562,7 +569,7 @@ func (s *Server) serveSocket(sock net.Conn, slot *preAuthSlot) {
 	negotiationDone := make(chan struct{})
 	stopNegotiation := context.AfterFunc(s.shutdown.drainCtx, func() {
 		defer close(negotiationDone)
-		if !closePreAuth() {
+		if !closePreAuth(nil) {
 			return
 		}
 		if err := sock.Close(); err != nil && !isDisconnect(err) {
@@ -601,7 +608,7 @@ func (s *Server) serveSocket(sock net.Conn, slot *preAuthSlot) {
 	// peer staying inside every deadline: each read the server does resets its
 	// own, so activity alone never ends a connection.
 	slot.armLifetime(func() {
-		if !closePreAuth() {
+		if !closePreAuth(context.DeadlineExceeded) {
 			return
 		}
 		if err := sock.Close(); err != nil && !isDisconnect(err) {

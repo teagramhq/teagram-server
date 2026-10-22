@@ -12,7 +12,9 @@ import (
 	"time"
 
 	"github.com/coder/websocket"
+	"github.com/gotd/td/bin"
 	"github.com/gotd/td/exchange"
+	"github.com/gotd/td/transport"
 
 	"github.com/teagramhq/teagram-server/internal/discovery"
 )
@@ -63,6 +65,77 @@ func TestServeSocketLogsCloseBeforeCodecDetection(t *testing.T) {
 	}
 
 	assertSingleTransportCloseRecord(t, sink.records, "TCP", "none", "client close")
+}
+
+func TestServeSocketLogsPreAuthLifetimeExpiryAsTimeout(t *testing.T) {
+	rsaKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatalf("generate RSA key: %v", err)
+	}
+	sink := &serverErrorLogSink{}
+	server := New(exchange.PrivateKey{RSA: rsaKey}, 2, NewMemoryAuthKeyStore(), nil, slog.New(sink))
+	const lifetime = time.Second
+	if err := server.SetPreAuthLimits(PreAuthLimits{Lifetime: lifetime}); err != nil {
+		t.Fatalf("set pre-auth lifetime: %v", err)
+	}
+	listener, err := (&net.ListenConfig{}).Listen(t.Context(), "tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := listener.Close(); err != nil && !errors.Is(err, net.ErrClosed) {
+			t.Errorf("close listener: %v", err)
+		}
+	})
+
+	client, err := (&net.Dialer{}).DialContext(t.Context(), "tcp", listener.Addr().String())
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := client.Close(); err != nil && !errors.Is(err, net.ErrClosed) {
+			t.Errorf("close client: %v", err)
+		}
+	})
+	serverSocket, err := listener.Accept()
+	if err != nil {
+		t.Fatalf("accept: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := serverSocket.Close(); err != nil && !errors.Is(err, net.ErrClosed) {
+			t.Errorf("close server socket: %v", err)
+		}
+	})
+	slot, ok := server.preAuth.admit()
+	if !ok {
+		t.Fatal("pre-auth slot unavailable")
+	}
+	served := make(chan struct{})
+	go func() {
+		server.serveSocket(serverSocket, slot)
+		close(served)
+	}()
+
+	conn, err := transport.Abridged.Handshake(client)
+	if err != nil {
+		t.Fatalf("transport handshake: %v", err)
+	}
+	ctx, cancel := context.WithTimeout(t.Context(), 5*lifetime)
+	defer cancel()
+	if err := conn.Send(ctx, &bin.Buffer{Buf: exchangeRequestFrame(t)}); err != nil {
+		t.Fatalf("send req_pq_multi: %v", err)
+	}
+	var response bin.Buffer
+	if err := conn.Recv(ctx, &response); err != nil {
+		t.Fatalf("read resPQ: %v", err)
+	}
+
+	select {
+	case <-served:
+	case <-ctx.Done():
+		t.Fatal("serveSocket did not close after the pre-auth lifetime")
+	}
+	assertSingleTransportCloseRecord(t, sink.records, "TCP", "resPQ sent", "timeout")
 }
 
 func TestServeWebSocketLogsCloseBeforeCodecDetection(t *testing.T) {
