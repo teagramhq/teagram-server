@@ -58,20 +58,43 @@ func isMessageURLWordRune(r rune) bool {
 
 func trimMessageURLSuffix(value string) string {
 	value = strings.TrimRight(value, ".,!?;:")
-	for len(value) > 0 {
-		last := value[len(value)-1]
-		var opening, closing byte
-		switch last {
+	var openParentheses, closeParentheses int
+	var openBrackets, closeBrackets int
+	var openBraces, closeBraces int
+	for i := range len(value) {
+		switch value[i] {
+		case '(':
+			openParentheses++
 		case ')':
-			opening, closing = '(', ')'
+			closeParentheses++
+		case '[':
+			openBrackets++
 		case ']':
-			opening, closing = '[', ']'
+			closeBrackets++
+		case '{':
+			openBraces++
 		case '}':
-			opening, closing = '{', '}'
-		default:
-			return value
+			closeBraces++
 		}
-		if strings.Count(value, string(closing)) <= strings.Count(value, string(opening)) {
+	}
+	for len(value) > 0 {
+		switch value[len(value)-1] {
+		case ')':
+			if closeParentheses <= openParentheses {
+				return value
+			}
+			closeParentheses--
+		case ']':
+			if closeBrackets <= openBrackets {
+				return value
+			}
+			closeBrackets--
+		case '}':
+			if closeBraces <= openBraces {
+				return value
+			}
+			closeBraces--
+		default:
 			return value
 		}
 		value = value[:len(value)-1]

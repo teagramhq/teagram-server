@@ -2,7 +2,9 @@ package api
 
 import (
 	"errors"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/gotd/td/tg"
 
@@ -76,5 +78,19 @@ func TestPollDescriptionEntitiesRejectUntrustedConstructorsAndMentions(t *testin
 				t.Fatalf("encode error = %v, want %v", err, test.wantErr)
 			}
 		})
+	}
+}
+
+func TestTrimMessageURLSuffixHandlesLongUnmatchedClosingBrackets(t *testing.T) {
+	const url = "https://example.com/path"
+	input := url + strings.Repeat(")", 100_000)
+
+	started := time.Now()
+	got := trimMessageURLSuffix(input)
+	if elapsed := time.Since(started); elapsed > 250*time.Millisecond {
+		t.Fatalf("trimMessageURLSuffix took %s for 100,000 unmatched closers, want under 250ms", elapsed)
+	}
+	if got != url {
+		t.Fatalf("trimMessageURLSuffix = %q, want %q", got, url)
 	}
 }
