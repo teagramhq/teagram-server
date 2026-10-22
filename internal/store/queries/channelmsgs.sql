@@ -47,8 +47,10 @@ WHERE channel_id = $1 AND local_id = $2 AND type = 1;
 INSERT INTO channel_events (channel_id, pts, type, local_id) VALUES ($1, $2, $3, $4);
 
 -- name: InsertChannelMessage :exec
-INSERT INTO channel_messages (channel_id, local_id, from_id, message, random_id, file_id, reply_to_msg_id, post_author)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8);
+INSERT INTO channel_messages (
+    channel_id, local_id, from_id, message, random_id, file_id, reply_to_msg_id, post_author, entities
+)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NULLIF(sqlc.arg(entities)::text, '')::jsonb);
 
 -- name: SetChannelMessageEditDate :execrows
 UPDATE channel_messages SET edit_date = now()
@@ -87,7 +89,7 @@ WHERE cm.channel_id = $1 AND cm.local_id = $2
 
 -- name: ChannelMessageByLocal :one
 SELECT channel_id, local_id, from_id, date, message, edit_date, deleted,
-       random_id, grouped_id, file_id, reply_to_msg_id, action_type, ttl_period, post_author
+       random_id, grouped_id, file_id, reply_to_msg_id, action_type, ttl_period, post_author, entities
 FROM channel_messages WHERE channel_id = $1 AND local_id = $2
   AND (expires_at IS NULL OR expires_at > statement_timestamp());
 
@@ -95,7 +97,7 @@ FROM channel_messages WHERE channel_id = $1 AND local_id = $2
 -- first hold channel_state and the caller participant SHARE lock.
 -- name: ChannelMessagesForDelete :many
 SELECT channel_id, local_id, from_id, date, message, edit_date, deleted,
-       random_id, grouped_id, file_id, reply_to_msg_id, action_type, ttl_period, post_author
+       random_id, grouped_id, file_id, reply_to_msg_id, action_type, ttl_period, post_author, entities
 FROM channel_messages
 WHERE channel_id = sqlc.arg(channel_id)::bigint
   AND local_id = ANY(sqlc.arg(local_ids)::bigint[])
@@ -136,7 +138,7 @@ FOR UPDATE OF post;
 
 -- name: ChannelMessageByRandomID :one
 SELECT channel_id, local_id, from_id, date, message, edit_date, deleted,
-       random_id, grouped_id, file_id, reply_to_msg_id, action_type, ttl_period, post_author
+       random_id, grouped_id, file_id, reply_to_msg_id, action_type, ttl_period, post_author, entities
 FROM channel_messages
 WHERE channel_id = $1 AND random_id = $2 AND random_id <> 0
   AND (expires_at IS NULL OR expires_at > statement_timestamp());
@@ -154,7 +156,7 @@ SELECT EXISTS (
 
 -- name: ChannelMessagesByLocalIDs :many
 SELECT channel_id, local_id, from_id, date, message, edit_date, deleted,
-       random_id, grouped_id, file_id, reply_to_msg_id, action_type, ttl_period, post_author
+       random_id, grouped_id, file_id, reply_to_msg_id, action_type, ttl_period, post_author, entities
 FROM channel_messages
 WHERE channel_id = $1 AND local_id = ANY(sqlc.arg(local_ids)::bigint[]) AND deleted = false
   AND (expires_at IS NULL OR expires_at > statement_timestamp())
@@ -165,7 +167,8 @@ WHERE channel_id = $1 AND local_id = ANY(sqlc.arg(local_ids)::bigint[]) AND dele
 -- floor in the same statement as the post read.
 -- name: ChannelMessagesForMember :many
 SELECT cm.channel_id, cm.local_id, cm.from_id, cm.date, cm.message, cm.edit_date, cm.deleted,
-       cm.random_id, cm.grouped_id, cm.file_id, cm.reply_to_msg_id, cm.action_type, cm.ttl_period, cm.post_author
+       cm.random_id, cm.grouped_id, cm.file_id, cm.reply_to_msg_id, cm.action_type, cm.ttl_period,
+       cm.post_author, cm.entities
 FROM channel_messages cm
 JOIN channel_participants cp ON cp.channel_id = cm.channel_id AND cp.user_id = sqlc.arg(user_id)::bigint
 WHERE cm.channel_id = sqlc.arg(channel_id)::bigint
@@ -210,7 +213,8 @@ WHERE channel_id = $1 AND local_id = ANY(sqlc.arg(local_ids)::bigint[]) AND dele
 -- instead of forming a cycle with the eraser.
 -- name: ChannelMessagesForForward :many
 SELECT cm.channel_id, cm.local_id, cm.from_id, cm.date, cm.message, cm.edit_date, cm.deleted,
-       cm.random_id, cm.grouped_id, cm.file_id, cm.reply_to_msg_id, cm.action_type, cm.ttl_period, cm.post_author
+       cm.random_id, cm.grouped_id, cm.file_id, cm.reply_to_msg_id, cm.action_type, cm.ttl_period,
+       cm.post_author, cm.entities
 FROM channel_messages cm
 WHERE cm.channel_id = sqlc.arg(channel_id)::bigint
   AND cm.local_id = ANY(sqlc.arg(local_ids)::bigint[])
@@ -233,7 +237,7 @@ FOR SHARE OF cm SKIP LOCKED;
 
 -- name: ChannelHistoryPage :many
 SELECT channel_id, local_id, from_id, date, message, edit_date, deleted,
-       random_id, grouped_id, file_id, reply_to_msg_id, action_type, ttl_period, post_author
+       random_id, grouped_id, file_id, reply_to_msg_id, action_type, ttl_period, post_author, entities
 FROM channel_messages
 WHERE channel_id = sqlc.arg(channel_id) AND deleted = false
   AND (expires_at IS NULL OR expires_at > statement_timestamp())
@@ -251,7 +255,8 @@ LIMIT sqlc.arg(lim)::int;
 -- name: ChannelHistoryPageWithOffset :many
 WITH page AS (
     SELECT cm.channel_id, cm.local_id, cm.from_id, cm.date, cm.message, cm.edit_date, cm.deleted,
-           cm.random_id, cm.grouped_id, cm.file_id, cm.reply_to_msg_id, cm.action_type, cm.ttl_period, cm.post_author
+           cm.random_id, cm.grouped_id, cm.file_id, cm.reply_to_msg_id, cm.action_type, cm.ttl_period,
+           cm.post_author, cm.entities
     FROM channel_messages cm
     JOIN channel_participants cp
       ON cp.channel_id = cm.channel_id
@@ -271,7 +276,7 @@ WITH page AS (
     OFFSET GREATEST(0::bigint, sqlc.arg(add_offset)::bigint)
 )
 SELECT channel_id, local_id, from_id, date, message, edit_date, deleted,
-       random_id, grouped_id, file_id, reply_to_msg_id, action_type, ttl_period, post_author
+       random_id, grouped_id, file_id, reply_to_msg_id, action_type, ttl_period, post_author, entities
 FROM page
 WHERE (sqlc.arg(max_id)::bigint <= 0 OR local_id < sqlc.arg(max_id)::bigint)
   AND (sqlc.arg(min_id)::bigint <= 0 OR local_id > sqlc.arg(min_id)::bigint)
@@ -299,7 +304,8 @@ WITH page_offset AS (
       )
 ), page AS (
     SELECT cm.channel_id, cm.local_id, cm.from_id, cm.date, cm.message, cm.edit_date, cm.deleted,
-           cm.random_id, cm.grouped_id, cm.file_id, cm.reply_to_msg_id, cm.action_type, cm.ttl_period, cm.post_author
+           cm.random_id, cm.grouped_id, cm.file_id, cm.reply_to_msg_id, cm.action_type, cm.ttl_period,
+           cm.post_author, cm.entities
     FROM channel_messages cm
     JOIN channel_participants cp
       ON cp.channel_id = cm.channel_id
@@ -319,7 +325,7 @@ WITH page_offset AS (
     OFFSET (SELECT skip FROM page_offset)
 )
 SELECT channel_id, local_id, from_id, date, message, edit_date, deleted,
-       random_id, grouped_id, file_id, reply_to_msg_id, action_type, ttl_period, post_author
+       random_id, grouped_id, file_id, reply_to_msg_id, action_type, ttl_period, post_author, entities
 FROM page
 WHERE (sqlc.arg(max_id)::bigint <= 0 OR local_id < sqlc.arg(max_id)::bigint)
   AND (sqlc.arg(min_id)::bigint <= 0 OR local_id > sqlc.arg(min_id)::bigint)
@@ -424,7 +430,8 @@ WITH access AS (
            cm.file_id,
            cm.reply_to_msg_id,
            cm.action_type,
-           cm.ttl_period
+           cm.ttl_period,
+           cm.entities
     FROM page_ids
     JOIN channel_messages cm
       ON cm.channel_id = sqlc.arg(channel_id)::bigint
@@ -449,7 +456,8 @@ SELECT status.channel_exists,
        selected.file_id,
        selected.reply_to_msg_id,
        selected.action_type,
-       selected.ttl_period
+       selected.ttl_period,
+       selected.entities
 FROM status
 LEFT JOIN selected ON true
 ORDER BY selected.local_id DESC;
@@ -461,7 +469,7 @@ ORDER BY selected.local_id DESC;
 -- name: SearchChannelPostsPage :many
 SELECT post.channel_id, post.local_id, post.from_id, post.date, post.message,
        post.edit_date, post.deleted, post.random_id, post.grouped_id, post.file_id,
-       post.reply_to_msg_id, post.action_type, post.ttl_period, post.post_author
+       post.reply_to_msg_id, post.action_type, post.ttl_period, post.post_author, post.entities
 FROM channel_messages post
 JOIN channel_participants cp
   ON cp.channel_id = post.channel_id
@@ -542,7 +550,7 @@ WHERE post.channel_id = sqlc.arg(channel_id)::bigint
 -- name: SearchFilteredChannelPostsPage :many
 SELECT post.channel_id, post.local_id, post.from_id, post.date, post.message,
        post.edit_date, post.deleted, post.random_id, post.grouped_id,
-       post.file_id, post.reply_to_msg_id, post.action_type, post.ttl_period, post.post_author
+       post.file_id, post.reply_to_msg_id, post.action_type, post.ttl_period, post.post_author, post.entities
 FROM channel_messages post
 WHERE post.channel_id = sqlc.arg(channel_id)::bigint
   AND post.deleted = false
@@ -599,7 +607,7 @@ LIMIT sqlc.arg(lim)::int;
 -- name: SearchPinnedChannelPostForMember :many
 SELECT post.channel_id, post.local_id, post.from_id, post.date, post.message,
        post.edit_date, post.deleted, post.random_id, post.grouped_id,
-       post.file_id, post.reply_to_msg_id, post.action_type, post.ttl_period, post.post_author
+       post.file_id, post.reply_to_msg_id, post.action_type, post.ttl_period, post.post_author, post.entities
 FROM channels c
 JOIN channel_participants participant
   ON participant.channel_id = c.id

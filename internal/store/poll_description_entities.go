@@ -6,7 +6,10 @@ import (
 )
 
 const (
-	MaxPollDescriptionEntities    = 100
+	MaxPollDescriptionEntities = 100
+	// MaxMessageEntityOffset is the largest UTF-16 entity endpoint representable
+	// within a TL string's 24-bit byte length.
+	MaxMessageEntityOffset        = 1<<24 - 1
 	maxPollDescriptionEntityBytes = 1 << 20
 	pollDescriptionEntityVersion  = 1
 )
@@ -70,6 +73,22 @@ func normalizePollDescriptionEntities(entities []PollDescriptionEntity) ([]PollD
 	return canonical, nil
 }
 
+func normalizeMessageEntities(entities []PollDescriptionEntity) ([]PollDescriptionEntity, error) {
+	if len(entities) > MaxPollDescriptionEntities {
+		return nil, ErrPollInvalid
+	}
+	if len(entities) == 0 {
+		return nil, nil
+	}
+	canonical := append([]PollDescriptionEntity(nil), entities...)
+	for _, entity := range canonical {
+		if !validMessageEntity(entity) {
+			return nil, ErrPollInvalid
+		}
+	}
+	return canonical, nil
+}
+
 func encodePollDescriptionEntities(entities []PollDescriptionEntity) (string, error) {
 	encoded, err := json.Marshal(storedPollDescriptionEntities{
 		Version:  pollDescriptionEntityVersion,
@@ -84,10 +103,33 @@ func encodePollDescriptionEntities(entities []PollDescriptionEntity) (string, er
 	return string(encoded), nil
 }
 
+// EncodeMessageEntities validates and encodes formatting attached to a message
+// row. It shares the versioned representation used for poll descriptions.
+func EncodeMessageEntities(entities []PollDescriptionEntity) (string, error) {
+	canonical, err := normalizeMessageEntities(entities)
+	if err != nil {
+		return "", err
+	}
+	if len(canonical) == 0 {
+		return "", nil
+	}
+	return encodePollDescriptionEntities(canonical)
+}
+
+// DecodeMessageEntities treats invalid stored entity metadata as absent so a
+// corrupt formatting payload cannot make a message unreadable.
+func DecodeMessageEntities(encoded []byte) []PollDescriptionEntity {
+	return decodeEntities(encoded, validMessageEntity)
+}
+
 // decodePollDescriptionEntities treats invalid stored metadata as absent
 // formatting. A bad entity must not prevent its containing message or poll
 // from being delivered through history, differences, dialogs, or search.
 func decodePollDescriptionEntities(encoded []byte) []PollDescriptionEntity {
+	return decodeEntities(encoded, validPollDescriptionEntity)
+}
+
+func decodeEntities(encoded []byte, validate func(PollDescriptionEntity) bool) []PollDescriptionEntity {
 	if len(encoded) == 0 || len(encoded) > maxPollDescriptionEntityBytes {
 		return nil
 	}
@@ -97,7 +139,7 @@ func decodePollDescriptionEntities(encoded []byte) []PollDescriptionEntity {
 	}
 	entities := make([]PollDescriptionEntity, 0, len(stored.Entities))
 	for _, entity := range stored.Entities {
-		if validPollDescriptionEntity(entity) {
+		if validate(entity) {
 			entities = append(entities, entity)
 		}
 	}
@@ -105,10 +147,18 @@ func decodePollDescriptionEntities(encoded []byte) []PollDescriptionEntity {
 }
 
 func validPollDescriptionEntity(entity PollDescriptionEntity) bool {
-	if entity.Offset < 0 || entity.Length <= 0 || entity.Offset > maxPollTextBytes || entity.Length > maxPollTextBytes-entity.Offset {
+	return validStoredEntity(entity, maxPollTextBytes, maxPollTextBytes)
+}
+
+func validMessageEntity(entity PollDescriptionEntity) bool {
+	return validStoredEntity(entity, MaxMessageEntityOffset, maxPollDescriptionEntityBytes)
+}
+
+func validStoredEntity(entity PollDescriptionEntity, maxOffset, maxTextBytes int) bool {
+	if entity.Offset < 0 || entity.Length <= 0 || entity.Offset > maxOffset || entity.Length > maxOffset-entity.Offset {
 		return false
 	}
-	if len(entity.Text) > maxPollTextBytes || !utf8.ValidString(entity.Text) {
+	if len(entity.Text) > maxTextBytes || !utf8.ValidString(entity.Text) {
 		return false
 	}
 	switch entity.Type {
