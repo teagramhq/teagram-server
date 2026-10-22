@@ -90,7 +90,7 @@ func (h *handlers) handleUploadProfilePhoto(r *mtproto.Request) (bin.Encoder, er
 	if err != nil {
 		switch {
 		case errors.Is(err, store.ErrProfilePartsIncomplete), errors.Is(err, store.ErrProfileUploadConflict),
-			errors.Is(err, store.ErrUploadPartMissing):
+			errors.Is(err, store.ErrUploadPartMissing), errors.Is(err, store.ErrProfilePhotoUnavailable):
 			return nil, errMediaInvalid
 		case errors.Is(err, store.ErrProfileGalleryCap):
 			return nil, errProfilePhotosTooMuch

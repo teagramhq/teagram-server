@@ -189,6 +189,89 @@ SET current_file_id = $2, mutation_revision = mutation_revision + 1
 WHERE user_id = $1
 RETURNING user_id, current_file_id, mutation_revision;
 
+-- LiveProfilePhotosForDeletion resolves only the caller's current gallery rows.
+-- The profile-domain advisory lock held by the caller makes this read stable
+-- against upload, selection and other deletion requests until commit.
+-- name: LiveProfilePhotosForDeletion :many
+SELECT file_id
+FROM user_photos
+WHERE user_id = $1 AND file_id = ANY(sqlc.arg(file_ids)::bigint[])
+ORDER BY array_position(sqlc.arg(file_ids)::bigint[], file_id);
+
+-- LockProfileUploadReceiptsForDeletion follows the gallery writer's lock order:
+-- the receipt rows are locked before profile_photo_state. A current gallery row
+-- normally has one receipt; the inner join keeps legacy or synthetic entries
+-- removable without fabricating receipt state.
+-- name: LockProfileUploadReceiptsForDeletion :many
+SELECT r.client_file_id, r.state
+FROM user_photos up
+JOIN profile_upload_receipt r
+  ON r.user_id = up.user_id AND r.client_file_id = up.client_file_id
+WHERE up.user_id = $1 AND up.file_id = ANY(sqlc.arg(file_ids)::bigint[])
+ORDER BY r.client_file_id
+FOR UPDATE OF r;
+
+-- TerminalizeProfileUploadReceiptsForDeletion leaves a durable retry denial
+-- after the live gallery reference is removed. The receipt and file row remain.
+-- name: TerminalizeProfileUploadReceiptsForDeletion :execrows
+UPDATE profile_upload_receipt
+SET state = 2, updated_at = now()
+WHERE user_id = $1
+  AND client_file_id = ANY(sqlc.arg(client_file_ids)::bigint[])
+  AND state <> 2;
+
+-- RemoveProfilePhotoStateEntries clears the current pointer only when it is in
+-- this deletion set and advances the per-owner revision once per removed entry.
+-- It runs after receipt locks and the state row lock, before gallery rows are
+-- deleted so the composite RESTRICT foreign key stays satisfied.
+-- name: RemoveProfilePhotoStateEntries :one
+UPDATE profile_photo_state
+SET current_file_id = CASE
+        WHEN current_file_id = ANY(sqlc.arg(file_ids)::bigint[]) THEN NULL
+        ELSE current_file_id
+    END,
+    mutation_revision = mutation_revision + cardinality(sqlc.arg(file_ids)::bigint[])
+WHERE user_id = $1
+RETURNING user_id, current_file_id, mutation_revision;
+
+-- DeleteUserPhotosByIDs is reference removal only. Files, bytes and unrelated
+-- message/chat/channel references are outside this statement by design.
+-- name: DeleteUserPhotosByIDs :many
+DELETE FROM user_photos
+WHERE user_id = $1 AND file_id = ANY(sqlc.arg(file_ids)::bigint[])
+RETURNING file_id;
+
+-- ProfilePhotoDeleteOperation is the durable idempotency lookup for clearing the
+-- current avatar. The tuple is copied only from the authenticated MTProto
+-- request. A found row means the resolved target must not be looked up again.
+-- name: ProfilePhotoDeleteOperation :one
+SELECT 1::bigint
+FROM profile_delete_operation
+WHERE user_id = $1 AND auth_key_id = $2 AND session_id = $3 AND msg_id = $4
+  AND created_at >= now() - INTERVAL '90 days';
+
+-- InsertProfilePhotoDeleteOperation binds the transport request to the target
+-- resolved in the same transaction. Nullable target fields also record that a
+-- first clear ran while the owner had no current photo.
+-- name: InsertProfilePhotoDeleteOperation :execrows
+INSERT INTO profile_delete_operation (
+    user_id, auth_key_id, session_id, msg_id, operation_key,
+    target_file_id, client_file_id, clear_revision
+)
+VALUES (
+    $1, $2, $3, $4, $5,
+    sqlc.narg(target_file_id)::bigint,
+    sqlc.narg(client_file_id)::bigint,
+    sqlc.narg(clear_revision)::bigint
+);
+
+-- ExpiredProfilePhotoDeleteOperations bounds the dedup table by the accepted
+-- 90-day request-replay retention. Older retries are fresh self-only clears.
+-- The per-owner primary-key prefix scopes this cleanup to one owner's rows.
+-- name: DeleteExpiredProfilePhotoDeleteOperations :execrows
+DELETE FROM profile_delete_operation
+WHERE user_id = $1 AND created_at < now() - INTERVAL '90 days';
+
 -- ProfileFileForOwner loads one of an owner's own file rows, stored or not, for
 -- the identity a completed receipt returns. Owner-scoped on purpose:
 -- the gallery lane never resolves a file id that its owner does not
