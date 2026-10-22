@@ -30,6 +30,21 @@ func dispatchProfilePhotoMutation(
 	request bin.Encoder,
 ) []byte {
 	t.Helper()
+	return dispatchProfilePhotoMutationWithContext(
+		t, h, userID, key, sessionID, msgID, context.Background(), request,
+	)
+}
+
+func dispatchProfilePhotoMutationWithContext(
+	t *testing.T,
+	h mtproto.Handler,
+	userID int64,
+	key crypto.AuthKey,
+	sessionID, msgID int64,
+	ctx context.Context,
+	request bin.Encoder,
+) []byte {
+	t.Helper()
 	var body bin.Buffer
 	if err := request.Encode(&body); err != nil {
 		t.Fatalf("encode %T: %v", request, err)
@@ -42,7 +57,7 @@ func dispatchProfilePhotoMutation(
 		SessionID: sessionID,
 		MsgID:     msgID,
 		Buf:       &body,
-		Ctx:       context.Background(),
+		Ctx:       ctx,
 	}); err != nil {
 		t.Fatalf("dispatch %T: %v", request, err)
 	}
@@ -337,34 +352,80 @@ func TestUpdateProfilePhotoEmptyReplayDoesNotSpendRateLimit(t *testing.T) {
 	}
 }
 
-func waitForProfilePhotoActivity(
+func waitForConcurrentProfilePhotoActivity(
 	t *testing.T,
 	f *galleryFixture,
-	deadline time.Time,
-	queryFragment, state, waitEvent string,
+	firstDone, replayDone <-chan []byte,
 ) {
 	t.Helper()
-	for time.Now().Before(deadline) {
-		var count int64
-		err := f.observer().QueryRow(context.Background(), `
-			SELECT count(*)
-			FROM pg_stat_activity
-			WHERE datname = current_database()
-			  AND pid <> pg_backend_pid()
-			  AND query LIKE '%' || $1 || '%'
-			  AND ($2 = '' OR state = $2)
-			  AND ($3 = '' OR wait_event_type = $3)
-		`, queryFragment, state, waitEvent).Scan(&count)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	ticker := time.NewTicker(10 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		var receiptBlocked, replayWaiting bool
+		err := f.observer().QueryRow(ctx, `
+			SELECT
+				EXISTS (
+					SELECT 1
+					FROM pg_stat_activity
+					WHERE datname = current_database()
+					  AND pid <> pg_backend_pid()
+					  AND query LIKE '%LockProfileUploadReceiptsForDeletion%'
+					  AND state = 'active'
+					  AND wait_event_type = 'Lock'
+				),
+				EXISTS (
+					SELECT 1
+					FROM pg_stat_activity
+					WHERE datname = current_database()
+					  AND pid <> pg_backend_pid()
+					  AND query LIKE '%pg_try_advisory_xact_lock%'
+					  AND state = 'idle in transaction'
+				)
+		`).Scan(&receiptBlocked, &replayWaiting)
 		if err != nil {
-			t.Fatalf("read pg_stat_activity for %q: %v", queryFragment, err)
+			t.Fatalf("read concurrent profile-photo mutation activity: %v", err)
 		}
-		if count > 0 {
+		if receiptBlocked && replayWaiting {
 			return
 		}
-		time.Sleep(2 * time.Millisecond)
+		select {
+		case <-firstDone:
+			t.Fatal("first clear returned before both requests reached their lock waits")
+		case <-replayDone:
+			t.Fatal("replay returned before both requests reached their lock waits")
+		default:
+		}
+		select {
+		case <-ctx.Done():
+			t.Fatal("timed out waiting for the first clear and replay to reach their lock waits")
+		case <-ticker.C:
+		}
 	}
-	t.Fatalf("timed out waiting for pg_stat_activity query %q (state %q, wait event %q)",
-		queryFragment, state, waitEvent)
+}
+
+func keepConcurrentProfilePhotoActivityBlocked(
+	t *testing.T,
+	firstDone, replayDone <-chan []byte,
+) {
+	t.Helper()
+	timer := time.NewTimer(store.ProfilePhotoSelectionWait + 50*time.Millisecond)
+	defer timer.Stop()
+	select {
+	case <-firstDone:
+		t.Fatal("first clear completed while the upload-receipt lock remained held")
+	case <-replayDone:
+		t.Fatal("replay completed while the upload-receipt lock remained held")
+	case <-timer.C:
+	}
+	select {
+	case <-firstDone:
+		t.Fatal("first clear completed while the upload-receipt lock remained held")
+	case <-replayDone:
+		t.Fatal("replay completed while the upload-receipt lock remained held")
+	default:
+	}
 }
 
 func TestUpdateProfilePhotoEmptyConcurrentReplayDoesNotSpendRateLimit(t *testing.T) {
@@ -403,21 +464,30 @@ func TestUpdateProfilePhotoEmptyConcurrentReplayDoesNotSpendRateLimit(t *testing
 		}
 	}()
 
-	deadline := time.Now().Add(store.ProfilePhotoSelectionWait - 25*time.Millisecond)
+	// Open the observer before either request starts so connection setup cannot
+	// consume the requests' bounded mutation time.
+	observer := f.observer()
+	if _, err := observer.Exec(context.Background(), `SELECT 1`); err != nil {
+		t.Fatalf("warm profile-photo activity observer: %v", err)
+	}
+	requestCtx := api.ProfilePhotoMutationWaitContextForTest(context.Background(), 30*time.Second)
+	start := make(chan struct{})
 	firstDone := make(chan []byte, 1)
 	go func() {
-		firstDone <- dispatchProfilePhotoMutation(t, h, f.owner, key, sessionID, clearMsgID, clearRequest)
+		<-start
+		firstDone <- dispatchProfilePhotoMutationWithContext(t, h, f.owner, key, sessionID, clearMsgID, requestCtx, clearRequest)
 	}()
-	waitForProfilePhotoActivity(t, f, deadline, "LockProfileUploadReceiptsForDeletion", "active", "Lock")
-
 	replayDone := make(chan []byte, 1)
 	go func() {
-		replayDone <- dispatchProfilePhotoMutation(t, h, f.owner, key, sessionID, clearMsgID, clearRequest)
+		<-start
+		replayDone <- dispatchProfilePhotoMutationWithContext(t, h, f.owner, key, sessionID, clearMsgID, requestCtx, clearRequest)
 	}()
-	// Both implementations reach the per-owner lock while the first clear is
-	// paused. The replay must wait there before rate admission as well as before
-	// mutating the gallery.
-	waitForProfilePhotoActivity(t, f, deadline, "pg_try_advisory_xact_lock", "idle in transaction", "")
+	close(start)
+	// Start both calls together, then release the upload-receipt lock only once
+	// PostgreSQL shows one clear paused there and the other waiting on the owner
+	// lock. Their test-only deadline stays well beyond the observer watchdog.
+	waitForConcurrentProfilePhotoActivity(t, f, firstDone, replayDone)
+	keepConcurrentProfilePhotoActivityBlocked(t, firstDone, replayDone)
 	if err := blocker.Commit(context.Background()); err != nil {
 		t.Fatalf("release upload-receipt lock: %v", err)
 	}

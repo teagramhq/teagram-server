@@ -1,6 +1,6 @@
 {
   "base_commit": "bdb89970bbd40fb57fdb89f3aa8fafb78925ce93",
-  "schema_head": "20261022000003",
+  "schema_head": "20261022000004",
   "trigger_tables": [
     "public.auth_keys",
     "public.browser_acceptance_binding_evidence",

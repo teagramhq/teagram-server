@@ -30,9 +30,9 @@ SOURCE_IMAGE = "mirror.gcr.io/library/postgres@sha256:721873c34ceb9f8d8fc2659849
 RESTORE_IMAGE = "mirror.gcr.io/library/postgres@sha256:77f585114c32fbca283dc835b0596f4e52b51b4c6662d7810b2f4084f60a1873"
 # The historical fixture is upgraded to the schema immediately before the
 # current pending migration, which is applied to the restored target.
-BASE_SCHEMA = "20261022000002"
+BASE_SCHEMA = "20261022000003"
 SEED_SCHEMA = "20261021000002"
-HEAD_SCHEMA = "20261022000003"
+HEAD_SCHEMA = "20261022000004"
 AUTH_KEY_INVENTORY_PATH = Path(__file__).with_name("auth-key-clearing-inventory.json")
 AUTH_KEY_FIXTURE_COUNT = 3
 AUTH_KEY_FIXTURE_STATE = ["3", "2", "3", "1", "2", "0"]

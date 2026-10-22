@@ -15,20 +15,21 @@ import (
 // channel, pin, membership decision, counts, pts and optional admin invite all
 // come from one repeatable-read snapshot.
 type ChannelFullInfoSnapshot struct {
-	Channel           Channel
-	CurrentPhoto      *File
-	Member            ChannelMember
-	HasMember         bool
-	ParticipantsCount int64
-	AdminsCount       int64
-	BannedCount       int64
-	ReadInboxMaxID    int64
-	UnreadCount       int
-	Pts               int
-	InviteHash        string
-	InviteCreatorID   int64
-	InviteDate        time.Time
-	HasInvite         bool
+	Channel            Channel
+	CurrentPhoto       *File
+	Member             ChannelMember
+	HasMember          bool
+	ParticipantsCount  int64
+	AdminsCount        int64
+	BannedCount        int64
+	ReadInboxMaxID     int64
+	UnreadCount        int
+	Pts                int
+	InviteHash         string
+	InviteCreatorID    int64
+	InviteDate         time.Time
+	HasInvite          bool
+	AvailableReactions ChatAvailableReactions
 }
 
 // SetChannelFullInfoSnapshotHook installs the test-only synchronization seam
@@ -174,6 +175,11 @@ func (s *Store) ChannelFullInfoForViewer(
 			return ChannelFullInfoSnapshot{}, false, fmt.Errorf("select active channel invite: %w", err)
 		}
 	}
+	availableReactions, err := channelAvailableReactions(ctx, qtx, channelID)
+	if err != nil {
+		return ChannelFullInfoSnapshot{}, false, err
+	}
+	snapshot.AvailableReactions = availableReactions
 
 	if err := tx.Commit(ctx); err != nil {
 		return ChannelFullInfoSnapshot{}, false, fmt.Errorf("commit channel full-info snapshot: %w", err)
