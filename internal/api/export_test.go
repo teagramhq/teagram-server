@@ -2067,6 +2067,16 @@ func SetPasswordProofLimit(h *handlers, cfg store.RateLimitConfig) {
 	h.rateLimitPasswordProof = cfg
 }
 
+// SetRecoveryEmailModeForTest changes recovery-email handling on a shared test handler.
+func SetRecoveryEmailModeForTest(h *handlers, mode config.RecoveryEmailMode) {
+	h.recoveryEmailMode = mode
+}
+
+// SetLoggerForTest changes the logger on a shared handler.
+func SetLoggerForTest(h *handlers, log *slog.Logger) {
+	h.log = log
+}
+
 // SetCheckPasswordLimits sets the per-account and per-IP checkPassword rate
 // limits on a shared test handler.
 func SetCheckPasswordLimits(h *handlers, perAccount, perIP store.RateLimitConfig) {
@@ -2082,6 +2092,11 @@ func HandleGetPassword(h *handlers, req *mtproto.Request) (bin.Encoder, error) {
 // HandleGetPasswordSettings invokes handleGetPasswordSettings on the given handler.
 func HandleGetPasswordSettings(h *handlers, req *mtproto.Request) (bin.Encoder, error) {
 	return h.handleGetPasswordSettings(req)
+}
+
+// HandleUpdatePasswordSettings invokes handleUpdatePasswordSettings on the given handler.
+func HandleUpdatePasswordSettings(h *handlers, req *mtproto.Request) (bin.Encoder, error) {
+	return h.handleUpdatePasswordSettings(req)
 }
 
 // HandleCheckPassword invokes handleCheckPassword on the given handler.

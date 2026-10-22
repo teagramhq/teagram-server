@@ -2,12 +2,14 @@ package e2e_test
 
 import (
 	"context"
+	"crypto/rand"
 	"errors"
 	"fmt"
 	"net"
 	"testing"
 	"time"
 
+	gotdsrp "github.com/gotd/td/crypto/srp"
 	"github.com/gotd/td/session"
 	"github.com/gotd/td/telegram"
 	"github.com/gotd/td/telegram/auth"
@@ -419,6 +421,52 @@ func emailOnlyUpdate(ctx context.Context, api *tg.Client, currentPassword string
 		NewSettings: tg.AccountPasswordInputSettings{Email: "recover@example.com"},
 	})
 	return err
+}
+
+func setFirstPasswordWithEmail(ctx context.Context, api *tg.Client, password, email string) error {
+	state, err := api.AccountGetPassword(ctx)
+	if err != nil {
+		return err
+	}
+	algo, ok := state.NewAlgo.(*tg.PasswordKdfAlgoSHA256SHA256PBKDF2HMACSHA512iter100000SHA256ModPow)
+	if !ok {
+		return fmt.Errorf("new password algo = %T, want SRP KDF", state.NewAlgo)
+	}
+	verifier, salt1, err := gotdsrp.NewSRP(rand.Reader).NewHash([]byte(password), gotdsrp.Input{
+		Salt1: algo.Salt1,
+		Salt2: algo.Salt2,
+		G:     algo.G,
+		P:     algo.P,
+	})
+	if err != nil {
+		return fmt.Errorf("hash new password: %w", err)
+	}
+	_, err = api.AccountUpdatePasswordSettings(ctx, &tg.AccountUpdatePasswordSettingsRequest{
+		Password: &tg.InputCheckPasswordEmpty{},
+		NewSettings: tg.AccountPasswordInputSettings{
+			NewAlgo: &tg.PasswordKdfAlgoSHA256SHA256PBKDF2HMACSHA512iter100000SHA256ModPow{
+				Salt1: salt1,
+				Salt2: algo.Salt2,
+				G:     algo.G,
+				P:     algo.P,
+			},
+			NewPasswordHash: verifier,
+			Email:           email,
+		},
+	})
+	return err
+}
+
+func getPasswordSettingsWithProof(ctx context.Context, api *tg.Client, password string) (*tg.AccountPasswordSettings, error) {
+	state, err := api.AccountGetPassword(ctx)
+	if err != nil {
+		return nil, err
+	}
+	proof, err := auth.PasswordHash([]byte(password), state.SRPID, state.SRPB, state.SecureRandom, state.CurrentAlgo)
+	if err != nil {
+		return nil, fmt.Errorf("compute current password proof: %w", err)
+	}
+	return api.AccountGetPasswordSettings(ctx, proof)
 }
 
 // removePassword clears the current 2FA password via the raw API: it proves the

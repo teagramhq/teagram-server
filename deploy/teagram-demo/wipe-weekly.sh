@@ -73,7 +73,7 @@ BEFORE_SPKI=$(jq -er '.mtproto.rsa_spki' "$CLIENT_CONFIG")
   demo_fail 'current client config does not match the approved demo WebSocket endpoint'
 "$SEED_SCRIPT" --check
 curl --fail --silent --show-error --max-time 10 \
-  https://demo.teagram.io/.well-known/telegramd/client > "$TMP_DIR/public-client.json"
+  https://demo.teagram.io/.well-known/teagramd/client > "$TMP_DIR/public-client.json"
 cmp -s "$CLIENT_CONFIG" "$TMP_DIR/public-client.json" || demo_fail 'public client config differs from the current server identity'
 
 # The seed check and public identity probe run before any destructive operation.

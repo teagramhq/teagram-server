@@ -1,0 +1,13 @@
+# source: gotd v0.162.0 layer-228 client request
+body: { messages_sendReaction flags:#
+  flags: 1 [INT],
+  peer: { inputPeerChat
+    chat_id: <N> [LONG],
+  },
+  msg_id: <N> [INT],
+  reaction: [ vector<Reaction> (1)
+    { reactionEmoji
+      emoticon: "❤" [STRING],
+    },
+  ],
+},

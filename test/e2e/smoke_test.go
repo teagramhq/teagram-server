@@ -166,6 +166,10 @@ func TestSmoke(t *testing.T) {
 		t.Parallel()
 		testSmokeBasicGroup(t)
 	})
+	t.Run("basic-group-reactions", func(t *testing.T) {
+		t.Parallel()
+		testSmokeBasicGroupReactions(t)
+	})
 	t.Run("basic-group-photo", func(t *testing.T) {
 		t.Parallel()
 		testSmokeBasicGroupPhoto(t)
@@ -5287,6 +5291,7 @@ type smokeFixture struct {
 	turnstileSiteKey            string
 	turnstileVerifier           api.SignUpTurnstileVerifier
 	turnstileSignInEnabled      bool
+	recoveryEmailMode           config.RecoveryEmailMode
 	persistStatus               bool
 	// rateLimits is the per-surface budget set the booted server gets.
 	// Zero, the fixture default, means no surface is limited, which is what
@@ -5717,7 +5722,11 @@ func newSmokeFixtureWithDeadline(t *testing.T, regMode config.RegistrationMode, 
 			t.Errorf("store close: %v", err)
 		}
 	})
-	f := &smokeFixture{ctx: ctx, failures: newClientFailureSignal(cancelFailure), key: key, dsn: dsn, store: st, blobs: blobs, codes: newMultiCodeSink(), dcID: 2, regMode: regMode}
+	f := &smokeFixture{
+		ctx: ctx, failures: newClientFailureSignal(cancelFailure), key: key, dsn: dsn,
+		store: st, blobs: blobs, codes: newMultiCodeSink(), dcID: 2,
+		regMode: regMode, recoveryEmailMode: config.RecoveryEmailOff,
+	}
 	if beforeStart != nil {
 		beforeStart(f)
 	}
@@ -5742,7 +5751,7 @@ func (f *smokeFixture) start(t *testing.T, address string) {
 	registry, stop := bootServerWithLimitsAndRegistrationModeAndBlobsAndStatusWithDeliveryHookAndTurnstileAndWelcomeChannel(
 		t, f.ctx, f.key, f.dcID, f.store, f.dsn, f.codes.Logger(), ln, f.rateLimits, f.regMode,
 		f.blobs, f.persistStatus, nil, f.turnstileSiteKey, f.turnstileVerifier, f.welcomeChannel,
-		f.turnstileSignInEnabled, f.suppressChannelPostDelivery, f.photoThumbs,
+		f.turnstileSignInEnabled, f.recoveryEmailMode, f.suppressChannelPostDelivery, f.photoThumbs,
 	)
 	f.registry = registry
 	f.setServerStop(t.Cleanup, stop)

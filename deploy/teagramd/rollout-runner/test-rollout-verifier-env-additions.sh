@@ -81,6 +81,16 @@ registration_snapshot() {
     "$inspected" "$compose_json" "$ENV_FILE" "$OVERRIDE_FILE" selected-compose-render "$name"
 }
 
+public_setting_snapshot() {
+  local setting=$1 value=$2 actual=$3 name=$4 added=${5:-} changed=${6:-} inspected compose_json
+  printf '%s=%s\n' "$setting" "$value" > "$ENV_FILE"
+  inspected=$(inspect_json "$actual")
+  compose_json=$(jq -c --arg setting "$setting" --arg value "$value" \
+    '.services.teagramd.environment[$setting]=$value' <<< "$COMPOSE_JSON")
+  ROLLOUT_ADDED_ENV="$added" ROLLOUT_CHANGED_ENV="$changed" snapshot_from_json \
+    "$inspected" "$compose_json" "$ENV_FILE" "$OVERRIDE_FILE" selected-compose-render "$name"
+}
+
 snapshot=$(target_snapshot 'TG_NEW_FLAG=on')
 [ "$(jq -r '.container_env_added' <<< "$snapshot")" = TG_NEW_FLAG ]
 if [ -e "$JQ_SECRET_ARG_MARKER" ]; then
@@ -218,6 +228,143 @@ for setting in TG_PUBLIC_WEBSOCKET_LISTEN_ADDR TG_PUBLIC_WEBSOCKET_ADVERTISE_ADD
   fi
   printf 'PASS unsafe container setting is rejected: %s\n' "$setting"
 done
+
+for setting_value in \
+  TG_PUBLIC_WEBSOCKET_LISTEN_ADDR=0.0.0.0:2444 \
+  TG_PUBLIC_WEBSOCKET_ADVERTISE_ADDR=server.example.com:443 \
+  TG_PUBLIC_REGISTRATION=invite \
+  TG_PUBLIC_WEBSOCKET_ALLOWED_ORIGINS=https://web.teagram.io; do
+  setting=${setting_value%%=*}
+  value=${setting_value#*=}
+  named_public_snapshot=$(public_setting_snapshot "$setting" "$value" "$setting=$value" target "$setting")
+  [ "$(jq -r '.container_env_added' <<< "$named_public_snapshot")" = "$setting" ]
+  printf 'PASS named public setting reaches the resolved Compose and target container: %s\n' "$setting"
+done
+
+setting=TG_PUBLIC_WEBSOCKET_LISTEN_ADDR
+value=0.0.0.0:2444
+printf '%s=%s\n' "$setting" "$value" > "$ENV_FILE"
+named_public_compose=$(jq -c --arg setting "$setting" --arg value "$value" \
+  '.services.teagramd.environment[$setting]=$value' <<< "$public_ws_compose")
+named_public_preflight=$(ROLLOUT_ADDED_ENV="$setting" snapshot_from_json \
+  "$legacy_inspect" "$named_public_compose" "$ENV_FILE" "$OVERRIDE_FILE" selected-compose-render preflight)
+[ "$(jq -r '.container_env_added' <<< "$named_public_preflight")" = none ]
+printf '%s\n' 'PASS named public setting is admitted during preflight before replacement'
+
+printf 'TG_PUBLIC_WEBSOCKET_LISTEN_ADDR="0.0.0.0:2444"\n' > "$ENV_FILE"
+public_listen_quoted_compose=$(jq -c '.services.teagramd.environment.TG_PUBLIC_WEBSOCKET_LISTEN_ADDR="0.0.0.0:2444"' <<< "$public_ws_compose")
+public_listen_quoted_inspect=$(printf '%s' "$legacy_inspect" | jq -c \
+  '.Config.Env += ["TG_PUBLIC_WEBSOCKET_LISTEN_ADDR=0.0.0.0:2444"]')
+named_public_quoted_target=$(ROLLOUT_ADDED_ENV=TG_PUBLIC_WEBSOCKET_LISTEN_ADDR snapshot_from_json \
+  "$public_listen_quoted_inspect" "$public_listen_quoted_compose" \
+  "$ENV_FILE" "$OVERRIDE_FILE" selected-compose-render target)
+[ "$(jq -r '.container_env_added' <<< "$named_public_quoted_target")" = TG_PUBLIC_WEBSOCKET_LISTEN_ADDR ]
+printf '%s\n' 'PASS quoted public .env value reaches the exact resolved Compose and target value'
+
+printf 'TG_PUBLIC_WEBSOCKET_LISTEN_ADDR=0.0.0.0:2444\n' > "$ENV_FILE"
+public_listen_mismatched_compose=$(jq -c '.services.teagramd.environment.TG_PUBLIC_WEBSOCKET_LISTEN_ADDR="127.0.0.1:2444"' <<< "$public_ws_compose")
+public_listen_mismatched_inspect=$(printf '%s' "$legacy_inspect" | jq -c \
+  '.Config.Env += ["TG_PUBLIC_WEBSOCKET_LISTEN_ADDR=127.0.0.1:2444"]')
+if ROLLOUT_ADDED_ENV=TG_PUBLIC_WEBSOCKET_LISTEN_ADDR snapshot_from_json \
+  "$public_listen_mismatched_inspect" "$public_listen_mismatched_compose" \
+  "$ENV_FILE" "$OVERRIDE_FILE" selected-compose-render target \
+  >/dev/null 2>"$TMP/public-listen-mismatched-source.err"; then
+  printf '%s\n' 'FAIL public setting whose resolved value differs from .env was accepted' >&2
+  exit 1
+fi
+printf '%s\n' 'PASS public addition rejects a resolved value that differs from its .env assignment'
+
+printf 'TG_WELCOME_CHANNEL=welcome\n' > "$ENV_FILE"
+welcome_active_compose=$(jq -c '.services.teagramd.environment.TG_WELCOME_CHANNEL="welcome"' <<< "$public_ws_compose")
+welcome_active_inspect=$(printf '%s' "$public_ws_inspect" | jq -c '
+  .Config.Env |= (map(select(startswith("TG_WELCOME_CHANNEL=") | not)) + ["TG_WELCOME_CHANNEL=welcome"])
+')
+if ROLLOUT_ADDED_ENV=TG_WELCOME_CHANNEL snapshot_from_json \
+  "$welcome_active_inspect" "$welcome_active_compose" "$ENV_FILE" "$OVERRIDE_FILE" selected-compose-render target \
+  >/dev/null 2>"$TMP/welcome-active-named.err"; then
+  printf '%s\n' 'FAIL named TG_WELCOME_CHANNEL activation was accepted' >&2
+  exit 1
+fi
+printf '%s\n' 'PASS TG_WELCOME_CHANNEL remains fail-closed when named'
+
+printf 'TG_PUBLIC_REGISTRATION=open\n' > "$ENV_FILE"
+public_registration_open_compose=$(jq -c '.services.teagramd.environment.TG_PUBLIC_REGISTRATION="open"' <<< "$public_ws_compose")
+public_registration_open_inspect=$(printf '%s' "$public_ws_inspect" | jq -c '
+  .Config.Env |= (map(select(startswith("TG_PUBLIC_REGISTRATION=") | not)) + ["TG_PUBLIC_REGISTRATION=open"])
+')
+if ROLLOUT_ADDED_ENV=TG_PUBLIC_REGISTRATION snapshot_from_json \
+  "$public_registration_open_inspect" "$public_registration_open_compose" "$ENV_FILE" "$OVERRIDE_FILE" selected-compose-render target \
+  >/dev/null 2>"$TMP/public-registration-open.err"; then
+  printf '%s\n' 'FAIL named TG_PUBLIC_REGISTRATION=open was accepted' >&2
+  exit 1
+fi
+printf '%s\n' 'PASS TG_PUBLIC_REGISTRATION=open is rejected even when named'
+
+printf 'TG_PUBLIC_WEBSOCKET_LISTEN_ADDR=127.0.0.1:2444\n' > "$ENV_FILE"
+public_listen_baseline_inspect=$(printf '%s' "$legacy_inspect" | jq -c '.Config.Env += ["TG_PUBLIC_WEBSOCKET_LISTEN_ADDR=0.0.0.0:2444"]')
+public_listen_changed_compose=$(jq -c '.services.teagramd.environment.TG_PUBLIC_WEBSOCKET_LISTEN_ADDR="127.0.0.1:2444"' <<< "$public_ws_compose")
+if snapshot_from_json "$public_listen_baseline_inspect" "$public_listen_changed_compose" \
+  "$ENV_FILE" "$OVERRIDE_FILE" selected-compose-render preflight \
+  >/dev/null 2>"$TMP/public-listen-changed-unnamed.err"; then
+  printf '%s\n' 'FAIL changed public WebSocket setting was accepted without the change path' >&2
+  exit 1
+fi
+public_listen_change_preflight=$(ROLLOUT_CHANGED_ENV=TG_PUBLIC_WEBSOCKET_LISTEN_ADDR snapshot_from_json \
+  "$public_listen_baseline_inspect" "$public_listen_changed_compose" \
+  "$ENV_FILE" "$OVERRIDE_FILE" selected-compose-render preflight)
+public_listen_change_target_inspect=$(printf '%s' "$legacy_inspect" | jq -c \
+  '.Config.Env += ["TG_PUBLIC_WEBSOCKET_LISTEN_ADDR=127.0.0.1:2444"]')
+public_listen_change_target=$(ROLLOUT_CHANGED_ENV=TG_PUBLIC_WEBSOCKET_LISTEN_ADDR snapshot_from_json \
+  "$public_listen_change_target_inspect" "$public_listen_changed_compose" \
+  "$ENV_FILE" "$OVERRIDE_FILE" selected-compose-render target)
+[ "$(jq -r '.container_env_changed' <<< "$public_listen_change_preflight")" = none ]
+[ "$(jq -r '.container_env_changed' <<< "$public_listen_change_target")" = TG_PUBLIC_WEBSOCKET_LISTEN_ADDR ]
+printf '%s\n' 'PASS changed public WebSocket value requires and accepts the named change path'
+
+printf 'TG_PUBLIC_WEBSOCKET_LISTEN_ADDR="127.0.0.1:2444"\n' > "$ENV_FILE"
+public_listen_quoted_change_target=$(ROLLOUT_CHANGED_ENV=TG_PUBLIC_WEBSOCKET_LISTEN_ADDR snapshot_from_json \
+  "$public_listen_change_target_inspect" "$public_listen_changed_compose" \
+  "$ENV_FILE" "$OVERRIDE_FILE" selected-compose-render target)
+[ "$(jq -r '.container_env_changed' <<< "$public_listen_quoted_change_target")" = TG_PUBLIC_WEBSOCKET_LISTEN_ADDR ]
+printf '%s\n' 'PASS quoted changed public WebSocket value matches the target container'
+
+printf 'TG_PUBLIC_REGISTRATION="closed"\n' > "$ENV_FILE"
+public_registration_closed_compose=$(jq -c '.services.teagramd.environment.TG_PUBLIC_REGISTRATION="closed"' <<< "$public_ws_compose")
+public_registration_closed_inspect=$(printf '%s' "$legacy_inspect" | jq -c \
+  '.Config.Env += ["TG_PUBLIC_REGISTRATION=closed"]')
+public_registration_quoted_change_target=$(ROLLOUT_CHANGED_ENV=TG_PUBLIC_REGISTRATION snapshot_from_json \
+  "$public_registration_closed_inspect" "$public_registration_closed_compose" \
+  "$ENV_FILE" "$OVERRIDE_FILE" selected-compose-render target)
+[ "$(jq -r '.container_env_changed' <<< "$public_registration_quoted_change_target")" = TG_PUBLIC_REGISTRATION ]
+printf '%s\n' 'PASS quoted TG_PUBLIC_REGISTRATION change matches the target container'
+
+printf '%s\n' \
+  'TG_PUBLIC_WEBSOCKET_LISTEN_ADDR=0.0.0.0:2444' \
+  'TG_PUBLIC_WEBSOCKET_ADVERTISE_ADDR=server.example.com:443' \
+  'TG_PUBLIC_REGISTRATION=invite' \
+  'TG_PUBLIC_WEBSOCKET_ALLOWED_ORIGINS=https://web.teagram.io' > "$ENV_FILE"
+public_retained_compose=$(jq -c '
+  .services.teagramd.environment += {
+    TG_PUBLIC_WEBSOCKET_LISTEN_ADDR:"0.0.0.0:2444",
+    TG_PUBLIC_WEBSOCKET_ADVERTISE_ADDR:"server.example.com:443",
+    TG_PUBLIC_REGISTRATION:"invite",
+    TG_PUBLIC_WEBSOCKET_ALLOWED_ORIGINS:"https://web.teagram.io"
+  }
+' <<< "$public_ws_compose")
+public_retained_inspect=$(printf '%s' "$legacy_inspect" | jq -c '
+  .Config.Env += [
+    "TG_PUBLIC_WEBSOCKET_LISTEN_ADDR=0.0.0.0:2444",
+    "TG_PUBLIC_WEBSOCKET_ADVERTISE_ADDR=server.example.com:443",
+    "TG_PUBLIC_REGISTRATION=invite",
+    "TG_PUBLIC_WEBSOCKET_ALLOWED_ORIGINS=https://web.teagram.io"
+  ]
+')
+public_retained_baseline=$(snapshot_from_json \
+  "$public_retained_inspect" "$public_retained_compose" "$ENV_FILE" "$OVERRIDE_FILE" selected-compose-render baseline)
+public_retained_target=$(snapshot_from_json \
+  "$public_retained_inspect" "$public_retained_compose" "$ENV_FILE" "$OVERRIDE_FILE" selected-compose-render target)
+[ "$(jq -r '.container_env_sha256' <<< "$public_retained_baseline")" = "$(jq -r '.container_env_sha256' <<< "$public_retained_target")" ]
+printf '%s\n' 'PASS previously added public settings are retained on a later unnamed rollout'
 
 turnstile_legacy_inspect=$(inspect_json '')
 turnstile_legacy_snapshot=$(snapshot_from_json \

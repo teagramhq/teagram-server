@@ -66,11 +66,10 @@ is green, the deployed Web and username-reservation prerequisites are current,
 and a fresh count-only claim audit still shows no conflicting claimant. Confirm
 the existing `web` alias on `teagram-web-edge-net`, loopback listeners 8081
 and 8082 are unused, and Serve still has HTTPS `/` to Web on 8080, `/apiws` to
-2444, `/admin` to 2445, and `/.well-known/telegramd/client` passed through to
-2444. Rewrite `/.well-known/teagramd/client` to
-`http://127.0.0.1:2444/.well-known/telegramd/client`; the WebSocket listener
-serves the document at that path, including `websocket.endpoint`. Keep Funnel
-off and do not change the MTProto listeners.
+2444, `/admin` to 2445, and `/.well-known/teagramd/client` passed through to
+2444. The WebSocket listener serves the discovery document at that path,
+including `websocket.endpoint`. Keep Funnel off and do not change the MTProto
+listeners.
 
 The rollout starts and stops this project only:
 
@@ -103,7 +102,7 @@ tailscale serve status --json
 ```
 
 The `--set-path=/` invocation updates the root handler; verify `/apiws`,
-`/admin`, and both discovery paths remain configured and reachable.
+`/admin`, and the discovery path remain configured and reachable.
 See the [Tailscale Serve CLI reference](https://tailscale.com/docs/reference/tailscale-cli/serve).
 Do not replace the full Serve handler table or enable Funnel.
 

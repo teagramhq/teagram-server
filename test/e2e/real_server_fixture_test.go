@@ -151,6 +151,16 @@ func TestRealServerFixtureInstallsPhotoWorkerFromServerRevision(t *testing.T) {
 	}
 }
 
+func TestRealServerFixtureUsesUniqueGitWorktreeRegistrationName(t *testing.T) {
+	startScript, err := os.ReadFile(filepath.Join("real_server_fixture", "start.sh"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(startScript, []byte(`SERVER_WORKTREE="$BUILD_DIR/server-worktree-$OWNER_TOKEN"`)) {
+		t.Fatal("fixture worktree path must include its unique owner token to avoid concurrent Git worktree name collisions")
+	}
+}
+
 func TestRealServerFixtureValidatesDockerEndpointBeforeDaemonAccess(t *testing.T) {
 	cases := []struct {
 		name              string

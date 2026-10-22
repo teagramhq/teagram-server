@@ -802,7 +802,7 @@ func runAtBlobModePath(log *slog.Logger, blobModePath string) error {
 			st, cfg.DCID, tgcfg, log, cfg.LogLoginCodes, cfg.MaxFileBytes, blobs,
 			cfg.MaxUserStorageBytes, peers, photos, cfg.RateLimits, registrationMode,
 			dialogFilterSync, photoThumbs, cfg.UploadPartTTL, turnstileSiteKey,
-			verifier, cfg.WelcomeChannel, turnstileSignInEnabled, notifyMetrics,
+			verifier, cfg.WelcomeChannel, turnstileSignInEnabled, cfg.RecoveryEmailMode, notifyMetrics,
 		)
 	}
 	if cfg.LogLoginCodes {

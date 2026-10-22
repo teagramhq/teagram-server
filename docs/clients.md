@@ -22,7 +22,7 @@ Configuration is read from environment variables in `internal/config/config.go`:
 | Variable            | Default          | Notes                                      |
 |---------------------|------------------|---------------------------------------------|
 | `TG_LISTEN_ADDR`    | `:2443`          | `host:port` (or `:port`) the server binds   |
-| `TG_WEBSOCKET_LISTEN_ADDR` | *(unset)* | Enables the WebSocket MTProto listener on this address; browser clients connect to `/apiws`, and the listener serves `/.well-known/telegramd/client` |
+| `TG_WEBSOCKET_LISTEN_ADDR` | *(unset)* | Enables the WebSocket MTProto listener on this address; browser clients connect to `/apiws`, and the listener serves `/.well-known/teagramd/client` |
 | `TG_PUBLIC_WEBSOCKET_LISTEN_ADDR` | *(unset)* | Enables the separate WebSocket MTProto listener for public traffic; use an address such as `:2446` and expose it only through the intended public proxy |
 | `TG_PUBLIC_WEBSOCKET_ADVERTISE_ADDR` | *(unset)* | Optional `host:port` used only for the public listener's discovery `websocket.endpoint`; its host becomes `wss://host/apiws`, while MTProto and `client-config` keep `TG_ADVERTISE_ADDR`. Requires `TG_PUBLIC_WEBSOCKET_LISTEN_ADDR`; malformed values fail server startup |
 | `TG_RPC_DEADLINE` | `23s` | Per-request timeout; overrides must be positive and no greater than `45s`. `0s` and values above `45s`, including the former `90s` setting, fail startup so admitted requests fit the fixed shutdown drain |
@@ -59,6 +59,7 @@ Configuration is read from environment variables in `internal/config/config.go`:
 | `TG_REGISTRATION`   | `closed`         | Accepted values are `closed`, `invite`, and `open`. `closed` rejects `auth.signUp`, `invite` requires an operator-issued invite, and `open` admits usernames without one. An unrecognized value fails startup. Sign-in for accounts that already exist is unaffected by this setting |
 | `TG_PUBLIC_REGISTRATION` | `closed` | Registration mode for the public WebSocket listener only. Defaults to `closed` even when `TG_REGISTRATION=open`; use `invite` to require an operator-issued invite |
 | `TG_WELCOME_CHANNEL` | *(unset)* | Optional handle of a public broadcast channel joined by new accounts after `auth.signUp`; invalid targets are skipped with a warning |
+| `TG_RECOVERY_EMAIL` | `off` | Exact lowercase `off` or `contact`; any other set value, including empty or whitespace, fails startup. `off` discards emails sent with a password set/change. `contact` retains them for operator-assisted reset; no mail transport or automated recovery RPC is provided |
 | `TG_TURNSTILE_SITE_KEY` | *(unset)* | Public Cloudflare Turnstile widget key. Required together with one secret source to enable the `auth.signUp` challenge |
 | `TG_TURNSTILE_SECRET_KEY` | *(unset)* | Private Siteverify key supplied directly through the environment; prefer the file form |
 | `TG_TURNSTILE_SECRET_KEY_FILE` | *(unset)* | Preferred file containing the Siteverify key. The gate stays disabled when both secret sources and the site key are unset |
@@ -85,7 +86,7 @@ When `TG_WEBSOCKET_LISTEN_ADDR` is set, configure
 not use `*` or a wildcard pattern. Requests without an `Origin` header remain
 valid for native clients; requests carrying one are rejected unless it matches
 the configured list. `GET` and `OPTIONS` on exactly
-`/.well-known/telegramd/client` return `Access-Control-Allow-Origin: *` without
+`/.well-known/teagramd/client` return `Access-Control-Allow-Origin: *` without
 credentials; other routes have no CORS headers. This does not relax the
 WebSocket origin check. Keep this listener within the intended network
 boundary.
@@ -156,7 +157,7 @@ privileges. The server's registration policy and abuse controls remain
 authoritative.
 
 `teagramd serve` serves a configured document at
-`/.well-known/telegramd/client` on each WebSocket listener. Route that path and
+`/.well-known/teagramd/client` on each WebSocket listener. Route that path and
 `/apiws` from each HTTPS origin to its intended listener. `client-config` still
 does not publish or serve its output; it can be used when a deployment serves
 the document as a static file instead. HTTPS certificate serving, web-root
@@ -404,6 +405,31 @@ phone code is used.
 
 `TG_LOG_LOGIN_CODES` is a legacy diagnostic option, not a Teagram sign-in
 step. Leave it disabled for Teagram clients.
+
+### Recovery-email retention
+
+`TG_RECOVERY_EMAIL` defaults to `off`. In that mode, setting or changing a
+password writes a NULL recovery email, and password settings never return an
+email. `account.getPassword` always reports `has_recovery=false`. Set
+`TG_RECOVERY_EMAIL=contact` to retain the email supplied with a password set or
+change. It is unverified, stored in plaintext, and returned only by
+`account.getPasswordSettings` after a valid SRP proof. The server sends no mail
+and has no automated recovery RPC.
+
+Email-only `account.updatePasswordSettings` calls remain accepted no-ops. They
+cannot add, replace, or remove an email, and they do not change the password.
+Switching to `off` stops future email writes and responses while preserving
+existing rows; switching back to `contact` exposes any retained row again and
+does not backfill missing emails. The local `teagramd admin set-password`
+command changes the password verifier and leaves its recovery-email row
+untouched.
+
+An operator can read `contact` emails from the database. The verifier is sealed
+at rest; the email is not. The email is not proof of identity: authenticate a
+reset requester through a separate channel or factor before using
+`teagramd admin set-password`. A database dump made before switching to `off`
+continues to contain emails stored at dump time. A slow password upsert can
+also include bound values in the slow-query log.
 
 ## 5. Register a username account
 

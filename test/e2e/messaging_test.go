@@ -391,7 +391,7 @@ func bootServerWithLimitsAndRegistrationModeAndBlobsAndStatusWithDeliveryHook(
 	t.Helper()
 	return bootServerWithLimitsAndRegistrationModeAndBlobsAndStatusWithDeliveryHookAndTurnstileAndWelcomeChannel(
 		t, ctx, key, dcID, st, dsn, log, ln, rateLimits, regMode, blobs, persistStatus,
-		beforeDelivery, "", nil, "", false, nil, photoThumbs...,
+		beforeDelivery, "", nil, "", false, config.RecoveryEmailOff, nil, photoThumbs...,
 	)
 }
 
@@ -401,6 +401,7 @@ func bootServerWithLimitsAndRegistrationModeAndBlobsAndStatusWithDeliveryHookAnd
 	regMode config.RegistrationMode, blobs blob.Store, persistStatus bool,
 	beforeDelivery func(context.Context, int64), turnstileSiteKey string,
 	turnstileVerifier api.SignUpTurnstileVerifier, welcomeChannel string, turnstileSignInEnabled bool,
+	recoveryEmailMode config.RecoveryEmailMode,
 	suppressChannelPostDelivery func(channelID int64) bool,
 	photoThumbs ...*photothumb.Supervisor,
 ) (*mtproto.SessionRegistry, func()) {
@@ -416,7 +417,7 @@ func bootServerWithLimitsAndRegistrationModeAndBlobsAndStatusWithDeliveryHookAnd
 		st, dcID, tgcfg, log, true, 100<<20, blobs, 2<<30,
 		pgtest.PeerDeriver(), pgtest.PhotoDeriver(), rateLimits, regMode,
 		dialogFilterSync, photoThumb, config.DefaultUploadPartTTL,
-		turnstileSiteKey, turnstileVerifier, welcomeChannel, turnstileSignInEnabled,
+		turnstileSiteKey, turnstileVerifier, welcomeChannel, turnstileSignInEnabled, recoveryEmailMode,
 	)
 	server := mtproto.New(exchange.PrivateKey{RSA: key}, dcID, mtproto.NewPgAuthKeyStore(st), handler, log)
 	if persistStatus {
