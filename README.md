@@ -11,6 +11,9 @@ accounts and messages, local media storage, and an admin metrics dashboard. The
 live deployment is for development and has no real users. Teagram is an
 independent project and is not affiliated with Telegram.
 
+To run a server on your own Linux host, follow the
+[self-hosting guide](docs/self-hosting.md).
+
 [![CI](https://github.com/teagramhq/teagram-server/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/teagramhq/teagram-server/actions/workflows/ci.yml)
 
 Required checks on `main`: `ci`, `docker`, `compose`, `sqlc`, `pr-title`, `smoke`, `e2e-admin`, and `lint`.
@@ -104,6 +107,7 @@ The development deployment runs `777742c`, deployed on 2026-10-10 through the lo
 | Path | Contents |
 |---|---|
 | [docs/clients.md](docs/clients.md) | Client connection, server discovery, and configuration reference |
+| [docs/self-hosting.md](docs/self-hosting.md) | Single-host self-hosting guide |
 | [docs/catalog.md](docs/catalog.md) | Catalog and RPC support reference |
 | [docs/observability.md](docs/observability.md) | Admin metrics, dashboards, and operations |
 | [docs/security.md](docs/security.md) | Security model and controls |
