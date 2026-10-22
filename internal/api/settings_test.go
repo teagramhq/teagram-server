@@ -33,8 +33,8 @@ type settingsHandler struct {
 
 func assertAppConfig(t *testing.T, got *tg.HelpAppConfig, mode config.RegistrationMode) {
 	t.Helper()
-	if got.Hash != 4 {
-		t.Fatalf("app config hash = %d, want 4", got.Hash)
+	if got.Hash != 5 {
+		t.Fatalf("app config hash = %d, want 5", got.Hash)
 	}
 	object, ok := got.Config.(*tg.JSONObject)
 	if !ok {
@@ -47,8 +47,8 @@ func assertAppConfig(t *testing.T, got *tg.HelpAppConfig, mode config.Registrati
 		}
 		values[value.Key] = value.Value
 	}
-	if len(values) != 9 {
-		t.Fatalf("app config has %d keys, want 9", len(values))
+	if len(values) != 12 {
+		t.Fatalf("app config has %d keys, want 12", len(values))
 	}
 	if value, ok := values["dialog_filters_enabled"].(*tg.JSONBool); !ok || !value.Value {
 		t.Fatalf("dialog_filters_enabled = %v, want true", values["dialog_filters_enabled"])
