@@ -83,6 +83,26 @@ func (s *Store) DeleteProfilePhotos(ctx context.Context, ownerID int64, fileIDs 
 	return live, nil
 }
 
+// HasProfilePhotoClearReceipt reports whether the request has a durable clear
+// receipt within the supported replay window. The handler uses this
+// before rate admission; ClearCurrentProfilePhoto repeats the lookup under the
+// profile-domain lock before resolving a target.
+func (s *Store) HasProfilePhotoClearReceipt(ctx context.Context, ownerID, authKeyID, sessionID, msgID int64) (bool, error) {
+	if authKeyID == 0 || msgID <= 0 {
+		return false, errors.New("profile photo clear: invalid transport request identity")
+	}
+	_, err := s.q.ProfilePhotoDeleteOperation(ctx, db.ProfilePhotoDeleteOperationParams{
+		UserID: ownerID, AuthKeyID: authKeyID, SessionID: sessionID, MsgID: msgID,
+	})
+	if err == nil {
+		return true, nil
+	}
+	if errors.Is(err, pgx.ErrNoRows) {
+		return false, nil
+	}
+	return false, fmt.Errorf("profile photo clear: read request receipt: %w", err)
+}
+
 // ClearCurrentProfilePhoto removes the current entry and records the resolved
 // target against the authenticated transport request in the same transaction.
 // Replaying the same tuple returns without resolving current again; a new msg_id

@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"errors"
 	"log/slog"
+	"strings"
 	"testing"
 	"time"
 
@@ -292,6 +293,47 @@ func TestUpdateProfilePhotoEmptyDeduplicatesByTransportRequest(t *testing.T) {
 	assertPhotoEmptyResponse(t, noCurrent)
 	if afterNoCurrent := f.selectionSnapshot(f.owner); afterNoCurrent != afterNewClear {
 		t.Fatalf("clear with no current photo changed profile state: before=%+v after=%+v", afterNewClear, afterNoCurrent)
+	}
+}
+
+func TestUpdateProfilePhotoEmptyReplayDoesNotSpendRateLimit(t *testing.T) {
+	t.Parallel()
+	f := newGalleryFixture(t, "+1555144700121", "+1555144700122")
+	current := f.addStoredPhoto(t, f.owner)
+	f.addEntry(t, f.owner, current)
+	addCompleteProfilePhotoReceipt(t, f, f.owner, current)
+	f.selectCurrentPhoto(t, f.owner, current)
+	h := profilePhotoDispatcherWithUpdateLimit(f.s, store.RateLimitConfig{Limit: 1, Window: time.Hour})
+	key := testKey()
+	const sessionID = int64(123)
+	const clearMsgID = int64(1 << 32)
+	clearRequest := &tg.PhotosUpdateProfilePhotoRequest{ID: &tg.InputPhotoEmpty{}}
+
+	first := dispatchProfilePhotoMutation(t, h, f.owner, key, sessionID, clearMsgID, clearRequest)
+	assertPhotoEmptyResponse(t, first)
+	f.selectCurrentPhoto(t, f.owner, f.photoID)
+	selectedState := f.selectionSnapshot(f.owner)
+
+	// A durable receipt replay returns its first result without spending another
+	// update_profile token or clearing the photo selected after the first call.
+	replay := dispatchProfilePhotoMutation(t, h, f.owner, key, sessionID, clearMsgID, clearRequest)
+	assertPhotoEmptyResponse(t, replay)
+	if afterReplay := f.selectionSnapshot(f.owner); afterReplay != selectedState {
+		t.Fatalf("replayed clear changed newer selection or revision: before=%+v after=%+v", selectedState, afterReplay)
+	}
+
+	// A different transport request is fresh and remains subject to the spent
+	// budget; refusal must leave the current profile photo untouched.
+	fresh := dispatchProfilePhotoMutation(t, h, f.owner, key, sessionID, clearMsgID+4, clearRequest)
+	var rpc mt.RPCError
+	if err := rpc.Decode(&bin.Buffer{Buf: fresh}); err != nil {
+		t.Fatalf("decode fresh clear rate-limit reply: %v", err)
+	}
+	if rpc.ErrorCode != 420 || !strings.HasPrefix(rpc.ErrorMessage, "FLOOD_WAIT_") {
+		t.Fatalf("fresh clear error = %d %q, want 420 FLOOD_WAIT", rpc.ErrorCode, rpc.ErrorMessage)
+	}
+	if afterFresh := f.selectionSnapshot(f.owner); afterFresh != selectedState {
+		t.Fatalf("rate-limited fresh clear changed profile state: before=%+v after=%+v", selectedState, afterFresh)
 	}
 }
 

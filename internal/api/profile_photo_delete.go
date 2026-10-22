@@ -68,12 +68,21 @@ func (h *handlers) handleDeleteProfilePhotos(r *mtproto.Request) (bin.Encoder, e
 func (h *handlers) handleClearProfilePhoto(r *mtproto.Request) (bin.Encoder, error) {
 	mutationCtx, cancel := context.WithTimeout(r.Ctx, store.ProfilePhotoSelectionWait)
 	defer cancel()
-	if err := h.checkRateLimitCostWithDeadline(r, mutationCtx, "update_profile", h.rateLimitUpdateProfile, 1); err != nil {
-		return nil, err
+	authKeyID := mtproto.AuthKeyIDInt64(r.AuthKeyID)
+	hasReceipt, err := h.store.HasProfilePhotoClearReceipt(mutationCtx, r.UserID, authKeyID, r.SessionID, r.MsgID)
+	if err != nil {
+		if r.Ctx.Err() == nil && errors.Is(mutationCtx.Err(), context.DeadlineExceeded) {
+			return nil, FloodWaitError(1)
+		}
+		h.log.Error("clear profile photo: read request receipt", "user_id", r.UserID, "err", err)
+		return nil, errInternal
 	}
-	if err := h.store.ClearCurrentProfilePhoto(
-		mutationCtx, r.UserID, mtproto.AuthKeyIDInt64(r.AuthKeyID), r.SessionID, r.MsgID,
-	); err != nil {
+	if !hasReceipt {
+		if err := h.checkRateLimitCostWithDeadline(r, mutationCtx, "update_profile", h.rateLimitUpdateProfile, 1); err != nil {
+			return nil, err
+		}
+	}
+	if err := h.store.ClearCurrentProfilePhoto(mutationCtx, r.UserID, authKeyID, r.SessionID, r.MsgID); err != nil {
 		if errors.Is(err, store.ErrProfilePhotoBusy) ||
 			(r.Ctx.Err() == nil && errors.Is(mutationCtx.Err(), context.DeadlineExceeded)) {
 			return nil, FloodWaitError(1)

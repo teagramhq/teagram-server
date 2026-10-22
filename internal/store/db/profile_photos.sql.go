@@ -447,6 +447,7 @@ const profilePhotoDeleteOperation = `-- name: ProfilePhotoDeleteOperation :one
 SELECT 1::bigint
 FROM profile_delete_operation
 WHERE user_id = $1 AND auth_key_id = $2 AND session_id = $3 AND msg_id = $4
+  AND created_at >= now() - INTERVAL '90 days'
 `
 
 type ProfilePhotoDeleteOperationParams struct {
