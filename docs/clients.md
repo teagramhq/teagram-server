@@ -59,15 +59,15 @@ Configuration is read from environment variables in `internal/config/config.go`:
 | `TG_SESSION_IP` | `false` | Store session IPs and return them in `account.getAuthorizations`. Unset means no session IP stored by default; a non-boolean value fails startup |
 | `TG_SESSION_DEVICE_LABELS` | `true` | Store and return device model, platform, OS version, API ID, and app version for sessions. A non-boolean value fails startup |
 | `TG_RATE_LIMIT_SEND_CODE_IP` | `10` | `auth.sendCode` calls per client network per window; `0` disables this counter |
-| `TG_RATE_LIMIT_SEND_CODE_IP_WINDOW` | `1h` | Window for the per-network `auth.sendCode` call counter; must be positive while enabled |
+| `TG_RATE_LIMIT_SEND_CODE_IP_WINDOW` | `1h` | Window for the per-network `auth.sendCode` call counter; `0` or a negative window also disables this counter |
 | `TG_RATE_LIMIT_SEND_CODE_IP_PHONES` | `20` | Distinct `auth.sendCode` identifiers per client network per window; `0` disables this counter |
-| `TG_RATE_LIMIT_SEND_CODE_IP_PHONES_WINDOW` | `24h` | Window for distinct `auth.sendCode` identifiers; must be positive while enabled |
+| `TG_RATE_LIMIT_SEND_CODE_IP_PHONES_WINDOW` | `24h` | Window for distinct `auth.sendCode` identifiers; `0` or a negative window also disables this counter |
 | `TG_RATE_LIMIT_CHECK_PASSWORD_IP` | `10` | Failed `auth.checkPassword` attempts per client network per window; `0` disables this counter |
-| `TG_RATE_LIMIT_CHECK_PASSWORD_IP_WINDOW` | `1h` | Window for the per-network `auth.checkPassword` counter; must be positive while enabled |
+| `TG_RATE_LIMIT_CHECK_PASSWORD_IP_WINDOW` | `1h` | Window for the per-network `auth.checkPassword` counter; `0` or a negative window also disables this counter |
 | `TG_RATE_LIMIT_GET_PASSWORD_IP` | `20` | Unauthenticated `account.getPassword` calls per client network per window; `0` disables this counter |
-| `TG_RATE_LIMIT_GET_PASSWORD_IP_WINDOW` | `1h` | Window for the per-network `account.getPassword` counter; must be positive while enabled |
+| `TG_RATE_LIMIT_GET_PASSWORD_IP_WINDOW` | `1h` | Window for the per-network `account.getPassword` counter; `0` or a negative window also disables this counter |
 | `TG_RATE_LIMIT_SIGN_UP_IP` | `5` | `auth.signUp` calls per client network per window; `0` disables this counter |
-| `TG_RATE_LIMIT_SIGN_UP_IP_WINDOW` | `1h` | Window for the per-network `auth.signUp` counter; must be positive while enabled |
+| `TG_RATE_LIMIT_SIGN_UP_IP_WINDOW` | `1h` | Window for the per-network `auth.signUp` counter; `0` or a negative window also disables this counter |
 | `TG_REGISTRATION`   | `closed`         | Accepted values are `closed`, `invite`, and `open`. `closed` rejects `auth.signUp`, `invite` requires an operator-issued invite, and `open` admits usernames without one. An unrecognized value fails startup. Sign-in for accounts that already exist is unaffected by this setting |
 | `TG_PUBLIC_REGISTRATION` | `closed` | Registration mode for the public WebSocket listener only. Defaults to `closed` even when `TG_REGISTRATION=open`; use `invite` to require an operator-issued invite |
 | `TG_WELCOME_CHANNEL` | *(unset)* | Optional handle of a public broadcast channel joined by new accounts after `auth.signUp`; invalid targets are skipped with a warning |
@@ -114,7 +114,8 @@ can change their limits and windows; setting a configurable limit to `0`
 disables only that counter. The failed `auth.signIn` counter has no environment
 override. Teagram puts a username in the protocol's `phone_number` field and
 rejects phone-shaped identifiers. Its `auth.sendCode` distinct-identifier
-counter may retain those usernames in Postgres for up to 24 hours.
+counter may retain those usernames in Postgres for the configured window
+(24h by default), plus up to five minutes before the sweep removes them.
 
 Per-network counters use an IPv4 `/32` or IPv6 `/64` bucket based on
 `TG_CLIENT_ADDR_TRUST`. The `auth.sendCode` tables store that network prefix;
