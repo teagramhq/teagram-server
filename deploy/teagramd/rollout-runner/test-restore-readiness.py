@@ -184,7 +184,8 @@ class RestoreReadinessContractTests(unittest.TestCase):
         self.assertEqual(
             RESTORE_READINESS.bootstrap_postgres_role_sql("a" * 64),
             "CREATE ROLE postgres WITH LOGIN SUPERUSER CREATEDB CREATEROLE "
-            "REPLICATION BYPASSRLS PASSWORD '" + "a" * 64 + "';",
+            "REPLICATION BYPASSRLS PASSWORD '" + "a" * 64 + "';\n"
+            "ALTER DATABASE teagram OWNER TO postgres;",
         )
         with self.assertRaises(ValueError):
             RESTORE_READINESS.bootstrap_postgres_role_sql("a' SUPERUSER; --")
@@ -205,6 +206,25 @@ class RestoreReadinessContractTests(unittest.TestCase):
             if isinstance(node, ast.FunctionDef) and node.name == "prepare_materials"
         )
         self.assertEqual(ast.unparse(prepare_materials).count("'POSTGRES_USER': RESTORE_BOOTSTRAP_ROLE"), 2)
+
+    def test_fixture_role_inventory_excludes_cluster_bootstrap_roles(self) -> None:
+        self.assertIn(
+            "rolname NOT IN ('postgres', '" + RESTORE_READINESS.RESTORE_BOOTSTRAP_ROLE + "')",
+            RESTORE_READINESS.FIXTURE_STATE_SQL,
+        )
+
+    def test_local_inventory_ignores_pg16_to_pg18_catalog_drift(self) -> None:
+        inventory = RESTORE_READINESS.LOCAL_OBJECT_INVENTORY_SQL
+        self.assertIn("FROM aclexplode(c.relacl) AS acl WHERE acl.grantee <> c.relowner", inventory)
+        self.assertIn(
+            "FROM aclexplode(relation.relacl) AS acl WHERE acl.grantee <> relation.relowner",
+            RESTORE_READINESS.EXTENSION_STATE_SQL,
+        )
+        self.assertIn("d.objid IN (t.typrelid, (SELECT element.typrelid FROM pg_type AS element WHERE element.oid = t.typelem))", inventory)
+        self.assertIn(
+            "routine.proname || '(' || oidvectortypes(routine.proargtypes) || ')'",
+            RESTORE_READINESS.EXTENSION_STATE_SQL,
+        )
 
     def test_sigkill_drill_requires_injection_marker_and_signal_status(self) -> None:
         marker = b"SIGKILL_INJECTED\n"

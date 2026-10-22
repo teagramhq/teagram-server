@@ -226,7 +226,8 @@ def bootstrap_postgres_role_sql(password: str) -> str:
         raise ValueError("invalid scratch database password")
     return (
         "CREATE ROLE postgres WITH LOGIN SUPERUSER CREATEDB CREATEROLE "
-        f"REPLICATION BYPASSRLS PASSWORD '{password}';"
+        f"REPLICATION BYPASSRLS PASSWORD '{password}';\n"
+        "ALTER DATABASE teagram OWNER TO postgres;"
     )
 
 
@@ -500,7 +501,7 @@ SELECT
   (SELECT count(*) FROM public.auth_keys)::text || '|' ||
   (SELECT count(*) FROM public.users)::text || '|' ||
   (SELECT COALESCE(string_agg(rolname, ',' ORDER BY rolname), '')
-   FROM pg_roles WHERE rolname <> 'postgres' AND left(rolname, 3) <> 'pg_') || '|' ||
+   FROM pg_roles WHERE rolname NOT IN ('postgres', 'restore_bootstrap') AND left(rolname, 3) <> 'pg_') || '|' ||
   (SELECT COALESCE(string_agg(extname, ',' ORDER BY extname), '') FROM pg_extension) || '|' ||
   (SELECT count(*) FROM pg_event_trigger)::text || '|' ||
   (SELECT count(*) FROM pg_foreign_server)::text || '|' ||
@@ -588,7 +589,7 @@ SELECT jsonb_build_object(
     SELECT jsonb_agg(jsonb_build_object(
       'name', relation.relname,
       'owner', pg_get_userbyid(relation.relowner),
-      'acl', COALESCE(relation.relacl::text, '')
+      'acl', COALESCE((SELECT string_agg(entry, ',' ORDER BY entry) FROM (SELECT CASE WHEN acl.grantee = 0 THEN 'PUBLIC' ELSE pg_get_userbyid(acl.grantee) END || '=' || acl.privilege_type || CASE WHEN acl.is_grantable THEN '*' ELSE '' END || '/' || pg_get_userbyid(acl.grantor) AS entry FROM aclexplode(relation.relacl) AS acl WHERE acl.grantee <> relation.relowner) AS entries), '')
     ) ORDER BY relation.relname)
     FROM pg_class AS relation
     JOIN pg_namespace AS namespace ON namespace.oid = relation.relnamespace
@@ -597,7 +598,7 @@ SELECT jsonb_build_object(
   ), '[]'::jsonb),
   'statistics_functions', COALESCE((
     SELECT jsonb_agg(jsonb_build_object(
-      'name', routine.proname || '(' || pg_get_function_identity_arguments(routine.oid) || ')',
+      'name', routine.proname || '(' || oidvectortypes(routine.proargtypes) || ')',
       'owner', pg_get_userbyid(routine.proowner),
       'acl', COALESCE(routine.proacl::text, '')
     ) ORDER BY routine.proname, pg_get_function_identity_arguments(routine.oid))
@@ -638,6 +639,13 @@ WITH objects AS (
       WHERE d.classid = 'pg_type'::regclass AND d.objid = t.oid
         AND d.refclassid = 'pg_extension'::regclass AND d.deptype = 'e'
     )
+    -- Row types of extension relations, and their arrays, are only extension members on some majors.
+    AND NOT EXISTS (
+      SELECT 1 FROM pg_depend AS d
+      WHERE d.classid = 'pg_class'::regclass
+        AND d.objid IN (t.typrelid, (SELECT element.typrelid FROM pg_type AS element WHERE element.oid = t.typelem))
+        AND d.refclassid = 'pg_extension'::regclass AND d.deptype = 'e'
+    )
   UNION ALL
   SELECT 'default_acl', COALESCE(n.nspname, '') || '|' || pg_get_userbyid(a.defaclrole) || '|' ||
          a.defaclobjtype::text || '|' || COALESCE(a.defaclacl::text, '')
@@ -650,7 +658,9 @@ WITH objects AS (
   UNION ALL
   SELECT 'relation'::text AS kind,
          n.nspname || '.' || c.relname || '|' || c.relkind::text || '|' ||
-         pg_get_userbyid(c.relowner) || '|' || COALESCE(c.relacl::text, '') || '|' ||
+         pg_get_userbyid(c.relowner) || '|' ||
+         -- The owner's own privileges differ across majors and pg_dump omits them; every other grant compares.
+         COALESCE((SELECT string_agg(entry, ',' ORDER BY entry) FROM (SELECT CASE WHEN acl.grantee = 0 THEN 'PUBLIC' ELSE pg_get_userbyid(acl.grantee) END || '=' || acl.privilege_type || CASE WHEN acl.is_grantable THEN '*' ELSE '' END || '/' || pg_get_userbyid(acl.grantor) AS entry FROM aclexplode(c.relacl) AS acl WHERE acl.grantee <> c.relowner) AS entries), '') || '|' ||
          COALESCE(array_to_string(c.reloptions, ','), '') || '|' || c.relpersistence::text || '|' ||
          c.relrowsecurity::text || '|' || c.relforcerowsecurity::text || '|' ||
          CASE WHEN c.relkind IN ('v', 'm') THEN pg_get_viewdef(c.oid, true) ELSE '' END AS detail
