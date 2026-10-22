@@ -103,6 +103,9 @@ jobs:
       - name: Install locked runtime test dependencies
         run: npm ci --prefix deploy/browser-acceptance --ignore-scripts --no-audit --no-fund
 
+      - name: Enable protected regular files for cross-UID lock test
+        run: sudo sysctl -w fs.protected_regular=1
+
       - name: Test browser acceptance runtime and observer
         run: node --test deploy/browser-acceptance/*.test.mjs
 
