@@ -3085,8 +3085,7 @@ class Drill(Docker):
             interactive=True,
         )
 
-    def remove_interrupted_auth_key_client(self, record: dict[str, Any], signum: int) -> None:
-        signal_name = "SIGINT" if signum == signal.SIGINT else "SIGTERM"
+    def remove_interrupted_auth_key_client(self, record: dict[str, Any]) -> None:
         def cleanup_call(args: list[str], timeout: int) -> tuple[int, bytes]:
             try:
                 return self.cleanup_call(args, timeout=timeout)
@@ -3094,8 +3093,12 @@ class Drill(Docker):
                 print(f"restore readiness signal cleanup failed during Docker {args[0]}", file=sys.stderr)
                 raise
 
-        kill_status, _ = cleanup_call(["kill", f"--signal={signal_name}", record["id"]], 10)
+        # psql runs as PID 1, which ignores SIGTERM; SIGINT cancels the open transaction so it rolls back.
+        kill_status, _ = cleanup_call(["kill", "--signal=SIGINT", record["id"]], 10)
         wait_status, wait_output = cleanup_call(["wait", record["id"]], 15)
+        if wait_status != 0:
+            kill_status, _ = cleanup_call(["kill", "--signal=SIGKILL", record["id"]], 10)
+            wait_status, wait_output = cleanup_call(["wait", record["id"]], 15)
         inspect_status, inspect_output = cleanup_call(
             ["inspect", "--format", "{{.State.Running}}", record["id"]], 10
         )
@@ -3174,7 +3177,7 @@ class Drill(Docker):
                 raise DrillFailure(phase, "auth_key_clear_failure")
         except DrillFailure as exc:
             if interrupt_signal is not None and exc.phase == phase and exc.category == "interrupted":
-                self.remove_interrupted_auth_key_client(client, interrupt_signal)
+                self.remove_interrupted_auth_key_client(client)
                 after = self.auth_key_state(target, phase, allow_interrupted=True)
                 if after != before:
                     raise DrillFailure(phase, "auth_key_clear_failure") from exc

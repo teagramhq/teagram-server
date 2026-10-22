@@ -431,6 +431,63 @@ class RestoreReadinessContractTests(unittest.TestCase):
         drill.sql.assert_not_called()
         drill.auth_key_clear_client.assert_not_called()
 
+    def test_interrupted_auth_key_client_is_cancelled_not_terminated(self) -> None:
+        # psql is PID 1 in the clearer, so it ignores SIGTERM; only SIGINT (query cancel) or SIGKILL stops it.
+        record = {"id": "d" * 64, "removed": False}
+        drill = object.__new__(RESTORE_READINESS.Drill)
+        drill.save = Mock()
+        running = [True]
+        calls: list[list[str]] = []
+
+        def cleanup_call(args: list[str], *, timeout: float = 30, input_bytes: bytes | None = None):
+            calls.append(args)
+            if args[0] == "kill":
+                if args[1] in {"--signal=SIGINT", "--signal=SIGKILL"}:
+                    running[0] = False
+                return 0, b""
+            if args[0] == "wait":
+                return (1, b"") if running[0] else (0, b"3\n")
+            if args[0] == "inspect":
+                return 0, b"true\n" if running[0] else b"false\n"
+            return 0, b""
+
+        drill.cleanup_call = cleanup_call
+        drill.remove_interrupted_auth_key_client(record)
+
+        self.assertEqual(calls[0], ["kill", "--signal=SIGINT", record["id"]])
+        self.assertNotIn(["kill", "--signal=SIGTERM", record["id"]], calls)
+        self.assertNotIn(["kill", "--signal=SIGKILL", record["id"]], calls)
+        self.assertTrue(record["removed"])
+
+    def test_interrupted_auth_key_client_escalates_to_sigkill_when_cancel_is_ignored(self) -> None:
+        record = {"id": "e" * 64, "removed": False}
+        drill = object.__new__(RESTORE_READINESS.Drill)
+        drill.save = Mock()
+        running = [True]
+        calls: list[list[str]] = []
+
+        def cleanup_call(args: list[str], *, timeout: float = 30, input_bytes: bytes | None = None):
+            calls.append(args)
+            if args[0] == "kill":
+                if args[1] == "--signal=SIGKILL":
+                    running[0] = False
+                return 0, b""
+            if args[0] == "wait":
+                return (1, b"") if running[0] else (0, b"137\n")
+            if args[0] == "inspect":
+                return 0, b"true\n" if running[0] else b"false\n"
+            return 0, b""
+
+        drill.cleanup_call = cleanup_call
+        drill.remove_interrupted_auth_key_client(record)
+
+        self.assertIn(["kill", "--signal=SIGKILL", record["id"]], calls)
+        self.assertLess(
+            calls.index(["kill", "--signal=SIGINT", record["id"]]),
+            calls.index(["kill", "--signal=SIGKILL", record["id"]]),
+        )
+        self.assertTrue(record["removed"])
+
     def test_failure_report_is_allowlisted_and_does_not_include_raw_errors(self) -> None:
         report = RESTORE_READINESS.report_document(
             "restore",
