@@ -316,13 +316,14 @@ docker exec teagram-postgres pg_dump -U postgres -d teagram --format=custom > "$
 tar --numeric-owner -C / -cpf "$backup_dir/files.tar" var/lib/teagram etc/teagram
 printf "Backup saved to %s\n" "$backup_dir"' sh "$backup_dir"
 # The update keeps teagramd stopped after the backup succeeds.
-restart_teagramd=0
 sudo cp -p /opt/teagram/bin/teagramd "$backup_dir/teagramd.previous"
 sudo sh -c 'cd /opt/teagram && git rev-parse HEAD > "$1"' sh "$backup_dir/source.previous"
 sudo git fetch --tags origin
 release_ref=FULL_COMMIT_SHA
 sudo git checkout "$release_ref"
 go build -trimpath -o /tmp/teagramd.new ./cmd/teagramd
+# Disable automatic restart before migrations may change the database.
+restart_teagramd=0
 sudo sh -c 'set -a; . /etc/teagram/teagram.env; set +a; cd /opt/teagram && make migrate'
 sudo install -o root -g root -m 0755 /tmp/teagramd.new /opt/teagram/bin/teagramd
 sudo systemctl start teagramd
