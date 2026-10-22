@@ -71,12 +71,14 @@ func buildReactionDocumentCatalog() (*reactionDocumentCatalog, error) {
 			return nil, fmt.Errorf("reaction %q has invalid asset name %q", emoji, entry.SVG)
 		}
 		staticName := stem + ".webp"
-		animationName := stem + ".tgs"
+		animationAssetName := stem + ".tgs"
+		// The web client recognizes TGS stickers by this filename.
+		animationFileName := "AnimatedSticker.tgs"
 		staticData, err := reactionassets.Files.ReadFile("static/" + staticName)
 		if err != nil {
 			return nil, fmt.Errorf("read reaction %q WebP: %w", emoji, err)
 		}
-		animationData, err := reactionassets.Files.ReadFile("tgs/" + animationName)
+		animationData, err := reactionassets.Files.ReadFile("tgs/" + animationAssetName)
 		if err != nil {
 			return nil, fmt.Errorf("read reaction %q TGS: %w", emoji, err)
 		}
@@ -87,7 +89,7 @@ func buildReactionDocumentCatalog() (*reactionDocumentCatalog, error) {
 		staticID := -int64(2*i + 1)
 		animationID := -int64(2*i + 2)
 		staticDoc := newReactionDocument(emoji, staticID, staticName, "image/webp", staticData)
-		animationDoc := newReactionDocument(emoji, animationID, animationName, "application/x-tgsticker", animationData)
+		animationDoc := newReactionDocument(emoji, animationID, animationFileName, "application/x-tgsticker", animationData)
 		reaction := tg.AvailableReaction{
 			Reaction:          emoji,
 			Title:             emoji,
@@ -115,7 +117,7 @@ func buildReactionDocumentCatalog() (*reactionDocumentCatalog, error) {
 		hashInput = append(hashInput, staticName...)
 		hashInput = append(hashInput, 0)
 		hashInput = append(hashInput, staticData...)
-		hashInput = append(hashInput, animationName...)
+		hashInput = append(hashInput, animationFileName...)
 		hashInput = append(hashInput, 0)
 		hashInput = append(hashInput, animationData...)
 	}

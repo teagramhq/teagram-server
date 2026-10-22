@@ -12,6 +12,7 @@ import (
 	"github.com/gotd/td/tg"
 
 	"github.com/teagramhq/teagram-server/internal/api"
+	"github.com/teagramhq/teagram-server/internal/reactionassets"
 	"github.com/teagramhq/teagram-server/internal/store"
 )
 
@@ -62,6 +63,9 @@ func TestGetAvailableReactionsReturnsStableStandardDocuments(t *testing.T) {
 		}
 
 		animation := requireReactionDocument(t, reaction.AppearAnimation, want, "application/x-tgsticker", ".tgs")
+		if got := reactionFilename(t, animation); got != "AnimatedSticker.tgs" {
+			t.Errorf("reaction %q TGS filename = %q, want client-recognized AnimatedSticker.tgs", want, got)
+		}
 		for field, class := range map[string]tg.DocumentClass{
 			"select_animation":   reaction.SelectAnimation,
 			"activate_animation": reaction.ActivateAnimation,
@@ -170,9 +174,21 @@ func TestAvailableReactionDocumentsDownloadForAnySignedInUser(t *testing.T) {
 	if len(full.Reactions) != len(strings.Fields(standardReactionEmoticons)) {
 		t.Fatalf("available reactions = %d, want %d", len(full.Reactions), len(strings.Fields(standardReactionEmoticons)))
 	}
+	entries, err := reactionassets.Manifest()
+	if err != nil {
+		t.Fatalf("read reaction asset manifest: %v", err)
+	}
+	if len(entries) != len(full.Reactions) {
+		t.Fatalf("reaction asset entries = %d, want %d", len(entries), len(full.Reactions))
+	}
 
 	getFile := api.GetFileSeqForTestWithLimits(s, blobs, store.RateLimitConfig{}, store.RateLimitConfig{})
-	for _, reaction := range full.Reactions {
+	for i, reaction := range full.Reactions {
+		entry := entries[i]
+		if reaction.Reaction != entry.Emoji {
+			t.Fatalf("reaction %d = %q, asset manifest emoji = %q", i, reaction.Reaction, entry.Emoji)
+		}
+		assetStem := strings.TrimSuffix(entry.SVG, ".svg")
 		for _, item := range []struct {
 			class     tg.DocumentClass
 			dir       string
@@ -183,7 +199,7 @@ func TestAvailableReactionDocumentsDownloadForAnySignedInUser(t *testing.T) {
 			{reaction.AppearAnimation, "tgs", "application/x-tgsticker", ".tgs"},
 		} {
 			document := requireReactionDocument(t, item.class, reaction.Reaction, item.mimeType, item.extension)
-			filename := reactionFilename(t, document)
+			filename := assetStem + item.extension
 			want, err := os.ReadFile(filepath.Join("..", "reactionassets", item.dir, filename))
 			if err != nil {
 				t.Fatalf("read committed %s asset %s: %v", item.dir, filename, err)
