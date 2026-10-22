@@ -1794,14 +1794,35 @@ test("acceptance preflight takes the shared lock before reading either manifest"
     if (error.code !== "EEXIST") throw error;
   }
   if (createdLockFile) await chmod(paths.sharedRuntimeLock, 0o666);
-  const holder = spawn("flock", ["--nonblock", "--close", paths.sharedRuntimeLock, "sleep", "0.25"], { stdio: "ignore" });
-  t.after(() => holder.kill());
-  await new Promise((resolve) => setTimeout(resolve, 200));
-  const result = invokePreflight(paths, await preflightScript(paths));
-  assert.equal(result.status, 1);
-  assert.equal(result.stdout, '{"status":"error","code":"runtime-busy"}\n');
-  await assert.rejects(readFile(paths.curlLog));
-  await assert.rejects(readFile(paths.log));
+  const holder = spawn("bash", ["-c", 'exec 9>>"$1"; flock -n 9 || exit; printf locked; IFS= read -r _',
+    "lock-holder", paths.sharedRuntimeLock], {
+    stdio: ["pipe", "pipe", "ignore"],
+  });
+  let holderOutput = "";
+  holder.stdout.setEncoding("utf8").on("data", (chunk) => { holderOutput += chunk; });
+  try {
+    await new Promise((resolve, reject) => {
+      const timeout = setTimeout(() => reject(new Error("lock holder did not acquire the fixture lock")), 5000);
+      holder.stdout.on("data", () => {
+        if (holderOutput.includes("locked")) {
+          clearTimeout(timeout);
+          resolve();
+        }
+      });
+      holder.on("error", reject);
+    });
+    const result = invokePreflight(paths, await preflightScript(paths));
+    assert.equal(result.status, 1);
+    assert.equal(result.stdout, '{"status":"error","code":"runtime-busy"}\n');
+    await assert.rejects(readFile(paths.curlLog));
+    await assert.rejects(readFile(paths.log));
+  } finally {
+    if (holder.exitCode === null && holder.signalCode === null) {
+      const closed = new Promise((resolve) => holder.once("close", resolve));
+      holder.kill("SIGKILL");
+      await closed;
+    }
+  }
 });
 
 test("each probe readiness failure maps to its fixed error without a QA run", async (t) => {
