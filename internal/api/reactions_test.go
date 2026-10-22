@@ -5,11 +5,365 @@ import (
 	"testing"
 
 	"github.com/gotd/td/bin"
+	"github.com/gotd/td/mt"
 	"github.com/gotd/td/tg"
 
 	"github.com/teagramhq/teagram-server/internal/api"
 	"github.com/teagramhq/teagram-server/internal/store"
 )
+
+func callReactionUpdates(t *testing.T, s *store.Store, userID int64, method string, req bin.Encoder) (*tg.Updates, *mt.RPCError) {
+	t.Helper()
+	body := dispatchChatMethod(t, fullChannelDispatcher(s), userID, method, req)
+	var updates tg.Updates
+	if err := updates.Decode(&bin.Buffer{Buf: body}); err == nil {
+		return &updates, nil
+	}
+	var rpc mt.RPCError
+	if err := rpc.Decode(&bin.Buffer{Buf: body}); err != nil {
+		t.Fatalf("decode %s response as Updates or RPCError: %v", method, err)
+	}
+	return nil, &rpc
+}
+
+func setChatReactions(t *testing.T, s *store.Store, userID, chatID int64, reactions tg.ChatReactionsClass) (*tg.Updates, *mt.RPCError) {
+	t.Helper()
+	return callReactionUpdates(t, s, userID, "messages.setChatAvailableReactions", &tg.MessagesSetChatAvailableReactionsRequest{
+		Peer:               &tg.InputPeerChat{ChatID: chatID},
+		AvailableReactions: reactions,
+	})
+}
+
+func sendReaction(t *testing.T, s *store.Store, userID int64, peer tg.InputPeerClass, messageID int64, reactions ...tg.ReactionClass) (*tg.Updates, *mt.RPCError) {
+	t.Helper()
+	return callReactionUpdates(t, s, userID, "messages.sendReaction", &tg.MessagesSendReactionRequest{
+		Peer:     peer,
+		MsgID:    int(messageID),
+		Reaction: reactions,
+	})
+}
+
+func requireReactionUpdates(t *testing.T, updates *tg.Updates, rpc *mt.RPCError, method string) *tg.Updates {
+	t.Helper()
+	if rpc != nil {
+		t.Fatalf("%s returned %s, want Updates", method, rpc.ErrorMessage)
+	}
+	if updates == nil {
+		t.Fatalf("%s returned no Updates", method)
+	}
+	return updates
+}
+
+func chatReactionsFromFull(t *testing.T, full *tg.MessagesChatFull) tg.ChatReactionsClass {
+	t.Helper()
+	info, ok := full.FullChat.(*tg.ChatFull)
+	if !ok {
+		t.Fatalf("full chat = %T, want *tg.ChatFull", full.FullChat)
+	}
+	reactions, ok := info.GetAvailableReactions()
+	if !ok {
+		t.Fatal("full chat omitted available_reactions")
+	}
+	return reactions
+}
+
+func assertChatReactionCount(t *testing.T, s *store.Store, ownerID, chatID, messageID int64, want int) {
+	t.Helper()
+	updates := getReactions(t, s, ownerID, api.InputPeerChat(ownerID, chatID), int(messageID))
+	if len(updates.Updates) != 1 {
+		t.Fatalf("reaction updates = %d, want 1", len(updates.Updates))
+	}
+	update, ok := updates.Updates[0].(*tg.UpdateMessageReactions)
+	if !ok {
+		t.Fatalf("reaction update = %T, want *tg.UpdateMessageReactions", updates.Updates[0])
+	}
+	if len(update.Reactions.Results) != want {
+		t.Fatalf("reaction results = %d, want %d", len(update.Reactions.Results), want)
+	}
+	if want == 1 {
+		if update.Reactions.Results[0].Count != 1 {
+			t.Fatalf("reaction count = %d, want 1", update.Reactions.Results[0].Count)
+		}
+		emoji, ok := update.Reactions.Results[0].Reaction.(*tg.ReactionEmoji)
+		if !ok || emoji.Emoticon != "❤" {
+			t.Fatalf("reaction = %#v, want heart", update.Reactions.Results[0].Reaction)
+		}
+	}
+}
+
+func TestSetChatAvailableReactionsSavesAndReadsForEveryMember(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	s := openStore(t)
+	a, err := s.CreateUser(ctx, "+15551348001")
+	if err != nil {
+		t.Fatalf("create A: %v", err)
+	}
+	b, err := s.CreateUser(ctx, "+15551348002")
+	if err != nil {
+		t.Fatalf("create B: %v", err)
+	}
+	chatID := createChatForTest(t, s, a.ID, "Reactions", b.ID)
+	h := fullChannelDispatcher(s)
+	for _, memberID := range []int64{a.ID, b.ID} {
+		got := chatReactionsFromFull(t, getFullChat(t, h, memberID, chatID))
+		if _, ok := got.(*tg.ChatReactionsAll); !ok {
+			t.Fatalf("member %d default reactions = %T, want ChatReactionsAll", memberID, got)
+		}
+	}
+
+	for _, setting := range []tg.ChatReactionsClass{
+		&tg.ChatReactionsNone{},
+		&tg.ChatReactionsSome{Reactions: []tg.ReactionClass{&tg.ReactionEmoji{Emoticon: "❤"}}},
+		&tg.ChatReactionsAll{},
+	} {
+		updates, rpc := setChatReactions(t, s, a.ID, chatID, setting)
+		if got := requireReactionUpdates(t, updates, rpc, "messages.setChatAvailableReactions"); got == nil {
+			t.Fatal("setChatAvailableReactions returned no Updates")
+		}
+		full := getFullChat(t, h, b.ID, chatID)
+		got := chatReactionsFromFull(t, full)
+		switch want := setting.(type) {
+		case *tg.ChatReactionsNone:
+			if _, ok := got.(*tg.ChatReactionsNone); !ok {
+				t.Fatalf("stored reactions = %T, want ChatReactionsNone", got)
+			}
+		case *tg.ChatReactionsAll:
+			if _, ok := got.(*tg.ChatReactionsAll); !ok {
+				t.Fatalf("stored reactions = %T, want ChatReactionsAll", got)
+			}
+		case *tg.ChatReactionsSome:
+			stored, ok := got.(*tg.ChatReactionsSome)
+			if !ok || len(stored.Reactions) != len(want.Reactions) {
+				t.Fatalf("stored reactions = %#v, want %#v", got, want)
+			}
+			emoji, ok := stored.Reactions[0].(*tg.ReactionEmoji)
+			if !ok || emoji.Emoticon != "❤" {
+				t.Fatalf("stored reaction = %#v, want heart", stored.Reactions[0])
+			}
+		}
+	}
+}
+
+func TestSetChatAvailableReactionsRejectsUnsupportedValues(t *testing.T) {
+	cases := []struct {
+		name    string
+		request func() *tg.MessagesSetChatAvailableReactionsRequest
+	}{
+		{
+			name: "emoji outside standard set",
+			request: func() *tg.MessagesSetChatAvailableReactionsRequest {
+				return &tg.MessagesSetChatAvailableReactionsRequest{
+					Peer: &tg.InputPeerChat{ChatID: 1},
+					AvailableReactions: &tg.ChatReactionsSome{Reactions: []tg.ReactionClass{
+						&tg.ReactionEmoji{Emoticon: "😀"},
+					}},
+				}
+			},
+		},
+		{
+			name: "custom emoji",
+			request: func() *tg.MessagesSetChatAvailableReactionsRequest {
+				return &tg.MessagesSetChatAvailableReactionsRequest{
+					Peer: &tg.InputPeerChat{ChatID: 1},
+					AvailableReactions: &tg.ChatReactionsSome{Reactions: []tg.ReactionClass{
+						&tg.ReactionCustomEmoji{DocumentID: 1},
+					}},
+				}
+			},
+		},
+		{
+			name: "paid reaction",
+			request: func() *tg.MessagesSetChatAvailableReactionsRequest {
+				return &tg.MessagesSetChatAvailableReactionsRequest{
+					Peer:               &tg.InputPeerChat{ChatID: 1},
+					AvailableReactions: &tg.ChatReactionsSome{Reactions: []tg.ReactionClass{&tg.ReactionPaid{}}},
+				}
+			},
+		},
+		{
+			name: "allow custom",
+			request: func() *tg.MessagesSetChatAvailableReactionsRequest {
+				all := &tg.ChatReactionsAll{}
+				all.SetAllowCustom(true)
+				return &tg.MessagesSetChatAvailableReactionsRequest{
+					Peer: &tg.InputPeerChat{ChatID: 1}, AvailableReactions: all,
+				}
+			},
+		},
+		{
+			name: "paid enabled",
+			request: func() *tg.MessagesSetChatAvailableReactionsRequest {
+				request := &tg.MessagesSetChatAvailableReactionsRequest{
+					Peer: &tg.InputPeerChat{ChatID: 1}, AvailableReactions: &tg.ChatReactionsAll{},
+				}
+				request.SetPaidEnabled(true)
+				return request
+			},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			ctx := context.Background()
+			s := openStore(t)
+			creator, err := s.CreateUser(ctx, "+15551348101")
+			if err != nil {
+				t.Fatalf("create creator: %v", err)
+			}
+			chatID := createChatForTest(t, s, creator.ID, "Reactions")
+			request := tc.request()
+			request.Peer = &tg.InputPeerChat{ChatID: chatID}
+			_, rpc := callReactionUpdates(t, s, creator.ID, "messages.setChatAvailableReactions", request)
+			if rpc == nil || rpc.ErrorMessage != "REACTION_INVALID" {
+				t.Fatalf("setChatAvailableReactions error = %v, want REACTION_INVALID", rpc)
+			}
+			got := chatReactionsFromFull(t, getFullChat(t, fullChannelDispatcher(s), creator.ID, chatID))
+			if _, ok := got.(*tg.ChatReactionsAll); !ok {
+				t.Fatalf("reactions after refusal = %T, want default ChatReactionsAll", got)
+			}
+		})
+	}
+}
+
+func TestSetChatAvailableReactionsRequiresChangeInfoRight(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	s := openStore(t)
+	a, err := s.CreateUser(ctx, "+15551348201")
+	if err != nil {
+		t.Fatalf("create A: %v", err)
+	}
+	b, err := s.CreateUser(ctx, "+15551348202")
+	if err != nil {
+		t.Fatalf("create B: %v", err)
+	}
+	chatID := createChatForTest(t, s, a.ID, "Reactions", b.ID)
+	if _, _, err := s.SetChatDefaultBannedRights(ctx, chatID, a.ID, []string{"change_info"}); err != nil {
+		t.Fatalf("restrict change_info: %v", err)
+	}
+	_, rpc := setChatReactions(t, s, b.ID, chatID, &tg.ChatReactionsNone{})
+	if rpc == nil || rpc.ErrorMessage != "CHAT_ADMIN_REQUIRED" {
+		t.Fatalf("member setting error = %v, want CHAT_ADMIN_REQUIRED", rpc)
+	}
+	got := chatReactionsFromFull(t, getFullChat(t, fullChannelDispatcher(s), b.ID, chatID))
+	if _, ok := got.(*tg.ChatReactionsAll); !ok {
+		t.Fatalf("reactions after refusal = %T, want default ChatReactionsAll", got)
+	}
+}
+
+func TestSendReactionRejectsNonStandardEmojiWithoutWriting(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	s := openStore(t)
+	p := seedReactionPair(t, s, "+15551348301", "+15551348302", "")
+	message := sendDM(t, s, p.a.ID, p.b.ID, "reaction target", 770101)
+	for _, emoji := range []string{"😀", "❤️"} {
+		_, rpc := sendReaction(t, s, p.a.ID, api.InputPeerUser(p.a.ID, p.b.ID), message.LocalID, &tg.ReactionEmoji{Emoticon: emoji})
+		if rpc == nil || rpc.ErrorMessage != "REACTION_INVALID" {
+			t.Fatalf("sendReaction(%q) error = %v, want REACTION_INVALID", emoji, rpc)
+		}
+		for _, owner := range []struct {
+			id      int64
+			localID int64
+		}{{p.a.ID, message.LocalID}, {p.b.ID, message.PeerLocalID}} {
+			reactions, err := s.ReactionsByOwnerLocal(ctx, owner.id, owner.localID)
+			if err != nil {
+				t.Fatalf("read owner %d reactions: %v", owner.id, err)
+			}
+			if len(reactions) != 0 {
+				t.Fatalf("invalid reaction %q persisted for owner %d: %+v", emoji, owner.id, reactions)
+			}
+		}
+	}
+}
+
+func TestStoredNonstandardReactionRemainsReadableAndClearable(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	s := openStore(t)
+	p := seedReactionPair(t, s, "+15551348501", "+15551348502", "😀")
+	updates := getReactions(t, s, p.a.ID, api.InputPeerUser(p.a.ID, p.b.ID), int(p.aLocalID))
+	if len(updates.Updates) != 1 {
+		t.Fatalf("reaction updates = %d, want 1", len(updates.Updates))
+	}
+	if _, emoji := emojiOf(t, updates.Updates[0]); emoji != "😀" {
+		t.Fatalf("stored reaction = %q, want the legacy emoji", emoji)
+	}
+	if _, rpc := sendReaction(t, s, p.b.ID, api.InputPeerUser(p.b.ID, p.a.ID), p.bLocalID); rpc != nil {
+		t.Fatalf("clear legacy reaction: %s", rpc.ErrorMessage)
+	}
+	for _, owner := range []struct {
+		id      int64
+		localID int64
+	}{{p.a.ID, p.aLocalID}, {p.b.ID, p.bLocalID}} {
+		reactions, err := s.ReactionsByOwnerLocal(ctx, owner.id, owner.localID)
+		if err != nil {
+			t.Fatalf("read owner %d reactions: %v", owner.id, err)
+		}
+		if len(reactions) != 0 {
+			t.Fatalf("legacy reaction remained for owner %d: %+v", owner.id, reactions)
+		}
+	}
+}
+
+func TestBasicGroupReactionSettingValidatesSendsAndAllowsClear(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	s := openStore(t)
+	a, err := s.CreateUser(ctx, "+15551348401")
+	if err != nil {
+		t.Fatalf("create A: %v", err)
+	}
+	b, err := s.CreateUser(ctx, "+15551348402")
+	if err != nil {
+		t.Fatalf("create B: %v", err)
+	}
+	chatID := createChatForTest(t, s, a.ID, "Reactions", b.ID)
+	messageReply, err := api.SendMessageForTest(s, a.ID, &tg.MessagesSendMessageRequest{
+		Peer: &tg.InputPeerChat{ChatID: chatID}, Message: "reaction target", RandomID: 770102,
+	})
+	if err != nil {
+		t.Fatalf("send group message: %v", err)
+	}
+	aLocalID := sentLocalID(t, messageReply)
+	bLocalID := int64(0)
+	messages, err := s.History(ctx, b.ID, store.PeerTypeChat, chatID, 0, 20)
+	if err != nil {
+		t.Fatalf("read B's group history: %v", err)
+	}
+	for _, message := range messages {
+		if message.Text == "reaction target" {
+			bLocalID = message.LocalID
+			break
+		}
+	}
+	if bLocalID == 0 {
+		t.Fatal("B's history omitted the group message")
+	}
+
+	if _, rpc := setChatReactions(t, s, a.ID, chatID, &tg.ChatReactionsSome{
+		Reactions: []tg.ReactionClass{&tg.ReactionEmoji{Emoticon: "❤"}},
+	}); rpc != nil {
+		t.Fatalf("set allowed heart: %s", rpc.ErrorMessage)
+	}
+	if _, rpc := sendReaction(t, s, b.ID, &tg.InputPeerChat{ChatID: chatID}, bLocalID, &tg.ReactionEmoji{Emoticon: "👍"}); rpc == nil || rpc.ErrorMessage != "REACTION_INVALID" {
+		t.Fatalf("disallowed group send error = %v, want REACTION_INVALID", rpc)
+	}
+	assertChatReactionCount(t, s, a.ID, chatID, aLocalID, 0)
+
+	if _, rpc := sendReaction(t, s, b.ID, &tg.InputPeerChat{ChatID: chatID}, bLocalID, &tg.ReactionEmoji{Emoticon: "❤"}); rpc != nil {
+		t.Fatalf("allowed group send: %s", rpc.ErrorMessage)
+	}
+	assertChatReactionCount(t, s, a.ID, chatID, aLocalID, 1)
+	if _, rpc := setChatReactions(t, s, a.ID, chatID, &tg.ChatReactionsNone{}); rpc != nil {
+		t.Fatalf("set no reactions: %s", rpc.ErrorMessage)
+	}
+	if _, rpc := sendReaction(t, s, b.ID, &tg.InputPeerChat{ChatID: chatID}, bLocalID); rpc != nil {
+		t.Fatalf("clear while reactions are disabled: %s", rpc.ErrorMessage)
+	}
+	assertChatReactionCount(t, s, a.ID, chatID, aLocalID, 0)
+}
 
 // sendDM sends a 1:1 message and returns the sender's stored copy, whose
 // PeerLocalID names the recipient's copy of the same message.

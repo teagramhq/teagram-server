@@ -166,6 +166,10 @@ func TestSmoke(t *testing.T) {
 		t.Parallel()
 		testSmokeBasicGroup(t)
 	})
+	t.Run("basic-group-reactions", func(t *testing.T) {
+		t.Parallel()
+		testSmokeBasicGroupReactions(t)
+	})
 	t.Run("basic-group-photo", func(t *testing.T) {
 		t.Parallel()
 		testSmokeBasicGroupPhoto(t)

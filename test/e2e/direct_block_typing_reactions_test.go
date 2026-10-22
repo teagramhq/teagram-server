@@ -183,7 +183,7 @@ func TestDirectTypingAndReactionsAcrossBlock(t *testing.T) {
 	senderBefore, peerBefore := ownerReactions(t, ctx, conn, a.id), ownerReactions(t, ctx, conn, b.id)
 	typing(a, b)
 	quiet(func(q context.Context) { expectNoPush(t, q, b.coll.typing, "typing from the blocker") })
-	_, err = react(a, b, aOwn, "😀")
+	_, err = react(a, b, aOwn, "👍")
 	assertRPCError(t, err, "YOU_BLOCKED_USER")
 	if got := ownerReactions(t, ctx, conn, a.id); got != senderBefore {
 		t.Fatalf("refused reaction changed the reactor's rows: %q, want %q", got, senderBefore)
