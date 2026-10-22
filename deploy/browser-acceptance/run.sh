@@ -4,7 +4,7 @@ set +x
 umask 077
 
 readonly TARGET_HOST="teagram.tailaa4918.ts.net"
-readonly APPROVED_QA_SCRIPT_SHA256="7fa033c93bdf521977faf9b485506e50441240a3cc91ecc8f5a52ad9d338aa69"
+readonly APPROVED_QA_SCRIPT_SHA256="6e12f6c9b14a127a08ed133b4ff6d1b7fa0ba60bd59939876cc0ef738dfe8133"
 readonly IMAGE_ARM64="mcr.microsoft.com/playwright:v1.61.1-noble@sha256:824f1a789072e648c62541c2cfa4479c4061a290d5c27766d67dc1dcbc19b321"
 readonly IMAGE_AMD64="mcr.microsoft.com/playwright:v1.61.1-noble@sha256:cf0daee9b994042e011bc29f20cdff1a9f682a039b43fcd738f7d8a9d3bcd9d6"
 readonly SERVED_MANIFEST_MAX_BYTES=16384
@@ -36,19 +36,38 @@ cleanup_and_report() {
     fi
   fi
   if (( cleanup_failed )); then
-    local evidence_result qa_failure_code=''
+    local evidence_result qa_failure_code='' wss_output='' wss_fields=''
     if evidence_result="$(jq -e -c 'select(.evidenceVersion == 2) | .status = "error" | .teardown = "failed"' \
       <<<"$RESULT_JSON" 2>/dev/null)"; then
       RESULT_JSON="$evidence_result"
     else
       qa_failure_code="$(jq -er -s '
         select(length == 1) | .[0] |
-        select((keys | sort) == ["code", "qa_failure_code", "status"] and
-          .status == "error" and (.code | type == "string" and test("^[a-z-]+$"))) |
+        select((keys | sort) == ["code", "qa_failure_code", "status"] or
+          ((keys | sort) == ["code", "qa_failure_code", "status", "wss_diagnostic", "wss_handshakes", "wss_status", "wss_target_match", "wss_targets"] and
+            .qa_failure_code == "websocket-not-ready")) |
+        select(.status == "error" and (.code | type == "string" and test("^[a-z-]+$"))) |
         .qa_failure_code | select(type == "string" and test("^[a-z-]+$"))
       ' <<<"$RESULT_JSON" 2>/dev/null)" || qa_failure_code=''
       if [[ "$qa_failure_code" == unknown ]] || is_qa_failure_code "$qa_failure_code"; then
-        RESULT_JSON="$(printf '{\"status\":\"error\",\"code\":\"cleanup-failed\",\"qa_failure_code\":\"%s\"}' "$qa_failure_code")"
+        if [[ "$qa_failure_code" == websocket-not-ready ]]; then
+          wss_output="$(jq -e -c -s '
+            select(length == 1) | .[0] |
+            select((keys | sort) == ["code", "qa_failure_code", "status", "wss_diagnostic", "wss_handshakes", "wss_status", "wss_target_match", "wss_targets"]) |
+            select(.status == "error" and .qa_failure_code == "websocket-not-ready") |
+            {status: "error", code: "websocket-not-ready", wss_diagnostic, wss_targets,
+              wss_handshakes, wss_target_match, wss_status}
+          ' <<<"$RESULT_JSON" 2>/dev/null)" || wss_output=''
+          if [[ -n "$wss_output" ]] && wss_output="$(normalize_wss_diagnostic "$wss_output")"; then
+            wss_fields="${wss_output#\{\"status\":\"error\",\"code\":\"websocket-not-ready\",}"
+            wss_fields="${wss_fields%\}}"
+            RESULT_JSON="$(printf '{\"status\":\"error\",\"code\":\"cleanup-failed\",\"qa_failure_code\":\"websocket-not-ready\",%s}' "$wss_fields")"
+          else
+            RESULT_JSON='{"status":"error","code":"cleanup-failed","qa_failure_code":"websocket-not-ready"}'
+          fi
+        else
+          RESULT_JSON="$(printf '{\"status\":\"error\",\"code\":\"cleanup-failed\",\"qa_failure_code\":\"%s\"}' "$qa_failure_code")"
+        fi
       else
         RESULT_JSON="$(json_error cleanup-failed)"
       fi
@@ -570,7 +589,7 @@ is_qa_failure_code() {
 }
 
 normalize_preflight_stream() {
-  local output code started=''
+  local output code normalized started=''
   local pattern='^\{"status":"error","code":"([a-z-]+)"\}$'
   if ! IFS= read -r started || [[ "$started" != 'qa child started' ]]; then
     printf '%s\n' '{"qaPreflight":"not-run"}'
@@ -581,6 +600,11 @@ normalize_preflight_stream() {
       printf '%s\n' '{"qaPreflight":"ready"}'
       return 0
     fi
+    if normalized="$(normalize_wss_diagnostic "$output")"; then
+      jq -c '{qaPreflight: "failed", qaFailureCode: "websocket-not-ready", wss_diagnostic,
+        wss_targets, wss_handshakes, wss_target_match, wss_status}' <<<"$normalized"
+      return 0
+    fi
     if [[ "$output" =~ $pattern ]]; then
       code="${BASH_REMATCH[1]}"
       is_qa_failure_code "$code" || code=unknown
@@ -589,6 +613,19 @@ normalize_preflight_stream() {
     fi
   fi
   printf '%s\n' '{"qaPreflight":"failed","qaFailureCode":"unknown"}'
+}
+
+normalize_qa_wss_diagnostic() {
+  local line="$1"
+  local diagnostic=''
+  diagnostic="$(jq -e -c -s '
+    select(length == 1) | .[0] |
+    select((keys | sort) == ["qaFailureCode", "qaPreflight", "wss_diagnostic", "wss_handshakes", "wss_status", "wss_target_match", "wss_targets"] and
+      .qaPreflight == "failed" and .qaFailureCode == "websocket-not-ready") |
+    {status: "error", code: "websocket-not-ready", wss_diagnostic, wss_targets,
+      wss_handshakes, wss_target_match, wss_status}
+  ' <<<"$line" 2>/dev/null)" || return 1
+  normalize_wss_diagnostic "$diagnostic"
 }
 
 normalize_probe_result() {
@@ -754,7 +791,7 @@ run_qa_script() {
 # Same probe path as acceptance, stopping at the QA preflight. Stdin is already
 # /dev/null and the probe never runs an interactive exec in this mode.
 run_acceptance_preflight() {
-  local output proof status code line web_commit server_commit qa_failure_code database_failure_category
+  local output proof status code line web_commit server_commit qa_failure_code database_failure_category wss_output wss_fields
   local -a lines
   set +e
   output="$(
@@ -787,7 +824,10 @@ run_acceptance_preflight() {
     fi
     qa_failure_code="$(jq -er -s '
       select(length == 1) | .[0] |
-      select((keys | sort) == ["qaFailureCode", "qaPreflight"] and .qaPreflight == "failed") |
+      select(.qaPreflight == "failed" and
+        ((keys | sort) == ["qaFailureCode", "qaPreflight"] or
+          ((keys | sort) == ["qaFailureCode", "qaPreflight", "wss_diagnostic", "wss_handshakes", "wss_status", "wss_target_match", "wss_targets"] and
+            .qaFailureCode == "websocket-not-ready"))) |
       .qaFailureCode | select(type == "string" and test("^[a-z-]+$"))
     ' <<<"$line" 2>/dev/null)" || qa_failure_code=''
     if [[ -n "$qa_failure_code" && "$qa_failure_code" != unknown ]] && ! is_qa_failure_code "$qa_failure_code"; then
@@ -797,7 +837,19 @@ run_acceptance_preflight() {
       qa_failure_code=unknown
     fi
     if [[ -n "$qa_failure_code" ]]; then
-      printf '{"status":"error","code":"%s","qa_failure_code":"%s"}' "$code" "$qa_failure_code"
+      if [[ "$qa_failure_code" == websocket-not-ready ]]; then
+        wss_output="$(normalize_qa_wss_diagnostic "$line")" || wss_output=''
+      else
+        wss_output=''
+      fi
+      if [[ -n "$wss_output" ]]; then
+        wss_fields="${wss_output#\{\"status\":\"error\",\"code\":\"websocket-not-ready\",}"
+        wss_fields="${wss_fields%\}}"
+        printf '{"status":"error","code":"%s","qa_failure_code":"%s",%s}' \
+          "$code" "$qa_failure_code" "$wss_fields"
+      else
+        printf '{"status":"error","code":"%s","qa_failure_code":"%s"}' "$code" "$qa_failure_code"
+      fi
     else
       printf '%s' "$(json_error "$code")"
     fi

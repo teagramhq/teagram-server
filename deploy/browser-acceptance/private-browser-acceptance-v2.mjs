@@ -5,6 +5,7 @@ import {statfsSync} from "node:fs";
 import {join, resolve} from "node:path";
 import {fileURLToPath, pathToFileURL} from "node:url";
 import {WSS_ACCOUNT_SLOT_CEILING, WSS_CONNECTION_CEILING} from "./acceptance-result.mjs";
+import {runtimeErrorOutput} from "./runtime.mjs";
 
 const TARGET_HOST = "teagram.tailaa4918.ts.net";
 const PROXY_BYPASS_RULE = "<-loopback>";
@@ -106,9 +107,10 @@ const SAFE_FAILURES = new Set([
 ]);
 
 class AcceptanceFailure extends Error {
-  constructor(code) {
+  constructor(code, wssDiagnostic) {
     super("browser acceptance failed");
     this.code = SAFE_FAILURES.has(code) ? code : "unexpected-failure";
+    if (wssDiagnostic) this.wssDiagnostic = wssDiagnostic;
   }
 }
 
@@ -117,9 +119,9 @@ function latchQaFailure(state, code) {
   state.qaFailureCode = SAFE_FAILURES.has(code) ? code : "unexpected-failure";
 }
 
-function fail(code, state) {
+function fail(code, state, wssDiagnostic) {
   latchQaFailure(state, code);
-  throw new AcceptanceFailure(code);
+  throw new AcceptanceFailure(code, wssDiagnostic);
 }
 
 function isRecord(value) {
@@ -146,8 +148,11 @@ function isBrowserClosedError(error) {
     /(?:Target page, context or browser has been closed|Target closed|browser has been closed|context has been closed|page has been closed)/iu.test(error.message);
 }
 
-function preflightFailureOutput(code) {
+function preflightFailureOutput(code, wssDiagnostic) {
   const safeCode = SAFE_FAILURES.has(code) ? code : "unexpected-failure";
+  if (safeCode === "websocket-not-ready") {
+    return JSON.stringify(runtimeErrorOutput({code: safeCode, wssDiagnostic}));
+  }
   return JSON.stringify({status: "error", code: safeCode});
 }
 
@@ -398,6 +403,7 @@ export async function prepareAcceptance(options, dependencies) {
   let contextInfo;
   let tracker;
   let browserClosure;
+  let wssDiagnostic;
   let code = "unexpected-failure";
   const progressState = createProgressState();
   try {
@@ -445,15 +451,17 @@ export async function prepareAcceptance(options, dependencies) {
     };
   } catch (error) {
     code = browserClosure?.unexpected ? "browser-closed" : safeFailureCode(error);
+    if (code === "websocket-not-ready") wssDiagnostic = error?.wssDiagnostic;
     latchQaFailure(progressState, code);
     if (contextInfo) {
       try {
         await dependencies.closeContext(contextInfo);
       } catch {
         code = browserClosure?.unexpected ? "browser-closed" : "browser-cleanup-failed";
+        wssDiagnostic = undefined;
       }
     }
-    return {ok: false, code, release, progress, progressState, tracker, contextInfo: null};
+    return {ok: false, code, wssDiagnostic, release, progress, progressState, tracker, contextInfo: null};
   }
 }
 
@@ -498,7 +506,9 @@ async function failedAcceptanceResult(prepared, dependencies, error) {
 export async function executeMode(options, dependencies) {
   const prepared = await prepareAcceptance(options, dependencies);
   if (!prepared.ok) {
-    if (options.mode === "preflight") return {output: preflightFailureOutput(prepared.code), exitCode: 1};
+    if (options.mode === "preflight") {
+      return {output: preflightFailureOutput(prepared.code, prepared.wssDiagnostic), exitCode: 1};
+    }
     try {
       const result = await failedAcceptanceResult(prepared, dependencies, {kind: "closed"});
       if (result) return {output: JSON.stringify(result), exitCode: 1};
@@ -906,6 +916,8 @@ async function makeWssAudit(contextInfo, progress) {
   let malformed = false;
   let handshakeCount = 0;
   let pendingWorkers = 0;
+  let orphanHandshake = false;
+  let workerUnobservable = false;
   const handlers = {
     created(params) {
       if (!isRecord(params) || typeof params.requestId !== "string" ||
@@ -938,7 +950,7 @@ async function makeWssAudit(contextInfo, progress) {
       handshakeCount = Math.min(WSS_CONNECTION_CEILING + 1, handshakeCount + 1);
       const connection = connections.get(params.requestId);
       if (!connection) {
-        malformed = true;
+        orphanHandshake = true;
         return;
       }
       connection.responses += 1;
@@ -946,7 +958,7 @@ async function makeWssAudit(contextInfo, progress) {
       progress.observeWssHandshake(params.response.status);
     },
     unobservable() {
-      malformed = true;
+      workerUnobservable = true;
     },
     attached() {
       pendingWorkers += 1;
@@ -964,6 +976,50 @@ async function makeWssAudit(contextInfo, progress) {
   session.on("Network.webSocketCreated", handlers.created);
   session.on("Network.webSocketHandshakeResponseReceived", handlers.handshakeResponse);
   await observeWorkerWebSockets(contextInfo.context.browser(), session, handlers);
+  function diagnostic() {
+    const entries = [...connections.values()];
+    const targets = connections.size;
+    const handshakes = handshakeCount;
+    const targetMatch = targets > 0 && entries.every((item) => item.matches);
+    const result = (name, matches = false, status = 0) => ({
+      wss_diagnostic: name,
+      wss_targets: Math.min(2, targets),
+      wss_handshakes: Math.min(2, handshakes),
+      wss_target_match: matches,
+      wss_status: status,
+    });
+
+    if (malformed) return result("observation-malformed");
+    if (orphanHandshake) return result("untracked-handshake");
+    if (workerUnobservable) return result("worker-unobservable");
+    if (pendingWorkers > 0) return result("worker-pending");
+    if (targets === 0) return result("no-target");
+    if (targets > WSS_ACCOUNT_SLOT_CEILING) return result("observation-malformed");
+
+    for (const [index, item] of entries.entries()) {
+      if (!item.matches) {
+        return result(`socket-${index + 1}-target-mismatch`, false,
+          item.responses > 0 ? item.status : 0);
+      }
+    }
+    for (const [index, item] of entries.entries()) {
+      if (item.responses > 1) {
+        return result(`socket-${index + 1}-duplicate-handshake`, targetMatch, item.status);
+      }
+    }
+    for (const [index, item] of entries.entries()) {
+      if (item.responses === 1 && item.status !== 101) {
+        return result(`socket-${index + 1}-handshake-not-101`, targetMatch, item.status);
+      }
+    }
+    for (const [index, item] of entries.entries()) {
+      if (item.responses === 0) {
+        return result(`socket-${index + 1}-no-handshake`, targetMatch);
+      }
+    }
+    return null;
+  }
+
   return {
     session,
     connections,
@@ -973,19 +1029,19 @@ async function makeWssAudit(contextInfo, progress) {
     },
     validate() {
       const entries = [...connections.values()];
-      if (malformed || pendingWorkers !== 0 || entries.length < 1 || entries.length > WSS_ACCOUNT_SLOT_CEILING ||
+      if (malformed || orphanHandshake || workerUnobservable || pendingWorkers !== 0 || entries.length < 1 || entries.length > WSS_ACCOUNT_SLOT_CEILING ||
           handshakeCount !== entries.length || entries.some((item) => !item.matches ||
             item.responses !== 1 || item.status !== 101)) {
-        fail("websocket-not-ready");
+        fail("websocket-not-ready", undefined, diagnostic());
       }
       return {connectionCount: entries.length, status101: true};
     },
     validateAfterLogout() {
       const entries = [...connections.values()];
-      if (malformed || pendingWorkers !== 0 || entries.length < 1 || entries.length > WSS_CONNECTION_CEILING ||
+      if (malformed || orphanHandshake || workerUnobservable || pendingWorkers !== 0 || entries.length < 1 || entries.length > WSS_CONNECTION_CEILING ||
           handshakeCount > entries.length || entries.some((item) => !item.matches || item.responses > 1 ||
             (item.responses === 1 && item.status !== 101))) {
-        fail("websocket-not-ready");
+        fail("websocket-not-ready", undefined, diagnostic());
       }
     },
   };
