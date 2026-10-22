@@ -210,6 +210,7 @@ fi
 build_inputs
 preflight_stage="run auth key signal drill"
 if auth_clear_signal_report=$(run_drill --fault-test auth-clear-signal 2>/dev/null); then
+  printf 'restore readiness signal fault unexpectedly passed: %s\n' "$auth_clear_signal_report" >&2
   emit_preflight_failure
 fi
 if ! printf '%s' "$auth_clear_signal_report" | /usr/bin/python3 -c '
@@ -218,6 +219,7 @@ report = json.load(sys.stdin)
 if not (report.get("result") == "fail" and report.get("phase") == "auth_key_clearing" and report.get("category") == "interrupted" and report.get("cleanup") == "verified" and report.get("exit") == 1):
     raise SystemExit(1)
 '; then
+  printf 'restore readiness signal fault returned unexpected report: %s\n' "$auth_clear_signal_report" >&2
   emit_preflight_failure
 fi
 
