@@ -66,6 +66,7 @@ func TestLoadRejectsRetiredBootstrapEnvBeforeInitialization(t *testing.T) {
 func TestLoadDefaults(t *testing.T) {
 	t.Setenv("TG_POSTGRES_DSN", "postgres://localhost/tg")
 	t.Setenv("TG_AUTHKEY_ENC_KEY", validEncKey)
+	t.Setenv("TG_RECOVERY_EMAIL", "off")
 	cfg, err := config.Load(discardLog())
 	if err != nil {
 		t.Fatalf("Load: %v", err)
@@ -93,6 +94,9 @@ func TestLoadDefaults(t *testing.T) {
 	}
 	if cfg.UploadPartTTL != 6*time.Hour {
 		t.Errorf("UploadPartTTL = %v, want 6h", cfg.UploadPartTTL)
+	}
+	if cfg.RecoveryEmailMode != config.RecoveryEmailOff {
+		t.Errorf("RecoveryEmailMode = %q, want off", cfg.RecoveryEmailMode)
 	}
 	if cfg.BlobDir != "blobs" {
 		t.Errorf("BlobDir = %q, want blobs", cfg.BlobDir)
@@ -190,6 +194,56 @@ func TestLoadDefaults(t *testing.T) {
 	}
 	if cfg.RateLimits.DiscardEncryption.Window != time.Hour {
 		t.Errorf("DiscardEncryption window = %v, want 1h", cfg.RateLimits.DiscardEncryption.Window)
+	}
+}
+
+func TestLoadRecoveryEmailMode(t *testing.T) {
+	t.Setenv("TG_POSTGRES_DSN", "postgres://localhost/tg")
+	t.Setenv("TG_AUTHKEY_ENC_KEY", validEncKey)
+	previous, wasSet := os.LookupEnv("TG_RECOVERY_EMAIL")
+	if wasSet {
+		t.Setenv("TG_RECOVERY_EMAIL", previous)
+	}
+	if err := os.Unsetenv("TG_RECOVERY_EMAIL"); err != nil {
+		t.Fatalf("unset TG_RECOVERY_EMAIL: %v", err)
+	}
+	if cfg, err := config.Load(discardLog()); err != nil || cfg.RecoveryEmailMode != config.RecoveryEmailOff {
+		t.Fatalf("unset TG_RECOVERY_EMAIL: mode=%q err=%v, want off", cfg.RecoveryEmailMode, err)
+	}
+	for _, test := range []struct {
+		value string
+		want  config.RecoveryEmailMode
+	}{
+		{value: "off", want: config.RecoveryEmailOff},
+		{value: "contact", want: config.RecoveryEmailContact},
+	} {
+		t.Run(test.value, func(t *testing.T) {
+			t.Setenv("TG_RECOVERY_EMAIL", test.value)
+			cfg, err := config.Load(discardLog())
+			if err != nil {
+				t.Fatalf("Load: %v", err)
+			}
+			if cfg.RecoveryEmailMode != test.want {
+				t.Fatalf("RecoveryEmailMode = %q, want %q", cfg.RecoveryEmailMode, test.want)
+			}
+		})
+	}
+}
+
+func TestLoadRejectsInvalidRecoveryEmailMode(t *testing.T) {
+	t.Setenv("TG_POSTGRES_DSN", "postgres://localhost/tg")
+	t.Setenv("TG_AUTHKEY_ENC_KEY", validEncKey)
+	for _, value := range []string{"Contact", "on", "", "   "} {
+		t.Run(strconv.Quote(value), func(t *testing.T) {
+			t.Setenv("TG_RECOVERY_EMAIL", value)
+			_, err := config.Load(discardLog())
+			if err == nil {
+				t.Fatalf("Load accepted TG_RECOVERY_EMAIL=%q", value)
+			}
+			if !strings.Contains(err.Error(), "TG_RECOVERY_EMAIL") {
+				t.Fatalf("Load error %q does not name TG_RECOVERY_EMAIL", err)
+			}
+		})
 	}
 }
 

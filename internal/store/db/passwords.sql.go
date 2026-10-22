@@ -74,6 +74,33 @@ func (q *Queries) PasswordByUser(ctx context.Context, userID int64) (UserPasswor
 	return i, err
 }
 
+const passwordForAuthenticationByUser = `-- name: PasswordForAuthenticationByUser :one
+SELECT user_id, salt1, salt2, verifier, hint
+FROM user_passwords
+WHERE user_id = $1
+`
+
+type PasswordForAuthenticationByUserRow struct {
+	UserID   int64
+	Salt1    []byte
+	Salt2    []byte
+	Verifier []byte
+	Hint     string
+}
+
+func (q *Queries) PasswordForAuthenticationByUser(ctx context.Context, userID int64) (PasswordForAuthenticationByUserRow, error) {
+	row := q.db.QueryRow(ctx, passwordForAuthenticationByUser, userID)
+	var i PasswordForAuthenticationByUserRow
+	err := row.Scan(
+		&i.UserID,
+		&i.Salt1,
+		&i.Salt2,
+		&i.Verifier,
+		&i.Hint,
+	)
+	return i, err
+}
+
 const upsertPassword = `-- name: UpsertPassword :exec
 INSERT INTO user_passwords (user_id, salt1, salt2, verifier, hint, recovery_email, has_recovery)
 VALUES ($1, $2, $3, $4, $5, $6, $7)

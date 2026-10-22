@@ -162,7 +162,7 @@ func passwordHashInvalid(err error) bool {
 	return errors.As(err, &rpc) && rpc.Code == 400 && rpc.Message == "PASSWORD_HASH_INVALID"
 }
 
-func requireStoredPasswordCandidate(t *testing.T, ctx context.Context, s *store.Store, userID int64, want firstPasswordCandidate) {
+func requireStoredPasswordCandidate(t *testing.T, ctx context.Context, s *store.Store, userID int64, want firstPasswordCandidate, wantRecoveryEmail string, wantHasRecovery bool) {
 	t.Helper()
 	got, ok, err := s.PasswordByUser(ctx, userID)
 	if err != nil || !ok {
@@ -170,7 +170,7 @@ func requireStoredPasswordCandidate(t *testing.T, ctx context.Context, s *store.
 	}
 	if !bytes.Equal(got.Salt1, want.salt1) || !bytes.Equal(got.Salt2, want.salt2) ||
 		!bytes.Equal(got.Verifier, want.verifier) || got.Hint != want.hint ||
-		got.RecoveryEmail != want.email || !got.HasRecovery {
+		got.RecoveryEmail != wantRecoveryEmail || got.HasRecovery != wantHasRecovery {
 		t.Fatalf("stored first password changed: got salts=(%x,%x) hint=%q email=%q recovery=%v", got.Salt1, got.Salt2, got.Hint, got.RecoveryEmail, got.HasRecovery)
 	}
 }
@@ -281,7 +281,7 @@ func TestConcurrentFirstPasswordSetupKeepsExactlyOneWinner(t *testing.T) {
 	if successes != 1 || conflicts != 1 {
 		t.Fatalf("first password responses: successes=%d conflicts=%d, want one each", successes, conflicts)
 	}
-	requireStoredPasswordCandidate(t, ctx, storeA, user.ID, winner)
+	requireStoredPasswordCandidate(t, ctx, storeA, user.ID, winner, "", false)
 
 	key, found, err := storeA.AuthKeyByID(ctx, creatingKeyID)
 	if err != nil || !found || key.UserID != user.ID {
@@ -374,12 +374,12 @@ func TestDelayedFirstPasswordSetupCannotReplaceCommittedVerifier(t *testing.T) {
 	case <-ctx.Done():
 		t.Fatalf("delayed first password response timed out: %v", ctx.Err())
 	}
-	requireStoredPasswordCandidate(t, ctx, storeA, user.ID, winner)
+	requireStoredPasswordCandidate(t, ctx, storeA, user.ID, winner, "", false)
 
 	if _, err := api.UpdatePasswordSettingsForTestWithContext(ctx, storeB, user.ID, firstPasswordRequest(t, delayed)); !passwordHashInvalid(err) {
 		t.Fatalf("repeat first password setup error = %v, want PASSWORD_HASH_INVALID", err)
 	}
-	requireStoredPasswordCandidate(t, ctx, storeA, user.ID, winner)
+	requireStoredPasswordCandidate(t, ctx, storeA, user.ID, winner, "", false)
 }
 
 func assertFirstPasswordLogin(t *testing.T, ctx context.Context, s *store.Store, userID int64, handle, password string, wantSuccess bool, keyByte byte) {
@@ -664,9 +664,9 @@ func TestPasswordChangeStillRequiresCurrentSRPProof(t *testing.T) {
 	if err := update(makeProof("incorrect current password")); !passwordHashInvalid(err) {
 		t.Fatalf("password change with invalid SRP proof error = %v, want PASSWORD_HASH_INVALID", err)
 	}
-	requireStoredPasswordCandidate(t, ctx, s, user.ID, oldPassword)
+	requireStoredPasswordCandidate(t, ctx, s, user.ID, oldPassword, oldPassword.email, true)
 	if err := update(makeProof(oldPassword.password)); err != nil {
 		t.Fatalf("password change with valid current proof: %v", err)
 	}
-	requireStoredPasswordCandidate(t, ctx, s, user.ID, newPassword)
+	requireStoredPasswordCandidate(t, ctx, s, user.ID, newPassword, "", false)
 }
