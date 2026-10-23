@@ -15,6 +15,9 @@ const (
 	// ProfilePhotoSelectionWait bounds rate admission and profile-lock waiting
 	// for one profile-photo mutation request.
 	ProfilePhotoSelectionWait = 250 * time.Millisecond
+	// ProfilePhotoClearWait gives an in-flight clear and its transport replay
+	// time to serialize before the bounded profile-lock refusal.
+	ProfilePhotoClearWait     = time.Second
 	profilePhotoSelectionPoll = 10 * time.Millisecond
 )
 
