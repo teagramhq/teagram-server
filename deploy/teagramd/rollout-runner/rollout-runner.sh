@@ -1292,7 +1292,7 @@ override_websocket_origins_value() {
 }
 
 validate_override_websocket_change() {
-  local previous_size current_size previous_sha previous_value current_value
+  local previous_size previous_sha previous_value current_value
   local i old_line line changed=0 old_value new_value
   local -a previous_lines current_lines
   [ -n "$CHANGED_ENV" ] && [ "$CHANGED_ENV" = TG_WEBSOCKET_ALLOWED_ORIGINS ] && \
@@ -1336,8 +1336,6 @@ validate_override_websocket_change() {
     fail 'TG_WEBSOCKET_ALLOWED_ORIGINS change must change the override value'
     return 1
   }
-  current_size=$(stat -c %s -- "$OVERRIDE_FILE") || { fail 'cannot size the Compose override'; return 1; }
-  [ "$previous_size" -eq "$current_size" ] || { fail 'Compose override changes or removes unrelated lines'; return 1; }
   mapfile -t previous_lines < "$PREVIOUS_OVERRIDE_FILE"
   mapfile -t current_lines < "$OVERRIDE_FILE"
   [ "${#previous_lines[@]}" -eq "${#current_lines[@]}" ] || { fail 'Compose override changes or removes unrelated lines'; return 1; }
@@ -2206,6 +2204,7 @@ perform_rollback() {
 
 run_apply() {
   local branch origin_sha previous_sha baseline_id target_id rc dir runtime_source_sha target_container_action
+  local authority_preflight_done=0
   verify_target_local_compose || return 1
   git -C "$CHECKOUT" fetch -q origin || { fail 'cannot fetch origin/main under deployment lock'; return 1; }
   branch=$(git -C "$CHECKOUT" branch --show-current) || { fail 'cannot read checkout branch'; return 1; }
@@ -2305,10 +2304,15 @@ run_apply() {
   if [ "$INITIALIZE_LOCAL" = 1 ]; then
     validate_env_baseline || return 1
     capture_snapshot "$baseline_id" "$BASELINE_DIR" initial-local-target-render || return 1
-  fi
-  preflight_target_local_blob_authority || return 1
-  if [ "$INITIALIZE_LOCAL" != 1 ]; then
+  elif [ ! -f "$CHECKOUT/.state/blob-mode/mode.json" ] || [ -L "$CHECKOUT/.state/blob-mode/mode.json" ]; then
+    # Reject absent or unsafe authority before consulting prior-run evidence.
+    preflight_target_local_blob_authority || return 1
+    authority_preflight_done=1
+  else
     validate_env_baseline || return 1
+  fi
+  if [ "$authority_preflight_done" = 0 ]; then
+    preflight_target_local_blob_authority || return 1
   fi
   capture_backup_and_restore || return 1
 
