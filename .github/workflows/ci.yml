@@ -35,6 +35,9 @@ jobs:
       - name: Test base image pull retries
         run: python3 .github/scripts/test_pull_base_images.py
 
+      - name: Test Playwright apt install budget
+        run: python3 .github/scripts/test_playwright_apt_timeout.py
+
       - uses: actions/setup-go@v7.0.0
         with:
           go-version-file: go.mod
@@ -1057,8 +1060,9 @@ jobs:
   e2e-admin:
     runs-on: ubuntu-26.04
     # The suite is a handful of specs against a local server; this only catches
-    # a hang (a browser that never launches, a webServer that never binds).
-    timeout-minutes: 20
+    # a hang (a browser that never launches, a webServer that never binds). A
+    # new Ubuntu image version has a cold apt cache and downloads packages first.
+    timeout-minutes: 35
 
     # Narrower than it looks: actions: write is the scope that covers the cache
     # API, and it is here only so this job can delete an apt cache entry that
@@ -1280,13 +1284,13 @@ jobs:
       # runs in its own process group (setsid makes $! the group id, since a
       # background job here is not already a group leader) and that group is
       # killed as root afterwards, then the lock is waited on and dpkg repaired
-      # before the retry. Every wait is bounded, so an install that genuinely
-      # cannot succeed still fails in minutes rather than burning the job
-      # timeout.
+      # before the retry. Cold cache downloads can take several minutes on a
+      # new runner image; allow nine minutes per attempt while keeping each
+      # attempt bounded. The step and job timeouts remain the outer backstops.
       - name: Install the system dependencies from the network
         id: apt-network-install
         if: ${{ steps.playwright-deps.outputs.mode == 'unknown' || (steps.playwright-deps.outputs.mode == 'packages' && steps.apt-cached-install.outputs.installed != 'true') }}
-        timeout-minutes: 10
+        timeout-minutes: 20
         env:
           MODE: ${{ steps.playwright-deps.outputs.mode }}
         run: |
@@ -1370,7 +1374,7 @@ jobs:
 
           for attempt in 1 2; do
             status=0
-            setsid timeout --signal=KILL 4m bash -c attempt_install &
+            setsid timeout --signal=KILL 9m bash -c attempt_install &
             pid=$!
             wait "$pid" || status=$?
             if [ "$status" -eq 0 ]; then
