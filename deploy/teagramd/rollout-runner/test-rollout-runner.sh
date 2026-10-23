@@ -408,8 +408,7 @@ if [ "${1:-}" = inspect ]; then
     elif [ "$id" = "$MOCK_ROLLBACK_ID" ] && [ -n "${MOCK_ROLLBACK_ENV_EXTRA:-}" ]; then
       env_json=$(jq -c --arg extra "$MOCK_ROLLBACK_ENV_EXTRA" '. + [$extra]' <<< "$env_json")
     fi
-    if [ "${MOCK_SCENARIO:-}" = target-local-df9-rollback ] && \
-       [ -f "$MOCK_STATE/websocket-origin-override-change" ]; then
+    if [ -f "$MOCK_STATE/websocket-origin-override-change" ]; then
       case "$id" in
         "$MOCK_BASE_ID"|"$MOCK_TARGET_ID"|"$MOCK_ROLLBACK_ID") origin_value='https://teagram.tailaa4918.ts.net' ;;
         "$MOCK_REPLACEMENT_ID") origin_value='https://teagram.tailaa4918.ts.net,https://web.teagram.io' ;;
@@ -2870,8 +2869,9 @@ write_verified_override_evidence() {
 }
 
 prepare_websocket_origin_override_change_fixture() {
-  local name=$1 state checkout previous_override override_evidence_root
-  prepare_target_local_apply_fixture "$name" target-local-df9-rollback \
+  local name=$1 scenario=${2:-target-local-df9-rollback}
+  local state checkout previous_override override_evidence_root
+  prepare_target_local_apply_fixture "$name" "$scenario" \
     "$DF9_LOCAL_COMPOSE_TARGET_SHA" "$TARGET_LOCAL_COMPOSE_TARGET_SHA" || return 1
   state=$(cat "$TMP/$name-state-path")
   checkout=$(cat "$TMP/$name-checkout-path")
@@ -3186,6 +3186,34 @@ checkout=$(cat "$TMP/websocket-origin-override-non-root-owned-checkout-path")
 chown 65534:65534 "$checkout/docker-compose.override.yml"
 assert_target_local_rejected_before_backup websocket-origin-override-non-root-owned \
   'override value changes require a root-owned regular non-symlink override file'
+
+prepare_websocket_origin_override_change_fixture websocket-origin-override-change-success \
+  target-local-carry-forward-env-value-change
+checkout=$(cat "$TMP/websocket-origin-override-change-success-checkout-path")
+root=$(cat "$TMP/websocket-origin-override-change-success-root-path")
+previous_override="$TMP/websocket-origin-override-change-success-previous.yml"
+override_evidence_root="/root/main1238-${APPLY_TARGET_SHA:0:12}-$(cat "$TMP/websocket-origin-override-change-success-stamp")"
+current_env_sha=$(sha256sum "$checkout/.env" | awk '{print $1}')
+previous_override_sha=$(sha256sum "$previous_override" | awk '{print $1}')
+current_override_sha=$(sha256sum "$checkout/docker-compose.override.yml" | awk '{print $1}')
+expected_env_baseline="recorded_env_sha256=$current_env_sha recorded_from=record env_sha256=$current_env_sha added=none changed=TG_WEBSOCKET_ALLOWED_ORIGINS source=override previous_override_sha256=$previous_override_sha previous_override_from=$override_evidence_root.target/target.snapshot.json current_override_sha256=$current_override_sha"
+status=$(run_fixture websocket-origin-override-change-success built 0 '' 2 '' '' apply "$APPLY_TARGET_SHA")
+if [ "$status" = 0 ] && \
+   grep -q "rollout=verified sha=$DF9_LOCAL_COMPOSE_TARGET_SHA" \
+     "$TMP/websocket-origin-override-change-success.stdout" && \
+   [ "$previous_override_sha" != "$current_override_sha" ] && \
+   grep -Fxq "$expected_env_baseline" "$root.baseline/env-baseline.txt" && \
+   [ "$(jq -r '.override_sha256' "$root.target/target.snapshot.json")" = "$current_override_sha" ] && \
+   [ "$(jq -r '.container_env_changed' "$root.target/target.snapshot.json")" = TG_WEBSOCKET_ALLOWED_ORIGINS ] && \
+   grep -q $'\toverride_sha256\t.*\tpass' "$root.target/target-comparisons.tsv" && \
+   grep -q $'\tcontainer_env_sha256\t.*\tpass' "$root.target/target-comparisons.tsv" && \
+   grep -qx "env_sha256=$current_env_sha source_sha=$DF9_LOCAL_COMPOSE_TARGET_SHA" \
+     "$checkout/.state/rollout-env"; then
+  pass 'override-only TG_WEBSOCKET_ALLOWED_ORIGINS change verifies and records target evidence'
+else
+  show_fixture_failure websocket-origin-override-change-success "$status"
+  fail 'override-only TG_WEBSOCKET_ALLOWED_ORIGINS change must verify and record target evidence'
+fi
 restore_verified_evidence
 
 park_verified_evidence
