@@ -22,15 +22,19 @@ import (
 // DeliverEncryption exercises the full path: registry lookup → store reload →
 // render → PushTo → wire.
 type fakeTransport struct {
-	mu      sync.Mutex
-	sent    bool
-	sendErr error
+	mu          sync.Mutex
+	sent        bool
+	sendCount   int
+	sentMessage []byte
+	sendErr     error
 }
 
-func (f *fakeTransport) Send(_ context.Context, _ *bin.Buffer) error {
+func (f *fakeTransport) Send(_ context.Context, message *bin.Buffer) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.sent = true
+	f.sendCount++
+	f.sentMessage = message.Copy()
 	return f.sendErr
 }
 
@@ -41,6 +45,18 @@ func (f *fakeTransport) wasSent() bool {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.sent
+}
+
+func (f *fakeTransport) lastSentMessage() []byte {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]byte(nil), f.sentMessage...)
+}
+
+func (f *fakeTransport) sentMessages() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.sendCount
 }
 
 // waitSent polls wasSent until true or 5 s elapses. NOTIFY dispatch is async
