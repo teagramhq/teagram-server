@@ -1877,7 +1877,7 @@ func writeFixtureArtifact(t *testing.T, directory string, ready realFixtureReady
 		"frame-src 'self' https://challenges.cloudflare.com; object-src 'none'; " +
 		"script-src 'self' 'wasm-unsafe-eval' https://challenges.cloudflare.com; style-src 'self' 'unsafe-inline'; " +
 		"img-src 'self' data: blob:; font-src 'self' data:; media-src 'self' blob:; " +
-		"worker-src 'self' blob:; manifest-src 'self'; connect-src 'self' " + endpoint + ";"
+		"worker-src 'self' blob:; manifest-src 'self'; connect-src 'self' https: wss:;"
 	productLinks := "const productLinks = [" + strings.Join(quoteAll(fixtureProductReferences), ", ") + "];\n"
 	appJS := "const target = { endpoint: '" + endpoint + "', fingerprint: '" + fingerprint + "' };\n" +
 		"window.fixtureTarget = target;\n" +
