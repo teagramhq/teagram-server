@@ -338,6 +338,18 @@ public_registration_quoted_change_target=$(ROLLOUT_CHANGED_ENV=TG_PUBLIC_REGISTR
 [ "$(jq -r '.container_env_changed' <<< "$public_registration_quoted_change_target")" = TG_PUBLIC_REGISTRATION ]
 printf '%s\n' 'PASS quoted TG_PUBLIC_REGISTRATION change matches the target container'
 
+websocket_origins='https://teagram.tailaa4918.ts.net,https://web.teagram.io'
+printf 'TG_WEBSOCKET_ALLOWED_ORIGINS=%s\n' "$websocket_origins" > "$ENV_FILE"
+websocket_origins_compose=$(jq -c --arg value "$websocket_origins" \
+  '.services.teagramd.environment.TG_WEBSOCKET_ALLOWED_ORIGINS=$value' <<< "$public_ws_compose")
+websocket_origins_inspect=$(printf '%s' "$legacy_inspect" | jq -c --arg value "$websocket_origins" \
+  '.Config.Env += ["TG_WEBSOCKET_ALLOWED_ORIGINS=" + $value]')
+websocket_origins_target=$(ROLLOUT_CHANGED_ENV=TG_WEBSOCKET_ALLOWED_ORIGINS snapshot_from_json \
+  "$websocket_origins_inspect" "$websocket_origins_compose" \
+  "$ENV_FILE" "$OVERRIDE_FILE" selected-compose-render target)
+[ "$(jq -r '.container_env_changed' <<< "$websocket_origins_target")" = TG_WEBSOCKET_ALLOWED_ORIGINS ]
+printf '%s\n' 'PASS changed TG_WEBSOCKET_ALLOWED_ORIGINS matches the resolved Compose and target container'
+
 printf '%s\n' \
   'TG_PUBLIC_WEBSOCKET_LISTEN_ADDR=0.0.0.0:2444' \
   'TG_PUBLIC_WEBSOCKET_ADVERTISE_ADDR=server.example.com:443' \

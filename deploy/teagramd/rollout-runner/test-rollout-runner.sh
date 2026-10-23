@@ -492,6 +492,8 @@ fi
           cat "$MOCK_STATE/base-compose.json"
         elif [[ "${MOCK_SCENARIO:-}" == *public-listener-* ]]; then
           if [ "$phase" = baseline ] || [ "$phase" = rollback ]; then cat "$MOCK_STATE/base-compose.json"; else cat "$MOCK_STATE/target-compose.json"; fi
+        elif [ -f "$MOCK_STATE/websocket-origin-change" ]; then
+          if [ "$phase" = baseline ] || [ "$phase" = rollback ]; then cat "$MOCK_STATE/base-compose.json"; else cat "$MOCK_STATE/target-compose.json"; fi
         elif [[ "${MOCK_SCENARIO:-}" == target-local-welcome-channel-* ]]; then
           if [ "$config_count" -ge 3 ]; then cat "$MOCK_STATE/target-compose.json"; else cat "$MOCK_STATE/base-compose.json"; fi
         elif [ "${MOCK_SCENARIO:-}" = target-local-carry-forward-cce-literal-build-arg ]; then
@@ -3018,6 +3020,37 @@ else
   fail 'named TG_REGISTRATION value change must deploy through apply'
 fi
 
+websocket_origin_before=https://teagram.tailaa4918.ts.net
+websocket_origin_after=https://teagram.tailaa4918.ts.net,https://web.teagram.io
+prepare_env_change_fixture websocket-origin-value-change \
+  target-local-carry-forward-env-value-change "$APPLY_TARGET_SHA" "$TARGET_SHA" \
+  "TG_WEBSOCKET_ALLOWED_ORIGINS=$websocket_origin_after" \
+  "TG_WEBSOCKET_ALLOWED_ORIGINS=$websocket_origin_before" \
+  TG_WEBSOCKET_ALLOWED_ORIGINS "$websocket_origin_before" "$websocket_origin_after" '' \
+  "TG_WEBSOCKET_ALLOWED_ORIGINS=$websocket_origin_before"
+state=$(cat "$TMP/websocket-origin-value-change-state-path")
+checkout=$(cat "$TMP/websocket-origin-value-change-checkout-path")
+root=$(cat "$TMP/websocket-origin-value-change-root-path")
+touch "$state/websocket-origin-change"
+jq -c --arg value "$websocket_origin_before" \
+  '.services.teagramd.environment.TG_WEBSOCKET_ALLOWED_ORIGINS=$value' \
+  "$state/base-compose.json" > "$TMP/websocket-origin-value-change-base-compose.json"
+mv -- "$TMP/websocket-origin-value-change-base-compose.json" "$state/base-compose.json"
+previous_env_sha=$(sha256sum "$TMP/websocket-origin-value-change-previous.env" | awk '{print $1}')
+current_env_sha=$(sha256sum "$checkout/.env" | awk '{print $1}')
+status=$(run_fixture websocket-origin-value-change built 0 '' 2 '' '' apply "$APPLY_TARGET_SHA")
+if [ "$status" = 0 ] && grep -q "rollout=verified sha=$APPLY_TARGET_SHA" "$TMP/websocket-origin-value-change.stdout" && \
+   grep -qx "recorded_env_sha256=$previous_env_sha recorded_from=record env_sha256=$current_env_sha added=none changed=TG_WEBSOCKET_ALLOWED_ORIGINS" \
+     "$root.baseline/env-baseline.txt" && \
+   grep -qx "env_sha256=$current_env_sha source_sha=$APPLY_TARGET_SHA" "$checkout/.state/rollout-env" && \
+   [ "$(jq -r '.container_env_changed' "$root.target/target.snapshot.json")" = TG_WEBSOCKET_ALLOWED_ORIGINS ] && \
+   grep -q $'\tcontainer_env_sha256\t.*\tpass' "$root.target/target-comparisons.tsv"; then
+  pass 'named TG_WEBSOCKET_ALLOWED_ORIGINS value change deploys through apply'
+else
+  show_fixture_failure websocket-origin-value-change "$status"
+  fail 'named TG_WEBSOCKET_ALLOWED_ORIGINS value change must deploy through apply'
+fi
+
 prepare_env_change_fixture public-registration-value-change \
   target-local-carry-forward-env-value-change "$APPLY_TARGET_SHA" "$TARGET_SHA" \
   TG_PUBLIC_REGISTRATION=closed '' TG_PUBLIC_REGISTRATION invite closed '' TG_PUBLIC_REGISTRATION=invite
@@ -3049,6 +3082,35 @@ if [ "$status" != 0 ] && grep -q "rollback=verified baseline_sha=$TARGET_LOCAL_C
 else
   show_fixture_failure env-value-change-rollback "$status"
   fail 'rollback must verify and retain the named TG_REGISTRATION value change'
+fi
+
+prepare_env_change_fixture websocket-origin-value-change-rollback \
+  target-local-df9-rollback "$DF9_LOCAL_COMPOSE_TARGET_SHA" "$TARGET_LOCAL_COMPOSE_TARGET_SHA" \
+  "TG_WEBSOCKET_ALLOWED_ORIGINS=$websocket_origin_after" \
+  "TG_WEBSOCKET_ALLOWED_ORIGINS=$websocket_origin_before" \
+  TG_WEBSOCKET_ALLOWED_ORIGINS "$websocket_origin_before" "$websocket_origin_after" '' \
+  "TG_WEBSOCKET_ALLOWED_ORIGINS=$websocket_origin_before"
+state=$(cat "$TMP/websocket-origin-value-change-rollback-state-path")
+checkout=$(cat "$TMP/websocket-origin-value-change-rollback-checkout-path")
+root=$(cat "$TMP/websocket-origin-value-change-rollback-root-path")
+touch "$state/websocket-origin-change"
+jq -c --arg value "$websocket_origin_before" \
+  '.services.teagramd.environment.TG_WEBSOCKET_ALLOWED_ORIGINS=$value' \
+  "$state/base-compose.json" > "$TMP/websocket-origin-value-change-rollback-base-compose.json"
+mv -- "$TMP/websocket-origin-value-change-rollback-base-compose.json" "$state/base-compose.json"
+previous_env_sha=$(sha256sum "$TMP/websocket-origin-value-change-rollback-previous.env" | awk '{print $1}')
+status=$(run_fixture websocket-origin-value-change-rollback built 0 '' 2 '' '' apply "$APPLY_TARGET_SHA")
+if [ "$status" != 0 ] && grep -q "rollback=verified baseline_sha=$TARGET_LOCAL_COMPOSE_TARGET_SHA" \
+     "$TMP/websocket-origin-value-change-rollback.stdout" && \
+   cmp -s "$checkout/.env" "$TMP/websocket-origin-value-change-rollback-previous.env" && \
+   grep -qx "env_sha256=$previous_env_sha source_sha=$TARGET_LOCAL_COMPOSE_TARGET_SHA" \
+     "$checkout/.state/rollout-env" && \
+   [ "$(jq -r '.container_env_changed' "$root.rollback/rollback.snapshot.json")" = TG_WEBSOCKET_ALLOWED_ORIGINS ] && \
+   grep -q $'rollback\tcontainer_env_sha256\t.*\tpass' "$root.rollback/rollback-equivalence.tsv"; then
+  pass 'failed TG_WEBSOCKET_ALLOWED_ORIGINS change restores the previous .env before rollback'
+else
+  show_fixture_failure websocket-origin-value-change-rollback "$status"
+  fail 'rollback must restore the previous .env for TG_WEBSOCKET_ALLOWED_ORIGINS'
 fi
 
 prepare_env_change_fixture env-value-change-unsupported

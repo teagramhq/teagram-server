@@ -102,7 +102,7 @@ verify_changed_container_environment() {
             | (($name == "TG_REGISTRATION" and (dotenv_value($assignments[0]) | IN("open","closed"))) or
                ($name == "TG_TURNSTILE_SIGNIN_ENABLED" and ($assignments[0] | IN("true","false"))) or
                ($name == "TG_PUBLIC_REGISTRATION" and (dotenv_value($assignments[0]) | IN("invite","closed"))) or
-               ($name | IN("TG_PUBLIC_WEBSOCKET_LISTEN_ADDR", "TG_PUBLIC_WEBSOCKET_ADVERTISE_ADDR", "TG_PUBLIC_WEBSOCKET_ALLOWED_ORIGINS"))) and
+               ($name | IN("TG_WEBSOCKET_ALLOWED_ORIGINS", "TG_PUBLIC_WEBSOCKET_LISTEN_ADDR", "TG_PUBLIC_WEBSOCKET_ADVERTISE_ADDR", "TG_PUBLIC_WEBSOCKET_ALLOWED_ORIGINS"))) and
               ($assignments | length) == 1 and
               ($compose_env | has($name)) and
               ($compose_env[$name] == dotenv_value($assignments[0])) and
@@ -616,6 +616,7 @@ snapshot_from_json() {
       if (.services.teagramd.environment | type) != "object" then error("teagramd environment must be an object") else
         .services.teagramd.environment |= del(
           .TG_REPLICA_COUNT, .TG_CLIENT_ADDR_TRUST,
+          .TG_WEBSOCKET_ALLOWED_ORIGINS,
           .TG_PUBLIC_WEBSOCKET_LISTEN_ADDR, .TG_PUBLIC_REGISTRATION,
           .TG_PUBLIC_WEBSOCKET_ADVERTISE_ADDR,
           .TG_PUBLIC_WEBSOCKET_ALLOWED_ORIGINS, .TG_WELCOME_CHANNEL,

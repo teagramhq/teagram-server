@@ -4,7 +4,7 @@ umask 077
 
 SCRIPT_DIR=$(cd -P "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 SCRIPT_SOURCE="$SCRIPT_DIR/$(basename "${BASH_SOURCE[0]}")"
-readonly APPROVED_VERIFIER_SHA=b1542952e543e3b960204bbdbbdd98d516cb4ae7a824ac6b8b6d0dfb815038b8
+readonly APPROVED_VERIFIER_SHA=726f3f717e03d3702cf57f2f64c56fd0d18f131cbc421ac54afe96f45ae93b39
 readonly APPROVED_SCHEMA_GATE_SHA=ac54d3cf0480383a52414a8bc8b856b5e1d5f6f8d19034c9c576c64627e097c8
 readonly APPROVED_SCHEMA_GATE_HELPER_SHA=7ae06c2872c60b434068b3715a9ddd5e19b03d4be98dc9881c8dd8f294953d41
 readonly APPROVED_INITIAL_LOCAL_COMPOSE_SHA=3a4f158c6e1f2ead6676fba85d8d95cfb15557a0fbd8e82230361e0af988e0f7
@@ -1156,35 +1156,46 @@ public_env_addition_requested() {
   return 1
 }
 
-restore_previous_env_for_public_additions() {
+changed_websocket_origins_requested() {
+  local name
+  local -a requested
+  [ -n "$CHANGED_ENV" ] || return 1
+  IFS=, read -r -a requested <<< "$CHANGED_ENV"
+  for name in "${requested[@]}"; do
+    [ "$name" = TG_WEBSOCKET_ALLOWED_ORIGINS ] && return 0
+  done
+  return 1
+}
+
+restore_previous_env_for_named_changes() {
   local env_dir temp
-  public_env_addition_requested || return 0
+  public_env_addition_requested || changed_websocket_origins_requested || return 0
   [ -n "$PREVIOUS_ENV_FILE" ] && [ -f "$PREVIOUS_ENV_FILE" ] && [ ! -L "$PREVIOUS_ENV_FILE" ] && \
     [ "$(stat -c %a -- "$PREVIOUS_ENV_FILE")" = 600 ] && [ "$(stat -c %u -- "$PREVIOUS_ENV_FILE")" = 0 ] || {
-    fail 'public-setting rollback requires the root-owned mode-0600 previous .env'
+    fail 'named environment rollback requires the root-owned mode-0600 previous .env'
     return 1
   }
   [ -f "$ENV_FILE" ] && [ ! -L "$ENV_FILE" ] && \
     [ "$(stat -c %a -- "$ENV_FILE")" = 600 ] && [ "$(stat -c %u -- "$ENV_FILE")" = 0 ] || {
-    fail 'cannot restore public-setting rollback over an unsafe .env path'
+    fail 'cannot restore named environment rollback over an unsafe .env path'
     return 1
   }
-  env_dir=$(dirname -- "$ENV_FILE") || { fail 'cannot resolve the .env directory for rollback'; return 1; }
+  env_dir=$(dirname -- "$ENV_FILE") || { fail 'cannot resolve the .env directory for named environment rollback'; return 1; }
   temp=$(mktemp "$env_dir/.rollout-env-rollback.XXXXXXXX") || {
-    fail 'cannot stage the previous .env for public-setting rollback'
+    fail 'cannot stage the previous .env for named environment rollback'
     return 1
   }
   if ! cp -- "$PREVIOUS_ENV_FILE" "$temp" || ! chmod 600 -- "$temp" || ! sync; then
     rm -f -- "$temp"
-    fail 'cannot prepare the previous .env for public-setting rollback'
+    fail 'cannot prepare the previous .env for named environment rollback'
     return 1
   fi
   if ! mv -f -- "$temp" "$ENV_FILE"; then
     rm -f -- "$temp"
-    fail 'cannot restore the previous .env for public-setting rollback'
+    fail 'cannot restore the previous .env for named environment rollback'
     return 1
   fi
-  sync || { fail 'cannot persist the previous .env for public-setting rollback'; return 1; }
+  sync || { fail 'cannot persist the previous .env for named environment rollback'; return 1; }
 }
 
 # Before the first record exists, the last verified run's evidence holds the
@@ -1312,7 +1323,7 @@ validate_env_baseline() {
       for name in "${requested[@]}"; do
         [[ "$name" =~ ^[A-Z][A-Z0-9_]*$ ]] || { fail 'environment value changes must be upper-case variable names'; return 1; }
         case "$name" in
-          TG_REGISTRATION|TG_TURNSTILE_SIGNIN_ENABLED|TG_PUBLIC_WEBSOCKET_LISTEN_ADDR|TG_PUBLIC_WEBSOCKET_ADVERTISE_ADDR|TG_PUBLIC_REGISTRATION|TG_PUBLIC_WEBSOCKET_ALLOWED_ORIGINS) ;;
+          TG_REGISTRATION|TG_TURNSTILE_SIGNIN_ENABLED|TG_WEBSOCKET_ALLOWED_ORIGINS|TG_PUBLIC_WEBSOCKET_LISTEN_ADDR|TG_PUBLIC_WEBSOCKET_ADVERTISE_ADDR|TG_PUBLIC_REGISTRATION|TG_PUBLIC_WEBSOCKET_ALLOWED_ORIGINS) ;;
           *) fail "environment value change $name is not an approved setting"; return 1 ;;
         esac
         change_names+="$name "
@@ -1364,6 +1375,7 @@ validate_env_baseline() {
             TG_PUBLIC_WEBSOCKET_LISTEN_ADDR:*) [ "$old_value" != "$new_value" ] || { fail 'TG_PUBLIC_WEBSOCKET_LISTEN_ADDR change must change the value'; return 1; } ;;
             TG_PUBLIC_WEBSOCKET_ADVERTISE_ADDR:*) [ "$old_value" != "$new_value" ] || { fail 'TG_PUBLIC_WEBSOCKET_ADVERTISE_ADDR change must change the value'; return 1; } ;;
             TG_PUBLIC_WEBSOCKET_ALLOWED_ORIGINS:*) [ "$old_value" != "$new_value" ] || { fail 'TG_PUBLIC_WEBSOCKET_ALLOWED_ORIGINS change must change the value'; return 1; } ;;
+            TG_WEBSOCKET_ALLOWED_ORIGINS:*) [ "$old_value" != "$new_value" ] || { fail 'TG_WEBSOCKET_ALLOWED_ORIGINS change must change the value'; return 1; } ;;
             TG_REGISTRATION:*) fail 'TG_REGISTRATION may change only between closed and open'; return 1 ;;
             TG_TURNSTILE_SIGNIN_ENABLED:*) fail 'TG_TURNSTILE_SIGNIN_ENABLED may change only between true and false'; return 1 ;;
             TG_PUBLIC_REGISTRATION:*) fail 'TG_PUBLIC_REGISTRATION may change only between invite and closed'; return 1 ;;
@@ -1931,7 +1943,7 @@ require_clean_build_checkout() {
 perform_rollback() {
   local rollback_id rollback_env_record
   restore_checkout_and_tag || return 1
-  restore_previous_env_for_public_additions || return 1
+  restore_previous_env_for_named_changes || return 1
   if ! validate_rollback_blob_authority; then
     write_immutable "$ROLLBACK_DIR/rollback-blob-authority-rejected.txt" \
       "result=rejected checkout_sha=$PREVIOUS_SHA reason=current-containers-or-baseline-render-mismatch" || return 1

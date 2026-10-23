@@ -604,11 +604,14 @@ live container (empty site key and secret path, sign-in `false`, secret mounted
 from `/dev/null`) count as unset, so a Turnstile name can be added over them.
 
 The runner allows changing `TG_REGISTRATION` between `closed` and `open`,
-`TG_TURNSTILE_SIGNIN_ENABLED` between `false` and `true`, and public WebSocket
-settings through the same named path. `TG_PUBLIC_REGISTRATION` may change only
-between `closed` and `invite`; the other three public settings accept a new
-string value, including empty to disable them. `open` is never accepted for
-`TG_PUBLIC_REGISTRATION`. Back up the verified `.env` to a root-owned
+`TG_TURNSTILE_SIGNIN_ENABLED` between `false` and `true`, and WebSocket origin
+allowlists through the same named path. `TG_WEBSOCKET_ALLOWED_ORIGINS` accepts
+a new string value; when its rollout fails, the runner restores the previous
+`.env` before recreating the baseline container. Public WebSocket settings are
+also supported. `TG_PUBLIC_REGISTRATION` may change only between `closed` and
+`invite`; the other three public settings accept a new string value, including
+empty to disable them. `open` is never accepted for `TG_PUBLIC_REGISTRATION`.
+Back up the verified `.env` to a root-owned
 mode-0600 file, change only that assignment in place, then pass the changed
 name and backup to the same `apply`:
 
