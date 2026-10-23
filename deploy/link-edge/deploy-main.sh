@@ -55,13 +55,19 @@ check_status() {
 }
 
 check_production_routes() {
-  local client_json content_type
+  local client_json client_response client_status content_type
   check_status http://127.0.0.1:8081/.well-known/telegram-web/version.txt 404 || return 1
   check_status "$PUBLIC_BASE_URL/.well-known/telegram-web/version.txt" 404 || return 1
   check_status "$PUBLIC_BASE_URL/.well-known/telegramd/client" 404 || return 1
 
-  if ! client_json=$(curl -fsS --max-time 20 "$PUBLIC_BASE_URL/.well-known/teagramd/client"); then
+  if ! client_response=$(curl -q -sS --max-time 20 -w '\n%{http_code}' "$PUBLIC_BASE_URL/.well-known/teagramd/client"); then
     echo 'link-edge deploy: teagramd discovery document request failed' >&2
+    return 1
+  fi
+  client_status=${client_response##*$'\n'}
+  client_json=${client_response%$'\n'*}
+  if [[ $client_status != 200 ]]; then
+    printf 'link-edge deploy: teagramd discovery document returned %s, expected 200\n' "$client_status" >&2
     return 1
   fi
   if ! python3 "$SCRIPT_DIR/validate-discovery.py" <<<"$client_json"; then

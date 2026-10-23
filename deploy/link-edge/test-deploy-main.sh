@@ -107,12 +107,16 @@ url=''
 write_format=''
 for arg in "$@"; do
   url=$arg
-  if [[ $arg == '%{http_code}' || $arg == '%{content_type}' ]]; then
+  if [[ $arg == *'%{http_code}'* || $arg == '%{content_type}' ]]; then
     write_format=$arg
   fi
 done
 if [[ $url == *'/.well-known/teagramd/client' ]]; then
-  [[ -z $write_format ]] && printf '%s\n' "$TEST_CLIENT_JSON"
+  if [[ $write_format == *'%{http_code}'* ]]; then
+    printf '%s\n%s' "$TEST_CLIENT_JSON" "$TEST_CLIENT_STATUS"
+  elif [[ -z $write_format ]]; then
+    printf '%s\n' "$TEST_CLIENT_JSON"
+  fi
   exit 0
 fi
 if [[ $url == *'/.well-known/teagram-web/version.txt' ]]; then
@@ -139,6 +143,7 @@ small_rsa_spki='MIGfMA0GCSqGSIb3DQEBAQUAA4GNADCBiQKBgQDZlFOztREchWtSDKHNQDUeMz8z
 valid_client_json="{\"version\":1,\"mtproto\":{\"endpoint\":\"mtproto.example.test:2443\",\"dc_id\":2,\"rsa_spki\":\"$valid_rsa_spki\"},\"websocket\":{\"endpoint\":\"wss://mtproto.example.test/apiws\"}}"
 export TEST_TARGET_SHA=$sha
 export TEST_CLIENT_JSON="$valid_client_json"
+export TEST_CLIENT_STATUS=200
 export MOCK_DOCKER_STATE="$tmp/state"
 export MOCK_DOCKER_LOG="$tmp/docker.log"
 export MOCK_COMPOSE_FILE="$tmp/repo/deploy/link-edge/compose.yaml"
@@ -164,6 +169,26 @@ if grep -Eq 'build linklanding|up .*linklanding' "$tmp/docker.log"; then
   echo 'FAIL linklanding was rebuilt or restarted' >&2
   exit 1
 fi
+
+assert_invalid_discovery_status() {
+  local status=$1 previous=5555555555555555555555555555555555555555
+  reset_state "$previous"
+  if TEST_CLIENT_STATUS="$status" bash "$script" "$sha" >"$tmp/discovery-status.log" 2>&1; then
+    printf 'FAIL discovery document status %s passed the deployment gate\n' "$status" >&2
+    exit 1
+  fi
+  [[ $(cat "$tmp/state/current_revision") == "$previous" ]] || {
+    printf 'FAIL status %s did not restore the previous selector\n' "$status" >&2
+    exit 1
+  }
+  grep -Fq "returned $status, expected 200" "$tmp/discovery-status.log" || {
+    printf 'FAIL status %s was not reported as a discovery response failure\n' "$status" >&2
+    exit 1
+  }
+}
+
+assert_invalid_discovery_status 201
+assert_invalid_discovery_status 302
 
 valid_ipv6_client_json=$(jq -c '.mtproto.endpoint = "[2001:db8::1]:2443" | .mtproto.dc_id = 2147483647 | .websocket.endpoint = "wss://[2001:db8::1]/apiws"' <<<"$valid_client_json")
 reset_state 1212121212121212121212121212121212121212
