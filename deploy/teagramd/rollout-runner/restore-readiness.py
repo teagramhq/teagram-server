@@ -320,10 +320,6 @@ def parse_go_version(value: str) -> tuple[str, str]:
     return match.group(1), match.group(2)
 
 
-def go_version_tuple(value: str) -> tuple[int, ...]:
-    return tuple(int(part) for part in re.fullmatch(r"go([0-9]+(?:\.[0-9]+){1,2})", value).group(1).split("."))
-
-
 def minimum_go_version() -> str:
     go_mod = ROOT / "go.mod"
     for line in go_mod.read_text(encoding="utf-8").splitlines():
@@ -354,8 +350,8 @@ def finalize_prepared_runtime(
     toolchain_version, version_arch = parse_go_version(go_version)
     if version_arch != go_arch or go_arch not in {"amd64", "arm64"}:
         raise ValueError("prepared runtime architecture mismatch")
-    if go_version_tuple(toolchain_version) < go_version_tuple(minimum_go_version()):
-        raise ValueError("Go toolchain is older than go.mod")
+    if toolchain_version != minimum_go_version():
+        raise ValueError("Go toolchain does not match go.mod")
     resolved_root = go_root.resolve(strict=True)
     resolved_binary = go_binary.resolve(strict=True)
     if not resolved_binary.is_relative_to(resolved_root):
@@ -519,7 +515,7 @@ def verify_prepared_runtime(directory: Path, *, expected_owner: int = 0) -> dict
     if (
         toolchain.get("goos") != "linux"
         or go_arch not in {"amd64", "arm64"}
-        or go_version_tuple(version_value) < go_version_tuple(minimum_go_version())
+        or version_value != minimum_go_version()
         or not root.is_absolute()
         or not binary.is_absolute()
         or binary.resolve(strict=True) != binary
