@@ -6,6 +6,7 @@ import (
 	"path"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gotd/td/bin"
 	"github.com/gotd/td/mt"
@@ -297,6 +298,25 @@ func TestBuiltInStickerDownloadCannotReachFilesOrSendMedia(t *testing.T) {
 	})
 	if got := rpcMessage(t, err); got != "MEDIA_INVALID" {
 		t.Fatalf("messages.sendMedia with catalogue document = %q, want MEDIA_INVALID", got)
+	}
+
+	limited := api.GetFileSeqForTestWithLimits(
+		s, blobs,
+		store.RateLimitConfig{Limit: 1, Window: time.Minute},
+		store.RateLimitConfig{},
+	)
+	limitedRequest := &tg.UploadGetFileRequest{
+		Location: &tg.InputDocumentFileLocation{ID: document.ID, AccessHash: document.AccessHash, FileReference: document.FileReference},
+		Limit:    1024,
+	}
+	if _, err := limited(caller.ID, limitedRequest); err != nil {
+		t.Fatalf("first catalogue download: %v", err)
+	}
+	if got := rpcMessage(t, func() error {
+		_, err := limited(caller.ID, limitedRequest)
+		return err
+	}()); !strings.HasPrefix(got, "FLOOD_WAIT_") {
+		t.Fatalf("second catalogue download = %q, want rate limit", got)
 	}
 }
 
