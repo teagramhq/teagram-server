@@ -21,10 +21,9 @@ TG_MAX_USER_STORAGE_BYTES=268435456
 TEAGRAM_DEMO_BLOB_PATH=/srv/teagram-demo-blobs/data
 TEAGRAM_DEMO_TURNSTILE_SITE_KEY=fixture-site-key
 ENV
-printf 'TEAGRAM_DEMO_TURNSTILE_SECRET_KEY_FILE=%s\n' "$TMP_DIR/turnstile-secret-key" >> "$TMP_DIR/demo.env"
+secret_file=/var/lib/teagram-demo/secrets/turnstile-secret-key
+printf 'TEAGRAM_DEMO_TURNSTILE_SECRET_KEY_FILE=%s\n' "$secret_file" >> "$TMP_DIR/demo.env"
 chmod 0600 "$TMP_DIR/demo.env"
-printf 'fixture-secret-key\n' > "$TMP_DIR/turnstile-secret-key"
-chmod 0600 "$TMP_DIR/turnstile-secret-key"
 
 compose=(
   docker compose
@@ -36,7 +35,7 @@ compose=(
 env -u COMPOSE_FILE -u COMPOSE_PROJECT_NAME -u COMPOSE_PROFILES \
   -u TEAGRAM_DEMO_TURNSTILE_SITE_KEY -u TEAGRAM_DEMO_TURNSTILE_SECRET_KEY_FILE \
   "${compose[@]}" config --format json > "$TMP_DIR/target.json"
-jq -e --arg secretFile "$TMP_DIR/turnstile-secret-key" '
+jq -e --arg secretFile "$secret_file" '
   .name == "teagram-demo"
   and (.services | keys | sort) == ["edge", "haproxy", "migrate", "postgres", "teagramd", "teagramd-next", "turnstile-egress"]
   and ((.services.teagramd.ports // []) | length) == 0
