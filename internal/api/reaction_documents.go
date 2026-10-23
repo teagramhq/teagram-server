@@ -219,7 +219,7 @@ func (c *reactionDocumentCatalog) responseReactions(dcID int) ([]tg.AvailableRea
 	return result, nil
 }
 
-func (h *handlers) builtInReactionFileGate(loc downloadLocation) downloadGate {
+func (h *handlers) builtInDocumentFileGate(loc downloadLocation) downloadGate {
 	return func(_ context.Context, fileID, _ int64) (authorizedDownload, error) {
 		catalog, err := getReactionDocumentCatalog()
 		if err != nil {
@@ -227,21 +227,34 @@ func (h *handlers) builtInReactionFileGate(loc downloadLocation) downloadGate {
 			return authorizedDownload{}, errInternal
 		}
 		document, ok := catalog.documents[reactionDocumentIdentity{id: fileID, accessHash: loc.accessHash}]
+		if ok {
+			return builtInDocumentDownload(document), nil
+		}
+		stickerSets, err := getStickerSetCatalog()
+		if err != nil {
+			h.log.Error("load sticker set documents", "err", err)
+			return authorizedDownload{}, errInternal
+		}
+		document, ok = stickerSets.documents[reactionDocumentIdentity{id: fileID, accessHash: loc.accessHash}]
 		if !ok {
 			return authorizedDownload{}, errLocationInvalid
 		}
-		return authorizedDownload{
-			file: document.file,
-			readChunk: func(ctx context.Context, offset, limit int64) ([]byte, error) {
-				if err := ctx.Err(); err != nil {
-					return nil, err
-				}
-				size := int64(len(document.data))
-				if offset < 0 || limit < 0 || offset > size || limit > size-offset {
-					return nil, fmt.Errorf("reaction document read window outside %d byte asset", size)
-				}
-				return document.data[int(offset):int(offset+limit)], nil
-			},
-		}, nil
+		return builtInDocumentDownload(document), nil
+	}
+}
+
+func builtInDocumentDownload(document builtInReactionDocument) authorizedDownload {
+	return authorizedDownload{
+		file: document.file,
+		readChunk: func(ctx context.Context, offset, limit int64) ([]byte, error) {
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
+			size := int64(len(document.data))
+			if offset < 0 || limit < 0 || offset > size || limit > size-offset {
+				return nil, fmt.Errorf("built-in document read window outside %d byte asset", size)
+			}
+			return document.data[int(offset):int(offset+limit)], nil
+		},
 	}
 }

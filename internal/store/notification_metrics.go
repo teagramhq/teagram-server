@@ -11,14 +11,14 @@ import (
 const (
 	notificationWindowSeconds   = int64((time.Hour / time.Second))
 	notificationBucketCount     = int(notificationWindowSeconds + 1)
-	notificationCounterCount    = 12 // eleven fixed channels plus invalid input
+	notificationCounterCount    = 13 // twelve fixed channels plus invalid input
 	notificationInvalidIndex    = notificationCounterCount - 1
 	notificationUnsetEpoch      = int64(-1 << 63)
 	notificationSnapshotTries   = 4
 	pushOutcomeCount            = 4
 	pushLatencyFiniteBuckets    = 15
 	pushLatencyBucketCount      = pushLatencyFiniteBuckets + 1
-	rateLimitDenialSurfaceCount = 25 // twenty-four fixed surfaces plus dropped
+	rateLimitDenialSurfaceCount = 26 // twenty-five fixed surfaces plus dropped
 	rateLimitDenialDroppedIndex = rateLimitDenialSurfaceCount - 1
 )
 
@@ -74,6 +74,7 @@ type NotificationChannelCounts struct {
 	Pinned        int64
 	DialogFilters int64
 	DialogPins    int64
+	StickerSets   int64
 }
 
 // RateLimitDenialSurfaceCounts holds one count for every fixed client-visible
@@ -104,6 +105,7 @@ type RateLimitDenialSurfaceCounts struct {
 	MessagesGetMessages       int64
 	SecretChatRequest         int64
 	SecretChatDiscard         int64
+	StickerSetMutation        int64
 }
 
 // PushOutcomeCounts holds one count for every possible result of an attempted
@@ -433,6 +435,7 @@ func (m *NotificationMetrics) Snapshot() NotificationMetricsSnapshot {
 			Pinned:        counts[8],
 			DialogFilters: counts[9],
 			DialogPins:    counts[10],
+			StickerSets:   counts[11],
 		},
 		Invalid: counts[notificationInvalidIndex],
 		RateLimitDenials: RateLimitDenialMetricsSnapshot{
@@ -464,6 +467,7 @@ func (m *NotificationMetrics) Snapshot() NotificationMetricsSnapshot {
 				MessagesGetMessages:       rateLimitDenials[21],
 				SecretChatRequest:         rateLimitDenials[22],
 				SecretChatDiscard:         rateLimitDenials[23],
+				StickerSetMutation:        rateLimitDenials[24],
 			},
 			Dropped: rateLimitDenials[rateLimitDenialDroppedIndex],
 		},
@@ -604,6 +608,8 @@ func notificationChannelIndex(channel string) int {
 		return 9
 	case ChannelDialogPins:
 		return 10
+	case ChannelStickerSets:
+		return 11
 	default:
 		return -1
 	}
@@ -659,6 +665,8 @@ func rateLimitDenialSurfaceIndex(surface string) int {
 		return 22
 	case "secret_chat_discard":
 		return 23
+	case "sticker_set_mutation":
+		return 24
 	default:
 		return -1
 	}

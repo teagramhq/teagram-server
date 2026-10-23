@@ -857,6 +857,7 @@ func dashboardNotifications(m MetricsResponse, capabilities dashboardCapabilitie
 		{ID: "notify-tg_pinned", Label: "tg_pinned", Value: safeCount(m.NotifyChannels.Pinned)},
 		{ID: "notify-tg_dialog_filters", Label: "tg_dialog_filters", Value: safeCount(m.NotifyChannels.DialogFilters)},
 		{ID: "notify-tg_dialog_pins", Label: "tg_dialog_pins", Value: safeCount(m.NotifyChannels.DialogPins)},
+		{ID: "notify-tg_sticker_sets", Label: "tg_sticker_sets", Value: safeCount(m.NotifyChannels.StickerSets)},
 	}
 	if channelsUnavailable {
 		markUninstrumentedRows(data.Rows)
@@ -905,6 +906,7 @@ func dashboardDenials(m MetricsResponse, capabilities dashboardCapabilities) Das
 		{ID: "denial-get_password", Label: "get_password", Value: safeCount(m.RateLimitDenialsBySurface.GetPassword)},
 		{ID: "denial-update_profile", Label: "update_profile", Value: safeCount(m.RateLimitDenialsBySurface.UpdateProfile)},
 		{ID: "denial-dialog_filter_mutation", Label: "dialog_filter_mutation", Value: safeCount(m.RateLimitDenialsBySurface.DialogFilterMutation)},
+		{ID: "denial-sticker_set_mutation", Label: "sticker_set_mutation", Value: safeCount(m.RateLimitDenialsBySurface.StickerSetMutation)},
 	}
 	if capabilities.unavailable("rate_limit_denials_by_surface") {
 		markUninstrumentedRows(data.Rows)

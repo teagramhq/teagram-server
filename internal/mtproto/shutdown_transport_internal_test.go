@@ -482,7 +482,12 @@ func TestStalledPushWriteDeadlineDoesNotCancelRPCOnTCPAndWebSocket(t *testing.T)
 			}
 			select {
 			case <-active.ctx.Done():
-				t.Fatalf("stalled %s push canceled active RPC before its own deadline: %v", name, active.ctx.Err())
+				// A loaded runner may schedule this timer after the RPC's own
+				// deadline. Treat that as the expected deadline, not early
+				// cancellation by the stalled push.
+				if time.Now().Before(active.deadline) || !errors.Is(active.ctx.Err(), context.DeadlineExceeded) {
+					t.Fatalf("stalled %s push canceled active RPC before its own deadline: %v", name, active.ctx.Err())
+				}
 			case <-time.After(beforeDeadline):
 			}
 			select {

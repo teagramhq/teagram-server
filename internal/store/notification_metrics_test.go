@@ -88,6 +88,7 @@ func TestNotificationMetricsConcurrentExactCounting(t *testing.T) {
 		store.ChannelPinned,
 		store.ChannelDialogFilters,
 		store.ChannelDialogPins,
+		store.ChannelStickerSets,
 	}
 
 	var wg sync.WaitGroup
@@ -130,6 +131,7 @@ func TestNotificationMetricsConcurrentExactCounting(t *testing.T) {
 		Pinned:        perChannel,
 		DialogFilters: perChannel,
 		DialogPins:    perChannel,
+		StickerSets:   perChannel,
 	}
 	if got.Channels != wantChannels {
 		t.Errorf("fixed channel counts = %+v, want each channel %d", got.Channels, perChannel)
@@ -185,6 +187,7 @@ func TestNotificationMetricsRateLimitDenialsUseFixedSurfaces(t *testing.T) {
 		"get_password",
 		"update_profile",
 		"dialog_filter_mutation",
+		"sticker_set_mutation",
 		"channel_unread_count",
 		"messages_get_messages",
 	}
@@ -229,6 +232,7 @@ func TestNotificationMetricsRateLimitDenialsUseFixedSurfaces(t *testing.T) {
 		GetPassword:               1,
 		UpdateProfile:             1,
 		DialogFilterMutation:      1,
+		StickerSetMutation:        1,
 		ChannelUnreadCount:        1,
 		MessagesGetMessages:       1,
 	}

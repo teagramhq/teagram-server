@@ -77,6 +77,7 @@ func TestDashboardM21RendersFixedOperationalFamilies(t *testing.T) {
 		"message_send",
 		"update_profile",
 		"dialog_filter_mutation",
+		"sticker_set_mutation",
 		"Telemetry observations dropped",
 		"RPC timing is not available in this dashboard. Production trace export is unavailable.",
 		"Expired and superseded generations are excluded.",

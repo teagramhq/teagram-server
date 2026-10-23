@@ -1277,7 +1277,7 @@ test.describe('admin dashboard acceptance states', () => {
     expect(labels.outcomes).toEqual(['Successful write', 'Owner mismatch', 'Encoding failed', 'Write failed']);
     expect(labels.channels).toEqual([
       'tg_updates', 'tg_typing', 'tg_evict', 'tg_channel_post', 'tg_encryption',
-      'tg_status', 'tg_encrypted_msg', 'tg_reactions', 'tg_pinned', 'tg_dialog_filters', 'tg_dialog_pins',
+      'tg_status', 'tg_encrypted_msg', 'tg_reactions', 'tg_pinned', 'tg_dialog_filters', 'tg_dialog_pins', 'tg_sticker_sets',
     ]);
     expect(labels.surfaces).toEqual([
       'message_send', 'create_chat', 'add_chat_user', 'create_channel', 'messages_search',
@@ -1285,6 +1285,7 @@ test.describe('admin dashboard acceptance states', () => {
       'send_code_ip_calls', 'send_code_ip_distinct_numbers', 'sign_in_fail_ip',
       'check_password', 'check_password_ip', 'get_password_ip', 'sign_up_ip',
       'password_proof', 'get_password', 'update_profile', 'dialog_filter_mutation',
+      'sticker_set_mutation',
     ]);
   });
 

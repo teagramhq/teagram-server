@@ -50,6 +50,9 @@ const (
 	ChannelDialogFilters = "tg_dialog_filters"
 	// ChannelDialogPins carries only a default-folder pin owner's user id.
 	ChannelDialogPins = "tg_dialog_pins"
+	// ChannelStickerSets carries the owner and the originating protocol session.
+	// Its update is transient, has no pts, and is never replayed by getDifference.
+	ChannelStickerSets = "tg_sticker_sets"
 )
 
 const channelMembershipPayloadPrefix = "channel_membership|"
@@ -445,8 +448,8 @@ type Listener struct {
 var ErrListenerStopped = errors.New("notification listener stopped")
 
 // StartListener opens a dedicated connection, subscribes to the update, typing,
-// evict, channel-post, encryption, status, encrypted-message, reactions, and
-// pinned channels, and runs the notification loop until the returned stop
+// evict, channel-post, encryption, status, encrypted-message, reactions, pinned,
+// and sticker-set channels, and runs the notification loop until the returned stop
 // function is called (which cancels the loop, drains it, and returns the error
 // from closing the connection). deliver receives a userID whose events changed;
 // typing receives (peerID, fromUserID) with the peer kind and action in the
@@ -456,7 +459,7 @@ var ErrListenerStopped = errors.New("notification listener stopped")
 // receives (userID, chatID) for a secret-chat state change; status receives
 // (userID, online) for a status change; encryptedMsg receives (recipientID, qts)
 // for a secret-chat message; reactions receives (ownerID, localID, userID) for
-// a reaction change on a specific message copy; pinned receives (peerType, peerID, pinnedMsgID) for a pin/unpin in a chat or channel; pinnedMsgID is nonzero on pin, zero on unpin.
+// a reaction change on a specific message copy; pinned receives (peerType, peerID, pinnedMsgID) for a pin/unpin in a chat or channel; pinnedMsgID is nonzero on pin, zero on unpin. Sticker-set changes are handled by StartListenerWithDialogPinsAndStickerSets.
 // An optional built-in metrics recorder receives fixed-channel valid counts and
 // aggregate malformed counts inline before delivery callbacks. StartListener
 // does not accept arbitrary telemetry sinks: the recorder's operation is fixed
@@ -486,7 +489,7 @@ func StartListener(
 	log *slog.Logger,
 	notifyMetrics ...*NotificationMetrics,
 ) (*Listener, func() error, error) {
-	return startListener(ctx, dsn, deliver, typing, evict, channelPost, encryption, status, encryptedMsg, reactions, pinned, nil, nil, nil, log, notifyMetrics...)
+	return startListener(ctx, dsn, deliver, typing, evict, channelPost, encryption, status, encryptedMsg, reactions, pinned, nil, nil, nil, nil, log, notifyMetrics...)
 }
 
 // StartListenerWithDialogFilters adds private-folder invalidation and listener
@@ -508,7 +511,7 @@ func StartListenerWithDialogFilters(
 	log *slog.Logger,
 	notifyMetrics ...*NotificationMetrics,
 ) (*Listener, func() error, error) {
-	return startListener(ctx, dsn, deliver, typing, evict, channelPost, encryption, status, encryptedMsg, reactions, pinned, dialogFilters, nil, reconnected, log, notifyMetrics...)
+	return startListener(ctx, dsn, deliver, typing, evict, channelPost, encryption, status, encryptedMsg, reactions, pinned, dialogFilters, nil, nil, reconnected, log, notifyMetrics...)
 }
 
 // StartListenerWithDialogPins adds owner-scoped pin notifications alongside
@@ -531,7 +534,31 @@ func StartListenerWithDialogPins(
 	log *slog.Logger,
 	notifyMetrics ...*NotificationMetrics,
 ) (*Listener, func() error, error) {
-	return startListener(ctx, dsn, deliver, typing, evict, channelPost, encryption, status, encryptedMsg, reactions, pinned, dialogFilters, dialogPins, reconnected, log, notifyMetrics...)
+	return startListener(ctx, dsn, deliver, typing, evict, channelPost, encryption, status, encryptedMsg, reactions, pinned, dialogFilters, dialogPins, nil, reconnected, log, notifyMetrics...)
+}
+
+// StartListenerWithDialogPinsAndStickerSets adds account-scoped transient
+// sticker-set invalidation to the replica listener alongside dialog pins.
+func StartListenerWithDialogPinsAndStickerSets(
+	ctx context.Context,
+	dsn string,
+	deliver func(ctx context.Context, userID int64),
+	typing func(ctx context.Context, peerID, fromID int64),
+	evict func(ctx context.Context, userID, authKeyID int64),
+	channelPost func(ctx context.Context, channelID int64),
+	encryption func(ctx context.Context, userID, chatID int64),
+	status func(ctx context.Context, userID int64, online bool),
+	encryptedMsg func(ctx context.Context, recipientID int64, qts int),
+	reactions func(ctx context.Context, ownerID, localID, userID int64),
+	pinned func(ctx context.Context, peerType PeerType, peerID int64, pinnedMsgID int32),
+	dialogFilters func(ctx context.Context, ownerID int64),
+	dialogPins func(ctx context.Context, ownerID int64),
+	stickerSets func(ctx context.Context, ownerID, authKeyID, sessionID int64),
+	reconnected func(),
+	log *slog.Logger,
+	notifyMetrics ...*NotificationMetrics,
+) (*Listener, func() error, error) {
+	return startListener(ctx, dsn, deliver, typing, evict, channelPost, encryption, status, encryptedMsg, reactions, pinned, dialogFilters, dialogPins, stickerSets, reconnected, log, notifyMetrics...)
 }
 
 func startListener(
@@ -548,6 +575,7 @@ func startListener(
 	pinned func(ctx context.Context, peerType PeerType, peerID int64, pinnedMsgID int32),
 	dialogFilters func(ctx context.Context, ownerID int64),
 	dialogPins func(ctx context.Context, ownerID int64),
+	stickerSets func(ctx context.Context, ownerID, authKeyID, sessionID int64),
 	reconnected func(),
 	log *slog.Logger,
 	notifyMetrics ...*NotificationMetrics,
@@ -568,7 +596,7 @@ func startListener(
 	l := &Listener{log: log, metrics: metrics, scheduler: newNotificationScheduler(loopCtx)}
 	var wg sync.WaitGroup
 	wg.Go(func() {
-		l.run(loopCtx, conn, dsn, deliver, typing, evict, channelPost, encryption, status, encryptedMsg, reactions, pinned, dialogFilters, dialogPins, reconnected)
+		l.run(loopCtx, conn, dsn, deliver, typing, evict, channelPost, encryption, status, encryptedMsg, reactions, pinned, dialogFilters, dialogPins, stickerSets, reconnected)
 	})
 
 	stop := func() error {
@@ -588,7 +616,7 @@ func connectAndListen(ctx context.Context, dsn string) (*pgx.Conn, error) {
 	if err != nil {
 		return nil, fmt.Errorf("listener connect: %w", err)
 	}
-	for _, ch := range []string{ChannelUpdates, ChannelTyping, ChannelEvict, ChannelPost, ChannelEncryption, ChannelStatus, ChannelEncryptedMsg, ChannelReactions, ChannelPinned, ChannelDialogFilters, ChannelDialogPins} {
+	for _, ch := range []string{ChannelUpdates, ChannelTyping, ChannelEvict, ChannelPost, ChannelEncryption, ChannelStatus, ChannelEncryptedMsg, ChannelReactions, ChannelPinned, ChannelDialogFilters, ChannelDialogPins, ChannelStickerSets} {
 		// ch is a constant channel identifier, never user input (no injection).
 		if _, err := conn.Exec(ctx, "LISTEN "+ch); err != nil {
 			_ = conn.Close(ctx) //nolint:errcheck // best-effort close on setup failure
@@ -617,6 +645,7 @@ func (l *Listener) run(
 	pinned func(ctx context.Context, peerType PeerType, peerID int64, pinnedMsgID int32),
 	dialogFilters func(ctx context.Context, ownerID int64),
 	dialogPins func(ctx context.Context, ownerID int64),
+	stickerSets func(ctx context.Context, ownerID, authKeyID, sessionID int64),
 	reconnected func(),
 ) {
 	backoff := listenerBackoffMin
@@ -642,7 +671,7 @@ func (l *Listener) run(
 		}
 
 		up := time.Now()
-		err := l.dispatch(ctx, conn, deliver, typing, evict, channelPost, encryption, status, encryptedMsg, reactions, pinned, dialogFilters, dialogPins)
+		err := l.dispatch(ctx, conn, deliver, typing, evict, channelPost, encryption, status, encryptedMsg, reactions, pinned, dialogFilters, dialogPins, stickerSets)
 		closeErr := conn.Close(context.Background())
 		conn = nil
 		if ctx.Err() != nil {
@@ -670,6 +699,7 @@ func (l *Listener) dispatch(
 	pinned func(ctx context.Context, peerType PeerType, peerID int64, pinnedMsgID int32),
 	dialogFilters func(ctx context.Context, ownerID int64),
 	dialogPins func(ctx context.Context, ownerID int64),
+	stickerSets func(ctx context.Context, ownerID, authKeyID, sessionID int64),
 ) error {
 	for {
 		n, err := conn.WaitForNotification(ctx)
@@ -1041,6 +1071,25 @@ func (l *Listener) dispatch(
 					},
 				})
 			}
+		case ChannelStickerSets:
+			payload, perr := parseStickerSetChangedPayload(n.Payload)
+			if perr != nil {
+				l.recordInvalidNotification()
+				l.log.Warn("bad tg_sticker_sets payload")
+				continue
+			}
+			l.recordValidNotification(ChannelStickerSets)
+			if stickerSets != nil {
+				routeKey := "sticker-sets:" + strconv.FormatInt(payload.ownerID, 10) + ":" +
+					strconv.FormatInt(payload.authKeyID, 10) + ":" + strconv.FormatInt(payload.sessionID, 10)
+				l.schedule(routeKey, notificationTask{
+					ctx:      ctx,
+					coalesce: true,
+					run: func(ctx context.Context) {
+						stickerSets(ctx, payload.ownerID, payload.authKeyID, payload.sessionID)
+					},
+				})
+			}
 		default:
 			l.recordInvalidNotification()
 		}
@@ -1400,6 +1449,40 @@ func ReactionPayload(ownerID, localID, userID int64) string {
 	return strconv.FormatInt(ownerID, 10) + "|" +
 		strconv.FormatInt(localID, 10) + "|" +
 		strconv.FormatInt(userID, 10)
+}
+
+// StickerSetChangedPayload carries the account and originating MTProto session
+// for a transient updateStickerSets fan-out. Payload: "ownerID|authKeyID|sessionID".
+func StickerSetChangedPayload(ownerID, authKeyID, sessionID int64) string {
+	return strconv.FormatInt(ownerID, 10) + "|" +
+		strconv.FormatInt(authKeyID, 10) + "|" +
+		strconv.FormatInt(sessionID, 10)
+}
+
+type stickerSetChangedPayload struct {
+	ownerID   int64
+	authKeyID int64
+	sessionID int64
+}
+
+func parseStickerSetChangedPayload(payload string) (stickerSetChangedPayload, error) {
+	parts := strings.Split(payload, "|")
+	if len(parts) != 3 {
+		return stickerSetChangedPayload{}, errors.New("invalid sticker-set payload fields")
+	}
+	ownerID, err := strconv.ParseInt(parts[0], 10, 64)
+	if err != nil || ownerID <= 0 {
+		return stickerSetChangedPayload{}, errors.New("invalid sticker-set owner")
+	}
+	authKeyID, err := strconv.ParseInt(parts[1], 10, 64)
+	if err != nil || authKeyID == 0 {
+		return stickerSetChangedPayload{}, errors.New("invalid sticker-set auth key")
+	}
+	sessionID, err := strconv.ParseInt(parts[2], 10, 64)
+	if err != nil {
+		return stickerSetChangedPayload{}, errors.New("invalid sticker-set session")
+	}
+	return stickerSetChangedPayload{ownerID: ownerID, authKeyID: authKeyID, sessionID: sessionID}, nil
 }
 
 // PinnedPayload formats a tg_pinned NOTIFY payload naming the peer whose
