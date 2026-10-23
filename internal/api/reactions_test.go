@@ -589,6 +589,91 @@ func TestGetMessagesReactionsAgreesWithGetHistory(t *testing.T) {
 	}
 }
 
+func TestDirectReactionViewsMarkOnlyCallerChosen(t *testing.T) {
+	t.Parallel()
+	s := openStore(t)
+	p := seedReactionPair(t, s, "+15551341501", "+15551341502", "")
+
+	// Telegram Desktop's quick reaction uses the reaction-vector flag with the
+	// dialog peer and the message id from the caller's local history.
+	request := &tg.MessagesSendReactionRequest{
+		Peer:  api.InputPeerUser(p.a.ID, p.b.ID),
+		MsgID: int(p.aLocalID),
+		Reaction: []tg.ReactionClass{
+			&tg.ReactionEmoji{Emoticon: "👍"},
+		},
+	}
+	if _, rpc := callReactionUpdates(t, s, p.a.ID, "messages.sendReaction", request); rpc != nil {
+		t.Fatalf("desktop-shaped messages.sendReaction returned %s", rpc.ErrorMessage)
+	}
+
+	assertReaction := func(t *testing.T, got tg.MessageReactions, wantChosen bool) {
+		t.Helper()
+		if len(got.Results) != 1 {
+			t.Fatalf("reaction results = %d, want 1", len(got.Results))
+		}
+		result := got.Results[0]
+		if result.Count != 1 {
+			t.Errorf("reaction count = %d, want 1", result.Count)
+		}
+		emoji, ok := result.Reaction.(*tg.ReactionEmoji)
+		if !ok || emoji.Emoticon != "👍" {
+			t.Errorf("reaction = %#v, want thumbs up", result.Reaction)
+		}
+		chosenOrder, hasChosenOrder := result.GetChosenOrder()
+		if hasChosenOrder != wantChosen || (wantChosen && chosenOrder != 1) {
+			t.Errorf("chosen_order = %d present=%v, want chosen=%v", chosenOrder, hasChosenOrder, wantChosen)
+		}
+	}
+
+	for _, tc := range []struct {
+		name     string
+		viewerID int64
+		peerID   int64
+		localID  int64
+		chosen   bool
+	}{
+		{name: "sender", viewerID: p.a.ID, peerID: p.b.ID, localID: p.aLocalID, chosen: true},
+		{name: "recipient", viewerID: p.b.ID, peerID: p.a.ID, localID: p.bLocalID},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			peer := api.InputPeerUser(tc.viewerID, tc.peerID)
+			historyResult, err := api.GetHistoryForTest(s, tc.viewerID, &tg.MessagesGetHistoryRequest{Peer: peer, Limit: 10})
+			if err != nil {
+				t.Fatalf("get history: %v", err)
+			}
+			history, ok := historyResult.(*tg.MessagesMessages)
+			if !ok {
+				t.Fatalf("history type = %T, want *tg.MessagesMessages", historyResult)
+			}
+			var historyReactions tg.MessageReactions
+			found := false
+			for _, item := range history.Messages {
+				message, ok := item.(*tg.Message)
+				if !ok || int64(message.ID) != tc.localID {
+					continue
+				}
+				historyReactions, found = message.GetReactions()
+				break
+			}
+			if !found {
+				t.Fatal("history omitted message reactions")
+			}
+			assertReaction(t, historyReactions, tc.chosen)
+
+			updates := getReactions(t, s, tc.viewerID, peer, int(tc.localID))
+			if len(updates.Updates) != 1 {
+				t.Fatalf("getMessagesReactions updates = %d, want 1", len(updates.Updates))
+			}
+			update, ok := updates.Updates[0].(*tg.UpdateMessageReactions)
+			if !ok {
+				t.Fatalf("getMessagesReactions update = %T, want *tg.UpdateMessageReactions", updates.Updates[0])
+			}
+			assertReaction(t, update.Reactions, tc.chosen)
+		})
+	}
+}
+
 // Criterion 3: an empty id list, and a list naming only unreadable ids, both
 // return an empty result and no error.
 func TestGetMessagesReactionsEmptyResults(t *testing.T) {

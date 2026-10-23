@@ -1961,7 +1961,7 @@ func (h *handlers) handleGetMessagesReactions(r *mtproto.Request) (bin.Encoder, 
 			// Derived from the stored row, never echoed from the request.
 			Peer:      peerToTL(m.PeerType, m.PeerID),
 			MsgID:     int(m.LocalID),
-			Reactions: reactionsToTL(byMessage[m.LocalID]),
+			Reactions: reactionsToTL(byMessage[m.LocalID], r.UserID),
 		}
 	}
 	// No users: the reply names no reactor, so there is no one to hydrate.
