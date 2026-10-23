@@ -3518,6 +3518,10 @@ class Drill(Docker):
         parts = value.split("|")
         if len(parts) != 9 or not all(part.isdigit() for part in (parts[0], parts[1], *parts[4:])):
             raise DrillFailure(phase, "schema_failure")
+        # The harness's own restore admin role lives on the target until promotion.
+        local_admin = self.local_admin_role
+        if local_admin is not None:
+            parts[2] = ",".join(role for role in parts[2].split(",") if role != local_admin)
         return parts
 
     def object_inventory(self, database: dict[str, Any], phase: str) -> tuple[int, str]:

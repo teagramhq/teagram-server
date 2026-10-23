@@ -731,6 +731,36 @@ class RestoreReadinessContractTests(unittest.TestCase):
             self.assertEqual(call.kwargs["database_user"], RESTORE_READINESS.LOCAL_ATTESTATION_ROLE)
             self.assertTrue(call.kwargs["pinned_search_path"])
 
+    def test_local_schema_state_ignores_only_the_live_restore_admin_role(self) -> None:
+        # The admin role exists on the target until promotion, which now runs after every local check.
+        source = {"id": "a" * 64}
+        target = {"id": "b" * 64}
+        head = RESTORE_READINESS.HEAD_SCHEMA
+        for target_roles, passes in (
+            ("browser_acceptance_probe,restore_admin_0123456789abcdef", True),
+            ("browser_acceptance_probe,restore_admin_0123456789abcdef,restore_readiness_hostile", False),
+        ):
+            with self.subTest(target_roles=target_roles):
+                drill = object.__new__(RESTORE_READINESS.Drill)
+                drill.local_admin_role = "restore_admin_0123456789abcdef"
+                drill.local_schema_snapshot = Mock(return_value=("same",))
+                drill.verify_database_settings = Mock()
+
+                def query(database: dict[str, Any], statement: str, _phase: str, **_kwargs: Any) -> str:
+                    if statement == RESTORE_READINESS.MIGRATION_HEAD_SQL:
+                        return head
+                    if statement == RESTORE_READINESS.FIXTURE_STATE_SQL:
+                        roles = target_roles if database is target else "browser_acceptance_probe"
+                        return f"5|3|{roles}|pg_stat_statements,plpgsql|0|0|0|0|0"
+                    raise AssertionError(f"unexpected query: {statement}")
+
+                drill.sql = Mock(side_effect=query)
+                if passes:
+                    drill.verify_local_schema_state(source, target, "schema_validation", expected_head=head)
+                else:
+                    with self.assertRaises(RESTORE_READINESS.DrillFailure):
+                        drill.verify_local_schema_state(source, target, "schema_validation", expected_head=head)
+
     def test_local_hostile_refusals_compare_the_normalized_snapshot(self) -> None:
         target = {"id": "a" * 64}
         baseline = ((1, "a" * 32), "normalized-roles", "database-state", "extension-state")
@@ -1467,6 +1497,7 @@ class RestoreReadinessContractTests(unittest.TestCase):
     def test_restored_target_mismatch_fails_closed(self) -> None:
         drill = object.__new__(RESTORE_READINESS.Drill)
         drill.phase = "schema_validation"
+        drill.local_admin_role = None
         outputs = iter(("0|2||pg_stat_statements,plpgsql|0|0|0|0|0",))
         drill.sql = lambda _database, _statement, _phase: next(outputs)
         with self.assertRaises(RESTORE_READINESS.DrillFailure) as failure:
