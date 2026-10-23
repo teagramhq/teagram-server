@@ -1910,7 +1910,7 @@ rollback_after_target_failure() {
 }
 
 restore_checkout_and_tag() {
-  git reset --hard "$PREVIOUS_SHA" >/dev/null || { fail 'cannot restore the previous checkout'; return 1; }
+  (umask 022; git reset --hard "$PREVIOUS_SHA") >/dev/null || { fail 'cannot restore the previous checkout'; return 1; }
   docker image tag "${BASE_IMAGE_ID#sha256:}" teagramd:local >/dev/null 2>&1 || { fail 'cannot restore the baseline image tag'; return 1; }
 }
 
@@ -2114,7 +2114,7 @@ run_apply() {
   fi
   [ "$(git -C "$CHECKOUT" rev-parse HEAD)" = "$TARGET_SHA" ] || { fail 'fast-forward did not reach the authorized target'; return 1; }
   if ! verify_approved_gates || ! verify_runtime_sources; then
-    git reset --hard "$PREVIOUS_SHA" >/dev/null || { fail 'pinned gate check failed and baseline checkout could not be restored'; return 1; }
+    (umask 022; git reset --hard "$PREVIOUS_SHA") >/dev/null || { fail 'pinned gate check failed and baseline checkout could not be restored'; return 1; }
     fail 'pinned gate hashes changed after fast-forward; target was not started'
     return 1
   fi

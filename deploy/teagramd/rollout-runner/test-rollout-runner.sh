@@ -107,6 +107,25 @@ write_mock_commands() {
 set -eu
 if [ -n "${MOCK_REAL_GIT:-}" ]; then
   printf 'git %s\n' "$*" >> "$MOCK_EVENTS"
+  case "${MOCK_SCENARIO:-}" in
+    real-git-gate-rejection-restores-modes|config-drift)
+    case "$*" in
+      *' merge --ff-only -q '*)
+        if "$MOCK_REAL_GIT" "$@"; then
+          target_mode=$(stat -c '%a' "$MOCK_CHECKOUT/cmd/teagramd/main.go")
+          [ "$target_mode" = 755 ] || { printf 'target build file mode after merge was %s, expected 755\n' "$target_mode" >&2; exit 91; }
+          printf '%s\n' "$target_mode" > "$MOCK_STATE/build-file-mode-after-merge"
+          if [ "${MOCK_SCENARIO:-}" = real-git-gate-rejection-restores-modes ]; then
+            printf '%s\n' 'fixture-only post-merge mutation' >> "${MOCK_EVIDENCE_ROOT}.baseline/rollout-verifier.pinned"
+          fi
+        else
+          exit $?
+        fi
+        exit 0
+        ;;
+    esac
+    ;;
+  esac
   exec "$MOCK_REAL_GIT" "$@"
 fi
 if [ "${1:-}" = -C ]; then shift 2; fi
@@ -921,7 +940,7 @@ git_for_fixture() {
 
 make_real_git_fixture() {
   local name=$1 scenario=$2 source_root origin checkout runtime_dir state bin target_sha target_tree
-  local baseline_tree baseline_sha target_commit index tracked_path author_header committer_header git_config
+  local baseline_tree baseline_sha target_commit index tracked_path author_header committer_header git_config mode
   local root stamp env_file override base_config target_config
   source_root=$(cd "$SCRIPT_DIR/../../.." && pwd -P)
   target_sha=$(git_for_fixture "$source_root" -C "$source_root" rev-parse HEAD)
@@ -962,6 +981,15 @@ make_real_git_fixture() {
     GIT_INDEX_FILE="$index" git -C "$origin" update-index --force-remove -- "$tracked_path"
   done < <(git_for_fixture "$source_root" -C "$source_root" ls-tree -r --name-only "$target_sha" -- deploy/teagramd/rollout-runner)
   baseline_tree=$(GIT_INDEX_FILE="$index" git -C "$origin" write-tree)
+  case "$name" in
+    real-git-*-restores-modes)
+      mode=$(git_for_fixture "$source_root" -C "$source_root" ls-tree "$target_sha" -- cmd/teagramd/main.go | awk '{print $1}')
+      [ "$mode" = 100644 ] || { printf 'mode recovery fixture requires a non-executable baseline file: %s\n' "$mode" >&2; return 1; }
+      GIT_INDEX_FILE="$index" git -C "$origin" read-tree "$target_tree"
+      GIT_INDEX_FILE="$index" git -C "$origin" update-index --chmod=+x -- cmd/teagramd/main.go
+      target_tree=$(GIT_INDEX_FILE="$index" git -C "$origin" write-tree)
+      ;;
+  esac
   rm -- "$index"
   author_header=$(git_for_fixture "$source_root" -C "$source_root" cat-file commit "$target_sha" | sed -n '/^author /p')
   committer_header=$(git_for_fixture "$source_root" -C "$source_root" cat-file commit "$target_sha" | sed -n '/^committer /p')
@@ -1891,6 +1919,44 @@ else
   printf 'real_git_status=%s\nreal_git_stderr=%s\nreal_git_events=%s\n' \
     "$status" "$(cat "$TMP/real-git-no-runner.stderr")" "$(cat "$TMP/real-git-no-runner-events")"
   fail 'real-git fast-forward from baseline without runner'
+fi
+
+make_real_git_fixture real-git-gate-rejection-restores-modes real-git-gate-rejection-restores-modes
+checkout=$(cat "$TMP/real-git-gate-rejection-restores-modes-checkout-path")
+state=$(cat "$TMP/real-git-gate-rejection-restores-modes-state-path")
+baseline_sha=$(cat "$TMP/real-git-gate-rejection-restores-modes-baseline-sha-path")
+status=$(run_fixture real-git-gate-rejection-restores-modes)
+if [ "$status" != 0 ] && \
+   grep -q 'pinned gate hashes changed after fast-forward; target was not started' "$TMP/real-git-gate-rejection-restores-modes.stderr" && \
+   [ "$(cat "$state/build-file-mode-after-merge")" = 755 ] && \
+   [ "$(git -C "$checkout" rev-parse HEAD)" = "$baseline_sha" ] && \
+   [ "$(stat -c '%a' "$checkout/cmd/teagramd/main.go")" = 644 ] && \
+   grep -q "reset --hard $baseline_sha$" "$TMP/real-git-gate-rejection-restores-modes-events"; then
+  pass 'real Git gate rejection restores baseline build file modes'
+else
+  printf 'real_git_gate_rejection_status=%s\nreal_git_gate_rejection_stderr=%s\nreal_git_gate_rejection_events=%s\n' \
+    "$status" "$(cat "$TMP/real-git-gate-rejection-restores-modes.stderr")" \
+    "$(cat "$TMP/real-git-gate-rejection-restores-modes-events")"
+  fail 'real Git gate rejection must restore baseline build file modes'
+fi
+
+make_real_git_fixture real-git-preflight-rejection-restores-modes config-drift
+checkout=$(cat "$TMP/real-git-preflight-rejection-restores-modes-checkout-path")
+state=$(cat "$TMP/real-git-preflight-rejection-restores-modes-state-path")
+baseline_sha=$(cat "$TMP/real-git-preflight-rejection-restores-modes-baseline-sha-path")
+status=$(run_fixture real-git-preflight-rejection-restores-modes)
+if [ "$status" != 0 ] && \
+   grep -q 'resolved Compose preflight rejected unapproved drift; target was not started' "$TMP/real-git-preflight-rejection-restores-modes.stderr" && \
+   [ "$(cat "$state/build-file-mode-after-merge")" = 755 ] && \
+   [ "$(git -C "$checkout" rev-parse HEAD)" = "$baseline_sha" ] && \
+   [ "$(stat -c '%a' "$checkout/cmd/teagramd/main.go")" = 644 ] && \
+   grep -q "reset --hard $baseline_sha$" "$TMP/real-git-preflight-rejection-restores-modes-events"; then
+  pass 'real Git preflight rejection restores baseline build file modes'
+else
+  printf 'real_git_preflight_rejection_status=%s\nreal_git_preflight_rejection_stderr=%s\nreal_git_preflight_rejection_events=%s\n' \
+    "$status" "$(cat "$TMP/real-git-preflight-rejection-restores-modes.stderr")" \
+    "$(cat "$TMP/real-git-preflight-rejection-restores-modes-events")"
+  fail 'real Git preflight rejection must restore baseline build file modes'
 fi
 
 make_fixed_target_transition_fixture real-fixed-initial-local-transition
