@@ -60,6 +60,63 @@ normalize_tracked_file_modes() {
   printf 'tracked file modes: normalized=%s mismatches=0\n' "$changed"
 }
 
+install_teagram_logs_command() {
+  local sha=$1 target=/usr/local/sbin/teagram-logs
+  local target_dir temp backup
+
+  if [[ -n ${DEPLOY_DIR:-} ]]; then
+    target="$R/usr/local/sbin/teagram-logs"
+  fi
+
+  # Older deployable commits predate the tracked log reader.
+  if ! git cat-file -e "$sha:deploy/teagram/teagram-logs.sh" 2>/dev/null; then
+    return 0
+  fi
+
+  target_dir=${target%/*}
+  if [[ "$target_dir" == "$target" || ! -d "$target_dir" ]]; then
+    printf 'teagram-logs target directory is missing: %s\n' "$target_dir" >&2
+    return 1
+  fi
+  if [[ -L "$target" || ( -e "$target" && ! -f "$target" ) ]]; then
+    printf 'teagram-logs target is not a regular file: %s\n' "$target" >&2
+    return 1
+  fi
+
+  temp=$(mktemp "$target_dir/.teagram-logs.XXXXXX") || return 1
+  if ! git show "$sha:deploy/teagram/teagram-logs.sh" > "$temp"; then
+    rm -f "$temp"
+    return 1
+  fi
+  if ! sh -n "$temp"; then
+    rm -f "$temp"
+    printf 'teagram-logs script from %s failed sh -n\n' "$sha" >&2
+    return 1
+  fi
+  if ! chmod 0755 "$temp"; then
+    rm -f "$temp"
+    return 1
+  fi
+
+  if [[ -f "$target" ]] && ! cmp -s "$temp" "$target"; then
+    backup="$R/teagram-logs-before-${sha:0:7}"
+    if [[ ! -e "$backup" ]]; then
+      if ! cp -p "$target" "$backup"; then
+        rm -f "$temp"
+        return 1
+      fi
+      chmod 0600 "$backup"
+      printf 'saved previous teagram-logs command to %s\n' "$backup"
+    fi
+  fi
+
+  if ! mv -f "$temp" "$target"; then
+    rm -f "$temp"
+    return 1
+  fi
+  printf 'installed teagram-logs command from %s\n' "${sha:0:7}"
+}
+
 SHA=${DEPLOY_SHA:-}
 case "$SHA" in *[!0-9a-f]*|"") echo "DEPLOY_SHA must be a full 40-hex commit SHA"; exit 1;; esac
 [ ${#SHA} = 40 ] || { echo "DEPLOY_SHA must be a full 40-hex commit SHA"; exit 1; }
@@ -86,6 +143,8 @@ esac
 export COMPOSE_FILE="$LIVE_CF"   # carry forward the pinned local-blob files live runs from
 IMG=$(docker inspect --format '{{.Image}}' $C)
 if [ "$PREV" = "$SHA" ] && grep -qs "source_sha=$SHA image_id=$IMG " "$R"/main1238-*.build/built-image.identity; then
+  umask 077
+  install_teagram_logs_command "$SHA"
   echo "already at $SHA with runner provenance"; exit 0
 fi
 echo "deploying ${PREV:0:7} -> $S"; git log --oneline "HEAD..$SHA"
@@ -122,4 +181,5 @@ fi
 if printf '%s\n' "$LOGS" | grep -q "level=ERROR"; then
   echo "teagramd logged level=ERROR after the rollout"; exit 1
 fi
+install_teagram_logs_command "$SHA"
 echo "deployed $SHA"

@@ -55,7 +55,23 @@ successful CI push run), or from a checkout of `main`:
 ssh teagram-server 'DEPLOY_SHA=<full sha> bash -s' < deploy/teagram/deploy-main.sh
 ```
 
-`deploy/teagram/test-deploy-main.sh` covers the script's target checks.
+`deploy/teagram/teagram-logs.sh` is installed as
+`/usr/local/sbin/teagram-logs` after the rollout gates pass, including when a
+deploy is already at its requested SHA. It gets the exact Compose file order
+from the running `teagramd` container label before resolving its ID with
+`docker compose ps -q teagramd`; the QA key remains restricted to this script.
+When the installed wrapper differs, the prior file is retained at
+`/root/teagram-logs-before-<7-char-sha>` with mode 0600. Replace
+`<7-char-sha>` with the prefix printed by the deploy before restoring it as root:
+
+```sh
+backup='/root/teagram-logs-before-<7-char-sha>'
+install -o root -g root -m 0755 "$backup" /usr/local/sbin/teagram-logs
+```
+
+`deploy/teagram/test-deploy-main.sh` covers deploy target checks and wrapper
+installation; `deploy/teagram/test-teagram-logs.sh` covers the restricted log
+command.
 
 Immediately after the `move-stack` action, the live container records the
 tracked selection `docker-compose.yml`, `docker-compose.local-blobs.yml`, and
