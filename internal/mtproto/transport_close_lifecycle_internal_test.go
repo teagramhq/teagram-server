@@ -68,6 +68,54 @@ func TestServeSocketLogsCloseBeforeCodecDetection(t *testing.T) {
 	assertSingleTransportCloseRecord(t, sink.records, "TCP", "none", "client close")
 }
 
+func TestServeSocketLogsPreAuthDrainAsServerClose(t *testing.T) {
+	sink := &transportCloseEventSink{events: make(chan serverErrorLogRecord, 16)}
+	server := New(exchange.PrivateKey{}, 2, NewMemoryAuthKeyStore(), nil, slog.New(sink))
+	t.Cleanup(func() { stopShutdownTimers(server.shutdown) })
+
+	client, serverSocket := net.Pipe()
+	t.Cleanup(func() {
+		if err := client.Close(); err != nil && !errors.Is(err, net.ErrClosed) {
+			t.Errorf("close client: %v", err)
+		}
+	})
+	t.Cleanup(func() {
+		if err := serverSocket.Close(); err != nil && !errors.Is(err, net.ErrClosed) {
+			t.Errorf("close server socket: %v", err)
+		}
+	})
+	slot, ok := server.preAuth.admit()
+	if !ok {
+		t.Fatal("pre-auth slot unavailable")
+	}
+	served := make(chan struct{})
+	go func() {
+		server.serveSocket(serverSocket, slot)
+		close(served)
+	}()
+	server.shutdown.beginDrain()
+
+	ctx, cancel := context.WithTimeout(t.Context(), 3*time.Second)
+	defer cancel()
+	var records []serverErrorLogRecord
+	servedCh := (<-chan struct{})(served)
+	closeLogged := false
+	for servedCh != nil || !closeLogged {
+		select {
+		case <-servedCh:
+			servedCh = nil
+		case record := <-sink.events:
+			records = append(records, record)
+			if record.message == "transport connection closed" {
+				closeLogged = true
+			}
+		case <-ctx.Done():
+			t.Fatal("serveSocket did not finish the pre-auth drain")
+		}
+	}
+	assertSingleTransportCloseRecord(t, records, "TCP", "none", "server close")
+}
+
 func TestServeSocketThrottlesPreAuthCloseLogs(t *testing.T) {
 	sink := &serverErrorLogSink{}
 	server := New(exchange.PrivateKey{}, 2, NewMemoryAuthKeyStore(), nil, slog.New(sink))

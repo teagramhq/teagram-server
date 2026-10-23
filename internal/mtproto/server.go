@@ -531,10 +531,12 @@ func (s *Server) serveSocket(sock net.Conn, slot *preAuthSlot) {
 	var servingMu sync.Mutex
 	var serving, preAuthClosing bool
 	var lifecycleCloseCause error
+	// A nil cause is an explicit server close, so track it separately from unset.
+	var lifecycleCloseCauseSet bool
 	defer func() {
 		if logCloseDiagnostics {
 			servingMu.Lock()
-			if lifecycleCloseCause != nil {
+			if lifecycleCloseCauseSet {
 				closeErr = lifecycleCloseCause
 			}
 			servingMu.Unlock()
@@ -551,6 +553,7 @@ func (s *Server) serveSocket(sock net.Conn, slot *preAuthSlot) {
 		}
 		preAuthClosing = true
 		lifecycleCloseCause = cause
+		lifecycleCloseCauseSet = true
 		servingMu.Unlock()
 		return true
 	}
