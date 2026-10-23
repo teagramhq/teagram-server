@@ -42,6 +42,24 @@ check_ci_contract() {
     ci_fail 'main pushes must share a group, PR updates must keep per-PR groups, and other runs must stay isolated'
   [[ "$(ci_query '.concurrency."cancel-in-progress"')" == "$expected_ci_cancel" ]] ||
     ci_fail 'only pull request updates may cancel in-progress CI runs'
+  [[ "$(ci_query '.jobs."publish-demo-image".if')" == "\${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}" ]] ||
+    ci_fail 'the demo image may publish only from main pushes'
+  [[ "$(ci_query '.jobs."publish-demo-image".needs | sort | join(",")')" == 'browser-acceptance,browser-acceptance-image,ci,ci-main,compose,css,deploy-workflow,docker,e2e-admin,lint,mirror-rustfs-qualification-images,photothumb-runtime,real-server-fixtures,restore-readiness,rustfs-transition-qualification,schema-gate-postgres,smoke,sql-lint,sqlc,websocket-d1,websocket-permanent-exchange' ]] ||
+    ci_fail 'the demo image publish must wait for every CI lane'
+  [[ "$(ci_query '.jobs."publish-demo-image".permissions | to_entries | sort_by(.key) | map(.key + "=" + .value) | join(",")')" == 'actions=write,contents=read,packages=write' ]] ||
+    ci_fail 'the demo image publisher must use only the required package and cache permissions'
+  [[ "$(ci_query '.jobs."publish-demo-image".steps[] | select(.name == "Log in to GHCR") | .env.GITHUB_TOKEN')" == '${{ secrets.GITHUB_TOKEN }}' ]] ||
+    ci_fail 'the demo image publisher must authenticate with the workflow token'
+  ci_query '.jobs."publish-demo-image".steps[] | select(.name == "Log in to GHCR") | .run' |
+    grep -Fq -- '--password-stdin' || ci_fail 'the demo publisher must send its token through stdin'
+  [[ "$(ci_query '.jobs."publish-demo-image".steps[] | select(.name == "Build and publish the tested demo image") | .with.push')" == 'true' ]] ||
+    ci_fail 'the demo image publisher must push its build output'
+  [[ "$(ci_query '.jobs."publish-demo-image".steps[] | select(.name == "Build and publish the tested demo image") | .with.tags')" == 'ghcr.io/teagramhq/teagram-server-demo:sha-${{ github.sha }}' ]] ||
+    ci_fail 'the demo image tag must contain the full tested SHA'
+  [[ "$(ci_query '.jobs."publish-demo-image".steps[] | select(.name == "Build and publish the tested demo image") | .with."build-args"')" == *'TEAGRAMD_SOURCE_REVISION=${{ github.sha }}'* ]] ||
+    ci_fail 'the demo image revision label must identify the tested SHA'
+  [[ "$(ci_query '.jobs."publish-demo-image".steps[] | select(.name == "Build and publish the tested demo image") | .with.labels')" == *'org.opencontainers.image.source=https://github.com/teagramhq/teagram-server'* ]] ||
+    ci_fail 'the published demo image must link to the public source repository'
 }
 
 # Run the actual target step against controlled forge responses.
@@ -271,6 +289,10 @@ self_test() {
     '.on.push.branches = ["main", "release"]'
     '.concurrency.group = "CI-run"'
     '.concurrency."cancel-in-progress" = false'
+    '.jobs."publish-demo-image".needs = ["lint"]'
+    '.jobs."publish-demo-image".permissions.packages = "read"'
+    '(.jobs."publish-demo-image".steps[] | select(.name == "Build and publish the tested demo image") | .with.tags) = "ghcr.io/teagramhq/teagram-server-demo:latest"'
+    '(.jobs."publish-demo-image".steps[] | select(.name == "Build and publish the tested demo image") | .with.push) = false'
   )
   for mutation in "${ci_mutations[@]}"; do
     yq "$mutation" "$ci_workflow" > "$tmp/ci.yml"

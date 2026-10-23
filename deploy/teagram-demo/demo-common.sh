@@ -24,6 +24,9 @@ DEMO_SEED_ACCOUNT_PASSWORD_FILE="$DEMO_SEED_ACCOUNT_DIR/inventory.json"
 DEMO_SEED_OWNER_MARKER="$DEMO_SEED_SECRET_DIR/seed-owner-created"
 # shellcheck disable=SC2034
 DEMO_SEED_OWNER_USERNAME="demo_seed_owner"
+# shellcheck disable=SC2034
+DEMO_IMAGE_REPOSITORY="ghcr.io/teagramhq/teagram-server-demo"
+DEMO_ACTIVE_RELEASE_FILE="$DEMO_STATE_DIR/active-release.json"
 DEMO_COMPOSE_ARGS=(
   --env-file "$DEMO_ENV_FILE"
   --project-directory "$DEMO_REPO_ROOT"
@@ -121,23 +124,83 @@ demo_require_env() {
   python3 "$DEMO_SCRIPT_DIR/validate-env.py" "$DEMO_ENV_FILE"
 }
 
-demo_active_server() {
-  local active_file="$DEMO_STATE_DIR/active-server" active
-  if [[ ! -e "$active_file" && ! -L "$active_file" ]]; then
-    printf 'teagramd\n'
+demo_valid_image_ref() {
+  local image_ref="$1" digest
+  if [[ "$image_ref" == teagramd:local ]]; then
     return 0
   fi
-  [[ -f "$active_file" && ! -L "$active_file" && "$(stat -c '%u:%a' "$active_file")" == '0:600' ]] ||
-    demo_fail 'active server marker must be a root-owned mode 0600 file'
-  active=$(<"$active_file")
-  [[ "$active" == teagramd || "$active" == teagramd-next ]] ||
-    demo_fail 'active server marker is invalid'
+  [[ "$image_ref" == "$DEMO_IMAGE_REPOSITORY@"* ]] || return 1
+  digest=${image_ref#"$DEMO_IMAGE_REPOSITORY@"}
+  [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]
+}
+
+demo_active_server() {
+  local active_file="$DEMO_STATE_DIR/active-server" release_file="$DEMO_ACTIVE_RELEASE_FILE" active
+  if [[ -e "$release_file" || -L "$release_file" ]]; then
+    if [[ ! -f "$release_file" || -L "$release_file" || "$(stat -c '%u:%a' "$release_file")" != '0:600' ]]; then
+      demo_fail 'active release file must be a root-owned mode 0600 file'
+      return 1
+    fi
+    if ! active=$(jq -er '.server | select(type == "string")' "$release_file"); then
+      demo_fail 'active release file is invalid'
+      return 1
+    fi
+  elif [[ ! -e "$active_file" && ! -L "$active_file" ]]; then
+    active=teagramd
+  else
+    if [[ ! -f "$active_file" || -L "$active_file" || "$(stat -c '%u:%a' "$active_file")" != '0:600' ]]; then
+      demo_fail 'active server marker must be a root-owned mode 0600 file'
+      return 1
+    fi
+    active=$(<"$active_file")
+  fi
+  if [[ "$active" != teagramd && "$active" != teagramd-next ]]; then
+    demo_fail 'active server selection is invalid'
+    return 1
+  fi
   printf '%s\n' "$active"
+}
+
+demo_active_image_ref() {
+  local active_file="$DEMO_ACTIVE_RELEASE_FILE" image_ref
+  if [[ -e "$active_file" || -L "$active_file" ]]; then
+    if [[ ! -f "$active_file" || -L "$active_file" || "$(stat -c '%u:%a' "$active_file")" != '0:600' ]]; then
+      demo_fail 'active release file must be a root-owned mode 0600 file'
+      return 1
+    fi
+    if ! image_ref=$(jq -er '.image_ref | select(type == "string")' "$active_file"); then
+      demo_fail 'active release image is invalid'
+      return 1
+    fi
+  else
+    image_ref=teagramd:local
+  fi
+  if ! demo_valid_image_ref "$image_ref"; then
+    demo_fail 'active release image reference is invalid'
+    return 1
+  fi
+  printf '%s\n' "$image_ref"
+}
+
+demo_compose_image_ref() {
+  local image_ref="${TEAGRAM_DEMO_IMAGE_REF:-}"
+  if [[ -z "$image_ref" ]]; then
+    if ! image_ref=$(demo_active_image_ref); then
+      return 1
+    fi
+  fi
+  if ! demo_valid_image_ref "$image_ref"; then
+    demo_fail 'Compose image reference is invalid'
+    return 1
+  fi
+  printf '%s\n' "$image_ref"
 }
 
 demo_inactive_server() {
   local active
-  active=$(demo_active_server)
+  if ! active=$(demo_active_server); then
+    return 1
+  fi
   if [[ "$active" == teagramd ]]; then
     printf 'teagramd-next\n'
   else
@@ -145,16 +208,59 @@ demo_inactive_server() {
   fi
 }
 
-demo_write_active_server() {
-  local active="$1" temporary
-  [[ "$active" == teagramd || "$active" == teagramd-next ]] || demo_fail 'invalid active server selection'
-  [[ ! -L "$DEMO_STATE_DIR" ]] || demo_fail 'demo state directory must not be a symlink'
+demo_write_active_release() {
+  local active="$1" image_ref="$2" temporary
+  if [[ "$active" != teagramd && "$active" != teagramd-next ]]; then
+    demo_fail 'invalid active server selection'
+    return 1
+  fi
+  if ! demo_valid_image_ref "$image_ref"; then
+    demo_fail 'invalid active release image reference'
+    return 1
+  fi
+  if [[ -L "$DEMO_STATE_DIR" ]]; then
+    demo_fail 'demo state directory must not be a symlink'
+    return 1
+  fi
   install -d -o root -g root -m 0755 "$DEMO_STATE_DIR"
-  temporary=$(mktemp "$DEMO_STATE_DIR/active-server.XXXXXXXX")
-  printf '%s\n' "$active" > "$temporary"
+  temporary=$(mktemp "$DEMO_STATE_DIR/active-release.XXXXXXXX")
+  jq -n --arg server "$active" --arg image_ref "$image_ref" \
+    '{server: $server, image_ref: $image_ref}' > "$temporary"
   chown root:root "$temporary"
   chmod 0600 "$temporary"
-  mv -f -- "$temporary" "$DEMO_STATE_DIR/active-server"
+  mv -f -- "$temporary" "$DEMO_ACTIVE_RELEASE_FILE"
+}
+
+demo_pull_image_by_sha() {
+  local sha="$1" tag revision image_ref
+  if [[ ! "$sha" =~ ^[0-9a-f]{40}$ ]]; then
+    demo_fail 'image source SHA must be a full 40-hex commit'
+    return 1
+  fi
+  tag="$DEMO_IMAGE_REPOSITORY:sha-$sha"
+  if ! docker pull "$tag" >&2; then
+    demo_fail "could not pull demo image for $sha"
+    return 1
+  fi
+  if ! revision=$(docker image inspect --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' "$tag"); then
+    demo_fail 'pulled demo image revision label is missing'
+    return 1
+  fi
+  if [[ "$revision" != "$sha" ]]; then
+    demo_fail 'pulled demo image does not identify the requested source SHA'
+    return 1
+  fi
+  if ! image_ref=$(docker image inspect --format '{{json .RepoDigests}}' "$tag" |
+    jq -er --arg repository "$DEMO_IMAGE_REPOSITORY" \
+      '[.[] | select(startswith($repository + "@"))] | unique | if length == 1 then .[0] else error("missing or ambiguous repository digest") end'); then
+    demo_fail 'pulled demo image has no unique repository digest'
+    return 1
+  fi
+  if ! demo_valid_image_ref "$image_ref"; then
+    demo_fail 'pulled demo image digest is invalid'
+    return 1
+  fi
+  printf '%s\n' "$image_ref"
 }
 
 demo_prepare_client_config_dir() {
@@ -181,47 +287,77 @@ demo_haproxy_control() {
 }
 
 demo_compose() {
+  local image_ref
+  if ! image_ref=$(demo_compose_image_ref); then
+    return 1
+  fi
   env -u COMPOSE_FILE -u COMPOSE_PROJECT_NAME -u COMPOSE_PROFILES \
     -u TEAGRAM_DEMO_TURNSTILE_SITE_KEY -u TEAGRAM_DEMO_TURNSTILE_SECRET_KEY_FILE \
     -u TEAGRAM_DEMO_EDGE_BIND \
+    "TEAGRAM_DEMO_IMAGE_REF=$image_ref" \
     docker compose "${DEMO_COMPOSE_ARGS[@]}" "$@" </dev/null
 }
 
 demo_validation_compose() {
+  local image_ref
+  if ! image_ref=$(demo_compose_image_ref); then
+    return 1
+  fi
   env -u COMPOSE_FILE -u COMPOSE_PROJECT_NAME -u COMPOSE_PROFILES \
     -u TEAGRAM_DEMO_TURNSTILE_SITE_KEY -u TEAGRAM_DEMO_TURNSTILE_SECRET_KEY_FILE \
+    "TEAGRAM_DEMO_IMAGE_REF=$image_ref" \
     TEAGRAM_DEMO_EDGE_BIND=127.0.0.1:18080 \
     docker compose "${DEMO_COMPOSE_ARGS[@]}" "$@" </dev/null
 }
 
 demo_compose_input() {
+  local image_ref
+  if ! image_ref=$(demo_compose_image_ref); then
+    return 1
+  fi
   env -u COMPOSE_FILE -u COMPOSE_PROJECT_NAME -u COMPOSE_PROFILES \
     -u TEAGRAM_DEMO_TURNSTILE_SITE_KEY -u TEAGRAM_DEMO_TURNSTILE_SECRET_KEY_FILE \
     -u TEAGRAM_DEMO_EDGE_BIND \
+    "TEAGRAM_DEMO_IMAGE_REF=$image_ref" \
     docker compose "${DEMO_COMPOSE_ARGS[@]}" "$@"
 }
 
 demo_bootstrap_compose() {
+  local image_ref
+  if ! image_ref=$(demo_compose_image_ref); then
+    return 1
+  fi
   env -u COMPOSE_FILE -u COMPOSE_PROJECT_NAME -u COMPOSE_PROFILES \
     -u TEAGRAM_DEMO_TURNSTILE_SITE_KEY -u TEAGRAM_DEMO_TURNSTILE_SECRET_KEY_FILE \
     -u TEAGRAM_DEMO_EDGE_BIND \
+    "TEAGRAM_DEMO_IMAGE_REF=$image_ref" \
     docker compose "${DEMO_COMPOSE_ARGS[@]}" \
       --file "$DEMO_SCRIPT_DIR/compose.bootstrap.yaml" \
       --file "$DEMO_SCRIPT_DIR/compose.seed.yaml" "$@" </dev/null
 }
 
 demo_seed_compose() {
+  local image_ref
+  if ! image_ref=$(demo_compose_image_ref); then
+    return 1
+  fi
   env -u COMPOSE_FILE -u COMPOSE_PROJECT_NAME -u COMPOSE_PROFILES \
     -u TEAGRAM_DEMO_TURNSTILE_SITE_KEY -u TEAGRAM_DEMO_TURNSTILE_SECRET_KEY_FILE \
     -u TEAGRAM_DEMO_EDGE_BIND \
+    "TEAGRAM_DEMO_IMAGE_REF=$image_ref" \
     docker compose "${DEMO_COMPOSE_ARGS[@]}" \
       --file "$DEMO_SCRIPT_DIR/compose.seed.yaml" "$@" </dev/null
 }
 
 demo_seed_compose_input() {
+  local image_ref
+  if ! image_ref=$(demo_compose_image_ref); then
+    return 1
+  fi
   env -u COMPOSE_FILE -u COMPOSE_PROJECT_NAME -u COMPOSE_PROFILES \
     -u TEAGRAM_DEMO_TURNSTILE_SITE_KEY -u TEAGRAM_DEMO_TURNSTILE_SECRET_KEY_FILE \
     -u TEAGRAM_DEMO_EDGE_BIND \
+    "TEAGRAM_DEMO_IMAGE_REF=$image_ref" \
     docker compose "${DEMO_COMPOSE_ARGS[@]}" \
       --file "$DEMO_SCRIPT_DIR/compose.seed.yaml" "$@"
 }
@@ -244,6 +380,9 @@ demo_render_config() {
     --arg edgeConfigHash "$TEAGRAM_DEMO_EDGE_CONFIG_SHA256" '
     (.services.teagramd.ports // [] | length) == 0
     and (.services["teagramd-next"].ports // [] | length) == 0
+    and (.services.teagramd.build == null)
+    and (.services["teagramd-next"].build == null)
+    and .services.teagramd.image == .services["teagramd-next"].image
     and (.services.edge.ports | length) == 1
     and .services.edge.ports[0].host_ip == "127.0.0.1"
     and ((.services.edge.ports[0].target | tostring) == "8080")

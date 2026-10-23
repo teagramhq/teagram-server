@@ -920,6 +920,7 @@ jobs:
           bash -n deploy/teagram-demo/activity-credential.sh
           bash -n deploy/teagram-demo/test-activity-credential-handoff.sh
           bash -n deploy/teagram-demo/test-demo-compose.sh
+          bash -n deploy/teagram-demo/test-image-release.sh
           bash -n deploy/teagram-demo/test-seed-compose.sh
           shellcheck \
             deploy/teagram/deploy-main.sh \
@@ -937,6 +938,7 @@ jobs:
             deploy/teagram-demo/activity-credential.sh \
             deploy/teagram-demo/test-activity-credential-handoff.sh \
             deploy/teagram-demo/test-demo-compose.sh \
+            deploy/teagram-demo/test-image-release.sh \
             deploy/teagram-demo/test-seed-compose.sh \
             deploy/teagram/test-deploy-main.sh \
             .github/scripts/test-deploy-workflow-contract.sh \
@@ -950,6 +952,9 @@ jobs:
 
       - name: Check public demo Compose policy
         run: deploy/teagram-demo/test-demo-compose.sh
+
+      - name: Check demo image release pinning
+        run: deploy/teagram-demo/test-image-release.sh
 
   ci:
     name: ci
@@ -993,6 +998,63 @@ jobs:
             exit 1
           fi
           echo "All required CI lanes passed"
+
+  publish-demo-image:
+    name: publish demo server image
+    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+    needs:
+      - browser-acceptance
+      - browser-acceptance-image
+      - ci
+      - ci-main
+      - compose
+      - css
+      - deploy-workflow
+      - docker
+      - e2e-admin
+      - lint
+      - mirror-rustfs-qualification-images
+      - photothumb-runtime
+      - real-server-fixtures
+      - restore-readiness
+      - rustfs-transition-qualification
+      - schema-gate-postgres
+      - smoke
+      - sql-lint
+      - sqlc
+      - websocket-d1
+      - websocket-permanent-exchange
+    runs-on: ubuntu-26.04
+    timeout-minutes: 20
+    permissions:
+      actions: write
+      contents: read
+      packages: write
+
+    steps:
+      - uses: actions/checkout@v7.0.1
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@v4.4.1
+
+      - name: Log in to GHCR
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: printf '%s' "$GITHUB_TOKEN" | docker login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
+
+      - name: Build and publish the tested demo image
+        uses: docker/build-push-action@v7.4.0
+        with:
+          context: .
+          push: true
+          tags: ghcr.io/teagramhq/teagram-server-demo:sha-${{ github.sha }}
+          build-args: |
+            TEAGRAMD_SOURCE_REVISION=${{ github.sha }}
+          labels: |
+            org.opencontainers.image.source=https://github.com/teagramhq/teagram-server
+            org.opencontainers.image.revision=${{ github.sha }}
+          cache-from: type=gha,scope=teagram-demo-image
+          cache-to: type=gha,scope=teagram-demo-image,mode=max
 
   # internal/admin/assets/dashboard.css is a build output that is committed, so
   # nothing forces a template change to be followed by `make css`. It has gone
@@ -1544,6 +1606,9 @@ jobs:
           revision=$(docker image inspect teagramd:ci --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}')
           test "$revision" = "$TEAGRAMD_SOURCE_REVISION" \
             || { echo "image revision label is '$revision'"; exit 1; }
+          source=$(docker image inspect teagramd:ci --format '{{ index .Config.Labels "org.opencontainers.image.source" }}')
+          test "$source" = "https://github.com/teagramhq/teagram-server" \
+            || { echo "image source label is '$source'"; exit 1; }
 
       - name: Assert missing source revision stays empty
         uses: docker/build-push-action@v7.4.0

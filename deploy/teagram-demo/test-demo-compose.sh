@@ -101,9 +101,10 @@ jq -e \
   and .services.postgres.platform == "linux/amd64"
   and (.services.postgres.mem_limit | tostring) == "335544320"
   and any(.services.postgres.volumes[]; (.source | endswith("/deploy/teagram-demo/postgresql.conf")) and .target == "/etc/postgresql/postgresql.conf" and .read_only)
-  and .services.teagramd.build.args.DEMO_BUILD_GOMAXPROCS == "1"
-  and .services.teagramd.build.args.DEMO_BUILD_GOMEMLIMIT == "640MiB"
-  and .services.teagramd.build.args.DEMO_BUILD_GOFLAGS == "-p=1"
+  and .services.teagramd.image == "teagramd:local"
+  and .services["teagramd-next"].image == "teagramd:local"
+  and .services.teagramd.build == null
+  and .services["teagramd-next"].build == null
   and (.services.migrate.mem_limit | tostring) == "268435456"
   and (.services.postgres.image | endswith("@sha256:d8703cd7fba306b9fec9268ecedfa8a966846c053036a60e3635791957eb2f66"))
   and .services.migrate.platform == "linux/amd64"
@@ -489,6 +490,15 @@ if "markers=133" not in seed_test_text or "search_account=demo_searcher" not in 
     raise SystemExit("test-seed-compose.sh: API convergence check must assert stable marker counts and search account")
 deploy_path = Path(sys.argv[3])
 deploy = deploy_path.read_text(encoding="utf-8")
+init = Path(sys.argv[2]).read_text(encoding="utf-8")
+assert_text_order(init, "init-demo.sh image release", [
+    'IMAGE_REF=$(demo_pull_image_by_sha "$SHA")',
+    'export TEAGRAM_DEMO_IMAGE_REF="$IMAGE_REF"',
+    'demo_write_active_release "$ACTIVE_SERVER" "$IMAGE_REF"',
+    'demo_compose run --rm --no-deps teagramd bootstrap-identity',
+])
+if "demo_pull_image_by_sha \"$SHA\"" not in init:
+    raise SystemExit("init-demo.sh: first install must use the CI image for its selected main SHA")
 deploy_preflight = deploy.split('TARGET_RENDER="$TMP_DIR/target-render.json"', 1)[1].split(
     'docker inspect "${CONTAINER_IDS[@]}"', 1
 )[0]
@@ -499,8 +509,9 @@ assert_text_order(deploy_preflight, "deploy-main.sh proxy preflight", [
     'demo_render_config "$TARGET_RENDER"',
 ])
 deploy_steps = [
+    'CANDIDATE_IMAGE_REF=$(demo_pull_image_by_sha "$SHA")',
     "demo_backup_database\n",
-    "demo_compose build teagramd",
+    'export TEAGRAM_DEMO_IMAGE_REF="$CANDIDATE_IMAGE_REF"',
     "demo_compose up -d migrate",
     "demo_wait_migration demo_compose 'deployment migrations'",
     'demo_seed_compose up -d "$CANDIDATE_SERVER"',
@@ -512,7 +523,7 @@ deploy_steps = [
     'install -o root -g root -m 0644 "$TMP_DIR/client.json" "$DEMO_CLIENT_CONFIG.next"',
     'python3 "$SCRIPT_DIR/smoke.py" "$DEMO_CLIENT_CONFIG"',
     '"$SCRIPT_DIR/seed-demo.sh" --verify-turnstile --endpoint haproxy:2443',
-    'demo_write_active_server "$CANDIDATE_SERVER"',
+    'demo_write_active_release "$CANDIDATE_SERVER" "$CANDIDATE_IMAGE_REF"',
     'demo_compose stop "$ACTIVE_SERVER"',
 ]
 deploy_start = deploy.find(deploy_steps[0])
@@ -531,8 +542,9 @@ assert_text_order(backup_function, "deploy-main.sh backup function", [
     'BACKUP_READY=1',
 ])
 assert_order(deploy_path, [
+    'CANDIDATE_IMAGE_REF=$(demo_pull_image_by_sha "$SHA")',
     "demo_backup_database\n",
-    "demo_compose build teagramd",
+    'export TEAGRAM_DEMO_IMAGE_REF="$CANDIDATE_IMAGE_REF"',
     "demo_compose up -d migrate",
     "demo_wait_migration demo_compose 'deployment migrations'",
     'demo_seed_compose up -d "$CANDIDATE_SERVER"',
@@ -540,14 +552,18 @@ assert_order(deploy_path, [
     'demo_compose up -d --wait --wait-timeout 120 "$CANDIDATE_SERVER"',
     'demo_compose stop "$ACTIVE_SERVER"',
 ])
-if 'docker image tag "$PREV_IMAGE_ID" teagramd:local' not in deploy:
-    raise SystemExit("deploy-main.sh: failed rollout must restore the previous image tag")
+if 'docker image tag "$PREV_IMAGE_ID" teagramd:local' in deploy:
+    raise SystemExit("deploy-main.sh: rollback must use the persisted previous image digest, not a mutable tag")
+if 'demo_write_active_release "$ACTIVE_SERVER" "$PREV_IMAGE_REF"' not in deploy:
+    raise SystemExit("deploy-main.sh: confirmed rollback must restore the previous slot and image digest")
 if "MIGRATE_STATUS=$(docker inspect" in deploy:
     raise SystemExit("deploy-main.sh: detached migration status must be checked after waiting")
 if "PREV_IMAGE_TAG" in deploy or "teagramd:rollback-" in deploy:
     raise SystemExit("deploy-main.sh: rollback image must not get a persistent unique tag")
-if 'docker image tag "$PREV_IMAGE_ID" teagramd:local' not in deploy:
-    raise SystemExit("deploy-main.sh: rollback must restore the previous image tag")
+if 'demo_pull_image_by_sha "$SHA"' not in deploy or 'previous-image-ref.txt' not in deploy:
+    raise SystemExit("deploy-main.sh: deployment must pull and pin the candidate while recording the previous image reference")
+if "compose build" in deploy or "compose build" in init:
+    raise SystemExit("demo install and deploy must never build the server image in the LXC")
 waiter = Path(sys.argv[4]).read_text(encoding="utf-8")
 if "demo_wait_migration()" not in waiter or 'docker wait "${migration_ids[0]}"' not in waiter:
     raise SystemExit("demo-common.sh: migration helper must wait for the container exit code")
@@ -781,7 +797,7 @@ demo_haproxy_control() {
   esac
 }
 demo_compose() { printf 'compose %s\n' "$*" >> "$CALLS"; }
-demo_write_active_server() { printf 'active %s\n' "$1" >> "$CALLS"; }
+demo_write_active_release() { printf 'active %s %s\n' "$1" "$2" >> "$CALLS"; }
 demo_prepare_haproxy_runtime() { printf 'prepare runtime\n' >> "$CALLS"; }
 docker() { printf 'docker %s\n' "$*" >> "$CALLS"; }
 

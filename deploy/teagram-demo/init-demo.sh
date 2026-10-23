@@ -42,9 +42,6 @@ cleanup() {
 trap cleanup EXIT
 
 demo_require_env
-if [[ ! -e "$DEMO_STATE_DIR/active-server" && ! -L "$DEMO_STATE_DIR/active-server" ]]; then
-  demo_write_active_server teagramd
-fi
 ACTIVE_SERVER=$(demo_active_server)
 ACTIVE_ENDPOINT="$ACTIVE_SERVER:2443"
 SEED_SCRIPT="$SCRIPT_DIR/seed-demo.sh"
@@ -145,11 +142,10 @@ if entries:
     raise SystemExit("demo blob path is not empty; refusing fresh installation")
 PY
 
-export TEAGRAMD_SOURCE_REVISION="$SHA"
-demo_compose build teagramd
+IMAGE_REF=$(demo_pull_image_by_sha "$SHA")
+export TEAGRAM_DEMO_IMAGE_REF="$IMAGE_REF"
+demo_write_active_release "$ACTIVE_SERVER" "$IMAGE_REF"
 "$SEED_SCRIPT" --check
-IMAGE_REVISION=$(docker image inspect --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' teagramd:local)
-[[ "$IMAGE_REVISION" == "$SHA" ]] || demo_fail 'built teagramd image does not identify the selected main commit'
 
 demo_compose run --rm --no-deps teagramd bootstrap-identity > "$TMP_DIR/bootstrap.stdout" 2> "$TMP_DIR/bootstrap.stderr"
 FINGERPRINT=$(sed -n 's/.*fingerprint=\(-\{0,1\}[0-9][0-9]*\).*/\1/p' "$TMP_DIR/bootstrap.stdout" | head -n 1)

@@ -69,13 +69,16 @@ and mode 0600. Compose mounts that file only into teagramd. It also configures
 `TG_ADVERTISE_DEMO_GUEST_SIGN_UP=true` so web.teagram.io advertises demo signup.
 
 The demo is budgeted for 2 GiB: teagramd uses `GOMAXPROCS=1`,
-`GOMEMLIMIT=320MiB` and a 448 MiB container cap. Its image build uses one Go
-build worker with a 640 MiB memory limit. PostgreSQL is capped at 320 MiB with
+`GOMEMLIMIT=320MiB` and a 448 MiB container cap. PostgreSQL is capped at 320 MiB with
 128 MiB shared buffers, 4 MiB work memory and 64 MiB maintenance work memory in
 the demo-specific `postgresql.conf`; the dev stack keeps its own larger profile.
-The seed and probe containers are capped at 256 MiB. If the in-box Go build or
-seed cannot complete within the LXC limit, report it here rather than
-increasing the host allocation.
+The seed and probe containers are capped at 256 MiB. If a host-side image pull
+or the API seed cannot complete within the LXC limit, report it here rather
+than increasing the host allocation. The demo LXC never builds the server
+image.
+Successful main CI publishes `ghcr.io/teagramhq/teagram-server-demo` from a
+hosted runner, tagged with the tested commit SHA. The package must be public so
+the isolated LXC can pull it without registry credentials.
 
 ## First install
 
@@ -106,7 +109,11 @@ file.
 
 `init-demo.sh` validates that the blob path is on the dedicated size-limited
 filesystem, that the volumes and blob directory are fresh, and that Compose
-renders the exposure and storage contract. It creates the RSA identity once,
+renders the exposure and storage contract. It pulls the selected main SHA's
+image, verifies its OCI revision label, resolves the repository digest, and
+stores that digest with the selected server slot in a root-only release file.
+Compose uses that immutable digest for the API seed, server and maintenance
+containers. It creates the RSA identity once,
 generates the discovery document, runs migrations, and uses the existing
 `blob-mode-state.py initialize-local` publisher to record the durable local
 blob authority. It then creates the ordinary seed owner, fills and verifies
@@ -143,16 +150,18 @@ command="/opt/teagram-demo/deploy/teagram-demo/forced-command.sh",restrict ssh-e
 ```
 
 `forced-command.sh` accepts one full commit SHA, fetches `origin/main`, rejects
-non-main revisions and skips stale deploys. `deploy-main.sh` revalidates the
-blob authority and running containers, then takes and validates a root-only
-PostgreSQL dump while the existing server and public edge keep running. It
-builds the tested image, applies migrations while the old server remains live,
-starts the candidate in the inactive slot, verifies seeded API reads and both
-HAProxy listener checks, then sends new sessions to the candidate and drains the
-old server before stopping it.
-The active slot is persisted so a host or proxy restart keeps routing to the
-new server. WebSocket sessions already connected to the old process drain
-during its configured 120-second graceful stop.
+non-main revisions and skips stale deploys. The image for that exact SHA is
+published only after the complete main CI gate passes. `deploy-main.sh` pulls
+the SHA tag, checks its revision label, and switches to the resolved repository
+digest before touching the database. It revalidates the blob authority and
+running containers, then takes and validates a root-only PostgreSQL dump while
+the existing server and public edge keep running. It applies migrations while
+the old server remains live, starts the candidate in the inactive slot,
+verifies seeded API reads and both HAProxy listener checks, then sends new
+sessions to the candidate and drains the old server before stopping it.
+The active slot and image digest are persisted atomically so a host or proxy
+restart recreates the same release. WebSocket sessions already connected to
+the old process drain during its configured 120-second graceful stop.
 
 Before rendering the mounted HAProxy config, a deploy compares the running
 HAProxy and edge Compose hashes and their recorded config source hashes with
@@ -162,12 +171,13 @@ proxy changes through the maintenance path, which recreates both proxies,
 before resuming routine server deploys.
 
 On a pre-cutover failure, the old server and edge stay available, the candidate
-stops, and the old image tag is restored. If traffic has reached the candidate,
-the script switches back to the old server when possible. It preserves the
-migrated database and the validated dump instead of restoring an online
-snapshot that could discard writes accepted during rollout. Keep schema changes
-backward-compatible with the previous server for this rollback path. The dump
-and metadata remain under `.state/teagram-demo/backups/` until the weekly wipe.
+stops, and the previous release reference remains active. If traffic has reached
+the candidate, the script switches back to the old server when possible. It
+preserves the migrated database and the validated dump instead of restoring an
+online snapshot that could discard writes accepted during rollout. Keep schema
+changes backward-compatible with the previous server for this rollback path.
+The dump and metadata remain under `.state/teagram-demo/backups/` until the
+weekly wipe.
 
 Do not use `docker compose down -v`. The named `pgdata`, `tgkey` and `tgblobs`
 volumes have independent lifetimes; especially, removing `tgkey` changes the

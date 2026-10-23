@@ -94,11 +94,13 @@ check_source_wiring() {
 }
 
 check_image_binary() {
-  if docker image inspect teagramd:local >/dev/null 2>&1; then
+  local image_ref
+  image_ref=$(demo_compose_image_ref)
+  if docker image inspect "$image_ref" >/dev/null 2>&1; then
     docker run --rm --network none --read-only --cap-drop ALL \
       --security-opt no-new-privileges --entrypoint /usr/local/bin/demo-seed \
-      teagramd:local --check --endpoint "$ENDPOINT" >/dev/null ||
-      demo_fail 'the built teagramd image cannot run demo-seed --check'
+      "$image_ref" --check --endpoint "$ENDPOINT" >/dev/null ||
+      demo_fail 'the selected teagramd image cannot run demo-seed --check'
   fi
 }
 

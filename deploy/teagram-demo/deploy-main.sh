@@ -18,6 +18,8 @@ readonly TS
 TMP_DIR=
 BACKUP_DIR=
 PREV_IMAGE_ID=
+PREV_IMAGE_REF=
+CANDIDATE_IMAGE_REF=
 DB_DUMP=
 RESTORE_DB=
 RESTORE_DB_CREATED=0
@@ -54,7 +56,8 @@ demo_cleanup() {
             chmod 0644 "$DEMO_CLIENT_CONFIG.next" || rollback_rc=1
             mv -f -- "$DEMO_CLIENT_CONFIG.next" "$DEMO_CLIENT_CONFIG" || rollback_rc=1
           fi
-          demo_write_active_server "$ACTIVE_SERVER" || rollback_rc=1
+          export TEAGRAM_DEMO_IMAGE_REF="$PREV_IMAGE_REF"
+          demo_write_active_release "$ACTIVE_SERVER" "$PREV_IMAGE_REF" || rollback_rc=1
           demo_prepare_haproxy_runtime || rollback_rc=1
           if (( rollback_rc == 0 )); then
             rollback_confirmed=1
@@ -78,9 +81,6 @@ demo_cleanup() {
           printf 'demo rollout left candidate server=%s running because rollback was not confirmed\n' \
             "$CANDIDATE_SERVER" >&2
         fi
-      fi
-      if [[ -n "$PREV_IMAGE_ID" ]]; then
-        docker image tag "$PREV_IMAGE_ID" teagramd:local || rc=1
       fi
       printf 'demo rollout retained previous server=%s database state and backup=%s\n' \
         "$ACTIVE_SERVER" "$BACKUP_DIR" >&2
@@ -179,20 +179,25 @@ mapfile -t SERVER_IDS < <(demo_compose ps -q "$ACTIVE_SERVER")
 (("${#SERVER_IDS[@]}" == 1)) || demo_fail 'active demo server is missing or ambiguous'
 PREV_IMAGE_ID=$(docker inspect --format '{{.Image}}' "${SERVER_IDS[0]}")
 [[ "$PREV_IMAGE_ID" =~ ^sha256:[0-9a-f]{64}$ ]] || demo_fail 'running demo image ID is invalid'
+PREV_IMAGE_REF=$(demo_active_image_ref)
+PREV_IMAGE_REF_ID=$(docker image inspect --format '{{.Id}}' "$PREV_IMAGE_REF")
+[[ "$PREV_IMAGE_REF_ID" == "$PREV_IMAGE_ID" ]] ||
+  demo_fail 'active release image does not match the running server container'
+CANDIDATE_IMAGE_REF=$(demo_pull_image_by_sha "$SHA")
 printf '%s\n' "$PREV_IMAGE_ID" > "$BACKUP_DIR/previous-image-id.txt"
 printf '%s\n' "$ACTIVE_SERVER" > "$BACKUP_DIR/active-server.txt"
+printf '%s\n' "$PREV_IMAGE_REF" > "$BACKUP_DIR/previous-image-ref.txt"
 cp -- "$DEMO_CLIENT_CONFIG" "$BACKUP_DIR/client.json"
-chown root:root "$BACKUP_DIR/previous-image-id.txt" "$BACKUP_DIR/active-server.txt" "$BACKUP_DIR/client.json"
-chmod 0600 "$BACKUP_DIR/previous-image-id.txt" "$BACKUP_DIR/active-server.txt" "$BACKUP_DIR/client.json"
+chown root:root "$BACKUP_DIR/previous-image-id.txt" "$BACKUP_DIR/active-server.txt" \
+  "$BACKUP_DIR/previous-image-ref.txt" "$BACKUP_DIR/client.json"
+chmod 0600 "$BACKUP_DIR/previous-image-id.txt" "$BACKUP_DIR/active-server.txt" \
+  "$BACKUP_DIR/previous-image-ref.txt" "$BACKUP_DIR/client.json"
 
 # The snapshot is taken online. Existing clients keep using the old server while
-# the image builds, migrations apply, and the candidate is checked.
+# the tested image is pulled, migrations apply, and the candidate is checked.
 demo_backup_database
 
-export TEAGRAMD_SOURCE_REVISION="$SHA"
-demo_compose build teagramd
-IMAGE_REVISION=$(docker image inspect --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' teagramd:local)
-[[ "$IMAGE_REVISION" == "$SHA" ]] || demo_fail 'built server image does not identify the requested SHA'
+export TEAGRAM_DEMO_IMAGE_REF="$CANDIDATE_IMAGE_REF"
 demo_compose run --rm --no-deps teagramd client-config > "$TMP_DIR/client.json"
 jq -e '
   .version == 1
@@ -229,7 +234,7 @@ mv -f -- "$DEMO_CLIENT_CONFIG.next" "$DEMO_CLIENT_CONFIG"
 CLIENT_CONFIG_UPDATED=1
 python3 "$SCRIPT_DIR/smoke.py" "$DEMO_CLIENT_CONFIG"
 "$SCRIPT_DIR/seed-demo.sh" --verify-turnstile --endpoint haproxy:2443
-demo_write_active_server "$CANDIDATE_SERVER"
+demo_write_active_release "$CANDIDATE_SERVER" "$CANDIDATE_IMAGE_REF"
 demo_prepare_haproxy_runtime
 CUTOVER_COMMITTED=1
 

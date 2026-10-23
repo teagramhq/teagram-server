@@ -4,6 +4,8 @@ umask 077
 
 SCRIPT_DIR=$(cd -P "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 REPO_ROOT=$(cd -P "$SCRIPT_DIR/../.." && pwd)
+# shellcheck source=deploy/teagram-demo/demo-common.sh
+source "$SCRIPT_DIR/demo-common.sh"
 ACTIVITY_ENV_FILE=/etc/default/teagram-demo-activity
 ACCOUNT_DIR=/var/lib/teagram-demo/secrets/demo-accounts
 ACCOUNT_INVENTORY="$ACCOUNT_DIR/inventory.json"
@@ -30,8 +32,9 @@ jq -e 'has("demo_ren") and (.["demo_ren"] | test("^[0-9a-f]{64}$"))' \
   echo 'the seeded activity account credential is missing or invalid' >&2
   exit 1
 }
-docker image inspect teagramd:local >/dev/null 2>&1 || {
-  echo 'the teagramd:local image must be built before enabling activity' >&2
+IMAGE_REF=$(demo_active_image_ref)
+docker image inspect "$IMAGE_REF" >/dev/null 2>&1 || {
+  echo 'the active teagramd image must be present before enabling activity' >&2
   exit 1
 }
 
