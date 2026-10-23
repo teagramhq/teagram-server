@@ -2907,7 +2907,7 @@ prepare_env_change_fixture() {
   local target_extra=${5-TG_REGISTRATION=open} rollback_extra=${6-}
   local key=${7:-TG_REGISTRATION} old_value=${8:-closed} new_value=${9:-open}
   local setup_lines=${10:-} baseline_extra=${11:-}
-  local checkout state previous
+  local checkout state previous env_tmp line matched=0
   prepare_target_local_apply_fixture "$name" "$scenario" "$target_sha" "$baseline_sha" || return 1
   state=$(cat "$TMP/$name-state-path")
   checkout=$(cat "$TMP/$name-checkout-path")
@@ -2916,7 +2916,18 @@ prepare_env_change_fixture() {
   write_env_record "$checkout" || return 1
   previous="$TMP/$name-previous.env"
   cp -p -- "$checkout/.env" "$previous" || return 1
-  sed -i "s/^${key}=${old_value}$/${key}=${new_value}/" "$checkout/.env" || return 1
+  env_tmp="$TMP/$name-updated.env"
+  : > "$env_tmp" || return 1
+  while IFS= read -r line || [ -n "$line" ]; do
+    if [[ "$line" == "${key}="* ]] && [ "${line#*=}" = "$old_value" ]; then
+      printf '%s=%s\n' "$key" "$new_value" >> "$env_tmp" || return 1
+      matched=$((matched + 1))
+    else
+      printf '%s\n' "$line" >> "$env_tmp" || return 1
+    fi
+  done < "$checkout/.env"
+  [ "$matched" -eq 1 ] || return 1
+  mv -- "$env_tmp" "$checkout/.env" || return 1
   printf '%s\n' "$key" > "$TMP/$name-changed-env"
   printf '%s\n' "$previous" > "$TMP/$name-previous-env-path"
   [ -z "$baseline_extra" ] || printf '%s\n' "$baseline_extra" > "$TMP/$name-baseline-env-extra"
