@@ -208,14 +208,16 @@ export async function cleanupNewBinding() {
   return { performed: false };
 }
 
-export async function browserLaunchPolicy({ targetHost }) {
+export async function browserLaunchPolicy({ targetHost }, { testOnly = {} } = {}) {
   if (targetHost !== ALLOWED_HOST) throw adapterError("proxy-policy-invalid");
   for (const name of ["DEBUG", "PWDEBUG", "DEBUG_FILE", "PLAYWRIGHT_DISABLE_FORCED_CHROMIUM_PROXIED_LOOPBACK"]) {
     if (process.env[name] !== undefined) throw adapterError("proxy-policy-invalid");
   }
-  const initial = await observerSnapshot();
-  await runBlockedHostControl();
-  const after = await observerSnapshot();
+  const getObserverSnapshot = testOnly.observerSnapshot ?? observerSnapshot;
+  const runHostControl = testOnly.runBlockedHostControl ?? runBlockedHostControl;
+  const initial = await waitForObserverSnapshot(getObserverSnapshot);
+  await runHostControl();
+  const after = await waitForObserverSnapshot(getObserverSnapshot);
   if (after.telegram_attempts !== initial.telegram_attempts + 1 ||
       after.blocked_requests !== initial.blocked_requests + 1 ||
       after.connect_attempts["telegram-suffix"] !== initial.connect_attempts["telegram-suffix"] + 1 ||
