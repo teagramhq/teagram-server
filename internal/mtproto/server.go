@@ -30,6 +30,8 @@ import (
 )
 
 const (
+	transportTCP = "TCP"
+
 	defaultReadTimeout  = 30 * time.Second
 	defaultWriteTimeout = 30 * time.Second
 	// defaultAuthenticatedReadTimeout gives authenticated clients enough time
@@ -157,6 +159,12 @@ type Server struct {
 	globalCapLog logSampler
 	netCapLog    logSampler
 	ceilingLog   logSampler
+	// A pre-auth close is one more line a peer can provoke per socket; keep its
+	// sampling window independent from the other pre-auth events.
+	preAuthCloseLog logSampler
+	// Signed-in clients can also provoke INFO close diagnostics with malformed
+	// frames or timeouts; keep those sampled independently of pre-auth closes.
+	authorizedCloseLog logSampler
 	// unboundKeys bounds what one auth key with nobody signed in on it may
 	// hold, which is what the pre-auth bounds stop counting and the per-user cap
 	// never starts. Written once before Serve and only read after, like proxyV2.
@@ -521,25 +529,43 @@ acceptLoop:
 // loop. It is given back here whatever ends the connection, and given back early
 // by the frame that authenticates it.
 func (s *Server) serveSocket(sock net.Conn, slot *preAuthSlot) {
-	defer slot.clear()
-
+	closeDiagnostics := newTransportCloseDiagnostics(transportTCP)
+	var closeErr error
+	logCloseDiagnostics := true
 	readCtx := s.shutdown.requestCtx
 	var servingMu sync.Mutex
 	var serving, preAuthClosing bool
-	closePreAuth := func() bool {
+	var lifecycleCloseCause error
+	// A nil cause is an explicit server close, so track it separately from unset.
+	var lifecycleCloseCauseSet bool
+	defer func() {
+		if logCloseDiagnostics {
+			servingMu.Lock()
+			if lifecycleCloseCauseSet {
+				closeErr = lifecycleCloseCause
+			}
+			servingMu.Unlock()
+			s.logTransportClose(closeDiagnostics, closeErr)
+		}
+	}()
+	defer slot.clear()
+
+	closePreAuth := func(cause error) bool {
 		servingMu.Lock()
 		if serving || preAuthClosing {
 			servingMu.Unlock()
 			return false
 		}
 		preAuthClosing = true
+		lifecycleCloseCause = cause
+		lifecycleCloseCauseSet = true
 		servingMu.Unlock()
 		return true
 	}
 	hardCutoffDone := make(chan struct{})
 	stopHardCutoff := context.AfterFunc(s.shutdown.requestCtx, func() {
 		defer close(hardCutoffDone)
-		if !closePreAuth() {
+		if !closePreAuth(nil) {
 			return
 		}
 		if err := sock.Close(); err != nil && !isDisconnect(err) {
@@ -554,7 +580,7 @@ func (s *Server) serveSocket(sock net.Conn, slot *preAuthSlot) {
 	negotiationDone := make(chan struct{})
 	stopNegotiation := context.AfterFunc(s.shutdown.drainCtx, func() {
 		defer close(negotiationDone)
-		if !closePreAuth() {
+		if !closePreAuth(nil) {
 			return
 		}
 		if err := sock.Close(); err != nil && !isDisconnect(err) {
@@ -593,7 +619,7 @@ func (s *Server) serveSocket(sock net.Conn, slot *preAuthSlot) {
 	// peer staying inside every deadline: each read the server does resets its
 	// own, so activity alone never ends a connection.
 	slot.armLifetime(func() {
-		if !closePreAuth() {
+		if !closePreAuth(context.DeadlineExceeded) {
 			return
 		}
 		if err := sock.Close(); err != nil && !isDisconnect(err) {
@@ -608,6 +634,7 @@ func (s *Server) serveSocket(sock net.Conn, slot *preAuthSlot) {
 	handshakeDeadline := time.Now().Add(s.handshakeTimeout)
 	addr, err := s.clientAddrUntil(sock, handshakeDeadline)
 	if err != nil {
+		closeErr = err
 		if !s.shutdown.draining() {
 			s.logNegotiation(err)
 		}
@@ -618,6 +645,7 @@ func (s *Server) serveSocket(sock net.Conn, slot *preAuthSlot) {
 	// negotiating population unbounded per network, which is the population a
 	// flood consists of.
 	if !slot.keyAddr(addr) {
+		logCloseDiagnostics = false
 		s.dropRefused(sock)
 		if dropped, ok := s.netCapLog.allow(time.Now(), preAuthLogInterval); ok {
 			s.log.Info("connection refused at the per-network pre-auth cap",
@@ -627,15 +655,18 @@ func (s *Server) serveSocket(sock net.Conn, slot *preAuthSlot) {
 	}
 	probe, err := probePreflight(sock, handshakeDeadline)
 	if err != nil {
+		closeErr = err
 		s.dropRefused(sock)
 		s.logNegotiation(errors.Join(errors.New("detect discovery preflight"), err))
 		return
 	}
 	if probe.matched {
+		logCloseDiagnostics = false
 		discoveryCtx, cancel := context.WithDeadline(readCtx, handshakeDeadline)
 		allowed, err := s.discovery.allowContext(discoveryCtx, addr)
 		cancel()
 		if err != nil {
+			closeErr = err
 			s.dropRefused(sock)
 			s.log.Error("check discovery rate limit", "err", err)
 			return
@@ -648,8 +679,9 @@ func (s *Server) serveSocket(sock net.Conn, slot *preAuthSlot) {
 			}
 			return
 		}
-		if err := s.servePreflight(readCtx, sock, probe.nonce, handshakeDeadline); err != nil && !isDisconnect(err) && !s.shutdown.draining() {
-			s.logNegotiation(errors.Join(errors.New("serve discovery preflight"), err))
+		closeErr = s.servePreflight(readCtx, sock, probe.nonce, handshakeDeadline)
+		if closeErr != nil && !isDisconnect(closeErr) && !s.shutdown.draining() {
+			s.logNegotiation(errors.Join(errors.New("serve discovery preflight"), closeErr))
 		}
 		return
 	}
@@ -659,13 +691,17 @@ func (s *Server) serveSocket(sock net.Conn, slot *preAuthSlot) {
 	}
 	conn, err := s.detectCodec(probe.stream)
 	if err != nil {
+		closeErr = err
 		if !s.shutdown.draining() {
 			s.logNegotiation(err)
 		}
 		return
 	}
-	if err := s.serveConnWithContexts(readCtx, s.shutdown.requestCtx, conn, addr, slot, markServing); err != nil && !isDisconnect(err) {
-		s.logConnectionFailure(err)
+	closeErr = s.serveConnWithHandlerContextsAndTransportDiagnostics(
+		readCtx, s.shutdown.requestCtx, conn, addr, slot, markServing, transportTCP, s.handler, closeDiagnostics,
+	)
+	if closeErr != nil && !isDisconnect(closeErr) {
+		s.logConnectionFailure(closeErr)
 	}
 }
 
@@ -700,6 +736,34 @@ func (s *Server) logConnectionFailure(err error) {
 		}
 	}
 	s.logServerFailure(category, details...)
+}
+
+func (s *Server) logTransportClose(diagnostics *transportCloseDiagnostics, err error) {
+	reason := classifyTransportCloseReason(err)
+	if diagnostics.step == transportCloseStepAuthorized && (reason == transportCloseReasonClientClose || reason == transportCloseReasonServerClose) {
+		s.log.Debug("transport connection closed",
+			"transport", diagnostics.transport,
+			"step", string(diagnostics.step),
+			"reason", string(reason),
+		)
+		return
+	}
+	attrs := make([]any, 0, 8)
+	attrs = append(attrs,
+		"transport", diagnostics.transport,
+		"step", string(diagnostics.step),
+		"reason", string(reason),
+	)
+	sampler := &s.preAuthCloseLog
+	if diagnostics.step == transportCloseStepAuthorized {
+		sampler = &s.authorizedCloseLog
+	}
+	dropped, ok := sampler.allow(time.Now(), preAuthLogInterval)
+	if !ok {
+		return
+	}
+	attrs = append(attrs, "suppressed", dropped)
+	s.log.Log(context.Background(), slog.LevelInfo, "transport connection closed", attrs...)
 }
 
 func (s *Server) logServerFailure(category serverFailureCategory, details ...any) {
@@ -802,7 +866,7 @@ func isDisconnect(err error) bool {
 // frame that decrypts under a key this server issued. It is nil for a connection
 // that was never accepted through a listener.
 func (s *Server) serveConn(ctx context.Context, tconn transport.Conn, clientAddr netip.Addr, slot *preAuthSlot) (rErr error) {
-	return s.serveConnMode(ctx, ctx, tconn, clientAddr, slot, nil, false, s.handler)
+	return s.serveConnMode(ctx, ctx, tconn, clientAddr, slot, nil, false, transportTCP, s.handler)
 }
 
 func (s *Server) serveConnWithContexts(readCtx, requestCtx context.Context, tconn transport.Conn, clientAddr netip.Addr, slot *preAuthSlot, markServing func() bool) (rErr error) {
@@ -810,10 +874,29 @@ func (s *Server) serveConnWithContexts(readCtx, requestCtx context.Context, tcon
 }
 
 func (s *Server) serveConnWithHandlerContexts(readCtx, requestCtx context.Context, tconn transport.Conn, clientAddr netip.Addr, slot *preAuthSlot, markServing func() bool, handler Handler) (rErr error) {
-	return s.serveConnMode(readCtx, requestCtx, tconn, clientAddr, slot, markServing, true, handler)
+	return s.serveConnWithHandlerContextsAndTransport(readCtx, requestCtx, tconn, clientAddr, slot, markServing, transportTCP, handler)
 }
 
-func (s *Server) serveConnMode(readCtx, requestCtx context.Context, tconn transport.Conn, clientAddr netip.Addr, slot *preAuthSlot, markServing func() bool, monitorPeer bool, handler Handler) (rErr error) {
+func (s *Server) serveConnWithHandlerContextsAndTransport(readCtx, requestCtx context.Context, tconn transport.Conn, clientAddr netip.Addr, slot *preAuthSlot, markServing func() bool, transportName string, handler Handler) (rErr error) {
+	return s.serveConnMode(readCtx, requestCtx, tconn, clientAddr, slot, markServing, true, transportName, handler)
+}
+
+func (s *Server) serveConnMode(readCtx, requestCtx context.Context, tconn transport.Conn, clientAddr netip.Addr, slot *preAuthSlot, markServing func() bool, monitorPeer bool, transportName string, handler Handler) (rErr error) {
+	closeDiagnostics := newTransportCloseDiagnostics(transportName)
+	defer func() {
+		s.logTransportClose(closeDiagnostics, rErr)
+	}()
+	return s.serveConnModeWithDiagnostics(readCtx, requestCtx, tconn, clientAddr, slot, markServing, monitorPeer, handler, closeDiagnostics)
+}
+
+func (s *Server) serveConnWithHandlerContextsAndTransportDiagnostics(readCtx, requestCtx context.Context, tconn transport.Conn, clientAddr netip.Addr, slot *preAuthSlot, markServing func() bool, transportName string, handler Handler, closeDiagnostics *transportCloseDiagnostics) (rErr error) {
+	if closeDiagnostics == nil {
+		closeDiagnostics = newTransportCloseDiagnostics(transportName)
+	}
+	return s.serveConnModeWithDiagnostics(readCtx, requestCtx, tconn, clientAddr, slot, markServing, true, handler, closeDiagnostics)
+}
+
+func (s *Server) serveConnModeWithDiagnostics(readCtx, requestCtx context.Context, tconn transport.Conn, clientAddr netip.Addr, slot *preAuthSlot, markServing func() bool, monitorPeer bool, handler Handler, closeDiagnostics *transportCloseDiagnostics) (rErr error) {
 	conn := newConn(tconn, s.cipher, s.msgID, s.clock, s.writeTimeout, s.log)
 	conn.sessionRegistry = s.registry
 	conn.shutdown = s.shutdown
@@ -1065,7 +1148,7 @@ func (s *Server) serveConnMode(readCtx, requestCtx context.Context, tconn transp
 			if peerReader != nil {
 				exchangeTransport = peerQueueConn{Conn: tconn, reader: peerReader}
 			}
-			if err := s.runExchange(readCtx, exchangeTransport, b, clientAddr); err != nil {
+			if err := s.runExchangeWithCloseDiagnostics(readCtx, exchangeTransport, b, clientAddr, closeDiagnostics); err != nil {
 				unexpected, ok := errors.AsType[*exchange.UnexpectedEncryptedError](err)
 				if !ok {
 					return err
@@ -1142,6 +1225,9 @@ func (s *Server) serveConnMode(readCtx, requestCtx context.Context, tconn transp
 		// this key skips that reservation so the post-dispatch charge below still
 		// observes a same-frame rebind.
 		if err := s.rpcHandle(requestCtx, conn, b, userID, provisional, clientAddr, slot, handler, func() error {
+			if userID != 0 {
+				closeDiagnostics.markAuthorized()
+			}
 			if hold.signedIn || userID != 0 || (hold.charged && hold.key == authKeyID) {
 				return nil
 			}
@@ -1218,6 +1304,9 @@ func (s *Server) serveConnMode(readCtx, requestCtx context.Context, tconn transp
 			}
 			return nil
 		}
+		if chargeUser != 0 || hold.signedIn {
+			closeDiagnostics.markAuthorized()
+		}
 		// Register the conn for the key's current binding, which s.keys.Get
 		// re-reads every frame. A changed binding was removed before dispatch;
 		// this adds the resolved user after the frame has been handled.
@@ -1271,6 +1360,10 @@ func (s *Server) touch(ctx context.Context, id [8]byte, clientAddr netip.Addr, e
 // persists the resulting auth key. A ServerExchangeError is reported to the
 // client as a protocol error and ends the connection.
 func (s *Server) runExchange(ctx context.Context, tconn transport.Conn, first *bin.Buffer, clientAddr netip.Addr) error {
+	return s.runExchangeWithCloseDiagnostics(ctx, tconn, first, clientAddr, nil)
+}
+
+func (s *Server) runExchangeWithCloseDiagnostics(ctx context.Context, tconn transport.Conn, first *bin.Buffer, clientAddr netip.Addr, closeDiagnostics *transportCloseDiagnostics) error {
 	bc := newBufferedConn(tconn)
 	bc.Push(first)
 	diagnostics := newExchangeDiagnostics()
@@ -1279,6 +1372,7 @@ func (s *Server) runExchange(ctx context.Context, tconn transport.Conn, first *b
 		Conn: exchangeDiagnosticConn{
 			Conn:        bc,
 			diagnostics: diagnostics,
+			closeState:  closeDiagnostics,
 		},
 		keys:            s.keys,
 		pendingLifetime: s.pendingLoginLifetime,
@@ -1304,6 +1398,9 @@ func (s *Server) runExchange(ctx context.Context, tconn transport.Conn, first *b
 			stage: diagnostics.stage,
 			cause: classifyExchangeFailure(err, diagnostics.operation),
 		}
+	}
+	if closeDiagnostics != nil {
+		closeDiagnostics.markDHComplete()
 	}
 
 	if err := s.persistAuthKey(ctx, key); err != nil {

@@ -182,19 +182,23 @@ already started are reported when the watch begins. A worker stays pending
 until its hold is released and its script has loaded. A worker that cannot be
 attached and enabled, or is still attaching when the window closes, is
 reported as `worker-unobservable` or `worker-pending`. The QA runner's preflight
-proof accepts up to four connections, each matching the endpoint with exactly
-one 101 response. The web client's SharedWorker keeps four account slots, and
-an unauthenticated page load opens one base-DC socket for each slot. Sign-in and
-chat-list rendering reuse those transports. At the end, `auth.logOut` revokes
-its own auth key; the server evicts that socket after replying, and the still-
-open client slot reconnects once before teardown. The full acceptance lifecycle
-therefore allows five connection openings, but the fifth is valid only during
-logout, must use the validated endpoint, and may have no handshake response if
-teardown interrupts it; any observed response must be a single 101. An extra
-connection during page load, sign-in or chat-list rendering, or a sixth opening
-fails the proof. `run.sh` and the progress helper enforce the same lifecycle
-budget. The host probe's CONNECT window caps allowed tunnels only at the counter
-clamp of 100.
+proof accepts up to four active connections, each matching the endpoint with
+exactly one 101 response. The web client's SharedWorker keeps four account
+slots, and an unauthenticated page load opens one base-DC socket for each slot.
+Sign-in and chat-list rendering normally reuse those transports. If one closes
+during sign-in, the client may replace that slot once; the replacement must use
+the validated endpoint and complete with one 101, leaving the same four active
+slots. At the end, `auth.logOut` revokes its own auth key; the server evicts that
+socket after replying, and the still-open client slot reconnects once before
+teardown. The full acceptance lifecycle therefore allows up to six openings:
+four initial sockets, one authenticated slot replacement, and one logout
+reconnect. A close without a replacement, an extra concurrently active slot,
+more than one sign-in replacement, or more than one logout reconnect fails the
+proof. The logout reconnect must use the validated endpoint and may have no
+handshake response if teardown interrupts it; any observed response must be a
+single 101. `run.sh` and the progress helper enforce the same lifecycle budget.
+The host probe's CONNECT window caps allowed tunnels only at the counter clamp
+of 100.
 
 The wrapper suppresses Compose and container stderr. The one-shot lock
 serializes this fixed project; preflight requires at least 2 GiB free under
@@ -275,9 +279,10 @@ closed-connection signals map to `timeout` and `closed`.
 The result is one JSON line with exactly `schemaVersion`, `ok`, `phase`,
 `outcome`, `logout`, `targetHost`, `sourceCommit`, and `wssConnections`.
 Version 2 binds the compiled host and mounted source revision, and clamps the
-WSS count at six to represent five observed openings or an overflow. A
-successful sign-in allows four initial account-slot sockets and one reconnect
-during its own `auth.logOut` call before teardown. The pinned QA v2
+WSS count at seven to represent six observed openings or an overflow. A
+successful sign-in allows four initial account-slot sockets, one replacement
+after a close during authentication, and one reconnect during its own
+`auth.logOut` call before teardown. The pinned QA v2
 script still emits this version 2 shape. Acceptance mode now validates QA v3;
 until the v3 script and pin are installed, a QA v2 line is marked invalid in
 the wrapper result below. This does not change the host probe code or process

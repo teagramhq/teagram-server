@@ -1,9 +1,9 @@
 import { ALLOWED_HOST } from "./connect-observer.mjs";
 
-// The web client opens four account-slot sockets on load and reconnects the
-// logged-out slot once before the acceptance context is torn down.
+// The web client opens four account-slot sockets on load, may replace one
+// closed slot after sign-in, and reconnects the logged-out slot once at teardown.
 export const WSS_ACCOUNT_SLOT_CEILING = 4;
-export const WSS_CONNECTION_CEILING = WSS_ACCOUNT_SLOT_CEILING + 1;
+export const WSS_CONNECTION_CEILING = WSS_ACCOUNT_SLOT_CEILING + 2;
 
 const PHASES = new Set([
   "wss-not-opened",
@@ -91,8 +91,10 @@ export function createAcceptanceProgress({ sourceCommit }) {
   let outcome = "other";
   let outcomeIsFinal = false;
   let wssConnections = 0;
+  let activeWssConnections = 0;
   let unexpectedWssConnection = false;
   let logoutStarted = false;
+  let logoutReconnects = 0;
   let logout = "not-attempted";
   let finishPromise;
   let finished = false;
@@ -124,16 +126,37 @@ export function createAcceptanceProgress({ sourceCommit }) {
     observeWssConnection() {
       if (finished || (outcomeIsFinal && phase !== "signed-in")) return false;
       wssConnections = Math.min(WSS_CONNECTION_CEILING + 1, wssConnections + 1);
-      if (wssConnections > WSS_ACCOUNT_SLOT_CEILING && !logoutStarted) {
+      activeWssConnections += 1;
+      const authenticationInProgress = phase === "password-check" || phase === "signed-in";
+      if (wssConnections > WSS_CONNECTION_CEILING) {
         unexpectedWssConnection = true;
         return false;
       }
-      if (wssConnections > WSS_CONNECTION_CEILING) {
+      if (logoutStarted && wssConnections > WSS_ACCOUNT_SLOT_CEILING) {
+        logoutReconnects += 1;
+        if (logoutReconnects > 1) {
+          unexpectedWssConnection = true;
+          return false;
+        }
+      } else if (wssConnections > WSS_ACCOUNT_SLOT_CEILING &&
+          (!authenticationInProgress || wssConnections > WSS_ACCOUNT_SLOT_CEILING + 1)) {
         unexpectedWssConnection = true;
         return false;
       }
       if (phase === "wss-not-opened") phase = "wss-not-101";
       return true;
+    },
+    observeWssClosed() {
+      if (finished) return true;
+      if (activeWssConnections === 0) {
+        unexpectedWssConnection = true;
+        return false;
+      }
+      activeWssConnections -= 1;
+      return true;
+    },
+    isSignedIn() {
+      return phase === "signed-in";
     },
     observeWssHandshake(status) {
       if (finishPromise || outcomeIsFinal || phase !== "wss-not-101" || wssConnections === 0 || status !== 101) {

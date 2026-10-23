@@ -906,6 +906,8 @@ jobs:
       - name: Check deploy script syntax
         run: |
           bash -n deploy/teagram/deploy-main.sh
+          bash -n deploy/teagram/teagram-logs.sh
+          bash -n deploy/teagram/test-teagram-logs.sh
           bash -n deploy/telegram-server/deploy-main.sh
           bash -n deploy/teagram-demo/prepare-env.sh
           bash -n deploy/teagram-demo/demo-common.sh
@@ -921,6 +923,8 @@ jobs:
           bash -n deploy/teagram-demo/test-seed-compose.sh
           shellcheck \
             deploy/teagram/deploy-main.sh \
+            deploy/teagram/teagram-logs.sh \
+            deploy/teagram/test-teagram-logs.sh \
             deploy/telegram-server/deploy-main.sh \
             deploy/teagram-demo/prepare-env.sh \
             deploy/teagram-demo/demo-common.sh \
@@ -940,6 +944,9 @@ jobs:
 
       - name: Check deploy script target fixtures
         run: deploy/teagram/test-deploy-main.sh
+
+      - name: Check teagram log access command
+        run: deploy/teagram/test-teagram-logs.sh
 
       - name: Check public demo Compose policy
         run: deploy/teagram-demo/test-demo-compose.sh

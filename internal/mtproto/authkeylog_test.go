@@ -151,10 +151,16 @@ func TestUnknownAuthKeyLogsAreSampledAcrossConnections(t *testing.T) {
 	}
 
 	records := sink.waitFor(t, 1)
-	if len(records) != 1 {
-		t.Fatalf("diagnostic records = %d, want one within the sampling window", len(records))
+	var diagnosticRecords []authKeyLogRecord
+	for _, record := range records {
+		if record.message == "server rejected MTProto auth key" {
+			diagnosticRecords = append(diagnosticRecords, record)
+		}
 	}
-	record := records[0]
+	if len(diagnosticRecords) != 1 {
+		t.Fatalf("auth-key diagnostic records = %d, want one within the sampling window; all records: %+v", len(diagnosticRecords), records)
+	}
+	record := diagnosticRecords[0]
 	if record.attrs["reason"] != "lookup_miss" {
 		t.Fatalf("reason = %v, want lookup_miss", record.attrs["reason"])
 	}
@@ -217,7 +223,7 @@ func TestAuthKeyLookupErrorClosesWithoutReplyOrDecryptDetailsInLogs(t *testing.T
 		t.Fatalf("close: %v", err)
 	}
 
-	records := sink.waitFor(t, 1)
+	records := sink.waitFor(t, 2)
 	for _, record := range records {
 		logged := record.message + " " + fmt.Sprint(record.attrs)
 		if strings.Contains(logged, "SECRET-DECRYPT-DETAIL") || strings.Contains(strings.ToLower(logged), "decrypt") {
