@@ -1925,7 +1925,8 @@ make_real_git_fixture real-git-gate-rejection-restores-modes real-git-gate-rejec
 checkout=$(cat "$TMP/real-git-gate-rejection-restores-modes-checkout-path")
 state=$(cat "$TMP/real-git-gate-rejection-restores-modes-state-path")
 baseline_sha=$(cat "$TMP/real-git-gate-rejection-restores-modes-baseline-sha-path")
-status=$(run_fixture real-git-gate-rejection-restores-modes)
+printf '%s\n' 1 > "$TMP/real-git-gate-rejection-restores-modes-adopt-env"
+status=$(run_fixture real-git-gate-rejection-restores-modes built 0 '' 2 '' '' apply)
 if [ "$status" != 0 ] && \
    grep -q 'pinned gate hashes changed after fast-forward; target was not started' "$TMP/real-git-gate-rejection-restores-modes.stderr" && \
    [ "$(cat "$state/build-file-mode-after-merge")" = 755 ] && \
@@ -1944,7 +1945,8 @@ make_real_git_fixture real-git-preflight-rejection-restores-modes config-drift
 checkout=$(cat "$TMP/real-git-preflight-rejection-restores-modes-checkout-path")
 state=$(cat "$TMP/real-git-preflight-rejection-restores-modes-state-path")
 baseline_sha=$(cat "$TMP/real-git-preflight-rejection-restores-modes-baseline-sha-path")
-status=$(run_fixture real-git-preflight-rejection-restores-modes)
+printf '%s\n' 1 > "$TMP/real-git-preflight-rejection-restores-modes-adopt-env"
+status=$(run_fixture real-git-preflight-rejection-restores-modes built 0 '' 2 '' '' apply)
 if [ "$status" != 0 ] && \
    grep -q 'resolved Compose preflight rejected unapproved drift; target was not started' "$TMP/real-git-preflight-rejection-restores-modes.stderr" && \
    [ "$(cat "$state/build-file-mode-after-merge")" = 755 ] && \
