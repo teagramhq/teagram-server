@@ -66,6 +66,7 @@ POSTGRES_PASSWORD=$postgres_password
 TG_AUTHKEY_ENC_KEY=$authkey_encryption_key
 TG_PUBLIC_LINK_PREFIX=https://demo.teagram.io/
 TG_ADVERTISE_ADDR=demo.teagram.io:443
+TG_ADVERTISE_DEMO_GUEST_SIGN_UP=true
 TG_WEBSOCKET_LISTEN_ADDR=:2446
 TG_WEBSOCKET_ALLOWED_ORIGINS=https://web.teagram.io
 TG_REGISTRATION=open

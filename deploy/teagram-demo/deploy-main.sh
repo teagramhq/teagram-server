@@ -9,6 +9,9 @@ source "$SCRIPT_DIR/demo-common.sh"
 readonly SHA=${DEPLOY_SHA:-}
 readonly PREV_SHA=${PREVIOUS_SHA:-}
 readonly MODE_HELPER="$DEMO_SCRIPT_DIR/../teagramd/rollout-runner/blob-mode-state.py"
+readonly ACTIVE_SERVER=$(demo_active_server)
+readonly CANDIDATE_SERVER=$(demo_inactive_server)
+readonly CANDIDATE_ENDPOINT="$CANDIDATE_SERVER:2443"
 TS=$(date -u +%Y%m%dT%H%M%SZ)
 readonly TS
 TMP_DIR=
@@ -18,24 +21,59 @@ DB_DUMP=
 RESTORE_DB=
 RESTORE_DB_CREATED=0
 BACKUP_READY=0
-DATABASE_MUTATION=0
-SERVICES_STOPPED=0
+CANDIDATE_STARTED=0
 PUBLIC_ACTIVATION_STARTED=0
+CUTOVER_COMMITTED=0
+CLIENT_CONFIG_UPDATED=0
+
+demo_remove_previous_image() {
+  local previous_image_id="$1" active_image_id="$2"
+  [[ "$previous_image_id" != "$active_image_id" ]] || return 0
+  docker image rm "$previous_image_id" ||
+    printf 'could not remove previous image %s\n' "$previous_image_id" >&2
+}
 
 demo_cleanup() {
   local rc=$?
   trap - EXIT
+  if (( rc != 0 && BACKUP_READY == 1 )); then
+    if (( CUTOVER_COMMITTED == 1 )); then
+      printf 'demo rollout failed after cutover; active server=%s and database preserved sha=%s backup=%s\n' \
+        "$CANDIDATE_SERVER" "$SHA" "$BACKUP_DIR" >&2
+    else
+      if (( PUBLIC_ACTIVATION_STARTED == 1 )); then
+        if demo_haproxy_control enable "$ACTIVE_SERVER" &&
+          demo_haproxy_control wait-healthy "$ACTIVE_SERVER" --timeout 60 &&
+          demo_haproxy_control drain "$CANDIDATE_SERVER"; then
+          if (( CLIENT_CONFIG_UPDATED == 1 )); then
+            cp -- "$BACKUP_DIR/client.json" "$DEMO_CLIENT_CONFIG.next" || rc=1
+            chown root:root "$DEMO_CLIENT_CONFIG.next" || rc=1
+            chmod 0644 "$DEMO_CLIENT_CONFIG.next" || rc=1
+            mv -f -- "$DEMO_CLIENT_CONFIG.next" "$DEMO_CLIENT_CONFIG" || rc=1
+          fi
+          demo_write_active_server "$ACTIVE_SERVER" || rc=1
+          demo_prepare_haproxy_runtime || rc=1
+          printf 'demo rollout reverted to server=%s; migrated database preserved backup=%s\n' \
+            "$ACTIVE_SERVER" "$BACKUP_DIR" >&2
+        else
+          printf 'demo rollout could not restore HAProxy to server=%s; edge remains running and backup=%s\n' \
+            "$ACTIVE_SERVER" "$BACKUP_DIR" >&2
+          rc=1
+        fi
+      fi
+      if (( CANDIDATE_STARTED == 1 )); then
+        demo_compose stop "$CANDIDATE_SERVER" || rc=1
+      fi
+      if [[ -n "$PREV_IMAGE_ID" ]]; then
+        docker image tag "$PREV_IMAGE_ID" teagramd:local || rc=1
+      fi
+      printf 'demo rollout retained previous server=%s database state and backup=%s\n' \
+        "$ACTIVE_SERVER" "$BACKUP_DIR" >&2
+    fi
+  fi
   if [[ -n "$RESTORE_DB" && "$RESTORE_DB_CREATED" == 1 ]]; then
     demo_compose exec -T postgres dropdb -U postgres --if-exists "$RESTORE_DB" </dev/null ||
       printf 'could not remove isolated restore database %s\n' "$RESTORE_DB" >&2
-  fi
-  if (( rc != 0 && (BACKUP_READY == 1 || SERVICES_STOPPED == 1) )); then
-    if (( PUBLIC_ACTIVATION_STARTED == 1 )); then
-      demo_preserve_after_activation_failure ||
-        printf 'could not confirm public edge stopped; inspect deployment backup %s\n' "$BACKUP_DIR" >&2
-    else
-      demo_rollback || printf 'demo rollback failed; keep services stopped and inspect %s\n' "$BACKUP_DIR" >&2
-    fi
   fi
   if [[ -n "$TMP_DIR" && -d "$TMP_DIR" ]]; then
     rm -rf -- "$TMP_DIR"
@@ -44,32 +82,7 @@ demo_cleanup() {
 }
 trap demo_cleanup EXIT
 
-demo_rollback_stop() {
-  if demo_compose config --services | grep -Fxq haproxy; then
-    if demo_compose ps -q turnstile-egress | grep -q .; then
-      demo_compose stop edge haproxy teagramd turnstile-egress
-    else
-      demo_compose stop edge haproxy teagramd
-    fi
-  else
-    demo_compose stop edge teagramd
-  fi
-}
-
-demo_preserve_after_activation_failure() {
-  local stop_rc=0
-  set +e
-  demo_compose stop edge haproxy >/dev/null 2>&1 || stop_rc=1
-  printf 'demo activation failed; public edge stopped and deployed database preserved sha=%s backup=%s\n' \
-    "$SHA" "$DB_DUMP" >&2
-  return "$stop_rc"
-}
-
-demo_quiesce_and_backup_database() {
-  SERVICES_STOPPED=1
-  demo_compose stop edge haproxy
-  demo_compose stop teagramd turnstile-egress
-
+demo_backup_database() {
   DB_DUMP="$BACKUP_DIR/postgres.dump"
   demo_compose exec -T postgres pg_dump -U postgres -Fc teagram </dev/null > "$DB_DUMP"
   chown root:root "$DB_DUMP"
@@ -91,63 +104,6 @@ demo_quiesce_and_backup_database() {
   chown root:root "$BACKUP_DIR/postgres.dump.sha256"
   chmod 0600 "$BACKUP_DIR/postgres.dump.sha256"
   BACKUP_READY=1
-}
-
-demo_restore_database() {
-  local restore_rc=0
-  demo_compose exec -T postgres dropdb -U postgres --if-exists teagram </dev/null || restore_rc=1
-  demo_compose exec -T postgres createdb -U postgres teagram </dev/null || restore_rc=1
-  demo_compose_input exec -T postgres pg_restore -U postgres --no-owner --no-privileges --exit-on-error -d teagram \
-    < "$DB_DUMP" || restore_rc=1
-  return "$restore_rc"
-}
-
-demo_remove_previous_image() {
-  local previous_image_id="$1" active_image_id="$2"
-  [[ "$previous_image_id" != "$active_image_id" ]] || return 0
-  docker image rm "$previous_image_id" ||
-    printf 'could not remove previous image %s\n' "$previous_image_id" >&2
-}
-
-demo_rollback() {
-  local rollback_rc=0
-  set +e
-  if (( SERVICES_STOPPED == 1 || DATABASE_MUTATION == 1 )); then
-    demo_rollback_stop >/dev/null 2>&1 || rollback_rc=1
-  fi
-  if (( DATABASE_MUTATION == 1 )); then
-    demo_restore_database || rollback_rc=1
-  fi
-  git -C "$DEMO_REPO_ROOT" reset --hard "$PREV_SHA" || rollback_rc=1
-  docker image tag "$PREV_IMAGE_ID" teagramd:local || rollback_rc=1
-  cp -- "$BACKUP_DIR/client.json" "$DEMO_STATE_DIR/client.json.next" || rollback_rc=1
-  chown root:root "$DEMO_STATE_DIR/client.json.next" || rollback_rc=1
-  chmod 0644 "$DEMO_STATE_DIR/client.json.next" || rollback_rc=1
-  mv -f -- "$DEMO_STATE_DIR/client.json.next" "$DEMO_STATE_DIR/client.json" || rollback_rc=1
-  if (( SERVICES_STOPPED == 1 && DATABASE_MUTATION == 1 && rollback_rc == 0 )); then
-    demo_compose rm -sf migrate >/dev/null 2>&1 || rollback_rc=1
-    if (( rollback_rc == 0 )); then
-      demo_compose up -d migrate || rollback_rc=1
-    fi
-    if (( rollback_rc == 0 )); then
-      demo_wait_migration demo_compose 'rollback migrations' || rollback_rc=1
-    fi
-  fi
-  if (( SERVICES_STOPPED == 1 && rollback_rc == 0 )); then
-    demo_compose up -d teagramd edge || rollback_rc=1
-    if (( rollback_rc == 0 )); then
-      python3 "$SCRIPT_DIR/smoke.py" "$DEMO_STATE_DIR/client.json" || rollback_rc=1
-    fi
-  fi
-  if (( rollback_rc != 0 && SERVICES_STOPPED == 1 )); then
-    demo_rollback_stop >/dev/null 2>&1 || true
-  fi
-  if (( rollback_rc == 0 )); then
-    printf 'demo rollback=verified previous_sha=%s dump=%s\n' "$PREV_SHA" "$DB_DUMP" >&2
-    return 0
-  fi
-  printf 'demo rollback=failed previous_sha=%s dump=%s\n' "$PREV_SHA" "$DB_DUMP" >&2
-  return 1
 }
 
 demo_require_root
@@ -180,10 +136,12 @@ TARGET_INVENTORY="$TMP_DIR/target-inventory.json"
 demo_render_config "$TARGET_RENDER"
 demo_check_blob_mount "$TARGET_RENDER"
 mapfile -t CONTAINER_IDS < <(demo_compose ps -q)
-((${#CONTAINER_IDS[@]} >= 4)) || demo_fail 'demo database, server, HAProxy, or edge container is not running'
+(("${#CONTAINER_IDS[@]}" >= 4)) || demo_fail 'demo database, server, HAProxy, or edge container is not running'
+[[ -z "$(demo_compose ps --status running -q "$CANDIDATE_SERVER")" ]] ||
+  demo_fail 'candidate server slot is already running; reconcile the rollout before deploying'
 docker inspect "${CONTAINER_IDS[@]}" > "$TMP_DIR/containers.raw.json"
 mapfile -t POSTGRES_IDS < <(demo_compose ps -q postgres)
-((${#POSTGRES_IDS[@]} == 1)) || demo_fail 'running demo database is missing or ambiguous'
+(("${#POSTGRES_IDS[@]}" == 1)) || demo_fail 'running demo database is missing or ambiguous'
 TARGET_POSTGRES_HASH=$(demo_compose config --hash postgres | awk '$1 == "postgres" {print $2}')
 LIVE_POSTGRES_HASH=$(docker inspect --format '{{index .Config.Labels "com.docker.compose.config-hash"}}' "${POSTGRES_IDS[0]}")
 [[ "$TARGET_POSTGRES_HASH" =~ ^[0-9a-f]{64}$ && "$LIVE_POSTGRES_HASH" == "$TARGET_POSTGRES_HASH" ]] ||
@@ -200,16 +158,19 @@ python3 "$MODE_HELPER" validate \
   --override "$SCRIPT_DIR/compose.empty-overrides.yaml" \
   --checkout "$DEMO_REPO_ROOT"
 
-mapfile -t SERVER_IDS < <(demo_compose ps -q teagramd)
-((${#SERVER_IDS[@]} == 1)) || demo_fail 'running demo server is missing or ambiguous'
+mapfile -t SERVER_IDS < <(demo_compose ps -q "$ACTIVE_SERVER")
+(("${#SERVER_IDS[@]}" == 1)) || demo_fail 'active demo server is missing or ambiguous'
 PREV_IMAGE_ID=$(docker inspect --format '{{.Image}}' "${SERVER_IDS[0]}")
 [[ "$PREV_IMAGE_ID" =~ ^sha256:[0-9a-f]{64}$ ]] || demo_fail 'running demo image ID is invalid'
 printf '%s\n' "$PREV_IMAGE_ID" > "$BACKUP_DIR/previous-image-id.txt"
-cp -- "$DEMO_STATE_DIR/client.json" "$BACKUP_DIR/client.json"
-chown root:root "$BACKUP_DIR/previous-image-id.txt" "$BACKUP_DIR/client.json"
-chmod 0600 "$BACKUP_DIR/previous-image-id.txt" "$BACKUP_DIR/client.json"
+printf '%s\n' "$ACTIVE_SERVER" > "$BACKUP_DIR/active-server.txt"
+cp -- "$DEMO_CLIENT_CONFIG" "$BACKUP_DIR/client.json"
+chown root:root "$BACKUP_DIR/previous-image-id.txt" "$BACKUP_DIR/active-server.txt" "$BACKUP_DIR/client.json"
+chmod 0600 "$BACKUP_DIR/previous-image-id.txt" "$BACKUP_DIR/active-server.txt" "$BACKUP_DIR/client.json"
 
-demo_quiesce_and_backup_database
+# The snapshot is taken online. Existing clients keep using the old server while
+# the image builds, migrations apply, and the candidate is checked.
+demo_backup_database
 
 export TEAGRAMD_SOURCE_REVISION="$SHA"
 demo_compose build teagramd
@@ -221,27 +182,44 @@ jq -e '
   and .mtproto.endpoint == "demo.teagram.io:443"
   and (.mtproto.rsa_spki | type == "string" and length > 0)
   and .websocket.endpoint == "wss://demo.teagram.io/apiws"
-' "$TMP_DIR/client.json" >/dev/null || demo_fail 'client-config lacks the approved demo WebSocket binding'
+  and .demo.guest_sign_up == true
+' "$TMP_DIR/client.json" >/dev/null || demo_fail 'client-config lacks the approved demo WebSocket or guest signup binding'
 OLD_SPKI=$(jq -er '.mtproto.rsa_spki' "$BACKUP_DIR/client.json")
 NEW_SPKI=$(jq -er '.mtproto.rsa_spki' "$TMP_DIR/client.json")
 [[ "$NEW_SPKI" == "$OLD_SPKI" ]] || demo_fail 'deployment changed the persistent RSA identity'
 
-DATABASE_MUTATION=1
+demo_compose rm -sf migrate >/dev/null
 demo_compose up -d migrate
 demo_wait_migration demo_compose 'deployment migrations'
-install -o root -g root -m 0644 "$TMP_DIR/client.json" "$DEMO_STATE_DIR/client.json.next"
-mv -f -- "$DEMO_STATE_DIR/client.json.next" "$DEMO_STATE_DIR/client.json"
-demo_compose up -d teagramd
-demo_validation_compose up -d haproxy edge
-python3 "$SCRIPT_DIR/smoke.py" "$DEMO_STATE_DIR/client.json" 18080
-mapfile -t SERVER_IDS < <(demo_compose ps -q teagramd)
-((${#SERVER_IDS[@]} == 1)) || demo_fail 'deployed server is missing or ambiguous'
-IMAGE_ID=$(docker inspect --format '{{.Image}}' "${SERVER_IDS[0]}")
-[[ "$(docker image inspect --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' "$IMAGE_ID")" == "$SHA" ]] ||
-  demo_fail 'running server image does not match the requested SHA'
-demo_validation_compose stop edge
+CANDIDATE_STARTED=1
+demo_seed_compose up -d "$CANDIDATE_SERVER"
+mapfile -t CANDIDATE_IDS < <(demo_compose ps -q "$CANDIDATE_SERVER")
+(("${#CANDIDATE_IDS[@]}" == 1)) || demo_fail 'candidate server is missing or ambiguous'
+CANDIDATE_IMAGE_ID=$(docker inspect --format '{{.Image}}' "${CANDIDATE_IDS[0]}")
+CANDIDATE_IMAGE_REVISION=$(docker image inspect --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' "$CANDIDATE_IMAGE_ID")
+[[ "$CANDIDATE_IMAGE_REVISION" == "$SHA" ]] || demo_fail 'running candidate image does not match the requested SHA'
+"$SCRIPT_DIR/seed-demo.sh" --verify-seed --endpoint "$CANDIDATE_ENDPOINT"
+demo_compose up -d --wait --wait-timeout 120 "$CANDIDATE_SERVER"
+
+# HAProxy checks both candidate listeners before routing to them. The previous
+# server remains enabled until both candidate checks pass.
 PUBLIC_ACTIVATION_STARTED=1
-demo_compose up -d edge
-demo_remove_previous_image "$PREV_IMAGE_ID" "$IMAGE_ID"
+demo_haproxy_control enable "$CANDIDATE_SERVER"
+demo_haproxy_control wait-healthy "$CANDIDATE_SERVER" --timeout 60
+demo_haproxy_control drain "$ACTIVE_SERVER"
+install -o root -g root -m 0644 "$TMP_DIR/client.json" "$DEMO_CLIENT_CONFIG.next"
+mv -f -- "$DEMO_CLIENT_CONFIG.next" "$DEMO_CLIENT_CONFIG"
+CLIENT_CONFIG_UPDATED=1
+python3 "$SCRIPT_DIR/smoke.py" "$DEMO_CLIENT_CONFIG"
+"$SCRIPT_DIR/seed-demo.sh" --verify-turnstile --endpoint haproxy:2443
+demo_write_active_server "$CANDIDATE_SERVER"
+demo_prepare_haproxy_runtime
+CUTOVER_COMMITTED=1
+
+# New sessions route to the candidate while HAProxy drains the old server's
+# existing connections before its graceful stop signal.
+demo_compose stop "$ACTIVE_SERVER"
+demo_remove_previous_image "$PREV_IMAGE_ID" "$CANDIDATE_IMAGE_ID"
 BACKUP_READY=0
-printf 'demo deployed sha=%s previous_sha=%s backup=%s\n' "$SHA" "$PREV_SHA" "$DB_DUMP"
+printf 'demo deployed sha=%s previous_sha=%s active_server=%s backup=%s\n' \
+  "$SHA" "$PREV_SHA" "$CANDIDATE_SERVER" "$BACKUP_DIR"

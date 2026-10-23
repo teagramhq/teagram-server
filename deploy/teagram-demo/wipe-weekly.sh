@@ -49,10 +49,15 @@ demo_prune_deploy_backups() {
 
 TARGET_RENDER="$TMP_DIR/target-render.json"
 TARGET_INVENTORY="$TMP_DIR/target-inventory.json"
+ACTIVE_SERVER=$(demo_active_server)
+INACTIVE_SERVER=$(demo_inactive_server)
+ACTIVE_ENDPOINT="$ACTIVE_SERVER:2443"
 demo_render_config "$TARGET_RENDER"
 demo_check_blob_mount "$TARGET_RENDER"
 mapfile -t CONTAINER_IDS < <(demo_compose ps -q)
 ((${#CONTAINER_IDS[@]} >= 4)) || demo_fail 'demo database, server, HAProxy, or edge container is not running'
+[[ -z "$(demo_compose ps --status running -q "$INACTIVE_SERVER")" ]] ||
+  demo_fail 'inactive server slot is running; reconcile the rollout before wiping demo data'
 docker inspect "${CONTAINER_IDS[@]}" > "$TMP_DIR/containers.raw.json"
 python3 "$DEMO_SCRIPT_DIR/../teagramd/rollout-runner/blob-mode-state.py" containers \
   --checkout "$DEMO_REPO_ROOT" < "$TMP_DIR/containers.raw.json" > "$TMP_DIR/containers.json"
@@ -66,7 +71,7 @@ python3 "$DEMO_SCRIPT_DIR/../teagramd/rollout-runner/blob-mode-state.py" validat
   --override "$SCRIPT_DIR/compose.empty-overrides.yaml" \
   --checkout "$DEMO_REPO_ROOT"
 
-CLIENT_CONFIG="$DEMO_STATE_DIR/client.json"
+CLIENT_CONFIG="$DEMO_CLIENT_CONFIG"
 [[ -f "$CLIENT_CONFIG" && ! -L "$CLIENT_CONFIG" ]] || demo_fail 'current public client config is missing'
 BEFORE_SPKI=$(jq -er '.mtproto.rsa_spki' "$CLIENT_CONFIG")
 [[ "$(jq -er '.websocket.endpoint' "$CLIENT_CONFIG")" == 'wss://demo.teagram.io/apiws' ]] ||
@@ -100,7 +105,7 @@ if [[ -d /var/lib/teagram-demo-activity && ! -L /var/lib/teagram-demo-activity &
 fi
 # Stop every public path before resetting data. The seed-only overlay never
 # starts HAProxy or edge.
-demo_compose stop edge haproxy teagramd turnstile-egress
+demo_compose stop edge haproxy "$ACTIVE_SERVER" turnstile-egress
 demo_prune_deploy_backups
 demo_compose exec -T postgres dropdb -U postgres --if-exists teagram </dev/null
 demo_compose exec -T postgres createdb -U postgres teagram </dev/null
@@ -111,13 +116,13 @@ demo_compose rm -sf migrate >/dev/null
 demo_compose up -d migrate
 demo_wait_migration demo_compose 'post-reset migrations'
 
-demo_seed_compose up -d teagramd
+demo_seed_compose up -d "$ACTIVE_SERVER"
 demo_prepare_seed_owner "$TMP_DIR"
 "$SEED_SCRIPT" --seed \
-  --endpoint teagramd:2443 \
+  --endpoint "$ACTIVE_ENDPOINT" \
   --owner-username "$DEMO_SEED_OWNER_USERNAME" \
   --owner-password-file "$DEMO_SEED_PASSWORD_FILE"
-"$SEED_SCRIPT" --verify-seed --endpoint teagramd:2443
+"$SEED_SCRIPT" --verify-seed --endpoint "$ACTIVE_ENDPOINT"
 
 # Re-run the API seeder in the private seed lane and compare verified counts.
 "$SCRIPT_DIR/test-seed-compose.sh"
@@ -125,11 +130,11 @@ demo_prepare_seed_owner "$TMP_DIR"
 # Recreate teagramd from the production config and start HAProxy's private
 # MTProto path while edge stays down. The probe must prove Turnstile is active
 # before the public edge starts.
-demo_compose up -d --wait --wait-timeout 120 haproxy
+demo_compose up -d --wait --wait-timeout 120 "$ACTIVE_SERVER" haproxy
 "$SEED_SCRIPT" --verify-turnstile --endpoint haproxy:2443
 demo_compose up -d edge
 python3 "$SCRIPT_DIR/smoke.py" "$CLIENT_CONFIG"
-demo_compose run --rm --no-deps teagramd client-config > "$TMP_DIR/client-after-wipe.json"
+demo_compose run --rm --no-deps "$ACTIVE_SERVER" client-config > "$TMP_DIR/client-after-wipe.json"
 AFTER_SPKI=$(jq -er '.mtproto.rsa_spki' "$TMP_DIR/client-after-wipe.json")
 [[ "$AFTER_SPKI" == "$BEFORE_SPKI" ]] || demo_fail 'weekly wipe changed the persistent RSA identity'
 if [[ -f "$ACTIVITY_SERVICE" ]]; then

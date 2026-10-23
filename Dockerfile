@@ -5,6 +5,10 @@
 # there is the only thing to change.
 FROM mirror.gcr.io/library/golang:1.27 AS build
 
+ARG DEMO_BUILD_GOMAXPROCS
+ARG DEMO_BUILD_GOMEMLIMIT
+ARG DEMO_BUILD_GOFLAGS
+
 WORKDIR /src
 
 # Dependencies first: this layer survives every source edit.
@@ -21,7 +25,10 @@ COPY utils/ ./utils/
 
 # The module has no cgo dependency (pgx is pure Go), so a static binary is both
 # available and required — the distroless static base has no libc to link to.
-RUN CGO_ENABLED=0 go build -o /teagramd ./cmd/teagramd \
+RUN if [ -n "$DEMO_BUILD_GOMAXPROCS" ]; then export GOMAXPROCS="$DEMO_BUILD_GOMAXPROCS"; fi; \
+    if [ -n "$DEMO_BUILD_GOMEMLIMIT" ]; then export GOMEMLIMIT="$DEMO_BUILD_GOMEMLIMIT"; fi; \
+    if [ -n "$DEMO_BUILD_GOFLAGS" ]; then export GOFLAGS="$DEMO_BUILD_GOFLAGS"; fi; \
+    CGO_ENABLED=0 go build -o /teagramd ./cmd/teagramd \
     && CGO_ENABLED=0 go build -o /blob-migrate ./cmd/blob-migrate \
     && CGO_ENABLED=0 go build -o /photothumb ./cmd/photothumb \
     && CGO_ENABLED=0 go build -o /demo-seed ./cmd/demo-seed

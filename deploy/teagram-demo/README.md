@@ -10,7 +10,7 @@ The install script intentionally stops until the public client config exposes
 `wss://demo.teagram.io/apiws` (MAIN-2196) and the tracked API seeder is ready.
 It keeps the edge stopped until it has closed the admin election, seeded and
 verified the content, restored production settings and verified the Turnstile
-gate. No live host was changed by this repository change.
+gate.
 
 ## LXC prerequisites
 
@@ -18,11 +18,13 @@ The Steward provisions the separate `teagram-demo` Incus LXC and its network
 policy. Required layout and policy:
 
 - Root-owned checkout at `/opt/teagram-demo`, branch `main`.
-- Docker Engine and Compose v2.39.4 or later. The bootstrap overlay uses
+- Incus `teagram-demo` on charlie, Debian 13, with `limits.cpu=1`,
+  `limits.cpu.priority=0`, `limits.memory=2GiB` and a 20 GiB root disk. This
+  intentionally stays below the original 2-vCPU / 4-GiB guidance.
+- Docker Engine and Compose v5.6.1. The bootstrap overlay uses
   Compose's `!override` merge tag.
 - Bash, coreutils, curl, Docker CLI, Git, `grep`, jq, OpenSSL, Python 3, `flock` and a
   systemd timer service. The included weekly reset installer uses systemd.
-- At least 2 vCPU, 4 GiB memory and 20 GiB root storage.
 - A dedicated filesystem between 3 GiB and 4 GiB, mounted at
   `/srv/teagram-demo-blobs`. The aggregate upload store is a bind volume at
   `/srv/teagram-demo-blobs/data`; it must never fall back to the root disk.
@@ -63,7 +65,17 @@ and uploads are capped at 16 MiB per file and 256 MiB per account.
 
 `prepare-env.sh` keeps the Turnstile site key in `.env` and writes the secret
 key to `/var/lib/teagram-demo/secrets/turnstile-secret-key` with root ownership
-and mode 0600. Compose mounts that file only into teagramd.
+and mode 0600. Compose mounts that file only into teagramd. It also configures
+`TG_ADVERTISE_DEMO_GUEST_SIGN_UP=true` so web.teagram.io advertises demo signup.
+
+The demo is budgeted for 2 GiB: teagramd uses `GOMAXPROCS=1`,
+`GOMEMLIMIT=320MiB` and a 448 MiB container cap. Its image build uses one Go
+build worker with a 640 MiB memory limit. PostgreSQL is capped at 320 MiB with
+128 MiB shared buffers, 4 MiB work memory and 64 MiB maintenance work memory in
+the demo-specific `postgresql.conf`; the dev stack keeps its own larger profile.
+The seed and probe containers are capped at 256 MiB. If the in-box Go build or
+seed cannot complete within the LXC limit, report it here rather than
+increasing the host allocation.
 
 ## First install
 
@@ -73,10 +85,16 @@ root on the demo LXC:
 
 ```sh
 cd /opt/teagram-demo
+# Only on a new host with no prepared .env or Turnstile secret:
 deploy/teagram-demo/prepare-env.sh
 install -d -o 65532 -g 65532 -m 0700 /srv/teagram-demo-blobs/data
 deploy/teagram-demo/init-demo.sh
 ```
+
+The prepared charlie host already has both root-only secret files, so do not
+rerun `prepare-env.sh` there. Existing `.env` files may omit
+`TG_ADVERTISE_DEMO_GUEST_SIGN_UP`; Compose supplies the approved `true` default
+and validates the resolved value without rewriting the secrets.
 
 `prepare-env.sh` prompts for the demo-specific Turnstile site and secret keys,
 then creates root-owned `.env` mode 0600 with the site key, the secret-file
@@ -109,8 +127,9 @@ Before enabling it, configure the `demo` GitHub environment with:
 
 | Name | Kind | Value |
 |---|---|---|
-| `DEMO_DEPLOY_HOST` | variable | Demo LXC's tailnet host or IP |
-| `DEMO_DEPLOY_KNOWN_HOSTS` | variable | Pinned SSH host key line for that host |
+| `DEMO_DEPLOY_HOST` | variable | `100.100.162.10` (charlie's tailnet address; SSH forwards to the LXC) |
+| `DEMO_DEPLOY_PORT` | variable | `2223` |
+| `DEMO_DEPLOY_KNOWN_HOSTS` | variable | Pinned SSH host key line for `[100.100.162.10]:2223` |
 | `DEMO_DEPLOY_SSH_KEY` | secret | Dedicated key forced to the demo deploy command |
 | `TEAGRAM_DEMO_DEPLOY_ENABLED` | variable | `true` only after host setup and first install |
 
@@ -125,20 +144,23 @@ command="/opt/teagram-demo/deploy/teagram-demo/forced-command.sh",restrict ssh-e
 
 `forced-command.sh` accepts one full commit SHA, fetches `origin/main`, rejects
 non-main revisions and skips stale deploys. `deploy-main.sh` revalidates the
-blob authority and running containers, closes edge and HAProxy, then stops
-teagramd and the egress proxy before taking the root-only PostgreSQL custom
-dump. This captures the final accepted writes before the deployment pauses the
-demo. The script checks the dump with `pg_restore --list`, validates a restore,
-builds the tested image, preserves the RSA public key, and keeps writers down
-through migration and smoke checks. A failed migration or smoke
-check runs through the edge on loopback port `18080` while the Tunnel target
-remains on `8080`. Only after the smoke and image-revision checks pass does the
-script recreate edge on `8080`. A pre-activation failure restores the previous
-checkout, image, client config and database, then checks the previous server.
-If activation itself fails, the script closes edge and preserves the migrated
-database because public writes may have started; it retains the backup for
-recovery. The backup directory is reported on failure and success under
-`.state/teagram-demo/backups/`.
+blob authority and running containers, then takes and validates a root-only
+PostgreSQL dump while the existing server and public edge keep running. It
+builds the tested image, applies migrations while the old server remains live,
+starts the candidate in the inactive slot, verifies seeded API reads and both
+HAProxy listener checks, then sends new sessions to the candidate and drains the
+old server before stopping it.
+The active slot is persisted so a host or proxy restart keeps routing to the
+new server. WebSocket sessions already connected to the old process drain
+during its configured 120-second graceful stop.
+
+On a pre-cutover failure, the old server and edge stay available, the candidate
+stops, and the old image tag is restored. If traffic has reached the candidate,
+the script switches back to the old server when possible. It preserves the
+migrated database and the validated dump instead of restoring an online
+snapshot that could discard writes accepted during rollout. Keep schema changes
+backward-compatible with the previous server for this rollback path. The dump
+and metadata remain under `.state/teagram-demo/backups/` until the weekly wipe.
 
 Do not use `docker compose down -v`. The named `pgdata`, `tgkey` and `tgblobs`
 volumes have independent lifetimes; especially, removing `tgkey` changes the
@@ -150,7 +172,7 @@ server fingerprint and invalidates existing client authorizations.
 all files below the capped blob mount. It preserves the `tgkey` volume, the
 encryption keys and the RSA public identity, then runs migrations and seeds
 through the private API path while the public edge, HAProxy and Turnstile egress
-proxy are stopped.
+proxy are stopped. The wipe operates on the persisted active server slot.
 It creates the ordinary `demo_seed_owner` account through
 `teagramd admin create-user` to close the first-admin election before seeding.
 Its freshly generated password is kept in the root-only

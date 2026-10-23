@@ -126,9 +126,12 @@ jobs:
           DEMO_DEPLOY_SSH_KEY: ${{ secrets.DEMO_DEPLOY_SSH_KEY }}
           DEMO_DEPLOY_KNOWN_HOSTS: ${{ vars.DEMO_DEPLOY_KNOWN_HOSTS }}
           DEMO_DEPLOY_HOST: ${{ vars.DEMO_DEPLOY_HOST }}
+          DEMO_DEPLOY_PORT: ${{ vars.DEMO_DEPLOY_PORT }}
         run: |
-          [[ -n "$DEMO_DEPLOY_SSH_KEY" && -n "$DEMO_DEPLOY_KNOWN_HOSTS" && -n "$DEMO_DEPLOY_HOST" ]]
+          [[ -n "$DEMO_DEPLOY_SSH_KEY" && -n "$DEMO_DEPLOY_KNOWN_HOSTS" && -n "$DEMO_DEPLOY_HOST" && -n "$DEMO_DEPLOY_PORT" ]]
           [[ "$DEMO_DEPLOY_HOST" =~ ^[A-Za-z0-9.-]+$ ]]
+          [[ "$DEMO_DEPLOY_PORT" =~ ^[0-9]{1,5}$ ]]
+          (( 10#$DEMO_DEPLOY_PORT >= 1 && 10#$DEMO_DEPLOY_PORT <= 65535 ))
           install -d -m 700 "$RUNNER_TEMP/ssh-demo"
           (umask 077 && printf '%s\n' "$DEMO_DEPLOY_SSH_KEY" > "$RUNNER_TEMP/ssh-demo/id_deploy")
           printf '%s\n' "$DEMO_DEPLOY_KNOWN_HOSTS" > "$RUNNER_TEMP/ssh-demo/known_hosts"
@@ -137,9 +140,10 @@ jobs:
         env:
           DEPLOY_SHA: ${{ needs.deploy.outputs.sha }}
           DEMO_DEPLOY_HOST: ${{ vars.DEMO_DEPLOY_HOST }}
+          DEMO_DEPLOY_PORT: ${{ vars.DEMO_DEPLOY_PORT }}
         run: |
           [[ "$DEPLOY_SHA" =~ ^[0-9a-f]{40}$ ]]
-          ssh -T -i "$RUNNER_TEMP/ssh-demo/id_deploy" \
+          ssh -T -p "$DEMO_DEPLOY_PORT" -i "$RUNNER_TEMP/ssh-demo/id_deploy" \
             -o IdentitiesOnly=yes -o BatchMode=yes \
             -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$RUNNER_TEMP/ssh-demo/known_hosts" \
             -o ServerAliveInterval=30 -o ServerAliveCountMax=10 \
