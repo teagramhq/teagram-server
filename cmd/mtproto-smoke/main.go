@@ -183,6 +183,8 @@ func exchangeAuthKey(ctx context.Context, endpoint string, identity serverIdenti
 	if err != nil {
 		return fmt.Errorf("initialize abridged transport: %w", err)
 	}
+	// The 60-second temporary mode is a client request, not a server-side
+	// cleanup guarantee; see this command's security model.
 	_, err = exchange.NewExchanger(client, identity.dcID).
 		WithTimeout(exchangeTimeout).
 		WithTempMode(tempKeyLifetime).

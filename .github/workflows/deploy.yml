@@ -7,6 +7,8 @@ run-name: ${{ inputs.issue && format('{0} [{1}]', github.workflow, inputs.issue)
 # forced command runs the stable deploy/telegram-server/deploy-main.sh bridge
 # to that commit's canonical script. The job checks out that SHA only after
 # removing the deploy key, to run the post-deploy MTProto smoke check.
+# The smoke retains the runner's tailnet route but no deploy key or persisted
+# checkout token; its auth-key storage model is documented with the command.
 # .github/scripts/test-deploy-workflow-contract.sh guards this flow.
 on:
   workflow_run:
