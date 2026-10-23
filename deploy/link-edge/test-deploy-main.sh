@@ -110,7 +110,7 @@ for arg in "$@"; do
   fi
 done
 if [[ $url == *'/.well-known/teagramd/client' ]]; then
-  [[ -z $write_format ]] && printf '{"version":1}\n'
+  [[ -z $write_format ]] && printf '%s\n' "$TEST_CLIENT_JSON"
   exit 0
 fi
 if [[ $url == *'/.well-known/teagram-web/version.txt' ]]; then
@@ -132,7 +132,9 @@ CURL
 
 chmod +x "$tmp/bin/docker" "$tmp/bin/curl"
 sha=0123456789abcdef0123456789abcdef01234567
+valid_client_json='{"version":1,"mtproto":{"endpoint":"mtproto.example.test:2443","dc_id":2,"rsa_spki":"c3BraQ=="},"websocket":{"endpoint":"wss://mtproto.example.test/apiws"}}'
 export TEST_TARGET_SHA=$sha
+export TEST_CLIENT_JSON="$valid_client_json"
 export MOCK_DOCKER_STATE="$tmp/state"
 export MOCK_DOCKER_LOG="$tmp/docker.log"
 export MOCK_COMPOSE_FILE="$tmp/repo/deploy/link-edge/compose.yaml"
@@ -194,6 +196,45 @@ if grep -Fq 'build selector' "$tmp/docker.log"; then
   exit 1
 fi
 unset MOCK_BAD_CONFIG
+
+assert_invalid_discovery() {
+  local mutation=$1 invalid_json previous=4444444444444444444444444444444444444444
+  invalid_json=$(jq -c "$mutation" <<<"$valid_client_json")
+  reset_state "$previous"
+  if TEST_CLIENT_JSON="$invalid_json" bash "$script" "$sha" >"$tmp/discovery-validation.log" 2>&1; then
+    printf 'FAIL malformed discovery document passed validation: %s\n' "$mutation" >&2
+    exit 1
+  fi
+  [[ $(cat "$tmp/state/current_revision") == "$previous" ]] || {
+    printf 'FAIL malformed discovery document did not roll back selector: %s\n' "$mutation" >&2
+    exit 1
+  }
+  grep -Fq 'previous selector image was restored' "$tmp/discovery-validation.log" || {
+    printf 'FAIL malformed discovery document did not report selector rollback: %s\n' "$mutation" >&2
+    exit 1
+  }
+}
+
+for mutation in \
+  'del(.mtproto)' \
+  '.mtproto = []' \
+  'del(.mtproto.endpoint)' \
+  '.mtproto.endpoint = 2443' \
+  '.mtproto.endpoint = ""' \
+  'del(.mtproto.dc_id)' \
+  '.mtproto.dc_id = "2"' \
+  '.mtproto.dc_id = 2.5' \
+  '.mtproto.dc_id = 0' \
+  'del(.mtproto.rsa_spki)' \
+  '.mtproto.rsa_spki = 2' \
+  '.mtproto.rsa_spki = ""' \
+  'del(.websocket)' \
+  '.websocket = []' \
+  'del(.websocket.endpoint)' \
+  '.websocket.endpoint = false' \
+  '.websocket.endpoint = ""'; do
+  assert_invalid_discovery "$mutation"
+done
 
 if bash "$script" short >"$tmp/invalid-sha.log" 2>&1; then
   echo 'FAIL invalid commit SHA was accepted' >&2

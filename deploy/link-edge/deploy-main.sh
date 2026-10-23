@@ -64,8 +64,17 @@ check_production_routes() {
     echo 'link-edge deploy: teagramd discovery document request failed' >&2
     return 1
   fi
-  if ! jq -e 'type == "object" and .version == 1' <<<"$client_json" >/dev/null; then
-    echo 'link-edge deploy: teagramd discovery document is not a version 1 JSON object' >&2
+  if ! jq -e '
+    type == "object"
+    and .version == 1
+    and (.mtproto | type == "object"
+      and (.endpoint | type == "string" and length > 0)
+      and (.dc_id | type == "number" and floor == . and . > 0)
+      and (.rsa_spki | type == "string" and length > 0))
+    and (.websocket | type == "object"
+      and (.endpoint | type == "string" and length > 0))
+  ' <<<"$client_json" >/dev/null; then
+    echo 'link-edge deploy: teagramd discovery document does not match the version 1 shape' >&2
     return 1
   fi
 
