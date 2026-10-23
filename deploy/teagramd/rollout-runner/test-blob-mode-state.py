@@ -877,46 +877,6 @@ class BlobModeStateTests(unittest.TestCase):
             with self.subTest(name=name):
                 self.assert_rejects(lambda: blob_mode.container_network(container), "container-network")
 
-    def test_initial_local_network_profiles_allow_only_exact_rustfs_isolation(self) -> None:
-        compose = {
-            "name": "fixture",
-            "services": {
-                "postgres": {}, "migrate": {},
-                "teagramd": {"networks": {"default": None}},
-            },
-            "networks": {"default": {"name": "fixture_default", "ipam": {}}},
-        }
-        self.assertEqual(blob_mode.compose_network_profile(compose), "default-only")
-
-        isolated = json.loads(json.dumps(compose))
-        isolated["networks"]["rustfs_private"] = {
-            "name": "fixture_rustfs_private",
-            "driver": "bridge",
-            "driver_opts": {"com.docker.network.bridge.gateway_mode_ipv4": "isolated"},
-            "ipam": {},
-            "internal": True,
-            "enable_ipv6": False,
-        }
-        isolated["services"]["teagramd"]["networks"] = {
-            "default": None, "rustfs_private": None,
-        }
-        isolated["services"].update({
-            name: {"networks": {"rustfs_private": None}}
-            for name in ("rustfs", "rustfs-init", "blob-migrate", "blob-restore")
-        })
-        self.assertEqual(blob_mode.compose_network_profile(isolated), "rustfs-isolated")
-
-        for name, mutate in (
-            ("public private network", lambda c: c["networks"]["rustfs_private"].update(internal=False)),
-            ("runtime attached elsewhere", lambda c: c["services"]["teagramd"]["networks"].update(edge=None)),
-            ("database attached privately", lambda c: c["services"]["postgres"].update(networks={"default": None, "rustfs_private": None})),
-            ("unknown service", lambda c: c["services"].update({"unexpected": {}})),
-        ):
-            with self.subTest(name=name):
-                candidate = json.loads(json.dumps(isolated))
-                mutate(candidate)
-                self.assertEqual(blob_mode.compose_network_profile(candidate), "other")
-
     def test_blob_settings_and_tgblobs_mounts_are_forbidden_in_override(self) -> None:
         cases = (
             (
@@ -1396,26 +1356,6 @@ class BlobModeStateTests(unittest.TestCase):
             "postgres_mounts": [pgdata_mount],
             "mode_source": mode_source,
         }
-
-        rustfs_target = json.loads(json.dumps(valid_target))
-        rustfs_target["network_profile"] = "rustfs-isolated"
-        rustfs_target["services"][0]["network"] = {
-            "mode": "networks", "networks": [
-                "teagram-server_default", "teagram-server_rustfs_private",
-            ],
-        }
-        with patch.object(blob_mode, "docker_volume_exists"):
-            blob_mode.assert_compose_matches_initial(
-                baseline, rustfs_target, backend, self.volume, mode_source,
-            )
-
-        unapproved_rustfs_target = json.loads(json.dumps(rustfs_target))
-        unapproved_rustfs_target["services"][0]["network"]["networks"].append("edge")
-        with self.assertRaises(blob_mode.Reject) as caught:
-            blob_mode.assert_compose_matches_initial(
-                baseline, unapproved_rustfs_target, backend, self.volume, mode_source,
-            )
-        self.assertEqual(str(caught.exception), "initial-render-network")
 
         def validate(containers: dict[str, object], target: dict[str, object]) -> None:
             blob_mode.validate_initial_local_transition(

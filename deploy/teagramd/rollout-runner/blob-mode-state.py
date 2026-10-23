@@ -420,66 +420,6 @@ def compose_network(service: dict[str, object], compose: dict[str, object]) -> d
     return {"mode": "networks", "networks": sorted(names)}
 
 
-def compose_network_profile(compose: object) -> str:
-    if not isinstance(compose, dict):
-        return "other"
-    project = compose.get("name")
-    networks = compose.get("networks", {})
-    services = compose.get("services")
-    if (
-        not isinstance(project, str)
-        or re.fullmatch(r"[a-z0-9][a-z0-9_-]*", project) is None
-        or not isinstance(networks, dict)
-        or not isinstance(services, dict)
-    ):
-        return "other"
-    service_networks: dict[str, dict[str, object]] = {}
-    for name, service in services.items():
-        if not isinstance(name, str) or not isinstance(service, dict):
-            return "other"
-        declared = service.get("networks")
-        if declared is None:
-            declared = {"default": None}
-        if not isinstance(declared, dict):
-            return "other"
-        service_networks[name] = declared
-
-    default_name = f"{project}_default"
-    private_name = f"{project}_rustfs_private"
-    if (
-        networks == {"default": {"name": default_name, "ipam": {}}}
-        and {"postgres", "migrate", "teagramd"}.issubset(service_networks)
-        and all(item == {"default": None} for item in service_networks.values())
-    ):
-        return "default-only"
-
-    expected_networks = {
-        "default": {"name": default_name, "ipam": {}},
-        "rustfs_private": {
-            "name": private_name,
-            "driver": "bridge",
-            "driver_opts": {"com.docker.network.bridge.gateway_mode_ipv4": "isolated"},
-            "ipam": {},
-            "internal": True,
-            "enable_ipv6": False,
-        },
-    }
-    if networks != expected_networks or not {"postgres", "migrate", "teagramd"}.issubset(service_networks):
-        return "other"
-    for name, attached in service_networks.items():
-        if name in {"postgres", "migrate"}:
-            expected = {"default": None}
-        elif name == "teagramd":
-            expected = {"default": None, "rustfs_private": None}
-        elif name in {"rustfs", "rustfs-init", "blob-migrate", "blob-restore"}:
-            expected = {"rustfs_private": None}
-        else:
-            return "other"
-        if attached != expected:
-            return "other"
-    return "rustfs-isolated"
-
-
 def container_network(container: dict[str, object]) -> dict[str, object]:
     host_config = container.get("HostConfig")
     settings = container.get("NetworkSettings")
@@ -508,37 +448,6 @@ def network_includes(network: object, expected_name: str) -> bool:
         return False
     attached = network.get("networks")
     return isinstance(attached, list) and expected_name in attached
-
-
-def initial_local_rustfs_network_transition(
-    service_name: object,
-    running: object,
-    target: object,
-    profile: object,
-) -> bool:
-    if (
-        service_name != "teagramd"
-        or profile != "rustfs-isolated"
-        or not isinstance(running, dict)
-        or not isinstance(target, dict)
-        or running.get("mode") != "networks"
-        or target.get("mode") != "networks"
-    ):
-        return False
-    running_networks = running.get("networks")
-    target_networks = target.get("networks")
-    if (
-        not isinstance(running_networks, list)
-        or len(running_networks) != 1
-        or not isinstance(running_networks[0], str)
-        or not running_networks[0].endswith("_default")
-        or not isinstance(target_networks, list)
-        or any(not isinstance(name, str) for name in target_networks)
-    ):
-        return False
-    default_name = running_networks[0]
-    private_name = f"{default_name[:-len('_default')]}_rustfs_private"
-    return target_networks == sorted((default_name, private_name))
 
 
 def compose_named_mounts(
@@ -687,7 +596,6 @@ def compose_inventory(compose: object, checkout: pathlib.Path) -> dict[str, obje
     return {
         "services": result_services, "volumes": volume_names,
         "postgres_mounts": postgres_mounts, "mode_source": mode_source,
-        "network_profile": compose_network_profile(compose),
     }
 
 
@@ -2137,13 +2045,7 @@ def assert_compose_matches_initial(
         if service.get("ports") != running.get("ports"):
             reject("initial-render-exposure")
         network = service.get("network")
-        running_network = running.get("network")
-        if not isinstance(network, dict) or (
-            network != running_network
-            and not initial_local_rustfs_network_transition(
-                service.get("name"), running_network, network, target.get("network_profile")
-            )
-        ):
+        if not isinstance(network, dict) or network != running.get("network"):
             reject("initial-render-network")
         key_mounts = service.get("tgkey_mounts")
         if (

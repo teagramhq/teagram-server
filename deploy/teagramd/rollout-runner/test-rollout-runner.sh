@@ -443,8 +443,9 @@ if [ "${1:-}" = inspect ]; then
         HostConfig:{PortBindings:({"2443/tcp":[{HostIp:"127.0.0.1",HostPort:"2443"}]} +
           if $scenario == "target-local-carry-forward-public-listener-addition" and $id == $replacement_id then
             {"2446/tcp":[{HostIp:"127.0.0.1",HostPort:"2446"}]}
-          else {} end),NetworkMode:"fixture_teagram_server"},
-        NetworkSettings:{Networks:({fixture_teagram_server:{}} +
+          else {} end),NetworkMode:(if ($scenario | contains("rustfs-isolation-network")) then "fixture_default" else "fixture_teagram_server" end)},
+        NetworkSettings:{Networks:((if ($scenario | contains("rustfs-isolation-network")) then {fixture_default:{}} else {fixture_teagram_server:{}} end) +
+          (if ($scenario | contains("rustfs-isolation-network")) and $cfg == "target" then {fixture_rustfs_private:{}} else {} end) +
           (if $scenario == "s3-accepted-apply" then {fixture_rustfs_private:{}} else {} end) +
           (if $scenario == "initial-local-replica-network-drift" and $id != $base_id then {edge:{}} else {} end))},
         Mounts:((if ($scenario == "moved-stack-9ef1110-to-da0107d" or $scenario == "moved-stack-9ef1110-to-da0107d-render-mismatch" or $scenario == "recovered-local-apply") then [{Type:"volume",Name:"identity",Source:"/synthetic/identity",Destination:"/var/lib/teagramd",Mode:"rw",RW:true,Propagation:"rprivate"},{Type:"volume",Name:"teagram_tgblobs",Source:"/synthetic/blobs",Destination:"/var/lib/teagramd-blobs",Mode:"ro",RW:false,Propagation:"rprivate"},{Type:"volume",Name:"teagram_tgblobs",Source:"/synthetic/blobs",Destination:"/var/lib/telegramd-blobs",Mode:"rw",RW:true,Propagation:"rprivate"},{Type:"bind",Name:"",Source:$source,Destination:"/run/teagramd/blob-mode",Mode:"ro",RW:false,Propagation:"rprivate"}] else ([{Type:"volume",Name:"identity",Source:"/synthetic/identity",Destination:"/var/lib/teagramd",Mode:"rw",RW:true,Propagation:"rprivate"},{Type:"volume",Name:(if $scenario == "runtime-volume-mismatch" and $cfg == "target" then "unexpected_tgblobs" else "fixture_tgblobs" end),Source:"/synthetic/blobs",Destination:"/var/lib/teagramd-blobs",Mode:"rw",RW:(if $scenario == "s3-accepted-apply" then false else true end),Propagation:"rprivate"}] + if ($cfg == "target" and $scenario != "runtime-mode-unmounted") or $cfg == "rollback" then [{Type:"bind",Name:"",Source:$source,Destination:"/run/teagramd/blob-mode",Mode:"ro",RW:false,Propagation:"rprivate"}] else [] end) end) + if $turnstile_source == "" then [] else [{Type:"bind",Name:"",Source:$turnstile_source,Destination:"/run/secrets/teagramd-turnstile",Mode:"ro",RW:false,Propagation:"rprivate"}] end)
@@ -490,7 +491,7 @@ fi
           cat "$MOCK_STATE/target-compose.drift.json"
         elif [[ "${MOCK_SCENARIO:-}" == public-websocket-* ]] && [ "$config_count" -lt 3 ]; then
           cat "$MOCK_STATE/base-compose.json"
-        elif [[ "${MOCK_SCENARIO:-}" == *public-listener-* ]]; then
+        elif [[ "${MOCK_SCENARIO:-}" == *public-listener-* || "${MOCK_SCENARIO:-}" == *rustfs-isolation-network* ]]; then
           if [ "$phase" = baseline ] || [ "$phase" = rollback ]; then cat "$MOCK_STATE/base-compose.json"; else cat "$MOCK_STATE/target-compose.json"; fi
         elif [[ "${MOCK_SCENARIO:-}" == target-local-welcome-channel-* ]]; then
           if [ "$config_count" -ge 3 ]; then cat "$MOCK_STATE/target-compose.json"; else cat "$MOCK_STATE/base-compose.json"; fi
@@ -768,31 +769,6 @@ write_compose_fixture() {
   ' > "$base_config"
   if [ "$scenario" = config-drift ]; then
     cp -- "$base_config" "$target_config"
-  elif [[ "$scenario" == rustfs-isolation-network* ]]; then
-    jq -c '
-      .networks={default:{name:"fixture_default",ipam:{}}}
-      | .services |= with_entries(.value.networks={default:null})
-    ' "$base_config" > "${base_config%.json}.base.json"
-    mv -- "${base_config%.json}.base.json" "$base_config"
-    jq -c '
-      .networks.rustfs_private={
-        name:"fixture_rustfs_private",
-        driver:"bridge",
-        driver_opts:{"com.docker.network.bridge.gateway_mode_ipv4":"isolated"},
-        ipam:{},
-        internal:true,
-        enable_ipv6:false
-      }
-      | .services.teagramd.networks.rustfs_private=null
-      | .services.rustfs={networks:{rustfs_private:null}}
-      | .services["rustfs-init"]={networks:{rustfs_private:null}}
-      | .services["blob-migrate"]={networks:{rustfs_private:null}}
-      | .services["blob-restore"]={networks:{rustfs_private:null}}
-    ' "$base_config" > "$target_config"
-    if [ "$scenario" = rustfs-isolation-network-drift ]; then
-      jq -c '.networks.rustfs_private.internal=false' "$target_config" > "${target_config%.json}.drift.json"
-      mv -- "${target_config%.json}.drift.json" "$target_config"
-    fi
   elif [ "$scenario" = public-websocket-defaults ]; then
     jq -c '.services.teagramd.environment += {TG_PUBLIC_WEBSOCKET_LISTEN_ADDR:"",TG_PUBLIC_WEBSOCKET_ADVERTISE_ADDR:"",TG_PUBLIC_REGISTRATION:"closed",TG_PUBLIC_WEBSOCKET_ALLOWED_ORIGINS:""}' "$base_config" > "$target_config"
   elif [ "$scenario" = public-websocket-enabled ]; then
@@ -3895,31 +3871,54 @@ else
   fail 'configuration drift rejection'
 fi
 
-make_fixture rustfs-isolation-network rustfs-isolation-network
-status=$(run_fixture rustfs-isolation-network)
-root=$(cat "$TMP/rustfs-isolation-network-root-path")
-if [ "$status" = 0 ] && grep -q "rollout=verified sha=$TARGET_SHA" "$TMP/rustfs-isolation-network.stdout" && \
+prepare_rustfs_network_apply_fixture() {
+  local name=$1 scenario=$2 internal=true state
+  [[ "$scenario" != *-drift ]] || internal=false
+  prepare_target_local_apply_fixture "$name" "$scenario" "$APPLY_TARGET_SHA" "$TARGET_SHA" || return 1
+  state=$(cat "$TMP/$name-state-path")
+  jq -c '
+    .networks={default:{name:"fixture_default",ipam:{}}}
+    | .services |= with_entries(.value.networks={default:null})
+  ' "$state/base-compose.json" > "$state/base-compose.next.json" || return 1
+  mv -- "$state/base-compose.next.json" "$state/base-compose.json" || return 1
+  jq -c --argjson internal "$internal" '
+    .networks.rustfs_private={
+      name:"fixture_rustfs_private",
+      driver:"bridge",
+      driver_opts:{"com.docker.network.bridge.gateway_mode_ipv4":"isolated"},
+      ipam:{},
+      internal:$internal,
+      enable_ipv6:false
+    }
+    | .services.teagramd.networks.rustfs_private=null
+  ' "$state/base-compose.json" > "$state/target-compose.json" || return 1
+}
+
+name=target-local-carry-forward-rustfs-isolation-network
+prepare_rustfs_network_apply_fixture "$name" "$name"
+status=$(run_fixture "$name" built 0 '' 2 '' '' apply "$APPLY_TARGET_SHA")
+root=$(cat "$TMP/$name-root-path")
+if [ "$status" = 0 ] && grep -q "rollout=verified sha=$APPLY_TARGET_SHA" "$TMP/$name.stdout" && \
    grep -q $'preflight\tconfig_sha256\t.*\tpass' "$root.target/preflight-comparisons.tsv" && \
    grep -q $'preflight\tcompose_network_topology\tdefault-only:.*\trustfs-isolated:.*\tpass' "$root.target/preflight-comparisons.tsv" && \
    grep -q $'compose_network_topology\t.*\tpass' "$root.target/target-comparisons.tsv"; then
   pass 'the exact RustFS isolation network transition passes preflight and target comparison'
 else
-  show_fixture_failure rustfs-isolation-network "$status"
+  show_fixture_failure "$name" "$status"
   fail 'the reviewed RustFS isolation network transition must deploy through apply'
 fi
 
-make_fixture rustfs-isolation-network-drift rustfs-isolation-network-drift
-status=$(run_fixture rustfs-isolation-network-drift)
-root=$(cat "$TMP/rustfs-isolation-network-drift-root-path")
-state=$(cat "$TMP/rustfs-isolation-network-drift-state-path")
+name=target-local-carry-forward-rustfs-isolation-network-drift
+prepare_rustfs_network_apply_fixture "$name" "$name"
+status=$(run_fixture "$name" built 0 '' 2 '' '' apply "$APPLY_TARGET_SHA")
+root=$(cat "$TMP/$name-root-path")
 if [ "$status" != 0 ] && \
-   grep -q 'blob authority rejected: initial-render-network' "$TMP/rustfs-isolation-network-drift.stderr" && \
-   [ "$(cat "$state/phase")" = baseline ] && \
-   ! grep -q '^docker compose exec -T postgres pg_dump' "$TMP/rustfs-isolation-network-drift-events" && \
-   ! grep -Eq '^docker compose (build|up)( |$)' "$TMP/rustfs-isolation-network-drift-events"; then
-  pass 'unapproved RustFS network drift is rejected by initial-local preflight before backup or service replacement'
+   grep -q $'preflight\tconfig_sha256\t.*\tpass' "$root.target/preflight-comparisons.tsv" && \
+   grep -q $'preflight\tcompose_network_topology\tdefault-only:.*\tother:.*\tfail' "$root.target/preflight-comparisons.tsv" && \
+   ! grep -q '^docker compose up -d$' "$TMP/$name-events"; then
+  pass 'network drift outside the exact RustFS isolation policy still rejects before service replacement'
 else
-  show_fixture_failure rustfs-isolation-network-drift "$status"
+  show_fixture_failure "$name" "$status"
   fail 'unapproved network drift must remain blocked by preflight'
 fi
 
