@@ -118,7 +118,17 @@ func testSmokeSavedGIFs(t *testing.T) {
 	}
 }
 
-func testSmokeSavedGIFRequestFixtures(t *testing.T, f *smokeFixture, sender, owner *smokeClient) {
+func testSmokeSavedGIFRequestFixtures(t *testing.T) {
+	t.Helper()
+	f := newSmokeFixture(t)
+	const senderPhone, ownerPhone = "+15551048911", "+15551048912"
+	seedSmokeUsers(t, f, senderPhone, ownerPhone)
+	sender := newSmokeClientWithRequests(t, f, "saved GIF fixture sender", senderPhone, &clientRequestRecorder{})
+	owner := newSmokeClientWithRequests(t, f, "saved GIF fixture owner", ownerPhone, &clientRequestRecorder{})
+	replaySmokeSavedGIFRequestFixtures(t, f, sender, owner)
+}
+
+func replaySmokeSavedGIFRequestFixtures(t *testing.T, f *smokeFixture, sender, owner *smokeClient) {
 	t.Helper()
 	const (
 		fileID   = int64(10578001)
