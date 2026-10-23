@@ -516,6 +516,10 @@ func TestSmokeClientRequestFixturesAreLayer228Shapes(t *testing.T) {
 		"messages_sendMedia.2",
 		"messages_sendMedia.3",
 		"messages_sendMedia.4",
+		"messages_sendMedia.gif.1",
+		"messages_saveGif.1",
+		"messages_saveGif.2",
+		"messages_getSavedGifs.1",
 		"messages_sendMessage.1",
 		"messages_sendMessage.2",
 		"messages_sendMessage.3",
@@ -1653,6 +1657,7 @@ func testSmokeClientRequestFixtures(t *testing.T) {
 		}); err != nil {
 			t.Fatalf("replay delete-chat fixture: %v", err)
 		}
+		testSmokeSavedGIFRequestFixtures(t, f, creator, member)
 		return
 	}
 	t.Fatal("poll answer web-page fixture response omitted updateNewMessage")

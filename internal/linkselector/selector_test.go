@@ -89,6 +89,30 @@ func TestAllowlistedWebResourcesAndLinkCollisions(t *testing.T) {
 	}
 }
 
+func TestRetiredWebVersionAliasReturnsNotFound(t *testing.T) {
+	var webRequests, landingRequests []observedRequest
+	web := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		webRequests = append(webRequests, observeRequest(t, r))
+		http.NotFound(w, r)
+	}))
+	t.Cleanup(web.Close)
+	landing := httptest.NewServer(recordingLanding(t, &landingRequests))
+	t.Cleanup(landing.Close)
+	handler := newSelector(t, web.URL, landing.URL, slog.New(slog.DiscardHandler))
+
+	const target = "/.well-known/telegram-web/version.txt"
+	response := serveTarget(handler, http.MethodGet, target, "")
+	if response.Code != http.StatusNotFound {
+		t.Fatalf("GET %s = %d, want 404", target, response.Code)
+	}
+	if len(webRequests) != 1 || webRequests[0].requestURI != target {
+		t.Errorf("Web requests = %+v, want one request for %s", webRequests, target)
+	}
+	if len(landingRequests) != 0 {
+		t.Errorf("retired Web version alias reached the landing service: %+v", landingRequests)
+	}
+}
+
 func TestThreatModelNegativeMatrixNeverReachesWeb(t *testing.T) {
 	var webRequests, landingRequests []observedRequest
 	web := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

@@ -1,0 +1,12 @@
+{
+  "layer": 228,
+  "client": "gotd/td v0.162.0",
+  "source": "source-derived/messages_getSavedGifs.1.txt",
+  "method": "messages.getSavedGifs",
+  "request": {
+    "type": "messages.getSavedGifs",
+    "fields": {
+      "hash": "<N>"
+    }
+  }
+}
