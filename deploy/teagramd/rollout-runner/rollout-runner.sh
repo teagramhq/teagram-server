@@ -864,7 +864,7 @@ archive_pre_rollout_teagramd_logs() {
     fail 'cannot resolve the current teagramd container before replacement'
     return 1
   }
-  driver=$(docker inspect --format '{{.HostConfig.LogConfig.Type}}' "$container_id") || {
+  driver=$(docker inspect "$container_id" --format '{{.HostConfig.LogConfig.Type}}') || {
     fail 'cannot inspect the current teagramd logging driver before replacement'
     return 1
   }
