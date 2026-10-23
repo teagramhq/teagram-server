@@ -1251,6 +1251,10 @@ class BlobTransitionRunnerFixtures(unittest.TestCase):
         if self.moved_stack_fixture:
             for name in ("rustfs", "rustfs-init", "blob-migrate", "blob-restore"):
                 model["services"].pop(name, None)
+            for service in model["services"].values():
+                networks = service.get("networks")
+                if isinstance(networks, dict):
+                    networks.pop("rustfs_private", None)
             model["volumes"].pop("rustfsdata", None)
             model.get("networks", {}).pop("rustfs_private", None)
         self.local_compose_json.write_text(json.dumps(model, sort_keys=True), encoding="utf-8")
