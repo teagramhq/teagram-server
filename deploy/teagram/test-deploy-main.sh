@@ -5,6 +5,7 @@ set -euo pipefail
 umask 077
 
 script="$(cd "$(dirname "$0")" && pwd)/deploy-main.sh"
+logs_script="$(cd "$(dirname "$0")" && pwd)/teagram-logs.sh"
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
 
@@ -114,6 +115,10 @@ commit() {
   git -C "$tmp/work" rev-parse HEAD
 }
 first=$(commit first)
+mkdir -p "$tmp/work/deploy/teagram"
+cp "$logs_script" "$tmp/work/deploy/teagram/teagram-logs.sh"
+chmod 755 "$tmp/work/deploy/teagram/teagram-logs.sh"
+git -C "$tmp/work" add deploy/teagram/teagram-logs.sh
 second=$(commit second)
 git -C "$tmp/work" checkout -q -b side "$first"
 side=$(commit side)
@@ -136,7 +141,9 @@ chmod 600 "$tmp/live/pgdump-fixture.sql" "$tmp/live/rollout-evidence.txt"
 local_files_before=$(stat -c '%n:%u:%g:%a' \
   "$tmp/live/.env" "$tmp/live/pgdump-fixture.sql" "$tmp/live/rollout-evidence.txt")
 
-mkdir -p "$tmp/bin" "$tmp/root/main1238-fixture.build"
+mkdir -p "$tmp/bin" "$tmp/root/main1238-fixture.build" "$tmp/root/usr/local/sbin"
+printf '#!/bin/sh\nprintf "legacy wrapper\\n"\n' > "$tmp/root/usr/local/sbin/teagram-logs"
+chmod 755 "$tmp/root/usr/local/sbin/teagram-logs"
 cat > "$tmp/bin/docker" <<'DOCKER'
 #!/usr/bin/env bash
 set -euo pipefail
@@ -213,6 +220,15 @@ fi
 
 echo "source_sha=$second image_id=sha256:fixture built_at=fixture" > "$tmp/root/main1238-fixture.build/built-image.identity"
 expect 0 "already at $second with runner provenance" DEPLOY_SHA="$second"
+if ! cmp -s "$tmp/root/usr/local/sbin/teagram-logs" "$tmp/work/deploy/teagram/teagram-logs.sh"; then
+  echo 'FAIL deploy did not install the commit-tracked teagram-logs command' >&2
+  failures=$((failures + 1))
+fi
+backup="$tmp/root/teagram-logs-before-${second:0:7}"
+if [[ ! -s "$backup" || "$(stat -c '%a' "$backup")" != 600 || "$(<"$backup")" != *'legacy wrapper'* ]]; then
+  echo 'FAIL deploy did not keep a root-only copy of the prior teagram-logs command' >&2
+  failures=$((failures + 1))
+fi
 
 # Without a provenance record, an equal SHA must reach the deploy path
 # (the fake docker refuses the pg_dump call).
