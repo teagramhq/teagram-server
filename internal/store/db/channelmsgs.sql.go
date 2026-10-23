@@ -98,7 +98,8 @@ func (q *Queries) ChannelEventsWindow(ctx context.Context, arg ChannelEventsWind
 
 const channelHistoryPage = `-- name: ChannelHistoryPage :many
 SELECT channel_id, local_id, from_id, date, message, edit_date, deleted,
-       random_id, grouped_id, file_id, sticker_document_id, reply_to_msg_id, action_type, ttl_period, post_author, entities
+       random_id, grouped_id, file_id, sticker_document_id, reply_to_msg_id,
+       action_type, ttl_period, post_author, entities
 FROM channel_messages
 WHERE channel_id = $1 AND deleted = false
   AND (expires_at IS NULL OR expires_at > statement_timestamp())
@@ -193,7 +194,8 @@ WITH page_offset AS (
       )
 ), page AS (
     SELECT cm.channel_id, cm.local_id, cm.from_id, cm.date, cm.message, cm.edit_date, cm.deleted,
-           cm.random_id, cm.grouped_id, cm.file_id, cm.sticker_document_id, cm.reply_to_msg_id, cm.action_type, cm.ttl_period,
+           cm.random_id, cm.grouped_id, cm.file_id, cm.sticker_document_id, cm.reply_to_msg_id,
+           cm.action_type, cm.ttl_period,
            cm.post_author, cm.entities
     FROM channel_messages cm
     JOIN channel_participants cp
@@ -214,7 +216,8 @@ WITH page_offset AS (
     OFFSET (SELECT skip FROM page_offset)
 )
 SELECT channel_id, local_id, from_id, date, message, edit_date, deleted,
-       random_id, grouped_id, file_id, sticker_document_id, reply_to_msg_id, action_type, ttl_period, post_author, entities
+       random_id, grouped_id, file_id, sticker_document_id, reply_to_msg_id,
+       action_type, ttl_period, post_author, entities
 FROM page
 WHERE ($1::bigint <= 0 OR local_id < $1::bigint)
   AND ($2::bigint <= 0 OR local_id > $2::bigint)
@@ -300,7 +303,8 @@ func (q *Queries) ChannelHistoryPageAround(ctx context.Context, arg ChannelHisto
 const channelHistoryPageWithOffset = `-- name: ChannelHistoryPageWithOffset :many
 WITH page AS (
     SELECT cm.channel_id, cm.local_id, cm.from_id, cm.date, cm.message, cm.edit_date, cm.deleted,
-           cm.random_id, cm.grouped_id, cm.file_id, cm.sticker_document_id, cm.reply_to_msg_id, cm.action_type, cm.ttl_period,
+           cm.random_id, cm.grouped_id, cm.file_id, cm.sticker_document_id, cm.reply_to_msg_id,
+           cm.action_type, cm.ttl_period,
            cm.post_author, cm.entities
     FROM channel_messages cm
     JOIN channel_participants cp
@@ -321,7 +325,8 @@ WITH page AS (
     OFFSET GREATEST(0::bigint, $6::bigint)
 )
 SELECT channel_id, local_id, from_id, date, message, edit_date, deleted,
-       random_id, grouped_id, file_id, sticker_document_id, reply_to_msg_id, action_type, ttl_period, post_author, entities
+       random_id, grouped_id, file_id, sticker_document_id, reply_to_msg_id,
+       action_type, ttl_period, post_author, entities
 FROM page
 WHERE ($1::bigint <= 0 OR local_id < $1::bigint)
   AND ($2::bigint <= 0 OR local_id > $2::bigint)
@@ -407,7 +412,8 @@ func (q *Queries) ChannelHistoryPageWithOffset(ctx context.Context, arg ChannelH
 
 const channelMessageByLocal = `-- name: ChannelMessageByLocal :one
 SELECT channel_id, local_id, from_id, date, message, edit_date, deleted,
-       random_id, grouped_id, file_id, sticker_document_id, reply_to_msg_id, action_type, ttl_period, post_author, entities
+       random_id, grouped_id, file_id, sticker_document_id, reply_to_msg_id,
+       action_type, ttl_period, post_author, entities
 FROM channel_messages WHERE channel_id = $1 AND local_id = $2
   AND (expires_at IS NULL OR expires_at > statement_timestamp())
 `
@@ -462,7 +468,8 @@ func (q *Queries) ChannelMessageByLocal(ctx context.Context, arg ChannelMessageB
 
 const channelMessageByRandomID = `-- name: ChannelMessageByRandomID :one
 SELECT channel_id, local_id, from_id, date, message, edit_date, deleted,
-       random_id, grouped_id, file_id, sticker_document_id, reply_to_msg_id, action_type, ttl_period, post_author, entities
+       random_id, grouped_id, file_id, sticker_document_id, reply_to_msg_id,
+       action_type, ttl_period, post_author, entities
 FROM channel_messages
 WHERE channel_id = $1 AND random_id = $2 AND random_id <> 0
   AND (expires_at IS NULL OR expires_at > statement_timestamp())
@@ -630,7 +637,8 @@ func (q *Queries) ChannelMessageTombstonesForMember(ctx context.Context, arg Cha
 
 const channelMessagesByLocalIDs = `-- name: ChannelMessagesByLocalIDs :many
 SELECT channel_id, local_id, from_id, date, message, edit_date, deleted,
-       random_id, grouped_id, file_id, sticker_document_id, reply_to_msg_id, action_type, ttl_period, post_author, entities
+       random_id, grouped_id, file_id, sticker_document_id, reply_to_msg_id,
+       action_type, ttl_period, post_author, entities
 FROM channel_messages
 WHERE channel_id = $1 AND local_id = ANY($2::bigint[]) AND deleted = false
   AND (expires_at IS NULL OR expires_at > statement_timestamp())
@@ -700,7 +708,8 @@ func (q *Queries) ChannelMessagesByLocalIDs(ctx context.Context, arg ChannelMess
 
 const channelMessagesForDelete = `-- name: ChannelMessagesForDelete :many
 SELECT channel_id, local_id, from_id, date, message, edit_date, deleted,
-       random_id, grouped_id, file_id, sticker_document_id, reply_to_msg_id, action_type, ttl_period, post_author, entities
+       random_id, grouped_id, file_id, sticker_document_id, reply_to_msg_id,
+       action_type, ttl_period, post_author, entities
 FROM channel_messages
 WHERE channel_id = $1::bigint
   AND local_id = ANY($2::bigint[])
@@ -773,7 +782,8 @@ func (q *Queries) ChannelMessagesForDelete(ctx context.Context, arg ChannelMessa
 
 const channelMessagesForForward = `-- name: ChannelMessagesForForward :many
 SELECT cm.channel_id, cm.local_id, cm.from_id, cm.date, cm.message, cm.edit_date, cm.deleted,
-       cm.random_id, cm.grouped_id, cm.file_id, cm.sticker_document_id, cm.reply_to_msg_id, cm.action_type, cm.ttl_period,
+       cm.random_id, cm.grouped_id, cm.file_id, cm.sticker_document_id, cm.reply_to_msg_id,
+       cm.action_type, cm.ttl_period,
        cm.post_author, cm.entities
 FROM channel_messages cm
 WHERE cm.channel_id = $1::bigint
@@ -864,7 +874,8 @@ func (q *Queries) ChannelMessagesForForward(ctx context.Context, arg ChannelMess
 
 const channelMessagesForMember = `-- name: ChannelMessagesForMember :many
 SELECT cm.channel_id, cm.local_id, cm.from_id, cm.date, cm.message, cm.edit_date, cm.deleted,
-       cm.random_id, cm.grouped_id, cm.file_id, cm.sticker_document_id, cm.reply_to_msg_id, cm.action_type, cm.ttl_period,
+       cm.random_id, cm.grouped_id, cm.file_id, cm.sticker_document_id, cm.reply_to_msg_id,
+       cm.action_type, cm.ttl_period,
        cm.post_author, cm.entities
 FROM channel_messages cm
 JOIN channel_participants cp ON cp.channel_id = cm.channel_id AND cp.user_id = $1::bigint
@@ -1433,7 +1444,8 @@ func (q *Queries) InsertChannelEvent(ctx context.Context, arg InsertChannelEvent
 
 const insertChannelMessage = `-- name: InsertChannelMessage :exec
 INSERT INTO channel_messages (
-    channel_id, local_id, from_id, message, random_id, file_id, sticker_document_id, reply_to_msg_id, post_author, entities
+    channel_id, local_id, from_id, message, random_id, file_id,
+    sticker_document_id, reply_to_msg_id, post_author, entities
 )
 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, NULLIF($10::text, '')::jsonb)
 `
@@ -1556,7 +1568,8 @@ func (q *Queries) NewChannelPostPts(ctx context.Context, arg NewChannelPostPtsPa
 
 const searchChannelPostsPage = `-- name: SearchChannelPostsPage :many
 SELECT post.channel_id, post.local_id, post.from_id, post.date, post.message,
-       post.edit_date, post.deleted, post.random_id, post.grouped_id, post.file_id, post.sticker_document_id,
+       post.edit_date, post.deleted, post.random_id, post.grouped_id, post.file_id,
+       post.sticker_document_id,
        post.reply_to_msg_id, post.action_type, post.ttl_period, post.post_author, post.entities
 FROM channel_messages post
 JOIN channel_participants cp
@@ -1654,7 +1667,8 @@ func (q *Queries) SearchChannelPostsPage(ctx context.Context, arg SearchChannelP
 const searchFilteredChannelPostsPage = `-- name: SearchFilteredChannelPostsPage :many
 SELECT post.channel_id, post.local_id, post.from_id, post.date, post.message,
        post.edit_date, post.deleted, post.random_id, post.grouped_id,
-       post.file_id, post.sticker_document_id, post.reply_to_msg_id, post.action_type, post.ttl_period, post.post_author, post.entities
+       post.file_id, post.sticker_document_id, post.reply_to_msg_id,
+       post.action_type, post.ttl_period, post.post_author, post.entities
 FROM channel_messages post
 WHERE post.channel_id = $1::bigint
   AND post.deleted = false
@@ -1781,7 +1795,8 @@ func (q *Queries) SearchFilteredChannelPostsPage(ctx context.Context, arg Search
 const searchPinnedChannelPostForMember = `-- name: SearchPinnedChannelPostForMember :many
 SELECT post.channel_id, post.local_id, post.from_id, post.date, post.message,
        post.edit_date, post.deleted, post.random_id, post.grouped_id,
-       post.file_id, post.sticker_document_id, post.reply_to_msg_id, post.action_type, post.ttl_period, post.post_author, post.entities
+       post.file_id, post.sticker_document_id, post.reply_to_msg_id,
+       post.action_type, post.ttl_period, post.post_author, post.entities
 FROM channels c
 JOIN channel_participants participant
   ON participant.channel_id = c.id

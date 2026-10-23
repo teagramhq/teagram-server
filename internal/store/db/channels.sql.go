@@ -291,7 +291,8 @@ CROSS JOIN LATERAL (
 ) AS unread
 LEFT JOIN LATERAL (
     SELECT cm.channel_id, cm.local_id, cm.from_id, cm.date, cm.message, cm.edit_date,
-           cm.deleted, cm.random_id, cm.grouped_id, cm.file_id, cm.sticker_document_id, cm.reply_to_msg_id, cm.action_type,
+           cm.deleted, cm.random_id, cm.grouped_id, cm.file_id, cm.sticker_document_id,
+           cm.reply_to_msg_id, cm.action_type,
            cm.ttl_period, cm.post_author, cm.entities
     FROM channel_messages cm
     WHERE cm.channel_id = c.id AND cm.deleted = false
