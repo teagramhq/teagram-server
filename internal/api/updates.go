@@ -109,7 +109,7 @@ func messageToTL(m store.Message, createUsers []int64, files map[int64]tg.Messag
 		msg.SetFwdFrom(fwd)
 	}
 	if len(reactions) > 0 {
-		msg.SetReactions(reactionsToTL(reactions, m.OwnerID))
+		msg.SetReactions(reactionsToTL(reactions, m.OwnerID, m.PeerType == store.PeerTypeChat))
 	}
 	return msg
 }
@@ -120,9 +120,12 @@ func messageToTL(m store.Message, createUsers []int64, files map[int64]tg.Messag
 //
 // It does not disclose other reactor identities through RecentReactions or a
 // user list.
-func reactionsToTL(reactions []store.Reaction, viewerID int64) tg.MessageReactions {
+func reactionsToTL(reactions []store.Reaction, viewerID int64, canSeeList bool) tg.MessageReactions {
 	mr := tg.MessageReactions{
 		Results: make([]tg.ReactionCount, 0, len(reactions)),
+	}
+	if canSeeList {
+		mr.SetCanSeeList(true)
 	}
 	resultByEmoji := make(map[string]int, len(reactions))
 	for _, r := range reactions {
@@ -144,8 +147,11 @@ func reactionsToTL(reactions []store.Reaction, viewerID int64) tg.MessageReactio
 	return mr
 }
 
-func channelReactionsToTL(reactions []store.ChannelReactionCount) tg.MessageReactions {
+func channelReactionsToTL(reactions []store.ChannelReactionCount, canSeeList bool) tg.MessageReactions {
 	mr := tg.MessageReactions{Results: make([]tg.ReactionCount, len(reactions))}
+	if canSeeList {
+		mr.SetCanSeeList(true)
+	}
 	for i, reaction := range reactions {
 		result := tg.ReactionCount{
 			Reaction: &tg.ReactionEmoji{Emoticon: reaction.Reaction},

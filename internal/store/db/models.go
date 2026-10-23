@@ -123,6 +123,7 @@ type ChannelMessageReaction struct {
 	LocalID   int64
 	ReactorID int64
 	Reaction  string
+	CreatedAt pgtype.Timestamptz
 }
 
 type ChannelParticipant struct {

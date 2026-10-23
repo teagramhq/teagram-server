@@ -530,6 +530,7 @@ func TestSmokeClientRequestFixturesAreLayer228Shapes(t *testing.T) {
 		"messages_setChatAvailableReactions.channel.1",
 		"messages_getMessagesReactions.1",
 		"messages_getMessagesReactions.channel.1",
+		"messages_getMessageReactionsList.1",
 		"messages_sendVote.1",
 		"messages_setTyping.1",
 		"upload_saveFilePart.1",
@@ -1398,6 +1399,20 @@ func testSmokeClientRequestFixtures(t *testing.T) {
 		return nil
 	}); err != nil {
 		t.Fatalf("replay get-message-reactions fixture: %v", err)
+	}
+	if err := fixtureClientCall(t, creator, "messages_getMessageReactionsList.1", func(ctx context.Context, api *tg.Client) error {
+		result, err := api.MessagesGetMessageReactionsList(ctx, &tg.MessagesGetMessageReactionsListRequest{
+			Peer: &tg.InputPeerChat{ChatID: chatID}, ID: groupMessageID, Limit: 50,
+		})
+		if err != nil {
+			return err
+		}
+		if result.Count != 1 || len(result.Reactions) != 1 {
+			return fmt.Errorf("getMessageReactionsList count/results = %d/%d, want 1/1", result.Count, len(result.Reactions))
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("replay get-message-reactions-list fixture: %v", err)
 	}
 	if err := fixtureClientCall(t, creator, "messages_setChatAvailableReactions.channel.1", func(ctx context.Context, api *tg.Client) error {
 		result, err := api.MessagesSetChatAvailableReactions(ctx, &tg.MessagesSetChatAvailableReactionsRequest{

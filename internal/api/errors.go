@@ -78,6 +78,7 @@ var (
 	errMessageDeleteForbidden = rpcErr(403, "MESSAGE_DELETE_FORBIDDEN")
 	// errPeerIDInvalid rejects an unresolvable or unauthorized input peer.
 	errPeerIDInvalid         = rpcErr(400, "PEER_ID_INVALID")
+	errBroadcastForbidden    = rpcErr(403, "BROADCAST_FORBIDDEN")
 	errPrivacyKeyInvalid     = rpcErr(400, "PRIVACY_KEY_INVALID")
 	errPrivacyValueInvalid   = rpcErr(400, "PRIVACY_VALUE_INVALID")
 	errPrivacyTooLong        = rpcErr(400, "PRIVACY_TOO_LONG")

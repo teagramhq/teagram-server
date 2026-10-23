@@ -132,6 +132,9 @@ func testSmokeBasicGroupReactions(t *testing.T) {
 			if len(update.Reactions.Results) != want {
 				return fmt.Errorf("reaction results = %d, want %d", len(update.Reactions.Results), want)
 			}
+			if !update.Reactions.GetCanSeeList() {
+				return errors.New("basic group reaction omitted can_see_list")
+			}
 			if want == 1 {
 				if update.Reactions.Results[0].Count != 1 {
 					return fmt.Errorf("heart count = %d, want 1", update.Reactions.Results[0].Count)
@@ -147,6 +150,45 @@ func testSmokeBasicGroupReactions(t *testing.T) {
 		}
 	}
 	readCount(1)
+	if err := a.call(f.ctx, func(ctx context.Context, client *tg.Client) error {
+		result, err := client.MessagesGetMessageReactionsList(ctx, &tg.MessagesGetMessageReactionsListRequest{
+			Peer: &tg.InputPeerChat{ChatID: chatID}, ID: aMessageID, Limit: 50,
+		})
+		if err != nil {
+			return err
+		}
+		if result.Count != 1 || len(result.Reactions) != 1 {
+			return fmt.Errorf("reaction list count/results = %d/%d, want 1/1", result.Count, len(result.Reactions))
+		}
+		reaction := result.Reactions[0]
+		peer, ok := reaction.PeerID.(*tg.PeerUser)
+		if !ok || peer.UserID != b.id {
+			return fmt.Errorf("reaction peer = %#v, want B (%d)", reaction.PeerID, b.id)
+		}
+		emoji, ok := reaction.Reaction.(*tg.ReactionEmoji)
+		if !ok || emoji.Emoticon != "❤" {
+			return fmt.Errorf("reaction = %#v, want heart", reaction.Reaction)
+		}
+		if reaction.Date <= 0 {
+			return fmt.Errorf("reaction date = %d, want a server timestamp", reaction.Date)
+		}
+		foundB := false
+		for _, item := range result.Users {
+			user, ok := item.(*tg.User)
+			if ok && user.ID == b.id {
+				foundB = true
+				if phone, present := user.GetPhone(); present && phone != "" {
+					return fmt.Errorf("reactor phone = %q, want private", phone)
+				}
+			}
+		}
+		if !foundB {
+			return errors.New("reaction list omitted reactor B from users")
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("A lists B's group reaction: %v", err)
+	}
 
 	if err := a.call(f.ctx, func(ctx context.Context, client *tg.Client) error {
 		result, err := client.MessagesSetChatAvailableReactions(ctx, &tg.MessagesSetChatAvailableReactionsRequest{

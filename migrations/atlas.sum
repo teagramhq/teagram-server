@@ -1,4 +1,4 @@
-h1:p5HWkaBJKKpRh+LfYymZSRAqfiqtBt7hs1KodtQn1lE=
+h1:gG0eEwCuJx10+ucQV0HemEw4z1FgrE6GrL6gurtOWS4=
 20260721000001_baseline.sql h1:cnO6K1z0Uv3goEvecgJixKSio6ziaB1rF7cQLoCWOxs=
 20260721000002_auth_keys.sql h1:+vNabm6vdEAgu3H5ZGw2Wr8D/Y6i4ikAAUO3JbfZQeE=
 20260721000003_code_hardening.sql h1:8pbAqUpqcwOONUfac+qC51QjfC1JnObNCcXa1HC/dr0=
@@ -120,3 +120,4 @@ h1:p5HWkaBJKKpRh+LfYymZSRAqfiqtBt7hs1KodtQn1lE=
 20261022000003_channel_message_reactions.sql h1:ZhvIo1VLF1pxdIt9mAZotrWiPlys64QkwWLA7lEWuSY=
 20261022000004_saved_gifs.sql h1:BXDhNYrdEdY8UR+nV/9gBWjjg2tlP9HQOtFhc7L/Zko=
 20261022000005_public_websocket_rate_limit_budgets.sql h1:vz+QZBfXh9mpmobhIusj2M+8aRPwhk+ZUlHkJCuSGHU=
+20261023000001_channel_reaction_dates.sql h1:EHLI8QrpJDuYv8yLWJ4+ka0VivhkITXRjlLxa2EbBN4=
