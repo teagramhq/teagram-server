@@ -4,7 +4,7 @@ set +x
 umask 077
 
 readonly TARGET_HOST="teagram.tailaa4918.ts.net"
-readonly APPROVED_QA_SCRIPT_SHA256="cf13d260ecd5eb272db2331e9e789df02b0de4420c752a63705f48f90f034cfa"
+readonly APPROVED_QA_SCRIPT_SHA256="859a54086180972953efc1e8293fc752b00e5f243ba65717929387aaa678484e"
 readonly IMAGE_ARM64="mcr.microsoft.com/playwright:v1.61.1-noble@sha256:824f1a789072e648c62541c2cfa4479c4061a290d5c27766d67dc1dcbc19b321"
 readonly IMAGE_AMD64="mcr.microsoft.com/playwright:v1.61.1-noble@sha256:cf0daee9b994042e011bc29f20cdff1a9f682a039b43fcd738f7d8a9d3bcd9d6"
 readonly SERVED_MANIFEST_MAX_BYTES=16384

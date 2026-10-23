@@ -916,6 +916,7 @@ async function observeWorkerWebSockets(browser, pageSession, handlers) {
 async function makeWssAudit(contextInfo, progress) {
   const connections = new Map();
   let accountSlotCount = null;
+  let activeConnectionsBeforeBaseline = 0;
   let logoutRpcStarted = false;
   let logoutSocketClosures = 0;
   let activeConnectionsAtContextTeardown = null;
@@ -946,6 +947,10 @@ async function makeWssAudit(contextInfo, progress) {
         malformed = true;
       }
       connections.set(params.requestId, {matches, responses: 0, status: 0, closed: false});
+      if (accountSlotCount === null) {
+        const activeConnections = [...connections.values()].filter((item) => !item.closed).length;
+        activeConnectionsBeforeBaseline = Math.max(activeConnectionsBeforeBaseline, activeConnections);
+      }
       if (activeConnectionsAtContextTeardown !== null) connectionsCreatedDuringContextTeardown += 1;
       if (!progress.observeWssConnection()) malformed = true;
     },
@@ -1003,6 +1008,13 @@ async function makeWssAudit(contextInfo, progress) {
   session.on("Network.webSocketHandshakeResponseReceived", handlers.handshakeResponse);
   session.on("Network.webSocketClosed", handlers.closed);
   await observeWorkerWebSockets(contextInfo.context.browser(), session, handlers);
+  function activeAccountSlotMismatch(activeConnections) {
+    if (accountSlotCount !== null) return activeConnections !== accountSlotCount;
+    if (!progress.isSignedIn()) return false;
+    return activeConnections > WSS_ACCOUNT_SLOT_CEILING ||
+      activeConnections < Math.min(activeConnectionsBeforeBaseline, WSS_ACCOUNT_SLOT_CEILING);
+  }
+
   function diagnostic() {
     const entries = [...connections.values()];
     const targets = connections.size;
@@ -1024,7 +1036,7 @@ async function makeWssAudit(contextInfo, progress) {
     if (targets === 0) return result("no-target");
     const connectionCeiling = progress.isSignedIn() ? WSS_CONNECTION_CEILING : WSS_ACCOUNT_SLOT_CEILING;
     if (targets > connectionCeiling) return result("observation-malformed");
-    if (accountSlotCount !== null && activeConnections !== accountSlotCount) {
+    if (activeAccountSlotMismatch(activeConnections)) {
       return result("observation-malformed");
     }
 
@@ -1064,14 +1076,11 @@ async function makeWssAudit(contextInfo, progress) {
       const activeConnections = entries.filter((item) => !item.closed).length;
       const signedIn = progress.isSignedIn();
       const connectionCeiling = signedIn ? WSS_CONNECTION_CEILING : WSS_ACCOUNT_SLOT_CEILING;
-      const unpinnedActiveConnectionOverflow = signedIn && accountSlotCount === null &&
-        activeConnections > WSS_ACCOUNT_SLOT_CEILING;
       if (malformed || orphanHandshake || workerUnobservable || pendingWorkers !== 0 || entries.length < 1 ||
           activeConnections < 1 || entries.length > connectionCeiling ||
-          unpinnedActiveConnectionOverflow ||
+          activeAccountSlotMismatch(activeConnections) ||
           handshakeCount !== entries.length || entries.some((item) => !item.matches ||
-            item.responses !== 1 || item.status !== 101) ||
-          (accountSlotCount !== null && activeConnections !== accountSlotCount)) {
+            item.responses !== 1 || item.status !== 101)) {
         fail("websocket-not-ready", undefined, diagnostic());
       }
       if (accountSlotCount === null && signedIn) accountSlotCount = activeConnections;

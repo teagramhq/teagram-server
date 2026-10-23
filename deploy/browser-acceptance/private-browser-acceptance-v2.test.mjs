@@ -1546,7 +1546,6 @@ test("a post-sign-in socket close without a replacement fails the WSS proof", as
     assert.equal(progress.observeClientEvent(event), true);
   }
   assert.equal(progress.markSignedIn(), true);
-  assert.doesNotThrow(() => wssAudit.validate());
 
   browserSession.workerMessage("observer-worker", {
     method: "Network.webSocketClosed",
