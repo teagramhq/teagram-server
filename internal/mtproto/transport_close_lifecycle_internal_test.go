@@ -388,6 +388,184 @@ func TestServeWebSocketLogsCloseBeforeCodecDetection(t *testing.T) {
 	}
 }
 
+func TestServeWebSocketLogsDrainAsServerCloseBeforeCodecDetection(t *testing.T) {
+	sink := &transportCloseEventSink{events: make(chan serverErrorLogRecord, 16)}
+	server := New(exchange.PrivateKey{}, 2, NewMemoryAuthKeyStore(), nil, slog.New(sink))
+	listener, err := (&net.ListenConfig{}).Listen(t.Context(), "tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	served := make(chan error, 1)
+	go func() { served <- server.ServeWebSocket(ctx, listener) }()
+	serverReturned := false
+	t.Cleanup(func() {
+		cancel()
+		if serverReturned {
+			return
+		}
+		select {
+		case err := <-served:
+			serverReturned = true
+			if err != nil {
+				t.Errorf("serve WebSocket: %v", err)
+			}
+		case <-time.After(3 * time.Second):
+			t.Error("ServeWebSocket did not stop")
+		}
+	})
+
+	dialCtx, stopDial := context.WithTimeout(context.Background(), 3*time.Second)
+	defer stopDial()
+	ws, response, err := websocket.Dial(dialCtx, "ws://"+listener.Addr().String()+"/apiws", &websocket.DialOptions{
+		Subprotocols: []string{"binary"},
+	})
+	if response != nil && response.Body != nil {
+		if closeErr := response.Body.Close(); closeErr != nil {
+			t.Errorf("close WebSocket response body: %v", closeErr)
+		}
+	}
+	if err != nil {
+		t.Fatalf("dial WebSocket: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := ws.CloseNow(); err != nil && !isDisconnect(err) {
+			t.Errorf("close WebSocket client: %v", err)
+		}
+	})
+
+	server.shutdown.beginDrain()
+	waitCtx, stopWait := context.WithTimeout(t.Context(), 3*time.Second)
+	defer stopWait()
+	var records []serverErrorLogRecord
+	servedCh := (<-chan error)(served)
+	servedReturned, closeLogged := false, false
+	for !servedReturned || !closeLogged {
+		select {
+		case err := <-servedCh:
+			servedReturned = true
+			serverReturned = true
+			servedCh = nil
+			if err != nil {
+				t.Fatalf("serve WebSocket: %v", err)
+			}
+		case record := <-sink.events:
+			records = append(records, record)
+			if record.message == "transport connection closed" {
+				closeLogged = true
+			}
+		case <-waitCtx.Done():
+			t.Fatal("ServeWebSocket did not finish the pre-auth drain")
+		}
+	}
+	assertSingleTransportCloseRecord(t, records, "/apiws", "none", "server close")
+}
+
+func TestServeWebSocketLogsPreAuthLifetimeExpiryAsTimeout(t *testing.T) {
+	rsaKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatalf("generate RSA key: %v", err)
+	}
+	sink := &transportCloseEventSink{events: make(chan serverErrorLogRecord, 16)}
+	server := New(exchange.PrivateKey{RSA: rsaKey}, 2, NewMemoryAuthKeyStore(), nil, slog.New(sink))
+	const lifetime = time.Second
+	if err := server.SetPreAuthLimits(PreAuthLimits{Lifetime: lifetime}); err != nil {
+		t.Fatalf("set pre-auth lifetime: %v", err)
+	}
+	listener, err := (&net.ListenConfig{}).Listen(t.Context(), "tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	served := make(chan error, 1)
+	go func() { served <- server.ServeWebSocket(ctx, listener) }()
+	serverReturned := false
+	t.Cleanup(func() {
+		cancel()
+		if serverReturned {
+			return
+		}
+		select {
+		case err := <-served:
+			serverReturned = true
+			if err != nil {
+				t.Errorf("serve WebSocket: %v", err)
+			}
+		case <-time.After(3 * time.Second):
+			t.Error("ServeWebSocket did not stop")
+		}
+	})
+
+	dialCtx, stopDial := context.WithTimeout(context.Background(), 3*time.Second)
+	defer stopDial()
+	ws, response, err := websocket.Dial(dialCtx, "ws://"+listener.Addr().String()+"/apiws", &websocket.DialOptions{
+		Subprotocols: []string{"binary"},
+	})
+	if response != nil && response.Body != nil {
+		if closeErr := response.Body.Close(); closeErr != nil {
+			t.Errorf("close WebSocket response body: %v", closeErr)
+		}
+	}
+	if err != nil {
+		t.Fatalf("dial WebSocket: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := ws.CloseNow(); err != nil && !isDisconnect(err) {
+			t.Errorf("close WebSocket client: %v", err)
+		}
+	})
+	clientStream := websocket.NetConn(context.Background(), ws, websocket.MessageBinary)
+	conn, err := transport.Abridged.Handshake(clientStream)
+	if err != nil {
+		t.Fatalf("transport handshake: %v", err)
+	}
+	handshakeCtx, cancelHandshake := context.WithTimeout(t.Context(), 5*lifetime)
+	defer cancelHandshake()
+	if err := conn.Send(handshakeCtx, &bin.Buffer{Buf: exchangeRequestFrame(t)}); err != nil {
+		t.Fatalf("send req_pq_multi: %v", err)
+	}
+	var responseFrame bin.Buffer
+	if err := conn.Recv(handshakeCtx, &responseFrame); err != nil {
+		t.Fatalf("read resPQ: %v", err)
+	}
+
+	var records []serverErrorLogRecord
+	ceilingLogged, closeLogged := false, false
+	for !ceilingLogged || !closeLogged {
+		select {
+		case record := <-sink.events:
+			records = append(records, record)
+			if record.message == "WebSocket connection closed at the pre-auth lifetime ceiling" {
+				ceilingLogged = true
+			}
+			if record.message == "transport connection closed" {
+				closeLogged = true
+			}
+		case <-handshakeCtx.Done():
+			t.Fatal("WebSocket did not finish the pre-auth lifetime close")
+		}
+	}
+	cancel()
+	select {
+	case err := <-served:
+		serverReturned = true
+		if err != nil {
+			t.Fatalf("serve WebSocket: %v", err)
+		}
+	case <-handshakeCtx.Done():
+		t.Fatal("ServeWebSocket did not stop after the pre-auth lifetime close")
+	}
+	for {
+		select {
+		case record := <-sink.events:
+			records = append(records, record)
+		default:
+			assertSingleTransportCloseRecord(t, records, "/apiws", "resPQ sent", "timeout")
+			return
+		}
+	}
+}
+
 func TestServeSocketSkipsTransportCloseLogForDiscoveryPreflight(t *testing.T) {
 	rsaKey, err := rsa.GenerateKey(rand.Reader, 2048)
 	if err != nil {
