@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Guards the production deploy workflow: it may run only after CI passes on a
 # push to main (or by manual dispatch), one at a time, in the production
-# environment, without checking out any code, and it deploys the commit whose
-# CI run passed.
+# environment. It deploys the commit whose CI run passed, removes the deploy
+# key, then checks out that commit for a raw MTProto smoke check.
 # shellcheck disable=SC2016 # single-quoted strings are literal workflow text
 set -euo pipefail
 
@@ -164,6 +164,37 @@ check_contract() {
   query '.jobs.deploy.steps[] | select(.run // "" | test("(^|\s)ssh\s")) | .run' |
     grep -Fq 'root@100.124.236.66 "$DEPLOY_SHA"' ||
     fail 'the dev ssh step must send DEPLOY_SHA as its command'
+  local checkout_steps checkout_uses checkout_ref checkout_credentials setup_go_steps setup_go_uses setup_go_version setup_go_cache smoke_steps smoke_run dev_step_names
+  checkout_steps="$(query '[.jobs[].steps[] | select(.uses // "" | test("^actions/checkout@"))] | length')"
+  [[ "$checkout_steps" == 1 ]] || fail "expected one checkout for the post-deploy smoke, found $checkout_steps"
+  checkout_uses="$(query '.jobs.deploy.steps[] | select(.name == "Checkout tested source") | .uses')"
+  [[ "$checkout_uses" == 'actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1' ]] ||
+    fail 'the post-deploy checkout must use the pinned checkout action'
+  checkout_ref="$(query '.jobs.deploy.steps[] | select(.name == "Checkout tested source") | .with.ref')"
+  [[ "$checkout_ref" == '${{ steps.target.outputs.sha }}' ]] ||
+    fail 'the post-deploy checkout must use the tested target SHA'
+  checkout_credentials="$(query '.jobs.deploy.steps[] | select(.name == "Checkout tested source") | .with."persist-credentials"')"
+  [[ "$checkout_credentials" == false ]] ||
+    fail 'the post-deploy checkout must not persist GitHub credentials'
+  setup_go_steps="$(query '[.jobs.deploy.steps[] | select(.name == "Set up Go")] | length')"
+  [[ "$setup_go_steps" == 1 ]] || fail 'the deploy job must set up Go exactly once for the smoke'
+  setup_go_uses="$(query '.jobs.deploy.steps[] | select(.name == "Set up Go") | .uses')"
+  [[ "$setup_go_uses" == 'actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e' ]] ||
+    fail 'the post-deploy Go setup must use the pinned setup-go action'
+  setup_go_version="$(query '.jobs.deploy.steps[] | select(.name == "Set up Go") | .with."go-version-file"')"
+  [[ "$setup_go_version" == go.mod ]] || fail 'the post-deploy Go setup must use go.mod'
+  setup_go_cache="$(query '.jobs.deploy.steps[] | select(.name == "Set up Go") | .with.cache')"
+  [[ "$setup_go_cache" == false ]] || fail 'the post-deploy Go setup must disable caching'
+  smoke_steps="$(query '[.jobs.deploy.steps[] | select(.name == "Run MTProto smoke on port 2443")] | length')"
+  [[ "$smoke_steps" == 1 ]] || fail 'the deploy job must run the MTProto smoke exactly once'
+  smoke_run="$(query '.jobs.deploy.steps[] | select(.name == "Run MTProto smoke on port 2443") | .run')"
+  [[ "$smoke_run" == 'go run ./cmd/mtproto-smoke' ]] ||
+    fail 'the post-deploy step must run the MTProto smoke command'
+  dev_step_names="$(query '.jobs.deploy.steps | map(.name) | join("|")')"
+  [[ "$dev_step_names" == *'Remove the deploy key|Checkout tested source|Set up Go|Run MTProto smoke on port 2443'* ]] ||
+    fail 'the post-deploy smoke must run after deploy-key removal and Go setup'
+  [[ "$(query '.jobs.deploy.steps[] | select(.name == "Remove the deploy key") | .if')" == '${{ always() }}' ]] ||
+    fail 'the deploy key must be removed even when deployment fails'
   demo_ssh_steps="$(query '[.jobs.deploy-demo.steps[] | select(.run // "" | test("(^|\s)ssh\s"))] | length')"
   [[ "$demo_ssh_steps" == 1 ]] || fail "expected one demo ssh step, found $demo_ssh_steps"
   [[ "$(query '.jobs.deploy-demo.steps[] | select(.run // "" | test("(^|\s)ssh\s")) | .env.DEPLOY_SHA')" == '${{ needs.deploy.outputs.sha }}' ]] ||
@@ -194,9 +225,6 @@ check_contract() {
   local uses
   while IFS= read -r uses; do
     [[ -n "$uses" ]] || continue
-    case "$uses" in
-      actions/checkout@*) fail 'must not use actions/checkout' ;;
-    esac
     [[ "$uses" =~ ^[^@]+@[0-9a-f]{40}$ ]] || fail "action not pinned to a commit SHA: $uses"
   done < <(query '.jobs[].steps[].uses // ""')
   check_target_selection
@@ -224,6 +252,12 @@ self_test() {
     '.concurrency.group = "deploy"'
     '.concurrency."cancel-in-progress" = true'
     '.jobs.deploy.steps = [{"uses": "actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955"}] + .jobs.deploy.steps'
+    '(.jobs.deploy.steps[] | select(.name == "Checkout tested source") | .with.ref) = "${{ github.sha }}"'
+    '(.jobs.deploy.steps[] | select(.name == "Checkout tested source") | .with."persist-credentials") = true'
+    '(.jobs.deploy.steps[] | select(.name == "Set up Go") | .uses) = "actions/setup-go@v7"'
+    '(.jobs.deploy.steps[] | select(.name == "Set up Go") | .with.cache) = true'
+    '(.jobs.deploy.steps[] | select(.name == "Run MTProto smoke on port 2443") | .run) = "go run ./cmd/telegramd"'
+    '.jobs.deploy.steps |= (map(select(.name == "Checkout tested source")) + map(select(.name != "Checkout tested source")))'
     '(.jobs.deploy.steps[] | select(.uses) | .uses) = "tailscale/github-action@v4"'
     '.permissions.contents = "write"'
     'del(.jobs.deploy.permissions.actions)'
