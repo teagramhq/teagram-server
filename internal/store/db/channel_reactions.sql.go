@@ -7,6 +7,8 @@ package db
 
 import (
 	"context"
+
+	"github.com/jackc/pgx/v5/pgtype"
 )
 
 const bumpChannelVersionForAvailableReactions = `-- name: BumpChannelVersionForAvailableReactions :execrows
@@ -41,6 +43,98 @@ func (q *Queries) ChannelAvailableReactionsByIDs(ctx context.Context, channelIds
 	for rows.Next() {
 		var i ChannelAvailableReaction
 		if err := rows.Scan(&i.ChannelID, &i.Mode, &i.Reactions); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const channelMessageReactionListForMember = `-- name: ChannelMessageReactionListForMember :many
+WITH visible_message AS MATERIALIZED (
+    SELECT message.channel_id, message.local_id
+    FROM channel_messages AS message
+    JOIN channels AS channel ON channel.id = message.channel_id
+    JOIN channel_participants AS participant
+      ON participant.channel_id = message.channel_id
+     AND participant.user_id = $1::bigint
+    WHERE message.channel_id = $2::bigint
+      AND message.local_id = $3::bigint
+      AND (participant.banned_until IS NULL OR participant.banned_until <= statement_timestamp())
+      AND message.local_id > participant.available_min_id
+      AND message.deleted = false
+      AND message.action_type = 0
+      AND (message.expires_at IS NULL OR message.expires_at > statement_timestamp())
+      AND channel.deleted_at IS NULL
+      AND channel.megagroup = true
+), matching AS MATERIALIZED (
+    SELECT reaction.reactor_id, reaction.reaction, reaction.created_at
+    FROM channel_message_reactions AS reaction
+    JOIN visible_message AS message
+      ON message.channel_id = reaction.channel_id
+     AND message.local_id = reaction.local_id
+    WHERE $4::text = ''
+       OR reaction.reaction = $4::text
+), page AS MATERIALIZED (
+    SELECT reactor_id, reaction, created_at
+    FROM matching
+    WHERE reactor_id > $5::bigint
+    ORDER BY reactor_id
+    LIMIT $6::bigint
+)
+SELECT EXISTS (SELECT 1 FROM visible_message) AS message_visible,
+       (SELECT count(*)::bigint FROM matching) AS reaction_count,
+       page.reactor_id,
+       page.reaction,
+       page.created_at
+FROM (SELECT 1) AS requested
+LEFT JOIN page ON true
+ORDER BY page.reactor_id NULLS LAST
+`
+
+type ChannelMessageReactionListForMemberParams struct {
+	UserID          int64
+	ChannelID       int64
+	LocalID         int64
+	Reaction        string
+	OffsetReactorID int64
+	PageSize        int64
+}
+
+type ChannelMessageReactionListForMemberRow struct {
+	MessageVisible bool
+	ReactionCount  int64
+	ReactorID      *int64
+	Reaction       *string
+	CreatedAt      pgtype.Timestamptz
+}
+
+func (q *Queries) ChannelMessageReactionListForMember(ctx context.Context, arg ChannelMessageReactionListForMemberParams) ([]ChannelMessageReactionListForMemberRow, error) {
+	rows, err := q.db.Query(ctx, channelMessageReactionListForMember,
+		arg.UserID,
+		arg.ChannelID,
+		arg.LocalID,
+		arg.Reaction,
+		arg.OffsetReactorID,
+		arg.PageSize,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ChannelMessageReactionListForMemberRow
+	for rows.Next() {
+		var i ChannelMessageReactionListForMemberRow
+		if err := rows.Scan(
+			&i.MessageVisible,
+			&i.ReactionCount,
+			&i.ReactorID,
+			&i.Reaction,
+			&i.CreatedAt,
+		); err != nil {
 			return nil, err
 		}
 		items = append(items, i)
@@ -294,7 +388,7 @@ INSERT INTO channel_message_reactions (channel_id, local_id, reactor_id, reactio
 VALUES ($1::bigint, $2::bigint,
         $3::bigint, $4::text)
 ON CONFLICT (channel_id, local_id, reactor_id)
-DO UPDATE SET reaction = EXCLUDED.reaction
+DO UPDATE SET reaction = EXCLUDED.reaction, created_at = statement_timestamp()
 `
 
 type UpsertChannelMessageReactionParams struct {

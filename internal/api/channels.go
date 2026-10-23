@@ -1387,7 +1387,7 @@ func (h *handlers) channelMessagesWithCountAndCaller(
 			return nil, errInternal
 		}
 		if rendered, ok := message.(*tg.Message); ok && m.Action == store.ChannelMessageActionNone {
-			rendered.SetReactions(channelReactionsToTL(channelReactions[m.LocalID]))
+			rendered.SetReactions(channelReactionsToTL(channelReactions[m.LocalID], !broadcast))
 		}
 		tlMsgs[i] = message
 		if !m.Deleted && !broadcast {

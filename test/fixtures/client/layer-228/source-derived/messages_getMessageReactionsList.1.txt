@@ -1,0 +1,8 @@
+# source: gotd v0.162.0 layer-228 client request
+body: { messages_getMessageReactionsList flags:#
+  peer: { inputPeerChat
+    chat_id: <N> [LONG],
+  },
+  id: 2 [INT],
+  limit: 50 [INT],
+},

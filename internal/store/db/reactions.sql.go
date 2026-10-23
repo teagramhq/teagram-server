@@ -7,6 +7,8 @@ package db
 
 import (
 	"context"
+
+	"github.com/jackc/pgx/v5/pgtype"
 )
 
 const deleteReaction = `-- name: DeleteReaction :exec
@@ -23,6 +25,95 @@ type DeleteReactionParams struct {
 func (q *Queries) DeleteReaction(ctx context.Context, arg DeleteReactionParams) error {
 	_, err := q.db.Exec(ctx, deleteReaction, arg.OwnerID, arg.LocalID, arg.ReactorID)
 	return err
+}
+
+const messageReactionListForOwner = `-- name: MessageReactionListForOwner :many
+WITH visible_message AS MATERIALIZED (
+    SELECT m.owner_id, m.local_id
+    FROM messages AS m
+    JOIN chat_participants AS participant
+      ON participant.chat_id = m.peer_id
+     AND participant.user_id = $1::bigint
+    WHERE m.owner_id = $1::bigint
+      AND m.local_id = $2::bigint
+      AND m.peer_type = 2
+      AND m.peer_id = $3::bigint
+      AND m.deleted = false
+      AND m.action_type = 0
+      AND (m.expires_at IS NULL OR m.expires_at > statement_timestamp())
+), matching AS MATERIALIZED (
+    SELECT reaction.reactor_id, reaction.reaction, reaction.created_at
+    FROM message_reactions AS reaction
+    JOIN visible_message AS message
+      ON message.owner_id = reaction.owner_id
+     AND message.local_id = reaction.local_id
+    WHERE $4::text = ''
+       OR reaction.reaction = $4::text
+), page AS MATERIALIZED (
+    SELECT reactor_id, reaction, created_at
+    FROM matching
+    WHERE reactor_id > $5::bigint
+    ORDER BY reactor_id
+    LIMIT $6::bigint
+)
+SELECT EXISTS (SELECT 1 FROM visible_message) AS message_visible,
+       (SELECT count(*)::bigint FROM matching) AS reaction_count,
+       page.reactor_id,
+       page.reaction,
+       page.created_at
+FROM (SELECT 1) AS requested
+LEFT JOIN page ON true
+ORDER BY page.reactor_id NULLS LAST
+`
+
+type MessageReactionListForOwnerParams struct {
+	OwnerID         int64
+	LocalID         int64
+	ChatID          int64
+	Reaction        string
+	OffsetReactorID int64
+	PageSize        int64
+}
+
+type MessageReactionListForOwnerRow struct {
+	MessageVisible bool
+	ReactionCount  int64
+	ReactorID      *int64
+	Reaction       *string
+	CreatedAt      pgtype.Timestamptz
+}
+
+func (q *Queries) MessageReactionListForOwner(ctx context.Context, arg MessageReactionListForOwnerParams) ([]MessageReactionListForOwnerRow, error) {
+	rows, err := q.db.Query(ctx, messageReactionListForOwner,
+		arg.OwnerID,
+		arg.LocalID,
+		arg.ChatID,
+		arg.Reaction,
+		arg.OffsetReactorID,
+		arg.PageSize,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []MessageReactionListForOwnerRow
+	for rows.Next() {
+		var i MessageReactionListForOwnerRow
+		if err := rows.Scan(
+			&i.MessageVisible,
+			&i.ReactionCount,
+			&i.ReactorID,
+			&i.Reaction,
+			&i.CreatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
 }
 
 const messagesByOwnerLocalIDs = `-- name: MessagesByOwnerLocalIDs :many
@@ -175,7 +266,7 @@ const upsertReaction = `-- name: UpsertReaction :exec
 INSERT INTO message_reactions (owner_id, local_id, reactor_id, reaction)
 VALUES ($1, $2, $3, $4)
 ON CONFLICT (owner_id, local_id, reactor_id)
-DO UPDATE SET reaction = $4
+DO UPDATE SET reaction = $4, created_at = statement_timestamp()
 `
 
 type UpsertReactionParams struct {

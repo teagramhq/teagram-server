@@ -471,6 +471,7 @@ func newWithPhotoThumbsAndDialogFilterSyncAndUploadPartTTLAndTurnstile(s *store.
 	register(d, tg.MessagesGetPollResultsRequestTypeID, h.handleGetPollResults)
 	register(d, tg.MessagesGetPollVotesRequestTypeID, h.handleGetPollVotes)
 	register(d, tg.MessagesGetMessagesReactionsRequestTypeID, h.handleGetMessagesReactions)
+	register(d, tg.MessagesGetMessageReactionsListRequestTypeID, h.handleGetMessageReactionsList)
 	register(d, tg.MessagesGetSavedReactionTagsRequestTypeID, h.handleGetSavedReactionTags)
 	register(d, tg.MessagesGetTopReactionsRequestTypeID, h.handleGetTopReactions)
 	register(d, tg.MessagesGetRecentReactionsRequestTypeID, h.handleGetRecentReactions)
