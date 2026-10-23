@@ -43,8 +43,8 @@ PINNED_LOCAL_COMPOSE_CONTENT_SHA=
 PINNED_LOCAL_COMPOSE_SOURCE_FILE=
 PINNED_LOCAL_COMPOSE_RUNTIME_FILE=
 PINNED_LOCAL_COMPOSE_CARRIED=0
-STACK_MOVED_TRACKED_COMPOSE=0
-STACK_MOVED_LOCAL_BLOB_DIR=
+TRACKED_LOCAL_AUTHORITY=0
+TRACKED_LOCAL_BLOB_DIR=
 BUILD_IDENTITY_REJECTION_REASON=built-image-id-invalid
 
 ROLLOUT_RUNNER_TEST_MODE=${ROLLOUT_RUNNER_TEST_MODE:-0}
@@ -426,7 +426,7 @@ verify_initial_local_compose() {
   }
 }
 
-is_stack_moved_tracked_compose_selection() {
+is_tracked_local_compose_selection() {
   local -a compose_files expected_files
   local index checkout_path expected_path
   [ "${COMPOSE_FILE+x}" = x ] && [ -n "$COMPOSE_FILE" ] || return 1
@@ -445,7 +445,7 @@ is_stack_moved_tracked_compose_selection() {
     git -C "$CHECKOUT" cat-file -e "$TARGET_SHA:docker-compose.local-blobs.yml" 2>/dev/null
 }
 
-activate_stack_moved_tracked_compose() {
+activate_tracked_local_compose() {
   local authority_json outcome backend_kind blob_dir
   authority_json=$(python3 "$MODE_HELPER" authority \
     --state-dir "$CHECKOUT/.state/blob-mode" --report-root "$EVIDENCE_ROOT") || {
@@ -464,21 +464,28 @@ activate_stack_moved_tracked_compose() {
     fail 'durable blob authority has no valid local blob directory for the tracked Compose selection'
     return 1
   }
-  [ "$outcome" = stack-moved-local ] && [ "$backend_kind" = local ] || {
-    fail 'tracked local Compose selection requires stack-moved-local authority'
+  case "$outcome" in
+    stack-moved-local|recovered-local) ;;
+    *)
+      fail 'tracked local Compose selection requires local blob authority'
+      return 1
+      ;;
+  esac
+  [ "$backend_kind" = local ] || {
+    fail 'tracked local Compose selection requires a local blob backend'
     return 1
   }
-  STACK_MOVED_LOCAL_BLOB_DIR=$blob_dir
+  TRACKED_LOCAL_BLOB_DIR=$blob_dir
   TEAGRAMD_STACK_MOVE_BLOB_DIR=$blob_dir
   export TEAGRAMD_STACK_MOVE_BLOB_DIR
-  STACK_MOVED_TRACKED_COMPOSE=1
+  TRACKED_LOCAL_AUTHORITY=1
 }
 
 verify_target_local_compose() {
   local artifact_path artifact_sha artifact_content_sha reviewed_content_sha override_path entry entry_path artifact_count=0 override_count=0
   local -a compose_files
-  STACK_MOVED_TRACKED_COMPOSE=0
-  STACK_MOVED_LOCAL_BLOB_DIR=
+  TRACKED_LOCAL_AUTHORITY=0
+  TRACKED_LOCAL_BLOB_DIR=
   [ "$INITIALIZE_LOCAL" = 1 ] && return 0
   if ! set_target_local_compose_pin; then
     [ "${COMPOSE_FILE+x}" = x ] || return 0
@@ -492,8 +499,8 @@ verify_target_local_compose() {
           ;;
       esac
     done
-    if is_stack_moved_tracked_compose_selection; then
-      activate_stack_moved_tracked_compose || return 1
+    if is_tracked_local_compose_selection; then
+      activate_tracked_local_compose || return 1
     fi
     return 0
   fi
@@ -1034,9 +1041,9 @@ preflight_target_local_blob_authority() {
   local containers_file="$TARGET_DIR/pre-backup-blob-containers.json"
   local compose_sha artifact_sha=not-pinned artifact_content_sha=not-pinned backend
   local compose_contract=reviewed-artifact blob_dir=not-authoritative
-  if [ "$STACK_MOVED_TRACKED_COMPOSE" = 1 ]; then
-    compose_contract=stack-moved-local-authority
-    blob_dir=$STACK_MOVED_LOCAL_BLOB_DIR
+  if [ "$TRACKED_LOCAL_AUTHORITY" = 1 ]; then
+    compose_contract=tracked-local-authority
+    blob_dir=$TRACKED_LOCAL_BLOB_DIR
   fi
   if set_target_local_compose_pin; then
     artifact_sha=$(sha256_file "$CHECKOUT/$PINNED_LOCAL_COMPOSE_RUNTIME_FILE") || {
@@ -1068,7 +1075,7 @@ preflight_target_local_blob_authority() {
     return 1
   }
   if [ "$backend" = local ] && [ "$artifact_sha" = not-pinned ] && \
-     [ "$STACK_MOVED_TRACKED_COMPOSE" != 1 ]; then
+     [ "$TRACKED_LOCAL_AUTHORITY" != 1 ]; then
     write_immutable "$TARGET_DIR/pre-backup-blob-authority-rejected.txt" \
       "result=rejected target_sha=$TARGET_SHA expected_baseline_sha=$EXPECTED_BASELINE_SHA compose_sha256=not-pinned render_sha256=$compose_sha reason=unpinned-local-target" || return 1
     fail 'local-backend apply requires a reviewed local Compose artifact or unchanged carried-forward content'
