@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/netip"
 	"sync/atomic"
@@ -681,7 +682,7 @@ func (h *handlers) checkAndChargeRateLimitIP(r *mtproto.Request, surface string,
 		h.recordRateLimitDenial(surface)
 		return FloodWaitError(int(cfg.Window / time.Second))
 	}
-	subjectID, err := keyToSubjectID(key)
+	subjectID, err := keyToSubjectIDForListener(key, r.RateLimitListener)
 	if err != nil {
 		h.log.Error("rate limit: convert IP to subject", "err", err)
 		return errInternal
@@ -710,7 +711,7 @@ func (h *handlers) reserveRateLimitIP(r *mtproto.Request, surface string, cfg st
 		h.recordRateLimitDenial(surface)
 		return nil, nil, FloodWaitError(int(cfg.Window / time.Second))
 	}
-	subjectID, err := keyToSubjectID(key)
+	subjectID, err := keyToSubjectIDForListener(key, r.RateLimitListener)
 	if err != nil {
 		h.log.Error("rate limit: convert IP to subject", "err", err)
 		return nil, nil, errInternal
@@ -728,7 +729,7 @@ func (h *handlers) refundRateLimitIP(r *mtproto.Request, surface string, res *st
 	if !ok {
 		return nil
 	}
-	subjectID, err := keyToSubjectID(key)
+	subjectID, err := keyToSubjectIDForListener(key, r.RateLimitListener)
 	if err != nil {
 		h.log.Error("rate limit: convert IP to subject", "err", err)
 		return err
@@ -786,6 +787,17 @@ func provisionalBlocked(id uint32, req *mtproto.Request) bool {
 // per-account limits.
 func keyToSubjectID(key netip.Prefix) (int64, error) {
 	h := fnv1a64(key.String())
+	return int64(h), nil //nolint:gosec // only used as a rate-limit subject ID
+}
+
+func keyToSubjectIDForListener(key netip.Prefix, listener store.RateLimitListener) (int64, error) {
+	if listener == store.RateLimitListenerTailnet {
+		return keyToSubjectID(key)
+	}
+	if listener != store.RateLimitListenerPublic {
+		return 0, fmt.Errorf("unknown rate-limit listener %d", listener)
+	}
+	h := fnv1a64("listener:public\x00" + key.String())
 	return int64(h), nil //nolint:gosec // only used as a rate-limit subject ID
 }
 

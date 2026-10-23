@@ -104,7 +104,10 @@ phone number. Device and app labels are stored by default with
 
 The session IP setting controls session metadata only. Every connection's IP is
 still processed in memory for pre-auth connection caps, PROXY-v2 parsing, and
-per-network abuse limits. These limits are deployment-wide by default: 10
+per-network abuse limits. Counters are deployment-wide within each listener
+scope: the default TCP and tailnet WebSocket listeners share their existing
+budgets, while the public WebSocket listener has independent per-client
+budgets. Defaults are 10
 `auth.sendCode` calls per network per hour, 20 distinct `auth.sendCode`
 identifiers per network per 24 hours, 10 failed `auth.signIn` attempts per
 network per hour, 10 failed `auth.checkPassword` attempts per network per hour,
@@ -118,10 +121,12 @@ counter may retain those usernames in Postgres for the configured window
 (24h by default), plus up to five minutes before the sweep removes them.
 
 Per-network counters use an IPv4 `/32` or IPv6 `/64` bucket based on
-`TG_CLIENT_ADDR_TRUST`. The `auth.sendCode` tables store that network prefix;
-other IP rate-limit rows store a deterministic FNV-derived key, which is
-enumerable for IPv4 and pseudonymous rather than anonymous. Counter rows expire
-with their configured windows and are pruned by the limiter or its sweeper.
+`TG_CLIENT_ADDR_TRUST`. Listener scope comes from the accepted socket, not
+`Host`, `Origin`, or forwarded HTTP headers. The `auth.sendCode` tables store
+that network prefix; other IP rate-limit rows store a deterministic FNV-derived
+key, which is enumerable for IPv4 and pseudonymous rather than anonymous.
+Counter rows expire with their configured windows and are pruned by the limiter
+or its sweeper.
 Slow-query logs that include bind values (default threshold 250 ms) and
 pre-deploy database dumps can hold older values beyond those windows.
 

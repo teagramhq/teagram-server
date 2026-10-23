@@ -15,7 +15,10 @@ import (
 
 // signInFailLockClass namespaces the advisory locks used by AttemptSignIn.
 // Two-argument form keeps this keyspace disjoint from other advisory locks.
-const signInFailLockClass = 0x7369676e // "sign"
+const (
+	signInFailLockClass       = 0x7369676e // "sign"
+	publicSignInFailLockClass = 0x73696770 // "sigp"
+)
 
 // AttemptSignIn atomically checks the per-IP failure budget, verifies the code,
 // checks that the phone belongs to an existing account, and charges the counter
@@ -34,6 +37,16 @@ const signInFailLockClass = 0x7369676e // "sign"
 // step is needed because correct codes for existing accounts never touch the
 // counter.
 func (s *Store) AttemptSignIn(ctx context.Context, addr netip.Addr, phone, hash, code string, cfg RateLimitConfig) (*RateLimitResult, error) {
+	return s.AttemptSignInForListener(ctx, addr, phone, hash, code, cfg, RateLimitListenerTailnet)
+}
+
+// AttemptSignInForListener applies the sign-in failure budget belonging to the
+// listener that accepted the request. Existing tailnet rows keep using the
+// original table; public attempts use their additive public table.
+func (s *Store) AttemptSignInForListener(ctx context.Context, addr netip.Addr, phone, hash, code string, cfg RateLimitConfig, listener RateLimitListener) (*RateLimitResult, error) {
+	if listener != RateLimitListenerTailnet && listener != RateLimitListenerPublic {
+		return nil, fmt.Errorf("unknown signIn rate-limit listener %d", listener)
+	}
 	// If rate limit is disabled, verify the code and require an existing account.
 	if !cfg.enabled() {
 		if err := s.verifyCodeWith(ctx, s.q, phone, hash, code); err != nil {
@@ -62,15 +75,29 @@ func (s *Store) AttemptSignIn(ctx context.Context, addr netip.Addr, phone, hash,
 	qtx := s.q.WithTx(tx)
 
 	// Advisory lock on the IP bucket serializes same-IP requests.
+	lockClass := signInFailLockClass
+	if listener == RateLimitListenerPublic {
+		lockClass = publicSignInFailLockClass
+	}
 	if _, err := tx.Exec(ctx,
 		"SELECT pg_advisory_xact_lock($1, hashtext($2))",
-		signInFailLockClass, key.String(),
+		lockClass, key.String(),
 	); err != nil {
 		return nil, fmt.Errorf("attempt sign in: %w", err)
 	}
 
 	// Check the budget.
-	row, err := qtx.CheckSignInFailBudget(ctx, key)
+	var tokenCount int32
+	var expiresAt pgtype.Timestamptz
+	if listener == RateLimitListenerPublic {
+		row, readErr := qtx.CheckPublicSignInFailBudget(ctx, key)
+		err = readErr
+		tokenCount, expiresAt = row.TokenCount, row.ExpiresAt
+	} else {
+		row, readErr := qtx.CheckSignInFailBudget(ctx, key)
+		err = readErr
+		tokenCount, expiresAt = row.TokenCount, row.ExpiresAt
+	}
 	switch {
 	case errors.Is(err, pgx.ErrNoRows):
 		// No row exists — budget not exhausted. Proceed to verify.
@@ -78,9 +105,9 @@ func (s *Store) AttemptSignIn(ctx context.Context, addr netip.Addr, phone, hash,
 		return nil, fmt.Errorf("attempt sign in: %w", err)
 	default:
 		// Row exists — check if budget is exhausted.
-		if row.ExpiresAt.Time.After(time.Now()) && row.TokenCount >= int32(cfg.Limit) { //nolint:gosec // rate limits are small positive ints
+		if expiresAt.Time.After(time.Now()) && tokenCount >= int32(cfg.Limit) { //nolint:gosec // rate limits are small positive ints
 			// Budget exhausted — compute wait.
-			return &RateLimitResult{Wait: waitUntil(time.Now(), row.ExpiresAt.Time)}, nil
+			return &RateLimitResult{Wait: waitUntil(time.Now(), expiresAt.Time)}, nil
 		}
 		// Window expired or under limit — proceed to verify.
 	}
@@ -95,7 +122,7 @@ func (s *Store) AttemptSignIn(ctx context.Context, addr netip.Addr, phone, hash,
 			// the charge fails or affects no rows — the rollback undoes the
 			// verify writes (IncrementCodeAttempts / ConsumeCode) so the code
 			// is not consumed and the client can retry.
-			if err := chargeSignInFailure(ctx, qtx, key, cfg); err != nil {
+			if err := chargeSignInFailure(ctx, qtx, key, cfg, listener); err != nil {
 				return nil, err
 			}
 		}
@@ -113,7 +140,7 @@ func (s *Store) AttemptSignIn(ctx context.Context, addr netip.Addr, phone, hash,
 		return nil, fmt.Errorf("attempt sign in: lookup phone: %w", err)
 	}
 	if !registered {
-		if err := chargeSignInFailure(ctx, qtx, key, cfg); err != nil {
+		if err := chargeSignInFailure(ctx, qtx, key, cfg, listener); err != nil {
 			return nil, err
 		}
 		if err := tx.Commit(ctx); err != nil {
@@ -142,15 +169,23 @@ func phoneUserExists(ctx context.Context, q *db.Queries, phone string) (bool, er
 	}
 }
 
-func chargeSignInFailure(ctx context.Context, q *db.Queries, key netip.Prefix, cfg RateLimitConfig) error {
+func chargeSignInFailure(ctx context.Context, q *db.Queries, key netip.Prefix, cfg RateLimitConfig, listener RateLimitListener) error {
 	// Wrong code and unknown-account refusals use the same conditional charge.
 	// A zero-row result means another failure won the budget while this request
 	// was waiting and must fail closed rather than granting a free attempt.
-	n, err := q.ChargeSignInFailCall(ctx, db.ChargeSignInFailCallParams{
-		IpKey:      key,
-		Column2:    pgtype.Interval{Microseconds: cfg.Window.Microseconds(), Valid: true},
-		TokenCount: int32(cfg.Limit), //nolint:gosec // rate limits are small positive ints
-	})
+	window := pgtype.Interval{Microseconds: cfg.Window.Microseconds(), Valid: true}
+	limit := int32(cfg.Limit) //nolint:gosec // rate limits are small positive ints
+	var n int64
+	var err error
+	if listener == RateLimitListenerPublic {
+		n, err = q.ChargePublicSignInFailCall(ctx, db.ChargePublicSignInFailCallParams{
+			IpKey: key, Column2: window, TokenCount: limit,
+		})
+	} else {
+		n, err = q.ChargeSignInFailCall(ctx, db.ChargeSignInFailCallParams{
+			IpKey: key, Column2: window, TokenCount: limit,
+		})
+	}
 	if err != nil {
 		return fmt.Errorf("sign in fail: charge: %w", err)
 	}
@@ -163,5 +198,13 @@ func chargeSignInFailure(ctx context.Context, q *db.Queries, key netip.Prefix, c
 // SweepExpiredSignInFailCalls deletes per-IP signIn-failure rows past their
 // deadline. Returns the total rows deleted.
 func (s *Store) SweepExpiredSignInFailCalls(ctx context.Context) (int64, error) {
-	return s.q.SweepExpiredSignInFailCalls(ctx)
+	rows, err := s.q.SweepExpiredSignInFailCalls(ctx)
+	if err != nil {
+		return rows, err
+	}
+	publicRows, err := s.q.SweepExpiredPublicSignInFailCalls(ctx)
+	if err != nil {
+		return rows, fmt.Errorf("sweep public sign in fail calls: %w", err)
+	}
+	return rows + publicRows, nil
 }

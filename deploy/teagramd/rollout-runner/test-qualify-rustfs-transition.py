@@ -272,6 +272,14 @@ def base_server_service(service_name: str) -> dict[str, Any]:
 
 
 def compose_documents(candidate_root: Path) -> tuple[dict[str, Any], dict[str, Any]]:
+    private_network = {
+        "name": f"{candidate_root.name}_rustfs_private",
+        "driver": "bridge",
+        "internal": True,
+        "enable_ipv6": False,
+        "driver_opts": {"com.docker.network.bridge.gateway_mode_ipv4": "isolated"},
+        "ipam": {},
+    }
     baseline = {
         "services": {
             "postgres": {
@@ -287,6 +295,10 @@ def compose_documents(candidate_root: Path) -> tuple[dict[str, Any], dict[str, A
         "networks": {"default": {"name": "teagram-server_default"}},
     }
     candidate = json.loads(json.dumps(baseline))
+    candidate["networks"]["rustfs_private"] = private_network
+    for name, service in candidate["services"].items():
+        if name.startswith("teagramd"):
+            service["networks"] = {"default": {}, "rustfs_private": {}}
     candidate["services"]["rustfs"] = {
         "image": PINNED_IMAGE,
         "environment": {
@@ -323,6 +335,7 @@ def compose_documents(candidate_root: Path) -> tuple[dict[str, Any], dict[str, A
         },
         "restart": "unless-stopped",
         "logging": {"driver": "json-file", "options": {"max-size": "10m", "max-file": "3"}},
+        "networks": {"rustfs_private": {}},
     }
     policy = os.path.realpath(candidate_root / "deploy" / "rustfs" / "teagramd-blob.json")
     candidate["services"]["rustfs-init"] = {
@@ -345,6 +358,7 @@ def compose_documents(candidate_root: Path) -> tuple[dict[str, Any], dict[str, A
             {"source": "teagramd_blob_secret_key", "target": "teagramd-blob-secret-key"},
         ],
         "depends_on": {"rustfs": {"condition": "service_healthy"}},
+        "networks": {"rustfs_private": {}},
     }
     s3_environment = {
         "TG_BLOB_S3_ENDPOINT": "http://rustfs:9000",
@@ -371,6 +385,7 @@ def compose_documents(candidate_root: Path) -> tuple[dict[str, Any], dict[str, A
                 {"type": "volume", "source": "tgblobs", "target": target, "read_only": read_only}
             ],
             "depends_on": {"rustfs-init": {"condition": "service_completed_successfully"}},
+            "networks": {"rustfs_private": {}},
         }
     candidate["volumes"]["rustfsdata"] = {"name": f"{candidate_root.name}_rustfsdata"}
     candidate["secrets"] = {
@@ -850,6 +865,13 @@ def write_bundle(
         candidate_compose["services"]["blob-migrate"]["environment"]["UNAPPROVED_SETTING"] = "value"
     elif scenario == "unapproved-digest":
         candidate_compose["services"]["rustfs"]["image"] = "rustfs/rustfs:latest"
+    elif scenario == "rustfs-extra-network":
+        candidate_compose["networks"]["external"] = {"name": "outside", "external": True}
+        candidate_compose["services"]["rustfs"]["networks"]["external"] = {}
+    elif scenario == "rustfs-network-not-internal":
+        candidate_compose["networks"]["rustfs_private"]["internal"] = False
+    elif scenario == "teagramd-missing-private-network":
+        candidate_compose["services"]["teagramd"]["networks"].pop("rustfs_private")
     elif scenario == "rustfsdata-alias":
         candidate_compose["volumes"]["rustfsdata"] = {"name": "teagram-server_tgblobs"}
     elif scenario == "baseline-and-candidate-extra-mount":
@@ -2020,6 +2042,15 @@ class QualificationFixtures(unittest.TestCase):
 
     def test_unpinned_rustfs_digest_is_rejected(self) -> None:
         self.run_scenario("unapproved-digest", "configuration_mismatch")
+
+    def test_rustfs_external_network_attachment_is_rejected(self) -> None:
+        self.run_scenario("rustfs-extra-network", "configuration_mismatch")
+
+    def test_rustfs_network_without_internal_routing_is_rejected(self) -> None:
+        self.run_scenario("rustfs-network-not-internal", "configuration_mismatch")
+
+    def test_teagramd_without_private_network_is_rejected(self) -> None:
+        self.run_scenario("teagramd-missing-private-network", "configuration_mismatch")
 
     def test_stale_compose_input_is_rejected(self) -> None:
         self.run_scenario("stale-compose-input", "compose_binding_mismatch")

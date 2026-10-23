@@ -2,6 +2,7 @@ package store_test
 
 import (
 	"context"
+	"net/netip"
 	"os"
 	"path/filepath"
 	"strings"
@@ -913,6 +914,40 @@ func TestOpenRejectsPartBlobMigrationMissing(t *testing.T) {
 	}
 
 	requireOpenMigrationError(t, ctx, dsn)
+}
+
+// The public listener's budget tables are not a startup requirement: a
+// database restored at an earlier head still opens and serves the tailnet
+// budgets, while a public-listener charge fails instead of falling back to
+// the tailnet rows.
+func TestOpenAcceptsSchemaWithoutPublicListenerBudgets(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	dsn := pgtest.DSN(t)
+
+	conn, err := pgx.Connect(ctx, dsn)
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	defer func() { _ = conn.Close(ctx) }() //nolint:errcheck // best-effort close
+	if _, err := conn.Exec(ctx, `DROP TABLE public_send_code_ip_calls, public_send_code_ip_phones, public_sign_in_fail_calls`); err != nil {
+		t.Fatalf("drop public listener budgets: %v", err)
+	}
+
+	s, err := store.Open(ctx, dsn, pgtest.EncKey(), store.WithBlobStore(testBlobs(t)))
+	if err != nil {
+		t.Fatalf("Open must not require the public listener budgets: %v", err)
+	}
+	defer func() { _ = s.Close() }() //nolint:errcheck // best-effort close
+
+	addr := netip.MustParseAddr("203.0.113.40")
+	cfg := store.SendCodeIPLimits{Calls: store.RateLimitConfig{Limit: 1, Window: time.Hour}}
+	if res, err := s.CheckAndChargeSendCodeIPForListener(ctx, addr, "15550000040", cfg, store.RateLimitListenerTailnet); err != nil || res != nil {
+		t.Fatalf("tailnet charge = %v, %v; want allowed", res, err)
+	}
+	if _, err := s.CheckAndChargeSendCodeIPForListener(ctx, addr, "15550000041", cfg, store.RateLimitListenerPublic); err == nil {
+		t.Fatal("public charge succeeded without its budget table")
+	}
 }
 
 // requireOpenMigrationError asserts Open fails with the migration error, not a

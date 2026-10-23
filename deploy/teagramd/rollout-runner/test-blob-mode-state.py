@@ -50,6 +50,19 @@ class BlobModeStateTests(unittest.TestCase):
         }
         self.override = pathlib.Path("/dev/null")
 
+    def test_private_rustfs_network_name_comes_from_rustfs_volume(self) -> None:
+        record = {
+            "volumes": {
+                "tgblobs": "teagram-server_tgblobs",
+                "rustfsdata": "candidate-checkout_rustfsdata",
+            },
+        }
+
+        self.assertEqual(
+            blob_mode.rustfs_private_network_name(record),
+            "candidate-checkout_rustfs_private",
+        )
+
     def local_compose(self, *, proxy_guard: bool = True) -> dict[str, object]:
         def service(name: str, guarded: bool = True) -> dict[str, object]:
             volumes: list[dict[str, object]] = [
@@ -378,6 +391,92 @@ class BlobModeStateTests(unittest.TestCase):
             lock_path=lock_path,
         )
         blob_mode.publish_transition(args)
+        return proof_path
+
+    def simple_s3_proof_file(
+        self,
+        root: pathlib.Path,
+        report_root: pathlib.Path,
+        *,
+        exposed: bool = False,
+        external_network: bool = False,
+        mismatched_destination: bool = False,
+    ) -> pathlib.Path:
+        phase_dir = report_root / f"simple-transition-proof-{len(list(report_root.iterdir()))}"
+        phase_dir.mkdir(mode=0o700)
+        manifest = b"01/1\t10\t" + b"a" * 64 + b"\n"
+        destination = b"01/1\t10\t" + b"b" * 64 + b"\n" if mismatched_destination else manifest
+        dump = b"-- PostgreSQL database dump complete\n"
+        dump_sha256 = blob_mode.hashlib.sha256(dump).hexdigest()
+        candidate_compose = {
+            "name": "teagram",
+            "services": {
+                "teagramd": {
+                    "networks": {"default": None, "rustfs_private": None},
+                },
+                "rustfs": {
+                    "ports": [{"target": 9000, "published": "9000"}] if exposed else [],
+                    "networks": (
+                        {"rustfs_private": None, "edge": None}
+                        if external_network else {"rustfs_private": None}
+                    ),
+                },
+            },
+            "networks": {
+                "default": {"name": "teagram_default"},
+                "rustfs_private": {
+                    "name": "teagram_rustfs_private",
+                    "driver": "bridge",
+                    "internal": True,
+                    "enable_ipv6": False,
+                    "driver_opts": {"com.docker.network.bridge.gateway_mode_ipv4": "isolated"},
+                },
+                **({"edge": {"name": "edge", "external": True}} if external_network else {}),
+            },
+        }
+        contents = {
+            "candidate_compose_sha256": json.dumps(
+                candidate_compose,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8"),
+            "local_compose_sha256": b"local compose\n",
+            "frozen_inventory_sha256": b"writer freeze verified\n",
+            "dump_sha256": dump,
+            "dump_restore_sha256": (
+                f"restore=pass database=blob_restore_{'a' * 32} dump_sha256={dump_sha256}\n"
+            ).encode("ascii"),
+            "source_frozen_sha256": manifest,
+            "copy_manifest_sha256": manifest,
+            "destination_census_sha256": destination,
+        }
+        phase_files: dict[str, str] = {}
+        phase_digests: dict[str, str] = {}
+        for name, content in contents.items():
+            path = phase_dir / f"{name}.artifact"
+            path.write_bytes(content)
+            path.chmod(0o600)
+            phase_files[name] = f"{phase_dir.name}/{path.name}"
+            phase_digests[name] = blob_mode.hashlib.sha256(content).hexdigest()
+        summary = blob_mode.manifest_summary(phase_dir / "source_frozen_sha256.artifact")
+        proof = {
+            "schema": blob_mode.SIMPLE_TRANSITION_PROOF_SCHEMA,
+            "outcome": "s3-accepted",
+            "backend": {"kind": "s3", "endpoint": "http://rustfs:9000", "bucket": "teagram", "prefix": "teagramd/"},
+            "volumes": {"tgblobs": self.volume, "rustfsdata": "teagram-server_rustfsdata"},
+            "evidence": {
+                "source_manifest_sha256": summary[0],
+                "destination_manifest_sha256": summary[0],
+                "object_count": summary[1],
+                "byte_total": summary[2],
+                "copy_passes": 1,
+            },
+            "phase_digests": phase_digests,
+            "phase_files": phase_files,
+        }
+        proof_path = root / "simple-s3-proof.json"
+        proof_path.write_text(json.dumps(proof), encoding="utf-8")
+        proof_path.chmod(0o600)
         return proof_path
 
     def test_local_inventory_preserves_exact_backend_and_volume_names(self) -> None:
@@ -918,6 +1017,138 @@ class BlobModeStateTests(unittest.TestCase):
             "render-backend-mismatch",
         )
 
+    def test_private_rustfs_render_requires_an_isolated_project_network(self) -> None:
+        compose = {
+            "name": "teagram",
+            "services": {
+                "rustfs": {"networks": {"rustfs_private": None}},
+                "teagramd": {"networks": {"default": None, "rustfs_private": None}},
+            },
+            "networks": {
+                "default": {"name": "teagram_default"},
+                "rustfs_private": {
+                    "name": "teagram_rustfs_private",
+                    "driver": "bridge",
+                    "internal": True,
+                    "enable_ipv6": False,
+                    "driver_opts": {
+                        "com.docker.network.bridge.gateway_mode_ipv4": "isolated",
+                    },
+                },
+            },
+        }
+        blob_mode.validate_private_rustfs_render(compose)
+
+        invalid_renders = []
+        plain_bridge = json.loads(json.dumps(compose))
+        plain_bridge["networks"]["rustfs_private"]["driver_opts"][
+            "com.docker.network.bridge.gateway_mode_ipv4"
+        ] = "nat"
+        invalid_renders.append(plain_bridge)
+        external = json.loads(json.dumps(compose))
+        external["networks"]["rustfs_private"]["external"] = True
+        invalid_renders.append(external)
+        extra_network = json.loads(json.dumps(compose))
+        extra_network["services"]["rustfs"]["networks"]["edge"] = None
+        extra_network["networks"]["edge"] = {"name": "edge", "external": True}
+        invalid_renders.append(extra_network)
+
+        for candidate in invalid_renders:
+            with self.subTest(networks=candidate["services"]["rustfs"]["networks"]):
+                self.assert_rejects(
+                    lambda candidate=candidate: blob_mode.validate_private_rustfs_render(candidate),
+                    "transition-rustfs-exposed",
+                )
+
+        app_missing_private_network = json.loads(json.dumps(compose))
+        app_missing_private_network["services"]["teagramd"]["networks"].pop("rustfs_private")
+        self.assert_rejects(
+            lambda: blob_mode.validate_private_rustfs_render(app_missing_private_network),
+            "transition-teagramd-rustfs-network",
+        )
+
+    def test_running_s3_teagramd_requires_the_private_rustfs_network(self) -> None:
+        record = {
+            "outcome": "s3-accepted",
+            "backend": {
+                "kind": "s3", "endpoint": "http://rustfs:9000",
+                "bucket": "teagram", "prefix": "teagramd/",
+            },
+            "volumes": {"tgblobs": "teagram_tgblobs", "rustfsdata": "teagram_rustfsdata"},
+        }
+        network = {"mode": "networks", "networks": ["teagram_default", "teagram_rustfs_private"]}
+        inventory = {
+            "containers": [
+                {
+                    "service": "teagramd",
+                    "backend": record["backend"],
+                    "mode_mounts": blob_mode.guarded_mode_mounts("teagramd", self.mode_source),
+                    "tgblobs_mounts": [{
+                        "type": "volume", "name": "teagram_tgblobs",
+                        "target": blob_mode.BLOB_TARGET, "rw": False,
+                    }],
+                    "network": network,
+                },
+                {
+                    "service": "rustfs",
+                    "mode_mounts": [],
+                    "rustfs_mounts": [{
+                        "type": "volume", "name": "teagram_rustfsdata",
+                        "target": "/data", "rw": True,
+                    }],
+                    "ports": [],
+                    "network": {"mode": "networks", "networks": ["teagram_rustfs_private"]},
+                },
+            ],
+        }
+        with patch.object(blob_mode, "docker_volume_exists"):
+            blob_mode.assert_containers_match(inventory, record, self.mode_source)
+
+            inventory["containers"][0]["network"] = {
+                "mode": "networks", "networks": ["teagram_default"],
+            }
+            self.assert_rejects(
+                lambda: blob_mode.assert_containers_match(inventory, record, self.mode_source),
+                "running-teagramd-rustfs-network",
+            )
+
+    def test_running_s3_rustfs_rejects_ports_extra_networks_and_unisolated_networks(self) -> None:
+        record = {
+            "outcome": "s3-accepted",
+            "volumes": {"tgblobs": "teagram_tgblobs", "rustfsdata": "teagram_rustfsdata"},
+        }
+        rustfs = {
+            "ports": [],
+            "network": {"mode": "networks", "networks": ["teagram_rustfs_private"]},
+            "rustfs_mounts": [{
+                "type": "volume", "name": "teagram_rustfsdata", "target": "/data", "rw": True,
+            }],
+        }
+        blob_mode.assert_rustfs_containers_match([rustfs], record)
+
+        exposed = json.loads(json.dumps(rustfs))
+        exposed["ports"] = [{"target": "9000", "published": "9000", "host_ip": "0.0.0.0", "protocol": "tcp"}]
+        self.assert_rejects(
+            lambda: blob_mode.assert_rustfs_containers_match([exposed], record),
+            "running-rustfs-exposed",
+        )
+        attached_elsewhere = json.loads(json.dumps(rustfs))
+        attached_elsewhere["network"]["networks"].append("untrusted_bridge")
+        self.assert_rejects(
+            lambda: blob_mode.assert_rustfs_containers_match([attached_elsewhere], record),
+            "running-rustfs-network",
+        )
+        self.assert_rejects(
+            lambda: blob_mode.validate_private_rustfs_network({
+                "Name": "teagram_rustfs_private",
+                "Driver": "bridge",
+                "Internal": True,
+                "EnableIPv6": False,
+                "Options": {"com.docker.network.bridge.gateway_mode_ipv4": "nat"},
+            }, "teagram_rustfs_private"),
+            "running-rustfs-network",
+        )
+
     def test_initial_local_record_rejects_wrong_generation_type_or_backend_path(self) -> None:
         invalid_generation = dict(self.record)
         invalid_generation["generation"] = True
@@ -1249,6 +1480,96 @@ class BlobModeStateTests(unittest.TestCase):
                 self.assertEqual(records[-1]["outcome"], "recovered-local")
                 self.assertEqual(records[-1]["evidence"]["retained_cutover_key_count"], 1)
                 self.assertEqual(head, mode_bytes)
+
+    def test_simple_s3_transition_accepts_current_migrations_and_one_verified_copy(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = pathlib.Path(temporary)
+            state_dir, report_root, lock_path = self.create_initial_authority(root)
+            proof_path = self.simple_s3_proof_file(root, report_root)
+            args = SimpleNamespace(
+                outcome="s3-accepted", proof=proof_path, state_dir=state_dir,
+                report_root=report_root, lock_path=lock_path,
+            )
+            with (
+                patch.object(blob_mode, "require_runner_lock"),
+                patch.object(blob_mode, "file_stat", side_effect=self.allow_unowned_private_files),
+                patch.object(blob_mode.os, "fchown"),
+                patch.object(blob_mode.os, "chown"),
+            ):
+                blob_mode.publish_transition(args)
+                records, head, mode_bytes = blob_mode.read_authority(state_dir, report_root)
+            self.assertEqual(records[-1]["outcome"], "s3-accepted")
+            self.assertEqual(records[-1]["evidence"]["copy_passes"], 1)
+            self.assertEqual(head, mode_bytes)
+
+    def test_simple_s3_transition_rejects_published_rustfs_port(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = pathlib.Path(temporary)
+            state_dir, report_root, lock_path = self.create_initial_authority(root)
+            proof_path = self.simple_s3_proof_file(root, report_root, exposed=True)
+            args = SimpleNamespace(
+                outcome="s3-accepted", proof=proof_path, state_dir=state_dir,
+                report_root=report_root, lock_path=lock_path,
+            )
+            state_before = {
+                path.relative_to(state_dir): path.read_bytes()
+                for path in state_dir.rglob("*") if path.is_file()
+            }
+            with (
+                patch.object(blob_mode, "require_runner_lock"),
+                patch.object(blob_mode, "file_stat", side_effect=self.allow_unowned_private_files),
+                patch.object(blob_mode.os, "fchown"),
+                patch.object(blob_mode.os, "chown"),
+            ):
+                self.assert_rejects(lambda: blob_mode.publish_transition(args), "transition-report-evidence")
+            state_after = {
+                path.relative_to(state_dir): path.read_bytes()
+                for path in state_dir.rglob("*") if path.is_file()
+            }
+            self.assertEqual(state_after, state_before)
+
+    def test_simple_s3_transition_rejects_external_rustfs_network(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = pathlib.Path(temporary)
+            state_dir, report_root, lock_path = self.create_initial_authority(root)
+            proof_path = self.simple_s3_proof_file(root, report_root, external_network=True)
+            args = SimpleNamespace(
+                outcome="s3-accepted", proof=proof_path, state_dir=state_dir,
+                report_root=report_root, lock_path=lock_path,
+            )
+            state_before = {
+                path.relative_to(state_dir): path.read_bytes()
+                for path in state_dir.rglob("*") if path.is_file()
+            }
+            with (
+                patch.object(blob_mode, "require_runner_lock"),
+                patch.object(blob_mode, "file_stat", side_effect=self.allow_unowned_private_files),
+                patch.object(blob_mode.os, "fchown"),
+                patch.object(blob_mode.os, "chown"),
+            ):
+                self.assert_rejects(lambda: blob_mode.publish_transition(args), "transition-report-evidence")
+            state_after = {
+                path.relative_to(state_dir): path.read_bytes()
+                for path in state_dir.rglob("*") if path.is_file()
+            }
+            self.assertEqual(state_after, state_before)
+
+    def test_simple_s3_transition_rejects_object_manifest_mismatch(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = pathlib.Path(temporary)
+            state_dir, report_root, lock_path = self.create_initial_authority(root)
+            proof_path = self.simple_s3_proof_file(root, report_root, mismatched_destination=True)
+            args = SimpleNamespace(
+                outcome="s3-accepted", proof=proof_path, state_dir=state_dir,
+                report_root=report_root, lock_path=lock_path,
+            )
+            with (
+                patch.object(blob_mode, "require_runner_lock"),
+                patch.object(blob_mode, "file_stat", side_effect=self.allow_unowned_private_files),
+                patch.object(blob_mode.os, "fchown"),
+                patch.object(blob_mode.os, "chown"),
+            ):
+                self.assert_rejects(lambda: blob_mode.publish_transition(args), "transition-report-evidence")
 
     def test_r70_recovery_publisher_rejects_nonempty_files(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
