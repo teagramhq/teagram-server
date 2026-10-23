@@ -36,6 +36,7 @@ demo_remove_previous_image() {
 
 demo_cleanup() {
   local rc=$?
+  local rollback_rc=0 rollback_confirmed=1
   trap - EXIT
   if (( rc != 0 && BACKUP_READY == 1 )); then
     if (( CUTOVER_COMMITTED == 1 )); then
@@ -43,27 +44,40 @@ demo_cleanup() {
         "$CANDIDATE_SERVER" "$SHA" "$BACKUP_DIR" >&2
     else
       if (( PUBLIC_ACTIVATION_STARTED == 1 )); then
+        rollback_confirmed=0
         if demo_haproxy_control enable "$ACTIVE_SERVER" &&
           demo_haproxy_control wait-healthy "$ACTIVE_SERVER" --timeout 60 &&
           demo_haproxy_control drain "$CANDIDATE_SERVER"; then
           if (( CLIENT_CONFIG_UPDATED == 1 )); then
-            cp -- "$BACKUP_DIR/client.json" "$DEMO_CLIENT_CONFIG.next" || rc=1
-            chown root:root "$DEMO_CLIENT_CONFIG.next" || rc=1
-            chmod 0644 "$DEMO_CLIENT_CONFIG.next" || rc=1
-            mv -f -- "$DEMO_CLIENT_CONFIG.next" "$DEMO_CLIENT_CONFIG" || rc=1
+            cp -- "$BACKUP_DIR/client.json" "$DEMO_CLIENT_CONFIG.next" || rollback_rc=1
+            chown root:root "$DEMO_CLIENT_CONFIG.next" || rollback_rc=1
+            chmod 0644 "$DEMO_CLIENT_CONFIG.next" || rollback_rc=1
+            mv -f -- "$DEMO_CLIENT_CONFIG.next" "$DEMO_CLIENT_CONFIG" || rollback_rc=1
           fi
-          demo_write_active_server "$ACTIVE_SERVER" || rc=1
-          demo_prepare_haproxy_runtime || rc=1
-          printf 'demo rollout reverted to server=%s; migrated database preserved backup=%s\n' \
-            "$ACTIVE_SERVER" "$BACKUP_DIR" >&2
+          demo_write_active_server "$ACTIVE_SERVER" || rollback_rc=1
+          demo_prepare_haproxy_runtime || rollback_rc=1
+          if (( rollback_rc == 0 )); then
+            rollback_confirmed=1
+            printf 'demo rollout reverted to server=%s; migrated database preserved backup=%s\n' \
+              "$ACTIVE_SERVER" "$BACKUP_DIR" >&2
+          else
+            printf 'demo rollout could not persist rollback to server=%s; candidate remains running; backup=%s\n' \
+              "$ACTIVE_SERVER" "$BACKUP_DIR" >&2
+            rc=1
+          fi
         else
-          printf 'demo rollout could not restore HAProxy to server=%s; edge remains running and backup=%s\n' \
+          printf 'demo rollout could not confirm server=%s healthy and restored; candidate remains running and backup=%s\n' \
             "$ACTIVE_SERVER" "$BACKUP_DIR" >&2
           rc=1
         fi
       fi
       if (( CANDIDATE_STARTED == 1 )); then
-        demo_compose stop "$CANDIDATE_SERVER" || rc=1
+        if (( rollback_confirmed == 1 )); then
+          demo_compose stop "$CANDIDATE_SERVER" || rc=1
+        else
+          printf 'demo rollout left candidate server=%s running because rollback was not confirmed\n' \
+            "$CANDIDATE_SERVER" >&2
+        fi
       fi
       if [[ -n "$PREV_IMAGE_ID" ]]; then
         docker image tag "$PREV_IMAGE_ID" teagramd:local || rc=1

@@ -183,27 +183,39 @@ return `RECAPTCHA_CHECK`, and only then starts HAProxy and the public edge.
 
 ## Stack data-retention threat model
 
-MAIN-2203 covers sign-up, auto-join, seeding and scheduled activity; it excludes
-this stack's storage and deploy backups. Demo users control account, message
-and uploaded-file data. Anyone who can read a stale copy can recover that data
+MAIN-2203 covers sign-up, auto-join, seeding and scheduled activity; this
+section covers the demo stack's storage and deploy backups. Demo users control
+account, message and uploaded-file data. A stale copy can recover that data
 after the live service has been wiped.
 
 The retained copies are the `teagram` database in `pgdata`, uploaded files in
 `tgblobs`, and deploy snapshots under `.state/teagram-demo/backups/`. Each
-snapshot contains a PostgreSQL dump and rollback metadata. Deploy keeps these
-files root-only (`0700` directories and `0600` dump files) for rollback until
-the next weekly wipe. After preflight and stopping every writer, the wipe
-removes all entries in that backup directory before dropping the live database
-and clearing blobs. A prune error aborts before the database or blobs are
-changed. The wipe never restores a pre-wipe snapshot. The `tgkey` volume and
-`.env` keys preserve server identity and encryption; they are not user content
-and must not be removed or exposed.
+online PostgreSQL snapshot is an unfiltered copy of the live database and can
+contain sign-up, account, authentication and message data. The dump is not
+encrypted separately by the stack. Snapshots also contain rollback metadata,
+including the prior client configuration. The backup root and each snapshot
+directory are root-owned mode `0700`; dump and metadata files are root-owned
+mode `0600`. Direct filesystem access is therefore limited to LXC root, but
+the Docker daemon and privileged Incus or host administrators can also read
+or copy these files. The forced CI deploy key has no shell, forwarding or PTY
+and accepts only a commit SHA; it cannot browse or download the backup tree.
 
-This policy covers files managed by the demo stack. Do not copy dumps off the
-LXC or take host-level snapshots with longer retention; any external snapshots
-must follow the same weekly erasure window. Docker logs are size-bounded but
-are not cleared by the wipe, so application and deploy logs must not contain
-message bodies, authentication tokens or passwords.
+There is no per-deploy expiry. Successful deploys, failed rollouts and
+incomplete backup attempts retain their backup directories until the next
+successful weekly wipe, scheduled for Sunday 03:00 UTC with up to 15 minutes
+of randomized delay. If preflight or pruning fails, the wipe aborts before
+changing the database or blobs and backups remain in place. After preflight
+and stopping writers, the wipe removes every entry under the backup root
+before dropping the live database and clearing blobs. It never restores a
+pre-wipe snapshot. This is filesystem deletion, not verified cryptographic
+erasure; the stack does not establish retention for host-level snapshots or
+copies outside the LXC. Do not keep such copies beyond the same weekly
+erasure window. The `tgkey` volume and `.env` keys preserve server identity
+and encryption; they are not user content and must not be removed or exposed.
+
+Docker logs are size-bounded but are not cleared by the wipe, so application
+and deploy logs must not contain message bodies, authentication tokens or
+passwords.
 
 The seed script interface is:
 

@@ -641,6 +641,57 @@ env \
   TMP_DIR="$TMP_DIR" \
   bash "$TMP_DIR/deploy-image-cleanup-regression.sh"
 
+cat > "$TMP_DIR/deploy-rollback-failure-regression.sh" <<'BASH'
+set -Eeuo pipefail
+source "$CLEANUP_FUNCTION"
+ACTIVE_SERVER=teagramd
+CANDIDATE_SERVER=teagramd-next
+BACKUP_READY=1
+BACKUP_DIR="$TEST_ROOT/backup"
+CANDIDATE_STARTED=1
+CLIENT_CONFIG_UPDATED=0
+CUTOVER_COMMITTED=0
+PUBLIC_ACTIVATION_STARTED=1
+PREV_IMAGE_ID=sha256:previous
+SHA=0123456789abcdef0123456789abcdef01234567
+RESTORE_DB=
+RESTORE_DB_CREATED=0
+TMP_DIR="$TEST_ROOT/tmp"
+mkdir -p "$TMP_DIR"
+trap demo_cleanup EXIT
+
+demo_haproxy_control() {
+  printf 'haproxy %s\n' "$*" >> "$CALLS"
+  case "$*" in
+    'enable teagramd'|'drain teagramd-next') return 0 ;;
+    'wait-healthy teagramd --timeout 60') return 1 ;;
+    *) return 1 ;;
+  esac
+}
+demo_compose() { printf 'compose %s\n' "$*" >> "$CALLS"; }
+demo_write_active_server() { printf 'active %s\n' "$1" >> "$CALLS"; }
+demo_prepare_haproxy_runtime() { printf 'prepare runtime\n' >> "$CALLS"; }
+docker() { printf 'docker %s\n' "$*" >> "$CALLS"; }
+
+false
+BASH
+if env \
+  CLEANUP_FUNCTION="$IMAGE_CLEANUP_FUNCTION" \
+  TEST_ROOT="$TMP_DIR/deploy-rollback-failure" \
+  CALLS="$TMP_DIR/deploy-rollback-failure-calls" \
+  bash "$TMP_DIR/deploy-rollback-failure-regression.sh"; then
+  printf '%s\n' 'rollback-failure regression unexpectedly succeeded' >&2
+  exit 1
+fi
+if ! grep -Fxq 'haproxy wait-healthy teagramd --timeout 60' "$TMP_DIR/deploy-rollback-failure-calls"; then
+  printf '%s\n' 'rollback-failure regression did not exercise the old-slot health-check failure' >&2
+  exit 1
+fi
+if grep -Fxq 'compose stop teagramd-next' "$TMP_DIR/deploy-rollback-failure-calls"; then
+  printf '%s\n' 'deploy rollback stopped the candidate before the old slot was restored' >&2
+  exit 1
+fi
+
 cat > "$TMP_DIR/deploy-image-cleanup-failure-regression.sh" <<'BASH'
 set -Eeuo pipefail
 source "$IMAGE_CLEANUP_FUNCTION"
