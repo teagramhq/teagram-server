@@ -823,6 +823,8 @@ async function observeWorkerWebSockets(browser, pageSession, handlers) {
       handlers.created(message.params);
     } else if (message.method === "Network.webSocketHandshakeResponseReceived") {
       handlers.handshakeResponse(message.params);
+    } else if (message.method === "Network.webSocketClosed") {
+      handlers.closed(message.params);
     }
   }
 
@@ -913,6 +915,12 @@ async function observeWorkerWebSockets(browser, pageSession, handlers) {
 
 async function makeWssAudit(contextInfo, progress) {
   const connections = new Map();
+  let accountSlotCount = null;
+  let activeConnectionsBeforeBaseline = 0;
+  let logoutRpcStarted = false;
+  let logoutSocketClosures = 0;
+  let activeConnectionsAtContextTeardown = null;
+  let connectionsCreatedDuringContextTeardown = 0;
   let malformed = false;
   let handshakeCount = 0;
   let pendingWorkers = 0;
@@ -938,7 +946,12 @@ async function makeWssAudit(contextInfo, progress) {
       } catch {
         malformed = true;
       }
-      connections.set(params.requestId, {matches, responses: 0, status: 0});
+      connections.set(params.requestId, {matches, responses: 0, status: 0, closed: false});
+      if (accountSlotCount === null) {
+        const activeConnections = [...connections.values()].filter((item) => !item.closed).length;
+        activeConnectionsBeforeBaseline = Math.max(activeConnectionsBeforeBaseline, activeConnections);
+      }
+      if (activeConnectionsAtContextTeardown !== null) connectionsCreatedDuringContextTeardown += 1;
       if (!progress.observeWssConnection()) malformed = true;
     },
     handshakeResponse(params) {
@@ -956,6 +969,24 @@ async function makeWssAudit(contextInfo, progress) {
       connection.responses += 1;
       if (connection.responses === 1) connection.status = params.response.status;
       progress.observeWssHandshake(params.response.status);
+    },
+    closed(params) {
+      if (!isRecord(params) || typeof params.requestId !== "string" ||
+          !/^[0-9A-Za-z._-]{1,64}$/u.test(params.requestId)) {
+        malformed = true;
+        return;
+      }
+      const connection = connections.get(params.requestId);
+      if (!connection || connection.closed) {
+        malformed = true;
+        return;
+      }
+      connection.closed = true;
+      if (logoutRpcStarted && activeConnectionsAtContextTeardown === null) {
+        logoutSocketClosures += 1;
+        if (logoutSocketClosures > 1) malformed = true;
+      }
+      if (!progress.observeWssClosed()) malformed = true;
     },
     unobservable() {
       workerUnobservable = true;
@@ -975,11 +1006,20 @@ async function makeWssAudit(contextInfo, progress) {
   await session.send("Network.enable");
   session.on("Network.webSocketCreated", handlers.created);
   session.on("Network.webSocketHandshakeResponseReceived", handlers.handshakeResponse);
+  session.on("Network.webSocketClosed", handlers.closed);
   await observeWorkerWebSockets(contextInfo.context.browser(), session, handlers);
+  function activeAccountSlotMismatch(activeConnections) {
+    if (accountSlotCount !== null) return activeConnections !== accountSlotCount;
+    if (!progress.isSignedIn()) return false;
+    return activeConnections > WSS_ACCOUNT_SLOT_CEILING ||
+      activeConnections < Math.min(activeConnectionsBeforeBaseline, WSS_ACCOUNT_SLOT_CEILING);
+  }
+
   function diagnostic() {
     const entries = [...connections.values()];
     const targets = connections.size;
     const handshakes = handshakeCount;
+    const activeConnections = entries.filter((item) => !item.closed).length;
     const targetMatch = targets > 0 && entries.every((item) => item.matches);
     const result = (name, matches = false, status = 0) => ({
       wss_diagnostic: name,
@@ -994,7 +1034,11 @@ async function makeWssAudit(contextInfo, progress) {
     if (workerUnobservable) return result("worker-unobservable");
     if (pendingWorkers > 0) return result("worker-pending");
     if (targets === 0) return result("no-target");
-    if (targets > WSS_ACCOUNT_SLOT_CEILING) return result("observation-malformed");
+    const connectionCeiling = progress.isSignedIn() ? WSS_CONNECTION_CEILING : WSS_ACCOUNT_SLOT_CEILING;
+    if (targets > connectionCeiling) return result("observation-malformed");
+    if (activeAccountSlotMismatch(activeConnections)) {
+      return result("observation-malformed");
+    }
 
     for (const [index, item] of entries.entries()) {
       if (!item.matches) {
@@ -1029,20 +1073,46 @@ async function makeWssAudit(contextInfo, progress) {
     },
     validate() {
       const entries = [...connections.values()];
-      if (malformed || orphanHandshake || workerUnobservable || pendingWorkers !== 0 || entries.length < 1 || entries.length > WSS_ACCOUNT_SLOT_CEILING ||
+      const activeConnections = entries.filter((item) => !item.closed).length;
+      const signedIn = progress.isSignedIn();
+      const connectionCeiling = signedIn ? WSS_CONNECTION_CEILING : WSS_ACCOUNT_SLOT_CEILING;
+      if (malformed || orphanHandshake || workerUnobservable || pendingWorkers !== 0 || entries.length < 1 ||
+          activeConnections < 1 || entries.length > connectionCeiling ||
+          activeAccountSlotMismatch(activeConnections) ||
           handshakeCount !== entries.length || entries.some((item) => !item.matches ||
             item.responses !== 1 || item.status !== 101)) {
         fail("websocket-not-ready", undefined, diagnostic());
       }
+      if (accountSlotCount === null && signedIn) accountSlotCount = activeConnections;
       return {connectionCount: entries.length, status101: true};
     },
     validateAfterLogout() {
       const entries = [...connections.values()];
+      const activeConnections = activeConnectionsAtContextTeardown === null
+        ? entries.filter((item) => !item.closed).length
+        : activeConnectionsAtContextTeardown + connectionsCreatedDuringContextTeardown;
+      const expectedLogoutSocketLoss = Math.min(logoutSocketClosures, 1);
       if (malformed || orphanHandshake || workerUnobservable || pendingWorkers !== 0 || entries.length < 1 || entries.length > WSS_CONNECTION_CEILING ||
+          accountSlotCount === null || activeConnections < Math.max(0, accountSlotCount - expectedLogoutSocketLoss) ||
+          activeConnections > accountSlotCount + 1 ||
           handshakeCount > entries.length || entries.some((item) => !item.matches || item.responses > 1 ||
             (item.responses === 1 && item.status !== 101))) {
         fail("websocket-not-ready", undefined, diagnostic());
       }
+    },
+    beginLogout() {
+      if (logoutRpcStarted) {
+        malformed = true;
+        return;
+      }
+      logoutRpcStarted = true;
+    },
+    beginContextTeardown() {
+      if (activeConnectionsAtContextTeardown !== null) {
+        malformed = true;
+        return;
+      }
+      activeConnectionsAtContextTeardown = [...connections.values()].filter((item) => !item.closed).length;
     },
   };
 }
@@ -1333,6 +1403,7 @@ async function clearInputWithKeyboard(page, locator) {
 
 async function logoutThroughApp(prepared, state) {
   let completed = false;
+  prepared.contextInfo.wssAudit?.beginLogout?.();
   try {
     completed = await prepared.contextInfo.page.evaluate(async () => {
       const proxy = window.apiManagerProxy;
@@ -1360,6 +1431,7 @@ async function logoutThroughApp(prepared, state) {
     return {kind: "closed"};
   }
   try {
+    prepared.contextInfo.wssAudit?.beginContextTeardown?.();
     await prepared.dependencies.closeContext(prepared.contextInfo);
     prepared.contextClosed = true;
     return {kind: "complete"};

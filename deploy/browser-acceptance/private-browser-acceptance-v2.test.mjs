@@ -209,6 +209,7 @@ function createAcceptancePage({
   signupTitleText = "YourName",
   stopAtUsernameFocus = false,
   completeSignIn = false,
+  onLogout = () => {},
 } = {}) {
   const apiMethods = [];
   let usernameFocused = false;
@@ -222,6 +223,7 @@ function createAcceptancePage({
           error.type = "SESSION_PASSWORD_NEEDED";
           throw error;
         }
+        if (payload.args?.[0] === "auth.logOut") queueMicrotask(onLogout);
         return null;
       },
     },
@@ -952,6 +954,116 @@ test("empty chats state is accepted as a rendered chat list after sign-in", asyn
   assert.deepEqual(browser.apiMethods.filter((method) => method === "auth.logOut"), ["auth.logOut"]);
 });
 
+test("socket-close events during context teardown do not invalidate the logout WSS proof", async (t) => {
+  const fixture = createDependencies(undefined, true);
+  const browser = createAcceptancePage({completeSignIn: true});
+  await useRealAcceptanceFlow(fixture, browser);
+  let wssFixture;
+  fixture.dependencies.proveWss = async (contextInfo, _release, _manifest, progress, tracker) => {
+    wssFixture = await proveSharedWorkerWss(t, {
+      workerSockets: workerSockets(4),
+      contextInfo,
+      progress,
+      tracker,
+    });
+    return wssFixture.result;
+  };
+  fixture.dependencies.closeContext = async () => {
+    fixture.events.push("close-context");
+    for (let index = 0; index < 4; index += 1) {
+      wssFixture.browserSession.workerMessage("observer-worker", {
+        method: "Network.webSocketClosed",
+        params: {requestId: `worker-socket-${index}`, timestamp: index + 1},
+      });
+    }
+  };
+
+  const result = await executeMode({mode: "acceptance", releaseRecord: "fixture"}, fixture.dependencies);
+  const output = JSON.parse(result.output);
+
+  assert.equal(result.exitCode, 0, result.output);
+  assert.equal(output.ok, true);
+  assert.equal(output.logout, "ok");
+  assert.equal(output.wssConnections, 4);
+  assert.deepEqual(browser.apiMethods, ["auth.sendCode", "auth.signIn", "auth.checkPassword", "auth.logOut"]);
+});
+
+test("one logout socket close before the teardown snapshot does not invalidate the WSS proof", async (t) => {
+  const fixture = createDependencies(undefined, true);
+  let wssFixture;
+  const browser = createAcceptancePage({
+    completeSignIn: true,
+    onLogout() {
+      fixture.events.push("logout-socket-close");
+      wssFixture.browserSession.workerMessage("observer-worker", {
+        method: "Network.webSocketClosed",
+        params: {requestId: "worker-socket-0", timestamp: 1},
+      });
+    },
+  });
+  await useRealAcceptanceFlow(fixture, browser);
+  fixture.dependencies.proveWss = async (contextInfo, _release, _manifest, progress, tracker) => {
+    wssFixture = await proveSharedWorkerWss(t, {
+      workerSockets: workerSockets(4),
+      contextInfo,
+      progress,
+      tracker,
+    });
+    return wssFixture.result;
+  };
+
+  const result = await executeMode({mode: "acceptance", releaseRecord: "fixture"}, fixture.dependencies);
+  const output = JSON.parse(result.output);
+
+  assert.equal(result.exitCode, 0, result.output);
+  assert.equal(output.ok, true);
+  assert.equal(output.logout, "ok");
+  assert.equal(output.wssConnections, 4);
+  assert.ok(fixture.events.indexOf("logout-socket-close") < fixture.events.indexOf("close-context"));
+  assert.deepEqual(browser.apiMethods, ["auth.sendCode", "auth.signIn", "auth.checkPassword", "auth.logOut"]);
+});
+
+test("logout reconnect created during asynchronous context teardown stays within the WSS budget", async (t) => {
+  const fixture = createDependencies(undefined, true);
+  const browser = createAcceptancePage({completeSignIn: true});
+  await useRealAcceptanceFlow(fixture, browser);
+  let wssFixture;
+  fixture.dependencies.proveWss = async (contextInfo, _release, _manifest, progress, tracker) => {
+    wssFixture = await proveSharedWorkerWss(t, {
+      workerSockets: workerSockets(4),
+      contextInfo,
+      progress,
+      tracker,
+    });
+    return wssFixture.result;
+  };
+  fixture.dependencies.closeContext = async () => {
+    fixture.events.push("close-context");
+    await Promise.resolve();
+    fixture.events.push("teardown-socket-close");
+    wssFixture.browserSession.workerMessage("observer-worker", {
+      method: "Network.webSocketClosed",
+      params: {requestId: "worker-socket-0", timestamp: 1},
+    });
+    fixture.events.push("teardown-reconnect");
+    wssFixture.browserSession.workerMessage("observer-worker", {
+      method: "Network.webSocketCreated",
+      params: {requestId: "worker-socket-during-teardown", url: `wss://${targetHost}/apiws`},
+    });
+  };
+
+  const result = await executeMode({mode: "acceptance", releaseRecord: "fixture"}, fixture.dependencies);
+  const output = JSON.parse(result.output);
+
+  assert.equal(result.exitCode, 0, result.output);
+  assert.equal(output.ok, true);
+  assert.equal(output.logout, "ok");
+  assert.equal(output.wssConnections, 5);
+  assert.ok(fixture.events.indexOf("close-context") < fixture.events.indexOf("teardown-reconnect"));
+  assert.ok(fixture.events.indexOf("teardown-socket-close") < fixture.events.indexOf("teardown-reconnect"));
+  assert.deepEqual(browser.apiMethods, ["auth.sendCode", "auth.signIn", "auth.checkPassword", "auth.logOut"]);
+});
+
 test("chat-list check ignores hidden list variants and scopes its row count", async () => {
   const fixture = createDependencies(undefined, true);
   const browser = createAcceptancePage({
@@ -1067,7 +1179,17 @@ function fakeCdpSession({attachFails = false, replies = true, detach = "release"
   return session;
 }
 
-async function proveSharedWorkerWss(t, {socketUrl, pageSocket = false, childSocketUrl, delayedChild = false, workerSockets = [], ...sessionOptions}) {
+async function proveSharedWorkerWss(t, {
+  socketUrl,
+  pageSocket = false,
+  childSocketUrl,
+  delayedChild = false,
+  workerSockets = [],
+  contextInfo: suppliedContextInfo,
+  progress: suppliedProgress,
+  tracker: suppliedTracker,
+  ...sessionOptions
+}) {
   t.mock.timers.enable({apis: ["Date"]});
   const endpoint = `wss://${targetHost}/apiws`;
   const log = [];
@@ -1138,18 +1260,21 @@ async function proveSharedWorkerWss(t, {socketUrl, pageSocket = false, childSock
       await new Promise((resolve) => setImmediate(resolve));
     },
   };
-  const contextInfo = {
-    page,
-    context: {
-      async newCDPSession() { return pageSession; },
-      browser() { return {async newBrowserCDPSession() { return browserSessions.shift(); }}; },
-    },
+  const contextInfo = suppliedContextInfo ?? {page, context: {}};
+  if (suppliedContextInfo) Object.assign(contextInfo.page, page);
+  Object.assign(contextInfo.context, {
+    async newCDPSession() { return pageSession; },
+    browser() { return {async newBrowserCDPSession() { return browserSessions.shift(); }}; },
+  });
+  const tracker = suppliedTracker ?? {
+    telegramOrgAttemptCount: 0,
+    telegramOrgWebSocketAttemptCount: 0,
+    websocketMismatch: false,
   };
-  const tracker = {telegramOrgAttemptCount: 0, telegramOrgWebSocketAttemptCount: 0, websocketMismatch: false};
-  const progress = createAcceptanceProgress({sourceCommit});
+  const progress = suppliedProgress ?? createAcceptanceProgress({sourceCommit});
   try {
     const result = await proveWss(contextInfo, {url: `https://${targetHost}/private/`}, {endpoint}, progress, tracker);
-    return {result, log, progress, browserSession, wssAudit: contextInfo.wssAudit};
+    return {result, log, progress, browserSession, wssAudit: contextInfo.wssAudit, contextInfo};
   } catch (error) {
     return {code: error.code, wssDiagnostic: error.wssDiagnostic, browserSession, relatedSession};
   }
@@ -1292,6 +1417,7 @@ test("one logout reconnect after the four account-slot sockets is accepted", asy
     assert.equal(progress.observeClientEvent(event), true);
   }
   assert.equal(progress.markSignedIn(), true);
+  assert.doesNotThrow(() => wssAudit.validate());
 
   const output = await progress.finish(async (method) => {
     assert.equal(method, "auth.logOut");
@@ -1312,6 +1438,207 @@ test("one logout reconnect after the four account-slot sockets is accepted", asy
   assert.doesNotThrow(() => wssAudit.validateAfterLogout());
 });
 
+test("WSS slots opened after the initial settle are pinned at sign-in", async (t) => {
+  const {result, progress, browserSession, wssAudit} = await proveSharedWorkerWss(t, {
+    workerSockets: workerSockets(2),
+  });
+  assert.equal(result.connectionCount, 2);
+
+  for (let index = 2; index < WSS_ACCOUNT_SLOT_CEILING; index += 1) {
+    browserSession.workerMessage("observer-worker", {
+      method: "Network.webSocketCreated",
+      params: {requestId: `worker-socket-${index}`, url: `wss://${targetHost}/apiws`},
+    });
+    browserSession.workerMessage("observer-worker", {
+      method: "Network.webSocketHandshakeResponseReceived",
+      params: {requestId: `worker-socket-${index}`, response: {status: 101}},
+    });
+  }
+
+  assert.doesNotThrow(() => wssAudit.validate());
+  for (const event of ["req-dh-params", "set-client-dh", "init-connection", "password-challenge", "password-check"]) {
+    assert.equal(progress.observeClientEvent(event), true);
+  }
+  assert.equal(progress.markSignedIn(), true);
+  assert.doesNotThrow(() => wssAudit.validate());
+});
+
+test("a fifth active WSS socket before the first signed-in validation fails", async (t) => {
+  const {progress, browserSession, wssAudit} = await proveSharedWorkerWss(t, {
+    workerSockets: workerSockets(WSS_ACCOUNT_SLOT_CEILING),
+  });
+  for (const event of ["req-dh-params", "set-client-dh", "init-connection", "password-challenge", "password-check"]) {
+    assert.equal(progress.observeClientEvent(event), true);
+  }
+  assert.equal(progress.markSignedIn(), true);
+  browserSession.workerMessage("observer-worker", {
+    method: "Network.webSocketCreated",
+    params: {requestId: "worker-socket-before-baseline-validation", url: `wss://${targetHost}/apiws`},
+  });
+  browserSession.workerMessage("observer-worker", {
+    method: "Network.webSocketHandshakeResponseReceived",
+    params: {requestId: "worker-socket-before-baseline-validation", response: {status: 101}},
+  });
+
+  assert.throws(() => wssAudit.validate(), {code: "websocket-not-ready"});
+});
+
+test("logout WSS validation retains the one-extra-active-socket limit", async (t) => {
+  const {browserSession, progress, wssAudit} = await proveSharedWorkerWss(t, {
+    workerSockets: workerSockets(4),
+  });
+  for (const event of ["req-dh-params", "set-client-dh", "init-connection", "password-challenge", "password-check"]) {
+    assert.equal(progress.observeClientEvent(event), true);
+  }
+  assert.equal(progress.markSignedIn(), true);
+  assert.doesNotThrow(() => wssAudit.validate());
+  wssAudit.beginLogout();
+  wssAudit.beginContextTeardown();
+
+  for (let index = 0; index < 2; index += 1) {
+    browserSession.workerMessage("observer-worker", {
+      method: "Network.webSocketCreated",
+      params: {requestId: `worker-socket-logout-${index}`, url: `wss://${targetHost}/apiws`},
+    });
+    browserSession.workerMessage("observer-worker", {
+      method: "Network.webSocketHandshakeResponseReceived",
+      params: {requestId: `worker-socket-logout-${index}`, response: {status: 101}},
+    });
+  }
+
+  assert.throws(() => wssAudit.validateAfterLogout(), {code: "websocket-not-ready"});
+});
+
+test("a post-sign-in reconnect replaces a closed account-slot socket", async (t) => {
+  const {progress, browserSession, wssAudit} = await proveSharedWorkerWss(t, {
+    workerSockets: workerSockets(4),
+  });
+  for (const event of ["req-dh-params", "set-client-dh", "init-connection", "password-challenge", "password-check"]) {
+    assert.equal(progress.observeClientEvent(event), true);
+  }
+  assert.equal(progress.markSignedIn(), true);
+  assert.doesNotThrow(() => wssAudit.validate());
+
+  browserSession.workerMessage("observer-worker", {
+    method: "Network.webSocketCreated",
+    params: {requestId: "worker-socket-after-sign-in", url: `wss://${targetHost}/apiws`},
+  });
+  browserSession.workerMessage("observer-worker", {
+    method: "Network.webSocketHandshakeResponseReceived",
+    params: {requestId: "worker-socket-after-sign-in", response: {status: 101}},
+  });
+  browserSession.workerMessage("observer-worker", {
+    method: "Network.webSocketClosed",
+    params: {requestId: "worker-socket-0", timestamp: 1},
+  });
+
+  assert.doesNotThrow(() => wssAudit.validate());
+  const output = await progress.finish(async () => null);
+  assert.equal(output.wssConnections, 5);
+  assert.equal(output.ok, true);
+});
+
+test("a sign-in replacement before the first validation is accepted in either event order", async (t) => {
+  for (const order of ["create-before-close", "close-before-create"]) {
+    await t.test(order, async (t) => {
+      const {progress, browserSession, wssAudit} = await proveSharedWorkerWss(t, {
+        workerSockets: workerSockets(4),
+      });
+      for (const event of ["req-dh-params", "set-client-dh", "init-connection", "password-challenge", "password-check"]) {
+        assert.equal(progress.observeClientEvent(event), true);
+      }
+      assert.equal(progress.markSignedIn(), true);
+
+      const createReplacement = () => {
+        browserSession.workerMessage("observer-worker", {
+          method: "Network.webSocketCreated",
+          params: {requestId: "worker-socket-before-first-validation", url: `wss://${targetHost}/apiws`},
+        });
+        browserSession.workerMessage("observer-worker", {
+          method: "Network.webSocketHandshakeResponseReceived",
+          params: {requestId: "worker-socket-before-first-validation", response: {status: 101}},
+        });
+      };
+      const closeOriginal = () => {
+        browserSession.workerMessage("observer-worker", {
+          method: "Network.webSocketClosed",
+          params: {requestId: "worker-socket-0", timestamp: 1},
+        });
+      };
+
+      if (order === "create-before-close") {
+        createReplacement();
+        closeOriginal();
+      } else {
+        closeOriginal();
+        createReplacement();
+      }
+
+      assert.equal(wssAudit.connections.size, 5);
+      assert.equal([...wssAudit.connections.values()].filter((connection) => !connection.closed).length, 4);
+      assert.deepEqual(wssAudit.validate(), {connectionCount: 5, status101: true});
+    });
+  }
+});
+
+test("a post-sign-in socket close without a replacement fails the WSS proof", async (t) => {
+  const {progress, browserSession, wssAudit} = await proveSharedWorkerWss(t, {
+    workerSockets: workerSockets(4),
+  });
+  for (const event of ["req-dh-params", "set-client-dh", "init-connection", "password-challenge", "password-check"]) {
+    assert.equal(progress.observeClientEvent(event), true);
+  }
+  assert.equal(progress.markSignedIn(), true);
+
+  browserSession.workerMessage("observer-worker", {
+    method: "Network.webSocketClosed",
+    params: {requestId: "worker-socket-0", timestamp: 1},
+  });
+
+  assert.throws(() => wssAudit.validate(), {code: "websocket-not-ready"});
+});
+
+test("a sign-in slot replacement and the logout reconnect both fit the observed lifecycle", async (t) => {
+  const {progress, browserSession, wssAudit} = await proveSharedWorkerWss(t, {
+    workerSockets: workerSockets(4),
+  });
+  for (const event of ["req-dh-params", "set-client-dh", "init-connection", "password-challenge", "password-check"]) {
+    assert.equal(progress.observeClientEvent(event), true);
+  }
+  assert.equal(progress.markSignedIn(), true);
+  assert.doesNotThrow(() => wssAudit.validate());
+
+  browserSession.workerMessage("observer-worker", {
+    method: "Network.webSocketCreated",
+    params: {requestId: "worker-socket-after-sign-in", url: `wss://${targetHost}/apiws`},
+  });
+  browserSession.workerMessage("observer-worker", {
+    method: "Network.webSocketHandshakeResponseReceived",
+    params: {requestId: "worker-socket-after-sign-in", response: {status: 101}},
+  });
+  browserSession.workerMessage("observer-worker", {
+    method: "Network.webSocketClosed",
+    params: {requestId: "worker-socket-0", timestamp: 1},
+  });
+  assert.doesNotThrow(() => wssAudit.validate());
+
+  const output = await progress.finish(async () => {
+    browserSession.workerMessage("observer-worker", {
+      method: "Network.webSocketCreated",
+      params: {requestId: "worker-socket-logout", url: `wss://${targetHost}/apiws`},
+    });
+    browserSession.workerMessage("observer-worker", {
+      method: "Network.webSocketHandshakeResponseReceived",
+      params: {requestId: "worker-socket-logout", response: {status: 101}},
+    });
+    return null;
+  });
+
+  assert.equal(output.wssConnections, 6);
+  assert.equal(output.ok, true);
+  assert.doesNotThrow(() => wssAudit.validateAfterLogout());
+});
+
 test("a logout reconnect must use the validated endpoint and may be observed before its handshake", async (t) => {
   for (const scenario of [
     {name: "matching opening without a response", url: `wss://${targetHost}/apiws`, status: null, valid: true},
@@ -1326,6 +1653,7 @@ test("a logout reconnect must use the validated endpoint and may be observed bef
         assert.equal(progress.observeClientEvent(event), true);
       }
       assert.equal(progress.markSignedIn(), true);
+      assert.doesNotThrow(() => wssAudit.validate());
 
       await progress.finish(async () => {
         browserSession.workerMessage("observer-worker", {
@@ -1350,14 +1678,15 @@ test("a logout reconnect must use the validated endpoint and may be observed bef
   }
 });
 
-test("a fifth socket before logout keeps the browser acceptance result failed", async (t) => {
-  const {progress, browserSession} = await proveSharedWorkerWss(t, {
+test("a fifth concurrently active socket before logout fails the WSS proof", async (t) => {
+  const {progress, browserSession, wssAudit} = await proveSharedWorkerWss(t, {
     workerSockets: workerSockets(4),
   });
   for (const event of ["req-dh-params", "set-client-dh", "init-connection", "password-challenge", "password-check"]) {
     assert.equal(progress.observeClientEvent(event), true);
   }
   assert.equal(progress.markSignedIn(), true);
+  assert.doesNotThrow(() => wssAudit.validate());
   browserSession.workerMessage("observer-worker", {
     method: "Network.webSocketCreated",
     params: {requestId: "worker-socket-before-logout", url: `wss://${targetHost}/apiws`},
@@ -1367,10 +1696,8 @@ test("a fifth socket before logout keeps the browser acceptance result failed", 
     params: {requestId: "worker-socket-before-logout", response: {status: 101}},
   });
 
-  const output = await progress.finish(async () => null);
-  assert.equal(output.logout, "ok");
-  assert.equal(output.wssConnections, 5);
-  assert.equal(output.ok, false);
+  assert.throws(() => wssAudit.validate(), {code: "websocket-not-ready"});
+  await progress.finish(async () => null);
 });
 
 test("preflight WSS proof rejects a nested mismatch discovered after the page handshake", async (t) => {

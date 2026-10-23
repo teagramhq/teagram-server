@@ -75,10 +75,10 @@ test("a successful sign-in logs out the current session before finish returns", 
   });
 });
 
-// teagram-web opens four account-slot sockets on load and reconnects the
-// logged-out slot once before the acceptance context is torn down.
+// teagram-web opens four account-slot sockets on load, may replace one closed
+// slot after sign-in, then reconnects the logged-out slot once at teardown.
 const WSS_ACCOUNT_SLOT_COUNT = 4;
-const WSS_CONNECTION_CEILING = WSS_ACCOUNT_SLOT_COUNT + 1;
+const WSS_CONNECTION_CEILING = WSS_ACCOUNT_SLOT_COUNT + 2;
 
 test("sign-in with all four account-slot sockets succeeds", async () => {
   const progress = createProgress();
@@ -103,21 +103,48 @@ test("one logout reconnect after the four account-slot sockets succeeds", async 
   assert.equal(result.phase, "signed-in");
   assert.equal(result.outcome, "ok");
   assert.equal(result.logout, "ok");
-  assert.equal(result.wssConnections, WSS_CONNECTION_CEILING);
+  assert.equal(result.wssConnections, WSS_ACCOUNT_SLOT_COUNT + 1);
   assert.equal(result.ok, true);
   assert.equal(progress.observeWssConnection(), false);
-  assert.equal(result.wssConnections, WSS_CONNECTION_CEILING);
+  assert.equal(result.wssConnections, WSS_ACCOUNT_SLOT_COUNT + 1);
 });
 
-test("a fifth socket before logout still fails the four-slot proof", async () => {
+test("only one reconnect can open during logout", async () => {
   const progress = createProgress();
   advanceTo(progress, "signed-in");
   for (let index = 1; index < WSS_ACCOUNT_SLOT_COUNT; index += 1) progress.observeWssConnection();
+  const result = await progress.finish(async () => {
+    assert.equal(progress.observeWssConnection(), true);
+    assert.equal(progress.observeWssConnection(), false);
+  });
+
+  assert.equal(result.wssConnections, WSS_ACCOUNT_SLOT_COUNT + 2);
+  assert.equal(result.ok, false);
+});
+
+test("a reconnect can arrive before the close event for its authenticated slot", async () => {
+  const progress = createProgress();
+  advanceTo(progress, "signed-in");
+  for (let index = 1; index < WSS_ACCOUNT_SLOT_COUNT; index += 1) progress.observeWssConnection();
+  assert.equal(progress.observeWssConnection(), true);
+  assert.equal(progress.observeWssClosed(), true);
+
+  const result = await progress.finish(async () => null);
+  assert.equal(result.wssConnections, WSS_ACCOUNT_SLOT_COUNT + 1);
+  assert.equal(result.ok, true);
+});
+
+test("a second sign-in reconnect exceeds the lifecycle budget", async () => {
+  const progress = createProgress();
+  advanceTo(progress, "signed-in");
+  for (let index = 1; index < WSS_ACCOUNT_SLOT_COUNT; index += 1) progress.observeWssConnection();
+  assert.equal(progress.observeWssConnection(), true);
+  assert.equal(progress.observeWssClosed(), true);
   assert.equal(progress.observeWssConnection(), false);
   const result = await progress.finish(async () => null);
 
   assert.equal(result.logout, "ok");
-  assert.equal(result.wssConnections, WSS_CONNECTION_CEILING);
+  assert.equal(result.wssConnections, WSS_ACCOUNT_SLOT_COUNT + 2);
   assert.equal(result.ok, false);
 });
 

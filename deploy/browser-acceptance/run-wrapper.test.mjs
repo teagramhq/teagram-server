@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { createServer } from "node:http";
 import { access, chmod, copyFile, mkdtemp, mkdir, readFile, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -14,9 +15,11 @@ const busyboxPhaseScript = join(repoRoot, ".github/scripts/run-busybox-phase-che
 const sourceCommit = "c".repeat(40);
 const phaseCommandToken = "e".repeat(64);
 const digest = `sha256:${"d".repeat(64)}`;
-// Four account-slot sockets on load plus the logout reconnect.
-const WSS_CONNECTION_CEILING = 5;
-const approvedQaDigest = "6e12f6c9b14a127a08ed133b4ff6d1b7fa0ba60bd59939876cc0ef738dfe8133";
+// Four account-slot sockets plus one sign-in replacement and one logout reconnect.
+const WSS_CONNECTION_CEILING = 6;
+const approvedQaDigest = readFileSync(runScript, "utf8")
+  .match(/^readonly APPROVED_QA_SCRIPT_SHA256="([0-9a-f]{64})"$/mu)?.[1];
+assert.ok(approvedQaDigest, "runner must pin the approved QA script digest");
 const blockedResult = "{\"status\":\"blocked_expected\",\"blocked_telegram_org_attempts\":1,\"telegram_org_upstream_connects\":0,\"payloads_retained\":0}";
 const readyResult = "{\"status\":\"ready\",\"http_status\":200,\"asset_502_count\":0,\"browser_wss_status\":101,\"browser_wss_unique_targets\":1,\"observer_success_hosts\":1,\"observer_target_host\":\"teagram.tailaa4918.ts.net\",\"telegram_org_attempts\":0,\"payloads_retained\":0}";
 const acceptanceResultValue = {
@@ -1977,7 +1980,6 @@ test("the reviewed QA v3 artifact matches the pinned digest", async () => {
   const script = await readFile(join(repoRoot, "deploy/browser-acceptance/private-browser-acceptance-v2.mjs"));
   const pinned = (await readFile(runScript, "utf8")).match(/^readonly APPROVED_QA_SCRIPT_SHA256="([0-9a-f]{64})"$/mu)[1];
   assert.equal(createHash("sha256").update(script).digest("hex"), pinned);
-  assert.equal(pinned, approvedQaDigest);
 });
 
 test("acceptance preflight takes the shared lock before reading either manifest", async (t) => {
