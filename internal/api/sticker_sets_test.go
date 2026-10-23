@@ -163,7 +163,7 @@ func TestStickerSetInstallListsDownloadsAndUninstallsCatalogue(t *testing.T) {
 	}
 }
 
-func TestStickerSetMethodsRejectEveryNonCatalogueReferenceUniformly(t *testing.T) {
+func TestStickerSetMethodsOnlyAllowCatalogueMutation(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
 	s := openStore(t)
@@ -174,22 +174,23 @@ func TestStickerSetMethodsRejectEveryNonCatalogueReferenceUniformly(t *testing.T
 	h := fullChannelDispatcher(s)
 	known := getStickerSet(t, h, owner.ID, &tg.InputStickerSetShortName{ShortName: "twemoji_reactions"}, 0).Set
 	refs := []struct {
-		name string
-		ref  tg.InputStickerSetClass
+		name       string
+		ref        tg.InputStickerSetClass
+		wantGetSet bool
 	}{
 		{name: "unknown short name", ref: &tg.InputStickerSetShortName{ShortName: "twemoji_unknown"}},
 		{name: "unknown numeric set id", ref: &tg.InputStickerSetID{ID: -1_234_567_890, AccessHash: 123}},
 		{name: "wrong access hash", ref: &tg.InputStickerSetID{ID: known.ID, AccessHash: known.AccessHash + 1}},
-		{name: "animated emoji special set", ref: &tg.InputStickerSetAnimatedEmoji{}},
-		{name: "dice special set", ref: &tg.InputStickerSetDice{Emoticon: "🎲"}},
-		{name: "animated emoji animations special set", ref: &tg.InputStickerSetAnimatedEmojiAnimations{}},
-		{name: "premium gifts special set", ref: &tg.InputStickerSetPremiumGifts{}},
-		{name: "emoji generic animations special set", ref: &tg.InputStickerSetEmojiGenericAnimations{}},
-		{name: "emoji default statuses special set", ref: &tg.InputStickerSetEmojiDefaultStatuses{}},
-		{name: "emoji default topic icons special set", ref: &tg.InputStickerSetEmojiDefaultTopicIcons{}},
-		{name: "emoji channel default statuses special set", ref: &tg.InputStickerSetEmojiChannelDefaultStatuses{}},
-		{name: "ton gifts special set", ref: &tg.InputStickerSetTonGifts{}},
-		{name: "empty special set", ref: &tg.InputStickerSetEmpty{}},
+		{name: "animated emoji special set", ref: &tg.InputStickerSetAnimatedEmoji{}, wantGetSet: true},
+		{name: "dice special set", ref: &tg.InputStickerSetDice{Emoticon: "🎲"}, wantGetSet: true},
+		{name: "animated emoji animations special set", ref: &tg.InputStickerSetAnimatedEmojiAnimations{}, wantGetSet: true},
+		{name: "premium gifts special set", ref: &tg.InputStickerSetPremiumGifts{}, wantGetSet: true},
+		{name: "emoji generic animations special set", ref: &tg.InputStickerSetEmojiGenericAnimations{}, wantGetSet: true},
+		{name: "emoji default statuses special set", ref: &tg.InputStickerSetEmojiDefaultStatuses{}, wantGetSet: true},
+		{name: "emoji default topic icons special set", ref: &tg.InputStickerSetEmojiDefaultTopicIcons{}, wantGetSet: true},
+		{name: "emoji channel default statuses special set", ref: &tg.InputStickerSetEmojiChannelDefaultStatuses{}, wantGetSet: true},
+		{name: "ton gifts special set", ref: &tg.InputStickerSetTonGifts{}, wantGetSet: true},
+		{name: "empty special set", ref: &tg.InputStickerSetEmpty{}, wantGetSet: true},
 		{name: "oversized short name", ref: &tg.InputStickerSetShortName{ShortName: strings.Repeat("x", 256)}},
 	}
 	for _, tc := range refs {
@@ -201,9 +202,19 @@ func TestStickerSetMethodsRejectEveryNonCatalogueReferenceUniformly(t *testing.T
 			if got := stickerSetRPCMessage(t, uninstallBody); got != "STICKERSET_INVALID" {
 				t.Errorf("uninstall result = %q, want STICKERSET_INVALID", got)
 			}
-			getBody := dispatchChatMethod(t, h, owner.ID, "messages.getStickerSet", &tg.MessagesGetStickerSetRequest{Stickerset: tc.ref})
-			if got := stickerSetRPCMessage(t, getBody); got != "STICKERSET_INVALID" {
-				t.Errorf("getStickerSet result = %q, want STICKERSET_INVALID", got)
+			if tc.wantGetSet {
+				full := getStickerSet(t, h, owner.ID, tc.ref, 0)
+				if full.Set.Hash == 0 || full.Set.Count != 0 || len(full.Packs) != 0 || len(full.Documents) != 0 {
+					t.Errorf("special getStickerSet = %+v with %d packs and %d documents, want empty set with non-zero hash", full.Set, len(full.Packs), len(full.Documents))
+				}
+				if !getStickerSetNotModified(t, h, owner.ID, tc.ref, full.Set.Hash) {
+					t.Error("getStickerSet with returned hash did not return notModified")
+				}
+			} else {
+				getBody := dispatchChatMethod(t, h, owner.ID, "messages.getStickerSet", &tg.MessagesGetStickerSetRequest{Stickerset: tc.ref})
+				if got := stickerSetRPCMessage(t, getBody); got != "STICKERSET_INVALID" {
+					t.Errorf("getStickerSet result = %q, want STICKERSET_INVALID", got)
+				}
 			}
 		})
 	}
