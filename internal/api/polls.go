@@ -207,7 +207,7 @@ func (h *handlers) channelPollSendResponse(
 		h.log.Error("load channel poll kind", "channel_id", channelID, "err", err)
 		return nil, nil, nil, errInternal
 	}
-	messageTL, err := channelMessageToTL(message, r.UserID, nil, broadcast)
+	messageTL, err := channelMessageToTL(message, r.UserID, nil, broadcast, h.dcID)
 	if err != nil {
 		h.log.Error("render channel poll description", "user_id", r.UserID, "channel_id", channelID, "local_id", message.LocalID, "err", err)
 		return nil, nil, nil, errInternal
@@ -426,7 +426,7 @@ func (h *handlers) handleClosePollAfterReplyOnConn(
 			h.log.Error("load closed channel poll channel", "channel_id", peerID, "err", channelErr)
 			return nil, nil, nil, errInternal
 		}
-		messageTL, renderErr := channelMessageToTL(channelMessages[0], r.UserID, nil, broadcast)
+		messageTL, renderErr := channelMessageToTL(channelMessages[0], r.UserID, nil, broadcast, h.dcID)
 		if renderErr != nil {
 			h.log.Error("render closed channel poll message", "channel_id", peerID, "local_id", localID, "err", renderErr)
 			return nil, nil, nil, errInternal

@@ -98,7 +98,8 @@ func (q *Queries) ChannelEventsWindow(ctx context.Context, arg ChannelEventsWind
 
 const channelHistoryPage = `-- name: ChannelHistoryPage :many
 SELECT channel_id, local_id, from_id, date, message, edit_date, deleted,
-       random_id, grouped_id, file_id, reply_to_msg_id, action_type, ttl_period, post_author, entities
+       random_id, grouped_id, file_id, sticker_document_id, reply_to_msg_id,
+       action_type, ttl_period, post_author, entities
 FROM channel_messages
 WHERE channel_id = $1 AND deleted = false
   AND (expires_at IS NULL OR expires_at > statement_timestamp())
@@ -118,21 +119,22 @@ type ChannelHistoryPageParams struct {
 }
 
 type ChannelHistoryPageRow struct {
-	ChannelID    int64
-	LocalID      int64
-	FromID       int64
-	Date         pgtype.Timestamptz
-	Message      string
-	EditDate     pgtype.Timestamptz
-	Deleted      bool
-	RandomID     int64
-	GroupedID    *int64
-	FileID       *int64
-	ReplyToMsgID *int32
-	ActionType   int16
-	TtlPeriod    int32
-	PostAuthor   *string
-	Entities     []byte
+	ChannelID         int64
+	LocalID           int64
+	FromID            int64
+	Date              pgtype.Timestamptz
+	Message           string
+	EditDate          pgtype.Timestamptz
+	Deleted           bool
+	RandomID          int64
+	GroupedID         *int64
+	FileID            *int64
+	StickerDocumentID *int64
+	ReplyToMsgID      *int32
+	ActionType        int16
+	TtlPeriod         int32
+	PostAuthor        *string
+	Entities          []byte
 }
 
 func (q *Queries) ChannelHistoryPage(ctx context.Context, arg ChannelHistoryPageParams) ([]ChannelHistoryPageRow, error) {
@@ -155,6 +157,7 @@ func (q *Queries) ChannelHistoryPage(ctx context.Context, arg ChannelHistoryPage
 			&i.RandomID,
 			&i.GroupedID,
 			&i.FileID,
+			&i.StickerDocumentID,
 			&i.ReplyToMsgID,
 			&i.ActionType,
 			&i.TtlPeriod,
@@ -191,7 +194,8 @@ WITH page_offset AS (
       )
 ), page AS (
     SELECT cm.channel_id, cm.local_id, cm.from_id, cm.date, cm.message, cm.edit_date, cm.deleted,
-           cm.random_id, cm.grouped_id, cm.file_id, cm.reply_to_msg_id, cm.action_type, cm.ttl_period,
+           cm.random_id, cm.grouped_id, cm.file_id, cm.sticker_document_id, cm.reply_to_msg_id,
+           cm.action_type, cm.ttl_period,
            cm.post_author, cm.entities
     FROM channel_messages cm
     JOIN channel_participants cp
@@ -212,7 +216,8 @@ WITH page_offset AS (
     OFFSET (SELECT skip FROM page_offset)
 )
 SELECT channel_id, local_id, from_id, date, message, edit_date, deleted,
-       random_id, grouped_id, file_id, reply_to_msg_id, action_type, ttl_period, post_author, entities
+       random_id, grouped_id, file_id, sticker_document_id, reply_to_msg_id,
+       action_type, ttl_period, post_author, entities
 FROM page
 WHERE ($1::bigint <= 0 OR local_id < $1::bigint)
   AND ($2::bigint <= 0 OR local_id > $2::bigint)
@@ -230,21 +235,22 @@ type ChannelHistoryPageAroundParams struct {
 }
 
 type ChannelHistoryPageAroundRow struct {
-	ChannelID    int64
-	LocalID      int64
-	FromID       int64
-	Date         pgtype.Timestamptz
-	Message      string
-	EditDate     pgtype.Timestamptz
-	Deleted      bool
-	RandomID     int64
-	GroupedID    *int64
-	FileID       *int64
-	ReplyToMsgID *int32
-	ActionType   int16
-	TtlPeriod    int32
-	PostAuthor   *string
-	Entities     []byte
+	ChannelID         int64
+	LocalID           int64
+	FromID            int64
+	Date              pgtype.Timestamptz
+	Message           string
+	EditDate          pgtype.Timestamptz
+	Deleted           bool
+	RandomID          int64
+	GroupedID         *int64
+	FileID            *int64
+	StickerDocumentID *int64
+	ReplyToMsgID      *int32
+	ActionType        int16
+	TtlPeriod         int32
+	PostAuthor        *string
+	Entities          []byte
 }
 
 // ChannelHistoryPageAround computes offset_id's ordinal only for negative
@@ -277,6 +283,7 @@ func (q *Queries) ChannelHistoryPageAround(ctx context.Context, arg ChannelHisto
 			&i.RandomID,
 			&i.GroupedID,
 			&i.FileID,
+			&i.StickerDocumentID,
 			&i.ReplyToMsgID,
 			&i.ActionType,
 			&i.TtlPeriod,
@@ -296,7 +303,8 @@ func (q *Queries) ChannelHistoryPageAround(ctx context.Context, arg ChannelHisto
 const channelHistoryPageWithOffset = `-- name: ChannelHistoryPageWithOffset :many
 WITH page AS (
     SELECT cm.channel_id, cm.local_id, cm.from_id, cm.date, cm.message, cm.edit_date, cm.deleted,
-           cm.random_id, cm.grouped_id, cm.file_id, cm.reply_to_msg_id, cm.action_type, cm.ttl_period,
+           cm.random_id, cm.grouped_id, cm.file_id, cm.sticker_document_id, cm.reply_to_msg_id,
+           cm.action_type, cm.ttl_period,
            cm.post_author, cm.entities
     FROM channel_messages cm
     JOIN channel_participants cp
@@ -317,7 +325,8 @@ WITH page AS (
     OFFSET GREATEST(0::bigint, $6::bigint)
 )
 SELECT channel_id, local_id, from_id, date, message, edit_date, deleted,
-       random_id, grouped_id, file_id, reply_to_msg_id, action_type, ttl_period, post_author, entities
+       random_id, grouped_id, file_id, sticker_document_id, reply_to_msg_id,
+       action_type, ttl_period, post_author, entities
 FROM page
 WHERE ($1::bigint <= 0 OR local_id < $1::bigint)
   AND ($2::bigint <= 0 OR local_id > $2::bigint)
@@ -335,21 +344,22 @@ type ChannelHistoryPageWithOffsetParams struct {
 }
 
 type ChannelHistoryPageWithOffsetRow struct {
-	ChannelID    int64
-	LocalID      int64
-	FromID       int64
-	Date         pgtype.Timestamptz
-	Message      string
-	EditDate     pgtype.Timestamptz
-	Deleted      bool
-	RandomID     int64
-	GroupedID    *int64
-	FileID       *int64
-	ReplyToMsgID *int32
-	ActionType   int16
-	TtlPeriod    int32
-	PostAuthor   *string
-	Entities     []byte
+	ChannelID         int64
+	LocalID           int64
+	FromID            int64
+	Date              pgtype.Timestamptz
+	Message           string
+	EditDate          pgtype.Timestamptz
+	Deleted           bool
+	RandomID          int64
+	GroupedID         *int64
+	FileID            *int64
+	StickerDocumentID *int64
+	ReplyToMsgID      *int32
+	ActionType        int16
+	TtlPeriod         int32
+	PostAuthor        *string
+	Entities          []byte
 }
 
 // ChannelHistoryPageWithOffset uses a local_id seek for non-negative add_offset.
@@ -383,6 +393,7 @@ func (q *Queries) ChannelHistoryPageWithOffset(ctx context.Context, arg ChannelH
 			&i.RandomID,
 			&i.GroupedID,
 			&i.FileID,
+			&i.StickerDocumentID,
 			&i.ReplyToMsgID,
 			&i.ActionType,
 			&i.TtlPeriod,
@@ -401,7 +412,8 @@ func (q *Queries) ChannelHistoryPageWithOffset(ctx context.Context, arg ChannelH
 
 const channelMessageByLocal = `-- name: ChannelMessageByLocal :one
 SELECT channel_id, local_id, from_id, date, message, edit_date, deleted,
-       random_id, grouped_id, file_id, reply_to_msg_id, action_type, ttl_period, post_author, entities
+       random_id, grouped_id, file_id, sticker_document_id, reply_to_msg_id,
+       action_type, ttl_period, post_author, entities
 FROM channel_messages WHERE channel_id = $1 AND local_id = $2
   AND (expires_at IS NULL OR expires_at > statement_timestamp())
 `
@@ -412,21 +424,22 @@ type ChannelMessageByLocalParams struct {
 }
 
 type ChannelMessageByLocalRow struct {
-	ChannelID    int64
-	LocalID      int64
-	FromID       int64
-	Date         pgtype.Timestamptz
-	Message      string
-	EditDate     pgtype.Timestamptz
-	Deleted      bool
-	RandomID     int64
-	GroupedID    *int64
-	FileID       *int64
-	ReplyToMsgID *int32
-	ActionType   int16
-	TtlPeriod    int32
-	PostAuthor   *string
-	Entities     []byte
+	ChannelID         int64
+	LocalID           int64
+	FromID            int64
+	Date              pgtype.Timestamptz
+	Message           string
+	EditDate          pgtype.Timestamptz
+	Deleted           bool
+	RandomID          int64
+	GroupedID         *int64
+	FileID            *int64
+	StickerDocumentID *int64
+	ReplyToMsgID      *int32
+	ActionType        int16
+	TtlPeriod         int32
+	PostAuthor        *string
+	Entities          []byte
 }
 
 func (q *Queries) ChannelMessageByLocal(ctx context.Context, arg ChannelMessageByLocalParams) (ChannelMessageByLocalRow, error) {
@@ -443,6 +456,7 @@ func (q *Queries) ChannelMessageByLocal(ctx context.Context, arg ChannelMessageB
 		&i.RandomID,
 		&i.GroupedID,
 		&i.FileID,
+		&i.StickerDocumentID,
 		&i.ReplyToMsgID,
 		&i.ActionType,
 		&i.TtlPeriod,
@@ -454,7 +468,8 @@ func (q *Queries) ChannelMessageByLocal(ctx context.Context, arg ChannelMessageB
 
 const channelMessageByRandomID = `-- name: ChannelMessageByRandomID :one
 SELECT channel_id, local_id, from_id, date, message, edit_date, deleted,
-       random_id, grouped_id, file_id, reply_to_msg_id, action_type, ttl_period, post_author, entities
+       random_id, grouped_id, file_id, sticker_document_id, reply_to_msg_id,
+       action_type, ttl_period, post_author, entities
 FROM channel_messages
 WHERE channel_id = $1 AND random_id = $2 AND random_id <> 0
   AND (expires_at IS NULL OR expires_at > statement_timestamp())
@@ -466,21 +481,22 @@ type ChannelMessageByRandomIDParams struct {
 }
 
 type ChannelMessageByRandomIDRow struct {
-	ChannelID    int64
-	LocalID      int64
-	FromID       int64
-	Date         pgtype.Timestamptz
-	Message      string
-	EditDate     pgtype.Timestamptz
-	Deleted      bool
-	RandomID     int64
-	GroupedID    *int64
-	FileID       *int64
-	ReplyToMsgID *int32
-	ActionType   int16
-	TtlPeriod    int32
-	PostAuthor   *string
-	Entities     []byte
+	ChannelID         int64
+	LocalID           int64
+	FromID            int64
+	Date              pgtype.Timestamptz
+	Message           string
+	EditDate          pgtype.Timestamptz
+	Deleted           bool
+	RandomID          int64
+	GroupedID         *int64
+	FileID            *int64
+	StickerDocumentID *int64
+	ReplyToMsgID      *int32
+	ActionType        int16
+	TtlPeriod         int32
+	PostAuthor        *string
+	Entities          []byte
 }
 
 func (q *Queries) ChannelMessageByRandomID(ctx context.Context, arg ChannelMessageByRandomIDParams) (ChannelMessageByRandomIDRow, error) {
@@ -497,6 +513,7 @@ func (q *Queries) ChannelMessageByRandomID(ctx context.Context, arg ChannelMessa
 		&i.RandomID,
 		&i.GroupedID,
 		&i.FileID,
+		&i.StickerDocumentID,
 		&i.ReplyToMsgID,
 		&i.ActionType,
 		&i.TtlPeriod,
@@ -620,7 +637,8 @@ func (q *Queries) ChannelMessageTombstonesForMember(ctx context.Context, arg Cha
 
 const channelMessagesByLocalIDs = `-- name: ChannelMessagesByLocalIDs :many
 SELECT channel_id, local_id, from_id, date, message, edit_date, deleted,
-       random_id, grouped_id, file_id, reply_to_msg_id, action_type, ttl_period, post_author, entities
+       random_id, grouped_id, file_id, sticker_document_id, reply_to_msg_id,
+       action_type, ttl_period, post_author, entities
 FROM channel_messages
 WHERE channel_id = $1 AND local_id = ANY($2::bigint[]) AND deleted = false
   AND (expires_at IS NULL OR expires_at > statement_timestamp())
@@ -633,21 +651,22 @@ type ChannelMessagesByLocalIDsParams struct {
 }
 
 type ChannelMessagesByLocalIDsRow struct {
-	ChannelID    int64
-	LocalID      int64
-	FromID       int64
-	Date         pgtype.Timestamptz
-	Message      string
-	EditDate     pgtype.Timestamptz
-	Deleted      bool
-	RandomID     int64
-	GroupedID    *int64
-	FileID       *int64
-	ReplyToMsgID *int32
-	ActionType   int16
-	TtlPeriod    int32
-	PostAuthor   *string
-	Entities     []byte
+	ChannelID         int64
+	LocalID           int64
+	FromID            int64
+	Date              pgtype.Timestamptz
+	Message           string
+	EditDate          pgtype.Timestamptz
+	Deleted           bool
+	RandomID          int64
+	GroupedID         *int64
+	FileID            *int64
+	StickerDocumentID *int64
+	ReplyToMsgID      *int32
+	ActionType        int16
+	TtlPeriod         int32
+	PostAuthor        *string
+	Entities          []byte
 }
 
 func (q *Queries) ChannelMessagesByLocalIDs(ctx context.Context, arg ChannelMessagesByLocalIDsParams) ([]ChannelMessagesByLocalIDsRow, error) {
@@ -670,6 +689,7 @@ func (q *Queries) ChannelMessagesByLocalIDs(ctx context.Context, arg ChannelMess
 			&i.RandomID,
 			&i.GroupedID,
 			&i.FileID,
+			&i.StickerDocumentID,
 			&i.ReplyToMsgID,
 			&i.ActionType,
 			&i.TtlPeriod,
@@ -688,7 +708,8 @@ func (q *Queries) ChannelMessagesByLocalIDs(ctx context.Context, arg ChannelMess
 
 const channelMessagesForDelete = `-- name: ChannelMessagesForDelete :many
 SELECT channel_id, local_id, from_id, date, message, edit_date, deleted,
-       random_id, grouped_id, file_id, reply_to_msg_id, action_type, ttl_period, post_author, entities
+       random_id, grouped_id, file_id, sticker_document_id, reply_to_msg_id,
+       action_type, ttl_period, post_author, entities
 FROM channel_messages
 WHERE channel_id = $1::bigint
   AND local_id = ANY($2::bigint[])
@@ -702,21 +723,22 @@ type ChannelMessagesForDeleteParams struct {
 }
 
 type ChannelMessagesForDeleteRow struct {
-	ChannelID    int64
-	LocalID      int64
-	FromID       int64
-	Date         pgtype.Timestamptz
-	Message      string
-	EditDate     pgtype.Timestamptz
-	Deleted      bool
-	RandomID     int64
-	GroupedID    *int64
-	FileID       *int64
-	ReplyToMsgID *int32
-	ActionType   int16
-	TtlPeriod    int32
-	PostAuthor   *string
-	Entities     []byte
+	ChannelID         int64
+	LocalID           int64
+	FromID            int64
+	Date              pgtype.Timestamptz
+	Message           string
+	EditDate          pgtype.Timestamptz
+	Deleted           bool
+	RandomID          int64
+	GroupedID         *int64
+	FileID            *int64
+	StickerDocumentID *int64
+	ReplyToMsgID      *int32
+	ActionType        int16
+	TtlPeriod         int32
+	PostAuthor        *string
+	Entities          []byte
 }
 
 // ChannelMessagesForDelete locks requested rows in local-id order. Callers
@@ -741,6 +763,7 @@ func (q *Queries) ChannelMessagesForDelete(ctx context.Context, arg ChannelMessa
 			&i.RandomID,
 			&i.GroupedID,
 			&i.FileID,
+			&i.StickerDocumentID,
 			&i.ReplyToMsgID,
 			&i.ActionType,
 			&i.TtlPeriod,
@@ -759,7 +782,8 @@ func (q *Queries) ChannelMessagesForDelete(ctx context.Context, arg ChannelMessa
 
 const channelMessagesForForward = `-- name: ChannelMessagesForForward :many
 SELECT cm.channel_id, cm.local_id, cm.from_id, cm.date, cm.message, cm.edit_date, cm.deleted,
-       cm.random_id, cm.grouped_id, cm.file_id, cm.reply_to_msg_id, cm.action_type, cm.ttl_period,
+       cm.random_id, cm.grouped_id, cm.file_id, cm.sticker_document_id, cm.reply_to_msg_id,
+       cm.action_type, cm.ttl_period,
        cm.post_author, cm.entities
 FROM channel_messages cm
 WHERE cm.channel_id = $1::bigint
@@ -789,21 +813,22 @@ type ChannelMessagesForForwardParams struct {
 }
 
 type ChannelMessagesForForwardRow struct {
-	ChannelID    int64
-	LocalID      int64
-	FromID       int64
-	Date         pgtype.Timestamptz
-	Message      string
-	EditDate     pgtype.Timestamptz
-	Deleted      bool
-	RandomID     int64
-	GroupedID    *int64
-	FileID       *int64
-	ReplyToMsgID *int32
-	ActionType   int16
-	TtlPeriod    int32
-	PostAuthor   *string
-	Entities     []byte
+	ChannelID         int64
+	LocalID           int64
+	FromID            int64
+	Date              pgtype.Timestamptz
+	Message           string
+	EditDate          pgtype.Timestamptz
+	Deleted           bool
+	RandomID          int64
+	GroupedID         *int64
+	FileID            *int64
+	StickerDocumentID *int64
+	ReplyToMsgID      *int32
+	ActionType        int16
+	TtlPeriod         int32
+	PostAuthor        *string
+	Entities          []byte
 }
 
 // ChannelMessagesForForward is the authoritative source read for a channel
@@ -830,6 +855,7 @@ func (q *Queries) ChannelMessagesForForward(ctx context.Context, arg ChannelMess
 			&i.RandomID,
 			&i.GroupedID,
 			&i.FileID,
+			&i.StickerDocumentID,
 			&i.ReplyToMsgID,
 			&i.ActionType,
 			&i.TtlPeriod,
@@ -848,7 +874,8 @@ func (q *Queries) ChannelMessagesForForward(ctx context.Context, arg ChannelMess
 
 const channelMessagesForMember = `-- name: ChannelMessagesForMember :many
 SELECT cm.channel_id, cm.local_id, cm.from_id, cm.date, cm.message, cm.edit_date, cm.deleted,
-       cm.random_id, cm.grouped_id, cm.file_id, cm.reply_to_msg_id, cm.action_type, cm.ttl_period,
+       cm.random_id, cm.grouped_id, cm.file_id, cm.sticker_document_id, cm.reply_to_msg_id,
+       cm.action_type, cm.ttl_period,
        cm.post_author, cm.entities
 FROM channel_messages cm
 JOIN channel_participants cp ON cp.channel_id = cm.channel_id AND cp.user_id = $1::bigint
@@ -871,21 +898,22 @@ type ChannelMessagesForMemberParams struct {
 }
 
 type ChannelMessagesForMemberRow struct {
-	ChannelID    int64
-	LocalID      int64
-	FromID       int64
-	Date         pgtype.Timestamptz
-	Message      string
-	EditDate     pgtype.Timestamptz
-	Deleted      bool
-	RandomID     int64
-	GroupedID    *int64
-	FileID       *int64
-	ReplyToMsgID *int32
-	ActionType   int16
-	TtlPeriod    int32
-	PostAuthor   *string
-	Entities     []byte
+	ChannelID         int64
+	LocalID           int64
+	FromID            int64
+	Date              pgtype.Timestamptz
+	Message           string
+	EditDate          pgtype.Timestamptz
+	Deleted           bool
+	RandomID          int64
+	GroupedID         *int64
+	FileID            *int64
+	StickerDocumentID *int64
+	ReplyToMsgID      *int32
+	ActionType        int16
+	TtlPeriod         int32
+	PostAuthor        *string
+	Entities          []byte
 }
 
 // ChannelMessagesForMember returns only live posts visible to this member. The
@@ -911,6 +939,7 @@ func (q *Queries) ChannelMessagesForMember(ctx context.Context, arg ChannelMessa
 			&i.RandomID,
 			&i.GroupedID,
 			&i.FileID,
+			&i.StickerDocumentID,
 			&i.ReplyToMsgID,
 			&i.ActionType,
 			&i.TtlPeriod,
@@ -1034,6 +1063,7 @@ WITH access AS (
            cm.random_id,
            cm.grouped_id,
            cm.file_id,
+           cm.sticker_document_id,
            cm.reply_to_msg_id,
            cm.action_type,
            cm.ttl_period,
@@ -1060,6 +1090,7 @@ SELECT status.channel_exists,
        selected.random_id,
        selected.grouped_id,
        selected.file_id,
+       selected.sticker_document_id,
        selected.reply_to_msg_id,
        selected.action_type,
        selected.ttl_period,
@@ -1081,25 +1112,26 @@ type ChannelRepliesPageParams struct {
 }
 
 type ChannelRepliesPageRow struct {
-	ChannelExists bool
-	Megagroup     bool
-	IsMember      bool
-	RootExists    bool
-	ReplyCount    int64
-	ChannelID     *int64
-	LocalID       *int64
-	FromID        *int64
-	Date          pgtype.Timestamptz
-	Message       *string
-	EditDate      pgtype.Timestamptz
-	Deleted       *bool
-	RandomID      *int64
-	GroupedID     *int64
-	FileID        *int64
-	ReplyToMsgID  *int32
-	ActionType    *int16
-	TtlPeriod     *int32
-	Entities      []byte
+	ChannelExists     bool
+	Megagroup         bool
+	IsMember          bool
+	RootExists        bool
+	ReplyCount        int64
+	ChannelID         *int64
+	LocalID           *int64
+	FromID            *int64
+	Date              pgtype.Timestamptz
+	Message           *string
+	EditDate          pgtype.Timestamptz
+	Deleted           *bool
+	RandomID          *int64
+	GroupedID         *int64
+	FileID            *int64
+	StickerDocumentID *int64
+	ReplyToMsgID      *int32
+	ActionType        *int16
+	TtlPeriod         *int32
+	Entities          []byte
 }
 
 // ChannelRepliesPage reads a direct-reply page and its authorization snapshot
@@ -1141,6 +1173,7 @@ func (q *Queries) ChannelRepliesPage(ctx context.Context, arg ChannelRepliesPage
 			&i.RandomID,
 			&i.GroupedID,
 			&i.FileID,
+			&i.StickerDocumentID,
 			&i.ReplyToMsgID,
 			&i.ActionType,
 			&i.TtlPeriod,
@@ -1411,21 +1444,23 @@ func (q *Queries) InsertChannelEvent(ctx context.Context, arg InsertChannelEvent
 
 const insertChannelMessage = `-- name: InsertChannelMessage :exec
 INSERT INTO channel_messages (
-    channel_id, local_id, from_id, message, random_id, file_id, reply_to_msg_id, post_author, entities
+    channel_id, local_id, from_id, message, random_id, file_id,
+    sticker_document_id, reply_to_msg_id, post_author, entities
 )
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NULLIF($9::text, '')::jsonb)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, NULLIF($10::text, '')::jsonb)
 `
 
 type InsertChannelMessageParams struct {
-	ChannelID    int64
-	LocalID      int64
-	FromID       int64
-	Message      string
-	RandomID     int64
-	FileID       *int64
-	ReplyToMsgID *int32
-	PostAuthor   *string
-	Entities     string
+	ChannelID         int64
+	LocalID           int64
+	FromID            int64
+	Message           string
+	RandomID          int64
+	FileID            *int64
+	StickerDocumentID *int64
+	ReplyToMsgID      *int32
+	PostAuthor        *string
+	Entities          string
 }
 
 func (q *Queries) InsertChannelMessage(ctx context.Context, arg InsertChannelMessageParams) error {
@@ -1436,6 +1471,7 @@ func (q *Queries) InsertChannelMessage(ctx context.Context, arg InsertChannelMes
 		arg.Message,
 		arg.RandomID,
 		arg.FileID,
+		arg.StickerDocumentID,
 		arg.ReplyToMsgID,
 		arg.PostAuthor,
 		arg.Entities,
@@ -1533,6 +1569,7 @@ func (q *Queries) NewChannelPostPts(ctx context.Context, arg NewChannelPostPtsPa
 const searchChannelPostsPage = `-- name: SearchChannelPostsPage :many
 SELECT post.channel_id, post.local_id, post.from_id, post.date, post.message,
        post.edit_date, post.deleted, post.random_id, post.grouped_id, post.file_id,
+       post.sticker_document_id,
        post.reply_to_msg_id, post.action_type, post.ttl_period, post.post_author, post.entities
 FROM channel_messages post
 JOIN channel_participants cp
@@ -1562,21 +1599,22 @@ type SearchChannelPostsPageParams struct {
 }
 
 type SearchChannelPostsPageRow struct {
-	ChannelID    int64
-	LocalID      int64
-	FromID       int64
-	Date         pgtype.Timestamptz
-	Message      string
-	EditDate     pgtype.Timestamptz
-	Deleted      bool
-	RandomID     int64
-	GroupedID    *int64
-	FileID       *int64
-	ReplyToMsgID *int32
-	ActionType   int16
-	TtlPeriod    int32
-	PostAuthor   *string
-	Entities     []byte
+	ChannelID         int64
+	LocalID           int64
+	FromID            int64
+	Date              pgtype.Timestamptz
+	Message           string
+	EditDate          pgtype.Timestamptz
+	Deleted           bool
+	RandomID          int64
+	GroupedID         *int64
+	FileID            *int64
+	StickerDocumentID *int64
+	ReplyToMsgID      *int32
+	ActionType        int16
+	TtlPeriod         int32
+	PostAuthor        *string
+	Entities          []byte
 }
 
 // SearchChannelPostsPage is ChannelHistoryPage narrowed by a full-text match.
@@ -1609,6 +1647,7 @@ func (q *Queries) SearchChannelPostsPage(ctx context.Context, arg SearchChannelP
 			&i.RandomID,
 			&i.GroupedID,
 			&i.FileID,
+			&i.StickerDocumentID,
 			&i.ReplyToMsgID,
 			&i.ActionType,
 			&i.TtlPeriod,
@@ -1628,7 +1667,8 @@ func (q *Queries) SearchChannelPostsPage(ctx context.Context, arg SearchChannelP
 const searchFilteredChannelPostsPage = `-- name: SearchFilteredChannelPostsPage :many
 SELECT post.channel_id, post.local_id, post.from_id, post.date, post.message,
        post.edit_date, post.deleted, post.random_id, post.grouped_id,
-       post.file_id, post.reply_to_msg_id, post.action_type, post.ttl_period, post.post_author, post.entities
+       post.file_id, post.sticker_document_id, post.reply_to_msg_id,
+       post.action_type, post.ttl_period, post.post_author, post.entities
 FROM channel_messages post
 WHERE post.channel_id = $1::bigint
   AND post.deleted = false
@@ -1690,21 +1730,22 @@ type SearchFilteredChannelPostsPageParams struct {
 }
 
 type SearchFilteredChannelPostsPageRow struct {
-	ChannelID    int64
-	LocalID      int64
-	FromID       int64
-	Date         pgtype.Timestamptz
-	Message      string
-	EditDate     pgtype.Timestamptz
-	Deleted      bool
-	RandomID     int64
-	GroupedID    *int64
-	FileID       *int64
-	ReplyToMsgID *int32
-	ActionType   int16
-	TtlPeriod    int32
-	PostAuthor   *string
-	Entities     []byte
+	ChannelID         int64
+	LocalID           int64
+	FromID            int64
+	Date              pgtype.Timestamptz
+	Message           string
+	EditDate          pgtype.Timestamptz
+	Deleted           bool
+	RandomID          int64
+	GroupedID         *int64
+	FileID            *int64
+	StickerDocumentID *int64
+	ReplyToMsgID      *int32
+	ActionType        int16
+	TtlPeriod         int32
+	PostAuthor        *string
+	Entities          []byte
 }
 
 func (q *Queries) SearchFilteredChannelPostsPage(ctx context.Context, arg SearchFilteredChannelPostsPageParams) ([]SearchFilteredChannelPostsPageRow, error) {
@@ -1734,6 +1775,7 @@ func (q *Queries) SearchFilteredChannelPostsPage(ctx context.Context, arg Search
 			&i.RandomID,
 			&i.GroupedID,
 			&i.FileID,
+			&i.StickerDocumentID,
 			&i.ReplyToMsgID,
 			&i.ActionType,
 			&i.TtlPeriod,
@@ -1753,7 +1795,8 @@ func (q *Queries) SearchFilteredChannelPostsPage(ctx context.Context, arg Search
 const searchPinnedChannelPostForMember = `-- name: SearchPinnedChannelPostForMember :many
 SELECT post.channel_id, post.local_id, post.from_id, post.date, post.message,
        post.edit_date, post.deleted, post.random_id, post.grouped_id,
-       post.file_id, post.reply_to_msg_id, post.action_type, post.ttl_period, post.post_author, post.entities
+       post.file_id, post.sticker_document_id, post.reply_to_msg_id,
+       post.action_type, post.ttl_period, post.post_author, post.entities
 FROM channels c
 JOIN channel_participants participant
   ON participant.channel_id = c.id
@@ -1784,21 +1827,22 @@ type SearchPinnedChannelPostForMemberParams struct {
 }
 
 type SearchPinnedChannelPostForMemberRow struct {
-	ChannelID    int64
-	LocalID      int64
-	FromID       int64
-	Date         pgtype.Timestamptz
-	Message      string
-	EditDate     pgtype.Timestamptz
-	Deleted      bool
-	RandomID     int64
-	GroupedID    *int64
-	FileID       *int64
-	ReplyToMsgID *int32
-	ActionType   int16
-	TtlPeriod    int32
-	PostAuthor   *string
-	Entities     []byte
+	ChannelID         int64
+	LocalID           int64
+	FromID            int64
+	Date              pgtype.Timestamptz
+	Message           string
+	EditDate          pgtype.Timestamptz
+	Deleted           bool
+	RandomID          int64
+	GroupedID         *int64
+	FileID            *int64
+	StickerDocumentID *int64
+	ReplyToMsgID      *int32
+	ActionType        int16
+	TtlPeriod         int32
+	PostAuthor        *string
+	Entities          []byte
 }
 
 // SearchPinnedChannelPostForMember returns the active pinned post only while
@@ -1830,6 +1874,7 @@ func (q *Queries) SearchPinnedChannelPostForMember(ctx context.Context, arg Sear
 			&i.RandomID,
 			&i.GroupedID,
 			&i.FileID,
+			&i.StickerDocumentID,
 			&i.ReplyToMsgID,
 			&i.ActionType,
 			&i.TtlPeriod,

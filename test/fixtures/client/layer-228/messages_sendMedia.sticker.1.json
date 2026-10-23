@@ -1,0 +1,35 @@
+{
+  "layer": 228,
+  "client": "gotd v0.162.0",
+  "source": "source-derived/messages_sendMedia.sticker.1.txt",
+  "method": "messages.sendMedia",
+  "request": {
+    "type": "messages.sendMedia",
+    "flags": 0,
+    "fields": {
+      "peer": {
+        "type": "inputPeerUser",
+        "fields": {
+          "user_id": "<N>",
+          "access_hash": "<N>"
+        }
+      },
+      "media": {
+        "type": "inputMediaDocument",
+        "flags": 0,
+        "fields": {
+          "id": {
+            "type": "inputDocument",
+            "fields": {
+              "id": "<N>",
+              "access_hash": "<N>",
+              "file_reference": "REDACTED"
+            }
+          }
+        }
+      },
+      "message": "Catalogue sticker fixture",
+      "random_id": "<N>"
+    }
+  }
+}

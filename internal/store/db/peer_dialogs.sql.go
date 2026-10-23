@@ -95,7 +95,7 @@ func (q *Queries) ChatsByIDs(ctx context.Context, chatIds []int64) ([]Chat, erro
 }
 
 const messagesByOwnerLocals = `-- name: MessagesByOwnerLocals :many
-SELECT owner_id, local_id, peer_id, from_id, date, message, out, edit_date, deleted, random_id, peer_local_id, peer_type, fanout_id, action_type, action_user_id, file_id, reply_to_msg_id, fwd_from_id, fwd_date, fwd_channel_id, fwd_channel_post, message_tsv, reply_to_trusted, grouped_id, fwd_post_author, ttl_period, expires_at, entities FROM messages
+SELECT owner_id, local_id, peer_id, from_id, date, message, out, edit_date, deleted, random_id, peer_local_id, peer_type, fanout_id, action_type, action_user_id, file_id, reply_to_msg_id, fwd_from_id, fwd_date, fwd_channel_id, fwd_channel_post, message_tsv, reply_to_trusted, grouped_id, fwd_post_author, ttl_period, expires_at, entities, sticker_document_id FROM messages
 WHERE owner_id = $1::bigint
   AND local_id = ANY($2::bigint[])
   AND deleted = false
@@ -145,6 +145,7 @@ func (q *Queries) MessagesByOwnerLocals(ctx context.Context, arg MessagesByOwner
 			&i.TtlPeriod,
 			&i.ExpiresAt,
 			&i.Entities,
+			&i.StickerDocumentID,
 		); err != nil {
 			return nil, err
 		}
@@ -192,6 +193,7 @@ SELECT
     COALESCE(top.random_id, 0)::bigint AS top_random_id,
     top.grouped_id AS top_grouped_id,
     top.file_id AS top_file_id,
+    top.sticker_document_id AS top_sticker_document_id,
     top.reply_to_msg_id AS top_reply_to_msg_id,
     COALESCE(top.action_type, 0)::smallint AS top_action_type,
     COALESCE(top.ttl_period, 0)::integer AS top_ttl_period,
@@ -217,7 +219,7 @@ CROSS JOIN LATERAL (
 ) AS unread
 LEFT JOIN LATERAL (
     SELECT cm.local_id, cm.from_id, cm.date, cm.message, cm.edit_date,
-           cm.random_id, cm.grouped_id, cm.file_id, cm.reply_to_msg_id, cm.action_type,
+           cm.random_id, cm.grouped_id, cm.file_id, cm.sticker_document_id, cm.reply_to_msg_id, cm.action_type,
            cm.ttl_period, cm.post_author
     FROM channel_messages cm
     WHERE cm.channel_id = c.id AND cm.deleted = false
@@ -271,6 +273,7 @@ type PeerChannelDialogsForOwnerRow struct {
 	TopRandomID                   int64
 	TopGroupedID                  *int64
 	TopFileID                     *int64
+	TopStickerDocumentID          *int64
 	TopReplyToMsgID               *int32
 	TopActionType                 int16
 	TopTtlPeriod                  int32
@@ -326,6 +329,7 @@ func (q *Queries) PeerChannelDialogsForOwner(ctx context.Context, arg PeerChanne
 			&i.TopRandomID,
 			&i.TopGroupedID,
 			&i.TopFileID,
+			&i.TopStickerDocumentID,
 			&i.TopReplyToMsgID,
 			&i.TopActionType,
 			&i.TopTtlPeriod,

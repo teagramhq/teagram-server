@@ -112,6 +112,9 @@ type ChannelMessage struct {
 	// GroupedID is the shared album id; nil means the post is not grouped.
 	GroupedID *int64
 	FileID    *int64
+	// StickerDocumentID is a reserved negative catalogue identity, separate
+	// from the file-backed media reference.
+	StickerDocumentID *int64
 	// ReplyToMsgID is the local_id of the post this post replies to; 0 = no reply.
 	ReplyToMsgID int32
 	Action       ChannelMessageAction
@@ -152,21 +155,22 @@ const (
 // the single channelMessageFromFields function below is the only place that maps
 // database columns to ChannelMessage fields.
 type channelMsgFields struct {
-	ChannelID    int64
-	LocalID      int64
-	FromID       int64
-	Date         pgtype.Timestamptz
-	Message      string
-	EditDate     pgtype.Timestamptz
-	Deleted      bool
-	RandomID     int64
-	GroupedID    *int64
-	FileID       *int64
-	ReplyToMsgID *int32
-	ActionType   int16
-	TtlPeriod    int32
-	PostAuthor   *string
-	Entities     []byte
+	ChannelID         int64
+	LocalID           int64
+	FromID            int64
+	Date              pgtype.Timestamptz
+	Message           string
+	EditDate          pgtype.Timestamptz
+	Deleted           bool
+	RandomID          int64
+	GroupedID         *int64
+	FileID            *int64
+	StickerDocumentID *int64
+	ReplyToMsgID      *int32
+	ActionType        int16
+	TtlPeriod         int32
+	PostAuthor        *string
+	Entities          []byte
 }
 
 // channelMessageFromFields is the sole row-to-struct converter for channel
@@ -194,6 +198,7 @@ func channelMessageFromFields(r channelMsgFields) ChannelMessage {
 		r.RandomID,
 		r.GroupedID,
 		r.FileID,
+		r.StickerDocumentID,
 		replyToMsgID,
 		ChannelMessageAction(r.ActionType),
 		int(r.TtlPeriod),
@@ -208,6 +213,7 @@ func channelMessageFromFields(r channelMsgFields) ChannelMessage {
 		message.EditDate = nil
 		message.RandomID = 0
 		message.FileID = nil
+		message.StickerDocumentID = nil
 		message.ReplyToMsgID = 0
 		message.Action = ChannelMessageActionNone
 		message.PostAuthor = nil
@@ -472,7 +478,7 @@ func (s *Store) ChannelPostPts(ctx context.Context, channelID, localID int64) (i
 func (s *Store) PostChannelMessage(
 	ctx context.Context, channelID, fromID int64, text string, randomID int64, fileID *int64, replyToMsgID int64,
 ) (ChannelMessage, int, bool, error) {
-	return s.postChannelMessage(ctx, channelID, fromID, text, randomID, fileID, replyToMsgID, false, nil, nil, false, nil)
+	return s.postChannelMessage(ctx, channelID, fromID, text, randomID, fileID, nil, replyToMsgID, false, nil, nil, false, nil)
 }
 
 // PostChannelMessageAs is PostChannelMessage with the post-rights check
@@ -510,7 +516,19 @@ func (s *Store) PostChannelMessageAsWithEntities(
 	ctx context.Context, channelID, fromID int64, text string, randomID int64, fileID *int64, replyToMsgID int64,
 	entities []PollDescriptionEntity,
 ) (ChannelMessage, int, bool, error) {
-	return s.postChannelMessage(ctx, channelID, fromID, text, randomID, fileID, replyToMsgID, true, nil, nil, false, entities)
+	return s.postChannelMessage(ctx, channelID, fromID, text, randomID, fileID, nil, replyToMsgID, true, nil, nil, false, entities)
+}
+
+// PostChannelStickerAsWithEntities appends a catalogue sticker with the
+// send_stickers check inside the channel post transaction.
+func (s *Store) PostChannelStickerAsWithEntities(
+	ctx context.Context, channelID, fromID int64, text string, randomID, stickerDocumentID, replyToMsgID int64,
+	entities []PollDescriptionEntity,
+) (ChannelMessage, int, bool, error) {
+	if stickerDocumentID >= 0 {
+		return ChannelMessage{}, 0, false, ErrMediaInvalid
+	}
+	return s.postChannelMessage(ctx, channelID, fromID, text, randomID, nil, &stickerDocumentID, replyToMsgID, true, nil, nil, false, entities)
 }
 
 // ChannelPhotoRetryAs resolves a photo-send retry only after the caller's
@@ -553,7 +571,7 @@ func (s *Store) ChannelPhotoRetryAs(
 		return ChannelMessage{}, 0, false, err
 	}
 
-	message, pts, duplicate, err := channelMessageRetry(ctx, qtx, channelID, fromID, randomID, nil, false, true)
+	message, pts, duplicate, err := channelMessageRetry(ctx, qtx, channelID, fromID, randomID, nil, false, true, nil)
 	if err != nil {
 		return ChannelMessage{}, 0, false, err
 	}
@@ -566,6 +584,49 @@ func (s *Store) ChannelPhotoRetryAs(
 		if err = s.channelPhotoRetryAfterCommitHook(ctx, channelID, fromID, randomID); err != nil {
 			return ChannelMessage{}, 0, false, fmt.Errorf("after channel photo retry commit hook: %w", err)
 		}
+	}
+	return message, pts, duplicate, nil
+}
+
+// ChannelStickerRetryAs resolves a committed catalogue-sticker post only after
+// the caller's current channel posting rights have been checked under the
+// channel state lock.
+func (s *Store) ChannelStickerRetryAs(
+	ctx context.Context, channelID, fromID, randomID, stickerDocumentID int64,
+) (ChannelMessage, int, bool, error) {
+	if channelID == 0 || fromID == 0 {
+		return ChannelMessage{}, 0, false, ErrMessageInvalid
+	}
+	if randomID == 0 {
+		return ChannelMessage{}, 0, false, nil
+	}
+	if stickerDocumentID >= 0 {
+		return ChannelMessage{}, 0, false, ErrMediaInvalid
+	}
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return ChannelMessage{}, 0, false, fmt.Errorf("begin channel sticker retry: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }() //nolint:errcheck // no-op after commit
+	qtx := s.q.WithTx(tx)
+	if _, err = checkPostRights(ctx, qtx, channelID, fromID); err != nil {
+		return ChannelMessage{}, 0, false, err
+	}
+	if err = qtx.EnsureChannelState(ctx, channelID); err != nil {
+		return ChannelMessage{}, 0, false, fmt.Errorf("ensure channel state for sticker retry: %w", err)
+	}
+	if _, err = qtx.LockChannelState(ctx, channelID); err != nil {
+		return ChannelMessage{}, 0, false, fmt.Errorf("lock channel state for sticker retry: %w", err)
+	}
+	if _, err = checkChannelMediaPostRights(ctx, qtx, channelID, fromID); err != nil {
+		return ChannelMessage{}, 0, false, err
+	}
+	message, pts, duplicate, err := channelMessageRetry(ctx, qtx, channelID, fromID, randomID, nil, false, false, &stickerDocumentID)
+	if err != nil {
+		return ChannelMessage{}, 0, false, err
+	}
+	if err = tx.Commit(ctx); err != nil {
+		return ChannelMessage{}, 0, false, fmt.Errorf("commit channel sticker retry: %w", err)
 	}
 	return message, pts, duplicate, nil
 }
@@ -668,7 +729,7 @@ func (s *Store) PostChannelPhotoAsWithEntities(
 		return ChannelMessage{}, 0, false, ErrFileMissing
 	}
 	id := fileID
-	return s.postChannelMessage(ctx, channelID, fromID, text, randomID, &id, replyToMsgID, true, nil, nil, true, entities)
+	return s.postChannelMessage(ctx, channelID, fromID, text, randomID, &id, nil, replyToMsgID, true, nil, nil, true, entities)
 }
 
 // ChannelTextMessageRetryAs resolves a text-send retry only after checking the
@@ -706,7 +767,7 @@ func (s *Store) ChannelTextMessageRetryAs(
 		return ChannelMessage{}, 0, false, err
 	}
 
-	message, pts, duplicate, err := channelMessageRetry(ctx, qtx, channelID, fromID, randomID, nil, true, false)
+	message, pts, duplicate, err := channelMessageRetry(ctx, qtx, channelID, fromID, randomID, nil, true, false, nil)
 	if err != nil {
 		return ChannelMessage{}, 0, false, err
 	}
@@ -722,7 +783,7 @@ func (s *Store) PostChannelPollAs(
 	ctx context.Context, channelID, fromID, randomID int64, text string, draft PollDraft,
 ) (ChannelMessage, Poll, int, bool, error) {
 	var poll Poll
-	message, pts, duplicate, err := s.postChannelMessage(ctx, channelID, fromID, text, randomID, nil, 0, true, &draft, &poll, false, nil)
+	message, pts, duplicate, err := s.postChannelMessage(ctx, channelID, fromID, text, randomID, nil, nil, 0, true, &draft, &poll, false, nil)
 	return message, poll, pts, duplicate, err
 }
 
@@ -763,7 +824,7 @@ func (s *Store) ChannelPollRetryAs(
 		return ChannelMessage{}, poll, 0, false, err
 	}
 
-	message, pts, duplicate, err := channelMessageRetry(ctx, qtx, channelID, fromID, randomID, &poll, false, false)
+	message, pts, duplicate, err := channelMessageRetry(ctx, qtx, channelID, fromID, randomID, &poll, false, false, nil)
 	if err != nil {
 		return ChannelMessage{}, poll, 0, false, err
 	}
@@ -771,7 +832,7 @@ func (s *Store) ChannelPollRetryAs(
 }
 
 func (s *Store) postChannelMessage(
-	ctx context.Context, channelID, fromID int64, text string, randomID int64, fileID *int64, replyToMsgID int64, checkRights bool,
+	ctx context.Context, channelID, fromID int64, text string, randomID int64, fileID, stickerDocumentID *int64, replyToMsgID int64, checkRights bool,
 	pollDraft *PollDraft, pollResult *Poll, photoMedia bool, entities []PollDescriptionEntity,
 ) (ChannelMessage, int, bool, error) {
 	if channelID == 0 || fromID == 0 {
@@ -785,6 +846,9 @@ func (s *Store) postChannelMessage(
 		if _, err := normalizePollDraftShape(*pollDraft); err != nil {
 			return ChannelMessage{}, 0, false, err
 		}
+	}
+	if stickerDocumentID != nil && (*stickerDocumentID >= 0 || fileID != nil) {
+		return ChannelMessage{}, 0, false, ErrMediaInvalid
 	}
 
 	tx, err := s.pool.Begin(ctx)
@@ -821,7 +885,7 @@ func (s *Store) postChannelMessage(
 	// slow-mode state either.
 	var role int
 	if checkRights {
-		if pollDraft != nil || photoMedia {
+		if pollDraft != nil || photoMedia || stickerDocumentID != nil {
 			role, err = checkChannelMediaPostRights(ctx, qtx, channelID, fromID)
 		} else {
 			role, err = checkPostRights(ctx, qtx, channelID, fromID)
@@ -840,7 +904,7 @@ func (s *Store) postChannelMessage(
 	// newer slot for an old post is how it skips whatever really sits there.
 	if randomID != 0 {
 		message, pts, duplicate, retryErr := channelMessageRetry(
-			ctx, qtx, channelID, fromID, randomID, pollResult, fileID == nil && pollDraft == nil, photoMedia,
+			ctx, qtx, channelID, fromID, randomID, pollResult, fileID == nil && stickerDocumentID == nil && pollDraft == nil, photoMedia, stickerDocumentID,
 		)
 		if retryErr != nil {
 			return ChannelMessage{}, 0, false, retryErr
@@ -866,6 +930,9 @@ func (s *Store) postChannelMessage(
 			if pollDraft != nil {
 				mediaRights = []string{"send_polls"}
 			}
+			if stickerDocumentID != nil {
+				mediaRights = []string{"send_stickers"}
+			}
 			if fileID != nil {
 				media, ferr := qtx.FileMediaRightsForPost(ctx, *fileID)
 				switch {
@@ -876,7 +943,7 @@ func (s *Store) postChannelMessage(
 				}
 				mediaRights = media.SubtypeRights
 			}
-			if err = checkDefaultMessageRestriction(channel.DefaultBannedRights, role >= channelRoleAdmin, fileID != nil || pollDraft != nil, mediaRights); err != nil {
+			if err = checkDefaultMessageRestriction(channel.DefaultBannedRights, role >= channelRoleAdmin, fileID != nil || stickerDocumentID != nil || pollDraft != nil, mediaRights); err != nil {
 				return ChannelMessage{}, 0, false, err
 			}
 		}
@@ -956,7 +1023,8 @@ func (s *Store) postChannelMessage(
 	}
 	if err = qtx.InsertChannelMessage(ctx, db.InsertChannelMessageParams{
 		ChannelID: channelID, LocalID: b.LocalID, FromID: fromID,
-		Message: text, RandomID: randomID, FileID: fileID, ReplyToMsgID: replyTo, PostAuthor: postAuthor, Entities: entityData,
+		Message: text, RandomID: randomID, FileID: fileID, StickerDocumentID: stickerDocumentID,
+		ReplyToMsgID: replyTo, PostAuthor: postAuthor, Entities: entityData,
 	}); err != nil {
 		return ChannelMessage{}, 0, false, fmt.Errorf("insert channel message: %w", err)
 	}
@@ -1011,7 +1079,7 @@ func channelPostAuthorName(ctx context.Context, qtx *db.Queries, userID int64) (
 }
 
 func channelMessageRetry(
-	ctx context.Context, qtx *db.Queries, channelID, fromID, randomID int64, pollResult *Poll, textOnly, photoRetry bool,
+	ctx context.Context, qtx *db.Queries, channelID, fromID, randomID int64, pollResult *Poll, textOnly, photoRetry bool, stickerDocumentID *int64,
 ) (ChannelMessage, int, bool, error) {
 	existing, err := channelMessageRowByRandomID(ctx, qtx, channelID, randomID)
 	if errors.Is(err, pgx.ErrNoRows) {
@@ -1045,7 +1113,7 @@ func channelMessageRetry(
 		retryPoll = &poll
 	}
 	if textOnly {
-		if existing.FileID != nil {
+		if existing.FileID != nil || existing.StickerDocumentID != nil {
 			return ChannelMessage{}, 0, false, ErrRandomIDDuplicate
 		}
 		_, pollErr := qtx.PollByChannelMessage(ctx, db.PollByChannelMessageParams{
@@ -1064,7 +1132,7 @@ func channelMessageRetry(
 		// photo post that send created, after a restart and after any later
 		// restriction, and a random id naming the caller's text post, poll or
 		// document post is a different send rather than a replay of this one.
-		if existing.FileID == nil {
+		if existing.FileID == nil || existing.StickerDocumentID != nil {
 			return ChannelMessage{}, 0, false, ErrMediaInvalid
 		}
 		media, ferr := qtx.FileMediaRightsForPost(ctx, *existing.FileID)
@@ -1072,6 +1140,11 @@ func channelMessageRetry(
 			return ChannelMessage{}, 0, false, fmt.Errorf("check photo retry media kind: %w", ferr)
 		}
 		if errors.Is(ferr, pgx.ErrNoRows) || media.MediaKind != string(FileKindPhoto) {
+			return ChannelMessage{}, 0, false, ErrMediaInvalid
+		}
+	}
+	if stickerDocumentID != nil {
+		if existing.StickerDocumentID == nil || *existing.StickerDocumentID != *stickerDocumentID || existing.FileID != nil {
 			return ChannelMessage{}, 0, false, ErrMediaInvalid
 		}
 	}

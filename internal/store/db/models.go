@@ -99,23 +99,24 @@ type ChannelInvite struct {
 }
 
 type ChannelMessage struct {
-	ChannelID    int64
-	LocalID      int64
-	FromID       int64
-	Date         pgtype.Timestamptz
-	Message      string
-	EditDate     pgtype.Timestamptz
-	Deleted      bool
-	RandomID     int64
-	FileID       *int64
-	MessageTsv   interface{}
-	ReplyToMsgID *int32
-	ActionType   int16
-	GroupedID    *int64
-	PostAuthor   *string
-	TtlPeriod    int32
-	ExpiresAt    pgtype.Timestamptz
-	Entities     []byte
+	ChannelID         int64
+	LocalID           int64
+	FromID            int64
+	Date              pgtype.Timestamptz
+	Message           string
+	EditDate          pgtype.Timestamptz
+	Deleted           bool
+	RandomID          int64
+	FileID            *int64
+	MessageTsv        interface{}
+	ReplyToMsgID      *int32
+	ActionType        int16
+	GroupedID         *int64
+	PostAuthor        *string
+	TtlPeriod         int32
+	ExpiresAt         pgtype.Timestamptz
+	Entities          []byte
+	StickerDocumentID *int64
 }
 
 type ChannelMessageReaction struct {
@@ -498,34 +499,35 @@ type LanguageCatalogVersion struct {
 }
 
 type Message struct {
-	OwnerID        int64
-	LocalID        int64
-	PeerID         int64
-	FromID         int64
-	Date           pgtype.Timestamptz
-	Message        string
-	Out            bool
-	EditDate       pgtype.Timestamptz
-	Deleted        bool
-	RandomID       int64
-	PeerLocalID    int64
-	PeerType       int16
-	FanoutID       int64
-	ActionType     int16
-	ActionUserID   int64
-	FileID         int64
-	ReplyToMsgID   *int32
-	FwdFromID      *int64
-	FwdDate        pgtype.Timestamptz
-	FwdChannelID   *int64
-	FwdChannelPost *int32
-	MessageTsv     interface{}
-	ReplyToTrusted bool
-	GroupedID      *int64
-	FwdPostAuthor  *string
-	TtlPeriod      int32
-	ExpiresAt      pgtype.Timestamptz
-	Entities       []byte
+	OwnerID           int64
+	LocalID           int64
+	PeerID            int64
+	FromID            int64
+	Date              pgtype.Timestamptz
+	Message           string
+	Out               bool
+	EditDate          pgtype.Timestamptz
+	Deleted           bool
+	RandomID          int64
+	PeerLocalID       int64
+	PeerType          int16
+	FanoutID          int64
+	ActionType        int16
+	ActionUserID      int64
+	FileID            int64
+	ReplyToMsgID      *int32
+	FwdFromID         *int64
+	FwdDate           pgtype.Timestamptz
+	FwdChannelID      *int64
+	FwdChannelPost    *int32
+	MessageTsv        interface{}
+	ReplyToTrusted    bool
+	GroupedID         *int64
+	FwdPostAuthor     *string
+	TtlPeriod         int32
+	ExpiresAt         pgtype.Timestamptz
+	Entities          []byte
+	StickerDocumentID *int64
 }
 
 type MessageDeleteCapacityRefusal struct {

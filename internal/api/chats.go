@@ -136,7 +136,7 @@ func (h *handlers) chatUpdate(ctx context.Context, callerID int64, chat store.Ch
 	return &tg.Updates{
 		Updates: []tg.UpdateClass{
 			&tg.UpdateNewMessage{
-				Message:  messageToTL(sender, createUsers, files, nil, nil),
+				Message:  messageToTL(sender, createUsers, files, nil, nil, h.dcID),
 				Pts:      perOwner[callerID],
 				PtsCount: 1,
 			},

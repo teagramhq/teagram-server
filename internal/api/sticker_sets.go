@@ -37,9 +37,10 @@ type builtInStickerSet struct {
 }
 
 type stickerSetCatalog struct {
-	byShortName map[string]*builtInStickerSet
-	byID        map[int64]*builtInStickerSet
-	documents   map[reactionDocumentIdentity]builtInReactionDocument
+	byShortName   map[string]*builtInStickerSet
+	byID          map[int64]*builtInStickerSet
+	documents     map[reactionDocumentIdentity]builtInReactionDocument
+	documentsByID map[int64]*tg.Document
 }
 
 var (
@@ -111,9 +112,10 @@ func buildStickerSetCatalog() (*stickerSetCatalog, error) {
 	set.set.SetFlags()
 
 	catalog := &stickerSetCatalog{
-		byShortName: map[string]*builtInStickerSet{set.set.ShortName: set},
-		byID:        map[int64]*builtInStickerSet{set.set.ID: set},
-		documents:   make(map[reactionDocumentIdentity]builtInReactionDocument, len(entries)),
+		byShortName:   map[string]*builtInStickerSet{set.set.ShortName: set},
+		byID:          map[int64]*builtInStickerSet{set.set.ID: set},
+		documents:     make(map[reactionDocumentIdentity]builtInReactionDocument, len(entries)),
+		documentsByID: make(map[int64]*tg.Document, len(entries)),
 	}
 	for _, entry := range entries {
 		stem := strings.TrimSuffix(entry.SVG, ".svg")
@@ -145,6 +147,7 @@ func buildStickerSetCatalog() (*stickerSetCatalog, error) {
 		}
 		set.documents = append(set.documents, document)
 		set.packs = append(set.packs, tg.StickerPack{Emoticon: entry.Emoji, Documents: []int64{id}})
+		catalog.documentsByID[id] = document
 		catalog.documents[reactionDocumentIdentity{id: id, accessHash: accessHash}] = builtInReactionDocument{
 			file: reactionStoreFile(document, data),
 			data: data,
@@ -259,6 +262,27 @@ func (c *stickerSetCatalog) resolve(ref tg.InputStickerSetClass) (*builtInSticke
 	}
 }
 
+func resolveStickerDocument(id, accessHash int64) (bool, error) {
+	catalog, err := getStickerSetCatalog()
+	if err != nil {
+		return false, err
+	}
+	_, ok := catalog.documents[reactionDocumentIdentity{id: id, accessHash: accessHash}]
+	return ok, nil
+}
+
+// validStickerRetryIdentity keeps current catalogue identities exact while
+// allowing a retry for a catalogue id that has since gone stale to render its
+// stored message as unsupported.
+func validStickerRetryIdentity(id, accessHash int64) (bool, error) {
+	catalog, err := getStickerSetCatalog()
+	if err != nil {
+		return false, err
+	}
+	document, current := catalog.documentsByID[id]
+	return !current || document.AccessHash == accessHash, nil
+}
+
 func (set *builtInStickerSet) responseSet(installedAt *time.Time) tg.StickerSet {
 	result := set.set
 	if installedAt != nil {
@@ -271,30 +295,46 @@ func (set *builtInStickerSet) responseSet(installedAt *time.Time) tg.StickerSet 
 func (set *builtInStickerSet) responseDocuments(dcID int) []tg.DocumentClass {
 	result := make([]tg.DocumentClass, 0, len(set.documents))
 	for _, source := range set.documents {
-		document := *source
-		document.DCID = dcID
-		document.FileReference = bytes.Clone(source.FileReference)
-		document.Attributes = append([]tg.DocumentAttributeClass(nil), source.Attributes...)
-		for i, attribute := range document.Attributes {
-			switch value := attribute.(type) {
-			case *tg.DocumentAttributeImageSize:
-				cloned := *value
-				document.Attributes[i] = &cloned
-			case *tg.DocumentAttributeSticker:
-				cloned := *value
-				if ref, ok := value.Stickerset.(*tg.InputStickerSetID); ok {
-					refCopy := *ref
-					cloned.Stickerset = &refCopy
-				}
-				document.Attributes[i] = &cloned
-			case *tg.DocumentAttributeFilename:
-				cloned := *value
-				document.Attributes[i] = &cloned
-			}
-		}
-		result = append(result, &document)
+		result = append(result, cloneStickerDocument(source, dcID))
 	}
 	return result
+}
+
+func cloneStickerDocument(source *tg.Document, dcID int) *tg.Document {
+	document := *source
+	document.DCID = dcID
+	document.FileReference = bytes.Clone(source.FileReference)
+	document.Attributes = append([]tg.DocumentAttributeClass(nil), source.Attributes...)
+	for i, attribute := range document.Attributes {
+		switch value := attribute.(type) {
+		case *tg.DocumentAttributeImageSize:
+			cloned := *value
+			document.Attributes[i] = &cloned
+		case *tg.DocumentAttributeSticker:
+			cloned := *value
+			if ref, ok := value.Stickerset.(*tg.InputStickerSetID); ok {
+				refCopy := *ref
+				cloned.Stickerset = &refCopy
+			}
+			document.Attributes[i] = &cloned
+		case *tg.DocumentAttributeFilename:
+			cloned := *value
+			document.Attributes[i] = &cloned
+		}
+	}
+	return &document
+}
+
+func stickerDocumentMedia(documentID int64, dcID int) (tg.MessageMediaClass, bool) {
+	catalog, err := getStickerSetCatalog()
+	if err != nil {
+		return nil, false
+	}
+	document, ok := catalog.documentsByID[documentID]
+	if !ok {
+		return nil, false
+	}
+	return &tg.MessageMediaDocument{Document: cloneStickerDocument(document, dcID)}, true
 }
 
 func installedStickerSetsHash(sets []tg.StickerSet) int64 {

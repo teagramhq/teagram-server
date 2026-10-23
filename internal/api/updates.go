@@ -45,7 +45,7 @@ func replySnippet(s string) string {
 // rather than fetching it. files is the same pattern for media, keyed by file
 // id; a row whose file id is absent from it renders as a plain message.
 // reactions, when non-nil, populates the message's Reactions field.
-func messageToTL(m store.Message, createUsers []int64, files map[int64]tg.MessageMediaClass, replyTexts map[int32]string, reactions []store.Reaction) tg.MessageClass {
+func messageToTL(m store.Message, createUsers []int64, files map[int64]tg.MessageMediaClass, replyTexts map[int32]string, reactions []store.Reaction, dcIDs ...int) tg.MessageClass {
 	if m.Action != store.ChatActionNone {
 		return &tg.MessageService{
 			ID:     int(m.LocalID),
@@ -89,7 +89,17 @@ func messageToTL(m store.Message, createUsers []int64, files map[int64]tg.Messag
 	}
 	// SetMedia rather than a plain assignment: Media is a conditional field and
 	// encodes only when its flag is set with it.
-	if media, ok := files[m.FileID]; ok && m.FileID != 0 {
+	if m.StickerDocumentID != nil {
+		dcID := 1
+		if len(dcIDs) > 0 {
+			dcID = dcIDs[0]
+		}
+		if media, ok := stickerDocumentMedia(*m.StickerDocumentID, dcID); ok {
+			msg.SetMedia(media)
+		} else {
+			msg.SetMedia(&tg.MessageMediaUnsupported{})
+		}
+	} else if media, ok := files[m.FileID]; ok && m.FileID != 0 {
 		msg.SetMedia(media)
 	}
 	if m.FwdFromID != 0 || !m.FwdDate.IsZero() {
@@ -173,7 +183,7 @@ func channelReactionsToTL(reactions []store.ChannelReactionCount, canSeeList boo
 // files is keyed by file id exactly as messageToTL's is, but the "no media"
 // sentinel differs and the trap is worth naming:
 // channel_messages.file_id is NULL for no media, while messages.file_id is 0.
-func channelMessageToTL(m store.ChannelMessage, viewerID int64, files map[int64]tg.MessageMediaClass, broadcast bool) (tg.MessageClass, error) {
+func channelMessageToTL(m store.ChannelMessage, viewerID int64, files map[int64]tg.MessageMediaClass, broadcast bool, dcIDs ...int) (tg.MessageClass, error) {
 	if m.Deleted {
 		return &tg.MessageEmpty{ID: int(m.LocalID)}, nil
 	}
@@ -251,7 +261,17 @@ func channelMessageToTL(m store.ChannelMessage, viewerID int64, files map[int64]
 	}
 	// SetMedia rather than a plain assignment: Media is a conditional field and
 	// encodes only when its flag is set with it.
-	if m.FileID != nil {
+	if m.StickerDocumentID != nil {
+		dcID := 1
+		if len(dcIDs) > 0 {
+			dcID = dcIDs[0]
+		}
+		if media, ok := stickerDocumentMedia(*m.StickerDocumentID, dcID); ok {
+			msg.SetMedia(media)
+		} else {
+			msg.SetMedia(&tg.MessageMediaUnsupported{})
+		}
+	} else if m.FileID != nil {
 		if media, ok := files[*m.FileID]; ok {
 			msg.SetMedia(media)
 		}
@@ -787,7 +807,7 @@ func (h *handlers) eventToUpdate(ctx context.Context, userID int64, ev store.Eve
 				}
 			}
 		}
-		tlMsg := messageToTL(m, createUsers, files, nil, nil)
+		tlMsg := messageToTL(m, createUsers, files, nil, nil, h.dcID)
 		if poll, ok := pollViews[m.LocalID]; ok {
 			pollMessage, pollErr := messageToTLWithPoll(m, createUsers, files, nil, nil, poll)
 			if pollErr != nil {
@@ -1202,7 +1222,7 @@ func (h *handlers) channelEventToUpdate(_ context.Context, channelID, viewerID i
 			h.log.Debug("channel message row not found", "local_id", ev.LocalID, "channel_id", channelID, "pts", ev.Pts)
 			return nil, nil, nil
 		}
-		message, err := channelMessageToTL(m, viewerID, files, broadcast)
+		message, err := channelMessageToTL(m, viewerID, files, broadcast, h.dcID)
 		if err != nil {
 			return nil, nil, err
 		}
