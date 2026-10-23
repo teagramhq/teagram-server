@@ -275,7 +275,7 @@ if not (report.get("result") == "pass" and report.get("input_mode") == "local" a
     if ! printf '%s' "$auth_clear_signal_report" | /usr/bin/python3 -c '
 import json, sys
 report = json.load(sys.stdin)
-if not (report.get("result") == "fail" and report.get("phase") == "auth_key_clearing" and report.get("category") == "interrupted" and report.get("cleanup") == "verified" and report.get("input_mode") == "local" and report.get("exit") == 1):
+if not (report.get("result") == "fail" and report.get("phase") == "auth_key_clearing" and report.get("category") == "interrupted" and report.get("cleanup") == "verified" and "input_mode" not in report and report.get("exit") == 1):
     raise SystemExit(1)
 '; then
       emit_preflight_failure
