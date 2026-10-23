@@ -201,9 +201,9 @@ demo_render_config() {
     and .services.teagramd.environment.TG_WEBSOCKET_LISTEN_ADDR == ":2446"
     and .services.teagramd.environment.GOMAXPROCS == "1"
     and .services.teagramd.environment.GOMEMLIMIT == "320MiB"
-    and .services.teagramd.mem_limit == "448m"
-    and .services["teagramd-next"].mem_limit == "448m"
-    and .services.postgres.mem_limit == "320m"
+    and .services.teagramd.mem_limit == 469762048
+    and .services["teagramd-next"].mem_limit == 469762048
+    and .services.postgres.mem_limit == 335544320
     and .services.teagramd.environment.TG_CLIENT_ADDR_TRUST == "proxy-v2"
     and .services.teagramd.environment.TG_CLIENT_ADDR_PROXY_CIDRS == "198.18.130.2/32"
     and .services.teagramd.environment.HTTP_PROXY == "http://turnstile-egress:3128"

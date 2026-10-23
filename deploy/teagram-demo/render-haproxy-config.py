@@ -29,7 +29,7 @@ def main() -> None:
         fail("template is unavailable")
 
     markers = {"@TEAGRAMD_DISABLED@", "@TEAGRAMD_NEXT_DISABLED@"}
-    if any(contents.count(marker) != 1 for marker in markers):
+    if any(contents.count(marker) != 2 for marker in markers):
         fail("template markers are invalid")
     contents = contents.replace(
         "@TEAGRAMD_DISABLED@", "" if active == "teagramd" else " disabled"

@@ -109,6 +109,51 @@ jq -e --arg secretFile "$TMP_DIR/turnstile-secret-key" '
   and .volumes.tgblobs.driver_opts.device == "/srv/teagram-demo-blobs/data"
 ' "$TMP_DIR/target.json" >/dev/null
 
+python3 - "$SCRIPT_DIR/render-haproxy-config.py" "$SCRIPT_DIR/haproxy.cfg" "$TMP_DIR" <<'PY'
+from pathlib import Path
+import subprocess
+import sys
+
+
+renderer = Path(sys.argv[1])
+template = Path(sys.argv[2])
+output_dir = Path(sys.argv[3])
+markers = ("@TEAGRAMD_DISABLED@", "@TEAGRAMD_NEXT_DISABLED@")
+
+for active in ("teagramd", "teagramd-next"):
+    destination = output_dir / f"haproxy-{active}.cfg"
+    subprocess.run(
+        [sys.executable, str(renderer), active, str(template), str(destination)],
+        check=True,
+    )
+    rendered = destination.read_text(encoding="utf-8")
+    if any(marker in rendered for marker in markers):
+        raise SystemExit(f"HAProxy renderer left an unresolved marker for {active}")
+
+    for slot in ("teagramd", "teagramd-next"):
+        slot_lines = [
+            line.strip()
+            for line in rendered.splitlines()
+            if line.strip().startswith(f"server {slot} ")
+            or line.strip().startswith(f"server {slot}-mtproto ")
+        ]
+        if len(slot_lines) != 2:
+            raise SystemExit(f"HAProxy renderer did not render both {slot} backends")
+        should_be_disabled = slot != active
+        if any(line.endswith(" disabled") != should_be_disabled for line in slot_lines):
+            raise SystemExit(f"HAProxy renderer selected the wrong {slot} backends for {active}")
+PY
+
+(
+  source "$SCRIPT_DIR/demo-common.sh"
+  DEMO_STATE_DIR="$TMP_DIR/production-validator-state"
+  DEMO_CLIENT_CONFIG_DIR="$DEMO_STATE_DIR/public-client"
+  demo_prepare_client_config_dir() { :; }
+  demo_prepare_haproxy_runtime() { :; }
+  demo_compose() { cat "$TMP_DIR/target.json"; }
+  demo_render_config "$TMP_DIR/production-validated.json"
+)
+
 env -u COMPOSE_FILE -u COMPOSE_PROJECT_NAME -u COMPOSE_PROFILES \
   -u TEAGRAM_DEMO_TURNSTILE_SITE_KEY -u TEAGRAM_DEMO_TURNSTILE_SECRET_KEY_FILE \
   TEAGRAM_DEMO_EDGE_BIND=127.0.0.1:18080 \
