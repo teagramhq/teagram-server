@@ -74,6 +74,24 @@ class BlobTransitionEnvironmentTests(unittest.TestCase):
 
         self.assertEqual(environment["MOCK_SOURCE_VOLUME_MOUNTPOINT"], "/host/source-volume")
 
+    def test_local_compose_overlay_precedes_the_host_override(self) -> None:
+        runner = import_from_path("blob_transition_runner_local_compose_order", RUNNER)
+        with tempfile.TemporaryDirectory(prefix="local-compose-order.") as temporary:
+            checkout = Path(temporary)
+            (checkout / "docker-compose.local-blobs.yml").touch()
+            (checkout / "docker-compose.override.yml").touch()
+            with patch.object(runner, "TEST_MODE", False):
+                environment = runner.compose_environment(checkout, local=True)
+
+        self.assertEqual(
+            environment["COMPOSE_FILE"],
+            os.pathsep.join((
+                "docker-compose.yml",
+                "docker-compose.local-blobs.yml",
+                "docker-compose.override.yml",
+            )),
+        )
+
     def test_live_authority_rejection_keeps_its_reason(self) -> None:
         runner = import_from_path("blob_transition_runner_authority_rejection", RUNNER)
         mode = import_from_path("blob_mode_authority_rejection", RUNNER.parent / "blob-mode-state.py")

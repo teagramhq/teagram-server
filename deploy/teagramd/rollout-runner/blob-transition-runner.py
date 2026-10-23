@@ -1377,13 +1377,13 @@ def compose_environment(checkout: pathlib.Path, local: bool = False) -> dict[str
     else:
         path = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/snap/bin"
     files = ["docker-compose.yml"]
-    if (checkout / "docker-compose.override.yml").is_file():
-        files.append("docker-compose.override.yml")
     if local:
         overlay = checkout / "docker-compose.local-blobs.yml"
         if not overlay.is_file() or overlay.is_symlink():
             reject("local-compose-overlay-unavailable")
         files.append("docker-compose.local-blobs.yml")
+    if (checkout / "docker-compose.override.yml").is_file():
+        files.append("docker-compose.override.yml")
     environment = {
         "PATH": path,
         "HOME": os.environ.get("HOME", "/root"),
