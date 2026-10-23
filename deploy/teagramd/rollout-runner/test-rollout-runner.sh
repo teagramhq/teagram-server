@@ -326,6 +326,9 @@ if [ "${1:-}" = inspect ]; then
   if [ "${1:-}" = --format ]; then
     template=${2:-}
     case "$template" in
+      '{{.HostConfig.LogConfig.Type}}')
+        if [ "${MOCK_SCENARIO:-}" = pre-rollout-log-persisted ]; then printf 'json-file\n'; else printf 'syslog\n'; fi
+        ;;
       '{{.State.Status}}|{{.State.ExitCode}}')
         if [ "$subject" = "$MOCK_MIGRATE_ID" ]; then printf 'exited|0\n'
         elif [ "$subject" = "$MOCK_TARGET_ID" ] && [ "${MOCK_SCENARIO:-}" = runtime-target-exited ]; then printf 'exited|1\n'
@@ -664,6 +667,10 @@ if [ "${1:-}" = rm ] && [ "${2:-}" = -f ]; then
   exit 0
 fi
 if [ "${1:-}" = logs ]; then
+  if [[ " $* " == *' --timestamps '* ]]; then
+    printf '2026-10-23T21:40:00.123456789Z pre-rollout-line\n'
+    exit 0
+  fi
   if [ "${MOCK_SCENARIO:-success}" = readiness-timeout ] && [ "$(cat "$MOCK_STATE/phase")" = target ]; then exit 0; fi
   if [ "${MOCK_SCENARIO:-success}" = logs-failed ] && [ "$(cat "$MOCK_STATE/phase")" = target ]; then
     printf 'fixture log read failed\n' >&2
@@ -1312,6 +1319,7 @@ run_fixture() {
     MOCK_REQUIRE_FAILURE_MARKER="$require_marker" MOCK_EVIDENCE_ROOT="$root" MOCK_BASE_ENV_EXTRA="$baseline_env_extra" MOCK_TARGET_ENV_EXTRA="$target_env_extra" MOCK_ROLLBACK_ENV_EXTRA="$rollback_env_extra" \
     MOCK_REAL_PYTHON3="$(command -v python3)" MOCK_REAL_CHMOD="$(command -v chmod)" MOCK_REAL_LN="$(command -v ln)" MOCK_REAL_DATE="$(command -v date)" MOCK_STAMP="$stamp" \
     ROLLOUT_RUNNER_TEST_MODE=1 ROLLOUT_RUNNER_CHECKOUT="$checkout" ROLLOUT_RUNNER_EVIDENCE_ROOT=/root \
+    ROLLOUT_RUNNER_TEST_LOG_ARCHIVE="$TMP/$name-legacy.log" \
     ROLLOUT_RUNNER_TEST_CHECKOUT="$checkout" \
     ROLLOUT_RUNNER_LOCK_PATH="$TMP/$name.lock" ROLLOUT_RUNNER_ENV_FILE="$checkout/.env" \
     ROLLOUT_RUNNER_ADDED_ENV="$added_env" ROLLOUT_RUNNER_CHANGED_ENV="$changed_env" \
@@ -1988,6 +1996,18 @@ if [ "$status" = 0 ] && grep -q 'rollout=verified' "$TMP/success.stdout" && grep
   pass 'built image captured after build, bound to target SHA, and compared before acceptance'
 else
   fail 'built image capture, provenance binding, and target acceptance'
+fi
+
+make_fixture pre-rollout-log-persisted pre-rollout-log-persisted
+status=$(run_fixture pre-rollout-log-persisted)
+legacy_archive="$TMP/pre-rollout-log-persisted-legacy.log"
+if [ "$status" = 0 ] && grep -Fq 'pre-rollout-line' "$legacy_archive" && \
+   awk '/docker logs --since .*--timestamps --tail 5000/ {snapshot=NR} $0=="docker compose up -d" {up=NR} END{exit !(snapshot>0 && snapshot<up)}' \
+     "$TMP/pre-rollout-log-persisted-events"; then
+  pass 'pre-rollout logs are archived before the container is replaced'
+else
+  show_fixture_failure pre-rollout-log-persisted "$status"
+  fail 'pre-rollout log persistence before container replacement'
 fi
 
 for restore_failure in restore-psql-failure restore-role-create-failure restore-rm-failure restore-remains-after-rm; do

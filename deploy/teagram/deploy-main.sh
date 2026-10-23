@@ -117,6 +117,111 @@ install_teagram_logs_command() {
   printf 'installed teagram-logs command from %s\n' "${sha:0:7}"
 }
 
+restore_previous_teagram_syslog_config() {
+  local backup=$1 target=$2
+  if ! cp -p "$backup" "$target" || ! chmod 0644 "$target"; then
+    printf 'could not restore the previous syslog configuration from %s\n' "$backup" >&2
+    return 1
+  fi
+  if ! rc-service syslog restart; then
+    printf 'previous syslog configuration was restored but syslog did not restart\n' >&2
+    return 1
+  fi
+  if ! rc-service syslog status >/dev/null; then
+    printf 'previous syslog configuration was restored but syslog is not running\n' >&2
+    return 1
+  fi
+}
+
+install_teagram_syslog_config() {
+  local sha=$1 target=/etc/conf.d/syslog
+  local target_dir temp backup changed=0
+
+  if [[ -n ${DEPLOY_DIR:-} ]]; then
+    target="$R/etc/conf.d/syslog"
+  fi
+
+  # Older deployable commits predate persistent teagramd logging.
+  if ! git cat-file -e "$sha:deploy/teagram/syslog.conf" 2>/dev/null; then
+    return 0
+  fi
+
+  target_dir=${target%/*}
+  if [[ -L "$target" || ! -f "$target" ]]; then
+    printf 'syslog configuration is missing, symlinked, or not a regular file: %s\n' "$target" >&2
+    return 1
+  fi
+
+  temp=$(mktemp "$target_dir/.teagram-syslog.XXXXXX") || return 1
+  if ! git show "$sha:deploy/teagram/syslog.conf" > "$temp"; then
+    rm -f "$temp"
+    return 1
+  fi
+  if ! bash -n "$temp"; then
+    rm -f "$temp"
+    printf 'syslog configuration from %s failed bash -n\n' "$sha" >&2
+    return 1
+  fi
+
+  if ! cmp -s "$temp" "$target"; then
+    if [[ "$(<"$target")" != 'SYSLOGD_OPTS="-t"' ]]; then
+      rm -f "$temp"
+      printf 'syslog configuration drifted; refusing to replace %s\n' "$target" >&2
+      return 1
+    fi
+
+    backup="$R/teagram-syslog-before-${sha:0:7}"
+    if [[ ! -e "$backup" ]]; then
+      if ! cp -p "$target" "$backup"; then
+        rm -f "$temp"
+        return 1
+      fi
+      chmod 0600 "$backup"
+      printf 'saved previous syslog configuration to %s\n' "$backup"
+    fi
+
+    if ! chmod 0644 "$temp" || ! mv -f "$temp" "$target"; then
+      rm -f "$temp"
+      return 1
+    fi
+    changed=1
+
+    if [[ -z ${DEPLOY_DIR:-} ]] && ! rc-service syslog restart; then
+      restore_previous_teagram_syslog_config "$backup" "$target" || return 1
+      printf 'syslog restart failed; restored previous configuration from %s\n' "$backup" >&2
+      return 1
+    fi
+  else
+    rm -f "$temp"
+  fi
+
+  if [[ -z ${DEPLOY_DIR:-} ]]; then
+    if ! rc-service syslog status >/dev/null; then
+      if [[ "$changed" == 1 ]]; then
+        restore_previous_teagram_syslog_config "$backup" "$target" || return 1
+      fi
+      printf 'syslog service is not running after configuration update\n' >&2
+      return 1
+    fi
+    if [[ ! -S /dev/log ]]; then
+      if [[ "$changed" == 1 ]]; then
+        restore_previous_teagram_syslog_config "$backup" "$target" || return 1
+      fi
+      printf 'syslog socket is missing: /dev/log\n' >&2
+      return 1
+    fi
+    if ! ps -o args | awk '$0 ~ /[s]yslogd/ && $0 ~ /-s 524288/ && $0 ~ /-b 15/ { active=1 } END { exit !active }'; then
+      if [[ "$changed" == 1 ]]; then
+        restore_previous_teagram_syslog_config "$backup" "$target" || return 1
+      fi
+      printf 'syslog is not running with the configured rotation cap\n' >&2
+      return 1
+    fi
+  fi
+
+  printf 'installed teagram syslog rotation config from %s\n' "${sha:0:7}"
+}
+
 SHA=${DEPLOY_SHA:-}
 case "$SHA" in *[!0-9a-f]*|"") echo "DEPLOY_SHA must be a full 40-hex commit SHA"; exit 1;; esac
 [ ${#SHA} = 40 ] || { echo "DEPLOY_SHA must be a full 40-hex commit SHA"; exit 1; }
@@ -185,6 +290,7 @@ docker_compose() {
     docker compose "$@"
   fi
 }
+install_teagram_syslog_config "$SHA"
 IMG=$(docker inspect --format '{{.Image}}' $C)
 if [ "$PREV" = "$SHA" ] && grep -qs "source_sha=$SHA image_id=$IMG " "$R"/main1238-*.build/built-image.identity; then
   umask 077

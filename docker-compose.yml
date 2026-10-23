@@ -198,6 +198,15 @@ services:
       args:
         TEAGRAMD_SOURCE_REVISION: ${TEAGRAMD_SOURCE_REVISION:-}
     image: teagramd:local
+    # Keep logs on the LXC across container replacement. The host syslog daemon
+    # rotates /var/log/messages with a bounded 8 GiB history.
+    logging:
+      driver: syslog
+      options:
+        syslog-address: "unixgram:///dev/log"
+        syslog-facility: daemon
+        syslog-format: rfc5424
+        tag: teagramd
     # The server's bounded TCP/WebSocket drain is 90 seconds. Keep the
     # container alive long enough for that drain to complete before Docker's
     # final kill.

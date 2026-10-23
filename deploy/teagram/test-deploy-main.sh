@@ -118,7 +118,8 @@ first=$(commit first)
 mkdir -p "$tmp/work/deploy/teagram"
 cp "$logs_script" "$tmp/work/deploy/teagram/teagram-logs.sh"
 chmod 755 "$tmp/work/deploy/teagram/teagram-logs.sh"
-git -C "$tmp/work" add deploy/teagram/teagram-logs.sh
+printf 'SYSLOGD_OPTS="-t -s 524288 -b 15"\n' > "$tmp/work/deploy/teagram/syslog.conf"
+git -C "$tmp/work" add deploy/teagram/teagram-logs.sh deploy/teagram/syslog.conf
 second=$(commit second)
 git -C "$tmp/work" checkout -q -b side "$first"
 side=$(commit side)
@@ -142,6 +143,9 @@ local_files_before=$(stat -c '%n:%u:%g:%a' \
   "$tmp/live/.env" "$tmp/live/pgdump-fixture.sql" "$tmp/live/rollout-evidence.txt")
 
 mkdir -p "$tmp/bin" "$tmp/root/main1238-fixture.build" "$tmp/root/usr/local/sbin"
+mkdir -p "$tmp/root/etc/conf.d"
+printf 'SYSLOGD_OPTS="-t"\n' > "$tmp/root/etc/conf.d/syslog"
+chmod 644 "$tmp/root/etc/conf.d/syslog"
 printf '#!/bin/sh\nprintf "legacy wrapper\\n"\n' > "$tmp/root/usr/local/sbin/teagram-logs"
 chmod 755 "$tmp/root/usr/local/sbin/teagram-logs"
 cat > "$tmp/bin/docker" <<'DOCKER'
@@ -222,6 +226,16 @@ echo "source_sha=$second image_id=sha256:fixture built_at=fixture" > "$tmp/root/
 expect 0 "already at $second with runner provenance" DEPLOY_SHA="$second"
 if ! cmp -s "$tmp/root/usr/local/sbin/teagram-logs" "$tmp/work/deploy/teagram/teagram-logs.sh"; then
   echo 'FAIL deploy did not install the commit-tracked teagram-logs command' >&2
+  failures=$((failures + 1))
+fi
+if ! cmp -s "$tmp/root/etc/conf.d/syslog" "$tmp/work/deploy/teagram/syslog.conf"; then
+  echo 'FAIL deploy did not install the bounded syslog rotation configuration' >&2
+  failures=$((failures + 1))
+fi
+syslog_backup="$tmp/root/teagram-syslog-before-${second:0:7}"
+if [[ ! -s "$syslog_backup" || "$(stat -c '%a' "$syslog_backup")" != 600 ]] || \
+  ! grep -Fqx 'SYSLOGD_OPTS="-t"' "$syslog_backup"; then
+  echo 'FAIL deploy did not keep a root-only copy of the previous syslog configuration' >&2
   failures=$((failures + 1))
 fi
 backup="$tmp/root/teagram-logs-before-${second:0:7}"

@@ -56,6 +56,11 @@ TARGET_DATABASE=
 CHECKOUT=${ROLLOUT_RUNNER_CHECKOUT:-/opt/teagram}
 TARGET_CHECKOUT=${ROLLOUT_RUNNER_TARGET_CHECKOUT:-/opt/teagram}
 EVIDENCE_ROOT=${ROLLOUT_RUNNER_EVIDENCE_ROOT:-/root}
+if [ "$ROLLOUT_RUNNER_TEST_MODE" = 1 ]; then
+  LEGACY_LOG_ARCHIVE=${ROLLOUT_RUNNER_TEST_LOG_ARCHIVE:-}
+else
+  LEGACY_LOG_ARCHIVE=/root/teagramd-legacy-logs.log
+fi
 if [ "${ROLLOUT_RUNNER_TEST_MODE:-0}" = 1 ]; then
   LOCK_PATH=${ROLLOUT_RUNNER_LOCK_PATH:-/tmp/teagram-deploy.lock}
   TARGET_LOCK_PATH=${ROLLOUT_RUNNER_TARGET_LOCK_PATH:-/tmp/teagram-deploy.lock}
@@ -851,6 +856,78 @@ current_service_id() {
   id=$(printf '%s' "$id" | head -n 1)
   [[ "$id" =~ ^[0-9a-f]{64}$ ]] || return 1
   printf '%s' "$id"
+}
+
+archive_pre_rollout_teagramd_logs() {
+  local container_id driver since archive_dir captured combined
+  container_id=$(current_service_id teagramd) || {
+    fail 'cannot resolve the current teagramd container before replacement'
+    return 1
+  }
+  driver=$(docker inspect --format '{{.HostConfig.LogConfig.Type}}' "$container_id") || {
+    fail 'cannot inspect the current teagramd logging driver before replacement'
+    return 1
+  }
+  if [ "$driver" = syslog ]; then
+    return 0
+  fi
+  [ -n "$LEGACY_LOG_ARCHIVE" ] || {
+    fail 'legacy log archive path is unavailable'
+    return 1
+  }
+
+  archive_dir=${LEGACY_LOG_ARCHIVE%/*}
+  [ -d "$archive_dir" ] || {
+    fail "legacy log archive directory is missing: $archive_dir"
+    return 1
+  }
+  if [ -L "$LEGACY_LOG_ARCHIVE" ] || { [ -e "$LEGACY_LOG_ARCHIVE" ] && [ ! -f "$LEGACY_LOG_ARCHIVE" ]; }; then
+    fail 'legacy log archive is not a regular file'
+    return 1
+  fi
+  if [ -f "$LEGACY_LOG_ARCHIVE" ] && grep -Fqx "# teagramd-container-id=$container_id" "$LEGACY_LOG_ARCHIVE"; then
+    return 0
+  fi
+
+  since=$(date -u -d '7 days ago' +%Y-%m-%dT%H:%M:%SZ) || {
+    fail 'cannot compute the legacy log retention cutoff'
+    return 1
+  }
+  captured=$(mktemp "$archive_dir/.teagramd-logs.XXXXXX") || return 1
+  combined=$(mktemp "$archive_dir/.teagramd-archive.XXXXXX") || {
+    rm -f "$captured"
+    return 1
+  }
+  if ! docker logs --since "$since" --timestamps --tail 5000 "$container_id" > "$captured"; then
+    rm -f "$captured" "$combined"
+    fail 'cannot preserve the current teagramd logs before container replacement'
+    return 1
+  fi
+  if [ -f "$LEGACY_LOG_ARCHIVE" ]; then
+    if ! { cat "$LEGACY_LOG_ARCHIVE"; printf '# teagramd-container-id=%s\n' "$container_id"; cat "$captured"; } | \
+      tail -c 33554432 > "$combined"; then
+      rm -f "$captured" "$combined"
+      fail 'cannot update the bounded legacy teagramd log archive'
+      return 1
+    fi
+  elif ! { printf '# teagramd-container-id=%s\n' "$container_id"; cat "$captured"; } | \
+    tail -c 33554432 > "$combined"; then
+    rm -f "$captured" "$combined"
+    fail 'cannot create the bounded legacy teagramd log archive'
+    return 1
+  fi
+  chmod 0600 "$combined" || {
+    rm -f "$captured" "$combined"
+    fail 'cannot protect the legacy teagramd log archive'
+    return 1
+  }
+  mv -f "$combined" "$LEGACY_LOG_ARCHIVE" || {
+    rm -f "$captured" "$combined"
+    fail 'cannot publish the legacy teagramd log archive'
+    return 1
+  }
+  rm -f "$captured"
+  printf 'preserved recent logs from teagramd container %s\n' "${container_id:0:12}"
 }
 
 capture_snapshot() {
@@ -1930,6 +2007,7 @@ require_clean_build_checkout() {
 
 perform_rollback() {
   local rollback_id rollback_env_record
+  archive_pre_rollout_teagramd_logs || return 1
   restore_checkout_and_tag || return 1
   restore_previous_env_for_public_additions || return 1
   if ! validate_rollback_blob_authority; then
@@ -2222,6 +2300,12 @@ run_apply() {
     return 1
   fi
 
+  if archive_pre_rollout_teagramd_logs; then :; else
+    rc=$?
+    restore_checkout_and_tag || return 1
+    fail "pre-rollout teagramd logs could not be preserved (exit=$rc); baseline checkout and image restored"
+    return 1
+  fi
   if docker compose up -d </dev/null; then :; else
     rc=$?
     rollback_after_target_failure "compose_up_exit_$rc" || return 2
