@@ -13,6 +13,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/gotd/td/bin"
 	"github.com/gotd/td/session"
@@ -589,9 +590,9 @@ func newSmokePhoneClientWithRequests(
 
 func testSmokeClientRequestFixtures(t *testing.T) {
 	t.Helper()
-	f := newSmokeFixtureWithSetup(t, config.RegistrationClosed, func(f *smokeFixture) {
+	f := newSmokeFixtureWithDeadline(t, config.RegistrationClosed, func(f *smokeFixture) {
 		f.recoveryEmailMode = config.RecoveryEmailContact
-	})
+	}, 4*time.Minute)
 	const phoneCreator, phoneMember = "+15551048901", "+15551048902"
 	seedSmokeUsers(t, f, phoneCreator, phoneMember)
 	creatorRequests := &clientRequestRecorder{}
