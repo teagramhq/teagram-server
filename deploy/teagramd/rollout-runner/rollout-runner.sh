@@ -1876,8 +1876,8 @@ compare_rollback_to_baseline() {
   fi
   write_immutable "$results" '' || return 1
   for field in "${fields[@]}"; do
-    if [ "$field" = env_sha256 ] && public_env_addition_requested; then
-      [ -n "$RECORDED_ENV_SHA" ] || { fail 'public-setting rollback has no verified previous .env digest'; return 1; }
+    if [ "$field" = env_sha256 ] && { public_env_addition_requested || changed_websocket_origins_requested; }; then
+      [ -n "$RECORDED_ENV_SHA" ] || { fail 'named environment rollback has no verified previous .env digest'; return 1; }
       before=$RECORDED_ENV_SHA
     else
       before=$(jq -er --arg field "$field" '.[$field]' "$baseline_file") || { fail 'baseline snapshot is missing an equivalence field'; return 1; }

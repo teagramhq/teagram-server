@@ -3117,6 +3117,7 @@ if [ "$status" != 0 ] && grep -q "rollback=verified baseline_sha=$TARGET_LOCAL_C
    grep -qx "env_sha256=$previous_env_sha source_sha=$TARGET_LOCAL_COMPOSE_TARGET_SHA" \
      "$checkout/.state/rollout-env" && \
    [ "$(jq -r '.container_env_changed' "$root.rollback/rollback.snapshot.json")" = TG_WEBSOCKET_ALLOWED_ORIGINS ] && \
+   grep -q $'rollback\tenv_sha256\t.*\tpass' "$root.rollback/rollback-equivalence.tsv" && \
    grep -q $'rollback\tcontainer_env_sha256\t.*\tpass' "$root.rollback/rollback-equivalence.tsv"; then
   pass 'failed TG_WEBSOCKET_ALLOWED_ORIGINS change restores the previous .env before rollback'
 else
