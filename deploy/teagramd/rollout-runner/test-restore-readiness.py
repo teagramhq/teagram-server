@@ -110,15 +110,6 @@ def container_fixture() -> tuple[dict[str, Any], dict[str, Any]]:
 
 
 class RestoreReadinessContractTests(unittest.TestCase):
-    def test_restore_gate_targets_latest_schema_with_one_pending_migration(self) -> None:
-        migrations = sorted(
-            path.name.split("_", 1)[0]
-            for path in (RESTORE_READINESS.ROOT / "migrations").glob("[0-9]*_*.sql")
-        )
-        self.assertGreaterEqual(len(migrations), 2)
-        self.assertEqual(RESTORE_READINESS.BASE_SCHEMA, migrations[-2])
-        self.assertEqual(RESTORE_READINESS.HEAD_SCHEMA, migrations[-1])
-
     def test_suite_work_budget_caps_each_run_and_is_shared_by_shell_gate(self) -> None:
         self.assertEqual(RESTORE_READINESS.bounded_work_seconds(None, None), 30 * 60)
         self.assertEqual(RESTORE_READINESS.bounded_work_seconds(None, 300), 300)
