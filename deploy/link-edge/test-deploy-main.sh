@@ -2,11 +2,13 @@
 set -euo pipefail
 umask 077
 
-script="$(cd "$(dirname "$0")" && pwd)/deploy-main.sh"
+script_dir="$(cd "$(dirname "$0")" && pwd)"
+script="$script_dir/deploy-main.sh"
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
 mkdir -p "$tmp/bin" "$tmp/repo/deploy/link-edge" "$tmp/state"
 cp "$script" "$tmp/repo/deploy/link-edge/deploy-main.sh"
+cp "$script_dir/validate-discovery.py" "$tmp/repo/deploy/link-edge/validate-discovery.py"
 : > "$tmp/repo/deploy/link-edge/compose.yaml"
 script="$tmp/repo/deploy/link-edge/deploy-main.sh"
 
@@ -132,7 +134,9 @@ CURL
 
 chmod +x "$tmp/bin/docker" "$tmp/bin/curl"
 sha=0123456789abcdef0123456789abcdef01234567
-valid_client_json='{"version":1,"mtproto":{"endpoint":"mtproto.example.test:2443","dc_id":2,"rsa_spki":"c3BraQ=="},"websocket":{"endpoint":"wss://mtproto.example.test/apiws"}}'
+valid_rsa_spki='MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEArEJt3/8EjP15mNmKXrysrVgX1ZnbQeQnaS/VA4k4sbyWIqnwbYly5namiP8OZZIB9lwaHQSNNOP9lFMgqsHE5eF8xRMEDYGtqoVqI27vxi8KozBGKt4KTmQgq24ykfLreAjZpwrE/bzOWCzpcjq0ZwblouIDSUQv2r2/hpanj1tFJud4IOeWYxNH6wTBOyDQA6MebsQOcah+cj+n6cQBezy8w4SJDSzwvNod3jr0rX5vDVa6N1x51/G/TR4gFykVR/jjuTxNM/cRT+rYSqa1DYWqEUAGifiGHscdRES5wqAMGWLl9kdsOiH4zje81ZmvVybCIkWZiZcXUIzXZwUKLwIDAQAB'
+small_rsa_spki='MIGfMA0GCSqGSIb3DQEBAQUAA4GNADCBiQKBgQDZlFOztREchWtSDKHNQDUeMz8zHHnWwFS5ZmNVOxpLdTL5WmJg/6rsRRSeVabkvu7WPIbWzxYb3NnCUDW/yOVcudflcrOLiNxjUFJdPX/uGf1aFPlaMCznlwMfZbk6bkYQmbnejRlrMENA+Uy6czv+Lvdcoe/cDV/LKFDDrwILMwIDAQAB'
+valid_client_json="{\"version\":1,\"mtproto\":{\"endpoint\":\"mtproto.example.test:2443\",\"dc_id\":2,\"rsa_spki\":\"$valid_rsa_spki\"},\"websocket\":{\"endpoint\":\"wss://mtproto.example.test/apiws\"}}"
 export TEST_TARGET_SHA=$sha
 export TEST_CLIENT_JSON="$valid_client_json"
 export MOCK_DOCKER_STATE="$tmp/state"
@@ -160,6 +164,14 @@ if grep -Eq 'build linklanding|up .*linklanding' "$tmp/docker.log"; then
   echo 'FAIL linklanding was rebuilt or restarted' >&2
   exit 1
 fi
+
+valid_ipv6_client_json=$(jq -c '.mtproto.endpoint = "[2001:db8::1]:2443" | .mtproto.dc_id = 2147483647 | .websocket.endpoint = "wss://[2001:db8::1]/apiws"' <<<"$valid_client_json")
+reset_state 1212121212121212121212121212121212121212
+if ! output=$(TEST_CLIENT_JSON="$valid_ipv6_client_json" bash "$script" "$sha"); then
+  cat "$tmp/docker.log" >&2
+  exit 1
+fi
+[[ $output == *"retired path=404"* ]] || { printf 'FAIL valid IPv6 discovery document was rejected: %s\n' "$output" >&2; exit 1; }
 
 reset_state 2222222222222222222222222222222222222222
 export TEST_RETIRED_STATUS=200
@@ -221,18 +233,34 @@ for mutation in \
   'del(.mtproto.endpoint)' \
   '.mtproto.endpoint = 2443' \
   '.mtproto.endpoint = ""' \
+  '.mtproto.endpoint = "mtproto.example.test"' \
+  '.mtproto.endpoint = "mtproto.example.test:not-a-port"' \
+  '.mtproto.endpoint = "mtproto.example.test:0"' \
+  '.mtproto.endpoint = "mtproto.example.test:65536"' \
+  '.mtproto.endpoint = "bad host:2443"' \
+  '.mtproto.endpoint = "[2001:db8::1]:not-a-port"' \
   'del(.mtproto.dc_id)' \
   '.mtproto.dc_id = "2"' \
   '.mtproto.dc_id = 2.5' \
   '.mtproto.dc_id = 0' \
+  '.mtproto.dc_id = 2147483648' \
+  '.mtproto.dc_id = -1' \
   'del(.mtproto.rsa_spki)' \
   '.mtproto.rsa_spki = 2' \
   '.mtproto.rsa_spki = ""' \
+  '.mtproto.rsa_spki = "c3BraQ=="' \
+  '.mtproto.rsa_spki = "not base64!"' \
+  ".mtproto.rsa_spki = \"$small_rsa_spki\"" \
   'del(.websocket)' \
   '.websocket = []' \
   'del(.websocket.endpoint)' \
   '.websocket.endpoint = false' \
-  '.websocket.endpoint = ""'; do
+  '.websocket.endpoint = ""' \
+  '.websocket.endpoint = "https://mtproto.example.test/apiws"' \
+  '.websocket.endpoint = "wss://mtproto.example.test:443/apiws"' \
+  '.websocket.endpoint = "wss://mtproto.example.test/other"' \
+  '.websocket.endpoint = "wss://bad host/apiws"' \
+  '.websocket.endpoint = "wss://mtproto.example.test/apiws?host=other.example.test"'; do
   assert_invalid_discovery "$mutation"
 done
 
