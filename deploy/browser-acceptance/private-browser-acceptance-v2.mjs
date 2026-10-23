@@ -1062,15 +1062,19 @@ async function makeWssAudit(contextInfo, progress) {
     validate() {
       const entries = [...connections.values()];
       const activeConnections = entries.filter((item) => !item.closed).length;
-      const connectionCeiling = progress.isSignedIn() ? WSS_CONNECTION_CEILING : WSS_ACCOUNT_SLOT_CEILING;
+      const signedIn = progress.isSignedIn();
+      const connectionCeiling = signedIn ? WSS_CONNECTION_CEILING : WSS_ACCOUNT_SLOT_CEILING;
+      const unpinnedActiveConnectionOverflow = signedIn && accountSlotCount === null &&
+        activeConnections > WSS_ACCOUNT_SLOT_CEILING;
       if (malformed || orphanHandshake || workerUnobservable || pendingWorkers !== 0 || entries.length < 1 ||
           activeConnections < 1 || entries.length > connectionCeiling ||
+          unpinnedActiveConnectionOverflow ||
           handshakeCount !== entries.length || entries.some((item) => !item.matches ||
             item.responses !== 1 || item.status !== 101) ||
           (accountSlotCount !== null && activeConnections !== accountSlotCount)) {
         fail("websocket-not-ready", undefined, diagnostic());
       }
-      if (accountSlotCount === null && progress.isSignedIn()) accountSlotCount = activeConnections;
+      if (accountSlotCount === null && signedIn) accountSlotCount = activeConnections;
       return {connectionCount: entries.length, status101: true};
     },
     validateAfterLogout() {

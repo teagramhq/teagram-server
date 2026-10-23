@@ -1463,6 +1463,26 @@ test("WSS slots opened after the initial settle are pinned at sign-in", async (t
   assert.doesNotThrow(() => wssAudit.validate());
 });
 
+test("a fifth active WSS socket before the first signed-in validation fails", async (t) => {
+  const {progress, browserSession, wssAudit} = await proveSharedWorkerWss(t, {
+    workerSockets: workerSockets(WSS_ACCOUNT_SLOT_CEILING),
+  });
+  for (const event of ["req-dh-params", "set-client-dh", "init-connection", "password-challenge", "password-check"]) {
+    assert.equal(progress.observeClientEvent(event), true);
+  }
+  assert.equal(progress.markSignedIn(), true);
+  browserSession.workerMessage("observer-worker", {
+    method: "Network.webSocketCreated",
+    params: {requestId: "worker-socket-before-baseline-validation", url: `wss://${targetHost}/apiws`},
+  });
+  browserSession.workerMessage("observer-worker", {
+    method: "Network.webSocketHandshakeResponseReceived",
+    params: {requestId: "worker-socket-before-baseline-validation", response: {status: 101}},
+  });
+
+  assert.throws(() => wssAudit.validate(), {code: "websocket-not-ready"});
+});
+
 test("logout WSS validation retains the one-extra-active-socket limit", async (t) => {
   const {browserSession, progress, wssAudit} = await proveSharedWorkerWss(t, {
     workerSockets: workerSockets(4),
