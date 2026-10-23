@@ -20,6 +20,20 @@ import (
 // saltLen is the length of each server-generated KDF salt half.
 const saltLen = 32
 
+// handleRequestPasswordRecovery gives clients the standard response when no
+// automated recovery flow is available. It deliberately does not look up the
+// pending account or its stored recovery email.
+func (*handlers) handleRequestPasswordRecovery(_ *mtproto.Request) (bin.Encoder, error) {
+	return nil, errPasswordRecoveryNotAvailable
+}
+
+// handleRecoveryCodeInvalid rejects both validation and use of recovery codes.
+// The server never issues these codes, so neither request needs to inspect its
+// fields or touch password state.
+func (*handlers) handleRecoveryCodeInvalid(_ *mtproto.Request) (bin.Encoder, error) {
+	return nil, errRecoveryCodeInvalid
+}
+
 // passwordAlgo builds the SRP KDF algo descriptor advertised to clients: the
 // canonical Telegram group plus the given salts.
 func passwordAlgo(salt1, salt2 []byte) tg.PasswordKdfAlgoClass {

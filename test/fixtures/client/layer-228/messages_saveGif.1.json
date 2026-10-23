@@ -1,0 +1,20 @@
+{
+  "layer": 228,
+  "client": "gotd/td v0.162.0",
+  "source": "source-derived/messages_saveGif.1.txt",
+  "method": "messages.saveGif",
+  "request": {
+    "type": "messages.saveGif",
+    "fields": {
+      "id": {
+        "type": "inputDocument",
+        "fields": {
+          "id": "<N>",
+          "access_hash": "<N>",
+          "file_reference": "REDACTED"
+        }
+      },
+      "unsave": false
+    }
+  }
+}

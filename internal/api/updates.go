@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/binary"
 	"fmt"
+	"slices"
 	"sort"
 	"time"
 	"unicode/utf8"
@@ -133,6 +134,21 @@ func reactionsToTL(reactions []store.Reaction) tg.MessageReactions {
 	return mr
 }
 
+func channelReactionsToTL(reactions []store.ChannelReactionCount) tg.MessageReactions {
+	mr := tg.MessageReactions{Results: make([]tg.ReactionCount, len(reactions))}
+	for i, reaction := range reactions {
+		result := tg.ReactionCount{
+			Reaction: &tg.ReactionEmoji{Emoticon: reaction.Reaction},
+			Count:    reaction.Count,
+		}
+		if reaction.Chosen {
+			result.SetChosenOrder(1)
+		}
+		mr.Results[i] = result
+	}
+	return mr
+}
+
 // channelMessageToTL maps a stored channel message to the wire message, the
 // channel counterpart of messageToTL. A channel keeps one row per message
 // rather than one per member, so Out is derived from the viewer here instead of
@@ -237,10 +253,9 @@ func channelMessageToTL(m store.ChannelMessage, viewerID int64, files map[int64]
 	return msg, nil
 }
 
-// documentToTL names a stored file on the wire. Attributes carry only the file
-// name: M5 stores no other document attribute, and it never decodes an uploaded
-// file, so it cannot honestly claim an image size or a duration it did not
-// measure.
+// documentToTL names a stored file on the wire. It echoes only the supported
+// filename and animated marker; M5 does not decode document bodies, so it
+// cannot honestly claim an image size or duration it did not measure.
 //
 // FileReference is the 8-byte big-endian file id — a placeholder, the same
 // posture as the peer access_hash. It is echoed deterministically and ignored
@@ -256,8 +271,11 @@ func (h *handlers) documentToTL(f store.File) *tg.Document {
 		Size:          f.Size,
 		DCID:          h.dcID,
 	}
+	if slices.Contains(f.SubtypeRights, "send_gifs") {
+		d.Attributes = append(d.Attributes, &tg.DocumentAttributeAnimated{})
+	}
 	if f.FileName != "" {
-		d.Attributes = []tg.DocumentAttributeClass{&tg.DocumentAttributeFilename{FileName: f.FileName}}
+		d.Attributes = append(d.Attributes, &tg.DocumentAttributeFilename{FileName: f.FileName})
 	}
 	return d
 }
