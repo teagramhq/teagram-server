@@ -39,6 +39,64 @@ func testSmokeStickerSetCatalogue(t *testing.T) {
 	assertEmpty(a2, "second owner session before install")
 	assertEmpty(b, "other account before install")
 
+	specialSets := []struct {
+		name string
+		ref  tg.InputStickerSetClass
+	}{
+		{name: "empty", ref: &tg.InputStickerSetEmpty{}},
+		{name: "animated emoji", ref: &tg.InputStickerSetAnimatedEmoji{}},
+		{name: "dice", ref: &tg.InputStickerSetDice{Emoticon: "🎲"}},
+		{name: "animated emoji animations", ref: &tg.InputStickerSetAnimatedEmojiAnimations{}},
+		{name: "premium gifts", ref: &tg.InputStickerSetPremiumGifts{}},
+		{name: "emoji generic animations", ref: &tg.InputStickerSetEmojiGenericAnimations{}},
+		{name: "emoji default statuses", ref: &tg.InputStickerSetEmojiDefaultStatuses{}},
+		{name: "emoji default topic icons", ref: &tg.InputStickerSetEmojiDefaultTopicIcons{}},
+		{name: "emoji channel default statuses", ref: &tg.InputStickerSetEmojiChannelDefaultStatuses{}},
+		{name: "TON gifts", ref: &tg.InputStickerSetTonGifts{}},
+	}
+	for _, tc := range specialSets {
+		t.Run("special sticker set/"+tc.name, func(t *testing.T) {
+			var hash int
+			if err := a1.call(f.ctx, func(ctx context.Context, api *tg.Client) error {
+				result, err := api.MessagesGetStickerSet(ctx, &tg.MessagesGetStickerSetRequest{Stickerset: tc.ref})
+				if err != nil {
+					return err
+				}
+				full, ok := result.(*tg.MessagesStickerSet)
+				if !ok {
+					return fmt.Errorf("getStickerSet with hash 0 = %T, want full set", result)
+				}
+				if full.Set.Hash == 0 || full.Set.ID == 0 || full.Set.AccessHash == 0 || full.Set.Count != 0 || len(full.Packs) != 0 || len(full.Documents) != 0 {
+					return fmt.Errorf("special getStickerSet = %+v with %d packs and %d documents, want empty set with stable identity and non-zero hash", full.Set, len(full.Packs), len(full.Documents))
+				}
+				hash = full.Set.Hash
+
+				zeroHashResult, err := api.MessagesGetStickerSet(ctx, &tg.MessagesGetStickerSetRequest{Stickerset: tc.ref, Hash: 0})
+				if err != nil {
+					return err
+				}
+				zeroHashFull, ok := zeroHashResult.(*tg.MessagesStickerSet)
+				if !ok {
+					return fmt.Errorf("repeat getStickerSet with hash 0 = %T, want full set", zeroHashResult)
+				}
+				if zeroHashFull.Set.Hash != hash {
+					return fmt.Errorf("special sticker set hash changed from %d to %d", hash, zeroHashFull.Set.Hash)
+				}
+
+				cached, err := api.MessagesGetStickerSet(ctx, &tg.MessagesGetStickerSetRequest{Stickerset: tc.ref, Hash: hash})
+				if err != nil {
+					return err
+				}
+				if _, ok := cached.(*tg.MessagesStickerSetNotModified); !ok {
+					return fmt.Errorf("getStickerSet with returned hash = %T, want notModified", cached)
+				}
+				return nil
+			}); err != nil {
+				t.Fatalf("special sticker set %s: %v", tc.name, err)
+			}
+		})
+	}
+
 	const shortName = "twemoji_reactions"
 	ref := &tg.InputStickerSetShortName{ShortName: shortName}
 	if err := a1.call(f.ctx, func(ctx context.Context, api *tg.Client) error {

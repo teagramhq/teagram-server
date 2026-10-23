@@ -262,6 +262,49 @@ func (c *stickerSetCatalog) resolve(ref tg.InputStickerSetClass) (*builtInSticke
 	}
 }
 
+func specialStickerSet(ref tg.InputStickerSetClass) (*builtInStickerSet, bool) {
+	switch ref.(type) {
+	case *tg.InputStickerSetEmpty,
+		*tg.InputStickerSetAnimatedEmoji,
+		*tg.InputStickerSetDice,
+		*tg.InputStickerSetAnimatedEmojiAnimations,
+		*tg.InputStickerSetPremiumGifts,
+		*tg.InputStickerSetEmojiGenericAnimations,
+		*tg.InputStickerSetEmojiDefaultStatuses,
+		*tg.InputStickerSetEmojiDefaultTopicIcons,
+		*tg.InputStickerSetEmojiChannelDefaultStatuses,
+		*tg.InputStickerSetTonGifts:
+	default:
+		return nil, false
+	}
+
+	identity := make([]byte, 4)
+	binary.BigEndian.PutUint32(identity, ref.TypeID())
+	if dice, ok := ref.(*tg.InputStickerSetDice); ok {
+		if dice == nil {
+			return nil, false
+		}
+		identity = appendHashPart(identity, []byte(dice.Emoticon))
+	}
+	digest := namespacedDigest("teagram-special-sticker-set-v1", identity)
+	hash := int(binary.BigEndian.Uint32(digest[24:28]) & 0x7fffffff)
+	if hash == 0 {
+		hash = 1
+	}
+	set := &builtInStickerSet{
+		set: tg.StickerSet{
+			ID:         negativeContentID(digest[:8]),
+			AccessHash: positiveContentHash(digest[8:16]),
+			Title:      ref.TypeName(),
+			Count:      0,
+			Hash:       hash,
+		},
+		documents: []*tg.Document{},
+		packs:     []tg.StickerPack{},
+	}
+	return set, true
+}
+
 func resolveStickerDocument(id, accessHash int64) (bool, error) {
 	catalog, err := getStickerSetCatalog()
 	if err != nil {
@@ -372,9 +415,12 @@ func (h *handlers) handleGetStickerSet(r *mtproto.Request) (bin.Encoder, error) 
 	}
 	set, ok := catalog.resolve(req.Stickerset)
 	if !ok {
-		return nil, errStickerSetInvalid
+		set, ok = specialStickerSet(req.Stickerset)
+		if !ok {
+			return nil, errStickerSetInvalid
+		}
 	}
-	if req.Hash == set.set.Hash {
+	if req.Hash != 0 && req.Hash == set.set.Hash {
 		return &tg.MessagesStickerSetNotModified{}, nil
 	}
 	installed, err := h.store.InstalledStickerSets(r.Ctx, r.UserID)
