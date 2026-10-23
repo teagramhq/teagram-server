@@ -12,6 +12,40 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
+const chargePublicSignInFailCall = `-- name: ChargePublicSignInFailCall :execrows
+INSERT INTO public_sign_in_fail_calls (ip_key, token_count, window_start, expires_at)
+VALUES ($1, 1, now(), now() + $2::INTERVAL)
+ON CONFLICT (ip_key) DO UPDATE SET
+    token_count = CASE
+        WHEN public_sign_in_fail_calls.expires_at <= now() THEN 1
+        ELSE public_sign_in_fail_calls.token_count + 1
+    END,
+    window_start = CASE
+        WHEN public_sign_in_fail_calls.expires_at <= now() THEN now()
+        ELSE public_sign_in_fail_calls.window_start
+    END,
+    expires_at = CASE
+        WHEN public_sign_in_fail_calls.expires_at <= now() THEN now() + $2::INTERVAL
+        ELSE public_sign_in_fail_calls.expires_at
+    END
+WHERE public_sign_in_fail_calls.expires_at <= now()
+   OR public_sign_in_fail_calls.token_count < $3
+`
+
+type ChargePublicSignInFailCallParams struct {
+	IpKey      netip.Prefix
+	Column2    pgtype.Interval
+	TokenCount int32
+}
+
+func (q *Queries) ChargePublicSignInFailCall(ctx context.Context, arg ChargePublicSignInFailCallParams) (int64, error) {
+	result, err := q.db.Exec(ctx, chargePublicSignInFailCall, arg.IpKey, arg.Column2, arg.TokenCount)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
 const chargeSignInFailCall = `-- name: ChargeSignInFailCall :execrows
 INSERT INTO sign_in_fail_calls (ip_key, token_count, window_start, expires_at)
 VALUES ($1, 1, now(), now() + $2::INTERVAL)
@@ -49,6 +83,26 @@ func (q *Queries) ChargeSignInFailCall(ctx context.Context, arg ChargeSignInFail
 	return result.RowsAffected(), nil
 }
 
+const checkPublicSignInFailBudget = `-- name: CheckPublicSignInFailBudget :one
+
+SELECT token_count, expires_at
+FROM public_sign_in_fail_calls
+WHERE ip_key = $1
+`
+
+type CheckPublicSignInFailBudgetRow struct {
+	TokenCount int32
+	ExpiresAt  pgtype.Timestamptz
+}
+
+// Public-listener failures use an independent budget from tailnet attempts.
+func (q *Queries) CheckPublicSignInFailBudget(ctx context.Context, ipKey netip.Prefix) (CheckPublicSignInFailBudgetRow, error) {
+	row := q.db.QueryRow(ctx, checkPublicSignInFailBudget, ipKey)
+	var i CheckPublicSignInFailBudgetRow
+	err := row.Scan(&i.TokenCount, &i.ExpiresAt)
+	return i, err
+}
+
 const checkSignInFailBudget = `-- name: CheckSignInFailBudget :one
 SELECT token_count, expires_at
 FROM sign_in_fail_calls
@@ -68,6 +122,19 @@ func (q *Queries) CheckSignInFailBudget(ctx context.Context, ipKey netip.Prefix)
 	var i CheckSignInFailBudgetRow
 	err := row.Scan(&i.TokenCount, &i.ExpiresAt)
 	return i, err
+}
+
+const sweepExpiredPublicSignInFailCalls = `-- name: SweepExpiredPublicSignInFailCalls :execrows
+DELETE FROM public_sign_in_fail_calls
+WHERE expires_at <= now()
+`
+
+func (q *Queries) SweepExpiredPublicSignInFailCalls(ctx context.Context) (int64, error) {
+	result, err := q.db.Exec(ctx, sweepExpiredPublicSignInFailCalls)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
 }
 
 const sweepExpiredSignInFailCalls = `-- name: SweepExpiredSignInFailCalls :execrows

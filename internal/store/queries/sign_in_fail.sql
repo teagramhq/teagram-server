@@ -32,3 +32,33 @@ WHERE sign_in_fail_calls.expires_at <= now()
 -- Delete counter rows whose window has closed.
 DELETE FROM sign_in_fail_calls
 WHERE expires_at <= now();
+
+-- Public-listener failures use an independent budget from tailnet attempts.
+
+-- name: CheckPublicSignInFailBudget :one
+SELECT token_count, expires_at
+FROM public_sign_in_fail_calls
+WHERE ip_key = $1;
+
+-- name: ChargePublicSignInFailCall :execrows
+INSERT INTO public_sign_in_fail_calls (ip_key, token_count, window_start, expires_at)
+VALUES ($1, 1, now(), now() + $2::INTERVAL)
+ON CONFLICT (ip_key) DO UPDATE SET
+    token_count = CASE
+        WHEN public_sign_in_fail_calls.expires_at <= now() THEN 1
+        ELSE public_sign_in_fail_calls.token_count + 1
+    END,
+    window_start = CASE
+        WHEN public_sign_in_fail_calls.expires_at <= now() THEN now()
+        ELSE public_sign_in_fail_calls.window_start
+    END,
+    expires_at = CASE
+        WHEN public_sign_in_fail_calls.expires_at <= now() THEN now() + $2::INTERVAL
+        ELSE public_sign_in_fail_calls.expires_at
+    END
+WHERE public_sign_in_fail_calls.expires_at <= now()
+   OR public_sign_in_fail_calls.token_count < $3;
+
+-- name: SweepExpiredPublicSignInFailCalls :execrows
+DELETE FROM public_sign_in_fail_calls
+WHERE expires_at <= now();

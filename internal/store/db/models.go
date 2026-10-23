@@ -695,6 +695,26 @@ type ProfileUploadReceipt struct {
 	UpdatedAt     pgtype.Timestamptz
 }
 
+type PublicSendCodeIpCall struct {
+	IpKey       netip.Prefix
+	TokenCount  int32
+	WindowStart pgtype.Timestamptz
+	ExpiresAt   pgtype.Timestamptz
+}
+
+type PublicSendCodeIpPhone struct {
+	IpKey     netip.Prefix
+	Phone     string
+	ExpiresAt pgtype.Timestamptz
+}
+
+type PublicSignInFailCall struct {
+	IpKey       netip.Prefix
+	TokenCount  int32
+	WindowStart pgtype.Timestamptz
+	ExpiresAt   pgtype.Timestamptz
+}
+
 type RateLimit struct {
 	SubjectID   int64
 	Surface     string
