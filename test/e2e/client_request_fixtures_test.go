@@ -13,6 +13,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/gotd/td/bin"
 	"github.com/gotd/td/session"
@@ -587,11 +588,14 @@ func newSmokePhoneClientWithRequests(
 	return client
 }
 
+const clientRequestFixturesTimeout = 3 * time.Minute
+
 func testSmokeClientRequestFixtures(t *testing.T) {
 	t.Helper()
-	f := newSmokeFixtureWithSetup(t, config.RegistrationClosed, func(f *smokeFixture) {
+	// This replay covers many RPCs; allow room for the parallel CI smoke load.
+	f := newSmokeFixtureWithDeadline(t, config.RegistrationClosed, func(f *smokeFixture) {
 		f.recoveryEmailMode = config.RecoveryEmailContact
-	})
+	}, clientRequestFixturesTimeout)
 	const phoneCreator, phoneMember = "+15551048901", "+15551048902"
 	seedSmokeUsers(t, f, phoneCreator, phoneMember)
 	creatorRequests := &clientRequestRecorder{}
