@@ -761,6 +761,39 @@ class RestoreReadinessContractTests(unittest.TestCase):
                     with self.assertRaises(RESTORE_READINESS.DrillFailure):
                         drill.verify_local_schema_state(source, target, "schema_validation", expected_head=head)
 
+    def test_server_settings_are_checked_only_after_promotion(self) -> None:
+        # SHOW of server settings needs superuser; postgres stays demoted until every local check passed.
+        target = {"id": "b" * 64}
+        drill = object.__new__(RESTORE_READINESS.Drill)
+        drill.databases = {"target": target}
+        drill.local_admin_role = "restore_admin_0123456789abcdef"
+        drill.target_db_password = "a" * 64
+        events: list[str] = []
+
+        def query(_database: dict[str, Any], statement: str, _phase: str, **kwargs: Any) -> str:
+            if statement.startswith("SELECT rolsuper"):
+                return "true|true|true"
+            if "SUPERUSER CREATEDB" in statement:
+                events.append("promote")
+            if statement.startswith("DROP ROLE"):
+                events.append("drop_admin")
+            return ""
+
+        drill.sql = Mock(side_effect=query)
+        drill.verify_database_settings = Mock(side_effect=lambda *_args: events.append("settings"))
+        drill.promote_local_restore_owner(target)
+        self.assertEqual(events, ["promote", "drop_admin", "settings"])
+
+        drill.local_admin_role = "restore_admin_0123456789abcdef"
+        drill.verify_database_settings.reset_mock()
+        drill.local_schema_snapshot = Mock(return_value=("same",))
+        drill.sql = Mock(side_effect=lambda _db, statement, _phase, **_kw: (
+            RESTORE_READINESS.HEAD_SCHEMA if statement == RESTORE_READINESS.MIGRATION_HEAD_SQL
+            else "5|3|browser_acceptance_probe|pg_stat_statements,plpgsql|0|0|0|0|0"
+        ))
+        drill.verify_local_schema_state({"id": "a" * 64}, target, "schema_validation", expected_head=RESTORE_READINESS.HEAD_SCHEMA)
+        drill.verify_database_settings.assert_not_called()
+
     def test_local_hostile_refusals_compare_the_normalized_snapshot(self) -> None:
         target = {"id": "a" * 64}
         baseline = ((1, "a" * 32), "normalized-roles", "database-state", "extension-state")

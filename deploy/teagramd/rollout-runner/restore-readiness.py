@@ -4259,7 +4259,6 @@ dump_path=$2
             != self.fixture_state(source, phase, pinned_search_path=True)[2:]
         ):
             raise DrillFailure(phase, "schema_failure")
-        self.verify_database_settings(target, phase)
 
     def promote_local_restore_owner(self, target: dict[str, Any]) -> None:
         self.phase = "schema_validation"
@@ -4280,6 +4279,8 @@ dump_path=$2
             raise DrillFailure(self.phase, "schema_failure")
         self.sql(target, f"DROP ROLE {self.local_admin_role};", self.phase)
         self.local_admin_role = None
+        # Server settings are readable only by a superuser, so they are rechecked once postgres is promoted.
+        self.verify_database_settings(target, self.phase)
 
     def apply_pending_migration(self, target: dict[str, Any]) -> None:
         self.migrate_database("target", target, HEAD_SCHEMA, "pending_migration")
