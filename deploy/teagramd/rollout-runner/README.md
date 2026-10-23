@@ -58,6 +58,11 @@ rejects before backup. Use the same `COMPOSE_FILE` for preflight, build,
 startup, verification, and rollback; never rely on the default S3 stack or omit
 the override.
 
+Ordinary `apply` leaves the migration profile disabled. The local overlay
+keeps `teagramd` on the default network even when the base S3 Compose file adds
+the isolated RustFS network; the blob transition runner validates that network
+when performing a blob transition.
+
 A later application target may carry only one of two reviewed Compose bodies.
 The measured non-comment digest `d025a25d3e38…` selects
 `local-compose-df9ffe5.yml`; `577dd9885aa9…` selects

@@ -30,6 +30,7 @@ jq -e '
   and .services.teagramd.environment.TG_TURNSTILE_SITE_KEY == ""
   and .services.teagramd.environment.TG_TURNSTILE_SECRET_KEY_FILE == ""
   and .services.teagramd.environment.TG_TURNSTILE_SIGNIN_ENABLED == "false"
+  and ((.services.teagramd.networks | keys) == ["default"])
   and .secrets.teagramd_turnstile.file == "/dev/null"
   and ((.services.teagramd.depends_on | keys) == ["migrate"])
   and ((.services | has("rustfs")) | not)
