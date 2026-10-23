@@ -1698,7 +1698,7 @@ func (u *Updater) DeliverReactions(ctx context.Context, ownerID, localID, userID
 		Update: &tg.UpdateMessageReactions{
 			Peer:      peerToTL(msg.PeerType, msg.PeerID),
 			MsgID:     int(msg.LocalID),
-			Reactions: reactionsToTL(reactions),
+			Reactions: reactionsToTL(reactions, ownerID),
 		},
 		Date: int(time.Now().Unix()),
 	}
