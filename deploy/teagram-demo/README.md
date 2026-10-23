@@ -154,6 +154,13 @@ The active slot is persisted so a host or proxy restart keeps routing to the
 new server. WebSocket sessions already connected to the old process drain
 during its configured 120-second graceful stop.
 
+Before rendering the mounted HAProxy config, a deploy compares the running
+HAProxy and edge Compose hashes and their recorded config source hashes with
+the target. A proxy image, `haproxy.cfg`, HAProxy renderer or `nginx.conf`
+change makes the deploy stop before it rewrites the live HAProxy config. Apply
+proxy changes through the maintenance path, which recreates both proxies,
+before resuming routine server deploys.
+
 On a pre-cutover failure, the old server and edge stay available, the candidate
 stops, and the old image tag is restored. If traffic has reached the candidate,
 the script switches back to the old server when possible. It preserves the

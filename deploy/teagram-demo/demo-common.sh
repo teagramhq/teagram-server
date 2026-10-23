@@ -36,6 +36,60 @@ demo_fail() {
   return 1
 }
 
+[[ -f "$DEMO_SCRIPT_DIR/haproxy.cfg" && -f "$DEMO_SCRIPT_DIR/render-haproxy-config.py" &&
+  -f "$DEMO_SCRIPT_DIR/nginx.conf" ]] || {
+  demo_fail 'proxy configuration source is missing'
+  return 1
+}
+TEAGRAM_DEMO_HAPROXY_CONFIG_SHA256=$(
+  sha256sum -- "$DEMO_SCRIPT_DIR/haproxy.cfg" "$DEMO_SCRIPT_DIR/render-haproxy-config.py" |
+    awk '{print $1}' | sha256sum | awk '{print $1}'
+)
+TEAGRAM_DEMO_EDGE_CONFIG_SHA256=$(sha256sum -- "$DEMO_SCRIPT_DIR/nginx.conf" | awk '{print $1}')
+export TEAGRAM_DEMO_HAPROXY_CONFIG_SHA256 TEAGRAM_DEMO_EDGE_CONFIG_SHA256
+
+demo_require_proxy_configuration_current() {
+  local service="$1" expected_source_hash="$2" source_label target_hash live_hash live_source_hash
+  local -a proxy_ids=()
+
+  case "$service" in
+    haproxy) source_label='com.teagram.demo.haproxy-config-sha256' ;;
+    edge) source_label='com.teagram.demo.edge-config-sha256' ;;
+    *) demo_fail "unsupported proxy service: $service"; return 1 ;;
+  esac
+
+  [[ "$expected_source_hash" =~ ^[0-9a-f]{64}$ ]] || {
+    demo_fail "$service source configuration hash is invalid"
+    return 1
+  }
+  mapfile -t proxy_ids < <(demo_compose ps -q "$service")
+  ((${#proxy_ids[@]} == 1)) || {
+    demo_fail "running $service proxy is missing or ambiguous"
+    return 1
+  }
+  target_hash=$(demo_compose config --hash "$service" | awk -v service="$service" '$1 == service {print $2}') || {
+    demo_fail "$service target Compose hash could not be read"
+    return 1
+  }
+  live_hash=$(docker inspect --format '{{index .Config.Labels "com.docker.compose.config-hash"}}' "${proxy_ids[0]}") || {
+    demo_fail "$service live Compose hash could not be read"
+    return 1
+  }
+  live_source_hash=$(docker inspect --format "{{index .Config.Labels \"$source_label\"}}" "${proxy_ids[0]}") || {
+    demo_fail "$service live source configuration hash could not be read"
+    return 1
+  }
+  [[ "$target_hash" =~ ^[0-9a-f]{64}$ ]] || {
+    demo_fail "$service target Compose hash is invalid"
+    return 1
+  }
+  [[ "$live_hash" == "$target_hash" && "$live_source_hash" == "$expected_source_hash" ]] ||
+    {
+      demo_fail "$service proxy image or configuration changed; apply proxy changes during maintenance before deploying"
+      return 1
+    }
+}
+
 demo_wait_migration() {
   local compose_command="$1" description="$2" exit_code
   local -a migration_ids=()
@@ -185,7 +239,9 @@ demo_render_config() {
   demo_prepare_haproxy_runtime
   demo_compose config --format json > "$destination"
   chmod 0600 "$destination"
-  jq -e '
+  jq -e \
+    --arg haproxyConfigHash "$TEAGRAM_DEMO_HAPROXY_CONFIG_SHA256" \
+    --arg edgeConfigHash "$TEAGRAM_DEMO_EDGE_CONFIG_SHA256" '
     (.services.teagramd.ports // [] | length) == 0
     and (.services["teagramd-next"].ports // [] | length) == 0
     and (.services.edge.ports | length) == 1
@@ -223,7 +279,9 @@ demo_render_config() {
     and .services.haproxy.networks.backend.ipv4_address == "198.18.130.2"
     and (.services.haproxy.ports // [] | length) == 0
     and .services.haproxy.image == "mirror.gcr.io/library/haproxy:3.2-alpine@sha256:51f173c6825753d9e3a888b1004a1c2cb730936cc9178730a5c555246bd161a2"
+    and .services.haproxy.labels["com.teagram.demo.haproxy-config-sha256"] == $haproxyConfigHash
     and .services.edge.depends_on.haproxy.condition == "service_healthy"
+    and .services.edge.labels["com.teagram.demo.edge-config-sha256"] == $edgeConfigHash
     and (.services.edge.networks | keys | sort) == ["backend", "edge"]
     and .secrets.teagram_demo_turnstile.file == "/var/lib/teagram-demo/secrets/turnstile-secret-key"
     and .volumes.tgblobs.driver == "local"

@@ -148,12 +148,14 @@ chown root:root "$BACKUP_DIR"
 
 TARGET_RENDER="$TMP_DIR/target-render.json"
 TARGET_INVENTORY="$TMP_DIR/target-inventory.json"
-demo_render_config "$TARGET_RENDER"
-demo_check_blob_mount "$TARGET_RENDER"
 mapfile -t CONTAINER_IDS < <(demo_compose ps -q)
 (("${#CONTAINER_IDS[@]}" >= 4)) || demo_fail 'demo database, server, HAProxy, or edge container is not running'
 [[ -z "$(demo_compose ps --status running -q "$CANDIDATE_SERVER")" ]] ||
   demo_fail 'candidate server slot is already running; reconcile the rollout before deploying'
+demo_require_proxy_configuration_current haproxy "$TEAGRAM_DEMO_HAPROXY_CONFIG_SHA256"
+demo_require_proxy_configuration_current edge "$TEAGRAM_DEMO_EDGE_CONFIG_SHA256"
+demo_render_config "$TARGET_RENDER"
+demo_check_blob_mount "$TARGET_RENDER"
 docker inspect "${CONTAINER_IDS[@]}" > "$TMP_DIR/containers.raw.json"
 mapfile -t POSTGRES_IDS < <(demo_compose ps -q postgres)
 (("${#POSTGRES_IDS[@]}" == 1)) || demo_fail 'running demo database is missing or ambiguous'

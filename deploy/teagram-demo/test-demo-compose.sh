@@ -3,6 +3,8 @@ set -Eeuo pipefail
 
 SCRIPT_DIR=$(cd -P "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 REPO_ROOT=$(cd -P "$SCRIPT_DIR/../.." && pwd)
+# shellcheck source=deploy/teagram-demo/demo-common.sh
+source "$SCRIPT_DIR/demo-common.sh"
 TMP_DIR=$(mktemp -d)
 trap 'rm -rf -- "$TMP_DIR"' EXIT
 
@@ -35,7 +37,10 @@ compose=(
 env -u COMPOSE_FILE -u COMPOSE_PROJECT_NAME -u COMPOSE_PROFILES \
   -u TEAGRAM_DEMO_TURNSTILE_SITE_KEY -u TEAGRAM_DEMO_TURNSTILE_SECRET_KEY_FILE \
   "${compose[@]}" config --format json > "$TMP_DIR/target.json"
-jq -e --arg secretFile "$secret_file" '
+jq -e \
+  --arg secretFile "$secret_file" \
+  --arg haproxyConfigHash "$TEAGRAM_DEMO_HAPROXY_CONFIG_SHA256" \
+  --arg edgeConfigHash "$TEAGRAM_DEMO_EDGE_CONFIG_SHA256" '
   .name == "teagram-demo"
   and (.services | keys | sort) == ["edge", "haproxy", "migrate", "postgres", "teagramd", "teagramd-next", "turnstile-egress"]
   and ((.services.teagramd.ports // []) | length) == 0
@@ -46,10 +51,12 @@ jq -e --arg secretFile "$secret_file" '
   and ((.services.haproxy.ports // []) | length) == 0
   and .services.haproxy.platform == "linux/amd64"
   and .services.haproxy.image == "mirror.gcr.io/library/haproxy:3.2-alpine@sha256:51f173c6825753d9e3a888b1004a1c2cb730936cc9178730a5c555246bd161a2"
+  and .services.haproxy.labels["com.teagram.demo.haproxy-config-sha256"] == $haproxyConfigHash
   and any(.services.haproxy.volumes[]; (.source | endswith("/.state/teagram-demo/haproxy-config")) and .target == "/usr/local/etc/haproxy" and .read_only)
   and .services.haproxy.networks.backend.ipv4_address == "198.18.130.2"
   and .services.haproxy.healthcheck.test[-1] == "http://127.0.0.1:8404/healthz"
   and .services.edge.depends_on.haproxy.condition == "service_healthy"
+  and .services.edge.labels["com.teagram.demo.edge-config-sha256"] == $edgeConfigHash
   and any(.services.edge.volumes[]; (.source | endswith("/.state/teagram-demo/public-client")) and .target == "/usr/share/nginx/html/.well-known/teagramd" and .read_only)
   and (.services.teagramd.networks | keys) == ["backend"]
   and .services.teagramd.networks.backend.ipv4_address == "198.18.130.253"
@@ -108,6 +115,61 @@ jq -e --arg secretFile "$secret_file" '
   and .volumes.tgblobs.driver_opts.device == "/srv/teagram-demo-blobs/data"
 ' "$TMP_DIR/target.json" >/dev/null
 
+(
+  MOCK_TARGET_HASH=$(printf 'target config' | sha256sum | awk '{print $1}')
+  MOCK_OTHER_HASH=$(printf 'changed config' | sha256sum | awk '{print $1}')
+  MOCK_LIVE_HASH=$MOCK_TARGET_HASH
+  MOCK_HAPROXY_SOURCE_HASH=$TEAGRAM_DEMO_HAPROXY_CONFIG_SHA256
+  MOCK_EDGE_SOURCE_HASH=$TEAGRAM_DEMO_EDGE_CONFIG_SHA256
+
+  demo_compose() {
+    if [[ "$1" == ps && "$2" == -q ]]; then
+      printf 'proxy-container\n'
+    elif [[ "$1" == config && "$2" == --hash && "$3" == "$MOCK_SERVICE" ]]; then
+      printf '%s %s\n' "$3" "$MOCK_TARGET_HASH"
+    else
+      return 1
+    fi
+  }
+  docker() {
+    [[ "$1" == inspect && "$2" == --format ]] || return 1
+    case "$3" in
+      *com.docker.compose.config-hash*) printf '%s\n' "$MOCK_LIVE_HASH" ;;
+      *com.teagram.demo.haproxy-config-sha256*) printf '%s\n' "$MOCK_HAPROXY_SOURCE_HASH" ;;
+      *com.teagram.demo.edge-config-sha256*) printf '%s\n' "$MOCK_EDGE_SOURCE_HASH" ;;
+      *) return 1 ;;
+    esac
+  }
+
+  for MOCK_SERVICE in haproxy edge; do
+    if [[ "$MOCK_SERVICE" == haproxy ]]; then
+      expected_source_hash=$TEAGRAM_DEMO_HAPROXY_CONFIG_SHA256
+    else
+      expected_source_hash=$TEAGRAM_DEMO_EDGE_CONFIG_SHA256
+    fi
+    demo_require_proxy_configuration_current "$MOCK_SERVICE" "$expected_source_hash"
+
+    MOCK_LIVE_HASH=$MOCK_OTHER_HASH
+    if demo_require_proxy_configuration_current "$MOCK_SERVICE" "$expected_source_hash" >/dev/null 2>&1; then
+      printf '%s\n' "$MOCK_SERVICE accepted a stale Compose hash" >&2
+      exit 1
+    fi
+    MOCK_LIVE_HASH=$MOCK_TARGET_HASH
+
+    if [[ "$MOCK_SERVICE" == haproxy ]]; then
+      MOCK_HAPROXY_SOURCE_HASH=$MOCK_OTHER_HASH
+    else
+      MOCK_EDGE_SOURCE_HASH=$MOCK_OTHER_HASH
+    fi
+    if demo_require_proxy_configuration_current "$MOCK_SERVICE" "$expected_source_hash" >/dev/null 2>&1; then
+      printf '%s\n' "$MOCK_SERVICE accepted a stale source configuration hash" >&2
+      exit 1
+    fi
+    MOCK_HAPROXY_SOURCE_HASH=$TEAGRAM_DEMO_HAPROXY_CONFIG_SHA256
+    MOCK_EDGE_SOURCE_HASH=$TEAGRAM_DEMO_EDGE_CONFIG_SHA256
+  done
+)
+
 python3 - "$SCRIPT_DIR/render-haproxy-config.py" "$SCRIPT_DIR/haproxy.cfg" "$TMP_DIR" <<'PY'
 from pathlib import Path
 import subprocess
@@ -144,8 +206,6 @@ for active in ("teagramd", "teagramd-next"):
 PY
 
 (
-  # shellcheck source=deploy/teagram-demo/demo-common.sh
-  source "$SCRIPT_DIR/demo-common.sh"
   demo_prepare_client_config_dir() { :; }
   demo_prepare_haproxy_runtime() { :; }
   demo_compose() { cat "$TMP_DIR/target.json"; }
@@ -429,6 +489,15 @@ if "markers=133" not in seed_test_text or "search_account=demo_searcher" not in 
     raise SystemExit("test-seed-compose.sh: API convergence check must assert stable marker counts and search account")
 deploy_path = Path(sys.argv[3])
 deploy = deploy_path.read_text(encoding="utf-8")
+deploy_preflight = deploy.split('TARGET_RENDER="$TMP_DIR/target-render.json"', 1)[1].split(
+    'docker inspect "${CONTAINER_IDS[@]}"', 1
+)[0]
+assert_text_order(deploy_preflight, "deploy-main.sh proxy preflight", [
+    'mapfile -t CONTAINER_IDS < <(demo_compose ps -q)',
+    'demo_require_proxy_configuration_current haproxy "$TEAGRAM_DEMO_HAPROXY_CONFIG_SHA256"',
+    'demo_require_proxy_configuration_current edge "$TEAGRAM_DEMO_EDGE_CONFIG_SHA256"',
+    'demo_render_config "$TARGET_RENDER"',
+])
 deploy_steps = [
     "demo_backup_database\n",
     "demo_compose build teagramd",
