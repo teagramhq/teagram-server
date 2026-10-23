@@ -18,6 +18,7 @@ import (
 	"github.com/gotd/td/transport"
 
 	"github.com/teagramhq/teagram-server/internal/discovery"
+	"github.com/teagramhq/teagram-server/internal/store"
 )
 
 func TestServeSocketLogsCloseBeforeCodecDetection(t *testing.T) {
@@ -44,7 +45,7 @@ func TestServeSocketLogsCloseBeforeCodecDetection(t *testing.T) {
 		}
 		t.Fatalf("accept: %v", err)
 	}
-	slot, ok := server.preAuth.admit()
+	slot, ok := server.preAuth.admit(store.RateLimitListenerTailnet)
 	if !ok {
 		t.Fatal("pre-auth slot unavailable")
 	}
@@ -84,7 +85,7 @@ func TestServeSocketLogsPreAuthDrainAsServerClose(t *testing.T) {
 			t.Errorf("close server socket: %v", err)
 		}
 	})
-	slot, ok := server.preAuth.admit()
+	slot, ok := server.preAuth.admit(store.RateLimitListenerTailnet)
 	if !ok {
 		t.Fatal("pre-auth slot unavailable")
 	}
@@ -125,7 +126,7 @@ func TestServeSocketThrottlesPreAuthCloseLogs(t *testing.T) {
 		if err := client.Close(); err != nil {
 			t.Fatalf("close client: %v", err)
 		}
-		slot, ok := server.preAuth.admit()
+		slot, ok := server.preAuth.admit(store.RateLimitListenerTailnet)
 		if !ok {
 			t.Fatal("pre-auth slot unavailable")
 		}
@@ -147,7 +148,7 @@ func TestServeSocketThrottlesPreAuthCloseLogs(t *testing.T) {
 	if err := client.Close(); err != nil {
 		t.Fatalf("close client after sampled interval: %v", err)
 	}
-	slot, ok := server.preAuth.admit()
+	slot, ok := server.preAuth.admit(store.RateLimitListenerTailnet)
 	if !ok {
 		t.Fatal("pre-auth slot unavailable after sampled interval")
 	}
@@ -174,7 +175,7 @@ func TestServeSocketSkipsTransportCloseLogOnPerNetworkRefusal(t *testing.T) {
 		t.Fatalf("set pre-auth limits: %v", err)
 	}
 
-	heldSlot, ok := server.preAuth.admit()
+	heldSlot, ok := server.preAuth.admit(store.RateLimitListenerTailnet)
 	if !ok {
 		t.Fatal("first pre-auth slot unavailable")
 	}
@@ -205,7 +206,7 @@ func TestServeSocketSkipsTransportCloseLogOnPerNetworkRefusal(t *testing.T) {
 	if err != nil {
 		t.Fatalf("accept: %v", err)
 	}
-	slot, ok := server.preAuth.admit()
+	slot, ok := server.preAuth.admit(store.RateLimitListenerTailnet)
 	if !ok {
 		t.Fatal("second pre-auth slot unavailable")
 	}
@@ -257,7 +258,7 @@ func TestServeSocketLogsPreAuthLifetimeExpiryAsTimeout(t *testing.T) {
 			t.Errorf("close server socket: %v", err)
 		}
 	})
-	slot, ok := server.preAuth.admit()
+	slot, ok := server.preAuth.admit(store.RateLimitListenerTailnet)
 	if !ok {
 		t.Fatal("pre-auth slot unavailable")
 	}
@@ -596,7 +597,7 @@ func TestServeSocketSkipsTransportCloseLogForDiscoveryPreflight(t *testing.T) {
 	if err != nil {
 		t.Fatalf("accept: %v", err)
 	}
-	slot, ok := server.preAuth.admit()
+	slot, ok := server.preAuth.admit(store.RateLimitListenerTailnet)
 	if !ok {
 		t.Fatal("pre-auth slot unavailable")
 	}
