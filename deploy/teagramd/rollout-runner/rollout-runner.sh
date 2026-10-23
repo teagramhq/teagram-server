@@ -1292,7 +1292,7 @@ override_websocket_origins_value() {
 }
 
 validate_override_websocket_change() {
-  local previous_size previous_sha previous_value current_value
+  local previous_size previous_sha previous_value current_value override_mode
   local i old_line line changed=0 old_value new_value
   local -a previous_lines current_lines
   [ -n "$CHANGED_ENV" ] && [ "$CHANGED_ENV" = TG_WEBSOCKET_ALLOWED_ORIGINS ] && \
@@ -1305,8 +1305,14 @@ validate_override_websocket_change() {
     fail 'override value changes require the pre-change override as a root-owned mode-0600 regular file'
     return 1
   }
-  [ -f "$OVERRIDE_FILE" ] && [ ! -L "$OVERRIDE_FILE" ] || {
-    fail 'override value changes require a regular non-symlink override file'
+  [ -f "$OVERRIDE_FILE" ] && [ ! -L "$OVERRIDE_FILE" ] && \
+    [ "$(stat -c %u -- "$OVERRIDE_FILE")" = 0 ] || {
+    fail 'override value changes require a root-owned regular non-symlink override file'
+    return 1
+  }
+  override_mode=$(stat -c %a -- "$OVERRIDE_FILE") || { fail 'cannot read the Compose override mode'; return 1; }
+  [[ "$override_mode" =~ ^[0-7]{3,4}$ ]] && (( (8#$override_mode & 0022) == 0 )) || {
+    fail 'Compose override permissions must not allow group or world writes'
     return 1
   }
   previous_size=$(stat -c %s -- "$PREVIOUS_OVERRIDE_FILE") || { fail 'cannot size the previous Compose override'; return 1; }

@@ -2869,6 +2869,27 @@ write_verified_override_evidence() {
   chmod 600 "$dir"/*
 }
 
+prepare_websocket_origin_override_change_fixture() {
+  local name=$1 state checkout previous_override override_evidence_root
+  prepare_target_local_apply_fixture "$name" target-local-df9-rollback \
+    "$DF9_LOCAL_COMPOSE_TARGET_SHA" "$TARGET_LOCAL_COMPOSE_TARGET_SHA" || return 1
+  state=$(cat "$TMP/$name-state-path")
+  checkout=$(cat "$TMP/$name-checkout-path")
+  previous_override="$TMP/$name-previous.yml"
+  printf '%s\n' 'services:' '  teagramd:' '    environment:' \
+    '      TG_WEBSOCKET_ALLOWED_ORIGINS: https://teagram.tailaa4918.ts.net' \
+    > "$checkout/docker-compose.override.yml"
+  cp -p -- "$checkout/docker-compose.override.yml" "$previous_override"
+  sed -i 's#https://teagram.tailaa4918.ts.net#https://teagram.tailaa4918.ts.net,https://web.teagram.io#' \
+    "$checkout/docker-compose.override.yml"
+  chmod 600 "$checkout/docker-compose.override.yml" "$previous_override"
+  printf '%s\n' TG_WEBSOCKET_ALLOWED_ORIGINS > "$TMP/$name-changed-env"
+  printf '%s\n' "$previous_override" > "$TMP/$name-previous-override-path"
+  override_evidence_root="/root/main1238-${APPLY_TARGET_SHA:0:12}-$(cat "$TMP/$name-stamp")"
+  write_verified_override_evidence "$override_evidence_root.target" "$previous_override"
+  touch "$state/websocket-origin-override-change"
+}
+
 # The fixtures share /root, so a host with no verified .env at all is staged by
 # parking the evidence earlier fixtures left there. Only directories recorded by
 # this run's fixtures move, never other evidence on the host, so an interrupted
@@ -3154,24 +3175,25 @@ else
 fi
 
 park_verified_evidence
-prepare_target_local_apply_fixture websocket-origin-override-change-rollback \
-  target-local-df9-rollback "$DF9_LOCAL_COMPOSE_TARGET_SHA" "$TARGET_LOCAL_COMPOSE_TARGET_SHA"
+prepare_websocket_origin_override_change_fixture websocket-origin-override-group-writable
+checkout=$(cat "$TMP/websocket-origin-override-group-writable-checkout-path")
+chmod 622 "$checkout/docker-compose.override.yml"
+assert_target_local_rejected_before_backup websocket-origin-override-group-writable \
+  'Compose override permissions must not allow group or world writes'
+
+prepare_websocket_origin_override_change_fixture websocket-origin-override-non-root-owned
+checkout=$(cat "$TMP/websocket-origin-override-non-root-owned-checkout-path")
+chown 65534:65534 "$checkout/docker-compose.override.yml"
+assert_target_local_rejected_before_backup websocket-origin-override-non-root-owned \
+  'override value changes require a root-owned regular non-symlink override file'
+restore_verified_evidence
+
+park_verified_evidence
+prepare_websocket_origin_override_change_fixture websocket-origin-override-change-rollback
 state=$(cat "$TMP/websocket-origin-override-change-rollback-state-path")
 checkout=$(cat "$TMP/websocket-origin-override-change-rollback-checkout-path")
 root=$(cat "$TMP/websocket-origin-override-change-rollback-root-path")
 previous_override="$TMP/websocket-origin-override-change-rollback-previous.yml"
-printf '%s\n' 'services:' '  teagramd:' '    environment:' \
-  '      TG_WEBSOCKET_ALLOWED_ORIGINS: https://teagram.tailaa4918.ts.net' \
-  > "$checkout/docker-compose.override.yml"
-cp -p -- "$checkout/docker-compose.override.yml" "$previous_override"
-sed -i 's#https://teagram.tailaa4918.ts.net#https://teagram.tailaa4918.ts.net,https://web.teagram.io#' \
-  "$checkout/docker-compose.override.yml"
-chmod 600 "$checkout/docker-compose.override.yml" "$previous_override"
-printf '%s\n' TG_WEBSOCKET_ALLOWED_ORIGINS > "$TMP/websocket-origin-override-change-rollback-changed-env"
-printf '%s\n' "$previous_override" > "$TMP/websocket-origin-override-change-rollback-previous-override-path"
-override_evidence_root="/root/main1238-${APPLY_TARGET_SHA:0:12}-20991231T235959Z"
-write_verified_override_evidence "$override_evidence_root.target" "$previous_override"
-touch "$state/websocket-origin-override-change"
 status=$(run_fixture websocket-origin-override-change-rollback built 0 '' 2 '' '' apply "$APPLY_TARGET_SHA")
 if [ "$status" != 0 ] && grep -q "rollback=verified baseline_sha=$TARGET_LOCAL_COMPOSE_TARGET_SHA" \
      "$TMP/websocket-origin-override-change-rollback.stdout" && \
