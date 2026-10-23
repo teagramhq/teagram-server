@@ -916,6 +916,8 @@ async function observeWorkerWebSockets(browser, pageSession, handlers) {
 async function makeWssAudit(contextInfo, progress) {
   const connections = new Map();
   let accountSlotCount = null;
+  let logoutRpcStarted = false;
+  let logoutSocketClosures = 0;
   let activeConnectionsAtContextTeardown = null;
   let malformed = false;
   let handshakeCount = 0;
@@ -977,6 +979,10 @@ async function makeWssAudit(contextInfo, progress) {
         return;
       }
       connection.closed = true;
+      if (logoutRpcStarted && activeConnectionsAtContextTeardown === null) {
+        logoutSocketClosures += 1;
+        if (logoutSocketClosures > 1) malformed = true;
+      }
       if (!progress.observeWssClosed()) malformed = true;
     },
     unobservable() {
@@ -1073,12 +1079,21 @@ async function makeWssAudit(contextInfo, progress) {
       const entries = [...connections.values()];
       const activeConnections = activeConnectionsAtContextTeardown ??
         entries.filter((item) => !item.closed).length;
+      const expectedLogoutSocketLoss = Math.min(logoutSocketClosures, 1);
       if (malformed || orphanHandshake || workerUnobservable || pendingWorkers !== 0 || entries.length < 1 || entries.length > WSS_CONNECTION_CEILING ||
-          activeConnections < accountSlotCount || activeConnections > accountSlotCount + 1 ||
+          accountSlotCount === null || activeConnections < Math.max(0, accountSlotCount - expectedLogoutSocketLoss) ||
+          activeConnections > accountSlotCount + 1 ||
           handshakeCount > entries.length || entries.some((item) => !item.matches || item.responses > 1 ||
             (item.responses === 1 && item.status !== 101))) {
         fail("websocket-not-ready", undefined, diagnostic());
       }
+    },
+    beginLogout() {
+      if (logoutRpcStarted) {
+        malformed = true;
+        return;
+      }
+      logoutRpcStarted = true;
     },
     beginContextTeardown() {
       if (activeConnectionsAtContextTeardown !== null) {
@@ -1376,6 +1391,7 @@ async function clearInputWithKeyboard(page, locator) {
 
 async function logoutThroughApp(prepared, state) {
   let completed = false;
+  prepared.contextInfo.wssAudit?.beginLogout?.();
   try {
     completed = await prepared.contextInfo.page.evaluate(async () => {
       const proxy = window.apiManagerProxy;

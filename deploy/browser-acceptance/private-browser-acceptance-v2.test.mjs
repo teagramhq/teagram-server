@@ -209,6 +209,7 @@ function createAcceptancePage({
   signupTitleText = "YourName",
   stopAtUsernameFocus = false,
   completeSignIn = false,
+  onLogout = () => {},
 } = {}) {
   const apiMethods = [];
   let usernameFocused = false;
@@ -222,6 +223,7 @@ function createAcceptancePage({
           error.type = "SESSION_PASSWORD_NEEDED";
           throw error;
         }
+        if (payload.args?.[0] === "auth.logOut") queueMicrotask(onLogout);
         return null;
       },
     },
@@ -986,6 +988,41 @@ test("socket-close events during context teardown do not invalidate the logout W
   assert.deepEqual(browser.apiMethods, ["auth.sendCode", "auth.signIn", "auth.checkPassword", "auth.logOut"]);
 });
 
+test("one logout socket close before the teardown snapshot does not invalidate the WSS proof", async (t) => {
+  const fixture = createDependencies(undefined, true);
+  let wssFixture;
+  const browser = createAcceptancePage({
+    completeSignIn: true,
+    onLogout() {
+      fixture.events.push("logout-socket-close");
+      wssFixture.browserSession.workerMessage("observer-worker", {
+        method: "Network.webSocketClosed",
+        params: {requestId: "worker-socket-0", timestamp: 1},
+      });
+    },
+  });
+  await useRealAcceptanceFlow(fixture, browser);
+  fixture.dependencies.proveWss = async (contextInfo, _release, _manifest, progress, tracker) => {
+    wssFixture = await proveSharedWorkerWss(t, {
+      workerSockets: workerSockets(4),
+      contextInfo,
+      progress,
+      tracker,
+    });
+    return wssFixture.result;
+  };
+
+  const result = await executeMode({mode: "acceptance", releaseRecord: "fixture"}, fixture.dependencies);
+  const output = JSON.parse(result.output);
+
+  assert.equal(result.exitCode, 0, result.output);
+  assert.equal(output.ok, true);
+  assert.equal(output.logout, "ok");
+  assert.equal(output.wssConnections, 4);
+  assert.ok(fixture.events.indexOf("logout-socket-close") < fixture.events.indexOf("close-context"));
+  assert.deepEqual(browser.apiMethods, ["auth.sendCode", "auth.signIn", "auth.checkPassword", "auth.logOut"]);
+});
+
 test("chat-list check ignores hidden list variants and scopes its row count", async () => {
   const fixture = createDependencies(undefined, true);
   const browser = createAcceptancePage({
@@ -1357,6 +1394,31 @@ test("one logout reconnect after the four account-slot sockets is accepted", asy
   assert.equal(output.wssConnections, 5);
   assert.equal(output.ok, true);
   assert.doesNotThrow(() => wssAudit.validateAfterLogout());
+});
+
+test("logout WSS validation retains the one-extra-active-socket limit", async (t) => {
+  const {browserSession, progress, wssAudit} = await proveSharedWorkerWss(t, {
+    workerSockets: workerSockets(4),
+  });
+  for (const event of ["req-dh-params", "set-client-dh", "init-connection", "password-challenge", "password-check"]) {
+    assert.equal(progress.observeClientEvent(event), true);
+  }
+  assert.equal(progress.markSignedIn(), true);
+  wssAudit.beginLogout();
+
+  for (let index = 0; index < 2; index += 1) {
+    browserSession.workerMessage("observer-worker", {
+      method: "Network.webSocketCreated",
+      params: {requestId: `worker-socket-logout-${index}`, url: `wss://${targetHost}/apiws`},
+    });
+    browserSession.workerMessage("observer-worker", {
+      method: "Network.webSocketHandshakeResponseReceived",
+      params: {requestId: `worker-socket-logout-${index}`, response: {status: 101}},
+    });
+  }
+  wssAudit.beginContextTeardown();
+
+  assert.throws(() => wssAudit.validateAfterLogout(), {code: "websocket-not-ready"});
 });
 
 test("a post-sign-in reconnect replaces a closed account-slot socket", async (t) => {
