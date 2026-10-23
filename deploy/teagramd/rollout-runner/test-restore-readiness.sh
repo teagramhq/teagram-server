@@ -267,6 +267,7 @@ if not (report.get("result") == "pass" and report.get("input_mode") == "local" a
   fi
   printf '%s\n' "$local_report"
   if [[ $local_mode == "local-fixture-test" ]]; then
+    build_inputs
     preflight_stage="run local auth-key signal fault drill"
     if auth_clear_signal_report=$(run_drill --local-fixture-test --fault-test auth-clear-signal); then
       emit_preflight_failure
@@ -280,6 +281,7 @@ if not (report.get("result") == "fail" and report.get("phase") == "auth_key_clea
       emit_preflight_failure
     fi
     printf '%s\n' "$auth_clear_signal_report"
+    build_inputs
     run_sigkill_recovery_drill --local-fixture-test --fault-test sigkill
   fi
   exit 0
