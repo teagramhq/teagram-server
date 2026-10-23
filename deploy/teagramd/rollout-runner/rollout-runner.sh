@@ -2302,11 +2302,14 @@ run_apply() {
     capture_snapshot "$baseline_id" "$BASELINE_DIR" baseline || return 1
   fi
   validate_baseline "$BASELINE_DIR/baseline.snapshot.json" || return 1
-  validate_env_baseline || return 1
   if [ "$INITIALIZE_LOCAL" = 1 ]; then
+    validate_env_baseline || return 1
     capture_snapshot "$baseline_id" "$BASELINE_DIR" initial-local-target-render || return 1
   fi
   preflight_target_local_blob_authority || return 1
+  if [ "$INITIALIZE_LOCAL" != 1 ]; then
+    validate_env_baseline || return 1
+  fi
   capture_backup_and_restore || return 1
 
   git -C "$CHECKOUT" fetch -q origin || { fail 'cannot recheck origin/main before fast-forward'; return 1; }

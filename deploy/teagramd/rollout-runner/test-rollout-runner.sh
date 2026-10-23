@@ -411,7 +411,7 @@ if [ "${1:-}" = inspect ]; then
     if [ "${MOCK_SCENARIO:-}" = target-local-df9-rollback ] && \
        [ -f "$MOCK_STATE/websocket-origin-override-change" ]; then
       case "$id" in
-        "$MOCK_BASE_ID"|"$MOCK_ROLLBACK_ID") origin_value='https://teagram.tailaa4918.ts.net' ;;
+        "$MOCK_BASE_ID"|"$MOCK_TARGET_ID"|"$MOCK_ROLLBACK_ID") origin_value='https://teagram.tailaa4918.ts.net' ;;
         "$MOCK_REPLACEMENT_ID") origin_value='https://teagram.tailaa4918.ts.net,https://web.teagram.io' ;;
         *) exit 94 ;;
       esac
