@@ -13,6 +13,7 @@ import (
 	"net/netip"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -440,6 +441,254 @@ func TestConnectionFailureLogsUseSampledSafeCategories(t *testing.T) {
 	}
 	if got := sink.records[len(sink.records)-1].attrs["suppressed"]; got != int64(1) {
 		t.Fatalf("key persistence suppressed count = %v, want 1", got)
+	}
+}
+
+func TestTransportCloseLogReportsLastKeyExchangeStepWithoutSensitiveFields(t *testing.T) {
+	rsaKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatalf("generate RSA key: %v", err)
+	}
+	sink := &serverErrorLogSink{}
+	server := New(exchange.PrivateKey{RSA: rsaKey}, 2, NewMemoryAuthKeyStore(), nil, slog.New(sink))
+	conn := &exchangeScriptConn{recv: [][]byte{exchangeRequestFrame(t)}}
+
+	if err := server.serveConn(context.Background(), conn, netip.Addr{}, nil); err == nil {
+		t.Fatal("serveConn returned nil after the client closed during key exchange")
+	}
+
+	var closeRecords []serverErrorLogRecord
+	for _, record := range sink.records {
+		if record.message == "transport connection closed" {
+			closeRecords = append(closeRecords, record)
+		}
+	}
+	if len(closeRecords) != 1 {
+		t.Fatalf("transport close records = %d, want one; all records: %+v", len(closeRecords), sink.records)
+	}
+	record := closeRecords[0]
+	if record.attrs["transport"] != "TCP" || record.attrs["step"] != "resPQ sent" || record.attrs["reason"] != "client close" {
+		t.Fatalf("transport close record = %+v, want TCP/resPQ sent/client close", record)
+	}
+	if got := record.attrs["suppressed"]; got != int64(0) {
+		t.Errorf("suppressed close records = %v, want 0", got)
+	}
+	for key := range record.attrs {
+		if key != "transport" && key != "step" && key != "reason" && key != "suppressed" {
+			t.Errorf("transport close record contains unexpected attribute %q: %+v", key, record.attrs)
+		}
+	}
+}
+
+type transportCloseDrainTestConn struct {
+	frame      []byte
+	reads      int
+	secondRead chan struct{}
+	closed     chan struct{}
+	closeOnce  sync.Once
+}
+
+func (c *transportCloseDrainTestConn) Recv(ctx context.Context, b *bin.Buffer) error {
+	c.reads++
+	if c.reads == 1 {
+		b.ResetTo(c.frame)
+		return nil
+	}
+	if c.reads == 2 {
+		close(c.secondRead)
+	}
+	select {
+	case <-c.closed:
+		return net.ErrClosed
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+func (*transportCloseDrainTestConn) Send(context.Context, *bin.Buffer) error { return nil }
+
+func (c *transportCloseDrainTestConn) Close() error {
+	c.closeOnce.Do(func() { close(c.closed) })
+	return nil
+}
+
+func TestServeConnDrainLogsAuthorizedServerCloseAtDebug(t *testing.T) {
+	sink := &serverErrorLogSink{}
+	key := shutdownTestAuthKey()
+	keys := &shutdownLookupAuthKeyStore{
+		key:     key,
+		blocked: make(chan struct{}),
+		release: make(chan struct{}),
+	}
+	server := New(exchange.PrivateKey{}, 2, keys, nil, slog.New(sink))
+	server.shutdown.drainTimeout = 2 * time.Second
+	server.shutdown.retirementWindow = 0
+	server.shutdown.retirementSlots = 1
+	server.shutdown.startServing()
+	conn := &transportCloseDrainTestConn{
+		frame:      shutdownClientFrame(t, key, 42, 1<<32, &mt.PingRequest{PingID: 1}),
+		secondRead: make(chan struct{}),
+		closed:     make(chan struct{}),
+	}
+	done := make(chan error, 1)
+	go func() {
+		done <- server.serveConnMode(
+			server.shutdown.requestCtx,
+			server.shutdown.requestCtx,
+			conn,
+			netip.Addr{},
+			nil,
+			nil,
+			false,
+			transportTCP,
+			server.handler,
+		)
+	}()
+	finished := false
+	t.Cleanup(func() {
+		server.shutdown.beginDrain()
+		if !finished {
+			select {
+			case err := <-done:
+				if err != nil {
+					t.Errorf("serve connection during cleanup: %v", err)
+				}
+			case <-time.After(3 * time.Second):
+				t.Error("serve connection did not stop during cleanup")
+			}
+		}
+		stopShutdownTimers(server.shutdown)
+		server.shutdown.finishServing()
+	})
+	select {
+	case <-conn.secondRead:
+	case <-time.After(3 * time.Second):
+		t.Fatal("authorized connection did not start its idle read")
+	}
+	server.shutdown.beginDrain()
+	select {
+	case err := <-done:
+		finished = true
+		if err != nil {
+			t.Fatalf("serve connection during drain: %v", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("serve connection did not finish draining")
+	}
+
+	var closeRecords []serverErrorLogRecord
+	for _, record := range sink.records {
+		if record.message == "transport connection closed" {
+			closeRecords = append(closeRecords, record)
+		}
+	}
+	if len(closeRecords) != 1 {
+		t.Fatalf("transport close records = %d, want one; all records: %+v", len(closeRecords), sink.records)
+	}
+	if got := closeRecords[0].attrs["reason"]; got != "server close" {
+		t.Errorf("drain close reason = %v, want server close", got)
+	}
+	if got := closeRecords[0].attrs["step"]; got != "authorized" {
+		t.Errorf("drain close step = %v, want authorized", got)
+	}
+	if got := closeRecords[0].level; got != slog.LevelDebug {
+		t.Errorf("drain close level = %v, want DEBUG", got)
+	}
+}
+
+func TestServeConnThrottlesAuthorizedDecryptFailures(t *testing.T) {
+	sink := &serverErrorLogSink{}
+	key := shutdownTestAuthKey()
+	keys := &authorizationRebindKeyStore{key: key, users: []int64{7}, owner: 7}
+	server := New(exchange.PrivateKey{}, 2, keys, nil, slog.New(sink))
+	const connections = 8
+
+	closeWithUndecryptableFrame := func(msgID int64) error {
+		validFrame := shutdownClientFrame(t, key, 42, msgID, &mt.PingRequest{PingID: msgID})
+		invalidFrame := shutdownClientFrame(t, key, 42, msgID+1, &mt.PingRequest{PingID: msgID + 1})
+		invalidFrame[8] ^= 0xff
+		return server.serveConn(context.Background(), &exchangeScriptConn{recv: [][]byte{validFrame, invalidFrame}}, netip.Addr{}, nil)
+	}
+
+	for i := range connections {
+		msgID := int64(2*i+1) << 32
+		err := closeWithUndecryptableFrame(msgID)
+		if err == nil || !strings.Contains(err.Error(), "decrypt message") {
+			t.Fatalf("authorized connection error = %v, want an undecryptable-frame error", err)
+		}
+	}
+
+	var closeRecords []serverErrorLogRecord
+	for _, record := range sink.records {
+		if record.message == "transport connection closed" {
+			closeRecords = append(closeRecords, record)
+		}
+	}
+	if len(closeRecords) != 1 {
+		t.Fatalf("transport close records = %d, want one after %d authorized decrypt failures: %+v", len(closeRecords), connections, sink.records)
+	}
+	if got := closeRecords[0].level; got != slog.LevelInfo {
+		t.Errorf("authorized error close level = %v, want INFO", got)
+	}
+	if got := closeRecords[0].attrs["step"]; got != "authorized" {
+		t.Errorf("authorized error close step = %v, want authorized", got)
+	}
+	if got := closeRecords[0].attrs["reason"]; got != "server error" {
+		t.Errorf("authorized error close reason = %v, want server error", got)
+	}
+	if got := closeRecords[0].attrs["suppressed"]; got != int64(0) {
+		t.Errorf("first suppressed close count = %v, want 0", got)
+	}
+
+	server.authorizedCloseLog.last.Store(time.Now().Add(-preAuthLogInterval).UnixNano())
+	if err := closeWithUndecryptableFrame(int64(2*connections+1) << 32); err == nil {
+		t.Fatal("authorized connection returned nil after an undecryptable frame")
+	}
+	closeRecords = closeRecords[:0]
+	for _, record := range sink.records {
+		if record.message == "transport connection closed" {
+			closeRecords = append(closeRecords, record)
+		}
+	}
+	if len(closeRecords) != 2 {
+		t.Fatalf("transport close records after sample interval = %d, want two: %+v", len(closeRecords), sink.records)
+	}
+	if got := closeRecords[1].attrs["suppressed"]; got != int64(connections-1) {
+		t.Errorf("authorized close suppressed count = %v, want %d", got, connections-1)
+	}
+}
+
+func TestTransportCloseReasonClassifiesClientCloseTimeoutAndServerError(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		err  error
+		want transportCloseReason
+	}{
+		{name: "peer EOF", err: io.EOF, want: transportCloseReasonClientClose},
+		{name: "truncated peer frame", err: io.ErrUnexpectedEOF, want: transportCloseReasonClientClose},
+		{name: "server-initiated close", err: nil, want: transportCloseReasonServerClose},
+		{name: "timeout", err: context.DeadlineExceeded, want: transportCloseReasonTimeout},
+		{name: "server failure", err: errors.New("write failed"), want: transportCloseReasonServerError},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if got := classifyTransportCloseReason(test.err); got != test.want {
+				t.Fatalf("close reason = %q, want %q", got, test.want)
+			}
+		})
+	}
+}
+
+func TestTransportCloseDiagnosticsTracksLatestHandshakeProgress(t *testing.T) {
+	diagnostics := newTransportCloseDiagnostics("/apiws")
+	diagnostics.observeRequest(mt.ReqPqMultiRequestTypeID)
+	diagnostics.observeResponse(mt.ResPQTypeID)
+	diagnostics.observeRequest(mt.ReqDHParamsRequestTypeID)
+	diagnostics.markDHComplete()
+	diagnostics.markAuthorized()
+	diagnostics.observeRequest(mt.ReqPqMultiRequestTypeID)
+
+	if diagnostics.transport != "/apiws" || diagnostics.step != transportCloseStepReqPQReceived {
+		t.Fatalf("diagnostics after a new exchange = %+v, want /apiws/req_pq received", diagnostics)
 	}
 }
 

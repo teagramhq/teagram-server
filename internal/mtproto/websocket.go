@@ -98,13 +98,29 @@ type webSocketAcceptedConn struct {
 	preAuthClosing bool
 	addr           netip.Addr
 	deadline       time.Time
+	// lifecycleCloseCauseSet distinguishes an explicit nil server-close cause
+	// from a socket closed by the peer.
+	lifecycleCloseCause    error
+	lifecycleCloseCauseSet bool
 }
 
 func (c *webSocketAcceptedConn) Close() error {
+	return c.close(false, nil)
+}
+
+func (c *webSocketAcceptedConn) closeWithLifecycleCause(cause error) error {
+	return c.close(true, cause)
+}
+
+func (c *webSocketAcceptedConn) close(setLifecycleCause bool, cause error) error {
 	c.state.Lock()
 	if c.closed {
 		c.state.Unlock()
 		return nil
+	}
+	if setLifecycleCause {
+		c.lifecycleCloseCause = cause
+		c.lifecycleCloseCauseSet = true
 	}
 	c.closed = true
 	c.state.Unlock()
@@ -114,6 +130,12 @@ func (c *webSocketAcceptedConn) Close() error {
 		c.listener.untrack(c)
 	}
 	return err
+}
+
+func (c *webSocketAcceptedConn) lifecycleCloseCauseValue() (error, bool) {
+	c.state.Lock()
+	defer c.state.Unlock()
+	return c.lifecycleCloseCause, c.lifecycleCloseCauseSet
 }
 
 func (c *webSocketAcceptedConn) markServing() bool {
@@ -265,7 +287,7 @@ func (l *webSocketListener) armLifetime(accepted *webSocketAcceptedConn) {
 		accepted.preAuthClosing = true
 		l.pendingMu.Unlock()
 
-		if err := accepted.Close(); err != nil && !isDisconnect(err) {
+		if err := accepted.closeWithLifecycleCause(context.DeadlineExceeded); err != nil && !isDisconnect(err) {
 			l.server.log.Info("close WebSocket connection at the pre-auth ceiling", "err", err)
 		}
 		if dropped, ok := l.server.ceilingLog.allow(time.Now(), preAuthLogInterval); ok {
@@ -397,7 +419,9 @@ func (l *webSocketListener) Close() error {
 		}
 		l.pendingMu.Unlock()
 		for _, accepted := range pending {
-			l.closeAccepted(accepted)
+			if err := accepted.closeWithLifecycleCause(nil); err != nil && !isDisconnect(err) {
+				l.server.log.Info("close WebSocket connection", "err", err)
+			}
 		}
 	})
 	return closeErr
@@ -413,7 +437,9 @@ func (l *webSocketListener) forceClose() {
 	}
 	l.pendingMu.Unlock()
 	for _, accepted := range all {
-		l.closeAccepted(accepted)
+		if err := accepted.closeWithLifecycleCause(nil); err != nil && !isDisconnect(err) {
+			l.server.log.Info("close WebSocket connection", "err", err)
+		}
 	}
 }
 
@@ -612,6 +638,14 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request, handler
 		s.logNegotiation(err)
 		return
 	}
+	closeDiagnostics := newTransportCloseDiagnostics(websocketPath)
+	var closeErr error
+	defer func() {
+		if cause, set := state.socket.lifecycleCloseCauseValue(); set {
+			closeErr = cause
+		}
+		s.logTransportClose(closeDiagnostics, closeErr)
+	}()
 	defer func() {
 		if err := ws.CloseNow(); err != nil && !isDisconnect(err) {
 			s.log.Info("close WebSocket connection", "err", err)
@@ -626,6 +660,7 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request, handler
 	// detection; serveConn replaces it with the normal per-frame deadlines after
 	// detection succeeds.
 	if err := state.socket.SetDeadline(state.deadline); err != nil {
+		closeErr = err
 		s.logNegotiation(errors.Join(errors.New("set WebSocket negotiation deadline"), err))
 		return
 	}
@@ -648,18 +683,21 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request, handler
 		<-hardCutoffDone
 	}
 	if err != nil {
+		closeErr = err
 		s.logNegotiation(err)
 		return
 	}
 	if err := state.socket.SetDeadline(time.Time{}); err != nil {
+		closeErr = err
 		s.logNegotiation(errors.Join(errors.New("clear WebSocket negotiation deadline"), err))
 		return
 	}
 	drainingConn := webSocketDrainConn{Conn: conn, socket: ws, shutdown: s.shutdown, readDeadline: stream}
-	if err := s.serveConnWithHandlerContexts(s.shutdown.requestCtx, s.shutdown.requestCtx, drainingConn, state.addr, state.slot, func() bool {
+	closeErr = s.serveConnWithHandlerContextsAndTransportDiagnostics(s.shutdown.requestCtx, s.shutdown.requestCtx, drainingConn, state.addr, state.slot, func() bool {
 		return state.socket.markServing()
-	}, handler); err != nil && !isDisconnect(err) {
-		s.logConnectionFailure(err)
+	}, websocketPath, handler, closeDiagnostics)
+	if closeErr != nil && !isDisconnect(closeErr) {
+		s.logConnectionFailure(closeErr)
 	}
 }
 
