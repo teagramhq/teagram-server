@@ -784,6 +784,10 @@ write_compose_fixture() {
         enable_ipv6:false
       }
       | .services.teagramd.networks.rustfs_private=null
+      | .services.rustfs={networks:{rustfs_private:null}}
+      | .services["rustfs-init"]={networks:{rustfs_private:null}}
+      | .services["blob-migrate"]={networks:{rustfs_private:null}}
+      | .services["blob-restore"]={networks:{rustfs_private:null}}
     ' "$base_config" > "$target_config"
     if [ "$scenario" = rustfs-isolation-network-drift ]; then
       jq -c '.networks.rustfs_private.internal=false' "$target_config" > "${target_config%.json}.drift.json"
@@ -3907,11 +3911,13 @@ fi
 make_fixture rustfs-isolation-network-drift rustfs-isolation-network-drift
 status=$(run_fixture rustfs-isolation-network-drift)
 root=$(cat "$TMP/rustfs-isolation-network-drift-root-path")
+state=$(cat "$TMP/rustfs-isolation-network-drift-state-path")
 if [ "$status" != 0 ] && \
-   grep -q $'preflight\tconfig_sha256\t.*\tpass' "$root.target/preflight-comparisons.tsv" && \
-   grep -q $'preflight\tcompose_network_topology\tdefault-only:.*\tother:.*\tfail' "$root.target/preflight-comparisons.tsv" && \
-   ! grep -q '^docker compose up -d$' "$TMP/rustfs-isolation-network-drift-events"; then
-  pass 'network drift outside the exact RustFS isolation policy still rejects before service replacement'
+   grep -q 'blob authority rejected: initial-render-network' "$TMP/rustfs-isolation-network-drift.stderr" && \
+   [ "$(cat "$state/phase")" = baseline ] && \
+   ! grep -q '^docker compose exec -T postgres pg_dump' "$TMP/rustfs-isolation-network-drift-events" && \
+   ! grep -Eq '^docker compose (build|up)( |$)' "$TMP/rustfs-isolation-network-drift-events"; then
+  pass 'unapproved RustFS network drift is rejected by initial-local preflight before backup or service replacement'
 else
   show_fixture_failure rustfs-isolation-network-drift "$status"
   fail 'unapproved network drift must remain blocked by preflight'
