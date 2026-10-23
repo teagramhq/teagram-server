@@ -39,6 +39,10 @@ case "$1" in
     for ((line = 1; line <= 5002; line++)); do
       printf 'line-%s\n' "$line"
     done
+    if [[ "${FIXTURE_LOGS_FAILURE:-}" == 1 ]]; then
+      printf 'fixture log error\n' >&2
+      exit 23
+    fi
     ;;
   *)
     printf 'unexpected docker call: %s\n' "$*" >&2
@@ -68,6 +72,14 @@ if grep -Fq 'telegram-server-telegramd-1' "$DOCKER_CALLS"; then
   echo 'FAIL log command used the retired fixed container name' >&2
   exit 1
 fi
+
+: > "$DOCKER_CALLS"
+status=0
+failed_output=$(FIXTURE_LOGS_FAILURE=1 SSH_ORIGINAL_COMMAND=2026-10-23T03:40:00Z "$script") || status=$?
+[[ "$status" == 23 ]]
+[[ "$(printf '%s\n' "$failed_output" | wc -l | tr -d ' ')" == 5000 ]]
+[[ "$failed_output" != *line-1$'\n'* ]]
+[[ "$failed_output" == *line-5002$'\n'fixture\ log\ error ]]
 
 : > "$DOCKER_CALLS"
 status=0

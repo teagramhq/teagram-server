@@ -88,9 +88,9 @@ install_teagram_logs_command() {
     rm -f "$temp"
     return 1
   fi
-  if ! sh -n "$temp"; then
+  if ! bash -n "$temp"; then
     rm -f "$temp"
-    printf 'teagram-logs script from %s failed sh -n\n' "$sha" >&2
+    printf 'teagram-logs script from %s failed bash -n\n' "$sha" >&2
     return 1
   fi
   if ! chmod 0755 "$temp"; then

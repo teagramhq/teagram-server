@@ -900,7 +900,7 @@ jobs:
       - name: Check deploy script syntax
         run: |
           bash -n deploy/teagram/deploy-main.sh
-          sh -n deploy/teagram/teagram-logs.sh
+          bash -n deploy/teagram/teagram-logs.sh
           bash -n deploy/teagram/test-teagram-logs.sh
           bash -n deploy/telegram-server/deploy-main.sh
           bash -n deploy/teagram-demo/prepare-env.sh

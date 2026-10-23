@@ -1,7 +1,7 @@
-#!/bin/sh
+#!/bin/bash
 # Read-only teagramd log access (forced command of the teagram-qa-logs key).
 # The client sends one UTC timestamp; this prints at most the last 5000 lines.
-set -eu
+set -euo pipefail
 T=${SSH_ORIGINAL_COMMAND:-}
 case "$T" in
   [0-9][0-9][0-9][0-9]-[0-1][0-9]-[0-3][0-9]T[0-2][0-9]:[0-5][0-9]:[0-5][0-9]Z) ;;
