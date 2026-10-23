@@ -6329,7 +6329,13 @@ def run_primary(args: argparse.Namespace) -> int:
             expected_auth_keys=AUTH_KEY_FIXTURE_COUNT,
         )
         if args.local_fixture_test:
-            drill.migrate_database("source", source, LOCAL_FIXTURE_SCHEMA, "source_migrations")
+            drill.migrate_database(
+                "source",
+                source,
+                LOCAL_FIXTURE_SCHEMA,
+                "source_migrations",
+                keep_env=True,
+            )
             expected_users, expected_auth_keys = source_fixture_counts(False)
             drill.verify_schema_state(
                 source,

@@ -268,6 +268,28 @@ class RestoreReadinessContractTests(unittest.TestCase):
         self.assertLess(count_calls[0][0], fixture_call_line)
         self.assertGreater(count_calls[1][0], fixture_call_line)
 
+    def test_local_fixture_retains_atlas_environment_for_pending_migration(self) -> None:
+        tree = ast.parse(SCRIPT.read_text(encoding="utf-8"))
+        run_primary = next(
+            node
+            for node in ast.walk(tree)
+            if isinstance(node, ast.FunctionDef) and node.name == "run_primary"
+        )
+        fixture_migration = next(
+            node
+            for node in ast.walk(run_primary)
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr == "migrate_database"
+            and len(node.args) >= 3
+            and isinstance(node.args[2], ast.Name)
+            and node.args[2].id == "LOCAL_FIXTURE_SCHEMA"
+        )
+        self.assertIn(
+            "keep_env=True",
+            [f"{keyword.arg}={ast.unparse(keyword.value)}" for keyword in fixture_migration.keywords],
+        )
+
     def test_postgres_restore_role_is_not_the_pg18_bootstrap_superuser(self) -> None:
         role = RESTORE_READINESS.RESTORE_BOOTSTRAP_ROLE
         self.assertNotEqual(role, "postgres")
