@@ -107,7 +107,11 @@ func TestProbeRejectsTCPListenerThatStallsBeforeAuthKeyExchange(t *testing.T) {
 		if err != nil {
 			return
 		}
-		defer func() { _ = conn.Close() }() //nolint:errcheck // test cleanup
+		defer func() {
+			if err := conn.Close(); err != nil {
+				t.Errorf("close stalled MTProto connection: %v", err)
+			}
+		}()
 		close(accepted)
 		<-ctx.Done()
 	}()
