@@ -78,20 +78,36 @@ than increasing the host allocation. The demo LXC never builds the server
 image.
 Successful main CI publishes `ghcr.io/teagramhq/teagram-server-demo` from a
 hosted runner, tagged with the tested commit SHA. The package must be public so
-the isolated LXC can pull it without registry credentials.
+the isolated LXC can pull it without registry credentials. The SHA tag is only
+for registry organization: deploys use the image digest recorded as an artifact
+on the successful main CI run, never a tag lookup.
 
 ## First install
 
 Do not begin until the Dev deploy for the selected `main` commit succeeds and
-that commit's `client-config` includes the approved WebSocket endpoint. Run as
-root on the demo LXC:
+that commit's `client-config` includes the approved WebSocket endpoint.
+
+On a trusted workstation, download the digest artifact from that commit's
+successful CI push run and copy its value for the host command below:
+
+```sh
+gh run download "$CI_RUN_ID" -R teagramhq/teagram-server \
+  --name "demo-image-digest-$MAIN_SHA" --dir ./demo-image
+cat ./demo-image/demo-image-digest.txt
+```
+
+Run as root on the demo LXC, passing that value as `IMAGE_DIGEST`:
 
 ```sh
 cd /opt/teagram-demo
 # Only on a new host with no prepared .env or Turnstile secret:
 deploy/teagram-demo/prepare-env.sh
 install -d -o 65532 -g 65532 -m 0700 /srv/teagram-demo-blobs/data
-deploy/teagram-demo/init-demo.sh
+# Copy the sha256 digest from the demo-image-digest-<main-SHA> artifact of that
+# commit's successful CI push run, then enter it here:
+read -r -p 'Trusted CI image digest: ' IMAGE_DIGEST
+deploy/teagram-demo/init-demo.sh "$IMAGE_DIGEST"
+unset IMAGE_DIGEST
 ```
 
 The prepared charlie host already has both root-only secret files, so do not
@@ -109,9 +125,10 @@ file.
 
 `init-demo.sh` validates that the blob path is on the dedicated size-limited
 filesystem, that the volumes and blob directory are fresh, and that Compose
-renders the exposure and storage contract. It pulls the selected main SHA's
-image, verifies its OCI revision label, resolves the repository digest, and
-stores that digest with the selected server slot in a root-only release file.
+renders the exposure and storage contract. It pulls only the digest supplied
+from the selected main CI run, verifies the OCI revision label and pulled
+repository digest, and stores that digest with the selected server slot in a
+root-only release file.
 Compose uses that immutable digest for the API seed, server and maintenance
 containers. It creates the RSA identity once,
 generates the discovery document, runs migrations, and uses the existing
@@ -149,11 +166,13 @@ The key's `authorized_keys` entry must have no shell, forwarding or PTY access:
 command="/opt/teagram-demo/deploy/teagram-demo/forced-command.sh",restrict ssh-ed25519 <public-key> teagram-demo-deploy
 ```
 
-`forced-command.sh` accepts one full commit SHA, fetches `origin/main`, rejects
-non-main revisions and skips stale deploys. The image for that exact SHA is
-published only after the complete main CI gate passes. `deploy-main.sh` pulls
-the SHA tag, checks its revision label, and switches to the resolved repository
-digest before touching the database. It revalidates the blob authority and
+`forced-command.sh` accepts one full commit SHA and its trusted CI image digest,
+fetches `origin/main`, rejects non-main revisions and skips stale deploys. The
+`Deploy.` workflow downloads the digest artifact from the successful push-on-main
+CI run for that exact SHA and sends both values. A PR workflow cannot influence
+the digest by overwriting the package's SHA tag. `deploy-main.sh` pulls only the
+supplied digest and checks both its repository digest and revision label before
+touching the database. It revalidates the blob authority and
 running containers, then takes and validates a root-only PostgreSQL dump while
 the existing server and public edge keep running. It applies migrations while
 the old server remains live, starts the candidate in the inactive slot,

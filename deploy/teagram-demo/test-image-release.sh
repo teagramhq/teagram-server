@@ -15,11 +15,11 @@ MOCK_REVISION="$SHA"
 MOCK_REPO_DIGESTS="[\"$DEMO_IMAGE_REPOSITORY@$DIGEST\"]"
 
 docker() {
-  case "$1 $2" in
-    'pull ghcr.io/teagramhq/teagram-server-demo:sha-'*)
+  case "$1" in
+    pull)
       printf '%s\n' "$2" >> "$PULLS"
       ;;
-    'image inspect')
+    image)
       case "$4" in
         *org.opencontainers.image.revision*) printf '%s\n' "$MOCK_REVISION" ;;
         *RepoDigests*) printf '%s\n' "$MOCK_REPO_DIGESTS" ;;
@@ -33,9 +33,21 @@ docker() {
   esac
 }
 
-image_ref=$(demo_pull_image_by_sha "$SHA" 2>"$TMP_DIR/pull.log")
+image_ref=$(demo_pull_image_by_sha "$SHA" "$DIGEST" 2>"$TMP_DIR/pull.log")
 [[ "$image_ref" == "$DEMO_IMAGE_REPOSITORY@$DIGEST" ]]
-[[ "$(cat "$PULLS")" == "$DEMO_IMAGE_REPOSITORY:sha-$SHA" ]]
+
+MOCK_REPO_DIGESTS="[\"$DEMO_IMAGE_REPOSITORY@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"]"
+if demo_pull_image_by_sha "$SHA" "$DIGEST" 2>/dev/null; then
+  printf '%s\n' 'image pull accepted a digest different from the trusted CI digest' >&2
+  exit 1
+fi
+MOCK_REPO_DIGESTS="[\"$DEMO_IMAGE_REPOSITORY@$DIGEST\"]"
+[[ "$(head -n 1 "$PULLS")" == "$DEMO_IMAGE_REPOSITORY@$DIGEST" ]]
+
+if demo_pull_image_by_sha "$SHA" sha256:short 2>/dev/null; then
+  printf '%s\n' 'image pull accepted a malformed trusted CI digest' >&2
+  exit 1
+fi
 
 DEMO_STATE_DIR="$TMP_DIR/state"
 DEMO_ACTIVE_RELEASE_FILE="$DEMO_STATE_DIR/active-release.json"
@@ -68,20 +80,20 @@ if demo_write_active_release teagramd "$DEMO_IMAGE_REPOSITORY:latest" 2>/dev/nul
 fi
 [[ "$(demo_active_server)" == teagramd-next ]]
 
-if demo_pull_image_by_sha short 2>/dev/null; then
+if demo_pull_image_by_sha short "$DIGEST" 2>/dev/null; then
   printf '%s\n' 'image pull accepted a non-full commit SHA' >&2
   exit 1
 fi
 
 MOCK_REVISION=$(printf '%040d' 7)
-if demo_pull_image_by_sha "$SHA" 2>/dev/null; then
+if demo_pull_image_by_sha "$SHA" "$DIGEST" 2>/dev/null; then
   printf '%s\n' 'image pull accepted a revision label for a different commit' >&2
   exit 1
 fi
 MOCK_REVISION="$SHA"
 
 MOCK_REPO_DIGESTS="[\"$DEMO_IMAGE_REPOSITORY@$DIGEST\",\"$DEMO_IMAGE_REPOSITORY@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"]"
-if demo_pull_image_by_sha "$SHA" 2>/dev/null; then
+if demo_pull_image_by_sha "$SHA" "$DIGEST" 2>/dev/null; then
   printf '%s\n' 'image pull accepted ambiguous repository digests' >&2
   exit 1
 fi

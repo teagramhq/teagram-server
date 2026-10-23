@@ -37,6 +37,7 @@ jobs:
     environment: production
     outputs:
       sha: ${{ steps.target.outputs.sha }}
+      ci_run_id: ${{ steps.target.outputs.ci_run_id }}
     permissions:
       contents: read
       actions: read
@@ -48,28 +49,38 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           RUN_HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+          RUN_ID: ${{ github.event.workflow_run.id }}
         run: |
           sha="$RUN_HEAD_SHA"
-          latest=$(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/ci.yml/runs?branch=main&event=push&status=success&per_page=1" --jq '.workflow_runs[0].head_sha')
-          if [[ ! "$latest" =~ ^[0-9a-f]{40}$ ]]; then
-            echo "::error::no tested commit SHA to deploy (got '$latest')"
+          ci_run_id="$RUN_ID"
+          latest=$(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/ci.yml/runs?branch=main&event=push&status=success&per_page=1" --jq '.workflow_runs[0] | [.head_sha, (.id | tostring)] | @tsv')
+          IFS=$'\t' read -r latest_sha latest_run_id <<< "$latest"
+          if [[ ! "$latest_sha" =~ ^[0-9a-f]{40}$ || ! "$latest_run_id" =~ ^[0-9]+$ ]]; then
+            echo "::error::no tested commit run to deploy (got '$latest')"
             exit 1
           fi
           if [[ "$GITHUB_EVENT_NAME" == workflow_dispatch ]]; then
-            sha="$latest"
+            sha="$latest_sha"
+            ci_run_id="$latest_run_id"
           fi
           if [[ ! "$sha" =~ ^[0-9a-f]{40}$ ]]; then
             echo "::error::no tested commit SHA to deploy (got '$sha')"
             exit 1
           fi
           if [[ "$GITHUB_EVENT_NAME" == workflow_run ]]; then
-            comparison=$(gh api "repos/$GITHUB_REPOSITORY/compare/$sha...$latest" --jq '.status')
+            comparison=$(gh api "repos/$GITHUB_REPOSITORY/compare/$sha...$latest_sha" --jq '.status')
             if [[ "$comparison" == ahead || "$comparison" == identical ]]; then
-              sha="$latest"
+              sha="$latest_sha"
+              ci_run_id="$latest_run_id"
             fi
           fi
-          echo "deploying $sha"
+          if [[ ! "$ci_run_id" =~ ^[0-9]+$ ]]; then
+            echo "::error::no successful main CI run for $sha (got '$ci_run_id')"
+            exit 1
+          fi
+          echo "deploying $sha from CI run $ci_run_id"
           echo "sha=$sha" >> "$GITHUB_OUTPUT"
+          echo "ci_run_id=$ci_run_id" >> "$GITHUB_OUTPUT"
 
       - name: Join the tailnet
         uses: tailscale/github-action@d1b6cd204f8dceda5b3eaad7f1f767be390056cd # v4.2.0
@@ -110,9 +121,28 @@ jobs:
     timeout-minutes: 60
     environment: demo
     permissions:
+      actions: read
       contents: read
 
     steps:
+      - name: Resolve the tested image digest
+        id: demo-image
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CI_RUN_ID: ${{ needs.deploy.outputs.ci_run_id }}
+          DEPLOY_SHA: ${{ needs.deploy.outputs.sha }}
+        run: |
+          [[ "$CI_RUN_ID" =~ ^[0-9]+$ ]]
+          [[ "$DEPLOY_SHA" =~ ^[0-9a-f]{40}$ ]]
+          artifact_dir="$RUNNER_TEMP/demo-image"
+          mkdir -p "$artifact_dir"
+          gh run download "$CI_RUN_ID" --repo "$GITHUB_REPOSITORY" \
+            --name "demo-image-digest-$DEPLOY_SHA" --dir "$artifact_dir"
+          [[ -f "$artifact_dir/demo-image-digest.txt" && ! -L "$artifact_dir/demo-image-digest.txt" ]]
+          digest=$(<"$artifact_dir/demo-image-digest.txt")
+          [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
+
       - name: Join the tailnet
         uses: tailscale/github-action@d1b6cd204f8dceda5b3eaad7f1f767be390056cd # v4.2.0
         with:
@@ -139,15 +169,17 @@ jobs:
       - name: Deploy the tested commit after the dev deploy
         env:
           DEPLOY_SHA: ${{ needs.deploy.outputs.sha }}
+          DEPLOY_IMAGE_DIGEST: ${{ steps.demo-image.outputs.digest }}
           DEMO_DEPLOY_HOST: ${{ vars.DEMO_DEPLOY_HOST }}
           DEMO_DEPLOY_PORT: ${{ vars.DEMO_DEPLOY_PORT }}
         run: |
           [[ "$DEPLOY_SHA" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$DEPLOY_IMAGE_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]
           ssh -T -p "$DEMO_DEPLOY_PORT" -i "$RUNNER_TEMP/ssh-demo/id_deploy" \
             -o IdentitiesOnly=yes -o BatchMode=yes \
             -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$RUNNER_TEMP/ssh-demo/known_hosts" \
             -o ServerAliveInterval=30 -o ServerAliveCountMax=10 \
-            "root@$DEMO_DEPLOY_HOST" "$DEPLOY_SHA" </dev/null
+            "root@$DEMO_DEPLOY_HOST" "$DEPLOY_SHA $DEPLOY_IMAGE_DIGEST" </dev/null
 
       - name: Remove the demo deploy key
         if: ${{ always() }}

@@ -7,6 +7,7 @@ SCRIPT_DIR=$(cd -P "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 source "$SCRIPT_DIR/demo-common.sh"
 
 readonly SHA=${DEPLOY_SHA:-}
+readonly IMAGE_DIGEST=${DEPLOY_IMAGE_DIGEST:-}
 readonly PREV_SHA=${PREVIOUS_SHA:-}
 readonly MODE_HELPER="$DEMO_SCRIPT_DIR/../teagramd/rollout-runner/blob-mode-state.py"
 ACTIVE_SERVER=$(demo_active_server)
@@ -124,6 +125,7 @@ demo_backup_database() {
 demo_require_root
 demo_require_env
 [[ "$SHA" =~ ^[0-9a-f]{40}$ ]] || demo_fail 'DEPLOY_SHA must be a full 40-hex commit SHA'
+[[ "$IMAGE_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]] || demo_fail 'DEPLOY_IMAGE_DIGEST must be a trusted sha256 digest'
 [[ "$PREV_SHA" =~ ^[0-9a-f]{40}$ ]] || demo_fail 'PREVIOUS_SHA must be a full 40-hex commit SHA'
 LOCK_PATH="$DEMO_REPO_ROOT/.state/deploy.lock"
 if [[ "${DEMO_DEPLOY_LOCK_HELD:-0}" != 1 ]]; then
@@ -183,7 +185,7 @@ PREV_IMAGE_REF=$(demo_active_image_ref)
 PREV_IMAGE_REF_ID=$(docker image inspect --format '{{.Id}}' "$PREV_IMAGE_REF")
 [[ "$PREV_IMAGE_REF_ID" == "$PREV_IMAGE_ID" ]] ||
   demo_fail 'active release image does not match the running server container'
-CANDIDATE_IMAGE_REF=$(demo_pull_image_by_sha "$SHA")
+CANDIDATE_IMAGE_REF=$(demo_pull_image_by_sha "$SHA" "$IMAGE_DIGEST")
 printf '%s\n' "$PREV_IMAGE_ID" > "$BACKUP_DIR/previous-image-id.txt"
 printf '%s\n' "$ACTIVE_SERVER" > "$BACKUP_DIR/active-server.txt"
 printf '%s\n' "$PREV_IMAGE_REF" > "$BACKUP_DIR/previous-image-ref.txt"

@@ -16,6 +16,11 @@ if [[ "$EUID" -ne 0 ]]; then
   echo 'teagram-demo: must run as root on the demo LXC' >&2
   exit 1
 fi
+if [[ "$#" -ne 1 || ! "${1:-}" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+  echo 'teagram-demo: usage: init-demo.sh <trusted-ci-sha256-digest>' >&2
+  exit 1
+fi
+readonly IMAGE_DIGEST=$1
 demo_lock_init
 
 # shellcheck source=deploy/teagram-demo/demo-common.sh
@@ -142,7 +147,7 @@ if entries:
     raise SystemExit("demo blob path is not empty; refusing fresh installation")
 PY
 
-IMAGE_REF=$(demo_pull_image_by_sha "$SHA")
+IMAGE_REF=$(demo_pull_image_by_sha "$SHA" "$IMAGE_DIGEST")
 export TEAGRAM_DEMO_IMAGE_REF="$IMAGE_REF"
 demo_write_active_release "$ACTIVE_SERVER" "$IMAGE_REF"
 "$SEED_SCRIPT" --check

@@ -232,17 +232,21 @@ demo_write_active_release() {
 }
 
 demo_pull_image_by_sha() {
-  local sha="$1" tag revision image_ref
+  local sha="$1" digest="${2:-}" revision image_ref actual_image_ref
   if [[ ! "$sha" =~ ^[0-9a-f]{40}$ ]]; then
     demo_fail 'image source SHA must be a full 40-hex commit'
     return 1
   fi
-  tag="$DEMO_IMAGE_REPOSITORY:sha-$sha"
-  if ! docker pull "$tag" >&2; then
+  if [[ ! "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+    demo_fail 'trusted CI image digest must be a sha256 digest'
+    return 1
+  fi
+  image_ref="$DEMO_IMAGE_REPOSITORY@$digest"
+  if ! docker pull "$image_ref" >&2; then
     demo_fail "could not pull demo image for $sha"
     return 1
   fi
-  if ! revision=$(docker image inspect --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' "$tag"); then
+  if ! revision=$(docker image inspect --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' "$image_ref"); then
     demo_fail 'pulled demo image revision label is missing'
     return 1
   fi
@@ -250,17 +254,17 @@ demo_pull_image_by_sha() {
     demo_fail 'pulled demo image does not identify the requested source SHA'
     return 1
   fi
-  if ! image_ref=$(docker image inspect --format '{{json .RepoDigests}}' "$tag" |
-    jq -er --arg repository "$DEMO_IMAGE_REPOSITORY" \
-      '[.[] | select(startswith($repository + "@"))] | unique | if length == 1 then .[0] else error("missing or ambiguous repository digest") end'); then
-    demo_fail 'pulled demo image has no unique repository digest'
+  if ! actual_image_ref=$(docker image inspect --format '{{json .RepoDigests}}' "$image_ref" |
+    jq -er --arg expected "$image_ref" --arg repository "$DEMO_IMAGE_REPOSITORY" \
+      '[.[] | select(startswith($repository + "@"))] | unique | if length == 1 and .[0] == $expected then .[0] else error("missing, mismatched or ambiguous repository digest") end'); then
+    demo_fail 'pulled demo image digest does not match the trusted CI digest'
     return 1
   fi
-  if ! demo_valid_image_ref "$image_ref"; then
+  if ! demo_valid_image_ref "$actual_image_ref"; then
     demo_fail 'pulled demo image digest is invalid'
     return 1
   fi
-  printf '%s\n' "$image_ref"
+  printf '%s\n' "$actual_image_ref"
 }
 
 demo_prepare_client_config_dir() {

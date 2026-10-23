@@ -48,6 +48,8 @@ check_ci_contract() {
     ci_fail 'the demo image publish must wait for every CI lane'
   [[ "$(ci_query '.jobs."publish-demo-image".permissions | to_entries | sort_by(.key) | map(.key + "=" + .value) | join(",")')" == 'actions=write,contents=read,packages=write' ]] ||
     ci_fail 'the demo image publisher must use only the required package and cache permissions'
+  [[ "$(ci_query '.jobs."publish-demo-image".steps[] | select(.name == "Build and publish the tested demo image") | .id')" == 'publish_image' ]] ||
+    ci_fail 'the demo image build step must expose its digest output'
   [[ "$(ci_query '.jobs."publish-demo-image".steps[] | select(.name == "Log in to GHCR") | .env.GITHUB_TOKEN')" == '${{ secrets.GITHUB_TOKEN }}' ]] ||
     ci_fail 'the demo image publisher must authenticate with the workflow token'
   ci_query '.jobs."publish-demo-image".steps[] | select(.name == "Log in to GHCR") | .run' |
@@ -60,6 +62,14 @@ check_ci_contract() {
     ci_fail 'the demo image revision label must identify the tested SHA'
   [[ "$(ci_query '.jobs."publish-demo-image".steps[] | select(.name == "Build and publish the tested demo image") | .with.labels')" == *'org.opencontainers.image.source=https://github.com/teagramhq/teagram-server'* ]] ||
     ci_fail 'the published demo image must link to the public source repository'
+  [[ "$(ci_query '.jobs."publish-demo-image".steps[] | select(.name == "Save tested demo image digest") | .env.IMAGE_DIGEST')" == '${{ steps.publish_image.outputs.digest }}' ]] ||
+    ci_fail 'the digest artifact must come from the publisher output'
+  [[ "$(ci_query '.jobs."publish-demo-image".steps[] | select(.name == "Upload tested demo image digest") | .uses')" == 'actions/upload-artifact@v7.0.1' ]] ||
+    ci_fail 'the tested image digest must be attached to its CI run as an artifact'
+  [[ "$(ci_query '.jobs."publish-demo-image".steps[] | select(.name == "Upload tested demo image digest") | .with.name')" == 'demo-image-digest-${{ github.sha }}' ]] ||
+    ci_fail 'the tested image digest artifact must be named for its source SHA'
+  [[ "$(ci_query '.jobs."publish-demo-image".steps[] | select(.name == "Upload tested demo image digest") | .with."if-no-files-found"')" == 'error' ]] ||
+    ci_fail 'publishing must fail if the trusted image digest artifact is missing'
 }
 
 # Run the actual target step against controlled forge responses.
@@ -72,8 +82,8 @@ check_target_selection() (
 #!/usr/bin/env bash
 set -euo pipefail
 case "$*" in
-  'api repos/test/server/actions/workflows/ci.yml/runs?branch=main&event=push&status=success&per_page=1 --jq .workflow_runs[0].head_sha')
-    printf '%s\n' "$TEST_LATEST_SHA"
+  'api repos/test/server/actions/workflows/ci.yml/runs?branch=main&event=push&status=success&per_page=1 --jq .workflow_runs[0] | [.head_sha, (.id | tostring)] | @tsv')
+    printf '%s\t%s\n' "$TEST_LATEST_SHA" "$TEST_LATEST_RUN_ID"
     ;;
   "api repos/test/server/compare/$RUN_HEAD_SHA...$TEST_LATEST_SHA --jq .status")
     [[ "$TEST_COMPARISON" != api-error ]] || exit 1
@@ -85,7 +95,9 @@ SH
   chmod +x "$tmp/gh"
   export PATH="$tmp:$PATH" GITHUB_REPOSITORY=test/server
   export RUN_HEAD_SHA=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+  export RUN_ID=111111111
   export TEST_LATEST_SHA=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+  export TEST_LATEST_RUN_ID=222222222
   export GITHUB_OUTPUT="$tmp/output" TEST_COMPARISON GITHUB_EVENT_NAME
   local expected status
   GITHUB_EVENT_NAME=workflow_run
@@ -101,7 +113,11 @@ SH
     fi
     : > "$GITHUB_OUTPUT"
     bash -euo pipefail "$tmp/target.sh" > /dev/null
-    [[ "$(cat "$GITHUB_OUTPUT")" == "sha=$expected" ]] ||
+    local expected_run_id="$RUN_ID"
+    if [[ "$status" == ahead || "$status" == identical ]]; then
+      expected_run_id="$TEST_LATEST_RUN_ID"
+    fi
+    [[ "$(cat "$GITHUB_OUTPUT")" == $'sha='"$expected"$'\nci_run_id='"$expected_run_id" ]] ||
       fail "workflow_run must select a successful descendant and otherwise retain head_sha ($status)"
   done
   TEST_COMPARISON=api-error
@@ -112,11 +128,54 @@ SH
   RUN_HEAD_SHA=''
   : > "$GITHUB_OUTPUT"
   bash -euo pipefail "$tmp/target.sh" > /dev/null
-  [[ "$(cat "$GITHUB_OUTPUT")" == "sha=$TEST_LATEST_SHA" ]] ||
+  [[ "$(cat "$GITHUB_OUTPUT")" == $'sha='"$TEST_LATEST_SHA"$'\nci_run_id='"$TEST_LATEST_RUN_ID" ]] ||
     fail 'manual dispatch must select the latest successful CI push head'
   TEST_LATEST_SHA=null
   if bash -euo pipefail "$tmp/target.sh" > /dev/null; then
     fail 'an invalid successful CI head must fail the deploy'
+  fi
+)
+
+check_demo_image_digest_download() (
+  set -euo pipefail
+  tmp="$(mktemp -d)"
+  trap 'rm -rf "$tmp"' EXIT
+  query '.jobs.deploy-demo.steps[] | select(.id == "demo-image") | .run' > "$tmp/download.sh"
+  cat > "$tmp/gh" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+[[ "$1" == run && "$2" == download && "$3" == "$TEST_CI_RUN_ID" ]]
+shift 3
+repo=
+name=
+destination=
+while (($#)); do
+  case "$1" in
+    --repo) repo="$2"; shift 2 ;;
+    --name) name="$2"; shift 2 ;;
+    --dir) destination="$2"; shift 2 ;;
+    *) exit 1 ;;
+  esac
+done
+[[ "$repo" == test/server ]]
+[[ "$name" == "demo-image-digest-$TEST_DEPLOY_SHA" ]]
+mkdir -p "$destination"
+printf '%s\n' "$TEST_IMAGE_DIGEST" > "$destination/demo-image-digest.txt"
+SH
+  chmod +x "$tmp/gh"
+  export PATH="$tmp:$PATH" GITHUB_REPOSITORY=test/server
+  export RUNNER_TEMP="$tmp/runner" GITHUB_OUTPUT="$tmp/output"
+  export CI_RUN_ID=222222222 DEPLOY_SHA=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+  export TEST_CI_RUN_ID="$CI_RUN_ID" TEST_DEPLOY_SHA="$DEPLOY_SHA"
+  export TEST_IMAGE_DIGEST=sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+  GH_TOKEN=test-token bash -euo pipefail "$tmp/download.sh"
+  [[ "$(cat "$GITHUB_OUTPUT")" == "digest=$TEST_IMAGE_DIGEST" ]] ||
+    fail 'the demo deploy must pass through the digest from the selected CI run artifact'
+  : > "$GITHUB_OUTPUT"
+  TEST_IMAGE_DIGEST=untrusted-value
+  export TEST_IMAGE_DIGEST
+  if GH_TOKEN=test-token bash -euo pipefail "$tmp/download.sh"; then
+    fail 'the demo deploy must reject an invalid digest from the CI artifact'
   fi
 )
 
@@ -160,6 +219,8 @@ check_contract() {
     fail 'the dev job must grant actions: read to resolve successful CI runs'
   [[ "$(query '.jobs.deploy.outputs.sha')" == '${{ steps.target.outputs.sha }}' ]] ||
     fail 'the dev job must expose the tested SHA to the demo job'
+  [[ "$(query '.jobs.deploy.outputs.ci_run_id')" == '${{ steps.target.outputs.ci_run_id }}' ]] ||
+    fail 'the dev job must expose the exact successful CI run to the demo job'
   [[ "$(query '.jobs.deploy-demo.needs')" == 'deploy' ]] ||
     fail 'the demo job must wait for a successful dev deployment'
   [[ "$(query '.jobs.deploy-demo.if')" == "$expected_demo_if" ]] ||
@@ -168,9 +229,13 @@ check_contract() {
     fail 'the demo job must use the separate demo environment'
   [[ "$(query '.jobs.deploy-demo.permissions // {} | to_entries | map(select(.value != "read")) | length')" == 0 ]] ||
     fail 'the demo job must not request write permissions'
+  [[ "$(query '.jobs.deploy-demo.permissions.actions')" == 'read' ]] ||
+    fail 'the demo job must use read-only access to the tested CI artifact'
 
   [[ "$(query '.jobs[].steps[] | select(.id == "target") | .env.RUN_HEAD_SHA')" == '${{ github.event.workflow_run.head_sha }}' ]] ||
     fail 'the target step must take the CI run head_sha'
+  [[ "$(query '.jobs[].steps[] | select(.id == "target") | .env.RUN_ID')" == '${{ github.event.workflow_run.id }}' ]] ||
+    fail 'the target step must retain the triggering CI run id'
   query '.jobs[].steps[] | select(.id == "target") | .run' |
     grep -Fq 'actions/workflows/ci.yml/runs?branch=main&event=push&status=success&per_page=1' ||
     fail 'a manual run must resolve the newest successful CI push run on main'
@@ -187,8 +252,20 @@ check_contract() {
   [[ "$(query '.jobs.deploy-demo.steps[] | select(.run // "" | test("(^|\s)ssh\s")) | .env.DEPLOY_SHA')" == '${{ needs.deploy.outputs.sha }}' ]] ||
     fail 'the demo ssh step must deploy the exact SHA from the dev job'
   query '.jobs.deploy-demo.steps[] | select(.run // "" | test("(^|\s)ssh\s")) | .run' |
-    grep -Fq '"root@$DEMO_DEPLOY_HOST" "$DEPLOY_SHA"' ||
-    fail 'the demo ssh step must send the tested SHA to the separate demo host'
+    grep -Fq '"root@$DEMO_DEPLOY_HOST" "$DEPLOY_SHA $DEPLOY_IMAGE_DIGEST"' ||
+    fail 'the demo ssh step must send the tested SHA and trusted image digest to the separate demo host'
+  [[ "$(query '.jobs.deploy-demo.steps[] | select(.run // "" | contains("ssh -T -p")) | .env.DEPLOY_IMAGE_DIGEST')" == '${{ steps.demo-image.outputs.digest }}' ]] ||
+    fail 'the demo ssh step must take its image digest from the trusted CI artifact'
+  [[ "$(query '.jobs.deploy-demo.steps[] | select(.id == "demo-image") | .env.CI_RUN_ID')" == '${{ needs.deploy.outputs.ci_run_id }}' ]] ||
+    fail 'the demo digest must be downloaded from the selected CI run'
+  local digest_run
+  digest_run="$(query '.jobs.deploy-demo.steps[] | select(.id == "demo-image") | .run')"
+  grep -Fq 'gh run download "$CI_RUN_ID"' <<< "$digest_run" ||
+    fail 'the demo image digest must be read from the trusted CI run artifact'
+  grep -Fq 'demo-image-digest-$DEPLOY_SHA' <<< "$digest_run" ||
+    fail 'the demo digest artifact must be selected by the exact tested SHA'
+  grep -Fq '^sha256:[0-9a-f]{64}$' <<< "$digest_run" ||
+    fail 'the downloaded image digest must be validated before SSH'
   [[ "$(query '.jobs.deploy-demo.steps[] | select(.name == "Install the demo deploy key") | .env.DEMO_DEPLOY_PORT')" == '${{ vars.DEMO_DEPLOY_PORT }}' ]] ||
     fail 'the demo key step must validate the configured SSH port'
   [[ "$(query '.jobs.deploy-demo.steps[] | select(.run // "" | test("(^|\\s)ssh\\s")) | .env.DEMO_DEPLOY_PORT')" == '${{ vars.DEMO_DEPLOY_PORT }}' ]] ||
@@ -218,6 +295,7 @@ check_contract() {
     [[ "$uses" =~ ^[^@]+@[0-9a-f]{40}$ ]] || fail "action not pinned to a commit SHA: $uses"
   done < <(query '.jobs[].steps[].uses // ""')
   check_target_selection
+  check_demo_image_digest_download
 }
 
 # Each mutation breaks one rule; the contract must reject all of them.

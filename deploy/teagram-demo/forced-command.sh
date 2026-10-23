@@ -3,17 +3,19 @@ set -Eeuo pipefail
 umask 077
 
 readonly REPO=/opt/teagram-demo
-readonly SHA=${SSH_ORIGINAL_COMMAND:-}
+readonly COMMAND=${SSH_ORIGINAL_COMMAND:-}
 unset DEMO_DEPLOY_LOCK_HELD
 
 if [[ "$EUID" -ne 0 ]]; then
   echo 'demo deploy key must run as root' >&2
   exit 1
 fi
-if [[ ! "$SHA" =~ ^[0-9a-f]{40}$ ]]; then
-  echo 'demo deploy key accepts only one full 40-hex commit SHA' >&2
+if [[ ! "$COMMAND" =~ ^([0-9a-f]{40})\ (sha256:[0-9a-f]{64})$ ]]; then
+  echo 'demo deploy key accepts a full commit SHA and a sha256 image digest' >&2
   exit 1
 fi
+readonly SHA=${BASH_REMATCH[1]}
+readonly IMAGE_DIGEST=${BASH_REMATCH[2]}
 [[ -d "$REPO/.git" && ! -L "$REPO" ]] || { echo 'demo checkout is unavailable' >&2; exit 1; }
 LOCK_PATH="$REPO/.state/deploy.lock"
 mkdir -p "$(dirname "$LOCK_PATH")"
@@ -34,7 +36,7 @@ fi
 
 git -C "$REPO" reset --hard "$SHA"
 deploy_rc=0
-DEMO_DEPLOY_LOCK_HELD=1 DEPLOY_SHA="$SHA" PREVIOUS_SHA="$previous" \
+DEMO_DEPLOY_LOCK_HELD=1 DEPLOY_SHA="$SHA" DEPLOY_IMAGE_DIGEST="$IMAGE_DIGEST" PREVIOUS_SHA="$previous" \
   bash "$REPO/deploy/teagram-demo/deploy-main.sh" || deploy_rc=$?
 if (( deploy_rc != 0 )); then
   git -C "$REPO" reset --hard "$previous" || {

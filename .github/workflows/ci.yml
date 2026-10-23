@@ -1043,6 +1043,7 @@ jobs:
         run: printf '%s' "$GITHUB_TOKEN" | docker login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
 
       - name: Build and publish the tested demo image
+        id: publish_image
         uses: docker/build-push-action@v7.4.0
         with:
           context: .
@@ -1055,6 +1056,20 @@ jobs:
             org.opencontainers.image.revision=${{ github.sha }}
           cache-from: type=gha,scope=teagram-demo-image
           cache-to: type=gha,scope=teagram-demo-image,mode=max
+
+      - name: Save tested demo image digest
+        env:
+          IMAGE_DIGEST: ${{ steps.publish_image.outputs.digest }}
+        run: |
+          [[ "$IMAGE_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]
+          printf '%s\n' "$IMAGE_DIGEST" > "$RUNNER_TEMP/demo-image-digest.txt"
+
+      - name: Upload tested demo image digest
+        uses: actions/upload-artifact@v7.0.1
+        with:
+          name: demo-image-digest-${{ github.sha }}
+          path: ${{ runner.temp }}/demo-image-digest.txt
+          if-no-files-found: error
 
   # internal/admin/assets/dashboard.css is a build output that is committed, so
   # nothing forces a template change to be followed by `make css`. It has gone

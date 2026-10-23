@@ -492,13 +492,13 @@ deploy_path = Path(sys.argv[3])
 deploy = deploy_path.read_text(encoding="utf-8")
 init = Path(sys.argv[2]).read_text(encoding="utf-8")
 assert_text_order(init, "init-demo.sh image release", [
-    'IMAGE_REF=$(demo_pull_image_by_sha "$SHA")',
+    'IMAGE_REF=$(demo_pull_image_by_sha "$SHA" "$IMAGE_DIGEST")',
     'export TEAGRAM_DEMO_IMAGE_REF="$IMAGE_REF"',
     'demo_write_active_release "$ACTIVE_SERVER" "$IMAGE_REF"',
     'demo_compose run --rm --no-deps teagramd bootstrap-identity',
 ])
-if "demo_pull_image_by_sha \"$SHA\"" not in init:
-    raise SystemExit("init-demo.sh: first install must use the CI image for its selected main SHA")
+if '[[ "$#" -ne 1 || ! "${1:-}" =~ ^sha256:[0-9a-f]{64}$ ]]' not in init:
+    raise SystemExit("init-demo.sh: first install must require the digest copied from the selected main CI run")
 deploy_preflight = deploy.split('TARGET_RENDER="$TMP_DIR/target-render.json"', 1)[1].split(
     'docker inspect "${CONTAINER_IDS[@]}"', 1
 )[0]
@@ -509,7 +509,7 @@ assert_text_order(deploy_preflight, "deploy-main.sh proxy preflight", [
     'demo_render_config "$TARGET_RENDER"',
 ])
 deploy_steps = [
-    'CANDIDATE_IMAGE_REF=$(demo_pull_image_by_sha "$SHA")',
+    'CANDIDATE_IMAGE_REF=$(demo_pull_image_by_sha "$SHA" "$IMAGE_DIGEST")',
     "demo_backup_database\n",
     'export TEAGRAM_DEMO_IMAGE_REF="$CANDIDATE_IMAGE_REF"',
     "demo_compose up -d migrate",
@@ -542,7 +542,7 @@ assert_text_order(backup_function, "deploy-main.sh backup function", [
     'BACKUP_READY=1',
 ])
 assert_order(deploy_path, [
-    'CANDIDATE_IMAGE_REF=$(demo_pull_image_by_sha "$SHA")',
+    'CANDIDATE_IMAGE_REF=$(demo_pull_image_by_sha "$SHA" "$IMAGE_DIGEST")',
     "demo_backup_database\n",
     'export TEAGRAM_DEMO_IMAGE_REF="$CANDIDATE_IMAGE_REF"',
     "demo_compose up -d migrate",
@@ -560,8 +560,10 @@ if "MIGRATE_STATUS=$(docker inspect" in deploy:
     raise SystemExit("deploy-main.sh: detached migration status must be checked after waiting")
 if "PREV_IMAGE_TAG" in deploy or "teagramd:rollback-" in deploy:
     raise SystemExit("deploy-main.sh: rollback image must not get a persistent unique tag")
-if 'demo_pull_image_by_sha "$SHA"' not in deploy or 'previous-image-ref.txt' not in deploy:
-    raise SystemExit("deploy-main.sh: deployment must pull and pin the candidate while recording the previous image reference")
+if 'demo_pull_image_by_sha "$SHA" "$IMAGE_DIGEST"' not in deploy or 'previous-image-ref.txt' not in deploy:
+    raise SystemExit("deploy-main.sh: deployment must pull the trusted candidate digest while recording the previous image reference")
+if '[[ "$IMAGE_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]' not in deploy:
+    raise SystemExit("deploy-main.sh: deployment must validate the trusted CI image digest")
 if "compose build" in deploy or "compose build" in init:
     raise SystemExit("demo install and deploy must never build the server image in the LXC")
 waiter = Path(sys.argv[4]).read_text(encoding="utf-8")
@@ -575,12 +577,13 @@ if 'LOCK_PATH="$DEMO_REPO_ROOT/.state/deploy.lock"' not in wipe:
     raise SystemExit("wipe-weekly.sh: deploy and wipe must share the deploy lock")
 assert_text_order(forced_command, "forced-command.sh deploy lock", [
     "unset DEMO_DEPLOY_LOCK_HELD",
+    'readonly IMAGE_DIGEST=${BASH_REMATCH[2]}',
     'LOCK_PATH="$REPO/.state/deploy.lock"',
     'exec 9> "$LOCK_PATH"',
     "flock -x 9",
     'git -C "$REPO" fetch',
     'git -C "$REPO" reset --hard "$SHA"',
-    'DEMO_DEPLOY_LOCK_HELD=1 DEPLOY_SHA="$SHA" PREVIOUS_SHA="$previous"',
+    'DEMO_DEPLOY_LOCK_HELD=1 DEPLOY_SHA="$SHA" DEPLOY_IMAGE_DIGEST="$IMAGE_DIGEST" PREVIOUS_SHA="$previous"',
     'git -C "$REPO" reset --hard "$previous"',
 ])
 assert_order(deploy_path, [
