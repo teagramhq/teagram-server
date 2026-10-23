@@ -140,6 +140,11 @@ func testSmokeSavedGIFRequestFixtures(t *testing.T, f *smokeFixture, sender, own
 	}); err != nil {
 		t.Fatalf("upload fixture GIF: %v", err)
 	}
+	// Earlier fixture requests can fill this bounded notification queue with
+	// unrelated messages, which would cause the GIF update to be dropped.
+	for len(owner.seen.newMsg) > 0 {
+		<-owner.seen.newMsg
+	}
 	if err := fixtureClientCall(t, sender, "messages_sendMedia.gif.1", func(ctx context.Context, api *tg.Client) error {
 		_, err := api.MessagesSendMedia(ctx, &tg.MessagesSendMediaRequest{
 			Peer: peerUser(sender.id, owner.id),
