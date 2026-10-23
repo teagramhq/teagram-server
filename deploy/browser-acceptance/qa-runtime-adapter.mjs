@@ -11,6 +11,10 @@ const OBSERVER_URL = "http://browser-observer:3129/healthz";
 const TARGET_ADDRESS_URL = "http://browser-observer:3130/target-address";
 const PROXY_SERVER = "http://browser-observer:3128";
 const BLOCKED_CONNECT = "CONNECT telegram.org:443 HTTP/1.1\r\nHost: telegram.org:443\r\n\r\n";
+const OBSERVER_REQUEST_TIMEOUT_MS = 2_000;
+// Compose's healthcheck is local to the observer; the browser waits on its own network path.
+const OBSERVER_READY_TIMEOUT_MS = 5_000;
+const OBSERVER_READY_POLL_INTERVAL_MS = 100;
 function adapterError(code, cause) {
   const error = cause === undefined
     ? new Error("runtime adapter check failed")
@@ -24,10 +28,10 @@ function exactKeys(value, keys) {
     JSON.stringify(Object.keys(value).sort()) === JSON.stringify([...keys].sort());
 }
 
-export async function observerSnapshot() {
+export async function observerSnapshot(timeoutMs = OBSERVER_REQUEST_TIMEOUT_MS) {
   let response;
   try {
-    response = await fetch(OBSERVER_URL, { signal: AbortSignal.timeout(2_000) });
+    response = await fetch(OBSERVER_URL, { signal: AbortSignal.timeout(timeoutMs) });
   } catch (error) {
     throw adapterError("observer-unhealthy", error);
   }
@@ -41,6 +45,26 @@ export async function observerSnapshot() {
     throw adapterError("observer-unhealthy");
   }
   return snapshot;
+}
+
+export async function waitForObserverSnapshot(readSnapshot = observerSnapshot, timeoutMs = OBSERVER_READY_TIMEOUT_MS) {
+  const deadline = Date.now() + timeoutMs;
+  let lastError;
+
+  while (true) {
+    const remaining = deadline - Date.now();
+    if (remaining <= 0) throw lastError ?? adapterError("observer-unhealthy");
+    try {
+      return await readSnapshot(Math.min(OBSERVER_REQUEST_TIMEOUT_MS, remaining));
+    } catch (error) {
+      if (error?.code !== "observer-unhealthy") throw error;
+      lastError = error;
+    }
+
+    const delayMs = Math.min(OBSERVER_READY_POLL_INTERVAL_MS, deadline - Date.now());
+    if (delayMs <= 0) throw lastError;
+    await new Promise((resolve) => setTimeout(resolve, delayMs));
+  }
 }
 
 export async function readReleaseRecord(path) {
@@ -148,9 +172,9 @@ async function assertBlockedRequestDeltas(before, after) {
 }
 
 export async function runDeniedObserverControl() {
-  const before = await observerSnapshot();
+  const before = await waitForObserverSnapshot();
   await sendBlockedConnect();
-  const after = await observerSnapshot();
+  const after = await waitForObserverSnapshot();
   await assertBlockedRequestDeltas(before, after);
   return after;
 }

@@ -22,6 +22,7 @@ import {
   startIndependentCapture,
   targetAddress,
   verifySandbox,
+  waitForObserverSnapshot,
 } from "./qa-runtime-adapter.mjs";
 
 const sourceCommit = "a".repeat(40);
@@ -651,6 +652,46 @@ test("observer snapshot maps fetch and JSON failures to its stable adapter code"
   await t.test("JSON parse failure", async (t) => {
     t.mock.method(globalThis, "fetch", async () => new Response("{", {status: 200}));
     await assert.rejects(observerSnapshot(), (error) => error.code === "observer-unhealthy");
+  });
+});
+
+test("observer readiness waits for browser-side health and fails closed at its deadline", async (t) => {
+  await t.test("waits until the observer is reachable", async () => {
+    let attempts = 0;
+    const snapshot = await waitForObserverSnapshot(async () => {
+      attempts += 1;
+      if (attempts < 3) {
+        const error = new Error("observer is not reachable yet");
+        error.code = "observer-unhealthy";
+        throw error;
+      }
+      return { status: "healthy" };
+    }, 1_000);
+
+    assert.deepEqual(snapshot, { status: "healthy" });
+    assert.equal(attempts, 3);
+  });
+
+  await t.test("does not wait indefinitely for an unhealthy observer", async () => {
+    let attempts = 0;
+    await assert.rejects(waitForObserverSnapshot(async () => {
+      attempts += 1;
+      const error = new Error("observer remains unhealthy");
+      error.code = "observer-unhealthy";
+      throw error;
+    }, 20), (error) => error.code === "observer-unhealthy");
+    assert.ok(attempts >= 1 && attempts <= 2);
+  });
+
+  await t.test("does not retry unrelated runtime failures", async () => {
+    let attempts = 0;
+    await assert.rejects(waitForObserverSnapshot(async () => {
+      attempts += 1;
+      const error = new Error("runtime policy failed");
+      error.code = "blocked-host-control-failed";
+      throw error;
+    }, 1_000), (error) => error.code === "blocked-host-control-failed");
+    assert.equal(attempts, 1);
   });
 });
 
