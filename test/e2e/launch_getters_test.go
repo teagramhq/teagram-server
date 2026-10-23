@@ -55,6 +55,9 @@ func TestLaunchGetterResults(t *testing.T) {
 }
 
 func checkLaunchGetterResults(ctx context.Context, client *tg.Client) error {
+	if err := checkThemeWallpaperResults(ctx, client); err != nil {
+		return fmt.Errorf("theme and wallpaper getters: %w", err)
+	}
 	if err := checkMAIN2154WebStartupGetters(ctx, client); err != nil {
 		return fmt.Errorf("saved music and emoji keyword getters: %w", err)
 	}
@@ -657,6 +660,47 @@ func assertEmptyReactionsGetter(name string, hash int64, got tg.MessagesReaction
 	}
 	if result.Hash != 0 || len(result.Reactions) != 0 {
 		return fmt.Errorf("%s = hash %d, %d reactions; want empty", name, result.Hash, len(result.Reactions))
+	}
+	return nil
+}
+
+func checkThemeWallpaperResults(ctx context.Context, client *tg.Client) error {
+	wallPapers, err := client.AccountGetWallPapers(ctx, 0)
+	if err != nil {
+		return fmt.Errorf("account.getWallPapers: %w", err)
+	}
+	wallPapersFull, ok := wallPapers.(*tg.AccountWallPapers)
+	if !ok {
+		return fmt.Errorf("account.getWallPapers with hash 0 = %T, want full empty wallpapers", wallPapers)
+	}
+	if wallPapersFull.Hash == 0 || len(wallPapersFull.Wallpapers) != 0 {
+		return fmt.Errorf("account.getWallPapers = hash %d, %d wallpapers; want nonzero hash and empty list", wallPapersFull.Hash, len(wallPapersFull.Wallpapers))
+	}
+	wallPapersUnchanged, err := client.AccountGetWallPapers(ctx, wallPapersFull.Hash)
+	if err != nil {
+		return fmt.Errorf("account.getWallPapers with returned hash: %w", err)
+	}
+	if _, ok := wallPapersUnchanged.(*tg.AccountWallPapersNotModified); !ok {
+		return fmt.Errorf("account.getWallPapers with returned hash = %T, want not modified", wallPapersUnchanged)
+	}
+
+	chatThemes, err := client.AccountGetChatThemes(ctx, 0)
+	if err != nil {
+		return fmt.Errorf("account.getChatThemes: %w", err)
+	}
+	chatThemesFull, ok := chatThemes.(*tg.AccountThemes)
+	if !ok {
+		return fmt.Errorf("account.getChatThemes with hash 0 = %T, want full empty themes", chatThemes)
+	}
+	if chatThemesFull.Hash == 0 || len(chatThemesFull.Themes) != 0 {
+		return fmt.Errorf("account.getChatThemes = hash %d, %d themes; want nonzero hash and empty list", chatThemesFull.Hash, len(chatThemesFull.Themes))
+	}
+	chatThemesUnchanged, err := client.AccountGetChatThemes(ctx, chatThemesFull.Hash)
+	if err != nil {
+		return fmt.Errorf("account.getChatThemes with returned hash: %w", err)
+	}
+	if _, ok := chatThemesUnchanged.(*tg.AccountThemesNotModified); !ok {
+		return fmt.Errorf("account.getChatThemes with returned hash = %T, want not modified", chatThemesUnchanged)
 	}
 	return nil
 }
