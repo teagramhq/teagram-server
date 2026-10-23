@@ -114,7 +114,7 @@ class ArtifactError(ValueError):
     """The supplied bundle cannot cross the fixture trust boundary."""
 
 
-def private_csp(endpoint: str, web_revision: str) -> str:
+def private_csp(endpoint: str, web_revision: str, *, discovery_ready: bool = True) -> str:
     directives = [
         "default-src 'self'",
         "base-uri 'self'",
@@ -136,7 +136,11 @@ def private_csp(endpoint: str, web_revision: str) -> str:
         "media-src 'self' blob:",
         "worker-src 'self' blob:",
         "manifest-src 'self'",
-        f"connect-src 'self' {endpoint}",
+        (
+            "connect-src 'self' https: wss:"
+            if discovery_ready and web_revision != AUTH_PROGRESS_ARTIFACT_SOURCE_REVISION
+            else f"connect-src 'self' {endpoint}"
+        ),
     ))
     return "; ".join(directives) + ";"
 
@@ -558,9 +562,12 @@ def _audit(directory: Path, args: argparse.Namespace) -> dict[str, object]:
     try:
         csp_parser = CSPParser()
         csp_parser.feed(paths["index.html"].read_text(encoding="utf-8"))
+        expected_csps = {private_csp(args.endpoint, args.web_revision)}
+        if args.web_revision != AUTH_PROGRESS_ARTIFACT_SOURCE_REVISION:
+            expected_csps.add(private_csp(args.endpoint, args.web_revision, discovery_ready=False))
         checks["privateCSP"] = (
             len(csp_parser.policies) == 1
-            and csp_parser.policies[0] == private_csp(args.endpoint, args.web_revision)
+            and csp_parser.policies[0] in expected_csps
         )
     except (OSError, UnicodeDecodeError):
         checks["privateCSP"] = False

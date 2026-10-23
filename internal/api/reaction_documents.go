@@ -23,6 +23,9 @@ type reactionDocumentIdentity struct {
 	accessHash int64
 }
 
+// Built-in reaction documents need a nonzero date for Teagram Desktop to apply their fields.
+const reactionDocumentDate = 1_700_000_000
+
 type builtInReactionDocument struct {
 	file store.File
 	data []byte
@@ -61,6 +64,9 @@ func buildReactionDocumentCatalog() (*reactionDocumentCatalog, error) {
 		documents: make(map[reactionDocumentIdentity]builtInReactionDocument, len(entries)*2),
 	}
 	hashInput := make([]byte, 0, len(entries)*64)
+	// Metadata is part of the response too; changing it must invalidate client caches.
+	hashInput = strconv.AppendInt(hashInput, int64(reactionDocumentDate), 10)
+	hashInput = append(hashInput, 0)
 	for i, emoji := range chatReactionsAll {
 		entry := entries[i]
 		if entry.Emoji != emoji {
@@ -135,6 +141,7 @@ func newReactionDocument(emoji string, id int64, filename, mimeType string, data
 		ID:            id,
 		AccessHash:    accessHash,
 		FileReference: fileReference,
+		Date:          reactionDocumentDate,
 		MimeType:      mimeType,
 		Size:          int64(len(data)),
 		Attributes: []tg.DocumentAttributeClass{

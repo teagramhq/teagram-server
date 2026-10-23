@@ -435,6 +435,136 @@ func getReactions(t *testing.T, s *store.Store, userID int64, peer tg.InputPeerC
 	return ups
 }
 
+type basicGroupReactionFixture struct {
+	members []store.User
+	chatID  int64
+	localID map[int64]int64
+}
+
+func newBasicGroupReactionFixture(t *testing.T, s *store.Store) basicGroupReactionFixture {
+	t.Helper()
+	ctx := context.Background()
+	fixture := basicGroupReactionFixture{localID: make(map[int64]int64)}
+	for _, phone := range []string{"+15551349011", "+15551349012", "+15551349013"} {
+		user, err := s.CreateUser(ctx, phone)
+		if err != nil {
+			t.Fatalf("create group member: %v", err)
+		}
+		fixture.members = append(fixture.members, user)
+	}
+	fixture.chatID = createChatForTest(t, s, fixture.members[0].ID, "Reaction counts", fixture.members[1].ID, fixture.members[2].ID)
+	messageReply, err := api.SendMessageForTest(s, fixture.members[0].ID, &tg.MessagesSendMessageRequest{
+		Peer: api.InputPeerChat(fixture.members[0].ID, fixture.chatID), Message: "count reactions", RandomID: 770103,
+	})
+	if err != nil {
+		t.Fatalf("send group message: %v", err)
+	}
+	fixture.localID[fixture.members[0].ID] = sentLocalID(t, messageReply)
+	for _, member := range fixture.members[1:] {
+		messages, err := s.History(ctx, member.ID, store.PeerTypeChat, fixture.chatID, 0, 20)
+		if err != nil {
+			t.Fatalf("read group history for member %d: %v", member.ID, err)
+		}
+		for _, message := range messages {
+			if message.Text == "count reactions" {
+				fixture.localID[member.ID] = message.LocalID
+				break
+			}
+		}
+		if fixture.localID[member.ID] == 0 {
+			t.Fatalf("group history for member %d omitted message", member.ID)
+		}
+	}
+	return fixture
+}
+
+func seedBasicGroupReactionCounts(t *testing.T, s *store.Store, fixture basicGroupReactionFixture) {
+	t.Helper()
+	for i, member := range fixture.members {
+		emoji := "👍"
+		if i == 2 {
+			emoji = "❤"
+		}
+		_, rpc := sendReaction(t, s, member.ID, api.InputPeerChat(member.ID, fixture.chatID), fixture.localID[member.ID], &tg.ReactionEmoji{Emoticon: emoji})
+		if rpc != nil {
+			t.Fatalf("member %d send %s reaction: %s", member.ID, emoji, rpc.ErrorMessage)
+		}
+	}
+}
+
+func assertBasicGroupReactionCounts(t *testing.T, got tg.MessageReactions, wantThumbCount int, chosenEmoji string) {
+	t.Helper()
+	if len(got.Results) != 2 {
+		t.Fatalf("reaction results = %d, want 2 aggregated emoji", len(got.Results))
+	}
+	wantCounts := map[string]int{"👍": wantThumbCount, "❤": 1}
+	seen := make(map[string]bool, len(wantCounts))
+	for _, result := range got.Results {
+		emoji, ok := result.Reaction.(*tg.ReactionEmoji)
+		if !ok {
+			t.Fatalf("reaction = %T, want ReactionEmoji", result.Reaction)
+		}
+		wantCount, ok := wantCounts[emoji.Emoticon]
+		if !ok || seen[emoji.Emoticon] {
+			t.Fatalf("unexpected or duplicate reaction %q", emoji.Emoticon)
+		}
+		seen[emoji.Emoticon] = true
+		if result.Count != wantCount {
+			t.Errorf("%s count = %d, want %d", emoji.Emoticon, result.Count, wantCount)
+		}
+		chosenOrder, hasChosen := result.GetChosenOrder()
+		wantChosen := emoji.Emoticon == chosenEmoji
+		if hasChosen != wantChosen || (wantChosen && chosenOrder != 1) {
+			t.Errorf("%s chosen_order = %d present=%v, want chosen=%v", emoji.Emoticon, chosenOrder, hasChosen, wantChosen)
+		}
+	}
+	if len(got.RecentReactions) != 0 {
+		t.Errorf("recent reactions = %d, want 0 (no reactor identities)", len(got.RecentReactions))
+	}
+}
+
+func assertBasicGroupReactionReadViews(t *testing.T, s *store.Store, fixture basicGroupReactionFixture, wantThumbCount int, chosenByMember map[int64]string) {
+	t.Helper()
+	for _, member := range fixture.members {
+		peer := api.InputPeerChat(member.ID, fixture.chatID)
+		historyResult, err := api.GetHistoryForTest(s, member.ID, &tg.MessagesGetHistoryRequest{Peer: peer, Limit: 20})
+		if err != nil {
+			t.Fatalf("get history for member %d: %v", member.ID, err)
+		}
+		history, ok := historyResult.(*tg.MessagesMessages)
+		if !ok {
+			t.Fatalf("history for member %d = %T, want *tg.MessagesMessages", member.ID, historyResult)
+		}
+		found := false
+		for _, item := range history.Messages {
+			message, ok := item.(*tg.Message)
+			if !ok || int64(message.ID) != fixture.localID[member.ID] {
+				continue
+			}
+			reactions, hasReactions := message.GetReactions()
+			if !hasReactions {
+				t.Fatalf("history for member %d omitted reactions", member.ID)
+			}
+			assertBasicGroupReactionCounts(t, reactions, wantThumbCount, chosenByMember[member.ID])
+			found = true
+			break
+		}
+		if !found {
+			t.Fatalf("history for member %d omitted group message", member.ID)
+		}
+
+		updates := getReactions(t, s, member.ID, peer, int(fixture.localID[member.ID]))
+		if len(updates.Updates) != 1 {
+			t.Fatalf("getMessagesReactions for member %d returned %d updates, want 1", member.ID, len(updates.Updates))
+		}
+		update, ok := updates.Updates[0].(*tg.UpdateMessageReactions)
+		if !ok {
+			t.Fatalf("getMessagesReactions update = %T, want *tg.UpdateMessageReactions", updates.Updates[0])
+		}
+		assertBasicGroupReactionCounts(t, update.Reactions, wantThumbCount, chosenByMember[member.ID])
+	}
+}
+
 // emojiOf reads the single reaction emoji off an updateMessageReactions.
 func emojiOf(t *testing.T, u tg.UpdateClass) (int, string) {
 	t.Helper()
@@ -587,6 +717,113 @@ func TestGetMessagesReactionsAgreesWithGetHistory(t *testing.T) {
 	if r.Reactions.String() != fromHistory.String() {
 		t.Errorf("reactions = %s, getHistory renders %s", r.Reactions.String(), fromHistory.String())
 	}
+}
+
+func TestDirectReactionViewsMarkOnlyCallerChosen(t *testing.T) {
+	t.Parallel()
+	s := openStore(t)
+	p := seedReactionPair(t, s, "+15551341501", "+15551341502", "")
+
+	// Telegram Desktop's quick reaction uses the reaction-vector flag with the
+	// dialog peer and the message id from the caller's local history.
+	request := &tg.MessagesSendReactionRequest{
+		Peer:  api.InputPeerUser(p.a.ID, p.b.ID),
+		MsgID: int(p.aLocalID),
+		Reaction: []tg.ReactionClass{
+			&tg.ReactionEmoji{Emoticon: "👍"},
+		},
+	}
+	if _, rpc := callReactionUpdates(t, s, p.a.ID, "messages.sendReaction", request); rpc != nil {
+		t.Fatalf("desktop-shaped messages.sendReaction returned %s", rpc.ErrorMessage)
+	}
+
+	assertReaction := func(t *testing.T, got tg.MessageReactions, wantChosen bool) {
+		t.Helper()
+		if len(got.Results) != 1 {
+			t.Fatalf("reaction results = %d, want 1", len(got.Results))
+		}
+		result := got.Results[0]
+		if result.Count != 1 {
+			t.Errorf("reaction count = %d, want 1", result.Count)
+		}
+		emoji, ok := result.Reaction.(*tg.ReactionEmoji)
+		if !ok || emoji.Emoticon != "👍" {
+			t.Errorf("reaction = %#v, want thumbs up", result.Reaction)
+		}
+		chosenOrder, hasChosenOrder := result.GetChosenOrder()
+		if hasChosenOrder != wantChosen || (wantChosen && chosenOrder != 1) {
+			t.Errorf("chosen_order = %d present=%v, want chosen=%v", chosenOrder, hasChosenOrder, wantChosen)
+		}
+	}
+
+	for _, tc := range []struct {
+		name     string
+		viewerID int64
+		peerID   int64
+		localID  int64
+		chosen   bool
+	}{
+		{name: "sender", viewerID: p.a.ID, peerID: p.b.ID, localID: p.aLocalID, chosen: true},
+		{name: "recipient", viewerID: p.b.ID, peerID: p.a.ID, localID: p.bLocalID},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			peer := api.InputPeerUser(tc.viewerID, tc.peerID)
+			historyResult, err := api.GetHistoryForTest(s, tc.viewerID, &tg.MessagesGetHistoryRequest{Peer: peer, Limit: 10})
+			if err != nil {
+				t.Fatalf("get history: %v", err)
+			}
+			history, ok := historyResult.(*tg.MessagesMessages)
+			if !ok {
+				t.Fatalf("history type = %T, want *tg.MessagesMessages", historyResult)
+			}
+			var historyReactions tg.MessageReactions
+			found := false
+			for _, item := range history.Messages {
+				message, ok := item.(*tg.Message)
+				if !ok || int64(message.ID) != tc.localID {
+					continue
+				}
+				historyReactions, found = message.GetReactions()
+				break
+			}
+			if !found {
+				t.Fatal("history omitted message reactions")
+			}
+			assertReaction(t, historyReactions, tc.chosen)
+
+			updates := getReactions(t, s, tc.viewerID, peer, int(tc.localID))
+			if len(updates.Updates) != 1 {
+				t.Fatalf("getMessagesReactions updates = %d, want 1", len(updates.Updates))
+			}
+			update, ok := updates.Updates[0].(*tg.UpdateMessageReactions)
+			if !ok {
+				t.Fatalf("getMessagesReactions update = %T, want *tg.UpdateMessageReactions", updates.Updates[0])
+			}
+			assertReaction(t, update.Reactions, tc.chosen)
+		})
+	}
+}
+
+func TestBasicGroupReactionCountsAggregateAcrossReadViews(t *testing.T) {
+	t.Parallel()
+	s := openStore(t)
+	fixture := newBasicGroupReactionFixture(t, s)
+	seedBasicGroupReactionCounts(t, s, fixture)
+
+	assertBasicGroupReactionReadViews(t, s, fixture, 2, map[int64]string{
+		fixture.members[0].ID: "👍",
+		fixture.members[1].ID: "👍",
+		fixture.members[2].ID: "❤",
+	})
+
+	member := fixture.members[1]
+	if _, rpc := sendReaction(t, s, member.ID, api.InputPeerChat(member.ID, fixture.chatID), fixture.localID[member.ID]); rpc != nil {
+		t.Fatalf("clear member %d reaction: %s", member.ID, rpc.ErrorMessage)
+	}
+	assertBasicGroupReactionReadViews(t, s, fixture, 1, map[int64]string{
+		fixture.members[0].ID: "👍",
+		fixture.members[2].ID: "❤",
+	})
 }
 
 // Criterion 3: an empty id list, and a list naming only unreadable ids, both

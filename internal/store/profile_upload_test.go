@@ -289,6 +289,43 @@ func profileUploadSession(t *testing.T, ctx context.Context, conn *pgx.Conn, own
 	return s
 }
 
+func TestProfileUploadSessionScopesLocksToObserverDatabase(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	observerDSN := pgtest.DSN(t)
+	otherDSN := pgtest.DSN(t)
+
+	observer, err := pgx.Connect(ctx, observerDSN)
+	if err != nil {
+		t.Fatalf("connect observer: %v", err)
+	}
+	defer func() { _ = observer.Close(ctx) }() //nolint:errcheck // best-effort close
+
+	other, err := pgx.Connect(ctx, otherDSN)
+	if err != nil {
+		t.Fatalf("connect other database: %v", err)
+	}
+	defer func() { _ = other.Close(ctx) }() //nolint:errcheck // best-effort close
+
+	const ownerID = int64(987654321)
+	tx, err := other.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin other-database transaction: %v", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }() //nolint:errcheck // release advisory lock
+	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock($1::int, $2::int)`,
+		int64(store.ProfileLockDomain), ownerID); err != nil {
+		t.Fatalf("take other-database profile lock: %v", err)
+	}
+	if _, err := tx.Exec(ctx, `SELECT 'profile_upload_receipt FOR UPDATE'`); err != nil {
+		t.Fatalf("set other-database activity query: %v", err)
+	}
+
+	if session := profileUploadSession(t, ctx, observer, ownerID); session.Pid != 0 {
+		t.Fatalf("selected profile-lock session from another database: %+v", session)
+	}
+}
+
 // profileHoldsRelation reports whether a session holds any
 // lock on a table. The completion takes the receipt and state row locks and the
 // files reference lock, and each takes a table-level lock with it, so "no lock

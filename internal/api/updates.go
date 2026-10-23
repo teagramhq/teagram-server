@@ -109,27 +109,37 @@ func messageToTL(m store.Message, createUsers []int64, files map[int64]tg.Messag
 		msg.SetFwdFrom(fwd)
 	}
 	if len(reactions) > 0 {
-		msg.SetReactions(reactionsToTL(reactions))
+		msg.SetReactions(reactionsToTL(reactions, m.OwnerID))
 	}
 	return msg
 }
 
 // reactionsToTL is the single wire projection of stored reactions, shared by
-// every surface that renders them. Each stored row is one reactor's single
-// emoji, so each renders as its own ReactionCount with Count 1.
+// every surface that renders them. It aggregates each emoji and marks the
+// viewer's reaction as chosen.
 //
-// It deliberately populates neither RecentReactions nor any user list:
-// message_reactions.reactor_id is stored but no surface discloses who reacted,
-// and a second projection is how the read paths would come to disagree.
-func reactionsToTL(reactions []store.Reaction) tg.MessageReactions {
+// It does not disclose other reactor identities through RecentReactions or a
+// user list.
+func reactionsToTL(reactions []store.Reaction, viewerID int64) tg.MessageReactions {
 	mr := tg.MessageReactions{
-		Results: make([]tg.ReactionCount, len(reactions)),
+		Results: make([]tg.ReactionCount, 0, len(reactions)),
 	}
-	for i, r := range reactions {
-		mr.Results[i] = tg.ReactionCount{
-			Reaction: &tg.ReactionEmoji{Emoticon: r.Reaction},
-			Count:    1,
+	resultByEmoji := make(map[string]int, len(reactions))
+	for _, r := range reactions {
+		if index, ok := resultByEmoji[r.Reaction]; ok {
+			result := &mr.Results[index]
+			result.Count++
+			if r.ReactorID == viewerID {
+				result.SetChosenOrder(1)
+			}
+			continue
 		}
+		result := tg.ReactionCount{Reaction: &tg.ReactionEmoji{Emoticon: r.Reaction}, Count: 1}
+		if r.ReactorID == viewerID {
+			result.SetChosenOrder(1)
+		}
+		resultByEmoji[r.Reaction] = len(mr.Results)
+		mr.Results = append(mr.Results, result)
 	}
 	return mr
 }
