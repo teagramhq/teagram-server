@@ -1538,6 +1538,49 @@ test("a post-sign-in reconnect replaces a closed account-slot socket", async (t)
   assert.equal(output.ok, true);
 });
 
+test("a sign-in replacement before the first validation is accepted in either event order", async (t) => {
+  for (const order of ["create-before-close", "close-before-create"]) {
+    await t.test(order, async (t) => {
+      const {progress, browserSession, wssAudit} = await proveSharedWorkerWss(t, {
+        workerSockets: workerSockets(4),
+      });
+      for (const event of ["req-dh-params", "set-client-dh", "init-connection", "password-challenge", "password-check"]) {
+        assert.equal(progress.observeClientEvent(event), true);
+      }
+      assert.equal(progress.markSignedIn(), true);
+
+      const createReplacement = () => {
+        browserSession.workerMessage("observer-worker", {
+          method: "Network.webSocketCreated",
+          params: {requestId: "worker-socket-before-first-validation", url: `wss://${targetHost}/apiws`},
+        });
+        browserSession.workerMessage("observer-worker", {
+          method: "Network.webSocketHandshakeResponseReceived",
+          params: {requestId: "worker-socket-before-first-validation", response: {status: 101}},
+        });
+      };
+      const closeOriginal = () => {
+        browserSession.workerMessage("observer-worker", {
+          method: "Network.webSocketClosed",
+          params: {requestId: "worker-socket-0", timestamp: 1},
+        });
+      };
+
+      if (order === "create-before-close") {
+        createReplacement();
+        closeOriginal();
+      } else {
+        closeOriginal();
+        createReplacement();
+      }
+
+      assert.equal(wssAudit.connections.size, 5);
+      assert.equal([...wssAudit.connections.values()].filter((connection) => !connection.closed).length, 4);
+      assert.deepEqual(wssAudit.validate(), {connectionCount: 5, status101: true});
+    });
+  }
+});
+
 test("a post-sign-in socket close without a replacement fails the WSS proof", async (t) => {
   const {progress, browserSession, wssAudit} = await proveSharedWorkerWss(t, {
     workerSockets: workerSockets(4),
