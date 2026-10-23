@@ -300,7 +300,7 @@ func (h *handlers) handleSendMediaAfterReplyOnConn(c *mtproto.Conn, r *mtproto.R
 	// Validate before any expensive work.
 	pollMedia, isPoll := req.Media.(*tg.InputMediaPoll)
 	stickerMedia, isSticker := req.Media.(*tg.InputMediaDocument)
-	if !isPoll && !isSticker && !validText(req.Message) {
+	if !isPoll && !validText(req.Message) {
 		return nil, nil, nil, errMessageEmpty
 	}
 	var descriptionEntities []store.PollDescriptionEntity
@@ -404,7 +404,7 @@ func (h *handlers) handleSendMediaAfterReplyOnConn(c *mtproto.Conn, r *mtproto.R
 	// send whose file is already gone gets, so a repeated random_id cannot be used
 	// to read which of the caller's posts were taken down or erased.
 	if req.RandomID != 0 && peerType == store.PeerTypeChannel && isSticker {
-		message, pts, duplicate, retryErr := h.store.ChannelStickerRetryAs(r.Ctx, toID, r.UserID, req.RandomID)
+		message, pts, duplicate, retryErr := h.store.ChannelStickerRetryAs(r.Ctx, toID, r.UserID, req.RandomID, stickerDocumentID)
 		switch {
 		case errors.Is(retryErr, store.ErrNotMember):
 			return nil, nil, nil, errPeerIDInvalid
@@ -415,8 +415,15 @@ func (h *handlers) handleSendMediaAfterReplyOnConn(c *mtproto.Conn, r *mtproto.R
 			h.log.Error("channel sticker retry", "user_id", r.UserID, "channel_id", toID, "err", retryErr)
 			return nil, nil, nil, errInternal
 		case duplicate:
-			if message.StickerDocumentID == nil || *message.StickerDocumentID != stickerDocumentID ||
-				!validStickerRetryIdentity(stickerInput.ID, stickerInput.AccessHash) {
+			if message.StickerDocumentID == nil || *message.StickerDocumentID != stickerDocumentID {
+				return nil, nil, nil, errMediaInvalid
+			}
+			valid, catalogErr := validStickerRetryIdentity(stickerInput.ID, stickerInput.AccessHash)
+			if catalogErr != nil {
+				h.log.Error("channel sticker retry catalogue", "user_id", r.UserID, "channel_id", toID, "err", catalogErr)
+				return nil, nil, nil, errInternal
+			}
+			if !valid {
 				return nil, nil, nil, errMediaInvalid
 			}
 			return h.channelPhotoSendResponse(r, &req, toID, message, pts)
@@ -481,9 +488,18 @@ func (h *handlers) handleSendMediaAfterReplyOnConn(c *mtproto.Conn, r *mtproto.R
 			return nil, nil, nil, errMediaInvalid
 		}
 		if ok {
-			if isSticker && (existing.StickerDocumentID == nil || *existing.StickerDocumentID != stickerDocumentID ||
-				!validStickerRetryIdentity(stickerInput.ID, stickerInput.AccessHash)) {
-				return nil, nil, nil, errMediaInvalid
+			if isSticker {
+				if existing.StickerDocumentID == nil || *existing.StickerDocumentID != stickerDocumentID {
+					return nil, nil, nil, errMediaInvalid
+				}
+				valid, catalogErr := validStickerRetryIdentity(stickerInput.ID, stickerInput.AccessHash)
+				if catalogErr != nil {
+					h.log.Error("sticker retry catalogue", "user_id", r.UserID, "err", catalogErr)
+					return nil, nil, nil, errInternal
+				}
+				if !valid {
+					return nil, nil, nil, errMediaInvalid
+				}
 			}
 			// Retry: return the stored message, at the pts it occupies, without
 			// rate-limiting or file assembly.
@@ -553,7 +569,12 @@ func (h *handlers) handleSendMediaAfterReplyOnConn(c *mtproto.Conn, r *mtproto.R
 	case isPhoto:
 		mediaRights = []string{"send_photos"}
 	case isSticker:
-		if !resolveStickerDocument(stickerInput.ID, stickerInput.AccessHash) {
+		valid, catalogErr := resolveStickerDocument(stickerInput.ID, stickerInput.AccessHash)
+		if catalogErr != nil {
+			h.log.Error("resolve sticker catalogue document", "user_id", r.UserID, "err", catalogErr)
+			return nil, nil, nil, errInternal
+		}
+		if !valid {
 			return nil, nil, nil, errMediaInvalid
 		}
 		mediaRights = []string{"send_stickers"}

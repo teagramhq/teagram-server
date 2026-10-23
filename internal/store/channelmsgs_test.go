@@ -129,6 +129,29 @@ func TestPostChannelMessageDedupsRandomID(t *testing.T) {
 	}
 }
 
+func TestPostChannelStickerRetryRequiresSameDocumentID(t *testing.T) {
+	t.Parallel()
+	s := open(t)
+	ctx := context.Background()
+	author := mustUser(t, s, "+15551260024")
+	ch := mustChannel(t, s, author.ID, "stickers").ID
+
+	first, firstPts, duplicate, err := s.PostChannelStickerAsWithEntities(ctx, ch, author.ID, "sticker", 2401, -2401, 0, nil)
+	if err != nil || duplicate {
+		t.Fatalf("first sticker post = %+v, pts %d, duplicate %t, err %v; want new post", first, firstPts, duplicate, err)
+	}
+
+	_, _, duplicate, err = s.PostChannelStickerAsWithEntities(ctx, ch, author.ID, "different sticker", 2401, -2402, 0, nil)
+	if !errors.Is(err, store.ErrMediaInvalid) || duplicate {
+		t.Fatalf("retry with different sticker = duplicate %t, err %v; want MEDIA_INVALID and no duplicate", duplicate, err)
+	}
+
+	again, againPts, duplicate, err := s.PostChannelStickerAsWithEntities(ctx, ch, author.ID, "sticker", 2401, -2401, 0, nil)
+	if err != nil || !duplicate || again.LocalID != first.LocalID || againPts != firstPts {
+		t.Fatalf("same-sticker retry = %+v, pts %d, duplicate %t, err %v; want original post at pts %d", again, againPts, duplicate, err, firstPts)
+	}
+}
+
 func TestChannelEventsWindowIsBounded(t *testing.T) {
 	t.Parallel()
 	s := open(t)

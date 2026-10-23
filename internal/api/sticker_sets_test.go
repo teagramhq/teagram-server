@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"path"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -345,6 +346,14 @@ func TestBuiltInStickerSendRendersToRecipientWithoutFileEntitlement(t *testing.T
 	if !ok {
 		t.Fatalf("first sticker document = %T, want *tg.Document", full.Documents[0])
 	}
+	available, ok := availableReactionsResponse(t, s, caller.ID, 0).(*tg.MessagesAvailableReactions)
+	if !ok || len(available.Reactions) == 0 {
+		t.Fatalf("available reactions = %#v, want a non-empty reaction catalogue", available)
+	}
+	reactionDocument, ok := available.Reactions[0].StaticIcon.(*tg.Document)
+	if !ok {
+		t.Fatalf("first reaction static icon = %T, want *tg.Document", available.Reactions[0].StaticIcon)
+	}
 
 	request := func(id, accessHash int64) error {
 		_, err := api.GetFileForTest(s, caller.ID, blobs, &tg.UploadGetFileRequest{
@@ -372,6 +381,7 @@ func TestBuiltInStickerSendRendersToRecipientWithoutFileEntitlement(t *testing.T
 		{name: "wrong catalogue hash", id: document.ID, access: document.AccessHash + 1},
 		{name: "unknown catalogue id", id: document.ID - 10_000, access: document.AccessHash},
 		{name: "positive files id", id: userDocument.ID, access: userDocument.AccessHash},
+		{name: "reaction document", id: reactionDocument.ID, access: reactionDocument.AccessHash},
 	} {
 		_, err := api.SendMediaForTest(s, caller.ID, blobs, api.TestMaxUserStorageBytes, &tg.MessagesSendMediaRequest{
 			Peer: api.InputPeerUser(caller.ID, receiver.ID),
@@ -383,6 +393,27 @@ func TestBuiltInStickerSendRendersToRecipientWithoutFileEntitlement(t *testing.T
 		if got := rpcMessage(t, err); got != "MEDIA_INVALID" {
 			t.Errorf("%s send = %q, want MEDIA_INVALID", tc.name, got)
 		}
+	}
+	for i, caption := range []string{string([]byte{0xff}), "bad\x00caption"} {
+		_, err := api.SendMediaForTest(s, caller.ID, blobs, api.TestMaxUserStorageBytes, &tg.MessagesSendMediaRequest{
+			Peer: api.InputPeerUser(caller.ID, receiver.ID),
+			Media: &tg.InputMediaDocument{ID: &tg.InputDocument{
+				ID: document.ID, AccessHash: document.AccessHash,
+			}},
+			Message: caption, RandomID: 4815162050 + int64(i),
+		})
+		if got := rpcMessage(t, err); got != "MESSAGE_EMPTY" {
+			t.Errorf("sticker caption %d error = %q, want MESSAGE_EMPTY", i, got)
+		}
+	}
+	if _, err := api.SendMediaForTest(s, caller.ID, blobs, api.TestMaxUserStorageBytes, &tg.MessagesSendMediaRequest{
+		Peer: api.InputPeerUser(caller.ID, receiver.ID),
+		Media: &tg.InputMediaDocument{ID: &tg.InputDocument{
+			ID: document.ID, AccessHash: document.AccessHash,
+		}},
+		RandomID: 4815162052,
+	}); err != nil {
+		t.Fatalf("empty sticker caption: %v", err)
 	}
 	for i, tc := range []struct {
 		name   string
@@ -418,6 +449,12 @@ func TestBuiltInStickerSendRendersToRecipientWithoutFileEntitlement(t *testing.T
 	senderDoc := documentOf(t, sent)
 	if senderDoc.ID != document.ID || senderDoc.AccessHash != document.AccessHash {
 		t.Fatalf("sender message document = (%d, %d), want catalogue document (%d, %d)", senderDoc.ID, senderDoc.AccessHash, document.ID, document.AccessHash)
+	}
+	if !reflect.DeepEqual(senderDoc.Attributes, document.Attributes) {
+		t.Fatalf("sender document attributes = %#v, want sticker-set attributes %#v", senderDoc.Attributes, document.Attributes)
+	}
+	if !hasStickerAttribute(senderDoc) {
+		t.Fatal("sender document has no DocumentAttributeSticker")
 	}
 	_, err = api.SendMediaForTest(s, caller.ID, blobs, api.TestMaxUserStorageBytes, &tg.MessagesSendMediaRequest{
 		Peer: api.InputPeerUser(caller.ID, receiver.ID),
@@ -468,6 +505,12 @@ func TestBuiltInStickerSendRendersToRecipientWithoutFileEntitlement(t *testing.T
 	if !ok || receivedDoc.ID != document.ID || receivedDoc.AccessHash != document.AccessHash {
 		t.Fatalf("recipient message document = %#v, want catalogue document (%d, %d)", receivedMedia.Document, document.ID, document.AccessHash)
 	}
+	if !reflect.DeepEqual(receivedDoc.Attributes, document.Attributes) {
+		t.Fatalf("recipient document attributes = %#v, want sticker-set attributes %#v", receivedDoc.Attributes, document.Attributes)
+	}
+	if !hasStickerAttribute(receivedDoc) {
+		t.Fatal("recipient document has no DocumentAttributeSticker")
+	}
 	if _, err := s.FileForDownload(context.Background(), document.ID, document.AccessHash, receiver.ID); err == nil {
 		t.Fatal("catalogue sticker unexpectedly acquired a files-table entitlement")
 	}
@@ -516,6 +559,15 @@ func TestBuiltInStickerSendRendersToRecipientWithoutFileEntitlement(t *testing.T
 	}()); !strings.HasPrefix(got, "FLOOD_WAIT_") {
 		t.Fatalf("second catalogue download = %q, want rate limit", got)
 	}
+}
+
+func hasStickerAttribute(document *tg.Document) bool {
+	for _, attribute := range document.Attributes {
+		if _, ok := attribute.(*tg.DocumentAttributeSticker); ok {
+			return true
+		}
+	}
+	return false
 }
 
 func TestCatalogueStickerUsesSendStickersRightInBasicGroupsAndForwards(t *testing.T) {

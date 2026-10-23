@@ -262,25 +262,25 @@ func (c *stickerSetCatalog) resolve(ref tg.InputStickerSetClass) (*builtInSticke
 	}
 }
 
-func resolveStickerDocument(id, accessHash int64) bool {
+func resolveStickerDocument(id, accessHash int64) (bool, error) {
 	catalog, err := getStickerSetCatalog()
 	if err != nil {
-		return false
+		return false, err
 	}
 	_, ok := catalog.documents[reactionDocumentIdentity{id: id, accessHash: accessHash}]
-	return ok
+	return ok, nil
 }
 
 // validStickerRetryIdentity keeps current catalogue identities exact while
 // allowing a retry for a catalogue id that has since gone stale to render its
 // stored message as unsupported.
-func validStickerRetryIdentity(id, accessHash int64) bool {
+func validStickerRetryIdentity(id, accessHash int64) (bool, error) {
 	catalog, err := getStickerSetCatalog()
 	if err != nil {
-		return false
+		return false, err
 	}
 	document, current := catalog.documentsByID[id]
-	return !current || document.AccessHash == accessHash
+	return !current || document.AccessHash == accessHash, nil
 }
 
 func (set *builtInStickerSet) responseSet(installedAt *time.Time) tg.StickerSet {

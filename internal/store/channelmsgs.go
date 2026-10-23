@@ -571,7 +571,7 @@ func (s *Store) ChannelPhotoRetryAs(
 		return ChannelMessage{}, 0, false, err
 	}
 
-	message, pts, duplicate, err := channelMessageRetry(ctx, qtx, channelID, fromID, randomID, nil, false, true, false)
+	message, pts, duplicate, err := channelMessageRetry(ctx, qtx, channelID, fromID, randomID, nil, false, true, nil)
 	if err != nil {
 		return ChannelMessage{}, 0, false, err
 	}
@@ -592,13 +592,16 @@ func (s *Store) ChannelPhotoRetryAs(
 // the caller's current channel posting rights have been checked under the
 // channel state lock.
 func (s *Store) ChannelStickerRetryAs(
-	ctx context.Context, channelID, fromID, randomID int64,
+	ctx context.Context, channelID, fromID, randomID, stickerDocumentID int64,
 ) (ChannelMessage, int, bool, error) {
 	if channelID == 0 || fromID == 0 {
 		return ChannelMessage{}, 0, false, ErrMessageInvalid
 	}
 	if randomID == 0 {
 		return ChannelMessage{}, 0, false, nil
+	}
+	if stickerDocumentID >= 0 {
+		return ChannelMessage{}, 0, false, ErrMediaInvalid
 	}
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
@@ -618,7 +621,7 @@ func (s *Store) ChannelStickerRetryAs(
 	if _, err = checkChannelMediaPostRights(ctx, qtx, channelID, fromID); err != nil {
 		return ChannelMessage{}, 0, false, err
 	}
-	message, pts, duplicate, err := channelMessageRetry(ctx, qtx, channelID, fromID, randomID, nil, false, false, true)
+	message, pts, duplicate, err := channelMessageRetry(ctx, qtx, channelID, fromID, randomID, nil, false, false, &stickerDocumentID)
 	if err != nil {
 		return ChannelMessage{}, 0, false, err
 	}
@@ -764,7 +767,7 @@ func (s *Store) ChannelTextMessageRetryAs(
 		return ChannelMessage{}, 0, false, err
 	}
 
-	message, pts, duplicate, err := channelMessageRetry(ctx, qtx, channelID, fromID, randomID, nil, true, false, false)
+	message, pts, duplicate, err := channelMessageRetry(ctx, qtx, channelID, fromID, randomID, nil, true, false, nil)
 	if err != nil {
 		return ChannelMessage{}, 0, false, err
 	}
@@ -821,7 +824,7 @@ func (s *Store) ChannelPollRetryAs(
 		return ChannelMessage{}, poll, 0, false, err
 	}
 
-	message, pts, duplicate, err := channelMessageRetry(ctx, qtx, channelID, fromID, randomID, &poll, false, false, false)
+	message, pts, duplicate, err := channelMessageRetry(ctx, qtx, channelID, fromID, randomID, &poll, false, false, nil)
 	if err != nil {
 		return ChannelMessage{}, poll, 0, false, err
 	}
@@ -901,7 +904,7 @@ func (s *Store) postChannelMessage(
 	// newer slot for an old post is how it skips whatever really sits there.
 	if randomID != 0 {
 		message, pts, duplicate, retryErr := channelMessageRetry(
-			ctx, qtx, channelID, fromID, randomID, pollResult, fileID == nil && stickerDocumentID == nil && pollDraft == nil, photoMedia, stickerDocumentID != nil,
+			ctx, qtx, channelID, fromID, randomID, pollResult, fileID == nil && stickerDocumentID == nil && pollDraft == nil, photoMedia, stickerDocumentID,
 		)
 		if retryErr != nil {
 			return ChannelMessage{}, 0, false, retryErr
@@ -1076,7 +1079,7 @@ func channelPostAuthorName(ctx context.Context, qtx *db.Queries, userID int64) (
 }
 
 func channelMessageRetry(
-	ctx context.Context, qtx *db.Queries, channelID, fromID, randomID int64, pollResult *Poll, textOnly, photoRetry, stickerRetry bool,
+	ctx context.Context, qtx *db.Queries, channelID, fromID, randomID int64, pollResult *Poll, textOnly, photoRetry bool, stickerDocumentID *int64,
 ) (ChannelMessage, int, bool, error) {
 	existing, err := channelMessageRowByRandomID(ctx, qtx, channelID, randomID)
 	if errors.Is(err, pgx.ErrNoRows) {
@@ -1140,8 +1143,10 @@ func channelMessageRetry(
 			return ChannelMessage{}, 0, false, ErrMediaInvalid
 		}
 	}
-	if stickerRetry && (existing.StickerDocumentID == nil || existing.FileID != nil) {
-		return ChannelMessage{}, 0, false, ErrMediaInvalid
+	if stickerDocumentID != nil {
+		if existing.StickerDocumentID == nil || *existing.StickerDocumentID != *stickerDocumentID || existing.FileID != nil {
+			return ChannelMessage{}, 0, false, ErrMediaInvalid
+		}
 	}
 	pts, err := newChannelPostPts(ctx, qtx, channelID, existing.LocalID)
 	if err != nil {

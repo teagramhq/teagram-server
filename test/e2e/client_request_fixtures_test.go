@@ -517,6 +517,7 @@ func TestSmokeClientRequestFixturesAreLayer228Shapes(t *testing.T) {
 		"messages_sendMedia.2",
 		"messages_sendMedia.3",
 		"messages_sendMedia.4",
+		"messages_sendMedia.sticker.1",
 		"messages_sendMedia.gif.1",
 		"messages_saveGif.1",
 		"messages_saveGif.2",
@@ -625,6 +626,7 @@ func testSmokeClientRequestFixtures(t *testing.T) {
 	const stickerSetShortName = "twemoji_reactions"
 	stickerSetRef := &tg.InputStickerSetShortName{ShortName: stickerSetShortName}
 	var stickerSet tg.StickerSet
+	var stickerDocument *tg.Document
 	if err := fixtureClientCall(t, creator, "messages_getAllStickers.1", func(ctx context.Context, api *tg.Client) error {
 		result, err := api.MessagesGetAllStickers(ctx, 0)
 		if err != nil {
@@ -647,6 +649,13 @@ func testSmokeClientRequestFixtures(t *testing.T) {
 			return fmt.Errorf("getStickerSet result = %T, want *tg.MessagesStickerSet", result)
 		}
 		stickerSet = full.Set
+		if len(full.Documents) == 0 {
+			return errors.New("getStickerSet returned no sticker documents")
+		}
+		stickerDocument, ok = full.Documents[0].(*tg.Document)
+		if !ok {
+			return fmt.Errorf("first sticker document = %T, want *tg.Document", full.Documents[0])
+		}
 		return nil
 	}); err != nil {
 		t.Fatalf("replay get-sticker-set fixture: %v", err)
@@ -1765,6 +1774,19 @@ func testSmokeClientRequestFixtures(t *testing.T) {
 			return nil
 		}); err != nil {
 			t.Fatalf("replay delete-chat fixture: %v", err)
+		}
+		if err := fixtureClientCall(t, creator, "messages_sendMedia.sticker.1", func(ctx context.Context, api *tg.Client) error {
+			_, err := api.MessagesSendMedia(ctx, &tg.MessagesSendMediaRequest{
+				Peer: peerUser(creator.id, member.id),
+				Media: &tg.InputMediaDocument{ID: &tg.InputDocument{
+					ID: stickerDocument.ID, AccessHash: stickerDocument.AccessHash, FileReference: stickerDocument.FileReference,
+				}},
+				Message:  "Catalogue sticker fixture",
+				RandomID: 13030301,
+			})
+			return err
+		}); err != nil {
+			t.Fatalf("replay catalogue sticker sendMedia fixture: %v", err)
 		}
 		return
 	}
