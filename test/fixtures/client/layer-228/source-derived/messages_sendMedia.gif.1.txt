@@ -1,0 +1,21 @@
+# source: gotd/td v0.162.0 layer-228 TL request
+body: { messages.sendMedia flags:#
+  flags: 0 [#],
+  peer: { inputPeerUser
+    user_id: <N> [LONG],
+    access_hash: <N> [LONG],
+  },
+  media: { inputMediaUploadedDocument flags:#
+    flags: 0 [#],
+    file: { inputFile
+      id: <N> [LONG],
+      parts: 1 [INT],
+      name: "smoke.gif" [STRING],
+      md5_checksum: <REDACTED> [STRING],
+    },
+    mime_type: "video/mp4" [STRING],
+    attributes: [{ documentAttributeAnimated }],
+  },
+  message: "fixture animated GIF" [STRING],
+  random_id: <N> [LONG],
+}

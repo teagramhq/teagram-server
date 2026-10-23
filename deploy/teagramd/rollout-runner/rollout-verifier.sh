@@ -375,9 +375,10 @@ snapshot_from_json() {
   local override_file=$4
   local compose_source=${5:-selected-compose-render}
   local snapshot_name=${6:-}
-  local mounts exposure resolved_config canonical_compose container_env container_id image_id state exit_code started_at finished_at grace stop_timeout mode_source
+  local mounts exposure exposure_for_hash resolved_config canonical_compose container_env container_id image_id state exit_code started_at finished_at grace stop_timeout mode_source
   local mounts_sha exposure_sha config_sha env_sha override_sha container_env_sha mount_count
   local compose_replica_count compose_client_addr_trust container_replica_count container_client_addr_trust
+  local compose_public_ws_2446 exposure_public_ws_2446
   local added_env_names changed_env_names container_env_added container_env_changed retained_added_env_names
 
   if [ ! -f "$env_file" ] || [ "$(stat -c %a "$env_file")" != 600 ]; then
@@ -392,6 +393,26 @@ snapshot_from_json() {
   verify_safe_public_environment \
     "$inspect_json" "$compose_json" "$env_file" "$added_env_names" "$changed_env_names" \
     "$snapshot_name" "$compose_source" || return 1
+  if [ "$compose_source" = selected-compose-render ]; then
+    compose_public_ws_2446=$(printf '%s' "$compose_json" | jq -r '
+      def approved_public_ws_port:
+        type == "object" and
+        ((.target | tostring) == "2446") and
+        ((.published | tostring) == "2446") and
+        .host_ip == "127.0.0.1" and
+        ((.protocol // "tcp") == "tcp") and
+        ((.mode // "") == "" or (.mode // "") == "ingress") and
+        ((keys - ["target", "published", "host_ip", "protocol", "mode"]) | length) == 0;
+      (.services.teagramd.ports // []) as $ports
+      | if ($ports | type) != "array" then error("resolved service ports must be an array") else
+          [$ports[] | select(approved_public_ws_port)] as $approved
+          | if ($approved | length) > 1 then error("approved public WebSocket port is duplicated")
+            else (($approved | length) == 1) end
+        end
+    ') || return 1
+  else
+    compose_public_ws_2446=not-captured
+  fi
   if [ "$compose_source" = selected-compose-render ]; then
     verify_turnstile_compose_configuration "$compose_json" || return 1
     verify_turnstile_container_configuration \
@@ -423,6 +444,26 @@ snapshot_from_json() {
              | sort_by(.host_ip, .host_port))})
     | sort_by(.container_port)
   ')
+  exposure_public_ws_2446=$(printf '%s' "$exposure" | jq -r '
+    [.[] | select(.container_port == "2446/tcp") | .bindings[]
+      | select(.host_ip == "127.0.0.1" and .host_port == "2446")] as $approved
+    | if ($approved | length) > 1 then error("approved public WebSocket exposure is duplicated")
+      else (($approved | length) == 1) end
+  ') || return 1
+  if [ "$compose_source" = selected-compose-render ] && \
+     { [ "$snapshot_name" = baseline ] || [ "$snapshot_name" = target ] || [ "$snapshot_name" = rollback ]; } && \
+     [ "$compose_public_ws_2446" != "$exposure_public_ws_2446" ]; then
+    printf '%s\n' 'resolved Compose public WebSocket port does not match the inspected container' >&2
+    return 1
+  fi
+  exposure_for_hash=$(printf '%s' "$exposure" | jq -ce '
+    map(
+      if .container_port == "2446/tcp" then
+        .bindings |= map(select(.host_ip != "127.0.0.1" or .host_port != "2446"))
+        | select((.bindings | length) > 0)
+      else . end
+    )
+  ') || return 1
   container_replica_count=$(printf '%s' "$inspect_json" | jq -er '
     def item: if type == "array" then .[0] else . end;
     (item.Config.Env // []) as $env
@@ -547,9 +588,11 @@ snapshot_from_json() {
       .services.teagramd as $s
       | {
           stop_grace_period:($s.stop_grace_period // ""),
-          ports:(($s.ports // [])
+      ports:(($s.ports // [])
             | map({target:(.target // 0 | tostring), published:(.published // "" | tostring),
                    host_ip:(.host_ip // ""), protocol:(.protocol // "tcp"), mode:(.mode // "")})
+            | map(select(.target != "2446" or .published != "2446" or .host_ip != "127.0.0.1" or
+                         .protocol != "tcp" or (.mode != "" and .mode != "ingress")))
             | sort_by(.host_ip, .published, .target, .protocol, .mode)),
           volumes:(($s.volumes // [])
             | map(select((.type == "bind" and .source == $mode_source and
@@ -562,6 +605,14 @@ snapshot_from_json() {
         }
     ')
     canonical_compose=$(printf '%s' "$compose_json" | jq -ceS --arg mode_source "$mode_source" '
+      def approved_public_ws_port:
+        type == "object" and
+        ((.target | tostring) == "2446") and
+        ((.published | tostring) == "2446") and
+        .host_ip == "127.0.0.1" and
+        ((.protocol // "tcp") == "tcp") and
+        ((.mode // "") == "" or (.mode // "") == "ingress") and
+        ((keys - ["target", "published", "host_ip", "protocol", "mode"]) | length) == 0;
       if (.services.teagramd.environment | type) != "object" then error("teagramd environment must be an object") else
         .services.teagramd.environment |= del(
           .TG_REPLICA_COUNT, .TG_CLIENT_ADDR_TRUST,
@@ -571,6 +622,8 @@ snapshot_from_json() {
           .TG_TURNSTILE_SITE_KEY, .TG_TURNSTILE_SECRET_KEY_FILE,
           .TG_TURNSTILE_SIGNIN_ENABLED)
       end
+      | .services.teagramd.ports = ((.services.teagramd.ports // []) | map(select(approved_public_ws_port | not)))
+      | if (.services.teagramd.ports | length) == 0 then del(.services.teagramd.ports) else . end
       | if (.services.teagramd.secrets | type) == "array" then
           .services.teagramd.secrets |= map(select(.source != "teagramd_turnstile"))
         else . end
@@ -606,7 +659,7 @@ snapshot_from_json() {
   fi
   mount_count=$(printf '%s' "$mounts" | jq -er 'length')
   mounts_sha=$(sha256_text "$mounts")
-  exposure_sha=$(sha256_text "$exposure")
+  exposure_sha=$(sha256_text "$exposure_for_hash")
   container_env_sha=$(sha256_text "$container_env")
 
   jq -cnS \
@@ -622,6 +675,8 @@ snapshot_from_json() {
     --arg compose_client_addr_trust "$compose_client_addr_trust" \
     --arg container_replica_count "$container_replica_count" \
     --arg container_client_addr_trust "$container_client_addr_trust" \
+    --arg compose_public_ws_2446 "$compose_public_ws_2446" \
+    --arg exposure_public_ws_2446 "$exposure_public_ws_2446" \
     --arg mount_count "$mount_count" \
     --arg mounts_sha "$mounts_sha" \
     --arg exposure_sha "$exposure_sha" \
@@ -638,6 +693,8 @@ snapshot_from_json() {
       container_stop_timeout:$stop_timeout,
       compose_replica_count:$compose_replica_count,
       compose_client_addr_trust:$compose_client_addr_trust,
+      compose_public_ws_2446:$compose_public_ws_2446,
+      exposure_public_ws_2446:$exposure_public_ws_2446,
       container_replica_count:$container_replica_count,
       container_client_addr_trust:$container_client_addr_trust,
       mount_count:($mount_count|tonumber),mounts_sha256:$mounts_sha,
@@ -804,6 +861,8 @@ compare_snapshots() {
       (.container_stop_timeout | type == "number" and . >= 0 and . == floor) and
       (.compose_replica_count | type == "string" and test("^(unset|invalid|[0-9]{1,3})$")) and
       (.compose_client_addr_trust | type == "string" and IN("unset","invalid","socket")) and
+      (.compose_public_ws_2446 | type == "string" and IN("true","false","not-captured")) and
+      (.exposure_public_ws_2446 | type == "string" and IN("true","false")) and
       (.container_replica_count | type == "string" and test("^(unset|invalid|duplicate|[0-9]{1,3})$")) and
       (.container_client_addr_trust | type == "string" and IN("unset","invalid","duplicate","socket")) and
       (.mount_count | type == "number" and . >= 0) and
@@ -824,6 +883,8 @@ compare_snapshots() {
       (.container_stop_timeout | type == "number" and . >= 0 and . == floor) and
       (.compose_replica_count | type == "string" and test("^(unset|invalid|[0-9]{1,3})$")) and
       (.compose_client_addr_trust | type == "string" and IN("unset","invalid","socket")) and
+      (.compose_public_ws_2446 | type == "string" and IN("true","false","not-captured")) and
+      (.exposure_public_ws_2446 | type == "string" and IN("true","false")) and
       (.container_replica_count | type == "string" and test("^(unset|invalid|duplicate|[0-9]{1,3})$")) and
       (.container_client_addr_trust | type == "string" and IN("unset","invalid","duplicate","socket")) and
       (.mount_count | type == "number" and . >= 0) and
@@ -847,6 +908,19 @@ compare_snapshots() {
     if ! before_value=$(jq -er --arg field "$field" '.[$field]' "$before_file"); then return 1; fi
     if ! after_value=$(jq -er --arg field "$field" '.[$field]' "$after_file"); then return 1; fi
     if [ "$before_value" = "$after_value" ]; then result=pass; else result=fail; fi
+    if ! record_comparison "$result_file" "$field" "$before_value" "$after_value" "$result"; then
+      printf '%s\n' "failed to persist comparison result: $field" >&2
+      return 1
+    fi
+  done
+  for field in compose_public_ws_2446 exposure_public_ws_2446; do
+    if ! before_value=$(jq -er --arg field "$field" '.[$field]' "$before_file"); then return 1; fi
+    if ! after_value=$(jq -er --arg field "$field" '.[$field]' "$after_file"); then return 1; fi
+    if [ "$before_value" = "$after_value" ] || { [ "$before_value" = false ] && [ "$after_value" = true ]; }; then
+      result=pass
+    else
+      result=fail
+    fi
     if ! record_comparison "$result_file" "$field" "$before_value" "$after_value" "$result"; then
       printf '%s\n' "failed to persist comparison result: $field" >&2
       return 1

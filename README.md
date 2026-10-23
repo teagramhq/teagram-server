@@ -111,6 +111,7 @@ The development deployment runs `777742c`, deployed on 2026-10-10 through the lo
 | [docs/catalog.md](docs/catalog.md) | Catalog and RPC support reference |
 | [docs/observability.md](docs/observability.md) | Admin metrics, dashboards, and operations |
 | [docs/security.md](docs/security.md) | Security model and controls |
+| [docs/public-websocket-threat-model.md](docs/public-websocket-threat-model.md) | Public WebSocket ingress, authentication, and abuse controls |
 | [docs/mixed-trust-compose.md](docs/mixed-trust-compose.md) | Optional mixed-trust Compose topology |
 | [docs/migrations.md](docs/migrations.md) | Atlas migration workflow |
 | [docs/testing.md](docs/testing.md) | Test harness and local test workflow |

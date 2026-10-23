@@ -48,7 +48,14 @@ func TestGetAvailableReactionsReturnsStableStandardDocuments(t *testing.T) {
 	if len(first.Reactions) != len(wantEmoticons) {
 		t.Fatalf("available reactions = %d, want %d", len(first.Reactions), len(wantEmoticons))
 	}
+	// This asset-only hash omitted the document metadata from older responses.
+	const previousReactionCatalogHash = 1491138664
+	previousHashResult := availableReactionsResponse(t, nil, 7, previousReactionCatalogHash)
+	if _, ok := previousHashResult.(*tg.MessagesAvailableReactions); !ok {
+		t.Fatalf("previous reaction hash result = %T, want a refreshed reaction list", previousHashResult)
+	}
 
+	var missingDates []string
 	for i, want := range wantEmoticons {
 		reaction := first.Reactions[i]
 		if reaction.Reaction != want {
@@ -63,6 +70,12 @@ func TestGetAvailableReactionsReturnsStableStandardDocuments(t *testing.T) {
 		}
 
 		animation := requireReactionDocument(t, reaction.AppearAnimation, want, "application/x-tgsticker", ".tgs")
+		if static.Date == 0 {
+			missingDates = append(missingDates, want+" static")
+		}
+		if animation.Date == 0 {
+			missingDates = append(missingDates, want+" animation")
+		}
 		if got := reactionFilename(t, animation); got != "AnimatedSticker.tgs" {
 			t.Errorf("reaction %q TGS filename = %q, want client-recognized AnimatedSticker.tgs", want, got)
 		}
@@ -82,6 +95,9 @@ func TestGetAvailableReactionsReturnsStableStandardDocuments(t *testing.T) {
 		} else if got := requireReactionDocument(t, around, want, "application/x-tgsticker", ".tgs"); !sameReactionDocument(got, animation) {
 			t.Errorf("reaction %q around_animation does not reference its TGS document", want)
 		}
+	}
+	if len(missingDates) > 0 {
+		t.Errorf("reaction document dates are zero, so Teagram Desktop ignores their fields: %s", strings.Join(missingDates, ", "))
 	}
 
 	secondResult := availableReactionsResponse(t, nil, 7, 0)
