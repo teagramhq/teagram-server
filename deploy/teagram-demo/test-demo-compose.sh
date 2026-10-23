@@ -145,9 +145,8 @@ for active in ("teagramd", "teagramd-next"):
 PY
 
 (
+  # shellcheck source=deploy/teagram-demo/demo-common.sh
   source "$SCRIPT_DIR/demo-common.sh"
-  DEMO_STATE_DIR="$TMP_DIR/production-validator-state"
-  DEMO_CLIENT_CONFIG_DIR="$DEMO_STATE_DIR/public-client"
   demo_prepare_client_config_dir() { :; }
   demo_prepare_haproxy_runtime() { :; }
   demo_compose() { cat "$TMP_DIR/target.json"; }
