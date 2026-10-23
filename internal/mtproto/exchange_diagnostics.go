@@ -77,11 +77,15 @@ type transportCloseReason string
 
 const (
 	transportCloseReasonClientClose transportCloseReason = "client close"
+	transportCloseReasonServerClose transportCloseReason = "server close"
 	transportCloseReasonServerError transportCloseReason = "server error"
 	transportCloseReasonTimeout     transportCloseReason = "timeout"
 )
 
 func classifyTransportCloseReason(err error) transportCloseReason {
+	if err == nil {
+		return transportCloseReasonServerClose
+	}
 	var netErr net.Error
 	if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, os.ErrDeadlineExceeded) {
 		return transportCloseReasonTimeout

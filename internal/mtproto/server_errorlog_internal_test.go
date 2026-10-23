@@ -13,6 +13,7 @@ import (
 	"net/netip"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -469,10 +470,129 @@ func TestTransportCloseLogReportsLastKeyExchangeStepWithoutSensitiveFields(t *te
 	if record.attrs["transport"] != "TCP" || record.attrs["step"] != "resPQ sent" || record.attrs["reason"] != "client close" {
 		t.Fatalf("transport close record = %+v, want TCP/resPQ sent/client close", record)
 	}
+	if got := record.attrs["suppressed"]; got != int64(0) {
+		t.Errorf("suppressed close records = %v, want 0", got)
+	}
 	for key := range record.attrs {
-		if key != "transport" && key != "step" && key != "reason" {
+		if key != "transport" && key != "step" && key != "reason" && key != "suppressed" {
 			t.Errorf("transport close record contains unexpected attribute %q: %+v", key, record.attrs)
 		}
+	}
+}
+
+type transportCloseDrainTestConn struct {
+	frame      []byte
+	reads      int
+	secondRead chan struct{}
+	closed     chan struct{}
+	closeOnce  sync.Once
+}
+
+func (c *transportCloseDrainTestConn) Recv(ctx context.Context, b *bin.Buffer) error {
+	c.reads++
+	if c.reads == 1 {
+		b.ResetTo(c.frame)
+		return nil
+	}
+	if c.reads == 2 {
+		close(c.secondRead)
+	}
+	select {
+	case <-c.closed:
+		return net.ErrClosed
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+func (*transportCloseDrainTestConn) Send(context.Context, *bin.Buffer) error { return nil }
+
+func (c *transportCloseDrainTestConn) Close() error {
+	c.closeOnce.Do(func() { close(c.closed) })
+	return nil
+}
+
+func TestServeConnDrainLogsAuthorizedServerCloseAtDebug(t *testing.T) {
+	sink := &serverErrorLogSink{}
+	key := shutdownTestAuthKey()
+	keys := &shutdownLookupAuthKeyStore{
+		key:     key,
+		blocked: make(chan struct{}),
+		release: make(chan struct{}),
+	}
+	server := New(exchange.PrivateKey{}, 2, keys, nil, slog.New(sink))
+	server.shutdown.drainTimeout = 2 * time.Second
+	server.shutdown.retirementWindow = 0
+	server.shutdown.retirementSlots = 1
+	server.shutdown.startServing()
+	conn := &transportCloseDrainTestConn{
+		frame:      shutdownClientFrame(t, key, 42, 1<<32, &mt.PingRequest{PingID: 1}),
+		secondRead: make(chan struct{}),
+		closed:     make(chan struct{}),
+	}
+	done := make(chan error, 1)
+	go func() {
+		done <- server.serveConnMode(
+			server.shutdown.requestCtx,
+			server.shutdown.requestCtx,
+			conn,
+			netip.Addr{},
+			nil,
+			nil,
+			false,
+			transportTCP,
+			server.handler,
+		)
+	}()
+	finished := false
+	t.Cleanup(func() {
+		server.shutdown.beginDrain()
+		if !finished {
+			select {
+			case err := <-done:
+				if err != nil {
+					t.Errorf("serve connection during cleanup: %v", err)
+				}
+			case <-time.After(3 * time.Second):
+				t.Error("serve connection did not stop during cleanup")
+			}
+		}
+		stopShutdownTimers(server.shutdown)
+		server.shutdown.finishServing()
+	})
+	select {
+	case <-conn.secondRead:
+	case <-time.After(3 * time.Second):
+		t.Fatal("authorized connection did not start its idle read")
+	}
+	server.shutdown.beginDrain()
+	select {
+	case err := <-done:
+		finished = true
+		if err != nil {
+			t.Fatalf("serve connection during drain: %v", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("serve connection did not finish draining")
+	}
+
+	var closeRecords []serverErrorLogRecord
+	for _, record := range sink.records {
+		if record.message == "transport connection closed" {
+			closeRecords = append(closeRecords, record)
+		}
+	}
+	if len(closeRecords) != 1 {
+		t.Fatalf("transport close records = %d, want one; all records: %+v", len(closeRecords), sink.records)
+	}
+	if got := closeRecords[0].attrs["reason"]; got != "server close" {
+		t.Errorf("drain close reason = %v, want server close", got)
+	}
+	if got := closeRecords[0].attrs["step"]; got != "authorized" {
+		t.Errorf("drain close step = %v, want authorized", got)
+	}
+	if got := closeRecords[0].level; got != slog.LevelDebug {
+		t.Errorf("drain close level = %v, want DEBUG", got)
 	}
 }
 
@@ -484,6 +604,7 @@ func TestTransportCloseReasonClassifiesClientCloseTimeoutAndServerError(t *testi
 	}{
 		{name: "peer EOF", err: io.EOF, want: transportCloseReasonClientClose},
 		{name: "truncated peer frame", err: io.ErrUnexpectedEOF, want: transportCloseReasonClientClose},
+		{name: "server-initiated close", err: nil, want: transportCloseReasonServerClose},
 		{name: "timeout", err: context.DeadlineExceeded, want: transportCloseReasonTimeout},
 		{name: "server failure", err: errors.New("write failed"), want: transportCloseReasonServerError},
 	} {

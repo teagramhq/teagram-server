@@ -157,6 +157,9 @@ type Server struct {
 	globalCapLog logSampler
 	netCapLog    logSampler
 	ceilingLog   logSampler
+	// A pre-auth close is one more line a peer can provoke per socket; keep its
+	// sampling window independent from the other pre-auth events.
+	preAuthCloseLog logSampler
 	// unboundKeys bounds what one auth key with nobody signed in on it may
 	// hold, which is what the pre-auth bounds stop counting and the per-user cap
 	// never starts. Written once before Serve and only read after, like proxyV2.
@@ -634,6 +637,7 @@ func (s *Server) serveSocket(sock net.Conn, slot *preAuthSlot) {
 	// negotiating population unbounded per network, which is the population a
 	// flood consists of.
 	if !slot.keyAddr(addr) {
+		logCloseDiagnostics = false
 		s.dropRefused(sock)
 		if dropped, ok := s.netCapLog.allow(time.Now(), preAuthLogInterval); ok {
 			s.log.Info("connection refused at the per-network pre-auth cap",
@@ -729,14 +733,22 @@ func (s *Server) logConnectionFailure(err error) {
 func (s *Server) logTransportClose(diagnostics *transportCloseDiagnostics, err error) {
 	reason := classifyTransportCloseReason(err)
 	level := slog.LevelInfo
-	if diagnostics.step == transportCloseStepAuthorized && reason == transportCloseReasonClientClose {
+	if diagnostics.step == transportCloseStepAuthorized && (reason == transportCloseReasonClientClose || reason == transportCloseReasonServerClose) {
 		level = slog.LevelDebug
 	}
-	s.log.Log(context.Background(), level, "transport connection closed",
+	attrs := []any{
 		"transport", diagnostics.transport,
 		"step", string(diagnostics.step),
 		"reason", string(reason),
-	)
+	}
+	if diagnostics.step != transportCloseStepAuthorized {
+		dropped, ok := s.preAuthCloseLog.allow(time.Now(), preAuthLogInterval)
+		if !ok {
+			return
+		}
+		attrs = append(attrs, "suppressed", dropped)
+	}
+	s.log.Log(context.Background(), level, "transport connection closed", attrs...)
 }
 
 func (s *Server) logServerFailure(category serverFailureCategory, details ...any) {

@@ -8,6 +8,7 @@ import (
 	"io"
 	"log/slog"
 	"net"
+	"net/netip"
 	"testing"
 	"time"
 
@@ -65,6 +66,108 @@ func TestServeSocketLogsCloseBeforeCodecDetection(t *testing.T) {
 	}
 
 	assertSingleTransportCloseRecord(t, sink.records, "TCP", "none", "client close")
+}
+
+func TestServeSocketThrottlesPreAuthCloseLogs(t *testing.T) {
+	sink := &serverErrorLogSink{}
+	server := New(exchange.PrivateKey{}, 2, NewMemoryAuthKeyStore(), nil, slog.New(sink))
+	const connections = 8
+	for range connections {
+		client, serverSocket := net.Pipe()
+		if err := client.Close(); err != nil {
+			t.Fatalf("close client: %v", err)
+		}
+		slot, ok := server.preAuth.admit()
+		if !ok {
+			t.Fatal("pre-auth slot unavailable")
+		}
+		server.serveSocket(serverSocket, slot)
+	}
+
+	var closeRecords []serverErrorLogRecord
+	for _, record := range sink.records {
+		if record.message == "transport connection closed" {
+			closeRecords = append(closeRecords, record)
+		}
+	}
+	if len(closeRecords) != 1 {
+		t.Fatalf("transport close records = %d, want one after %d closed connections: %+v", len(closeRecords), connections, sink.records)
+	}
+	assertTransportCloseRecord(t, closeRecords[0], "TCP", "none", "client close")
+	server.preAuthCloseLog.last.Store(time.Now().Add(-preAuthLogInterval).UnixNano())
+	client, serverSocket := net.Pipe()
+	if err := client.Close(); err != nil {
+		t.Fatalf("close client after sampled interval: %v", err)
+	}
+	slot, ok := server.preAuth.admit()
+	if !ok {
+		t.Fatal("pre-auth slot unavailable after sampled interval")
+	}
+	server.serveSocket(serverSocket, slot)
+
+	closeRecords = closeRecords[:0]
+	for _, record := range sink.records {
+		if record.message == "transport connection closed" {
+			closeRecords = append(closeRecords, record)
+		}
+	}
+	if len(closeRecords) != 2 {
+		t.Fatalf("transport close records after sampled interval = %d, want two: %+v", len(closeRecords), sink.records)
+	}
+	if got := closeRecords[1].attrs["suppressed"]; got != int64(connections-1) {
+		t.Errorf("suppressed close records = %v, want %d", got, connections-1)
+	}
+}
+
+func TestServeSocketSkipsTransportCloseLogOnPerNetworkRefusal(t *testing.T) {
+	sink := &serverErrorLogSink{}
+	server := New(exchange.PrivateKey{}, 2, NewMemoryAuthKeyStore(), nil, slog.New(sink))
+	if err := server.SetPreAuthLimits(PreAuthLimits{MaxConns: 2, MaxConnsPerNet: 1}); err != nil {
+		t.Fatalf("set pre-auth limits: %v", err)
+	}
+
+	heldSlot, ok := server.preAuth.admit()
+	if !ok {
+		t.Fatal("first pre-auth slot unavailable")
+	}
+	if !heldSlot.keyAddr(netip.MustParseAddr("127.0.0.1")) {
+		t.Fatal("first connection was refused at the per-network cap")
+	}
+	t.Cleanup(heldSlot.clear)
+
+	listener, err := (&net.ListenConfig{}).Listen(t.Context(), "tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := listener.Close(); err != nil && !errors.Is(err, net.ErrClosed) {
+			t.Errorf("close listener: %v", err)
+		}
+	})
+	client, err := (&net.Dialer{}).DialContext(t.Context(), "tcp", listener.Addr().String())
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := client.Close(); err != nil && !errors.Is(err, net.ErrClosed) {
+			t.Errorf("close client: %v", err)
+		}
+	})
+	serverSocket, err := listener.Accept()
+	if err != nil {
+		t.Fatalf("accept: %v", err)
+	}
+	slot, ok := server.preAuth.admit()
+	if !ok {
+		t.Fatal("second pre-auth slot unavailable")
+	}
+	server.serveSocket(serverSocket, slot)
+
+	for _, record := range sink.records {
+		if record.message == "transport connection closed" {
+			t.Fatalf("per-network refusal emitted a transport-close record: %+v", record)
+		}
+	}
 }
 
 func TestServeSocketLogsPreAuthLifetimeExpiryAsTimeout(t *testing.T) {
@@ -334,7 +437,7 @@ func assertTransportCloseRecord(t *testing.T, record serverErrorLogRecord, trans
 		t.Fatalf("transport close record = %+v, want %s/%s/%s", record, transport, step, reason)
 	}
 	for key := range record.attrs {
-		if key != "transport" && key != "step" && key != "reason" {
+		if key != "transport" && key != "step" && key != "reason" && key != "suppressed" {
 			t.Errorf("transport close record contains unexpected attribute %q: %+v", key, record)
 		}
 	}
