@@ -37,6 +37,15 @@ func TestStickerSetInstallListsDownloadsAndUninstallsCatalogue(t *testing.T) {
 	if got := installStickerSet(t, h, owner.ID, shortRef); got != "success" {
 		t.Fatalf("install result = %q, want success", got)
 	}
+	installedResponse := getStickerSet(t, h, owner.ID, shortRef, 0)
+	installedDate, installed := installedResponse.Set.GetInstalledDate()
+	if !installed || installedDate <= 0 {
+		t.Errorf("getStickerSet installed date = %d, present %t, want a positive date", installedDate, installed)
+	}
+	otherResponse := getStickerSet(t, h, other.ID, shortRef, 0)
+	if otherDate, otherInstalled := otherResponse.Set.GetInstalledDate(); otherInstalled {
+		t.Errorf("other account getStickerSet installed date = %d, want absent", otherDate)
+	}
 	ownerSets := getAllStickerSets(t, h, owner.ID, 0)
 	if len(ownerSets.Sets) != 1 {
 		t.Fatalf("owner sticker sets = %d, want one", len(ownerSets.Sets))
@@ -81,6 +90,9 @@ func TestStickerSetInstallListsDownloadsAndUninstallsCatalogue(t *testing.T) {
 		document, ok := class.(*tg.Document)
 		if !ok {
 			t.Fatalf("document %d = %T, want *tg.Document", i, class)
+		}
+		if document.Date != 1_735_689_600 {
+			t.Errorf("document %d date = %d, want stable 2025-01-01 UTC timestamp", i, document.Date)
 		}
 		if document.ID >= 0 || document.AccessHash == 0 || document.MimeType != "image/webp" || document.Size <= 0 {
 			t.Errorf("document %d identity/metadata = id %d hash %d MIME %q size %d", i, document.ID, document.AccessHash, document.MimeType, document.Size)
@@ -138,6 +150,10 @@ func TestStickerSetInstallListsDownloadsAndUninstallsCatalogue(t *testing.T) {
 	}
 	if !uninstallStickerSet(t, h, owner.ID, byID) {
 		t.Fatal("uninstall of an absent set returned false")
+	}
+	removedSet := getStickerSet(t, h, owner.ID, byID, 0).Set
+	if _, ok := removedSet.GetInstalledDate(); ok {
+		t.Error("getStickerSet after uninstall still has an installed date")
 	}
 	removed := getAllStickerSetResult(t, h, owner.ID, ownerSets.Hash)
 	if removed == nil || len(removed.Sets) != 0 || removed.Hash == ownerSets.Hash {

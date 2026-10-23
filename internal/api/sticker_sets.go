@@ -23,6 +23,7 @@ import (
 const (
 	twemojiReactionSetShortName = "twemoji_reactions"
 	twemojiReactionSetTitle     = "Twemoji Reactions"
+	twemojiReactionDocumentDate = 1_735_689_600 // 2025-01-01 00:00:00 UTC.
 	stickerSetRateLimitSurface  = "sticker_set_mutation"
 	maxStickerSetShortNameBytes = 64
 )
@@ -130,6 +131,7 @@ func buildStickerSetCatalog() (*stickerSetCatalog, error) {
 			ID:            id,
 			AccessHash:    accessHash,
 			FileReference: bytes.Clone(digest[16:]),
+			Date:          twemojiReactionDocumentDate,
 			MimeType:      "image/webp",
 			Size:          int64(len(data)),
 			Attributes: []tg.DocumentAttributeClass{
@@ -335,8 +337,20 @@ func (h *handlers) handleGetStickerSet(r *mtproto.Request) (bin.Encoder, error) 
 	if req.Hash == set.set.Hash {
 		return &tg.MessagesStickerSetNotModified{}, nil
 	}
+	installed, err := h.store.InstalledStickerSets(r.Ctx, r.UserID)
+	if err != nil {
+		h.log.Error("load installed sticker sets", "user_id", r.UserID, "err", err)
+		return nil, errInternal
+	}
+	var installedAt *time.Time
+	for _, item := range installed {
+		if item.ID == set.set.ID {
+			installedAt = &item.InstalledAt
+			break
+		}
+	}
 	return &tg.MessagesStickerSet{
-		Set:       set.responseSet(nil),
+		Set:       set.responseSet(installedAt),
 		Packs:     append([]tg.StickerPack(nil), set.packs...),
 		Keywords:  []tg.StickerKeyword{},
 		Documents: set.responseDocuments(h.dcID),
