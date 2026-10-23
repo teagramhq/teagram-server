@@ -1925,7 +1925,10 @@ make_real_git_fixture real-git-gate-rejection-restores-modes real-git-gate-rejec
 checkout=$(cat "$TMP/real-git-gate-rejection-restores-modes-checkout-path")
 state=$(cat "$TMP/real-git-gate-rejection-restores-modes-state-path")
 baseline_sha=$(cat "$TMP/real-git-gate-rejection-restores-modes-baseline-sha-path")
-printf '%s\n' 1 > "$TMP/real-git-gate-rejection-restores-modes-adopt-env"
+mkdir -m 700 "$checkout/.state"
+env_sha=$(sha256sum "$checkout/.env" | awk '{print $1}')
+printf 'env_sha256=%s source_sha=%s\n' "$env_sha" "$baseline_sha" > "$checkout/.state/rollout-env"
+chmod 600 "$checkout/.state/rollout-env"
 status=$(run_fixture real-git-gate-rejection-restores-modes built 0 '' 2 '' '' apply)
 if [ "$status" != 0 ] && \
    grep -q 'pinned gate hashes changed after fast-forward; target was not started' "$TMP/real-git-gate-rejection-restores-modes.stderr" && \
@@ -1945,7 +1948,10 @@ make_real_git_fixture real-git-preflight-rejection-restores-modes config-drift
 checkout=$(cat "$TMP/real-git-preflight-rejection-restores-modes-checkout-path")
 state=$(cat "$TMP/real-git-preflight-rejection-restores-modes-state-path")
 baseline_sha=$(cat "$TMP/real-git-preflight-rejection-restores-modes-baseline-sha-path")
-printf '%s\n' 1 > "$TMP/real-git-preflight-rejection-restores-modes-adopt-env"
+mkdir -m 700 "$checkout/.state"
+env_sha=$(sha256sum "$checkout/.env" | awk '{print $1}')
+printf 'env_sha256=%s source_sha=%s\n' "$env_sha" "$baseline_sha" > "$checkout/.state/rollout-env"
+chmod 600 "$checkout/.state/rollout-env"
 status=$(run_fixture real-git-preflight-rejection-restores-modes built 0 '' 2 '' '' apply)
 if [ "$status" != 0 ] && \
    grep -q 'resolved Compose preflight rejected unapproved drift; target was not started' "$TMP/real-git-preflight-rejection-restores-modes.stderr" && \
