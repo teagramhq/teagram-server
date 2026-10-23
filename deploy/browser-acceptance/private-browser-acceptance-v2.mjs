@@ -1070,7 +1070,7 @@ async function makeWssAudit(contextInfo, progress) {
           (accountSlotCount !== null && activeConnections !== accountSlotCount)) {
         fail("websocket-not-ready", undefined, diagnostic());
       }
-      if (accountSlotCount === null) accountSlotCount = activeConnections;
+      if (accountSlotCount === null && progress.isSignedIn()) accountSlotCount = activeConnections;
       return {connectionCount: entries.length, status101: true};
     },
     validateAfterLogout() {

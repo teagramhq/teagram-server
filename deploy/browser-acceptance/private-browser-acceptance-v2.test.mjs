@@ -1417,6 +1417,7 @@ test("one logout reconnect after the four account-slot sockets is accepted", asy
     assert.equal(progress.observeClientEvent(event), true);
   }
   assert.equal(progress.markSignedIn(), true);
+  assert.doesNotThrow(() => wssAudit.validate());
 
   const output = await progress.finish(async (method) => {
     assert.equal(method, "auth.logOut");
@@ -1437,6 +1438,31 @@ test("one logout reconnect after the four account-slot sockets is accepted", asy
   assert.doesNotThrow(() => wssAudit.validateAfterLogout());
 });
 
+test("WSS slots opened after the initial settle are pinned at sign-in", async (t) => {
+  const {result, progress, browserSession, wssAudit} = await proveSharedWorkerWss(t, {
+    workerSockets: workerSockets(2),
+  });
+  assert.equal(result.connectionCount, 2);
+
+  for (let index = 2; index < WSS_ACCOUNT_SLOT_CEILING; index += 1) {
+    browserSession.workerMessage("observer-worker", {
+      method: "Network.webSocketCreated",
+      params: {requestId: `worker-socket-${index}`, url: `wss://${targetHost}/apiws`},
+    });
+    browserSession.workerMessage("observer-worker", {
+      method: "Network.webSocketHandshakeResponseReceived",
+      params: {requestId: `worker-socket-${index}`, response: {status: 101}},
+    });
+  }
+
+  assert.doesNotThrow(() => wssAudit.validate());
+  for (const event of ["req-dh-params", "set-client-dh", "init-connection", "password-challenge", "password-check"]) {
+    assert.equal(progress.observeClientEvent(event), true);
+  }
+  assert.equal(progress.markSignedIn(), true);
+  assert.doesNotThrow(() => wssAudit.validate());
+});
+
 test("logout WSS validation retains the one-extra-active-socket limit", async (t) => {
   const {browserSession, progress, wssAudit} = await proveSharedWorkerWss(t, {
     workerSockets: workerSockets(4),
@@ -1445,6 +1471,7 @@ test("logout WSS validation retains the one-extra-active-socket limit", async (t
     assert.equal(progress.observeClientEvent(event), true);
   }
   assert.equal(progress.markSignedIn(), true);
+  assert.doesNotThrow(() => wssAudit.validate());
   wssAudit.beginLogout();
   wssAudit.beginContextTeardown();
 
@@ -1470,6 +1497,7 @@ test("a post-sign-in reconnect replaces a closed account-slot socket", async (t)
     assert.equal(progress.observeClientEvent(event), true);
   }
   assert.equal(progress.markSignedIn(), true);
+  assert.doesNotThrow(() => wssAudit.validate());
 
   browserSession.workerMessage("observer-worker", {
     method: "Network.webSocketCreated",
@@ -1498,6 +1526,7 @@ test("a post-sign-in socket close without a replacement fails the WSS proof", as
     assert.equal(progress.observeClientEvent(event), true);
   }
   assert.equal(progress.markSignedIn(), true);
+  assert.doesNotThrow(() => wssAudit.validate());
 
   browserSession.workerMessage("observer-worker", {
     method: "Network.webSocketClosed",
@@ -1515,6 +1544,7 @@ test("a sign-in slot replacement and the logout reconnect both fit the observed 
     assert.equal(progress.observeClientEvent(event), true);
   }
   assert.equal(progress.markSignedIn(), true);
+  assert.doesNotThrow(() => wssAudit.validate());
 
   browserSession.workerMessage("observer-worker", {
     method: "Network.webSocketCreated",
@@ -1561,6 +1591,7 @@ test("a logout reconnect must use the validated endpoint and may be observed bef
         assert.equal(progress.observeClientEvent(event), true);
       }
       assert.equal(progress.markSignedIn(), true);
+      assert.doesNotThrow(() => wssAudit.validate());
 
       await progress.finish(async () => {
         browserSession.workerMessage("observer-worker", {
@@ -1593,6 +1624,7 @@ test("a fifth concurrently active socket before logout fails the WSS proof", asy
     assert.equal(progress.observeClientEvent(event), true);
   }
   assert.equal(progress.markSignedIn(), true);
+  assert.doesNotThrow(() => wssAudit.validate());
   browserSession.workerMessage("observer-worker", {
     method: "Network.webSocketCreated",
     params: {requestId: "worker-socket-before-logout", url: `wss://${targetHost}/apiws`},
