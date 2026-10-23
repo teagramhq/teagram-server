@@ -588,11 +588,14 @@ func newSmokePhoneClientWithRequests(
 	return client
 }
 
+const clientRequestFixturesTimeout = 3 * time.Minute
+
 func testSmokeClientRequestFixtures(t *testing.T) {
 	t.Helper()
+	// This replay covers many RPCs; allow room for the parallel CI smoke load.
 	f := newSmokeFixtureWithDeadline(t, config.RegistrationClosed, func(f *smokeFixture) {
 		f.recoveryEmailMode = config.RecoveryEmailContact
-	}, 4*time.Minute)
+	}, clientRequestFixturesTimeout)
 	const phoneCreator, phoneMember = "+15551048901", "+15551048902"
 	seedSmokeUsers(t, f, phoneCreator, phoneMember)
 	creatorRequests := &clientRequestRecorder{}
