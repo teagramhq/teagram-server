@@ -134,7 +134,7 @@ func waitForChannelReactionLockWait(t *testing.T, ctx context.Context, dsn strin
 	}
 }
 
-func assertChannelReactionCounts(t *testing.T, got tg.MessageReactions, want map[string]struct {
+func assertChannelReactionCounts(t *testing.T, got tg.MessageReactions, canSeeList bool, want map[string]struct {
 	count  int
 	chosen bool
 }) {
@@ -163,8 +163,8 @@ func assertChannelReactionCounts(t *testing.T, got tg.MessageReactions, want map
 	}
 	_, hasRecent := got.GetRecentReactions()
 	_, hasTopReactors := got.GetTopReactors()
-	if hasRecent || got.GetCanSeeList() || hasTopReactors {
-		t.Errorf("reaction response exposed reactor details: %+v", got)
+	if hasRecent || got.GetCanSeeList() != canSeeList || hasTopReactors {
+		t.Errorf("reaction response can_see_list=%v recent=%v top_reactors=%v, want can_see_list=%v", got.GetCanSeeList(), hasRecent, hasTopReactors, canSeeList)
 	}
 	for emoticon := range want {
 		if !seen[emoticon] {
@@ -214,7 +214,7 @@ func TestChannelReactionsRoundTrip(t *testing.T) {
 			if peer, ok := update.Peer.(*tg.PeerChannel); !ok || peer.ChannelID != f.channel.ID {
 				t.Fatalf("sendReaction peer = %#v, want channel %d", update.Peer, f.channel.ID)
 			}
-			assertChannelReactionCounts(t, update.Reactions, map[string]struct {
+			assertChannelReactionCounts(t, update.Reactions, megagroup, map[string]struct {
 				count  int
 				chosen bool
 			}{"🔥": {count: 1, chosen: true}})
@@ -227,7 +227,7 @@ func TestChannelReactionsRoundTrip(t *testing.T) {
 				t.Fatalf("B getMessagesReactions updates = %d, want 1", len(readAsB.Updates))
 			}
 			bUpdate := oneChannelReactionUpdate(t, readAsB, "B getMessagesReactions")
-			assertChannelReactionCounts(t, bUpdate.Reactions, map[string]struct {
+			assertChannelReactionCounts(t, bUpdate.Reactions, megagroup, map[string]struct {
 				count  int
 				chosen bool
 			}{"🔥": {count: 1}})
@@ -273,7 +273,7 @@ func TestChannelReactionsRoundTrip(t *testing.T) {
 					if err != nil {
 						t.Fatalf("%s: %v", tc.name, err)
 					}
-					assertChannelReactionCounts(t, got, map[string]struct {
+					assertChannelReactionCounts(t, got, megagroup, map[string]struct {
 						count  int
 						chosen bool
 					}{"🔥": {count: 1}})
@@ -283,7 +283,7 @@ func TestChannelReactionsRoundTrip(t *testing.T) {
 			updates, rpc = sendReaction(t, f.s, f.a.ID, peerA, f.post.LocalID, &tg.ReactionEmoji{Emoticon: "❤"})
 			updates = requireReactionUpdates(t, updates, rpc, "messages.sendReaction replace")
 			update = oneChannelReactionUpdate(t, updates, "messages.sendReaction replace")
-			assertChannelReactionCounts(t, update.Reactions, map[string]struct {
+			assertChannelReactionCounts(t, update.Reactions, megagroup, map[string]struct {
 				count  int
 				chosen bool
 			}{"❤": {count: 1, chosen: true}})
@@ -291,7 +291,7 @@ func TestChannelReactionsRoundTrip(t *testing.T) {
 			updates, rpc = sendReaction(t, f.s, f.b.ID, peerB, f.post.LocalID, &tg.ReactionEmoji{Emoticon: "🔥"})
 			updates = requireReactionUpdates(t, updates, rpc, "messages.sendReaction second member")
 			update = oneChannelReactionUpdate(t, updates, "messages.sendReaction second member")
-			assertChannelReactionCounts(t, update.Reactions, map[string]struct {
+			assertChannelReactionCounts(t, update.Reactions, megagroup, map[string]struct {
 				count  int
 				chosen bool
 			}{"❤": {count: 1}, "🔥": {count: 1, chosen: true}})
@@ -335,7 +335,7 @@ func TestChannelReactionsRoundTrip(t *testing.T) {
 				if err != nil {
 					t.Fatalf("%s: %v", tc.name, err)
 				}
-				assertChannelReactionCounts(t, got, map[string]struct {
+				assertChannelReactionCounts(t, got, megagroup, map[string]struct {
 					count  int
 					chosen bool
 				}{"❤": {count: 1}, "🔥": {count: 1, chosen: true}})
@@ -344,7 +344,7 @@ func TestChannelReactionsRoundTrip(t *testing.T) {
 			updates, rpc = sendReaction(t, f.s, f.a.ID, peerA, f.post.LocalID)
 			updates = requireReactionUpdates(t, updates, rpc, "messages.sendReaction clear")
 			update = oneChannelReactionUpdate(t, updates, "messages.sendReaction clear")
-			assertChannelReactionCounts(t, update.Reactions, map[string]struct {
+			assertChannelReactionCounts(t, update.Reactions, megagroup, map[string]struct {
 				count  int
 				chosen bool
 			}{"🔥": {count: 1}})

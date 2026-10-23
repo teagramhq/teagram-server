@@ -1778,6 +1778,14 @@ func (h *handlers) handleSendReaction(r *mtproto.Request) (bin.Encoder, error) {
 			}
 			reaction = emoji.Emoticon
 		}
+		if _, err := h.requireChannelMember(r.Ctx, peerID, r.UserID); err != nil {
+			return nil, err
+		}
+		broadcast, err := h.channelIsBroadcast(r.Ctx, peerID)
+		if err != nil {
+			h.log.Error("load channel kind for reaction", "user_id", r.UserID, "channel_id", peerID, "err", err)
+			return nil, errInternal
+		}
 		counts, err := h.store.SetChannelMessageReaction(r.Ctx, peerID, r.UserID, localID, reaction)
 		switch {
 		case errors.Is(err, store.ErrMessageInvalid):
@@ -1794,7 +1802,7 @@ func (h *handlers) handleSendReaction(r *mtproto.Request) (bin.Encoder, error) {
 			Updates: []tg.UpdateClass{&tg.UpdateMessageReactions{
 				Peer:      &tg.PeerChannel{ChannelID: peerID},
 				MsgID:     req.MsgID,
-				Reactions: channelReactionsToTL(counts),
+				Reactions: channelReactionsToTL(counts, !broadcast),
 			}},
 			Date: int(time.Now().Unix()),
 		}, nil
@@ -1901,6 +1909,11 @@ func (h *handlers) handleGetMessagesReactions(r *mtproto.Request) (bin.Encoder, 
 		localIDs = append(localIDs, localID)
 	}
 	if peerType == store.PeerTypeChannel {
+		broadcast, err := h.channelIsBroadcast(r.Ctx, peerID)
+		if err != nil {
+			h.log.Error("load channel kind for message reactions", "user_id", r.UserID, "channel_id", peerID, "err", err)
+			return nil, errInternal
+		}
 		msgs, err := h.store.ChannelMessagesForMember(r.Ctx, peerID, r.UserID, localIDs)
 		if err != nil {
 			h.log.Error("get channel message reactions", "user_id", r.UserID, "channel_id", peerID, "err", err)
@@ -1926,7 +1939,7 @@ func (h *handlers) handleGetMessagesReactions(r *mtproto.Request) (bin.Encoder, 
 			updates = append(updates, &tg.UpdateMessageReactions{
 				Peer:      &tg.PeerChannel{ChannelID: peerID},
 				MsgID:     int(m.LocalID),
-				Reactions: channelReactionsToTL(byMessage[m.LocalID]),
+				Reactions: channelReactionsToTL(byMessage[m.LocalID], !broadcast),
 			})
 		}
 		return &tg.Updates{Updates: updates, Date: int(time.Now().Unix())}, nil
@@ -1971,7 +1984,7 @@ func (h *handlers) handleGetMessagesReactions(r *mtproto.Request) (bin.Encoder, 
 			// Derived from the stored row, never echoed from the request.
 			Peer:      peerToTL(m.PeerType, m.PeerID),
 			MsgID:     int(m.LocalID),
-			Reactions: reactionsToTL(byMessage[m.LocalID], r.UserID),
+			Reactions: reactionsToTL(byMessage[m.LocalID], r.UserID, peerType == store.PeerTypeChat),
 		}
 	}
 	// No users: the reply names no reactor, so there is no one to hydrate.

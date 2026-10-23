@@ -48,7 +48,7 @@ INSERT INTO channel_message_reactions (channel_id, local_id, reactor_id, reactio
 VALUES (sqlc.arg(channel_id)::bigint, sqlc.arg(local_id)::bigint,
         sqlc.arg(reactor_id)::bigint, sqlc.arg(reaction)::text)
 ON CONFLICT (channel_id, local_id, reactor_id)
-DO UPDATE SET reaction = EXCLUDED.reaction;
+DO UPDATE SET reaction = EXCLUDED.reaction, created_at = statement_timestamp();
 
 -- name: DeleteChannelMessageReaction :exec
 DELETE FROM channel_message_reactions
@@ -104,3 +104,44 @@ ORDER BY reaction.local_id;
 DELETE FROM channel_message_reactions
 WHERE channel_id = sqlc.arg(channel_id)::bigint
   AND local_id = ANY(sqlc.arg(local_ids)::bigint[]);
+
+-- name: ChannelMessageReactionListForMember :many
+WITH visible_message AS MATERIALIZED (
+    SELECT message.channel_id, message.local_id
+    FROM channel_messages AS message
+    JOIN channels AS channel ON channel.id = message.channel_id
+    JOIN channel_participants AS participant
+      ON participant.channel_id = message.channel_id
+     AND participant.user_id = sqlc.arg(user_id)::bigint
+    WHERE message.channel_id = sqlc.arg(channel_id)::bigint
+      AND message.local_id = sqlc.arg(local_id)::bigint
+      AND (participant.banned_until IS NULL OR participant.banned_until <= statement_timestamp())
+      AND message.local_id > participant.available_min_id
+      AND message.deleted = false
+      AND message.action_type = 0
+      AND (message.expires_at IS NULL OR message.expires_at > statement_timestamp())
+      AND channel.deleted_at IS NULL
+      AND channel.megagroup = true
+), matching AS MATERIALIZED (
+    SELECT reaction.reactor_id, reaction.reaction, reaction.created_at
+    FROM channel_message_reactions AS reaction
+    JOIN visible_message AS message
+      ON message.channel_id = reaction.channel_id
+     AND message.local_id = reaction.local_id
+    WHERE sqlc.arg(reaction)::text = ''
+       OR reaction.reaction = sqlc.arg(reaction)::text
+), page AS MATERIALIZED (
+    SELECT reactor_id, reaction, created_at
+    FROM matching
+    WHERE reactor_id > sqlc.arg(offset_reactor_id)::bigint
+    ORDER BY reactor_id
+    LIMIT sqlc.arg(page_size)::bigint
+)
+SELECT EXISTS (SELECT 1 FROM visible_message) AS message_visible,
+       (SELECT count(*)::bigint FROM matching) AS reaction_count,
+       page.reactor_id,
+       page.reaction,
+       page.created_at
+FROM (SELECT 1) AS requested
+LEFT JOIN page ON true
+ORDER BY page.reactor_id NULLS LAST;
