@@ -73,6 +73,9 @@ check_ci_contract() {
 }
 
 # Run the actual target step against controlled forge responses.
+# The extracted workflow script is a child process, so these subshell-local
+# exports are intentional despite ShellCheck's subshell propagation warnings.
+# shellcheck disable=SC2030,SC2031
 check_target_selection() (
   set -euo pipefail
   tmp="$(mktemp -d)"
@@ -136,6 +139,9 @@ SH
   fi
 )
 
+# The extracted workflow script is a child process, so these subshell-local
+# exports are intentional despite ShellCheck's subshell propagation warnings.
+# shellcheck disable=SC2030,SC2031
 check_demo_image_digest_download() (
   set -euo pipefail
   tmp="$(mktemp -d)"
