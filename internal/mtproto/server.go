@@ -162,6 +162,9 @@ type Server struct {
 	// A pre-auth close is one more line a peer can provoke per socket; keep its
 	// sampling window independent from the other pre-auth events.
 	preAuthCloseLog logSampler
+	// Signed-in clients can also provoke INFO close diagnostics with malformed
+	// frames or timeouts; keep those sampled independently of pre-auth closes.
+	authorizedCloseLog logSampler
 	// unboundKeys bounds what one auth key with nobody signed in on it may
 	// hold, which is what the pre-auth bounds stop counting and the per-user cap
 	// never starts. Written once before Serve and only read after, like proxyV2.
@@ -737,23 +740,30 @@ func (s *Server) logConnectionFailure(err error) {
 
 func (s *Server) logTransportClose(diagnostics *transportCloseDiagnostics, err error) {
 	reason := classifyTransportCloseReason(err)
-	level := slog.LevelInfo
 	if diagnostics.step == transportCloseStepAuthorized && (reason == transportCloseReasonClientClose || reason == transportCloseReasonServerClose) {
-		level = slog.LevelDebug
+		s.log.Debug("transport connection closed",
+			"transport", diagnostics.transport,
+			"step", string(diagnostics.step),
+			"reason", string(reason),
+		)
+		return
 	}
-	attrs := []any{
+	attrs := make([]any, 0, 8)
+	attrs = append(attrs,
 		"transport", diagnostics.transport,
 		"step", string(diagnostics.step),
 		"reason", string(reason),
+	)
+	sampler := &s.preAuthCloseLog
+	if diagnostics.step == transportCloseStepAuthorized {
+		sampler = &s.authorizedCloseLog
 	}
-	if diagnostics.step != transportCloseStepAuthorized {
-		dropped, ok := s.preAuthCloseLog.allow(time.Now(), preAuthLogInterval)
-		if !ok {
-			return
-		}
-		attrs = append(attrs, "suppressed", dropped)
+	dropped, ok := sampler.allow(time.Now(), preAuthLogInterval)
+	if !ok {
+		return
 	}
-	s.log.Log(context.Background(), level, "transport connection closed", attrs...)
+	attrs = append(attrs, "suppressed", dropped)
+	s.log.Log(context.Background(), slog.LevelInfo, "transport connection closed", attrs...)
 }
 
 func (s *Server) logServerFailure(category serverFailureCategory, details ...any) {

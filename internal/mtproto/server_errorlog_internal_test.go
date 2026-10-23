@@ -596,6 +596,68 @@ func TestServeConnDrainLogsAuthorizedServerCloseAtDebug(t *testing.T) {
 	}
 }
 
+func TestServeConnThrottlesAuthorizedDecryptFailures(t *testing.T) {
+	sink := &serverErrorLogSink{}
+	key := shutdownTestAuthKey()
+	keys := &authorizationRebindKeyStore{key: key, users: []int64{7}, owner: 7}
+	server := New(exchange.PrivateKey{}, 2, keys, nil, slog.New(sink))
+	const connections = 8
+
+	closeWithUndecryptableFrame := func(msgID int64) error {
+		validFrame := shutdownClientFrame(t, key, 42, msgID, &mt.PingRequest{PingID: msgID})
+		invalidFrame := shutdownClientFrame(t, key, 42, msgID+1, &mt.PingRequest{PingID: msgID + 1})
+		invalidFrame[8] ^= 0xff
+		return server.serveConn(context.Background(), &exchangeScriptConn{recv: [][]byte{validFrame, invalidFrame}}, netip.Addr{}, nil)
+	}
+
+	for i := range connections {
+		msgID := int64(2*i+1) << 32
+		err := closeWithUndecryptableFrame(msgID)
+		if err == nil || !strings.Contains(err.Error(), "decrypt message") {
+			t.Fatalf("authorized connection error = %v, want an undecryptable-frame error", err)
+		}
+	}
+
+	var closeRecords []serverErrorLogRecord
+	for _, record := range sink.records {
+		if record.message == "transport connection closed" {
+			closeRecords = append(closeRecords, record)
+		}
+	}
+	if len(closeRecords) != 1 {
+		t.Fatalf("transport close records = %d, want one after %d authorized decrypt failures: %+v", len(closeRecords), connections, sink.records)
+	}
+	if got := closeRecords[0].level; got != slog.LevelInfo {
+		t.Errorf("authorized error close level = %v, want INFO", got)
+	}
+	if got := closeRecords[0].attrs["step"]; got != "authorized" {
+		t.Errorf("authorized error close step = %v, want authorized", got)
+	}
+	if got := closeRecords[0].attrs["reason"]; got != "server error" {
+		t.Errorf("authorized error close reason = %v, want server error", got)
+	}
+	if got := closeRecords[0].attrs["suppressed"]; got != int64(0) {
+		t.Errorf("first suppressed close count = %v, want 0", got)
+	}
+
+	server.authorizedCloseLog.last.Store(time.Now().Add(-preAuthLogInterval).UnixNano())
+	if err := closeWithUndecryptableFrame(int64(2*connections+1) << 32); err == nil {
+		t.Fatal("authorized connection returned nil after an undecryptable frame")
+	}
+	closeRecords = closeRecords[:0]
+	for _, record := range sink.records {
+		if record.message == "transport connection closed" {
+			closeRecords = append(closeRecords, record)
+		}
+	}
+	if len(closeRecords) != 2 {
+		t.Fatalf("transport close records after sample interval = %d, want two: %+v", len(closeRecords), sink.records)
+	}
+	if got := closeRecords[1].attrs["suppressed"]; got != int64(connections-1) {
+		t.Errorf("authorized close suppressed count = %v, want %d", got, connections-1)
+	}
+}
+
 func TestTransportCloseReasonClassifiesClientCloseTimeoutAndServerError(t *testing.T) {
 	for _, test := range []struct {
 		name string
