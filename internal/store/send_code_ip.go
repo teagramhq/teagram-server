@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgtype"
 
 	"github.com/teagramhq/teagram-server/internal/store/db"
@@ -288,17 +289,26 @@ func (s *Store) SweepExpiredSendCodeIPLimits(ctx context.Context) (int64, error)
 	if err != nil {
 		return 0, fmt.Errorf("sweep send code ip calls: %w", err)
 	}
-	publicCalls, err := s.q.SweepExpiredPublicSendCodeIPCalls(ctx)
-	if err != nil {
-		return calls, fmt.Errorf("sweep public send code ip calls: %w", err)
-	}
 	phones, err := s.q.SweepExpiredSendCodeIPPhones(ctx)
 	if err != nil {
-		return calls + publicCalls, fmt.Errorf("sweep send code ip phones: %w", err)
+		return calls, fmt.Errorf("sweep send code ip phones: %w", err)
+	}
+	// Older restored schemas may not have the optional public budget tables.
+	publicCalls, err := s.q.SweepExpiredPublicSendCodeIPCalls(ctx)
+	if err != nil {
+		var pgErr *pgconn.PgError
+		if !errors.As(err, &pgErr) || pgErr.Code != "42P01" {
+			return calls + phones, fmt.Errorf("sweep public send code ip calls: %w", err)
+		}
+		publicCalls = 0
 	}
 	publicPhones, err := s.q.SweepExpiredPublicSendCodeIPPhones(ctx)
 	if err != nil {
-		return calls + publicCalls + phones, fmt.Errorf("sweep public send code ip phones: %w", err)
+		var pgErr *pgconn.PgError
+		if !errors.As(err, &pgErr) || pgErr.Code != "42P01" {
+			return calls + phones + publicCalls, fmt.Errorf("sweep public send code ip phones: %w", err)
+		}
+		publicPhones = 0
 	}
 	return calls + publicCalls + phones + publicPhones, nil
 }
