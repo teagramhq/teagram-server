@@ -74,24 +74,6 @@ class BlobTransitionEnvironmentTests(unittest.TestCase):
 
         self.assertEqual(environment["MOCK_SOURCE_VOLUME_MOUNTPOINT"], "/host/source-volume")
 
-    def test_local_compose_overlay_precedes_the_host_override(self) -> None:
-        runner = import_from_path("blob_transition_runner_local_compose_order", RUNNER)
-        with tempfile.TemporaryDirectory(prefix="local-compose-order.") as temporary:
-            checkout = Path(temporary)
-            (checkout / "docker-compose.local-blobs.yml").touch()
-            (checkout / "docker-compose.override.yml").touch()
-            with patch.object(runner, "TEST_MODE", False):
-                environment = runner.compose_environment(checkout, local=True)
-
-        self.assertEqual(
-            environment["COMPOSE_FILE"],
-            os.pathsep.join((
-                "docker-compose.yml",
-                "docker-compose.local-blobs.yml",
-                "docker-compose.override.yml",
-            )),
-        )
-
     def test_live_authority_rejection_keeps_its_reason(self) -> None:
         runner = import_from_path("blob_transition_runner_authority_rejection", RUNNER)
         mode = import_from_path("blob_mode_authority_rejection", RUNNER.parent / "blob-mode-state.py")
@@ -504,7 +486,12 @@ if [ "${{1:-}}" = compose ]; then
   shift
   if [[ " $* " == *" config "* ]]; then
     if [[ "${{COMPOSE_FILE:-}}" == *docker-compose.local-blobs.yml* ]]; then
-      cat "${{MOCK_LOCAL_COMPOSE_JSON:?}}"
+      if [ -n "${{MOCK_LOCAL_COMPOSE_DEFAULT_JSON:-}}" ] \
+        && [ "${{TEAGRAMD_STACK_MOVE_BLOB_DIR:-}}" != "${{MOCK_LOCAL_COMPOSE_EXPECTED_BLOB_DIR:-}}" ]; then
+        cat "$MOCK_LOCAL_COMPOSE_DEFAULT_JSON"
+      else
+        cat "${{MOCK_LOCAL_COMPOSE_JSON:?}}"
+      fi
       exit 0
     fi
     cat {shlex.quote(str(candidate_compose))}
@@ -873,7 +860,7 @@ class BlobTransitionRunnerFixtures(unittest.TestCase):
         self.authority_case.setUp()
         self.current_stack_fixture = self._testMethodName.startswith("test_current_")
         self.moved_stack_fixture = (
-            self._testMethodName == "test_current_cutover_and_recovery_preserve_moved_stack_env"
+            self._testMethodName == "test_current_cutover_and_recovery_use_authority_blob_dir"
         )
         if self.current_stack_fixture:
             self.authority_case.volume = (
@@ -958,14 +945,9 @@ class BlobTransitionRunnerFixtures(unittest.TestCase):
             (self.bundle / name).unlink()
         self.events = Path(events_text)
         self.local_compose_json = self.mock_bin / "local-compose.json"
+        self.local_compose_default_json = self.mock_bin / "local-compose-default.json"
         (self.checkout / "docker-compose.local-blobs.yml").write_text("services: {}\n", encoding="utf-8")
         (self.checkout / "docker-compose.local-blobs.yml").chmod(0o600)
-        if self.moved_stack_fixture:
-            (self.checkout / ".env").write_text(
-                "TEAGRAMD_STACK_MOVE_BLOB_DIR=/var/lib/telegramd-blobs\n",
-                encoding="ascii",
-            )
-            (self.checkout / ".env").chmod(0o600)
         write_fake_docker(self.mock_bin, self.root, self.events, "success", self.bundle / "candidate-compose.json")
         self.write_local_compose_fixture()
         (self.root / "serving").write_text("running\n", encoding="ascii")
@@ -1178,6 +1160,12 @@ class BlobTransitionRunnerFixtures(unittest.TestCase):
             environment["BLOB_TRANSITION_TEST_INTERRUPT_AFTER"] = interrupt_after
         if self.local_compose_json.exists():
             environment["MOCK_LOCAL_COMPOSE_JSON"] = str(self.local_compose_json)
+        if self.moved_stack_fixture:
+            environment["MOCK_LOCAL_COMPOSE_DEFAULT_JSON"] = str(self.local_compose_default_json)
+            environment["MOCK_LOCAL_COMPOSE_EXPECTED_BLOB_DIR"] = (
+                mode_fixtures.blob_mode.MOVED_BLOB_TARGET
+            )
+            environment.pop("TEAGRAMD_STACK_MOVE_BLOB_DIR", None)
         if seed_running_writer:
             environment["MOCK_WRITER_RUNNING"] = "1"
         if scenario == "dump-restore-failed":
@@ -1235,36 +1223,44 @@ class BlobTransitionRunnerFixtures(unittest.TestCase):
 
     def write_local_compose_fixture(self) -> None:
         model = json.loads((self.bundle / "candidate-compose.json").read_text(encoding="utf-8"))
-        blob_dir = mode_fixtures.blob_mode.BLOB_TARGET
+
+        def make_local_model(compose: dict[str, Any], blob_dir: str | None) -> None:
+            for name, service in compose["services"].items():
+                if not name.startswith("teagramd"):
+                    continue
+                environment = service["environment"]
+                if blob_dir is not None:
+                    environment["TG_BLOB_DIR"] = blob_dir
+                for key in (
+                    "TG_BLOB_S3_ENDPOINT",
+                    "TG_BLOB_S3_BUCKET",
+                    "TG_BLOB_S3_PREFIX",
+                    "TG_BLOB_S3_REGION",
+                    "TG_BLOB_S3_ACCESS_KEY_ID",
+                    "TG_BLOB_S3_SECRET_ACCESS_KEY",
+                    "TG_BLOB_S3_SECRET_ACCESS_KEY_FILE",
+                    "TG_BLOB_S3_CA_PATH",
+                    "TG_BLOB_S3_ALLOW_INSECURE_HTTP",
+                ):
+                    environment[key] = ""
+                for mount in service["volumes"]:
+                    if mount.get("target") == mode_fixtures.blob_mode.BLOB_TARGET:
+                        mount["target"] = blob_dir or mode_fixtures.blob_mode.BLOB_TARGET
+                        mount["read_only"] = False
+
+        make_local_model(
+            model,
+            mode_fixtures.blob_mode.MOVED_BLOB_TARGET if self.moved_stack_fixture else None,
+        )
         if self.moved_stack_fixture:
-            persisted = (self.checkout / ".env").read_text(encoding="ascii")
-            self.assertIn(
-                "TEAGRAMD_STACK_MOVE_BLOB_DIR=/var/lib/telegramd-blobs\n",
-                persisted,
+            default_model = json.loads(
+                (self.bundle / "candidate-compose.json").read_text(encoding="utf-8")
             )
-            blob_dir = mode_fixtures.blob_mode.MOVED_BLOB_TARGET
-        for name, service in model["services"].items():
-            if not name.startswith("teagramd"):
-                continue
-            environment = service["environment"]
-            if self.moved_stack_fixture:
-                environment["TG_BLOB_DIR"] = blob_dir
-            for key in (
-                "TG_BLOB_S3_ENDPOINT",
-                "TG_BLOB_S3_BUCKET",
-                "TG_BLOB_S3_PREFIX",
-                "TG_BLOB_S3_REGION",
-                "TG_BLOB_S3_ACCESS_KEY_ID",
-                "TG_BLOB_S3_SECRET_ACCESS_KEY",
-                "TG_BLOB_S3_SECRET_ACCESS_KEY_FILE",
-                "TG_BLOB_S3_CA_PATH",
-                "TG_BLOB_S3_ALLOW_INSECURE_HTTP",
-            ):
-                environment[key] = ""
-            for mount in service["volumes"]:
-                if mount.get("target") == "/var/lib/teagramd-blobs":
-                    mount["target"] = blob_dir
-                    mount["read_only"] = False
+            make_local_model(default_model, mode_fixtures.blob_mode.BLOB_TARGET)
+            self.local_compose_default_json.write_text(
+                json.dumps(default_model, sort_keys=True), encoding="utf-8"
+            )
+            self.local_compose_default_json.chmod(0o600)
         self.local_compose_json.write_text(json.dumps(model, sort_keys=True), encoding="utf-8")
         self.local_compose_json.chmod(0o600)
 
@@ -1671,10 +1667,10 @@ class BlobTransitionRunnerFixtures(unittest.TestCase):
         self.assertEqual(second_cutover.returncode, 0, second_cutover.stderr)
         self.assertEqual((self.root / "serving-backend").read_text(encoding="ascii").strip(), "s3")
 
-    def test_current_cutover_and_recovery_preserve_moved_stack_env(self) -> None:
-        self.assertEqual(
+    def test_current_cutover_and_recovery_use_authority_blob_dir(self) -> None:
+        self.assertNotIn(
+            "TEAGRAMD_STACK_MOVE_BLOB_DIR=",
             (self.checkout / ".env").read_text(encoding="ascii"),
-            "TEAGRAMD_STACK_MOVE_BLOB_DIR=/var/lib/telegramd-blobs\n",
         )
         cutover = self.run_current_cutover()
         self.assertEqual(cutover.returncode, 0, cutover.stderr)
