@@ -2101,11 +2101,13 @@ run_apply() {
     fail 'reviewed rollout runtime source left origin/main after the verified backup'
     return 1
   }
+  # The caller keeps deploy evidence private with umask 077. Preserve Git's
+  # tracked 0644/0755 modes so source checkout changes do not invalidate build layers.
   if git -C "$CHECKOUT" merge-base --is-ancestor "$PREVIOUS_SHA" "$TARGET_SHA"; then
-    git -C "$CHECKOUT" merge --ff-only -q "$TARGET_SHA" || { fail 'fast-forward to authorized application target failed'; return 1; }
+    (umask 022; git -C "$CHECKOUT" merge --ff-only -q "$TARGET_SHA") || { fail 'fast-forward to authorized application target failed'; return 1; }
   elif [ "$INITIALIZE_LOCAL" = 1 ] && [ "$PREVIOUS_SHA" = "$INITIAL_LOCAL_LEGACY_BASELINE_SHA" ] && \
       [ "$TARGET_SHA" = "$INITIAL_LOCAL_COMPOSE_TARGET_SHA" ]; then
-    git -C "$CHECKOUT" reset --hard -q "$TARGET_SHA" || { fail 'fixed reviewed initial-local target checkout failed'; return 1; }
+    (umask 022; git -C "$CHECKOUT" reset --hard -q "$TARGET_SHA") || { fail 'fixed reviewed initial-local target checkout failed'; return 1; }
   else
     fail 'authorized application target is not a fast-forward from the live baseline'
     return 1

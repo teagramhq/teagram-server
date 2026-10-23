@@ -186,6 +186,10 @@ case "$*" in
     fi
     ;;
   'merge --ff-only -q '*)
+    if [ "${MOCK_SCENARIO:-}" = target-local-apply-success ] && [ "$(umask)" != 0022 ]; then
+      printf 'target checkout merge used umask %s instead of 0022\n' "$(umask)" >&2
+      exit 91
+    fi
     printf '%s\n' "${*: -1}" > "$MOCK_STATE/head"
     printf '%s\n' target > "$MOCK_STATE/phase"
     if [ "${MOCK_SCENARIO:-}" = dirty-before-build ]; then
@@ -1876,6 +1880,8 @@ status=$(run_fixture real-git-no-runner)
 if [ "$status" = 0 ] && grep -q 'rollout=verified' "$TMP/real-git-no-runner.stdout" && \
    [ "$(git -C "$checkout" rev-parse HEAD)" = "$target_sha" ] && \
    [ -f "$checkout/deploy/teagramd/rollout-runner/rollout-runner.sh" ] && \
+   [ "$(stat -c '%a' "$checkout/deploy/teagramd/rollout-runner/rollout-runner.sh")" = 755 ] && \
+   [ "$(stat -c '%a' "$checkout/deploy/teagramd/rollout-runner/schema-result-gate.py")" = 644 ] && \
    grep -q '^docker compose exec -T postgres pg_dump' "$TMP/real-git-no-runner-events" && \
    grep -q '^docker compose build' "$TMP/real-git-no-runner-events" && \
    grep -q '^docker compose up -d$' "$TMP/real-git-no-runner-events" && \
