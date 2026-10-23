@@ -79,8 +79,8 @@ jq -e --arg secretFile "$TMP_DIR/turnstile-secret-key" '
   and .services["teagramd-next"].environment.TG_ADVERTISE_DEMO_GUEST_SIGN_UP == "true"
   and .services.teagramd.environment.GOMAXPROCS == "1"
   and .services.teagramd.environment.GOMEMLIMIT == "320MiB"
-  and .services.teagramd.mem_limit == "448m"
-  and .services["teagramd-next"].mem_limit == "448m"
+  and (.services.teagramd.mem_limit | tostring) == "469762048"
+  and (.services["teagramd-next"].mem_limit | tostring) == "469762048"
   and .services.teagramd.environment.TG_LOG_LOGIN_CODES == "false"
   and .services.teagramd.environment.TG_MAX_FILE_BYTES == "16777216"
   and .services.teagramd.environment.TG_MAX_USER_STORAGE_BYTES == "268435456"
@@ -93,12 +93,12 @@ jq -e --arg secretFile "$TMP_DIR/turnstile-secret-key" '
   and .secrets.teagram_demo_turnstile.file == $secretFile
   and .services.postgres.environment.PGDATA == "/var/lib/postgresql/18/docker"
   and .services.postgres.platform == "linux/amd64"
-  and .services.postgres.mem_limit == "320m"
+  and (.services.postgres.mem_limit | tostring) == "335544320"
   and any(.services.postgres.volumes[]; (.source | endswith("/deploy/teagram-demo/postgresql.conf")) and .target == "/etc/postgresql/postgresql.conf" and .read_only)
   and .services.teagramd.build.args.DEMO_BUILD_GOMAXPROCS == "1"
   and .services.teagramd.build.args.DEMO_BUILD_GOMEMLIMIT == "640MiB"
   and .services.teagramd.build.args.DEMO_BUILD_GOFLAGS == "-p=1"
-  and .services.migrate.mem_limit == "256m"
+  and (.services.migrate.mem_limit | tostring) == "268435456"
   and (.services.postgres.image | endswith("@sha256:d8703cd7fba306b9fec9268ecedfa8a966846c053036a60e3635791957eb2f66"))
   and .services.migrate.platform == "linux/amd64"
   and (.services.migrate.image | endswith("@sha256:5abea953e8e048d5b27b1b3e2fc83e17fdc1f7cd0d908a8432ed0c7e6394c58f"))
@@ -299,7 +299,7 @@ jq -e --slurpfile bootstrap "$TMP_DIR/bootstrap-inventory.json" '
     "TG_REPLICA_COUNT": "1",
     "TG_CLIENT_ADDR_TRUST": "socket"
   })
-  and all(.services[] as $seed; any($bootstrap[0].services[];
+  and all(.services[]; . as $seed | any($bootstrap[0].services[];
     .name == $seed.name
     and .tg_environment_sha256 == $seed.tg_environment_sha256
     and .network == $seed.network
