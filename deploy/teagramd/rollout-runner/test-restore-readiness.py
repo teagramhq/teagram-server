@@ -1,12 +1,15 @@
 #!/usr/bin/env python3
-"""Focused tests for the synthetic restore gate's public safety contract."""
+"""Focused tests for the restore readiness gate's public safety contract."""
 
 from __future__ import annotations
 
+import ast
 import importlib.util
 import io
 import json
 import os
+import stat
+import subprocess
 import tempfile
 import time
 import unittest
@@ -115,6 +118,10 @@ class RestoreReadinessContractTests(unittest.TestCase):
         self.assertEqual(RESTORE_READINESS.bounded_work_seconds(None, 300), 300)
         self.assertEqual(RESTORE_READINESS.bounded_work_seconds("malformed-sql", None), 8 * 60)
         self.assertEqual(RESTORE_READINESS.bounded_work_seconds("sigkill", 9 * 60), 8 * 60)
+        self.assertEqual(
+            RESTORE_READINESS.bounded_work_seconds("sigkill", 20 * 60, local_fixture_test=True),
+            20 * 60,
+        )
         with self.assertRaises(ValueError):
             RESTORE_READINESS.bounded_work_seconds(None, 0)
 
@@ -126,6 +133,220 @@ class RestoreReadinessContractTests(unittest.TestCase):
         self.assertIn('--work-seconds "$work_seconds"', run_drill)
         self.assertIn('run_suite_command "${build_env[@]}" go build', shell)
         self.assertIn("run_teardown_command sudo -n -- /usr/bin/find", shell)
+        self.assertIn('local_args=(--local-dump "$2")', shell)
+        self.assertIn('local_args=(--local-fixture-test)', shell)
+        self.assertIn('time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())', SCRIPT.read_text(encoding="utf-8"))
+        self.assertLess(shell.index("--validate-local-dump"), shell.index("build_inputs\n"))
+        workflow = Path(__file__).parents[3] / ".github" / "workflows" / "ci.yml"
+        self.assertIn("test-restore-readiness.sh --local-fixture-test", workflow.read_text(encoding="utf-8"))
+        self.assertIn("--local-fixture-test --fault-test auth-clear-signal", shell)
+        self.assertIn("--local-fixture-test --fault-test sigkill", shell)
+
+    def test_local_dump_head_is_known_and_uses_the_latest_repo_migration(self) -> None:
+        versions = RESTORE_READINESS.repo_migration_versions()
+        self.assertTrue(versions)
+        self.assertEqual(RESTORE_READINESS.HEAD_SCHEMA, versions[-1])
+        self.assertEqual(RESTORE_READINESS.LOCAL_FIXTURE_SCHEMA, versions[-2])
+        self.assertGreater(RESTORE_READINESS.LOCAL_FIXTURE_SCHEMA, RESTORE_READINESS.BASE_SCHEMA)
+        self.assertLess(RESTORE_READINESS.LOCAL_FIXTURE_SCHEMA, RESTORE_READINESS.HEAD_SCHEMA)
+        self.assertGreater(RESTORE_READINESS.HEAD_SCHEMA, "20261021000004")
+        self.assertEqual(
+            RESTORE_READINESS.resolve_local_dump_migration_head(RESTORE_READINESS.HEAD_SCHEMA),
+            RESTORE_READINESS.HEAD_SCHEMA,
+        )
+        with self.assertRaises(ValueError):
+            RESTORE_READINESS.resolve_local_dump_migration_head("20990101000000")
+
+    def test_local_fault_injection_is_limited_to_fixture_signal_and_sigkill(self) -> None:
+        runtime_args = [
+            "--docker-bin", "/usr/bin/docker",
+            "--atlas-bin", "/run/atlas",
+            "--build-dir", "/run/build",
+            "--build-uid", "1000",
+            "--go-arch", "amd64",
+        ]
+        for fault in ("auth-clear-signal", "sigkill"):
+            with self.subTest(fault=fault), patch.object(
+                RESTORE_READINESS.sys,
+                "argv",
+                [str(SCRIPT), *runtime_args, "--local-fixture-test", "--fault-test", fault],
+            ):
+                parsed = RESTORE_READINESS.parse_args()
+            self.assertTrue(parsed.local_fixture_test)
+            self.assertEqual(parsed.fault_test, fault)
+
+        invalid_local_inputs = (
+            [*runtime_args, "--local-fixture-test", "--fault-test", "malformed-sql"],
+            [*runtime_args, "--local-fixture-test", "--fault-test", "auth-clear-failure"],
+            [*runtime_args, "--local-dump", "/root/pgdump-pre-abcdef0-20261022T211333Z.sql", "--fault-test", "sigkill"],
+        )
+        for arguments in invalid_local_inputs:
+            with self.subTest(arguments=arguments), patch.object(
+                RESTORE_READINESS.sys,
+                "argv",
+                [str(SCRIPT), *arguments],
+            ), redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+                RESTORE_READINESS.parse_args()
+
+    def test_local_dump_preflight_is_a_single_metadata_only_mode(self) -> None:
+        arguments = [
+            "--validate-local-dump",
+            "/opt/teagram/backups/pgdump-pre-" + "a" * 40 + ".sql",
+        ]
+        with patch.object(RESTORE_READINESS.sys, "argv", [str(SCRIPT), *arguments]):
+            parsed = RESTORE_READINESS.parse_args()
+        self.assertEqual(parsed.validate_local_dump, Path(arguments[1]))
+        self.assertIsNone(parsed.local_dump)
+        self.assertFalse(parsed.local_fixture_test)
+
+        for invalid in (
+            [*arguments, "extra.sql"],
+            [*arguments, "--local-dump", arguments[1]],
+            [*arguments, "--docker-bin", "/usr/bin/docker"],
+        ):
+            with self.subTest(invalid=invalid), patch.object(
+                RESTORE_READINESS.sys, "argv", [str(SCRIPT), *invalid]
+            ), redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+                RESTORE_READINESS.parse_args()
+
+    def test_local_dump_fixture_shadows_postgres_18_declared_volume(self) -> None:
+        tree = ast.parse(SCRIPT.read_text(encoding="utf-8"))
+        fixture_method = next(
+            node
+            for node in ast.walk(tree)
+            if isinstance(node, ast.FunctionDef) and node.name == "create_local_dump_fixture"
+        )
+        self.assertTrue(
+            any(
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Name)
+                and node.func.id == "local_unenrolled_auth_key_fixture_sql"
+                for node in ast.walk(fixture_method)
+            )
+        )
+        self.assertIn("UNENROLLED_BOUND_AUTH_KEY_COUNT_SQL", ast.unparse(fixture_method))
+        image_container_call = next(
+            node
+            for node in ast.walk(fixture_method)
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr == "image_container"
+        )
+        tmpfs_options = next(
+            keyword.value for keyword in image_container_call.keywords if keyword.arg == "tmpfs_options"
+        )
+        tmpfs_paths = ast.literal_eval(tmpfs_options)
+
+        self.assertIn("/var/lib/postgresql", tmpfs_paths)
+        self.assertNotIn("/var/lib/postgresql/data", tmpfs_paths)
+
+    def test_local_fixture_source_migration_allows_added_users_and_auth_keys(self) -> None:
+        self.assertEqual(RESTORE_READINESS.source_fixture_counts(False), (1, 3))
+        self.assertEqual(RESTORE_READINESS.source_fixture_counts(True), (3, 5))
+
+        tree = ast.parse(SCRIPT.read_text(encoding="utf-8"))
+        run_primary = next(
+            node
+            for node in ast.walk(tree)
+            if isinstance(node, ast.FunctionDef) and node.name == "run_primary"
+        )
+        count_calls = sorted(
+            (node.lineno, ast.unparse(node.args[0]))
+            for node in ast.walk(run_primary)
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id == "source_fixture_counts"
+        )
+        fixture_call_line = next(
+            node.lineno
+            for node in ast.walk(run_primary)
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr == "create_local_dump_fixture"
+        )
+        self.assertEqual([argument for _, argument in count_calls], ["False", "args.local_fixture_test"])
+        self.assertLess(count_calls[0][0], fixture_call_line)
+        self.assertGreater(count_calls[1][0], fixture_call_line)
+
+    def test_local_fixture_retains_atlas_environment_for_pending_migration(self) -> None:
+        tree = ast.parse(SCRIPT.read_text(encoding="utf-8"))
+        run_primary = next(
+            node
+            for node in ast.walk(tree)
+            if isinstance(node, ast.FunctionDef) and node.name == "run_primary"
+        )
+        fixture_migration = next(
+            node
+            for node in ast.walk(run_primary)
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr == "migrate_database"
+            and len(node.args) >= 3
+            and isinstance(node.args[2], ast.Name)
+            and node.args[2].id == "LOCAL_FIXTURE_SCHEMA"
+        )
+        self.assertIn(
+            "keep_env=True",
+            [f"{keyword.arg}={ast.unparse(keyword.value)}" for keyword in fixture_migration.keywords],
+        )
+
+    def test_postgres_restore_role_is_not_the_pg18_bootstrap_superuser(self) -> None:
+        role = RESTORE_READINESS.RESTORE_BOOTSTRAP_ROLE
+        self.assertNotEqual(role, "postgres")
+        self.assertEqual(
+            RESTORE_READINESS.bootstrap_postgres_role_sql("a" * 64),
+            "CREATE ROLE postgres WITH LOGIN SUPERUSER CREATEDB CREATEROLE "
+            "REPLICATION BYPASSRLS PASSWORD '" + "a" * 64 + "';\n"
+            "ALTER DATABASE teagram OWNER TO postgres;",
+        )
+        with self.assertRaises(ValueError):
+            RESTORE_READINESS.bootstrap_postgres_role_sql("a' SUPERUSER; --")
+
+        tree = ast.parse(SCRIPT.read_text(encoding="utf-8"))
+        create_database = next(
+            node
+            for node in ast.walk(tree)
+            if isinstance(node, ast.FunctionDef) and node.name == "create_database"
+        )
+        create_database_source = ast.unparse(create_database)
+        self.assertIn("database_user=RESTORE_BOOTSTRAP_ROLE", create_database_source)
+        self.assertIn("self.sql(record, role_sql, self.phase", create_database_source)
+
+        prepare_materials = next(
+            node
+            for node in ast.walk(tree)
+            if isinstance(node, ast.FunctionDef) and node.name == "prepare_materials"
+        )
+        self.assertEqual(ast.unparse(prepare_materials).count("'POSTGRES_USER': RESTORE_BOOTSTRAP_ROLE"), 2)
+
+    def test_fixture_role_inventory_excludes_cluster_bootstrap_roles(self) -> None:
+        self.assertIn(
+            "rolname NOT IN ('postgres', '" + RESTORE_READINESS.RESTORE_BOOTSTRAP_ROLE + "')",
+            RESTORE_READINESS.FIXTURE_STATE_SQL,
+        )
+
+    def test_local_inventory_ignores_pg16_to_pg18_catalog_drift(self) -> None:
+        inventory = RESTORE_READINESS.LOCAL_OBJECT_INVENTORY_SQL
+        self.assertIn("FROM aclexplode(c.relacl) AS acl WHERE acl.grantee <> c.relowner", inventory)
+        self.assertIn(
+            "FROM aclexplode(relation.relacl) AS acl WHERE acl.grantee <> relation.relowner",
+            RESTORE_READINESS.EXTENSION_STATE_SQL,
+        )
+        self.assertIn("d.objid IN (t.typrelid, (SELECT element.typrelid FROM pg_type AS element WHERE element.oid = t.typelem))", inventory)
+        self.assertIn(
+            "routine.proname || '(' || oidvectortypes(routine.proargtypes) || ')'",
+            RESTORE_READINESS.EXTENSION_STATE_SQL,
+        )
+        self.assertIn("FROM pg_rewrite AS rewrite", inventory)
+        self.assertIn("rewrite.rulename <> '_RETURN'", inventory)
+        self.assertIn("pg_get_ruledef(rewrite.oid, true)", inventory)
+        hostile_fixtures = next(
+            node
+            for node in ast.walk(ast.parse(SCRIPT.read_text(encoding="utf-8")))
+            if isinstance(node, ast.FunctionDef) and node.name == "run_local_hostile_fixture_tests"
+        )
+        self.assertIn("CREATE RULE restore_readiness_unexpected_rule", ast.unparse(hostile_fixtures))
+        self.assertIn("pg_catalog.pg_reload_conf()", ast.unparse(hostile_fixtures))
 
     def test_sigkill_drill_requires_injection_marker_and_signal_status(self) -> None:
         marker = b"SIGKILL_INJECTED\n"
@@ -138,7 +359,7 @@ class RestoreReadinessContractTests(unittest.TestCase):
                 RESTORE_READINESS.write_sigkill_marker(17)
 
         shell = SHELL_GATE.read_text(encoding="utf-8")
-        self.assertIn('run_drill --fault-test sigkill >"$sigkill_output" 2>/dev/null &', shell)
+        self.assertIn("run_sigkill_recovery_drill --fault-test sigkill", shell)
         self.assertIn('[[ $sigkill_status -ne 137 ]]', shell)
         self.assertIn('[[ $(<"$sigkill_output") != "SIGKILL_INJECTED" ]]', shell)
 
@@ -320,6 +541,18 @@ class RestoreReadinessContractTests(unittest.TestCase):
                 "exit": 0,
             },
         )
+        local_passed = RESTORE_READINESS.report_document(
+            "application_assertions",
+            "assertions_passed",
+            "verified",
+            123,
+            migration_head=RESTORE_READINESS.HEAD_SCHEMA,
+            help_get_config="pass",
+            synthetic_signin="pass",
+            auth_keys_cleared="pass",
+            input_mode="local",
+        )
+        self.assertEqual(local_passed, dict(passed, input_mode="local"))
         cleanup_failure = RESTORE_READINESS.report_document(
             "application_assertions",
             "assertions_passed",
@@ -355,10 +588,351 @@ class RestoreReadinessContractTests(unittest.TestCase):
                 auth_keys_cleared="pass",
             )
 
+    def test_local_dump_metadata_is_bounded(self) -> None:
+        name = "pgdump-pre-" + "a" * 40 + ".sql"
+
+        def file_info(
+            *,
+            mode: int = stat.S_IFREG | 0o600,
+            uid: int = 0,
+            gid: int = 0,
+            links: int = 1,
+            size: int = 4096,
+        ) -> os.stat_result:
+            return os.stat_result((mode, 1, 2, links, uid, gid, size, 0, 0, 0))
+
+        self.assertTrue(RESTORE_READINESS.validate_local_dump_metadata(file_info(), name))
+        deploy_name = "pgdump-pre-abcdef0-20261022T211333Z.sql"
+        self.assertTrue(RESTORE_READINESS.validate_local_dump_metadata(file_info(), deploy_name))
+        for info, candidate in (
+            (file_info(mode=stat.S_IFLNK | 0o600), name),
+            (file_info(uid=1), name),
+            (file_info(gid=1), name),
+            (file_info(mode=stat.S_IFREG | 0o640), name),
+            (file_info(links=2), name),
+            (file_info(size=0), name),
+            (file_info(size=RESTORE_READINESS.MAX_LOCAL_DUMP_BYTES + 1), name),
+            (file_info(), "pgdump-pre-" + "A" * 40 + ".sql"),
+            (file_info(), "pgdump-pre-abcdef0-20261022T21133Z.sql"),
+        ):
+            with self.subTest(info=info, name=candidate):
+                self.assertFalse(RESTORE_READINESS.validate_local_dump_metadata(info, candidate))
+
+    def test_local_dump_walk_rejects_an_untrusted_root_directory_fd(self) -> None:
+        name = "pgdump-pre-" + "a" * 40 + ".sql"
+        path = Path("/tmp") / name
+        cases = (
+            (stat.S_IFDIR | 0o755, 1000, 0),
+            (stat.S_IFDIR | 0o755, 0, 1000),
+            (stat.S_IFDIR | 0o775, 0, 0),
+            (stat.S_IFDIR | 0o757, 0, 0),
+            (stat.S_IFREG | 0o755, 0, 0),
+        )
+        for mode, uid, gid in cases:
+            info = os.stat_result((mode, 1, 2, 1, uid, gid, 0, 0, 0, 0))
+            with (
+                self.subTest(mode=oct(mode), uid=uid, gid=gid),
+                patch.object(RESTORE_READINESS.os, "open", return_value=41) as open_directory,
+                patch.object(RESTORE_READINESS.os, "fstat", return_value=info),
+                patch.object(RESTORE_READINESS.os, "close") as close_directory,
+                self.assertRaises(ValueError),
+            ):
+                RESTORE_READINESS.open_local_dump(path)
+
+            open_directory.assert_called_once()
+            self.assertEqual(open_directory.call_args.args[0], "/")
+            close_directory.assert_called_once_with(41)
+
+    def test_local_inventory_and_restore_contracts_are_bounded(self) -> None:
+        inventory = RESTORE_READINESS.LOCAL_OBJECT_INVENTORY_SQL
+        self.assertIn("LEFT JOIN pg_sequence AS seq ON seq.seqrelid = c.oid", inventory)
+        for parameter in (
+            "seqtypid",
+            "seqstart",
+            "seqincrement",
+            "seqmax",
+            "seqmin",
+            "seqcache",
+            "seqcycle",
+        ):
+            with self.subTest(parameter=parameter):
+                self.assertIn(f"seq.{parameter}", inventory)
+
+        source = SCRIPT.read_text(encoding="utf-8")
+        self.assertIn("ALTER SEQUENCE public.users_id_seq INCREMENT BY", source)
+        self.assertIn("seqincrement::text FROM pg_sequence", source)
+
+        self.assertIn("self.mount(self.local_dump_path, \"/run/local-dump/input.sql\", writable=False)", source)
+        self.assertIn("--single-transaction --file=-", source)
+        self.assertIn("\\\\restrict", source)
+        self.assertIn("-- PostgreSQL database dump complete", source)
+        self.assertIn("printf 'SELECT 1 / 0;\\n'", source)
+        self.assertIn('entrypoint="/bin/sh"', source)
+        self.assertIn("LIMIT {MAX_LOCAL_AUTH_KEYS}", source)
+        self.assertIn("IF deleted_keys <> original_keys", source)
+        self.assertIn("def validate_local_dump_argument", source)
+        self.assertIn("LOCAL_OBJECT_INVENTORY_SQL", source)
+        self.assertIn("COMMENT ON SCHEMA public IS", source)
+        self.assertIn("obj_description(namespace.oid, 'pg_namespace')", source)
+        self.assertIn('"synthetic_local_dump_fixture"}', source)
+        self.assertIn("            LOCAL_DUMP_LEAK_MARKER,", source)
+        self.assertIn('role="local_restore_client",\n            user="0:70"', source)
+        self.assertIn('"local_restore_client": "0:70"', source)
+        self.assertIn("MIGRATION_HEAD_RELATION_SAFE_SQL", source)
+        self.assertIn("database_user=LOCAL_ATTESTATION_ROLE", source)
+        self.assertIn("pinned_search_path=True", source)
+        self.assertIn("restore_readiness_copy_to_program", source)
+        self.assertIn("ALTER ROLE postgres SET search_path = public, pg_catalog", source)
+        self.assertIn("CREATE FUNCTION public.md5(text)", source)
+
+        tree = ast.parse(source)
+        restore_method = next(
+            node
+            for node in ast.walk(tree)
+            if isinstance(node, ast.FunctionDef) and node.name == "restore_local_dump"
+        )
+        assignment = next(
+            node
+            for node in restore_method.body
+            if isinstance(node, ast.Assign)
+            and any(isinstance(target, ast.Name) and target.id == "restore_script" for target in node.targets)
+        )
+        restore_script = ast.literal_eval(assignment.value)
+        awk_program = restore_script.split("  if awk '\n", 1)[1].split('\n  \' "$dump_path"; then', 1)[0]
+        valid_pg16_dump = (
+            "SET statement_timeout = 0;\n"
+            "--\n-- PostgreSQL database dump complete\n--\n\n"
+        )
+        valid_pg18_dump = (
+            "\\restrict sourcekey\nSET statement_timeout = 0;\n"
+            "--\n-- PostgreSQL database dump complete\n--\n\n"
+            "\\unrestrict sourcekey\n\n"
+        )
+        hostile_dump = valid_pg18_dump.replace(
+            "--\n-- PostgreSQL database dump complete",
+            "\\unrestrict injectedkey\n--\n-- PostgreSQL database dump complete",
+        )
+        for dump, expected_status in (
+            (valid_pg16_dump, 0),
+            (valid_pg18_dump, 0),
+            (hostile_dump, 42),
+        ):
+            with self.subTest(expected_status=expected_status):
+                filtered = subprocess.run(
+                    ["awk", awk_program, "-"],
+                    input=dump,
+                    text=True,
+                    capture_output=True,
+                    check=False,
+                )
+                self.assertEqual(filtered.returncode, expected_status)
+                self.assertNotIn("\\unrestrict", filtered.stdout)
+
+        # Blank lines are SQL content: function bodies and empty-string COPY rows must reach psql unchanged.
+        body = "CREATE FUNCTION public.f() RETURNS integer LANGUAGE plpgsql AS $$\nBEGIN\n\n  RETURN 1;\nEND\n$$;\n"
+        copy = "COPY public.t (note) FROM stdin;\n\nkept\n\\.\n"
+        dump_with_blank_lines = valid_pg18_dump.replace(
+            "SET statement_timeout = 0;\n",
+            "SET statement_timeout = 0;\n" + body + copy,
+        )
+        filtered = subprocess.run(
+            ["awk", awk_program, "-"],
+            input=dump_with_blank_lines,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        self.assertEqual(filtered.returncode, 0)
+        self.assertIn("SET statement_timeout = 0;\n" + body + copy, filtered.stdout)
+
+    def test_local_schema_snapshot_uses_pinned_non_superuser_queries(self) -> None:
+        target = {"id": "a" * 64}
+        drill = object.__new__(RESTORE_READINESS.Drill)
+        drill.local_admin_role = None
+
+        def query(_database: dict[str, Any], statement: str, _phase: str, **_kwargs: Any) -> str:
+            if statement == RESTORE_READINESS.LOCAL_OBJECT_INVENTORY_SQL:
+                return "1|" + "a" * 32
+            if statement == RESTORE_READINESS.ROLE_STATE_SQL:
+                return json.dumps({"roles": [], "memberships": [], "settings": []})
+            if statement in (RESTORE_READINESS.DATABASE_STATE_SQL, RESTORE_READINESS.EXTENSION_STATE_SQL):
+                return "{}"
+            raise AssertionError(f"unexpected local snapshot query: {statement}")
+
+        drill.sql = Mock(side_effect=query)
+        drill.local_schema_snapshot(target, "schema_validation")
+        self.assertEqual(drill.sql.call_count, 4)
+        for call in drill.sql.call_args_list:
+            self.assertEqual(call.kwargs["database_user"], RESTORE_READINESS.LOCAL_ATTESTATION_ROLE)
+            self.assertTrue(call.kwargs["pinned_search_path"])
+
+    def test_local_schema_state_ignores_only_the_live_restore_admin_role(self) -> None:
+        # The admin role exists on the target until promotion, which now runs after every local check.
+        source = {"id": "a" * 64}
+        target = {"id": "b" * 64}
+        head = RESTORE_READINESS.HEAD_SCHEMA
+        for target_roles, passes in (
+            ("browser_acceptance_probe,restore_admin_0123456789abcdef", True),
+            ("browser_acceptance_probe,restore_admin_0123456789abcdef,restore_readiness_hostile", False),
+        ):
+            with self.subTest(target_roles=target_roles):
+                drill = object.__new__(RESTORE_READINESS.Drill)
+                drill.local_admin_role = "restore_admin_0123456789abcdef"
+                drill.local_schema_snapshot = Mock(return_value=("same",))
+                drill.verify_database_settings = Mock()
+
+                def query(database: dict[str, Any], statement: str, _phase: str, **_kwargs: Any) -> str:
+                    if statement == RESTORE_READINESS.MIGRATION_HEAD_SQL:
+                        return head
+                    if statement == RESTORE_READINESS.FIXTURE_STATE_SQL:
+                        roles = target_roles if database is target else "browser_acceptance_probe"
+                        return f"5|3|{roles}|pg_stat_statements,plpgsql|0|0|0|0|0"
+                    raise AssertionError(f"unexpected query: {statement}")
+
+                drill.sql = Mock(side_effect=query)
+                if passes:
+                    drill.verify_local_schema_state(source, target, "schema_validation", expected_head=head)
+                else:
+                    with self.assertRaises(RESTORE_READINESS.DrillFailure):
+                        drill.verify_local_schema_state(source, target, "schema_validation", expected_head=head)
+
+    def test_server_settings_are_checked_only_after_promotion(self) -> None:
+        # SHOW of server settings needs superuser; postgres stays demoted until every local check passed.
+        target = {"id": "b" * 64}
+        drill = object.__new__(RESTORE_READINESS.Drill)
+        drill.databases = {"target": target}
+        drill.local_admin_role = "restore_admin_0123456789abcdef"
+        drill.target_db_password = "a" * 64
+        events: list[str] = []
+
+        def query(_database: dict[str, Any], statement: str, _phase: str, **kwargs: Any) -> str:
+            if statement.startswith("SELECT rolsuper"):
+                return "true|true|true"
+            if "SUPERUSER CREATEDB" in statement:
+                events.append("promote")
+            if statement.startswith("DROP ROLE"):
+                events.append("drop_admin")
+            return ""
+
+        drill.sql = Mock(side_effect=query)
+        drill.verify_database_settings = Mock(side_effect=lambda *_args: events.append("settings"))
+        drill.promote_local_restore_owner(target)
+        self.assertEqual(events, ["promote", "drop_admin", "settings"])
+
+        drill.local_admin_role = "restore_admin_0123456789abcdef"
+        drill.verify_database_settings.reset_mock()
+        drill.local_schema_snapshot = Mock(return_value=("same",))
+        drill.sql = Mock(side_effect=lambda _db, statement, _phase, **_kw: (
+            RESTORE_READINESS.HEAD_SCHEMA if statement == RESTORE_READINESS.MIGRATION_HEAD_SQL
+            else "5|3|browser_acceptance_probe|pg_stat_statements,plpgsql|0|0|0|0|0"
+        ))
+        drill.verify_local_schema_state({"id": "a" * 64}, target, "schema_validation", expected_head=RESTORE_READINESS.HEAD_SCHEMA)
+        drill.verify_database_settings.assert_not_called()
+
+    def test_local_hostile_refusals_compare_the_normalized_snapshot(self) -> None:
+        target = {"id": "a" * 64}
+        baseline = ((1, "a" * 32), "normalized-roles", "database-state", "extension-state")
+        drill = object.__new__(RESTORE_READINESS.Drill)
+        drill.args = Mock(local_fixture_test=True)
+        drill.databases = {"target": target}
+        drill.local_object_inventory = Mock(return_value=baseline[0])
+        drill.sql = Mock(
+            side_effect=lambda _database, statement, _phase, **_kwargs: (
+                "raw-roles" if statement == RESTORE_READINESS.ROLE_STATE_SQL else "{}"
+            )
+        )
+
+        class ComparedCurrentSnapshot(Exception):
+            pass
+
+        snapshot_calls = 0
+
+        def snapshot(_database: dict[str, Any], _phase: str) -> tuple[Any, ...]:
+            nonlocal snapshot_calls
+            snapshot_calls += 1
+            if snapshot_calls == 3:
+                raise ComparedCurrentSnapshot
+            return baseline
+
+        drill.local_schema_snapshot = Mock(side_effect=snapshot)
+        drill.run_local_fixture_sql = Mock(return_value=(1, b""))
+
+        with self.assertRaises(ComparedCurrentSnapshot):
+            drill.run_local_hostile_fixture_tests({"id": "b" * 64}, target, RESTORE_READINESS.HEAD_SCHEMA)
+
+        self.assertEqual(snapshot_calls, 3)
+
+    def test_local_migration_head_is_guarded_by_catalog_shape_before_read(self) -> None:
+        target = {"id": "b" * 64, "role": "target_postgres"}
+        drill = object.__new__(RESTORE_READINESS.Drill)
+        drill.databases = {"target": target}
+
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            migration_dir = Path(temporary_directory) / "migrations"
+            migration_dir.mkdir()
+            (migration_dir / f"{RESTORE_READINESS.HEAD_SCHEMA}_fixture.sql").write_text("-- fixture\n")
+            drill.run_dir = Path(temporary_directory)
+            calls: list[tuple[str, dict[str, Any]]] = []
+            outputs = iter(("false", "safe", "reviewed-shape", "reviewed-shape", RESTORE_READINESS.HEAD_SCHEMA))
+
+            def query(_database: dict[str, Any], statement: str, _phase: str, **kwargs: Any) -> str:
+                calls.append((statement, kwargs))
+                return next(outputs)
+
+            drill.sql = Mock(side_effect=query)
+            self.assertEqual(
+                drill.local_dump_migration_head({"id": "c" * 64}, target, "schema_validation"),
+                RESTORE_READINESS.HEAD_SCHEMA,
+            )
+            self.assertEqual(
+                [statement for statement, _ in calls],
+                [
+                    "SELECT rolsuper::text FROM pg_catalog.pg_roles WHERE rolname = CURRENT_USER;",
+                    RESTORE_READINESS.MIGRATION_HEAD_RELATION_SAFE_SQL,
+                    RESTORE_READINESS.MIGRATION_HEAD_RELATION_SHAPE_SQL,
+                    RESTORE_READINESS.MIGRATION_HEAD_RELATION_SHAPE_SQL,
+                    RESTORE_READINESS.MIGRATION_HEAD_SQL,
+                ],
+            )
+            self.assertTrue(all(kwargs["pinned_search_path"] for _, kwargs in calls))
+            self.assertEqual(calls[1][1]["database_user"], RESTORE_READINESS.LOCAL_ATTESTATION_ROLE)
+            self.assertEqual(calls[-1][1]["database_user"], "postgres")
+
+            drill.sql = Mock(side_effect=("false", "unsafe"))
+            with self.assertRaises(RESTORE_READINESS.DrillFailure) as unsafe_relation:
+                drill.local_dump_migration_head({"id": "c" * 64}, target, "schema_validation")
+            self.assertEqual(unsafe_relation.exception.category, "schema_failure")
+            self.assertEqual(drill.sql.call_count, 2)
+
+    def test_local_success_report_adds_only_its_mode_marker(self) -> None:
+        report = RESTORE_READINESS.report_document(
+            "application_assertions",
+            "assertions_passed",
+            "verified",
+            3,
+            migration_head=RESTORE_READINESS.HEAD_SCHEMA,
+            help_get_config="pass",
+            synthetic_signin="pass",
+            auth_keys_cleared="pass",
+            input_mode="local",
+        )
+        self.assertEqual(set(report) - {"input_mode"}, {
+            "result",
+            "migration_head",
+            "help_getConfig",
+            "synthetic_signin",
+            "auth_keys_cleared",
+            "cleanup",
+            "elapsed_ms",
+            "exit",
+        })
+        self.assertEqual(report["input_mode"], "local")
+
     def test_auth_key_inventory_and_bounded_fixture_transactions(self) -> None:
         inventory = RESTORE_READINESS.load_auth_key_inventory()
         self.assertEqual(inventory["base_commit"], "bdb89970bbd40fb57fdb89f3aa8fafb78925ce93")
-        self.assertEqual(inventory["schema_head"], RESTORE_READINESS.HEAD_SCHEMA)
+        self.assertEqual(inventory["schema_head"], "20261021000004")
+        self.assertIn(inventory["schema_head"], RESTORE_READINESS.repo_migration_versions())
         self.assertEqual(
             inventory["trigger_tables"],
             [
@@ -401,6 +975,35 @@ class RestoreReadinessContractTests(unittest.TestCase):
         self.assertIn("INSERT INTO public.notify_settings_difference_cursors", fixture_sql)
         self.assertIn("decode(repeat('a5', 256), 'hex')", fixture_sql)
         self.assertNotIn("SELECT key_value", fixture_sql)
+
+        local_fixture_sql = RESTORE_READINESS.local_unenrolled_auth_key_fixture_sql((-404, -505), "a" * 32)
+        self.assertIn("INSERT INTO public.users", local_fixture_sql)
+        self.assertIn("INSERT INTO public.auth_keys", local_fixture_sql)
+        self.assertNotIn("browser_acceptance_enroll_binding_evidence", local_fixture_sql)
+        self.assertIn(
+            "JOIN public.browser_acceptance_binding_evidence AS evidence\n  ON evidence.user_id = auth_key.user_id",
+            RESTORE_READINESS.AUTH_KEY_EVIDENCE_BOUND_COUNT_SQL,
+        )
+        self.assertIn(
+            "LEFT JOIN public.browser_acceptance_binding_evidence AS evidence",
+            RESTORE_READINESS.UNENROLLED_BOUND_AUTH_KEY_COUNT_SQL,
+        )
+        with self.assertRaises(ValueError):
+            RESTORE_READINESS.local_unenrolled_auth_key_fixture_sql((-404, -404), "a" * 32)
+
+        local_transaction = RESTORE_READINESS.local_auth_key_clear_transaction_sql()
+        self.assertIn("INTO evidence_bound_keys", local_transaction)
+        self.assertIn("original_removals + evidence_bound_keys", local_transaction)
+        self.assertIn(
+            "JOIN public.browser_acceptance_binding_evidence AS evidence",
+            local_transaction,
+        )
+        local_interrupted = RESTORE_READINESS.local_auth_key_clear_transaction_sql(wait_for_signal=True)
+        self.assertLess(
+            local_interrupted.index("\\echo RESTORE_READINESS_AUTH_KEY_DELETE_APPLIED"),
+            local_interrupted.index("pg_sleep(30)"),
+        )
+        self.assertLess(local_interrupted.index("pg_sleep(30)"), local_interrupted.index("COMMIT"))
 
         transaction = RESTORE_READINESS.auth_key_clear_transaction_sql((-101, -202, -303))
         self.assertIn("LOCK TABLE public.auth_keys, public.srp_challenges", transaction)
@@ -553,6 +1156,7 @@ class RestoreReadinessContractTests(unittest.TestCase):
     def test_auth_key_clear_refuses_wrong_target_and_missing_marker_before_sql(self) -> None:
         target = {"id": "a" * 64, "role": "target_postgres", "removed": False}
         drill = object.__new__(RESTORE_READINESS.Drill)
+        drill.input_mode = "synthetic"
         drill.phase = "auth_key_clearing"
         drill.databases = {"target": target}
         drill.manifest = {"containers": [target], "processes": [], "files": []}
@@ -589,12 +1193,14 @@ class RestoreReadinessContractTests(unittest.TestCase):
                 )
                 target = {"id": "a" * 64, "role": "target_postgres", "removed": False}
                 marker = {
+                    "input_mode": "synthetic",
                     "target_container_id": target["id"],
                     "migration_head": RESTORE_READINESS.HEAD_SCHEMA,
                     "database_identity": "fixture-db",
                     "table_counts": ["fixture-counts"],
                 }
                 drill = object.__new__(RESTORE_READINESS.Drill)
+                drill.input_mode = "synthetic"
                 drill.phase = "auth_key_clearing"
                 drill.databases = {"target": target}
                 drill.manifest = {"containers": [target], "processes": []}
@@ -714,6 +1320,18 @@ class RestoreReadinessContractTests(unittest.TestCase):
         )
         self.assertEqual(report["category"], "restore_failure")
         self.assertNotIn("raw", str(report))
+        later_migration_failure = RESTORE_READINESS.report_document(
+            "schema_validation",
+            "schema_failure",
+            "verified",
+            7,
+            migration_head="20261022000002",
+        )
+        self.assertEqual(later_migration_failure["migration_head"], "20261022000002")
+        with self.assertRaises(ValueError):
+            RESTORE_READINESS.report_document(
+                "schema_validation", "schema_failure", "verified", 7, migration_head="20990101000000"
+            )
         with self.assertRaises(ValueError):
             RESTORE_READINESS.report_document("restore", "raw-database-error", "verified", 7)
 
@@ -881,6 +1499,39 @@ class RestoreReadinessContractTests(unittest.TestCase):
         ]
         self.assertTrue(RESTORE_READINESS.validate_container_inspect(seed_document, seed_record))
 
+    def test_local_restore_client_is_root_in_the_socket_group(self) -> None:
+        # Root owns the 0600 dump; the scratch socket directory is 70:70 0770 and no capability overrides it.
+        document, record = container_fixture()
+        mounts = [
+            {"type": "bind", "source": "/run/dump.sql", "destination": "/run/local-dump/input.sql", "rw": False},
+            {"type": "bind", "source": "/run/sockets/target", "destination": "/run/postgres", "rw": True},
+        ]
+        record.update(
+            {
+                "role": "local_restore_client",
+                "user": "0:70",
+                "entrypoint": ["/bin/sh"],
+                "mounts": mounts,
+                "network_mode": "container:" + "d" * 64,
+            }
+        )
+        document["Config"]["User"] = "0:70"
+        document["Config"]["Entrypoint"] = record["entrypoint"]
+        document["Config"]["Labels"][RESTORE_READINESS.IMAGE_ROLE_LABEL] = "local_restore_client"
+        document["HostConfig"]["NetworkMode"] = record["network_mode"]
+        document["Mounts"] = [
+            {"Type": "bind", "Source": item["source"], "Destination": item["destination"], "RW": item["rw"]}
+            for item in mounts
+        ]
+        self.assertTrue(RESTORE_READINESS.validate_container_inspect(document, record))
+
+        for user in ("0:0", "65532:70"):
+            wrong_document = json.loads(json.dumps(document))
+            wrong_record = json.loads(json.dumps(record))
+            wrong_document["Config"]["User"] = user
+            wrong_record["user"] = user
+            self.assertFalse(RESTORE_READINESS.validate_container_inspect(wrong_document, wrong_record))
+
     def test_application_checker_must_stay_non_root(self) -> None:
         document, record = container_fixture()
         record.update({"role": "checker", "user": "0:0"})
@@ -914,6 +1565,7 @@ class RestoreReadinessContractTests(unittest.TestCase):
     def test_restored_target_mismatch_fails_closed(self) -> None:
         drill = object.__new__(RESTORE_READINESS.Drill)
         drill.phase = "schema_validation"
+        drill.local_admin_role = None
         outputs = iter(("0|2||pg_stat_statements,plpgsql|0|0|0|0|0",))
         drill.sql = lambda _database, _statement, _phase: next(outputs)
         with self.assertRaises(RESTORE_READINESS.DrillFailure) as failure:

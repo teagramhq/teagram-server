@@ -20,6 +20,7 @@ WEB_REVISION = "e947f119ba90d9d87b198c9d7a113cceb1395318"
 AUTH_PROGRESS_WEB_REVISION = "569529c1f36923c098760ef727808254dcb6a662"
 ENDPOINT = "wss://teagramd.test/apiws"
 FINGERPRINT = "1234567890abcdef"
+DISCOVERY_CONNECT_SRC = "connect-src 'self' https: wss:"
 # Ordinary product references the accepted private release carries in executable assets.
 PRODUCT_REFERENCES = (
     "https://web.telegram.org/a/",
@@ -31,7 +32,7 @@ CSP = (
     "frame-src 'self' https://challenges.cloudflare.com; object-src 'none'; "
     "script-src 'self' 'wasm-unsafe-eval' https://challenges.cloudflare.com; style-src 'self' 'unsafe-inline'; "
     "img-src 'self' data: blob:; font-src 'self' data:; media-src 'self' blob:; "
-    "worker-src 'self' blob:; manifest-src 'self'; connect-src 'self' " + ENDPOINT + ";"
+    "worker-src 'self' blob:; manifest-src 'self'; " + DISCOVERY_CONNECT_SRC + ";"
 )
 AUTH_PROGRESS_CSP = (
     "default-src 'self'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'; "
@@ -194,7 +195,7 @@ class ArtifactBoundaryTests(unittest.TestCase):
     def tearDown(self) -> None:
         self.temp.cleanup()
 
-    def test_stages_immutable_bytes_and_reports_independent_audit_results(self) -> None:
+    def test_accepts_discovery_ready_csp_and_stages_immutable_bytes(self) -> None:
         expected_index = hashlib.sha256((self.source / "index.html").read_bytes()).hexdigest()
         result = stage(self.source, self.destination, self.secrets, self.build, self.repository)
         self.assertEqual(result.returncode, 0, result.stderr)
@@ -231,11 +232,55 @@ class ArtifactBoundaryTests(unittest.TestCase):
 
     def test_rejects_unreviewed_csp_network_sources(self) -> None:
         index_path = self.source / "index.html"
+        original = index_path.read_text(encoding="utf-8")
+        for extra_source in ("http:", "*", "https://unexpected.invalid"):
+            with self.subTest(extra_source=extra_source):
+                index_path.write_text(
+                    original.replace(
+                        DISCOVERY_CONNECT_SRC,
+                        f"{DISCOVERY_CONNECT_SRC} {extra_source}",
+                    ),
+                    encoding="utf-8",
+                )
+                write_manifest(self.source)
+
+                result = stage(self.source, self.destination, self.secrets, self.build, self.repository)
+
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("privateCSP", result.stderr)
+                self.assertFalse(self.destination.exists())
+
+    def test_accepts_legacy_exact_private_csp_for_current_revision(self) -> None:
+        index_path = self.source / "index.html"
+        legacy_csp = CSP.replace(DISCOVERY_CONNECT_SRC, f"connect-src 'self' {ENDPOINT}")
         index_path.write_text(
-            index_path.read_text(encoding="utf-8").replace(
-                f"connect-src 'self' {ENDPOINT}",
-                f"connect-src 'self' {ENDPOINT} https://unexpected.invalid",
-            ),
+            index_path.read_text(encoding="utf-8").replace(CSP, legacy_csp),
+            encoding="utf-8",
+        )
+        write_manifest(self.source)
+
+        result = stage(self.source, self.destination, self.secrets, self.build, self.repository)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertTrue(json.loads(result.stdout)["checks"]["privateCSP"])
+
+    def test_rejects_multiple_private_csp_meta_elements(self) -> None:
+        index_path = self.source / "index.html"
+        original = index_path.read_text(encoding="utf-8")
+        duplicate = '<meta http-equiv="Content-Security-Policy" content="' + CSP + '">'
+        index_path.write_text(original.replace("</head>", duplicate + "</head>"), encoding="utf-8")
+        write_manifest(self.source)
+
+        result = stage(self.source, self.destination, self.secrets, self.build, self.repository)
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("privateCSP", result.stderr)
+        self.assertFalse(self.destination.exists())
+
+    def test_rejects_changed_non_connect_csp_directive(self) -> None:
+        index_path = self.source / "index.html"
+        index_path.write_text(
+            index_path.read_text(encoding="utf-8").replace("default-src 'self'", "default-src *"),
             encoding="utf-8",
         )
         write_manifest(self.source)

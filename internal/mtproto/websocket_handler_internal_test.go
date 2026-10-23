@@ -6,6 +6,8 @@ import (
 	"net"
 	"testing"
 	"time"
+
+	"github.com/teagramhq/teagram-server/internal/store"
 )
 
 type shutdownTestListener struct{}
@@ -20,7 +22,7 @@ func (a shutdownTestAddr) Network() string { return string(a) }
 func (a shutdownTestAddr) String() string  { return string(a) }
 
 func TestWebSocketWaitTracksHandlerAfterSocketClose(t *testing.T) {
-	listener := newWebSocketListener(shutdownTestListener{}, nil)
+	listener := newWebSocketListener(shutdownTestListener{}, nil, store.RateLimitListenerTailnet)
 	close(listener.acceptDone)
 	serverConn, peerConn := net.Pipe()
 	defer func() {

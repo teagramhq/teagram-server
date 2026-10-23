@@ -30,6 +30,8 @@ SCHEMA = "teagram.blob-mode/v1"
 REPORT_SCHEMA = "teagram.blob-mode-report/v1"
 TRANSITION_REPORT_SCHEMA = "teagram.blob-mode-report/v2"
 TRANSITION_PROOF_SCHEMA = "teagram.blob-transition-proof/v2"
+SIMPLE_TRANSITION_REPORT_SCHEMA = "teagram.blob-mode-report/v3"
+SIMPLE_TRANSITION_PROOF_SCHEMA = "teagram.blob-transition-proof/v3"
 STACK_MOVE_REPORT_SCHEMA = "teagram.blob-mode-stack-move-report/v1"
 STACK_MOVE_OUTCOME = "stack-moved-local"
 STACK_MOVE_SOURCE_VOLUMES = {
@@ -93,6 +95,28 @@ S3_TRANSITION_PHASES = {
     "copy_pass_2_sha256",
     "destination_census_pass_1_sha256",
     "destination_census_pass_2_sha256",
+}
+SIMPLE_S3_TRANSITION_PHASES = {
+    "candidate_compose_sha256",
+    "local_compose_sha256",
+    "frozen_inventory_sha256",
+    "dump_sha256",
+    "dump_restore_sha256",
+    "source_frozen_sha256",
+    "copy_manifest_sha256",
+    "destination_census_sha256",
+}
+SIMPLE_RECOVERY_TRANSITION_PHASES = {
+    "s3_compose_sha256",
+    "local_compose_sha256",
+    "frozen_inventory_sha256",
+    "dump_sha256",
+    "dump_restore_sha256",
+    "s3_census_sha256",
+    "local_before_restore_sha256",
+    "restore_manifest_sha256",
+    "destination_census_sha256",
+    "retained_keys_sha256",
 }
 RECOVERY_TRANSITION_PHASES_V1 = {
     "frozen_inventory_sha256",
@@ -419,6 +443,13 @@ def container_network(container: dict[str, object]) -> dict[str, object]:
     return {"mode": "networks", "networks": sorted(attached)}
 
 
+def network_includes(network: object, expected_name: str) -> bool:
+    if not isinstance(network, dict) or network.get("mode") != "networks":
+        return False
+    attached = network.get("networks")
+    return isinstance(attached, list) and expected_name in attached
+
+
 def compose_named_mounts(
     service: dict[str, object], compose: dict[str, object], volume_key: str,
     target_roots: str | tuple[str, ...],
@@ -665,6 +696,8 @@ def container_inventory(inspected: object, checkout: pathlib.Path, allow_empty: 
             record["tg_environment_sha256"] = teagramd_environment_sha256(container_tg_environment(item))
         elif service == "rustfs":
             record["rustfs_mounts"] = rustfs_mounts
+            record["ports"] = container_ports(item)
+            record["network"] = container_network(item)
         elif service == "postgres":
             record["pgdata_mounts"] = pgdata_mounts
         result.append(record)
@@ -745,7 +778,7 @@ def valid_outcome(record: object, expected_generation: int, previous_id: str | N
             reject("record-evidence")
     elif outcome == "s3-accepted":
         expected = {"report_sha256", "source_manifest_sha256", "destination_manifest_sha256", "object_count", "byte_total", "copy_passes"}
-        if set(evidence) != expected or type(evidence.get("copy_passes")) is not int or evidence.get("copy_passes") != 2:
+        if set(evidence) != expected or type(evidence.get("copy_passes")) is not int or evidence.get("copy_passes") not in (1, 2):
             reject("record-evidence")
         if not all(digest(evidence.get(key)) for key in ("source_manifest_sha256", "destination_manifest_sha256")):
             reject("record-evidence")
@@ -753,7 +786,7 @@ def valid_outcome(record: object, expected_generation: int, previous_id: str | N
             reject("record-evidence")
     elif outcome == "recovered-local":
         expected = {"report_sha256", "s3_census_manifest_sha256", "restored_manifest_sha256", "object_count", "byte_total", "restore_passes", "retained_cutover_key_count"}
-        if set(evidence) != expected or type(evidence.get("restore_passes")) is not int or evidence.get("restore_passes") != 2:
+        if set(evidence) != expected or type(evidence.get("restore_passes")) is not int or evidence.get("restore_passes") not in (1, 2):
             reject("record-evidence")
         if not all(digest(evidence.get(key)) for key in ("s3_census_manifest_sha256", "restored_manifest_sha256")):
             reject("record-evidence")
@@ -1097,6 +1130,87 @@ def validate_restored_union(
     return retained_count
 
 
+def validate_private_rustfs_render(compose: object) -> None:
+    services = compose.get("services") if isinstance(compose, dict) else None
+    rustfs = services.get("rustfs") if isinstance(services, dict) else None
+    if (
+        not isinstance(rustfs, dict)
+        or rustfs.get("ports") not in (None, [])
+        or rustfs.get("network_mode") not in (None, "")
+    ):
+        reject("transition-rustfs-exposed")
+    project = compose.get("name") if isinstance(compose, dict) else None
+    networks = compose.get("networks") if isinstance(compose, dict) else None
+    service_networks = rustfs.get("networks")
+    if (
+        not isinstance(project, str)
+        or re.fullmatch(r"[a-z0-9][a-z0-9_-]*", project) is None
+        or not isinstance(networks, dict)
+        or not isinstance(service_networks, dict)
+        or set(service_networks) != {"rustfs_private"}
+    ):
+        reject("transition-rustfs-exposed")
+    private_network = networks.get("rustfs_private")
+    if (
+        not isinstance(private_network, dict)
+        or private_network.get("name") != f"{project}_rustfs_private"
+        or private_network.get("driver") != "bridge"
+        or private_network.get("internal") is not True
+        or private_network.get("enable_ipv6") is not False
+        or private_network.get("driver_opts") != {
+            "com.docker.network.bridge.gateway_mode_ipv4": "isolated"
+        }
+        or private_network.get("external") not in (None, False)
+    ):
+        reject("transition-rustfs-exposed")
+    try:
+        network = compose_network(rustfs, compose)
+    except Reject:
+        reject("transition-rustfs-exposed")
+    if network != {"mode": "networks", "networks": [f"{project}_rustfs_private"]}:
+        reject("transition-rustfs-exposed")
+    serving_services = [
+        (name, service) for name, service in services.items()
+        if is_runtime_service(name)
+    ]
+    if not serving_services:
+        reject("transition-teagramd-rustfs-network")
+    for name, service in serving_services:
+        if not isinstance(service, dict):
+            reject("transition-teagramd-rustfs-network")
+        try:
+            serving_network = compose_network(service, compose)
+        except Reject:
+            reject("transition-teagramd-rustfs-network")
+        if not network_includes(serving_network, f"{project}_rustfs_private"):
+            reject("transition-teagramd-rustfs-network")
+
+
+def rustfs_private_network_name(record: dict[str, object]) -> str:
+    volumes = record.get("volumes")
+    volume = volumes.get("rustfsdata") if isinstance(volumes, dict) else None
+    if not isinstance(volume, str):
+        reject("running-rustfs-network")
+    match = re.fullmatch(r"([a-z0-9][a-z0-9_-]*)_rustfsdata", volume)
+    if match is None:
+        reject("running-rustfs-network")
+    return f"{match.group(1)}_rustfs_private"
+
+
+def validate_private_rustfs_network(network: object, expected_name: str) -> None:
+    if not isinstance(network, dict):
+        reject("running-rustfs-network")
+    options = network.get("Options")
+    if (
+        network.get("Name") != expected_name
+        or network.get("Driver") != "bridge"
+        or network.get("Internal") is not True
+        or network.get("EnableIPv6") is not False
+        or options != {"com.docker.network.bridge.gateway_mode_ipv4": "isolated"}
+    ):
+        reject("running-rustfs-network")
+
+
 def validate_transition_artifacts(
     report_root: pathlib.Path,
     outcome: str,
@@ -1106,6 +1220,79 @@ def validate_transition_artifacts(
     sync: bool = False,
 ) -> None:
     paths = validate_phase_files(report_root, phase_digests, phase_files, sync=sync)
+    simple_cutover = set(phase_digests) == SIMPLE_S3_TRANSITION_PHASES
+    simple_recovery = set(phase_digests) == SIMPLE_RECOVERY_TRANSITION_PHASES
+    if simple_cutover or simple_recovery:
+        if (simple_cutover and outcome != "s3-accepted") or (simple_recovery and outcome != "recovered-local"):
+            reject("transition-report-evidence")
+        try:
+            restore_result = paths["dump_restore_sha256"].read_bytes()
+        except OSError:
+            reject("transition-report-evidence")
+        restore_match = re.fullmatch(
+            rb"restore=pass database=blob_restore_[0-9a-f]{32} dump_sha256=([0-9a-f]{64})\n",
+            restore_result,
+        )
+        if restore_match is None or restore_match.group(1).decode("ascii") != phase_digests.get("dump_sha256"):
+            reject("transition-report-evidence")
+        if simple_cutover:
+            compose = read_json(paths["candidate_compose_sha256"])
+            try:
+                validate_private_rustfs_render(compose)
+            except Reject:
+                reject("transition-report-evidence")
+            manifest_sha, objects, total_bytes = compare_manifest_summaries(
+                [
+                    paths["source_frozen_sha256"],
+                    paths["copy_manifest_sha256"],
+                    paths["destination_census_sha256"],
+                ]
+            )
+            if (
+                manifest_sha != evidence.get("source_manifest_sha256")
+                or manifest_sha != evidence.get("destination_manifest_sha256")
+                or type(evidence.get("object_count")) is not int
+                or evidence.get("object_count") != objects
+                or type(evidence.get("byte_total")) is not int
+                or evidence.get("byte_total") != total_bytes
+                or evidence.get("copy_passes") != 1
+            ):
+                reject("transition-report-evidence")
+        else:
+            compose = read_json(paths["s3_compose_sha256"])
+            try:
+                validate_private_rustfs_render(compose)
+            except Reject:
+                reject("transition-report-evidence")
+            s3_sha, _s3_objects, _s3_bytes = compare_manifest_summaries(
+                [paths["s3_census_sha256"], paths["restore_manifest_sha256"]]
+            )
+            before_sha, _before_objects, _before_bytes = manifest_summary(
+                paths["local_before_restore_sha256"]
+            )
+            retained_sha, _retained_objects, _retained_bytes = manifest_summary(
+                paths["retained_keys_sha256"]
+            )
+            local_sha, objects, total_bytes = manifest_summary(paths["destination_census_sha256"])
+            retained_count = validate_restored_union(
+                paths["local_before_restore_sha256"],
+                paths["s3_census_sha256"],
+                paths["retained_keys_sha256"],
+                paths["destination_census_sha256"],
+            )
+            if (
+                s3_sha != evidence.get("s3_census_manifest_sha256")
+                or local_sha != evidence.get("restored_manifest_sha256")
+                or objects != evidence.get("object_count")
+                or total_bytes != evidence.get("byte_total")
+                or retained_count != evidence.get("retained_cutover_key_count")
+                or retained_sha != phase_digests.get("retained_keys_sha256")
+                or before_sha != phase_digests.get("local_before_restore_sha256")
+                or evidence.get("restore_passes") != 1
+            ):
+                reject("transition-report-evidence")
+        return
+
     release_set = validate_live_schema_dump_binding(paths, phase_digests)
     if outcome == "s3-accepted":
         manifest_names = (
@@ -1266,7 +1453,7 @@ def validate_report(
         reject("report-digest")
     report = read_json(report_file)
     if not isinstance(report, dict) or report.get("schema") not in (
-        REPORT_SCHEMA, TRANSITION_REPORT_SCHEMA, STACK_MOVE_REPORT_SCHEMA,
+        REPORT_SCHEMA, TRANSITION_REPORT_SCHEMA, SIMPLE_TRANSITION_REPORT_SCHEMA, STACK_MOVE_REPORT_SCHEMA,
     ):
         reject("report-schema")
     if (
@@ -1376,7 +1563,15 @@ def validate_report(
     elif record["outcome"] == STACK_MOVE_OUTCOME:
         validate_stack_move_report(report_root, record, report, previous_record)
     else:
-        if report.get("schema") == TRANSITION_REPORT_SCHEMA:
+        simple_report = report.get("schema") == SIMPLE_TRANSITION_REPORT_SCHEMA
+        if simple_report:
+            if record["outcome"] == "s3-accepted":
+                expected_phases = SIMPLE_S3_TRANSITION_PHASES
+            elif record["outcome"] == "recovered-local":
+                expected_phases = SIMPLE_RECOVERY_TRANSITION_PHASES
+            else:
+                reject("report-schema")
+        elif report.get("schema") == TRANSITION_REPORT_SCHEMA:
             expected_phases = S3_TRANSITION_PHASES if record["outcome"] == "s3-accepted" else RECOVERY_TRANSITION_PHASES
         elif record["outcome"] == "s3-accepted":
             expected_phases = S3_TRANSITION_PHASES
@@ -1398,7 +1593,7 @@ def validate_report(
             reject("transition-report-evidence")
         validate_transition_artifacts(report_root, record["outcome"], expected_evidence, phases, phase_files)
         if record["outcome"] == "s3-accepted":
-            if (
+            if report.get("schema") != SIMPLE_TRANSITION_REPORT_SCHEMA and (
                 phases.get("copy_pass_1_sha256") != phases.get("copy_pass_2_sha256")
                 or phases.get("source_provisional_sha256") != phases.get("source_frozen_sha256")
                 or phases.get("source_frozen_sha256") != phases.get("destination_census_pass_1_sha256")
@@ -1407,7 +1602,7 @@ def validate_report(
                 or record["evidence"]["source_manifest_sha256"] != record["evidence"]["destination_manifest_sha256"]
             ):
                 reject("transition-report-evidence")
-        elif (
+        elif report.get("schema") != SIMPLE_TRANSITION_REPORT_SCHEMA and (
             phases.get("s3_census_pass_1_sha256") != phases.get("s3_census_pass_2_sha256")
             or phases.get("s3_census_pass_1_sha256") != record["evidence"]["s3_census_manifest_sha256"]
             or phases.get("restore_pass_1_sha256") != phases.get("restore_pass_2_sha256")
@@ -1561,11 +1756,20 @@ def assert_compose_matches(
         reject("compose-teagramd-missing")
     names = {service.get("name") for service in services if isinstance(service, dict)}
     expected_backend = record["backend"]
+    expected_private_network = (
+        rustfs_private_network_name(record)
+        if expected_backend.get("kind") == "s3"
+        else None
+    )
     expected_read_only = expected_mount_read_only(record)
     expected_target = expected_blob_target(record)
     for service in services:
         if not isinstance(service, dict) or service.get("backend") != expected_backend:
             reject("render-backend-mismatch")
+        if expected_private_network is not None and not network_includes(
+            service.get("network"), expected_private_network
+        ):
+            reject("render-teagramd-rustfs-network")
         mode_mounts = service.get("blob_mode_mounts", [])
         if allow_unguarded_initial_local and record["outcome"] == "initial-local" and not mode_mounts:
             pass
@@ -1606,6 +1810,28 @@ def assert_compose_matches(
         reject("compose-teagramd-missing")
 
 
+def assert_rustfs_containers_match(rustfs: list[dict[str, object]], record: dict[str, object]) -> None:
+    if record.get("outcome") != "s3-accepted":
+        return
+    volume_name = record.get("volumes", {}).get("rustfsdata") if isinstance(record.get("volumes"), dict) else None
+    if not isinstance(volume_name, str) or not volume_name:
+        reject("running-rustfs-mount-missing")
+    if len(rustfs) != 1:
+        reject("running-rustfs-missing")
+    container = rustfs[0]
+    if container.get("ports") != []:
+        reject("running-rustfs-exposed")
+    if container.get("network") != {
+        "mode": "networks",
+        "networks": [rustfs_private_network_name(record)],
+    }:
+        reject("running-rustfs-network")
+    if container.get("rustfs_mounts") != [{
+        "type": "volume", "name": volume_name, "target": "/data", "rw": True,
+    }]:
+        reject("running-rustfs-mount-missing")
+
+
 def assert_containers_match(
     inventory: dict[str, object],
     record: dict[str, object],
@@ -1622,12 +1848,17 @@ def assert_containers_match(
         reject("running-mode-mount-helper")
     if not teagramd and not allow_no_teagramd:
         reject("running-teagramd-missing")
+    assert_rustfs_containers_match(rustfs, record)
     read_only = expected_mount_read_only(record)
     expected_target = expected_blob_target(record)
     names = set()
     for container in teagramd:
         if container.get("backend") != record["backend"]:
             reject("running-backend-mismatch")
+        if record.get("outcome") == "s3-accepted" and not network_includes(
+            container.get("network"), rustfs_private_network_name(record)
+        ):
+            reject("running-teagramd-rustfs-network")
         mounts = container.get("tgblobs_mounts", [])
         if not isinstance(mounts, list):
             reject("running-tgblobs-mount")
@@ -2234,14 +2465,24 @@ def publish_transition(args: argparse.Namespace) -> None:
     if proof_path.stat().st_size > 1_048_576:
         reject("transition-proof-oversize")
     proof = read_json(proof_path)
+    proof_schema = proof.get("schema") if isinstance(proof, dict) else None
     if (
         not isinstance(proof, dict)
         or set(proof) != {"schema", "outcome", "backend", "volumes", "evidence", "phase_digests", "phase_files"}
-        or proof.get("schema") != TRANSITION_PROOF_SCHEMA
+        or proof_schema not in (TRANSITION_PROOF_SCHEMA, SIMPLE_TRANSITION_PROOF_SCHEMA)
         or proof.get("outcome") != args.outcome
     ):
         reject("transition-proof-invalid")
-    expected_phases = S3_TRANSITION_PHASES if args.outcome == "s3-accepted" else RECOVERY_TRANSITION_PHASES
+    simple_transition = proof_schema == SIMPLE_TRANSITION_PROOF_SCHEMA
+    if simple_transition and args.outcome not in ("s3-accepted", "recovered-local"):
+        reject("transition-proof-invalid")
+    expected_phases = (
+        SIMPLE_S3_TRANSITION_PHASES
+        if simple_transition and args.outcome == "s3-accepted"
+        else SIMPLE_RECOVERY_TRANSITION_PHASES
+        if simple_transition and args.outcome == "recovered-local"
+        else S3_TRANSITION_PHASES if args.outcome == "s3-accepted" else RECOVERY_TRANSITION_PHASES
+    )
     phases = proof.get("phase_digests")
     phase_files = proof.get("phase_files")
     if (
@@ -2272,22 +2513,32 @@ def publish_transition(args: argparse.Namespace) -> None:
         }:
             reject("transition-backend")
         expected = {"source_manifest_sha256", "destination_manifest_sha256", "object_count", "byte_total", "copy_passes"}
-        if set(evidence) != expected:
+        expected_passes = 1 if simple_transition else 2
+        if set(evidence) != expected or evidence.get("copy_passes") != expected_passes:
             reject("transition-proof-invalid")
     else:
-        if set(backend) != {"kind", "dir"} or backend != {"kind": "local", "dir": BLOB_TARGET}:
+        local_record = records[-2] if len(records) >= 2 else None
+        expected_backend = local_record.get("backend") if isinstance(local_record, dict) else None
+        if (
+            set(backend) != {"kind", "dir"}
+            or not isinstance(expected_backend, dict)
+            or expected_backend.get("kind") != "local"
+            or expected_backend.get("dir") not in BLOB_TARGETS
+            or backend != expected_backend
+        ):
             reject("transition-backend")
         expected = {
             "s3_census_manifest_sha256", "restored_manifest_sha256", "object_count", "byte_total",
             "restore_passes", "retained_cutover_key_count",
         }
-        if set(evidence) != expected:
+        expected_passes = 1 if simple_transition else 2
+        if set(evidence) != expected or evidence.get("restore_passes") != expected_passes:
             reject("transition-proof-invalid")
 
     generation = len(records) + 1
     transition_id = str(uuid.uuid4())
     report = {
-        "schema": TRANSITION_REPORT_SCHEMA,
+        "schema": SIMPLE_TRANSITION_REPORT_SCHEMA if simple_transition else TRANSITION_REPORT_SCHEMA,
         "generation": generation,
         "transition_id": transition_id,
         "outcome": args.outcome,

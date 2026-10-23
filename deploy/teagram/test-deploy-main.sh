@@ -5,6 +5,7 @@ set -euo pipefail
 umask 077
 
 script="$(cd "$(dirname "$0")" && pwd)/deploy-main.sh"
+logs_script="$(cd "$(dirname "$0")" && pwd)/teagram-logs.sh"
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
 
@@ -68,8 +69,13 @@ printf '#!/usr/bin/env bash\n' > "$tmp/work/tracked-script.sh"
 cat > "$tmp/work/deploy/teagramd/rollout-runner/rollout-runner.sh" <<'RUNNER'
 #!/usr/bin/env bash
 set -euo pipefail
+if [[ "${FIXTURE_EXPECT_S3_ENV:-0}" == 1 && \
+    "${COMPOSE_ENV_FILES:-}" != "$DEPLOY_DIR/.env,$FIXTURE_PARKED_ENV" ]]; then
+  echo "S3 rollout did not inherit the validated environment files" >&2
+  exit 96
+fi
 runtime_dir="$DEPLOY_ROOT/teagramd-rollout-runner"
-for file in rollout-runner.sh rollout-verifier.sh schema-result-gate.sh schema-result-gate.py blob-mode-state.py qualify-rustfs-transition.py stack-move-runner.py; do
+for file in rollout-runner.sh rollout-verifier.sh schema-result-gate.sh schema-result-gate.py blob-mode-state.py blob-transition-runner.py qualify-rustfs-transition.py stack-move-runner.py; do
   if ! git -C "$DEPLOY_DIR" show "$2:deploy/teagramd/rollout-runner/$file" | cmp - "$runtime_dir/$file"; then
     printf 'staged runtime is missing or stale: %s\n' "$file" >&2
     exit 90
@@ -82,6 +88,24 @@ RUNNER
 for file in rollout-verifier.sh schema-result-gate.sh schema-result-gate.py blob-mode-state.py qualify-rustfs-transition.py stack-move-runner.py; do
   printf 'fixture\n' > "$tmp/work/deploy/teagramd/rollout-runner/$file"
 done
+cat > "$tmp/work/deploy/teagramd/rollout-runner/blob-transition-runner.py" <<'PYTHON'
+#!/usr/bin/env python3
+import json
+import os
+import sys
+
+if sys.argv[1:] and sys.argv[1] == "deployment-env":
+    outcome = os.environ.get("FIXTURE_AUTHORITY_OUTCOME", "initial-local")
+    if outcome != "s3-accepted":
+        print("blob transition rejected: deploy-s3-authority-invalid", file=sys.stderr)
+        raise SystemExit(1)
+    print(json.dumps({
+        "outcome": outcome,
+        "env_files": [os.path.join(os.environ["DEPLOY_DIR"], ".env"), os.environ["FIXTURE_PARKED_ENV"]],
+    }, separators=(",", ":")))
+    raise SystemExit(0)
+raise SystemExit(2)
+PYTHON
 chmod 644 "$tmp/work/tracked.txt"
 chmod 755 "$tmp/work/tracked-script.sh"
 chmod 644 "$tmp/work/deploy/teagramd/rollout-runner/"*
@@ -91,6 +115,10 @@ commit() {
   git -C "$tmp/work" rev-parse HEAD
 }
 first=$(commit first)
+mkdir -p "$tmp/work/deploy/teagram"
+cp "$logs_script" "$tmp/work/deploy/teagram/teagram-logs.sh"
+chmod 755 "$tmp/work/deploy/teagram/teagram-logs.sh"
+git -C "$tmp/work" add deploy/teagram/teagram-logs.sh
 second=$(commit second)
 git -C "$tmp/work" checkout -q -b side "$first"
 side=$(commit side)
@@ -113,10 +141,18 @@ chmod 600 "$tmp/live/pgdump-fixture.sql" "$tmp/live/rollout-evidence.txt"
 local_files_before=$(stat -c '%n:%u:%g:%a' \
   "$tmp/live/.env" "$tmp/live/pgdump-fixture.sql" "$tmp/live/rollout-evidence.txt")
 
-mkdir -p "$tmp/bin" "$tmp/root/main1238-fixture.build"
+mkdir -p "$tmp/bin" "$tmp/root/main1238-fixture.build" "$tmp/root/usr/local/sbin"
+printf '#!/bin/sh\nprintf "legacy wrapper\\n"\n' > "$tmp/root/usr/local/sbin/teagram-logs"
+chmod 755 "$tmp/root/usr/local/sbin/teagram-logs"
 cat > "$tmp/bin/docker" <<'DOCKER'
 #!/usr/bin/env bash
 set -euo pipefail
+if [[ "${FIXTURE_EXPECT_S3_ENV:-0}" == 1 && "$1" == compose ]]; then
+  case "$*" in
+    *"--env-file $DEPLOY_DIR/.env --env-file $FIXTURE_PARKED_ENV"*) ;;
+    *) echo "S3 deploy did not load both environment files: $*" >&2; exit 97 ;;
+  esac
+fi
 case "$*" in
   *config_files*teagram-teagramd-1*) echo "${FIXTURE_COMPOSE_FILES:-$DEPLOY_DIR/.rollout-compose.local-abc.yml,$DEPLOY_DIR/docker-compose.override.yml}" ;;
   *config_files*) echo "unexpected live container name: $*" >&2; exit 98 ;;
@@ -127,8 +163,8 @@ case "$*" in
     ;;
   *org.opencontainers.image.revision*) echo "$DEPLOY_SHA" ;;
   *'{{range .Config.Env}}'*) echo 'TG_RSA_KEY_FINGERPRINT=12345' ;;
-  *'compose ps -a'*) ;;
-  *'compose logs --since 3m teagramd'*) echo 'advertise=teagram.tailaa4918.ts.net:2443' ;;
+  *'ps -a'*) ;;
+  *'logs --since 3m teagramd'*) echo 'advertise=teagram.tailaa4918.ts.net:2443' ;;
   *) echo "unexpected docker call: $*" >&2; exit 99 ;;
 esac
 DOCKER
@@ -184,6 +220,15 @@ fi
 
 echo "source_sha=$second image_id=sha256:fixture built_at=fixture" > "$tmp/root/main1238-fixture.build/built-image.identity"
 expect 0 "already at $second with runner provenance" DEPLOY_SHA="$second"
+if ! cmp -s "$tmp/root/usr/local/sbin/teagram-logs" "$tmp/work/deploy/teagram/teagram-logs.sh"; then
+  echo 'FAIL deploy did not install the commit-tracked teagram-logs command' >&2
+  failures=$((failures + 1))
+fi
+backup="$tmp/root/teagram-logs-before-${second:0:7}"
+if [[ ! -s "$backup" || "$(stat -c '%a' "$backup")" != 600 || "$(<"$backup")" != *'legacy wrapper'* ]]; then
+  echo 'FAIL deploy did not keep a root-only copy of the prior teagram-logs command' >&2
+  failures=$((failures + 1))
+fi
 
 # Without a provenance record, an equal SHA must reach the deploy path
 # (the fake docker refuses the pg_dump call).
@@ -209,8 +254,7 @@ if [[ "$local_files_after" != "$local_files_before" ]]; then
 fi
 
 unapproved_compose="$tmp/live/docker-compose.yml,$tmp/live/docker-compose.override.yml"
-unapproved_label=${unapproved_compose//,/:}
-expect 1 "live teagramd not on an approved local compose ($unapproved_label); refusing" \
+expect 1 'live S3 Compose has no valid s3-accepted authority or credentials; refusing' \
   FIXTURE_COMPOSE_FILES="$unapproved_compose" DEPLOY_SHA="$third"
 
 fourth=$(commit fourth)
@@ -219,6 +263,17 @@ moved_compose="$tmp/live/docker-compose.yml,$tmp/live/docker-compose.local-blobs
 expect 0 "deployed $fourth" --contains \
   'runner exit 0' FIXTURE_DEPLOY_SUCCESS=1 \
   FIXTURE_COMPOSE_FILES="$moved_compose" DEPLOY_SHA="$fourth"
+
+fifth=$(commit fifth)
+git -C "$tmp/work" push -q "$tmp/origin.git" main
+mkdir -p "$tmp/telegram-server"
+printf 'fixture parked credentials\n' > "$tmp/telegram-server/.env.rustfs-parked"
+expect 1 'live S3 Compose has no valid s3-accepted authority or credentials; refusing' \
+  FIXTURE_COMPOSE_FILES="$unapproved_compose" \
+  FIXTURE_PARKED_ENV="$tmp/telegram-server/.env.rustfs-parked" DEPLOY_SHA="$fifth"
+expect 0 "deployed $fifth" --contains 'runner exit 0' FIXTURE_DEPLOY_SUCCESS=1 \
+  FIXTURE_COMPOSE_FILES="$unapproved_compose" FIXTURE_AUTHORITY_OUTCOME=s3-accepted \
+  FIXTURE_EXPECT_S3_ENV=1 FIXTURE_PARKED_ENV="$tmp/telegram-server/.env.rustfs-parked" DEPLOY_SHA="$fifth"
 
 if [[ ! -s "$tmp/lock-targets" ]] || grep -Fvxq /tmp/teagram-deploy.lock "$tmp/lock-targets"; then
   echo 'FAIL deploy-main.sh did not use the teagram deploy lock' >&2

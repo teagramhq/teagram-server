@@ -28,18 +28,45 @@ from typing import Any
 # Use the public, digest-preserving mirror because this gate refuses ambient registry credentials.
 SOURCE_IMAGE = "mirror.gcr.io/library/postgres@sha256:721873c34ceb9f8d8fc265984940dc982404c105f19ad51be9fdc5970a6080ea"
 RESTORE_IMAGE = "mirror.gcr.io/library/postgres@sha256:77f585114c32fbca283dc835b0596f4e52b51b4c6662d7810b2f4084f60a1873"
+ROOT = Path(__file__).resolve().parents[3]
 BASE_SCHEMA = "20261021000003"
 # The base migrations landed with the head store check, so the fixture is seeded by the
 # last release before them and then migrated to BASE_SCHEMA.
 SEED_SCHEMA = "20261021000002"
-HEAD_SCHEMA = "20261021000004"
+
+
+def repo_migration_versions(migration_dir: Path | None = None) -> tuple[str, ...]:
+    directory = migration_dir or ROOT / "migrations"
+    try:
+        entries = sorted(directory.glob("*.sql"))
+    except OSError as exc:
+        raise ValueError("repository migrations are unavailable") from exc
+    versions: list[str] = []
+    for entry in entries:
+        if entry.is_symlink() or not entry.is_file():
+            raise ValueError("invalid repository migration")
+        match = re.fullmatch(r"([0-9]{14})_[A-Za-z0-9_-]+\.sql", entry.name)
+        if match is None:
+            raise ValueError("invalid repository migration")
+        versions.append(match.group(1))
+    if not versions or len(versions) != len(set(versions)):
+        raise ValueError("invalid repository migration set")
+    return tuple(versions)
+
+
+HEAD_SCHEMA = repo_migration_versions()[-1]
+LOCAL_FIXTURE_SCHEMA = repo_migration_versions()[-2]
+if not BASE_SCHEMA < LOCAL_FIXTURE_SCHEMA < HEAD_SCHEMA:
+    raise ValueError("local fixture needs a repo migration strictly between the base and head")
 AUTH_KEY_INVENTORY_PATH = Path(__file__).with_name("auth-key-clearing-inventory.json")
 AUTH_KEY_FIXTURE_COUNT = 3
+LOCAL_UNENROLLED_AUTH_KEY_FIXTURE_COUNT = 2
 AUTH_KEY_FIXTURE_STATE = ["3", "2", "3", "1", "2", "0"]
 AUTH_KEY_CLEARED_STATE = ["0", "0", "0", "1", "2", "2"]
 AUTH_KEY_CLEAR_ACK = b"RESTORE_READINESS_AUTH_KEY_DELETE_APPLIED"
 # Roles the repository migrations create; the restore imports no globals, so the target has none.
 MIGRATION_ROLES = "browser_acceptance_probe"
+LOCAL_ATTESTATION_ROLE = "browser_acceptance_probe"
 WORK_SECONDS = 30 * 60
 FAULT_WORK_SECONDS = 8 * 60
 CLEANUP_SECONDS = 4 * 60
@@ -84,18 +111,116 @@ PG_MEMORY = 1024 * 1024 * 1024
 CLIENT_MEMORY = 512 * 1024 * 1024
 MAX_CAPTURE = 2 * 1024 * 1024
 MAX_ARCHIVE = 256 * 1024 * 1024
+MAX_LOCAL_DUMP_BYTES = 512 * 1024 * 1024
+MAX_LOCAL_AUTH_KEYS = 100_000
+LOCAL_DUMP_NAME = re.compile(r"^pgdump-pre-(?:[0-9a-f]{7,40}|[0-9a-f]{7}-[0-9]{8}T[0-9]{6}Z)\.sql$")
+LOCAL_DUMP_LEAK_MARKER = b"RESTORE_READINESS_LOCAL_DUMP_LEAK_MARKER"
+RESTORE_BOOTSTRAP_ROLE = "restore_bootstrap"
 
 
-def bounded_work_seconds(fault_test: str | None, requested: int | None) -> int:
+def bounded_work_seconds(
+    fault_test: str | None,
+    requested: int | None,
+    *,
+    local_fixture_test: bool = False,
+) -> int:
     """Keep each run inside its normal or fault-test work budget."""
     if requested is not None and requested < 1:
         raise ValueError("work budget must be positive")
-    limit = FAULT_WORK_SECONDS if fault_test else WORK_SECONDS
+    limit = FAULT_WORK_SECONDS if fault_test and not local_fixture_test else WORK_SECONDS
     return limit if requested is None else min(limit, requested)
 
 
-ROOT = Path(__file__).resolve().parents[3]
-MIGRATION_HEAD_SQL = "SELECT COALESCE(max(version), '') FROM atlas_schema_revisions.atlas_schema_revisions;"
+def resolve_local_dump_migration_head(version: str, migration_dir: Path | None = None) -> str:
+    if not re.fullmatch(r"[0-9]{14}", version):
+        raise ValueError("invalid local dump migration head")
+    if version < BASE_SCHEMA or version not in repo_migration_versions(migration_dir):
+        raise ValueError("unsupported local dump migration head")
+    return version
+
+
+MIGRATION_HEAD_SQL = "SELECT COALESCE(pg_catalog.max(version), '') FROM atlas_schema_revisions.atlas_schema_revisions;"
+MIGRATION_HEAD_RELATION_SAFE_SQL = r"""
+SELECT CASE WHEN relation.relkind = 'r'
+  AND NOT relation.relrowsecurity
+  AND NOT relation.relforcerowsecurity
+  AND pg_catalog.pg_get_userbyid(relation.relowner) = 'postgres'
+  AND EXISTS (
+    SELECT 1 FROM pg_catalog.pg_attribute AS attribute
+    JOIN pg_catalog.pg_type AS data_type ON data_type.oid = attribute.atttypid
+    JOIN pg_catalog.pg_namespace AS type_namespace ON type_namespace.oid = data_type.typnamespace
+    WHERE attribute.attrelid = relation.oid
+      AND attribute.attname = 'version'
+      AND type_namespace.nspname = 'pg_catalog'
+      AND data_type.typname IN ('text', 'varchar')
+      AND attribute.attnum > 0
+      AND NOT attribute.attisdropped
+      AND attribute.attgenerated = ''
+      AND attribute.attidentity = ''
+  )
+  AND NOT EXISTS (
+    SELECT 1 FROM pg_catalog.pg_policy AS policy
+    WHERE policy.polrelid = relation.oid
+  )
+  AND NOT EXISTS (
+    SELECT 1 FROM pg_catalog.pg_rewrite AS rewrite
+    WHERE rewrite.ev_class = relation.oid
+  )
+  AND NOT EXISTS (
+    SELECT 1 FROM pg_catalog.pg_trigger AS trigger_row
+    WHERE trigger_row.tgrelid = relation.oid AND NOT trigger_row.tgisinternal
+  )
+  THEN 'safe' ELSE 'unsafe' END
+FROM pg_catalog.pg_class AS relation
+JOIN pg_catalog.pg_namespace AS namespace ON namespace.oid = relation.relnamespace
+WHERE namespace.nspname = 'atlas_schema_revisions'
+  AND relation.relname = 'atlas_schema_revisions';
+"""
+MIGRATION_HEAD_RELATION_SHAPE_SQL = r"""
+SELECT jsonb_build_object(
+  'kind', relation.relkind,
+  'owner', pg_catalog.pg_get_userbyid(relation.relowner),
+  'persistence', relation.relpersistence,
+  'columns', COALESCE((
+    SELECT jsonb_agg(jsonb_build_object(
+      'name', attribute.attname,
+      'type', pg_catalog.format_type(attribute.atttypid, attribute.atttypmod),
+      'not_null', attribute.attnotnull,
+      'identity', attribute.attidentity,
+      'generated', attribute.attgenerated,
+      'default', COALESCE(pg_catalog.pg_get_expr(default_value.adbin, default_value.adrelid), '')
+    ) ORDER BY attribute.attnum)
+    FROM pg_catalog.pg_attribute AS attribute
+    LEFT JOIN pg_catalog.pg_attrdef AS default_value
+      ON default_value.adrelid = attribute.attrelid AND default_value.adnum = attribute.attnum
+    WHERE attribute.attrelid = relation.oid
+      AND attribute.attnum > 0
+      AND NOT attribute.attisdropped
+  ), '[]'::jsonb),
+  'constraints', COALESCE((
+    SELECT jsonb_agg(pg_catalog.pg_get_constraintdef(constraint_row.oid, true) ORDER BY constraint_row.conname)
+    FROM pg_catalog.pg_constraint AS constraint_row
+    WHERE constraint_row.conrelid = relation.oid AND constraint_row.contype <> 'n'
+  ), '[]'::jsonb),
+  'rules', COALESCE((
+    SELECT jsonb_agg(rewrite.rulename ORDER BY rewrite.rulename)
+    FROM pg_catalog.pg_rewrite AS rewrite WHERE rewrite.ev_class = relation.oid
+  ), '[]'::jsonb),
+  'policies', COALESCE((
+    SELECT jsonb_agg(policy.polname ORDER BY policy.polname)
+    FROM pg_catalog.pg_policy AS policy WHERE policy.polrelid = relation.oid
+  ), '[]'::jsonb),
+  'triggers', COALESCE((
+    SELECT jsonb_agg(pg_catalog.pg_get_triggerdef(trigger_row.oid, true) ORDER BY trigger_row.tgname)
+    FROM pg_catalog.pg_trigger AS trigger_row
+    WHERE trigger_row.tgrelid = relation.oid AND NOT trigger_row.tgisinternal
+  ), '[]'::jsonb)
+)::text
+FROM pg_catalog.pg_class AS relation
+JOIN pg_catalog.pg_namespace AS namespace ON namespace.oid = relation.relnamespace
+WHERE namespace.nspname = 'atlas_schema_revisions'
+  AND relation.relname = 'atlas_schema_revisions';
+"""
 DATABASE_IDENTITY_SQL = r"""
 SELECT current_database() || '|' || current_setting('server_version_num') || '|' ||
        (SELECT oid::text FROM pg_database WHERE datname = current_database()) || '|' ||
@@ -199,6 +324,108 @@ SELECT
   (SELECT COALESCE(sum(removals), 0) FROM public.browser_acceptance_binding_evidence)::text;
 """
 AUTH_KEY_COUNT_SQL = "SELECT count(*)::text FROM public.auth_keys;"
+AUTH_KEY_EVIDENCE_BOUND_COUNT_SQL = """
+SELECT count(*)::text
+FROM public.auth_keys AS auth_key
+JOIN public.browser_acceptance_binding_evidence AS evidence
+  ON evidence.user_id = auth_key.user_id;
+"""
+UNENROLLED_BOUND_AUTH_KEY_COUNT_SQL = """
+SELECT count(*)::text
+FROM public.auth_keys AS auth_key
+LEFT JOIN public.browser_acceptance_binding_evidence AS evidence
+  ON evidence.user_id = auth_key.user_id
+WHERE auth_key.user_id IS NOT NULL AND evidence.user_id IS NULL;
+"""
+
+
+def local_dump_identity(info: os.stat_result) -> dict[str, int]:
+    return {
+        "device": info.st_dev,
+        "inode": info.st_ino,
+        "mode": stat.S_IMODE(info.st_mode),
+        "uid": info.st_uid,
+        "gid": info.st_gid,
+        "links": info.st_nlink,
+        "size": info.st_size,
+        "mtime_ns": info.st_mtime_ns,
+        "ctime_ns": info.st_ctime_ns,
+    }
+
+
+def bootstrap_postgres_role_sql(password: str) -> str:
+    if not re.fullmatch(r"[0-9a-f]{64}", password):
+        raise ValueError("invalid scratch database password")
+    return (
+        "CREATE ROLE postgres WITH LOGIN SUPERUSER CREATEDB CREATEROLE "
+        f"REPLICATION BYPASSRLS PASSWORD '{password}';\n"
+        "ALTER DATABASE teagram OWNER TO postgres;"
+    )
+
+
+def validate_local_dump_metadata(info: os.stat_result, name: str) -> bool:
+    return (
+        bool(LOCAL_DUMP_NAME.fullmatch(name))
+        and stat.S_ISREG(info.st_mode)
+        and info.st_uid == 0
+        and info.st_gid == 0
+        and stat.S_IMODE(info.st_mode) == 0o600
+        and info.st_nlink == 1
+        and 0 < info.st_size <= MAX_LOCAL_DUMP_BYTES
+    )
+
+
+def validate_local_dump_parent(info: os.stat_result) -> bool:
+    return (
+        stat.S_ISDIR(info.st_mode)
+        and info.st_uid == 0
+        and info.st_gid == 0
+        and (info.st_mode & 0o022) == 0
+    )
+
+
+def open_local_dump(path: Path) -> tuple[int, dict[str, int]]:
+    """Open a protected dump without following path components or reading its bytes."""
+    if not path.is_absolute() or str(path) != os.path.normpath(str(path)) or not LOCAL_DUMP_NAME.fullmatch(path.name):
+        raise ValueError("invalid local dump path")
+
+    directory_fd = os.open("/", os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+    descriptor = -1
+    try:
+        if not validate_local_dump_parent(os.fstat(directory_fd)):
+            raise ValueError("invalid local dump parent")
+
+        for component in path.parts[1:-1]:
+            if component in {"", ".", ".."}:
+                raise ValueError("invalid local dump path")
+            next_fd = os.open(
+                component,
+                os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC | os.O_NOFOLLOW,
+                dir_fd=directory_fd,
+            )
+            parent_info = os.fstat(next_fd)
+            if not validate_local_dump_parent(parent_info):
+                os.close(next_fd)
+                raise ValueError("invalid local dump parent")
+            os.close(directory_fd)
+            directory_fd = next_fd
+
+        descriptor = os.open(
+            path.name,
+            os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW | os.O_NONBLOCK,
+            dir_fd=directory_fd,
+        )
+        info = os.fstat(descriptor)
+        path_info = os.stat(path.name, dir_fd=directory_fd, follow_symlinks=False)
+        if not validate_local_dump_metadata(info, path.name) or local_dump_identity(info) != local_dump_identity(path_info):
+            raise ValueError("invalid local dump metadata")
+        return descriptor, local_dump_identity(info)
+    except BaseException:
+        if descriptor >= 0:
+            os.close(descriptor)
+        raise
+    finally:
+        os.close(directory_fd)
 
 
 def malformed_sql_fixture(token: str) -> str:
@@ -229,7 +456,8 @@ def load_auth_key_inventory() -> dict[str, Any]:
         raise ValueError("auth-key inventory is unavailable") from exc
     if (
         not isinstance(inventory, dict)
-        or inventory.get("schema_head") != HEAD_SCHEMA
+        or inventory.get("schema_head") not in repo_migration_versions()
+        or inventory.get("schema_head") < BASE_SCHEMA
         or not isinstance(inventory.get("foreign_keys"), list)
         or not isinstance(inventory.get("triggers"), list)
         or not isinstance(inventory.get("trigger_tables"), list)
@@ -277,6 +505,51 @@ BEGIN
 END
 $auth_key_fixture$;
 """
+
+
+def local_unenrolled_auth_key_fixture_sql(auth_key_ids: list[int] | tuple[int, ...], token: str) -> str:
+    if (
+        len(auth_key_ids) != LOCAL_UNENROLLED_AUTH_KEY_FIXTURE_COUNT
+        or any(
+            isinstance(identifier, bool)
+            or not isinstance(identifier, int)
+            or identifier >= 0
+            or identifier <= -(1 << 63)
+            for identifier in auth_key_ids
+        )
+        or len(set(auth_key_ids)) != LOCAL_UNENROLLED_AUTH_KEY_FIXTURE_COUNT
+        or not re.fullmatch(r"[0-9a-f]{32}", token)
+    ):
+        raise ValueError("invalid local auth-key fixture")
+    first, second = auth_key_ids
+    return f"""
+DO $local_unenrolled_auth_key_fixture$
+DECLARE
+  first_unenrolled_user_id BIGINT;
+  second_unenrolled_user_id BIGINT;
+BEGIN
+  IF (SELECT count(*) FROM public.auth_keys) <> {AUTH_KEY_FIXTURE_COUNT}
+     OR (SELECT count(*) FROM public.browser_acceptance_binding_evidence) <> 1 THEN
+    RAISE EXCEPTION 'unexpected local auth-key fixture state';
+  END IF;
+  INSERT INTO public.users (phone, first_name)
+  VALUES ('restore-readiness-{token}-unenrolled-a', 'Unenrolled fixture user A')
+  RETURNING id INTO STRICT first_unenrolled_user_id;
+  INSERT INTO public.users (phone, first_name)
+  VALUES ('restore-readiness-{token}-unenrolled-b', 'Unenrolled fixture user B')
+  RETURNING id INTO STRICT second_unenrolled_user_id;
+  INSERT INTO public.auth_keys (id, key_value, user_id, pending_user_id)
+  VALUES
+    ({first}, decode(repeat('c3', 256), 'hex'), first_unenrolled_user_id, NULL),
+    ({second}, decode(repeat('d4', 256), 'hex'), second_unenrolled_user_id, NULL);
+END
+$local_unenrolled_auth_key_fixture$;
+"""
+
+
+def source_fixture_counts(local_fixture_test: bool) -> tuple[int, int]:
+    extra_count = LOCAL_UNENROLLED_AUTH_KEY_FIXTURE_COUNT if local_fixture_test else 0
+    return 1 + extra_count, AUTH_KEY_FIXTURE_COUNT + extra_count
 
 
 def auth_key_clear_transaction_sql(
@@ -332,6 +605,60 @@ $auth_key_clear$;""",
     return "\n".join(statements) + "\n"
 
 
+def local_auth_key_clear_transaction_sql(*, wait_for_signal: bool = False) -> str:
+    wait = (
+        f"\\echo {AUTH_KEY_CLEAR_ACK.decode('ascii')}\nSELECT pg_sleep(30);\n"
+        if wait_for_signal
+        else ""
+    )
+    return f"""
+BEGIN;
+SET LOCAL lock_timeout = '5s';
+SET LOCAL statement_timeout = '120s';
+LOCK TABLE public.auth_keys, public.srp_challenges,
+  public.notify_settings_difference_cursors, public.browser_acceptance_binding_evidence
+  IN ACCESS EXCLUSIVE MODE;
+DO $local_auth_key_clear$
+DECLARE
+  original_keys BIGINT;
+  evidence_bound_keys BIGINT;
+  original_evidence BIGINT;
+  original_additions BIGINT;
+  original_removals BIGINT;
+  deleted_keys BIGINT;
+BEGIN
+  SELECT count(*) INTO original_keys FROM public.auth_keys;
+  SELECT count(*) INTO evidence_bound_keys
+    FROM public.auth_keys AS auth_key
+    JOIN public.browser_acceptance_binding_evidence AS evidence
+      ON evidence.user_id = auth_key.user_id;
+  IF original_keys > {MAX_LOCAL_AUTH_KEYS} THEN
+    RAISE EXCEPTION 'auth-key clearing bound exceeded';
+  END IF;
+  SELECT count(*), COALESCE(sum(additions), 0), COALESCE(sum(removals), 0)
+    INTO original_evidence, original_additions, original_removals
+    FROM public.browser_acceptance_binding_evidence;
+  DELETE FROM public.auth_keys
+    WHERE id IN (
+      SELECT auth_key.id FROM public.auth_keys AS auth_key
+      ORDER BY auth_key.id LIMIT {MAX_LOCAL_AUTH_KEYS}
+    );
+  GET DIAGNOSTICS deleted_keys = ROW_COUNT;
+  IF deleted_keys <> original_keys
+     OR (SELECT count(*) FROM public.auth_keys) <> 0
+     OR (SELECT count(*) FROM public.srp_challenges) <> 0
+     OR (SELECT count(*) FROM public.notify_settings_difference_cursors) <> 0
+     OR (SELECT count(*) FROM public.browser_acceptance_binding_evidence) <> original_evidence
+     OR (SELECT COALESCE(sum(additions), 0) FROM public.browser_acceptance_binding_evidence) <> original_additions
+     OR (SELECT COALESCE(sum(removals), 0) FROM public.browser_acceptance_binding_evidence) <> original_removals + evidence_bound_keys THEN
+    RAISE EXCEPTION 'auth-key clearing aggregate mismatch';
+  END IF;
+END
+$local_auth_key_clear$;
+{wait}COMMIT;
+""".lstrip()
+
+
 def auth_key_clear_fault_category(
     fault_kind: str,
     before: list[str],
@@ -367,7 +694,7 @@ SELECT
   (SELECT count(*) FROM public.auth_keys)::text || '|' ||
   (SELECT count(*) FROM public.users)::text || '|' ||
   (SELECT COALESCE(string_agg(rolname, ',' ORDER BY rolname), '')
-   FROM pg_roles WHERE rolname <> 'postgres' AND left(rolname, 3) <> 'pg_') || '|' ||
+   FROM pg_roles WHERE rolname NOT IN ('postgres', 'restore_bootstrap') AND left(rolname, 3) <> 'pg_') || '|' ||
   (SELECT COALESCE(string_agg(extname, ',' ORDER BY extname), '') FROM pg_extension) || '|' ||
   (SELECT count(*) FROM pg_event_trigger)::text || '|' ||
   (SELECT count(*) FROM pg_foreign_server)::text || '|' ||
@@ -375,6 +702,296 @@ SELECT
   (SELECT count(*) FROM pg_subscription)::text || '|' ||
   (SELECT count(*) FROM pg_db_role_setting
    WHERE setdatabase = (SELECT oid FROM pg_database WHERE datname = current_database()))::text;
+"""
+ROLE_STATE_SQL = r"""
+SELECT jsonb_build_object(
+  'roles', COALESCE((
+    SELECT jsonb_agg(jsonb_build_object(
+      'name', role.rolname,
+      'superuser', role.rolsuper,
+      'inherit', role.rolinherit,
+      'create_role', role.rolcreaterole,
+      'create_database', role.rolcreatedb,
+      'login', role.rolcanlogin,
+      'replication', role.rolreplication,
+      'bypass_rls', role.rolbypassrls,
+      'connection_limit', role.rolconnlimit,
+      'valid_until', role.rolvaliduntil,
+      'settings', role.rolconfig
+    ) ORDER BY role.rolname)
+    FROM pg_roles AS role
+    WHERE role.rolname NOT LIKE 'pg_%'
+  ), '[]'::jsonb),
+  'memberships', COALESCE((
+    SELECT jsonb_agg(jsonb_build_object(
+      'role', granted.rolname,
+      'member', member.rolname,
+      'grantor', grantor.rolname,
+      'admin', membership.admin_option,
+      'inherit', membership.inherit_option,
+      'set', membership.set_option
+    ) ORDER BY granted.rolname, member.rolname, grantor.rolname)
+    FROM pg_auth_members AS membership
+    JOIN pg_roles AS granted ON granted.oid = membership.roleid
+    JOIN pg_roles AS member ON member.oid = membership.member
+    JOIN pg_roles AS grantor ON grantor.oid = membership.grantor
+    WHERE granted.rolname NOT LIKE 'pg_%'
+      AND member.rolname NOT LIKE 'pg_%'
+      AND grantor.rolname NOT LIKE 'pg_%'
+  ), '[]'::jsonb),
+  'settings', COALESCE((
+    SELECT jsonb_agg(jsonb_build_object(
+      'database', COALESCE(database.datname, ''),
+      'role', COALESCE(role.rolname, ''),
+      'values', setting.setconfig
+    ) ORDER BY COALESCE(database.datname, ''), COALESCE(role.rolname, ''))
+    FROM pg_db_role_setting AS setting
+    LEFT JOIN pg_database AS database ON database.oid = setting.setdatabase
+    LEFT JOIN pg_roles AS role ON role.oid = setting.setrole
+    WHERE setting.setrole = 0 OR role.rolname NOT LIKE 'pg_%'
+  ), '[]'::jsonb)
+)::text;
+"""
+DATABASE_STATE_SQL = r"""
+SELECT jsonb_build_object(
+  'owner', pg_get_userbyid(database.datdba),
+  'acl', COALESCE(database.datacl::text, ''),
+  'connection_limit', database.datconnlimit,
+  'allow_connections', database.datallowconn,
+  'settings', (
+    SELECT setting.setconfig
+    FROM pg_db_role_setting AS setting
+    WHERE setting.setdatabase = database.oid AND setting.setrole = 0
+  )
+)::text
+FROM pg_database AS database
+WHERE database.datname = current_database();
+"""
+EXTENSION_STATE_SQL = r"""
+SELECT jsonb_build_object(
+  'extensions', COALESCE((
+    SELECT jsonb_agg(jsonb_build_object(
+      'name', extension.extname,
+      'schema', namespace.nspname,
+      'owner', pg_get_userbyid(extension.extowner)
+    ) ORDER BY extension.extname)
+    FROM pg_extension AS extension
+    JOIN pg_namespace AS namespace ON namespace.oid = extension.extnamespace
+  ), '[]'::jsonb),
+  'statistics_relations', COALESCE((
+    SELECT jsonb_agg(jsonb_build_object(
+      'name', relation.relname,
+      'owner', pg_get_userbyid(relation.relowner),
+      'acl', COALESCE((SELECT string_agg(entry, ',' ORDER BY entry) FROM (SELECT CASE WHEN acl.grantee = 0 THEN 'PUBLIC' ELSE pg_get_userbyid(acl.grantee) END || '=' || acl.privilege_type || CASE WHEN acl.is_grantable THEN '*' ELSE '' END || '/' || pg_get_userbyid(acl.grantor) AS entry FROM aclexplode(relation.relacl) AS acl WHERE acl.grantee <> relation.relowner) AS entries), '')
+    ) ORDER BY relation.relname)
+    FROM pg_class AS relation
+    JOIN pg_namespace AS namespace ON namespace.oid = relation.relnamespace
+    WHERE namespace.nspname = 'public'
+      AND relation.relname IN ('pg_stat_statements', 'pg_stat_statements_info')
+  ), '[]'::jsonb),
+  'statistics_functions', COALESCE((
+    SELECT jsonb_agg(jsonb_build_object(
+      'name', routine.proname || '(' || oidvectortypes(routine.proargtypes) || ')',
+      'owner', pg_get_userbyid(routine.proowner),
+      'acl', COALESCE(routine.proacl::text, '')
+    ) ORDER BY routine.proname, pg_get_function_identity_arguments(routine.oid))
+    FROM pg_proc AS routine
+    JOIN pg_namespace AS namespace ON namespace.oid = routine.pronamespace
+    WHERE namespace.nspname = 'public'
+      AND routine.proname IN ('pg_stat_statements', 'pg_stat_statements_info')
+  ), '[]'::jsonb)
+)::text;
+"""
+LOCAL_OBJECT_INVENTORY_SQL = r"""
+WITH objects AS (
+  SELECT 'schema'::text AS kind,
+         namespace.nspname || '|' || pg_get_userbyid(namespace.nspowner) || '|' ||
+         COALESCE(namespace.nspacl::text, '') || '|' ||
+         COALESCE(obj_description(namespace.oid, 'pg_namespace'), '') AS detail
+  FROM pg_namespace AS namespace
+  WHERE namespace.nspname NOT IN ('pg_catalog', 'information_schema')
+    AND namespace.nspname NOT LIKE 'pg_toast%'
+    AND namespace.nspname NOT LIKE 'pg_temp_%'
+    AND namespace.nspname NOT LIKE 'pg_toast_temp_%'
+  UNION ALL
+  SELECT 'type', n.nspname || '.' || t.typname || '|' || t.typtype::text || '|' ||
+         t.typcategory::text || '|' || pg_get_userbyid(t.typowner) || '|' ||
+         COALESCE(t.typacl::text, '') || '|' || COALESCE((
+           SELECT string_agg(enum.enumlabel, ',' ORDER BY enum.enumsortorder)
+           FROM pg_enum AS enum
+           WHERE enum.enumtypid = t.oid
+         ), '')
+  FROM pg_type AS t
+  JOIN pg_namespace AS n ON n.oid = t.typnamespace
+  WHERE n.nspname NOT IN ('pg_catalog', 'information_schema')
+    AND n.nspname NOT LIKE 'pg_toast%'
+    AND n.nspname NOT LIKE 'pg_temp_%'
+    AND n.nspname NOT LIKE 'pg_toast_temp_%'
+    AND NOT EXISTS (
+      SELECT 1 FROM pg_depend AS d
+      WHERE d.classid = 'pg_type'::regclass AND d.objid = t.oid
+        AND d.refclassid = 'pg_extension'::regclass AND d.deptype = 'e'
+    )
+    -- Row types of extension relations, and their arrays, are only extension members on some majors.
+    AND NOT EXISTS (
+      SELECT 1 FROM pg_depend AS d
+      WHERE d.classid = 'pg_class'::regclass
+        AND d.objid IN (t.typrelid, (SELECT element.typrelid FROM pg_type AS element WHERE element.oid = t.typelem))
+        AND d.refclassid = 'pg_extension'::regclass AND d.deptype = 'e'
+    )
+  UNION ALL
+  SELECT 'default_acl', COALESCE(n.nspname, '') || '|' || pg_get_userbyid(a.defaclrole) || '|' ||
+         a.defaclobjtype::text || '|' || COALESCE(a.defaclacl::text, '')
+  FROM pg_default_acl AS a
+  LEFT JOIN pg_namespace AS n ON n.oid = a.defaclnamespace
+  WHERE n.oid IS NULL OR (n.nspname NOT IN ('pg_catalog', 'information_schema')
+    AND n.nspname NOT LIKE 'pg_toast%'
+    AND n.nspname NOT LIKE 'pg_temp_%'
+    AND n.nspname NOT LIKE 'pg_toast_temp_%')
+  UNION ALL
+  SELECT 'relation'::text AS kind,
+         n.nspname || '.' || c.relname || '|' || c.relkind::text || '|' ||
+         pg_get_userbyid(c.relowner) || '|' ||
+         -- The owner's own privileges differ across majors and pg_dump omits them; every other grant compares.
+         COALESCE((SELECT string_agg(entry, ',' ORDER BY entry) FROM (SELECT CASE WHEN acl.grantee = 0 THEN 'PUBLIC' ELSE pg_get_userbyid(acl.grantee) END || '=' || acl.privilege_type || CASE WHEN acl.is_grantable THEN '*' ELSE '' END || '/' || pg_get_userbyid(acl.grantor) AS entry FROM aclexplode(c.relacl) AS acl WHERE acl.grantee <> c.relowner) AS entries), '') || '|' ||
+         COALESCE(array_to_string(c.reloptions, ','), '') || '|' || c.relpersistence::text || '|' ||
+         c.relrowsecurity::text || '|' || c.relforcerowsecurity::text || '|' ||
+         CASE WHEN c.relkind = 'S' THEN
+           COALESCE(format_type(seq.seqtypid, NULL) || '|' || seq.seqstart::text || '|' ||
+                    seq.seqincrement::text || '|' || seq.seqmax::text || '|' ||
+                    seq.seqmin::text || '|' || seq.seqcache::text || '|' ||
+                    seq.seqcycle::text, 'missing')
+         ELSE '' END || '|' ||
+         CASE WHEN c.relkind IN ('v', 'm') THEN pg_get_viewdef(c.oid, true) ELSE '' END AS detail
+  FROM pg_class AS c
+  JOIN pg_namespace AS n ON n.oid = c.relnamespace
+  LEFT JOIN pg_sequence AS seq ON seq.seqrelid = c.oid
+  WHERE n.nspname NOT IN ('pg_catalog', 'information_schema')
+    AND n.nspname NOT LIKE 'pg_toast%'
+    AND n.nspname NOT LIKE 'pg_temp_%'
+    AND n.nspname NOT LIKE 'pg_toast_temp_%'
+    AND c.relkind IN ('r', 'p', 'v', 'm', 'S', 'f')
+    AND NOT EXISTS (
+      SELECT 1 FROM pg_depend AS d
+      WHERE d.classid = 'pg_class'::regclass AND d.objid = c.oid
+        AND d.refclassid = 'pg_extension'::regclass AND d.deptype = 'e'
+    )
+  UNION ALL
+  SELECT 'column', n.nspname || '.' || c.relname || '.' || a.attname || '|' ||
+         format_type(a.atttypid, a.atttypmod) || '|' || a.attnotnull || '|' ||
+         a.attidentity::text || '|' || a.attgenerated::text || '|' || COALESCE(pg_get_expr(d.adbin, d.adrelid), '')
+  FROM pg_attribute AS a
+  JOIN pg_class AS c ON c.oid = a.attrelid
+  JOIN pg_namespace AS n ON n.oid = c.relnamespace
+  LEFT JOIN pg_attrdef AS d ON d.adrelid = c.oid AND d.adnum = a.attnum
+  WHERE n.nspname NOT IN ('pg_catalog', 'information_schema')
+    AND n.nspname NOT LIKE 'pg_toast%'
+    AND n.nspname NOT LIKE 'pg_temp_%'
+    AND n.nspname NOT LIKE 'pg_toast_temp_%'
+    AND a.attnum > 0 AND NOT a.attisdropped
+    AND NOT EXISTS (
+      SELECT 1 FROM pg_depend AS e
+      WHERE e.classid = 'pg_class'::regclass AND e.objid = c.oid
+        AND e.refclassid = 'pg_extension'::regclass AND e.deptype = 'e'
+    )
+  UNION ALL
+  SELECT 'index', n.nspname || '.' || idx.relname || '|' ||
+         i.indisvalid || '|' || i.indisready || '|' || pg_get_indexdef(i.indexrelid)
+  FROM pg_index AS i
+  JOIN pg_class AS idx ON idx.oid = i.indexrelid
+  JOIN pg_namespace AS n ON n.oid = idx.relnamespace
+  WHERE n.nspname NOT IN ('pg_catalog', 'information_schema')
+    AND n.nspname NOT LIKE 'pg_toast%'
+    AND n.nspname NOT LIKE 'pg_temp_%'
+    AND n.nspname NOT LIKE 'pg_toast_temp_%'
+    AND NOT EXISTS (
+      SELECT 1 FROM pg_depend AS d
+      WHERE d.classid = 'pg_class'::regclass AND d.objid = idx.oid
+        AND d.refclassid = 'pg_extension'::regclass AND d.deptype = 'e'
+    )
+  UNION ALL
+  SELECT 'constraint', n.nspname || '.' || c.relname || '.' || con.conname || '|' ||
+         con.contype::text || '|' || con.convalidated || '|' || pg_get_constraintdef(con.oid, true)
+  FROM pg_constraint AS con
+  JOIN pg_class AS c ON c.oid = con.conrelid
+  JOIN pg_namespace AS n ON n.oid = c.relnamespace
+  -- PG18 also catalogs NOT NULL as constraints; column rows already compare nullability.
+  WHERE n.nspname NOT IN ('pg_catalog', 'information_schema')
+    AND n.nspname NOT LIKE 'pg_toast%'
+    AND n.nspname NOT LIKE 'pg_temp_%'
+    AND n.nspname NOT LIKE 'pg_toast_temp_%'
+    AND con.contype <> 'n'
+    AND NOT EXISTS (
+      SELECT 1 FROM pg_depend AS d
+      WHERE d.classid = 'pg_class'::regclass AND d.objid = c.oid
+        AND d.refclassid = 'pg_extension'::regclass AND d.deptype = 'e'
+    )
+  UNION ALL
+  SELECT 'function', n.nspname || '.' || p.proname || '(' || pg_get_function_identity_arguments(p.oid) || ')|' ||
+         pg_get_userbyid(p.proowner) || '|' || p.prosecdef || '|' || p.provolatile::text || '|' ||
+         p.proparallel::text || '|' || p.proleakproof || '|' || p.proisstrict || '|' ||
+         COALESCE(array_to_string(p.proconfig, ','), '') || '|' || COALESCE(p.proacl::text, '') || '|' ||
+         pg_get_functiondef(p.oid)
+  FROM pg_proc AS p
+  JOIN pg_namespace AS n ON n.oid = p.pronamespace
+  WHERE n.nspname NOT IN ('pg_catalog', 'information_schema')
+    AND n.nspname NOT LIKE 'pg_toast%'
+    AND n.nspname NOT LIKE 'pg_temp_%'
+    AND n.nspname NOT LIKE 'pg_toast_temp_%'
+    AND NOT EXISTS (
+      SELECT 1 FROM pg_depend AS d
+      WHERE d.classid = 'pg_proc'::regclass AND d.objid = p.oid
+        AND d.refclassid = 'pg_extension'::regclass AND d.deptype = 'e'
+    )
+  UNION ALL
+  SELECT 'trigger', n.nspname || '.' || c.relname || '.' || t.tgname || '|' ||
+         t.tgenabled::text || '|' || pg_get_triggerdef(t.oid, true)
+  FROM pg_trigger AS t
+  JOIN pg_class AS c ON c.oid = t.tgrelid
+  JOIN pg_namespace AS n ON n.oid = c.relnamespace
+  WHERE n.nspname NOT IN ('pg_catalog', 'information_schema')
+    AND n.nspname NOT LIKE 'pg_toast%'
+    AND n.nspname NOT LIKE 'pg_temp_%'
+    AND n.nspname NOT LIKE 'pg_toast_temp_%'
+    AND NOT t.tgisinternal
+  UNION ALL
+  SELECT 'rule', n.nspname || '.' || c.relname || '.' || rewrite.rulename || '|' ||
+         rewrite.ev_enabled::text || '|' || pg_get_ruledef(rewrite.oid, true)
+  FROM pg_rewrite AS rewrite
+  JOIN pg_class AS c ON c.oid = rewrite.ev_class
+  JOIN pg_namespace AS n ON n.oid = c.relnamespace
+  WHERE rewrite.rulename <> '_RETURN'
+    AND n.nspname NOT IN ('pg_catalog', 'information_schema')
+    AND n.nspname NOT LIKE 'pg_toast%'
+    AND n.nspname NOT LIKE 'pg_temp_%'
+    AND n.nspname NOT LIKE 'pg_toast_temp_%'
+  UNION ALL
+  SELECT 'policy', n.nspname || '.' || c.relname || '.' || p.polname || '|' ||
+         p.polcmd::text || '|' || p.polpermissive::text || '|' ||
+         COALESCE(array_to_string(ARRAY(
+           SELECT CASE WHEN role_oid = 0 THEN 'PUBLIC'
+                       ELSE COALESCE((SELECT rolname FROM pg_roles WHERE oid = role_oid), role_oid::text)
+                  END
+           FROM unnest(p.polroles) AS policy_role(role_oid)
+           ORDER BY 1
+         ), ','), '') || '|' ||
+         COALESCE(pg_get_expr(p.polqual, p.polrelid), '') || '|' ||
+         COALESCE(pg_get_expr(p.polwithcheck, p.polrelid), '')
+  FROM pg_policy AS p
+  JOIN pg_class AS c ON c.oid = p.polrelid
+  JOIN pg_namespace AS n ON n.oid = c.relnamespace
+  WHERE n.nspname NOT IN ('pg_catalog', 'information_schema')
+    AND n.nspname NOT LIKE 'pg_toast%'
+    AND n.nspname NOT LIKE 'pg_temp_%'
+    AND n.nspname NOT LIKE 'pg_toast_temp_%'
+  UNION ALL
+  SELECT 'language', language.lanname || '|' || language.lanpltrusted::text || '|' ||
+         pg_get_userbyid(language.lanowner) || '|' || COALESCE(language.lanacl::text, '')
+  FROM pg_language AS language
+  WHERE language.lanname NOT IN ('internal', 'c', 'sql', 'plpgsql')
+)
+SELECT count(*)::text || '|' || md5(COALESCE(string_agg(kind || '|' || detail, E'\n' ORDER BY kind, detail), ''))
+FROM objects;
 """
 OBJECT_INVENTORY_SQL = r"""
 WITH objects AS (
@@ -576,10 +1193,11 @@ def validate_container_inspect(document: dict[str, Any], record: dict[str, Any])
         return False
     if config.get("User", "") != record.get("user", ""):
         return False
-    root_roles = {"source_seed", "checker_provisioner"}
+    # The local restore client reads the root-owned dump and reaches the scratch socket through group 70.
+    root_roles = {"source_seed": "0:0", "checker_provisioner": "0:0", "local_restore_client": "0:70"}
     if record.get("role") not in root_roles and config.get("User", "").startswith("0"):
         return False
-    if record.get("role") in root_roles and config.get("User", "") != "0:0":
+    if record.get("role") in root_roles and config.get("User", "") != root_roles[record["role"]]:
         return False
     if record.get("role") in {
         "application",
@@ -710,6 +1328,47 @@ def validate_container_inspect(document: dict[str, Any], record: dict[str, Any])
             return False
         if (record.get("entrypoint") or []) != ["/run/app/restore-readiness-provisioner"]:
             return False
+    elif role == "local_restore_client":
+        dump_mount = mounts_by_destination.get("/run/local-dump/input.sql")
+        socket_mount = mounts_by_destination.get("/run/postgres")
+        if (
+            not record.get("network_mode", "").startswith("container:")
+            or set(mounts_by_destination) != {"/run/local-dump/input.sql", "/run/postgres"}
+            or dump_mount is None
+            or dump_mount.get("type") != "bind"
+            or dump_mount.get("rw")
+            or socket_mount is None
+            or socket_mount.get("type") != "bind"
+            or not socket_mount.get("rw")
+            or record.get("entrypoint") != ["/bin/sh"]
+        ):
+            return False
+    elif role == "source_local_dump_fixture":
+        output_mount = mounts_by_destination.get("/run/local-dump/output.sql")
+        socket_mount = mounts_by_destination.get("/run/postgres")
+        if (
+            not record.get("network_mode", "").startswith("container:")
+            or set(mounts_by_destination) != {"/run/local-dump/output.sql", "/run/postgres"}
+            or output_mount is None
+            or output_mount.get("type") != "bind"
+            or not output_mount.get("rw")
+            or socket_mount is None
+            or socket_mount.get("type") != "bind"
+            or not socket_mount.get("rw")
+            or record.get("entrypoint") != ["pg_dump"]
+        ):
+            return False
+    elif role == "local_fixture_attack_client":
+        socket_mount = mounts_by_destination.get("/run/postgres")
+        if (
+            not record.get("network_mode", "").startswith("container:")
+            or set(mounts_by_destination) != {"/run/postgres"}
+            or socket_mount is None
+            or socket_mount.get("type") != "bind"
+            or not socket_mount.get("rw")
+            or record.get("entrypoint") != ["psql"]
+        ):
+            return False
     tmpfs = host.get("Tmpfs") or {}
     if tmpfs != (record.get("tmpfs_options") or {}):
         return False
@@ -729,12 +1388,13 @@ def report_document(
     help_get_config: str = "not_run",
     synthetic_signin: str = "not_run",
     auth_keys_cleared: str = "not_run",
+    input_mode: str = "synthetic",
 ) -> dict[str, Any]:
     if phase not in SAFE_PHASES | {"preflight"} or category not in SAFE_CATEGORIES:
         raise ValueError("invalid report value")
     if cleanup not in {"verified", "unverified", "not_started"}:
         raise ValueError("invalid cleanup value")
-    if migration_head not in {"not_reached", BASE_SCHEMA, HEAD_SCHEMA}:
+    if migration_head != "not_reached" and migration_head not in repo_migration_versions():
         raise ValueError("invalid migration head")
     if help_get_config not in {"pass", "fail", "not_run"}:
         raise ValueError("invalid config assertion")
@@ -742,6 +1402,8 @@ def report_document(
         raise ValueError("invalid sign-in assertion")
     if auth_keys_cleared not in {"pass", "not_run"}:
         raise ValueError("invalid auth-key clearing assertion")
+    if input_mode not in {"synthetic", "local"}:
+        raise ValueError("invalid restore input mode")
     success = category == "assertions_passed" and cleanup == "verified"
     if success:
         if (
@@ -751,7 +1413,7 @@ def report_document(
             or auth_keys_cleared != "pass"
         ):
             raise ValueError("incomplete success report")
-        return {
+        result = {
             "result": "pass",
             "migration_head": migration_head,
             "help_getConfig": help_get_config,
@@ -761,6 +1423,9 @@ def report_document(
             "elapsed_ms": max(0, int(elapsed_ms)),
             "exit": 0,
         }
+        if input_mode == "local":
+            result["input_mode"] = input_mode
+        return result
     return {
         "result": "fail",
         "phase": phase,
@@ -1519,6 +2184,12 @@ class Drill(Docker):
         self.args = args
         self.run_dir = run_dir
         self.manifest = manifest
+        self.input_mode = "local" if getattr(args, "local_dump", None) is not None or getattr(args, "local_fixture_test", False) else "synthetic"
+        self.local_dump_path: Path | None = getattr(args, "local_dump", None)
+        self.local_dump_fd: int | None = getattr(args, "local_dump_fd", None)
+        self.local_dump_info: dict[str, int] | None = getattr(args, "local_dump_identity", None)
+        self.local_admin_role: str | None = None
+        self.target_db_password: str | None = None
         self.manifest_path = run_dir / "ownership.json"
         super().__init__(args.docker_bin, self.manifest_path, manifest)
         self.phase = "preflight"
@@ -2620,14 +3291,22 @@ class Drill(Docker):
         self.save()
 
     def sql(
-        self, database: dict[str, Any], statement: str, phase: str, *, allow_interrupted: bool = False
+        self,
+        database: dict[str, Any],
+        statement: str,
+        phase: str,
+        *,
+        allow_interrupted: bool = False,
+        database_user: str = "postgres",
+        pinned_search_path: bool = False,
     ) -> str:
-        output = self.call(
-            [
-                "exec",
-                "--interactive",
-                "--user",
-                "70:70",
+        if not re.fullmatch(r"[a-z][a-z0-9_]{0,63}", database_user):
+            raise DrillFailure(phase, "isolation_refusal")
+        command = ["exec", "--interactive", "--user", "70:70"]
+        if pinned_search_path:
+            command.extend(("--env", "PGOPTIONS=-c search_path=pg_catalog"))
+        command.extend(
+            (
                 database["id"],
                 "psql",
                 "-X",
@@ -2637,10 +3316,13 @@ class Drill(Docker):
                 "-F",
                 "|",
                 "-U",
-                "postgres",
+                database_user,
                 "-d",
                 "teagram",
-            ],
+            )
+        )
+        output = self.call(
+            command,
             phase=phase,
             category="schema_failure",
             input_bytes=statement.encode("utf-8"),
@@ -2669,7 +3351,7 @@ class Drill(Docker):
                     "-h",
                     "127.0.0.1",
                     "-U",
-                    "postgres",
+                    RESTORE_BOOTSTRAP_ROLE,
                     "-d",
                     "teagram",
                 ],
@@ -2693,7 +3375,7 @@ class Drill(Docker):
         env_values = {
             "PGDATA": "/var/lib/postgresql/18/docker",
             "POSTGRES_DB": "teagram",
-            "POSTGRES_USER": "postgres",
+            "POSTGRES_USER": RESTORE_BOOTSTRAP_ROLE,
             "POSTGRES_PASSWORD_FILE": "/run/secrets/init-password",
             "POSTGRES_HOST_AUTH_METHOD": "scram-sha-256",
         }
@@ -2762,6 +3444,12 @@ class Drill(Docker):
         self.databases[name] = record
         self.start_container(record, self.phase, "fixture_failure")
         self.wait_database(record, self.phase)
+        try:
+            bootstrap_password = self.private_read(secret, max_bytes=128).decode("ascii").strip()
+            role_sql = bootstrap_postgres_role_sql(bootstrap_password)
+        except (UnicodeDecodeError, ValueError) as exc:
+            raise DrillFailure(self.phase, "fixture_failure") from exc
+        self.sql(record, role_sql, self.phase, database_user=RESTORE_BOOTSTRAP_ROLE)
         self.truncate_private(secret)
         if self.private_read(secret) != b"":
             raise DrillFailure(self.phase, "fixture_failure")
@@ -2830,11 +3518,24 @@ class Drill(Docker):
         if not keep_env:
             self.delete_private_file(env_file)
 
-    def fixture_state(self, database: dict[str, Any], phase: str) -> list[str]:
-        value = self.sql(database, FIXTURE_STATE_SQL, phase)
+    def fixture_state(
+        self,
+        database: dict[str, Any],
+        phase: str,
+        *,
+        pinned_search_path: bool = False,
+    ) -> list[str]:
+        if pinned_search_path:
+            value = self.sql(database, FIXTURE_STATE_SQL, phase, pinned_search_path=True)
+        else:
+            value = self.sql(database, FIXTURE_STATE_SQL, phase)
         parts = value.split("|")
         if len(parts) != 9 or not all(part.isdigit() for part in (parts[0], parts[1], *parts[4:])):
             raise DrillFailure(phase, "schema_failure")
+        # The harness's own restore admin role lives on the target until promotion.
+        local_admin = self.local_admin_role
+        if local_admin is not None:
+            parts[2] = ",".join(role for role in parts[2].split(",") if role != local_admin)
         return parts
 
     def object_inventory(self, database: dict[str, Any], phase: str) -> tuple[int, str]:
@@ -2843,6 +3544,128 @@ class Drill(Docker):
         if len(parts) != 2 or not parts[0].isdigit() or not re.fullmatch(r"[0-9a-f]{32}", parts[1]):
             raise DrillFailure(phase, "schema_failure")
         return int(parts[0]), parts[1]
+
+    def local_object_inventory(self, database: dict[str, Any], phase: str) -> tuple[int, str]:
+        value = self.sql(
+            database,
+            LOCAL_OBJECT_INVENTORY_SQL,
+            phase,
+            database_user=LOCAL_ATTESTATION_ROLE,
+            pinned_search_path=True,
+        )
+        parts = value.split("|")
+        if len(parts) != 2 or not parts[0].isdigit() or not re.fullmatch(r"[0-9a-f]{32}", parts[1]):
+            raise DrillFailure(phase, "schema_failure")
+        return int(parts[0]), parts[1]
+
+    def local_schema_snapshot(self, database: dict[str, Any], phase: str) -> tuple[Any, ...]:
+        return (
+            self.local_object_inventory(database, phase),
+            self.local_role_state(database, phase),
+            self.sql(
+                database,
+                DATABASE_STATE_SQL,
+                phase,
+                database_user=LOCAL_ATTESTATION_ROLE,
+                pinned_search_path=True,
+            ),
+            self.sql(
+                database,
+                EXTENSION_STATE_SQL,
+                phase,
+                database_user=LOCAL_ATTESTATION_ROLE,
+                pinned_search_path=True,
+            ),
+        )
+
+    def local_role_state(self, database: dict[str, Any], phase: str) -> str:
+        try:
+            state = json.loads(
+                self.sql(
+                    database,
+                    ROLE_STATE_SQL,
+                    phase,
+                    database_user=LOCAL_ATTESTATION_ROLE,
+                    pinned_search_path=True,
+                )
+            )
+        except (json.JSONDecodeError, TypeError) as exc:
+            raise DrillFailure(phase, "schema_failure") from exc
+        if not isinstance(state, dict) or not all(isinstance(state.get(key), list) for key in ("roles", "memberships", "settings")):
+            raise DrillFailure(phase, "schema_failure")
+        local_admin = self.local_admin_role
+        state["roles"] = [role for role in state["roles"] if role.get("name") != local_admin]
+        for role in state["roles"]:
+            if role.get("name") == "postgres":
+                role.update(
+                    superuser=False,
+                    create_role=False,
+                    create_database=False,
+                    replication=False,
+                    bypass_rls=False,
+                )
+        state["memberships"] = [
+            membership
+            for membership in state["memberships"]
+            if membership.get("member") != local_admin
+            and membership.get("role") != local_admin
+            and membership.get("grantor") != local_admin
+        ]
+        state["settings"] = [setting for setting in state["settings"] if setting.get("role") != local_admin]
+        return json.dumps(state, separators=(",", ":"), sort_keys=True)
+
+    def local_dump_migration_head(
+        self,
+        source: dict[str, Any],
+        target: dict[str, Any],
+        phase: str,
+    ) -> str:
+        if target is not self.databases.get("target"):
+            raise DrillFailure(phase, "isolation_refusal")
+        if self.sql(
+            target,
+            "SELECT rolsuper::text FROM pg_catalog.pg_roles WHERE rolname = CURRENT_USER;",
+            phase,
+            database_user="postgres",
+            pinned_search_path=True,
+        ) != "false":
+            raise DrillFailure(phase, "schema_failure")
+        safe = self.sql(
+            target,
+            MIGRATION_HEAD_RELATION_SAFE_SQL,
+            phase,
+            database_user=LOCAL_ATTESTATION_ROLE,
+            pinned_search_path=True,
+        )
+        if safe != "safe":
+            raise DrillFailure(phase, "schema_failure")
+        target_shape = self.sql(
+            target,
+            MIGRATION_HEAD_RELATION_SHAPE_SQL,
+            phase,
+            database_user=LOCAL_ATTESTATION_ROLE,
+            pinned_search_path=True,
+        )
+        source_shape = self.sql(
+            source,
+            MIGRATION_HEAD_RELATION_SHAPE_SQL,
+            phase,
+            database_user=LOCAL_ATTESTATION_ROLE,
+            pinned_search_path=True,
+        )
+        if not target_shape or target_shape != source_shape:
+            raise DrillFailure(phase, "schema_failure")
+        version = self.sql(
+            target,
+            MIGRATION_HEAD_SQL,
+            phase,
+            database_user="postgres",
+            pinned_search_path=True,
+        )
+        try:
+            return resolve_local_dump_migration_head(version, self.run_dir / "migrations")
+        except ValueError as exc:
+            raise DrillFailure(phase, "schema_failure") from exc
 
     def table_counts(self, database: dict[str, Any], phase: str) -> tuple[int, str]:
         value = self.sql(database, TABLE_COUNTS_SQL, phase)
@@ -3045,14 +3868,478 @@ class Drill(Docker):
         ):
             raise DrillFailure(self.phase, "schema_failure")
 
+    def verify_local_dump_unchanged(self) -> None:
+        phase = "restore"
+        if self.local_dump_path is None or self.local_dump_fd is None or self.local_dump_info is None:
+            raise DrillFailure(phase, "isolation_refusal")
+        try:
+            descriptor_info = os.fstat(self.local_dump_fd)
+            path_info = os.stat(self.local_dump_path, follow_symlinks=False)
+        except OSError as exc:
+            raise DrillFailure(phase, "isolation_refusal") from exc
+        if (
+            local_dump_identity(descriptor_info) != self.local_dump_info
+            or local_dump_identity(path_info) != self.local_dump_info
+            or not validate_local_dump_metadata(descriptor_info, self.local_dump_path.name)
+        ):
+            raise DrillFailure(phase, "isolation_refusal")
+
+    def create_local_dump_fixture(self, source: dict[str, Any]) -> None:
+        self.phase = "fixture_generation"
+        if not self.args.local_fixture_test or self.local_dump_path is not None:
+            raise DrillFailure(self.phase, "isolation_refusal")
+        marker = LOCAL_DUMP_LEAK_MARKER.decode("ascii")
+        token = self.manifest["token"]
+        used_ids = set(self.synthetic_auth_key_ids)
+        unenrolled_ids: list[int] = []
+        while len(unenrolled_ids) < LOCAL_UNENROLLED_AUTH_KEY_FIXTURE_COUNT:
+            candidate = -(secrets.randbelow(9_000_000_000_000_000_000) + 1)
+            if candidate not in used_ids:
+                used_ids.add(candidate)
+                unenrolled_ids.append(candidate)
+        self.sql(source, local_unenrolled_auth_key_fixture_sql(unenrolled_ids, token), self.phase)
+        if (
+            self.sql(source, AUTH_KEY_STATE_SQL, self.phase).split("|") != ["5", "2", "3", "1", "2", "0"]
+            or self.sql(source, UNENROLLED_BOUND_AUTH_KEY_COUNT_SQL, self.phase)
+            != str(LOCAL_UNENROLLED_AUTH_KEY_FIXTURE_COUNT)
+        ):
+            raise DrillFailure(self.phase, "fixture_failure")
+        self.sql(source, f"COMMENT ON SCHEMA public IS '{marker}';", self.phase)
+        fixture_timestamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
+        fixture_path = self.run_dir / "work" / f"pgdump-pre-{token[:7]}-{fixture_timestamp}.sql"
+        self.private_write(
+            fixture_path,
+            b"",
+            mode=0o600,
+            owner=(65532, 70),
+            purpose="synthetic_local_dump_fixture",
+        )
+        client = self.image_container(
+            "target",
+            role="source_local_dump_fixture",
+            user="65532:70",
+            memory=CLIENT_MEMORY,
+            pids_limit=64,
+            mounts=[
+                self.mount(self.sockets["source"], "/run/postgres", writable=True),
+                self.mount(fixture_path, "/run/local-dump/output.sql", writable=True),
+            ],
+            tmpfs_options={
+                "/tmp": "rw,nosuid,nodev,noexec,size=64m,uid=70,gid=70,mode=1777",
+                "/var/lib/postgresql": "rw,nosuid,nodev,noexec,size=1m,uid=70,gid=70,mode=0700",
+            },
+            command_args=[
+                "--format=plain",
+                "--no-publications",
+                "--no-subscriptions",
+                "--file=/run/local-dump/output.sql",
+                "--dbname=teagram",
+            ],
+            entrypoint="pg_dump",
+            network_mode=f"container:{source['id']}",
+            env_file=self.files["source_tool_env"],
+            interactive=True,
+        )
+        dump_output = self.utility(client, self.phase, "fixture_failure", timeout=120)
+        if LOCAL_DUMP_LEAK_MARKER in dump_output:
+            raise DrillFailure(self.phase, "fixture_failure")
+        fixture_info = fixture_path.lstat()
+        if (
+            not stat.S_ISREG(fixture_info.st_mode)
+            or fixture_info.st_uid != 65532
+            or fixture_info.st_gid != 70
+            or stat.S_IMODE(fixture_info.st_mode) != 0o600
+            or fixture_info.st_nlink != 1
+            or not 0 < fixture_info.st_size <= 16 * 1024 * 1024
+        ):
+            raise DrillFailure(self.phase, "fixture_failure")
+        os.chown(fixture_path, 0, 0, follow_symlinks=False)
+        os.chmod(fixture_path, 0o600, follow_symlinks=False)
+        fixture_info = fixture_path.lstat()
+        if not stat.S_ISREG(fixture_info.st_mode) or fixture_info.st_nlink != 1 or fixture_info.st_size > 16 * 1024 * 1024:
+            raise DrillFailure(self.phase, "fixture_failure")
+        fixture_record = next(item for item in self.manifest["files"] if item["path"] == str(fixture_path))
+        fixture_record.update(uid=0, gid=0, mode=0o600, size=fixture_info.st_size)
+        self.save()
+        try:
+            self.local_dump_fd, self.local_dump_info = open_local_dump(fixture_path)
+        except (OSError, ValueError) as exc:
+            raise DrillFailure(self.phase, "fixture_failure") from exc
+        self.local_dump_path = fixture_path
+
+    def run_local_fixture_sql(self, target: dict[str, Any], statement: str) -> tuple[int, bytes]:
+        return_phase = self.phase
+        self.phase = "restore"
+        if not self.args.local_fixture_test or target is not self.databases.get("target"):
+            raise DrillFailure(self.phase, "isolation_refusal")
+        restrict_key = secrets.token_hex(16)
+        client = self.image_container(
+            "target",
+            role="local_fixture_attack_client",
+            user="65532:70",
+            memory=CLIENT_MEMORY,
+            pids_limit=64,
+            mounts=[self.mount(self.sockets["target"], "/run/postgres", writable=True)],
+            tmpfs_options={
+                "/tmp": "rw,nosuid,nodev,noexec,size=64m,uid=70,gid=70,mode=1777",
+                "/var/lib/postgresql": "rw,nosuid,nodev,noexec,size=1m,uid=70,gid=70,mode=0700",
+            },
+            command_args=["-X", "-qAt", "-v", "ON_ERROR_STOP=1", "--single-transaction", "--file=-", "-U", "postgres", "-d", "teagram"],
+            entrypoint="psql",
+            network_mode=f"container:{target['id']}",
+            env_file=self.files["target_tool_env"],
+            interactive=True,
+        )
+        payload = f"\\restrict {restrict_key}\n{statement.rstrip()}\n".encode()
+        output = self.attached(
+            client,
+            self.phase,
+            "fixture_failure",
+            input_bytes=payload,
+            accept_nonzero=True,
+            timeout=60,
+        )
+        document = self.attest_container(client, self.phase)
+        state = document.get("State") or {}
+        if state.get("Running"):
+            raise DrillFailure(self.phase, "fixture_failure")
+        status = int(state.get("ExitCode", -1))
+        self.discard_container(client, self.phase, "fixture_failure")
+        self.phase = return_phase
+        return status, output
+
+    def run_local_hostile_fixture_tests(
+        self,
+        source: dict[str, Any],
+        target: dict[str, Any],
+        expected_head: str,
+    ) -> None:
+        if not self.args.local_fixture_test:
+            return
+        self.phase = "schema_validation"
+        baseline = self.local_schema_snapshot(target, self.phase)
+        if baseline != self.local_schema_snapshot(source, self.phase):
+            raise DrillFailure(self.phase, "schema_failure")
+        marker = LOCAL_DUMP_LEAK_MARKER.decode("ascii")
+        refused_inputs = (
+            "CREATE ROLE restore_readiness_hostile SUPERUSER;",
+            "ALTER ROLE postgres WITH SUPERUSER;",
+            "COPY (SELECT 1) TO PROGRAM 'touch /tmp/restore-readiness-local-copy-to';",
+            "COPY public.auth_keys FROM PROGRAM 'touch /tmp/restore-readiness-local-copy-from';",
+            "DROP EXTENSION pg_stat_statements; CREATE EXTENSION pg_stat_statements;",
+            "CREATE LANGUAGE restore_readiness_untrusted HANDLER pg_catalog.plpgsql_call_handler;",
+            f"\\! printf '{marker}'",
+        )
+        for statement in refused_inputs:
+            status, output = self.run_local_fixture_sql(target, statement)
+            current = self.local_schema_snapshot(target, self.phase)
+            if status == 0 or marker.encode() in output or current != baseline:
+                raise DrillFailure(self.phase, "schema_failure")
+
+        status, _ = self.run_local_fixture_sql(target, "ALTER DATABASE teagram SET work_mem = '9MB';")
+        if status != 0 or self.sql(target, DATABASE_STATE_SQL, self.phase) == baseline[2]:
+            raise DrillFailure(self.phase, "schema_failure")
+        status, _ = self.run_local_fixture_sql(target, "ALTER DATABASE teagram RESET work_mem;")
+        if status != 0 or self.sql(target, DATABASE_STATE_SQL, self.phase) != baseline[2]:
+            raise DrillFailure(self.phase, "schema_failure")
+
+        sequence_increment = self.sql(
+            target,
+            "SELECT seqincrement::text FROM pg_sequence "
+            "WHERE seqrelid = 'public.users_id_seq'::regclass;",
+            self.phase,
+        )
+        if not re.fullmatch(r"-?[1-9][0-9]*", sequence_increment):
+            raise DrillFailure(self.phase, "schema_failure")
+        test_increment = "19" if sequence_increment == "17" else "17"
+        status, _ = self.run_local_fixture_sql(
+            target,
+            f"ALTER SEQUENCE public.users_id_seq INCREMENT BY {test_increment};",
+        )
+        if status != 0 or self.local_object_inventory(target, self.phase) == baseline[0]:
+            raise DrillFailure(self.phase, "schema_failure")
+        status, _ = self.run_local_fixture_sql(
+            target,
+            f"ALTER SEQUENCE public.users_id_seq INCREMENT BY {sequence_increment};",
+        )
+        if status != 0 or self.local_object_inventory(target, self.phase) != baseline[0]:
+            raise DrillFailure(self.phase, "schema_failure")
+
+        status, _ = self.run_local_fixture_sql(
+            target,
+            "CREATE FUNCTION public.restore_readiness_unexpected() RETURNS trigger "
+            "LANGUAGE plpgsql AS $$ BEGIN RETURN NEW; END $$; "
+            "CREATE TRIGGER restore_readiness_unexpected BEFORE INSERT ON public.users "
+            "FOR EACH ROW EXECUTE FUNCTION public.restore_readiness_unexpected();",
+        )
+        if status != 0 or self.local_object_inventory(target, self.phase) == baseline[0]:
+            raise DrillFailure(self.phase, "schema_failure")
+        status, _ = self.run_local_fixture_sql(
+            target,
+            "DROP TRIGGER restore_readiness_unexpected ON public.users; "
+            "DROP FUNCTION public.restore_readiness_unexpected();",
+        )
+        if status != 0:
+            raise DrillFailure(self.phase, "schema_failure")
+        status, _ = self.run_local_fixture_sql(
+            target,
+            "CREATE RULE restore_readiness_unexpected_rule AS ON INSERT TO public.users "
+            "DO ALSO SELECT pg_catalog.pg_reload_conf();",
+        )
+        if status != 0 or self.local_object_inventory(target, self.phase) == baseline[0]:
+            raise DrillFailure(self.phase, "schema_failure")
+        try:
+            self.verify_local_schema_state(source, target, self.phase, expected_head=expected_head)
+        except DrillFailure as exc:
+            if exc.phase != self.phase or exc.category != "schema_failure":
+                raise
+        else:
+            raise DrillFailure(self.phase, "schema_failure")
+        status, _ = self.run_local_fixture_sql(
+            target,
+            "DROP RULE restore_readiness_unexpected_rule ON public.users;",
+        )
+        if status != 0 or self.local_schema_snapshot(target, self.phase) != baseline:
+            raise DrillFailure(self.phase, "schema_failure")
+        current = (
+            *self.local_schema_snapshot(target, self.phase),
+        )
+        if current != baseline:
+            raise DrillFailure(self.phase, "schema_failure")
+
+        program_marker = "/tmp/restore-readiness-local-copy-to"
+        status, _ = self.run_local_fixture_sql(
+            target,
+            "ALTER TABLE atlas_schema_revisions.atlas_schema_revisions "
+            "RENAME TO restore_readiness_saved_revisions; "
+            "CREATE FUNCTION public.restore_readiness_copy_to_program() RETURNS text "
+            "LANGUAGE plpgsql AS $$ BEGIN "
+            "EXECUTE 'COPY (SELECT 1) TO PROGRAM ''touch /tmp/restore-readiness-local-copy-to'''; "
+            f"RETURN '{expected_head}'; END $$; "
+            "CREATE VIEW atlas_schema_revisions.atlas_schema_revisions AS "
+            "SELECT public.restore_readiness_copy_to_program() AS version;",
+        )
+        if status != 0:
+            raise DrillFailure(self.phase, "schema_failure")
+        try:
+            self.verify_local_schema_state(source, target, self.phase, expected_head=expected_head)
+        except DrillFailure as exc:
+            if exc.phase != self.phase or exc.category != "schema_failure":
+                raise
+        else:
+            raise DrillFailure(self.phase, "schema_failure")
+        self.call(
+            ["exec", "--user", "70:70", target["id"], "test", "!", "-e", program_marker],
+            phase=self.phase,
+            category="schema_failure",
+        )
+        status, _ = self.run_local_fixture_sql(
+            target,
+            "DROP VIEW atlas_schema_revisions.atlas_schema_revisions; "
+            "DROP FUNCTION public.restore_readiness_copy_to_program(); "
+            "ALTER TABLE atlas_schema_revisions.restore_readiness_saved_revisions "
+            "RENAME TO atlas_schema_revisions;",
+        )
+        if status != 0:
+            raise DrillFailure(self.phase, "schema_failure")
+
+        status, _ = self.run_local_fixture_sql(
+            target,
+            "ALTER ROLE postgres SET search_path = public, pg_catalog; "
+            "CREATE FUNCTION public.md5(text) RETURNS text LANGUAGE plpgsql IMMUTABLE "
+            "AS $$ BEGIN RAISE EXCEPTION 'shadow md5 executed'; END $$;",
+        )
+        if status != 0:
+            raise DrillFailure(self.phase, "schema_failure")
+        try:
+            self.verify_local_schema_state(source, target, self.phase, expected_head=expected_head)
+        except DrillFailure as exc:
+            if exc.phase != self.phase or exc.category != "schema_failure":
+                raise
+        else:
+            raise DrillFailure(self.phase, "schema_failure")
+        self.call(
+            ["exec", "--user", "70:70", target["id"], "test", "!", "-e", program_marker],
+            phase=self.phase,
+            category="schema_failure",
+        )
+        status, _ = self.run_local_fixture_sql(
+            target,
+            "ALTER ROLE postgres RESET search_path; DROP FUNCTION public.md5(text);",
+        )
+        if status != 0:
+            raise DrillFailure(self.phase, "schema_failure")
+        if self.local_schema_snapshot(target, self.phase) != baseline:
+            raise DrillFailure(self.phase, "schema_failure")
+
+    def prepare_local_restore_target(self, target: dict[str, Any]) -> None:
+        self.phase = "restore"
+        if target is not self.databases.get("target") or self.local_dump_path is None:
+            raise DrillFailure(self.phase, "isolation_refusal")
+        self.local_admin_role = f"restore_admin_{self.manifest['token'][:16]}"
+        self.sql(
+            target,
+            "\n".join(
+                (
+                    "CREATE EXTENSION IF NOT EXISTS pg_stat_statements;",
+                    "REVOKE ALL ON TABLE public.pg_stat_statements, public.pg_stat_statements_info FROM PUBLIC;",
+                    "REVOKE EXECUTE ON FUNCTION public.pg_stat_statements(boolean), public.pg_stat_statements_info() FROM PUBLIC;",
+                    "GRANT SELECT ON TABLE public.pg_stat_statements, public.pg_stat_statements_info TO pg_read_all_stats;",
+                    "GRANT EXECUTE ON FUNCTION public.pg_stat_statements(boolean), public.pg_stat_statements_info() TO pg_read_all_stats;",
+                    "CREATE ROLE browser_acceptance_probe LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOREPLICATION NOBYPASSRLS;",
+                    f"CREATE ROLE {self.local_admin_role} SUPERUSER LOGIN;",
+                    "ALTER DATABASE postgres OWNER TO browser_acceptance_probe;",
+                    "REVOKE CONNECT ON DATABASE postgres FROM PUBLIC, postgres;",
+                    "ALTER DATABASE template1 OWNER TO browser_acceptance_probe;",
+                    "REVOKE CONNECT ON DATABASE template1 FROM PUBLIC, postgres;",
+                    "ALTER ROLE postgres NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS;",
+                )
+            ),
+            self.phase,
+        )
+        if self.sql(target, "SELECT rolsuper::text || '|' || rolcreaterole::text || '|' || rolcreatedb::text FROM pg_roles WHERE rolname = 'postgres';", self.phase) != "false|false|false":
+            raise DrillFailure(self.phase, "isolation_refusal")
+
+    def restore_local_dump(self, target: dict[str, Any]) -> None:
+        self.phase = "restore"
+        if target is not self.databases.get("target"):
+            raise DrillFailure(self.phase, "isolation_refusal")
+        self.verify_local_dump_unchanged()
+        dump_mount = self.mount(self.local_dump_path, "/run/local-dump/input.sql", writable=False)
+        restrict_key = secrets.token_hex(16)
+        restore_script = r'''set -eu
+restrict_key=$1
+dump_path=$2
+{
+  printf '\\restrict %s\n' "$restrict_key"
+  if awk '
+    {
+      if (!sql_started && source_key == "" && substr($0, 1, 10) == "\\restrict ") {
+        source_key = substr($0, 11)
+        next
+      }
+      if (dump_complete) {
+        if ($0 ~ /^[[:space:]]*$/ || $0 ~ /^[[:space:]]*--/) next
+        if (source_key != "" && !source_unrestrict && $0 == "\\unrestrict " source_key) {
+          source_unrestrict = 1
+          next
+        }
+        invalid_meta = 1
+        next
+      }
+      if ($0 ~ /^\\restrict([[:space:]]|$)/ || $0 ~ /^\\unrestrict([[:space:]]|$)/) {
+        invalid_meta = 1
+        next
+      }
+      if ($0 !~ /^[[:space:]]*$/ && $0 !~ /^[[:space:]]*--/) sql_started = 1
+      if (has_pending) print pending
+      pending = $0
+      has_pending = 1
+      if ($0 == "-- PostgreSQL database dump complete") dump_complete = 1
+    }
+    END {
+      if (invalid_meta || !dump_complete) exit 42
+      if (source_key != "" && (!source_unrestrict || pending != "-- PostgreSQL database dump complete")) exit 42
+      if (source_key == "" && (source_unrestrict || pending != "-- PostgreSQL database dump complete")) exit 42
+    }
+  ' "$dump_path"; then
+    :
+  else
+    printf 'SELECT 1 / 0;\n'
+  fi
+} | psql -X -qAt -v ON_ERROR_STOP=1 --single-transaction --file=- -U postgres -d teagram >/dev/null 2>&1
+'''
+        client = self.image_container(
+            "target",
+            role="local_restore_client",
+            user="0:70",
+            memory=CLIENT_MEMORY,
+            pids_limit=96,
+            mounts=[
+                self.mount(self.sockets["target"], "/run/postgres", writable=True),
+                dump_mount,
+            ],
+            tmpfs_options={
+                "/tmp": "rw,nosuid,nodev,noexec,size=128m,uid=70,gid=70,mode=1777",
+                "/var/lib/postgresql": "rw,nosuid,nodev,noexec,size=1m,uid=70,gid=70,mode=0700",
+            },
+            command_args=["-eu", "-c", restore_script, "restore-readiness", restrict_key, "/run/local-dump/input.sql"],
+            entrypoint="/bin/sh",
+            network_mode=f"container:{target['id']}",
+            env_file=self.files["target_tool_env"],
+            interactive=True,
+        )
+        self.attest_container(client, self.phase)
+        self.verify_local_dump_unchanged()
+        restore_output = self.utility(client, self.phase, "restore_failure", timeout=900)
+        if LOCAL_DUMP_LEAK_MARKER in restore_output:
+            raise DrillFailure(self.phase, "restore_failure")
+        self.verify_local_dump_unchanged()
+
+    def verify_local_schema_state(
+        self,
+        source: dict[str, Any],
+        target: dict[str, Any],
+        phase: str,
+        expected_head: str,
+    ) -> None:
+        target_snapshot = self.local_schema_snapshot(target, phase)
+        source_snapshot = self.local_schema_snapshot(source, phase)
+        if (
+            target_snapshot != source_snapshot
+            or self.sql(target, MIGRATION_HEAD_SQL, phase, pinned_search_path=True) != expected_head
+            or self.sql(source, MIGRATION_HEAD_SQL, phase, pinned_search_path=True) != expected_head
+            or self.fixture_state(target, phase, pinned_search_path=True)[2:]
+            != self.fixture_state(source, phase, pinned_search_path=True)[2:]
+        ):
+            raise DrillFailure(phase, "schema_failure")
+
+    def promote_local_restore_owner(self, target: dict[str, Any]) -> None:
+        self.phase = "schema_validation"
+        if target is not self.databases.get("target") or self.local_admin_role is None or self.target_db_password is None:
+            raise DrillFailure(self.phase, "isolation_refusal")
+        self.sql(
+            target,
+            "\n".join(
+                (
+                    "ALTER ROLE browser_acceptance_probe LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOREPLICATION NOBYPASSRLS;",
+                    "ALTER ROLE postgres WITH PASSWORD '" + self.target_db_password + "' SUPERUSER CREATEDB CREATEROLE REPLICATION BYPASSRLS;",
+                )
+            ),
+            self.phase,
+            database_user=self.local_admin_role,
+        )
+        if self.sql(target, "SELECT rolsuper::text || '|' || rolcreaterole::text || '|' || rolcreatedb::text FROM pg_roles WHERE rolname = 'postgres';", self.phase) != "true|true|true":
+            raise DrillFailure(self.phase, "schema_failure")
+        self.sql(target, f"DROP ROLE {self.local_admin_role};", self.phase)
+        self.local_admin_role = None
+        # Server settings are readable only by a superuser, so they are rechecked once postgres is promoted.
+        self.verify_database_settings(target, self.phase)
+
     def apply_pending_migration(self, target: dict[str, Any]) -> None:
         self.migrate_database("target", target, HEAD_SCHEMA, "pending_migration")
-        self.migration_head = self.sql(target, MIGRATION_HEAD_SQL, "pending_migration")
-        if self.migration_head != HEAD_SCHEMA or self.sql(target, INDEX_VALID_SQL, "pending_migration") != "valid":
+        self.migration_head = self.sql(
+            target,
+            MIGRATION_HEAD_SQL,
+            "pending_migration",
+            pinned_search_path=self.input_mode == "local",
+        )
+        if self.migration_head != HEAD_SCHEMA or self.sql(
+            target,
+            INDEX_VALID_SQL,
+            "pending_migration",
+            pinned_search_path=self.input_mode == "local",
+        ) != "valid":
             raise DrillFailure("pending_migration", "schema_failure")
 
     def auth_key_state(self, database: dict[str, Any], phase: str, *, allow_interrupted: bool = False) -> list[str]:
-        state = self.sql(database, AUTH_KEY_STATE_SQL, phase, allow_interrupted=allow_interrupted).split("|")
+        state = self.sql(
+            database,
+            AUTH_KEY_STATE_SQL,
+            phase,
+            allow_interrupted=allow_interrupted,
+            pinned_search_path=self.input_mode == "local",
+        ).split("|")
         if len(state) != 6 or any(not value.isdigit() for value in state):
             raise DrillFailure(phase, "schema_failure")
         return state
@@ -3060,7 +4347,14 @@ class Drill(Docker):
     def verify_auth_key_inventory(self, database: dict[str, Any], phase: str) -> None:
         try:
             expected = load_auth_key_inventory()
-            actual = json.loads(self.sql(database, AUTH_KEY_INVENTORY_SQL, phase))
+            actual = json.loads(
+                self.sql(
+                    database,
+                    AUTH_KEY_INVENTORY_SQL,
+                    phase,
+                    pinned_search_path=self.input_mode == "local",
+                )
+            )
         except (ValueError, json.JSONDecodeError) as exc:
             raise DrillFailure(phase, "schema_failure") from exc
         expected_inventory = {key: expected[key] for key in ("trigger_tables", "foreign_keys", "triggers")}
@@ -3077,20 +4371,56 @@ class Drill(Docker):
             raise DrillFailure(self.phase, "isolation_refusal")
         document = self.attest_container(target, self.phase)
         require_container_running(document, self.phase, "schema_failure")
-        if self.sql(target, MIGRATION_HEAD_SQL, self.phase) != HEAD_SCHEMA:
+        if self.sql(
+            target,
+            MIGRATION_HEAD_SQL,
+            self.phase,
+            pinned_search_path=self.input_mode == "local",
+        ) != HEAD_SCHEMA:
             raise DrillFailure(self.phase, "schema_failure")
         self.verify_auth_key_inventory(target, self.phase)
         auth_key_state = self.auth_key_state(target, self.phase)
-        if auth_key_state != AUTH_KEY_FIXTURE_STATE:
-            raise DrillFailure(self.phase, "schema_failure")
-        marker = {
-            "schema_version": 1,
-            "target_container_id": target["id"],
-            "database_identity": self.sql(target, DATABASE_IDENTITY_SQL, self.phase),
-            "migration_head": HEAD_SCHEMA,
-            "table_counts": self.table_counts(target, self.phase)[1],
-            "auth_key_state": auth_key_state,
-        }
+        if self.input_mode == "synthetic":
+            if auth_key_state != AUTH_KEY_FIXTURE_STATE:
+                raise DrillFailure(self.phase, "schema_failure")
+            marker = {
+                "schema_version": 1,
+                "input_mode": self.input_mode,
+                "target_container_id": target["id"],
+                "database_identity": self.sql(
+                    target,
+                    DATABASE_IDENTITY_SQL,
+                    self.phase,
+                    pinned_search_path=self.input_mode == "local",
+                ),
+                "migration_head": HEAD_SCHEMA,
+                "table_counts": self.table_counts(target, self.phase)[1],
+                "auth_key_state": auth_key_state,
+            }
+        else:
+            try:
+                auth_key_count = int(auth_key_state[0])
+                evidence_bound_key_count = int(
+                    self.sql(target, AUTH_KEY_EVIDENCE_BOUND_COUNT_SQL, self.phase, pinned_search_path=True)
+                )
+            except ValueError as exc:
+                raise DrillFailure(self.phase, "schema_failure") from exc
+            if auth_key_count > MAX_LOCAL_AUTH_KEYS or evidence_bound_key_count > auth_key_count:
+                raise DrillFailure(self.phase, "schema_failure")
+            marker = {
+                "schema_version": 1,
+                "input_mode": self.input_mode,
+                "target_container_id": target["id"],
+                "database_identity": self.sql(
+                    target,
+                    DATABASE_IDENTITY_SQL,
+                    self.phase,
+                    pinned_search_path=self.input_mode == "local",
+                ),
+                "migration_head": HEAD_SCHEMA,
+                "auth_key_state": auth_key_state,
+                "auth_key_evidence_bound_count": evidence_bound_key_count,
+            }
         encoded = (json.dumps(marker, separators=(",", ":"), sort_keys=True) + "\n").encode()
         self.private_write(
             self.auth_key_clear_marker_path(self.run_dir),
@@ -3130,26 +4460,57 @@ class Drill(Docker):
             or marker != self.post_restore_marker
             or marker.get("target_container_id") != target.get("id")
             or marker.get("migration_head") != HEAD_SCHEMA
+            or marker.get("input_mode") != self.input_mode
         ):
             raise DrillFailure(phase, "isolation_refusal")
         document = self.attest_container(target, phase)
         require_container_running(document, phase, "isolation_refusal")
         if (
-            self.sql(target, "SELECT current_database();", phase) != "teagram"
-            or self.sql(target, MIGRATION_HEAD_SQL, phase) != marker["migration_head"]
-            or self.sql(target, DATABASE_IDENTITY_SQL, phase) != marker["database_identity"]
-            or self.table_counts(target, phase)[1] != marker["table_counts"]
+            self.sql(
+                target,
+                "SELECT current_database();",
+                phase,
+                pinned_search_path=self.input_mode == "local",
+            ) != "teagram"
+            or self.sql(
+                target,
+                MIGRATION_HEAD_SQL,
+                phase,
+                pinned_search_path=self.input_mode == "local",
+            ) != marker["migration_head"]
+            or self.sql(
+                target,
+                DATABASE_IDENTITY_SQL,
+                phase,
+                pinned_search_path=self.input_mode == "local",
+            ) != marker["database_identity"]
         ):
             raise DrillFailure(phase, "isolation_refusal")
         self.verify_auth_key_inventory(target, phase)
-        if self.auth_key_state(target, phase) != AUTH_KEY_FIXTURE_STATE:
-            raise DrillFailure(phase, "schema_failure")
+        state = self.auth_key_state(target, phase)
+        if self.input_mode == "synthetic":
+            if self.table_counts(target, phase)[1] != marker["table_counts"] or state != AUTH_KEY_FIXTURE_STATE:
+                raise DrillFailure(phase, "schema_failure")
+        else:
+            try:
+                evidence_bound_key_count = int(
+                    self.sql(target, AUTH_KEY_EVIDENCE_BOUND_COUNT_SQL, phase, pinned_search_path=True)
+                )
+            except ValueError as exc:
+                raise DrillFailure(phase, "schema_failure") from exc
+            if (
+                state != marker["auth_key_state"]
+                or int(state[0]) > MAX_LOCAL_AUTH_KEYS
+                or evidence_bound_key_count != marker["auth_key_evidence_bound_count"]
+            ):
+                raise DrillFailure(phase, "schema_failure")
         if self.sql(
             target,
             "SELECT count(*)::text FROM pg_stat_activity "
             "WHERE datname = current_database() AND backend_type = 'client backend' "
             "AND pid <> pg_backend_pid();",
             phase,
+            pinned_search_path=self.input_mode == "local",
         ) != "0":
             raise DrillFailure(phase, "isolation_refusal")
         return marker
@@ -3237,21 +4598,45 @@ class Drill(Docker):
     ) -> None:
         phase = "auth_key_clearing"
         self.phase = phase
-        try:
-            self.synthetic_auth_key_ids = validate_synthetic_auth_key_ids(self.synthetic_auth_key_ids)
-        except (TypeError, ValueError) as exc:
-            raise DrillFailure(phase, "isolation_refusal") from exc
+        if self.input_mode == "synthetic":
+            try:
+                self.synthetic_auth_key_ids = validate_synthetic_auth_key_ids(self.synthetic_auth_key_ids)
+            except (TypeError, ValueError) as exc:
+                raise DrillFailure(phase, "isolation_refusal") from exc
         self.validate_auth_key_clear_target(target)
         before = self.auth_key_state(target, phase)
-        if before != AUTH_KEY_FIXTURE_STATE:
+        if self.input_mode == "synthetic" and before != AUTH_KEY_FIXTURE_STATE:
             raise DrillFailure(phase, "schema_failure")
+        if self.input_mode == "local":
+            try:
+                auth_key_count = int(before[0])
+                evidence_bound_key_count = int(
+                    self.sql(target, AUTH_KEY_EVIDENCE_BOUND_COUNT_SQL, phase, pinned_search_path=True)
+                )
+            except ValueError as exc:
+                raise DrillFailure(phase, "schema_failure") from exc
+            marker = self.post_restore_marker or {}
+            if (
+                auth_key_count > MAX_LOCAL_AUTH_KEYS
+                or evidence_bound_key_count > auth_key_count
+                or before != marker.get("auth_key_state")
+                or evidence_bound_key_count != marker.get("auth_key_evidence_bound_count")
+            ):
+                raise DrillFailure(phase, "schema_failure")
         client = self.auth_key_clear_client(target)
         try:
-            transaction = auth_key_clear_transaction_sql(
-                self.synthetic_auth_key_ids,
-                inject_failure=inject_failure,
-                wait_for_signal=interrupt_signal is not None,
-            ).encode()
+            if self.input_mode == "local":
+                if inject_failure:
+                    raise DrillFailure(phase, "fault_test_failure")
+                transaction = local_auth_key_clear_transaction_sql(
+                    wait_for_signal=interrupt_signal is not None
+                ).encode()
+            else:
+                transaction = auth_key_clear_transaction_sql(
+                    self.synthetic_auth_key_ids,
+                    inject_failure=inject_failure,
+                    wait_for_signal=interrupt_signal is not None,
+                ).encode()
             fault_kind = "failure" if inject_failure else "signal" if interrupt_signal is not None else None
             failure_category = "fault_test_failure" if fault_kind is not None else "auth_key_clear_failure"
             output = self.attached(
@@ -3301,7 +4686,18 @@ class Drill(Docker):
         if state.get("Running") or container_status != 0:
             raise DrillFailure(phase, "auth_key_clear_failure")
         self.discard_container(client, phase, "auth_key_clear_failure")
-        if output or self.auth_key_state(target, phase) != AUTH_KEY_CLEARED_STATE:
+        if self.input_mode == "synthetic":
+            expected_state = AUTH_KEY_CLEARED_STATE
+        else:
+            expected_state = [
+                "0",
+                "0",
+                "0",
+                before[3],
+                before[4],
+                str(int(before[5]) + evidence_bound_key_count),
+            ]
+        if output or self.auth_key_state(target, phase) != expected_state:
             raise DrillFailure(phase, "auth_key_clear_failure")
         self.auth_keys_cleared = True
 
@@ -3529,11 +4925,12 @@ class Drill(Docker):
             b"restore.invalid",
             b"127.0.0.1:2444",
             str(self.run_dir).encode(),
+            LOCAL_DUMP_LEAK_MARKER,
         ]
         for record in self.manifest.get("containers", []):
             leaks.extend((record["name"].encode(), record.get("id", "").encode()))
         for file_record in self.manifest.get("files", []):
-            if file_record.get("purpose") == "checker_result":
+            if file_record.get("purpose") in {"checker_result", "synthetic_local_dump_fixture"}:
                 continue
             path = Path(file_record["path"])
             if path.exists() and file_record.get("size", 0) > 7:
@@ -4368,6 +5765,7 @@ class Drill(Docker):
         self.phase = "fixture_generation"
         source_db_password = secrets.token_hex(32)
         target_db_password = secrets.token_hex(32)
+        self.target_db_password = target_db_password
         source_dsn = database_dsn(source_db_password)
         target_dsn = database_dsn(target_db_password)
         auth_key = secrets.token_hex(32)
@@ -4470,14 +5868,14 @@ class Drill(Docker):
             ("source_database_env", {
                 "PGDATA": "/var/lib/postgresql/18/docker",
                 "POSTGRES_DB": "teagram",
-                "POSTGRES_USER": "postgres",
+                "POSTGRES_USER": RESTORE_BOOTSTRAP_ROLE,
                 "POSTGRES_PASSWORD_FILE": "/run/secrets/init-password",
                 "POSTGRES_HOST_AUTH_METHOD": "scram-sha-256",
             }),
             ("target_database_env", {
                 "PGDATA": "/var/lib/postgresql/18/docker",
                 "POSTGRES_DB": "teagram",
-                "POSTGRES_USER": "postgres",
+                "POSTGRES_USER": RESTORE_BOOTSTRAP_ROLE,
                 "POSTGRES_PASSWORD_FILE": "/run/secrets/init-password",
                 "POSTGRES_HOST_AUTH_METHOD": "scram-sha-256",
             }),
@@ -4732,6 +6130,21 @@ def recover(manifest_path: Path) -> int:
     return 1
 
 
+def validate_local_dump_argument(path: Path) -> int:
+    if os.geteuid() != 0:
+        print("restore readiness preflight check failed: root privileges", file=sys.stderr)
+        print(json.dumps(report_document("preflight", "preflight_failure", "not_started", 0), separators=(",", ":")))
+        return 1
+    try:
+        descriptor, _ = open_local_dump(path)
+        os.close(descriptor)
+    except (OSError, ValueError):
+        print("restore readiness preflight check failed: local dump metadata", file=sys.stderr)
+        print(json.dumps(report_document("preflight", "isolation_refusal", "not_started", 0), separators=(",", ":")))
+        return 1
+    return 0
+
+
 def run_primary(args: argparse.Namespace) -> int:
     if os.geteuid() != 0:
         print("restore readiness preflight check failed: root privileges", file=sys.stderr)
@@ -4744,13 +6157,39 @@ def run_primary(args: argparse.Namespace) -> int:
         print(json.dumps(report_document("preflight", "preflight_failure", "not_started", 0), separators=(",", ":")))
         return 1
     try:
-        work_seconds = bounded_work_seconds(args.fault_test, args.work_seconds)
+        work_seconds = bounded_work_seconds(
+            args.fault_test,
+            args.work_seconds,
+            local_fixture_test=args.local_fixture_test,
+        )
     except ValueError:
         print("restore readiness preflight check failed: work budget", file=sys.stderr)
         print(json.dumps(report_document("preflight", "preflight_failure", "not_started", 0), separators=(",", ":")))
         return 1
+    local_dump_fd: int | None = None
+    if args.local_dump is not None:
+        try:
+            local_dump_fd, args.local_dump_identity = open_local_dump(args.local_dump)
+            args.local_dump_fd = local_dump_fd
+        except (OSError, ValueError):
+            print("restore readiness preflight check failed: local dump metadata", file=sys.stderr)
+            print(json.dumps(report_document("preflight", "isolation_refusal", "not_started", 0), separators=(",", ":")))
+            return 1
+
+    def close_local_dump() -> bool:
+        nonlocal local_dump_fd
+        if local_dump_fd is None:
+            return True
+        try:
+            os.close(local_dump_fd)
+        except OSError:
+            return False
+        local_dump_fd = None
+        return True
+
     lock = open_global_lock()
     if lock is None:
+        close_local_dump()
         print("restore readiness preflight check failed: global lock", file=sys.stderr)
         print(json.dumps(report_document("preflight", "isolation_refusal", "not_started", 0), separators=(",", ":")))
         return 1
@@ -4761,6 +6200,7 @@ def run_primary(args: argparse.Namespace) -> int:
         os.chmod(run_dir, 0o700)
     except OSError:
         os.close(lock_fd)
+        close_local_dump()
         print("restore readiness preflight check failed: private /run directory", file=sys.stderr)
         print(json.dumps(report_document("preflight", "preflight_failure", "not_started", 0), separators=(",", ":")))
         return 1
@@ -4768,6 +6208,7 @@ def run_primary(args: argparse.Namespace) -> int:
     parent_ticks = process_start_ticks(os.getpid())
     if parent_ticks is None:
         os.close(lock_fd)
+        close_local_dump()
         print("restore readiness preflight check failed: parent process identity", file=sys.stderr)
         print(json.dumps(report_document("preflight", "preflight_failure", "not_started", 0), separators=(",", ":")))
         return 1
@@ -4863,7 +6304,7 @@ def run_primary(args: argparse.Namespace) -> int:
         drill.gateway = None
         drill.prepare_materials()
         source = drill.create_database("source")
-        if args.fault_test == "sigkill":
+        if args.fault_test == "sigkill" and not args.local_fixture_test:
             write_sigkill_marker(sys.stdout.fileno())
             os.kill(os.getpid(), signal.SIGKILL)
         drill.migrate_database(
@@ -4871,7 +6312,13 @@ def run_primary(args: argparse.Namespace) -> int:
         )
         drill.verify_schema_state(source, 0, MIGRATION_ROLES, "source_migrations", SEED_SCHEMA)
         drill.seed_source_fixture(source)
-        drill.migrate_database("source", source, BASE_SCHEMA, "source_migrations")
+        drill.migrate_database(
+            "source",
+            source,
+            BASE_SCHEMA,
+            "source_migrations",
+            keep_env=drill.input_mode == "local",
+        )
         drill.verify_schema_state(source, 1, MIGRATION_ROLES, "source_migrations")
         drill.seed_source_auth_key_fixture(source)
         drill.verify_schema_state(
@@ -4881,12 +6328,82 @@ def run_primary(args: argparse.Namespace) -> int:
             "source_migrations",
             expected_auth_keys=AUTH_KEY_FIXTURE_COUNT,
         )
+        if args.local_fixture_test:
+            drill.migrate_database(
+                "source",
+                source,
+                LOCAL_FIXTURE_SCHEMA,
+                "source_migrations",
+                keep_env=True,
+            )
+            expected_users, expected_auth_keys = source_fixture_counts(False)
+            drill.verify_schema_state(
+                source,
+                expected_users,
+                MIGRATION_ROLES,
+                "source_migrations",
+                expected_head=LOCAL_FIXTURE_SCHEMA,
+                expected_auth_keys=expected_auth_keys,
+            )
         target = drill.create_database("target")
-        if args.fault_test == "malformed-sql":
+        if drill.input_mode == "local":
+            if args.local_fixture_test:
+                drill.create_local_dump_fixture(source)
+            drill.delete_private_file(drill.files["source_tool_env"])
+            drill.prepare_local_restore_target(target)
+            drill.restore_local_dump(target)
+            if args.fault_test == "sigkill":
+                write_sigkill_marker(sys.stdout.fileno())
+                os.kill(os.getpid(), signal.SIGKILL)
+            dump_head = drill.local_dump_migration_head(source, target, "schema_validation")
+            try:
+                source_head = resolve_local_dump_migration_head(
+                    drill.sql(source, MIGRATION_HEAD_SQL, "schema_validation", pinned_search_path=True),
+                    drill.run_dir / "migrations",
+                )
+            except ValueError as exc:
+                raise DrillFailure("schema_validation", "schema_failure") from exc
+            if source_head > dump_head:
+                raise DrillFailure("schema_validation", "schema_failure")
+            if source_head != dump_head:
+                drill.migrate_database(
+                    "source",
+                    source,
+                    dump_head,
+                    "source_migrations",
+                    keep_env=dump_head != HEAD_SCHEMA,
+                )
+            expected_users, expected_auth_keys = source_fixture_counts(args.local_fixture_test)
+            drill.verify_schema_state(
+                source,
+                expected_users,
+                MIGRATION_ROLES,
+                "source_migrations",
+                expected_head=dump_head,
+                expected_auth_keys=expected_auth_keys,
+            )
+            drill.verify_local_schema_state(source, target, "schema_validation", expected_head=dump_head)
+            drill.run_local_hostile_fixture_tests(source, target, dump_head)
+            if dump_head != HEAD_SCHEMA:
+                drill.migrate_database("source", source, HEAD_SCHEMA, "source_migrations")
+                drill.verify_schema_state(
+                    source,
+                    expected_users,
+                    MIGRATION_ROLES,
+                    "source_migrations",
+                    expected_head=HEAD_SCHEMA,
+                    expected_auth_keys=expected_auth_keys,
+                )
+                drill.apply_pending_migration(target)
+            drill.verify_local_schema_state(source, target, "schema_validation", expected_head=HEAD_SCHEMA)
+            drill.migration_head = HEAD_SCHEMA
+            drill.promote_local_restore_owner(target)
+        elif args.fault_test == "malformed-sql":
             drill.restore_fixture(source, target, malformed_sql=malformed_sql_fixture(token))
         else:
             drill.restore_fixture(source, target)
-        drill.apply_pending_migration(target)
+        if drill.input_mode == "synthetic":
+            drill.apply_pending_migration(target)
         if args.fault_test == "malformed-sql":
             raise DrillFailure("auth_key_clearing", "schema_failure")
         drill.write_post_restore_marker(target)
@@ -4959,6 +6476,8 @@ def run_primary(args: argparse.Namespace) -> int:
         failure = failure or signal_failure
     for sig, previous in previous_handlers.items():
         signal.signal(sig, previous)
+    if not close_local_dump() and failure is None:
+        failure = DrillFailure("cleanup", "cleanup_failure")
 
     cleanup_verified = supervisor_succeeded and not run_dir.exists()
     category = failure.category if failure is not None else "assertions_passed"
@@ -4976,6 +6495,7 @@ def run_primary(args: argparse.Namespace) -> int:
         help_get_config=drill.checker_result["help_getConfig"],
         synthetic_signin=drill.checker_result["synthetic_signin"],
         auth_keys_cleared="pass" if drill.auth_keys_cleared else "not_run",
+        input_mode=drill.input_mode,
     )
     print(json.dumps(report, separators=(",", ":"), sort_keys=True))
     return report["exit"]
@@ -4986,6 +6506,7 @@ def parse_args() -> argparse.Namespace:
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument("--supervise", type=Path)
     mode.add_argument("--recover", type=Path)
+    mode.add_argument("--validate-local-dump", type=Path)
     parser.add_argument("--global-lock-fd", type=int)
     parser.add_argument("--docker-bin")
     parser.add_argument("--atlas-bin")
@@ -4997,15 +6518,47 @@ def parse_args() -> argparse.Namespace:
         choices=("malformed-sql", "auth-clear-failure", "auth-clear-signal", "sigkill"),
     )
     parser.add_argument("--work-seconds", type=int)
+    local_mode = parser.add_mutually_exclusive_group()
+    local_mode.add_argument("--local-dump", type=Path)
+    local_mode.add_argument("--local-fixture-test", action="store_true")
     args = parser.parse_args()
     if args.work_seconds is not None and args.work_seconds < 1:
         parser.error("work budget must be positive")
     if args.supervise is not None:
-        if args.global_lock_fd is None or args.global_lock_fd < 0:
+        if (
+            args.global_lock_fd is None
+            or args.global_lock_fd < 0
+            or args.local_dump is not None
+            or args.local_fixture_test
+            or args.fault_test is not None
+        ):
             parser.error("invalid supervisor descriptor")
         return args
-    if args.recover is not None:
+    if args.validate_local_dump is not None:
+        if any(
+            (
+                args.global_lock_fd is not None,
+                args.docker_bin is not None,
+                args.atlas_bin is not None,
+                args.build_dir is not None,
+                args.build_uid is not None,
+                args.go_arch is not None,
+                args.fault_test is not None,
+                args.work_seconds is not None,
+                args.local_dump is not None,
+                args.local_fixture_test,
+            )
+        ):
+            parser.error("invalid local dump validation input")
         return args
+    if args.recover is not None:
+        if args.local_dump is not None or args.local_fixture_test or args.fault_test is not None:
+            parser.error("invalid recovery input")
+        return args
+    if args.local_dump is not None and args.fault_test is not None:
+        parser.error("local dump mode cannot use fault injection")
+    if args.local_fixture_test and args.fault_test not in (None, "auth-clear-signal", "sigkill"):
+        parser.error("unsupported local fixture fault injection")
     if not all((args.docker_bin, args.atlas_bin, args.build_dir, args.go_arch)) or args.build_uid is None:
         parser.error("missing confined drill input")
     return args
@@ -5017,6 +6570,8 @@ def main() -> int:
         return supervise(args.supervise, args.global_lock_fd)
     if args.recover is not None:
         return recover(args.recover)
+    if args.validate_local_dump is not None:
+        return validate_local_dump_argument(args.validate_local_dump)
     return run_primary(args)
 
 

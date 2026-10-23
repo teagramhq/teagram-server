@@ -20,7 +20,7 @@ func profilePhotoMutationWait(ctx context.Context) time.Duration {
 	if wait, ok := ctx.Value(profilePhotoMutationWaitForTestContextKey{}).(time.Duration); ok && wait > 0 {
 		return wait
 	}
-	return store.ProfilePhotoSelectionWait
+	return store.ProfilePhotoClearWait
 }
 
 // handleDeleteProfilePhotos removes only live gallery entries authorized by

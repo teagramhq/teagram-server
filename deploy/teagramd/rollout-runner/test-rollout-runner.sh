@@ -16,7 +16,7 @@ bash "$SCRIPT_DIR/test-rollout-verifier-env-additions.sh"
 TMP=$(mktemp -d "${TMPDIR:-/root}/main1238-rollout-fixtures.XXXXXXXX")
 chmod 700 "$TMP"
 cleanup_fixtures() {
-  local root_file root phase checkout transition record_file
+  local root_file root phase checkout transition record_file report phase_dir
   for root_file in "$TMP"/*-root-path; do
     [ -f "$root_file" ] || continue
     root=$(cat "$root_file")
@@ -25,7 +25,15 @@ cleanup_fixtures() {
       for record_file in "$checkout"/.state/blob-mode/journal/*.json "$checkout"/.state/blob-mode/mode.json; do
         [ -f "$record_file" ] || continue
         transition=$(jq -r '.transition_id' "$record_file")
-        rm -f -- "/root/teagramd-blob-mode-report-$transition.json"
+        report="/root/teagramd-blob-mode-report-$transition.json"
+        if [ -f "$report" ]; then
+          while IFS= read -r phase_dir; do
+            case "$phase_dir" in
+              transition-proof-fixtures-*) rm -rf -- "/root/$phase_dir" ;;
+            esac
+          done < <(jq -r '.phase_files[]? | split("/")[0]' "$report" | sort -u)
+          rm -f -- "$report"
+        fi
         if [ "$(jq -r '.outcome' "$record_file")" = stack-moved-local ]; then
           rm -rf -- "/root/stack-move-$transition"
         fi
@@ -78,6 +86,7 @@ APPLY_ID=ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff
 ROLLBACK_ID=cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
 POSTGRES_ID=dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd
 MIGRATE_ID=eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee
+RUSTFS_ID=1212121212121212121212121212121212121212121212121212121212121212
 
 pass() {
   PASS_COUNT=$((PASS_COUNT + 1))
@@ -234,9 +243,16 @@ SH
 set -eu
 printf 'docker %s\n' "$*" >> "$MOCK_EVENTS"
 if [ "${1:-}" = compose ] && [ -n "${MOCK_COMPOSE_FILE_EVENTS:-}" ]; then
+  if [ "${MOCK_SCENARIO:-}" = s3-accepted-apply ] && \
+     [ "${COMPOSE_ENV_FILES:-}" != "${MOCK_EXPECTED_COMPOSE_ENV_FILES:-}" ]; then
+    printf 'expected COMPOSE_ENV_FILES=%s actual=%s\n' \
+      "${MOCK_EXPECTED_COMPOSE_ENV_FILES:-unset}" "${COMPOSE_ENV_FILES:-unset}" >&2
+    exit 89
+  fi
   compose_command=''
   printf -v compose_command '%q ' "$@"
-  printf '%s\t%s\n' "${COMPOSE_FILE:-unset}" "$compose_command" >> "$MOCK_COMPOSE_FILE_EVENTS"
+  printf '%s\t%s\t%s\n' "${COMPOSE_FILE:-unset}" "$compose_command" \
+    "${COMPOSE_ENV_FILES:-unset}" >> "$MOCK_COMPOSE_FILE_EVENTS"
 fi
 phase=$(cat "$MOCK_STATE/phase")
 if [ -n "${MOCK_REAL_GIT:-}" ]; then
@@ -272,6 +288,9 @@ if [ "${1:-}" = ps ]; then
     fi
     cat "$MOCK_STATE/teagramd"
     printf '%s\n' "$MOCK_POSTGRES_ID"
+    case "${MOCK_SCENARIO:-}" in
+      s3-accepted-apply|recovered-local-apply) printf '%s\n' "$MOCK_RUSTFS_ID" ;;
+    esac
   else
     printf '%s\n' "$(cat "$MOCK_STATE/teagramd")"
   fi
@@ -352,16 +371,23 @@ if [ "${1:-}" = inspect ]; then
       ;;
     "$MOCK_POSTGRES_ID") id=$MOCK_POSTGRES_ID; image=$MOCK_POSTGRES_IMAGE; cfg=postgres ;;
     "$MOCK_MIGRATE_ID") id=$MOCK_MIGRATE_ID; image=$MOCK_POSTGRES_IMAGE; cfg=migrate ;;
+    "$MOCK_RUSTFS_ID") id=$MOCK_RUSTFS_ID; image=$MOCK_POSTGRES_IMAGE; cfg=rustfs ;;
     *) printf 'unknown inspect subject\n' >&2; exit 93 ;;
   esac
   if [ "$cfg" = postgres ]; then
     jq -nc --arg id "$id" --arg image "$image" '{Id:$id,Image:$image,Config:{Env:[],StopTimeout:120,Labels:{"com.docker.compose.project":"fixture","com.docker.compose.service":"postgres"}},State:{Status:"running",ExitCode:0,StartedAt:"2026-10-06T12:00:00Z",FinishedAt:"0001-01-01T00:00:00Z",Health:{Status:"healthy"}},HostConfig:{PortBindings:{}},Mounts:[{Type:"volume",Name:"fixture_pgdata",Source:"/synthetic/pgdata",Destination:"/var/lib/postgresql/data",Mode:"rw",RW:true,Propagation:"rprivate"}]}'
   elif [ "$cfg" = migrate ]; then
     jq -nc --arg id "$id" --arg image "$image" '{Id:$id,Image:$image,Config:{Env:[],StopTimeout:120,Labels:{"com.docker.compose.project":"fixture","com.docker.compose.service":"migrate"}},State:{Status:"exited",ExitCode:0,StartedAt:"2026-10-06T12:00:00Z",FinishedAt:"2026-10-06T12:00:01Z"},HostConfig:{PortBindings:{}},Mounts:[]}'
+  elif [ "$cfg" = rustfs ]; then
+    jq -nc --arg id "$id" --arg image "$image" --arg network "$MOCK_RUSTFS_PRIVATE_NETWORK" \
+      --arg volume "$MOCK_RUSTFS_VOLUME" '{Id:$id,Image:$image,Config:{Env:[],StopTimeout:120,Labels:{"com.docker.compose.project":"fixture","com.docker.compose.service":"rustfs"}},State:{Status:"running",ExitCode:0,StartedAt:"2026-10-06T12:00:00Z",FinishedAt:"0001-01-01T00:00:00Z",Health:{Status:"healthy"}},HostConfig:{PortBindings:{},NetworkMode:$network},NetworkSettings:{Networks:{($network):{}}},Mounts:[{Type:"volume",Name:$volume,Source:"/synthetic/rustfsdata",Destination:"/data",Mode:"rw",RW:true,Propagation:"rprivate"}]}'
   else
     env_json='["TG_RSA_KEY_PATH=/var/lib/teagramd/server_key.pem","TG_SYNTHETIC_FLAG=fixture","TG_BLOB_DIR=/var/lib/teagramd-blobs"]'
-    if [[ "${MOCK_SCENARIO:-}" == moved-stack-9ef1110-to-da0107d* ]]; then
+    if [[ "${MOCK_SCENARIO:-}" == moved-stack-9ef1110-to-da0107d* ]] || \
+       [ "${MOCK_SCENARIO:-}" = recovered-local-apply ]; then
       env_json='["TG_RSA_KEY_PATH=/var/lib/teagramd/server_key.pem","TG_SYNTHETIC_FLAG=fixture","TG_BLOB_DIR=/var/lib/telegramd-blobs","TG_REPLICA_COUNT=1","TG_CLIENT_ADDR_TRUST=socket"]'
+    elif [ "${MOCK_SCENARIO:-}" = s3-accepted-apply ]; then
+      env_json='["TG_RSA_KEY_PATH=/var/lib/teagramd/server_key.pem","TG_SYNTHETIC_FLAG=fixture","TG_BLOB_S3_ENDPOINT=http://rustfs:9000","TG_BLOB_S3_BUCKET=teagram","TG_BLOB_S3_PREFIX=teagramd/","TG_BLOB_S3_REGION=us-east-1","TG_BLOB_S3_ACCESS_KEY_ID=fixture-access-key","TG_BLOB_S3_SECRET_ACCESS_KEY_FILE=/run/secrets/teagramd-blob-secret-key","TG_BLOB_S3_ALLOW_INSECURE_HTTP=true","TG_REPLICA_COUNT=1","TG_CLIENT_ADDR_TRUST=socket"]'
     elif [ "${MOCK_SCENARIO:-}" = target-local-running-backend-mismatch ] || [ "${MOCK_SCENARIO:-}" = target-local-df9-running-backend-mismatch ]; then
       env_json='["TG_RSA_KEY_PATH=/var/lib/teagramd/server_key.pem","TG_SYNTHETIC_FLAG=fixture","TG_BLOB_DIR=/var/lib/teagramd-blobs","TG_BLOB_S3_ENDPOINT=https://objects.fixture.invalid","TG_BLOB_S3_BUCKET=fixture","TG_BLOB_S3_PREFIX=fixture/","TG_REPLICA_COUNT=1","TG_CLIENT_ADDR_TRUST=socket"]'
     elif { [ "$cfg" = target ] || [ "$cfg" = rollback ]; } && [ "${MOCK_SCENARIO:-success}" = runtime-backend-mismatch ]; then
@@ -418,8 +444,10 @@ if [ "${1:-}" = inspect ]; then
           if $scenario == "target-local-carry-forward-public-listener-addition" and $id == $replacement_id then
             {"2446/tcp":[{HostIp:"127.0.0.1",HostPort:"2446"}]}
           else {} end),NetworkMode:"fixture_teagram_server"},
-        NetworkSettings:{Networks:({fixture_teagram_server:{}} + if $scenario == "initial-local-replica-network-drift" and $id != $base_id then {edge:{}} else {} end)},
-        Mounts:((if ($scenario == "moved-stack-9ef1110-to-da0107d" or $scenario == "moved-stack-9ef1110-to-da0107d-render-mismatch") then [{Type:"volume",Name:"identity",Source:"/synthetic/identity",Destination:"/var/lib/teagramd",Mode:"rw",RW:true,Propagation:"rprivate"},{Type:"volume",Name:"teagram_tgblobs",Source:"/synthetic/blobs",Destination:"/var/lib/teagramd-blobs",Mode:"ro",RW:false,Propagation:"rprivate"},{Type:"volume",Name:"teagram_tgblobs",Source:"/synthetic/blobs",Destination:"/var/lib/telegramd-blobs",Mode:"rw",RW:true,Propagation:"rprivate"},{Type:"bind",Name:"",Source:$source,Destination:"/run/teagramd/blob-mode",Mode:"ro",RW:false,Propagation:"rprivate"}] else ([{Type:"volume",Name:"identity",Source:"/synthetic/identity",Destination:"/var/lib/teagramd",Mode:"rw",RW:true,Propagation:"rprivate"},{Type:"volume",Name:(if $scenario == "runtime-volume-mismatch" and $cfg == "target" then "unexpected_tgblobs" else "fixture_tgblobs" end),Source:"/synthetic/blobs",Destination:"/var/lib/teagramd-blobs",Mode:"rw",RW:true,Propagation:"rprivate"}] + if ($cfg == "target" and $scenario != "runtime-mode-unmounted") or $cfg == "rollback" then [{Type:"bind",Name:"",Source:$source,Destination:"/run/teagramd/blob-mode",Mode:"ro",RW:false,Propagation:"rprivate"}] else [] end) end) + if $turnstile_source == "" then [] else [{Type:"bind",Name:"",Source:$turnstile_source,Destination:"/run/secrets/teagramd-turnstile",Mode:"ro",RW:false,Propagation:"rprivate"}] end)
+        NetworkSettings:{Networks:({fixture_teagram_server:{}} +
+          (if $scenario == "s3-accepted-apply" then {fixture_rustfs_private:{}} else {} end) +
+          (if $scenario == "initial-local-replica-network-drift" and $id != $base_id then {edge:{}} else {} end))},
+        Mounts:((if ($scenario == "moved-stack-9ef1110-to-da0107d" or $scenario == "moved-stack-9ef1110-to-da0107d-render-mismatch" or $scenario == "recovered-local-apply") then [{Type:"volume",Name:"identity",Source:"/synthetic/identity",Destination:"/var/lib/teagramd",Mode:"rw",RW:true,Propagation:"rprivate"},{Type:"volume",Name:"teagram_tgblobs",Source:"/synthetic/blobs",Destination:"/var/lib/teagramd-blobs",Mode:"ro",RW:false,Propagation:"rprivate"},{Type:"volume",Name:"teagram_tgblobs",Source:"/synthetic/blobs",Destination:"/var/lib/telegramd-blobs",Mode:"rw",RW:true,Propagation:"rprivate"},{Type:"bind",Name:"",Source:$source,Destination:"/run/teagramd/blob-mode",Mode:"ro",RW:false,Propagation:"rprivate"}] else ([{Type:"volume",Name:"identity",Source:"/synthetic/identity",Destination:"/var/lib/teagramd",Mode:"rw",RW:true,Propagation:"rprivate"},{Type:"volume",Name:(if $scenario == "runtime-volume-mismatch" and $cfg == "target" then "unexpected_tgblobs" else "fixture_tgblobs" end),Source:"/synthetic/blobs",Destination:"/var/lib/teagramd-blobs",Mode:"rw",RW:(if $scenario == "s3-accepted-apply" then false else true end),Propagation:"rprivate"}] + if ($cfg == "target" and $scenario != "runtime-mode-unmounted") or $cfg == "rollback" then [{Type:"bind",Name:"",Source:$source,Destination:"/run/teagramd/blob-mode",Mode:"ro",RW:false,Propagation:"rprivate"}] else [] end) end) + if $turnstile_source == "" then [] else [{Type:"bind",Name:"",Source:$turnstile_source,Destination:"/run/secrets/teagramd-turnstile",Mode:"ro",RW:false,Propagation:"rprivate"}] end)
       }'
   fi
   exit 0
@@ -474,7 +502,8 @@ fi
             "$MOCK_STATE/target-compose.json"
         elif [ "${MOCK_SCENARIO:-}" = stack-move-retained-rustfs-volume ] && [ "$compose_profile_enabled" = 0 ]; then
           jq -c 'del(.volumes.rustfsdata)' "$MOCK_STATE/target-compose.json"
-        elif [[ "${MOCK_SCENARIO:-}" == moved-stack-9ef1110-to-da0107d* ]]; then
+        elif [[ "${MOCK_SCENARIO:-}" == moved-stack-9ef1110-to-da0107d* ]] || \
+             [ "${MOCK_SCENARIO:-}" = recovered-local-apply ]; then
           if [ "${MOCK_SCENARIO:-}" = moved-stack-9ef1110-to-da0107d-render-mismatch ]; then
             moved_blob_dir=/var/lib/not-authoritative
           elif [ -n "${TEAGRAMD_STACK_MOVE_BLOB_DIR:-}" ]; then
@@ -826,7 +855,7 @@ make_fixture() {
   printf '%s\n' 'fixture baseline source' > "$checkout/tracked-source.txt"
   env_file="$checkout/.env"
   override="$checkout/docker-compose.override.yml"
-  if [[ "$name" == moved-stack-9ef1110-to-da0107d* ]]; then
+  if [[ "$name" == moved-stack-* ]]; then
     printf 'FIXTURE=synthetic-only\nTEAGRAMD_STACK_MOVE_BLOB_DIR=/var/lib/teagramd-blobs\n' > "$env_file"
   else
     printf 'FIXTURE=synthetic-only\n' > "$env_file"
@@ -1100,8 +1129,8 @@ make_fixed_target_transition_fixture() {
 run_fixture() {
   local name=$1 capture=${2:-built} fail_sync=${3:-0} chmod_match=${4:-} ready=${5:-2} ln_match=${6:-} sync_match=${7:-} action=${8:-initialize-local} runtime_source_sha=${9:-}
   local branch=main
-  local state bin checkout root stamp scenario status require_marker=0 runner runtime_dir target_runtime target_sha baseline_sha real_git compose_file
-  local -a runner_args=() ambient_revision=()
+  local state bin checkout root stamp scenario status require_marker=0 runner runtime_dir target_runtime target_sha baseline_sha real_git compose_file compose_env_files='' rustfs_private_network='' rustfs_volume=''
+  local -a runner_args=() ambient_revision=() compose_env_args=()
   local replacement_id=$TARGET_ID added_env='' changed_env='' previous_env_file='' baseline_env_extra='' target_env_extra='' rollback_env_extra='' adopt_env=0
   [ ! -f "$TMP/$name-adopt-env" ] || adopt_env=$(cat "$TMP/$name-adopt-env")
   [ ! -f "$TMP/$name-added-env" ] || added_env=$(cat "$TMP/$name-added-env")
@@ -1133,6 +1162,18 @@ run_fixture() {
   esac
   compose_file='.rollout-compose.initial-local.yml:docker-compose.override.yml'
   case "$scenario" in
+    s3-accepted-apply)
+      compose_file="$checkout/docker-compose.yml:$checkout/docker-compose.override.yml"
+      compose_env_files=$(cat "$TMP/$name-compose-env-files")
+      compose_env_args=("COMPOSE_ENV_FILES=$compose_env_files")
+      rustfs_private_network=fixture_rustfs_private
+      rustfs_volume=fixture_rustfsdata
+      ;;
+    recovered-local-apply)
+      compose_file="$checkout/docker-compose.yml:$checkout/docker-compose.local-blobs.yml:$checkout/docker-compose.override.yml"
+      rustfs_private_network=teagram_rustfs_private
+      rustfs_volume=teagram_rustfsdata
+      ;;
     stack-move-retained-rustfs-volume)
       compose_file='.rollout-compose.local-e58ba20.yml:docker-compose.override.yml'
       ;;
@@ -1256,13 +1297,16 @@ run_fixture() {
   printf '%s\n' 0 > "$state/compose-config-count"
   printf 'fixture runner: %s action=%s\n' "$name" "$action" >&2
   set +e
-  (cd "$checkout" && timeout --signal=TERM --kill-after=5s 180s env -u TEAGRAMD_SOURCE_REVISION PATH="$bin:$PATH" "${ambient_revision[@]}" \
+  (cd "$checkout" && timeout --signal=TERM --kill-after=5s 180s env \
+    -u COMPOSE_ENV_FILES -u TEAGRAMD_SOURCE_REVISION PATH="$bin:$PATH" "${compose_env_args[@]}" "${ambient_revision[@]}" \
     MOCK_REAL_BASH="$(command -v bash)" \
     MOCK_STATE="$state" MOCK_EVENTS="$TMP/$name-events" MOCK_COMPOSE_FILE_EVENTS="$TMP/$name-compose-selections" MOCK_SCENARIO="$scenario" MOCK_BRANCH="$branch" \
     MOCK_CHECKOUT="$checkout" MOCK_TARGET_SHA="$target_sha" MOCK_TARGET_RUNTIME_DIR="$target_runtime" MOCK_REAL_GIT="$real_git" \
     MOCK_SOURCE_SHA="$runtime_source_sha" MOCK_ORIGIN_SHA="$APPLY_ORIGIN_SHA" MOCK_BASELINE_SHA="$baseline_sha" ROLLOUT_RUNNER_SOURCE_SHA="$runtime_source_sha" \
     MOCK_BASE_ID="$BASE_ID" MOCK_TARGET_ID="$TARGET_ID" MOCK_REPLACEMENT_ID="$replacement_id" MOCK_ROLLBACK_ID="$ROLLBACK_ID" \
-    MOCK_POSTGRES_ID="$POSTGRES_ID" MOCK_MIGRATE_ID="$MIGRATE_ID" \
+    MOCK_POSTGRES_ID="$POSTGRES_ID" MOCK_MIGRATE_ID="$MIGRATE_ID" MOCK_RUSTFS_ID="$RUSTFS_ID" \
+    MOCK_RUSTFS_PRIVATE_NETWORK="$rustfs_private_network" MOCK_RUSTFS_VOLUME="$rustfs_volume" \
+    MOCK_EXPECTED_COMPOSE_ENV_FILES="$compose_env_files" \
     MOCK_BASE_IMAGE="$BASE_IMAGE" MOCK_BUILT_IMAGE="$BUILT_IMAGE" MOCK_ACTUAL_TARGET_IMAGE="$BUILT_IMAGE" MOCK_POSTGRES_IMAGE="$POSTGRES_IMAGE" \
     MOCK_CAPTURE_IMAGE="$capture" MOCK_FAIL_SYNC="$fail_sync" MOCK_FAIL_CHMOD_MATCH="$chmod_match" MOCK_FAIL_LN_MATCH="$ln_match" MOCK_FAIL_SYNC_MATCH="$sync_match" \
     MOCK_REQUIRE_FAILURE_MARKER="$require_marker" MOCK_EVIDENCE_ROOT="$root" MOCK_BASE_ENV_EXTRA="$baseline_env_extra" MOCK_TARGET_ENV_EXTRA="$target_env_extra" MOCK_ROLLBACK_ENV_EXTRA="$rollback_env_extra" \
@@ -1568,6 +1612,119 @@ for item in authority_reports.iterdir():
     else:
         shutil.copy2(item, destination)
 PY
+}
+
+create_transition_authority_fixture() {
+  local test_module=$1 fixture_root=$2 state_dir=$3 report_root=$4 outcome=$5 moved=${6:-0}
+  python3 - "$test_module" "$fixture_root" "$state_dir" "$report_root" "$outcome" "$moved" <<'PY'
+import importlib.util
+import json
+import pathlib
+import sys
+from types import SimpleNamespace
+from unittest.mock import patch
+
+module_path = pathlib.Path(sys.argv[1])
+spec = importlib.util.spec_from_file_location("blob_mode_fixtures", module_path)
+assert spec is not None and spec.loader is not None
+fixtures = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(fixtures)
+blob_mode = fixtures.blob_mode
+fixture = fixtures.BlobModeStateTests()
+fixture.setUp()
+root = pathlib.Path(sys.argv[2])
+root.mkdir(mode=0o700, parents=True)
+state_dir = pathlib.Path(sys.argv[3])
+report_root = pathlib.Path(sys.argv[4])
+outcome = sys.argv[5]
+moved = sys.argv[6] == "1"
+records = [
+    json.loads(path.read_text(encoding="utf-8"))
+    for path in sorted((state_dir / "journal").glob("*.json"))
+]
+previous = records[-1]
+fixture.volume = previous["volumes"]["tgblobs"]
+local_blob_dir = blob_mode.MOVED_BLOB_TARGET if moved else blob_mode.BLOB_TARGET
+layouts = dict(blob_mode.RUNTIME_LAYOUTS)
+layouts["teagramd"] = {**layouts["teagramd"], "blobs": local_blob_dir}
+rustfs_volume = previous["volumes"]["rustfsdata"] or (
+    "teagram_rustfsdata" if moved else "fixture_rustfsdata"
+)
+
+with (
+    patch.object(blob_mode, "BLOB_TARGET", local_blob_dir),
+    patch.object(blob_mode, "BLOB_TARGETS", {local_blob_dir}),
+    patch.object(blob_mode, "RUNTIME_LAYOUTS", layouts),
+    patch.object(blob_mode, "require_runner_lock"),
+    patch.object(blob_mode, "file_stat", side_effect=fixture.allow_unowned_private_files),
+    patch.object(blob_mode.os, "fchown"),
+    patch.object(blob_mode.os, "chown"),
+):
+    outcomes = ["s3-accepted"] if outcome == "s3-accepted" else ["s3-accepted", "recovered-local"]
+    for next_outcome in outcomes:
+        records, _head, _mode_bytes = blob_mode.read_authority(state_dir, report_root)
+        previous = records[-1]
+        proof = fixture.transition_proof(next_outcome)
+        proof["volumes"] = {
+            "tgblobs": previous["volumes"]["tgblobs"],
+            "rustfsdata": rustfs_volume,
+        }
+        if next_outcome == "recovered-local":
+            proof["backend"] = previous_local = next(
+                record["backend"] for record in reversed(records[:-1])
+                if record["backend"].get("kind") == "local"
+            )
+            proof["backend"] = {"kind": "local", "dir": previous_local["dir"]}
+        fixture.materialize_transition_proof(proof, report_root)
+        proof_path = root / f"{next_outcome}.json"
+        proof_path.write_text(json.dumps(proof), encoding="utf-8")
+        proof_path.chmod(0o600)
+        blob_mode.publish_transition(SimpleNamespace(
+            outcome=next_outcome,
+            proof=proof_path,
+            state_dir=state_dir,
+            report_root=report_root,
+            lock_path=root / "deploy.lock",
+        ))
+PY
+}
+
+configure_s3_compose_fixture() {
+  local state=$1 rustfs_volume=$2 private_network=$3
+  local config next
+  for config in "$state/base-compose.json" "$state/target-compose.json"; do
+    next="$config.next.json"
+    jq -c --arg rustfs_volume "$rustfs_volume" --arg private_network "$private_network" '
+      .services.teagramd.environment |= (
+        del(.TG_BLOB_DIR) + {
+          TG_BLOB_S3_ENDPOINT:"http://rustfs:9000",
+          TG_BLOB_S3_BUCKET:"teagram",
+          TG_BLOB_S3_PREFIX:"teagramd/",
+          TG_BLOB_S3_REGION:"us-east-1",
+          TG_BLOB_S3_ACCESS_KEY_ID:"fixture-access-key",
+          TG_BLOB_S3_SECRET_ACCESS_KEY_FILE:"/run/secrets/teagramd-blob-secret-key",
+          TG_BLOB_S3_ALLOW_INSECURE_HTTP:"true"
+        }
+      ) |
+      .services.teagramd.networks += {rustfs_private:{}} |
+      .services.teagramd.volumes |= map(
+        if .target == "/var/lib/teagramd-blobs" then .read_only=true else . end
+      ) |
+      .services.rustfs={
+        networks:{rustfs_private:{}},
+        volumes:[{type:"volume",source:"rustfsdata",target:"/data",read_only:false}]
+      } |
+      .volumes.rustfsdata={name:$rustfs_volume} |
+      .networks.rustfs_private={
+        name:$private_network,
+        driver:"bridge",
+        internal:true,
+        enable_ipv6:false,
+        driver_opts:{"com.docker.network.bridge.gateway_mode_ipv4":"isolated"}
+      }
+    ' "$config" > "$next" || return 1
+    mv -- "$next" "$config" || return 1
+  done
 }
 
 prepare_moved_stack_apply_fixture() {
@@ -2034,7 +2191,7 @@ if prepare_moved_stack_apply_fixture moved-stack-9ef1110-to-da0107d moved-stack-
          any(.tgblobs_mounts[]; .target == $dir and .read_only == false) and
          any(.tgblobs_mounts[]; .target == "/var/lib/teagramd-blobs" and .read_only == true))
      ' "$root.target/pre-backup-blob-compose.json" >/dev/null && \
-     grep -q "compose_contract=stack-moved-local-authority blob_dir=/var/lib/telegramd-blobs" \
+     grep -q "compose_contract=tracked-local-authority blob_dir=/var/lib/telegramd-blobs" \
        "$root.target/pre-backup-blob-authority.txt" && \
      awk '/docker compose .*config --format json/ && config == 0 {config=NR} /^docker compose exec -T postgres pg_dump -U postgres / {backup=NR} END {exit !(config > 0 && backup > config)}' \
        "$TMP/moved-stack-9ef1110-to-da0107d-events" && assert_evidence_mode "$root"; then
@@ -2068,6 +2225,84 @@ if prepare_moved_stack_apply_fixture moved-stack-9ef1110-to-da0107d-render-misma
   fi
 else
   fail 'moved-stack mismatch fixture requires a valid stack-moved-local authority'
+fi
+
+if prepare_apply_fixture s3-accepted-apply s3-accepted-apply; then
+  state=$(cat "$TMP/s3-accepted-apply-state-path")
+  checkout=$(cat "$TMP/s3-accepted-apply-checkout-path")
+  root=$(cat "$TMP/s3-accepted-apply-root-path")
+  if create_transition_authority_fixture "$SCRIPT_DIR/test-blob-mode-state.py" \
+    "$TMP/s3-accepted-apply-authority" "$checkout/.state/blob-mode" /root s3-accepted && \
+    configure_s3_compose_fixture "$state" fixture_rustfsdata fixture_rustfs_private; then
+    printf '%s\n' 'TG_BLOB_S3_ACCESS_KEY_ID=fixture-access-key' \
+      'TG_BLOB_S3_SECRET_ACCESS_KEY=fixture-secret' > "$checkout/.env.rustfs-parked"
+    chmod 600 "$checkout/.env.rustfs-parked"
+    expected_env_files="$checkout/.env,$checkout/.env.rustfs-parked"
+    printf '%s\n' "$expected_env_files" > "$TMP/s3-accepted-apply-compose-env-files"
+    status=$(run_fixture s3-accepted-apply built 0 '' 2 '' '' apply "$APPLY_TARGET_SHA")
+    if [ "$status" = 0 ] && \
+       grep -q "rollout=verified sha=$APPLY_TARGET_SHA" "$TMP/s3-accepted-apply.stdout" && \
+       [ "$(cat "$state/head")" = "$APPLY_TARGET_SHA" ] && \
+       awk -F '\t' \
+         -v expected_selection="$checkout/docker-compose.yml:$checkout/docker-compose.override.yml" \
+         -v expected_env_files="$expected_env_files" '
+           $1 == expected_selection {
+             selected++
+             if ($2 == "compose up -d ") target_up++
+             if (NF < 3 || $3 != expected_env_files) bad=1
+           }
+           END {exit !(selected > 0 && target_up == 1 && !bad)}
+         ' \
+         "$TMP/s3-accepted-apply-compose-selections" && \
+       jq -e '.services | all(.[]; .backend.kind == "s3")' \
+         "$root.target/pre-backup-blob-compose.json" >/dev/null && \
+       grep -q 'backend=s3 ' "$root.target/pre-backup-blob-authority.txt" && assert_evidence_mode "$root"; then
+      pass 'ordinary S3 apply carries the selected Compose pair and parked credential files through the real runner'
+    else
+      show_fixture_failure s3-accepted-apply "$status"
+      fail 'ordinary S3 apply must preserve authority, environment-file selection, and existing rollout gates'
+    fi
+  else
+    fail 'S3 apply fixture requires publishable authority and a matching S3 Compose render'
+  fi
+else
+  fail 'S3 apply fixture requires a valid initialized local authority'
+fi
+
+recovered_apply_name=moved-stack-9ef1110-to-da0107d-recovered-local-apply
+if prepare_moved_stack_apply_fixture "$recovered_apply_name" recovered-local-apply; then
+  state=$(cat "$TMP/$recovered_apply_name-state-path")
+  checkout=$(cat "$TMP/$recovered_apply_name-checkout-path")
+  root=$(cat "$TMP/$recovered_apply_name-root-path")
+  if create_transition_authority_fixture "$SCRIPT_DIR/test-blob-mode-state.py" \
+    "$TMP/$recovered_apply_name-authority" "$checkout/.state/blob-mode" /root recovered-local 1; then
+    status=$(run_fixture "$recovered_apply_name" built 0 '' 2 '' '' apply da0107dfeadbeafbc1abfc4dd1594796ae661ed1)
+    compose_selection=$(awk -F '\t' '{print $1}' "$TMP/$recovered_apply_name-compose-selections" | sort -u)
+    if [ "$status" = 0 ] && \
+       grep -q 'rollout=verified sha=da0107dfeadbeafbc1abfc4dd1594796ae661ed1' \
+         "$TMP/$recovered_apply_name.stdout" && \
+       [ "$(cat "$state/head")" = da0107dfeadbeafbc1abfc4dd1594796ae661ed1 ] && \
+       [ "$compose_selection" = "$checkout/docker-compose.yml:$checkout/docker-compose.local-blobs.yml:$checkout/docker-compose.override.yml" ] && \
+       jq -e --arg dir /var/lib/telegramd-blobs '
+         .outcome == "recovered-local" and .backend == {kind:"local",dir:$dir}
+       ' "$checkout/.state/blob-mode/mode.json" >/dev/null && \
+       jq -e --arg dir /var/lib/telegramd-blobs '
+         .services | all(.[]; .backend == {kind:"local",dir:$dir} and
+           any(.tgblobs_mounts[]; .target == $dir and .read_only == false) and
+           any(.tgblobs_mounts[]; .target == "/var/lib/teagramd-blobs" and .read_only == true))
+       ' "$root.target/pre-backup-blob-compose.json" >/dev/null && \
+       grep -q 'compose_contract=tracked-local-authority blob_dir=/var/lib/telegramd-blobs' \
+         "$root.target/pre-backup-blob-authority.txt" && assert_evidence_mode "$root"; then
+      pass 'ordinary deploy after recovery renders the tracked local Compose pair from recovered-local authority'
+    else
+      show_fixture_failure "$recovered_apply_name" "$status"
+      fail 'ordinary deploy after recovery must render the authority directory before backup and pass rollout gates'
+    fi
+  else
+    fail 'recovered-local apply fixture requires a valid moved-stack S3 and recovery authority chain'
+  fi
+else
+  fail 'recovered-local apply fixture requires a valid moved-stack local authority'
 fi
 
 if prepare_apply_fixture apply-backend-flip runtime-backend-mismatch; then

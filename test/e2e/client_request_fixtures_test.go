@@ -1661,7 +1661,6 @@ func testSmokeClientRequestFixtures(t *testing.T) {
 		}); err != nil {
 			t.Fatalf("replay delete-chat fixture: %v", err)
 		}
-		testSmokeSavedGIFRequestFixtures(t, f, creator, member)
 		return
 	}
 	t.Fatal("poll answer web-page fixture response omitted updateNewMessage")

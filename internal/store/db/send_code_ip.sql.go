@@ -12,6 +12,17 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
+const deleteExpiredPublicSendCodeIPPhones = `-- name: DeleteExpiredPublicSendCodeIPPhones :exec
+DELETE FROM public_send_code_ip_phones
+WHERE ip_key = $1
+  AND expires_at <= now()
+`
+
+func (q *Queries) DeleteExpiredPublicSendCodeIPPhones(ctx context.Context, ipKey netip.Prefix) error {
+	_, err := q.db.Exec(ctx, deleteExpiredPublicSendCodeIPPhones, ipKey)
+	return err
+}
+
 const deleteExpiredSendCodeIPPhones = `-- name: DeleteExpiredSendCodeIPPhones :exec
 DELETE FROM send_code_ip_phones
 WHERE ip_key = $1
@@ -23,6 +34,59 @@ WHERE ip_key = $1
 func (q *Queries) DeleteExpiredSendCodeIPPhones(ctx context.Context, ipKey netip.Prefix) error {
 	_, err := q.db.Exec(ctx, deleteExpiredSendCodeIPPhones, ipKey)
 	return err
+}
+
+const getPublicSendCodeIPCallExpiry = `-- name: GetPublicSendCodeIPCallExpiry :one
+SELECT expires_at
+FROM public_send_code_ip_calls
+WHERE ip_key = $1
+`
+
+func (q *Queries) GetPublicSendCodeIPCallExpiry(ctx context.Context, ipKey netip.Prefix) (pgtype.Timestamptz, error) {
+	row := q.db.QueryRow(ctx, getPublicSendCodeIPCallExpiry, ipKey)
+	var expires_at pgtype.Timestamptz
+	err := row.Scan(&expires_at)
+	return expires_at, err
+}
+
+const getPublicSendCodeIPPhoneNextExpiry = `-- name: GetPublicSendCodeIPPhoneNextExpiry :one
+SELECT expires_at
+FROM public_send_code_ip_phones
+WHERE ip_key = $1
+ORDER BY expires_at
+LIMIT 1
+`
+
+func (q *Queries) GetPublicSendCodeIPPhoneNextExpiry(ctx context.Context, ipKey netip.Prefix) (pgtype.Timestamptz, error) {
+	row := q.db.QueryRow(ctx, getPublicSendCodeIPPhoneNextExpiry, ipKey)
+	var expires_at pgtype.Timestamptz
+	err := row.Scan(&expires_at)
+	return expires_at, err
+}
+
+const getPublicSendCodeIPPhoneUsage = `-- name: GetPublicSendCodeIPPhoneUsage :one
+SELECT
+    count(*)::INT AS used,
+    coalesce(bool_or(phone = $2), FALSE)::BOOLEAN AS counted
+FROM public_send_code_ip_phones
+WHERE ip_key = $1
+`
+
+type GetPublicSendCodeIPPhoneUsageParams struct {
+	IpKey netip.Prefix
+	Phone string
+}
+
+type GetPublicSendCodeIPPhoneUsageRow struct {
+	Used    int32
+	Counted bool
+}
+
+func (q *Queries) GetPublicSendCodeIPPhoneUsage(ctx context.Context, arg GetPublicSendCodeIPPhoneUsageParams) (GetPublicSendCodeIPPhoneUsageRow, error) {
+	row := q.db.QueryRow(ctx, getPublicSendCodeIPPhoneUsage, arg.IpKey, arg.Phone)
+	var i GetPublicSendCodeIPPhoneUsageRow
+	err := row.Scan(&i.Used, &i.Counted)
+	return i, err
 }
 
 const getSendCodeIPCallExpiry = `-- name: GetSendCodeIPCallExpiry :one
@@ -86,6 +150,23 @@ func (q *Queries) GetSendCodeIPPhoneUsage(ctx context.Context, arg GetSendCodeIP
 	return i, err
 }
 
+const insertPublicSendCodeIPPhone = `-- name: InsertPublicSendCodeIPPhone :exec
+INSERT INTO public_send_code_ip_phones (ip_key, phone, expires_at)
+VALUES ($1, $2, now() + $3::INTERVAL)
+ON CONFLICT (ip_key, phone) DO NOTHING
+`
+
+type InsertPublicSendCodeIPPhoneParams struct {
+	IpKey   netip.Prefix
+	Phone   string
+	Column3 pgtype.Interval
+}
+
+func (q *Queries) InsertPublicSendCodeIPPhone(ctx context.Context, arg InsertPublicSendCodeIPPhoneParams) error {
+	_, err := q.db.Exec(ctx, insertPublicSendCodeIPPhone, arg.IpKey, arg.Phone, arg.Column3)
+	return err
+}
+
 const insertSendCodeIPPhone = `-- name: InsertSendCodeIPPhone :exec
 INSERT INTO send_code_ip_phones (ip_key, phone, expires_at)
 VALUES ($1, $2, now() + $3::INTERVAL)
@@ -104,6 +185,32 @@ type InsertSendCodeIPPhoneParams struct {
 func (q *Queries) InsertSendCodeIPPhone(ctx context.Context, arg InsertSendCodeIPPhoneParams) error {
 	_, err := q.db.Exec(ctx, insertSendCodeIPPhone, arg.IpKey, arg.Phone, arg.Column3)
 	return err
+}
+
+const sweepExpiredPublicSendCodeIPCalls = `-- name: SweepExpiredPublicSendCodeIPCalls :execrows
+DELETE FROM public_send_code_ip_calls
+WHERE expires_at <= now()
+`
+
+func (q *Queries) SweepExpiredPublicSendCodeIPCalls(ctx context.Context) (int64, error) {
+	result, err := q.db.Exec(ctx, sweepExpiredPublicSendCodeIPCalls)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
+const sweepExpiredPublicSendCodeIPPhones = `-- name: SweepExpiredPublicSendCodeIPPhones :execrows
+DELETE FROM public_send_code_ip_phones
+WHERE expires_at <= now()
+`
+
+func (q *Queries) SweepExpiredPublicSendCodeIPPhones(ctx context.Context) (int64, error) {
+	result, err := q.db.Exec(ctx, sweepExpiredPublicSendCodeIPPhones)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
 }
 
 const sweepExpiredSendCodeIPCalls = `-- name: SweepExpiredSendCodeIPCalls :execrows
@@ -134,6 +241,48 @@ func (q *Queries) SweepExpiredSendCodeIPPhones(ctx context.Context) (int64, erro
 		return 0, err
 	}
 	return result.RowsAffected(), nil
+}
+
+const tryConsumePublicSendCodeIPCall = `-- name: TryConsumePublicSendCodeIPCall :one
+
+INSERT INTO public_send_code_ip_calls (ip_key, token_count, window_start, expires_at)
+VALUES ($1, 1, now(), now() + $2::INTERVAL)
+ON CONFLICT (ip_key) DO UPDATE SET
+    token_count = CASE
+        WHEN public_send_code_ip_calls.expires_at <= now() THEN 1
+        ELSE public_send_code_ip_calls.token_count + 1
+    END,
+    window_start = CASE
+        WHEN public_send_code_ip_calls.expires_at <= now() THEN now()
+        ELSE public_send_code_ip_calls.window_start
+    END,
+    expires_at = CASE
+        WHEN public_send_code_ip_calls.expires_at <= now() THEN now() + $2::INTERVAL
+        ELSE public_send_code_ip_calls.expires_at
+    END
+WHERE public_send_code_ip_calls.expires_at <= now()
+   OR public_send_code_ip_calls.token_count < $3
+RETURNING token_count, expires_at
+`
+
+type TryConsumePublicSendCodeIPCallParams struct {
+	IpKey      netip.Prefix
+	Column2    pgtype.Interval
+	TokenCount int32
+}
+
+type TryConsumePublicSendCodeIPCallRow struct {
+	TokenCount int32
+	ExpiresAt  pgtype.Timestamptz
+}
+
+// Public-listener counters are stored separately so their usage cannot spend
+// the tailnet listener's budget for the same observed client network.
+func (q *Queries) TryConsumePublicSendCodeIPCall(ctx context.Context, arg TryConsumePublicSendCodeIPCallParams) (TryConsumePublicSendCodeIPCallRow, error) {
+	row := q.db.QueryRow(ctx, tryConsumePublicSendCodeIPCall, arg.IpKey, arg.Column2, arg.TokenCount)
+	var i TryConsumePublicSendCodeIPCallRow
+	err := row.Scan(&i.TokenCount, &i.ExpiresAt)
+	return i, err
 }
 
 const tryConsumeSendCodeIPCall = `-- name: TryConsumeSendCodeIPCall :one

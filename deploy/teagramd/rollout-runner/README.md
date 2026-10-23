@@ -706,12 +706,80 @@ If the journal, report, or head is ambiguous or mismatched, leave all files and
 containers unchanged and stop for review. Never edit or remove authority files
 by hand.
 
-## Backend transition boundary
+## Current live transition
+
+`blob-transition-runner.py accept-s3` cuts over the current local stack without
+a migration-set pin. It reads the active `teagramd` Compose labels and requires
+the exact local selection `docker-compose.yml`,
+`docker-compose.local-blobs.yml`, then `docker-compose.override.yml`. It renders
+that local selection and the S3 candidate (`docker-compose.yml` plus the
+existing override), checking both against blob-mode authority before stopping
+a writer. RustFS must stay on `rustfs_private`, an internal bridge using the
+isolated IPv4 gateway mode with IPv6 disabled, with no published ports or extra
+network attachments. The runner inspects the live RustFS container and Docker network
+before copying media and before recovery; after activation it checks the live
+backend, mounts, port bindings, and network attachments against authority.
+
+Under `/tmp/teagram-deploy.lock`, the runner stops every `teagramd*` service,
+checks the host for remaining writers, captures `pg_dump` and verifies it by
+restoring into a temporary database, then records one source census. It loads
+the existing RustFS credentials from `/opt/teagram/.env` and the root-owned
+parked `/opt/telegram-server/.env.rustfs-parked` file without copying them. It
+checks that the parked app secret matches the existing mounted key file and
+rejects a mismatch before stopping writers. It starts RustFS and `rustfs-init`,
+makes one checksum-verified copy, and compares
+the full copy manifest with an independent destination census. A mismatch
+leaves local authority active and restarts local serving. After the publisher
+records `s3-accepted`, it starts S3 serving. Activation failure after
+publication leaves S3 authority in place for diagnosis.
+
+Run as root from `/opt/teagram` after MAIN-1977 and deployment of this runner:
+
+```sh
+cd /opt/teagram
+python3 deploy/teagramd/rollout-runner/blob-transition-runner.py accept-s3 \
+  --checkout /opt/teagram \
+  --state-dir /opt/teagram/.state/blob-mode \
+  --report-root /root \
+  --lock-path /tmp/teagram-deploy.lock
+```
+
+`blob-transition-runner.py recover-local` is the rollback to `TG_BLOB_DIR`. It
+checks the active S3 and proposed local renders, freezes `teagramd*`, verifies
+a fresh Postgres dump restore, records an S3 census, restores S3 objects into
+the retained `tgblobs` volume, and compares the restore manifest and
+destination census. Local-only keys already in `tgblobs` are kept and counted.
+It publishes `recovered-local` before starting local serving. A rejection
+before publication leaves S3 authority active and resumes S3 serving. The
+rollback writes to `tgblobs`; it never removes the volume.
+
+Run recovery with the same paths. To return to S3 later, run `accept-s3`
+again; it copies the current local contents through the same checksum and
+census checks.
+
+```sh
+cd /opt/teagram
+python3 deploy/teagramd/rollout-runner/blob-transition-runner.py recover-local \
+  --checkout /opt/teagram \
+  --state-dir /opt/teagram/.state/blob-mode \
+  --report-root /root \
+  --lock-path /tmp/teagram-deploy.lock
+```
+
+Every authority publication is made by `blob-mode-state.py` under the shared
+lock. Never hand-write mode JSON. If publication stops after the journal entry
+is committed but before the head is replaced, run the existing `reconcile`
+action with this reviewed checkout before restarting either backend.
+
+## Historical migration qualification boundary
 
 The ordinary rollout runner still initializes and rolls out local storage
-only. `blob-transition-runner.py accept-s3` exercises the cutover sequence with
-a root-owned pre-copy bundle beneath the report root. Under the shared lock it
-verifies the current local render against local authority, stops every configured
+only. The qualified actions are retained for earlier pinned qualification
+workflows; the current `accept-s3` and `recover-local` actions above do not
+invoke them. `blob-transition-runner.py accept-s3-qualified` exercises the
+retired cutover sequence with a root-owned pre-copy bundle beneath the report
+root. Under the shared lock it verifies the current local render against local
+authority, stops every configured
 `teagramd*` writer, and checks that no writers remain before it recaptures the
 Postgres dump, live Atlas/schema query, reference queries, and source-volume
 census. The live Atlas observation records each applied revision's completion
@@ -734,7 +802,7 @@ resumes the local serving services. An interruption after journal publication
 follows the same `reconcile` rules above. Activation failures after S3
 publication do not roll back to local.
 
-`blob-transition-runner.py recover-local` consumes a separate root-owned
+`blob-transition-runner.py recover-local-qualified` consumes a separate root-owned
 recovery bundle containing `recovery.json`, `frozen-containers.json`,
 `postgres.dump`, and `migrations.json`. The qualification record binds the
 fresh dump and schema evidence to the freeze and retained `tgblobs` volume.
@@ -754,7 +822,7 @@ unchanged S3 authority; local start remains rejected until the restore proof is
 published. The private recovery report publishes the aggregate retained-key
 count and never claims physical erasure.
 
-Both transition commands reject live execution while the MAIN-1418/1419/1420
+Both qualified transition commands reject live execution while the MAIN-1418/1419/1420
 60–67 release requirements remain pending. `BLOB_TRANSITION_TEST_MODE=1` alone
 cannot enable a transition: root-only fixtures must also provide a private
 0700 fixture root, keep every input and authority path inside it, and pin all

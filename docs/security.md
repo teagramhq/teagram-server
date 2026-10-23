@@ -101,3 +101,36 @@ credential is therefore inside the trusted reader boundary: compromise of
 the running application credential can expose query statistics and the
 database contents it already accesses. The `pg_read_all_stats` grants do not
 contain that risk or provide isolation from the application.
+
+# Threat model: profile-photo clear and request replay
+
+## Assets and boundaries
+
+The clear RPC acts on the authenticated account's current profile-photo
+selection. It accepts the empty-photo input, not a caller-selected owner or
+file ID. The handler passes the authenticated owner to the store, which scopes
+the current-state, gallery, upload-receipt, and clear-receipt operations to
+that owner. A clear removes the profile/gallery reference and advances the
+profile revision; it does not erase file bytes or unrelated message, chat, or
+channel references. File reclamation and erasure of those other references are
+separate operations.
+
+PostgreSQL is the shared boundary for serialization across server replicas and
+for durable retry identity. A clear receipt stores the owner and
+`(auth_key_id, session_id, msg_id)` tuple, a random operation key, and optional
+historical file and revision IDs. It contains no photo bytes. The transport
+tuple stays in the local receipt table; recovery uses the separate opaque
+operation key. Receipts older than 90 days no longer match a replay and are
+pruned for that owner on a later clear. Treat the database, backups, and query
+diagnostics as sensitive because the receipt IDs can be joined to account and
+photo metadata.
+
+## Abuse cases and controls
+
+| Abuse case | Control and remaining risk |
+|---|---|
+| An account tries to clear another account's photo | The RPC derives its owner from the authenticated MTProto request and accepts no target ID. Store queries and the current-photo/gallery relationship are owner-scoped. A stolen session can still clear its own account's current photo. |
+| A completed clear is replayed after a new photo is selected | The store checks the durable receipt for the same owner, auth key, session, and message ID before reading the current selection. Clear, receipt, and rate charge commit in one transaction under the per-owner advisory lock. A match does not resolve or delete the newer selection. After 90 days the receipt no longer deduplicates; MTProto's separate message-ID age check remains the wire-level bound for old requests. |
+| Concurrent retries repeat the clear or consume extra rate budget | The shared per-owner lock serializes replicas. Only the first request with a new tuple clears and charges `update_profile`; same-tuple retries return through the receipt path without another charge. Each fresh tuple is rate-limited. Same-tuple retries still use database and lock capacity, and lock contention can return `FLOOD_WAIT_1` after the one-second wait. |
+| A database error leaves a photo cleared but no receipt, or charges without clearing | The clear, receipt insert, and rate-limit update share one transaction, so a failed transaction rolls back all three. Database unavailability can reduce availability; the handler returns a generic internal error for storage failures. |
+| Operators mistake profile clear for complete personal-data erasure | The operation removes the current gallery reference, not the underlying file bytes or references outside the profile gallery. Those have separate retention and erasure controls and must be considered for a full erasure request. |

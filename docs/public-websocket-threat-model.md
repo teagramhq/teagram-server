@@ -23,15 +23,17 @@ authentication state, and availability of the public and tailnet services.
 Neither the admin HTTP listener nor the tailnet TCP listener is part of the
 public route. The listener split separates ingress and registration policy; it
 does not create separate account or data stores. Public and tailnet accounts
-belong to the same Teagram service.
+belong to the same Teagram service. Public WebSocket per-client abuse budgets
+are separate from the budgets shared by the default TCP and tailnet WebSocket
+listeners.
 
 ## Authentication controls
 
 | Surface | Who can reach it | Control and limitation |
 |---|---|---|
-| `auth.sendCode` | Any caller that opens the public WebSocket. | Starts the username authentication flow and creates code state; it does not create an account or authorize a session. The default limits are 10 calls per observed client network per hour and 20 distinct usernames per network per day. The limit is charged before the username is looked up. These are throttles, not proof of identity. |
-| `auth.signIn` and `auth.checkPassword` | Any caller can submit the RPCs, but password verification requires the pending state and a valid SRP proof. | Existing code-hash checks and failed-password limits still apply: five failed `auth.checkPassword` attempts per account per 10 minutes and ten per observed client network per hour by default. These controls limit guessing but do not hide the service from anonymous callers. |
-| `auth.signUp` | Any caller can submit it; the public registration policy decides whether admission succeeds. | `TG_PUBLIC_REGISTRATION=invite` requires a live operator-issued invite bound to the requested username. The server consumes it in the same transaction that creates the account. A missing, invalid, expired, revoked, or already-used invite cannot admit an account. The public policy is independent of `TG_REGISTRATION=open` on the existing listener. The default sign-up limit is five attempts per observed client network per hour. |
+| `auth.sendCode` | Any caller that opens the public WebSocket. | Starts the username authentication flow and creates code state; it does not create an account or authorize a session. The default limits are 10 calls per observed client network per hour and 20 distinct usernames per network per day. The public listener's counters are independent from the default TCP and tailnet WebSocket counters, and are charged before the username is looked up. These are throttles, not proof of identity. |
+| `auth.signIn` and `auth.checkPassword` | Any caller can submit the RPCs, but password verification requires the pending state and a valid SRP proof. | Existing code-hash checks and failed-password limits still apply: five failed `auth.checkPassword` attempts per account per 10 minutes and ten per observed client network per hour by default. The IP counter is listener-scoped; the account counter remains shared. These controls limit guessing but do not hide the service from anonymous callers. |
+| `auth.signUp` | Any caller can submit it; the public registration policy decides whether admission succeeds. | `TG_PUBLIC_REGISTRATION=invite` requires a live operator-issued invite bound to the requested username. The server consumes it in the same transaction that creates the account. A missing, invalid, expired, revoked, or already-used invite cannot admit an account. The public policy is independent of `TG_REGISTRATION=open` on the existing listener. The default sign-up limit is five attempts per observed client network per hour, with independent public and tailnet budgets. |
 | WebSocket `Origin` | Browser handshakes to `/apiws`. | `TG_PUBLIC_WEBSOCKET_ALLOWED_ORIGINS=https://web.teagram.io` rejects a browser handshake carrying a different Origin. It is a cross-origin browser control, not authentication: requests without Origin remain accepted, and a non-browser client can set or omit the header. Discovery is public metadata and is served separately from the WebSocket Origin check. |
 
 The public listener intentionally leaves sign-in available while restricting
@@ -46,11 +48,13 @@ boundary.
 The production Compose configuration uses `TG_CLIENT_ADDR_TRUST=socket`. The
 authentication counters therefore use the address of the socket peer, not a
 forwarded HTTP header. With a host-local tunnel connection, public visitors
-may share one observed network bucket. This caps aggregate RPC traffic but is
-not a per-visitor limit and may also throttle legitimate users together. Do
-not trust `X-Forwarded-For` to change this; any client-address proxy mode
-requires an explicitly allowlisted, trusted proxy that supplies the supported
-PROXY-v2 metadata.
+may share one observed network bucket. This caps aggregate public RPC traffic
+but is not a per-visitor limit and may also throttle legitimate users together.
+The public listener's budgets are selected from the accepted listener; request
+headers cannot select or merge them with the tailnet budget. Do not trust
+`X-Forwarded-For` to change this; any client-address proxy mode requires an
+explicitly allowlisted, trusted proxy that supplies the supported PROXY-v2
+metadata.
 
 Unauthenticated callers can still consume connection and shared service
 capacity; per-RPC authentication limits do not by themselves prevent a
@@ -63,8 +67,11 @@ paths but do not make the public listener private or provide a general bot
 defense.
 
 The tailnet TCP and optional tailnet WebSocket paths remain on their existing
-listeners and network routes. `TG_REGISTRATION=open` continues to apply only
-there; public sign-up uses the separate invite policy. Deployment verification
-must confirm the host publish remains loopback-only, the tunnel routes only
-the two documented paths, public sign-up without an invite is refused, and
-tailnet authentication still works through its existing listener.
+listeners and network routes and share their original per-client counters.
+Existing rows remain assigned to that tailnet scope; the additive migration
+creates separate public counters without resetting or copying them.
+`TG_REGISTRATION=open` continues to apply only there; public sign-up uses the
+separate invite policy. Deployment verification must confirm the host publish
+remains loopback-only, the tunnel routes only the two documented paths, public
+sign-up without an invite is refused, public budgets still limit traffic, and
+tailnet authentication still works through TCP and WebSocket.

@@ -60,6 +60,63 @@ normalize_tracked_file_modes() {
   printf 'tracked file modes: normalized=%s mismatches=0\n' "$changed"
 }
 
+install_teagram_logs_command() {
+  local sha=$1 target=/usr/local/sbin/teagram-logs
+  local target_dir temp backup
+
+  if [[ -n ${DEPLOY_DIR:-} ]]; then
+    target="$R/usr/local/sbin/teagram-logs"
+  fi
+
+  # Older deployable commits predate the tracked log reader.
+  if ! git cat-file -e "$sha:deploy/teagram/teagram-logs.sh" 2>/dev/null; then
+    return 0
+  fi
+
+  target_dir=${target%/*}
+  if [[ "$target_dir" == "$target" || ! -d "$target_dir" ]]; then
+    printf 'teagram-logs target directory is missing: %s\n' "$target_dir" >&2
+    return 1
+  fi
+  if [[ -L "$target" || ( -e "$target" && ! -f "$target" ) ]]; then
+    printf 'teagram-logs target is not a regular file: %s\n' "$target" >&2
+    return 1
+  fi
+
+  temp=$(mktemp "$target_dir/.teagram-logs.XXXXXX") || return 1
+  if ! git show "$sha:deploy/teagram/teagram-logs.sh" > "$temp"; then
+    rm -f "$temp"
+    return 1
+  fi
+  if ! bash -n "$temp"; then
+    rm -f "$temp"
+    printf 'teagram-logs script from %s failed bash -n\n' "$sha" >&2
+    return 1
+  fi
+  if ! chmod 0755 "$temp"; then
+    rm -f "$temp"
+    return 1
+  fi
+
+  if [[ -f "$target" ]] && ! cmp -s "$temp" "$target"; then
+    backup="$R/teagram-logs-before-${sha:0:7}"
+    if [[ ! -e "$backup" ]]; then
+      if ! cp -p "$target" "$backup"; then
+        rm -f "$temp"
+        return 1
+      fi
+      chmod 0600 "$backup"
+      printf 'saved previous teagram-logs command to %s\n' "$backup"
+    fi
+  fi
+
+  if ! mv -f "$temp" "$target"; then
+    rm -f "$temp"
+    return 1
+  fi
+  printf 'installed teagram-logs command from %s\n' "${sha:0:7}"
+}
+
 SHA=${DEPLOY_SHA:-}
 case "$SHA" in *[!0-9a-f]*|"") echo "DEPLOY_SHA must be a full 40-hex commit SHA"; exit 1;; esac
 [ ${#SHA} = 40 ] || { echo "DEPLOY_SHA must be a full 40-hex commit SHA"; exit 1; }
@@ -77,28 +134,69 @@ if [ "$PREV" != "$SHA" ] && git merge-base --is-ancestor "$SHA" "$PREV"; then
 fi
 C=teagram-teagramd-1
 LIVE_CHECKOUT=$(pwd -P)
+unset COMPOSE_ENV_FILES
+# Stage the candidate's validator before preflight. The selected SHA is on
+# origin/main, and the same files are used by the rollout after the backup.
+# shellcheck disable=SC2174 # only the runner directory is new
+mkdir -m 700 -p "$R/teagramd-rollout-runner"
+for f in rollout-runner.sh rollout-verifier.sh schema-result-gate.sh schema-result-gate.py blob-mode-state.py blob-transition-runner.py qualify-rustfs-transition.py stack-move-runner.py; do
+  git show "$SHA:deploy/teagramd/rollout-runner/$f" > "$R/teagramd-rollout-runner/$f"; chmod 600 "$R/teagramd-rollout-runner/$f"
+done
 LIVE_CF=$(docker inspect --format '{{index .Config.Labels "com.docker.compose.project.config_files"}}' $C | tr , :)
+S3_ENV_FILES=()
 case "$LIVE_CF" in
   "$LIVE_CHECKOUT"/.rollout-compose.local-*.yml:"$LIVE_CHECKOUT"/docker-compose.override.yml) ;;
   "$LIVE_CHECKOUT"/docker-compose.yml:"$LIVE_CHECKOUT"/docker-compose.local-blobs.yml:"$LIVE_CHECKOUT"/docker-compose.override.yml) ;;
+  "$LIVE_CHECKOUT"/docker-compose.yml:"$LIVE_CHECKOUT"/docker-compose.override.yml)
+    if ! authority_json=$(python3 "$R/teagramd-rollout-runner/blob-transition-runner.py" deployment-env \
+      --checkout "$LIVE_CHECKOUT" --state-dir "$LIVE_CHECKOUT/.state/blob-mode" \
+      --report-root "$R" --lock-path /tmp/teagram-deploy.lock); then
+      echo 'live S3 Compose has no valid s3-accepted authority or credentials; refusing' >&2
+      exit 1
+    fi
+    if ! env_file_lines=$(jq -er '
+      select(.outcome == "s3-accepted") |
+      .env_files |
+      if type == "array" and length == 2 and all(.[]; type == "string" and length > 0)
+      then .[] else error("invalid environment file list") end
+    ' <<< "$authority_json"); then
+      echo 'live S3 Compose validator returned an invalid environment file list; refusing' >&2
+      exit 1
+    fi
+    mapfile -t S3_ENV_FILES <<< "$env_file_lines"
+    if [[ "${#S3_ENV_FILES[@]}" != 2 || "${S3_ENV_FILES[0]}" != "$LIVE_CHECKOUT/.env" ]]; then
+      echo 'live S3 Compose validator returned unexpected environment files; refusing' >&2
+      exit 1
+    fi
+    legacy_parked="$(dirname "$LIVE_CHECKOUT")/telegram-server/.env.rustfs-parked"
+    case "${S3_ENV_FILES[1]}" in
+      "$LIVE_CHECKOUT/.env.rustfs-parked"|"$legacy_parked"|"$R/.env.rustfs-parked") ;;
+      *) echo 'live S3 Compose validator returned an unexpected parked credential path; refusing' >&2; exit 1 ;;
+    esac
+    export COMPOSE_ENV_FILES="${S3_ENV_FILES[0]},${S3_ENV_FILES[1]}"
+    ;;
   *) echo "live teagramd not on an approved local compose ($LIVE_CF); refusing"; exit 1 ;;
 esac
 export COMPOSE_FILE="$LIVE_CF"   # carry forward the pinned local-blob files live runs from
+docker_compose() {
+  if [[ "${#S3_ENV_FILES[@]}" == 2 ]]; then
+    docker compose --env-file "${S3_ENV_FILES[0]}" --env-file "${S3_ENV_FILES[1]}" "$@"
+  else
+    docker compose "$@"
+  fi
+}
 IMG=$(docker inspect --format '{{.Image}}' $C)
 if [ "$PREV" = "$SHA" ] && grep -qs "source_sha=$SHA image_id=$IMG " "$R"/main1238-*.build/built-image.identity; then
+  umask 077
+  install_teagram_logs_command "$SHA"
   echo "already at $SHA with runner provenance"; exit 0
 fi
 echo "deploying ${PREV:0:7} -> $S"; git log --oneline "HEAD..$SHA"
 git diff --name-only HEAD "$SHA" -- migrations
 umask 077
-docker compose exec -T postgres pg_dump -U postgres teagram > "$R/pgdump-pre-$S-$TS.sql" </dev/null
+docker_compose exec -T postgres pg_dump -U postgres teagram > "$R/pgdump-pre-$S-$TS.sql" </dev/null
 tail -c 200 "$R/pgdump-pre-$S-$TS.sql" | grep -q "dump complete"
 echo "dump $R/pgdump-pre-$S-$TS.sql"
-# shellcheck disable=SC2174 # only the runner directory is new
-mkdir -m 700 -p "$R/teagramd-rollout-runner"
-for f in rollout-runner.sh rollout-verifier.sh schema-result-gate.sh schema-result-gate.py blob-mode-state.py qualify-rustfs-transition.py stack-move-runner.py; do
-  git show "$SHA:deploy/teagramd/rollout-runner/$f" > "$R/teagramd-rollout-runner/$f"; chmod 600 "$R/teagramd-rollout-runner/$f"
-done
 flock -u 9; exec 9>&-
 rc=0
 ROLLOUT_RUNNER_SOURCE_SHA=$SHA bash "$R/teagramd-rollout-runner/rollout-runner.sh" apply "$SHA" "$PREV" \
@@ -113,8 +211,8 @@ IMG=$(docker inspect --format '{{.Image}}' $C)
 grep -ls "source_sha=$SHA image_id=$IMG " "$R"/main1238-*.build/built-image.identity
 PIN=$(grep -E '^TG_RSA_KEY_FINGERPRINT=-?[0-9]+$' .env)
 docker inspect --format '{{range .Config.Env}}{{println .}}{{end}}' $C | grep -qx "$PIN"; echo "pin ok: $PIN"
-docker compose ps -a </dev/null
-LOGS=$(docker compose logs --since 3m teagramd </dev/null)
+docker_compose ps -a </dev/null
+LOGS=$(docker_compose logs --since 3m teagramd </dev/null)
 printf '%s\n' "$LOGS" | grep -E "advertise=|level=ERROR" || true
 if ! printf '%s\n' "$LOGS" | grep -q "advertise=teagram.tailaa4918.ts.net:2443"; then
   echo "teagramd did not log its tailnet advertise address"; exit 1
@@ -122,4 +220,5 @@ fi
 if printf '%s\n' "$LOGS" | grep -q "level=ERROR"; then
   echo "teagramd logged level=ERROR after the rollout"; exit 1
 fi
+install_teagram_logs_command "$SHA"
 echo "deployed $SHA"

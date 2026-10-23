@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
-import importlib.util
+import contextlib
 import hashlib
+import importlib.util
+import io
 import json
 import os
 import shlex
@@ -11,6 +13,7 @@ import subprocess
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import patch
 
@@ -70,6 +73,199 @@ class BlobTransitionEnvironmentTests(unittest.TestCase):
             environment = runner.compose_environment(Path("/checkout"))
 
         self.assertEqual(environment["MOCK_SOURCE_VOLUME_MOUNTPOINT"], "/host/source-volume")
+
+    def test_live_authority_rejection_keeps_its_reason(self) -> None:
+        runner = import_from_path("blob_transition_runner_authority_rejection", RUNNER)
+        mode = import_from_path("blob_mode_authority_rejection", RUNNER.parent / "blob-mode-state.py")
+        container_id = "a" * 64
+        inspected = {
+            "Id": container_id,
+            "Config": {
+                "Labels": {
+                    "com.docker.compose.project": "teagram",
+                    "com.docker.compose.service": "teagramd",
+                }
+            },
+            "State": {"Status": "running"},
+        }
+        with tempfile.TemporaryDirectory(prefix="live-authority-rejection.") as temporary:
+            with (
+                patch.object(
+                    runner,
+                    "run_command",
+                    side_effect=[
+                        f"{container_id}\tteagramd\n".encode("ascii"),
+                        (json.dumps(inspected) + "\n").encode("ascii"),
+                    ],
+                ),
+                patch.object(
+                    mode,
+                    "container_inventory",
+                    side_effect=mode.Reject("running-backend-mismatch"),
+                ),
+            ):
+                with self.assertRaisesRegex(runner.TransitionReject, "^running-backend-mismatch$"):
+                    runner.assert_live_teagramd_matches_authority(
+                        mode,
+                        "teagram",
+                        ["teagramd"],
+                        {},
+                        "/checkout/.state/blob-mode",
+                        Path(temporary),
+                        Path("/checkout"),
+                        {},
+                        "test-live-authority",
+                    )
+
+    def test_compose_authority_rejection_keeps_its_reason(self) -> None:
+        runner = import_from_path("blob_transition_runner_compose_rejection", RUNNER)
+        mode = import_from_path(
+            "blob_mode_compose_rejection", RUNNER.parent / "blob-mode-state.py"
+        )
+        with patch.object(
+            mode,
+            "assert_compose_matches",
+            side_effect=mode.Reject("render-teagramd-rustfs-network"),
+        ):
+            with self.assertRaisesRegex(
+                runner.TransitionReject, "^render-teagramd-rustfs-network$"
+            ):
+                runner.assert_compose_matches_authority(
+                    mode, {}, {}, "/checkout/.state/blob-mode", Path("/checkout/docker-compose.override.yml")
+                )
+
+    def test_deployment_environment_requires_s3_authority(self) -> None:
+        runner = import_from_path("blob_transition_runner_deploy_environment", RUNNER)
+        mode = SimpleNamespace(
+            Reject=RuntimeError,
+            require_runner_lock=lambda _path: None,
+            current_authority=lambda _state, _reports: {
+                "outcome": "s3-accepted",
+                "backend": {"kind": "s3"},
+            },
+        )
+        with tempfile.TemporaryDirectory(prefix="deploy-s3-environment.") as temporary:
+            checkout = Path(temporary) / "teagram"
+            checkout.mkdir()
+            report_root = Path(temporary) / "reports"
+            report_root.mkdir()
+            env_files = [
+                str(checkout / ".env"),
+                str(Path(temporary) / "telegram-server/.env.rustfs-parked"),
+            ]
+            output = io.StringIO()
+            with (
+                patch.object(runner, "TEST_MODE", True),
+                patch.object(runner, "import_mode_helper", return_value=mode),
+                patch.object(runner, "rustfs_compose_environment_files", return_value=env_files),
+                contextlib.redirect_stdout(output),
+            ):
+                runner.deployment_environment(
+                    SimpleNamespace(
+                        checkout=checkout,
+                        state_dir=checkout / ".state/blob-mode",
+                        report_root=report_root,
+                        lock_path=Path(temporary) / "deploy.lock",
+                    )
+                )
+            self.assertEqual(
+                json.loads(output.getvalue()),
+                {"outcome": "s3-accepted", "env_files": env_files},
+            )
+
+            mode.current_authority = lambda _state, _reports: {
+                "outcome": "initial-local",
+                "backend": {"kind": "local", "dir": "/var/lib/teagramd-blobs"},
+            }
+            with (
+                patch.object(runner, "TEST_MODE", True),
+                patch.object(runner, "import_mode_helper", return_value=mode),
+                patch.object(runner, "rustfs_compose_environment_files") as credentials,
+            ):
+                with self.assertRaisesRegex(runner.TransitionReject, "deploy-s3-authority-invalid"):
+                    runner.deployment_environment(
+                        SimpleNamespace(
+                            checkout=checkout,
+                            state_dir=checkout / ".state/blob-mode",
+                            report_root=report_root,
+                            lock_path=Path(temporary) / "deploy.lock",
+                        )
+                    )
+                credentials.assert_not_called()
+
+    def test_rustfs_commands_load_parked_credentials_after_the_checkout_env(self) -> None:
+        if os.geteuid() != 0:
+            self.skipTest("RustFS environment fixture requires root ownership checks")
+        runner = import_from_path("blob_transition_runner_parked_env", RUNNER)
+        with tempfile.TemporaryDirectory(prefix="rustfs-parked-env.") as temporary:
+            root = Path(temporary)
+            checkout = root / "opt" / "teagram"
+            parked_checkout = root / "opt" / "telegram-server"
+            checkout.mkdir(parents=True)
+            parked_checkout.mkdir(parents=True)
+            (checkout / ".env").write_text("POSTGRES_PASSWORD=fixture\n", encoding="ascii")
+            (checkout / ".env").chmod(0o600)
+            values = {
+                "RUSTFS_ROOT_ACCESS_KEY": "a" * 20,
+                "RUSTFS_ROOT_SECRET_KEY": "c" * 64,
+                "TG_BLOB_S3_ACCESS_KEY_ID": "b" * 20,
+                "TG_BLOB_S3_SECRET_ACCESS_KEY": "d" * 64,
+            }
+            parked = parked_checkout / ".env.rustfs-parked"
+            parked_values = values
+            parked.write_text(
+                "".join(f"{key}={value}\n" for key, value in parked_values.items()),
+                encoding="ascii",
+            )
+            parked.chmod(0o600)
+            secret_dir = checkout / ".secrets"
+            secret_dir.mkdir(mode=0o700)
+            secret_file = secret_dir / "teagramd-blob-secret-key"
+            secret_file.write_text(values["TG_BLOB_S3_SECRET_ACCESS_KEY"], encoding="ascii")
+            secret_file.chmod(0o444)
+
+            env_files = runner.rustfs_compose_environment_files(checkout)
+            command = runner.compose_command(
+                ["docker", "compose", "config"],
+                {runner.BLOB_TRANSITION_COMPOSE_ENV_FILES: os.pathsep.join(env_files)},
+            )
+
+        self.assertEqual(env_files[0], str(checkout / ".env"))
+        self.assertEqual(env_files[1], str(parked.resolve()))
+        self.assertEqual(
+            command,
+            ["docker", "compose", "--env-file", env_files[0], "--env-file", env_files[1], "config"],
+        )
+
+    def test_rustfs_credentials_reject_mismatched_existing_blob_secret(self) -> None:
+        if os.geteuid() != 0:
+            self.skipTest("RustFS environment fixture requires root ownership checks")
+        runner = import_from_path("blob_transition_runner_mismatched_parked_env", RUNNER)
+        with tempfile.TemporaryDirectory(prefix="rustfs-parked-env-mismatch.") as temporary:
+            root = Path(temporary)
+            checkout = root / "opt" / "teagram"
+            parked_checkout = root / "opt" / "telegram-server"
+            checkout.mkdir(parents=True)
+            parked_checkout.mkdir(parents=True)
+            (checkout / ".env").write_text("POSTGRES_PASSWORD=fixture\n", encoding="ascii")
+            (checkout / ".env").chmod(0o600)
+            parked = parked_checkout / ".env.rustfs-parked"
+            parked.write_text(
+                "RUSTFS_ROOT_ACCESS_KEY=" + "a" * 20 + "\n"
+                "RUSTFS_ROOT_SECRET_KEY=" + "c" * 64 + "\n"
+                "TG_BLOB_S3_ACCESS_KEY_ID=" + "b" * 20 + "\n"
+                "TG_BLOB_S3_SECRET_ACCESS_KEY=" + "d" * 64 + "\n",
+                encoding="ascii",
+            )
+            parked.chmod(0o600)
+            secret_dir = checkout / ".secrets"
+            secret_dir.mkdir(mode=0o700)
+            secret_file = secret_dir / "teagramd-blob-secret-key"
+            secret_file.write_text("e" * 64, encoding="ascii")
+            secret_file.chmod(0o444)
+
+            with self.assertRaisesRegex(runner.TransitionReject, "rustfs-credentials-mismatch"):
+                runner.rustfs_compose_environment_files(checkout)
 
     def test_r70_inert_capture_preserves_reference_coverage_rejection(self) -> None:
         runner = import_from_path("blob_transition_runner_inert_capture", RUNNER)
@@ -298,12 +494,17 @@ if [ "${{1:-}}" = compose ]; then
   fi
   if [[ " $* " == *" pg_dump "* ]]; then cat "${{MOCK_POSTGRES_DUMP:?}}"; exit 0; fi
   if [[ " $* " == *" psql "* ]]; then
+    if [[ " $* " == *" blob_restore_"* ]]; then
+      [ "${{MOCK_DUMP_RESTORE_FAIL:-0}}" != 1 ] || exit 91
+      exit 0
+    fi
     if [[ " $* " == *"atlas_schema_revisions"* ]]; then cat "${{MOCK_LIVE_SCHEMA:?}}"
     elif [[ " $* " == *"erasure_epoch_completion"* ]]; then cat "${{MOCK_LIVE_R70_INERT_SURFACES:?}}"
     elif [[ " $* " == *"FROM files AS f"* ]]; then cat "${{MOCK_REFERENCE_BUNDLE:?}}/references.tsv"
     else cat "${{MOCK_REFERENCE_BUNDLE:?}}/active-links.tsv"; fi
     exit 0
   fi
+  if [[ " $* " == *" createdb "* || " $* " == *" dropdb "* ]]; then exit 0; fi
   case "${{1:-}}" in
     up)
       if [[ " $* " == *" rustfs "* ]]; then printf '%s\\n' running > {shlex.quote(str(state / 'rustfs'))}; fi
@@ -333,7 +534,14 @@ if [ "${{1:-}}" = compose ]; then
           cat "${{MOCK_REFERENCE_BUNDLE:?}}/source-frozen.tsv"
           exit 0
         fi
-        if [[ " $* " == *" s3-census "* ]]; then printf '%s' {shlex.quote(MANIFEST)}; exit 0; fi
+        if [[ " $* " == *" s3-census "* ]]; then
+          if [ {shlex.quote(scenario)} = mismatched-destination-census ]; then
+            printf '%s' {shlex.quote(MISMATCHED_MANIFEST)}
+          else
+            printf '%s' {shlex.quote(MANIFEST)}
+          fi
+          exit 0
+        fi
         count=0
         [ ! -f {shlex.quote(str(state / 'copy-count'))} ] || count=$(cat {shlex.quote(str(state / 'copy-count'))})
         count=$((count + 1))
@@ -346,7 +554,19 @@ if [ "${{1:-}}" = compose ]; then
         exit 0
       fi
       if [[ " $* " == *" blob-restore "* ]]; then
+        if [[ " $* " == *" s3-census "* ]]; then
+          printf '%s' {shlex.quote(MANIFEST)}
+          exit 0
+        fi
         if [[ " $* " == *" local-census "* ]]; then
+          count=0
+          [ ! -f {shlex.quote(str(state / 'local-census-count'))} ] || count=$(cat {shlex.quote(str(state / 'local-census-count'))})
+          count=$((count + 1))
+          printf '%s\\n' "$count" > {shlex.quote(str(state / 'local-census-count'))}
+          if [ {shlex.quote(scenario)} = mismatched-recovery-destination-census ] && [ "$count" -eq 2 ]; then
+            printf '%s' {shlex.quote(MISMATCHED_MANIFEST)}
+            exit 0
+          fi
           if [ -f {shlex.quote(str(state / 'restore-count'))} ]; then
             printf '%s' {shlex.quote(RESTORED_UNION)}
           else
@@ -367,15 +587,68 @@ if [ "${{1:-}}" = compose ]; then
       ;;
   esac
 fi
+if [ "${{1:-}}" = inspect ] && [[ " $* " == *"project.config_files"* ]]; then
+  printf '%s\n' "${{MOCK_LIVE_COMPOSE_FILES:?}}"
+  exit 0
+fi
+if [ "${{1:-}}" = inspect ] && [[ " $* " == *"{{json .}}"* ]]; then
+  shift 3
+  inspect_fixture="${{MOCK_AUTHORITY_INSPECT:?}}"
+  if [[ "${{COMPOSE_FILE:-}}" != *docker-compose.local-blobs.yml* ]] \
+    && [ -n "${{MOCK_S3_AUTHORITY_INSPECT:-}}" ]; then
+    inspect_fixture="$MOCK_S3_AUTHORITY_INSPECT"
+  fi
+  python3 -c '
+import json, os, sys
+inspect_fixture = sys.argv[1]
+wanted = sys.argv[2:]
+rows = [json.loads(line) for line in open(inspect_fixture, encoding="utf-8") if line]
+for item in wanted:
+    for row in rows:
+        if row.get("Id") == item:
+            print(json.dumps(row, separators=(",", ":")))
+' "$inspect_fixture" "$@"
+  exit 0
+fi
+if [ "${{1:-}}" = network ] && [ "${{2:-}}" = inspect ]; then
+  if [ {shlex.quote(scenario)} = live-rustfs-network-not-isolated ]; then
+    gateway_mode=nat
+  else
+    gateway_mode=isolated
+  fi
+  printf '%s\\n' \\
+    '{{"Name":"teagram_rustfs_private","Driver":"bridge",'\\
+    '"Internal":true,"EnableIPv6":false,"Options":'\\
+    '{{"com.docker.network.bridge.gateway_mode_ipv4":"'"$gateway_mode"'"}}}}'
+  exit 0
+fi
 if [ "${{1:-}}" = inspect ]; then
   cat "${{MOCK_FROZEN_INSPECT:?}}"
   exit 0
 fi
 if [ "${{1:-}}" = volume ] && [ "${{2:-}}" = inspect ]; then
-  printf '%s\\n' "${{MOCK_SOURCE_VOLUME_MOUNTPOINT:?}}"
+  if [[ " $* " == *"--format"* ]]; then
+    printf '%s\\n' "${{MOCK_SOURCE_VOLUME_MOUNTPOINT:?}}"
+  else
+    printf '[{{"Name":"%s"}}]\\n' "${{3:?}}"
+  fi
   exit 0
 fi
 if [ "${{1:-}}" = ps ]; then
+  if [[ " $* " == *"label=com.docker.compose.service=rustfs"* ]]; then
+    if ! awk -F '\t' '$2 == "rustfs" {{ found=1; print $1 }} END {{ exit found ? 0 : 1 }}' "${{MOCK_LIVE_PS:?}}"; then
+      if [ -f {shlex.quote(str(state / 'rustfs'))} ]; then printf '%s\\n' "{'e' * 64}"; fi
+    fi
+    exit 0
+  fi
+  if [[ " $* " == *"--filter label=com.docker.compose.project="* ]]; then
+    cat "${{MOCK_LIVE_PS:?}}"
+    if [ -f {shlex.quote(str(state / 'rustfs'))} ] \\
+      && ! awk -F '\t' '$2 == "rustfs" {{ found=1 }} END {{ exit found ? 0 : 1 }}' "${{MOCK_LIVE_PS:?}}"; then
+      printf '%s\\trustfs\\n' "{'e' * 64}"
+    fi
+    exit 0
+  fi
   if [[ " $* " == *"{{.ID}}"* ]]; then
     cat "${{MOCK_FROZEN_PS:?}}"
     exit 0
@@ -399,6 +672,176 @@ exit 90
     executable.chmod(0o700)
 
 
+class BlobTransitionAuthorityTests(unittest.TestCase):
+    def test_compose_environment_forwards_s3_authority_inspector(self) -> None:
+        runner = import_from_path("blob_transition_runner_compose_environment", RUNNER)
+        inspector = "/fixtures/s3-authority-inspect.jsonl"
+        with (
+            patch.object(runner, "TEST_MODE", True),
+            patch.object(runner, "TEST_FIXTURE_DOCKER", Path("/fixtures/docker")),
+            patch.dict(os.environ, {"MOCK_S3_AUTHORITY_INSPECT": inspector}),
+        ):
+            environment = runner.compose_environment(Path("/checkout"))
+
+        self.assertEqual(environment["MOCK_S3_AUTHORITY_INSPECT"], inspector)
+
+    def test_live_teagramd_inventory_must_match_authority(self) -> None:
+        runner = import_from_path("blob_transition_runner_live_authority", RUNNER)
+        mode = mode_fixtures.blob_mode
+        project = "teagram"
+        checkout = Path("/checkout")
+        mode_source = str(checkout / ".state" / "blob-mode")
+        authority = {
+            "outcome": "initial-local",
+            "backend": {"kind": "local", "dir": mode.BLOB_TARGET},
+            "volumes": {"tgblobs": "teagram_tgblobs", "rustfsdata": None},
+        }
+        identifier = "a" * 64
+
+        def inspect(backend_dir: str, volume_name: str) -> dict[str, Any]:
+            return {
+                "Id": identifier,
+                "State": {"Status": "running"},
+                "Config": {
+                    "Labels": {
+                        "com.docker.compose.project": project,
+                        "com.docker.compose.service": "teagramd",
+                    },
+                    "Env": [f"TG_BLOB_DIR={backend_dir}"],
+                },
+                "HostConfig": {"NetworkMode": "teagram_default", "PortBindings": {}},
+                "Mounts": [
+                    {
+                        "Type": "volume", "Name": volume_name, "Source": "",
+                        "Destination": mode.BLOB_TARGET, "RW": True,
+                    },
+                    {
+                        "Type": "bind", "Name": "", "Source": mode_source,
+                        "Destination": mode.MODE_TARGET, "RW": False,
+                    },
+                ],
+                "NetworkSettings": {"Networks": {"teagram_default": {}}, "Ports": {}},
+            }
+
+        for case, backend_dir, volume_name, expected_error in (
+            ("matching", mode.BLOB_TARGET, "teagram_tgblobs", None),
+            ("backend drift", "/srv/unexpected-blobs", "teagram_tgblobs", "running-backend-mismatch"),
+            ("mount drift", mode.BLOB_TARGET, "teagram_other_tgblobs", "running-volume-mismatch"),
+        ):
+            with self.subTest(case=case):
+                inspected = inspect(backend_dir, volume_name)
+                with (
+                    patch.object(
+                        runner,
+                        "run_command",
+                        side_effect=[
+                            f"{identifier}\tteagramd\n".encode("ascii"),
+                            (json.dumps(inspected) + "\n").encode("utf-8"),
+                        ],
+                    ),
+                    patch.object(mode, "docker_volume_exists"),
+                ):
+                    if expected_error is None:
+                        runner.assert_live_teagramd_matches_authority(
+                            mode, project, ["teagramd"], authority, mode_source,
+                            Path("/output"), checkout, {}, "test-live-authority",
+                        )
+                    else:
+                        with self.assertRaisesRegex(runner.TransitionReject, expected_error):
+                            runner.assert_live_teagramd_matches_authority(
+                                mode, project, ["teagramd"], authority, mode_source,
+                                Path("/output"), checkout, {}, "test-live-authority",
+                            )
+
+    def test_live_s3_inventory_includes_rustfs_volume(self) -> None:
+        runner = import_from_path("blob_transition_runner_live_s3_authority", RUNNER)
+        mode = mode_fixtures.blob_mode
+        project = "teagram"
+        checkout = Path("/checkout")
+        mode_source = str(checkout / ".state" / "blob-mode")
+        authority = {
+            "outcome": "s3-accepted",
+            "backend": {
+                "kind": "s3", "endpoint": "http://rustfs:9000",
+                "bucket": "teagram", "prefix": "teagramd/",
+            },
+            "volumes": {"tgblobs": "teagram_tgblobs", "rustfsdata": "teagram_rustfsdata"},
+        }
+        serving = {
+            "Id": "a" * 64,
+            "State": {"Status": "running"},
+            "Config": {
+                "Labels": {
+                    "com.docker.compose.project": project,
+                    "com.docker.compose.service": "teagramd",
+                },
+                "Env": [
+                    "TG_BLOB_S3_ENDPOINT=http://rustfs:9000",
+                    "TG_BLOB_S3_BUCKET=teagram",
+                    "TG_BLOB_S3_PREFIX=teagramd/",
+                    "TG_BLOB_S3_REGION=us-east-1",
+                    "TG_BLOB_S3_ACCESS_KEY_ID=fixture-access",
+                    "TG_BLOB_S3_SECRET_ACCESS_KEY_FILE=/run/secrets/teagramd-blob-secret-key",
+                ],
+            },
+            "HostConfig": {"NetworkMode": "teagram_default", "PortBindings": {}},
+            "Mounts": [
+                {
+                    "Type": "volume", "Name": "teagram_tgblobs", "Source": "",
+                    "Destination": mode.BLOB_TARGET, "RW": False,
+                },
+                {
+                    "Type": "bind", "Name": "", "Source": mode_source,
+                    "Destination": mode.MODE_TARGET, "RW": False,
+                },
+            ],
+            "NetworkSettings": {
+                "Networks": {"teagram_default": {}, "teagram_rustfs_private": {}},
+                "Ports": {},
+            },
+        }
+        rustfs = {
+            "Id": "b" * 64,
+            "State": {"Status": "running"},
+            "Config": {
+                "Labels": {
+                    "com.docker.compose.project": project,
+                    "com.docker.compose.service": "rustfs",
+                },
+                "Env": [],
+            },
+            "Mounts": [{
+                "Type": "volume", "Name": "teagram_rustfsdata", "Source": "",
+                "Destination": "/data", "RW": True,
+            }],
+            "HostConfig": {"NetworkMode": "teagram_rustfs_private", "PortBindings": {}},
+            "NetworkSettings": {"Networks": {"teagram_rustfs_private": {}}, "Ports": {}},
+        }
+        inspected = (json.dumps(serving) + "\n" + json.dumps(rustfs) + "\n").encode("utf-8")
+        with (
+            patch.object(
+                runner,
+                "run_command",
+                side_effect=[
+                    b"a" * 64 + b"\tteagramd\n" + b"b" * 64 + b"\trustfs\n",
+                    inspected,
+                    json.dumps({
+                        "Name": "teagram_rustfs_private",
+                        "Driver": "bridge",
+                        "Internal": True,
+                        "EnableIPv6": False,
+                        "Options": {"com.docker.network.bridge.gateway_mode_ipv4": "isolated"},
+                    }).encode("utf-8"),
+                ],
+            ),
+            patch.object(mode, "docker_volume_exists"),
+        ):
+            runner.assert_live_teagramd_matches_authority(
+                mode, project, ["teagramd"], authority, mode_source,
+                Path("/output"), checkout, {}, "test-live-s3-authority",
+            )
+
+
 class BlobTransitionRunnerFixtures(unittest.TestCase):
     def setUp(self) -> None:
         if os.geteuid() != 0:
@@ -410,11 +853,46 @@ class BlobTransitionRunnerFixtures(unittest.TestCase):
         self.report_root = self.root / "reports"
         self.authority_case = mode_fixtures.BlobModeStateTests(methodName="runTest")
         self.authority_case.setUp()
-        self.state_dir, authority_report_root, self.lock_path = self.authority_case.create_initial_authority(self.root)
+        self.current_stack_fixture = self._testMethodName.startswith("test_current_")
+        self.moved_stack_fixture = (
+            self._testMethodName == "test_current_cutover_and_recovery_preserve_moved_stack_env"
+        )
+        if self.current_stack_fixture:
+            self.authority_case.volume = (
+                "telegram-server_tgblobs" if self.moved_stack_fixture else "teagram_tgblobs"
+            )
+        if self.moved_stack_fixture:
+            layouts = dict(mode_fixtures.blob_mode.RUNTIME_LAYOUTS)
+            layouts["teagramd"] = {
+                **layouts["teagramd"],
+                "blobs": mode_fixtures.blob_mode.MOVED_BLOB_TARGET,
+            }
+            with patch.object(
+                mode_fixtures.blob_mode,
+                "BLOB_TARGET",
+                mode_fixtures.blob_mode.MOVED_BLOB_TARGET,
+            ), patch.object(mode_fixtures.blob_mode, "RUNTIME_LAYOUTS", layouts):
+                self.state_dir, authority_report_root, self.lock_path = (
+                    self.authority_case.create_initial_authority(self.root)
+                )
+        else:
+            self.state_dir, authority_report_root, self.lock_path = (
+                self.authority_case.create_initial_authority(self.root)
+            )
         self.assertEqual(authority_report_root, self.report_root)
         self.lock_path.write_bytes(b"")
         self.lock_path.chmod(0o600)
+        if self.moved_stack_fixture:
+            self.publish_moved_stack_authority()
         self.bundle, self.checkout, self.mock_bin, events_text = qualifier_fixtures.write_bundle(self.report_root)
+        (self.checkout / ".state").chmod(0o700)
+        if self.current_stack_fixture:
+            self.rewrite_current_compose_fixture(self.bundle / "candidate-compose.json")
+        for name in ("docker-compose.yml", "docker-compose.override.yml"):
+            path = self.checkout / name
+            if not path.exists():
+                path.write_text("services: {}\n", encoding="utf-8")
+                path.chmod(0o600)
         self.decoy_bin = self.root / "decoy-bin"
         self.decoy_bin.mkdir(mode=0o700)
         self.decoy_called = self.root / "decoy-called"
@@ -464,10 +942,41 @@ class BlobTransitionRunnerFixtures(unittest.TestCase):
         self.local_compose_json = self.mock_bin / "local-compose.json"
         (self.checkout / "docker-compose.local-blobs.yml").write_text("services: {}\n", encoding="utf-8")
         (self.checkout / "docker-compose.local-blobs.yml").chmod(0o600)
+        if self.moved_stack_fixture:
+            (self.checkout / ".env").write_text(
+                "TEAGRAMD_STACK_MOVE_BLOB_DIR=/var/lib/telegramd-blobs\n",
+                encoding="ascii",
+            )
+            (self.checkout / ".env").chmod(0o600)
         write_fake_docker(self.mock_bin, self.root, self.events, "success", self.bundle / "candidate-compose.json")
         self.write_local_compose_fixture()
         (self.root / "serving").write_text("running\n", encoding="ascii")
         (self.root / "serving-backend").write_text("local\n", encoding="ascii")
+
+    def publish_moved_stack_authority(self) -> None:
+        mode = mode_fixtures.blob_mode
+        inventory_paths: dict[str, dict[str, Path]] = {"source": {}, "target": {}}
+        for logical in ("tgblobs", "rustfsdata"):
+            inventory_sha = mode.hashlib.sha256(f"moved {logical}".encode()).hexdigest()
+            inventory = f"{inventory_sha}  ./fixture.bin\n"
+            for side in ("source", "target"):
+                path = self.root / f"{logical}.{side}.sha256"
+                path.write_text(inventory, encoding="ascii")
+                path.chmod(0o600)
+                inventory_paths[side][logical] = path
+        with patch.object(mode, "require_runner_lock"):
+            record = mode.publish_local_stack_move(
+                SimpleNamespace(
+                    state_dir=self.state_dir,
+                    report_root=self.report_root,
+                    lock_path=self.lock_path,
+                    source_inventories=inventory_paths["source"],
+                    target_inventories=inventory_paths["target"],
+                )
+            )
+        self.assertEqual(record["outcome"], mode.STACK_MOVE_OUTCOME)
+        self.assertEqual(record["backend"], {"kind": "local", "dir": mode.MOVED_BLOB_TARGET})
+        self.authority_case.volume = mode.STACK_MOVE_TARGET_VOLUMES["tgblobs"]
 
     def run_action(
         self,
@@ -483,6 +992,24 @@ class BlobTransitionRunnerFixtures(unittest.TestCase):
         frozen_doc = json.loads((selected_bundle / "frozen-containers.json").read_text(encoding="utf-8"))
         candidate_compose = json.loads((self.bundle / "candidate-compose.json").read_text(encoding="utf-8"))
         project = candidate_compose["name"]
+        current_records, _current_head, _current_bytes = mode_fixtures.blob_mode.read_authority(
+            self.state_dir, self.report_root
+        )
+        if action == "recover-local" and current_records[-1]["outcome"] == "s3-accepted":
+            frozen_doc["containers"].append({
+                "service": "rustfs",
+                "id": "e" * 64,
+                "name": "/teagram-rustfs-1",
+                "running": True,
+                "mounts": [{
+                    "type": "volume",
+                    "source": current_records[-1]["volumes"]["rustfsdata"],
+                    "target": "/data",
+                    "rw": True,
+                }],
+                "environment": {},
+                "ports": [],
+            })
         ps_lines = []
         inspected = []
         for container in frozen_doc["containers"]:
@@ -564,6 +1091,49 @@ class BlobTransitionRunnerFixtures(unittest.TestCase):
         frozen_inspect = self.root / "frozen-inspect.json"
         frozen_inspect.write_text(json.dumps(inspected, sort_keys=True), encoding="utf-8")
         frozen_inspect.chmod(0o600)
+        live_ps = self.root / "live-ps.tsv"
+        live_ps.write_text(
+            "".join(
+                f"{'c' * (64 - index)}{'d' * index}\tteagramd{suffix}\n"
+                for index, suffix in enumerate(("", "-proxy"))
+            ),
+            encoding="utf-8",
+        )
+        live_ps.chmod(0o600)
+        live_compose_files = self.root / "live-compose-files.txt"
+        current_records, _current_head, _current_bytes = mode_fixtures.blob_mode.read_authority(
+            self.state_dir, self.report_root
+        )
+        current_outcome = current_records[-1]["outcome"]
+        if current_outcome == "s3-accepted":
+            with live_ps.open("a", encoding="utf-8") as stream:
+                stream.write(f"{'e' * 64}\trustfs\n")
+        live_compose_path = (
+            self.bundle / "candidate-compose.json"
+            if current_outcome == "s3-accepted"
+            else self.local_compose_json
+        )
+        live_authority_inspect = self.write_live_authority_inspect(
+            live_compose_path, live_ps, scenario, "live-authority-inspect.jsonl"
+        )
+        s3_authority_inspect = (
+            live_authority_inspect
+            if current_outcome == "s3-accepted"
+            else self.write_live_authority_inspect(
+                self.bundle / "candidate-compose.json",
+                live_ps,
+                scenario,
+                "s3-authority-inspect.jsonl",
+            )
+        )
+        live_names = (
+            ("docker-compose.yml", "docker-compose.override.yml")
+            if current_outcome == "s3-accepted"
+            else ("docker-compose.yml", "docker-compose.local-blobs.yml", "docker-compose.override.yml")
+        )
+        live_selection = ",".join(str(self.checkout / name) for name in live_names)
+        live_compose_files.write_text(f"{live_selection}\n{live_selection}\n", encoding="utf-8")
+        live_compose_files.chmod(0o600)
         write_fake_docker(self.mock_bin, self.root, self.events, scenario, self.bundle / "candidate-compose.json")
         environment = os.environ.copy()
         if put_decoy_first:
@@ -578,8 +1148,13 @@ class BlobTransitionRunnerFixtures(unittest.TestCase):
         environment["MOCK_LIVE_R70_INERT_SURFACES"] = str(self.live_r70_inert_path)
         environment["MOCK_FROZEN_PS"] = str(frozen_ps)
         environment["MOCK_FROZEN_INSPECT"] = str(frozen_inspect)
+        environment["MOCK_LIVE_PS"] = str(live_ps)
+        environment["MOCK_AUTHORITY_INSPECT"] = str(live_authority_inspect)
+        environment["MOCK_S3_AUTHORITY_INSPECT"] = str(s3_authority_inspect)
+        environment["MOCK_LIVE_COMPOSE_FILES"] = live_compose_files.read_text(encoding="utf-8").rstrip("\n")
         environment["MOCK_SOURCE_VOLUME_MOUNTPOINT"] = (
-            "/var/lib/docker/volumes/teagram-server_tgblobs/_data"
+            "/var/lib/docker/volumes/"
+            f"{current_records[-1]['volumes']['tgblobs']}/_data"
         )
         if interrupt_after is not None:
             environment["BLOB_TRANSITION_TEST_INTERRUPT_AFTER"] = interrupt_after
@@ -587,14 +1162,13 @@ class BlobTransitionRunnerFixtures(unittest.TestCase):
             environment["MOCK_LOCAL_COMPOSE_JSON"] = str(self.local_compose_json)
         if seed_running_writer:
             environment["MOCK_WRITER_RUNNING"] = "1"
+        if scenario == "dump-restore-failed":
+            environment["MOCK_DUMP_RESTORE_FAIL"] = "1"
         environment["MOCK_POSTGRES_DUMP"] = str(self.live_dump_path)
-        return subprocess.run(
-            [
+        command = [
                 "python3",
                 str(RUNNER),
                 action,
-                "--bundle",
-                str(selected_bundle),
                 "--checkout",
                 str(self.checkout),
                 "--state-dir",
@@ -603,7 +1177,11 @@ class BlobTransitionRunnerFixtures(unittest.TestCase):
                 str(self.report_root),
                 "--lock-path",
                 str(self.lock_path),
-            ],
+            ]
+        if action not in ("accept-s3", "recover-local"):
+            command[3:3] = ["--bundle", str(selected_bundle)]
+        return subprocess.run(
+            command,
             env=environment,
             text=True,
             capture_output=True,
@@ -626,17 +1204,33 @@ class BlobTransitionRunnerFixtures(unittest.TestCase):
         host_container_case: str | None = None,
     ) -> subprocess.CompletedProcess[str]:
         return self.run_action(
-            "accept-s3", scenario, seed_running_writer,
+            "accept-s3-qualified", scenario, seed_running_writer,
             interrupt_after=interrupt_after, put_decoy_first=put_decoy_first,
             host_container_case=host_container_case,
         )
 
+    def run_current_cutover(self, scenario: str = "success") -> subprocess.CompletedProcess[str]:
+        return self.run_action("accept-s3", scenario)
+
+    def run_current_recovery(self, scenario: str = "success") -> subprocess.CompletedProcess[str]:
+        return self.run_action("recover-local", scenario)
+
     def write_local_compose_fixture(self) -> None:
         model = json.loads((self.bundle / "candidate-compose.json").read_text(encoding="utf-8"))
+        blob_dir = mode_fixtures.blob_mode.BLOB_TARGET
+        if self.moved_stack_fixture:
+            persisted = (self.checkout / ".env").read_text(encoding="ascii")
+            self.assertIn(
+                "TEAGRAMD_STACK_MOVE_BLOB_DIR=/var/lib/telegramd-blobs\n",
+                persisted,
+            )
+            blob_dir = mode_fixtures.blob_mode.MOVED_BLOB_TARGET
         for name, service in model["services"].items():
             if not name.startswith("teagramd"):
                 continue
             environment = service["environment"]
+            if self.moved_stack_fixture:
+                environment["TG_BLOB_DIR"] = blob_dir
             for key in (
                 "TG_BLOB_S3_ENDPOINT",
                 "TG_BLOB_S3_BUCKET",
@@ -651,9 +1245,131 @@ class BlobTransitionRunnerFixtures(unittest.TestCase):
                 environment[key] = ""
             for mount in service["volumes"]:
                 if mount.get("target") == "/var/lib/teagramd-blobs":
+                    mount["target"] = blob_dir
                     mount["read_only"] = False
         self.local_compose_json.write_text(json.dumps(model, sort_keys=True), encoding="utf-8")
         self.local_compose_json.chmod(0o600)
+
+    def write_live_authority_inspect(
+        self,
+        compose_path: Path,
+        live_ps_path: Path,
+        scenario: str,
+        filename: str = "live-authority-inspect.jsonl",
+    ) -> Path:
+        compose = json.loads(compose_path.read_text(encoding="utf-8"))
+        project = compose["name"]
+        volumes = compose.get("volumes", {})
+        declared_networks = compose.get("networks", {})
+        rows = [
+            line.split("\t")
+            for line in live_ps_path.read_text(encoding="utf-8").splitlines()
+            if line
+        ]
+        if "rustfs" in compose.get("services", {}) and not any(service == "rustfs" for _identifier, service in rows):
+            rows.append(["e" * 64, "rustfs"])
+        containers = []
+        for identifier, service_name in rows:
+            service = compose["services"][service_name]
+            environment = service.get("environment", {})
+            if not isinstance(environment, dict):
+                raise AssertionError("fixture service environment must be a mapping")
+            environment = {key: str(value) for key, value in environment.items() if value is not None}
+            if scenario == "live-backend-drift" and not containers:
+                if environment.get("TG_BLOB_S3_ENDPOINT"):
+                    for key in (
+                        "TG_BLOB_S3_ENDPOINT", "TG_BLOB_S3_BUCKET", "TG_BLOB_S3_PREFIX",
+                        "TG_BLOB_S3_REGION", "TG_BLOB_S3_ACCESS_KEY_ID",
+                        "TG_BLOB_S3_SECRET_ACCESS_KEY_FILE", "TG_BLOB_S3_ALLOW_INSECURE_HTTP",
+                    ):
+                        environment[key] = ""
+                    environment["TG_BLOB_DIR"] = "/srv/unexpected-blobs"
+                else:
+                    candidate = json.loads(
+                        (self.bundle / "candidate-compose.json").read_text(encoding="utf-8")
+                    )
+                    environment.update(candidate["services"][service_name]["environment"])
+
+            mounts = []
+            for mount in service.get("volumes", []):
+                kind = mount.get("type", "volume")
+                source = mount.get("source", "")
+                target = mount.get("target", "")
+                if kind == "volume":
+                    volume = volumes.get(source, {})
+                    name = volume.get("name", source) if isinstance(volume, dict) else source
+                    if scenario == "live-mount-drift" and not containers and target == "/var/lib/teagramd-blobs":
+                        name = "teagram_unexpected_tgblobs"
+                    mounts.append({
+                        "Type": "volume", "Name": name, "Source": "",
+                        "Destination": target, "RW": mount.get("read_only") is not True,
+                    })
+                elif kind == "bind":
+                    bind_source = Path(source)
+                    if not bind_source.is_absolute():
+                        bind_source = self.checkout / bind_source
+                    mounts.append({
+                        "Type": "bind", "Name": "", "Source": str(bind_source.resolve()),
+                        "Destination": target, "RW": mount.get("read_only") is not True,
+                    })
+
+            raw_networks = service.get("networks") or {"default": None}
+            attached = {}
+            for network_key in raw_networks:
+                if (
+                    scenario == "live-teagramd-rustfs-network-missing"
+                    and mode_fixtures.blob_mode.is_runtime_service(service_name)
+                    and network_key == "rustfs_private"
+                ):
+                    continue
+                network = declared_networks.get(network_key, {})
+                network_name = network.get("name", f"{project}_{network_key}")
+                attached[network_name] = {}
+            if service_name == "rustfs" and scenario == "live-rustfs-extra-network":
+                attached["untrusted_bridge"] = {}
+            network_mode = next(iter(attached), "bridge")
+            port_bindings = {}
+            if service_name == "rustfs" and scenario == "live-rustfs-port-binding":
+                port_bindings = {"9000/tcp": [{"HostIp": "0.0.0.0", "HostPort": "9000"}]}
+            containers.append({
+                "Id": identifier,
+                "Name": f"/{service_name}-1",
+                "State": {"Status": "running"},
+                "Config": {
+                    "Labels": {
+                        "com.docker.compose.project": project,
+                        "com.docker.compose.service": service_name,
+                    },
+                    "Env": [f"{key}={value}" for key, value in environment.items()],
+                },
+                "HostConfig": {"NetworkMode": network_mode, "PortBindings": port_bindings},
+                "Mounts": mounts,
+                "NetworkSettings": {"Networks": attached, "Ports": {}},
+            })
+        path = self.root / filename
+        path.write_text(
+            "".join(json.dumps(container, sort_keys=True) + "\n" for container in containers),
+            encoding="utf-8",
+        )
+        path.chmod(0o600)
+        return path
+
+    def rewrite_current_compose_fixture(self, path: Path) -> None:
+        model = json.loads(path.read_text(encoding="utf-8"))
+        model["name"] = "teagram"
+        networks = model.get("networks")
+        if isinstance(networks, dict) and isinstance(networks.get("default"), dict):
+            networks["default"]["name"] = "teagram_default"
+        if isinstance(networks, dict) and isinstance(networks.get("rustfs_private"), dict):
+            networks["rustfs_private"]["name"] = "teagram_rustfs_private"
+        volumes = model.get("volumes")
+        if isinstance(volumes, dict):
+            if isinstance(volumes.get("tgblobs"), dict):
+                volumes["tgblobs"]["name"] = "teagram_tgblobs"
+            if isinstance(volumes.get("rustfsdata"), dict):
+                volumes["rustfsdata"]["name"] = "teagram_rustfsdata"
+        path.write_text(json.dumps(model, sort_keys=True), encoding="utf-8")
+        path.chmod(0o600)
 
     def write_recovery_bundle(self, release_set: str = "60-66") -> Path:
         bundle = self.report_root / "recovery-bundle"
@@ -802,6 +1518,260 @@ class BlobTransitionRunnerFixtures(unittest.TestCase):
             live_capture["query_sha256"],
             qualifier.live_schema_query_sha256("60-66"),
         )
+
+    def test_current_cutover_verifies_dump_and_copies_one_manifest(self) -> None:
+        result = self.run_current_cutover()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("objects=2", result.stdout)
+        self.assertIn("bytes=8", result.stdout)
+        events = self.events.read_text(encoding="utf-8")
+        freeze = events.index("compose stop --timeout 120 teagramd teagramd-proxy")
+        dump = events.index("compose exec -T postgres pg_dump")
+        restore = events.index("compose exec -T postgres createdb")
+        source = events.index("--direction local-census")
+        rustfs = events.index("compose up -d --wait rustfs")
+        copy = events.index("compose run --rm --no-deps blob-migrate --manifest stdout")
+        destination = events.index("--direction s3-census")
+        activate = events.index("compose up -d --no-deps teagramd teagramd-proxy")
+        self.assertLess(freeze, dump)
+        self.assertLess(dump, restore)
+        self.assertLess(restore, source)
+        self.assertLess(source, rustfs)
+        self.assertLess(rustfs, copy)
+        self.assertLess(copy, destination)
+        self.assertLess(destination, activate)
+        self.assertNotIn("atlas_schema_revisions", events)
+        self.assertNotIn("qualification-", events)
+        self.assertEqual((self.root / "copy-count").read_text(encoding="ascii").strip(), "1")
+        records, head, mode_bytes = mode_fixtures.blob_mode.read_authority(self.state_dir, self.report_root)
+        self.assertEqual(records[-1]["outcome"], "s3-accepted")
+        self.assertEqual(records[-1]["evidence"]["copy_passes"], 1)
+        self.assertEqual(head, mode_bytes)
+        report = mode_fixtures.blob_mode.read_json(
+            mode_fixtures.blob_mode.report_path(self.report_root, records[-1]["transition_id"])
+        )
+        self.assertEqual(report["schema"], mode_fixtures.blob_mode.SIMPLE_TRANSITION_REPORT_SCHEMA)
+        self.assertNotIn("schema_evidence_sha256", report["phase_digests"])
+        compose_path = self.report_root / report["phase_files"]["candidate_compose_sha256"]
+        compose_bytes = compose_path.read_bytes()
+        for credential in (
+            qualifier_fixtures.ROOT_ACCESS,
+            qualifier_fixtures.ROOT_SECRET,
+            qualifier_fixtures.APP_ACCESS,
+            qualifier_fixtures.APP_SECRET,
+        ):
+            self.assertNotIn(credential.encode("ascii"), compose_bytes)
+        self.assertFalse(compose_path.with_name("candidate-render.stdout").exists())
+
+    def test_current_cutover_rejects_teagramd_without_rustfs_network_before_freeze(self) -> None:
+        candidate_path = self.bundle / "candidate-compose.json"
+        candidate = json.loads(candidate_path.read_text(encoding="utf-8"))
+        for name, service in candidate["services"].items():
+            if not mode_fixtures.blob_mode.is_runtime_service(name):
+                continue
+            networks = service.get("networks")
+            if isinstance(networks, dict):
+                networks.pop("rustfs_private", None)
+            elif isinstance(networks, list):
+                service["networks"] = [network for network in networks if network != "rustfs_private"]
+        candidate_path.write_text(json.dumps(candidate, sort_keys=True), encoding="utf-8")
+        candidate_path.chmod(0o600)
+
+        result = self.run_current_cutover()
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("render-teagramd-rustfs-network", result.stderr)
+        events = self.events.read_text(encoding="utf-8")
+        self.assertNotIn("compose stop --timeout 120 teagramd teagramd-proxy", events)
+        self.assertNotIn("blob-migrate --manifest stdout", events)
+        records, _head, _mode = mode_fixtures.blob_mode.read_authority(self.state_dir, self.report_root)
+        self.assertEqual(records[-1]["outcome"], "initial-local")
+
+    def test_current_cutover_rejects_mismatch_and_resumes_local(self) -> None:
+        before = self.state_snapshot()
+        result = self.run_current_cutover("mismatched-destination-census")
+        self.assertNotEqual(result.returncode, 0)
+        records, head, mode_bytes = mode_fixtures.blob_mode.read_authority(self.state_dir, self.report_root)
+        self.assertEqual(records[-1]["outcome"], "initial-local")
+        self.assertEqual(head, mode_bytes)
+        self.assertEqual(self.state_snapshot(), before)
+        self.assertEqual((self.root / "serving-backend").read_text(encoding="ascii").strip(), "local")
+        self.assertFalse((self.root / "rustfs").exists())
+
+    def test_current_cutover_rejects_live_backend_drift_before_freeze(self) -> None:
+        result = self.run_current_cutover("live-backend-drift")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("running-backend-mismatch", result.stderr)
+        self.assertNotIn("compose stop --timeout 120 teagramd teagramd-proxy", self.events.read_text(encoding="utf-8"))
+        records, _head, _mode = mode_fixtures.blob_mode.read_authority(self.state_dir, self.report_root)
+        self.assertEqual(records[-1]["outcome"], "initial-local")
+
+    def test_current_cutover_rejects_live_mount_drift_before_freeze(self) -> None:
+        result = self.run_current_cutover("live-mount-drift")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("running-volume-mismatch", result.stderr)
+        self.assertNotIn("compose stop --timeout 120 teagramd teagramd-proxy", self.events.read_text(encoding="utf-8"))
+        records, _head, _mode = mode_fixtures.blob_mode.read_authority(self.state_dir, self.report_root)
+        self.assertEqual(records[-1]["outcome"], "initial-local")
+
+    def test_current_cutover_rejects_nonisolated_rustfs_before_copy(self) -> None:
+        result = self.run_current_cutover("live-rustfs-network-not-isolated")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("running-rustfs-network", result.stderr)
+        events = self.events.read_text(encoding="utf-8")
+        self.assertNotIn("blob-migrate --manifest stdout", events)
+        self.assertIn("compose stop rustfs", events)
+        records, _head, _mode = mode_fixtures.blob_mode.read_authority(self.state_dir, self.report_root)
+        self.assertEqual(records[-1]["outcome"], "initial-local")
+        self.assertEqual((self.root / "serving-backend").read_text(encoding="ascii").strip(), "local")
+
+    def test_current_cutover_requires_a_restorable_database_dump(self) -> None:
+        result = self.run_current_cutover("dump-restore-failed")
+        self.assertNotEqual(result.returncode, 0)
+        events = self.events.read_text(encoding="utf-8")
+        self.assertIn("compose exec -T postgres dropdb", events)
+        self.assertNotIn("compose up -d --wait rustfs", events)
+        records, _head, _mode_bytes = mode_fixtures.blob_mode.read_authority(self.state_dir, self.report_root)
+        self.assertEqual(records[-1]["outcome"], "initial-local")
+        self.assertEqual((self.root / "serving-backend").read_text(encoding="ascii").strip(), "local")
+
+    def test_current_cutover_can_roll_back_to_local_and_back_to_s3(self) -> None:
+        cutover = self.run_current_cutover()
+        self.assertEqual(cutover.returncode, 0, cutover.stderr)
+        self.assertEqual((self.root / "serving-backend").read_text(encoding="ascii").strip(), "s3")
+
+        recovery = self.run_current_recovery()
+        self.assertEqual(recovery.returncode, 0, recovery.stderr)
+        self.assertIn("outcome=recovered-local", recovery.stdout)
+        self.assertEqual((self.root / "serving-backend").read_text(encoding="ascii").strip(), "local")
+        records, _head, _mode = mode_fixtures.blob_mode.read_authority(self.state_dir, self.report_root)
+        self.assertEqual(records[-1]["outcome"], "recovered-local")
+        self.assertEqual(records[-1]["evidence"]["restore_passes"], 1)
+        self.assertIn("compose run --rm --no-deps blob-restore --direction s3-to-local", self.events.read_text(encoding="utf-8"))
+
+        second_cutover = self.run_current_cutover()
+        self.assertEqual(second_cutover.returncode, 0, second_cutover.stderr)
+        self.assertEqual((self.root / "serving-backend").read_text(encoding="ascii").strip(), "s3")
+
+    def test_current_cutover_and_recovery_preserve_moved_stack_env(self) -> None:
+        self.assertEqual(
+            (self.checkout / ".env").read_text(encoding="ascii"),
+            "TEAGRAMD_STACK_MOVE_BLOB_DIR=/var/lib/telegramd-blobs\n",
+        )
+        cutover = self.run_current_cutover()
+        self.assertEqual(cutover.returncode, 0, cutover.stderr)
+        records, _head, _mode = mode_fixtures.blob_mode.read_authority(
+            self.state_dir, self.report_root
+        )
+        self.assertEqual(records[-1]["outcome"], "s3-accepted")
+
+        recovery = self.run_current_recovery()
+        self.assertEqual(recovery.returncode, 0, recovery.stderr)
+        records, _head, _mode = mode_fixtures.blob_mode.read_authority(
+            self.state_dir, self.report_root
+        )
+        self.assertEqual(records[-1]["outcome"], "recovered-local")
+        self.assertEqual(
+            records[-1]["backend"],
+            {"kind": "local", "dir": mode_fixtures.blob_mode.MOVED_BLOB_TARGET},
+        )
+
+    def test_current_recovery_mismatch_keeps_s3_authority_and_resumes_s3(self) -> None:
+        cutover = self.run_current_cutover()
+        self.assertEqual(cutover.returncode, 0, cutover.stderr)
+        before = self.state_snapshot()
+
+        result = self.run_current_recovery("mismatched-recovery-destination-census")
+        self.assertNotEqual(result.returncode, 0)
+        records, head, mode_bytes = mode_fixtures.blob_mode.read_authority(self.state_dir, self.report_root)
+        self.assertEqual(records[-1]["outcome"], "s3-accepted")
+        self.assertEqual(head, mode_bytes)
+        self.assertEqual(self.state_snapshot(), before)
+        self.assertEqual((self.root / "serving-backend").read_text(encoding="ascii").strip(), "s3")
+
+    def test_current_recovery_rejects_live_backend_drift_before_freeze(self) -> None:
+        cutover = self.run_current_cutover()
+        self.assertEqual(cutover.returncode, 0, cutover.stderr)
+        event_count = len(self.events.read_text(encoding="utf-8").splitlines())
+
+        result = self.run_current_recovery("live-backend-drift")
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("running-backend-mismatch", result.stderr)
+        later_events = self.events.read_text(encoding="utf-8").splitlines()[event_count:]
+        self.assertNotIn("docker compose stop --timeout 120 teagramd teagramd-proxy", later_events)
+        records, _head, _mode = mode_fixtures.blob_mode.read_authority(self.state_dir, self.report_root)
+        self.assertEqual(records[-1]["outcome"], "s3-accepted")
+
+    def test_current_recovery_rejects_live_mount_drift_before_freeze(self) -> None:
+        cutover = self.run_current_cutover()
+        self.assertEqual(cutover.returncode, 0, cutover.stderr)
+        event_count = len(self.events.read_text(encoding="utf-8").splitlines())
+
+        result = self.run_current_recovery("live-mount-drift")
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("running-volume-mismatch", result.stderr)
+        later_events = self.events.read_text(encoding="utf-8").splitlines()[event_count:]
+        self.assertNotIn("docker compose stop --timeout 120 teagramd teagramd-proxy", later_events)
+        records, _head, _mode = mode_fixtures.blob_mode.read_authority(self.state_dir, self.report_root)
+        self.assertEqual(records[-1]["outcome"], "s3-accepted")
+
+    def test_current_recovery_rejects_teagramd_missing_rustfs_network_before_freeze(self) -> None:
+        cutover = self.run_current_cutover()
+        self.assertEqual(cutover.returncode, 0, cutover.stderr)
+        event_count = len(self.events.read_text(encoding="utf-8").splitlines())
+
+        result = self.run_current_recovery("live-teagramd-rustfs-network-missing")
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("running-teagramd-rustfs-network", result.stderr)
+        later_events = self.events.read_text(encoding="utf-8").splitlines()[event_count:]
+        self.assertNotIn("docker compose stop --timeout 120 teagramd teagramd-proxy", later_events)
+        records, _head, _mode = mode_fixtures.blob_mode.read_authority(self.state_dir, self.report_root)
+        self.assertEqual(records[-1]["outcome"], "s3-accepted")
+
+    def assert_current_recovery_rejects_rustfs_drift(self, scenario: str, reason: str) -> None:
+        cutover = self.run_current_cutover()
+        self.assertEqual(cutover.returncode, 0, cutover.stderr)
+        event_count = len(self.events.read_text(encoding="utf-8").splitlines())
+
+        result = self.run_current_recovery(scenario)
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn(reason, result.stderr)
+        later_events = self.events.read_text(encoding="utf-8").splitlines()[event_count:]
+        self.assertNotIn("docker compose stop --timeout 120 teagramd teagramd-proxy", later_events)
+        records, _head, _mode = mode_fixtures.blob_mode.read_authority(self.state_dir, self.report_root)
+        self.assertEqual(records[-1]["outcome"], "s3-accepted")
+
+    def test_current_recovery_rejects_live_rustfs_port_binding_before_freeze(self) -> None:
+        self.assert_current_recovery_rejects_rustfs_drift(
+            "live-rustfs-port-binding", "running-rustfs-exposed"
+        )
+
+    def test_current_recovery_rejects_live_rustfs_extra_network_before_freeze(self) -> None:
+        self.assert_current_recovery_rejects_rustfs_drift(
+            "live-rustfs-extra-network", "running-rustfs-network"
+        )
+
+    def test_current_recovery_rejects_live_rustfs_nonisolated_network_before_freeze(self) -> None:
+        self.assert_current_recovery_rejects_rustfs_drift(
+            "live-rustfs-network-not-isolated", "running-rustfs-network"
+        )
+
+    def test_current_recovery_requires_a_restorable_database_dump(self) -> None:
+        cutover = self.run_current_cutover()
+        self.assertEqual(cutover.returncode, 0, cutover.stderr)
+
+        result = self.run_current_recovery("dump-restore-failed")
+        self.assertNotEqual(result.returncode, 0)
+        events = self.events.read_text(encoding="utf-8")
+        self.assertIn("compose exec -T postgres dropdb", events)
+        self.assertNotIn("compose run --rm --no-deps blob-restore", events)
+        records, _head, _mode = mode_fixtures.blob_mode.read_authority(self.state_dir, self.report_root)
+        self.assertEqual(records[-1]["outcome"], "s3-accepted")
+        self.assertEqual((self.root / "serving-backend").read_text(encoding="ascii").strip(), "s3")
 
     def test_post_publication_serving_failure_keeps_s3_authority_and_volumes(self) -> None:
         result = self.run_runner("post-publication-serving-not-ready")
@@ -1003,7 +1973,7 @@ class BlobTransitionRunnerFixtures(unittest.TestCase):
 
     def test_recovery_runs_two_restores_and_publishes_before_local_serving(self) -> None:
         bundle = self.seed_s3_authority_and_running_stack()
-        result = self.run_action("recover-local", bundle=bundle)
+        result = self.run_action("recover-local-qualified", bundle=bundle)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("recovery_qualification=pass", result.stdout)
         self.assertIn("transition=accepted outcome=recovered-local", result.stdout)
@@ -1041,7 +2011,7 @@ class BlobTransitionRunnerFixtures(unittest.TestCase):
 
     def test_r67_recovery_reports_its_validated_release_set(self) -> None:
         bundle = self.seed_s3_authority_and_running_stack(release_set="60-67")
-        result = self.run_action("recover-local", bundle=bundle)
+        result = self.run_action("recover-local-qualified", bundle=bundle)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("recovery_qualification=pass", result.stdout)
         self.assertIn("migrations=60-67", result.stdout)
@@ -1049,7 +2019,7 @@ class BlobTransitionRunnerFixtures(unittest.TestCase):
 
     def test_r70_recovery_recaptures_schema_and_inert_evidence_before_dump(self) -> None:
         bundle = self.seed_s3_authority_and_running_stack(release_set="60-70")
-        result = self.run_action("recover-local", bundle=bundle)
+        result = self.run_action("recover-local-qualified", bundle=bundle)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("recovery_qualification=pass", result.stdout)
         self.assertIn("migrations=60-70", result.stdout)
@@ -1117,7 +2087,7 @@ class BlobTransitionRunnerFixtures(unittest.TestCase):
         observation["revision_detail"][version][field] = False
         self.write_live_schema_fixture(observation)
 
-        result = self.run_action("recover-local", bundle=bundle)
+        result = self.run_action("recover-local-qualified", bundle=bundle)
 
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("baseline-live-schema-rejected", result.stderr)
@@ -1147,7 +2117,7 @@ class BlobTransitionRunnerFixtures(unittest.TestCase):
         )
         self.live_r70_inert_path.chmod(0o600)
 
-        result = self.run_action("recover-local", bundle=bundle)
+        result = self.run_action("recover-local-qualified", bundle=bundle)
 
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("reference_coverage", result.stderr)
@@ -1161,7 +2131,7 @@ class BlobTransitionRunnerFixtures(unittest.TestCase):
         bundle = self.seed_s3_authority_and_running_stack()
         before = self.state_snapshot()
         interrupted = self.run_action(
-            "recover-local", bundle=bundle, interrupt_after="restore-pass-2"
+            "recover-local-qualified", bundle=bundle, interrupt_after="restore-pass-2"
         )
         self.assertEqual(interrupted.returncode, 86)
         self.assertEqual(self.state_snapshot(), before)
@@ -1208,7 +2178,7 @@ class BlobTransitionRunnerFixtures(unittest.TestCase):
             "revision_detail": qualifier_fixtures.good_migration_evidence()["revision_detail"],
             "migration_66_schema": qualifier_fixtures.new_unread_mark_schema(),
         })
-        result = self.run_action("recover-local", bundle=bundle)
+        result = self.run_action("recover-local-qualified", bundle=bundle)
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("live-schema-rejected", result.stderr)
         lines = self.events.read_text(encoding="utf-8").splitlines()
@@ -1226,7 +2196,7 @@ class BlobTransitionRunnerFixtures(unittest.TestCase):
         }
         observation["revision_detail"][qualifier_fixtures.VERSIONS_60_66[-1]]["hash"] = "h1:stale"
         self.write_live_schema_fixture(observation)
-        result = self.run_action("recover-local", bundle=bundle)
+        result = self.run_action("recover-local-qualified", bundle=bundle)
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("live-schema-rejected", result.stderr)
         self.assertEqual((self.root / "serving-backend").read_text(encoding="utf-8").strip(), "s3")
@@ -1236,7 +2206,7 @@ class BlobTransitionRunnerFixtures(unittest.TestCase):
     def test_failed_second_restore_keeps_s3_authority_and_resumes_s3(self) -> None:
         bundle = self.seed_s3_authority_and_running_stack()
         before = self.state_snapshot()
-        result = self.run_action("recover-local", "failed-second-restore", bundle=bundle)
+        result = self.run_action("recover-local-qualified", "failed-second-restore", bundle=bundle)
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("restore-pass-2-failed", result.stderr)
         lines = self.events.read_text(encoding="utf-8").splitlines()
@@ -1268,7 +2238,7 @@ class BlobTransitionRunnerFixtures(unittest.TestCase):
         dump_path = bundle / "postgres.dump"
         dump_path.write_bytes(b"substituted dump")
         dump_path.chmod(0o600)
-        result = self.run_action("recover-local", bundle=bundle)
+        result = self.run_action("recover-local-qualified", bundle=bundle)
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("recovery-dump-invalid", result.stderr)
         lines = self.events.read_text(encoding="utf-8").splitlines()
@@ -1285,7 +2255,7 @@ class BlobTransitionRunnerFixtures(unittest.TestCase):
         environment.pop("BLOB_TRANSITION_TEST_FIXTURE_DOCKER", None)
         result = subprocess.run(
             [
-                "python3", str(RUNNER), "accept-s3", "--bundle", str(self.bundle),
+                "python3", str(RUNNER), "accept-s3-qualified", "--bundle", str(self.bundle),
                 "--checkout", str(self.checkout), "--state-dir", str(self.state_dir),
                 "--report-root", str(self.report_root), "--lock-path", str(self.lock_path),
             ],

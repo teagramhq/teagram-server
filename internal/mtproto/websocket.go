@@ -18,6 +18,7 @@ import (
 	"github.com/gotd/td/transport"
 
 	"github.com/teagramhq/teagram-server/internal/discovery"
+	"github.com/teagramhq/teagram-server/internal/store"
 )
 
 const (
@@ -160,12 +161,13 @@ func (c *webSocketAcceptedConn) handlerDone() {
 type webSocketListener struct {
 	net.Listener
 
-	server     *Server
-	ready      chan *webSocketAcceptedConn
-	acceptErr  chan error
-	done       chan struct{}
-	acceptDone chan struct{}
-	closeOnce  sync.Once
+	server            *Server
+	rateLimitListener store.RateLimitListener
+	ready             chan *webSocketAcceptedConn
+	acceptErr         chan error
+	done              chan struct{}
+	acceptDone        chan struct{}
+	closeOnce         sync.Once
 
 	// pendingMu is a leaf bookkeeping lock. It is never held while calling
 	// pre-auth, socket or server methods, so it cannot order against any other
@@ -176,15 +178,16 @@ type webSocketListener struct {
 	handlers  sync.WaitGroup
 }
 
-func newWebSocketListener(listener net.Listener, server *Server) *webSocketListener {
+func newWebSocketListener(listener net.Listener, server *Server, rateLimitListener store.RateLimitListener) *webSocketListener {
 	return &webSocketListener{
-		Listener:   listener,
-		server:     server,
-		ready:      make(chan *webSocketAcceptedConn, 1),
-		acceptErr:  make(chan error, 1),
-		done:       make(chan struct{}),
-		acceptDone: make(chan struct{}),
-		pending:    make(map[*webSocketAcceptedConn]struct{}),
+		Listener:          listener,
+		server:            server,
+		rateLimitListener: rateLimitListener,
+		ready:             make(chan *webSocketAcceptedConn, 1),
+		acceptErr:         make(chan error, 1),
+		done:              make(chan struct{}),
+		acceptDone:        make(chan struct{}),
+		pending:           make(map[*webSocketAcceptedConn]struct{}),
 	}
 }
 
@@ -245,7 +248,7 @@ func (l *webSocketListener) acceptLoop() {
 		}
 		backoff = 0
 
-		slot, ok := l.server.preAuth.admit()
+		slot, ok := l.server.preAuth.admit(l.rateLimitListener)
 		if !ok {
 			l.server.dropRefused(sock)
 			if dropped, allow := l.server.globalCapLog.allow(time.Now(), preAuthLogInterval); allow {
@@ -465,7 +468,7 @@ func (l *webSocketListener) wait(ctx context.Context) bool {
 // detection, while this endpoint performs the HTTP upgrade and then enters the
 // same per-connection MTProto path.
 func (s *Server) ServeWebSocket(ctx context.Context, l net.Listener) error {
-	return s.serveWebSocket(ctx, l, s.handler, s.webSocketOriginPatterns, s.clientDiscoveryDocument)
+	return s.serveWebSocket(ctx, l, s.handler, s.webSocketOriginPatterns, s.clientDiscoveryDocument, store.RateLimitListenerTailnet)
 }
 
 // ServeWebSocketWithHandler serves MTProto over WebSocket with a handler and
@@ -476,7 +479,7 @@ func (s *Server) ServeWebSocketWithHandler(ctx context.Context, l net.Listener, 
 	if handler == nil {
 		return errors.New("WebSocket handler is required")
 	}
-	return s.serveWebSocket(ctx, l, handler, append([]string(nil), originPatterns...), s.clientDiscoveryDocument)
+	return s.serveWebSocket(ctx, l, handler, append([]string(nil), originPatterns...), s.clientDiscoveryDocument, store.RateLimitListenerTailnet)
 }
 
 // ServeWebSocketWithHandlerAndDiscovery serves a listener with its own public
@@ -490,10 +493,10 @@ func (s *Server) ServeWebSocketWithHandlerAndDiscovery(ctx context.Context, l ne
 	if err != nil {
 		return fmt.Errorf("marshal listener client discovery document: %w", err)
 	}
-	return s.serveWebSocket(ctx, l, handler, append([]string(nil), originPatterns...), data)
+	return s.serveWebSocket(ctx, l, handler, append([]string(nil), originPatterns...), data, store.RateLimitListenerPublic)
 }
 
-func (s *Server) serveWebSocket(ctx context.Context, l net.Listener, handler Handler, originPatterns []string, discoveryDocument []byte) error {
+func (s *Server) serveWebSocket(ctx context.Context, l net.Listener, handler Handler, originPatterns []string, discoveryDocument []byte, rateLimitListener store.RateLimitListener) error {
 	s.shutdown.startServing()
 	defer s.shutdown.finishServing()
 	server := &http.Server{
@@ -520,7 +523,7 @@ func (s *Server) serveWebSocket(ctx context.Context, l net.Listener, handler Han
 		},
 	}
 	server.SetKeepAlivesEnabled(false)
-	listener := newWebSocketListener(l, s)
+	listener := newWebSocketListener(l, s, rateLimitListener)
 	listener.start()
 	stopOnContext := context.AfterFunc(ctx, s.shutdown.beginDrain)
 	defer stopOnContext()

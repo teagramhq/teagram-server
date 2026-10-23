@@ -123,6 +123,10 @@ func TestSmoke(t *testing.T) {
 		t.Parallel()
 		testSmokeSavedGIFs(t)
 	})
+	t.Run("saved-gifs-client-request-fixtures", func(t *testing.T) {
+		t.Parallel()
+		testSmokeSavedGIFRequestFixtures(t)
+	})
 	t.Run("album-media", func(t *testing.T) {
 		t.Parallel()
 		testSmokeAlbumMedia(t)

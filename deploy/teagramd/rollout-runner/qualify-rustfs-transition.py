@@ -836,11 +836,49 @@ def check_secret_mounts(service: Any, expected: list[dict[str, Any]]) -> None:
 
 def check_private_network_service(service: Any) -> None:
     require(service.get("network_mode") in (None, ""), "configuration_mismatch")
-    networks = service.get("networks", {"default": {}})
+    networks = service.get("networks")
     require(
         isinstance(networks, dict)
-        and set(networks) == {"default"}
-        and networks["default"] in (None, {}),
+        and set(networks) == {"rustfs_private"}
+        and networks["rustfs_private"] in (None, {}),
+        "configuration_mismatch",
+    )
+
+
+def check_compose_networks(
+    baseline: dict[str, Any], candidate: dict[str, Any], project_name: str
+) -> None:
+    baseline_networks = baseline.get("networks", {})
+    candidate_networks = candidate.get("networks")
+    require(
+        isinstance(baseline_networks, dict)
+        and set(baseline_networks) == {"default"}
+        and isinstance(candidate_networks, dict)
+        and set(candidate_networks) == {"default", "rustfs_private"}
+        and candidate_networks["default"] == baseline_networks["default"],
+        "configuration_mismatch",
+    )
+    require(
+        candidate_networks["rustfs_private"]
+        == {
+            "name": f"{project_name}_rustfs_private",
+            "driver": "bridge",
+            "driver_opts": {"com.docker.network.bridge.gateway_mode_ipv4": "isolated"},
+            "ipam": {},
+            "internal": True,
+            "enable_ipv6": False,
+        },
+        "configuration_mismatch",
+    )
+
+
+def check_teagramd_networks(service: Any) -> None:
+    require(service.get("network_mode") in (None, ""), "configuration_mismatch")
+    networks = service.get("networks")
+    require(
+        isinstance(networks, dict)
+        and set(networks) == {"default", "rustfs_private"}
+        and all(networks[name] in (None, {}) for name in networks),
         "configuration_mismatch",
     )
 
@@ -1110,6 +1148,7 @@ def check_candidate_services(
         isinstance(project_name, str) and project_name and baseline.get("name") == project_name,
         "configuration_mismatch",
     )
+    check_compose_networks(baseline, candidate, project_name)
     for service in (*base_services.values(), *target_services.values()):
         require(isinstance(service, dict), "configuration_mismatch")
         check_normalized_dependencies(service)
@@ -1186,6 +1225,9 @@ def check_candidate_services(
             continue
         before = base_services_copy[service_name]
         after = target_services_copy[service_name]
+        check_teagramd_networks(after)
+        before.pop("networks", None)
+        after.pop("networks", None)
         before_env = service_environment(before)
         after_env = service_environment(after)
         require(all(before_env.get(key) in (None, "") for key in S3_ENV_KEYS), "configuration_mismatch")
@@ -1272,6 +1314,8 @@ def check_candidate_services(
     for service_name in ADDED_SERVICES:
         target_services_copy.pop(service_name)
     normalized_target["volumes"].pop("rustfsdata")
+    normalized_base.pop("networks", None)
+    normalized_target.pop("networks", None)
     for secret_name in ADDED_SECRETS:
         normalized_target["secrets"].pop(secret_name)
     if not normalized_target["secrets"]:

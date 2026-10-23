@@ -20,6 +20,7 @@ import (
 	"github.com/gotd/td/tg"
 	"github.com/gotd/td/transport"
 
+	"github.com/teagramhq/teagram-server/internal/discovery"
 	"github.com/teagramhq/teagram-server/internal/mtproto"
 )
 
@@ -144,6 +145,75 @@ func TestPreAuthPerNetCapBucketsIPv6ByPrefix(t *testing.T) {
 	}
 	if !served {
 		t.Errorf("%s was refused although no connection is held in its /64", otherNet)
+	}
+}
+
+func TestPreAuthPerNetCapIsolatedByPublicListener(t *testing.T) {
+	t.Parallel()
+	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
+	defer cancel()
+
+	rsaKey, err := rsa.GenerateKey(crand.Reader, 2048)
+	if err != nil {
+		t.Fatalf("generate RSA key: %v", err)
+	}
+	doc, err := discovery.NewDocument("tailnet.example.test:2443", 2, &rsaKey.PublicKey, false)
+	if err != nil {
+		t.Fatalf("build discovery document: %v", err)
+	}
+	defaultTCP := mustListenTCP(t, ctx, "127.0.0.1:0")
+	defaultWebSocket := mustListenTCP(t, ctx, "127.0.0.1:0")
+	publicWebSocket := mustListenTCP(t, ctx, "127.0.0.1:0")
+	server := mtproto.New(exchange.PrivateKey{RSA: rsaKey}, 2, mtproto.NewMemoryAuthKeyStore(), nil, nil)
+	if err := server.SetPreAuthLimits(mtproto.PreAuthLimits{MaxConnsPerNet: 2}); err != nil {
+		t.Fatalf("set pre-auth limits: %v", err)
+	}
+	publicHandler := mtproto.HandlerFunc(func(*mtproto.Conn, *mtproto.Request) error { return nil })
+	serveCtx, stopServing := context.WithCancel(ctx)
+	serveErr := make(chan error, 3)
+	go func() { serveErr <- server.Serve(serveCtx, defaultTCP) }()
+	go func() { serveErr <- server.ServeWebSocket(serveCtx, defaultWebSocket) }()
+	go func() {
+		serveErr <- server.ServeWebSocketWithHandlerAndDiscovery(serveCtx, publicWebSocket, publicHandler, nil, doc)
+	}()
+	t.Cleanup(func() {
+		stopServing()
+		for range 3 {
+			if err := <-serveErr; err != nil && !errors.Is(err, context.Canceled) && !errors.Is(err, net.ErrClosed) {
+				t.Errorf("serve listener: %v", err)
+			}
+		}
+	})
+
+	publicConn, err := dialWebSocket(ctx, publicWebSocket.Addr().String())
+	if err != nil {
+		t.Fatalf("open public WebSocket handshake: %v", err)
+	}
+	defer closeWebSocket(t, publicConn)
+	secondPublicConn, err := dialWebSocket(ctx, publicWebSocket.Addr().String())
+	if err != nil {
+		t.Fatalf("open second public WebSocket handshake up to the cap: %v", err)
+	}
+	defer closeWebSocket(t, secondPublicConn)
+
+	// Keep two public connections inside their cap and both default transports
+	// inside theirs. Keeping the TCP connection open avoids relying on the
+	// server goroutine observing a client close before the next accept.
+	tcpConn := holdPreAuth(t, ctx, defaultTCP.Addr().String(), nil)
+	defer func() {
+		if err := tcpConn.Close(); err != nil && !errors.Is(err, net.ErrClosed) {
+			t.Errorf("close tailnet TCP pre-auth connection: %v", err)
+		}
+	}()
+	tailnetWS, err := dialWebSocket(ctx, defaultWebSocket.Addr().String())
+	if err != nil {
+		t.Fatalf("open tailnet WebSocket handshake: %v", err)
+	}
+	defer closeWebSocket(t, tailnetWS)
+
+	if third, err := dialWebSocket(ctx, publicWebSocket.Addr().String()); err == nil {
+		closeWebSocket(t, third)
+		t.Fatal("third public WebSocket handshake was admitted past its per-network pre-auth cap")
 	}
 }
 

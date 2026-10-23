@@ -25,6 +25,8 @@ import (
 	"github.com/gotd/td/proto"
 	"github.com/gotd/td/proto/codec"
 	"github.com/gotd/td/transport"
+
+	"github.com/teagramhq/teagram-server/internal/store"
 )
 
 const (
@@ -483,7 +485,7 @@ acceptLoop:
 		}
 		// The global pre-auth cap is applied here, before a socket costs a
 		// goroutine, deadline, or read.
-		slot, ok := s.preAuth.admit()
+		slot, ok := s.preAuth.admit(store.RateLimitListenerTailnet)
 		if !ok {
 			s.dropRefused(sock)
 			if dropped, allow := s.globalCapLog.allow(time.Now(), preAuthLogInterval); allow {

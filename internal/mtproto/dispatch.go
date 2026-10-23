@@ -11,6 +11,8 @@ import (
 	"github.com/gotd/td/bin"
 	"github.com/gotd/td/tg"
 	"github.com/gotd/td/tgerr"
+
+	"github.com/teagramhq/teagram-server/internal/store"
 )
 
 // Request represents a decrypted MTProto RPC request handed to a Handler.
@@ -32,6 +34,9 @@ type Request struct {
 	// parse — a transport-layer fault a handler must decide about explicitly,
 	// never a bucket to group requests into.
 	ClientAddr netip.Addr
+	// RateLimitListener is the immutable listener scope assigned at accept.
+	// It is never selected from Host, Origin, forwarded headers, or RPC input.
+	RateLimitListener store.RateLimitListener
 	// ClientAddrFromProxyV2 is true when ClientAddr came from an allowlisted
 	// PROXY v2 header rather than the socket peer.
 	ClientAddrFromProxyV2 bool

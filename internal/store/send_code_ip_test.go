@@ -8,6 +8,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5"
+
 	"github.com/teagramhq/teagram-server/internal/pgtest"
 	"github.com/teagramhq/teagram-server/internal/store"
 )
@@ -312,6 +314,39 @@ func TestSweepExpiredSendCodeIPLimits(t *testing.T) {
 	}
 }
 
+func TestSweepExpiredSendCodeIPLimitsWithoutPublicBudgetTables(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	dsn := pgtest.DSN(t)
+
+	conn, err := pgx.Connect(ctx, dsn)
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	defer func() { _ = conn.Close(ctx) }() //nolint:errcheck // best-effort close
+	if _, err := conn.Exec(ctx, `DROP TABLE public_send_code_ip_calls, public_send_code_ip_phones, public_sign_in_fail_calls`); err != nil {
+		t.Fatalf("drop public listener budgets: %v", err)
+	}
+	s := openSendCodeStoreWithDSN(t, dsn)
+
+	brief := store.SendCodeIPLimits{
+		Calls:  store.RateLimitConfig{Limit: 5, Window: 100 * time.Millisecond},
+		Phones: store.RateLimitConfig{Limit: 5, Window: 100 * time.Millisecond},
+	}
+	if res := charge(t, s, netip.MustParseAddr("203.0.113.42"), phoneN(42), brief); res != nil {
+		t.Fatalf("seeding call denied: wait %s", res.Wait)
+	}
+	time.Sleep(200 * time.Millisecond)
+
+	n, err := s.SweepExpiredSendCodeIPLimits(ctx)
+	if err != nil {
+		t.Fatalf("sweep without public listener budgets: %v", err)
+	}
+	if n != 2 {
+		t.Errorf("swept %d rows, want the expired tailnet call and phone rows", n)
+	}
+}
+
 // charge runs one per-IP check and fails the test on a storage error, so each
 // case reads as the allow/deny decision it is about.
 func charge(t *testing.T, s *store.Store, addr netip.Addr, phone string, cfg store.SendCodeIPLimits) *store.RateLimitResult {
@@ -330,7 +365,12 @@ func phoneN(i int) string {
 
 func openSendCodeStore(t *testing.T) *store.Store {
 	t.Helper()
-	s, err := store.Open(context.Background(), pgtest.DSN(t), pgtest.EncKey(), store.WithBlobStore(testBlobs(t)))
+	return openSendCodeStoreWithDSN(t, pgtest.DSN(t))
+}
+
+func openSendCodeStoreWithDSN(t *testing.T, dsn string) *store.Store {
+	t.Helper()
+	s, err := store.Open(context.Background(), dsn, pgtest.EncKey(), store.WithBlobStore(testBlobs(t)))
 	if err != nil {
 		t.Fatalf("open: %v", err)
 	}

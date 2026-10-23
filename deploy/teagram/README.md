@@ -1,10 +1,14 @@
 # teagram-server media operations
 
 The default Compose stack includes a private RustFS service with no published
-ports. Its named `rustfsdata` volume and root/app credentials are provisioned by
-the existing bootstrap. Credential values live in `.env` (mode 0600); the app
-key is written to `.secrets/teagramd-blob-secret-key` (mode 0444 in a
-mode-0700 directory). Never copy these files off the deployment or commit them.
+ports. The live stack retains the root and app credentials at
+`/opt/telegram-server/.env.rustfs-parked`; the app key is mounted from
+`/opt/teagram/.secrets/teagramd-blob-secret-key` (mode 0444 in a mode-0700
+directory). The cutover runner loads the current `/opt/teagram/.env` first and
+the parked credential file second. Never print, copy, or commit these files.
+Before freezing writers, the runner requires the parked app secret to match
+the existing mounted app-key file. A mismatch fails closed; the runner does
+not reset an existing RustFS user.
 
 The optional public auth Turnstile secret is also mounted as a file. Because
 local Compose file secrets preserve the source file's permissions, stage the
@@ -21,12 +25,12 @@ The application receives only `/run/secrets/teagramd-turnstile`; the source
 path and secret value are not added to its environment. Leave the host variable
 unset when Turnstile is not configured. The sign-in gate defaults off.
 
-Do not run `deploy/bootstrap-rustfs-secrets.sh`, add RustFS keys, or change the
-serving backend before the MAIN-1332 cutover. The server reads the root-owned
-durable authority mounted at `/run/teagramd/blob-mode`; starting the default
-S3 Compose stack without a valid matching authority fails closed. Do not
-hand-write a mode record or use the retired `.state/blob-migration-complete`
-marker.
+Do not run `deploy/bootstrap-rustfs-secrets.sh` during this cutover or generate
+replacement keys while the parked set is present. The server reads the
+root-owned durable authority mounted at `/run/teagramd/blob-mode`; starting
+the default S3 Compose stack without a valid matching authority fails closed.
+Do not hand-write a mode record or use the retired
+`.state/blob-migration-complete` marker.
 
 ## Deploys
 
@@ -55,7 +59,23 @@ successful CI push run), or from a checkout of `main`:
 ssh teagram-server 'DEPLOY_SHA=<full sha> bash -s' < deploy/teagram/deploy-main.sh
 ```
 
-`deploy/teagram/test-deploy-main.sh` covers the script's target checks.
+`deploy/teagram/teagram-logs.sh` is installed as
+`/usr/local/sbin/teagram-logs` after the rollout gates pass, including when a
+deploy is already at its requested SHA. It gets the exact Compose file order
+from the running `teagramd` container label before resolving its ID with
+`docker compose ps -q teagramd`; the QA key remains restricted to this script.
+When the installed wrapper differs, the prior file is retained at
+`/root/teagram-logs-before-<7-char-sha>` with mode 0600. Replace
+`<7-char-sha>` with the prefix printed by the deploy before restoring it as root:
+
+```sh
+backup='/root/teagram-logs-before-<7-char-sha>'
+install -o root -g root -m 0755 "$backup" /usr/local/sbin/teagram-logs
+```
+
+`deploy/teagram/test-deploy-main.sh` covers deploy target checks and wrapper
+installation; `deploy/teagram/test-teagram-logs.sh` covers the restricted log
+command.
 
 Immediately after the `move-stack` action, the live container records the
 tracked selection `docker-compose.yml`, `docker-compose.local-blobs.yml`, and
@@ -63,6 +83,13 @@ the remapped `docker-compose.override.yml`. The deploy entrypoint accepts that
 exact selection for the first Teagram rollout, as well as the pinned local
 artifact used by later local-backed rollouts. Keep the file order reported by
 the running container.
+
+After `accept-s3` publishes `s3-accepted`, the live selection is exactly
+`docker-compose.yml` plus `docker-compose.override.yml`. Ordinary deploys accept
+that pair only after the transition helper validates the durable S3 authority
+and the parked credential file against the mounted app key. Compose receives
+the checkout `.env` followed by `.env.rustfs-parked`; the deploy script never
+prints those values. Keep the running container's file order unchanged.
 
 ## Initial local rollout
 
@@ -94,14 +121,63 @@ failure, it re-inspects the currently running containers and validates them
 with the rollback render against the same durable authority. If their backend
 or volume does not match, it stops without replacing the current containers.
 
-## RustFS transition boundary
+## RustFS cutover and recovery
 
-This stage does not authorize a fresh S3 startup, copy media, restore media, or
-publish `s3-accepted` or `recovered-local`. The read-only RustFS qualification
-gate is evidence for a later reviewed orchestration path; it cannot publish a
-serving authority on its own. Until that path lands, keep the local overlay and
-do not change the backend or remove the authority mount.
+### Threat model
+
+The protected assets are users' private media, the RustFS data volume, the
+durable blob-mode authority, and the RustFS root and application credentials.
+The LXC host, its root account, and Docker daemon are trusted administrators;
+container isolation does not protect these assets from a host or daemon
+compromise. `teagramd` receives only the scoped application credential through
+the read-only `/run/secrets/teagramd-blob-secret-key` file. RustFS root
+credentials are file secrets available only to RustFS and its initializer.
+Keep source secrets in protected files, never in application environment
+variables, command arguments, logs, or Git.
+
+RustFS listens on its internal S3 port with its console disabled. RustFS and its
+initialization and migration helpers use only the Compose project's
+`rustfs_private` network. It is an internal bridge with IPv6 disabled and the
+isolated IPv4 gateway mode, which removes the host route to container IPs.
+RustFS has no published ports or other network attachments. `teagramd` also
+joins this network to reach RustFS, and uses the ordinary project network for its other
+connections. External clients reach media through the application edge; host
+root and the Docker daemon remain inside the trusted boundary.
+
+After the cutover, verify the exposure boundary from the LXC host and another
+tailnet node. On the LXC, obtain the RustFS container IP with `docker inspect`
+and confirm TCP connections to that IP on ports 9000 and 9001 fail. From a
+different tailnet node, probe the LXC's Tailscale IPv4 address on the same
+ports; both connections must fail. Record the two probe results with the
+cutover evidence. The runner also inspects the live RustFS port bindings,
+network attachments, and isolated network options before copying media and
+before recovery.
+
+Cutover freezes `teagramd` writers and checks the copied media before changing
+the durable authority. A validation failure before `s3-accepted` is published
+keeps local authority and resumes local serving. After S3 authority is
+published, stop serving and use `recover-local` to restore and verify media in
+the retained `tgblobs` volume before publishing local authority. Keep that
+volume intact; it is the rollback copy. Verify local serving after recovery,
+then repeat the cutover only after the RustFS path passes its checks.
+
+The reviewed live path runs from `/opt/teagram` as root with
+`deploy/teagramd/rollout-runner/blob-transition-runner.py accept-s3`. It checks
+the running local Compose selection, freezes `teagramd*`, verifies a fresh
+Postgres dump restore, makes one checksum-verified copy from `tgblobs`, checks
+the destination census, publishes `s3-accepted`, and starts S3-backed serving.
+The operation and exact command are documented in
+[`../teagramd/rollout-runner/README.md`](../teagramd/rollout-runner/README.md).
+
+Use `blob-transition-runner.py recover-local` to restore S3 objects into the
+retained `tgblobs` volume and publish `recovered-local` before starting the
+local backend. Recovery preserves the local blob directory from the authority
+record immediately before cutover and verifies that the Compose render uses
+that directory, including the persisted
+`TEAGRAMD_STACK_MOVE_BLOB_DIR=/var/lib/telegramd-blobs` setting from `move-stack`.
+Run `accept-s3` again to move back to RustFS. Both paths use the same shared
+deployment lock and publish authority only through `blob-mode-state.py`.
 
 Never remove `tgblobs` or run `docker compose down -v` on the deployment. The
-retained volume is the local data store for this stage and remains available
-for the later verified transition or recovery process.
+volume remains the local rollback copy and is written only when `recover-local`
+restores S3 objects into it.
