@@ -486,6 +486,7 @@ if [ "${{1:-}}" = compose ]; then
   shift
   if [[ " $* " == *" config "* ]]; then
     if [[ "${{COMPOSE_FILE:-}}" == *docker-compose.local-blobs.yml* ]]; then
+      printf 'local-compose-blob-dir=%s\\n' "${{TEAGRAMD_STACK_MOVE_BLOB_DIR:-unset}}" >> {shlex.quote(str(events))}
       cat "${{MOCK_LOCAL_COMPOSE_JSON:?}}"
       exit 0
     fi
@@ -855,7 +856,7 @@ class BlobTransitionRunnerFixtures(unittest.TestCase):
         self.authority_case.setUp()
         self.current_stack_fixture = self._testMethodName.startswith("test_current_")
         self.moved_stack_fixture = (
-            self._testMethodName == "test_current_cutover_and_recovery_preserve_moved_stack_env"
+            self._testMethodName == "test_current_cutover_and_recovery_use_moved_authority_path"
         )
         if self.current_stack_fixture:
             self.authority_case.volume = (
@@ -1653,20 +1654,49 @@ class BlobTransitionRunnerFixtures(unittest.TestCase):
         self.assertEqual(second_cutover.returncode, 0, second_cutover.stderr)
         self.assertEqual((self.root / "serving-backend").read_text(encoding="ascii").strip(), "s3")
 
-    def test_current_cutover_and_recovery_preserve_moved_stack_env(self) -> None:
-        self.assertEqual(
-            (self.checkout / ".env").read_text(encoding="ascii"),
-            "TEAGRAMD_STACK_MOVE_BLOB_DIR=/var/lib/telegramd-blobs\n",
-        )
-        cutover = self.run_current_cutover()
+    def test_current_cutover_and_recovery_use_moved_authority_path(self) -> None:
+        env_file = self.checkout / ".env"
+        env_file.write_text("POSTGRES_PASSWORD=synthetic\n", encoding="ascii")
+        env_file.chmod(0o600)
+        self.assertNotIn("TEAGRAMD_STACK_MOVE_BLOB_DIR=", env_file.read_text(encoding="ascii"))
+
+        with patch.dict(os.environ):
+            os.environ.pop("TEAGRAMD_STACK_MOVE_BLOB_DIR", None)
+            cutover = self.run_current_cutover()
         self.assertEqual(cutover.returncode, 0, cutover.stderr)
+        events = self.events.read_text(encoding="utf-8").splitlines()
+        local_render = events.index("local-compose-blob-dir=/var/lib/telegramd-blobs")
+        freeze = next(
+            index for index, event in enumerate(events)
+            if "compose stop --timeout 120 teagramd teagramd-proxy" in event
+        )
+        self.assertLess(local_render, freeze)
+        self.assertEqual(
+            events.count("local-compose-blob-dir=/var/lib/telegramd-blobs"),
+            1,
+        )
         records, _head, _mode = mode_fixtures.blob_mode.read_authority(
             self.state_dir, self.report_root
         )
         self.assertEqual(records[-1]["outcome"], "s3-accepted")
 
-        recovery = self.run_current_recovery()
+        event_count = len(events)
+        with patch.dict(os.environ):
+            os.environ.pop("TEAGRAMD_STACK_MOVE_BLOB_DIR", None)
+            recovery = self.run_current_recovery()
         self.assertEqual(recovery.returncode, 0, recovery.stderr)
+        events = self.events.read_text(encoding="utf-8").splitlines()
+        recovery_events = events[event_count:]
+        recovery_render = recovery_events.index("local-compose-blob-dir=/var/lib/telegramd-blobs")
+        recovery_freeze = next(
+            index for index, event in enumerate(recovery_events)
+            if "compose stop --timeout 120 teagramd teagramd-proxy" in event
+        )
+        self.assertLess(recovery_render, recovery_freeze)
+        self.assertEqual(
+            events.count("local-compose-blob-dir=/var/lib/telegramd-blobs"),
+            2,
+        )
         records, _head, _mode = mode_fixtures.blob_mode.read_authority(
             self.state_dir, self.report_root
         )
