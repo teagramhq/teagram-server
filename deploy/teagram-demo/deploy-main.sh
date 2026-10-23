@@ -9,8 +9,9 @@ source "$SCRIPT_DIR/demo-common.sh"
 readonly SHA=${DEPLOY_SHA:-}
 readonly PREV_SHA=${PREVIOUS_SHA:-}
 readonly MODE_HELPER="$DEMO_SCRIPT_DIR/../teagramd/rollout-runner/blob-mode-state.py"
-readonly ACTIVE_SERVER=$(demo_active_server)
-readonly CANDIDATE_SERVER=$(demo_inactive_server)
+ACTIVE_SERVER=$(demo_active_server)
+CANDIDATE_SERVER=$(demo_inactive_server)
+readonly ACTIVE_SERVER CANDIDATE_SERVER
 readonly CANDIDATE_ENDPOINT="$CANDIDATE_SERVER:2443"
 TS=$(date -u +%Y%m%dT%H%M%SZ)
 readonly TS

@@ -231,7 +231,7 @@ func TestSmoke(t *testing.T) {
 		testSmokePeerSettingsBarDismissal(t)
 	})
 	t.Run("client-request-fixtures", func(t *testing.T) {
-		t.Parallel()
+		// Keep this multi-client fixture out of concurrent smoke DB load.
 		testSmokeClientRequestFixtures(t)
 	})
 	t.Run("megagroup-slow-mode", func(t *testing.T) {
