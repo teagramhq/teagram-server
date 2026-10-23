@@ -49,10 +49,39 @@ if [[ $# -eq 2 && $1 == "--recover" ]]; then
     /usr/bin/python3 "$script_dir/restore-readiness.py" --recover "$2"
 fi
 
-preflight_stage="validate runner prerequisites"
-if [[ $# -ne 0 || $(id -u) -eq 0 ]]; then
+local_mode=""
+local_args=()
+if [[ $# -eq 2 && $1 == "--local-dump" && -n $2 ]]; then
+  local_mode="local-dump"
+  local_args=(--local-dump "$2")
+elif [[ $# -eq 1 && $1 == "--local-fixture-test" ]]; then
+  local_mode="local-fixture-test"
+  local_args=(--local-fixture-test)
+elif [[ $# -ne 0 ]]; then
   printf '%s\n' '{"result":"fail","phase":"preflight","category":"preflight_failure","migration_head":"not_reached","help_getConfig":"not_run","synthetic_signin":"not_run","cleanup":"not_started","elapsed_ms":0,"exit":1}'
   exit 1
+fi
+
+preflight_stage="validate runner prerequisites"
+if [[ $(id -u) -eq 0 ]]; then
+  printf '%s\n' '{"result":"fail","phase":"preflight","category":"preflight_failure","migration_head":"not_reached","help_getConfig":"not_run","synthetic_signin":"not_run","cleanup":"not_started","elapsed_ms":0,"exit":1}'
+  exit 1
+fi
+
+if [[ $local_mode == "local-dump" ]]; then
+  if ! command -v sudo >/dev/null 2>&1; then
+    emit_preflight_failure
+  fi
+  if ! sudo -n -- env -i \
+    HOME=/root \
+    LANG=C \
+    LC_ALL=C \
+    PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
+    PYTHONDONTWRITEBYTECODE=1 \
+    /usr/bin/python3 "$script_dir/restore-readiness.py" \
+    --validate-local-dump "${local_args[1]}"; then
+    exit 1
+  fi
 fi
 
 build_uid=$(id -u)
@@ -164,6 +193,100 @@ run_drill() {
     "$@"
 }
 
+run_sigkill_recovery_drill() {
+  local -a drill_args=("$@")
+  local attempt recovered remaining_runs containers volumes networks owned_images sigkill_status
+  preflight_stage="run SIGKILL recovery drill"
+  if ! sigkill_output=$(run_suite_command /usr/bin/mktemp "$build_parent/teagram-restore-sigkill.XXXXXXXX" 2>/dev/null); then
+    emit_preflight_failure
+  fi
+  run_drill "${drill_args[@]}" >"$sigkill_output" 2>/dev/null &
+  recovery_pid=$!
+  sigkill_status=0
+  if wait "$recovery_pid"; then
+    emit_preflight_failure
+  else
+    sigkill_status=$?
+  fi
+  if [[ $sigkill_status -ne 137 ]] || [[ $(<"$sigkill_output") != "SIGKILL_INJECTED" ]]; then
+    emit_preflight_failure
+  fi
+  recovered=0
+  for ((attempt = 0; attempt < 240; attempt++)); do
+    if ! remaining_runs=$(run_teardown_command sudo -n -- /usr/bin/find /run -mindepth 1 -maxdepth 1 -type d -name 'restore-readiness-*' -print 2>/dev/null); then
+      emit_preflight_failure
+    fi
+    if [[ -z $remaining_runs ]]; then
+      recovered=1
+      break
+    fi
+    if ! run_teardown_command /usr/bin/sleep 1; then
+      emit_preflight_failure
+    fi
+  done
+  if [[ $recovered -ne 1 ]]; then
+    emit_preflight_failure
+  fi
+  if ! containers=$(run_teardown_command "$docker_bin" ps --all --quiet --no-trunc 2>/dev/null) ||
+    ! volumes=$(run_teardown_command "$docker_bin" volume ls --quiet 2>/dev/null) ||
+    ! networks=$(run_teardown_command "$docker_bin" network ls --format '{{.Name}}' 2>/dev/null) ||
+    ! owned_images=$(run_teardown_command "$docker_bin" image ls --all --quiet --no-trunc --filter 'label=com.teagram.restore-readiness.token' 2>/dev/null); then
+    emit_preflight_failure
+  fi
+  if [[ -n $containers || -n $volumes || -n $owned_images ]] ||
+    ! printf '%s\n' "$networks" | /usr/bin/python3 -c '
+import sys
+networks = sorted(line.strip() for line in sys.stdin if line.strip())
+if networks != ["bridge", "host", "none"]:
+    raise SystemExit(1)
+' ||
+    [[ -n $(/usr/bin/find "$build_dir" -mindepth 1 -print -quit 2>/dev/null) ]] ||
+    ! run_teardown_command /usr/bin/python3 -B -c '
+import runpy, sys
+if runpy.run_path(sys.argv[1])["docker_cli_pids"]():
+    raise SystemExit(1)
+' "$script_dir/restore-readiness.py"; then
+    emit_preflight_failure
+  fi
+}
+
+if [[ -n $local_mode ]]; then
+  build_inputs
+  preflight_stage="run local-dump restore drill"
+  if ! local_report=$(run_drill "${local_args[@]}"); then
+    printf '%s\n' "$local_report"
+    exit 1
+  fi
+  if ! printf '%s' "$local_report" | /usr/bin/python3 -c '
+import json, sys
+report = json.load(sys.stdin)
+if not (report.get("result") == "pass" and report.get("input_mode") == "local" and report.get("cleanup") == "verified" and report.get("auth_keys_cleared") == "pass" and report.get("exit") == 0):
+    raise SystemExit(1)
+'; then
+    emit_preflight_failure
+  fi
+  printf '%s\n' "$local_report"
+  if [[ $local_mode == "local-fixture-test" ]]; then
+    build_inputs
+    preflight_stage="run local auth-key signal fault drill"
+    if auth_clear_signal_report=$(run_drill --local-fixture-test --fault-test auth-clear-signal); then
+      emit_preflight_failure
+    fi
+    if ! printf '%s' "$auth_clear_signal_report" | /usr/bin/python3 -c '
+import json, sys
+report = json.load(sys.stdin)
+if not (report.get("result") == "fail" and report.get("phase") == "auth_key_clearing" and report.get("category") == "interrupted" and report.get("cleanup") == "verified" and "input_mode" not in report and report.get("exit") == 1):
+    raise SystemExit(1)
+'; then
+      emit_preflight_failure
+    fi
+    printf '%s\n' "$auth_clear_signal_report"
+    build_inputs
+    run_sigkill_recovery_drill --local-fixture-test --fault-test sigkill
+  fi
+  exit 0
+fi
+
 build_inputs
 preflight_stage="run primary synthetic restore drill"
 if ! success_report=$(run_drill); then
@@ -224,57 +347,6 @@ if not (report.get("result") == "fail" and report.get("phase") == "auth_key_clea
 fi
 
 build_inputs
-preflight_stage="run SIGKILL recovery drill"
-if ! sigkill_output=$(run_suite_command /usr/bin/mktemp "$build_parent/teagram-restore-sigkill.XXXXXXXX" 2>/dev/null); then
-  emit_preflight_failure
-fi
-run_drill --fault-test sigkill >"$sigkill_output" 2>/dev/null &
-recovery_pid=$!
-sigkill_status=0
-if wait "$recovery_pid"; then
-  emit_preflight_failure
-else
-  sigkill_status=$?
-fi
-if [[ $sigkill_status -ne 137 ]] || [[ $(<"$sigkill_output") != "SIGKILL_INJECTED" ]]; then
-  emit_preflight_failure
-fi
-recovered=0
-for ((attempt = 0; attempt < 240; attempt++)); do
-  if ! remaining_runs=$(run_teardown_command sudo -n -- /usr/bin/find /run -mindepth 1 -maxdepth 1 -type d -name 'restore-readiness-*' -print 2>/dev/null); then
-    emit_preflight_failure
-  fi
-  if [[ -z $remaining_runs ]]; then
-    recovered=1
-    break
-  fi
-  if ! run_teardown_command /usr/bin/sleep 1; then
-    emit_preflight_failure
-  fi
-done
-if [[ $recovered -ne 1 ]]; then
-  emit_preflight_failure
-fi
-if ! containers=$(run_teardown_command "$docker_bin" ps --all --quiet --no-trunc 2>/dev/null) ||
-  ! volumes=$(run_teardown_command "$docker_bin" volume ls --quiet 2>/dev/null) ||
-  ! networks=$(run_teardown_command "$docker_bin" network ls --format '{{.Name}}' 2>/dev/null) ||
-  ! owned_images=$(run_teardown_command "$docker_bin" image ls --all --quiet --no-trunc --filter 'label=com.teagram.restore-readiness.token' 2>/dev/null); then
-  emit_preflight_failure
-fi
-if [[ -n $containers || -n $volumes || -n $owned_images ]] ||
-  ! printf '%s\n' "$networks" | /usr/bin/python3 -c '
-import sys
-networks = sorted(line.strip() for line in sys.stdin if line.strip())
-if networks != ["bridge", "host", "none"]:
-    raise SystemExit(1)
-' ||
-  [[ -n $(/usr/bin/find "$build_dir" -mindepth 1 -print -quit 2>/dev/null) ]] ||
-  ! run_teardown_command /usr/bin/python3 -B -c '
-import runpy, sys
-if runpy.run_path(sys.argv[1])["docker_cli_pids"]():
-    raise SystemExit(1)
-' "$script_dir/restore-readiness.py"; then
-  emit_preflight_failure
-fi
+run_sigkill_recovery_drill --fault-test sigkill
 
 printf '%s\n' "$success_report"
