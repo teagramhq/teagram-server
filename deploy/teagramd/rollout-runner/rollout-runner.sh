@@ -1673,7 +1673,7 @@ compare_initial_local_target() {
   local results="$TARGET_DIR/target-comparisons.tsv"
   local failures=0 field before after result expected_image
   local baseline_fields=(mounts_sha256 container_stop_timeout exposure_sha256 container_env_sha256)
-  local render_fields=(config_sha256 env_sha256 override_sha256 stop_grace_period compose_replica_count compose_client_addr_trust compose_public_ws_2446)
+  local render_fields=(config_sha256 compose_network_sha256 env_sha256 override_sha256 stop_grace_period compose_replica_count compose_client_addr_trust compose_public_ws_2446)
   write_immutable "$results" '' || return 1
   [ "$(jq -er '.provenance.compose_source' "$baseline_file")" = live-container-inspection ] && \
     [ "$(jq -er '.provenance.compose_source' "$render_file")" = selected-compose-render ] && \
@@ -1781,6 +1781,10 @@ compare_resolved_preflight() {
       if [ "$expected" = "$after" ]; then result=pass; else result=fail; failures=$((failures + 1)); fi
       append_evidence_row "$results" preflight "target_$field" "$expected" "$after" "$result" || return 1
     done
+    before=$(jq -er '.compose_network_sha256' "$render_file") || { fail 'pinned target render is missing its Compose network digest'; return 1; }
+    after=$(jq -er '.compose_network_sha256' "$target_file") || { fail 'resolved target is missing its Compose network digest'; return 1; }
+    if [ "$before" = "$after" ]; then result=pass; else result=fail; failures=$((failures + 1)); fi
+    append_evidence_row "$results" preflight selected_render_compose_network_sha256 "$before" "$after" "$result" || return 1
     [ "$failures" -eq 0 ] || { fail 'initial-local preflight changed live baseline facts or pinned target render'; return 1; }
     return 0
   fi
@@ -1810,6 +1814,21 @@ compare_resolved_preflight() {
     if [ "$expected" = "$after" ]; then result=pass; else result=fail; failures=$((failures + 1)); fi
     append_evidence_row "$results" preflight "$field" "$expected" "$after" "$result" || return 1
   done
+  local before_network_sha after_network_sha before_network_profile after_network_profile
+  before_network_sha=$(jq -er '.compose_network_sha256' "$old_file") || { fail 'baseline is missing its Compose network digest'; return 1; }
+  after_network_sha=$(jq -er '.compose_network_sha256' "$target_file") || { fail 'resolved target is missing its Compose network digest'; return 1; }
+  before_network_profile=$(jq -er '.compose_network_profile' "$old_file") || { fail 'baseline is missing its Compose network profile'; return 1; }
+  after_network_profile=$(jq -er '.compose_network_profile' "$target_file") || { fail 'resolved target is missing its Compose network profile'; return 1; }
+  if [ "$before_network_sha" = "$after_network_sha" ] || {
+    [ "$before_network_profile" = default-only ] && [ "$after_network_profile" = rustfs-isolated ];
+  }; then
+    result=pass
+  else
+    result=fail
+    failures=$((failures + 1))
+  fi
+  append_evidence_row "$results" preflight compose_network_topology \
+    "$before_network_profile:$before_network_sha" "$after_network_profile:$after_network_sha" "$result" || return 1
   [ "$failures" -eq 0 ] || { fail 'resolved Compose preflight rejected unapproved drift'; return 1; }
 }
 
@@ -1817,7 +1836,7 @@ compare_rollback_to_baseline() {
   local baseline_file="$ROLLBACK_DIR/baseline.snapshot.json"
   local rollback_file="$ROLLBACK_DIR/rollback.snapshot.json"
   local results="$ROLLBACK_DIR/rollback-equivalence.tsv"
-  local fields=(image_id mounts_sha256 stop_grace_period container_stop_timeout config_sha256 env_sha256 override_sha256 exposure_sha256 container_env_sha256 compose_replica_count compose_client_addr_trust container_replica_count container_client_addr_trust compose_public_ws_2446 exposure_public_ws_2446)
+  local fields=(image_id mounts_sha256 stop_grace_period container_stop_timeout config_sha256 compose_network_sha256 env_sha256 override_sha256 exposure_sha256 container_env_sha256 compose_replica_count compose_client_addr_trust container_replica_count container_client_addr_trust compose_public_ws_2446 exposure_public_ws_2446)
   local field before after state timeout_value grace
   local expected_count=${#fields[@]}
   ROLLBACK_COMPARE_FAILURES=0
@@ -1826,7 +1845,7 @@ compare_rollback_to_baseline() {
     local render_file="$ROLLBACK_DIR/initial-local-target-render.snapshot.json"
     local target_render="$BASELINE_DIR/initial-local-target-render.snapshot.json"
     local live_fields=(image_id mounts_sha256 container_stop_timeout exposure_sha256 exposure_public_ws_2446 container_env_sha256)
-    local render_fields=(config_sha256 env_sha256 override_sha256 stop_grace_period compose_replica_count compose_client_addr_trust compose_public_ws_2446)
+    local render_fields=(config_sha256 compose_network_sha256 env_sha256 override_sha256 stop_grace_period compose_replica_count compose_client_addr_trust compose_public_ws_2446)
     [ "$(jq -er '.provenance.compose_source' "$baseline_file")" = live-container-inspection ] && \
       [ "$(jq -er '.provenance.compose_source' "$target_render")" = selected-compose-render ] && \
       [ "$(jq -er '.provenance.compose_source' "$rollback_file")" = selected-compose-render ] || {
@@ -1879,7 +1898,7 @@ compare_rollback_to_baseline() {
   record_rollback_row "$results" rollback_grace_policy 2m0s "$grace" || return 1
   timeout_value=$(jq -er '.container_stop_timeout' "$rollback_file") || { fail 'rollback inspected timeout is missing'; return 1; }
   record_rollback_row "$results" rollback_inspected_stop_timeout 120 "$timeout_value" || return 1
-  [ "$expected_count" -eq 15 ] || { fail 'internal rollback equivalence field count changed'; return 1; }
+  [ "$expected_count" -eq 16 ] || { fail 'internal rollback equivalence field count changed'; return 1; }
   [ "$ROLLBACK_COMPARE_FAILURES" -eq 0 ] || { fail 'rollback does not match the captured baseline'; return 1; }
 }
 

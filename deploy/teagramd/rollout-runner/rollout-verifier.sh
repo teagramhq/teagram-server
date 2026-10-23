@@ -18,6 +18,63 @@ sha256_text() {
   printf '%s' "$1" | sha256sum | awk '{print $1}'
 }
 
+compose_network_projection() {
+  printf '%s' "$1" | jq -ceS '
+    {
+      project_name:(.name // ""),
+      networks:(.networks // {}),
+      services:(
+        .services
+        | to_entries
+        | map({key:.key,value:(.value.networks // {default:null})})
+        | from_entries
+      )
+    }
+  '
+}
+
+compose_network_profile() {
+  printf '%s' "$1" | jq -er '
+    . as $compose
+    | ($compose.name // "") as $project
+    | ($compose.networks // {}) as $networks
+    | ($compose.services
+       | with_entries(.value = (.value.networks // {default:null}))) as $services
+    | ($project + "_default") as $default_name
+    | ($project + "_rustfs_private") as $private_name
+    | if $networks == {default:{name:$default_name,ipam:{}}} and
+         ($services | has("postgres")) and ($services | has("migrate")) and
+         ($services | has("teagramd")) and all($services[]; . == {default:null}) then
+        "default-only"
+      elif $networks == {
+          default:{name:$default_name,ipam:{}},
+          rustfs_private:{
+            name:$private_name,
+            driver:"bridge",
+            driver_opts:{"com.docker.network.bridge.gateway_mode_ipv4":"isolated"},
+            ipam:{},
+            internal:true,
+            enable_ipv6:false
+          }
+        } and
+        ($services | has("postgres")) and ($services | has("migrate")) and
+        ($services | has("teagramd")) and
+        all(($services | to_entries[]);
+          .key as $service
+          | (if $service == "postgres" or $service == "migrate" then {default:null}
+             elif $service == "teagramd" then {default:null,rustfs_private:null}
+             elif $service == "rustfs" or $service == "rustfs-init" or
+                  $service == "blob-migrate" or $service == "blob-restore" then {rustfs_private:null}
+             else null end) as $expected
+          | $expected != null and .value == $expected
+        ) then
+        "rustfs-isolated"
+      else
+        "other"
+      end
+  '
+}
+
 verify_added_container_environment() {
   local inspect_json=$1 compose_json=$2 env_file=$3 added_env_names=$4
   [ "$added_env_names" != "[]" ] || return 0
@@ -375,8 +432,8 @@ snapshot_from_json() {
   local override_file=$4
   local compose_source=${5:-selected-compose-render}
   local snapshot_name=${6:-}
-  local mounts exposure exposure_for_hash resolved_config canonical_compose container_env container_id image_id state exit_code started_at finished_at grace stop_timeout mode_source
-  local mounts_sha exposure_sha config_sha env_sha override_sha container_env_sha mount_count
+  local mounts exposure exposure_for_hash resolved_config canonical_compose container_env container_id image_id state exit_code started_at finished_at grace stop_timeout mode_source compose_network_json
+  local mounts_sha exposure_sha config_sha env_sha override_sha container_env_sha compose_network_sha compose_network_profile_value mount_count
   local compose_replica_count compose_client_addr_trust container_replica_count container_client_addr_trust
   local compose_public_ws_2446 exposure_public_ws_2446
   local added_env_names changed_env_names container_env_added container_env_changed retained_added_env_names
@@ -579,6 +636,8 @@ snapshot_from_json() {
     config_sha=not-captured
     env_sha=not-captured
     override_sha=not-captured
+    compose_network_sha=not-captured
+    compose_network_profile_value=not-captured
   else
     [ "$compose_source" = selected-compose-render ] || {
       printf '%s\n' 'invalid Compose provenance for snapshot' >&2
@@ -637,6 +696,8 @@ snapshot_from_json() {
             .value.volumes |= map(select((.type == "bind" and .source == $mode_source and
                                           .target == "/run/teagramd/blob-mode" and .read_only == true) | not))
           else . end)
+      | del(.networks)
+      | .services |= with_entries(.value |= del(.networks))
     ')
     compose_replica_count=$(printf '%s' "$compose_json" | jq -er '
       .services.teagramd.environment as $env
@@ -656,6 +717,9 @@ snapshot_from_json() {
     config_sha=$(sha256_text "$canonical_compose")
     env_sha=$(sha256sum "$env_file" | awk '{print $1}')
     override_sha=$(sha256sum "$override_file" | awk '{print $1}')
+    compose_network_json=$(compose_network_projection "$compose_json") || return 1
+    compose_network_sha=$(sha256_text "$compose_network_json")
+    compose_network_profile_value=$(compose_network_profile "$compose_json") || return 1
   fi
   mount_count=$(printf '%s' "$mounts" | jq -er 'length')
   mounts_sha=$(sha256_text "$mounts")
@@ -683,6 +747,8 @@ snapshot_from_json() {
     --arg config_sha "$config_sha" \
     --arg env_sha "$env_sha" \
     --arg override_sha "$override_sha" \
+    --arg compose_network_sha "$compose_network_sha" \
+    --arg compose_network_profile "$compose_network_profile_value" \
     --arg container_env_sha "$container_env_sha" \
     --arg container_env_added "$container_env_added" \
     --arg container_env_changed "$container_env_changed" \
@@ -699,6 +765,8 @@ snapshot_from_json() {
       container_client_addr_trust:$container_client_addr_trust,
       mount_count:($mount_count|tonumber),mounts_sha256:$mounts_sha,
       exposure_sha256:$exposure_sha,config_sha256:$config_sha,
+      compose_network_sha256:$compose_network_sha,
+      compose_network_profile:$compose_network_profile,
       env_sha256:$env_sha,override_sha256:$override_sha,
       container_env_sha256:$container_env_sha,
       container_env_added:$container_env_added,
@@ -868,6 +936,8 @@ compare_snapshots() {
       (.mount_count | type == "number" and . >= 0) and
       (.mounts_sha256 | sha) and (.exposure_sha256 | sha) and
       (.config_sha256 | sha) and (.env_sha256 | sha) and (.override_sha256 | sha) and
+      (.compose_network_sha256 | (sha or . == "not-captured")) and
+      (.compose_network_profile | IN("default-only","rustfs-isolated","other","not-captured")) and
       (.container_env_sha256 | sha)
     ' "$before_file" >/dev/null \
     || ! jq -e '
@@ -890,6 +960,8 @@ compare_snapshots() {
       (.mount_count | type == "number" and . >= 0) and
       (.mounts_sha256 | sha) and (.exposure_sha256 | sha) and
       (.config_sha256 | sha) and (.env_sha256 | sha) and (.override_sha256 | sha) and
+      (.compose_network_sha256 | (sha or . == "not-captured")) and
+      (.compose_network_profile | IN("default-only","rustfs-isolated","other","not-captured")) and
       (.container_env_sha256 | sha)
     ' "$after_file" >/dev/null \
     || ! [[ "$expected_image" =~ ^sha256:[0-9a-f]{64}$ ]]; then
@@ -913,6 +985,23 @@ compare_snapshots() {
       return 1
     fi
   done
+  if ! before_value=$(jq -er '.compose_network_sha256' "$before_file"); then return 1; fi
+  if ! after_value=$(jq -er '.compose_network_sha256' "$after_file"); then return 1; fi
+  local before_network_profile after_network_profile
+  before_network_profile=$(jq -er '.compose_network_profile' "$before_file") || return 1
+  after_network_profile=$(jq -er '.compose_network_profile' "$after_file") || return 1
+  if [ "$before_value" = "$after_value" ] || {
+    [ "$before_network_profile" = default-only ] && [ "$after_network_profile" = rustfs-isolated ];
+  }; then
+    result=pass
+  else
+    result=fail
+  fi
+  if ! record_comparison "$result_file" compose_network_topology \
+    "$before_network_profile:$before_value" "$after_network_profile:$after_value" "$result"; then
+    printf '%s\n' 'failed to persist comparison result: compose_network_topology' >&2
+    return 1
+  fi
   for field in compose_public_ws_2446 exposure_public_ws_2446; do
     if ! before_value=$(jq -er --arg field "$field" '.[$field]' "$before_file"); then return 1; fi
     if ! after_value=$(jq -er --arg field "$field" '.[$field]' "$after_file"); then return 1; fi

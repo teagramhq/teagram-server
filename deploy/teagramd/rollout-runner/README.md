@@ -42,6 +42,14 @@ match the Compose mapping. A wildcard host IP, another host or container port,
 or any other port change remains a configuration drift and rejects before
 replacement.
 
+Apply also accepts the reviewed network transition from the default-only
+Compose topology to the isolated `rustfs_private` network. It must be an
+internal IPv4 bridge with the isolated gateway mode, with `teagramd` attached
+to both `default` and `rustfs_private`, Postgres and migrations on `default`,
+and RustFS plus its migration helpers only on `rustfs_private`. Every other
+network change remains drift. Rollback still requires the exact captured
+baseline network topology.
+
 For every local-backed rollout, read the running `teagramd` container's
 `com.docker.compose.project.config_files` label and carry that Compose selection
 forward unchanged. With ordinary local authority, it must start with a
