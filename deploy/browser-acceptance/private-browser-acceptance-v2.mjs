@@ -919,6 +919,7 @@ async function makeWssAudit(contextInfo, progress) {
   let logoutRpcStarted = false;
   let logoutSocketClosures = 0;
   let activeConnectionsAtContextTeardown = null;
+  let connectionsCreatedDuringContextTeardown = 0;
   let malformed = false;
   let handshakeCount = 0;
   let pendingWorkers = 0;
@@ -929,10 +930,6 @@ async function makeWssAudit(contextInfo, progress) {
       if (!isRecord(params) || typeof params.requestId !== "string" ||
           !/^[0-9A-Za-z._-]{1,64}$/u.test(params.requestId) || typeof params.url !== "string" ||
           connections.has(params.requestId)) {
-        malformed = true;
-        return;
-      }
-      if (activeConnectionsAtContextTeardown !== null) {
         malformed = true;
         return;
       }
@@ -949,6 +946,7 @@ async function makeWssAudit(contextInfo, progress) {
         malformed = true;
       }
       connections.set(params.requestId, {matches, responses: 0, status: 0, closed: false});
+      if (activeConnectionsAtContextTeardown !== null) connectionsCreatedDuringContextTeardown += 1;
       if (!progress.observeWssConnection()) malformed = true;
     },
     handshakeResponse(params) {
@@ -1077,8 +1075,9 @@ async function makeWssAudit(contextInfo, progress) {
     },
     validateAfterLogout() {
       const entries = [...connections.values()];
-      const activeConnections = activeConnectionsAtContextTeardown ??
-        entries.filter((item) => !item.closed).length;
+      const activeConnections = activeConnectionsAtContextTeardown === null
+        ? entries.filter((item) => !item.closed).length
+        : activeConnectionsAtContextTeardown + connectionsCreatedDuringContextTeardown;
       const expectedLogoutSocketLoss = Math.min(logoutSocketClosures, 1);
       if (malformed || orphanHandshake || workerUnobservable || pendingWorkers !== 0 || entries.length < 1 || entries.length > WSS_CONNECTION_CEILING ||
           accountSlotCount === null || activeConnections < Math.max(0, accountSlotCount - expectedLogoutSocketLoss) ||

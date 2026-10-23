@@ -1023,6 +1023,47 @@ test("one logout socket close before the teardown snapshot does not invalidate t
   assert.deepEqual(browser.apiMethods, ["auth.sendCode", "auth.signIn", "auth.checkPassword", "auth.logOut"]);
 });
 
+test("logout reconnect created during asynchronous context teardown stays within the WSS budget", async (t) => {
+  const fixture = createDependencies(undefined, true);
+  const browser = createAcceptancePage({completeSignIn: true});
+  await useRealAcceptanceFlow(fixture, browser);
+  let wssFixture;
+  fixture.dependencies.proveWss = async (contextInfo, _release, _manifest, progress, tracker) => {
+    wssFixture = await proveSharedWorkerWss(t, {
+      workerSockets: workerSockets(4),
+      contextInfo,
+      progress,
+      tracker,
+    });
+    return wssFixture.result;
+  };
+  fixture.dependencies.closeContext = async () => {
+    fixture.events.push("close-context");
+    await Promise.resolve();
+    fixture.events.push("teardown-socket-close");
+    wssFixture.browserSession.workerMessage("observer-worker", {
+      method: "Network.webSocketClosed",
+      params: {requestId: "worker-socket-0", timestamp: 1},
+    });
+    fixture.events.push("teardown-reconnect");
+    wssFixture.browserSession.workerMessage("observer-worker", {
+      method: "Network.webSocketCreated",
+      params: {requestId: "worker-socket-during-teardown", url: `wss://${targetHost}/apiws`},
+    });
+  };
+
+  const result = await executeMode({mode: "acceptance", releaseRecord: "fixture"}, fixture.dependencies);
+  const output = JSON.parse(result.output);
+
+  assert.equal(result.exitCode, 0, result.output);
+  assert.equal(output.ok, true);
+  assert.equal(output.logout, "ok");
+  assert.equal(output.wssConnections, 5);
+  assert.ok(fixture.events.indexOf("close-context") < fixture.events.indexOf("teardown-reconnect"));
+  assert.ok(fixture.events.indexOf("teardown-socket-close") < fixture.events.indexOf("teardown-reconnect"));
+  assert.deepEqual(browser.apiMethods, ["auth.sendCode", "auth.signIn", "auth.checkPassword", "auth.logOut"]);
+});
+
 test("chat-list check ignores hidden list variants and scopes its row count", async () => {
   const fixture = createDependencies(undefined, true);
   const browser = createAcceptancePage({
@@ -1405,6 +1446,7 @@ test("logout WSS validation retains the one-extra-active-socket limit", async (t
   }
   assert.equal(progress.markSignedIn(), true);
   wssAudit.beginLogout();
+  wssAudit.beginContextTeardown();
 
   for (let index = 0; index < 2; index += 1) {
     browserSession.workerMessage("observer-worker", {
@@ -1416,7 +1458,6 @@ test("logout WSS validation retains the one-extra-active-socket limit", async (t
       params: {requestId: `worker-socket-logout-${index}`, response: {status: 101}},
     });
   }
-  wssAudit.beginContextTeardown();
 
   assert.throws(() => wssAudit.validateAfterLogout(), {code: "websocket-not-ready"});
 });
