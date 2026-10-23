@@ -73,9 +73,6 @@ check_ci_contract() {
 }
 
 # Run the actual target step against controlled forge responses.
-# The extracted workflow script is a child process, so these subshell-local
-# exports are intentional despite ShellCheck's subshell propagation warnings.
-# shellcheck disable=SC2030,SC2031
 check_target_selection() (
   set -euo pipefail
   tmp="$(mktemp -d)"
@@ -96,11 +93,14 @@ case "$*" in
 esac
 SH
   chmod +x "$tmp/gh"
+  # These overrides are consumed by the extracted workflow child process.
+  # shellcheck disable=SC2030,SC2031
   export PATH="$tmp:$PATH" GITHUB_REPOSITORY=test/server
   export RUN_HEAD_SHA=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
   export RUN_ID=111111111
   export TEST_LATEST_SHA=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
   export TEST_LATEST_RUN_ID=222222222
+  # shellcheck disable=SC2030,SC2031
   export GITHUB_OUTPUT="$tmp/output" TEST_COMPARISON GITHUB_EVENT_NAME
   local expected status
   GITHUB_EVENT_NAME=workflow_run
@@ -139,9 +139,6 @@ SH
   fi
 )
 
-# The extracted workflow script is a child process, so these subshell-local
-# exports are intentional despite ShellCheck's subshell propagation warnings.
-# shellcheck disable=SC2030,SC2031
 check_demo_image_digest_download() (
   set -euo pipefail
   tmp="$(mktemp -d)"
@@ -169,7 +166,10 @@ mkdir -p "$destination"
 printf '%s\n' "$TEST_IMAGE_DIGEST" > "$destination/demo-image-digest.txt"
 SH
   chmod +x "$tmp/gh"
+  # These overrides are consumed by the extracted workflow child process.
+  # shellcheck disable=SC2030,SC2031
   export PATH="$tmp:$PATH" GITHUB_REPOSITORY=test/server
+  # shellcheck disable=SC2030,SC2031
   export RUNNER_TEMP="$tmp/runner" GITHUB_OUTPUT="$tmp/output"
   export CI_RUN_ID=222222222 DEPLOY_SHA=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
   export TEST_CI_RUN_ID="$CI_RUN_ID" TEST_DEPLOY_SHA="$DEPLOY_SHA"
