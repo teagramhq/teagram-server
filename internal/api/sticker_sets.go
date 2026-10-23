@@ -2,7 +2,6 @@ package api
 
 import (
 	"bytes"
-	"context"
 	"crypto/sha256"
 	"encoding/binary"
 	"errors"
@@ -406,7 +405,7 @@ func (h *handlers) handleInstallStickerSet(c *mtproto.Conn, r *mtproto.Request) 
 		return &tg.MessagesStickerSetInstallResultSuccess{}, nil, nil
 	}
 	return &tg.MessagesStickerSetInstallResultSuccess{}, func() {
-		h.pushStickerSetChanged(c, r)
+		h.notifyStickerSetChanged(r)
 	}, nil
 }
 
@@ -439,19 +438,15 @@ func (h *handlers) handleUninstallStickerSet(c *mtproto.Conn, r *mtproto.Request
 		return &tg.BoolTrue{}, nil, nil
 	}
 	return &tg.BoolTrue{}, func() {
-		h.pushStickerSetChanged(c, r)
+		h.notifyStickerSetChanged(r)
 	}, nil
 }
 
-func (h *handlers) pushStickerSetChanged(c *mtproto.Conn, r *mtproto.Request) {
-	ctx, cancel := context.WithTimeout(r.Ctx, 3*time.Second)
+func (h *handlers) notifyStickerSetChanged(r *mtproto.Request) {
+	ctx, cancel := store.NotificationContext(r.Ctx)
 	defer cancel()
-	update := &tg.Updates{
-		Updates: []tg.UpdateClass{&tg.UpdateStickerSets{}},
-		Date:    int(time.Now().Unix()),
-		Seq:     0,
-	}
-	if err := c.PushToOtherSessions(ctx, r.UserID, update); err != nil {
-		h.log.Info("push sticker set update", "user_id", r.UserID, "err", err)
+	payload := store.StickerSetChangedPayload(r.UserID, mtproto.AuthKeyIDInt64(r.AuthKeyID), r.SessionID)
+	if err := h.store.Notify(ctx, store.ChannelStickerSets, payload); err != nil {
+		h.log.Info("notify sticker set update", "user_id", r.UserID, "err", err)
 	}
 }

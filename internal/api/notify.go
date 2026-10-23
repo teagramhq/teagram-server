@@ -134,6 +134,36 @@ func (u *Updater) DeliverDialogPins(ctx context.Context, ownerID int64) {
 	u.pushTransientFanout(ctx, pushes)
 }
 
+// DeliverStickerSets fans out the account's transient sticker-set invalidation
+// to live sessions on this replica, omitting the session that made the RPC.
+// PushTo retains the owner check for every connection after the registry snapshot.
+func (u *Updater) DeliverStickerSets(ctx context.Context, ownerID, authKeyID, sessionID int64) {
+	if ownerID <= 0 || authKeyID == 0 || u.registry == nil {
+		return
+	}
+	update := &tg.Updates{
+		Updates: []tg.UpdateClass{&tg.UpdateStickerSets{}},
+		Date:    int(time.Now().Unix()),
+		Seq:     0,
+	}
+	pushes := make([]transientPush, 0)
+	for _, conn := range u.registry.Conns(ownerID) {
+		connAuthKeyID, connSessionID := conn.SessionIdentity()
+		if connAuthKeyID == authKeyID && connSessionID == sessionID {
+			continue
+		}
+		pushes = append(pushes, transientPush{
+			owner: ownerID,
+			conn:  conn,
+			enc:   update,
+			onError: func(err error) {
+				u.log.Info("deliver sticker-set refresh", "user_id", ownerID, "err", err)
+			},
+		})
+	}
+	u.pushTransientFanout(ctx, pushes)
+}
+
 // DialogFilterListenerReconnected advances the replica-wide recovery epoch.
 func (u *Updater) DialogFilterListenerReconnected() {
 	u.dialogFilterSync.ListenerReconnected()

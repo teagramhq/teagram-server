@@ -866,7 +866,7 @@ func runAtBlobModePath(log *slog.Logger, blobModePath string) error {
 	updater := api.NewUpdaterWithDialogFilterSync(st, cfg.DCID, server.Registry(), log, peers, dialogFilterSync, notifyMetrics)
 	stopDialogFilterRecovery := updater.StartDialogFilterRecovery(serviceCtx)
 	defer stopDialogFilterRecovery()
-	_, stopListener, err := store.StartListenerWithDialogPins(serviceCtx, cfg.PostgresDSN, updater.Deliver, updater.DeliverTyping, updater.Evict, updater.DeliverChannelPost, updater.DeliverEncryption, updater.DeliverStatus, updater.DeliverEncryptedMsg, updater.DeliverReactions, updater.DeliverPinned, updater.MarkDialogFilters, updater.DeliverDialogPins, updater.DialogFilterListenerReconnected, log, notifyMetrics)
+	_, stopListener, err := store.StartListenerWithDialogPinsAndStickerSets(serviceCtx, cfg.PostgresDSN, updater.Deliver, updater.DeliverTyping, updater.Evict, updater.DeliverChannelPost, updater.DeliverEncryption, updater.DeliverStatus, updater.DeliverEncryptedMsg, updater.DeliverReactions, updater.DeliverPinned, updater.MarkDialogFilters, updater.DeliverDialogPins, updater.DeliverStickerSets, updater.DialogFilterListenerReconnected, log, notifyMetrics)
 	if err != nil {
 		return err
 	}

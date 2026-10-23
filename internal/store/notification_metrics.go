@@ -11,7 +11,7 @@ import (
 const (
 	notificationWindowSeconds   = int64((time.Hour / time.Second))
 	notificationBucketCount     = int(notificationWindowSeconds + 1)
-	notificationCounterCount    = 12 // eleven fixed channels plus invalid input
+	notificationCounterCount    = 13 // twelve fixed channels plus invalid input
 	notificationInvalidIndex    = notificationCounterCount - 1
 	notificationUnsetEpoch      = int64(-1 << 63)
 	notificationSnapshotTries   = 4
@@ -74,6 +74,7 @@ type NotificationChannelCounts struct {
 	Pinned        int64
 	DialogFilters int64
 	DialogPins    int64
+	StickerSets   int64
 }
 
 // RateLimitDenialSurfaceCounts holds one count for every fixed client-visible
@@ -434,6 +435,7 @@ func (m *NotificationMetrics) Snapshot() NotificationMetricsSnapshot {
 			Pinned:        counts[8],
 			DialogFilters: counts[9],
 			DialogPins:    counts[10],
+			StickerSets:   counts[11],
 		},
 		Invalid: counts[notificationInvalidIndex],
 		RateLimitDenials: RateLimitDenialMetricsSnapshot{
@@ -606,6 +608,8 @@ func notificationChannelIndex(channel string) int {
 		return 9
 	case ChannelDialogPins:
 		return 10
+	case ChannelStickerSets:
+		return 11
 	default:
 		return -1
 	}
