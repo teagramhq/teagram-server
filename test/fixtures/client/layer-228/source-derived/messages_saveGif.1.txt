@@ -1,0 +1,9 @@
+# source: gotd/td v0.162.0 layer-228 TL request
+body: { messages.saveGif
+  id: { inputDocument
+    id: <N> [LONG],
+    access_hash: <N> [LONG],
+    file_reference: <REDACTED> [BYTES],
+  },
+  unsave: false [BOOL],
+}

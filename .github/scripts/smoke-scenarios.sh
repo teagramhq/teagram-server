@@ -13,6 +13,7 @@ SMOKE_SCENARIOS=(
   profile-photo-upload
   profile-bio
   upload-media
+  saved-gifs
   album-media
   shared-media-search
   saved-messages
