@@ -390,6 +390,8 @@ func newWithPhotoThumbsAndDialogFilterSyncAndUploadPartTTLAndTurnstile(s *store.
 	register(d, tg.AccountGetPrivacyRequestTypeID, h.handleGetPrivacy)
 	register(d, tg.AccountSetPrivacyRequestTypeID, h.handleSetPrivacy)
 	register(d, tg.AccountGetThemesRequestTypeID, h.handleGetThemes)
+	register(d, tg.AccountGetWallPapersRequestTypeID, h.handleGetWallPapers)
+	register(d, tg.AccountGetChatThemesRequestTypeID, h.handleGetChatThemes)
 	register(d, tg.AccountGetAccountTTLRequestTypeID, h.handleGetAccountTTL)
 	register(d, tg.AccountGetReactionsNotifySettingsRequestTypeID, h.handleGetReactionsNotifySettings)
 	register(d, tg.AccountGetContactSignUpNotificationRequestTypeID, h.handleGetContactSignUpNotification)
