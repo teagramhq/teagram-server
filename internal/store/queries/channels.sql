@@ -532,6 +532,7 @@ SELECT
     COALESCE(top.action_type, 0)::smallint AS top_action_type,
     COALESCE(top.ttl_period, 0)::integer AS top_ttl_period,
     top.post_author AS top_post_author,
+    top.entities AS top_entities,
     EXISTS (
         SELECT 1 FROM user_dialog_pins pin
         WHERE pin.owner_id = p.user_id AND pin.peer_type = 3
@@ -559,7 +560,7 @@ CROSS JOIN LATERAL (
 LEFT JOIN LATERAL (
     SELECT cm.channel_id, cm.local_id, cm.from_id, cm.date, cm.message, cm.edit_date,
            cm.deleted, cm.random_id, cm.grouped_id, cm.file_id, cm.reply_to_msg_id, cm.action_type,
-           cm.ttl_period, cm.post_author
+           cm.ttl_period, cm.post_author, cm.entities
     FROM channel_messages cm
     WHERE cm.channel_id = c.id AND cm.deleted = false
       AND cm.local_id > p.available_min_id

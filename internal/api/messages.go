@@ -400,6 +400,10 @@ func (h *handlers) handleSendMessageAfterReplyOnConn(c *mtproto.Conn, r *mtproto
 	if !validText(req.Message) {
 		return nil, nil, nil, errMessageEmpty
 	}
+	messageEntities, err := h.encodeMessageEntitiesWithURLs(r.UserID, req.Message, req.Entities)
+	if err != nil {
+		return nil, nil, nil, err
+	}
 	peerType, toID, err := h.inputPeer(req.Peer, r.UserID)
 	if err != nil {
 		return nil, nil, nil, err
@@ -410,12 +414,12 @@ func (h *handlers) handleSendMessageAfterReplyOnConn(c *mtproto.Conn, r *mtproto
 		return nil, nil, nil, err
 	}
 	if peerType == store.PeerTypeChannel {
-		res, err := h.sendChannelMessage(r, toID, &req, replyToMsgID)
+		res, err := h.sendChannelMessage(r, toID, &req, replyToMsgID, messageEntities)
 		return res, nil, nil, err
 	}
 
 	if peerType == store.PeerTypeChat {
-		return h.sendChatMessageAfterReplyOnConn(c, r, toID, &req, replyToMsgID)
+		return h.sendChatMessageAfterReplyOnConn(c, r, toID, &req, replyToMsgID, messageEntities)
 	}
 
 	// Check for a transport retry (already-stored random_id) before the rate
@@ -462,7 +466,7 @@ func (h *handlers) handleSendMessageAfterReplyOnConn(c *mtproto.Conn, r *mtproto
 	}
 
 	attempt := beginSenderRPC(c, r)
-	sender, senderPts, recipientPts, _, err := h.store.SendMessage(r.Ctx, r.UserID, toID, req.Message, req.RandomID, 0, replyToMsgID)
+	sender, senderPts, recipientPts, _, err := h.store.SendMessageWithEntities(r.Ctx, r.UserID, toID, req.Message, req.RandomID, 0, replyToMsgID, messageEntities)
 	if err != nil {
 		if errors.Is(err, store.ErrRandomIDExpired) {
 			clearSenderRPC(attempt)
@@ -544,7 +548,7 @@ func (h *handlers) requireMember(ctx context.Context, chatID, userID int64) erro
 // chatID and returns the sender-side Updates. The reply is the 1:1 shape plus
 // the chat itself. With a connection, the sender's own notification is keyed
 // and held until the RPC result has been written.
-func (h *handlers) sendChatMessageAfterReplyOnConn(c *mtproto.Conn, r *mtproto.Request, chatID int64, req *tg.MessagesSendMessageRequest, replyToMsgID int64) (bin.Encoder, *replyUpdate, func(), error) {
+func (h *handlers) sendChatMessageAfterReplyOnConn(c *mtproto.Conn, r *mtproto.Request, chatID int64, req *tg.MessagesSendMessageRequest, replyToMsgID int64, entities []store.PollDescriptionEntity) (bin.Encoder, *replyUpdate, func(), error) {
 	if err := h.requireMember(r.Ctx, chatID, r.UserID); err != nil {
 		return nil, nil, nil, err
 	}
@@ -594,7 +598,7 @@ func (h *handlers) sendChatMessageAfterReplyOnConn(c *mtproto.Conn, r *mtproto.R
 	attempt := beginSenderRPC(c, r)
 	sender, perOwner, _, err := h.store.SendChatMessage(r.Ctx, store.FanOut{
 		ChatID: chatID, FromID: r.UserID, Text: req.Message, RandomID: req.RandomID,
-		ReplyToMsgID: replyToMsgID,
+		ReplyToMsgID: replyToMsgID, Entities: entities,
 	})
 	if errors.Is(err, store.ErrNotMember) {
 		clearSenderRPC(attempt)
@@ -1137,12 +1141,16 @@ func (h *handlers) handleEditMessageAfterReplyOnConn(c *mtproto.Conn, r *mtproto
 	if !validText(req.Message) {
 		return nil, nil, nil, errMessageEmpty
 	}
+	messageEntities, err := h.encodeMessageEntitiesWithURLs(r.UserID, req.Message, req.Entities)
+	if err != nil {
+		return nil, nil, nil, err
+	}
 
 	var attempt senderRPCAttempt
 	if peerType == store.PeerTypeUser {
 		attempt = beginSenderRPC(c, r)
 	}
-	peerID, newPts, err := h.store.EditMessage(r.Ctx, r.UserID, int64(req.ID), req.Message)
+	peerID, newPts, err := h.store.EditMessageWithEntities(r.Ctx, r.UserID, int64(req.ID), req.Message, messageEntities)
 	if errors.Is(err, store.ErrMessageInvalid) {
 		if peerType == store.PeerTypeUser {
 			h.clearSenderAfterStoreFailure(attempt, r, err)
@@ -1746,18 +1754,46 @@ func (h *handlers) handleSendReaction(r *mtproto.Request) (bin.Encoder, error) {
 	if err != nil {
 		return nil, err
 	}
-	// Reactions on channel messages are out of scope.
+	localID := int64(req.MsgID)
+	reactions, hasReactions := req.GetReaction()
 	if peerType == store.PeerTypeChannel {
-		return nil, errPeerIDInvalid
+		reaction := ""
+		if hasReactions && len(reactions) > 0 {
+			if len(reactions) != 1 {
+				return nil, errReactionInvalid
+			}
+			emoji, ok := reactions[0].(*tg.ReactionEmoji)
+			if !ok || !isStandardReactionEmoji(emoji.Emoticon) {
+				return nil, errReactionInvalid
+			}
+			reaction = emoji.Emoticon
+		}
+		counts, err := h.store.SetChannelMessageReaction(r.Ctx, peerID, r.UserID, localID, reaction)
+		switch {
+		case errors.Is(err, store.ErrMessageInvalid):
+			return nil, errMessageIDInvalid
+		case errors.Is(err, store.ErrNotMember):
+			return nil, errPeerIDInvalid
+		case errors.Is(err, store.ErrReactionInvalid):
+			return nil, errReactionInvalid
+		case err != nil:
+			h.log.Error("send channel reaction", "user_id", r.UserID, "channel_id", peerID, "err", err)
+			return nil, errInternal
+		}
+		return &tg.Updates{
+			Updates: []tg.UpdateClass{&tg.UpdateMessageReactions{
+				Peer:      &tg.PeerChannel{ChannelID: peerID},
+				MsgID:     req.MsgID,
+				Reactions: channelReactionsToTL(counts),
+			}},
+			Date: int(time.Now().Unix()),
+		}, nil
 	}
 	if peerType == store.PeerTypeChat {
 		if err = h.requireMember(r.Ctx, peerID, r.UserID); err != nil {
 			return nil, err
 		}
 	}
-
-	localID := int64(req.MsgID)
-	reactions, hasReactions := req.GetReaction()
 
 	var affected []store.ReactionTarget
 	if !hasReactions || len(reactions) == 0 {
@@ -1860,6 +1896,17 @@ func (h *handlers) handleGetMessagesReactions(r *mtproto.Request) (bin.Encoder, 
 			h.log.Error("get channel message reactions", "user_id", r.UserID, "channel_id", peerID, "err", err)
 			return nil, errInternal
 		}
+		visibleIDs := make([]int64, 0, len(msgs))
+		for _, localID := range localIDs {
+			if m, ok := msgs[localID]; ok && !m.Deleted {
+				visibleIDs = append(visibleIDs, m.LocalID)
+			}
+		}
+		byMessage, err := h.store.ChannelMessageReactionsByMessageIDs(r.Ctx, peerID, r.UserID, visibleIDs)
+		if err != nil {
+			h.log.Error("load channel reaction counts", "user_id", r.UserID, "channel_id", peerID, "err", err)
+			return nil, errInternal
+		}
 		updates := make([]tg.UpdateClass, 0, len(localIDs))
 		for _, localID := range localIDs {
 			m, ok := msgs[localID]
@@ -1867,10 +1914,9 @@ func (h *handlers) handleGetMessagesReactions(r *mtproto.Request) (bin.Encoder, 
 				continue
 			}
 			updates = append(updates, &tg.UpdateMessageReactions{
-				Peer:  &tg.PeerChannel{ChannelID: peerID},
-				MsgID: int(m.LocalID),
-				// Channel post reactions are not persisted on this server yet.
-				Reactions: reactionsToTL(nil),
+				Peer:      &tg.PeerChannel{ChannelID: peerID},
+				MsgID:     int(m.LocalID),
+				Reactions: channelReactionsToTL(byMessage[m.LocalID]),
 			})
 		}
 		return &tg.Updates{Updates: updates, Date: int(time.Now().Unix())}, nil
@@ -1915,7 +1961,7 @@ func (h *handlers) handleGetMessagesReactions(r *mtproto.Request) (bin.Encoder, 
 			// Derived from the stored row, never echoed from the request.
 			Peer:      peerToTL(m.PeerType, m.PeerID),
 			MsgID:     int(m.LocalID),
-			Reactions: reactionsToTL(byMessage[m.LocalID]),
+			Reactions: reactionsToTL(byMessage[m.LocalID], r.UserID),
 		}
 	}
 	// No users: the reply names no reactor, so there is no one to hydrate.

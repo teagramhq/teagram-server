@@ -464,7 +464,10 @@ func isAdminPath(path string) bool {
 }
 
 func isWebPath(path string) bool {
-	if path == "/" || path == "/.well-known/teagram-web/version.txt" {
+	// Route the retired well-known path to Web so its 404 rule wins over the landing fallback.
+	if path == "/" ||
+		path == "/.well-known/teagram-web/version.txt" ||
+		path == "/.well-known/telegram-web/version.txt" {
 		return true
 	}
 	if strings.ContainsAny(path, "%\\") || strings.HasSuffix(path, "/") || len(path) < 2 {

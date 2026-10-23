@@ -516,12 +516,19 @@ func TestSmokeClientRequestFixturesAreLayer228Shapes(t *testing.T) {
 		"messages_sendMedia.2",
 		"messages_sendMedia.3",
 		"messages_sendMedia.4",
+		"messages_sendMedia.gif.1",
+		"messages_saveGif.1",
+		"messages_saveGif.2",
+		"messages_getSavedGifs.1",
 		"messages_sendMessage.1",
 		"messages_sendMessage.2",
 		"messages_sendMessage.3",
 		"messages_sendReaction.1",
+		"messages_sendReaction.channel.1",
 		"messages_setChatAvailableReactions.1",
+		"messages_setChatAvailableReactions.channel.1",
 		"messages_getMessagesReactions.1",
+		"messages_getMessagesReactions.channel.1",
 		"messages_sendVote.1",
 		"messages_setTyping.1",
 		"upload_saveFilePart.1",
@@ -1298,6 +1305,7 @@ func testSmokeClientRequestFixtures(t *testing.T) {
 	}
 
 	var groupMessageID int
+	var channelMessageID int
 	for i, message := range []struct {
 		fixture string
 		peer    tg.InputPeerClass
@@ -1335,6 +1343,7 @@ func testSmokeClientRequestFixtures(t *testing.T) {
 			if posted == nil {
 				t.Fatal("channel post result omitted updateNewChannelMessage")
 			}
+			channelMessageID = posted.ID
 			if author, present := posted.GetPostAuthor(); !present || author != "Smoke" {
 				t.Fatalf("channel post_author = %q, present=%v; want the send-time display name Smoke", author, present)
 			}
@@ -1385,6 +1394,49 @@ func testSmokeClientRequestFixtures(t *testing.T) {
 		return nil
 	}); err != nil {
 		t.Fatalf("replay get-message-reactions fixture: %v", err)
+	}
+	if err := fixtureClientCall(t, creator, "messages_setChatAvailableReactions.channel.1", func(ctx context.Context, api *tg.Client) error {
+		result, err := api.MessagesSetChatAvailableReactions(ctx, &tg.MessagesSetChatAvailableReactionsRequest{
+			Peer: peerChannel(creator.id, channelID),
+			AvailableReactions: &tg.ChatReactionsSome{Reactions: []tg.ReactionClass{
+				&tg.ReactionEmoji{Emoticon: "❤"},
+			}},
+		})
+		if err == nil && result == nil {
+			return errors.New("set channel available reactions returned nil Updates")
+		}
+		return err
+	}); err != nil {
+		t.Fatalf("replay channel set-available-reactions fixture: %v", err)
+	}
+	if err := fixtureClientCall(t, creator, "messages_sendReaction.channel.1", func(ctx context.Context, api *tg.Client) error {
+		result, err := api.MessagesSendReaction(ctx, &tg.MessagesSendReactionRequest{
+			Peer: peerChannel(creator.id, channelID), MsgID: channelMessageID,
+			Reaction: []tg.ReactionClass{&tg.ReactionEmoji{Emoticon: "❤"}},
+		})
+		if err == nil {
+			if _, ok := result.(*tg.Updates); !ok {
+				return fmt.Errorf("channel sendReaction result = %T, want *tg.Updates", result)
+			}
+		}
+		return err
+	}); err != nil {
+		t.Fatalf("replay channel send-reaction fixture: %v", err)
+	}
+	if err := fixtureClientCall(t, creator, "messages_getMessagesReactions.channel.1", func(ctx context.Context, api *tg.Client) error {
+		result, err := api.MessagesGetMessagesReactions(ctx, &tg.MessagesGetMessagesReactionsRequest{
+			Peer: peerChannel(creator.id, channelID), ID: []int{channelMessageID},
+		})
+		if err != nil {
+			return err
+		}
+		updates, ok := result.(*tg.Updates)
+		if !ok || len(updates.Updates) != 1 {
+			return fmt.Errorf("channel getMessagesReactions result = %#v, want one reaction update", result)
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("replay channel get-message-reactions fixture: %v", err)
 	}
 	if err := fixtureClientCall(t, creator, "messages_deleteHistory.1", func(ctx context.Context, api *tg.Client) error {
 		request := &tg.MessagesDeleteHistoryRequest{Peer: peerUser(creator.id, member.id)}
@@ -1605,6 +1657,7 @@ func testSmokeClientRequestFixtures(t *testing.T) {
 		}); err != nil {
 			t.Fatalf("replay delete-chat fixture: %v", err)
 		}
+		testSmokeSavedGIFRequestFixtures(t, f, creator, member)
 		return
 	}
 	t.Fatal("poll answer web-page fixture response omitted updateNewMessage")

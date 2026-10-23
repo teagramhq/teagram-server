@@ -56,6 +56,7 @@ type Message struct {
 	Date        time.Time
 	TTLPeriod   int
 	Text        string
+	Entities    string
 	Out         bool
 	EditDate    *time.Time
 	Deleted     bool
@@ -101,6 +102,7 @@ func messageFromRow(r db.Message) Message {
 		Date:        r.Date.Time,
 		TTLPeriod:   int(r.TtlPeriod),
 		Text:        r.Message,
+		Entities:    string(r.Entities),
 		Out:         r.Out,
 		Deleted:     r.Deleted,
 		RandomID:    r.RandomID,
@@ -196,7 +198,17 @@ func messageRowByRandomID(ctx context.Context, q *db.Queries, ownerID, randomID 
 // copy is written as usual with peer_local_id 0, the recipient gets nothing,
 // and recipientPts is 0. A sender who blocked the recipient gets
 // ErrYouBlockedUser and nothing is written. A resend keeps its stored answer.
-func (s *Store) SendMessage(ctx context.Context, fromID, toID int64, text string, randomID, fileID, replyToMsgID int64) (sender Message, senderPts, recipientPts int, dup bool, err error) {
+func (s *Store) SendMessage(ctx context.Context, fromID, toID int64, text string, randomID, fileID, replyToMsgID int64) (Message, int, int, bool, error) {
+	return s.SendMessageWithEntities(ctx, fromID, toID, text, randomID, fileID, replyToMsgID, nil)
+}
+
+// SendMessageWithEntities stores the same entity spans on both owner rows so
+// send replies, updates and history all render one canonical message.
+func (s *Store) SendMessageWithEntities(ctx context.Context, fromID, toID int64, text string, randomID, fileID, replyToMsgID int64, entities []PollDescriptionEntity) (sender Message, senderPts, recipientPts int, dup bool, err error) {
+	entityData, err := EncodeMessageEntities(entities)
+	if err != nil {
+		return Message{}, 0, 0, false, fmt.Errorf("encode message entities: %w", err)
+	}
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return Message{}, 0, 0, false, fmt.Errorf("begin: %w", err)
@@ -300,6 +312,7 @@ func (s *Store) SendMessage(ctx context.Context, fromID, toID int64, text string
 			FanoutID: 0, ActionType: 0, ActionUserID: 0, FileID: fileID, ReplyToMsgID: senderReplyTo,
 			FwdFromID: nil, FwdDate: pgtype.Timestamptz{}, FwdChannelID: nil, FwdChannelPost: nil,
 			ReplyToTrusted: senderReplyTrusted,
+			Entities:       entityData,
 		}); err != nil {
 			return Message{}, 0, 0, false, fmt.Errorf("insert self message: %w", err)
 		}
@@ -339,6 +352,7 @@ func (s *Store) SendMessage(ctx context.Context, fromID, toID int64, text string
 		FanoutID: 0, ActionType: 0, ActionUserID: 0, FileID: fileID, ReplyToMsgID: senderReplyTo,
 		FwdFromID: nil, FwdDate: pgtype.Timestamptz{}, FwdChannelID: nil, FwdChannelPost: nil,
 		ReplyToTrusted: senderReplyTrusted,
+		Entities:       entityData,
 	}); err != nil {
 		return Message{}, 0, 0, false, fmt.Errorf("insert sender message: %w", err)
 	}
@@ -357,6 +371,7 @@ func (s *Store) SendMessage(ctx context.Context, fromID, toID int64, text string
 			FanoutID: 0, ActionType: 0, ActionUserID: 0, FileID: fileID, ReplyToMsgID: recipientReplyTo,
 			FwdFromID: nil, FwdDate: pgtype.Timestamptz{}, FwdChannelID: nil, FwdChannelPost: nil,
 			ReplyToTrusted: recipientReplyTrusted,
+			Entities:       entityData,
 		}); err != nil {
 			return Message{}, 0, 0, false, fmt.Errorf("insert recipient message: %w", err)
 		}
@@ -778,7 +793,17 @@ func (s *Store) SearchFilteredMessages(
 // On a chat message the mirror is every per-member copy of the fan-out rather
 // than one peer row, the returned peer id is the chat id, and the caller must
 // still be a member of that chat.
-func (s *Store) EditMessage(ctx context.Context, ownerID, localID int64, text string) (peerID int64, newPts int, err error) {
+func (s *Store) EditMessage(ctx context.Context, ownerID, localID int64, text string) (int64, int, error) {
+	return s.EditMessageWithEntities(ctx, ownerID, localID, text, nil)
+}
+
+// EditMessageWithEntities updates entity metadata on every active copy in the
+// same transaction as the text and edit event.
+func (s *Store) EditMessageWithEntities(ctx context.Context, ownerID, localID int64, text string, entities []PollDescriptionEntity) (peerID int64, newPts int, err error) {
+	entityData, err := EncodeMessageEntities(entities)
+	if err != nil {
+		return 0, 0, fmt.Errorf("encode message entities: %w", err)
+	}
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return 0, 0, fmt.Errorf("begin: %w", err)
@@ -796,7 +821,7 @@ func (s *Store) EditMessage(ctx context.Context, ownerID, localID int64, text st
 	}
 	peerID = pre.PeerID
 	if PeerType(pre.PeerType) == PeerTypeChat {
-		if newPts, err = editChatMessage(ctx, tx, qtx, pre, text); err != nil {
+		if newPts, err = editChatMessage(ctx, tx, qtx, pre, text, entityData); err != nil {
 			return 0, 0, err
 		}
 		if err = tx.Commit(ctx); err != nil {
@@ -819,14 +844,14 @@ func (s *Store) EditMessage(ctx context.Context, ownerID, localID int64, text st
 		return 0, 0, ErrMessageInvalid
 	}
 
-	if err = qtx.SetEditedText(ctx, db.SetEditedTextParams{OwnerID: ownerID, LocalID: localID, Message: text}); err != nil {
+	if err = qtx.SetEditedTextWithEntities(ctx, db.SetEditedTextWithEntitiesParams{OwnerID: ownerID, LocalID: localID, Message: text, Entities: entityData}); err != nil {
 		return 0, 0, fmt.Errorf("edit owner row: %w", err)
 	}
 	// A send withheld from a recipient who blocked the sender has no mirror
 	// (peer_local_id 0), so its edit touches the sender's side alone.
 	mirrored := ownerID != peerID && msg.PeerLocalID != 0
 	if mirrored {
-		if err = qtx.SetEditedText(ctx, db.SetEditedTextParams{OwnerID: peerID, LocalID: msg.PeerLocalID, Message: text}); err != nil {
+		if err = qtx.SetEditedTextWithEntities(ctx, db.SetEditedTextWithEntitiesParams{OwnerID: peerID, LocalID: msg.PeerLocalID, Message: text, Entities: entityData}); err != nil {
 			return 0, 0, fmt.Errorf("edit mirror row: %w", err)
 		}
 	}
@@ -971,7 +996,7 @@ func lockPollsForDeletedMessageCopies(ctx context.Context, qtx *db.Queries, refs
 // as the chats row lock here. Leaving the chats row out is what lets
 // DeleteMessages accept a batch spanning several chats without breaking the
 // one-chats-row-per-transaction rule.
-func editChatMessage(ctx context.Context, tx pgx.Tx, qtx *db.Queries, pre db.Message, text string) (int, error) {
+func editChatMessage(ctx context.Context, tx pgx.Tx, qtx *db.Queries, pre db.Message, text, entityData string) (int, error) {
 	copies, err := chatCopies(ctx, qtx, pre)
 	if err != nil {
 		return 0, err
@@ -1014,7 +1039,7 @@ func editChatMessage(ctx context.Context, tx pgx.Tx, qtx *db.Queries, pre db.Mes
 		if !members[c.OwnerID] {
 			continue
 		}
-		if err = qtx.SetEditedText(ctx, db.SetEditedTextParams{OwnerID: c.OwnerID, LocalID: c.LocalID, Message: text}); err != nil {
+		if err = qtx.SetEditedTextWithEntities(ctx, db.SetEditedTextWithEntitiesParams{OwnerID: c.OwnerID, LocalID: c.LocalID, Message: text, Entities: entityData}); err != nil {
 			return 0, fmt.Errorf("edit copy %d: %w", c.OwnerID, err)
 		}
 		pts, e := bumpPtsOnly(ctx, qtx, c.OwnerID)

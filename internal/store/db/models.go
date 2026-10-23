@@ -71,6 +71,12 @@ type Channel struct {
 	CurrentPhotoUploaderID *int64
 }
 
+type ChannelAvailableReaction struct {
+	ChannelID int64
+	Mode      string
+	Reactions []string
+}
+
 type ChannelDeletionJob struct {
 	ChannelID         int64
 	PostCursor        int64
@@ -109,6 +115,14 @@ type ChannelMessage struct {
 	PostAuthor   *string
 	TtlPeriod    int32
 	ExpiresAt    pgtype.Timestamptz
+	Entities     []byte
+}
+
+type ChannelMessageReaction struct {
+	ChannelID int64
+	LocalID   int64
+	ReactorID int64
+	Reaction  string
 }
 
 type ChannelParticipant struct {
@@ -510,6 +524,7 @@ type Message struct {
 	FwdPostAuthor  *string
 	TtlPeriod      int32
 	ExpiresAt      pgtype.Timestamptz
+	Entities       []byte
 }
 
 type MessageDeleteCapacityRefusal struct {
@@ -697,6 +712,12 @@ type RegistrationInvite struct {
 	State        string
 	ConsumedAt   pgtype.Timestamptz
 	RevokedAt    pgtype.Timestamptz
+}
+
+type SavedGif struct {
+	OwnerID int64
+	FileID  int64
+	SavedAt pgtype.Timestamptz
 }
 
 type SecretChat struct {

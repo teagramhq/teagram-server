@@ -34,6 +34,14 @@ Change a retained value only through `ROLLOUT_RUNNER_CHANGED_ENV` with the
 previous `.env` backup. If a rollout that added public settings rolls back, the
 runner restores that previous `.env` before recreating the previous container.
 
+The only approved Compose listener addition is `127.0.0.1:2446:2446` for the
+public WebSocket listener. Preflight and post-start comparisons normalize that
+exact binding from the configuration and inspected-exposure digests, while
+recording its presence separately and requiring the replacement container to
+match the Compose mapping. A wildcard host IP, another host or container port,
+or any other port change remains a configuration drift and rejects before
+replacement.
+
 For every local-backed rollout, read the running `teagramd` container's
 `com.docker.compose.project.config_files` label and carry that Compose selection
 forward unchanged. With ordinary local authority, it must start with a

@@ -1,12 +1,153 @@
 package api
 
 import (
+	"regexp"
+	"strings"
+	"unicode"
 	"unicode/utf16"
+	"unicode/utf8"
 
 	"github.com/gotd/td/tg"
+	"golang.org/x/net/publicsuffix"
 
 	"github.com/teagramhq/teagram-server/internal/store"
 )
+
+var messageURLPattern = regexp.MustCompile(`(?i)(?:https?://|tg://)[^\s\v\x{85}\p{Z}<>"']+|(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,}(?::[0-9]{1,5})?(?:[/?#][^\s\v\x{85}\p{Z}<>"']*)?`)
+
+func (h *handlers) encodeMessageEntitiesWithURLs(viewerID int64, text string, entities []tg.MessageEntityClass) ([]store.PollDescriptionEntity, error) {
+	encoded, err := h.encodeMessageEntities(viewerID, text, entities)
+	if err != nil {
+		return nil, err
+	}
+	return addDetectedMessageURLs(text, encoded)
+}
+
+func addDetectedMessageURLs(text string, entities []store.PollDescriptionEntity) ([]store.PollDescriptionEntity, error) {
+	merged := append([]store.PollDescriptionEntity(nil), entities...)
+	if len(merged) >= store.MaxPollDescriptionEntities {
+		return merged, nil
+	}
+	for searchFrom := 0; searchFrom < len(text); {
+		match := messageURLPattern.FindStringIndex(text[searchFrom:])
+		if match == nil {
+			break
+		}
+		start, end := searchFrom+match[0], searchFrom+match[1]
+		searchFrom = end
+		if start > 0 {
+			previous, _ := utf8.DecodeLastRuneInString(text[:start])
+			if isMessageURLWordRune(previous) || previous == '@' || previous == '.' {
+				continue
+			}
+		}
+		candidate := trimMessageURLSuffix(text[start:end])
+		if candidate == "" {
+			continue
+		}
+		if !hasExplicitMessageURLScheme(candidate) && !hasKnownMessageURLSuffix(candidate) {
+			continue
+		}
+		end = start + len(candidate)
+		offset := utf16Length(text[:start])
+		length := utf16Length(text[start:end])
+		if offset > store.MaxMessageEntityOffset || length > store.MaxMessageEntityOffset-offset {
+			continue
+		}
+		if overlapsMessageEntity(offset, length, merged) {
+			continue
+		}
+		merged = append(merged, store.PollDescriptionEntity{
+			Type: store.PollDescriptionEntityURL, Offset: offset, Length: length,
+		})
+		if len(merged) >= store.MaxPollDescriptionEntities {
+			break
+		}
+	}
+	return merged, nil
+}
+
+func hasExplicitMessageURLScheme(candidate string) bool {
+	candidate = strings.ToLower(candidate)
+	return strings.HasPrefix(candidate, "http://") || strings.HasPrefix(candidate, "https://") || strings.HasPrefix(candidate, "tg://")
+}
+
+func hasKnownMessageURLSuffix(candidate string) bool {
+	if hostEnd := strings.IndexAny(candidate, ":/?#"); hostEnd >= 0 {
+		candidate = candidate[:hostEnd]
+	}
+	if candidate == "" {
+		return false
+	}
+	candidate = strings.ToLower(candidate)
+	suffix, icann := publicsuffix.PublicSuffix(candidate)
+	// Telegram also accepts the special-use .onion and TON .ton suffixes.
+	return icann || strings.Contains(suffix, ".") || suffix == "onion" || suffix == "ton"
+}
+
+func isMessageURLWordRune(r rune) bool {
+	return r == '_' || r == '-' || unicode.IsLetter(r) || unicode.IsDigit(r)
+}
+
+func trimMessageURLSuffix(value string) string {
+	value = strings.TrimRight(value, ".,!?;:")
+	var openParentheses, closeParentheses int
+	var openBrackets, closeBrackets int
+	var openBraces, closeBraces int
+	for i := range len(value) {
+		switch value[i] {
+		case '(':
+			openParentheses++
+		case ')':
+			closeParentheses++
+		case '[':
+			openBrackets++
+		case ']':
+			closeBrackets++
+		case '{':
+			openBraces++
+		case '}':
+			closeBraces++
+		}
+	}
+	for len(value) > 0 {
+		switch value[len(value)-1] {
+		case ')':
+			if closeParentheses <= openParentheses {
+				return value
+			}
+			closeParentheses--
+		case ']':
+			if closeBrackets <= openBrackets {
+				return value
+			}
+			closeBrackets--
+		case '}':
+			if closeBraces <= openBraces {
+				return value
+			}
+			closeBraces--
+		default:
+			return value
+		}
+		value = value[:len(value)-1]
+	}
+	return value
+}
+
+func overlapsMessageEntity(offset, length int, entities []store.PollDescriptionEntity) bool {
+	end := offset + length
+	for _, entity := range entities {
+		if offset < entity.Offset+entity.Length && entity.Offset < end {
+			return true
+		}
+	}
+	return false
+}
+
+func utf16Length(text string) int {
+	return len(utf16.Encode([]rune(text)))
+}
 
 func (h *handlers) encodeMessageEntities(viewerID int64, text string, entities []tg.MessageEntityClass) ([]store.PollDescriptionEntity, error) {
 	if len(entities) > store.MaxPollDescriptionEntities {
@@ -23,7 +164,8 @@ func (h *handlers) encodeMessageEntities(viewerID int64, text string, entities [
 			return nil, errEntityBoundsInvalid
 		}
 		offset, length := entity.GetOffset(), entity.GetLength()
-		if offset < 0 || length <= 0 || offset > textLength || length > textLength-offset {
+		if offset < 0 || length <= 0 || offset > textLength || length > textLength-offset ||
+			offset > store.MaxMessageEntityOffset || length > store.MaxMessageEntityOffset-offset {
 			return nil, errEntityBoundsInvalid
 		}
 		stored := store.PollDescriptionEntity{Offset: offset, Length: length}

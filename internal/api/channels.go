@@ -425,6 +425,12 @@ func (h *handlers) handleGetFullChannel(r *mtproto.Request) (bin.Encoder, error)
 		ChatPhoto:      &tg.PhotoEmpty{},
 		NotifySettings: notifySettings,
 	}
+	availableReactions, err := chatAvailableReactionsToTL(snapshot.AvailableReactions)
+	if err != nil {
+		h.log.Error("get full channel available reactions", "channel_id", channelID, "err", err)
+		return nil, errInternal
+	}
+	full.SetAvailableReactions(availableReactions)
 	if member && snapshot.CurrentPhoto != nil {
 		full.ChatPhoto = h.photoToTL(*snapshot.CurrentPhoto)
 	}
@@ -887,7 +893,7 @@ func (h *handlers) requireChannelMember(ctx context.Context, channelID, userID i
 // ride. store.ErrNotMember covers "not a member", "banned", "may not post in a
 // broadcast" and "no such channel" alike, and all four must stay one wire error
 // so channel ids are not enumerable.
-func (h *handlers) sendChannelMessage(r *mtproto.Request, channelID int64, req *tg.MessagesSendMessageRequest, replyToMsgID int64) (bin.Encoder, error) {
+func (h *handlers) sendChannelMessage(r *mtproto.Request, channelID int64, req *tg.MessagesSendMessageRequest, replyToMsgID int64, entities []store.PollDescriptionEntity) (bin.Encoder, error) {
 	// Check for a transport retry before the rate limit.
 	if req.RandomID != 0 {
 		existing, pts, duplicate, err := h.store.ChannelTextMessageRetryAs(r.Ctx, channelID, r.UserID, req.RandomID)
@@ -944,7 +950,7 @@ func (h *handlers) sendChannelMessage(r *mtproto.Request, channelID int64, req *
 
 	// PostChannelMessageAs, never PostChannelMessage: the latter is the
 	// unchecked primitive and trusts its caller to have decided post rights.
-	msg, pts, dup, err := h.store.PostChannelMessageAs(r.Ctx, channelID, r.UserID, req.Message, req.RandomID, nil, replyToMsgID)
+	msg, pts, dup, err := h.store.PostChannelMessageAsWithEntities(r.Ctx, channelID, r.UserID, req.Message, req.RandomID, nil, replyToMsgID, entities)
 	if slowModeWait, ok := errors.AsType[*store.SlowModeWaitError](err); ok {
 		return nil, rpcErr(420, slowModeWait.Error())
 	}
@@ -1352,6 +1358,20 @@ func (h *handlers) channelMessagesWithCountAndCaller(
 		h.log.Error("channel messages files", "user_id", r.UserID, "channel_id", channelID, "err", err)
 		return nil, errInternal
 	}
+	reactionIDs := make([]int64, 0, len(msgs))
+	for _, m := range msgs {
+		if !m.Deleted && m.Action == store.ChannelMessageActionNone {
+			reactionIDs = append(reactionIDs, m.LocalID)
+		}
+	}
+	channelReactions := map[int64][]store.ChannelReactionCount{}
+	if len(reactionIDs) > 0 {
+		channelReactions, err = h.store.ChannelMessageReactionsByMessageIDs(r.Ctx, channelID, r.UserID, reactionIDs)
+		if err != nil {
+			h.log.Error("channel message reactions", "user_id", r.UserID, "channel_id", channelID, "err", err)
+			return nil, errInternal
+		}
+	}
 	// A page has as many authors as the channel has posters, so the user list is
 	// collected off the batch itself. getReplies includes only authors of returned
 	// replies; channel history also includes the caller as before.
@@ -1365,6 +1385,9 @@ func (h *handlers) channelMessagesWithCountAndCaller(
 		if renderErr != nil {
 			h.log.Error("render channel history message", "user_id", r.UserID, "channel_id", channelID, "local_id", m.LocalID, "err", renderErr)
 			return nil, errInternal
+		}
+		if rendered, ok := message.(*tg.Message); ok && m.Action == store.ChannelMessageActionNone {
+			rendered.SetReactions(channelReactionsToTL(channelReactions[m.LocalID]))
 		}
 		tlMsgs[i] = message
 		if !m.Deleted && !broadcast {
