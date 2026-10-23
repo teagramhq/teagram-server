@@ -165,6 +165,7 @@ type updateCollector struct {
 	pinnedDialogs  chan *tg.UpdatePinnedDialogs
 	dialogUnread   chan *tg.UpdateDialogUnreadMark
 	notifySettings chan *tg.UpdateNotifySettings
+	stickerSets    chan *tg.UpdateStickerSets
 	drafts         chan *tg.UpdateDraftMessage
 	points         chan int
 }
@@ -201,6 +202,7 @@ func newUpdateCollector() *updateCollector {
 		pinnedDialogs:  make(chan *tg.UpdatePinnedDialogs, 8),
 		dialogUnread:   make(chan *tg.UpdateDialogUnreadMark, 8),
 		notifySettings: make(chan *tg.UpdateNotifySettings, 16),
+		stickerSets:    make(chan *tg.UpdateStickerSets, 8),
 		drafts:         make(chan *tg.UpdateDraftMessage, 8),
 		points:         make(chan int, 8),
 	}
@@ -289,6 +291,8 @@ func (u *updateCollector) dispatch(x tg.UpdateClass, chats []tg.ChatClass) {
 		send(u.dialogUnread, up)
 	case *tg.UpdateNotifySettings:
 		send(u.notifySettings, up)
+	case *tg.UpdateStickerSets:
+		send(u.stickerSets, up)
 	case *tg.UpdateDraftMessage:
 		send(u.drafts, up)
 	}
@@ -449,7 +453,7 @@ func bootServerWithLimitsAndRegistrationModeAndBlobsAndStatusWithDeliveryHookAnd
 			updater.Deliver(ctx, userID)
 		}
 	}
-	_, stopListener, err := store.StartListenerWithDialogPins(ctx, dsn, deliver, updater.DeliverTyping, updater.Evict, deliverChannelPost, updater.DeliverEncryption, updater.DeliverStatus, updater.DeliverEncryptedMsg, updater.DeliverReactions, updater.DeliverPinned, updater.MarkDialogFilters, updater.DeliverDialogPins, updater.DialogFilterListenerReconnected, log)
+	_, stopListener, err := store.StartListenerWithDialogPinsAndStickerSets(ctx, dsn, deliver, updater.DeliverTyping, updater.Evict, deliverChannelPost, updater.DeliverEncryption, updater.DeliverStatus, updater.DeliverEncryptedMsg, updater.DeliverReactions, updater.DeliverPinned, updater.MarkDialogFilters, updater.DeliverDialogPins, updater.DeliverStickerSets, updater.DialogFilterListenerReconnected, log)
 	if err != nil {
 		t.Fatalf("start listener: %v", err)
 	}

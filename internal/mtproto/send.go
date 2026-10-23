@@ -248,8 +248,9 @@ type dialogFilterRecovery struct {
 }
 
 type recoveryBinding struct {
-	Owner   int64
-	Session int64
+	Owner     int64
+	AuthKeyID int64
+	Session   int64
 }
 
 type rpcOutcome struct {
@@ -300,6 +301,16 @@ func (c *Conn) LastPushedPts() int {
 // on purpose: it is read while matching an eviction against live conns.
 func (c *Conn) AuthKeyID() int64 {
 	return c.authKeyID.Load()
+}
+
+// SessionIdentity returns a consistent lock-free snapshot of the connection's
+// current auth key and MTProto session. Listener callbacks use it to omit the
+// originating session from a transient cross-replica push.
+func (c *Conn) SessionIdentity() (authKeyID, sessionID int64) {
+	if binding := c.recoveryBinding.Load(); binding != nil {
+		return binding.AuthKeyID, binding.Session
+	}
+	return 0, 0
 }
 
 // WriteTimeout returns the deadline applied to each transport write. Delivery
@@ -719,7 +730,7 @@ func (c *Conn) setOwner(userID int64) {
 		return
 	}
 	c.owner = userID
-	c.recoveryBinding.Store(&recoveryBinding{Owner: userID, Session: c.sessionID})
+	c.recoveryBinding.Store(&recoveryBinding{Owner: userID, AuthKeyID: c.authKey.IntID(), Session: c.sessionID})
 	c.lastPushedPts.Store(0)
 	c.pendingRPCOwner = 0
 	c.pendingRPCAuthKey = 0
@@ -761,6 +772,7 @@ func (c *Conn) setKey(key crypto.AuthKey) {
 	keyChanged := c.authKey.IntID() != keyID
 	c.authKey = key
 	c.ackBinding.Store(&readAheadAckBinding{key: key, session: c.sessionID})
+	c.recoveryBinding.Store(&recoveryBinding{Owner: c.owner, AuthKeyID: keyID, Session: c.sessionID})
 	if keyChanged {
 		c.pendingRPCOwner = 0
 		c.pendingRPCAuthKey = 0
@@ -784,7 +796,7 @@ func (c *Conn) setSession(id int64) {
 	changed := c.sessionID != id
 	c.sessionID = id
 	c.ackBinding.Store(&readAheadAckBinding{key: c.authKey, session: id})
-	c.recoveryBinding.Store(&recoveryBinding{Owner: c.owner, Session: id})
+	c.recoveryBinding.Store(&recoveryBinding{Owner: c.owner, AuthKeyID: c.authKey.IntID(), Session: id})
 	if changed {
 		c.resetDialogFilterRecoveryLocked(c.owner, id)
 		c.resetRPCOutcomesLocked()
@@ -1224,6 +1236,20 @@ func (c *Conn) notAttemptedPushError(enc bin.Encoder, err error) error {
 // write; pass 0 for a transient update that carries none, since a persisted
 // batch always advertises at least 1. Safe to call from another goroutine.
 func (c *Conn) PushTo(ctx context.Context, owner int64, enc bin.Encoder, pts int) (bool, error) {
+	return c.pushTo(ctx, owner, 0, 0, false, enc, pts)
+}
+
+// PushToBinding writes only if the connection still has the owner, auth key
+// and session captured when the push was queued. The binding check and write
+// share writeMu with rebinds, so a stale snapshot cannot reach a new session.
+func (c *Conn) PushToBinding(ctx context.Context, owner, authKeyID, sessionID int64, enc bin.Encoder, pts int) (bool, error) {
+	if authKeyID == 0 {
+		return false, nil
+	}
+	return c.pushTo(ctx, owner, authKeyID, sessionID, true, enc, pts)
+}
+
+func (c *Conn) pushTo(ctx context.Context, owner, authKeyID, sessionID int64, checkBinding bool, enc bin.Encoder, pts int) (bool, error) {
 	if !c.beginPush() {
 		return false, nil
 	}
@@ -1245,7 +1271,7 @@ func (c *Conn) PushTo(ctx context.Context, owner int64, enc bin.Encoder, pts int
 			sendErr = c.notAttemptedPushError(enc, err)
 			return
 		}
-		if c.owner != owner {
+		if c.owner != owner || (checkBinding && (c.authKey.IntID() != authKeyID || c.sessionID != sessionID)) {
 			return
 		}
 		attempted = true

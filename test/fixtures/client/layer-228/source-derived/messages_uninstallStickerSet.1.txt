@@ -1,0 +1,6 @@
+# source: gotd v0.162.0 layer-228 generated request type
+body: { messages.uninstallStickerSet#f96e55de
+  stickerset: { inputStickerSetShortName#861cc8a0
+    short_name: "twemoji_reactions" [STRING],
+  },
+},

@@ -8,7 +8,11 @@ import (
 	"github.com/teagramhq/teagram-server/internal/store"
 )
 
-const appConfigHash = 5
+const (
+	appConfigHash       = 5
+	emptyWallPapersHash = 1
+	emptyChatThemesHash = 1
+)
 
 func (h *handlers) handleGetContentSettings(r *mtproto.Request) (bin.Encoder, error) {
 	var req tg.AccountGetContentSettingsRequest
@@ -41,6 +45,40 @@ func (h *handlers) handleGetThemes(r *mtproto.Request) (bin.Encoder, error) {
 		return nil, errAuthKeyUnreg
 	}
 	return &tg.AccountThemes{Themes: []tg.Theme{}}, nil
+}
+
+func (h *handlers) handleGetWallPapers(r *mtproto.Request) (bin.Encoder, error) {
+	var req tg.AccountGetWallPapersRequest
+	if err := req.Decode(r.Buf); err != nil {
+		return nil, errMethodNotImpl
+	}
+	if r.UserID == 0 {
+		return nil, errAuthKeyUnreg
+	}
+	if req.Hash == emptyWallPapersHash {
+		return &tg.AccountWallPapersNotModified{}, nil
+	}
+	return &tg.AccountWallPapers{
+		Hash:       emptyWallPapersHash,
+		Wallpapers: []tg.WallPaperClass{},
+	}, nil
+}
+
+func (h *handlers) handleGetChatThemes(r *mtproto.Request) (bin.Encoder, error) {
+	var req tg.AccountGetChatThemesRequest
+	if err := req.Decode(r.Buf); err != nil {
+		return nil, errMethodNotImpl
+	}
+	if r.UserID == 0 {
+		return nil, errAuthKeyUnreg
+	}
+	if req.Hash == emptyChatThemesHash {
+		return &tg.AccountThemesNotModified{}, nil
+	}
+	return &tg.AccountThemes{
+		Hash:   emptyChatThemesHash,
+		Themes: []tg.Theme{},
+	}, nil
 }
 
 func (h *handlers) handleGetAppConfig(r *mtproto.Request) (bin.Encoder, error) {

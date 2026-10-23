@@ -52,7 +52,7 @@ var rateLimitDenialSurfacePayloadKeys = []string{
 	"create_channel", "create_chat", "dialog_filter_mutation", "get_password", "get_password_ip",
 	"message_send", "messages_search", "messages_search_global", "password_proof",
 	"save_file_part", "send_code_ip_calls", "send_code_ip_distinct_numbers",
-	"sign_in_fail_ip", "sign_up_ip", "update_profile", "upload_get_file",
+	"sign_in_fail_ip", "sign_up_ip", "sticker_set_mutation", "update_profile", "upload_get_file",
 }
 
 var pushSurfaceKeys = []string{
@@ -400,6 +400,7 @@ func TestAuthenticatedJSONAndSSEShareRateLimitDenialSnapshot(t *testing.T) {
 		"get_password",
 		"update_profile",
 		"dialog_filter_mutation",
+		"sticker_set_mutation",
 	}
 	for i, surface := range surfaces {
 		for range i + 1 {
@@ -410,9 +411,9 @@ func TestAuthenticatedJSONAndSSEShareRateLimitDenialSnapshot(t *testing.T) {
 	metrics.RecordRateLimitDenial("unknown_surface")
 
 	want := rateLimitDenialSurfacePayload{
-		Count:         210,
+		Count:         231,
 		WindowSeconds: 42,
-		RatePerSecond: 210.0 / 42.0,
+		RatePerSecond: 231.0 / 42.0,
 		BySurface: admin.RateLimitDenialsBySurface{
 			MessageSend:               1,
 			CreateChat:                2,
@@ -434,6 +435,7 @@ func TestAuthenticatedJSONAndSSEShareRateLimitDenialSnapshot(t *testing.T) {
 			GetPassword:               18,
 			UpdateProfile:             19,
 			DialogFilterMutation:      20,
+			StickerSetMutation:        21,
 		},
 		Dropped: 2,
 	}

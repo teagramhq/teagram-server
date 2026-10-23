@@ -1046,6 +1046,13 @@ func TestStatusPayloadFormat(t *testing.T) {
 	}
 }
 
+func TestStickerSetChangedPayloadFormat(t *testing.T) {
+	t.Parallel()
+	if got := store.StickerSetChangedPayload(42, -17, 9); got != "42|-17|9" {
+		t.Fatalf("StickerSetChangedPayload(42, -17, 9) = %q, want 42|-17|9", got)
+	}
+}
+
 // terminateListenBackends kills every Postgres backend holding a LISTEN on this
 // test's database, the server-side equivalent of the connection dropping.
 func terminateListenBackends(t *testing.T, dsn string) {

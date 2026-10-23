@@ -34,6 +34,14 @@ func GetThemesForTest(userID int64) (bin.Encoder, error) {
 	return handleSettingsForTest(userID, &tg.AccountGetThemesRequest{}, (*handlers).handleGetThemes)
 }
 
+func GetWallPapersForTest(userID, hash int64) (bin.Encoder, error) {
+	return handleSettingsForTest(userID, &tg.AccountGetWallPapersRequest{Hash: hash}, (*handlers).handleGetWallPapers)
+}
+
+func GetChatThemesForTest(userID, hash int64) (bin.Encoder, error) {
+	return handleSettingsForTest(userID, &tg.AccountGetChatThemesRequest{Hash: hash}, (*handlers).handleGetChatThemes)
+}
+
 func GetAppConfigForTest(userID int64) (bin.Encoder, error) {
 	return GetAppConfigForTestWithMode(userID, config.RegistrationClosed)
 }

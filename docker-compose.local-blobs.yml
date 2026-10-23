@@ -22,6 +22,9 @@ services:
     depends_on: !override
       migrate:
         condition: service_completed_successfully
+    # The local backend does not need the isolated RustFS network.
+    networks: !override
+      - default
     # Keep optional auth while dropping the S3 blob credential.
     secrets: !override
       - source: teagramd_turnstile

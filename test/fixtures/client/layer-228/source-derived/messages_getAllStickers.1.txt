@@ -1,0 +1,4 @@
+# source: gotd v0.162.0 layer-228 generated request type
+body: { messages.getAllStickers#b8a0a1a8
+  hash: 0 [LONG],
+},

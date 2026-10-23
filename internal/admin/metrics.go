@@ -229,6 +229,7 @@ type NotifyChannels struct {
 	Pinned        int64 `json:"tg_pinned"`
 	DialogFilters int64 `json:"tg_dialog_filters"`
 	DialogPins    int64 `json:"tg_dialog_pins"`
+	StickerSets   int64 `json:"tg_sticker_sets"`
 }
 
 // PushOutcomes holds one count for every fixed persisted-update push result.
@@ -263,6 +264,7 @@ type RateLimitDenialsBySurface struct {
 	GetPassword               int64 `json:"get_password"`
 	UpdateProfile             int64 `json:"update_profile"`
 	DialogFilterMutation      int64 `json:"dialog_filter_mutation"`
+	StickerSetMutation        int64 `json:"sticker_set_mutation"`
 }
 
 // StorageRows is approximate row counts across key database tables,
@@ -538,6 +540,7 @@ func notificationChannels(channels store.NotificationChannelCounts) NotifyChanne
 		Pinned:        channels.Pinned,
 		DialogFilters: channels.DialogFilters,
 		DialogPins:    channels.DialogPins,
+		StickerSets:   channels.StickerSets,
 	}
 }
 
@@ -572,6 +575,7 @@ func rateLimitDenialsBySurface(counts store.RateLimitDenialSurfaceCounts) RateLi
 		GetPassword:               counts.GetPassword,
 		UpdateProfile:             counts.UpdateProfile,
 		DialogFilterMutation:      counts.DialogFilterMutation,
+		StickerSetMutation:        counts.StickerSetMutation,
 	}
 }
 
