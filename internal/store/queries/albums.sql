@@ -157,7 +157,7 @@ SELECT sqlc.arg(channel_id)::bigint,
 -- dedup tokens in this channel's own random_id space.
 -- name: ChannelMessagesByRandomIDs :many
 SELECT channel_id, local_id, from_id, date, message, edit_date, deleted,
-       random_id, grouped_id, file_id, reply_to_msg_id, action_type, ttl_period, post_author, entities
+       random_id, grouped_id, file_id, sticker_document_id, reply_to_msg_id, action_type, ttl_period, post_author, entities
 FROM channel_messages
 WHERE channel_id = sqlc.arg(channel_id)::bigint
   AND random_id = ANY(sqlc.arg(random_ids)::bigint[])

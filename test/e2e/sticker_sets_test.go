@@ -114,6 +114,7 @@ func testSmokeStickerSetCatalogue(t *testing.T) {
 	if firstDocument == nil {
 		t.Fatal("getStickerSet returned no first sticker document")
 	}
+	var stickerBytes []byte
 	if err := a1.call(f.ctx, func(ctx context.Context, api *tg.Client) error {
 		result, err := api.UploadGetFile(ctx, &tg.UploadGetFileRequest{
 			Location: &tg.InputDocumentFileLocation{
@@ -129,12 +130,93 @@ func testSmokeStickerSetCatalogue(t *testing.T) {
 		if !ok || int64(len(file.Bytes)) != firstDocument.Size {
 			return fmt.Errorf("sticker upload.getFile = %T with %d bytes, want %d bytes", result, lenUploadBytes(result), firstDocument.Size)
 		}
+		stickerBytes = append([]byte(nil), file.Bytes...)
 		if len(file.Bytes) < 12 || !bytes.Equal(file.Bytes[:4], []byte("RIFF")) || !bytes.Equal(file.Bytes[8:12], []byte("WEBP")) {
 			return fmt.Errorf("sticker download lacks WebP magic bytes: %x", file.Bytes[:min(len(file.Bytes), 12)])
 		}
 		return nil
 	}); err != nil {
 		t.Fatalf("download sticker WebP: %v", err)
+	}
+	const sentMessageText = "catalogue sticker smoke"
+	if err := a1.call(f.ctx, func(ctx context.Context, api *tg.Client) error {
+		_, err := api.MessagesSendMedia(ctx, &tg.MessagesSendMediaRequest{
+			Peer: peerUser(a1.id, b.id),
+			Media: &tg.InputMediaDocument{ID: &tg.InputDocument{
+				ID: firstDocument.ID, AccessHash: firstDocument.AccessHash, FileReference: []byte("ignored file reference"),
+			}},
+			Message: sentMessageText, RandomID: 1049701,
+		})
+		return err
+	}); err != nil {
+		t.Fatalf("send catalogue sticker to another account: %v", err)
+	}
+	if err := a1.call(f.ctx, func(ctx context.Context, api *tg.Client) error {
+		_, err := api.MessagesSendMultiMedia(ctx, &tg.MessagesSendMultiMediaRequest{
+			Peer: peerUser(a1.id, b.id),
+			MultiMedia: []tg.InputSingleMedia{
+				{Media: &tg.InputMediaDocument{ID: &tg.InputDocument{ID: firstDocument.ID, AccessHash: firstDocument.AccessHash}}, RandomID: 1049702},
+				{Media: &tg.InputMediaDocument{ID: &tg.InputDocument{ID: firstDocument.ID, AccessHash: firstDocument.AccessHash}}, RandomID: 1049703},
+			},
+		})
+		return err
+	}); err == nil {
+		t.Fatal("sendMultiMedia accepted catalogue stickers, want MEDIA_INVALID")
+	} else {
+		assertRPCError(t, err, "MEDIA_INVALID")
+	}
+	var recipientSticker *tg.Document
+	if err := b.call(f.ctx, func(ctx context.Context, api *tg.Client) error {
+		result, err := api.MessagesGetHistory(ctx, &tg.MessagesGetHistoryRequest{Peer: peerUser(b.id, a1.id), Limit: 10})
+		if err != nil {
+			return err
+		}
+		history, ok := result.(*tg.MessagesMessages)
+		if !ok {
+			return fmt.Errorf("recipient history = %T, want *tg.MessagesMessages", result)
+		}
+		for _, item := range history.Messages {
+			message, ok := item.(*tg.Message)
+			if !ok || message.Message != sentMessageText {
+				continue
+			}
+			media, ok := message.Media.(*tg.MessageMediaDocument)
+			if !ok {
+				return fmt.Errorf("recipient sticker media = %T, want *tg.MessageMediaDocument", message.Media)
+			}
+			document, ok := media.Document.(*tg.Document)
+			if !ok {
+				return fmt.Errorf("recipient sticker document = %T, want *tg.Document", media.Document)
+			}
+			recipientSticker = document
+		}
+		if recipientSticker == nil {
+			return fmt.Errorf("recipient history omitted %q", sentMessageText)
+		}
+		if recipientSticker.ID != firstDocument.ID || recipientSticker.AccessHash != firstDocument.AccessHash {
+			return fmt.Errorf("recipient document identity = (%d, %d), want (%d, %d)", recipientSticker.ID, recipientSticker.AccessHash, firstDocument.ID, firstDocument.AccessHash)
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("recipient getHistory: %v", err)
+	}
+	if err := b.call(f.ctx, func(ctx context.Context, api *tg.Client) error {
+		result, err := api.UploadGetFile(ctx, &tg.UploadGetFileRequest{
+			Location: &tg.InputDocumentFileLocation{
+				ID: recipientSticker.ID, AccessHash: recipientSticker.AccessHash, FileReference: recipientSticker.FileReference,
+			},
+			Limit: 262144,
+		})
+		if err != nil {
+			return err
+		}
+		file, ok := result.(*tg.UploadFile)
+		if !ok || !bytes.Equal(file.Bytes, stickerBytes) {
+			return fmt.Errorf("recipient download = %T with %d bytes, want the %d catalogue sticker bytes", result, lenUploadBytes(result), len(stickerBytes))
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("recipient download from received message: %v", err)
 	}
 
 	if err := a1.call(f.ctx, func(ctx context.Context, api *tg.Client) error {

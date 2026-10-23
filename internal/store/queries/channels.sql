@@ -528,6 +528,7 @@ SELECT
     COALESCE(top.random_id, 0) AS top_random_id,
     top.grouped_id AS top_grouped_id,
     top.file_id                AS top_file_id,
+    top.sticker_document_id    AS top_sticker_document_id,
     top.reply_to_msg_id        AS top_reply_to_msg_id,
     COALESCE(top.action_type, 0)::smallint AS top_action_type,
     COALESCE(top.ttl_period, 0)::integer AS top_ttl_period,
@@ -559,7 +560,7 @@ CROSS JOIN LATERAL (
 ) AS unread
 LEFT JOIN LATERAL (
     SELECT cm.channel_id, cm.local_id, cm.from_id, cm.date, cm.message, cm.edit_date,
-           cm.deleted, cm.random_id, cm.grouped_id, cm.file_id, cm.reply_to_msg_id, cm.action_type,
+           cm.deleted, cm.random_id, cm.grouped_id, cm.file_id, cm.sticker_document_id, cm.reply_to_msg_id, cm.action_type,
            cm.ttl_period, cm.post_author, cm.entities
     FROM channel_messages cm
     WHERE cm.channel_id = c.id AND cm.deleted = false

@@ -69,7 +69,7 @@ func (q *Queries) BumpStateBy(ctx context.Context, arg BumpStateByParams) (BumpS
 
 const channelMessagesByRandomIDs = `-- name: ChannelMessagesByRandomIDs :many
 SELECT channel_id, local_id, from_id, date, message, edit_date, deleted,
-       random_id, grouped_id, file_id, reply_to_msg_id, action_type, ttl_period, post_author, entities
+       random_id, grouped_id, file_id, sticker_document_id, reply_to_msg_id, action_type, ttl_period, post_author, entities
 FROM channel_messages
 WHERE channel_id = $1::bigint
   AND random_id = ANY($2::bigint[])
@@ -84,21 +84,22 @@ type ChannelMessagesByRandomIDsParams struct {
 }
 
 type ChannelMessagesByRandomIDsRow struct {
-	ChannelID    int64
-	LocalID      int64
-	FromID       int64
-	Date         pgtype.Timestamptz
-	Message      string
-	EditDate     pgtype.Timestamptz
-	Deleted      bool
-	RandomID     int64
-	GroupedID    *int64
-	FileID       *int64
-	ReplyToMsgID *int32
-	ActionType   int16
-	TtlPeriod    int32
-	PostAuthor   *string
-	Entities     []byte
+	ChannelID         int64
+	LocalID           int64
+	FromID            int64
+	Date              pgtype.Timestamptz
+	Message           string
+	EditDate          pgtype.Timestamptz
+	Deleted           bool
+	RandomID          int64
+	GroupedID         *int64
+	FileID            *int64
+	StickerDocumentID *int64
+	ReplyToMsgID      *int32
+	ActionType        int16
+	TtlPeriod         int32
+	PostAuthor        *string
+	Entities          []byte
 }
 
 // ChannelMessagesByRandomIDs returns the posts carrying any of the presented
@@ -123,6 +124,7 @@ func (q *Queries) ChannelMessagesByRandomIDs(ctx context.Context, arg ChannelMes
 			&i.RandomID,
 			&i.GroupedID,
 			&i.FileID,
+			&i.StickerDocumentID,
 			&i.ReplyToMsgID,
 			&i.ActionType,
 			&i.TtlPeriod,
@@ -521,7 +523,7 @@ func (q *Queries) LockUploadGrants(ctx context.Context, arg LockUploadGrantsPara
 }
 
 const messagesByRandomIDs = `-- name: MessagesByRandomIDs :many
-SELECT owner_id, local_id, peer_id, from_id, date, message, out, edit_date, deleted, random_id, peer_local_id, peer_type, fanout_id, action_type, action_user_id, file_id, reply_to_msg_id, fwd_from_id, fwd_date, fwd_channel_id, fwd_channel_post, message_tsv, reply_to_trusted, grouped_id, fwd_post_author, ttl_period, expires_at, entities FROM messages
+SELECT owner_id, local_id, peer_id, from_id, date, message, out, edit_date, deleted, random_id, peer_local_id, peer_type, fanout_id, action_type, action_user_id, file_id, reply_to_msg_id, fwd_from_id, fwd_date, fwd_channel_id, fwd_channel_post, message_tsv, reply_to_trusted, grouped_id, fwd_post_author, ttl_period, expires_at, entities, sticker_document_id FROM messages
 WHERE owner_id = $1::bigint
   AND random_id = ANY($2::bigint[])
   AND random_id <> 0
@@ -574,6 +576,7 @@ func (q *Queries) MessagesByRandomIDs(ctx context.Context, arg MessagesByRandomI
 			&i.TtlPeriod,
 			&i.ExpiresAt,
 			&i.Entities,
+			&i.StickerDocumentID,
 		); err != nil {
 			return nil, err
 		}

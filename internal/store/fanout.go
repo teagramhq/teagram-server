@@ -38,6 +38,9 @@ type FanOut struct {
 	RandomID     int64 // sender dedup token; 0 for service messages
 	// FileID attaches an uploaded file to every per-member copy. 0 = no media.
 	FileID int64
+	// StickerDocumentID attaches a built-in catalogue document through its
+	// separate identity column, never through files.
+	StickerDocumentID *int64
 	// MediaRights names the document subtype flags derived from the input
 	// document attributes. The handler only supplies values it recognizes.
 	MediaRights []string
@@ -196,6 +199,9 @@ func fanOut(ctx context.Context, tx pgx.Tx, qtx *db.Queries, log *slog.Logger, f
 			return Message{}, nil, false, ErrMessageInvalid
 		}
 	}
+	if f.StickerDocumentID != nil && (*f.StickerDocumentID >= 0 || f.FileID != 0) {
+		return Message{}, nil, false, ErrMessageInvalid
+	}
 
 	// Early reject, ahead of the chats row lock, for the one fan-out a client
 	// causes directly. A non-member that takes that lock holds it to commit, which
@@ -286,6 +292,9 @@ func fanOut(ctx context.Context, tx pgx.Tx, qtx *db.Queries, log *slog.Logger, f
 		existing, e := messageRowByRandomID(ctx, qtx, f.FromID, f.RandomID)
 		switch {
 		case e == nil:
+			if f.StickerDocumentID != nil && (existing.StickerDocumentID == nil || *existing.StickerDocumentID != *f.StickerDocumentID) {
+				return Message{}, nil, false, ErrMediaInvalid
+			}
 			pts, e2 := fanoutPts(ctx, qtx, log, f, existing, owners)
 			if e2 != nil {
 				return Message{}, nil, false, e2
@@ -328,7 +337,7 @@ func fanOut(ctx context.Context, tx pgx.Tx, qtx *db.Queries, log *slog.Logger, f
 		}
 	}
 	if f.Action == ChatActionNone {
-		isMedia := f.FileID != 0 || f.MediaRights != nil
+		isMedia := f.FileID != 0 || f.StickerDocumentID != nil || f.MediaRights != nil
 		if err = checkDefaultMessageRestriction(chat.DefaultBannedRights, f.FromID == chat.CreatorID, isMedia, f.MediaRights); err != nil {
 			return Message{}, nil, false, err
 		}
@@ -378,14 +387,15 @@ func fanOut(ctx context.Context, tx pgx.Tx, qtx *db.Queries, log *slog.Logger, f
 			OwnerID: owner, LocalID: b.LocalID, PeerType: int16(PeerTypeChat), PeerID: f.ChatID, FromID: f.FromID,
 			Message: f.Text, Out: out, RandomID: randomID, PeerLocalID: 0,
 			FanoutID: fanoutID, ActionType: int16(f.Action), ActionUserID: f.ActionUserID, FileID: f.FileID,
-			TtlPeriod:      historyTTLPeriodValue(f.TTLPeriod),
-			ReplyToMsgID:   replyToMsgID,
-			ReplyToTrusted: replyToTrusted,
-			FwdFromID:      f.FwdFromID,
-			FwdDate:        f.FwdDate,
-			FwdChannelID:   f.FwdChannelID,
-			FwdChannelPost: f.FwdChannelPost,
-			Entities:       entityData,
+			StickerDocumentID: f.StickerDocumentID,
+			TtlPeriod:         historyTTLPeriodValue(f.TTLPeriod),
+			ReplyToMsgID:      replyToMsgID,
+			ReplyToTrusted:    replyToTrusted,
+			FwdFromID:         f.FwdFromID,
+			FwdDate:           f.FwdDate,
+			FwdChannelID:      f.FwdChannelID,
+			FwdChannelPost:    f.FwdChannelPost,
+			Entities:          entityData,
 		}); err != nil {
 			return Message{}, nil, false, fmt.Errorf("insert message %d: %w", owner, err)
 		}

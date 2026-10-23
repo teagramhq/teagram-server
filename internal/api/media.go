@@ -299,7 +299,8 @@ func (h *handlers) handleSendMediaAfterReplyOnConn(c *mtproto.Conn, r *mtproto.R
 	}
 	// Validate before any expensive work.
 	pollMedia, isPoll := req.Media.(*tg.InputMediaPoll)
-	if !isPoll && !validText(req.Message) {
+	stickerMedia, isSticker := req.Media.(*tg.InputMediaDocument)
+	if !isPoll && !isSticker && !validText(req.Message) {
 		return nil, nil, nil, errMessageEmpty
 	}
 	var descriptionEntities []store.PollDescriptionEntity
@@ -328,13 +329,27 @@ func (h *handlers) handleSendMediaAfterReplyOnConn(c *mtproto.Conn, r *mtproto.R
 	if _, ok := req.Media.(*tg.InputMediaPhoto); ok {
 		return nil, nil, nil, errMediaInvalid
 	}
+	var stickerInput *tg.InputDocument
+	var stickerDocumentID int64
+	if isSticker {
+		if stickerMedia == nil || !stickerMedia.Flags.Zero() || stickerMedia.Spoiler ||
+			stickerMedia.VideoCover != nil || stickerMedia.VideoTimestamp != 0 || stickerMedia.TTLSeconds != 0 || stickerMedia.Query != "" {
+			return nil, nil, nil, errMediaInvalid
+		}
+		var ok bool
+		stickerInput, ok = stickerMedia.ID.(*tg.InputDocument)
+		if !ok || stickerInput == nil {
+			return nil, nil, nil, errMediaInvalid
+		}
+		stickerDocumentID = stickerInput.ID
+	}
 	// A channel post carries a photo or a poll and nothing else. Polls use the
 	// shared channel-message store path below and never fall through to owner
 	// rows; documents and every other media type still have nowhere to go in a
 	// channel, and a reference to an already-stored file stays rejected for
 	// every peer. PEER_ID_INVALID is the same answer a non-member gets, so this
 	// refusal says nothing about whether the channel exists.
-	if peerType == store.PeerTypeChannel && !isPoll && !isPhoto {
+	if peerType == store.PeerTypeChannel && !isPoll && !isPhoto && !isSticker {
 		return nil, nil, nil, errPeerIDInvalid
 	}
 	if isPoll {
@@ -388,7 +403,26 @@ func (h *handlers) handleSendMediaAfterReplyOnConn(c *mtproto.Conn, r *mtproto.R
 	// poll paths give. For a photo send that collapses the refusal with the one a
 	// send whose file is already gone gets, so a repeated random_id cannot be used
 	// to read which of the caller's posts were taken down or erased.
-	if req.RandomID != 0 && peerType == store.PeerTypeChannel {
+	if req.RandomID != 0 && peerType == store.PeerTypeChannel && isSticker {
+		message, pts, duplicate, retryErr := h.store.ChannelStickerRetryAs(r.Ctx, toID, r.UserID, req.RandomID)
+		switch {
+		case errors.Is(retryErr, store.ErrNotMember):
+			return nil, nil, nil, errPeerIDInvalid
+		case errors.Is(retryErr, store.ErrRandomIDDuplicate), errors.Is(retryErr, store.ErrMediaInvalid),
+			errors.Is(retryErr, store.ErrMessageInvalid):
+			return nil, nil, nil, errMediaInvalid
+		case retryErr != nil:
+			h.log.Error("channel sticker retry", "user_id", r.UserID, "channel_id", toID, "err", retryErr)
+			return nil, nil, nil, errInternal
+		case duplicate:
+			if message.StickerDocumentID == nil || *message.StickerDocumentID != stickerDocumentID ||
+				!validStickerRetryIdentity(stickerInput.ID, stickerInput.AccessHash) {
+				return nil, nil, nil, errMediaInvalid
+			}
+			return h.channelPhotoSendResponse(r, &req, toID, message, pts)
+		}
+	}
+	if req.RandomID != 0 && peerType == store.PeerTypeChannel && isPhoto {
 		message, pts, duplicate, retryErr := h.store.ChannelPhotoRetryAs(r.Ctx, toID, r.UserID, req.RandomID)
 		switch {
 		case errors.Is(retryErr, store.ErrNotMember):
@@ -447,6 +481,10 @@ func (h *handlers) handleSendMediaAfterReplyOnConn(c *mtproto.Conn, r *mtproto.R
 			return nil, nil, nil, errMediaInvalid
 		}
 		if ok {
+			if isSticker && (existing.StickerDocumentID == nil || *existing.StickerDocumentID != stickerDocumentID ||
+				!validStickerRetryIdentity(stickerInput.ID, stickerInput.AccessHash)) {
+				return nil, nil, nil, errMediaInvalid
+			}
 			// Retry: return the stored message, at the pts it occupies, without
 			// rate-limiting or file assembly.
 			pts, err := h.store.MessagePts(r.Ctx, r.UserID, existing.LocalID)
@@ -473,7 +511,7 @@ func (h *handlers) handleSendMediaAfterReplyOnConn(c *mtproto.Conn, r *mtproto.R
 				res := &tg.Updates{
 					Updates: []tg.UpdateClass{
 						&tg.UpdateMessageID{ID: int(existing.LocalID), RandomID: req.RandomID},
-						&tg.UpdateNewMessage{Message: messageToTL(existing, nil, files, nil, nil), Pts: pts, PtsCount: 1},
+						&tg.UpdateNewMessage{Message: messageToTL(existing, nil, files, nil, nil, h.dcID), Pts: pts, PtsCount: 1},
 					},
 					Users: users,
 					Chats: chats,
@@ -498,7 +536,7 @@ func (h *handlers) handleSendMediaAfterReplyOnConn(c *mtproto.Conn, r *mtproto.R
 			res := &tg.Updates{
 				Updates: []tg.UpdateClass{
 					&tg.UpdateMessageID{ID: int(existing.LocalID), RandomID: req.RandomID},
-					&tg.UpdateNewMessage{Message: messageToTL(existing, nil, files, nil, nil), Pts: pts, PtsCount: 1},
+					&tg.UpdateNewMessage{Message: messageToTL(existing, nil, files, nil, nil, h.dcID), Pts: pts, PtsCount: 1},
 				},
 				Users: users,
 				Date:  int(existing.Date.Unix()),
@@ -511,9 +549,15 @@ func (h *handlers) handleSendMediaAfterReplyOnConn(c *mtproto.Conn, r *mtproto.R
 
 	documentMedia, isDocument := req.Media.(*tg.InputMediaUploadedDocument)
 	var mediaRights []string
-	if isPhoto {
+	switch {
+	case isPhoto:
 		mediaRights = []string{"send_photos"}
-	} else {
+	case isSticker:
+		if !resolveStickerDocument(stickerInput.ID, stickerInput.AccessHash) {
+			return nil, nil, nil, errMediaInvalid
+		}
+		mediaRights = []string{"send_stickers"}
+	default:
 		if !isDocument {
 			return nil, nil, nil, errMediaInvalid
 		}
@@ -569,7 +613,7 @@ func (h *handlers) handleSendMediaAfterReplyOnConn(c *mtproto.Conn, r *mtproto.R
 		}
 	}
 
-	if !duplicate && !isPhoto {
+	if !duplicate && !isPhoto && !isSticker {
 		clientFileID, parts, name, err = inputFileParts(documentMedia.File)
 		if err != nil {
 			return nil, nil, nil, err
@@ -598,7 +642,7 @@ func (h *handlers) handleSendMediaAfterReplyOnConn(c *mtproto.Conn, r *mtproto.R
 			return nil, nil, nil, errMediaInvalid
 		}
 	}
-	if !existing {
+	if !existing && !isSticker {
 		var file store.File
 		var aerr error
 		if isPhoto {
@@ -613,14 +657,26 @@ func (h *handlers) handleSendMediaAfterReplyOnConn(c *mtproto.Conn, r *mtproto.R
 	}
 
 	if peerType == store.PeerTypeChat {
+		if isSticker {
+			return h.sendChatMedia(c, r, toID, &req, fileID, mediaRights, messageEntities, stickerDocumentID)
+		}
 		return h.sendChatMedia(c, r, toID, &req, fileID, mediaRights, messageEntities)
 	}
 	if peerType == store.PeerTypeChannel {
+		if isSticker {
+			return h.sendChannelSticker(r, toID, &req, stickerDocumentID, replyToMsgID, messageEntities)
+		}
 		return h.sendChannelPhoto(r, toID, &req, fileID, replyToMsgID, messageEntities)
 	}
 
 	attempt := beginSenderRPC(c, r)
-	sender, senderPts, recipientPts, _, err := h.store.SendMessageWithEntities(r.Ctx, r.UserID, toID, req.Message, req.RandomID, fileID, 0, messageEntities)
+	var sender store.Message
+	var senderPts, recipientPts int
+	if isSticker {
+		sender, senderPts, recipientPts, _, err = h.store.SendStickerMessageWithEntities(r.Ctx, r.UserID, toID, req.Message, req.RandomID, stickerDocumentID, 0, messageEntities)
+	} else {
+		sender, senderPts, recipientPts, _, err = h.store.SendMessageWithEntities(r.Ctx, r.UserID, toID, req.Message, req.RandomID, fileID, 0, messageEntities)
+	}
 	if errors.Is(err, store.ErrRandomIDExpired) {
 		h.clearSenderAfterStoreFailure(attempt, r, err)
 		return nil, nil, nil, errRandomIDDuplicate
@@ -629,6 +685,10 @@ func (h *handlers) handleSendMediaAfterReplyOnConn(c *mtproto.Conn, r *mtproto.R
 	// hears that rather than an internal error for a state that is theirs to
 	// retry from.
 	if errors.Is(err, store.ErrFileMissing) {
+		h.clearSenderAfterStoreFailure(attempt, r, err)
+		return nil, nil, nil, errMediaInvalid
+	}
+	if errors.Is(err, store.ErrMediaInvalid) {
 		h.clearSenderAfterStoreFailure(attempt, r, err)
 		return nil, nil, nil, errMediaInvalid
 	}
@@ -670,7 +730,7 @@ func (h *handlers) handleSendMediaAfterReplyOnConn(c *mtproto.Conn, r *mtproto.R
 	res := &tg.Updates{
 		Updates: []tg.UpdateClass{
 			&tg.UpdateMessageID{ID: int(sender.LocalID), RandomID: req.RandomID},
-			&tg.UpdateNewMessage{Message: messageToTL(sender, nil, files, nil, nil), Pts: senderPts, PtsCount: 1},
+			&tg.UpdateNewMessage{Message: messageToTL(sender, nil, files, nil, nil, h.dcID), Pts: senderPts, PtsCount: 1},
 		},
 		Users: users,
 		Date:  int(sender.Date.Unix()),
@@ -694,13 +754,18 @@ func (h *handlers) handleSendMediaAfterReplyOnConn(c *mtproto.Conn, r *mtproto.R
 // and a hook that publishes the fan-out only after the RPC result is written.
 func (h *handlers) sendChatMedia(
 	c *mtproto.Conn, r *mtproto.Request, chatID int64, req *tg.MessagesSendMediaRequest, fileID int64, mediaRights []string,
-	entities []store.PollDescriptionEntity,
+	entities []store.PollDescriptionEntity, stickerDocumentIDs ...int64,
 ) (bin.Encoder, *replyUpdate, func(), error) {
 	// Rate limit already checked in handleSendMedia before the peer split.
+	var stickerDocumentID *int64
+	if len(stickerDocumentIDs) > 0 {
+		id := stickerDocumentIDs[0]
+		stickerDocumentID = &id
+	}
 	attempt := beginSenderRPC(c, r)
 	sender, perOwner, _, err := h.store.SendChatMessage(r.Ctx, store.FanOut{
 		ChatID: chatID, FromID: r.UserID, Text: req.Message, RandomID: req.RandomID, FileID: fileID,
-		MediaRights: mediaRights, Entities: entities,
+		StickerDocumentID: stickerDocumentID, MediaRights: mediaRights, Entities: entities,
 	})
 	// Every exit below releases a barrier that held this connection's generic
 	// delivery back for the whole send, so an unrelated update that landed during
@@ -716,6 +781,10 @@ func (h *handlers) sendChatMedia(
 		return nil, nil, nil, errChatWriteForbidden
 	}
 	if errors.Is(err, store.ErrFileMissing) {
+		h.clearSenderAfterStoreFailure(attempt, r, err)
+		return nil, nil, nil, errMediaInvalid
+	}
+	if errors.Is(err, store.ErrMediaInvalid) {
 		h.clearSenderAfterStoreFailure(attempt, r, err)
 		return nil, nil, nil, errMediaInvalid
 	}
@@ -763,7 +832,7 @@ func (h *handlers) sendChatMedia(
 	result := &tg.Updates{
 		Updates: []tg.UpdateClass{
 			&tg.UpdateMessageID{ID: int(sender.LocalID), RandomID: req.RandomID},
-			&tg.UpdateNewMessage{Message: messageToTL(sender, nil, files, nil, nil), Pts: senderPts, PtsCount: 1},
+			&tg.UpdateNewMessage{Message: messageToTL(sender, nil, files, nil, nil, h.dcID), Pts: senderPts, PtsCount: 1},
 		},
 		Users: users,
 		Chats: chats,
@@ -782,6 +851,33 @@ func (h *handlers) sendChatMedia(
 		h.notifySendAfterReply(r, senderPts)
 	}
 	return result, update, afterReply, nil
+}
+
+func (h *handlers) sendChannelSticker(
+	r *mtproto.Request, channelID int64, req *tg.MessagesSendMediaRequest, stickerDocumentID, replyToMsgID int64,
+	entities []store.PollDescriptionEntity,
+) (bin.Encoder, *replyUpdate, func(), error) {
+	message, pts, duplicate, err := h.store.PostChannelStickerAsWithEntities(
+		r.Ctx, channelID, r.UserID, req.Message, req.RandomID, stickerDocumentID, replyToMsgID, entities,
+	)
+	if slowModeWait, ok := errors.AsType[*store.SlowModeWaitError](err); ok {
+		return nil, nil, nil, rpcErr(420, slowModeWait.Error())
+	}
+	switch {
+	case errors.Is(err, store.ErrNotMember):
+		return nil, nil, nil, errPeerIDInvalid
+	case errors.Is(err, store.ErrChatWriteForbidden):
+		return nil, nil, nil, errChatWriteForbidden
+	case errors.Is(err, store.ErrRandomIDDuplicate), errors.Is(err, store.ErrMessageInvalid), errors.Is(err, store.ErrMediaInvalid):
+		return nil, nil, nil, errMediaInvalid
+	case err != nil:
+		h.log.Error("send channel sticker", "user_id", r.UserID, "channel_id", channelID, "err", err)
+		return nil, nil, nil, errInternal
+	}
+	if !duplicate {
+		h.notifyChannelPost(r.Ctx, channelID)
+	}
+	return h.channelPhotoSendResponse(r, req, channelID, message, pts)
 }
 
 // sendChannelPhoto posts an assembled photo to a channel.
@@ -865,7 +961,7 @@ func (h *handlers) channelPhotoSendResponse(
 		h.log.Error("load channel photo kind", "channel_id", channelID, "err", err)
 		return nil, nil, nil, errInternal
 	}
-	messageTL, err := channelMessageToTL(message, r.UserID, files, broadcast)
+	messageTL, err := channelMessageToTL(message, r.UserID, files, broadcast, h.dcID)
 	if err != nil {
 		h.log.Error("render channel photo message", "channel_id", channelID, "local_id", message.LocalID, "err", err)
 		return nil, nil, nil, errInternal

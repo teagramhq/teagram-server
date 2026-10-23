@@ -68,9 +68,12 @@ type Message struct {
 	// GroupedID is the shared album id; nil means the message is not grouped.
 	GroupedID *int64
 	// FileID is the uploaded file attached to this message; 0 = no media.
-	FileID       int64
-	Action       ChatAction
-	ActionUserID int64
+	FileID int64
+	// StickerDocumentID is a built-in catalogue document; it is stored outside
+	// the files table and never grants FileForDownload entitlement.
+	StickerDocumentID *int64
+	Action            ChatAction
+	ActionUserID      int64
 	// ReplyToMsgID is the local_id of the message this message replies to,
 	// in this row's owner's local_id space.
 	ReplyToMsgID int32
@@ -108,12 +111,13 @@ func messageFromRow(r db.Message) Message {
 		RandomID:    r.RandomID,
 		PeerLocalID: r.PeerLocalID,
 
-		FanoutID:       r.FanoutID,
-		GroupedID:      r.GroupedID,
-		FileID:         r.FileID,
-		Action:         ChatAction(r.ActionType),
-		ActionUserID:   r.ActionUserID,
-		ReplyToTrusted: r.ReplyToTrusted,
+		FanoutID:          r.FanoutID,
+		GroupedID:         r.GroupedID,
+		FileID:            r.FileID,
+		StickerDocumentID: r.StickerDocumentID,
+		Action:            ChatAction(r.ActionType),
+		ActionUserID:      r.ActionUserID,
+		ReplyToTrusted:    r.ReplyToTrusted,
 	}
 	if r.EditDate.Valid {
 		t := r.EditDate.Time
@@ -205,6 +209,19 @@ func (s *Store) SendMessage(ctx context.Context, fromID, toID int64, text string
 // SendMessageWithEntities stores the same entity spans on both owner rows so
 // send replies, updates and history all render one canonical message.
 func (s *Store) SendMessageWithEntities(ctx context.Context, fromID, toID int64, text string, randomID, fileID, replyToMsgID int64, entities []PollDescriptionEntity) (sender Message, senderPts, recipientPts int, dup bool, err error) {
+	return s.sendMessageWithMediaEntities(ctx, fromID, toID, text, randomID, fileID, nil, replyToMsgID, entities)
+}
+
+// SendStickerMessageWithEntities stores a built-in catalogue document on each
+// owner row without treating its id as a files-table reference.
+func (s *Store) SendStickerMessageWithEntities(ctx context.Context, fromID, toID int64, text string, randomID, stickerDocumentID, replyToMsgID int64, entities []PollDescriptionEntity) (sender Message, senderPts, recipientPts int, dup bool, err error) {
+	if stickerDocumentID >= 0 {
+		return Message{}, 0, 0, false, ErrMessageInvalid
+	}
+	return s.sendMessageWithMediaEntities(ctx, fromID, toID, text, randomID, 0, &stickerDocumentID, replyToMsgID, entities)
+}
+
+func (s *Store) sendMessageWithMediaEntities(ctx context.Context, fromID, toID int64, text string, randomID, fileID int64, stickerDocumentID *int64, replyToMsgID int64, entities []PollDescriptionEntity) (sender Message, senderPts, recipientPts int, dup bool, err error) {
 	entityData, err := EncodeMessageEntities(entities)
 	if err != nil {
 		return Message{}, 0, 0, false, fmt.Errorf("encode message entities: %w", err)
@@ -236,6 +253,9 @@ func (s *Store) SendMessageWithEntities(ctx context.Context, fromID, toID int64,
 		existing, e := messageRowByRandomID(ctx, qtx, fromID, randomID)
 		switch {
 		case e == nil:
+			if stickerDocumentID != nil && (existing.StickerDocumentID == nil || *existing.StickerDocumentID != *stickerDocumentID) {
+				return Message{}, 0, 0, false, ErrMediaInvalid
+			}
 			sPts, e2 := newMessagePts(ctx, qtx, fromID, existing.LocalID)
 			if e2 != nil {
 				return Message{}, 0, 0, false, e2
@@ -310,7 +330,8 @@ func (s *Store) SendMessageWithEntities(ctx context.Context, fromID, toID int64,
 			OwnerID: fromID, LocalID: b.LocalID, PeerType: int16(PeerTypeUser), PeerID: fromID, FromID: fromID,
 			Message: text, Out: true, RandomID: randomID, PeerLocalID: 0,
 			FanoutID: 0, ActionType: 0, ActionUserID: 0, FileID: fileID, ReplyToMsgID: senderReplyTo,
-			FwdFromID: nil, FwdDate: pgtype.Timestamptz{}, FwdChannelID: nil, FwdChannelPost: nil,
+			StickerDocumentID: stickerDocumentID,
+			FwdFromID:         nil, FwdDate: pgtype.Timestamptz{}, FwdChannelID: nil, FwdChannelPost: nil,
 			ReplyToTrusted: senderReplyTrusted,
 			Entities:       entityData,
 		}); err != nil {
@@ -350,7 +371,8 @@ func (s *Store) SendMessageWithEntities(ctx context.Context, fromID, toID int64,
 		OwnerID: fromID, LocalID: sb.LocalID, PeerType: int16(PeerTypeUser), PeerID: toID, FromID: fromID,
 		Message: text, Out: true, RandomID: randomID, PeerLocalID: rb.LocalID,
 		FanoutID: 0, ActionType: 0, ActionUserID: 0, FileID: fileID, ReplyToMsgID: senderReplyTo,
-		FwdFromID: nil, FwdDate: pgtype.Timestamptz{}, FwdChannelID: nil, FwdChannelPost: nil,
+		StickerDocumentID: stickerDocumentID,
+		FwdFromID:         nil, FwdDate: pgtype.Timestamptz{}, FwdChannelID: nil, FwdChannelPost: nil,
 		ReplyToTrusted: senderReplyTrusted,
 		Entities:       entityData,
 	}); err != nil {
@@ -369,7 +391,8 @@ func (s *Store) SendMessageWithEntities(ctx context.Context, fromID, toID int64,
 			OwnerID: toID, LocalID: rb.LocalID, PeerType: int16(PeerTypeUser), PeerID: fromID, FromID: fromID,
 			Message: text, Out: false, RandomID: 0, PeerLocalID: sb.LocalID,
 			FanoutID: 0, ActionType: 0, ActionUserID: 0, FileID: fileID, ReplyToMsgID: recipientReplyTo,
-			FwdFromID: nil, FwdDate: pgtype.Timestamptz{}, FwdChannelID: nil, FwdChannelPost: nil,
+			StickerDocumentID: stickerDocumentID,
+			FwdFromID:         nil, FwdDate: pgtype.Timestamptz{}, FwdChannelID: nil, FwdChannelPost: nil,
 			ReplyToTrusted: recipientReplyTrusted,
 			Entities:       entityData,
 		}); err != nil {
@@ -1712,6 +1735,8 @@ type ForwardSource struct {
 	PostAuthor *string
 	// FileID is the file attached to the source message; 0 = no media.
 	FileID int64
+	// StickerDocumentID is a separate built-in catalogue identity; 0 = no sticker.
+	StickerDocumentID int64
 }
 
 // ForwardedMessage is one forwarded message returned by ForwardMessages, carrying
@@ -1742,6 +1767,11 @@ type ForwardedMessage struct {
 func (s *Store) ForwardMessages(ctx context.Context, fromID int64, destPeerType PeerType, destPeerID int64, sources []ForwardSource, randomIDs []int64) (map[int64]int, []ForwardedMessage, error) {
 	if len(sources) == 0 || len(randomIDs) != len(sources) {
 		return nil, nil, ErrMessageInvalid
+	}
+	for _, src := range sources {
+		if src.StickerDocumentID > 0 || (src.StickerDocumentID != 0 && src.FileID != 0) {
+			return nil, nil, ErrMessageInvalid
+		}
 	}
 
 	if destPeerType == PeerTypeUser && destPeerID == fromID {
@@ -1851,6 +1881,10 @@ func (s *Store) ForwardMessages(ctx context.Context, fromID int64, destPeerType 
 
 	for i, src := range sources {
 		randomID := randomIDs[i]
+		var stickerDocumentID *int64
+		if src.StickerDocumentID < 0 {
+			stickerDocumentID = &src.StickerDocumentID
+		}
 
 		// Dedup: check if this random_id was already used for a forward to this
 		// destination by this sender.
@@ -1858,6 +1892,9 @@ func (s *Store) ForwardMessages(ctx context.Context, fromID int64, destPeerType 
 			existing, e := messageRowByRandomID(ctx, qtx, fromID, randomID)
 			switch {
 			case e == nil:
+				if stickerDocumentID != nil && (existing.StickerDocumentID == nil || *existing.StickerDocumentID != *stickerDocumentID) {
+					return nil, nil, ErrMediaInvalid
+				}
 				// Already forwarded — return the existing message at the pts it
 				// occupies, never the sender's current one, for the reason
 				// SendMessage's dedup branch records.
@@ -1878,7 +1915,11 @@ func (s *Store) ForwardMessages(ctx context.Context, fromID int64, destPeerType 
 			blockChecked = true
 		}
 		if destPeerType == PeerTypeChat {
-			if err = checkDefaultMessageRestriction(chatDefaultBannedRights, fromID == chatCreatorID, src.FileID != 0, fileSubtypeRights[src.FileID]); err != nil {
+			mediaRights := fileSubtypeRights[src.FileID]
+			if stickerDocumentID != nil {
+				mediaRights = []string{"send_stickers"}
+			}
+			if err = checkDefaultMessageRestriction(chatDefaultBannedRights, fromID == chatCreatorID, src.FileID != 0 || stickerDocumentID != nil, mediaRights); err != nil {
 				return nil, nil, err
 			}
 		}
@@ -1912,7 +1953,7 @@ func (s *Store) ForwardMessages(ctx context.Context, fromID int64, destPeerType 
 				OwnerID: fromID, LocalID: sb.LocalID, PeerType: int16(destPeerType), PeerID: destPeerID,
 				FromID: fromID, Message: src.Text, Out: true, RandomID: randomID,
 				PeerLocalID: rb.LocalID, FanoutID: 0, ActionType: 0, ActionUserID: 0,
-				FileID: src.FileID, ReplyToMsgID: nil,
+				FileID: src.FileID, StickerDocumentID: stickerDocumentID, ReplyToMsgID: nil,
 				FwdFromID: &fwdFromID, FwdDate: fwdDate, FwdChannelID: fwdChannelID, FwdChannelPost: fwdChannelPost,
 				FwdPostAuthor: fwdPostAuthor,
 			}); err != nil {
@@ -1930,7 +1971,7 @@ func (s *Store) ForwardMessages(ctx context.Context, fromID int64, destPeerType 
 					OwnerID: destPeerID, LocalID: rb.LocalID, PeerType: int16(destPeerType), PeerID: fromID,
 					FromID: fromID, Message: src.Text, Out: false, RandomID: 0,
 					PeerLocalID: sb.LocalID, FanoutID: 0, ActionType: 0, ActionUserID: 0,
-					FileID: src.FileID, ReplyToMsgID: nil,
+					FileID: src.FileID, StickerDocumentID: stickerDocumentID, ReplyToMsgID: nil,
 					FwdFromID: &fwdFromID, FwdDate: fwdDate, FwdChannelID: fwdChannelID, FwdChannelPost: fwdChannelPost,
 					FwdPostAuthor: fwdPostAuthor,
 				}); err != nil {
@@ -1977,7 +2018,7 @@ func (s *Store) ForwardMessages(ctx context.Context, fromID int64, destPeerType 
 					OwnerID: uid, LocalID: b.LocalID, PeerType: int16(PeerTypeChat), PeerID: destPeerID,
 					FromID: fromID, Message: src.Text, Out: out, RandomID: rID,
 					PeerLocalID: 0, FanoutID: fanoutID, ActionType: 0, ActionUserID: 0,
-					FileID: src.FileID, ReplyToMsgID: nil,
+					FileID: src.FileID, StickerDocumentID: stickerDocumentID, ReplyToMsgID: nil,
 					FwdFromID: &fwdFromID, FwdDate: fwdDate, FwdChannelID: fwdChannelID, FwdChannelPost: fwdChannelPost,
 					FwdPostAuthor: fwdPostAuthor,
 				}); err != nil {
@@ -2087,6 +2128,10 @@ func lockChannelForwardSources(ctx context.Context, qtx *db.Queries, fromID int6
 		sources[i].FileID = 0
 		if row.FileID != nil {
 			sources[i].FileID = *row.FileID
+		}
+		sources[i].StickerDocumentID = 0
+		if row.StickerDocumentID != nil {
+			sources[i].StickerDocumentID = *row.StickerDocumentID
 		}
 	}
 	return nil

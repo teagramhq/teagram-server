@@ -259,6 +259,7 @@ SELECT
     COALESCE(top.random_id, 0) AS top_random_id,
     top.grouped_id AS top_grouped_id,
     top.file_id                AS top_file_id,
+    top.sticker_document_id    AS top_sticker_document_id,
     top.reply_to_msg_id        AS top_reply_to_msg_id,
     COALESCE(top.action_type, 0)::smallint AS top_action_type,
     COALESCE(top.ttl_period, 0)::integer AS top_ttl_period,
@@ -290,7 +291,7 @@ CROSS JOIN LATERAL (
 ) AS unread
 LEFT JOIN LATERAL (
     SELECT cm.channel_id, cm.local_id, cm.from_id, cm.date, cm.message, cm.edit_date,
-           cm.deleted, cm.random_id, cm.grouped_id, cm.file_id, cm.reply_to_msg_id, cm.action_type,
+           cm.deleted, cm.random_id, cm.grouped_id, cm.file_id, cm.sticker_document_id, cm.reply_to_msg_id, cm.action_type,
            cm.ttl_period, cm.post_author, cm.entities
     FROM channel_messages cm
     WHERE cm.channel_id = c.id AND cm.deleted = false
@@ -316,46 +317,47 @@ type ChannelDialogsForUserParams struct {
 }
 
 type ChannelDialogsForUserRow struct {
-	ChannelID           int64
-	Title               string
-	About               string
-	CreatorID           int64
-	Megagroup           bool
-	Signatures          bool
-	Version             int32
-	Username            *string
-	DefaultBannedRights []string
-	ChannelTtlPeriod    int32
-	ChannelDate         pgtype.Timestamptz
-	MemberRole          int16
-	MemberBannedUntil   pgtype.Timestamptz
-	MemberJoinPts       int64
-	ReadInboxMaxID      int64
-	UnreadCount         int32
-	SummaryEntitled     bool
-	SummaryStatusExists bool
-	SummaryVersion      int16
-	SummaryReady        bool
-	SummaryTotalLive    int64
-	SummaryAuthorLive   int64
-	Pts                 int64
-	NextLocalID         int64
-	StateDate           pgtype.Timestamptz
-	TopLocalID          int64
-	TopFromID           int64
-	TopDate             pgtype.Timestamptz
-	TopMessage          string
-	TopEditDate         pgtype.Timestamptz
-	TopDeleted          bool
-	TopRandomID         int64
-	TopGroupedID        *int64
-	TopFileID           *int64
-	TopReplyToMsgID     *int32
-	TopActionType       int16
-	TopTtlPeriod        int32
-	TopPostAuthor       *string
-	TopEntities         []byte
-	Pinned              bool
+	ChannelID            int64
+	Title                string
+	About                string
+	CreatorID            int64
+	Megagroup            bool
+	Signatures           bool
+	Version              int32
+	Username             *string
+	DefaultBannedRights  []string
+	ChannelTtlPeriod     int32
+	ChannelDate          pgtype.Timestamptz
+	MemberRole           int16
+	MemberBannedUntil    pgtype.Timestamptz
+	MemberJoinPts        int64
+	ReadInboxMaxID       int64
+	UnreadCount          int32
+	SummaryEntitled      bool
+	SummaryStatusExists  bool
+	SummaryVersion       int16
+	SummaryReady         bool
+	SummaryTotalLive     int64
+	SummaryAuthorLive    int64
+	Pts                  int64
+	NextLocalID          int64
+	StateDate            pgtype.Timestamptz
+	TopLocalID           int64
+	TopFromID            int64
+	TopDate              pgtype.Timestamptz
+	TopMessage           string
+	TopEditDate          pgtype.Timestamptz
+	TopDeleted           bool
+	TopRandomID          int64
+	TopGroupedID         *int64
+	TopFileID            *int64
+	TopStickerDocumentID *int64
+	TopReplyToMsgID      *int32
+	TopActionType        int16
+	TopTtlPeriod         int32
+	TopPostAuthor        *string
+	TopEntities          []byte
+	Pinned               bool
 }
 
 // ChannelDialogsForUser returns every unbanned channel the user belongs to,
@@ -409,6 +411,7 @@ func (q *Queries) ChannelDialogsForUser(ctx context.Context, arg ChannelDialogsF
 			&i.TopRandomID,
 			&i.TopGroupedID,
 			&i.TopFileID,
+			&i.TopStickerDocumentID,
 			&i.TopReplyToMsgID,
 			&i.TopActionType,
 			&i.TopTtlPeriod,

@@ -1,7 +1,10 @@
 package api
 
 import (
+	"encoding/binary"
 	"errors"
+	"hash/crc32"
+	"time"
 
 	"github.com/gotd/td/bin"
 	"github.com/gotd/td/tg"
@@ -100,12 +103,71 @@ func (h *handlers) handleGetFeaturedStickers(r *mtproto.Request) (bin.Encoder, e
 	if err := decodeLaunchGetterRequest(r, &req); err != nil {
 		return nil, err
 	}
+	catalog, err := getStickerSetCatalog()
+	if err != nil {
+		h.log.Error("load featured sticker sets", "err", err)
+		return nil, errInternal
+	}
+	installed, err := h.store.InstalledStickerSets(r.Ctx, r.UserID)
+	if err != nil {
+		h.log.Error("load featured sticker set state", "user_id", r.UserID, "err", err)
+		return nil, errInternal
+	}
+	installedAt := make(map[int64]time.Time, len(installed))
+	for _, item := range installed {
+		if _, ok := catalog.byID[item.ID]; ok {
+			installedAt[item.ID] = item.InstalledAt
+		}
+	}
+	set, ok := catalog.byShortName[twemojiReactionSetShortName]
+	if !ok || len(set.documents) == 0 {
+		return nil, errInternal
+	}
+	var setInstalledAt *time.Time
+	if value, ok := installedAt[set.set.ID]; ok {
+		setInstalledAt = &value
+	}
+	hash := featuredStickerSetsHash(set.set, setInstalledAt, set.documents[0].ID)
+	if req.Hash != 0 && req.Hash == hash {
+		return &tg.MessagesFeaturedStickersNotModified{}, nil
+	}
+	documents := set.responseDocuments(h.dcID)
+	if len(documents) == 0 {
+		return nil, errInternal
+	}
 	return &tg.MessagesFeaturedStickers{
-		Hash:   0,
-		Count:  0,
-		Sets:   []tg.StickerSetCoveredClass{},
+		Hash:  hash,
+		Count: 1,
+		Sets: []tg.StickerSetCoveredClass{&tg.StickerSetCovered{
+			Set:   set.responseSet(setInstalledAt),
+			Cover: documents[0],
+		}},
 		Unread: []int64{},
 	}, nil
+}
+
+func featuredStickerSetsHash(set tg.StickerSet, installedAt *time.Time, coverID int64) int64 {
+	input := make([]byte, 0, 36)
+	var long [8]byte
+	binary.BigEndian.PutUint64(long[:], uint64(set.ID)) //nolint:gosec // Catalogue ids use a reserved negative namespace.
+	input = append(input, long[:]...)
+	binary.BigEndian.PutUint64(long[:], uint64(set.AccessHash)) //nolint:gosec // Hashes are serialized as their two's-complement bit pattern.
+	input = append(input, long[:]...)
+	binary.BigEndian.PutUint64(long[:], uint64(int64(set.Hash))) //nolint:gosec // Set hashes are constrained to signed 31-bit values.
+	input = append(input, long[:]...)
+	binary.BigEndian.PutUint64(long[:], uint64(coverID)) //nolint:gosec // Catalogue document ids use a reserved negative namespace.
+	input = append(input, long[:]...)
+	var installed int64
+	if installedAt != nil {
+		installed = installedAt.Unix()
+	}
+	binary.BigEndian.PutUint64(long[:], uint64(installed))
+	input = append(input, long[:]...)
+	hash := int64(crc32.ChecksumIEEE(input) & 0x7fffffff)
+	if hash == 0 {
+		return 1
+	}
+	return hash
 }
 
 func (h *handlers) handleGetEmojiStickers(r *mtproto.Request) (bin.Encoder, error) {

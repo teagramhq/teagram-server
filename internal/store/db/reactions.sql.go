@@ -26,7 +26,7 @@ func (q *Queries) DeleteReaction(ctx context.Context, arg DeleteReactionParams) 
 }
 
 const messagesByOwnerLocalIDs = `-- name: MessagesByOwnerLocalIDs :many
-SELECT owner_id, local_id, peer_id, from_id, date, message, out, edit_date, deleted, random_id, peer_local_id, peer_type, fanout_id, action_type, action_user_id, file_id, reply_to_msg_id, fwd_from_id, fwd_date, fwd_channel_id, fwd_channel_post, message_tsv, reply_to_trusted, grouped_id, fwd_post_author, ttl_period, expires_at, entities FROM messages
+SELECT owner_id, local_id, peer_id, from_id, date, message, out, edit_date, deleted, random_id, peer_local_id, peer_type, fanout_id, action_type, action_user_id, file_id, reply_to_msg_id, fwd_from_id, fwd_date, fwd_channel_id, fwd_channel_post, message_tsv, reply_to_trusted, grouped_id, fwd_post_author, ttl_period, expires_at, entities, sticker_document_id FROM messages
 WHERE owner_id = $1
   AND local_id = ANY($2::bigint[])
   AND (expires_at IS NULL OR expires_at > statement_timestamp())
@@ -75,6 +75,7 @@ func (q *Queries) MessagesByOwnerLocalIDs(ctx context.Context, arg MessagesByOwn
 			&i.TtlPeriod,
 			&i.ExpiresAt,
 			&i.Entities,
+			&i.StickerDocumentID,
 		); err != nil {
 			return nil, err
 		}

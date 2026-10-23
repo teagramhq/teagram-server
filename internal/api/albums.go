@@ -318,7 +318,7 @@ func (h *handlers) userAlbumUpdates(r *mtproto.Request, peerType store.PeerType,
 	for i, message := range album.Messages {
 		res.Updates = append(res.Updates, &tg.UpdateMessageID{ID: int(message.LocalID), RandomID: message.RandomID})
 		res.Updates = append(res.Updates, &tg.UpdateNewMessage{
-			Message: messageToTL(message, nil, files, nil, nil), Pts: album.Pts[i], PtsCount: 1,
+			Message: messageToTL(message, nil, files, nil, nil, h.dcID), Pts: album.Pts[i], PtsCount: 1,
 		})
 	}
 	if peerType == store.PeerTypeChat {
@@ -371,7 +371,7 @@ func (h *handlers) channelAlbumResponse(
 	}
 	res := &tg.Updates{Chats: channels, Users: users, Date: int(album.Messages[0].Date.Unix())}
 	for i, message := range album.Messages {
-		messageTL, renderErr := channelMessageToTL(message, r.UserID, files, broadcast)
+		messageTL, renderErr := channelMessageToTL(message, r.UserID, files, broadcast, h.dcID)
 		if renderErr != nil {
 			h.log.Error("render channel album message", "channel_id", channelID, "local_id", message.LocalID, "err", renderErr)
 			return nil, nil, nil, errInternal
