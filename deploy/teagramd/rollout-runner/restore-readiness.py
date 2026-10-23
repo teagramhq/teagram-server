@@ -29,6 +29,22 @@ from typing import Any
 SOURCE_IMAGE = "mirror.gcr.io/library/postgres@sha256:721873c34ceb9f8d8fc265984940dc982404c105f19ad51be9fdc5970a6080ea"
 RESTORE_IMAGE = "mirror.gcr.io/library/postgres@sha256:77f585114c32fbca283dc835b0596f4e52b51b4c6662d7810b2f4084f60a1873"
 ROOT = Path(__file__).resolve().parents[3]
+SEED_COMMIT = "7b62b9ab1cad0c459627ad7a2eb736a40382939b"
+PREPARED_DIRECTORY_PREFIX = "teagram-restore-readiness."
+PREPARED_ATTESTATION = "prepared.json"
+PREPARED_ARTIFACTS = {
+    "atlas",
+    "teagramd",
+    "teagramd-seed",
+    "restore-readiness-launcher",
+    "restore-readiness-seed",
+    "restore-readiness-seed-shim",
+    "restore-readiness-provisioner",
+    "restore-drill-checker",
+    "restore-readiness-probe",
+}
+PREPARED_BUILD_FLAGS = ["-trimpath", "-buildvcs=false", "-p=1"]
+ROLLOUT_LOCK_PATH = Path("/tmp/teagram-deploy.lock")
 BASE_SCHEMA = "20261021000003"
 # The base migrations landed with the head store check, so the fixture is seeded by the
 # last release before them and then migrated to BASE_SCHEMA.
@@ -103,6 +119,7 @@ SAFE_CATEGORIES = {
     "interrupted",
     "cleanup_failure",
     "assertions_passed",
+    "rollout_in_progress",
 }
 IMAGE_TOKEN_LABEL = "com.teagram.restore-readiness.token"
 IMAGE_ROLE_LABEL = "com.teagram.restore-readiness.role"
@@ -129,6 +146,419 @@ def bounded_work_seconds(
         raise ValueError("work budget must be positive")
     limit = FAULT_WORK_SECONDS if fault_test and not local_fixture_test else WORK_SECONDS
     return limit if requested is None else min(limit, requested)
+
+
+def prepared_directory_path(value: Path) -> Path:
+    path = Path(value)
+    if (
+        not path.is_absolute()
+        or path.parent != Path("/tmp")
+        or not re.fullmatch(r"teagram-restore-readiness\.[A-Za-z0-9]{8}", path.name)
+    ):
+        raise ValueError("invalid prepared runtime path")
+    parent = path.parent.lstat()
+    if (
+        not stat.S_ISDIR(parent.st_mode)
+        or parent.st_uid != 0
+        or stat.S_IMODE(parent.st_mode) != 0o1777
+    ):
+        raise ValueError("invalid prepared runtime parent")
+    return path
+
+
+def sha256_open_file(descriptor: int, *, limit: int = 2 * 1024 * 1024 * 1024) -> tuple[str, int]:
+    digest = hashlib.sha256()
+    size = 0
+    os.lseek(descriptor, 0, os.SEEK_SET)
+    while True:
+        chunk = os.read(descriptor, 1024 * 1024)
+        if not chunk:
+            break
+        size += len(chunk)
+        if size > limit:
+            raise ValueError("prepared input exceeds size limit")
+        digest.update(chunk)
+    return digest.hexdigest(), size
+
+
+def sha256_file(path: Path) -> tuple[str, int]:
+    descriptor = os.open(path, os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW)
+    try:
+        info = os.fstat(descriptor)
+        if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
+            raise ValueError("invalid prepared file")
+        return sha256_open_file(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+def sha256_directory(path: Path, *, max_entries: int = 200_000) -> str:
+    root = Path(path)
+    root_info = root.lstat()
+    if not stat.S_ISDIR(root_info.st_mode) or root.is_symlink():
+        raise ValueError("invalid toolchain directory")
+    digest = hashlib.sha256()
+    entries_seen = 0
+    bytes_seen = 0
+    for current, directories, files in os.walk(root, topdown=True, followlinks=False):
+        directories.sort()
+        files.sort()
+        current_path = Path(current)
+        for name in list(directories):
+            item = current_path / name
+            info = item.lstat()
+            relative = item.relative_to(root).as_posix().encode("utf-8", "strict")
+            if stat.S_ISLNK(info.st_mode):
+                target = os.readlink(item).encode("utf-8", "strict")
+                record = b"L\0" + relative + b"\0" + target + b"\0"
+                directories.remove(name)
+            elif stat.S_ISDIR(info.st_mode):
+                record = b"D\0" + relative + b"\0" + oct(stat.S_IMODE(info.st_mode)).encode() + b"\0"
+            else:
+                raise ValueError("invalid toolchain entry")
+            digest.update(record)
+            entries_seen += 1
+        for name in files:
+            item = current_path / name
+            info = item.lstat()
+            relative = item.relative_to(root).as_posix().encode("utf-8", "strict")
+            if stat.S_ISLNK(info.st_mode):
+                record = b"L\0" + relative + b"\0" + os.readlink(item).encode("utf-8", "strict") + b"\0"
+            elif stat.S_ISREG(info.st_mode):
+                file_hash, size = sha256_file(item)
+                bytes_seen += size
+                if bytes_seen > 2 * 1024 * 1024 * 1024:
+                    raise ValueError("toolchain exceeds size limit")
+                record = (
+                    b"F\0"
+                    + relative
+                    + b"\0"
+                    + oct(stat.S_IMODE(info.st_mode)).encode()
+                    + b"\0"
+                    + str(size).encode()
+                    + b"\0"
+                    + file_hash.encode()
+                    + b"\0"
+                )
+            else:
+                raise ValueError("invalid toolchain entry")
+            digest.update(record)
+            entries_seen += 1
+            if entries_seen > max_entries:
+                raise ValueError("toolchain has too many entries")
+    return digest.hexdigest()
+
+
+def source_identity() -> tuple[str, str]:
+    environment = {"GIT_OPTIONAL_LOCKS": "0", "LANG": "C", "LC_ALL": "C", "PATH": "/usr/bin:/bin"}
+    revision = subprocess.run(
+        ["/usr/bin/git", "-c", f"safe.directory={ROOT}", "-C", str(ROOT), "rev-parse", "HEAD"],
+        check=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        env=environment,
+        timeout=10,
+    ).stdout.decode("ascii", "strict").strip()
+    if not re.fullmatch(r"[0-9a-f]{40}", revision):
+        raise ValueError("invalid source revision")
+    paths = subprocess.run(
+        [
+            "/usr/bin/git",
+            "-c",
+            f"safe.directory={ROOT}",
+            "-C",
+            str(ROOT),
+            "ls-files",
+            "--cached",
+            "--others",
+            "--exclude-standard",
+            "-z",
+        ],
+        check=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        env=environment,
+        timeout=30,
+    ).stdout.split(b"\0")
+    digest = hashlib.sha256()
+    seen: set[bytes] = set()
+    for raw_path in sorted(path for path in paths if path):
+        if raw_path in seen:
+            continue
+        seen.add(raw_path)
+        relative = Path(os.fsdecode(raw_path))
+        if relative.is_absolute() or ".." in relative.parts:
+            raise ValueError("invalid source path")
+        item = ROOT / relative
+        info = item.lstat()
+        name = raw_path.replace(b"\\", b"/")
+        if stat.S_ISLNK(info.st_mode):
+            entry = b"L\0" + name + b"\0" + os.readlink(item).encode("utf-8", "strict") + b"\0"
+        elif stat.S_ISREG(info.st_mode):
+            file_hash, size = sha256_file(item)
+            entry = (
+                b"F\0"
+                + name
+                + b"\0"
+                + oct(stat.S_IMODE(info.st_mode)).encode()
+                + b"\0"
+                + str(size).encode()
+                + b"\0"
+                + file_hash.encode()
+                + b"\0"
+            )
+        else:
+            raise ValueError("invalid source entry")
+        digest.update(entry)
+    return revision, digest.hexdigest()
+
+
+def parse_go_version(value: str) -> tuple[str, str]:
+    match = re.fullmatch(r"go version (go[0-9]+\.[0-9]+(?:\.[0-9]+)?) linux/(amd64|arm64)", value)
+    if match is None:
+        raise ValueError("invalid Go toolchain version")
+    return match.group(1), match.group(2)
+
+
+def go_version_tuple(value: str) -> tuple[int, ...]:
+    return tuple(int(part) for part in re.fullmatch(r"go([0-9]+(?:\.[0-9]+){1,2})", value).group(1).split("."))
+
+
+def minimum_go_version() -> str:
+    go_mod = ROOT / "go.mod"
+    for line in go_mod.read_text(encoding="utf-8").splitlines():
+        match = re.fullmatch(r"go ([0-9]+\.[0-9]+(?:\.[0-9]+)?)", line.strip())
+        if match is not None:
+            return "go" + match.group(1)
+    raise ValueError("go.mod toolchain pin missing")
+
+
+def finalize_prepared_runtime(
+    directory: Path,
+    *,
+    build_uid: int,
+    go_version: str,
+    go_root: Path,
+    go_binary: Path,
+    go_arch: str,
+) -> dict[str, Any]:
+    if os.geteuid() != 0 or build_uid <= 0:
+        raise ValueError("invalid prepared runtime authority")
+    path = prepared_directory_path(directory)
+    info = path.lstat()
+    if path.is_symlink() or not stat.S_ISDIR(info.st_mode) or info.st_uid != build_uid or stat.S_IMODE(info.st_mode) != 0o700:
+        raise ValueError("invalid prepared runtime directory")
+    expected_entries = PREPARED_ARTIFACTS
+    if {entry.name for entry in path.iterdir()} != expected_entries:
+        raise ValueError("prepared runtime contents mismatch")
+    toolchain_version, version_arch = parse_go_version(go_version)
+    if version_arch != go_arch or go_arch not in {"amd64", "arm64"}:
+        raise ValueError("prepared runtime architecture mismatch")
+    if go_version_tuple(toolchain_version) < go_version_tuple(minimum_go_version()):
+        raise ValueError("Go toolchain is older than go.mod")
+    resolved_root = go_root.resolve(strict=True)
+    resolved_binary = go_binary.resolve(strict=True)
+    if not resolved_binary.is_relative_to(resolved_root):
+        raise ValueError("Go binary is outside GOROOT")
+    root_info = resolved_root.lstat()
+    binary_info = resolved_binary.lstat()
+    if not stat.S_ISDIR(root_info.st_mode) or not stat.S_ISREG(binary_info.st_mode) or not binary_info.st_mode & 0o111:
+        raise ValueError("invalid Go toolchain paths")
+    artifacts: dict[str, dict[str, Any]] = {}
+    open_files: list[int] = []
+    directory_fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC | os.O_NOFOLLOW)
+    try:
+        directory_info = os.fstat(directory_fd)
+        if directory_info.st_dev != info.st_dev or directory_info.st_ino != info.st_ino:
+            raise ValueError("prepared runtime directory changed")
+        for name in sorted(PREPARED_ARTIFACTS):
+            descriptor = os.open(name, os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW, dir_fd=directory_fd)
+            open_files.append(descriptor)
+            artifact_info = os.fstat(descriptor)
+            if (
+                not stat.S_ISREG(artifact_info.st_mode)
+                or artifact_info.st_uid != build_uid
+                or artifact_info.st_nlink != 1
+                or artifact_info.st_mode & 0o022
+                or not artifact_info.st_mode & 0o111
+                or artifact_info.st_size <= 0
+            ):
+                raise ValueError("invalid prepared runtime artifact")
+            file_hash, size = sha256_open_file(descriptor)
+            artifacts[name] = {"sha256": file_hash, "size": size}
+        revision, source_digest = source_identity()
+        attestation = {
+            "schema_version": 1,
+            "prepared_uid": build_uid,
+            "directory": {"device": directory_info.st_dev, "inode": directory_info.st_ino},
+            "source": {"revision": revision, "tree_sha256": source_digest},
+            "toolchain": {
+                "version": toolchain_version,
+                "goos": "linux",
+                "goarch": go_arch,
+                "root": str(resolved_root),
+                "root_sha256": sha256_directory(resolved_root),
+                "binary": str(resolved_binary),
+                "binary_sha256": sha256_file(resolved_binary)[0],
+            },
+            "images": {"source": SOURCE_IMAGE, "restore": RESTORE_IMAGE},
+            "seed_commit": SEED_COMMIT,
+            "build_flags": PREPARED_BUILD_FLAGS,
+            "build_environment": {
+                "CGO_ENABLED": "0",
+                "GOENV": "off",
+                "GOMAXPROCS": "1",
+                "GOPROXY": "off",
+                "GOSUMDB": "off",
+                "GOTOOLCHAIN": "local",
+            },
+            "artifacts": artifacts,
+        }
+        encoded = (json.dumps(attestation, separators=(",", ":"), sort_keys=True) + "\n").encode("utf-8")
+        descriptor = os.open(
+            PREPARED_ATTESTATION,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC | os.O_NOFOLLOW,
+            0o400,
+            dir_fd=directory_fd,
+        )
+        try:
+            os.fchown(descriptor, 0, 0)
+            os.fchmod(descriptor, 0o400)
+            view = memoryview(encoded)
+            while view:
+                written = os.write(descriptor, view)
+                if written <= 0:
+                    raise OSError("short prepared runtime attestation write")
+                view = view[written:]
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+        for file_descriptor in open_files:
+            os.fchown(file_descriptor, 0, 0)
+            os.fchmod(file_descriptor, 0o500)
+        os.fchown(directory_fd, 0, 0)
+        os.fchmod(directory_fd, 0o500)
+        os.fsync(directory_fd)
+        final_info = path.lstat()
+        if final_info.st_dev != directory_info.st_dev or final_info.st_ino != directory_info.st_ino or final_info.st_uid != 0:
+            raise ValueError("prepared runtime directory changed")
+        return attestation
+    finally:
+        for descriptor in open_files:
+            os.close(descriptor)
+        os.close(directory_fd)
+
+
+def verify_prepared_runtime(directory: Path, *, expected_owner: int = 0) -> dict[str, Any]:
+    path = prepared_directory_path(directory)
+    directory_info = path.lstat()
+    if path.is_symlink() or not stat.S_ISDIR(directory_info.st_mode) or directory_info.st_uid != expected_owner or stat.S_IMODE(directory_info.st_mode) != 0o500:
+        raise ValueError("prepared runtime is missing or has unsafe ownership")
+    descriptor = os.open(path / PREPARED_ATTESTATION, os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW)
+    try:
+        info = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(info.st_mode)
+            or info.st_uid != expected_owner
+            or stat.S_IMODE(info.st_mode) != 0o400
+            or info.st_nlink != 1
+            or info.st_size > 1024 * 1024
+        ):
+            raise ValueError("invalid prepared runtime attestation")
+        data = os.read(descriptor, 1024 * 1024 + 1)
+    finally:
+        os.close(descriptor)
+    if len(data) > 1024 * 1024:
+        raise ValueError("prepared runtime attestation is too large")
+    attestation = json.loads(data, object_pairs_hook=unique_json_object)
+    expected_top = {
+        "schema_version",
+        "prepared_uid",
+        "directory",
+        "source",
+        "toolchain",
+        "images",
+        "seed_commit",
+        "build_flags",
+        "build_environment",
+        "artifacts",
+    }
+    if not isinstance(attestation, dict) or set(attestation) != expected_top or attestation.get("schema_version") != 1:
+        raise ValueError("invalid prepared runtime attestation fields")
+    if (
+        attestation["directory"] != {"device": directory_info.st_dev, "inode": directory_info.st_ino}
+        or not isinstance(attestation["prepared_uid"], int)
+        or attestation["prepared_uid"] <= 0
+        or attestation["images"] != {"source": SOURCE_IMAGE, "restore": RESTORE_IMAGE}
+        or attestation["seed_commit"] != SEED_COMMIT
+        or attestation["build_flags"] != PREPARED_BUILD_FLAGS
+        or attestation["build_environment"]
+        != {
+            "CGO_ENABLED": "0",
+            "GOENV": "off",
+            "GOMAXPROCS": "1",
+            "GOPROXY": "off",
+            "GOSUMDB": "off",
+            "GOTOOLCHAIN": "local",
+        }
+    ):
+        raise ValueError("prepared runtime pins mismatch")
+    source_revision, source_digest = source_identity()
+    source = attestation["source"]
+    if source != {"revision": source_revision, "tree_sha256": source_digest}:
+        raise ValueError("prepared runtime source mismatch")
+    toolchain = attestation["toolchain"]
+    if not isinstance(toolchain, dict) or set(toolchain) != {
+        "version", "goos", "goarch", "root", "root_sha256", "binary", "binary_sha256"
+    }:
+        raise ValueError("invalid prepared runtime toolchain")
+    version = "go version " + toolchain.get("version", "") + " linux/" + toolchain.get("goarch", "")
+    version_value, go_arch = parse_go_version(version)
+    root = Path(toolchain["root"])
+    binary = Path(toolchain["binary"])
+    if (
+        toolchain.get("goos") != "linux"
+        or go_arch not in {"amd64", "arm64"}
+        or go_version_tuple(version_value) < go_version_tuple(minimum_go_version())
+        or not root.is_absolute()
+        or not binary.is_absolute()
+        or binary.resolve(strict=True) != binary
+        or not binary.is_relative_to(root)
+        or sha256_directory(root) != toolchain["root_sha256"]
+        or sha256_file(binary)[0] != toolchain["binary_sha256"]
+    ):
+        raise ValueError("prepared runtime toolchain mismatch")
+    artifacts = attestation["artifacts"]
+    if not isinstance(artifacts, dict) or set(artifacts) != PREPARED_ARTIFACTS:
+        raise ValueError("prepared runtime artifact list mismatch")
+    if {item.name for item in path.iterdir()} != PREPARED_ARTIFACTS | {PREPARED_ATTESTATION}:
+        raise ValueError("prepared runtime contents mismatch")
+    for name in sorted(PREPARED_ARTIFACTS):
+        item = path / name
+        item_info = item.lstat()
+        expected = artifacts[name]
+        if (
+            not isinstance(expected, dict)
+            or set(expected) != {"sha256", "size"}
+            or not stat.S_ISREG(item_info.st_mode)
+            or item_info.st_uid != expected_owner
+            or stat.S_IMODE(item_info.st_mode) != 0o500
+            or item_info.st_nlink != 1
+            or not item_info.st_mode & 0o111
+            or sha256_file(item) != (expected["sha256"], expected["size"])
+        ):
+            raise ValueError("prepared runtime artifact mismatch")
+    manifest_hash = hashlib.sha256(data).hexdigest()
+    return {
+        "path": str(path),
+        "device": directory_info.st_dev,
+        "inode": directory_info.st_ino,
+        "attestation_sha256": manifest_hash,
+        "prepared_uid": attestation["prepared_uid"],
+        "go_arch": go_arch,
+        "atlas_bin": str(path / "atlas"),
+        "build_dir": str(path),
+    }
 
 
 def resolve_local_dump_migration_head(version: str, migration_dir: Path | None = None) -> str:
@@ -2087,6 +2517,8 @@ def load_manifest(path: Path) -> dict[str, Any]:
         or not isinstance(manifest.get("supervisor"), dict)
         or not isinstance(manifest.get("runtime"), dict)
         or not isinstance(manifest.get("global_lock"), dict)
+        or not isinstance(manifest.get("rollout_lock"), dict)
+        or not isinstance(manifest.get("prepared_runtime"), dict)
         or not isinstance(manifest.get("work_deadline"), (float, int))
         or not isinstance(manifest.get("cleanup_deadline"), (float, int))
     ):
@@ -2106,6 +2538,53 @@ def load_manifest(path: Path) -> dict[str, Any]:
             or lock_info.st_ino != lock_record["inode"]
         ):
             raise ValueError("invalid global lock")
+    except (KeyError, OSError, TypeError, ValueError) as exc:
+        raise DrillFailure("cleanup", "cleanup_failure") from exc
+    rollout_record = manifest["rollout_lock"]
+    try:
+        rollout_path = Path(rollout_record["path"])
+        rollout_info = rollout_path.lstat()
+        if (
+            str(rollout_path) != str(ROLLOUT_LOCK_PATH)
+            or rollout_path.is_symlink()
+            or not stat.S_ISREG(rollout_info.st_mode)
+            or rollout_info.st_uid != 0
+            or stat.S_IMODE(rollout_info.st_mode) != 0o600
+            or rollout_info.st_nlink != 1
+            or rollout_info.st_dev != rollout_record["device"]
+            or rollout_info.st_ino != rollout_record["inode"]
+        ):
+            raise ValueError("invalid rollout lock")
+    except (KeyError, OSError, TypeError, ValueError) as exc:
+        raise DrillFailure("cleanup", "cleanup_failure") from exc
+    prepared_runtime = manifest["prepared_runtime"]
+    try:
+        prepared_path = prepared_directory_path(Path(prepared_runtime["path"]))
+        prepared_info = prepared_path.lstat()
+        attestation_path = prepared_path / PREPARED_ATTESTATION
+        attestation_info = attestation_path.lstat()
+        attestation_fd = os.open(attestation_path, os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW)
+        try:
+            attestation_data = os.read(attestation_fd, 1024 * 1024 + 1)
+        finally:
+            os.close(attestation_fd)
+        if (
+            set(prepared_runtime) != {"path", "device", "inode", "attestation_sha256", "prepared_uid", "go_arch"}
+            or not stat.S_ISDIR(prepared_info.st_mode)
+            or prepared_info.st_uid != 0
+            or stat.S_IMODE(prepared_info.st_mode) != 0o500
+            or prepared_info.st_dev != prepared_runtime["device"]
+            or prepared_info.st_ino != prepared_runtime["inode"]
+            or not stat.S_ISREG(attestation_info.st_mode)
+            or attestation_info.st_uid != 0
+            or stat.S_IMODE(attestation_info.st_mode) != 0o400
+            or len(attestation_data) > 1024 * 1024
+            or hashlib.sha256(attestation_data).hexdigest() != prepared_runtime["attestation_sha256"]
+            or not isinstance(prepared_runtime["prepared_uid"], int)
+            or prepared_runtime["prepared_uid"] <= 0
+            or prepared_runtime["go_arch"] not in {"amd64", "arm64"}
+        ):
+            raise ValueError("invalid prepared runtime record")
     except (KeyError, OSError, TypeError, ValueError) as exc:
         raise DrillFailure("cleanup", "cleanup_failure") from exc
     for item in manifest["processes"]:
@@ -2184,6 +2663,7 @@ class Drill(Docker):
         self.args = args
         self.run_dir = run_dir
         self.manifest = manifest
+        self.prepared_runtime = getattr(args, "prepared_runtime", manifest.get("prepared_runtime"))
         self.input_mode = "local" if getattr(args, "local_dump", None) is not None or getattr(args, "local_fixture_test", False) else "synthetic"
         self.local_dump_path: Path | None = getattr(args, "local_dump", None)
         self.local_dump_fd: int | None = getattr(args, "local_dump_fd", None)
@@ -2363,29 +2843,14 @@ class Drill(Docker):
         if (
             directory.is_symlink()
             or not stat.S_ISDIR(info.st_mode)
-            or info.st_uid != self.args.build_uid
-            or stat.S_IMODE(info.st_mode) != 0o700
+            or info.st_uid != 0
+            or stat.S_IMODE(info.st_mode) != 0o500
+            or self.prepared_runtime is None
+            or info.st_dev != self.prepared_runtime["device"]
+            or info.st_ino != self.prepared_runtime["inode"]
         ):
             raise DrillFailure(self.phase, "preflight_failure")
-        self.manifest["build_directory"] = {
-            "path": str(directory),
-            "device": info.st_dev,
-            "inode": info.st_ino,
-            "mode": stat.S_IMODE(info.st_mode),
-            "uid": info.st_uid,
-            "gid": info.st_gid,
-        }
-        expected = {
-            "atlas",
-            "teagramd",
-            "teagramd-seed",
-            "restore-readiness-launcher",
-            "restore-readiness-seed",
-            "restore-readiness-seed-shim",
-            "restore-readiness-provisioner",
-            "restore-drill-checker",
-            "restore-readiness-probe",
-        }
+        expected = PREPARED_ARTIFACTS | {PREPARED_ATTESTATION}
         if Path(self.args.atlas_bin) != directory / "atlas":
             raise DrillFailure(self.phase, "preflight_failure")
         try:
@@ -2400,16 +2865,14 @@ class Drill(Docker):
                 raise DrillFailure(self.phase, "preflight_failure") from exc
             if (
                 not stat.S_ISREG(item.st_mode)
-                or item.st_uid != self.args.build_uid
+                or item.st_uid != 0
                 or item.st_nlink != 1
-                or item.st_mode & 0o022
-                or not item.st_mode & 0o111
-                or item.st_size <= 0
+                or stat.S_IMODE(item.st_mode) != (0o400 if name == PREPARED_ATTESTATION else 0o500)
+                or (name != PREPARED_ATTESTATION and not item.st_mode & 0o111)
+                or (name != PREPARED_ATTESTATION and item.st_size <= 0)
             ):
                 raise DrillFailure(self.phase, "preflight_failure")
-            path = directory / name
-            if not any(record.get("path") == str(path) for record in self.manifest.get("files", [])):
-                self.register_file(path, "build_input_" + name.replace("-", "_"))
+        self.manifest["prepared_runtime"] = self.prepared_runtime
         self.save()
 
     def preload(self) -> None:
@@ -5923,6 +6386,119 @@ def open_global_lock() -> tuple[int, dict[str, Any]] | None:
         return None
 
 
+def open_rollout_lock(
+    path: Path = ROLLOUT_LOCK_PATH,
+    *,
+    expected_uid: int = 0,
+) -> tuple[int, dict[str, Any]] | None:
+    descriptor: int | None = None
+    try:
+        path = Path(path)
+        if path.parent != Path("/tmp") or expected_uid < 0:
+            return None
+        descriptor = os.open(
+            path,
+            os.O_RDWR | os.O_CREAT | os.O_CLOEXEC | os.O_NOFOLLOW,
+            0o600,
+        )
+        info = os.fstat(descriptor)
+        path_info = path.lstat()
+        parent_info = path.parent.lstat()
+        if (
+            not stat.S_ISDIR(parent_info.st_mode)
+            or parent_info.st_uid != 0
+            or stat.S_IMODE(parent_info.st_mode) != 0o1777
+            or not stat.S_ISREG(info.st_mode)
+            or info.st_uid != expected_uid
+            or stat.S_IMODE(info.st_mode) != 0o600
+            or info.st_nlink != 1
+            or path_info.st_dev != info.st_dev
+            or path_info.st_ino != info.st_ino
+        ):
+            os.close(descriptor)
+            return None
+        fcntl.flock(descriptor, fcntl.LOCK_SH | fcntl.LOCK_NB)
+        path_info = path.lstat()
+        if path_info.st_dev != info.st_dev or path_info.st_ino != info.st_ino:
+            os.close(descriptor)
+            return None
+        return descriptor, {"path": str(path), "device": info.st_dev, "inode": info.st_ino}
+    except (OSError, BlockingIOError):
+        if descriptor is not None:
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
+        return None
+
+
+def teardown_prepared_runtime(directory: Path, build_uid: int) -> bool:
+    if os.geteuid() != 0 or build_uid <= 0:
+        return False
+    try:
+        path = prepared_directory_path(directory)
+        try:
+            directory_info = path.lstat()
+        except FileNotFoundError:
+            return True
+        if (
+            path.is_symlink()
+            or not stat.S_ISDIR(directory_info.st_mode)
+            or directory_info.st_uid not in {0, build_uid}
+            or stat.S_IMODE(directory_info.st_mode) not in {0o500, 0o700}
+        ):
+            return False
+        lock = open_global_lock()
+        if lock is None:
+            return False
+        lock_fd, _ = lock
+        parent_fd: int | None = None
+        try:
+            parent_fd = os.open("/tmp", os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC | os.O_NOFOLLOW)
+            directory_fd = os.open(path.name, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC | os.O_NOFOLLOW, dir_fd=parent_fd)
+            try:
+                opened_info = os.fstat(directory_fd)
+                if opened_info.st_dev != directory_info.st_dev or opened_info.st_ino != directory_info.st_ino:
+                    return False
+                entries = set(os.listdir(directory_fd))
+                if not entries <= PREPARED_ARTIFACTS | {PREPARED_ATTESTATION} or not entries:
+                    return False
+                for name in sorted(entries):
+                    descriptor = os.open(name, os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW, dir_fd=directory_fd)
+                    try:
+                        info = os.fstat(descriptor)
+                        if (
+                            not stat.S_ISREG(info.st_mode)
+                            or info.st_uid not in {0, build_uid}
+                            or info.st_nlink != 1
+                            or info.st_mode & 0o022
+                            or info.st_size > 2 * 1024 * 1024 * 1024
+                        ):
+                            return False
+                    finally:
+                        os.close(descriptor)
+                    current = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+                    if current.st_dev != info.st_dev or current.st_ino != info.st_ino:
+                        return False
+                    os.unlink(name, dir_fd=directory_fd)
+                os.fsync(directory_fd)
+            finally:
+                os.close(directory_fd)
+            os.rmdir(path.name, dir_fd=parent_fd)
+            os.fsync(parent_fd)
+            try:
+                path.lstat()
+                return False
+            except FileNotFoundError:
+                return True
+        finally:
+            if parent_fd is not None:
+                os.close(parent_fd)
+            os.close(lock_fd)
+    except (OSError, ValueError, TypeError):
+        return False
+
+
 def make_runtime_args(manifest: dict[str, Any]) -> argparse.Namespace:
     runtime = manifest["runtime"]
     return argparse.Namespace(
@@ -5931,6 +6507,7 @@ def make_runtime_args(manifest: dict[str, Any]) -> argparse.Namespace:
         build_dir=runtime["build_dir"],
         build_uid=runtime["build_uid"],
         go_arch=runtime["go_arch"],
+        prepared_runtime=manifest["prepared_runtime"],
     )
 
 
@@ -6010,13 +6587,16 @@ def remove_finished_run(drill: Drill, deadline: float | None = None) -> bool:
         return False
 
 
-def supervise(manifest_path: Path, lock_fd: int) -> int:
+def supervise(manifest_path: Path, lock_fd: int, rollout_lock_fd: int) -> int:
     try:
         manifest = load_manifest(manifest_path)
         lock_info = os.fstat(lock_fd)
+        rollout_info = os.fstat(rollout_lock_fd)
         if (
             lock_info.st_dev != manifest["global_lock"]["device"]
             or lock_info.st_ino != manifest["global_lock"]["inode"]
+            or rollout_info.st_dev != manifest["rollout_lock"]["device"]
+            or rollout_info.st_ino != manifest["rollout_lock"]["inode"]
         ):
             return 1
         supervisor_pid = os.getpid()
@@ -6092,6 +6672,10 @@ def supervise(manifest_path: Path, lock_fd: int) -> int:
             os.close(lock_fd)
         except OSError:
             pass
+        try:
+            os.close(rollout_lock_fd)
+        except OSError:
+            pass
 
 
 def recover(manifest_path: Path) -> int:
@@ -6099,12 +6683,17 @@ def recover(manifest_path: Path) -> int:
         print(json.dumps(report_document("cleanup", "cleanup_failure", "not_started", 0), separators=(",", ":")))
         return 1
     descriptor: int | None = None
+    rollout_descriptor: int | None = None
     try:
+        rollout_lock = open_rollout_lock()
+        if rollout_lock is None:
+            raise ValueError("deployment rollout is active")
+        rollout_descriptor, rollout_record = rollout_lock
         manifest = load_manifest(manifest_path)
         lock = open_global_lock()
         if lock is not None:
             descriptor, _ = lock
-            if lock[1] == manifest["global_lock"]:
+            if lock[1] == manifest["global_lock"] and rollout_record == manifest["rollout_lock"]:
                 manifest["cleanup_deadline"] = time.monotonic() + CLEANUP_SECONDS
                 drill = Drill(make_runtime_args(manifest), manifest_path.parent, manifest)
                 drill.save()
@@ -6124,6 +6713,11 @@ def recover(manifest_path: Path) -> int:
         if descriptor is not None:
             try:
                 os.close(descriptor)
+            except OSError:
+                pass
+        if rollout_descriptor is not None:
+            try:
+                os.close(rollout_descriptor)
             except OSError:
                 pass
     print(json.dumps(report_document("cleanup", "cleanup_failure", "unverified", 0), separators=(",", ":")))
@@ -6150,6 +6744,20 @@ def run_primary(args: argparse.Namespace) -> int:
         print("restore readiness preflight check failed: root privileges", file=sys.stderr)
         print(json.dumps(report_document("preflight", "preflight_failure", "not_started", 0), separators=(",", ":")))
         return 1
+    try:
+        prepared = verify_prepared_runtime(args.prepared_dir)
+    except (OSError, ValueError, TypeError, KeyError, json.JSONDecodeError, subprocess.SubprocessError):
+        print("restore readiness preflight check failed: prepared runtime", file=sys.stderr)
+        print(json.dumps(report_document("preflight", "preflight_failure", "not_started", 0), separators=(",", ":")))
+        return 1
+    args.atlas_bin = prepared["atlas_bin"]
+    args.build_dir = prepared["build_dir"]
+    args.build_uid = prepared["prepared_uid"]
+    args.go_arch = prepared["go_arch"]
+    args.prepared_runtime = {
+        key: prepared[key]
+        for key in ("path", "device", "inode", "attestation_sha256", "prepared_uid", "go_arch")
+    }
     try:
         args.docker_bin = ensure_trusted_system_executable(args.docker_bin)
     except DrillFailure:
@@ -6187,8 +6795,16 @@ def run_primary(args: argparse.Namespace) -> int:
         local_dump_fd = None
         return True
 
+    rollout_lock = open_rollout_lock()
+    if rollout_lock is None:
+        close_local_dump()
+        print("restore readiness preflight check failed: deploy rollout lock", file=sys.stderr)
+        print(json.dumps(report_document("preflight", "rollout_in_progress", "not_started", 0), separators=(",", ":")))
+        return 1
+    rollout_lock_fd, rollout_lock_record = rollout_lock
     lock = open_global_lock()
     if lock is None:
+        os.close(rollout_lock_fd)
         close_local_dump()
         print("restore readiness preflight check failed: global lock", file=sys.stderr)
         print(json.dumps(report_document("preflight", "isolation_refusal", "not_started", 0), separators=(",", ":")))
@@ -6200,6 +6816,7 @@ def run_primary(args: argparse.Namespace) -> int:
         os.chmod(run_dir, 0o700)
     except OSError:
         os.close(lock_fd)
+        os.close(rollout_lock_fd)
         close_local_dump()
         print("restore readiness preflight check failed: private /run directory", file=sys.stderr)
         print(json.dumps(report_document("preflight", "preflight_failure", "not_started", 0), separators=(",", ":")))
@@ -6208,6 +6825,7 @@ def run_primary(args: argparse.Namespace) -> int:
     parent_ticks = process_start_ticks(os.getpid())
     if parent_ticks is None:
         os.close(lock_fd)
+        os.close(rollout_lock_fd)
         close_local_dump()
         print("restore readiness preflight check failed: parent process identity", file=sys.stderr)
         print(json.dumps(report_document("preflight", "preflight_failure", "not_started", 0), separators=(",", ":")))
@@ -6230,6 +6848,8 @@ def run_primary(args: argparse.Namespace) -> int:
         "parent": {"pid": os.getpid(), "start_ticks": parent_ticks},
         "supervisor": {"pid": 0, "start_ticks": 0},
         "global_lock": lock_record,
+        "rollout_lock": rollout_lock_record,
+        "prepared_runtime": args.prepared_runtime,
         "runtime": runtime,
         "baseline": {
             "containers": [],
@@ -6276,13 +6896,15 @@ def run_primary(args: argparse.Namespace) -> int:
                 str(drill.manifest_path),
                 "--global-lock-fd",
                 str(lock_fd),
+                "--rollout-lock-fd",
+                str(rollout_lock_fd),
             ],
             stdin=subprocess.DEVNULL,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
             env={"HOME": "/root", "LANG": "C", "LC_ALL": "C", "PATH": "/usr/bin:/bin"},
             close_fds=True,
-            pass_fds=(lock_fd,),
+            pass_fds=(lock_fd, rollout_lock_fd),
             start_new_session=True,
         )
         supervisor_ticks = process_start_ticks(supervisor.pid)
@@ -6453,6 +7075,11 @@ def run_primary(args: argparse.Namespace) -> int:
     except OSError:
         if failure is None:
             failure = DrillFailure("cleanup", "cleanup_failure")
+    try:
+        os.close(rollout_lock_fd)
+    except OSError:
+        if failure is None:
+            failure = DrillFailure("cleanup", "cleanup_failure")
 
     supervisor_succeeded = False
     if supervisor is not None:
@@ -6507,12 +7134,20 @@ def parse_args() -> argparse.Namespace:
     mode.add_argument("--supervise", type=Path)
     mode.add_argument("--recover", type=Path)
     mode.add_argument("--validate-local-dump", type=Path)
+    mode.add_argument("--validate-prepared", type=Path)
+    mode.add_argument("--attest-prepared", type=Path)
+    mode.add_argument("--teardown-prepared", type=Path)
     parser.add_argument("--global-lock-fd", type=int)
+    parser.add_argument("--rollout-lock-fd", type=int)
     parser.add_argument("--docker-bin")
     parser.add_argument("--atlas-bin")
     parser.add_argument("--build-dir")
     parser.add_argument("--build-uid", type=int)
     parser.add_argument("--go-arch")
+    parser.add_argument("--go-version")
+    parser.add_argument("--go-root", type=Path)
+    parser.add_argument("--go-binary", type=Path)
+    parser.add_argument("--prepared-dir", type=Path)
     parser.add_argument(
         "--fault-test",
         choices=("malformed-sql", "auth-clear-failure", "auth-clear-signal", "sigkill"),
@@ -6528,21 +7163,99 @@ def parse_args() -> argparse.Namespace:
         if (
             args.global_lock_fd is None
             or args.global_lock_fd < 0
+            or args.rollout_lock_fd is None
+            or args.rollout_lock_fd < 0
             or args.local_dump is not None
             or args.local_fixture_test
             or args.fault_test is not None
         ):
             parser.error("invalid supervisor descriptor")
         return args
-    if args.validate_local_dump is not None:
+    if args.attest_prepared is not None:
+        if (
+            args.build_uid is None
+            or args.build_uid <= 0
+            or args.go_version is None
+            or args.go_root is None
+            or args.go_binary is None
+            or args.go_arch is None
+            or any(
+                (
+                    args.global_lock_fd is not None,
+                    args.rollout_lock_fd is not None,
+                    args.docker_bin is not None,
+                    args.atlas_bin is not None,
+                    args.build_dir is not None,
+                    args.prepared_dir is not None,
+                    args.validate_prepared is not None,
+                    args.fault_test is not None,
+                    args.work_seconds is not None,
+                    args.local_dump is not None,
+                    args.local_fixture_test,
+                )
+            )
+        ):
+            parser.error("invalid prepared runtime attestation input")
+        return args
+    if args.validate_prepared is not None:
         if any(
             (
                 args.global_lock_fd is not None,
+                args.rollout_lock_fd is not None,
                 args.docker_bin is not None,
                 args.atlas_bin is not None,
                 args.build_dir is not None,
                 args.build_uid is not None,
                 args.go_arch is not None,
+                args.go_version is not None,
+                args.go_root is not None,
+                args.go_binary is not None,
+                args.prepared_dir is not None,
+                args.fault_test is not None,
+                args.work_seconds is not None,
+                args.local_dump is not None,
+                args.local_fixture_test,
+            )
+        ):
+            parser.error("invalid prepared runtime validation input")
+        return args
+    if args.teardown_prepared is not None:
+        if (
+            args.build_uid is None
+            or args.build_uid <= 0
+            or args.go_version is not None
+            or args.go_root is not None
+            or args.go_binary is not None
+            or args.go_arch is not None
+            or args.prepared_dir is not None
+            or args.validate_prepared is not None
+            or args.global_lock_fd is not None
+            or args.rollout_lock_fd is not None
+            or args.docker_bin is not None
+            or args.atlas_bin is not None
+            or args.build_dir is not None
+            or args.fault_test is not None
+            or args.work_seconds is not None
+            or args.local_dump is not None
+            or args.local_fixture_test
+        ):
+            parser.error("invalid prepared runtime teardown input")
+        return args
+    if args.validate_local_dump is not None:
+        if any(
+            (
+                args.global_lock_fd is not None,
+                args.rollout_lock_fd is not None,
+                args.docker_bin is not None,
+                args.atlas_bin is not None,
+                args.build_dir is not None,
+                args.build_uid is not None,
+                args.go_arch is not None,
+                args.go_version is not None,
+                args.go_root is not None,
+                args.go_binary is not None,
+                args.prepared_dir is not None,
+                args.validate_prepared is not None,
                 args.fault_test is not None,
                 args.work_seconds is not None,
                 args.local_dump is not None,
@@ -6552,14 +7265,23 @@ def parse_args() -> argparse.Namespace:
             parser.error("invalid local dump validation input")
         return args
     if args.recover is not None:
-        if args.local_dump is not None or args.local_fixture_test or args.fault_test is not None:
+        if (
+            args.local_dump is not None
+            or args.local_fixture_test
+            or args.fault_test is not None
+            or args.prepared_dir is not None
+            or args.validate_prepared is not None
+        ):
             parser.error("invalid recovery input")
         return args
     if args.local_dump is not None and args.fault_test is not None:
         parser.error("local dump mode cannot use fault injection")
     if args.local_fixture_test and args.fault_test not in (None, "auth-clear-signal", "sigkill"):
         parser.error("unsupported local fixture fault injection")
-    if not all((args.docker_bin, args.atlas_bin, args.build_dir, args.go_arch)) or args.build_uid is None:
+    if (
+        not all((args.docker_bin, args.prepared_dir))
+        or any((args.atlas_bin, args.build_dir, args.build_uid, args.go_arch, args.go_version, args.go_root, args.go_binary))
+    ):
         parser.error("missing confined drill input")
     return args
 
@@ -6567,11 +7289,37 @@ def parse_args() -> argparse.Namespace:
 def main() -> int:
     args = parse_args()
     if args.supervise is not None:
-        return supervise(args.supervise, args.global_lock_fd)
+        return supervise(args.supervise, args.global_lock_fd, args.rollout_lock_fd)
     if args.recover is not None:
         return recover(args.recover)
     if args.validate_local_dump is not None:
         return validate_local_dump_argument(args.validate_local_dump)
+    if args.validate_prepared is not None:
+        try:
+            verify_prepared_runtime(args.validate_prepared)
+            return 0
+        except (OSError, ValueError, TypeError, KeyError, json.JSONDecodeError, subprocess.SubprocessError):
+            print("restore readiness preflight check failed: prepared runtime", file=sys.stderr)
+            return 1
+    if args.attest_prepared is not None:
+        try:
+            finalize_prepared_runtime(
+                args.attest_prepared,
+                build_uid=args.build_uid,
+                go_version=args.go_version,
+                go_root=args.go_root,
+                go_binary=args.go_binary,
+                go_arch=args.go_arch,
+            )
+            return 0
+        except (OSError, ValueError, TypeError, subprocess.SubprocessError):
+            print("restore readiness preflight check failed: prepared runtime attestation", file=sys.stderr)
+            return 1
+    if args.teardown_prepared is not None:
+        if teardown_prepared_runtime(args.teardown_prepared, args.build_uid):
+            return 0
+        print("restore readiness preflight check failed: prepared runtime teardown", file=sys.stderr)
+        return 1
     return run_primary(args)
 
 
