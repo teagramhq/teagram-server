@@ -132,8 +132,8 @@ func TestServeSocketLogsPreAuthLifetimeExpiryAsTimeout(t *testing.T) {
 
 	var records []serverErrorLogRecord
 	servedCh := (<-chan struct{})(served)
-	servedReturned, ceilingLogged := false, false
-	for !servedReturned || !ceilingLogged {
+	servedReturned, ceilingLogged, closeLogged := false, false, false
+	for !servedReturned || !ceilingLogged || !closeLogged {
 		select {
 		case <-servedCh:
 			servedReturned = true
@@ -142,6 +142,9 @@ func TestServeSocketLogsPreAuthLifetimeExpiryAsTimeout(t *testing.T) {
 			records = append(records, record)
 			if record.message == "connection closed at the pre-auth lifetime ceiling" {
 				ceilingLogged = true
+			}
+			if record.message == "transport connection closed" {
+				closeLogged = true
 			}
 		case <-ctx.Done():
 			t.Fatal("serveSocket did not finish the pre-auth lifetime close")
