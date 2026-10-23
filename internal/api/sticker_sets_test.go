@@ -827,6 +827,49 @@ func TestCatalogueStickerRespectsMegagroupAndBroadcastPostRights(t *testing.T) {
 	}
 }
 
+func TestCatalogueStickerSendAndRetryRejectBannedMegagroupMember(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	s, blobs, creator, member, _ := downloadFixture(t, "+15551810015", "+15551810016")
+	set := getStickerSet(t, fullChannelDispatcher(s), creator.ID, &tg.InputStickerSetShortName{ShortName: "twemoji_reactions"}, 0).Set
+	full := getStickerSet(t, fullChannelDispatcher(s), creator.ID, &tg.InputStickerSetID{ID: set.ID, AccessHash: set.AccessHash}, 0)
+	if len(full.Documents) == 0 {
+		t.Fatal("getStickerSet returned no documents")
+	}
+	document, ok := full.Documents[0].(*tg.Document)
+	if !ok {
+		t.Fatalf("first sticker document = %T, want *tg.Document", full.Documents[0])
+	}
+	channel, err := s.CreateChannel(ctx, creator.ID, "Catalogue sticker banned member", "", true)
+	if err != nil {
+		t.Fatalf("create megagroup: %v", err)
+	}
+	joinChannelByInvite(t, s, channel, member.ID)
+	req := &tg.MessagesSendMediaRequest{
+		Peer:    channelPeer(member.ID, channel.ID),
+		Media:   &tg.InputMediaDocument{ID: &tg.InputDocument{ID: document.ID, AccessHash: document.AccessHash}},
+		Message: "member catalogue sticker", RandomID: 4815162426,
+	}
+	if _, err = api.SendMediaForTest(s, member.ID, blobs, api.TestMaxUserStorageBytes, req); err != nil {
+		t.Fatalf("member send catalogue sticker before ban: %v", err)
+	}
+	if err = s.SetChannelBan(ctx, channel.ID, creator.ID, member.ID, nil, true); err != nil {
+		t.Fatalf("ban member: %v", err)
+	}
+	newSend := *req
+	newSend.RandomID++
+	if _, err = api.SendMediaForTest(s, member.ID, blobs, api.TestMaxUserStorageBytes, &newSend); err == nil {
+		t.Fatal("banned member sent a catalogue sticker, want PEER_ID_INVALID")
+	} else {
+		rpcError(t, err, "PEER_ID_INVALID")
+	}
+	if _, err = api.SendMediaForTest(s, member.ID, blobs, api.TestMaxUserStorageBytes, req); err == nil {
+		t.Fatal("banned member retried a catalogue sticker, want PEER_ID_INVALID")
+	} else {
+		rpcError(t, err, "PEER_ID_INVALID")
+	}
+}
+
 func TestStaleCatalogueStickerRetriesAndHistoryRenderUnsupported(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()

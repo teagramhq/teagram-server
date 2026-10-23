@@ -80,7 +80,7 @@ func testSmokeStickerSetCatalogue(t *testing.T) {
 	}
 	assertEmpty(b, "other account after install")
 
-	var firstDocument *tg.Document
+	var firstDocument, secondDocument *tg.Document
 	if err := a1.call(f.ctx, func(ctx context.Context, api *tg.Client) error {
 		result, err := api.MessagesGetStickerSet(ctx, &tg.MessagesGetStickerSetRequest{Stickerset: ref})
 		if err != nil {
@@ -103,6 +103,13 @@ func testSmokeStickerSetCatalogue(t *testing.T) {
 		firstDocument, okDocument = full.Documents[0].(*tg.Document)
 		if !okDocument {
 			return fmt.Errorf("first sticker document = %T, want *tg.Document", full.Documents[0])
+		}
+		secondDocument, okDocument = full.Documents[1].(*tg.Document)
+		if !okDocument {
+			return fmt.Errorf("second sticker document = %T, want *tg.Document", full.Documents[1])
+		}
+		if firstDocument.ID == secondDocument.ID {
+			return fmt.Errorf("first and second sticker documents share id %d", firstDocument.ID)
 		}
 		if firstDocument.MimeType != "image/webp" || firstDocument.Size <= 0 {
 			return fmt.Errorf("first sticker MIME %q size %d, want a non-empty WebP", firstDocument.MimeType, firstDocument.Size)
@@ -156,7 +163,7 @@ func testSmokeStickerSetCatalogue(t *testing.T) {
 			Peer: peerUser(a1.id, b.id),
 			MultiMedia: []tg.InputSingleMedia{
 				{Media: &tg.InputMediaDocument{ID: &tg.InputDocument{ID: firstDocument.ID, AccessHash: firstDocument.AccessHash}}, RandomID: 1049702},
-				{Media: &tg.InputMediaDocument{ID: &tg.InputDocument{ID: firstDocument.ID, AccessHash: firstDocument.AccessHash}}, RandomID: 1049703},
+				{Media: &tg.InputMediaDocument{ID: &tg.InputDocument{ID: secondDocument.ID, AccessHash: secondDocument.AccessHash}}, RandomID: 1049703},
 			},
 		})
 		return err
