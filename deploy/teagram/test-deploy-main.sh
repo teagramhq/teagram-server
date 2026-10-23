@@ -63,7 +63,7 @@ fi
 grep -Fq 'DEPLOY_SHA must be a full 40-hex commit SHA' "$tmp/bridge-invalid.log"
 
 git init -q -b main "$tmp/work"
-mkdir -p "$tmp/work/deploy/teagramd/rollout-runner"
+mkdir -p "$tmp/work/deploy/teagramd/rollout-runner" "$tmp/work/deploy/link-edge"
 printf 'tracked fixture\n' > "$tmp/work/tracked.txt"
 printf '#!/usr/bin/env bash\n' > "$tmp/work/tracked-script.sh"
 cat > "$tmp/work/deploy/teagramd/rollout-runner/rollout-runner.sh" <<'RUNNER'
@@ -85,6 +85,12 @@ git -C "$DEPLOY_DIR" merge --ff-only -q "$2"
 printf 'source_sha=%s image_id=sha256:fixture built_at=fixture\n' "$2" \
   > "$DEPLOY_ROOT/main1238-fixture.build/built-image.identity"
 RUNNER
+cat > "$tmp/work/deploy/link-edge/deploy-main.sh" <<'EDGE'
+#!/usr/bin/env bash
+set -euo pipefail
+[[ $# == 1 ]]
+printf '%s\n' "$1" >> "${LINK_EDGE_DEPLOY_LOG:?}"
+EDGE
 for file in rollout-verifier.sh schema-result-gate.sh schema-result-gate.py blob-mode-state.py qualify-rustfs-transition.py stack-move-runner.py; do
   printf 'fixture\n' > "$tmp/work/deploy/teagramd/rollout-runner/$file"
 done
@@ -109,7 +115,7 @@ PYTHON
 chmod 644 "$tmp/work/tracked.txt"
 chmod 755 "$tmp/work/tracked-script.sh"
 chmod 644 "$tmp/work/deploy/teagramd/rollout-runner/"*
-git -C "$tmp/work" add tracked.txt tracked-script.sh deploy/teagramd/rollout-runner
+git -C "$tmp/work" add tracked.txt tracked-script.sh deploy/teagramd/rollout-runner deploy/link-edge/deploy-main.sh
 commit() {
   git -C "$tmp/work" commit -q --allow-empty -m "$1"
   git -C "$tmp/work" rev-parse HEAD
@@ -178,6 +184,8 @@ FLOCK
 chmod 755 "$tmp/bin/flock"
 
 failures=0
+export LINK_EDGE_DEPLOY_LOG="$tmp/link-edge-deploys"
+: > "$LINK_EDGE_DEPLOY_LOG"
 # expect <exit code> <last line> [VAR=value...]
 expect() {
   local want_rc="$1" want_last="$2" want_contains='' out rc=0
@@ -229,6 +237,10 @@ if [[ ! -s "$backup" || "$(stat -c '%a' "$backup")" != 600 || "$(<"$backup")" !=
   echo 'FAIL deploy did not keep a root-only copy of the prior teagram-logs command' >&2
   failures=$((failures + 1))
 fi
+if [[ "$(tail -n 1 "$LINK_EDGE_DEPLOY_LOG")" != "$second" ]]; then
+  echo 'FAIL an already deployed server SHA did not refresh the link edge' >&2
+  failures=$((failures + 1))
+fi
 
 # Without a provenance record, an equal SHA must reach the deploy path
 # (the fake docker refuses the pg_dump call).
@@ -240,6 +252,10 @@ mkdir -p "$tmp/root/teagramd-rollout-runner"
 printf 'stale qualifier fixture\n' > "$tmp/root/teagramd-rollout-runner/qualify-rustfs-transition.py"
 expect 0 "deployed $third" --contains \
   'tracked file modes: normalized=1 mismatches=0' FIXTURE_DEPLOY_SUCCESS=1 DEPLOY_SHA="$third"
+if [[ "$(tail -n 1 "$LINK_EDGE_DEPLOY_LOG")" != "$third" ]]; then
+  echo 'FAIL a successful server rollout did not refresh the link edge at the same SHA' >&2
+  failures=$((failures + 1))
+fi
 if [[ "$(stat -c '%a' "$tmp/live/tracked.txt")" != 644 || \
     "$(stat -c '%a' "$tmp/live/tracked-script.sh")" != 755 || \
     "$(stat -c '%a' "$tmp/live/new-tracked.txt")" != 644 ]]; then
@@ -263,6 +279,10 @@ moved_compose="$tmp/live/docker-compose.yml,$tmp/live/docker-compose.local-blobs
 expect 0 "deployed $fourth" --contains \
   'runner exit 0' FIXTURE_DEPLOY_SUCCESS=1 \
   FIXTURE_COMPOSE_FILES="$moved_compose" DEPLOY_SHA="$fourth"
+if [[ "$(tail -n 1 "$LINK_EDGE_DEPLOY_LOG")" != "$fourth" ]]; then
+  echo 'FAIL a successful local-blob rollout did not refresh the link edge at the same SHA' >&2
+  failures=$((failures + 1))
+fi
 
 fifth=$(commit fifth)
 git -C "$tmp/work" push -q "$tmp/origin.git" main

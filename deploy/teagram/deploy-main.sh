@@ -3,7 +3,8 @@
 # teagram-server LXC through the rollout runner. Runs as root on the LXC: from
 # the Deploy. workflow's forced-command key, or by hand with
 # `ssh teagram-server 'DEPLOY_SHA=<full sha> bash -s' < deploy/teagram/deploy-main.sh`.
-# Stdin may be this script, so every docker compose call reads /dev/null.
+# Stdin may be this script, so every docker compose call reads /dev/null. The
+# same tested commit refreshes the independent link selector after teagramd.
 # DEPLOY_DIR and DEPLOY_ROOT exist for the fixture test only.
 set -eu
 
@@ -189,6 +190,7 @@ IMG=$(docker inspect --format '{{.Image}}' $C)
 if [ "$PREV" = "$SHA" ] && grep -qs "source_sha=$SHA image_id=$IMG " "$R"/main1238-*.build/built-image.identity; then
   umask 077
   install_teagram_logs_command "$SHA"
+  bash "$LIVE_CHECKOUT/deploy/link-edge/deploy-main.sh" "$SHA"
   echo "already at $SHA with runner provenance"; exit 0
 fi
 echo "deploying ${PREV:0:7} -> $S"; git log --oneline "HEAD..$SHA"
@@ -221,4 +223,5 @@ if printf '%s\n' "$LOGS" | grep -q "level=ERROR"; then
   echo "teagramd logged level=ERROR after the rollout"; exit 1
 fi
 install_teagram_logs_command "$SHA"
+bash "$LIVE_CHECKOUT/deploy/link-edge/deploy-main.sh" "$SHA"
 echo "deployed $SHA"

@@ -112,6 +112,31 @@ checks from MAIN-1160 before acceptance. Use only synthetic link values. Verify
 the published ports are still loopback-only and the selector cannot reach
 Postgres or host admin listeners.
 
+## Routine selector refresh
+
+The server `Deploy.` workflow refreshes only the selector from the tested
+server commit after the `teagramd` rollout. It preserves the current selector
+image as `teagram-linkselector:rollback`, waits for the replacement health
+check, then verifies the retired version path and all production discovery
+routes through Tailscale Serve. A failed health or route check triggers a
+restore of the previous selector image before the deploy exits unsuccessfully;
+the deploy reports a rollback failure if it cannot verify that restore. The
+landing container and Serve handler table are not changed.
+
+To manually restore the last selector image, from `/opt/teagram` run:
+
+```sh
+docker image tag teagram-linkselector:rollback teagram-linkselector:local
+docker compose --env-file /dev/null \
+  --project-directory /opt/teagram/deploy/link-edge \
+  --file /opt/teagram/deploy/link-edge/compose.yaml \
+  --project-name teagram-link-edge \
+  up -d --no-deps --wait --wait-timeout 60 selector
+```
+
+The restore wait is bounded to 60 seconds. The rollback tag points to the
+selector image that was live before the latest refresh attempt.
+
 ## Rollback
 
 Restore only HTTPS `/` to Web at `http://127.0.0.1:8080`, confirm `/apiws`,
