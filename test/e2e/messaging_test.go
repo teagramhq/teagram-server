@@ -453,7 +453,7 @@ func bootServerWithLimitsAndRegistrationModeAndBlobsAndStatusWithDeliveryHookAnd
 			updater.Deliver(ctx, userID)
 		}
 	}
-	_, stopListener, err := store.StartListenerWithDialogPins(ctx, dsn, deliver, updater.DeliverTyping, updater.Evict, deliverChannelPost, updater.DeliverEncryption, updater.DeliverStatus, updater.DeliverEncryptedMsg, updater.DeliverReactions, updater.DeliverPinned, updater.MarkDialogFilters, updater.DeliverDialogPins, updater.DialogFilterListenerReconnected, log)
+	_, stopListener, err := store.StartListenerWithDialogPinsAndStickerSets(ctx, dsn, deliver, updater.DeliverTyping, updater.Evict, deliverChannelPost, updater.DeliverEncryption, updater.DeliverStatus, updater.DeliverEncryptedMsg, updater.DeliverReactions, updater.DeliverPinned, updater.MarkDialogFilters, updater.DeliverDialogPins, updater.DeliverStickerSets, updater.DialogFilterListenerReconnected, log)
 	if err != nil {
 		t.Fatalf("start listener: %v", err)
 	}
