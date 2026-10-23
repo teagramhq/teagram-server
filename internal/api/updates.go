@@ -115,24 +115,31 @@ func messageToTL(m store.Message, createUsers []int64, files map[int64]tg.Messag
 }
 
 // reactionsToTL is the single wire projection of stored reactions, shared by
-// every surface that renders them. Each stored row is one reactor's single
-// emoji, so each renders as its own ReactionCount with Count 1.
+// every surface that renders them. It aggregates each emoji and marks the
+// viewer's reaction as chosen.
 //
-// It marks the viewer's reaction as chosen without disclosing other reactor
-// identities through RecentReactions or a user list.
+// It does not disclose other reactor identities through RecentReactions or a
+// user list.
 func reactionsToTL(reactions []store.Reaction, viewerID int64) tg.MessageReactions {
 	mr := tg.MessageReactions{
-		Results: make([]tg.ReactionCount, len(reactions)),
+		Results: make([]tg.ReactionCount, 0, len(reactions)),
 	}
-	for i, r := range reactions {
-		result := tg.ReactionCount{
-			Reaction: &tg.ReactionEmoji{Emoticon: r.Reaction},
-			Count:    1,
+	resultByEmoji := make(map[string]int, len(reactions))
+	for _, r := range reactions {
+		if index, ok := resultByEmoji[r.Reaction]; ok {
+			result := &mr.Results[index]
+			result.Count++
+			if r.ReactorID == viewerID {
+				result.SetChosenOrder(1)
+			}
+			continue
 		}
+		result := tg.ReactionCount{Reaction: &tg.ReactionEmoji{Emoticon: r.Reaction}, Count: 1}
 		if r.ReactorID == viewerID {
 			result.SetChosenOrder(1)
 		}
-		mr.Results[i] = result
+		resultByEmoji[r.Reaction] = len(mr.Results)
+		mr.Results = append(mr.Results, result)
 	}
 	return mr
 }
