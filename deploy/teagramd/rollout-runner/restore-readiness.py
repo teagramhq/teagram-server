@@ -55,6 +55,9 @@ def repo_migration_versions(migration_dir: Path | None = None) -> tuple[str, ...
 
 
 HEAD_SCHEMA = repo_migration_versions()[-1]
+LOCAL_FIXTURE_SCHEMA = repo_migration_versions()[-2]
+if not BASE_SCHEMA < LOCAL_FIXTURE_SCHEMA < HEAD_SCHEMA:
+    raise ValueError("local fixture needs a repo migration strictly between the base and head")
 AUTH_KEY_INVENTORY_PATH = Path(__file__).with_name("auth-key-clearing-inventory.json")
 AUTH_KEY_FIXTURE_COUNT = 3
 LOCAL_UNENROLLED_AUTH_KEY_FIXTURE_COUNT = 2
@@ -951,6 +954,17 @@ WITH objects AS (
     AND n.nspname NOT LIKE 'pg_temp_%'
     AND n.nspname NOT LIKE 'pg_toast_temp_%'
     AND NOT t.tgisinternal
+  UNION ALL
+  SELECT 'rule', n.nspname || '.' || c.relname || '.' || rewrite.rulename || '|' ||
+         rewrite.ev_enabled::text || '|' || pg_get_ruledef(rewrite.oid, true)
+  FROM pg_rewrite AS rewrite
+  JOIN pg_class AS c ON c.oid = rewrite.ev_class
+  JOIN pg_namespace AS n ON n.oid = c.relnamespace
+  WHERE rewrite.rulename <> '_RETURN'
+    AND n.nspname NOT IN ('pg_catalog', 'information_schema')
+    AND n.nspname NOT LIKE 'pg_toast%'
+    AND n.nspname NOT LIKE 'pg_temp_%'
+    AND n.nspname NOT LIKE 'pg_toast_temp_%'
   UNION ALL
   SELECT 'policy', n.nspname || '.' || c.relname || '.' || p.polname || '|' ||
          p.polcmd::text || '|' || p.polpermissive::text || '|' ||
@@ -4067,6 +4081,26 @@ class Drill(Docker):
         )
         if status != 0:
             raise DrillFailure(self.phase, "schema_failure")
+        status, _ = self.run_local_fixture_sql(
+            target,
+            "CREATE RULE restore_readiness_unexpected_rule AS ON INSERT TO public.users "
+            "DO ALSO SELECT pg_catalog.pg_reload_conf();",
+        )
+        if status != 0 or self.local_object_inventory(target, self.phase) == baseline[0]:
+            raise DrillFailure(self.phase, "schema_failure")
+        try:
+            self.verify_local_schema_state(source, target, self.phase, expected_head=expected_head)
+        except DrillFailure as exc:
+            if exc.phase != self.phase or exc.category != "schema_failure":
+                raise
+        else:
+            raise DrillFailure(self.phase, "schema_failure")
+        status, _ = self.run_local_fixture_sql(
+            target,
+            "DROP RULE restore_readiness_unexpected_rule ON public.users;",
+        )
+        if status != 0 or self.local_schema_snapshot(target, self.phase) != baseline:
+            raise DrillFailure(self.phase, "schema_failure")
         current = (
             *self.local_schema_snapshot(target, self.phase),
         )
@@ -6295,14 +6329,14 @@ def run_primary(args: argparse.Namespace) -> int:
             expected_auth_keys=AUTH_KEY_FIXTURE_COUNT,
         )
         if args.local_fixture_test:
-            drill.migrate_database("source", source, HEAD_SCHEMA, "source_migrations")
+            drill.migrate_database("source", source, LOCAL_FIXTURE_SCHEMA, "source_migrations")
             expected_users, expected_auth_keys = source_fixture_counts(False)
             drill.verify_schema_state(
                 source,
                 expected_users,
                 MIGRATION_ROLES,
                 "source_migrations",
-                expected_head=HEAD_SCHEMA,
+                expected_head=LOCAL_FIXTURE_SCHEMA,
                 expected_auth_keys=expected_auth_keys,
             )
         target = drill.create_database("target")

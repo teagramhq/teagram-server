@@ -146,6 +146,9 @@ class RestoreReadinessContractTests(unittest.TestCase):
         versions = RESTORE_READINESS.repo_migration_versions()
         self.assertTrue(versions)
         self.assertEqual(RESTORE_READINESS.HEAD_SCHEMA, versions[-1])
+        self.assertEqual(RESTORE_READINESS.LOCAL_FIXTURE_SCHEMA, versions[-2])
+        self.assertGreater(RESTORE_READINESS.LOCAL_FIXTURE_SCHEMA, RESTORE_READINESS.BASE_SCHEMA)
+        self.assertLess(RESTORE_READINESS.LOCAL_FIXTURE_SCHEMA, RESTORE_READINESS.HEAD_SCHEMA)
         self.assertGreater(RESTORE_READINESS.HEAD_SCHEMA, "20261021000004")
         self.assertEqual(
             RESTORE_READINESS.resolve_local_dump_migration_head(RESTORE_READINESS.HEAD_SCHEMA),
@@ -312,6 +315,16 @@ class RestoreReadinessContractTests(unittest.TestCase):
             "routine.proname || '(' || oidvectortypes(routine.proargtypes) || ')'",
             RESTORE_READINESS.EXTENSION_STATE_SQL,
         )
+        self.assertIn("FROM pg_rewrite AS rewrite", inventory)
+        self.assertIn("rewrite.rulename <> '_RETURN'", inventory)
+        self.assertIn("pg_get_ruledef(rewrite.oid, true)", inventory)
+        hostile_fixtures = next(
+            node
+            for node in ast.walk(ast.parse(SCRIPT.read_text(encoding="utf-8")))
+            if isinstance(node, ast.FunctionDef) and node.name == "run_local_hostile_fixture_tests"
+        )
+        self.assertIn("CREATE RULE restore_readiness_unexpected_rule", ast.unparse(hostile_fixtures))
+        self.assertIn("pg_catalog.pg_reload_conf()", ast.unparse(hostile_fixtures))
 
     def test_sigkill_drill_requires_injection_marker_and_signal_status(self) -> None:
         marker = b"SIGKILL_INJECTED\n"
