@@ -136,7 +136,7 @@ func (u *Updater) DeliverDialogPins(ctx context.Context, ownerID int64) {
 
 // DeliverStickerSets fans out the account's transient sticker-set invalidation
 // to live sessions on this replica, omitting the session that made the RPC.
-// PushTo retains the owner check for every connection after the registry snapshot.
+// The snapshotted binding is checked again under the conn's write lock.
 func (u *Updater) DeliverStickerSets(ctx context.Context, ownerID, authKeyID, sessionID int64) {
 	if ownerID <= 0 || authKeyID == 0 || u.registry == nil {
 		return
@@ -153,9 +153,10 @@ func (u *Updater) DeliverStickerSets(ctx context.Context, ownerID, authKeyID, se
 			continue
 		}
 		pushes = append(pushes, transientPush{
-			owner: ownerID,
-			conn:  conn,
-			enc:   update,
+			owner:   ownerID,
+			conn:    conn,
+			enc:     update,
+			binding: &transientSessionBinding{authKeyID: connAuthKeyID, sessionID: connSessionID},
 			onError: func(err error) {
 				u.log.Info("deliver sticker-set refresh", "user_id", ownerID, "err", err)
 			},
@@ -245,6 +246,10 @@ type pushConn interface {
 
 type orderedPushConn interface {
 	PushToAtWatermark(ctx context.Context, owner int64, expectedPts int, enc bin.Encoder, pts int) (pushed, stale bool, err error)
+}
+
+type sessionBindingPushConn interface {
+	PushToBinding(ctx context.Context, owner, authKeyID, sessionID int64, enc bin.Encoder, pts int) (bool, error)
 }
 
 type rpcUpdatePushConn interface {
@@ -872,8 +877,14 @@ type transientPush struct {
 	owner     int64
 	conn      pushConn
 	enc       bin.Encoder
+	binding   *transientSessionBinding
 	onSuccess func()
 	onError   func(error)
+}
+
+type transientSessionBinding struct {
+	authKeyID int64
+	sessionID int64
 }
 
 type transientWriteTimeoutConn interface {
@@ -922,7 +933,7 @@ func (u *Updater) pushTransientFanout(ctx context.Context, pushes []transientPus
 					if !ok || ctx.Err() != nil {
 						return
 					}
-					pushed, err := u.pushTransientEncoded(ctx, push.owner, push.conn, push.enc, encoders)
+					pushed, err := u.pushTransientEncoded(ctx, push.owner, push.conn, push.enc, encoders, push.binding)
 					if err != nil {
 						if push.onError != nil {
 							push.onError(err)
@@ -1148,11 +1159,21 @@ func (u *Updater) handlePushFailure(ctx context.Context, owner int64, conn pushC
 	}
 }
 
-func (u *Updater) pushTransientEncoded(ctx context.Context, owner int64, conn pushConn, enc bin.Encoder, encoders *deliveryEncoder) (bool, error) {
+func (u *Updater) pushTransientEncoded(ctx context.Context, owner int64, conn pushConn, enc bin.Encoder, encoders *deliveryEncoder, binding *transientSessionBinding) (bool, error) {
 	if _, ok := conn.(*mtproto.Conn); ok && encoders != nil {
 		enc = synchronizedEncoder{mu: &encoders.mu, enc: enc}
 	}
-	pushed, err := conn.PushTo(ctx, owner, enc, 0)
+	var pushed bool
+	var err error
+	if binding != nil {
+		guarded, ok := conn.(sessionBindingPushConn)
+		if !ok {
+			return false, errors.New("transient connection does not support binding-checked pushes")
+		}
+		pushed, err = guarded.PushToBinding(ctx, owner, binding.authKeyID, binding.sessionID, enc, 0)
+	} else {
+		pushed, err = conn.PushTo(ctx, owner, enc, 0)
+	}
 	u.handlePushFailure(ctx, owner, conn, err)
 	return pushed, err
 }
