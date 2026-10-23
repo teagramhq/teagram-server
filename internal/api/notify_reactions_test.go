@@ -5,6 +5,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gotd/td/bin"
+	"github.com/gotd/td/crypto"
+	"github.com/gotd/td/tg"
+
 	"github.com/teagramhq/teagram-server/internal/api"
 	"github.com/teagramhq/teagram-server/internal/mtproto"
 	"github.com/teagramhq/teagram-server/internal/pgtest"
@@ -105,4 +109,70 @@ func TestDeliverReactionsSkipsDeletedCopy(t *testing.T) {
 	if got := aConn.LastPushedPts(); got != 0 {
 		t.Errorf("A pts = %d, want 0", got)
 	}
+}
+
+func TestDeliverReactionsAggregatesBasicGroupCountsForEveryMember(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	s, _ := openStoreDSN(t)
+	reg := mtproto.NewSessionRegistry()
+	updater := api.NewUpdater(s, 2, reg, nil, pgtest.PeerDeriver())
+	fixture := newBasicGroupReactionFixture(t, s)
+	seedBasicGroupReactionCounts(t, s, fixture)
+
+	transports := make(map[int64]*fakeTransport, len(fixture.members))
+	for _, member := range fixture.members {
+		_, transport := newConnFor(t, reg, member.ID)
+		transports[member.ID] = transport
+	}
+
+	for _, member := range fixture.members {
+		updater.DeliverReactions(ctx, member.ID, fixture.localID[member.ID], member.ID)
+		update := lastPushedReaction(t, transports[member.ID])
+		chosenEmoji := "👍"
+		if member.ID == fixture.members[2].ID {
+			chosenEmoji = "❤"
+		}
+		assertBasicGroupReactionCounts(t, update.Reactions, 2, chosenEmoji)
+	}
+
+	clearingMember := fixture.members[1]
+	if _, rpc := sendReaction(t, s, clearingMember.ID, api.InputPeerChat(clearingMember.ID, fixture.chatID), fixture.localID[clearingMember.ID]); rpc != nil {
+		t.Fatalf("clear member %d reaction: %s", clearingMember.ID, rpc.ErrorMessage)
+	}
+	for _, member := range fixture.members {
+		transport := transports[member.ID]
+		before := transport.sentMessages()
+		updater.DeliverReactions(ctx, member.ID, fixture.localID[member.ID], member.ID)
+		if got := transport.sentMessages(); got != before+1 {
+			t.Fatalf("member %d push count = %d, want %d", member.ID, got, before+1)
+		}
+		update := lastPushedReaction(t, transport)
+		chosenEmoji := ""
+		switch member.ID {
+		case fixture.members[0].ID:
+			chosenEmoji = "👍"
+		case fixture.members[2].ID:
+			chosenEmoji = "❤"
+		}
+		assertBasicGroupReactionCounts(t, update.Reactions, 1, chosenEmoji)
+	}
+}
+
+func lastPushedReaction(t *testing.T, transport *fakeTransport) *tg.UpdateMessageReactions {
+	t.Helper()
+	data, err := crypto.NewClientCipher(crypto.DefaultRand()).DecryptFromBuffer(testKey(), &bin.Buffer{Buf: transport.lastSentMessage()})
+	if err != nil {
+		t.Fatalf("decrypt pushed update: %v", err)
+	}
+	body := data.MessageDataWithPadding[:data.MessageDataLen]
+	var short tg.UpdateShort
+	if err := short.Decode(&bin.Buffer{Buf: body}); err != nil {
+		t.Fatalf("decode pushed updateShort: %v", err)
+	}
+	update, ok := short.Update.(*tg.UpdateMessageReactions)
+	if !ok {
+		t.Fatalf("pushed update = %T, want *tg.UpdateMessageReactions", short.Update)
+	}
+	return update
 }

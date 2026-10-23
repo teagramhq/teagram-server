@@ -12,6 +12,8 @@ SMOKE_SCENARIOS=(
   profile-photo-upload
   profile-bio
   upload-media
+  saved-gifs
+  saved-gifs-client-request-fixtures
   album-media
   shared-media-search
   saved-messages
@@ -27,6 +29,7 @@ SMOKE_SCENARIOS=(
   unread-acknowledgements
   basic-group
   basic-group-reactions
+  channel-reactions
   available-reactions
   basic-group-photo
   delete-basic-group

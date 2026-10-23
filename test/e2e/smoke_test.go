@@ -119,6 +119,14 @@ func TestSmoke(t *testing.T) {
 		t.Parallel()
 		testSmokeUploadMedia(t)
 	})
+	t.Run("saved-gifs", func(t *testing.T) {
+		t.Parallel()
+		testSmokeSavedGIFs(t)
+	})
+	t.Run("saved-gifs-client-request-fixtures", func(t *testing.T) {
+		t.Parallel()
+		testSmokeSavedGIFRequestFixtures(t)
+	})
 	t.Run("album-media", func(t *testing.T) {
 		t.Parallel()
 		testSmokeAlbumMedia(t)
@@ -174,6 +182,10 @@ func TestSmoke(t *testing.T) {
 	t.Run("basic-group-reactions", func(t *testing.T) {
 		t.Parallel()
 		testSmokeBasicGroupReactions(t)
+	})
+	t.Run("channel-reactions", func(t *testing.T) {
+		t.Parallel()
+		testSmokeChannelReactions(t)
 	})
 	t.Run("available-reactions", func(t *testing.T) {
 		t.Parallel()
@@ -552,6 +564,7 @@ func testSmokePeerDisconnect(t *testing.T) {
 	if len(setupConns) == 0 {
 		t.Fatal("[assert:peer-disconnect.setup-transport] bootstrap transport was absent from the registry")
 	}
+	a1.lifecycle.expectedRemoteClose.Store(true)
 	a1.lifecycle.intentionalStop.Store(true)
 	for _, conn := range setupConns {
 		if err := conn.Close(); err != nil && !errors.Is(err, net.ErrClosed) {

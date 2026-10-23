@@ -92,7 +92,7 @@ func (s *Store) ClearCurrentProfilePhoto(
 	rateLimit RateLimitConfig,
 ) error {
 	return s.ClearCurrentProfilePhotoWithWait(
-		ctx, ownerID, authKeyID, sessionID, msgID, rateLimit, ProfilePhotoSelectionWait,
+		ctx, ownerID, authKeyID, sessionID, msgID, rateLimit, ProfilePhotoClearWait,
 	)
 }
 

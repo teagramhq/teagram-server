@@ -35,8 +35,8 @@ var (
 	IsGeneratedCodeForTest = isGeneratedCode
 )
 
-// ProfilePhotoMutationWaitContextForTest extends the bounded wait used by the
-// clear-profile-photo handler in tests that deliberately hold a database lock.
+// ProfilePhotoMutationWaitContextForTest extends a clear request deadline for
+// tests that hold its database locks while starting a production-bound replay.
 func ProfilePhotoMutationWaitContextForTest(ctx context.Context, wait time.Duration) context.Context {
 	return context.WithValue(ctx, profilePhotoMutationWaitForTestContextKey{}, wait)
 }

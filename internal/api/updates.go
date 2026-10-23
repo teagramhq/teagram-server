@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/binary"
 	"fmt"
+	"slices"
 	"sort"
 	"time"
 	"unicode/utf8"
@@ -108,27 +109,52 @@ func messageToTL(m store.Message, createUsers []int64, files map[int64]tg.Messag
 		msg.SetFwdFrom(fwd)
 	}
 	if len(reactions) > 0 {
-		msg.SetReactions(reactionsToTL(reactions))
+		msg.SetReactions(reactionsToTL(reactions, m.OwnerID))
 	}
 	return msg
 }
 
 // reactionsToTL is the single wire projection of stored reactions, shared by
-// every surface that renders them. Each stored row is one reactor's single
-// emoji, so each renders as its own ReactionCount with Count 1.
+// every surface that renders them. It aggregates each emoji and marks the
+// viewer's reaction as chosen.
 //
-// It deliberately populates neither RecentReactions nor any user list:
-// message_reactions.reactor_id is stored but no surface discloses who reacted,
-// and a second projection is how the read paths would come to disagree.
-func reactionsToTL(reactions []store.Reaction) tg.MessageReactions {
+// It does not disclose other reactor identities through RecentReactions or a
+// user list.
+func reactionsToTL(reactions []store.Reaction, viewerID int64) tg.MessageReactions {
 	mr := tg.MessageReactions{
-		Results: make([]tg.ReactionCount, len(reactions)),
+		Results: make([]tg.ReactionCount, 0, len(reactions)),
 	}
-	for i, r := range reactions {
-		mr.Results[i] = tg.ReactionCount{
-			Reaction: &tg.ReactionEmoji{Emoticon: r.Reaction},
-			Count:    1,
+	resultByEmoji := make(map[string]int, len(reactions))
+	for _, r := range reactions {
+		if index, ok := resultByEmoji[r.Reaction]; ok {
+			result := &mr.Results[index]
+			result.Count++
+			if r.ReactorID == viewerID {
+				result.SetChosenOrder(1)
+			}
+			continue
 		}
+		result := tg.ReactionCount{Reaction: &tg.ReactionEmoji{Emoticon: r.Reaction}, Count: 1}
+		if r.ReactorID == viewerID {
+			result.SetChosenOrder(1)
+		}
+		resultByEmoji[r.Reaction] = len(mr.Results)
+		mr.Results = append(mr.Results, result)
+	}
+	return mr
+}
+
+func channelReactionsToTL(reactions []store.ChannelReactionCount) tg.MessageReactions {
+	mr := tg.MessageReactions{Results: make([]tg.ReactionCount, len(reactions))}
+	for i, reaction := range reactions {
+		result := tg.ReactionCount{
+			Reaction: &tg.ReactionEmoji{Emoticon: reaction.Reaction},
+			Count:    reaction.Count,
+		}
+		if reaction.Chosen {
+			result.SetChosenOrder(1)
+		}
+		mr.Results[i] = result
 	}
 	return mr
 }
@@ -237,10 +263,9 @@ func channelMessageToTL(m store.ChannelMessage, viewerID int64, files map[int64]
 	return msg, nil
 }
 
-// documentToTL names a stored file on the wire. Attributes carry only the file
-// name: M5 stores no other document attribute, and it never decodes an uploaded
-// file, so it cannot honestly claim an image size or a duration it did not
-// measure.
+// documentToTL names a stored file on the wire. It echoes only the supported
+// filename and animated marker; M5 does not decode document bodies, so it
+// cannot honestly claim an image size or duration it did not measure.
 //
 // FileReference is the 8-byte big-endian file id — a placeholder, the same
 // posture as the peer access_hash. It is echoed deterministically and ignored
@@ -256,8 +281,11 @@ func (h *handlers) documentToTL(f store.File) *tg.Document {
 		Size:          f.Size,
 		DCID:          h.dcID,
 	}
+	if slices.Contains(f.SubtypeRights, "send_gifs") {
+		d.Attributes = append(d.Attributes, &tg.DocumentAttributeAnimated{})
+	}
 	if f.FileName != "" {
-		d.Attributes = []tg.DocumentAttributeClass{&tg.DocumentAttributeFilename{FileName: f.FileName}}
+		d.Attributes = append(d.Attributes, &tg.DocumentAttributeFilename{FileName: f.FileName})
 	}
 	return d
 }

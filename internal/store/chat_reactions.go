@@ -38,12 +38,8 @@ func (available ChatAvailableReactions) Allows(emoticon string) bool {
 // existing chats row lock. That lock serializes this setting with group
 // reactions and keeps the current title-edit permission decision authoritative.
 func (s *Store) SetChatAvailableReactions(ctx context.Context, chatID, callerID int64, available ChatAvailableReactions) error {
-	if (available.Mode != ChatAvailableReactionsAll && available.Mode != ChatAvailableReactionsSome && available.Mode != ChatAvailableReactionsNone) ||
-		(available.Mode != ChatAvailableReactionsSome && len(available.Emoticons) != 0) {
-		return ErrReactionInvalid
-	}
-	if slices.Contains(available.Emoticons, "") {
-		return ErrReactionInvalid
+	if err := validateAvailableReactions(available); err != nil {
+		return err
 	}
 	reactions := available.Emoticons
 	if reactions == nil {
