@@ -4014,12 +4014,7 @@ class Drill(Docker):
         )
         for statement in refused_inputs:
             status, output = self.run_local_fixture_sql(target, statement)
-            current = (
-                self.local_object_inventory(target, self.phase),
-                self.sql(target, ROLE_STATE_SQL, self.phase),
-                self.sql(target, DATABASE_STATE_SQL, self.phase),
-                self.sql(target, EXTENSION_STATE_SQL, self.phase),
-            )
+            current = self.local_schema_snapshot(target, self.phase)
             if status == 0 or marker.encode() in output or current != baseline:
                 raise DrillFailure(self.phase, "schema_failure")
 

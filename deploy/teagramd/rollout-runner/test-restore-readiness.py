@@ -731,6 +731,39 @@ class RestoreReadinessContractTests(unittest.TestCase):
             self.assertEqual(call.kwargs["database_user"], RESTORE_READINESS.LOCAL_ATTESTATION_ROLE)
             self.assertTrue(call.kwargs["pinned_search_path"])
 
+    def test_local_hostile_refusals_compare_the_normalized_snapshot(self) -> None:
+        target = {"id": "a" * 64}
+        baseline = ((1, "a" * 32), "normalized-roles", "database-state", "extension-state")
+        drill = object.__new__(RESTORE_READINESS.Drill)
+        drill.args = Mock(local_fixture_test=True)
+        drill.databases = {"target": target}
+        drill.local_object_inventory = Mock(return_value=baseline[0])
+        drill.sql = Mock(
+            side_effect=lambda _database, statement, _phase, **_kwargs: (
+                "raw-roles" if statement == RESTORE_READINESS.ROLE_STATE_SQL else "{}"
+            )
+        )
+
+        class ComparedCurrentSnapshot(Exception):
+            pass
+
+        snapshot_calls = 0
+
+        def snapshot(_database: dict[str, Any], _phase: str) -> tuple[Any, ...]:
+            nonlocal snapshot_calls
+            snapshot_calls += 1
+            if snapshot_calls == 3:
+                raise ComparedCurrentSnapshot
+            return baseline
+
+        drill.local_schema_snapshot = Mock(side_effect=snapshot)
+        drill.run_local_fixture_sql = Mock(return_value=(1, b""))
+
+        with self.assertRaises(ComparedCurrentSnapshot):
+            drill.run_local_hostile_fixture_tests({"id": "b" * 64}, target, RESTORE_READINESS.HEAD_SCHEMA)
+
+        self.assertEqual(snapshot_calls, 3)
+
     def test_local_migration_head_is_guarded_by_catalog_shape_before_read(self) -> None:
         target = {"id": "b" * 64, "role": "target_postgres"}
         drill = object.__new__(RESTORE_READINESS.Drill)
