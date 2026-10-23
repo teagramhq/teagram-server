@@ -9,11 +9,68 @@ x-logging: &logging
   options:
     max-size: "10m"
     max-file: "3"
+x-teagramd: &teagramd
+  build:
+    context: .
+    args:
+      TEAGRAMD_SOURCE_REVISION: ${TEAGRAMD_SOURCE_REVISION:-}
+      DEMO_BUILD_GOMAXPROCS: "1"
+      DEMO_BUILD_GOMEMLIMIT: 640MiB
+      DEMO_BUILD_GOFLAGS: -p=1
+  image: teagramd:local
+  stop_grace_period: 120s
+  mem_limit: 448m
+  memswap_limit: 448m
+  cpus: "1.0"
+  pids_limit: 256
+  environment:
+    TG_POSTGRES_DSN: *dsn
+    TG_PUBLIC_LINK_PREFIX: ${TG_PUBLIC_LINK_PREFIX:?set TG_PUBLIC_LINK_PREFIX in deploy/teagram-demo/.env}
+    TG_ADVERTISE_ADDR: ${TG_ADVERTISE_ADDR:-demo.teagram.io:443}
+    TG_ADVERTISE_DEMO_GUEST_SIGN_UP: ${TG_ADVERTISE_DEMO_GUEST_SIGN_UP:-true}
+    TG_WEBSOCKET_LISTEN_ADDR: ${TG_WEBSOCKET_LISTEN_ADDR:-:2446}
+    TG_WEBSOCKET_ALLOWED_ORIGINS: ${TG_WEBSOCKET_ALLOWED_ORIGINS:-https://web.teagram.io}
+    TG_LOG_LOGIN_CODES: ${TG_LOG_LOGIN_CODES:-false}
+    TG_REGISTRATION: ${TG_REGISTRATION:-open}
+    TG_MAX_FILE_BYTES: ${TG_MAX_FILE_BYTES:-16777216}
+    TG_MAX_USER_STORAGE_BYTES: ${TG_MAX_USER_STORAGE_BYTES:-268435456}
+    TG_RSA_KEY_FINGERPRINT: ${TG_RSA_KEY_FINGERPRINT:-}
+    TG_AUTHKEY_ENC_KEY: ${TG_AUTHKEY_ENC_KEY:?set TG_AUTHKEY_ENC_KEY in deploy/teagram-demo/.env}
+    TG_AUTHKEY_ENC_KEY_FILE: ${TG_AUTHKEY_ENC_KEY_FILE:-/var/lib/teagramd/enc_key.hex}
+    HTTP_PROXY: http://turnstile-egress:3128
+    HTTPS_PROXY: http://turnstile-egress:3128
+    NO_PROXY: localhost,127.0.0.1,postgres,teagramd,teagramd-next
+    TG_REPLICA_COUNT: "1"
+    TG_CLIENT_ADDR_TRUST: proxy-v2
+    TG_CLIENT_ADDR_PROXY_CIDRS: 198.18.130.2/32
+    TG_TURNSTILE_SITE_KEY: ${TEAGRAM_DEMO_TURNSTILE_SITE_KEY:?set TEAGRAM_DEMO_TURNSTILE_SITE_KEY in deploy/teagram-demo/.env}
+    TG_TURNSTILE_SECRET_KEY_FILE: /run/secrets/teagram_demo_turnstile
+    TG_BLOB_DIR: /var/lib/teagramd-blobs
+    GOMAXPROCS: "1"
+    GOMEMLIMIT: 320MiB
+  read_only: true
+  volumes:
+    - tgkey:/var/lib/teagramd
+    - tgblobs:/var/lib/teagramd-blobs
+    - .state/blob-mode:/run/teagramd/blob-mode:ro
+  secrets:
+    - teagram_demo_turnstile
+  depends_on:
+    migrate:
+      condition: service_completed_successfully
+    turnstile-egress:
+      condition: service_healthy
+  restart: unless-stopped
+  logging: *logging
 
 services:
   postgres:
     image: mirror.gcr.io/library/postgres:18-alpine@sha256:d8703cd7fba306b9fec9268ecedfa8a966846c053036a60e3635791957eb2f66
     platform: linux/amd64
+    mem_limit: 320m
+    memswap_limit: 320m
+    cpus: "0.5"
+    pids_limit: 128
     environment:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in deploy/teagram-demo/.env}
       POSTGRES_DB: teagram
@@ -27,7 +84,7 @@ services:
     volumes:
       - pgdata:/var/lib/postgresql
       - type: bind
-        source: ./deploy/postgres/postgresql.conf
+        source: ./deploy/teagram-demo/postgresql.conf
         target: /etc/postgresql/postgresql.conf
         read_only: true
     networks: [backend]
@@ -37,6 +94,10 @@ services:
   migrate:
     image: mirror.gcr.io/arigaio/atlas:1.2.0-alpine@sha256:5abea953e8e048d5b27b1b3e2fc83e17fdc1f7cd0d908a8432ed0c7e6394c58f
     platform: linux/amd64
+    mem_limit: 256m
+    memswap_limit: 256m
+    cpus: "0.25"
+    pids_limit: 64
     command:
       - migrate
       - apply
@@ -56,51 +117,16 @@ services:
     logging: *logging
 
   teagramd:
-    build:
-      context: .
-      args:
-        TEAGRAMD_SOURCE_REVISION: ${TEAGRAMD_SOURCE_REVISION:-}
-    image: teagramd:local
-    stop_grace_period: 120s
-    environment:
-      TG_POSTGRES_DSN: *dsn
-      TG_PUBLIC_LINK_PREFIX: ${TG_PUBLIC_LINK_PREFIX:?set TG_PUBLIC_LINK_PREFIX in deploy/teagram-demo/.env}
-      TG_ADVERTISE_ADDR: ${TG_ADVERTISE_ADDR:-demo.teagram.io:443}
-      TG_WEBSOCKET_LISTEN_ADDR: ${TG_WEBSOCKET_LISTEN_ADDR:-:2446}
-      TG_WEBSOCKET_ALLOWED_ORIGINS: ${TG_WEBSOCKET_ALLOWED_ORIGINS:-https://web.teagram.io}
-      TG_LOG_LOGIN_CODES: ${TG_LOG_LOGIN_CODES:-false}
-      TG_REGISTRATION: ${TG_REGISTRATION:-open}
-      TG_MAX_FILE_BYTES: ${TG_MAX_FILE_BYTES:-16777216}
-      TG_MAX_USER_STORAGE_BYTES: ${TG_MAX_USER_STORAGE_BYTES:-268435456}
-      TG_RSA_KEY_FINGERPRINT: ${TG_RSA_KEY_FINGERPRINT:-}
-      TG_AUTHKEY_ENC_KEY: ${TG_AUTHKEY_ENC_KEY:?set TG_AUTHKEY_ENC_KEY in deploy/teagram-demo/.env}
-      TG_AUTHKEY_ENC_KEY_FILE: ${TG_AUTHKEY_ENC_KEY_FILE:-/var/lib/teagramd/enc_key.hex}
-      HTTP_PROXY: http://turnstile-egress:3128
-      HTTPS_PROXY: http://turnstile-egress:3128
-      NO_PROXY: localhost,127.0.0.1,postgres,teagramd
-      TG_REPLICA_COUNT: "1"
-      TG_CLIENT_ADDR_TRUST: proxy-v2
-      TG_CLIENT_ADDR_PROXY_CIDRS: 198.18.130.2/32
-      TG_TURNSTILE_SITE_KEY: ${TEAGRAM_DEMO_TURNSTILE_SITE_KEY:?set TEAGRAM_DEMO_TURNSTILE_SITE_KEY in deploy/teagram-demo/.env}
-      TG_TURNSTILE_SECRET_KEY_FILE: /run/secrets/teagram_demo_turnstile
-      TG_BLOB_DIR: /var/lib/teagramd-blobs
-    read_only: true
-    volumes:
-      - tgkey:/var/lib/teagramd
-      - tgblobs:/var/lib/teagramd-blobs
-      - .state/blob-mode:/run/teagramd/blob-mode:ro
-    secrets:
-      - teagram_demo_turnstile
-    depends_on:
-      migrate:
-        condition: service_completed_successfully
-      turnstile-egress:
-        condition: service_healthy
+    <<: *teagramd
     networks:
       backend:
         ipv4_address: 198.18.130.253
-    restart: unless-stopped
-    logging: *logging
+
+  teagramd-next:
+    <<: *teagramd
+    networks:
+      backend:
+        ipv4_address: 198.18.130.251
 
   demo-seed:
     image: teagramd:local
@@ -110,9 +136,16 @@ services:
     read_only: true
     cap_drop: [ALL]
     security_opt: ["no-new-privileges:true"]
+    mem_limit: 256m
+    memswap_limit: 256m
+    cpus: "0.5"
+    pids_limit: 128
+    environment:
+      GOMAXPROCS: "1"
+      GOMEMLIMIT: 192MiB
     volumes:
       - type: bind
-        source: ./.state/teagram-demo/client.json
+        source: ./.state/teagram-demo/public-client/client
         target: /run/teagram-demo/client.json
         read_only: true
       - type: bind
@@ -133,9 +166,16 @@ services:
     read_only: true
     cap_drop: [ALL]
     security_opt: ["no-new-privileges:true"]
+    mem_limit: 256m
+    memswap_limit: 256m
+    cpus: "0.5"
+    pids_limit: 128
+    environment:
+      GOMAXPROCS: "1"
+      GOMEMLIMIT: 192MiB
     volumes:
       - type: bind
-        source: ./.state/teagram-demo/client.json
+        source: ./.state/teagram-demo/public-client/client
         target: /run/teagram-demo/client.json
         read_only: true
     networks: [backend]
@@ -149,9 +189,16 @@ services:
     read_only: true
     cap_drop: [ALL]
     security_opt: ["no-new-privileges:true"]
+    mem_limit: 256m
+    memswap_limit: 256m
+    cpus: "0.5"
+    pids_limit: 128
+    environment:
+      GOMAXPROCS: "1"
+      GOMEMLIMIT: 192MiB
     volumes:
       - type: bind
-        source: ./.state/teagram-demo/client.json
+        source: ./.state/teagram-demo/public-client/client
         target: /run/teagram-demo/client.json
         read_only: true
       - type: bind
@@ -166,8 +213,8 @@ services:
     user: "584792:584792"
     cap_drop: [ALL]
     security_opt: ["no-new-privileges:true"]
-    mem_limit: 128m
-    memswap_limit: 128m
+    mem_limit: 96m
+    memswap_limit: 96m
     cpus: "0.25"
     pids_limit: 64
     tmpfs:
@@ -201,18 +248,27 @@ services:
   haproxy:
     image: mirror.gcr.io/library/haproxy:3.2-alpine@sha256:51f173c6825753d9e3a888b1004a1c2cb730936cc9178730a5c555246bd161a2
     platform: linux/amd64
+    labels:
+      com.teagram.demo.haproxy-config-sha256: ${TEAGRAM_DEMO_HAPROXY_CONFIG_SHA256:?missing HAProxy configuration hash}
     read_only: true
     cap_drop: [ALL]
     security_opt: ["no-new-privileges:true"]
-    mem_limit: 128m
-    memswap_limit: 128m
+    mem_limit: 96m
+    memswap_limit: 96m
+    cpus: "0.25"
+    pids_limit: 64
     tmpfs:
       - /tmp:size=16m,mode=1777
     volumes:
+      # Mount directories so atomic config replacements are visible to the
+      # already-running proxy, rather than pinned to an old file inode.
       - type: bind
-        source: ./deploy/teagram-demo/haproxy.cfg
-        target: /usr/local/etc/haproxy/haproxy.cfg
+        source: ./.state/teagram-demo/haproxy-config
+        target: /usr/local/etc/haproxy
         read_only: true
+      - type: bind
+        source: ./.state/teagram-demo/haproxy-run
+        target: /run/haproxy
     healthcheck:
       test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8404/healthz"]
       interval: 10s
@@ -220,8 +276,8 @@ services:
       retries: 3
       start_period: 10s
     depends_on:
-      teagramd:
-        condition: service_started
+      turnstile-egress:
+        condition: service_healthy
     networks:
       backend:
         ipv4_address: 198.18.130.2
@@ -231,6 +287,8 @@ services:
   edge:
     image: mirror.gcr.io/library/nginx:1.28.0-alpine@sha256:09ab424a8c788f8d0fe3a64429f6d19dfa526885c8609b748d0943a75dcb9f8c
     platform: linux/amd64
+    labels:
+      com.teagram.demo.edge-config-sha256: ${TEAGRAM_DEMO_EDGE_CONFIG_SHA256:?missing edge configuration hash}
     entrypoint: ["nginx", "-g", "daemon off;"]
     user: "101:101"
     ports:
@@ -238,8 +296,10 @@ services:
     read_only: true
     cap_drop: [ALL]
     security_opt: ["no-new-privileges:true"]
-    mem_limit: 128m
-    memswap_limit: 128m
+    mem_limit: 96m
+    memswap_limit: 96m
+    cpus: "0.25"
+    pids_limit: 64
     tmpfs:
       - /tmp:size=16m,mode=1777
     volumes:
@@ -247,9 +307,10 @@ services:
         source: ./deploy/teagram-demo/nginx.conf
         target: /etc/nginx/nginx.conf
         read_only: true
+      # The discovery file is atomically replaced during a rollout.
       - type: bind
-        source: ./.state/teagram-demo/client.json
-        target: /usr/share/nginx/html/.well-known/teagramd/client
+        source: ./.state/teagram-demo/public-client
+        target: /usr/share/nginx/html/.well-known/teagramd
         read_only: true
     depends_on:
       haproxy:

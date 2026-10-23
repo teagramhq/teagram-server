@@ -42,6 +42,11 @@ cleanup() {
 trap cleanup EXIT
 
 demo_require_env
+if [[ ! -e "$DEMO_STATE_DIR/active-server" && ! -L "$DEMO_STATE_DIR/active-server" ]]; then
+  demo_write_active_server teagramd
+fi
+ACTIVE_SERVER=$(demo_active_server)
+ACTIVE_ENDPOINT="$ACTIVE_SERVER:2443"
 SEED_SCRIPT="$SCRIPT_DIR/seed-demo.sh"
 git -C "$DEMO_REPO_ROOT" ls-files --error-unmatch deploy/teagram-demo/seed-demo.sh >/dev/null 2>&1 ||
   demo_fail 'initial install is disabled until the tracked API seed-demo.sh is supplied'
@@ -81,7 +86,7 @@ JOURNAL_DIR="$DEMO_AUTHORITY_DIR/journal"
 if [[ -e "$MODE_FILE" || -L "$MODE_FILE" ]]; then
   # Resume a valid, already-published first-install authority after an
   # interrupted switch from the unguarded bootstrap container.
-  demo_compose stop edge haproxy turnstile-egress
+  demo_compose stop edge haproxy turnstile-egress "$ACTIVE_SERVER"
   mapfile -t CONTAINER_IDS < <(demo_bootstrap_compose ps -q)
   if ((${#CONTAINER_IDS[@]})); then
     docker inspect "${CONTAINER_IDS[@]}" > "$TMP_DIR/containers.raw.json"
@@ -101,23 +106,24 @@ if [[ -e "$MODE_FILE" || -L "$MODE_FILE" ]]; then
     --allow-empty-containers \
     --allow-unguarded-initial-local \
     --allow-unguarded-initial-local-containers
-  demo_compose stop teagramd
-  demo_seed_compose up -d teagramd
+  demo_compose stop "$ACTIVE_SERVER"
+  demo_seed_compose up -d "$ACTIVE_SERVER"
   demo_prepare_seed_owner "$TMP_DIR"
   "$SEED_SCRIPT" --seed \
-    --endpoint teagramd:2443 \
+    --endpoint "$ACTIVE_ENDPOINT" \
     --owner-username "$DEMO_SEED_OWNER_USERNAME" \
     --owner-password-file "$DEMO_SEED_PASSWORD_FILE"
-  "$SEED_SCRIPT" --verify-seed --endpoint teagramd:2443
+  "$SEED_SCRIPT" --verify-seed --endpoint "$ACTIVE_ENDPOINT"
   "$SCRIPT_DIR/test-seed-compose.sh"
   PUBLIC_SERVICES_MAY_BE_RUNNING=1
-  demo_compose up -d --wait --wait-timeout 120 haproxy
+  demo_compose up -d --wait --wait-timeout 120 "$ACTIVE_SERVER" haproxy
   "$SEED_SCRIPT" --verify-turnstile --endpoint haproxy:2443
   demo_compose up -d edge
-  python3 "$SCRIPT_DIR/smoke.py" "$DEMO_STATE_DIR/client.json"
+  python3 "$SCRIPT_DIR/smoke.py" "$DEMO_CLIENT_CONFIG"
   echo "demo install resumed and seeded at $SHA"
   exit 0
 fi
+[[ "$ACTIVE_SERVER" == teagramd ]] || demo_fail 'fresh installs must begin in the teagramd slot'
 if [[ -e "$JOURNAL_DIR" || -L "$JOURNAL_DIR" ]]; then
   demo_fail 'blob-mode journal exists without mode.json; preserve state and reconcile it before retrying'
 fi
@@ -156,8 +162,8 @@ jq -e '
   and (.mtproto.rsa_spki | type == "string" and length > 0)
   and .websocket.endpoint == "wss://demo.teagram.io/apiws"
 ' "$TMP_DIR/client.json" >/dev/null || demo_fail 'client-config lacks the approved demo WebSocket binding; wait for MAIN-2196'
-install -o root -g root -m 0644 "$TMP_DIR/client.json" "$DEMO_STATE_DIR/client.json.next"
-mv -f -- "$DEMO_STATE_DIR/client.json.next" "$DEMO_STATE_DIR/client.json"
+install -o root -g root -m 0644 "$TMP_DIR/client.json" "$DEMO_CLIENT_CONFIG.next"
+mv -f -- "$DEMO_CLIENT_CONFIG.next" "$DEMO_CLIENT_CONFIG"
 
 demo_bootstrap_compose up -d migrate
 demo_wait_migration demo_bootstrap_compose 'bootstrap migrations'
@@ -200,8 +206,8 @@ demo_prepare_seed_owner "$TMP_DIR"
 "$SEED_SCRIPT" --verify-seed --endpoint teagramd:2443
 "$SCRIPT_DIR/test-seed-compose.sh"
 PUBLIC_SERVICES_MAY_BE_RUNNING=1
-demo_compose up -d --wait --wait-timeout 120 haproxy
+demo_compose up -d --wait --wait-timeout 120 "$ACTIVE_SERVER" haproxy
 "$SEED_SCRIPT" --verify-turnstile --endpoint haproxy:2443
 demo_compose up -d edge
-python3 "$SCRIPT_DIR/smoke.py" "$DEMO_STATE_DIR/client.json"
+python3 "$SCRIPT_DIR/smoke.py" "$DEMO_CLIENT_CONFIG"
 echo "demo install ready sha=$SHA rsa_fingerprint=$FINGERPRINT seeded=true"

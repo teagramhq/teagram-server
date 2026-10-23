@@ -13,7 +13,9 @@ if [[ -n "$(demo_compose ps --status running -q edge haproxy)" ]]; then
   demo_fail 'seed convergence test requires edge and HAProxy to be stopped'
 fi
 
-mapfile -t SERVER_IDS < <(demo_seed_compose ps --status running -q teagramd)
+ACTIVE_SERVER=$(demo_active_server)
+ACTIVE_ENDPOINT="$ACTIVE_SERVER:2443"
+mapfile -t SERVER_IDS < <(demo_seed_compose ps --status running -q "$ACTIVE_SERVER")
 ((${#SERVER_IDS[@]} == 1)) || demo_fail 'seed convergence test requires one running teagramd service'
 docker inspect "${SERVER_IDS[0]}" | jq -e '
   .[0].Config.Env as $env
@@ -29,7 +31,7 @@ EXPECTED_REPORT='demo seed verified accounts=10 welcome_posts=1 broadcast_channe
 
 capture_seed_report() {
   local output report line
-  output=$("$SEED_SCRIPT" --verify-seed --endpoint teagramd:2443 \
+  output=$("$SEED_SCRIPT" --verify-seed --endpoint "$ACTIVE_ENDPOINT" \
     --owner-username "$OWNER_USERNAME" --owner-password-file "$OWNER_PASSWORD_FILE")
   report=
   while IFS= read -r line; do
@@ -44,7 +46,7 @@ capture_seed_report() {
 before=$(capture_seed_report)
 [[ "$before" == "$EXPECTED_REPORT" ]] || demo_fail 'first API verification did not match the expected content counts and search account'
 
-"$SEED_SCRIPT" --seed --endpoint teagramd:2443 \
+"$SEED_SCRIPT" --seed --endpoint "$ACTIVE_ENDPOINT" \
   --owner-username "$OWNER_USERNAME" --owner-password-file "$OWNER_PASSWORD_FILE"
 
 after=$(capture_seed_report)

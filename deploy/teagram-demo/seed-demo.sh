@@ -15,8 +15,8 @@ usage() {
   cat <<'EOF'
 Usage:
   seed-demo.sh --check
-  seed-demo.sh --seed [--endpoint teagramd:2443] [--owner-username demo_seed_owner] [--owner-password-file PATH]
-  seed-demo.sh --verify-seed [--endpoint teagramd:2443]
+  seed-demo.sh --seed [--endpoint teagramd:2443|teagramd-next:2443] [--owner-username demo_seed_owner] [--owner-password-file PATH]
+  seed-demo.sh --verify-seed [--endpoint teagramd:2443|teagramd-next:2443]
   seed-demo.sh --verify-turnstile --endpoint haproxy:2443
 EOF
 }
@@ -55,12 +55,13 @@ while (($#)); do
 done
 
 [[ -n "$MODE" ]] || { usage >&2; demo_fail 'select one mode'; }
-EXPECTED_ENDPOINT=teagramd:2443
 if [[ "$MODE" == --verify-turnstile ]]; then
-  EXPECTED_ENDPOINT=haproxy:2443
+  [[ "$ENDPOINT" == haproxy:2443 ]] ||
+    demo_fail "endpoint for $MODE must be the internal haproxy:2443 service"
+else
+  [[ "$ENDPOINT" == teagramd:2443 || "$ENDPOINT" == teagramd-next:2443 ]] ||
+    demo_fail "endpoint for $MODE must be an internal teagramd service"
 fi
-[[ "$ENDPOINT" == "$EXPECTED_ENDPOINT" ]] ||
-  demo_fail "endpoint for $MODE must be the internal $EXPECTED_ENDPOINT service"
 
 check_dependencies() {
   local command_name version

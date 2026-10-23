@@ -3,6 +3,8 @@ set -Eeuo pipefail
 
 SCRIPT_DIR=$(cd -P "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 REPO_ROOT=$(cd -P "$SCRIPT_DIR/../.." && pwd)
+# shellcheck source=deploy/teagram-demo/demo-common.sh
+source "$SCRIPT_DIR/demo-common.sh"
 TMP_DIR=$(mktemp -d)
 trap 'rm -rf -- "$TMP_DIR"' EXIT
 
@@ -11,6 +13,7 @@ POSTGRES_PASSWORD=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 TG_AUTHKEY_ENC_KEY=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
 TG_PUBLIC_LINK_PREFIX=https://demo.teagram.io/
 TG_ADVERTISE_ADDR=demo.teagram.io:443
+TG_ADVERTISE_DEMO_GUEST_SIGN_UP=true
 TG_WEBSOCKET_LISTEN_ADDR=:2446
 TG_WEBSOCKET_ALLOWED_ORIGINS=https://web.teagram.io
 TG_LOG_LOGIN_CODES=false
@@ -20,10 +23,9 @@ TG_MAX_USER_STORAGE_BYTES=268435456
 TEAGRAM_DEMO_BLOB_PATH=/srv/teagram-demo-blobs/data
 TEAGRAM_DEMO_TURNSTILE_SITE_KEY=fixture-site-key
 ENV
-printf 'TEAGRAM_DEMO_TURNSTILE_SECRET_KEY_FILE=%s\n' "$TMP_DIR/turnstile-secret-key" >> "$TMP_DIR/demo.env"
+secret_file=/var/lib/teagram-demo/secrets/turnstile-secret-key
+printf 'TEAGRAM_DEMO_TURNSTILE_SECRET_KEY_FILE=%s\n' "$secret_file" >> "$TMP_DIR/demo.env"
 chmod 0600 "$TMP_DIR/demo.env"
-printf 'fixture-secret-key\n' > "$TMP_DIR/turnstile-secret-key"
-chmod 0600 "$TMP_DIR/turnstile-secret-key"
 
 compose=(
   docker compose
@@ -35,9 +37,12 @@ compose=(
 env -u COMPOSE_FILE -u COMPOSE_PROJECT_NAME -u COMPOSE_PROFILES \
   -u TEAGRAM_DEMO_TURNSTILE_SITE_KEY -u TEAGRAM_DEMO_TURNSTILE_SECRET_KEY_FILE \
   "${compose[@]}" config --format json > "$TMP_DIR/target.json"
-jq -e --arg secretFile "$TMP_DIR/turnstile-secret-key" '
+jq -e \
+  --arg secretFile "$secret_file" \
+  --arg haproxyConfigHash "$TEAGRAM_DEMO_HAPROXY_CONFIG_SHA256" \
+  --arg edgeConfigHash "$TEAGRAM_DEMO_EDGE_CONFIG_SHA256" '
   .name == "teagram-demo"
-  and (.services | keys | sort) == ["edge", "haproxy", "migrate", "postgres", "teagramd", "turnstile-egress"]
+  and (.services | keys | sort) == ["edge", "haproxy", "migrate", "postgres", "teagramd", "teagramd-next", "turnstile-egress"]
   and ((.services.teagramd.ports // []) | length) == 0
   and ((.services.edge.ports | length) == 1)
   and .services.edge.ports[0].host_ip == "127.0.0.1"
@@ -46,14 +51,19 @@ jq -e --arg secretFile "$TMP_DIR/turnstile-secret-key" '
   and ((.services.haproxy.ports // []) | length) == 0
   and .services.haproxy.platform == "linux/amd64"
   and .services.haproxy.image == "mirror.gcr.io/library/haproxy:3.2-alpine@sha256:51f173c6825753d9e3a888b1004a1c2cb730936cc9178730a5c555246bd161a2"
+  and .services.haproxy.labels["com.teagram.demo.haproxy-config-sha256"] == $haproxyConfigHash
+  and any(.services.haproxy.volumes[]; (.source | endswith("/.state/teagram-demo/haproxy-config")) and .target == "/usr/local/etc/haproxy" and .read_only)
   and .services.haproxy.networks.backend.ipv4_address == "198.18.130.2"
   and .services.haproxy.healthcheck.test[-1] == "http://127.0.0.1:8404/healthz"
   and .services.edge.depends_on.haproxy.condition == "service_healthy"
+  and .services.edge.labels["com.teagram.demo.edge-config-sha256"] == $edgeConfigHash
+  and any(.services.edge.volumes[]; (.source | endswith("/.state/teagram-demo/public-client")) and .target == "/usr/share/nginx/html/.well-known/teagramd" and .read_only)
   and (.services.teagramd.networks | keys) == ["backend"]
   and .services.teagramd.networks.backend.ipv4_address == "198.18.130.253"
+  and .services["teagramd-next"].networks.backend.ipv4_address == "198.18.130.251"
   and .services.teagramd.environment.HTTPS_PROXY == "http://turnstile-egress:3128"
   and .services.teagramd.environment.HTTP_PROXY == "http://turnstile-egress:3128"
-  and .services.teagramd.environment.NO_PROXY == "localhost,127.0.0.1,postgres,teagramd"
+  and .services.teagramd.environment.NO_PROXY == "localhost,127.0.0.1,postgres,teagramd,teagramd-next"
   and .services.teagramd.depends_on["turnstile-egress"].condition == "service_healthy"
   and .services["turnstile-egress"].platform == "linux/amd64"
   and .services["turnstile-egress"].image == "mirror.gcr.io/ubuntu/squid:7.2-26.04_edge@sha256:f6843088c0eab9e63ecb8a1c215d939cd97d0370611bb2bdb65c4a8e48b3c3eb"
@@ -71,6 +81,12 @@ jq -e --arg secretFile "$TMP_DIR/turnstile-secret-key" '
   and .networks.backend.ipam.config[0].subnet == "198.18.130.0/24"
   and (.services.edge.networks | keys | sort) == ["backend", "edge"]
   and .services.teagramd.environment.TG_REGISTRATION == "open"
+  and .services.teagramd.environment.TG_ADVERTISE_DEMO_GUEST_SIGN_UP == "true"
+  and .services["teagramd-next"].environment.TG_ADVERTISE_DEMO_GUEST_SIGN_UP == "true"
+  and .services.teagramd.environment.GOMAXPROCS == "1"
+  and .services.teagramd.environment.GOMEMLIMIT == "320MiB"
+  and (.services.teagramd.mem_limit | tostring) == "469762048"
+  and (.services["teagramd-next"].mem_limit | tostring) == "469762048"
   and .services.teagramd.environment.TG_LOG_LOGIN_CODES == "false"
   and .services.teagramd.environment.TG_MAX_FILE_BYTES == "16777216"
   and .services.teagramd.environment.TG_MAX_USER_STORAGE_BYTES == "268435456"
@@ -83,6 +99,12 @@ jq -e --arg secretFile "$TMP_DIR/turnstile-secret-key" '
   and .secrets.teagram_demo_turnstile.file == $secretFile
   and .services.postgres.environment.PGDATA == "/var/lib/postgresql/18/docker"
   and .services.postgres.platform == "linux/amd64"
+  and (.services.postgres.mem_limit | tostring) == "335544320"
+  and any(.services.postgres.volumes[]; (.source | endswith("/deploy/teagram-demo/postgresql.conf")) and .target == "/etc/postgresql/postgresql.conf" and .read_only)
+  and .services.teagramd.build.args.DEMO_BUILD_GOMAXPROCS == "1"
+  and .services.teagramd.build.args.DEMO_BUILD_GOMEMLIMIT == "640MiB"
+  and .services.teagramd.build.args.DEMO_BUILD_GOFLAGS == "-p=1"
+  and (.services.migrate.mem_limit | tostring) == "268435456"
   and (.services.postgres.image | endswith("@sha256:d8703cd7fba306b9fec9268ecedfa8a966846c053036a60e3635791957eb2f66"))
   and .services.migrate.platform == "linux/amd64"
   and (.services.migrate.image | endswith("@sha256:5abea953e8e048d5b27b1b3e2fc83e17fdc1f7cd0d908a8432ed0c7e6394c58f"))
@@ -92,6 +114,103 @@ jq -e --arg secretFile "$TMP_DIR/turnstile-secret-key" '
   and .volumes.tgblobs.driver_opts.o == "bind"
   and .volumes.tgblobs.driver_opts.device == "/srv/teagram-demo-blobs/data"
 ' "$TMP_DIR/target.json" >/dev/null
+
+(
+  MOCK_TARGET_HASH=$(printf 'target config' | sha256sum | awk '{print $1}')
+  MOCK_OTHER_HASH=$(printf 'changed config' | sha256sum | awk '{print $1}')
+  MOCK_LIVE_HASH=$MOCK_TARGET_HASH
+  MOCK_HAPROXY_SOURCE_HASH=$TEAGRAM_DEMO_HAPROXY_CONFIG_SHA256
+  MOCK_EDGE_SOURCE_HASH=$TEAGRAM_DEMO_EDGE_CONFIG_SHA256
+
+  demo_compose() {
+    if [[ "$1" == ps && "$2" == -q ]]; then
+      printf 'proxy-container\n'
+    elif [[ "$1" == config && "$2" == --hash && "$3" == "$MOCK_SERVICE" ]]; then
+      printf '%s %s\n' "$3" "$MOCK_TARGET_HASH"
+    else
+      return 1
+    fi
+  }
+  docker() {
+    [[ "$1" == inspect && "$2" == --format ]] || return 1
+    case "$3" in
+      *com.docker.compose.config-hash*) printf '%s\n' "$MOCK_LIVE_HASH" ;;
+      *com.teagram.demo.haproxy-config-sha256*) printf '%s\n' "$MOCK_HAPROXY_SOURCE_HASH" ;;
+      *com.teagram.demo.edge-config-sha256*) printf '%s\n' "$MOCK_EDGE_SOURCE_HASH" ;;
+      *) return 1 ;;
+    esac
+  }
+
+  for MOCK_SERVICE in haproxy edge; do
+    if [[ "$MOCK_SERVICE" == haproxy ]]; then
+      expected_source_hash=$TEAGRAM_DEMO_HAPROXY_CONFIG_SHA256
+    else
+      expected_source_hash=$TEAGRAM_DEMO_EDGE_CONFIG_SHA256
+    fi
+    demo_require_proxy_configuration_current "$MOCK_SERVICE" "$expected_source_hash"
+
+    MOCK_LIVE_HASH=$MOCK_OTHER_HASH
+    if demo_require_proxy_configuration_current "$MOCK_SERVICE" "$expected_source_hash" >/dev/null 2>&1; then
+      printf '%s\n' "$MOCK_SERVICE accepted a stale Compose hash" >&2
+      exit 1
+    fi
+    MOCK_LIVE_HASH=$MOCK_TARGET_HASH
+
+    if [[ "$MOCK_SERVICE" == haproxy ]]; then
+      MOCK_HAPROXY_SOURCE_HASH=$MOCK_OTHER_HASH
+    else
+      MOCK_EDGE_SOURCE_HASH=$MOCK_OTHER_HASH
+    fi
+    if demo_require_proxy_configuration_current "$MOCK_SERVICE" "$expected_source_hash" >/dev/null 2>&1; then
+      printf '%s\n' "$MOCK_SERVICE accepted a stale source configuration hash" >&2
+      exit 1
+    fi
+    MOCK_HAPROXY_SOURCE_HASH=$TEAGRAM_DEMO_HAPROXY_CONFIG_SHA256
+    MOCK_EDGE_SOURCE_HASH=$TEAGRAM_DEMO_EDGE_CONFIG_SHA256
+  done
+)
+
+python3 - "$SCRIPT_DIR/render-haproxy-config.py" "$SCRIPT_DIR/haproxy.cfg" "$TMP_DIR" <<'PY'
+from pathlib import Path
+import subprocess
+import sys
+
+
+renderer = Path(sys.argv[1])
+template = Path(sys.argv[2])
+output_dir = Path(sys.argv[3])
+markers = ("@TEAGRAMD_DISABLED@", "@TEAGRAMD_NEXT_DISABLED@")
+
+for active in ("teagramd", "teagramd-next"):
+    destination = output_dir / f"haproxy-{active}.cfg"
+    subprocess.run(
+        [sys.executable, str(renderer), active, str(template), str(destination)],
+        check=True,
+    )
+    rendered = destination.read_text(encoding="utf-8")
+    if any(marker in rendered for marker in markers):
+        raise SystemExit(f"HAProxy renderer left an unresolved marker for {active}")
+
+    for slot in ("teagramd", "teagramd-next"):
+        slot_lines = [
+            line.strip()
+            for line in rendered.splitlines()
+            if line.strip().startswith(f"server {slot} ")
+            or line.strip().startswith(f"server {slot}-mtproto ")
+        ]
+        if len(slot_lines) != 2:
+            raise SystemExit(f"HAProxy renderer did not render both {slot} backends")
+        should_be_disabled = slot != active
+        if any(line.endswith(" disabled") != should_be_disabled for line in slot_lines):
+            raise SystemExit(f"HAProxy renderer selected the wrong {slot} backends for {active}")
+PY
+
+(
+  demo_prepare_client_config_dir() { :; }
+  demo_prepare_haproxy_runtime() { :; }
+  demo_compose() { cat "$TMP_DIR/target.json"; }
+  demo_render_config "$TMP_DIR/production-validated.json"
+)
 
 env -u COMPOSE_FILE -u COMPOSE_PROJECT_NAME -u COMPOSE_PROFILES \
   -u TEAGRAM_DEMO_TURNSTILE_SITE_KEY -u TEAGRAM_DEMO_TURNSTILE_SECRET_KEY_FILE \
@@ -154,7 +273,8 @@ jq -e '
   and .services["demo-seed"].security_opt == ["no-new-privileges:true"]
   and (.services["demo-seed"].networks | keys) == ["backend"]
   and (.services["demo-seed"].ports // [] | length) == 0
-  and (.services["demo-seed"].environment // {} | length) == 0
+  and .services["demo-seed"].environment.GOMAXPROCS == "1"
+  and .services["demo-seed"].environment.GOMEMLIMIT == "192MiB"
   and (.services["demo-seed"].secrets // [] | length) == 0
   and any(.services["demo-seed"].volumes[]; .target == "/run/teagram-demo/client.json" and .read_only)
   and any(.services["demo-seed"].volumes[]; .target == "/run/secrets/seed-owner-password" and .read_only)
@@ -163,7 +283,8 @@ jq -e '
   and (.services["demo-probe"].volumes | length) == 1
   and .services["demo-probe"].volumes[0].target == "/run/teagram-demo/client.json"
   and (.services["demo-probe"].volumes[0].read_only == true)
-  and (.services["demo-probe"].environment // {} | length) == 0
+  and .services["demo-probe"].environment.GOMAXPROCS == "1"
+  and .services["demo-probe"].environment.GOMEMLIMIT == "192MiB"
   and (.services["demo-probe"].networks | keys) == ["backend"]
 ' "$TMP_DIR/seed-profile.json" >/dev/null
 
@@ -180,7 +301,8 @@ jq -e '
   and .services["demo-activity"].security_opt == ["no-new-privileges:true"]
   and (.services["demo-activity"].networks | keys) == ["backend"]
   and (.services["demo-activity"].ports // [] | length) == 0
-  and (.services["demo-activity"].environment // {} | length) == 0
+  and .services["demo-activity"].environment.GOMAXPROCS == "1"
+  and .services["demo-activity"].environment.GOMEMLIMIT == "192MiB"
   and (.services["demo-activity"].secrets // [] | length) == 0
   and any(.services["demo-activity"].volumes[]; .target == "/run/teagram-demo/client.json" and .read_only)
   and any(.services["demo-activity"].volumes[]; .target == "/var/lib/teagram-demo-activity" and (.read_only // false) == false)
@@ -275,13 +397,16 @@ python3 "$SCRIPT_DIR/../teagramd/rollout-runner/blob-mode-state.py" compose \
 python3 "$SCRIPT_DIR/../teagramd/rollout-runner/blob-mode-state.py" compose \
   --checkout "$REPO_ROOT" < "$TMP_DIR/bootstrap.json" > "$TMP_DIR/bootstrap-inventory.json"
 jq -e --slurpfile bootstrap "$TMP_DIR/bootstrap-inventory.json" '
-  .services | length == 1
-  and .[0].initial_local_guard_environment == {
+  (.services | map(.name)) == ["teagramd", "teagramd-next"]
+  and all(.services[]; .initial_local_guard_environment == {
     "TG_REPLICA_COUNT": "1",
     "TG_CLIENT_ADDR_TRUST": "socket"
-  }
-  and .[0].tg_environment_sha256 == $bootstrap[0].services[0].tg_environment_sha256
-  and .[0].network == $bootstrap[0].services[0].network
+  })
+  and all(.services[]; . as $seed | any($bootstrap[0].services[];
+    .name == $seed.name
+    and .tg_environment_sha256 == $seed.tg_environment_sha256
+    and .network == $seed.network
+  ))
 ' "$TMP_DIR/seed-inventory.json" >/dev/null
 
 grep -Fq 'location = /apiws {' "$SCRIPT_DIR/nginx.conf"
@@ -297,11 +422,15 @@ grep -Fq 'image: mirror.gcr.io/library/nginx:1.28.0-alpine@sha256:' "$SCRIPT_DIR
 grep -Fq 'http-request set-src req.hdr_ip(CF-Connecting-IP)' "$SCRIPT_DIR/haproxy.cfg"
 grep -Fq 'req.hdr_cnt(CF-Connecting-IP) eq 1' "$SCRIPT_DIR/haproxy.cfg"
 grep -Fq 'server teagramd teagramd:2446 check send-proxy-v2' "$SCRIPT_DIR/haproxy.cfg"
+grep -Fq 'server teagramd-next teagramd-next:2446 check send-proxy-v2' "$SCRIPT_DIR/haproxy.cfg"
 grep -Fq 'frontend mtproto' "$SCRIPT_DIR/haproxy.cfg"
 grep -Fq 'bind :2443' "$SCRIPT_DIR/haproxy.cfg"
 grep -Fq 'default_backend teagramd_mtproto' "$SCRIPT_DIR/haproxy.cfg"
 grep -Fq 'backend teagramd_mtproto' "$SCRIPT_DIR/haproxy.cfg"
-grep -Fq 'server teagramd-mtproto teagramd:2443 send-proxy-v2' "$SCRIPT_DIR/haproxy.cfg"
+grep -Fq 'server teagramd-mtproto teagramd:2443 check send-proxy-v2' "$SCRIPT_DIR/haproxy.cfg"
+grep -Fq 'stats socket /run/haproxy/admin.sock mode 600 level admin' "$SCRIPT_DIR/haproxy.cfg"
+grep -Fq '@TEAGRAMD_DISABLED@' "$SCRIPT_DIR/haproxy.cfg"
+grep -Fq '@TEAGRAMD_NEXT_DISABLED@' "$SCRIPT_DIR/haproxy.cfg"
 grep -Fq 'http-check send meth CONNECT uri challenges.cloudflare.com:443' "$SCRIPT_DIR/haproxy.cfg"
 grep -Fq 'monitor fail if { nbsrv(turnstile_egress) eq 0 }' "$SCRIPT_DIR/haproxy.cfg"
 grep -Fq 'bind :8404' "$SCRIPT_DIR/haproxy.cfg"
@@ -336,22 +465,22 @@ def assert_order(path: Path, fragments: list[str], start: int = 0) -> None:
 
 
 assert_order(Path(sys.argv[1]), [
-    "demo_compose stop edge haproxy teagramd turnstile-egress",
+    'demo_compose stop edge haproxy "$ACTIVE_SERVER" turnstile-egress',
     "demo_prune_deploy_backups\n",
     "dropdb -U postgres --if-exists teagram",
-    "demo_seed_compose up -d teagramd",
+    'demo_seed_compose up -d "$ACTIVE_SERVER"',
     "demo_prepare_seed_owner \"$TMP_DIR\"",
     '"$SEED_SCRIPT" --seed',
-    '"$SEED_SCRIPT" --verify-seed --endpoint teagramd:2443',
+    '"$SEED_SCRIPT" --verify-seed --endpoint "$ACTIVE_ENDPOINT"',
     '"$SCRIPT_DIR/test-seed-compose.sh"',
-    "demo_compose up -d --wait --wait-timeout 120 haproxy",
+    'demo_compose up -d --wait --wait-timeout 120 "$ACTIVE_SERVER" haproxy',
     '"$SEED_SCRIPT" --verify-turnstile --endpoint haproxy:2443',
     "demo_compose up -d edge",
 ])
 seed_test = Path(sys.argv[6])
 assert_order(seed_test, [
     'before=$(capture_seed_report)',
-    '"$SEED_SCRIPT" --seed --endpoint teagramd:2443',
+    '"$SEED_SCRIPT" --seed --endpoint "$ACTIVE_ENDPOINT"',
     'after=$(capture_seed_report)',
     '[[ "$before" == "$after" ]]',
 ])
@@ -360,40 +489,59 @@ if "markers=133" not in seed_test_text or "search_account=demo_searcher" not in 
     raise SystemExit("test-seed-compose.sh: API convergence check must assert stable marker counts and search account")
 deploy_path = Path(sys.argv[3])
 deploy = deploy_path.read_text(encoding="utf-8")
+deploy_preflight = deploy.split('TARGET_RENDER="$TMP_DIR/target-render.json"', 1)[1].split(
+    'docker inspect "${CONTAINER_IDS[@]}"', 1
+)[0]
+assert_text_order(deploy_preflight, "deploy-main.sh proxy preflight", [
+    'mapfile -t CONTAINER_IDS < <(demo_compose ps -q)',
+    'demo_require_proxy_configuration_current haproxy "$TEAGRAM_DEMO_HAPROXY_CONFIG_SHA256"',
+    'demo_require_proxy_configuration_current edge "$TEAGRAM_DEMO_EDGE_CONFIG_SHA256"',
+    'demo_render_config "$TARGET_RENDER"',
+])
 deploy_steps = [
-    "demo_validation_compose up -d haproxy edge",
-    'python3 "$SCRIPT_DIR/smoke.py" "$DEMO_STATE_DIR/client.json" 18080',
-    "demo_compose up -d edge",
-    'demo_remove_previous_image "$PREV_IMAGE_ID" "$IMAGE_ID"',
-    "BACKUP_READY=0",
+    "demo_backup_database\n",
+    "demo_compose build teagramd",
+    "demo_compose up -d migrate",
+    "demo_wait_migration demo_compose 'deployment migrations'",
+    'demo_seed_compose up -d "$CANDIDATE_SERVER"',
+    '"$SCRIPT_DIR/seed-demo.sh" --verify-seed --endpoint "$CANDIDATE_ENDPOINT"',
+    'demo_compose up -d --wait --wait-timeout 120 "$CANDIDATE_SERVER"',
+    'demo_haproxy_control enable "$CANDIDATE_SERVER"',
+    'demo_haproxy_control wait-healthy "$CANDIDATE_SERVER" --timeout 60',
+    'demo_haproxy_control drain "$ACTIVE_SERVER"',
+    'install -o root -g root -m 0644 "$TMP_DIR/client.json" "$DEMO_CLIENT_CONFIG.next"',
+    'python3 "$SCRIPT_DIR/smoke.py" "$DEMO_CLIENT_CONFIG"',
+    '"$SCRIPT_DIR/seed-demo.sh" --verify-turnstile --endpoint haproxy:2443',
+    'demo_write_active_server "$CANDIDATE_SERVER"',
+    'demo_compose stop "$ACTIVE_SERVER"',
 ]
 deploy_start = deploy.find(deploy_steps[0])
 deploy_positions = [deploy.find(step, deploy_start) for step in deploy_steps]
 if any(position < 0 for position in deploy_positions) or deploy_positions != sorted(deploy_positions):
-    raise SystemExit("deploy-main.sh: public edge must start only after private validation smoke")
-if "PUBLIC_ACTIVATION_STARTED=1" not in deploy or "database preserved" not in deploy:
-    raise SystemExit("deploy-main.sh: activation failure must not restore a database after public writes")
-backup_function = deploy.split("demo_quiesce_and_backup_database() {", 1)[1].split("\n}", 1)[0]
+    raise SystemExit("deploy-main.sh: candidate health and traffic cutover must precede stopping the old server")
+if "PUBLIC_ACTIVATION_STARTED=1" not in deploy or "migrated database preserved" not in deploy:
+    raise SystemExit("deploy-main.sh: failed cutover must retain the migrated database and dump")
+if 'demo_compose stop edge' in deploy or 'demo_compose stop haproxy' in deploy:
+    raise SystemExit("deploy-main.sh: normal deploy must keep the public edge and HAProxy running")
+backup_function = deploy.split("demo_backup_database() {", 1)[1].split("\n}", 1)[0]
 assert_text_order(backup_function, "deploy-main.sh backup function", [
-    "SERVICES_STOPPED=1",
-    "demo_compose stop edge haproxy",
-    "demo_compose stop teagramd turnstile-egress",
     'DB_DUMP="$BACKUP_DIR/postgres.dump"',
     "demo_compose exec -T postgres pg_dump -U postgres -Fc teagram",
     "demo_compose_input exec -T postgres pg_restore --list",
     'BACKUP_READY=1',
 ])
 assert_order(deploy_path, [
-    "demo_quiesce_and_backup_database\n",
+    "demo_backup_database\n",
     "demo_compose build teagramd",
+    "demo_compose up -d migrate",
+    "demo_wait_migration demo_compose 'deployment migrations'",
+    'demo_seed_compose up -d "$CANDIDATE_SERVER"',
+    '"$SCRIPT_DIR/seed-demo.sh" --verify-seed --endpoint "$CANDIDATE_ENDPOINT"',
+    'demo_compose up -d --wait --wait-timeout 120 "$CANDIDATE_SERVER"',
+    'demo_compose stop "$ACTIVE_SERVER"',
 ])
-rollback = deploy.split("demo_rollback() {", 1)[1].split("\n}", 1)[0]
-if "demo_restore_database || rollback_rc=1" not in rollback:
-    raise SystemExit("deploy-main.sh: rollback must restore the tested database snapshot")
-if "demo_wait_migration demo_compose 'deployment migrations'" not in deploy:
-    raise SystemExit("deploy-main.sh: deployment must wait for migration completion")
-if "demo_wait_migration demo_compose 'rollback migrations'" not in rollback:
-    raise SystemExit("deploy-main.sh: rollback must wait for migration completion")
+if 'docker image tag "$PREV_IMAGE_ID" teagramd:local' not in deploy:
+    raise SystemExit("deploy-main.sh: failed rollout must restore the previous image tag")
 if "MIGRATE_STATUS=$(docker inspect" in deploy:
     raise SystemExit("deploy-main.sh: detached migration status must be checked after waiting")
 if "PREV_IMAGE_TAG" in deploy or "teagramd:rollback-" in deploy:
@@ -403,6 +551,8 @@ if 'docker image tag "$PREV_IMAGE_ID" teagramd:local' not in deploy:
 waiter = Path(sys.argv[4]).read_text(encoding="utf-8")
 if "demo_wait_migration()" not in waiter or 'docker wait "${migration_ids[0]}"' not in waiter:
     raise SystemExit("demo-common.sh: migration helper must wait for the container exit code")
+if 'install -d -o 99 -g 99 -m 0700 "$DEMO_STATE_DIR/haproxy-run"' not in waiter:
+    raise SystemExit("demo-common.sh: HAProxy runtime socket directory must be writable only by the image's haproxy user")
 forced_command = Path(sys.argv[5]).read_text(encoding="utf-8")
 wipe = Path(sys.argv[1]).read_text(encoding="utf-8")
 if 'LOCK_PATH="$DEMO_REPO_ROOT/.state/deploy.lock"' not in wipe:
@@ -441,26 +591,26 @@ if '  --lock-path "$LOCK_PATH"' not in init:
     raise SystemExit("init-demo.sh: fresh install must pass its acquired lock path to authority initialization")
 assert_order(Path(sys.argv[2]), [
     "PUBLIC_SERVICES_MAY_BE_RUNNING=1",
-    "demo_compose up -d --wait --wait-timeout 120 haproxy",
+    'demo_compose up -d --wait --wait-timeout 120 "$ACTIVE_SERVER" haproxy',
     '"$SEED_SCRIPT" --verify-turnstile --endpoint haproxy:2443',
     "demo_compose up -d edge",
-    'python3 "$SCRIPT_DIR/smoke.py" "$DEMO_STATE_DIR/client.json"',
+    'python3 "$SCRIPT_DIR/smoke.py" "$DEMO_CLIENT_CONFIG"',
     "exit 0",
 ])
 assert_order(Path(sys.argv[2]), [
     "PUBLIC_SERVICES_MAY_BE_RUNNING=1",
-    "demo_compose up -d --wait --wait-timeout 120 haproxy",
+    'demo_compose up -d --wait --wait-timeout 120 "$ACTIVE_SERVER" haproxy',
     '"$SEED_SCRIPT" --verify-turnstile --endpoint haproxy:2443',
     "demo_compose up -d edge",
-    'python3 "$SCRIPT_DIR/smoke.py" "$DEMO_STATE_DIR/client.json"',
+    'python3 "$SCRIPT_DIR/smoke.py" "$DEMO_CLIENT_CONFIG"',
 ], start=init.index("exit 0") + len("exit 0"))
 assert_order(Path(sys.argv[2]), [
-    "demo_compose stop edge haproxy",
-    "demo_seed_compose up -d teagramd",
+    'demo_compose stop edge haproxy turnstile-egress "$ACTIVE_SERVER"',
+    'demo_seed_compose up -d "$ACTIVE_SERVER"',
     '"$SEED_SCRIPT" --seed',
-    '"$SEED_SCRIPT" --verify-seed --endpoint teagramd:2443',
+    '"$SEED_SCRIPT" --verify-seed --endpoint "$ACTIVE_ENDPOINT"',
     '"$SCRIPT_DIR/test-seed-compose.sh"',
-    "demo_compose up -d --wait --wait-timeout 120 haproxy",
+    'demo_compose up -d --wait --wait-timeout 120 "$ACTIVE_SERVER" haproxy',
     '"$SEED_SCRIPT" --verify-turnstile --endpoint haproxy:2443',
     "demo_compose up -d edge",
 ])
@@ -603,6 +753,57 @@ env \
   TMP_DIR="$TMP_DIR" \
   bash "$TMP_DIR/deploy-image-cleanup-regression.sh"
 
+cat > "$TMP_DIR/deploy-rollback-failure-regression.sh" <<'BASH'
+set -Eeuo pipefail
+source "$CLEANUP_FUNCTION"
+ACTIVE_SERVER=teagramd
+CANDIDATE_SERVER=teagramd-next
+BACKUP_READY=1
+BACKUP_DIR="$TEST_ROOT/backup"
+CANDIDATE_STARTED=1
+CLIENT_CONFIG_UPDATED=0
+CUTOVER_COMMITTED=0
+PUBLIC_ACTIVATION_STARTED=1
+PREV_IMAGE_ID=sha256:previous
+SHA=0123456789abcdef0123456789abcdef01234567
+RESTORE_DB=
+RESTORE_DB_CREATED=0
+TMP_DIR="$TEST_ROOT/tmp"
+mkdir -p "$TMP_DIR"
+trap demo_cleanup EXIT
+
+demo_haproxy_control() {
+  printf 'haproxy %s\n' "$*" >> "$CALLS"
+  case "$*" in
+    'enable teagramd'|'drain teagramd-next') return 0 ;;
+    'wait-healthy teagramd --timeout 60') return 1 ;;
+    *) return 1 ;;
+  esac
+}
+demo_compose() { printf 'compose %s\n' "$*" >> "$CALLS"; }
+demo_write_active_server() { printf 'active %s\n' "$1" >> "$CALLS"; }
+demo_prepare_haproxy_runtime() { printf 'prepare runtime\n' >> "$CALLS"; }
+docker() { printf 'docker %s\n' "$*" >> "$CALLS"; }
+
+false
+BASH
+if env \
+  CLEANUP_FUNCTION="$IMAGE_CLEANUP_FUNCTION" \
+  TEST_ROOT="$TMP_DIR/deploy-rollback-failure" \
+  CALLS="$TMP_DIR/deploy-rollback-failure-calls" \
+  bash "$TMP_DIR/deploy-rollback-failure-regression.sh"; then
+  printf '%s\n' 'rollback-failure regression unexpectedly succeeded' >&2
+  exit 1
+fi
+if ! grep -Fxq 'haproxy wait-healthy teagramd --timeout 60' "$TMP_DIR/deploy-rollback-failure-calls"; then
+  printf '%s\n' 'rollback-failure regression did not exercise the old-slot health-check failure' >&2
+  exit 1
+fi
+if grep -Fxq 'compose stop teagramd-next' "$TMP_DIR/deploy-rollback-failure-calls"; then
+  printf '%s\n' 'deploy rollback stopped the candidate before the old slot was restored' >&2
+  exit 1
+fi
+
 cat > "$TMP_DIR/deploy-image-cleanup-failure-regression.sh" <<'BASH'
 set -Eeuo pipefail
 source "$IMAGE_CLEANUP_FUNCTION"
@@ -636,37 +837,20 @@ fi
 [[ ! -e "$TMP_DIR/preserve-called" ]]
 
 BACKUP_FUNCTIONS="$TMP_DIR/deploy-backup-functions.sh"
-sed -n \
-  -e '/^demo_quiesce_and_backup_database() {$/,/^}/p' \
-  -e '/^demo_restore_database() {$/,/^}/p' \
-  "$SCRIPT_DIR/deploy-main.sh" > "$BACKUP_FUNCTIONS"
+sed -n '/^demo_backup_database() {$/,/^}/p' "$SCRIPT_DIR/deploy-main.sh" > "$BACKUP_FUNCTIONS"
 cat > "$TMP_DIR/deploy-backup-regression.sh" <<'BASH'
 set -Eeuo pipefail
 source "$BACKUP_FUNCTIONS"
-EVENTS="$TMP_DIR/events"
-DATABASE_STATE="$TMP_DIR/database"
-RESTORE_CHECK="$TMP_DIR/restore-check"
 mkdir -p "$BACKUP_DIR" "$TMP_DIR"
-printf 'original-row\n' > "$DATABASE_STATE"
 INGRESS_OPEN=1
 SERVER_RUNNING=1
 demo_fail() { return 1; }
 chown() { :; }
 chmod() { :; }
 demo_compose() {
-  if [[ "$*" == 'stop edge haproxy' ]]; then
-    INGRESS_OPEN=0
-    printf 'ingress-stopped\n' >> "$EVENTS"
-  elif [[ "$*" == 'stop teagramd turnstile-egress' ]]; then
-    [[ "$INGRESS_OPEN" == 0 ]] || return 1
-    # A request accepted as the server drains must be in the rollback snapshot.
-    printf 'acknowledged-during-shutdown\n' >> "$DATABASE_STATE"
-    SERVER_RUNNING=0
-    printf 'server-stopped\n' >> "$EVENTS"
-  elif [[ "$*" == *'pg_dump -U postgres -Fc teagram'* ]]; then
-    [[ "$SERVER_RUNNING" == 0 ]] || return 1
-    printf 'database-dumped\n' >> "$EVENTS"
-    cat "$DATABASE_STATE"
+  if [[ "$*" == *'pg_dump -U postgres -Fc teagram'* ]]; then
+    [[ "$INGRESS_OPEN" == 1 && "$SERVER_RUNNING" == 1 ]] || return 1
+    printf 'live-database-snapshot\n'
   elif [[ "$*" == *'psql -U postgres -Atqc'* ]]; then
     : # The isolated restore database does not exist yet.
   elif [[ "$*" == *'createdb -U postgres'* || "$*" == *'dropdb -U postgres'* ]]; then
@@ -680,21 +864,17 @@ demo_compose_input() {
   if [[ "$*" == *'pg_restore --list'* ]]; then
     printf 'TABLE DATA\n'
   elif [[ "$*" == *'-d teagram_restore_'* ]]; then
-    cat > "$RESTORE_CHECK"
-  elif [[ "$*" == *'-d teagram'* ]]; then
-    cat > "$DATABASE_STATE"
+    cat >/dev/null
   else
     printf 'unexpected demo_compose_input call: %s\n' "$*" >&2
     return 1
   fi
 }
-demo_quiesce_and_backup_database
-grep -Fxq acknowledged-during-shutdown "$DB_DUMP"
-printf 'partial-migration\n' > "$DATABASE_STATE"
-demo_restore_database
-grep -Fxq acknowledged-during-shutdown "$DATABASE_STATE"
-grep -Fxq original-row "$DATABASE_STATE"
-[[ "$(cat "$EVENTS")" == $'ingress-stopped\nserver-stopped\ndatabase-dumped' ]]
+demo_backup_database
+[[ "$INGRESS_OPEN" == 1 && "$SERVER_RUNNING" == 1 ]]
+grep -Fxq live-database-snapshot "$DB_DUMP"
+[[ -s "$BACKUP_DIR/postgres.dump.sha256" ]]
+[[ "$BACKUP_READY" == 1 ]]
 BASH
 env \
   BACKUP_DIR="$TMP_DIR/deploy-backup" \
@@ -703,8 +883,6 @@ env \
   RESTORE_DB='' \
   RESTORE_DB_CREATED=0 \
   BACKUP_READY=0 \
-  SERVICES_STOPPED=0 \
-  DATABASE_MUTATION=0 \
   SHA=0123456789abcdef0123456789abcdef01234567 \
   BACKUP_FUNCTIONS="$BACKUP_FUNCTIONS" \
   bash "$TMP_DIR/deploy-backup-regression.sh"

@@ -75,3 +75,9 @@ separate invite policy. Deployment verification must confirm the host publish
 remains loopback-only, the tunnel routes only the two documented paths, public
 sign-up without an invite is refused, public budgets still limit traffic, and
 tailnet authentication still works through TCP and WebSocket.
+
+The isolated `demo.teagram.io` deployment has separate ingress and data
+stores. Its online deployment dumps can retain live demo account and message
+data until the weekly wipe; see the [demo stack data-retention threat
+model](../deploy/teagram-demo/README.md#stack-data-retention-threat-model) for
+backup access, retention and deletion controls.

@@ -22,6 +22,7 @@ EXPECTED = {
     "TEAGRAM_DEMO_BLOB_PATH": "/srv/teagram-demo-blobs/data",
     "TEAGRAM_DEMO_TURNSTILE_SECRET_KEY_FILE": "/var/lib/teagram-demo/secrets/turnstile-secret-key",
 }
+OPTIONAL_EXPECTED = {"TG_ADVERTISE_DEMO_GUEST_SIGN_UP": "true"}
 
 
 def reject(message: str) -> None:
@@ -59,7 +60,10 @@ def main() -> None:
         "POSTGRES_PASSWORD", "TG_AUTHKEY_ENC_KEY",
         "TEAGRAM_DEMO_TURNSTILE_SITE_KEY",
     }
-    if set(values) != expected_names:
+    if frozenset(values) not in {
+        frozenset(expected_names),
+        frozenset(expected_names | OPTIONAL_EXPECTED.keys()),
+    }:
         reject("variable-set")
     if not re.fullmatch(r"[0-9a-f]{64}", values["POSTGRES_PASSWORD"]):
         reject("postgres-password-format")
@@ -99,6 +103,8 @@ def main() -> None:
     if site_key == secret_key:
         reject("turnstile-key-reuse")
     if any(values[name] != value for name, value in EXPECTED.items()):
+        reject("fixed-demo-settings")
+    if any(values[name] != value for name, value in OPTIONAL_EXPECTED.items() if name in values):
         reject("fixed-demo-settings")
     if os.path.realpath(values["TEAGRAM_DEMO_BLOB_PATH"]) != values["TEAGRAM_DEMO_BLOB_PATH"]:
         reject("blob-path-not-canonical")
