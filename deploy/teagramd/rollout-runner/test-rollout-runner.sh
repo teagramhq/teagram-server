@@ -407,14 +407,17 @@ if [ "${1:-}" = inspect ]; then
       turnstile_source=$(jq -r '.secrets.teagramd_turnstile.file // ""' "$turnstile_compose")
     fi
     jq -nc \
-      --arg id "$id" --arg base_id "$MOCK_BASE_ID" --arg image "$image" --argjson env "$env_json" \
+      --arg id "$id" --arg base_id "$MOCK_BASE_ID" --arg replacement_id "$MOCK_REPLACEMENT_ID" --arg image "$image" --argjson env "$env_json" \
       --arg cfg "$cfg" --arg source "$MOCK_CHECKOUT/.state/blob-mode" \
       --arg scenario "${MOCK_SCENARIO:-}" --arg phase "$phase" --arg turnstile_source "$turnstile_source" \
       '{
         Id:$id,Image:$image,
         Config:{Env:$env,StopTimeout:(if $scenario == "target-local-carry-forward-image-reuse-stop-timeout-mismatch" and $cfg == "target" and $phase == "target" then 60 else 120 end),Labels:{"com.docker.compose.project":"fixture","com.docker.compose.service":"teagramd"}},
         State:{Status:(if $scenario == "runtime-target-exited" and $cfg == "target" then "exited" else "running" end),ExitCode:(if $scenario == "runtime-target-exited" and $cfg == "target" then 1 else 0 end),StartedAt:"2026-10-06T12:00:00Z",FinishedAt:(if $scenario == "runtime-target-exited" and $cfg == "target" then "2026-10-06T12:00:01Z" else "0001-01-01T00:00:00Z" end)},
-        HostConfig:{PortBindings:{"2443/tcp":[{HostIp:"127.0.0.1",HostPort:"2443"}]},NetworkMode:"fixture_teagram_server"},
+        HostConfig:{PortBindings:({"2443/tcp":[{HostIp:"127.0.0.1",HostPort:"2443"}]} +
+          if $scenario == "target-local-carry-forward-public-listener-addition" and $id == $replacement_id then
+            {"2446/tcp":[{HostIp:"127.0.0.1",HostPort:"2446"}]}
+          else {} end),NetworkMode:"fixture_teagram_server"},
         NetworkSettings:{Networks:({fixture_teagram_server:{}} + if $scenario == "initial-local-replica-network-drift" and $id != $base_id then {edge:{}} else {} end)},
         Mounts:((if ($scenario == "moved-stack-9ef1110-to-da0107d" or $scenario == "moved-stack-9ef1110-to-da0107d-render-mismatch") then [{Type:"volume",Name:"identity",Source:"/synthetic/identity",Destination:"/var/lib/teagramd",Mode:"rw",RW:true,Propagation:"rprivate"},{Type:"volume",Name:"teagram_tgblobs",Source:"/synthetic/blobs",Destination:"/var/lib/teagramd-blobs",Mode:"ro",RW:false,Propagation:"rprivate"},{Type:"volume",Name:"teagram_tgblobs",Source:"/synthetic/blobs",Destination:"/var/lib/telegramd-blobs",Mode:"rw",RW:true,Propagation:"rprivate"},{Type:"bind",Name:"",Source:$source,Destination:"/run/teagramd/blob-mode",Mode:"ro",RW:false,Propagation:"rprivate"}] else ([{Type:"volume",Name:"identity",Source:"/synthetic/identity",Destination:"/var/lib/teagramd",Mode:"rw",RW:true,Propagation:"rprivate"},{Type:"volume",Name:(if $scenario == "runtime-volume-mismatch" and $cfg == "target" then "unexpected_tgblobs" else "fixture_tgblobs" end),Source:"/synthetic/blobs",Destination:"/var/lib/teagramd-blobs",Mode:"rw",RW:true,Propagation:"rprivate"}] + if ($cfg == "target" and $scenario != "runtime-mode-unmounted") or $cfg == "rollback" then [{Type:"bind",Name:"",Source:$source,Destination:"/run/teagramd/blob-mode",Mode:"ro",RW:false,Propagation:"rprivate"}] else [] end) end) + if $turnstile_source == "" then [] else [{Type:"bind",Name:"",Source:$turnstile_source,Destination:"/run/secrets/teagramd-turnstile",Mode:"ro",RW:false,Propagation:"rprivate"}] end)
       }'
@@ -459,6 +462,8 @@ fi
           cat "$MOCK_STATE/target-compose.drift.json"
         elif [[ "${MOCK_SCENARIO:-}" == public-websocket-* ]] && [ "$config_count" -lt 3 ]; then
           cat "$MOCK_STATE/base-compose.json"
+        elif [[ "${MOCK_SCENARIO:-}" == *public-listener-* ]]; then
+          if [ "$phase" = baseline ] || [ "$phase" = rollback ]; then cat "$MOCK_STATE/base-compose.json"; else cat "$MOCK_STATE/target-compose.json"; fi
         elif [[ "${MOCK_SCENARIO:-}" == target-local-welcome-channel-* ]]; then
           if [ "$config_count" -ge 3 ]; then cat "$MOCK_STATE/target-compose.json"; else cat "$MOCK_STATE/base-compose.json"; fi
         elif [ "${MOCK_SCENARIO:-}" = target-local-carry-forward-cce-literal-build-arg ]; then
@@ -1240,7 +1245,7 @@ run_fixture() {
     ambient_revision=(TEAGRAMD_SOURCE_REVISION=ambient-revision-must-not-win)
   fi
   runner="$runtime_dir/rollout-runner.sh"
-  case "$scenario" in old-target-image|target-local-598-rollback|target-local-df9-rollback|target-local-welcome-channel-addition-rollback|config-drift|public-websocket-enabled|readiness-timeout|logs-failed|runtime-target-exited|target-local-carry-forward-image-reuse-stale-build|target-local-carry-forward-image-reuse-stop-timeout-mismatch|schema-post-failed-69|schema-post-missing-69) require_marker=1 ;; esac
+  case "$scenario" in old-target-image|target-local-598-rollback|target-local-df9-rollback|target-local-welcome-channel-addition-rollback|config-drift|target-local-carry-forward-public-listener-wide-host|target-local-carry-forward-public-listener-other-port|public-websocket-enabled|readiness-timeout|logs-failed|runtime-target-exited|target-local-carry-forward-image-reuse-stale-build|target-local-carry-forward-image-reuse-stop-timeout-mismatch|schema-post-failed-69|schema-post-missing-69) require_marker=1 ;; esac
   [ "$name" = marker-write-failed ] && require_marker=0
   [ -n "$chmod_match" ] && require_marker=1
   if [ "$action" = reconcile ]; then
@@ -3629,6 +3634,49 @@ else
   cat "$root".target/preflight-comparisons.tsv 2>/dev/null || true
   fail 'configuration drift rejection'
 fi
+
+prepare_public_listener_apply_fixture() {
+  local name=$1 scenario=$2 port=$3 host_ip=$4 state
+  prepare_target_local_apply_fixture "$name" "$scenario" "$APPLY_TARGET_SHA" "$TARGET_SHA" || return 1
+  state=$(cat "$TMP/$name-state-path")
+  jq -c --arg port "$port" --arg host_ip "$host_ip" \
+    '.services.teagramd.ports += [{target:($port | tonumber),published:$port,host_ip:$host_ip,protocol:"tcp",mode:"ingress"}]' \
+    "$state/target-compose.json" > "$TMP/$name-target-compose.json" || return 1
+  mv -- "$TMP/$name-target-compose.json" "$state/target-compose.json" || return 1
+  printf '%s\n' "$scenario" > "$TMP/$name-scenario"
+}
+
+prepare_public_listener_apply_fixture target-local-carry-forward-public-listener-addition \
+  target-local-carry-forward-public-listener-addition 2446 127.0.0.1
+status=$(run_fixture target-local-carry-forward-public-listener-addition built 0 '' 2 '' '' apply "$APPLY_TARGET_SHA")
+root=$(cat "$TMP/target-local-carry-forward-public-listener-addition-root-path")
+if [ "$status" = 0 ] && grep -q "rollout=verified sha=$APPLY_TARGET_SHA" "$TMP/target-local-carry-forward-public-listener-addition.stdout" && \
+   grep -q $'preflight\tconfig_sha256\t.*\tpass' "$root".target/preflight-comparisons.tsv && \
+   grep -q $'preflight\tcompose_public_ws_2446\tfalse\ttrue\tpass' "$root".target/preflight-comparisons.tsv && \
+   grep -q $'\tcompose_public_ws_2446\tfalse\ttrue\tpass' "$root".target/target-comparisons.tsv && \
+   grep -q $'\texposure_public_ws_2446\tfalse\ttrue\tpass' "$root".target/target-comparisons.tsv && \
+   grep -q $'\texposure_sha256\t.*\tpass' "$root".target/target-comparisons.tsv; then
+  pass 'only the exact loopback public WebSocket binding is accepted and verified after startup'
+else
+  show_fixture_failure target-local-carry-forward-public-listener-addition "$status"
+  fail 'the exact loopback public WebSocket binding must deploy through apply'
+fi
+
+for scenario in target-local-carry-forward-public-listener-wide-host target-local-carry-forward-public-listener-other-port; do
+  if [[ "$scenario" == *wide-host ]]; then port=2446; host_ip=0.0.0.0; else port=2450; host_ip=127.0.0.1; fi
+  prepare_public_listener_apply_fixture "$scenario" "$scenario" "$port" "$host_ip"
+  status=$(run_fixture "$scenario" built 0 '' 2 '' '' apply "$APPLY_TARGET_SHA")
+  root=$(cat "$TMP/$scenario-root-path")
+  if [ "$status" != 0 ] && \
+     grep -q $'preflight\tconfig_sha256\t.*\tfail' "$root".target/preflight-comparisons.tsv && \
+     grep -q 'result=rejected exit=[1-9]' "$root".target/preflight-failure.txt && \
+     ! grep -q '^docker compose up -d$' "$TMP/$scenario-events"; then
+    pass "$scenario rejects before service replacement"
+  else
+    show_fixture_failure "$scenario" "$status"
+    fail "$scenario must remain unapproved by the exact loopback port exception"
+  fi
+done
 
 make_fixture public-websocket-defaults public-websocket-defaults
 status=$(run_fixture public-websocket-defaults)

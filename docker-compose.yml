@@ -251,6 +251,8 @@ services:
       # DNAT rule the host firewall never sees, so "2443:2443" would hand this
       # server to the whole network the laptop is on.
       - "127.0.0.1:2443:2443"
+      # The public WebSocket listener is reached through the host-side tunnel.
+      - "127.0.0.1:2446:2446"
     # TG_LISTEN_ADDR and TG_ADVERTISE_ADDR are both deliberately unset. The
     # listen default :2443 binds every interface in the container, and with no
     # advertise address set the DC address derives from it as 127.0.0.1:2443,
