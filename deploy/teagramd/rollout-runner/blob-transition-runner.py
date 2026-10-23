@@ -1503,6 +1503,7 @@ def compose_environment_for_files(
     files: list[str],
     *,
     include_rustfs_credentials: bool = False,
+    local_blob_dir: str | None = None,
 ) -> dict[str, str]:
     paths = []
     for name in files:
@@ -1516,6 +1517,8 @@ def compose_environment_for_files(
         paths.append(str(path))
     environment = compose_environment(checkout)
     environment["COMPOSE_FILE"] = ":".join(paths)
+    if local_blob_dir is not None:
+        environment["TEAGRAMD_STACK_MOVE_BLOB_DIR"] = local_blob_dir
     if include_rustfs_credentials and not TEST_MODE:
         environment[BLOB_TRANSITION_COMPOSE_ENV_FILES] = os.pathsep.join(
             rustfs_compose_environment_files(checkout)
@@ -2253,6 +2256,7 @@ def run_current_cutover(args: argparse.Namespace) -> None:
             "docker-compose.local-blobs.yml",
             "docker-compose.override.yml",
         ],
+        local_blob_dir=previous["backend"]["dir"],
     )
     candidate_env = compose_environment_for_files(
         checkout,
@@ -2594,7 +2598,10 @@ def run_simple_recovery(args: argparse.Namespace) -> None:
         "docker-compose.local-blobs.yml",
         "docker-compose.override.yml",
     ]
-    local_env = compose_environment_for_files(checkout, local_files)
+    local_backend = recovery_local_backend(mode, records)
+    local_env = compose_environment_for_files(
+        checkout, local_files, local_blob_dir=local_backend["dir"]
+    )
 
     s3_services: list[str] = []
     local_services: list[str] = []
@@ -2623,7 +2630,7 @@ def run_simple_recovery(args: argparse.Namespace) -> None:
         local_services = live_compose_services(local_compose, "local-compose-invalid")
         local_record = dict(previous)
         local_record["outcome"] = "recovered-local"
-        local_record["backend"] = recovery_local_backend(mode, records)
+        local_record["backend"] = local_backend
         assert_compose_matches_authority(
             mode,
             mode.compose_inventory(local_compose, checkout),
