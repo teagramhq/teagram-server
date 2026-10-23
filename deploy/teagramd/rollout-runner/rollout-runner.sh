@@ -4,7 +4,7 @@ umask 077
 
 SCRIPT_DIR=$(cd -P "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 SCRIPT_SOURCE="$SCRIPT_DIR/$(basename "${BASH_SOURCE[0]}")"
-readonly APPROVED_VERIFIER_SHA=726f3f717e03d3702cf57f2f64c56fd0d18f131cbc421ac54afe96f45ae93b39
+readonly APPROVED_VERIFIER_SHA=0ecb90236713c45c7b32ebb90100c5ff1b380a3aca8722690bc16985980d1c16
 readonly APPROVED_SCHEMA_GATE_SHA=ac54d3cf0480383a52414a8bc8b856b5e1d5f6f8d19034c9c576c64627e097c8
 readonly APPROVED_SCHEMA_GATE_HELPER_SHA=7ae06c2872c60b434068b3715a9ddd5e19b03d4be98dc9881c8dd8f294953d41
 readonly APPROVED_INITIAL_LOCAL_COMPOSE_SHA=3a4f158c6e1f2ead6676fba85d8d95cfb15557a0fbd8e82230361e0af988e0f7
@@ -70,6 +70,11 @@ OVERRIDE_FILE=${ROLLOUT_RUNNER_OVERRIDE_FILE:-/opt/teagram/docker-compose.overri
 ADDED_ENV=${ROLLOUT_RUNNER_ADDED_ENV:-}
 CHANGED_ENV=${ROLLOUT_RUNNER_CHANGED_ENV:-}
 PREVIOUS_ENV_FILE=${ROLLOUT_RUNNER_PREVIOUS_ENV_FILE:-}
+PREVIOUS_OVERRIDE_FILE=${ROLLOUT_RUNNER_PREVIOUS_OVERRIDE_FILE:-}
+CHANGED_ENV_SOURCE=dotenv
+if [ -n "$PREVIOUS_OVERRIDE_FILE" ]; then CHANGED_ENV_SOURCE=override; fi
+RECORDED_OVERRIDE_SHA=
+RECORDED_OVERRIDE_FROM=
 ADOPT_ENV=${ROLLOUT_RUNNER_ADOPT_ENV:-0}
 ENV_RECORD="$CHECKOUT/.state/rollout-env"
 RECORDED_ENV_SHA=
@@ -855,10 +860,23 @@ current_service_id() {
 
 capture_snapshot() {
   local id=$1 dir=$2 name=$3 compose_source=${4:-selected-compose-render} output verifier_error
+  local override_origin_value previous_override_origin_value
   output="$dir/$name.snapshot.json"
   [ ! -e "$output" ] && [ ! -L "$output" ] || { fail 'snapshot evidence already exists'; return 1; }
+  if [ "$CHANGED_ENV_SOURCE" = override ]; then
+    override_origin_value=$(override_websocket_origins_value "$OVERRIDE_FILE") || {
+      fail 'Compose override must set TG_WEBSOCKET_ALLOWED_ORIGINS once under services.teagramd.environment'
+      return 1
+    }
+    previous_override_origin_value=$(override_websocket_origins_value "$PREVIOUS_OVERRIDE_FILE") || {
+      fail 'previous Compose override must set TG_WEBSOCKET_ALLOWED_ORIGINS once under services.teagramd.environment'
+      return 1
+    }
+  fi
   if ! verifier_error=$(ROLLOUT_CHECKOUT_PATH="$CHECKOUT" ROLLOUT_ADDED_ENV="$ADDED_ENV" \
-    ROLLOUT_CHANGED_ENV="$CHANGED_ENV" \
+    ROLLOUT_CHANGED_ENV="$CHANGED_ENV" ROLLOUT_CHANGED_ENV_SOURCE="$CHANGED_ENV_SOURCE" \
+    ROLLOUT_OVERRIDE_ORIGIN_VALUE="${override_origin_value:-}" \
+    ROLLOUT_PREVIOUS_OVERRIDE_ORIGIN_VALUE="${previous_override_origin_value:-}" \
     bash "$VERIFIER" snapshot "$id" "$dir" "$name" "$ENV_FILE" "$OVERRIDE_FILE" "$compose_source" 2>&1 >/dev/null); then
     if [ "$ROLLOUT_RUNNER_TEST_MODE" = 1 ] && [ -n "$verifier_error" ]; then
       printf 'snapshot verifier: %s\n' "$verifier_error" >&2
@@ -1169,6 +1187,7 @@ changed_websocket_origins_requested() {
 
 restore_previous_env_for_named_changes() {
   local env_dir temp
+  [ "$CHANGED_ENV_SOURCE" != override ] || return 0
   public_env_addition_requested || changed_websocket_origins_requested || return 0
   [ -n "$PREVIOUS_ENV_FILE" ] && [ -f "$PREVIOUS_ENV_FILE" ] && [ ! -L "$PREVIOUS_ENV_FILE" ] && \
     [ "$(stat -c %a -- "$PREVIOUS_ENV_FILE")" = 600 ] && [ "$(stat -c %u -- "$PREVIOUS_ENV_FILE")" = 0 ] || {
@@ -1198,6 +1217,150 @@ restore_previous_env_for_named_changes() {
   sync || { fail 'cannot persist the previous .env for named environment rollback'; return 1; }
 }
 
+restore_previous_override_for_named_changes() {
+  local override_dir override_mode temp
+  [ "$CHANGED_ENV_SOURCE" = override ] || return 0
+  [ -n "$PREVIOUS_OVERRIDE_FILE" ] && [ -f "$PREVIOUS_OVERRIDE_FILE" ] && [ ! -L "$PREVIOUS_OVERRIDE_FILE" ] && \
+    [ "$(stat -c %a -- "$PREVIOUS_OVERRIDE_FILE")" = 600 ] && [ "$(stat -c %u -- "$PREVIOUS_OVERRIDE_FILE")" = 0 ] || {
+    fail 'named override rollback requires the root-owned mode-0600 previous Compose override'
+    return 1
+  }
+  [ -f "$OVERRIDE_FILE" ] && [ ! -L "$OVERRIDE_FILE" ] && [ "$(stat -c %u -- "$OVERRIDE_FILE")" = 0 ] || {
+    fail 'cannot restore named override rollback over an unsafe Compose override path'
+    return 1
+  }
+  override_mode=$(stat -c %a -- "$OVERRIDE_FILE") || { fail 'cannot read the Compose override mode'; return 1; }
+  [[ "$override_mode" =~ ^[0-7]{3,4}$ ]] && (( (8#$override_mode & 0022) == 0 )) || {
+    fail 'Compose override permissions must not allow group or world writes'
+    return 1
+  }
+  override_dir=$(dirname -- "$OVERRIDE_FILE") || { fail 'cannot resolve the Compose override directory'; return 1; }
+  temp=$(mktemp "$override_dir/.rollout-override-rollback.XXXXXXXX") || {
+    fail 'cannot stage the previous Compose override for named rollback'
+    return 1
+  }
+  if ! cp -- "$PREVIOUS_OVERRIDE_FILE" "$temp" || ! chmod "$override_mode" -- "$temp" || ! sync; then
+    rm -f -- "$temp"
+    fail 'cannot prepare the previous Compose override for named rollback'
+    return 1
+  fi
+  if ! mv -f -- "$temp" "$OVERRIDE_FILE"; then
+    rm -f -- "$temp"
+    fail 'cannot restore the previous Compose override for named rollback'
+    return 1
+  fi
+  sync || { fail 'cannot persist the previous Compose override for named rollback'; return 1; }
+}
+
+override_websocket_origins_value() {
+  local file=$1
+  awk '
+    function trim(value) {
+      sub(/^[[:space:]]+/, "", value)
+      sub(/[[:space:]]+$/, "", value)
+      return value
+    }
+    /^services:[[:space:]]*$/ { services=1; next }
+    services && /^[^[:space:]#][^:]*:/ { services=0; teagramd=0; environment=0 }
+    services && /^  [^[:space:]][^:]*:[[:space:]]*$/ {
+      teagramd=($0 ~ /^  teagramd:[[:space:]]*$/)
+      environment=0
+      next
+    }
+    teagramd && /^    [^[:space:]][^:]*:/ {
+      environment=($0 ~ /^    environment:[[:space:]]*$/)
+      next
+    }
+    environment && /^      TG_WEBSOCKET_ALLOWED_ORIGINS:[[:space:]]*/ {
+      count++
+      value=$0
+      sub(/^      TG_WEBSOCKET_ALLOWED_ORIGINS:[[:space:]]*/, "", value)
+      value=trim(value)
+      if (length(value) >= 2 && substr(value,1,1) == substr(value,length(value),1) &&
+          (substr(value,1,1) == "\"" || substr(value,1,1) == "\047")) {
+        value=substr(value,2,length(value)-2)
+      } else if (value ~ /[[:space:]#]/ || value ~ /[\047\"`]/) {
+        invalid=1
+      }
+      found=value
+    }
+    END {
+      if (count != 1 || invalid || found == "") exit 1
+      print found
+    }
+  ' "$file"
+}
+
+validate_override_websocket_change() {
+  local previous_size current_size previous_sha previous_value current_value
+  local i old_line line changed=0 old_value new_value
+  local -a previous_lines current_lines
+  [ -n "$CHANGED_ENV" ] && [ "$CHANGED_ENV" = TG_WEBSOCKET_ALLOWED_ORIGINS ] && \
+    [ -z "$ADDED_ENV" ] && [ -z "$PREVIOUS_ENV_FILE" ] || {
+    fail 'an override backup is supported only for a named TG_WEBSOCKET_ALLOWED_ORIGINS value change'
+    return 1
+  }
+  [ -f "$PREVIOUS_OVERRIDE_FILE" ] && [ ! -L "$PREVIOUS_OVERRIDE_FILE" ] && \
+    [ "$(stat -c %a -- "$PREVIOUS_OVERRIDE_FILE")" = 600 ] && [ "$(stat -c %u -- "$PREVIOUS_OVERRIDE_FILE")" = 0 ] || {
+    fail 'override value changes require the pre-change override as a root-owned mode-0600 regular file'
+    return 1
+  }
+  [ -f "$OVERRIDE_FILE" ] && [ ! -L "$OVERRIDE_FILE" ] || {
+    fail 'override value changes require a regular non-symlink override file'
+    return 1
+  }
+  previous_size=$(stat -c %s -- "$PREVIOUS_OVERRIDE_FILE") || { fail 'cannot size the previous Compose override'; return 1; }
+  [ "$previous_size" -eq 0 ] || [ -z "$(tail -c 1 -- "$PREVIOUS_OVERRIDE_FILE")" ] || {
+    fail 'previous Compose override must end with a newline'
+    return 1
+  }
+  [ -z "$(tail -c 1 -- "$OVERRIDE_FILE")" ] || { fail 'Compose override must end with a newline'; return 1; }
+  previous_sha=$(sha256_file "$PREVIOUS_OVERRIDE_FILE") || { fail 'cannot hash the previous Compose override'; return 1; }
+  [ -n "$RECORDED_OVERRIDE_SHA" ] && [ "$previous_sha" = "$RECORDED_OVERRIDE_SHA" ] || {
+    fail 'previous Compose override is not the last verified override'
+    return 1
+  }
+  previous_value=$(override_websocket_origins_value "$PREVIOUS_OVERRIDE_FILE") || {
+    fail 'previous Compose override must set TG_WEBSOCKET_ALLOWED_ORIGINS once under services.teagramd.environment'
+    return 1
+  }
+  current_value=$(override_websocket_origins_value "$OVERRIDE_FILE") || {
+    fail 'Compose override must set TG_WEBSOCKET_ALLOWED_ORIGINS once under services.teagramd.environment'
+    return 1
+  }
+  ! grep -Eq '^[[:space:]]*(export[[:space:]]+)?TG_WEBSOCKET_ALLOWED_ORIGINS[[:space:]]*=' -- "$ENV_FILE" || {
+    fail 'override value changes require TG_WEBSOCKET_ALLOWED_ORIGINS to be absent from .env'
+    return 1
+  }
+  [ "$previous_value" != "$current_value" ] || {
+    fail 'TG_WEBSOCKET_ALLOWED_ORIGINS change must change the override value'
+    return 1
+  }
+  current_size=$(stat -c %s -- "$OVERRIDE_FILE") || { fail 'cannot size the Compose override'; return 1; }
+  [ "$previous_size" -eq "$current_size" ] || { fail 'Compose override changes or removes unrelated lines'; return 1; }
+  mapfile -t previous_lines < "$PREVIOUS_OVERRIDE_FILE"
+  mapfile -t current_lines < "$OVERRIDE_FILE"
+  [ "${#previous_lines[@]}" -eq "${#current_lines[@]}" ] || { fail 'Compose override changes or removes unrelated lines'; return 1; }
+  for ((i = 0; i < ${#previous_lines[@]}; i++)); do
+    old_line=${previous_lines[$i]}
+    line=${current_lines[$i]}
+    if [ "$old_line" != "$line" ]; then
+      [[ "$old_line" =~ ^[[:space:]]*TG_WEBSOCKET_ALLOWED_ORIGINS: ]] && \
+        [[ "$line" =~ ^[[:space:]]*TG_WEBSOCKET_ALLOWED_ORIGINS: ]] || {
+        fail 'Compose override changes or removes unrelated lines'
+        return 1
+      }
+      old_value=${old_line#*:}
+      new_value=${line#*:}
+      old_value=$(printf '%s' "$old_value" | sed -E 's/^[[:space:]]*//; s/[[:space:]]*$//; s/^(["\047])(.*)\1$/\2/')
+      new_value=$(printf '%s' "$new_value" | sed -E 's/^[[:space:]]*//; s/[[:space:]]*$//; s/^(["\047])(.*)\1$/\2/')
+      [ "$old_value" != "$new_value" ] || { fail 'Compose override line changes only formatting'; return 1; }
+      changed=$((changed + 1))
+    fi
+  done
+  [ "$changed" -eq 1 ] || { fail 'Compose override must change only the named origin assignment'; return 1; }
+}
+
 # Before the first record exists, the last verified run's evidence holds the
 # .env digest that target or rollback ran with.
 read_verified_env_evidence() {
@@ -1223,6 +1386,31 @@ read_verified_env_evidence() {
   }
   RECORDED_ENV_SHA=$env_sha
   RECORDED_ENV_FROM=$best_snapshot
+}
+
+read_verified_override_evidence() {
+  local result dir snapshot stamp best_stamp='' best_snapshot='' override_sha
+  for result in "$EVIDENCE_ROOT"/main1238-*.target/target-result.txt "$EVIDENCE_ROOT"/main1238-*.rollback/rollback-result.txt; do
+    [ -f "$result" ] && [ ! -L "$result" ] && grep -q '^result=verified ' "$result" || continue
+    dir=${result%/*}
+    case "$dir" in
+      *.target) snapshot="$dir/target.snapshot.json" ;;
+      *) snapshot="$dir/rollback.snapshot.json" ;;
+    esac
+    [ -f "$snapshot" ] && [ ! -L "$snapshot" ] || continue
+    stamp=${dir##*-}
+    stamp=${stamp%.*}
+    [[ "$stamp" =~ ^[0-9]{8}T[0-9]{6}Z$ ]] && [[ "$stamp" > "$best_stamp" ]] || continue
+    best_stamp=$stamp
+    best_snapshot=$snapshot
+  done
+  [ -n "$best_snapshot" ] || return 0
+  override_sha=$(jq -er 'select(.provenance.compose_source == "selected-compose-render") | .override_sha256 | select(test("^[0-9a-f]{64}$"))' "$best_snapshot") || {
+    fail 'latest verified evidence has no Compose override digest'
+    return 1
+  }
+  RECORDED_OVERRIDE_SHA=$override_sha
+  RECORDED_OVERRIDE_FROM=$best_snapshot
 }
 
 read_env_record() {
@@ -1286,7 +1474,8 @@ validate_env_baseline() {
   local change_names=' ' changed=' ' changed_count=0 old_line old_key old_value new_value i
   local -a requested previous_lines current_lines
   if [ "$INITIALIZE_LOCAL" = 1 ]; then
-    [ -z "$ADDED_ENV" ] && [ -z "$CHANGED_ENV" ] && [ -z "$PREVIOUS_ENV_FILE" ] && [ "$ADOPT_ENV" = 0 ] || {
+    [ -z "$ADDED_ENV" ] && [ -z "$CHANGED_ENV" ] && [ -z "$PREVIOUS_ENV_FILE" ] && \
+      [ -z "$PREVIOUS_OVERRIDE_FILE" ] && [ "$ADOPT_ENV" = 0 ] || {
       fail 'initialize-local does not accept environment changes or adoption'
       return 1
     }
@@ -1306,7 +1495,8 @@ validate_env_baseline() {
       fi
       return 1
     }
-    [ -z "$ADDED_ENV" ] && [ -z "$CHANGED_ENV" ] && [ -z "$PREVIOUS_ENV_FILE" ] || { fail '.env adoption does not accept environment changes'; return 1; }
+    [ -z "$ADDED_ENV" ] && [ -z "$CHANGED_ENV" ] && [ -z "$PREVIOUS_ENV_FILE" ] && \
+      [ -z "$PREVIOUS_OVERRIDE_FILE" ] || { fail '.env adoption does not accept environment changes'; return 1; }
     write_immutable "$BASELINE_DIR/env-baseline.txt" "recorded_env_sha256=adopted recorded_from=adopted env_sha256=$current_sha added=none"
     return
   fi
@@ -1316,6 +1506,17 @@ validate_env_baseline() {
   }
   if [ -z "$ADDED_ENV" ]; then
     if [ -n "$CHANGED_ENV" ]; then
+      if [ "$CHANGED_ENV_SOURCE" = override ]; then
+        read_verified_override_evidence || return 1
+        [ "$current_sha" = "$RECORDED_ENV_SHA" ] || {
+          fail 'override value change requires the last verified .env to remain unchanged'
+          return 1
+        }
+        validate_override_websocket_change || return 1
+        write_immutable "$BASELINE_DIR/env-baseline.txt" \
+          "recorded_env_sha256=$RECORDED_ENV_SHA recorded_from=$RECORDED_ENV_FROM env_sha256=$current_sha added=none changed=$CHANGED_ENV source=override previous_override_sha256=$RECORDED_OVERRIDE_SHA previous_override_from=$RECORDED_OVERRIDE_FROM current_override_sha256=$(sha256_file "$OVERRIDE_FILE")"
+        return
+      fi
       [ -z "$PREVIOUS_ENV_FILE" ] && { fail 'named environment value changes require the pre-change .env'; return 1; }
       [[ "$CHANGED_ENV" != *,* ]] || { fail 'only one existing environment value may change per apply'; return 1; }
       IFS=, read -r -a requested <<< "$CHANGED_ENV"
@@ -1414,6 +1615,7 @@ validate_env_baseline() {
     return
   fi
   [ -z "$CHANGED_ENV" ] || { fail 'an apply cannot add and change environment variables together'; return 1; }
+  [ -z "$PREVIOUS_OVERRIDE_FILE" ] || { fail 'a previous Compose override requires a named WebSocket origin value change'; return 1; }
   IFS=, read -r -a requested <<< "$ADDED_ENV"
   [ "${#requested[@]}" -gt 0 ] || { fail 'environment additions list is empty'; return 1; }
   for name in "${requested[@]}"; do
@@ -1879,6 +2081,9 @@ compare_rollback_to_baseline() {
     if [ "$field" = env_sha256 ] && { public_env_addition_requested || changed_websocket_origins_requested; }; then
       [ -n "$RECORDED_ENV_SHA" ] || { fail 'named environment rollback has no verified previous .env digest'; return 1; }
       before=$RECORDED_ENV_SHA
+    elif [ "$field" = override_sha256 ] && [ "$CHANGED_ENV_SOURCE" = override ]; then
+      [ -n "$RECORDED_OVERRIDE_SHA" ] || { fail 'named override rollback has no verified previous Compose override digest'; return 1; }
+      before=$RECORDED_OVERRIDE_SHA
     else
       before=$(jq -er --arg field "$field" '.[$field]' "$baseline_file") || { fail 'baseline snapshot is missing an equivalence field'; return 1; }
     fi
@@ -1944,6 +2149,7 @@ perform_rollback() {
   local rollback_id rollback_env_record
   restore_checkout_and_tag || return 1
   restore_previous_env_for_named_changes || return 1
+  restore_previous_override_for_named_changes || return 1
   if ! validate_rollback_blob_authority; then
     write_immutable "$ROLLBACK_DIR/rollback-blob-authority-rejected.txt" \
       "result=rejected checkout_sha=$PREVIOUS_SHA reason=current-containers-or-baseline-render-mismatch" || return 1
