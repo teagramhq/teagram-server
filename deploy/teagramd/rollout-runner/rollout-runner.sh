@@ -1910,7 +1910,7 @@ rollback_after_target_failure() {
 }
 
 restore_checkout_and_tag() {
-  git reset --hard "$PREVIOUS_SHA" >/dev/null || { fail 'cannot restore the previous checkout'; return 1; }
+  (umask 022; git reset --hard "$PREVIOUS_SHA") >/dev/null || { fail 'cannot restore the previous checkout'; return 1; }
   docker image tag "${BASE_IMAGE_ID#sha256:}" teagramd:local >/dev/null 2>&1 || { fail 'cannot restore the baseline image tag'; return 1; }
 }
 
@@ -2101,18 +2101,20 @@ run_apply() {
     fail 'reviewed rollout runtime source left origin/main after the verified backup'
     return 1
   }
+  # The caller keeps deploy evidence private with umask 077. Preserve Git's
+  # tracked 0644/0755 modes so source checkout changes do not invalidate build layers.
   if git -C "$CHECKOUT" merge-base --is-ancestor "$PREVIOUS_SHA" "$TARGET_SHA"; then
-    git -C "$CHECKOUT" merge --ff-only -q "$TARGET_SHA" || { fail 'fast-forward to authorized application target failed'; return 1; }
+    (umask 022; git -C "$CHECKOUT" merge --ff-only -q "$TARGET_SHA") || { fail 'fast-forward to authorized application target failed'; return 1; }
   elif [ "$INITIALIZE_LOCAL" = 1 ] && [ "$PREVIOUS_SHA" = "$INITIAL_LOCAL_LEGACY_BASELINE_SHA" ] && \
       [ "$TARGET_SHA" = "$INITIAL_LOCAL_COMPOSE_TARGET_SHA" ]; then
-    git -C "$CHECKOUT" reset --hard -q "$TARGET_SHA" || { fail 'fixed reviewed initial-local target checkout failed'; return 1; }
+    (umask 022; git -C "$CHECKOUT" reset --hard -q "$TARGET_SHA") || { fail 'fixed reviewed initial-local target checkout failed'; return 1; }
   else
     fail 'authorized application target is not a fast-forward from the live baseline'
     return 1
   fi
   [ "$(git -C "$CHECKOUT" rev-parse HEAD)" = "$TARGET_SHA" ] || { fail 'fast-forward did not reach the authorized target'; return 1; }
   if ! verify_approved_gates || ! verify_runtime_sources; then
-    git reset --hard "$PREVIOUS_SHA" >/dev/null || { fail 'pinned gate check failed and baseline checkout could not be restored'; return 1; }
+    (umask 022; git reset --hard "$PREVIOUS_SHA") >/dev/null || { fail 'pinned gate check failed and baseline checkout could not be restored'; return 1; }
     fail 'pinned gate hashes changed after fast-forward; target was not started'
     return 1
   fi

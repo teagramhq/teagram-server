@@ -186,6 +186,10 @@ case "$*" in
     fi
     ;;
   'merge --ff-only -q '*)
+    if [ "${MOCK_SCENARIO:-}" = target-local-apply-success ] && [ "$(umask)" != 0022 ]; then
+      printf 'target checkout merge used umask %s instead of 0022\n' "$(umask)" >&2
+      exit 91
+    fi
     printf '%s\n' "${*: -1}" > "$MOCK_STATE/head"
     printf '%s\n' target > "$MOCK_STATE/phase"
     if [ "${MOCK_SCENARIO:-}" = dirty-before-build ]; then
@@ -193,6 +197,9 @@ case "$*" in
     fi
     if [ "${MOCK_SCENARIO:-}" = untracked-before-build ]; then
       printf '%s\n' 'package teagramd' > "$MOCK_CHECKOUT/cmd/untracked.go"
+    fi
+    if [ "${MOCK_SCENARIO:-}" = gate-mutation ]; then
+      printf '%s\n' 'fixture-only post-merge mutation' >> "${MOCK_EVIDENCE_ROOT}.baseline/rollout-verifier.pinned"
     fi
     if [ "${MOCK_SCENARIO:-}" = runtime-mutation ]; then
       printf '%s\n' 'not the pinned verifier' > "$MOCK_CHECKOUT/deploy/teagramd/rollout-runner/rollout-verifier.sh"
@@ -207,6 +214,7 @@ case "$*" in
       printf 'rollback started before target failure evidence was persisted\n' >&2
       exit 89
     fi
+    umask > "$MOCK_STATE/reset-umask"
     printf '%s\n' "${*: -1}" > "$MOCK_STATE/head"
     printf '%s\n' baseline > "$MOCK_STATE/phase"
     ;;
@@ -1876,6 +1884,8 @@ status=$(run_fixture real-git-no-runner)
 if [ "$status" = 0 ] && grep -q 'rollout=verified' "$TMP/real-git-no-runner.stdout" && \
    [ "$(git -C "$checkout" rev-parse HEAD)" = "$target_sha" ] && \
    [ -f "$checkout/deploy/teagramd/rollout-runner/rollout-runner.sh" ] && \
+   [ "$(stat -c '%a' "$checkout/deploy/teagramd/rollout-runner/rollout-runner.sh")" = 755 ] && \
+   [ "$(stat -c '%a' "$checkout/deploy/teagramd/rollout-runner/blob-mode-state.py")" = 644 ] && \
    grep -q '^docker compose exec -T postgres pg_dump' "$TMP/real-git-no-runner-events" && \
    grep -q '^docker compose build' "$TMP/real-git-no-runner-events" && \
    grep -q '^docker compose up -d$' "$TMP/real-git-no-runner-events" && \
@@ -3859,7 +3869,9 @@ fi
 make_fixture config-drift config-drift
 status=$(run_fixture config-drift)
 root=$(cat "$TMP/config-drift-root-path")
+state=$(cat "$TMP/config-drift-state-path")
 if [ "$status" != 0 ] && grep -q $'preflight\tselected_render_config_sha256\t.*\tfail' "$root".target/preflight-comparisons.tsv && \
+   [ "$(cat "$state/reset-umask" 2>/dev/null)" = 0022 ] && \
    grep -q 'result=rejected exit=[1-9]' "$root".target/preflight-failure.txt && \
    ! grep -q 'docker compose up -d$' "$TMP/config-drift-events" && grep -q 'target was not started' "$TMP/config-drift.stderr"; then
   pass 'unrelated Compose configuration drift rejects before build and service replacement'
@@ -3868,6 +3880,20 @@ else
     "$status" "$(cat "$TMP/config-drift.stderr")" "$(cat "$TMP/config-drift-events")"
   cat "$root".target/preflight-comparisons.tsv 2>/dev/null || true
   fail 'configuration drift rejection'
+fi
+
+make_fixture gate-mutation gate-mutation
+status=$(run_fixture gate-mutation)
+state=$(cat "$TMP/gate-mutation-state-path")
+if [ "$status" != 0 ] && \
+   grep -q 'pinned gate hashes changed after fast-forward; target was not started' "$TMP/gate-mutation.stderr" && \
+   [ "$(cat "$state/phase")" = baseline ] && [ "$(cat "$state/reset-umask" 2>/dev/null)" = 0022 ] && \
+   ! grep -q '^docker compose build' "$TMP/gate-mutation-events"; then
+  pass 'post-merge gate rejection restores the baseline checkout with tracked file modes'
+else
+  printf 'gate_mutation_status=%s\ngate_mutation_stderr=%s\ngate_mutation_events=%s\n' \
+    "$status" "$(cat "$TMP/gate-mutation.stderr")" "$(cat "$TMP/gate-mutation-events")"
+  fail 'post-merge gate rejection must restore the baseline checkout under umask 022'
 fi
 
 prepare_public_listener_apply_fixture() {
