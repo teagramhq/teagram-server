@@ -38,6 +38,29 @@ export PATH
 
 COMPOSE_JSON='{"services":{"teagramd":{"stop_grace_period":"2m0s","ports":[],"volumes":[],"network_mode":"","networks":{},"environment":{"TG_REPLICA_COUNT":"1","TG_CLIENT_ADDR_TRUST":"socket","POSTGRES_PASSWORD":"fixture-secret-postgres-password","DATABASE_URL":"postgres://fixture:dsn-secret@db/teagram"}}}}'
 
+NETWORK_ALLOWLIST_BASE=$(jq -cn '
+  {
+    name:"fixture",
+    networks:{default:{name:"fixture_default",ipam:{}}},
+    services:{postgres:{},migrate:{},teagramd:{}}
+  }
+')
+DEFAULT_NETWORK_PROJECTION=$(compose_network_projection "$NETWORK_ALLOWLIST_BASE")
+[ "$(compose_network_profile "$NETWORK_ALLOWLIST_BASE")" = default-only ]
+for service in postgres migrate; do
+  host_network_compose=$(jq -c --arg service "$service" \
+    '.services[$service].network_mode="host"' <<< "$NETWORK_ALLOWLIST_BASE")
+  host_network_projection=$(compose_network_projection "$host_network_compose")
+  if [ "$(compose_network_profile "$host_network_compose")" != other ] || \
+     [ "$host_network_projection" = "$DEFAULT_NETWORK_PROJECTION" ] || \
+     ! jq -e --arg service "$service" '.services[$service].network_mode == "host"' \
+       <<< "$host_network_projection" >/dev/null; then
+    printf 'FAIL %s host network mode must be projected and rejected by the allowlist\n' "$service" >&2
+    exit 1
+  fi
+  printf 'PASS %s host network mode is projected and rejected by the allowlist\n' "$service"
+done
+
 inspect_json() {
   local extra=$1
   jq -cn --arg extra "$extra" '

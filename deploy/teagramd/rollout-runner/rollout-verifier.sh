@@ -26,7 +26,10 @@ compose_network_projection() {
       services:(
         .services
         | to_entries
-        | map({key:.key,value:(.value.networks // {default:null})})
+        | map({key:.key,value:{
+            network_mode:(.value.network_mode // ""),
+            networks:(.value.networks // {default:null})
+          }})
         | from_entries
       )
     }
@@ -39,12 +42,16 @@ compose_network_profile() {
     | ($compose.name // "") as $project
     | ($compose.networks // {}) as $networks
     | ($compose.services
-       | with_entries(.value = (.value.networks // {default:null}))) as $services
+       | with_entries(.value = {
+           network_mode:(.value.network_mode // ""),
+           networks:(.value.networks // {default:null})
+         })) as $services
     | ($project + "_default") as $default_name
     | ($project + "_rustfs_private") as $private_name
     | if $networks == {default:{name:$default_name,ipam:{}}} and
          ($services | has("postgres")) and ($services | has("migrate")) and
-         ($services | has("teagramd")) and all($services[]; . == {default:null}) then
+         ($services | has("teagramd")) and
+         all($services[]; .network_mode == "" and .networks == {default:null}) then
         "default-only"
       elif $networks == {
           default:{name:$default_name,ipam:{}},
@@ -66,7 +73,7 @@ compose_network_profile() {
              elif $service == "rustfs" or $service == "rustfs-init" or
                   $service == "blob-migrate" or $service == "blob-restore" then {rustfs_private:null}
              else null end) as $expected
-          | $expected != null and .value == $expected
+          | $expected != null and .value.network_mode == "" and .value.networks == $expected
         ) then
         "rustfs-isolated"
       else
