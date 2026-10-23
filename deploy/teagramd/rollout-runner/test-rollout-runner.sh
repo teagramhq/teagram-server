@@ -1881,7 +1881,7 @@ if [ "$status" = 0 ] && grep -q 'rollout=verified' "$TMP/real-git-no-runner.stdo
    [ "$(git -C "$checkout" rev-parse HEAD)" = "$target_sha" ] && \
    [ -f "$checkout/deploy/teagramd/rollout-runner/rollout-runner.sh" ] && \
    [ "$(stat -c '%a' "$checkout/deploy/teagramd/rollout-runner/rollout-runner.sh")" = 755 ] && \
-   [ "$(stat -c '%a' "$checkout/deploy/teagramd/rollout-runner/schema-result-gate.py")" = 644 ] && \
+   [ "$(stat -c '%a' "$checkout/deploy/teagramd/rollout-runner/blob-mode-state.py")" = 644 ] && \
    grep -q '^docker compose exec -T postgres pg_dump' "$TMP/real-git-no-runner-events" && \
    grep -q '^docker compose build' "$TMP/real-git-no-runner-events" && \
    grep -q '^docker compose up -d$' "$TMP/real-git-no-runner-events" && \
