@@ -59,12 +59,38 @@ successful CI push run), or from a checkout of `main`:
 ssh teagram-server 'DEPLOY_SHA=<full sha> bash -s' < deploy/teagram/deploy-main.sh
 ```
 
-`deploy/teagram/teagram-logs.sh` is installed as
-`/usr/local/sbin/teagram-logs` after the rollout gates pass, including when a
-deploy is already at its requested SHA. It gets the exact Compose file order
-from the running `teagramd` container label before resolving its ID with
-`docker compose ps -q teagramd`; the QA key remains restricted to this script.
-When the installed wrapper differs, the prior file is retained at
+`teagramd` uses the host's BusyBox syslog socket, with `tag=teagramd`. The
+deploy installs `deploy/teagram/syslog.conf` as `/etc/conf.d/syslog` before
+replacing the server container. BusyBox keeps a 512 MiB active file and 15
+rotations in `/var/log/messages*`, for an 8 GiB maximum. The current host has no
+staging LXC; Compose rendering and the deploy fixtures are the preview gate.
+
+Before replacing a container whose logging driver is not `syslog`, the rollout
+runner snapshots its last seven days (up to 5,000 lines) into the root-only
+`/root/teagramd-legacy-logs.log`, capped at 32 MiB. `ssh teagram-logs <since>`
+reads that snapshot and the rotated host syslog files, so application records
+from the container being replaced remain available. Legacy `login code issued`
+records are discarded before the snapshot is written. The QA key remains
+restricted to `/usr/local/sbin/teagram-logs`.
+
+### Retained log threat model
+
+Treat application diagnostics as sensitive personal data, not anonymized
+telemetry: lines may contain account identifiers or request context. The QA
+SSH key can retrieve up to 5,000 matching lines through the forced log reader,
+but cannot start a shell or invoke Docker. Restrict that key to trusted
+responders and revoke it when no longer needed. Host root and Docker
+administrators can read the raw files; this setup does not encrypt them at
+rest. The 8 GiB syslog cap bounds disk use, not elapsed retention, so high log
+volume can rotate records sooner than seven days.
+
+`TG_LOG_LOGIN_CODES` is a legacy diagnostic, not part of username/password
+sign-in. When enabled, it logs phone numbers and authentication codes in
+cleartext. The main Compose file pins it to `false`; custom deployment overlays
+must not turn it back on. The legacy importer drops code-bearing records before
+storage, and the reader suppresses them from every source as a second boundary.
+
+When the installed log reader differs, the prior file is retained at
 `/root/teagram-logs-before-<7-char-sha>` with mode 0600. Replace
 `<7-char-sha>` with the prefix printed by the deploy before restoring it as root:
 
@@ -73,9 +99,15 @@ backup='/root/teagram-logs-before-<7-char-sha>'
 install -o root -g root -m 0755 "$backup" /usr/local/sbin/teagram-logs
 ```
 
-`deploy/teagram/test-deploy-main.sh` covers deploy target checks and wrapper
-installation; `deploy/teagram/test-teagram-logs.sh` covers the restricted log
-command.
+`deploy/teagram/test-deploy-main.sh` covers deploy target checks, syslog
+configuration, and wrapper installation; `deploy/teagram/test-teagram-logs.sh`
+covers the restricted log command across a simulated container replacement.
+The host syslog configuration backup is retained at
+`/root/teagram-syslog-before-<7-char-sha>`. To restore the previous host
+setting, install that file as `/etc/conf.d/syslog` with mode 0644 and run
+`rc-service syslog restart`. A code rollback uses the normal `Deploy.` workflow;
+the rollout runner takes and verifies the PostgreSQL dump before replacing a
+container.
 
 Immediately after the `move-stack` action, the live container records the
 tracked selection `docker-compose.yml`, `docker-compose.local-blobs.yml`, and

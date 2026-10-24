@@ -5,36 +5,71 @@ set -euo pipefail
 T=${SSH_ORIGINAL_COMMAND:-}
 case "$T" in
   [0-9][0-9][0-9][0-9]-[0-1][0-9]-[0-3][0-9]T[0-2][0-9]:[0-5][0-9]:[0-5][0-9]Z) ;;
-  *) logger -t teagram-logs "refused: '$T' client=${SSH_CLIENT:-}"; echo "teagram-logs: send one UTC time like 2026-10-17T00:00:00Z" >&2; exit 64 ;;
+  *) logger -t teagram-logs "refused invalid request client=${SSH_CLIENT:-}"; echo "teagram-logs: send one UTC time like 2026-10-17T00:00:00Z" >&2; exit 64 ;;
 esac
+since_epoch=$(date -u -d "$T" +%s 2>/dev/null) || {
+  echo 'teagram-logs: timestamp is not a valid UTC date' >&2
+  exit 64
+}
+current_year=$(date -u +%Y)
+now_epoch=$(date -u +%s)
 logger -t teagram-logs "since=$T client=${SSH_CLIENT:-}"
 
-candidate_ids=$(docker ps -q \
-  --filter label=com.docker.compose.project=teagram \
-  --filter label=com.docker.compose.service=teagramd)
-candidate_count=$(printf '%s\n' "$candidate_ids" | wc -l | tr -d ' ')
-if [ -z "$candidate_ids" ] || [ "$candidate_count" != 1 ]; then
-  echo "teagram-logs: expected one running teagramd service container" >&2
-  exit 1
-fi
+{
+  if [ -f /root/teagramd-legacy-logs.log ]; then
+    cat /root/teagramd-legacy-logs.log
+  fi
+  rotation=99
+  while [ "$rotation" -ge 0 ]; do
+    if [ -f "/var/log/messages.$rotation" ]; then
+      cat "/var/log/messages.$rotation"
+    fi
+    rotation=$((rotation - 1))
+  done
+  if [ -f /var/log/messages ]; then
+    cat /var/log/messages
+  fi
+} | TZ=UTC awk -v since="$since_epoch" -v year="$current_year" -v now="$now_epoch" '
+  BEGIN {
+    split("Jan Feb Mar Apr May Jun Jul Aug Sep Oct Nov Dec", month_names, " ")
+    for (i = 1; i <= 12; i++) month_number[month_names[i]] = i
+  }
+  function timestamp(y, mon, day, clock, fields) {
+    split(clock, fields, ":")
+    return mktime(sprintf("%04d %02d %02d %02d %02d %02d", y, mon, day, fields[1], fields[2], fields[3]))
+  }
+  function keep(epoch, line) {
+    if (epoch >= since && index(line, "login code issued") == 0) print line
+  }
+  function is_teagramd_tag(tag) {
+    sub(/:$/, "", tag)
+    sub(/\[[^]]*\]$/, "", tag)
+    return tag == "teagramd"
+  }
+  {
+    # Legacy json-file logs are snapshotted by the rollout runner with their
+    # Docker RFC3339 timestamps intact.
+    if (substr($0, 5, 1) == "-" && substr($0, 8, 1) == "-" && substr($0, 11, 1) == "T") {
+      date_part = substr($0, 1, 10)
+      clock_part = substr($0, 12, 8)
+      split(date_part, date_fields, "-")
+      epoch = timestamp(date_fields[1], date_fields[2], date_fields[3], clock_part)
+      keep(epoch, $0)
+      next
+    }
 
-config_files=$(docker inspect \
-  --format '{{ index .Config.Labels "com.docker.compose.project.config_files" }}' \
-  "$candidate_ids")
-if [ -z "$config_files" ]; then
-  echo "teagram-logs: running teagramd container has no Compose file selection" >&2
-  exit 1
-fi
-config_files=$(printf '%s' "$config_files" | tr ',' ':')
-
-container_ids=$(COMPOSE_FILE="$config_files" docker compose \
-  --project-directory /opt/teagram \
-  --project-name teagram \
-  ps -q teagramd)
-container_count=$(printf '%s\n' "$container_ids" | wc -l | tr -d ' ')
-if [ -z "$container_ids" ] || [ "$container_count" != 1 ]; then
-  echo "teagram-logs: expected one teagramd container from the live Compose project" >&2
-  exit 1
-fi
-
-docker logs --since "$T" "$container_ids" 2>&1 | tail -n 5000
+    # BusyBox syslog writes RFC3164 timestamps without a year. The host is UTC;
+    # retained files can cross New Year, so treat timestamps far in the future
+    # as belonging to the previous year.
+    if (!($1 in month_number) || $2 !~ /^[0-9]+$/ || $3 !~ /^[0-9][0-9]:[0-9][0-9]:[0-9][0-9]$/) next
+    # BusyBox writes its RFC3164 prefix (timestamp, host, facility) before the
+    # Docker message. RFC5424 APP-NAME is field 9 in that message.
+    tag_found = is_teagramd_tag($5) || is_teagramd_tag($6)
+    if ($6 == "1" && substr($7, 5, 1) == "-" && substr($7, 8, 1) == "-" &&
+        substr($7, 11, 1) == "T" && $9 == "teagramd") tag_found = 1
+    if (!tag_found) next
+    epoch = timestamp(year, month_number[$1], $2, $3)
+    if (epoch > now + 86400) epoch = timestamp(year - 1, month_number[$1], $2, $3)
+    keep(epoch, $0)
+  }
+' | tail -n 5000

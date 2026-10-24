@@ -334,6 +334,9 @@ if [ "${1:-}" = inspect ]; then
   if [ "${1:-}" = --format ]; then
     template=${2:-}
     case "$template" in
+      '{{.HostConfig.LogConfig.Type}}')
+        if [ "${MOCK_SCENARIO:-}" = pre-rollout-log-persisted ]; then printf 'json-file\n'; else printf 'syslog\n'; fi
+        ;;
       '{{.State.Status}}|{{.State.ExitCode}}')
         if [ "$subject" = "$MOCK_MIGRATE_ID" ]; then printf 'exited|0\n'
         elif [ "$subject" = "$MOCK_TARGET_ID" ] && [ "${MOCK_SCENARIO:-}" = runtime-target-exited ]; then printf 'exited|1\n'
@@ -641,7 +644,11 @@ fi
         cp -- "$MOCK_STATE/base-compose.json" "$MOCK_STATE/started-compose-$MOCK_ROLLBACK_ID.json" 2>/dev/null || true
       else
         printf '%s\n' target > "$MOCK_STATE/phase"
-        printf '%s\n' "$MOCK_REPLACEMENT_ID" > "$MOCK_STATE/teagramd"
+        if [ "${MOCK_SCENARIO:-}" = target-container-unavailable ]; then
+          : > "$MOCK_STATE/teagramd"
+        else
+          printf '%s\n' "$MOCK_REPLACEMENT_ID" > "$MOCK_STATE/teagramd"
+        fi
         cp -- "$MOCK_STATE/target-compose.json" "$MOCK_STATE/started-compose-$MOCK_REPLACEMENT_ID.json"
       fi
       exit 0
@@ -688,6 +695,15 @@ if [ "${1:-}" = rm ] && [ "${2:-}" = -f ]; then
   exit 0
 fi
 if [ "${1:-}" = logs ]; then
+  if [[ " $* " == *' --timestamps '* ]]; then
+    printf '2026-10-23T21:40:00.123456789Z pre-rollout-line\n'
+    if [ "${MOCK_SCENARIO:-}" = pre-rollout-log-persisted ]; then
+      printf '2026-10-23T21:40:01.123456789Z level=INFO msg="login code issued" phone=fixture code=secret-fixture-code\n'
+      printf '2026-10-23T21:40:02.123456789Z pre-rollout-stderr-line\n' >&2
+      printf '2026-10-23T21:40:03.123456789Z level=INFO msg="login code issued" phone=fixture code=stderr-secret-fixture-code\n' >&2
+    fi
+    exit 0
+  fi
   if [ "${MOCK_SCENARIO:-success}" = readiness-timeout ] && [ "$(cat "$MOCK_STATE/phase")" = target ]; then exit 0; fi
   if [ "${MOCK_SCENARIO:-success}" = logs-failed ] && [ "$(cat "$MOCK_STATE/phase")" = target ]; then
     printf 'fixture log read failed\n' >&2
@@ -1311,7 +1327,7 @@ run_fixture() {
     ambient_revision=(TEAGRAMD_SOURCE_REVISION=ambient-revision-must-not-win)
   fi
   runner="$runtime_dir/rollout-runner.sh"
-  case "$scenario" in old-target-image|target-local-598-rollback|target-local-df9-rollback|target-local-welcome-channel-addition-rollback|config-drift|target-local-carry-forward-public-listener-wide-host|target-local-carry-forward-public-listener-other-port|public-websocket-enabled|readiness-timeout|logs-failed|runtime-target-exited|target-local-carry-forward-image-reuse-stale-build|target-local-carry-forward-image-reuse-stop-timeout-mismatch|schema-post-failed-69|schema-post-missing-69) require_marker=1 ;; esac
+  case "$scenario" in old-target-image|target-local-598-rollback|target-local-df9-rollback|target-local-welcome-channel-addition-rollback|config-drift|target-local-carry-forward-public-listener-wide-host|target-local-carry-forward-public-listener-other-port|public-websocket-enabled|readiness-timeout|logs-failed|runtime-target-exited|target-container-unavailable|target-local-carry-forward-image-reuse-stale-build|target-local-carry-forward-image-reuse-stop-timeout-mismatch|schema-post-failed-69|schema-post-missing-69) require_marker=1 ;; esac
   [ "$name" = marker-write-failed ] && require_marker=0
   [ -n "$chmod_match" ] && require_marker=1
   if [ "$action" = reconcile ]; then
@@ -1337,6 +1353,7 @@ run_fixture() {
     MOCK_REQUIRE_FAILURE_MARKER="$require_marker" MOCK_EVIDENCE_ROOT="$root" MOCK_BASE_ENV_EXTRA="$baseline_env_extra" MOCK_TARGET_ENV_EXTRA="$target_env_extra" MOCK_ROLLBACK_ENV_EXTRA="$rollback_env_extra" \
     MOCK_REAL_PYTHON3="$(command -v python3)" MOCK_REAL_CHMOD="$(command -v chmod)" MOCK_REAL_LN="$(command -v ln)" MOCK_REAL_DATE="$(command -v date)" MOCK_STAMP="$stamp" \
     ROLLOUT_RUNNER_TEST_MODE=1 ROLLOUT_RUNNER_CHECKOUT="$checkout" ROLLOUT_RUNNER_EVIDENCE_ROOT=/root \
+    ROLLOUT_RUNNER_TEST_LOG_ARCHIVE="$TMP/$name-legacy.log" \
     ROLLOUT_RUNNER_TEST_CHECKOUT="$checkout" \
     ROLLOUT_RUNNER_LOCK_PATH="$TMP/$name.lock" ROLLOUT_RUNNER_ENV_FILE="$checkout/.env" \
     ROLLOUT_RUNNER_ADDED_ENV="$added_env" ROLLOUT_RUNNER_CHANGED_ENV="$changed_env" \
@@ -2016,6 +2033,39 @@ if [ "$status" = 0 ] && grep -q 'rollout=verified' "$TMP/success.stdout" && grep
   pass 'built image captured after build, bound to target SHA, and compared before acceptance'
 else
   fail 'built image capture, provenance binding, and target acceptance'
+fi
+
+make_fixture pre-rollout-log-persisted pre-rollout-log-persisted
+printf '# teagramd-container-id=previous-container\n2026-10-16T21:40:00Z msg="login code issued" code=old-secret-fixture\n' \
+  > "$TMP/pre-rollout-log-persisted-legacy.log"
+status=$(run_fixture pre-rollout-log-persisted)
+legacy_archive="$TMP/pre-rollout-log-persisted-legacy.log"
+reader_bin="$TMP/pre-rollout-log-reader-bin"
+mkdir -m 700 "$reader_bin"
+cat > "$reader_bin/logger" <<'SH'
+#!/usr/bin/env sh
+exit 0
+SH
+chmod 700 "$reader_bin/logger"
+reader_script="$TMP/pre-rollout-log-reader.sh"
+sed \
+  -e "s|/root/teagramd-legacy-logs.log|$legacy_archive|g" \
+  -e "s|/var/log/messages|$TMP/pre-rollout-log-messages|g" \
+  "$SCRIPT_DIR/../../teagram/teagram-logs.sh" > "$reader_script"
+chmod 700 "$reader_script"
+retrieved=$(PATH="$reader_bin:$PATH" SSH_ORIGINAL_COMMAND='2000-01-01T00:00:00Z' "$reader_script")
+if [ "$status" = 0 ] && grep -Fq 'pre-rollout-line' <<< "$retrieved" && \
+   grep -Fq 'pre-rollout-stderr-line' <<< "$retrieved" && \
+   ! grep -Fq 'stderr-secret-fixture-code' <<< "$retrieved" && \
+   ! grep -Fq 'stderr-secret-fixture-code' "$legacy_archive" && \
+   ! grep -Fq 'secret-fixture-code' "$legacy_archive" && \
+   ! grep -Fq 'old-secret-fixture' "$legacy_archive" && \
+   awk '/docker logs --since .*--timestamps --tail 5000/ {snapshot=NR} $0=="docker compose up -d" {up=NR} END{exit !(snapshot>0 && snapshot<up)}' \
+     "$TMP/pre-rollout-log-persisted-events"; then
+  pass 'pre-rollout logs are archived before the container is replaced'
+else
+  show_fixture_failure pre-rollout-log-persisted "$status"
+  fail 'pre-rollout log persistence before container replacement'
 fi
 
 for restore_failure in restore-psql-failure restore-role-create-failure restore-rm-failure restore-remains-after-rm; do
@@ -3979,6 +4029,20 @@ if [ "$status" != 0 ] && jq -e '.state == "exited"' "$root.target/target.snapsho
   pass 'exited target with empty serving inventory validates authority and restores the inspected baseline'
 else
   fail 'exited target rollback with empty serving inventory'
+fi
+
+make_fixture target-container-unavailable target-container-unavailable
+status=$(run_fixture target-container-unavailable)
+root=$(cat "$TMP/target-container-unavailable-root-path")
+state=$(cat "$TMP/target-container-unavailable-state-path")
+if [ "$status" != 0 ] && grep -q 'rollback=verified' "$TMP/target-container-unavailable.stdout" && \
+   grep -q '^docker compose up -d --no-build --no-deps teagramd$' "$TMP/target-container-unavailable-events" && \
+   [ "$(cat "$state/head")" = "$BASELINE_SHA" ] && \
+   [ "$(cat "$state/teagramd")" = "$ROLLBACK_ID" ] && \
+   grep -q 'reason=target_container_id_unavailable' "$root.target/target-failure.txt"; then
+  pass 'target with no running container restores the baseline and verifies rollback'
+else
+  fail 'target container unavailable rollback must restore the baseline'
 fi
 
 for runtime_mismatch in runtime-volume-mismatch runtime-backend-mismatch; do

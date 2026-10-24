@@ -401,8 +401,8 @@ func (h *handlers) sendCodeIPRetry() time.Duration {
 	return max(shortest, time.Second)
 }
 
-// logIssuedCode writes the code to the log only when the operator opted in
-// via TG_LOG_LOGIN_CODES; the log is the only delivery channel this server has.
+// logIssuedCode writes a legacy diagnostic only when the operator opts in via
+// TG_LOG_LOGIN_CODES. Current username/password sign-in does not use phone codes.
 func (h *handlers) logIssuedCode(phone, code string) {
 	if !h.logLoginCodes {
 		return

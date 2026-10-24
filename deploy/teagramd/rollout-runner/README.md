@@ -681,9 +681,9 @@ Assets and threats:
   open, the first successful signup can win that election. Verify that the
   intended administrator is already elected and the election is closed before
   allowing open registration.
-- If `TG_LOG_LOGIN_CODES` is enabled, login codes are written to logs in
-  cleartext. Restrict access to those logs and do not treat them as ordinary
-  application output.
+- `TG_LOG_LOGIN_CODES` is a legacy diagnostic, not part of username/password
+  sign-in. When enabled, it writes phone numbers and codes in cleartext. Keep it
+  false for any deployment with retained or shared logs.
 
 Operator controls and limits:
 
