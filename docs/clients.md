@@ -352,7 +352,9 @@ The default Compose service mounts that directory read-only and selects version
 cutover authority keeps serving those existing objects in plaintext mode until
 the separately reviewed migration stage. RustFS and its console have no
 published ports. The internal S3 URL is plaintext on the private Compose
-network; the explicit HTTP setting is logged at startup.
+network; the explicit HTTP setting is logged at startup. See the
+[S3 media threat model](media-storage-threat-model.md) for the key-custody,
+object-tampering, and accepted-plaintext boundaries.
 
 For local development, copy `.env.example` to `.env`, generate credentials,
 then run:
