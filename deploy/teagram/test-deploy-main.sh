@@ -90,6 +90,7 @@ cat > "$tmp/work/deploy/link-edge/deploy-main.sh" <<'EDGE'
 set -euo pipefail
 [[ $# == 1 ]]
 printf '%s\n' "$1" >> "${LINK_EDGE_DEPLOY_LOG:?}"
+printf 'link-edge\n' >> "${DEPLOY_ACTION_LOG:?}"
 EDGE
 for file in rollout-verifier.sh schema-result-gate.sh schema-result-gate.py blob-mode-state.py qualify-rustfs-transition.py stack-move-runner.py; do
   printf 'fixture\n' > "$tmp/work/deploy/teagramd/rollout-runner/$file"
@@ -164,6 +165,18 @@ if [[ "${FIXTURE_EXPECT_S3_ENV:-0}" == 1 && "$1" == compose ]]; then
   esac
 fi
 case "$*" in
+  *'--entrypoint /usr/local/bin/mtproto-smoke'*)
+    case "$*" in
+      *'--network host'*'--read-only'*'--cap-drop ALL'*'--security-opt no-new-privileges'*'--user 65532:65532'*'sha256:fixture'*) ;;
+      *) echo "MTProto smoke must use the deployed image with host networking and non-root restrictions: $*" >&2; exit 98 ;;
+    esac
+    printf 'mtproto-smoke\n' >> "${DEPLOY_ACTION_LOG:?}"
+    if [[ "${FIXTURE_SMOKE_SUCCESS:-1}" != 1 ]]; then
+      echo 'fixture MTProto smoke failure' >&2
+      exit 91
+    fi
+    printf 'MTProto auth-key exchange passed on 100.124.236.66:2443\n'
+    ;;
   *config_files*teagram-teagramd-1*) echo "${FIXTURE_COMPOSE_FILES:-$DEPLOY_DIR/.rollout-compose.local-abc.yml,$DEPLOY_DIR/docker-compose.override.yml}" ;;
   *config_files*) echo "unexpected live container name: $*" >&2; exit 98 ;;
   *'{{.Image}}'*) echo "sha256:fixture" ;;
@@ -174,7 +187,10 @@ case "$*" in
   *org.opencontainers.image.revision*) echo "$DEPLOY_SHA" ;;
   *'{{range .Config.Env}}'*) echo 'TG_RSA_KEY_FINGERPRINT=12345' ;;
   *'ps -a'*) ;;
-  *'logs --since 3m teagramd'*) echo 'advertise=teagram.tailaa4918.ts.net:2443' ;;
+  *'logs --since 3m teagramd'*)
+    printf 'readiness\n' >> "${DEPLOY_ACTION_LOG:?}"
+    echo 'advertise=teagram.tailaa4918.ts.net:2443'
+    ;;
   *) echo "unexpected docker call: $*" >&2; exit 99 ;;
 esac
 DOCKER
@@ -189,7 +205,9 @@ chmod 755 "$tmp/bin/flock"
 
 failures=0
 export LINK_EDGE_DEPLOY_LOG="$tmp/link-edge-deploys"
+export DEPLOY_ACTION_LOG="$tmp/deploy-actions"
 : > "$LINK_EDGE_DEPLOY_LOG"
+: > "$DEPLOY_ACTION_LOG"
 # expect <exit code> <last line> [VAR=value...]
 expect() {
   local want_rc="$1" want_last="$2" want_contains='' out rc=0
@@ -231,7 +249,12 @@ if [[ "$local_files_after" != "$local_files_before" ]]; then
 fi
 
 echo "source_sha=$second image_id=sha256:fixture built_at=fixture" > "$tmp/root/main1238-fixture.build/built-image.identity"
+: > "$DEPLOY_ACTION_LOG"
 expect 0 "already at $second with runner provenance" DEPLOY_SHA="$second"
+if [[ "$(cat "$DEPLOY_ACTION_LOG")" != $'link-edge\nmtproto-smoke' ]]; then
+  echo 'FAIL an already deployed server SHA did not run the host-side smoke after the link edge' >&2
+  failures=$((failures + 1))
+fi
 if ! cmp -s "$tmp/root/usr/local/sbin/teagram-logs" "$tmp/work/deploy/teagram/teagram-logs.sh"; then
   echo 'FAIL deploy did not install the commit-tracked teagram-logs command' >&2
   failures=$((failures + 1))
@@ -255,6 +278,12 @@ if [[ "$(tail -n 1 "$LINK_EDGE_DEPLOY_LOG")" != "$second" ]]; then
   echo 'FAIL an already deployed server SHA did not refresh the link edge' >&2
   failures=$((failures + 1))
 fi
+: > "$DEPLOY_ACTION_LOG"
+expect 91 'fixture MTProto smoke failure' FIXTURE_SMOKE_SUCCESS=0 DEPLOY_SHA="$second"
+if [[ "$(cat "$DEPLOY_ACTION_LOG")" != $'link-edge\nmtproto-smoke' ]]; then
+  echo 'FAIL a failed host-side smoke did not follow the link-edge update' >&2
+  failures=$((failures + 1))
+fi
 
 # Without a provenance record, an equal SHA must reach the deploy path
 # (the fake docker refuses the pg_dump call).
@@ -264,8 +293,13 @@ expect 99 "unexpected docker call: compose exec -T postgres pg_dump -U postgres 
 expect 99 "unexpected docker call: compose exec -T postgres pg_dump -U postgres teagram" DEPLOY_SHA="$third"
 mkdir -p "$tmp/root/teagramd-rollout-runner"
 printf 'stale qualifier fixture\n' > "$tmp/root/teagramd-rollout-runner/qualify-rustfs-transition.py"
+: > "$DEPLOY_ACTION_LOG"
 expect 0 "deployed $third" --contains \
   'tracked file modes: normalized=1 mismatches=0' FIXTURE_DEPLOY_SUCCESS=1 DEPLOY_SHA="$third"
+if [[ "$(cat "$DEPLOY_ACTION_LOG")" != $'readiness\nlink-edge\nmtproto-smoke' ]]; then
+  echo 'FAIL a new server rollout did not run the host-side smoke after readiness and link-edge update' >&2
+  failures=$((failures + 1))
+fi
 if [[ "$(tail -n 1 "$LINK_EDGE_DEPLOY_LOG")" != "$third" ]]; then
   echo 'FAIL a successful server rollout did not refresh the link edge at the same SHA' >&2
   failures=$((failures + 1))
