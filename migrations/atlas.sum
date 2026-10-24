@@ -1,4 +1,4 @@
-h1:um8JGSf9e/F/v8maLm/IgQO1tDt+U8JX4qbgghYCMV0=
+h1:Y48XltZtmF6Tg0XOAynaeNVNzZx69EJFw6nbtP4VYCU=
 20260721000001_baseline.sql h1:cnO6K1z0Uv3goEvecgJixKSio6ziaB1rF7cQLoCWOxs=
 20260721000002_auth_keys.sql h1:+vNabm6vdEAgu3H5ZGw2Wr8D/Y6i4ikAAUO3JbfZQeE=
 20260721000003_code_hardening.sql h1:8pbAqUpqcwOONUfac+qC51QjfC1JnObNCcXa1HC/dr0=
@@ -123,5 +123,5 @@ h1:um8JGSf9e/F/v8maLm/IgQO1tDt+U8JX4qbgghYCMV0=
 20261023000001_user_sticker_sets.sql h1:bGDxMfEc6FdC4HYDujM/oz372TCdhMTVRJepj20UIds=
 20261023000002_channel_reaction_dates.sql h1:ZXd3J28uVQa6HC8a1O46NvBxhmu26boAbqL/6BVBndA=
 20261023000003_catalogue_sticker_messages.sql h1:xBu5GPtno0FBd8Wck/9iM120JAMuvFs6QHxy6llClUg=
-20261024000001_auth_keys_ever_bound.sql h1:m+zjAYBD6LDfIpLImdTd2SW2zpDAheLvPoU69znjQGc=
-20261024000002_auth_keys_ever_bound_backfill.sql h1:KnQRIFBwOlSU/V8hpAJbQOsFAABmY8bkJrW31LTDO7Q=
+20261024000001_auth_keys_ever_bound.sql h1:iD+VafSMN7lmnQvKFXyb5UJdpNIpRHR/9+KeMCfL3z4=
+20261024000002_auth_keys_ever_bound_backfill.sql h1:nRyDGMNpan06rAz/MeYpdGyrcnXeVaXxNf0+DxbEZtI=

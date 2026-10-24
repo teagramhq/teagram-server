@@ -205,21 +205,19 @@ func TestAuthKeysEverBoundMigrationBackfillsExistingRows(t *testing.T) {
 	}
 	defer func() { _ = conn.Close(ctx) }() //nolint:errcheck // best-effort close
 
-	if _, err := conn.Exec(ctx, "ALTER TABLE auth_keys DROP COLUMN ever_bound_at"); err != nil {
+	if _, err := conn.Exec(ctx, `
+		ALTER TABLE auth_keys DROP CONSTRAINT IF EXISTS auth_keys_user_requires_ever_bound;
+		DROP TRIGGER IF EXISTS auth_keys_mark_ever_bound ON auth_keys;
+		DROP FUNCTION IF EXISTS public.auth_keys_mark_ever_bound();
+		DROP TABLE IF EXISTS public.auth_keys_ever_bound_backfill_snapshot;
+		ALTER TABLE auth_keys DROP COLUMN ever_bound_at;
+	`); err != nil {
 		t.Fatalf("restore pre-marker schema: %v", err)
 	}
 	createdAt := time.Date(2020, 1, 2, 3, 4, 5, 0, time.UTC)
 	if _, err := conn.Exec(ctx, "INSERT INTO auth_keys (id, key_value, user_id, created_at) VALUES (910000000000000001, decode('00', 'hex'), NULL, $1), (910000000000000002, decode('00', 'hex'), $2, $1)", createdAt, owner.ID); err != nil {
 		t.Fatalf("seed legacy auth keys: %v", err)
 	}
-	if _, err := conn.Exec(ctx, "CREATE TABLE public.auth_keys_ever_bound_backfill_snapshot AS SELECT id FROM auth_keys; ALTER TABLE public.auth_keys_ever_bound_backfill_snapshot ADD PRIMARY KEY (id)"); err != nil {
-		t.Fatalf("snapshot legacy auth keys: %v", err)
-	}
-	const freshID = int64(910000000000000003)
-	if _, err := conn.Exec(ctx, "INSERT INTO auth_keys (id, key_value) VALUES ($1, decode('00', 'hex'))", freshID); err != nil {
-		t.Fatalf("insert fresh auth key after snapshot: %v", err)
-	}
-
 	schemaMigration, err := os.ReadFile(filepath.Join("..", "..", "migrations", "20261024000001_auth_keys_ever_bound.sql"))
 	if err != nil {
 		t.Fatalf("read ever-bound schema migration: %v", err)
@@ -227,6 +225,32 @@ func TestAuthKeysEverBoundMigrationBackfillsExistingRows(t *testing.T) {
 	if _, err := conn.Exec(ctx, string(schemaMigration)); err != nil {
 		t.Fatalf("apply ever-bound schema migration: %v", err)
 	}
+	if _, err := conn.Exec(ctx, `
+		CREATE TABLE public.auth_keys_ever_bound_backfill_snapshot AS
+		SELECT id FROM public.auth_keys;
+		ALTER TABLE public.auth_keys_ever_bound_backfill_snapshot ADD PRIMARY KEY (id);
+	`); err != nil {
+		t.Fatalf("snapshot auth keys for backfill: %v", err)
+	}
+	const (
+		freshID         = int64(910000000000000003)
+		freshUnboundID  = int64(910000000000000004)
+		postMigrationID = int64(910000000000000005)
+	)
+	if _, err := conn.Exec(ctx, "INSERT INTO auth_keys (id, key_value) VALUES ($1, decode('00', 'hex')), ($2, decode('00', 'hex'))", freshID, freshUnboundID); err != nil {
+		t.Fatalf("insert fresh auth keys after snapshot: %v", err)
+	}
+	if _, err := conn.Exec(ctx, "UPDATE auth_keys SET user_id = $1 WHERE id = $2", owner.ID, freshID); err != nil {
+		t.Fatalf("bind a key through the old server between migrations: %v", err)
+	}
+	var everBoundAt time.Time
+	if err := conn.QueryRow(ctx, "SELECT ever_bound_at FROM auth_keys WHERE id = $1", freshID).Scan(&everBoundAt); err != nil {
+		t.Fatalf("read old-server bind marker before backfill: %v", err)
+	}
+	if everBoundAt.IsZero() {
+		t.Fatal("database did not mark an old-server bind between migrations")
+	}
+
 	partialMarker := createdAt.Add(time.Hour)
 	if _, err := conn.Exec(ctx, "UPDATE auth_keys SET ever_bound_at = $1 WHERE id = 910000000000000001", partialMarker); err != nil {
 		t.Fatalf("simulate a committed backfill batch: %v", err)
@@ -257,16 +281,34 @@ func TestAuthKeysEverBoundMigrationBackfillsExistingRows(t *testing.T) {
 	}
 
 	var marked bool
-	if err := conn.QueryRow(ctx, "SELECT ever_bound_at IS NOT NULL FROM auth_keys WHERE id = $1", freshID).Scan(&marked); err != nil {
-		t.Fatalf("read fresh key marker: %v", err)
+	if err := conn.QueryRow(ctx, "SELECT ever_bound_at IS NOT NULL FROM auth_keys WHERE id = $1", freshUnboundID).Scan(&marked); err != nil {
+		t.Fatalf("read fresh unbound key marker: %v", err)
 	}
 	if marked {
-		t.Fatal("freshly inserted key has an ever-bound marker")
+		t.Fatal("freshly inserted unbound key has an ever-bound marker")
 	}
-	_, err = conn.Exec(ctx, "UPDATE auth_keys SET user_id = $1 WHERE id = $2", owner.ID, freshID)
+	if _, err := conn.Exec(ctx, "ALTER TABLE auth_keys DISABLE TRIGGER auth_keys_mark_ever_bound"); err != nil {
+		t.Fatalf("disable compatibility trigger for constraint check: %v", err)
+	}
+	_, err = conn.Exec(ctx, "UPDATE auth_keys SET user_id = $1 WHERE id = $2", owner.ID, freshUnboundID)
 	var constraintErr *pgconn.PgError
 	if !errors.As(err, &constraintErr) || constraintErr.Code != "23514" || constraintErr.ConstraintName != "auth_keys_user_requires_ever_bound" {
-		t.Fatalf("bind without marker error = %v, want auth_keys_user_requires_ever_bound check violation", err)
+		t.Fatalf("bind with the marker trigger disabled error = %v, want auth_keys_user_requires_ever_bound check violation", err)
+	}
+	if _, err := conn.Exec(ctx, "ALTER TABLE auth_keys ENABLE TRIGGER auth_keys_mark_ever_bound"); err != nil {
+		t.Fatalf("reenable compatibility trigger: %v", err)
+	}
+	if _, err := conn.Exec(ctx, "INSERT INTO auth_keys (id, key_value) VALUES ($1, decode('00', 'hex'))", postMigrationID); err != nil {
+		t.Fatalf("insert a fresh key after migration: %v", err)
+	}
+	if _, err := conn.Exec(ctx, "UPDATE auth_keys SET user_id = $1 WHERE id = $2", owner.ID, postMigrationID); err != nil {
+		t.Fatalf("bind a key through the old server after migration: %v", err)
+	}
+	if err := conn.QueryRow(ctx, "SELECT ever_bound_at IS NOT NULL FROM auth_keys WHERE id = $1", postMigrationID).Scan(&marked); err != nil {
+		t.Fatalf("read post-migration old-server bind marker: %v", err)
+	}
+	if !marked {
+		t.Fatal("database did not mark an old-server bind after migration")
 	}
 }
 

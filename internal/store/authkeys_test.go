@@ -8,7 +8,6 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/teagramhq/teagram-server/internal/pgtest"
 	"github.com/teagramhq/teagram-server/internal/store"
@@ -409,10 +408,15 @@ func TestAuthKeyEverBoundMarker(t *testing.T) {
 		t.Fatalf("connect for constraint check: %v", err)
 	}
 	defer func() { _ = conn.Close(ctx) }() //nolint:errcheck // best-effort close
-	_, err = conn.Exec(ctx, `UPDATE auth_keys SET user_id = $1 WHERE id = $2`, owner.ID, freshID)
-	var constraintErr *pgconn.PgError
-	if !errors.As(err, &constraintErr) || constraintErr.Code != "23514" || constraintErr.ConstraintName != "auth_keys_user_requires_ever_bound" {
-		t.Fatalf("bind without marker error = %v, want auth_keys_user_requires_ever_bound check violation", err)
+	if _, err := conn.Exec(ctx, `UPDATE auth_keys SET user_id = $1 WHERE id = $2`, owner.ID, freshID); err != nil {
+		t.Fatalf("bind fresh key through the old server: %v", err)
+	}
+	fresh, ok, err = s.AuthKeyByID(ctx, freshID)
+	if err != nil || !ok {
+		t.Fatalf("read old-server bound key: ok=%v err=%v", ok, err)
+	}
+	if fresh.EverBoundAt.IsZero() {
+		t.Fatal("database did not mark a key bound through the old server")
 	}
 
 	const boundID = int64(0x4011)
@@ -434,8 +438,18 @@ func TestAuthKeyEverBoundMarker(t *testing.T) {
 	if err != nil {
 		t.Fatalf("list bound keys: %v", err)
 	}
-	if len(boundKeys) != 1 || !boundKeys[0].EverBoundAt.Equal(marker) {
-		t.Fatalf("listed key marker = %+v, want %s", boundKeys, marker)
+	if len(boundKeys) != 2 {
+		t.Fatalf("listed %d keys after old-server and current-server binds, want 2", len(boundKeys))
+	}
+	markersByID := make(map[int64]time.Time, len(boundKeys))
+	for _, key := range boundKeys {
+		markersByID[key.ID] = key.EverBoundAt
+	}
+	if listedMarker := markersByID[freshID]; !listedMarker.Equal(fresh.EverBoundAt) {
+		t.Fatalf("listed old-server key marker = %s, want %s", listedMarker, fresh.EverBoundAt)
+	}
+	if listedMarker := markersByID[boundID]; !listedMarker.Equal(marker) {
+		t.Fatalf("listed current-server key marker = %s, want %s", listedMarker, marker)
 	}
 	if _, found, err := s.LogOutAuthKey(ctx, boundID); err != nil || !found {
 		t.Fatalf("log out key: found=%v err=%v", found, err)

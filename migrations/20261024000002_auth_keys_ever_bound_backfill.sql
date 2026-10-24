@@ -22,6 +22,14 @@ BEGIN
         RETURN;
     END IF;
 
+    -- The marker trigger is already live, so this online snapshot can race
+    -- safely with old-server binds without holding a table lock.
+    IF pg_catalog.to_regclass('public.auth_keys_ever_bound_backfill_snapshot') IS NULL THEN
+        CREATE TABLE public.auth_keys_ever_bound_backfill_snapshot (id BIGINT PRIMARY KEY);
+        INSERT INTO public.auth_keys_ever_bound_backfill_snapshot (id)
+        SELECT id FROM public.auth_keys;
+    END IF;
+
     COMMIT;
 
     LOOP
