@@ -42,6 +42,15 @@ match the Compose mapping. A wildcard host IP, another host or container port,
 or any other port change remains a configuration drift and rejects before
 replacement.
 
+The approved persistent-log migration changes `teagramd` from Docker's
+`json-file` driver to the exact `syslog` profile using
+`unixgram:///dev/log`, facility `daemon`, RFC5424, and tag `teagramd`; it sets
+`TG_LOG_LOGIN_CODES` to `false`. Preflight records both the rendered and
+inspected logging profiles and permits only that forward transition. The
+replacement container must match the rendered profile, and the runner archives
+filtered legacy logs before replacement. A rollback restores the baseline
+Compose render and logging profile.
+
 For every local-backed rollout, read the running `teagramd` container's
 `com.docker.compose.project.config_files` label and carry that Compose selection
 forward unchanged. With ordinary local authority, it must start with a

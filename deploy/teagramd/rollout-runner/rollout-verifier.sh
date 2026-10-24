@@ -384,6 +384,55 @@ canonical_blob_mode_source() {
   fi
 }
 
+compose_logging_profile() {
+  printf '%s\n' "$1" | jq -er '
+    .services.teagramd as $service
+    | ($service.environment // null) as $environment
+    | if ($environment | type) != "object" then error("teagramd environment is missing") else
+        ($environment.TG_LOG_LOGIN_CODES) as $login_codes
+        | if ($login_codes | type) != "string" or ($login_codes | IN("true", "false") | not) then
+            error("TG_LOG_LOGIN_CODES is not an explicit boolean")
+          elif ($service.logging // null) == null then
+            "default:" + $login_codes
+          elif $service.logging == {
+              driver:"syslog",
+              options:{"syslog-address":"unixgram:///dev/log", "syslog-facility":"daemon", "syslog-format":"rfc5424", tag:"teagramd"}
+            } and $login_codes == "false" then
+            "syslog:false"
+          else error("unsupported teagramd logging profile") end
+      end
+  '
+}
+
+container_logging_profile() {
+  printf '%s\n' "$1" | jq -er '
+    def item: if type == "array" then .[0] else . end;
+    (item) as $container
+    | ($container.Config.Env // []) as $environment
+    | [$environment[] | select(type == "string" and startswith("TG_LOG_LOGIN_CODES="))
+       | .[("TG_LOG_LOGIN_CODES=" | length):]] as $login_codes
+    | ($container.HostConfig.LogConfig.Type // "json-file") as $driver
+    | ($container.HostConfig.LogConfig.Config // {}) as $options
+    | if ($login_codes | length) != 1 or ($login_codes[0] | IN("true", "false") | not) then
+        error("container TG_LOG_LOGIN_CODES is missing or invalid")
+      elif $driver == "json-file" and $options == {} then
+        "default:" + $login_codes[0]
+      elif $driver == "syslog" and $options == {
+          "syslog-address":"unixgram:///dev/log", "syslog-facility":"daemon", "syslog-format":"rfc5424", tag:"teagramd"
+        } and $login_codes[0] == "false" then
+        "syslog:false"
+      else error("unsupported container logging profile") end
+  '
+}
+
+logging_profile_transition_allowed() {
+  local before=$1 after=$2
+  [ "$before" = "$after" ] || {
+    { [ "$before" = default:true ] || [ "$before" = default:false ]; } &&
+      [ "$after" = syslog:false ]
+  }
+}
+
 snapshot_from_json() {
   local inspect_json=$1
   local compose_json=$2
@@ -395,6 +444,7 @@ snapshot_from_json() {
   local mounts_sha exposure_sha config_sha env_sha override_sha container_env_sha mount_count
   local compose_replica_count compose_client_addr_trust container_replica_count container_client_addr_trust
   local compose_public_ws_2446 exposure_public_ws_2446
+  local compose_logging_profile_value container_logging_profile_value
   local added_env_names changed_env_names container_env_added container_env_changed retained_added_env_names
 
   if [ ! -f "$env_file" ] || [ "$(stat -c %a "$env_file")" != 600 ]; then
@@ -539,6 +589,7 @@ snapshot_from_json() {
     | if type != "array" then error("container environment must be an array") else
         map(select(type != "string" or (startswith("TG_REPLICA_COUNT=") | not)))
         | map(select(type != "string" or (startswith("TG_CLIENT_ADDR_TRUST=") | not)))
+        | map(select(type != "string" or (startswith("TG_LOG_LOGIN_CODES=") | not)))
         | map(select(type != "string" or ((split("=")[0]) as $key | (["TG_PUBLIC_WEBSOCKET_LISTEN_ADDR", "TG_PUBLIC_WEBSOCKET_ADVERTISE_ADDR", "TG_PUBLIC_REGISTRATION", "TG_PUBLIC_WEBSOCKET_ALLOWED_ORIGINS", "TG_WELCOME_CHANNEL"] | index($key) == null))))
         | map(select(type != "string" or ((split("=")[0]) as $key | any($added[]; runtime_name(.) == $key) | not)))
         | map(select(type != "string" or ((split("=")[0]) as $key | any($changed[]; . == $key) | not)))
@@ -598,11 +649,26 @@ snapshot_from_json() {
     config_sha=not-captured
     env_sha=not-captured
     override_sha=not-captured
+    compose_logging_profile_value=not-captured
+    container_logging_profile_value=not-captured
   else
     [ "$compose_source" = selected-compose-render ] || {
       printf '%s\n' 'invalid Compose provenance for snapshot' >&2
       return 1
     }
+    compose_logging_profile_value=$(compose_logging_profile "$compose_json") || {
+      printf '%s\n' 'resolved Compose has an unsupported teagramd logging profile' >&2
+      return 1
+    }
+    container_logging_profile_value=$(container_logging_profile "$inspect_json") || {
+      printf '%s\n' 'inspected teagramd container has an unsupported logging profile' >&2
+      return 1
+    }
+    if { [ "$snapshot_name" = baseline ] || [ "$snapshot_name" = target ] || [ "$snapshot_name" = rollback ]; } && \
+       [ "$compose_logging_profile_value" != "$container_logging_profile_value" ]; then
+      printf '%s\n' 'resolved Compose logging profile does not match the inspected container' >&2
+      return 1
+    fi
     resolved_config=$(printf '%s' "$compose_json" | jq -ce --arg mode_source "$mode_source" '
       .services.teagramd as $s
       | {
@@ -635,6 +701,7 @@ snapshot_from_json() {
       if (.services.teagramd.environment | type) != "object" then error("teagramd environment must be an object") else
         .services.teagramd.environment |= del(
           .TG_REPLICA_COUNT, .TG_CLIENT_ADDR_TRUST,
+          .TG_LOG_LOGIN_CODES,
           .TG_WEBSOCKET_ALLOWED_ORIGINS,
           .TG_PUBLIC_WEBSOCKET_LISTEN_ADDR, .TG_PUBLIC_REGISTRATION,
           .TG_PUBLIC_WEBSOCKET_ADVERTISE_ADDR,
@@ -642,6 +709,7 @@ snapshot_from_json() {
           .TG_TURNSTILE_SITE_KEY, .TG_TURNSTILE_SECRET_KEY_FILE,
           .TG_TURNSTILE_SIGNIN_ENABLED)
       end
+      | .services.teagramd |= del(.logging)
       | .services.teagramd.ports = ((.services.teagramd.ports // []) | map(select(approved_public_ws_port | not)))
       | if (.services.teagramd.ports | length) == 0 then del(.services.teagramd.ports) else . end
       | if (.services.teagramd.secrets | type) == "array" then
@@ -697,6 +765,8 @@ snapshot_from_json() {
     --arg container_client_addr_trust "$container_client_addr_trust" \
     --arg compose_public_ws_2446 "$compose_public_ws_2446" \
     --arg exposure_public_ws_2446 "$exposure_public_ws_2446" \
+    --arg compose_logging_profile "$compose_logging_profile_value" \
+    --arg container_logging_profile "$container_logging_profile_value" \
     --arg mount_count "$mount_count" \
     --arg mounts_sha "$mounts_sha" \
     --arg exposure_sha "$exposure_sha" \
@@ -715,6 +785,8 @@ snapshot_from_json() {
       compose_client_addr_trust:$compose_client_addr_trust,
       compose_public_ws_2446:$compose_public_ws_2446,
       exposure_public_ws_2446:$exposure_public_ws_2446,
+      compose_logging_profile:$compose_logging_profile,
+      container_logging_profile:$container_logging_profile,
       container_replica_count:$container_replica_count,
       container_client_addr_trust:$container_client_addr_trust,
       mount_count:($mount_count|tonumber),mounts_sha256:$mounts_sha,
@@ -883,6 +955,8 @@ compare_snapshots() {
       (.compose_client_addr_trust | type == "string" and IN("unset","invalid","socket")) and
       (.compose_public_ws_2446 | type == "string" and IN("true","false","not-captured")) and
       (.exposure_public_ws_2446 | type == "string" and IN("true","false")) and
+      (.compose_logging_profile | type == "string" and IN("not-captured","default:true","default:false","syslog:false")) and
+      (.container_logging_profile | type == "string" and IN("not-captured","default:true","default:false","syslog:false")) and
       (.container_replica_count | type == "string" and test("^(unset|invalid|duplicate|[0-9]{1,3})$")) and
       (.container_client_addr_trust | type == "string" and IN("unset","invalid","duplicate","socket")) and
       (.mount_count | type == "number" and . >= 0) and
@@ -905,6 +979,8 @@ compare_snapshots() {
       (.compose_client_addr_trust | type == "string" and IN("unset","invalid","socket")) and
       (.compose_public_ws_2446 | type == "string" and IN("true","false","not-captured")) and
       (.exposure_public_ws_2446 | type == "string" and IN("true","false")) and
+      (.compose_logging_profile | type == "string" and IN("not-captured","default:true","default:false","syslog:false")) and
+      (.container_logging_profile | type == "string" and IN("not-captured","default:true","default:false","syslog:false")) and
       (.container_replica_count | type == "string" and test("^(unset|invalid|duplicate|[0-9]{1,3})$")) and
       (.container_client_addr_trust | type == "string" and IN("unset","invalid","duplicate","socket")) and
       (.mount_count | type == "number" and . >= 0) and
@@ -932,6 +1008,12 @@ compare_snapshots() {
       printf '%s\n' "failed to persist comparison result: $field" >&2
       return 1
     fi
+  done
+  for field in compose_logging_profile container_logging_profile; do
+    if ! before_value=$(jq -er --arg field "$field" '.[$field]' "$before_file"); then return 1; fi
+    if ! after_value=$(jq -er --arg field "$field" '.[$field]' "$after_file"); then return 1; fi
+    if logging_profile_transition_allowed "$before_value" "$after_value"; then result=pass; else result=fail; fi
+    if ! record_comparison "$result_file" "$field" "$before_value" "$after_value" "$result"; then return 1; fi
   done
   for field in compose_public_ws_2446 exposure_public_ws_2446; do
     if ! before_value=$(jq -er --arg field "$field" '.[$field]' "$before_file"); then return 1; fi
