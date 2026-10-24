@@ -15,6 +15,7 @@ from urllib.parse import urlsplit
 MAX_DC_ID = (1 << 31) - 1
 MAX_SPKI_LENGTH = 4096
 MAX_SPKI_BASE64_LENGTH = 4 * ((MAX_SPKI_LENGTH + 2) // 3)
+TURNSTILE_SITE_KEY = re.compile(r"[A-Za-z0-9_-]{1,256}")
 OPENSSL = "/usr/bin/openssl"
 
 
@@ -233,6 +234,24 @@ def validate_document(document):
     split_host_port(endpoint)
     validate_websocket_endpoint(websocket_endpoint)
     validate_spki(spki)
+
+    if "demo" in document:
+        demo = document["demo"]
+        if not isinstance(demo, dict) or demo.get("guest_sign_up") is not True:
+            raise InvalidDiscovery("demo guest_sign_up must be true when present")
+
+    if "turnstile" in document:
+        turnstile = document["turnstile"]
+        if not isinstance(turnstile, dict):
+            raise InvalidDiscovery("turnstile must be an object when present")
+        site_key = turnstile.get("site_key")
+        if (
+            not isinstance(site_key, str)
+            or TURNSTILE_SITE_KEY.fullmatch(site_key) is None
+        ):
+            raise InvalidDiscovery(
+                "turnstile site_key must contain 1 to 256 letters, digits, '_' or '-'"
+            )
 
 
 def main():

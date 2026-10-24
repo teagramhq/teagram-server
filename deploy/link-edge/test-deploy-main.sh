@@ -198,6 +198,14 @@ if ! output=$(TEST_CLIENT_JSON="$valid_ipv6_client_json" bash "$script" "$sha");
 fi
 [[ $output == *"retired path=404"* ]] || { printf 'FAIL valid IPv6 discovery document was rejected: %s\n' "$output" >&2; exit 1; }
 
+valid_optional_client_json=$(jq -c '.demo = {guest_sign_up:true} | .turnstile = {site_key:("a" * 256)}' <<<"$valid_client_json")
+reset_state 1313131313131313131313131313131313131313
+if ! output=$(TEST_CLIENT_JSON="$valid_optional_client_json" bash "$script" "$sha"); then
+  cat "$tmp/docker.log" >&2
+  exit 1
+fi
+[[ $output == *"retired path=404"* ]] || { printf 'FAIL valid optional discovery fields were rejected: %s\n' "$output" >&2; exit 1; }
+
 reset_state 2222222222222222222222222222222222222222
 export TEST_RETIRED_STATUS=200
 if bash "$script" "$sha" >"$tmp/rollback.log" 2>&1; then
@@ -285,7 +293,20 @@ for mutation in \
   '.websocket.endpoint = "wss://mtproto.example.test:443/apiws"' \
   '.websocket.endpoint = "wss://mtproto.example.test/other"' \
   '.websocket.endpoint = "wss://bad host/apiws"' \
-  '.websocket.endpoint = "wss://mtproto.example.test/apiws?host=other.example.test"'; do
+  '.websocket.endpoint = "wss://mtproto.example.test/apiws?host=other.example.test"' \
+  '.demo = null' \
+  '.demo = []' \
+  '.demo = {}' \
+  '.demo.guest_sign_up = false' \
+  '.demo.guest_sign_up = "true"' \
+  '.turnstile = null' \
+  '.turnstile = []' \
+  '.turnstile = {}' \
+  '.turnstile.site_key = null' \
+  '.turnstile.site_key = 123' \
+  '.turnstile.site_key = ""' \
+  '.turnstile.site_key = "bad site key"' \
+  '.turnstile.site_key = ("a" * 257)'; do
   assert_invalid_discovery "$mutation"
 done
 
