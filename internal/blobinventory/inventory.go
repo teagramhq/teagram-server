@@ -39,7 +39,8 @@ type ObjectID struct {
 }
 
 // Class reports the number of objects and their logical and physical sizes.
-// IDs is populated for missing and unaccounted objects.
+// IDs is populated for objects that are missing, unaccounted, or do not have
+// a valid envelope matching their database reference.
 type Class struct {
 	Count         int64      `json:"count"`
 	LogicalBytes  int64      `json:"logical_bytes"`
@@ -209,10 +210,11 @@ func Scan(ctx context.Context, blobs blob.Store, ring *blob.KeyRing, references 
 		}
 
 		if referenced {
-			if validEnvelope {
+			if validEnvelope && info.LogicalBytes == ref.LogicalBytes {
 				return addClass(&report.Classes.ValidEnvelope, info.LogicalBytes, entry.Size, nil)
 			}
-			return addClass(&report.Classes.NoValidEnvelope, ref.LogicalBytes, entry.Size, nil)
+			id := ObjectID{Kind: ref.Kind, ID: ref.ID, Key: entry.Key}
+			return addClass(&report.Classes.NoValidEnvelope, ref.LogicalBytes, entry.Size, &id)
 		}
 		id := objectIDForKey(entry.Key)
 		logicalBytes := entry.Size
