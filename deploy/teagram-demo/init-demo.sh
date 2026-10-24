@@ -88,7 +88,7 @@ JOURNAL_DIR="$DEMO_AUTHORITY_DIR/journal"
 if [[ -e "$MODE_FILE" || -L "$MODE_FILE" ]]; then
   # Resume a valid, already-published first-install authority after an
   # interrupted switch from the unguarded bootstrap container.
-  demo_compose stop edge haproxy turnstile-egress "$ACTIVE_SERVER"
+  demo_compose stop edge haproxy turnstile-egress
   mapfile -t CONTAINER_IDS < <(demo_bootstrap_compose ps -q)
   if ((${#CONTAINER_IDS[@]})); then
     docker inspect "${CONTAINER_IDS[@]}" > "$TMP_DIR/containers.raw.json"
@@ -108,7 +108,13 @@ if [[ -e "$MODE_FILE" || -L "$MODE_FILE" ]]; then
     --allow-empty-containers \
     --allow-unguarded-initial-local \
     --allow-unguarded-initial-local-containers
+
+  IMAGE_REF=$(demo_pull_image_by_sha "$SHA" "$IMAGE_DIGEST")
+  export TEAGRAM_DEMO_IMAGE_REF="$IMAGE_REF"
   demo_compose stop "$ACTIVE_SERVER"
+  demo_bootstrap_compose up -d migrate
+  demo_wait_migration demo_bootstrap_compose 'resume migrations'
+  demo_write_active_release "$ACTIVE_SERVER" "$IMAGE_REF"
   demo_seed_compose up -d "$ACTIVE_SERVER"
   demo_prepare_seed_owner "$TMP_DIR"
   "$SEED_SCRIPT" --seed \

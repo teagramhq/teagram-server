@@ -238,6 +238,10 @@ jq -e '
   and .services.teagramd.environment.TG_TURNSTILE_SITE_KEY == ""
   and .services.teagramd.environment.TG_TURNSTILE_SECRET_KEY_FILE == ""
   and .services.teagramd.environment.TG_RATE_LIMIT_SIGN_UP_IP == "32"
+  and .services.teagramd.environment.TG_RATE_LIMIT_KEY_EXCHANGE_IP == "256"
+  and .services.teagramd.environment.TG_RATE_LIMIT_KEY_EXCHANGE_IP_WINDOW == "1h"
+  and .services["teagramd-next"].environment.TG_RATE_LIMIT_KEY_EXCHANGE_IP == "256"
+  and .services["teagramd-next"].environment.TG_RATE_LIMIT_KEY_EXCHANGE_IP_WINDOW == "1h"
   and .volumes.tgblobs.driver_opts.device == "/srv/teagram-demo-blobs/data"
 ' "$TMP_DIR/bootstrap.json" >/dev/null
 
@@ -257,6 +261,10 @@ jq -e '
   and .services.teagramd.environment.TG_RATE_LIMIT_SEND_CODE_IP == "256"
   and .services.teagramd.environment.TG_RATE_LIMIT_SEND_CODE_IP_PHONES == "32"
   and .services.teagramd.environment.TG_RATE_LIMIT_GET_PASSWORD_IP == "256"
+  and .services.teagramd.environment.TG_RATE_LIMIT_KEY_EXCHANGE_IP == "256"
+  and .services.teagramd.environment.TG_RATE_LIMIT_KEY_EXCHANGE_IP_WINDOW == "1h"
+  and .services["teagramd-next"].environment.TG_RATE_LIMIT_KEY_EXCHANGE_IP == "256"
+  and .services["teagramd-next"].environment.TG_RATE_LIMIT_KEY_EXCHANGE_IP_WINDOW == "1h"
   and .services.teagramd.environment.TG_RATE_LIMIT_SEND == "0"
 ' "$TMP_DIR/seed.json" >/dev/null
 
@@ -624,7 +632,13 @@ assert_order(Path(sys.argv[2]), [
     'python3 "$SCRIPT_DIR/smoke.py" "$DEMO_CLIENT_CONFIG"',
 ], start=init.index("exit 0") + len("exit 0"))
 assert_order(Path(sys.argv[2]), [
-    'demo_compose stop edge haproxy turnstile-egress "$ACTIVE_SERVER"',
+    'demo_compose stop edge haproxy turnstile-egress',
+    'python3 "$MODE_HELPER" validate',
+    'IMAGE_REF=$(demo_pull_image_by_sha "$SHA" "$IMAGE_DIGEST")',
+    'demo_compose stop "$ACTIVE_SERVER"',
+    'demo_bootstrap_compose up -d migrate',
+    "demo_wait_migration demo_bootstrap_compose 'resume migrations'",
+    'demo_write_active_release "$ACTIVE_SERVER" "$IMAGE_REF"',
     'demo_seed_compose up -d "$ACTIVE_SERVER"',
     '"$SEED_SCRIPT" --seed',
     '"$SEED_SCRIPT" --verify-seed --endpoint "$ACTIVE_ENDPOINT"',

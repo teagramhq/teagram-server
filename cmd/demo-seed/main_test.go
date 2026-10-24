@@ -139,6 +139,20 @@ func TestExpectedSeedMarkerCounts(t *testing.T) {
 	}
 }
 
+func TestSeedReactionRequestUsesServerStandardHeartEmoji(t *testing.T) {
+	request := seedReactionRequest(&tg.InputPeerUser{UserID: 42, AccessHash: 43}, 17)
+	if request.MsgID != 17 {
+		t.Fatalf("seed reaction message id = %d, want 17", request.MsgID)
+	}
+	if len(request.Reaction) != 1 {
+		t.Fatalf("seed reaction count = %d, want one standard emoji", len(request.Reaction))
+	}
+	reaction, ok := request.Reaction[0].(*tg.ReactionEmoji)
+	if !ok || reaction.Emoticon != "❤" {
+		t.Fatalf("seed reaction = %#v, want the server's standard heart emoji", request.Reaction[0])
+	}
+}
+
 func TestCountSeedMarkersForSpace(t *testing.T) {
 	spec := spaceSpec{slug: "maps"}
 	markers := map[string]int64{

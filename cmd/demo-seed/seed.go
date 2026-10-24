@@ -75,6 +75,8 @@ var conversationLines = []string{
 	"I added that light change to my notes. Thanks for making the route clearer.",
 }
 
+const seedReactionEmoji = "❤"
+
 func seedDemo(ctx context.Context, cfg apiConfig, options seedOptions, ownerPassword string, inventory map[string]string) error {
 	for _, account := range seedAccounts {
 		if err := withSeedAccount(ctx, cfg, options, account, ownerPassword, inventory, func(runCtx context.Context, api *tg.Client) error {
@@ -713,16 +715,20 @@ func seedReactionExample(ctx context.Context, cfg apiConfig, options seedOptions
 		if messageID <= 0 {
 			return errors.New("reaction example message was not found")
 		}
-		_, err = api.MessagesSendReaction(runCtx, &tg.MessagesSendReactionRequest{
-			Peer:     peer,
-			MsgID:    messageID,
-			Reaction: []tg.ReactionClass{&tg.ReactionEmoji{Emoticon: "❤️"}},
-		})
+		_, err = api.MessagesSendReaction(runCtx, seedReactionRequest(peer, messageID))
 		if err != nil {
 			return fmt.Errorf("react to fictional message: %w", err)
 		}
 		return nil
 	})
+}
+
+func seedReactionRequest(peer tg.InputPeerClass, messageID int) *tg.MessagesSendReactionRequest {
+	return &tg.MessagesSendReactionRequest{
+		Peer:     peer,
+		MsgID:    messageID,
+		Reaction: []tg.ReactionClass{&tg.ReactionEmoji{Emoticon: seedReactionEmoji}},
+	}
 }
 
 func resolveUserPeer(ctx context.Context, api *tg.Client, username string) (tg.InputPeerClass, error) {
