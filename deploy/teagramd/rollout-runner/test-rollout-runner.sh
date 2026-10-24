@@ -335,7 +335,15 @@ if [ "${1:-}" = inspect ]; then
     template=${2:-}
     case "$template" in
       '{{.HostConfig.LogConfig.Type}}')
-        if [ "${MOCK_SCENARIO:-}" = pre-rollout-log-persisted ]; then printf 'json-file\n'; else printf 'syslog\n'; fi
+        if [ "${MOCK_SCENARIO:-}" = pre-rollout-log-persisted ] || \
+           { [ "${MOCK_SCENARIO:-}" = target-local-syslog-logging-rollout ] && \
+             { [ "$phase" = baseline ] || [ "$phase" = rollback ]; }; } || \
+           { [ "${MOCK_SCENARIO:-}" = target-local-old-target-image-logging-mismatch ] && \
+             { [ "$phase" = baseline ] || [ "$phase" = target ]; }; }; then
+          printf 'json-file\n'
+        else
+          printf 'syslog\n'
+        fi
         ;;
       '{{.State.Status}}|{{.State.ExitCode}}')
         if [ "$subject" = "$MOCK_MIGRATE_ID" ]; then printf 'exited|0\n'
@@ -355,7 +363,7 @@ if [ "${1:-}" = inspect ]; then
             fi
             ;;
           "$MOCK_TARGET_ID"|"$MOCK_REPLACEMENT_ID")
-            if [ "${MOCK_SCENARIO:-success}" = old-target-image ] || [ "${MOCK_SCENARIO:-}" = target-local-598-rollback ] || [ "${MOCK_SCENARIO:-}" = target-local-df9-rollback ] || [ "${MOCK_SCENARIO:-}" = target-local-welcome-channel-addition-rollback ]; then printf '%s\n' "$MOCK_BASE_IMAGE"; else printf '%s\n' "$MOCK_ACTUAL_TARGET_IMAGE"; fi
+            if [ "${MOCK_SCENARIO:-success}" = old-target-image ] || [ "${MOCK_SCENARIO:-}" = target-local-old-target-image-logging-mismatch ] || [ "${MOCK_SCENARIO:-}" = target-local-598-rollback ] || [ "${MOCK_SCENARIO:-}" = target-local-df9-rollback ] || [ "${MOCK_SCENARIO:-}" = target-local-welcome-channel-addition-rollback ]; then printf '%s\n' "$MOCK_BASE_IMAGE"; else printf '%s\n' "$MOCK_ACTUAL_TARGET_IMAGE"; fi
             ;;
           *) printf '%s\n' "$MOCK_POSTGRES_IMAGE" ;;
         esac
@@ -369,7 +377,7 @@ if [ "${1:-}" = inspect ]; then
     "$MOCK_TARGET_ID"|"$MOCK_REPLACEMENT_ID")
       id=$subject
       cfg=target
-      if [ "${MOCK_SCENARIO:-success}" = old-target-image ] || [ "${MOCK_SCENARIO:-}" = target-local-598-rollback ] || [ "${MOCK_SCENARIO:-}" = target-local-df9-rollback ] || [ "${MOCK_SCENARIO:-}" = target-local-welcome-channel-addition-rollback ]; then image=$MOCK_BASE_IMAGE; else image=$MOCK_ACTUAL_TARGET_IMAGE; fi
+      if [ "${MOCK_SCENARIO:-success}" = old-target-image ] || [ "${MOCK_SCENARIO:-}" = target-local-old-target-image-logging-mismatch ] || [ "${MOCK_SCENARIO:-}" = target-local-598-rollback ] || [ "${MOCK_SCENARIO:-}" = target-local-df9-rollback ] || [ "${MOCK_SCENARIO:-}" = target-local-welcome-channel-addition-rollback ]; then image=$MOCK_BASE_IMAGE; else image=$MOCK_ACTUAL_TARGET_IMAGE; fi
       ;;
     "$MOCK_ROLLBACK_ID")
       id=$MOCK_ROLLBACK_ID
@@ -427,6 +435,12 @@ if [ "${1:-}" = inspect ]; then
       esac
       env_json=$(jq -c --arg value "$origin_value" '. + ["TG_WEBSOCKET_ALLOWED_ORIGINS=" + $value]' <<< "$env_json")
     fi
+    if [ "${MOCK_SCENARIO:-}" = target-local-syslog-logging-rollout ]; then
+      if [ "$phase" = target ]; then login_codes=false; else login_codes=true; fi
+      env_json=$(jq -c --arg value "$login_codes" \
+        'map(select(type != "string" or (startswith("TG_LOG_LOGIN_CODES=") | not))) + ["TG_LOG_LOGIN_CODES=" + $value]' \
+        <<< "$env_json")
+    fi
     turnstile_source=''
     if [ "$cfg" = baseline ] || [ "$cfg" = target ] || [ "$cfg" = rollback ]; then
       if [ -f "$MOCK_STATE/started-compose-$id.json" ]; then
@@ -451,15 +465,27 @@ if [ "${1:-}" = inspect ]; then
       fi
       turnstile_source=$(jq -r '.secrets.teagramd_turnstile.file // ""' "$turnstile_compose")
     fi
+    log_config_type=syslog
+    log_config='{"syslog-address":"unixgram:///dev/log","syslog-facility":"daemon","syslog-format":"rfc5424","tag":"teagramd"}'
+    if [ "${MOCK_SCENARIO:-}" = target-local-syslog-logging-rollout ] && \
+       { [ "$phase" = baseline ] || [ "$phase" = rollback ]; }; then
+      log_config_type=json-file
+      log_config='{}'
+    elif [ "${MOCK_SCENARIO:-}" = target-local-old-target-image-logging-mismatch ] && \
+         { [ "$phase" = baseline ] || [ "$phase" = target ]; }; then
+      log_config_type=json-file
+      log_config='{}'
+    fi
     jq -nc \
       --arg id "$id" --arg base_id "$MOCK_BASE_ID" --arg replacement_id "$MOCK_REPLACEMENT_ID" --arg image "$image" --argjson env "$env_json" \
       --arg cfg "$cfg" --arg source "$MOCK_CHECKOUT/.state/blob-mode" \
+      --arg log_config_type "$log_config_type" --argjson log_config "$log_config" \
       --arg scenario "${MOCK_SCENARIO:-}" --arg phase "$phase" --arg turnstile_source "$turnstile_source" \
       '{
         Id:$id,Image:$image,
         Config:{Env:$env,StopTimeout:(if $scenario == "target-local-carry-forward-image-reuse-stop-timeout-mismatch" and $cfg == "target" and $phase == "target" then 60 else 120 end),Labels:{"com.docker.compose.project":"fixture","com.docker.compose.service":"teagramd"}},
         State:{Status:(if $scenario == "runtime-target-exited" and $cfg == "target" then "exited" else "running" end),ExitCode:(if $scenario == "runtime-target-exited" and $cfg == "target" then 1 else 0 end),StartedAt:"2026-10-06T12:00:00Z",FinishedAt:(if $scenario == "runtime-target-exited" and $cfg == "target" then "2026-10-06T12:00:01Z" else "0001-01-01T00:00:00Z" end)},
-        HostConfig:{PortBindings:({"2443/tcp":[{HostIp:"127.0.0.1",HostPort:"2443"}]} +
+        HostConfig:{LogConfig:{Type:$log_config_type,Config:$log_config},PortBindings:({"2443/tcp":[{HostIp:"127.0.0.1",HostPort:"2443"}]} +
           if $scenario == "target-local-carry-forward-public-listener-addition" and $id == $replacement_id then
             {"2446/tcp":[{HostIp:"127.0.0.1",HostPort:"2446"}]}
           else {} end),NetworkMode:"fixture_teagram_server"},
@@ -505,6 +531,10 @@ fi
             esac
           done < "$MOCK_CHECKOUT/.env"
           printf '%s\n' "$public_compose"
+        elif [ "${MOCK_SCENARIO:-}" = target-local-syslog-logging-rollout ] && [ "$config_count" -lt 3 ]; then
+          cat "$MOCK_STATE/base-compose.json"
+        elif [ "${MOCK_SCENARIO:-}" = target-local-syslog-logging-rollout ]; then
+          cat "$MOCK_STATE/target-compose.json"
         elif [ "${MOCK_SCENARIO:-}" = config-drift ] && [ "$config_count" -ge 3 ]; then
           cat "$MOCK_STATE/target-compose.drift.json"
         elif [[ "${MOCK_SCENARIO:-}" == public-websocket-* ]] && [ "$config_count" -lt 3 ]; then
@@ -1327,7 +1357,7 @@ run_fixture() {
     ambient_revision=(TEAGRAMD_SOURCE_REVISION=ambient-revision-must-not-win)
   fi
   runner="$runtime_dir/rollout-runner.sh"
-  case "$scenario" in old-target-image|target-local-598-rollback|target-local-df9-rollback|target-local-welcome-channel-addition-rollback|config-drift|target-local-carry-forward-public-listener-wide-host|target-local-carry-forward-public-listener-other-port|public-websocket-enabled|readiness-timeout|logs-failed|runtime-target-exited|target-container-unavailable|target-local-carry-forward-image-reuse-stale-build|target-local-carry-forward-image-reuse-stop-timeout-mismatch|schema-post-failed-69|schema-post-missing-69) require_marker=1 ;; esac
+  case "$scenario" in old-target-image|target-local-old-target-image-logging-mismatch|target-local-598-rollback|target-local-df9-rollback|target-local-welcome-channel-addition-rollback|config-drift|target-local-carry-forward-public-listener-wide-host|target-local-carry-forward-public-listener-other-port|public-websocket-enabled|readiness-timeout|logs-failed|runtime-target-exited|target-container-unavailable|target-local-carry-forward-image-reuse-stale-build|target-local-carry-forward-image-reuse-stop-timeout-mismatch|schema-post-failed-69|schema-post-missing-69) require_marker=1 ;; esac
   [ "$name" = marker-write-failed ] && require_marker=0
   [ -n "$chmod_match" ] && require_marker=1
   if [ "$action" = reconcile ]; then
@@ -4080,6 +4110,19 @@ else
   fail 'old running image rejection and baseline rollback'
 fi
 
+prepare_apply_fixture rollback-logging-mismatch target-local-old-target-image-logging-mismatch
+status=$(run_fixture rollback-logging-mismatch built 0 '' 2 '' '' apply "$APPLY_TARGET_SHA")
+root=$(cat "$TMP/rollback-logging-mismatch-root-path")
+if [ "$status" != 0 ] && \
+   grep -q $'target_image_matches_built\t.*\tfail' "$root".target/target-comparisons.tsv && \
+   grep -q $'rollback\tcontainer_logging_sha256\t.*\tfail' "$root".rollback/rollback-equivalence.tsv && \
+   ! grep -q 'rollback=verified' "$TMP/rollback-logging-mismatch.stdout"; then
+  pass 'rollback with a different inspected logging driver is not reported as verified'
+else
+  show_fixture_failure rollback-logging-mismatch "$status"
+  fail 'mismatched inspected rollback logging configuration must be rejected'
+fi
+
 make_fixture stale-pin built
 status=$(run_fixture stale-pin old)
 if [ "$status" != 0 ] && grep -q $'target_image_matches_built\t.*\tfail' "$(cat "$TMP/stale-pin-root-path")".target/target-comparisons.tsv; then
@@ -4252,6 +4295,33 @@ if [ "$status" != 0 ] && \
 else
   show_fixture_failure welcome-channel-addition-rollback "$status"
   fail 'rollback should preserve equivalence when welcome channel is empty'
+fi
+
+prepare_target_local_apply_fixture syslog-logging-rollout \
+  target-local-syslog-logging-rollout "$E58_LOCAL_COMPOSE_TARGET_SHA"
+state=$(cat "$TMP/syslog-logging-rollout-state-path")
+root=$(cat "$TMP/syslog-logging-rollout-root-path")
+jq -c '.services.teagramd.environment.TG_LOG_LOGIN_CODES="true" | del(.services.teagramd.logging)' \
+  "$state/base-compose.json" > "$state/base-compose.next.json"
+mv -- "$state/base-compose.next.json" "$state/base-compose.json"
+jq -c '.services.teagramd.environment.TG_LOG_LOGIN_CODES="false" | .services.teagramd.logging={driver:"syslog",options:{"syslog-address":"unixgram:///dev/log","syslog-facility":"daemon","syslog-format":"rfc5424",tag:"teagramd"}}' \
+  "$state/target-compose.json" > "$state/target-compose.next.json"
+mv -- "$state/target-compose.next.json" "$state/target-compose.json"
+status=$(run_fixture syslog-logging-rollout built 0 '' 2 '' '' apply "$APPLY_TARGET_SHA")
+if [ "$status" = 0 ] && \
+   grep -q $'preflight\tconfig_sha256\t.*\tpass' "$root.target/preflight-comparisons.tsv" && \
+   grep -q $'preflight\tcompose_log_login_codes\ttrue\tfalse\tpass' "$root.target/preflight-comparisons.tsv" && \
+   grep -q $'preflight\tcompose_logging_policy\tdefault\tsyslog-v1\tpass' "$root.target/preflight-comparisons.tsv" && \
+   grep -q $'container_env_sha256\t.*\tpass' "$root.target/target-comparisons.tsv" && \
+   grep -q $'compose_log_login_codes\ttrue\tfalse\tpass' "$root.target/target-comparisons.tsv" && \
+   grep -q $'container_log_login_codes\ttrue\tfalse\tpass' "$root.target/target-comparisons.tsv" && \
+   grep -q $'container_logging_sha256\t.*\tpass' "$root.target/target-comparisons.tsv" && \
+   grep -q $'compose_logging_policy\tdefault\tsyslog-v1\tpass' "$root.target/target-comparisons.tsv" && \
+   grep -q "rollout=verified sha=$E58_LOCAL_COMPOSE_TARGET_SHA" "$TMP/syslog-logging-rollout.stdout"; then
+  pass 'complete previous-to-current Compose profile disables login-code logging and verifies retained syslog'
+else
+  show_fixture_failure syslog-logging-rollout "$status"
+  fail 'complete previous-to-current Compose profile should pass preflight and target verification'
 fi
 
 prepare_target_local_apply_fixture welcome-channel-active \

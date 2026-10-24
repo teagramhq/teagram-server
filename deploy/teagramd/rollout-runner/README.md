@@ -42,6 +42,51 @@ match the Compose mapping. A wildcard host IP, another host or container port,
 or any other port change remains a configuration drift and rejects before
 replacement.
 
+The only approved `teagramd` logging change is the reviewed transition from
+Compose's default logger to `syslog` at `/dev/log` with the `teagramd` tag,
+daemon facility, and RFC5424 format. Preflight records that policy separately
+from the general configuration digest; post-start inspection must confirm the
+container received the exact logger settings. Other drivers and options remain
+configuration drift.
+
+The only approved login-code logging transition is `true` to `false`. The
+runner records the Compose and inspected container settings separately and
+checks both at preflight, target verification, and rollback. Login-code
+settings are removed from the general Compose and container-environment hashes
+only because their exact before and after values are compared separately.
+Syslog targets require `TG_LOG_LOGIN_CODES=false`, so the retained sink cannot
+be enabled while the legacy diagnostic emits phone numbers and codes.
+
+### Retained log threat model
+
+Application diagnostics are sensitive: they can include account identifiers
+and request context. Do not log message bodies, passwords, tokens, or
+authentication codes. `TG_LOG_LOGIN_CODES` is pinned to `false`; the
+pre-syslog snapshot and the forced reader also discard legacy `login code
+issued` records.
+
+The QA SSH key can retrieve at most 5,000 matching `teagramd` lines through
+the forced `/usr/local/sbin/teagram-logs` command. It cannot open a shell or
+invoke Docker. Restrict that key to trusted responders and revoke it when it
+is no longer needed. Host root and Docker administrators can read or copy the
+raw files. The files are not encrypted at rest.
+
+BusyBox syslog keeps a 512 MiB active `/var/log/messages` file and 15
+rotations, for an 8 GiB maximum. This is a size limit, not an age limit; high
+volume can evict records quickly, while low volume can leave them longer. A
+normal deployment does not clear these files. Once the rotation set is full,
+the oldest file is overwritten as new rotations are created. Host snapshots
+and copies outside the LXC are outside this retention control.
+
+Before replacing a pre-syslog container, the runner can preserve its last
+seven days of logs, up to 5,000 lines, in the root-only
+`/root/teagramd-legacy-logs.log`, capped at 32 MiB and mode `0600`. The
+forced reader filters this file too. The snapshot is not age-expired: it
+remains until a later archive update or an operator removes it. Filesystem
+deletion does not establish cryptographic erasure or remove host-level copies.
+The operational logging procedure and reader contract are documented in
+[`../../teagram/README.md#retained-log-threat-model`](../../teagram/README.md#retained-log-threat-model).
+
 For every local-backed rollout, read the running `teagramd` container's
 `com.docker.compose.project.config_files` label and carry that Compose selection
 forward unchanged. With ordinary local authority, it must start with a
