@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"io"
 	"sync"
+	"time"
 )
 
 // ErrEnvelope is returned by [Encrypted.ReadAt] for an object that is not an
@@ -98,6 +99,15 @@ func NewEncrypted(backend Store, ring *KeyRing, chunkSize int) (*Encrypted, erro
 		return nil, fmt.Errorf("encrypted store: chunk size %d outside [%d, %d]", chunkSize, MinChunkSize, MaxChunkSize)
 	}
 	return &Encrypted{backend: backend, ring: ring, chunkSize: chunkSize}, nil
+}
+
+// OperationTimeout forwards a backend's per-operation bound through the
+// decorator. Stores without a backend timeout keep the caller's default.
+func (e *Encrypted) OperationTimeout() time.Duration {
+	if bounded, ok := e.backend.(OperationTimeoutProvider); ok {
+		return bounded.OperationTimeout()
+	}
+	return 0
 }
 
 // envelopeHeader is a parsed, not yet authenticated, header.

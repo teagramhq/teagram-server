@@ -178,6 +178,31 @@ func NewS3(cfg S3Config) (*S3, error) {
 	}, nil
 }
 
+// NewS3Store constructs and checks the serving store for an S3 backend. When
+// encrypt is true, every write goes through the authenticated envelope store.
+// The raw S3 store is returned separately for maintenance and verification.
+func NewS3Store(ctx context.Context, cfg S3Config, keys *KeyRing, encrypt bool) (Store, *S3, error) {
+	if encrypt && keys == nil {
+		return nil, nil, errors.New("S3 media encryption requires TG_MEDIA_KEY_DIR and TG_MEDIA_KEY_CURRENT")
+	}
+	remote, err := NewS3(cfg)
+	if err != nil {
+		return nil, nil, fmt.Errorf("object store configuration is invalid; check TG_BLOB_S3_* settings: %w", err)
+	}
+	var serving Store = remote
+	if encrypt {
+		sealed, err := NewEncrypted(remote, keys, DefaultChunkSize)
+		if err != nil {
+			return nil, nil, fmt.Errorf("construct encrypted object store: %w", err)
+		}
+		serving = sealed
+	}
+	if err := remote.Check(ctx); err != nil {
+		return nil, nil, fmt.Errorf("object store startup check failed: %w", err)
+	}
+	return serving, remote, nil
+}
+
 // OperationTimeout reports the configured bound for one S3 operation,
 // including its bounded retries.
 func (s *S3) OperationTimeout() time.Duration { return s.operationTimeout }
