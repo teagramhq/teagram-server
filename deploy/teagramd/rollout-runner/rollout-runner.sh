@@ -4,7 +4,7 @@ umask 077
 
 SCRIPT_DIR=$(cd -P "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 SCRIPT_SOURCE="$SCRIPT_DIR/$(basename "${BASH_SOURCE[0]}")"
-readonly APPROVED_VERIFIER_SHA=2e0202a7f9b893028cd07179ab3761b0195aaa8363f8cca973b1281d2c5b1442
+readonly APPROVED_VERIFIER_SHA=2cc839a2ef86dde4d3aa8e9635b6374dcdd76de802da4c8d502cae93a1fd622e
 readonly APPROVED_SCHEMA_GATE_SHA=ac54d3cf0480383a52414a8bc8b856b5e1d5f6f8d19034c9c576c64627e097c8
 readonly APPROVED_SCHEMA_GATE_HELPER_SHA=7ae06c2872c60b434068b3715a9ddd5e19b03d4be98dc9881c8dd8f294953d41
 readonly APPROVED_INITIAL_LOCAL_COMPOSE_SHA=3a4f158c6e1f2ead6676fba85d8d95cfb15557a0fbd8e82230361e0af988e0f7
@@ -1985,7 +1985,7 @@ compare_initial_local_target() {
   local results="$TARGET_DIR/target-comparisons.tsv"
   local failures=0 field before after result expected_image
   local baseline_fields=(mounts_sha256 container_stop_timeout exposure_sha256 container_env_sha256)
-  local render_fields=(config_sha256 env_sha256 override_sha256 stop_grace_period compose_replica_count compose_client_addr_trust compose_public_ws_2446 compose_logging_policy)
+  local render_fields=(config_sha256 env_sha256 override_sha256 stop_grace_period compose_replica_count compose_client_addr_trust compose_public_ws_2446 compose_logging_policy compose_log_login_codes)
   write_immutable "$results" '' || return 1
   [ "$(jq -er '.provenance.compose_source' "$baseline_file")" = live-container-inspection ] && \
     [ "$(jq -er '.provenance.compose_source' "$render_file")" = selected-compose-render ] && \
@@ -2059,11 +2059,11 @@ compare_resolved_preflight() {
   local old_file="$BASELINE_DIR/baseline.snapshot.json"
   local target_file="$TARGET_DIR/preflight.snapshot.json"
   local results="$TARGET_DIR/preflight-comparisons.tsv"
-  local fields=(config_sha256 env_sha256 override_sha256 stop_grace_period compose_logging_policy)
+  local fields=(config_sha256 env_sha256 override_sha256 stop_grace_period compose_logging_policy compose_log_login_codes)
   local field before after result expected failures=0
   if [ "$INITIALIZE_LOCAL" = 1 ]; then
     local render_file="$BASELINE_DIR/initial-local-target-render.snapshot.json"
-    local live_fields=(container_id image_id state mounts_sha256 container_stop_timeout exposure_sha256 exposure_public_ws_2446 container_env_sha256 container_replica_count container_client_addr_trust)
+    local live_fields=(container_id image_id state mounts_sha256 container_stop_timeout exposure_sha256 exposure_public_ws_2446 container_env_sha256 container_logging_sha256 container_log_login_codes container_replica_count container_client_addr_trust)
     [ "$(jq -er '.provenance.compose_source' "$old_file")" = live-container-inspection ] && \
       [ "$(jq -er '.provenance.compose_source' "$render_file")" = selected-compose-render ] && \
       [ "$(jq -er '.provenance.compose_source' "$target_file")" = selected-compose-render ] || {
@@ -2107,6 +2107,13 @@ compare_resolved_preflight() {
         result=fail
         failures=$((failures + 1))
       fi
+    elif [ "$field" = compose_log_login_codes ]; then
+      if [ "$before" = "$after" ] || { [ "$before" = true ] && [ "$after" = false ]; }; then
+        result=pass
+      else
+        result=fail
+        failures=$((failures + 1))
+      fi
     elif [ "$before" = "$after" ]; then result=pass; else result=fail; failures=$((failures + 1)); fi
     append_evidence_row "$results" preflight "$field" "$before" "$after" "$result" || return 1
   done
@@ -2136,7 +2143,7 @@ compare_rollback_to_baseline() {
   local baseline_file="$ROLLBACK_DIR/baseline.snapshot.json"
   local rollback_file="$ROLLBACK_DIR/rollback.snapshot.json"
   local results="$ROLLBACK_DIR/rollback-equivalence.tsv"
-  local fields=(image_id mounts_sha256 stop_grace_period container_stop_timeout config_sha256 env_sha256 override_sha256 exposure_sha256 container_env_sha256 compose_replica_count compose_client_addr_trust container_replica_count container_client_addr_trust compose_public_ws_2446 exposure_public_ws_2446 compose_logging_policy)
+  local fields=(image_id mounts_sha256 stop_grace_period container_stop_timeout config_sha256 env_sha256 override_sha256 exposure_sha256 container_env_sha256 container_logging_sha256 compose_replica_count compose_client_addr_trust container_replica_count container_client_addr_trust compose_public_ws_2446 exposure_public_ws_2446 compose_logging_policy compose_log_login_codes container_log_login_codes)
   local field before after state timeout_value grace
   local expected_count=${#fields[@]}
   ROLLBACK_COMPARE_FAILURES=0
@@ -2144,8 +2151,8 @@ compare_rollback_to_baseline() {
   if [ "$INITIALIZE_LOCAL" = 1 ]; then
     local render_file="$ROLLBACK_DIR/initial-local-target-render.snapshot.json"
     local target_render="$BASELINE_DIR/initial-local-target-render.snapshot.json"
-    local live_fields=(image_id mounts_sha256 container_stop_timeout exposure_sha256 exposure_public_ws_2446 container_env_sha256)
-    local render_fields=(config_sha256 env_sha256 override_sha256 stop_grace_period compose_replica_count compose_client_addr_trust compose_public_ws_2446 compose_logging_policy)
+    local live_fields=(image_id mounts_sha256 container_stop_timeout exposure_sha256 exposure_public_ws_2446 container_env_sha256 container_logging_sha256 container_log_login_codes)
+    local render_fields=(config_sha256 env_sha256 override_sha256 stop_grace_period compose_replica_count compose_client_addr_trust compose_public_ws_2446 compose_logging_policy compose_log_login_codes)
     [ "$(jq -er '.provenance.compose_source' "$baseline_file")" = live-container-inspection ] && \
       [ "$(jq -er '.provenance.compose_source' "$target_render")" = selected-compose-render ] && \
       [ "$(jq -er '.provenance.compose_source' "$rollback_file")" = selected-compose-render ] || {
@@ -2201,7 +2208,7 @@ compare_rollback_to_baseline() {
   record_rollback_row "$results" rollback_grace_policy 2m0s "$grace" || return 1
   timeout_value=$(jq -er '.container_stop_timeout' "$rollback_file") || { fail 'rollback inspected timeout is missing'; return 1; }
   record_rollback_row "$results" rollback_inspected_stop_timeout 120 "$timeout_value" || return 1
-  [ "$expected_count" -eq 16 ] || { fail 'internal rollback equivalence field count changed'; return 1; }
+  [ "$expected_count" -eq 19 ] || { fail 'internal rollback equivalence field count changed'; return 1; }
   [ "$ROLLBACK_COMPARE_FAILURES" -eq 0 ] || { fail 'rollback does not match the captured baseline'; return 1; }
 }
 
