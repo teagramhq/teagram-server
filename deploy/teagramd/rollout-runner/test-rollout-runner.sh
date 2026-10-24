@@ -435,7 +435,9 @@ if [ "${1:-}" = inspect ]; then
       esac
       env_json=$(jq -c --arg value "$origin_value" '. + ["TG_WEBSOCKET_ALLOWED_ORIGINS=" + $value]' <<< "$env_json")
     fi
-    if [ "$phase" = target ] && [ "${MOCK_SCENARIO:-}" != target-local-syslog-logging-unmigrated ]; then
+    if [ "$phase" = target ] && [ "$cfg" = target ] && \
+       [ "${MOCK_SCENARIO:-}" != target-local-syslog-logging-unmigrated ] && \
+       [ "${MOCK_SCENARIO:-}" != initial-local-unsafe-logging ]; then
       env_json=$(jq -c \
         'map(select(type != "string" or (startswith("TG_LOG_LOGIN_CODES=") | not))) + ["TG_LOG_LOGIN_CODES=false"]' \
         <<< "$env_json")
@@ -2233,6 +2235,8 @@ done
 make_fixture initial-local-unsafe-logging initial-local-unsafe-logging
 state=$(cat "$TMP/initial-local-unsafe-logging-state-path")
 root=$(cat "$TMP/initial-local-unsafe-logging-root-path")
+printf '%s\n' "$APPLY_TARGET_SHA" > "$state/origin"
+printf '%s\n' "$INITIAL_LOCAL_TARGET_SHA" > "$TMP/initial-local-unsafe-logging-target-sha-path"
 jq -c '.services.teagramd.environment.TG_LOG_LOGIN_CODES="true" | del(.services.teagramd.logging)' \
   "$state/target-compose.json" > "$state/target-compose.next.json"
 mv -- "$state/target-compose.next.json" "$state/target-compose.json"
