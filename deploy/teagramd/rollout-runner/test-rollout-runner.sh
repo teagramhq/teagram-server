@@ -435,7 +435,7 @@ if [ "${1:-}" = inspect ]; then
       esac
       env_json=$(jq -c --arg value "$origin_value" '. + ["TG_WEBSOCKET_ALLOWED_ORIGINS=" + $value]' <<< "$env_json")
     fi
-    if [[ "${MOCK_SCENARIO:-}" == initial-local-* ]] && [ "$phase" = target ]; then
+    if [ "$phase" = target ] && [ "${MOCK_SCENARIO:-}" != target-local-syslog-logging-unmigrated ]; then
       env_json=$(jq -c \
         'map(select(type != "string" or (startswith("TG_LOG_LOGIN_CODES=") | not))) + ["TG_LOG_LOGIN_CODES=false"]' \
         <<< "$env_json")
@@ -890,13 +890,11 @@ write_compose_fixture() {
   else
     cp -- "$base_config" "$target_config"
   fi
+  jq -c '.services.teagramd.logging={driver:"syslog",options:{"syslog-address":"unixgram:///dev/log","syslog-facility":"daemon","syslog-format":"rfc5424",tag:"teagramd"}} | .services.teagramd.environment.TG_LOG_LOGIN_CODES="false"' \
+    "$target_config" > "${target_config%.json}.logging.json"
+  mv -- "${target_config%.json}.logging.json" "$target_config"
   if [ "$scenario" = config-drift ]; then
     jq -c '.services.teagramd.environment.UNRELATED="changed"' "$target_config" > "${target_config%.json}.drift.json"
-  fi
-  if [[ "$scenario" == initial-local-* ]]; then
-    jq -c '.services.teagramd.logging={driver:"syslog",options:{"syslog-address":"unixgram:///dev/log","syslog-facility":"daemon","syslog-format":"rfc5424",tag:"teagramd"}} | .services.teagramd.environment.TG_LOG_LOGIN_CODES="false"' \
-      "$target_config" > "${target_config%.json}.logging.json"
-    mv -- "${target_config%.json}.logging.json" "$target_config"
   fi
 }
 
