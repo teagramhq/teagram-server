@@ -249,85 +249,216 @@ def sha256_directory(path: Path, *, max_entries: int = 200_000) -> str:
     return digest.hexdigest()
 
 
+def source_worktree_paths() -> set[bytes]:
+    paths: set[bytes] = set()
+
+    def walk_error(error: OSError) -> None:
+        raise error
+
+    for directory, child_directories, child_files in os.walk(
+        ROOT, topdown=True, followlinks=False, onerror=walk_error
+    ):
+        parent = Path(directory)
+        if parent == ROOT:
+            if ".git" in child_directories:
+                child_directories.remove(".git")
+            if ".git" in child_files:
+                child_files.remove(".git")
+        for name in tuple(child_directories):
+            item = parent / name
+            info = item.lstat()
+            if stat.S_ISLNK(info.st_mode):
+                paths.add(os.fsencode(item.relative_to(ROOT).as_posix()))
+                child_directories.remove(name)
+            elif not stat.S_ISDIR(info.st_mode):
+                raise ValueError("invalid source directory")
+        for name in child_files:
+            paths.add(os.fsencode((parent / name).relative_to(ROOT).as_posix()))
+    return paths
+
+
+def open_source_parent(raw_path: bytes) -> tuple[int, bytes]:
+    parts = raw_path.split(b"/")
+    if not raw_path or any(part in (b"", b".", b"..") for part in parts):
+        raise ValueError("invalid source path")
+    directory_fd = os.open(ROOT, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC | os.O_NOFOLLOW)
+    try:
+        for part in parts[:-1]:
+            next_fd = os.open(
+                part,
+                os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC | os.O_NOFOLLOW,
+                dir_fd=directory_fd,
+            )
+            os.close(directory_fd)
+            directory_fd = next_fd
+        return directory_fd, parts[-1]
+    except BaseException:
+        os.close(directory_fd)
+        raise
+
+
 def source_identity() -> tuple[str, str]:
-    environment = {"GIT_OPTIONAL_LOCKS": "0", "LANG": "C", "LC_ALL": "C", "PATH": "/usr/bin:/bin"}
-    revision = subprocess.run(
-        ["/usr/bin/git", "-c", f"safe.directory={ROOT}", "-C", str(ROOT), "rev-parse", "HEAD"],
-        check=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.DEVNULL,
-        env=environment,
-        timeout=10,
-    ).stdout.decode("ascii", "strict").strip()
+    environment = {
+        "GIT_CONFIG_GLOBAL": os.devnull,
+        "GIT_CONFIG_NOSYSTEM": "1",
+        "GIT_NO_LAZY_FETCH": "1",
+        "GIT_NO_REPLACE_OBJECTS": "1",
+        "GIT_OPTIONAL_LOCKS": "0",
+        "LANG": "C",
+        "LC_ALL": "C",
+        "PATH": "/usr/bin:/bin",
+    }
+    git = [
+        "/usr/bin/git",
+        "-c",
+        "core.fsmonitor=false",
+        "-c",
+        f"safe.directory={ROOT}",
+        "-C",
+        str(ROOT),
+    ]
+
+    def git_output(*arguments: str) -> bytes:
+        return subprocess.run(
+            [*git, *arguments],
+            check=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            env=environment,
+            timeout=30,
+        ).stdout
+
+    revision = git_output("rev-parse", "--verify", "--end-of-options", "HEAD^{commit}").decode(
+        "ascii", "strict"
+    ).strip()
     if not re.fullmatch(r"[0-9a-f]{40}", revision):
         raise ValueError("invalid source revision")
-    status = subprocess.run(
-        [
-            "/usr/bin/git",
-            "-c",
-            f"safe.directory={ROOT}",
-            "-C",
-            str(ROOT),
-            "status",
-            "--porcelain=v1",
-            "--untracked-files=all",
-            "--ignored=matching",
-        ],
-        check=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.DEVNULL,
-        env=environment,
-        timeout=30,
-    ).stdout
-    if status:
-        raise ValueError("source worktree is dirty")
-    paths = subprocess.run(
-        [
-            "/usr/bin/git",
-            "-c",
-            f"safe.directory={ROOT}",
-            "-C",
-            str(ROOT),
-            "ls-files",
-            "--cached",
-            "-z",
-        ],
-        check=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.DEVNULL,
-        env=environment,
-        timeout=30,
-    ).stdout.split(b"\0")
-    digest = hashlib.sha256()
-    seen: set[bytes] = set()
-    for raw_path in sorted(path for path in paths if path):
-        if raw_path in seen:
+    tree = git_output("ls-tree", "-rz", "--full-tree", revision)
+    entries: list[tuple[bytes, bytes, bytes]] = []
+    for record in tree.split(b"\0"):
+        if not record:
             continue
-        seen.add(raw_path)
-        relative = Path(os.fsdecode(raw_path))
-        if relative.is_absolute() or ".." in relative.parts:
-            raise ValueError("invalid source path")
-        item = ROOT / relative
-        info = item.lstat()
-        name = raw_path.replace(b"\\", b"/")
-        if stat.S_ISLNK(info.st_mode):
-            entry = b"L\0" + name + b"\0" + os.readlink(item).encode("utf-8", "strict") + b"\0"
-        elif stat.S_ISREG(info.st_mode):
-            file_hash, size = sha256_file(item)
-            entry = (
-                b"F\0"
-                + name
+        header, separator, raw_path = record.partition(b"\t")
+        fields = header.split(b" ")
+        if (
+            not separator
+            or len(fields) != 3
+            or fields[0] not in (b"100644", b"100755", b"120000")
+            or fields[1] != b"blob"
+            or not re.fullmatch(rb"[0-9a-f]{40}", fields[2])
+            or not raw_path
+        ):
+            raise ValueError("invalid source tree entry")
+        entries.append((raw_path, fields[0], fields[2]))
+    entries.sort(key=lambda entry: entry[0])
+    if len({path for path, _, _ in entries}) != len(entries):
+        raise ValueError("duplicate source tree path")
+    expected_paths = {path for path, _, _ in entries}
+    if source_worktree_paths() != expected_paths:
+        raise ValueError("source worktree is dirty")
+
+    digest = hashlib.sha256()
+    total_bytes = 0
+    for raw_path, mode, object_id in entries:
+        parent_fd, leaf = open_source_parent(raw_path)
+        file_fd: int | None = None
+        try:
+            info = os.stat(leaf, dir_fd=parent_fd, follow_symlinks=False)
+            is_symlink = mode == b"120000"
+            if is_symlink:
+                if not stat.S_ISLNK(info.st_mode):
+                    raise ValueError("source worktree is dirty")
+                link_bytes = os.fsencode(os.readlink(leaf, dir_fd=parent_fd))
+                if len(link_bytes) != info.st_size:
+                    raise ValueError("source worktree is dirty")
+                size = len(link_bytes)
+            else:
+                if (
+                    not stat.S_ISREG(info.st_mode)
+                    or bool(info.st_mode & 0o111) != (mode == b"100755")
+                    or info.st_nlink != 1
+                ):
+                    raise ValueError("source worktree is dirty")
+                size = info.st_size
+                file_fd = os.open(
+                    leaf,
+                    os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW | os.O_NONBLOCK,
+                    dir_fd=parent_fd,
+                )
+                opened_info = os.fstat(file_fd)
+                if (
+                    not stat.S_ISREG(opened_info.st_mode)
+                    or opened_info.st_nlink != 1
+                    or (opened_info.st_dev, opened_info.st_ino) != (info.st_dev, info.st_ino)
+                ):
+                    raise ValueError("source worktree is dirty")
+            if size < 0 or total_bytes + size > 2 * 1024 * 1024 * 1024:
+                raise ValueError("source tree exceeds size limit")
+            total_bytes += size
+
+            git_hash = hashlib.sha1(usedforsecurity=False)
+            git_hash.update(b"blob " + str(size).encode() + b"\0")
+            file_hash = hashlib.sha256()
+            if is_symlink:
+                git_hash.update(link_bytes)
+                file_hash.update(link_bytes)
+                after_info = os.stat(leaf, dir_fd=parent_fd, follow_symlinks=False)
+                if (after_info.st_dev, after_info.st_ino) != (info.st_dev, info.st_ino):
+                    raise ValueError("source worktree is dirty")
+            else:
+                read_size = 0
+                while True:
+                    chunk = os.read(file_fd, 1024 * 1024)
+                    if not chunk:
+                        break
+                    read_size += len(chunk)
+                    if read_size > size:
+                        raise ValueError("source worktree is dirty")
+                    git_hash.update(chunk)
+                    file_hash.update(chunk)
+                after_info = os.fstat(file_fd)
+                if (
+                    read_size != size
+                    or (
+                        after_info.st_dev,
+                        after_info.st_ino,
+                        after_info.st_size,
+                        after_info.st_mode,
+                        after_info.st_mtime_ns,
+                        after_info.st_ctime_ns,
+                    )
+                    != (
+                        opened_info.st_dev,
+                        opened_info.st_ino,
+                        opened_info.st_size,
+                        opened_info.st_mode,
+                        opened_info.st_mtime_ns,
+                        opened_info.st_ctime_ns,
+                    )
+                ):
+                    raise ValueError("source worktree is dirty")
+            if git_hash.hexdigest().encode() != object_id:
+                raise ValueError("source worktree is dirty")
+            digest.update(
+                (b"L" if is_symlink else b"F")
                 + b"\0"
-                + oct(stat.S_IMODE(info.st_mode)).encode()
+                + raw_path
+                + b"\0"
+                + mode
                 + b"\0"
                 + str(size).encode()
                 + b"\0"
-                + file_hash.encode()
+                + file_hash.hexdigest().encode()
                 + b"\0"
             )
-        else:
-            raise ValueError("invalid source entry")
-        digest.update(entry)
+        finally:
+            if file_fd is not None:
+                os.close(file_fd)
+            os.close(parent_fd)
+    if git_output("rev-parse", "--verify", "--end-of-options", "HEAD^{commit}").decode(
+        "ascii", "strict"
+    ).strip() != revision or source_worktree_paths() != expected_paths:
+        raise ValueError("source worktree is dirty")
     return revision, digest.hexdigest()
 
 

@@ -151,22 +151,65 @@ class RestoreReadinessContractTests(unittest.TestCase):
         self.assertIn("--teardown-prepared", shell)
         self.assertLess(shell.index("--validate-source"), shell.index("build pinned runtime binaries"))
 
-    def test_source_identity_rejects_modified_untracked_and_ignored_inputs(self) -> None:
-        revision = b"a" * 40
-        for status in (b" M tracked.go\n", b"?? untracked.go\n", b"!! ignored.go\n"):
-            with self.subTest(status=status):
-                with patch.object(
-                    RESTORE_READINESS.subprocess,
-                    "run",
-                    side_effect=(Mock(stdout=revision), Mock(stdout=status)),
-                ) as git_run:
-                    with self.assertRaisesRegex(ValueError, "source worktree is dirty"):
-                        RESTORE_READINESS.source_identity()
+    def test_source_identity_compares_head_blobs_without_running_fsmonitor(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "repo"
+            root.mkdir()
+            marker = Path(directory) / "fsmonitor-ran"
+            git_environment = {
+                key: value for key, value in os.environ.items() if not key.startswith("GIT_")
+            }
+            git_environment.update({
+                "GIT_CONFIG_NOSYSTEM": "1",
+                "GIT_CONFIG_GLOBAL": os.devnull,
+                "GIT_AUTHOR_NAME": "Restore Readiness Test",
+                "GIT_AUTHOR_EMAIL": "restore-readiness-test@example.invalid",
+                "GIT_COMMITTER_NAME": "Restore Readiness Test",
+                "GIT_COMMITTER_EMAIL": "restore-readiness-test@example.invalid",
+            })
 
-                status_command = git_run.call_args_list[1].args[0]
-                self.assertIn("status", status_command)
-                self.assertIn("--untracked-files=all", status_command)
-                self.assertIn("--ignored=matching", status_command)
+            def git(*arguments: str) -> None:
+                subprocess.run(
+                    ["/usr/bin/git", "-C", str(root), *arguments],
+                    check=True,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    env=git_environment,
+                    timeout=10,
+                )
+
+            git("init", "--quiet")
+            (root / "tracked.go").write_bytes(b"package tracked\n")
+            (root / ".gitignore").write_text("ignored.txt\n", encoding="utf-8")
+            git("add", "tracked.go", ".gitignore")
+            git("commit", "--quiet", "-m", "test fixture")
+
+            fsmonitor = Path(directory) / "fsmonitor"
+            fsmonitor.write_text(
+                f"#!/bin/sh\nprintf 'called\\n' > {marker}\nprintf 'token\\n'\n",
+                encoding="utf-8",
+            )
+            fsmonitor.chmod(0o755)
+            git("config", "core.fsmonitor", str(fsmonitor))
+
+            with patch.object(RESTORE_READINESS, "ROOT", root):
+                RESTORE_READINESS.source_identity()
+                self.assertFalse(marker.exists(), "privileged source inspection ran checkout fsmonitor")
+
+                git("update-index", "--assume-unchanged", "tracked.go")
+                (root / "tracked.go").write_bytes(b"package tampered\n")
+                with self.assertRaisesRegex(ValueError, "source worktree is dirty"):
+                    RESTORE_READINESS.source_identity()
+
+                git("update-index", "--no-assume-unchanged", "tracked.go")
+                (root / "tracked.go").write_bytes(b"package tracked\n")
+                (root / "untracked.txt").write_text("untracked\n", encoding="utf-8")
+                with self.assertRaisesRegex(ValueError, "source worktree is dirty"):
+                    RESTORE_READINESS.source_identity()
+                (root / "untracked.txt").unlink()
+                (root / "ignored.txt").write_text("ignored\n", encoding="utf-8")
+                with self.assertRaisesRegex(ValueError, "source worktree is dirty"):
+                    RESTORE_READINESS.source_identity()
 
     def test_unverified_drill_cleanup_keeps_prepared_runtime_for_recovery(self) -> None:
         shell = SHELL_GATE.read_text(encoding="utf-8")
