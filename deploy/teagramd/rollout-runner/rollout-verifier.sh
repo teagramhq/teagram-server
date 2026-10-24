@@ -71,11 +71,15 @@ verify_added_container_environment() {
 }
 
 verify_changed_container_environment() {
-  local inspect_json=$1 compose_json=$2 env_file=$3 changed_env_names=$4
+  local inspect_json=$1 compose_json=$2 env_file=$3 changed_env_names=$4 snapshot_name=$5
   [ "$changed_env_names" != "[]" ] || return 0
   if ! {
     printf '%s\n' "$inspect_json" "$compose_json"
-  } | jq -se --argjson changed "$changed_env_names" --rawfile env_content "$env_file" '
+  } | jq -se --argjson changed "$changed_env_names" --arg snapshot_name "$snapshot_name" \
+      --arg source "${ROLLOUT_CHANGED_ENV_SOURCE:-dotenv}" \
+      --arg override_value "${ROLLOUT_OVERRIDE_ORIGIN_VALUE:-}" \
+      --arg previous_override_value "${ROLLOUT_PREVIOUS_OVERRIDE_ORIGIN_VALUE:-}" \
+      --rawfile env_content "$env_file" '
     def item: if type == "array" then .[0] else . end;
     def dotenv_value($value):
       if ($value | length) >= 2 and
@@ -99,19 +103,31 @@ verify_changed_container_environment() {
                 | select(type == "string" and startswith($name + "="))
                 | .[($name | length) + 1:]
               ] as $actual
-            | (($name == "TG_REGISTRATION" and (dotenv_value($assignments[0]) | IN("open","closed"))) or
-               ($name == "TG_TURNSTILE_SIGNIN_ENABLED" and ($assignments[0] | IN("true","false"))) or
-               ($name == "TG_PUBLIC_REGISTRATION" and (dotenv_value($assignments[0]) | IN("invite","closed"))) or
-               ($name | IN("TG_PUBLIC_WEBSOCKET_LISTEN_ADDR", "TG_PUBLIC_WEBSOCKET_ADVERTISE_ADDR", "TG_PUBLIC_WEBSOCKET_ALLOWED_ORIGINS"))) and
-              ($assignments | length) == 1 and
-              ($compose_env | has($name)) and
-              ($compose_env[$name] == dotenv_value($assignments[0])) and
-              ($actual | length) == 1 and
-              ($actual[0] == dotenv_value($assignments[0]))
+            | if $source == "override" then
+                $name == "TG_WEBSOCKET_ALLOWED_ORIGINS" and
+                ($assignments | length) == 0 and
+                ($compose_env | has($name)) and
+                ($compose_env[$name] | type) == "string" and
+                $compose_env[$name] == $override_value and
+                ($actual | length) == 1 and
+                (if $snapshot_name == "baseline" or $snapshot_name == "preflight"
+                 then $actual[0] == $previous_override_value
+                 else $actual[0] == $compose_env[$name] end)
+              else
+                (($name == "TG_REGISTRATION" and (dotenv_value($assignments[0]) | IN("open","closed"))) or
+                 ($name == "TG_TURNSTILE_SIGNIN_ENABLED" and ($assignments[0] | IN("true","false"))) or
+                 ($name == "TG_PUBLIC_REGISTRATION" and (dotenv_value($assignments[0]) | IN("invite","closed"))) or
+                 ($name | IN("TG_WEBSOCKET_ALLOWED_ORIGINS", "TG_PUBLIC_WEBSOCKET_LISTEN_ADDR", "TG_PUBLIC_WEBSOCKET_ADVERTISE_ADDR", "TG_PUBLIC_WEBSOCKET_ALLOWED_ORIGINS"))) and
+                ($assignments | length) == 1 and
+                ($compose_env | has($name)) and
+                ($compose_env[$name] == dotenv_value($assignments[0])) and
+                ($actual | length) == 1 and
+                ($actual[0] == dotenv_value($assignments[0]))
+              end
           )
       end
   ' >/dev/null; then
-    printf '%s\n' 'named environment value changes do not match the resolved Compose environment' >&2
+    printf '%s\n' 'named environment value changes do not match the resolved Compose environment and source' >&2
     return 1
   fi
   return 0
@@ -488,7 +504,7 @@ snapshot_from_json() {
   ')
   if [ "$compose_source" = selected-compose-render ] && [ "$snapshot_name" = target ]; then
     verify_added_container_environment "$inspect_json" "$compose_json" "$env_file" "$added_env_names" || return 1
-    verify_changed_container_environment "$inspect_json" "$compose_json" "$env_file" "$changed_env_names" || return 1
+    verify_changed_container_environment "$inspect_json" "$compose_json" "$env_file" "$changed_env_names" "$snapshot_name" || return 1
   elif [ "$compose_source" = selected-compose-render ] && [ "$snapshot_name" = rollback ]; then
     retained_added_env_names=$(printf '%s' "$inspect_json" | jq -c --argjson added "$added_env_names" '
       def item: if type == "array" then .[0] else . end;
@@ -508,7 +524,10 @@ snapshot_from_json() {
     ') || return 1
     verify_added_container_environment \
       "$inspect_json" "$compose_json" "$env_file" "$retained_added_env_names" || return 1
-    verify_changed_container_environment "$inspect_json" "$compose_json" "$env_file" "$changed_env_names" || return 1
+    verify_changed_container_environment "$inspect_json" "$compose_json" "$env_file" "$changed_env_names" "$snapshot_name" || return 1
+  elif [ "$compose_source" = selected-compose-render ] && \
+       [ "${ROLLOUT_CHANGED_ENV_SOURCE:-dotenv}" = override ] && [ "$changed_env_names" != "[]" ]; then
+    verify_changed_container_environment "$inspect_json" "$compose_json" "$env_file" "$changed_env_names" "$snapshot_name" || return 1
   fi
   container_env=$(printf '%s' "$inspect_json" | jq -ce --argjson added "$added_env_names" --argjson changed "$changed_env_names" '
     def item: if type == "array" then .[0] else . end;
@@ -616,6 +635,7 @@ snapshot_from_json() {
       if (.services.teagramd.environment | type) != "object" then error("teagramd environment must be an object") else
         .services.teagramd.environment |= del(
           .TG_REPLICA_COUNT, .TG_CLIENT_ADDR_TRUST,
+          .TG_WEBSOCKET_ALLOWED_ORIGINS,
           .TG_PUBLIC_WEBSOCKET_LISTEN_ADDR, .TG_PUBLIC_REGISTRATION,
           .TG_PUBLIC_WEBSOCKET_ADVERTISE_ADDR,
           .TG_PUBLIC_WEBSOCKET_ALLOWED_ORIGINS, .TG_WELCOME_CHANNEL,

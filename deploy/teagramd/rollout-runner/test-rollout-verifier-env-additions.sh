@@ -338,6 +338,45 @@ public_registration_quoted_change_target=$(ROLLOUT_CHANGED_ENV=TG_PUBLIC_REGISTR
 [ "$(jq -r '.container_env_changed' <<< "$public_registration_quoted_change_target")" = TG_PUBLIC_REGISTRATION ]
 printf '%s\n' 'PASS quoted TG_PUBLIC_REGISTRATION change matches the target container'
 
+websocket_origins='https://teagram.tailaa4918.ts.net,https://web.teagram.io'
+printf 'TG_WEBSOCKET_ALLOWED_ORIGINS=%s\n' "$websocket_origins" > "$ENV_FILE"
+websocket_origins_compose=$(jq -c --arg value "$websocket_origins" \
+  '.services.teagramd.environment.TG_WEBSOCKET_ALLOWED_ORIGINS=$value' <<< "$public_ws_compose")
+websocket_origins_inspect=$(printf '%s' "$legacy_inspect" | jq -c --arg value "$websocket_origins" \
+  '.Config.Env += ["TG_WEBSOCKET_ALLOWED_ORIGINS=" + $value]')
+websocket_origins_target=$(ROLLOUT_CHANGED_ENV=TG_WEBSOCKET_ALLOWED_ORIGINS snapshot_from_json \
+  "$websocket_origins_inspect" "$websocket_origins_compose" \
+  "$ENV_FILE" "$OVERRIDE_FILE" selected-compose-render target)
+[ "$(jq -r '.container_env_changed' <<< "$websocket_origins_target")" = TG_WEBSOCKET_ALLOWED_ORIGINS ]
+printf '%s\n' 'PASS changed TG_WEBSOCKET_ALLOWED_ORIGINS matches the resolved Compose and target container'
+
+websocket_origin_before='https://teagram.tailaa4918.ts.net'
+websocket_origin_after='https://teagram.tailaa4918.ts.net,https://web.teagram.io'
+printf 'services:\n  teagramd:\n    environment:\n      TG_WEBSOCKET_ALLOWED_ORIGINS: %s\n' \
+  "$websocket_origin_after" > "$OVERRIDE_FILE"
+printf 'TG_NEW_FLAG=on\n' > "$ENV_FILE"
+override_origins_compose=$(jq -c --arg value "$websocket_origin_after" \
+  '.services.teagramd.environment.TG_WEBSOCKET_ALLOWED_ORIGINS=$value' <<< "$public_ws_compose")
+override_origins_baseline_inspect=$(printf '%s' "$legacy_inspect" | jq -c --arg value "$websocket_origin_before" \
+  '.Config.Env += ["TG_WEBSOCKET_ALLOWED_ORIGINS=" + $value]')
+override_origins_target_inspect=$(printf '%s' "$legacy_inspect" | jq -c --arg value "$websocket_origin_after" \
+  '.Config.Env += ["TG_WEBSOCKET_ALLOWED_ORIGINS=" + $value]')
+override_origins_baseline=$(ROLLOUT_CHANGED_ENV=TG_WEBSOCKET_ALLOWED_ORIGINS \
+  ROLLOUT_CHANGED_ENV_SOURCE=override \
+  ROLLOUT_OVERRIDE_ORIGIN_VALUE="$websocket_origin_after" \
+  ROLLOUT_PREVIOUS_OVERRIDE_ORIGIN_VALUE="$websocket_origin_before" snapshot_from_json \
+  "$override_origins_baseline_inspect" "$override_origins_compose" \
+  "$ENV_FILE" "$OVERRIDE_FILE" selected-compose-render baseline)
+override_origins_target=$(ROLLOUT_CHANGED_ENV=TG_WEBSOCKET_ALLOWED_ORIGINS \
+  ROLLOUT_CHANGED_ENV_SOURCE=override \
+  ROLLOUT_OVERRIDE_ORIGIN_VALUE="$websocket_origin_after" \
+  ROLLOUT_PREVIOUS_OVERRIDE_ORIGIN_VALUE="$websocket_origin_before" snapshot_from_json \
+  "$override_origins_target_inspect" "$override_origins_compose" \
+  "$ENV_FILE" "$OVERRIDE_FILE" selected-compose-render target)
+[ "$(jq -r '.container_env_changed' <<< "$override_origins_baseline")" = none ]
+[ "$(jq -r '.container_env_changed' <<< "$override_origins_target")" = TG_WEBSOCKET_ALLOWED_ORIGINS ]
+printf '%s\n' 'PASS override-only WebSocket origin baseline and target are checked against their effective source'
+
 printf '%s\n' \
   'TG_PUBLIC_WEBSOCKET_LISTEN_ADDR=0.0.0.0:2444' \
   'TG_PUBLIC_WEBSOCKET_ADVERTISE_ADDR=server.example.com:443' \

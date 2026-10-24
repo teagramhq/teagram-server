@@ -604,11 +604,24 @@ live container (empty site key and secret path, sign-in `false`, secret mounted
 from `/dev/null`) count as unset, so a Turnstile name can be added over them.
 
 The runner allows changing `TG_REGISTRATION` between `closed` and `open`,
-`TG_TURNSTILE_SIGNIN_ENABLED` between `false` and `true`, and public WebSocket
-settings through the same named path. `TG_PUBLIC_REGISTRATION` may change only
-between `closed` and `invite`; the other three public settings accept a new
-string value, including empty to disable them. `open` is never accepted for
-`TG_PUBLIC_REGISTRATION`. Back up the verified `.env` to a root-owned
+`TG_TURNSTILE_SIGNIN_ENABLED` between `false` and `true`, and WebSocket origin
+allowlists through the same named path. `TG_WEBSOCKET_ALLOWED_ORIGINS` accepts
+a new string value; when it is assigned in `.env`, the runner restores the
+previous `.env` before recreating the baseline container. If the effective
+value is assigned only in `docker-compose.override.yml`, back up that file to a
+root-owned mode-0600 file, change only its origin assignment, and pass the
+backup as `ROLLOUT_RUNNER_PREVIOUS_OVERRIDE_FILE` instead. The runner requires
+the `.env` to remain unchanged and contain no origin assignment, checks the
+backup digest against the last verified Compose snapshot, and verifies that
+only the override's named origin value changed. It confirms the old override
+value matches the running baseline and that the replacement matches resolved
+Compose. A failed rollout restores the previous override before recreating the
+baseline container, then checks its recorded override digest. Public WebSocket
+settings are also supported. `TG_PUBLIC_REGISTRATION` may change only between
+`closed` and `invite`; the other three public settings accept a new string
+value, including empty to disable them. `open` is never accepted for
+`TG_PUBLIC_REGISTRATION`.
+Back up the verified `.env` to a root-owned
 mode-0600 file, change only that assignment in place, then pass the changed
 name and backup to the same `apply`:
 
@@ -631,6 +644,17 @@ retains the changed value; otherwise rollback verification fails closed.
 To deactivate public sign-in after activation, set
 `ROLLOUT_RUNNER_CHANGED_ENV=TG_TURNSTILE_SIGNIN_ENABLED` and change only its
 assignment from `true` to `false`; the signup credentials remain in place.
+
+For an override-only WebSocket origin change, retain the `.env` unchanged and
+use the previous override backup:
+
+```sh
+sudo env ROLLOUT_RUNNER_SOURCE_SHA="$TOOL_SHA" COMPOSE_FILE="$COMPOSE_FILE" \
+  ROLLOUT_RUNNER_CHANGED_ENV=TG_WEBSOCKET_ALLOWED_ORIGINS \
+  ROLLOUT_RUNNER_PREVIOUS_OVERRIDE_FILE=/root/docker-compose.override.yml.bak-<date> \
+  bash /root/teagramd-rollout-runner/rollout-runner.sh apply \
+  "$TARGET_SHA" "$EXPECTED_BASELINE_SHA"
+```
 
 ## Registration-open threat model
 
