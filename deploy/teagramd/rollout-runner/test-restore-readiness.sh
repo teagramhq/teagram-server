@@ -270,6 +270,7 @@ if not (report.get("result") == "pass" and report.get("input_mode") == "local" a
     build_inputs
     preflight_stage="run local auth-key signal fault drill"
     if auth_clear_signal_report=$(run_drill --local-fixture-test --fault-test auth-clear-signal); then
+      printf 'restore readiness local signal fault unexpectedly passed: %s\n' "$auth_clear_signal_report" >&2
       emit_preflight_failure
     fi
     if ! printf '%s' "$auth_clear_signal_report" | /usr/bin/python3 -c '
@@ -278,6 +279,7 @@ report = json.load(sys.stdin)
 if not (report.get("result") == "fail" and report.get("phase") == "auth_key_clearing" and report.get("category") == "interrupted" and report.get("cleanup") == "verified" and "input_mode" not in report and report.get("exit") == 1):
     raise SystemExit(1)
 '; then
+      printf 'restore readiness local signal fault returned unexpected report: %s\n' "$auth_clear_signal_report" >&2
       emit_preflight_failure
     fi
     printf '%s\n' "$auth_clear_signal_report"
