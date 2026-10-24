@@ -1168,7 +1168,6 @@ func TestS3WalkPrefixUsesPerPageDeadlines(t *testing.T) {
 }
 
 func TestS3WalkHeaderReadsOutliveListingDeadline(t *testing.T) {
-	t.Parallel()
 	const (
 		objects          = 1000
 		headerReadDelay  = 2 * time.Millisecond
@@ -1176,7 +1175,7 @@ func TestS3WalkHeaderReadsOutliveListingDeadline(t *testing.T) {
 	)
 	var listing strings.Builder
 	listing.WriteString(`<ListBucketResult><IsTruncated>false</IsTruncated>`)
-	listingPadding := strings.Repeat("x", 12*1024)
+	listingPadding := strings.Repeat("x", 256)
 	for i := range objects {
 		fmt.Fprintf(&listing, `<Contents><Key>tenant/object-%04d</Key><LastModified>2026-10-24T00:00:00Z</LastModified><Size>102</Size><ETag>%s</ETag></Contents>`, i, listingPadding)
 	}
@@ -1218,7 +1217,7 @@ func TestS3WalkHeaderReadsOutliveListingDeadline(t *testing.T) {
 	if err != nil {
 		t.Fatalf("new S3 store: %v", err)
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	var reads int
 	err = store.Walk(ctx, func(entry blob.Entry) error {
