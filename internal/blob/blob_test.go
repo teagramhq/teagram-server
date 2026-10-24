@@ -26,6 +26,17 @@ func newLocal(t *testing.T) (*blob.Local, string) {
 	return l, filepath.Join(dir, "blobs")
 }
 
+func TestOpenLocalDoesNotCreateMissingRoot(t *testing.T) {
+	t.Parallel()
+	root := filepath.Join(t.TempDir(), "missing-blobs")
+	if _, err := blob.OpenLocal(root); err == nil {
+		t.Fatal("OpenLocal succeeded for a missing root")
+	}
+	if _, err := os.Stat(root); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("OpenLocal created root, stat error = %v", err)
+	}
+}
+
 func TestPutReadAt(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()

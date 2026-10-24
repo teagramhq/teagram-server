@@ -505,12 +505,14 @@ func (s *S3) Remove(ctx context.Context, key string) (retErr error) {
 // Walk enumerates every object in the configured namespace. Unlike
 // WalkPrefix, this is deliberately not part of blob.Store: it is the full-tree
 // view needed by the read-only classifier, while ordinary callers only receive
-// containment-scoped enumeration.
+// containment-scoped enumeration. It finishes each bounded S3 page before
+// invoking fn so inspection requests do not extend the listing request's
+// timeout.
 func (s *S3) Walk(ctx context.Context, fn func(Entry) error) error {
 	if fn == nil {
 		return s.operationError("walk", errS3UnscopedPrefix)
 	}
-	return s.walkList(ctx, s.prefix, "", fn)
+	return s.walkListAfterPage(ctx, s.prefix, "", fn)
 }
 
 // WalkPrefix pages ListObjectsV2 results and invokes fn for each object without
@@ -563,6 +565,44 @@ func (s *S3) walkList(ctx context.Context, listPrefix, localPrefix string, fn fu
 		pageCancel()
 		if pageErr != nil {
 			return pageErr
+		}
+		if !truncated {
+			return nil
+		}
+		if next == "" {
+			return s.operationError("walk", errS3MissingListPage)
+		}
+		token = next
+	}
+}
+
+// walkListAfterPage buffers at most one ListObjectsV2 page and invokes fn only
+// after the page response is closed and its request context is canceled. The
+// inventory callback reads each object's header, which needs its own S3
+// operation timeout rather than time remaining on the listing request.
+func (s *S3) walkListAfterPage(ctx context.Context, listPrefix, localPrefix string, fn func(Entry) error) error {
+	var token string
+	for {
+		query := encodeS3Query([]s3Query{
+			{key: "list-type", value: "2"},
+			{key: "prefix", value: listPrefix},
+			{key: "max-keys", value: strconv.Itoa(s3ListPageSize)},
+			{key: "continuation-token", value: token},
+		})
+		entries := make([]Entry, 0, s3ListPageSize)
+		pageCtx, pageCancel := context.WithTimeout(ctx, s.operationTimeout)
+		truncated, next, pageErr := s.listPage(pageCtx, query, listPrefix, localPrefix, func(entry Entry) error {
+			entries = append(entries, entry)
+			return nil
+		})
+		pageCancel()
+		if pageErr != nil {
+			return pageErr
+		}
+		for _, entry := range entries {
+			if err := fn(entry); err != nil {
+				return err
+			}
 		}
 		if !truncated {
 			return nil

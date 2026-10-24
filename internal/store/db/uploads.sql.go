@@ -11,6 +11,52 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
+const blobInventoryReferences = `-- name: BlobInventoryReferences :many
+SELECT 'file'::text AS kind, f.id AS file_id, ''::text AS blob_key, f.size AS logical_bytes
+FROM files f
+WHERE f.stored = true
+UNION ALL
+SELECT 'part'::text AS kind, 0::bigint AS file_id, up.blob_key, up.size AS logical_bytes
+FROM upload_parts up
+WHERE up.blob_key <> ''
+ORDER BY kind, file_id, blob_key
+`
+
+type BlobInventoryReferencesRow struct {
+	Kind         string
+	FileID       int64
+	BlobKey      string
+	LogicalBytes int64
+}
+
+// BlobInventoryReferences lists only rows that name an object in the blob
+// store. A files row is an object reference only after stored=true; the empty
+// upload_parts key is the legacy no-object state from the storage migration.
+func (q *Queries) BlobInventoryReferences(ctx context.Context) ([]BlobInventoryReferencesRow, error) {
+	rows, err := q.db.Query(ctx, blobInventoryReferences)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []BlobInventoryReferencesRow
+	for rows.Next() {
+		var i BlobInventoryReferencesRow
+		if err := rows.Scan(
+			&i.Kind,
+			&i.FileID,
+			&i.BlobKey,
+			&i.LogicalBytes,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const claimExpiredUploadParts = `-- name: ClaimExpiredUploadParts :many
 
 SELECT old.user_id, old.file_id, old.part_index, old.blob_key

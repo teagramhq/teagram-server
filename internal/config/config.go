@@ -813,6 +813,17 @@ func loadRecoveryEmailMode() (RecoveryEmailMode, error) {
 // logger is used only when a missing auth-key master key file is generated for
 // a non-replica development start, which has to be logged as such.
 func Load(log *slog.Logger) (Config, error) {
+	return load(log, true)
+}
+
+// LoadReadOnly reads the same configuration as Load but never creates an
+// auth-key master key file. Maintenance commands that must not write can use
+// it and require that key to be provisioned already.
+func LoadReadOnly(log *slog.Logger) (Config, error) {
+	return load(log, false)
+}
+
+func load(log *slog.Logger, allowKeyGeneration bool) (Config, error) {
 	for _, name := range [...]string{
 		"TG_BOOTSTRAP_USERNAME",
 		"TG_BOOTSTRAP_PASSWORD",
@@ -1562,7 +1573,7 @@ func Load(log *slog.Logger) (Config, error) {
 	if cfg.PostgresDSN == "" {
 		return Config{}, errors.New("TG_POSTGRES_DSN is required")
 	}
-	encKey, err := loadEncKey(log, cfg.ReplicaID == "" && cfg.ExpectedRSAFingerprint == nil)
+	encKey, err := loadEncKey(log, allowKeyGeneration && cfg.ReplicaID == "" && cfg.ExpectedRSAFingerprint == nil)
 	if err != nil {
 		return Config{}, err
 	}
