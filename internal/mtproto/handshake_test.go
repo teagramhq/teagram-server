@@ -109,7 +109,7 @@ func TestHandshakeFrameDropsRegistration(t *testing.T) {
 	// The key is now revoked in the store. Instead of another encrypted frame,
 	// the client runs full key exchanges on the same socket: each one is a
 	// zero-auth-key-id frame, so the serve loop never calls keys.Get again.
-	for i := range 3 {
+	for i := range 2 {
 		if _, err := exchange.NewExchanger(client, 2).
 			Client([]exchange.PublicKey{priv.Public()}).
 			Run(ctx); err != nil {

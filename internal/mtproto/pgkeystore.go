@@ -20,6 +20,7 @@ type pgAuthKeyStore struct {
 
 var _ AuthKeyStore = (*pgAuthKeyStore)(nil)
 var _ AuthKeyMetadataToucher = (*pgAuthKeyStore)(nil)
+var _ keyExchangeRateLimitStore = (*pgAuthKeyStore)(nil)
 
 // NewPgAuthKeyStore returns an AuthKeyStore that reads and writes auth keys via s.
 func NewPgAuthKeyStore(s *store.Store) AuthKeyStore {
@@ -104,4 +105,13 @@ func (p *pgAuthKeyStore) CheckDiscoveryRateLimit(
 	perNetwork store.RateLimitConfig,
 ) (*store.RateLimitResult, error) {
 	return p.s.CheckDiscoveryRateLimit(ctx, addr, global, perNetwork)
+}
+
+func (p *pgAuthKeyStore) CheckIPRateLimit(
+	ctx context.Context,
+	addr netip.Addr,
+	surface string,
+	cfg store.RateLimitConfig,
+) (*store.RateLimitResult, error) {
+	return p.s.CheckIPRateLimit(ctx, addr, surface, cfg)
 }

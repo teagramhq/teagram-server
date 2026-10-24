@@ -673,6 +673,93 @@ func TestLoadPreAuthLimits(t *testing.T) {
 	}
 }
 
+func TestLoadKeyExchangeLimits(t *testing.T) {
+	t.Setenv("TG_POSTGRES_DSN", "postgres://localhost/tg")
+	t.Setenv("TG_AUTHKEY_ENC_KEY", validEncKey)
+	defaults := mtproto.DefaultExchangeLimits()
+	tests := map[string]struct {
+		env     string
+		raw     string
+		want    mtproto.ExchangeLimits
+		wantErr bool
+	}{
+		"defaults": {want: defaults},
+		"connection override": {
+			env: "TG_KEY_EXCHANGE_PER_CONNECTION", raw: "4",
+			want: func() mtproto.ExchangeLimits { v := defaults; v.PerConnection = 4; return v }(),
+		},
+		"connection disabled": {
+			env: "TG_KEY_EXCHANGE_PER_CONNECTION", raw: "0",
+			want: func() mtproto.ExchangeLimits { v := defaults; v.PerConnection = 0; return v }(),
+		},
+		"connection invalid":  {env: "TG_KEY_EXCHANGE_PER_CONNECTION", raw: "many", wantErr: true},
+		"connection negative": {env: "TG_KEY_EXCHANGE_PER_CONNECTION", raw: "-1", wantErr: true},
+		"network override": {
+			env: "TG_RATE_LIMIT_KEY_EXCHANGE_IP", raw: "12",
+			want: func() mtproto.ExchangeLimits { v := defaults; v.PerNetwork.Limit = 12; return v }(),
+		},
+		"network disabled": {
+			env: "TG_RATE_LIMIT_KEY_EXCHANGE_IP", raw: "0",
+			want: func() mtproto.ExchangeLimits { v := defaults; v.PerNetwork.Limit = 0; return v }(),
+		},
+		"network invalid":  {env: "TG_RATE_LIMIT_KEY_EXCHANGE_IP", raw: "many", wantErr: true},
+		"network negative": {env: "TG_RATE_LIMIT_KEY_EXCHANGE_IP", raw: "-1", wantErr: true},
+		"window override": {
+			env: "TG_RATE_LIMIT_KEY_EXCHANGE_IP_WINDOW", raw: "30m",
+			want: func() mtproto.ExchangeLimits { v := defaults; v.PerNetwork.Window = 30 * time.Minute; return v }(),
+		},
+		"window disabled": {
+			env: "TG_RATE_LIMIT_KEY_EXCHANGE_IP_WINDOW", raw: "0s",
+			want: func() mtproto.ExchangeLimits { v := defaults; v.PerNetwork.Window = 0; return v }(),
+		},
+		"window invalid":  {env: "TG_RATE_LIMIT_KEY_EXCHANGE_IP_WINDOW", raw: "soon", wantErr: true},
+		"window negative": {env: "TG_RATE_LIMIT_KEY_EXCHANGE_IP_WINDOW", raw: "-1m", wantErr: true},
+		"global rate override": {
+			env: "TG_KEY_EXCHANGE_GLOBAL_RATE", raw: "8",
+			want: func() mtproto.ExchangeLimits { v := defaults; v.GlobalRate = 8; return v }(),
+		},
+		"global rate disabled": {
+			env: "TG_KEY_EXCHANGE_GLOBAL_RATE", raw: "0",
+			want: func() mtproto.ExchangeLimits { v := defaults; v.GlobalRate = 0; return v }(),
+		},
+		"global rate invalid":  {env: "TG_KEY_EXCHANGE_GLOBAL_RATE", raw: "many", wantErr: true},
+		"global rate negative": {env: "TG_KEY_EXCHANGE_GLOBAL_RATE", raw: "-1", wantErr: true},
+		"global burst override": {
+			env: "TG_KEY_EXCHANGE_GLOBAL_BURST", raw: "40",
+			want: func() mtproto.ExchangeLimits { v := defaults; v.GlobalBurst = 40; return v }(),
+		},
+		"global burst disabled": {
+			env: "TG_KEY_EXCHANGE_GLOBAL_BURST", raw: "0",
+			want: func() mtproto.ExchangeLimits { v := defaults; v.GlobalBurst = 0; return v }(),
+		},
+		"global burst invalid":  {env: "TG_KEY_EXCHANGE_GLOBAL_BURST", raw: "many", wantErr: true},
+		"global burst negative": {env: "TG_KEY_EXCHANGE_GLOBAL_BURST", raw: "-1", wantErr: true},
+	}
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			if tc.env != "" {
+				t.Setenv(tc.env, tc.raw)
+			}
+			cfg, err := config.Load(discardLog())
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("Load succeeded with %s=%q: %+v", tc.env, tc.raw, cfg.KeyExchangeLimits)
+				}
+				if !strings.Contains(err.Error(), tc.env) {
+					t.Errorf("error %q does not name %s", err, tc.env)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("Load: %v", err)
+			}
+			if cfg.KeyExchangeLimits != tc.want {
+				t.Errorf("key exchange limits = %+v, want %+v", cfg.KeyExchangeLimits, tc.want)
+			}
+		})
+	}
+}
+
 // TestLoadMaxConnsPerUnboundKey covers the bound that picks up where the
 // pre-auth ones stop: what a key nobody has signed in on may hold. Zero is a
 // real setting here too and turns it off, so a typo that would read as "off"
