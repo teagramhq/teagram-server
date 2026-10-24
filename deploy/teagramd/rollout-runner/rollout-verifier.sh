@@ -750,6 +750,14 @@ snapshot_from_json() {
         ((.protocol // "tcp") == "tcp") and
         ((.mode // "") == "" or (.mode // "") == "ingress") and
         ((keys - ["target", "published", "host_ip", "protocol", "mode"]) | length) == 0;
+      def empty_key_exchange_default:
+        (.key | IN(
+          "TG_RATE_LIMIT_KEY_EXCHANGE_IP",
+          "TG_RATE_LIMIT_KEY_EXCHANGE_IP_WINDOW",
+          "TG_KEY_EXCHANGE_PER_CONNECTION",
+          "TG_KEY_EXCHANGE_GLOBAL_RATE",
+          "TG_KEY_EXCHANGE_GLOBAL_BURST"
+        )) and .value == "";
       if (.services.teagramd.environment | type) != "object" then error("teagramd environment must be an object") else
         .services.teagramd.environment |= del(
           .TG_REPLICA_COUNT, .TG_CLIENT_ADDR_TRUST,
@@ -761,6 +769,9 @@ snapshot_from_json() {
           .TG_TURNSTILE_SITE_KEY, .TG_TURNSTILE_SECRET_KEY_FILE,
           .TG_TURNSTILE_SIGNIN_ENABLED)
       end
+      # Empty key-exchange mappings use binary defaults; active values remain
+      # subject to the Compose and container environment checks.
+      | .services.teagramd.environment |= with_entries(select(empty_key_exchange_default | not))
       # Reviewed logger and login-code transitions are checked separately.
       # Keep both out of the unrelated config digest.
       | .services.teagramd |= del(.logging)

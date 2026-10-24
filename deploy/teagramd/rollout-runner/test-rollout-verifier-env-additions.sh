@@ -92,15 +92,16 @@ public_setting_snapshot() {
 }
 
 exchange_budget_snapshot() {
-  local name=$1 value=$2 added=${3:-} env_content=${4:-} actual inspected compose_json
+  local name=$1 value=$2 added=${3:-} env_content=${4:-} actual_value actual inspected compose_json
+  actual_value=${5:-$value}
   if [ -n "$env_content" ]; then
     printf '%s\n' "$env_content" > "$ENV_FILE"
   else
     : > "$ENV_FILE"
   fi
   actual=
-  if [ -n "$value" ]; then
-    actual="TG_RATE_LIMIT_KEY_EXCHANGE_IP=$value"
+  if [ -n "$actual_value" ]; then
+    actual="TG_RATE_LIMIT_KEY_EXCHANGE_IP=$actual_value"
   fi
   inspected=$(inspect_json "$actual")
   inspected=$(jq -c --arg value "$value" '
@@ -131,6 +132,17 @@ empty_exchange_env=$(exchange_budget_snapshot target '' '')
 [ "$(jq -r '.container_env_sha256' <<< "$empty_env")" = \
   "$(jq -r '.container_env_sha256' <<< "$empty_exchange_env")" ]
 [ "$(jq -r '.container_env_added' <<< "$empty_exchange_env")" = none ]
+printf '%s\n' "$empty_env" > "$TMP/key-exchange-baseline.snapshot.json"
+printf '%s\n' "$empty_exchange_env" > "$TMP/key-exchange-empty-target.snapshot.json"
+if ! compare_snapshots \
+  "$TMP/key-exchange-baseline.snapshot.json" "$TMP/key-exchange-empty-target.snapshot.json" \
+  sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb \
+  "$TMP/key-exchange-empty-comparisons.tsv"; then
+  printf '%s\n' 'FAIL full baseline-to-target comparison rejected empty key-exchange mappings' >&2
+  cat "$TMP/key-exchange-empty-comparisons.tsv" >&2
+  exit 1
+fi
+printf '%s\n' 'PASS full baseline-to-target comparison accepts empty key-exchange mappings'
 printf '%s\n' 'PASS empty key-exchange settings retain the binary-default environment baseline'
 
 added_exchange_env=$(exchange_budget_snapshot target 0 TG_RATE_LIMIT_KEY_EXCHANGE_IP \
@@ -138,6 +150,14 @@ added_exchange_env=$(exchange_budget_snapshot target 0 TG_RATE_LIMIT_KEY_EXCHANG
 [ "$(jq -r '.container_env_sha256' <<< "$empty_env")" = \
   "$(jq -r '.container_env_sha256' <<< "$added_exchange_env")" ]
 [ "$(jq -r '.container_env_added' <<< "$added_exchange_env")" = TG_RATE_LIMIT_KEY_EXCHANGE_IP ]
+[ "$(jq -r '.config_sha256' <<< "$empty_env")" != \
+  "$(jq -r '.config_sha256' <<< "$added_exchange_env")" ]
+if exchange_budget_snapshot target 0 TG_RATE_LIMIT_KEY_EXCHANGE_IP \
+  'TG_RATE_LIMIT_KEY_EXCHANGE_IP=0' 1 >/dev/null 2>"$TMP/key-exchange-mismatch.err"; then
+  printf '%s\n' 'FAIL target with a mismatched configured key-exchange value was accepted' >&2
+  exit 1
+fi
+printf '%s\n' 'PASS configured key-exchange values remain pinned and must match the target container'
 printf '%s\n' 'PASS named key-exchange override is verified without changing the remaining environment baseline'
 
 snapshot=$(target_snapshot 'TG_NEW_FLAG=on')
