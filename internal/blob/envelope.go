@@ -53,9 +53,8 @@ const (
 	// writer default needs no format bump.
 	MinChunkSize = 4 << 10
 	MaxChunkSize = 4 << 20
-	// DefaultChunkSize is the chunk size new objects are written with until a
-	// measured default replaces it.
-	DefaultChunkSize = 64 << 10
+	// DefaultChunkSize is the measured size new objects are written with.
+	DefaultChunkSize = 16 << 10
 )
 
 // Encrypted is a [Store] decorator that writes every object as an

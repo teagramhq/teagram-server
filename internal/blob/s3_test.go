@@ -241,10 +241,10 @@ type minioHarness struct {
 	container testcontainers.Container
 }
 
-func newMinioStore(t *testing.T) *blob.S3 {
-	t.Helper()
-	harness := newMinioHarness(t)
-	prefix := "conformance/" + harness.namespace + "/" + strings.NewReplacer("/", "-", "_", "-").Replace(t.Name()) + "/"
+func newMinioStore(tb testing.TB) *blob.S3 {
+	tb.Helper()
+	harness := newMinioHarness(tb)
+	prefix := "conformance/" + harness.namespace + "/" + strings.NewReplacer("/", "-", "_", "-").Replace(tb.Name()) + "/"
 	store, err := blob.NewS3(blob.S3Config{
 		Endpoint:          harness.endpoint,
 		Bucket:            "blob-conformance",
@@ -257,13 +257,13 @@ func newMinioStore(t *testing.T) *blob.S3 {
 		MaxAttempts:       3,
 	})
 	if err != nil {
-		t.Fatalf("new MinIO store: %v", err)
+		tb.Fatalf("new MinIO store: %v", err)
 	}
 	return store
 }
 
-func newMinioHarness(t *testing.T) *minioHarness {
-	t.Helper()
+func newMinioHarness(tb testing.TB) *minioHarness {
+	tb.Helper()
 	ctx := context.Background()
 	container, err := testcontainers.GenericContainer(ctx, testcontainers.GenericContainerRequest{
 		Image:        "quay.io/minio/minio:latest",
@@ -278,31 +278,31 @@ func newMinioHarness(t *testing.T) *minioHarness {
 	})
 	if err != nil {
 		if container != nil {
-			logMinioFailure(t, container, "")
+			logMinioFailure(tb, container, "")
 			if cleanupErr := container.Terminate(context.Background()); cleanupErr != nil {
-				t.Logf("MinIO cleanup after startup failure: %v", cleanupErr)
+				tb.Logf("MinIO cleanup after startup failure: %v", cleanupErr)
 			}
 		}
-		t.Fatalf("start MinIO container: %v", err)
+		tb.Fatalf("start MinIO container: %v", err)
 	}
 
 	harness := &minioHarness{container: container}
-	t.Cleanup(func() {
-		if t.Failed() {
-			logMinioFailure(t, harness.container, harness.endpoint)
+	tb.Cleanup(func() {
+		if tb.Failed() {
+			logMinioFailure(tb, harness.container, harness.endpoint)
 		}
 		if err := harness.container.Terminate(context.Background()); err != nil {
-			t.Logf("terminate MinIO container %s: %v", harness.container.GetContainerID(), err)
+			tb.Logf("terminate MinIO container %s: %v", harness.container.GetContainerID(), err)
 		}
 	})
 
 	host, err := container.Host(ctx)
 	if err != nil {
-		t.Fatalf("get MinIO host: %v", err)
+		tb.Fatalf("get MinIO host: %v", err)
 	}
 	port, err := container.MappedPort(ctx, "9000/tcp")
 	if err != nil {
-		t.Fatalf("get MinIO port: %v", err)
+		tb.Fatalf("get MinIO port: %v", err)
 	}
 	harness.endpoint = "http://" + net.JoinHostPort(host, port.Port())
 	harness.namespace = "run-" + strconv.FormatInt(time.Now().UnixNano(), 36)
@@ -319,22 +319,22 @@ func newMinioHarness(t *testing.T) *minioHarness {
 		MaxAttempts:       3,
 	})
 	if err != nil {
-		t.Fatalf("new MinIO admin store: %v", err)
+		tb.Fatalf("new MinIO admin store: %v", err)
 	}
 	if err := blob.CreateBucketForTest(ctx, admin); err != nil {
-		t.Fatalf("create MinIO bucket: %v", err)
+		tb.Fatalf("create MinIO bucket: %v", err)
 	}
 	return harness
 }
 
-func logMinioFailure(t *testing.T, container testcontainers.Container, endpoint string) {
-	t.Helper()
+func logMinioFailure(tb testing.TB, container testcontainers.Container, endpoint string) {
+	tb.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 
 	state, err := container.State(ctx)
 	if err != nil {
-		t.Logf("MinIO failure cause: unable to inspect container: %v", err)
+		tb.Logf("MinIO failure cause: unable to inspect container: %v", err)
 	} else {
 		cause := "MinIO was running; the S3 operation failed after readiness"
 		switch {
@@ -345,52 +345,52 @@ func logMinioFailure(t *testing.T, container testcontainers.Container, endpoint 
 		case state.Error != "":
 			cause = "MinIO container reported a runtime error"
 		}
-		t.Logf("MinIO failure cause: %s (status=%s exit_code=%d oom_killed=%t error=%q)",
+		tb.Logf("MinIO failure cause: %s (status=%s exit_code=%d oom_killed=%t error=%q)",
 			cause, state.Status, state.ExitCode, state.OOMKilled, redactMinioDiagnostic(state.Error))
 	}
 
 	if endpoint != "" {
-		logMinioHealth(t, ctx, endpoint)
+		logMinioHealth(tb, ctx, endpoint)
 	}
 	logs, err := container.Logs(ctx)
 	if err != nil {
-		t.Logf("MinIO failure diagnostics: unable to read container logs: %v", err)
+		tb.Logf("MinIO failure diagnostics: unable to read container logs: %v", err)
 		return
 	}
 	data, readErr := io.ReadAll(io.LimitReader(logs, 16*1024))
 	closeErr := logs.Close()
 	if readErr != nil {
-		t.Logf("MinIO failure diagnostics: unable to read complete container logs: %v", readErr)
+		tb.Logf("MinIO failure diagnostics: unable to read complete container logs: %v", readErr)
 	}
 	if closeErr != nil {
-		t.Logf("MinIO failure diagnostics: unable to close container logs: %v", closeErr)
+		tb.Logf("MinIO failure diagnostics: unable to close container logs: %v", closeErr)
 	}
 	if len(data) > 0 {
-		t.Logf("MinIO container logs:\n%s", redactMinioDiagnostic(string(data)))
+		tb.Logf("MinIO container logs:\n%s", redactMinioDiagnostic(string(data)))
 	}
 }
 
-func logMinioHealth(t *testing.T, ctx context.Context, endpoint string) {
-	t.Helper()
+func logMinioHealth(tb testing.TB, ctx context.Context, endpoint string) {
+	tb.Helper()
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint+"/minio/health/ready", nil)
 	if err != nil {
-		t.Logf("MinIO failure cause: health probe could not be created")
+		tb.Logf("MinIO failure cause: health probe could not be created")
 		return
 	}
 	client := &http.Client{Timeout: 2 * time.Second}
 	resp, err := client.Do(req)
 	if err != nil {
-		t.Logf("MinIO failure cause: readiness probe was unavailable (%T)", err)
+		tb.Logf("MinIO failure cause: readiness probe was unavailable (%T)", err)
 		return
 	}
 	if closeErr := resp.Body.Close(); closeErr != nil {
-		t.Logf("MinIO failure diagnostics: readiness probe body close failed: %v", closeErr)
+		tb.Logf("MinIO failure diagnostics: readiness probe body close failed: %v", closeErr)
 	}
 	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
-		t.Logf("MinIO failure cause: readiness probe returned HTTP %s", resp.Status)
+		tb.Logf("MinIO failure cause: readiness probe returned HTTP %s", resp.Status)
 		return
 	}
-	t.Logf("MinIO failure diagnostics: readiness probe returned HTTP %s while the container was running", resp.Status)
+	tb.Logf("MinIO failure diagnostics: readiness probe returned HTTP %s while the container was running", resp.Status)
 }
 
 func redactMinioDiagnostic(value string) string {
