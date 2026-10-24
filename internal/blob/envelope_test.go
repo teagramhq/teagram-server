@@ -730,6 +730,34 @@ func TestEncryptedOverS3RefusesUnsizedSource(t *testing.T) {
 	}
 }
 
+func TestEncryptedReadsObjectsWrittenWithDifferentChunkSizes(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	local, _ := newLocal(t)
+	ring := newRing(t, 1, 1)
+	reader := newEncrypted(t, local, ring, blob.DefaultChunkSize)
+
+	writerChunks := []int{64 << 10}
+	if blob.DefaultChunkSize == writerChunks[0] {
+		writerChunks = append(writerChunks, 16<<10)
+	}
+	for i, chunk := range writerChunks {
+		key := fmt.Sprintf("chunk-change/%d", i)
+		want := pattern(2*chunk + 113)
+		writer := newEncrypted(t, local, ring, chunk)
+		if _, err := writer.Put(ctx, key, bytes.NewReader(want)); err != nil {
+			t.Fatalf("write with %d-byte chunks: %v", chunk, err)
+		}
+		got, err := reader.ReadAt(ctx, key, 0, int64(len(want)))
+		if err != nil {
+			t.Fatalf("read %d-byte chunks with %d-byte default: %v", chunk, blob.DefaultChunkSize, err)
+		}
+		if !bytes.Equal(got, want) {
+			t.Fatalf("read %d-byte chunks with %d-byte default returned different bytes", chunk, blob.DefaultChunkSize)
+		}
+	}
+}
+
 func TestNewEncryptedRejectsChunkSize(t *testing.T) {
 	t.Parallel()
 	ring := newRing(t, 1, 1)
