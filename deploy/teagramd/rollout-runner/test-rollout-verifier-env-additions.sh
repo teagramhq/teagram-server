@@ -47,7 +47,7 @@ inspect_json() {
         Image:"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
         Config:{Env:($base + (if $extra == "" then [] else [$extra] end)),StopTimeout:120},
         State:{Status:"running",ExitCode:0,StartedAt:"2026-10-16T12:00:00Z",FinishedAt:"0001-01-01T00:00:00Z"},
-        HostConfig:{PortBindings:{}},Mounts:[]
+        HostConfig:{LogConfig:{Type:"json-file",Config:{}},PortBindings:{}},Mounts:[]
       }
   '
 }
@@ -201,6 +201,36 @@ public_ws_snapshot=$(snapshot_from_json \
 [ "$(jq -r '.config_sha256' <<< "$legacy_snapshot")" = "$(jq -r '.config_sha256' <<< "$public_ws_snapshot")" ]
 [ "$(jq -r '.container_env_sha256' <<< "$legacy_snapshot")" = "$(jq -r '.container_env_sha256' <<< "$public_ws_snapshot")" ]
 printf '%s\n' 'PASS safe public defaults preserve resolved config and container environment equivalence'
+
+syslog_logging='{"driver":"syslog","options":{"syslog-address":"unixgram:///dev/log","syslog-facility":"daemon","syslog-format":"rfc5424","tag":"teagramd"}}'
+syslog_compose=$(jq -c --argjson logging "$syslog_logging" \
+  '.services.teagramd.logging=$logging' <<< "$COMPOSE_JSON")
+syslog_options=$(jq -c '.options' <<< "$syslog_logging")
+syslog_inspect=$(printf '%s' "$legacy_inspect" | jq -c --argjson options "$syslog_options" \
+  '.HostConfig.LogConfig={Type:"syslog",Config:$options}')
+default_logging_snapshot=$(snapshot_from_json \
+  "$legacy_inspect" "$COMPOSE_JSON" "$ENV_FILE" "$OVERRIDE_FILE" selected-compose-render baseline)
+syslog_logging_snapshot=$(snapshot_from_json \
+  "$syslog_inspect" "$syslog_compose" "$ENV_FILE" "$OVERRIDE_FILE" selected-compose-render target)
+if [ "$(jq -r '.config_sha256' <<< "$default_logging_snapshot")" != \
+     "$(jq -r '.config_sha256' <<< "$syslog_logging_snapshot")" ]; then
+  printf '%s\n' 'FAIL approved syslog logging policy changed the unrelated Compose digest' >&2
+  exit 1
+fi
+[ "$(jq -r '.compose_logging_policy' <<< "$default_logging_snapshot")" = default ]
+[ "$(jq -r '.compose_logging_policy' <<< "$syslog_logging_snapshot")" = syslog-v1 ]
+if snapshot_from_json "$legacy_inspect" "$syslog_compose" "$ENV_FILE" "$OVERRIDE_FILE" \
+  selected-compose-render target >/dev/null 2>&1; then
+  printf '%s\n' 'FAIL syslog logging policy accepted a container with a different active driver' >&2
+  exit 1
+fi
+unapproved_logging_compose=$(jq -c '.services.teagramd.logging.options.tag="other"' <<< "$syslog_compose")
+if snapshot_from_json "$syslog_inspect" "$unapproved_logging_compose" "$ENV_FILE" "$OVERRIDE_FILE" \
+  selected-compose-render preflight >/dev/null 2>&1; then
+  printf '%s\n' 'FAIL unreviewed syslog options were accepted' >&2
+  exit 1
+fi
+printf '%s\n' 'PASS reviewed syslog policy is isolated, exact, and verified against the target container'
 
 for setting in TG_PUBLIC_WEBSOCKET_LISTEN_ADDR TG_PUBLIC_WEBSOCKET_ADVERTISE_ADDR TG_PUBLIC_REGISTRATION TG_PUBLIC_WEBSOCKET_ALLOWED_ORIGINS TG_WELCOME_CHANNEL; do
   case "$setting" in

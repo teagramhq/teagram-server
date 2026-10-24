@@ -451,15 +451,21 @@ if [ "${1:-}" = inspect ]; then
       fi
       turnstile_source=$(jq -r '.secrets.teagramd_turnstile.file // ""' "$turnstile_compose")
     fi
+    log_config_type=syslog
+    log_config='{}'
+    if [ "${MOCK_SCENARIO:-}" = target-local-syslog-logging-rollout ] && [ "$cfg" = target ]; then
+      log_config='{"syslog-address":"unixgram:///dev/log","syslog-facility":"daemon","syslog-format":"rfc5424","tag":"teagramd"}'
+    fi
     jq -nc \
       --arg id "$id" --arg base_id "$MOCK_BASE_ID" --arg replacement_id "$MOCK_REPLACEMENT_ID" --arg image "$image" --argjson env "$env_json" \
       --arg cfg "$cfg" --arg source "$MOCK_CHECKOUT/.state/blob-mode" \
+      --arg log_config_type "$log_config_type" --argjson log_config "$log_config" \
       --arg scenario "${MOCK_SCENARIO:-}" --arg phase "$phase" --arg turnstile_source "$turnstile_source" \
       '{
         Id:$id,Image:$image,
         Config:{Env:$env,StopTimeout:(if $scenario == "target-local-carry-forward-image-reuse-stop-timeout-mismatch" and $cfg == "target" and $phase == "target" then 60 else 120 end),Labels:{"com.docker.compose.project":"fixture","com.docker.compose.service":"teagramd"}},
         State:{Status:(if $scenario == "runtime-target-exited" and $cfg == "target" then "exited" else "running" end),ExitCode:(if $scenario == "runtime-target-exited" and $cfg == "target" then 1 else 0 end),StartedAt:"2026-10-06T12:00:00Z",FinishedAt:(if $scenario == "runtime-target-exited" and $cfg == "target" then "2026-10-06T12:00:01Z" else "0001-01-01T00:00:00Z" end)},
-        HostConfig:{PortBindings:({"2443/tcp":[{HostIp:"127.0.0.1",HostPort:"2443"}]} +
+        HostConfig:{LogConfig:{Type:$log_config_type,Config:$log_config},PortBindings:({"2443/tcp":[{HostIp:"127.0.0.1",HostPort:"2443"}]} +
           if $scenario == "target-local-carry-forward-public-listener-addition" and $id == $replacement_id then
             {"2446/tcp":[{HostIp:"127.0.0.1",HostPort:"2446"}]}
           else {} end),NetworkMode:"fixture_teagram_server"},
@@ -505,6 +511,10 @@ fi
             esac
           done < "$MOCK_CHECKOUT/.env"
           printf '%s\n' "$public_compose"
+        elif [ "${MOCK_SCENARIO:-}" = target-local-syslog-logging-rollout ] && [ "$config_count" -lt 3 ]; then
+          cat "$MOCK_STATE/base-compose.json"
+        elif [ "${MOCK_SCENARIO:-}" = target-local-syslog-logging-rollout ]; then
+          cat "$MOCK_STATE/target-compose.json"
         elif [ "${MOCK_SCENARIO:-}" = config-drift ] && [ "$config_count" -ge 3 ]; then
           cat "$MOCK_STATE/target-compose.drift.json"
         elif [[ "${MOCK_SCENARIO:-}" == public-websocket-* ]] && [ "$config_count" -lt 3 ]; then
@@ -4252,6 +4262,25 @@ if [ "$status" != 0 ] && \
 else
   show_fixture_failure welcome-channel-addition-rollback "$status"
   fail 'rollback should preserve equivalence when welcome channel is empty'
+fi
+
+prepare_target_local_apply_fixture syslog-logging-rollout \
+  target-local-syslog-logging-rollout "$E58_LOCAL_COMPOSE_TARGET_SHA"
+state=$(cat "$TMP/syslog-logging-rollout-state-path")
+root=$(cat "$TMP/syslog-logging-rollout-root-path")
+jq -c '.services.teagramd.logging={driver:"syslog",options:{"syslog-address":"unixgram:///dev/log","syslog-facility":"daemon","syslog-format":"rfc5424",tag:"teagramd"}}' \
+  "$state/target-compose.json" > "$state/target-compose.next.json"
+mv -- "$state/target-compose.next.json" "$state/target-compose.json"
+status=$(run_fixture syslog-logging-rollout built 0 '' 2 '' '' apply "$APPLY_TARGET_SHA")
+if [ "$status" = 0 ] && \
+   grep -q $'preflight\tconfig_sha256\t.*\tpass' "$root.target/preflight-comparisons.tsv" && \
+   grep -q $'preflight\tcompose_logging_policy\tdefault\tsyslog-v1\tpass' "$root.target/preflight-comparisons.tsv" && \
+   grep -q $'compose_logging_policy\tdefault\tsyslog-v1\tpass' "$root.target/target-comparisons.tsv" && \
+   grep -q "rollout=verified sha=$E58_LOCAL_COMPOSE_TARGET_SHA" "$TMP/syslog-logging-rollout.stdout"; then
+  pass 'reviewed teagramd syslog logging policy deploys while unrelated Compose drift stays pinned'
+else
+  show_fixture_failure syslog-logging-rollout "$status"
+  fail 'reviewed teagramd syslog logging policy should pass preflight and target verification'
 fi
 
 prepare_target_local_apply_fixture welcome-channel-active \

@@ -42,6 +42,13 @@ match the Compose mapping. A wildcard host IP, another host or container port,
 or any other port change remains a configuration drift and rejects before
 replacement.
 
+The only approved `teagramd` logging change is the reviewed transition from
+Compose's default logger to `syslog` at `/dev/log` with the `teagramd` tag,
+daemon facility, and RFC5424 format. Preflight records that policy separately
+from the general configuration digest; post-start inspection must confirm the
+container received the exact logger settings. Other drivers and options remain
+configuration drift.
+
 For every local-backed rollout, read the running `teagramd` container's
 `com.docker.compose.project.config_files` label and carry that Compose selection
 forward unchanged. With ordinary local authority, it must start with a

@@ -18,6 +18,13 @@ sha256_text() {
   printf '%s' "$1" | sha256sum | awk '{print $1}'
 }
 
+approved_logging_transition() {
+  case "$1:$2" in
+    default:default|syslog-v1:syslog-v1|default:syslog-v1) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
 verify_added_container_environment() {
   local inspect_json=$1 compose_json=$2 env_file=$3 added_env_names=$4
   [ "$added_env_names" != "[]" ] || return 0
@@ -391,7 +398,7 @@ snapshot_from_json() {
   local override_file=$4
   local compose_source=${5:-selected-compose-render}
   local snapshot_name=${6:-}
-  local mounts exposure exposure_for_hash resolved_config canonical_compose container_env container_id image_id state exit_code started_at finished_at grace stop_timeout mode_source
+  local mounts exposure exposure_for_hash resolved_config canonical_compose container_env container_id image_id state exit_code started_at finished_at grace stop_timeout mode_source compose_logging_policy
   local mounts_sha exposure_sha config_sha env_sha override_sha container_env_sha mount_count
   local compose_replica_count compose_client_addr_trust container_replica_count container_client_addr_trust
   local compose_public_ws_2446 exposure_public_ws_2446
@@ -409,6 +416,43 @@ snapshot_from_json() {
   verify_safe_public_environment \
     "$inspect_json" "$compose_json" "$env_file" "$added_env_names" "$changed_env_names" \
     "$snapshot_name" "$compose_source" || return 1
+  compose_logging_policy=not-captured
+  if [ "$compose_source" = selected-compose-render ]; then
+    compose_logging_policy=$(printf '%s' "$compose_json" | jq -er '
+      .services.teagramd.logging as $logging
+      | if $logging == null then "default"
+        elif $logging == {
+          driver:"syslog",
+          options:{
+            "syslog-address":"unixgram:///dev/log",
+            "syslog-facility":"daemon",
+            "syslog-format":"rfc5424",
+            tag:"teagramd"
+          }
+        } then "syslog-v1"
+        else error("unapproved teagramd logging configuration")
+        end
+    ' 2>/dev/null) || {
+      printf '%s\n' 'resolved Compose logging configuration is not approved' >&2
+      return 1
+    }
+    if [ "$compose_logging_policy" = syslog-v1 ] && \
+       { [ "$snapshot_name" = baseline ] || [ "$snapshot_name" = target ] || [ "$snapshot_name" = rollback ]; } && \
+       ! printf '%s' "$inspect_json" | jq -e '
+         def item: if type == "array" then .[0] else . end;
+         (item.HostConfig.LogConfig // {}) as $log
+         | $log.Type == "syslog" and
+           ($log.Config // {}) == {
+             "syslog-address":"unixgram:///dev/log",
+             "syslog-facility":"daemon",
+             "syslog-format":"rfc5424",
+             tag:"teagramd"
+           }
+       ' >/dev/null; then
+      printf '%s\n' 'container syslog logging configuration does not match the reviewed Compose policy' >&2
+      return 1
+    fi
+  fi
   if [ "$compose_source" = selected-compose-render ]; then
     compose_public_ws_2446=$(printf '%s' "$compose_json" | jq -r '
       def approved_public_ws_port:
@@ -642,6 +686,9 @@ snapshot_from_json() {
           .TG_TURNSTILE_SITE_KEY, .TG_TURNSTILE_SECRET_KEY_FILE,
           .TG_TURNSTILE_SIGNIN_ENABLED)
       end
+      # The reviewed syslog policy is checked against the running container
+      # below. Keep logger options out of the unrelated config digest.
+      | .services.teagramd |= del(.logging)
       | .services.teagramd.ports = ((.services.teagramd.ports // []) | map(select(approved_public_ws_port | not)))
       | if (.services.teagramd.ports | length) == 0 then del(.services.teagramd.ports) else . end
       | if (.services.teagramd.secrets | type) == "array" then
@@ -696,6 +743,7 @@ snapshot_from_json() {
     --arg container_replica_count "$container_replica_count" \
     --arg container_client_addr_trust "$container_client_addr_trust" \
     --arg compose_public_ws_2446 "$compose_public_ws_2446" \
+    --arg compose_logging_policy "$compose_logging_policy" \
     --arg exposure_public_ws_2446 "$exposure_public_ws_2446" \
     --arg mount_count "$mount_count" \
     --arg mounts_sha "$mounts_sha" \
@@ -714,6 +762,7 @@ snapshot_from_json() {
       compose_replica_count:$compose_replica_count,
       compose_client_addr_trust:$compose_client_addr_trust,
       compose_public_ws_2446:$compose_public_ws_2446,
+      compose_logging_policy:$compose_logging_policy,
       exposure_public_ws_2446:$exposure_public_ws_2446,
       container_replica_count:$container_replica_count,
       container_client_addr_trust:$container_client_addr_trust,
@@ -862,7 +911,7 @@ compare_snapshots() {
   local expected_image=$3
   local result_file=$4
   local field before_value after_value before_image after_image result
-  local fields=(mounts_sha256 stop_grace_period container_stop_timeout config_sha256 env_sha256 override_sha256 exposure_sha256 container_env_sha256)
+  local fields=(mounts_sha256 stop_grace_period container_stop_timeout config_sha256 env_sha256 override_sha256 exposure_sha256 container_env_sha256 compose_logging_policy)
   ROLLOUT_COMPARE_FAILURES=0
   if [ -e "$result_file" ] || [ -L "$result_file" ]; then
     printf '%s\n' 'comparison evidence already exists' >&2
@@ -882,6 +931,7 @@ compare_snapshots() {
       (.compose_replica_count | type == "string" and test("^(unset|invalid|[0-9]{1,3})$")) and
       (.compose_client_addr_trust | type == "string" and IN("unset","invalid","socket")) and
       (.compose_public_ws_2446 | type == "string" and IN("true","false","not-captured")) and
+      (.compose_logging_policy | type == "string" and IN("default","syslog-v1","not-captured")) and
       (.exposure_public_ws_2446 | type == "string" and IN("true","false")) and
       (.container_replica_count | type == "string" and test("^(unset|invalid|duplicate|[0-9]{1,3})$")) and
       (.container_client_addr_trust | type == "string" and IN("unset","invalid","duplicate","socket")) and
@@ -904,6 +954,7 @@ compare_snapshots() {
       (.compose_replica_count | type == "string" and test("^(unset|invalid|[0-9]{1,3})$")) and
       (.compose_client_addr_trust | type == "string" and IN("unset","invalid","socket")) and
       (.compose_public_ws_2446 | type == "string" and IN("true","false","not-captured")) and
+      (.compose_logging_policy | type == "string" and IN("default","syslog-v1","not-captured")) and
       (.exposure_public_ws_2446 | type == "string" and IN("true","false")) and
       (.container_replica_count | type == "string" and test("^(unset|invalid|duplicate|[0-9]{1,3})$")) and
       (.container_client_addr_trust | type == "string" and IN("unset","invalid","duplicate","socket")) and
@@ -927,7 +978,9 @@ compare_snapshots() {
   for field in "${fields[@]}"; do
     if ! before_value=$(jq -er --arg field "$field" '.[$field]' "$before_file"); then return 1; fi
     if ! after_value=$(jq -er --arg field "$field" '.[$field]' "$after_file"); then return 1; fi
-    if [ "$before_value" = "$after_value" ]; then result=pass; else result=fail; fi
+    if [ "$field" = compose_logging_policy ]; then
+      if approved_logging_transition "$before_value" "$after_value"; then result=pass; else result=fail; fi
+    elif [ "$before_value" = "$after_value" ]; then result=pass; else result=fail; fi
     if ! record_comparison "$result_file" "$field" "$before_value" "$after_value" "$result"; then
       printf '%s\n' "failed to persist comparison result: $field" >&2
       return 1
