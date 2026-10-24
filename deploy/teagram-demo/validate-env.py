@@ -30,6 +30,33 @@ def reject(message: str) -> None:
     raise SystemExit(1)
 
 
+def read_turnstile_secret(path: pathlib.Path) -> str:
+    try:
+        secret_dir_metadata = path.parent.lstat()
+        secret_metadata = path.lstat()
+        secret_key = path.read_text(encoding="utf-8").strip()
+    except (OSError, UnicodeDecodeError):
+        reject("turnstile-secret-file-unavailable")
+    if (
+        stat.S_ISLNK(secret_dir_metadata.st_mode)
+        or not stat.S_ISDIR(secret_dir_metadata.st_mode)
+        or secret_dir_metadata.st_uid != 0
+        or stat.S_IMODE(secret_dir_metadata.st_mode) != 0o700
+    ):
+        reject("turnstile-secret-directory-owner-or-mode")
+    if (
+        stat.S_ISLNK(secret_metadata.st_mode)
+        or not stat.S_ISREG(secret_metadata.st_mode)
+        or secret_metadata.st_uid != 0
+        or secret_metadata.st_gid != 65532
+        or stat.S_IMODE(secret_metadata.st_mode) != 0o440
+    ):
+        reject("turnstile-secret-file-owner-group-or-mode")
+    if not re.fullmatch(r"[A-Za-z0-9_-]+", secret_key):
+        reject("turnstile-secret-key-format")
+    return secret_key
+
+
 def main() -> None:
     if len(sys.argv) != 2:
         reject("usage")
@@ -78,28 +105,7 @@ def main() -> None:
     if secret_path_value != EXPECTED["TEAGRAM_DEMO_TURNSTILE_SECRET_KEY_FILE"]:
         reject("turnstile-secret-file-path")
     secret_path = pathlib.Path(secret_path_value)
-    try:
-        secret_dir_metadata = secret_path.parent.lstat()
-        secret_metadata = secret_path.lstat()
-        secret_key = secret_path.read_text(encoding="utf-8").strip()
-    except (OSError, UnicodeDecodeError):
-        reject("turnstile-secret-file-unavailable")
-    if (
-        stat.S_ISLNK(secret_dir_metadata.st_mode)
-        or not stat.S_ISDIR(secret_dir_metadata.st_mode)
-        or secret_dir_metadata.st_uid != 0
-        or stat.S_IMODE(secret_dir_metadata.st_mode) != 0o700
-    ):
-        reject("turnstile-secret-directory-owner-or-mode")
-    if (
-        stat.S_ISLNK(secret_metadata.st_mode)
-        or not stat.S_ISREG(secret_metadata.st_mode)
-        or secret_metadata.st_uid != 0
-        or stat.S_IMODE(secret_metadata.st_mode) != 0o600
-    ):
-        reject("turnstile-secret-file-owner-or-mode")
-    if not re.fullmatch(r"[A-Za-z0-9_-]+", secret_key):
-        reject("turnstile-secret-key-format")
+    secret_key = read_turnstile_secret(secret_path)
     if site_key == secret_key:
         reject("turnstile-key-reuse")
     if any(values[name] != value for name, value in EXPECTED.items()):

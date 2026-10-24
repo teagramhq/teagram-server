@@ -924,6 +924,7 @@ jobs:
           bash -n deploy/teagram-demo/test-seed-compose.sh
           bash -n deploy/link-edge/deploy-main.sh
           bash -n deploy/link-edge/test-deploy-main.sh
+          bash -n deploy/teagram-demo/test-turnstile-secret-access.sh
           shellcheck \
             deploy/teagram/deploy-main.sh \
             deploy/teagram/teagram-logs.sh \
@@ -944,6 +945,7 @@ jobs:
             deploy/teagram-demo/test-seed-compose.sh \
             deploy/link-edge/deploy-main.sh \
             deploy/link-edge/test-deploy-main.sh \
+            deploy/teagram-demo/test-turnstile-secret-access.sh \
             deploy/teagram/test-deploy-main.sh \
             .github/scripts/test-deploy-workflow-contract.sh \
             .github/scripts/mirror_rustfs_qualification_images.sh
@@ -956,6 +958,9 @@ jobs:
 
       - name: Check public demo Compose policy
         run: deploy/teagram-demo/test-demo-compose.sh
+
+      - name: Check demo Turnstile secret access
+        run: sudo -n deploy/teagram-demo/test-turnstile-secret-access.sh
 
       - name: Check demo image release pinning
         run: deploy/teagram-demo/test-image-release.sh
