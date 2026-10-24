@@ -2780,6 +2780,7 @@ jobs:
           sudo env TMPDIR=/root bash deploy/teagramd/rollout-runner/test-stack-move-entrypoint.sh
           sudo env TMPDIR=/root bash deploy/teagramd/rollout-runner/test-rollout-runner.sh
           sudo env TMPDIR=/root bash deploy/teagramd/rollout-runner/test-compose-path-preflight.sh
+          python3 -B deploy/teagramd/rollout-runner/test-stack-move-runner-inspect.py
           bash deploy/teagramd/rollout-runner/test-initial-local-compose.sh
           bash deploy/teagramd/rollout-runner/test-local-compose-598359e.sh
           bash deploy/teagramd/rollout-runner/test-local-compose-df9ffe5.sh

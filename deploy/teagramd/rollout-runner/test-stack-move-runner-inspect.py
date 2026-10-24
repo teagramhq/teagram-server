@@ -100,6 +100,81 @@ class InspectComposeSelectionTest(unittest.TestCase):
         self.assertTrue(runner.layout_changed(source, added_data_mount))
         print("PASS layout preflight permits only the exact read-only media-key mount addition")
 
+    def test_read_only_media_key_mount_is_not_a_data_layout_change(self) -> None:
+        runner = load_runner()
+        source = {
+            "project": "teagram",
+            "server": "teagramd",
+            "server_mounts": [
+                {"type": "volume", "source": "teagram_tgkey", "target": "/var/lib/teagramd", "read_only": False},
+                {"type": "volume", "source": "teagram_tgblobs", "target": "/var/lib/teagramd-blobs", "read_only": True},
+            ],
+            "postgres_mounts": [
+                {"type": "volume", "source": "teagram_pgdata", "target": "/var/lib/postgresql", "read_only": False},
+            ],
+            "persistent_service_mounts": {
+                "postgres": [{"type": "volume", "source": "teagram_pgdata", "target": "/var/lib/postgresql", "read_only": False}],
+                "teagramd": [
+                    {"type": "volume", "source": "teagram_tgkey", "target": "/var/lib/teagramd", "read_only": False},
+                    {"type": "volume", "source": "teagram_tgblobs", "target": "/var/lib/teagramd-blobs", "read_only": True},
+                ],
+            },
+            "volumes": {"pgdata": "teagram_pgdata", "tgkey": "teagram_tgkey", "tgblobs": "teagram_tgblobs"},
+        }
+        media_mount = {
+            "type": "bind",
+            "source": "/etc/teagramd/media-keys",
+            "target": "/run/teagramd/media-keys",
+            "read_only": True,
+            "bind": {"create_host_path": False},
+        }
+        target = copy.deepcopy(source)
+        target["server_mounts"].append(media_mount)
+        target["persistent_service_mounts"]["teagramd"].append(media_mount)
+        target_config = {
+            "name": "teagram",
+            "services": {
+                "teagramd": {
+                    "environment": {
+                        "TG_MEDIA_KEY_DIR": "/run/teagramd/media-keys",
+                        "TG_MEDIA_KEY_CURRENT": "1",
+                    },
+                    "volumes": [media_mount],
+                },
+            },
+        }
+
+        checkout = pathlib.Path("/opt/teagram")
+        self.assertFalse(runner.ordinary_rollout_layout_changed(source, target, target_config, checkout))
+        print("PASS rollout layout accepts only the read-only media-key bind addition")
+
+        writable_target = copy.deepcopy(target)
+        writable_target["server_mounts"][-1]["read_only"] = False
+        writable_target["persistent_service_mounts"]["teagramd"][-1]["read_only"] = False
+        writable_config = copy.deepcopy(target_config)
+        writable_config["services"]["teagramd"]["volumes"][0]["read_only"] = False
+        self.assertTrue(runner.ordinary_rollout_layout_changed(source, writable_target, writable_config, checkout))
+
+        changed_volume_target = copy.deepcopy(target)
+        changed_volume_target["volumes"]["tgblobs"] = "teagram_other_tgblobs"
+        self.assertTrue(runner.ordinary_rollout_layout_changed(source, changed_volume_target, target_config, checkout))
+        wrong_version_config = copy.deepcopy(target_config)
+        wrong_version_config["services"]["teagramd"]["environment"]["TG_MEDIA_KEY_CURRENT"] = "2"
+        self.assertTrue(runner.ordinary_rollout_layout_changed(source, target, wrong_version_config, checkout))
+        host_path_creating_config = copy.deepcopy(target_config)
+        host_path_creating_config["services"]["teagramd"]["volumes"][0]["bind"]["create_host_path"] = True
+        self.assertTrue(runner.ordinary_rollout_layout_changed(source, target, host_path_creating_config, checkout))
+        unexpected_bind_option = copy.deepcopy(target_config)
+        unexpected_bind_option["services"]["teagramd"]["volumes"][0]["bind"]["propagation"] = "rprivate"
+        self.assertTrue(runner.ordinary_rollout_layout_changed(source, target, unexpected_bind_option, checkout))
+        in_checkout_target = copy.deepcopy(target)
+        in_checkout_config = copy.deepcopy(target_config)
+        in_checkout_target["server_mounts"][-1]["source"] = "/opt/teagram/.secrets/media-keys"
+        in_checkout_target["persistent_service_mounts"]["teagramd"][-1]["source"] = "/opt/teagram/.secrets/media-keys"
+        in_checkout_config["services"]["teagramd"]["volumes"][0]["source"] = "/opt/teagram/.secrets/media-keys"
+        self.assertTrue(runner.ordinary_rollout_layout_changed(source, in_checkout_target, in_checkout_config, checkout))
+        print("PASS rollout layout still rejects writable media mounts and persistent-volume changes")
+
     def test_pinned_local_compose_is_used_for_both_layouts_without_s3_env(self) -> None:
         runner = load_runner()
         with tempfile.TemporaryDirectory(prefix="stack-move-inspect-") as temporary:
@@ -358,16 +433,6 @@ class InspectComposeSelectionTest(unittest.TestCase):
                 _profiles: object = (),
             ) -> dict[str, object]:
                 self.assertTrue(files)
-                if files[0].name == "target-docker-compose.yml":
-                    target_config = copy.deepcopy(current_config)
-                    target_config["services"]["teagramd"]["volumes"].append({
-                        "type": "bind",
-                        "source": "/etc/teagramd/media-keys",
-                        "target": "/run/teagramd/media-keys",
-                        "read_only": True,
-                        "bind": {},
-                    })
-                    return target_config
                 return current_config
 
             args = argparse.Namespace(
@@ -391,13 +456,97 @@ class InspectComposeSelectionTest(unittest.TestCase):
 
             result = json.loads(output.getvalue())
             self.assertFalse(result["changed"])
-            self.assertNotEqual(result["source"], result["target"])
+            self.assertEqual(result["source"], result["target"])
             self.assertEqual(result["source"]["project"], "teagram")
             self.assertEqual(result["source"]["server"], "teagramd")
-            rendered_key_mount = copy.deepcopy(runner.MEDIA_KEY_MOUNT)
-            rendered_key_mount["bind"] = {}
-            self.assertIn(rendered_key_mount, result["target"]["server_mounts"])
-            print("PASS apply layout preflight accepts the media-key addition on teagram")
+            print("PASS apply layout preflight accepts the current teagram project")
+
+    def test_inspect_accepts_only_the_media_key_mount_transition(self) -> None:
+        runner = load_runner()
+        with tempfile.TemporaryDirectory(prefix="stack-move-inspect-media-key-") as temporary:
+            checkout = pathlib.Path(temporary)
+            default_compose = checkout / "docker-compose.yml"
+            default_compose.write_text("name: teagram\n", encoding="utf-8")
+            override = checkout / "docker-compose.override.yml"
+            override.write_text("services:\n  teagramd:\n    ports: []\n", encoding="utf-8")
+            env_file = checkout / ".env"
+            env_file.write_text("POSTGRES_PASSWORD=fixture-only\n", encoding="utf-8")
+            base_config = {
+                "name": "teagram",
+                "services": {
+                    "postgres": {
+                        "environment": {"POSTGRES_DB": "telegram"},
+                        "volumes": [{
+                            "type": "volume",
+                            "source": "pgdata",
+                            "target": "/var/lib/postgresql/18/docker",
+                        }],
+                    },
+                    "teagramd": {
+                        "volumes": [
+                            {"type": "volume", "source": "tgkey", "target": "/var/lib/teagramd"},
+                            {"type": "volume", "source": "tgblobs", "target": "/var/lib/teagramd-blobs", "read_only": True},
+                        ],
+                    },
+                },
+                "volumes": {
+                    "pgdata": {"name": "teagram_pgdata"},
+                    "tgkey": {"name": "teagram_tgkey"},
+                    "tgblobs": {"name": "teagram_tgblobs"},
+                    "rustfsdata": {"name": "teagram_rustfsdata"},
+                },
+            }
+            media_mount = {
+                "type": "bind",
+                "source": "/etc/teagramd/media-keys",
+                "target": "/run/teagramd/media-keys",
+                "read_only": True,
+                "bind": {"create_host_path": False},
+            }
+            target_config = copy.deepcopy(base_config)
+            target_config["services"]["teagramd"]["environment"] = {
+                "TG_MEDIA_KEY_DIR": "/run/teagramd/media-keys",
+                "TG_MEDIA_KEY_CURRENT": "1",
+            }
+            target_config["services"]["teagramd"]["volumes"].append(media_mount)
+            render_configs = iter((base_config, target_config, target_config))
+            target_sha = "1234567890abcdef1234567890abcdef12345678"
+
+            def target_compose(
+                target_checkout: pathlib.Path,
+                sha: str,
+                destination: pathlib.Path,
+            ) -> pathlib.Path:
+                self.assertEqual(target_checkout, checkout)
+                self.assertEqual(sha, target_sha)
+                target_path = destination / "target-docker-compose.yml"
+                target_path.write_text("name: teagram\n", encoding="utf-8")
+                return target_path
+
+            args = argparse.Namespace(
+                checkout=checkout,
+                target_sha=target_sha,
+                env_file=env_file,
+                override=override,
+            )
+            output = io.StringIO()
+            with mock.patch.dict(
+                os.environ,
+                {
+                    "COMPOSE_FILE": os.pathsep.join((str(default_compose), str(override))),
+                    "PATH": os.environ.get("PATH", os.defpath),
+                },
+                clear=True,
+            ), mock.patch.object(runner, "render_compose", side_effect=lambda *_args, **_kwargs: next(render_configs)), \
+                    mock.patch.object(runner, "inspect_git_target", side_effect=target_compose), \
+                    contextlib.redirect_stdout(output):
+                runner.inspect(args)
+
+            result = json.loads(output.getvalue())
+            self.assertFalse(result["changed"])
+            self.assertEqual(result["source"]["volumes"], result["target"]["volumes"])
+            self.assertNotEqual(result["source"]["server_mounts"], result["target"]["server_mounts"])
+            print("PASS Compose inspect permits the reviewed read-only media-key mount addition")
 
 
 class MoveSecretMigrationTest(unittest.TestCase):

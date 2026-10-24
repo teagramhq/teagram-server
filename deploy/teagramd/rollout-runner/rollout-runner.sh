@@ -2059,7 +2059,7 @@ compare_resolved_preflight() {
   local old_file="$BASELINE_DIR/baseline.snapshot.json"
   local target_file="$TARGET_DIR/preflight.snapshot.json"
   local results="$TARGET_DIR/preflight-comparisons.tsv"
-  local fields=(config_sha256 env_sha256 override_sha256 stop_grace_period compose_logging_policy compose_log_login_codes)
+  local fields=(config_sha256 env_sha256 override_sha256 stop_grace_period compose_logging_policy compose_log_login_codes media_key_source media_key_current)
   local field before after result expected failures=0
   if [ "$INITIALIZE_LOCAL" = 1 ]; then
     local render_file="$BASELINE_DIR/initial-local-target-render.snapshot.json"
@@ -2114,6 +2114,10 @@ compare_resolved_preflight() {
         result=fail
         failures=$((failures + 1))
       fi
+    elif [ "$field" = media_key_source ] && [ "$before" = unset ] && [[ "$after" = /* ]]; then
+      result=pass
+    elif [ "$field" = media_key_current ] && [ "$before" = unset ] && [ "$after" = 1 ]; then
+      result=pass
     elif [ "$before" = "$after" ]; then result=pass; else result=fail; failures=$((failures + 1)); fi
     append_evidence_row "$results" preflight "$field" "$before" "$after" "$result" || return 1
   done
@@ -2143,7 +2147,7 @@ compare_rollback_to_baseline() {
   local baseline_file="$ROLLBACK_DIR/baseline.snapshot.json"
   local rollback_file="$ROLLBACK_DIR/rollback.snapshot.json"
   local results="$ROLLBACK_DIR/rollback-equivalence.tsv"
-  local fields=(image_id mounts_sha256 stop_grace_period container_stop_timeout config_sha256 env_sha256 override_sha256 exposure_sha256 container_env_sha256 container_logging_sha256 compose_replica_count compose_client_addr_trust container_replica_count container_client_addr_trust compose_public_ws_2446 exposure_public_ws_2446 compose_logging_policy compose_log_login_codes container_log_login_codes)
+  local fields=(image_id mounts_sha256 stop_grace_period container_stop_timeout config_sha256 env_sha256 override_sha256 exposure_sha256 container_env_sha256 container_logging_sha256 compose_replica_count compose_client_addr_trust container_replica_count container_client_addr_trust compose_public_ws_2446 exposure_public_ws_2446 compose_logging_policy compose_log_login_codes container_log_login_codes media_key_source media_key_current)
   local field before after state timeout_value grace
   local expected_count=${#fields[@]}
   ROLLBACK_COMPARE_FAILURES=0
@@ -2208,7 +2212,7 @@ compare_rollback_to_baseline() {
   record_rollback_row "$results" rollback_grace_policy 2m0s "$grace" || return 1
   timeout_value=$(jq -er '.container_stop_timeout' "$rollback_file") || { fail 'rollback inspected timeout is missing'; return 1; }
   record_rollback_row "$results" rollback_inspected_stop_timeout 120 "$timeout_value" || return 1
-  [ "$expected_count" -eq 19 ] || { fail 'internal rollback equivalence field count changed'; return 1; }
+  [ "$expected_count" -eq 21 ] || { fail 'internal rollback equivalence field count changed'; return 1; }
   [ "$ROLLBACK_COMPARE_FAILURES" -eq 0 ] || { fail 'rollback does not match the captured baseline'; return 1; }
 }
 
