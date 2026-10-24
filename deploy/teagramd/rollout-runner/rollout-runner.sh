@@ -2009,7 +2009,6 @@ require_clean_build_checkout() {
 
 perform_rollback() {
   local rollback_id rollback_env_record
-  archive_pre_rollout_teagramd_logs || return 1
   restore_checkout_and_tag || return 1
   restore_previous_env_for_public_additions || return 1
   if ! validate_rollback_blob_authority; then

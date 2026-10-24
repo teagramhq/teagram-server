@@ -620,7 +620,11 @@ fi
         cp -- "$MOCK_STATE/base-compose.json" "$MOCK_STATE/started-compose-$MOCK_ROLLBACK_ID.json" 2>/dev/null || true
       else
         printf '%s\n' target > "$MOCK_STATE/phase"
-        printf '%s\n' "$MOCK_REPLACEMENT_ID" > "$MOCK_STATE/teagramd"
+        if [ "${MOCK_SCENARIO:-}" = target-container-unavailable ]; then
+          : > "$MOCK_STATE/teagramd"
+        else
+          printf '%s\n' "$MOCK_REPLACEMENT_ID" > "$MOCK_STATE/teagramd"
+        fi
         cp -- "$MOCK_STATE/target-compose.json" "$MOCK_STATE/started-compose-$MOCK_REPLACEMENT_ID.json"
       fi
       exit 0
@@ -1298,7 +1302,7 @@ run_fixture() {
     ambient_revision=(TEAGRAMD_SOURCE_REVISION=ambient-revision-must-not-win)
   fi
   runner="$runtime_dir/rollout-runner.sh"
-  case "$scenario" in old-target-image|target-local-598-rollback|target-local-df9-rollback|target-local-welcome-channel-addition-rollback|config-drift|target-local-carry-forward-public-listener-wide-host|target-local-carry-forward-public-listener-other-port|public-websocket-enabled|readiness-timeout|logs-failed|runtime-target-exited|target-local-carry-forward-image-reuse-stale-build|target-local-carry-forward-image-reuse-stop-timeout-mismatch|schema-post-failed-69|schema-post-missing-69) require_marker=1 ;; esac
+  case "$scenario" in old-target-image|target-local-598-rollback|target-local-df9-rollback|target-local-welcome-channel-addition-rollback|config-drift|target-local-carry-forward-public-listener-wide-host|target-local-carry-forward-public-listener-other-port|public-websocket-enabled|readiness-timeout|logs-failed|runtime-target-exited|target-container-unavailable|target-local-carry-forward-image-reuse-stale-build|target-local-carry-forward-image-reuse-stop-timeout-mismatch|schema-post-failed-69|schema-post-missing-69) require_marker=1 ;; esac
   [ "$name" = marker-write-failed ] && require_marker=0
   [ -n "$chmod_match" ] && require_marker=1
   if [ "$action" = reconcile ]; then
@@ -3830,6 +3834,20 @@ if [ "$status" != 0 ] && jq -e '.state == "exited"' "$root.target/target.snapsho
   pass 'exited target with empty serving inventory validates authority and restores the inspected baseline'
 else
   fail 'exited target rollback with empty serving inventory'
+fi
+
+make_fixture target-container-unavailable target-container-unavailable
+status=$(run_fixture target-container-unavailable)
+root=$(cat "$TMP/target-container-unavailable-root-path")
+state=$(cat "$TMP/target-container-unavailable-state-path")
+if [ "$status" != 0 ] && grep -q 'rollback=verified' "$TMP/target-container-unavailable.stdout" && \
+   grep -q '^docker compose up -d --no-build --no-deps teagramd$' "$TMP/target-container-unavailable-events" && \
+   [ "$(cat "$state/head")" = "$BASELINE_SHA" ] && \
+   [ "$(cat "$state/teagramd")" = "$ROLLBACK_ID" ] && \
+   grep -q 'reason=target_container_id_unavailable' "$root.target/target-failure.txt"; then
+  pass 'target with no running container restores the baseline and verifies rollback'
+else
+  fail 'target container unavailable rollback must restore the baseline'
 fi
 
 for runtime_mismatch in runtime-volume-mismatch runtime-backend-mismatch; do
