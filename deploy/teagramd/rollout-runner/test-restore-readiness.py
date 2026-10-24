@@ -1049,6 +1049,48 @@ class RestoreReadinessContractTests(unittest.TestCase):
         expected_error = b"ERROR:  division by zero\n"
 
         self.assertEqual(
+            RESTORE_READINESS.auth_key_clear_failure_diagnostics(
+                before,
+                before,
+                client_status=3,
+                container_status=3,
+                stdout=ack,
+                stderr=expected_error,
+            ),
+            {
+                "acknowledged": True,
+                "client_status": 3,
+                "container_status": 3,
+                "rollback_preserved": True,
+                "division_by_zero_reported": True,
+            },
+        )
+        self.assertEqual(
+            RESTORE_READINESS.auth_key_clear_failure_diagnostics(
+                before,
+                before,
+                client_status=3,
+                container_status=3,
+                stdout=ack,
+                stderr=b"ERROR: unrelated SQL failure\n",
+            )["division_by_zero_reported"],
+            False,
+        )
+        shell = SHELL_GATE.read_text(encoding="utf-8")
+        self.assertIn(
+            "auth_clear_failure_report=$(run_drill --fault-test auth-clear-failure)",
+            shell,
+        )
+        self.assertNotIn(
+            "auth_clear_failure_report=$(run_drill --fault-test auth-clear-failure 2>/dev/null)",
+            shell,
+        )
+        self.assertIn(
+            "restore readiness auth-key failure drill returned unexpected report:",
+            shell,
+        )
+
+        self.assertEqual(
             RESTORE_READINESS.auth_key_clear_fault_category(
                 "failure",
                 before,
