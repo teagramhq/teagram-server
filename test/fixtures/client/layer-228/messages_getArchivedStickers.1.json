@@ -1,0 +1,16 @@
+{
+  "layer": 228,
+  "client": "gotd v0.162.0",
+  "source": "source-derived/messages_getArchivedStickers.1.txt",
+  "method": "messages.getArchivedStickers",
+  "request": {
+    "type": "messages.getArchivedStickers",
+    "flags": 3,
+    "fields": {
+      "masks": true,
+      "emojis": true,
+      "offset_id": 987654321,
+      "limit": 25
+    }
+  }
+}

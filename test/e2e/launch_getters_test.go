@@ -48,9 +48,18 @@ func TestLaunchGetterResults(t *testing.T) {
 		if !tgerr.Is(err, "AUTH_KEY_UNREGISTERED") {
 			return fmt.Errorf("messages.getWebPagePreview for unbound key = %w, want AUTH_KEY_UNREGISTERED", err)
 		}
+		_, err = unboundClient.API().MessagesGetArchivedStickers(ctx, &tg.MessagesGetArchivedStickersRequest{
+			Masks: true, Emojis: true, OffsetID: 42, Limit: 10,
+		})
+		if err == nil {
+			return errors.New("messages.getArchivedStickers for unbound key succeeded, want AUTH_KEY_UNREGISTERED")
+		}
+		if !tgerr.Is(err, "AUTH_KEY_UNREGISTERED") {
+			return fmt.Errorf("messages.getArchivedStickers for unbound key = %w, want AUTH_KEY_UNREGISTERED", err)
+		}
 		return nil
 	}); err != nil {
-		t.Fatalf("unbound messages.getWebPagePreview: %v", err)
+		t.Fatalf("unbound launch getter: %v", err)
 	}
 }
 
@@ -153,6 +162,16 @@ func checkLaunchGetterResults(ctx context.Context, client *tg.Client) error {
 		}
 		if result, ok := allStickers.(*tg.MessagesAllStickers); ok && (result.Hash != 0 || len(result.Sets) != 0) {
 			return fmt.Errorf("messages.getAllStickers = hash %d, %d sets; want empty", result.Hash, len(result.Sets))
+		}
+
+		archivedStickers, err := client.MessagesGetArchivedStickers(ctx, &tg.MessagesGetArchivedStickersRequest{
+			Masks: hash == 0, Emojis: hash != 0, OffsetID: hash, Limit: 20,
+		})
+		if err != nil {
+			return fmt.Errorf("messages.getArchivedStickers: %w", err)
+		}
+		if archivedStickers.Count != 0 || len(archivedStickers.Sets) != 0 {
+			return fmt.Errorf("messages.getArchivedStickers = count %d, %d sets; want empty", archivedStickers.Count, len(archivedStickers.Sets))
 		}
 
 		recentStickers, err := client.MessagesGetRecentStickers(ctx, &tg.MessagesGetRecentStickersRequest{Hash: hash})

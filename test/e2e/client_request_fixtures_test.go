@@ -697,6 +697,20 @@ func testSmokeClientRequestFixtures(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("replay install-sticker-set-by-id fixture: %v", err)
 	}
+	if err := fixtureClientCall(t, creator, "messages_getArchivedStickers.1", func(ctx context.Context, api *tg.Client) error {
+		result, err := api.MessagesGetArchivedStickers(ctx, &tg.MessagesGetArchivedStickersRequest{
+			Masks: true, Emojis: true, OffsetID: 987654321, Limit: 25,
+		})
+		if err != nil {
+			return err
+		}
+		if result.Count != 0 || len(result.Sets) != 0 {
+			return fmt.Errorf("getArchivedStickers = count %d, %d sets after install; want empty", result.Count, len(result.Sets))
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("replay get-archived-stickers fixture: %v", err)
+	}
 	if err := fixtureClientCall(t, creator, "messages_uninstallStickerSet.1", func(ctx context.Context, api *tg.Client) error {
 		removed, err := api.MessagesUninstallStickerSet(ctx, stickerSetRef)
 		if err != nil {

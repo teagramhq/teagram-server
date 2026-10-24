@@ -20,6 +20,122 @@ import (
 	"github.com/teagramhq/teagram-server/internal/store"
 )
 
+func TestGetArchivedStickersReturnsEmptyForEveryFilterAndOffset(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	s := openStore(t)
+	owner, err := s.CreateUser(ctx, "+15551810009")
+	if err != nil {
+		t.Fatalf("create owner: %v", err)
+	}
+	h := fullChannelDispatcher(s)
+	ref := &tg.InputStickerSetShortName{ShortName: "twemoji_reactions"}
+	if got := installStickerSet(t, h, owner.ID, ref); got != "success" {
+		t.Fatalf("install sticker set = %q, want success", got)
+	}
+	if sets := getAllStickerSets(t, h, owner.ID, 0); len(sets.Sets) != 1 {
+		t.Fatalf("installed sets = %d, want one setup set", len(sets.Sets))
+	}
+
+	for _, test := range []struct {
+		name string
+		req  *tg.MessagesGetArchivedStickersRequest
+	}{
+		{name: "no flags", req: &tg.MessagesGetArchivedStickersRequest{}},
+		{name: "masks", req: &tg.MessagesGetArchivedStickersRequest{Masks: true, OffsetID: -1, Limit: -7}},
+		{name: "emojis", req: &tg.MessagesGetArchivedStickersRequest{Emojis: true, OffsetID: 9_007_199_254_740_991, Limit: 100_000}},
+		{name: "masks and emojis", req: &tg.MessagesGetArchivedStickersRequest{Masks: true, Emojis: true, OffsetID: -9_007_199_254_740_991, Limit: 2}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			got := getArchivedStickerSets(t, h, owner.ID, test.req)
+			if got.Count != 0 || len(got.Sets) != 0 {
+				t.Fatalf("archived stickers = count %d, %d sets; want empty", got.Count, len(got.Sets))
+			}
+		})
+	}
+
+	if got := stickerSetRPCMessage(t, dispatchChatMethod(t, h, 0, "messages.getArchivedStickers", &tg.MessagesGetArchivedStickersRequest{})); got != "AUTH_KEY_UNREGISTERED" {
+		t.Fatalf("unbound getArchivedStickers = %q, want AUTH_KEY_UNREGISTERED", got)
+	}
+	if got := stickerSetRPCMessage(t, dispatchChatMethod(t, h, owner.ID, "messages.getArchivedStickers", malformedArchivedStickersRequest{})); got != "INPUT_METHOD_INVALID" {
+		t.Fatalf("malformed getArchivedStickers = %q, want INPUT_METHOD_INVALID", got)
+	}
+}
+
+func TestGetArchivedStickersDoesNotSpendUnimplementedBudget(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	s := openStore(t)
+	owner, err := s.CreateUser(ctx, "+15551810010")
+	if err != nil {
+		t.Fatalf("create owner: %v", err)
+	}
+	h := fullChannelDispatcher(s)
+	key := testKey()
+	transport := &settingsDispatcherTransport{}
+	conn := mtproto.NewTestConn(transport, key)
+
+	for i := range 64 {
+		msgID := int64(1<<32) + int64(i+1)*4
+		var body bin.Buffer
+		if err := (&tg.MessagesGetArchivedStickersRequest{Limit: i + 1}).Encode(&body); err != nil {
+			t.Fatalf("encode getArchivedStickers call %d: %v", i+1, err)
+		}
+		if err := h.OnMessage(conn, &mtproto.Request{
+			AuthKeyID: key.ID,
+			UserID:    owner.ID,
+			MsgID:     msgID,
+			Buf:       &body,
+			Ctx:       ctx,
+		}); err != nil {
+			t.Fatalf("dispatch getArchivedStickers call %d: %v", i+1, err)
+		}
+	}
+	var archived tg.MessagesArchivedStickers
+	if err := archived.Decode(&bin.Buffer{Buf: transport.result(t, key, int64(1<<32)+64*4)}); err != nil {
+		t.Fatalf("last getArchivedStickers response: %v", err)
+	}
+	if archived.Count != 0 || len(archived.Sets) != 0 {
+		t.Fatalf("getArchivedStickers = count %d, %d sets; want empty", archived.Count, len(archived.Sets))
+	}
+
+	var unknown bin.Buffer
+	if err := (&tg.AccountRegisterDeviceRequest{}).Encode(&unknown); err != nil {
+		t.Fatalf("encode unknown method: %v", err)
+	}
+	msgID := int64(1<<32) + 65*4
+	err = h.OnMessage(conn, &mtproto.Request{
+		AuthKeyID: key.ID,
+		UserID:    owner.ID,
+		MsgID:     msgID,
+		Buf:       &unknown,
+		Ctx:       ctx,
+	})
+	if err == nil {
+		t.Fatal("unknown method after archived sticker calls succeeded")
+	}
+	if rpc := mustRPCError(t, err); rpc.Code != 400 || rpc.Message != "INPUT_METHOD_INVALID" {
+		t.Fatalf("unknown method after archived sticker calls = %d %s, want 400 INPUT_METHOD_INVALID", rpc.Code, rpc.Message)
+	}
+}
+
+type malformedArchivedStickersRequest struct{}
+
+func (malformedArchivedStickersRequest) Encode(b *bin.Buffer) error {
+	b.PutID(tg.MessagesGetArchivedStickersRequestTypeID)
+	return nil
+}
+
+func getArchivedStickerSets(t *testing.T, h mtproto.Handler, userID int64, req *tg.MessagesGetArchivedStickersRequest) *tg.MessagesArchivedStickers {
+	t.Helper()
+	body := dispatchChatMethod(t, h, userID, "messages.getArchivedStickers", req)
+	var got tg.MessagesArchivedStickers
+	if err := got.Decode(&bin.Buffer{Buf: body}); err != nil {
+		t.Fatalf("decode getArchivedStickers: %v", err)
+	}
+	return &got
+}
+
 func TestStickerSetInstallListsDownloadsAndUninstallsCatalogue(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
