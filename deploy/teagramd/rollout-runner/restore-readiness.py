@@ -6606,7 +6606,7 @@ def teardown_prepared_runtime(directory: Path, build_uid: int) -> bool:
                 if opened_info.st_dev != directory_info.st_dev or opened_info.st_ino != directory_info.st_ino:
                     return False
                 entries = set(os.listdir(directory_fd))
-                if not entries <= PREPARED_ARTIFACTS | {PREPARED_ATTESTATION} or not entries:
+                if not entries <= PREPARED_ARTIFACTS | {PREPARED_ATTESTATION}:
                     return False
                 for name in sorted(entries):
                     descriptor = os.open(name, os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW, dir_fd=directory_fd)

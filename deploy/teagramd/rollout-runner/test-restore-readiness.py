@@ -284,6 +284,35 @@ class RestoreReadinessContractTests(unittest.TestCase):
         trusted_docker.assert_not_called()
         rollout_lock.assert_not_called()
 
+    def test_early_preparation_failure_can_remove_empty_owned_runtime_directory(self) -> None:
+        path = Path("/tmp") / ("teagram-restore-readiness." + os.urandom(4).hex())
+        path.mkdir(mode=0o700)
+        lock_path = Path("/tmp") / ("teagram-restore-readiness-test-lock." + os.urandom(4).hex())
+        lock_fd = os.open(lock_path, os.O_RDWR | os.O_CREAT | os.O_EXCL, 0o600)
+        shell = SHELL_GATE.read_text(encoding="utf-8")
+        build_inputs = shell[shell.index("build_inputs() {"):shell.index("\nvalidate_prepared_runtime() {")]
+
+        try:
+            with (
+                patch.object(RESTORE_READINESS.os, "geteuid", return_value=0),
+                patch.object(RESTORE_READINESS, "open_global_lock", return_value=(lock_fd, {})),
+            ):
+                self.assertTrue(RESTORE_READINESS.teardown_prepared_runtime(path, os.getuid()))
+            self.assertFalse(path.exists())
+            self.assertLess(shell.index("trap cleanup_build EXIT"), shell.index("build_inputs\n"))
+            self.assertLess(
+                build_inputs.index('mktemp -d "$build_parent'),
+                build_inputs.index('preflight_stage="read pinned Go toolchain"'),
+            )
+        finally:
+            try:
+                os.close(lock_fd)
+            except OSError:
+                pass
+            lock_path.unlink(missing_ok=True)
+            if path.exists():
+                path.rmdir()
+
     def test_deploy_rollout_conflict_refuses_before_restore_lock(self) -> None:
         prepared_path = Path("/tmp/teagram-restore-readiness.abcdefgh")
         prepared = {
