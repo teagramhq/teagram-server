@@ -6,7 +6,8 @@ ON CONFLICT (id) DO UPDATE
       last_seen_at = now();
 
 -- name: AuthKeyByID :one
-SELECT ak.id, ak.key_value, ak.user_id, ak.created_at, ak.last_seen_at, ak.pending_user_id,
+SELECT ak.id, ak.key_value, ak.user_id, ak.created_at, ak.last_seen_at, ak.ever_bound_at,
+       ak.pending_user_id,
        ak.pending_started_at,
        GREATEST(
            0::bigint,
@@ -28,14 +29,16 @@ WHERE ak.id = sqlc.arg(id);
 
 -- name: BindAuthKeyUser :execrows
 UPDATE auth_keys
-SET user_id = $2, pending_user_id = NULL, pending_started_at = NULL,
+SET user_id = $2, ever_bound_at = COALESCE(ever_bound_at, clock_timestamp()),
+    pending_user_id = NULL, pending_started_at = NULL,
     device_model = NULL, platform = NULL, system_version = NULL,
     api_id = NULL, app_version = NULL, ip = NULL
 WHERE id = $1;
 
 -- name: BindAuthKeyUserWithMetadata :execrows
 UPDATE auth_keys
-SET user_id = sqlc.arg(user_id), pending_user_id = NULL, pending_started_at = NULL,
+SET user_id = sqlc.arg(user_id), ever_bound_at = COALESCE(ever_bound_at, clock_timestamp()),
+    pending_user_id = NULL, pending_started_at = NULL,
     device_model = sqlc.arg(device_model), platform = sqlc.arg(platform),
     system_version = sqlc.arg(system_version), api_id = sqlc.arg(api_id),
     app_version = sqlc.arg(app_version), ip = sqlc.arg(ip)
@@ -237,7 +240,8 @@ WHERE id = sqlc.arg(id)
 
 -- name: PromotePendingUser :execrows
 UPDATE auth_keys
-SET user_id = sqlc.arg(user_id), pending_user_id = NULL, pending_started_at = NULL,
+SET user_id = sqlc.arg(user_id), ever_bound_at = COALESCE(ever_bound_at, clock_timestamp()),
+    pending_user_id = NULL, pending_started_at = NULL,
     device_model = sqlc.arg(device_model), platform = sqlc.arg(platform),
     system_version = sqlc.arg(system_version), api_id = sqlc.arg(api_id),
     app_version = sqlc.arg(app_version), ip = sqlc.arg(ip)

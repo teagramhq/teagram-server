@@ -53,8 +53,8 @@ func TestAuthorizationTTLSweepUsesOrderedBoundKeyIndex(t *testing.T) {
 		t.Fatalf("authorization sweep index definition = %q, want ordered partial index for bound keys", indexDefinition)
 	}
 	if _, err := conn.Exec(ctx, `
-		INSERT INTO auth_keys (id, key_value, user_id, last_seen_at)
-		SELECT 6000000000000000000 + n, decode('00', 'hex'), $1,
+		INSERT INTO auth_keys (id, key_value, user_id, ever_bound_at, last_seen_at)
+		SELECT 6000000000000000000 + n, decode('00', 'hex'), $1, now(),
 		       now() - interval '400 days' - n * interval '1 second'
 		FROM generate_series(1, 10000) AS n
 	`, owner.ID); err != nil {

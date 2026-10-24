@@ -74,7 +74,7 @@ func TestBindingEvidenceEnrollmentWaitsForEarlierWriter(t *testing.T) {
 			f := newBindingEvidenceFixture(t, reinitialize)
 			enrollment := bindingEvidenceConn(t, f.ctx, f.dsn)
 			bindingEvidenceExec(t, f.ctx, f.owner, `BEGIN`)
-			bindingEvidenceExec(t, f.ctx, f.owner, `INSERT INTO auth_keys (id, key_value, user_id) VALUES (3, '\x00', $1)`, f.user)
+			bindingEvidenceExec(t, f.ctx, f.owner, `INSERT INTO auth_keys (id, key_value, user_id, ever_bound_at) VALUES (3, '\x00', $1, now())`, f.user)
 			done := bindingEvidenceAsync(t, f.ctx, enrollment, `SELECT public.browser_acceptance_enroll_binding_evidence($1)`, f.user)
 			bindingEvidenceWaitBlocked(t, f.ctx, f.probe, enrollment.PgConn().PID(), f.owner.PgConn().PID())
 			if !reinitialize {
@@ -89,7 +89,7 @@ func TestBindingEvidenceEnrollmentWaitsForEarlierWriter(t *testing.T) {
 			if cut.witness != nil || !reflect.DeepEqual(cut.ids, []int64{1, 2, 3}) {
 				t.Fatal("earlier writer escaped the enrollment baseline")
 			}
-			bindingEvidenceExec(t, f.ctx, f.owner, `INSERT INTO auth_keys (id, key_value, user_id) VALUES (4, '\x00', $1)`, f.user)
+			bindingEvidenceExec(t, f.ctx, f.owner, `INSERT INTO auth_keys (id, key_value, user_id, ever_bound_at) VALUES (4, '\x00', $1, now())`, f.user)
 			bindingEvidenceTotals(t, bindingEvidenceRead(t, f.ctx, f.probe, f.user), 1, 0)
 		})
 	}
@@ -167,7 +167,7 @@ func TestBindingEvidenceConcurrentCutsAreAtomic(t *testing.T) {
 	go func() {
 		defer close(done)
 		for range 50 {
-			if _, err := writer.Exec(ctx, `INSERT INTO auth_keys (id, key_value, user_id) VALUES (3, '\x00', $1)`, f.user); err != nil {
+			if _, err := writer.Exec(ctx, `INSERT INTO auth_keys (id, key_value, user_id, ever_bound_at) VALUES (3, '\x00', $1, now())`, f.user); err != nil {
 				done <- err
 				return
 			}
@@ -279,8 +279,8 @@ func TestBindingEvidenceMigrationPreservesExistingBindings(t *testing.T) {
 		DROP TABLE public.browser_acceptance_binding_evidence;
 		DROP SEQUENCE IF EXISTS public.browser_acceptance_binding_epoch_seq;
 	`)
-	bindingEvidenceExec(t, f.ctx, f.owner, `INSERT INTO auth_keys (id, key_value, user_id, created_at)
-		SELECT n + 100, '\x00', $1, $2 FROM generate_series(1, 10000) n`, f.user, bindingEvidenceOldTime)
+	bindingEvidenceExec(t, f.ctx, f.owner, `INSERT INTO auth_keys (id, key_value, user_id, ever_bound_at, created_at)
+		SELECT n + 100, '\x00', $1, now(), $2 FROM generate_series(1, 10000) n`, f.user, bindingEvidenceOldTime)
 	roleName := "binding_defaults_" + pgtest.RandomHex()
 	bindingEvidenceExec(t, f.ctx, f.owner, `CREATE ROLE `+roleName)
 	for _, objectType := range []string{"TABLES", "SEQUENCES", "FUNCTIONS"} {

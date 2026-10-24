@@ -2,6 +2,7 @@ package store_test
 
 import (
 	"context"
+	"errors"
 	"net/netip"
 	"os"
 	"path/filepath"
@@ -10,6 +11,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/teagramhq/teagram-server/internal/pgtest"
 	"github.com/teagramhq/teagram-server/internal/store"
@@ -186,6 +188,86 @@ func TestOpenRejectsMissingAuthorizationTTLColumn(t *testing.T) {
 	}
 
 	requireOpenMigrationError(t, ctx, dsn)
+}
+
+func TestAuthKeysEverBoundMigrationBackfillsExistingRows(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	dsn := pgtest.DSN(t)
+	s := openStore(t, dsn)
+	owner, err := s.CreateUser(ctx, "+15551239999")
+	if err != nil {
+		t.Fatalf("create legacy binding owner: %v", err)
+	}
+	conn, err := pgx.Connect(ctx, dsn)
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	defer func() { _ = conn.Close(ctx) }() //nolint:errcheck // best-effort close
+
+	if _, err := conn.Exec(ctx, "ALTER TABLE auth_keys DROP COLUMN ever_bound_at"); err != nil {
+		t.Fatalf("restore pre-marker schema: %v", err)
+	}
+	createdAt := time.Date(2020, 1, 2, 3, 4, 5, 0, time.UTC)
+	if _, err := conn.Exec(ctx, "INSERT INTO auth_keys (id, key_value, user_id, created_at) VALUES (910000000000000001, decode('00', 'hex'), NULL, $1), (910000000000000002, decode('00', 'hex'), $2, $1)", createdAt, owner.ID); err != nil {
+		t.Fatalf("seed legacy auth keys: %v", err)
+	}
+	if _, err := conn.Exec(ctx, "CREATE TABLE public.auth_keys_ever_bound_backfill_snapshot AS SELECT id FROM auth_keys; ALTER TABLE public.auth_keys_ever_bound_backfill_snapshot ADD PRIMARY KEY (id)"); err != nil {
+		t.Fatalf("snapshot legacy auth keys: %v", err)
+	}
+	const freshID = int64(910000000000000003)
+	if _, err := conn.Exec(ctx, "INSERT INTO auth_keys (id, key_value) VALUES ($1, decode('00', 'hex'))", freshID); err != nil {
+		t.Fatalf("insert fresh auth key after snapshot: %v", err)
+	}
+
+	schemaMigration, err := os.ReadFile(filepath.Join("..", "..", "migrations", "20261024000001_auth_keys_ever_bound.sql"))
+	if err != nil {
+		t.Fatalf("read ever-bound schema migration: %v", err)
+	}
+	if _, err := conn.Exec(ctx, string(schemaMigration)); err != nil {
+		t.Fatalf("apply ever-bound schema migration: %v", err)
+	}
+	partialMarker := createdAt.Add(time.Hour)
+	if _, err := conn.Exec(ctx, "UPDATE auth_keys SET ever_bound_at = $1 WHERE id = 910000000000000001", partialMarker); err != nil {
+		t.Fatalf("simulate a committed backfill batch: %v", err)
+	}
+
+	backfillMigration, err := os.ReadFile(filepath.Join("..", "..", "migrations", "20261024000002_auth_keys_ever_bound_backfill.sql"))
+	if err != nil {
+		t.Fatalf("read ever-bound backfill migration: %v", err)
+	}
+	if _, err := conn.Exec(ctx, string(backfillMigration)); err != nil {
+		t.Fatalf("apply ever-bound backfill migration: %v", err)
+	}
+
+	for _, key := range []struct {
+		id            int64
+		wantEverBound time.Time
+	}{
+		{id: 910000000000000001, wantEverBound: partialMarker},
+		{id: 910000000000000002, wantEverBound: createdAt},
+	} {
+		var everBoundAt time.Time
+		if err := conn.QueryRow(ctx, "SELECT ever_bound_at FROM auth_keys WHERE id = $1", key.id).Scan(&everBoundAt); err != nil {
+			t.Fatalf("read migrated key %d: %v", key.id, err)
+		}
+		if !everBoundAt.Equal(key.wantEverBound) {
+			t.Errorf("legacy key %d marker = %s, want %s", key.id, everBoundAt, key.wantEverBound)
+		}
+	}
+
+	var marked bool
+	if err := conn.QueryRow(ctx, "SELECT ever_bound_at IS NOT NULL FROM auth_keys WHERE id = $1", freshID).Scan(&marked); err != nil {
+		t.Fatalf("read fresh key marker: %v", err)
+	}
+	if marked {
+		t.Fatal("freshly inserted key has an ever-bound marker")
+	}
+	_, err = conn.Exec(ctx, "UPDATE auth_keys SET user_id = $1 WHERE id = $2", owner.ID, freshID)
+	var constraintErr *pgconn.PgError
+	if !errors.As(err, &constraintErr) || constraintErr.Code != "23514" || constraintErr.ConstraintName != "auth_keys_user_requires_ever_bound" {
+		t.Fatalf("bind without marker error = %v, want auth_keys_user_requires_ever_bound check violation", err)
+	}
 }
 
 func TestOpenRejectsMissingFileSubtypeRightsConstraint(t *testing.T) {

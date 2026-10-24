@@ -36,9 +36,11 @@ type AuthKey struct {
 	// Provisional is true when the bound user is username-mode and has not
 	// yet completed sign-in (no verifier stored). It is derived from the
 	// login_mode column and the absence of a user_passwords row, never stored.
-	Provisional   bool
-	CreatedAt     time.Time
-	LastSeenAt    time.Time
+	Provisional bool
+	CreatedAt   time.Time
+	LastSeenAt  time.Time
+	// EverBoundAt marks a key that has been bound; legacy keys use created_at.
+	EverBoundAt   time.Time
 	DeviceModel   string
 	Platform      string
 	SystemVersion string
@@ -711,12 +713,17 @@ func (s *Store) authKeyFromDBBasic(k db.AuthKey) (AuthKey, error) {
 	if k.PendingStartedAt.Valid {
 		pendingStartedAt = k.PendingStartedAt.Time
 	}
+	var everBoundAt time.Time
+	if k.EverBoundAt.Valid {
+		everBoundAt = k.EverBoundAt.Time
+	}
 	return AuthKey{
 		ID:               k.ID,
 		Value:            value,
 		UserID:           userID,
 		PendingUserID:    pendingUserID,
 		PendingStartedAt: pendingStartedAt,
+		EverBoundAt:      everBoundAt,
 		CreatedAt:        k.CreatedAt.Time,
 		LastSeenAt:       k.LastSeenAt.Time,
 		DeviceModel:      nullableString(k.DeviceModel),
@@ -765,6 +772,10 @@ func (s *Store) authKeyFromDB(k db.AuthKeyByIDRow) (AuthKey, error) {
 	if k.PendingStartedAt.Valid {
 		pendingStartedAt = k.PendingStartedAt.Time
 	}
+	var everBoundAt time.Time
+	if k.EverBoundAt.Valid {
+		everBoundAt = k.EverBoundAt.Time
+	}
 	provisional := false
 	if k.UserID != nil && k.LoginMode != nil && *k.LoginMode == "username" {
 		hasPw, ok := k.HasPassword.(bool)
@@ -785,5 +796,6 @@ func (s *Store) authKeyFromDB(k db.AuthKeyByIDRow) (AuthKey, error) {
 		Provisional:      provisional,
 		CreatedAt:        k.CreatedAt.Time,
 		LastSeenAt:       k.LastSeenAt.Time,
+		EverBoundAt:      everBoundAt,
 	}, nil
 }
