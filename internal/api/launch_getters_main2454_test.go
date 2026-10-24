@@ -16,16 +16,17 @@ import (
 	"github.com/teagramhq/teagram-server/internal/pgtest"
 )
 
-func TestMAIN2454CollectibleEmojiStatusesThroughDispatcher(t *testing.T) {
+func TestMAIN2474CollectibleEmojiStatusesHashThroughDispatcher(t *testing.T) {
 	t.Parallel()
 	h := main2454Dispatcher()
 
 	for _, test := range []struct {
-		name string
-		hash int64
+		name            string
+		hash            int64
+		wantNotModified bool
 	}{
-		{name: "hash zero", hash: 0},
-		{name: "nonzero hash", hash: 123456789},
+		{name: "matching empty-list hash", hash: 0, wantNotModified: true},
+		{name: "different hash", hash: 123456789},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			body := dispatchSettings(t, h, settingsHandler{
@@ -38,6 +39,12 @@ func TestMAIN2454CollectibleEmojiStatusesThroughDispatcher(t *testing.T) {
 			response := &tg.AccountEmojiStatusesBox{}
 			if err := response.Decode(&bin.Buffer{Buf: body}); err != nil {
 				t.Fatalf("decode collectible emoji statuses: %v", err)
+			}
+			if test.wantNotModified {
+				if _, ok := response.EmojiStatuses.(*tg.AccountEmojiStatusesNotModified); !ok {
+					t.Fatalf("collectible emoji statuses = %T, want not modified", response.EmojiStatuses)
+				}
+				return
 			}
 			assertEmptyEmojiStatuses(t, response)
 		})
