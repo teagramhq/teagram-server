@@ -562,6 +562,9 @@ fi
           if [ "$phase" = baseline ] || [ "$phase" = rollback ]; then cat "$MOCK_STATE/base-compose.json"; else cat "$MOCK_STATE/target-compose.json"; fi
         elif [[ "${MOCK_SCENARIO:-}" == target-local-welcome-channel-* ]]; then
           if [ "$config_count" -ge 3 ]; then cat "$MOCK_STATE/target-compose.json"; else cat "$MOCK_STATE/base-compose.json"; fi
+        # The first two renders model the live baseline; the target render follows.
+        elif [ "$config_count" -lt 3 ]; then
+          cat "$MOCK_STATE/base-compose.json"
         elif [ "${MOCK_SCENARIO:-}" = target-local-carry-forward-cce-literal-build-arg ]; then
           jq -c '.services.teagramd.build.args.TEAGRAMD_SOURCE_REVISION="literal-override"' \
             "$MOCK_STATE/target-compose.json"
