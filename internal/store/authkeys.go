@@ -636,12 +636,16 @@ func (s *Store) SweepNeverBoundAuthKeys(ctx context.Context, idleWindow, maxAge,
 	}
 	deleted := 0
 	for {
-		batchDeleted, err := func() (int, error) {
+		batchDeleted, err := func() (batchDeleted int, batchErr error) {
 			tx, err := s.pool.Begin(ctx)
 			if err != nil {
 				return 0, fmt.Errorf("sweep never-bound auth-key batch: begin transaction: %w", err)
 			}
-			defer func() { _ = tx.Rollback(ctx) }() //nolint:errcheck // no-op after commit
+			defer func() {
+				if batchErr != nil {
+					batchErr = rollbackNeverBoundAuthKeySweepBatch(tx, batchErr)
+				}
+			}()
 
 			rows, err := s.q.WithTx(tx).SweepNeverBoundAuthKeyBatch(ctx, params)
 			if err != nil {
@@ -660,6 +664,15 @@ func (s *Store) SweepNeverBoundAuthKeys(ctx context.Context, idleWindow, maxAge,
 			return deleted, nil
 		}
 	}
+}
+
+func rollbackNeverBoundAuthKeySweepBatch(tx pgx.Tx, operationErr error) error {
+	rollbackCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if rollbackErr := tx.Rollback(rollbackCtx); rollbackErr != nil && !errors.Is(rollbackErr, pgx.ErrTxClosed) {
+		return errors.Join(operationErr, fmt.Errorf("sweep never-bound auth-key batch: rollback transaction: %w", rollbackErr))
+	}
+	return operationErr
 }
 
 // ResetAuthorizations unbinds every bound or password-pending auth key for
