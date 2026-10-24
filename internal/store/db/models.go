@@ -31,6 +31,11 @@ type AuthKey struct {
 	ApiID            *int32
 	AppVersion       *string
 	Ip               *string
+	EverBoundAt      pgtype.Timestamptz
+}
+
+type AuthKeysEverBoundBackfillNewKey struct {
+	ID int64
 }
 
 type BlockedUser struct {

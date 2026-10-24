@@ -81,8 +81,8 @@ func TestHotQueryPlansAtScale(t *testing.T) {
 		 SELECT n, '+scale' || n, 'Scale ' || n FROM generate_series(1, 10000) n`,
 		`INSERT INTO usernames (handle, owner_type, owner_id)
 		 SELECT 'scale' || n, 'user', n FROM generate_series(1, 10000) n`,
-		`INSERT INTO auth_keys (id, user_id, key_value)
-		 SELECT n, n, decode(repeat('ab', 32), 'hex') FROM generate_series(1, 10000) n`,
+		`INSERT INTO auth_keys (id, user_id, key_value, ever_bound_at)
+		 SELECT n, n, decode(repeat('ab', 32), 'hex'), now() FROM generate_series(1, 10000) n`,
 		`INSERT INTO update_state (user_id, pts, next_local_id)
 		 SELECT n, 100, 101 FROM generate_series(1, 10000) n`,
 		`ALTER TABLE messages DISABLE TRIGGER messages_stamp_history_ttl`,

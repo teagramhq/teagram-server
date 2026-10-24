@@ -959,7 +959,23 @@ class RestoreReadinessContractTests(unittest.TestCase):
         )
         self.assertEqual(
             {item["name"] for item in inventory["triggers"]},
-            {"AA_browser_acceptance_binding_evidence", "browser_acceptance_auth_keys_reject_truncate"},
+            {
+                "AA_browser_acceptance_binding_evidence",
+                "auth_keys_mark_ever_bound",
+                "browser_acceptance_auth_keys_reject_truncate",
+            },
+        )
+        self.assertIn(
+            {
+                "name": "auth_keys_mark_ever_bound",
+                "table": "public.auth_keys",
+                "timing": "BEFORE",
+                "level": "ROW",
+                "events": ["INSERT", "UPDATE"],
+                "enabled": "ORIGIN",
+                "function": "public.auth_keys_mark_ever_bound",
+            },
+            inventory["triggers"],
         )
         self.assertEqual(
             RESTORE_READINESS.validate_synthetic_auth_key_ids((-101, -202, -303)),
@@ -979,6 +995,8 @@ class RestoreReadinessContractTests(unittest.TestCase):
         local_fixture_sql = RESTORE_READINESS.local_unenrolled_auth_key_fixture_sql((-404, -505), "a" * 32)
         self.assertIn("INSERT INTO public.users", local_fixture_sql)
         self.assertIn("INSERT INTO public.auth_keys", local_fixture_sql)
+        self.assertIn("ever_bound_at, pending_user_id", local_fixture_sql)
+        self.assertIn("clock_timestamp()", local_fixture_sql)
         self.assertNotIn("browser_acceptance_enroll_binding_evidence", local_fixture_sql)
         self.assertIn(
             "JOIN public.browser_acceptance_binding_evidence AS evidence\n  ON evidence.user_id = auth_key.user_id",

@@ -142,8 +142,8 @@ func TestBrowserAcceptanceProbeRoleCanOnlyReadBoundedAuthKeyData(t *testing.T) {
 		{id: 91004, pendingID: &userID, createdAt: createdAt2},
 	} {
 		if _, err := admin.Exec(ctx, `
-			INSERT INTO auth_keys (id, key_value, user_id, pending_user_id, created_at)
-			VALUES ($1, $2, $3, $4, $5)
+			INSERT INTO auth_keys (id, key_value, user_id, ever_bound_at, pending_user_id, created_at)
+			VALUES ($1, $2, $3, CASE WHEN $3::bigint IS NULL THEN NULL::timestamptz ELSE $5::timestamptz END, $4, $5)
 		`, key.id, []byte("test key material"), key.userID, key.pendingID, key.createdAt); err != nil {
 			t.Fatalf("insert auth key %d: %v", key.id, err)
 		}

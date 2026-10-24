@@ -88,8 +88,8 @@ func newBindingEvidenceFixture(t *testing.T, enroll bool) bindingEvidenceFixture
 	probe := bindingEvidenceConn(t, ctx, dsn)
 	bindingEvidenceExec(t, ctx, probe, `SET ROLE browser_acceptance_probe`)
 	f := bindingEvidenceFixture{ctx: ctx, dsn: dsn, s: s, owner: owner, probe: probe, user: user.ID, other: other.ID}
-	bindingEvidenceExec(t, ctx, owner, `INSERT INTO public.auth_keys (id, key_value, user_id, created_at)
-		VALUES (1, '\x00', $1, $2), (2, '\x00', $1, $2)`, f.user, bindingEvidenceOldTime)
+	bindingEvidenceExec(t, ctx, owner, `INSERT INTO public.auth_keys (id, key_value, user_id, ever_bound_at, created_at)
+		VALUES (1, '\x00', $1, now(), $2), (2, '\x00', $1, now(), $2)`, f.user, bindingEvidenceOldTime)
 	if enroll {
 		bindingEvidenceExec(t, ctx, owner, `SELECT public.browser_acceptance_enroll_binding_evidence($1)`, f.user)
 	}
@@ -147,12 +147,12 @@ func TestBindingEvidenceTransientFixtures(t *testing.T) {
 		fresh   bool
 		bound   []int64
 	}{
-		{"one fresh key binds and logs out", `INSERT INTO auth_keys (id, key_value, user_id, created_at) VALUES (3, '\x00', $1, $2); UPDATE auth_keys SET user_id = NULL WHERE id = 3`, 11, 9, true, []int64{1, 2}},
-		{"two fresh keys bind and log out", `INSERT INTO auth_keys (id, key_value, user_id, created_at) VALUES (3, '\x00', $1, $2), (4, '\x00', $1, $2); DELETE FROM auth_keys WHERE id IN (3, 4)`, 12, 10, true, []int64{1, 2}},
-		{"baseline key removed and restored", `DELETE FROM auth_keys WHERE id = 1; INSERT INTO auth_keys (id, key_value, user_id, created_at) VALUES (1, '\x00', $1, '2000-01-01')`, 11, 9, false, []int64{1, 2}},
-		{"old unbound key binds and logs out", `INSERT INTO auth_keys (id, key_value, created_at) VALUES (3, '\x00', '2000-01-01'); UPDATE auth_keys SET user_id = $1 WHERE id = 3; UPDATE auth_keys SET user_id = NULL WHERE id = 3`, 11, 9, false, []int64{1, 2}},
+		{"one fresh key binds and logs out", `INSERT INTO auth_keys (id, key_value, user_id, ever_bound_at, created_at) VALUES (3, '\x00', $1, now(), $2); UPDATE auth_keys SET user_id = NULL WHERE id = 3`, 11, 9, true, []int64{1, 2}},
+		{"two fresh keys bind and log out", `INSERT INTO auth_keys (id, key_value, user_id, ever_bound_at, created_at) VALUES (3, '\x00', $1, now(), $2), (4, '\x00', $1, now(), $2); DELETE FROM auth_keys WHERE id IN (3, 4)`, 12, 10, true, []int64{1, 2}},
+		{"baseline key removed and restored", `DELETE FROM auth_keys WHERE id = 1; INSERT INTO auth_keys (id, key_value, user_id, ever_bound_at, created_at) VALUES (1, '\x00', $1, now(), '2000-01-01')`, 11, 9, false, []int64{1, 2}},
+		{"old unbound key binds and logs out", `INSERT INTO auth_keys (id, key_value, created_at) VALUES (3, '\x00', '2000-01-01'); UPDATE auth_keys SET user_id = $1, ever_bound_at = clock_timestamp() WHERE id = 3; UPDATE auth_keys SET user_id = NULL WHERE id = 3`, 11, 9, false, []int64{1, 2}},
 		{"baseline key reassigned away and back", `UPDATE auth_keys SET user_id = $2 WHERE id = 1; UPDATE auth_keys SET user_id = $1 WHERE id = 1`, 11, 9, false, []int64{1, 2}},
-		{"fresh key remains bound", `INSERT INTO auth_keys (id, key_value, user_id, created_at) VALUES (3, '\x00', $1, $2)`, 11, 8, true, []int64{1, 2, 3}},
+		{"fresh key remains bound", `INSERT INTO auth_keys (id, key_value, user_id, ever_bound_at, created_at) VALUES (3, '\x00', $1, now(), $2)`, 11, 8, true, []int64{1, 2, 3}},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			t.Parallel()
@@ -201,7 +201,7 @@ func TestBindingEvidenceCountsTupleChangesAndIgnoresMetadata(t *testing.T) {
 		{`UPDATE auth_keys SET created_at = '2001-01-01' WHERE id = 11`, 2, 2},
 		{`UPDATE auth_keys SET user_id = $1 WHERE id = 11`, 2, 3},
 		{`DELETE FROM auth_keys WHERE id = 2`, 2, 4},
-		{`INSERT INTO auth_keys (id, key_value, user_id) VALUES (3, '\x00', $1)`, 2, 4},
+		{`INSERT INTO auth_keys (id, key_value, user_id, ever_bound_at) VALUES (3, '\x00', $1, now())`, 2, 4},
 	} {
 		args := []any{pgx.QueryExecModeSimpleProtocol}
 		if strings.Contains(test.query, "$1") {
@@ -227,7 +227,7 @@ func TestBindingEvidenceReplicationRoleAndTruncate(t *testing.T) {
 	t.Parallel()
 	f := newBindingEvidenceFixture(t, true)
 	bindingEvidenceExec(t, f.ctx, f.owner, `SET session_replication_role = replica`)
-	bindingEvidenceExec(t, f.ctx, f.owner, `INSERT INTO auth_keys (id, key_value, user_id) VALUES (3, '\x00', $1)`, f.user)
+	bindingEvidenceExec(t, f.ctx, f.owner, `INSERT INTO auth_keys (id, key_value, user_id, ever_bound_at) VALUES (3, '\x00', $1, now())`, f.user)
 	bindingEvidenceExec(t, f.ctx, f.owner, `UPDATE auth_keys SET created_at = '2001-01-01' WHERE id = 3`)
 	bindingEvidenceExec(t, f.ctx, f.owner, `DELETE FROM auth_keys WHERE id = 3`)
 	bindingEvidenceTotals(t, bindingEvidenceRead(t, f.ctx, f.probe, f.user), 2, 2)
@@ -298,7 +298,7 @@ func TestBindingEvidenceRollbackAndWriteFailure(t *testing.T) {
 	t.Parallel()
 	f := newBindingEvidenceFixture(t, true)
 	bindingEvidenceExec(t, f.ctx, f.owner, `BEGIN`)
-	bindingEvidenceExec(t, f.ctx, f.owner, `INSERT INTO auth_keys (id, key_value, user_id) VALUES (3, '\x00', $1)`, f.user)
+	bindingEvidenceExec(t, f.ctx, f.owner, `INSERT INTO auth_keys (id, key_value, user_id, ever_bound_at) VALUES (3, '\x00', $1, now())`, f.user)
 	cut := bindingEvidenceRead(t, f.ctx, f.probe, f.user)
 	bindingEvidenceTotals(t, cut, 0, 0)
 	if !reflect.DeepEqual(cut.ids, []int64{1, 2}) || cut.witness != nil {
@@ -307,7 +307,7 @@ func TestBindingEvidenceRollbackAndWriteFailure(t *testing.T) {
 	bindingEvidenceExec(t, f.ctx, f.owner, `ROLLBACK`)
 	bindingEvidenceTotals(t, bindingEvidenceRead(t, f.ctx, f.probe, f.user), 0, 0)
 	bindingEvidenceExec(t, f.ctx, f.owner, `ALTER TABLE public.browser_acceptance_binding_evidence ADD CONSTRAINT fixture_refuse_addition CHECK (additions = 0)`)
-	_, err := f.owner.Exec(f.ctx, `INSERT INTO auth_keys (id, key_value, user_id) VALUES (3, '\x00', $1)`, f.user)
+	_, err := f.owner.Exec(f.ctx, `INSERT INTO auth_keys (id, key_value, user_id, ever_bound_at) VALUES (3, '\x00', $1, now())`, f.user)
 	bindingEvidenceSQLState(t, err, "23514")
 	cut = bindingEvidenceRead(t, f.ctx, f.probe, f.user)
 	bindingEvidenceTotals(t, cut, 0, 0)
@@ -334,7 +334,7 @@ func TestBindingEvidenceOverflowAbortsBinding(t *testing.T) {
 		added  int64
 		remove int64
 	}{
-		{"addition", "additions", `INSERT INTO auth_keys (id, key_value, user_id) VALUES (3, '\x00', $1)`, math.MaxInt64, 0},
+		{"addition", "additions", `INSERT INTO auth_keys (id, key_value, user_id, ever_bound_at) VALUES (3, '\x00', $1, now())`, math.MaxInt64, 0},
 		{"removal", "removals", `UPDATE auth_keys SET user_id = NULL WHERE id = 1`, 0, math.MaxInt64},
 		{"tuple replacement", "additions", `UPDATE auth_keys SET id = 11 WHERE id = 1`, math.MaxInt64, 0},
 	} {

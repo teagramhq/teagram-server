@@ -5,6 +5,9 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
+
+	"github.com/jackc/pgx/v5"
 
 	"github.com/teagramhq/teagram-server/internal/pgtest"
 	"github.com/teagramhq/teagram-server/internal/store"
@@ -379,5 +382,117 @@ func TestAuthKeyProvisionalPendingUser(t *testing.T) {
 	// (unbound keys are not provisional).
 	if got.Provisional {
 		t.Error("pending key should not be provisional (user_id is NULL)")
+	}
+}
+
+func TestAuthKeyEverBoundMarker(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	dsn := pgtest.DSN(t)
+	s := openStore(t, dsn)
+	owner := mustUser(t, s, "+15551234101")
+
+	const freshID = int64(0x4010)
+	if err := s.SaveAuthKey(ctx, freshID, []byte("fresh key")); err != nil {
+		t.Fatalf("save fresh key: %v", err)
+	}
+	fresh, ok, err := s.AuthKeyByID(ctx, freshID)
+	if err != nil || !ok {
+		t.Fatalf("read fresh key: ok=%v err=%v", ok, err)
+	}
+	if !fresh.EverBoundAt.IsZero() {
+		t.Fatalf("fresh key has ever-bound marker %s", fresh.EverBoundAt)
+	}
+	conn, err := pgx.Connect(ctx, dsn)
+	if err != nil {
+		t.Fatalf("connect for constraint check: %v", err)
+	}
+	defer func() { _ = conn.Close(ctx) }() //nolint:errcheck // best-effort close
+	if _, err := conn.Exec(ctx, `UPDATE auth_keys SET user_id = $1 WHERE id = $2`, owner.ID, freshID); err != nil {
+		t.Fatalf("bind fresh key through the old server: %v", err)
+	}
+	fresh, ok, err = s.AuthKeyByID(ctx, freshID)
+	if err != nil || !ok {
+		t.Fatalf("read old-server bound key: ok=%v err=%v", ok, err)
+	}
+	if fresh.EverBoundAt.IsZero() {
+		t.Fatal("database did not mark a key bound through the old server")
+	}
+
+	const boundID = int64(0x4011)
+	if err := s.SaveAuthKey(ctx, boundID, []byte("bound key")); err != nil {
+		t.Fatalf("save bound key: %v", err)
+	}
+	if err := s.BindAuthKeyUser(ctx, boundID, owner.ID); err != nil {
+		t.Fatalf("bind key: %v", err)
+	}
+	bound, ok, err := s.AuthKeyByID(ctx, boundID)
+	if err != nil || !ok {
+		t.Fatalf("read bound key: ok=%v err=%v", ok, err)
+	}
+	marker := bound.EverBoundAt
+	if marker.IsZero() {
+		t.Fatal("bound key has no ever-bound marker")
+	}
+	boundKeys, err := s.AuthKeysByUser(ctx, owner.ID)
+	if err != nil {
+		t.Fatalf("list bound keys: %v", err)
+	}
+	if len(boundKeys) != 2 {
+		t.Fatalf("listed %d keys after old-server and current-server binds, want 2", len(boundKeys))
+	}
+	markersByID := make(map[int64]time.Time, len(boundKeys))
+	for _, key := range boundKeys {
+		markersByID[key.ID] = key.EverBoundAt
+	}
+	if listedMarker := markersByID[freshID]; !listedMarker.Equal(fresh.EverBoundAt) {
+		t.Fatalf("listed old-server key marker = %s, want %s", listedMarker, fresh.EverBoundAt)
+	}
+	if listedMarker := markersByID[boundID]; !listedMarker.Equal(marker) {
+		t.Fatalf("listed current-server key marker = %s, want %s", listedMarker, marker)
+	}
+	if _, found, err := s.LogOutAuthKey(ctx, boundID); err != nil || !found {
+		t.Fatalf("log out key: found=%v err=%v", found, err)
+	}
+	unbound, ok, err := s.AuthKeyByID(ctx, boundID)
+	if err != nil || !ok {
+		t.Fatalf("read logged-out key: ok=%v err=%v", ok, err)
+	}
+	if afterLogout := unbound.EverBoundAt; !afterLogout.Equal(marker) {
+		t.Fatalf("logout changed ever-bound marker from %s to %s", marker, afterLogout)
+	}
+
+	const metadataID = int64(0x4012)
+	if err := s.SaveAuthKey(ctx, metadataID, []byte("metadata key")); err != nil {
+		t.Fatalf("save metadata key: %v", err)
+	}
+	if err := s.BindAuthKeyUserWithMetadata(ctx, metadataID, owner.ID, store.AuthorizationMetadata{}); err != nil {
+		t.Fatalf("bind key with metadata: %v", err)
+	}
+	metadataKey, ok, err := s.AuthKeyByID(ctx, metadataID)
+	if err != nil || !ok {
+		t.Fatalf("read metadata key: ok=%v err=%v", ok, err)
+	}
+	if metadataKey.EverBoundAt.IsZero() {
+		t.Fatal("metadata-bound key has no ever-bound marker")
+	}
+
+	const promotedID = int64(0x4013)
+	if err := s.SaveAuthKey(ctx, promotedID, []byte("promoted key")); err != nil {
+		t.Fatalf("save promoted key: %v", err)
+	}
+	startedAt, _, err := s.StagePendingUser(ctx, promotedID, owner.ID, time.Minute)
+	if err != nil {
+		t.Fatalf("stage pending user: %v", err)
+	}
+	if err := s.PromotePendingUser(ctx, promotedID, owner.ID, startedAt, time.Minute); err != nil {
+		t.Fatalf("promote pending user: %v", err)
+	}
+	promoted, ok, err := s.AuthKeyByID(ctx, promotedID)
+	if err != nil || !ok {
+		t.Fatalf("read promoted key: ok=%v err=%v", ok, err)
+	}
+	if promoted.EverBoundAt.IsZero() {
+		t.Fatal("promoted key has no ever-bound marker")
 	}
 }

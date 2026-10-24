@@ -538,10 +538,10 @@ BEGIN
   INSERT INTO public.users (phone, first_name)
   VALUES ('restore-readiness-{token}-unenrolled-b', 'Unenrolled fixture user B')
   RETURNING id INTO STRICT second_unenrolled_user_id;
-  INSERT INTO public.auth_keys (id, key_value, user_id, pending_user_id)
+  INSERT INTO public.auth_keys (id, key_value, user_id, ever_bound_at, pending_user_id)
   VALUES
-    ({first}, decode(repeat('c3', 256), 'hex'), first_unenrolled_user_id, NULL),
-    ({second}, decode(repeat('d4', 256), 'hex'), second_unenrolled_user_id, NULL);
+    ({first}, decode(repeat('c3', 256), 'hex'), first_unenrolled_user_id, clock_timestamp(), NULL),
+    ({second}, decode(repeat('d4', 256), 'hex'), second_unenrolled_user_id, clock_timestamp(), NULL);
 END
 $local_unenrolled_auth_key_fixture$;
 """

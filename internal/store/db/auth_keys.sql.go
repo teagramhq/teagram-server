@@ -12,7 +12,8 @@ import (
 )
 
 const authKeyByID = `-- name: AuthKeyByID :one
-SELECT ak.id, ak.key_value, ak.user_id, ak.created_at, ak.last_seen_at, ak.pending_user_id,
+SELECT ak.id, ak.key_value, ak.user_id, ak.created_at, ak.last_seen_at, ak.ever_bound_at,
+       ak.pending_user_id,
        ak.pending_started_at,
        GREATEST(
            0::bigint,
@@ -44,6 +45,7 @@ type AuthKeyByIDRow struct {
 	UserID                 *int64
 	CreatedAt              pgtype.Timestamptz
 	LastSeenAt             pgtype.Timestamptz
+	EverBoundAt            pgtype.Timestamptz
 	PendingUserID          *int64
 	PendingStartedAt       pgtype.Timestamptz
 	PendingRemainingMicros int64
@@ -60,6 +62,7 @@ func (q *Queries) AuthKeyByID(ctx context.Context, arg AuthKeyByIDParams) (AuthK
 		&i.UserID,
 		&i.CreatedAt,
 		&i.LastSeenAt,
+		&i.EverBoundAt,
 		&i.PendingUserID,
 		&i.PendingStartedAt,
 		&i.PendingRemainingMicros,
@@ -70,7 +73,7 @@ func (q *Queries) AuthKeyByID(ctx context.Context, arg AuthKeyByIDParams) (AuthK
 }
 
 const authKeysByUser = `-- name: AuthKeysByUser :many
-SELECT id, key_value, user_id, created_at, last_seen_at, pending_user_id, pending_started_at, device_model, platform, system_version, api_id, app_version, ip FROM auth_keys WHERE user_id = $1
+SELECT id, key_value, user_id, created_at, last_seen_at, pending_user_id, pending_started_at, device_model, platform, system_version, api_id, app_version, ip, ever_bound_at FROM auth_keys WHERE user_id = $1
 `
 
 func (q *Queries) AuthKeysByUser(ctx context.Context, userID *int64) ([]AuthKey, error) {
@@ -96,6 +99,7 @@ func (q *Queries) AuthKeysByUser(ctx context.Context, userID *int64) ([]AuthKey,
 			&i.ApiID,
 			&i.AppVersion,
 			&i.Ip,
+			&i.EverBoundAt,
 		); err != nil {
 			return nil, err
 		}
@@ -122,7 +126,8 @@ func (q *Queries) AuthorizationTTLDaysByUser(ctx context.Context, userID int64) 
 
 const bindAuthKeyUser = `-- name: BindAuthKeyUser :execrows
 UPDATE auth_keys
-SET user_id = $2, pending_user_id = NULL, pending_started_at = NULL,
+SET user_id = $2, ever_bound_at = COALESCE(ever_bound_at, clock_timestamp()),
+    pending_user_id = NULL, pending_started_at = NULL,
     device_model = NULL, platform = NULL, system_version = NULL,
     api_id = NULL, app_version = NULL, ip = NULL
 WHERE id = $1
@@ -143,7 +148,8 @@ func (q *Queries) BindAuthKeyUser(ctx context.Context, arg BindAuthKeyUserParams
 
 const bindAuthKeyUserWithMetadata = `-- name: BindAuthKeyUserWithMetadata :execrows
 UPDATE auth_keys
-SET user_id = $1, pending_user_id = NULL, pending_started_at = NULL,
+SET user_id = $1, ever_bound_at = COALESCE(ever_bound_at, clock_timestamp()),
+    pending_user_id = NULL, pending_started_at = NULL,
     device_model = $2, platform = $3,
     system_version = $4, api_id = $5,
     app_version = $6, ip = $7
@@ -298,7 +304,8 @@ func (q *Queries) PendingLoginByID(ctx context.Context, arg PendingLoginByIDPara
 
 const promotePendingUser = `-- name: PromotePendingUser :execrows
 UPDATE auth_keys
-SET user_id = $1, pending_user_id = NULL, pending_started_at = NULL,
+SET user_id = $1, ever_bound_at = COALESCE(ever_bound_at, clock_timestamp()),
+    pending_user_id = NULL, pending_started_at = NULL,
     device_model = $2, platform = $3,
     system_version = $4, api_id = $5,
     app_version = $6, ip = $7

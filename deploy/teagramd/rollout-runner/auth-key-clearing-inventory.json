@@ -72,6 +72,15 @@
       "function": "public.browser_acceptance_record_binding_evidence"
     },
     {
+      "name": "auth_keys_mark_ever_bound",
+      "table": "public.auth_keys",
+      "timing": "BEFORE",
+      "level": "ROW",
+      "events": ["INSERT", "UPDATE"],
+      "enabled": "ORIGIN",
+      "function": "public.auth_keys_mark_ever_bound"
+    },
+    {
       "name": "browser_acceptance_auth_keys_reject_truncate",
       "table": "public.auth_keys",
       "timing": "BEFORE",
