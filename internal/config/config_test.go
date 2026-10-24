@@ -2051,6 +2051,51 @@ func TestLoadMediaErasureSweep(t *testing.T) {
 	}
 }
 
+func TestLoadAuthKeySweepWindows(t *testing.T) {
+	t.Setenv("TG_POSTGRES_DSN", "postgres://localhost/tg")
+	t.Setenv("TG_AUTHKEY_ENC_KEY", validEncKey)
+	tests := map[string]struct {
+		idle, maxAge string
+		wantIdle     time.Duration
+		wantMaxAge   time.Duration
+		wantErrVar   string
+	}{
+		"defaults":                          {wantIdle: 24 * time.Hour, wantMaxAge: 72 * time.Hour},
+		"override":                          {idle: "48h", maxAge: "96h", wantIdle: 48 * time.Hour, wantMaxAge: 96 * time.Hour},
+		"idle zero disables":                {idle: "0s", maxAge: "72h", wantMaxAge: 72 * time.Hour},
+		"max age zero disables":             {idle: "24h", maxAge: "0s", wantIdle: 24 * time.Hour},
+		"idle below pending lease":          {idle: (mtproto.DefaultPendingLoginLifetime + mtproto.AuthKeyTouchInterval - time.Nanosecond).String(), maxAge: "72h", wantErrVar: "TG_AUTH_KEY_SWEEP_IDLE_WINDOW"},
+		"idle below pending while disabled": {idle: (mtproto.DefaultPendingLoginLifetime + mtproto.AuthKeyTouchInterval - time.Nanosecond).String(), maxAge: "0s", wantErrVar: "TG_AUTH_KEY_SWEEP_IDLE_WINDOW"},
+		"max age below idle":                {idle: "24h", maxAge: "23h", wantErrVar: "TG_AUTH_KEY_SWEEP_MAX_AGE"},
+		"idle not a duration":               {idle: "often", maxAge: "72h", wantErrVar: "TG_AUTH_KEY_SWEEP_IDLE_WINDOW"},
+		"max age not a duration":            {idle: "24h", maxAge: "forever", wantErrVar: "TG_AUTH_KEY_SWEEP_MAX_AGE"},
+		"negative idle":                     {idle: "-1s", maxAge: "72h", wantErrVar: "TG_AUTH_KEY_SWEEP_IDLE_WINDOW"},
+		"negative max age":                  {idle: "24h", maxAge: "-1s", wantErrVar: "TG_AUTH_KEY_SWEEP_MAX_AGE"},
+	}
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Setenv("TG_AUTH_KEY_SWEEP_IDLE_WINDOW", tc.idle)
+			t.Setenv("TG_AUTH_KEY_SWEEP_MAX_AGE", tc.maxAge)
+			cfg, err := config.Load(discardLog())
+			if tc.wantErrVar != "" {
+				if err == nil {
+					t.Fatalf("Load succeeded with invalid auth-key sweep settings: idle=%q max_age=%q", tc.idle, tc.maxAge)
+				}
+				if !strings.Contains(err.Error(), tc.wantErrVar) {
+					t.Errorf("Load error %q does not name %s", err, tc.wantErrVar)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("Load: %v", err)
+			}
+			if idle, maxAge := cfg.AuthKeySweepIdleWindow, cfg.AuthKeySweepMaxAge; idle != tc.wantIdle || maxAge != tc.wantMaxAge {
+				t.Errorf("auth-key sweep windows = [%v, %v], want [%v, %v]", idle, maxAge, tc.wantIdle, tc.wantMaxAge)
+			}
+		})
+	}
+}
+
 // The not-stored age cutoff defaults to a 24-hour floor while MAIN-338 remains
 // open. The row interlock makes a live assembly safe even below that value; the
 // floor is a deliberate crash-retention default, not the safety control.

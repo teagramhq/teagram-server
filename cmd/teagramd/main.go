@@ -716,6 +716,11 @@ func runAtBlobModePath(log *slog.Logger, blobModePath string) error {
 	sweepWG.Go(func() {
 		sweepExpiredAuthorizations(sweepCtx, st, log)
 	})
+	if cfg.AuthKeySweepIdleWindow > 0 && cfg.AuthKeySweepMaxAge > 0 {
+		sweepWG.Go(func() {
+			sweepNeverBoundAuthKeys(sweepCtx, st, cfg.AuthKeySweepIdleWindow, cfg.AuthKeySweepMaxAge, mtproto.DefaultPendingLoginLifetime, log)
+		})
+	}
 	sweepWG.Go(func() {
 		sweepExpiredUploadParts(sweepCtx, st, cfg.UploadPartTTL, log)
 	})
@@ -1096,6 +1101,26 @@ func sweepExpiredAuthorizations(ctx context.Context, st *store.Store, log *slog.
 				continue
 			}
 			log.Info("swept expired authorizations", "deleted", len(revoked))
+		}
+	}
+}
+
+// sweepNeverBoundAuthKeys periodically removes only keys that have never been
+// bound to an account and have no live pending login.
+func sweepNeverBoundAuthKeys(ctx context.Context, st *store.Store, idleWindow, maxAge, pendingLifetime time.Duration, log *slog.Logger) {
+	ticker := time.NewTicker(sweepInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			deleted, err := st.SweepNeverBoundAuthKeys(ctx, idleWindow, maxAge, pendingLifetime, store.NeverBoundAuthKeySweepBatch)
+			if err != nil {
+				log.Error("sweep never-bound auth keys", "deleted", deleted, "err", err)
+				continue
+			}
+			log.Info("swept never-bound auth keys", "deleted", deleted)
 		}
 	}
 }

@@ -613,6 +613,68 @@ func (s *Store) SweepExpiredAuthorizations(ctx context.Context, batch int) ([]Au
 	}
 }
 
+// NeverBoundAuthKeySweepBatch bounds how many auth-key rows one deletion
+// transaction may lock and remove.
+const NeverBoundAuthKeySweepBatch = 1000
+
+// SweepNeverBoundAuthKeys deletes only unbound keys without an ever-bound
+// marker and without a live pending login. Each batch is its own transaction;
+// concurrent replicas skip each other's locked rows. It returns only the total
+// number deleted so callers cannot log key identifiers.
+func (s *Store) SweepNeverBoundAuthKeys(ctx context.Context, idleWindow, maxAge, pendingLifetime time.Duration, batch int) (int, error) {
+	if idleWindow <= 0 || maxAge <= 0 || pendingLifetime <= 0 || maxAge < idleWindow {
+		return 0, errors.New("sweep never-bound auth keys: invalid retention windows")
+	}
+	if batch <= 0 || batch > math.MaxInt32 {
+		return 0, fmt.Errorf("sweep never-bound auth keys: batch %d out of range", batch)
+	}
+	params := db.SweepNeverBoundAuthKeyBatchParams{
+		IdleWindowMicros:      int64(idleWindow / time.Microsecond),
+		MaxAgeMicros:          int64(maxAge / time.Microsecond),
+		PendingLifetimeMicros: int64(pendingLifetime / time.Microsecond),
+		Batch:                 int32(batch),
+	}
+	deleted := 0
+	for {
+		batchDeleted, err := func() (batchDeleted int, batchErr error) {
+			tx, err := s.pool.Begin(ctx)
+			if err != nil {
+				return 0, fmt.Errorf("sweep never-bound auth-key batch: begin transaction: %w", err)
+			}
+			defer func() {
+				if batchErr != nil {
+					batchErr = rollbackNeverBoundAuthKeySweepBatch(tx, batchErr)
+				}
+			}()
+
+			rows, err := s.q.WithTx(tx).SweepNeverBoundAuthKeyBatch(ctx, params)
+			if err != nil {
+				return 0, fmt.Errorf("sweep never-bound auth-key batch: delete keys: %w", err)
+			}
+			if err := tx.Commit(ctx); err != nil {
+				return 0, fmt.Errorf("sweep never-bound auth-key batch: commit transaction: %w", err)
+			}
+			return int(rows), nil
+		}()
+		if err != nil {
+			return deleted, err
+		}
+		deleted += batchDeleted
+		if batchDeleted < batch {
+			return deleted, nil
+		}
+	}
+}
+
+func rollbackNeverBoundAuthKeySweepBatch(tx pgx.Tx, operationErr error) error {
+	rollbackCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if rollbackErr := tx.Rollback(rollbackCtx); rollbackErr != nil && !errors.Is(rollbackErr, pgx.ErrTxClosed) {
+		return errors.Join(operationErr, fmt.Errorf("sweep never-bound auth-key batch: rollback transaction: %w", rollbackErr))
+	}
+	return operationErr
+}
+
 // ResetAuthorizations unbinds every bound or password-pending auth key for
 // ownerID except callerKeyID. The caller must still be bound to ownerID when
 // the reset takes effect. It returns only keys that were bound to the owner,
