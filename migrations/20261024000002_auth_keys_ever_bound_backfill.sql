@@ -19,15 +19,26 @@ BEGIN
             DROP TABLE public.auth_keys_ever_bound_backfill_snapshot;
             COMMIT;
         END IF;
+        DROP TRIGGER IF EXISTS auth_keys_capture_ever_bound_backfill_new_key ON public.auth_keys;
+        DROP FUNCTION IF EXISTS public.auth_keys_capture_ever_bound_backfill_new_key();
+        DROP TABLE IF EXISTS public.auth_keys_ever_bound_backfill_new_keys;
+        COMMIT;
         RETURN;
     END IF;
 
-    -- The marker trigger is already live, so this online snapshot can race
-    -- safely with old-server binds without holding a table lock.
+    -- Exclude keys inserted after migration 1 committed. The insert trigger
+    -- records each new ID atomically with the auth-key row, so a key exchange
+    -- between migrations remains unmarked until its first bind.
     IF pg_catalog.to_regclass('public.auth_keys_ever_bound_backfill_snapshot') IS NULL THEN
         CREATE TABLE public.auth_keys_ever_bound_backfill_snapshot (id BIGINT PRIMARY KEY);
         INSERT INTO public.auth_keys_ever_bound_backfill_snapshot (id)
-        SELECT id FROM public.auth_keys;
+        SELECT auth_key.id
+        FROM public.auth_keys AS auth_key
+        WHERE NOT EXISTS (
+            SELECT 1
+            FROM public.auth_keys_ever_bound_backfill_new_keys AS new_key
+            WHERE new_key.id = auth_key.id
+        );
     END IF;
 
     COMMIT;
@@ -39,6 +50,11 @@ BEGIN
             INNER JOIN public.auth_keys_ever_bound_backfill_snapshot AS existing_key
                 ON existing_key.id = auth_key.id
             WHERE auth_key.ever_bound_at IS NULL
+              AND NOT EXISTS (
+                  SELECT 1
+                  FROM public.auth_keys_ever_bound_backfill_new_keys AS new_key
+                  WHERE new_key.id = auth_key.id
+              )
             ORDER BY auth_key.id
             LIMIT 10000
         )
@@ -55,6 +71,11 @@ BEGIN
             INNER JOIN public.auth_keys_ever_bound_backfill_snapshot AS existing_key
                 ON existing_key.id = auth_key.id
             WHERE auth_key.ever_bound_at IS NULL
+              AND NOT EXISTS (
+                  SELECT 1
+                  FROM public.auth_keys_ever_bound_backfill_new_keys AS new_key
+                  WHERE new_key.id = auth_key.id
+              )
             LIMIT 1
         );
     END LOOP;
@@ -76,6 +97,11 @@ BEGIN
     COMMIT;
 
     DROP TABLE public.auth_keys_ever_bound_backfill_snapshot;
+    COMMIT;
+
+    DROP TRIGGER IF EXISTS auth_keys_capture_ever_bound_backfill_new_key ON public.auth_keys;
+    DROP FUNCTION IF EXISTS public.auth_keys_capture_ever_bound_backfill_new_key();
+    DROP TABLE IF EXISTS public.auth_keys_ever_bound_backfill_new_keys;
     COMMIT;
 END
 $migration$;

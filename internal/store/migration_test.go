@@ -207,9 +207,12 @@ func TestAuthKeysEverBoundMigrationBackfillsExistingRows(t *testing.T) {
 
 	if _, err := conn.Exec(ctx, `
 		ALTER TABLE auth_keys DROP CONSTRAINT IF EXISTS auth_keys_user_requires_ever_bound;
+		DROP TRIGGER IF EXISTS auth_keys_capture_ever_bound_backfill_new_key ON auth_keys;
+		DROP FUNCTION IF EXISTS public.auth_keys_capture_ever_bound_backfill_new_key();
 		DROP TRIGGER IF EXISTS auth_keys_mark_ever_bound ON auth_keys;
 		DROP FUNCTION IF EXISTS public.auth_keys_mark_ever_bound();
 		DROP TABLE IF EXISTS public.auth_keys_ever_bound_backfill_snapshot;
+		DROP TABLE IF EXISTS public.auth_keys_ever_bound_backfill_new_keys;
 		ALTER TABLE auth_keys DROP COLUMN ever_bound_at;
 	`); err != nil {
 		t.Fatalf("restore pre-marker schema: %v", err)
@@ -224,13 +227,6 @@ func TestAuthKeysEverBoundMigrationBackfillsExistingRows(t *testing.T) {
 	}
 	if _, err := conn.Exec(ctx, string(schemaMigration)); err != nil {
 		t.Fatalf("apply ever-bound schema migration: %v", err)
-	}
-	if _, err := conn.Exec(ctx, `
-		CREATE TABLE public.auth_keys_ever_bound_backfill_snapshot AS
-		SELECT id FROM public.auth_keys;
-		ALTER TABLE public.auth_keys_ever_bound_backfill_snapshot ADD PRIMARY KEY (id);
-	`); err != nil {
-		t.Fatalf("snapshot auth keys for backfill: %v", err)
 	}
 	const (
 		freshID         = int64(910000000000000003)

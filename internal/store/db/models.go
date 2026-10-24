@@ -34,6 +34,10 @@ type AuthKey struct {
 	EverBoundAt      pgtype.Timestamptz
 }
 
+type AuthKeysEverBoundBackfillNewKey struct {
+	ID int64
+}
+
 type BlockedUser struct {
 	BlockerID int64
 	BlockedID int64
