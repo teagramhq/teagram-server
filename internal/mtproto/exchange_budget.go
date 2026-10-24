@@ -31,14 +31,15 @@ type ExchangeLimits struct {
 	PerConnection int
 	// PerNetwork bounds exchanges from one client network on the public listener.
 	PerNetwork store.RateLimitConfig
-	// TailnetPerNetwork bounds exchanges on tailnet listeners; the default is off.
+	// TailnetPerNetwork bounds exchanges on tailnet listeners.
 	TailnetPerNetwork store.RateLimitConfig
 	GlobalRate        int
 	GlobalBurst       int
 }
 
-// DefaultExchangeLimits returns the production key-exchange budgets. The
-// public listener has a per-network bound; the tailnet network bound is off.
+// DefaultExchangeLimits returns the production key-exchange budgets. Both
+// listener families start with a per-network bound; config may disable the
+// tailnet bound when a separate public WebSocket listener is configured.
 func DefaultExchangeLimits() ExchangeLimits {
 	return ExchangeLimits{
 		PerConnection: defaultKeyExchangesPerConnection,
@@ -46,9 +47,12 @@ func DefaultExchangeLimits() ExchangeLimits {
 			Limit:  defaultKeyExchangesPerNetwork,
 			Window: defaultKeyExchangeNetworkWindow,
 		},
-		TailnetPerNetwork: store.RateLimitConfig{Window: defaultKeyExchangeNetworkWindow},
-		GlobalRate:        defaultKeyExchangeRate,
-		GlobalBurst:       defaultKeyExchangeBurst,
+		TailnetPerNetwork: store.RateLimitConfig{
+			Limit:  defaultKeyExchangesPerNetwork,
+			Window: defaultKeyExchangeNetworkWindow,
+		},
+		GlobalRate:  defaultKeyExchangeRate,
+		GlobalBurst: defaultKeyExchangeBurst,
 	}
 }
 

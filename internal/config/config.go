@@ -258,9 +258,8 @@ type Config struct {
 	// by ReplicaCount; zero disables a bound.
 	PreAuth mtproto.PreAuthLimits
 	// KeyExchangeLimits bounds unauthenticated RSA key-exchange work. The
-	// per-network budgets are shared by Postgres; tailnet's network layer is
-	// disabled by default. teagramd divides the global in-memory ceiling by
-	// ReplicaCount.
+	// per-network budgets are shared by Postgres; teagramd divides the global
+	// in-memory ceiling by ReplicaCount.
 	KeyExchangeLimits mtproto.ExchangeLimits
 	// MaxConnsPerUnboundKey is the deployment-wide bound on concurrent
 	// connections one auth key with nobody signed in on it may hold. It picks up
@@ -1544,7 +1543,7 @@ func load(log *slog.Logger, allowKeyGeneration bool) (Config, error) {
 		return Config{}, err
 	}
 	cfg.PreAuth = preAuth
-	keyExchange, err := keyExchangeLimits()
+	keyExchange, err := keyExchangeLimits(cfg.PublicWebSocketListenAddr)
 	if err != nil {
 		return Config{}, err
 	}
@@ -1900,8 +1899,11 @@ func preAuthLimits() (mtproto.PreAuthLimits, error) {
 // keyExchangeLimits resolves the three anonymous key-exchange budgets. Zero
 // turns a layer off; a negative value is a startup error so a typo cannot
 // silently remove the bound.
-func keyExchangeLimits() (mtproto.ExchangeLimits, error) {
+func keyExchangeLimits(publicWebSocketListenAddr string) (mtproto.ExchangeLimits, error) {
 	limits := mtproto.DefaultExchangeLimits()
+	if publicWebSocketListenAddr != "" {
+		limits.TailnetPerNetwork.Limit = 0
+	}
 	for _, setting := range []struct {
 		name   string
 		target *int

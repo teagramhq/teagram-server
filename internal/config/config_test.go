@@ -676,6 +676,8 @@ func TestLoadPreAuthLimits(t *testing.T) {
 func TestLoadKeyExchangeLimits(t *testing.T) {
 	t.Setenv("TG_POSTGRES_DSN", "postgres://localhost/tg")
 	t.Setenv("TG_AUTHKEY_ENC_KEY", validEncKey)
+	t.Setenv("TG_PUBLIC_WEBSOCKET_LISTEN_ADDR", "")
+	clearKeyExchangeTestEnv(t)
 	defaults := mtproto.DefaultExchangeLimits()
 	tests := map[string]struct {
 		env     string
@@ -705,7 +707,12 @@ func TestLoadKeyExchangeLimits(t *testing.T) {
 		},
 		"network disabled": {
 			env: "TG_RATE_LIMIT_KEY_EXCHANGE_IP", raw: "0",
-			want: func() mtproto.ExchangeLimits { v := defaults; v.PerNetwork.Limit = 0; return v }(),
+			want: func() mtproto.ExchangeLimits {
+				v := defaults
+				v.PerNetwork.Limit = 0
+				v.TailnetPerNetwork.Limit = 0
+				return v
+			}(),
 		},
 		"network invalid":  {env: "TG_RATE_LIMIT_KEY_EXCHANGE_IP", raw: "many", wantErr: true},
 		"network negative": {env: "TG_RATE_LIMIT_KEY_EXCHANGE_IP", raw: "-1", wantErr: true},
@@ -715,7 +722,7 @@ func TestLoadKeyExchangeLimits(t *testing.T) {
 		},
 		"tailnet network disabled": {
 			env: "TG_RATE_LIMIT_KEY_EXCHANGE_IP_TAILNET", raw: "0",
-			want: defaults,
+			want: func() mtproto.ExchangeLimits { v := defaults; v.TailnetPerNetwork.Limit = 0; return v }(),
 		},
 		"tailnet network invalid":  {env: "TG_RATE_LIMIT_KEY_EXCHANGE_IP_TAILNET", raw: "many", wantErr: true},
 		"tailnet network negative": {env: "TG_RATE_LIMIT_KEY_EXCHANGE_IP_TAILNET", raw: "-1", wantErr: true},
@@ -794,6 +801,64 @@ func TestLoadKeyExchangeLimits(t *testing.T) {
 			t.Fatalf("key exchange network limits = public %d, tailnet %d, want public 12 and tailnet 7", cfg.KeyExchangeLimits.PerNetwork.Limit, cfg.KeyExchangeLimits.TailnetPerNetwork.Limit)
 		}
 	})
+}
+
+func TestLoadKeyExchangeTailnetDefaultDependsOnPublicListener(t *testing.T) {
+	t.Setenv("TG_POSTGRES_DSN", "postgres://localhost/tg")
+	t.Setenv("TG_AUTHKEY_ENC_KEY", validEncKey)
+	clearKeyExchangeTestEnv(t)
+	topologies := []struct {
+		name         string
+		publicAddr   string
+		defaultLimit int
+	}{
+		{name: "default listener may be public", defaultLimit: 20},
+		{name: "separate public listener", publicAddr: "127.0.0.1:2444", defaultLimit: 0},
+	}
+	for _, topology := range topologies {
+		t.Run(topology.name, func(t *testing.T) {
+			t.Setenv("TG_PUBLIC_WEBSOCKET_LISTEN_ADDR", topology.publicAddr)
+			t.Setenv("TG_RATE_LIMIT_KEY_EXCHANGE_IP", "")
+			t.Setenv("TG_RATE_LIMIT_KEY_EXCHANGE_IP_TAILNET", "")
+			t.Setenv("TG_RATE_LIMIT_KEY_EXCHANGE_IP_WINDOW", "")
+
+			cfg, err := config.Load(discardLog())
+			if err != nil {
+				t.Fatalf("Load default key-exchange limits: %v", err)
+			}
+			if got := cfg.KeyExchangeLimits.TailnetPerNetwork; got.Limit != topology.defaultLimit || got.Window != time.Hour {
+				t.Fatalf("default tailnet network limit = %+v, want %d per hour", got, topology.defaultLimit)
+			}
+
+			for _, override := range []struct {
+				raw  string
+				want int
+			}{{raw: "14", want: 14}, {raw: "0", want: 0}} {
+				t.Setenv("TG_RATE_LIMIT_KEY_EXCHANGE_IP_TAILNET", override.raw)
+				cfg, err := config.Load(discardLog())
+				if err != nil {
+					t.Fatalf("Load tailnet override %q: %v", override.raw, err)
+				}
+				if got := cfg.KeyExchangeLimits.TailnetPerNetwork; got.Limit != override.want || got.Window != time.Hour {
+					t.Errorf("tailnet network limit with override %q = %+v, want %d per hour", override.raw, got, override.want)
+				}
+			}
+		})
+	}
+}
+
+func clearKeyExchangeTestEnv(t *testing.T) {
+	t.Helper()
+	for _, name := range []string{
+		"TG_KEY_EXCHANGE_PER_CONNECTION",
+		"TG_RATE_LIMIT_KEY_EXCHANGE_IP",
+		"TG_RATE_LIMIT_KEY_EXCHANGE_IP_TAILNET",
+		"TG_RATE_LIMIT_KEY_EXCHANGE_IP_WINDOW",
+		"TG_KEY_EXCHANGE_GLOBAL_RATE",
+		"TG_KEY_EXCHANGE_GLOBAL_BURST",
+	} {
+		t.Setenv(name, "")
+	}
 }
 
 // TestLoadMaxConnsPerUnboundKey covers the bound that picks up where the

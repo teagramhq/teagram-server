@@ -288,10 +288,11 @@ func TestExchangeBudgetUsesSeparateListenerNetworkCounters(t *testing.T) {
 	}
 }
 
-func TestDefaultExchangeBudgetNetworkLimitAppliesOnlyToPublicListener(t *testing.T) {
+func TestDisabledTailnetNetworkBudgetAllowsOverTwentyWhilePublicStillRefuses(t *testing.T) {
 	addr := netip.MustParseAddr("192.0.2.51")
 	now := time.Now()
 	limits := DefaultExchangeLimits()
+	limits.TailnetPerNetwork.Limit = 0
 	tailnetBudget := newKeyExchangeBudget(limits)
 	tailnetKeys := &memoryAuthKeyStore{}
 	for attempt := 1; attempt <= 21; attempt++ {
@@ -316,6 +317,25 @@ func TestDefaultExchangeBudgetNetworkLimitAppliesOnlyToPublicListener(t *testing
 	}
 }
 
+func TestDefaultExchangeBudgetLimitsBothListenerFamilies(t *testing.T) {
+	addr := netip.MustParseAddr("192.0.2.54")
+	now := time.Now()
+	for _, listener := range []store.RateLimitListener{store.RateLimitListenerTailnet, store.RateLimitListenerPublic} {
+		budget := newKeyExchangeBudget(DefaultExchangeLimits())
+		keys := &memoryAuthKeyStore{}
+		for attempt := 1; attempt <= 21; attempt++ {
+			var connectionAttempts int
+			layer, err := budget.charge(context.Background(), keys, &connectionAttempts, addr, listener, now)
+			if attempt < 21 && (layer != "" || err != nil) {
+				t.Fatalf("listener %d attempt %d = (%q, %v), want admitted", listener, attempt, layer, err)
+			}
+			if attempt == 21 && (layer != "network" || err != nil) {
+				t.Fatalf("listener %d attempt %d = (%q, %v), want network refusal", listener, attempt, layer, err)
+			}
+		}
+	}
+}
+
 func TestExplicitTailnetNetworkLimitAppliesOnlyToTailnetListener(t *testing.T) {
 	limits := DefaultExchangeLimits()
 	limits.PerConnection = 0
@@ -336,8 +356,9 @@ func TestExplicitTailnetNetworkLimitAppliesOnlyToTailnetListener(t *testing.T) {
 	}
 }
 
-func TestDefaultTailnetExchangeBudgetKeepsConnectionAndGlobalCaps(t *testing.T) {
+func TestTailnetWithoutNetworkBudgetKeepsConnectionAndGlobalCaps(t *testing.T) {
 	limits := DefaultExchangeLimits()
+	limits.TailnetPerNetwork.Limit = 0
 	addr := netip.MustParseAddr("192.0.2.53")
 	now := time.Now().Add(time.Second)
 
