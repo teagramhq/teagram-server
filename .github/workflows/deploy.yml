@@ -5,11 +5,10 @@ run-name: ${{ inputs.issue && format('{0} [{1}]', github.workflow, inputs.issue)
 # Deploys the exact commit whose CI passed on a push to main to the
 # teagram-server LXC. The SSH command is the tested commit's SHA, and the key's
 # forced command runs the stable deploy/telegram-server/deploy-main.sh bridge
-# to that commit's canonical script. The job checks out that SHA only after
-# removing the deploy key, to run the post-deploy MTProto smoke check.
-# The smoke retains the runner's tailnet route but no deploy key or persisted
-# checkout token; its auth-key storage model is documented with the command.
-# .github/scripts/test-deploy-workflow-contract.sh guards this flow.
+# to that commit's canonical script. The canonical script runs the MTProto
+# smoke from the deployed image on the host after readiness; the runner does
+# not check out or run the smoke code. Its auth-key storage model is documented
+# with the command. .github/scripts/test-deploy-workflow-contract.sh guards this flow.
 on:
   workflow_run:
     workflows: [CI]
@@ -115,21 +114,6 @@ jobs:
       - name: Remove the deploy key
         if: ${{ always() }}
         run: rm -rf "$RUNNER_TEMP/ssh"
-
-      - name: Checkout tested source
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          ref: ${{ steps.target.outputs.sha }}
-          persist-credentials: false
-
-      - name: Set up Go
-        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
-        with:
-          go-version-file: go.mod
-          cache: false
-
-      - name: Run MTProto smoke on port 2443
-        run: go run ./cmd/mtproto-smoke
 
   deploy-demo:
     name: deploy public demo

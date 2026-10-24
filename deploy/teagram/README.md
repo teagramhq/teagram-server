@@ -51,6 +51,12 @@ identity record and fingerprint pin. Its last line is `deployed <sha>` or
 `already at <sha> with runner provenance`; any failure exits nonzero and fails
 the run.
 
+After server readiness and link-edge update, the canonical script runs the
+deployed image's `/usr/local/bin/mtproto-smoke` in a read-only, non-root
+container using the host network. The probe fetches client discovery through
+the host's Tailscale Serve endpoint and checks the MTProto auth-key exchange;
+the GitHub runner does not need Serve access.
+
 To redeploy by hand, run the `Deploy.` workflow from the Actions tab
 (`workflow_dispatch`, no inputs; it deploys the newest `main` commit with a
 successful CI push run), or from a checkout of `main`:

@@ -1,8 +1,11 @@
 # MTProto deploy smoke security model
 
 `Deploy.` runs one no-account MTProto exchange after a successful deployment.
-The probe verifies the public endpoint and key-exchange path; it does not
-verify user sign-in.
+The canonical deploy script runs the probe from the exact deployed image in a
+one-shot container on the teagram host. Host networking lets it fetch the same
+HTTPS discovery URL and reach the tailnet MTProto listener without granting the
+GitHub runner access to the Serve endpoint. The probe verifies the public
+endpoint and key-exchange path; it does not verify user sign-in.
 
 ## Key and data flow
 
@@ -27,13 +30,11 @@ production probes; the workflow runs it once per deployment.
 ## Privilege boundary
 
 The workflow runs after successful CI on `main` or manual dispatch, in the
-production environment, with read-only repository permissions. The deploy SSH
-key is removed with an `always()` step before source checkout and the smoke;
-checkout uses the exact tested SHA with persisted credentials disabled. The
-smoke step receives no SSH key, database credential, or user credential. The
-runner remains connected to the tailnet as `tag:ci-deploy`; the tailnet ACL
-defines every destination available to the tested code, including the fixed
-MTProto endpoint and HTTPS discovery service. A compromised tested commit or
-runner could issue pre-auth traffic to any ACL-permitted destination, but this
-step has no account session or database credential. Output reports the endpoint
-and exchange result without logging key material.
+production environment, with read-only repository permissions. The canonical
+script runs the smoke binary from the deployed image as uid 65532 in a
+read-only container with all capabilities dropped and no mounted files or
+credentials. The container uses the host network only so it can reach the
+host's Tailscale Serve URL and MTProto listener. The runner does not check out
+or execute the probe; its deploy key is removed with an `always()` step after
+the remote deploy command returns. Output reports the endpoint and exchange
+result without logging key material.

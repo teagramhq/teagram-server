@@ -292,11 +292,23 @@ docker_compose() {
   fi
 }
 install_teagram_syslog_config "$SHA"
+run_mtproto_smoke() {
+  local image_id=$1
+  docker run --rm \
+    --network host \
+    --read-only \
+    --cap-drop ALL \
+    --security-opt no-new-privileges \
+    --user 65532:65532 \
+    --entrypoint /usr/local/bin/mtproto-smoke \
+    "$image_id"
+}
 IMG=$(docker inspect --format '{{.Image}}' $C)
 if [ "$PREV" = "$SHA" ] && grep -qs "source_sha=$SHA image_id=$IMG " "$R"/main1238-*.build/built-image.identity; then
   umask 077
   install_teagram_logs_command "$SHA"
   bash "$LIVE_CHECKOUT/deploy/link-edge/deploy-main.sh" "$SHA"
+  run_mtproto_smoke "$IMG"
   echo "already at $SHA with runner provenance"; exit 0
 fi
 echo "deploying ${PREV:0:7} -> $S"; git log --oneline "HEAD..$SHA"
@@ -330,4 +342,5 @@ if printf '%s\n' "$LOGS" | grep -q "level=ERROR"; then
 fi
 install_teagram_logs_command "$SHA"
 bash "$LIVE_CHECKOUT/deploy/link-edge/deploy-main.sh" "$SHA"
+run_mtproto_smoke "$IMG"
 echo "deployed $SHA"
