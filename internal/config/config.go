@@ -258,8 +258,9 @@ type Config struct {
 	// by ReplicaCount; zero disables a bound.
 	PreAuth mtproto.PreAuthLimits
 	// KeyExchangeLimits bounds unauthenticated RSA key-exchange work. The
-	// per-network budget is shared by Postgres; teagramd divides the global
-	// in-memory ceiling by ReplicaCount.
+	// per-network budgets are shared by Postgres; tailnet's network layer is
+	// disabled by default. teagramd divides the global in-memory ceiling by
+	// ReplicaCount.
 	KeyExchangeLimits mtproto.ExchangeLimits
 	// MaxConnsPerUnboundKey is the deployment-wide bound on concurrent
 	// connections one auth key with nobody signed in on it may hold. It picks up
@@ -1921,6 +1922,19 @@ func keyExchangeLimits() (mtproto.ExchangeLimits, error) {
 			*setting.target = n
 		}
 	}
+	if value := os.Getenv("TG_RATE_LIMIT_KEY_EXCHANGE_IP"); value != "" {
+		limits.TailnetPerNetwork.Limit = limits.PerNetwork.Limit
+	}
+	if value := os.Getenv("TG_RATE_LIMIT_KEY_EXCHANGE_IP_TAILNET"); value != "" {
+		n, err := strconv.Atoi(value)
+		if err != nil {
+			return mtproto.ExchangeLimits{}, errors.New("TG_RATE_LIMIT_KEY_EXCHANGE_IP_TAILNET must be an integer")
+		}
+		if n < 0 {
+			return mtproto.ExchangeLimits{}, errors.New("TG_RATE_LIMIT_KEY_EXCHANGE_IP_TAILNET must not be negative; 0 disables the limit")
+		}
+		limits.TailnetPerNetwork.Limit = n
+	}
 	if value := os.Getenv("TG_RATE_LIMIT_KEY_EXCHANGE_IP_WINDOW"); value != "" {
 		window, err := time.ParseDuration(value)
 		if err != nil {
@@ -1930,6 +1944,7 @@ func keyExchangeLimits() (mtproto.ExchangeLimits, error) {
 			return mtproto.ExchangeLimits{}, errors.New("TG_RATE_LIMIT_KEY_EXCHANGE_IP_WINDOW must not be negative; 0 disables the network limit")
 		}
 		limits.PerNetwork.Window = window
+		limits.TailnetPerNetwork.Window = window
 	}
 	return limits, nil
 }
