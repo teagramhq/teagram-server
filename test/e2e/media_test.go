@@ -824,6 +824,20 @@ func TestMediaRoundTrip(t *testing.T) {
 	defer cancel()
 
 	initialBlobs := testBlobs(t)
+	var rawS3 *blob.S3
+	var mediaKeys *blob.KeyRing
+	if remote, ok := initialBlobs.(*blob.S3); ok && os.Getenv("TG_BLOB_S3_ENDPOINT") != "" {
+		rawS3 = remote
+		var err error
+		mediaKeys, err = blob.NewKeyRing(1, map[uint32][]byte{1: bytes.Repeat([]byte{0x6d}, blob.MediaKeyLen)})
+		if err != nil {
+			t.Fatalf("create test media key ring: %v", err)
+		}
+		initialBlobs, err = blob.NewEncrypted(remote, mediaKeys, blob.DefaultChunkSize)
+		if err != nil {
+			t.Fatalf("wrap S3 backend with encryption: %v", err)
+		}
+	}
 	blobs := &switchableMediaBlobs{store: initialBlobs}
 	clients := bootMediaEnvWithBlobs(t, ctx, blobs, "+15551310001", "+15551310002")
 	a, b := clients[0], clients[1]
@@ -879,11 +893,18 @@ func TestMediaRoundTrip(t *testing.T) {
 	if !bytes.Equal(got, payload) {
 		t.Fatalf("downloaded %d bytes, want %d identical bytes", len(got), len(payload))
 	}
+	if rawS3 != nil {
+		assertS3MediaEnvelopes(t, rawS3, mediaKeys)
+	}
 
 	// The Postgres document metadata survives a backend rollback. Copy the
 	// scoped store into a fresh local tree, switch the server to that tree, and
 	// prove the same document still downloads byte-for-byte.
-	source, ok := initialBlobs.(interface {
+	restoreSource := initialBlobs
+	if rawS3 != nil {
+		restoreSource = rawS3
+	}
+	source, ok := restoreSource.(interface {
 		blob.Store
 		Walk(context.Context, func(blob.Entry) error) error
 	})
@@ -898,7 +919,14 @@ func TestMediaRoundTrip(t *testing.T) {
 	if _, err := blobmigration.Restore(ctx, source, rollbackBlobs, &restoreReport); err != nil {
 		t.Fatalf("restore media before filesystem rollback: %v", err)
 	}
-	blobs.switchTo(rollbackBlobs)
+	var rollbackStore blob.Store = rollbackBlobs
+	if mediaKeys != nil {
+		rollbackStore, err = blob.NewEncrypted(rollbackBlobs, mediaKeys, blob.DefaultChunkSize)
+		if err != nil {
+			t.Fatalf("wrap rollback backend with encryption: %v", err)
+		}
+	}
+	blobs.switchTo(rollbackStore)
 	rollbackDownload := downloadDocument(t, ctx, b, bDoc)
 	if !bytes.Equal(rollbackDownload, payload) {
 		t.Fatalf("rollback downloaded %d bytes, want %d identical bytes", len(rollbackDownload), len(payload))
@@ -918,6 +946,34 @@ func TestMediaRoundTrip(t *testing.T) {
 		return gerr
 	})
 	assertRPCError(t, err, "LOCATION_INVALID")
+}
+
+func assertS3MediaEnvelopes(t *testing.T, backend *blob.S3, keys *blob.KeyRing) {
+	t.Helper()
+	var entries []blob.Entry
+	if err := backend.Walk(context.Background(), func(entry blob.Entry) error {
+		if entry.Regular {
+			entries = append(entries, entry)
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("list encrypted S3 media: %v", err)
+	}
+	if len(entries) == 0 {
+		t.Fatal("encrypted S3 media listing is empty")
+	}
+	for _, entry := range entries {
+		info, err := blob.InspectEnvelopeHeader(context.Background(), backend, keys, entry.Key, entry.Size)
+		if err != nil {
+			t.Fatalf("inspect S3 media %q: %v", entry.Key, err)
+		}
+		if !info.HasEnvelopeMagic || !info.HasKeyVersion || info.KeyVersion != keys.Current() {
+			t.Errorf("S3 media %q header = %+v, want an authenticated envelope using key version %d", entry.Key, info, keys.Current())
+		}
+		if entry.Size <= info.LogicalBytes {
+			t.Errorf("S3 media %q physical size = %d, want overhead above %d logical bytes", entry.Key, entry.Size, info.LogicalBytes)
+		}
+	}
 }
 
 // TestMediaCrossReplicaUploadHandover proves an in-flight multipart upload is

@@ -1864,10 +1864,17 @@ jobs:
       - name: Write local-only Compose environment
         run: |
           umask 077
+          media_key_dir="$RUNNER_TEMP/teagramd-media-keys"
+          install -d -o 65532 -g 65532 -m 0700 "$media_key_dir"
+          printf '%s\n' 1111111111111111111111111111111111111111111111111111111111111111 \
+            >"$media_key_dir/1.key"
+          chown 65532:65532 "$media_key_dir/1.key"
+          chmod 0600 "$media_key_dir/1.key"
           cat > .env <<'ENV'
           POSTGRES_PASSWORD=ci-local-mode-postgres
           TG_PUBLIC_LINK_PREFIX=https://links.example.test/
           ENV
+          printf 'TEAGRAM_MEDIA_KEY_SOURCE_DIR=%s\nTG_MEDIA_KEY_CURRENT=1\n' "$media_key_dir" >> .env
           chmod 600 .env
 
       - name: Boot, restart, and check database, key, and rollback volumes
@@ -1883,6 +1890,8 @@ jobs:
             and ((.services | has("rustfs")) | not)
             and ((.services | has("rustfs-init")) | not)
             and any(.services.teagramd.volumes[]; .type == "bind" and .target == "/run/teagramd/blob-mode" and .read_only == true)
+            and all(.services.teagramd.volumes[]; .target != "/run/teagramd/media-keys")
+            and ((.services.teagramd.environment | keys | map(select(startswith("TG_MEDIA_KEY_"))) | length) == 0)
           ' "$RUNNER_TEMP/teagram-server-local-compose.json"
           sudo env "CI=$CI" python3 .github/scripts/write-ci-local-blob-mode-fixture.py \
             --checkout "$GITHUB_WORKSPACE" \
@@ -2135,7 +2144,7 @@ jobs:
           # Compose omits inactive profile services, so include migration to
           # inspect its read-only mount.
           docker compose --profile migration config --format json >"$RUNNER_TEMP/teagram-server-compose.json"
-          jq -e --arg revision "$GITHUB_SHA" '
+          jq -e --arg revision "$GITHUB_SHA" --arg media_key_dir "$RUNNER_TEMP/teagramd-media-keys" '
             (.name == "teagram")
             and (.volumes.pgdata.name == "teagram_pgdata")
             and (.volumes.tgkey.name == "teagram_tgkey")
@@ -2151,9 +2160,12 @@ jobs:
             and (.services.teagramd.environment.TG_BLOB_S3_ENDPOINT == "http://rustfs:9000")
             and (.services.teagramd.environment.TG_BLOB_S3_BUCKET == "teagram")
             and (.services.teagramd.environment.TG_BLOB_S3_PREFIX == "teagramd/")
+            and (.services.teagramd.environment.TG_MEDIA_KEY_DIR == "/run/teagramd/media-keys")
+            and (.services.teagramd.environment.TG_MEDIA_KEY_CURRENT == "1")
             and (.services.teagramd.depends_on["rustfs-init"].condition == "service_completed_successfully")
             and any(.services.teagramd.volumes[]; .target == "/var/lib/teagramd-blobs" and .read_only == true)
             and any(.services.teagramd.volumes[]; .type == "bind" and .target == "/run/teagramd/blob-mode" and .read_only == true)
+            and any(.services.teagramd.volumes[]; .type == "bind" and .source == $media_key_dir and .target == "/run/teagramd/media-keys" and .read_only == true)
             and all(.services | to_entries[] | select((.key | startswith("teagramd")) | not); all((.value.volumes // [])[]; .target != "/run/teagramd/blob-mode"))
             and (.services["blob-migrate"].volumes[0].read_only == true)
             and ((.services["blob-migrate"].profiles | index("migration")) != null)
@@ -2162,6 +2174,8 @@ jobs:
             and ((.services["blob-restore"].profiles | index("migration")) != null)
             and (.secrets.teagramd_blob_secret_key.file | endswith("/.secrets/teagramd-blob-secret-key"))
           ' "$RUNNER_TEMP/teagram-server-compose.json"
+          test "$(stat -c '%a:%u:%g' "$RUNNER_TEMP/teagramd-media-keys")" = 700:65532:65532
+          test "$(stat -c '%a:%u:%g' "$RUNNER_TEMP/teagramd-media-keys/1.key")" = 600:65532:65532
 
           env -u TEAGRAM_TURNSTILE_SITE_KEY -u TEAGRAM_TURNSTILE_SECRET_KEY_FILE \
             -u TG_TURNSTILE_SIGNIN_ENABLED docker compose config --format json \

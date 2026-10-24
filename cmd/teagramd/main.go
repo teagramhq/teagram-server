@@ -626,7 +626,8 @@ func runAtBlobModePath(log *slog.Logger, blobModePath string) error {
 	if err != nil {
 		return err
 	}
-	if err := blobmode.Validate(blobModePath, blobmode.EffectiveConfig{BlobDir: cfg.BlobDir, BlobS3: cfg.BlobS3}); err != nil {
+	blobAuthority, err := blobmode.Read(blobModePath, blobmode.EffectiveConfig{BlobDir: cfg.BlobDir, BlobS3: cfg.BlobS3})
+	if err != nil {
 		return err
 	}
 
@@ -667,7 +668,7 @@ func runAtBlobModePath(log *slog.Logger, blobModePath string) error {
 	}
 	log.Info("server RSA key", "key_id", keyID, "fingerprint", fingerprint, "path", cfg.RSAKeyPath)
 
-	blobs, err := newBlobStore(ctx, cfg, log)
+	blobs, err := newBlobStoreWithAuthority(ctx, cfg, log, blobAuthority)
 	if err != nil {
 		return err
 	}
@@ -1018,8 +1019,21 @@ func closeListener(listener net.Listener) error {
 }
 
 func newBlobStore(ctx context.Context, cfg config.Config, log *slog.Logger) (blob.Store, error) {
+	return newBlobStoreWithAuthority(ctx, cfg, log, blobmode.Authority{})
+}
+
+func newBlobStoreWithAuthority(ctx context.Context, cfg config.Config, log *slog.Logger, authority blobmode.Authority) (blob.Store, error) {
 	if cfg.BlobS3 == nil {
 		return blob.NewLocal(cfg.BlobDir)
+	}
+	acceptedPlaintext := authority.Present && authority.Outcome == blobmode.OutcomeS3Accepted
+	if authority.Present && !acceptedPlaintext {
+		return nil, errors.New("blob-mode authority is not valid for the configured S3 backend")
+	}
+	if acceptedPlaintext {
+		log.Warn("S3 media encryption remains disabled for accepted plaintext cutover", "mode", authority.Outcome)
+	} else if cfg.MediaKeys == nil {
+		return nil, errors.New("S3 media encryption requires TG_MEDIA_KEY_DIR and TG_MEDIA_KEY_CURRENT")
 	}
 	s3cfg := *cfg.BlobS3
 	// NewS3 emits the plaintext warning while it constructs the client, so
@@ -1029,10 +1043,18 @@ func newBlobStore(ctx context.Context, cfg config.Config, log *slog.Logger) (blo
 	if err != nil {
 		return nil, fmt.Errorf("object store configuration is invalid; check TG_BLOB_S3_* settings: %w", err)
 	}
+	var blobs blob.Store = remote
+	if !acceptedPlaintext {
+		sealed, err := blob.NewEncrypted(remote, cfg.MediaKeys, blob.DefaultChunkSize)
+		if err != nil {
+			return nil, fmt.Errorf("construct encrypted object store: %w", err)
+		}
+		blobs = sealed
+	}
 	if err := remote.Check(ctx); err != nil {
 		return nil, fmt.Errorf("object store startup check failed: %w", err)
 	}
-	return remote, nil
+	return blobs, nil
 }
 
 // trustClientAddr applies the configured client-address source to the server.

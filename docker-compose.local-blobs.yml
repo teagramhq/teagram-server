@@ -19,6 +19,8 @@ services:
       TG_BLOB_S3_SECRET_ACCESS_KEY_FILE: !reset null
       TG_BLOB_S3_CA_PATH: !reset null
       TG_BLOB_S3_ALLOW_INSECURE_HTTP: !reset null
+      TG_MEDIA_KEY_DIR: !reset null
+      TG_MEDIA_KEY_CURRENT: !reset null
     depends_on: !override
       migrate:
         condition: service_completed_successfully
@@ -29,5 +31,7 @@ services:
     secrets: !override
       - source: teagramd_turnstile
         target: teagramd-turnstile
-    volumes:
+    volumes: !override
+      - tgkey:/var/lib/teagramd
       - tgblobs:${TEAGRAMD_STACK_MOVE_BLOB_DIR:-/var/lib/teagramd-blobs}
+      - ./.state/blob-mode:/run/teagramd/blob-mode:ro

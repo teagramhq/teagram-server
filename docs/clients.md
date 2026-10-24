@@ -50,6 +50,9 @@ Configuration is read from environment variables in `internal/config/config.go`:
 | `TG_BLOB_S3_SECRET_ACCESS_KEY_FILE` | *(unset)* | Preferred file containing the object-store secret; read at startup |
 | `TG_BLOB_S3_CA_PATH` | *(unset)*        | PEM bundle for a private endpoint CA; TLS verification remains enabled |
 | `TG_BLOB_S3_ALLOW_INSECURE_HTTP` | `false` | Explicit loopback/compose-only plaintext opt-in; startup warns when enabled |
+| `TG_MEDIA_KEY_DIR` | *(unset)* | Directory of versioned media keys (`<version>.key`); both media key settings must be set together |
+| `TG_MEDIA_KEY_CURRENT` | *(unset)* | Version used for newly written encrypted S3 objects; old versions remain readable while their key files stay available |
+| `TEAGRAM_MEDIA_KEY_SOURCE_DIR` | `/etc/teagramd/media-keys` | Host directory bind-mounted read-only into the default Compose server; provision outside the repository |
 | `TG_DC_ID`          | `2`              | DC id this server advertises as `ThisDC`    |
 | `TG_RATE_LIMIT_DISCOVERY` | `60` | Cluster-wide valid local-direct preflight response attempts per fixed window, counted in Postgres; `0` disables this bound, and a negative or non-integer value fails startup |
 | `TG_RATE_LIMIT_DISCOVERY_WINDOW` | `1m` | Fixed window for the cluster-wide discovery bound; it must be positive while that bound is enabled |
@@ -334,9 +337,22 @@ The main Compose file uses RustFS as its default blob store. Generate separate
 RustFS root and `teagramd` credentials on the box, keep `.env` at mode 0600,
 and let Compose mount those values as read-only files for the services that
 need them. The app key is limited to the `teagram` bucket's `teagramd/`
-prefix. RustFS and its console have no published ports. The internal S3 URL is
-plaintext on the private Compose network; the explicit HTTP setting is logged
-at startup.
+prefix. Provision a separate media key outside the repository before starting
+the default S3 stack:
+
+```bash
+sudo install -d -o 65532 -g 65532 -m 0700 /etc/teagramd/media-keys
+sudo sh -c 'umask 077; openssl rand -hex 32 > /etc/teagramd/media-keys/1.key'
+sudo chown 65532:65532 /etc/teagramd/media-keys/1.key
+sudo chmod 0600 /etc/teagramd/media-keys/1.key
+```
+
+The default Compose service mounts that directory read-only and selects version
+1. Fresh S3 objects are encrypted at rest; a server with an accepted plaintext
+cutover authority keeps serving those existing objects in plaintext mode until
+the separately reviewed migration stage. RustFS and its console have no
+published ports. The internal S3 URL is plaintext on the private Compose
+network; the explicit HTTP setting is logged at startup.
 
 For local development, copy `.env.example` to `.env`, generate credentials,
 then run:
