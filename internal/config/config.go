@@ -103,7 +103,11 @@ type Config struct {
 	// only safe while that stays true — before adding any dual-key rotation that
 	// lets a session survive a key change, read the key rotation constraint in
 	// the internal/peerhash package doc.
-	AuthKeyEncKey []byte
+	AuthKeyEncKey []byte `json:"-"`
+	// MediaKeys is the media key ring from TG_MEDIA_KEY_DIR and
+	// TG_MEDIA_KEY_CURRENT, or nil when neither is set. Nothing selects the
+	// encrypted media store yet.
+	MediaKeys *blob.KeyRing `json:"-"`
 	// AdvertiseHost and AdvertisePort are the address clients are told to
 	// dial, which is not always the one the server binds: a listener on every
 	// interface still has to name one address a client can reach it by.
@@ -1563,6 +1567,13 @@ func Load(log *slog.Logger) (Config, error) {
 		return Config{}, err
 	}
 	cfg.AuthKeyEncKey = encKey
+	if mediaKeysConfigured() {
+		mediaKeys, err := loadMediaKeys(encKey)
+		if err != nil {
+			return Config{}, err
+		}
+		cfg.MediaKeys = mediaKeys
+	}
 	return cfg, nil
 }
 
