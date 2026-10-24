@@ -22,7 +22,10 @@ import (
 // assembled-key writes remain streamed. Normal and photo assembly can
 // genuinely run long while streaming a whole file out of its parts, but both
 // write under an assembled key, which the disjointness test in internal/blob
-// shows can never fall under this prefix.
+// shows can never fall under this prefix. The envelope decorator in
+// internal/blob writes only the key its own caller named, sealing that
+// caller's payload as it streams, so it adds no writer of its own: a bounded
+// in-memory part stays bounded through it.
 //
 // The premise is a fact about the set of callers, so it is pinned as one: this
 // census reds when a new Put appears anywhere in the tree, which is the
@@ -41,6 +44,7 @@ func TestPartPrefixHasOneBoundedWriter(t *testing.T) {
 	// entry merely still matches must not read as unchanged.
 	want := map[string][]string{
 		"internal/api/media.go":             {"blob.Key(file.ID)", "key"},
+		"internal/blob/envelope.go":         {"key"},
 		"internal/blobmigration/migrate.go": {"entry.Key"},
 		"internal/store/uploads.go":         {"key"},
 	}
