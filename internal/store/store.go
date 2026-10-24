@@ -518,7 +518,7 @@ type queryRower interface {
 // silently degrades to a per-row Seq Scan of messages — so either state is
 // exactly the un-migrated state this is here to refuse.
 func (s *Store) checkSchema(ctx context.Context, q queryRower) error {
-	var hasParticipants, hasFanoutID, hasEvents, hasUserStatus, hasEncryptedEvents, hasFwdFromID, hasReactions, hasPinnedChat, hasPinnedChannel, hasNameTsv, hasRateLimits, hasNotifySettings, hasSendCodeIP, hasSignInFail, hasLoginMode, hasAuthorizationTTL, hasAdminSessions, hasPartSize, hasPartBlobKey, hasPartPayload, hasMessageFileIdx, hasPartBlobKeyIdx, hasBlockedUsers, hasRegistrationInvites, hasRegistrationInviteLiveIdx, hasServerAdministration, hasFileSubtypeRights, hasValidatedFileSubtypeRights, hasFileMediaMetadata, hasValidatedFileMediaMetadata, hasLanguageCatalog, hasChannelReadState, hasFleetSnapshots, hasFleetLiveAccounts, hasSRPChallenges, hasChatPhotoColumns, hasChatPhotoPair, hasChatPhotoOwnership, hasChatPhotoIndex, hasChatPhotoReceiptIndex bool
+	var hasParticipants, hasFanoutID, hasEvents, hasUserStatus, hasEncryptedEvents, hasFwdFromID, hasReactions, hasPinnedChat, hasPinnedChannel, hasNameTsv, hasRateLimits, hasNotifySettings, hasSendCodeIP, hasSignInFail, hasLoginMode, hasAuthorizationTTL, hasAdminSessions, hasPartSize, hasPartBlobKey, hasPartPayload, hasMessageFileIdx, hasPartBlobKeyIdx, hasBlockedUsers, hasRegistrationInvites, hasRegistrationInviteLiveIdx, hasServerAdministration, hasFileSubtypeRights, hasValidatedFileSubtypeRights, hasFileMediaMetadata, hasValidatedFileMediaMetadata, hasLanguageCatalog, hasChannelReadState, hasFleetSnapshots, hasFleetLiveAccounts, hasSRPChallenges, hasAuthKeysEverBound, hasValidatedAuthKeysEverBound, hasChatPhotoColumns, hasChatPhotoPair, hasChatPhotoOwnership, hasChatPhotoIndex, hasChatPhotoReceiptIndex bool
 	err := q.QueryRow(ctx, `
 		SELECT to_regclass('public.chat_participants') IS NOT NULL,
 		       EXISTS(SELECT 1 FROM information_schema.columns
@@ -581,6 +581,13 @@ func (s *Store) checkSchema(ctx context.Context, q queryRower) error {
 	       to_regclass('public.fleet_process_snapshots') IS NOT NULL,
 	       to_regclass('public.fleet_live_accounts') IS NOT NULL,
 	       to_regclass('public.srp_challenges') IS NOT NULL,
+	       EXISTS(SELECT 1 FROM information_schema.columns
+	              WHERE table_schema = 'public' AND table_name = 'auth_keys' AND column_name = 'ever_bound_at'),
+	       EXISTS(SELECT 1 FROM pg_catalog.pg_constraint
+	              WHERE conrelid = to_regclass('public.auth_keys')
+	                AND conname = 'auth_keys_user_requires_ever_bound'
+	                AND contype = 'c'
+	                AND convalidated),
 	       (EXISTS(SELECT 1 FROM information_schema.columns WHERE table_name = 'chats' AND column_name = 'current_photo_file_id')
 	        AND EXISTS(SELECT 1 FROM information_schema.columns WHERE table_name = 'chats' AND column_name = 'current_photo_uploader_id')),
 	       EXISTS(SELECT 1 FROM pg_catalog.pg_constraint
@@ -597,11 +604,11 @@ func (s *Store) checkSchema(ctx context.Context, q queryRower) error {
 	       EXISTS(SELECT 1 FROM pg_catalog.pg_index
 	              WHERE indexrelid = to_regclass('public.profile_upload_receipt_file_id_idx')
 	                AND indisvalid)`,
-	).Scan(&hasParticipants, &hasFanoutID, &hasEvents, &hasUserStatus, &hasEncryptedEvents, &hasFwdFromID, &hasReactions, &hasPinnedChat, &hasPinnedChannel, &hasNameTsv, &hasRateLimits, &hasNotifySettings, &hasSendCodeIP, &hasSignInFail, &hasLoginMode, &hasAuthorizationTTL, &hasAdminSessions, &hasPartSize, &hasPartBlobKey, &hasPartPayload, &hasMessageFileIdx, &hasPartBlobKeyIdx, &hasBlockedUsers, &hasRegistrationInvites, &hasRegistrationInviteLiveIdx, &hasServerAdministration, &hasFileSubtypeRights, &hasValidatedFileSubtypeRights, &hasFileMediaMetadata, &hasValidatedFileMediaMetadata, &hasLanguageCatalog, &hasChannelReadState, &hasFleetSnapshots, &hasFleetLiveAccounts, &hasSRPChallenges, &hasChatPhotoColumns, &hasChatPhotoPair, &hasChatPhotoOwnership, &hasChatPhotoIndex, &hasChatPhotoReceiptIndex)
+	).Scan(&hasParticipants, &hasFanoutID, &hasEvents, &hasUserStatus, &hasEncryptedEvents, &hasFwdFromID, &hasReactions, &hasPinnedChat, &hasPinnedChannel, &hasNameTsv, &hasRateLimits, &hasNotifySettings, &hasSendCodeIP, &hasSignInFail, &hasLoginMode, &hasAuthorizationTTL, &hasAdminSessions, &hasPartSize, &hasPartBlobKey, &hasPartPayload, &hasMessageFileIdx, &hasPartBlobKeyIdx, &hasBlockedUsers, &hasRegistrationInvites, &hasRegistrationInviteLiveIdx, &hasServerAdministration, &hasFileSubtypeRights, &hasValidatedFileSubtypeRights, &hasFileMediaMetadata, &hasValidatedFileMediaMetadata, &hasLanguageCatalog, &hasChannelReadState, &hasFleetSnapshots, &hasFleetLiveAccounts, &hasSRPChallenges, &hasAuthKeysEverBound, &hasValidatedAuthKeysEverBound, &hasChatPhotoColumns, &hasChatPhotoPair, &hasChatPhotoOwnership, &hasChatPhotoIndex, &hasChatPhotoReceiptIndex)
 	if err != nil {
 		return fmt.Errorf("schema check: %w", err)
 	}
-	if !hasParticipants || !hasFanoutID || !hasEvents || !hasUserStatus || !hasEncryptedEvents || !hasFwdFromID || !hasReactions || !hasPinnedChat || !hasPinnedChannel || !hasNameTsv || !hasRateLimits || !hasNotifySettings || !hasSendCodeIP || !hasSignInFail || !hasLoginMode || !hasAuthorizationTTL || !hasAdminSessions || !hasPartSize || !hasPartBlobKey || hasPartPayload || !hasMessageFileIdx || !hasPartBlobKeyIdx || !hasBlockedUsers || !hasRegistrationInvites || !hasRegistrationInviteLiveIdx || !hasServerAdministration || !hasFileSubtypeRights || !hasValidatedFileSubtypeRights || !hasFileMediaMetadata || !hasValidatedFileMediaMetadata || !hasLanguageCatalog || !hasChannelReadState || !hasFleetSnapshots || !hasFleetLiveAccounts || !hasSRPChallenges || !hasChatPhotoColumns || !hasChatPhotoPair || !hasChatPhotoOwnership || !hasChatPhotoIndex || !hasChatPhotoReceiptIndex {
+	if !hasParticipants || !hasFanoutID || !hasEvents || !hasUserStatus || !hasEncryptedEvents || !hasFwdFromID || !hasReactions || !hasPinnedChat || !hasPinnedChannel || !hasNameTsv || !hasRateLimits || !hasNotifySettings || !hasSendCodeIP || !hasSignInFail || !hasLoginMode || !hasAuthorizationTTL || !hasAdminSessions || !hasPartSize || !hasPartBlobKey || hasPartPayload || !hasMessageFileIdx || !hasPartBlobKeyIdx || !hasBlockedUsers || !hasRegistrationInvites || !hasRegistrationInviteLiveIdx || !hasServerAdministration || !hasFileSubtypeRights || !hasValidatedFileSubtypeRights || !hasFileMediaMetadata || !hasValidatedFileMediaMetadata || !hasLanguageCatalog || !hasChannelReadState || !hasFleetSnapshots || !hasFleetLiveAccounts || !hasSRPChallenges || !hasAuthKeysEverBound || !hasValidatedAuthKeysEverBound || !hasChatPhotoColumns || !hasChatPhotoPair || !hasChatPhotoOwnership || !hasChatPhotoIndex || !hasChatPhotoReceiptIndex {
 		return errors.New("database schema is not migrated; run: atlas migrate apply --env local")
 	}
 	return nil

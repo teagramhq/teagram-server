@@ -190,6 +190,50 @@ func TestOpenRejectsMissingAuthorizationTTLColumn(t *testing.T) {
 	requireOpenMigrationError(t, ctx, dsn)
 }
 
+func TestOpenRejectsMissingAuthKeysEverBoundColumn(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	dsn := pgtest.DSN(t)
+
+	conn, err := pgx.Connect(ctx, dsn)
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	defer func() { _ = conn.Close(ctx) }() //nolint:errcheck // best-effort close
+	if _, err := conn.Exec(ctx, `
+		ALTER TABLE auth_keys DROP CONSTRAINT auth_keys_user_requires_ever_bound;
+		DROP TRIGGER auth_keys_mark_ever_bound ON auth_keys;
+		DROP FUNCTION public.auth_keys_mark_ever_bound();
+		ALTER TABLE auth_keys DROP COLUMN ever_bound_at;
+	`); err != nil {
+		t.Fatalf("remove auth-key ever-bound schema: %v", err)
+	}
+
+	requireOpenMigrationError(t, ctx, dsn)
+}
+
+func TestOpenRejectsUnvalidatedAuthKeysEverBoundConstraint(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	dsn := pgtest.DSN(t)
+
+	conn, err := pgx.Connect(ctx, dsn)
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	defer func() { _ = conn.Close(ctx) }() //nolint:errcheck // best-effort close
+	if _, err := conn.Exec(ctx, `
+		ALTER TABLE auth_keys DROP CONSTRAINT auth_keys_user_requires_ever_bound;
+		ALTER TABLE auth_keys
+			ADD CONSTRAINT auth_keys_user_requires_ever_bound
+			CHECK (user_id IS NULL OR ever_bound_at IS NOT NULL) NOT VALID;
+	`); err != nil {
+		t.Fatalf("make auth-key ever-bound constraint unvalidated: %v", err)
+	}
+
+	requireOpenMigrationError(t, ctx, dsn)
+}
+
 func TestAuthKeysEverBoundMigrationBackfillsExistingRows(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
