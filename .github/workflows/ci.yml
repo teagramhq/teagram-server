@@ -1865,11 +1865,12 @@ jobs:
         run: |
           umask 077
           media_key_dir="$RUNNER_TEMP/teagramd-media-keys"
-          install -d -o 65532 -g 65532 -m 0700 "$media_key_dir"
+          media_key_file="$RUNNER_TEMP/teagramd-media-key"
+          sudo install -d -o 65532 -g 65532 -m 0700 "$media_key_dir"
           printf '%s\n' 1111111111111111111111111111111111111111111111111111111111111111 \
-            >"$media_key_dir/1.key"
-          chown 65532:65532 "$media_key_dir/1.key"
-          chmod 0600 "$media_key_dir/1.key"
+            >"$media_key_file"
+          sudo install -o 65532 -g 65532 -m 0600 "$media_key_file" "$media_key_dir/1.key"
+          rm "$media_key_file"
           cat > .env <<'ENV'
           POSTGRES_PASSWORD=ci-local-mode-postgres
           TG_PUBLIC_LINK_PREFIX=https://links.example.test/
@@ -2174,8 +2175,8 @@ jobs:
             and ((.services["blob-restore"].profiles | index("migration")) != null)
             and (.secrets.teagramd_blob_secret_key.file | endswith("/.secrets/teagramd-blob-secret-key"))
           ' "$RUNNER_TEMP/teagram-server-compose.json"
-          test "$(stat -c '%a:%u:%g' "$RUNNER_TEMP/teagramd-media-keys")" = 700:65532:65532
-          test "$(stat -c '%a:%u:%g' "$RUNNER_TEMP/teagramd-media-keys/1.key")" = 600:65532:65532
+          test "$(sudo stat -c '%a:%u:%g' "$RUNNER_TEMP/teagramd-media-keys")" = 700:65532:65532
+          test "$(sudo stat -c '%a:%u:%g' "$RUNNER_TEMP/teagramd-media-keys/1.key")" = 600:65532:65532
 
           env -u TEAGRAM_TURNSTILE_SITE_KEY -u TEAGRAM_TURNSTILE_SECRET_KEY_FILE \
             -u TG_TURNSTILE_SIGNIN_ENABLED docker compose config --format json \

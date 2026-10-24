@@ -33,5 +33,6 @@ services:
         target: teagramd-turnstile
     volumes: !override
       - tgkey:/var/lib/teagramd
+      - tgblobs:/var/lib/teagramd-blobs:ro
       - tgblobs:${TEAGRAMD_STACK_MOVE_BLOB_DIR:-/var/lib/teagramd-blobs}
       - ./.state/blob-mode:/run/teagramd/blob-mode:ro

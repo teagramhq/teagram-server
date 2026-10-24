@@ -41,6 +41,9 @@ jq -e '
   and .services.teagramd.logging.options.tag == "teagramd"
   and ((.services | has("rustfs")) | not)
   and ((.services | has("rustfs-init")) | not)
+  and ([.services.teagramd.volumes[] | select(.type == "volume" and .source == "tgblobs" and .target == "/var/lib/teagramd-blobs")] | length == 1)
+  and any(.services.teagramd.volumes[]; .type == "volume" and .source == "tgblobs" and .target == "/var/lib/teagramd-blobs" and ((.read_only // false) == false))
+  and all(.services.teagramd.volumes[]; .target != "/run/teagramd/media-keys")
 ' "$TMP/local.json" >/dev/null
 
 printf 'fixture-secret' >"$TMP/turnstile-secret"
