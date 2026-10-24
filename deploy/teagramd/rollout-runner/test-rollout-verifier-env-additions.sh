@@ -36,12 +36,12 @@ chmod 700 "$TMP/bin/jq"
 PATH="$TMP/bin:$PATH"
 export PATH
 
-COMPOSE_JSON='{"services":{"teagramd":{"stop_grace_period":"2m0s","ports":[],"volumes":[],"network_mode":"","networks":{},"environment":{"TG_REPLICA_COUNT":"1","TG_CLIENT_ADDR_TRUST":"socket","POSTGRES_PASSWORD":"fixture-secret-postgres-password","DATABASE_URL":"postgres://fixture:dsn-secret@db/teagram"}}}}'
+COMPOSE_JSON='{"services":{"teagramd":{"stop_grace_period":"2m0s","ports":[],"volumes":[],"network_mode":"","networks":{},"environment":{"TG_REPLICA_COUNT":"1","TG_CLIENT_ADDR_TRUST":"socket","TG_LOG_LOGIN_CODES":"false","POSTGRES_PASSWORD":"fixture-secret-postgres-password","DATABASE_URL":"postgres://fixture:dsn-secret@db/teagram"}}}}'
 
 inspect_json() {
   local extra=$1
   jq -cn --arg extra "$extra" '
-    ["TG_REPLICA_COUNT=1","TG_CLIENT_ADDR_TRUST=socket"] as $base
+    ["TG_REPLICA_COUNT=1","TG_CLIENT_ADDR_TRUST=socket","TG_LOG_LOGIN_CODES=false"] as $base
     | {
         Id:"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
         Image:"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
@@ -209,9 +209,9 @@ syslog_compose=$(jq -c --argjson logging "$syslog_logging" \
   '.services.teagramd.environment.TG_LOG_LOGIN_CODES="false" | .services.teagramd.logging=$logging' <<< "$COMPOSE_JSON")
 syslog_options=$(jq -c '.options' <<< "$syslog_logging")
 legacy_login_codes_inspect=$(printf '%s' "$legacy_inspect" | jq -c \
-  '.Config.Env += ["TG_LOG_LOGIN_CODES=true"]')
+  '.Config.Env |= map(select(startswith("TG_LOG_LOGIN_CODES=") | not)) + ["TG_LOG_LOGIN_CODES=true"]')
 syslog_inspect=$(printf '%s' "$legacy_inspect" | jq -c --argjson options "$syslog_options" \
-  '.Id="cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc" | .Config.Env += ["TG_LOG_LOGIN_CODES=false"] | .HostConfig.LogConfig={Type:"syslog",Config:$options}')
+  '.Id="cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc" | .Config.Env |= map(select(startswith("TG_LOG_LOGIN_CODES=") | not)) + ["TG_LOG_LOGIN_CODES=false"] | .HostConfig.LogConfig={Type:"syslog",Config:$options}')
 default_logging_snapshot=$(snapshot_from_json \
   "$legacy_login_codes_inspect" "$legacy_login_codes_compose" "$ENV_FILE" "$OVERRIDE_FILE" selected-compose-render baseline)
 syslog_logging_snapshot=$(snapshot_from_json \
@@ -242,6 +242,19 @@ if ! compare_snapshots "$TMP/baseline.snapshot.json" "$TMP/syslog-target.snapsho
   exit 1
 fi
 printf '%s\n' 'PASS complete previous-to-current Compose profile accepts default-to-syslog and true-to-false login-code logging'
+if compare_snapshots "$TMP/baseline.snapshot.json" "$TMP/baseline.snapshot.json" \
+  sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb \
+  "$TMP/unmigrated-profile-comparisons.tsv" >/dev/null 2>&1; then
+  printf '%s\n' 'FAIL unchanged default logging with login codes was accepted' >&2
+  exit 1
+fi
+if ! grep -q $'compose_logging_policy\tdefault\tdefault\tfail' "$TMP/unmigrated-profile-comparisons.tsv" || \
+   ! grep -q $'compose_log_login_codes\ttrue\ttrue\tfail' "$TMP/unmigrated-profile-comparisons.tsv"; then
+  printf '%s\n' 'FAIL unchanged default logging did not fail both profile comparisons' >&2
+  cat "$TMP/unmigrated-profile-comparisons.tsv" >&2
+  exit 1
+fi
+printf '%s\n' 'PASS unchanged default logging with login codes is rejected by target verification'
 if snapshot_from_json "$legacy_login_codes_inspect" "$syslog_compose" "$ENV_FILE" "$OVERRIDE_FILE" \
   selected-compose-render target >/dev/null 2>&1; then
   printf '%s\n' 'FAIL syslog target accepted a container with a different active logger or login-code setting' >&2

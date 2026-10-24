@@ -4,10 +4,10 @@ umask 077
 
 SCRIPT_DIR=$(cd -P "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 SCRIPT_SOURCE="$SCRIPT_DIR/$(basename "${BASH_SOURCE[0]}")"
-readonly APPROVED_VERIFIER_SHA=2cc839a2ef86dde4d3aa8e9635b6374dcdd76de802da4c8d502cae93a1fd622e
+readonly APPROVED_VERIFIER_SHA=53c62b0723c6d9f3b5795d40b1116734f850897f8bad1dbe9a0fa5a7c76a5f2a
 readonly APPROVED_SCHEMA_GATE_SHA=ac54d3cf0480383a52414a8bc8b856b5e1d5f6f8d19034c9c576c64627e097c8
 readonly APPROVED_SCHEMA_GATE_HELPER_SHA=7ae06c2872c60b434068b3715a9ddd5e19b03d4be98dc9881c8dd8f294953d41
-readonly APPROVED_INITIAL_LOCAL_COMPOSE_SHA=3a4f158c6e1f2ead6676fba85d8d95cfb15557a0fbd8e82230361e0af988e0f7
+readonly APPROVED_INITIAL_LOCAL_COMPOSE_SHA=d764d291ad2ea91cff841d14a0cd2bbcb5981961dbc67406bfeba1196a7b3fa4
 readonly APPROVED_LOCAL_COMPOSE_CONTENT_SHA=d025a25d3e388489ddaf181e3d38b4ecd56906aeab75a9f9fbabdc38e017cfdb
 readonly SOURCE_LOCAL_COMPOSE_TARGET_SHA=5602c7c13eb1571278f43129345a4b52f0630377
 readonly SOURCE_LOCAL_COMPOSE_SHA=05fc5a3e7dbdc2feac58fce870796baebc055b617bc81f6d6b206c5a2c184cc5
@@ -1083,15 +1083,48 @@ validate_blob_authority() {
     --override "$OVERRIDE_FILE" --checkout "$CHECKOUT" "${mode_args[@]}"
 }
 
+approved_logging_transition() {
+  case "$1:$2" in
+    syslog-v1:syslog-v1|default:syslog-v1) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+approved_login_code_logging_transition() {
+  case "$1:$2" in
+    true:false|false:false|unset:false|not-captured:false) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
 preflight_target_local_blob_authority() {
   if [ "$INITIALIZE_LOCAL" = 1 ]; then
     local containers_file="$BASELINE_DIR/initial-local-baseline-containers.json"
     local compose_file="$BASELINE_DIR/initial-local-target-compose.json"
     local preflight_file="$BASELINE_DIR/initial-local-preflight.txt"
     local provenance_file="$BASELINE_DIR/initial-local-provenance.txt"
-    local containers_sha compose_sha
+    local render_file="$BASELINE_DIR/initial-local-target-render.snapshot.json"
+    local logging_profile_file="$BASELINE_DIR/initial-local-logging-profile-preflight.tsv"
+    local containers_sha compose_sha logging_policy login_codes result failures=0
     [ "$INITIAL_LOCAL_ARTIFACT_SHA" = "$APPROVED_INITIAL_LOCAL_COMPOSE_SHA" ] || {
       fail 'verified initial-local artifact digest is unavailable'
+      return 1
+    }
+    logging_policy=$(jq -er '.compose_logging_policy' "$render_file") || {
+      fail 'initial-local target render is missing its Compose logging policy'
+      return 1
+    }
+    login_codes=$(jq -er '.compose_log_login_codes' "$render_file") || {
+      fail 'initial-local target render is missing its login-code logging policy'
+      return 1
+    }
+    write_immutable "$logging_profile_file" '' || return 1
+    if [ "$logging_policy" = syslog-v1 ]; then result=pass; else result=fail; failures=$((failures + 1)); fi
+    append_evidence_row "$logging_profile_file" preflight compose_logging_policy syslog-v1 "$logging_policy" "$result" || return 1
+    if [ "$login_codes" = false ]; then result=pass; else result=fail; failures=$((failures + 1)); fi
+    append_evidence_row "$logging_profile_file" preflight compose_log_login_codes false "$login_codes" "$result" || return 1
+    [ "$failures" -eq 0 ] || {
+      fail 'initial-local target must use syslog and disable login-code logging before backup'
       return 1
     }
     capture_running_blob_inventory "$containers_file" || {
@@ -2074,7 +2107,11 @@ compare_resolved_preflight() {
     for field in "${fields[@]}"; do
       before=$(jq -er --arg field "$field" '.[$field]' "$render_file") || { fail 'pinned target render is missing a preflight comparison field'; return 1; }
       after=$(jq -er --arg field "$field" '.[$field]' "$target_file") || { fail 'resolved target is missing a preflight comparison field'; return 1; }
-      if [ "$before" = "$after" ]; then result=pass; else result=fail; failures=$((failures + 1)); fi
+      if [ "$field" = compose_logging_policy ]; then
+        if approved_logging_transition "$before" "$after"; then result=pass; else result=fail; failures=$((failures + 1)); fi
+      elif [ "$field" = compose_log_login_codes ]; then
+        if approved_login_code_logging_transition "$before" "$after"; then result=pass; else result=fail; failures=$((failures + 1)); fi
+      elif [ "$before" = "$after" ]; then result=pass; else result=fail; failures=$((failures + 1)); fi
       append_evidence_row "$results" preflight "selected_render_$field" "$before" "$after" "$result" || return 1
     done
     before=$(jq -er '.compose_public_ws_2446' "$render_file") || { fail 'pinned target render is missing the public WebSocket port policy'; return 1; }
@@ -2101,19 +2138,9 @@ compare_resolved_preflight() {
     before=$(jq -er --arg field "$field" '.[$field]' "$old_file") || { fail 'baseline is missing a resolved configuration comparison field'; return 1; }
     after=$(jq -er --arg field "$field" '.[$field]' "$target_file") || { fail 'resolved target is missing a configuration comparison field'; return 1; }
     if [ "$field" = compose_logging_policy ]; then
-      if [ "$before" = "$after" ] || { [ "$before" = default ] && [ "$after" = syslog-v1 ]; }; then
-        result=pass
-      else
-        result=fail
-        failures=$((failures + 1))
-      fi
+      if approved_logging_transition "$before" "$after"; then result=pass; else result=fail; failures=$((failures + 1)); fi
     elif [ "$field" = compose_log_login_codes ]; then
-      if [ "$before" = "$after" ] || { [ "$before" = true ] && [ "$after" = false ]; }; then
-        result=pass
-      else
-        result=fail
-        failures=$((failures + 1))
-      fi
+      if approved_login_code_logging_transition "$before" "$after"; then result=pass; else result=fail; failures=$((failures + 1)); fi
     elif [ "$before" = "$after" ]; then result=pass; else result=fail; failures=$((failures + 1)); fi
     append_evidence_row "$results" preflight "$field" "$before" "$after" "$result" || return 1
   done

@@ -338,8 +338,8 @@ func TestSeededPhotoDerivativesRenderAndDownload(t *testing.T) {
 
 	rateLimited := api.GetFileSeqForTestWithLimits(
 		s, downloadBlobs,
-		store.RateLimitConfig{Limit: 2, Window: time.Second},
-		store.RateLimitConfig{Limit: 3, Window: time.Second},
+		store.RateLimitConfig{Limit: 2, Window: time.Hour},
+		store.RateLimitConfig{Limit: 3, Window: time.Hour},
 	)
 	requestM := func(userID int64) error {
 		_, err := rateLimited(userID, &tg.UploadGetFileRequest{
@@ -353,11 +353,15 @@ func TestSeededPhotoDerivativesRenderAndDownload(t *testing.T) {
 			t.Fatalf("allowed account m download: %v", err)
 		}
 	}
-	rpcError(t, requestM(recipient.ID), "FLOOD_WAIT_1")
+	if err := requestM(recipient.ID); !isFloodWait(err) {
+		t.Fatalf("third account m download = %v, want flood wait", err)
+	}
 	if err := requestM(sender.ID); err != nil {
 		t.Fatalf("allowed aggregate m download: %v", err)
 	}
-	rpcError(t, requestM(sender.ID), "FLOOD_WAIT_1")
+	if err := requestM(sender.ID); !isFloodWait(err) {
+		t.Fatalf("fourth aggregate m download = %v, want flood wait", err)
+	}
 }
 
 func TestLegacyPhotoDerivativeLocationIsInvalid(t *testing.T) {

@@ -230,7 +230,7 @@ sudo env TOOL_SHA="$TOOL_SHA" bash -c '
     "$TOOL_SHA:deploy/teagramd/rollout-runner/initial-local-compose-777742.yml" \
     > /opt/teagram/.rollout-compose.initial-local.yml
   printf "%s  %s\n" \
-    3a4f158c6e1f2ead6676fba85d8d95cfb15557a0fbd8e82230361e0af988e0f7 \
+    d764d291ad2ea91cff841d14a0cd2bbcb5981961dbc67406bfeba1196a7b3fa4 \
     /opt/teagram/.rollout-compose.initial-local.yml | sha256sum --check
   chmod 600 /opt/teagram/.rollout-compose.initial-local.yml
 '

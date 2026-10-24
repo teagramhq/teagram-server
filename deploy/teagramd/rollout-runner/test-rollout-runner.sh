@@ -76,7 +76,7 @@ CCE_LOCAL_COMPOSE_ARTIFACT_SHA=72a91a77db188f106b0062420722166436d38c6cb1974b73b
 CCE_LOCAL_COMPOSE_CONTENT_SHA=577dd9885aa9babd3370a97417d1653884f0567c6f50e7feb208ca9d11ca15bd
 INITIAL_LOCAL_TARGET_SHA=777742cc4b3ab0fda6b504a82b314a90aa60918b
 INITIAL_LOCAL_LEGACY_BASELINE_SHA=932994e26a86eb1c9ad60f81b3d222b19d3f40b7
-INITIAL_LOCAL_COMPOSE_ARTIFACT_SHA=3a4f158c6e1f2ead6676fba85d8d95cfb15557a0fbd8e82230361e0af988e0f7
+INITIAL_LOCAL_COMPOSE_ARTIFACT_SHA=d764d291ad2ea91cff841d14a0cd2bbcb5981961dbc67406bfeba1196a7b3fa4
 BASE_IMAGE=sha256:0000000000000000000000000000000000000000000000000000000000000000
 BUILT_IMAGE=sha256:1111111111111111111111111111111111111111111111111111111111111111
 POSTGRES_IMAGE=sha256:2222222222222222222222222222222222222222222222222222222222222222
@@ -435,8 +435,16 @@ if [ "${1:-}" = inspect ]; then
       esac
       env_json=$(jq -c --arg value "$origin_value" '. + ["TG_WEBSOCKET_ALLOWED_ORIGINS=" + $value]' <<< "$env_json")
     fi
-    if [ "${MOCK_SCENARIO:-}" = target-local-syslog-logging-rollout ]; then
-      if [ "$phase" = target ]; then login_codes=false; else login_codes=true; fi
+    if [ "$phase" = target ] && [ "$cfg" = target ] && \
+       [ "${MOCK_SCENARIO:-}" != target-local-syslog-logging-unmigrated ] && \
+       [ "${MOCK_SCENARIO:-}" != initial-local-unsafe-logging ]; then
+      env_json=$(jq -c \
+        'map(select(type != "string" or (startswith("TG_LOG_LOGIN_CODES=") | not))) + ["TG_LOG_LOGIN_CODES=false"]' \
+        <<< "$env_json")
+    fi
+    if [ "${MOCK_SCENARIO:-}" = target-local-syslog-logging-rollout ] || \
+       [ "${MOCK_SCENARIO:-}" = target-local-syslog-logging-unmigrated ]; then
+      if [ "${MOCK_SCENARIO:-}" = target-local-syslog-logging-rollout ] && [ "$phase" = target ]; then login_codes=false; else login_codes=true; fi
       env_json=$(jq -c --arg value "$login_codes" \
         'map(select(type != "string" or (startswith("TG_LOG_LOGIN_CODES=") | not))) + ["TG_LOG_LOGIN_CODES=" + $value]' \
         <<< "$env_json")
@@ -467,7 +475,8 @@ if [ "${1:-}" = inspect ]; then
     fi
     log_config_type=syslog
     log_config='{"syslog-address":"unixgram:///dev/log","syslog-facility":"daemon","syslog-format":"rfc5424","tag":"teagramd"}'
-    if [ "${MOCK_SCENARIO:-}" = target-local-syslog-logging-rollout ] && \
+    if { [ "${MOCK_SCENARIO:-}" = target-local-syslog-logging-rollout ] || \
+         [ "${MOCK_SCENARIO:-}" = target-local-syslog-logging-unmigrated ]; } && \
        { [ "$phase" = baseline ] || [ "$phase" = rollback ]; }; then
       log_config_type=json-file
       log_config='{}'
@@ -531,9 +540,11 @@ fi
             esac
           done < "$MOCK_CHECKOUT/.env"
           printf '%s\n' "$public_compose"
-        elif [ "${MOCK_SCENARIO:-}" = target-local-syslog-logging-rollout ] && [ "$config_count" -lt 3 ]; then
+        elif { [ "${MOCK_SCENARIO:-}" = target-local-syslog-logging-rollout ] || \
+               [ "${MOCK_SCENARIO:-}" = target-local-syslog-logging-unmigrated ]; } && [ "$config_count" -lt 3 ]; then
           cat "$MOCK_STATE/base-compose.json"
-        elif [ "${MOCK_SCENARIO:-}" = target-local-syslog-logging-rollout ]; then
+        elif [ "${MOCK_SCENARIO:-}" = target-local-syslog-logging-rollout ] || \
+             [ "${MOCK_SCENARIO:-}" = target-local-syslog-logging-unmigrated ]; then
           cat "$MOCK_STATE/target-compose.json"
         elif [ "${MOCK_SCENARIO:-}" = config-drift ] && [ "$config_count" -ge 3 ]; then
           cat "$MOCK_STATE/target-compose.drift.json"
@@ -881,6 +892,9 @@ write_compose_fixture() {
   else
     cp -- "$base_config" "$target_config"
   fi
+  jq -c '.services.teagramd.logging={driver:"syslog",options:{"syslog-address":"unixgram:///dev/log","syslog-facility":"daemon","syslog-format":"rfc5424",tag:"teagramd"}} | .services.teagramd.environment.TG_LOG_LOGIN_CODES="false"' \
+    "$target_config" > "${target_config%.json}.logging.json"
+  mv -- "${target_config%.json}.logging.json" "$target_config"
   if [ "$scenario" = config-drift ]; then
     jq -c '.services.teagramd.environment.UNRELATED="changed"' "$target_config" > "${target_config%.json}.drift.json"
   fi
@@ -2217,6 +2231,27 @@ for scenario in initial-local-port-drift initial-local-network-drift initial-loc
     fail "$scenario must reject before rollout side effects"
   fi
 done
+
+make_fixture initial-local-unsafe-logging initial-local-unsafe-logging
+state=$(cat "$TMP/initial-local-unsafe-logging-state-path")
+root=$(cat "$TMP/initial-local-unsafe-logging-root-path")
+printf '%s\n' "$APPLY_TARGET_SHA" > "$state/origin"
+printf '%s\n' "$INITIAL_LOCAL_TARGET_SHA" > "$TMP/initial-local-unsafe-logging-target-sha-path"
+jq -c '.services.teagramd.environment.TG_LOG_LOGIN_CODES="true" | del(.services.teagramd.logging)' \
+  "$state/target-compose.json" > "$state/target-compose.next.json"
+mv -- "$state/target-compose.next.json" "$state/target-compose.json"
+status=$(run_fixture initial-local-unsafe-logging built 0 '' 2 '' '' initialize-local "$APPLY_TARGET_SHA")
+if [ "$status" != 0 ] && \
+   grep -q 'initial-local target must use syslog and disable login-code logging before backup' "$TMP/initial-local-unsafe-logging.stderr" && \
+   grep -q $'compose_logging_policy\tsyslog-v1\tdefault\tfail' "$root.baseline/initial-local-logging-profile-preflight.tsv" && \
+   grep -q $'compose_log_login_codes\tfalse\ttrue\tfail' "$root.baseline/initial-local-logging-profile-preflight.tsv" && \
+   ! grep -q '^docker compose exec -T postgres pg_dump' "$TMP/initial-local-unsafe-logging-events" && \
+   ! grep -Eq '^docker compose (build|up)( |$)|^git (merge --ff-only -q |reset --hard -q )' "$TMP/initial-local-unsafe-logging-events"; then
+  pass 'initial-local default logging with login codes is rejected before backup or replacement'
+else
+  show_fixture_failure initial-local-unsafe-logging "$status"
+  fail 'initial-local target must reject unsafe logging before backup'
+fi
 
 checkout=$(cat "$TMP/success-checkout-path")
 root=$(cat "$TMP/success-root-path")
@@ -4322,6 +4357,27 @@ if [ "$status" = 0 ] && \
 else
   show_fixture_failure syslog-logging-rollout "$status"
   fail 'complete previous-to-current Compose profile should pass preflight and target verification'
+fi
+
+prepare_target_local_apply_fixture syslog-logging-unmigrated \
+  target-local-syslog-logging-unmigrated "$E58_LOCAL_COMPOSE_TARGET_SHA"
+state=$(cat "$TMP/syslog-logging-unmigrated-state-path")
+root=$(cat "$TMP/syslog-logging-unmigrated-root-path")
+jq -c '.services.teagramd.environment.TG_LOG_LOGIN_CODES="true" | del(.services.teagramd.logging)' \
+  "$state/base-compose.json" > "$state/base-compose.next.json"
+mv -- "$state/base-compose.next.json" "$state/base-compose.json"
+jq -c '.services.teagramd.environment.TG_LOG_LOGIN_CODES="true" | del(.services.teagramd.logging)' \
+  "$state/target-compose.json" > "$state/target-compose.next.json"
+mv -- "$state/target-compose.next.json" "$state/target-compose.json"
+status=$(run_fixture syslog-logging-unmigrated built 0 '' 2 '' '' apply "$APPLY_TARGET_SHA")
+if [ "$status" != 0 ] && \
+   grep -q $'preflight\tcompose_log_login_codes\ttrue\ttrue\tfail' "$root.target/preflight-comparisons.tsv" && \
+   grep -q $'preflight\tcompose_logging_policy\tdefault\tdefault\tfail' "$root.target/preflight-comparisons.tsv" && \
+   ! grep -q '^docker compose up -d$' "$TMP/syslog-logging-unmigrated-events"; then
+  pass 'unchanged default JSON-file logging with login codes is rejected before target startup'
+else
+  show_fixture_failure syslog-logging-unmigrated "$status"
+  fail 'default:true to default:true logging must be rejected before target startup'
 fi
 
 prepare_target_local_apply_fixture welcome-channel-active \

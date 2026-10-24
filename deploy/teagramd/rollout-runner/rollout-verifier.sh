@@ -20,14 +20,14 @@ sha256_text() {
 
 approved_logging_transition() {
   case "$1:$2" in
-    default:default|syslog-v1:syslog-v1|default:syslog-v1) return 0 ;;
+    syslog-v1:syslog-v1|default:syslog-v1) return 0 ;;
     *) return 1 ;;
   esac
 }
 
 approved_login_code_logging_transition() {
   case "$1:$2" in
-    true:true|false:false|unset:unset|not-captured:not-captured|true:false) return 0 ;;
+    true:false|false:false|unset:false|not-captured:false) return 0 ;;
     *) return 1 ;;
   esac
 }

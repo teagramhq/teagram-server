@@ -729,6 +729,24 @@ class BlobModeStateTests(unittest.TestCase):
                     blob_mode.teagramd_environment_sha256(non_default),
                 )
 
+    def test_initial_local_logging_profile_is_checked_outside_blob_authority_hash(self) -> None:
+        baseline = {
+            "TG_RSA_KEY_PATH": blob_mode.IMAGE_ENV_DEFAULTS["TG_RSA_KEY_PATH"],
+            "TG_BLOB_DIR": blob_mode.BLOB_TARGET,
+            "TG_SYNTHETIC_FLAG": "fixture",
+        }
+        with_code_logging = {**baseline, "TG_LOG_LOGIN_CODES": "true"}
+        without_code_logging = {**baseline, "TG_LOG_LOGIN_CODES": "false"}
+        self.assertEqual(
+            blob_mode.teagramd_environment_sha256(with_code_logging),
+            blob_mode.teagramd_environment_sha256(without_code_logging),
+        )
+        with_unrelated_change = {**without_code_logging, "TG_SYNTHETIC_FLAG": "changed"}
+        self.assertNotEqual(
+            blob_mode.teagramd_environment_sha256(without_code_logging),
+            blob_mode.teagramd_environment_sha256(with_unrelated_change),
+        )
+
     def test_initial_local_inventory_accepts_live_telegramd_layout(self) -> None:
         # The live stack keeps its historical names until the stack move.
         self.assert_initial_local_inventory(
