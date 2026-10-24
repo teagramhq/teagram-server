@@ -468,6 +468,7 @@ func TestSmokeClientRequestFixturesAreLayer228Shapes(t *testing.T) {
 		"auth.sendCode.1",
 		"auth.signIn.1",
 		"account_updatePasswordSettings.contact.1",
+		"account_getCollectibleEmojiStatuses.1",
 		"auth.invokeWithReCaptcha.signUp.1",
 		"contacts_getStatuses.1",
 		"channels_checkUsername.1",
@@ -622,6 +623,11 @@ func testSmokeClientRequestFixtures(t *testing.T) {
 		return nil
 	}); err != nil {
 		t.Fatalf("replay get-all-drafts fixture: %v", err)
+	}
+	if err := fixtureClientCall(t, creator, "account_getCollectibleEmojiStatuses.1", func(ctx context.Context, api *tg.Client) error {
+		return checkCollectibleEmojiStatuses(ctx, api, 0)
+	}); err != nil {
+		t.Fatalf("replay collectible emoji statuses fixture: %v", err)
 	}
 	const stickerSetShortName = "twemoji_reactions"
 	stickerSetRef := &tg.InputStickerSetShortName{ShortName: stickerSetShortName}

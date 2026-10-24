@@ -628,6 +628,14 @@ func (h *handlers) handleGetDefaultEmojiStatuses(r *mtproto.Request) (bin.Encode
 	return &tg.AccountEmojiStatuses{Hash: 0, Statuses: []tg.EmojiStatusClass{}}, nil
 }
 
+func (h *handlers) handleGetCollectibleEmojiStatuses(r *mtproto.Request) (bin.Encoder, error) {
+	var req tg.AccountGetCollectibleEmojiStatusesRequest
+	if err := decodeLaunchGetterRequest(r, &req); err != nil {
+		return nil, err
+	}
+	return &tg.AccountEmojiStatuses{Hash: 0, Statuses: []tg.EmojiStatusClass{}}, nil
+}
+
 func (h *handlers) handleGetChannelRecommendations(r *mtproto.Request) (bin.Encoder, error) {
 	var req tg.ChannelsGetChannelRecommendationsRequest
 	if err := decodeLaunchGetterRequest(r, &req); err != nil {
