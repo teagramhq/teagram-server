@@ -36,12 +36,12 @@ chmod 700 "$TMP/bin/jq"
 PATH="$TMP/bin:$PATH"
 export PATH
 
-COMPOSE_JSON='{"services":{"teagramd":{"stop_grace_period":"2m0s","ports":[],"volumes":[],"network_mode":"","networks":{},"environment":{"TG_REPLICA_COUNT":"1","TG_CLIENT_ADDR_TRUST":"socket","POSTGRES_PASSWORD":"fixture-secret-postgres-password","DATABASE_URL":"postgres://fixture:dsn-secret@db/teagram"}}}}'
+COMPOSE_JSON='{"services":{"teagramd":{"stop_grace_period":"2m0s","ports":[],"volumes":[],"network_mode":"","networks":{},"environment":{"TG_REPLICA_COUNT":"1","TG_CLIENT_ADDR_TRUST":"socket","TG_LOG_LOGIN_CODES":"false","POSTGRES_PASSWORD":"fixture-secret-postgres-password","DATABASE_URL":"postgres://fixture:dsn-secret@db/teagram"}}}}'
 
 inspect_json() {
   local extra=$1
   jq -cn --arg extra "$extra" '
-    ["TG_REPLICA_COUNT=1","TG_CLIENT_ADDR_TRUST=socket"] as $base
+    ["TG_REPLICA_COUNT=1","TG_CLIENT_ADDR_TRUST=socket","TG_LOG_LOGIN_CODES=false"] as $base
     | {
         Id:"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
         Image:"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
