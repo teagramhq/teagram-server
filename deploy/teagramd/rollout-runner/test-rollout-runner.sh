@@ -671,6 +671,8 @@ if [ "${1:-}" = logs ]; then
     printf '2026-10-23T21:40:00.123456789Z pre-rollout-line\n'
     if [ "${MOCK_SCENARIO:-}" = pre-rollout-log-persisted ]; then
       printf '2026-10-23T21:40:01.123456789Z level=INFO msg="login code issued" phone=fixture code=secret-fixture-code\n'
+      printf '2026-10-23T21:40:02.123456789Z pre-rollout-stderr-line\n' >&2
+      printf '2026-10-23T21:40:03.123456789Z level=INFO msg="login code issued" phone=fixture code=stderr-secret-fixture-code\n' >&2
     fi
     exit 0
   fi
@@ -2006,7 +2008,24 @@ printf '# teagramd-container-id=previous-container\n2026-10-16T21:40:00Z msg="lo
   > "$TMP/pre-rollout-log-persisted-legacy.log"
 status=$(run_fixture pre-rollout-log-persisted)
 legacy_archive="$TMP/pre-rollout-log-persisted-legacy.log"
-if [ "$status" = 0 ] && grep -Fq 'pre-rollout-line' "$legacy_archive" && \
+reader_bin="$TMP/pre-rollout-log-reader-bin"
+mkdir -m 700 "$reader_bin"
+cat > "$reader_bin/logger" <<'SH'
+#!/usr/bin/env sh
+exit 0
+SH
+chmod 700 "$reader_bin/logger"
+reader_script="$TMP/pre-rollout-log-reader.sh"
+sed \
+  -e "s|/root/teagramd-legacy-logs.log|$legacy_archive|g" \
+  -e "s|/var/log/messages|$TMP/pre-rollout-log-messages|g" \
+  "$SCRIPT_DIR/../../teagram/teagram-logs.sh" > "$reader_script"
+chmod 700 "$reader_script"
+retrieved=$(PATH="$reader_bin:$PATH" SSH_ORIGINAL_COMMAND='2000-01-01T00:00:00Z' "$reader_script")
+if [ "$status" = 0 ] && grep -Fq 'pre-rollout-line' <<< "$retrieved" && \
+   grep -Fq 'pre-rollout-stderr-line' <<< "$retrieved" && \
+   ! grep -Fq 'stderr-secret-fixture-code' <<< "$retrieved" && \
+   ! grep -Fq 'stderr-secret-fixture-code' "$legacy_archive" && \
    ! grep -Fq 'secret-fixture-code' "$legacy_archive" && \
    ! grep -Fq 'old-secret-fixture' "$legacy_archive" && \
    awk '/docker logs --since .*--timestamps --tail 5000/ {snapshot=NR} $0=="docker compose up -d" {up=NR} END{exit !(snapshot>0 && snapshot<up)}' \

@@ -898,7 +898,7 @@ archive_pre_rollout_teagramd_logs() {
     rm -f "$captured"
     return 1
   }
-  if ! docker logs --since "$since" --timestamps --tail 5000 "$container_id" | \
+  if ! docker logs --since "$since" --timestamps --tail 5000 "$container_id" 2>&1 | \
     awk 'index($0, "login code issued") == 0' > "$captured"; then
     rm -f "$captured" "$combined"
     fail 'cannot preserve the current teagramd logs before container replacement'
