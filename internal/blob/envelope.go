@@ -384,12 +384,18 @@ func (sr *sealReader) fill() error {
 		if err := sr.sealChunk(); err != nil {
 			return err
 		}
+		// The last chunk is withheld until the source is proven exhausted. A
+		// transport stops reading at the declared length, so an error that
+		// surfaced only after the last chunk would never reach it, and the
+		// backend would store a complete envelope of a truncated source.
 		var probe [1]byte
 		n, err := io.ReadFull(sr.src, probe[:])
 		if n > 0 {
+			sr.pending = nil
 			return errors.New("envelope put: source longer than its declared length")
 		}
 		if !errors.Is(err, io.EOF) {
+			sr.pending = nil
 			return fmt.Errorf("envelope put: source: %w", err)
 		}
 		return nil

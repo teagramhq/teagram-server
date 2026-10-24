@@ -609,6 +609,45 @@ func TestEncryptedOverS3SendsKnownLength(t *testing.T) {
 	}
 }
 
+// TestEncryptedOverS3RejectsOverlongSource checks that a source holding more
+// than it declared fails the Put even though the transport stops reading at
+// Content-Length and never asks for the byte that gives the source away.
+func TestEncryptedOverS3RejectsOverlongSource(t *testing.T) {
+	t.Parallel()
+	var mu sync.Mutex
+	stored := false
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if _, err := io.ReadAll(r.Body); err != nil {
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		mu.Lock()
+		stored = true
+		mu.Unlock()
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(server.Close)
+	s3, err := blob.NewS3(blob.S3Config{
+		Endpoint: server.URL, Bucket: "b", AccessKeyID: "a", SecretAccessKey: "s",
+		AllowInsecureHTTP: true, OperationTimeout: 5 * time.Second,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	e := newEncrypted(t, s3, newRing(t, 1, 1), blob.MinChunkSize)
+	for _, size := range []int{0, 10, blob.MinChunkSize, 3*blob.MinChunkSize + 5} {
+		src := sizedReader{bytes.NewReader(pattern(size + 1)), int64(size)}
+		if _, err := e.Put(context.Background(), "aa/1", src); err == nil {
+			t.Fatalf("Put of a source declaring %d bytes and holding %d succeeded", size, size+1)
+		}
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if stored {
+		t.Fatal("the server received a complete body for an overlong source")
+	}
+}
+
 func TestEncryptedOverS3RefusesUnsizedSource(t *testing.T) {
 	t.Parallel()
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
