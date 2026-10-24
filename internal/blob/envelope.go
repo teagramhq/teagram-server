@@ -479,11 +479,18 @@ func (e *Encrypted) ReadAt(ctx context.Context, key string, offset, limit int64)
 	if err != nil {
 		return nil, err
 	}
-	if offset >= h.plainLen {
+	var end, first, last int64
+	switch {
+	case h.plainLen == 0:
+		// An empty object's one chunk is a bare tag no window overlaps, so
+		// every read authenticates it; otherwise nothing would.
+		offset = 0
+	case offset >= h.plainLen:
 		return []byte{}, nil
+	default:
+		end = offset + min(limit, h.plainLen-offset)
+		first, last = offset/h.chunkSize, (end-1)/h.chunkSize
 	}
-	end := offset + min(limit, h.plainLen-offset)
-	first, last := offset/h.chunkSize, (end-1)/h.chunkSize
 	from := h.chunkOffset(first)
 	want := h.chunkOffset(last) + h.chunkLen(last) + gcmTagLen - from
 	fetch := want

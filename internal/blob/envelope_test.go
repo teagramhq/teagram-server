@@ -406,6 +406,63 @@ func TestEncryptedFailsClosed(t *testing.T) {
 	})
 }
 
+// TestEncryptedEmptyObjectFailsClosed checks that reading an empty object
+// still authenticates its one tag-only chunk, since no window ever overlaps it.
+func TestEncryptedEmptyObjectFailsClosed(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	sealed := func(t *testing.T) (*memStore, *blob.Encrypted, []byte) {
+		t.Helper()
+		mem := newMemStore()
+		e := newEncrypted(t, mem, newRing(t, 1, 1), blob.MinChunkSize)
+		if _, err := e.Put(ctx, "aa/1", bytes.NewReader(nil)); err != nil {
+			t.Fatal(err)
+		}
+		return mem, e, bytes.Clone(mem.raw("aa/1"))
+	}
+
+	t.Run("intact", func(t *testing.T) {
+		t.Parallel()
+		_, e, _ := sealed(t)
+		for _, w := range [][2]int64{{0, 1}, {0, 4096}, {7, 1}} {
+			got, err := e.ReadAt(ctx, "aa/1", w[0], w[1])
+			if err != nil || got == nil || len(got) != 0 {
+				t.Fatalf("ReadAt(%d, %d) = %v, %v; want empty success", w[0], w[1], got, err)
+			}
+		}
+	})
+	t.Run("zero window", func(t *testing.T) {
+		t.Parallel()
+		mem, e, raw := sealed(t)
+		mem.set("aa/1", raw[:envelopeHeaderLen])
+		got, err := e.ReadAt(ctx, "aa/1", 0, 0)
+		if err != nil || got == nil || len(got) != 0 {
+			t.Fatalf("ReadAt(0, 0) = %v, %v; want empty success", got, err)
+		}
+	})
+	mutations := map[string]func(raw []byte) []byte{
+		"truncated to header": func(raw []byte) []byte { return raw[:envelopeHeaderLen] },
+		"tag truncated":       func(raw []byte) []byte { return raw[:len(raw)-1] },
+		"tag corrupted": func(raw []byte) []byte {
+			raw[len(raw)-1] ^= 1
+			return raw
+		},
+		"data appended": func(raw []byte) []byte { return append(raw, 0) },
+	}
+	for name, mutate := range mutations {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			mem, e, raw := sealed(t)
+			mem.set("aa/1", mutate(raw))
+			for _, w := range [][2]int64{{0, 1}, {5, 10}} {
+				if _, err := e.ReadAt(ctx, "aa/1", w[0], w[1]); !errors.Is(err, blob.ErrEnvelope) {
+					t.Fatalf("ReadAt(%d, %d) = %v, want ErrEnvelope", w[0], w[1], err)
+				}
+			}
+		})
+	}
+}
+
 func TestEncryptedKeyRotation(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
