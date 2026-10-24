@@ -1,0 +1,2 @@
+# source: gotd v0.162.0 layer-228 generated request type
+body: { messages.getArchivedStickers#57f17692 flags:# masks:flags.0?true emojis:flags.1?true offset_id:987654321 [LONG], limit:25 [INT] }

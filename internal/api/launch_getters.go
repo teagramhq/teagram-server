@@ -57,6 +57,14 @@ func (h *handlers) handleGetStickers(r *mtproto.Request) (bin.Encoder, error) {
 	return &tg.MessagesStickers{Hash: 0, Stickers: []tg.DocumentClass{}}, nil
 }
 
+func (h *handlers) handleGetArchivedStickers(r *mtproto.Request) (bin.Encoder, error) {
+	var req tg.MessagesGetArchivedStickersRequest
+	if err := decodeLaunchGetterRequest(r, &req); err != nil {
+		return nil, err
+	}
+	return &tg.MessagesArchivedStickers{Count: 0, Sets: []tg.StickerSetCoveredClass{}}, nil
+}
+
 func (h *handlers) handleSearchStickers(r *mtproto.Request) (bin.Encoder, error) {
 	var req tg.MessagesSearchStickersRequest
 	if err := decodeLaunchGetterRequest(r, &req); err != nil {
