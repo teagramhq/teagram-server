@@ -84,17 +84,30 @@ restricted to `/usr/local/sbin/teagram-logs`.
 Treat application diagnostics as sensitive personal data, not anonymized
 telemetry: lines may contain account identifiers or request context. The QA
 SSH key can retrieve up to 5,000 matching lines through the forced log reader,
-but cannot start a shell or invoke Docker. Restrict that key to trusted
+but cannot start a shell or invoke Docker. It can request any valid UTC cutoff,
+so the line cap is a volume bound, not an age limit. Restrict that key to trusted
 responders and revoke it when no longer needed. Host root and Docker
-administrators can read the raw files; this setup does not encrypt them at
-rest. The 8 GiB syslog cap bounds disk use, not elapsed retention, so high log
-volume can rotate records sooner than seven days.
+administrators can read raw Docker logs and the archive; anyone with host-level
+access to `/var/log/messages*` can read syslog records. This setup does not
+encrypt them at rest.
+
+The legacy archive captures at most the last seven days and 5,000 lines, then
+keeps at most 32 MiB. It has no time-based expiry and is not removed when the
+container switches to syslog; it remains until a root operator deletes it or a
+later legacy capture replaces its contents. BusyBox rotates syslog by size at
+512 MiB with 15 backups, not by age. The 8 GiB cap bounds disk use, not elapsed
+retention, so high volume can rotate records sooner than seven days while low
+volume can retain them longer. Rotation removes the oldest file after the
+backup limit; neither rotation nor manual file deletion guarantees secure
+erasure or removes host-level snapshots or backups outside this deployment.
 
 `TG_LOG_LOGIN_CODES` is a legacy diagnostic, not part of username/password
 sign-in. When enabled, it logs phone numbers and authentication codes in
 cleartext. The main Compose file pins it to `false`; custom deployment overlays
-must not turn it back on. The legacy importer drops code-bearing records before
-storage, and the reader suppresses them from every source as a second boundary.
+must not turn it back on. The archive step and reader drop lines containing
+the `login code issued` event marker. This filter is defense in depth, not
+general redaction: treat both the archive and syslog as sensitive even when the
+supported Compose profile disables code logging.
 
 When the installed log reader differs, the prior file is retained at
 `/root/teagram-logs-before-<7-char-sha>` with mode 0600. Replace

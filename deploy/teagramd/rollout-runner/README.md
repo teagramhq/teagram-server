@@ -49,7 +49,9 @@ The approved persistent-log migration changes `teagramd` from Docker's
 inspected logging profiles and permits only that forward transition. The
 replacement container must match the rendered profile, and the runner archives
 filtered legacy logs before replacement. A rollback restores the baseline
-Compose render and logging profile.
+Compose render and logging profile. The access boundary, sensitive-data
+assumptions, retention limits, and deletion gaps are documented in the
+[retained log threat model](../../teagram/README.md#retained-log-threat-model).
 
 For every local-backed rollout, read the running `teagramd` container's
 `com.docker.compose.project.config_files` label and carry that Compose selection
