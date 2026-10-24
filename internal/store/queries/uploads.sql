@@ -128,3 +128,16 @@ WHERE user_id = $1 AND file_id = $2 AND part_index = $3 AND blob_key = $4;
 -- name: LivePartKeys :many
 SELECT blob_key FROM upload_parts
 WHERE blob_key = ANY(sqlc.arg(keys)::text[]);
+
+-- BlobInventoryReferences lists only rows that name an object in the blob
+-- store. A files row is an object reference only after stored=true; the empty
+-- upload_parts key is the legacy no-object state from the storage migration.
+-- name: BlobInventoryReferences :many
+SELECT 'file'::text AS kind, f.id AS file_id, ''::text AS blob_key, f.size AS logical_bytes
+FROM files f
+WHERE f.stored = true
+UNION ALL
+SELECT 'part'::text AS kind, 0::bigint AS file_id, up.blob_key, up.size AS logical_bytes
+FROM upload_parts up
+WHERE up.blob_key <> ''
+ORDER BY kind, file_id, blob_key;

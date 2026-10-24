@@ -233,6 +233,13 @@ func NewLocal(dir string) (*Local, error) {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return nil, fmt.Errorf("blob dir: %w", err)
 	}
+	return OpenLocal(dir)
+}
+
+// OpenLocal opens an existing blob directory without creating or changing it.
+// Read-only operators should use this rather than NewLocal, whose normal
+// writer setup creates a missing directory.
+func OpenLocal(dir string) (*Local, error) {
 	// Every path operation goes through this *os.Root handle, which confines
 	// it to dir at the OS level even if a future caller or filesystem change
 	// presents a path the lexical validator does not cover.
@@ -242,6 +249,9 @@ func NewLocal(dir string) (*Local, error) {
 	}
 	return &Local{root: root, dir: dir}, nil
 }
+
+// Close releases the directory handle opened by NewLocal or OpenLocal.
+func (l *Local) Close() error { return l.root.Close() }
 
 // RootDir reports the directory the store is rooted in.
 func (l *Local) RootDir() string { return l.dir }

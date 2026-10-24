@@ -1049,6 +1049,30 @@ func TestLoadReplicaRequiresExistingAuthKeyFile(t *testing.T) {
 	}
 }
 
+func TestLoadReadOnlyDoesNotCreateAuthKeyFile(t *testing.T) {
+	path := keyFileEnv(t)
+	if _, err := config.LoadReadOnly(discardLog()); err == nil {
+		t.Fatal("read-only config load succeeded without a provisioned auth-key file")
+	}
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Fatalf("read-only config load created auth-key file, stat error = %v", err)
+	}
+}
+
+func TestLoadReadOnlyUsesProvisionedAuthKey(t *testing.T) {
+	path := keyFileEnv(t)
+	if err := os.WriteFile(path, []byte(validEncKey), 0o600); err != nil {
+		t.Fatalf("write auth-key file: %v", err)
+	}
+	cfg, err := config.LoadReadOnly(discardLog())
+	if err != nil {
+		t.Fatalf("LoadReadOnly: %v", err)
+	}
+	if got := hex.EncodeToString(cfg.AuthKeyEncKey); got != validEncKey {
+		t.Fatalf("auth key = %q, want provisioned key", got)
+	}
+}
+
 func TestLoadFingerprintPinnedRequiresExistingAuthKeyFile(t *testing.T) {
 	path := keyFileEnv(t)
 	t.Setenv("TG_REPLICA_ID", "")

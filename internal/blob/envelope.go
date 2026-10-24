@@ -22,6 +22,11 @@ import (
 // never read as missing.
 var ErrEnvelope = errors.New("blob envelope invalid")
 
+// ErrEnvelopeKeyUnavailable means a structurally valid envelope header could
+// not be authenticated because no media key ring was supplied. An inventory
+// must fail in this case rather than report an encrypted object as plaintext.
+var ErrEnvelopeKeyUnavailable = errors.New("blob envelope key unavailable")
+
 // Envelope format v1. The header is fixed-size and big-endian:
 //
 //	offset size field
@@ -104,6 +109,19 @@ type envelopeHeader struct {
 	raw        [envelopeHeaderLen]byte
 }
 
+// EnvelopeHeaderInfo is the portion of an envelope that can be established
+// without reading any encrypted chunks. HasKeyVersion can be true even when
+// inspection returns ErrEnvelope: the header may claim a version but fail
+// structural or authentication checks, and a retirement inventory must treat
+// that claim conservatively.
+type EnvelopeHeaderInfo struct {
+	KeyVersion       uint32
+	LogicalBytes     int64
+	HasEnvelopeMagic bool
+	HasKeyVersion    bool
+	HasLogicalBytes  bool
+}
+
 func (h *envelopeHeader) chunks() int64 {
 	return max(1, (h.plainLen+h.chunkSize-1)/h.chunkSize)
 }
@@ -158,6 +176,72 @@ func parseHeader(raw []byte) (envelopeHeader, error) {
 	}
 	h.plainLen = int64(plain)
 	return h, nil
+}
+
+// InspectEnvelopeHeader reads and authenticates only key's fixed-size header.
+// It checks the envelope's declared physical length and, when the header is
+// structurally valid, authenticates its wrapped data key against key and ring.
+// It does not read or authenticate any encrypted chunk. A nil ring is accepted
+// for plaintext stores, but a structurally valid envelope then returns
+// ErrEnvelopeKeyUnavailable so a caller cannot mistake it for plaintext.
+//
+// physicalBytes comes from the backend's listing and lets inspection reject a
+// truncated or extended object without reading its body.
+func InspectEnvelopeHeader(
+	ctx context.Context,
+	backend Store,
+	ring *KeyRing,
+	key string,
+	physicalBytes int64,
+) (EnvelopeHeaderInfo, error) {
+	var info EnvelopeHeaderInfo
+	if backend == nil {
+		return info, errors.New("envelope inspect: backend is required")
+	}
+	if err := ValidateKey(key); err != nil {
+		return info, err
+	}
+	if physicalBytes < 0 {
+		return info, fmt.Errorf("envelope inspect: negative physical size %d", physicalBytes)
+	}
+	var raw []byte
+	if physicalBytes > 0 {
+		// Limit the request to the available prefix. A truncated envelope may
+		// still carry a readable key-version claim that must block retirement.
+		readRaw, readErr := backend.ReadAt(ctx, key, 0, min(physicalBytes, int64(envelopeHeaderLen)))
+		if readErr != nil {
+			return info, fmt.Errorf("envelope inspect: read header: %w", readErr)
+		}
+		raw = readRaw
+	}
+	if len(raw) >= 4 && string(raw[:4]) == envelopeMagic {
+		info.HasEnvelopeMagic = true
+	}
+	if len(raw) >= 10 && info.HasEnvelopeMagic && binary.BigEndian.Uint16(raw[4:6]) == envelopeVersion {
+		info.KeyVersion = binary.BigEndian.Uint32(raw[6:10])
+		info.HasKeyVersion = info.KeyVersion != 0
+	}
+	h, err := parseHeader(raw)
+	if err != nil {
+		return info, err
+	}
+	info.KeyVersion = h.keyVersion
+	info.HasKeyVersion = h.keyVersion != 0
+	info.LogicalBytes = h.plainLen
+	info.HasLogicalBytes = true
+	if h.objectLen() != physicalBytes {
+		return info, fmt.Errorf("%w: physical size does not match header", ErrEnvelope)
+	}
+	if ring == nil {
+		return info, ErrEnvelopeKeyUnavailable
+	}
+	if _, ok := ring.key(h.keyVersion); !ok {
+		return info, fmt.Errorf("%w: key version %d not in key ring", ErrEnvelope, h.keyVersion)
+	}
+	if _, err := (&Encrypted{ring: ring}).openDataKey(&h, key); err != nil {
+		return info, err
+	}
+	return info, nil
 }
 
 // wrapAEAD returns the one-shot cipher that wraps this object's data key. The
