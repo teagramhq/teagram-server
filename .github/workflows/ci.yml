@@ -2843,8 +2843,8 @@ jobs:
     runs-on: ubuntu-26.04
     needs: mirror-rustfs-qualification-images
     if: ${{ always() && needs.mirror-rustfs-qualification-images.result != 'failure' && needs.mirror-rustfs-qualification-images.result != 'cancelled' }}
-    # The complete R69/R70 fixture matrix can exceed 30 minutes on hosted runners.
-    timeout-minutes: 45
+    # The complete R69/R70 fixture matrix can exceed 45 minutes on slower hosted runners.
+    timeout-minutes: 60
     permissions:
       contents: read
       packages: read
