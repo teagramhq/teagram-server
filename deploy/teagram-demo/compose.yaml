@@ -10,14 +10,7 @@ x-logging: &logging
     max-size: "10m"
     max-file: "3"
 x-teagramd: &teagramd
-  build:
-    context: .
-    args:
-      TEAGRAMD_SOURCE_REVISION: ${TEAGRAMD_SOURCE_REVISION:-}
-      DEMO_BUILD_GOMAXPROCS: "1"
-      DEMO_BUILD_GOMEMLIMIT: 640MiB
-      DEMO_BUILD_GOFLAGS: -p=1
-  image: teagramd:local
+  image: ${TEAGRAM_DEMO_IMAGE_REF:-teagramd:local}
   stop_grace_period: 120s
   mem_limit: 448m
   memswap_limit: 448m
@@ -129,7 +122,7 @@ services:
         ipv4_address: 198.18.130.251
 
   demo-seed:
-    image: teagramd:local
+    image: ${TEAGRAM_DEMO_IMAGE_REF:-teagramd:local}
     profiles: [seed]
     entrypoint: ["/usr/local/bin/demo-seed"]
     user: "0:0"
@@ -159,7 +152,7 @@ services:
     logging: *logging
 
   demo-probe:
-    image: teagramd:local
+    image: ${TEAGRAM_DEMO_IMAGE_REF:-teagramd:local}
     profiles: [seed]
     entrypoint: ["/usr/local/bin/demo-seed"]
     user: "0:0"
@@ -182,7 +175,7 @@ services:
     logging: *logging
 
   demo-activity:
-    image: teagramd:local
+    image: ${TEAGRAM_DEMO_IMAGE_REF:-teagramd:local}
     profiles: [activity]
     entrypoint: ["/usr/local/bin/demo-seed"]
     user: "0:0"
