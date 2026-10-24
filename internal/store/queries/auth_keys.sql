@@ -174,6 +174,40 @@ WITH expired AS MATERIALIZED (
 SELECT id, user_id
 FROM unbound;
 
+-- name: SweepNeverBoundAuthKeyBatch :execrows
+WITH candidates AS MATERIALIZED (
+    SELECT auth_key.id
+    FROM auth_keys AS auth_key
+    WHERE auth_key.user_id IS NULL
+      AND auth_key.ever_bound_at IS NULL
+      AND (
+          auth_key.last_seen_at < clock_timestamp() - (sqlc.arg(idle_window_micros)::bigint * interval '1 microsecond')
+          OR auth_key.created_at < clock_timestamp() - (sqlc.arg(max_age_micros)::bigint * interval '1 microsecond')
+      )
+      AND NOT (
+          auth_key.pending_user_id IS NOT NULL
+          AND auth_key.pending_started_at IS NOT NULL
+          AND auth_key.pending_started_at + (sqlc.arg(pending_lifetime_micros)::bigint * interval '1 microsecond') > clock_timestamp()
+      )
+    ORDER BY auth_key.last_seen_at, auth_key.id
+    LIMIT sqlc.arg(batch)::int
+    FOR UPDATE OF auth_key SKIP LOCKED
+)
+DELETE FROM auth_keys AS auth_key
+USING candidates
+WHERE auth_key.id = candidates.id
+  AND auth_key.user_id IS NULL
+  AND auth_key.ever_bound_at IS NULL
+  AND (
+      auth_key.last_seen_at < clock_timestamp() - (sqlc.arg(idle_window_micros)::bigint * interval '1 microsecond')
+      OR auth_key.created_at < clock_timestamp() - (sqlc.arg(max_age_micros)::bigint * interval '1 microsecond')
+  )
+  AND NOT (
+      auth_key.pending_user_id IS NOT NULL
+      AND auth_key.pending_started_at IS NOT NULL
+      AND auth_key.pending_started_at + (sqlc.arg(pending_lifetime_micros)::bigint * interval '1 microsecond') > clock_timestamp()
+  );
+
 -- name: LockAuthKeyForResetAuthorization :one
 SELECT id FROM auth_keys
 WHERE id = sqlc.arg(caller_id)

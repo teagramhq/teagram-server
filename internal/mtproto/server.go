@@ -65,9 +65,10 @@ const (
 	// which is what keeps a silent connection from costing the server a slot
 	// for as long as the peer cares to hold it open.
 	defaultHandshakeTimeout = 30 * time.Second
-	// touchInterval throttles per-connection last-seen updates so an active
+	// AuthKeyTouchInterval throttles per-connection last-seen updates so an active
 	// session writes its activity time at most once per interval, not per frame.
-	touchInterval = 60 * time.Second
+	AuthKeyTouchInterval = 60 * time.Second
+	touchInterval        = AuthKeyTouchInterval
 )
 
 var (

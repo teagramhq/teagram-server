@@ -495,6 +495,61 @@ func (q *Queries) SweepExpiredAuthorizationBatch(ctx context.Context, batch int3
 	return items, nil
 }
 
+const sweepNeverBoundAuthKeyBatch = `-- name: SweepNeverBoundAuthKeyBatch :execrows
+WITH candidates AS MATERIALIZED (
+    SELECT auth_key.id
+    FROM auth_keys AS auth_key
+    WHERE auth_key.user_id IS NULL
+      AND auth_key.ever_bound_at IS NULL
+      AND (
+          auth_key.last_seen_at < clock_timestamp() - ($1::bigint * interval '1 microsecond')
+          OR auth_key.created_at < clock_timestamp() - ($2::bigint * interval '1 microsecond')
+      )
+      AND NOT (
+          auth_key.pending_user_id IS NOT NULL
+          AND auth_key.pending_started_at IS NOT NULL
+          AND auth_key.pending_started_at + ($3::bigint * interval '1 microsecond') > clock_timestamp()
+      )
+    ORDER BY auth_key.last_seen_at, auth_key.id
+    LIMIT $4::int
+    FOR UPDATE OF auth_key SKIP LOCKED
+)
+DELETE FROM auth_keys AS auth_key
+USING candidates
+WHERE auth_key.id = candidates.id
+  AND auth_key.user_id IS NULL
+  AND auth_key.ever_bound_at IS NULL
+  AND (
+      auth_key.last_seen_at < clock_timestamp() - ($1::bigint * interval '1 microsecond')
+      OR auth_key.created_at < clock_timestamp() - ($2::bigint * interval '1 microsecond')
+  )
+  AND NOT (
+      auth_key.pending_user_id IS NOT NULL
+      AND auth_key.pending_started_at IS NOT NULL
+      AND auth_key.pending_started_at + ($3::bigint * interval '1 microsecond') > clock_timestamp()
+  )
+`
+
+type SweepNeverBoundAuthKeyBatchParams struct {
+	IdleWindowMicros      int64
+	MaxAgeMicros          int64
+	PendingLifetimeMicros int64
+	Batch                 int32
+}
+
+func (q *Queries) SweepNeverBoundAuthKeyBatch(ctx context.Context, arg SweepNeverBoundAuthKeyBatchParams) (int64, error) {
+	result, err := q.db.Exec(ctx, sweepNeverBoundAuthKeyBatch,
+		arg.IdleWindowMicros,
+		arg.MaxAgeMicros,
+		arg.PendingLifetimeMicros,
+		arg.Batch,
+	)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
 const touchAuthKey = `-- name: TouchAuthKey :exec
 UPDATE auth_keys
 SET last_seen_at = now(),
