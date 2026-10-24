@@ -234,6 +234,11 @@ registration, change password or Turnstile requirements, or grant authentication
 privileges. The server's registration policy and abuse controls remain
 authoritative.
 
+When Turnstile is configured, discovery also includes
+`"turnstile":{"site_key":"..."}`. The public `site_key` must contain 1–256
+ASCII letters, digits, underscores, or hyphens; the Siteverify secret is never
+included. If `demo` is present, `guest_sign_up` must be the boolean `true`.
+
 `teagramd serve` serves a configured document at
 `/.well-known/teagramd/client` on each WebSocket listener. Route that path and
 `/apiws` from each HTTPS origin to its intended listener. `client-config` still

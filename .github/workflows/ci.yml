@@ -922,6 +922,8 @@ jobs:
           bash -n deploy/teagram-demo/test-demo-compose.sh
           bash -n deploy/teagram-demo/test-image-release.sh
           bash -n deploy/teagram-demo/test-seed-compose.sh
+          bash -n deploy/link-edge/deploy-main.sh
+          bash -n deploy/link-edge/test-deploy-main.sh
           shellcheck \
             deploy/teagram/deploy-main.sh \
             deploy/teagram/teagram-logs.sh \
@@ -940,6 +942,8 @@ jobs:
             deploy/teagram-demo/test-demo-compose.sh \
             deploy/teagram-demo/test-image-release.sh \
             deploy/teagram-demo/test-seed-compose.sh \
+            deploy/link-edge/deploy-main.sh \
+            deploy/link-edge/test-deploy-main.sh \
             deploy/teagram/test-deploy-main.sh \
             .github/scripts/test-deploy-workflow-contract.sh \
             .github/scripts/mirror_rustfs_qualification_images.sh
@@ -2737,6 +2741,9 @@ jobs:
         run: |
           bash -n deploy/link-edge/container-identity-gate.sh deploy/link-edge/test-container-identity-gate.sh
           bash deploy/link-edge/test-container-identity-gate.sh
+
+      - name: Check link-edge deployment
+        run: deploy/link-edge/test-deploy-main.sh
 
       - name: Check isolated link-edge control evidence
         run: python3 -m unittest discover -s deploy/link-edge -p 'test_*.py'
