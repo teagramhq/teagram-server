@@ -637,6 +637,8 @@ snapshot_from_json() {
     return 1
   }
   container_logging_sha=$(sha256_text "$container_logging_config")
+  # Empty mapped key-exchange values use the binary defaults, so they stay
+  # equivalent to an absent variable; configured values remain pinned.
   container_env=$(printf '%s' "$inspect_json" | jq -ce --argjson added "$added_env_names" --argjson changed "$changed_env_names" '
     def item: if type == "array" then .[0] else . end;
     def runtime_name($name):
@@ -651,6 +653,13 @@ snapshot_from_json() {
         | map(select(type != "string" or ((split("=")[0]) as $key | (["TG_PUBLIC_WEBSOCKET_LISTEN_ADDR", "TG_PUBLIC_WEBSOCKET_ADVERTISE_ADDR", "TG_PUBLIC_REGISTRATION", "TG_PUBLIC_WEBSOCKET_ALLOWED_ORIGINS", "TG_WELCOME_CHANNEL"] | index($key) == null))))
         | map(select(type != "string" or ((split("=")[0]) as $key | any($added[]; runtime_name(.) == $key) | not)))
         | map(select(type != "string" or ((split("=")[0]) as $key | any($changed[]; . == $key) | not)))
+        | map(select(type != "string" or (IN(
+            "TG_RATE_LIMIT_KEY_EXCHANGE_IP=",
+            "TG_RATE_LIMIT_KEY_EXCHANGE_IP_WINDOW=",
+            "TG_KEY_EXCHANGE_PER_CONNECTION=",
+            "TG_KEY_EXCHANGE_GLOBAL_RATE=",
+            "TG_KEY_EXCHANGE_GLOBAL_BURST="
+          ) | not)))
         | map(select(type != "string" or (
             (. == "TG_TURNSTILE_SITE_KEY=" or
              . == "TG_TURNSTILE_SECRET_KEY_FILE=" or

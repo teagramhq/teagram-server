@@ -91,6 +91,55 @@ public_setting_snapshot() {
     "$inspected" "$compose_json" "$ENV_FILE" "$OVERRIDE_FILE" selected-compose-render "$name"
 }
 
+exchange_budget_snapshot() {
+  local name=$1 value=$2 added=${3:-} env_content=${4:-} actual inspected compose_json
+  if [ -n "$env_content" ]; then
+    printf '%s\n' "$env_content" > "$ENV_FILE"
+  else
+    : > "$ENV_FILE"
+  fi
+  actual=
+  if [ -n "$value" ]; then
+    actual="TG_RATE_LIMIT_KEY_EXCHANGE_IP=$value"
+  fi
+  inspected=$(inspect_json "$actual")
+  inspected=$(jq -c --arg value "$value" '
+    .Config.Env += [
+      "TG_RATE_LIMIT_KEY_EXCHANGE_IP_WINDOW=",
+      "TG_KEY_EXCHANGE_PER_CONNECTION=",
+      "TG_KEY_EXCHANGE_GLOBAL_RATE=",
+      "TG_KEY_EXCHANGE_GLOBAL_BURST="
+    ] + (if $value == "" then ["TG_RATE_LIMIT_KEY_EXCHANGE_IP="] else [] end)
+  ' <<< "$inspected")
+  compose_json=$(jq -c --arg value "$value" '
+    .services.teagramd.environment += {
+      TG_RATE_LIMIT_KEY_EXCHANGE_IP:$value,
+      TG_RATE_LIMIT_KEY_EXCHANGE_IP_WINDOW:"",
+      TG_KEY_EXCHANGE_PER_CONNECTION:"",
+      TG_KEY_EXCHANGE_GLOBAL_RATE:"",
+      TG_KEY_EXCHANGE_GLOBAL_BURST:""
+    }
+  ' <<< "$COMPOSE_JSON")
+  ROLLOUT_ADDED_ENV="$added" snapshot_from_json \
+    "$inspected" "$compose_json" "$ENV_FILE" "$OVERRIDE_FILE" selected-compose-render "$name"
+}
+
+: > "$ENV_FILE"
+empty_env=$(snapshot_from_json \
+  "$(inspect_json '')" "$COMPOSE_JSON" "$ENV_FILE" "$OVERRIDE_FILE" selected-compose-render baseline)
+empty_exchange_env=$(exchange_budget_snapshot target '' '')
+[ "$(jq -r '.container_env_sha256' <<< "$empty_env")" = \
+  "$(jq -r '.container_env_sha256' <<< "$empty_exchange_env")" ]
+[ "$(jq -r '.container_env_added' <<< "$empty_exchange_env")" = none ]
+printf '%s\n' 'PASS empty key-exchange settings retain the binary-default environment baseline'
+
+added_exchange_env=$(exchange_budget_snapshot target 0 TG_RATE_LIMIT_KEY_EXCHANGE_IP \
+  'TG_RATE_LIMIT_KEY_EXCHANGE_IP=0')
+[ "$(jq -r '.container_env_sha256' <<< "$empty_env")" = \
+  "$(jq -r '.container_env_sha256' <<< "$added_exchange_env")" ]
+[ "$(jq -r '.container_env_added' <<< "$added_exchange_env")" = TG_RATE_LIMIT_KEY_EXCHANGE_IP ]
+printf '%s\n' 'PASS named key-exchange override is verified without changing the remaining environment baseline'
+
 snapshot=$(target_snapshot 'TG_NEW_FLAG=on')
 [ "$(jq -r '.container_env_added' <<< "$snapshot")" = TG_NEW_FLAG ]
 if [ -e "$JQ_SECRET_ARG_MARKER" ]; then
