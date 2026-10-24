@@ -898,13 +898,15 @@ archive_pre_rollout_teagramd_logs() {
     rm -f "$captured"
     return 1
   }
-  if ! docker logs --since "$since" --timestamps --tail 5000 "$container_id" > "$captured"; then
+  if ! docker logs --since "$since" --timestamps --tail 5000 "$container_id" | \
+    awk 'index($0, "login code issued") == 0' > "$captured"; then
     rm -f "$captured" "$combined"
     fail 'cannot preserve the current teagramd logs before container replacement'
     return 1
   fi
   if [ -f "$LEGACY_LOG_ARCHIVE" ]; then
-    if ! { cat "$LEGACY_LOG_ARCHIVE"; printf '# teagramd-container-id=%s\n' "$container_id"; cat "$captured"; } | \
+    if ! { awk 'index($0, "login code issued") == 0' "$LEGACY_LOG_ARCHIVE"; \
+      printf '# teagramd-container-id=%s\n' "$container_id"; cat "$captured"; } | \
       tail -c 33554432 > "$combined"; then
       rm -f "$captured" "$combined"
       fail 'cannot update the bounded legacy teagramd log archive'

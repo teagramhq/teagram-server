@@ -231,10 +231,9 @@ services:
       # cannot write it — the container root is read_only. Pinned deployments
       # read this path only; they do not generate a missing key file.
       TG_AUTHKEY_ENC_KEY_FILE: ${TG_AUTHKEY_ENC_KEY_FILE:-/var/lib/teagramd/enc_key.hex}
-      # Not :? like the two above: there is a safe default for this stack, and a
-      # .env copied before this line existed must still boot into a server you
-      # can sign in to. A bare `true` here would take the knob away instead.
-      TG_LOG_LOGIN_CODES: ${TG_LOG_LOGIN_CODES:-true}
+      # Legacy diagnostic only: current username/password sign-in does not use
+      # phone codes. Keep cleartext phone/code values out of retained logs.
+      TG_LOG_LOGIN_CODES: "false"
       # Registration is closed by default. Set TG_REGISTRATION=open in .env
       # while creating the first account through auth.signUp, then change it
       # back to closed before exposing the stack.

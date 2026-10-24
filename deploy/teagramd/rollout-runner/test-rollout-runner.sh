@@ -669,6 +669,9 @@ fi
 if [ "${1:-}" = logs ]; then
   if [[ " $* " == *' --timestamps '* ]]; then
     printf '2026-10-23T21:40:00.123456789Z pre-rollout-line\n'
+    if [ "${MOCK_SCENARIO:-}" = pre-rollout-log-persisted ]; then
+      printf '2026-10-23T21:40:01.123456789Z level=INFO msg="login code issued" phone=fixture code=secret-fixture-code\n'
+    fi
     exit 0
   fi
   if [ "${MOCK_SCENARIO:-success}" = readiness-timeout ] && [ "$(cat "$MOCK_STATE/phase")" = target ]; then exit 0; fi
@@ -1999,9 +2002,13 @@ else
 fi
 
 make_fixture pre-rollout-log-persisted pre-rollout-log-persisted
+printf '# teagramd-container-id=previous-container\n2026-10-16T21:40:00Z msg="login code issued" code=old-secret-fixture\n' \
+  > "$TMP/pre-rollout-log-persisted-legacy.log"
 status=$(run_fixture pre-rollout-log-persisted)
 legacy_archive="$TMP/pre-rollout-log-persisted-legacy.log"
 if [ "$status" = 0 ] && grep -Fq 'pre-rollout-line' "$legacy_archive" && \
+   ! grep -Fq 'secret-fixture-code' "$legacy_archive" && \
+   ! grep -Fq 'old-secret-fixture' "$legacy_archive" && \
    awk '/docker logs --since .*--timestamps --tail 5000/ {snapshot=NR} $0=="docker compose up -d" {up=NR} END{exit !(snapshot>0 && snapshot<up)}' \
      "$TMP/pre-rollout-log-persisted-events"; then
   pass 'pre-rollout logs are archived before the container is replaced'

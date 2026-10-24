@@ -39,7 +39,12 @@ logger -t teagram-logs "since=$T client=${SSH_CLIENT:-}"
     return mktime(sprintf("%04d %02d %02d %02d %02d %02d", y, mon, day, fields[1], fields[2], fields[3]))
   }
   function keep(epoch, line) {
-    if (epoch >= since) print line
+    if (epoch >= since && index(line, "login code issued") == 0) print line
+  }
+  function is_teagramd_tag(tag) {
+    sub(/:$/, "", tag)
+    sub(/\[[^]]*\]$/, "", tag)
+    return tag == "teagramd"
   }
   {
     # Legacy json-file logs are snapshotted by the rollout runner with their
@@ -57,16 +62,11 @@ logger -t teagram-logs "since=$T client=${SSH_CLIENT:-}"
     # retained files can cross New Year, so treat timestamps far in the future
     # as belonging to the previous year.
     if (!($1 in month_number) || $2 !~ /^[0-9]+$/ || $3 !~ /^[0-9][0-9]:[0-9][0-9]:[0-9][0-9]$/) next
-    tag_found = 0
-    for (field = 4; field <= 5 && field <= NF; field++) {
-      tag = $field
-      sub(/:$/, "", tag)
-      sub(/\[[^]]*\]$/, "", tag)
-      if (tag == "teagramd") {
-        tag_found = 1
-        break
-      }
-    }
+    # BusyBox writes its RFC3164 prefix (timestamp, host, facility) before the
+    # Docker message. RFC5424 APP-NAME is field 9 in that message.
+    tag_found = is_teagramd_tag($5) || is_teagramd_tag($6)
+    if ($6 == "1" && substr($7, 5, 1) == "-" && substr($7, 8, 1) == "-" &&
+        substr($7, 11, 1) == "T" && $9 == "teagramd") tag_found = 1
     if (!tag_found) next
     epoch = timestamp(year, month_number[$1], $2, $3)
     if (epoch > now + 86400) epoch = timestamp(year - 1, month_number[$1], $2, $3)

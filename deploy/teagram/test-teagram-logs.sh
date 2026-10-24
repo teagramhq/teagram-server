@@ -25,19 +25,24 @@ legacy_time=$(date -u -d '10 minutes ago' +%Y-%m-%dT%H:%M:%S.123456789Z)
 old_syslog_time=$(date -u -d '2 hours ago' '+%b %d %H:%M:%S')
 recent_syslog_time=$(date -u -d '5 minutes ago' '+%b %d %H:%M:%S')
 current_syslog_time=$(date -u '+%b %d %H:%M:%S')
+old_rfc_time=$(date -u -d '2 hours ago' +%Y-%m-%dT%H:%M:%S.123456789Z)
+recent_rfc_time=$(date -u -d '5 minutes ago' +%Y-%m-%dT%H:%M:%S.123456789Z)
+current_rfc_time=$(date -u +%Y-%m-%dT%H:%M:%S.123456789Z)
 cat > "$tmp/legacy.log" <<EOF
 # teagramd-container-id=old-container
 $legacy_time pre-rollout-line
+$legacy_time level=INFO msg="login code issued" phone=fixture code=legacy-secret-code
 EOF
 cat > "$tmp/messages.1" <<EOF
-$old_syslog_time teagram teagramd: too-old-line
+$old_syslog_time teagram daemon.info 1 $old_rfc_time teagram teagramd 100 ID47 - - too-old-line
 EOF
 cat > "$tmp/messages.0" <<EOF
-$recent_syslog_time teagram teagramd: after-rollout-line
-$recent_syslog_time teagram sshd: unrelated teagramd: hidden-line
+$recent_syslog_time teagram daemon.info 1 $recent_rfc_time teagram teagramd 101 ID47 - - after-rollout-line
+$recent_syslog_time teagram daemon.info 1 $recent_rfc_time teagram sshd 102 ID47 - - unrelated teagramd: hidden-line
+$recent_syslog_time teagram daemon.info 1 $recent_rfc_time teagram teagramd 103 ID47 - - msg="login code issued" phone=fixture code=syslog-secret-code
 EOF
 cat > "$tmp/messages" <<EOF
-$current_syslog_time teagram teagramd: current-line
+$current_syslog_time teagram daemon.info 1 $current_rfc_time teagram teagramd 104 ID47 - - current-line
 EOF
 
 output=$(SSH_ORIGINAL_COMMAND="$since" "$tmp/teagram-logs.sh")
@@ -47,14 +52,16 @@ grep -Fq 'after-rollout-line' <<< "$output"
 grep -Fq 'current-line' <<< "$output"
 [[ "$output" != *too-old-line* ]]
 [[ "$output" != *hidden-line* ]]
+[[ "$output" != *login\ code\ issued* ]]
+[[ "$output" != *secret-code* ]]
 [[ "$(printf '%s\n' "$output" | sed -n '1p')" == *pre-rollout-line* ]]
 [[ "$(printf '%s\n' "$output" | sed -n '2p')" == *after-rollout-line* ]]
 [[ "$(printf '%s\n' "$output" | sed -n '3p')" == *current-line* ]]
 
 rm -f "$tmp/legacy.log" "$tmp/messages" "$tmp/messages."*
-awk -v timestamp="$current_syslog_time" 'BEGIN {
+awk -v timestamp="$current_syslog_time" -v rfc_timestamp="$current_rfc_time" 'BEGIN {
   for (line = 1; line <= 5002; line++) {
-    printf "%s teagram teagramd: line-%s\n", timestamp, line
+    printf "%s teagram daemon.info 1 %s teagram teagramd 104 ID47 - - line-%s\n", timestamp, rfc_timestamp, line
   }
 }' > "$tmp/messages"
 output=$(SSH_ORIGINAL_COMMAND="$(date -u -d '1 hour ago' +%Y-%m-%dT%H:%M:%SZ)" "$tmp/teagram-logs.sh")
