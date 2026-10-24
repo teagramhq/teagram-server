@@ -88,17 +88,23 @@ func TestMAIN2454CollectibleEmojiStatusesDoNotChargeUnimplementedBudget(t *testi
 	const firstMsgID = int64(1 << 32)
 	for i := range 255 {
 		var body bin.Buffer
-		if err := (&tg.HelpGetCountriesListRequest{}).Encode(&body); err != nil {
+		if err := (&tg.AccountRegisterDeviceRequest{}).Encode(&body); err != nil {
 			t.Fatalf("encode unimplemented request %d: %v", i+1, err)
 		}
-		if err := h.OnMessage(conn, &mtproto.Request{
+		err := h.OnMessage(conn, &mtproto.Request{
 			AuthKeyID: key.ID,
 			UserID:    1,
 			MsgID:     firstMsgID + int64(i+1)*4,
 			Buf:       &body,
 			Ctx:       context.Background(),
-		}); err != nil {
-			t.Fatalf("dispatch unimplemented request %d: %v", i+1, err)
+		})
+		rpc := mustRPCError(t, err)
+		wantCode, wantMessage := 400, "INPUT_METHOD_INVALID"
+		if i >= 64 {
+			wantCode, wantMessage = 420, "FLOOD_WAIT_30"
+		}
+		if rpc.Code != wantCode || rpc.Message != wantMessage {
+			t.Fatalf("unimplemented request %d = %d %s, want %d %s", i+1, rpc.Code, rpc.Message, wantCode, wantMessage)
 		}
 	}
 
