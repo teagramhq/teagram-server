@@ -1167,6 +1167,81 @@ func TestS3WalkPrefixUsesPerPageDeadlines(t *testing.T) {
 	}
 }
 
+func TestS3WalkHeaderReadsOutliveListingDeadline(t *testing.T) {
+	const (
+		objects          = 1000
+		headerReadDelay  = 2 * time.Millisecond
+		operationTimeout = time.Second
+	)
+	var listing strings.Builder
+	listing.WriteString(`<ListBucketResult><IsTruncated>false</IsTruncated>`)
+	listingPadding := strings.Repeat("x", 256)
+	for i := range objects {
+		fmt.Fprintf(&listing, `<Contents><Key>tenant/object-%04d</Key><LastModified>2026-10-24T00:00:00Z</LastModified><Size>102</Size><ETag>%s</ETag></Contents>`, i, listingPadding)
+	}
+	listing.WriteString(`</ListBucketResult>`)
+	header := make([]byte, 102)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			writeS3Error(w, http.StatusNotFound, "NoSuchKey")
+			return
+		}
+		if r.URL.Query().Get("list-type") == "2" {
+			w.Header().Set("Content-Type", "application/xml")
+			if _, err := io.WriteString(w, listing.String()); err != nil {
+				return
+			}
+			return
+		}
+		if r.Header.Get("Range") != "bytes=0-101" {
+			writeS3Error(w, http.StatusBadRequest, "InvalidRange")
+			return
+		}
+		time.Sleep(headerReadDelay)
+		w.WriteHeader(http.StatusPartialContent)
+		if _, err := w.Write(header); err != nil {
+			return
+		}
+	}))
+	t.Cleanup(server.Close)
+	store, err := blob.NewS3(blob.S3Config{
+		Endpoint:          server.URL,
+		Bucket:            "test-bucket",
+		Prefix:            "tenant/",
+		AccessKeyID:       "access",
+		SecretAccessKey:   "secret",
+		AllowInsecureHTTP: true,
+		MaxAttempts:       1,
+		OperationTimeout:  operationTimeout,
+	})
+	if err != nil {
+		t.Fatalf("new S3 store: %v", err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	var reads int
+	err = store.Walk(ctx, func(entry blob.Entry) error {
+		// Inventory performs one 102-byte header GET per listed object. Each
+		// GET is healthy on its own, but the page's cumulative read time exceeds
+		// its listing timeout.
+		got, err := store.ReadAt(ctx, entry.Key, 0, int64(len(header)))
+		if err != nil {
+			return err
+		}
+		if len(got) != len(header) {
+			return fmt.Errorf("header read returned %d bytes, want %d", len(got), len(header))
+		}
+		reads++
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("walk and inspect %d headers: %v", objects, err)
+	}
+	if reads != objects {
+		t.Fatalf("header reads = %d, want %d", reads, objects)
+	}
+}
+
 type listingServer struct {
 	*httptest.Server
 
