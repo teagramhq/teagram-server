@@ -51,6 +51,7 @@ INITIAL_LOCAL_DISABLED_ENV = {
     "TG_PUBLIC_REGISTRATION": "closed",
     "TG_PUBLIC_WEBSOCKET_ALLOWED_ORIGINS": "",
 }
+INITIAL_LOCAL_LOGGING_ENV = {"TG_LOG_LOGIN_CODES"}
 IMAGE_ENV_DEFAULTS = {"TG_RSA_KEY_PATH": "/var/lib/teagramd/server_key.pem"}
 # In-container paths per serving service name. The moved teagramd service may
 # retain the legacy blob path while its copied local authority remains active.
@@ -323,10 +324,11 @@ def image_environment_defaults(layout: dict[str, str]) -> dict[str, str]:
 
 
 def teagramd_environment_sha256(values: dict[str, str]) -> str:
-    # These settings change during initial rollout; exact disabled public defaults are inert.
+    # These settings have separate initial-local policy checks; disabled public defaults are inert.
     comparable = {
         key: value for key, value in values.items()
         if key not in INITIAL_LOCAL_GUARD_ENV
+        and key not in INITIAL_LOCAL_LOGGING_ENV
         and INITIAL_LOCAL_DISABLED_ENV.get(key) != value
     }
     encoded = json.dumps(comparable, sort_keys=True, separators=(",", ":")).encode("utf-8")

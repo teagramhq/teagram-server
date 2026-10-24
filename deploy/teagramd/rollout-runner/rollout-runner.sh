@@ -1083,15 +1083,44 @@ validate_blob_authority() {
     --override "$OVERRIDE_FILE" --checkout "$CHECKOUT" "${mode_args[@]}"
 }
 
+logging_profile_transition_allowed() {
+  local before=$1 after=$2
+  [ "$before" = "$after" ] || {
+    { [ "$before" = default:true ] || [ "$before" = default:false ]; } &&
+      [ "$after" = syslog:false ]
+  }
+}
+
 preflight_target_local_blob_authority() {
   if [ "$INITIALIZE_LOCAL" = 1 ]; then
     local containers_file="$BASELINE_DIR/initial-local-baseline-containers.json"
     local compose_file="$BASELINE_DIR/initial-local-target-compose.json"
     local preflight_file="$BASELINE_DIR/initial-local-preflight.txt"
+    local logging_profile_file="$BASELINE_DIR/initial-local-logging-profile-preflight.tsv"
     local provenance_file="$BASELINE_DIR/initial-local-provenance.txt"
-    local containers_sha compose_sha
+    local containers_sha compose_sha logging_before logging_after logging_result
     [ "$INITIAL_LOCAL_ARTIFACT_SHA" = "$APPROVED_INITIAL_LOCAL_COMPOSE_SHA" ] || {
       fail 'verified initial-local artifact digest is unavailable'
+      return 1
+    }
+    logging_before=$(jq -er '.container_logging_profile' "$BASELINE_DIR/initial-local-target-render.snapshot.json") || {
+      fail 'initial-local live logging profile is unavailable before backup'
+      return 1
+    }
+    logging_after=$(jq -er '.compose_logging_profile' "$BASELINE_DIR/initial-local-target-render.snapshot.json") || {
+      fail 'pinned initial-local Compose logging profile is unavailable before backup'
+      return 1
+    }
+    if logging_profile_transition_allowed "$logging_before" "$logging_after"; then
+      logging_result=pass
+    else
+      logging_result=fail
+    fi
+    write_immutable "$logging_profile_file" '' || return 1
+    append_evidence_row "$logging_profile_file" preflight compose_logging_profile \
+      "$logging_before" "$logging_after" "$logging_result" || return 1
+    [ "$logging_result" = pass ] || {
+      fail 'initial-local logging profile transition is not approved before backup'
       return 1
     }
     capture_running_blob_inventory "$containers_file" || {
@@ -1999,6 +2028,13 @@ compare_initial_local_target() {
     if [ "$before" = "$after" ]; then result=pass; else result=fail; failures=$((failures + 1)); fi
     append_evidence_row "$results" target "selected_render_$field" "$before" "$after" "$result" || return 1
   done
+  before=$(jq -er '.container_logging_profile' "$render_file") || { fail 'initial-local target render is missing the inspected logging profile'; return 1; }
+  after=$(jq -er '.compose_logging_profile' "$target_file") || { fail 'initial-local target is missing the Compose logging profile'; return 1; }
+  if logging_profile_transition_allowed "$before" "$after"; then result=pass; else result=fail; failures=$((failures + 1)); fi
+  append_evidence_row "$results" target compose_logging_profile "$before" "$after" "$result" || return 1
+  after=$(jq -er '.container_logging_profile' "$target_file") || { fail 'initial-local target is missing the inspected logging profile'; return 1; }
+  if logging_profile_transition_allowed "$before" "$after"; then result=pass; else result=fail; failures=$((failures + 1)); fi
+  append_evidence_row "$results" target container_logging_profile "$before" "$after" "$result" || return 1
   expected_image=$BUILT_IMAGE_ID
   after=$(jq -er '.container_id' "$target_file") || { fail 'initial-local target container ID is missing'; return 1; }
   before=$(jq -er '.container_id' "$baseline_file") || { fail 'initial-local baseline container ID is missing'; return 1; }
@@ -2062,6 +2098,10 @@ compare_resolved_preflight() {
       if [ "$before" = "$after" ]; then result=pass; else result=fail; failures=$((failures + 1)); fi
       append_evidence_row "$results" preflight "selected_render_$field" "$before" "$after" "$result" || return 1
     done
+    before=$(jq -er '.container_logging_profile' "$render_file") || { fail 'pinned target render is missing the inspected logging profile'; return 1; }
+    after=$(jq -er '.compose_logging_profile' "$target_file") || { fail 'resolved target is missing the Compose logging profile'; return 1; }
+    if logging_profile_transition_allowed "$before" "$after"; then result=pass; else result=fail; failures=$((failures + 1)); fi
+    append_evidence_row "$results" preflight compose_logging_profile "$before" "$after" "$result" || return 1
     before=$(jq -er '.compose_public_ws_2446' "$render_file") || { fail 'pinned target render is missing the public WebSocket port policy'; return 1; }
     after=$(jq -er '.compose_public_ws_2446' "$target_file") || { fail 'resolved target is missing the public WebSocket port policy'; return 1; }
     if [ "$before" = "$after" ]; then result=pass; else result=fail; failures=$((failures + 1)); fi
@@ -2086,9 +2126,7 @@ compare_resolved_preflight() {
     before=$(jq -er --arg field "$field" '.[$field]' "$old_file") || { fail 'baseline is missing a resolved configuration comparison field'; return 1; }
     after=$(jq -er --arg field "$field" '.[$field]' "$target_file") || { fail 'resolved target is missing a configuration comparison field'; return 1; }
     if [ "$before" = "$after" ] || {
-      [ "$field" = compose_logging_profile ] && \
-        { [ "$before" = default:true ] || [ "$before" = default:false ]; } && \
-        [ "$after" = syslog:false ];
+      [ "$field" = compose_logging_profile ] && logging_profile_transition_allowed "$before" "$after";
     }; then
       result=pass
     else
@@ -2158,6 +2196,11 @@ compare_rollback_to_baseline() {
       if { [ "$before" = unset ] || [ "$before" = "$expected" ]; } && [ "$after" = "$expected" ]; then result=pass; else result=fail; fi
       append_evidence_row "$results" rollback "target_$field" "$before" "$after" "$result" || return 1
       [ "$result" = pass ] || ROLLBACK_COMPARE_FAILURES=$((ROLLBACK_COMPARE_FAILURES + 1))
+    done
+    before=$(jq -er '.container_logging_profile' "$target_render") || { fail 'live baseline is missing its inspected logging profile'; return 1; }
+    for field in compose_logging_profile container_logging_profile; do
+      after=$(jq -er --arg field "$field" '.[$field]' "$rollback_file") || { fail "rollback is missing its $field"; return 1; }
+      record_rollback_row "$results" "$field" "$before" "$after" || return 1
     done
     state=$(jq -er '.state' "$rollback_file") || { fail 'rollback state is missing'; return 1; }
     record_rollback_row "$results" rollback_state running "$state" || return 1
