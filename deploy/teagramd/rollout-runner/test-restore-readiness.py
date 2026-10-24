@@ -179,9 +179,10 @@ class RestoreReadinessContractTests(unittest.TestCase):
                 )
 
             git("init", "--quiet")
-            (root / "tracked.go").write_bytes(b"package tracked\n")
+            (root / "nested").mkdir()
+            (root / "nested" / "tracked.go").write_bytes(b"package tracked\n")
             (root / ".gitignore").write_text("ignored.txt\n", encoding="utf-8")
-            git("add", "tracked.go", ".gitignore")
+            git("add", "nested/tracked.go", ".gitignore")
             git("commit", "--quiet", "-m", "test fixture")
 
             fsmonitor = Path(directory) / "fsmonitor"
@@ -196,13 +197,13 @@ class RestoreReadinessContractTests(unittest.TestCase):
                 RESTORE_READINESS.source_identity()
                 self.assertFalse(marker.exists(), "privileged source inspection ran checkout fsmonitor")
 
-                git("update-index", "--assume-unchanged", "tracked.go")
-                (root / "tracked.go").write_bytes(b"package tampered\n")
+                git("update-index", "--assume-unchanged", "nested/tracked.go")
+                (root / "nested" / "tracked.go").write_bytes(b"package tampered\n")
                 with self.assertRaisesRegex(ValueError, "source worktree is dirty"):
                     RESTORE_READINESS.source_identity()
 
-                git("update-index", "--no-assume-unchanged", "tracked.go")
-                (root / "tracked.go").write_bytes(b"package tracked\n")
+                git("update-index", "--no-assume-unchanged", "nested/tracked.go")
+                (root / "nested" / "tracked.go").write_bytes(b"package tracked\n")
                 (root / "untracked.txt").write_text("untracked\n", encoding="utf-8")
                 with self.assertRaisesRegex(ValueError, "source worktree is dirty"):
                     RESTORE_READINESS.source_identity()

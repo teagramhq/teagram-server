@@ -333,7 +333,7 @@ def source_identity() -> tuple[str, str]:
     ).strip()
     if not re.fullmatch(r"[0-9a-f]{40}", revision):
         raise ValueError("invalid source revision")
-    tree = git_output("ls-tree", "-rz", "--full-tree", revision)
+    tree = git_output("ls-tree", "-r", "-z", "--full-tree", revision)
     entries: list[tuple[bytes, bytes, bytes]] = []
     for record in tree.split(b"\0"):
         if not record:
