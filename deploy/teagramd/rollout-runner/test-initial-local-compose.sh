@@ -5,7 +5,7 @@ umask 077
 SCRIPT_DIR=$(cd -P "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 REPO_ROOT=$(cd -P "$SCRIPT_DIR/../../.." && pwd)
 readonly ARTIFACT_NAME=.rollout-compose.initial-local.yml
-readonly ARTIFACT_SHA=3a4f158c6e1f2ead6676fba85d8d95cfb15557a0fbd8e82230361e0af988e0f7
+readonly ARTIFACT_SHA=d764d291ad2ea91cff841d14a0cd2bbcb5981961dbc67406bfeba1196a7b3fa4
 readonly APP_TARGET_SHA=777742cc4b3ab0fda6b504a82b314a90aa60918b
 TMP=$(mktemp -d "${TMPDIR:-/tmp}/telegramd-initial-local-compose.XXXXXXXX")
 chmod 700 "$TMP"
@@ -109,6 +109,8 @@ jq -e '
   and ([.services.telegramd.depends_on | keys[]] == ["migrate"])
   and ((.services.telegramd.secrets // []) | length) == 0
   and (.services.telegramd.stop_grace_period == "120s" or .services.telegramd.stop_grace_period == "2m0s")
+  and .services.telegramd.logging == {driver:"syslog",options:{"syslog-address":"unixgram:///dev/log","syslog-facility":"daemon","syslog-format":"rfc5424",tag:"teagramd"}}
+  and .services.telegramd.environment.TG_LOG_LOGIN_CODES == "false"
   and any(.services.telegramd.volumes[]; .target == "/var/lib/telegramd-blobs" and (.read_only // false) == false)
   and any(.services.telegramd.volumes[]; .target == "/var/lib/telegramd" and (.read_only // false) == false)
   and any(.services.telegramd.volumes[]; .target == "/run/telegramd/blob-mode" and .read_only == true)

@@ -76,7 +76,7 @@ CCE_LOCAL_COMPOSE_ARTIFACT_SHA=72a91a77db188f106b0062420722166436d38c6cb1974b73b
 CCE_LOCAL_COMPOSE_CONTENT_SHA=577dd9885aa9babd3370a97417d1653884f0567c6f50e7feb208ca9d11ca15bd
 INITIAL_LOCAL_TARGET_SHA=777742cc4b3ab0fda6b504a82b314a90aa60918b
 INITIAL_LOCAL_LEGACY_BASELINE_SHA=932994e26a86eb1c9ad60f81b3d222b19d3f40b7
-INITIAL_LOCAL_COMPOSE_ARTIFACT_SHA=3a4f158c6e1f2ead6676fba85d8d95cfb15557a0fbd8e82230361e0af988e0f7
+INITIAL_LOCAL_COMPOSE_ARTIFACT_SHA=d764d291ad2ea91cff841d14a0cd2bbcb5981961dbc67406bfeba1196a7b3fa4
 BASE_IMAGE=sha256:0000000000000000000000000000000000000000000000000000000000000000
 BUILT_IMAGE=sha256:1111111111111111111111111111111111111111111111111111111111111111
 POSTGRES_IMAGE=sha256:2222222222222222222222222222222222222222222222222222222222222222
@@ -336,7 +336,14 @@ if [ "${1:-}" = inspect ]; then
     case "$template" in
       '{{.HostConfig.LogConfig.Type}}')
         if [ "${MOCK_SCENARIO:-}" = pre-rollout-log-persisted ] || \
-           [[ "${MOCK_SCENARIO:-}" == compose-syslog-transition* ]]; then printf 'json-file\n'; else printf 'syslog\n'; fi
+           { [ "${MOCK_SCENARIO:-}" = target-local-syslog-logging-rollout ] && \
+             { [ "$phase" = baseline ] || [ "$phase" = rollback ]; }; } || \
+           { [ "${MOCK_SCENARIO:-}" = target-local-old-target-image-logging-mismatch ] && \
+             { [ "$phase" = baseline ] || [ "$phase" = target ]; }; }; then
+          printf 'json-file\n'
+        else
+          printf 'syslog\n'
+        fi
         ;;
       '{{.State.Status}}|{{.State.ExitCode}}')
         if [ "$subject" = "$MOCK_MIGRATE_ID" ]; then printf 'exited|0\n'
@@ -356,7 +363,7 @@ if [ "${1:-}" = inspect ]; then
             fi
             ;;
           "$MOCK_TARGET_ID"|"$MOCK_REPLACEMENT_ID")
-            if [ "${MOCK_SCENARIO:-success}" = old-target-image ] || [ "${MOCK_SCENARIO:-}" = target-local-598-rollback ] || [ "${MOCK_SCENARIO:-}" = target-local-df9-rollback ] || [ "${MOCK_SCENARIO:-}" = target-local-welcome-channel-addition-rollback ]; then printf '%s\n' "$MOCK_BASE_IMAGE"; else printf '%s\n' "$MOCK_ACTUAL_TARGET_IMAGE"; fi
+            if [ "${MOCK_SCENARIO:-success}" = old-target-image ] || [ "${MOCK_SCENARIO:-}" = target-local-old-target-image-logging-mismatch ] || [ "${MOCK_SCENARIO:-}" = target-local-598-rollback ] || [ "${MOCK_SCENARIO:-}" = target-local-df9-rollback ] || [ "${MOCK_SCENARIO:-}" = target-local-welcome-channel-addition-rollback ]; then printf '%s\n' "$MOCK_BASE_IMAGE"; else printf '%s\n' "$MOCK_ACTUAL_TARGET_IMAGE"; fi
             ;;
           *) printf '%s\n' "$MOCK_POSTGRES_IMAGE" ;;
         esac
@@ -370,7 +377,7 @@ if [ "${1:-}" = inspect ]; then
     "$MOCK_TARGET_ID"|"$MOCK_REPLACEMENT_ID")
       id=$subject
       cfg=target
-      if [ "${MOCK_SCENARIO:-success}" = old-target-image ] || [ "${MOCK_SCENARIO:-}" = target-local-598-rollback ] || [ "${MOCK_SCENARIO:-}" = target-local-df9-rollback ] || [ "${MOCK_SCENARIO:-}" = target-local-welcome-channel-addition-rollback ]; then image=$MOCK_BASE_IMAGE; else image=$MOCK_ACTUAL_TARGET_IMAGE; fi
+      if [ "${MOCK_SCENARIO:-success}" = old-target-image ] || [ "${MOCK_SCENARIO:-}" = target-local-old-target-image-logging-mismatch ] || [ "${MOCK_SCENARIO:-}" = target-local-598-rollback ] || [ "${MOCK_SCENARIO:-}" = target-local-df9-rollback ] || [ "${MOCK_SCENARIO:-}" = target-local-welcome-channel-addition-rollback ]; then image=$MOCK_BASE_IMAGE; else image=$MOCK_ACTUAL_TARGET_IMAGE; fi
       ;;
     "$MOCK_ROLLBACK_ID")
       id=$MOCK_ROLLBACK_ID
@@ -428,12 +435,18 @@ if [ "${1:-}" = inspect ]; then
       esac
       env_json=$(jq -c --arg value "$origin_value" '. + ["TG_WEBSOCKET_ALLOWED_ORIGINS=" + $value]' <<< "$env_json")
     fi
-    login_codes=false
-    if [ "${MOCK_SCENARIO:-}" = compose-syslog-unmigrated ]; then
-      login_codes=true
-    elif { [ "${MOCK_SCENARIO:-}" = compose-syslog-transition-enabled ] || \
-         [ "${MOCK_SCENARIO:-}" = compose-syslog-invalid-transition ]; } && [ "$cfg" != target ]; then login_codes=true; fi
-    env_json=$(jq -c --arg value "$login_codes" 'map(select(type != "string" or (startswith("TG_LOG_LOGIN_CODES=") | not))) + ["TG_LOG_LOGIN_CODES=" + $value]' <<< "$env_json")
+    if [[ "${MOCK_SCENARIO:-}" == initial-local-* ]] && [ "$phase" = target ]; then
+      env_json=$(jq -c \
+        'map(select(type != "string" or (startswith("TG_LOG_LOGIN_CODES=") | not))) + ["TG_LOG_LOGIN_CODES=false"]' \
+        <<< "$env_json")
+    fi
+    if [ "${MOCK_SCENARIO:-}" = target-local-syslog-logging-rollout ] || \
+       [ "${MOCK_SCENARIO:-}" = target-local-syslog-logging-unmigrated ]; then
+      if [ "${MOCK_SCENARIO:-}" = target-local-syslog-logging-rollout ] && [ "$phase" = target ]; then login_codes=false; else login_codes=true; fi
+      env_json=$(jq -c --arg value "$login_codes" \
+        'map(select(type != "string" or (startswith("TG_LOG_LOGIN_CODES=") | not))) + ["TG_LOG_LOGIN_CODES=" + $value]' \
+        <<< "$env_json")
+    fi
     turnstile_source=''
     if [ "$cfg" = baseline ] || [ "$cfg" = target ] || [ "$cfg" = rollback ]; then
       if [ -f "$MOCK_STATE/started-compose-$id.json" ]; then
@@ -458,17 +471,28 @@ if [ "${1:-}" = inspect ]; then
       fi
       turnstile_source=$(jq -r '.secrets.teagramd_turnstile.file // ""' "$turnstile_compose")
     fi
+    log_config_type=syslog
+    log_config='{"syslog-address":"unixgram:///dev/log","syslog-facility":"daemon","syslog-format":"rfc5424","tag":"teagramd"}'
+    if { [ "${MOCK_SCENARIO:-}" = target-local-syslog-logging-rollout ] || \
+         [ "${MOCK_SCENARIO:-}" = target-local-syslog-logging-unmigrated ]; } && \
+       { [ "$phase" = baseline ] || [ "$phase" = rollback ]; }; then
+      log_config_type=json-file
+      log_config='{}'
+    elif [ "${MOCK_SCENARIO:-}" = target-local-old-target-image-logging-mismatch ] && \
+         { [ "$phase" = baseline ] || [ "$phase" = target ]; }; then
+      log_config_type=json-file
+      log_config='{}'
+    fi
     jq -nc \
       --arg id "$id" --arg base_id "$MOCK_BASE_ID" --arg replacement_id "$MOCK_REPLACEMENT_ID" --arg image "$image" --argjson env "$env_json" \
       --arg cfg "$cfg" --arg source "$MOCK_CHECKOUT/.state/blob-mode" \
+      --arg log_config_type "$log_config_type" --argjson log_config "$log_config" \
       --arg scenario "${MOCK_SCENARIO:-}" --arg phase "$phase" --arg turnstile_source "$turnstile_source" \
       '{
         Id:$id,Image:$image,
         Config:{Env:$env,StopTimeout:(if $scenario == "target-local-carry-forward-image-reuse-stop-timeout-mismatch" and $cfg == "target" and $phase == "target" then 60 else 120 end),Labels:{"com.docker.compose.project":"fixture","com.docker.compose.service":"teagramd"}},
         State:{Status:(if $scenario == "runtime-target-exited" and $cfg == "target" then "exited" else "running" end),ExitCode:(if $scenario == "runtime-target-exited" and $cfg == "target" then 1 else 0 end),StartedAt:"2026-10-06T12:00:00Z",FinishedAt:(if $scenario == "runtime-target-exited" and $cfg == "target" then "2026-10-06T12:00:01Z" else "0001-01-01T00:00:00Z" end)},
-        HostConfig:{LogConfig:(if ($scenario | startswith("compose-syslog-transition")) and $cfg == "target" then
-          {Type:"syslog",Config:{"syslog-address":"unixgram:///dev/log","syslog-facility":"daemon","syslog-format":"rfc5424",tag:"teagramd"}}
-        else {Type:"json-file",Config:{}} end),PortBindings:({"2443/tcp":[{HostIp:"127.0.0.1",HostPort:"2443"}]} +
+        HostConfig:{LogConfig:{Type:$log_config_type,Config:$log_config},PortBindings:({"2443/tcp":[{HostIp:"127.0.0.1",HostPort:"2443"}]} +
           if $scenario == "target-local-carry-forward-public-listener-addition" and $id == $replacement_id then
             {"2446/tcp":[{HostIp:"127.0.0.1",HostPort:"2446"}]}
           else {} end),NetworkMode:"fixture_teagram_server"},
@@ -514,6 +538,12 @@ fi
             esac
           done < "$MOCK_CHECKOUT/.env"
           printf '%s\n' "$public_compose"
+        elif { [ "${MOCK_SCENARIO:-}" = target-local-syslog-logging-rollout ] || \
+               [ "${MOCK_SCENARIO:-}" = target-local-syslog-logging-unmigrated ]; } && [ "$config_count" -lt 3 ]; then
+          cat "$MOCK_STATE/base-compose.json"
+        elif [ "${MOCK_SCENARIO:-}" = target-local-syslog-logging-rollout ] || \
+             [ "${MOCK_SCENARIO:-}" = target-local-syslog-logging-unmigrated ]; then
+          cat "$MOCK_STATE/target-compose.json"
         elif [ "${MOCK_SCENARIO:-}" = config-drift ] && [ "$config_count" -ge 3 ]; then
           cat "$MOCK_STATE/target-compose.drift.json"
         elif [[ "${MOCK_SCENARIO:-}" == public-websocket-* ]] && [ "$config_count" -lt 3 ]; then
@@ -538,9 +568,6 @@ fi
             "$MOCK_STATE/target-compose.json"
         elif [ "${MOCK_SCENARIO:-}" = stack-move-retained-rustfs-volume ] && [ "$compose_profile_enabled" = 0 ]; then
           jq -c 'del(.volumes.rustfsdata)' "$MOCK_STATE/target-compose.json"
-        elif [[ "${MOCK_SCENARIO:-}" == compose-syslog-transition* ]] && \
-             [ "$(cat "$MOCK_STATE/teagramd")" = "$MOCK_ROLLBACK_ID" ]; then
-          cat "$MOCK_STATE/base-compose.json"
         elif [[ "${MOCK_SCENARIO:-}" == moved-stack-9ef1110-to-da0107d* ]] || \
              [ "${MOCK_SCENARIO:-}" = recovered-local-apply ]; then
           if [ "${MOCK_SCENARIO:-}" = moved-stack-9ef1110-to-da0107d-render-mismatch ]; then
@@ -716,9 +743,7 @@ if [ "${1:-}" = logs ]; then
     fi
     exit 0
   fi
-  if { [ "${MOCK_SCENARIO:-success}" = readiness-timeout ] || \
-       [ "${MOCK_SCENARIO:-}" = compose-syslog-transition-readiness-timeout ]; } && \
-     [ "$(cat "$MOCK_STATE/phase")" = target ]; then exit 0; fi
+  if [ "${MOCK_SCENARIO:-success}" = readiness-timeout ] && [ "$(cat "$MOCK_STATE/phase")" = target ]; then exit 0; fi
   if [ "${MOCK_SCENARIO:-success}" = logs-failed ] && [ "$(cat "$MOCK_STATE/phase")" = target ]; then
     printf 'fixture log read failed\n' >&2
     exit 23
@@ -804,7 +829,7 @@ write_compose_fixture() {
         teagramd:{
           build:{context:$build_context,args:{TEAGRAMD_SOURCE_REVISION:""}},
           stop_grace_period:"2m0s",
-          environment:{TG_SYNTHETIC_FLAG:"fixture",TG_BLOB_DIR:"/var/lib/teagramd-blobs",TG_REPLICA_COUNT:"1",TG_CLIENT_ADDR_TRUST:"socket",TG_LOG_LOGIN_CODES:"false"},
+          environment:{TG_SYNTHETIC_FLAG:"fixture",TG_BLOB_DIR:"/var/lib/teagramd-blobs",TG_REPLICA_COUNT:"1",TG_CLIENT_ADDR_TRUST:"socket"},
           ports:[{target:2443,published:"2443",host_ip:"127.0.0.1",protocol:"tcp",mode:"ingress"}],
           volumes:[
             {type:"volume",source:"tgkey",target:"/var/lib/teagramd",read_only:false},
@@ -822,22 +847,6 @@ write_compose_fixture() {
   ' > "$base_config"
   if [ "$scenario" = config-drift ]; then
     cp -- "$base_config" "$target_config"
-  elif [[ "$scenario" == compose-syslog-transition* ]]; then
-    if [ "$scenario" = compose-syslog-transition-enabled ]; then
-      jq -c '.services.teagramd.environment.TG_LOG_LOGIN_CODES="true"' "$base_config" > "${base_config%.json}.enabled.json"
-      mv -- "${base_config%.json}.enabled.json" "$base_config"
-    fi
-    jq -c '.services.teagramd.environment.TG_LOG_LOGIN_CODES="false" | .services.teagramd.logging={driver:"syslog",options:{"syslog-address":"unixgram:///dev/log","syslog-facility":"daemon","syslog-format":"rfc5424",tag:"teagramd"}}' "$base_config" > "$target_config"
-  elif [ "$scenario" = compose-syslog-invalid-transition ]; then
-    jq -c '.services.teagramd.environment.TG_LOG_LOGIN_CODES="true"' "$base_config" > "${base_config%.json}.enabled.json"
-    mv -- "${base_config%.json}.enabled.json" "$base_config"
-    jq -c '.services.teagramd.environment.TG_LOG_LOGIN_CODES="false"' "$base_config" > "$target_config"
-  elif [ "$scenario" = compose-syslog-unmigrated ]; then
-    jq -c '.services.teagramd.environment.TG_LOG_LOGIN_CODES="true"' "$base_config" > "${base_config%.json}.enabled.json"
-    mv -- "${base_config%.json}.enabled.json" "$base_config"
-    cp -- "$base_config" "$target_config"
-  elif [ "$scenario" = compose-syslog-invalid-profile ]; then
-    jq -c '.services.teagramd.environment.TG_LOG_LOGIN_CODES="false" | .services.teagramd.logging={driver:"syslog",options:{"syslog-address":"tcp://0.0.0.0:514","syslog-facility":"daemon","syslog-format":"rfc5424",tag:"teagramd"}}' "$base_config" > "$target_config"
   elif [ "$scenario" = public-websocket-defaults ]; then
     jq -c '.services.teagramd.environment += {TG_PUBLIC_WEBSOCKET_LISTEN_ADDR:"",TG_PUBLIC_WEBSOCKET_ADVERTISE_ADDR:"",TG_PUBLIC_REGISTRATION:"closed",TG_PUBLIC_WEBSOCKET_ALLOWED_ORIGINS:""}' "$base_config" > "$target_config"
   elif [ "$scenario" = public-websocket-enabled ]; then
@@ -883,6 +892,11 @@ write_compose_fixture() {
   fi
   if [ "$scenario" = config-drift ]; then
     jq -c '.services.teagramd.environment.UNRELATED="changed"' "$target_config" > "${target_config%.json}.drift.json"
+  fi
+  if [[ "$scenario" == initial-local-* ]]; then
+    jq -c '.services.teagramd.logging={driver:"syslog",options:{"syslog-address":"unixgram:///dev/log","syslog-facility":"daemon","syslog-format":"rfc5424",tag:"teagramd"}} | .services.teagramd.environment.TG_LOG_LOGIN_CODES="false"' \
+      "$target_config" > "${target_config%.json}.logging.json"
+    mv -- "${target_config%.json}.logging.json" "$target_config"
   fi
 }
 
@@ -1357,7 +1371,7 @@ run_fixture() {
     ambient_revision=(TEAGRAMD_SOURCE_REVISION=ambient-revision-must-not-win)
   fi
   runner="$runtime_dir/rollout-runner.sh"
-  case "$scenario" in old-target-image|target-local-598-rollback|target-local-df9-rollback|target-local-welcome-channel-addition-rollback|config-drift|compose-syslog-invalid-profile|compose-syslog-transition-readiness-timeout|target-local-carry-forward-public-listener-wide-host|target-local-carry-forward-public-listener-other-port|public-websocket-enabled|readiness-timeout|logs-failed|runtime-target-exited|target-container-unavailable|target-local-carry-forward-image-reuse-stale-build|target-local-carry-forward-image-reuse-stop-timeout-mismatch|schema-post-failed-69|schema-post-missing-69) require_marker=1 ;; esac
+  case "$scenario" in old-target-image|target-local-old-target-image-logging-mismatch|target-local-598-rollback|target-local-df9-rollback|target-local-welcome-channel-addition-rollback|config-drift|target-local-carry-forward-public-listener-wide-host|target-local-carry-forward-public-listener-other-port|public-websocket-enabled|readiness-timeout|logs-failed|runtime-target-exited|target-container-unavailable|target-local-carry-forward-image-reuse-stale-build|target-local-carry-forward-image-reuse-stop-timeout-mismatch|schema-post-failed-69|schema-post-missing-69) require_marker=1 ;; esac
   [ "$name" = marker-write-failed ] && require_marker=0
   [ -n "$chmod_match" ] && require_marker=1
   if [ "$action" = reconcile ]; then
@@ -2217,6 +2231,25 @@ for scenario in initial-local-port-drift initial-local-network-drift initial-loc
     fail "$scenario must reject before rollout side effects"
   fi
 done
+
+make_fixture initial-local-unsafe-logging initial-local-unsafe-logging
+state=$(cat "$TMP/initial-local-unsafe-logging-state-path")
+root=$(cat "$TMP/initial-local-unsafe-logging-root-path")
+jq -c '.services.teagramd.environment.TG_LOG_LOGIN_CODES="true" | del(.services.teagramd.logging)' \
+  "$state/target-compose.json" > "$state/target-compose.next.json"
+mv -- "$state/target-compose.next.json" "$state/target-compose.json"
+status=$(run_fixture initial-local-unsafe-logging built 0 '' 2 '' '' initialize-local "$APPLY_TARGET_SHA")
+if [ "$status" != 0 ] && \
+   grep -q 'initial-local target must use syslog and disable login-code logging before backup' "$TMP/initial-local-unsafe-logging.stderr" && \
+   grep -q $'compose_logging_policy\tsyslog-v1\tdefault\tfail' "$root.baseline/initial-local-logging-profile-preflight.tsv" && \
+   grep -q $'compose_log_login_codes\tfalse\ttrue\tfail' "$root.baseline/initial-local-logging-profile-preflight.tsv" && \
+   ! grep -q '^docker compose exec -T postgres pg_dump' "$TMP/initial-local-unsafe-logging-events" && \
+   ! grep -Eq '^docker compose (build|up)( |$)|^git (merge --ff-only -q |reset --hard -q )' "$TMP/initial-local-unsafe-logging-events"; then
+  pass 'initial-local default logging with login codes is rejected before backup or replacement'
+else
+  show_fixture_failure initial-local-unsafe-logging "$status"
+  fail 'initial-local target must reject unsafe logging before backup'
+fi
 
 checkout=$(cat "$TMP/success-checkout-path")
 root=$(cat "$TMP/success-root-path")
@@ -4110,6 +4143,19 @@ else
   fail 'old running image rejection and baseline rollback'
 fi
 
+prepare_apply_fixture rollback-logging-mismatch target-local-old-target-image-logging-mismatch
+status=$(run_fixture rollback-logging-mismatch built 0 '' 2 '' '' apply "$APPLY_TARGET_SHA")
+root=$(cat "$TMP/rollback-logging-mismatch-root-path")
+if [ "$status" != 0 ] && \
+   grep -q $'target_image_matches_built\t.*\tfail' "$root".target/target-comparisons.tsv && \
+   grep -q $'rollback\tcontainer_logging_sha256\t.*\tfail' "$root".rollback/rollback-equivalence.tsv && \
+   ! grep -q 'rollback=verified' "$TMP/rollback-logging-mismatch.stdout"; then
+  pass 'rollback with a different inspected logging driver is not reported as verified'
+else
+  show_fixture_failure rollback-logging-mismatch "$status"
+  fail 'mismatched inspected rollback logging configuration must be rejected'
+fi
+
 make_fixture stale-pin built
 status=$(run_fixture stale-pin old)
 if [ "$status" != 0 ] && grep -q $'target_image_matches_built\t.*\tfail' "$(cat "$TMP/stale-pin-root-path")".target/target-comparisons.tsv; then
@@ -4143,83 +4189,6 @@ if [ "$status" != 0 ] && [ -n "$rollback_rows" ] && grep -q $'rollback\tselected
   pass 'rollback compares live unset container values to target-render settings without mixing provenance'
 else
   fail 'live baseline inspection and pinned rollback render equivalence'
-fi
-
-make_fixture compose-syslog-transition compose-syslog-transition
-status=$(run_fixture compose-syslog-transition)
-root=$(cat "$TMP/compose-syslog-transition-root-path")
-if [ "$status" = 0 ] && \
-   grep -q $'preflight\tcompose_logging_profile\tdefault:false\tsyslog:false\tpass' "$root".target/preflight-comparisons.tsv && \
-   grep -q $'compose_logging_profile\tdefault:false\tsyslog:false\tpass' "$root".target/target-comparisons.tsv && \
-   grep -q $'container_logging_profile\tdefault:false\tsyslog:false\tpass' "$root".target/target-comparisons.tsv && \
-   awk '/^docker logs --since .*--timestamps --tail 5000/ {archive=NR} $0=="docker compose up -d" {up=NR} END {exit !(archive > 0 && up > archive)}' "$TMP/compose-syslog-transition-events"; then
-  pass 'reviewed syslog logging transition is accepted after preserving legacy logs'
-else
-  show_fixture_failure compose-syslog-transition "$status"
-  fail 'reviewed syslog logging transition'
-fi
-
-make_fixture compose-syslog-transition-enabled compose-syslog-transition-enabled
-status=$(run_fixture compose-syslog-transition-enabled)
-root=$(cat "$TMP/compose-syslog-transition-enabled-root-path")
-if [ "$status" = 0 ] && \
-   grep -q $'preflight\tcompose_logging_profile\tdefault:true\tsyslog:false\tpass' "$root".target/preflight-comparisons.tsv && \
-   grep -q $'compose_logging_profile\tdefault:true\tsyslog:false\tpass' "$root".target/target-comparisons.tsv && \
-   grep -q $'container_logging_profile\tdefault:true\tsyslog:false\tpass' "$root".target/target-comparisons.tsv; then
-  pass 'syslog migration disables legacy code logging when the .env uses the default'
-else
-  show_fixture_failure compose-syslog-transition-enabled "$status"
-  fail 'syslog migration from default code logging'
-fi
-
-make_fixture compose-syslog-invalid-profile compose-syslog-invalid-profile
-status=$(run_fixture compose-syslog-invalid-profile)
-if [ "$status" != 0 ] && grep -q 'unsupported teagramd logging profile' "$TMP/compose-syslog-invalid-profile.stderr" && \
-   ! grep -q '^docker compose up -d$' "$TMP/compose-syslog-invalid-profile-events"; then
-  pass 'unapproved syslog logging options remain rejected before service replacement'
-else
-  show_fixture_failure compose-syslog-invalid-profile "$status"
-  fail 'unapproved syslog logging profile rejection'
-fi
-
-make_fixture compose-syslog-transition-readiness-timeout compose-syslog-transition-readiness-timeout
-status=$(run_fixture compose-syslog-transition-readiness-timeout)
-root=$(cat "$TMP/compose-syslog-transition-readiness-timeout-root-path")
-state=$(cat "$TMP/compose-syslog-transition-readiness-timeout-state-path")
-if [ "$status" != 0 ] && grep -q 'rollback=verified' "$TMP/compose-syslog-transition-readiness-timeout.stdout" && \
-   grep -q $'rollback\tcompose_logging_profile\tdefault:false\tdefault:false\tpass' "$root".rollback/rollback-equivalence.tsv && \
-   grep -q $'rollback\tcontainer_logging_profile\tdefault:false\tdefault:false\tpass' "$root".rollback/rollback-equivalence.tsv && \
-   [ "$(cat "$state/head")" = "$BASELINE_SHA" ]; then
-  pass 'failed syslog rollout restores and verifies the prior logging profile'
-else
-  show_fixture_failure compose-syslog-transition-readiness-timeout "$status"
-  fail 'syslog logging profile rollback'
-fi
-
-make_fixture compose-syslog-invalid-transition compose-syslog-invalid-transition
-status=$(run_fixture compose-syslog-invalid-transition)
-root=$(cat "$TMP/compose-syslog-invalid-transition-root-path")
-if [ "$status" != 0 ] && \
-   grep -q $'preflight\tcompose_logging_profile\tdefault:true\tdefault:false\tfail' "$root.baseline/initial-local-logging-profile-preflight.tsv" && \
-   ! grep -q '^docker compose exec -T postgres pg_dump' "$TMP/compose-syslog-invalid-transition-events" && \
-   ! grep -q '^docker compose up -d' "$TMP/compose-syslog-invalid-transition-events"; then
-  pass 'unapproved login-code logging disablement rejects before backup or service replacement'
-else
-  show_fixture_failure compose-syslog-invalid-transition "$status"
-  fail 'unapproved initial-local logging profile transition rejection'
-fi
-
-make_fixture compose-syslog-unmigrated compose-syslog-unmigrated
-status=$(run_fixture compose-syslog-unmigrated)
-root=$(cat "$TMP/compose-syslog-unmigrated-root-path")
-if [ "$status" != 0 ] && \
-   grep -q $'preflight\tcompose_logging_profile\tdefault:true\tdefault:true\tfail' "$root.baseline/initial-local-logging-profile-preflight.tsv" && \
-   ! grep -q '^docker compose exec -T postgres pg_dump' "$TMP/compose-syslog-unmigrated-events" && \
-   ! grep -q '^docker compose up -d' "$TMP/compose-syslog-unmigrated-events"; then
-  pass 'unmigrated JSON-file logging is rejected before backup or service replacement'
-else
-  show_fixture_failure compose-syslog-unmigrated "$status"
-  fail 'initial-local rollout rejects an unchanged JSON-file logging profile'
 fi
 
 make_fixture config-drift config-drift
@@ -4359,6 +4328,54 @@ if [ "$status" != 0 ] && \
 else
   show_fixture_failure welcome-channel-addition-rollback "$status"
   fail 'rollback should preserve equivalence when welcome channel is empty'
+fi
+
+prepare_target_local_apply_fixture syslog-logging-rollout \
+  target-local-syslog-logging-rollout "$E58_LOCAL_COMPOSE_TARGET_SHA"
+state=$(cat "$TMP/syslog-logging-rollout-state-path")
+root=$(cat "$TMP/syslog-logging-rollout-root-path")
+jq -c '.services.teagramd.environment.TG_LOG_LOGIN_CODES="true" | del(.services.teagramd.logging)' \
+  "$state/base-compose.json" > "$state/base-compose.next.json"
+mv -- "$state/base-compose.next.json" "$state/base-compose.json"
+jq -c '.services.teagramd.environment.TG_LOG_LOGIN_CODES="false" | .services.teagramd.logging={driver:"syslog",options:{"syslog-address":"unixgram:///dev/log","syslog-facility":"daemon","syslog-format":"rfc5424",tag:"teagramd"}}' \
+  "$state/target-compose.json" > "$state/target-compose.next.json"
+mv -- "$state/target-compose.next.json" "$state/target-compose.json"
+status=$(run_fixture syslog-logging-rollout built 0 '' 2 '' '' apply "$APPLY_TARGET_SHA")
+if [ "$status" = 0 ] && \
+   grep -q $'preflight\tconfig_sha256\t.*\tpass' "$root.target/preflight-comparisons.tsv" && \
+   grep -q $'preflight\tcompose_log_login_codes\ttrue\tfalse\tpass' "$root.target/preflight-comparisons.tsv" && \
+   grep -q $'preflight\tcompose_logging_policy\tdefault\tsyslog-v1\tpass' "$root.target/preflight-comparisons.tsv" && \
+   grep -q $'container_env_sha256\t.*\tpass' "$root.target/target-comparisons.tsv" && \
+   grep -q $'compose_log_login_codes\ttrue\tfalse\tpass' "$root.target/target-comparisons.tsv" && \
+   grep -q $'container_log_login_codes\ttrue\tfalse\tpass' "$root.target/target-comparisons.tsv" && \
+   grep -q $'container_logging_sha256\t.*\tpass' "$root.target/target-comparisons.tsv" && \
+   grep -q $'compose_logging_policy\tdefault\tsyslog-v1\tpass' "$root.target/target-comparisons.tsv" && \
+   grep -q "rollout=verified sha=$E58_LOCAL_COMPOSE_TARGET_SHA" "$TMP/syslog-logging-rollout.stdout"; then
+  pass 'complete previous-to-current Compose profile disables login-code logging and verifies retained syslog'
+else
+  show_fixture_failure syslog-logging-rollout "$status"
+  fail 'complete previous-to-current Compose profile should pass preflight and target verification'
+fi
+
+prepare_target_local_apply_fixture syslog-logging-unmigrated \
+  target-local-syslog-logging-unmigrated "$E58_LOCAL_COMPOSE_TARGET_SHA"
+state=$(cat "$TMP/syslog-logging-unmigrated-state-path")
+root=$(cat "$TMP/syslog-logging-unmigrated-root-path")
+jq -c '.services.teagramd.environment.TG_LOG_LOGIN_CODES="true" | del(.services.teagramd.logging)' \
+  "$state/base-compose.json" > "$state/base-compose.next.json"
+mv -- "$state/base-compose.next.json" "$state/base-compose.json"
+jq -c '.services.teagramd.environment.TG_LOG_LOGIN_CODES="true" | del(.services.teagramd.logging)' \
+  "$state/target-compose.json" > "$state/target-compose.next.json"
+mv -- "$state/target-compose.next.json" "$state/target-compose.json"
+status=$(run_fixture syslog-logging-unmigrated built 0 '' 2 '' '' apply "$APPLY_TARGET_SHA")
+if [ "$status" != 0 ] && \
+   grep -q $'preflight\tcompose_log_login_codes\ttrue\ttrue\tfail' "$root.target/preflight-comparisons.tsv" && \
+   grep -q $'preflight\tcompose_logging_policy\tdefault\tdefault\tfail' "$root.target/preflight-comparisons.tsv" && \
+   ! grep -q '^docker compose up -d$' "$TMP/syslog-logging-unmigrated-events"; then
+  pass 'unchanged default JSON-file logging with login codes is rejected before target startup'
+else
+  show_fixture_failure syslog-logging-unmigrated "$status"
+  fail 'default:true to default:true logging must be rejected before target startup'
 fi
 
 prepare_target_local_apply_fixture welcome-channel-active \

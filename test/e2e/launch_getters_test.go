@@ -631,6 +631,12 @@ func checkCollectibleEmojiStatuses(ctx context.Context, client *tg.Client, hash 
 	if err != nil {
 		return fmt.Errorf("account.getCollectibleEmojiStatuses: %w", err)
 	}
+	if hash == 0 {
+		if _, ok := statuses.(*tg.AccountEmojiStatusesNotModified); !ok {
+			return fmt.Errorf("account.getCollectibleEmojiStatuses = %#v, want not modified", statuses)
+		}
+		return nil
+	}
 	statusResult, ok := statuses.(*tg.AccountEmojiStatuses)
 	if !ok || statusResult.Hash != 0 || len(statusResult.Statuses) != 0 {
 		return fmt.Errorf("account.getCollectibleEmojiStatuses = %#v, want full empty statuses", statuses)

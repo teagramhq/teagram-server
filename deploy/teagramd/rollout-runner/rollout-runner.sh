@@ -4,10 +4,10 @@ umask 077
 
 SCRIPT_DIR=$(cd -P "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 SCRIPT_SOURCE="$SCRIPT_DIR/$(basename "${BASH_SOURCE[0]}")"
-readonly APPROVED_VERIFIER_SHA=c4b5fd3623171164f171d05cba98e2921624c0fa40c702c97515e5964d2e378b
+readonly APPROVED_VERIFIER_SHA=53c62b0723c6d9f3b5795d40b1116734f850897f8bad1dbe9a0fa5a7c76a5f2a
 readonly APPROVED_SCHEMA_GATE_SHA=ac54d3cf0480383a52414a8bc8b856b5e1d5f6f8d19034c9c576c64627e097c8
 readonly APPROVED_SCHEMA_GATE_HELPER_SHA=7ae06c2872c60b434068b3715a9ddd5e19b03d4be98dc9881c8dd8f294953d41
-readonly APPROVED_INITIAL_LOCAL_COMPOSE_SHA=3a4f158c6e1f2ead6676fba85d8d95cfb15557a0fbd8e82230361e0af988e0f7
+readonly APPROVED_INITIAL_LOCAL_COMPOSE_SHA=d764d291ad2ea91cff841d14a0cd2bbcb5981961dbc67406bfeba1196a7b3fa4
 readonly APPROVED_LOCAL_COMPOSE_CONTENT_SHA=d025a25d3e388489ddaf181e3d38b4ecd56906aeab75a9f9fbabdc38e017cfdb
 readonly SOURCE_LOCAL_COMPOSE_TARGET_SHA=5602c7c13eb1571278f43129345a4b52f0630377
 readonly SOURCE_LOCAL_COMPOSE_SHA=05fc5a3e7dbdc2feac58fce870796baebc055b617bc81f6d6b206c5a2c184cc5
@@ -1083,11 +1083,18 @@ validate_blob_authority() {
     --override "$OVERRIDE_FILE" --checkout "$CHECKOUT" "${mode_args[@]}"
 }
 
-logging_profile_transition_allowed() {
-  local before=$1 after=$2
-  [ "$after" = syslog:false ] && {
-    [ "$before" = default:true ] || [ "$before" = default:false ] || [ "$before" = syslog:false ]
-  }
+approved_logging_transition() {
+  case "$1:$2" in
+    syslog-v1:syslog-v1|default:syslog-v1) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+approved_login_code_logging_transition() {
+  case "$1:$2" in
+    true:false|false:false|unset:false|not-captured:false) return 0 ;;
+    *) return 1 ;;
+  esac
 }
 
 preflight_target_local_blob_authority() {
@@ -1095,31 +1102,29 @@ preflight_target_local_blob_authority() {
     local containers_file="$BASELINE_DIR/initial-local-baseline-containers.json"
     local compose_file="$BASELINE_DIR/initial-local-target-compose.json"
     local preflight_file="$BASELINE_DIR/initial-local-preflight.txt"
-    local logging_profile_file="$BASELINE_DIR/initial-local-logging-profile-preflight.tsv"
     local provenance_file="$BASELINE_DIR/initial-local-provenance.txt"
-    local containers_sha compose_sha logging_before logging_after logging_result
+    local render_file="$BASELINE_DIR/initial-local-target-render.snapshot.json"
+    local logging_profile_file="$BASELINE_DIR/initial-local-logging-profile-preflight.tsv"
+    local containers_sha compose_sha logging_policy login_codes result failures=0
     [ "$INITIAL_LOCAL_ARTIFACT_SHA" = "$APPROVED_INITIAL_LOCAL_COMPOSE_SHA" ] || {
       fail 'verified initial-local artifact digest is unavailable'
       return 1
     }
-    logging_before=$(jq -er '.container_logging_profile' "$BASELINE_DIR/initial-local-target-render.snapshot.json") || {
-      fail 'initial-local live logging profile is unavailable before backup'
+    logging_policy=$(jq -er '.compose_logging_policy' "$render_file") || {
+      fail 'initial-local target render is missing its Compose logging policy'
       return 1
     }
-    logging_after=$(jq -er '.compose_logging_profile' "$BASELINE_DIR/initial-local-target-render.snapshot.json") || {
-      fail 'pinned initial-local Compose logging profile is unavailable before backup'
+    login_codes=$(jq -er '.compose_log_login_codes' "$render_file") || {
+      fail 'initial-local target render is missing its login-code logging policy'
       return 1
     }
-    if logging_profile_transition_allowed "$logging_before" "$logging_after"; then
-      logging_result=pass
-    else
-      logging_result=fail
-    fi
     write_immutable "$logging_profile_file" '' || return 1
-    append_evidence_row "$logging_profile_file" preflight compose_logging_profile \
-      "$logging_before" "$logging_after" "$logging_result" || return 1
-    [ "$logging_result" = pass ] || {
-      fail 'initial-local logging profile transition is not approved before backup'
+    if [ "$logging_policy" = syslog-v1 ]; then result=pass; else result=fail; failures=$((failures + 1)); fi
+    append_evidence_row "$logging_profile_file" preflight compose_logging_policy syslog-v1 "$logging_policy" "$result" || return 1
+    if [ "$login_codes" = false ]; then result=pass; else result=fail; failures=$((failures + 1)); fi
+    append_evidence_row "$logging_profile_file" preflight compose_log_login_codes false "$login_codes" "$result" || return 1
+    [ "$failures" -eq 0 ] || {
+      fail 'initial-local target must use syslog and disable login-code logging before backup'
       return 1
     }
     capture_running_blob_inventory "$containers_file" || {
@@ -1977,7 +1982,7 @@ verify_forwarded_build_config() {
 }
 
 target_compare() {
-  local rc
+  local rc expected_logging actual_logging result
   if [ "$INITIALIZE_LOCAL" = 1 ]; then
     if compare_initial_local_target; then return 0; else rc=$?; fi
     printf 'target_compare=reject exit=%s rows=%s\n' "$rc" "$(wc -l < "$TARGET_DIR/target-comparisons.tsv" 2>/dev/null || printf 0)" >&2
@@ -1986,7 +1991,22 @@ target_compare() {
   if ! copy_immutable "$BASELINE_DIR/baseline.snapshot.json" "$TARGET_DIR/baseline.snapshot.json"; then return 1; fi
   if ROLLOUT_CHECKOUT_PATH="$CHECKOUT" bash "$VERIFIER" compare \
       "$TARGET_DIR/baseline.snapshot.json" "$TARGET_DIR/target.snapshot.json" \
-      "$BUILT_IMAGE_ID" "$TARGET_DIR" target >/dev/null; then return 0; else rc=$?; fi
+      "$BUILT_IMAGE_ID" "$TARGET_DIR" target >/dev/null; then
+    expected_logging=$(jq -er '.compose_logging_policy' "$TARGET_DIR/preflight.snapshot.json") || {
+      fail 'preflight snapshot is missing its Compose logging policy'
+      return 1
+    }
+    actual_logging=$(jq -er '.compose_logging_policy' "$TARGET_DIR/target.snapshot.json") || {
+      fail 'target snapshot is missing its Compose logging policy'
+      return 1
+    }
+    if [ "$expected_logging" = "$actual_logging" ]; then result=pass; else result=fail; fi
+    append_evidence_row "$TARGET_DIR/target-comparisons.tsv" target preflight_compose_logging_policy \
+      "$expected_logging" "$actual_logging" "$result" || return 1
+    if [ "$result" = pass ]; then return 0; fi
+    fail 'target Compose logging policy changed after preflight'
+    return 1
+  else rc=$?; fi
   printf 'target_compare=reject exit=%s rows=%s\n' "$rc" "$(wc -l < "$TARGET_DIR/target-comparisons.tsv" 2>/dev/null || printf 0)" >&2
   return 1
 }
@@ -1998,7 +2018,7 @@ compare_initial_local_target() {
   local results="$TARGET_DIR/target-comparisons.tsv"
   local failures=0 field before after result expected_image
   local baseline_fields=(mounts_sha256 container_stop_timeout exposure_sha256 container_env_sha256)
-  local render_fields=(config_sha256 env_sha256 override_sha256 stop_grace_period compose_replica_count compose_client_addr_trust compose_public_ws_2446)
+  local render_fields=(config_sha256 env_sha256 override_sha256 stop_grace_period compose_replica_count compose_client_addr_trust compose_public_ws_2446 compose_logging_policy compose_log_login_codes)
   write_immutable "$results" '' || return 1
   [ "$(jq -er '.provenance.compose_source' "$baseline_file")" = live-container-inspection ] && \
     [ "$(jq -er '.provenance.compose_source' "$render_file")" = selected-compose-render ] && \
@@ -2027,13 +2047,6 @@ compare_initial_local_target() {
     if [ "$before" = "$after" ]; then result=pass; else result=fail; failures=$((failures + 1)); fi
     append_evidence_row "$results" target "selected_render_$field" "$before" "$after" "$result" || return 1
   done
-  before=$(jq -er '.container_logging_profile' "$render_file") || { fail 'initial-local target render is missing the inspected logging profile'; return 1; }
-  after=$(jq -er '.compose_logging_profile' "$target_file") || { fail 'initial-local target is missing the Compose logging profile'; return 1; }
-  if logging_profile_transition_allowed "$before" "$after"; then result=pass; else result=fail; failures=$((failures + 1)); fi
-  append_evidence_row "$results" target compose_logging_profile "$before" "$after" "$result" || return 1
-  after=$(jq -er '.container_logging_profile' "$target_file") || { fail 'initial-local target is missing the inspected logging profile'; return 1; }
-  if logging_profile_transition_allowed "$before" "$after"; then result=pass; else result=fail; failures=$((failures + 1)); fi
-  append_evidence_row "$results" target container_logging_profile "$before" "$after" "$result" || return 1
   expected_image=$BUILT_IMAGE_ID
   after=$(jq -er '.container_id' "$target_file") || { fail 'initial-local target container ID is missing'; return 1; }
   before=$(jq -er '.container_id' "$baseline_file") || { fail 'initial-local baseline container ID is missing'; return 1; }
@@ -2079,11 +2092,11 @@ compare_resolved_preflight() {
   local old_file="$BASELINE_DIR/baseline.snapshot.json"
   local target_file="$TARGET_DIR/preflight.snapshot.json"
   local results="$TARGET_DIR/preflight-comparisons.tsv"
-  local fields=(config_sha256 env_sha256 override_sha256 stop_grace_period compose_logging_profile container_logging_profile)
+  local fields=(config_sha256 env_sha256 override_sha256 stop_grace_period compose_logging_policy compose_log_login_codes)
   local field before after result expected failures=0
   if [ "$INITIALIZE_LOCAL" = 1 ]; then
     local render_file="$BASELINE_DIR/initial-local-target-render.snapshot.json"
-    local live_fields=(container_id image_id state mounts_sha256 container_stop_timeout exposure_sha256 exposure_public_ws_2446 container_env_sha256 container_replica_count container_client_addr_trust)
+    local live_fields=(container_id image_id state mounts_sha256 container_stop_timeout exposure_sha256 exposure_public_ws_2446 container_env_sha256 container_logging_sha256 container_log_login_codes container_replica_count container_client_addr_trust)
     [ "$(jq -er '.provenance.compose_source' "$old_file")" = live-container-inspection ] && \
       [ "$(jq -er '.provenance.compose_source' "$render_file")" = selected-compose-render ] && \
       [ "$(jq -er '.provenance.compose_source' "$target_file")" = selected-compose-render ] || {
@@ -2094,13 +2107,13 @@ compare_resolved_preflight() {
     for field in "${fields[@]}"; do
       before=$(jq -er --arg field "$field" '.[$field]' "$render_file") || { fail 'pinned target render is missing a preflight comparison field'; return 1; }
       after=$(jq -er --arg field "$field" '.[$field]' "$target_file") || { fail 'resolved target is missing a preflight comparison field'; return 1; }
-      if [ "$before" = "$after" ]; then result=pass; else result=fail; failures=$((failures + 1)); fi
+      if [ "$field" = compose_logging_policy ]; then
+        if approved_logging_transition "$before" "$after"; then result=pass; else result=fail; failures=$((failures + 1)); fi
+      elif [ "$field" = compose_log_login_codes ]; then
+        if approved_login_code_logging_transition "$before" "$after"; then result=pass; else result=fail; failures=$((failures + 1)); fi
+      elif [ "$before" = "$after" ]; then result=pass; else result=fail; failures=$((failures + 1)); fi
       append_evidence_row "$results" preflight "selected_render_$field" "$before" "$after" "$result" || return 1
     done
-    before=$(jq -er '.container_logging_profile' "$render_file") || { fail 'pinned target render is missing the inspected logging profile'; return 1; }
-    after=$(jq -er '.compose_logging_profile' "$target_file") || { fail 'resolved target is missing the Compose logging profile'; return 1; }
-    if logging_profile_transition_allowed "$before" "$after"; then result=pass; else result=fail; failures=$((failures + 1)); fi
-    append_evidence_row "$results" preflight compose_logging_profile "$before" "$after" "$result" || return 1
     before=$(jq -er '.compose_public_ws_2446' "$render_file") || { fail 'pinned target render is missing the public WebSocket port policy'; return 1; }
     after=$(jq -er '.compose_public_ws_2446' "$target_file") || { fail 'resolved target is missing the public WebSocket port policy'; return 1; }
     if [ "$before" = "$after" ]; then result=pass; else result=fail; failures=$((failures + 1)); fi
@@ -2124,14 +2137,11 @@ compare_resolved_preflight() {
   for field in "${fields[@]}"; do
     before=$(jq -er --arg field "$field" '.[$field]' "$old_file") || { fail 'baseline is missing a resolved configuration comparison field'; return 1; }
     after=$(jq -er --arg field "$field" '.[$field]' "$target_file") || { fail 'resolved target is missing a configuration comparison field'; return 1; }
-    if [ "$field" = compose_logging_profile ]; then
-      if logging_profile_transition_allowed "$before" "$after"; then result=pass; else result=fail; failures=$((failures + 1)); fi
-    elif [ "$before" = "$after" ]; then
-      result=pass
-    else
-      result=fail
-      failures=$((failures + 1))
-    fi
+    if [ "$field" = compose_logging_policy ]; then
+      if approved_logging_transition "$before" "$after"; then result=pass; else result=fail; failures=$((failures + 1)); fi
+    elif [ "$field" = compose_log_login_codes ]; then
+      if approved_login_code_logging_transition "$before" "$after"; then result=pass; else result=fail; failures=$((failures + 1)); fi
+    elif [ "$before" = "$after" ]; then result=pass; else result=fail; failures=$((failures + 1)); fi
     append_evidence_row "$results" preflight "$field" "$before" "$after" "$result" || return 1
   done
   for field in compose_public_ws_2446 exposure_public_ws_2446; do
@@ -2160,7 +2170,7 @@ compare_rollback_to_baseline() {
   local baseline_file="$ROLLBACK_DIR/baseline.snapshot.json"
   local rollback_file="$ROLLBACK_DIR/rollback.snapshot.json"
   local results="$ROLLBACK_DIR/rollback-equivalence.tsv"
-  local fields=(image_id mounts_sha256 stop_grace_period container_stop_timeout config_sha256 env_sha256 override_sha256 exposure_sha256 container_env_sha256 compose_replica_count compose_client_addr_trust container_replica_count container_client_addr_trust compose_public_ws_2446 exposure_public_ws_2446 compose_logging_profile container_logging_profile)
+  local fields=(image_id mounts_sha256 stop_grace_period container_stop_timeout config_sha256 env_sha256 override_sha256 exposure_sha256 container_env_sha256 container_logging_sha256 compose_replica_count compose_client_addr_trust container_replica_count container_client_addr_trust compose_public_ws_2446 exposure_public_ws_2446 compose_logging_policy compose_log_login_codes container_log_login_codes)
   local field before after state timeout_value grace
   local expected_count=${#fields[@]}
   ROLLBACK_COMPARE_FAILURES=0
@@ -2168,8 +2178,8 @@ compare_rollback_to_baseline() {
   if [ "$INITIALIZE_LOCAL" = 1 ]; then
     local render_file="$ROLLBACK_DIR/initial-local-target-render.snapshot.json"
     local target_render="$BASELINE_DIR/initial-local-target-render.snapshot.json"
-    local live_fields=(image_id mounts_sha256 container_stop_timeout exposure_sha256 exposure_public_ws_2446 container_env_sha256)
-    local render_fields=(config_sha256 env_sha256 override_sha256 stop_grace_period compose_replica_count compose_client_addr_trust compose_public_ws_2446)
+    local live_fields=(image_id mounts_sha256 container_stop_timeout exposure_sha256 exposure_public_ws_2446 container_env_sha256 container_logging_sha256 container_log_login_codes)
+    local render_fields=(config_sha256 env_sha256 override_sha256 stop_grace_period compose_replica_count compose_client_addr_trust compose_public_ws_2446 compose_logging_policy compose_log_login_codes)
     [ "$(jq -er '.provenance.compose_source' "$baseline_file")" = live-container-inspection ] && \
       [ "$(jq -er '.provenance.compose_source' "$target_render")" = selected-compose-render ] && \
       [ "$(jq -er '.provenance.compose_source' "$rollback_file")" = selected-compose-render ] || {
@@ -2195,11 +2205,6 @@ compare_rollback_to_baseline() {
       if { [ "$before" = unset ] || [ "$before" = "$expected" ]; } && [ "$after" = "$expected" ]; then result=pass; else result=fail; fi
       append_evidence_row "$results" rollback "target_$field" "$before" "$after" "$result" || return 1
       [ "$result" = pass ] || ROLLBACK_COMPARE_FAILURES=$((ROLLBACK_COMPARE_FAILURES + 1))
-    done
-    before=$(jq -er '.container_logging_profile' "$target_render") || { fail 'live baseline is missing its inspected logging profile'; return 1; }
-    for field in compose_logging_profile container_logging_profile; do
-      after=$(jq -er --arg field "$field" '.[$field]' "$rollback_file") || { fail "rollback is missing its $field"; return 1; }
-      record_rollback_row "$results" "$field" "$before" "$after" || return 1
     done
     state=$(jq -er '.state' "$rollback_file") || { fail 'rollback state is missing'; return 1; }
     record_rollback_row "$results" rollback_state running "$state" || return 1
@@ -2230,7 +2235,7 @@ compare_rollback_to_baseline() {
   record_rollback_row "$results" rollback_grace_policy 2m0s "$grace" || return 1
   timeout_value=$(jq -er '.container_stop_timeout' "$rollback_file") || { fail 'rollback inspected timeout is missing'; return 1; }
   record_rollback_row "$results" rollback_inspected_stop_timeout 120 "$timeout_value" || return 1
-  [ "$expected_count" -eq 17 ] || { fail 'internal rollback equivalence field count changed'; return 1; }
+  [ "$expected_count" -eq 19 ] || { fail 'internal rollback equivalence field count changed'; return 1; }
   [ "$ROLLBACK_COMPARE_FAILURES" -eq 0 ] || { fail 'rollback does not match the captured baseline'; return 1; }
 }
 

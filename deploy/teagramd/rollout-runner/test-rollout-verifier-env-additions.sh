@@ -47,7 +47,7 @@ inspect_json() {
         Image:"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
         Config:{Env:($base + (if $extra == "" then [] else [$extra] end)),StopTimeout:120},
         State:{Status:"running",ExitCode:0,StartedAt:"2026-10-16T12:00:00Z",FinishedAt:"0001-01-01T00:00:00Z"},
-        HostConfig:{PortBindings:{}},Mounts:[]
+        HostConfig:{LogConfig:{Type:"json-file",Config:{}},PortBindings:{}},Mounts:[]
       }
   '
 }
@@ -201,6 +201,98 @@ public_ws_snapshot=$(snapshot_from_json \
 [ "$(jq -r '.config_sha256' <<< "$legacy_snapshot")" = "$(jq -r '.config_sha256' <<< "$public_ws_snapshot")" ]
 [ "$(jq -r '.container_env_sha256' <<< "$legacy_snapshot")" = "$(jq -r '.container_env_sha256' <<< "$public_ws_snapshot")" ]
 printf '%s\n' 'PASS safe public defaults preserve resolved config and container environment equivalence'
+
+syslog_logging='{"driver":"syslog","options":{"syslog-address":"unixgram:///dev/log","syslog-facility":"daemon","syslog-format":"rfc5424","tag":"teagramd"}}'
+legacy_login_codes_compose=$(jq -c \
+  '.services.teagramd.environment.TG_LOG_LOGIN_CODES="true"' <<< "$COMPOSE_JSON")
+syslog_compose=$(jq -c --argjson logging "$syslog_logging" \
+  '.services.teagramd.environment.TG_LOG_LOGIN_CODES="false" | .services.teagramd.logging=$logging' <<< "$COMPOSE_JSON")
+syslog_options=$(jq -c '.options' <<< "$syslog_logging")
+legacy_login_codes_inspect=$(printf '%s' "$legacy_inspect" | jq -c \
+  '.Config.Env |= map(select(startswith("TG_LOG_LOGIN_CODES=") | not)) + ["TG_LOG_LOGIN_CODES=true"]')
+syslog_inspect=$(printf '%s' "$legacy_inspect" | jq -c --argjson options "$syslog_options" \
+  '.Id="cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc" | .Config.Env |= map(select(startswith("TG_LOG_LOGIN_CODES=") | not)) + ["TG_LOG_LOGIN_CODES=false"] | .HostConfig.LogConfig={Type:"syslog",Config:$options}')
+default_logging_snapshot=$(snapshot_from_json \
+  "$legacy_login_codes_inspect" "$legacy_login_codes_compose" "$ENV_FILE" "$OVERRIDE_FILE" selected-compose-render baseline)
+syslog_logging_snapshot=$(snapshot_from_json \
+  "$syslog_inspect" "$syslog_compose" "$ENV_FILE" "$OVERRIDE_FILE" selected-compose-render target)
+if [ "$(jq -r '.config_sha256' <<< "$default_logging_snapshot")" != \
+       "$(jq -r '.config_sha256' <<< "$syslog_logging_snapshot")" ] || \
+   [ "$(jq -r '.container_env_sha256' <<< "$default_logging_snapshot")" != \
+       "$(jq -r '.container_env_sha256' <<< "$syslog_logging_snapshot")" ]; then
+  printf '%s\n' 'FAIL reviewed previous-to-current profile changed unrelated Compose or container-environment digests' >&2
+  exit 1
+fi
+[ "$(jq -r '.compose_logging_policy' <<< "$default_logging_snapshot")" = default ]
+[ "$(jq -r '.compose_logging_policy' <<< "$syslog_logging_snapshot")" = syslog-v1 ]
+if [ "$(jq -r '.compose_log_login_codes' <<< "$default_logging_snapshot")" != true ] || \
+   [ "$(jq -r '.container_log_login_codes' <<< "$default_logging_snapshot")" != true ] || \
+   [ "$(jq -r '.compose_log_login_codes' <<< "$syslog_logging_snapshot")" != false ] || \
+   [ "$(jq -r '.container_log_login_codes' <<< "$syslog_logging_snapshot")" != false ]; then
+  printf '%s\n' 'FAIL previous-to-current profile did not capture the exact login-code logging transition' >&2
+  exit 1
+fi
+printf '%s\n' "$default_logging_snapshot" > "$TMP/baseline.snapshot.json"
+printf '%s\n' "$syslog_logging_snapshot" > "$TMP/syslog-target.snapshot.json"
+if ! compare_snapshots "$TMP/baseline.snapshot.json" "$TMP/syslog-target.snapshot.json" \
+  sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb \
+  "$TMP/profile-comparisons.tsv"; then
+  printf '%s\n' 'FAIL the complete previous-to-current Compose profile was rejected' >&2
+  cat "$TMP/profile-comparisons.tsv" >&2
+  exit 1
+fi
+printf '%s\n' 'PASS complete previous-to-current Compose profile accepts default-to-syslog and true-to-false login-code logging'
+if compare_snapshots "$TMP/baseline.snapshot.json" "$TMP/baseline.snapshot.json" \
+  sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb \
+  "$TMP/unmigrated-profile-comparisons.tsv" >/dev/null 2>&1; then
+  printf '%s\n' 'FAIL unchanged default logging with login codes was accepted' >&2
+  exit 1
+fi
+if ! grep -q $'compose_logging_policy\tdefault\tdefault\tfail' "$TMP/unmigrated-profile-comparisons.tsv" || \
+   ! grep -q $'compose_log_login_codes\ttrue\ttrue\tfail' "$TMP/unmigrated-profile-comparisons.tsv"; then
+  printf '%s\n' 'FAIL unchanged default logging did not fail both profile comparisons' >&2
+  cat "$TMP/unmigrated-profile-comparisons.tsv" >&2
+  exit 1
+fi
+printf '%s\n' 'PASS unchanged default logging with login codes is rejected by target verification'
+if snapshot_from_json "$legacy_login_codes_inspect" "$syslog_compose" "$ENV_FILE" "$OVERRIDE_FILE" \
+  selected-compose-render target >/dev/null 2>&1; then
+  printf '%s\n' 'FAIL syslog target accepted a container with a different active logger or login-code setting' >&2
+  exit 1
+fi
+syslog_enabled_codes_compose=$(jq -c --argjson logging "$syslog_logging" \
+  '.services.teagramd.environment.TG_LOG_LOGIN_CODES="true" | .services.teagramd.logging=$logging' <<< "$COMPOSE_JSON")
+syslog_enabled_codes_inspect=$(printf '%s' "$legacy_login_codes_inspect" | jq -c --argjson options "$syslog_options" \
+  '.HostConfig.LogConfig={Type:"syslog",Config:$options}')
+if snapshot_from_json "$syslog_enabled_codes_inspect" "$syslog_enabled_codes_compose" \
+  "$ENV_FILE" "$OVERRIDE_FILE" selected-compose-render target >/dev/null 2>&1; then
+  printf '%s\n' 'FAIL syslog target accepted login-code logging enabled' >&2
+  exit 1
+fi
+unapproved_logging_compose=$(jq -c '.services.teagramd.logging.options.tag="other"' <<< "$syslog_compose")
+if snapshot_from_json "$syslog_inspect" "$unapproved_logging_compose" "$ENV_FILE" "$OVERRIDE_FILE" \
+  selected-compose-render preflight >/dev/null 2>&1; then
+  printf '%s\n' 'FAIL unreviewed syslog options were accepted' >&2
+  exit 1
+fi
+rollback_logger_mismatch_inspect=$(printf '%s' "$legacy_login_codes_inspect" | jq -c --argjson options "$syslog_options" \
+  '.HostConfig.LogConfig={Type:"syslog",Config:$options}')
+rollback_logger_mismatch=$(snapshot_from_json "$rollback_logger_mismatch_inspect" "$legacy_login_codes_compose" \
+  "$ENV_FILE" "$OVERRIDE_FILE" selected-compose-render rollback)
+printf '%s\n' "$rollback_logger_mismatch" > "$TMP/mismatched-rollback.snapshot.json"
+if compare_snapshots "$TMP/baseline.snapshot.json" "$TMP/mismatched-rollback.snapshot.json" \
+  sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb \
+  "$TMP/mismatched-rollback-comparisons.tsv" >/dev/null 2>&1; then
+  printf '%s\n' 'FAIL rollback accepted a different inspected logging driver' >&2
+  exit 1
+fi
+if ! grep -q $'container_logging_sha256\t.*\tfail' "$TMP/mismatched-rollback-comparisons.tsv"; then
+  printf '%s\n' 'FAIL mismatched rollback did not fail the inspected logging comparison' >&2
+  cat "$TMP/mismatched-rollback-comparisons.tsv" >&2
+  exit 1
+fi
+printf '%s\n' 'PASS rollback equivalence rejects a changed inspected logging driver'
+printf '%s\n' 'PASS reviewed syslog policy is isolated, exact, and verified against the target container'
 
 for setting in TG_PUBLIC_WEBSOCKET_LISTEN_ADDR TG_PUBLIC_WEBSOCKET_ADVERTISE_ADDR TG_PUBLIC_REGISTRATION TG_PUBLIC_WEBSOCKET_ALLOWED_ORIGINS TG_WELCOME_CHANNEL; do
   case "$setting" in
