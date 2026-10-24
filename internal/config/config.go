@@ -34,12 +34,14 @@ type RegistrationMode string
 type RecoveryEmailMode string
 
 const (
-	RegistrationClosed   RegistrationMode  = "closed"
-	RegistrationInvite   RegistrationMode  = "invite"
-	RegistrationOpen     RegistrationMode  = "open"
-	RecoveryEmailOff     RecoveryEmailMode = "off"
-	RecoveryEmailContact RecoveryEmailMode = "contact"
-	DefaultUploadPartTTL                   = 6 * time.Hour
+	RegistrationClosed            RegistrationMode  = "closed"
+	RegistrationInvite            RegistrationMode  = "invite"
+	RegistrationOpen              RegistrationMode  = "open"
+	RecoveryEmailOff              RecoveryEmailMode = "off"
+	RecoveryEmailContact          RecoveryEmailMode = "contact"
+	DefaultUploadPartTTL                            = 6 * time.Hour
+	DefaultAuthKeySweepIdleWindow                   = 24 * time.Hour
+	DefaultAuthKeySweepMaxAge                       = 72 * time.Hour
 )
 
 // Config holds server configuration.
@@ -156,6 +158,11 @@ type Config struct {
 	// within minutes, and the TTL is the term that makes worst-case retained
 	// bytes finite at accounts x cap.
 	UploadPartTTL time.Duration
+	// AuthKeySweepIdleWindow and AuthKeySweepMaxAge bound retention for keys
+	// that have never been bound to an account. Setting either to zero disables
+	// the sweep.
+	AuthKeySweepIdleWindow time.Duration
+	AuthKeySweepMaxAge     time.Duration
 	// MediaErasureMinAge is how old a file must be before the media erasure
 	// report will name it, and before the erasure sweep will remove it.
 	//
@@ -876,11 +883,13 @@ func load(log *slog.Logger, allowKeyGeneration bool) (Config, error) {
 		DCID:                          identity.DCID,
 		BlobDir:                       envOr("TG_BLOB_DIR", "blobs"),
 
-		MaxFileBytes:        100 << 20,
-		MaxUserStorageBytes: 2 << 30,
-		UploadPartTTL:       DefaultUploadPartTTL,
-		MediaErasureMinAge:  24 * time.Hour,
-		BlobScanTempMinAge:  24 * time.Hour,
+		MaxFileBytes:           100 << 20,
+		MaxUserStorageBytes:    2 << 30,
+		UploadPartTTL:          DefaultUploadPartTTL,
+		AuthKeySweepIdleWindow: DefaultAuthKeySweepIdleWindow,
+		AuthKeySweepMaxAge:     DefaultAuthKeySweepMaxAge,
+		MediaErasureMinAge:     24 * time.Hour,
+		BlobScanTempMinAge:     24 * time.Hour,
 
 		MediaErasureReportInterval: 0,
 		BlobScanReportInterval:     0,
@@ -960,6 +969,35 @@ func load(log *slog.Logger, allowKeyGeneration bool) (Config, error) {
 			return Config{}, errors.New("TG_UPLOAD_PART_TTL must be positive")
 		}
 		cfg.UploadPartTTL = d
+	}
+	if v := os.Getenv("TG_AUTH_KEY_SWEEP_IDLE_WINDOW"); v != "" {
+		d, err := time.ParseDuration(v)
+		if err != nil {
+			return Config{}, errors.New("TG_AUTH_KEY_SWEEP_IDLE_WINDOW must be a duration")
+		}
+		if d < 0 {
+			return Config{}, errors.New("TG_AUTH_KEY_SWEEP_IDLE_WINDOW must not be negative; 0 disables the sweep")
+		}
+		cfg.AuthKeySweepIdleWindow = d
+	}
+	if v := os.Getenv("TG_AUTH_KEY_SWEEP_MAX_AGE"); v != "" {
+		d, err := time.ParseDuration(v)
+		if err != nil {
+			return Config{}, errors.New("TG_AUTH_KEY_SWEEP_MAX_AGE must be a duration")
+		}
+		if d < 0 {
+			return Config{}, errors.New("TG_AUTH_KEY_SWEEP_MAX_AGE must not be negative; 0 disables the sweep")
+		}
+		cfg.AuthKeySweepMaxAge = d
+	}
+	if cfg.AuthKeySweepIdleWindow > 0 {
+		minimumIdleWindow := mtproto.DefaultPendingLoginLifetime + mtproto.AuthKeyTouchInterval
+		if cfg.AuthKeySweepIdleWindow < minimumIdleWindow {
+			return Config{}, fmt.Errorf("TG_AUTH_KEY_SWEEP_IDLE_WINDOW must be at least %s", minimumIdleWindow)
+		}
+	}
+	if cfg.AuthKeySweepIdleWindow > 0 && cfg.AuthKeySweepMaxAge > 0 && cfg.AuthKeySweepMaxAge < cfg.AuthKeySweepIdleWindow {
+		return Config{}, errors.New("TG_AUTH_KEY_SWEEP_MAX_AGE must be at least TG_AUTH_KEY_SWEEP_IDLE_WINDOW")
 	}
 	if v := os.Getenv("TG_MEDIA_ERASURE_MIN_AGE"); v != "" {
 		d, err := time.ParseDuration(v)
