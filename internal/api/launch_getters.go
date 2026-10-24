@@ -641,6 +641,9 @@ func (h *handlers) handleGetCollectibleEmojiStatuses(r *mtproto.Request) (bin.En
 	if err := decodeLaunchGetterRequest(r, &req); err != nil {
 		return nil, err
 	}
+	if req.Hash == 0 {
+		return &tg.AccountEmojiStatusesNotModified{}, nil
+	}
 	return &tg.AccountEmojiStatuses{Hash: 0, Statuses: []tg.EmojiStatusClass{}}, nil
 }
 
