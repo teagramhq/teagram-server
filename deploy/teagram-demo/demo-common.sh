@@ -119,9 +119,54 @@ demo_require_root() {
   [[ "$EUID" -eq 0 ]] || demo_fail 'must run as root on the demo LXC'
 }
 
+demo_prepare_turnstile_secret_access() {
+  local secret_file="${1:-$DEMO_SEED_SECRET_DIR/turnstile-secret-key}"
+  local secret_dir state
+  secret_dir=$(dirname -- "$secret_file")
+
+  [[ "$EUID" -eq 0 ]] || {
+    demo_fail 'must run as root to prepare the Turnstile secret mount'
+    return 1
+  }
+  [[ -d "$secret_dir" && ! -L "$secret_dir" &&
+    "$(stat -c '%u:%g:%a' "$secret_dir")" == '0:0:700' ]] || {
+    demo_fail 'Turnstile secret directory must be root-owned mode 0700'
+    return 1
+  }
+  [[ -f "$secret_file" && ! -L "$secret_file" && "$(stat -c '%u' "$secret_file")" == 0 ]] || {
+    demo_fail 'Turnstile secret must be a regular root-owned file'
+    return 1
+  }
+  state=$(stat -c '%u:%g:%a' "$secret_file") || {
+    demo_fail 'Turnstile secret metadata could not be read'
+    return 1
+  }
+  case "$state" in
+    0:0:600)
+      chgrp 65532 -- "$secret_file" || {
+        demo_fail 'Turnstile secret runtime group could not be set'
+        return 1
+      }
+      ;;
+    0:65532:600|0:65532:440) ;;
+    *)
+      demo_fail 'Turnstile secret must be root-owned and inaccessible outside runtime gid 65532'
+      return 1
+      ;;
+  esac
+  chmod 0440 -- "$secret_file" || {
+    demo_fail 'Turnstile secret runtime read mode could not be set'
+    return 1
+  }
+}
+
 demo_require_env() {
-  [[ -f "$DEMO_ENV_FILE" && ! -L "$DEMO_ENV_FILE" ]] || demo_fail 'deploy/teagram-demo/.env is missing or not a regular file'
-  python3 "$DEMO_SCRIPT_DIR/validate-env.py" "$DEMO_ENV_FILE"
+  [[ -f "$DEMO_ENV_FILE" && ! -L "$DEMO_ENV_FILE" ]] || {
+    demo_fail 'deploy/teagram-demo/.env is missing or not a regular file'
+    return 1
+  }
+  demo_prepare_turnstile_secret_access || return 1
+  python3 "$DEMO_SCRIPT_DIR/validate-env.py" "$DEMO_ENV_FILE" || return 1
 }
 
 demo_valid_image_ref() {

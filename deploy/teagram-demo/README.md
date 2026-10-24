@@ -110,18 +110,24 @@ deploy/teagram-demo/init-demo.sh "$IMAGE_DIGEST"
 unset IMAGE_DIGEST
 ```
 
-The prepared charlie host already has both root-only secret files, so do not
+The prepared charlie host already has both root-owned secret files, so do not
 rerun `prepare-env.sh` there. Existing `.env` files may omit
 `TG_ADVERTISE_DEMO_GUEST_SIGN_UP`; Compose supplies the approved `true` default
 and validates the resolved value without rewriting the secrets.
 
 `prepare-env.sh` prompts for the demo-specific Turnstile site and secret keys,
 then creates root-owned `.env` mode 0600 with the site key, the secret-file
-path and two different random 64-hex runtime secrets. It writes the Turnstile
-secret to a separate root-owned 0600 file outside the checkout and refuses to
-replace either file. Keep `POSTGRES_PASSWORD` and `TG_AUTHKEY_ENC_KEY` unchanged
-during deploys and weekly resets. Never display or copy `.env` or the secret
-file.
+path and two different random 64-hex runtime secrets. The Turnstile secret is
+stored outside the checkout in a root-owned file with group 65532 and mode
+0440, inside a root-owned mode 0700 directory. Compose file secrets are
+bind-mounted and ignore uid/gid/mode remapping, so the file's runtime group
+must match the non-root server uid/gid 65532. The root-only parent directory
+keeps the host path inaccessible to other host users; only the server
+containers are granted the secret mount. `demo_require_env` safely upgrades a
+prepared root:root 0600 secret file to this mode before validating it. The
+script refuses to replace either secret file. Keep `POSTGRES_PASSWORD` and
+`TG_AUTHKEY_ENC_KEY` unchanged during deploys and weekly resets. Never display
+or copy `.env` or the secret file.
 
 `init-demo.sh` validates that the blob path is on the dedicated size-limited
 filesystem, that the volumes and blob directory are fresh, and that Compose

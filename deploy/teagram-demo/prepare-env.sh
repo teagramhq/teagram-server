@@ -58,9 +58,9 @@ trap cleanup EXIT
 }
 install -d -o root -g root -m 0700 "$SECRET_DIR"
 secret_temporary=$(mktemp "$SECRET_DIR/turnstile-secret-key.XXXXXXXX")
-chmod 0600 "$secret_temporary"
-chown root:root "$secret_temporary"
 printf '%s\n' "$turnstile_secret_key" > "$secret_temporary"
+chown root:65532 "$secret_temporary"
+chmod 0440 "$secret_temporary"
 cat > "$temporary" <<ENV
 POSTGRES_PASSWORD=$postgres_password
 TG_AUTHKEY_ENC_KEY=$authkey_encryption_key
@@ -89,4 +89,4 @@ unset postgres_password authkey_encryption_key turnstile_site_key turnstile_secr
 trap - EXIT
 cleanup
 python3 "$SCRIPT_DIR/validate-env.py" "$ENV_FILE"
-echo 'created deploy/teagram-demo/.env and root-only Turnstile secret file; secrets are not displayed'
+echo 'created deploy/teagram-demo/.env and runtime-readable Turnstile secret file under its root-only directory; secrets are not displayed'
