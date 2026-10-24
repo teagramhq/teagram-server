@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import argparse
 import ast
 import importlib.util
 import io
@@ -126,12 +127,17 @@ class RestoreReadinessContractTests(unittest.TestCase):
             RESTORE_READINESS.bounded_work_seconds(None, 0)
 
         shell = SHELL_GATE.read_text(encoding="utf-8")
+        self.assertIn("suite_work_deadline=0", shell)
         self.assertIn("suite_work_deadline=$((SECONDS + 30 * 60))", shell)
         self.assertIn("suite_teardown_deadline=$((suite_work_deadline + 4 * 60))", shell)
-        run_drill = shell[shell.index("run_drill() {"):shell.index("\nbuild_inputs\n", shell.index("run_drill() {"))]
+        run_drill = shell[shell.index("run_drill() {"):shell.index("\nrun_sigkill_recovery_drill", shell.index("run_drill() {"))]
         self.assertIn("work_seconds=$(suite_remaining_seconds)", run_drill)
+        self.assertIn('--prepared-dir "$build_dir"', run_drill)
         self.assertIn('--work-seconds "$work_seconds"', run_drill)
-        self.assertIn('run_suite_command "${build_env[@]}" go build', shell)
+        self.assertIn('run_preparation_command "${build_env[@]}" go build', shell)
+        self.assertIn("preparation_timeout_seconds=$((45 * 60))", shell)
+        self.assertIn("PREPARED_BUILD_FLAGS=(-trimpath -buildvcs=false -p=1)", shell)
+        self.assertLess(shell.index("validate_prepared_runtime\n"), shell.index("suite_work_deadline=$((SECONDS + 30 * 60))"))
         self.assertIn("run_teardown_command sudo -n -- /usr/bin/find", shell)
         self.assertIn('local_args=(--local-dump "$2")', shell)
         self.assertIn('local_args=(--local-fixture-test)', shell)
@@ -141,6 +147,326 @@ class RestoreReadinessContractTests(unittest.TestCase):
         self.assertIn("test-restore-readiness.sh --local-fixture-test", workflow.read_text(encoding="utf-8"))
         self.assertIn("--local-fixture-test --fault-test auth-clear-signal", shell)
         self.assertIn("--local-fixture-test --fault-test sigkill", shell)
+        self.assertIn("--attest-prepared", shell)
+        self.assertIn("--teardown-prepared", shell)
+        self.assertLess(shell.index("--validate-source"), shell.index("build pinned runtime binaries"))
+
+    def test_source_identity_compares_head_blobs_without_running_fsmonitor(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "repo"
+            root.mkdir()
+            marker = Path(directory) / "fsmonitor-ran"
+            git_environment = {
+                key: value for key, value in os.environ.items() if not key.startswith("GIT_")
+            }
+            git_environment.update({
+                "GIT_CONFIG_NOSYSTEM": "1",
+                "GIT_CONFIG_GLOBAL": os.devnull,
+                "GIT_AUTHOR_NAME": "Restore Readiness Test",
+                "GIT_AUTHOR_EMAIL": "restore-readiness-test@example.invalid",
+                "GIT_COMMITTER_NAME": "Restore Readiness Test",
+                "GIT_COMMITTER_EMAIL": "restore-readiness-test@example.invalid",
+            })
+
+            def git(*arguments: str) -> None:
+                subprocess.run(
+                    ["/usr/bin/git", "-C", str(root), *arguments],
+                    check=True,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    env=git_environment,
+                    timeout=10,
+                )
+
+            git("init", "--quiet")
+            (root / "nested").mkdir()
+            (root / "nested" / "tracked.go").write_bytes(b"package tracked\n")
+            (root / ".gitignore").write_text("ignored.txt\n", encoding="utf-8")
+            git("add", "nested/tracked.go", ".gitignore")
+            git("commit", "--quiet", "-m", "test fixture")
+
+            fsmonitor = Path(directory) / "fsmonitor"
+            fsmonitor.write_text(
+                f"#!/bin/sh\nprintf 'called\\n' > {marker}\nprintf 'token\\n'\n",
+                encoding="utf-8",
+            )
+            fsmonitor.chmod(0o755)
+            git("config", "core.fsmonitor", str(fsmonitor))
+
+            with patch.object(RESTORE_READINESS, "ROOT", root):
+                RESTORE_READINESS.source_identity()
+                self.assertFalse(marker.exists(), "privileged source inspection ran checkout fsmonitor")
+
+                git("update-index", "--assume-unchanged", "nested/tracked.go")
+                (root / "nested" / "tracked.go").write_bytes(b"package tampered\n")
+                with self.assertRaisesRegex(ValueError, "source worktree is dirty"):
+                    RESTORE_READINESS.source_identity()
+
+                git("update-index", "--no-assume-unchanged", "nested/tracked.go")
+                (root / "nested" / "tracked.go").write_bytes(b"package tracked\n")
+                (root / "untracked.txt").write_text("untracked\n", encoding="utf-8")
+                with self.assertRaisesRegex(ValueError, "source worktree is dirty"):
+                    RESTORE_READINESS.source_identity()
+                (root / "untracked.txt").unlink()
+                (root / "ignored.txt").write_text("ignored\n", encoding="utf-8")
+                with self.assertRaisesRegex(ValueError, "source worktree is dirty"):
+                    RESTORE_READINESS.source_identity()
+
+    def test_unverified_drill_cleanup_keeps_prepared_runtime_for_recovery(self) -> None:
+        shell = SHELL_GATE.read_text(encoding="utf-8")
+
+        def function_source(name: str) -> str:
+            start = shell.index(f"{name}() {{")
+            end = shell.index("\n}\n", start) + 2
+            return shell[start:end]
+
+        helpers = "\n".join(
+            function_source(name)
+            for name in (
+                "preserve_prepared_on_unverified_cleanup",
+                "cleanup_prepared_after_failed_drill",
+            )
+        )
+        harness = "\n".join(
+            (
+                helpers,
+                "keep_prepared=0",
+                "cleanup_called=0",
+                "cleanup_failed=0",
+                "cleanup_prepared_inputs() { cleanup_called=1; return 0; }",
+                "emit_prepared_cleanup_failure() { cleanup_failed=1; }",
+                'cleanup_prepared_after_failed_drill "$REPORT"',
+                'printf "%s %s %s\\n" "$keep_prepared" "$cleanup_called" "$cleanup_failed"',
+            )
+        )
+        self.assertIn(
+            "if (( keep_prepared == 0 )); then\n    if ! cleanup_prepared_inputs; then status=1; fi",
+            shell,
+        )
+        for cleanup, expected in (("unverified", "1 0 0\n"), ("verified", "0 1 0\n")):
+            with self.subTest(cleanup=cleanup):
+                environment = os.environ.copy()
+                environment["REPORT"] = json.dumps({"cleanup": cleanup})
+                result = subprocess.run(
+                    ["/usr/bin/bash", "-c", harness],
+                    check=True,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    env=environment,
+                    text=True,
+                )
+                self.assertEqual(result.stdout, expected)
+
+    def test_missing_prepared_runtime_refuses_before_docker_or_run_lock(self) -> None:
+        path = Path("/tmp") / ("teagram-restore-readiness." + os.urandom(4).hex())
+        arguments = argparse.Namespace(
+            prepared_dir=path,
+            docker_bin="/usr/bin/true",
+            local_dump=None,
+            local_fixture_test=False,
+            fault_test=None,
+            work_seconds=None,
+        )
+        output = io.StringIO()
+        with (
+            patch.object(RESTORE_READINESS.os, "geteuid", return_value=0),
+            patch.object(RESTORE_READINESS, "ensure_trusted_system_executable") as trusted_docker,
+            patch.object(RESTORE_READINESS, "open_rollout_lock") as rollout_lock,
+            redirect_stdout(output),
+        ):
+            status = RESTORE_READINESS.run_primary(arguments)
+
+        self.assertEqual(status, 1)
+        report = json.loads(output.getvalue())
+        self.assertEqual(report["phase"], "preflight")
+        self.assertEqual(report["category"], "preflight_failure")
+        self.assertEqual(report["cleanup"], "not_started")
+        trusted_docker.assert_not_called()
+        rollout_lock.assert_not_called()
+
+    def test_early_preparation_failure_can_remove_empty_owned_runtime_directory(self) -> None:
+        path = Path("/tmp") / ("teagram-restore-readiness." + os.urandom(4).hex())
+        path.mkdir(mode=0o700)
+        lock_path = Path("/tmp") / ("teagram-restore-readiness-test-lock." + os.urandom(4).hex())
+        lock_fd = os.open(lock_path, os.O_RDWR | os.O_CREAT | os.O_EXCL, 0o600)
+        shell = SHELL_GATE.read_text(encoding="utf-8")
+        build_inputs = shell[shell.index("build_inputs() {"):shell.index("\nvalidate_prepared_runtime() {")]
+
+        try:
+            with (
+                patch.object(RESTORE_READINESS.os, "geteuid", return_value=0),
+                patch.object(RESTORE_READINESS, "open_global_lock", return_value=(lock_fd, {})),
+            ):
+                self.assertTrue(RESTORE_READINESS.teardown_prepared_runtime(path, os.getuid()))
+            self.assertFalse(path.exists())
+            self.assertLess(shell.index("trap cleanup_build EXIT"), shell.index("build_inputs\n"))
+            self.assertLess(
+                build_inputs.index('mktemp -d "$build_parent'),
+                build_inputs.index('preflight_stage="read pinned Go toolchain"'),
+            )
+        finally:
+            try:
+                os.close(lock_fd)
+            except OSError:
+                pass
+            lock_path.unlink(missing_ok=True)
+            if path.exists():
+                path.rmdir()
+
+    def test_deploy_rollout_conflict_refuses_before_restore_lock(self) -> None:
+        prepared_path = Path("/tmp/teagram-restore-readiness.abcdefgh")
+        prepared = {
+            "path": str(prepared_path),
+            "device": 1,
+            "inode": 2,
+            "attestation_sha256": "a" * 64,
+            "prepared_uid": 1000,
+            "go_arch": "amd64",
+            "atlas_bin": str(prepared_path / "atlas"),
+            "build_dir": str(prepared_path),
+        }
+        arguments = argparse.Namespace(
+            prepared_dir=prepared_path,
+            docker_bin="/usr/bin/true",
+            local_dump=None,
+            local_fixture_test=False,
+            fault_test=None,
+            work_seconds=None,
+        )
+        output = io.StringIO()
+        with (
+            patch.object(RESTORE_READINESS.os, "geteuid", return_value=0),
+            patch.object(RESTORE_READINESS, "verify_prepared_runtime", return_value=prepared),
+            patch.object(RESTORE_READINESS, "ensure_trusted_system_executable", return_value="/usr/bin/true"),
+            patch.object(RESTORE_READINESS, "open_rollout_lock", return_value=None),
+            patch.object(RESTORE_READINESS, "open_global_lock") as restore_lock,
+            redirect_stdout(output),
+        ):
+            status = RESTORE_READINESS.run_primary(arguments)
+
+        self.assertEqual(status, 1)
+        report = json.loads(output.getvalue())
+        self.assertEqual(report["phase"], "preflight")
+        self.assertEqual(report["category"], "rollout_in_progress")
+        self.assertEqual(report["cleanup"], "not_started")
+        restore_lock.assert_not_called()
+
+    def test_rollout_shared_lock_is_nonblocking_and_excludes_exclusive_rollouts(self) -> None:
+        lock_path = Path("/tmp") / ("teagram-deploy-test." + os.urandom(4).hex())
+        exclusive_fd = os.open(lock_path, os.O_RDWR | os.O_CREAT | os.O_EXCL, 0o600)
+        os.fchmod(exclusive_fd, 0o600)
+        shared: tuple[int, dict[str, Any]] | None = None
+        try:
+            RESTORE_READINESS.fcntl.flock(exclusive_fd, RESTORE_READINESS.fcntl.LOCK_EX | RESTORE_READINESS.fcntl.LOCK_NB)
+            self.assertIsNone(
+                RESTORE_READINESS.open_rollout_lock(lock_path, expected_uid=os.geteuid())
+            )
+            RESTORE_READINESS.fcntl.flock(exclusive_fd, RESTORE_READINESS.fcntl.LOCK_UN)
+            shared = RESTORE_READINESS.open_rollout_lock(lock_path, expected_uid=os.geteuid())
+            self.assertIsNotNone(shared)
+            with self.assertRaises(BlockingIOError):
+                RESTORE_READINESS.fcntl.flock(
+                    exclusive_fd,
+                    RESTORE_READINESS.fcntl.LOCK_EX | RESTORE_READINESS.fcntl.LOCK_NB,
+                )
+        finally:
+            if shared is not None:
+                os.close(shared[0])
+            os.close(exclusive_fd)
+            lock_path.unlink(missing_ok=True)
+
+    def test_prepared_runtime_attestation_checks_source_toolchain_images_and_artifact_hashes(self) -> None:
+        prepared_path = Path("/tmp") / ("teagram-restore-readiness." + os.urandom(4).hex())
+        prepared_path.mkdir(mode=0o700)
+        os.chmod(prepared_path, 0o700)
+        try:
+            with tempfile.TemporaryDirectory(prefix="rr-toolchain-") as toolchain_directory:
+                toolchain_root = Path(toolchain_directory)
+                go_binary = toolchain_root / "bin" / "go"
+                go_binary.parent.mkdir()
+                go_binary.write_bytes(b"pinned-go-binary")
+                go_binary.chmod(0o500)
+                artifacts: dict[str, dict[str, Any]] = {}
+                for name in sorted(RESTORE_READINESS.PREPARED_ARTIFACTS):
+                    item = prepared_path / name
+                    item.write_bytes((name + "-payload").encode())
+                    item.chmod(0o500)
+                    digest, size = RESTORE_READINESS.sha256_file(item)
+                    artifacts[name] = {"sha256": digest, "size": size}
+
+                directory_info = prepared_path.stat()
+                source = {"revision": "a" * 40, "tree_sha256": "b" * 64}
+                attestation = {
+                    "schema_version": 1,
+                    "prepared_uid": os.getuid(),
+                    "directory": {"device": directory_info.st_dev, "inode": directory_info.st_ino},
+                    "source": source,
+                    "toolchain": {
+                        "version": RESTORE_READINESS.minimum_go_version(),
+                        "goos": "linux",
+                        "goarch": "amd64",
+                        "root": str(toolchain_root),
+                        "root_sha256": RESTORE_READINESS.sha256_directory(toolchain_root),
+                        "binary": str(go_binary),
+                        "binary_sha256": RESTORE_READINESS.sha256_file(go_binary)[0],
+                    },
+                    "images": {
+                        "source": RESTORE_READINESS.SOURCE_IMAGE,
+                        "restore": RESTORE_READINESS.RESTORE_IMAGE,
+                    },
+                    "seed_commit": RESTORE_READINESS.SEED_COMMIT,
+                    "build_flags": RESTORE_READINESS.PREPARED_BUILD_FLAGS,
+                    "build_environment": {
+                        "CGO_ENABLED": "0",
+                        "GOENV": "off",
+                        "GOMAXPROCS": "1",
+                        "GOPROXY": "off",
+                        "GOSUMDB": "off",
+                        "GOTOOLCHAIN": "local",
+                    },
+                    "artifacts": artifacts,
+                }
+                attestation_path = prepared_path / RESTORE_READINESS.PREPARED_ATTESTATION
+                attestation_path.write_text(json.dumps(attestation), encoding="utf-8")
+                attestation_path.chmod(0o400)
+                prepared_path.chmod(0o500)
+
+                with patch.object(RESTORE_READINESS, "source_identity", return_value=(source["revision"], source["tree_sha256"])):
+                    verified = RESTORE_READINESS.verify_prepared_runtime(
+                        prepared_path,
+                        expected_owner=os.getuid(),
+                    )
+                    self.assertEqual(verified["go_arch"], "amd64")
+                    self.assertEqual(verified["prepared_uid"], os.getuid())
+
+                    prepared_path.chmod(0o700)
+                    attestation_path.chmod(0o600)
+                    attestation["images"]["source"] = "mirror.gcr.io/library/postgres:mutable"
+                    attestation_path.write_text(json.dumps(attestation), encoding="utf-8")
+                    attestation_path.chmod(0o400)
+                    prepared_path.chmod(0o500)
+                    with self.assertRaisesRegex(ValueError, "prepared runtime pins mismatch"):
+                        RESTORE_READINESS.verify_prepared_runtime(prepared_path, expected_owner=os.getuid())
+
+                    prepared_path.chmod(0o700)
+                    attestation_path.chmod(0o600)
+                    attestation["images"] = {
+                        "source": RESTORE_READINESS.SOURCE_IMAGE,
+                        "restore": RESTORE_READINESS.RESTORE_IMAGE,
+                    }
+                    attestation_path.write_text(json.dumps(attestation), encoding="utf-8")
+                    attestation_path.chmod(0o400)
+                    (prepared_path / "teagramd").chmod(0o600)
+                    (prepared_path / "teagramd").write_bytes(b"tampered-binary")
+                    (prepared_path / "teagramd").chmod(0o500)
+                    prepared_path.chmod(0o500)
+                    with self.assertRaisesRegex(ValueError, "prepared runtime artifact mismatch"):
+                        RESTORE_READINESS.verify_prepared_runtime(prepared_path, expected_owner=os.getuid())
+        finally:
+            prepared_path.chmod(0o700)
+            for item in prepared_path.iterdir():
+                item.unlink()
+            prepared_path.rmdir()
 
     def test_local_dump_head_is_known_and_uses_the_latest_repo_migration(self) -> None:
         versions = RESTORE_READINESS.repo_migration_versions()
@@ -160,10 +486,7 @@ class RestoreReadinessContractTests(unittest.TestCase):
     def test_local_fault_injection_is_limited_to_fixture_signal_and_sigkill(self) -> None:
         runtime_args = [
             "--docker-bin", "/usr/bin/docker",
-            "--atlas-bin", "/run/atlas",
-            "--build-dir", "/run/build",
-            "--build-uid", "1000",
-            "--go-arch", "amd64",
+            "--prepared-dir", "/tmp/teagram-restore-readiness.abcdefgh",
         ]
         for fault in ("auth-clear-signal", "sigkill"):
             with self.subTest(fault=fault), patch.object(
@@ -383,7 +706,24 @@ class RestoreReadinessContractTests(unittest.TestCase):
             error = io.StringIO()
             args = Mock(docker_bin=str(shadow), fault_test=None, work_seconds=None)
             with patch.object(RESTORE_READINESS.os, "geteuid", return_value=0):
-                with redirect_stdout(output), redirect_stderr(error):
+                with (
+                    patch.object(
+                        RESTORE_READINESS,
+                        "verify_prepared_runtime",
+                        return_value={
+                            "atlas_bin": "/tmp/teagram-restore-readiness.abcdefgh/atlas",
+                            "build_dir": "/tmp/teagram-restore-readiness.abcdefgh",
+                            "prepared_uid": 1000,
+                            "go_arch": "amd64",
+                            "path": "/tmp/teagram-restore-readiness.abcdefgh",
+                            "device": 1,
+                            "inode": 2,
+                            "attestation_sha256": "a" * 64,
+                        },
+                    ),
+                    redirect_stdout(output),
+                    redirect_stderr(error),
+                ):
                     status = RESTORE_READINESS.run_primary(args)
 
         self.assertEqual(status, 1)
@@ -1718,8 +2058,13 @@ class RestoreReadinessContractTests(unittest.TestCase):
             lock_path.write_bytes(b"")
             lock_fd = RESTORE_READINESS.os.open(lock_path, RESTORE_READINESS.os.O_RDWR)
             lock_info = RESTORE_READINESS.os.fstat(lock_fd)
+            rollout_path = Path(directory) / "rollout-lock"
+            rollout_path.write_bytes(b"")
+            rollout_fd = RESTORE_READINESS.os.open(rollout_path, RESTORE_READINESS.os.O_RDWR)
+            rollout_info = RESTORE_READINESS.os.fstat(rollout_fd)
             manifest = {
                 "global_lock": {"device": lock_info.st_dev, "inode": lock_info.st_ino},
+                "rollout_lock": {"device": rollout_info.st_dev, "inode": rollout_info.st_ino},
                 "supervisor": {"pid": 0, "start_ticks": 0},
                 "parent": {"pid": 999999, "start_ticks": 1},
                 "parent_done": False,
@@ -1743,7 +2088,7 @@ class RestoreReadinessContractTests(unittest.TestCase):
                 patch.object(RESTORE_READINESS, "Drill", RecoveryDrill),
                 patch.object(RESTORE_READINESS, "remove_finished_run", return_value=True),
             ):
-                self.assertEqual(RESTORE_READINESS.supervise(Path(directory) / "ownership.json", lock_fd), 0)
+                self.assertEqual(RESTORE_READINESS.supervise(Path(directory) / "ownership.json", lock_fd, rollout_fd), 0)
 
     def test_supervisor_bounds_delayed_cleanup_command_and_leaves_cleanup_unverified(self) -> None:
         with tempfile.TemporaryDirectory(prefix="rr-cleanup-deadline-") as directory:
@@ -1751,8 +2096,13 @@ class RestoreReadinessContractTests(unittest.TestCase):
             lock_path.write_bytes(b"")
             lock_fd = RESTORE_READINESS.os.open(lock_path, RESTORE_READINESS.os.O_RDWR)
             lock_info = RESTORE_READINESS.os.fstat(lock_fd)
+            rollout_path = Path(directory) / "rollout-lock"
+            rollout_path.write_bytes(b"")
+            rollout_fd = RESTORE_READINESS.os.open(rollout_path, RESTORE_READINESS.os.O_RDWR)
+            rollout_info = RESTORE_READINESS.os.fstat(rollout_fd)
             manifest = {
                 "global_lock": {"device": lock_info.st_dev, "inode": lock_info.st_ino},
+                "rollout_lock": {"device": rollout_info.st_dev, "inode": rollout_info.st_ino},
                 "supervisor": {"pid": 0, "start_ticks": 0},
                 "parent": {"pid": 999999, "start_ticks": 1},
                 "parent_done": True,
@@ -1791,7 +2141,7 @@ class RestoreReadinessContractTests(unittest.TestCase):
                 patch.object(RESTORE_READINESS, "Drill", DelayedCleanupDrill),
                 patch.object(RESTORE_READINESS, "remove_finished_run", return_value=True),
             ):
-                status = RESTORE_READINESS.supervise(Path(directory) / "ownership.json", lock_fd)
+                status = RESTORE_READINESS.supervise(Path(directory) / "ownership.json", lock_fd, rollout_fd)
 
             self.assertEqual(status, 1)
             self.assertLess(time.monotonic() - started, 1)
@@ -1807,12 +2157,20 @@ class RestoreReadinessContractTests(unittest.TestCase):
 
     def test_recovery_failure_suppresses_unexpected_diagnostics(self) -> None:
         output = io.StringIO()
+        rollout_fd, rollout_write_fd = os.pipe()
+        rollout_record = {
+            "path": str(RESTORE_READINESS.ROLLOUT_LOCK_PATH),
+            "device": 1,
+            "inode": 2,
+        }
         with (
             patch.object(RESTORE_READINESS.os, "geteuid", return_value=0),
+            patch.object(RESTORE_READINESS, "open_rollout_lock", return_value=(rollout_fd, rollout_record)),
             patch.object(RESTORE_READINESS, "load_manifest", side_effect=RuntimeError("private-marker")),
             redirect_stdout(output),
         ):
             status = RESTORE_READINESS.recover(Path("/run/restore-readiness-private/ownership.json"))
+        os.close(rollout_write_fd)
         self.assertEqual(status, 1)
         report = json.loads(output.getvalue())
         self.assertEqual(report["result"], "fail")
@@ -1826,8 +2184,21 @@ class RestoreReadinessContractTests(unittest.TestCase):
             descriptor = RESTORE_READINESS.os.open(lock_path, RESTORE_READINESS.os.O_RDWR)
             lock_info = RESTORE_READINESS.os.fstat(descriptor)
             lock_record = {"device": lock_info.st_dev, "inode": lock_info.st_ino}
+            rollout_path = Path(directory) / "rollout-lock"
+            rollout_path.write_bytes(b"")
+            rollout_descriptor = RESTORE_READINESS.os.open(rollout_path, RESTORE_READINESS.os.O_RDWR)
+            rollout_info = RESTORE_READINESS.os.fstat(rollout_descriptor)
+            rollout_record = {
+                "path": str(RESTORE_READINESS.ROLLOUT_LOCK_PATH),
+                "device": rollout_info.st_dev,
+                "inode": rollout_info.st_ino,
+            }
             original_deadline = time.monotonic() - 1
-            manifest = {"global_lock": lock_record, "cleanup_deadline": original_deadline}
+            manifest = {
+                "global_lock": lock_record,
+                "rollout_lock": rollout_record,
+                "cleanup_deadline": original_deadline,
+            }
             observed: dict[str, float] = {}
 
             class RecoveryDrill:
@@ -1845,6 +2216,9 @@ class RestoreReadinessContractTests(unittest.TestCase):
                 self.assertEqual(manifest["cleanup_deadline"], original_deadline)
                 return descriptor, lock_record
 
+            def acquire_rollout_lock() -> tuple[int, dict[str, int]]:
+                return rollout_descriptor, rollout_record
+
             def remove_run(drill: Any, deadline: float) -> bool:
                 observed["remove_deadline"] = deadline
                 self.assertEqual(drill.manifest["cleanup_deadline"], deadline)
@@ -1854,6 +2228,7 @@ class RestoreReadinessContractTests(unittest.TestCase):
             output = io.StringIO()
             with (
                 patch.object(RESTORE_READINESS.os, "geteuid", return_value=0),
+                patch.object(RESTORE_READINESS, "open_rollout_lock", side_effect=acquire_rollout_lock),
                 patch.object(RESTORE_READINESS, "load_manifest", return_value=manifest),
                 patch.object(RESTORE_READINESS, "open_global_lock", side_effect=acquire_lock),
                 patch.object(RESTORE_READINESS, "make_runtime_args", return_value=None),
