@@ -356,6 +356,13 @@ network; the explicit HTTP setting is logged at startup. See the
 [S3 media threat model](media-storage-threat-model.md) for the key-custody,
 object-tampering, and accepted-plaintext boundaries.
 
+On first S3 startup, Compose may create an empty `.state/blob-mode` bind source.
+The server treats it as no authority only while the directory has no entries,
+then requires the media key and selects encrypted mode. Existing authority
+records are always validated and keep their selected mode. For a deployment
+without an authority, use a fresh S3 namespace; existing plaintext objects need
+their `s3-accepted` authority until the reviewed migration completes.
+
 For local development, copy `.env.example` to `.env`, generate credentials,
 then run:
 

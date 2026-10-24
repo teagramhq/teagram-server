@@ -1867,7 +1867,7 @@ jobs:
           media_key_dir="$RUNNER_TEMP/teagramd-media-keys"
           media_key_file="$RUNNER_TEMP/teagramd-media-key"
           sudo install -d -o 65532 -g 65532 -m 0700 "$media_key_dir"
-          printf '%s\n' 1111111111111111111111111111111111111111111111111111111111111111 \
+          printf '%s\n' 6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d \
             >"$media_key_file"
           sudo install -o 65532 -g 65532 -m 0600 "$media_key_file" "$media_key_dir/1.key"
           rm "$media_key_file"
@@ -2399,6 +2399,33 @@ jobs:
           assert_forbidden "unauthenticated LIST" \
             "http://127.0.0.1:9000/teagram?list-type=2"
 
+          # Exercise the default S3 Compose stack from a genuinely empty
+          # authority directory and a fresh namespace. Keep the initialized
+          # local authority for the migration and rollback checks below.
+          compose down
+          if [ -e .state/blob-mode.local-fixture ] || [ -L .state/blob-mode.local-fixture ]; then
+            echo "local blob-mode fixture backup already exists"
+            exit 1
+          fi
+          sudo mv .state/blob-mode .state/blob-mode.local-fixture
+          sudo install -d -o 0 -g 0 -m 0755 .state/blob-mode
+          test -z "$(sudo find .state/blob-mode -mindepth 1 -maxdepth 1 -print -quit)" \
+            || { echo "fresh S3 blob-mode directory is not empty"; exit 1; }
+          export TG_BLOB_S3_PREFIX=teagramd/ci-fresh/
+          export COMPOSE_FILE=docker-compose.yml:$RUNNER_TEMP/rustfs-ci-image.yml
+          compose up -d postgres migrate teagramd rustfs rustfs-init
+          wait_listening
+          if compose logs teagramd | grep -q 'S3 media encryption remains disabled for accepted plaintext cutover'; then
+            echo "fresh S3 Compose startup selected accepted plaintext mode"
+            exit 1
+          fi
+          fresh_namespace=$(authenticated_mc \
+            'mc alias set app http://rustfs:9000 "$TG_BLOB_S3_ACCESS_KEY_ID" \
+               "$(cat /run/secrets/teagramd-blob-secret-key)" >/dev/null &&
+             mc ls --recursive app/teagram/teagramd/ci-fresh/')
+          [ -z "$fresh_namespace" ] \
+            || { echo "fresh S3 Compose namespace already contains objects"; exit 1; }
+
           # RustFS must stay unreachable from the runner through its private
           # container address. The e2e test process itself runs on the runner,
           # so give this test a temporary loopback-only relay attached to the
@@ -2455,7 +2482,7 @@ jobs:
           docker image tag mirror.gcr.io/library/postgres:18-alpine mirror.gcr.io/postgres:18-alpine
           TG_BLOB_S3_ENDPOINT="$rustfs_test_endpoint" \
           TG_BLOB_S3_BUCKET=teagram \
-          TG_BLOB_S3_PREFIX=teagramd/ci/ \
+          TG_BLOB_S3_PREFIX=teagramd/ci-fresh/ \
           TG_BLOB_S3_REGION=us-east-1 \
           TG_BLOB_S3_ACCESS_KEY_ID="$app_access_key" \
           TG_BLOB_S3_SECRET_ACCESS_KEY_FILE="$app_secret_file" \
@@ -2464,26 +2491,32 @@ jobs:
           app_media=$(authenticated_mc \
             'mc alias set app http://rustfs:9000 "$TG_BLOB_S3_ACCESS_KEY_ID" \
                "$(cat /run/secrets/teagramd-blob-secret-key)" >/dev/null &&
-             mc ls --recursive app/teagram/teagramd/ci/')
+             mc ls --recursive app/teagram/teagramd/ci-fresh/')
           case "$app_media" in
             *TestMediaRoundTrip*) ;;
             *) echo "the S3 media e2e test left no objects in its RustFS prefix"; exit 1 ;;
           esac
+          compose up -d --force-recreate --no-deps teagramd
+          wait_listening
+          if compose logs teagramd | grep -q 'S3 media encryption remains disabled for accepted plaintext cutover'; then
+            echo "authority-free S3 restart selected accepted plaintext mode"
+            exit 1
+          fi
 
           # Exercise the documented rollback: stop writes, checksum-copy every
           # RustFS object into tgblobs, then start the local backend. Verify an
           # e2e-uploaded document is present byte-for-byte in the restored tree.
           compose stop teagramd
           restore_report="$RUNNER_TEMP/blob-restore.jsonl"
-          compose run --rm --no-deps blob-restore >"$restore_report"
-          jq -e -s --arg prefix "ci/TestMediaRoundTrip/" '
+          TG_BLOB_S3_PREFIX=teagramd/ compose run --rm --no-deps blob-restore >"$restore_report"
+          jq -e -s --arg prefix "ci-fresh/TestMediaRoundTrip/" '
             length >= 2
             and .[-1].type == "summary"
             and .[-1].source_manifest_sha256 == .[-1].destination_manifest_sha256
             and all(.[0:-1][]; .type == "object" and .source_sha256 == .destination_sha256)
             and any(.[0:-1][]; .type == "object" and (.key | startswith($prefix)) and ((.key | contains("/parts/")) | not))
           ' "$restore_report" >/dev/null
-          rollback_media_key=$(jq -r -s --arg prefix "ci/TestMediaRoundTrip/" \
+          rollback_media_key=$(jq -r -s --arg prefix "ci-fresh/TestMediaRoundTrip/" \
             '[.[] | select(.type == "object" and (.key | startswith($prefix)) and ((.key | contains("/parts/")) | not))][0].key // empty' \
             "$restore_report")
           [ -n "$rollback_media_key" ] \
@@ -2494,6 +2527,10 @@ jobs:
             sha256sum "/blobs/$rollback_media_key" | awk '{print $1}')
           [ "$restored_media_sha" = "$rollback_media_sha" ] \
             || { echo "restored media $rollback_media_key does not match the RustFS checksum"; exit 1; }
+          sudo rmdir .state/blob-mode
+          sudo mv .state/blob-mode.local-fixture .state/blob-mode
+          unset TG_BLOB_S3_PREFIX
+          export COMPOSE_FILE=docker-compose.yml:docker-compose.local-blobs.yml:$RUNNER_TEMP/rustfs-ci-image.yml
           docker compose -f docker-compose.yml -f docker-compose.local-blobs.yml \
             up -d --no-deps teagramd
           wait_listening

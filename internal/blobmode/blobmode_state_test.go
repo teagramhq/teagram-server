@@ -41,6 +41,58 @@ func TestReadReturnsAbsentAuthorityForMissingDirectory(t *testing.T) {
 	}
 }
 
+func TestReadTreatsEmptyS3BootstrapDirectoryAsAbsentAuthority(t *testing.T) {
+	t.Parallel()
+	path := filepath.Join(t.TempDir(), "blob-mode")
+	if err := os.Mkdir(path, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	cfg := EffectiveConfig{BlobS3: &blob.S3Config{Endpoint: "http://rustfs:9000", Bucket: "teagram", Prefix: "teagramd/"}}
+
+	got, err := readAt(path, cfg, testUID(t))
+	if err != nil {
+		t.Fatalf("read fresh S3 bootstrap directory: %v", err)
+	}
+	if got.Present || got.Outcome != "" {
+		t.Fatalf("authority = %+v, want absent", got)
+	}
+	entries, err := os.ReadDir(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("bootstrap directory entries = %v, want unchanged empty directory", entries)
+	}
+}
+
+func TestReadRejectsEmptyLocalBootstrapDirectory(t *testing.T) {
+	t.Parallel()
+	path := filepath.Join(t.TempDir(), "blob-mode")
+	if err := os.Mkdir(path, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	_, err := readAt(path, EffectiveConfig{BlobDir: "/var/lib/teagramd-blobs"}, testUID(t))
+	if err == nil || err.Error() != "blob-mode validation failed: reason=invalid field=mode.json" {
+		t.Fatalf("read empty local authority error = %v, want invalid mode.json", err)
+	}
+}
+
+func TestReadRejectsNonemptyS3BootstrapDirectory(t *testing.T) {
+	t.Parallel()
+	path := filepath.Join(t.TempDir(), "blob-mode")
+	if err := os.Mkdir(path, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(path, ".interrupted"), []byte("partial"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg := EffectiveConfig{BlobS3: &blob.S3Config{Endpoint: "http://rustfs:9000", Bucket: "teagram", Prefix: "teagramd/"}}
+	_, err := readAt(path, cfg, testUID(t))
+	if err == nil || err.Error() != "blob-mode validation failed: reason=invalid field=mode.json" {
+		t.Fatalf("read nonempty S3 bootstrap directory error = %v, want invalid mode.json", err)
+	}
+}
+
 func testUID(t *testing.T) uint32 {
 	t.Helper()
 	uid := uint64(os.Getuid()) //nolint:gosec // POSIX uid is nonnegative; the range is checked below.

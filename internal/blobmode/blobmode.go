@@ -39,9 +39,9 @@ type EffectiveConfig struct {
 	BlobS3  *blob.S3Config
 }
 
-// Authority is the validated current blob-mode record. Present is false only
-// when the authority directory is absent, which preserves the legacy
-// fail-closed policy selected by the serving process.
+// Authority is the validated current blob-mode record. Present is false when
+// the authority directory is absent, or when an empty directory accompanies
+// an S3 backend and therefore contains no authority to validate.
 type Authority struct {
 	Present bool
 	Outcome string
@@ -62,7 +62,8 @@ func reject(reason, field string) error {
 
 // Read validates the fixed record directory and binds its current head to the
 // effective serving backend. An absent directory returns an absent authority;
-// callers must choose the documented legacy mode for that backend.
+// for S3, a completely empty directory has the same meaning. Nonempty state is
+// always validated and cannot be bypassed by the fresh-S3 path.
 func Read(path string, cfg EffectiveConfig) (Authority, error) {
 	return readAt(path, cfg, 0)
 }
@@ -95,6 +96,16 @@ func readAt(path string, cfg EffectiveConfig, expectedUID uint32) (authority Aut
 			err = reject("unavailable", "blob-mode")
 		}
 	}()
+	directoryEntries, err := modeDir.Readdirnames(1)
+	if err != nil && !errors.Is(err, io.EOF) {
+		return Authority{}, reject("unavailable", "blob-mode")
+	}
+	if len(directoryEntries) == 0 && errors.Is(err, io.EOF) && cfg.BlobS3 != nil {
+		// Docker creates a missing bind source as an empty directory. In a fresh
+		// S3 deployment that is the same state as a missing authority directory;
+		// once any authority file exists, every existing validation still applies.
+		return Authority{}, nil
+	}
 
 	modeBytes, err := readRecordAt(int(modeDir.Fd()), "mode.json", expectedUID, "mode.json")
 	if err != nil {

@@ -823,20 +823,27 @@ func TestMediaRoundTrip(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
 	defer cancel()
 
-	initialBlobs := testBlobs(t)
+	var initialBlobs blob.Store
 	var rawS3 *blob.S3
 	var mediaKeys *blob.KeyRing
-	if remote, ok := initialBlobs.(*blob.S3); ok && os.Getenv("TG_BLOB_S3_ENDPOINT") != "" {
-		rawS3 = remote
-		var err error
+	if os.Getenv("TG_BLOB_S3_ENDPOINT") != "" {
+		s3Config, err := config.LoadBlobS3Config()
+		if err != nil {
+			t.Fatalf("load S3 blob configuration: %v", err)
+		}
+		s3Config.Prefix = testBlobPrefix(t)
+		s3Config.OperationTimeout = 10 * time.Second
+		s3Config.MaxAttempts = 3
 		mediaKeys, err = blob.NewKeyRing(1, map[uint32][]byte{1: bytes.Repeat([]byte{0x6d}, blob.MediaKeyLen)})
 		if err != nil {
 			t.Fatalf("create test media key ring: %v", err)
 		}
-		initialBlobs, err = blob.NewEncrypted(remote, mediaKeys, blob.DefaultChunkSize)
+		initialBlobs, rawS3, err = blob.NewS3Store(ctx, *s3Config, mediaKeys, true)
 		if err != nil {
-			t.Fatalf("wrap S3 backend with encryption: %v", err)
+			t.Fatalf("create encrypted S3 store: %v", err)
 		}
+	} else {
+		initialBlobs = testBlobs(t)
 	}
 	blobs := &switchableMediaBlobs{store: initialBlobs}
 	clients := bootMediaEnvWithBlobs(t, ctx, blobs, "+15551310001", "+15551310002")

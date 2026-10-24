@@ -88,7 +88,14 @@ shorten the interval. A separate reviewed migration must rewrite and verify
 the objects and publish the encrypted authority before the at-rest envelope
 protection applies to that data. A fresh S3 deployment without an accepted
 plaintext authority requires the media key ring and fails startup if it is
-missing; it does not silently select plaintext mode.
+missing; it does not silently select plaintext mode. Compose may materialize
+the authority bind source as an empty directory on first boot. The server
+treats that directory as no authority only for S3. Any nonempty authority tree
+is validated normally, so an existing `s3-accepted` record continues to select
+plaintext until the separate migration publishes a new authority. With no
+authority, the encrypted mode remains selected on later starts and never falls
+back to plaintext; an authority-free deployment should use a fresh namespace,
+since existing plaintext objects will fail envelope authentication on read.
 
 ## Residual risk
 

@@ -1039,20 +1039,9 @@ func newBlobStoreWithAuthority(ctx context.Context, cfg config.Config, log *slog
 	// NewS3 emits the plaintext warning while it constructs the client, so
 	// the logger must be selected before construction rather than after it.
 	s3cfg.Logger = log
-	remote, err := blob.NewS3(s3cfg)
+	blobs, _, err := blob.NewS3Store(ctx, s3cfg, cfg.MediaKeys, !acceptedPlaintext)
 	if err != nil {
-		return nil, fmt.Errorf("object store configuration is invalid; check TG_BLOB_S3_* settings: %w", err)
-	}
-	var blobs blob.Store = remote
-	if !acceptedPlaintext {
-		sealed, err := blob.NewEncrypted(remote, cfg.MediaKeys, blob.DefaultChunkSize)
-		if err != nil {
-			return nil, fmt.Errorf("construct encrypted object store: %w", err)
-		}
-		blobs = sealed
-	}
-	if err := remote.Check(ctx); err != nil {
-		return nil, fmt.Errorf("object store startup check failed: %w", err)
+		return nil, err
 	}
 	return blobs, nil
 }

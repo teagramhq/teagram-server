@@ -1,8 +1,7 @@
 # Local and single-LXC stack: Postgres, migrations, RustFS, and the server.
-# Serving requires a valid runner-published blob-mode authority. Use the
-# reviewed initialization and rollout steps in
-# deploy/teagramd/rollout-runner/README.md; a direct fresh `docker compose up`
-# without authority intentionally fails closed.
+# Existing blob-mode authorities always control serving. A first S3 boot may
+# use an empty authority directory; all nonempty authority state is validated,
+# and existing `s3-accepted` data stays plaintext.
 #
 # `docker compose down` keeps the named volumes, including RustFS media, which
 # makes a restart uneventful. `down -v` destroys persistent state and must not
@@ -20,7 +19,7 @@ x-dsn: &dsn "postgres://postgres:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .
 x-blob-s3: &blob-s3
   TG_BLOB_S3_ENDPOINT: http://rustfs:9000
   TG_BLOB_S3_BUCKET: teagram
-  TG_BLOB_S3_PREFIX: teagramd/
+  TG_BLOB_S3_PREFIX: ${TG_BLOB_S3_PREFIX:-teagramd/}
   TG_BLOB_S3_REGION: us-east-1
   TG_BLOB_S3_ACCESS_KEY_ID: ${TG_BLOB_S3_ACCESS_KEY_ID:-}
   TG_BLOB_S3_SECRET_ACCESS_KEY_FILE: /run/secrets/teagramd-blob-secret-key

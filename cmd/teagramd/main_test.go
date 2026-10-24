@@ -144,7 +144,7 @@ func TestNewBlobStoreKeepsAcceptedS3PlaintextRegardlessOfMediaKey(t *testing.T) 
 				}
 				if r.URL.Query().Get("list-type") == "2" {
 					w.Header().Set("Content-Type", "application/xml")
-					if _, err := io.WriteString(w, `<ListBucketResult><IsTruncated>false</IsTruncated></ListBucketResult>`); err != nil {
+					if _, err := io.WriteString(w, `<ListBucketResult><IsTruncated>false</IsTruncated><Contents><Key>tenant/02/2</Key><LastModified>2026-10-24T00:00:00Z</LastModified><Size>24</Size></Contents></ListBucketResult>`); err != nil {
 						t.Errorf("write S3 listing: %v", err)
 					}
 					return
