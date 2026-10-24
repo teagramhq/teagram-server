@@ -817,6 +817,47 @@ func TestS3PlaintextRequiresOptInAndWarns(t *testing.T) {
 	}
 }
 
+func TestNewS3StoreRequiresMediaKeysForEncryptedMode(t *testing.T) {
+	t.Parallel()
+	_, _, err := blob.NewS3Store(context.Background(), blob.S3Config{}, nil, true)
+	if err == nil || !strings.Contains(err.Error(), "TG_MEDIA_KEY_DIR and TG_MEDIA_KEY_CURRENT") {
+		t.Fatalf("encrypted S3 store without keys error = %v, want media-key setting", err)
+	}
+}
+
+func TestNewS3StoreKeepsPopulatedAuthorityFreeNamespaceEncrypted(t *testing.T) {
+	t.Parallel()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/xml")
+		if _, err := io.WriteString(w, `<ListBucketResult><IsTruncated>false</IsTruncated><Contents><Key>tenant/plaintext</Key><LastModified>2026-10-24T00:00:00Z</LastModified><Size>9</Size></Contents></ListBucketResult>`); err != nil {
+			t.Errorf("write S3 listing: %v", err)
+		}
+	}))
+	t.Cleanup(server.Close)
+	keys, err := blob.NewKeyRing(1, map[uint32][]byte{1: bytes.Repeat([]byte{0x6d}, blob.MediaKeyLen)})
+	if err != nil {
+		t.Fatalf("new media key ring: %v", err)
+	}
+	serving, remote, err := blob.NewS3Store(context.Background(), blob.S3Config{
+		Endpoint:          server.URL,
+		Bucket:            "test-bucket",
+		Prefix:            "tenant/",
+		AccessKeyID:       "access",
+		SecretAccessKey:   "secret",
+		AllowInsecureHTTP: true,
+		MaxAttempts:       1,
+	}, keys, true)
+	if err != nil {
+		t.Fatalf("encrypted S3 store with existing namespace: %v", err)
+	}
+	if _, ok := serving.(*blob.Encrypted); !ok {
+		t.Fatalf("serving store type = %T, want encrypted store", serving)
+	}
+	if remote == nil {
+		t.Fatal("raw S3 store is nil")
+	}
+}
+
 func TestS3UsesConfiguredCABundle(t *testing.T) {
 	t.Parallel()
 	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

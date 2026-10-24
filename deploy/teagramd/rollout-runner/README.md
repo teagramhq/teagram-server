@@ -16,8 +16,11 @@ This stage has one publisher: `initialize-local` for the initial local record.
 Ordinary `apply` validates the existing head against every running `teagramd*`
 container and the proposed Compose render before build or replacement. A
 rollout cannot change backend. There is no fresh-S3 or recovered-local
-publisher in this stage, and no manual record-writing path. A default S3 render
-without a matching authority intentionally fails closed.
+publisher in this stage, and no manual record-writing path. The serving
+process has a separate fresh-S3 bootstrap for an empty authority directory; it
+writes no authority and cannot bypass a nonempty record tree. The rollout
+runner still requires a matching authority for every managed S3 render and
+transition.
 
 Preflight treats disabled public WebSocket settings and an empty
 `TG_WELCOME_CHANNEL` as equivalent when they are unset or passed through as

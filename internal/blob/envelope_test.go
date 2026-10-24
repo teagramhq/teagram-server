@@ -831,3 +831,28 @@ func TestKeyRingNeverPrintsKeys(t *testing.T) {
 		t.Fatalf("json = %s", js)
 	}
 }
+
+type timeoutStore struct {
+	blob.Store
+
+	timeout time.Duration
+}
+
+func (s timeoutStore) OperationTimeout() time.Duration { return s.timeout }
+
+func TestEncryptedPreservesBackendOperationTimeout(t *testing.T) {
+	t.Parallel()
+	local, _ := newLocal(t)
+	const timeout = 37 * time.Second
+	wrapped, err := blob.NewEncrypted(timeoutStore{Store: local, timeout: timeout}, newRing(t, 1, 1), blob.DefaultChunkSize)
+	if err != nil {
+		t.Fatalf("new encrypted store: %v", err)
+	}
+	provider, ok := any(wrapped).(blob.OperationTimeoutProvider)
+	if !ok {
+		t.Fatal("encrypted store does not preserve the backend operation timeout")
+	}
+	if got := provider.OperationTimeout(); got != timeout {
+		t.Fatalf("operation timeout = %s, want %s", got, timeout)
+	}
+}

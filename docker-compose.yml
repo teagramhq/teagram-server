@@ -1,8 +1,7 @@
 # Local and single-LXC stack: Postgres, migrations, RustFS, and the server.
-# Serving requires a valid runner-published blob-mode authority. Use the
-# reviewed initialization and rollout steps in
-# deploy/teagramd/rollout-runner/README.md; a direct fresh `docker compose up`
-# without authority intentionally fails closed.
+# Existing blob-mode authorities always control serving. A first S3 boot may
+# use an empty authority directory; all nonempty authority state is validated,
+# and existing `s3-accepted` data stays plaintext.
 #
 # `docker compose down` keeps the named volumes, including RustFS media, which
 # makes a restart uneventful. `down -v` destroys persistent state and must not
@@ -20,7 +19,7 @@ x-dsn: &dsn "postgres://postgres:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .
 x-blob-s3: &blob-s3
   TG_BLOB_S3_ENDPOINT: http://rustfs:9000
   TG_BLOB_S3_BUCKET: teagram
-  TG_BLOB_S3_PREFIX: teagramd/
+  TG_BLOB_S3_PREFIX: ${TG_BLOB_S3_PREFIX:-teagramd/}
   TG_BLOB_S3_REGION: us-east-1
   TG_BLOB_S3_ACCESS_KEY_ID: ${TG_BLOB_S3_ACCESS_KEY_ID:-}
   TG_BLOB_S3_SECRET_ACCESS_KEY_FILE: /run/secrets/teagramd-blob-secret-key
@@ -28,6 +27,10 @@ x-blob-s3: &blob-s3
   # rejects plaintext S3 endpoints unless this explicit private-network opt-in
   # is set; no RustFS port is published on the host.
   TG_BLOB_S3_ALLOW_INSECURE_HTTP: "true"
+
+x-media-keys: &media-keys
+  TG_MEDIA_KEY_DIR: /run/teagramd/media-keys
+  TG_MEDIA_KEY_CURRENT: ${TG_MEDIA_KEY_CURRENT:-1}
 
 services:
   # MAIN-1974 restores the PostgreSQL 16 source volume into this PostgreSQL 18
@@ -262,7 +265,7 @@ services:
       # Retain the local data volume for the later verified transition and
       # recovery while the default backend uses S3.
       TG_BLOB_DIR: /var/lib/teagramd-blobs
-      <<: *blob-s3
+      <<: [*blob-s3, *media-keys]
     ports:
       # Loopback only. 2443 is unauthenticated at the transport layer, so whoever
       # reaches it feeds chosen bytes into the MTProto decode path before any
@@ -290,6 +293,12 @@ services:
       - tgkey:/var/lib/teagramd
       - tgblobs:/var/lib/teagramd-blobs:ro
       - ./.state/blob-mode:/run/teagramd/blob-mode:ro
+      - type: bind
+        source: ${TEAGRAM_MEDIA_KEY_SOURCE_DIR:-/etc/teagramd/media-keys}
+        target: /run/teagramd/media-keys
+        read_only: true
+        bind:
+          create_host_path: false
     secrets:
       - source: teagramd_blob_secret_key
         target: teagramd-blob-secret-key

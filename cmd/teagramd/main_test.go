@@ -21,6 +21,7 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/teagramhq/teagram-server/internal/blob"
+	"github.com/teagramhq/teagram-server/internal/blobmode"
 	"github.com/teagramhq/teagram-server/internal/config"
 	"github.com/teagramhq/teagram-server/internal/pgtest"
 	"github.com/teagramhq/teagram-server/internal/photothumb"
@@ -85,16 +86,117 @@ func TestNewBlobStoreChecksConfiguredS3AtStartup(t *testing.T) {
 		SecretAccessKey:   "secret",
 		AllowInsecureHTTP: true,
 		MaxAttempts:       1,
-	}}, slog.New(slog.DiscardHandler))
+	}, MediaKeys: testMediaKeyRing(t)}, slog.New(slog.DiscardHandler))
 	if err != nil {
 		t.Fatalf("new blob store: %v", err)
 	}
-	if _, ok := got.(*blob.S3); !ok {
-		t.Fatalf("blob store type = %T, want *blob.S3", got)
+	if _, ok := got.(*blob.Encrypted); !ok {
+		t.Fatalf("blob store type = %T, want *blob.Encrypted", got)
 	}
 	if requests.Load() != 1 {
 		t.Fatalf("startup requests = %d, want 1", requests.Load())
 	}
+}
+
+func TestNewBlobStoreRequiresMediaKeysBeforeS3Access(t *testing.T) {
+	t.Parallel()
+	var requests atomic.Int64
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests.Add(1)
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(server.Close)
+
+	_, err := newBlobStore(context.Background(), config.Config{BlobS3: &blob.S3Config{
+		Endpoint:          server.URL,
+		Bucket:            "test-bucket",
+		Prefix:            "tenant/",
+		AccessKeyID:       "access",
+		SecretAccessKey:   "secret",
+		AllowInsecureHTTP: true,
+		MaxAttempts:       1,
+	}}, slog.New(slog.DiscardHandler))
+	if err == nil || !strings.Contains(err.Error(), "TG_MEDIA_KEY_DIR") || !strings.Contains(err.Error(), "TG_MEDIA_KEY_CURRENT") {
+		t.Fatalf("new blob store error = %v, want missing media key settings", err)
+	}
+	if requests.Load() != 0 {
+		t.Fatalf("S3 requests before missing-key failure = %d, want 0", requests.Load())
+	}
+}
+
+func TestNewBlobStoreKeepsAcceptedS3PlaintextRegardlessOfMediaKey(t *testing.T) {
+	for _, tt := range []struct {
+		name string
+		keys *blob.KeyRing
+	}{
+		{name: "without key"},
+		{name: "with key", keys: testMediaKeyRing(t)},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			var logs bytes.Buffer
+			const legacyMedia = "accepted plaintext media"
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Method != http.MethodGet {
+					t.Errorf("S3 request = %s %s, want GET", r.Method, r.URL)
+					w.WriteHeader(http.StatusMethodNotAllowed)
+					return
+				}
+				if r.URL.Query().Get("list-type") == "2" {
+					w.Header().Set("Content-Type", "application/xml")
+					if _, err := io.WriteString(w, `<ListBucketResult><IsTruncated>false</IsTruncated><Contents><Key>tenant/02/2</Key><LastModified>2026-10-24T00:00:00Z</LastModified><Size>24</Size></Contents></ListBucketResult>`); err != nil {
+						t.Errorf("write S3 listing: %v", err)
+					}
+					return
+				}
+				if r.Header.Get("Range") != "bytes=0-23" {
+					t.Errorf("S3 media range = %q, want bytes=0-23", r.Header.Get("Range"))
+				}
+				w.WriteHeader(http.StatusPartialContent)
+				if _, err := io.WriteString(w, legacyMedia); err != nil {
+					t.Errorf("write legacy media: %v", err)
+				}
+			}))
+			t.Cleanup(server.Close)
+			got, err := newBlobStoreWithAuthority(context.Background(), config.Config{
+				BlobS3: &blob.S3Config{
+					Endpoint:          server.URL,
+					Bucket:            "test-bucket",
+					Prefix:            "tenant/",
+					AccessKeyID:       "access",
+					SecretAccessKey:   "secret",
+					AllowInsecureHTTP: true,
+					MaxAttempts:       1,
+				},
+				MediaKeys: tt.keys,
+			}, slog.New(slog.NewTextHandler(&logs, nil)), blobmode.Authority{Present: true, Outcome: blobmode.OutcomeS3Accepted})
+			if err != nil {
+				t.Fatalf("new accepted S3 store: %v", err)
+			}
+			if _, ok := got.(*blob.S3); !ok {
+				t.Fatalf("blob store type = %T, want plaintext *blob.S3", got)
+			}
+			if !strings.Contains(logs.String(), "S3 media encryption remains disabled for accepted plaintext cutover") {
+				t.Fatalf("startup logs = %q, want accepted plaintext warning", logs.String())
+			}
+			data, err := got.ReadAt(context.Background(), "02/2", 0, int64(len(legacyMedia)))
+			if err != nil {
+				t.Fatalf("read accepted plaintext media: %v", err)
+			}
+			if string(data) != legacyMedia {
+				t.Fatalf("accepted plaintext media = %q, want %q", data, legacyMedia)
+			}
+		})
+	}
+}
+
+func testMediaKeyRing(t *testing.T) *blob.KeyRing {
+	t.Helper()
+	ring, err := blob.NewKeyRing(1, map[uint32][]byte{1: bytes.Repeat([]byte{0x51}, blob.MediaKeyLen)})
+	if err != nil {
+		t.Fatalf("new media key ring: %v", err)
+	}
+	return ring
 }
 
 func TestNewBlobStoreDoesNotFallBackWhenS3IsUnreachable(t *testing.T) {
@@ -112,7 +214,7 @@ func TestNewBlobStoreDoesNotFallBackWhenS3IsUnreachable(t *testing.T) {
 		AllowInsecureHTTP: true,
 		MaxAttempts:       1,
 		OperationTimeout:  100 * time.Millisecond,
-	}}, slog.New(slog.DiscardHandler))
+	}, MediaKeys: testMediaKeyRing(t)}, slog.New(slog.DiscardHandler))
 	if err == nil || !strings.Contains(err.Error(), "startup") {
 		t.Fatalf("new blob store error = %v, want startup failure", err)
 	}

@@ -107,8 +107,8 @@ type Config struct {
 	// the internal/peerhash package doc.
 	AuthKeyEncKey []byte `json:"-"`
 	// MediaKeys is the media key ring from TG_MEDIA_KEY_DIR and
-	// TG_MEDIA_KEY_CURRENT, or nil when neither is set. Nothing selects the
-	// encrypted media store yet.
+	// TG_MEDIA_KEY_CURRENT, or nil when neither is set. Fresh S3 stores use this
+	// ring to encrypt objects; accepted plaintext cutovers leave it unused.
 	MediaKeys *blob.KeyRing `json:"-"`
 	// AdvertiseHost and AdvertisePort are the address clients are told to
 	// dial, which is not always the one the server binds: a listener on every

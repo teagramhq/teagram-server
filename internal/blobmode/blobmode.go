@@ -25,6 +25,7 @@ const (
 	maxJournalEntries          = 1000
 	maxJournalDirectoryEntries = maxJournalEntries*2 + 2
 	stackMoveOutcome           = "stack-moved-local"
+	OutcomeS3Accepted          = "s3-accepted"
 	stackMoveSourceTGBlobs     = "telegram-server_tgblobs"
 	stackMoveTargetTGBlobs     = "teagram_tgblobs"
 	stackMoveSourceRustFSData  = "telegram-server_rustfsdata"
@@ -36,6 +37,14 @@ const (
 type EffectiveConfig struct {
 	BlobDir string
 	BlobS3  *blob.S3Config
+}
+
+// Authority is the validated current blob-mode record. Present is false when
+// the authority directory is absent, or when an empty directory accompanies
+// an S3 backend and therefore contains no authority to validate.
+type Authority struct {
+	Present bool
+	Outcome string
 }
 
 type validationError struct {
@@ -51,42 +60,61 @@ func reject(reason, field string) error {
 	return &validationError{reason: reason, field: field}
 }
 
+// Read validates the fixed record directory and binds its current head to the
+// effective serving backend. An absent directory returns an absent authority;
+// for S3, a completely empty directory has the same meaning. Nonempty state is
+// always validated and cannot be bypassed by the fresh-S3 path.
+func Read(path string, cfg EffectiveConfig) (Authority, error) {
+	return readAt(path, cfg, 0)
+}
+
 // Validate checks the fixed record directory and binds its current head to the
 // effective serving backend. An absent directory keeps pre-guard behavior.
 func Validate(path string, cfg EffectiveConfig) error {
-	return validateAt(path, cfg, 0)
+	_, err := Read(path, cfg)
+	return err
 }
 
-func validateAt(path string, cfg EffectiveConfig, expectedUID uint32) (err error) {
+func readAt(path string, cfg EffectiveConfig, expectedUID uint32) (authority Authority, err error) {
 	var pathStat unix.Stat_t
 	if err := unix.Lstat(path, &pathStat); err != nil {
 		if errors.Is(err, unix.ENOENT) {
-			return nil
+			return Authority{}, nil
 		}
-		return reject("unavailable", "blob-mode")
+		return Authority{}, reject("unavailable", "blob-mode")
 	}
 	if err := validateStat(&pathStat, unix.S_IFDIR, expectedUID, "blob-mode"); err != nil {
-		return err
+		return Authority{}, err
 	}
 
 	modeDir, err := openDirectory(path, expectedUID, "blob-mode", &pathStat)
 	if err != nil {
-		return err
+		return Authority{}, err
 	}
 	defer func() {
 		if closeErr := modeDir.Close(); closeErr != nil && err == nil {
 			err = reject("unavailable", "blob-mode")
 		}
 	}()
+	directoryEntries, err := modeDir.Readdirnames(1)
+	if err != nil && !errors.Is(err, io.EOF) {
+		return Authority{}, reject("unavailable", "blob-mode")
+	}
+	if len(directoryEntries) == 0 && errors.Is(err, io.EOF) && cfg.BlobS3 != nil {
+		// Docker creates a missing bind source as an empty directory. In a fresh
+		// S3 deployment that is the same state as a missing authority directory;
+		// once any authority file exists, every existing validation still applies.
+		return Authority{}, nil
+	}
 
 	modeBytes, err := readRecordAt(int(modeDir.Fd()), "mode.json", expectedUID, "mode.json")
 	if err != nil {
-		return err
+		return Authority{}, err
 	}
 
 	journalDir, err := openDirectoryAt(int(modeDir.Fd()), "journal", expectedUID, "journal")
 	if err != nil {
-		return err
+		return Authority{}, err
 	}
 	defer func() {
 		if closeErr := journalDir.Close(); closeErr != nil && err == nil {
@@ -96,13 +124,13 @@ func validateAt(path string, cfg EffectiveConfig, expectedUID uint32) (err error
 
 	entries, err := readJournal(journalDir, expectedUID)
 	if err != nil {
-		return err
+		return Authority{}, err
 	}
 	if len(entries) == 0 {
-		return reject("missing", "journal")
+		return Authority{}, reject("missing", "journal")
 	}
 	if !bytes.Equal(modeBytes, entries[len(entries)-1].data) {
-		return reject("stale", "mode.json")
+		return Authority{}, reject("stale", "mode.json")
 	}
 
 	transitionIDs := make(map[string]struct{}, len(entries))
@@ -115,17 +143,17 @@ func validateAt(path string, cfg EffectiveConfig, expectedUID uint32) (err error
 		generation := int64(index + 1)
 		record, err := parseRecord(entry.data)
 		if err != nil {
-			return err
+			return Authority{}, err
 		}
 		if err := validateRecord(record, entry.data, generation, previousID, previousOutcome, previousBackend, previousVolumes); err != nil {
-			return err
+			return Authority{}, err
 		}
 		if _, exists := transitionIDs[record.TransitionID]; exists {
-			return reject("reused", "transition_id")
+			return Authority{}, reject("reused", "transition_id")
 		}
 		transitionIDs[record.TransitionID] = struct{}{}
 		if _, exists := reportDigests[record.Evidence.ReportSHA256]; exists {
-			return reject("reused", "evidence.report_sha256")
+			return Authority{}, reject("reused", "evidence.report_sha256")
 		}
 		reportDigests[record.Evidence.ReportSHA256] = struct{}{}
 		previousID = record.TransitionID
@@ -134,11 +162,11 @@ func validateAt(path string, cfg EffectiveConfig, expectedUID uint32) (err error
 		previousVolumes = record.Volumes
 		if index == len(entries)-1 {
 			if err := validateBackend(record.Backend, cfg); err != nil {
-				return err
+				return Authority{}, err
 			}
 		}
 	}
-	return nil
+	return Authority{Present: true, Outcome: previousOutcome}, nil
 }
 
 type record struct {

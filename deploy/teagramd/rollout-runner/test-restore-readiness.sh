@@ -318,7 +318,7 @@ fi
 
 build_inputs
 preflight_stage="run auth key failure drill"
-if auth_clear_failure_report=$(run_drill --fault-test auth-clear-failure 2>/dev/null); then
+if auth_clear_failure_report=$(run_drill --fault-test auth-clear-failure); then
   emit_preflight_failure
 fi
 if ! printf '%s' "$auth_clear_failure_report" | /usr/bin/python3 -c '
@@ -327,6 +327,7 @@ report = json.load(sys.stdin)
 if not (report.get("result") == "fail" and report.get("phase") == "auth_key_clearing" and report.get("category") == "auth_key_clear_failure" and report.get("cleanup") == "verified" and report.get("exit") == 1):
     raise SystemExit(1)
 '; then
+  printf 'restore readiness auth-key failure drill returned unexpected report: %s\n' "$auth_clear_failure_report" >&2
   emit_preflight_failure
 fi
 

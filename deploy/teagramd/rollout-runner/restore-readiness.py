@@ -659,6 +659,27 @@ $local_auth_key_clear$;
 """.lstrip()
 
 
+def auth_key_clear_failure_diagnostics(
+    before: list[str],
+    after: list[str],
+    *,
+    client_status: int | None = None,
+    container_status: int | None = None,
+    stdout: bytes = b"",
+    stderr: bytes = b"",
+) -> dict[str, bool | int | None]:
+    expected_error = re.search(
+        rb"(?:^|\n)ERROR:[ \t]+division by zero(?:\r?\n|$)", stdout + stderr
+    )
+    return {
+        "acknowledged": AUTH_KEY_CLEAR_ACK in stdout,
+        "client_status": client_status,
+        "container_status": container_status,
+        "rollback_preserved": before == after,
+        "division_by_zero_reported": expected_error is not None,
+    }
+
+
 def auth_key_clear_fault_category(
     fault_kind: str,
     before: list[str],
@@ -676,14 +697,19 @@ def auth_key_clear_fault_category(
         return "interrupted" if interrupt_acknowledged else "fault_test_failure"
     if fault_kind != "failure":
         return "fault_test_failure"
-    expected_error = re.search(
-        rb"(?:^|\n)ERROR:[ \t]+division by zero(?:\r?\n|$)", stdout + stderr
+    diagnostics = auth_key_clear_failure_diagnostics(
+        before,
+        after,
+        client_status=client_status,
+        container_status=container_status,
+        stdout=stdout,
+        stderr=stderr,
     )
     if (
-        AUTH_KEY_CLEAR_ACK in stdout
-        and client_status == 3
-        and container_status == 3
-        and expected_error is not None
+        diagnostics["acknowledged"]
+        and diagnostics["client_status"] == 3
+        and diagnostics["container_status"] == 3
+        and diagnostics["division_by_zero_reported"]
     ):
         return "auth_key_clear_failure"
     return "fault_test_failure"
@@ -4682,6 +4708,20 @@ dump_path=$2
                 stderr=self.last_attached_stderr,
                 interrupt_acknowledged=self.last_attached_interrupt_acknowledged,
             )
+            if fault_kind == "failure" and result_category == "fault_test_failure":
+                diagnostics = auth_key_clear_failure_diagnostics(
+                    before,
+                    after,
+                    client_status=self.last_attached_status,
+                    container_status=container_status,
+                    stdout=output,
+                    stderr=self.last_attached_stderr,
+                )
+                print(
+                    "restore readiness auth-key injected failure diagnostics: "
+                    + json.dumps(diagnostics, separators=(",", ":"), sort_keys=True),
+                    file=sys.stderr,
+                )
             raise DrillFailure(phase, result_category)
         if state.get("Running") or container_status != 0:
             raise DrillFailure(phase, "auth_key_clear_failure")
