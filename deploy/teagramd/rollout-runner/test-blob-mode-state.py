@@ -1017,6 +1017,69 @@ class BlobModeStateTests(unittest.TestCase):
             "render-backend-mismatch",
         )
 
+    def test_local_render_allows_omitted_inactive_rustfs_volume(self) -> None:
+        local_record = dict(self.record)
+        local_record["volumes"] = {
+            **self.record["volumes"],
+            "rustfsdata": "teagram-server_rustfsdata",
+        }
+        inventory = self.local_compose()
+        inventory["volumes"].pop("rustfsdata")
+
+        blob_mode.assert_compose_matches(
+            inventory, local_record, self.mode_source, self.override
+        )
+
+    def test_local_render_rejects_mismatched_rustfs_volume(self) -> None:
+        local_record = dict(self.record)
+        local_record["volumes"] = {
+            **self.record["volumes"],
+            "rustfsdata": "teagram-server_rustfsdata",
+        }
+        inventory = self.local_compose()
+        inventory["volumes"]["rustfsdata"] = "teagram-server_other_rustfsdata"
+
+        self.assert_rejects(
+            lambda: blob_mode.assert_compose_matches(
+                inventory, local_record, self.mode_source, self.override
+            ),
+            "render-rustfs-volume-mismatch",
+        )
+
+    def test_s3_render_still_requires_its_rustfs_volume(self) -> None:
+        s3_backend = {
+            "kind": "s3",
+            "endpoint": "http://rustfs:9000",
+            "bucket": "teagram",
+            "prefix": "teagramd/",
+        }
+        s3_record = dict(self.record)
+        s3_record.update({
+            "outcome": "s3-accepted",
+            "backend": s3_backend,
+            "volumes": {
+                "tgblobs": self.volume,
+                "rustfsdata": "teagram-server_rustfsdata",
+            },
+        })
+        inventory = self.local_compose()
+        inventory["volumes"].pop("rustfsdata")
+        for service in inventory["services"]:
+            service["backend"] = s3_backend
+            service["network"] = {
+                "mode": "networks",
+                "networks": ["teagram-server_default", "teagram-server_rustfs_private"],
+            }
+            for mount in service["tgblobs_mounts"]:
+                mount["read_only"] = True
+
+        self.assert_rejects(
+            lambda: blob_mode.assert_compose_matches(
+                inventory, s3_record, self.mode_source, self.override
+            ),
+            "render-rustfs-volume-mismatch",
+        )
+
     def test_private_rustfs_render_requires_an_isolated_project_network(self) -> None:
         compose = {
             "name": "teagram",

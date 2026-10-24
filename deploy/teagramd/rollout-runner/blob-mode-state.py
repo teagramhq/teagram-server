@@ -1802,7 +1802,16 @@ def assert_compose_matches(
     volumes = inventory.get("volumes")
     if not isinstance(volumes, dict) or volumes.get("tgblobs") != record["volumes"]["tgblobs"]:
         reject("render-volume-mismatch")
-    if record["volumes"]["rustfsdata"] is not None and volumes.get("rustfsdata") != record["volumes"]["rustfsdata"]:
+    expected_rustfs_volume = record["volumes"]["rustfsdata"]
+    rendered_rustfs_volume = volumes.get("rustfsdata")
+    if record["outcome"] == "s3-accepted":
+        if not isinstance(expected_rustfs_volume, str) or rendered_rustfs_volume != expected_rustfs_volume:
+            reject("render-rustfs-volume-mismatch")
+    elif (
+        expected_rustfs_volume is not None
+        and rendered_rustfs_volume is not None
+        and rendered_rustfs_volume != expected_rustfs_volume
+    ):
         reject("render-rustfs-volume-mismatch")
     # Every configured teagramd replica is guarded; unrelated services must
     # not inherit the mount (checked by compose_inventory).

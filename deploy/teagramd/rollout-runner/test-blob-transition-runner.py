@@ -856,7 +856,7 @@ class BlobTransitionRunnerFixtures(unittest.TestCase):
         self.authority_case.setUp()
         self.current_stack_fixture = self._testMethodName.startswith("test_current_")
         self.moved_stack_fixture = (
-            self._testMethodName == "test_current_cutover_and_recovery_use_moved_authority_path"
+            self._testMethodName == "test_current_cutover_and_recovery_use_moved_authority_without_rustfs_profile"
         )
         if self.current_stack_fixture:
             self.authority_case.volume = (
@@ -1248,6 +1248,15 @@ class BlobTransitionRunnerFixtures(unittest.TestCase):
                 if mount.get("target") == "/var/lib/teagramd-blobs":
                     mount["target"] = blob_dir
                     mount["read_only"] = False
+        if self.moved_stack_fixture:
+            for name in ("rustfs", "rustfs-init", "blob-migrate", "blob-restore"):
+                model["services"].pop(name, None)
+            for service in model["services"].values():
+                networks = service.get("networks")
+                if isinstance(networks, dict):
+                    networks.pop("rustfs_private", None)
+            model["volumes"].pop("rustfsdata", None)
+            model.get("networks", {}).pop("rustfs_private", None)
         self.local_compose_json.write_text(json.dumps(model, sort_keys=True), encoding="utf-8")
         self.local_compose_json.chmod(0o600)
 
@@ -1654,7 +1663,7 @@ class BlobTransitionRunnerFixtures(unittest.TestCase):
         self.assertEqual(second_cutover.returncode, 0, second_cutover.stderr)
         self.assertEqual((self.root / "serving-backend").read_text(encoding="ascii").strip(), "s3")
 
-    def test_current_cutover_and_recovery_use_moved_authority_path(self) -> None:
+    def test_current_cutover_and_recovery_use_moved_authority_without_rustfs_profile(self) -> None:
         env_file = self.checkout / ".env"
         env_file.write_text("POSTGRES_PASSWORD=synthetic\n", encoding="ascii")
         env_file.chmod(0o600)
