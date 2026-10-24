@@ -696,7 +696,12 @@ func TestLoadKeyExchangeLimits(t *testing.T) {
 		"connection negative": {env: "TG_KEY_EXCHANGE_PER_CONNECTION", raw: "-1", wantErr: true},
 		"network override": {
 			env: "TG_RATE_LIMIT_KEY_EXCHANGE_IP", raw: "12",
-			want: func() mtproto.ExchangeLimits { v := defaults; v.PerNetwork.Limit = 12; return v }(),
+			want: func() mtproto.ExchangeLimits {
+				v := defaults
+				v.PerNetwork.Limit = 12
+				v.TailnetPerNetwork.Limit = 12
+				return v
+			}(),
 		},
 		"network disabled": {
 			env: "TG_RATE_LIMIT_KEY_EXCHANGE_IP", raw: "0",
@@ -704,13 +709,33 @@ func TestLoadKeyExchangeLimits(t *testing.T) {
 		},
 		"network invalid":  {env: "TG_RATE_LIMIT_KEY_EXCHANGE_IP", raw: "many", wantErr: true},
 		"network negative": {env: "TG_RATE_LIMIT_KEY_EXCHANGE_IP", raw: "-1", wantErr: true},
+		"tailnet network override": {
+			env: "TG_RATE_LIMIT_KEY_EXCHANGE_IP_TAILNET", raw: "12",
+			want: func() mtproto.ExchangeLimits { v := defaults; v.TailnetPerNetwork.Limit = 12; return v }(),
+		},
+		"tailnet network disabled": {
+			env: "TG_RATE_LIMIT_KEY_EXCHANGE_IP_TAILNET", raw: "0",
+			want: defaults,
+		},
+		"tailnet network invalid":  {env: "TG_RATE_LIMIT_KEY_EXCHANGE_IP_TAILNET", raw: "many", wantErr: true},
+		"tailnet network negative": {env: "TG_RATE_LIMIT_KEY_EXCHANGE_IP_TAILNET", raw: "-1", wantErr: true},
 		"window override": {
 			env: "TG_RATE_LIMIT_KEY_EXCHANGE_IP_WINDOW", raw: "30m",
-			want: func() mtproto.ExchangeLimits { v := defaults; v.PerNetwork.Window = 30 * time.Minute; return v }(),
+			want: func() mtproto.ExchangeLimits {
+				v := defaults
+				v.PerNetwork.Window = 30 * time.Minute
+				v.TailnetPerNetwork.Window = 30 * time.Minute
+				return v
+			}(),
 		},
 		"window disabled": {
 			env: "TG_RATE_LIMIT_KEY_EXCHANGE_IP_WINDOW", raw: "0s",
-			want: func() mtproto.ExchangeLimits { v := defaults; v.PerNetwork.Window = 0; return v }(),
+			want: func() mtproto.ExchangeLimits {
+				v := defaults
+				v.PerNetwork.Window = 0
+				v.TailnetPerNetwork.Window = 0
+				return v
+			}(),
 		},
 		"window invalid":  {env: "TG_RATE_LIMIT_KEY_EXCHANGE_IP_WINDOW", raw: "soon", wantErr: true},
 		"window negative": {env: "TG_RATE_LIMIT_KEY_EXCHANGE_IP_WINDOW", raw: "-1m", wantErr: true},
@@ -758,6 +783,17 @@ func TestLoadKeyExchangeLimits(t *testing.T) {
 			}
 		})
 	}
+	t.Run("tailnet network override takes precedence", func(t *testing.T) {
+		t.Setenv("TG_RATE_LIMIT_KEY_EXCHANGE_IP", "12")
+		t.Setenv("TG_RATE_LIMIT_KEY_EXCHANGE_IP_TAILNET", "7")
+		cfg, err := config.Load(discardLog())
+		if err != nil {
+			t.Fatalf("Load: %v", err)
+		}
+		if cfg.KeyExchangeLimits.PerNetwork.Limit != 12 || cfg.KeyExchangeLimits.TailnetPerNetwork.Limit != 7 {
+			t.Fatalf("key exchange network limits = public %d, tailnet %d, want public 12 and tailnet 7", cfg.KeyExchangeLimits.PerNetwork.Limit, cfg.KeyExchangeLimits.TailnetPerNetwork.Limit)
+		}
+	})
 }
 
 // TestLoadMaxConnsPerUnboundKey covers the bound that picks up where the
