@@ -85,6 +85,11 @@ func NewEncrypted(backend Store, ring *KeyRing, chunkSize int) (*Encrypted, erro
 	if backend == nil || ring == nil {
 		return nil, errors.New("encrypted store: backend and key ring are required")
 	}
+	// A ring not built by NewKeyRing has no current key, and wrapping under
+	// it would derive the wrap key from an empty secret.
+	if kek, ok := ring.key(ring.Current()); !ok || len(kek) != MediaKeyLen {
+		return nil, errors.New("encrypted store: key ring has no current key")
+	}
 	if chunkSize < MinChunkSize || chunkSize > MaxChunkSize {
 		return nil, fmt.Errorf("encrypted store: chunk size %d outside [%d, %d]", chunkSize, MinChunkSize, MaxChunkSize)
 	}
@@ -333,7 +338,10 @@ func (sr *sealReader) start() error {
 		return fmt.Errorf("envelope data key: %w", err)
 	}
 	current := sr.e.ring.Current()
-	kek, _ := sr.e.ring.key(current)
+	kek, ok := sr.e.ring.key(current)
+	if !ok || len(kek) != MediaKeyLen {
+		return errors.New("envelope put: key ring has no current key")
+	}
 	h := encodeHeader(current, int64(sr.e.chunkSize), sr.plainLen, salt[:])
 	wrap, err := wrapAEAD(kek, &h)
 	if err != nil {

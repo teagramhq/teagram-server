@@ -740,6 +740,17 @@ func TestNewEncryptedRejectsChunkSize(t *testing.T) {
 	}
 }
 
+// TestNewEncryptedRejectsZeroRing checks that a ring not built by NewKeyRing
+// is refused, so no write can wrap a data key under an empty secret.
+func TestNewEncryptedRejectsZeroRing(t *testing.T) {
+	t.Parallel()
+	for name, ring := range map[string]*blob.KeyRing{"literal": {}, "new": new(blob.KeyRing)} {
+		if _, err := blob.NewEncrypted(newMemStore(), ring, blob.MinChunkSize); err == nil {
+			t.Errorf("%s zero-value ring accepted", name)
+		}
+	}
+}
+
 func TestNewKeyRingRejects(t *testing.T) {
 	t.Parallel()
 	cases := map[string]struct {
