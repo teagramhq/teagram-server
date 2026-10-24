@@ -338,8 +338,7 @@ if [ "${1:-}" = inspect ]; then
         if [ "${MOCK_SCENARIO:-}" = pre-rollout-log-persisted ] || \
            { [ "${MOCK_SCENARIO:-}" = target-local-syslog-logging-rollout ] && \
              { [ "$phase" = baseline ] || [ "$phase" = rollback ]; }; } || \
-           { [ "${MOCK_SCENARIO:-}" = target-local-old-target-image-logging-mismatch ] && \
-             { [ "$phase" = baseline ] || [ "$phase" = target ]; }; }; then
+           { [ "${MOCK_SCENARIO:-}" = target-local-old-target-image-logging-mismatch ] && [ "$phase" = baseline ]; }; then
           printf 'json-file\n'
         else
           printf 'syslog\n'
@@ -435,20 +434,14 @@ if [ "${1:-}" = inspect ]; then
       esac
       env_json=$(jq -c --arg value "$origin_value" '. + ["TG_WEBSOCKET_ALLOWED_ORIGINS=" + $value]' <<< "$env_json")
     fi
-    if [ "$phase" = target ] && [ "$cfg" = target ] && \
-       [ "${MOCK_SCENARIO:-}" != target-local-syslog-logging-unmigrated ] && \
-       [ "${MOCK_SCENARIO:-}" != initial-local-unsafe-logging ]; then
-      env_json=$(jq -c \
-        'map(select(type != "string" or (startswith("TG_LOG_LOGIN_CODES=") | not))) + ["TG_LOG_LOGIN_CODES=false"]' \
-        <<< "$env_json")
+    login_codes=false
+    if [ "${MOCK_SCENARIO:-}" = target-local-syslog-logging-unmigrated ] || \
+       { [ "${MOCK_SCENARIO:-}" = target-local-syslog-logging-rollout ] && [ "$phase" != target ]; }; then
+      login_codes=true
     fi
-    if [ "${MOCK_SCENARIO:-}" = target-local-syslog-logging-rollout ] || \
-       [ "${MOCK_SCENARIO:-}" = target-local-syslog-logging-unmigrated ]; then
-      if [ "${MOCK_SCENARIO:-}" = target-local-syslog-logging-rollout ] && [ "$phase" = target ]; then login_codes=false; else login_codes=true; fi
-      env_json=$(jq -c --arg value "$login_codes" \
-        'map(select(type != "string" or (startswith("TG_LOG_LOGIN_CODES=") | not))) + ["TG_LOG_LOGIN_CODES=" + $value]' \
-        <<< "$env_json")
-    fi
+    env_json=$(jq -c --arg value "$login_codes" \
+      'map(select(type != "string" or (startswith("TG_LOG_LOGIN_CODES=") | not))) + ["TG_LOG_LOGIN_CODES=" + $value]' \
+      <<< "$env_json")
     turnstile_source=''
     if [ "$cfg" = baseline ] || [ "$cfg" = target ] || [ "$cfg" = rollback ]; then
       if [ -f "$MOCK_STATE/started-compose-$id.json" ]; then
@@ -480,8 +473,7 @@ if [ "${1:-}" = inspect ]; then
        { [ "$phase" = baseline ] || [ "$phase" = rollback ]; }; then
       log_config_type=json-file
       log_config='{}'
-    elif [ "${MOCK_SCENARIO:-}" = target-local-old-target-image-logging-mismatch ] && \
-         { [ "$phase" = baseline ] || [ "$phase" = target ]; }; then
+    elif [ "${MOCK_SCENARIO:-}" = target-local-old-target-image-logging-mismatch ] && [ "$phase" = baseline ]; then
       log_config_type=json-file
       log_config='{}'
     fi
@@ -550,7 +542,8 @@ fi
           cat "$MOCK_STATE/target-compose.drift.json"
         elif [[ "${MOCK_SCENARIO:-}" == public-websocket-* ]] && [ "$config_count" -lt 3 ]; then
           cat "$MOCK_STATE/base-compose.json"
-        elif [[ "${MOCK_SCENARIO:-}" == *public-listener-* ]]; then
+        elif [[ "${MOCK_SCENARIO:-}" == *public-listener-* ]] || \
+             [ "${MOCK_SCENARIO:-}" = target-local-old-target-image-logging-mismatch ]; then
           if [ "$phase" = baseline ] || [ "$phase" = rollback ]; then cat "$MOCK_STATE/base-compose.json"; else cat "$MOCK_STATE/target-compose.json"; fi
         elif [ -f "$MOCK_STATE/websocket-origin-override-change" ]; then
           if [ "$phase" = baseline ] || [ "$phase" = rollback ]; then config_file="$MOCK_STATE/base-compose.json"; else config_file="$MOCK_STATE/target-compose.json"; fi
@@ -562,9 +555,6 @@ fi
           if [ "$phase" = baseline ] || [ "$phase" = rollback ]; then cat "$MOCK_STATE/base-compose.json"; else cat "$MOCK_STATE/target-compose.json"; fi
         elif [[ "${MOCK_SCENARIO:-}" == target-local-welcome-channel-* ]]; then
           if [ "$config_count" -ge 3 ]; then cat "$MOCK_STATE/target-compose.json"; else cat "$MOCK_STATE/base-compose.json"; fi
-        # The first two renders model the live baseline; the target render follows.
-        elif [ "$config_count" -lt 3 ]; then
-          cat "$MOCK_STATE/base-compose.json"
         elif [ "${MOCK_SCENARIO:-}" = target-local-carry-forward-cce-literal-build-arg ]; then
           jq -c '.services.teagramd.build.args.TEAGRAMD_SOURCE_REVISION="literal-override"' \
             "$MOCK_STATE/target-compose.json"
@@ -834,7 +824,8 @@ write_compose_fixture() {
         teagramd:{
           build:{context:$build_context,args:{TEAGRAMD_SOURCE_REVISION:""}},
           stop_grace_period:"2m0s",
-          environment:{TG_SYNTHETIC_FLAG:"fixture",TG_BLOB_DIR:"/var/lib/teagramd-blobs",TG_REPLICA_COUNT:"1",TG_CLIENT_ADDR_TRUST:"socket"},
+          environment:{TG_SYNTHETIC_FLAG:"fixture",TG_BLOB_DIR:"/var/lib/teagramd-blobs",TG_REPLICA_COUNT:"1",TG_CLIENT_ADDR_TRUST:"socket",TG_LOG_LOGIN_CODES:"false"},
+          logging:{driver:"syslog",options:{"syslog-address":"unixgram:///dev/log","syslog-facility":"daemon","syslog-format":"rfc5424",tag:"teagramd"}},
           ports:[{target:2443,published:"2443",host_ip:"127.0.0.1",protocol:"tcp",mode:"ingress"}],
           volumes:[
             {type:"volume",source:"tgkey",target:"/var/lib/teagramd",read_only:false},
@@ -895,9 +886,6 @@ write_compose_fixture() {
   else
     cp -- "$base_config" "$target_config"
   fi
-  jq -c '.services.teagramd.logging={driver:"syslog",options:{"syslog-address":"unixgram:///dev/log","syslog-facility":"daemon","syslog-format":"rfc5424",tag:"teagramd"}} | .services.teagramd.environment.TG_LOG_LOGIN_CODES="false"' \
-    "$target_config" > "${target_config%.json}.logging.json"
-  mv -- "${target_config%.json}.logging.json" "$target_config"
   if [ "$scenario" = config-drift ]; then
     jq -c '.services.teagramd.environment.UNRELATED="changed"' "$target_config" > "${target_config%.json}.drift.json"
   fi
@@ -2237,13 +2225,13 @@ done
 
 make_fixture initial-local-unsafe-logging initial-local-unsafe-logging
 state=$(cat "$TMP/initial-local-unsafe-logging-state-path")
-root=$(cat "$TMP/initial-local-unsafe-logging-root-path")
 printf '%s\n' "$APPLY_TARGET_SHA" > "$state/origin"
 printf '%s\n' "$INITIAL_LOCAL_TARGET_SHA" > "$TMP/initial-local-unsafe-logging-target-sha-path"
 jq -c '.services.teagramd.environment.TG_LOG_LOGIN_CODES="true" | del(.services.teagramd.logging)' \
   "$state/target-compose.json" > "$state/target-compose.next.json"
 mv -- "$state/target-compose.next.json" "$state/target-compose.json"
 status=$(run_fixture initial-local-unsafe-logging built 0 '' 2 '' '' initialize-local "$APPLY_TARGET_SHA")
+root=$(cat "$TMP/initial-local-unsafe-logging-root-path")
 if [ "$status" != 0 ] && \
    grep -q 'initial-local target must use syslog and disable login-code logging before backup' "$TMP/initial-local-unsafe-logging.stderr" && \
    grep -q $'compose_logging_policy\tsyslog-v1\tdefault\tfail' "$root.baseline/initial-local-logging-profile-preflight.tsv" && \
@@ -4149,6 +4137,9 @@ else
 fi
 
 prepare_apply_fixture rollback-logging-mismatch target-local-old-target-image-logging-mismatch
+state=$(cat "$TMP/rollback-logging-mismatch-state-path")
+jq -c 'del(.services.teagramd.logging)' "$state/base-compose.json" > "$state/base-compose.next.json"
+mv -- "$state/base-compose.next.json" "$state/base-compose.json"
 status=$(run_fixture rollback-logging-mismatch built 0 '' 2 '' '' apply "$APPLY_TARGET_SHA")
 root=$(cat "$TMP/rollback-logging-mismatch-root-path")
 if [ "$status" != 0 ] && \
