@@ -1295,6 +1295,14 @@ func photoValidationRPCError(err error) error {
 	}
 }
 
+type sizedPhotoReader struct {
+	io.Reader
+
+	size int64
+}
+
+func (r sizedPhotoReader) Size() int64 { return r.size }
+
 func (h *handlers) putAndValidateJPEG(
 	ctx context.Context, key string, source io.Reader, size int64, checksum string, capture *photothumb.InputCapture,
 ) (photoDimensions, int64, error) {
@@ -1311,7 +1319,7 @@ func (h *handlers) putAndValidateJPEG(
 	putDone := make(chan putResult, 1)
 	validationDone := make(chan validationResult, 1)
 	go func() {
-		written, err := h.blobs.Put(ctx, key, blobReader)
+		written, err := h.blobs.Put(ctx, key, sizedPhotoReader{Reader: blobReader, size: size})
 		if closeErr := blobReader.CloseWithError(err); err == nil && closeErr != nil {
 			err = fmt.Errorf("close photo blob reader: %w", closeErr)
 		}
