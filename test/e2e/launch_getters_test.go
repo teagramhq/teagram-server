@@ -600,6 +600,21 @@ func checkMAIN1505StaticGetters(ctx context.Context, client *tg.Client) error {
 		if !ok || statusResult.Hash != 0 || len(statusResult.Statuses) != 0 {
 			return fmt.Errorf("account.getDefaultEmojiStatuses = %#v, want full empty statuses", statuses)
 		}
+		if err := checkCollectibleEmojiStatuses(ctx, client, hash); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func checkCollectibleEmojiStatuses(ctx context.Context, client *tg.Client, hash int64) error {
+	statuses, err := client.AccountGetCollectibleEmojiStatuses(ctx, hash)
+	if err != nil {
+		return fmt.Errorf("account.getCollectibleEmojiStatuses: %w", err)
+	}
+	statusResult, ok := statuses.(*tg.AccountEmojiStatuses)
+	if !ok || statusResult.Hash != 0 || len(statusResult.Statuses) != 0 {
+		return fmt.Errorf("account.getCollectibleEmojiStatuses = %#v, want full empty statuses", statuses)
 	}
 	return nil
 }

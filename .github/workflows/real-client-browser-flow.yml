@@ -68,7 +68,7 @@ jobs:
       # Match the main CI fixture job: pre-pull the mirrored Node base with retries.
       - name: Pull fixture base images
         timeout-minutes: 5
-        run: bash .github/scripts/pull-base-images.sh test/e2e/real_server_fixture/Dockerfile
+        run: bash .github/scripts/pull-base-images.sh --image mirror.gcr.io/arigaio/atlas:1.2.0-alpine test/e2e/real_server_fixture/Dockerfile
 
       - name: Run fixture, private build, and all five browser scenarios
         id: browser-flow
