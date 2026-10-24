@@ -33,6 +33,8 @@ TRANSITION_PROOF_SCHEMA = "teagram.blob-transition-proof/v2"
 SIMPLE_TRANSITION_REPORT_SCHEMA = "teagram.blob-mode-report/v3"
 SIMPLE_TRANSITION_PROOF_SCHEMA = "teagram.blob-transition-proof/v3"
 STACK_MOVE_REPORT_SCHEMA = "teagram.blob-mode-stack-move-report/v1"
+ENCRYPTED_REPORT_SCHEMA = "teagram.blob-encryption-report/v1"
+ENCRYPTED_INVENTORY_SCHEMA = "teagram.blob-encryption-inventory/v1"
 STACK_MOVE_OUTCOME = "stack-moved-local"
 STACK_MOVE_SOURCE_VOLUMES = {
     "tgblobs": "telegram-server_tgblobs",
@@ -42,7 +44,9 @@ STACK_MOVE_TARGET_VOLUMES = {
     "tgblobs": "teagram_tgblobs",
     "rustfsdata": "teagram_rustfsdata",
 }
-NON_SERVING_SERVICES = {"rustfs", "rustfs-init", "migrate", "blob-migrate", "blob-restore"}
+NON_SERVING_SERVICES = {
+    "rustfs", "rustfs-init", "migrate", "blob-migrate", "blob-restore", "blob-encrypt-migrate",
+}
 DATABASE_SERVICES = {"postgres"}
 INITIAL_LOCAL_GUARD_ENV = {"TG_REPLICA_COUNT": "1", "TG_CLIENT_ADDR_TRUST": "socket"}
 INITIAL_LOCAL_DISABLED_ENV = {
@@ -586,7 +590,15 @@ def compose_inventory(compose: object, checkout: pathlib.Path) -> dict[str, obje
             reject("compose-service")
         modes, _ = service_mounts(service, mode_source, compose)
         if modes:
-            reject("mode-mount-helper")
+            if name != "blob-encrypt-migrate":
+                reject("mode-mount-helper")
+            serving = services.get("teagramd")
+            if not isinstance(serving, dict):
+                reject("mode-mount-helper")
+            validate_encryption_migration_service(
+                service, modes, mode_source, compose,
+                raw_environment_map(serving.get("environment", {}), True),
+            )
     postgres_mounts: list[dict[str, object]] = []
     postgres = services.get("postgres")
     if postgres is not None:
@@ -597,6 +609,86 @@ def compose_inventory(compose: object, checkout: pathlib.Path) -> dict[str, obje
         "services": result_services, "volumes": volume_names,
         "postgres_mounts": postgres_mounts, "mode_source": mode_source,
     }
+
+
+def validate_encryption_migration_service(
+    service: dict[str, object],
+    mode_mounts: list[dict[str, object]],
+    mode_source: str,
+    compose: dict[str, object],
+    serving_environment: dict[str, str],
+) -> None:
+    networks = service.get("networks")
+    if (
+        service.get("profiles") != ["migration"]
+        or service.get("entrypoint") != ["/usr/local/bin/blob-encrypt-migrate"]
+        or service.get("user") != "0:0"
+        or service.get("read_only") is not True
+        or service.get("command") not in (None, [])
+        or service.get("ports") not in (None, [])
+        or not isinstance(networks, dict)
+        or set(networks) != {"default", "rustfs_private"}
+    ):
+        reject("mode-mount-helper")
+    if len(mode_mounts) != 1:
+        reject("mode-mount-helper")
+    authority = mode_mounts[0]
+    if (
+        authority.get("type") != "bind"
+        or authority.get("target") != MODE_TARGET
+        or authority.get("read_only") is not False
+        or not isinstance(authority.get("source"), str)
+        or os.path.realpath(authority["source"]) != mode_source
+    ):
+        reject("mode-mount-helper")
+
+    raw_volumes = service.get("volumes", [])
+    if not isinstance(raw_volumes, list):
+        reject("mode-mount-helper")
+    report_mounts = []
+    for mount in raw_volumes:
+        if not isinstance(mount, dict):
+            reject("mode-mount-helper")
+        target = mount.get("target")
+        if target == "/run/teagramd/reports":
+            if mount.get("type") != "bind" or mount.get("read_only", False) is True:
+                reject("mode-mount-helper")
+            report_mounts.append(mount)
+        elif target == MODE_TARGET:
+            continue
+        elif mount.get("read_only", False) is not True:
+            reject("mode-mount-helper")
+    if len(report_mounts) != 1:
+        reject("mode-mount-helper")
+
+    maintenance_environment = raw_environment_map(service.get("environment", {}), True)
+    shared_keys = {
+        *S3_FIELDS,
+        "TG_BLOB_DIR",
+        "TG_POSTGRES_DSN",
+        "TG_AUTHKEY_ENC_KEY",
+        "TG_AUTHKEY_ENC_KEY_FILE",
+        "TG_MEDIA_KEY_DIR",
+        "TG_MEDIA_KEY_CURRENT",
+    }
+    if any(maintenance_environment.get(key, "") != serving_environment.get(key, "") for key in shared_keys):
+        reject("mode-mount-helper")
+    if (
+        not maintenance_environment.get("TG_POSTGRES_DSN")
+        or not maintenance_environment.get("TG_MEDIA_KEY_DIR")
+        or not maintenance_environment.get("TG_MEDIA_KEY_CURRENT")
+    ):
+        reject("mode-mount-helper")
+    declared_networks = compose.get("networks")
+    rustfs_network = declared_networks.get("rustfs_private") if isinstance(declared_networks, dict) else None
+    if not isinstance(rustfs_network, dict) or not isinstance(rustfs_network.get("name"), str):
+        reject("mode-mount-helper")
+    try:
+        network = compose_network(service, compose)
+    except Reject:
+        reject("mode-mount-helper")
+    if not network_includes(network, rustfs_network["name"]):
+        reject("mode-mount-helper")
 
 
 def container_backend(container: dict[str, object]) -> dict[str, str]:
@@ -747,6 +839,7 @@ def valid_outcome(record: object, expected_generation: int, previous_id: str | N
     if (
         (outcome == "initial-local" and expected_generation != 1)
         or (outcome == "s3-accepted" and backend["kind"] != "s3")
+        or (outcome == "encrypted" and backend["kind"] != "s3")
         or (outcome in ("recovered-local", STACK_MOVE_OUTCOME) and backend["kind"] != "local")
     ):
         reject("record-outcome")
@@ -757,6 +850,8 @@ def valid_outcome(record: object, expected_generation: int, previous_id: str | N
         if not canonical_uuid(record.get("supersedes")) or record["supersedes"] != previous_id or outcome == "initial-local":
             reject("record-supersession")
         if outcome == "recovered-local" and previous_outcome != "s3-accepted":
+            reject("record-supersession")
+        if outcome == "encrypted" and previous_outcome != "s3-accepted":
             reject("record-supersession")
         if outcome == STACK_MOVE_OUTCOME and previous_outcome not in ("initial-local", "recovered-local"):
             reject("record-supersession")
@@ -783,6 +878,21 @@ def valid_outcome(record: object, expected_generation: int, previous_id: str | N
         if not all(digest(evidence.get(key)) for key in ("source_manifest_sha256", "destination_manifest_sha256")):
             reject("record-evidence")
         if not all(type(evidence.get(key)) is int and evidence[key] >= 0 for key in ("object_count", "byte_total")):
+            reject("record-evidence")
+    elif outcome == "encrypted":
+        expected = {"report_sha256", "encrypted_inventory_sha256", "object_count", "byte_total", "key_version", "writes"}
+        if set(evidence) != expected:
+            reject("record-evidence")
+        if (
+            not digest(evidence.get("encrypted_inventory_sha256"))
+            or type(evidence.get("object_count")) is not int
+            or evidence["object_count"] < 0
+            or type(evidence.get("byte_total")) is not int
+            or evidence["byte_total"] < 0
+            or type(evidence.get("key_version")) is not int
+            or evidence["key_version"] <= 0
+            or evidence.get("writes") not in ("stopped", "drained")
+        ):
             reject("record-evidence")
     elif outcome == "recovered-local":
         expected = {"report_sha256", "s3_census_manifest_sha256", "restored_manifest_sha256", "object_count", "byte_total", "restore_passes", "retained_cutover_key_count"}
@@ -1454,6 +1564,7 @@ def validate_report(
     report = read_json(report_file)
     if not isinstance(report, dict) or report.get("schema") not in (
         REPORT_SCHEMA, TRANSITION_REPORT_SCHEMA, SIMPLE_TRANSITION_REPORT_SCHEMA, STACK_MOVE_REPORT_SCHEMA,
+        ENCRYPTED_REPORT_SCHEMA,
     ):
         reject("report-schema")
     if (
@@ -1464,6 +1575,51 @@ def validate_report(
         reject("report-provenance")
     if report.get("backend") != record["backend"] or report.get("outcome") != record["outcome"]:
         reject("report-provenance")
+    if record["outcome"] == "encrypted":
+        expected_evidence = dict(record["evidence"])
+        expected_evidence.pop("report_sha256")
+        inventory_name = f"teagramd-blob-encryption-inventory-{record['transition_id']}.json"
+        if (
+            report.get("schema") != ENCRYPTED_REPORT_SCHEMA
+            or set(report) != {"schema", "generation", "transition_id", "outcome", "backend", "volumes", "evidence", "inventory_report"}
+            or report.get("volumes") != record["volumes"]
+            or report.get("evidence") != expected_evidence
+            or report.get("inventory_report") != inventory_name
+        ):
+            reject("transition-report-evidence")
+        inventory_path = report_root / inventory_name
+        file_stat(inventory_path, stat.S_IFREG, 0o600)
+        try:
+            inventory_raw = inventory_path.read_bytes()
+        except OSError:
+            reject("report-unavailable")
+        if hashlib.sha256(inventory_raw).hexdigest() != expected_evidence["encrypted_inventory_sha256"]:
+            reject("transition-report-evidence")
+        inventory = read_json(inventory_path)
+        if not isinstance(inventory, dict) or inventory.get("schema") != ENCRYPTED_INVENTORY_SCHEMA or set(inventory) != {"schema", "encrypted", "plaintext"}:
+            reject("transition-report-evidence")
+        encrypted = inventory.get("encrypted")
+        classes = encrypted.get("classes") if isinstance(encrypted, dict) else None
+        if not isinstance(classes, dict):
+            reject("transition-report-evidence")
+        valid = classes.get("valid_envelope")
+        invalid = classes.get("no_valid_envelope")
+        missing = classes.get("missing")
+        if (
+            not isinstance(valid, dict)
+            or type(valid.get("count")) is not int
+            or valid["count"] != expected_evidence["object_count"]
+            or type(valid.get("logical_bytes")) is not int
+            or valid["logical_bytes"] != expected_evidence["byte_total"]
+            or not isinstance(invalid, dict)
+            or type(invalid.get("count")) is not int
+            or invalid["count"] != 0
+            or not isinstance(missing, dict)
+            or type(missing.get("count")) is not int
+            or missing["count"] != 0
+        ):
+            reject("transition-report-evidence")
+        return
     if record["outcome"] == "initial-local":
         if report.get("schema") != REPORT_SCHEMA:
             reject("report-schema")
@@ -1722,7 +1878,7 @@ def docker_volume_exists(name: str) -> None:
 
 
 def expected_mount_read_only(record: dict[str, object]) -> bool:
-    return record["outcome"] == "s3-accepted"
+    return record["backend"]["kind"] == "s3"
 
 
 def expected_blob_target(record: dict[str, object]) -> str:
@@ -1804,7 +1960,7 @@ def assert_compose_matches(
         reject("render-volume-mismatch")
     expected_rustfs_volume = record["volumes"]["rustfsdata"]
     rendered_rustfs_volume = volumes.get("rustfsdata")
-    if record["outcome"] == "s3-accepted":
+    if record["outcome"] in ("s3-accepted", "encrypted"):
         if not isinstance(expected_rustfs_volume, str) or rendered_rustfs_volume != expected_rustfs_volume:
             reject("render-rustfs-volume-mismatch")
     elif (
@@ -1820,7 +1976,7 @@ def assert_compose_matches(
 
 
 def assert_rustfs_containers_match(rustfs: list[dict[str, object]], record: dict[str, object]) -> None:
-    if record.get("outcome") != "s3-accepted":
+    if record.get("outcome") not in ("s3-accepted", "encrypted"):
         return
     volume_name = record.get("volumes", {}).get("rustfsdata") if isinstance(record.get("volumes"), dict) else None
     if not isinstance(volume_name, str) or not volume_name:
@@ -1864,7 +2020,7 @@ def assert_containers_match(
     for container in teagramd:
         if container.get("backend") != record["backend"]:
             reject("running-backend-mismatch")
-        if record.get("outcome") == "s3-accepted" and not network_includes(
+        if record.get("outcome") in ("s3-accepted", "encrypted") and not network_includes(
             container.get("network"), rustfs_private_network_name(record)
         ):
             reject("running-teagramd-rustfs-network")
@@ -1904,7 +2060,7 @@ def assert_containers_match(
         docker_volume_exists(record["volumes"]["rustfsdata"])
         if any(mount.get("name") != record["volumes"]["rustfsdata"] for container in rustfs for mount in container.get("rustfs_mounts", [])):
             reject("running-rustfs-volume-mismatch")
-        if record["outcome"] == "s3-accepted" and not any(
+        if record["outcome"] in ("s3-accepted", "encrypted") and not any(
             mount.get("type") == "volume" and mount.get("name") == record["volumes"]["rustfsdata"] and mount.get("rw") is True
             for container in rustfs for mount in container.get("rustfs_mounts", [])
         ):

@@ -2737,7 +2737,7 @@ run_stack_move() {
     return 1
   }
   case "$blob_validation" in
-    *'outcome=s3-accepted '*)
+    *'outcome=s3-accepted '*|*'outcome=encrypted '*)
       fail 'S3-authorized blob source requires MAIN-1977 bucket-move work; the source stack was not stopped'
       return 1
       ;;

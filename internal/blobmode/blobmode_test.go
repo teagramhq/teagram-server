@@ -1,6 +1,8 @@
 package blobmode_test
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io/fs"
@@ -43,6 +45,11 @@ func TestValidateAcceptsCurrentBackendRecords(t *testing.T) {
 		{
 			name:     "accepted S3",
 			outcomes: []string{"initial-local", "s3-accepted"},
+			config:   blobmode.EffectiveConfig{BlobS3: testS3Config()},
+		},
+		{
+			name:     "encrypted S3 after accepted plaintext",
+			outcomes: []string{"initial-local", "s3-accepted", "encrypted"},
 			config:   blobmode.EffectiveConfig{BlobS3: testS3Config()},
 		},
 		{
@@ -133,6 +140,31 @@ func TestValidateAcceptsPublisherGeneratedStackMoveJournal(t *testing.T) {
 	statePath := filepath.Join(fixtureRoot, "checkout", ".state", "blob-mode")
 	if err := blobmode.Validate(statePath, blobmode.EffectiveConfig{BlobDir: movedBlobDir}); err != nil {
 		t.Fatalf("validate publisher-generated stack-move journal: %v", err)
+	}
+}
+
+func TestPublishEncryptedAuthorityAfterVerifiedMigration(t *testing.T) {
+	if !requireRootFixture(t, "TestPublishEncryptedAuthorityAfterVerifiedMigration") {
+		return
+	}
+	state := testState(t, "initial-local", "s3-accepted")
+	config := blobmode.EffectiveConfig{BlobS3: testS3Config()}
+	reportRoot := filepath.Join(t.TempDir(), "reports")
+	inventoryReport := []byte(`{"schema":"teagram.blob-encryption-inventory/v1","encrypted":{"classes":{"valid_envelope":{"count":3,"logical_bytes":4096},"no_valid_envelope":{"count":0},"missing":{"count":0}}},"plaintext":{"classes":{}}}`)
+	inventoryDigest := sha256.Sum256(inventoryReport)
+	err := blobmode.PublishEncrypted(state.path, reportRoot, config, blobmode.EncryptedEvidence{
+		InventorySHA256: hex.EncodeToString(inventoryDigest[:]), InventoryReport: inventoryReport,
+		ObjectCount: 3, ByteTotal: 4096, KeyVersion: 4, Writes: "drained",
+	})
+	if err != nil {
+		t.Fatalf("publish encrypted authority: %v", err)
+	}
+	authority, err := blobmode.Read(state.path, config)
+	if err != nil {
+		t.Fatalf("read encrypted authority: %v", err)
+	}
+	if !authority.Present || authority.Outcome != blobmode.OutcomeEncrypted {
+		t.Fatalf("authority = %+v, want encrypted", authority)
 	}
 }
 
@@ -592,6 +624,26 @@ func TestValidateRejectsInvalidTreesWithoutChangingThem(t *testing.T) {
 			},
 		},
 		{
+			name: "encrypted authority rejects an unknown write choice",
+			setup: func(t *testing.T) (string, blobmode.EffectiveConfig) {
+				t.Helper()
+				chain := testChain(t, "initial-local", "s3-accepted", "encrypted")
+				changed := mutateRecord(t, chain.records[3], func(record map[string]any) {
+					objectField(t, record, "evidence")["writes"] = "running"
+				})
+				chain.records[3] = changed
+				return writeTestState(t, chain.records, changed), blobmode.EffectiveConfig{BlobS3: testS3Config()}
+			},
+		},
+		{
+			name: "encrypted authority must follow accepted S3",
+			setup: func(t *testing.T) (string, blobmode.EffectiveConfig) {
+				t.Helper()
+				chain := testChain(t, "initial-local", "encrypted")
+				return writeTestState(t, chain.records, chain.records[2]), blobmode.EffectiveConfig{BlobS3: testS3Config()}
+			},
+		},
+		{
 			name: "S3 null rustfsdata volume",
 			setup: func(t *testing.T) (string, blobmode.EffectiveConfig) {
 				t.Helper()
@@ -659,6 +711,8 @@ func TestValidateRejectsInvalidTreesWithoutChangingThem(t *testing.T) {
 		"S3 record does not match local backend":              "reason=backend field=backend",
 		"missing mandatory evidence":                          "reason=schema field=evidence",
 		"missing mandatory restore evidence":                  "reason=schema field=evidence",
+		"encrypted authority rejects an unknown write choice": "reason=schema field=evidence",
+		"encrypted authority must follow accepted S3":         "reason=supersession field=outcome",
 		"S3 null rustfsdata volume":                           "reason=schema field=volumes.rustfsdata",
 		"copy pass count is invalid":                          "reason=schema field=evidence",
 		"restore pass count is invalid":                       "reason=schema field=evidence",
@@ -811,6 +865,14 @@ func makeRecord(t *testing.T, generation int, outcome, supersedes string, change
 		evidence["object_count"] = 12
 		evidence["byte_total"] = 2048
 		evidence["copy_passes"] = 2
+	case "encrypted":
+		backend = map[string]any{"kind": "s3", "endpoint": "http://rustfs:9000", "bucket": "teagram", "prefix": "teagramd/"}
+		volumes["rustfsdata"] = "project_rustfsdata"
+		evidence["encrypted_inventory_sha256"] = digest(generation + 10)
+		evidence["object_count"] = 12
+		evidence["byte_total"] = 2048
+		evidence["key_version"] = 4
+		evidence["writes"] = "stopped"
 	case "recovered-local":
 		volumes["rustfsdata"] = "project_rustfsdata"
 		evidence["s3_census_manifest_sha256"] = digest(generation + 10)

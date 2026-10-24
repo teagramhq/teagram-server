@@ -1032,7 +1032,8 @@ func newBlobStoreWithAuthority(ctx context.Context, cfg config.Config, log *slog
 		return blob.NewLocal(cfg.BlobDir)
 	}
 	acceptedPlaintext := authority.Present && authority.Outcome == blobmode.OutcomeS3Accepted
-	if authority.Present && !acceptedPlaintext {
+	encryptedMigration := authority.Present && authority.Outcome == blobmode.OutcomeEncrypted
+	if authority.Present && !acceptedPlaintext && !encryptedMigration {
 		return nil, errors.New("blob-mode authority is not valid for the configured S3 backend")
 	}
 	if acceptedPlaintext {
@@ -1044,6 +1045,27 @@ func newBlobStoreWithAuthority(ctx context.Context, cfg config.Config, log *slog
 	// NewS3 emits the plaintext warning while it constructs the client, so
 	// the logger must be selected before construction rather than after it.
 	s3cfg.Logger = log
+	if encryptedMigration {
+		if cfg.MediaKeys == nil {
+			return nil, errors.New("S3 media encryption requires TG_MEDIA_KEY_DIR and TG_MEDIA_KEY_CURRENT")
+		}
+		remote, err := blob.NewS3(s3cfg)
+		if err != nil {
+			return nil, fmt.Errorf("object store configuration is invalid; check TG_BLOB_S3_* settings: %w", err)
+		}
+		if err := remote.Check(ctx); err != nil {
+			return nil, fmt.Errorf("object store startup check failed: %w", err)
+		}
+		prefixed, err := blob.NewPrefixedStore(remote, blob.EncryptedObjectsPrefix)
+		if err != nil {
+			return nil, fmt.Errorf("construct encrypted object namespace: %w", err)
+		}
+		sealed, err := blob.NewEncrypted(prefixed, cfg.MediaKeys, blob.DefaultChunkSize)
+		if err != nil {
+			return nil, fmt.Errorf("construct encrypted object store: %w", err)
+		}
+		return sealed, nil
+	}
 	blobs, _, err := blob.NewS3Store(ctx, s3cfg, cfg.MediaKeys, !acceptedPlaintext)
 	if err != nil {
 		return nil, err

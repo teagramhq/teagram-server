@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"sync"
 	"time"
 )
@@ -99,6 +100,23 @@ func NewEncrypted(backend Store, ring *KeyRing, chunkSize int) (*Encrypted, erro
 		return nil, fmt.Errorf("encrypted store: chunk size %d outside [%d, %d]", chunkSize, MinChunkSize, MaxChunkSize)
 	}
 	return &Encrypted{backend: backend, ring: ring, chunkSize: chunkSize}, nil
+}
+
+// EnvelopePhysicalSize returns the byte length written for a plaintext object
+// of plainBytes using chunkSize. It lets a writer authenticate a newly
+// written envelope before a subsequent full-tree inventory.
+func EnvelopePhysicalSize(plainBytes int64, chunkSize int) (int64, error) {
+	if plainBytes < 0 || plainBytes > envelopeMaxPlain {
+		return 0, fmt.Errorf("envelope size: plaintext length %d out of range", plainBytes)
+	}
+	if chunkSize < MinChunkSize || chunkSize > MaxChunkSize {
+		return 0, fmt.Errorf("envelope size: chunk size %d outside [%d, %d]", chunkSize, MinChunkSize, MaxChunkSize)
+	}
+	chunks := max(int64(1), (plainBytes+int64(chunkSize)-1)/int64(chunkSize))
+	if chunks > (math.MaxInt64-envelopeHeaderLen-plainBytes)/gcmTagLen {
+		return 0, errors.New("envelope size: physical length overflows int64")
+	}
+	return envelopeHeaderLen + plainBytes + chunks*gcmTagLen, nil
 }
 
 // OperationTimeout forwards a backend's per-operation bound through the

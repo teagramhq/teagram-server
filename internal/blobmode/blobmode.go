@@ -26,6 +26,8 @@ const (
 	maxJournalDirectoryEntries = maxJournalEntries*2 + 2
 	stackMoveOutcome           = "stack-moved-local"
 	OutcomeS3Accepted          = "s3-accepted"
+	OutcomeEncrypted           = "encrypted"
+	DefaultDirectory           = "/run/teagramd/blob-mode"
 	stackMoveSourceTGBlobs     = "telegram-server_tgblobs"
 	stackMoveTargetTGBlobs     = "teagram_tgblobs"
 	stackMoveSourceRustFSData  = "telegram-server_rustfsdata"
@@ -215,6 +217,9 @@ type evidence struct {
 	CopyPasses                *int64 `json:"copy_passes"`
 	RestorePasses             *int64 `json:"restore_passes"`
 	RetainedCutoverKeyCount   *int64 `json:"retained_cutover_key_count"`
+	EncryptedInventorySHA256  string `json:"encrypted_inventory_sha256"`
+	KeyVersion                uint32 `json:"key_version"`
+	Writes                    string `json:"writes"`
 }
 
 type journalEntry struct {
@@ -517,6 +522,8 @@ func hasRequiredEvidenceKeys(outcome string, fields map[string]json.RawMessage) 
 		expected = []string{"report_sha256"}
 	case "s3-accepted":
 		expected = []string{"report_sha256", "source_manifest_sha256", "destination_manifest_sha256", "object_count", "byte_total", "copy_passes"}
+	case OutcomeEncrypted:
+		expected = []string{"report_sha256", "encrypted_inventory_sha256", "object_count", "byte_total", "key_version", "writes"}
 	case "recovered-local":
 		expected = []string{"report_sha256", "s3_census_manifest_sha256", "restored_manifest_sha256", "object_count", "byte_total", "restore_passes", "retained_cutover_key_count"}
 	case stackMoveOutcome:
@@ -556,6 +563,12 @@ func validateRecord(
 		if record.Outcome == "recovered-local" && previousOutcome != "s3-accepted" {
 			return reject("supersession", "outcome")
 		}
+		if record.Outcome == OutcomeS3Accepted && previousOutcome != "initial-local" && previousOutcome != "recovered-local" && previousOutcome != stackMoveOutcome {
+			return reject("supersession", "outcome")
+		}
+		if record.Outcome == OutcomeEncrypted && previousOutcome != OutcomeS3Accepted {
+			return reject("supersession", "outcome")
+		}
 		if record.Outcome == stackMoveOutcome && previousOutcome != "initial-local" && previousOutcome != "recovered-local" {
 			return reject("supersession", "outcome")
 		}
@@ -571,6 +584,7 @@ func validateRecord(
 	}
 	if record.Outcome == "initial-local" && record.Backend.Kind != "local" ||
 		record.Outcome == "s3-accepted" && record.Backend.Kind != "s3" ||
+		record.Outcome == OutcomeEncrypted && record.Backend.Kind != "s3" ||
 		record.Outcome == "recovered-local" && record.Backend.Kind != "local" ||
 		record.Outcome == stackMoveOutcome && record.Backend.Kind != "local" {
 		return reject("schema", "outcome")
@@ -633,6 +647,12 @@ func validateEvidence(outcome string, evidence evidence) error {
 		if !lowerHexDigest(evidence.SourceManifestSHA256) || !lowerHexDigest(evidence.DestinationManifestSHA256) ||
 			evidence.ObjectCount == nil || *evidence.ObjectCount < 0 || evidence.ByteTotal == nil || *evidence.ByteTotal < 0 ||
 			evidence.CopyPasses == nil || (*evidence.CopyPasses != 1 && *evidence.CopyPasses != 2) {
+			return reject("schema", "evidence")
+		}
+	case OutcomeEncrypted:
+		if !lowerHexDigest(evidence.EncryptedInventorySHA256) || evidence.ObjectCount == nil || *evidence.ObjectCount < 0 ||
+			evidence.ByteTotal == nil || *evidence.ByteTotal < 0 || evidence.KeyVersion == 0 ||
+			(evidence.Writes != "stopped" && evidence.Writes != "drained") {
 			return reject("schema", "evidence")
 		}
 	case "recovered-local":
