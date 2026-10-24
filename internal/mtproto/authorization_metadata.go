@@ -55,10 +55,12 @@ func (c *Conn) setAuthorizationMetadata(metadata AuthorizationMetadata) {
 	c.authorizationMetadataSet = true
 }
 
-// RecordAuthorizationBinding records the owner returned by a committed auth-key
-// binding transaction on this connection. Call it only after the transaction
-// succeeds; a later per-frame lookup may already see a different owner.
+// RecordAuthorizationBinding records a committed auth-key binding on this
+// connection's current frame and observes the transaction's returned owner.
+// Call it only after the transaction succeeds; a later per-frame lookup may
+// already see a different owner.
 func (c *Conn) RecordAuthorizationBinding(userID int64) {
+	c.authorizationBindingRecorded = true
 	c.observeAuthorizationOwner(userID)
 }
 

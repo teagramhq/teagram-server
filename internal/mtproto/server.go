@@ -1223,6 +1223,7 @@ func (s *Server) serveConnModeWithDiagnostics(readCtx, requestCtx context.Contex
 		// connection pending from inside the handler. A hold already charged to
 		// this key skips that reservation so the post-dispatch charge below still
 		// observes a same-frame rebind.
+		conn.authorizationBindingRecorded = false
 		if err := s.rpcHandle(requestCtx, conn, b, userID, provisional, clientAddr, slot, handler, func() error {
 			if userID != 0 {
 				closeDiagnostics.markAuthorized()
@@ -1265,20 +1266,16 @@ func (s *Server) serveConnModeWithDiagnostics(readCtx, requestCtx context.Contex
 		}
 
 		// Every decrypted frame still gets this post-dispatch charge. A new
-		// unbound key was reserved by the callback above before dispatch; keeping
-		// this call after dispatch for an already-charged key lets a same-frame
-		// sign-in use the post-dispatch binding before the hold is released.
+		// unbound key was reserved by the callback above before dispatch; a
+		// committed binding recorded during this frame may let the charge release
+		// an already-held slot after reading the database's current binding.
 		//
-		// Re-read the binding after dispatch only for the one path it helps:
-		// an unbound session (userID == 0) that has not already proven signed-in
-		// (hold.signedIn). On every signed-in session's frames the second query
-		// is discarded — charge short-circuits on signedIn — so the gate drops
-		// the extra AuthKeyByID query for nearly all frames.
+		// Read the binding after dispatch only if a handler recorded a committed
+		// binding on an unbound session that has not already proven signed-in.
+		// This also handles containers whose later entries may return the key to
+		// an unbound pending-user state before the frame finishes.
 		var chargeUser = userID
-		if userID == 0 && !hold.signedIn {
-			// rpcHandle can change the binding (auth.signIn binds the key to a
-			// user), and charging with the pre-dispatch value would close a
-			// session that just signed in.
+		if userID == 0 && !hold.signedIn && conn.authorizationBindingRecorded {
 			var ok bool
 			var err error
 			_, chargeUser, _, _, ok, err = s.keys.Get(requestCtx, authKeyID, s.pendingLoginLifetime)

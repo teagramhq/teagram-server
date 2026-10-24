@@ -125,6 +125,9 @@ type Conn struct {
 	// authorizationMetadata is captured from initConnection and read by the same
 	// serve goroutine for login handlers and the throttled session touch.
 	authorizationMetadata AuthorizationMetadata
+	// authorizationBindingRecorded is set by a committed binding handler and
+	// reset before each frame is dispatched. It gates the post-dispatch key read.
+	authorizationBindingRecorded bool
 	// authorizationMetadataSet distinguishes absent initConnection data from an
 	// explicit empty device description on an already-bound key.
 	authorizationMetadataSet bool

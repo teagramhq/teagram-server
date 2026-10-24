@@ -305,7 +305,7 @@ func TestUnboundKeyCapBindDuringDispatchAtFullCap(t *testing.T) {
 	// second frame's post-dispatch charge, but before the third frame's charge.
 	var reqCount int
 	mu := sync.Mutex{}
-	handler := mtproto.HandlerFunc(func(_ *mtproto.Conn, req *mtproto.Request) error {
+	handler := mtproto.HandlerFunc(func(conn *mtproto.Conn, req *mtproto.Request) error {
 		mu.Lock()
 		reqCount++
 		request := reqCount
@@ -314,6 +314,7 @@ func TestUnboundKeyCapBindDuringDispatchAtFullCap(t *testing.T) {
 		case 2:
 			// Second request: bind the key during dispatch.
 			keys.bind(7)
+			conn.RecordAuthorizationBinding(7)
 		case 3:
 			// The server cannot reach this handler until frame 2's
 			// post-dispatch charge has completed. Keep frame 3 from charging
@@ -348,6 +349,9 @@ func TestUnboundKeyCapBindDuringDispatchAtFullCap(t *testing.T) {
 	// the previous frame's post-dispatch binding re-read has released A's slot.
 	sendFrame(t, ctx, connA, keys.key, 100, int64(3)<<32)
 	wantSignal(t, thirdReady, "A's third frame")
+	if got, want := keys.readCount(), 4; got != want {
+		t.Fatalf("auth-key reads through the binding frame = %d, want %d (one per ordinary frame, two for the binding frame)", got, want)
+	}
 
 	// 3. The binding is now removed while A's third frame is still in its
 	// handler, so a new connection can take the released slot. If frame 2's
@@ -397,8 +401,9 @@ func TestSetMaxConnsPerUnboundKeyRefusesANegativeCap(t *testing.T) {
 type signInStore struct {
 	key crypto.AuthKey
 
-	mu     sync.Mutex
-	userID int64
+	mu      sync.Mutex
+	userID  int64
+	lookups int
 }
 
 func newSignInStore() *signInStore { return &signInStore{key: rebindTestKey()} }
@@ -415,7 +420,14 @@ func (s *signInStore) Touch(context.Context, [8]byte) error       { return nil }
 func (s *signInStore) Get(context.Context, [8]byte, time.Duration) (crypto.AuthKey, int64, bool, mtproto.PendingLogin, bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.lookups++
 	return s.key, s.userID, false, mtproto.PendingLogin{}, true, nil
+}
+
+func (s *signInStore) readCount() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.lookups
 }
 
 // twoKeyStore is an AuthKeyStore holding two distinct keys, neither bound to
