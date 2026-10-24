@@ -429,7 +429,9 @@ if [ "${1:-}" = inspect ]; then
       env_json=$(jq -c --arg value "$origin_value" '. + ["TG_WEBSOCKET_ALLOWED_ORIGINS=" + $value]' <<< "$env_json")
     fi
     login_codes=false
-    if { [ "${MOCK_SCENARIO:-}" = compose-syslog-transition-enabled ] || \
+    if [ "${MOCK_SCENARIO:-}" = compose-syslog-unmigrated ]; then
+      login_codes=true
+    elif { [ "${MOCK_SCENARIO:-}" = compose-syslog-transition-enabled ] || \
          [ "${MOCK_SCENARIO:-}" = compose-syslog-invalid-transition ]; } && [ "$cfg" != target ]; then login_codes=true; fi
     env_json=$(jq -c --arg value "$login_codes" 'map(select(type != "string" or (startswith("TG_LOG_LOGIN_CODES=") | not))) + ["TG_LOG_LOGIN_CODES=" + $value]' <<< "$env_json")
     turnstile_source=''
@@ -830,6 +832,10 @@ write_compose_fixture() {
     jq -c '.services.teagramd.environment.TG_LOG_LOGIN_CODES="true"' "$base_config" > "${base_config%.json}.enabled.json"
     mv -- "${base_config%.json}.enabled.json" "$base_config"
     jq -c '.services.teagramd.environment.TG_LOG_LOGIN_CODES="false"' "$base_config" > "$target_config"
+  elif [ "$scenario" = compose-syslog-unmigrated ]; then
+    jq -c '.services.teagramd.environment.TG_LOG_LOGIN_CODES="true"' "$base_config" > "${base_config%.json}.enabled.json"
+    mv -- "${base_config%.json}.enabled.json" "$base_config"
+    cp -- "$base_config" "$target_config"
   elif [ "$scenario" = compose-syslog-invalid-profile ]; then
     jq -c '.services.teagramd.environment.TG_LOG_LOGIN_CODES="false" | .services.teagramd.logging={driver:"syslog",options:{"syslog-address":"tcp://0.0.0.0:514","syslog-facility":"daemon","syslog-format":"rfc5424",tag:"teagramd"}}' "$base_config" > "$target_config"
   elif [ "$scenario" = public-websocket-defaults ]; then
@@ -4201,6 +4207,19 @@ if [ "$status" != 0 ] && \
 else
   show_fixture_failure compose-syslog-invalid-transition "$status"
   fail 'unapproved initial-local logging profile transition rejection'
+fi
+
+make_fixture compose-syslog-unmigrated compose-syslog-unmigrated
+status=$(run_fixture compose-syslog-unmigrated)
+root=$(cat "$TMP/compose-syslog-unmigrated-root-path")
+if [ "$status" != 0 ] && \
+   grep -q $'preflight\tcompose_logging_profile\tdefault:true\tdefault:true\tfail' "$root.baseline/initial-local-logging-profile-preflight.tsv" && \
+   ! grep -q '^docker compose exec -T postgres pg_dump' "$TMP/compose-syslog-unmigrated-events" && \
+   ! grep -q '^docker compose up -d' "$TMP/compose-syslog-unmigrated-events"; then
+  pass 'unmigrated JSON-file logging is rejected before backup or service replacement'
+else
+  show_fixture_failure compose-syslog-unmigrated "$status"
+  fail 'initial-local rollout rejects an unchanged JSON-file logging profile'
 fi
 
 make_fixture config-drift config-drift

@@ -427,9 +427,8 @@ container_logging_profile() {
 
 logging_profile_transition_allowed() {
   local before=$1 after=$2
-  [ "$before" = "$after" ] || {
-    { [ "$before" = default:true ] || [ "$before" = default:false ]; } &&
-      [ "$after" = syslog:false ]
+  [ "$after" = syslog:false ] && {
+    [ "$before" = default:true ] || [ "$before" = default:false ] || [ "$before" = syslog:false ]
   }
 }
 

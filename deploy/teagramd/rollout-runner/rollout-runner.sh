@@ -4,7 +4,7 @@ umask 077
 
 SCRIPT_DIR=$(cd -P "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 SCRIPT_SOURCE="$SCRIPT_DIR/$(basename "${BASH_SOURCE[0]}")"
-readonly APPROVED_VERIFIER_SHA=a421c8d517e6097de11be0368e7ce18321e518e5657e503601080fc257c882f3
+readonly APPROVED_VERIFIER_SHA=c4b5fd3623171164f171d05cba98e2921624c0fa40c702c97515e5964d2e378b
 readonly APPROVED_SCHEMA_GATE_SHA=ac54d3cf0480383a52414a8bc8b856b5e1d5f6f8d19034c9c576c64627e097c8
 readonly APPROVED_SCHEMA_GATE_HELPER_SHA=7ae06c2872c60b434068b3715a9ddd5e19b03d4be98dc9881c8dd8f294953d41
 readonly APPROVED_INITIAL_LOCAL_COMPOSE_SHA=3a4f158c6e1f2ead6676fba85d8d95cfb15557a0fbd8e82230361e0af988e0f7
@@ -1085,9 +1085,8 @@ validate_blob_authority() {
 
 logging_profile_transition_allowed() {
   local before=$1 after=$2
-  [ "$before" = "$after" ] || {
-    { [ "$before" = default:true ] || [ "$before" = default:false ]; } &&
-      [ "$after" = syslog:false ]
+  [ "$after" = syslog:false ] && {
+    [ "$before" = default:true ] || [ "$before" = default:false ] || [ "$before" = syslog:false ]
   }
 }
 
@@ -2125,9 +2124,9 @@ compare_resolved_preflight() {
   for field in "${fields[@]}"; do
     before=$(jq -er --arg field "$field" '.[$field]' "$old_file") || { fail 'baseline is missing a resolved configuration comparison field'; return 1; }
     after=$(jq -er --arg field "$field" '.[$field]' "$target_file") || { fail 'resolved target is missing a configuration comparison field'; return 1; }
-    if [ "$before" = "$after" ] || {
-      [ "$field" = compose_logging_profile ] && logging_profile_transition_allowed "$before" "$after";
-    }; then
+    if [ "$field" = compose_logging_profile ]; then
+      if logging_profile_transition_allowed "$before" "$after"; then result=pass; else result=fail; failures=$((failures + 1)); fi
+    elif [ "$before" = "$after" ]; then
       result=pass
     else
       result=fail
