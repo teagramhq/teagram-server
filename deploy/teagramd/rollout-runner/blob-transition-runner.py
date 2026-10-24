@@ -28,6 +28,7 @@ TEST_MODE = os.environ.get("BLOB_TRANSITION_TEST_MODE") == "1"
 TEST_FIXTURE_ROOT: pathlib.Path | None = None
 TEST_FIXTURE_DOCKER: pathlib.Path | None = None
 BLOB_TRANSITION_COMPOSE_ENV_FILES = "BLOB_TRANSITION_COMPOSE_ENV_FILES"
+LOG_VOLUME_ACCOUNTING_COMMAND = "/usr/local/sbin/teagramd-log-volume-accounting"
 RECOVERY_BUNDLE_FILES = {
     "recovery.json",
     "frozen-containers.json",
@@ -304,6 +305,32 @@ def compose_command(args: list[str], env: dict[str, str] | None) -> list[str]:
     return [*prefix, *args[2:]]
 
 
+def replaces_teagramd(args: list[str]) -> bool:
+    return args[:3] == ["docker", "compose", "up"] and any(
+        service in args[3:] for service in ("teagramd", "teagramd-proxy")
+    )
+
+
+def record_log_volume_event(event: str) -> bool:
+    command = os.environ.get("TEAGRAMD_LOG_VOLUME_ACCOUNTING_COMMAND")
+    if TEST_MODE and not command:
+        return True
+    try:
+        result = subprocess.run(
+            [command or LOG_VOLUME_ACCOUNTING_COMMAND, event],
+            check=False,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+    except OSError:
+        return False
+    return result.returncode == 0
+
+
+def log_volume_warning() -> None:
+    print("log-volume accounting gap=1 reason=capture_failed", file=sys.stderr)
+
+
 def run_command(
     args: list[str],
     output_dir: pathlib.Path,
@@ -316,6 +343,9 @@ def run_command(
     stdout_path = output_dir / f"{name}.stdout"
     stderr_path = output_dir / f"{name}.stderr"
     try:
+        captures_teagramd = replaces_teagramd(args)
+        if captures_teagramd and not record_log_volume_event("before-replacement"):
+            log_volume_warning()
         command = compose_command(args, env)
         if TEST_MODE and args and args[0] == "docker":
             if TEST_FIXTURE_DOCKER is None:
@@ -326,6 +356,8 @@ def run_command(
         )
     except OSError:
         reject(f"{name}-unavailable")
+    if captures_teagramd and result.returncode == 0 and not record_log_volume_event("after-replacement"):
+        log_volume_warning()
     if persist_output:
         try:
             write_synced(stdout_path, result.stdout)

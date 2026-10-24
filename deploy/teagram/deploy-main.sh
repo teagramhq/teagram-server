@@ -117,6 +117,68 @@ install_teagram_logs_command() {
   printf 'installed teagram-logs command from %s\n' "${sha:0:7}"
 }
 
+install_teagramd_log_volume_accounting() {
+  local sha=$1 target=/usr/local/sbin/teagramd-log-volume-accounting
+  local periodic=/etc/periodic/15min/teagramd-log-volume-accounting
+  local target_dir periodic_dir temp periodic_temp backup
+
+  if [[ -n ${DEPLOY_DIR:-} ]]; then
+    target="$R/usr/local/sbin/teagramd-log-volume-accounting"
+    periodic="$R/etc/periodic/15min/teagramd-log-volume-accounting"
+  fi
+
+  # Older deployable commits predate metadata-only log-volume accounting.
+  if ! git cat-file -e "$sha:deploy/teagram/teagramd-log-volume-accounting.py" 2>/dev/null; then
+    return 0
+  fi
+
+  target_dir=${target%/*}
+  periodic_dir=${periodic%/*}
+  install -d -m 0755 "$target_dir" "$periodic_dir"
+  if [[ -L "$target" || ( -e "$target" && ! -f "$target" ) || \
+        -L "$periodic" || ( -e "$periodic" && ! -f "$periodic" ) ]]; then
+    echo 'teagramd log-volume accounting target is not a regular file' >&2
+    return 1
+  fi
+
+  temp=$(mktemp "$target_dir/.teagramd-log-volume-accounting.XXXXXX") || return 1
+  if ! git show "$sha:deploy/teagram/teagramd-log-volume-accounting.py" > "$temp"; then
+    rm -f "$temp"
+    return 1
+  fi
+  if ! python3 -c 'import ast,sys; ast.parse(open(sys.argv[1], encoding="utf-8").read())' "$temp"; then
+    rm -f "$temp"
+    echo "teagramd log-volume accounting script from ${sha:0:7} failed syntax validation" >&2
+    return 1
+  fi
+  chmod 0755 "$temp" || { rm -f "$temp"; return 1; }
+
+  if [[ -f "$target" ]] && ! cmp -s "$temp" "$target"; then
+    backup="$R/teagramd-log-volume-accounting.previous"
+    if ! cp -p "$target" "$backup"; then
+      rm -f "$temp"
+      return 1
+    fi
+    chmod 0600 "$backup"
+  fi
+  if ! mv -f "$temp" "$target"; then
+    rm -f "$temp"
+    return 1
+  fi
+
+  periodic_temp=$(mktemp "$periodic_dir/.teagramd-log-volume-accounting.XXXXXX") || return 1
+  cat > "$periodic_temp" <<'PERIODIC'
+#!/bin/sh
+exec /usr/local/sbin/teagramd-log-volume-accounting sample >/dev/null 2>&1
+PERIODIC
+  chmod 0755 "$periodic_temp" || { rm -f "$periodic_temp"; return 1; }
+  if ! mv -f "$periodic_temp" "$periodic"; then
+    rm -f "$periodic_temp"
+    return 1
+  fi
+  printf 'installed teagramd log-volume accounting from %s; sample runs every 15 minutes\n' "${sha:0:7}"
+}
+
 SHA=${DEPLOY_SHA:-}
 case "$SHA" in *[!0-9a-f]*|"") echo "DEPLOY_SHA must be a full 40-hex commit SHA"; exit 1;; esac
 [ ${#SHA} = 40 ] || { echo "DEPLOY_SHA must be a full 40-hex commit SHA"; exit 1; }
@@ -185,6 +247,7 @@ docker_compose() {
     docker compose "$@"
   fi
 }
+install_teagramd_log_volume_accounting "$SHA"
 IMG=$(docker inspect --format '{{.Image}}' $C)
 if [ "$PREV" = "$SHA" ] && grep -qs "source_sha=$SHA image_id=$IMG " "$R"/main1238-*.build/built-image.identity; then
   umask 077

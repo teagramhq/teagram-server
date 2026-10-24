@@ -67,6 +67,7 @@ else
 fi
 ENV_FILE=${ROLLOUT_RUNNER_ENV_FILE:-/opt/teagram/.env}
 OVERRIDE_FILE=${ROLLOUT_RUNNER_OVERRIDE_FILE:-/opt/teagram/docker-compose.override.yml}
+LOG_VOLUME_ACCOUNTING_COMMAND=${TEAGRAMD_LOG_VOLUME_ACCOUNTING_COMMAND:-/usr/local/sbin/teagramd-log-volume-accounting}
 ADDED_ENV=${ROLLOUT_RUNNER_ADDED_ENV:-}
 CHANGED_ENV=${ROLLOUT_RUNNER_CHANGED_ENV:-}
 PREVIOUS_ENV_FILE=${ROLLOUT_RUNNER_PREVIOUS_ENV_FILE:-}
@@ -98,6 +99,21 @@ QUALIFIER_HELPER="$SCRIPT_DIR/qualify-rustfs-transition.py"
 fail() {
   printf 'rollout runner rejected: %s\n' "$1" >&2
   return 1
+}
+
+verify_log_volume_accounting() {
+  [ -x "$LOG_VOLUME_ACCOUNTING_COMMAND" ] || {
+    fail 'host teagramd log-volume accounting command is unavailable'
+    return 1
+  }
+}
+
+record_log_volume_event() {
+  local event=$1
+  "$LOG_VOLUME_ACCOUNTING_COMMAND" "$event" || {
+    fail 'cannot record teagramd log-volume sample (gap=1)'
+    return 1
+  }
 }
 
 configure_action_paths() {
@@ -2160,7 +2176,11 @@ perform_rollback() {
     fail 'current containers or baseline rollback render do not satisfy durable blob authority; baseline was not started'
     return 1
   fi
+  record_log_volume_event before-replacement || return 1
   docker compose up -d --no-build --no-deps teagramd </dev/null || { fail 'baseline teagramd recreation failed'; return 1; }
+  if ! record_log_volume_event after-replacement; then
+    printf '%s\n' 'log-volume accounting gap=1 reason=capture_failed' >&2
+  fi
   rollback_id=$(current_service_id teagramd) || { fail 'rollback teagramd container ID is unavailable'; return 1; }
   capture_snapshot "$rollback_id" "$ROLLBACK_DIR" rollback || return 1
   local equivalence_rc=0 readiness_rc=0
@@ -2211,6 +2231,7 @@ perform_rollback() {
 run_apply() {
   local branch origin_sha previous_sha baseline_id target_id rc dir runtime_source_sha target_container_action
   local authority_preflight_done=0
+  verify_log_volume_accounting || return 1
   verify_target_local_compose || return 1
   git -C "$CHECKOUT" fetch -q origin || { fail 'cannot fetch origin/main under deployment lock'; return 1; }
   branch=$(git -C "$CHECKOUT" branch --show-current) || { fail 'cannot read checkout branch'; return 1; }
@@ -2455,10 +2476,18 @@ run_apply() {
     return 1
   fi
 
+  if ! record_log_volume_event before-replacement; then
+    restore_checkout_and_tag || return 1
+    fail 'baseline teagramd log-volume capture failed; target was not started'
+    return 1
+  fi
   if docker compose up -d </dev/null; then :; else
     rc=$?
     rollback_after_target_failure "compose_up_exit_$rc" || return 2
     return 1
+  fi
+  if ! record_log_volume_event after-replacement; then
+    printf '%s\n' 'log-volume accounting gap=1 reason=capture_failed' >&2
   fi
   target_id=$(current_service_id teagramd) || target_id=''
   if [ -n "$target_id" ]; then

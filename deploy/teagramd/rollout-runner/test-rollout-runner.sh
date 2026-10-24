@@ -15,6 +15,13 @@ fi
 bash "$SCRIPT_DIR/test-rollout-verifier-env-additions.sh"
 TMP=$(mktemp -d "${TMPDIR:-/root}/main1238-rollout-fixtures.XXXXXXXX")
 chmod 700 "$TMP"
+cat > "$TMP/log-volume-accounting-stub" <<'ACCOUNTING'
+#!/usr/bin/env bash
+set -euo pipefail
+printf 'log-volume %s\n' "${1:?missing event}" >> "$MOCK_EVENTS"
+printf '%s\n' "$1" >> "$TEAGRAMD_LOG_VOLUME_TEST_EVENTS"
+ACCOUNTING
+chmod 700 "$TMP/log-volume-accounting-stub"
 cleanup_fixtures() {
   local root_file root phase checkout transition record_file report phase_dir
   for root_file in "$TMP"/*-root-path; do
@@ -1320,6 +1327,7 @@ run_fixture() {
     runner_args=("$action" "$target_sha" "$baseline_sha")
   fi
   printf '%s\n' 0 > "$state/compose-config-count"
+  : > "$TMP/$name-accounting-events"
   printf 'fixture runner: %s action=%s\n' "$name" "$action" >&2
   set +e
   (cd "$checkout" && timeout --signal=TERM --kill-after=5s 180s env \
@@ -1336,6 +1344,7 @@ run_fixture() {
     MOCK_CAPTURE_IMAGE="$capture" MOCK_FAIL_SYNC="$fail_sync" MOCK_FAIL_CHMOD_MATCH="$chmod_match" MOCK_FAIL_LN_MATCH="$ln_match" MOCK_FAIL_SYNC_MATCH="$sync_match" \
     MOCK_REQUIRE_FAILURE_MARKER="$require_marker" MOCK_EVIDENCE_ROOT="$root" MOCK_BASE_ENV_EXTRA="$baseline_env_extra" MOCK_TARGET_ENV_EXTRA="$target_env_extra" MOCK_ROLLBACK_ENV_EXTRA="$rollback_env_extra" \
     MOCK_REAL_PYTHON3="$(command -v python3)" MOCK_REAL_CHMOD="$(command -v chmod)" MOCK_REAL_LN="$(command -v ln)" MOCK_REAL_DATE="$(command -v date)" MOCK_STAMP="$stamp" \
+    TEAGRAMD_LOG_VOLUME_ACCOUNTING_COMMAND="$TMP/log-volume-accounting-stub" TEAGRAMD_LOG_VOLUME_TEST_EVENTS="$TMP/$name-accounting-events" \
     ROLLOUT_RUNNER_TEST_MODE=1 ROLLOUT_RUNNER_CHECKOUT="$checkout" ROLLOUT_RUNNER_EVIDENCE_ROOT=/root \
     ROLLOUT_RUNNER_TEST_CHECKOUT="$checkout" \
     ROLLOUT_RUNNER_LOCK_PATH="$TMP/$name.lock" ROLLOUT_RUNNER_ENV_FILE="$checkout/.env" \
@@ -2004,6 +2013,8 @@ status=$(run_fixture success)
 root=$(cat "$TMP/success-root-path")
 if [ "$status" = 0 ] && grep -q 'rollout=verified' "$TMP/success.stdout" && grep -q 'flock -x 9' "$TMP/success-events" && \
    awk 'index($0,"docker image inspect teagramd:local") {image=NR} $0=="docker compose up -d" {up=NR} END{exit !(image>0 && up>image)}' "$TMP/success-events" && \
+   awk '$0=="log-volume before-replacement" {before=NR} $0=="docker compose up -d" {up=NR} $0=="log-volume after-replacement" {after=NR} END{exit !(before>0 && before<up && after>up)}' "$TMP/success-events" && \
+   [ "$(<"$TMP/success-accounting-events")" = $'before-replacement\nafter-replacement' ] && \
    grep -q 'restore network none tmpfs only' "$TMP/success-events" && \
    awk '
      /^docker exec -i main1238-restore-[A-Za-z0-9-]+ psql -X -v ON_ERROR_STOP=1 -U postgres -d postgres$/ {globals_import++}

@@ -6,6 +6,7 @@ umask 077
 
 script="$(cd "$(dirname "$0")" && pwd)/deploy-main.sh"
 logs_script="$(cd "$(dirname "$0")" && pwd)/teagram-logs.sh"
+accounting_script="$(cd "$(dirname "$0")" && pwd)/teagramd-log-volume-accounting.py"
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
 
@@ -118,7 +119,9 @@ first=$(commit first)
 mkdir -p "$tmp/work/deploy/teagram"
 cp "$logs_script" "$tmp/work/deploy/teagram/teagram-logs.sh"
 chmod 755 "$tmp/work/deploy/teagram/teagram-logs.sh"
-git -C "$tmp/work" add deploy/teagram/teagram-logs.sh
+cp "$accounting_script" "$tmp/work/deploy/teagram/teagramd-log-volume-accounting.py"
+chmod 755 "$tmp/work/deploy/teagram/teagramd-log-volume-accounting.py"
+git -C "$tmp/work" add deploy/teagram/teagram-logs.sh deploy/teagram/teagramd-log-volume-accounting.py
 second=$(commit second)
 git -C "$tmp/work" checkout -q -b side "$first"
 side=$(commit side)
@@ -227,6 +230,14 @@ fi
 backup="$tmp/root/teagram-logs-before-${second:0:7}"
 if [[ ! -s "$backup" || "$(stat -c '%a' "$backup")" != 600 || "$(<"$backup")" != *'legacy wrapper'* ]]; then
   echo 'FAIL deploy did not keep a root-only copy of the prior teagram-logs command' >&2
+  failures=$((failures + 1))
+fi
+if ! cmp -s "$tmp/root/usr/local/sbin/teagramd-log-volume-accounting" \
+    "$tmp/work/deploy/teagram/teagramd-log-volume-accounting.py" || \
+   [[ ! -x "$tmp/root/etc/periodic/15min/teagramd-log-volume-accounting" ]] || \
+   ! grep -Fq '/usr/local/sbin/teagramd-log-volume-accounting sample' \
+     "$tmp/root/etc/periodic/15min/teagramd-log-volume-accounting"; then
+  echo 'FAIL deploy did not install the metadata sampler and 15-minute schedule' >&2
   failures=$((failures + 1))
 fi
 

@@ -74,6 +74,50 @@ class BlobTransitionEnvironmentTests(unittest.TestCase):
 
         self.assertEqual(environment["MOCK_SOURCE_VOLUME_MOUNTPOINT"], "/host/source-volume")
 
+    def test_teagramd_replacement_is_captured_before_and_after_compose_up(self) -> None:
+        runner = import_from_path("blob_transition_log_volume", RUNNER)
+        with tempfile.TemporaryDirectory(prefix="log-volume-transition.") as temporary:
+            output_dir = Path(temporary)
+            calls: list[list[str]] = []
+
+            def run(command: list[str], **_kwargs: Any) -> SimpleNamespace:
+                calls.append([str(item) for item in command])
+                return SimpleNamespace(returncode=0, stdout=b"", stderr=b"")
+
+            with (
+                patch.object(runner, "TEST_MODE", True),
+                patch.object(runner, "TEST_FIXTURE_DOCKER", Path("/fixture/docker")),
+                patch.dict(os.environ, {"TEAGRAMD_LOG_VOLUME_ACCOUNTING_COMMAND": "/fixture/accounting"}, clear=True),
+                patch.object(
+                    runner,
+                    "write_synced",
+                    side_effect=lambda path, content: Path(path).write_bytes(content),
+                ),
+                patch.object(runner.subprocess, "run", side_effect=run),
+            ):
+                runner.run_command(
+                    ["docker", "compose", "up", "-d", "--no-deps", "teagramd", "teagramd-proxy"],
+                    output_dir,
+                    "activate-serving",
+                    env={},
+                )
+                runner.run_command(
+                    ["docker", "compose", "up", "-d", "--wait", "rustfs"],
+                    output_dir,
+                    "start-rustfs",
+                    env={},
+                )
+
+        self.assertEqual(
+            calls,
+            [
+                ["/fixture/accounting", "before-replacement"],
+                ["/fixture/docker", "compose", "up", "-d", "--no-deps", "teagramd", "teagramd-proxy"],
+                ["/fixture/accounting", "after-replacement"],
+                ["/fixture/docker", "compose", "up", "-d", "--wait", "rustfs"],
+            ],
+        )
+
     def test_live_authority_rejection_keeps_its_reason(self) -> None:
         runner = import_from_path("blob_transition_runner_authority_rejection", RUNNER)
         mode = import_from_path("blob_mode_authority_rejection", RUNNER.parent / "blob-mode-state.py")

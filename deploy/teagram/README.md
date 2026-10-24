@@ -77,6 +77,35 @@ install -o root -g root -m 0755 "$backup" /usr/local/sbin/teagram-logs
 installation; `deploy/teagram/test-teagram-logs.sh` covers the restricted log
 command.
 
+## Log volume measurement
+
+Deploys install `/usr/local/sbin/teagramd-log-volume-accounting` and run its
+metadata sampler from `/etc/periodic/15min`. The rollout and blob-transition
+runners sample before and after `teagramd` replacements, including rollbacks
+and settings transitions. The sampler accepts only an unrotated `json-file`
+source and uses its log-file size and container creation timestamp; it never
+opens or reads a log. Daily state under
+`/var/lib/teagramd-log-volume/state.json` stores byte counters, UTC timestamps,
+and coverage-gap flags. It retains at most 30 completed daily rows plus the
+current day. Keep this directory across deploys and rollbacks.
+
+The report command emits the retained daily totals, complete-day count, UTC
+coverage, gaps, maximum complete rolling seven-day total, a 2x quota
+recommendation after 14 complete days, current available space, and a fixed
+64 GiB host free-space reserve:
+
+```sh
+ssh teagram '/usr/local/sbin/teagramd-log-volume-accounting report'
+```
+
+The collector marks missed samples, unavailable or rotated sources, counter
+regressions, and replacements without a successful pre-capture as gaps. A day
+without a trustworthy total has `bytes: null`, never a zero total. Gap records
+are also sent to host syslog with only a timestamp and reason code. A report
+with fewer than 14 complete UTC days, or without a complete rolling seven-day
+window, does not issue a quota recommendation. Reverting the code leaves the
+bounded metadata intact; replacements made by an older runner appear as gaps.
+
 Immediately after the `move-stack` action, the live container records the
 tracked selection `docker-compose.yml`, `docker-compose.local-blobs.yml`, and
 the remapped `docker-compose.override.yml`. The deploy entrypoint accepts that
