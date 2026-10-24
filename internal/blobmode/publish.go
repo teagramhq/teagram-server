@@ -1,7 +1,6 @@
 package blobmode
 
 import (
-	"bytes"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
@@ -68,7 +67,7 @@ func PublishEncrypted(stateDir, reportRoot string, cfg EffectiveConfig, proof En
 		return err
 	}
 
-	stateFile, journalDir, previous, err := openCurrentRecords(stateDir)
+	stateFile, journalDir, previous, err := openCurrentRecords(stateDir, cfg)
 	if err != nil {
 		return err
 	}
@@ -192,7 +191,7 @@ func encryptedBackendValue(value backend) map[string]string {
 	}
 }
 
-func openCurrentRecords(path string) (*os.File, *os.File, record, error) {
+func openCurrentRecords(path string, cfg EffectiveConfig) (*os.File, *os.File, record, error) {
 	var pathStat unix.Stat_t
 	if err := unix.Lstat(path, &pathStat); err != nil {
 		return nil, nil, record{}, reject("unavailable", "blob-mode")
@@ -248,18 +247,7 @@ func openCurrentRecords(path string) (*os.File, *os.File, record, error) {
 		}
 		return nil, nil, record{}, err
 	}
-	if !bytes.Equal(modeBytes, entries[len(entries)-1].data) {
-		if closeErr := journalDir.Close(); closeErr != nil {
-			err = errors.Join(reject("stale", "mode.json"), fmt.Errorf("close blob-mode journal: %w", closeErr))
-		} else {
-			err = reject("stale", "mode.json")
-		}
-		if closeErr := stateDir.Close(); closeErr != nil {
-			err = errors.Join(err, fmt.Errorf("close blob-mode directory: %w", closeErr))
-		}
-		return nil, nil, record{}, err
-	}
-	previous, err := parseRecord(entries[len(entries)-1].data)
+	previous, head, err := validateJournalHead(entries, modeBytes, cfg)
 	if err != nil {
 		if closeErr := journalDir.Close(); closeErr != nil {
 			err = errors.Join(err, fmt.Errorf("close blob-mode journal: %w", closeErr))
@@ -269,7 +257,39 @@ func openCurrentRecords(path string) (*os.File, *os.File, record, error) {
 		}
 		return nil, nil, record{}, err
 	}
+	// A complete encrypted tail is an uncommitted candidate. Remove it under
+	// the publisher lock before reusing its generation; Read leaves it untouched.
+	if head < len(entries)-1 {
+		if err := removeUncommittedEncryptedEntry(journalDir, entries[head+1], head+2); err != nil {
+			if closeErr := journalDir.Close(); closeErr != nil {
+				err = errors.Join(err, fmt.Errorf("close blob-mode journal: %w", closeErr))
+			}
+			if closeErr := stateDir.Close(); closeErr != nil {
+				err = errors.Join(err, fmt.Errorf("close blob-mode directory: %w", closeErr))
+			}
+			return nil, nil, record{}, err
+		}
+	}
 	return stateDir, journalDir, previous, nil
+}
+
+func removeUncommittedEncryptedEntry(journalDir *os.File, entry journalEntry, generation int) error {
+	orphan, err := parseRecord(entry.data)
+	if err != nil {
+		return err
+	}
+	journalName := fmt.Sprintf("%010d.json", generation)
+	if err := unix.Unlinkat(int(journalDir.Fd()), journalName, 0); err != nil {
+		return reject("unavailable", "journal")
+	}
+	tempName := ".tmp-" + orphan.TransitionID
+	if err := unix.Unlinkat(int(journalDir.Fd()), tempName, 0); err != nil && !errors.Is(err, unix.ENOENT) {
+		return reject("unavailable", "journal")
+	}
+	if err := journalDir.Sync(); err != nil {
+		return reject("unavailable", "journal")
+	}
+	return nil
 }
 
 func publishPrivateReport(rootPath, name string, data []byte) error {

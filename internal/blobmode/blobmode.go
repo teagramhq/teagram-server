@@ -131,8 +131,23 @@ func readAt(path string, cfg EffectiveConfig, expectedUID uint32) (authority Aut
 	if len(entries) == 0 {
 		return Authority{}, reject("missing", "journal")
 	}
-	if !bytes.Equal(modeBytes, entries[len(entries)-1].data) {
-		return Authority{}, reject("stale", "mode.json")
+	current, _, err := validateJournalHead(entries, modeBytes, cfg)
+	if err != nil {
+		return Authority{}, err
+	}
+	return Authority{Present: true, Outcome: current.Outcome}, nil
+}
+
+func validateJournalHead(entries []journalEntry, modeBytes []byte, cfg EffectiveConfig) (record, int, error) {
+	if len(entries) == 0 {
+		return record{}, 0, reject("missing", "journal")
+	}
+	head := len(entries) - 1
+	if !bytes.Equal(modeBytes, entries[head].data) {
+		if head == 0 || !bytes.Equal(modeBytes, entries[head-1].data) {
+			return record{}, 0, reject("stale", "mode.json")
+		}
+		head--
 	}
 
 	transitionIDs := make(map[string]struct{}, len(entries))
@@ -141,34 +156,41 @@ func readAt(path string, cfg EffectiveConfig, expectedUID uint32) (authority Aut
 	var previousOutcome string
 	var previousBackend backend
 	var previousVolumes volumes
+	var current record
 	for index, entry := range entries {
 		generation := int64(index + 1)
-		record, err := parseRecord(entry.data)
+		entryRecord, err := parseRecord(entry.data)
 		if err != nil {
-			return Authority{}, err
+			return record{}, 0, err
 		}
-		if err := validateRecord(record, entry.data, generation, previousID, previousOutcome, previousBackend, previousVolumes); err != nil {
-			return Authority{}, err
+		if index > head && (previousOutcome != OutcomeS3Accepted || entryRecord.Outcome != OutcomeEncrypted) {
+			return record{}, 0, reject("stale", "mode.json")
 		}
-		if _, exists := transitionIDs[record.TransitionID]; exists {
-			return Authority{}, reject("reused", "transition_id")
+		if err := validateRecord(entryRecord, entry.data, generation, previousID, previousOutcome, previousBackend, previousVolumes); err != nil {
+			return record{}, 0, err
 		}
-		transitionIDs[record.TransitionID] = struct{}{}
-		if _, exists := reportDigests[record.Evidence.ReportSHA256]; exists {
-			return Authority{}, reject("reused", "evidence.report_sha256")
+		if _, exists := transitionIDs[entryRecord.TransitionID]; exists {
+			return record{}, 0, reject("reused", "transition_id")
 		}
-		reportDigests[record.Evidence.ReportSHA256] = struct{}{}
-		previousID = record.TransitionID
-		previousOutcome = record.Outcome
-		previousBackend = record.Backend
-		previousVolumes = record.Volumes
-		if index == len(entries)-1 {
-			if err := validateBackend(record.Backend, cfg); err != nil {
-				return Authority{}, err
+		transitionIDs[entryRecord.TransitionID] = struct{}{}
+		if _, exists := reportDigests[entryRecord.Evidence.ReportSHA256]; exists {
+			return record{}, 0, reject("reused", "evidence.report_sha256")
+		}
+		reportDigests[entryRecord.Evidence.ReportSHA256] = struct{}{}
+		previousID = entryRecord.TransitionID
+		previousOutcome = entryRecord.Outcome
+		previousBackend = entryRecord.Backend
+		previousVolumes = entryRecord.Volumes
+		if index == head {
+			current = entryRecord
+		}
+		if index >= head {
+			if err := validateBackend(entryRecord.Backend, cfg); err != nil {
+				return record{}, 0, err
 			}
 		}
 	}
-	return Authority{Present: true, Outcome: previousOutcome}, nil
+	return current, head, nil
 }
 
 type record struct {

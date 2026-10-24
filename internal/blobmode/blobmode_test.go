@@ -168,6 +168,81 @@ func TestPublishEncryptedAuthorityAfterVerifiedMigration(t *testing.T) {
 	}
 }
 
+func TestPublishEncryptedRecoversUncommittedJournalTail(t *testing.T) {
+	if !requireRootFixture(t, "TestPublishEncryptedRecoversUncommittedJournalTail") {
+		return
+	}
+	state := testState(t, "initial-local", "s3-accepted")
+	config := blobmode.EffectiveConfig{BlobS3: testS3Config()}
+	reportRoot := filepath.Join(t.TempDir(), "reports")
+	inventoryReport := []byte(`{"schema":"teagram.blob-encryption-inventory/v1","encrypted":{"classes":{"valid_envelope":{"count":3,"logical_bytes":4096},"no_valid_envelope":{"count":0},"missing":{"count":0}}},"plaintext":{"classes":{}}}`)
+	inventoryDigest := sha256.Sum256(inventoryReport)
+	proof := blobmode.EncryptedEvidence{
+		InventorySHA256: hex.EncodeToString(inventoryDigest[:]), InventoryReport: inventoryReport,
+		ObjectCount: 3, ByteTotal: 4096, KeyVersion: 4, Writes: "drained",
+	}
+	if err := blobmode.PublishEncrypted(state.path, reportRoot, config, proof); err != nil {
+		t.Fatalf("publish encrypted authority: %v", err)
+	}
+
+	journalDir := filepath.Join(state.path, "journal")
+	orphanPath := filepath.Join(journalDir, "0000000003.json")
+	orphanBytes, err := os.ReadFile(orphanPath)
+	if err != nil {
+		t.Fatalf("read linked journal entry: %v", err)
+	}
+	var orphan struct {
+		TransitionID string `json:"transition_id"`
+	}
+	if err := json.Unmarshal(orphanBytes, &orphan); err != nil {
+		t.Fatalf("decode linked journal entry: %v", err)
+	}
+	tempPath := filepath.Join(journalDir, ".tmp-"+orphan.TransitionID)
+	if err := os.Link(orphanPath, tempPath); err != nil {
+		t.Fatalf("recreate linked publication temp: %v", err)
+	}
+
+	// Recreate the durable state after the journal sync and before mode.json's
+	// rename: the encrypted entry exists, while the committed head is unchanged.
+	if err := os.WriteFile(filepath.Join(state.path, "mode.json"), state.mode, 0o600); err != nil {
+		t.Fatalf("restore previous mode head: %v", err)
+	}
+	authority, err := blobmode.Read(state.path, config)
+	if err != nil {
+		t.Fatalf("read authority with an uncommitted journal tail: %v", err)
+	}
+	if !authority.Present || authority.Outcome != blobmode.OutcomeS3Accepted {
+		t.Fatalf("authority with an uncommitted tail = %+v, want s3-accepted", authority)
+	}
+
+	if err := blobmode.PublishEncrypted(state.path, reportRoot, config, proof); err != nil {
+		t.Fatalf("retry encrypted publication: %v", err)
+	}
+	authority, err = blobmode.Read(state.path, config)
+	if err != nil {
+		t.Fatalf("read retried encrypted authority: %v", err)
+	}
+	if !authority.Present || authority.Outcome != blobmode.OutcomeEncrypted {
+		t.Fatalf("retried authority = %+v, want encrypted", authority)
+	}
+	entries, err := os.ReadDir(journalDir)
+	if err != nil {
+		t.Fatalf("read repaired journal: %v", err)
+	}
+	var committedEntries int
+	for _, entry := range entries {
+		if !strings.HasPrefix(entry.Name(), ".") {
+			committedEntries++
+		}
+	}
+	if committedEntries != 3 {
+		t.Fatalf("journal has %d committed entries after retry, want 3", committedEntries)
+	}
+	if _, err := os.Lstat(tempPath); !os.IsNotExist(err) {
+		t.Fatalf("stale publication temp remains after retry: %v", err)
+	}
+}
+
 func TestValidateRejectsStackMoveWithChangedBackendOrVolumes(t *testing.T) {
 	if !requireRootFixture(t, "TestValidateRejectsStackMoveWithChangedBackendOrVolumes") {
 		return
@@ -490,6 +565,14 @@ func TestValidateRejectsInvalidTreesWithoutChangingThem(t *testing.T) {
 			},
 		},
 		{
+			name: "uncommitted non-encrypted journal tail",
+			setup: func(t *testing.T) (string, blobmode.EffectiveConfig) {
+				t.Helper()
+				chain := testChain(t, "initial-local", "s3-accepted", "recovered-local")
+				return writeTestState(t, chain.records, chain.records[2]), blobmode.EffectiveConfig{BlobS3: testS3Config()}
+			},
+		},
+		{
 			name: "reused transition id",
 			setup: func(t *testing.T) (string, blobmode.EffectiveConfig) {
 				t.Helper()
@@ -679,21 +762,22 @@ func TestValidateRejectsInvalidTreesWithoutChangingThem(t *testing.T) {
 	}
 	// #nosec G101 -- Values are fixed validator error strings, not credentials.
 	wantErrors := map[string]string{
-		"missing mode record":         "reason=invalid field=mode.json",
-		"symlinked mode file":         "reason=invalid field=mode.json",
-		"symlinked journal directory": "reason=invalid field=journal",
-		"symlinked journal entry":     "reason=invalid field=journal",
-		"symlinked guard directory":   "reason=invalid field=blob-mode",
-		"writable mode file":          "reason=permissions field=mode.json",
-		"writable journal entry":      "reason=permissions field=journal",
-		"writable journal directory":  "reason=permissions field=journal",
-		"4097-byte mode file":         "reason=oversize field=mode.json",
-		"4097-byte journal entry":     "reason=oversize field=journal",
-		"UTF-8 BOM":                   "reason=encoding field=record",
-		"invalid UTF-8":               "reason=encoding field=record",
-		"duplicate nested key":        "reason=schema field=record",
-		"unknown field":               "reason=schema field=record",
-		"journal gap":                 "reason=sequence field=journal",
+		"missing mode record":                    "reason=invalid field=mode.json",
+		"symlinked mode file":                    "reason=invalid field=mode.json",
+		"symlinked journal directory":            "reason=invalid field=journal",
+		"symlinked journal entry":                "reason=invalid field=journal",
+		"symlinked guard directory":              "reason=invalid field=blob-mode",
+		"writable mode file":                     "reason=permissions field=mode.json",
+		"writable journal entry":                 "reason=permissions field=journal",
+		"writable journal directory":             "reason=permissions field=journal",
+		"4097-byte mode file":                    "reason=oversize field=mode.json",
+		"4097-byte journal entry":                "reason=oversize field=journal",
+		"uncommitted non-encrypted journal tail": "reason=stale field=mode.json",
+		"UTF-8 BOM":                              "reason=encoding field=record",
+		"invalid UTF-8":                          "reason=encoding field=record",
+		"duplicate nested key":                   "reason=schema field=record",
+		"unknown field":                          "reason=schema field=record",
+		"journal gap":                            "reason=sequence field=journal",
 		"recovered local follows initial local without S3 acceptance": "reason=supersession field=outcome",
 		"stack move does not follow S3 authority":                     "reason=supersession field=outcome",
 		"stack move requires matching volume inventories":             "reason=schema field=evidence",
