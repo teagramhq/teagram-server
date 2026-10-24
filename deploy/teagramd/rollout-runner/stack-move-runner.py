@@ -37,6 +37,12 @@ TARGET_VOLUMES = {
 SOURCE_SERVER = "telegramd"
 TARGET_SERVER = "teagramd"
 TARGET_IMAGE_NAME = "teagramd:local"
+MEDIA_KEY_MOUNT = {
+    "type": "bind",
+    "source": "/etc/teagramd/media-keys",
+    "target": "/run/teagramd/media-keys",
+    "read_only": True,
+}
 PGDATA_MOUNT = "/var/lib/postgresql"
 PGDATA_PATH = "/var/lib/postgresql/18/docker"
 SOURCE_LOCAL_BLOB_PATH = "/var/lib/telegramd-blobs"
@@ -421,6 +427,60 @@ def layout(config: dict[str, object], service_name: str) -> dict[str, object]:
 
 def layout_changed(source: dict[str, object], target: dict[str, object]) -> bool:
     return source != target
+
+
+def rollout_layout_changed(source: dict[str, object], target: dict[str, object]) -> bool:
+    if not layout_changed(source, target):
+        return False
+    if source.get("project") != target.get("project"):
+        return True
+    if source.get("server") != TARGET_SERVER or target.get("server") != TARGET_SERVER:
+        return True
+
+    source_mounts = source.get("server_mounts")
+    target_mounts = target.get("server_mounts")
+    source_services = source.get("persistent_service_mounts")
+    target_services = target.get("persistent_service_mounts")
+    if (
+        not isinstance(source_mounts, list)
+        or not isinstance(target_mounts, list)
+        or not isinstance(source_services, dict)
+        or not isinstance(target_services, dict)
+        or MEDIA_KEY_MOUNT in source_mounts
+        or target_mounts.count(MEDIA_KEY_MOUNT) != 1
+    ):
+        return True
+
+    source_server_mounts = source_services.get(TARGET_SERVER)
+    target_server_mounts = target_services.get(TARGET_SERVER)
+    if (
+        not isinstance(source_server_mounts, list)
+        or MEDIA_KEY_MOUNT in source_server_mounts
+        or not isinstance(target_server_mounts, list)
+        or target_server_mounts.count(MEDIA_KEY_MOUNT) != 1
+        or any(
+            not isinstance(mounts, list) or MEDIA_KEY_MOUNT in mounts
+            for service, mounts in source_services.items()
+            if service != TARGET_SERVER
+        )
+        or any(
+            not isinstance(mounts, list) or MEDIA_KEY_MOUNT in mounts
+            for service, mounts in target_services.items()
+            if service != TARGET_SERVER
+        )
+    ):
+        return True
+
+    normalized_target = dict(target)
+    normalized_target["server_mounts"] = [
+        mount for mount in target_mounts if mount != MEDIA_KEY_MOUNT
+    ]
+    normalized_services = dict(target_services)
+    normalized_services[TARGET_SERVER] = [
+        mount for mount in target_server_mounts if mount != MEDIA_KEY_MOUNT
+    ]
+    normalized_target["persistent_service_mounts"] = normalized_services
+    return layout_changed(source, normalized_target)
 
 
 def write_private(path: pathlib.Path, data: bytes, *, exclusive: bool = True) -> None:
@@ -1753,7 +1813,7 @@ def inspect(args: argparse.Namespace) -> None:
         target_server_name = TARGET_SERVER if TARGET_SERVER in target_services else SOURCE_SERVER
         target_layout = layout(target, target_server_name)
         print(json.dumps({
-            "changed": layout_changed(source_layout, target_layout),
+            "changed": rollout_layout_changed(source_layout, target_layout),
             "source": source_layout,
             "target": target_layout,
             "source_database": database_name(source),

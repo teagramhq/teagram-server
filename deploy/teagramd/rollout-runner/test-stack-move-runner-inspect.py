@@ -234,6 +234,7 @@ class InspectComposeSelectionTest(unittest.TestCase):
             self.assertEqual(render_selections[2][0].name, "target-docker-compose.yml")
             print("PASS non-pinned Compose selection renders the target SHA layout")
 
+
     def test_existing_teagram_project_is_compared_with_teagramd(self) -> None:
         runner = load_runner()
         with tempfile.TemporaryDirectory(prefix="stack-move-inspect-teagram-") as temporary:
@@ -317,6 +318,68 @@ class InspectComposeSelectionTest(unittest.TestCase):
             self.assertEqual(result["source"]["project"], "teagram")
             self.assertEqual(result["source"]["server"], "teagramd")
             print("PASS apply layout preflight accepts the current teagram project")
+
+
+class RolloutLayoutChangePolicyTest(unittest.TestCase):
+    def test_only_read_only_media_key_mount_addition_is_accepted(self) -> None:
+        runner = load_runner()
+        key_mount = {
+            "type": "bind",
+            "source": "/etc/teagramd/media-keys",
+            "target": "/run/teagramd/media-keys",
+            "read_only": True,
+        }
+        existing_mount = {
+            "type": "volume",
+            "source": "tgkey",
+            "target": "/var/lib/teagramd",
+            "read_only": False,
+        }
+        source = {
+            "project": "teagram",
+            "server": "teagramd",
+            "server_mounts": [existing_mount],
+            "postgres_mounts": [],
+            "persistent_service_mounts": {"teagramd": [existing_mount]},
+            "volumes": {"tgkey": "teagram_tgkey"},
+        }
+        target = json.loads(json.dumps(source))
+        target["server_mounts"].append(key_mount)
+        target["persistent_service_mounts"]["teagramd"].append(key_mount)
+
+        self.assertTrue(runner.layout_changed(source, target))
+        self.assertFalse(runner.rollout_layout_changed(source, target))
+
+        for field, value in (
+            ("source", "/tmp/media-keys"),
+            ("target", "/run/other-keys"),
+            ("read_only", False),
+        ):
+            changed = json.loads(json.dumps(target))
+            changed["server_mounts"][1][field] = value
+            changed["persistent_service_mounts"]["teagramd"][1][field] = value
+            self.assertTrue(runner.rollout_layout_changed(source, changed), field)
+
+        changed_volume = json.loads(json.dumps(target))
+        changed_volume["volumes"]["tgkey"] = "other_tgkey"
+        self.assertTrue(runner.rollout_layout_changed(source, changed_volume))
+
+        changed_project = json.loads(json.dumps(target))
+        changed_project["project"] = "other-project"
+        self.assertTrue(runner.rollout_layout_changed(source, changed_project))
+
+        changed_mounts = json.loads(json.dumps(target))
+        extra_mount = {
+            "type": "bind",
+            "source": "/etc/other",
+            "target": "/run/other",
+            "read_only": True,
+        }
+        changed_mounts["server_mounts"].append(extra_mount)
+        changed_mounts["persistent_service_mounts"]["teagramd"].append(extra_mount)
+        self.assertTrue(runner.rollout_layout_changed(source, changed_mounts))
+
+        print("PASS ordinary rollout permits only the reviewed media-key mount addition")
 
 
 class MoveSecretMigrationTest(unittest.TestCase):
