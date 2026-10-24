@@ -88,6 +88,11 @@ Configuration is read from environment variables in `internal/config/config.go`:
 | `TG_CLIENT_ADDR_TRUST`| `socket`       | Where the address a per-IP limit is keyed on comes from: `socket` or `proxy-v2`. Any other value fails startup by name. `socket` is the connection's own peer address and assumes one peer address is one client, which fails from either end: behind a proxy or an L4 load balancer every peer address is the balancer's, so one bucket holds every client and the per-IP cap becomes a global one; behind a carrier NAT one address covers thousands of mobile subscribers, who then spend each other's budget. The server warns about both once at startup while any per-IP limit is on. `proxy-v2` takes the address from a PROXY protocol v2 header and is what to run behind an L4 load balancer; it needs `TG_CLIENT_ADDR_PROXY_CIDRS` and emits no such warning, because the misconfiguration it warns about fails the start instead |
 | `TG_MAX_PREAUTH_CONNS`| `1024`       | Cluster-wide concurrent connections that have not authenticated yet. `TG_REPLICA_COUNT` divides this into per-replica accept-loop caps, so sockets past a share are closed before they cost a goroutine, a deadline or a read. `0` disables it; a negative or non-integer value fails startup |
 | `TG_MAX_PREAUTH_CONNS_PER_IP`| `64`    | The same, per client network, divided by `TG_REPLICA_COUNT` and enforced in each replica's memory. Keyed on the network the per-IP rate limits already use — an address for IPv4, a **/64** for IPv6, since a host on a routed v6 allocation mints addresses inside its own /64 for free — and on the address `TG_CLIENT_ADDR_TRUST` names, which in `proxy-v2` mode is the one the balancer reports and never the socket peer. A connection carrying no address at all (a `LOCAL` health check, or a socket peer the transport could not report) is charged to nothing and stays bounded by the other two. It is a concurrency cap and not a rate. `0` disables it; a negative or non-integer value fails startup |
+| `TG_KEY_EXCHANGE_PER_CONNECTION` | `2` | Maximum anonymous key exchanges on one connection. The count survives the pre-auth slot clearing after the first MAC-valid frame. `0` disables it; a negative or non-integer value fails startup |
+| `TG_RATE_LIMIT_KEY_EXCHANGE_IP` | `20` | Fixed-window anonymous key exchanges per client network, enforced in Postgres and shared by replicas. Uses the same IPv4-address / IPv6-**/64** key and trusted client address as the other per-IP limits; public WebSocket and TCP/tailnet listeners use separate budgets. A connection with no keyable address skips only this layer. Store errors refuse the exchange. `0` disables it; a negative or non-integer value fails startup |
+| `TG_RATE_LIMIT_KEY_EXCHANGE_IP_WINDOW` | `1h` | Fixed window for the per-network key-exchange budget. `0` disables that layer; a negative or invalid duration fails startup |
+| `TG_KEY_EXCHANGE_GLOBAL_RATE` | `5` | Deployment-wide in-memory key-exchange ceiling in attempts per second. `TG_REPLICA_COUNT` divides it across replicas. `0` disables the ceiling; when enabled, a value smaller than the replica count fails startup. A negative or non-integer value also fails startup |
+| `TG_KEY_EXCHANGE_GLOBAL_BURST` | `30` | Burst capacity of the deployment-wide in-memory key-exchange ceiling, divided across replicas. `0` disables the ceiling; when enabled, a value smaller than the replica count fails startup. A negative or non-integer value also fails startup |
 | `TG_PREAUTH_LIFETIME`| `2m`          | How long a connection may stay unauthenticated, measured from accept. Past it the socket is closed whatever it is sending, which is the only bound that reaches a peer that stays inside every deadline by dripping one small frame per read timeout. It ends at the first frame that decrypts under a key the server issued, so a client completing its password challenge is not cut off. Do not set it below a minute: gotd applies a 60s timeout per read inside key exchange, a shorter ceiling starts cutting handshakes that are merely slow, and the server warns at startup if you do. `0` disables it; a negative or unparseable duration fails startup |
 | `TG_MAX_CONNS_PER_UNBOUND_KEY`| `8`  | Concurrent connections one auth key with nobody signed in on it may hold, divided by `TG_REPLICA_COUNT` and enforced in each replica's memory. It covers the population between pre-auth connections and signed-in sessions. A connection is charged only once a frame has decrypted under the key. Past the cap the frame in hand is answered and the socket is then closed. `0` disables it; a negative or non-integer value fails startup |
 | `TG_MAX_PENDING_LOGIN_CONNS`| `1024` | Cluster-wide concurrent connections waiting for `auth.checkPassword` after `SESSION_PASSWORD_NEEDED`, held in Postgres leases. A pending connection remains counted in the unbound-key hold and this cap, and receives a single ten-minute absolute read lease (`2 × srp.DefaultTTL`); activity never refreshes it. The SRP challenge still expires after five minutes. Past the cap the connection is closed immediately. `0` disables it; a negative or non-integer value fails startup |
@@ -358,18 +363,27 @@ an unauthenticated population spread over k client networks holds at most
 most `TG_PREAUTH_LIFETIME`.
 
 They end at the first frame that decrypts under a key the server issued, not at
-sign-in: a client completing its password challenge must not be closed, so one
-completed key exchange buys connections those three settings no longer
-count. `TG_MAX_CONNS_PER_UNBOUND_KEY` is what counts those, so the worst case
-extends rather than stopping there. A peer holding m keys nobody has signed in
-on holds at most `m × TG_MAX_CONNS_PER_UNBOUND_KEY` connections beyond the
-pre-auth population above, and each of those m keys costs its own key exchange,
-which had to pass the pre-auth bounds to happen at all. The number m itself is
-unbounded until MAIN-252 ships retention of persisted unbound keys, which bounds
-m over time by expiring keys nobody signed in on. Once someone does sign
-in on a key, what its connections may hold is the per-user connection cap's to
-decide and this bound lets them go for good — including if the key is unbound
-again afterwards, as the 2FA path does.
+sign-in: a client completing its password challenge must not be closed. Each
+zero-key-id exchange is separately charged before RSA work to
+`TG_KEY_EXCHANGE_PER_CONNECTION`, the per-network Postgres budget, and the
+deployment-wide in-memory ceiling, in that order. A normal client exchanges
+once and may continue signing in or reconnecting on that key; encrypted frames
+and reconnects on an existing key are not charged. A refused exchange receives
+`-429` and the connection closes. The per-connection count survives pre-auth
+slot clearing and renegotiation.
+
+The per-network limit uses the same IPv4 address or IPv6 **/64** key as the
+other per-IP limits, with separate public WebSocket and TCP/tailnet budgets.
+Unkeyable addresses skip that layer only. The in-memory ceiling is divided by
+`TG_REPLICA_COUNT`, so it bounds exchange work even when an attacker spreads
+requests across many networks. `TG_MAX_CONNS_PER_UNBOUND_KEY` still bounds the
+connections one unbound key can hold: a peer with m keys nobody has signed in on
+holds at most `m × TG_MAX_CONNS_PER_UNBOUND_KEY` connections beyond the pre-auth
+population above. Each persisted key now costs an exchange from all three
+budgets, but the number m can still accumulate over time until the sibling
+retention sweep expires eligible keys. Once someone signs in on a key, the
+per-user connection cap takes over, including if that key is unbound again
+afterwards, as the 2FA path does.
 
 When a sign-in stages a password challenge, that connection keeps its unbound-key
 hold and also consumes one `TG_MAX_PENDING_LOGIN_CONNS` slot until its goroutine

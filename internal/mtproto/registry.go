@@ -49,6 +49,9 @@ func AuthKeyIDInt64(id [8]byte) int64 {
 type memoryAuthKeyStore struct {
 	mu   sync.Mutex
 	keys map[[8]byte]crypto.AuthKey
+
+	limitMu        sync.Mutex
+	exchangeLimits map[memoryExchangeLimitKey]memoryExchangeLimitCounter
 }
 
 var _ AuthKeyStore = (*memoryAuthKeyStore)(nil)

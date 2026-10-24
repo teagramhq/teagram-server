@@ -831,6 +831,9 @@ func runAtBlobModePath(log *slog.Logger, blobModePath string) error {
 	if err := server.SetPreAuthLimits(cfg.PreAuth); err != nil {
 		return err
 	}
+	if err := server.SetExchangeLimits(cfg.KeyExchangeLimits); err != nil {
+		return err
+	}
 	if err := server.SetDiscoveryLimits(cfg.DiscoveryLimits); err != nil {
 		return err
 	}

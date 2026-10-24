@@ -146,6 +146,11 @@ type Server struct {
 	preAuthLimits PreAuthLimits
 	preAuth       *preAuthLimiter
 	replicaCount  int
+	// exchangeLimits are the deployment-wide anonymous key-exchange budgets;
+	// exchangeBudget holds the process-local share of the global ceiling.
+	exchangeLimits    ExchangeLimits
+	exchangeBudget    *keyExchangeBudget
+	exchangeBudgetLog logSampler
 	// discovery bounds valid local-direct preflight requests admitted to the
 	// response path. Written once before Serve and only read after, like the
 	// other admission controls.
@@ -260,14 +265,31 @@ func (s *Server) SetPreAuthLimits(l PreAuthLimits) error {
 	return nil
 }
 
-// SetReplicaCount divides deployment-wide connection budgets into local shares
-// across the configured deployment size. Shared Postgres budgets are not
-// divided. Call it after all cap setters and before Serve.
+// SetExchangeLimits replaces the bounds on anonymous key-exchange work. Call
+// it before Serve. The database-backed network budget is shared and is not
+// divided; the in-memory ceiling is divided across replicas.
+func (s *Server) SetExchangeLimits(limits ExchangeLimits) error {
+	perReplica, err := divideExchangeLimits(limits, s.replicaCount)
+	if err != nil {
+		return err
+	}
+	s.exchangeLimits = limits
+	s.exchangeBudget = newKeyExchangeBudget(perReplica)
+	return nil
+}
+
+// SetReplicaCount divides process-local deployment-wide budgets, including the
+// key-exchange ceiling, across the configured deployment size. Shared Postgres
+// budgets are not divided. Call it after all cap setters and before Serve.
 func (s *Server) SetReplicaCount(n int) error {
 	if n < 1 {
 		return fmt.Errorf("replica count is %d: must be at least 1", n)
 	}
 	preAuth, err := dividePreAuthLimits(s.preAuthLimits, n)
+	if err != nil {
+		return err
+	}
+	keyExchange, err := divideExchangeLimits(s.exchangeLimits, n)
 	if err != nil {
 		return err
 	}
@@ -284,6 +306,7 @@ func (s *Server) SetReplicaCount(n int) error {
 	}
 	s.replicaCount = n
 	s.preAuth = newPreAuthLimiter(preAuth)
+	s.exchangeBudget = newKeyExchangeBudget(keyExchange)
 	s.unboundKeys = newUnboundKeyLimiter(unboundKeyCap)
 	return nil
 }
@@ -397,6 +420,8 @@ func New(key exchange.PrivateKey, dcID int, keys AuthKeyStore, handler Handler, 
 		rpcDeadline:              DefaultRPCDeadline,
 		preAuth:                  newPreAuthLimiter(DefaultPreAuthLimits()),
 		preAuthLimits:            DefaultPreAuthLimits(),
+		exchangeLimits:           DefaultExchangeLimits(),
+		exchangeBudget:           newKeyExchangeBudget(DefaultExchangeLimits()),
 		replicaCount:             1,
 		discovery:                discovery,
 		unboundKeys:              newUnboundKeyLimiter(DefaultMaxConnsPerUnboundKey),
@@ -944,6 +969,7 @@ func (s *Server) serveConnModeWithDiagnostics(readCtx, requestCtx context.Contex
 	defer conn.FlushUnimplementedLog()
 	b := new(bin.Buffer)
 	var lastTouch time.Time
+	var exchangeAttempts int
 	// registeredUser is the userID this conn is currently registered under
 	// (0 = none). bind moves the conn to userID and is the only thing that
 	// writes it, so every path that changes or drops the binding — rebind,
@@ -1147,7 +1173,10 @@ func (s *Server) serveConnModeWithDiagnostics(readCtx, requestCtx context.Contex
 			if peerReader != nil {
 				exchangeTransport = peerQueueConn{Conn: tconn, reader: peerReader}
 			}
-			if err := s.runExchangeWithCloseDiagnostics(readCtx, exchangeTransport, b, clientAddr, closeDiagnostics); err != nil {
+			if err := s.runExchangeWithCloseDiagnostics(readCtx, exchangeTransport, b, clientAddr, closeDiagnostics, &exchangeAttempts, slot.rateLimitListener()); err != nil {
+				if errors.Is(err, errKeyExchangeRateLimited) {
+					return nil
+				}
 				unexpected, ok := errors.AsType[*exchange.UnexpectedEncryptedError](err)
 				if !ok {
 					return err
@@ -1359,12 +1388,28 @@ func (s *Server) touch(ctx context.Context, id [8]byte, clientAddr netip.Addr, e
 // persists the resulting auth key. A ServerExchangeError is reported to the
 // client as a protocol error and ends the connection.
 func (s *Server) runExchange(ctx context.Context, tconn transport.Conn, first *bin.Buffer, clientAddr netip.Addr) error {
-	return s.runExchangeWithCloseDiagnostics(ctx, tconn, first, clientAddr, nil)
+	var attempts int
+	return s.runExchangeWithCloseDiagnostics(ctx, tconn, first, clientAddr, nil, &attempts, store.RateLimitListenerTailnet)
 }
 
-func (s *Server) runExchangeWithCloseDiagnostics(ctx context.Context, tconn transport.Conn, first *bin.Buffer, clientAddr netip.Addr, closeDiagnostics *transportCloseDiagnostics) error {
+func (s *Server) runExchangeWithCloseDiagnostics(
+	ctx context.Context,
+	tconn transport.Conn,
+	first *bin.Buffer,
+	clientAddr netip.Addr,
+	closeDiagnostics *transportCloseDiagnostics,
+	attempts *int,
+	listener store.RateLimitListener,
+) error {
 	bc := newBufferedConn(tconn)
 	bc.Push(first)
+	if layer, err := s.exchangeBudget.charge(ctx, s.keys, attempts, clientAddr, listener, time.Now()); layer != "" {
+		s.logExchangeBudgetRefusal(layer, listener, err)
+		if sendErr := s.sendProtoError(ctx, bc, codec.CodeTransportFlood); sendErr != nil {
+			return sendErr
+		}
+		return errKeyExchangeRateLimited
+	}
 	diagnostics := newExchangeDiagnostics()
 
 	key, err := s.exchange(ctx, exchangeConn{
@@ -1406,6 +1451,24 @@ func (s *Server) runExchangeWithCloseDiagnostics(ctx context.Context, tconn tran
 		return errors.Join(errAuthKeyPersistenceFailure, errors.Join(errors.New("save auth key"), err))
 	}
 	return nil
+}
+
+func (s *Server) logExchangeBudgetRefusal(layer string, listener store.RateLimitListener, err error) {
+	dropped, ok := s.exchangeBudgetLog.allow(time.Now(), preAuthLogInterval)
+	if !ok {
+		return
+	}
+	listenerName := "tailnet"
+	if listener == store.RateLimitListenerPublic {
+		listenerName = "public"
+	}
+	attrs := []any{"layer", layer, "listener", listenerName, "suppressed", dropped}
+	if err != nil {
+		attrs = append(attrs, "err", err)
+		s.log.Error("key exchange refused at budget", attrs...)
+		return
+	}
+	s.log.Info("key exchange refused at budget", attrs...)
 }
 
 func (s *Server) persistAuthKey(ctx context.Context, key crypto.AuthKey) error {

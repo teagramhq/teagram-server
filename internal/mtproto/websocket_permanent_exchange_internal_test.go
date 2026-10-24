@@ -11,6 +11,7 @@ import (
 	"io"
 	"log/slog"
 	"net"
+	"net/netip"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -21,6 +22,8 @@ import (
 
 	"github.com/gotd/td/crypto"
 	"github.com/gotd/td/exchange"
+
+	"github.com/teagramhq/teagram-server/internal/store"
 )
 
 const (
@@ -218,6 +221,14 @@ func (s *webPermanentExchangeStore) Save(ctx context.Context, key crypto.AuthKey
 	default:
 	}
 	return nil
+}
+
+func (s *webPermanentExchangeStore) CheckIPRateLimit(ctx context.Context, addr netip.Addr, surface string, limits store.RateLimitConfig) (*store.RateLimitResult, error) {
+	limiter, ok := s.AuthKeyStore.(keyExchangeRateLimitStore)
+	if !ok {
+		return nil, errors.New("in-memory key exchange rate limiter is unavailable")
+	}
+	return limiter.CheckIPRateLimit(ctx, addr, surface, limits)
 }
 
 func (s *webPermanentExchangeStore) waitForOneStoredKey(ctx context.Context, timeout time.Duration) bool {

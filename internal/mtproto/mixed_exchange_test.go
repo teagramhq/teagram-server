@@ -6,6 +6,8 @@ import (
 	"crypto/rsa"
 	"errors"
 	"io"
+	"net"
+	"net/netip"
 	"sync"
 	"testing"
 	"time"
@@ -21,6 +23,7 @@ import (
 	"github.com/gotd/td/transport"
 
 	"github.com/teagramhq/teagram-server/internal/mtproto"
+	"github.com/teagramhq/teagram-server/internal/store"
 )
 
 type mixedExchangeKeyStore struct {
@@ -69,6 +72,10 @@ func (s *mixedExchangeKeyStore) Touch(context.Context, [8]byte) error {
 	defer s.mu.Unlock()
 	s.touches++
 	return nil
+}
+
+func (*mixedExchangeKeyStore) CheckIPRateLimit(context.Context, netip.Addr, string, store.RateLimitConfig) (*store.RateLimitResult, error) {
+	return nil, nil //nolint:nilnil // test key stores do not keep a shared network counter.
 }
 
 func (s *mixedExchangeKeyStore) snapshot() mixedExchangeKeyStoreState {
@@ -151,6 +158,123 @@ func startMixedExchangeConn(t *testing.T, server *mtproto.Server) *mixedExchange
 func beginMixedExchange(t *testing.T, run *mixedExchangeRun) {
 	t.Helper()
 	beginKeyExchange(t, run.ctx, run.client)
+}
+
+func TestKeyExchangeCountSurvivesPreAuthSlotClear(t *testing.T) {
+	ctx, cancel := context.WithTimeout(t.Context(), 20*time.Second)
+	defer cancel()
+	rsaKey, err := rsa.GenerateKey(crand.Reader, crypto.RSAKeyBits)
+	if err != nil {
+		t.Fatalf("generate RSA key: %v", err)
+	}
+	privateKey := exchange.PrivateKey{RSA: rsaKey}
+	keys := &mixedExchangeKeyStore{}
+	handler := mtproto.HandlerFunc(func(c *mtproto.Conn, req *mtproto.Request) error {
+		return c.SendResult(req, &tg.BoolTrue{})
+	})
+	server := mtproto.New(privateKey, 2, keys, handler, nil)
+	listener := mustListenTCP(t, ctx, "127.0.0.1:0")
+	serverCtx, stopServer := context.WithCancel(ctx)
+	served := make(chan error, 1)
+	go func() { served <- server.Serve(serverCtx, listener) }()
+	t.Cleanup(func() {
+		stopServer()
+		select {
+		case err := <-served:
+			if err != nil {
+				t.Errorf("serve: %v", err)
+			}
+		case <-time.After(5 * time.Second):
+			t.Error("server did not stop")
+		}
+	})
+
+	rawConn, err := (&net.Dialer{}).DialContext(ctx, "tcp", listener.Addr().String())
+	if err != nil {
+		t.Fatalf("dial server: %v", err)
+	}
+	client, err := transport.Intermediate.Handshake(rawConn)
+	if err != nil {
+		t.Fatalf("handshake transport: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := client.Close(); err != nil {
+			t.Errorf("close client: %v", err)
+		}
+	})
+
+	for exchangeNumber := 1; exchangeNumber <= 2; exchangeNumber++ {
+		result, err := exchange.NewExchanger(client, 2).
+			Client([]exchange.PublicKey{privateKey.Public()}).Run(ctx)
+		if err != nil {
+			t.Fatalf("complete exchange %d: %v", exchangeNumber, err)
+		}
+		requestID := int64(proto.NewMessageID(time.Now(), proto.MessageFromClient))
+		frame := clientFrame(t, result.AuthKey, 72, requestID, &tg.HelpGetConfigRequest{})
+		if err := client.Send(ctx, &bin.Buffer{Buf: frame}); err != nil {
+			t.Fatalf("send MAC-valid frame after exchange %d: %v", exchangeNumber, err)
+		}
+		waitForMixedExchangeRPCResult(t, ctx, client, result.AuthKey, requestID)
+	}
+
+	request := mt.ReqPqMultiRequest{Nonce: bin.Int128{1}}
+	var requestBody bin.Buffer
+	if err := request.Encode(&requestBody); err != nil {
+		t.Fatalf("encode req_pq_multi: %v", err)
+	}
+	var first bin.Buffer
+	if err := (proto.UnencryptedMessage{
+		MessageID:   int64(proto.NewMessageID(time.Now(), proto.MessageFromClient)),
+		MessageData: requestBody.Copy(),
+	}).Encode(&first); err != nil {
+		t.Fatalf("encode third exchange frame: %v", err)
+	}
+	if err := client.Send(ctx, &first); err != nil {
+		t.Fatalf("send third exchange: %v", err)
+	}
+	var refusal bin.Buffer
+	err = client.Recv(ctx, &refusal)
+	protocolErr, ok := errors.AsType[*codec.ProtocolErr](err)
+	if !ok || protocolErr.Code != 429 {
+		t.Fatalf("third exchange refusal = %v, want protocol error -429", err)
+	}
+	if err := client.Recv(ctx, &refusal); err == nil {
+		t.Fatal("connection remained open after the third exchange refusal")
+	}
+	state := keys.snapshot()
+	if state.saves != 2 {
+		t.Fatalf("saved auth keys = %d, want two successful exchanges", state.saves)
+	}
+}
+
+func waitForMixedExchangeRPCResult(t *testing.T, ctx context.Context, client transport.Conn, key crypto.AuthKey, requestID int64) {
+	t.Helper()
+	cipher := crypto.NewClientCipher(crypto.DefaultRand())
+	for {
+		var wire bin.Buffer
+		if err := client.Recv(ctx, &wire); err != nil {
+			t.Fatalf("receive authenticated-frame response: %v", err)
+		}
+		message, err := cipher.DecryptFromBuffer(key, &wire)
+		if err != nil {
+			t.Fatalf("decrypt authenticated-frame response: %v", err)
+		}
+		body := &bin.Buffer{Buf: message.MessageDataWithPadding[:message.MessageDataLen]}
+		id, err := body.PeekID()
+		if err != nil {
+			t.Fatalf("peek authenticated-frame response: %v", err)
+		}
+		if id == mt.NewSessionCreatedTypeID {
+			continue
+		}
+		var result proto.Result
+		if err := result.Decode(body); err != nil {
+			continue
+		}
+		if result.RequestMessageID == requestID {
+			return
+		}
+	}
 }
 
 func beginKeyExchange(t *testing.T, ctx context.Context, client transport.Conn) {

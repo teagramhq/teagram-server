@@ -246,6 +246,10 @@ type Config struct {
 	// and their maximum lifetime. teagramd divides the two concurrency budgets
 	// by ReplicaCount; zero disables a bound.
 	PreAuth mtproto.PreAuthLimits
+	// KeyExchangeLimits bounds unauthenticated RSA key-exchange work. The
+	// per-network budget is shared by Postgres; teagramd divides the global
+	// in-memory ceiling by ReplicaCount.
+	KeyExchangeLimits mtproto.ExchangeLimits
 	// MaxConnsPerUnboundKey is the deployment-wide bound on concurrent
 	// connections one auth key with nobody signed in on it may hold. It picks up
 	// where PreAuth stops counting and hands over to the per-user connection cap
@@ -875,6 +879,7 @@ func Load(log *slog.Logger) (Config, error) {
 
 		MaxConnsPerUnboundKey: mtproto.DefaultMaxConnsPerUnboundKey,
 		MaxPendingLoginConns:  mtproto.DefaultMaxPendingLoginConns,
+		KeyExchangeLimits:     mtproto.DefaultExchangeLimits(),
 
 		RPCDeadline:      mtproto.DefaultRPCDeadline,
 		StatementTimeout: DefaultStatementTimeout,
@@ -1485,6 +1490,11 @@ func Load(log *slog.Logger) (Config, error) {
 		return Config{}, err
 	}
 	cfg.PreAuth = preAuth
+	keyExchange, err := keyExchangeLimits()
+	if err != nil {
+		return Config{}, err
+	}
+	cfg.KeyExchangeLimits = keyExchange
 	discoveryLimits, err := discoveryLimits()
 	if err != nil {
 		return Config{}, err
@@ -1822,6 +1832,44 @@ func preAuthLimits() (mtproto.PreAuthLimits, error) {
 			return mtproto.PreAuthLimits{}, errors.New("TG_PREAUTH_LIFETIME must not be negative; 0 disables the ceiling")
 		}
 		limits.Lifetime = d
+	}
+	return limits, nil
+}
+
+// keyExchangeLimits resolves the three anonymous key-exchange budgets. Zero
+// turns a layer off; a negative value is a startup error so a typo cannot
+// silently remove the bound.
+func keyExchangeLimits() (mtproto.ExchangeLimits, error) {
+	limits := mtproto.DefaultExchangeLimits()
+	for _, setting := range []struct {
+		name   string
+		target *int
+	}{
+		{name: "TG_KEY_EXCHANGE_PER_CONNECTION", target: &limits.PerConnection},
+		{name: "TG_RATE_LIMIT_KEY_EXCHANGE_IP", target: &limits.PerNetwork.Limit},
+		{name: "TG_KEY_EXCHANGE_GLOBAL_RATE", target: &limits.GlobalRate},
+		{name: "TG_KEY_EXCHANGE_GLOBAL_BURST", target: &limits.GlobalBurst},
+	} {
+		if value := os.Getenv(setting.name); value != "" {
+			n, err := strconv.Atoi(value)
+			if err != nil {
+				return mtproto.ExchangeLimits{}, fmt.Errorf("%s must be an integer", setting.name)
+			}
+			if n < 0 {
+				return mtproto.ExchangeLimits{}, fmt.Errorf("%s must not be negative; 0 disables the limit", setting.name)
+			}
+			*setting.target = n
+		}
+	}
+	if value := os.Getenv("TG_RATE_LIMIT_KEY_EXCHANGE_IP_WINDOW"); value != "" {
+		window, err := time.ParseDuration(value)
+		if err != nil {
+			return mtproto.ExchangeLimits{}, errors.New("TG_RATE_LIMIT_KEY_EXCHANGE_IP_WINDOW must be a duration")
+		}
+		if window < 0 {
+			return mtproto.ExchangeLimits{}, errors.New("TG_RATE_LIMIT_KEY_EXCHANGE_IP_WINDOW must not be negative; 0 disables the network limit")
+		}
+		limits.PerNetwork.Window = window
 	}
 	return limits, nil
 }
