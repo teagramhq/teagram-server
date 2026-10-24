@@ -959,7 +959,23 @@ class RestoreReadinessContractTests(unittest.TestCase):
         )
         self.assertEqual(
             {item["name"] for item in inventory["triggers"]},
-            {"AA_browser_acceptance_binding_evidence", "browser_acceptance_auth_keys_reject_truncate"},
+            {
+                "AA_browser_acceptance_binding_evidence",
+                "auth_keys_mark_ever_bound",
+                "browser_acceptance_auth_keys_reject_truncate",
+            },
+        )
+        self.assertIn(
+            {
+                "name": "auth_keys_mark_ever_bound",
+                "table": "public.auth_keys",
+                "timing": "BEFORE",
+                "level": "ROW",
+                "events": ["INSERT", "UPDATE"],
+                "enabled": "ORIGIN",
+                "function": "public.auth_keys_mark_ever_bound",
+            },
+            inventory["triggers"],
         )
         self.assertEqual(
             RESTORE_READINESS.validate_synthetic_auth_key_ids((-101, -202, -303)),
