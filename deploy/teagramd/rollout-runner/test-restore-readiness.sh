@@ -196,6 +196,27 @@ cleanup_prepared_inputs() {
   build_dir=""
 }
 
+preserve_prepared_on_unverified_cleanup() {
+  if ! printf '%s' "$1" | /usr/bin/python3 -c '
+import json, sys
+try:
+    report = json.load(sys.stdin)
+except (OSError, ValueError):
+    raise SystemExit(1)
+if not isinstance(report, dict) or report.get("cleanup") not in {"verified", "not_started"}:
+    raise SystemExit(1)
+'; then
+    keep_prepared=1
+  fi
+}
+
+cleanup_prepared_after_failed_drill() {
+  preserve_prepared_on_unverified_cleanup "$1"
+  if (( keep_prepared == 0 )) && ! cleanup_prepared_inputs; then
+    emit_prepared_cleanup_failure
+  fi
+}
+
 cleanup_build() {
   status=$?
   trap - EXIT
@@ -205,7 +226,11 @@ cleanup_build() {
   if [[ -n $seed_source ]] && ! run_preparation_cleanup_command /usr/bin/rm -rf -- "$seed_source" 2>/dev/null; then
     status=1
   fi
-  if (( keep_prepared == 0 )) && ! cleanup_prepared_inputs; then status=1; fi
+  if (( keep_prepared == 0 )); then
+    if ! cleanup_prepared_inputs; then status=1; fi
+  elif [[ -n $build_dir ]]; then
+    printf 'restore readiness prepared runtime retained for recovery: %s\n' "$build_dir" >&2
+  fi
   exit "$status"
 }
 trap cleanup_build EXIT
@@ -213,6 +238,10 @@ trap cleanup_build EXIT
 build_inputs() {
   preparation_deadline=$((SECONDS + preparation_timeout_seconds))
   preparation_started=$SECONDS
+  preflight_stage="validate clean source tree"
+  if ! run_preparation_command /usr/bin/python3 -B "$script_dir/restore-readiness.py" --validate-source; then
+    emit_preflight_failure
+  fi
   if [[ -z $build_dir ]]; then
     preflight_stage="create prepared runtime directory"
     if ! build_dir=$(mktemp -d "$build_parent/teagram-restore-readiness.XXXXXXXX" 2>/dev/null); then
@@ -311,8 +340,10 @@ run_drill() {
 
 run_sigkill_recovery_drill() {
   local -a drill_args=("$@")
-  local attempt recovered remaining_runs containers volumes networks owned_images sigkill_status
+  local attempt recovered remaining_runs containers volumes networks owned_images sigkill_status original_keep_prepared
   preflight_stage="run SIGKILL recovery drill"
+  original_keep_prepared=$keep_prepared
+  keep_prepared=1
   if ! sigkill_output=$(run_suite_command /usr/bin/mktemp "$build_parent/teagram-restore-sigkill.XXXXXXXX" 2>/dev/null); then
     emit_preflight_failure
   fi
@@ -325,6 +356,7 @@ run_sigkill_recovery_drill() {
     sigkill_status=$?
   fi
   if [[ $sigkill_status -ne 137 ]] || [[ $(<"$sigkill_output") != "SIGKILL_INJECTED" ]]; then
+    preserve_prepared_on_unverified_cleanup "$(<"$sigkill_output")"
     emit_preflight_failure
   fi
   recovered=0
@@ -371,6 +403,7 @@ if runpy.run_path(sys.argv[1])["docker_cli_pids"]():
 ' "$script_dir/restore-readiness.py"; then
     emit_preflight_failure
   fi
+  keep_prepared=$original_keep_prepared
 }
 
 if [[ -z $build_dir ]]; then
@@ -392,7 +425,7 @@ suite_teardown_deadline=$((suite_work_deadline + 4 * 60))
 if [[ -n $local_mode ]]; then
   preflight_stage="run local-dump restore drill"
   if ! local_report=$(run_drill "${local_args[@]}"); then
-    if ! cleanup_prepared_inputs; then emit_prepared_cleanup_failure; fi
+    cleanup_prepared_after_failed_drill "$local_report"
     printf '%s\n' "$local_report"
     exit 1
   fi
@@ -409,6 +442,7 @@ if not (report.get("result") == "pass" and report.get("input_mode") == "local" a
     if auth_clear_signal_report=$(run_drill --local-fixture-test --fault-test auth-clear-signal); then
       emit_preflight_failure
     fi
+    preserve_prepared_on_unverified_cleanup "$auth_clear_signal_report"
     if ! printf '%s' "$auth_clear_signal_report" | /usr/bin/python3 -c '
 import json, sys
 report = json.load(sys.stdin)
@@ -427,7 +461,7 @@ fi
 
 preflight_stage="run primary synthetic restore drill"
 if ! success_report=$(run_drill); then
-  if ! cleanup_prepared_inputs; then emit_prepared_cleanup_failure; fi
+  cleanup_prepared_after_failed_drill "$success_report"
   printf '%s\n' "$success_report"
   exit 1
 fi
@@ -444,6 +478,7 @@ preflight_stage="run malformed SQL fault drill"
 if malformed_report=$(run_drill --fault-test malformed-sql 2>/dev/null); then
   emit_preflight_failure
 fi
+preserve_prepared_on_unverified_cleanup "$malformed_report"
 if ! printf '%s' "$malformed_report" | /usr/bin/python3 -c '
 import json, sys
 report = json.load(sys.stdin)
@@ -457,6 +492,7 @@ preflight_stage="run auth key failure drill"
 if auth_clear_failure_report=$(run_drill --fault-test auth-clear-failure 2>/dev/null); then
   emit_preflight_failure
 fi
+preserve_prepared_on_unverified_cleanup "$auth_clear_failure_report"
 if ! printf '%s' "$auth_clear_failure_report" | /usr/bin/python3 -c '
 import json, sys
 report = json.load(sys.stdin)
@@ -471,6 +507,7 @@ if auth_clear_signal_report=$(run_drill --fault-test auth-clear-signal); then
   printf 'restore readiness signal fault unexpectedly passed: %s\n' "$auth_clear_signal_report" >&2
   emit_preflight_failure
 fi
+preserve_prepared_on_unverified_cleanup "$auth_clear_signal_report"
 if ! printf '%s' "$auth_clear_signal_report" | /usr/bin/python3 -c '
 import json, sys
 report = json.load(sys.stdin)

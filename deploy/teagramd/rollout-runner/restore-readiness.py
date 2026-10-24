@@ -261,6 +261,26 @@ def source_identity() -> tuple[str, str]:
     ).stdout.decode("ascii", "strict").strip()
     if not re.fullmatch(r"[0-9a-f]{40}", revision):
         raise ValueError("invalid source revision")
+    status = subprocess.run(
+        [
+            "/usr/bin/git",
+            "-c",
+            f"safe.directory={ROOT}",
+            "-C",
+            str(ROOT),
+            "status",
+            "--porcelain=v1",
+            "--untracked-files=all",
+            "--ignored=matching",
+        ],
+        check=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        env=environment,
+        timeout=30,
+    ).stdout
+    if status:
+        raise ValueError("source worktree is dirty")
     paths = subprocess.run(
         [
             "/usr/bin/git",
@@ -270,8 +290,6 @@ def source_identity() -> tuple[str, str]:
             str(ROOT),
             "ls-files",
             "--cached",
-            "--others",
-            "--exclude-standard",
             "-z",
         ],
         check=True,
@@ -7130,6 +7148,7 @@ def parse_args() -> argparse.Namespace:
     mode.add_argument("--supervise", type=Path)
     mode.add_argument("--recover", type=Path)
     mode.add_argument("--validate-local-dump", type=Path)
+    mode.add_argument("--validate-source", action="store_true")
     mode.add_argument("--validate-prepared", type=Path)
     mode.add_argument("--attest-prepared", type=Path)
     mode.add_argument("--teardown-prepared", type=Path)
@@ -7260,6 +7279,28 @@ def parse_args() -> argparse.Namespace:
         ):
             parser.error("invalid local dump validation input")
         return args
+    if args.validate_source:
+        if any(
+            (
+                args.global_lock_fd is not None,
+                args.rollout_lock_fd is not None,
+                args.docker_bin is not None,
+                args.atlas_bin is not None,
+                args.build_dir is not None,
+                args.build_uid is not None,
+                args.go_arch is not None,
+                args.go_version is not None,
+                args.go_root is not None,
+                args.go_binary is not None,
+                args.prepared_dir is not None,
+                args.fault_test is not None,
+                args.work_seconds is not None,
+                args.local_dump is not None,
+                args.local_fixture_test,
+            )
+        ):
+            parser.error("invalid source validation input")
+        return args
     if args.recover is not None:
         if (
             args.local_dump is not None
@@ -7290,6 +7331,13 @@ def main() -> int:
         return recover(args.recover)
     if args.validate_local_dump is not None:
         return validate_local_dump_argument(args.validate_local_dump)
+    if args.validate_source:
+        try:
+            source_identity()
+            return 0
+        except (OSError, ValueError, TypeError, subprocess.SubprocessError):
+            print("restore readiness preflight check failed: source tree", file=sys.stderr)
+            return 1
     if args.validate_prepared is not None:
         try:
             verify_prepared_runtime(args.validate_prepared)

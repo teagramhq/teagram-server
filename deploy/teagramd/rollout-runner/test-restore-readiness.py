@@ -149,6 +149,69 @@ class RestoreReadinessContractTests(unittest.TestCase):
         self.assertIn("--local-fixture-test --fault-test sigkill", shell)
         self.assertIn("--attest-prepared", shell)
         self.assertIn("--teardown-prepared", shell)
+        self.assertLess(shell.index("--validate-source"), shell.index("build pinned runtime binaries"))
+
+    def test_source_identity_rejects_modified_untracked_and_ignored_inputs(self) -> None:
+        revision = b"a" * 40
+        for status in (b" M tracked.go\n", b"?? untracked.go\n", b"!! ignored.go\n"):
+            with self.subTest(status=status):
+                with patch.object(
+                    RESTORE_READINESS.subprocess,
+                    "run",
+                    side_effect=(Mock(stdout=revision), Mock(stdout=status)),
+                ) as git_run:
+                    with self.assertRaisesRegex(ValueError, "source worktree is dirty"):
+                        RESTORE_READINESS.source_identity()
+
+                status_command = git_run.call_args_list[1].args[0]
+                self.assertIn("status", status_command)
+                self.assertIn("--untracked-files=all", status_command)
+                self.assertIn("--ignored=matching", status_command)
+
+    def test_unverified_drill_cleanup_keeps_prepared_runtime_for_recovery(self) -> None:
+        shell = SHELL_GATE.read_text(encoding="utf-8")
+
+        def function_source(name: str) -> str:
+            start = shell.index(f"{name}() {{")
+            end = shell.index("\n}\n", start) + 2
+            return shell[start:end]
+
+        helpers = "\n".join(
+            function_source(name)
+            for name in (
+                "preserve_prepared_on_unverified_cleanup",
+                "cleanup_prepared_after_failed_drill",
+            )
+        )
+        harness = "\n".join(
+            (
+                helpers,
+                "keep_prepared=0",
+                "cleanup_called=0",
+                "cleanup_failed=0",
+                "cleanup_prepared_inputs() { cleanup_called=1; return 0; }",
+                "emit_prepared_cleanup_failure() { cleanup_failed=1; }",
+                'cleanup_prepared_after_failed_drill "$REPORT"',
+                'printf "%s %s %s\\n" "$keep_prepared" "$cleanup_called" "$cleanup_failed"',
+            )
+        )
+        self.assertIn(
+            "if (( keep_prepared == 0 )); then\n    if ! cleanup_prepared_inputs; then status=1; fi",
+            shell,
+        )
+        for cleanup, expected in (("unverified", "1 0 0\n"), ("verified", "0 1 0\n")):
+            with self.subTest(cleanup=cleanup):
+                environment = os.environ.copy()
+                environment["REPORT"] = json.dumps({"cleanup": cleanup})
+                result = subprocess.run(
+                    ["/usr/bin/bash", "-c", harness],
+                    check=True,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    env=environment,
+                    text=True,
+                )
+                self.assertEqual(result.stdout, expected)
 
     def test_missing_prepared_runtime_refuses_before_docker_or_run_lock(self) -> None:
         path = Path("/tmp") / ("teagram-restore-readiness." + os.urandom(4).hex())
