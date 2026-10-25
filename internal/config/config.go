@@ -1543,7 +1543,7 @@ func load(log *slog.Logger, allowKeyGeneration bool) (Config, error) {
 		return Config{}, err
 	}
 	cfg.PreAuth = preAuth
-	keyExchange, err := keyExchangeLimits(cfg.PublicWebSocketListenAddr)
+	keyExchange, err := keyExchangeLimits()
 	if err != nil {
 		return Config{}, err
 	}
@@ -1899,11 +1899,8 @@ func preAuthLimits() (mtproto.PreAuthLimits, error) {
 // keyExchangeLimits resolves the three anonymous key-exchange budgets. Zero
 // turns a layer off; a negative value is a startup error so a typo cannot
 // silently remove the bound.
-func keyExchangeLimits(publicWebSocketListenAddr string) (mtproto.ExchangeLimits, error) {
+func keyExchangeLimits() (mtproto.ExchangeLimits, error) {
 	limits := mtproto.DefaultExchangeLimits()
-	if publicWebSocketListenAddr != "" {
-		limits.TailnetPerNetwork.Limit = 0
-	}
 	for _, setting := range []struct {
 		name   string
 		target *int

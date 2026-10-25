@@ -803,7 +803,7 @@ func TestLoadKeyExchangeLimits(t *testing.T) {
 	})
 }
 
-func TestLoadKeyExchangeTailnetDefaultDependsOnPublicListener(t *testing.T) {
+func TestLoadKeyExchangeTailnetDefaultIndependentOfPublicListener(t *testing.T) {
 	t.Setenv("TG_POSTGRES_DSN", "postgres://localhost/tg")
 	t.Setenv("TG_AUTHKEY_ENC_KEY", validEncKey)
 	clearKeyExchangeTestEnv(t)
@@ -813,7 +813,7 @@ func TestLoadKeyExchangeTailnetDefaultDependsOnPublicListener(t *testing.T) {
 		defaultLimit int
 	}{
 		{name: "default listener may be public", defaultLimit: 20},
-		{name: "separate public listener", publicAddr: "127.0.0.1:2444", defaultLimit: 0},
+		{name: "separate public listener", publicAddr: "127.0.0.1:2444", defaultLimit: 20},
 	}
 	for _, topology := range topologies {
 		t.Run(topology.name, func(t *testing.T) {

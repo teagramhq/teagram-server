@@ -39,7 +39,7 @@ type ExchangeLimits struct {
 
 // DefaultExchangeLimits returns the production key-exchange budgets. Both
 // listener families start with a per-network bound; config may disable the
-// tailnet bound when a separate public WebSocket listener is configured.
+// tailnet bound through its explicit tailnet override.
 func DefaultExchangeLimits() ExchangeLimits {
 	return ExchangeLimits{
 		PerConnection: defaultKeyExchangesPerConnection,
