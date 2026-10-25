@@ -79,6 +79,7 @@ jq -e \
   and (.services.teagramd.networks | keys) == ["backend"]
   and .networks.backend.internal == true
   and .networks.backend.ipam.config[0].subnet == "198.18.130.0/24"
+  and .networks.backend.ipam.config[0].ip_range == "198.18.130.128/26"
   and (.services.edge.networks | keys | sort) == ["backend", "edge"]
   and .services.teagramd.environment.TG_REGISTRATION == "open"
   and .services.teagramd.environment.TG_ADVERTISE_DEMO_GUEST_SIGN_UP == "true"
@@ -99,6 +100,7 @@ jq -e \
   and .secrets.teagram_demo_turnstile.file == $secretFile
   and .services.postgres.environment.PGDATA == "/var/lib/postgresql/18/docker"
   and .services.postgres.platform == "linux/amd64"
+  and .services.postgres.networks.backend.ipv4_address == "198.18.130.3"
   and (.services.postgres.mem_limit | tostring) == "335544320"
   and any(.services.postgres.volumes[]; (.source | endswith("/deploy/teagram-demo/postgresql.conf")) and .target == "/etc/postgresql/postgresql.conf" and .read_only)
   and .services.teagramd.image == "teagramd:local"
@@ -444,7 +446,7 @@ grep -Fq 'http-check send meth CONNECT uri challenges.cloudflare.com:443' "$SCRI
 grep -Fq 'monitor fail if { nbsrv(turnstile_egress) eq 0 }' "$SCRIPT_DIR/haproxy.cfg"
 grep -Fq 'bind :8404' "$SCRIPT_DIR/haproxy.cfg"
 grep -Fq 'http-reuse never' "$SCRIPT_DIR/haproxy.cfg"
-grep -Fq 'acl allowed_client src 198.18.130.2/32 198.18.130.253/32' "$SCRIPT_DIR/turnstile-egress.conf"
+grep -Fq 'acl allowed_client src 198.18.130.2/32 198.18.130.251/32 198.18.130.253/32' "$SCRIPT_DIR/turnstile-egress.conf"
 grep -Fq 'acl siteverify_host dstdomain challenges.cloudflare.com' "$SCRIPT_DIR/turnstile-egress.conf"
 grep -Fq 'http_access allow allowed_client CONNECT CONNECT_PORT siteverify_host' "$SCRIPT_DIR/turnstile-egress.conf"
 grep -Fq 'http_access deny all' "$SCRIPT_DIR/turnstile-egress.conf"
@@ -635,7 +637,7 @@ assert_order(Path(sys.argv[2]), [
     'demo_compose stop edge haproxy turnstile-egress',
     'python3 "$MODE_HELPER" validate',
     'IMAGE_REF=$(demo_pull_image_by_sha "$SHA" "$IMAGE_DIGEST")',
-    'demo_compose stop "$ACTIVE_SERVER"',
+    'demo_compose down --remove-orphans',
     'demo_bootstrap_compose up -d migrate',
     "demo_wait_migration demo_bootstrap_compose 'resume migrations'",
     'demo_write_active_release "$ACTIVE_SERVER" "$IMAGE_REF"',
@@ -647,6 +649,11 @@ assert_order(Path(sys.argv[2]), [
     '"$SEED_SCRIPT" --verify-turnstile --endpoint haproxy:2443',
     "demo_compose up -d edge",
 ])
+resume_path = init.split('if [[ -e "$MODE_FILE" || -L "$MODE_FILE" ]]; then\n', 1)[1].split(
+    '\nfi\n[[ "$ACTIVE_SERVER"', 1
+)[0]
+if 'demo_compose down --volumes' in resume_path or 'demo_compose down -v' in resume_path:
+    raise SystemExit("init-demo.sh: resume network recreation must preserve named volumes")
 if "demo_wait_migration demo_bootstrap_compose 'bootstrap migrations'" not in init:
     raise SystemExit("init-demo.sh: bootstrap must wait for migration completion")
 if "MIGRATE_STATUS=$(docker inspect" in init:
