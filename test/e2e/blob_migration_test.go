@@ -23,6 +23,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gotd/td/tg"
+
 	"github.com/teagramhq/teagram-server/internal/blob"
 	"github.com/teagramhq/teagram-server/internal/blobinventory"
 	"github.com/teagramhq/teagram-server/internal/blobmode"
@@ -63,7 +65,7 @@ func TestBlobEncryptionMigrationKillResume(t *testing.T) {
 	doc := sendUploadedDocument(t, ctx, initial.client, self, 0x5ED24777,
 		uploadParts(t, ctx, initial.client, 0x5ED24777, payload), "migration.bin", "", 0x5ED24777)
 	secondPayload := []byte("second plaintext file survives cutover")
-	secondDoc := sendUploadedDocument(t, ctx, initial.client, self, 0x5ED24779,
+	secondDoc, secondMessageID := sendUploadedDocumentWithMessageID(t, ctx, initial.client, self, 0x5ED24779,
 		uploadParts(t, ctx, initial.client, 0x5ED24779, secondPayload), "second.bin", "", 0x5ED24779)
 	livePartPayload := []byte("live upload part survives migration")
 	saveMediaPart(t, ctx, initial.client, 0x5ED24778, 0, livePartPayload)
@@ -228,6 +230,33 @@ func TestBlobEncryptionMigrationKillResume(t *testing.T) {
 	if authority, err := blobmode.Read(authorityDir, blobmode.EffectiveConfig{BlobS3: &s3Config}); err != nil || authority.Outcome != blobmode.OutcomeEncrypted {
 		t.Fatalf("authority after completed migration = %+v, %v; want encrypted", authority, err)
 	}
+	keys, err := blob.NewKeyRing(4, map[uint32][]byte{4: mediaKey})
+	if err != nil {
+		t.Fatalf("create serving media key ring: %v", err)
+	}
+	encryptedStore, err := blob.NewMigratedS3Store(ctx, s3Config, keys)
+	if err != nil {
+		t.Fatalf("create encrypted serving store after restart: %v", err)
+	}
+	// Replicas resume writes after authority switches, before the operator runs
+	// the separate plaintext cleanup command.
+	restarted := startMigrationMediaHarness(t, ctx, dsn, serverKey, phone, encryptedStore, false)
+	execChat(t, ctx, restarted.client.cmds, func(ctx context.Context, client *tg.Client) error {
+		_, err := client.MessagesDeleteMessages(ctx, &tg.MessagesDeleteMessagesRequest{ID: []int{secondMessageID}})
+		return err
+	})
+	erased, err := restarted.store.SweepMediaErasure(ctx, time.Now().Add(time.Hour), store.ErasureScanBatch)
+	if err != nil || erased.Erased != 1 {
+		t.Fatalf("erase migrated file after cutover = %+v, %v; want one erased file", erased, err)
+	}
+	if remote.has(secondTarget) || !remote.has("teagramd/"+secondFileKey) {
+		t.Fatalf("post-cutover erasure state: encrypted=%v plaintext=%v; want only the old plaintext copy to remain before cleanup",
+			remote.has(secondTarget), remote.has("teagramd/"+secondFileKey))
+	}
+	currentReferences, err := restarted.store.BlobInventoryReferences(ctx)
+	if err != nil || len(currentReferences) != 2 {
+		t.Fatalf("database references after erasure = %+v, %v; want the remaining file and live part", currentReferences, err)
+	}
 
 	stdout, stderr, err = migration.run(ctx, cleanupArgs...)
 	if err != nil {
@@ -237,32 +266,19 @@ func TestBlobEncryptionMigrationKillResume(t *testing.T) {
 		Objects int `json:"objects"`
 		Removed int `json:"plaintext_objects_removed"`
 	}
-	if err := json.Unmarshal([]byte(stdout), &cleanupSummary); err != nil || cleanupSummary.Objects != 3 || cleanupSummary.Removed != 3 {
-		t.Fatalf("explicit cleanup summary = %+v, %v; want three referenced objects removed", cleanupSummary, err)
+	if err := json.Unmarshal([]byte(stdout), &cleanupSummary); err != nil || cleanupSummary.Objects != 2 || cleanupSummary.Removed != 3 {
+		t.Fatalf("explicit cleanup summary = %+v, %v; want two current references and all three plaintext copies removed", cleanupSummary, err)
 	}
 	if remote.has("teagramd/"+fileKey) || remote.has("teagramd/"+secondFileKey) || remote.has("teagramd/"+partKey) {
-		t.Fatal("explicit cleanup retained a referenced plaintext copy")
+		t.Fatal("explicit cleanup retained a plaintext copy")
 	}
 	if !remote.has("teagramd/" + strayKey) {
 		t.Fatal("explicit cleanup removed the unreferenced stray object")
 	}
 
-	keys, err := blob.NewKeyRing(4, map[uint32][]byte{4: mediaKey})
-	if err != nil {
-		t.Fatalf("create serving media key ring: %v", err)
-	}
-	encryptedStore, err := blob.NewMigratedS3Store(ctx, s3Config, keys)
-	if err != nil {
-		t.Fatalf("create encrypted serving store after restart: %v", err)
-	}
-	restarted := startMigrationMediaHarness(t, ctx, dsn, serverKey, phone, encryptedStore, false)
 	got := downloadDocument(t, ctx, restarted.client, doc)
 	if !bytes.Equal(got, payload) {
 		t.Fatalf("ranged download after encrypted serving restart returned %d bytes; want %d byte-identical bytes", len(got), len(payload))
-	}
-	secondGot := downloadDocument(t, ctx, restarted.client, secondDoc)
-	if !bytes.Equal(secondGot, secondPayload) {
-		t.Fatalf("second ranged download after restart returned %q; want %q", secondGot, secondPayload)
 	}
 }
 

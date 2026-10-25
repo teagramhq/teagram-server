@@ -333,9 +333,11 @@ func EncryptReferenced(
 	return summary, nil
 }
 
-// CleanupPlaintext removes only referenced plaintext source objects whose
-// encrypted copies still authenticate in full and match the recorded source
-// digest. It is intentionally separate from [EncryptReferenced].
+// CleanupPlaintext removes verified plaintext copies for current references
+// and journaled objects erased after cutover. Current references require a
+// matching authenticated envelope; erased objects require a matching journal
+// digest. Unjournaled objects are left untouched. It is intentionally separate
+// from [EncryptReferenced].
 func CleanupPlaintext(
 	ctx context.Context,
 	backend blob.Store,
@@ -388,10 +390,12 @@ func CleanupPlaintext(
 	if err != nil {
 		return summary, err
 	}
+	referenced := make(map[string]struct{}, len(refs))
 	for _, ref := range refs {
 		if err := ctx.Err(); err != nil {
 			return summary, err
 		}
+		referenced[ref.Key] = struct{}{}
 		progress, hasProgress := journal.objects[ref.Key]
 		targetKey, err := blob.EncryptedObjectKey(ref.Key)
 		if err != nil {
@@ -433,6 +437,51 @@ func CleanupPlaintext(
 			summary.BytesRemoved += ref.LogicalBytes
 		}
 		if err := journal.record(ref, digest, "cleaned"); err != nil {
+			return summary, err
+		}
+	}
+	staleKeys := make([]string, 0, len(journal.objects))
+	for key, progress := range journal.objects {
+		if progress.State != "verified" {
+			continue
+		}
+		if _, isReferenced := referenced[key]; isReferenced {
+			continue
+		}
+		staleKeys = append(staleKeys, key)
+	}
+	sort.Strings(staleKeys)
+	for _, key := range staleKeys {
+		if err := ctx.Err(); err != nil {
+			return summary, err
+		}
+		progress := journal.objects[key]
+		source, exists := entries[key]
+		if !exists {
+			continue
+		}
+		if !source.Regular || source.Dir || source.Size != progress.LogicalBytes {
+			return summary, fmt.Errorf("plaintext cleanup: erased source %q is not the expected regular object", progress.ID)
+		}
+		sourceDigest, err := digestStore(ctx, backend, source)
+		if err != nil {
+			return summary, fmt.Errorf("plaintext cleanup: checksum erased source for %q: %w", progress.ID, err)
+		}
+		if sourceDigest != progress.SourceSHA256 {
+			return summary, fmt.Errorf("plaintext cleanup: erased source %q differs from its verified migration digest", progress.ID)
+		}
+		if progress.LogicalBytes > math.MaxInt64-summary.BytesRemoved {
+			return summary, errors.New("plaintext cleanup: removed byte total overflows int64")
+		}
+		if err := backend.Remove(ctx, key); err != nil {
+			return summary, fmt.Errorf("plaintext cleanup: remove erased source for %q: %w", progress.ID, err)
+		}
+		summary.ObjectsRemoved++
+		summary.BytesRemoved += progress.LogicalBytes
+		ref := blobinventory.Reference{
+			Key: key, Kind: progress.Kind, ID: progress.ID, LogicalBytes: progress.LogicalBytes,
+		}
+		if err := journal.record(ref, progress.SourceSHA256, "cleaned"); err != nil {
 			return summary, err
 		}
 	}

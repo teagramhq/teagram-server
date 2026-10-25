@@ -173,6 +173,89 @@ func TestCleanupPlaintextRemovesOnlyVerifiedReferences(t *testing.T) {
 	}
 }
 
+func TestCleanupPlaintextRemovesErasedVerifiedReference(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	erasedKey := blob.Key(80)
+	liveKey := blob.Key(81)
+	strayKey := blob.Key(99)
+	erasedRef := blobinventory.Reference{Key: erasedKey, Kind: "file", ID: "80", LogicalBytes: 6}
+	liveRef := blobinventory.Reference{Key: liveKey, Kind: "file", ID: "81", LogicalBytes: 4}
+	store := &interruptingMemoryStore{
+		memoryStore: &memoryStore{objects: map[string][]byte{
+			erasedKey: []byte("erased"), liveKey: []byte("live"), strayKey: []byte("stray"),
+		}},
+		putCounts: make(map[string]int),
+	}
+	options := blobmigration.EncryptionOptions{ProgressPath: t.TempDir() + "/migration-progress.json", Writes: "drained"}
+	ring := migrationTestKeyRing(t)
+	if _, err := blobmigration.EncryptReferenced(ctx, store, ring, []blobinventory.Reference{erasedRef, liveRef}, options); err != nil {
+		t.Fatalf("migrate referenced objects: %v", err)
+	}
+	prefixed, err := blob.NewPrefixedStore(store, blob.EncryptedObjectsPrefix)
+	if err != nil {
+		t.Fatalf("create encrypted namespace: %v", err)
+	}
+	if err := prefixed.Remove(ctx, erasedKey); err != nil {
+		t.Fatalf("erase encrypted copy: %v", err)
+	}
+
+	summary, err := blobmigration.CleanupPlaintext(ctx, store, ring, []blobinventory.Reference{liveRef}, options)
+	if err != nil {
+		t.Fatalf("clean up after erasure: %v", err)
+	}
+	if summary.ObjectsRemoved != 2 || summary.BytesRemoved != 10 {
+		t.Fatalf("cleanup summary = %+v, want live and erased plaintext copies totaling 10 bytes", summary)
+	}
+	for _, key := range []string{erasedKey, liveKey} {
+		if _, exists := store.objects[key]; exists {
+			t.Errorf("plaintext copy %q remains after cleanup", key)
+		}
+	}
+	if string(store.objects[strayKey]) != "stray" {
+		t.Fatal("cleanup touched an unjournaled stray object")
+	}
+	if _, exists := store.objects[blob.EncryptedObjectsPrefix+"/"+liveKey]; !exists {
+		t.Fatal("cleanup removed the current verified encrypted copy")
+	}
+}
+
+func TestCleanupPlaintextKeepsChangedErasedReference(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	erasedKey := blob.Key(82)
+	liveKey := blob.Key(83)
+	erasedRef := blobinventory.Reference{Key: erasedKey, Kind: "file", ID: "82", LogicalBytes: 6}
+	liveRef := blobinventory.Reference{Key: liveKey, Kind: "file", ID: "83", LogicalBytes: 4}
+	store := &interruptingMemoryStore{
+		memoryStore: &memoryStore{objects: map[string][]byte{erasedKey: []byte("erased"), liveKey: []byte("live")}},
+		putCounts:   make(map[string]int),
+	}
+	options := blobmigration.EncryptionOptions{ProgressPath: t.TempDir() + "/migration-progress.json", Writes: "drained"}
+	ring := migrationTestKeyRing(t)
+	if _, err := blobmigration.EncryptReferenced(ctx, store, ring, []blobinventory.Reference{erasedRef, liveRef}, options); err != nil {
+		t.Fatalf("migrate referenced objects: %v", err)
+	}
+	prefixed, err := blob.NewPrefixedStore(store, blob.EncryptedObjectsPrefix)
+	if err != nil {
+		t.Fatalf("create encrypted namespace: %v", err)
+	}
+	if err := prefixed.Remove(ctx, erasedKey); err != nil {
+		t.Fatalf("erase encrypted copy: %v", err)
+	}
+	if _, err := store.Put(ctx, erasedKey, strings.NewReader("change")); err != nil {
+		t.Fatalf("replace erased plaintext fixture: %v", err)
+	}
+
+	if _, err := blobmigration.CleanupPlaintext(ctx, store, ring, []blobinventory.Reference{liveRef}, options); err == nil ||
+		!strings.Contains(err.Error(), "differs from its verified migration digest") {
+		t.Fatalf("cleanup after source changed = %v, want verified digest mismatch", err)
+	}
+	if string(store.objects[erasedKey]) != "change" {
+		t.Fatal("cleanup removed a changed source object")
+	}
+}
+
 func TestCleanupPlaintextAllowsNewEncryptedReferencesAfterCutover(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
