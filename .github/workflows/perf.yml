@@ -107,9 +107,24 @@ jobs:
           path: .perf-cache
           key: perf-fixture-${{ hashFiles('test/perf/fixture_test.go') }}
 
+      # A missing snapshot is expected only when this branch is the one that
+      # changes the fixture: main builds the new snapshot on merge. For an
+      # unchanged fixture it means the snapshot was lost, and a green check
+      # without measurements would hide every regression, so the gate fails.
       - name: No snapshot for this fixture
         if: steps.snapshot.outputs.cache-hit != 'true'
         run: |
+          fixture=test/perf/fixture_test.go
+          if [ -n "$PERF_BASE_SHA" ] && git cat-file -e "$PERF_BASE_SHA:$fixture" 2>/dev/null \
+            && git diff --quiet "$PERF_BASE_SHA" HEAD -- "$fixture"; then
+            {
+              echo "## RPC performance"
+              echo
+              echo "Not measured: the fixture snapshot for this unchanged fixture is missing. Rerun this workflow on main to rebuild it."
+            } >>"$GITHUB_STEP_SUMMARY"
+            echo "::error::Fixture snapshot missing for an unchanged $fixture; rerun RPC performance on main."
+            exit 1
+          fi
           {
             echo "## RPC performance"
             echo

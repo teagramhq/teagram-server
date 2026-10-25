@@ -283,7 +283,7 @@ func (p planNode) walk(fn func(planNode)) {
 // transaction it rolls back, so a write's re-execution leaves nothing behind.
 // A statement that cannot run twice (a unique insert) is planned without
 // ANALYZE instead, and its rows read are the planner's estimate.
-func (x *explainer) statements(ctx context.Context, captured []capturedQuery) (rows int64, scans []string, unexplained int) {
+func (x *explainer) statements(ctx context.Context, captured []capturedQuery) (rows int64, scans, unexplained []string) {
 	for _, q := range captured {
 		body := statementBody(q.sql)
 		if body == "" {
@@ -291,7 +291,9 @@ func (x *explainer) statements(ctx context.Context, captured []capturedQuery) (r
 		}
 		plan, analyzed, err := x.plan(ctx, body, q.args)
 		if err != nil {
-			unexplained++
+			if line := firstLine(body); !slices.Contains(unexplained, line) {
+				unexplained = append(unexplained, line)
+			}
 			continue
 		}
 		plan.walk(func(n planNode) {

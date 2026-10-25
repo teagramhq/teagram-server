@@ -235,3 +235,31 @@ func TestMarkdownListsEveryScenarioWithBudgetAndBand(t *testing.T) {
 		}
 	}
 }
+
+func TestEvaluateWaivesOnlySequentialScansBaseAlreadyHas(t *testing.T) {
+	known := "messages (40200 rows): SELECT f.id FROM files f"
+	added := "dialogs (12000 rows): SELECT id FROM dialogs"
+	base := pair("upload.getFile", perfreport.Read, result(1, 1, 1, 1), result(1, 1, 1, 1))
+	base[0].SeqScans = []string{"messages (20100 rows): SELECT f.id FROM files f"}
+	base[1].SeqScans = []string{"messages (40100 rows): SELECT f.id FROM files f"}
+	head := pair("upload.getFile", perfreport.Read, result(1, 1, 1, 1), result(1, 1, 1, 1))
+	head[1].SeqScans = []string{known, added}
+	waivers := []perfreport.Waiver{{Scenario: "upload.getFile", Check: perfreport.CheckSeqScan, Issue: "MAIN-2538"}}
+	v := perfreport.Evaluate(perfreport.Input{Head: rounds(head...), Base: rounds(base...), Waivers: waivers})
+	got := reasons(v.Failures)
+	if !strings.Contains(got, "sequential scan on "+added) {
+		t.Fatalf("failures = %q, want the new scan to block despite the waiver", got)
+	}
+	if strings.Contains(got, "messages") || len(v.Waived) != 1 {
+		t.Fatalf("failures = %q, waived = %+v, want only base's scan waived", got, v.Waived)
+	}
+}
+
+func TestEvaluateBlocksUnexplainedStatements(t *testing.T) {
+	rs := pair("messages.search", perfreport.Read, result(1, 1, 1, 1), result(1, 1, 1, 1))
+	rs[1].Unexplained = []string{"SELECT id FROM messages WHERE id = $1"}
+	got := reasons(perfreport.Evaluate(perfreport.Input{Head: rounds(rs...)}).Failures)
+	if !strings.Contains(got, "messages.search: could not EXPLAIN SELECT id FROM messages WHERE id = $1 at 100x") {
+		t.Fatalf("failures = %q", got)
+	}
+}

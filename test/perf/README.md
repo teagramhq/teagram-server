@@ -16,7 +16,8 @@ table above 10,000 rows.
 
 - Blocking from the first run: statement count and rows read against the base
   branch, the same statement count at 1x and 100x, rows read at 100x within 1.5x
-  of 1x, no sequential scan, no failed scenario.
+  of 1x, no sequential scan, no statement Postgres cannot EXPLAIN, no failed
+  scenario.
 - Reported on every run, blocking once 20 `main` runs have given the scenario a
   noise band: p95 within budget (reads 20 ms, writes 50 ms, fan-out 2 s),
   p50 at 100x within 1.5x of 1x, and a median no slower than base by more than
@@ -24,14 +25,16 @@ table above 10,000 rows.
   more before it counts.
 
 A check `main` already fails is listed in `known_violations.json` with the issue
-that fixes it. Base regressions cannot be listed.
+that fixes it. Base regressions cannot be listed, and a listed sequential scan
+covers only the scans the base branch already has: a new one still fails.
 
 ## CI
 
 `.github/workflows/perf.yml`. A `main` run seeds the fixtures when
 `fixture_test.go` changed and stores the dump as a cache entry; every run
 restores it, applies the branch's migrations on top, and measures base and head
-interleaved. A PR that changes the fixture is not measured until it merges.
+interleaved. A PR that changes the fixture is not measured until it merges; a
+missing snapshot for an unchanged fixture fails the gate.
 
 ## Locally
 

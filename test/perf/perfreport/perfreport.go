@@ -81,10 +81,11 @@ type Result struct {
 	AllocBytes int64 `json:"alloc_bytes"`
 	// SeqScans names each sequential scan over a table above the size limit.
 	SeqScans []string `json:"seq_scans,omitempty"`
-	// Unexplained counts statements Postgres could not EXPLAIN.
-	Unexplained int    `json:"unexplained,omitempty"`
-	Note        string `json:"note,omitempty"`
-	Error       string `json:"error,omitempty"`
+	// Unexplained lists statements Postgres could not EXPLAIN. Their scans
+	// and rows are unverified, so each one fails the run.
+	Unexplained []string `json:"unexplained,omitempty"`
+	Note        string   `json:"note,omitempty"`
+	Error       string   `json:"error,omitempty"`
 }
 
 // Failure is one failed check.
@@ -106,9 +107,11 @@ const (
 	CheckAlloc   = "alloc"
 	CheckSeqScan = "seqscan"
 	CheckError   = "error"
-	checkMissing = "missing"
-	checkBase    = "regression"
-	checkSlower  = "slower"
+	// CheckUnexplained fails a statement whose plan could not be read.
+	CheckUnexplained = "unexplained"
+	checkMissing     = "missing"
+	checkBase        = "regression"
+	checkSlower      = "slower"
 )
 
 // timing reports whether a check is decided by a clock rather than a counter.
@@ -135,7 +138,7 @@ func ParseWaivers(raw []byte) ([]Waiver, error) {
 	}
 	for _, w := range ws {
 		switch w.Check {
-		case CheckBudget, CheckQueries, CheckLatency, CheckRows, CheckAlloc, CheckSeqScan, CheckError:
+		case CheckBudget, CheckQueries, CheckLatency, CheckRows, CheckAlloc, CheckSeqScan, CheckError, CheckUnexplained:
 		default:
 			return nil, fmt.Errorf("waiver for %q: check %q cannot be waived", w.Scenario, w.Check)
 		}
@@ -206,11 +209,13 @@ func Evaluate(in Input) Verdict {
 		row.Band, row.Runs = bands[name].sd, bands[name].n
 		calibrated := row.Runs >= Calibration
 		failed := map[string]bool{}
-		fail := func(check, format string, args ...any) {
+		// record files a failed check. waivable is false for a finding the
+		// base branch does not have, which no waiver covers.
+		record := func(check string, waivable bool, format string, args ...any) {
 			f := Failure{Scenario: name, Check: check, Reason: fmt.Sprintf(format, args...)}
 			failed[check] = true
 			for _, w := range in.Waivers {
-				if w.Scenario == name && w.Check == check {
+				if waivable && w.Scenario == name && w.Check == check {
 					f.Issue = w.Issue
 					if !slices.Contains(row.Known, w.Issue) {
 						row.Known = append(row.Known, w.Issue)
@@ -231,6 +236,8 @@ func Evaluate(in Input) Verdict {
 				v.Reported = append(v.Reported, f)
 			}
 		}
+		fail := func(check, format string, args ...any) { record(check, true, format, args...) }
+		baseSmall, baseLarge := baseAgg[key{name, Small}], baseAgg[key{name, Large}]
 		for _, r := range []*Result{row.Small, row.Large} {
 			if r == nil {
 				continue
@@ -239,8 +246,18 @@ func Evaluate(in Input) Verdict {
 			if r.Error != "" {
 				fail(CheckError, "%s run failed: %s", r.Fixture, r.Error)
 			}
+			baseRun := baseSmall
+			if r.Fixture == Large {
+				baseRun = baseLarge
+			}
 			for _, scan := range r.SeqScans {
-				fail(CheckSeqScan, "sequential scan on %s at %s", scan, r.Fixture)
+				// Without a base measurement there is nothing to tell a known
+				// scan from a new one, and the waiver stands for all of them.
+				known := baseRun == nil || slices.ContainsFunc(baseRun.SeqScans, func(b string) bool { return scanKey(b) == scanKey(scan) })
+				record(CheckSeqScan, known, "sequential scan on %s at %s", scan, r.Fixture)
+			}
+			for _, sql := range r.Unexplained {
+				fail(CheckUnexplained, "could not EXPLAIN %s at %s", sql, r.Fixture)
 			}
 		}
 		if row.Small == nil {
@@ -296,6 +313,19 @@ func Evaluate(in Input) Verdict {
 }
 
 type key struct{ name, fixture string }
+
+// scanKey drops a scan's table size, which moves with the data, so the same
+// scan matches across branches and rounds.
+func scanKey(scan string) string {
+	table, statement, ok := strings.Cut(scan, ": ")
+	if !ok {
+		return scan
+	}
+	if i := strings.Index(table, " ("); i >= 0 {
+		table = table[:i]
+	}
+	return table + ": " + statement
+}
 
 // Aggregate folds rounds into one report of their medians, the form a main
 // run is kept in for noise bands.
@@ -374,7 +404,7 @@ func aggregate(reports []Report) (map[key]*Result, []string) {
 		agg.Queries = int(median(rs, func(r Result) float64 { return float64(r.Queries) }))
 		agg.RowsRead = int64(median(rs, func(r Result) float64 { return float64(r.RowsRead) }))
 		agg.AllocBytes = int64(median(rs, func(r Result) float64 { return float64(r.AllocBytes) }))
-		agg.SeqScans, agg.Error = nil, ""
+		agg.SeqScans, agg.Unexplained, agg.Error = nil, nil, ""
 		for _, r := range rs {
 			for _, scan := range r.SeqScans {
 				if !slices.Contains(agg.SeqScans, scan) {
@@ -384,7 +414,11 @@ func aggregate(reports []Report) (map[key]*Result, []string) {
 			if agg.Error == "" {
 				agg.Error = r.Error
 			}
-			agg.Unexplained = max(agg.Unexplained, r.Unexplained)
+			for _, sql := range r.Unexplained {
+				if !slices.Contains(agg.Unexplained, sql) {
+					agg.Unexplained = append(agg.Unexplained, sql)
+				}
+			}
 		}
 		out[k] = &agg
 	}
@@ -493,9 +527,6 @@ func Markdown(v Verdict) string {
 	for _, row := range v.Rows {
 		if row.Large != nil && row.Large.Note != "" {
 			notes = append(notes, fmt.Sprintf("- `%s`: %s", row.Name, row.Large.Note))
-		}
-		if row.Large != nil && row.Large.Unexplained > 0 {
-			notes = append(notes, fmt.Sprintf("- `%s`: %d statements could not be EXPLAINed", row.Name, row.Large.Unexplained))
 		}
 	}
 	if len(notes) > 0 {
