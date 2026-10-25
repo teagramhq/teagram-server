@@ -336,6 +336,7 @@ if [ "${1:-}" = inspect ]; then
     case "$template" in
       '{{.HostConfig.LogConfig.Type}}')
         if [ "${MOCK_SCENARIO:-}" = pre-rollout-log-persisted ] || \
+           { [ "${MOCK_SCENARIO:-}" = initial-local-legacy-logging-readiness-timeout ] && [ "$subject" = "$MOCK_BASE_ID" ]; } || \
            { [ "${MOCK_SCENARIO:-}" = target-local-syslog-logging-rollout ] && \
              { [ "$phase" = baseline ] || [ "$phase" = rollback ]; }; } || \
            { [ "${MOCK_SCENARIO:-}" = target-local-old-target-image-logging-mismatch ] && [ "$phase" = baseline ]; }; then
@@ -435,7 +436,8 @@ if [ "${1:-}" = inspect ]; then
       env_json=$(jq -c --arg value "$origin_value" '. + ["TG_WEBSOCKET_ALLOWED_ORIGINS=" + $value]' <<< "$env_json")
     fi
     login_codes=false
-    if [ "${MOCK_SCENARIO:-}" = target-local-syslog-logging-unmigrated ] || \
+    if { [ "${MOCK_SCENARIO:-}" = initial-local-legacy-logging-readiness-timeout ] && [ "$cfg" = baseline ]; } || \
+       [ "${MOCK_SCENARIO:-}" = target-local-syslog-logging-unmigrated ] || \
        { [ "${MOCK_SCENARIO:-}" = target-local-syslog-logging-rollout ] && [ "$phase" != target ]; }; then
       login_codes=true
     fi
@@ -468,7 +470,8 @@ if [ "${1:-}" = inspect ]; then
     fi
     log_config_type=syslog
     log_config='{"syslog-address":"unixgram:///dev/log","syslog-facility":"daemon","syslog-format":"rfc5424","tag":"teagramd"}'
-    if { [ "${MOCK_SCENARIO:-}" = target-local-syslog-logging-rollout ] || \
+    if { [ "${MOCK_SCENARIO:-}" = initial-local-legacy-logging-readiness-timeout ] && [ "$cfg" = baseline ]; } || \
+       { [ "${MOCK_SCENARIO:-}" = target-local-syslog-logging-rollout ] || \
          [ "${MOCK_SCENARIO:-}" = target-local-syslog-logging-unmigrated ]; } && \
        { [ "$phase" = baseline ] || [ "$phase" = rollback ]; }; then
       log_config_type=json-file
@@ -738,7 +741,9 @@ if [ "${1:-}" = logs ]; then
     fi
     exit 0
   fi
-  if [ "${MOCK_SCENARIO:-success}" = readiness-timeout ] && [ "$(cat "$MOCK_STATE/phase")" = target ]; then exit 0; fi
+  if { [ "${MOCK_SCENARIO:-success}" = readiness-timeout ] || \
+       [ "${MOCK_SCENARIO:-}" = initial-local-legacy-logging-readiness-timeout ]; } && \
+     [ "$(cat "$MOCK_STATE/phase")" = target ]; then exit 0; fi
   if [ "${MOCK_SCENARIO:-success}" = logs-failed ] && [ "$(cat "$MOCK_STATE/phase")" = target ]; then
     printf 'fixture log read failed\n' >&2
     exit 23
@@ -1362,7 +1367,7 @@ run_fixture() {
     ambient_revision=(TEAGRAMD_SOURCE_REVISION=ambient-revision-must-not-win)
   fi
   runner="$runtime_dir/rollout-runner.sh"
-  case "$scenario" in old-target-image|target-local-old-target-image-logging-mismatch|target-local-598-rollback|target-local-df9-rollback|target-local-welcome-channel-addition-rollback|config-drift|target-local-carry-forward-public-listener-wide-host|target-local-carry-forward-public-listener-other-port|public-websocket-enabled|readiness-timeout|logs-failed|runtime-target-exited|target-container-unavailable|target-local-carry-forward-image-reuse-stale-build|target-local-carry-forward-image-reuse-stop-timeout-mismatch|schema-post-failed-69|schema-post-missing-69) require_marker=1 ;; esac
+  case "$scenario" in old-target-image|target-local-old-target-image-logging-mismatch|target-local-598-rollback|target-local-df9-rollback|target-local-welcome-channel-addition-rollback|config-drift|target-local-carry-forward-public-listener-wide-host|target-local-carry-forward-public-listener-other-port|public-websocket-enabled|readiness-timeout|initial-local-legacy-logging-readiness-timeout|logs-failed|runtime-target-exited|target-container-unavailable|target-local-carry-forward-image-reuse-stale-build|target-local-carry-forward-image-reuse-stop-timeout-mismatch|schema-post-failed-69|schema-post-missing-69) require_marker=1 ;; esac
   [ "$name" = marker-write-failed ] && require_marker=0
   [ -n "$chmod_match" ] && require_marker=1
   if [ "$action" = reconcile ]; then
@@ -2033,6 +2038,38 @@ else
   grep -nE '^docker compose config --format json$|^docker compose exec -T postgres pg_dump|merge --ff-only -q |reset --hard -q |^python3 blob-mode-state.pinned preflight-initial-local$|^python3 blob-mode-state.pinned initialize-local$' \
     "$TMP/real-fixed-initial-local-transition-events" >&2
   fail 'real-Git fixed legacy-to-target transition, capture provenance, and publication order'
+fi
+
+make_fixed_target_transition_fixture real-fixed-initial-local-legacy-logging-rollback
+printf '%s\n' initial-local-legacy-logging-readiness-timeout \
+  > "$TMP/real-fixed-initial-local-legacy-logging-rollback-scenario"
+runtime_source_sha=$(cat "$TMP/real-fixed-initial-local-legacy-logging-rollback-runtime-source-sha-path")
+status=$(run_fixture real-fixed-initial-local-legacy-logging-rollback built 0 '' 2 '' '' initialize-local "$runtime_source_sha")
+root=$(cat "$TMP/real-fixed-initial-local-legacy-logging-rollback-root-path")
+state=$(cat "$TMP/real-fixed-initial-local-legacy-logging-rollback-state-path")
+baseline_sha=$(cat "$TMP/real-fixed-initial-local-legacy-logging-rollback-baseline-sha-path")
+rollback_rows="$root.rollback/rollback-equivalence.tsv"
+default_json_logging_sha=$(printf '%s' '{"config":{},"type":"json-file"}' | sha256sum | awk '{print $1}')
+approved_syslog_logging_sha=$(printf '%s' '{"config":{"syslog-address":"unixgram:///dev/log","syslog-facility":"daemon","syslog-format":"rfc5424","tag":"teagramd"},"type":"syslog"}' | sha256sum | awk '{print $1}')
+if [ "$status" != 0 ] && grep -q 'rollback=verified' "$TMP/real-fixed-initial-local-legacy-logging-rollback.stdout" && \
+   grep -q 'reason=target_readiness_rejected_exit_' "$root.rollback/target-failure.txt" && \
+   grep -q 'result=verified .*baseline_equivalence=pass' "$root.rollback/rollback-result.txt" && \
+   grep -q $'rollback\tinitial_local_logging_transition\tjson-file:true\tsyslog-v1:false\tpass' "$rollback_rows" && \
+   awk -F '\t' -v expected="$default_json_logging_sha" -v actual="$approved_syslog_logging_sha" \
+     '$3 == "live_baseline_container_logging_sha256" && $4 == expected && $5 == actual && $6 == "pass" {found=1} END {exit !found}' \
+     "$rollback_rows" && \
+   grep -q $'rollback\tlive_baseline_container_log_login_codes\ttrue\tfalse\tpass' "$rollback_rows" && \
+   jq -e --arg expected "$default_json_logging_sha" \
+     '.container_log_login_codes == "true" and .container_logging_sha256 == $expected' \
+     "$root.baseline/baseline.snapshot.json" >/dev/null && \
+   jq -e --arg expected "$approved_syslog_logging_sha" \
+     '.container_log_login_codes == "false" and .container_logging_sha256 == $expected' \
+     "$root.rollback/rollback.snapshot.json" >/dev/null && \
+   [ "$(cat "$state/head")" = "$baseline_sha" ] && [ "$(cat "$state/teagramd")" = "$ROLLBACK_ID" ]; then
+  pass 'initial-local readiness failure verifies rollback across the approved legacy logging transition'
+else
+  show_fixture_failure real-fixed-initial-local-legacy-logging-rollback "$status"
+  fail 'initial-local readiness failure must verify rollback from legacy json-file logging'
 fi
 
 make_fixture project-layout-change project-layout-changed

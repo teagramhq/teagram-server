@@ -2172,6 +2172,9 @@ compare_rollback_to_baseline() {
   local results="$ROLLBACK_DIR/rollback-equivalence.tsv"
   local fields=(image_id mounts_sha256 stop_grace_period container_stop_timeout config_sha256 env_sha256 override_sha256 exposure_sha256 container_env_sha256 container_logging_sha256 compose_replica_count compose_client_addr_trust container_replica_count container_client_addr_trust compose_public_ws_2446 exposure_public_ws_2446 compose_logging_policy compose_log_login_codes container_log_login_codes)
   local field before after state timeout_value grace
+  local baseline_logging_sha rollback_logging_sha baseline_login_codes rollback_login_codes
+  local target_logging_policy target_login_codes rollback_logging_policy rollback_login_codes_value
+  local default_json_logging_sha approved_syslog_logging_sha initial_local_logging_transition=0
   local expected_count=${#fields[@]}
   ROLLBACK_COMPARE_FAILURES=0
   copy_immutable "$BASELINE_DIR/baseline.snapshot.json" "$baseline_file" || return 1
@@ -2187,11 +2190,41 @@ compare_rollback_to_baseline() {
       return 1
     }
     copy_immutable "$target_render" "$render_file" || return 1
+    baseline_logging_sha=$(jq -er '.container_logging_sha256' "$baseline_file") || { fail 'live baseline is missing its container logging digest'; return 1; }
+    rollback_logging_sha=$(jq -er '.container_logging_sha256' "$rollback_file") || { fail 'rollback is missing its container logging digest'; return 1; }
+    baseline_login_codes=$(jq -er '.container_log_login_codes' "$baseline_file") || { fail 'live baseline is missing its inspected login-code logging setting'; return 1; }
+    rollback_login_codes=$(jq -er '.container_log_login_codes' "$rollback_file") || { fail 'rollback is missing its inspected login-code logging setting'; return 1; }
+    target_logging_policy=$(jq -er '.compose_logging_policy' "$render_file") || { fail 'pinned target render is missing its logging policy'; return 1; }
+    target_login_codes=$(jq -er '.compose_log_login_codes' "$render_file") || { fail 'pinned target render is missing its login-code logging setting'; return 1; }
+    rollback_logging_policy=$(jq -er '.compose_logging_policy' "$rollback_file") || { fail 'rollback render is missing its logging policy'; return 1; }
+    rollback_login_codes_value=$(jq -er '.compose_log_login_codes' "$rollback_file") || { fail 'rollback render is missing its login-code logging setting'; return 1; }
+    default_json_logging_sha=$(printf '%s' '{"config":{},"type":"json-file"}' | sha256sum | awk '{print $1}') || return 1
+    approved_syslog_logging_sha=$(printf '%s' '{"config":{"syslog-address":"unixgram:///dev/log","syslog-facility":"daemon","syslog-format":"rfc5424","tag":"teagramd"},"type":"syslog"}' | sha256sum | awk '{print $1}') || return 1
+    # initialize-local keeps its reviewed syslog artifact for rollback. Accept
+    # only the exact default json-file to reviewed syslog/false transition.
+    if [ "$baseline_logging_sha" = "$default_json_logging_sha" ] && \
+       [ "$rollback_logging_sha" = "$approved_syslog_logging_sha" ] && \
+       { [ "$baseline_login_codes" = true ] || [ "$baseline_login_codes" = false ] || [ "$baseline_login_codes" = unset ]; } && \
+       [ "$rollback_login_codes" = false ] && \
+       [ "$target_logging_policy" = syslog-v1 ] && [ "$target_login_codes" = false ] && \
+       [ "$rollback_logging_policy" = syslog-v1 ] && [ "$rollback_login_codes_value" = false ]; then
+      initial_local_logging_transition=1
+    fi
     write_immutable "$results" '' || return 1
+    if [ "$initial_local_logging_transition" = 1 ]; then
+      append_evidence_row "$results" rollback initial_local_logging_transition \
+        "json-file:$baseline_login_codes" syslog-v1:false pass || return 1
+    fi
     for field in "${live_fields[@]}"; do
       before=$(jq -er --arg field "$field" '.[$field]' "$baseline_file") || { fail 'live baseline is missing a rollback comparison field'; return 1; }
       after=$(jq -er --arg field "$field" '.[$field]' "$rollback_file") || { fail 'rollback snapshot is missing an inspected comparison field'; return 1; }
-      record_rollback_row "$results" "live_baseline_$field" "$before" "$after" || return 1
+      if [ "$initial_local_logging_transition" = 1 ] && [ "$field" = container_logging_sha256 ]; then
+        append_evidence_row "$results" rollback "live_baseline_$field" "$before" "$after" pass || return 1
+      elif [ "$initial_local_logging_transition" = 1 ] && [ "$field" = container_log_login_codes ] && [ "$before" != "$after" ]; then
+        append_evidence_row "$results" rollback "live_baseline_$field" "$before" "$after" pass || return 1
+      else
+        record_rollback_row "$results" "live_baseline_$field" "$before" "$after" || return 1
+      fi
     done
     for field in "${render_fields[@]}"; do
       before=$(jq -er --arg field "$field" '.[$field]' "$render_file") || { fail 'pinned target render is missing a rollback comparison field'; return 1; }
