@@ -10,6 +10,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"golang.org/x/sys/unix"
@@ -216,6 +217,15 @@ func openCurrentRecords(path string, cfg EffectiveConfig) (*os.File, *os.File, r
 		}
 		return nil, nil, record{}, err
 	}
+	if err := recoverPublicationTemps(stateDir, journalDir); err != nil {
+		if closeErr := journalDir.Close(); closeErr != nil {
+			err = errors.Join(err, fmt.Errorf("close blob-mode journal: %w", closeErr))
+		}
+		if closeErr := stateDir.Close(); closeErr != nil {
+			err = errors.Join(err, fmt.Errorf("close blob-mode directory: %w", closeErr))
+		}
+		return nil, nil, record{}, err
+	}
 	entries, err := readJournal(journalDir, 0)
 	if err != nil {
 		if closeErr := journalDir.Close(); closeErr != nil {
@@ -271,6 +281,59 @@ func openCurrentRecords(path string, cfg EffectiveConfig) (*os.File, *os.File, r
 		}
 	}
 	return stateDir, journalDir, previous, nil
+}
+
+// recoverPublicationTemps removes only private publication staging files while
+// holding the state directory lock. Neither temporary-file namespace is part
+// of the journal authority; a retry can safely rebuild any interrupted write.
+func recoverPublicationTemps(stateDir, journalDir *os.File) error {
+	if err := removePublicationTemps(stateDir, ".mode.json.tmp-", "mode.json"); err != nil {
+		return err
+	}
+	return removePublicationTemps(journalDir, ".tmp-", "journal")
+}
+
+func removePublicationTemps(dir *os.File, prefix, field string) (retErr error) {
+	fd, err := unix.Openat(int(dir.Fd()), ".", unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
+	if err != nil {
+		return reject("unavailable", field)
+	}
+	entriesDir := os.NewFile(uintptr(fd), field+" temporary directory")
+	entries, readErr := entriesDir.ReadDir(-1)
+	closeErr := entriesDir.Close()
+	if readErr != nil || closeErr != nil {
+		return reject("unavailable", field)
+	}
+	removed := false
+	for _, entry := range entries {
+		name := entry.Name()
+		if !strings.HasPrefix(name, prefix) {
+			continue
+		}
+		if !canonicalUUID(strings.TrimPrefix(name, prefix)) {
+			return reject("invalid", field)
+		}
+		var stat unix.Stat_t
+		if err := unix.Fstatat(int(dir.Fd()), name, &stat, unix.AT_SYMLINK_NOFOLLOW); err != nil {
+			return reject("unavailable", field)
+		}
+		if err := validateStat(&stat, unix.S_IFREG, 0, field); err != nil {
+			return err
+		}
+		if stat.Size > maxRecordBytes {
+			return reject("oversize", field)
+		}
+		if err := unix.Unlinkat(int(dir.Fd()), name, 0); err != nil {
+			return reject("unavailable", field)
+		}
+		removed = true
+	}
+	if removed {
+		if err := dir.Sync(); err != nil {
+			return reject("unavailable", field)
+		}
+	}
+	return nil
 }
 
 func removeUncommittedEncryptedEntry(journalDir *os.File, entry journalEntry, generation int) error {

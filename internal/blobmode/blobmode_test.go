@@ -201,6 +201,11 @@ func TestPublishEncryptedRecoversUncommittedJournalTail(t *testing.T) {
 	if err := os.Link(orphanPath, tempPath); err != nil {
 		t.Fatalf("recreate linked publication temp: %v", err)
 	}
+	modeTempPath := filepath.Join(state.path, ".mode.json.tmp-"+orphan.TransitionID)
+	// #nosec G306 G703 -- Recreate the publisher's 0644 staging-file mode under this private temp directory.
+	if err := os.WriteFile(modeTempPath, orphanBytes, 0o644); err != nil {
+		t.Fatalf("recreate mode publication temp: %v", err)
+	}
 
 	// Recreate the durable state after the journal sync and before mode.json's
 	// rename: the encrypted entry exists, while the committed head is unchanged.
@@ -240,6 +245,58 @@ func TestPublishEncryptedRecoversUncommittedJournalTail(t *testing.T) {
 	}
 	if _, err := os.Lstat(tempPath); !os.IsNotExist(err) {
 		t.Fatalf("stale publication temp remains after retry: %v", err)
+	}
+	if _, err := os.Lstat(modeTempPath); !os.IsNotExist(err) {
+		t.Fatalf("stale mode publication temp remains after retry: %v", err)
+	}
+	assertRolloutAuthorityAccepts(t, state.path, reportRoot)
+}
+
+func TestPublishEncryptedRecoversJournalTempBeforeLink(t *testing.T) {
+	if !requireRootFixture(t, "TestPublishEncryptedRecoversJournalTempBeforeLink") {
+		return
+	}
+	state := testState(t, "initial-local", "s3-accepted")
+	config := blobmode.EffectiveConfig{BlobS3: testS3Config()}
+	reportRoot := filepath.Join(t.TempDir(), "reports")
+	inventoryReport := []byte(`{"schema":"teagram.blob-encryption-inventory/v1","encrypted":{"classes":{"valid_envelope":{"count":3,"logical_bytes":4096},"no_valid_envelope":{"count":0},"missing":{"count":0}}},"plaintext":{"classes":{}}}`)
+	inventoryDigest := sha256.Sum256(inventoryReport)
+	proof := blobmode.EncryptedEvidence{
+		InventorySHA256: hex.EncodeToString(inventoryDigest[:]), InventoryReport: inventoryReport,
+		ObjectCount: 3, ByteTotal: 4096, KeyVersion: 4, Writes: "drained",
+	}
+
+	journalTempPath := filepath.Join(state.path, "journal", ".tmp-00000000-0000-4000-8000-000000000099")
+	// #nosec G306 G703 -- Recreate the publisher's 0644 staging-file mode under this private temp directory.
+	if err := os.WriteFile(journalTempPath, []byte("partial journal record"), 0o644); err != nil {
+		t.Fatalf("create interrupted journal temp: %v", err)
+	}
+	if _, err := blobmode.Read(state.path, config); err != nil {
+		t.Fatalf("read accepted authority with incomplete journal temp: %v", err)
+	}
+	if err := blobmode.PublishEncrypted(state.path, reportRoot, config, proof); err != nil {
+		t.Fatalf("retry encrypted publication: %v", err)
+	}
+	if _, err := os.Lstat(journalTempPath); !os.IsNotExist(err) {
+		t.Fatalf("interrupted journal temp remains after retry: %v", err)
+	}
+	assertRolloutAuthorityAccepts(t, state.path, reportRoot)
+}
+
+func assertRolloutAuthorityAccepts(t *testing.T, statePath, reportRoot string) {
+	t.Helper()
+	_, testFile, _, ok := runtime.Caller(0)
+	if !ok {
+		t.Fatal("locate blob-mode package source")
+	}
+	repoRoot := filepath.Clean(filepath.Join(filepath.Dir(testFile), "../.."))
+	// #nosec G204 -- This is the repository's fixed rollout validator with private test fixture paths.
+	command := exec.CommandContext(t.Context(), "python3",
+		filepath.Join(repoRoot, "deploy/teagramd/rollout-runner/blob-mode-state.py"),
+		"authority", "--state-dir", statePath, "--report-root", reportRoot,
+	)
+	if output, err := command.CombinedOutput(); err != nil {
+		t.Fatalf("rollout authority validator rejected retried publication: %v\n%s", err, output)
 	}
 }
 
