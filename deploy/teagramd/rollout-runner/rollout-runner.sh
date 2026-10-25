@@ -1121,11 +1121,18 @@ approved_login_code_logging_transition() {
 
 approved_initial_local_logging_transition() {
   local baseline_sha="$1" baseline_login_codes="$2" target_policy="$3" target_login_codes="$4"
-  local default_json_logging_sha
+  local default_json_logging_sha approved_syslog_logging_sha
   default_json_logging_sha=$(printf '%s' '{"config":{},"type":"json-file"}' | sha256sum | awk '{print $1}') || return 1
-  [ "$baseline_sha" = "$default_json_logging_sha" ] && \
-    { [ "$baseline_login_codes" = true ] || [ "$baseline_login_codes" = false ] || [ "$baseline_login_codes" = unset ]; } && \
-    [ "$target_policy" = syslog-v1 ] && [ "$target_login_codes" = false ]
+  approved_syslog_logging_sha=$(printf '%s' '{"config":{"syslog-address":"unixgram:///dev/log","syslog-facility":"daemon","syslog-format":"rfc5424","tag":"teagramd"},"type":"syslog"}' | sha256sum | awk '{print $1}') || return 1
+  [ "$target_policy" = syslog-v1 ] && [ "$target_login_codes" = false ] || return 1
+  if [ "$baseline_sha" = "$default_json_logging_sha" ] && \
+     { [ "$baseline_login_codes" = true ] || [ "$baseline_login_codes" = false ] || [ "$baseline_login_codes" = unset ]; }; then
+    printf 'json-file:%s' "$baseline_login_codes"
+  elif [ "$baseline_sha" = "$approved_syslog_logging_sha" ] && [ "$baseline_login_codes" = false ]; then
+    printf 'syslog-v1:false'
+  else
+    return 1
+  fi
 }
 
 preflight_target_local_blob_authority() {
@@ -2141,10 +2148,10 @@ compare_resolved_preflight() {
     baseline_login_codes=$(jq -er '.container_log_login_codes' "$old_file") || { fail 'live baseline is missing its inspected login-code logging setting'; return 1; }
     target_logging_policy=$(jq -er '.compose_logging_policy' "$render_file") || { fail 'pinned target render is missing its logging policy'; return 1; }
     target_login_codes=$(jq -er '.compose_log_login_codes' "$render_file") || { fail 'pinned target render is missing its login-code logging setting'; return 1; }
-    if approved_initial_local_logging_transition \
-      "$baseline_logging_sha" "$baseline_login_codes" "$target_logging_policy" "$target_login_codes"; then
+    if baseline_logging_transition=$(approved_initial_local_logging_transition \
+      "$baseline_logging_sha" "$baseline_login_codes" "$target_logging_policy" "$target_login_codes"); then
       append_evidence_row "$results" preflight initial_local_logging_transition \
-        "json-file:$baseline_login_codes" syslog-v1:false pass || return 1
+        "$baseline_logging_transition" syslog-v1:false pass || return 1
     else
       append_evidence_row "$results" preflight initial_local_logging_transition \
         "sha256:$baseline_logging_sha:$baseline_login_codes" "$target_logging_policy:$target_login_codes" fail || return 1
@@ -2223,7 +2230,7 @@ compare_rollback_to_baseline() {
   local results="$ROLLBACK_DIR/rollback-equivalence.tsv"
   local fields=(image_id mounts_sha256 stop_grace_period container_stop_timeout config_sha256 env_sha256 override_sha256 exposure_sha256 container_env_sha256 container_logging_sha256 compose_replica_count compose_client_addr_trust container_replica_count container_client_addr_trust compose_public_ws_2446 exposure_public_ws_2446 compose_logging_policy compose_log_login_codes container_log_login_codes media_key_source media_key_current)
   local field before after state timeout_value grace
-  local baseline_logging_sha rollback_logging_sha baseline_login_codes rollback_login_codes
+  local baseline_logging_sha rollback_logging_sha baseline_login_codes rollback_login_codes baseline_logging_transition
   local target_logging_policy target_login_codes rollback_logging_policy rollback_login_codes_value
   local approved_syslog_logging_sha
   local initial_local_logging_transition=0
@@ -2251,10 +2258,9 @@ compare_rollback_to_baseline() {
     rollback_logging_policy=$(jq -er '.compose_logging_policy' "$rollback_file") || { fail 'rollback render is missing its logging policy'; return 1; }
     rollback_login_codes_value=$(jq -er '.compose_log_login_codes' "$rollback_file") || { fail 'rollback render is missing its login-code logging setting'; return 1; }
     approved_syslog_logging_sha=$(printf '%s' '{"config":{"syslog-address":"unixgram:///dev/log","syslog-facility":"daemon","syslog-format":"rfc5424","tag":"teagramd"},"type":"syslog"}' | sha256sum | awk '{print $1}') || return 1
-    # initialize-local keeps its reviewed syslog artifact for rollback. Accept
-    # only the exact default json-file to reviewed syslog/false transition.
-    if approved_initial_local_logging_transition \
-       "$baseline_logging_sha" "$baseline_login_codes" "$target_logging_policy" "$target_login_codes" && \
+    # initialize-local keeps its reviewed syslog artifact for rollback.
+    if baseline_logging_transition=$(approved_initial_local_logging_transition \
+       "$baseline_logging_sha" "$baseline_login_codes" "$target_logging_policy" "$target_login_codes") && \
        [ "$rollback_logging_sha" = "$approved_syslog_logging_sha" ] && \
        [ "$rollback_login_codes" = false ] && \
        [ "$rollback_logging_policy" = syslog-v1 ] && [ "$rollback_login_codes_value" = false ]; then
@@ -2263,7 +2269,7 @@ compare_rollback_to_baseline() {
     write_immutable "$results" '' || return 1
     if [ "$initial_local_logging_transition" = 1 ]; then
       append_evidence_row "$results" rollback initial_local_logging_transition \
-        "json-file:$baseline_login_codes" syslog-v1:false pass || return 1
+        "$baseline_logging_transition" syslog-v1:false pass || return 1
     fi
     for field in "${live_fields[@]}"; do
       before=$(jq -er --arg field "$field" '.[$field]' "$baseline_file") || { fail 'live baseline is missing a rollback comparison field'; return 1; }

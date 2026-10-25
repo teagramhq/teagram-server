@@ -2263,6 +2263,7 @@ if [ "$status" = 0 ] && grep -q 'rollout=verified' "$TMP/initial-local-target-co
    [ -n "$preflight_line" ] && [ -n "$dump_line" ] && [ -n "$merge_line" ] && [ -n "$initialize_line" ] && \
    [ "$preflight_line" -lt "$dump_line" ] && [ "$dump_line" -lt "$merge_line" ] && [ "$merge_line" -lt "$initialize_line" ] && \
    grep -q 'result=pass' "$root.baseline/initial-local-preflight.txt" && \
+   grep -q $'preflight\tinitial_local_logging_transition\tsyslog-v1:false\tsyslog-v1:false\tpass' "$root.target/preflight-comparisons.tsv" && \
    grep -q 'baseline_source=running-unguarded-containers' "$root.baseline/initial-local-provenance.txt" && \
    grep -q 'target_source=pinned-target-compose' "$root.baseline/initial-local-provenance.txt" && \
    grep -q "target_artifact_sha256=$INITIAL_LOCAL_COMPOSE_ARTIFACT_SHA" "$root.baseline/initial-local-provenance.txt" && \
