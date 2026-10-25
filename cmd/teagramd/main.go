@@ -626,6 +626,10 @@ func runAtBlobModePath(log *slog.Logger, blobModePath string) error {
 	if err != nil {
 		return err
 	}
+	stickerSets, err := api.LoadStickerSetCatalog(cfg.StickerBundle)
+	if err != nil {
+		return fmt.Errorf("load sticker catalogue: %w", err)
+	}
 	blobAuthority, err := blobmode.Read(blobModePath, blobmode.EffectiveConfig{BlobDir: cfg.BlobDir, BlobS3: cfg.BlobS3})
 	if err != nil {
 		return err
@@ -814,11 +818,11 @@ func runAtBlobModePath(log *slog.Logger, blobModePath string) error {
 			turnstileSiteKey = cfg.Turnstile.SiteKey
 			verifier = turnstileVerifier
 		}
-		return api.NewWithPhotoThumbsAndDialogFilterSyncAndUploadPartTTLAndTurnstileAndWelcomeChannelAndSignIn(
+		return api.NewWithPhotoThumbsAndDialogFilterSyncAndUploadPartTTLAndTurnstileAndWelcomeChannelAndSignInAndStickerCatalog(
 			st, cfg.DCID, tgcfg, log, cfg.LogLoginCodes, cfg.MaxFileBytes, blobs,
 			cfg.MaxUserStorageBytes, peers, photos, cfg.RateLimits, registrationMode,
 			dialogFilterSync, photoThumbs, cfg.UploadPartTTL, turnstileSiteKey,
-			verifier, cfg.WelcomeChannel, turnstileSignInEnabled, cfg.RecoveryEmailMode, notifyMetrics,
+			verifier, cfg.WelcomeChannel, turnstileSignInEnabled, cfg.RecoveryEmailMode, stickerSets, notifyMetrics,
 		)
 	}
 	if cfg.LogLoginCodes {

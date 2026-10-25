@@ -24,6 +24,7 @@ import (
 	"github.com/teagramhq/teagram-server/internal/blob"
 	"github.com/teagramhq/teagram-server/internal/keycrypt"
 	"github.com/teagramhq/teagram-server/internal/mtproto"
+	"github.com/teagramhq/teagram-server/internal/stickerbundle"
 	"github.com/teagramhq/teagram-server/internal/store"
 )
 
@@ -94,6 +95,9 @@ type Config struct {
 
 	// WelcomeChannel is the operator-configured public broadcast channel for new accounts.
 	WelcomeChannel string
+	// StickerBundle is the validated optional static sticker catalogue bundle.
+	// It remains nil when TG_STICKER_CATALOG_BUNDLE is unset or empty.
+	StickerBundle *stickerbundle.Bundle `json:"-"`
 	// Turnstile contains the optional public-auth challenge credentials. SecretKey
 	// is consumed only by the RPC verifier and must never be logged or exposed.
 	Turnstile TurnstileConfig `json:"-"`
@@ -918,6 +922,12 @@ func load(log *slog.Logger, allowKeyGeneration bool) (Config, error) {
 		RegistrationMode:    RegistrationClosed,
 		RecoveryEmailMode:   recoveryEmailMode,
 		SessionDeviceLabels: true,
+	}
+	if bundleDir := os.Getenv("TG_STICKER_CATALOG_BUNDLE"); bundleDir != "" {
+		cfg.StickerBundle, err = stickerbundle.Load(bundleDir)
+		if err != nil {
+			return Config{}, fmt.Errorf("TG_STICKER_CATALOG_BUNDLE: %w", err)
+		}
 	}
 	turnstile, err := loadTurnstileConfig()
 	if err != nil {

@@ -4,8 +4,11 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"hash/crc32"
+	"io"
+	"os"
 	"path"
 	"strconv"
 	"strings"
@@ -29,6 +32,45 @@ const reactionDocumentDate = 1_700_000_000
 type builtInReactionDocument struct {
 	file store.File
 	data []byte
+	path string
+}
+
+func (document builtInReactionDocument) readChunk(ctx context.Context, offset, limit int64) ([]byte, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if offset < 0 || limit < 0 || offset > document.file.Size || limit > document.file.Size-offset {
+		return nil, fmt.Errorf("built-in document read window outside %d byte asset", document.file.Size)
+	}
+	if document.path == "" {
+		return document.data[int(offset):int(offset+limit)], nil
+	}
+	file, err := os.Open(document.path)
+	if err != nil {
+		return nil, fmt.Errorf("open built-in document: %w", err)
+	}
+	info, err := file.Stat()
+	if err != nil {
+		closeErr := file.Close()
+		return nil, errors.Join(fmt.Errorf("inspect built-in document: %w", err), closeErr)
+	}
+	if info.Size() != document.file.Size {
+		closeErr := file.Close()
+		return nil, errors.Join(fmt.Errorf("built-in document size changed from %d to %d", document.file.Size, info.Size()), closeErr)
+	}
+	chunk := make([]byte, int(limit))
+	n, readErr := file.ReadAt(chunk, offset)
+	closeErr := file.Close()
+	if n != len(chunk) || (readErr != nil && !errors.Is(readErr, io.EOF)) {
+		return nil, errors.Join(fmt.Errorf("read built-in document: %w", readErr), closeErr)
+	}
+	if n != len(chunk) {
+		return nil, errors.Join(fmt.Errorf("read built-in document: got %d bytes, want %d", n, len(chunk)), closeErr)
+	}
+	if closeErr != nil {
+		return nil, fmt.Errorf("close built-in document: %w", closeErr)
+	}
+	return chunk, nil
 }
 
 type reactionDocumentCatalog struct {
@@ -230,7 +272,7 @@ func (h *handlers) builtInDocumentFileGate(loc downloadLocation) downloadGate {
 		if ok {
 			return builtInDocumentDownload(document), nil
 		}
-		stickerSets, err := getStickerSetCatalog()
+		stickerSets, err := h.stickerSetCatalog()
 		if err != nil {
 			h.log.Error("load sticker set documents", "err", err)
 			return authorizedDownload{}, errInternal
@@ -245,16 +287,7 @@ func (h *handlers) builtInDocumentFileGate(loc downloadLocation) downloadGate {
 
 func builtInDocumentDownload(document builtInReactionDocument) authorizedDownload {
 	return authorizedDownload{
-		file: document.file,
-		readChunk: func(ctx context.Context, offset, limit int64) ([]byte, error) {
-			if err := ctx.Err(); err != nil {
-				return nil, err
-			}
-			size := int64(len(document.data))
-			if offset < 0 || limit < 0 || offset > size || limit > size-offset {
-				return nil, fmt.Errorf("built-in document read window outside %d byte asset", size)
-			}
-			return document.data[int(offset):int(offset+limit)], nil
-		},
+		file:      document.file,
+		readChunk: document.readChunk,
 	}
 }

@@ -7,7 +7,9 @@ import (
 	"errors"
 	"fmt"
 	"hash/crc32"
+	"log/slog"
 	"path"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -17,6 +19,7 @@ import (
 
 	"github.com/teagramhq/teagram-server/internal/mtproto"
 	"github.com/teagramhq/teagram-server/internal/reactionassets"
+	"github.com/teagramhq/teagram-server/internal/stickerbundle"
 	"github.com/teagramhq/teagram-server/internal/store"
 )
 
@@ -39,9 +42,14 @@ type builtInStickerSet struct {
 type stickerSetCatalog struct {
 	byShortName   map[string]*builtInStickerSet
 	byID          map[int64]*builtInStickerSet
+	featured      []*builtInStickerSet
 	documents     map[reactionDocumentIdentity]builtInReactionDocument
 	documentsByID map[int64]*tg.Document
 }
+
+// StickerSetCatalog is a fully validated catalogue view suitable for sharing
+// with the handlers created for one server process.
+type StickerSetCatalog = stickerSetCatalog
 
 var (
 	stickerSetCatalogOnce sync.Once
@@ -51,12 +59,52 @@ var (
 
 func getStickerSetCatalog() (*stickerSetCatalog, error) {
 	stickerSetCatalogOnce.Do(func() {
-		stickerSetCatalogVal, errStickerSetCatalog = buildStickerSetCatalog()
+		stickerSetCatalogVal, errStickerSetCatalog = buildStickerSetCatalog(nil)
 	})
 	return stickerSetCatalogVal, errStickerSetCatalog
 }
 
-func buildStickerSetCatalog() (*stickerSetCatalog, error) {
+func (h *handlers) stickerSetCatalog() (*stickerSetCatalog, error) {
+	if h.stickerSets != nil {
+		return h.stickerSets, nil
+	}
+	return getStickerSetCatalog()
+}
+
+// LoadStickerSetCatalog combines the built-in set with a previously validated
+// optional bundle. Bundle files stay on disk and are read by range on demand.
+func LoadStickerSetCatalog(bundle *stickerbundle.Bundle) (*StickerSetCatalog, error) {
+	return buildStickerSetCatalog(bundle)
+}
+
+func buildStickerSetCatalog(bundles ...*stickerbundle.Bundle) (*stickerSetCatalog, error) {
+	if len(bundles) > 1 {
+		return nil, errors.New("sticker catalogue accepts at most one generated bundle")
+	}
+	var bundle *stickerbundle.Bundle
+	if len(bundles) == 1 {
+		bundle = bundles[0]
+	}
+	catalog, err := buildTwemojiStickerSetCatalog()
+	if err != nil {
+		return nil, err
+	}
+	if bundle != nil {
+		if err := appendStickerBundle(catalog, bundle); err != nil {
+			return nil, err
+		}
+	}
+	reactions, err := getReactionDocumentCatalog()
+	if err != nil {
+		return nil, fmt.Errorf("load standard reaction documents for sticker collision check: %w", err)
+	}
+	if err := validateStickerSetCatalogIdentities(catalog, reactions); err != nil {
+		return nil, err
+	}
+	return catalog, nil
+}
+
+func buildTwemojiStickerSetCatalog() (*stickerSetCatalog, error) {
 	entries, err := reactionassets.Manifest()
 	if err != nil {
 		return nil, fmt.Errorf("read twemoji sticker manifest: %w", err)
@@ -64,11 +112,6 @@ func buildStickerSetCatalog() (*stickerSetCatalog, error) {
 	if len(entries) != 73 {
 		return nil, fmt.Errorf("twemoji sticker manifest has %d entries, want 73", len(entries))
 	}
-	reactions, err := getReactionDocumentCatalog()
-	if err != nil {
-		return nil, fmt.Errorf("load standard reaction documents for sticker collision check: %w", err)
-	}
-
 	setInput := make([]byte, 0, 32+len(twemojiReactionSetTitle)+len(twemojiReactionSetShortName))
 	setInput = appendHashPart(setInput, []byte(twemojiReactionSetShortName))
 	setInput = appendHashPart(setInput, []byte(twemojiReactionSetTitle))
@@ -114,6 +157,7 @@ func buildStickerSetCatalog() (*stickerSetCatalog, error) {
 	catalog := &stickerSetCatalog{
 		byShortName:   map[string]*builtInStickerSet{set.set.ShortName: set},
 		byID:          map[int64]*builtInStickerSet{set.set.ID: set},
+		featured:      []*builtInStickerSet{set},
 		documents:     make(map[reactionDocumentIdentity]builtInReactionDocument, len(entries)),
 		documentsByID: make(map[int64]*tg.Document, len(entries)),
 	}
@@ -153,10 +197,73 @@ func buildStickerSetCatalog() (*stickerSetCatalog, error) {
 			data: data,
 		}
 	}
-	if err := validateStickerSetCatalog(set, reactions); err != nil {
-		return nil, err
-	}
 	return catalog, nil
+}
+
+func appendStickerBundle(catalog *stickerSetCatalog, bundle *stickerbundle.Bundle) error {
+	for _, pack := range bundle.Packs {
+		if _, exists := catalog.byShortName[pack.ShortName]; exists {
+			return fmt.Errorf("sticker bundle pack %q collides with an existing sticker set", pack.ShortName)
+		}
+		setIdentity := namespacedDigest("teagram-bundle-sticker-set-identity-v1", appendHashPart(nil, []byte(pack.ShortName)))
+		setContent := appendHashPart(nil, []byte(pack.ShortName), []byte(pack.Title), []byte(pack.Attribution))
+		for _, sticker := range pack.Stickers {
+			setContent = appendHashPart(setContent, []byte(sticker.Emoji), []byte(sticker.File), []byte(strconv.FormatInt(sticker.Size, 10)), sticker.SHA256[:])
+		}
+		setDigest := namespacedDigest("teagram-bundle-sticker-set-content-v1", setContent)
+		setHash := int(binary.BigEndian.Uint32(setDigest[24:28]) & 0x7fffffff)
+		if setHash == 0 {
+			setHash = 1
+		}
+		set := &builtInStickerSet{
+			set: tg.StickerSet{
+				ID:         negativeContentID(setIdentity[:8]),
+				AccessHash: positiveContentHash(setIdentity[8:16]),
+				Title:      pack.Title,
+				ShortName:  pack.ShortName,
+				Count:      len(pack.Stickers),
+				Hash:       setHash,
+			},
+			documents: make([]*tg.Document, 0, len(pack.Stickers)),
+			packs:     make([]tg.StickerPack, 0, len(pack.Stickers)),
+		}
+		set.set.SetFlags()
+		for _, sticker := range pack.Stickers {
+			filename := path.Base(sticker.File)
+			digest := namespacedDigest("teagram-bundle-sticker-document-v1", appendHashPart(nil,
+				[]byte(pack.ShortName), []byte(sticker.Emoji), []byte(sticker.File), sticker.SHA256[:],
+			))
+			document := &tg.Document{
+				ID:            negativeContentID(digest[:8]),
+				AccessHash:    positiveContentHash(digest[8:16]),
+				FileReference: bytes.Clone(digest[16:]),
+				Date:          twemojiReactionDocumentDate,
+				MimeType:      "image/webp",
+				Size:          sticker.Size,
+				Attributes: []tg.DocumentAttributeClass{
+					&tg.DocumentAttributeImageSize{W: 512, H: 512},
+					&tg.DocumentAttributeSticker{
+						Alt:        sticker.Emoji,
+						Stickerset: &tg.InputStickerSetID{ID: set.set.ID, AccessHash: set.set.AccessHash},
+					},
+					&tg.DocumentAttributeFilename{FileName: filename},
+				},
+			}
+			set.documents = append(set.documents, document)
+			set.packs = append(set.packs, tg.StickerPack{Emoticon: sticker.Emoji, Documents: []int64{document.ID}})
+			catalog.documentsByID[document.ID] = document
+			file := reactionStoreFile(document, nil)
+			file.Size = sticker.Size
+			catalog.documents[reactionDocumentIdentity{id: document.ID, accessHash: document.AccessHash}] = builtInReactionDocument{
+				file: file,
+				path: sticker.Path,
+			}
+		}
+		catalog.byShortName[set.set.ShortName] = set
+		catalog.byID[set.set.ID] = set
+		catalog.featured = append(catalog.featured, set)
+	}
+	return nil
 }
 
 func appendHashPart(dst []byte, parts ...[]byte) []byte {
@@ -240,6 +347,56 @@ func validateStickerSetCatalog(set *builtInStickerSet, reactions *reactionDocume
 	return nil
 }
 
+func validateStickerSetCatalogIdentities(catalog *stickerSetCatalog, reactions *reactionDocumentCatalog) error {
+	identities := make(map[int64]string, len(reactions.documents)*2+len(catalog.documents)*2+len(catalog.featured)*3)
+	addIdentity := func(value int64, description string) error {
+		if existing, ok := identities[value]; ok {
+			return fmt.Errorf("built-in sticker identity collision: %s collides with %s", description, existing)
+		}
+		identities[value] = description
+		return nil
+	}
+	for identity := range reactions.documents {
+		if err := addIdentity(identity.id, fmt.Sprintf("reaction document id %d", identity.id)); err != nil {
+			return err
+		}
+		if err := addIdentity(identity.accessHash, fmt.Sprintf("reaction document access hash %d", identity.accessHash)); err != nil {
+			return err
+		}
+	}
+	for _, set := range catalog.featured {
+		if set.set.ID >= 0 || set.set.AccessHash == 0 || set.set.Hash == 0 || set.set.Count != len(set.documents) {
+			return fmt.Errorf("sticker set %q has invalid identity or count", set.set.ShortName)
+		}
+		if err := addIdentity(set.set.ID, fmt.Sprintf("sticker set %q id %d", set.set.ShortName, set.set.ID)); err != nil {
+			return err
+		}
+		if err := addIdentity(set.set.AccessHash, fmt.Sprintf("sticker set %q access hash %d", set.set.ShortName, set.set.AccessHash)); err != nil {
+			return err
+		}
+		if err := addIdentity(int64(set.set.Hash), fmt.Sprintf("sticker set %q hash %d", set.set.ShortName, set.set.Hash)); err != nil {
+			return err
+		}
+		seenDocuments := make(map[int64]struct{}, len(set.documents))
+		for _, document := range set.documents {
+			if document.ID >= 0 {
+				return fmt.Errorf("sticker set %q document id %d is not in the reserved negative range", set.set.ShortName, document.ID)
+			}
+			if _, ok := seenDocuments[document.ID]; ok {
+				return fmt.Errorf("sticker set %q has duplicate document id %d", set.set.ShortName, document.ID)
+			}
+			seenDocuments[document.ID] = struct{}{}
+			if err := addIdentity(document.ID, fmt.Sprintf("sticker set %q document id %d", set.set.ShortName, document.ID)); err != nil {
+				return err
+			}
+			if err := addIdentity(document.AccessHash, fmt.Sprintf("sticker set %q document access hash %d", set.set.ShortName, document.AccessHash)); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
 func (c *stickerSetCatalog) resolve(ref tg.InputStickerSetClass) (*builtInStickerSet, bool) {
 	switch value := ref.(type) {
 	case *tg.InputStickerSetShortName:
@@ -305,8 +462,8 @@ func specialStickerSet(ref tg.InputStickerSetClass) (*builtInStickerSet, bool) {
 	return set, true
 }
 
-func resolveStickerDocument(id, accessHash int64) (bool, error) {
-	catalog, err := getStickerSetCatalog()
+func (h *handlers) resolveStickerDocument(id, accessHash int64) (bool, error) {
+	catalog, err := h.stickerSetCatalog()
 	if err != nil {
 		return false, err
 	}
@@ -317,8 +474,8 @@ func resolveStickerDocument(id, accessHash int64) (bool, error) {
 // validStickerRetryIdentity keeps current catalogue identities exact while
 // allowing a retry for a catalogue id that has since gone stale to render its
 // stored message as unsupported.
-func validStickerRetryIdentity(id, accessHash int64) (bool, error) {
-	catalog, err := getStickerSetCatalog()
+func (h *handlers) validStickerRetryIdentity(id, accessHash int64) (bool, error) {
+	catalog, err := h.stickerSetCatalog()
 	if err != nil {
 		return false, err
 	}
@@ -368,9 +525,16 @@ func cloneStickerDocument(source *tg.Document, dcID int) *tg.Document {
 	return &document
 }
 
-func stickerDocumentMedia(documentID int64, dcID int) (tg.MessageMediaClass, bool) {
-	catalog, err := getStickerSetCatalog()
-	if err != nil {
+func stickerDocumentMedia(catalog *stickerSetCatalog, documentID int64, dcID int) (tg.MessageMediaClass, bool) {
+	if catalog == nil {
+		var err error
+		catalog, err = getStickerSetCatalog()
+		if err != nil {
+			slog.Default().Error("load sticker catalogue to render message", "err", err)
+			return nil, false
+		}
+	}
+	if catalog == nil {
 		return nil, false
 	}
 	document, ok := catalog.documentsByID[documentID]
@@ -408,7 +572,7 @@ func (h *handlers) handleGetStickerSet(r *mtproto.Request) (bin.Encoder, error) 
 	if err := req.Decode(r.Buf); err != nil {
 		return nil, errMethodNotImpl
 	}
-	catalog, err := getStickerSetCatalog()
+	catalog, err := h.stickerSetCatalog()
 	if err != nil {
 		h.log.Error("load sticker set catalogue", "err", err)
 		return nil, errInternal
@@ -451,7 +615,7 @@ func (h *handlers) handleGetAllStickers(r *mtproto.Request) (bin.Encoder, error)
 	if err := req.Decode(r.Buf); err != nil {
 		return nil, errMethodNotImpl
 	}
-	catalog, err := getStickerSetCatalog()
+	catalog, err := h.stickerSetCatalog()
 	if err != nil {
 		h.log.Error("load sticker set catalogue", "err", err)
 		return nil, errInternal
@@ -487,7 +651,7 @@ func (h *handlers) handleInstallStickerSet(c *mtproto.Conn, r *mtproto.Request) 
 	if err := h.checkRateLimit(r, stickerSetRateLimitSurface, stickerSetMutationRateLimit); err != nil {
 		return nil, nil, err
 	}
-	catalog, err := getStickerSetCatalog()
+	catalog, err := h.stickerSetCatalog()
 	if err != nil {
 		h.log.Error("load sticker set catalogue", "err", err)
 		return nil, nil, errInternal
@@ -520,7 +684,7 @@ func (h *handlers) handleUninstallStickerSet(c *mtproto.Conn, r *mtproto.Request
 	if err := h.checkRateLimit(r, stickerSetRateLimitSurface, stickerSetMutationRateLimit); err != nil {
 		return nil, nil, err
 	}
-	catalog, err := getStickerSetCatalog()
+	catalog, err := h.stickerSetCatalog()
 	if err != nil {
 		h.log.Error("load sticker set catalogue", "err", err)
 		return nil, nil, errInternal
