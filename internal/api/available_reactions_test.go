@@ -58,6 +58,11 @@ func TestGetAvailableReactionsReturnsStableStandardDocuments(t *testing.T) {
 	if _, ok := previousHashResult.(*tg.MessagesAvailableReactions); !ok {
 		t.Fatalf("previous reaction hash result = %T, want a refreshed reaction list", previousHashResult)
 	}
+	const unpaddedReactionCatalogHash = 1976891679
+	unpaddedHashResult := availableReactionsResponse(t, nil, 7, unpaddedReactionCatalogHash)
+	if _, ok := unpaddedHashResult.(*tg.MessagesAvailableReactions); !ok {
+		t.Fatalf("unpadded reaction hash result = %T, want a refreshed reaction list", unpaddedHashResult)
+	}
 
 	var missingDates []string
 	for i, want := range wantEmoticons {
@@ -66,13 +71,23 @@ func TestGetAvailableReactionsReturnsStableStandardDocuments(t *testing.T) {
 			t.Errorf("reaction %d = %q, want %q", i, reaction.Reaction, want)
 		}
 		static := requireReactionDocument(t, reaction.StaticIcon, want, "image/webp", ".webp")
-		center, ok := reaction.GetCenterIcon()
-		if !ok {
+		centerIcon, hasCenterIcon := reaction.GetCenterIcon()
+		if !hasCenterIcon {
 			t.Errorf("reaction %q has no center_icon", want)
-		} else if got := requireReactionDocument(t, center, want, "image/webp", ".webp"); got.ID != -int64(2*len(wantEmoticons)+i+1) {
-			t.Errorf("reaction %q center_icon id = %d, want historical id %d", want, got.ID, -int64(2*len(wantEmoticons)+i+1))
-		} else if i == 0 && got.AccessHash != 5531608559122588618 {
-			t.Errorf("first center_icon access_hash = %d, want historical hash 5531608559122588618", got.AccessHash)
+		} else {
+			centerDocument := requireReactionDocument(t, centerIcon, want, "image/webp", ".webp")
+			if centerDocument.ID == static.ID {
+				t.Errorf("reaction %q center_icon reuses its full-size static icon document", want)
+			}
+			if centerDocument.ID != -int64(2*len(wantEmoticons)+i+1) {
+				t.Errorf("reaction %q center_icon id = %d, want historical id %d", want, centerDocument.ID, -int64(2*len(wantEmoticons)+i+1))
+			}
+			if i == 0 && centerDocument.AccessHash != 5531608559122588618 {
+				t.Errorf("first center_icon access_hash = %d, want historical hash 5531608559122588618", centerDocument.AccessHash)
+			}
+			if centerDocument.Date == 0 {
+				missingDates = append(missingDates, want+" center")
+			}
 		}
 
 		animation := requireReactionDocument(t, reaction.AppearAnimation, want, "application/x-tgsticker", ".tgs")

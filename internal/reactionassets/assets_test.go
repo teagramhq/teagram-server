@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"compress/gzip"
 	"encoding/json"
+	"image"
 	"io"
 	"os"
 	"path/filepath"
@@ -76,6 +77,76 @@ func TestReactionAssets(t *testing.T) {
 	checkDirectory(t, "static", staticFiles)
 	checkDirectory(t, "center", centerFiles)
 	checkDirectory(t, "tgs", tgsFiles)
+}
+
+func TestCenterIconsUseOfficialPadding(t *testing.T) {
+	manifestBytes, err := os.ReadFile("manifest.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var manifest []manifestEntry
+	if err := json.Unmarshal(manifestBytes, &manifest); err != nil {
+		t.Fatalf("decode reaction manifest: %v", err)
+	}
+
+	for _, entry := range manifest {
+		stem := strings.TrimSuffix(entry.SVG, ".svg")
+		path := filepath.Join("center", stem+".webp")
+		file, err := os.Open(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		decoded, err := webp.Decode(file)
+		closeErr := file.Close()
+		if err != nil {
+			t.Fatalf("decode %s: %v", path, err)
+		}
+		if closeErr != nil {
+			t.Fatalf("close %s: %v", path, closeErr)
+		}
+
+		bounds := visibleBounds(decoded)
+		if bounds.Empty() {
+			t.Errorf("%s has no visible emoji pixels", path)
+			continue
+		}
+		if size := max(bounds.Dx(), bounds.Dy()); size < 240 || size > 272 {
+			t.Errorf("%s visible emoji size = %dpx, want 240-272px within 512px canvas", path, size)
+		}
+		centerX := bounds.Min.X + bounds.Dx()/2
+		centerY := bounds.Min.Y + bounds.Dy()/2
+		if abs(centerX-256) > 8 || abs(centerY-256) > 8 {
+			t.Errorf("%s visible emoji center = (%d,%d), want near (256,256)", path, centerX, centerY)
+		}
+	}
+}
+
+func visibleBounds(img image.Image) image.Rectangle {
+	minX, minY := img.Bounds().Max.X, img.Bounds().Max.Y
+	maxX, maxY := -1, -1
+	for y := img.Bounds().Min.Y; y < img.Bounds().Max.Y; y++ {
+		for x := img.Bounds().Min.X; x < img.Bounds().Max.X; x++ {
+			_, _, _, alpha := img.At(x, y).RGBA()
+			if alpha == 0 {
+				continue
+			}
+			minX = min(minX, x)
+			minY = min(minY, y)
+			maxX = max(maxX, x)
+			maxY = max(maxY, y)
+		}
+	}
+	if maxX < minX || maxY < minY {
+		return image.Rectangle{}
+	}
+	return image.Rect(minX, minY, maxX+1, maxY+1)
+}
+
+func abs(value int) int {
+	if value < 0 {
+		return -value
+	}
+	return value
 }
 
 func codepointSequence(emoji string) string {
