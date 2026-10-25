@@ -106,6 +106,7 @@ exchange_budget_snapshot() {
   inspected=$(inspect_json "$actual")
   inspected=$(jq -c --arg value "$value" '
     .Config.Env += [
+      "TG_RATE_LIMIT_KEY_EXCHANGE_IP_TAILNET=",
       "TG_RATE_LIMIT_KEY_EXCHANGE_IP_WINDOW=",
       "TG_KEY_EXCHANGE_PER_CONNECTION=",
       "TG_KEY_EXCHANGE_GLOBAL_RATE=",
@@ -115,6 +116,7 @@ exchange_budget_snapshot() {
   compose_json=$(jq -c --arg value "$value" '
     .services.teagramd.environment += {
       TG_RATE_LIMIT_KEY_EXCHANGE_IP:$value,
+      TG_RATE_LIMIT_KEY_EXCHANGE_IP_TAILNET:"",
       TG_RATE_LIMIT_KEY_EXCHANGE_IP_WINDOW:"",
       TG_KEY_EXCHANGE_PER_CONNECTION:"",
       TG_KEY_EXCHANGE_GLOBAL_RATE:"",
@@ -122,6 +124,26 @@ exchange_budget_snapshot() {
     }
   ' <<< "$COMPOSE_JSON")
   ROLLOUT_ADDED_ENV="$added" snapshot_from_json \
+    "$inspected" "$compose_json" "$ENV_FILE" "$OVERRIDE_FILE" selected-compose-render "$name"
+}
+
+tailnet_limit_snapshot() {
+  local name=$1 actual_value=$2 env_content=$3 env_mode=$4 compose_value=$5 inspected compose_json added= changed= actual
+  printf '%s\n' "$env_content" > "$ENV_FILE"
+  actual=
+  if [ -n "$actual_value" ]; then
+    actual="TG_RATE_LIMIT_KEY_EXCHANGE_IP_TAILNET=$actual_value"
+  fi
+  inspected=$(inspect_json "$actual")
+  compose_json=$(jq -c --arg value "$compose_value" \
+    '.services.teagramd.environment.TG_RATE_LIMIT_KEY_EXCHANGE_IP_TAILNET=$value' <<< "$COMPOSE_JSON")
+  case "$env_mode" in
+    added) added=TG_RATE_LIMIT_KEY_EXCHANGE_IP_TAILNET ;;
+    changed) changed=TG_RATE_LIMIT_KEY_EXCHANGE_IP_TAILNET ;;
+    retained) ;;
+    *) printf 'invalid tailnet fixture mode: %s\n' "$env_mode" >&2; return 1 ;;
+  esac
+  ROLLOUT_ADDED_ENV="$added" ROLLOUT_CHANGED_ENV="$changed" snapshot_from_json \
     "$inspected" "$compose_json" "$ENV_FILE" "$OVERRIDE_FILE" selected-compose-render "$name"
 }
 
@@ -138,6 +160,11 @@ empty_exchange_env=$(exchange_budget_snapshot target '' '')
 empty_exchange_added_baseline=$(exchange_budget_snapshot baseline '' TG_RATE_LIMIT_KEY_EXCHANGE_IP '')
 if [ "$(jq -r '.container_env_added' <<< "$empty_exchange_added_baseline")" != none ]; then
   printf '%s\n' 'FAIL exact-empty exchange mapping was treated as an existing named environment addition' >&2
+  exit 1
+fi
+empty_tailnet_added_baseline=$(exchange_budget_snapshot baseline '' TG_RATE_LIMIT_KEY_EXCHANGE_IP_TAILNET '')
+if [ "$(jq -r '.container_env_added' <<< "$empty_tailnet_added_baseline")" != none ]; then
+  printf '%s\n' 'FAIL exact-empty tailnet mapping was treated as an existing named environment addition' >&2
   exit 1
 fi
 printf '%s\n' "$empty_env" > "$TMP/key-exchange-baseline.snapshot.json"
@@ -250,6 +277,67 @@ if exchange_budget_snapshot target 0 TG_RATE_LIMIT_KEY_EXCHANGE_IP \
 fi
 printf '%s\n' 'PASS configured key-exchange values remain pinned and must match the target container'
 printf '%s\n' 'PASS named key-exchange override is verified without changing the remaining environment baseline'
+
+tailnet_added_baseline=$(tailnet_limit_snapshot baseline '' 'TG_RATE_LIMIT_KEY_EXCHANGE_IP_TAILNET=0' added 0)
+tailnet_added_target=$(tailnet_limit_snapshot target 0 'TG_RATE_LIMIT_KEY_EXCHANGE_IP_TAILNET=0' added 0)
+[ "$(jq -r '.container_env_added' <<< "$tailnet_added_baseline")" = none ]
+[ "$(jq -r '.container_env_added' <<< "$tailnet_added_target")" = TG_RATE_LIMIT_KEY_EXCHANGE_IP_TAILNET ]
+[ "$(jq -r '.container_env_sha256' <<< "$tailnet_added_baseline")" = \
+  "$(jq -r '.container_env_sha256' <<< "$tailnet_added_target")" ]
+[ "$(jq -r '.config_sha256' <<< "$tailnet_added_baseline")" = \
+  "$(jq -r '.config_sha256' <<< "$tailnet_added_target")" ]
+printf '%s\n' "$tailnet_added_baseline" > "$TMP/tailnet-add-baseline.snapshot.json"
+printf '%s\n' "$tailnet_added_target" > "$TMP/tailnet-add-target.snapshot.json"
+if ! compare_snapshots \
+  "$TMP/tailnet-add-baseline.snapshot.json" "$TMP/tailnet-add-target.snapshot.json" \
+  sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb \
+  "$TMP/tailnet-add-comparisons.tsv"; then
+  printf '%s\n' 'FAIL named tailnet addition changed the baseline-to-target comparison' >&2
+  cat "$TMP/tailnet-add-comparisons.tsv" >&2
+  exit 1
+fi
+printf '%s\n' 'PASS named tailnet addition is value-checked and passes baseline-to-target comparison'
+
+if tailnet_limit_snapshot target 5 'TG_RATE_LIMIT_KEY_EXCHANGE_IP_TAILNET=0' added 0 \
+  >/dev/null 2>"$TMP/tailnet-mismatch.err"; then
+  printf '%s\n' 'FAIL mismatched tailnet addition was accepted' >&2
+  exit 1
+fi
+tailnet_retained_zero=$(tailnet_limit_snapshot baseline 0 'TG_RATE_LIMIT_KEY_EXCHANGE_IP_TAILNET=0' retained 0)
+tailnet_retained_twelve=$(tailnet_limit_snapshot baseline 12 'TG_RATE_LIMIT_KEY_EXCHANGE_IP_TAILNET=12' retained 12)
+[ "$(jq -r '.config_sha256' <<< "$tailnet_retained_zero")" != \
+  "$(jq -r '.config_sha256' <<< "$tailnet_retained_twelve")" ]
+[ "$(jq -r '.container_env_sha256' <<< "$tailnet_retained_zero")" != \
+  "$(jq -r '.container_env_sha256' <<< "$tailnet_retained_twelve")" ]
+printf '%s\n' 'PASS retained tailnet values remain pinned in Compose and container digests'
+
+tailnet_changed_baseline=$(tailnet_limit_snapshot baseline 12 'TG_RATE_LIMIT_KEY_EXCHANGE_IP_TAILNET=0' changed 0)
+tailnet_changed_target=$(tailnet_limit_snapshot target 0 'TG_RATE_LIMIT_KEY_EXCHANGE_IP_TAILNET=0' changed 0)
+[ "$(jq -r '.container_env_sha256' <<< "$tailnet_changed_baseline")" = \
+  "$(jq -r '.container_env_sha256' <<< "$tailnet_changed_target")" ]
+[ "$(jq -r '.config_sha256' <<< "$tailnet_changed_baseline")" = \
+  "$(jq -r '.config_sha256' <<< "$tailnet_changed_target")" ]
+printf '%s\n' "$tailnet_changed_baseline" > "$TMP/tailnet-change-baseline.snapshot.json"
+printf '%s\n' "$tailnet_changed_target" > "$TMP/tailnet-change-target.snapshot.json"
+if ! compare_snapshots \
+  "$TMP/tailnet-change-baseline.snapshot.json" "$TMP/tailnet-change-target.snapshot.json" \
+  sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb \
+  "$TMP/tailnet-change-comparisons.tsv"; then
+  printf '%s\n' 'FAIL named tailnet value change changed the baseline-to-target comparison' >&2
+  cat "$TMP/tailnet-change-comparisons.tsv" >&2
+  exit 1
+fi
+printf '%s\n' 'PASS named tailnet value changes stay separately pinned from general config drift'
+
+if tailnet_limit_snapshot target -1 'TG_RATE_LIMIT_KEY_EXCHANGE_IP_TAILNET=-1' added -1 \
+  >/dev/null 2>"$TMP/tailnet-negative.err"; then
+  printf '%s\n' 'FAIL negative tailnet limit was accepted' >&2
+  exit 1
+fi
+printf '%s\n' 'PASS negative tailnet limit is rejected before rollout'
+
+COMPOSE_JSON=$default_compose_json
+unset INSPECT_LOG_CONFIG
 
 snapshot=$(target_snapshot 'TG_NEW_FLAG=on')
 [ "$(jq -r '.container_env_added' <<< "$snapshot")" = TG_NEW_FLAG ]
