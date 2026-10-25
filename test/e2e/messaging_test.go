@@ -456,7 +456,7 @@ func bootServerWithLimitsAndRegistrationModeAndBlobsAndStatusWithDeliveryHookAnd
 		})
 	}
 
-	updater := api.NewUpdaterWithDialogFilterSync(st, dcID, server.Registry(), log, pgtest.PeerDeriver(), dialogFilterSync)
+	updater := api.NewUpdaterWithDialogFilterSyncAndStickerCatalog(st, dcID, server.Registry(), log, pgtest.PeerDeriver(), dialogFilterSync, stickerSets)
 	deliverChannelPost := updater.DeliverChannelPost
 	if suppressChannelPostDelivery != nil {
 		deliverChannelPost = func(ctx context.Context, channelID int64) {

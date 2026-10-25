@@ -145,6 +145,18 @@ func testSmokeStickerBundleCatalogue(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("send bundle sticker to second account: %v", err)
 	}
+	pushed := recvOrCtx(t, f.ctx, b.push.newMsg, "recipient live bundle sticker update")
+	if pushed.Message != sentText {
+		t.Fatalf("recipient live message = %q, want %q", pushed.Message, sentText)
+	}
+	pushedMedia, ok := pushed.Media.(*tg.MessageMediaDocument)
+	if !ok {
+		t.Fatalf("recipient live sticker media = %T, want *tg.MessageMediaDocument", pushed.Media)
+	}
+	pushedDocument, ok := pushedMedia.Document.(*tg.Document)
+	if !ok || pushedDocument.ID != document.ID || pushedDocument.AccessHash != document.AccessHash {
+		t.Fatalf("recipient live sticker document = %+v, want catalogue document (%d,%d)", pushedMedia.Document, document.ID, document.AccessHash)
+	}
 	var received *tg.Document
 	if err := b.call(f.ctx, func(ctx context.Context, client *tg.Client) error {
 		result, err := client.MessagesGetHistory(ctx, &tg.MessagesGetHistoryRequest{Peer: peerUser(b.id, a.id), Limit: 10})
