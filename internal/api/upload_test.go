@@ -242,30 +242,46 @@ func TestConfiguredUploadByteLimitBoundaries(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			payload := bytes.Repeat([]byte{'a'}, tc.size)
-			_, err := api.SaveFilePartCappedForTest(s, u.ID, 512000, &tg.UploadSaveFilePartRequest{
-				FileID: tc.fileID, FilePart: 0, Bytes: payload,
-			})
-			if tc.wantErr == "" {
+			partSize := store.MinPartBytesForRowCap
+			partCount := 0
+			for offset := 0; offset < len(payload); offset += partSize {
+				end := min(offset+partSize, len(payload))
+				_, err := api.SaveFilePartCappedForTest(s, u.ID, 512000, &tg.UploadSaveFilePartRequest{
+					FileID: tc.fileID, FilePart: partCount, Bytes: payload[offset:end],
+				})
+				partCount++
+				if end == len(payload) && tc.wantErr != "" {
+					rpcError(t, err, tc.wantErr)
+					break
+				}
 				if err != nil {
-					t.Fatalf("save %s: %v", tc.name, err)
+					t.Fatalf("save part %d: %v", partCount-1, err)
 				}
-				got, ok, err := s.UploadPart(ctx, u.ID, tc.fileID, 0)
-				if err != nil || !ok || !bytes.Equal(got, payload) {
-					t.Fatalf("accepted payload: ok=%v bytes=%d err=%v", ok, len(got), err)
-				}
-			} else {
-				rpcError(t, err, tc.wantErr)
 			}
-			parts, _, _, err := s.UploadPartsSummary(ctx, u.ID, tc.fileID)
+			parts, maxIndex, totalBytes, err := s.UploadPartsSummary(ctx, u.ID, tc.fileID)
 			if err != nil {
 				t.Fatalf("upload summary: %v", err)
 			}
-			wantParts := int64(1)
+			wantParts := int64(partCount)
+			wantBytes := int64(tc.size)
+			wantMaxIndex := partCount - 1
 			if tc.wantErr != "" {
 				wantParts = 0
+				wantBytes = 0
+				wantMaxIndex = -1
 			}
-			if parts != wantParts {
-				t.Fatalf("stored parts = %d, want %d", parts, wantParts)
+			if parts != wantParts || totalBytes != wantBytes || maxIndex != wantMaxIndex {
+				t.Fatalf("stored parts = %d, max index = %d, bytes = %d; want %d, %d, %d", parts, maxIndex, totalBytes, wantParts, wantMaxIndex, wantBytes)
+			}
+			if tc.wantErr == "" {
+				for part := range partCount {
+					start := part * partSize
+					end := min(start+partSize, len(payload))
+					got, ok, err := s.UploadPart(ctx, u.ID, tc.fileID, part)
+					if err != nil || !ok || !bytes.Equal(got, payload[start:end]) {
+						t.Fatalf("accepted part %d: ok=%v bytes=%d err=%v", part, ok, len(got), err)
+					}
+				}
 			}
 		})
 	}

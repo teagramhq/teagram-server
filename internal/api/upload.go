@@ -10,13 +10,10 @@ import (
 	"github.com/teagramhq/teagram-server/internal/store"
 )
 
-// maxFileParts bounds a part index. It is derived rather than configured:
-// TG_MAX_FILE_BYTES or TG_UPLOAD_MAX_BYTES over the 512 KiB protocol part size
-// is the most parts a legal file can have, so anything past it is rejected at
-// save time instead of letting the parts table absorb the difference until
-// assembly.
+// maxFileParts bounds a part index using the smallest part size real clients
+// choose. The byte total in the store remains the per-file size gate.
 func (h *handlers) maxFileParts() int {
-	return int((h.maxFileBytes + store.MaxPartBytes - 1) / store.MaxPartBytes)
+	return int((h.maxFileBytes + store.MinPartBytesForRowCap - 1) / store.MinPartBytesForRowCap)
 }
 
 // handleSaveFilePart serves upload.saveFilePart: it stores one part of an
@@ -64,10 +61,10 @@ func (h *handlers) handleSaveBigFilePart(r *mtproto.Request) (bin.Encoder, error
 		return nil, errFilePartInvalid
 	}
 	if req.FileTotalParts > h.maxFileParts() || declaredUploadTooLarge(req.FileTotalParts, len(req.Bytes), h.maxFileBytes) {
-		if err := h.discardOversizedUpload(r, req.FileID); err != nil {
+		if err := h.checkUploadPartRateLimit(r, req.Bytes); err != nil {
 			return nil, err
 		}
-		if err := h.checkUploadPartRateLimit(r, req.Bytes); err != nil {
+		if err := h.discardOversizedUpload(r, req.FileID); err != nil {
 			return nil, err
 		}
 		return nil, errFilePartTooBig

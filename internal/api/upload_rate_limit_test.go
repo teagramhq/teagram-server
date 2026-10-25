@@ -268,3 +268,56 @@ func TestUploadByteRateLimitCountsOversizedPartBytes(t *testing.T) {
 		t.Fatalf("oversized part over byte budget: expected FLOOD_WAIT, got %v", err)
 	}
 }
+
+func TestOversizedBigFileRateLimitDenialPreservesStagedParts(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name      string
+		callLimit store.RateLimitConfig
+		byteLimit store.RateLimitConfig
+	}{
+		{
+			name:      "request budget",
+			callLimit: store.RateLimitConfig{Limit: 1, Window: time.Hour},
+		},
+		{
+			name:      "byte budget",
+			byteLimit: store.RateLimitConfig{Limit: 4, Window: time.Hour},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			s := openStore(t)
+			u, err := s.CreateUser(ctx, "+15551298011")
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			const fileID = 4011
+			seed := &tg.UploadSaveFilePartRequest{FileID: fileID, FilePart: 0, Bytes: []byte("seed")}
+			if _, err := api.SaveFilePartForTestWithRateLimits(s, u.ID, tc.callLimit, tc.byteLimit, seed); err != nil {
+				t.Fatalf("save seed part: %v", err)
+			}
+
+			_, err = api.SaveBigFilePartForTestWithRateLimits(s, u.ID, tc.callLimit, tc.byteLimit, &tg.UploadSaveBigFilePartRequest{
+				FileID: fileID, FilePart: 0, FileTotalParts: api.MaxFileParts() + 1, Bytes: []byte("x"),
+			})
+			if !isFloodWait(err) {
+				t.Fatalf("oversized request: expected FLOOD_WAIT, got %v", err)
+			}
+
+			got, ok, err := s.UploadPart(ctx, u.ID, fileID, 0)
+			if err != nil || !ok || string(got) != "seed" {
+				t.Fatalf("staged part after rate denial: ok=%v payload=%q err=%v", ok, got, err)
+			}
+			parts, _, _, err := s.UploadPartsSummary(ctx, u.ID, fileID)
+			if err != nil {
+				t.Fatalf("upload summary: %v", err)
+			}
+			if parts != 1 {
+				t.Fatalf("staged parts after rate denial = %d, want 1", parts)
+			}
+		})
+	}
+}

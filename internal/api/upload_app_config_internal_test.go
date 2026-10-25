@@ -30,8 +30,8 @@ func TestGetAppConfigAdvertisesUploadPartLimits(t *testing.T) {
 		t.Fatalf("config = %T, want *tg.JSONObject", appConfig.Config)
 	}
 	want := map[string]float64{
-		"upload_max_fileparts_default": 1,
-		"upload_max_fileparts_premium": 1,
+		"upload_max_fileparts_default": 16,
+		"upload_max_fileparts_premium": 16,
 	}
 	for _, value := range object.Value {
 		limit, found := want[value.Key]

@@ -74,11 +74,11 @@ func assertAppConfig(t *testing.T, got *tg.HelpAppConfig, mode config.Registrati
 	if value, ok := values["chat_read_mark_expire_period"].(*tg.JSONNumber); !ok || value.Value != 604800 {
 		t.Fatalf("chat_read_mark_expire_period = %v, want 604800", values["chat_read_mark_expire_period"])
 	}
-	if value, ok := values["upload_max_fileparts_default"].(*tg.JSONNumber); !ok || value.Value != 200 {
-		t.Fatalf("upload_max_fileparts_default = %v, want 200", values["upload_max_fileparts_default"])
+	if value, ok := values["upload_max_fileparts_default"].(*tg.JSONNumber); !ok || value.Value != 3200 {
+		t.Fatalf("upload_max_fileparts_default = %v, want 3200", values["upload_max_fileparts_default"])
 	}
-	if value, ok := values["upload_max_fileparts_premium"].(*tg.JSONNumber); !ok || value.Value != 200 {
-		t.Fatalf("upload_max_fileparts_premium = %v, want 200", values["upload_max_fileparts_premium"])
+	if value, ok := values["upload_max_fileparts_premium"].(*tg.JSONNumber); !ok || value.Value != 3200 {
+		t.Fatalf("upload_max_fileparts_premium = %v, want 3200", values["upload_max_fileparts_premium"])
 	}
 	if value, ok := values["registration_mode"].(*tg.JSONString); !ok || value.Value != string(mode) {
 		t.Fatalf("registration_mode = %v, want %q", values["registration_mode"], mode)

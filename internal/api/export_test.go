@@ -276,7 +276,7 @@ func GatedUnhandledForTest(log *slog.Logger, c *mtproto.Conn, req *mtproto.Reque
 }
 
 // TestMaxFileBytes is the per-file upload cap test handlers run with. It is the
-// production default, so MaxFileParts is the same 200 a real server enforces.
+// production default, so MaxFileParts matches the advertised client part cap.
 const TestMaxFileBytes int64 = 100 << 20
 
 const testPublicLinkPrefix = "https://test.example/"
