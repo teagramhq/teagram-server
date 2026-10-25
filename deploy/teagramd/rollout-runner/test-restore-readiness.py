@@ -144,7 +144,9 @@ class RestoreReadinessContractTests(unittest.TestCase):
         self.assertIn('time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())', SCRIPT.read_text(encoding="utf-8"))
         self.assertLess(shell.index("--validate-local-dump"), shell.index("build_inputs\n"))
         workflow = Path(__file__).parents[3] / ".github" / "workflows" / "ci.yml"
-        self.assertIn("test-restore-readiness.sh --local-fixture-test", workflow.read_text(encoding="utf-8"))
+        workflow_text = workflow.read_text(encoding="utf-8")
+        self.assertIn("test-restore-readiness-foreign-fixture.sh", workflow_text)
+        self.assertIn("test-restore-readiness-foreign-fixture.sh --local-fixture-test", workflow_text)
         self.assertIn("--local-fixture-test --fault-test auth-clear-signal", shell)
         self.assertIn("--local-fixture-test --fault-test sigkill", shell)
         self.assertIn("--attest-prepared", shell)
@@ -927,6 +929,211 @@ class RestoreReadinessContractTests(unittest.TestCase):
                 synthetic_signin="pass",
                 auth_keys_cleared="pass",
             )
+
+    def test_docker_resource_inventory_records_isolation_metadata_only(self) -> None:
+        container_id = "a" * 64
+        image_id = "sha256:" + "b" * 64
+        network_id = "c" * 64
+        container_name = "foreign-postgres"
+        network_name = "foreign-network"
+        volume_name = "foreign-volume"
+        labels = {"restore-readiness.fixture": "foreign"}
+        mounts = [
+            {
+                "Type": "volume",
+                "Name": volume_name,
+                "Source": "/var/lib/docker/volumes/foreign-volume/_data",
+                "Destination": "/foreign",
+                "Driver": "local",
+                "Mode": "z",
+                "RW": True,
+                "Propagation": "rprivate",
+            }
+        ]
+        port_bindings = {"5432/tcp": [{"HostIp": "127.0.0.1", "HostPort": "49153"}]}
+        attachments = {
+            network_name: {
+                "NetworkID": network_id,
+                "EndpointID": "d" * 64,
+                "Gateway": "172.25.0.1",
+                "IPAddress": "172.25.0.2",
+                "MacAddress": "02:42:ac:19:00:02",
+            }
+        }
+        container_fields = [
+            container_id,
+            "/" + container_name,
+            image_id,
+            "postgres:18",
+            json.dumps(labels),
+            "running",
+            "true",
+            "false",
+            "false",
+            "false",
+            "0",
+            "2026-10-25T17:00:00.000000000Z",
+            "0001-01-01T00:00:00Z",
+            "none",
+            json.dumps(attachments),
+            json.dumps(mounts),
+            json.dumps({"5432/tcp": {}}),
+            json.dumps(port_bindings),
+            "false",
+            network_name,
+            "null",
+            "null",
+            "null",
+            "null",
+            "false",
+            "null",
+            "null",
+            json.dumps(["no-new-privileges:true"]),
+            "false",
+            "null",
+            "",
+            "private",
+            "",
+            "",
+            json.dumps({"Name": "no", "MaximumRetryCount": 0}),
+        ]
+        volume_fields = [
+            volume_name,
+            "local",
+            "local",
+            "/var/lib/docker/volumes/foreign-volume/_data",
+            "2026-10-25T17:00:00Z",
+            json.dumps(labels),
+            "{}",
+        ]
+        network_fields = [
+            network_id,
+            network_name,
+            "bridge",
+            "local",
+            "false",
+            "true",
+            "false",
+            "false",
+            "false",
+            "null",
+            json.dumps({"Driver": "default", "Options": None, "Config": [{"Subnet": "172.25.0.0/16"}]}),
+            "null",
+            json.dumps(labels),
+            json.dumps({container_id: {"Name": container_name, "EndpointID": "d" * 64}}),
+        ]
+
+        def call(arguments: list[str]) -> bytes:
+            if arguments[:3] == ["ps", "--all", "--no-trunc"]:
+                return f"{container_id}\n".encode()
+            if arguments[0] == "inspect" and arguments[1:3] == ["--type", "container"]:
+                return ("\n".join(container_fields) + "\n").encode()
+            if arguments[:2] == ["volume", "ls"]:
+                return f"{volume_name}\n".encode()
+            if arguments[:2] == ["volume", "inspect"]:
+                return ("\n".join(volume_fields) + "\n").encode()
+            if arguments[:2] == ["network", "ls"]:
+                return f"{network_id}\t{network_name}\n".encode()
+            if arguments[:2] == ["network", "inspect"]:
+                return ("\n".join(network_fields) + "\n").encode()
+            raise AssertionError(f"unexpected Docker inventory command: {arguments[0]}")
+
+        inventory = RESTORE_READINESS.collect_docker_resource_inventory(call)
+        container = inventory["containers"][container_id]
+        self.assertEqual(container["name"], container_name)
+        self.assertEqual(container["labels"], labels)
+        self.assertEqual(container["attachments"], attachments)
+        self.assertEqual(container["mounts"], mounts)
+        self.assertEqual(container["published_ports"], port_bindings)
+        self.assertEqual(container["state"]["running"], "true")
+        self.assertEqual(inventory["volumes"][volume_name]["labels"], labels)
+        self.assertEqual(inventory["networks"][network_id]["attachments"][container_id]["Name"], container_name)
+        RESTORE_READINESS.require_no_docker_identity_collisions(inventory, "9" * 32, "preflight")
+        self.assertNotIn(".Config.Env", RESTORE_READINESS.CONTAINER_INVENTORY_TEMPLATE)
+        self.assertNotIn(".State.Health.Log", RESTORE_READINESS.CONTAINER_INVENTORY_TEMPLATE)
+        with self.assertRaises(ValueError):
+            RESTORE_READINESS._inventory_labels('{"unexpected":[]}')
+
+    def test_docker_identity_collision_fixtures_refuse_with_fixed_category(self) -> None:
+        token = "a" * 32
+        project = "restore-readiness-" + token[:16]
+        fixtures = (
+            (
+                "name",
+                {"containers": {"id": {"name": project + "-application", "labels": {}}}, "volumes": {}, "networks": {}},
+            ),
+            (
+                "token label",
+                {"containers": {}, "volumes": {"volume": {"name": "volume", "labels": {"owner": token}}}, "networks": {}},
+            ),
+            (
+                "Compose project",
+                {"containers": {}, "volumes": {}, "networks": {"id": {"name": "network", "labels": {"com.docker.compose.project": project}}}},
+            ),
+        )
+        for name, inventory in fixtures:
+            with self.subTest(name=name), self.assertRaises(RESTORE_READINESS.DrillFailure) as failure:
+                RESTORE_READINESS.require_no_docker_identity_collisions(inventory, token, "preflight")
+            self.assertEqual(failure.exception.category, "isolation_refusal")
+
+    def test_foreign_inventory_change_fails_with_fixed_isolation_category(self) -> None:
+        foreign_id = "e" * 64
+        second_id = "d" * 64
+        network_id = "f" * 64
+        baseline = {
+            "containers": {foreign_id: {"name": "foreign", "state": {"running": "true"}}},
+            "volumes": {"foreign-volume": {"labels": {}}},
+            "networks": {network_id: {"name": "foreign-network", "attachments": {}}},
+        }
+        changed_state = json.loads(json.dumps(baseline))
+        changed_state["containers"][foreign_id]["state"]["running"] = "false"
+        added_container = json.loads(json.dumps(baseline))
+        added_container["containers"][second_id] = {"name": "new-foreign", "state": {"running": "true"}}
+        removed_volume = json.loads(json.dumps(baseline))
+        removed_volume["volumes"].clear()
+        changed_network = json.loads(json.dumps(baseline))
+        changed_network["networks"][network_id]["attachments"] = {foreign_id: {"IPAddress": "172.25.0.2"}}
+
+        for name, current in (
+            ("changed state", changed_state),
+            ("added container", added_container),
+            ("removed volume", removed_volume),
+            ("changed network attachment", changed_network),
+        ):
+            with self.subTest(change=name):
+                drill = object.__new__(RESTORE_READINESS.Drill)
+                drill.manifest = {
+                    "baseline": {"docker_inventory": baseline},
+                    "resource_creation_started": True,
+                    "containers": [],
+                    "pending_container": None,
+                    "networks": [],
+                }
+                drill.docker_resource_inventory = Mock(return_value=current)
+                self.assertFalse(drill.verify_foreign_inventory())
+                self.assertTrue(drill.manifest["foreign_inventory_changed"])
+                failure = RESTORE_READINESS.foreign_inventory_failure(drill.manifest)
+                self.assertIsNotNone(failure)
+                self.assertEqual(failure.phase, "cleanup")
+                self.assertEqual(failure.category, "isolation_refusal")
+                report = RESTORE_READINESS.report_document("cleanup", failure.category, "unverified", 0)
+                self.assertEqual(report["category"], "isolation_refusal")
+
+    def test_foreign_inventory_comparison_excludes_only_manifest_owned_containers(self) -> None:
+        owned_id = "1" * 64
+        owned = {"name": "restore-readiness-owned", "labels": {}}
+        drill = object.__new__(RESTORE_READINESS.Drill)
+        drill.manifest = {
+            "baseline": {"docker_inventory": {"containers": {}, "volumes": {}, "networks": {}}},
+            "resource_creation_started": True,
+            "containers": [{"id": owned_id}],
+            "pending_container": None,
+            "networks": [],
+        }
+        drill.docker_resource_inventory = Mock(
+            return_value={"containers": {owned_id: owned}, "volumes": {}, "networks": {}}
+        )
+        self.assertTrue(drill.verify_foreign_inventory())
 
     def test_local_dump_metadata_is_bounded(self) -> None:
         name = "pgdump-pre-" + "a" * 40 + ".sql"
@@ -2029,6 +2236,11 @@ class RestoreReadinessContractTests(unittest.TestCase):
         drill.cleanup_volume_inventory = lambda: []
         drill.cleanup_container_inspect = lambda _identifier: wrong_document
         self.assertFalse(drill.cleanup_recover_pending_container([(record["id"], record["name"])]))
+
+    def test_cleanup_volume_inventory_accepts_named_foreign_volumes(self) -> None:
+        drill = object.__new__(RESTORE_READINESS.Drill)
+        drill.cleanup_call = Mock(return_value=(0, b"restore-readiness-foreign-fixture\n"))
+        self.assertEqual(drill.cleanup_volume_inventory(), ["restore-readiness-foreign-fixture"])
 
     def test_cleanup_listing_and_removal_failures_never_report_absence(self) -> None:
         drill = object.__new__(RESTORE_READINESS.Drill)
