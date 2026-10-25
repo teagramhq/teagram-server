@@ -389,7 +389,7 @@ MEDIA_KEY_VERSION=
 
 verify_media_key_mount() {
   local inspect_json=$1 compose_json=$2 snapshot_name=$3 record media_source media_version container_present
-  local resolved_source checkout_root directory_mode key_file key_mode key_owner key_size
+  local resolved_source checkout_root directory_mode key_file key_mode key_owner
   if ! record=$(printf '%s\n' "$inspect_json" "$compose_json" | jq -ser --arg snapshot_name "$snapshot_name" '
     def item: if type == "array" then .[0] else . end;
     def env_values($env; $name):
@@ -487,8 +487,18 @@ verify_media_key_mount() {
     return 1
   }
   key_mode=$(stat -c %a "$key_file") || return 1
-  key_size=$(stat -c %s "$key_file") || return 1
-  [ "$key_mode" = 600 ] && [ "$key_size" = 65 ] && LC_ALL=C grep -Eq '^[0-9a-f]{64}$' "$key_file" || {
+  [ "$key_mode" = 600 ] && python3 -c '
+import re
+import sys
+
+try:
+    with open(sys.argv[1], encoding="utf-8") as key_file:
+        value = key_file.read().strip()
+except (OSError, UnicodeDecodeError):
+    raise SystemExit(1)
+
+raise SystemExit(re.fullmatch(r"[0-9a-fA-F]{64}", value) is None)
+' "$key_file" 2>/dev/null || {
     printf '%s\n' 'selected media-key file has invalid permissions or format' >&2
     return 1
   }

@@ -495,7 +495,6 @@ def ordinary_rollout_layout_changed(
     source: dict[str, object],
     target: dict[str, object],
     target_config: dict[str, object],
-    checkout: pathlib.Path,
 ) -> bool:
     if source == target:
         return False
@@ -517,61 +516,9 @@ def ordinary_rollout_layout_changed(
         mount for mount in volumes
         if isinstance(mount, dict) and mount.get("target") == "/run/teagramd/media-keys"
     ]
-    if len(media_mounts) != 1:
+    if media_mounts != [MEDIA_KEY_MOUNT]:
         return True
-    media_mount = media_mounts[0]
-    source_path = media_mount.get("source")
-    if (
-        set(media_mount) != {"type", "source", "target", "read_only", "bind"}
-        or media_mount.get("type") != "bind"
-        or media_mount.get("read_only") is not True
-        or not isinstance(media_mount.get("bind"), dict)
-        or set(media_mount["bind"]) != {"create_host_path"}
-        or media_mount["bind"].get("create_host_path") is not False
-        or not isinstance(source_path, str)
-        or not pathlib.PurePosixPath(source_path).is_absolute()
-        or ".." in pathlib.PurePosixPath(source_path).parts
-    ):
-        return True
-    try:
-        pathlib.PurePosixPath(source_path).relative_to(checkout.resolve().as_posix())
-    except ValueError:
-        pass
-    else:
-        return True
-
-    source_service = source.get("server")
-    target_service = target.get("server")
-    if source_service != TARGET_SERVER or target_service != TARGET_SERVER:
-        return True
-    source_server_mounts = source.get("server_mounts")
-    target_server_mounts = target.get("server_mounts")
-    if not isinstance(source_server_mounts, list) or not isinstance(target_server_mounts, list):
-        return True
-    if any(mount.get("target") == "/run/teagramd/media-keys" for mount in source_server_mounts if isinstance(mount, dict)):
-        return True
-    inspected_mount = {
-        "type": "bind",
-        "source": source_path,
-        "target": "/run/teagramd/media-keys",
-        "read_only": True,
-        "bind": {"create_host_path": False},
-    }
-    if target_server_mounts.count(inspected_mount) != 1:
-        return True
-    normalized_source = copy.deepcopy(source)
-    normalized_target = copy.deepcopy(target)
-    normalized_target["server_mounts"].remove(inspected_mount)
-    target_persistent = normalized_target.get("persistent_service_mounts")
-    if not isinstance(target_persistent, dict):
-        return True
-    target_server_persistent = target_persistent.get(TARGET_SERVER)
-    if not isinstance(target_server_persistent, list) or target_server_persistent.count(inspected_mount) != 1:
-        return True
-    target_server_persistent.remove(inspected_mount)
-    if not target_server_persistent:
-        del target_persistent[TARGET_SERVER]
-    return normalized_source != normalized_target
+    return layout_changed(source, target)
 
 
 def write_private(path: pathlib.Path, data: bytes, *, exclusive: bool = True) -> None:
@@ -1904,7 +1851,7 @@ def inspect(args: argparse.Namespace) -> None:
         target_server_name = TARGET_SERVER if TARGET_SERVER in target_services else SOURCE_SERVER
         target_layout = layout(target, target_server_name)
         print(json.dumps({
-            "changed": ordinary_rollout_layout_changed(source_layout, target_layout, target, checkout),
+            "changed": ordinary_rollout_layout_changed(source_layout, target_layout, target),
             "source": source_layout,
             "target": target_layout,
             "source_database": database_name(source),

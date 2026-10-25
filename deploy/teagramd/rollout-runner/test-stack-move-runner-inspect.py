@@ -144,8 +144,7 @@ class InspectComposeSelectionTest(unittest.TestCase):
             },
         }
 
-        checkout = pathlib.Path("/opt/teagram")
-        self.assertFalse(runner.ordinary_rollout_layout_changed(source, target, target_config, checkout))
+        self.assertFalse(runner.ordinary_rollout_layout_changed(source, target, target_config))
         print("PASS rollout layout accepts only the read-only media-key bind addition")
 
         writable_target = copy.deepcopy(target)
@@ -153,26 +152,34 @@ class InspectComposeSelectionTest(unittest.TestCase):
         writable_target["persistent_service_mounts"]["teagramd"][-1]["read_only"] = False
         writable_config = copy.deepcopy(target_config)
         writable_config["services"]["teagramd"]["volumes"][0]["read_only"] = False
-        self.assertTrue(runner.ordinary_rollout_layout_changed(source, writable_target, writable_config, checkout))
+        self.assertTrue(runner.ordinary_rollout_layout_changed(source, writable_target, writable_config))
 
         changed_volume_target = copy.deepcopy(target)
         changed_volume_target["volumes"]["tgblobs"] = "teagram_other_tgblobs"
-        self.assertTrue(runner.ordinary_rollout_layout_changed(source, changed_volume_target, target_config, checkout))
+        self.assertTrue(runner.ordinary_rollout_layout_changed(source, changed_volume_target, target_config))
         wrong_version_config = copy.deepcopy(target_config)
         wrong_version_config["services"]["teagramd"]["environment"]["TG_MEDIA_KEY_CURRENT"] = "2"
-        self.assertTrue(runner.ordinary_rollout_layout_changed(source, target, wrong_version_config, checkout))
+        self.assertTrue(runner.ordinary_rollout_layout_changed(source, target, wrong_version_config))
         host_path_creating_config = copy.deepcopy(target_config)
         host_path_creating_config["services"]["teagramd"]["volumes"][0]["bind"]["create_host_path"] = True
-        self.assertTrue(runner.ordinary_rollout_layout_changed(source, target, host_path_creating_config, checkout))
+        self.assertTrue(runner.ordinary_rollout_layout_changed(source, target, host_path_creating_config))
         unexpected_bind_option = copy.deepcopy(target_config)
         unexpected_bind_option["services"]["teagramd"]["volumes"][0]["bind"]["propagation"] = "rprivate"
-        self.assertTrue(runner.ordinary_rollout_layout_changed(source, target, unexpected_bind_option, checkout))
-        in_checkout_target = copy.deepcopy(target)
-        in_checkout_config = copy.deepcopy(target_config)
-        in_checkout_target["server_mounts"][-1]["source"] = "/opt/teagram/.secrets/media-keys"
-        in_checkout_target["persistent_service_mounts"]["teagramd"][-1]["source"] = "/opt/teagram/.secrets/media-keys"
-        in_checkout_config["services"]["teagramd"]["volumes"][0]["source"] = "/opt/teagram/.secrets/media-keys"
-        self.assertTrue(runner.ordinary_rollout_layout_changed(source, in_checkout_target, in_checkout_config, checkout))
+        self.assertTrue(runner.ordinary_rollout_layout_changed(source, target, unexpected_bind_option))
+        alternate_source_target = copy.deepcopy(target)
+        alternate_source_config = copy.deepcopy(target_config)
+        alternate_source_target["server_mounts"][-1]["source"] = "/var/lib/teagram/media-keys"
+        alternate_source_target["persistent_service_mounts"]["teagramd"][-1]["source"] = (
+            "/var/lib/teagram/media-keys"
+        )
+        alternate_source_config["services"]["teagramd"]["volumes"][0]["source"] = (
+            "/var/lib/teagram/media-keys"
+        )
+        self.assertTrue(
+            runner.ordinary_rollout_layout_changed(
+                source, alternate_source_target, alternate_source_config,
+            )
+        )
         print("PASS rollout layout still rejects writable media mounts and persistent-volume changes")
 
     def test_pinned_local_compose_is_used_for_both_layouts_without_s3_env(self) -> None:

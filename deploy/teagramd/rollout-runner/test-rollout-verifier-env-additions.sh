@@ -791,7 +791,7 @@ printf '%s\n' 'PASS live disabled Turnstile defaults count as unset when the dep
 
 media_key_source="$TMP/media-keys"
 mkdir -m 700 "$media_key_source"
-printf '%064d\n' 0 > "$media_key_source/1.key"
+printf '%064d' 0 > "$media_key_source/1.key"
 chmod 600 "$media_key_source/1.key"
 if [ "$(id -u)" = 0 ]; then
   chown 65532:65532 "$media_key_source" "$media_key_source/1.key"
@@ -825,6 +825,14 @@ media_key_target=$(snapshot_from_json \
 [ "$(jq -r '.config_sha256' <<< "$media_key_baseline")" = "$(jq -r '.config_sha256' <<< "$media_key_target")" ]
 [ "$(jq -r '.mounts_sha256' <<< "$media_key_baseline")" = "$(jq -r '.mounts_sha256' <<< "$media_key_target")" ]
 [ "$(jq -r '.container_env_sha256' <<< "$media_key_baseline")" = "$(jq -r '.container_env_sha256' <<< "$media_key_target")" ]
+printf '%064s' '' | tr ' ' A > "$media_key_source/1.key"
+snapshot_from_json "$media_key_inspect" "$media_key_compose" \
+  "$ENV_FILE" "$OVERRIDE_FILE" selected-compose-render target >/dev/null
+printf '%064d\r\n' 0 > "$media_key_source/1.key"
+snapshot_from_json "$media_key_inspect" "$media_key_compose" \
+  "$ENV_FILE" "$OVERRIDE_FILE" selected-compose-render target >/dev/null
+printf '%s\n' 'PASS media-key accepts no newline, uppercase hex, and CRLF'
+printf '%064d' 0 > "$media_key_source/1.key"
 printf '%s\n' "$media_key_baseline" > "$TMP/media-key-baseline.snapshot.json"
 printf '%s\n' "$media_key_target" > "$TMP/media-key-target.snapshot.json"
 compare_snapshots "$TMP/media-key-baseline.snapshot.json" "$TMP/media-key-target.snapshot.json" \
