@@ -4,10 +4,10 @@ umask 077
 
 SCRIPT_DIR=$(cd -P "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 SCRIPT_SOURCE="$SCRIPT_DIR/$(basename "${BASH_SOURCE[0]}")"
-readonly APPROVED_VERIFIER_SHA=f5589f0e7e5b0b43bcbaf3ef0b03d8fd1c0eb1d58c7e43cabd2217998966d776
+readonly APPROVED_VERIFIER_SHA=e80bd36461a7418032ef569e95514179fdeb8ec19e819aefbbc066522f1bd807
 readonly APPROVED_SCHEMA_GATE_SHA=ac54d3cf0480383a52414a8bc8b856b5e1d5f6f8d19034c9c576c64627e097c8
 readonly APPROVED_SCHEMA_GATE_HELPER_SHA=7ae06c2872c60b434068b3715a9ddd5e19b03d4be98dc9881c8dd8f294953d41
-readonly APPROVED_INITIAL_LOCAL_COMPOSE_SHA=3a4f158c6e1f2ead6676fba85d8d95cfb15557a0fbd8e82230361e0af988e0f7
+readonly APPROVED_INITIAL_LOCAL_COMPOSE_SHA=d764d291ad2ea91cff841d14a0cd2bbcb5981961dbc67406bfeba1196a7b3fa4
 readonly APPROVED_LOCAL_COMPOSE_CONTENT_SHA=d025a25d3e388489ddaf181e3d38b4ecd56906aeab75a9f9fbabdc38e017cfdb
 readonly SOURCE_LOCAL_COMPOSE_TARGET_SHA=5602c7c13eb1571278f43129345a4b52f0630377
 readonly SOURCE_LOCAL_COMPOSE_SHA=05fc5a3e7dbdc2feac58fce870796baebc055b617bc81f6d6b206c5a2c184cc5
@@ -50,6 +50,7 @@ BUILD_IDENTITY_REJECTION_REASON=built-image-id-invalid
 ROLLOUT_RUNNER_TEST_MODE=${ROLLOUT_RUNNER_TEST_MODE:-0}
 ROLLOUT_PINNED_EXECUTION=${ROLLOUT_PINNED_EXECUTION:-0}
 INITIALIZE_LOCAL=0
+ROLLOUT_COMPOSE_SERVICE=teagramd
 INITIAL_LOCAL_ARTIFACT_SHA=
 RUNNER_ACTION=apply
 TARGET_DATABASE=
@@ -863,9 +864,29 @@ current_service_id() {
   printf '%s' "$id"
 }
 
+rollout_compose_service() {
+  printf '%s\n' "$ROLLOUT_COMPOSE_SERVICE"
+}
+
+select_rollout_compose_service() {
+  [ "$INITIALIZE_LOCAL" = 1 ] || return 0
+  local services
+  services=$(docker compose config --services </dev/null) || {
+    fail 'cannot list services from the pinned initial-local Compose render'
+    return 1
+  }
+  ROLLOUT_COMPOSE_SERVICE=$(printf '%s\n' "$services" | awk '
+    $0 == "telegramd" || $0 == "teagramd" { selected=$0; count++ }
+    END {if (count == 1) print selected; else exit 1}
+  ') || {
+    fail 'pinned initial-local Compose render must define exactly one supported server service'
+    return 1
+  }
+}
+
 archive_pre_rollout_teagramd_logs() {
   local container_id driver since archive_dir captured combined
-  container_id=$(current_service_id teagramd) || {
+  container_id=$(current_service_id "$(rollout_compose_service)") || {
     fail 'cannot resolve the current teagramd container before replacement'
     return 1
   }
@@ -952,7 +973,7 @@ capture_snapshot() {
       return 1
     }
   fi
-  if ! verifier_error=$(ROLLOUT_CHECKOUT_PATH="$CHECKOUT" ROLLOUT_ADDED_ENV="$ADDED_ENV" \
+  if ! verifier_error=$(ROLLOUT_CHECKOUT_PATH="$CHECKOUT" ROLLOUT_COMPOSE_SERVICE="$(rollout_compose_service)" ROLLOUT_ADDED_ENV="$ADDED_ENV" \
     ROLLOUT_CHANGED_ENV="$CHANGED_ENV" ROLLOUT_CHANGED_ENV_SOURCE="$CHANGED_ENV_SOURCE" \
     ROLLOUT_OVERRIDE_ORIGIN_VALUE="${override_origin_value:-}" \
     ROLLOUT_PREVIOUS_OVERRIDE_ORIGIN_VALUE="${previous_override_origin_value:-}" \
@@ -1013,7 +1034,8 @@ capture_compose_blob_inventory() {
 
 capture_running_blob_inventory() {
   local path=$1 allow_empty=${2:-0} reference_id reference_inspect project ids id inventory
-  local reference_service=teagramd
+  local reference_service
+  reference_service=$(rollout_compose_service)
   local -a container_ids=()
   [ "$RUNNER_ACTION" = move-stack ] && reference_service=telegramd
   [ ! -e "$path" ] && [ ! -L "$path" ] || { fail 'running blob inventory evidence already exists'; return 1; }
@@ -1083,15 +1105,64 @@ validate_blob_authority() {
     --override "$OVERRIDE_FILE" --checkout "$CHECKOUT" "${mode_args[@]}"
 }
 
+approved_logging_transition() {
+  case "$1:$2" in
+    syslog-v1:syslog-v1|default:syslog-v1) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+approved_login_code_logging_transition() {
+  case "$1:$2" in
+    true:false|false:false|unset:false|not-captured:false) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+approved_initial_local_logging_transition() {
+  local baseline_sha="$1" baseline_login_codes="$2" target_policy="$3" target_login_codes="$4"
+  local default_json_logging_sha approved_syslog_logging_sha
+  default_json_logging_sha=$(printf '%s' '{"config":{},"type":"json-file"}' | sha256sum | awk '{print $1}') || return 1
+  approved_syslog_logging_sha=$(printf '%s' '{"config":{"syslog-address":"unixgram:///dev/log","syslog-facility":"daemon","syslog-format":"rfc5424","tag":"teagramd"},"type":"syslog"}' | sha256sum | awk '{print $1}') || return 1
+  [ "$target_policy" = syslog-v1 ] && [ "$target_login_codes" = false ] || return 1
+  if [ "$baseline_sha" = "$default_json_logging_sha" ] && \
+     { [ "$baseline_login_codes" = true ] || [ "$baseline_login_codes" = false ] || [ "$baseline_login_codes" = unset ]; }; then
+    printf 'json-file:%s' "$baseline_login_codes"
+  elif [ "$baseline_sha" = "$approved_syslog_logging_sha" ] && [ "$baseline_login_codes" = false ]; then
+    printf 'syslog-v1:false'
+  else
+    return 1
+  fi
+}
+
 preflight_target_local_blob_authority() {
   if [ "$INITIALIZE_LOCAL" = 1 ]; then
     local containers_file="$BASELINE_DIR/initial-local-baseline-containers.json"
     local compose_file="$BASELINE_DIR/initial-local-target-compose.json"
     local preflight_file="$BASELINE_DIR/initial-local-preflight.txt"
     local provenance_file="$BASELINE_DIR/initial-local-provenance.txt"
-    local containers_sha compose_sha
+    local render_file="$BASELINE_DIR/initial-local-target-render.snapshot.json"
+    local logging_profile_file="$BASELINE_DIR/initial-local-logging-profile-preflight.tsv"
+    local containers_sha compose_sha logging_policy login_codes result failures=0
     [ "$INITIAL_LOCAL_ARTIFACT_SHA" = "$APPROVED_INITIAL_LOCAL_COMPOSE_SHA" ] || {
       fail 'verified initial-local artifact digest is unavailable'
+      return 1
+    }
+    logging_policy=$(jq -er '.compose_logging_policy' "$render_file") || {
+      fail 'initial-local target render is missing its Compose logging policy'
+      return 1
+    }
+    login_codes=$(jq -er '.compose_log_login_codes' "$render_file") || {
+      fail 'initial-local target render is missing its login-code logging policy'
+      return 1
+    }
+    write_immutable "$logging_profile_file" '' || return 1
+    if [ "$logging_policy" = syslog-v1 ]; then result=pass; else result=fail; failures=$((failures + 1)); fi
+    append_evidence_row "$logging_profile_file" preflight compose_logging_policy syslog-v1 "$logging_policy" "$result" || return 1
+    if [ "$login_codes" = false ]; then result=pass; else result=fail; failures=$((failures + 1)); fi
+    append_evidence_row "$logging_profile_file" preflight compose_log_login_codes false "$login_codes" "$result" || return 1
+    [ "$failures" -eq 0 ] || {
+      fail 'initial-local target must use syslog and disable login-code logging before backup'
       return 1
     }
     capture_running_blob_inventory "$containers_file" || {
@@ -1884,14 +1955,15 @@ capture_backup_and_restore() {
 }
 
 record_build_identity() {
-  local built_image checked_out_sha image_file revision_label revision_label_json
+  local built_image checked_out_sha image_file image_tag revision_label revision_label_json
+  image_tag="$(rollout_compose_service):local"
   BUILD_IDENTITY_REJECTION_REASON=built-image-id-invalid
   checked_out_sha=$(git rev-parse HEAD) || { fail 'cannot read checked-out SHA after fast-forward'; return 1; }
   [ "$checked_out_sha" = "$TARGET_SHA" ] || { fail 'checked-out SHA changed before image capture'; return 1; }
-  built_image=$(docker image inspect teagramd:local --format '{{.Id}}' 2>/dev/null) || { fail 'cannot inspect built teagramd tag'; return 1; }
+  built_image=$(docker image inspect "$image_tag" --format '{{.Id}}' 2>/dev/null) || { fail 'cannot inspect built application image tag'; return 1; }
   [[ "$built_image" =~ ^sha256:[0-9a-f]{64}$ ]] || { fail 'built teagramd image ID is missing or malformed'; return 1; }
   BUILD_IDENTITY_REJECTION_REASON=built-image-revision-label-unavailable
-  revision_label=$(docker image inspect teagramd:local \
+  revision_label=$(docker image inspect "$image_tag" \
     --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}' 2>/dev/null) || {
     fail 'cannot inspect built teagramd revision label'
     return 1
@@ -2064,6 +2136,7 @@ compare_resolved_preflight() {
   if [ "$INITIALIZE_LOCAL" = 1 ]; then
     local render_file="$BASELINE_DIR/initial-local-target-render.snapshot.json"
     local live_fields=(container_id image_id state mounts_sha256 container_stop_timeout exposure_sha256 exposure_public_ws_2446 container_env_sha256 container_logging_sha256 container_log_login_codes container_replica_count container_client_addr_trust)
+    local baseline_logging_sha baseline_login_codes target_logging_policy target_login_codes
     [ "$(jq -er '.provenance.compose_source' "$old_file")" = live-container-inspection ] && \
       [ "$(jq -er '.provenance.compose_source' "$render_file")" = selected-compose-render ] && \
       [ "$(jq -er '.provenance.compose_source' "$target_file")" = selected-compose-render ] || {
@@ -2071,10 +2144,28 @@ compare_resolved_preflight() {
       return 1
     }
     write_immutable "$results" '' || return 1
+    baseline_logging_sha=$(jq -er '.container_logging_sha256' "$old_file") || { fail 'live baseline is missing its container logging digest'; return 1; }
+    baseline_login_codes=$(jq -er '.container_log_login_codes' "$old_file") || { fail 'live baseline is missing its inspected login-code logging setting'; return 1; }
+    target_logging_policy=$(jq -er '.compose_logging_policy' "$render_file") || { fail 'pinned target render is missing its logging policy'; return 1; }
+    target_login_codes=$(jq -er '.compose_log_login_codes' "$render_file") || { fail 'pinned target render is missing its login-code logging setting'; return 1; }
+    if baseline_logging_transition=$(approved_initial_local_logging_transition \
+      "$baseline_logging_sha" "$baseline_login_codes" "$target_logging_policy" "$target_login_codes"); then
+      append_evidence_row "$results" preflight initial_local_logging_transition \
+        "$baseline_logging_transition" syslog-v1:false pass || return 1
+    else
+      append_evidence_row "$results" preflight initial_local_logging_transition \
+        "sha256:$baseline_logging_sha:$baseline_login_codes" "$target_logging_policy:$target_login_codes" fail || return 1
+      fail 'initial-local preflight rejected an unsupported live logging profile'
+      return 1
+    fi
     for field in "${fields[@]}"; do
       before=$(jq -er --arg field "$field" '.[$field]' "$render_file") || { fail 'pinned target render is missing a preflight comparison field'; return 1; }
       after=$(jq -er --arg field "$field" '.[$field]' "$target_file") || { fail 'resolved target is missing a preflight comparison field'; return 1; }
-      if [ "$before" = "$after" ]; then result=pass; else result=fail; failures=$((failures + 1)); fi
+      if [ "$field" = compose_logging_policy ]; then
+        if approved_logging_transition "$before" "$after"; then result=pass; else result=fail; failures=$((failures + 1)); fi
+      elif [ "$field" = compose_log_login_codes ]; then
+        if approved_login_code_logging_transition "$before" "$after"; then result=pass; else result=fail; failures=$((failures + 1)); fi
+      elif [ "$before" = "$after" ]; then result=pass; else result=fail; failures=$((failures + 1)); fi
       append_evidence_row "$results" preflight "selected_render_$field" "$before" "$after" "$result" || return 1
     done
     before=$(jq -er '.compose_public_ws_2446' "$render_file") || { fail 'pinned target render is missing the public WebSocket port policy'; return 1; }
@@ -2101,19 +2192,9 @@ compare_resolved_preflight() {
     before=$(jq -er --arg field "$field" '.[$field]' "$old_file") || { fail 'baseline is missing a resolved configuration comparison field'; return 1; }
     after=$(jq -er --arg field "$field" '.[$field]' "$target_file") || { fail 'resolved target is missing a configuration comparison field'; return 1; }
     if [ "$field" = compose_logging_policy ]; then
-      if [ "$before" = "$after" ] || { [ "$before" = default ] && [ "$after" = syslog-v1 ]; }; then
-        result=pass
-      else
-        result=fail
-        failures=$((failures + 1))
-      fi
+      if approved_logging_transition "$before" "$after"; then result=pass; else result=fail; failures=$((failures + 1)); fi
     elif [ "$field" = compose_log_login_codes ]; then
-      if [ "$before" = "$after" ] || { [ "$before" = true ] && [ "$after" = false ]; }; then
-        result=pass
-      else
-        result=fail
-        failures=$((failures + 1))
-      fi
+      if approved_login_code_logging_transition "$before" "$after"; then result=pass; else result=fail; failures=$((failures + 1)); fi
     elif [ "$field" = media_key_source ] && [ "$before" = unset ] && [[ "$after" = /* ]]; then
       result=pass
     elif [ "$field" = media_key_current ] && [ "$before" = unset ] && [ "$after" = 1 ]; then
@@ -2149,6 +2230,10 @@ compare_rollback_to_baseline() {
   local results="$ROLLBACK_DIR/rollback-equivalence.tsv"
   local fields=(image_id mounts_sha256 stop_grace_period container_stop_timeout config_sha256 env_sha256 override_sha256 exposure_sha256 container_env_sha256 container_logging_sha256 compose_replica_count compose_client_addr_trust container_replica_count container_client_addr_trust compose_public_ws_2446 exposure_public_ws_2446 compose_logging_policy compose_log_login_codes container_log_login_codes media_key_source media_key_current)
   local field before after state timeout_value grace
+  local baseline_logging_sha rollback_logging_sha baseline_login_codes rollback_login_codes baseline_logging_transition
+  local target_logging_policy target_login_codes rollback_logging_policy rollback_login_codes_value
+  local approved_syslog_logging_sha
+  local initial_local_logging_transition=0
   local expected_count=${#fields[@]}
   ROLLBACK_COMPARE_FAILURES=0
   copy_immutable "$BASELINE_DIR/baseline.snapshot.json" "$baseline_file" || return 1
@@ -2164,11 +2249,38 @@ compare_rollback_to_baseline() {
       return 1
     }
     copy_immutable "$target_render" "$render_file" || return 1
+    baseline_logging_sha=$(jq -er '.container_logging_sha256' "$baseline_file") || { fail 'live baseline is missing its container logging digest'; return 1; }
+    rollback_logging_sha=$(jq -er '.container_logging_sha256' "$rollback_file") || { fail 'rollback is missing its container logging digest'; return 1; }
+    baseline_login_codes=$(jq -er '.container_log_login_codes' "$baseline_file") || { fail 'live baseline is missing its inspected login-code logging setting'; return 1; }
+    rollback_login_codes=$(jq -er '.container_log_login_codes' "$rollback_file") || { fail 'rollback is missing its inspected login-code logging setting'; return 1; }
+    target_logging_policy=$(jq -er '.compose_logging_policy' "$render_file") || { fail 'pinned target render is missing its logging policy'; return 1; }
+    target_login_codes=$(jq -er '.compose_log_login_codes' "$render_file") || { fail 'pinned target render is missing its login-code logging setting'; return 1; }
+    rollback_logging_policy=$(jq -er '.compose_logging_policy' "$rollback_file") || { fail 'rollback render is missing its logging policy'; return 1; }
+    rollback_login_codes_value=$(jq -er '.compose_log_login_codes' "$rollback_file") || { fail 'rollback render is missing its login-code logging setting'; return 1; }
+    approved_syslog_logging_sha=$(printf '%s' '{"config":{"syslog-address":"unixgram:///dev/log","syslog-facility":"daemon","syslog-format":"rfc5424","tag":"teagramd"},"type":"syslog"}' | sha256sum | awk '{print $1}') || return 1
+    # initialize-local keeps its reviewed syslog artifact for rollback.
+    if baseline_logging_transition=$(approved_initial_local_logging_transition \
+       "$baseline_logging_sha" "$baseline_login_codes" "$target_logging_policy" "$target_login_codes") && \
+       [ "$rollback_logging_sha" = "$approved_syslog_logging_sha" ] && \
+       [ "$rollback_login_codes" = false ] && \
+       [ "$rollback_logging_policy" = syslog-v1 ] && [ "$rollback_login_codes_value" = false ]; then
+      initial_local_logging_transition=1
+    fi
     write_immutable "$results" '' || return 1
+    if [ "$initial_local_logging_transition" = 1 ]; then
+      append_evidence_row "$results" rollback initial_local_logging_transition \
+        "$baseline_logging_transition" syslog-v1:false pass || return 1
+    fi
     for field in "${live_fields[@]}"; do
       before=$(jq -er --arg field "$field" '.[$field]' "$baseline_file") || { fail 'live baseline is missing a rollback comparison field'; return 1; }
       after=$(jq -er --arg field "$field" '.[$field]' "$rollback_file") || { fail 'rollback snapshot is missing an inspected comparison field'; return 1; }
-      record_rollback_row "$results" "live_baseline_$field" "$before" "$after" || return 1
+      if [ "$initial_local_logging_transition" = 1 ] && [ "$field" = container_logging_sha256 ]; then
+        append_evidence_row "$results" rollback "live_baseline_$field" "$before" "$after" pass || return 1
+      elif [ "$initial_local_logging_transition" = 1 ] && [ "$field" = container_log_login_codes ] && [ "$before" != "$after" ]; then
+        append_evidence_row "$results" rollback "live_baseline_$field" "$before" "$after" pass || return 1
+      else
+        record_rollback_row "$results" "live_baseline_$field" "$before" "$after" || return 1
+      fi
     done
     for field in "${render_fields[@]}"; do
       before=$(jq -er --arg field "$field" '.[$field]' "$render_file") || { fail 'pinned target render is missing a rollback comparison field'; return 1; }
@@ -2244,7 +2356,7 @@ rollback_after_target_failure() {
 
 restore_checkout_and_tag() {
   (umask 022; git reset --hard "$PREVIOUS_SHA") >/dev/null || { fail 'cannot restore the previous checkout'; return 1; }
-  docker image tag "${BASE_IMAGE_ID#sha256:}" teagramd:local >/dev/null 2>&1 || { fail 'cannot restore the baseline image tag'; return 1; }
+  docker image tag "${BASE_IMAGE_ID#sha256:}" "$(rollout_compose_service):local" >/dev/null 2>&1 || { fail 'cannot restore the baseline image tag'; return 1; }
 }
 
 require_clean_build_checkout() {
@@ -2272,8 +2384,8 @@ perform_rollback() {
     fail 'current containers or baseline rollback render do not satisfy durable blob authority; baseline was not started'
     return 1
   fi
-  docker compose up -d --no-build --no-deps teagramd </dev/null || { fail 'baseline teagramd recreation failed'; return 1; }
-  rollback_id=$(current_service_id teagramd) || { fail 'rollback teagramd container ID is unavailable'; return 1; }
+  docker compose up -d --no-build --no-deps "$(rollout_compose_service)" </dev/null || { fail "baseline $(rollout_compose_service) recreation failed"; return 1; }
+  rollback_id=$(current_service_id "$(rollout_compose_service)") || { fail "rollback $(rollout_compose_service) container ID is unavailable"; return 1; }
   capture_snapshot "$rollback_id" "$ROLLBACK_DIR" rollback || return 1
   local equivalence_rc=0 readiness_rc=0
   if compare_rollback_to_baseline; then :; else equivalence_rc=$?; fi
@@ -2412,7 +2524,8 @@ run_apply() {
   fi
 
   require_clean_build_checkout || return 1
-  baseline_id=$(current_service_id teagramd) || { fail 'baseline teagramd container ID is unavailable'; return 1; }
+  select_rollout_compose_service || return 1
+  baseline_id=$(current_service_id "$(rollout_compose_service)") || { fail "baseline $(rollout_compose_service) container ID is unavailable"; return 1; }
   if [ "$INITIALIZE_LOCAL" = 1 ]; then
     capture_snapshot "$baseline_id" "$BASELINE_DIR" baseline live-container-inspection || return 1
   else
@@ -2543,7 +2656,7 @@ run_apply() {
     fail 'Compose build provenance rejected; baseline checkout and tag restored'
     return 1
   fi
-  TEAGRAMD_SOURCE_REVISION="$TARGET_SHA" docker compose build -q teagramd </dev/null || {
+  TEAGRAMD_SOURCE_REVISION="$TARGET_SHA" docker compose build -q "$(rollout_compose_service)" </dev/null || {
     rc=$?
     if ! write_immutable "$BUILD_DIR/build-result.txt" "result=failed exit=$rc source_sha=$TARGET_SHA"; then
       restore_checkout_and_tag || return 1
@@ -2578,7 +2691,7 @@ run_apply() {
     rollback_after_target_failure "compose_up_exit_$rc" || return 2
     return 1
   fi
-  target_id=$(current_service_id teagramd) || target_id=''
+  target_id=$(current_service_id "$(rollout_compose_service)") || target_id=''
   if [ -n "$target_id" ]; then
     if capture_snapshot "$target_id" "$TARGET_DIR" target; then :; else
       rollback_after_target_failure snapshot_capture_failed || return 2
