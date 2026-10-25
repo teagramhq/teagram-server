@@ -2565,6 +2565,18 @@ def process_start_ticks(pid: int) -> int | None:
     return int(fields[19])
 
 
+def process_is_alive(pid: int) -> bool | None:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except OSError:
+        return None
+    return True
+
+
 def docker_cli_pids() -> list[int]:
     pids: list[int] = []
     for entry in Path("/proc").iterdir():
@@ -6049,6 +6061,8 @@ dump_path=$2
             current_ticks = process_start_ticks(pid)
             if current_ticks == ticks:
                 owned.append((pid, ticks))
+            elif current_ticks is None and process_is_alive(pid) is not False:
+                unknown = True
 
         markers = [self.manifest.get("token", "").encode(), str(self.run_dir).encode()]
         markers.extend(record.get("id", "").encode() for record in self.manifest.get("containers", []))
@@ -6067,7 +6081,8 @@ dump_path=$2
                 continue
             ticks = process_start_ticks(pid)
             if ticks is None:
-                unknown = True
+                if process_is_alive(pid) is not False:
+                    unknown = True
                 continue
             if (pid, ticks) in known:
                 continue
