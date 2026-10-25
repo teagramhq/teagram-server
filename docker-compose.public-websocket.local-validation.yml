@@ -1,0 +1,16 @@
+# Disposable-only overrides for the public WebSocket proof. The local blob
+# backend itself comes from docker-compose.local-blobs.yml, as in deployment.
+services:
+  teagramd-public-1:
+    environment:
+      TG_RATE_LIMIT_KEY_EXCHANGE_IP: "1"
+      TG_RATE_LIMIT_KEY_EXCHANGE_IP_WINDOW: 1h
+
+  teagramd-public-2:
+    environment:
+      TG_RATE_LIMIT_KEY_EXCHANGE_IP: "1"
+      TG_RATE_LIMIT_KEY_EXCHANGE_IP_WINDOW: 1h
+
+  public-haproxy:
+    ports: !override
+      - "127.0.0.1:${TG_PUBLIC_HAPROXY_HOST_PORT:-2446}:2446"

@@ -70,19 +70,31 @@ printf '#!/usr/bin/env bash\n' > "$tmp/work/tracked-script.sh"
 cat > "$tmp/work/deploy/teagramd/rollout-runner/rollout-runner.sh" <<'RUNNER'
 #!/usr/bin/env bash
 set -euo pipefail
+if [[ "${ROLLOUT_RUNNER_PUBLIC_WEBSOCKET:-0}" != 1 || ",${COMPOSE_PROFILES:-}," != *,public,* ]]; then
+  echo 'public WebSocket rollout flags were not passed to the runner' >&2
+  exit 96
+fi
 if [[ "${FIXTURE_EXPECT_S3_ENV:-0}" == 1 && \
     "${COMPOSE_ENV_FILES:-}" != "$DEPLOY_DIR/.env,$FIXTURE_PARKED_ENV" ]]; then
   echo "S3 rollout did not inherit the validated environment files" >&2
   exit 96
 fi
 runtime_dir="$DEPLOY_ROOT/teagramd-rollout-runner"
-for file in rollout-runner.sh rollout-verifier.sh schema-result-gate.sh schema-result-gate.py blob-mode-state.py blob-transition-runner.py qualify-rustfs-transition.py stack-move-runner.py; do
+for file in rollout-runner.sh rollout-verifier.sh schema-result-gate.sh schema-result-gate.py blob-mode-state.py blob-transition-runner.py qualify-rustfs-transition.py stack-move-runner.py public-websocket-check.py; do
   if ! git -C "$DEPLOY_DIR" show "$2:deploy/teagramd/rollout-runner/$file" | cmp - "$runtime_dir/$file"; then
     printf 'staged runtime is missing or stale: %s\n' "$file" >&2
     exit 90
   fi
 done
 git -C "$DEPLOY_DIR" merge --ff-only -q "$2"
+if [[ "${ROLLOUT_RUNNER_CHANGED_ENV:-}" == TG_REPLICA_COUNT ]]; then
+  [[ "${ROLLOUT_RUNNER_PREVIOUS_ENV_FILE:-}" == "$DEPLOY_ROOT"/teagramd-env-before-* ]] &&
+    grep -Fqx 'TG_REPLICA_COUNT=1' "$ROLLOUT_RUNNER_PREVIOUS_ENV_FILE" &&
+    grep -Fqx 'TG_REPLICA_COUNT=3' "$DEPLOY_DIR/.env" || {
+      echo 'runner did not receive the pre-change replica-count backup' >&2
+      exit 96
+    }
+fi
 image_id=${FIXTURE_POST_IMAGE_ID:-sha256:fixture}
 printf 'source_sha=%s image_id=%s built_at=fixture\n' "$2" "$image_id" \
   > "$DEPLOY_ROOT/main1238-fixture.build/built-image.identity"
@@ -95,7 +107,7 @@ set -euo pipefail
 printf '%s\n' "$1" >> "${LINK_EDGE_DEPLOY_LOG:?}"
 printf 'link-edge\n' >> "${DEPLOY_ACTION_LOG:?}"
 EDGE
-for file in rollout-verifier.sh schema-result-gate.sh schema-result-gate.py blob-mode-state.py qualify-rustfs-transition.py stack-move-runner.py; do
+for file in rollout-verifier.sh schema-result-gate.sh schema-result-gate.py blob-mode-state.py qualify-rustfs-transition.py stack-move-runner.py public-websocket-check.py; do
   printf 'fixture\n' > "$tmp/work/deploy/teagramd/rollout-runner/$file"
 done
 cat > "$tmp/work/deploy/teagramd/rollout-runner/blob-transition-runner.py" <<'PYTHON'
@@ -146,13 +158,13 @@ git -C "$tmp/work" add new-tracked.txt
 third=$(commit third)
 git -C "$tmp/work" push -q "$tmp/origin.git" main
 git -C "$tmp/live" reset -q --hard "$second"
-printf 'TG_RSA_KEY_FINGERPRINT=12345\n' > "$tmp/live/.env"
+printf 'TG_RSA_KEY_FINGERPRINT=12345\nTG_REPLICA_COUNT=1\n' > "$tmp/live/.env"
 printf 'fixture dump\n' > "$tmp/live/pgdump-fixture.sql"
 printf 'fixture evidence\n' > "$tmp/live/rollout-evidence.txt"
 chmod 640 "$tmp/live/.env"
 chmod 600 "$tmp/live/pgdump-fixture.sql" "$tmp/live/rollout-evidence.txt"
 local_files_before=$(stat -c '%n:%u:%g:%a' \
-  "$tmp/live/.env" "$tmp/live/pgdump-fixture.sql" "$tmp/live/rollout-evidence.txt")
+  "$tmp/live/pgdump-fixture.sql" "$tmp/live/rollout-evidence.txt")
 
 mkdir -p "$tmp/bin" "$tmp/root/main1238-fixture.build" "$tmp/root/usr/local/sbin"
 mkdir -p "$tmp/root/etc/conf.d"
@@ -206,6 +218,9 @@ case "$*" in
     ;;
   *org.opencontainers.image.revision*) echo "$DEPLOY_SHA" ;;
   *'{{range .Config.Env}}'*) echo 'TG_RSA_KEY_FINGERPRINT=12345' ;;
+  *'compose ps -q public-haproxy'*|*'compose ps -q teagramd-public-1'*|*'compose ps -q teagramd-public-2'*) printf '%064d\n' 1 ;;
+  *'{{.State.Status}}'*) echo running ;;
+  *'{{if .State.Health}}'*) echo healthy ;;
   *'ps -a'*) ;;
   *'logs --since 3m teagramd'*)
     printf 'readiness\n' >> "${DEPLOY_ACTION_LOG:?}"
@@ -263,7 +278,7 @@ if [[ "$(stat -c '%a' "$tmp/live/tracked.txt")" != 644 || \
   failures=$((failures + 1))
 fi
 local_files_after=$(stat -c '%n:%u:%g:%a' \
-  "$tmp/live/.env" "$tmp/live/pgdump-fixture.sql" "$tmp/live/rollout-evidence.txt")
+  "$tmp/live/pgdump-fixture.sql" "$tmp/live/rollout-evidence.txt")
 if [[ "$local_files_after" != "$local_files_before" ]]; then
   echo 'FAIL untracked host-local file owners or modes changed' >&2
   failures=$((failures + 1))
@@ -272,9 +287,20 @@ fi
 printf 'sha256:already-deployed\n' > "$DEPLOY_IMAGE_ID_FILE"
 echo "source_sha=$second image_id=sha256:already-deployed built_at=fixture" > "$tmp/root/main1238-fixture.build/built-image.identity"
 : > "$DEPLOY_ACTION_LOG"
-expect 0 "already at $second with runner provenance" DEPLOY_SHA="$second" \
+expect 0 "deployed $second" --contains 'runner exit 0' DEPLOY_SHA="$second" \
+  FIXTURE_DEPLOY_SUCCESS=1 FIXTURE_POST_IMAGE_ID=sha256:already-deployed \
   FIXTURE_SMOKE_IMAGE_ID=sha256:already-deployed
-if [[ "$(cat "$DEPLOY_ACTION_LOG")" != $'link-edge\nmtproto-smoke sha256:already-deployed' ]]; then
+if [[ "$(grep -c '^TG_REPLICA_COUNT=3$' "$tmp/live/.env")" != 1 || "$(stat -c '%a' "$tmp/live/.env")" != 600 ]]; then
+  echo 'FAIL deployment did not stage TG_REPLICA_COUNT=3 in a mode-0600 .env' >&2
+  failures=$((failures + 1))
+fi
+mapfile -t count_backups < <(find "$tmp/root" -maxdepth 1 -type f -name "teagramd-env-before-${second:0:7}-*" -print)
+if [[ "${#count_backups[@]}" != 1 || "$(stat -c '%a' "${count_backups[0]:-missing}")" != 600 ]] || \
+  ! grep -Fqx 'TG_REPLICA_COUNT=1' "${count_backups[0]:-missing}"; then
+  echo 'FAIL deployment did not keep the previous replica count in one mode-0600 backup' >&2
+  failures=$((failures + 1))
+fi
+if [[ "$(cat "$DEPLOY_ACTION_LOG")" != $'readiness\nlink-edge\nmtproto-smoke sha256:already-deployed' ]]; then
   echo 'FAIL an already deployed server SHA did not run the host-side smoke after the link edge' >&2
   failures=$((failures + 1))
 fi
@@ -347,9 +373,13 @@ if [[ "$(stat -c '%a' "$tmp/live/tracked.txt")" != 644 || \
   failures=$((failures + 1))
 fi
 local_files_after=$(stat -c '%n:%u:%g:%a' \
-  "$tmp/live/.env" "$tmp/live/pgdump-fixture.sql" "$tmp/live/rollout-evidence.txt")
+  "$tmp/live/pgdump-fixture.sql" "$tmp/live/rollout-evidence.txt")
 if [[ "$local_files_after" != "$local_files_before" ]]; then
   echo 'FAIL untracked host-local file owners or modes changed after rollout' >&2
+  failures=$((failures + 1))
+fi
+if [[ "$(grep -c '^TG_REPLICA_COUNT=3$' "$tmp/live/.env")" != 1 || "$(stat -c '%a' "$tmp/live/.env")" != 600 ]]; then
+  echo 'FAIL later rollouts did not preserve the staged replica count and protected .env mode' >&2
   failures=$((failures + 1))
 fi
 

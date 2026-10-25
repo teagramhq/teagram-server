@@ -85,13 +85,31 @@ Change a retained value only through `ROLLOUT_RUNNER_CHANGED_ENV` with the
 previous `.env` backup. If a rollout that added public settings rolls back, the
 runner restores that previous `.env` before recreating the previous container.
 
-The only approved Compose listener addition is `127.0.0.1:2446:2446` for the
-public WebSocket listener. Preflight and post-start comparisons normalize that
-exact binding from the configuration and inspected-exposure digests, while
-recording its presence separately and requiring the replacement container to
-match the Compose mapping. A wildcard host IP, another host or container port,
-or any other port change remains a configuration drift and rejects before
-replacement.
+The public WebSocket route is applied with the `public` Compose profile and
+`ROLLOUT_RUNNER_PUBLIC_WEBSOCKET=1`. `deploy-main.sh` takes the database dump
+first, then stages the approved `TG_REPLICA_COUNT=1` to `3` change through the
+named environment-change path and keeps the root-only previous `.env`. The
+public topology checker validates the isolated HAProxy frontend and backend,
+the peer and header rules, the two proxy-v2 replicas, registration and Origin
+policy, and their absence of host ports. It also requires the bounded HAProxy
+healthcheck and logs. The runner checks HAProxy health, the loopback-only
+publish, both replica environments and listener readiness after startup.
+The existing host tunnel keeps its `127.0.0.1:2446` origin; Compose now assigns
+that publish to HAProxy, while the ordinary socket-trust service has no public
+listener or 2446 publish. The public advertise address comes from the same
+verified `.env` but is set only on the public replicas because the base process
+rejects an advertise address when its public listener is disabled.
+
+Snapshot normalization removes only the three reviewed public services and
+their two fixed networks, the public-only environment settings, and the exact
+loopback 2446 binding from the ordinary service's baseline digest. The separate
+topology checker validates those removed fields in full. The base service's
+public listener and 2446 publish must be absent after rollout. On failure, the
+runner restores the previous checkout and `.env`, removes only containers
+carrying this Compose project's public-service labels, recreates the prior
+`teagramd`, and verifies baseline equivalence and readiness. The database dump
+is retained at the path printed by `deploy-main.sh`; the previous `.env` is
+retained as `/root/teagramd-env-before-<sha>-<timestamp>`.
 
 The only approved `teagramd` logging change is the reviewed transition from
 Compose's default logger to `syslog` at `/dev/log` with the `teagramd` tag,

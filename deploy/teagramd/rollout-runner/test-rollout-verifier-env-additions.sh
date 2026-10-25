@@ -39,9 +39,9 @@ export PATH
 COMPOSE_JSON='{"services":{"teagramd":{"stop_grace_period":"2m0s","ports":[],"volumes":[],"network_mode":"","networks":{},"environment":{"TG_REPLICA_COUNT":"1","TG_CLIENT_ADDR_TRUST":"socket","TG_LOG_LOGIN_CODES":"false","POSTGRES_PASSWORD":"fixture-secret-postgres-password","DATABASE_URL":"postgres://fixture:dsn-secret@db/teagram"}}}}'
 
 inspect_json() {
-  local extra=$1 log_config=${INSPECT_LOG_CONFIG:-'{"Type":"json-file","Config":{}}'}
-  jq -cn --arg extra "$extra" --argjson log_config "$log_config" '
-    ["TG_REPLICA_COUNT=1","TG_CLIENT_ADDR_TRUST=socket","TG_LOG_LOGIN_CODES=false"] as $base
+  local extra=$1 replica_count=${2:-1} log_config=${INSPECT_LOG_CONFIG:-'{"Type":"json-file","Config":{}}'}
+  jq -cn --arg extra "$extra" --arg replica_count "$replica_count" --argjson log_config "$log_config" '
+    ["TG_REPLICA_COUNT=" + $replica_count,"TG_CLIENT_ADDR_TRUST=socket","TG_LOG_LOGIN_CODES=false"] as $base
     | {
         Id:"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
         Image:"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
@@ -89,6 +89,16 @@ public_setting_snapshot() {
     '.services.teagramd.environment[$setting]=$value' <<< "$COMPOSE_JSON")
   ROLLOUT_ADDED_ENV="$added" ROLLOUT_CHANGED_ENV="$changed" snapshot_from_json \
     "$inspected" "$compose_json" "$ENV_FILE" "$OVERRIDE_FILE" selected-compose-render "$name"
+}
+
+replica_count_snapshot() {
+  local snapshot_name=$1 env_count=$2 container_count=$3 inspected compose_json
+  printf 'TG_REPLICA_COUNT=%s\n' "$env_count" > "$ENV_FILE"
+  inspected=$(inspect_json '' "$container_count")
+  compose_json=$(jq -c --arg count "$env_count" \
+    '.services.teagramd.environment.TG_REPLICA_COUNT=$count' <<< "$COMPOSE_JSON")
+  ROLLOUT_CHANGED_ENV=TG_REPLICA_COUNT snapshot_from_json \
+    "$inspected" "$compose_json" "$ENV_FILE" "$OVERRIDE_FILE" selected-compose-render "$snapshot_name"
 }
 
 exchange_budget_snapshot() {
@@ -231,6 +241,24 @@ unset INSPECT_LOG_CONFIG
 printf '%s\n' 'PASS full baseline-to-target comparison accepts empty key-exchange mappings'
 printf '%s\n' 'PASS empty key-exchange settings retain the binary-default environment baseline'
 
+replica_baseline=$(replica_count_snapshot baseline 3 1)
+replica_preflight=$(replica_count_snapshot preflight 3 1)
+replica_target=$(replica_count_snapshot target 3 3)
+replica_rollback=$(replica_count_snapshot rollback 1 1)
+[ "$(jq -r '.container_replica_count' <<< "$replica_baseline")" = 1 ]
+[ "$(jq -r '.container_replica_count' <<< "$replica_preflight")" = 1 ]
+[ "$(jq -r '.container_replica_count' <<< "$replica_target")" = 3 ]
+[ "$(jq -r '.container_replica_count' <<< "$replica_rollback")" = 1 ]
+if replica_count_snapshot baseline 3 3 >/dev/null 2>"$TMP/replica-baseline-mismatch.err"; then
+  printf '%s\n' 'FAIL pre-rollout container with the target replica count was accepted as the baseline' >&2
+  exit 1
+fi
+if replica_count_snapshot target 3 1 >/dev/null 2>"$TMP/replica-target-mismatch.err"; then
+  printf '%s\n' 'FAIL target with the old replica count was accepted' >&2
+  exit 1
+fi
+printf '%s\n' 'PASS replica-count rollout checks baseline, target, and rollback container states'
+
 added_exchange_env=$(exchange_budget_snapshot target 0 TG_RATE_LIMIT_KEY_EXCHANGE_IP \
   'TG_RATE_LIMIT_KEY_EXCHANGE_IP=0')
 [ "$(jq -r '.container_env_sha256' <<< "$empty_env")" = \
@@ -356,6 +384,53 @@ public_ws_snapshot=$(snapshot_from_json \
 [ "$(jq -r '.config_sha256' <<< "$legacy_snapshot")" = "$(jq -r '.config_sha256' <<< "$public_ws_snapshot")" ]
 [ "$(jq -r '.container_env_sha256' <<< "$legacy_snapshot")" = "$(jq -r '.container_env_sha256' <<< "$public_ws_snapshot")" ]
 printf '%s\n' 'PASS safe public defaults preserve resolved config and container environment equivalence'
+
+printf '%s\n' \
+  'TG_REPLICA_COUNT=3' \
+  'TG_PUBLIC_WEBSOCKET_LISTEN_ADDR=:2446' \
+  'TG_PUBLIC_WEBSOCKET_ADVERTISE_ADDR=server.example.com:443' \
+  'TG_PUBLIC_REGISTRATION=invite' \
+  'TG_PUBLIC_WEBSOCKET_ALLOWED_ORIGINS=https://web.example.test' > "$ENV_FILE"
+public_route_compose=$(jq -c '
+  .services.teagramd.environment += {
+    TG_REPLICA_COUNT:"3",
+    TG_PUBLIC_WEBSOCKET_LISTEN_ADDR:"",
+    TG_PUBLIC_WEBSOCKET_ADVERTISE_ADDR:"",
+    TG_PUBLIC_REGISTRATION:"invite",
+    TG_PUBLIC_WEBSOCKET_ALLOWED_ORIGINS:"https://web.example.test"
+  }
+  | .services.teagramd.ports=[]
+  | .services["teagramd-public-1"]={environment:{
+      TG_PUBLIC_WEBSOCKET_LISTEN_ADDR:":2446",
+      TG_PUBLIC_WEBSOCKET_ADVERTISE_ADDR:"server.example.com:443"
+    }}
+' <<< "$COMPOSE_JSON")
+public_route_old_inspect=$(printf '%s' "$(inspect_json '' 1)" | jq -c '
+  .Config.Env += [
+    "TG_PUBLIC_WEBSOCKET_LISTEN_ADDR=:2446",
+    "TG_PUBLIC_WEBSOCKET_ADVERTISE_ADDR=server.example.com:443",
+    "TG_PUBLIC_REGISTRATION=invite",
+    "TG_PUBLIC_WEBSOCKET_ALLOWED_ORIGINS=https://web.example.test"
+  ]
+  | .HostConfig.PortBindings={"2446/tcp":[{"HostIp":"127.0.0.1","HostPort":"2446"}]}
+')
+public_route_new_inspect=$(printf '%s' "$(inspect_json '' 3)" | jq -c '
+  .Config.Env += [
+    "TG_PUBLIC_WEBSOCKET_LISTEN_ADDR=",
+    "TG_PUBLIC_WEBSOCKET_ADVERTISE_ADDR=",
+    "TG_PUBLIC_REGISTRATION=invite",
+    "TG_PUBLIC_WEBSOCKET_ALLOWED_ORIGINS=https://web.example.test"
+  ]
+')
+public_route_preflight=$(ROLLOUT_CHANGED_ENV=TG_REPLICA_COUNT ROLLOUT_PUBLIC_WEBSOCKET=1 snapshot_from_json \
+  "$public_route_old_inspect" "$public_route_compose" "$ENV_FILE" "$OVERRIDE_FILE" selected-compose-render preflight)
+public_route_target=$(ROLLOUT_CHANGED_ENV=TG_REPLICA_COUNT ROLLOUT_PUBLIC_WEBSOCKET=1 snapshot_from_json \
+  "$public_route_new_inspect" "$public_route_compose" "$ENV_FILE" "$OVERRIDE_FILE" selected-compose-render target)
+[ "$(jq -r '.compose_public_ws_2446' <<< "$public_route_preflight")" = false ]
+[ "$(jq -r '.exposure_public_ws_2446' <<< "$public_route_preflight")" = true ]
+[ "$(jq -r '.compose_public_ws_2446' <<< "$public_route_target")" = false ]
+[ "$(jq -r '.exposure_public_ws_2446' <<< "$public_route_target")" = false ]
+printf '%s\n' 'PASS public-route preflight permits the old loopback publish only until the base listener is replaced'
 
 syslog_logging='{"driver":"syslog","options":{"syslog-address":"unixgram:///dev/log","syslog-facility":"daemon","syslog-format":"rfc5424","tag":"teagramd"}}'
 legacy_login_codes_compose=$(jq -c \

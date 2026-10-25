@@ -21,6 +21,10 @@ legacy_tcp_pid=
 legacy_ws_pid=
 proxy_tcp_pid=
 proxy_ws_pid=
+public_ws_pid_a=
+public_ws_pid_b=
+test_haproxy_name="${project}-attribution-proxy"
+test_echo_name="${project}-attribution-echo"
 
 mapfile -t existing_network_ids < <(docker network ls --quiet)
 if [ "${#existing_network_ids[@]}" -eq 0 ]; then
@@ -53,6 +57,10 @@ for route in routes:
             pass
 
 pool = ipaddress.ip_network("198.18.0.0/15")
+public_networks = (ipaddress.ip_network("198.18.131.0/24"), ipaddress.ip_network("198.18.132.0/24"))
+if any(public.overlaps(existing) for public in public_networks for existing in occupied):
+    raise SystemExit("fixed public-WebSocket test subnets overlap an existing network or host route")
+occupied.extend(public_networks)
 for offset in range(pool.num_addresses // 256):
     candidate = ipaddress.ip_network((int(pool.network_address) + offset * 256, 24))
     if not any(candidate.overlaps(existing) for existing in occupied):
@@ -85,7 +93,7 @@ for match in re.finditer(r"(?:\]|:)(\d+)\s", listeners):
     used.add(int(match.group(1)))
 
 for base in range(39000, 50000):
-    selected = [base, base + 1, base + 10, base + 11]
+    selected = [base, base + 1, base + 10, base + 11, base + 12, base + 13]
     if not used.intersection(selected):
         print("\n".join(map(str, selected)))
         break
@@ -93,7 +101,7 @@ else:
     raise SystemExit("no non-overlapping host ports are available in 39000-50010")
 PY
 )
-if [ "${#mixed_ports[@]}" -ne 4 ]; then
+if [ "${#mixed_ports[@]}" -ne 6 ]; then
 	echo "could not select non-overlapping mixed-trust host ports" >&2
 	exit 1
 fi
@@ -102,13 +110,20 @@ cat > "$env_file" <<EOF
 POSTGRES_PASSWORD=localdev
 TG_PUBLIC_LINK_PREFIX=https://links.example.test/
 TG_LOG_LOGIN_CODES=false
-TG_REGISTRATION=closed
+TG_REGISTRATION=open
 TG_AUTHKEY_ENC_KEY=
 TG_AUTHKEY_ENC_KEY_FILE=/var/lib/teagramd/enc_key.hex
 TG_REPLICA_ID=legacy
 TG_REPLICA_COUNT=3
 TG_ADVERTISE_ADDR=127.0.0.1:${mixed_ports[2]}
 TG_WEBSOCKET_ALLOWED_ORIGINS=https://web.example.test
+TG_PUBLIC_WEBSOCKET_LISTEN_ADDR=:2446
+TG_PUBLIC_WEBSOCKET_ADVERTISE_ADDR=server.example.test:443
+TG_PUBLIC_REGISTRATION=invite
+TG_PUBLIC_WEBSOCKET_ALLOWED_ORIGINS=https://web.example.test
+TG_PUBLIC_HAPROXY_HOST_PORT=${mixed_ports[4]}
+TG_RATE_LIMIT_KEY_EXCHANGE_IP=1
+TG_RATE_LIMIT_KEY_EXCHANGE_IP_WINDOW=1h
 TG_MIXED_TRUST_SUBNET=${mixed_network_values[0]}
 TG_MIXED_TRUST_PROXY_IP=${mixed_network_values[1]}
 TG_MIXED_TRUST_REPLICA_1_IP=${mixed_network_values[2]}
@@ -143,6 +158,13 @@ compose_probe() {
 		-f docker-compose.mixed-trust.probe.yml "$@"
 }
 
+compose_public() {
+	docker compose --project-name "$project" --env-file .env --env-file "$env_file" \
+		--profile public -f docker-compose.yml -f docker-compose.local-blobs.yml \
+		-f docker-compose.mixed-trust.validation.yml \
+		-f docker-compose.public-websocket.local-validation.yml "$@"
+}
+
 compose_for_service() {
 	service=$1
 	shift
@@ -162,10 +184,13 @@ stop_probe() {
 
 cleanup() {
 	status=$?
+	docker rm -f "$test_haproxy_name" "$test_echo_name" >/dev/null 2>&1 || true
 	stop_probe "$legacy_tcp_pid"
 	stop_probe "$legacy_ws_pid"
 	stop_probe "$proxy_tcp_pid"
 	stop_probe "$proxy_ws_pid"
+	stop_probe "$public_ws_pid_a"
+	stop_probe "$public_ws_pid_b"
 	compose_mixed down --volumes --remove-orphans >/dev/null 2>&1 || true
 	rm -rf "$work_dir"
 	exit "$status"
@@ -185,15 +210,23 @@ compose_default_json="$work_dir/default-compose.json"
 docker compose --project-name "$project" --env-file .env --env-file "$env_file" \
 	-f docker-compose.yml config --format json > "$compose_default_json"
 compose_base config --format json > "$work_dir/legacy-compose.json"
+compose_public config --format json > "$work_dir/public-compose.json"
 
-python3 - "$compose_default_json" "$work_dir/legacy-compose.json" <<'PY'
+python3 - "$compose_default_json" "$work_dir/legacy-compose.json" "$work_dir/public-compose.json" "${mixed_ports[4]}" <<'PY'
 import json
 import sys
 
-default, legacy = [json.load(open(path, encoding="utf-8")) for path in sys.argv[1:]]
+default, legacy, public = [json.load(open(path, encoding="utf-8")) for path in sys.argv[1:4]]
 assert "tcp-proxy" not in default["services"]
 assert "teagramd-proxy-1" not in default["services"]
 assert "teagramd-proxy-2" not in default["services"]
+assert "public-haproxy" not in default["services"]
+assert not any(
+    str(port.get("published")) == "2446" and str(port.get("target")) == "2446"
+    for port in default["services"]["teagramd"].get("ports", [])
+)
+assert default["services"]["teagramd"]["environment"]["TG_PUBLIC_WEBSOCKET_LISTEN_ADDR"] == ""
+assert default["services"]["teagramd"]["environment"]["TG_PUBLIC_WEBSOCKET_ADVERTISE_ADDR"] == ""
 assert any(
     port.get("host_ip") == "127.0.0.1"
     and str(port.get("published")) == "2443"
@@ -202,6 +235,7 @@ assert any(
 )
 assert legacy["services"]["teagramd"]["environment"]["TG_CLIENT_ADDR_TRUST"] == "socket"
 assert legacy["services"]["teagramd"]["environment"]["TG_REPLICA_COUNT"] == "3"
+assert legacy["services"]["teagramd"]["environment"]["TG_REGISTRATION"] == "open"
 assert legacy["services"]["teagramd"]["environment"]["TG_WEBSOCKET_ALLOWED_ORIGINS"] == "https://web.example.test"
 assert not any(key.startswith("TG_BLOB_S3_") for key in legacy["services"]["teagramd"]["environment"])
 assert legacy["services"]["teagramd"].get("secrets") == [
@@ -211,8 +245,77 @@ assert legacy["services"]["teagramd"]["environment"]["TG_TURNSTILE_SITE_KEY"] ==
 assert legacy["services"]["teagramd"]["environment"]["TG_TURNSTILE_SECRET_KEY_FILE"] == ""
 assert legacy["services"]["teagramd"]["environment"]["TG_TURNSTILE_SIGNIN_ENABLED"] == "false"
 assert legacy["secrets"]["teagramd_turnstile"]["file"] == "/dev/null"
+services = public["services"]
+base = services["teagramd"]
+proxy = services["public-haproxy"]
+assert base["environment"]["TG_PUBLIC_WEBSOCKET_LISTEN_ADDR"] == ""
+assert not any(str(port.get("target")) == "2446" for port in base.get("ports", []))
+assert proxy["image"].split("@sha256:")[-1] and "@sha256:" in proxy["image"]
+assert proxy["networks"]["public-ingress"]["ipv4_address"] == "198.18.131.10"
+assert proxy["networks"]["public-backend"]["ipv4_address"] == "198.18.132.10"
+assert any(
+    port.get("host_ip") == "127.0.0.1"
+    and str(port.get("published")) == sys.argv[4]
+    and str(port.get("target")) == "2446"
+    for port in proxy["ports"]
+)
+for name, expected_ip in (("teagramd-public-1", "198.18.132.21"), ("teagramd-public-2", "198.18.132.22")):
+    replica = services[name]
+    environment = replica["environment"]
+    assert environment["TG_CLIENT_ADDR_TRUST"] == "proxy-v2"
+    assert environment["TG_CLIENT_ADDR_PROXY_CIDRS"] == "198.18.132.10/32"
+    assert environment["TG_PUBLIC_WEBSOCKET_LISTEN_ADDR"] == ":2446"
+    assert environment["TG_PUBLIC_WEBSOCKET_ADVERTISE_ADDR"] == "server.example.test:443"
+    assert environment["TG_PUBLIC_REGISTRATION"] == "invite"
+    assert environment["TG_REGISTRATION"] == "open"
+    assert environment["TG_PUBLIC_WEBSOCKET_ALLOWED_ORIGINS"] == "https://web.example.test"
+    assert environment["TG_WEBSOCKET_LISTEN_ADDR"] == ""
+    assert environment["TG_WEBSOCKET_ALLOWED_ORIGINS"] == ""
+    assert environment["TG_REPLICA_COUNT"] == "3"
+    assert replica.get("ports", []) == []
+    assert replica["networks"]["public-backend"]["ipv4_address"] == expected_ip
+    assert "public-ingress" not in replica["networks"]
+ingress_members = {name for name, service in services.items() if "public-ingress" in service.get("networks", {})}
+assert ingress_members == {"public-haproxy"}
+for name in ("teagramd-public-1", "teagramd-public-2"):
+    env = services[name]["environment"]
+    assert env["TG_BLOB_DIR"] == base["environment"]["TG_BLOB_DIR"]
+    for key in (
+        "TG_BLOB_S3_ENDPOINT", "TG_BLOB_S3_BUCKET", "TG_BLOB_S3_PREFIX",
+        "TG_BLOB_S3_REGION", "TG_BLOB_S3_ACCESS_KEY_ID",
+        "TG_BLOB_S3_SECRET_ACCESS_KEY", "TG_BLOB_S3_SECRET_ACCESS_KEY_FILE",
+        "TG_BLOB_S3_CA_PATH", "TG_BLOB_S3_ALLOW_INSECURE_HTTP",
+        "TG_MEDIA_KEY_DIR", "TG_MEDIA_KEY_CURRENT",
+    ):
+        assert env.get(key, "") == ""
+    assert services[name].get("secrets") == base.get("secrets")
+    for key in ("TG_TURNSTILE_SITE_KEY", "TG_TURNSTILE_SECRET_KEY_FILE", "TG_TURNSTILE_SIGNIN_ENABLED"):
+        assert env[key] == base["environment"][key]
 print("default Compose stays direct; validation legacy is socket-trust")
+print("public Compose isolates the invite-only public listeners behind the pinned proxy-v2 frontend")
 PY
+
+python3 - deploy/teagramd/haproxy-public-websocket.cfg <<'PY'
+import sys
+
+path = sys.argv[1]
+content = open(path, encoding="utf-8").read()
+frontend = content.split("frontend public_websocket\n", 1)[1].split("\nbackend ", 1)[0]
+backend = content.split("backend public_websocket_replicas\n", 1)[1].split("\nfrontend ", 1)[0]
+rules = [line.strip() for line in frontend.splitlines() if line.strip().startswith(("tcp-request", "http-request"))]
+assert rules[0] == "tcp-request connection reject unless { src 198.18.131.1/32 }"
+assert rules[1] == "tcp-request connection set-var(sess.peer) src"
+assert rules[2] == "http-request deny deny_status 400 unless { req.hdr_cnt(CF-Connecting-IP) eq 1 }"
+assert rules[3] == "http-request deny deny_status 400 unless { req.hdr_ip(CF-Connecting-IP) -m found }"
+assert rules[4] == "http-request set-src req.hdr_ip(CF-Connecting-IP)"
+assert "http-reuse never" in backend
+assert "send-proxy-v2" in backend
+assert "X-Forwarded-For" not in content
+assert 'public_peer=%[var(sess.peer)]' in content
+assert 'client=%[req.hdr_ip(CF-Connecting-IP)]' in content
+print("public HAProxy pins its socket peer, validates one Cloudflare address, and disables backend reuse")
+PY
+compose_public run --rm --no-deps public-haproxy haproxy -c -f /usr/local/etc/haproxy/haproxy.cfg
 
 bootstrap_output=$(compose_base run --rm --no-deps -T teagramd bootstrap-identity)
 fingerprint=$(printf '%s\n' "$bootstrap_output" | sed -n 's/^RSA identity bootstrapped: fingerprint=\(-\?[0-9][0-9]*\) path=.*/\1/p')
@@ -504,4 +607,160 @@ for pid in "$legacy_tcp_pid" "$legacy_ws_pid" "$proxy_tcp_pid" "$proxy_ws_pid"; 
 	fi
 done
 
-printf '%s\n' "legacy and proxy TCP/WebSocket streams completed post-start application RPC heartbeats; forged PROXY-v2 and unapproved Origin were refused"
+compose_public up -d teagramd-public-1 teagramd-public-2 public-haproxy
+for service in teagramd-public-1 teagramd-public-2; do
+	for _ in $(seq 60); do
+		if compose_public logs "$service" 2>&1 | grep -F 'Public WebSocket MTProto listening' >/dev/null; then
+			break
+		fi
+		sleep 1
+	done
+	if ! compose_public logs "$service" 2>&1 | grep -F 'Public WebSocket MTProto listening' >/dev/null; then
+		compose_public ps -a
+		compose_public logs "$service"
+		echo "$service did not start the dedicated public WebSocket listener" >&2
+		exit 1
+	fi
+done
+
+public_haproxy=$(compose_public ps -q public-haproxy)
+for _ in $(seq 45); do
+	public_haproxy_health=$(docker inspect "$public_haproxy" --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}missing{{end}}')
+	if [ "$public_haproxy_health" = healthy ]; then
+		break
+	fi
+	sleep 1
+done
+if [ "$public_haproxy_health" != healthy ]; then
+	compose_public ps -a
+	compose_public logs public-haproxy teagramd-public-1 teagramd-public-2
+	echo "public HAProxy did not become healthy" >&2
+	exit 1
+fi
+
+public_config="$work_dir/public-client-config.json"
+compose_public run --rm --no-deps -T teagramd-public-1 client-config > "$public_config"
+start_hold websocket "127.0.0.1:${mixed_ports[4]}" "$work_dir/public-ws-a.log" \
+	--config "$public_config" --origin https://web.example.test --cf-connecting-ip 203.0.113.10
+public_ws_pid_a=$started_hold_pid
+wait_hold "$public_ws_pid_a" "$work_dir/public-ws-a.log"
+start_hold websocket "127.0.0.1:${mixed_ports[4]}" "$work_dir/public-ws-b.log" \
+	--config "$public_config" --origin https://web.example.test --cf-connecting-ip 203.0.114.10
+public_ws_pid_b=$started_hold_pid
+wait_hold "$public_ws_pid_b" "$work_dir/public-ws-b.log"
+public_ws_heartbeats_a=$(heartbeat_count "$work_dir/public-ws-a.log")
+public_ws_heartbeats_b=$(heartbeat_count "$work_dir/public-ws-b.log")
+wait_for_heartbeat_after "$public_ws_pid_a" "$work_dir/public-ws-a.log" "$public_ws_heartbeats_a" "public WebSocket client A"
+wait_for_heartbeat_after "$public_ws_pid_b" "$work_dir/public-ws-b.log" "$public_ws_heartbeats_b" "public WebSocket client B"
+stop_probe "$public_ws_pid_a"
+public_ws_pid_a=
+stop_probe "$public_ws_pid_b"
+public_ws_pid_b=
+
+ingress_network=$(jq -er '.networks["public-ingress"].name' "$work_dir/public-compose.json")
+backend_network=$(jq -er '.networks["public-backend"].name' "$work_dir/public-compose.json")
+default_network=$(jq -er '.networks.default.name' "$work_dir/public-compose.json")
+ingress_gateway=$(docker network inspect "$ingress_network" | jq -er '.[0].IPAM.Config[] | select(.Subnet == "198.18.131.0/24") | .Gateway')
+if [ "$ingress_gateway" != 198.18.131.1 ]; then
+	echo "public ingress gateway is $ingress_gateway, expected the pinned HAProxy peer gateway" >&2
+	exit 1
+fi
+if default_network_output=$(docker run --rm --network "$default_network" --read-only --cap-drop ALL \
+		busybox:1.37 sh -ec 'nc -z -w 2 198.18.131.10 2446' 2>&1); then
+	echo "a container on the Compose default network reached the public HAProxy frontend" >&2
+	exit 1
+else
+	if ! printf '%s\n' "$default_network_output" | grep -Fiq 'connection refused'; then
+		printf '%s\n' "$default_network_output" >&2
+		echo "default-network connection did not receive a TCP refusal from the public frontend" >&2
+		exit 1
+	fi
+fi
+
+public_replica_id=$(compose_public ps -q teagramd-public-1)
+public_replica_ip=$(docker inspect "$public_replica_id" | jq -er --arg network "$default_network" '.[0].NetworkSettings.Networks[$network].IPAddress')
+docker run --rm --network "$default_network" --read-only --cap-drop ALL \
+	--security-opt no-new-privileges --user 65532:65532 \
+	-v "$probe_binary:/mixed-trust-probe:ro" --entrypoint /mixed-trust-probe teagramd:local \
+	forged --address "$public_replica_ip:2446"
+
+"$probe_binary" origin --address "127.0.0.1:${mixed_ports[4]}" --origin https://web.example.test --status 400
+"$probe_binary" origin --address "127.0.0.1:${mixed_ports[4]}" --origin https://web.example.test \
+	--cf-connecting-ip '198.51.100.10, 198.51.100.11' --status 400
+"$probe_binary" origin --address "127.0.0.1:${mixed_ports[4]}" --origin https://web.example.test \
+	--cf-connecting-ip invalid-address --status 400
+"$probe_binary" origin --address "127.0.0.1:${mixed_ports[4]}" --origin https://evil.example \
+	--cf-connecting-ip 203.0.115.10 --status 403
+"$probe_binary" public-signup --address "127.0.0.1:${mixed_ports[4]}" --config "$public_config" \
+	--cf-connecting-ip 203.0.116.10
+
+public_haproxy_logs=$(compose_public logs --no-color public-haproxy)
+observed_ingress_peer=$(printf '%s\n' "$public_haproxy_logs" | sed -n \
+	's/.*public_peer=\([^ ]*\) client=203\.0\.113\.10 .*/\1/p' | head -1)
+if [ -z "$observed_ingress_peer" ]; then
+	printf '%s\n' "$public_haproxy_logs" >&2
+	echo "HAProxy did not log the observed socket peer for the first public request" >&2
+	exit 1
+fi
+if [ "$observed_ingress_peer" != "$ingress_gateway" ]; then
+	echo "HAProxy observed peer $observed_ingress_peer, expected inspected gateway $ingress_gateway" >&2
+	exit 1
+fi
+for client_ip in 203.0.113.10 203.0.114.10; do
+	if ! printf '%s\n' "$public_haproxy_logs" | grep -F "public_peer=$observed_ingress_peer client=$client_ip" >/dev/null; then
+		printf '%s\n' "$public_haproxy_logs" >&2
+		echo "HAProxy did not report the inspected gateway peer and client address $client_ip" >&2
+		exit 1
+	fi
+done
+
+haproxy_image=$(jq -er '.services["public-haproxy"].image' "$work_dir/public-compose.json")
+python3 - deploy/teagramd/haproxy-public-websocket.cfg "$work_dir/haproxy-attribution.cfg" <<'PY'
+import sys
+
+source, target = sys.argv[1:]
+content = open(source, encoding="utf-8").read()
+if content.count("bind 198.18.131.10:2446") != 1:
+    raise SystemExit("public HAProxy config must bind the production frontend once")
+content = content.replace("bind 198.18.131.10:2446", "bind 198.18.131.11:2446")
+lines = content.splitlines()
+servers = [index for index, line in enumerate(lines) if line.strip().startswith("server-template public 2 ")]
+if len(servers) != 1:
+    raise SystemExit("public HAProxy config must declare one public backend template")
+lines[servers[0]] = "  server attribution 198.18.132.23:2446 send-proxy-v2"
+open(target, "w", encoding="utf-8").write("\n".join(lines) + "\n")
+PY
+docker run --rm --network none --read-only --cap-drop ALL \
+	-v "$work_dir/haproxy-attribution.cfg:/usr/local/etc/haproxy/haproxy.cfg:ro" \
+	"$haproxy_image" haproxy -c -f /usr/local/etc/haproxy/haproxy.cfg
+docker run --detach --name "$test_echo_name" --network "$backend_network" --ip 198.18.132.23 \
+	--read-only --cap-drop ALL --security-opt no-new-privileges --user 65532:65532 \
+	-v "$probe_binary:/mixed-trust-probe:ro" --entrypoint /mixed-trust-probe teagramd:local \
+	proxy-v2-echo --listen :2446 --requests 2 >/dev/null
+for _ in $(seq 30); do
+	if docker logs "$test_echo_name" 2>&1 | grep -F 'proxy-v2-echo-ready' >/dev/null; then
+		break
+	fi
+	sleep 1
+done
+if ! docker logs "$test_echo_name" 2>&1 | grep -F 'proxy-v2-echo-ready' >/dev/null; then
+	docker logs "$test_echo_name" >&2
+	echo "PROXY-v2 attribution backend did not start" >&2
+	exit 1
+fi
+docker run --detach --name "$test_haproxy_name" --network "$ingress_network" --ip 198.18.131.11 \
+	--publish "127.0.0.1:${mixed_ports[5]}:2446" --read-only --cap-drop ALL \
+	--security-opt no-new-privileges --memory 96m --cpus 0.25 --pids-limit 64 \
+	-v "$work_dir/haproxy-attribution.cfg:/usr/local/etc/haproxy/haproxy.cfg:ro" \
+	"$haproxy_image" -f /usr/local/etc/haproxy/haproxy.cfg >/dev/null
+docker network connect --ip 198.18.132.11 "$backend_network" "$test_haproxy_name"
+"$probe_binary" keepalive-attribution --address "127.0.0.1:${mixed_ports[5]}" \
+	--first-ip 203.0.113.101 --second-ip 203.0.114.102
+docker wait "$test_echo_name" >/dev/null
+echo_attribution=$(docker logs "$test_echo_name" 2>&1 | sed -n 's/^proxy-v2-attribution=//p')
+if [ "$echo_attribution" != "203.0.113.101,203.0.114.102" ]; then
+	docker logs "$test_echo_name" >&2
+	echo "keepalive requests reached backend with PROXY-v2 addresses $echo_attribution" >&2
+	exit 1
+fi
+echo "legacy and proxy listeners passed; public header validation, invite policy over open ordinary registration, observed peer, separate buckets, and keepalive attribution passed"

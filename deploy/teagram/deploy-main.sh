@@ -302,7 +302,7 @@ unset COMPOSE_ENV_FILES
 # origin/main, and the same files are used by the rollout after the backup.
 # shellcheck disable=SC2174 # only the runner directory is new
 mkdir -m 700 -p "$R/teagramd-rollout-runner"
-for f in rollout-runner.sh rollout-verifier.sh schema-result-gate.sh schema-result-gate.py blob-mode-state.py blob-transition-runner.py qualify-rustfs-transition.py stack-move-runner.py; do
+for f in rollout-runner.sh rollout-verifier.sh schema-result-gate.sh schema-result-gate.py blob-mode-state.py blob-transition-runner.py qualify-rustfs-transition.py stack-move-runner.py public-websocket-check.py; do
   git show "$SHA:deploy/teagramd/rollout-runner/$f" > "$R/teagramd-rollout-runner/$f"; chmod 600 "$R/teagramd-rollout-runner/$f"
 done
 LIVE_CF=$(docker inspect --format '{{index .Config.Labels "com.docker.compose.project.config_files"}}' $C | tr , :)
@@ -341,12 +341,88 @@ case "$LIVE_CF" in
   *) echo "live teagramd not on an approved local compose ($LIVE_CF); refusing"; exit 1 ;;
 esac
 export COMPOSE_FILE="$LIVE_CF"   # carry forward the pinned local-blob files live runs from
+export COMPOSE_PROFILES=public
+export ROLLOUT_RUNNER_PUBLIC_WEBSOCKET=1
+unset ROLLOUT_RUNNER_CHANGED_ENV ROLLOUT_RUNNER_PREVIOUS_ENV_FILE
 docker_compose() {
   if [[ "${#S3_ENV_FILES[@]}" == 2 ]]; then
     docker compose --env-file "${S3_ENV_FILES[0]}" --env-file "${S3_ENV_FILES[1]}" "$@"
   else
     docker compose "$@"
   fi
+}
+public_replica_count() {
+  awk -F= '
+    $1 == "TG_REPLICA_COUNT" { count++; value=$2 }
+    END {
+      if (count == 0) print "unset"
+      else if (count > 1) print "duplicate"
+      else print value
+    }
+  ' "$LIVE_CHECKOUT/.env"
+}
+public_route_services_running() {
+  local service id state health
+  for service in public-haproxy teagramd-public-1 teagramd-public-2; do
+    id=$(docker_compose ps -q "$service" </dev/null 2>/dev/null) || return 1
+    [[ "$id" =~ ^[0-9a-f]{12,64}$ ]] || return 1
+    state=$(docker inspect --format '{{.State.Status}}' "$id" 2>/dev/null) || return 1
+    [ "$state" = running ] || return 1
+    if [[ "$service" == public-haproxy ]]; then
+      health=$(docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}missing{{end}}' "$id" 2>/dev/null) || return 1
+      [ "$health" = healthy ] || return 1
+    fi
+  done
+}
+stage_public_replica_count() {
+  local env_file="$LIVE_CHECKOUT/.env" previous_env temp count
+  [[ ! -L "$env_file" && -f "$env_file" ]] || { echo 'public WebSocket rollout requires a regular .env file' >&2; return 1; }
+  if [[ -z ${DEPLOY_DIR:-} ]]; then
+    [[ "$(stat -c '%u:%a' -- "$env_file")" == 0:600 ]] || {
+      echo 'public WebSocket rollout requires a root-owned mode-0600 .env file' >&2
+      return 1
+    }
+  fi
+  [ -z "$(tail -c 1 -- "$env_file")" ] || { echo '.env must end with a newline before changing replica count' >&2; return 1; }
+  count=$(public_replica_count) || return 1
+  case "$count" in
+    3) return 0 ;;
+    1) ;;
+    *)
+      echo "public WebSocket rollout requires one explicit TG_REPLICA_COUNT=1 or TG_REPLICA_COUNT=3 assignment (found $count)" >&2
+      return 1
+      ;;
+  esac
+  previous_env="$R/teagramd-env-before-${S}-${TS}"
+  [[ ! -e "$previous_env" && ! -L "$previous_env" ]] || { echo 'replica-count backup path already exists' >&2; return 1; }
+  cp -p -- "$env_file" "$previous_env" && chmod 600 -- "$previous_env" || {
+    echo 'cannot protect the pre-change .env for replica-count rollback' >&2
+    return 1
+  }
+  temp=$(mktemp "$LIVE_CHECKOUT/.env.public-count.XXXXXXXX") || return 1
+  if ! awk '
+      BEGIN { count=0; invalid=0 }
+      /^TG_REPLICA_COUNT=/ {
+        count++
+        if ($0 != "TG_REPLICA_COUNT=1") invalid=1
+        print "TG_REPLICA_COUNT=3"
+        next
+      }
+      { print }
+      END { if (count != 1 || invalid) exit 1 }
+    ' "$env_file" > "$temp"; then
+    rm -f -- "$temp"
+    echo 'only a literal TG_REPLICA_COUNT=1 value may be raised for the public replicas' >&2
+    return 1
+  fi
+  if ! chmod 600 -- "$temp" || ! sync || ! mv -f -- "$temp" "$env_file" || ! sync; then
+    rm -f -- "$temp"
+    echo 'cannot atomically stage TG_REPLICA_COUNT=3' >&2
+    return 1
+  fi
+  export ROLLOUT_RUNNER_CHANGED_ENV=TG_REPLICA_COUNT
+  export ROLLOUT_RUNNER_PREVIOUS_ENV_FILE="$previous_env"
+  printf 'staged TG_REPLICA_COUNT=3 through the rollout runner approved environment path\n'
 }
 install_teagram_syslog_config "$SHA"
 run_mtproto_smoke() {
@@ -361,7 +437,8 @@ run_mtproto_smoke() {
     "$image_id"
 }
 IMG=$(docker inspect --format '{{.Image}}' $C)
-if [ "$PREV" = "$SHA" ] && grep -qs "source_sha=$SHA image_id=$IMG " "$R"/main1238-*.build/built-image.identity; then
+if [ "$PREV" = "$SHA" ] && [ "$(public_replica_count)" = 3 ] && \
+   public_route_services_running && grep -qs "source_sha=$SHA image_id=$IMG " "$R"/main1238-*.build/built-image.identity; then
   umask 077
   install_teagram_logs_command "$SHA"
   bash "$LIVE_CHECKOUT/deploy/link-edge/deploy-main.sh" "$SHA"
@@ -375,6 +452,7 @@ umask 077
 docker_compose exec -T postgres pg_dump -U postgres teagram > "$R/pgdump-pre-$S-$TS.sql" </dev/null
 tail -c 200 "$R/pgdump-pre-$S-$TS.sql" | grep -q "dump complete"
 echo "dump $R/pgdump-pre-$S-$TS.sql"
+stage_public_replica_count
 flock -u 9; exec 9>&-
 rc=0
 ROLLOUT_RUNNER_SOURCE_SHA=$SHA bash "$R/teagramd-rollout-runner/rollout-runner.sh" apply "$SHA" "$PREV" \

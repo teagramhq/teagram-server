@@ -127,6 +127,18 @@ verify_changed_container_environment() {
                 (if $snapshot_name == "baseline" or $snapshot_name == "preflight"
                  then $actual[0] == $previous_override_value
                  else $actual[0] == $compose_env[$name] end)
+              elif $name == "TG_REPLICA_COUNT" then
+                ($assignments | length) == 1 and
+                ($compose_env | has($name)) and
+                ($compose_env[$name] == dotenv_value($assignments[0])) and
+                ($actual | length) == 1 and
+                (if ($snapshot_name | IN("baseline", "preflight")) then
+                   dotenv_value($assignments[0]) == "3" and $actual[0] == "1"
+                 elif $snapshot_name == "target" then
+                   dotenv_value($assignments[0]) == "3" and $actual[0] == "3"
+                 elif $snapshot_name == "rollback" then
+                   dotenv_value($assignments[0]) == "1" and $actual[0] == "1"
+                 else false end)
               else
                 (($name == "TG_REGISTRATION" and (dotenv_value($assignments[0]) | IN("open","closed"))) or
                  ($name == "TG_TURNSTILE_SIGNIN_ENABLED" and ($assignments[0] | IN("true","false"))) or
@@ -179,6 +191,7 @@ verify_safe_public_environment() {
     | .[1] as $compose
     | ($inspect | item | .Config.Env // null) as $container_env
     | ($compose.services[env.ROLLOUT_COMPOSE_SERVICE // "teagramd"].environment // null) as $compose_env
+    | ($compose.services["teagramd-public-1"].environment // null) as $public_env
     | ($env_content | split("\n")) as $env_lines
     | if ($container_env | type) != "array" then false
       elif $compose_source == "selected-compose-render" and ($compose_env | type) != "object" then false
@@ -195,12 +208,24 @@ verify_safe_public_environment() {
           | values($container_env; $name) as $container_values
           | (($compose_source == "selected-compose-render") and ($compose_env | has($name))) as $compose_has
           | (if $compose_has then $compose_env[$name] else $default end) as $compose_value
+          | (($public_env | type) == "object" and
+             ($name | IN("TG_PUBLIC_WEBSOCKET_LISTEN_ADDR", "TG_PUBLIC_WEBSOCKET_ADVERTISE_ADDR")) and
+             ($public_env | has($name))) as $route_moved
+          | (if $route_moved then $public_env[$name] else $compose_value end) as $active_value
           | (if ($container_values | length) == 0 then $default else $container_values[0] end) as $container_value
           | assignments($env_lines; $name) as $env_assignments
           | if ($container_values | length) > 1 or
                ($compose_has and ($compose_value | type) != "string") then false
             elif $compose_source == "live-container-inspection" then
               is_default($name; $container_value)
+            elif $route_moved then
+              ($compose_value == $default) and
+              ($active_value | type) == "string" and
+              (valid_value($name; $active_value)) and
+              ($env_assignments | length) == 1 and
+              (dotenv_value($env_assignments[0]) == $active_value) and
+              (if $snapshot_name == "target" then $container_value == $compose_value
+               else $container_value == $active_value end)
             elif is_default($name; $compose_value) and is_default($name; $container_value) then true
             elif $name == "TG_WELCOME_CHANNEL" or
                  (valid_value($name; $compose_value) | not) or
@@ -815,7 +840,8 @@ snapshot_from_json() {
     *) printf '%s\n' 'container login-code logging configuration is invalid' >&2; return 1 ;;
   esac
   if [ "$compose_source" = selected-compose-render ] && \
-     { [ "$snapshot_name" = baseline ] || [ "$snapshot_name" = target ] || [ "$snapshot_name" = rollback ]; } && \
+     { [ "$snapshot_name" = baseline ] || [ "$snapshot_name" = preflight ] || \
+       [ "$snapshot_name" = target ] || [ "$snapshot_name" = rollback ]; } && \
      [ "$compose_log_login_codes" != "$container_log_login_codes" ]; then
     printf '%s\n' 'resolved Compose login-code logging setting does not match the inspected container' >&2
     return 1
@@ -888,8 +914,11 @@ snapshot_from_json() {
   if [ "$compose_source" = selected-compose-render ] && \
      { [ "$snapshot_name" = baseline ] || [ "$snapshot_name" = target ] || [ "$snapshot_name" = rollback ]; } && \
      [ "$compose_public_ws_2446" != "$exposure_public_ws_2446" ]; then
-    printf '%s\n' 'resolved Compose public WebSocket port does not match the inspected container' >&2
-    return 1
+    if ! { [ "${ROLLOUT_PUBLIC_WEBSOCKET:-0}" = 1 ] && [ "$snapshot_name" = preflight ] && \
+           [ "$compose_public_ws_2446" = false ] && [ "$exposure_public_ws_2446" = true ]; }; then
+      printf '%s\n' 'resolved Compose public WebSocket port does not match the inspected container' >&2
+      return 1
+    fi
   fi
   exposure_for_hash=$(printf '%s' "$exposure" | jq -ce '
     map(
@@ -923,6 +952,10 @@ snapshot_from_json() {
   ')
   if [ "$compose_source" = selected-compose-render ] && [ "$snapshot_name" = target ]; then
     verify_added_container_environment "$inspect_json" "$compose_json" "$env_file" "$added_env_names" || return 1
+    verify_changed_container_environment "$inspect_json" "$compose_json" "$env_file" "$changed_env_names" "$snapshot_name" || return 1
+  elif [ "$compose_source" = selected-compose-render ] && \
+       { [ "$snapshot_name" = baseline ] || [ "$snapshot_name" = preflight ]; } && \
+       [ "$changed_env_names" = '["TG_REPLICA_COUNT"]' ]; then
     verify_changed_container_environment "$inspect_json" "$compose_json" "$env_file" "$changed_env_names" "$snapshot_name" || return 1
   elif [ "$compose_source" = selected-compose-render ] && [ "$snapshot_name" = rollback ]; then
     retained_added_env_names=$(printf '%s' "$inspect_json" | jq -c --argjson added "$added_env_names" '
@@ -1142,6 +1175,10 @@ snapshot_from_json() {
             .value.volumes |= map(select((.type == "bind" and .source == $mode_source and
                                           .target == $mode_target and .read_only == true) | not))
           else . end)
+      | .services |= with_entries(select(.key | IN("public-haproxy", "teagramd-public-1", "teagramd-public-2") | not))
+      | if (.networks | type) == "object" then
+          .networks |= with_entries(select(.key | IN("public-ingress", "public-backend") | not))
+        else . end
     ')
     compose_replica_count=$(printf '%s' "$compose_json" | jq -er '
       .services[env.ROLLOUT_COMPOSE_SERVICE // "teagramd"].environment as $env
@@ -1342,6 +1379,9 @@ record_ordinary_setting() {
   local output=$1 field=$2 before=$3 after=$4 expected=$5 result
   if { [ "$before" = unset ] || [ "$before" = "$expected" ]; } && [ "$after" = "$expected" ]; then
     result=pass
+  elif [[ "$field" == *TG_REPLICA_COUNT ]] && [ "${ROLLOUT_CHANGED_ENV:-}" = TG_REPLICA_COUNT ] && \
+      [ "$after" = 3 ] && { [ "$before" = 1 ] || [ "$before" = 3 ]; }; then
+    result=pass
   else
     result=fail
   fi
@@ -1455,7 +1495,9 @@ compare_snapshots() {
   for field in compose_public_ws_2446 exposure_public_ws_2446; do
     if ! before_value=$(jq -er --arg field "$field" '.[$field]' "$before_file"); then return 1; fi
     if ! after_value=$(jq -er --arg field "$field" '.[$field]' "$after_file"); then return 1; fi
-    if [ "$before_value" = "$after_value" ] || { [ "$before_value" = false ] && [ "$after_value" = true ]; }; then
+    if [ "$before_value" = "$after_value" ] || \
+       { [ "$before_value" = false ] && [ "$after_value" = true ]; } || \
+       { [ "${ROLLOUT_PUBLIC_WEBSOCKET:-0}" = 1 ] && [ "$before_value" = true ] && [ "$after_value" = false ]; }; then
       result=pass
     else
       result=fail
