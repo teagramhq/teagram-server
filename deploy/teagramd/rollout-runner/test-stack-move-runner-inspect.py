@@ -67,6 +67,11 @@ class InspectComposeSelectionTest(unittest.TestCase):
 
         self.assertFalse(runner.layout_changed(source, target))
 
+        normalized_bind = copy.deepcopy(target)
+        normalized_bind["server_mounts"][-1]["bind"] = {}
+        normalized_bind["persistent_service_mounts"]["teagramd"][-1]["bind"] = {}
+        self.assertFalse(runner.layout_changed(source, normalized_bind))
+
         writable_key_mount = copy.deepcopy(target)
         writable_key_mount["server_mounts"][-1]["read_only"] = False
         writable_key_mount["persistent_service_mounts"]["teagramd"][-1]["read_only"] = False
@@ -360,7 +365,7 @@ class InspectComposeSelectionTest(unittest.TestCase):
                         "source": "/etc/teagramd/media-keys",
                         "target": "/run/teagramd/media-keys",
                         "read_only": True,
-                        "bind": {"create_host_path": False},
+                        "bind": {},
                     })
                     return target_config
                 return current_config
@@ -389,7 +394,9 @@ class InspectComposeSelectionTest(unittest.TestCase):
             self.assertNotEqual(result["source"], result["target"])
             self.assertEqual(result["source"]["project"], "teagram")
             self.assertEqual(result["source"]["server"], "teagramd")
-            self.assertIn(runner.MEDIA_KEY_MOUNT, result["target"]["server_mounts"])
+            rendered_key_mount = copy.deepcopy(runner.MEDIA_KEY_MOUNT)
+            rendered_key_mount["bind"] = {}
+            self.assertIn(rendered_key_mount, result["target"]["server_mounts"])
             print("PASS apply layout preflight accepts the media-key addition on teagram")
 
 

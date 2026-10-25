@@ -436,7 +436,21 @@ def _has_only_one_addition(source: object, target: object, addition: dict[str, o
             remaining.remove(item)
         except ValueError:
             return False
-    return remaining == [addition]
+    if remaining == [addition]:
+        return True
+    if (
+        addition != MEDIA_KEY_MOUNT
+        or len(remaining) != 1
+        or not isinstance(remaining[0], dict)
+    ):
+        return False
+
+    # Compose versions serialize the explicit false as either false or {}.
+    normalized = dict(remaining[0])
+    if normalized.get("bind") != {}:
+        return False
+    normalized["bind"] = {"create_host_path": False}
+    return normalized == addition
 
 
 def _is_approved_media_key_mount_addition(
