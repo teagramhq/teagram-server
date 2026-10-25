@@ -190,7 +190,7 @@ func (s *rotationCaptureStore) Put(ctx context.Context, key string, r io.Reader)
 	return s.memStore.Put(ctx, key, r)
 }
 
-func TestRewrapOverS3RetriesWithKnownLengthAndKeepsChunks(t *testing.T) {
+func TestRewrapOverS3StreamsKnownLengthAndKeepsChunks(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
 	key := "dd/4"
@@ -245,6 +245,9 @@ func TestRewrapOverS3RetriesWithKnownLengthAndKeepsChunks(t *testing.T) {
 				t.Errorf("write range response: %v", err)
 			}
 		case http.MethodPut:
+			mu.Lock()
+			attempts++
+			mu.Unlock()
 			if r.ContentLength != int64(len(oldObject)) {
 				t.Errorf("PUT Content-Length = %d, want %d", r.ContentLength, len(oldObject))
 			}
@@ -255,16 +258,8 @@ func TestRewrapOverS3RetriesWithKnownLengthAndKeepsChunks(t *testing.T) {
 				return
 			}
 			mu.Lock()
-			attempts++
-			attempt := attempts
-			if attempt > 1 {
-				stored = bytes.Clone(body)
-			}
+			stored = bytes.Clone(body)
 			mu.Unlock()
-			if attempt == 1 {
-				writeS3Error(w, http.StatusServiceUnavailable, "SlowDown")
-				return
-			}
 			w.WriteHeader(http.StatusOK)
 		default:
 			t.Errorf("unexpected S3 method %s", r.Method)
@@ -292,8 +287,8 @@ func TestRewrapOverS3RetriesWithKnownLengthAndKeepsChunks(t *testing.T) {
 	finalObject := bytes.Clone(stored)
 	finalAttempts, finalRequests := attempts, requests
 	mu.Unlock()
-	if finalAttempts != 2 {
-		t.Fatalf("S3 PUT attempts = %d, want retry after transient failure", finalAttempts)
+	if finalAttempts != 1 {
+		t.Fatalf("S3 PUT attempts = %d, want one successful request", finalAttempts)
 	}
 	if finalRequests == 0 || len(finalObject) != len(oldObject) || !bytes.Equal(finalObject[102:], oldObject[102:]) {
 		t.Fatal("S3 rewrap did not preserve the chunk bytes")

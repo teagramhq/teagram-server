@@ -198,6 +198,9 @@ type rotationBody struct {
 	atEnd      bool
 }
 
+// Size gives S3 a known Content-Length. The stateful stream deliberately does
+// not implement io.Seeker, because a retry could rewind while an earlier HTTP
+// attempt is still reading it.
 func (r *rotationBody) Size() int64 { return r.target.objectLen() }
 
 func (r *rotationBody) Read(p []byte) (int, error) {
@@ -255,23 +258,4 @@ func (r *rotationBody) readChunk() error {
 	return nil
 }
 
-func (r *rotationBody) Seek(offset int64, whence int) (int64, error) {
-	switch {
-	case offset == 0 && whence == io.SeekCurrent:
-		if r.atEnd {
-			return r.Size(), nil
-		}
-		return r.position, nil
-	case offset == 0 && whence == io.SeekEnd:
-		r.atEnd = true
-		return r.Size(), nil
-	case offset == 0 && whence == io.SeekStart:
-		r.position, r.nextChunk, r.pending, r.atEnd = 0, 0, nil, false
-		return 0, nil
-	default:
-		return 0, errors.New("envelope rotation: unsupported seek")
-	}
-}
-
-var _ io.ReadSeeker = (*rotationBody)(nil)
 var _ interface{ Size() int64 } = (*rotationBody)(nil)
