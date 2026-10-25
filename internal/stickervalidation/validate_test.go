@@ -159,6 +159,7 @@ func TestValidateEnforcesTargetDimensions(t *testing.T) {
 
 func TestValidateEnforcesDurationAndFrameRate(t *testing.T) {
 	tooLongWEBM := testWEBM(512, 512, 3.01, false)
+	framePastDurationWEBM := testWEBMWithFrameTimestamp(512, 512, 2, false, 3000, 1000)
 	tooLongTGS := testTGSWithTiming(512, 512, 30, 0, 91, "")
 	tooFastTGS := testTGSWithTiming(512, 512, 61, 0, 60, "")
 
@@ -168,6 +169,7 @@ func TestValidateEnforcesDurationAndFrameRate(t *testing.T) {
 		want string
 	}{
 		{name: "WEBM duration", body: tooLongWEBM, want: "STICKER_VIDEO_DURATION"},
+		{name: "WEBM frame exceeds declared duration", body: framePastDurationWEBM, want: "STICKER_VIDEO_DURATION"},
 		{name: "TGS duration", body: tooLongTGS, want: "STICKER_TGS_NOTGS"},
 		{name: "TGS frame rate", body: tooFastTGS, want: "STICKER_TGS_NOTGS"},
 	} {
@@ -398,6 +400,10 @@ func writeUint24(dst []byte, value uint32) {
 }
 
 func testWEBM(width, height int, duration float64, withAudio bool) []byte {
+	return testWEBMWithFrameTimestamp(width, height, duration, withAudio, 0, 0)
+}
+
+func testWEBMWithFrameTimestamp(width, height int, duration float64, withAudio bool, clusterTimecode uint64, relativeTimecode uint16) []byte {
 	if width < 1 || height < 1 {
 		panic("invalid test WEBM dimensions")
 	}
@@ -420,9 +426,37 @@ func testWEBM(width, height int, duration float64, withAudio bool) []byte {
 		tracks = append(tracks, audio...)
 	}
 	segment := append(testEBMLElement(0x1549a966, info), testEBMLElement(0x1654ae6b, tracks)...)
-	cluster := append(testEBMLElement(0xe7, []byte{0}), testEBMLElement(0xa3, []byte{0x81, 0, 0, 0x80, 0x80})...)
+	frame := testVP9Frame(width, height)
+	block := make([]byte, 4+len(frame))
+	block[0] = 0x81
+	binary.BigEndian.PutUint16(block[1:3], relativeTimecode)
+	block[3] = 0x80
+	copy(block[4:], frame)
+	cluster := append(testEBMLElement(0xe7, testEBMLUint(clusterTimecode)), testEBMLElement(0xa3, block)...)
 	segment = append(segment, testEBMLElement(0x1f43b675, cluster)...)
 	return append(header, testEBMLElement(0x18538067, segment)...)
+}
+
+// These self-made solid-color VP9 keyframes were encoded and decoded with libvpx.
+func testVP9Frame(width, height int) []byte {
+	if width == 100 && height == 100 {
+		return []byte{
+			0x82, 0x49, 0x83, 0x42, 0x00, 0x06, 0x30, 0x06,
+			0x36, 0x00, 0x38, 0x24, 0x1c, 0x18, 0x42, 0x00,
+			0x00, 0x30, 0x60, 0x00, 0x00, 0x67, 0x3f, 0xff,
+			0xfd, 0x8d, 0x10, 0x9d, 0xdc, 0x2b, 0xd8, 0x00,
+		}
+	}
+	return []byte{
+		0x82, 0x49, 0x83, 0x42, 0x00, 0x1f, 0xf0, 0x1f,
+		0xf6, 0x00, 0x38, 0x24, 0x1c, 0x18, 0xda, 0x10,
+		0x00, 0x50, 0x61, 0xf6, 0x3a, 0xf6, 0x80, 0x5c,
+		0xd1, 0xee, 0x00, 0x00, 0x00, 0x00, 0x00, 0x0e,
+		0x65, 0x56, 0xa3, 0x16, 0x63, 0x51, 0xbf, 0x85,
+		0x0c, 0x91, 0xe4, 0x48, 0x89, 0x00, 0x65, 0x56,
+		0xa3, 0x16, 0x63, 0x51, 0xbf, 0x85, 0x0c, 0x91,
+		0xe4, 0x48, 0x89, 0x00,
+	}
 }
 
 func testEBMLUint(value uint64) []byte {
