@@ -15,7 +15,7 @@ func testSmokeUploadMedia(t *testing.T) {
 	const phoneA, phoneB = "+15551048401", "+15551048402"
 	seedSmokeUsers(t, f, phoneA, phoneB)
 	uploader, peer := newSmokeClient(t, f, "upload-media sender", phoneA), newSmokeClient(t, f, "upload-media peer", phoneB)
-	assertSmokeUploadPartLimits(t, f.ctx, uploader, 200)
+	assertSmokeUploadPartLimits(t, f.ctx, uploader, 3200)
 
 	documentBody := []byte("uploadMedia smoke document")
 	const documentFileID = int64(1048401)
