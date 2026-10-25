@@ -637,7 +637,7 @@ assert_order(Path(sys.argv[2]), [
     'demo_compose stop edge haproxy turnstile-egress',
     'python3 "$MODE_HELPER" validate',
     'IMAGE_REF=$(demo_pull_image_by_sha "$SHA" "$IMAGE_DIGEST")',
-    'demo_compose stop "$ACTIVE_SERVER"',
+    'demo_compose down --remove-orphans',
     'demo_bootstrap_compose up -d migrate',
     "demo_wait_migration demo_bootstrap_compose 'resume migrations'",
     'demo_write_active_release "$ACTIVE_SERVER" "$IMAGE_REF"',
@@ -649,6 +649,11 @@ assert_order(Path(sys.argv[2]), [
     '"$SEED_SCRIPT" --verify-turnstile --endpoint haproxy:2443',
     "demo_compose up -d edge",
 ])
+resume_path = init.split('if [[ -e "$MODE_FILE" || -L "$MODE_FILE" ]]; then\n', 1)[1].split(
+    '\nfi\n[[ "$ACTIVE_SERVER"', 1
+)[0]
+if 'demo_compose down --volumes' in resume_path or 'demo_compose down -v' in resume_path:
+    raise SystemExit("init-demo.sh: resume network recreation must preserve named volumes")
 if "demo_wait_migration demo_bootstrap_compose 'bootstrap migrations'" not in init:
     raise SystemExit("init-demo.sh: bootstrap must wait for migration completion")
 if "MIGRATE_STATUS=$(docker inspect" in init:
