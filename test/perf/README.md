@@ -7,6 +7,10 @@ and a 200,000-message group with photos) and the same account at one hundredth
 of the data. Both are seeded through the store's write methods and the RPC
 upload path.
 
+The fixture owner can sign in with username `perftestowner` and password
+`perf-fixture-password-2026`. These fixed credentials exist only in this test
+fixture.
+
 Per scenario and fixture it records p50 and p95 latency, statements per call
 (including the delivery work the call triggers), rows read (from `EXPLAIN
 ANALYZE` of every statement), allocated bytes and every sequential scan over a
@@ -51,6 +55,7 @@ atlas migrate apply --url "$DSN_1X" --dir file://migrations
 atlas migrate apply --url "$DSN_100X" --dir file://migrations
 export TG_PERF_DIR=/tmp/perf TG_PERF_DSN_1X=$DSN_1X TG_PERF_DSN_100X=$DSN_100X
 TG_PERF_SHRINK=50 go test -tags performance -run '^TestSeedFixtures$' -timeout 2h ./test/perf
+go test -tags performance -run '^TestOwnerUsernamePasswordLogin$' -timeout 5m ./test/perf
 make perf
 ```
 

@@ -82,15 +82,19 @@ revision_ahead_of() {
 }
 
 # base_ready prepares the base branch's databases and test binary. It returns
-# 1 only for the documented skips: no base commit, a base without the harness,
-# and a cached fixture already past base's migrations. Anything else that goes
-# wrong, a broken migration included, fails the job, since skipping would
-# silently drop every base check.
+# 1 only for the documented skips: no base commit, a changed fixture seeder,
+# a base without the harness, and a cached fixture already past base's
+# migrations. Anything else that goes wrong, a broken migration included,
+# fails the job, since skipping would silently drop every base check.
 # Its databases are copies of the restored fixtures, migrated with the base
 # branch's own migrations before head's are applied.
 base_ready() {
   if [ -z "${PERF_BASE_SHA:-}" ]; then
     echo "no base commit" >"$PERF_WORK/base-skipped"
+    return 1
+  fi
+  if ! git diff --quiet "$PERF_BASE_SHA" HEAD -- test/perf/fixture_test.go; then
+    echo "the fixture seeder changed; the base harness cannot read its versioned snapshot" >"$PERF_WORK/base-skipped"
     return 1
   fi
   local tree="$PERF_WORK/base"
@@ -126,7 +130,7 @@ run_branch() {
   TG_PERF_DIR="$PERF_CACHE" \
     TG_PERF_DSN_1X="$(dsn 1x "$suffix")" TG_PERF_DSN_100X="$(dsn 100x "$suffix")" \
     TG_PERF_REPORT="$PERF_WORK/$branch-$round.json" \
-    "$PERF_WORK/$branch.test" -test.run '^TestRPCPerformance$' -test.count=1 -test.timeout 30m -test.v
+    "$PERF_WORK/$branch.test" -test.run '^Test(OwnerUsernamePasswordLogin|RPCPerformance)$' -test.count=1 -test.timeout 30m -test.v
   echo "::endgroup::"
 }
 
