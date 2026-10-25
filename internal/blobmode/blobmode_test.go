@@ -147,9 +147,8 @@ func TestPublishEncryptedAuthorityAfterVerifiedMigration(t *testing.T) {
 	if !requireRootFixture(t, "TestPublishEncryptedAuthorityAfterVerifiedMigration") {
 		return
 	}
-	state := testState(t, "initial-local", "s3-accepted")
+	state, reportRoot := testRolloutValidS3Authority(t)
 	config := blobmode.EffectiveConfig{BlobS3: testS3Config()}
-	reportRoot := filepath.Join(t.TempDir(), "reports")
 	inventoryReport := []byte(`{"schema":"teagram.blob-encryption-inventory/v1","encrypted":{"classes":{"valid_envelope":{"count":3,"logical_bytes":4096},"no_valid_envelope":{"count":0},"missing":{"count":0}}},"plaintext":{"classes":{}}}`)
 	inventoryDigest := sha256.Sum256(inventoryReport)
 	err := blobmode.PublishEncrypted(state.path, reportRoot, config, blobmode.EncryptedEvidence{
@@ -172,9 +171,8 @@ func TestPublishEncryptedRecoversUncommittedJournalTail(t *testing.T) {
 	if !requireRootFixture(t, "TestPublishEncryptedRecoversUncommittedJournalTail") {
 		return
 	}
-	state := testState(t, "initial-local", "s3-accepted")
+	state, reportRoot := testRolloutValidS3Authority(t)
 	config := blobmode.EffectiveConfig{BlobS3: testS3Config()}
-	reportRoot := filepath.Join(t.TempDir(), "reports")
 	inventoryReport := []byte(`{"schema":"teagram.blob-encryption-inventory/v1","encrypted":{"classes":{"valid_envelope":{"count":3,"logical_bytes":4096},"no_valid_envelope":{"count":0},"missing":{"count":0}}},"plaintext":{"classes":{}}}`)
 	inventoryDigest := sha256.Sum256(inventoryReport)
 	proof := blobmode.EncryptedEvidence{
@@ -256,9 +254,8 @@ func TestPublishEncryptedRecoversJournalTempBeforeLink(t *testing.T) {
 	if !requireRootFixture(t, "TestPublishEncryptedRecoversJournalTempBeforeLink") {
 		return
 	}
-	state := testState(t, "initial-local", "s3-accepted")
+	state, reportRoot := testRolloutValidS3Authority(t)
 	config := blobmode.EffectiveConfig{BlobS3: testS3Config()}
-	reportRoot := filepath.Join(t.TempDir(), "reports")
 	inventoryReport := []byte(`{"schema":"teagram.blob-encryption-inventory/v1","encrypted":{"classes":{"valid_envelope":{"count":3,"logical_bytes":4096},"no_valid_envelope":{"count":0},"missing":{"count":0}}},"plaintext":{"classes":{}}}`)
 	inventoryDigest := sha256.Sum256(inventoryReport)
 	proof := blobmode.EncryptedEvidence{
@@ -964,6 +961,31 @@ func testState(t *testing.T, outcomes ...string) testStateData {
 	chain := testChain(t, outcomes...)
 	path := writeTestState(t, chain.records, chain.records[len(chain.records)])
 	return testStateData{path: path, mode: chain.records[len(chain.records)], records: chain.records}
+}
+
+func testRolloutValidS3Authority(t *testing.T) (testStateData, string) {
+	t.Helper()
+	_, testFile, _, ok := runtime.Caller(0)
+	if !ok {
+		t.Fatal("locate blob-mode package source")
+	}
+	repoRoot := filepath.Clean(filepath.Join(filepath.Dir(testFile), "../.."))
+	fixtureRoot := t.TempDir()
+	config := testS3Config()
+	// #nosec G204 -- Run the repository-owned accepted-S3 authority fixture with fixed arguments and a private temporary directory.
+	command := exec.CommandContext(t.Context(), "python3",
+		filepath.Join(repoRoot, "internal/blobmigration/testdata/publish_s3_accepted_fixture.py"),
+		repoRoot, fixtureRoot, config.Endpoint, config.Bucket,
+	)
+	if output, err := command.CombinedOutput(); err != nil {
+		t.Fatalf("publish rollout-valid accepted-S3 authority fixture: %v\n%s", err, output)
+	}
+	statePath := filepath.Join(fixtureRoot, "checkout", ".state", "blob-mode")
+	mode, err := os.ReadFile(filepath.Join(statePath, "mode.json"))
+	if err != nil {
+		t.Fatalf("read accepted-S3 authority fixture head: %v", err)
+	}
+	return testStateData{path: statePath, mode: mode}, filepath.Join(fixtureRoot, "reports")
 }
 
 func testChain(t *testing.T, outcomes ...string) struct{ records map[int][]byte } {
