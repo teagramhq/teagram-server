@@ -249,8 +249,8 @@ func TestBlobEncryptionMigrationKillResume(t *testing.T) {
 	if err != nil || erased.Erased != 1 {
 		t.Fatalf("erase migrated file after cutover = %+v, %v; want one erased file", erased, err)
 	}
-	if remote.has(secondTarget) || !remote.has("teagramd/"+secondFileKey) {
-		t.Fatalf("post-cutover erasure state: encrypted=%v plaintext=%v; want only the old plaintext copy to remain before cleanup",
+	if remote.has(secondTarget) || remote.has("teagramd/"+secondFileKey) {
+		t.Fatalf("post-cutover erasure state: encrypted=%v plaintext=%v; want both copies removed before cleanup",
 			remote.has(secondTarget), remote.has("teagramd/"+secondFileKey))
 	}
 	currentReferences, err := restarted.store.BlobInventoryReferences(ctx)
@@ -266,8 +266,8 @@ func TestBlobEncryptionMigrationKillResume(t *testing.T) {
 		Objects int `json:"objects"`
 		Removed int `json:"plaintext_objects_removed"`
 	}
-	if err := json.Unmarshal([]byte(stdout), &cleanupSummary); err != nil || cleanupSummary.Objects != 2 || cleanupSummary.Removed != 3 {
-		t.Fatalf("explicit cleanup summary = %+v, %v; want two current references and all three plaintext copies removed", cleanupSummary, err)
+	if err := json.Unmarshal([]byte(stdout), &cleanupSummary); err != nil || cleanupSummary.Objects != 2 || cleanupSummary.Removed != 2 {
+		t.Fatalf("explicit cleanup summary = %+v, %v; want two current plaintext references removed", cleanupSummary, err)
 	}
 	if remote.has("teagramd/"+fileKey) || remote.has("teagramd/"+secondFileKey) || remote.has("teagramd/"+partKey) {
 		t.Fatal("explicit cleanup retained a plaintext copy")

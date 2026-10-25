@@ -206,6 +206,7 @@ func NewS3Store(ctx context.Context, cfg S3Config, keys *KeyRing, encrypt bool) 
 // NewMigratedS3Store constructs and checks the serving store for an S3 backend
 // whose blob-mode authority is encrypted: envelopes are read and written under
 // [EncryptedObjectsPrefix], where the migration from accepted plaintext put them.
+// Remove also deletes the corresponding legacy plaintext key.
 func NewMigratedS3Store(ctx context.Context, cfg S3Config, keys *KeyRing) (Store, error) {
 	if keys == nil {
 		return nil, errors.New("S3 media encryption requires TG_MEDIA_KEY_DIR and TG_MEDIA_KEY_CURRENT")
@@ -225,7 +226,24 @@ func NewMigratedS3Store(ctx context.Context, cfg S3Config, keys *KeyRing) (Store
 	if err != nil {
 		return nil, fmt.Errorf("construct encrypted object store: %w", err)
 	}
-	return sealed, nil
+	return migratedS3ServingStore{Store: sealed, legacy: remote}, nil
+}
+
+type migratedS3ServingStore struct {
+	Store
+
+	legacy Store
+}
+
+func (s migratedS3ServingStore) Remove(ctx context.Context, key string) error {
+	var removeErrors []error
+	if err := s.legacy.Remove(ctx, key); err != nil {
+		removeErrors = append(removeErrors, fmt.Errorf("remove legacy plaintext media: %w", err))
+	}
+	if err := s.Store.Remove(ctx, key); err != nil {
+		removeErrors = append(removeErrors, fmt.Errorf("remove encrypted media: %w", err))
+	}
+	return errors.Join(removeErrors...)
 }
 
 // OperationTimeout reports the configured bound for one S3 operation,

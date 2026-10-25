@@ -389,6 +389,7 @@ func sendUploadedDocument(
 	t *testing.T, ctx context.Context, mc *mediaClient, peer tg.InputPeerClass,
 	fileID int64, parts int, name, caption string, randomID int64,
 ) *tg.Document {
+	t.Helper()
 	doc, _ := sendUploadedDocumentWithMessageID(t, ctx, mc, peer, fileID, parts, name, caption, randomID)
 	return doc
 }
