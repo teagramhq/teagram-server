@@ -58,11 +58,24 @@ other scan in that scenario still fails.
 
 ## CI
 
-`.github/workflows/perf.yml`. A `main` run seeds the fixtures when
-`fixture_test.go` changed and stores the dump as a cache entry; every run
-restores it, applies the branch's migrations on top, and measures base and head
-interleaved. A PR that changes the fixture is not measured until it merges; a
-missing snapshot for an unchanged fixture fails the gate.
+`.github/workflows/perf.yml`. The fixture cache key includes
+`fixture_test.go` and `server_test.go`. Main seeds and stores a snapshot when
+that key is missing. PRs restore a matching snapshot or seed fixtures on their
+branch when none is available, then measure the base and head interleaved. If
+the fixture seeder changed, the head is measured without a base comparison.
+
+Each `main` run also publishes the snapshot as a public prerelease named
+`perf-fixture-<fixture version>`, where the version is the cache key suffix
+(the Actions `hashFiles` value for `test/perf/fixture_test.go` and
+`test/perf/server_test.go`). The release includes every file under the snapshot
+directory and a `manifest.json`. Snapshot paths are
+flattened into asset names by replacing `/` with `__`; a dump larger than
+1,900,000,000 bytes is split into `<asset name>.part000`, `.part001`, and so
+on; join numbered parts in order to reconstruct the file. The manifest has
+`fixture`, `server_commit`, `migration_revision`, and an
+`assets` array containing each asset's `name` and `sha256`. The manifest itself
+is not listed in that array. Releases stay prereleases and are never marked
+latest. Consumers can download the assets anonymously from the release URL.
 
 ## Locally
 

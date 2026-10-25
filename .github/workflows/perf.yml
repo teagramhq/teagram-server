@@ -36,6 +36,9 @@ jobs:
     permissions:
       contents: read
       actions: write
+    outputs:
+      release_exists: ${{ steps.release.outputs.exists }}
+      release_draft: ${{ steps.release.outputs.draft }}
     steps:
       - uses: actions/checkout@v7.0.1
         with:
@@ -43,8 +46,38 @@ jobs:
 
       # Track both the fixture writer and server setup helper: either can
       # change the seeded data. Migrations apply on top of restored data.
+      - name: Check for an existing fixture release
+        id: release
+        if: github.ref == 'refs/heads/main'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          FIXTURE_VERSION: ${{ hashFiles('test/perf/fixture_test.go', 'test/perf/server_test.go') }}
+        run: |
+          tag="perf-fixture-$FIXTURE_VERSION"
+          status=$(curl --silent --show-error \
+            --output "$RUNNER_TEMP/perf-fixture-release.json" \
+            --write-out '%{http_code}' \
+            --header 'Accept: application/vnd.github+json' \
+            --header "Authorization: Bearer $GH_TOKEN" \
+            "$GITHUB_API_URL/repos/$GITHUB_REPOSITORY/releases/tags/$tag")
+          case "$status" in
+            200)
+              echo "exists=true" >>"$GITHUB_OUTPUT"
+              echo "draft=$(jq -r '.draft' "$RUNNER_TEMP/perf-fixture-release.json")" >>"$GITHUB_OUTPUT"
+              ;;
+            404)
+              echo "exists=false" >>"$GITHUB_OUTPUT"
+              echo "draft=false" >>"$GITHUB_OUTPUT"
+              ;;
+            *)
+              echo "::error::GitHub returned HTTP $status while looking up $tag"
+              exit 1
+              ;;
+          esac
+
       - name: Look up the snapshot
         id: snapshot
+        if: steps.release.outputs.exists != 'true'
         uses: actions/cache/restore@v6.1.0
         with:
           path: .perf-cache
@@ -52,30 +85,56 @@ jobs:
           lookup-only: true
 
       - uses: actions/setup-go@v7.0.0
-        if: steps.snapshot.outputs.cache-hit != 'true'
+        if: steps.snapshot.outputs.cache-hit != 'true' && steps.release.outputs.exists != 'true'
         with:
           go-version-file: go.mod
           cache: false
 
       - uses: ariga/setup-atlas@v0.3
-        if: steps.snapshot.outputs.cache-hit != 'true'
+        if: steps.snapshot.outputs.cache-hit != 'true' && steps.release.outputs.exists != 'true'
         with:
           version: v1.2.0
 
       - name: Start Postgres
-        if: steps.snapshot.outputs.cache-hit != 'true'
+        if: steps.snapshot.outputs.cache-hit != 'true' && steps.release.outputs.exists != 'true'
         run: bash .github/scripts/perf-postgres.sh
 
       - name: Seed fixtures
         id: seed
-        if: steps.snapshot.outputs.cache-hit != 'true'
+        if: steps.snapshot.outputs.cache-hit != 'true' && steps.release.outputs.exists != 'true'
         run: bash .github/scripts/perf-run.sh seed
 
+      - name: Record snapshot metadata
+        if: steps.snapshot.outputs.cache-hit != 'true' && steps.release.outputs.exists != 'true'
+        env:
+          FIXTURE_VERSION: ${{ hashFiles('test/perf/fixture_test.go', 'test/perf/server_test.go') }}
+        run: |
+          newest_revision=
+          for fixture in 1x 100x; do
+            revision=$(docker exec "$PERF_PG_CONTAINER" psql -v ON_ERROR_STOP=1 -U postgres -d "perf_$fixture" -qAt \
+              -c 'SELECT version FROM atlas_schema_revisions.atlas_schema_revisions ORDER BY version DESC LIMIT 1')
+            if [ -z "$revision" ]; then
+              echo "::error::No migration revision found in perf_$fixture"
+              exit 1
+            fi
+            if [ -z "$newest_revision" ] || [[ "$revision" > "$newest_revision" ]]; then
+              newest_revision=$revision
+            fi
+          done
+          jq -n \
+            --arg fixture "$FIXTURE_VERSION" \
+            --arg server_commit "$GITHUB_SHA" \
+            --arg migration_revision "$newest_revision" \
+            '{fixture: $fixture, server_commit: $server_commit, migration_revision: $migration_revision}' \
+            > .perf-cache-metadata.json
+
       - name: Store the snapshot
-        if: steps.snapshot.outputs.cache-hit != 'true'
+        if: steps.snapshot.outputs.cache-hit != 'true' && steps.release.outputs.exists != 'true'
         uses: actions/cache/save@v6.1.0
         with:
-          path: .perf-cache
+          path: |
+            .perf-cache
+            .perf-cache-metadata.json
           key: perf-fixture-${{ hashFiles('test/perf/fixture_test.go', 'test/perf/server_test.go') }}
 
       - name: Report fixture snapshot infrastructure failure
@@ -87,6 +146,175 @@ jobs:
             echo
             echo "Fixture snapshot setup or storage failed before measurement. Check the failed workflow step for its cause."
           } >>"$GITHUB_STEP_SUMMARY"
+
+  publish-fixture:
+    needs: fixture-snapshot
+    if: >-
+      github.ref == 'refs/heads/main' &&
+      (needs.fixture-snapshot.outputs.release_exists != 'true' || needs.fixture-snapshot.outputs.release_draft == 'true')
+    runs-on: ubuntu-26.04
+    timeout-minutes: 60
+    concurrency:
+      group: perf-fixture-release-${{ github.repository }}
+      cancel-in-progress: false
+    permissions:
+      actions: read
+      contents: write
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Recheck release after acquiring the publisher slot
+        id: release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          FIXTURE_VERSION: ${{ hashFiles('test/perf/fixture_test.go', 'test/perf/server_test.go') }}
+        run: |
+          tag="perf-fixture-$FIXTURE_VERSION"
+          status=$(curl --silent --show-error \
+            --output "$RUNNER_TEMP/perf-fixture-release.json" \
+            --write-out '%{http_code}' \
+            --header 'Accept: application/vnd.github+json' \
+            --header "Authorization: Bearer $GH_TOKEN" \
+            "$GITHUB_API_URL/repos/$GITHUB_REPOSITORY/releases/tags/$tag")
+          case "$status" in
+            200)
+              echo "exists=true" >>"$GITHUB_OUTPUT"
+              echo "draft=$(jq -r '.draft' "$RUNNER_TEMP/perf-fixture-release.json")" >>"$GITHUB_OUTPUT"
+              ;;
+            404)
+              echo "exists=false" >>"$GITHUB_OUTPUT"
+              echo "draft=false" >>"$GITHUB_OUTPUT"
+              ;;
+            *)
+              echo "::error::GitHub returned HTTP $status while looking up $tag"
+              exit 1
+              ;;
+          esac
+
+      - name: Restore the fixture snapshot
+        id: snapshot
+        if: steps.release.outputs.exists != 'true' || steps.release.outputs.draft == 'true'
+        uses: actions/cache/restore@v6.1.0
+        with:
+          path: |
+            .perf-cache
+            .perf-cache-metadata.json
+          key: perf-fixture-${{ hashFiles('test/perf/fixture_test.go', 'test/perf/server_test.go') }}
+
+      - name: Require the cached snapshot
+        if: steps.release.outputs.exists != 'true' || steps.release.outputs.draft == 'true'
+        run: |
+          if [ "${{ steps.snapshot.outputs.cache-hit }}" != true ]; then
+            echo "::error::Fixture snapshot cache is missing; refusing to publish an empty fixture release"
+            exit 1
+          fi
+
+      - name: Check for cached snapshot metadata
+        id: metadata
+        if: steps.release.outputs.exists != 'true' || steps.release.outputs.draft == 'true'
+        run: |
+          if [ -f .perf-cache-metadata.json ]; then
+            echo "present=true" >>"$GITHUB_OUTPUT"
+          else
+            echo "present=false" >>"$GITHUB_OUTPUT"
+          fi
+
+      - name: Recover metadata for an older snapshot cache
+        if: (steps.release.outputs.exists != 'true' || steps.release.outputs.draft == 'true') && steps.metadata.outputs.present != 'true'
+        run: |
+          bash .github/scripts/perf-postgres.sh
+          newest_revision=
+          for fixture in 1x 100x; do
+            docker exec "$PERF_PG_CONTAINER" createdb -U postgres "perf_$fixture"
+            docker exec "$PERF_PG_CONTAINER" pg_restore -U postgres -d "perf_$fixture" -j 4 --no-owner "/cache/perf_$fixture.dump"
+            revision=$(docker exec "$PERF_PG_CONTAINER" psql -v ON_ERROR_STOP=1 -U postgres -d "perf_$fixture" -qAt \
+              -c 'SELECT version FROM atlas_schema_revisions.atlas_schema_revisions ORDER BY version DESC LIMIT 1')
+            if [ -z "$revision" ]; then
+              echo "::error::No migration revision found in perf_$fixture"
+              exit 1
+            fi
+            if [ -z "$newest_revision" ] || [[ "$revision" > "$newest_revision" ]]; then
+              newest_revision=$revision
+            fi
+          done
+          jq -n \
+            --arg fixture "${{ hashFiles('test/perf/fixture_test.go', 'test/perf/server_test.go') }}" \
+            --arg server_commit "$GITHUB_SHA" \
+            --arg migration_revision "$newest_revision" \
+            '{fixture: $fixture, server_commit: $server_commit, migration_revision: $migration_revision}' \
+            > .perf-cache-metadata.json
+
+      - name: Build release assets and manifest
+        id: assets
+        if: steps.release.outputs.exists != 'true' || steps.release.outputs.draft == 'true'
+        run: |
+          python3 .github/scripts/build-perf-fixture-release.py \
+            --snapshot .perf-cache \
+            --metadata .perf-cache-metadata.json \
+            --output "$RUNNER_TEMP/perf-fixture-assets"
+
+      - name: Create a draft release
+        if: steps.release.outputs.exists != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          FIXTURE_VERSION: ${{ hashFiles('test/perf/fixture_test.go', 'test/perf/server_test.go') }}
+        run: |
+          tag="perf-fixture-$FIXTURE_VERSION"
+          gh release create "$tag" \
+            --target "$GITHUB_SHA" \
+            --draft \
+            --prerelease \
+            --latest=false \
+            --title "$tag" \
+            --notes "Scale performance fixture snapshot for fixture version $FIXTURE_VERSION."
+
+      - name: Upload all fixture assets to the draft
+        if: steps.release.outputs.exists != 'true' || steps.release.outputs.draft == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          FIXTURE_VERSION: ${{ hashFiles('test/perf/fixture_test.go', 'test/perf/server_test.go') }}
+        run: |
+          tag="perf-fixture-$FIXTURE_VERSION"
+          gh release upload "$tag" "$RUNNER_TEMP"/perf-fixture-assets/* --clobber
+
+      - name: Verify the draft has every asset
+        if: steps.release.outputs.exists != 'true' || steps.release.outputs.draft == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          FIXTURE_VERSION: ${{ hashFiles('test/perf/fixture_test.go', 'test/perf/server_test.go') }}
+        run: |
+          tag="perf-fixture-$FIXTURE_VERSION"
+          release_id=$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/$tag" --jq '.id')
+          find "$RUNNER_TEMP/perf-fixture-assets" -maxdepth 1 -type f -printf '%f\n' | sort > "$RUNNER_TEMP/perf-fixture-expected.txt"
+          gh api --paginate "repos/$GITHUB_REPOSITORY/releases/$release_id/assets?per_page=100" --jq '.[].name' \
+            | sort > "$RUNNER_TEMP/perf-fixture-actual.txt"
+          diff -u "$RUNNER_TEMP/perf-fixture-expected.txt" "$RUNNER_TEMP/perf-fixture-actual.txt"
+
+      - name: Publish the complete release
+        if: steps.release.outputs.exists != 'true' || steps.release.outputs.draft == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          FIXTURE_VERSION: ${{ hashFiles('test/perf/fixture_test.go', 'test/perf/server_test.go') }}
+        run: |
+          tag="perf-fixture-$FIXTURE_VERSION"
+          gh release edit "$tag" --draft=false --prerelease --latest=false
+
+      - name: Verify anonymous asset downloads
+        if: steps.release.outputs.exists != 'true' || steps.release.outputs.draft == 'true'
+        env:
+          FIXTURE_VERSION: ${{ hashFiles('test/perf/fixture_test.go', 'test/perf/server_test.go') }}
+        run: |
+          tag="perf-fixture-$FIXTURE_VERSION"
+          release_url="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/releases/download/$tag"
+          curl --fail --location --silent --show-error "$release_url/manifest.json" \
+            --output "$RUNNER_TEMP/perf-fixture-manifest.json"
+          while IFS=$'\t' read -r name expected; do
+            curl --fail --location --silent --show-error "$release_url/$name" \
+              --output "$RUNNER_TEMP/$name"
+            printf '%s  %s\n' "$expected" "$RUNNER_TEMP/$name" | sha256sum --check --status
+          done < <(jq -r '.assets[] | [.name, .sha256] | @tsv' "$RUNNER_TEMP/perf-fixture-manifest.json")
 
   # Runs beside ci-main and finishes well inside it, so it adds no time to
   # the server's CI.
