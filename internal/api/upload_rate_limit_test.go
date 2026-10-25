@@ -213,3 +213,58 @@ func TestSaveFilePartRateLimitDisabled(t *testing.T) {
 		}
 	}
 }
+
+func TestUploadByteRateLimitIsPerAccountAcrossSaveMethods(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	s := openStore(t)
+
+	alice, err := s.CreateUser(ctx, "+15551298008")
+	if err != nil {
+		t.Fatal(err)
+	}
+	bob, err := s.CreateUser(ctx, "+15551298009")
+	if err != nil {
+		t.Fatal(err)
+	}
+	byteLimit := store.RateLimitConfig{Limit: store.MaxPartBytes, Window: time.Hour}
+	part := func(userID int64, fileID int64, index int, payload []byte) error {
+		_, err := api.SaveFilePartForTestWithRateLimits(s, userID, store.RateLimitConfig{}, byteLimit, &tg.UploadSaveFilePartRequest{
+			FileID: fileID, FilePart: index, Bytes: payload,
+		})
+		return err
+	}
+	if err := part(alice.ID, 4008, 0, make([]byte, store.MaxPartBytes)); err != nil {
+		t.Fatalf("alice first part: %v", err)
+	}
+	_, err = api.SaveBigFilePartForTestWithRateLimits(s, alice.ID, store.RateLimitConfig{}, byteLimit, &tg.UploadSaveBigFilePartRequest{
+		FileID: 4008, FilePart: 1, FileTotalParts: 2, Bytes: []byte("x"),
+	})
+	if !isFloodWait(err) {
+		t.Fatalf("alice over-budget part: expected FLOOD_WAIT, got %v", err)
+	}
+	if err := part(bob.ID, 4008, 0, []byte("x")); err != nil {
+		t.Fatalf("bob's independent budget: %v", err)
+	}
+	if _, ok, err := s.UploadPart(ctx, alice.ID, 4008, 1); err != nil || ok {
+		t.Fatalf("denied part stored: ok=%v err=%v", ok, err)
+	}
+}
+
+func TestUploadByteRateLimitCountsOversizedPartBytes(t *testing.T) {
+	t.Parallel()
+	s := openStore(t)
+
+	u, err := s.CreateUser(context.Background(), "+15551298010")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = api.SaveFilePartForTestWithRateLimits(s, u.ID, store.RateLimitConfig{}, store.RateLimitConfig{
+		Limit: 1, Window: time.Hour,
+	}, &tg.UploadSaveFilePartRequest{
+		FileID: 4010, FilePart: 0, Bytes: make([]byte, store.MaxPartBytes+1),
+	})
+	if !isFloodWait(err) {
+		t.Fatalf("oversized part over byte budget: expected FLOOD_WAIT, got %v", err)
+	}
+}

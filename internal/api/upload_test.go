@@ -222,6 +222,157 @@ func TestSaveFilePartRowCap(t *testing.T) {
 	rpcError(t, err, "FLOOD_WAIT_60")
 }
 
+func TestConfiguredUploadByteLimitBoundaries(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	s := openStore(t)
+	u, err := s.CreateUser(ctx, "+15551294031")
+	if err != nil {
+		t.Fatalf("create user: %v", err)
+	}
+
+	for _, tc := range []struct {
+		name    string
+		fileID  int64
+		size    int
+		wantErr string
+	}{
+		{name: "499 KiB accepted", fileID: 9031, size: 499 * 1024},
+		{name: "501 KiB rejected", fileID: 9032, size: 501 * 1024, wantErr: "FILE_PART_TOO_BIG"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			payload := bytes.Repeat([]byte{'a'}, tc.size)
+			_, err := api.SaveFilePartCappedForTest(s, u.ID, 512000, &tg.UploadSaveFilePartRequest{
+				FileID: tc.fileID, FilePart: 0, Bytes: payload,
+			})
+			if tc.wantErr == "" {
+				if err != nil {
+					t.Fatalf("save %s: %v", tc.name, err)
+				}
+				got, ok, err := s.UploadPart(ctx, u.ID, tc.fileID, 0)
+				if err != nil || !ok || !bytes.Equal(got, payload) {
+					t.Fatalf("accepted payload: ok=%v bytes=%d err=%v", ok, len(got), err)
+				}
+			} else {
+				rpcError(t, err, tc.wantErr)
+			}
+			parts, _, _, err := s.UploadPartsSummary(ctx, u.ID, tc.fileID)
+			if err != nil {
+				t.Fatalf("upload summary: %v", err)
+			}
+			wantParts := int64(1)
+			if tc.wantErr != "" {
+				wantParts = 0
+			}
+			if parts != wantParts {
+				t.Fatalf("stored parts = %d, want %d", parts, wantParts)
+			}
+		})
+	}
+}
+
+func TestOversizedUploadRemovesEarlierParts(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	s := openStore(t)
+	u, err := s.CreateUser(ctx, "+15551294032")
+	if err != nil {
+		t.Fatalf("create user: %v", err)
+	}
+	const fileID = 9033
+	if _, err := api.SaveFilePartCappedForTest(s, u.ID, 800000, &tg.UploadSaveFilePartRequest{
+		FileID: fileID, FilePart: 0, Bytes: bytes.Repeat([]byte{'a'}, 400*1024),
+	}); err != nil {
+		t.Fatalf("save first part: %v", err)
+	}
+	_, err = api.SaveFilePartCappedForTest(s, u.ID, 800000, &tg.UploadSaveFilePartRequest{
+		FileID: fileID, FilePart: 1, Bytes: bytes.Repeat([]byte{'b'}, 400*1024),
+	})
+	rpcError(t, err, "FILE_PART_TOO_BIG")
+
+	parts, _, _, err := s.UploadPartsSummary(ctx, u.ID, fileID)
+	if err != nil {
+		t.Fatalf("upload summary: %v", err)
+	}
+	if parts != 0 {
+		t.Fatalf("stored parts after over-limit rejection = %d, want 0", parts)
+	}
+}
+
+func TestOversizedPartRemovesEarlierParts(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	s := openStore(t)
+	u, err := s.CreateUser(ctx, "+15551294035")
+	if err != nil {
+		t.Fatalf("create user: %v", err)
+	}
+	const fileID = 9036
+	if _, err := api.SaveFilePartCappedForTest(s, u.ID, 512000, &tg.UploadSaveFilePartRequest{
+		FileID: fileID, FilePart: 0, Bytes: bytes.Repeat([]byte{'a'}, 499*1024),
+	}); err != nil {
+		t.Fatalf("save initial part: %v", err)
+	}
+	_, err = api.SaveFilePartCappedForTest(s, u.ID, 512000, &tg.UploadSaveFilePartRequest{
+		FileID: fileID, FilePart: 0, Bytes: bytes.Repeat([]byte{'b'}, 515*1024),
+	})
+	rpcError(t, err, "FILE_PART_TOO_BIG")
+
+	parts, _, _, err := s.UploadPartsSummary(ctx, u.ID, fileID)
+	if err != nil {
+		t.Fatalf("upload summary: %v", err)
+	}
+	if parts != 0 {
+		t.Fatalf("stored parts after oversized-part rejection = %d, want 0", parts)
+	}
+}
+
+func TestOversizedBigFileIsRejectedBeforeStoringPart(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	s := openStore(t)
+	u, err := s.CreateUser(ctx, "+15551294033")
+	if err != nil {
+		t.Fatalf("create user: %v", err)
+	}
+	const fileID = 9034
+	_, err = api.SaveBigFilePartCappedForTest(s, u.ID, 512000, &tg.UploadSaveBigFilePartRequest{
+		FileID: fileID, FilePart: 0, FileTotalParts: 20, Bytes: bytes.Repeat([]byte{'v'}, store.MaxPartBytes),
+	})
+	rpcError(t, err, "FILE_PART_TOO_BIG")
+
+	parts, _, _, err := s.UploadPartsSummary(ctx, u.ID, fileID)
+	if err != nil {
+		t.Fatalf("upload summary: %v", err)
+	}
+	if parts != 0 {
+		t.Fatalf("stored parts after declared-size rejection = %d, want 0", parts)
+	}
+}
+
+func TestDeclaredBigFileSizeIsRejectedBeforeStoringPart(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	s := openStore(t)
+	u, err := s.CreateUser(ctx, "+15551294034")
+	if err != nil {
+		t.Fatalf("create user: %v", err)
+	}
+	const fileID = 9035
+	_, err = api.SaveBigFilePartCappedForTest(s, u.ID, 800000, &tg.UploadSaveBigFilePartRequest{
+		FileID: fileID, FilePart: 0, FileTotalParts: 2, Bytes: bytes.Repeat([]byte{'v'}, 400*1024),
+	})
+	rpcError(t, err, "FILE_PART_TOO_BIG")
+
+	parts, _, _, err := s.UploadPartsSummary(ctx, u.ID, fileID)
+	if err != nil {
+		t.Fatalf("upload summary: %v", err)
+	}
+	if parts != 0 {
+		t.Fatalf("stored parts after declared-size rejection = %d, want 0", parts)
+	}
+}
+
 func TestSaveBigFilePartValidatesTotalParts(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
@@ -231,15 +382,27 @@ func TestSaveBigFilePartValidatesTotalParts(t *testing.T) {
 		t.Fatalf("create user: %v", err)
 	}
 
-	tests := map[string]tg.UploadSaveBigFilePartRequest{
-		"part past declared total": {FileID: 999, FilePart: 3, FileTotalParts: 3, Bytes: []byte("hello world")},
-		"total parts zero":         {FileID: 999, FilePart: 0, FileTotalParts: 0, Bytes: []byte("hello world")},
-		"total parts past max":     {FileID: 999, FilePart: 0, FileTotalParts: api.MaxFileParts() + 1, Bytes: []byte("hello world")},
+	tests := map[string]struct {
+		req  tg.UploadSaveBigFilePartRequest
+		want string
+	}{
+		"part past declared total": {
+			req:  tg.UploadSaveBigFilePartRequest{FileID: 999, FilePart: 3, FileTotalParts: 3, Bytes: []byte("hello world")},
+			want: "FILE_PART_INVALID",
+		},
+		"total parts zero": {
+			req:  tg.UploadSaveBigFilePartRequest{FileID: 999, FilePart: 0, FileTotalParts: 0, Bytes: []byte("hello world")},
+			want: "FILE_PART_INVALID",
+		},
+		"total parts past max": {
+			req:  tg.UploadSaveBigFilePartRequest{FileID: 999, FilePart: 0, FileTotalParts: api.MaxFileParts() + 1, Bytes: []byte("hello world")},
+			want: "FILE_PART_TOO_BIG",
+		},
 	}
-	for name, req := range tests {
+	for name, tc := range tests {
 		t.Run(name, func(t *testing.T) {
-			_, err := api.SaveBigFilePartForTest(s, u.ID, &req)
-			rpcError(t, err, "FILE_PART_INVALID")
+			_, err := api.SaveBigFilePartForTest(s, u.ID, &tc.req)
+			rpcError(t, err, tc.want)
 		})
 	}
 
