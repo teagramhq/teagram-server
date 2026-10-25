@@ -574,13 +574,15 @@ jobs:
       - name: Measure flat parts directory ceiling
         run: PARTS_DIR_CEILING_PROBE=1 go test -count=1 -timeout 30m ./internal/blob/ -run TestFlatPartsDirEntryCeiling -v
 
-      # Postgres comes from testcontainers inside internal/pgtest, which starts
-      # mirror.gcr.io/library/postgres:18-alpine with its own config. Nothing to
-      # wire up on the runner beyond the Docker daemon ubuntu-26.04 provides.
+      # Testcontainers pulls mirror.gcr.io/postgres:18-alpine. Pre-pull it with
+      # bounded retries so transient mirror misses are caught before package tests.
       #
       # Keep the cached non-E2E command in the Makefile unchanged. The remaining
       # E2E invocation runs once with the same race/count/timeout/package
       # settings, excluding fixtures and adding JSON output for diagnostics.
+      - name: Pre-pull the shared PostgreSQL test image with retry
+        run: bash .github/scripts/pull-base-images.sh --image mirror.gcr.io/postgres:18-alpine
+
       - name: Test non-E2E packages
         run: make test-unit
 
