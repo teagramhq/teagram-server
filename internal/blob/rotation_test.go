@@ -120,6 +120,76 @@ func TestRotationPlanCannotReuseWrappingSaltForChangedObject(t *testing.T) {
 	}
 }
 
+func TestPartRotationBuffersBoundedEnvelopeBeforePut(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	mem := newMemStore()
+	backend := &rotationCaptureStore{memStore: mem}
+	key, err := blob.NewPartKey()
+	if err != nil {
+		t.Fatalf("draw part key: %v", err)
+	}
+	want := pattern(blob.MaxPartBytes)
+	oldRing := newRing(t, 1, 1)
+	if _, err := newEncrypted(t, backend, oldRing, blob.MinChunkSize).Put(ctx, key, bytes.NewReader(want)); err != nil {
+		t.Fatalf("write part envelope: %v", err)
+	}
+	oldObject := bytes.Clone(mem.raw(key))
+
+	rotator := newEncrypted(t, backend, newRing(t, 2, 1, 2), blob.MinChunkSize)
+	plan, err := rotator.PrepareRotation(key, false)
+	if err != nil {
+		t.Fatalf("prepare part rewrap: %v", err)
+	}
+	if err := rotator.Rotate(ctx, plan, int64(len(oldObject))); err != nil {
+		t.Fatalf("rewrap part envelope: %v", err)
+	}
+	if _, ok := backend.lastPartReader.(*bytes.Reader); !ok {
+		t.Fatalf("part rotation Put reader = %T, want bounded in-memory reader", backend.lastPartReader)
+	}
+	if got := mem.raw(key); len(got) != len(oldObject) || !bytes.Equal(got[102:], oldObject[102:]) {
+		t.Fatal("part rewrap changed ciphertext chunks")
+	}
+}
+
+func TestPartRotationRejectsOversizedPlaintext(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	mem := newMemStore()
+	backend := &rotationCaptureStore{memStore: mem}
+	key, err := blob.NewPartKey()
+	if err != nil {
+		t.Fatalf("draw part key: %v", err)
+	}
+	oldRing := newRing(t, 1, 1)
+	tooLarge := pattern(blob.MaxPartBytes + 1)
+	if _, err := newEncrypted(t, backend, oldRing, blob.MinChunkSize).Put(ctx, key, bytes.NewReader(tooLarge)); err != nil {
+		t.Fatalf("write oversized test envelope: %v", err)
+	}
+	oldObject := bytes.Clone(mem.raw(key))
+	rotator := newEncrypted(t, backend, newRing(t, 2, 1, 2), blob.MinChunkSize)
+	plan, err := rotator.PrepareRotation(key, false)
+	if err != nil {
+		t.Fatalf("prepare oversized part rewrap: %v", err)
+	}
+	if err := rotator.Rotate(ctx, plan, int64(len(oldObject))); err == nil {
+		t.Fatal("oversized part envelope was rotated")
+	}
+}
+
+type rotationCaptureStore struct {
+	*memStore
+
+	lastPartReader io.Reader
+}
+
+func (s *rotationCaptureStore) Put(ctx context.Context, key string, r io.Reader) (int64, error) {
+	if blob.ParsePartKey(key) {
+		s.lastPartReader = r
+	}
+	return s.memStore.Put(ctx, key, r)
+}
+
 func TestRewrapOverS3RetriesWithKnownLengthAndKeepsChunks(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()

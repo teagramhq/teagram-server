@@ -1,6 +1,7 @@
 package blob
 
 import (
+	"bytes"
 	"context"
 	"crypto/cipher"
 	"crypto/rand"
@@ -78,6 +79,9 @@ func (e *Encrypted) Rotate(ctx context.Context, plan RotationPlan, physicalBytes
 	if source.objectLen() != physicalBytes {
 		return fmt.Errorf("%w: physical size does not match header", ErrEnvelope)
 	}
+	if ParsePartKey(plan.key) && source.plainLen > MaxPartBytes {
+		return fmt.Errorf("%w: part plaintext length %d exceeds maximum %d", ErrEnvelope, source.plainLen, MaxPartBytes)
+	}
 	if source.keyVersion == plan.targetVersion && (!plan.rewrite || sourceHasSalt(source, plan.salt)) {
 		return nil
 	}
@@ -117,7 +121,14 @@ func (e *Encrypted) Rotate(ctx context.Context, plan RotationPlan, physicalBytes
 		sourceAEAD: sourceAEAD, targetAEAD: targetAEAD,
 		rewrite: plan.rewrite,
 	}
-	written, err := e.backend.Put(ctx, plan.key, body)
+	var replacement io.Reader = body
+	if ParsePartKey(plan.key) {
+		replacement, err = boundedPartRotationBody(body)
+		if err != nil {
+			return err
+		}
+	}
+	written, err := e.backend.Put(ctx, plan.key, replacement)
 	if err != nil {
 		return fmt.Errorf("envelope rotation: write replacement: %w", err)
 	}
@@ -125,6 +136,27 @@ func (e *Encrypted) Rotate(ctx context.Context, plan RotationPlan, physicalBytes
 		return fmt.Errorf("envelope rotation: backend wrote %d bytes, want %d", written, physicalBytes)
 	}
 	return nil
+}
+
+// boundedPartRotationBody materializes only part envelopes, whose plaintext is
+// capped by MaxPartBytes. The local orphan reclaim pass relies on every writer
+// under parts/ finishing within that bounded input size.
+func boundedPartRotationBody(body *rotationBody) (io.Reader, error) {
+	maxChunks := (int64(MaxPartBytes) + int64(MinChunkSize) - 1) / int64(MinChunkSize)
+	maxBytes := int64(envelopeHeaderLen) + int64(MaxPartBytes) + maxChunks*gcmTagLen
+	if body.Size() > maxBytes {
+		return nil, fmt.Errorf("envelope rotation: part envelope size %d exceeds maximum %d", body.Size(), maxBytes)
+	}
+	data, err := io.ReadAll(io.LimitReader(body, maxBytes+1))
+	if err != nil {
+		clear(data)
+		return nil, fmt.Errorf("envelope rotation: buffer bounded part: %w", err)
+	}
+	if int64(len(data)) != body.Size() {
+		clear(data)
+		return nil, fmt.Errorf("envelope rotation: buffered part has %d bytes, want %d", len(data), body.Size())
+	}
+	return bytes.NewReader(data), nil
 }
 
 func sourceHasSalt(h envelopeHeader, salt [envelopeSaltLen]byte) bool {
