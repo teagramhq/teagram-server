@@ -427,6 +427,8 @@ grep -Fq 'set $teagramd http://haproxy:2446;' "$SCRIPT_DIR/nginx.conf"
 # shellcheck disable=SC2016
 grep -Fq 'proxy_set_header CF-Connecting-IP $http_cf_connecting_ip;' "$SCRIPT_DIR/nginx.conf"
 grep -Fq '"CF-Connecting-IP": "192.0.2.1"' "$SCRIPT_DIR/smoke.py"
+grep -Fq 'location = / { default_type text/plain; return 200 "Teagram demo server"; }' "$SCRIPT_DIR/nginx.conf"
+grep -Fq 'base_url + "/"' "$SCRIPT_DIR/smoke.py"
 grep -Fq 'location = /admin { return 404; }' "$SCRIPT_DIR/nginx.conf"
 grep -Fq 'location ^~ /admin/ { return 404; }' "$SCRIPT_DIR/nginx.conf"
 grep -Fq 'fastcgi_temp_path /tmp/fastcgi_temp;' "$SCRIPT_DIR/nginx.conf"
