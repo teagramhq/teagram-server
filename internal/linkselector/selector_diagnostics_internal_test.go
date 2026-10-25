@@ -45,7 +45,7 @@ func TestSelectorCompletionDiagnostics(t *testing.T) {
 			configure:          returnDiagnosticResponse(http.StatusOK, "SENTINEL_UPSTREAM_BODY", int64(len("SENTINEL_UPSTREAM_BODY")), nil),
 			wantRouteClass:     "invite",
 			wantStatus:         http.StatusOK,
-			wantBody:           "<!doctype html><html lang=\"en\"><body><main>Open this in Teagramd</main></body></html>",
+			wantBody:           "<!doctype html><html lang=\"en\"><body><main>Open this in Teagram</main></body></html>",
 			wantReason:         "ok",
 			wantUpstreamStatus: intPointer(http.StatusOK),
 		},
