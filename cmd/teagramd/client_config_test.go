@@ -151,14 +151,12 @@ func TestRunClientConfigAdvertisesDemoGuestSignUpOnlyWhenEnabled(t *testing.T) {
 	}
 
 	tests := []struct {
-		name    string
-		value   string
-		set     bool
-		enabled bool
+		name  string
+		value string
+		set   bool
 	}{
 		{name: "unset"},
 		{name: "disabled", value: "false", set: true},
-		{name: "enabled", value: "true", set: true, enabled: true},
 	}
 	var baseIdentity struct {
 		Version int `json:"version"`
@@ -200,11 +198,7 @@ func TestRunClientConfigAdvertisesDemoGuestSignUpOnlyWhenEnabled(t *testing.T) {
 			if err := json.Unmarshal(stdout.Bytes(), &document); err != nil {
 				t.Fatalf("decode client-config output %q: %v", stdout.String(), err)
 			}
-			if tt.enabled {
-				if document.Demo == nil || !bytes.Equal(document.Demo.GuestSignUp, []byte("true")) {
-					t.Fatalf("client-config demo capability = %s, want literal true", stdout.Bytes())
-				}
-			} else if document.Demo != nil {
+			if document.Demo != nil {
 				t.Fatalf("client-config includes demo while advertisement is disabled: %s", stdout.Bytes())
 			}
 			if i == 0 {
@@ -215,6 +209,27 @@ func TestRunClientConfigAdvertisesDemoGuestSignUpOnlyWhenEnabled(t *testing.T) {
 				t.Fatalf("client-config identity changed with advertisement mode: got %+v, want %+v", document, baseIdentity)
 			}
 		})
+	}
+}
+
+func TestRunClientConfigFailsClosedWhenDemoGenerationCannotBeRead(t *testing.T) {
+	t.Setenv("TG_POSTGRES_DSN", "")
+	t.Setenv("TG_ADVERTISE_ADDR", "mtproto.example.com:443")
+	t.Setenv("TG_DC_ID", "2")
+	t.Setenv("TG_ADVERTISE_DEMO_GUEST_SIGN_UP", "true")
+	keyPath := filepath.Join(t.TempDir(), "server-key.pem")
+	t.Setenv("TG_RSA_KEY_PATH", keyPath)
+	var bootstrapOutput bytes.Buffer
+	if err := runCommand([]string{"bootstrap-identity"}, slog.New(slog.DiscardHandler), &bootstrapOutput, &bootstrapOutput); err != nil {
+		t.Fatalf("bootstrap-identity: %v", err)
+	}
+
+	var stdout bytes.Buffer
+	if err := runCommand([]string{"client-config"}, slog.New(slog.DiscardHandler), &stdout, &stdout); err == nil {
+		t.Fatal("client-config succeeded without a readable demo wipe generation")
+	}
+	if stdout.Len() != 0 {
+		t.Fatalf("client-config wrote output after generation lookup failed: %q", stdout.String())
 	}
 }
 

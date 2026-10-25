@@ -43,7 +43,7 @@ func TestProbePerformsObfuscatedAbridgedAuthKeyExchange(t *testing.T) {
 		}
 	})
 
-	document, err := discovery.NewDocument(listener.Addr().String(), 2, &rsaKey.PublicKey, false)
+	document, err := discovery.NewDocument(listener.Addr().String(), 2, &rsaKey.PublicKey, false, "")
 	if err != nil {
 		t.Fatalf("build client discovery: %v", err)
 	}
@@ -78,7 +78,7 @@ func TestProbeRejectsTCPListenerThatStallsBeforeAuthKeyExchange(t *testing.T) {
 		t.Fatalf("listen for stalled MTProto: %v", err)
 	}
 
-	document, err := discovery.NewDocument(listener.Addr().String(), 2, &rsaKey.PublicKey, false)
+	document, err := discovery.NewDocument(listener.Addr().String(), 2, &rsaKey.PublicKey, false, "")
 	if err != nil {
 		t.Fatalf("build client discovery: %v", err)
 	}
