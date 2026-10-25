@@ -32,8 +32,9 @@ import (
 )
 
 // fixtureVersion changes whenever the seeded shape changes, so a cached dump
-// of an older shape is never measured as if it were this one.
-const fixtureVersion = 1
+// of an older shape is never measured as if it were this one. Version 2 marks
+// the first complete 10,000-contact scale fixture.
+const fixtureVersion = 2
 
 // spec is one fixture size. The large fixture is the account the parent issue
 // defines; the small one is the same account at one hundredth of the data, so
