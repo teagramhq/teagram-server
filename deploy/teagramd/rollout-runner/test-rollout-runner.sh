@@ -336,7 +336,9 @@ if [ "${1:-}" = inspect ]; then
     template=${2:-}
     case "$template" in
       '{{.HostConfig.LogConfig.Type}}')
-        if [ "${MOCK_SCENARIO:-}" = pre-rollout-log-persisted ] || \
+        if [ -f "$MOCK_STATE/unsupported-live-logger" ] && [ "$subject" = "$MOCK_BASE_ID" ]; then
+          printf 'journald\n'
+        elif [ "${MOCK_SCENARIO:-}" = pre-rollout-log-persisted ] || \
            { [ "${MOCK_SCENARIO:-}" = initial-local-legacy-logging-readiness-timeout ] && [ "$subject" = "$MOCK_BASE_ID" ]; } || \
            { [ "${MOCK_SCENARIO:-}" = target-local-syslog-logging-rollout ] && \
              { [ "$phase" = baseline ] || [ "$phase" = rollback ]; }; } || \
@@ -484,7 +486,10 @@ if [ "${1:-}" = inspect ]; then
     fi
     log_config_type=syslog
     log_config='{"syslog-address":"unixgram:///dev/log","syslog-facility":"daemon","syslog-format":"rfc5424","tag":"teagramd"}'
-    if { [ "${MOCK_SCENARIO:-}" = initial-local-legacy-logging-readiness-timeout ] && [ "$cfg" = baseline ]; } || \
+    if [ -f "$MOCK_STATE/unsupported-live-logger" ] && [ "$cfg" = baseline ]; then
+      log_config_type=journald
+      log_config='{}'
+    elif { [ "${MOCK_SCENARIO:-}" = initial-local-legacy-logging-readiness-timeout ] && [ "$cfg" = baseline ]; } || \
        { { [ "${MOCK_SCENARIO:-}" = target-local-syslog-logging-rollout ] || \
            [ "${MOCK_SCENARIO:-}" = target-local-syslog-logging-unmigrated ]; } && \
          { [ "$phase" = baseline ] || [ "$phase" = rollback ]; }; }; then
@@ -2286,6 +2291,27 @@ if [ "$status" = 0 ] && grep -q 'rollout=verified' "$TMP/initial-local-target-co
 else
   show_fixture_failure initial-local-target-compose-render "$status"
   fail 'initial-local accepts the pinned guarded render while recording the actual unguarded baseline'
+fi
+
+make_fixture initial-local-unsupported-live-logger initial-local-target-compose-render
+state=$(cat "$TMP/initial-local-unsupported-live-logger-state-path")
+printf '%s\n' "$APPLY_TARGET_SHA" > "$state/origin"
+printf '%s\n' "$INITIAL_LOCAL_TARGET_SHA" > "$TMP/initial-local-unsupported-live-logger-target-sha-path"
+: > "$state/unsupported-live-logger"
+status=$(run_fixture initial-local-unsupported-live-logger built 0 '' 2 '' '' initialize-local "$APPLY_TARGET_SHA")
+root=$(cat "$TMP/initial-local-unsupported-live-logger-root-path")
+checkout=$(cat "$TMP/initial-local-unsupported-live-logger-checkout-path")
+state=$(cat "$TMP/initial-local-unsupported-live-logger-state-path")
+if [ "$status" != 0 ] && \
+   grep -q 'initial-local preflight rejected an unsupported live logging profile' "$TMP/initial-local-unsupported-live-logger.stderr" && \
+   grep -q $'preflight\tinitial_local_logging_transition\tsha256:.*:false\tsyslog-v1:false\tfail' "$root.target/preflight-comparisons.tsv" && \
+   ! grep -Eq '^docker compose (build|up)( |$)|^python3 blob-mode-state.pinned initialize-local$' "$TMP/initial-local-unsupported-live-logger-events" && \
+   [ "$(cat "$state/head")" = "$BASELINE_SHA" ] && [ "$(cat "$state/teagramd")" = "$BASE_ID" ] && \
+   [ ! -e "$checkout/.state/blob-mode" ]; then
+  pass 'initial-local rejects an unsupported live logger before building or replacing the service'
+else
+  show_fixture_failure initial-local-unsupported-live-logger "$status"
+  fail 'initial-local must reject unsupported live logging before service replacement'
 fi
 
 for scenario in initial-local-port-drift initial-local-network-drift initial-local-replica-network-drift initial-local-key-mount-drift initial-local-pgdata-drift initial-local-environment-drift; do

@@ -2145,6 +2145,11 @@ compare_resolved_preflight() {
       "$baseline_logging_sha" "$baseline_login_codes" "$target_logging_policy" "$target_login_codes"; then
       append_evidence_row "$results" preflight initial_local_logging_transition \
         "json-file:$baseline_login_codes" syslog-v1:false pass || return 1
+    else
+      append_evidence_row "$results" preflight initial_local_logging_transition \
+        "sha256:$baseline_logging_sha:$baseline_login_codes" "$target_logging_policy:$target_login_codes" fail || return 1
+      fail 'initial-local preflight rejected an unsupported live logging profile'
+      return 1
     fi
     for field in "${fields[@]}"; do
       before=$(jq -er --arg field "$field" '.[$field]' "$render_file") || { fail 'pinned target render is missing a preflight comparison field'; return 1; }
