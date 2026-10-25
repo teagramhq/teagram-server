@@ -54,6 +54,12 @@ func NewUpdater(s *store.Store, dcID int, registry *mtproto.SessionRegistry, log
 // NewUpdaterWithDialogFilterSync shares folder recovery state with the RPC
 // handlers on this replica and renders media with the configured server DC.
 func NewUpdaterWithDialogFilterSync(s *store.Store, dcID int, registry *mtproto.SessionRegistry, log *slog.Logger, peers *peerhash.Deriver, dialogFilterSync *DialogFilterSync, pushMetrics ...*store.NotificationMetrics) *Updater {
+	return NewUpdaterWithDialogFilterSyncAndStickerCatalog(s, dcID, registry, log, peers, dialogFilterSync, nil, pushMetrics...)
+}
+
+// NewUpdaterWithDialogFilterSyncAndStickerCatalog shares folder recovery state
+// with the RPC handlers and renders sticker media with the validated catalogue.
+func NewUpdaterWithDialogFilterSyncAndStickerCatalog(s *store.Store, dcID int, registry *mtproto.SessionRegistry, log *slog.Logger, peers *peerhash.Deriver, dialogFilterSync *DialogFilterSync, stickerSets *StickerSetCatalog, pushMetrics ...*store.NotificationMetrics) *Updater {
 	if log == nil {
 		log = slog.New(slog.DiscardHandler)
 	}
@@ -65,7 +71,7 @@ func NewUpdaterWithDialogFilterSync(s *store.Store, dcID int, registry *mtproto.
 		metrics = pushMetrics[0]
 	}
 	return &Updater{
-		h:                &handlers{store: s, dcID: dcID, log: log, peers: peers, dialogFilterSync: dialogFilterSync},
+		h:                &handlers{store: s, dcID: dcID, log: log, peers: peers, dialogFilterSync: dialogFilterSync, stickerSets: stickerSets},
 		registry:         registry,
 		dialogFilterSync: dialogFilterSync,
 		log:              log,

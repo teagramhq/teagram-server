@@ -60,7 +60,7 @@ func (h *handlers) handleGetSavedDialogs(r *mtproto.Request) (bin.Encoder, error
 			}
 			tlMessages = append(tlMessages, tlMessage)
 		} else {
-			tlMessages = append(tlMessages, messageToTL(message, nil, files, nil, nil, h.dcID))
+			tlMessages = append(tlMessages, h.messageToTL(message, nil, files, nil, nil, h.dcID))
 		}
 	}
 

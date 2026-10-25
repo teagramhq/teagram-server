@@ -806,3 +806,154 @@ turnstile_signin_add_baseline=$(ROLLOUT_ADDED_ENV=TG_TURNSTILE_SIGNIN_ENABLED \
   snapshot_from_json "$turnstile_disabled_inspect" "$turnstile_disabled_compose" "$ENV_FILE" "$OVERRIDE_FILE" selected-compose-render baseline)
 [ "$(jq -r '.container_env_added' <<< "$turnstile_signin_add_baseline")" = none ]
 printf '%s\n' 'PASS live disabled Turnstile defaults count as unset when the deploy adds Turnstile settings'
+
+media_key_source="$TMP/media-keys"
+mkdir -m 700 "$media_key_source"
+printf '%064d' 0 > "$media_key_source/1.key"
+chmod 600 "$media_key_source/1.key"
+if [ "$(id -u)" = 0 ]; then
+  chown 65532:65532 "$media_key_source" "$media_key_source/1.key"
+fi
+media_key_compose=$(jq -c --arg source "$media_key_source" '
+  .services.teagramd.environment.TG_MEDIA_KEY_DIR="/run/teagramd/media-keys"
+  | .services.teagramd.environment.TG_MEDIA_KEY_CURRENT="1"
+  | .services.teagramd.volumes += [{
+      type:"bind",source:$source,target:"/run/teagramd/media-keys",read_only:true,
+      bind:{create_host_path:false}
+    }]
+' <<< "$syslog_compose")
+media_key_inspect=$(printf '%s' "$syslog_inspect" | jq -c --arg source "$media_key_source" '
+  .Config.Env += [
+    "TG_MEDIA_KEY_DIR=/run/teagramd/media-keys",
+    "TG_MEDIA_KEY_CURRENT=1"
+  ]
+  | .Mounts += [{
+      Type:"bind",Source:$source,Destination:"/run/teagramd/media-keys",
+      Mode:"ro",RW:false,Propagation:"rprivate"
+    }]
+')
+media_key_baseline=$(snapshot_from_json \
+  "$syslog_inspect" "$syslog_compose" "$ENV_FILE" "$OVERRIDE_FILE" selected-compose-render baseline)
+media_key_target=$(snapshot_from_json \
+  "$media_key_inspect" "$media_key_compose" "$ENV_FILE" "$OVERRIDE_FILE" selected-compose-render target)
+[ "$(jq -r '.media_key_source' <<< "$media_key_baseline")" = unset ]
+[ "$(jq -r '.media_key_current' <<< "$media_key_baseline")" = unset ]
+[ "$(jq -r '.media_key_source' <<< "$media_key_target")" = "$media_key_source" ]
+[ "$(jq -r '.media_key_current' <<< "$media_key_target")" = 1 ]
+[ "$(jq -r '.config_sha256' <<< "$media_key_baseline")" = "$(jq -r '.config_sha256' <<< "$media_key_target")" ]
+[ "$(jq -r '.mounts_sha256' <<< "$media_key_baseline")" = "$(jq -r '.mounts_sha256' <<< "$media_key_target")" ]
+[ "$(jq -r '.container_env_sha256' <<< "$media_key_baseline")" = "$(jq -r '.container_env_sha256' <<< "$media_key_target")" ]
+printf '%064s' '' | tr ' ' A > "$media_key_source/1.key"
+snapshot_from_json "$media_key_inspect" "$media_key_compose" \
+  "$ENV_FILE" "$OVERRIDE_FILE" selected-compose-render target >/dev/null
+printf '%064d\r\n' 0 > "$media_key_source/1.key"
+snapshot_from_json "$media_key_inspect" "$media_key_compose" \
+  "$ENV_FILE" "$OVERRIDE_FILE" selected-compose-render target >/dev/null
+printf '%s\n' 'PASS media-key accepts no newline, uppercase hex, and CRLF'
+printf '%064d' 0 > "$media_key_source/1.key"
+printf '%s\n' "$media_key_baseline" > "$TMP/media-key-baseline.snapshot.json"
+printf '%s\n' "$media_key_target" > "$TMP/media-key-target.snapshot.json"
+compare_snapshots "$TMP/media-key-baseline.snapshot.json" "$TMP/media-key-target.snapshot.json" \
+  sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb \
+  "$TMP/media-key-comparisons.tsv" >/dev/null
+printf '%s\n' 'PASS read-only media-key mount addition preserves rollout equivalence'
+
+media_key_changed_source=$(printf '%s' "$media_key_target" | jq -c --arg source "$TMP/other-media-keys" '.media_key_source=$source')
+printf '%s\n' "$media_key_changed_source" > "$TMP/media-key-changed-source.snapshot.json"
+if compare_snapshots "$TMP/media-key-target.snapshot.json" "$TMP/media-key-changed-source.snapshot.json" \
+  sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb \
+  "$TMP/media-key-changed-source-comparisons.tsv" >/dev/null; then
+  printf '%s\n' 'FAIL media-key source drift was accepted after the initial bind addition' >&2
+  exit 1
+fi
+printf '%s\n' 'PASS media-key source path is pinned after initial deployment'
+
+media_key_changed_version=$(printf '%s' "$media_key_target" | jq -c '.media_key_current="2"')
+printf '%s\n' "$media_key_changed_version" > "$TMP/media-key-changed-version.snapshot.json"
+if compare_snapshots "$TMP/media-key-target.snapshot.json" "$TMP/media-key-changed-version.snapshot.json" \
+  sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb \
+  "$TMP/media-key-changed-version-comparisons.tsv" >/dev/null; then
+  printf '%s\n' 'FAIL media-key version drift was accepted after the initial deployment' >&2
+  exit 1
+fi
+printf '%s\n' 'PASS media-key version is pinned after initial deployment'
+
+media_key_writable_compose=$(jq -c '
+  .services.teagramd.volumes[-1].read_only=false
+' <<< "$media_key_compose")
+media_key_writable_inspect=$(printf '%s' "$media_key_inspect" | jq -c '
+  .Mounts[-1].Mode="rw" | .Mounts[-1].RW=true
+')
+if snapshot_from_json "$media_key_writable_inspect" "$media_key_writable_compose" \
+  "$ENV_FILE" "$OVERRIDE_FILE" selected-compose-render target \
+  >/dev/null 2>"$TMP/media-key-writable.err"; then
+  printf '%s\n' 'FAIL writable media-key mount was accepted' >&2
+  exit 1
+fi
+printf '%s\n' 'PASS writable media-key mount is rejected'
+
+media_key_extra_option_compose=$(jq -c '
+  .services.teagramd.volumes[-1].bind.propagation="rprivate"
+' <<< "$media_key_compose")
+if snapshot_from_json "$media_key_inspect" "$media_key_extra_option_compose" \
+  "$ENV_FILE" "$OVERRIDE_FILE" selected-compose-render target \
+  >/dev/null 2>"$TMP/media-key-extra-option.err"; then
+  printf '%s\n' 'FAIL media-key mount with extra bind options was accepted' >&2
+  exit 1
+fi
+printf '%s\n' 'PASS media-key mount rejects unreviewed bind options'
+
+media_key_wrong_version_compose=$(jq -c '.services.teagramd.environment.TG_MEDIA_KEY_CURRENT="2"' <<< "$media_key_compose")
+media_key_wrong_version_inspect=$(printf '%s' "$media_key_inspect" | jq -c '
+  .Config.Env |= map(if startswith("TG_MEDIA_KEY_CURRENT=") then "TG_MEDIA_KEY_CURRENT=2" else . end)
+')
+if snapshot_from_json "$media_key_wrong_version_inspect" "$media_key_wrong_version_compose" \
+  "$ENV_FILE" "$OVERRIDE_FILE" selected-compose-render target \
+  >/dev/null 2>"$TMP/media-key-version.err"; then
+  printf '%s\n' 'FAIL unsupported media-key version was accepted' >&2
+  exit 1
+fi
+printf '%s\n' 'PASS unsupported media-key version is rejected'
+
+media_key_inside_checkout="$ROLLOUT_CHECKOUT_PATH/media-keys"
+mkdir -m 700 "$media_key_inside_checkout"
+printf '%064d\n' 0 > "$media_key_inside_checkout/1.key"
+chmod 600 "$media_key_inside_checkout/1.key"
+if [ "$(id -u)" = 0 ]; then
+  chown 65532:65532 "$media_key_inside_checkout" "$media_key_inside_checkout/1.key"
+fi
+media_key_inside_compose=$(jq -c --arg source "$media_key_inside_checkout" \
+  '.services.teagramd.volumes[-1].source=$source' <<< "$media_key_compose")
+media_key_inside_inspect=$(printf '%s' "$media_key_inspect" | jq -c --arg source "$media_key_inside_checkout" \
+  '.Mounts[-1].Source=$source')
+if snapshot_from_json "$media_key_inside_inspect" "$media_key_inside_compose" \
+  "$ENV_FILE" "$OVERRIDE_FILE" selected-compose-render target \
+  >/dev/null 2>"$TMP/media-key-inside-checkout.err"; then
+  printf '%s\n' 'FAIL media-key directory inside the application checkout was accepted' >&2
+  exit 1
+fi
+printf '%s\n' 'PASS media-key directory must be outside the application checkout'
+
+if [ "$(id -u)" = 0 ]; then
+  chown 0:0 "$media_key_source/1.key"
+  if snapshot_from_json "$media_key_inspect" "$media_key_compose" \
+    "$ENV_FILE" "$OVERRIDE_FILE" selected-compose-render target \
+    >/dev/null 2>"$TMP/media-key-owner.err"; then
+    chown 65532:65532 "$media_key_source/1.key"
+    printf '%s\n' 'FAIL media-key file with an unexpected owner was accepted' >&2
+    exit 1
+  fi
+  chown 65532:65532 "$media_key_source/1.key"
+  printf '%s\n' 'PASS media-key file owner is validated when rollout runs as root'
+fi
+
+media_key_wrong_path=$(printf '%s' "$media_key_inspect" | jq -c '
+  .Mounts[-1].Source="/tmp/other-media-keys"
+')
+if snapshot_from_json "$media_key_wrong_path" "$media_key_compose" \
+  "$ENV_FILE" "$OVERRIDE_FILE" selected-compose-render target \
+  >/dev/null 2>"$TMP/media-key-source-mismatch.err"; then
+  printf '%s\n' 'FAIL media-key source mismatch was accepted' >&2
+  exit 1
+fi
+printf '%s\n' 'PASS media-key container mount must match the resolved Compose source'

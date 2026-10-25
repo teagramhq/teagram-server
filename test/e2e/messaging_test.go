@@ -410,6 +410,25 @@ func bootServerWithLimitsAndRegistrationModeAndBlobsAndStatusWithDeliveryHookAnd
 	photoThumbs ...*photothumb.Supervisor,
 ) (*mtproto.SessionRegistry, func()) {
 	t.Helper()
+	return bootServerWithLimitsAndRegistrationModeAndBlobsAndStatusWithDeliveryHookAndTurnstileAndWelcomeChannelAndStickerCatalog(
+		t, ctx, key, dcID, st, dsn, log, ln, rateLimits, regMode, blobs, persistStatus,
+		beforeDelivery, turnstileSiteKey, turnstileVerifier, welcomeChannel, turnstileSignInEnabled,
+		recoveryEmailMode, suppressChannelPostDelivery, nil, photoThumbs...,
+	)
+}
+
+func bootServerWithLimitsAndRegistrationModeAndBlobsAndStatusWithDeliveryHookAndTurnstileAndWelcomeChannelAndStickerCatalog(
+	t *testing.T, ctx context.Context, key *rsa.PrivateKey, dcID int, st *store.Store,
+	dsn string, log *slog.Logger, ln net.Listener, rateLimits config.RateLimitsConfig,
+	regMode config.RegistrationMode, blobs blob.Store, persistStatus bool,
+	beforeDelivery func(context.Context, int64), turnstileSiteKey string,
+	turnstileVerifier api.SignUpTurnstileVerifier, welcomeChannel string, turnstileSignInEnabled bool,
+	recoveryEmailMode config.RecoveryEmailMode,
+	suppressChannelPostDelivery func(channelID int64) bool,
+	stickerSets *api.StickerSetCatalog,
+	photoThumbs ...*photothumb.Supervisor,
+) (*mtproto.SessionRegistry, func()) {
+	t.Helper()
 	tgcfg := fixtureConfigForListener(t, dcID, ln)
 	// Sign-in here reads the code off the log, so the gated line must be on.
 	dialogFilterSync := api.NewDialogFilterSync()
@@ -417,11 +436,12 @@ func bootServerWithLimitsAndRegistrationModeAndBlobsAndStatusWithDeliveryHookAnd
 	if len(photoThumbs) > 0 {
 		photoThumb = photoThumbs[0]
 	}
-	handler := api.NewWithPhotoThumbsAndDialogFilterSyncAndUploadPartTTLAndTurnstileAndWelcomeChannelAndSignIn(
+	handler := api.NewWithPhotoThumbsAndDialogFilterSyncAndUploadPartTTLAndTurnstileAndWelcomeChannelAndSignInAndStickerCatalog(
 		st, dcID, tgcfg, log, true, 100<<20, blobs, 2<<30,
 		pgtest.PeerDeriver(), pgtest.PhotoDeriver(), rateLimits, regMode,
 		dialogFilterSync, photoThumb, config.DefaultUploadPartTTL,
 		turnstileSiteKey, turnstileVerifier, welcomeChannel, turnstileSignInEnabled, recoveryEmailMode,
+		stickerSets,
 	)
 	server := mtproto.New(exchange.PrivateKey{RSA: key}, dcID, mtproto.NewPgAuthKeyStore(st), handler, log)
 	if persistStatus {
@@ -436,7 +456,7 @@ func bootServerWithLimitsAndRegistrationModeAndBlobsAndStatusWithDeliveryHookAnd
 		})
 	}
 
-	updater := api.NewUpdaterWithDialogFilterSync(st, dcID, server.Registry(), log, pgtest.PeerDeriver(), dialogFilterSync)
+	updater := api.NewUpdaterWithDialogFilterSyncAndStickerCatalog(st, dcID, server.Registry(), log, pgtest.PeerDeriver(), dialogFilterSync, stickerSets)
 	deliverChannelPost := updater.DeliverChannelPost
 	if suppressChannelPostDelivery != nil {
 		deliverChannelPost = func(ctx context.Context, channelID int64) {

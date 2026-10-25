@@ -203,7 +203,7 @@ func (h *handlers) handleGetDialogs(r *mtproto.Request) (bin.Encoder, error) {
 			}
 			tlMsgs = append(tlMsgs, tlMessage)
 		} else {
-			tlMsgs = append(tlMsgs, messageToTL(m, topCreateUsers[i], files, nil, nil, h.dcID))
+			tlMsgs = append(tlMsgs, h.messageToTL(m, topCreateUsers[i], files, nil, nil, h.dcID))
 		}
 	}
 
@@ -240,7 +240,7 @@ func (h *handlers) handleGetDialogs(r *mtproto.Request) (bin.Encoder, error) {
 		tlDialogs = append(channelDialogs, tlDialogs...)
 		channelMsgs := make([]tg.MessageClass, 0, len(channelTops)+len(tlMsgs))
 		for _, m := range channelTops {
-			message, renderErr := channelMessageToTL(m, r.UserID, channelFiles, channelBroadcasts[m.ChannelID], h.dcID)
+			message, renderErr := h.channelMessageToTL(m, r.UserID, channelFiles, channelBroadcasts[m.ChannelID], h.dcID)
 			if renderErr != nil {
 				h.log.Error("render channel dialog poll description", "user_id", r.UserID, "channel_id", m.ChannelID, "local_id", m.LocalID, "err", renderErr)
 				return nil, errInternal
@@ -442,11 +442,11 @@ func (h *handlers) peerDialogsToTL(ctx context.Context, snapshot store.PeerDialo
 				}
 				tlMsgs = append(tlMsgs, tlMessage)
 			} else {
-				tlMsgs = append(tlMsgs, messageToTL(*selected.Message, createUsers, files, nil, nil, h.dcID))
+				tlMsgs = append(tlMsgs, h.messageToTL(*selected.Message, createUsers, files, nil, nil, h.dcID))
 			}
 		case selected.ChannelMessage != nil:
 			channel := snapshot.Channels[d.PeerID]
-			tlMessage, renderErr := channelMessageToTL(*selected.ChannelMessage, viewerID, files, !channel.Megagroup, h.dcID)
+			tlMessage, renderErr := h.channelMessageToTL(*selected.ChannelMessage, viewerID, files, !channel.Megagroup, h.dcID)
 			if renderErr != nil {
 				return nil, renderErr
 			}

@@ -45,6 +45,10 @@ func TestGetAvailableReactionsReturnsStableStandardDocuments(t *testing.T) {
 	if first.Hash == 0 {
 		t.Fatal("available reactions hash is zero")
 	}
+	const previousPaddedReactionCatalogHash = 303018940
+	if first.Hash != previousPaddedReactionCatalogHash {
+		t.Errorf("available reactions hash = %d, want prior center-icon hash %d", first.Hash, previousPaddedReactionCatalogHash)
+	}
 	if len(first.Reactions) != len(wantEmoticons) {
 		t.Fatalf("available reactions = %d, want %d", len(first.Reactions), len(wantEmoticons))
 	}
@@ -74,6 +78,12 @@ func TestGetAvailableReactionsReturnsStableStandardDocuments(t *testing.T) {
 			centerDocument := requireReactionDocument(t, centerIcon, want, "image/webp", ".webp")
 			if centerDocument.ID == static.ID {
 				t.Errorf("reaction %q center_icon reuses its full-size static icon document", want)
+			}
+			if centerDocument.ID != -int64(2*len(wantEmoticons)+i+1) {
+				t.Errorf("reaction %q center_icon id = %d, want historical id %d", want, centerDocument.ID, -int64(2*len(wantEmoticons)+i+1))
+			}
+			if i == 0 && centerDocument.AccessHash != 5531608559122588618 {
+				t.Errorf("first center_icon access_hash = %d, want historical hash 5531608559122588618", centerDocument.AccessHash)
 			}
 			if centerDocument.Date == 0 {
 				missingDates = append(missingDates, want+" center")

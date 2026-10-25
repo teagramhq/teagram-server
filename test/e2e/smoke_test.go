@@ -71,6 +71,10 @@ func TestSmoke(t *testing.T) {
 		t.Parallel()
 		testSmokeStickerSetCatalogue(t)
 	})
+	t.Run("sticker-bundle-catalogue", func(t *testing.T) {
+		t.Parallel()
+		testSmokeStickerBundleCatalogue(t)
+	})
 	t.Run("help-countries", func(t *testing.T) {
 		t.Parallel()
 		testSmokeHelpCountries(t)
@@ -5366,6 +5370,7 @@ type smokeFixture struct {
 	dsn                         string
 	store                       *store.Store
 	blobs                       blob.Store
+	stickerSets                 *api.StickerSetCatalog
 	photoThumbs                 *photothumb.Supervisor
 	codes                       *multiCodeSink
 	authHandles                 map[string]string
@@ -5838,10 +5843,10 @@ func (f *smokeFixture) start(t *testing.T, address string) {
 	}
 	f.port = tcpPort(t, ln)
 	f.listener = ln
-	registry, stop := bootServerWithLimitsAndRegistrationModeAndBlobsAndStatusWithDeliveryHookAndTurnstileAndWelcomeChannel(
+	registry, stop := bootServerWithLimitsAndRegistrationModeAndBlobsAndStatusWithDeliveryHookAndTurnstileAndWelcomeChannelAndStickerCatalog(
 		t, f.ctx, f.key, f.dcID, f.store, f.dsn, f.codes.Logger(), ln, f.rateLimits, f.regMode,
 		f.blobs, f.persistStatus, nil, f.turnstileSiteKey, f.turnstileVerifier, f.welcomeChannel,
-		f.turnstileSignInEnabled, f.recoveryEmailMode, f.suppressChannelPostDelivery, f.photoThumbs,
+		f.turnstileSignInEnabled, f.recoveryEmailMode, f.suppressChannelPostDelivery, f.stickerSets, f.photoThumbs,
 	)
 	f.registry = registry
 	f.setServerStop(t.Cleanup, stop)

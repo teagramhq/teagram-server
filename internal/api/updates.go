@@ -46,6 +46,10 @@ func replySnippet(s string) string {
 // id; a row whose file id is absent from it renders as a plain message.
 // reactions, when non-nil, populates the message's Reactions field.
 func messageToTL(m store.Message, createUsers []int64, files map[int64]tg.MessageMediaClass, replyTexts map[int32]string, reactions []store.Reaction, dcIDs ...int) tg.MessageClass {
+	return messageToTLWithStickerCatalog(m, createUsers, files, replyTexts, reactions, nil, dcIDs...)
+}
+
+func messageToTLWithStickerCatalog(m store.Message, createUsers []int64, files map[int64]tg.MessageMediaClass, replyTexts map[int32]string, reactions []store.Reaction, stickerSets *stickerSetCatalog, dcIDs ...int) tg.MessageClass {
 	if m.Action != store.ChatActionNone {
 		return &tg.MessageService{
 			ID:     int(m.LocalID),
@@ -94,7 +98,7 @@ func messageToTL(m store.Message, createUsers []int64, files map[int64]tg.Messag
 		if len(dcIDs) > 0 {
 			dcID = dcIDs[0]
 		}
-		if media, ok := stickerDocumentMedia(*m.StickerDocumentID, dcID); ok {
+		if media, ok := stickerDocumentMedia(stickerSets, *m.StickerDocumentID, dcID); ok {
 			msg.SetMedia(media)
 		} else {
 			msg.SetMedia(&tg.MessageMediaUnsupported{})
@@ -122,6 +126,10 @@ func messageToTL(m store.Message, createUsers []int64, files map[int64]tg.Messag
 		msg.SetReactions(reactionsToTL(reactions, m.OwnerID, m.PeerType == store.PeerTypeChat))
 	}
 	return msg
+}
+
+func (h *handlers) messageToTL(m store.Message, createUsers []int64, files map[int64]tg.MessageMediaClass, replyTexts map[int32]string, reactions []store.Reaction, dcIDs ...int) tg.MessageClass {
+	return messageToTLWithStickerCatalog(m, createUsers, files, replyTexts, reactions, h.stickerSets, dcIDs...)
 }
 
 // reactionsToTL is the single wire projection of stored reactions, shared by
@@ -184,6 +192,10 @@ func channelReactionsToTL(reactions []store.ChannelReactionCount, canSeeList boo
 // sentinel differs and the trap is worth naming:
 // channel_messages.file_id is NULL for no media, while messages.file_id is 0.
 func channelMessageToTL(m store.ChannelMessage, viewerID int64, files map[int64]tg.MessageMediaClass, broadcast bool, dcIDs ...int) (tg.MessageClass, error) {
+	return channelMessageToTLWithStickerCatalog(m, viewerID, files, broadcast, nil, dcIDs...)
+}
+
+func channelMessageToTLWithStickerCatalog(m store.ChannelMessage, viewerID int64, files map[int64]tg.MessageMediaClass, broadcast bool, stickerSets *stickerSetCatalog, dcIDs ...int) (tg.MessageClass, error) {
 	if m.Deleted {
 		return &tg.MessageEmpty{ID: int(m.LocalID)}, nil
 	}
@@ -266,7 +278,7 @@ func channelMessageToTL(m store.ChannelMessage, viewerID int64, files map[int64]
 		if len(dcIDs) > 0 {
 			dcID = dcIDs[0]
 		}
-		if media, ok := stickerDocumentMedia(*m.StickerDocumentID, dcID); ok {
+		if media, ok := stickerDocumentMedia(stickerSets, *m.StickerDocumentID, dcID); ok {
 			msg.SetMedia(media)
 		} else {
 			msg.SetMedia(&tg.MessageMediaUnsupported{})
@@ -287,6 +299,10 @@ func channelMessageToTL(m store.ChannelMessage, viewerID int64, files map[int64]
 		})
 	}
 	return msg, nil
+}
+
+func (h *handlers) channelMessageToTL(m store.ChannelMessage, viewerID int64, files map[int64]tg.MessageMediaClass, broadcast bool, dcIDs ...int) (tg.MessageClass, error) {
+	return channelMessageToTLWithStickerCatalog(m, viewerID, files, broadcast, h.stickerSets, dcIDs...)
 }
 
 // documentToTL names a stored file on the wire. It echoes only the supported
@@ -807,7 +823,7 @@ func (h *handlers) eventToUpdate(ctx context.Context, userID int64, ev store.Eve
 				}
 			}
 		}
-		tlMsg := messageToTL(m, createUsers, files, nil, nil, h.dcID)
+		tlMsg := h.messageToTL(m, createUsers, files, nil, nil, h.dcID)
 		if poll, ok := pollViews[m.LocalID]; ok {
 			pollMessage, pollErr := messageToTLWithPoll(m, createUsers, files, nil, nil, poll)
 			if pollErr != nil {
@@ -1222,7 +1238,7 @@ func (h *handlers) channelEventToUpdate(_ context.Context, channelID, viewerID i
 			h.log.Debug("channel message row not found", "local_id", ev.LocalID, "channel_id", channelID, "pts", ev.Pts)
 			return nil, nil, nil
 		}
-		message, err := channelMessageToTL(m, viewerID, files, broadcast, h.dcID)
+		message, err := h.channelMessageToTL(m, viewerID, files, broadcast, h.dcID)
 		if err != nil {
 			return nil, nil, err
 		}

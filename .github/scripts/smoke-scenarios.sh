@@ -1,6 +1,7 @@
 SMOKE_SCENARIOS=(
   launch-getters
   sticker-set-catalogue
+  sticker-bundle-catalogue
   reset-authorizations
   authorization-device-metadata
   authorization-ttl

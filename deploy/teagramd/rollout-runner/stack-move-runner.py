@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import copy
 import hashlib
 import importlib.machinery
 import importlib.util
@@ -488,6 +489,30 @@ def layout_changed(source: dict[str, object], target: dict[str, object]) -> bool
     if source == target:
         return False
     return not _is_approved_media_key_mount_addition(source, target)
+
+
+def ordinary_rollout_layout_changed(
+    source: dict[str, object],
+    target: dict[str, object],
+    target_config: dict[str, object],
+) -> bool:
+    if source == target:
+        return False
+    if target_config.get("name") != TARGET_PROJECT:
+        return True
+    services = target_config.get("services")
+    service = services.get(TARGET_SERVER) if isinstance(services, dict) else None
+    environment = service.get("environment") if isinstance(service, dict) else None
+    volumes = service.get("volumes") if isinstance(service, dict) else None
+    if not isinstance(environment, dict) or not isinstance(volumes, list):
+        return True
+    if environment.get("TG_MEDIA_KEY_DIR") != "/run/teagramd/media-keys":
+        return True
+    current_version = environment.get("TG_MEDIA_KEY_CURRENT")
+    if current_version != "1":
+        return True
+
+    return layout_changed(source, target)
 
 
 def write_private(path: pathlib.Path, data: bytes, *, exclusive: bool = True) -> None:
@@ -1820,7 +1845,7 @@ def inspect(args: argparse.Namespace) -> None:
         target_server_name = TARGET_SERVER if TARGET_SERVER in target_services else SOURCE_SERVER
         target_layout = layout(target, target_server_name)
         print(json.dumps({
-            "changed": layout_changed(source_layout, target_layout),
+            "changed": ordinary_rollout_layout_changed(source_layout, target_layout, target),
             "source": source_layout,
             "target": target_layout,
             "source_database": database_name(source),

@@ -68,7 +68,7 @@ func (h *handlers) setUserHistoryTTLAfterReply(
 	}
 	result := &tg.Updates{
 		Updates: []tg.UpdateClass{&tg.UpdateNewMessage{
-			Message: messageToTL(sender, nil, nil, nil, nil, h.dcID), Pts: senderPts, PtsCount: 1,
+			Message: h.messageToTL(sender, nil, nil, nil, nil, h.dcID), Pts: senderPts, PtsCount: 1,
 		}},
 		Users: users,
 		Date:  int(sender.Date.Unix()),
@@ -165,7 +165,7 @@ func (h *handlers) setChannelHistoryTTLAfterReply(
 		h.log.Error("set channel history TTL: load user", "user_id", r.UserID, "channel_id", channelID, "err", err)
 		return nil, nil, nil, errInternal
 	}
-	message, err := channelMessageToTL(service, r.UserID, nil, !channel.Megagroup, h.dcID)
+	message, err := h.channelMessageToTL(service, r.UserID, nil, !channel.Megagroup, h.dcID)
 	if err != nil {
 		h.notifyChannelPost(r.Ctx, channelID)
 		h.log.Error("set channel history TTL: render service message", "channel_id", channelID, "local_id", service.LocalID, "err", err)
