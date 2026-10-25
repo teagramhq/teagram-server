@@ -637,6 +637,8 @@ snapshot_from_json() {
     return 1
   }
   container_logging_sha=$(sha256_text "$container_logging_config")
+  # Empty mapped key-exchange values use the binary defaults, so they stay
+  # equivalent to an absent variable; configured values remain pinned.
   container_env=$(printf '%s' "$inspect_json" | jq -ce --argjson added "$added_env_names" --argjson changed "$changed_env_names" '
     def item: if type == "array" then .[0] else . end;
     def runtime_name($name):
@@ -651,6 +653,13 @@ snapshot_from_json() {
         | map(select(type != "string" or ((split("=")[0]) as $key | (["TG_PUBLIC_WEBSOCKET_LISTEN_ADDR", "TG_PUBLIC_WEBSOCKET_ADVERTISE_ADDR", "TG_PUBLIC_REGISTRATION", "TG_PUBLIC_WEBSOCKET_ALLOWED_ORIGINS", "TG_WELCOME_CHANNEL"] | index($key) == null))))
         | map(select(type != "string" or ((split("=")[0]) as $key | any($added[]; runtime_name(.) == $key) | not)))
         | map(select(type != "string" or ((split("=")[0]) as $key | any($changed[]; . == $key) | not)))
+        | map(select(type != "string" or (IN(
+            "TG_RATE_LIMIT_KEY_EXCHANGE_IP=",
+            "TG_RATE_LIMIT_KEY_EXCHANGE_IP_WINDOW=",
+            "TG_KEY_EXCHANGE_PER_CONNECTION=",
+            "TG_KEY_EXCHANGE_GLOBAL_RATE=",
+            "TG_KEY_EXCHANGE_GLOBAL_BURST="
+          ) | not)))
         | map(select(type != "string" or (
             (. == "TG_TURNSTILE_SITE_KEY=" or
              . == "TG_TURNSTILE_SECRET_KEY_FILE=" or
@@ -741,6 +750,14 @@ snapshot_from_json() {
         ((.protocol // "tcp") == "tcp") and
         ((.mode // "") == "" or (.mode // "") == "ingress") and
         ((keys - ["target", "published", "host_ip", "protocol", "mode"]) | length) == 0;
+      def empty_key_exchange_default:
+        (.key | IN(
+          "TG_RATE_LIMIT_KEY_EXCHANGE_IP",
+          "TG_RATE_LIMIT_KEY_EXCHANGE_IP_WINDOW",
+          "TG_KEY_EXCHANGE_PER_CONNECTION",
+          "TG_KEY_EXCHANGE_GLOBAL_RATE",
+          "TG_KEY_EXCHANGE_GLOBAL_BURST"
+        )) and .value == "";
       if (.services.teagramd.environment | type) != "object" then error("teagramd environment must be an object") else
         .services.teagramd.environment |= del(
           .TG_REPLICA_COUNT, .TG_CLIENT_ADDR_TRUST,
@@ -752,6 +769,9 @@ snapshot_from_json() {
           .TG_TURNSTILE_SITE_KEY, .TG_TURNSTILE_SECRET_KEY_FILE,
           .TG_TURNSTILE_SIGNIN_ENABLED)
       end
+      # Empty key-exchange mappings use binary defaults; active values remain
+      # subject to the Compose and container environment checks.
+      | .services.teagramd.environment |= with_entries(select(empty_key_exchange_default | not))
       # Reviewed logger and login-code transitions are checked separately.
       # Keep both out of the unrelated config digest.
       | .services.teagramd |= del(.logging)

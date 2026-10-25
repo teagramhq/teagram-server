@@ -181,10 +181,14 @@ reviewed artifact and content pin before rollout.
 
 Ordinary `apply` compares the checked-out baseline Compose project and
 persistent mounts with the target render before creating evidence, dumping the
-database, building, or stopping a container. A project or mount change fails
-closed and asks for the explicit `move-stack` action. `deploy-main.sh` continues
-to call `apply`, so a main-branch deployment that contains the rename exits
-before changing the running stack until the move action is run.
+database, building, or stopping a container. The only permitted layout change
+is adding the exact read-only `/etc/teagramd/media-keys` bind mount at
+`/run/teagramd/media-keys` to the existing `teagramd` service. Any project,
+volume, or other mount change fails closed and asks for the explicit
+`move-stack` action. `deploy-main.sh` continues to call `apply`, so a
+main-branch deployment that contains the project rename exits before changing
+the running stack until the move action is run. The normal readiness and
+rollback gates still apply when adding the media-key mount.
 
 The move action accepts only a reviewed fast-forward target on `origin/main`.
 It takes both the old and new deploy locks, stages `/opt/teagram` as a worktree,

@@ -1,6 +1,8 @@
 # Temporary API-seed configuration. The caller starts only teagramd with this
 # overlay while edge and HAProxy are stopped, then recreates teagramd from the
 # production Compose file before either public path starts.
+# Seeding opens many MTProto sessions from one host, so its key-exchange budget
+# is raised only for this private overlay.
 services:
   teagramd:
     environment:
@@ -17,6 +19,8 @@ services:
       TG_RATE_LIMIT_SEND_CODE_IP_PHONES: "32"
       TG_RATE_LIMIT_SEND_CODE_IP_PHONES_WINDOW: 1h
       TG_RATE_LIMIT_GET_PASSWORD_IP: "256"
+      TG_RATE_LIMIT_KEY_EXCHANGE_IP: "256"
+      TG_RATE_LIMIT_KEY_EXCHANGE_IP_WINDOW: 1h
       TG_RATE_LIMIT_SEND: "0"
     depends_on: !override
       migrate:
@@ -36,6 +40,8 @@ services:
       TG_RATE_LIMIT_SEND_CODE_IP_PHONES: "32"
       TG_RATE_LIMIT_SEND_CODE_IP_PHONES_WINDOW: 1h
       TG_RATE_LIMIT_GET_PASSWORD_IP: "256"
+      TG_RATE_LIMIT_KEY_EXCHANGE_IP: "256"
+      TG_RATE_LIMIT_KEY_EXCHANGE_IP_WINDOW: 1h
       TG_RATE_LIMIT_SEND: "0"
     depends_on: !override
       migrate:

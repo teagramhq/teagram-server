@@ -307,6 +307,13 @@ services:
       # The ordinary listener trusts its direct socket peer. The opt-in proxy
       # overlay changes only its replacement services to proxy-v2 trust.
       TG_CLIENT_ADDR_TRUST: socket
+      # Empty values preserve the binary defaults; operators can tune each
+      # key-exchange budget through the deployment environment.
+      TG_RATE_LIMIT_KEY_EXCHANGE_IP: ${TG_RATE_LIMIT_KEY_EXCHANGE_IP:-}
+      TG_RATE_LIMIT_KEY_EXCHANGE_IP_WINDOW: ${TG_RATE_LIMIT_KEY_EXCHANGE_IP_WINDOW:-}
+      TG_KEY_EXCHANGE_PER_CONNECTION: ${TG_KEY_EXCHANGE_PER_CONNECTION:-}
+      TG_KEY_EXCHANGE_GLOBAL_RATE: ${TG_KEY_EXCHANGE_GLOBAL_RATE:-}
+      TG_KEY_EXCHANGE_GLOBAL_BURST: ${TG_KEY_EXCHANGE_GLOBAL_BURST:-}
       # Retain the local data volume for the later verified transition and
       # recovery while the default backend uses S3.
       TG_BLOB_DIR: /var/lib/teagramd-blobs

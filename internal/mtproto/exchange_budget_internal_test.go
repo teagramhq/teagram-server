@@ -73,6 +73,11 @@ func TestExchangeBudgetRefusesBeforeExchange(t *testing.T) {
 		t.Fatalf("generate RSA key: %v", err)
 	}
 	server := New(exchange.PrivateKey{RSA: rsaKey}, 2, keys, nil, nil)
+	limits := DefaultExchangeLimits()
+	limits.TailnetPerNetwork = limits.PerNetwork
+	if err := server.SetExchangeLimits(limits); err != nil {
+		t.Fatalf("set key exchange limits: %v", err)
+	}
 	conn := &exchangeScriptConn{}
 	first := exchangeBudgetRequestFrame(t)
 
@@ -102,6 +107,11 @@ func TestExchangeBudgetServerRefusesWhenRateLimitStoreFails(t *testing.T) {
 		t.Fatalf("generate RSA key: %v", err)
 	}
 	server := New(exchange.PrivateKey{RSA: rsaKey}, 2, keys, nil, nil)
+	limits := DefaultExchangeLimits()
+	limits.TailnetPerNetwork = limits.PerNetwork
+	if err := server.SetExchangeLimits(limits); err != nil {
+		t.Fatalf("set key exchange limits: %v", err)
+	}
 	conn := &exchangeScriptConn{}
 	first := exchangeBudgetRequestFrame(t)
 
@@ -155,11 +165,13 @@ func TestExchangeBudgetGlobalCeilingSends429BeforeExchange(t *testing.T) {
 }
 
 func TestExchangeBudgetChargesLayersInOrder(t *testing.T) {
+	network := store.RateLimitConfig{Limit: 1, Window: time.Hour}
 	limits := ExchangeLimits{
-		PerConnection: 1,
-		PerNetwork:    store.RateLimitConfig{Limit: 1, Window: time.Hour},
-		GlobalRate:    1,
-		GlobalBurst:   1,
+		PerConnection:     1,
+		PerNetwork:        network,
+		TailnetPerNetwork: network,
+		GlobalRate:        1,
+		GlobalBurst:       1,
 	}
 	budget := newKeyExchangeBudget(limits)
 	keys := &exchangeBudgetTestStore{rateResult: &store.RateLimitResult{Wait: time.Hour}}
@@ -189,9 +201,10 @@ func TestExchangeBudgetChargesLayersInOrder(t *testing.T) {
 	}
 
 	globalOnlyAfterNetwork := newKeyExchangeBudget(ExchangeLimits{
-		PerNetwork:  store.RateLimitConfig{Limit: 1, Window: time.Hour},
-		GlobalRate:  1,
-		GlobalBurst: 1,
+		PerNetwork:        network,
+		TailnetPerNetwork: network,
+		GlobalRate:        1,
+		GlobalBurst:       1,
 	})
 	keys = &exchangeBudgetTestStore{}
 	if layer, err := globalOnlyAfterNetwork.charge(context.Background(), keys, nil, addr, store.RateLimitListenerTailnet, now); layer != "" || err != nil {
@@ -209,11 +222,13 @@ func TestExchangeBudgetChargesLayersInOrder(t *testing.T) {
 }
 
 func TestExchangeBudgetWithoutKeyableAddressSkipsOnlyNetworkLayer(t *testing.T) {
+	network := store.RateLimitConfig{Limit: 1, Window: time.Hour}
 	budget := newKeyExchangeBudget(ExchangeLimits{
-		PerConnection: 1,
-		PerNetwork:    store.RateLimitConfig{Limit: 1, Window: time.Hour},
-		GlobalRate:    1,
-		GlobalBurst:   1,
+		PerConnection:     1,
+		PerNetwork:        network,
+		TailnetPerNetwork: network,
+		GlobalRate:        1,
+		GlobalBurst:       1,
 	})
 	keys := &exchangeBudgetTestStore{}
 	var attempts int
@@ -247,7 +262,8 @@ func TestKeyExchangeListenerBudgetsUseSeparateSurfaces(t *testing.T) {
 }
 
 func TestExchangeBudgetUsesSeparateListenerNetworkCounters(t *testing.T) {
-	limits := ExchangeLimits{PerNetwork: store.RateLimitConfig{Limit: 20, Window: time.Hour}}
+	perNetwork := store.RateLimitConfig{Limit: 20, Window: time.Hour}
+	limits := ExchangeLimits{PerNetwork: perNetwork, TailnetPerNetwork: perNetwork}
 	budget := newKeyExchangeBudget(limits)
 	keys := &exchangeBudgetTestStore{}
 	addr := netip.MustParseAddr("2001:db8:1::3")
@@ -269,6 +285,105 @@ func TestExchangeBudgetUsesSeparateListenerNetworkCounters(t *testing.T) {
 	}
 	if keys.rateConfigs[0] != limits.PerNetwork || keys.rateConfigs[1] != limits.PerNetwork {
 		t.Fatalf("network configs = %v, want %v for both listeners", keys.rateConfigs, limits.PerNetwork)
+	}
+}
+
+func TestDisabledTailnetNetworkBudgetAllowsOverTwentyWhilePublicStillRefuses(t *testing.T) {
+	addr := netip.MustParseAddr("192.0.2.51")
+	now := time.Now()
+	limits := DefaultExchangeLimits()
+	limits.TailnetPerNetwork.Limit = 0
+	tailnetBudget := newKeyExchangeBudget(limits)
+	tailnetKeys := &memoryAuthKeyStore{}
+	for attempt := 1; attempt <= 21; attempt++ {
+		var connectionAttempts int
+		layer, err := tailnetBudget.charge(context.Background(), tailnetKeys, &connectionAttempts, addr, store.RateLimitListenerTailnet, now)
+		if layer != "" || err != nil {
+			t.Fatalf("tailnet attempt %d = (%q, %v), want admitted beyond the public default", attempt, layer, err)
+		}
+	}
+
+	publicBudget := newKeyExchangeBudget(limits)
+	publicKeys := &memoryAuthKeyStore{}
+	for attempt := 1; attempt <= 21; attempt++ {
+		var connectionAttempts int
+		layer, err := publicBudget.charge(context.Background(), publicKeys, &connectionAttempts, addr, store.RateLimitListenerPublic, now)
+		if attempt < 21 && (layer != "" || err != nil) {
+			t.Fatalf("public attempt %d = (%q, %v), want admitted", attempt, layer, err)
+		}
+		if attempt == 21 && (layer != "network" || err != nil) {
+			t.Fatalf("public attempt %d = (%q, %v), want network refusal", attempt, layer, err)
+		}
+	}
+}
+
+func TestDefaultExchangeBudgetLimitsBothListenerFamilies(t *testing.T) {
+	addr := netip.MustParseAddr("192.0.2.54")
+	now := time.Now()
+	for _, listener := range []store.RateLimitListener{store.RateLimitListenerTailnet, store.RateLimitListenerPublic} {
+		budget := newKeyExchangeBudget(DefaultExchangeLimits())
+		keys := &memoryAuthKeyStore{}
+		for attempt := 1; attempt <= 21; attempt++ {
+			var connectionAttempts int
+			layer, err := budget.charge(context.Background(), keys, &connectionAttempts, addr, listener, now)
+			if attempt < 21 && (layer != "" || err != nil) {
+				t.Fatalf("listener %d attempt %d = (%q, %v), want admitted", listener, attempt, layer, err)
+			}
+			if attempt == 21 && (layer != "network" || err != nil) {
+				t.Fatalf("listener %d attempt %d = (%q, %v), want network refusal", listener, attempt, layer, err)
+			}
+		}
+	}
+}
+
+func TestExplicitTailnetNetworkLimitAppliesOnlyToTailnetListener(t *testing.T) {
+	limits := DefaultExchangeLimits()
+	limits.PerConnection = 0
+	limits.TailnetPerNetwork.Limit = 1
+	addr := netip.MustParseAddr("192.0.2.52")
+	now := time.Now()
+	keys := &memoryAuthKeyStore{}
+	budget := newKeyExchangeBudget(limits)
+
+	if layer, err := budget.charge(context.Background(), keys, nil, addr, store.RateLimitListenerTailnet, now); layer != "" || err != nil {
+		t.Fatalf("first tailnet attempt = (%q, %v), want admitted", layer, err)
+	}
+	if layer, err := budget.charge(context.Background(), keys, nil, addr, store.RateLimitListenerTailnet, now); layer != "network" || err != nil {
+		t.Fatalf("second tailnet attempt = (%q, %v), want network refusal", layer, err)
+	}
+	if layer, err := budget.charge(context.Background(), keys, nil, addr, store.RateLimitListenerPublic, now); layer != "" || err != nil {
+		t.Fatalf("first public attempt = (%q, %v), want its independent budget admitted", layer, err)
+	}
+}
+
+func TestTailnetWithoutNetworkBudgetKeepsConnectionAndGlobalCaps(t *testing.T) {
+	limits := DefaultExchangeLimits()
+	limits.TailnetPerNetwork.Limit = 0
+	addr := netip.MustParseAddr("192.0.2.53")
+	now := time.Now().Add(time.Second)
+
+	connectionBudget := newKeyExchangeBudget(limits)
+	var attempts int
+	for attempt := 1; attempt <= limits.PerConnection+1; attempt++ {
+		layer, err := connectionBudget.charge(context.Background(), nil, &attempts, addr, store.RateLimitListenerTailnet, now)
+		if attempt <= limits.PerConnection && (layer != "" || err != nil) {
+			t.Fatalf("tailnet connection attempt %d = (%q, %v), want admitted", attempt, layer, err)
+		}
+		if attempt == limits.PerConnection+1 && (layer != "connection" || err != nil) {
+			t.Fatalf("tailnet connection attempt %d = (%q, %v), want connection refusal", attempt, layer, err)
+		}
+	}
+
+	globalBudget := newKeyExchangeBudget(limits)
+	for attempt := 1; attempt <= limits.GlobalBurst+1; attempt++ {
+		var connectionAttempts int
+		layer, err := globalBudget.charge(context.Background(), nil, &connectionAttempts, addr, store.RateLimitListenerTailnet, now)
+		if attempt <= limits.GlobalBurst && (layer != "" || err != nil) {
+			t.Fatalf("tailnet global attempt %d = (%q, %v), want admitted", attempt, layer, err)
+		}
+		if attempt == limits.GlobalBurst+1 && (layer != "global" || err != nil) {
+			t.Fatalf("tailnet global attempt %d = (%q, %v), want global refusal", attempt, layer, err)
+		}
 	}
 }
 
@@ -312,6 +427,16 @@ func TestExchangeLimitsRejectNegativeValuesAndDivideGlobalCeiling(t *testing.T) 
 	limits.PerNetwork.Window = -time.Second
 	if _, err := divideExchangeLimits(limits, 1); err == nil {
 		t.Fatal("negative per-network window was accepted")
+	}
+	limits = DefaultExchangeLimits()
+	limits.TailnetPerNetwork.Limit = -1
+	if _, err := divideExchangeLimits(limits, 1); err == nil {
+		t.Fatal("negative tailnet per-network limit was accepted")
+	}
+	limits = DefaultExchangeLimits()
+	limits.TailnetPerNetwork.Window = -time.Second
+	if _, err := divideExchangeLimits(limits, 1); err == nil {
+		t.Fatal("negative tailnet per-network window was accepted")
 	}
 	limits = DefaultExchangeLimits()
 	limits.GlobalRate = -1

@@ -79,8 +79,9 @@ Configuration is read from environment variables. The full reference is in [docs
 | `TG_MAX_PREAUTH_CONNS` | `1024` | Deployment-wide cap on unauthenticated connections; `0` disables it |
 | `TG_MAX_PREAUTH_CONNS_PER_IP` | `64` | Cap per client network; `0` disables it |
 | `TG_KEY_EXCHANGE_PER_CONNECTION` | `2` | Key exchanges per connection before refusal; `0` disables the cap |
-| `TG_RATE_LIMIT_KEY_EXCHANGE_IP` | `20` | Key exchanges per client network per window and listener; `0` disables it |
-| `TG_RATE_LIMIT_KEY_EXCHANGE_IP_WINDOW` | `1h` | Per-network key-exchange budget window |
+| `TG_RATE_LIMIT_KEY_EXCHANGE_IP` | `20` | Per-network key exchanges; when set, applies to both listener families; `0` disables it |
+| `TG_RATE_LIMIT_KEY_EXCHANGE_IP_TAILNET` | `20` | Tailnet-only per-network limit; overrides `TG_RATE_LIMIT_KEY_EXCHANGE_IP` when set; `0` disables it |
+| `TG_RATE_LIMIT_KEY_EXCHANGE_IP_WINDOW` | `1h` | Window for the public and tailnet per-network limits |
 | `TG_KEY_EXCHANGE_GLOBAL_RATE` | `5` | Deployment-wide key exchanges per second; `0` disables the ceiling |
 | `TG_KEY_EXCHANGE_GLOBAL_BURST` | `30` | Deployment-wide key-exchange burst; `0` disables the ceiling |
 | `TG_RATE_LIMIT_GET_FILE` | `50` | Per-account `upload.getFile` calls per window; `0` disables the limit |

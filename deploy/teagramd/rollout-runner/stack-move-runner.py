@@ -39,6 +39,13 @@ TARGET_SERVER = "teagramd"
 TARGET_IMAGE_NAME = "teagramd:local"
 PGDATA_MOUNT = "/var/lib/postgresql"
 PGDATA_PATH = "/var/lib/postgresql/18/docker"
+MEDIA_KEY_MOUNT = {
+    "type": "bind",
+    "source": "/etc/teagramd/media-keys",
+    "target": "/run/teagramd/media-keys",
+    "read_only": True,
+    "bind": {"create_host_path": False},
+}
 SOURCE_LOCAL_BLOB_PATH = "/var/lib/telegramd-blobs"
 TARGET_LOCAL_BLOB_PATH = "/var/lib/teagramd-blobs"
 MOVE_BLOB_DIR_ENV = "TEAGRAMD_STACK_MOVE_BLOB_DIR"
@@ -379,6 +386,7 @@ def service_mounts(config: dict[str, object], service_name: str) -> list[dict[st
             "source": mount.get("source", ""),
             "target": mount.get("target", ""),
             "read_only": mount.get("read_only", False),
+            "bind": mount.get("bind"),
         })
     return sorted(selected, key=lambda item: (str(item["target"]), str(item["source"])))
 
@@ -419,8 +427,53 @@ def layout(config: dict[str, object], service_name: str) -> dict[str, object]:
     }
 
 
+def _has_only_one_addition(source: object, target: object, addition: dict[str, object]) -> bool:
+    if not isinstance(source, list) or not isinstance(target, list):
+        return False
+    remaining = list(target)
+    for item in source:
+        try:
+            remaining.remove(item)
+        except ValueError:
+            return False
+    return remaining == [addition]
+
+
+def _is_approved_media_key_mount_addition(
+    source: dict[str, object], target: dict[str, object],
+) -> bool:
+    if source.keys() != target.keys() or any(
+        source.get(key) != target.get(key)
+        for key in ("project", "server", "postgres_mounts", "volumes")
+    ):
+        return False
+    if source.get("project") != TARGET_PROJECT or source.get("server") != TARGET_SERVER:
+        return False
+    if not _has_only_one_addition(
+        source.get("server_mounts"), target.get("server_mounts"), MEDIA_KEY_MOUNT,
+    ):
+        return False
+
+    source_services = source.get("persistent_service_mounts")
+    target_services = target.get("persistent_service_mounts")
+    if not isinstance(source_services, dict) or not isinstance(target_services, dict):
+        return False
+    if source_services.keys() != target_services.keys():
+        return False
+    for service, source_mounts in source_services.items():
+        target_mounts = target_services[service]
+        if service == TARGET_SERVER:
+            if not _has_only_one_addition(source_mounts, target_mounts, MEDIA_KEY_MOUNT):
+                return False
+        elif source_mounts != target_mounts:
+            return False
+    return True
+
+
 def layout_changed(source: dict[str, object], target: dict[str, object]) -> bool:
-    return source != target
+    if source == target:
+        return False
+    return not _is_approved_media_key_mount_addition(source, target)
 
 
 def write_private(path: pathlib.Path, data: bytes, *, exclusive: bool = True) -> None:
