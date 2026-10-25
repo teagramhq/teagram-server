@@ -16,7 +16,7 @@ docker run -d --name "$PERF_PG_CONTAINER" -p 5432:5432 --shm-size=1g \
   -e POSTGRES_PASSWORD=perf -v "$PERF_CACHE:/cache" \
   mirror.gcr.io/postgres:18-alpine -c shared_buffers=1GB -c max_connections=200 -c autovacuum=off
 for _ in $(seq 1 60); do
-  if docker exec "$PERF_PG_CONTAINER" pg_isready -U postgres -q; then
+  if docker exec "$PERF_PG_CONTAINER" pg_isready -h 127.0.0.1 -U postgres -q; then
     exit 0
   fi
   sleep 1
