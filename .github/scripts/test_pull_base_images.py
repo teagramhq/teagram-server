@@ -142,6 +142,43 @@ class PullBaseImagesTests(unittest.TestCase):
             f"::error::pull of {IMAGES[0]} failed after 4 attempts", result.stdout
         )
 
+    def test_perf_postgres_waits_for_tcp_listener(self) -> None:
+        fake_docker = """#!/usr/bin/env bash
+set -euo pipefail
+case "$1" in
+  pull) exit 0 ;;
+  run) echo fake-container-id ;;
+  exec)
+    shift
+    shift
+    printf '%s\\n' "$*" >> "$FAKE_DOCKER_DIR/readiness"
+    [[ " $* " == *" -h 127.0.0.1 "* ]] || exit 0
+    [ "$(wc -l < "$FAKE_DOCKER_DIR/readiness")" -gt 1 ]
+    ;;
+  *) echo "unexpected docker $*" >&2; exit 64 ;;
+esac
+"""
+        docker = self.dir / "bin" / "docker"
+        docker.write_text(fake_docker, encoding="utf-8")
+        cache = self.dir / "perf-cache"
+        result = subprocess.run(
+            ["bash", str(ROOT / ".github/scripts/perf-postgres.sh")],
+            env={
+                **self.env,
+                "PERF_PG_CONTAINER": "perf-pg",
+                "PERF_CACHE": str(cache),
+            },
+            capture_output=True,
+            text=True,
+            timeout=60,
+            check=False,
+        )
+        readiness = (self.dir / "readiness").read_text(encoding="utf-8").splitlines()
+
+        self.assertEqual(0, result.returncode, result.stdout + result.stderr)
+        self.assertEqual(2, len(readiness))
+        self.assertTrue(all("-h 127.0.0.1" in call for call in readiness))
+
     def test_real_client_workflow_pulls_fixture_bases_before_starting(self) -> None:
         workflow = (
             ROOT / ".github/workflows/real-client-browser-flow.yml"
