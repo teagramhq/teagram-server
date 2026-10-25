@@ -134,7 +134,11 @@ class DockerImageMirrorTests(unittest.TestCase):
             "ghcr.io/teagramhq/teagram-server-busybox:1.37@sha256:"
             "bdf57e528e45e4433820e045b29b4597825a1c9e38353532d90a01445013f82e"
         )
-        self.assertIn("needs: mirror-rustfs-qualification-images", job)
+        self.assertRegex(
+            job,
+            r"(?m)^    needs:\n      - mirror-rustfs-qualification-images\n      - sticker-bundle$",
+        )
+        self.assertIn("needs.sticker-bundle.result == 'success'", job)
         self.assertIn("packages: read", job)
         self.assertIn("docker login ghcr.io", job)
         self.assertIn(f"BUSYBOX_IMAGE: {image}", job)
