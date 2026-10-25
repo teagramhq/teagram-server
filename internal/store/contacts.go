@@ -23,8 +23,12 @@ var ErrContactLimit = errors.New("contact limit reached")
 const MaxContactsPerUser = 5000
 
 // WithMaxContactsPerUser replaces the per-account contact bound for one Store.
-// The server never sets it; the performance fixture needs more contacts than
-// the shipped bound to measure account-scale behavior.
+// This process-level option can only be set by trusted code constructing the
+// Store; request data cannot change it. The server keeps the shipped 5,000
+// contact bound, while the performance fixture raises it to 10,000. A higher
+// bound allows each account to persist more contact edges, increasing database
+// use and the work of contact-list and reconciliation operations; it does not
+// change contact access or privacy rules. Non-positive values are ignored.
 func WithMaxContactsPerUser(n int) Option {
 	return func(s *Store) {
 		if n > 0 {
