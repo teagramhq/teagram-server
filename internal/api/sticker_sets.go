@@ -233,21 +233,27 @@ func appendStickerBundle(catalog *stickerSetCatalog, bundle *stickerbundle.Bundl
 			digest := namespacedDigest("teagram-bundle-sticker-document-v1", appendHashPart(nil,
 				[]byte(pack.ShortName), []byte(sticker.Emoji), []byte(sticker.File), sticker.SHA256[:],
 			))
+			attributes := make([]tg.DocumentAttributeClass, 0, 3)
+			if sticker.Animated {
+				attributes = append(attributes, &tg.DocumentAttributeAnimated{})
+			} else {
+				attributes = append(attributes, &tg.DocumentAttributeImageSize{W: 512, H: 512})
+			}
+			attributes = append(attributes,
+				&tg.DocumentAttributeSticker{
+					Alt:        sticker.Emoji,
+					Stickerset: &tg.InputStickerSetID{ID: set.set.ID, AccessHash: set.set.AccessHash},
+				},
+				&tg.DocumentAttributeFilename{FileName: filename},
+			)
 			document := &tg.Document{
 				ID:            negativeContentID(digest[:8]),
 				AccessHash:    positiveContentHash(digest[8:16]),
 				FileReference: bytes.Clone(digest[16:]),
 				Date:          twemojiReactionDocumentDate,
-				MimeType:      "image/webp",
+				MimeType:      sticker.MimeType,
 				Size:          sticker.Size,
-				Attributes: []tg.DocumentAttributeClass{
-					&tg.DocumentAttributeImageSize{W: 512, H: 512},
-					&tg.DocumentAttributeSticker{
-						Alt:        sticker.Emoji,
-						Stickerset: &tg.InputStickerSetID{ID: set.set.ID, AccessHash: set.set.AccessHash},
-					},
-					&tg.DocumentAttributeFilename{FileName: filename},
-				},
+				Attributes:    attributes,
 			}
 			set.documents = append(set.documents, document)
 			set.packs = append(set.packs, tg.StickerPack{Emoticon: sticker.Emoji, Documents: []int64{document.ID}})
@@ -507,6 +513,8 @@ func cloneStickerDocument(source *tg.Document, dcID int) *tg.Document {
 	document.Attributes = append([]tg.DocumentAttributeClass(nil), source.Attributes...)
 	for i, attribute := range document.Attributes {
 		switch value := attribute.(type) {
+		case *tg.DocumentAttributeAnimated:
+			document.Attributes[i] = &tg.DocumentAttributeAnimated{}
 		case *tg.DocumentAttributeImageSize:
 			cloned := *value
 			document.Attributes[i] = &cloned
