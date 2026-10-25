@@ -1151,6 +1151,7 @@ jobs:
           push: true
           tags: ghcr.io/teagramhq/teagram-server-demo:sha-${{ github.sha }}
           build-args: |
+            STICKER_BUNDLE_SOURCE=sticker-bundle
             TEAGRAMD_SOURCE_REVISION=${{ github.sha }}
           labels: |
             org.opencontainers.image.source=https://github.com/teagramhq/teagram-server
@@ -1716,6 +1717,7 @@ jobs:
           tags: teagramd:ci
           load: true
           build-args: |
+            STICKER_BUNDLE_SOURCE=sticker-bundle
             TEAGRAMD_SOURCE_REVISION=${{ github.sha }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
@@ -1750,6 +1752,8 @@ jobs:
           build-contexts: sticker-bundle=build
           tags: teagramd:ci-no-revision
           load: true
+          build-args: |
+            STICKER_BUNDLE_SOURCE=sticker-bundle
           cache-from: type=gha
 
       - name: Check missing source revision label
@@ -1924,6 +1928,7 @@ jobs:
           tags: teagramd:local
           load: true
           build-args: |
+            STICKER_BUNDLE_SOURCE=sticker-bundle
             TEAGRAMD_SOURCE_REVISION=${{ github.sha }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
@@ -2757,9 +2762,11 @@ jobs:
 
   photothumb-runtime:
     name: photo worker runtime (${{ matrix.arch }})
+    needs: sticker-bundle
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 20
     permissions:
+      actions: read
       contents: read
     strategy:
       fail-fast: false
@@ -2774,6 +2781,15 @@ jobs:
 
     steps:
       - uses: actions/checkout@v7.0.1
+
+      - uses: actions/download-artifact@v8.0.2
+        with:
+          name: sticker-catalogue-bundle
+          path: build/sticker-bundle
+
+      - uses: docker/setup-buildx-action@v4.4.1
+        with:
+          driver: docker
 
       - name: Prepare the qualified replacement fixture
         run: |
@@ -2799,7 +2815,11 @@ jobs:
         run: |
           set -euo pipefail
           fixture="$RUNNER_TEMP/replacement-1600x1600.jpg"
-          docker build --tag photothumb-runtime:qualification .
+          docker buildx build \
+            --load \
+            --build-context sticker-bundle=build \
+            --build-arg STICKER_BUNDLE_SOURCE=sticker-bundle \
+            --tag photothumb-runtime:qualification .
           image_arch=$(docker image inspect --format '{{.Architecture}}' photothumb-runtime:qualification)
           [ "$image_arch" = "$EXPECTED_ARCH" ] || {
             echo "built image architecture is '$image_arch', want '$EXPECTED_ARCH'"
