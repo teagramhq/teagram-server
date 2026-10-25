@@ -3,8 +3,12 @@ package store_test
 import (
 	"context"
 	"fmt"
+	"sync"
 	"testing"
 
+	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/teagramhq/teagram-server/internal/pgtest"
 	"github.com/teagramhq/teagram-server/internal/store"
 )
 
@@ -174,4 +178,128 @@ func TestDialogsPaging(t *testing.T) {
 	if next[0].TopMessage != first[page-1].TopMessage-1 {
 		t.Fatalf("second page starts at %d, want %d", next[0].TopMessage, first[page-1].TopMessage-1)
 	}
+}
+
+func TestMaintainedDialogCount(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	dsn := pgtest.DSN(t)
+	s := openStore(t, dsn)
+	pool, err := pgxpool.New(ctx, dsn)
+	if err != nil {
+		t.Fatalf("open test pool: %v", err)
+	}
+	t.Cleanup(pool.Close)
+
+	owner := mustUser(t, s, "+15551263999")
+	assertCount := func(want int) {
+		t.Helper()
+		var stored, actual int64
+		if err := pool.QueryRow(ctx, `
+			SELECT COALESCE((
+				SELECT dialog_count FROM owner_dialog_counts
+				WHERE owner_id = $1 AND initialized
+			), -1),
+			(SELECT count(*) FROM dialogs WHERE owner_id = $1)
+		`, owner.ID).Scan(&stored, &actual); err != nil {
+			t.Fatalf("read maintained dialog count: %v", err)
+		}
+		if stored != actual || actual != int64(want) {
+			t.Fatalf("maintained dialog count = %d, dialogs rows = %d; want both %d", stored, actual, want)
+		}
+		if got, err := s.CountDialogs(ctx, owner.ID); err != nil || got != want {
+			t.Fatalf("CountDialogs = %d, err %v; want %d", got, err, want)
+		}
+	}
+	insert := func(peerType int16, peerID int64) {
+		t.Helper()
+		if _, err := pool.Exec(ctx, `
+			INSERT INTO dialogs (owner_id, peer_type, peer_id, top_message)
+			VALUES ($1, $2, $3, 0)
+		`, owner.ID, peerType, peerID); err != nil {
+			t.Fatalf("insert dialog %d/%d: %v", peerType, peerID, err)
+		}
+	}
+
+	assertCount(0)
+	insert(1, 700001)
+	assertCount(1)
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO dialogs (owner_id, peer_type, peer_id, top_message)
+		VALUES ($1, 1, 700001, 1)
+		ON CONFLICT (owner_id, peer_type, peer_id)
+		DO UPDATE SET top_message = EXCLUDED.top_message
+	`, owner.ID); err != nil {
+		t.Fatalf("upsert existing dialog: %v", err)
+	}
+	assertCount(1)
+
+	const concurrentCreates = 32
+	start := make(chan struct{})
+	errs := make(chan error, concurrentCreates)
+	var wg sync.WaitGroup
+	for i := range concurrentCreates {
+		wg.Add(1)
+		go func(peerID int64) {
+			defer wg.Done()
+			<-start
+			_, err := pool.Exec(ctx, `
+				INSERT INTO dialogs (owner_id, peer_type, peer_id, top_message)
+				VALUES ($1, 1, $2, 0)
+			`, owner.ID, peerID)
+			errs <- err
+		}(int64(710000 + i))
+	}
+	close(start)
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			t.Fatalf("concurrent dialog create: %v", err)
+		}
+	}
+	assertCount(concurrentCreates + 1)
+
+	const concurrentDeletes = 16
+	start = make(chan struct{})
+	errs = make(chan error, concurrentDeletes)
+	for i := range concurrentDeletes {
+		wg.Add(1)
+		go func(peerID int64) {
+			defer wg.Done()
+			<-start
+			_, err := pool.Exec(ctx, `
+				DELETE FROM dialogs WHERE owner_id = $1 AND peer_id = $2
+			`, owner.ID, peerID)
+			errs <- err
+		}(int64(710000 + i))
+	}
+	close(start)
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			t.Fatalf("concurrent dialog delete: %v", err)
+		}
+	}
+	assertCount(concurrentCreates + 1 - concurrentDeletes)
+
+	if _, err := pool.Exec(ctx, `DELETE FROM dialogs WHERE owner_id = $1 AND peer_id = $2`, owner.ID, 700001); err != nil {
+		t.Fatalf("delete dialog: %v", err)
+	}
+	assertCount(concurrentCreates - concurrentDeletes)
+
+	insert(3, 720001)
+	assertCount(concurrentCreates - concurrentDeletes + 1)
+	// Channel deletion removes its owner dialogs with a direct DELETE, bypassing
+	// the store's single-dialog delete method.
+	if _, err := pool.Exec(ctx, `DELETE FROM dialogs WHERE peer_type = 3 AND peer_id = $1`, 720001); err != nil {
+		t.Fatalf("delete channel dialogs: %v", err)
+	}
+	assertCount(concurrentCreates - concurrentDeletes)
+
+	if _, err := pool.Exec(ctx, `DELETE FROM dialogs WHERE owner_id = $1`, owner.ID); err != nil {
+		t.Fatalf("delete all owner dialogs: %v", err)
+	}
+	assertCount(0)
 }

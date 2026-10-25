@@ -31,11 +31,13 @@ func (q *Queries) ContactExists(ctx context.Context, arg ContactExistsParams) (b
 const contactStates = `-- name: ContactStates :many
 SELECT uc.contact_id,
        EXISTS (
-           SELECT 1 FROM user_contacts reverse
+           SELECT 1
+           FROM user_contacts AS reverse
            WHERE reverse.owner_id = uc.contact_id
              AND reverse.contact_id = uc.owner_id
+           LIMIT 1
        ) AS mutual
-FROM user_contacts uc
+FROM user_contacts AS uc
 WHERE uc.owner_id = $1
   AND uc.contact_id = ANY($2::bigint[])
 ORDER BY uc.contact_id

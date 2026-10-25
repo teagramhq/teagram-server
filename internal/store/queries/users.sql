@@ -56,9 +56,15 @@ SELECT id FROM (
 WHERE id = sqlc.arg(viewer_id)::bigint
    OR EXISTS (
        SELECT 1 FROM dialogs d
-       WHERE d.peer_type = 1
-         AND ((d.owner_id = sqlc.arg(viewer_id)::bigint AND d.peer_id = id)
-           OR (d.owner_id = id AND d.peer_id = sqlc.arg(viewer_id)::bigint))
+       WHERE d.owner_id = sqlc.arg(viewer_id)::bigint
+         AND d.peer_type = 1
+         AND d.peer_id = id
+   )
+   OR EXISTS (
+       SELECT 1 FROM dialogs d
+       WHERE d.owner_id = id
+         AND d.peer_type = 1
+         AND d.peer_id = sqlc.arg(viewer_id)::bigint
    )
    OR EXISTS (
        SELECT 1 FROM chat_participants p1

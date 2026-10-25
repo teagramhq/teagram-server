@@ -399,6 +399,85 @@ func TestChatAdminMarkerIndexesSupportParticipantCascades(t *testing.T) {
 	}
 }
 
+func TestOwnerDialogCountsBackfillExistingDialogs(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	dsn := pgtest.DSN(t)
+	s := openStore(t, dsn)
+	owner := mustUser(t, s, "+15551263998")
+	emptyOwner := mustUser(t, s, "+15551263997")
+	conn, err := pgx.Connect(ctx, dsn)
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := conn.Close(ctx); err != nil {
+			t.Errorf("close connection: %v", err)
+		}
+	})
+
+	if _, err := conn.Exec(ctx, `
+		DROP TRIGGER dialogs_track_owner_count ON public.dialogs;
+		DROP TRIGGER users_initialize_owner_dialog_count ON public.users;
+		DROP FUNCTION public.initialize_owner_dialog_count_for_user();
+		DROP FUNCTION public.track_owner_dialog_count();
+		DROP FUNCTION public.apply_owner_dialog_count_delta(BIGINT, BIGINT);
+		DROP TABLE public.owner_dialog_counts;
+	`); err != nil {
+		t.Fatalf("remove current dialog count schema: %v", err)
+	}
+	for peerID := int64(730001); peerID < 730004; peerID++ {
+		if _, err := conn.Exec(ctx, `
+			INSERT INTO dialogs (owner_id, peer_type, peer_id, top_message)
+			VALUES ($1, 1, $2, 0)
+		`, owner.ID, peerID); err != nil {
+			t.Fatalf("seed existing dialog %d: %v", peerID, err)
+		}
+	}
+
+	for _, filename := range []string{
+		"20261025000001_owner_dialog_counts.sql",
+		"20261025000002_backfill_owner_dialog_counts.sql",
+		"20261025000003_owner_dialog_counts_for_users.sql",
+		"20261025000004_backfill_zero_dialog_counts.sql",
+	} {
+		migration, err := os.ReadFile(filepath.Join("..", "..", "migrations", filename))
+		if err != nil {
+			t.Fatalf("read migration %s: %v", filename, err)
+		}
+		if _, err := conn.Exec(ctx, string(migration)); err != nil {
+			t.Fatalf("apply migration %s: %v", filename, err)
+		}
+	}
+
+	var stored, actual int64
+	if err := conn.QueryRow(ctx, `
+		SELECT counts.dialog_count, (
+			SELECT count(*) FROM public.dialogs WHERE owner_id = counts.owner_id
+		)
+		FROM public.owner_dialog_counts AS counts
+		WHERE counts.owner_id = $1 AND counts.initialized
+	`, owner.ID).Scan(&stored, &actual); err != nil {
+		t.Fatalf("read backfilled dialog count: %v", err)
+	}
+	if stored != 3 || actual != 3 {
+		t.Fatalf("backfilled dialog count = %d, dialogs rows = %d; want both 3", stored, actual)
+	}
+	if count, err := s.CountDialogs(ctx, owner.ID); err != nil || count != 3 {
+		t.Fatalf("CountDialogs after backfill = %d, err %v; want 3", count, err)
+	}
+	if err := conn.QueryRow(ctx, `
+		SELECT dialog_count
+		FROM public.owner_dialog_counts
+		WHERE owner_id = $1 AND initialized
+	`, emptyOwner.ID).Scan(&stored); err != nil {
+		t.Fatalf("read backfilled zero dialog count: %v", err)
+	}
+	if stored != 0 {
+		t.Fatalf("backfilled zero dialog count = %d, want 0", stored)
+	}
+}
+
 func TestOpenRejectsMissingCurrentChatPhotoIndex(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()

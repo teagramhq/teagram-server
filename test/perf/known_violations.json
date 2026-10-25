@@ -1,6 +1,4 @@
 [
-  {"scenario": "messages.getDialogs", "check": "queries", "issue": "MAIN-2534"},
-  {"scenario": "messages.getDialogs", "check": "rows", "issue": "MAIN-2534"},
   {"scenario": "messages.getHistory oldest page", "check": "rows", "issue": "MAIN-2535"},
   {"scenario": "updates.getDifference 1 day offline", "check": "queries", "issue": "MAIN-2536"},
   {"scenario": "channels.getParticipants", "check": "rows", "issue": "MAIN-2537"},

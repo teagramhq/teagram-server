@@ -267,12 +267,16 @@ func (q *Queries) CountDialogsExcludingPinned(ctx context.Context, ownerID int64
 }
 
 const countDialogsForOwner = `-- name: CountDialogsForOwner :one
-SELECT count(*)::int FROM dialogs WHERE owner_id = $1
+SELECT COALESCE((
+    SELECT dialog_count::int
+    FROM owner_dialog_counts
+    WHERE owner_id = $1 AND initialized
+), 0)::int
 `
 
-// CountDialogsForOwner is the total the truncated reply advertises, so a client
-// knows more pages exist. Unfiltered by offset on purpose: it is the size of the
-// whole list, not of the remainder.
+// CountDialogsForOwner is the exact total the truncated reply advertises. It is
+// maintained for every dialogs row, unfiltered by offset, so this lookup stays
+// constant cost as the owner's list grows.
 func (q *Queries) CountDialogsForOwner(ctx context.Context, ownerID int64) (int32, error) {
 	row := q.db.QueryRow(ctx, countDialogsForOwner, ownerID)
 	var column_1 int32
