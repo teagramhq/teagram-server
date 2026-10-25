@@ -25,17 +25,23 @@ func TestAnimatedStickerBundleDocumentsUseTGSMetadata(t *testing.T) {
 	if document.MimeType != "application/x-tgsticker" {
 		t.Fatalf("animated sticker MIME type = %q, want application/x-tgsticker", document.MimeType)
 	}
-	var hasAnimated, hasImageSize bool
+	var hasAnimated, hasImageSize, hasSticker, hasFilename bool
+	var imageWidth, imageHeight int
 	for _, attribute := range document.Attributes {
-		switch attribute.(type) {
+		switch value := attribute.(type) {
 		case *tg.DocumentAttributeAnimated:
 			hasAnimated = true
 		case *tg.DocumentAttributeImageSize:
 			hasImageSize = true
+			imageWidth, imageHeight = value.W, value.H
+		case *tg.DocumentAttributeSticker:
+			hasSticker = true
+		case *tg.DocumentAttributeFilename:
+			hasFilename = true
 		}
 	}
-	if !hasAnimated || hasImageSize {
-		t.Fatalf("animated sticker attributes = %#v, want animated and no static image-size attribute", document.Attributes)
+	if hasAnimated || !hasImageSize || imageWidth != 512 || imageHeight != 512 || !hasSticker || !hasFilename {
+		t.Fatalf("animated sticker attributes = %#v, want 512x512 image size, sticker, and filename attributes without animated", document.Attributes)
 	}
 }
 

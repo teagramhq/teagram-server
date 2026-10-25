@@ -115,14 +115,21 @@ func testSmokeStickerBundleCatalogue(t *testing.T) {
 	if animatedDocument.MimeType != "application/x-tgsticker" || animatedDocument.Size != int64(len(animatedBytes)) {
 		t.Fatalf("animated sticker MIME and size = %q / %d, want application/x-tgsticker / %d", animatedDocument.MimeType, animatedDocument.Size, len(animatedBytes))
 	}
-	var hasAnimatedAttribute bool
+	var hasAnimatedAttribute, hasImageSize, hasStickerAttribute bool
+	var imageWidth, imageHeight int
 	for _, attribute := range animatedDocument.Attributes {
-		if _, ok := attribute.(*tg.DocumentAttributeAnimated); ok {
+		switch value := attribute.(type) {
+		case *tg.DocumentAttributeAnimated:
 			hasAnimatedAttribute = true
+		case *tg.DocumentAttributeImageSize:
+			hasImageSize = true
+			imageWidth, imageHeight = value.W, value.H
+		case *tg.DocumentAttributeSticker:
+			hasStickerAttribute = true
 		}
 	}
-	if !hasAnimatedAttribute {
-		t.Fatalf("animated sticker attributes = %#v, want documentAttributeAnimated", animatedDocument.Attributes)
+	if hasAnimatedAttribute || !hasImageSize || imageWidth != 512 || imageHeight != 512 || !hasStickerAttribute {
+		t.Fatalf("animated sticker attributes = %#v, want 512x512 image size and sticker attributes without documentAttributeAnimated", animatedDocument.Attributes)
 	}
 
 	transferSmokeBundleSticker(t, f, a, b, document, wantBytes, "static bundle sticker smoke", 1049801)

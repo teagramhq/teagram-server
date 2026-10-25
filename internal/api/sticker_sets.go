@@ -234,12 +234,8 @@ func appendStickerBundle(catalog *stickerSetCatalog, bundle *stickerbundle.Bundl
 				[]byte(pack.ShortName), []byte(sticker.Emoji), []byte(sticker.File), sticker.SHA256[:],
 			))
 			attributes := make([]tg.DocumentAttributeClass, 0, 3)
-			if sticker.Animated {
-				attributes = append(attributes, &tg.DocumentAttributeAnimated{})
-			} else {
-				attributes = append(attributes, &tg.DocumentAttributeImageSize{W: 512, H: 512})
-			}
 			attributes = append(attributes,
+				&tg.DocumentAttributeImageSize{W: 512, H: 512},
 				&tg.DocumentAttributeSticker{
 					Alt:        sticker.Emoji,
 					Stickerset: &tg.InputStickerSetID{ID: set.set.ID, AccessHash: set.set.AccessHash},
@@ -513,8 +509,6 @@ func cloneStickerDocument(source *tg.Document, dcID int) *tg.Document {
 	document.Attributes = append([]tg.DocumentAttributeClass(nil), source.Attributes...)
 	for i, attribute := range document.Attributes {
 		switch value := attribute.(type) {
-		case *tg.DocumentAttributeAnimated:
-			document.Attributes[i] = &tg.DocumentAttributeAnimated{}
 		case *tg.DocumentAttributeImageSize:
 			cloned := *value
 			document.Attributes[i] = &cloned
