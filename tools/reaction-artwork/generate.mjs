@@ -37,13 +37,16 @@ try {
   const converter = join(toolDir, "target/release/reaction-artwork");
   const sourceDir = join(upstreamDir, "assets/svg");
   const staticDir = join(artworkDir, "static");
+  const centerDir = join(artworkDir, "center");
   const tgsDir = join(artworkDir, "tgs");
   await mkdir(staticDir, { recursive: true });
+  await mkdir(centerDir, { recursive: true });
   await mkdir(tgsDir, { recursive: true });
 
   const staticNames = new Set(manifest.map(({ svg }) => `${svg.slice(0, -4)}.webp`));
+  const centerNames = new Set(manifest.map(({ svg }) => `${svg.slice(0, -4)}.webp`));
   const tgsNames = new Set(manifest.map(({ svg }) => `${svg.slice(0, -4)}.tgs`));
-  for (const [dir, expected] of [[staticDir, staticNames], [tgsDir, tgsNames]]) {
+  for (const [dir, expected] of [[staticDir, staticNames], [centerDir, centerNames], [tgsDir, tgsNames]]) {
     for (const name of await readdir(dir)) {
       if (!expected.has(name)) await rm(join(dir, name), { recursive: true });
     }
@@ -52,10 +55,18 @@ try {
   for (const { svg } of manifest) {
     const input = join(sourceDir, svg);
     const stem = svg.slice(0, -4);
+    const staticPath = join(staticDir, `${stem}.webp`);
+    const centerPath = join(centerDir, `${stem}.webp`);
     await sharp(input, { density: 1024 })
       .resize(512, 512, { fit: "contain", background: { r: 0, g: 0, b: 0, alpha: 0 } })
       .webp({ lossless: true, quality: 100, effort: 6 })
-      .toFile(join(staticDir, `${stem}.webp`));
+      .toFile(staticPath);
+    await sharp(staticPath)
+      .trim({ background: { r: 0, g: 0, b: 0, alpha: 0 }, threshold: 0 })
+      .resize(256, 256, { fit: "contain", background: { r: 0, g: 0, b: 0, alpha: 0 } })
+      .extend({ top: 128, right: 128, bottom: 128, left: 128, background: { r: 0, g: 0, b: 0, alpha: 0 } })
+      .webp({ lossless: true, quality: 100, effort: 6 })
+      .toFile(centerPath);
     execFileSync(converter, [input, join(tgsDir, `${stem}.tgs`)], { cwd: repoDir, stdio: "inherit" });
   }
 } finally {
