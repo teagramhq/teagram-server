@@ -1366,3 +1366,40 @@ if ! compare_rollback_to_baseline; then
   exit 1
 fi
 printf '%s\n' 'PASS initial-local preflight, target, and rollback normalize live and selected TG_BLOB_DIR environment'
+live_preflight_fixture="$SCRIPT_DIR/testdata/key-exchange-preflight/live-b5d8471-to-35dd1457.json"
+if ! jq -e '
+  .source.live_revision == "b5d84718a4a2c0c059acb07d3875e3b212fa06d4" and
+  .source.candidate_head == "35dd14574b0fc94bde1048120629c48cfb97c639" and
+  .source.tailnet_env == "absent" and
+  .source.container_env_added == "none" and
+  .source.comparison_rows == 12 and
+  .baseline.provenance.compose_source == "selected-compose-render" and
+  .preflight.provenance.compose_source == "selected-compose-render"
+' "$live_preflight_fixture" >/dev/null; then
+  printf '%s\n' 'FAIL live key-exchange preflight fixture metadata is invalid' >&2
+  exit 1
+fi
+INITIALIZE_LOCAL=0
+BASELINE_DIR="$TMP/live-preflight.baseline"
+TARGET_DIR="$TMP/live-preflight.target"
+mkdir -m 700 "$BASELINE_DIR" "$TARGET_DIR"
+jq -c '.baseline' "$live_preflight_fixture" > "$BASELINE_DIR/baseline.snapshot.json"
+jq -c '.preflight' "$live_preflight_fixture" > "$TARGET_DIR/preflight.snapshot.json"
+if ! compare_resolved_preflight; then
+  printf '%s\n' 'FAIL live baseline-to-target preflight fixture was rejected' >&2
+  cat "$TARGET_DIR/preflight-comparisons.tsv" >&2
+  exit 1
+fi
+live_preflight_rows=$(grep -vc '^$' "$TARGET_DIR/preflight-comparisons.tsv")
+[ "$live_preflight_rows" -eq 12 ] || {
+  printf 'FAIL live baseline-to-target comparison recorded %s rows instead of 12\n' "$live_preflight_rows" >&2
+  cat "$TARGET_DIR/preflight-comparisons.tsv" >&2
+  exit 1
+}
+if awk -F '\t' 'NF > 0 && $5 != "pass" { found=1 } END { exit !found }' \
+    "$TARGET_DIR/preflight-comparisons.tsv"; then
+  printf '%s\n' 'FAIL live baseline-to-target comparison contains a failing row' >&2
+  cat "$TARGET_DIR/preflight-comparisons.tsv" >&2
+  exit 1
+fi
+printf '%s\n' 'PASS live b5d8471-to-35dd1457 preflight fixture passes all 12 comparisons'
