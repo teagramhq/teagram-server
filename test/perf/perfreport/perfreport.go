@@ -60,7 +60,9 @@ type Report struct {
 	// Scenarios names every scenario the harness was built to run, so one
 	// that produced no result is still judged, as missing.
 	Scenarios []string `json:"scenarios"`
-	Results   []Result `json:"results"`
+	// Filter is the TG_PERF_ONLY substring a development run was limited to.
+	Filter  string   `json:"filter,omitempty"`
+	Results []Result `json:"results"`
 }
 
 // Result is one scenario on one fixture.
@@ -203,6 +205,10 @@ type Input struct {
 	// History holds one report per earlier main run, for noise bands.
 	History []Report
 	Waivers []Waiver
+	// Required names every scenario the gate must see measured, from a
+	// manifest kept apart from the harness, so dropping a scenario from the
+	// harness cannot also drop it from the check.
+	Required []string
 }
 
 // Evaluate aggregates each scenario's rounds by median and applies every
@@ -230,6 +236,23 @@ func Evaluate(in Input) Verdict {
 		for _, name := range rep.Scenarios {
 			if !slices.Contains(order, name) {
 				order = append(order, name)
+			}
+		}
+	}
+	for _, name := range in.Required {
+		if !slices.ContainsFunc(in.Head, func(h Report) bool { return slices.Contains(h.Scenarios, name) }) {
+			v.Failures = append(v.Failures, Failure{Scenario: name, Check: checkMissing,
+				Reason: "required, but the harness does not run it"})
+		}
+		if !slices.Contains(order, name) {
+			order = append(order, name)
+		}
+	}
+	if len(in.Required) > 0 {
+		for i, rep := range in.Head {
+			if rep.Filter != "" {
+				v.Failures = append(v.Failures, Failure{Scenario: "report", Check: checkMissing,
+					Reason: fmt.Sprintf("head report %d ran only scenarios matching %q", i+1, rep.Filter)})
 			}
 		}
 	}

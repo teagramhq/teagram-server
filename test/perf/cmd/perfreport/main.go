@@ -18,6 +18,7 @@ func main() {
 	base := flag.String("base", "", "glob of the base branch's reports, interleaved with head's")
 	history := flag.String("history", "", "glob of earlier main runs' aggregated reports")
 	known := flag.String("waivers", "", "known-violations file")
+	required := flag.String("required", "", "required-scenarios manifest, a JSON list of scenario names")
 	aggregate := flag.String("aggregate", "", "write head's rounds, folded into one report, to this file")
 	flag.Parse()
 	in := perfreport.Input{}
@@ -38,6 +39,18 @@ func main() {
 		}
 		if err != nil {
 			failf("waivers: %v", err)
+		}
+	}
+	if *required != "" {
+		raw, err := os.ReadFile(*required)
+		if err == nil {
+			err = json.Unmarshal(raw, &in.Required)
+		}
+		if err == nil && len(in.Required) == 0 {
+			err = fmt.Errorf("%s lists no scenarios", *required)
+		}
+		if err != nil {
+			failf("required scenarios: %v", err)
 		}
 	}
 	if *aggregate != "" {

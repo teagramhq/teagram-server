@@ -311,3 +311,27 @@ func TestEvaluateBlocksScenarioDroppedFromBase(t *testing.T) {
 		t.Fatalf("failures = %q", got)
 	}
 }
+
+func TestEvaluateBlocksRequiredScenarioMissingFromHarness(t *testing.T) {
+	head := report(pair("help.getConfig", perfreport.Read, result(1, 1, 1, 1), result(1, 1, 1, 1))...)
+	head.Scenarios = []string{"help.getConfig"}
+	v := perfreport.Evaluate(perfreport.Input{Head: []perfreport.Report{head}, Required: []string{"help.getConfig", "contacts.importContacts 5000"}})
+	got := reasons(v.Failures)
+	for _, want := range []string{
+		"contacts.importContacts 5000: required, but the harness does not run it",
+		"contacts.importContacts 5000: no 1x measurement",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("failures = %q, want %q", got, want)
+		}
+	}
+}
+
+func TestEvaluateBlocksFilteredRunWhenScenariosAreRequired(t *testing.T) {
+	head := report(pair("help.getConfig", perfreport.Read, result(1, 1, 1, 1), result(1, 1, 1, 1))...)
+	head.Scenarios, head.Filter = []string{"help.getConfig"}, "help"
+	v := perfreport.Evaluate(perfreport.Input{Head: []perfreport.Report{head}, Required: []string{"help.getConfig"}})
+	if got := reasons(v.Failures); !strings.Contains(got, `head report 1 ran only scenarios matching "help"`) {
+		t.Fatalf("failures = %q", got)
+	}
+}

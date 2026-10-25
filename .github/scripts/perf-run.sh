@@ -140,6 +140,7 @@ judge() {
   [ "$with_base" = true ] && base_glob="$PERF_WORK/base-$tag*.json"
   go run ./test/perf/cmd/perfreport -head "$PERF_WORK/head-$tag*.json" -base "$base_glob" \
     -history "$PERF_HISTORY/*.json" -waivers test/perf/known_violations.json \
+    -required test/perf/required_scenarios.json \
     -aggregate "$PERF_WORK/aggregate.json" >"$PERF_WORK/summary.md"
 }
 

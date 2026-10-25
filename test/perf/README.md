@@ -24,6 +24,11 @@ table above 10,000 rows.
   max(15%, 3 standard deviations) and 2 ms. A timing failure is measured once
   more before it counts.
 
+`required_scenarios.json` lists the scenarios the gate must see measured on
+both fixtures. It is kept apart from the harness on purpose: a scenario dropped
+from `scenarios()` still fails as unmeasured, and a run limited by
+`TG_PERF_ONLY` fails rather than passing on a subset.
+
 A check `main` already fails is listed in `known_violations.json` with the issue
 that fixes it. Base regressions cannot be listed. A sequential-scan entry names one scan by
 the `table#fingerprint` the report prints (a hash of the full statement), so any

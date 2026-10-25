@@ -91,7 +91,7 @@ test-fleet-cap: docker-bridge
 # test/perf/README.md), judged the way CI judges it, without a base branch.
 perf:
 	TG_PERF_REPORT="$${TG_PERF_DIR:?}/head-1.json" go test -tags performance -count=1 -timeout 30m -run '^TestRPCPerformance$$' -v ./test/perf
-	go run ./test/perf/cmd/perfreport -head "$$TG_PERF_DIR/head-1.json" -waivers test/perf/known_violations.json
+	go run ./test/perf/cmd/perfreport -head "$$TG_PERF_DIR/head-1.json" -waivers test/perf/known_violations.json -required test/perf/required_scenarios.json
 
 # The store suite alone, for a quick check while working in internal/store.
 # Deliberately not ./test/... — e2e wants the whole machine to itself and is
