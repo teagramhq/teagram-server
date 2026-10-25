@@ -391,6 +391,7 @@ verify_media_key_mount() {
   local inspect_json=$1 compose_json=$2 snapshot_name=$3 record media_source media_version container_present service_name
   service_name=${ROLLOUT_COMPOSE_SERVICE:-teagramd}
   local resolved_source checkout_root directory_mode key_file key_mode key_owner
+  # Compose omits create_host_path: false from the resolved config.
   if ! record=$(printf '%s\n' "$inspect_json" "$compose_json" | jq -ser --arg snapshot_name "$snapshot_name" --arg service_name "$service_name" '
     def item: if type == "array" then .[0] else . end;
     def env_values($env; $name):
@@ -422,10 +423,13 @@ verify_media_key_mount() {
         | ($mount.source // "") as $source
         | if ($mount | keys) != ["bind", "read_only", "source", "target", "type"] then
              error("Compose media-key mount has unexpected fields")
-          elif ($mount.bind | type) != "object" or ($mount.bind | keys) != ["create_host_path"] then
+          elif ($mount.bind | type) != "object" then
+             error("Compose media-key bind options are invalid")
+          elif ($mount.bind | keys) != [] and
+               (($mount.bind | keys) != ["create_host_path"] or $mount.bind.create_host_path != false) then
              error("Compose media-key bind options are invalid")
           elif $mount.type != "bind" or $mount.read_only != true or
-               $mount.bind.create_host_path != false or
+               ($mount.bind.create_host_path // false) != false or
                ($source | startswith("/") | not) or
                (($source | split("/")) | index("..") != null) or
                ($source | contains("\t")) or

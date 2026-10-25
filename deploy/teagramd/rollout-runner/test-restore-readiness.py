@@ -2052,6 +2052,60 @@ class RestoreReadinessContractTests(unittest.TestCase):
         drill.cleanup_call = lambda args, **_kwargs: (1, b"") if args[0] == "rm" else (0, b"")
         self.assertFalse(drill.cleanup_owned_containers())
 
+    def test_cleanup_process_scan_ignores_docker_cli_that_exited_before_stat(self) -> None:
+        drill = object.__new__(RESTORE_READINESS.Drill)
+        drill.manifest = {"cleanup_deadline": time.monotonic() + 10}
+        drill.run_dir = Path("/tmp/teagram-restore-readiness.gone")
+
+        with (
+            patch.object(RESTORE_READINESS, "docker_cli_pids", return_value=[999_999]),
+            patch.object(RESTORE_READINESS, "process_start_ticks", return_value=None),
+            patch.object(RESTORE_READINESS.os, "kill", side_effect=ProcessLookupError),
+        ):
+            self.assertTrue(drill.cleanup_processes())
+
+    def test_cleanup_process_scan_keeps_live_unreadable_docker_cli_unverified(self) -> None:
+        drill = object.__new__(RESTORE_READINESS.Drill)
+        drill.manifest = {"cleanup_deadline": time.monotonic() + 10}
+        drill.run_dir = Path("/tmp/teagram-restore-readiness.unreadable")
+
+        with (
+            patch.object(RESTORE_READINESS, "docker_cli_pids", return_value=[999_999]),
+            patch.object(RESTORE_READINESS, "process_start_ticks", return_value=None),
+            patch.object(RESTORE_READINESS.os, "kill", return_value=None),
+        ):
+            self.assertFalse(drill.cleanup_processes())
+
+    def test_cleanup_process_scan_keeps_live_unreadable_manifest_process_unverified(self) -> None:
+        drill = object.__new__(RESTORE_READINESS.Drill)
+        drill.manifest = {
+            "cleanup_deadline": time.monotonic() + 10,
+            "processes": [{"pid": 999_999, "start_ticks": 1}],
+        }
+        drill.run_dir = Path("/tmp/teagram-restore-readiness.tracked-unreadable")
+
+        with (
+            patch.object(RESTORE_READINESS, "docker_cli_pids", return_value=[]),
+            patch.object(RESTORE_READINESS, "process_start_ticks", return_value=None),
+            patch.object(RESTORE_READINESS.os, "kill", return_value=None),
+        ):
+            self.assertFalse(drill.cleanup_processes())
+
+    def test_cleanup_process_scan_ignores_gone_manifest_process(self) -> None:
+        drill = object.__new__(RESTORE_READINESS.Drill)
+        drill.manifest = {
+            "cleanup_deadline": time.monotonic() + 10,
+            "processes": [{"pid": 999_999, "start_ticks": 1}],
+        }
+        drill.run_dir = Path("/tmp/teagram-restore-readiness.tracked-gone")
+
+        with (
+            patch.object(RESTORE_READINESS, "docker_cli_pids", return_value=[]),
+            patch.object(RESTORE_READINESS, "process_start_ticks", return_value=None),
+            patch.object(RESTORE_READINESS.os, "kill", side_effect=ProcessLookupError),
+        ):
+            self.assertTrue(drill.cleanup_processes())
+
     def test_supervisor_recovers_owned_resources_after_parent_disappears(self) -> None:
         with tempfile.TemporaryDirectory(prefix="rr-supervisor-") as directory:
             lock_path = Path(directory) / "lock"
