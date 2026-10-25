@@ -77,18 +77,33 @@ ORDER BY local_id DESC
 LIMIT sqlc.arg(lim)::int
 OFFSET GREATEST(0::bigint, sqlc.arg(add_offset)::bigint);
 
--- HistoryPageAround handles negative add_offset by converting offset_id to its
--- ordinal in the owner's filtered newest-first history before selecting a page.
+-- HistoryPageByDate keeps date jumps on an ordered peer/date index.
+-- name: HistoryPageByDate :many
+SELECT * FROM messages
+WHERE owner_id = sqlc.arg(owner_id)
+  AND peer_type = sqlc.arg(peer_type)
+  AND peer_id = sqlc.arg(peer_id)
+  AND deleted = false
+  AND (expires_at IS NULL OR expires_at > statement_timestamp())
+  AND date < to_timestamp(sqlc.arg(offset_date)::bigint::double precision)
+ORDER BY date DESC, local_id DESC
+LIMIT sqlc.arg(lim)::int
+OFFSET GREATEST(0::bigint, sqlc.arg(add_offset)::bigint);
+
+-- HistoryPageAround shifts a negative add_offset with a bounded ascending
+-- index walk from offset_id before reading the requested page.
 -- name: HistoryPageAround :many
-WITH page_offset AS (
-    SELECT GREATEST(0::bigint, COUNT(*) + sqlc.arg(add_offset)::bigint) AS skip
-    FROM messages AS offset_message
-    WHERE offset_message.owner_id = sqlc.arg(owner_id)
-      AND offset_message.peer_type = sqlc.arg(peer_type)
-      AND offset_message.peer_id = sqlc.arg(peer_id)
-      AND offset_message.deleted = false
-      AND (offset_message.expires_at IS NULL OR offset_message.expires_at > statement_timestamp())
-      AND offset_message.local_id >= sqlc.arg(offset_id)::bigint
+WITH shifted_window AS MATERIALIZED (
+    SELECT local_id
+    FROM messages
+    WHERE owner_id = sqlc.arg(owner_id)
+      AND peer_type = sqlc.arg(peer_type)
+      AND peer_id = sqlc.arg(peer_id)
+      AND deleted = false
+      AND (expires_at IS NULL OR expires_at > statement_timestamp())
+      AND local_id >= sqlc.arg(offset_id)::bigint
+    ORDER BY local_id ASC
+    LIMIT GREATEST(0::bigint, -sqlc.arg(add_offset)::bigint)
 )
 SELECT page_message.* FROM messages AS page_message
 WHERE page_message.owner_id = sqlc.arg(owner_id)
@@ -96,9 +111,13 @@ WHERE page_message.owner_id = sqlc.arg(owner_id)
   AND page_message.peer_id = sqlc.arg(peer_id)
   AND page_message.deleted = false
   AND (page_message.expires_at IS NULL OR page_message.expires_at > statement_timestamp())
+  AND page_message.local_id <= COALESCE(
+      (SELECT max(local_id) FROM shifted_window
+       HAVING count(*) = -sqlc.arg(add_offset)::bigint),
+      9223372036854775807::bigint
+  )
 ORDER BY page_message.local_id DESC
-LIMIT sqlc.arg(lim)::int
-OFFSET (SELECT skip FROM page_offset);
+LIMIT sqlc.arg(lim)::int;
 
 -- name: SetEditedText :exec
 UPDATE messages SET message = $3, edit_date = now() WHERE owner_id = $1 AND local_id = $2;

@@ -415,15 +415,17 @@ func (q *Queries) HistoryPage(ctx context.Context, arg HistoryPageParams) ([]Mes
 }
 
 const historyPageAround = `-- name: HistoryPageAround :many
-WITH page_offset AS (
-    SELECT GREATEST(0::bigint, COUNT(*) + $5::bigint) AS skip
-    FROM messages AS offset_message
-    WHERE offset_message.owner_id = $1
-      AND offset_message.peer_type = $2
-      AND offset_message.peer_id = $3
-      AND offset_message.deleted = false
-      AND (offset_message.expires_at IS NULL OR offset_message.expires_at > statement_timestamp())
-      AND offset_message.local_id >= $6::bigint
+WITH shifted_window AS MATERIALIZED (
+    SELECT local_id
+    FROM messages
+    WHERE owner_id = $1
+      AND peer_type = $2
+      AND peer_id = $3
+      AND deleted = false
+      AND (expires_at IS NULL OR expires_at > statement_timestamp())
+      AND local_id >= $6::bigint
+    ORDER BY local_id ASC
+    LIMIT GREATEST(0::bigint, -$4::bigint)
 )
 SELECT page_message.owner_id, page_message.local_id, page_message.peer_id, page_message.from_id, page_message.date, page_message.message, page_message.out, page_message.edit_date, page_message.deleted, page_message.random_id, page_message.peer_local_id, page_message.peer_type, page_message.fanout_id, page_message.action_type, page_message.action_user_id, page_message.file_id, page_message.reply_to_msg_id, page_message.fwd_from_id, page_message.fwd_date, page_message.fwd_channel_id, page_message.fwd_channel_post, page_message.message_tsv, page_message.reply_to_trusted, page_message.grouped_id, page_message.fwd_post_author, page_message.ttl_period, page_message.expires_at, page_message.entities, page_message.sticker_document_id FROM messages AS page_message
 WHERE page_message.owner_id = $1
@@ -431,30 +433,114 @@ WHERE page_message.owner_id = $1
   AND page_message.peer_id = $3
   AND page_message.deleted = false
   AND (page_message.expires_at IS NULL OR page_message.expires_at > statement_timestamp())
+  AND page_message.local_id <= COALESCE(
+      (SELECT max(local_id) FROM shifted_window
+       HAVING count(*) = -$4::bigint),
+      9223372036854775807::bigint
+  )
 ORDER BY page_message.local_id DESC
-LIMIT $4::int
-OFFSET (SELECT skip FROM page_offset)
+LIMIT $5::int
 `
 
 type HistoryPageAroundParams struct {
 	OwnerID   int64
 	PeerType  int16
 	PeerID    int64
-	Lim       int32
 	AddOffset int64
+	Lim       int32
 	OffsetID  int64
 }
 
-// HistoryPageAround handles negative add_offset by converting offset_id to its
-// ordinal in the owner's filtered newest-first history before selecting a page.
+// HistoryPageAround shifts a negative add_offset with a bounded ascending
+// index walk from offset_id before reading the requested page.
 func (q *Queries) HistoryPageAround(ctx context.Context, arg HistoryPageAroundParams) ([]Message, error) {
 	rows, err := q.db.Query(ctx, historyPageAround,
 		arg.OwnerID,
 		arg.PeerType,
 		arg.PeerID,
-		arg.Lim,
 		arg.AddOffset,
+		arg.Lim,
 		arg.OffsetID,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []Message
+	for rows.Next() {
+		var i Message
+		if err := rows.Scan(
+			&i.OwnerID,
+			&i.LocalID,
+			&i.PeerID,
+			&i.FromID,
+			&i.Date,
+			&i.Message,
+			&i.Out,
+			&i.EditDate,
+			&i.Deleted,
+			&i.RandomID,
+			&i.PeerLocalID,
+			&i.PeerType,
+			&i.FanoutID,
+			&i.ActionType,
+			&i.ActionUserID,
+			&i.FileID,
+			&i.ReplyToMsgID,
+			&i.FwdFromID,
+			&i.FwdDate,
+			&i.FwdChannelID,
+			&i.FwdChannelPost,
+			&i.MessageTsv,
+			&i.ReplyToTrusted,
+			&i.GroupedID,
+			&i.FwdPostAuthor,
+			&i.TtlPeriod,
+			&i.ExpiresAt,
+			&i.Entities,
+			&i.StickerDocumentID,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const historyPageByDate = `-- name: HistoryPageByDate :many
+SELECT owner_id, local_id, peer_id, from_id, date, message, out, edit_date, deleted, random_id, peer_local_id, peer_type, fanout_id, action_type, action_user_id, file_id, reply_to_msg_id, fwd_from_id, fwd_date, fwd_channel_id, fwd_channel_post, message_tsv, reply_to_trusted, grouped_id, fwd_post_author, ttl_period, expires_at, entities, sticker_document_id FROM messages
+WHERE owner_id = $1
+  AND peer_type = $2
+  AND peer_id = $3
+  AND deleted = false
+  AND (expires_at IS NULL OR expires_at > statement_timestamp())
+  AND date < to_timestamp($4::bigint::double precision)
+ORDER BY date DESC, local_id DESC
+LIMIT $6::int
+OFFSET GREATEST(0::bigint, $5::bigint)
+`
+
+type HistoryPageByDateParams struct {
+	OwnerID    int64
+	PeerType   int16
+	PeerID     int64
+	OffsetDate int64
+	AddOffset  int64
+	Lim        int32
+}
+
+// HistoryPageByDate keeps date jumps on an ordered peer/date index.
+func (q *Queries) HistoryPageByDate(ctx context.Context, arg HistoryPageByDateParams) ([]Message, error) {
+	rows, err := q.db.Query(ctx, historyPageByDate,
+		arg.OwnerID,
+		arg.PeerType,
+		arg.PeerID,
+		arg.OffsetDate,
+		arg.AddOffset,
+		arg.Lim,
 	)
 	if err != nil {
 		return nil, err
