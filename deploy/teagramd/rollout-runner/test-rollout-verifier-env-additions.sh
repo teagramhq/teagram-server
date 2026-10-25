@@ -825,6 +825,14 @@ media_key_target=$(snapshot_from_json \
 [ "$(jq -r '.config_sha256' <<< "$media_key_baseline")" = "$(jq -r '.config_sha256' <<< "$media_key_target")" ]
 [ "$(jq -r '.mounts_sha256' <<< "$media_key_baseline")" = "$(jq -r '.mounts_sha256' <<< "$media_key_target")" ]
 [ "$(jq -r '.container_env_sha256' <<< "$media_key_baseline")" = "$(jq -r '.container_env_sha256' <<< "$media_key_target")" ]
+media_key_normalized_compose=$(jq -c '
+  .services.teagramd.volumes[-1].bind={}
+' <<< "$media_key_compose")
+media_key_normalized_target=$(snapshot_from_json \
+  "$media_key_inspect" "$media_key_normalized_compose" \
+  "$ENV_FILE" "$OVERRIDE_FILE" selected-compose-render target)
+[ "$(jq -r '.media_key_source' <<< "$media_key_normalized_target")" = "$media_key_source" ]
+printf '%s\n' 'PASS media-key validation accepts Compose-normalized empty bind options'
 printf '%064s' '' | tr ' ' A > "$media_key_source/1.key"
 snapshot_from_json "$media_key_inspect" "$media_key_compose" \
   "$ENV_FILE" "$OVERRIDE_FILE" selected-compose-render target >/dev/null
@@ -873,6 +881,17 @@ if snapshot_from_json "$media_key_writable_inspect" "$media_key_writable_compose
   exit 1
 fi
 printf '%s\n' 'PASS writable media-key mount is rejected'
+
+media_key_create_host_path_compose=$(jq -c '
+  .services.teagramd.volumes[-1].bind.create_host_path=true
+' <<< "$media_key_compose")
+if snapshot_from_json "$media_key_inspect" "$media_key_create_host_path_compose" \
+  "$ENV_FILE" "$OVERRIDE_FILE" selected-compose-render target \
+  >/dev/null 2>"$TMP/media-key-create-host-path.err"; then
+  printf '%s\n' 'FAIL media-key host path creation was accepted' >&2
+  exit 1
+fi
+printf '%s\n' 'PASS media-key host path creation is rejected'
 
 media_key_extra_option_compose=$(jq -c '
   .services.teagramd.volumes[-1].bind.propagation="rprivate"
