@@ -18,6 +18,72 @@ env:
   TESTCONTAINERS_HUB_IMAGE_NAME_PREFIX: mirror.gcr.io
 
 jobs:
+  sticker-bundle:
+    name: sticker bundle license gate
+    runs-on: ubuntu-26.04
+    timeout-minutes: 20
+    permissions:
+      actions: write
+      contents: read
+
+    steps:
+      - uses: actions/checkout@v7.0.1
+
+      - uses: actions/setup-go@v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: false
+
+      # This cache is keyed by every input that can change the output bundle.
+      # PRs can restore the main-branch snapshot, while a changed pin or
+      # generator gets one fresh build and cache entry.
+      - name: Restore sticker bundle snapshot
+        id: sticker-bundle-cache
+        uses: actions/cache@v6.1.0
+        with:
+          path: ${{ runner.temp }}/sticker-bundle
+          key: sticker-bundle-${{ runner.os }}-node22-python3.12.15-${{ hashFiles('tools/stickerbundle/generate.sh', 'tools/stickerbundle/generate.py', 'tools/stickerbundle/render.mjs', 'tools/stickerbundle/sources.json', 'tools/stickerbundle/package.json', 'tools/stickerbundle/package-lock.json') }}
+
+      - uses: actions/setup-node@v7.0.0
+        if: steps.sticker-bundle-cache.outputs.cache-hit != 'true'
+        with:
+          node-version: 22
+
+      - uses: actions/setup-python@v6.0.0
+        if: steps.sticker-bundle-cache.outputs.cache-hit != 'true'
+        with:
+          python-version: "3.12.15"
+
+      - name: Generate pinned sticker bundle on cache miss
+        if: steps.sticker-bundle-cache.outputs.cache-hit != 'true'
+        timeout-minutes: 15
+        run: tools/stickerbundle/generate.sh --output "$RUNNER_TEMP/sticker-bundle"
+
+      - name: Gate bundle licenses and report cache state
+        run: |
+          test -s "$RUNNER_TEMP/sticker-bundle/manifest.json"
+          go run ./cmd/stickerbundle-check "$RUNNER_TEMP/sticker-bundle"
+          packs=$(jq '.packs | length' "$RUNNER_TEMP/sticker-bundle/manifest.json")
+          bytes=$(du -sb "$RUNNER_TEMP/sticker-bundle" | cut -f1)
+          echo "cache hit: ${{ steps.sticker-bundle-cache.outputs.cache-hit == 'true' }}"
+          echo "bundle packs: $packs"
+          echo "bundle bytes: $bytes"
+          {
+            echo '### Sticker bundle cache'
+            echo "- Cache hit: ${{ steps.sticker-bundle-cache.outputs.cache-hit == 'true' }}"
+            echo "- Packs: $packs"
+            echo "- Bytes: $bytes"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload sticker bundle for image jobs
+        uses: actions/upload-artifact@v7.0.1
+        with:
+          name: sticker-catalogue-bundle
+          path: ${{ runner.temp }}/sticker-bundle
+          if-no-files-found: error
+          retention-days: 1
+          compression-level: 0
+
   lint:
     name: lint
     runs-on: ubuntu-26.04
@@ -987,6 +1053,7 @@ jobs:
     if: ${{ always() }}
     needs:
       - ci-main
+      - sticker-bundle
       - photothumb-runtime
       - real-server-fixtures
       - websocket-d1
@@ -1006,6 +1073,7 @@ jobs:
       - name: Require all CI lanes to pass
         env:
           CI_MAIN_RESULT: ${{ needs.ci-main.result }}
+          STICKER_BUNDLE_RESULT: ${{ needs.sticker-bundle.result }}
           PHOTOTHUMB_RUNTIME_RESULT: ${{ needs.photothumb-runtime.result }}
           REAL_SERVER_FIXTURES_RESULT: ${{ needs.real-server-fixtures.result }}
           WEBSOCKET_D1_RESULT: ${{ needs.websocket-d1.result }}
@@ -1019,8 +1087,8 @@ jobs:
           DEPLOY_WORKFLOW_RESULT: ${{ needs.deploy-workflow.result }}
           RESTORE_READINESS_RESULT: ${{ needs.restore-readiness.result }}
         run: |
-          if [[ "$CI_MAIN_RESULT" != "success" || "$PHOTOTHUMB_RUNTIME_RESULT" != "success" || "$REAL_SERVER_FIXTURES_RESULT" != "success" || "$WEBSOCKET_D1_RESULT" != "success" || "$WEB_PERMANENT_EXCHANGE_RESULT" != "success" || "$SQL_LINT_RESULT" != "success" || "$CSS_RESULT" != "success" || "$BROWSER_ACCEPTANCE_RESULT" != "success" || "$BROWSER_ACCEPTANCE_IMAGE_RESULT" != "success" || "$RUSTFS_TRANSITION_RESULT" != "success" || "$SCHEMA_GATE_POSTGRES_RESULT" != "success" || "$DEPLOY_WORKFLOW_RESULT" != "success" || "$RESTORE_READINESS_RESULT" != "success" ]]; then
-            echo "::error::Required CI lanes did not pass (ci-main=$CI_MAIN_RESULT, photothumb-runtime=$PHOTOTHUMB_RUNTIME_RESULT, real-server-fixtures=$REAL_SERVER_FIXTURES_RESULT, websocket-d1=$WEBSOCKET_D1_RESULT, websocket-permanent-exchange=$WEB_PERMANENT_EXCHANGE_RESULT, sql-lint=$SQL_LINT_RESULT, css=$CSS_RESULT, browser-acceptance=$BROWSER_ACCEPTANCE_RESULT, browser-acceptance-image=$BROWSER_ACCEPTANCE_IMAGE_RESULT, rustfs-transition-qualification=$RUSTFS_TRANSITION_RESULT, schema-gate-postgres=$SCHEMA_GATE_POSTGRES_RESULT, deploy-workflow=$DEPLOY_WORKFLOW_RESULT, restore-readiness=$RESTORE_READINESS_RESULT)"
+          if [[ "$CI_MAIN_RESULT" != "success" || "$STICKER_BUNDLE_RESULT" != "success" || "$PHOTOTHUMB_RUNTIME_RESULT" != "success" || "$REAL_SERVER_FIXTURES_RESULT" != "success" || "$WEBSOCKET_D1_RESULT" != "success" || "$WEB_PERMANENT_EXCHANGE_RESULT" != "success" || "$SQL_LINT_RESULT" != "success" || "$CSS_RESULT" != "success" || "$BROWSER_ACCEPTANCE_RESULT" != "success" || "$BROWSER_ACCEPTANCE_IMAGE_RESULT" != "success" || "$RUSTFS_TRANSITION_RESULT" != "success" || "$SCHEMA_GATE_POSTGRES_RESULT" != "success" || "$DEPLOY_WORKFLOW_RESULT" != "success" || "$RESTORE_READINESS_RESULT" != "success" ]]; then
+            echo "::error::Required CI lanes did not pass (ci-main=$CI_MAIN_RESULT, sticker-bundle=$STICKER_BUNDLE_RESULT, photothumb-runtime=$PHOTOTHUMB_RUNTIME_RESULT, real-server-fixtures=$REAL_SERVER_FIXTURES_RESULT, websocket-d1=$WEBSOCKET_D1_RESULT, websocket-permanent-exchange=$WEB_PERMANENT_EXCHANGE_RESULT, sql-lint=$SQL_LINT_RESULT, css=$CSS_RESULT, browser-acceptance=$BROWSER_ACCEPTANCE_RESULT, browser-acceptance-image=$BROWSER_ACCEPTANCE_IMAGE_RESULT, rustfs-transition-qualification=$RUSTFS_TRANSITION_RESULT, schema-gate-postgres=$SCHEMA_GATE_POSTGRES_RESULT, deploy-workflow=$DEPLOY_WORKFLOW_RESULT, restore-readiness=$RESTORE_READINESS_RESULT)"
             exit 1
           fi
           echo "All required CI lanes passed"
@@ -1037,6 +1105,7 @@ jobs:
       - css
       - deploy-workflow
       - docker
+      - sticker-bundle
       - e2e-admin
       - lint
       - mirror-rustfs-qualification-images
@@ -1060,6 +1129,11 @@ jobs:
     steps:
       - uses: actions/checkout@v7.0.1
 
+      - uses: actions/download-artifact@v8.0.2
+        with:
+          name: sticker-catalogue-bundle
+          path: build/sticker-bundle
+
       - name: Set up Buildx
         uses: docker/setup-buildx-action@v4.4.1
 
@@ -1073,6 +1147,7 @@ jobs:
         uses: docker/build-push-action@v7.4.0
         with:
           context: .
+          build-contexts: sticker-bundle=build
           push: true
           tags: ghcr.io/teagramhq/teagram-server-demo:sha-${{ github.sha }}
           build-args: |
@@ -1566,6 +1641,7 @@ jobs:
   # available in the environments the Dockerfile is edited from, so this job is
   # the only place it is ever built — it is the gate that stops it rotting.
   docker:
+    needs: sticker-bundle
     runs-on: ubuntu-26.04
     # The build is the slow part at roughly a minute; this only catches a hang
     # (a stalled pull, a container that never logs) before it burns six hours.
@@ -1610,6 +1686,11 @@ jobs:
     steps:
       - uses: actions/checkout@v7.0.1
 
+      - uses: actions/download-artifact@v8.0.2
+        with:
+          name: sticker-catalogue-bundle
+          path: build/sticker-bundle
+
       # The daemon's builder, not a docker-container one, so the build uses the
       # base images pulled below instead of fetching them again. The runner's
       # containerd image store is what lets it export to type=gha.
@@ -1631,6 +1712,7 @@ jobs:
         uses: docker/build-push-action@v7.4.0
         with:
           context: .
+          build-contexts: sticker-bundle=build
           tags: teagramd:ci
           load: true
           build-args: |
@@ -1651,10 +1733,21 @@ jobs:
           test "$source" = "https://github.com/teagramhq/teagram-server" \
             || { echo "image source label is '$source'"; exit 1; }
 
+      - name: Assert image contains the gated bundle and loader path
+        run: |
+          docker image inspect teagramd:ci --format '{{json .Config.Env}}' \
+            | jq -e 'index("TG_STICKER_CATALOG_BUNDLE=/usr/share/teagram/sticker-bundle") != null'
+          cid=$(docker create teagramd:ci)
+          mkdir -p "$RUNNER_TEMP/sticker-bundle-image"
+          docker cp "$cid":/usr/share/teagram/sticker-bundle/. "$RUNNER_TEMP/sticker-bundle-image/"
+          docker rm "$cid" > /dev/null
+          diff -qr build/sticker-bundle "$RUNNER_TEMP/sticker-bundle-image"
+
       - name: Assert missing source revision stays empty
         uses: docker/build-push-action@v7.4.0
         with:
           context: .
+          build-contexts: sticker-bundle=build
           tags: teagramd:ci-no-revision
           load: true
           cache-from: type=gha
@@ -1694,6 +1787,14 @@ jobs:
         with:
           version: v1.2.0
 
+      - uses: actions/setup-go@v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: false
+
+      - name: Download Go modules for the bundle smoke client
+        run: go mod download
+
       - name: Apply migrations
         run: atlas migrate apply --dir file://migrations --url "$TG_POSTGRES_DSN"
 
@@ -1725,6 +1826,14 @@ jobs:
           echo "server never reached msg=listening"
           exit 1
 
+      - name: Smoke featured bundle packs through the real client
+        env:
+          TESTCONTAINERS_RYUK_DISABLED: "true"
+        run: |
+          env -u TG_POSTGRES_DSN -u TG_AUTHKEY_ENC_KEY -u TG_PUBLIC_LINK_PREFIX \
+            TG_STICKER_CATALOG_BUNDLE="$PWD/build/sticker-bundle" \
+            go test ./test/e2e -run '^TestStickerBundleCatalogue$' -count=1
+
       - name: Stop container
         if: always()
         run: docker rm -f teagramd
@@ -1736,8 +1845,10 @@ jobs:
   # docker-compose.yml is edited from, so this job is the only place it ever
   # runs — the gate that stops it rotting.
   compose:
-    needs: mirror-rustfs-qualification-images
-    if: ${{ always() && needs.mirror-rustfs-qualification-images.result != 'failure' && needs.mirror-rustfs-qualification-images.result != 'cancelled' }}
+    needs:
+      - mirror-rustfs-qualification-images
+      - sticker-bundle
+    if: ${{ always() && needs.mirror-rustfs-qualification-images.result != 'failure' && needs.mirror-rustfs-qualification-images.result != 'cancelled' && needs.sticker-bundle.result == 'success' }}
     runs-on: ubuntu-26.04
     # The image build plus RustFS and media verification, which is the slow part
     # at roughly a minute; this only catches a hang before it
@@ -1761,6 +1872,11 @@ jobs:
 
     steps:
       - uses: actions/checkout@v7.0.1
+
+      - uses: actions/download-artifact@v8.0.2
+        with:
+          name: sticker-catalogue-bundle
+          path: build/sticker-bundle
 
       - name: Log in to GHCR
         env:
@@ -1804,6 +1920,7 @@ jobs:
         uses: docker/build-push-action@v7.4.0
         with:
           context: .
+          build-contexts: sticker-bundle=build
           tags: teagramd:local
           load: true
           build-args: |
@@ -1817,6 +1934,16 @@ jobs:
           revision=$(docker image inspect teagramd:local --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}')
           test "$revision" = "$TEAGRAMD_SOURCE_REVISION" \
             || { echo "Compose image revision label is '$revision'"; exit 1; }
+
+      - name: Assert Compose image contains the gated bundle and loader path
+        run: |
+          docker image inspect teagramd:local --format '{{json .Config.Env}}' \
+            | jq -e 'index("TG_STICKER_CATALOG_BUNDLE=/usr/share/teagram/sticker-bundle") != null'
+          cid=$(docker create teagramd:local)
+          mkdir -p "$RUNNER_TEMP/sticker-bundle-image"
+          docker cp "$cid":/usr/share/teagram/sticker-bundle/. "$RUNNER_TEMP/sticker-bundle-image/"
+          docker rm "$cid" > /dev/null
+          diff -qr build/sticker-bundle "$RUNNER_TEMP/sticker-bundle-image"
 
       - name: Verify pinned local Compose revision forwarding
         timeout-minutes: 15
@@ -2149,6 +2276,13 @@ jobs:
           # logged. What the scenario claims is that it survived the restart and
           # the assertions above it, so ask again at the end.
           assert_running "after the migrate assertions"
+
+      - name: Smoke featured bundle packs through the real client
+        run: |
+          go mod download
+          env -u TG_POSTGRES_DSN -u TG_AUTHKEY_ENC_KEY -u TG_PUBLIC_LINK_PREFIX \
+            TG_STICKER_CATALOG_BUNDLE="$PWD/build/sticker-bundle" \
+            go test ./test/e2e -run '^TestStickerBundleCatalogue$' -count=1
 
       - name: Write throwaway RustFS credentials and verify S3 rendering
         run: |
