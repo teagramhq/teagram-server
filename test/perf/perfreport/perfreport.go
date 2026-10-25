@@ -128,6 +128,9 @@ type Waiver struct {
 	Scenario string `json:"scenario"`
 	Check    string `json:"check"`
 	Issue    string `json:"issue"`
+	// Scan names the one sequential scan a seqscan waiver accepts, as
+	// "table#fingerprint" from the report. Any other scan still fails.
+	Scan string `json:"scan,omitempty"`
 }
 
 // ParseWaivers reads the known-violations list.
@@ -144,6 +147,9 @@ func ParseWaivers(raw []byte) ([]Waiver, error) {
 		}
 		if w.Scenario == "" || w.Issue == "" {
 			return nil, fmt.Errorf("waiver %+v needs a scenario and a tracking issue", w)
+		}
+		if (w.Check == CheckSeqScan) != (w.Scan != "") {
+			return nil, fmt.Errorf("waiver %+v: a seqscan waiver, and only one, names its scan", w)
 		}
 	}
 	return ws, nil
@@ -203,19 +209,21 @@ func Evaluate(in Input) Verdict {
 	headAgg, order := aggregate(in.Head)
 	baseAgg, _ := aggregate(in.Base)
 	bands := noise(in.History)
-	checked := map[string]map[string]bool{}
+	// checked holds the scenarios measured on both fixtures, the only ones whose
+	// unused waivers are stale.
+	checked := map[string]bool{}
+	used := map[Waiver]bool{}
 	for _, name := range order {
 		row := Row{Name: name, Small: headAgg[key{name, Small}], Large: headAgg[key{name, Large}], Base: baseAgg[key{name, Large}]}
 		row.Band, row.Runs = bands[name].sd, bands[name].n
 		calibrated := row.Runs >= Calibration
-		failed := map[string]bool{}
-		// record files a failed check. waivable is false for a finding the
-		// base branch does not have, which no waiver covers.
-		record := func(check string, waivable bool, format string, args ...any) {
+		// record files a failed check. scan is the fingerprint of a sequential
+		// scan, which only a waiver naming that scan covers.
+		record := func(check, scan string, format string, args ...any) {
 			f := Failure{Scenario: name, Check: check, Reason: fmt.Sprintf(format, args...)}
-			failed[check] = true
 			for _, w := range in.Waivers {
-				if waivable && w.Scenario == name && w.Check == check {
+				if w.Scenario == name && w.Check == check && w.Scan == scan {
+					used[w] = true
 					f.Issue = w.Issue
 					if !slices.Contains(row.Known, w.Issue) {
 						row.Known = append(row.Known, w.Issue)
@@ -236,8 +244,7 @@ func Evaluate(in Input) Verdict {
 				v.Reported = append(v.Reported, f)
 			}
 		}
-		fail := func(check, format string, args ...any) { record(check, true, format, args...) }
-		baseSmall, baseLarge := baseAgg[key{name, Small}], baseAgg[key{name, Large}]
+		fail := func(check, format string, args ...any) { record(check, "", format, args...) }
 		for _, r := range []*Result{row.Small, row.Large} {
 			if r == nil {
 				continue
@@ -246,15 +253,8 @@ func Evaluate(in Input) Verdict {
 			if r.Error != "" {
 				fail(CheckError, "%s run failed: %s", r.Fixture, r.Error)
 			}
-			baseRun := baseSmall
-			if r.Fixture == Large {
-				baseRun = baseLarge
-			}
 			for _, scan := range r.SeqScans {
-				// Without a base measurement there is nothing to tell a known
-				// scan from a new one, and the waiver stands for all of them.
-				known := baseRun == nil || slices.ContainsFunc(baseRun.SeqScans, func(b string) bool { return scanKey(b) == scanKey(scan) })
-				record(CheckSeqScan, known, "sequential scan on %s at %s", scan, r.Fixture)
+				record(CheckSeqScan, scanKey(scan), "sequential scan on %s at %s", scan, r.Fixture)
 			}
 			for _, sql := range r.Unexplained {
 				fail(CheckUnexplained, "could not EXPLAIN %s at %s", sql, r.Fixture)
@@ -268,7 +268,6 @@ func Evaluate(in Input) Verdict {
 		}
 		if row.Small == nil || row.Large == nil || row.Small.Error != "" || row.Large.Error != "" {
 			v.Rows = append(v.Rows, row)
-			checked[name] = nil
 			continue
 		}
 		s, l := row.Small, row.Large
@@ -302,10 +301,10 @@ func Evaluate(in Input) Verdict {
 			}
 		}
 		v.Rows = append(v.Rows, row)
-		checked[name] = failed
+		checked[name] = true
 	}
 	for _, w := range in.Waivers {
-		if failedChecks, ok := checked[w.Scenario]; ok && !failedChecks[w.Check] {
+		if checked[w.Scenario] && !used[w] {
 			v.Stale = append(v.Stale, w)
 		}
 	}
@@ -314,17 +313,11 @@ func Evaluate(in Input) Verdict {
 
 type key struct{ name, fixture string }
 
-// scanKey drops a scan's table size, which moves with the data, so the same
-// scan matches across branches and rounds.
+// scanKey is a scan's "table#fingerprint", the part a waiver names; the table
+// size after it moves with the data.
 func scanKey(scan string) string {
-	table, statement, ok := strings.Cut(scan, ": ")
-	if !ok {
-		return scan
-	}
-	if i := strings.Index(table, " ("); i >= 0 {
-		table = table[:i]
-	}
-	return table + ": " + statement
+	k, _, _ := strings.Cut(scan, " ")
+	return k
 }
 
 // Aggregate folds rounds into one report of their medians, the form a main

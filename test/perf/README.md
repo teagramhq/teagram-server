@@ -25,8 +25,9 @@ table above 10,000 rows.
   more before it counts.
 
 A check `main` already fails is listed in `known_violations.json` with the issue
-that fixes it. Base regressions cannot be listed, and a listed sequential scan
-covers only the scans the base branch already has: a new one still fails.
+that fixes it. Base regressions cannot be listed. A sequential-scan entry names one scan by
+the `table#fingerprint` the report prints (a hash of the full statement), so any
+other scan in that scenario still fails.
 
 ## CI
 

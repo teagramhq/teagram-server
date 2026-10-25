@@ -5,6 +5,8 @@ package perf_test
 import (
 	"context"
 	"crypto/rsa"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -306,7 +308,7 @@ func (x *explainer) statements(ctx context.Context, captured []capturedQuery) (r
 				rows += int64(n.PlanRows)
 			}
 			if strings.Contains(n.Node, "Seq Scan") && x.sizes[n.Relation] > seqScanRows {
-				scan := fmt.Sprintf("%s (%.0f rows): %s", n.Relation, x.sizes[n.Relation], firstLine(body))
+				scan := fmt.Sprintf("%s#%s (%.0f rows): %s", n.Relation, fingerprint(body), x.sizes[n.Relation], firstLine(body))
 				if !slices.Contains(scans, scan) {
 					scans = append(scans, scan)
 				}
@@ -366,6 +368,13 @@ func statementBody(sql string) string {
 		return body
 	}
 	return ""
+}
+
+// fingerprint names a statement by its full text with whitespace collapsed, so
+// a waiver can name one exact scan.
+func fingerprint(sql string) string {
+	sum := sha256.Sum256([]byte(strings.Join(strings.Fields(sql), " ")))
+	return hex.EncodeToString(sum[:4])
 }
 
 func firstLine(sql string) string {

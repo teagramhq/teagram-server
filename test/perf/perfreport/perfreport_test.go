@@ -72,9 +72,9 @@ func TestEvaluateBlocksRowsThatFollowAccountSize(t *testing.T) {
 
 func TestEvaluateBlocksSequentialScan(t *testing.T) {
 	rs := pair("messages.search", perfreport.Read, result(1, 2, 3, 10), result(1, 2, 3, 10))
-	rs[1].SeqScans = []string{"messages (1000000 rows)"}
+	rs[1].SeqScans = []string{"messages#1a2b3c4d (1000000 rows): SELECT id FROM messages"}
 	v := perfreport.Evaluate(perfreport.Input{Head: rounds(rs...)})
-	if got := reasons(v.Failures); !strings.Contains(got, "messages.search: sequential scan on messages (1000000 rows) at 100x") {
+	if got := reasons(v.Failures); !strings.Contains(got, "messages.search: sequential scan on messages#1a2b3c4d (1000000 rows): SELECT id FROM messages at 100x") {
 		t.Fatalf("failures = %q, want the sequential scan", got)
 	}
 }
@@ -191,7 +191,7 @@ func TestEvaluateWaivesKnownViolationButNotRegression(t *testing.T) {
 	head := rounds(pair("messages.getHistory", perfreport.Read, result(20, 25, 5, 100), result(20, 25, 125, 100))...)
 	waivers := []perfreport.Waiver{
 		{Scenario: "messages.getHistory", Check: perfreport.CheckQueries, Issue: "MAIN-2"},
-		{Scenario: "messages.getHistory", Check: perfreport.CheckSeqScan, Issue: "MAIN-3"},
+		{Scenario: "messages.getHistory", Check: perfreport.CheckSeqScan, Issue: "MAIN-3", Scan: "messages#00000000"},
 	}
 	v := perfreport.Evaluate(perfreport.Input{Head: head, Base: base, Waivers: waivers})
 	got := reasons(v.Failures)
@@ -217,7 +217,7 @@ func TestParseWaiversRejectsUnwaivableChecks(t *testing.T) {
 			t.Errorf("%s was accepted", raw)
 		}
 	}
-	if w, err := perfreport.ParseWaivers([]byte(`[{"scenario":"x","check":"seqscan","issue":"MAIN-1"}]`)); err != nil || len(w) != 1 {
+	if w, err := perfreport.ParseWaivers([]byte(`[{"scenario":"x","check":"seqscan","issue":"MAIN-1","scan":"messages#1a2b3c4d"}]`)); err != nil || len(w) != 1 {
 		t.Fatalf("waivers = %v, %v", w, err)
 	}
 }
@@ -236,22 +236,32 @@ func TestMarkdownListsEveryScenarioWithBudgetAndBand(t *testing.T) {
 	}
 }
 
-func TestEvaluateWaivesOnlySequentialScansBaseAlreadyHas(t *testing.T) {
-	known := "messages (40200 rows): SELECT f.id FROM files f"
-	added := "dialogs (12000 rows): SELECT id FROM dialogs"
-	base := pair("upload.getFile", perfreport.Read, result(1, 1, 1, 1), result(1, 1, 1, 1))
-	base[0].SeqScans = []string{"messages (20100 rows): SELECT f.id FROM files f"}
-	base[1].SeqScans = []string{"messages (40100 rows): SELECT f.id FROM files f"}
+func TestEvaluateWaivesOnlyTheNamedSequentialScan(t *testing.T) {
+	known := "messages#1a2b3c4d (40200 rows): SELECT f.id FROM files f"
+	added := "messages#99887766 (40200 rows): SELECT f.id FROM files f JOIN messages m"
 	head := pair("upload.getFile", perfreport.Read, result(1, 1, 1, 1), result(1, 1, 1, 1))
+	head[0].SeqScans = []string{"messages#1a2b3c4d (20100 rows): SELECT f.id FROM files f"}
 	head[1].SeqScans = []string{known, added}
-	waivers := []perfreport.Waiver{{Scenario: "upload.getFile", Check: perfreport.CheckSeqScan, Issue: "MAIN-2538"}}
-	v := perfreport.Evaluate(perfreport.Input{Head: rounds(head...), Base: rounds(base...), Waivers: waivers})
+	waivers := []perfreport.Waiver{{Scenario: "upload.getFile", Check: perfreport.CheckSeqScan, Issue: "MAIN-2538", Scan: "messages#1a2b3c4d"}}
+	// No base: the waiver alone must tell the known scan from the new one.
+	v := perfreport.Evaluate(perfreport.Input{Head: rounds(head...), Waivers: waivers})
 	got := reasons(v.Failures)
 	if !strings.Contains(got, "sequential scan on "+added) {
 		t.Fatalf("failures = %q, want the new scan to block despite the waiver", got)
 	}
-	if strings.Contains(got, "messages") || len(v.Waived) != 1 {
-		t.Fatalf("failures = %q, waived = %+v, want only base's scan waived", got, v.Waived)
+	if strings.Contains(got, "1a2b3c4d") || len(v.Waived) != 2 {
+		t.Fatalf("failures = %q, waived = %+v, want the named scan waived at both fixtures", got, v.Waived)
+	}
+}
+
+func TestParseWaiversRequiresScanForSeqScanOnly(t *testing.T) {
+	for _, raw := range []string{
+		`[{"scenario":"x","check":"seqscan","issue":"MAIN-1"}]`,
+		`[{"scenario":"x","check":"rows","issue":"MAIN-1","scan":"messages#1a2b3c4d"}]`,
+	} {
+		if _, err := perfreport.ParseWaivers([]byte(raw)); err == nil {
+			t.Errorf("%s was accepted", raw)
+		}
 	}
 }
 
