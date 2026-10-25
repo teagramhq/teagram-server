@@ -101,6 +101,16 @@ replica_count_snapshot() {
     "$inspected" "$compose_json" "$ENV_FILE" "$OVERRIDE_FILE" selected-compose-render "$snapshot_name"
 }
 
+replica_count_addition_snapshot() {
+  local snapshot_name=$1 container_count=$2 env_assignment=${3:-TG_REPLICA_COUNT=3} inspected compose_json compose_count=1
+  if [ "$env_assignment" = TG_REPLICA_COUNT=3 ]; then compose_count=3; fi
+  printf 'TG_NEW_FLAG=on\n%s\n' "$env_assignment" > "$ENV_FILE"
+  inspected=$(inspect_json '' "$container_count")
+  compose_json=$(jq -c --arg count "$compose_count" '.services.teagramd.environment.TG_REPLICA_COUNT=$count' <<< "$COMPOSE_JSON")
+  ROLLOUT_ADDED_ENV=TG_REPLICA_COUNT snapshot_from_json \
+    "$inspected" "$compose_json" "$ENV_FILE" "$OVERRIDE_FILE" selected-compose-render "$snapshot_name"
+}
+
 exchange_budget_snapshot() {
   local name=$1 value=$2 added=${3:-} env_content=${4:-} actual_value actual inspected compose_json
   actual_value=${5:-$value}
@@ -258,6 +268,34 @@ if replica_count_snapshot target 3 1 >/dev/null 2>"$TMP/replica-target-mismatch.
   exit 1
 fi
 printf '%s\n' 'PASS replica-count rollout checks baseline, target, and rollback container states'
+
+(
+  COMPOSE_JSON=$(jq -c '.services.teagramd.logging={driver:"syslog",options:{"syslog-address":"unixgram:///dev/log","syslog-facility":"daemon","syslog-format":"rfc5424",tag:"teagramd"}}' <<< "$COMPOSE_JSON")
+  INSPECT_LOG_CONFIG='{"Type":"syslog","Config":{"syslog-address":"unixgram:///dev/log","syslog-facility":"daemon","syslog-format":"rfc5424","tag":"teagramd"}}'
+  replica_addition_baseline=$(replica_count_addition_snapshot baseline 1)
+  replica_addition_preflight=$(replica_count_addition_snapshot preflight 1)
+  replica_addition_target=$(replica_count_addition_snapshot target 3)
+  [ "$(jq -r '.container_env_added' <<< "$replica_addition_baseline")" = none ]
+  [ "$(jq -r '.container_env_added' <<< "$replica_addition_preflight")" = none ]
+  [ "$(jq -r '.container_env_added' <<< "$replica_addition_target")" = TG_REPLICA_COUNT ]
+  printf '%s\n' "$replica_addition_baseline" > "$TMP/replica-addition-baseline.snapshot.json"
+  printf '%s\n' "$replica_addition_target" > "$TMP/replica-addition-target.snapshot.json"
+  if ! ROLLOUT_ADDED_ENV=TG_REPLICA_COUNT compare_snapshots \
+    "$TMP/replica-addition-baseline.snapshot.json" "$TMP/replica-addition-target.snapshot.json" \
+    sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb \
+    "$TMP/replica-addition-comparisons.tsv"; then
+    printf '%s\n' 'FAIL named replica-count addition did not pass baseline-to-target comparison' >&2
+    cat "$TMP/replica-addition-comparisons.tsv" >&2
+    exit 1
+  fi
+  replica_addition_rollback=$(replica_count_addition_snapshot rollback 1 TG_NEW_FLAG=on)
+  [ "$(jq -r '.container_env_added' <<< "$replica_addition_rollback")" = none ]
+  if replica_count_addition_snapshot target 2 >/dev/null 2>"$TMP/replica-addition-mismatch.err"; then
+    printf '%s\n' 'FAIL named replica-count addition accepted a target other than 3' >&2
+    exit 1
+  fi
+  printf '%s\n' 'PASS unset replica-count addition verifies value 3 and rolls back to the implicit value'
+)
 
 added_exchange_env=$(exchange_budget_snapshot target 0 TG_RATE_LIMIT_KEY_EXCHANGE_IP \
   'TG_RATE_LIMIT_KEY_EXCHANGE_IP=0')
@@ -999,6 +1037,49 @@ media_key_target=$(snapshot_from_json \
 [ "$(jq -r '.media_key_current' <<< "$media_key_target")" = 1 ]
 [ "$(jq -r '.config_sha256' <<< "$media_key_baseline")" = "$(jq -r '.config_sha256' <<< "$media_key_target")" ]
 printf '%s\n' 'PASS Compose extension anchors do not change the resolved runtime digest'
+
+public_preflight_fixture="$SCRIPT_DIR/testdata/public-websocket-preflight-b5d8471.json"
+(
+  ROLLOUT_RUNNER_SOURCE_ONLY=1 source "$SCRIPT_DIR/rollout-runner.sh"
+  write_immutable() {
+    local path=$1 contents=$2
+    [ ! -e "$path" ] && [ ! -L "$path" ] || return 1
+    printf '%s\n' "$contents" > "$path"
+    chmod 600 -- "$path"
+  }
+  run_public_preflight_fixture() {
+    local scenario=$1 replica_count=$2 phase_dir expected_rows actual_rows
+    phase_dir="$TMP/public-preflight-$scenario"
+    BASELINE_DIR="$phase_dir.baseline"
+    TARGET_DIR="$phase_dir.target"
+    mkdir -m 700 "$BASELINE_DIR" "$TARGET_DIR"
+    jq -c --arg scenario "$scenario" '.[$scenario].baseline' "$public_preflight_fixture" \
+      > "$BASELINE_DIR/baseline.snapshot.json"
+    jq -c --arg scenario "$scenario" '.[$scenario].preflight' "$public_preflight_fixture" \
+      > "$TARGET_DIR/preflight.snapshot.json"
+    chmod 600 "$BASELINE_DIR/baseline.snapshot.json" "$TARGET_DIR/preflight.snapshot.json"
+    ENV_FILE="$phase_dir.env"
+    if [ "$replica_count" = unset ]; then : > "$ENV_FILE"; else printf 'TG_REPLICA_COUNT=%s\n' "$replica_count" > "$ENV_FILE"; fi
+    chmod 600 "$ENV_FILE"
+    INITIALIZE_LOCAL=0
+    ROLLOUT_RUNNER_PUBLIC_WEBSOCKET=1
+    ADDED_ENV=
+    CHANGED_ENV=
+    if [ "$scenario" = staged_pair ]; then ADDED_ENV=TG_REPLICA_COUNT; fi
+    compare_resolved_preflight
+    expected_rows=$(jq -r '.expected_rows[] | . + "\tpass"' "$public_preflight_fixture" | sort)
+    actual_rows=$(awk -F '\t' '$3 != "" { print $3 "\t" $6 }' "$TARGET_DIR/preflight-comparisons.tsv" | sort)
+    [ "$actual_rows" = "$expected_rows" ] || {
+      printf 'FAIL public WebSocket %s preflight rows differ from the sanitized replay fixture\n' "$scenario" >&2
+      printf 'expected rows:\n%s\nactual rows:\n%s\n' "$expected_rows" "$actual_rows" >&2
+      cat "$TARGET_DIR/preflight-comparisons.tsv" >&2
+      return 1
+    }
+  }
+  run_public_preflight_fixture live_pair unset
+  run_public_preflight_fixture staged_pair 3
+)
+printf '%s\n' 'PASS sanitized b5d8471-to-PR-882 public preflight replay and staged apply fixture'
 [ "$(jq -r '.mounts_sha256' <<< "$media_key_baseline")" = "$(jq -r '.mounts_sha256' <<< "$media_key_target")" ]
 [ "$(jq -r '.container_env_sha256' <<< "$media_key_baseline")" = "$(jq -r '.container_env_sha256' <<< "$media_key_target")" ]
 media_key_compose_empty_bind=$(jq -c '.services.teagramd.volumes[-1].bind={}' <<< "$media_key_compose")

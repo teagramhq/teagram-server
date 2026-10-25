@@ -343,7 +343,7 @@ esac
 export COMPOSE_FILE="$LIVE_CF"   # carry forward the pinned local-blob files live runs from
 export COMPOSE_PROFILES=public
 export ROLLOUT_RUNNER_PUBLIC_WEBSOCKET=1
-unset ROLLOUT_RUNNER_CHANGED_ENV ROLLOUT_RUNNER_PREVIOUS_ENV_FILE
+unset ROLLOUT_RUNNER_ADDED_ENV ROLLOUT_RUNNER_CHANGED_ENV ROLLOUT_RUNNER_PREVIOUS_ENV_FILE
 docker_compose() {
   if [[ "${#S3_ENV_FILES[@]}" == 2 ]]; then
     docker compose --env-file "${S3_ENV_FILES[0]}" --env-file "${S3_ENV_FILES[1]}" "$@"
@@ -387,9 +387,9 @@ stage_public_replica_count() {
   count=$(public_replica_count) || return 1
   case "$count" in
     3) return 0 ;;
-    1) ;;
+    1|unset) ;;
     *)
-      echo "public WebSocket rollout requires one explicit TG_REPLICA_COUNT=1 or TG_REPLICA_COUNT=3 assignment (found $count)" >&2
+      echo "public WebSocket rollout requires an unset, 1, or 3 TG_REPLICA_COUNT value (found $count)" >&2
       return 1
       ;;
   esac
@@ -400,7 +400,7 @@ stage_public_replica_count() {
     return 1
   }
   temp=$(mktemp "$LIVE_CHECKOUT/.env.public-count.XXXXXXXX") || return 1
-  if ! awk '
+  if [[ "$count" == 1 ]] && ! awk '
       BEGIN { count=0; invalid=0 }
       /^TG_REPLICA_COUNT=/ {
         count++
@@ -414,15 +414,26 @@ stage_public_replica_count() {
     rm -f -- "$temp"
     echo 'only a literal TG_REPLICA_COUNT=1 value may be raised for the public replicas' >&2
     return 1
+  elif [[ "$count" == unset ]] && ! {
+    cat -- "$env_file" && printf '%s\n' 'TG_REPLICA_COUNT=3'
+  } > "$temp"; then
+    rm -f -- "$temp"
+    echo 'cannot stage TG_REPLICA_COUNT=3 as an approved environment addition' >&2
+    return 1
   fi
   if ! chmod 600 -- "$temp" || ! sync || ! mv -f -- "$temp" "$env_file" || ! sync; then
     rm -f -- "$temp"
     echo 'cannot atomically stage TG_REPLICA_COUNT=3' >&2
     return 1
   fi
-  export ROLLOUT_RUNNER_CHANGED_ENV=TG_REPLICA_COUNT
   export ROLLOUT_RUNNER_PREVIOUS_ENV_FILE="$previous_env"
-  printf 'staged TG_REPLICA_COUNT=3 through the rollout runner approved environment path\n'
+  if [[ "$count" == unset ]]; then
+    export ROLLOUT_RUNNER_ADDED_ENV=TG_REPLICA_COUNT
+    printf 'staged TG_REPLICA_COUNT=3 as a named environment addition through the rollout runner\n'
+  else
+    export ROLLOUT_RUNNER_CHANGED_ENV=TG_REPLICA_COUNT
+    printf 'staged TG_REPLICA_COUNT=3 through the rollout runner approved environment change path\n'
+  fi
 }
 install_teagram_syslog_config "$SHA"
 run_mtproto_smoke() {

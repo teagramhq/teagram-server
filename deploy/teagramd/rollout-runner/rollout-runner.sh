@@ -4,7 +4,7 @@ umask 077
 
 SCRIPT_DIR=$(cd -P "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 SCRIPT_SOURCE="$SCRIPT_DIR/$(basename "${BASH_SOURCE[0]}")"
-readonly APPROVED_VERIFIER_SHA=4d9c6b6c4ef9706d44b2afb9c7f38d3d959d1fdf84687d9e281f7fedf8a0dae6
+readonly APPROVED_VERIFIER_SHA=086670fc082f5b6d7e1f786dd9e369c49acc39113c52c2fd96027ea7fa686496
 readonly APPROVED_SCHEMA_GATE_SHA=ac54d3cf0480383a52414a8bc8b856b5e1d5f6f8d19034c9c576c64627e097c8
 readonly APPROVED_SCHEMA_GATE_HELPER_SHA=7ae06c2872c60b434068b3715a9ddd5e19b03d4be98dc9881c8dd8f294953d41
 readonly APPROVED_INITIAL_LOCAL_COMPOSE_SHA=d764d291ad2ea91cff841d14a0cd2bbcb5981961dbc67406bfeba1196a7b3fa4
@@ -1299,6 +1299,10 @@ validate_baseline() {
 
 protected_env_name() {
   case "$1" in
+    TG_REPLICA_COUNT)
+      [ "${ROLLOUT_RUNNER_PUBLIC_WEBSOCKET:-0}" != 1 ] && return 0
+      return 1
+      ;;
     TG_RSA_KEY_*|TG_AUTHKEY_ENC_KEY*|TG_POSTGRES_*|POSTGRES_*|TG_BLOB_*|RUSTFS_*|TG_REPLICA_*|TG_CLIENT_ADDR_TRUST|COMPOSE_*|DOCKER_*) return 0 ;;
   esac
   return 1
@@ -1331,8 +1335,30 @@ public_env_addition_requested() {
   return 1
 }
 
+replica_count_addition_requested() {
+  local name
+  local -a requested
+  [ "${ROLLOUT_RUNNER_PUBLIC_WEBSOCKET:-0}" = 1 ] && [ -n "$ADDED_ENV" ] || return 1
+  IFS=, read -r -a requested <<< "$ADDED_ENV"
+  for name in "${requested[@]}"; do
+    [ "$name" = TG_REPLICA_COUNT ] && return 0
+  done
+  return 1
+}
+
 replica_count_change_requested() {
   [ "$CHANGED_ENV" = TG_REPLICA_COUNT ]
+}
+
+read_replica_count_from_env() {
+  awk -F= '
+    $1 == "TG_REPLICA_COUNT" { count++; value=$2 }
+    END {
+      if (count == 0) print "unset"
+      else if (count > 1) print "duplicate"
+      else print value
+    }
+  ' "$ENV_FILE"
 }
 
 changed_websocket_origins_requested() {
@@ -1349,7 +1375,8 @@ changed_websocket_origins_requested() {
 restore_previous_env_for_named_changes() {
   local env_dir temp
   [ "$CHANGED_ENV_SOURCE" != override ] || return 0
-  public_env_addition_requested || changed_websocket_origins_requested || replica_count_change_requested || return 0
+  public_env_addition_requested || replica_count_addition_requested || \
+    changed_websocket_origins_requested || replica_count_change_requested || return 0
   [ -n "$PREVIOUS_ENV_FILE" ] && [ -f "$PREVIOUS_ENV_FILE" ] && [ ! -L "$PREVIOUS_ENV_FILE" ] && \
     [ "$(stat -c %a -- "$PREVIOUS_ENV_FILE")" = 600 ] && [ "$(stat -c %u -- "$PREVIOUS_ENV_FILE")" = 0 ] || {
     fail 'named environment rollback requires the root-owned mode-0600 previous .env'
@@ -1788,6 +1815,13 @@ validate_env_baseline() {
   for name in "${requested[@]}"; do
     [[ "$name" =~ ^[A-Z][A-Z0-9_]*$ ]] || { fail 'environment additions must be upper-case variable names'; return 1; }
     ! protected_env_name "$name" || { fail "environment addition $name is a protected deployment setting"; return 1; }
+    if [ "$name" = TG_REPLICA_COUNT ]; then
+      [ "${ROLLOUT_RUNNER_PUBLIC_WEBSOCKET:-0}" = 1 ] && \
+        [ "$(read_replica_count_from_env)" = 3 ] || {
+        fail 'TG_REPLICA_COUNT addition is limited to value 3 for the public WebSocket rollout'
+        return 1
+      }
+    fi
     [[ "$names" != *" $name "* ]] || { fail "environment addition $name is named twice"; return 1; }
     names+="$name "
   done
@@ -2041,7 +2075,9 @@ target_compare() {
     return "$rc"
   fi
   if ! copy_immutable "$BASELINE_DIR/baseline.snapshot.json" "$TARGET_DIR/baseline.snapshot.json"; then return 1; fi
-  if ROLLOUT_CHECKOUT_PATH="$CHECKOUT" ROLLOUT_CHANGED_ENV="$CHANGED_ENV" ROLLOUT_PUBLIC_WEBSOCKET="${ROLLOUT_RUNNER_PUBLIC_WEBSOCKET:-0}" bash "$VERIFIER" compare \
+  if ROLLOUT_CHECKOUT_PATH="$CHECKOUT" ROLLOUT_ADDED_ENV="$ADDED_ENV" \
+      ROLLOUT_CHANGED_ENV="$CHANGED_ENV" \
+      ROLLOUT_PUBLIC_WEBSOCKET="${ROLLOUT_RUNNER_PUBLIC_WEBSOCKET:-0}" bash "$VERIFIER" compare \
       "$TARGET_DIR/baseline.snapshot.json" "$TARGET_DIR/target.snapshot.json" \
       "$BUILT_IMAGE_ID" "$TARGET_DIR" target >/dev/null; then
     expected_logging=$(jq -er '.compose_logging_policy' "$TARGET_DIR/preflight.snapshot.json") || {
@@ -2241,7 +2277,15 @@ compare_resolved_preflight() {
   done
   for field in compose_replica_count compose_client_addr_trust; do
     after=$(jq -er --arg field "$field" '.[$field]' "$target_file") || { fail 'resolved target is missing an approved environment setting'; return 1; }
-    if [ "$field" = compose_replica_count ]; then expected=1; else expected=socket; fi
+    if [ "$field" = compose_replica_count ]; then
+      expected=1
+      if [ "${ROLLOUT_RUNNER_PUBLIC_WEBSOCKET:-0}" = 1 ] && \
+         [ "$(read_replica_count_from_env)" = 3 ]; then
+        expected=3
+      fi
+    else
+      expected=socket
+    fi
     if [ "$expected" = "$after" ]; then result=pass; else result=fail; failures=$((failures + 1)); fi
     append_evidence_row "$results" preflight "$field" "$expected" "$after" "$result" || return 1
   done
@@ -2334,7 +2378,8 @@ compare_rollback_to_baseline() {
   fi
   write_immutable "$results" '' || return 1
   for field in "${fields[@]}"; do
-    if [ "$field" = env_sha256 ] && { public_env_addition_requested || changed_websocket_origins_requested || replica_count_change_requested; }; then
+    if [ "$field" = env_sha256 ] && { public_env_addition_requested || replica_count_addition_requested || \
+      changed_websocket_origins_requested || replica_count_change_requested; }; then
       [ -n "$RECORDED_ENV_SHA" ] || { fail 'named environment rollback has no verified previous .env digest'; return 1; }
       before=$RECORDED_ENV_SHA
     elif [ "$field" = override_sha256 ] && [ "$CHANGED_ENV_SOURCE" = override ]; then
@@ -2344,7 +2389,8 @@ compare_rollback_to_baseline() {
       before=$(jq -er --arg field "$field" '.[$field]' "$baseline_file") || { fail 'baseline snapshot is missing an equivalence field'; return 1; }
     fi
     after=$(jq -er --arg field "$field" '.[$field]' "$rollback_file") || { fail 'rollback snapshot is missing an equivalence field'; return 1; }
-    if [ "$field" = compose_replica_count ] && replica_count_change_requested; then
+    if [ "$field" = compose_replica_count ] && \
+       { replica_count_change_requested || replica_count_addition_requested; }; then
       if [ "$before" = 3 ] && [ "$after" = 1 ]; then result=pass; else result=fail; fi
       append_evidence_row "$results" rollback "$field" "$before" "$after" "$result" || return 1
       [ "$result" = pass ] || ROLLBACK_COMPARE_FAILURES=$((ROLLBACK_COMPARE_FAILURES + 1))

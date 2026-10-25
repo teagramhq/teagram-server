@@ -71,6 +71,8 @@ verify_added_container_environment() {
               ($compose_env[$runtime_name] | type) == "string" and
               ($actual | length) == 1 and
               $actual[0] == $compose_env[$runtime_name] and
+              ($name != "TG_REPLICA_COUNT" or
+                (dotenv_value($assignments[0]) == "3" and $compose_env[$runtime_name] == "3" and $actual[0] == "3")) and
               (($name | IN(
                 "TG_PUBLIC_WEBSOCKET_LISTEN_ADDR", "TG_PUBLIC_WEBSOCKET_ADVERTISE_ADDR",
                 "TG_PUBLIC_REGISTRATION", "TG_PUBLIC_WEBSOCKET_ALLOWED_ORIGINS"
@@ -968,7 +970,8 @@ snapshot_from_json() {
        | select(IN(
            "TG_TURNSTILE_SITE_KEY=", "TG_TURNSTILE_SECRET_KEY_FILE=", "TG_TURNSTILE_SIGNIN_ENABLED=false",
            "TG_PUBLIC_WEBSOCKET_LISTEN_ADDR=", "TG_PUBLIC_WEBSOCKET_ADVERTISE_ADDR=",
-           "TG_PUBLIC_REGISTRATION=closed", "TG_PUBLIC_WEBSOCKET_ALLOWED_ORIGINS="
+           "TG_PUBLIC_REGISTRATION=closed", "TG_PUBLIC_WEBSOCKET_ALLOWED_ORIGINS=",
+           "TG_REPLICA_COUNT=1"
          ) | not)
        | split("=")[0]] as $keys
       | [$added[] | select(. as $name | ($name | runtime_name($name)) as $runtime | any($keys[]; . == $runtime))]
@@ -1056,7 +1059,8 @@ snapshot_from_json() {
               (IN(
                 "TG_TURNSTILE_SITE_KEY=", "TG_TURNSTILE_SECRET_KEY_FILE=", "TG_TURNSTILE_SIGNIN_ENABLED=false",
                 "TG_PUBLIC_WEBSOCKET_LISTEN_ADDR=", "TG_PUBLIC_WEBSOCKET_ADVERTISE_ADDR=",
-                "TG_PUBLIC_REGISTRATION=closed", "TG_PUBLIC_WEBSOCKET_ALLOWED_ORIGINS="
+                "TG_PUBLIC_REGISTRATION=closed", "TG_PUBLIC_WEBSOCKET_ALLOWED_ORIGINS=",
+                "TG_REPLICA_COUNT=1"
               ) | not))
      | split("=")[0]] as $keys
     | [$added[] | select(. as $name | ($name | runtime_name($name)) as $runtime | any($keys[]; . == $runtime))]
@@ -1375,11 +1379,24 @@ record_comparison() {
   return 0
 }
 
+replica_count_addition_is_named() {
+  local name
+  local -a requested
+  IFS=, read -r -a requested <<< "${ROLLOUT_ADDED_ENV:-}"
+  for name in "${requested[@]}"; do
+    [ "$name" = TG_REPLICA_COUNT ] && return 0
+  done
+  return 1
+}
+
 record_ordinary_setting() {
   local output=$1 field=$2 before=$3 after=$4 expected=$5 result
   if { [ "$before" = unset ] || [ "$before" = "$expected" ]; } && [ "$after" = "$expected" ]; then
     result=pass
   elif [[ "$field" == *TG_REPLICA_COUNT ]] && [ "${ROLLOUT_CHANGED_ENV:-}" = TG_REPLICA_COUNT ] && \
+      [ "$after" = 3 ] && { [ "$before" = 1 ] || [ "$before" = 3 ]; }; then
+    result=pass
+  elif [[ "$field" == *TG_REPLICA_COUNT ]] && replica_count_addition_is_named && \
       [ "$after" = 3 ] && { [ "$before" = 1 ] || [ "$before" = 3 ]; }; then
     result=pass
   else

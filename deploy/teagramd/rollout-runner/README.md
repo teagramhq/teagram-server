@@ -85,10 +85,19 @@ Change a retained value only through `ROLLOUT_RUNNER_CHANGED_ENV` with the
 previous `.env` backup. If a rollout that added public settings rolls back, the
 runner restores that previous `.env` before recreating the previous container.
 
+The public WebSocket rollout also raises `TG_REPLICA_COUNT` to `3`. When the
+previous `.env` has no assignment, `deploy-main.sh` stages this as the named
+addition `ROLLOUT_RUNNER_ADDED_ENV=TG_REPLICA_COUNT`; when it has the literal
+`TG_REPLICA_COUNT=1`, it stages the named change
+`ROLLOUT_RUNNER_CHANGED_ENV=TG_REPLICA_COUNT`. Both paths retain the previous
+mode-0600 `.env`, and the runner accepts only value `3` with the public profile
+enabled. A failed rollout restores the previous `.env` and Compose checkout
+automatically before verifying the old service.
+
 The public WebSocket route is applied with the `public` Compose profile and
 `ROLLOUT_RUNNER_PUBLIC_WEBSOCKET=1`. `deploy-main.sh` takes the database dump
-first, then stages the approved `TG_REPLICA_COUNT=1` to `3` change through the
-named environment-change path and keeps the root-only previous `.env`. The
+first, then stages `TG_REPLICA_COUNT=3` through the named environment addition
+or change path described above and keeps the root-only previous `.env`. The
 public topology checker validates the isolated HAProxy frontend and backend,
 the peer and header rules, the two proxy-v2 replicas, registration and Origin
 policy, and their absence of host ports. It also requires the bounded HAProxy
