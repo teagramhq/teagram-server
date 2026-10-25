@@ -55,10 +55,26 @@ restore() {
   done
 }
 
+# revision_ahead_of prints the first of the applied revisions that the tree's
+# migrations/ does not contain, and fails when there is none. That is the one
+# way base migrations cannot apply: the snapshot was built after a migration
+# base predates.
+revision_ahead_of() {
+  local tree="$1" revs="$2" v
+  for v in $revs; do
+    if ! compgen -G "$tree/migrations/${v}_*.sql" >/dev/null; then
+      echo "$v"
+      return 0
+    fi
+  done
+  return 1
+}
+
 # base_ready prepares the base branch's databases and test binary. It returns
-# 1 only for the two documented skips, a base without the harness and base
-# migrations that do not apply to the cached fixture; anything else that goes
-# wrong fails the job, since skipping would silently drop every base check.
+# 1 only for the documented skips: no base commit, a base without the harness,
+# and a cached fixture already past base's migrations. Anything else that goes
+# wrong, a broken migration included, fails the job, since skipping would
+# silently drop every base check.
 # Its databases are copies of the restored fixtures, migrated with the base
 # branch's own migrations before head's are applied.
 base_ready() {
@@ -74,10 +90,14 @@ base_ready() {
   fi
   for f in "${fixtures[@]}"; do
     psql_admin -c "CREATE DATABASE perf_${f}_base TEMPLATE perf_$f" || fatal "copy the $f fixture for base"
-    if ! migrate "$tree" "${f}_base"; then
-      echo "base migrations do not apply to the cached fixture" >"$PERF_WORK/base-skipped"
+    local revs rev
+    revs=$(psql_admin -d "perf_${f}_base" -c "SELECT version FROM atlas_schema_revisions.atlas_schema_revisions ORDER BY version") \
+      || fatal "read the migration revisions of the $f fixture"
+    if rev=$(revision_ahead_of "$tree" "$revs"); then
+      echo "the cached fixture already has migration $rev, which base does not" >"$PERF_WORK/base-skipped"
       return 1
     fi
+    migrate "$tree" "${f}_base" || fatal "apply base migrations to the $f fixture"
   done
   (cd "$tree" && go test -c -tags performance -o "$PERF_WORK/base.test" ./test/perf) || fatal "build the base harness"
 }
