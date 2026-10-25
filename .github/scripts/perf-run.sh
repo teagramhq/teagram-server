@@ -48,10 +48,21 @@ seed() {
   done
 }
 
+# analyze vacuums a database and rebuilds its planner statistics. Vacuum sets
+# the visibility map index-only scans depend on. pg_dump leaves statistics out and
+# pg_restore never runs ANALYZE, so a restored fixture has none; autovacuum is
+# off on this server, so nothing else fills them in mid-run either. Plans, and
+# with them the sequential-scan and rows-read checks, read these statistics.
+analyze() {
+  docker exec "$PERF_PG_CONTAINER" vacuumdb -U postgres -q --analyze -j 4 -d "$1"
+}
+
 restore() {
   for f in "${fixtures[@]}"; do
     psql_admin -c "CREATE DATABASE perf_$f"
     docker exec "$PERF_PG_CONTAINER" pg_restore -U postgres -d "perf_$f" -j 4 --no-owner "/cache/perf_$f.dump"
+    # Before base_ready copies it, so the copies carry the same statistics.
+    analyze "perf_$f"
   done
 }
 
@@ -98,6 +109,7 @@ base_ready() {
       return 1
     fi
     migrate "$tree" "${f}_base" || fatal "apply base migrations to the $f fixture"
+    analyze "perf_${f}_base" || fatal "analyze the base $f fixture"
   done
   (cd "$tree" && go test -c -tags performance -o "$PERF_WORK/base.test" ./test/perf) || fatal "build the base harness"
 }
@@ -150,8 +162,11 @@ measure() {
   if base_ready; then
     with_base=true
   fi
+  # A migration can rewrite a table and drop its statistics, so each side is
+  # analyzed again after its own migrations.
   for f in "${fixtures[@]}"; do
     migrate . "$f"
+    analyze "perf_$f"
   done
   go test -c -tags performance -o "$PERF_WORK/head.test" ./test/perf
   run_rounds a
