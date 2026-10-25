@@ -29,11 +29,13 @@ query() {
 missing_snapshot_step="$(query '.jobs."rpc-performance".steps[] | select(.name == "No snapshot for this fixture") | .name')"
 [[ -z "$missing_snapshot_step" ]] || fail 'a missing main snapshot must not be a standalone failure'
 
-rg -Fq 'RPC performance fixture seed / infrastructure failure' "$runner" ||
+runner_contents="$(<"$runner")"
+[[ "$runner_contents" == *"RPC performance fixture seed / infrastructure failure"* ]] ||
   fail 'fixture seed and infrastructure errors need an explicit summary label'
-rg -Fq 'fixture seeder changed; skipping the base comparison' "$runner" ||
+[[ "$runner_contents" == *"fixture seeder changed; skipping the base comparison"* ]] ||
   fail 'a changed fixture seeder must still allow head measurements without an incompatible base comparison'
-rg -Fq 'pg_isready -h 127.0.0.1 -U postgres -q' "$postgres" ||
+postgres_contents="$(<"$postgres")"
+[[ "$postgres_contents" == *"pg_isready -h 127.0.0.1 -U postgres -q"* ]] ||
   fail 'Postgres readiness must wait for the TCP listener used by the workflow'
 
 printf 'RPC performance workflow contract holds\n'
