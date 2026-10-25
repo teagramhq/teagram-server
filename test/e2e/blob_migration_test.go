@@ -270,12 +270,44 @@ func requireRootMigrationFixture(t *testing.T) bool {
 	if err != nil {
 		t.Fatalf("locate test binary: %v", err)
 	}
-	// #nosec G204 G702 -- Re-run this exact test binary with the system sudo/env executables and the runner's Go PATH.
-	command := osexec.CommandContext(t.Context(), sudo, "-n", "env", "PATH="+os.Getenv("PATH"), testBinary, "-test.run=^TestBlobEncryptionMigrationKillResume$")
+	// #nosec G204 G702 -- Re-run this exact test binary with the runner's container runtime and Go environment.
+	args := append([]string{"-n", "env"}, rootMigrationEnvironment()...)
+	args = append(args, testBinary, "-test.run=^TestBlobEncryptionMigrationKillResume$")
+	command := osexec.CommandContext(t.Context(), sudo, args...)
 	if output, err := command.CombinedOutput(); err != nil {
 		t.Fatalf("root migration integration test failed: %v\n%s", err, output)
 	}
 	return false
+}
+
+func TestRootMigrationEnvironmentPreservesContainerSettings(t *testing.T) {
+	t.Setenv("TESTCONTAINERS_HUB_IMAGE_NAME_PREFIX", "mirror.gcr.io")
+	t.Setenv("TESTCONTAINERS_RYUK_DISABLED", "true")
+	t.Setenv("DOCKER_HOST", "unix:///var/run/docker.sock")
+
+	got := strings.Join(rootMigrationEnvironment(), "\n")
+	for _, setting := range []string{
+		"TESTCONTAINERS_HUB_IMAGE_NAME_PREFIX=mirror.gcr.io",
+		"TESTCONTAINERS_RYUK_DISABLED=true",
+		"DOCKER_HOST=unix:///var/run/docker.sock",
+	} {
+		if !strings.Contains(got, setting) {
+			t.Errorf("root migration environment omitted %q: %q", setting, got)
+		}
+	}
+}
+
+func rootMigrationEnvironment() []string {
+	var env []string
+	for _, setting := range os.Environ() {
+		key, _, _ := strings.Cut(setting, "=")
+		if key == "PATH" || key == "DOCKER_HOST" || key == "DOCKER_CONTEXT" ||
+			key == "DOCKER_TLS_VERIFY" || key == "DOCKER_CERT_PATH" || key == "DOCKER_CONFIG" ||
+			strings.HasPrefix(key, "TESTCONTAINERS_") || key == "GOTOOLCHAIN" || key == "GOMODCACHE" {
+			env = append(env, setting)
+		}
+	}
+	return env
 }
 
 type migrationMediaHarness struct {
