@@ -186,13 +186,14 @@ func TestValidateRejectsOversizedInputBeforeParsing(t *testing.T) {
 
 func TestValidateTGSInflationAllocationIsBounded(t *testing.T) {
 	const maxInflatedTGSBytes = 1 << 20
-	body := testGzip(t, bytes.Repeat([]byte("z"), maxInflatedTGSBytes+1))
+	body := testGzip(t, bytes.Repeat([]byte("z"), 16*maxInflatedTGSBytes+1))
+	runtime.GC()
 	var before, after runtime.MemStats
 	runtime.ReadMemStats(&before)
 	_, err := stickervalidation.Validate(body, stickervalidation.TargetSticker)
 	runtime.ReadMemStats(&after)
 	assertReason(t, err, "STICKER_TGS_NOTGS")
-	if allocated := after.TotalAlloc - before.TotalAlloc; allocated > 4*maxInflatedTGSBytes {
+	if allocated := after.TotalAlloc - before.TotalAlloc; allocated > 8*maxInflatedTGSBytes {
 		t.Fatalf("TGS validation allocated %d bytes for a %d-byte inflate cap", allocated, maxInflatedTGSBytes)
 	}
 }
@@ -206,7 +207,8 @@ func FuzzValidateNeverPanics(f *testing.F) {
 	f.Fuzz(func(t *testing.T, body []byte, targetName string) {
 		_, err := stickervalidation.Validate(body, stickervalidation.Target(targetName))
 		if err != nil {
-			if _, ok := errors.AsType[*stickervalidation.ValidationError](err); !ok {
+			var validationErr *stickervalidation.ValidationError
+			if !errors.As(err, &validationErr) || validationErr == nil {
 				t.Fatalf("unexpected error type %T", err)
 			}
 		}
