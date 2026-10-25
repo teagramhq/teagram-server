@@ -485,9 +485,9 @@ if [ "${1:-}" = inspect ]; then
     log_config_type=syslog
     log_config='{"syslog-address":"unixgram:///dev/log","syslog-facility":"daemon","syslog-format":"rfc5424","tag":"teagramd"}'
     if { [ "${MOCK_SCENARIO:-}" = initial-local-legacy-logging-readiness-timeout ] && [ "$cfg" = baseline ]; } || \
-       { [ "${MOCK_SCENARIO:-}" = target-local-syslog-logging-rollout ] || \
-         [ "${MOCK_SCENARIO:-}" = target-local-syslog-logging-unmigrated ]; } && \
-       { [ "$phase" = baseline ] || [ "$phase" = rollback ]; }; then
+       { { [ "${MOCK_SCENARIO:-}" = target-local-syslog-logging-rollout ] || \
+           [ "${MOCK_SCENARIO:-}" = target-local-syslog-logging-unmigrated ]; } && \
+         { [ "$phase" = baseline ] || [ "$phase" = rollback ]; }; }; then
       log_config_type=json-file
       log_config='{}'
     elif [ "${MOCK_SCENARIO:-}" = target-local-old-target-image-logging-mismatch ] && [ "$phase" = baseline ]; then
@@ -2096,7 +2096,7 @@ if [ "$status" != 0 ] && grep -q 'rollback=verified' "$TMP/real-fixed-initial-lo
    awk -F '\t' -v expected="$default_json_logging_sha" -v actual="$approved_syslog_logging_sha" \
      '$3 == "live_baseline_container_logging_sha256" && $4 == expected && $5 == actual && $6 == "pass" {found=1} END {exit !found}' \
      "$preflight_rows" && \
-   grep -q 'reason=target_readiness_rejected_exit_' "$root.rollback/target-failure.txt" && \
+   grep -q 'reason=target_readiness_rejected_exit_' "$root.target/target-failure.txt" && \
    grep -q 'result=verified .*baseline_equivalence=pass' "$root.rollback/rollback-result.txt" && \
    grep -q $'rollback\tinitial_local_logging_transition\tjson-file:true\tsyslog-v1:false\tpass' "$rollback_rows" && \
    awk -F '\t' -v expected="$default_json_logging_sha" -v actual="$approved_syslog_logging_sha" \
