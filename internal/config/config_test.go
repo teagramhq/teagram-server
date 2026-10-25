@@ -197,6 +197,32 @@ func TestLoadDefaults(t *testing.T) {
 	}
 }
 
+func TestLoadSignUpTermsOfService(t *testing.T) {
+	t.Setenv("TG_POSTGRES_DSN", "postgres://localhost/tg")
+	t.Setenv("TG_AUTHKEY_ENC_KEY", validEncKey)
+	t.Setenv("TG_AUTHKEY_ENC_KEY_FILE", "")
+	t.Setenv("TG_RECOVERY_EMAIL", "off")
+	t.Setenv("TG_TERMS_OF_SERVICE", "")
+	readTerms := func() string {
+		t.Helper()
+		cfg, err := config.Load(discardLog())
+		if err != nil {
+			t.Fatalf("Load: %v", err)
+		}
+		return cfg.SignUpTermsOfService
+	}
+
+	const statement = "Teagram is software. Its authors hold no liability for what operators or users do with a self-hosted Teagram instance. Each instance's operator and its users are responsible for the content on that instance, including sticker and emoji packs users import."
+	if got := readTerms(); got != statement {
+		t.Fatalf("default sign-up terms = %q, want %q", got, statement)
+	}
+	const custom = "This instance is operated independently."
+	t.Setenv("TG_TERMS_OF_SERVICE", custom)
+	if got := readTerms(); got != custom {
+		t.Fatalf("configured sign-up terms = %q, want %q", got, custom)
+	}
+}
+
 func TestLoadRecoveryEmailMode(t *testing.T) {
 	t.Setenv("TG_POSTGRES_DSN", "postgres://localhost/tg")
 	t.Setenv("TG_AUTHKEY_ENC_KEY", validEncKey)

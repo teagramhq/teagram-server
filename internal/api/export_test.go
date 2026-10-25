@@ -308,6 +308,7 @@ func testHandlers(s *store.Store, linkPrefixes ...string) *handlers {
 	return &handlers{
 		store:                    s,
 		cfg:                      &tg.Config{MeURLPrefix: linkPrefix},
+		signUpTermsOfService:     config.DefaultSignUpTermsOfService,
 		log:                      slog.New(slog.DiscardHandler),
 		maxFileBytes:             TestMaxFileBytes,
 		now:                      time.Now,
