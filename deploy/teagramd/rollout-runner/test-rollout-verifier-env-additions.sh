@@ -135,6 +135,11 @@ empty_exchange_env=$(exchange_budget_snapshot target '' '')
 [ "$(jq -r '.container_env_sha256' <<< "$empty_env")" = \
   "$(jq -r '.container_env_sha256' <<< "$empty_exchange_env")" ]
 [ "$(jq -r '.container_env_added' <<< "$empty_exchange_env")" = none ]
+empty_exchange_added_baseline=$(exchange_budget_snapshot baseline '' TG_RATE_LIMIT_KEY_EXCHANGE_IP '')
+if [ "$(jq -r '.container_env_added' <<< "$empty_exchange_added_baseline")" != none ]; then
+  printf '%s\n' 'FAIL exact-empty exchange mapping was treated as an existing named environment addition' >&2
+  exit 1
+fi
 printf '%s\n' "$empty_env" > "$TMP/key-exchange-baseline.snapshot.json"
 printf '%s\n' "$empty_exchange_env" > "$TMP/key-exchange-empty-target.snapshot.json"
 if ! compare_snapshots \
