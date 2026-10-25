@@ -33,11 +33,11 @@ import (
 
 // fixtureVersion changes whenever the seeded shape changes, so a cached dump
 // of an older shape is never measured as if it were this one.
-const fixtureVersion = 1
+const fixtureVersion = 2
 
 // spec is one fixture size. The large fixture is the account the parent issue
-// defines; the small one is the same account at one hundredth of the data, so
-// the pair shows whether an RPC's cost follows account size.
+// defines; the small one is one hundredth of its requested size, capped by
+// store limits, so the pair shows whether an RPC's cost follows account size.
 type spec struct {
 	Name          string `json:"name"`
 	Contacts      int    `json:"contacts"`
@@ -62,6 +62,16 @@ var fixtures = []spec{
 	scaled("100x", shrink()),
 }
 
+func TestFixtureContactsFitStoreLimit(t *testing.T) {
+	for _, s := range fixtures {
+		t.Run(s.Name, func(t *testing.T) {
+			if s.Contacts > store.MaxContactsPerUser {
+				t.Fatalf("fixture has %d contacts, store limit is %d", s.Contacts, store.MaxContactsPerUser)
+			}
+		})
+	}
+}
+
 // shrink lets a development run seed a smaller large fixture in minutes
 // instead of the full one. CI never sets it; the fixture records its spec, so
 // a shrunk fixture's numbers are never mistaken for the real one's.
@@ -76,7 +86,7 @@ func shrink() int {
 func scaled(name string, divisor int) spec {
 	return spec{
 		Name:          name,
-		Contacts:      10_000 / divisor,
+		Contacts:      min(10_000/divisor, store.MaxContactsPerUser),
 		Dialogs:       5_000 / divisor,
 		ChatMessages:  1_000_000 / divisor,
 		Subscribers:   100_000 / divisor,
