@@ -15,7 +15,7 @@ import (
 	"github.com/teagramhq/teagram-server/internal/linklanding"
 )
 
-const wantLandingBody = `<!doctype html><html lang="en"><body><main>Open this in Teagramd</main></body></html>`
+const wantLandingBody = `<!doctype html><html lang="en"><body><main>Open this in Teagram</main></body></html>`
 
 func TestGETPathsReturnIdenticalStaticPageAndSecurityHeaders(t *testing.T) {
 	t.Parallel()
@@ -23,10 +23,12 @@ func TestGETPathsReturnIdenticalStaticPageAndSecurityHeaders(t *testing.T) {
 	handler := linklanding.NewHandler(slog.New(slog.DiscardHandler))
 	paths := []string{
 		"/+example",
+		"/joinchat/example-capability",
 		"/+live-synthetic-capability",
 		"/example",
 		"/example/1",
 		"/c/1/2",
+		"/unknown/path",
 		"/+%3Cscript%3E",
 		"/+revoked-synthetic-capability",
 		"/+random-synthetic-capability",
