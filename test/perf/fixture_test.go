@@ -33,7 +33,7 @@ import (
 
 // fixtureVersion changes whenever the seeded shape changes, so a cached dump
 // of an older shape is never measured as if it were this one.
-const fixtureVersion = 1
+const fixtureVersion = 2
 
 // spec is one fixture size. The large fixture is the account the parent issue
 // defines; the small one is the same account at one hundredth of the data, so
@@ -76,13 +76,24 @@ func shrink() int {
 func scaled(name string, divisor int) spec {
 	return spec{
 		Name:          name,
-		Contacts:      10_000 / divisor,
+		Contacts:      store.MaxContactsPerUser / divisor,
 		Dialogs:       5_000 / divisor,
 		ChatMessages:  1_000_000 / divisor,
 		Subscribers:   100_000 / divisor,
 		GroupMessages: 200_000 / divisor,
 		GroupPhotos:   max(2, 200/divisor),
 		DayEvents:     2_000 / divisor,
+	}
+}
+
+func TestFixtureContactsRespectStoreLimit(t *testing.T) {
+	small := scaled("1x", 100)
+	large := scaled("100x", 1)
+	if large.Contacts > store.MaxContactsPerUser {
+		t.Fatalf("100x fixture has %d contacts, store limit is %d", large.Contacts, store.MaxContactsPerUser)
+	}
+	if small.Contacts*100 != large.Contacts {
+		t.Fatalf("contact scale = %d to %d, want 100x", small.Contacts, large.Contacts)
 	}
 }
 
