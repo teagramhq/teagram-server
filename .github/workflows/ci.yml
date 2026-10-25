@@ -610,6 +610,9 @@ jobs:
         with:
           persist-credentials: false
 
+      - name: Pre-pull the shared PostgreSQL test image with retry
+        run: bash .github/scripts/pull-base-images.sh --image mirror.gcr.io/postgres:18-alpine
+
       - name: Pin migration timestamps for the test cache
         run: touch -d @0 migrations/* migrations
 
