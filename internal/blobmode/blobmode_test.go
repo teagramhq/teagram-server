@@ -1,6 +1,8 @@
 package blobmode_test
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io/fs"
@@ -43,6 +45,11 @@ func TestValidateAcceptsCurrentBackendRecords(t *testing.T) {
 		{
 			name:     "accepted S3",
 			outcomes: []string{"initial-local", "s3-accepted"},
+			config:   blobmode.EffectiveConfig{BlobS3: testS3Config()},
+		},
+		{
+			name:     "encrypted S3 after accepted plaintext",
+			outcomes: []string{"initial-local", "s3-accepted", "encrypted"},
 			config:   blobmode.EffectiveConfig{BlobS3: testS3Config()},
 		},
 		{
@@ -133,6 +140,160 @@ func TestValidateAcceptsPublisherGeneratedStackMoveJournal(t *testing.T) {
 	statePath := filepath.Join(fixtureRoot, "checkout", ".state", "blob-mode")
 	if err := blobmode.Validate(statePath, blobmode.EffectiveConfig{BlobDir: movedBlobDir}); err != nil {
 		t.Fatalf("validate publisher-generated stack-move journal: %v", err)
+	}
+}
+
+func TestPublishEncryptedAuthorityAfterVerifiedMigration(t *testing.T) {
+	if !requireRootFixture(t, "TestPublishEncryptedAuthorityAfterVerifiedMigration") {
+		return
+	}
+	state, reportRoot := testRolloutValidS3Authority(t)
+	config := blobmode.EffectiveConfig{BlobS3: testS3Config()}
+	inventoryReport := []byte(`{"schema":"teagram.blob-encryption-inventory/v1","encrypted":{"classes":{"valid_envelope":{"count":3,"logical_bytes":4096},"no_valid_envelope":{"count":0},"missing":{"count":0}}},"plaintext":{"classes":{}}}`)
+	inventoryDigest := sha256.Sum256(inventoryReport)
+	err := blobmode.PublishEncrypted(state.path, reportRoot, config, blobmode.EncryptedEvidence{
+		InventorySHA256: hex.EncodeToString(inventoryDigest[:]), InventoryReport: inventoryReport,
+		ObjectCount: 3, ByteTotal: 4096, KeyVersion: 4, Writes: "drained",
+	})
+	if err != nil {
+		t.Fatalf("publish encrypted authority: %v", err)
+	}
+	authority, err := blobmode.Read(state.path, config)
+	if err != nil {
+		t.Fatalf("read encrypted authority: %v", err)
+	}
+	if !authority.Present || authority.Outcome != blobmode.OutcomeEncrypted {
+		t.Fatalf("authority = %+v, want encrypted", authority)
+	}
+}
+
+func TestPublishEncryptedRecoversUncommittedJournalTail(t *testing.T) {
+	if !requireRootFixture(t, "TestPublishEncryptedRecoversUncommittedJournalTail") {
+		return
+	}
+	state, reportRoot := testRolloutValidS3Authority(t)
+	config := blobmode.EffectiveConfig{BlobS3: testS3Config()}
+	inventoryReport := []byte(`{"schema":"teagram.blob-encryption-inventory/v1","encrypted":{"classes":{"valid_envelope":{"count":3,"logical_bytes":4096},"no_valid_envelope":{"count":0},"missing":{"count":0}}},"plaintext":{"classes":{}}}`)
+	inventoryDigest := sha256.Sum256(inventoryReport)
+	proof := blobmode.EncryptedEvidence{
+		InventorySHA256: hex.EncodeToString(inventoryDigest[:]), InventoryReport: inventoryReport,
+		ObjectCount: 3, ByteTotal: 4096, KeyVersion: 4, Writes: "drained",
+	}
+	if err := blobmode.PublishEncrypted(state.path, reportRoot, config, proof); err != nil {
+		t.Fatalf("publish encrypted authority: %v", err)
+	}
+
+	journalDir := filepath.Join(state.path, "journal")
+	orphanPath := filepath.Join(journalDir, "0000000003.json")
+	orphanBytes, err := os.ReadFile(orphanPath)
+	if err != nil {
+		t.Fatalf("read linked journal entry: %v", err)
+	}
+	var orphan struct {
+		TransitionID string `json:"transition_id"`
+	}
+	if err := json.Unmarshal(orphanBytes, &orphan); err != nil {
+		t.Fatalf("decode linked journal entry: %v", err)
+	}
+	tempPath := filepath.Join(journalDir, ".tmp-"+orphan.TransitionID)
+	if err := os.Link(orphanPath, tempPath); err != nil {
+		t.Fatalf("recreate linked publication temp: %v", err)
+	}
+	modeTempPath := filepath.Join(state.path, ".mode.json.tmp-"+orphan.TransitionID)
+	// #nosec G306 G703 -- Recreate the publisher's 0644 staging-file mode under this private temp directory.
+	if err := os.WriteFile(modeTempPath, orphanBytes, 0o644); err != nil {
+		t.Fatalf("recreate mode publication temp: %v", err)
+	}
+
+	// Recreate the durable state after the journal sync and before mode.json's
+	// rename: the encrypted entry exists, while the committed head is unchanged.
+	if err := os.WriteFile(filepath.Join(state.path, "mode.json"), state.mode, 0o600); err != nil {
+		t.Fatalf("restore previous mode head: %v", err)
+	}
+	authority, err := blobmode.Read(state.path, config)
+	if err != nil {
+		t.Fatalf("read authority with an uncommitted journal tail: %v", err)
+	}
+	if !authority.Present || authority.Outcome != blobmode.OutcomeS3Accepted {
+		t.Fatalf("authority with an uncommitted tail = %+v, want s3-accepted", authority)
+	}
+
+	if err := blobmode.PublishEncrypted(state.path, reportRoot, config, proof); err != nil {
+		t.Fatalf("retry encrypted publication: %v", err)
+	}
+	authority, err = blobmode.Read(state.path, config)
+	if err != nil {
+		t.Fatalf("read retried encrypted authority: %v", err)
+	}
+	if !authority.Present || authority.Outcome != blobmode.OutcomeEncrypted {
+		t.Fatalf("retried authority = %+v, want encrypted", authority)
+	}
+	entries, err := os.ReadDir(journalDir)
+	if err != nil {
+		t.Fatalf("read repaired journal: %v", err)
+	}
+	var committedEntries int
+	for _, entry := range entries {
+		if !strings.HasPrefix(entry.Name(), ".") {
+			committedEntries++
+		}
+	}
+	if committedEntries != 3 {
+		t.Fatalf("journal has %d committed entries after retry, want 3", committedEntries)
+	}
+	if _, err := os.Lstat(tempPath); !os.IsNotExist(err) {
+		t.Fatalf("stale publication temp remains after retry: %v", err)
+	}
+	if _, err := os.Lstat(modeTempPath); !os.IsNotExist(err) {
+		t.Fatalf("stale mode publication temp remains after retry: %v", err)
+	}
+	assertRolloutAuthorityAccepts(t, state.path, reportRoot)
+}
+
+func TestPublishEncryptedRecoversJournalTempBeforeLink(t *testing.T) {
+	if !requireRootFixture(t, "TestPublishEncryptedRecoversJournalTempBeforeLink") {
+		return
+	}
+	state, reportRoot := testRolloutValidS3Authority(t)
+	config := blobmode.EffectiveConfig{BlobS3: testS3Config()}
+	inventoryReport := []byte(`{"schema":"teagram.blob-encryption-inventory/v1","encrypted":{"classes":{"valid_envelope":{"count":3,"logical_bytes":4096},"no_valid_envelope":{"count":0},"missing":{"count":0}}},"plaintext":{"classes":{}}}`)
+	inventoryDigest := sha256.Sum256(inventoryReport)
+	proof := blobmode.EncryptedEvidence{
+		InventorySHA256: hex.EncodeToString(inventoryDigest[:]), InventoryReport: inventoryReport,
+		ObjectCount: 3, ByteTotal: 4096, KeyVersion: 4, Writes: "drained",
+	}
+
+	journalTempPath := filepath.Join(state.path, "journal", ".tmp-00000000-0000-4000-8000-000000000099")
+	// #nosec G306 G703 -- Recreate the publisher's 0644 staging-file mode under this private temp directory.
+	if err := os.WriteFile(journalTempPath, []byte("partial journal record"), 0o644); err != nil {
+		t.Fatalf("create interrupted journal temp: %v", err)
+	}
+	if _, err := blobmode.Read(state.path, config); err != nil {
+		t.Fatalf("read accepted authority with incomplete journal temp: %v", err)
+	}
+	if err := blobmode.PublishEncrypted(state.path, reportRoot, config, proof); err != nil {
+		t.Fatalf("retry encrypted publication: %v", err)
+	}
+	if _, err := os.Lstat(journalTempPath); !os.IsNotExist(err) {
+		t.Fatalf("interrupted journal temp remains after retry: %v", err)
+	}
+	assertRolloutAuthorityAccepts(t, state.path, reportRoot)
+}
+
+func assertRolloutAuthorityAccepts(t *testing.T, statePath, reportRoot string) {
+	t.Helper()
+	_, testFile, _, ok := runtime.Caller(0)
+	if !ok {
+		t.Fatal("locate blob-mode package source")
+	}
+	repoRoot := filepath.Clean(filepath.Join(filepath.Dir(testFile), "../.."))
+	// #nosec G204 -- This is the repository's fixed rollout validator with private test fixture paths.
+	command := exec.CommandContext(t.Context(), "python3",
+		filepath.Join(repoRoot, "deploy/teagramd/rollout-runner/blob-mode-state.py"),
+		"authority", "--state-dir", statePath, "--report-root", reportRoot,
+	)
+	if output, err := command.CombinedOutput(); err != nil {
+		t.Fatalf("rollout authority validator rejected retried publication: %v\n%s", err, output)
 	}
 }
 
@@ -458,6 +619,14 @@ func TestValidateRejectsInvalidTreesWithoutChangingThem(t *testing.T) {
 			},
 		},
 		{
+			name: "uncommitted non-encrypted journal tail",
+			setup: func(t *testing.T) (string, blobmode.EffectiveConfig) {
+				t.Helper()
+				chain := testChain(t, "initial-local", "s3-accepted", "recovered-local")
+				return writeTestState(t, chain.records, chain.records[2]), blobmode.EffectiveConfig{BlobS3: testS3Config()}
+			},
+		},
+		{
 			name: "reused transition id",
 			setup: func(t *testing.T) (string, blobmode.EffectiveConfig) {
 				t.Helper()
@@ -592,6 +761,26 @@ func TestValidateRejectsInvalidTreesWithoutChangingThem(t *testing.T) {
 			},
 		},
 		{
+			name: "encrypted authority rejects an unknown write choice",
+			setup: func(t *testing.T) (string, blobmode.EffectiveConfig) {
+				t.Helper()
+				chain := testChain(t, "initial-local", "s3-accepted", "encrypted")
+				changed := mutateRecord(t, chain.records[3], func(record map[string]any) {
+					objectField(t, record, "evidence")["writes"] = "running"
+				})
+				chain.records[3] = changed
+				return writeTestState(t, chain.records, changed), blobmode.EffectiveConfig{BlobS3: testS3Config()}
+			},
+		},
+		{
+			name: "encrypted authority must follow accepted S3",
+			setup: func(t *testing.T) (string, blobmode.EffectiveConfig) {
+				t.Helper()
+				chain := testChain(t, "initial-local", "encrypted")
+				return writeTestState(t, chain.records, chain.records[2]), blobmode.EffectiveConfig{BlobS3: testS3Config()}
+			},
+		},
+		{
 			name: "S3 null rustfsdata volume",
 			setup: func(t *testing.T) (string, blobmode.EffectiveConfig) {
 				t.Helper()
@@ -627,21 +816,22 @@ func TestValidateRejectsInvalidTreesWithoutChangingThem(t *testing.T) {
 	}
 	// #nosec G101 -- Values are fixed validator error strings, not credentials.
 	wantErrors := map[string]string{
-		"missing mode record":         "reason=invalid field=mode.json",
-		"symlinked mode file":         "reason=invalid field=mode.json",
-		"symlinked journal directory": "reason=invalid field=journal",
-		"symlinked journal entry":     "reason=invalid field=journal",
-		"symlinked guard directory":   "reason=invalid field=blob-mode",
-		"writable mode file":          "reason=permissions field=mode.json",
-		"writable journal entry":      "reason=permissions field=journal",
-		"writable journal directory":  "reason=permissions field=journal",
-		"4097-byte mode file":         "reason=oversize field=mode.json",
-		"4097-byte journal entry":     "reason=oversize field=journal",
-		"UTF-8 BOM":                   "reason=encoding field=record",
-		"invalid UTF-8":               "reason=encoding field=record",
-		"duplicate nested key":        "reason=schema field=record",
-		"unknown field":               "reason=schema field=record",
-		"journal gap":                 "reason=sequence field=journal",
+		"missing mode record":                    "reason=invalid field=mode.json",
+		"symlinked mode file":                    "reason=invalid field=mode.json",
+		"symlinked journal directory":            "reason=invalid field=journal",
+		"symlinked journal entry":                "reason=invalid field=journal",
+		"symlinked guard directory":              "reason=invalid field=blob-mode",
+		"writable mode file":                     "reason=permissions field=mode.json",
+		"writable journal entry":                 "reason=permissions field=journal",
+		"writable journal directory":             "reason=permissions field=journal",
+		"4097-byte mode file":                    "reason=oversize field=mode.json",
+		"4097-byte journal entry":                "reason=oversize field=journal",
+		"uncommitted non-encrypted journal tail": "reason=stale field=mode.json",
+		"UTF-8 BOM":                              "reason=encoding field=record",
+		"invalid UTF-8":                          "reason=encoding field=record",
+		"duplicate nested key":                   "reason=schema field=record",
+		"unknown field":                          "reason=schema field=record",
+		"journal gap":                            "reason=sequence field=journal",
 		"recovered local follows initial local without S3 acceptance": "reason=supersession field=outcome",
 		"stack move does not follow S3 authority":                     "reason=supersession field=outcome",
 		"stack move requires matching volume inventories":             "reason=schema field=evidence",
@@ -659,6 +849,8 @@ func TestValidateRejectsInvalidTreesWithoutChangingThem(t *testing.T) {
 		"S3 record does not match local backend":              "reason=backend field=backend",
 		"missing mandatory evidence":                          "reason=schema field=evidence",
 		"missing mandatory restore evidence":                  "reason=schema field=evidence",
+		"encrypted authority rejects an unknown write choice": "reason=schema field=evidence",
+		"encrypted authority must follow accepted S3":         "reason=supersession field=outcome",
 		"S3 null rustfsdata volume":                           "reason=schema field=volumes.rustfsdata",
 		"copy pass count is invalid":                          "reason=schema field=evidence",
 		"restore pass count is invalid":                       "reason=schema field=evidence",
@@ -771,6 +963,31 @@ func testState(t *testing.T, outcomes ...string) testStateData {
 	return testStateData{path: path, mode: chain.records[len(chain.records)], records: chain.records}
 }
 
+func testRolloutValidS3Authority(t *testing.T) (testStateData, string) {
+	t.Helper()
+	_, testFile, _, ok := runtime.Caller(0)
+	if !ok {
+		t.Fatal("locate blob-mode package source")
+	}
+	repoRoot := filepath.Clean(filepath.Join(filepath.Dir(testFile), "../.."))
+	fixtureRoot := t.TempDir()
+	config := testS3Config()
+	// #nosec G204 -- Run the repository-owned accepted-S3 authority fixture with fixed arguments and a private temporary directory.
+	command := exec.CommandContext(t.Context(), "python3",
+		filepath.Join(repoRoot, "internal/blobmigration/testdata/publish_s3_accepted_fixture.py"),
+		repoRoot, fixtureRoot, config.Endpoint, config.Bucket,
+	)
+	if output, err := command.CombinedOutput(); err != nil {
+		t.Fatalf("publish rollout-valid accepted-S3 authority fixture: %v\n%s", err, output)
+	}
+	statePath := filepath.Join(fixtureRoot, "checkout", ".state", "blob-mode")
+	mode, err := os.ReadFile(filepath.Join(statePath, "mode.json"))
+	if err != nil {
+		t.Fatalf("read accepted-S3 authority fixture head: %v", err)
+	}
+	return testStateData{path: statePath, mode: mode}, filepath.Join(fixtureRoot, "reports")
+}
+
 func testChain(t *testing.T, outcomes ...string) struct{ records map[int][]byte } {
 	t.Helper()
 	records := make(map[int][]byte, len(outcomes))
@@ -811,6 +1028,14 @@ func makeRecord(t *testing.T, generation int, outcome, supersedes string, change
 		evidence["object_count"] = 12
 		evidence["byte_total"] = 2048
 		evidence["copy_passes"] = 2
+	case "encrypted":
+		backend = map[string]any{"kind": "s3", "endpoint": "http://rustfs:9000", "bucket": "teagram", "prefix": "teagramd/"}
+		volumes["rustfsdata"] = "project_rustfsdata"
+		evidence["encrypted_inventory_sha256"] = digest(generation + 10)
+		evidence["object_count"] = 12
+		evidence["byte_total"] = 2048
+		evidence["key_version"] = 4
+		evidence["writes"] = "stopped"
 	case "recovered-local":
 		volumes["rustfsdata"] = "project_rustfsdata"
 		evidence["s3_census_manifest_sha256"] = digest(generation + 10)

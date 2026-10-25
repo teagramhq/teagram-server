@@ -2096,7 +2096,7 @@ def assert_live_teagramd_matches_authority(
         mode.assert_containers_match(inventory, authority, mode_source)
     except mode.Reject as error:
         reject(str(error))
-    if authority.get("outcome") == "s3-accepted":
+    if authority.get("outcome") in ("s3-accepted", "encrypted"):
         assert_live_rustfs_network(mode, authority, output_dir, checkout, environment, name)
 
 
@@ -3442,7 +3442,7 @@ def deployment_environment(args: argparse.Namespace) -> None:
         reject(str(error))
     backend = record.get("backend")
     if (
-        record.get("outcome") != "s3-accepted"
+        record.get("outcome") not in ("s3-accepted", "encrypted")
         or not isinstance(backend, dict)
         or backend.get("kind") != "s3"
     ):

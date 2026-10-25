@@ -12,15 +12,63 @@ on rollback. No other non-fast-forward transition is accepted. The runner
 preserves the existing backup, build identity, readiness, selected-revision
 Atlas schema, and rollback gates.
 
-This stage has one publisher: `initialize-local` for the initial local record.
-Ordinary `apply` validates the existing head against every running `teagramd*`
-container and the proposed Compose render before build or replacement. A
-rollout cannot change backend. There is no fresh-S3 or recovered-local
-publisher in this stage, and no manual record-writing path. The serving
-process has a separate fresh-S3 bootstrap for an empty authority directory; it
-writes no authority and cannot bypass a nonempty record tree. The rollout
-runner still requires a matching authority for every managed S3 render and
-transition.
+This rollout runner has one initializer: `initialize-local` publishes the
+initial local record. Ordinary `apply` validates the existing head against
+every running `teagramd*` container and the proposed Compose render before
+build or replacement. A rollout cannot change backend. There is no fresh-S3 or
+recovered-local publisher in this stage, and no manual record-writing path.
+The separate `blob-encrypt-migrate` operator command is the only publisher of
+`encrypted` authority, after its database-reference inventory passes. The
+serving process has a separate fresh-S3 bootstrap for an empty authority
+directory; it writes no authority and cannot bypass a nonempty record tree.
+The rollout runner still requires a matching authority for every managed S3
+render and transition.
+
+## Encrypting accepted plaintext S3 media
+
+The `blob-encrypt-migrate` profile is a one-time operator job for an existing
+`s3-accepted` authority. It reads assembled-file rows and live upload-part rows
+from PostgreSQL, streams each referenced plaintext object into the `encrypted/`
+S3 namespace, authenticates a full readback, checks that the database inventory
+did not change, and only then appends `encrypted` authority. It leaves source
+objects and unreferenced strays untouched. The private progress journal,
+inventory artifact, and authority report persist under `/root` by default and
+survive interruption.
+
+Run from the deployment checkout as root after choosing and recording the
+actual write-quiescence state. `stopped` means every `teagramd` writer is
+stopped. `drained` means writes were stopped at the request boundary and all
+in-flight uploads finished. Keep writers quiescent until this command exits,
+then restart every `teagramd` replica before allowing writes again so each
+process loads the encrypted authority.
+
+```sh
+docker compose --profile migration run --rm blob-encrypt-migrate \
+  --writes stopped \
+  --progress /run/teagramd/reports/blob-encryption-progress.jsonl
+```
+
+If interrupted, rerun with the same `--writes` choice and journal path. The
+command authenticates and reuses completed envelopes; it reports any stray
+objects in its JSON result and never moves or deletes them. If an inventory
+reference cannot be verified, the command names the affected IDs and keeps the
+accepted authority active.
+
+Plaintext removal is a separate opt-in operation after all replicas are
+serving encrypted authority. Stop or drain writes again, then run:
+
+```sh
+docker compose --profile migration run --rm blob-encrypt-migrate \
+  --writes stopped \
+  --progress /run/teagramd/reports/blob-encryption-progress.jsonl \
+  --cleanup
+```
+
+Use the same `--writes` value recorded for migration. Cleanup reauthenticates
+each encrypted copy and compares it with the plaintext source before removing
+that referenced source. It does not remove unreferenced objects. If changing
+`TEAGRAM_BLOB_MODE_REPORT_ROOT`, set `ROLLOUT_RUNNER_EVIDENCE_ROOT` to the same
+host directory so later authority validation reads the published report.
 
 Preflight treats disabled public WebSocket settings and an empty
 `TG_WELCOME_CHANNEL` as equivalent when they are unset or passed through as

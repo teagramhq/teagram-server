@@ -390,6 +390,15 @@ func sendUploadedDocument(
 	fileID int64, parts int, name, caption string, randomID int64,
 ) *tg.Document {
 	t.Helper()
+	doc, _ := sendUploadedDocumentWithMessageID(t, ctx, mc, peer, fileID, parts, name, caption, randomID)
+	return doc
+}
+
+func sendUploadedDocumentWithMessageID(
+	t *testing.T, ctx context.Context, mc *mediaClient, peer tg.InputPeerClass,
+	fileID int64, parts int, name, caption string, randomID int64,
+) (*tg.Document, int) {
+	t.Helper()
 	var ups tg.UpdatesClass
 	execChat(t, ctx, mc.cmds, func(ctx context.Context, c *tg.Client) error {
 		res, err := c.MessagesSendMedia(ctx, &tg.MessagesSendMediaRequest{
@@ -421,10 +430,10 @@ func sendUploadedDocument(
 		if !ok {
 			t.Fatalf("sendMedia message type = %T, want *tg.Message", newMsg.Message)
 		}
-		return documentOf(t, msg)
+		return documentOf(t, msg), msg.ID
 	}
 	t.Fatal("sendMedia carried no updateNewMessage")
-	return nil
+	return nil, 0
 }
 
 func TestUploadMediaStoresBehindGrant(t *testing.T) {

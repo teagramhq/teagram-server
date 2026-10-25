@@ -191,6 +191,51 @@ services:
       rustfs-init:
         condition: service_completed_successfully
 
+  # One-time accepted-plaintext to encrypted-media transition. Run only after
+  # writers have been stopped or drained; this root-owned job can publish the
+  # shared authority. Plaintext removal requires a separate --cleanup run.
+  blob-encrypt-migrate:
+    image: teagramd:local
+    entrypoint: ["/usr/local/bin/blob-encrypt-migrate"]
+    user: "0:0"
+    read_only: true
+    environment:
+      TG_POSTGRES_DSN: *dsn
+      TG_AUTHKEY_ENC_KEY: ${TG_AUTHKEY_ENC_KEY:-}
+      TG_AUTHKEY_ENC_KEY_FILE: ${TG_AUTHKEY_ENC_KEY_FILE:-/var/lib/teagramd/enc_key.hex}
+      TG_BLOB_DIR: /var/lib/teagramd-blobs
+      <<: [*blob-s3, *media-keys]
+    secrets:
+      - source: teagramd_blob_secret_key
+        target: teagramd-blob-secret-key
+    volumes:
+      - tgkey:/var/lib/teagramd:ro
+      - type: bind
+        source: ./.state/blob-mode
+        target: /run/teagramd/blob-mode
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${TEAGRAM_BLOB_MODE_REPORT_ROOT:-/root}
+        target: /run/teagramd/reports
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${TEAGRAM_MEDIA_KEY_SOURCE_DIR:-/etc/teagramd/media-keys}
+        target: /run/teagramd/media-keys
+        read_only: true
+        bind:
+          create_host_path: false
+    profiles: ["migration"]
+    networks:
+      - default
+      - rustfs_private
+    depends_on:
+      postgres:
+        condition: service_healthy
+      rustfs-init:
+        condition: service_completed_successfully
+
   teagramd:
     # Built from the repo-root Dockerfile: nothing is published to a registry, so
     # there is no image to pull. The explicit tag is what lets a build done
