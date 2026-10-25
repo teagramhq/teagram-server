@@ -79,6 +79,7 @@ jq -e \
   and (.services.teagramd.networks | keys) == ["backend"]
   and .networks.backend.internal == true
   and .networks.backend.ipam.config[0].subnet == "198.18.130.0/24"
+  and .networks.backend.ipam.config[0].ip_range == "198.18.130.128/26"
   and (.services.edge.networks | keys | sort) == ["backend", "edge"]
   and .services.teagramd.environment.TG_REGISTRATION == "open"
   and .services.teagramd.environment.TG_ADVERTISE_DEMO_GUEST_SIGN_UP == "true"
@@ -445,7 +446,7 @@ grep -Fq 'http-check send meth CONNECT uri challenges.cloudflare.com:443' "$SCRI
 grep -Fq 'monitor fail if { nbsrv(turnstile_egress) eq 0 }' "$SCRIPT_DIR/haproxy.cfg"
 grep -Fq 'bind :8404' "$SCRIPT_DIR/haproxy.cfg"
 grep -Fq 'http-reuse never' "$SCRIPT_DIR/haproxy.cfg"
-grep -Fq 'acl allowed_client src 198.18.130.2/32 198.18.130.253/32' "$SCRIPT_DIR/turnstile-egress.conf"
+grep -Fq 'acl allowed_client src 198.18.130.2/32 198.18.130.251/32 198.18.130.253/32' "$SCRIPT_DIR/turnstile-egress.conf"
 grep -Fq 'acl siteverify_host dstdomain challenges.cloudflare.com' "$SCRIPT_DIR/turnstile-egress.conf"
 grep -Fq 'http_access allow allowed_client CONNECT CONNECT_PORT siteverify_host' "$SCRIPT_DIR/turnstile-egress.conf"
 grep -Fq 'http_access deny all' "$SCRIPT_DIR/turnstile-egress.conf"

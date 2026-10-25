@@ -336,6 +336,7 @@ networks:
     ipam:
       config:
         - subnet: 198.18.130.0/24
+          ip_range: 198.18.130.128/26
   edge:
     driver: bridge
   egress:
