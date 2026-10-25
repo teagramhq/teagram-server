@@ -833,6 +833,40 @@ media_key_normalized_target=$(snapshot_from_json \
   "$ENV_FILE" "$OVERRIDE_FILE" selected-compose-render target)
 [ "$(jq -r '.media_key_source' <<< "$media_key_normalized_target")" = "$media_key_source" ]
 printf '%s\n' 'PASS media-key validation accepts Compose-normalized empty bind options'
+media_key_preflight=$(snapshot_from_json \
+  "$legacy_inspect" "$media_key_normalized_compose" \
+  "$ENV_FILE" "$OVERRIDE_FILE" selected-compose-render preflight)
+[ "$(jq -r '.media_key_source' <<< "$media_key_preflight")" = "$media_key_source" ]
+media_key_implicit_create_compose=$(jq -c '
+  del(.services.teagramd.volumes[-1].bind)
+' <<< "$media_key_compose")
+if snapshot_from_json "$legacy_inspect" "$media_key_implicit_create_compose" \
+  "$ENV_FILE" "$OVERRIDE_FILE" selected-compose-render preflight \
+  >/dev/null 2>"$TMP/media-key-implicit-host-path.err"; then
+  printf '%s\n' 'FAIL media-key bind without explicit host-path policy was accepted' >&2
+  exit 1
+fi
+printf '%s\n' 'PASS media-key preflight accepts Compose JSON omitted false and rejects an implicit host-path policy'
+media_key_null_create_compose=$(jq -c '
+  .services.teagramd.volumes[-1].bind.create_host_path=null
+' <<< "$media_key_compose")
+if snapshot_from_json "$legacy_inspect" "$media_key_null_create_compose" \
+  "$ENV_FILE" "$OVERRIDE_FILE" selected-compose-render preflight \
+  >/dev/null 2>"$TMP/media-key-null-host-path.err"; then
+  printf '%s\n' 'FAIL media-key bind with a null host-path policy was accepted' >&2
+  exit 1
+fi
+printf '%s\n' 'PASS media-key preflight rejects a null host-path policy'
+media_key_true_create_compose=$(jq -c '
+  .services.teagramd.volumes[-1].bind.create_host_path=true
+' <<< "$media_key_compose")
+if snapshot_from_json "$legacy_inspect" "$media_key_true_create_compose" \
+  "$ENV_FILE" "$OVERRIDE_FILE" selected-compose-render preflight \
+  >/dev/null 2>"$TMP/media-key-true-host-path.err"; then
+  printf '%s\n' 'FAIL media-key bind with host-path creation enabled was accepted' >&2
+  exit 1
+fi
+printf '%s\n' 'PASS media-key preflight rejects an enabled host-path policy'
 printf '%064s' '' | tr ' ' A > "$media_key_source/1.key"
 snapshot_from_json "$media_key_inspect" "$media_key_compose" \
   "$ENV_FILE" "$OVERRIDE_FILE" selected-compose-render target >/dev/null
