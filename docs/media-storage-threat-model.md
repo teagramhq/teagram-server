@@ -49,9 +49,17 @@ rewrites its chunks. Both modes include assembled files and live upload parts,
 verify each replacement by authenticated read-back, and keep a private progress
 journal so an interrupted run can resume.
 
-The invocation is `blob-key-rotate [--target-version N] [--rewrite] [--progress PATH]`;
-if omitted, the target is the configured current version and the journal is
-`/run/teagramd/reports/blob-key-rotation.jsonl`.
+Run it from the deployment checkout through the one-shot migration profile:
+
+```sh
+docker compose --profile migration run --rm blob-key-rotate
+```
+
+The image includes `blob-key-rotate`; the service reads the encrypted authority
+and media keys read-only and persists its journal under
+`/run/teagramd/reports/blob-key-rotation.jsonl`. Optional flags are
+`--target-version N`, `--rewrite`, and `--progress PATH`. If omitted, the target
+is the configured current version and the journal uses that default path.
 
 Run `blob-inventory` after rotation. Remove an old `<version>.key` only when
 the inventory reports that version retirable, and run the rotation again after
