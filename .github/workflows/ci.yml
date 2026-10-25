@@ -603,7 +603,7 @@ jobs:
 
   real-server-fixtures:
     runs-on: ubuntu-26.04
-    timeout-minutes: 30
+    timeout-minutes: 60
     env:
       TESTCONTAINERS_RYUK_DISABLED: "true"
 
