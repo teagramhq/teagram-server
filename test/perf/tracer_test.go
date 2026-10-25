@@ -5,6 +5,7 @@ package perf_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sync"
 	"time"
 
@@ -46,6 +47,16 @@ func (q *queryTracer) TraceQueryEnd(context.Context, *pgx.Conn, pgx.TraceQueryEn
 	defer q.mu.Unlock()
 	q.inFlight--
 	q.last = time.Now()
+}
+
+func (q *queryTracer) TraceCopyFromStart(ctx context.Context, conn *pgx.Conn, data pgx.TraceCopyFromStartData) context.Context {
+	return q.TraceQueryStart(ctx, conn, pgx.TraceQueryStartData{
+		SQL: fmt.Sprintf("COPY %s FROM STDIN", data.TableName.Sanitize()),
+	})
+}
+
+func (q *queryTracer) TraceCopyFromEnd(ctx context.Context, conn *pgx.Conn, data pgx.TraceCopyFromEndData) {
+	q.TraceQueryEnd(ctx, conn, pgx.TraceQueryEndData(data))
 }
 
 // reset starts a new counting window. With capture set, the window also keeps

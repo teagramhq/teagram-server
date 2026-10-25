@@ -184,3 +184,33 @@ FROM UNNEST($2::BIGINT[]) AS requested(user_id);
 INSERT INTO user_privacy_rule_users (owner_id, privacy_key, user_id, entry_type)
 SELECT $1, 'status_timestamp', requested.user_id, 'disallow'
 FROM UNNEST($2::BIGINT[]) AS requested(user_id);
+
+-- name: GetAddedByPhonePrivacyRule :one
+SELECT base_rule
+FROM user_privacy_rules
+WHERE owner_id = $1 AND privacy_key = 'added_by_phone';
+
+-- name: GetAddedByPhonePrivacyRuleUsers :many
+SELECT user_id, entry_type
+FROM user_privacy_rule_users
+WHERE owner_id = $1 AND privacy_key = 'added_by_phone'
+ORDER BY user_id, entry_type;
+
+-- name: UpsertAddedByPhonePrivacyRule :exec
+INSERT INTO user_privacy_rules (owner_id, privacy_key, base_rule)
+VALUES ($1, 'added_by_phone', $2)
+ON CONFLICT (owner_id, privacy_key) DO UPDATE SET base_rule = EXCLUDED.base_rule;
+
+-- name: DeleteAddedByPhonePrivacyRuleUsers :exec
+DELETE FROM user_privacy_rule_users
+WHERE owner_id = $1 AND privacy_key = 'added_by_phone';
+
+-- name: InsertAddedByPhonePrivacyAllowedUsers :exec
+INSERT INTO user_privacy_rule_users (owner_id, privacy_key, user_id, entry_type)
+SELECT $1, 'added_by_phone', requested.user_id, 'allow'
+FROM UNNEST($2::BIGINT[]) AS requested(user_id);
+
+-- name: InsertAddedByPhonePrivacyDisallowedUsers :exec
+INSERT INTO user_privacy_rule_users (owner_id, privacy_key, user_id, entry_type)
+SELECT $1, 'added_by_phone', requested.user_id, 'disallow'
+FROM UNNEST($2::BIGINT[]) AS requested(user_id);

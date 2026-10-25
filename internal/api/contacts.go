@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"errors"
 	"slices"
 	"time"
@@ -66,6 +67,100 @@ func (h *handlers) handleAddContact(r *mtproto.Request) (bin.Encoder, error) {
 		Chats: []tg.ChatClass{},
 		Date:  int(time.Now().Unix()),
 	}, nil
+}
+
+// handleImportContacts matches a phone book in a bounded store batch. Contact
+// names from the phone book stay local; imported users are rendered from their
+// global profiles and only permitted matches are added to the caller's list.
+func (h *handlers) handleImportContacts(r *mtproto.Request) (bin.Encoder, error) {
+	var req tg.ContactsImportContactsRequest
+	if err := req.Decode(r.Buf); err != nil {
+		return nil, errMethodNotImpl
+	}
+	if r.UserID == 0 {
+		return nil, errAuthKeyUnreg
+	}
+	if len(req.Contacts) > store.MaxContactsPerUser {
+		return nil, errContactsTooMuch
+	}
+
+	inputs := make([]store.ContactImportInput, len(req.Contacts))
+	for i, contact := range req.Contacts {
+		if err := validatePhone(contact.Phone); err != nil {
+			return nil, err
+		}
+		inputs[i] = store.ContactImportInput{
+			ClientID: contact.ClientID,
+			Phone:    store.NormalizePhone(contact.Phone),
+		}
+	}
+
+	matches, err := h.store.ImportContacts(r.Ctx, r.UserID, inputs)
+	if err != nil {
+		return nil, h.contactMutationError("import contacts", r.UserID, err)
+	}
+	imported := make([]tg.ImportedContact, len(matches))
+	userIDs := make([]int64, 0, len(matches))
+	seen := make(map[int64]struct{}, len(matches))
+	for i, match := range matches {
+		imported[i] = tg.ImportedContact{ClientID: match.ClientID, UserID: match.UserID}
+		if _, ok := seen[match.UserID]; ok {
+			continue
+		}
+		seen[match.UserID] = struct{}{}
+		userIDs = append(userIDs, match.UserID)
+	}
+	usersByID, err := h.store.UsersByID(r.Ctx, userIDs)
+	if err != nil {
+		h.log.Error("import contacts users", "user_id", r.UserID, "err", err)
+		return nil, errInternal
+	}
+	users := make([]store.User, 0, len(userIDs))
+	for _, id := range userIDs {
+		user, ok := usersByID[id]
+		if !ok {
+			h.log.Error("import contacts user missing", "user_id", r.UserID, "contact_user_id", id)
+			return nil, errInternal
+		}
+		users = append(users, user)
+	}
+	rendered, err := h.importedUsersToTL(r.Ctx, users, r.UserID, matches)
+	if err != nil {
+		h.log.Error("import contacts render users", "user_id", r.UserID, "err", err)
+		return nil, errInternal
+	}
+	wireUsers := make([]tg.UserClass, len(rendered))
+	for i, user := range rendered {
+		wireUsers[i] = user
+	}
+	return &tg.ContactsImportedContacts{
+		Imported:       imported,
+		PopularInvites: []tg.PopularContact{},
+		RetryContacts:  []int64{},
+		Users:          wireUsers,
+	}, nil
+}
+
+func (h *handlers) importedUsersToTL(ctx context.Context, users []store.User, viewerID int64, matches []store.ContactImportMatch) ([]*tg.User, error) {
+	mutualByID := make(map[int64]bool, len(matches))
+	for _, match := range matches {
+		mutualByID[match.UserID] = match.Mutual
+	}
+	visibility, err := h.lastSeenVisibilityForUsers(ctx, users, viewerID)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]*tg.User, len(users))
+	for i, user := range users {
+		out[i] = h.userToTL(user, viewerID, false, store.Contact{
+			UserID: user.ID,
+			Mutual: mutualByID[user.ID],
+		}, visibility[user.ID])
+	}
+	if err := h.attachCurrentProfilePhotos(ctx, viewerID, users, out); err != nil {
+		return nil, err
+	}
+	return out, nil
 }
 
 // handleDeleteContacts validates every peer before removing any edge. The

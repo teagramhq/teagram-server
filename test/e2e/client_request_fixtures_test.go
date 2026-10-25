@@ -470,6 +470,7 @@ func TestSmokeClientRequestFixturesAreLayer228Shapes(t *testing.T) {
 		"account_updatePasswordSettings.contact.1",
 		"account_getCollectibleEmojiStatuses.1",
 		"auth.invokeWithReCaptcha.signUp.1",
+		"contacts_importContacts.1",
 		"contacts_getStatuses.1",
 		"channels_checkUsername.1",
 		"channels_createChannel.1",
@@ -628,6 +629,20 @@ func testSmokeClientRequestFixtures(t *testing.T) {
 		return checkCollectibleEmojiStatuses(ctx, api, 0)
 	}); err != nil {
 		t.Fatalf("replay collectible emoji statuses fixture: %v", err)
+	}
+	if err := fixtureClientCall(t, creator, "contacts_importContacts.1", func(ctx context.Context, api *tg.Client) error {
+		result, err := api.ContactsImportContacts(ctx, []tg.InputPhoneContact{{
+			ClientID: 801, Phone: "+15551048909", FirstName: "Fixture", LastName: "Contact",
+		}})
+		if err != nil {
+			return err
+		}
+		if result == nil {
+			return errors.New("importContacts returned nil")
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("replay contacts.importContacts fixture: %v", err)
 	}
 	const stickerSetShortName = "twemoji_reactions"
 	stickerSetRef := &tg.InputStickerSetShortName{ShortName: stickerSetShortName}

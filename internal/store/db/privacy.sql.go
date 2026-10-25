@@ -9,6 +9,16 @@ import (
 	"context"
 )
 
+const deleteAddedByPhonePrivacyRuleUsers = `-- name: DeleteAddedByPhonePrivacyRuleUsers :exec
+DELETE FROM user_privacy_rule_users
+WHERE owner_id = $1 AND privacy_key = 'added_by_phone'
+`
+
+func (q *Queries) DeleteAddedByPhonePrivacyRuleUsers(ctx context.Context, ownerID int64) error {
+	_, err := q.db.Exec(ctx, deleteAddedByPhonePrivacyRuleUsers, ownerID)
+	return err
+}
+
 const deleteLastSeenPrivacyRuleUsers = `-- name: DeleteLastSeenPrivacyRuleUsers :exec
 DELETE FROM user_privacy_rule_users
 WHERE owner_id = $1 AND privacy_key = 'status_timestamp'
@@ -264,6 +274,51 @@ func (q *Queries) EvaluateLastSeenPrivacyForViewer(ctx context.Context, arg Eval
 	return items, nil
 }
 
+const getAddedByPhonePrivacyRule = `-- name: GetAddedByPhonePrivacyRule :one
+SELECT base_rule
+FROM user_privacy_rules
+WHERE owner_id = $1 AND privacy_key = 'added_by_phone'
+`
+
+func (q *Queries) GetAddedByPhonePrivacyRule(ctx context.Context, ownerID int64) (string, error) {
+	row := q.db.QueryRow(ctx, getAddedByPhonePrivacyRule, ownerID)
+	var base_rule string
+	err := row.Scan(&base_rule)
+	return base_rule, err
+}
+
+const getAddedByPhonePrivacyRuleUsers = `-- name: GetAddedByPhonePrivacyRuleUsers :many
+SELECT user_id, entry_type
+FROM user_privacy_rule_users
+WHERE owner_id = $1 AND privacy_key = 'added_by_phone'
+ORDER BY user_id, entry_type
+`
+
+type GetAddedByPhonePrivacyRuleUsersRow struct {
+	UserID    int64
+	EntryType string
+}
+
+func (q *Queries) GetAddedByPhonePrivacyRuleUsers(ctx context.Context, ownerID int64) ([]GetAddedByPhonePrivacyRuleUsersRow, error) {
+	rows, err := q.db.Query(ctx, getAddedByPhonePrivacyRuleUsers, ownerID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []GetAddedByPhonePrivacyRuleUsersRow
+	for rows.Next() {
+		var i GetAddedByPhonePrivacyRuleUsersRow
+		if err := rows.Scan(&i.UserID, &i.EntryType); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const getLastSeenPrivacyRule = `-- name: GetLastSeenPrivacyRule :one
 SELECT base_rule
 FROM user_privacy_rules
@@ -309,6 +364,38 @@ func (q *Queries) GetLastSeenPrivacyRuleUsers(ctx context.Context, ownerID int64
 	return items, nil
 }
 
+const insertAddedByPhonePrivacyAllowedUsers = `-- name: InsertAddedByPhonePrivacyAllowedUsers :exec
+INSERT INTO user_privacy_rule_users (owner_id, privacy_key, user_id, entry_type)
+SELECT $1, 'added_by_phone', requested.user_id, 'allow'
+FROM UNNEST($2::BIGINT[]) AS requested(user_id)
+`
+
+type InsertAddedByPhonePrivacyAllowedUsersParams struct {
+	OwnerID int64
+	Column2 []int64
+}
+
+func (q *Queries) InsertAddedByPhonePrivacyAllowedUsers(ctx context.Context, arg InsertAddedByPhonePrivacyAllowedUsersParams) error {
+	_, err := q.db.Exec(ctx, insertAddedByPhonePrivacyAllowedUsers, arg.OwnerID, arg.Column2)
+	return err
+}
+
+const insertAddedByPhonePrivacyDisallowedUsers = `-- name: InsertAddedByPhonePrivacyDisallowedUsers :exec
+INSERT INTO user_privacy_rule_users (owner_id, privacy_key, user_id, entry_type)
+SELECT $1, 'added_by_phone', requested.user_id, 'disallow'
+FROM UNNEST($2::BIGINT[]) AS requested(user_id)
+`
+
+type InsertAddedByPhonePrivacyDisallowedUsersParams struct {
+	OwnerID int64
+	Column2 []int64
+}
+
+func (q *Queries) InsertAddedByPhonePrivacyDisallowedUsers(ctx context.Context, arg InsertAddedByPhonePrivacyDisallowedUsersParams) error {
+	_, err := q.db.Exec(ctx, insertAddedByPhonePrivacyDisallowedUsers, arg.OwnerID, arg.Column2)
+	return err
+}
+
 const insertLastSeenPrivacyAllowedUsers = `-- name: InsertLastSeenPrivacyAllowedUsers :exec
 INSERT INTO user_privacy_rule_users (owner_id, privacy_key, user_id, entry_type)
 SELECT $1, 'status_timestamp', requested.user_id, 'allow'
@@ -338,6 +425,22 @@ type InsertLastSeenPrivacyDisallowedUsersParams struct {
 
 func (q *Queries) InsertLastSeenPrivacyDisallowedUsers(ctx context.Context, arg InsertLastSeenPrivacyDisallowedUsersParams) error {
 	_, err := q.db.Exec(ctx, insertLastSeenPrivacyDisallowedUsers, arg.OwnerID, arg.Column2)
+	return err
+}
+
+const upsertAddedByPhonePrivacyRule = `-- name: UpsertAddedByPhonePrivacyRule :exec
+INSERT INTO user_privacy_rules (owner_id, privacy_key, base_rule)
+VALUES ($1, 'added_by_phone', $2)
+ON CONFLICT (owner_id, privacy_key) DO UPDATE SET base_rule = EXCLUDED.base_rule
+`
+
+type UpsertAddedByPhonePrivacyRuleParams struct {
+	OwnerID  int64
+	BaseRule string
+}
+
+func (q *Queries) UpsertAddedByPhonePrivacyRule(ctx context.Context, arg UpsertAddedByPhonePrivacyRuleParams) error {
+	_, err := q.db.Exec(ctx, upsertAddedByPhonePrivacyRule, arg.OwnerID, arg.BaseRule)
 	return err
 }
 

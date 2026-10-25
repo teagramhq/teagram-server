@@ -1,0 +1,5 @@
+contacts.importContacts request shape derived from the layer-228 gotd v0.162.0 TL constructors:
+contacts.importContacts#2c800be5 contacts:Vector<InputContact>
+inputPhoneContact#6a1dc4be client_id:long phone:string first_name:string last_name:string
+
+Synthetic fixture values; no live account data.

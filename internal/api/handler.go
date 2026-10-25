@@ -584,6 +584,7 @@ func newWithPhotoThumbsAndDialogFilterSyncAndUploadPartTTLAndTurnstile(s *store.
 	register(d, tg.ContactsResolveUsernameRequestTypeID, h.handleResolveUsername)
 	register(d, tg.ContactsSearchRequestTypeID, h.handleContactsSearch)
 	register(d, tg.ContactsAddContactRequestTypeID, h.handleAddContact)
+	register(d, tg.ContactsImportContactsRequestTypeID, h.handleImportContacts)
 	register(d, tg.ContactsDeleteContactsRequestTypeID, h.handleDeleteContacts)
 	register(d, tg.ContactsGetContactsRequestTypeID, h.handleGetContacts)
 	register(d, tg.ContactsGetStatusesRequestTypeID, h.handleGetContactStatuses)

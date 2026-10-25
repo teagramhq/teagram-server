@@ -1,0 +1,22 @@
+{
+  "layer": 228,
+  "client": "gotd/td v0.162.0",
+  "source": "source-derived/contacts_importContacts.1.txt",
+  "method": "contacts.importContacts",
+  "request": {
+    "type": "contacts.importContacts",
+    "fields": {
+      "contacts": [
+        {
+          "type": "inputPhoneContact",
+          "fields": {
+            "client_id": 801,
+            "phone": "+15551048909",
+            "first_name": "Fixture",
+            "last_name": "Contact"
+          }
+        }
+      ]
+    }
+  }
+}

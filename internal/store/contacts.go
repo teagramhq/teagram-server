@@ -29,8 +29,177 @@ type Contact struct {
 	Mutual bool
 }
 
+// ContactImportInput is one phone-book entry sent by contacts.importContacts.
+type ContactImportInput struct {
+	ClientID int64
+	Phone    string
+}
+
+// ContactImportMatch maps an imported phone-book entry to an account.
+type ContactImportMatch struct {
+	ClientID int64
+	UserID   int64
+	Existing bool
+	Mutual   bool
+}
+
 func validContactIDs(ownerID, contactID int64) bool {
 	return ownerID > 0 && contactID > 0 && ownerID != contactID
+}
+
+// ImportContacts matches a phone book in one batch, applies each target's
+// added-by-phone privacy rule, and adds all permitted accounts atomically.
+func (s *Store) ImportContacts(ctx context.Context, ownerID int64, inputs []ContactImportInput) ([]ContactImportMatch, error) {
+	if ownerID <= 0 {
+		return nil, ErrInvalidContact
+	}
+	if len(inputs) > MaxContactsPerUser {
+		return nil, ErrContactLimit
+	}
+	if len(inputs) == 0 {
+		return []ContactImportMatch{}, nil
+	}
+
+	clientIDs := make([]int64, len(inputs))
+	phones := make([]string, len(inputs))
+	for i, input := range inputs {
+		clientIDs[i] = input.ClientID
+		phones[i] = NormalizePhone(input.Phone)
+	}
+
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("import contacts begin: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }() //nolint:errcheck // no-op after commit
+	if err := lockOwners(ctx, tx, ownerID); err != nil {
+		return nil, err
+	}
+
+	// Resolve phones and privacy in one statement snapshot. The owner lock
+	// serializes this import's edge and cap changes with other owner writes.
+	matches, err := importContactMatches(ctx, tx, ownerID, clientIDs, phones)
+	if err != nil {
+		return nil, err
+	}
+	newIDs := make([]int64, 0, len(matches))
+	seenUsers := make(map[int64]struct{}, len(matches))
+	for _, match := range matches {
+		if _, seen := seenUsers[match.UserID]; seen {
+			continue
+		}
+		seenUsers[match.UserID] = struct{}{}
+		if !match.Existing {
+			newIDs = append(newIDs, match.UserID)
+		}
+	}
+	newIDs = ascendingUnique(newIDs)
+
+	if len(newIDs) > 0 {
+		qtx := s.q.WithTx(tx)
+		state, err := qtx.CountContactsForImport(ctx, ownerID)
+		if err != nil {
+			return nil, fmt.Errorf("import contacts read owner state: %w", err)
+		}
+		if state.ContactCount+int64(len(newIDs)) > MaxContactsPerUser {
+			return nil, ErrContactLimit
+		}
+
+		var changedViewers []int64
+		if state.LastSeenContactsRule {
+			inputsByViewer, err := lastSeenPrivacyInputsForViewers(ctx, qtx, ownerID, newIDs)
+			if err != nil {
+				return nil, fmt.Errorf("import contacts evaluate status access: %w", err)
+			}
+			changedViewers, err = changedLastSeenAccessViewers(inputsByViewer, func(_ int64, inputs *lastSeenPrivacyInputs) {
+				inputs.ownerContact = true
+			})
+			if err != nil {
+				return nil, fmt.Errorf("import contacts compare status access: %w", err)
+			}
+		}
+
+		copyRows := make([][]any, len(newIDs))
+		for i, id := range newIDs {
+			copyRows[i] = []any{ownerID, id}
+		}
+		inserted, err := tx.CopyFrom(ctx, pgx.Identifier{"user_contacts"}, []string{"owner_id", "contact_id"}, pgx.CopyFromRows(copyRows))
+		if err != nil {
+			return nil, fmt.Errorf("import contacts copy edges: %w", err)
+		}
+		if inserted != int64(len(newIDs)) {
+			return nil, fmt.Errorf("import contacts inserted %d of %d edges", inserted, len(newIDs))
+		}
+		if err := notifyStatusReconcile(ctx, tx, ownerID, changedViewers...); err != nil {
+			return nil, fmt.Errorf("import contacts notify status: %w", err)
+		}
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return nil, fmt.Errorf("import contacts commit: %w", err)
+	}
+	return matches, nil
+}
+
+func importContactMatches(ctx context.Context, tx pgx.Tx, ownerID int64, clientIDs []int64, phones []string) ([]ContactImportMatch, error) {
+	rows, err := tx.Query(ctx, `
+		WITH requested AS (
+			SELECT entry.client_id, entry.phone, entry.ordinality
+			FROM UNNEST($2::BIGINT[], $3::TEXT[]) WITH ORDINALITY
+				AS entry(client_id, phone, ordinality)
+		)
+		SELECT requested.client_id, target.id, existing.contact_id IS NOT NULL, target_contact.contact_id IS NOT NULL
+		FROM requested
+		JOIN users target ON target.phone = requested.phone
+		LEFT JOIN user_privacy_rules privacy
+		  ON privacy.owner_id = target.id
+		 AND privacy.privacy_key = 'added_by_phone'
+		LEFT JOIN user_privacy_rule_users disallowed
+		  ON disallowed.owner_id = target.id
+		 AND disallowed.privacy_key = 'added_by_phone'
+		 AND disallowed.user_id = $1
+		 AND disallowed.entry_type = 'disallow'
+		LEFT JOIN user_privacy_rule_users allowed
+		  ON allowed.owner_id = target.id
+		 AND allowed.privacy_key = 'added_by_phone'
+		 AND allowed.user_id = $1
+		 AND allowed.entry_type = 'allow'
+		LEFT JOIN user_contacts target_contact
+		  ON target_contact.owner_id = target.id
+		 AND target_contact.contact_id = $1
+		LEFT JOIN user_contacts existing
+		  ON existing.owner_id = $1
+		 AND existing.contact_id = target.id
+		WHERE target.id <> $1
+		  AND (
+			existing.contact_id IS NOT NULL
+			OR (
+				disallowed.user_id IS NULL
+				AND (
+					allowed.user_id IS NOT NULL
+					OR COALESCE(privacy.base_rule, 'everybody') = 'everybody'
+					OR (privacy.base_rule = 'contacts' AND target_contact.contact_id IS NOT NULL)
+				)
+			)
+		  )
+		ORDER BY requested.ordinality
+	`, ownerID, clientIDs, phones)
+	if err != nil {
+		return nil, fmt.Errorf("import contacts match phones: %w", err)
+	}
+	defer rows.Close()
+	var matches []ContactImportMatch
+	for rows.Next() {
+		var match ContactImportMatch
+		if err := rows.Scan(&match.ClientID, &match.UserID, &match.Existing, &match.Mutual); err != nil {
+			return nil, fmt.Errorf("import contacts match phones scan: %w", err)
+		}
+		matches = append(matches, match)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("import contacts match phones: %w", err)
+	}
+	return matches, nil
 }
 
 // AddContact adds contactID to ownerID's directed contact list. The existing

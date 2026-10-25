@@ -7,6 +7,18 @@ SELECT EXISTS (
 -- name: CountContacts :one
 SELECT COUNT(*) FROM user_contacts WHERE owner_id = $1;
 
+-- name: CountContactsForImport :one
+SELECT COUNT(*) AS contact_count,
+       EXISTS (
+           SELECT 1
+           FROM user_privacy_rules privacy
+           WHERE privacy.owner_id = $1
+             AND privacy.privacy_key = 'status_timestamp'
+             AND privacy.base_rule = 'contacts'
+       ) AS last_seen_contacts_rule
+FROM user_contacts contacts
+WHERE contacts.owner_id = $1;
+
 -- name: InsertContact :execrows
 INSERT INTO user_contacts (owner_id, contact_id)
 VALUES ($1, $2)

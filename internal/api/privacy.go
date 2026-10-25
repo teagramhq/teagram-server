@@ -21,10 +21,13 @@ func (h *handlers) handleGetPrivacy(r *mtproto.Request) (bin.Encoder, error) {
 	if r.UserID == 0 {
 		return nil, errAuthKeyUnreg
 	}
-	if !isLastSeenPrivacyKey(req.Key) {
-		return nil, errPrivacyKeyInvalid
+	if isLastSeenPrivacyKey(req.Key) {
+		return h.lastSeenPrivacyRulesForOwner(r.Ctx, r.UserID)
 	}
-	return h.lastSeenPrivacyRulesForOwner(r.Ctx, r.UserID)
+	if isAddedByPhonePrivacyKey(req.Key) {
+		return h.addedByPhonePrivacyRulesForOwner(r.Ctx, r.UserID)
+	}
+	return nil, errPrivacyKeyInvalid
 }
 
 func (h *handlers) handleSetPrivacy(r *mtproto.Request) (bin.Encoder, error) {
@@ -35,7 +38,9 @@ func (h *handlers) handleSetPrivacy(r *mtproto.Request) (bin.Encoder, error) {
 	if r.UserID == 0 {
 		return nil, errAuthKeyUnreg
 	}
-	if !isLastSeenPrivacyKey(req.Key) {
+	isLastSeen := isLastSeenPrivacyKey(req.Key)
+	isAddedByPhone := isAddedByPhonePrivacyKey(req.Key)
+	if !isLastSeen && !isAddedByPhone {
 		return nil, errPrivacyKeyInvalid
 	}
 	if lastSeenPrivacyEntryCount(req.Rules) > store.MaxLastSeenPrivacyUsers {
@@ -57,22 +62,36 @@ func (h *handlers) handleSetPrivacy(r *mtproto.Request) (bin.Encoder, error) {
 	if err := h.checkRateLimit(r, "account_set_privacy", h.rateLimitUpdateProfile); err != nil {
 		return nil, err
 	}
-	if err := h.store.SetLastSeenPrivacy(r.Ctx, r.UserID, rule); err != nil {
+	var setErr error
+	if isLastSeen {
+		setErr = h.store.SetLastSeenPrivacy(r.Ctx, r.UserID, rule)
+	} else {
+		setErr = h.store.SetAddedByPhonePrivacy(r.Ctx, r.UserID, rule)
+	}
+	if err := setErr; err != nil {
 		switch {
 		case errors.Is(err, store.ErrLastSeenPrivacyTooLong):
 			return nil, errPrivacyTooLong
 		case errors.Is(err, store.ErrInvalidLastSeenPrivacy):
 			return nil, errPrivacyValueInvalid
 		default:
-			h.log.Error("set last-seen privacy", "user_id", r.UserID, "err", err)
+			h.log.Error("set account privacy", "user_id", r.UserID, "err", err)
 			return nil, errInternal
 		}
 	}
-	return h.lastSeenPrivacyRulesForOwner(r.Ctx, r.UserID)
+	if isLastSeen {
+		return h.lastSeenPrivacyRulesForOwner(r.Ctx, r.UserID)
+	}
+	return h.addedByPhonePrivacyRulesForOwner(r.Ctx, r.UserID)
 }
 
 func isLastSeenPrivacyKey(key tg.InputPrivacyKeyClass) bool {
 	_, ok := key.(*tg.InputPrivacyKeyStatusTimestamp)
+	return ok
+}
+
+func isAddedByPhonePrivacyKey(key tg.InputPrivacyKeyClass) bool {
+	_, ok := key.(*tg.InputPrivacyKeyAddedByPhone)
 	return ok
 }
 
@@ -182,6 +201,19 @@ func (h *handlers) lastSeenPrivacyRulesForOwner(ctx context.Context, ownerID int
 		h.log.Error("get last-seen privacy", "user_id", ownerID, "err", err)
 		return nil, errInternal
 	}
+	return h.privacyRulesForOwner(ctx, ownerID, rule)
+}
+
+func (h *handlers) addedByPhonePrivacyRulesForOwner(ctx context.Context, ownerID int64) (*tg.AccountPrivacyRules, error) {
+	rule, _, err := h.store.GetAddedByPhonePrivacy(ctx, ownerID)
+	if err != nil {
+		h.log.Error("get added-by-phone privacy", "user_id", ownerID, "err", err)
+		return nil, errInternal
+	}
+	return h.privacyRulesForOwner(ctx, ownerID, rule)
+}
+
+func (h *handlers) privacyRulesForOwner(ctx context.Context, ownerID int64, rule store.LastSeenPrivacyRule) (*tg.AccountPrivacyRules, error) {
 	var rules []tg.PrivacyRuleClass
 	switch rule.BaseRule {
 	case "everybody":
@@ -191,7 +223,7 @@ func (h *handlers) lastSeenPrivacyRulesForOwner(ctx context.Context, ownerID int
 	case "nobody":
 		rules = append(rules, &tg.PrivacyValueDisallowAll{})
 	default:
-		h.log.Error("get last-seen privacy: invalid stored base rule", "user_id", ownerID, "base_rule", rule.BaseRule)
+		h.log.Error("get account privacy: invalid stored base rule", "user_id", ownerID, "base_rule", rule.BaseRule)
 		return nil, errInternal
 	}
 	// Disallow must precede allow because clients keep the first rule per user.
@@ -207,21 +239,21 @@ func (h *handlers) lastSeenPrivacyRulesForOwner(ctx context.Context, ownerID int
 	userIDs = slices.Compact(userIDs)
 	usersByID, err := h.store.UsersByID(ctx, userIDs)
 	if err != nil {
-		h.log.Error("get last-seen privacy users", "user_id", ownerID, "err", err)
+		h.log.Error("get account privacy users", "user_id", ownerID, "err", err)
 		return nil, errInternal
 	}
 	users := make([]store.User, 0, len(userIDs))
 	for _, id := range userIDs {
 		user, ok := usersByID[id]
 		if !ok {
-			h.log.Error("get last-seen privacy user missing", "user_id", ownerID, "entry_user_id", id)
+			h.log.Error("get account privacy user missing", "user_id", ownerID, "entry_user_id", id)
 			return nil, errInternal
 		}
 		users = append(users, user)
 	}
 	rendered, err := h.usersToTL(ctx, users, ownerID, false)
 	if err != nil {
-		h.log.Error("get last-seen privacy: render users", "user_id", ownerID, "err", err)
+		h.log.Error("get account privacy: render users", "user_id", ownerID, "err", err)
 		return nil, errInternal
 	}
 	wireUsers := make([]tg.UserClass, len(rendered))
@@ -229,7 +261,7 @@ func (h *handlers) lastSeenPrivacyRulesForOwner(ctx context.Context, ownerID int
 		wireUsers[i] = user
 	}
 	if rules == nil {
-		return nil, fmt.Errorf("get last-seen privacy: no base rule for owner %d", ownerID)
+		return nil, fmt.Errorf("get account privacy: no base rule for owner %d", ownerID)
 	}
 	return &tg.AccountPrivacyRules{Rules: rules, Chats: []tg.ChatClass{}, Users: wireUsers}, nil
 }

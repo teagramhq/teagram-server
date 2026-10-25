@@ -82,6 +82,31 @@ func (q *Queries) CountContacts(ctx context.Context, ownerID int64) (int64, erro
 	return count, err
 }
 
+const countContactsForImport = `-- name: CountContactsForImport :one
+SELECT COUNT(*) AS contact_count,
+       EXISTS (
+           SELECT 1
+           FROM user_privacy_rules privacy
+           WHERE privacy.owner_id = $1
+             AND privacy.privacy_key = 'status_timestamp'
+             AND privacy.base_rule = 'contacts'
+       ) AS last_seen_contacts_rule
+FROM user_contacts contacts
+WHERE contacts.owner_id = $1
+`
+
+type CountContactsForImportRow struct {
+	ContactCount         int64
+	LastSeenContactsRule bool
+}
+
+func (q *Queries) CountContactsForImport(ctx context.Context, ownerID int64) (CountContactsForImportRow, error) {
+	row := q.db.QueryRow(ctx, countContactsForImport, ownerID)
+	var i CountContactsForImportRow
+	err := row.Scan(&i.ContactCount, &i.LastSeenContactsRule)
+	return i, err
+}
+
 const deleteContact = `-- name: DeleteContact :execrows
 DELETE FROM user_contacts
 WHERE owner_id = $1 AND contact_id = $2

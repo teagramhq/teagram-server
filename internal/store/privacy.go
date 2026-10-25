@@ -26,6 +26,10 @@ type LastSeenPrivacyRule struct {
 	DisallowedUserIDs []int64
 }
 
+// AddedByPhonePrivacyRule is the base decision and user exceptions for
+// contacts.importContacts phone matches.
+type AddedByPhonePrivacyRule = LastSeenPrivacyRule
+
 // LastSeenAccess is the level of last-seen detail a viewer may receive.
 // Its zero value is hidden so an incomplete evaluation cannot grant access.
 type LastSeenAccess uint8
@@ -270,6 +274,92 @@ func getLastSeenPrivacy(ctx context.Context, q *db.Queries, ownerID int64) (Last
 		}
 	}
 	return rule, true, nil
+}
+
+// GetAddedByPhonePrivacy returns the saved added-by-phone rule. A missing rule
+// keeps Telegram's Everybody default.
+func (s *Store) GetAddedByPhonePrivacy(ctx context.Context, ownerID int64) (AddedByPhonePrivacyRule, bool, error) {
+	if ownerID <= 0 {
+		return AddedByPhonePrivacyRule{}, false, errors.New("get added-by-phone privacy: owner ID must be positive")
+	}
+	baseRule, err := s.q.GetAddedByPhonePrivacyRule(ctx, ownerID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return AddedByPhonePrivacyRule{BaseRule: "everybody"}, false, nil
+	}
+	if err != nil {
+		return AddedByPhonePrivacyRule{}, false, fmt.Errorf("get added-by-phone privacy rule: %w", err)
+	}
+	rows, err := s.q.GetAddedByPhonePrivacyRuleUsers(ctx, ownerID)
+	if err != nil {
+		return AddedByPhonePrivacyRule{}, false, fmt.Errorf("get added-by-phone privacy users: %w", err)
+	}
+	rule := AddedByPhonePrivacyRule{BaseRule: baseRule}
+	for _, row := range rows {
+		switch row.EntryType {
+		case "allow":
+			rule.AllowedUserIDs = append(rule.AllowedUserIDs, row.UserID)
+		case "disallow":
+			rule.DisallowedUserIDs = append(rule.DisallowedUserIDs, row.UserID)
+		default:
+			return AddedByPhonePrivacyRule{}, false, fmt.Errorf("get added-by-phone privacy users: unknown entry type %q", row.EntryType)
+		}
+	}
+	return rule, true, nil
+}
+
+// SetAddedByPhonePrivacy atomically replaces the phone-import rule and its
+// user exceptions. The owner lock also serializes imports that check this rule.
+func (s *Store) SetAddedByPhonePrivacy(ctx context.Context, ownerID int64, rule AddedByPhonePrivacyRule) error {
+	if ownerID <= 0 || !validLastSeenBaseRule(rule.BaseRule) {
+		return ErrInvalidLastSeenPrivacy
+	}
+	if len(rule.AllowedUserIDs)+len(rule.DisallowedUserIDs) > MaxLastSeenPrivacyUsers {
+		return ErrLastSeenPrivacyTooLong
+	}
+	allowed, err := normalizeLastSeenPrivacyUsers(ownerID, rule.AllowedUserIDs)
+	if err != nil {
+		return err
+	}
+	disallowed, err := normalizeLastSeenPrivacyUsers(ownerID, rule.DisallowedUserIDs)
+	if err != nil {
+		return err
+	}
+
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("set added-by-phone privacy begin: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }() //nolint:errcheck // no-op after commit
+	if err := lockOwners(ctx, tx, ownerID); err != nil {
+		return err
+	}
+	qtx := s.q.WithTx(tx)
+	if err := qtx.UpsertAddedByPhonePrivacyRule(ctx, db.UpsertAddedByPhonePrivacyRuleParams{
+		OwnerID: ownerID, BaseRule: rule.BaseRule,
+	}); err != nil {
+		return fmt.Errorf("set added-by-phone privacy rule: %w", err)
+	}
+	if err := qtx.DeleteAddedByPhonePrivacyRuleUsers(ctx, ownerID); err != nil {
+		return fmt.Errorf("set added-by-phone privacy clear users: %w", err)
+	}
+	if len(allowed) > 0 {
+		if err := qtx.InsertAddedByPhonePrivacyAllowedUsers(ctx, db.InsertAddedByPhonePrivacyAllowedUsersParams{
+			OwnerID: ownerID, Column2: allowed,
+		}); err != nil {
+			return fmt.Errorf("set added-by-phone privacy allow users: %w", err)
+		}
+	}
+	if len(disallowed) > 0 {
+		if err := qtx.InsertAddedByPhonePrivacyDisallowedUsers(ctx, db.InsertAddedByPhonePrivacyDisallowedUsersParams{
+			OwnerID: ownerID, Column2: disallowed,
+		}); err != nil {
+			return fmt.Errorf("set added-by-phone privacy disallow users: %w", err)
+		}
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("set added-by-phone privacy commit: %w", err)
+	}
+	return nil
 }
 
 // SetLastSeenPrivacy atomically replaces the owner's saved status rule and its

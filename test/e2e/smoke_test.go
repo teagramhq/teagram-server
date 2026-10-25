@@ -250,6 +250,14 @@ func TestSmoke(t *testing.T) {
 		t.Parallel()
 		testSmokeContactsSearch(t)
 	})
+	t.Run("contacts-import", func(t *testing.T) {
+		t.Parallel()
+		testSmokeContactsImport(t)
+	})
+	t.Run("contacts-import-privacy", func(t *testing.T) {
+		t.Parallel()
+		testSmokeContactsImportPrivacy(t)
+	})
 	t.Run("full-user-profile", func(t *testing.T) {
 		t.Parallel()
 		testSmokeFullUserProfile(t)
