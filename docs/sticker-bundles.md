@@ -43,6 +43,23 @@ Validate a bundle before publishing it:
 go run ./cmd/stickerbundle-check /path/to/sticker-bundle
 ```
 
+## Generate the pinned free emoji packs
+
+On Ubuntu with Python 3.10 or newer and Node.js 20.9 or newer, run:
+
+```bash
+tools/stickerbundle/generate.sh --output /tmp/sticker-bundle
+```
+
+The command installs its locked SVG and WebP renderers, downloads the pinned
+Unicode group list and upstream source files, verifies their revisions,
+licenses and SHA-256 digests, then writes a deterministic bundle. The output
+directory must not already exist. The renderer uses transparent backgrounds
+and scales each image so its longest side is 512 pixels. Generated art stays
+out of the repository. Each source digest covers the sorted relative paths,
+byte lengths and bytes of the downloaded license, metadata and selected art
+files for that source.
+
 To enable the bundle, set `TG_STICKER_CATALOG_BUNDLE` to its directory. The
 server validates the complete bundle before starting. With the setting absent
 or empty, it serves only the built-in `twemoji_reactions` set.

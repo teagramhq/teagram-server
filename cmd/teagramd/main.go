@@ -1036,7 +1036,8 @@ func newBlobStoreWithAuthority(ctx context.Context, cfg config.Config, log *slog
 		return blob.NewLocal(cfg.BlobDir)
 	}
 	acceptedPlaintext := authority.Present && authority.Outcome == blobmode.OutcomeS3Accepted
-	if authority.Present && !acceptedPlaintext {
+	encryptedMigration := authority.Present && authority.Outcome == blobmode.OutcomeEncrypted
+	if authority.Present && !acceptedPlaintext && !encryptedMigration {
 		return nil, errors.New("blob-mode authority is not valid for the configured S3 backend")
 	}
 	if acceptedPlaintext {
@@ -1048,6 +1049,9 @@ func newBlobStoreWithAuthority(ctx context.Context, cfg config.Config, log *slog
 	// NewS3 emits the plaintext warning while it constructs the client, so
 	// the logger must be selected before construction rather than after it.
 	s3cfg.Logger = log
+	if encryptedMigration {
+		return blob.NewMigratedS3Store(ctx, s3cfg, cfg.MediaKeys)
+	}
 	blobs, _, err := blob.NewS3Store(ctx, s3cfg, cfg.MediaKeys, !acceptedPlaintext)
 	if err != nil {
 		return nil, err

@@ -138,6 +138,39 @@ func TestScanReportsMissingReferencesAndOnlyRetiresUnreferencedVersions(t *testi
 	}
 }
 
+func TestScanRejectsEnvelopeWithLogicalLengthDifferentFromReference(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	backend, err := blob.NewLocal(t.TempDir())
+	if err != nil {
+		t.Fatalf("create backend: %v", err)
+	}
+	ring, err := blob.NewKeyRing(1, map[uint32][]byte{1: bytes.Repeat([]byte{0x73}, blob.MediaKeyLen)})
+	if err != nil {
+		t.Fatalf("create key ring: %v", err)
+	}
+	sealed, err := blob.NewEncrypted(backend, ring, blob.MinChunkSize)
+	if err != nil {
+		t.Fatalf("create encrypted store: %v", err)
+	}
+	if _, err := sealed.Put(ctx, blob.Key(7), bytes.NewReader([]byte("secret"))); err != nil {
+		t.Fatalf("put envelope: %v", err)
+	}
+
+	report, err := blobinventory.Scan(ctx, backend, ring, []blobinventory.Reference{{
+		Key: blob.Key(7), Kind: "file", ID: "7", LogicalBytes: 5,
+	}})
+	if err != nil {
+		t.Fatalf("scan: %v", err)
+	}
+	if report.Classes.NoValidEnvelope.Count != 1 || report.Classes.ValidEnvelope.Count != 0 {
+		t.Fatalf("classes = %+v, want the length-mismatched envelope rejected", report.Classes)
+	}
+	if len(report.Classes.NoValidEnvelope.IDs) != 1 || report.Classes.NoValidEnvelope.IDs[0].ID != "7" {
+		t.Fatalf("remaining IDs = %+v, want file id 7", report.Classes.NoValidEnvelope.IDs)
+	}
+}
+
 func TestScanFailsWhenTreeListingIsIncomplete(t *testing.T) {
 	t.Parallel()
 	want := errors.New("listing failed")

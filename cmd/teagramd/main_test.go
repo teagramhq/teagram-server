@@ -190,6 +190,99 @@ func TestNewBlobStoreKeepsAcceptedS3PlaintextRegardlessOfMediaKey(t *testing.T) 
 	}
 }
 
+func TestNewBlobStoreUsesEncryptedNamespaceAfterMigration(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	ring := testMediaKeyRing(t)
+	local, err := blob.NewLocal(t.TempDir())
+	if err != nil {
+		t.Fatalf("create envelope fixture store: %v", err)
+	}
+	prefixed, err := blob.NewPrefixedStore(local, blob.EncryptedObjectsPrefix)
+	if err != nil {
+		t.Fatalf("create prefixed fixture store: %v", err)
+	}
+	sealed, err := blob.NewEncrypted(prefixed, ring, blob.DefaultChunkSize)
+	if err != nil {
+		t.Fatalf("create encrypted fixture store: %v", err)
+	}
+	const key = "02/2"
+	const media = "media-range-payload"
+	if _, err := sealed.Put(ctx, key, strings.NewReader(media)); err != nil {
+		t.Fatalf("write encrypted fixture: %v", err)
+	}
+	physicalSize, err := blob.EnvelopePhysicalSize(int64(len(media)), blob.DefaultChunkSize)
+	if err != nil {
+		t.Fatalf("calculate envelope fixture size: %v", err)
+	}
+	physical, err := local.ReadAt(ctx, blob.EncryptedObjectsPrefix+"/"+key, 0, physicalSize)
+	if err != nil || int64(len(physical)) != physicalSize {
+		t.Fatalf("read encrypted fixture = %d bytes, %v; want %d", len(physical), err, physicalSize)
+	}
+
+	var objectPath string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			t.Errorf("S3 request = %s %s, want GET", r.Method, r.URL)
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
+		if r.URL.Query().Get("list-type") == "2" {
+			w.Header().Set("Content-Type", "application/xml")
+			if _, err := io.WriteString(w, `<ListBucketResult><IsTruncated>false</IsTruncated></ListBucketResult>`); err != nil {
+				t.Errorf("write S3 listing: %v", err)
+			}
+			return
+		}
+		objectPath = r.URL.Path
+		window := strings.TrimPrefix(r.Header.Get("Range"), "bytes=")
+		bounds := strings.Split(window, "-")
+		if len(bounds) != 2 {
+			t.Errorf("S3 range = %q, want byte bounds", r.Header.Get("Range"))
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		start, startErr := strconv.ParseInt(bounds[0], 10, 64)
+		end, endErr := strconv.ParseInt(bounds[1], 10, 64)
+		if startErr != nil || endErr != nil || start < 0 || end < start {
+			t.Errorf("S3 range bounds = %q, want valid non-negative bounds", window)
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		if start >= int64(len(physical)) {
+			w.WriteHeader(http.StatusRequestedRangeNotSatisfiable)
+			return
+		}
+		end = min(end, int64(len(physical))-1)
+		w.WriteHeader(http.StatusPartialContent)
+		if _, err := w.Write(physical[start : end+1]); err != nil {
+			t.Errorf("write S3 object range: %v", err)
+		}
+	}))
+	t.Cleanup(server.Close)
+	got, err := newBlobStoreWithAuthority(ctx, config.Config{
+		BlobS3: &blob.S3Config{
+			Endpoint: server.URL, Bucket: "test-bucket", Prefix: "tenant/",
+			AccessKeyID: "access", SecretAccessKey: "secret",
+			AllowInsecureHTTP: true, MaxAttempts: 1,
+		},
+		MediaKeys: ring,
+	}, slog.New(slog.DiscardHandler), blobmode.Authority{Present: true, Outcome: blobmode.OutcomeEncrypted})
+	if err != nil {
+		t.Fatalf("open encrypted migrated store: %v", err)
+	}
+	window, err := got.ReadAt(ctx, key, 2, 4)
+	if err != nil {
+		t.Fatalf("read migrated encrypted range: %v", err)
+	}
+	if string(window) != media[2:6] {
+		t.Fatalf("range = %q, want %q", window, media[2:6])
+	}
+	if objectPath != "/test-bucket/tenant/encrypted/02/2" {
+		t.Fatalf("encrypted S3 path = %q, want prefixed logical key", objectPath)
+	}
+}
+
 func testMediaKeyRing(t *testing.T) *blob.KeyRing {
 	t.Helper()
 	ring, err := blob.NewKeyRing(1, map[uint32][]byte{1: bytes.Repeat([]byte{0x51}, blob.MediaKeyLen)})

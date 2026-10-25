@@ -111,7 +111,9 @@ if [[ -e "$MODE_FILE" || -L "$MODE_FILE" ]]; then
 
   IMAGE_REF=$(demo_pull_image_by_sha "$SHA" "$IMAGE_DIGEST")
   export TEAGRAM_DEMO_IMAGE_REF="$IMAGE_REF"
-  demo_compose stop "$ACTIVE_SERVER"
+  # Recreate the project networks from the current IPAM config, including the
+  # backend dynamic-address pool. Compose down leaves named volumes intact.
+  demo_compose down --remove-orphans
   demo_bootstrap_compose up -d migrate
   demo_wait_migration demo_bootstrap_compose 'resume migrations'
   demo_write_active_release "$ACTIVE_SERVER" "$IMAGE_REF"

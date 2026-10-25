@@ -80,7 +80,9 @@ services:
         source: ./deploy/teagram-demo/postgresql.conf
         target: /etc/postgresql/postgresql.conf
         read_only: true
-    networks: [backend]
+    networks:
+      backend:
+        ipv4_address: 198.18.130.3
     restart: unless-stopped
     logging: *logging
 
@@ -334,6 +336,7 @@ networks:
     ipam:
       config:
         - subnet: 198.18.130.0/24
+          ip_range: 198.18.130.128/26
   edge:
     driver: bridge
   egress:

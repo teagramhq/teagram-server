@@ -26,6 +26,8 @@ const (
 	maxJournalDirectoryEntries = maxJournalEntries*2 + 2
 	stackMoveOutcome           = "stack-moved-local"
 	OutcomeS3Accepted          = "s3-accepted"
+	OutcomeEncrypted           = "encrypted"
+	DefaultDirectory           = "/run/teagramd/blob-mode"
 	stackMoveSourceTGBlobs     = "telegram-server_tgblobs"
 	stackMoveTargetTGBlobs     = "teagram_tgblobs"
 	stackMoveSourceRustFSData  = "telegram-server_rustfsdata"
@@ -129,8 +131,23 @@ func readAt(path string, cfg EffectiveConfig, expectedUID uint32) (authority Aut
 	if len(entries) == 0 {
 		return Authority{}, reject("missing", "journal")
 	}
-	if !bytes.Equal(modeBytes, entries[len(entries)-1].data) {
-		return Authority{}, reject("stale", "mode.json")
+	current, _, err := validateJournalHead(entries, modeBytes, cfg)
+	if err != nil {
+		return Authority{}, err
+	}
+	return Authority{Present: true, Outcome: current.Outcome}, nil
+}
+
+func validateJournalHead(entries []journalEntry, modeBytes []byte, cfg EffectiveConfig) (record, int, error) {
+	if len(entries) == 0 {
+		return record{}, 0, reject("missing", "journal")
+	}
+	head := len(entries) - 1
+	if !bytes.Equal(modeBytes, entries[head].data) {
+		if head == 0 || !bytes.Equal(modeBytes, entries[head-1].data) {
+			return record{}, 0, reject("stale", "mode.json")
+		}
+		head--
 	}
 
 	transitionIDs := make(map[string]struct{}, len(entries))
@@ -139,34 +156,41 @@ func readAt(path string, cfg EffectiveConfig, expectedUID uint32) (authority Aut
 	var previousOutcome string
 	var previousBackend backend
 	var previousVolumes volumes
+	var current record
 	for index, entry := range entries {
 		generation := int64(index + 1)
-		record, err := parseRecord(entry.data)
+		entryRecord, err := parseRecord(entry.data)
 		if err != nil {
-			return Authority{}, err
+			return record{}, 0, err
 		}
-		if err := validateRecord(record, entry.data, generation, previousID, previousOutcome, previousBackend, previousVolumes); err != nil {
-			return Authority{}, err
+		if index > head && (previousOutcome != OutcomeS3Accepted || entryRecord.Outcome != OutcomeEncrypted) {
+			return record{}, 0, reject("stale", "mode.json")
 		}
-		if _, exists := transitionIDs[record.TransitionID]; exists {
-			return Authority{}, reject("reused", "transition_id")
+		if err := validateRecord(entryRecord, entry.data, generation, previousID, previousOutcome, previousBackend, previousVolumes); err != nil {
+			return record{}, 0, err
 		}
-		transitionIDs[record.TransitionID] = struct{}{}
-		if _, exists := reportDigests[record.Evidence.ReportSHA256]; exists {
-			return Authority{}, reject("reused", "evidence.report_sha256")
+		if _, exists := transitionIDs[entryRecord.TransitionID]; exists {
+			return record{}, 0, reject("reused", "transition_id")
 		}
-		reportDigests[record.Evidence.ReportSHA256] = struct{}{}
-		previousID = record.TransitionID
-		previousOutcome = record.Outcome
-		previousBackend = record.Backend
-		previousVolumes = record.Volumes
-		if index == len(entries)-1 {
-			if err := validateBackend(record.Backend, cfg); err != nil {
-				return Authority{}, err
+		transitionIDs[entryRecord.TransitionID] = struct{}{}
+		if _, exists := reportDigests[entryRecord.Evidence.ReportSHA256]; exists {
+			return record{}, 0, reject("reused", "evidence.report_sha256")
+		}
+		reportDigests[entryRecord.Evidence.ReportSHA256] = struct{}{}
+		previousID = entryRecord.TransitionID
+		previousOutcome = entryRecord.Outcome
+		previousBackend = entryRecord.Backend
+		previousVolumes = entryRecord.Volumes
+		if index == head {
+			current = entryRecord
+		}
+		if index >= head {
+			if err := validateBackend(entryRecord.Backend, cfg); err != nil {
+				return record{}, 0, err
 			}
 		}
 	}
-	return Authority{Present: true, Outcome: previousOutcome}, nil
+	return current, head, nil
 }
 
 type record struct {
@@ -215,6 +239,9 @@ type evidence struct {
 	CopyPasses                *int64 `json:"copy_passes"`
 	RestorePasses             *int64 `json:"restore_passes"`
 	RetainedCutoverKeyCount   *int64 `json:"retained_cutover_key_count"`
+	EncryptedInventorySHA256  string `json:"encrypted_inventory_sha256"`
+	KeyVersion                uint32 `json:"key_version"`
+	Writes                    string `json:"writes"`
 }
 
 type journalEntry struct {
@@ -517,6 +544,8 @@ func hasRequiredEvidenceKeys(outcome string, fields map[string]json.RawMessage) 
 		expected = []string{"report_sha256"}
 	case "s3-accepted":
 		expected = []string{"report_sha256", "source_manifest_sha256", "destination_manifest_sha256", "object_count", "byte_total", "copy_passes"}
+	case OutcomeEncrypted:
+		expected = []string{"report_sha256", "encrypted_inventory_sha256", "object_count", "byte_total", "key_version", "writes"}
 	case "recovered-local":
 		expected = []string{"report_sha256", "s3_census_manifest_sha256", "restored_manifest_sha256", "object_count", "byte_total", "restore_passes", "retained_cutover_key_count"}
 	case stackMoveOutcome:
@@ -556,6 +585,12 @@ func validateRecord(
 		if record.Outcome == "recovered-local" && previousOutcome != "s3-accepted" {
 			return reject("supersession", "outcome")
 		}
+		if record.Outcome == OutcomeS3Accepted && previousOutcome != "initial-local" && previousOutcome != "recovered-local" && previousOutcome != stackMoveOutcome {
+			return reject("supersession", "outcome")
+		}
+		if record.Outcome == OutcomeEncrypted && previousOutcome != OutcomeS3Accepted {
+			return reject("supersession", "outcome")
+		}
 		if record.Outcome == stackMoveOutcome && previousOutcome != "initial-local" && previousOutcome != "recovered-local" {
 			return reject("supersession", "outcome")
 		}
@@ -571,6 +606,7 @@ func validateRecord(
 	}
 	if record.Outcome == "initial-local" && record.Backend.Kind != "local" ||
 		record.Outcome == "s3-accepted" && record.Backend.Kind != "s3" ||
+		record.Outcome == OutcomeEncrypted && record.Backend.Kind != "s3" ||
 		record.Outcome == "recovered-local" && record.Backend.Kind != "local" ||
 		record.Outcome == stackMoveOutcome && record.Backend.Kind != "local" {
 		return reject("schema", "outcome")
@@ -633,6 +669,12 @@ func validateEvidence(outcome string, evidence evidence) error {
 		if !lowerHexDigest(evidence.SourceManifestSHA256) || !lowerHexDigest(evidence.DestinationManifestSHA256) ||
 			evidence.ObjectCount == nil || *evidence.ObjectCount < 0 || evidence.ByteTotal == nil || *evidence.ByteTotal < 0 ||
 			evidence.CopyPasses == nil || (*evidence.CopyPasses != 1 && *evidence.CopyPasses != 2) {
+			return reject("schema", "evidence")
+		}
+	case OutcomeEncrypted:
+		if !lowerHexDigest(evidence.EncryptedInventorySHA256) || evidence.ObjectCount == nil || *evidence.ObjectCount < 0 ||
+			evidence.ByteTotal == nil || *evidence.ByteTotal < 0 || evidence.KeyVersion == 0 ||
+			(evidence.Writes != "stopped" && evidence.Writes != "drained") {
 			return reject("schema", "evidence")
 		}
 	case "recovered-local":

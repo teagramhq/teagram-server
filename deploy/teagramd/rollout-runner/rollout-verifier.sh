@@ -909,6 +909,10 @@ snapshot_from_json() {
           "TG_KEY_EXCHANGE_GLOBAL_RATE",
           "TG_KEY_EXCHANGE_GLOBAL_BURST"
         )) and .value == "";
+      # Compose includes extension anchors in its rendered output. Their
+      # expanded service fields remain in the digest; the anchors do not.
+      with_entries(select((.key | startswith("x-")) | not))
+      |
       if (.services[env.ROLLOUT_COMPOSE_SERVICE // "teagramd"].environment | type) != "object" then error("teagramd environment must be an object") else
         .services[env.ROLLOUT_COMPOSE_SERVICE // "teagramd"].environment |= del(
           .TG_REPLICA_COUNT, .TG_CLIENT_ADDR_TRUST,

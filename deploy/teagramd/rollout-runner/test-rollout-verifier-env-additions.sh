@@ -815,7 +815,8 @@ if [ "$(id -u)" = 0 ]; then
   chown 65532:65532 "$media_key_source" "$media_key_source/1.key"
 fi
 media_key_compose=$(jq -c --arg source "$media_key_source" '
-  .services.teagramd.environment.TG_MEDIA_KEY_DIR="/run/teagramd/media-keys"
+  .["x-media-keys"]={environment:{TG_MEDIA_KEY_DIR:"/run/teagramd/media-keys",TG_MEDIA_KEY_CURRENT:"1"}}
+  | .services.teagramd.environment.TG_MEDIA_KEY_DIR="/run/teagramd/media-keys"
   | .services.teagramd.environment.TG_MEDIA_KEY_CURRENT="1"
   | .services.teagramd.volumes += [{
       type:"bind",source:$source,target:"/run/teagramd/media-keys",read_only:true,
@@ -841,6 +842,7 @@ media_key_target=$(snapshot_from_json \
 [ "$(jq -r '.media_key_source' <<< "$media_key_target")" = "$media_key_source" ]
 [ "$(jq -r '.media_key_current' <<< "$media_key_target")" = 1 ]
 [ "$(jq -r '.config_sha256' <<< "$media_key_baseline")" = "$(jq -r '.config_sha256' <<< "$media_key_target")" ]
+printf '%s\n' 'PASS Compose extension anchors do not change the resolved runtime digest'
 [ "$(jq -r '.mounts_sha256' <<< "$media_key_baseline")" = "$(jq -r '.mounts_sha256' <<< "$media_key_target")" ]
 [ "$(jq -r '.container_env_sha256' <<< "$media_key_baseline")" = "$(jq -r '.container_env_sha256' <<< "$media_key_target")" ]
 media_key_normalized_compose=$(jq -c '
