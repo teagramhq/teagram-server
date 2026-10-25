@@ -131,6 +131,8 @@ class InspectComposeSelectionTest(unittest.TestCase):
         target = copy.deepcopy(source)
         target["server_mounts"].append(media_mount)
         target["persistent_service_mounts"]["teagramd"].append(media_mount)
+        compose_media_mount = copy.deepcopy(media_mount)
+        compose_media_mount["bind"] = {}
         target_config = {
             "name": "teagram",
             "services": {
@@ -139,7 +141,7 @@ class InspectComposeSelectionTest(unittest.TestCase):
                         "TG_MEDIA_KEY_DIR": "/run/teagramd/media-keys",
                         "TG_MEDIA_KEY_CURRENT": "1",
                     },
-                    "volumes": [media_mount],
+                    "volumes": [compose_media_mount],
                 },
             },
         }
@@ -160,12 +162,30 @@ class InspectComposeSelectionTest(unittest.TestCase):
         wrong_version_config = copy.deepcopy(target_config)
         wrong_version_config["services"]["teagramd"]["environment"]["TG_MEDIA_KEY_CURRENT"] = "2"
         self.assertTrue(runner.ordinary_rollout_layout_changed(source, target, wrong_version_config))
+        host_path_creating_target = copy.deepcopy(target)
+        host_path_creating_target["server_mounts"][-1]["bind"]["create_host_path"] = True
+        host_path_creating_target["persistent_service_mounts"]["teagramd"][-1]["bind"][
+            "create_host_path"
+        ] = True
         host_path_creating_config = copy.deepcopy(target_config)
         host_path_creating_config["services"]["teagramd"]["volumes"][0]["bind"]["create_host_path"] = True
-        self.assertTrue(runner.ordinary_rollout_layout_changed(source, target, host_path_creating_config))
+        self.assertTrue(
+            runner.ordinary_rollout_layout_changed(
+                source, host_path_creating_target, host_path_creating_config,
+            )
+        )
+        unexpected_bind_target = copy.deepcopy(target)
+        unexpected_bind_target["server_mounts"][-1]["bind"]["propagation"] = "rprivate"
+        unexpected_bind_target["persistent_service_mounts"]["teagramd"][-1]["bind"][
+            "propagation"
+        ] = "rprivate"
         unexpected_bind_option = copy.deepcopy(target_config)
         unexpected_bind_option["services"]["teagramd"]["volumes"][0]["bind"]["propagation"] = "rprivate"
-        self.assertTrue(runner.ordinary_rollout_layout_changed(source, target, unexpected_bind_option))
+        self.assertTrue(
+            runner.ordinary_rollout_layout_changed(
+                source, unexpected_bind_target, unexpected_bind_option,
+            )
+        )
         alternate_source_target = copy.deepcopy(target)
         alternate_source_config = copy.deepcopy(target_config)
         alternate_source_target["server_mounts"][-1]["source"] = "/var/lib/teagram/media-keys"
@@ -508,7 +528,7 @@ class InspectComposeSelectionTest(unittest.TestCase):
                 "source": "/etc/teagramd/media-keys",
                 "target": "/run/teagramd/media-keys",
                 "read_only": True,
-                "bind": {"create_host_path": False},
+                "bind": {},
             }
             target_config = copy.deepcopy(base_config)
             target_config["services"]["teagramd"]["environment"] = {

@@ -512,12 +512,6 @@ def ordinary_rollout_layout_changed(
     if current_version != "1":
         return True
 
-    media_mounts = [
-        mount for mount in volumes
-        if isinstance(mount, dict) and mount.get("target") == "/run/teagramd/media-keys"
-    ]
-    if media_mounts != [MEDIA_KEY_MOUNT]:
-        return True
     return layout_changed(source, target)
 
 
