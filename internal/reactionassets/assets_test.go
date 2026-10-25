@@ -46,6 +46,7 @@ func TestReactionAssets(t *testing.T) {
 	}
 
 	staticFiles := make(map[string]struct{}, len(manifest))
+	centerFiles := make(map[string]struct{}, len(manifest))
 	tgsFiles := make(map[string]struct{}, len(manifest))
 	emojis := make(map[string]struct{}, len(manifest))
 	for i, entry := range manifest {
@@ -65,12 +66,15 @@ func TestReactionAssets(t *testing.T) {
 			t.Fatalf("duplicate WebP mapping for %q", entry.Emoji)
 		}
 		staticFiles[stem+".webp"] = struct{}{}
+		centerFiles[stem+".webp"] = struct{}{}
 		tgsFiles[stem+".tgs"] = struct{}{}
 
 		checkWebP(t, filepath.Join("static", stem+".webp"))
+		checkWebP(t, filepath.Join("center", stem+".webp"))
 		checkTGS(t, filepath.Join("tgs", stem+".tgs"))
 	}
 	checkDirectory(t, "static", staticFiles)
+	checkDirectory(t, "center", centerFiles)
 	checkDirectory(t, "tgs", tgsFiles)
 }
 

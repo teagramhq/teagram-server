@@ -45,6 +45,10 @@ func TestGetAvailableReactionsReturnsStableStandardDocuments(t *testing.T) {
 	if first.Hash == 0 {
 		t.Fatal("available reactions hash is zero")
 	}
+	const previousPaddedReactionCatalogHash = 303018940
+	if first.Hash != previousPaddedReactionCatalogHash {
+		t.Errorf("available reactions hash = %d, want prior center-icon hash %d", first.Hash, previousPaddedReactionCatalogHash)
+	}
 	if len(first.Reactions) != len(wantEmoticons) {
 		t.Fatalf("available reactions = %d, want %d", len(first.Reactions), len(wantEmoticons))
 	}
@@ -65,8 +69,10 @@ func TestGetAvailableReactionsReturnsStableStandardDocuments(t *testing.T) {
 		center, ok := reaction.GetCenterIcon()
 		if !ok {
 			t.Errorf("reaction %q has no center_icon", want)
-		} else if got := requireReactionDocument(t, center, want, "image/webp", ".webp"); !sameReactionDocument(got, static) {
-			t.Errorf("reaction %q center_icon is not its static WebP document", want)
+		} else if got := requireReactionDocument(t, center, want, "image/webp", ".webp"); got.ID != -int64(2*len(wantEmoticons)+i+1) {
+			t.Errorf("reaction %q center_icon id = %d, want historical id %d", want, got.ID, -int64(2*len(wantEmoticons)+i+1))
+		} else if i == 0 && got.AccessHash != 5531608559122588618 {
+			t.Errorf("first center_icon access_hash = %d, want historical hash 5531608559122588618", got.AccessHash)
 		}
 
 		animation := requireReactionDocument(t, reaction.AppearAnimation, want, "application/x-tgsticker", ".tgs")
@@ -204,6 +210,10 @@ func TestAvailableReactionDocumentsDownloadForAnySignedInUser(t *testing.T) {
 		if reaction.Reaction != entry.Emoji {
 			t.Fatalf("reaction %d = %q, asset manifest emoji = %q", i, reaction.Reaction, entry.Emoji)
 		}
+		centerIcon, ok := reaction.GetCenterIcon()
+		if !ok {
+			t.Fatalf("reaction %q has no center_icon", reaction.Reaction)
+		}
 		assetStem := strings.TrimSuffix(entry.SVG, ".svg")
 		for _, item := range []struct {
 			class     tg.DocumentClass
@@ -212,6 +222,7 @@ func TestAvailableReactionDocumentsDownloadForAnySignedInUser(t *testing.T) {
 			extension string
 		}{
 			{reaction.StaticIcon, "static", "image/webp", ".webp"},
+			{centerIcon, "center", "image/webp", ".webp"},
 			{reaction.AppearAnimation, "tgs", "application/x-tgsticker", ".tgs"},
 		} {
 			document := requireReactionDocument(t, item.class, reaction.Reaction, item.mimeType, item.extension)

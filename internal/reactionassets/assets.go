@@ -7,7 +7,7 @@ import (
 
 // Files embeds the pinned reaction artwork in the server binary.
 //
-//go:embed manifest.json static/*.webp tgs/*.tgs
+//go:embed manifest.json static/*.webp center/*.webp tgs/*.tgs
 var Files embed.FS
 
 // Entry maps one standard reaction to its Twemoji source asset name.
