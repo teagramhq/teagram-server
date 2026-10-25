@@ -1276,6 +1276,7 @@ func (h *handlers) channelHistory(r *mtproto.Request, channelID int64, req *tg.M
 		channelID,
 		r.UserID,
 		int64(req.OffsetID),
+		int64(req.OffsetDate),
 		int64(req.AddOffset),
 		int64(req.MaxID),
 		int64(req.MinID),

@@ -232,8 +232,28 @@ func TestChannelHistoryWithOffsetUsesOrdinalAnchor(t *testing.T) {
 	for i := int64(1); i <= 30; i++ {
 		post(t, s, ch, author.ID, "post", i)
 	}
+	for localID := int64(1); localID <= 31; localID++ {
+		date := time.Unix(1_700_000_000+(localID-1)*60, 0).UTC()
+		if _, err := store.StorePool(s).Exec(ctx,
+			`UPDATE channel_messages SET date = $1 WHERE channel_id = $2 AND local_id = $3`, date, ch, localID); err != nil {
+			t.Fatalf("set date for channel post %d: %v", localID, err)
+		}
+	}
 
-	history, count, err := s.ChannelHistoryWithOffset(ctx, ch, author.ID, 20, 0, 0, 0, 10)
+	history, count, err := s.ChannelHistoryWithOffset(ctx, ch, author.ID, 0, time.Unix(1_700_001_140, 0).Unix(), -10, 0, 0, 10)
+	if err != nil {
+		t.Fatalf("history around date: %v", err)
+	}
+	if count != 31 || len(history) != 10 {
+		t.Fatalf("history around date count=%d rows=%d, want 31 and 10", count, len(history))
+	}
+	for i, msg := range history {
+		if want := int64(29 - i); msg.LocalID != want {
+			t.Fatalf("history around date row %d has local_id %d, want %d", i, msg.LocalID, want)
+		}
+	}
+
+	history, count, err = s.ChannelHistoryWithOffset(ctx, ch, author.ID, 20, 0, 0, 0, 0, 10)
 	if err != nil {
 		t.Fatalf("history at offset 20: %v", err)
 	}
@@ -249,7 +269,7 @@ func TestChannelHistoryWithOffsetUsesOrdinalAnchor(t *testing.T) {
 		}
 	}
 
-	history, count, err = s.ChannelHistoryWithOffset(ctx, ch, author.ID, 20, 1, 0, 0, 10)
+	history, count, err = s.ChannelHistoryWithOffset(ctx, ch, author.ID, 20, 0, 1, 0, 0, 10)
 	if err != nil {
 		t.Fatalf("history after offset 20: %v", err)
 	}
@@ -265,7 +285,7 @@ func TestChannelHistoryWithOffsetUsesOrdinalAnchor(t *testing.T) {
 		}
 	}
 
-	history, count, err = s.ChannelHistoryWithOffset(ctx, ch, author.ID, 20, -10, 0, 0, 10)
+	history, count, err = s.ChannelHistoryWithOffset(ctx, ch, author.ID, 20, 0, -10, 0, 0, 10)
 	if err != nil {
 		t.Fatalf("history around offset 20: %v", err)
 	}
@@ -284,7 +304,7 @@ func TestChannelHistoryWithOffsetUsesOrdinalAnchor(t *testing.T) {
 	if err := store.SetChannelPostDeleted(ctx, s, ch, 2); err != nil {
 		t.Fatalf("delete channel post: %v", err)
 	}
-	_, count, err = s.ChannelHistoryWithOffset(ctx, ch, author.ID, 0, 0, 0, 0, 10)
+	_, count, err = s.ChannelHistoryWithOffset(ctx, ch, author.ID, 0, 0, 0, 0, 0, 10)
 	if err != nil {
 		t.Fatalf("history after delete: %v", err)
 	}
@@ -307,7 +327,7 @@ func TestChannelHistoryCountWithoutActiveCreateServiceEntry(t *testing.T) {
 		t.Fatalf("delete channel creation entry: %v", err)
 	}
 
-	history, count, err := s.ChannelHistoryWithOffset(ctx, ch, author.ID, 0, 0, 0, 0, 10)
+	history, count, err := s.ChannelHistoryWithOffset(ctx, ch, author.ID, 0, 0, 0, 0, 0, 10)
 	if err != nil {
 		t.Fatalf("channel history: %v", err)
 	}

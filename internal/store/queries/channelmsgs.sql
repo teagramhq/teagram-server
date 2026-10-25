@@ -343,6 +343,125 @@ WHERE (sqlc.arg(max_id)::bigint <= 0 OR local_id < sqlc.arg(max_id)::bigint)
   AND (sqlc.arg(min_id)::bigint <= 0 OR local_id > sqlc.arg(min_id)::bigint)
 ORDER BY local_id DESC;
 
+-- ChannelHistoryPageByDate resolves the date to the closest visible history
+-- boundary, then seeks by local_id for the add_offset and result page.
+-- name: ChannelHistoryPageByDate :many
+WITH history_tail AS MATERIALIZED (
+    SELECT cm.local_id
+    FROM channel_messages cm
+    JOIN channel_participants cp
+      ON cp.channel_id = cm.channel_id
+     AND cp.user_id = sqlc.arg(owner_id)::bigint
+    WHERE cm.channel_id = sqlc.arg(channel_id)::bigint
+      AND cm.deleted = false
+      AND (cm.expires_at IS NULL OR cm.expires_at > statement_timestamp())
+      AND cm.local_id > cp.available_min_id
+      AND (cp.banned_until IS NULL OR cp.banned_until <= now())
+      AND EXISTS (
+          SELECT 1 FROM channels c
+          WHERE c.id = sqlc.arg(channel_id)::bigint AND c.deleted_at IS NULL
+      )
+    ORDER BY cm.local_id DESC
+    LIMIT 1
+), date_anchor AS MATERIALIZED (
+    SELECT cm.local_id
+    FROM channel_messages cm
+    JOIN channel_participants cp
+      ON cp.channel_id = cm.channel_id
+     AND cp.user_id = sqlc.arg(owner_id)::bigint
+    WHERE cm.channel_id = sqlc.arg(channel_id)::bigint
+      AND cm.deleted = false
+      AND (cm.expires_at IS NULL OR cm.expires_at > statement_timestamp())
+      AND cm.local_id > cp.available_min_id
+      AND (cp.banned_until IS NULL OR cp.banned_until <= now())
+      AND cm.date >= to_timestamp(sqlc.arg(offset_date)::bigint::double precision)
+      AND EXISTS (
+          SELECT 1 FROM channels c
+          WHERE c.id = sqlc.arg(channel_id)::bigint AND c.deleted_at IS NULL
+      )
+    ORDER BY cm.date, cm.local_id
+    LIMIT 1
+), cursor AS MATERIALIZED (
+    SELECT COALESCE(
+        (SELECT local_id FROM date_anchor),
+        (SELECT local_id + 1 FROM history_tail)
+    ) AS local_id
+), page_start AS (
+    SELECT CASE
+        WHEN sqlc.arg(add_offset)::bigint < 0 THEN COALESCE(
+            (
+                SELECT cm.local_id
+                FROM channel_messages cm
+                JOIN channel_participants cp
+                  ON cp.channel_id = cm.channel_id
+                 AND cp.user_id = sqlc.arg(owner_id)::bigint
+                WHERE cm.channel_id = sqlc.arg(channel_id)::bigint
+                  AND cm.deleted = false
+                  AND (cm.expires_at IS NULL OR cm.expires_at > statement_timestamp())
+                  AND cm.local_id > cp.available_min_id
+                  AND (cp.banned_until IS NULL OR cp.banned_until <= now())
+                  AND cm.local_id >= (SELECT local_id FROM cursor)
+                  AND EXISTS (
+                      SELECT 1 FROM channels c
+                      WHERE c.id = sqlc.arg(channel_id)::bigint AND c.deleted_at IS NULL
+                  )
+                ORDER BY cm.local_id
+                LIMIT 1
+                OFFSET GREATEST(0::bigint, 0::bigint - sqlc.arg(add_offset)::bigint - 1)
+            ),
+            (SELECT local_id FROM history_tail)
+        )
+        ELSE (
+            SELECT cm.local_id
+            FROM channel_messages cm
+            JOIN channel_participants cp
+              ON cp.channel_id = cm.channel_id
+             AND cp.user_id = sqlc.arg(owner_id)::bigint
+            WHERE cm.channel_id = sqlc.arg(channel_id)::bigint
+              AND cm.deleted = false
+              AND (cm.expires_at IS NULL OR cm.expires_at > statement_timestamp())
+              AND cm.local_id > cp.available_min_id
+              AND (cp.banned_until IS NULL OR cp.banned_until <= now())
+              AND cm.local_id < (SELECT local_id FROM cursor)
+              AND EXISTS (
+                  SELECT 1 FROM channels c
+                  WHERE c.id = sqlc.arg(channel_id)::bigint AND c.deleted_at IS NULL
+              )
+            ORDER BY cm.local_id DESC
+            LIMIT 1
+            OFFSET sqlc.arg(add_offset)::bigint
+        )
+    END AS local_id
+), page AS (
+    SELECT cm.channel_id, cm.local_id, cm.from_id, cm.date, cm.message, cm.edit_date, cm.deleted,
+           cm.random_id, cm.grouped_id, cm.file_id, cm.sticker_document_id, cm.reply_to_msg_id,
+           cm.action_type, cm.ttl_period, cm.post_author, cm.entities
+    FROM channel_messages cm
+    JOIN channel_participants cp
+      ON cp.channel_id = cm.channel_id
+     AND cp.user_id = sqlc.arg(owner_id)::bigint
+    CROSS JOIN page_start
+    WHERE cm.channel_id = sqlc.arg(channel_id)::bigint
+      AND cm.deleted = false
+      AND (cm.expires_at IS NULL OR cm.expires_at > statement_timestamp())
+      AND cm.local_id > cp.available_min_id
+      AND (cp.banned_until IS NULL OR cp.banned_until <= now())
+      AND cm.local_id <= page_start.local_id
+      AND EXISTS (
+          SELECT 1 FROM channels c
+          WHERE c.id = sqlc.arg(channel_id)::bigint AND c.deleted_at IS NULL
+      )
+    ORDER BY cm.local_id DESC
+    LIMIT sqlc.arg(lim)::int
+)
+SELECT channel_id, local_id, from_id, date, message, edit_date, deleted,
+       random_id, grouped_id, file_id, sticker_document_id, reply_to_msg_id,
+       action_type, ttl_period, post_author, entities
+FROM page
+WHERE (sqlc.arg(max_id)::bigint <= 0 OR local_id < sqlc.arg(max_id)::bigint)
+  AND (sqlc.arg(min_id)::bigint <= 0 OR local_id > sqlc.arg(min_id)::bigint)
+ORDER BY local_id DESC;
+
 -- name: CountChannelHistory :one
 SELECT count(*)::bigint
 FROM channel_messages cm

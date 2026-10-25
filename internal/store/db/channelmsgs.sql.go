@@ -300,6 +300,200 @@ func (q *Queries) ChannelHistoryPageAround(ctx context.Context, arg ChannelHisto
 	return items, nil
 }
 
+const channelHistoryPageByDate = `-- name: ChannelHistoryPageByDate :many
+WITH history_tail AS MATERIALIZED (
+    SELECT cm.local_id
+    FROM channel_messages cm
+    JOIN channel_participants cp
+      ON cp.channel_id = cm.channel_id
+     AND cp.user_id = $3::bigint
+    WHERE cm.channel_id = $4::bigint
+      AND cm.deleted = false
+      AND (cm.expires_at IS NULL OR cm.expires_at > statement_timestamp())
+      AND cm.local_id > cp.available_min_id
+      AND (cp.banned_until IS NULL OR cp.banned_until <= now())
+      AND EXISTS (
+          SELECT 1 FROM channels c
+          WHERE c.id = $4::bigint AND c.deleted_at IS NULL
+      )
+    ORDER BY cm.local_id DESC
+    LIMIT 1
+), date_anchor AS MATERIALIZED (
+    SELECT cm.local_id
+    FROM channel_messages cm
+    JOIN channel_participants cp
+      ON cp.channel_id = cm.channel_id
+     AND cp.user_id = $3::bigint
+    WHERE cm.channel_id = $4::bigint
+      AND cm.deleted = false
+      AND (cm.expires_at IS NULL OR cm.expires_at > statement_timestamp())
+      AND cm.local_id > cp.available_min_id
+      AND (cp.banned_until IS NULL OR cp.banned_until <= now())
+      AND cm.date >= to_timestamp($5::bigint::double precision)
+      AND EXISTS (
+          SELECT 1 FROM channels c
+          WHERE c.id = $4::bigint AND c.deleted_at IS NULL
+      )
+    ORDER BY cm.date, cm.local_id
+    LIMIT 1
+), cursor AS MATERIALIZED (
+    SELECT COALESCE(
+        (SELECT local_id FROM date_anchor),
+        (SELECT local_id + 1 FROM history_tail)
+    ) AS local_id
+), page_start AS (
+    SELECT CASE
+        WHEN $6::bigint < 0 THEN COALESCE(
+            (
+                SELECT cm.local_id
+                FROM channel_messages cm
+                JOIN channel_participants cp
+                  ON cp.channel_id = cm.channel_id
+                 AND cp.user_id = $3::bigint
+                WHERE cm.channel_id = $4::bigint
+                  AND cm.deleted = false
+                  AND (cm.expires_at IS NULL OR cm.expires_at > statement_timestamp())
+                  AND cm.local_id > cp.available_min_id
+                  AND (cp.banned_until IS NULL OR cp.banned_until <= now())
+                  AND cm.local_id >= (SELECT local_id FROM cursor)
+                  AND EXISTS (
+                      SELECT 1 FROM channels c
+                      WHERE c.id = $4::bigint AND c.deleted_at IS NULL
+                  )
+                ORDER BY cm.local_id
+                LIMIT 1
+                OFFSET GREATEST(0::bigint, 0::bigint - $6::bigint - 1)
+            ),
+            (SELECT local_id FROM history_tail)
+        )
+        ELSE (
+            SELECT cm.local_id
+            FROM channel_messages cm
+            JOIN channel_participants cp
+              ON cp.channel_id = cm.channel_id
+             AND cp.user_id = $3::bigint
+            WHERE cm.channel_id = $4::bigint
+              AND cm.deleted = false
+              AND (cm.expires_at IS NULL OR cm.expires_at > statement_timestamp())
+              AND cm.local_id > cp.available_min_id
+              AND (cp.banned_until IS NULL OR cp.banned_until <= now())
+              AND cm.local_id < (SELECT local_id FROM cursor)
+              AND EXISTS (
+                  SELECT 1 FROM channels c
+                  WHERE c.id = $4::bigint AND c.deleted_at IS NULL
+              )
+            ORDER BY cm.local_id DESC
+            LIMIT 1
+            OFFSET $6::bigint
+        )
+    END AS local_id
+), page AS (
+    SELECT cm.channel_id, cm.local_id, cm.from_id, cm.date, cm.message, cm.edit_date, cm.deleted,
+           cm.random_id, cm.grouped_id, cm.file_id, cm.sticker_document_id, cm.reply_to_msg_id,
+           cm.action_type, cm.ttl_period, cm.post_author, cm.entities
+    FROM channel_messages cm
+    JOIN channel_participants cp
+      ON cp.channel_id = cm.channel_id
+     AND cp.user_id = $3::bigint
+    CROSS JOIN page_start
+    WHERE cm.channel_id = $4::bigint
+      AND cm.deleted = false
+      AND (cm.expires_at IS NULL OR cm.expires_at > statement_timestamp())
+      AND cm.local_id > cp.available_min_id
+      AND (cp.banned_until IS NULL OR cp.banned_until <= now())
+      AND cm.local_id <= page_start.local_id
+      AND EXISTS (
+          SELECT 1 FROM channels c
+          WHERE c.id = $4::bigint AND c.deleted_at IS NULL
+      )
+    ORDER BY cm.local_id DESC
+    LIMIT $7::int
+)
+SELECT channel_id, local_id, from_id, date, message, edit_date, deleted,
+       random_id, grouped_id, file_id, sticker_document_id, reply_to_msg_id,
+       action_type, ttl_period, post_author, entities
+FROM page
+WHERE ($1::bigint <= 0 OR local_id < $1::bigint)
+  AND ($2::bigint <= 0 OR local_id > $2::bigint)
+ORDER BY local_id DESC
+`
+
+type ChannelHistoryPageByDateParams struct {
+	MaxID      int64
+	MinID      int64
+	OwnerID    int64
+	ChannelID  int64
+	OffsetDate int64
+	AddOffset  int64
+	Lim        int32
+}
+
+type ChannelHistoryPageByDateRow struct {
+	ChannelID         int64
+	LocalID           int64
+	FromID            int64
+	Date              pgtype.Timestamptz
+	Message           string
+	EditDate          pgtype.Timestamptz
+	Deleted           bool
+	RandomID          int64
+	GroupedID         *int64
+	FileID            *int64
+	StickerDocumentID *int64
+	ReplyToMsgID      *int32
+	ActionType        int16
+	TtlPeriod         int32
+	PostAuthor        *string
+	Entities          []byte
+}
+
+// ChannelHistoryPageByDate resolves the date to the closest visible history
+// boundary, then seeks by local_id for the add_offset and result page.
+func (q *Queries) ChannelHistoryPageByDate(ctx context.Context, arg ChannelHistoryPageByDateParams) ([]ChannelHistoryPageByDateRow, error) {
+	rows, err := q.db.Query(ctx, channelHistoryPageByDate,
+		arg.MaxID,
+		arg.MinID,
+		arg.OwnerID,
+		arg.ChannelID,
+		arg.OffsetDate,
+		arg.AddOffset,
+		arg.Lim,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ChannelHistoryPageByDateRow
+	for rows.Next() {
+		var i ChannelHistoryPageByDateRow
+		if err := rows.Scan(
+			&i.ChannelID,
+			&i.LocalID,
+			&i.FromID,
+			&i.Date,
+			&i.Message,
+			&i.EditDate,
+			&i.Deleted,
+			&i.RandomID,
+			&i.GroupedID,
+			&i.FileID,
+			&i.StickerDocumentID,
+			&i.ReplyToMsgID,
+			&i.ActionType,
+			&i.TtlPeriod,
+			&i.PostAuthor,
+			&i.Entities,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const channelHistoryPageWithOffset = `-- name: ChannelHistoryPageWithOffset :many
 WITH page AS (
     SELECT cm.channel_id, cm.local_id, cm.from_id, cm.date, cm.message, cm.edit_date, cm.deleted,
