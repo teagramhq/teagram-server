@@ -57,7 +57,10 @@ docker compose --profile migration run --rm blob-key-rotate
 
 The image includes `blob-key-rotate`; the service reads the encrypted authority
 and media keys read-only and persists its journal under
-`/run/teagramd/reports/blob-key-rotation.jsonl`. Optional flags are
+`/run/teagramd/reports/blob-key-rotation.jsonl` in the dedicated Compose volume
+`teagram_blob_key_rotate_reports`. Find the volume's host mountpoint with
+`docker volume inspect --format '{{ .Mountpoint }}' teagram_blob_key_rotate_reports`
+to read the journal. Optional flags are
 `--target-version N`, `--rewrite`, and `--progress PATH`. If omitted, the target
 is the configured current version and the journal uses that default path.
 

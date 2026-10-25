@@ -22,6 +22,9 @@ from collections.abc import Iterator
 
 MODE_TARGET = "/run/teagramd/blob-mode"
 BLOB_TARGET = "/var/lib/teagramd-blobs"
+REPORT_TARGET = "/run/teagramd/reports"
+KEY_ROTATION_REPORT_VOLUME = "blob_key_rotate_reports"
+KEY_ROTATION_REPORT_VOLUME_NAME = "teagram_blob_key_rotate_reports"
 MOVED_BLOB_TARGET = "/var/lib/telegramd-blobs"
 KEY_TARGET = "/var/lib/teagramd"
 PGDATA_TARGET = "/var/lib/postgresql/data"
@@ -661,7 +664,7 @@ def validate_encryption_migration_service(
         if not isinstance(mount, dict):
             reject("mode-mount-helper")
         target = mount.get("target")
-        if target == "/run/teagramd/reports":
+        if target == REPORT_TARGET:
             if mount.get("type") != "bind" or mount.get("read_only", False) is True:
                 reject("mode-mount-helper")
             report_mounts.append(mount)
@@ -741,8 +744,12 @@ def validate_key_rotation_service(
         if not isinstance(mount, dict):
             reject("mode-mount-helper")
         target = mount.get("target")
-        if target == "/run/teagramd/reports":
-            if mount.get("type") != "bind" or mount.get("read_only", False) is True:
+        if target == REPORT_TARGET:
+            if (
+                mount.get("type") != "volume"
+                or mount.get("source") != KEY_ROTATION_REPORT_VOLUME
+                or mount.get("read_only", False) is True
+            ):
                 reject("mode-mount-helper")
             report_mounts.append(mount)
         elif target == MODE_TARGET:
@@ -750,6 +757,20 @@ def validate_key_rotation_service(
         elif mount.get("read_only", False) is not True:
             reject("mode-mount-helper")
     if len(report_mounts) != 1:
+        reject("mode-mount-helper")
+    declared_volumes = compose.get("volumes")
+    report_volume = (
+        declared_volumes.get(KEY_ROTATION_REPORT_VOLUME)
+        if isinstance(declared_volumes, dict)
+        else None
+    )
+    if (
+        not isinstance(report_volume, dict)
+        or report_volume.get("name") != KEY_ROTATION_REPORT_VOLUME_NAME
+        or report_volume.get("external") not in (None, False)
+        or report_volume.get("driver") not in (None, "local")
+        or report_volume.get("driver_opts") not in (None, {})
+    ):
         reject("mode-mount-helper")
 
     rotation_environment = raw_environment_map(service.get("environment", {}), True)

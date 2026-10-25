@@ -260,11 +260,7 @@ services:
         read_only: true
         bind:
           create_host_path: false
-      - type: bind
-        source: ${TEAGRAM_BLOB_MODE_REPORT_ROOT:-/root}
-        target: /run/teagramd/reports
-        bind:
-          create_host_path: false
+      - blob_key_rotate_reports:/run/teagramd/reports
       - type: bind
         source: ${TEAGRAM_MEDIA_KEY_SOURCE_DIR:-/etc/teagramd/media-keys}
         target: /run/teagramd/media-keys
@@ -417,6 +413,9 @@ volumes:
   # default S3 render mounts it read-only; the local overlay writes it.
   tgblobs:
   rustfsdata:
+  blob_key_rotate_reports:
+    name: teagram_blob_key_rotate_reports
+    driver: local
 
 networks:
   # `internal` blocks external routing from attached containers. The isolated

@@ -1015,7 +1015,8 @@ class BlobModeStateTests(unittest.TestCase):
                 "type": "bind", "source": str(authority_source),
                 "target": blob_mode.MODE_TARGET, "read_only": True,
             }, {
-                "type": "bind", "source": "/root", "target": "/run/teagramd/reports",
+                "type": "volume", "source": blob_mode.KEY_ROTATION_REPORT_VOLUME,
+                "target": blob_mode.REPORT_TARGET,
             }, {
                 "type": "volume", "source": "tgkey", "target": "/var/lib/teagramd", "read_only": True,
             }, {
@@ -1039,6 +1040,9 @@ class BlobModeStateTests(unittest.TestCase):
                 "tgblobs": {"name": "teagram_tgblobs"},
                 "rustfsdata": {"name": "teagram_rustfsdata"},
                 "tgkey": {"name": "teagram_tgkey"},
+                blob_mode.KEY_ROTATION_REPORT_VOLUME: {
+                    "name": blob_mode.KEY_ROTATION_REPORT_VOLUME_NAME,
+                },
             },
             "networks": {
                 "default": {"name": "teagram_default"},
@@ -1053,6 +1057,9 @@ class BlobModeStateTests(unittest.TestCase):
             ("missing authority", lambda item: item["volumes"].pop(0)),
             ("writable authority", lambda item: item["volumes"][0].update(read_only=False)),
             ("wrong entrypoint", lambda item: item.update(entrypoint=["/bin/sh"])),
+            ("host-wide reports bind", lambda item: item["volumes"][1].update(
+                type="bind", source="/root",
+            )),
             ("unbounded writable mount", lambda item: item["volumes"].append({
                 "type": "bind", "source": "/tmp", "target": "/tmp",
             })),
@@ -1064,6 +1071,15 @@ class BlobModeStateTests(unittest.TestCase):
                     lambda: blob_mode.compose_inventory(candidate, checkout),
                     "mode-mount-helper",
                 )
+
+        candidate = json.loads(json.dumps(compose))
+        candidate["volumes"][blob_mode.KEY_ROTATION_REPORT_VOLUME]["driver_opts"] = {
+            "type": "none", "o": "bind", "device": "/root",
+        }
+        self.assert_rejects(
+            lambda: blob_mode.compose_inventory(candidate, checkout),
+            "mode-mount-helper",
+        )
 
     def test_missing_proxy_guard_rejects_before_replacement(self) -> None:
         self.assert_rejects(
