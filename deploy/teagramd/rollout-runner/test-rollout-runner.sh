@@ -1940,8 +1940,9 @@ authority_fingerprint() {
 }
 
 show_fixture_failure() {
-  local name=$1 status=$2 root
+  local name=$1 status=$2 root checkout
   root=$(cat "$TMP/$name-root-path")
+  checkout=$(cat "$TMP/$name-checkout-path")
   printf 'fixture_failure=%s status=%s\nfixture_stdout:\n' "$name" "$status" >&2
   cat "$TMP/$name.stdout" >&2
   printf 'fixture_stderr:\n' >&2
@@ -1957,6 +1958,19 @@ show_fixture_failure() {
   if [ -f "$root.rollback/rollback-equivalence.tsv" ]; then
     printf 'rollback_equivalence:\n' >&2
     cat "$root.rollback/rollback-equivalence.tsv" >&2
+  fi
+  if [ -f "$root.baseline/env-baseline.txt" ]; then
+    printf 'env_baseline:\n' >&2
+    cat "$root.baseline/env-baseline.txt" >&2
+  fi
+  if [ -f "$root.target/target.snapshot.json" ]; then
+    printf 'target_environment_evidence:\n' >&2
+    jq '{env_sha256,container_env_sha256,container_env_added,container_env_changed}' \
+      "$root.target/target.snapshot.json" >&2
+  fi
+  if [ -f "$checkout/.state/rollout-env" ]; then
+    printf 'recorded_environment:\n' >&2
+    cat "$checkout/.state/rollout-env" >&2
   fi
   printf 'fixture_events:\n' >&2
   cat "$TMP/$name-events" >&2

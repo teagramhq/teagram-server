@@ -298,6 +298,18 @@ if ! compare_snapshots \
 fi
 printf '%s\n' 'PASS named tailnet addition is value-checked and passes baseline-to-target comparison'
 
+: > "$ENV_FILE"
+empty_tailnet_rollback_inspect=$(jq -c '.Config.Env += ["TG_RATE_LIMIT_KEY_EXCHANGE_IP_TAILNET="]' \
+  <<< "$(inspect_json '')")
+empty_tailnet_rollback_compose=$(jq -c \
+  '.services.teagramd.environment.TG_RATE_LIMIT_KEY_EXCHANGE_IP_TAILNET=""' \
+  <<< "$COMPOSE_JSON")
+empty_tailnet_rollback=$(ROLLOUT_ADDED_ENV=TG_RATE_LIMIT_KEY_EXCHANGE_IP_TAILNET \
+  snapshot_from_json "$empty_tailnet_rollback_inspect" "$empty_tailnet_rollback_compose" \
+  "$ENV_FILE" "$OVERRIDE_FILE" selected-compose-render rollback)
+[ "$(jq -r '.container_env_added' <<< "$empty_tailnet_rollback")" = none ]
+printf '%s\n' 'PASS empty retained tailnet mapping does not block rollback of a named addition'
+
 if tailnet_limit_snapshot target 5 'TG_RATE_LIMIT_KEY_EXCHANGE_IP_TAILNET=0' added 0 \
   >/dev/null 2>"$TMP/tailnet-mismatch.err"; then
   printf '%s\n' 'FAIL mismatched tailnet addition was accepted' >&2
@@ -313,6 +325,7 @@ printf '%s\n' 'PASS retained tailnet values remain pinned in Compose and contain
 
 tailnet_changed_baseline=$(tailnet_limit_snapshot baseline 12 'TG_RATE_LIMIT_KEY_EXCHANGE_IP_TAILNET=0' changed 0)
 tailnet_changed_target=$(tailnet_limit_snapshot target 0 'TG_RATE_LIMIT_KEY_EXCHANGE_IP_TAILNET=0' changed 0)
+[ "$(jq -r '.container_env_changed' <<< "$tailnet_changed_target")" = TG_RATE_LIMIT_KEY_EXCHANGE_IP_TAILNET ]
 [ "$(jq -r '.container_env_sha256' <<< "$tailnet_changed_baseline")" = \
   "$(jq -r '.container_env_sha256' <<< "$tailnet_changed_target")" ]
 [ "$(jq -r '.config_sha256' <<< "$tailnet_changed_baseline")" = \

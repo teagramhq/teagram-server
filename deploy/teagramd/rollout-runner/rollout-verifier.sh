@@ -935,6 +935,7 @@ snapshot_from_json() {
         elif $name == "TEAGRAM_TURNSTILE_SECRET_KEY_FILE" then "TG_TURNSTILE_SECRET_KEY_FILE"
         else $name end;
       [(item.Config.Env // [])[] | select(type == "string")
+       | select(. != "TG_RATE_LIMIT_KEY_EXCHANGE_IP_TAILNET=")
        | select(IN(
            "TG_TURNSTILE_SITE_KEY=", "TG_TURNSTILE_SECRET_KEY_FILE=", "TG_TURNSTILE_SIGNIN_ENABLED=false",
            "TG_PUBLIC_WEBSOCKET_LISTEN_ADDR=", "TG_PUBLIC_WEBSOCKET_ADVERTISE_ADDR=",
