@@ -99,6 +99,7 @@ jq -e \
   and .secrets.teagram_demo_turnstile.file == $secretFile
   and .services.postgres.environment.PGDATA == "/var/lib/postgresql/18/docker"
   and .services.postgres.platform == "linux/amd64"
+  and .services.postgres.networks.backend.ipv4_address == "198.18.130.3"
   and (.services.postgres.mem_limit | tostring) == "335544320"
   and any(.services.postgres.volumes[]; (.source | endswith("/deploy/teagram-demo/postgresql.conf")) and .target == "/etc/postgresql/postgresql.conf" and .read_only)
   and .services.teagramd.image == "teagramd:local"
