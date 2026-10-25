@@ -729,6 +729,24 @@ class BlobModeStateTests(unittest.TestCase):
                     blob_mode.teagramd_environment_sha256(non_default),
                 )
 
+    def test_initial_local_logging_profile_is_checked_outside_blob_authority_hash(self) -> None:
+        baseline = {
+            "TG_RSA_KEY_PATH": blob_mode.IMAGE_ENV_DEFAULTS["TG_RSA_KEY_PATH"],
+            "TG_BLOB_DIR": blob_mode.BLOB_TARGET,
+            "TG_SYNTHETIC_FLAG": "fixture",
+        }
+        with_code_logging = {**baseline, "TG_LOG_LOGIN_CODES": "true"}
+        without_code_logging = {**baseline, "TG_LOG_LOGIN_CODES": "false"}
+        self.assertEqual(
+            blob_mode.teagramd_environment_sha256(with_code_logging),
+            blob_mode.teagramd_environment_sha256(without_code_logging),
+        )
+        with_unrelated_change = {**without_code_logging, "TG_SYNTHETIC_FLAG": "changed"}
+        self.assertNotEqual(
+            blob_mode.teagramd_environment_sha256(without_code_logging),
+            blob_mode.teagramd_environment_sha256(with_unrelated_change),
+        )
+
     def test_initial_local_inventory_accepts_live_telegramd_layout(self) -> None:
         # The live stack keeps its historical names until the stack move.
         self.assert_initial_local_inventory(
@@ -899,6 +917,77 @@ class BlobModeStateTests(unittest.TestCase):
                         ),
                         reason,
                     )
+
+    def test_encryption_migration_profile_has_only_the_exact_writable_authority_mount(self) -> None:
+        checkout = pathlib.Path(tempfile.mkdtemp())
+        authority_source = checkout / ".state" / "blob-mode"
+        authority_source.mkdir(parents=True)
+        shared_environment = {
+            "TG_BLOB_DIR": blob_mode.BLOB_TARGET,
+            "TG_BLOB_S3_ENDPOINT": "https://objects.example.test",
+            "TG_BLOB_S3_BUCKET": "teagram",
+            "TG_BLOB_S3_PREFIX": "teagramd/",
+            "TG_POSTGRES_DSN": "postgres://postgres:secret@postgres:5432/teagram",
+            "TG_AUTHKEY_ENC_KEY_FILE": "/var/lib/teagramd/enc_key.hex",
+            "TG_MEDIA_KEY_DIR": "/run/teagramd/media-keys",
+            "TG_MEDIA_KEY_CURRENT": "1",
+        }
+        service = {
+            "profiles": ["migration"],
+            "entrypoint": ["/usr/local/bin/blob-encrypt-migrate"],
+            "user": "0:0",
+            "read_only": True,
+            "environment": dict(shared_environment),
+            "networks": {"default": None, "rustfs_private": None},
+            "volumes": [{
+                "type": "bind", "source": str(authority_source),
+                "target": blob_mode.MODE_TARGET,
+            }, {
+                "type": "bind", "source": "/root", "target": "/run/teagramd/reports",
+            }, {
+                "type": "volume", "source": "tgkey", "target": "/var/lib/teagramd", "read_only": True,
+            }, {
+                "type": "bind", "source": "/etc/teagramd/media-keys",
+                "target": "/run/teagramd/media-keys", "read_only": True,
+            }],
+        }
+        compose = {
+            "services": {
+                "teagramd": {
+                    "environment": dict(shared_environment),
+                    "volumes": [
+                        {"type": "volume", "source": "tgblobs", "target": blob_mode.BLOB_TARGET, "read_only": True},
+                        {"type": "bind", "source": str(authority_source), "target": blob_mode.MODE_TARGET, "read_only": True},
+                    ],
+                    "networks": {"default": None, "rustfs_private": None},
+                },
+                "blob-encrypt-migrate": service,
+            },
+            "volumes": {
+                "tgblobs": {"name": "teagram_tgblobs"},
+                "rustfsdata": {"name": "teagram_rustfsdata"},
+                "tgkey": {"name": "teagram_tgkey"},
+            },
+            "networks": {
+                "default": {"name": "teagram_default"},
+                "rustfs_private": {"name": "teagram_rustfs_private"},
+            },
+        }
+        inventory = blob_mode.compose_inventory(compose, checkout)
+        self.assertEqual(inventory["services"][0]["backend"]["kind"], "s3")
+
+        for name, mutation in (
+            ("not profile-gated", lambda item: item.pop("profiles")),
+            ("read-only authority", lambda item: item["volumes"][0].update(read_only=True)),
+            ("wrong authority target", lambda item: item["volumes"][0].update(target="/tmp/blob-mode")),
+        ):
+            with self.subTest(name=name):
+                candidate = json.loads(json.dumps(compose))
+                mutation(candidate["services"]["blob-encrypt-migrate"])
+                self.assert_rejects(
+                    lambda: blob_mode.compose_inventory(candidate, checkout),
+                    "mode-mount-helper",
+                )
 
     def test_missing_proxy_guard_rejects_before_replacement(self) -> None:
         self.assert_rejects(
@@ -1563,6 +1652,122 @@ class BlobModeStateTests(unittest.TestCase):
                 records, head, mode_bytes = blob_mode.read_authority(state_dir, report_root)
             self.assertEqual(records[-1]["outcome"], "s3-accepted")
             self.assertEqual(records[-1]["evidence"]["copy_passes"], 1)
+            self.assertEqual(head, mode_bytes)
+
+    def test_encrypted_authority_accepts_only_a_verified_inventory_after_s3(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = pathlib.Path(temporary)
+            state_dir, report_root, lock_path = self.create_initial_authority(root)
+            with (
+                patch.object(blob_mode, "require_runner_lock"),
+                patch.object(blob_mode, "file_stat", side_effect=self.allow_unowned_private_files),
+                patch.object(blob_mode.os, "fchown"),
+                patch.object(blob_mode.os, "chown"),
+            ):
+                self.publish(state_dir, report_root, lock_path, root, "s3-accepted")
+                records, _, _ = blob_mode.read_authority(state_dir, report_root)
+                previous = records[-1]
+                transition_id = str(blob_mode.uuid.uuid4())
+                inventory = {
+                    "schema": blob_mode.ENCRYPTED_INVENTORY_SCHEMA,
+                    "encrypted": {"classes": {
+                        "valid_envelope": {"count": 3, "logical_bytes": 4096},
+                        "no_valid_envelope": {"count": 0},
+                        "missing": {"count": 0},
+                    }},
+                    "plaintext": {"classes": {}},
+                }
+                inventory_bytes = json.dumps(inventory, sort_keys=True, separators=(",", ":")).encode("utf-8")
+                inventory_sha = blob_mode.hashlib.sha256(inventory_bytes).hexdigest()
+                inventory_name = f"teagramd-blob-encryption-inventory-{transition_id}.json"
+                inventory_path = report_root / inventory_name
+                inventory_path.write_bytes(inventory_bytes)
+                inventory_path.chmod(0o600)
+                report_evidence = {
+                    "encrypted_inventory_sha256": inventory_sha,
+                    "object_count": 3,
+                    "byte_total": 4096,
+                    "key_version": 4,
+                    "writes": "drained",
+                }
+                report = {
+                    "schema": blob_mode.ENCRYPTED_REPORT_SCHEMA,
+                    "generation": 3,
+                    "transition_id": transition_id,
+                    "outcome": "encrypted",
+                    "backend": previous["backend"],
+                    "volumes": previous["volumes"],
+                    "evidence": report_evidence,
+                    "inventory_report": inventory_name,
+                }
+                report_bytes = json.dumps(report, sort_keys=True, separators=(",", ":")).encode("utf-8")
+                report_path = blob_mode.report_path(report_root, transition_id)
+                report_path.write_bytes(report_bytes)
+                report_path.chmod(0o600)
+                record = {
+                    "schema": blob_mode.SCHEMA,
+                    "generation": 3,
+                    "transition_id": transition_id,
+                    "supersedes": previous["transition_id"],
+                    "outcome": "encrypted",
+                    "backend": previous["backend"],
+                    "volumes": previous["volumes"],
+                    "evidence": {
+                        **report_evidence,
+                        "report_sha256": blob_mode.hashlib.sha256(report_bytes).hexdigest(),
+                    },
+                    "published_at": "2026-10-24T00:00:00Z",
+                }
+                valid = blob_mode.valid_outcome(record, 3, previous["transition_id"], "s3-accepted")
+                blob_mode.validate_report(report_root, valid, previous)
+                bad_inventory = dict(inventory)
+                bad_inventory["encrypted"] = {"classes": {
+                    "valid_envelope": {"count": 2, "logical_bytes": 4096},
+                    "no_valid_envelope": {"count": 0},
+                    "missing": {"count": 0},
+                }}
+                inventory_path.write_text(json.dumps(bad_inventory), encoding="utf-8")
+                with self.assertRaises(blob_mode.Reject):
+                    blob_mode.validate_report(report_root, valid, previous)
+                inventory_path.write_bytes(inventory_bytes)
+                self.assertTrue(blob_mode.expected_mount_read_only(valid))
+                mode_source = os.path.realpath(state_dir)
+                runtime = {
+                    "id": "c" * 64,
+                    "service": "teagramd",
+                    "backend": valid["backend"],
+                    "mode_mounts": blob_mode.guarded_mode_mounts("teagramd", mode_source),
+                    "tgblobs_mounts": [{
+                        "type": "volume", "name": valid["volumes"]["tgblobs"],
+                        "target": blob_mode.BLOB_TARGET, "rw": False,
+                    }],
+                    "network": {
+                        "mode": "networks",
+                        "networks": ["teagram_default", blob_mode.rustfs_private_network_name(valid)],
+                    },
+                }
+                rustfs = {
+                    "id": "d" * 64,
+                    "service": "rustfs",
+                    "ports": [],
+                    "network": {
+                        "mode": "networks",
+                        "networks": [blob_mode.rustfs_private_network_name(valid)],
+                    },
+                    "rustfs_mounts": [{
+                        "type": "volume", "name": valid["volumes"]["rustfsdata"],
+                        "target": "/data", "rw": True,
+                    }],
+                }
+                with patch.object(blob_mode, "docker_volume_exists"):
+                    blob_mode.assert_containers_match(
+                        {"containers": [runtime, rustfs]}, valid, mode_source
+                    )
+                record_bytes = json.dumps(record, sort_keys=True, separators=(",", ":")).encode("utf-8")
+                blob_mode.atomic_publish_state(state_dir, record_bytes, transition_id, 3)
+                final, head, mode_bytes = blob_mode.read_authority(state_dir, report_root)
+            self.assertEqual(final[-1]["outcome"], "encrypted")
+            self.assertEqual(final[-1]["evidence"]["key_version"], 4)
             self.assertEqual(head, mode_bytes)
 
     def test_simple_s3_transition_rejects_published_rustfs_port(self) -> None:

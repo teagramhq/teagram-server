@@ -38,13 +38,20 @@ services:
     build: .
     image: telegramd:local
     stop_grace_period: 120s
+    logging:
+      driver: syslog
+      options:
+        syslog-address: unixgram:///dev/log
+        syslog-facility: daemon
+        syslog-format: rfc5424
+        tag: teagramd
     environment:
       TG_POSTGRES_DSN: *dsn
       TG_PUBLIC_LINK_PREFIX: ${TG_PUBLIC_LINK_PREFIX:?set TG_PUBLIC_LINK_PREFIX in .env}
       TG_RSA_KEY_FINGERPRINT: ${TG_RSA_KEY_FINGERPRINT:-}
       TG_AUTHKEY_ENC_KEY: ${TG_AUTHKEY_ENC_KEY:-}
       TG_AUTHKEY_ENC_KEY_FILE: ${TG_AUTHKEY_ENC_KEY_FILE:-/var/lib/telegramd/enc_key.hex}
-      TG_LOG_LOGIN_CODES: ${TG_LOG_LOGIN_CODES:-true}
+      TG_LOG_LOGIN_CODES: "false"
       TG_REGISTRATION: ${TG_REGISTRATION:-closed}
       TG_REPLICA_ID: ${TG_REPLICA_ID:-}
       TG_REPLICA_COUNT: ${TG_REPLICA_COUNT:-1}

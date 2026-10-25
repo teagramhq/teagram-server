@@ -41,10 +41,14 @@ func TestPartPrefixHasOneBoundedWriter(t *testing.T) {
 	// added to a file already listed here is the likely shape of the change
 	// this pin exists to catch — a streaming part writer lands in
 	// internal/store/uploads.go, which is already a writer — so a file whose
-	// entry merely still matches must not read as unchanged.
+	// entry merely still matches must not read as unchanged. The encrypted
+	// migration adds a streaming envelope writer and its prefix-store backend;
+	// both map to encrypted/<key>, outside the root parts/ orphan scope.
 	want := map[string][]string{
 		"internal/api/media.go":             {"blob.Key(file.ID)", "key"},
 		"internal/blob/envelope.go":         {"key"},
+		"internal/blob/prefix.go":           {"physical"},
+		"internal/blobmigration/encrypt.go": {"ref.Key"},
 		"internal/blobmigration/migrate.go": {"entry.Key"},
 		"internal/store/uploads.go":         {"key"},
 	}

@@ -16,6 +16,7 @@ import (
 
 	"github.com/teagramhq/teagram-server/internal/blob"
 	"github.com/teagramhq/teagram-server/internal/blobinventory"
+	"github.com/teagramhq/teagram-server/internal/blobmode"
 	"github.com/teagramhq/teagram-server/internal/config"
 	"github.com/teagramhq/teagram-server/internal/store"
 )
@@ -42,6 +43,13 @@ func run(args []string, stdout, stderr io.Writer) (err error) {
 	defer stop()
 	quietLog := slog.New(slog.DiscardHandler)
 	cfg, err := config.LoadReadOnly(quietLog)
+	if err != nil {
+		return err
+	}
+	authority, err := blobmode.Read(blobmode.DefaultDirectory, blobmode.EffectiveConfig{
+		BlobDir: cfg.BlobDir,
+		BlobS3:  cfg.BlobS3,
+	})
 	if err != nil {
 		return err
 	}
@@ -84,7 +92,11 @@ func run(args []string, stdout, stderr io.Writer) (err error) {
 			LogicalBytes: ref.LogicalBytes,
 		}
 	}
-	report, err := blobinventory.Scan(ctx, blobs, cfg.MediaKeys, refs)
+	inventoryBlobs, err := inventoryStoreWithAuthority(blobs, authority)
+	if err != nil {
+		return err
+	}
+	report, err := blobinventory.Scan(ctx, inventoryBlobs, cfg.MediaKeys, refs)
 	if err != nil {
 		return err
 	}
@@ -92,6 +104,13 @@ func run(args []string, stdout, stderr io.Writer) (err error) {
 		return fmt.Errorf("write inventory report: %w", err)
 	}
 	return nil
+}
+
+func inventoryStoreWithAuthority(blobs blob.Store, authority blobmode.Authority) (blob.Store, error) {
+	if authority.Present && authority.Outcome == blobmode.OutcomeEncrypted {
+		return blob.NewPrefixedStore(blobs, blob.EncryptedObjectsPrefix)
+	}
+	return blobs, nil
 }
 
 func openBlobStore(ctx context.Context, cfg config.Config, log *slog.Logger) (blob.Store, func() error, error) {

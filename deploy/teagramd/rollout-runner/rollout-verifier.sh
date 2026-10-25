@@ -20,14 +20,14 @@ sha256_text() {
 
 approved_logging_transition() {
   case "$1:$2" in
-    default:default|syslog-v1:syslog-v1|default:syslog-v1) return 0 ;;
+    syslog-v1:syslog-v1|default:syslog-v1) return 0 ;;
     *) return 1 ;;
   esac
 }
 
 approved_login_code_logging_transition() {
   case "$1:$2" in
-    true:true|false:false|unset:unset|not-captured:not-captured|true:false) return 0 ;;
+    true:false|false:false|unset:false|not-captured:false) return 0 ;;
     *) return 1 ;;
   esac
 }
@@ -51,7 +51,7 @@ verify_added_container_environment() {
     .[0] as $inspect
     | .[1] as $compose
     | ($inspect | item | .Config.Env // []) as $container_env
-    | ($compose.services.teagramd.environment // null) as $compose_env
+    | ($compose.services[env.ROLLOUT_COMPOSE_SERVICE // "teagramd"].environment // null) as $compose_env
     | if ($container_env | type) != "array" or ($compose_env | type) != "object" then false else
         ($env_content | split("\n")) as $env_lines
         | all($added[];
@@ -103,7 +103,7 @@ verify_changed_container_environment() {
     .[0] as $inspect
     | .[1] as $compose
     | ($inspect | item | .Config.Env // []) as $container_env
-    | ($compose.services.teagramd.environment // null) as $compose_env
+    | ($compose.services[env.ROLLOUT_COMPOSE_SERVICE // "teagramd"].environment // null) as $compose_env
     | if ($container_env | type) != "array" or ($compose_env | type) != "object" then false else
         ($env_content | split("\n")) as $env_lines
         | all($changed[];
@@ -178,7 +178,7 @@ verify_safe_public_environment() {
     .[0] as $inspect
     | .[1] as $compose
     | ($inspect | item | .Config.Env // null) as $container_env
-    | ($compose.services.teagramd.environment // null) as $compose_env
+    | ($compose.services[env.ROLLOUT_COMPOSE_SERVICE // "teagramd"].environment // null) as $compose_env
     | ($env_content | split("\n")) as $env_lines
     | if ($container_env | type) != "array" then false
       elif $compose_source == "selected-compose-render" and ($compose_env | type) != "object" then false
@@ -235,8 +235,8 @@ verify_turnstile_compose_configuration() {
   checkout_root=$(readlink -f "$ROLLOUT_CHECKOUT_PATH") || return 1
   secret_source="$checkout_root/.secrets/teagramd-turnstile"
   if ! printf '%s\n' "$compose_json" | jq -e --arg secret_source "$secret_source" '
-    (.services.teagramd.environment // {}) as $env
-    | (.services.teagramd.secrets // []) as $service_secrets
+    (.services[env.ROLLOUT_COMPOSE_SERVICE // "teagramd"].environment // {}) as $env
+    | (.services[env.ROLLOUT_COMPOSE_SERVICE // "teagramd"].secrets // []) as $service_secrets
     | (.secrets // {}) as $secrets
     | ($secrets.teagramd_turnstile.file // "") as $file_source
     | (
@@ -306,7 +306,7 @@ verify_turnstile_container_configuration() {
       else $name end;
     .[0] as $inspect
     | .[1] as $compose
-    | ($compose.services.teagramd.environment // {}) as $compose_env
+    | ($compose.services[env.ROLLOUT_COMPOSE_SERVICE // "teagramd"].environment // {}) as $compose_env
     | ($inspect | item | .Config.Env // []) as $container_env
     | if ($container_env | type) != "array" then false else
         [
@@ -383,6 +383,142 @@ verify_turnstile_secret_mount() {
   return 0
 }
 
+MEDIA_KEY_MOUNT_CONFIGURED=false
+MEDIA_KEY_SOURCE_PATH=
+MEDIA_KEY_VERSION=
+
+verify_media_key_mount() {
+  local inspect_json=$1 compose_json=$2 snapshot_name=$3 record media_source media_version container_present service_name
+  service_name=${ROLLOUT_COMPOSE_SERVICE:-teagramd}
+  local resolved_source checkout_root directory_mode key_file key_mode key_owner
+  # Compose omits create_host_path: false from the resolved config.
+  if ! record=$(printf '%s\n' "$inspect_json" "$compose_json" | jq -ser --arg snapshot_name "$snapshot_name" --arg service_name "$service_name" '
+    def item: if type == "array" then .[0] else . end;
+    def env_values($env; $name):
+      [$env[] | select(type == "string" and startswith($name + "=")) | .[($name | length) + 1:]];
+    .[0] as $inspect
+    | .[1] as $compose
+    | ($compose.services[$service_name] // null) as $service
+    | ($service.environment // {}) as $compose_env
+    | ($service.volumes // []) as $compose_volumes
+    | ($inspect | item | .Config.Env // []) as $container_env
+    | ($inspect | item | .Mounts // []) as $container_mounts
+    | (if ($container_env | type) == "array" then $container_env else error("container environment is invalid") end) as $checked_env
+    | (if ($compose_env | type) == "object" and ($compose_volumes | type) == "array" then true else error("Compose media-key configuration is invalid") end)
+    | (env_values($checked_env; "TG_MEDIA_KEY_DIR")) as $container_dirs
+    | (env_values($checked_env; "TG_MEDIA_KEY_CURRENT")) as $container_versions
+    | [ $compose_volumes[] | select(type == "object" and .target == "/run/teagramd/media-keys") ] as $compose_mounts
+    | [ $container_mounts[] | select(type == "object" and .Destination == "/run/teagramd/media-keys") ] as $live_mounts
+    | (($compose_env | has("TG_MEDIA_KEY_DIR")) or ($compose_env | has("TG_MEDIA_KEY_CURRENT"))) as $configured
+    | if ($configured | not) and ($compose_mounts | length) == 0 and
+         ($container_dirs | length) == 0 and ($container_versions | length) == 0 and
+         ($live_mounts | length) == 0 then "disabled"
+      elif ($configured | not) or
+           ($compose_env.TG_MEDIA_KEY_DIR != "/run/teagramd/media-keys") or
+           (($compose_env.TG_MEDIA_KEY_CURRENT | type) != "string") or
+           (($compose_env.TG_MEDIA_KEY_CURRENT | test("^[1-9][0-9]*$") | not)) or
+           ($compose_mounts | length) != 1 then error("Compose media-key configuration is incomplete")
+      else
+        $compose_mounts[0] as $mount
+        | ($mount.source // "") as $source
+        | if ($mount | keys) != ["bind", "read_only", "source", "target", "type"] then
+             error("Compose media-key mount has unexpected fields")
+          elif ($mount.bind | type) != "object" then
+             error("Compose media-key bind options are invalid")
+          elif ($mount.bind | keys) != [] and
+               (($mount.bind | keys) != ["create_host_path"] or $mount.bind.create_host_path != false) then
+             error("Compose media-key bind options are invalid")
+          elif $mount.type != "bind" or $mount.read_only != true or
+               ($mount.bind.create_host_path // false) != false or
+               ($source | startswith("/") | not) or
+               (($source | split("/")) | index("..") != null) or
+               ($source | contains("\t")) or
+               ($source | contains("\n")) then error("Compose media-key mount is not an exact read-only bind")
+          else
+            (if $snapshot_name == "target" or ($container_dirs | length) > 0 or
+                ($container_versions | length) > 0 or ($live_mounts | length) > 0 then
+               ($container_dirs | length) == 1 and
+               $container_dirs[0] == "/run/teagramd/media-keys" and
+               ($container_versions | length) == 1 and
+               $container_versions[0] == $compose_env.TG_MEDIA_KEY_CURRENT and
+               ($live_mounts | length) == 1 and
+               $live_mounts[0].Type == "bind" and
+               $live_mounts[0].Source == $source and
+               $live_mounts[0].RW == false
+             else $snapshot_name != "target" end) as $container_matches
+            | if ($container_matches | not) then error("container media-key configuration does not match Compose")
+              else [$source, $compose_env.TG_MEDIA_KEY_CURRENT, (($live_mounts | length) == 1 | tostring)] | @tsv end
+          end
+      end
+  '); then
+    printf '%s\n' 'resolved media-key configuration is incomplete or does not match the inspected container' >&2
+    return 1
+  fi
+  if [ "$record" = disabled ]; then
+    MEDIA_KEY_MOUNT_CONFIGURED=false
+    MEDIA_KEY_SOURCE_PATH=
+    MEDIA_KEY_VERSION=
+    return 0
+  fi
+  IFS=$'\t' read -r media_source media_version container_present <<< "$record"
+  [[ "$media_source" = /* && "$media_version" = 1 && "$container_present" =~ ^(true|false)$ ]] || {
+    printf '%s\n' 'resolved media-key source metadata is invalid' >&2
+    return 1
+  }
+  [ -d "$media_source" ] && [ ! -L "$media_source" ] || {
+    printf '%s\n' 'media-key directory is missing or symlinked' >&2
+    return 1
+  }
+  resolved_source=$(readlink -f "$media_source") || return 1
+  [ "$resolved_source" = "$media_source" ] || {
+    printf '%s\n' 'media-key directory has a symlinked path' >&2
+    return 1
+  }
+  checkout_root=$(readlink -f "$ROLLOUT_CHECKOUT_PATH") || return 1
+  case "$resolved_source/" in
+    "$checkout_root/"*)
+      printf '%s\n' 'media-key directory must be outside the application checkout' >&2
+      return 1
+      ;;
+  esac
+  directory_mode=$(stat -c %a "$media_source") || return 1
+  [ "$directory_mode" = 700 ] || {
+    printf '%s\n' 'media-key directory permissions are not private' >&2
+    return 1
+  }
+  key_file="$media_source/$media_version.key"
+  [ -f "$key_file" ] && [ ! -L "$key_file" ] || {
+    printf '%s\n' 'selected media-key file is missing or symlinked' >&2
+    return 1
+  }
+  key_mode=$(stat -c %a "$key_file") || return 1
+  [ "$key_mode" = 600 ] && python3 -c '
+import re
+import sys
+
+try:
+    with open(sys.argv[1], encoding="utf-8") as key_file:
+        value = key_file.read().strip()
+except (OSError, UnicodeDecodeError):
+    raise SystemExit(1)
+
+raise SystemExit(re.fullmatch(r"[0-9a-fA-F]{64}", value) is None)
+' "$key_file" 2>/dev/null || {
+    printf '%s\n' 'selected media-key file has invalid permissions or format' >&2
+    return 1
+  }
+  if [ "$(id -u)" = 0 ]; then
+    key_owner=$(stat -c '%u:%g' "$key_file") || return 1
+    [ "$(stat -c '%u:%g' "$media_source")" = 65532:65532 ] && [ "$key_owner" = 65532:65532 ] || {
+      printf '%s\n' 'media-key directory or file has an unexpected owner' >&2
+      return 1
+    }
+  fi
+  MEDIA_KEY_MOUNT_CONFIGURED=true
+  MEDIA_KEY_SOURCE_PATH=$media_source
+  MEDIA_KEY_VERSION=$media_version
+}
+
 canonical_blob_mode_source() {
   local checkout_path state_dir mode_source
   checkout_path=$(readlink -f "$ROLLOUT_CHECKOUT_PATH") || return 1
@@ -405,11 +541,15 @@ snapshot_from_json() {
   local override_file=$4
   local compose_source=${5:-selected-compose-render}
   local snapshot_name=${6:-}
-  local mounts exposure exposure_for_hash resolved_config canonical_compose container_env container_logging_config container_id image_id state exit_code started_at finished_at grace stop_timeout mode_source compose_logging_policy compose_log_login_codes container_log_login_codes
+  local mounts exposure exposure_for_hash resolved_config canonical_compose container_env container_logging_config container_id image_id state exit_code started_at finished_at grace stop_timeout mode_source mode_mount_target compose_logging_policy compose_log_login_codes container_log_login_codes
   local mounts_sha exposure_sha config_sha env_sha override_sha container_env_sha container_logging_sha mount_count
   local compose_replica_count compose_client_addr_trust container_replica_count container_client_addr_trust
   local compose_public_ws_2446 exposure_public_ws_2446
+  local media_key_source media_key_current
   local added_env_names changed_env_names container_env_added container_env_changed retained_added_env_names
+  MEDIA_KEY_MOUNT_CONFIGURED=false
+  MEDIA_KEY_SOURCE_PATH=
+  MEDIA_KEY_VERSION=
 
   if [ ! -f "$env_file" ] || [ "$(stat -c %a "$env_file")" != 600 ]; then
     printf '%s\n' 'environment file must be a regular mode-0600 file' >&2
@@ -427,7 +567,7 @@ snapshot_from_json() {
   compose_log_login_codes=not-captured
   if [ "$compose_source" = selected-compose-render ]; then
     compose_logging_policy=$(printf '%s' "$compose_json" | jq -er '
-      .services.teagramd.logging as $logging
+      .services[env.ROLLOUT_COMPOSE_SERVICE // "teagramd"].logging as $logging
       | if $logging == null then "default"
         elif $logging == {
           driver:"syslog",
@@ -445,7 +585,7 @@ snapshot_from_json() {
       return 1
     }
     compose_log_login_codes=$(printf '%s' "$compose_json" | jq -er '
-      .services.teagramd.environment as $env
+      .services[env.ROLLOUT_COMPOSE_SERVICE // "teagramd"].environment as $env
       | if ($env | type) != "object" then error("teagramd environment must be an object")
         elif ($env | has("TG_LOG_LOGIN_CODES") | not) then "unset"
         elif $env.TG_LOG_LOGIN_CODES == "true" or $env.TG_LOG_LOGIN_CODES == true then "true"
@@ -515,7 +655,7 @@ snapshot_from_json() {
         ((.protocol // "tcp") == "tcp") and
         ((.mode // "") == "" or (.mode // "") == "ingress") and
         ((keys - ["target", "published", "host_ip", "protocol", "mode"]) | length) == 0;
-      (.services.teagramd.ports // []) as $ports
+      (.services[env.ROLLOUT_COMPOSE_SERVICE // "teagramd"].ports // []) as $ports
       | if ($ports | type) != "array" then error("resolved service ports must be an array") else
           [$ports[] | select(approved_public_ws_port)] as $approved
           | if ($approved | length) > 1 then error("approved public WebSocket port is duplicated")
@@ -530,11 +670,17 @@ snapshot_from_json() {
     verify_turnstile_container_configuration \
       "$inspect_json" "$compose_json" "$snapshot_name" "$added_env_names" "$changed_env_names" || return 1
     verify_turnstile_secret_mount "$inspect_json" "$compose_json" "$snapshot_name" || return 1
+    verify_media_key_mount "$inspect_json" "$compose_json" "$snapshot_name" || return 1
   fi
+  media_key_source=${MEDIA_KEY_SOURCE_PATH:-unset}
+  media_key_current=${MEDIA_KEY_VERSION:-unset}
 
   mode_source=$(canonical_blob_mode_source) || return 1
+  mode_mount_target=/run/teagramd/blob-mode
+  [ "${ROLLOUT_COMPOSE_SERVICE:-teagramd}" != telegramd ] || mode_mount_target=/run/telegramd/blob-mode
 
-  mounts=$(printf '%s' "$inspect_json" | jq -ce --arg mode_source "$mode_source" --arg compose_source "$compose_source" '
+  mounts=$(printf '%s' "$inspect_json" | jq -ce --arg mode_source "$mode_source" --arg mode_target "$mode_mount_target" --arg compose_source "$compose_source" \
+    --arg media_key_source "$MEDIA_KEY_SOURCE_PATH" --argjson media_key_enabled "$MEDIA_KEY_MOUNT_CONFIGURED" '
     def item: if type == "array" then .[0] else . end;
     (item.Mounts // [])
     | map({type:(.Type // ""), name:(.Name // ""), source:(.Source // ""),
@@ -542,8 +688,10 @@ snapshot_from_json() {
            rw:(.RW // false), propagation:(.Propagation // "")})
     | map(select((.destination == "/run/secrets/teagramd-turnstile" and
                   $compose_source == "selected-compose-render") | not))
+    | map(select(($media_key_enabled and .type == "bind" and .source == $media_key_source and
+                  .destination == "/run/teagramd/media-keys" and .rw == false) | not))
     | map(select((.type == "bind" and .source == $mode_source and
-                  .destination == "/run/teagramd/blob-mode" and .rw == false) | not))
+                  .destination == $mode_target and .rw == false) | not))
     | sort_by(.type, .name, .source, .destination, .mode, .rw, .propagation)
   ')
   exposure=$(printf '%s' "$inspect_json" | jq -ce '
@@ -639,7 +787,8 @@ snapshot_from_json() {
   container_logging_sha=$(sha256_text "$container_logging_config")
   # Empty mapped key-exchange values use the binary defaults, so they stay
   # equivalent to an absent variable; configured values remain pinned.
-  container_env=$(printf '%s' "$inspect_json" | jq -ce --argjson added "$added_env_names" --argjson changed "$changed_env_names" '
+  container_env=$(printf '%s' "$inspect_json" | jq -ce --argjson added "$added_env_names" --argjson changed "$changed_env_names" \
+    --argjson media_key_enabled "$MEDIA_KEY_MOUNT_CONFIGURED" '
     def item: if type == "array" then .[0] else . end;
     def runtime_name($name):
       if $name == "TEAGRAM_TURNSTILE_SITE_KEY" then "TG_TURNSTILE_SITE_KEY"
@@ -660,6 +809,7 @@ snapshot_from_json() {
             "TG_KEY_EXCHANGE_GLOBAL_RATE=",
             "TG_KEY_EXCHANGE_GLOBAL_BURST="
           ) | not)))
+        | map(select(type != "string" or (((split("="))[0]) as $key | ($media_key_enabled and ($key | IN("TG_MEDIA_KEY_DIR", "TG_MEDIA_KEY_CURRENT"))) | not)))
         | map(select(type != "string" or (
             (. == "TG_TURNSTILE_SITE_KEY=" or
              . == "TG_TURNSTILE_SECRET_KEY_FILE=" or
@@ -721,8 +871,8 @@ snapshot_from_json() {
       printf '%s\n' 'invalid Compose provenance for snapshot' >&2
       return 1
     }
-    resolved_config=$(printf '%s' "$compose_json" | jq -ce --arg mode_source "$mode_source" '
-      .services.teagramd as $s
+    resolved_config=$(printf '%s' "$compose_json" | jq -ce --arg mode_source "$mode_source" --arg mode_target "$mode_mount_target" '
+      .services[env.ROLLOUT_COMPOSE_SERVICE // "teagramd"] as $s
       | {
           stop_grace_period:($s.stop_grace_period // ""),
       ports:(($s.ports // [])
@@ -733,7 +883,7 @@ snapshot_from_json() {
             | sort_by(.host_ip, .published, .target, .protocol, .mode)),
           volumes:(($s.volumes // [])
             | map(select((.type == "bind" and .source == $mode_source and
-                          .target == "/run/teagramd/blob-mode" and .read_only == true) | not))
+                          .target == $mode_target and .read_only == true) | not))
             | map({type:(.type // ""), source:(.source // ""), target:(.target // ""),
                    read_only:(.read_only // false)})
             | sort_by(.type, .source, .target, .read_only)),
@@ -741,7 +891,8 @@ snapshot_from_json() {
           networks:(($s.networks // {}) | if type == "object" then keys else . end | sort)
         }
     ')
-    canonical_compose=$(printf '%s' "$compose_json" | jq -ceS --arg mode_source "$mode_source" '
+    canonical_compose=$(printf '%s' "$compose_json" | jq -ceS --arg mode_source "$mode_source" --arg mode_target "$mode_mount_target" \
+      --arg media_key_source "$MEDIA_KEY_SOURCE_PATH" --argjson media_key_enabled "$MEDIA_KEY_MOUNT_CONFIGURED" '
       def approved_public_ws_port:
         type == "object" and
         ((.target | tostring) == "2446") and
@@ -758,48 +909,57 @@ snapshot_from_json() {
           "TG_KEY_EXCHANGE_GLOBAL_RATE",
           "TG_KEY_EXCHANGE_GLOBAL_BURST"
         )) and .value == "";
-      if (.services.teagramd.environment | type) != "object" then error("teagramd environment must be an object") else
-        .services.teagramd.environment |= del(
+      # Compose includes extension anchors in its rendered output. Their
+      # expanded service fields remain in the digest; the anchors do not.
+      with_entries(select((.key | startswith("x-")) | not))
+      |
+      if (.services[env.ROLLOUT_COMPOSE_SERVICE // "teagramd"].environment | type) != "object" then error("teagramd environment must be an object") else
+        .services[env.ROLLOUT_COMPOSE_SERVICE // "teagramd"].environment |= del(
           .TG_REPLICA_COUNT, .TG_CLIENT_ADDR_TRUST,
           .TG_WEBSOCKET_ALLOWED_ORIGINS,
           .TG_PUBLIC_WEBSOCKET_LISTEN_ADDR, .TG_PUBLIC_REGISTRATION,
           .TG_PUBLIC_WEBSOCKET_ADVERTISE_ADDR,
           .TG_PUBLIC_WEBSOCKET_ALLOWED_ORIGINS, .TG_WELCOME_CHANNEL,
           .TG_LOG_LOGIN_CODES,
+          .TG_MEDIA_KEY_DIR, .TG_MEDIA_KEY_CURRENT,
           .TG_TURNSTILE_SITE_KEY, .TG_TURNSTILE_SECRET_KEY_FILE,
           .TG_TURNSTILE_SIGNIN_ENABLED)
       end
       # Empty key-exchange mappings use binary defaults; active values remain
       # subject to the Compose and container environment checks.
-      | .services.teagramd.environment |= with_entries(select(empty_key_exchange_default | not))
+      | .services[env.ROLLOUT_COMPOSE_SERVICE // "teagramd"].environment |= with_entries(select(empty_key_exchange_default | not))
       # Reviewed logger and login-code transitions are checked separately.
       # Keep both out of the unrelated config digest.
-      | .services.teagramd |= del(.logging)
-      | .services.teagramd.ports = ((.services.teagramd.ports // []) | map(select(approved_public_ws_port | not)))
-      | if (.services.teagramd.ports | length) == 0 then del(.services.teagramd.ports) else . end
-      | if (.services.teagramd.secrets | type) == "array" then
-          .services.teagramd.secrets |= map(select(.source != "teagramd_turnstile"))
+      | .services[env.ROLLOUT_COMPOSE_SERVICE // "teagramd"] |= del(.logging)
+      | .services[env.ROLLOUT_COMPOSE_SERVICE // "teagramd"].ports = ((.services[env.ROLLOUT_COMPOSE_SERVICE // "teagramd"].ports // []) | map(select(approved_public_ws_port | not)))
+      | if (.services[env.ROLLOUT_COMPOSE_SERVICE // "teagramd"].ports | length) == 0 then del(.services[env.ROLLOUT_COMPOSE_SERVICE // "teagramd"].ports) else . end
+      | if $media_key_enabled then
+          .services[env.ROLLOUT_COMPOSE_SERVICE // "teagramd"].volumes |= map(select((.type == "bind" and .source == $media_key_source and
+                                                      .target == "/run/teagramd/media-keys" and .read_only == true) | not))
         else . end
-      | if (.services.teagramd.secrets | type) == "array" and (.services.teagramd.secrets | length) == 0 then
-          del(.services.teagramd.secrets)
+      | if (.services[env.ROLLOUT_COMPOSE_SERVICE // "teagramd"].secrets | type) == "array" then
+          .services[env.ROLLOUT_COMPOSE_SERVICE // "teagramd"].secrets |= map(select(.source != "teagramd_turnstile"))
+        else . end
+      | if (.services[env.ROLLOUT_COMPOSE_SERVICE // "teagramd"].secrets | type) == "array" and (.services[env.ROLLOUT_COMPOSE_SERVICE // "teagramd"].secrets | length) == 0 then
+          del(.services[env.ROLLOUT_COMPOSE_SERVICE // "teagramd"].secrets)
         else . end
       | if (.secrets | type) == "object" then .secrets |= del(.teagramd_turnstile) else . end
       | if (.secrets | type) == "object" and (.secrets | length) == 0 then del(.secrets) else . end
       | .services |= with_entries(
-          if (.key | startswith("teagramd")) and (.value.volumes | type) == "array" then
+          if .key == (env.ROLLOUT_COMPOSE_SERVICE // "teagramd") and (.value.volumes | type) == "array" then
             .value.volumes |= map(select((.type == "bind" and .source == $mode_source and
-                                          .target == "/run/teagramd/blob-mode" and .read_only == true) | not))
+                                          .target == $mode_target and .read_only == true) | not))
           else . end)
     ')
     compose_replica_count=$(printf '%s' "$compose_json" | jq -er '
-      .services.teagramd.environment as $env
+      .services[env.ROLLOUT_COMPOSE_SERVICE // "teagramd"].environment as $env
       | if ($env | type) != "object" then error("teagramd environment must be an object")
         elif ($env | has("TG_REPLICA_COUNT")) then
           if ($env.TG_REPLICA_COUNT | type) == "string" and ($env.TG_REPLICA_COUNT | test("^[0-9]{1,3}$")) then $env.TG_REPLICA_COUNT else "invalid" end
         else "unset" end
     ')
     compose_client_addr_trust=$(printf '%s' "$compose_json" | jq -er '
-      .services.teagramd.environment as $env
+      .services[env.ROLLOUT_COMPOSE_SERVICE // "teagramd"].environment as $env
       | if ($env | type) != "object" then error("teagramd environment must be an object")
         elif ($env | has("TG_CLIENT_ADDR_TRUST")) then
           if ($env.TG_CLIENT_ADDR_TRUST | type) == "string" and $env.TG_CLIENT_ADDR_TRUST == "socket" then "socket" else "invalid" end
@@ -832,6 +992,8 @@ snapshot_from_json() {
     --arg compose_logging_policy "$compose_logging_policy" \
     --arg compose_log_login_codes "$compose_log_login_codes" \
     --arg container_log_login_codes "$container_log_login_codes" \
+    --arg media_key_source "$media_key_source" \
+    --arg media_key_current "$media_key_current" \
     --arg exposure_public_ws_2446 "$exposure_public_ws_2446" \
     --arg mount_count "$mount_count" \
     --arg mounts_sha "$mounts_sha" \
@@ -854,6 +1016,7 @@ snapshot_from_json() {
       compose_logging_policy:$compose_logging_policy,
       compose_log_login_codes:$compose_log_login_codes,
       container_log_login_codes:$container_log_login_codes,
+      media_key_source:$media_key_source,media_key_current:$media_key_current,
       exposure_public_ws_2446:$exposure_public_ws_2446,
       container_replica_count:$container_replica_count,
       container_client_addr_trust:$container_client_addr_trust,
@@ -1003,7 +1166,7 @@ compare_snapshots() {
   local expected_image=$3
   local result_file=$4
   local field before_value after_value before_image after_image result before_logging_policy after_logging_policy
-  local fields=(mounts_sha256 stop_grace_period container_stop_timeout config_sha256 env_sha256 override_sha256 exposure_sha256 container_env_sha256 container_logging_sha256 compose_logging_policy compose_log_login_codes container_log_login_codes)
+  local fields=(mounts_sha256 stop_grace_period container_stop_timeout config_sha256 env_sha256 override_sha256 exposure_sha256 container_env_sha256 container_logging_sha256 compose_logging_policy compose_log_login_codes container_log_login_codes media_key_source media_key_current)
   ROLLOUT_COMPARE_FAILURES=0
   if [ -e "$result_file" ] || [ -L "$result_file" ]; then
     printf '%s\n' 'comparison evidence already exists' >&2
@@ -1026,6 +1189,8 @@ compare_snapshots() {
       (.compose_logging_policy | type == "string" and IN("default","syslog-v1","not-captured")) and
       (.compose_log_login_codes | type == "string" and IN("true","false","unset","not-captured")) and
       (.container_log_login_codes | type == "string" and IN("true","false","unset")) and
+      (.media_key_source | type == "string" and (. == "unset" or startswith("/"))) and
+      (.media_key_current | type == "string" and (. == "unset" or test("^[1-9][0-9]*$"))) and
       (.exposure_public_ws_2446 | type == "string" and IN("true","false")) and
       (.container_replica_count | type == "string" and test("^(unset|invalid|duplicate|[0-9]{1,3})$")) and
       (.container_client_addr_trust | type == "string" and IN("unset","invalid","duplicate","socket")) and
@@ -1051,6 +1216,8 @@ compare_snapshots() {
       (.compose_logging_policy | type == "string" and IN("default","syslog-v1","not-captured")) and
       (.compose_log_login_codes | type == "string" and IN("true","false","unset","not-captured")) and
       (.container_log_login_codes | type == "string" and IN("true","false","unset")) and
+      (.media_key_source | type == "string" and (. == "unset" or startswith("/"))) and
+      (.media_key_current | type == "string" and (. == "unset" or test("^[1-9][0-9]*$"))) and
       (.exposure_public_ws_2446 | type == "string" and IN("true","false")) and
       (.container_replica_count | type == "string" and test("^(unset|invalid|duplicate|[0-9]{1,3})$")) and
       (.container_client_addr_trust | type == "string" and IN("unset","invalid","duplicate","socket")) and
@@ -1080,6 +1247,10 @@ compare_snapshots() {
       if approved_logging_transition "$before_value" "$after_value"; then result=pass; else result=fail; fi
     elif [ "$field" = compose_log_login_codes ] || [ "$field" = container_log_login_codes ]; then
       if approved_login_code_logging_transition "$before_value" "$after_value"; then result=pass; else result=fail; fi
+    elif [ "$field" = media_key_source ] && [ "$before_value" = unset ] && [[ "$after_value" = /* ]]; then
+      result=pass
+    elif [ "$field" = media_key_current ] && [ "$before_value" = unset ] && [ "$after_value" = 1 ]; then
+      result=pass
     elif [ "$field" = container_logging_sha256 ] && \
          [ "$before_logging_policy" = default ] && [ "$after_logging_policy" = syslog-v1 ]; then
       result=pass

@@ -626,6 +626,10 @@ func runAtBlobModePath(log *slog.Logger, blobModePath string) error {
 	if err != nil {
 		return err
 	}
+	stickerSets, err := api.LoadStickerSetCatalog(cfg.StickerBundle)
+	if err != nil {
+		return fmt.Errorf("load sticker catalogue: %w", err)
+	}
 	blobAuthority, err := blobmode.Read(blobModePath, blobmode.EffectiveConfig{BlobDir: cfg.BlobDir, BlobS3: cfg.BlobS3})
 	if err != nil {
 		return err
@@ -814,11 +818,11 @@ func runAtBlobModePath(log *slog.Logger, blobModePath string) error {
 			turnstileSiteKey = cfg.Turnstile.SiteKey
 			verifier = turnstileVerifier
 		}
-		return api.NewWithPhotoThumbsAndDialogFilterSyncAndUploadPartTTLAndTurnstileAndWelcomeChannelAndSignIn(
+		return api.NewWithPhotoThumbsAndDialogFilterSyncAndUploadPartTTLAndTurnstileAndWelcomeChannelAndSignInAndStickerCatalog(
 			st, cfg.DCID, tgcfg, log, cfg.LogLoginCodes, cfg.MaxFileBytes, blobs,
 			cfg.MaxUserStorageBytes, peers, photos, cfg.RateLimits, registrationMode,
 			dialogFilterSync, photoThumbs, cfg.UploadPartTTL, turnstileSiteKey,
-			verifier, cfg.WelcomeChannel, turnstileSignInEnabled, cfg.RecoveryEmailMode, notifyMetrics,
+			verifier, cfg.WelcomeChannel, turnstileSignInEnabled, cfg.RecoveryEmailMode, stickerSets, notifyMetrics,
 		)
 	}
 	if cfg.LogLoginCodes {
@@ -872,7 +876,7 @@ func runAtBlobModePath(log *slog.Logger, blobModePath string) error {
 	// Cross-replica real-time delivery: the listener wakes on NOTIFY and pushes
 	// each user's pending updates to their live conns in this process. Drained
 	// before the store pool closes (defer registered after st.Close, runs first).
-	updater := api.NewUpdaterWithDialogFilterSync(st, cfg.DCID, server.Registry(), log, peers, dialogFilterSync, notifyMetrics)
+	updater := api.NewUpdaterWithDialogFilterSyncAndStickerCatalog(st, cfg.DCID, server.Registry(), log, peers, dialogFilterSync, stickerSets, notifyMetrics)
 	stopDialogFilterRecovery := updater.StartDialogFilterRecovery(serviceCtx)
 	defer stopDialogFilterRecovery()
 	_, stopListener, err := store.StartListenerWithDialogPinsAndStickerSets(serviceCtx, cfg.PostgresDSN, updater.Deliver, updater.DeliverTyping, updater.Evict, updater.DeliverChannelPost, updater.DeliverEncryption, updater.DeliverStatus, updater.DeliverEncryptedMsg, updater.DeliverReactions, updater.DeliverPinned, updater.MarkDialogFilters, updater.DeliverDialogPins, updater.DeliverStickerSets, updater.DialogFilterListenerReconnected, log, notifyMetrics)
@@ -1032,7 +1036,8 @@ func newBlobStoreWithAuthority(ctx context.Context, cfg config.Config, log *slog
 		return blob.NewLocal(cfg.BlobDir)
 	}
 	acceptedPlaintext := authority.Present && authority.Outcome == blobmode.OutcomeS3Accepted
-	if authority.Present && !acceptedPlaintext {
+	encryptedMigration := authority.Present && authority.Outcome == blobmode.OutcomeEncrypted
+	if authority.Present && !acceptedPlaintext && !encryptedMigration {
 		return nil, errors.New("blob-mode authority is not valid for the configured S3 backend")
 	}
 	if acceptedPlaintext {
@@ -1044,6 +1049,9 @@ func newBlobStoreWithAuthority(ctx context.Context, cfg config.Config, log *slog
 	// NewS3 emits the plaintext warning while it constructs the client, so
 	// the logger must be selected before construction rather than after it.
 	s3cfg.Logger = log
+	if encryptedMigration {
+		return blob.NewMigratedS3Store(ctx, s3cfg, cfg.MediaKeys)
+	}
 	blobs, _, err := blob.NewS3Store(ctx, s3cfg, cfg.MediaKeys, !acceptedPlaintext)
 	if err != nil {
 		return nil, err

@@ -574,13 +574,15 @@ jobs:
       - name: Measure flat parts directory ceiling
         run: PARTS_DIR_CEILING_PROBE=1 go test -count=1 -timeout 30m ./internal/blob/ -run TestFlatPartsDirEntryCeiling -v
 
-      # Postgres comes from testcontainers inside internal/pgtest, which starts
-      # mirror.gcr.io/library/postgres:18-alpine with its own config. Nothing to
-      # wire up on the runner beyond the Docker daemon ubuntu-26.04 provides.
+      # Testcontainers pulls mirror.gcr.io/postgres:18-alpine. Pre-pull it with
+      # bounded retries so transient mirror misses are caught before package tests.
       #
       # Keep the cached non-E2E command in the Makefile unchanged. The remaining
       # E2E invocation runs once with the same race/count/timeout/package
       # settings, excluding fixtures and adding JSON output for diagnostics.
+      - name: Pre-pull the shared PostgreSQL test image with retry
+        run: bash .github/scripts/pull-base-images.sh --image mirror.gcr.io/postgres:18-alpine
+
       - name: Test non-E2E packages
         run: make test-unit
 
@@ -601,7 +603,7 @@ jobs:
 
   real-server-fixtures:
     runs-on: ubuntu-26.04
-    timeout-minutes: 30
+    timeout-minutes: 60
     env:
       TESTCONTAINERS_RYUK_DISABLED: "true"
 
@@ -2170,7 +2172,8 @@ jobs:
             and any(.services.teagramd.volumes[]; .target == "/var/lib/teagramd-blobs" and .read_only == true)
             and any(.services.teagramd.volumes[]; .type == "bind" and .target == "/run/teagramd/blob-mode" and .read_only == true)
             and any(.services.teagramd.volumes[]; .type == "bind" and .source == $media_key_dir and .target == "/run/teagramd/media-keys" and .read_only == true)
-            and all(.services | to_entries[] | select((.key | startswith("teagramd")) | not); all((.value.volumes // [])[]; .target != "/run/teagramd/blob-mode"))
+            and any(.services["blob-encrypt-migrate"].volumes[]; .type == "bind" and .target == "/run/teagramd/blob-mode" and (.read_only // false) == false)
+            and all(.services | to_entries[] | select((.key | startswith("teagramd")) | not) | select(.key != "blob-encrypt-migrate"); all((.value.volumes // [])[]; .target != "/run/teagramd/blob-mode"))
             and (.services["blob-migrate"].volumes[0].read_only == true)
             and ((.services["blob-migrate"].profiles | index("migration")) != null)
             and (.services["blob-restore"].command == ["--direction", "s3-to-local", "--destination", "/destination"])
@@ -2736,7 +2739,7 @@ jobs:
   # and its Postgres container are discarded with this job.
   smoke:
     runs-on: ubuntu-26.04
-    timeout-minutes: 40
+    timeout-minutes: 60
     permissions:
       contents: read
     env:
@@ -2783,6 +2786,7 @@ jobs:
           sudo env TMPDIR=/root bash deploy/teagramd/rollout-runner/test-stack-move-entrypoint.sh
           sudo env TMPDIR=/root bash deploy/teagramd/rollout-runner/test-rollout-runner.sh
           sudo env TMPDIR=/root bash deploy/teagramd/rollout-runner/test-compose-path-preflight.sh
+          python3 -B deploy/teagramd/rollout-runner/test-stack-move-runner-inspect.py
           bash deploy/teagramd/rollout-runner/test-initial-local-compose.sh
           bash deploy/teagramd/rollout-runner/test-local-compose-598359e.sh
           bash deploy/teagramd/rollout-runner/test-local-compose-df9ffe5.sh

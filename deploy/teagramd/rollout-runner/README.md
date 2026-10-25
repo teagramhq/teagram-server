@@ -12,15 +12,63 @@ on rollback. No other non-fast-forward transition is accepted. The runner
 preserves the existing backup, build identity, readiness, selected-revision
 Atlas schema, and rollback gates.
 
-This stage has one publisher: `initialize-local` for the initial local record.
-Ordinary `apply` validates the existing head against every running `teagramd*`
-container and the proposed Compose render before build or replacement. A
-rollout cannot change backend. There is no fresh-S3 or recovered-local
-publisher in this stage, and no manual record-writing path. The serving
-process has a separate fresh-S3 bootstrap for an empty authority directory; it
-writes no authority and cannot bypass a nonempty record tree. The rollout
-runner still requires a matching authority for every managed S3 render and
-transition.
+This rollout runner has one initializer: `initialize-local` publishes the
+initial local record. Ordinary `apply` validates the existing head against
+every running `teagramd*` container and the proposed Compose render before
+build or replacement. A rollout cannot change backend. There is no fresh-S3 or
+recovered-local publisher in this stage, and no manual record-writing path.
+The separate `blob-encrypt-migrate` operator command is the only publisher of
+`encrypted` authority, after its database-reference inventory passes. The
+serving process has a separate fresh-S3 bootstrap for an empty authority
+directory; it writes no authority and cannot bypass a nonempty record tree.
+The rollout runner still requires a matching authority for every managed S3
+render and transition.
+
+## Encrypting accepted plaintext S3 media
+
+The `blob-encrypt-migrate` profile is a one-time operator job for an existing
+`s3-accepted` authority. It reads assembled-file rows and live upload-part rows
+from PostgreSQL, streams each referenced plaintext object into the `encrypted/`
+S3 namespace, authenticates a full readback, checks that the database inventory
+did not change, and only then appends `encrypted` authority. It leaves source
+objects and unreferenced strays untouched. The private progress journal,
+inventory artifact, and authority report persist under `/root` by default and
+survive interruption.
+
+Run from the deployment checkout as root after choosing and recording the
+actual write-quiescence state. `stopped` means every `teagramd` writer is
+stopped. `drained` means writes were stopped at the request boundary and all
+in-flight uploads finished. Keep writers quiescent until this command exits,
+then restart every `teagramd` replica before allowing writes again so each
+process loads the encrypted authority.
+
+```sh
+docker compose --profile migration run --rm blob-encrypt-migrate \
+  --writes stopped \
+  --progress /run/teagramd/reports/blob-encryption-progress.jsonl
+```
+
+If interrupted, rerun with the same `--writes` choice and journal path. The
+command authenticates and reuses completed envelopes; it reports any stray
+objects in its JSON result and never moves or deletes them. If an inventory
+reference cannot be verified, the command names the affected IDs and keeps the
+accepted authority active.
+
+Plaintext removal is a separate opt-in operation after all replicas are
+serving encrypted authority. Stop or drain writes again, then run:
+
+```sh
+docker compose --profile migration run --rm blob-encrypt-migrate \
+  --writes stopped \
+  --progress /run/teagramd/reports/blob-encryption-progress.jsonl \
+  --cleanup
+```
+
+Use the same `--writes` value recorded for migration. Cleanup reauthenticates
+each encrypted copy and compares it with the plaintext source before removing
+that referenced source. It does not remove unreferenced objects. If changing
+`TEAGRAM_BLOB_MODE_REPORT_ROOT`, set `ROLLOUT_RUNNER_EVIDENCE_ROOT` to the same
+host directory so later authority validation reads the published report.
 
 Preflight treats disabled public WebSocket settings and an empty
 `TG_WELCOME_CHANNEL` as equivalent when they are unset or passed through as
@@ -133,14 +181,18 @@ reviewed artifact and content pin before rollout.
 
 Ordinary `apply` compares the checked-out baseline Compose project and
 persistent mounts with the target render before creating evidence, dumping the
-database, building, or stopping a container. The only permitted layout change
-is adding the exact read-only `/etc/teagramd/media-keys` bind mount at
-`/run/teagramd/media-keys` to the existing `teagramd` service. Any project,
-volume, or other mount change fails closed and asks for the explicit
-`move-stack` action. `deploy-main.sh` continues to call `apply`, so a
-main-branch deployment that contains the project rename exits before changing
-the running stack until the move action is run. The normal readiness and
-rollback gates still apply when adding the media-key mount.
+database, building, or stopping a container. The only additional layout change
+allowed during an ordinary rollout is the initial exact read-only bind from
+`/etc/teagramd/media-keys` to `/run/teagramd/media-keys` on the existing
+`teagramd` service. It requires `TG_MEDIA_KEY_CURRENT=1` and a matching
+mode-0600 key file owned by uid/gid 65532 in a mode-0700 directory outside the
+application checkout. The runner pins the host path and key version after that
+first rollout; later changes remain blocked. Any project, volume, or other
+mount change fails closed and asks for the explicit `move-stack` action.
+`deploy-main.sh` continues to call `apply`, so a main-branch deployment that
+contains the project rename exits before changing the running stack until the
+move action is run. The normal readiness and rollback gates still apply when
+adding the media-key mount.
 
 The move action accepts only a reviewed fast-forward target on `origin/main`.
 It takes both the old and new deploy locks, stages `/opt/teagram` as a worktree,
@@ -234,7 +286,7 @@ sudo env TOOL_SHA="$TOOL_SHA" bash -c '
     "$TOOL_SHA:deploy/teagramd/rollout-runner/initial-local-compose-777742.yml" \
     > /opt/teagram/.rollout-compose.initial-local.yml
   printf "%s  %s\n" \
-    3a4f158c6e1f2ead6676fba85d8d95cfb15557a0fbd8e82230361e0af988e0f7 \
+    d764d291ad2ea91cff841d14a0cd2bbcb5981961dbc67406bfeba1196a7b3fa4 \
     /opt/teagram/.rollout-compose.initial-local.yml | sha256sum --check
   chmod 600 /opt/teagram/.rollout-compose.initial-local.yml
 '

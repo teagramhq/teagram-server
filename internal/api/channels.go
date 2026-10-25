@@ -187,7 +187,7 @@ func (h *handlers) handleCreateChannel(r *mtproto.Request) (bin.Encoder, error) 
 		h.log.Error("create channel users", "channel_id", ch.ID, "err", err)
 		return nil, errInternal
 	}
-	message, err := channelMessageToTL(createMessage, r.UserID, nil, !ch.Megagroup, h.dcID)
+	message, err := h.channelMessageToTL(createMessage, r.UserID, nil, !ch.Megagroup, h.dcID)
 	if err != nil {
 		h.log.Error("render channel create message", "channel_id", ch.ID, "local_id", createMessage.LocalID, "err", err)
 		return nil, errInternal
@@ -247,7 +247,7 @@ func (h *handlers) handleEditChannelTitle(r *mtproto.Request) (bin.Encoder, erro
 		h.log.Error("edit channel title users", "channel_id", channelID, "err", err)
 		return nil, errInternal
 	}
-	message, err := channelMessageToTL(service, r.UserID, nil, !channel.Megagroup, h.dcID)
+	message, err := h.channelMessageToTL(service, r.UserID, nil, !channel.Megagroup, h.dcID)
 	if err != nil {
 		h.log.Error("render channel title service message", "channel_id", channelID, "local_id", service.LocalID, "err", err)
 		return nil, errInternal
@@ -357,7 +357,7 @@ func (h *handlers) handleEditChannelPhoto(r *mtproto.Request) (bin.Encoder, erro
 		h.log.Error("edit channel photo file", "channel_id", channelID, "local_id", service.LocalID, "err", err)
 		return nil, errInternal
 	}
-	message, err := channelMessageToTL(service, r.UserID, files, !channel.Megagroup, h.dcID)
+	message, err := h.channelMessageToTL(service, r.UserID, files, !channel.Megagroup, h.dcID)
 	if err != nil {
 		h.log.Error("render channel photo service message", "channel_id", channelID, "local_id", service.LocalID, "err", err)
 		return nil, errInternal
@@ -926,7 +926,7 @@ func (h *handlers) sendChannelMessage(r *mtproto.Request, channelID int64, req *
 				h.log.Error("load users on retry", "err", err)
 				return nil, errInternal
 			}
-			message, err := channelMessageToTL(existing, r.UserID, nil, broadcast, h.dcID)
+			message, err := h.channelMessageToTL(existing, r.UserID, nil, broadcast, h.dcID)
 			if err != nil {
 				h.log.Error("render channel retry message", "channel_id", channelID, "local_id", existing.LocalID, "err", err)
 				return nil, errInternal
@@ -991,7 +991,7 @@ func (h *handlers) sendChannelMessage(r *mtproto.Request, channelID int64, req *
 		h.log.Error("send channel message users", "err", err)
 		return nil, errInternal
 	}
-	message, err := channelMessageToTL(msg, r.UserID, nil, broadcast, h.dcID)
+	message, err := h.channelMessageToTL(msg, r.UserID, nil, broadcast, h.dcID)
 	if err != nil {
 		h.log.Error("render channel message", "channel_id", channelID, "local_id", msg.LocalID, "err", err)
 		return nil, errInternal
@@ -1381,7 +1381,7 @@ func (h *handlers) channelMessagesWithCountAndCaller(
 	}
 	tlMsgs := make([]tg.MessageClass, len(msgs))
 	for i, m := range msgs {
-		message, renderErr := channelMessageToTL(m, r.UserID, files, broadcast, h.dcID)
+		message, renderErr := h.channelMessageToTL(m, r.UserID, files, broadcast, h.dcID)
 		if renderErr != nil {
 			h.log.Error("render channel history message", "user_id", r.UserID, "channel_id", channelID, "local_id", m.LocalID, "err", renderErr)
 			return nil, errInternal

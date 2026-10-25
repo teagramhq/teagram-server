@@ -209,6 +209,7 @@ type Store struct {
 	// read it after the options run; see WithStatementTimeout.
 	statementTimeout time.Duration
 	poolConfig       *PoolConfig
+	queryTracer      pgx.QueryTracer
 
 	// assemblySlots bounds the number of connections an in-flight assembled
 	// upload may pin. Open sizes it from the pool's configured maximum after
@@ -433,6 +434,9 @@ func Open(ctx context.Context, dsn string, encKey []byte, opts ...Option) (*Stor
 	// every query on the connection carries the ceiling with no per-call cost.
 	if s.statementTimeout > 0 {
 		poolCfg.ConnConfig.RuntimeParams["statement_timeout"] = strconv.FormatInt(s.statementTimeout.Milliseconds(), 10)
+	}
+	if s.queryTracer != nil {
+		poolCfg.ConnConfig.Tracer = s.queryTracer
 	}
 	pool, err := pgxpool.NewWithConfig(ctx, poolCfg)
 	if err != nil {

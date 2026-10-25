@@ -36,18 +36,18 @@ chmod 700 "$TMP/bin/jq"
 PATH="$TMP/bin:$PATH"
 export PATH
 
-COMPOSE_JSON='{"services":{"teagramd":{"stop_grace_period":"2m0s","ports":[],"volumes":[],"network_mode":"","networks":{},"environment":{"TG_REPLICA_COUNT":"1","TG_CLIENT_ADDR_TRUST":"socket","POSTGRES_PASSWORD":"fixture-secret-postgres-password","DATABASE_URL":"postgres://fixture:dsn-secret@db/teagram"}}}}'
+COMPOSE_JSON='{"services":{"teagramd":{"stop_grace_period":"2m0s","ports":[],"volumes":[],"network_mode":"","networks":{},"environment":{"TG_REPLICA_COUNT":"1","TG_CLIENT_ADDR_TRUST":"socket","TG_LOG_LOGIN_CODES":"false","POSTGRES_PASSWORD":"fixture-secret-postgres-password","DATABASE_URL":"postgres://fixture:dsn-secret@db/teagram"}}}}'
 
 inspect_json() {
-  local extra=$1
-  jq -cn --arg extra "$extra" '
-    ["TG_REPLICA_COUNT=1","TG_CLIENT_ADDR_TRUST=socket"] as $base
+  local extra=$1 log_config=${INSPECT_LOG_CONFIG:-'{"Type":"json-file","Config":{}}'}
+  jq -cn --arg extra "$extra" --argjson log_config "$log_config" '
+    ["TG_REPLICA_COUNT=1","TG_CLIENT_ADDR_TRUST=socket","TG_LOG_LOGIN_CODES=false"] as $base
     | {
         Id:"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
         Image:"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
         Config:{Env:($base + (if $extra == "" then [] else [$extra] end)),StopTimeout:120},
         State:{Status:"running",ExitCode:0,StartedAt:"2026-10-16T12:00:00Z",FinishedAt:"0001-01-01T00:00:00Z"},
-        HostConfig:{LogConfig:{Type:"json-file",Config:{}},PortBindings:{}},Mounts:[]
+        HostConfig:{LogConfig:$log_config,PortBindings:{}},Mounts:[]
       }
   '
 }
@@ -126,6 +126,9 @@ exchange_budget_snapshot() {
 }
 
 : > "$ENV_FILE"
+default_compose_json=$COMPOSE_JSON
+COMPOSE_JSON=$(jq -c '.services.teagramd.logging={driver:"syslog",options:{"syslog-address":"unixgram:///dev/log","syslog-facility":"daemon","syslog-format":"rfc5424",tag:"teagramd"}}' <<< "$COMPOSE_JSON")
+INSPECT_LOG_CONFIG='{"Type":"syslog","Config":{"syslog-address":"unixgram:///dev/log","syslog-facility":"daemon","syslog-format":"rfc5424","tag":"teagramd"}}'
 empty_env=$(snapshot_from_json \
   "$(inspect_json '')" "$COMPOSE_JSON" "$ENV_FILE" "$OVERRIDE_FILE" selected-compose-render baseline)
 empty_exchange_env=$(exchange_budget_snapshot target '' '')
@@ -142,6 +145,8 @@ if ! compare_snapshots \
   cat "$TMP/key-exchange-empty-comparisons.tsv" >&2
   exit 1
 fi
+COMPOSE_JSON=$default_compose_json
+unset INSPECT_LOG_CONFIG
 printf '%s\n' 'PASS full baseline-to-target comparison accepts empty key-exchange mappings'
 printf '%s\n' 'PASS empty key-exchange settings retain the binary-default environment baseline'
 
@@ -278,9 +283,9 @@ syslog_compose=$(jq -c --argjson logging "$syslog_logging" \
   '.services.teagramd.environment.TG_LOG_LOGIN_CODES="false" | .services.teagramd.logging=$logging' <<< "$COMPOSE_JSON")
 syslog_options=$(jq -c '.options' <<< "$syslog_logging")
 legacy_login_codes_inspect=$(printf '%s' "$legacy_inspect" | jq -c \
-  '.Config.Env += ["TG_LOG_LOGIN_CODES=true"]')
+  '.Config.Env |= map(select(startswith("TG_LOG_LOGIN_CODES=") | not)) + ["TG_LOG_LOGIN_CODES=true"]')
 syslog_inspect=$(printf '%s' "$legacy_inspect" | jq -c --argjson options "$syslog_options" \
-  '.Id="cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc" | .Config.Env += ["TG_LOG_LOGIN_CODES=false"] | .HostConfig.LogConfig={Type:"syslog",Config:$options}')
+  '.Id="cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc" | .Config.Env |= map(select(startswith("TG_LOG_LOGIN_CODES=") | not)) + ["TG_LOG_LOGIN_CODES=false"] | .HostConfig.LogConfig={Type:"syslog",Config:$options}')
 default_logging_snapshot=$(snapshot_from_json \
   "$legacy_login_codes_inspect" "$legacy_login_codes_compose" "$ENV_FILE" "$OVERRIDE_FILE" selected-compose-render baseline)
 syslog_logging_snapshot=$(snapshot_from_json \
@@ -311,6 +316,19 @@ if ! compare_snapshots "$TMP/baseline.snapshot.json" "$TMP/syslog-target.snapsho
   exit 1
 fi
 printf '%s\n' 'PASS complete previous-to-current Compose profile accepts default-to-syslog and true-to-false login-code logging'
+if compare_snapshots "$TMP/baseline.snapshot.json" "$TMP/baseline.snapshot.json" \
+  sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb \
+  "$TMP/unmigrated-profile-comparisons.tsv" >/dev/null 2>&1; then
+  printf '%s\n' 'FAIL unchanged default logging with login codes was accepted' >&2
+  exit 1
+fi
+if ! grep -q $'compose_logging_policy\tdefault\tdefault\tfail' "$TMP/unmigrated-profile-comparisons.tsv" || \
+   ! grep -q $'compose_log_login_codes\ttrue\ttrue\tfail' "$TMP/unmigrated-profile-comparisons.tsv"; then
+  printf '%s\n' 'FAIL unchanged default logging did not fail both profile comparisons' >&2
+  cat "$TMP/unmigrated-profile-comparisons.tsv" >&2
+  exit 1
+fi
+printf '%s\n' 'PASS unchanged default logging with login codes is rejected by target verification'
 if snapshot_from_json "$legacy_login_codes_inspect" "$syslog_compose" "$ENV_FILE" "$OVERRIDE_FILE" \
   selected-compose-render target >/dev/null 2>&1; then
   printf '%s\n' 'FAIL syslog target accepted a container with a different active logger or login-code setting' >&2
@@ -788,3 +806,175 @@ turnstile_signin_add_baseline=$(ROLLOUT_ADDED_ENV=TG_TURNSTILE_SIGNIN_ENABLED \
   snapshot_from_json "$turnstile_disabled_inspect" "$turnstile_disabled_compose" "$ENV_FILE" "$OVERRIDE_FILE" selected-compose-render baseline)
 [ "$(jq -r '.container_env_added' <<< "$turnstile_signin_add_baseline")" = none ]
 printf '%s\n' 'PASS live disabled Turnstile defaults count as unset when the deploy adds Turnstile settings'
+
+media_key_source="$TMP/media-keys"
+mkdir -m 700 "$media_key_source"
+printf '%064d' 0 > "$media_key_source/1.key"
+chmod 600 "$media_key_source/1.key"
+if [ "$(id -u)" = 0 ]; then
+  chown 65532:65532 "$media_key_source" "$media_key_source/1.key"
+fi
+media_key_compose=$(jq -c --arg source "$media_key_source" '
+  .["x-media-keys"]={environment:{TG_MEDIA_KEY_DIR:"/run/teagramd/media-keys",TG_MEDIA_KEY_CURRENT:"1"}}
+  | .services.teagramd.environment.TG_MEDIA_KEY_DIR="/run/teagramd/media-keys"
+  | .services.teagramd.environment.TG_MEDIA_KEY_CURRENT="1"
+  | .services.teagramd.volumes += [{
+      type:"bind",source:$source,target:"/run/teagramd/media-keys",read_only:true,
+      bind:{create_host_path:false}
+    }]
+' <<< "$syslog_compose")
+media_key_inspect=$(printf '%s' "$syslog_inspect" | jq -c --arg source "$media_key_source" '
+  .Config.Env += [
+    "TG_MEDIA_KEY_DIR=/run/teagramd/media-keys",
+    "TG_MEDIA_KEY_CURRENT=1"
+  ]
+  | .Mounts += [{
+      Type:"bind",Source:$source,Destination:"/run/teagramd/media-keys",
+      Mode:"ro",RW:false,Propagation:"rprivate"
+    }]
+')
+media_key_baseline=$(snapshot_from_json \
+  "$syslog_inspect" "$syslog_compose" "$ENV_FILE" "$OVERRIDE_FILE" selected-compose-render baseline)
+media_key_target=$(snapshot_from_json \
+  "$media_key_inspect" "$media_key_compose" "$ENV_FILE" "$OVERRIDE_FILE" selected-compose-render target)
+[ "$(jq -r '.media_key_source' <<< "$media_key_baseline")" = unset ]
+[ "$(jq -r '.media_key_current' <<< "$media_key_baseline")" = unset ]
+[ "$(jq -r '.media_key_source' <<< "$media_key_target")" = "$media_key_source" ]
+[ "$(jq -r '.media_key_current' <<< "$media_key_target")" = 1 ]
+[ "$(jq -r '.config_sha256' <<< "$media_key_baseline")" = "$(jq -r '.config_sha256' <<< "$media_key_target")" ]
+printf '%s\n' 'PASS Compose extension anchors do not change the resolved runtime digest'
+[ "$(jq -r '.mounts_sha256' <<< "$media_key_baseline")" = "$(jq -r '.mounts_sha256' <<< "$media_key_target")" ]
+[ "$(jq -r '.container_env_sha256' <<< "$media_key_baseline")" = "$(jq -r '.container_env_sha256' <<< "$media_key_target")" ]
+media_key_normalized_compose=$(jq -c '
+  .services.teagramd.volumes[-1].bind={}
+' <<< "$media_key_compose")
+media_key_normalized_target=$(snapshot_from_json \
+  "$media_key_inspect" "$media_key_normalized_compose" \
+  "$ENV_FILE" "$OVERRIDE_FILE" selected-compose-render target)
+[ "$(jq -r '.media_key_source' <<< "$media_key_normalized_target")" = "$media_key_source" ]
+printf '%s\n' 'PASS media-key validation accepts Compose-normalized empty bind options'
+printf '%064s' '' | tr ' ' A > "$media_key_source/1.key"
+snapshot_from_json "$media_key_inspect" "$media_key_compose" \
+  "$ENV_FILE" "$OVERRIDE_FILE" selected-compose-render target >/dev/null
+printf '%064d\r\n' 0 > "$media_key_source/1.key"
+snapshot_from_json "$media_key_inspect" "$media_key_compose" \
+  "$ENV_FILE" "$OVERRIDE_FILE" selected-compose-render target >/dev/null
+printf '%s\n' 'PASS media-key accepts no newline, uppercase hex, and CRLF'
+printf '%064d' 0 > "$media_key_source/1.key"
+printf '%s\n' "$media_key_baseline" > "$TMP/media-key-baseline.snapshot.json"
+printf '%s\n' "$media_key_target" > "$TMP/media-key-target.snapshot.json"
+compare_snapshots "$TMP/media-key-baseline.snapshot.json" "$TMP/media-key-target.snapshot.json" \
+  sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb \
+  "$TMP/media-key-comparisons.tsv" >/dev/null
+printf '%s\n' 'PASS read-only media-key mount addition preserves rollout equivalence'
+
+media_key_changed_source=$(printf '%s' "$media_key_target" | jq -c --arg source "$TMP/other-media-keys" '.media_key_source=$source')
+printf '%s\n' "$media_key_changed_source" > "$TMP/media-key-changed-source.snapshot.json"
+if compare_snapshots "$TMP/media-key-target.snapshot.json" "$TMP/media-key-changed-source.snapshot.json" \
+  sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb \
+  "$TMP/media-key-changed-source-comparisons.tsv" >/dev/null; then
+  printf '%s\n' 'FAIL media-key source drift was accepted after the initial bind addition' >&2
+  exit 1
+fi
+printf '%s\n' 'PASS media-key source path is pinned after initial deployment'
+
+media_key_changed_version=$(printf '%s' "$media_key_target" | jq -c '.media_key_current="2"')
+printf '%s\n' "$media_key_changed_version" > "$TMP/media-key-changed-version.snapshot.json"
+if compare_snapshots "$TMP/media-key-target.snapshot.json" "$TMP/media-key-changed-version.snapshot.json" \
+  sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb \
+  "$TMP/media-key-changed-version-comparisons.tsv" >/dev/null; then
+  printf '%s\n' 'FAIL media-key version drift was accepted after the initial deployment' >&2
+  exit 1
+fi
+printf '%s\n' 'PASS media-key version is pinned after initial deployment'
+
+media_key_writable_compose=$(jq -c '
+  .services.teagramd.volumes[-1].read_only=false
+' <<< "$media_key_compose")
+media_key_writable_inspect=$(printf '%s' "$media_key_inspect" | jq -c '
+  .Mounts[-1].Mode="rw" | .Mounts[-1].RW=true
+')
+if snapshot_from_json "$media_key_writable_inspect" "$media_key_writable_compose" \
+  "$ENV_FILE" "$OVERRIDE_FILE" selected-compose-render target \
+  >/dev/null 2>"$TMP/media-key-writable.err"; then
+  printf '%s\n' 'FAIL writable media-key mount was accepted' >&2
+  exit 1
+fi
+printf '%s\n' 'PASS writable media-key mount is rejected'
+
+media_key_create_host_path_compose=$(jq -c '
+  .services.teagramd.volumes[-1].bind.create_host_path=true
+' <<< "$media_key_compose")
+if snapshot_from_json "$media_key_inspect" "$media_key_create_host_path_compose" \
+  "$ENV_FILE" "$OVERRIDE_FILE" selected-compose-render target \
+  >/dev/null 2>"$TMP/media-key-create-host-path.err"; then
+  printf '%s\n' 'FAIL media-key host path creation was accepted' >&2
+  exit 1
+fi
+printf '%s\n' 'PASS media-key host path creation is rejected'
+
+media_key_extra_option_compose=$(jq -c '
+  .services.teagramd.volumes[-1].bind.propagation="rprivate"
+' <<< "$media_key_compose")
+if snapshot_from_json "$media_key_inspect" "$media_key_extra_option_compose" \
+  "$ENV_FILE" "$OVERRIDE_FILE" selected-compose-render target \
+  >/dev/null 2>"$TMP/media-key-extra-option.err"; then
+  printf '%s\n' 'FAIL media-key mount with extra bind options was accepted' >&2
+  exit 1
+fi
+printf '%s\n' 'PASS media-key mount rejects unreviewed bind options'
+
+media_key_wrong_version_compose=$(jq -c '.services.teagramd.environment.TG_MEDIA_KEY_CURRENT="2"' <<< "$media_key_compose")
+media_key_wrong_version_inspect=$(printf '%s' "$media_key_inspect" | jq -c '
+  .Config.Env |= map(if startswith("TG_MEDIA_KEY_CURRENT=") then "TG_MEDIA_KEY_CURRENT=2" else . end)
+')
+if snapshot_from_json "$media_key_wrong_version_inspect" "$media_key_wrong_version_compose" \
+  "$ENV_FILE" "$OVERRIDE_FILE" selected-compose-render target \
+  >/dev/null 2>"$TMP/media-key-version.err"; then
+  printf '%s\n' 'FAIL unsupported media-key version was accepted' >&2
+  exit 1
+fi
+printf '%s\n' 'PASS unsupported media-key version is rejected'
+
+media_key_inside_checkout="$ROLLOUT_CHECKOUT_PATH/media-keys"
+mkdir -m 700 "$media_key_inside_checkout"
+printf '%064d\n' 0 > "$media_key_inside_checkout/1.key"
+chmod 600 "$media_key_inside_checkout/1.key"
+if [ "$(id -u)" = 0 ]; then
+  chown 65532:65532 "$media_key_inside_checkout" "$media_key_inside_checkout/1.key"
+fi
+media_key_inside_compose=$(jq -c --arg source "$media_key_inside_checkout" \
+  '.services.teagramd.volumes[-1].source=$source' <<< "$media_key_compose")
+media_key_inside_inspect=$(printf '%s' "$media_key_inspect" | jq -c --arg source "$media_key_inside_checkout" \
+  '.Mounts[-1].Source=$source')
+if snapshot_from_json "$media_key_inside_inspect" "$media_key_inside_compose" \
+  "$ENV_FILE" "$OVERRIDE_FILE" selected-compose-render target \
+  >/dev/null 2>"$TMP/media-key-inside-checkout.err"; then
+  printf '%s\n' 'FAIL media-key directory inside the application checkout was accepted' >&2
+  exit 1
+fi
+printf '%s\n' 'PASS media-key directory must be outside the application checkout'
+
+if [ "$(id -u)" = 0 ]; then
+  chown 0:0 "$media_key_source/1.key"
+  if snapshot_from_json "$media_key_inspect" "$media_key_compose" \
+    "$ENV_FILE" "$OVERRIDE_FILE" selected-compose-render target \
+    >/dev/null 2>"$TMP/media-key-owner.err"; then
+    chown 65532:65532 "$media_key_source/1.key"
+    printf '%s\n' 'FAIL media-key file with an unexpected owner was accepted' >&2
+    exit 1
+  fi
+  chown 65532:65532 "$media_key_source/1.key"
+  printf '%s\n' 'PASS media-key file owner is validated when rollout runs as root'
+fi
+
+media_key_wrong_path=$(printf '%s' "$media_key_inspect" | jq -c '
+  .Mounts[-1].Source="/tmp/other-media-keys"
+')
+if snapshot_from_json "$media_key_wrong_path" "$media_key_compose" \
+  "$ENV_FILE" "$OVERRIDE_FILE" selected-compose-render target \
+  >/dev/null 2>"$TMP/media-key-source-mismatch.err"; then
+  printf '%s\n' 'FAIL media-key source mismatch was accepted' >&2
+  exit 1
+fi
+printf '%s\n' 'PASS media-key container mount must match the resolved Compose source'

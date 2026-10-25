@@ -858,6 +858,62 @@ func TestNewS3StoreKeepsPopulatedAuthorityFreeNamespaceEncrypted(t *testing.T) {
 	}
 }
 
+func TestNewMigratedS3StoreRemoveDeletesLegacyAndEncryptedKeys(t *testing.T) {
+	t.Parallel()
+	var mu sync.Mutex
+	var deleted []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet && r.URL.Query().Get("list-type") == "2" {
+			w.Header().Set("Content-Type", "application/xml")
+			if _, err := io.WriteString(w, `<ListBucketResult><IsTruncated>false</IsTruncated></ListBucketResult>`); err != nil {
+				t.Errorf("write S3 listing: %v", err)
+			}
+			return
+		}
+		if r.Method == http.MethodDelete {
+			mu.Lock()
+			deleted = append(deleted, strings.TrimPrefix(r.URL.Path, "/test-bucket/"))
+			mu.Unlock()
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		writeS3Error(w, http.StatusNotFound, "NoSuchKey")
+	}))
+	t.Cleanup(server.Close)
+	keys, err := blob.NewKeyRing(1, map[uint32][]byte{1: bytes.Repeat([]byte{0x6d}, blob.MediaKeyLen)})
+	if err != nil {
+		t.Fatalf("new media key ring: %v", err)
+	}
+	serving, err := blob.NewMigratedS3Store(context.Background(), blob.S3Config{
+		Endpoint:          server.URL,
+		Bucket:            "test-bucket",
+		Prefix:            "tenant/",
+		AccessKeyID:       "access",
+		SecretAccessKey:   "secret",
+		AllowInsecureHTTP: true,
+		MaxAttempts:       1,
+	}, keys)
+	if err != nil {
+		t.Fatalf("create migrated S3 store: %v", err)
+	}
+	if err := serving.Remove(context.Background(), "02/1"); err != nil {
+		t.Fatalf("remove migrated media: %v", err)
+	}
+
+	mu.Lock()
+	got := append([]string(nil), deleted...)
+	mu.Unlock()
+	want := []string{"tenant/02/1", "tenant/encrypted/02/1"}
+	if len(got) != len(want) {
+		t.Fatalf("deleted S3 keys = %v, want legacy plaintext and encrypted keys %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("deleted S3 keys = %v, want plaintext removed before encrypted key: %v", got, want)
+		}
+	}
+}
+
 func TestS3UsesConfiguredCABundle(t *testing.T) {
 	t.Parallel()
 	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

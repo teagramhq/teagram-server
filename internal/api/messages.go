@@ -444,7 +444,7 @@ func (h *handlers) handleSendMessageAfterReplyOnConn(c *mtproto.Conn, r *mtproto
 			res := &tg.Updates{
 				Updates: []tg.UpdateClass{
 					&tg.UpdateMessageID{ID: int(existing.LocalID), RandomID: req.RandomID},
-					&tg.UpdateNewMessage{Message: messageToTL(existing, nil, nil, nil, nil, h.dcID), Pts: pts, PtsCount: 1},
+					&tg.UpdateNewMessage{Message: h.messageToTL(existing, nil, nil, nil, nil, h.dcID), Pts: pts, PtsCount: 1},
 				},
 				Users: users,
 				Date:  int(existing.Date.Unix()),
@@ -505,7 +505,7 @@ func (h *handlers) handleSendMessageAfterReplyOnConn(c *mtproto.Conn, r *mtproto
 		Updates: []tg.UpdateClass{
 			&tg.UpdateMessageID{ID: int(sender.LocalID), RandomID: req.RandomID},
 			// sendMessage never carries media; the media send path builds its own reply.
-			&tg.UpdateNewMessage{Message: messageToTL(sender, nil, nil, nil, nil, h.dcID), Pts: senderPts, PtsCount: 1},
+			&tg.UpdateNewMessage{Message: h.messageToTL(sender, nil, nil, nil, nil, h.dcID), Pts: senderPts, PtsCount: 1},
 		},
 		Users: users,
 		Date:  int(sender.Date.Unix()),
@@ -576,7 +576,7 @@ func (h *handlers) sendChatMessageAfterReplyOnConn(c *mtproto.Conn, r *mtproto.R
 			return &tg.Updates{
 				Updates: []tg.UpdateClass{
 					&tg.UpdateMessageID{ID: int(existing.LocalID), RandomID: req.RandomID},
-					&tg.UpdateNewMessage{Message: messageToTL(existing, nil, nil, nil, nil, h.dcID), Pts: pts, PtsCount: 1},
+					&tg.UpdateNewMessage{Message: h.messageToTL(existing, nil, nil, nil, nil, h.dcID), Pts: pts, PtsCount: 1},
 				},
 				Users: users,
 				Chats: chats,
@@ -656,7 +656,7 @@ func (h *handlers) sendChatMessageAfterReplyOnConn(c *mtproto.Conn, r *mtproto.R
 		Updates: []tg.UpdateClass{
 			&tg.UpdateMessageID{ID: int(sender.LocalID), RandomID: req.RandomID},
 			// sendMessage never carries media; the media send path builds its own reply.
-			&tg.UpdateNewMessage{Message: messageToTL(sender, nil, nil, nil, nil, h.dcID), Pts: senderPts, PtsCount: 1},
+			&tg.UpdateNewMessage{Message: h.messageToTL(sender, nil, nil, nil, nil, h.dcID), Pts: senderPts, PtsCount: 1},
 		},
 		Users: users,
 		Chats: chats,
@@ -822,7 +822,7 @@ func (h *handlers) handleGetHistory(r *mtproto.Request) (bin.Encoder, error) {
 			}
 			tlMsgs[i] = tlMessage
 		} else {
-			tlMsgs[i] = messageToTL(m, nil, files, nil, reactionsByMsg[m.LocalID], h.dcID)
+			tlMsgs[i] = h.messageToTL(m, nil, files, nil, reactionsByMsg[m.LocalID], h.dcID)
 		}
 	}
 	var users []tg.UserClass
@@ -917,7 +917,7 @@ func (h *handlers) handleGetMessages(r *mtproto.Request) (bin.Encoder, error) {
 			}
 			tlMessages[i] = tlMessage
 		} else {
-			tlMessages[i] = messageToTL(message, createUsers, files, nil, snapshot.ReactionsByLocalID[message.LocalID], h.dcID)
+			tlMessages[i] = h.messageToTL(message, createUsers, files, nil, snapshot.ReactionsByLocalID[message.LocalID], h.dcID)
 		}
 	}
 	return &tg.MessagesMessages{Messages: tlMessages, Users: users, Chats: chats}, nil
@@ -1023,7 +1023,7 @@ func (h *handlers) chatHistory(r *mtproto.Request, snapshot store.ChatHistorySna
 			}
 			tlMsgs[i] = tlMessage
 		} else {
-			tlMsgs[i] = messageToTL(m, createUsers, files, nil, reactionsByMsg[m.LocalID], h.dcID)
+			tlMsgs[i] = h.messageToTL(m, createUsers, files, nil, reactionsByMsg[m.LocalID], h.dcID)
 		}
 	}
 	users, err := h.renderUsers(r.Ctx, snapshot.Users, r.UserID, snapshot.EntitledUsers, nil)
@@ -1208,7 +1208,7 @@ func (h *handlers) handleEditMessageAfterReplyOnConn(c *mtproto.Conn, r *mtproto
 	}
 	res := &tg.Updates{
 		Updates: []tg.UpdateClass{
-			&tg.UpdateEditMessage{Message: messageToTL(edited, nil, files, nil, nil, h.dcID), Pts: newPts, PtsCount: 1},
+			&tg.UpdateEditMessage{Message: h.messageToTL(edited, nil, files, nil, nil, h.dcID), Pts: newPts, PtsCount: 1},
 		},
 		Users: users,
 		Date:  int(time.Now().Unix()),
@@ -2135,7 +2135,7 @@ func (h *handlers) forwardReply(r *mtproto.Request, destPeerType store.PeerType,
 	for i, fm := range sentMsgs {
 		updates = append(updates,
 			&tg.UpdateMessageID{ID: int(fm.Message.LocalID), RandomID: randomIDs[i]},
-			&tg.UpdateNewMessage{Message: messageToTL(fm.Message, nil, files, nil, nil, h.dcID), Pts: fm.Pts, PtsCount: 1},
+			&tg.UpdateNewMessage{Message: h.messageToTL(fm.Message, nil, files, nil, nil, h.dcID), Pts: fm.Pts, PtsCount: 1},
 		)
 	}
 	date := time.Now().Unix()
@@ -2552,7 +2552,7 @@ func (h *handlers) handleSearch(r *mtproto.Request) (bin.Encoder, error) {
 			}
 			tlMsgs[i] = tlMessage
 		} else {
-			tlMsgs[i] = messageToTL(m, nil, files, nil, nil, h.dcID)
+			tlMsgs[i] = h.messageToTL(m, nil, files, nil, nil, h.dcID)
 		}
 	}
 
@@ -2611,7 +2611,7 @@ func (h *handlers) chatSearch(
 			}
 			tlMsgs[i] = tlMessage
 		} else {
-			tlMsgs[i] = messageToTL(m, createUsers, files, nil, nil, h.dcID)
+			tlMsgs[i] = h.messageToTL(m, createUsers, files, nil, nil, h.dcID)
 		}
 		authors[m.FromID] = true
 		switch m.Action {

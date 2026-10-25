@@ -1,0 +1,22 @@
+[
+  "auth key exchange",
+  "help.getConfig",
+  "messages.getAvailableReactions",
+  "messages.getDialogs",
+  "messages.getHistory newest page",
+  "messages.getHistory oldest page",
+  "messages.getHistory jump to date",
+  "messages.getHistory group",
+  "messages.search",
+  "contacts.search",
+  "contacts.getContacts",
+  "updates.getDifference 1 day offline",
+  "updates.getDifference 30 days offline",
+  "channels.getParticipants",
+  "upload.getFile first part",
+  "messages.sendMessage private",
+  "messages.sendMessage channel",
+  "channel post fan-out",
+  "messages.readHistory",
+  "contacts.importContacts 5000"
+]

@@ -75,6 +75,17 @@ const (
 	defaultMaxChannelsPerUser     = 500   // per account
 )
 
+// WithMaxChannelParticipants replaces the per-channel participant bound for
+// one Store. The server never sets it; the performance fixture needs a channel
+// larger than the shipped bound to measure fan-out at that size.
+func WithMaxChannelParticipants(n int) Option {
+	return func(s *Store) {
+		if n > 0 {
+			s.maxChannelParticipants = n
+		}
+	}
+}
+
 // inviteHashBytes is the entropy behind one invite. 128 bits is what makes the
 // hash space unwalkable, which is the whole of the admission boundary.
 const inviteHashBytes = 16
