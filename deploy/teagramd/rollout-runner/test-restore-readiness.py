@@ -1051,6 +1051,23 @@ class RestoreReadinessContractTests(unittest.TestCase):
         RESTORE_READINESS.require_no_docker_identity_collisions(inventory, "9" * 32, "preflight")
         self.assertNotIn(".Config.Env", RESTORE_READINESS.CONTAINER_INVENTORY_TEMPLATE)
         self.assertNotIn(".State.Health.Log", RESTORE_READINESS.CONTAINER_INVENTORY_TEMPLATE)
+        for path in (
+            "State.Health",
+            "Config.Labels",
+            "Config.ExposedPorts",
+            "NetworkSettings.Networks",
+            "HostConfig.PortBindings",
+            "HostConfig.Binds",
+            "HostConfig.VolumesFrom",
+            "HostConfig.Links",
+            "HostConfig.ExtraHosts",
+            "HostConfig.CapAdd",
+            "HostConfig.CapDrop",
+            "HostConfig.SecurityOpt",
+            "HostConfig.Devices",
+        ):
+            parent, key = path.split(".")
+            self.assertIn(f'(index .{parent} "{key}")', RESTORE_READINESS.CONTAINER_INVENTORY_TEMPLATE)
         with self.assertRaises(ValueError):
             RESTORE_READINESS._inventory_labels('{"unexpected":[]}')
 
