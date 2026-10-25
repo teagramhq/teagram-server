@@ -82,5 +82,36 @@ class EmojiDefinitionTests(unittest.TestCase):
             verify("Noto Emoji", "0" * 64, {"2D/svg/emoji_u1f600.svg": b"tampered"})
 
 
+class FluentMetadataTests(unittest.TestCase):
+    def test_metadata_uses_default_color_art_when_direct_color_is_absent(self):
+        metadata_path = "assets/waving-hand/metadata.json"
+        art_path = "assets/waving-hand/Default/Color/waving-hand.svg"
+        files = {metadata_path: b'{"unicode":"1F44B"}'}
+        tree = {metadata_path: {}, art_path: {}}
+
+        index = generate.parse_fluent_metadata(
+            {"name": "Microsoft Fluent Emoji"}, files, tree,
+        )
+
+        self.assertEqual(index, {(0x1F44B,): art_path})
+
+    def test_metadata_rejects_ambiguous_default_color_art(self):
+        metadata_path = "assets/waving-hand/metadata.json"
+        files = {metadata_path: b'{"unicode":"1F44B"}'}
+        tree = {
+            metadata_path: {},
+            "assets/waving-hand/Default/Color/waving-hand.svg": {},
+            "assets/waving-hand/Default/Color/waving-hand_variant.svg": {},
+        }
+
+        with self.assertRaisesRegex(
+            generate.GeneratorError,
+            "Microsoft Fluent Emoji source metadata assets/waving-hand/metadata.json has ambiguous Color art",
+        ):
+            generate.parse_fluent_metadata(
+                {"name": "Microsoft Fluent Emoji"}, files, tree,
+            )
+
+
 if __name__ == "__main__":
     unittest.main()

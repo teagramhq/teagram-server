@@ -288,9 +288,18 @@ def parse_fluent_metadata(source: dict, files: dict[str, bytes], tree: dict[str,
         except (UnicodeDecodeError, json.JSONDecodeError, KeyError, TypeError, ValueError) as error:
             raise GeneratorError(f"{name} source metadata {path} is invalid: {error}") from error
         key = normalized_codepoints(codepoints)
-        color_paths = colors_by_parent.get(path.rsplit("/", 1)[0], [])
-        if not key or len(color_paths) != 1:
+        if not key:
             continue
+        parent = path.rsplit("/", 1)[0]
+        color_paths = colors_by_parent.get(parent, [])
+        if not color_paths:
+            color_paths = colors_by_parent.get(f"{parent}/Default", [])
+        if not color_paths:
+            continue
+        if len(color_paths) != 1:
+            raise GeneratorError(
+                f"{name} source metadata {path} has ambiguous Color art"
+            )
         existing = index.get(key)
         if existing is not None and existing != color_paths[0]:
             raise GeneratorError(f"{name} source has duplicate Color art for {emoji_filename(key)}")
