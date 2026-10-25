@@ -19,6 +19,7 @@ foreign_volume_name=""
 foreign_volume_created_at=""
 foreign_network_id=""
 
+# shellcheck disable=SC2329 # Invoked by the EXIT trap below.
 cleanup_foreign_fixture() {
   local status=$?
   local current_volume_identity expected_volume_identity
@@ -93,7 +94,7 @@ if ! sudo -n -- env -i \
   LC_ALL=C \
   PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
   PYTHONDONTWRITEBYTECODE=1 \
-  /usr/bin/python3 -B "$inventory_tool" snapshot >"$inventory_snapshot"; then
+  /usr/bin/python3 -B "$inventory_tool" snapshot | /usr/bin/tee "$inventory_snapshot" >/dev/null; then
   printf '%s\n' 'could not snapshot foreign Docker fixture' >&2
   exit 1
 fi
