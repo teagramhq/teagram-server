@@ -19,7 +19,7 @@ import (
 )
 
 const (
-	landingBody = `<!doctype html><html lang="en"><body><main>Open this in Teagramd</main></body></html>`
+	landingBody = `<!doctype html><html lang="en"><body><main>Open this in Teagram</main></body></html>`
 	webBody     = "web-resource"
 )
 
@@ -126,6 +126,7 @@ func TestThreatModelNegativeMatrixNeverReachesWeb(t *testing.T) {
 
 	targets := []string{
 		"/+synthetic-capability",
+		"/joinchat/synthetic-capability",
 		"/%2Bsynthetic-capability",
 		"/%2bsynthetic-capability",
 		"/+synthetic-capability/",

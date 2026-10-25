@@ -41,7 +41,7 @@ if [[ "$(<"$temp_dir/status")" != 200 ]]; then
 	printf 'landing GET returned %s, want 200\n' "$(<"$temp_dir/status")" >&2
 	exit 1
 fi
-if [[ "$(<"$temp_dir/body")" != '<!doctype html><html lang="en"><body><main>Open this in Teagramd</main></body></html>' ]]; then
+if [[ "$(<"$temp_dir/body")" != '<!doctype html><html lang="en"><body><main>Open this in Teagram</main></body></html>' ]]; then
 	printf 'landing GET returned unexpected content\n' >&2
 	exit 1
 fi
