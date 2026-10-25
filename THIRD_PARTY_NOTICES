@@ -1,0 +1,38 @@
+Twemoji graphics
+
+Copyright 2019 Twitter, Inc. and other contributors.
+License: Creative Commons Attribution 4.0 International (CC BY 4.0):
+https://creativecommons.org/licenses/by/4.0/
+Source: https://github.com/twitter/twemoji
+Pinned revision: v14.0.3 (commit edfe80f9dc0ca034b8071115c5fd377ce5182905).
+
+Noto Emoji images
+
+Copyright 2013 Google, Inc. All Rights Reserved.
+License: Apache License 2.0 (Apache-2.0):
+https://www.apache.org/licenses/LICENSE-2.0
+Source: https://github.com/googlefonts/noto-emoji
+Pinned revision: v2026-09-24-unicode18_0 (commit e20cbc2bbec1926686be9f9bee7d1d2cfa1fea0e). The generated packs use the 2D SVG artwork.
+
+OpenMoji
+
+Copyright HfG Schwäbisch Gmünd and OpenMoji contributors. OpenMoji is a project by Benedikt Groß, Daniel Utz, students, and external contributors.
+License: Creative Commons Attribution-ShareAlike 4.0 International (CC BY-SA 4.0):
+https://creativecommons.org/licenses/by-sa/4.0/
+Source: https://github.com/hfg-gmuend/openmoji
+Pinned revision: 17.0.0 (commit f9fc506a3f913be9897ab0181d611d4c910a4104).
+Attribution: All emojis designed by OpenMoji, the open-source emoji and icon project.
+
+Microsoft Fluent Emoji
+
+Copyright Microsoft Corporation.
+License: MIT.
+Source: https://github.com/microsoft/fluentui-emoji
+Pinned revision: commit 1ffb34c752ecf5d402f04cfb4b392c77f57c54bc. The generated packs use the Color artwork.
+
+Unicode Emoji data
+
+Copyright 2026 Unicode, Inc.
+License: Unicode Terms of Use: https://www.unicode.org/terms_of_use.html
+Source: https://www.unicode.org/Public/18.0.0/emoji/emoji-test.txt
+Pinned revision: Emoji 18.0 (SHA-256 8f3735cda1f92a779d78af67cf86066bb1f07143dc22f2ac29394d9bc57ab21a). Used to define the four included Unicode groups and emoji alternatives.
