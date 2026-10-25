@@ -273,3 +273,41 @@ func TestEvaluateBlocksUnexplainedStatements(t *testing.T) {
 		t.Fatalf("failures = %q", got)
 	}
 }
+
+func TestEvaluateBlocksUnreadableOrEmptyHeadReport(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		head perfreport.Report
+		want string
+	}{
+		{"empty", perfreport.Report{Version: perfreport.Version}, "head report 1 has no results"},
+		{"old format", perfreport.Report{Version: perfreport.Version + 1, Results: pair("x", perfreport.Read, result(1, 1, 1, 1), result(1, 1, 1, 1))}, "head report 1 has format 2, want 1"},
+	} {
+		v := perfreport.Evaluate(perfreport.Input{Head: []perfreport.Report{tc.head}})
+		if got := reasons(v.Failures); !strings.Contains(got, tc.want) {
+			t.Errorf("%s: failures = %q, want %q", tc.name, got, tc.want)
+		}
+	}
+}
+
+func TestEvaluateBlocksScenarioTheHarnessListsButDidNotMeasure(t *testing.T) {
+	head := report(pair("help.getConfig", perfreport.Read, result(1, 1, 1, 1), result(1, 1, 1, 1))...)
+	head.Scenarios = []string{"help.getConfig", "messages.getDialogs"}
+	got := reasons(perfreport.Evaluate(perfreport.Input{Head: []perfreport.Report{head}}).Failures)
+	for _, want := range []string{"messages.getDialogs: no 1x measurement", "messages.getDialogs: no 100x measurement"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("failures = %q, want %q", got, want)
+		}
+	}
+}
+
+func TestEvaluateBlocksScenarioDroppedFromBase(t *testing.T) {
+	base := report(pair("help.getConfig", perfreport.Read, result(1, 1, 1, 1), result(1, 1, 1, 1))...)
+	base.Scenarios = []string{"help.getConfig", "messages.getDialogs"}
+	head := report(pair("help.getConfig", perfreport.Read, result(1, 1, 1, 1), result(1, 1, 1, 1))...)
+	head.Scenarios = []string{"help.getConfig"}
+	got := reasons(perfreport.Evaluate(perfreport.Input{Head: []perfreport.Report{head}, Base: []perfreport.Report{base}}).Failures)
+	if !strings.Contains(got, "messages.getDialogs: measured on main, not on this branch") {
+		t.Fatalf("failures = %q", got)
+	}
+}

@@ -55,28 +55,36 @@ restore() {
   done
 }
 
-# base_ready prepares the base branch's databases and test binary, or says why
-# it cannot. Its databases are copies of the restored fixtures, migrated with
-# the base branch's own migrations before head's are applied.
+# base_ready prepares the base branch's databases and test binary. It returns
+# 1 only for the two documented skips, a base without the harness and base
+# migrations that do not apply to the cached fixture; anything else that goes
+# wrong fails the job, since skipping would silently drop every base check.
+# Its databases are copies of the restored fixtures, migrated with the base
+# branch's own migrations before head's are applied.
 base_ready() {
   if [ -z "${PERF_BASE_SHA:-}" ]; then
     echo "no base commit" >"$PERF_WORK/base-skipped"
     return 1
   fi
   local tree="$PERF_WORK/base"
-  git worktree add --detach "$tree" "$PERF_BASE_SHA" >/dev/null
+  git worktree add --detach "$tree" "$PERF_BASE_SHA" >/dev/null || fatal "check out base $PERF_BASE_SHA"
   if [ ! -f "$tree/test/perf/harness_test.go" ]; then
     echo "base has no harness" >"$PERF_WORK/base-skipped"
     return 1
   fi
   for f in "${fixtures[@]}"; do
-    psql_admin -c "CREATE DATABASE perf_${f}_base TEMPLATE perf_$f"
+    psql_admin -c "CREATE DATABASE perf_${f}_base TEMPLATE perf_$f" || fatal "copy the $f fixture for base"
     if ! migrate "$tree" "${f}_base"; then
       echo "base migrations do not apply to the cached fixture" >"$PERF_WORK/base-skipped"
       return 1
     fi
   done
-  (cd "$tree" && go test -c -tags performance -o "$PERF_WORK/base.test" ./test/perf)
+  (cd "$tree" && go test -c -tags performance -o "$PERF_WORK/base.test" ./test/perf) || fatal "build the base harness"
+}
+
+fatal() {
+  echo "::error::could not $1"
+  exit 1
 }
 
 run_branch() {
@@ -143,7 +151,9 @@ measure() {
   if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
     cat "$PERF_WORK/summary.md" >>"$GITHUB_STEP_SUMMARY"
   fi
-  if [ -n "${PERF_RECORD:-}" ] && [ -f "$PERF_WORK/aggregate.json" ]; then
+  # Only a passing main run calibrates: a regression kept in the history would
+  # widen the noise band that is meant to catch it.
+  if [ -n "${PERF_RECORD:-}" ] && [ "$status" -eq 0 ] && [ -f "$PERF_WORK/aggregate.json" ]; then
     cp "$PERF_WORK/aggregate.json" "$PERF_HISTORY/$(date -u +%Y%m%dT%H%M%S).json"
     ls -1 "$PERF_HISTORY"/*.json | head -n -"$history_keep" | xargs -r rm --
   fi

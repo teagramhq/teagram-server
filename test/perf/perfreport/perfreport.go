@@ -56,8 +56,11 @@ const Calibration = 20
 
 // Report is one harness run over both fixtures.
 type Report struct {
-	Version int      `json:"version"`
-	Results []Result `json:"results"`
+	Version int `json:"version"`
+	// Scenarios names every scenario the harness was built to run, so one
+	// that produced no result is still judged, as missing.
+	Scenarios []string `json:"scenarios"`
+	Results   []Result `json:"results"`
 }
 
 // Result is one scenario on one fixture.
@@ -213,6 +216,33 @@ func Evaluate(in Input) Verdict {
 	// unused waivers are stale.
 	checked := map[string]bool{}
 	used := map[Waiver]bool{}
+	// A head report that cannot be read measured nothing; passing on it would
+	// pass an unmeasured branch.
+	for i, rep := range in.Head {
+		switch {
+		case rep.Version != Version:
+			v.Failures = append(v.Failures, Failure{Scenario: "report", Check: checkMissing,
+				Reason: fmt.Sprintf("head report %d has format %d, want %d", i+1, rep.Version, Version)})
+		case len(rep.Results) == 0:
+			v.Failures = append(v.Failures, Failure{Scenario: "report", Check: checkMissing,
+				Reason: fmt.Sprintf("head report %d has no results", i+1)})
+		}
+		for _, name := range rep.Scenarios {
+			if !slices.Contains(order, name) {
+				order = append(order, name)
+			}
+		}
+	}
+	for _, rep := range in.Base {
+		for _, name := range rep.Scenarios {
+			if !slices.ContainsFunc(in.Head, func(h Report) bool { return slices.Contains(h.Scenarios, name) }) &&
+				!slices.Contains(order, name) {
+				order = append(order, name)
+				v.Failures = append(v.Failures, Failure{Scenario: name, Check: checkMissing,
+					Reason: "measured on main, not on this branch"})
+			}
+		}
+	}
 	for _, name := range order {
 		row := Row{Name: name, Small: headAgg[key{name, Small}], Large: headAgg[key{name, Large}], Base: baseAgg[key{name, Large}]}
 		row.Band, row.Runs = bands[name].sd, bands[name].n
@@ -325,6 +355,13 @@ func scanKey(scan string) string {
 func Aggregate(reports []Report) Report {
 	agg, order := aggregate(reports)
 	out := Report{Version: Version}
+	for _, rep := range reports {
+		for _, name := range rep.Scenarios {
+			if !slices.Contains(out.Scenarios, name) {
+				out.Scenarios = append(out.Scenarios, name)
+			}
+		}
+	}
 	for _, name := range order {
 		for _, fixture := range []string{Small, Large} {
 			if r := agg[key{name, fixture}]; r != nil {

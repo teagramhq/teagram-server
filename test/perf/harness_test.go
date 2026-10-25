@@ -74,6 +74,11 @@ func TestRPCPerformance(t *testing.T) {
 	}
 	only := os.Getenv("TG_PERF_ONLY")
 	rep := perfreport.Report{Version: perfreport.Version}
+	for _, sc := range scenarios() {
+		if only == "" || strings.Contains(sc.name, only) {
+			rep.Scenarios = append(rep.Scenarios, sc.name)
+		}
+	}
 	for _, s := range fixtures {
 		dsn, ok := fixtureDSN(s)
 		if !ok {
