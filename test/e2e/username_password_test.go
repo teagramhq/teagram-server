@@ -377,6 +377,78 @@ func TestUsernamePasswordSignIn(t *testing.T) {
 	}
 }
 
+// TestSequentialUsernameAccountSignInsFromSameClientIP exercises the first
+// account followed by a fresh client signing into a second account from the
+// same loopback address, including the app-config request shown by the web
+// sign-in card.
+func TestSequentialUsernameAccountSignInsFromSameClientIP(t *testing.T) {
+	t.Parallel()
+	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+	defer cancel()
+
+	key, err := rsakey.Bootstrap(t.TempDir() + "/key.pem")
+	if err != nil {
+		t.Fatal(err)
+	}
+	st, err := store.Open(ctx, pgtest.DSN(t), pgtest.EncKey(), store.WithBlobStore(testBlobs(t)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if cerr := st.Close(); cerr != nil {
+			t.Errorf("store close: %v", cerr)
+		}
+	})
+
+	const dcID = 2
+	codes := newCodeSink()
+	ln := mustListen(t, ctx, "127.0.0.1:0")
+	addr, ok := ln.Addr().(*net.TCPAddr)
+	if !ok {
+		t.Fatalf("listener addr type = %T", ln.Addr())
+	}
+	stop := bootServerWithRegMode(t, ctx, key, dcID, st, codes.Logger(), ln, config.RegistrationInvite)
+	t.Cleanup(stop)
+
+	const password = "testpassword"
+	usernames := []string{"sameip_first", "sameip_second"}
+	for _, username := range usernames {
+		seedUsernameUser(t, ctx, st, username, "Same IP", password)
+	}
+
+	for _, username := range usernames {
+		client := newUsernameClient(addr.Port, key, dcID, nil)
+		if err := client.Run(ctx, func(ctx context.Context) error {
+			api := client.API()
+			if _, err := api.HelpGetAppConfig(ctx, 0); err != nil {
+				return fmt.Errorf("help.getAppConfig for %s: %w", username, err)
+			}
+			hash, err := sendCodeUsername(ctx, api, username)
+			if err != nil {
+				return fmt.Errorf("auth.sendCode for %s: %w", username, err)
+			}
+			if _, err := signInUsername(ctx, api, username, hash, ""); err == nil {
+				return fmt.Errorf("auth.signIn for %s succeeded, want SESSION_PASSWORD_NEEDED", username)
+			} else if !isSessionPasswordNeeded(err) {
+				return fmt.Errorf("auth.signIn for %s: expected SESSION_PASSWORD_NEEDED, got %w", username, err)
+			}
+			if err := checkPasswordUsername(ctx, api, password); err != nil {
+				return fmt.Errorf("auth.checkPassword for %s: %w", username, err)
+			}
+			status, err := client.Auth().Status(ctx)
+			if err != nil {
+				return fmt.Errorf("authorization status for %s: %w", username, err)
+			}
+			if !status.Authorized {
+				return fmt.Errorf("%s was not authorized", username)
+			}
+			return nil
+		}); err != nil {
+			t.Fatalf("fresh-client login from shared loopback IP for %s: %v", username, err)
+		}
+	}
+}
+
 // TestUsernamePasswordSignUp proves the invite-backed username registration
 // flow against a real gotd client and leaves the new account provisional.
 func TestUsernamePasswordSignUp(t *testing.T) {

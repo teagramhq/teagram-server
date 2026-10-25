@@ -18,12 +18,14 @@ import (
 	"time"
 
 	"github.com/gotd/td/bin"
+	"github.com/gotd/td/clock"
 	tdcrypto "github.com/gotd/td/crypto"
 	"github.com/gotd/td/exchange"
 	"github.com/gotd/td/mt"
 	"github.com/gotd/td/proto"
 	"github.com/gotd/td/tg"
 	"github.com/gotd/td/tgerr"
+	"github.com/gotd/td/transport"
 )
 
 type serverErrorLogRecord struct {
@@ -35,6 +37,10 @@ type serverErrorLogRecord struct {
 type serverErrorLogSink struct {
 	records []serverErrorLogRecord
 }
+
+type serverErrorLogEncoder struct{ err error }
+
+func (e serverErrorLogEncoder) Encode(*bin.Buffer) error { return e.err }
 
 func (*serverErrorLogSink) Enabled(context.Context, slog.Level) bool { return true }
 
@@ -784,6 +790,75 @@ func TestRequestHandlingFailureLogsSafeRPCContext(t *testing.T) {
 		if strings.Contains(logged, forbidden) {
 			t.Errorf("failure record exposed private request data %q: %s", forbidden, logged)
 		}
+	}
+}
+
+func TestPlainHandlerFailureLogNamesRPCAndCause(t *testing.T) {
+	const cause = "PRIVATE-HANDLER-DETAIL"
+	sink := &serverErrorLogSink{}
+	handler := NewDispatcher().HandleFuncNamed(tg.HelpGetAppConfigRequestTypeID, "help.getAppConfig", func(*Conn, *Request) error {
+		return errors.New(cause)
+	})
+	server := New(exchange.PrivateKey{}, 2, NewMemoryAuthKeyStore(), handler, slog.New(sink))
+	var body bin.Buffer
+	body.PutID(tg.HelpGetAppConfigRequestTypeID)
+	err := server.handle(nil, &Request{MsgID: 17, Buf: &body, Ctx: context.Background()})
+	if err == nil {
+		t.Fatal("handle succeeded after help.getAppConfig returned a plain error")
+	}
+	server.logConnectionFailure(errors.Join(errRequestHandlingFailure, err))
+
+	if len(sink.records) != 1 {
+		t.Fatalf("failure records = %d, want 1", len(sink.records))
+	}
+	record := sink.records[0]
+	for key, want := range map[string]any{
+		"rpc_method": "help.getAppConfig",
+		"cause":      "handler_error",
+	} {
+		if got := record.attrs[key]; got != want {
+			t.Errorf("%s = %v, want %v", key, got, want)
+		}
+	}
+	if logged := record.message + fmt.Sprint(record.attrs); strings.Contains(logged, cause) {
+		t.Fatalf("failure record exposed raw handler error: %s", logged)
+	}
+}
+
+func TestResponseEncodingFailureLogNamesCause(t *testing.T) {
+	const cause = "PRIVATE-ENCODING-DETAIL"
+	clientTransport, serverTransport := transport.Intermediate.Pipe()
+	t.Cleanup(func() {
+		if err := clientTransport.Close(); err != nil {
+			t.Errorf("close client transport: %v", err)
+		}
+		if err := serverTransport.Close(); err != nil {
+			t.Errorf("close server transport: %v", err)
+		}
+	})
+	conn := newConn(serverTransport, tdcrypto.NewServerCipher(tdcrypto.DefaultRand()), proto.NewMessageIDGen(time.Now), clock.System, time.Second, nil)
+	sink := &serverErrorLogSink{}
+	handler := NewDispatcher().HandleFuncNamed(tg.HelpGetAppConfigRequestTypeID, "help.getAppConfig", func(c *Conn, req *Request) error {
+		return c.SendResult(req, serverErrorLogEncoder{err: errors.New(cause)})
+	})
+	server := New(exchange.PrivateKey{}, 2, NewMemoryAuthKeyStore(), handler, slog.New(sink))
+	server.checkMsgIDTime = false
+	var body bin.Buffer
+	body.PutID(tg.HelpGetAppConfigRequestTypeID)
+	err := server.handle(conn, &Request{MsgID: 17, Buf: &body, Ctx: context.Background()})
+	if err == nil {
+		t.Fatal("handle succeeded after response encoding failed")
+	}
+	server.logConnectionFailure(errors.Join(errRequestHandlingFailure, err))
+
+	if len(sink.records) != 1 {
+		t.Fatalf("failure records = %d, want 1", len(sink.records))
+	}
+	if got := sink.records[0].attrs["cause"]; got != "response_encoding" {
+		t.Fatalf("cause = %v, want response_encoding", got)
+	}
+	if logged := sink.records[0].message + fmt.Sprint(sink.records[0].attrs); strings.Contains(logged, cause) {
+		t.Fatalf("failure record exposed raw encoder error: %s", logged)
 	}
 }
 

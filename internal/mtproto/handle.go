@@ -27,6 +27,36 @@ var errServerDraining = errors.New("server is draining")
 
 const maxMTProtoMessageIDs = 8192
 
+type requestFailureCause string
+
+const (
+	requestFailureHandlerError      requestFailureCause = "handler_error"
+	requestFailureResponseEncoding  requestFailureCause = "response_encoding"
+	requestFailureResponseWrite     requestFailureCause = "response_write"
+	requestFailureDeadline          requestFailureCause = "deadline"
+	requestFailureCanceled          requestFailureCause = "canceled"
+	requestFailureTransport         requestFailureCause = "transport"
+	requestFailureRPCError          requestFailureCause = "rpc_error"
+	requestFailureRequestProcessing requestFailureCause = "request_processing"
+	requestFailureOther             requestFailureCause = "other"
+)
+
+type requestFailureCauseError struct {
+	cause requestFailureCause
+	err   error
+}
+
+func (e *requestFailureCauseError) Error() string { return e.err.Error() }
+
+func (e *requestFailureCauseError) Unwrap() error { return e.err }
+
+func markRequestFailureCause(cause requestFailureCause, err error) error {
+	if err == nil {
+		return nil
+	}
+	return &requestFailureCauseError{cause: cause, err: err}
+}
+
 // A client msg_id carries the time it was created. One older than
 // msgIDMaxPast or newer than msgIDMaxFuture against server time is refused
 // unexecuted, which bounds how long a captured frame can be replayed.
@@ -63,6 +93,7 @@ type rpcRequestError struct {
 	method        string
 	requestID     int64
 	errorCategory RPCResultClass
+	cause         requestFailureCause
 	err           error
 }
 
@@ -81,8 +112,35 @@ func requestFailureContext(req *Request, err error) *rpcRequestError {
 		method:        method,
 		requestID:     requestID,
 		errorCategory: requestRPCResult(req, err),
+		cause:         classifyRequestFailure(req, err),
 		err:           err,
 	}
+}
+
+func classifyRequestFailure(req *Request, err error) requestFailureCause {
+	if cause, ok := errors.AsType[*requestFailureCauseError](err); ok && cause != nil {
+		return cause.cause
+	}
+	switch {
+	case errors.Is(err, context.DeadlineExceeded):
+		return requestFailureDeadline
+	case errors.Is(err, context.Canceled):
+		return requestFailureCanceled
+	case errors.Is(err, io.EOF), errors.Is(err, io.ErrClosedPipe), errors.Is(err, net.ErrClosed):
+		return requestFailureTransport
+	case errors.Is(err, errRequestHandlingFailure):
+		return requestFailureRequestProcessing
+	}
+	if rpcErr, ok := errors.AsType[*tgerr.Error](err); ok && rpcErr != nil {
+		return requestFailureRPCError
+	}
+	if req != nil && requestRPCMethod(req) != UnknownRPCMethod {
+		return requestFailureHandlerError
+	}
+	if req != nil {
+		return requestFailureRequestProcessing
+	}
+	return requestFailureOther
 }
 
 func (e *rpcRequestError) logAttrs() []any {
@@ -90,6 +148,7 @@ func (e *rpcRequestError) logAttrs() []any {
 		"rpc_method", e.method,
 		"request_id", e.requestID,
 		"error_category", string(e.errorCategory),
+		"cause", string(e.cause),
 		"error", safeRPCErrorName(e.err),
 	}
 	return withSafeRPCErrorCode(attrs, e.err)
