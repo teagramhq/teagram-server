@@ -254,19 +254,21 @@ def download_source_files(source: dict, entries: dict[str, dict]) -> dict[str, b
 
 
 def source_asset_path(source: dict, codepoints: tuple[int, ...], tree: dict[str, dict]) -> str | None:
-    key = normalized_codepoints(codepoints)
-    if source["kind"] == "twemoji":
-        filename = emoji_filename(key).lower()
-        path = f"assets/svg/{filename}.svg"
-    elif source["kind"] == "noto":
-        filename = "_".join(f"{cp:x}" for cp in key)
-        path = f"2D/svg/emoji_u{filename}.svg"
-    elif source["kind"] == "openmoji":
-        filename = emoji_filename(key).upper()
-        path = f"color/svg/{filename}.svg"
-    else:
-        raise GeneratorError(f"{source['name']} source has an unknown asset layout")
-    return path if path in tree else None
+    for key in (codepoints, normalized_codepoints(codepoints)):
+        if source["kind"] == "twemoji":
+            filename = emoji_filename(key).lower()
+            path = f"assets/svg/{filename}.svg"
+        elif source["kind"] == "noto":
+            filename = "_".join(f"{cp:x}" for cp in key)
+            path = f"2D/svg/emoji_u{filename}.svg"
+        elif source["kind"] == "openmoji":
+            filename = emoji_filename(key).upper()
+            path = f"color/svg/{filename}.svg"
+        else:
+            raise GeneratorError(f"{source['name']} source has an unknown asset layout")
+        if path in tree:
+            return path
+    return None
 
 
 def parse_fluent_metadata(source: dict, files: dict[str, bytes], tree: dict[str, dict]) -> dict[tuple[int, ...], str]:

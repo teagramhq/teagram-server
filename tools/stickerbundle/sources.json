@@ -17,7 +17,7 @@
       "license_file": "LICENSE-GRAPHICS",
       "license_marker": "Attribution 4.0 International",
       "attribution": "Graphics by Twitter, Inc. and other contributors.",
-      "download_sha256": "e7195bb4b035f6def7efb4e8ad2ac199debdd02f1166f68e9a4e776dde2340d7"
+      "download_sha256": "17f5d2f6880df872290422b6a38ebce6cf82fd362849c4fcc321217570b11f8c"
     },
     {
       "id": "noto",
@@ -45,7 +45,7 @@
       "license_file": "LICENSE.txt",
       "license_marker": "Attribution-ShareAlike 4.0 International",
       "attribution": "All emojis designed by OpenMoji, the open-source emoji and icon project.",
-      "download_sha256": "9cdecaaddb8248b5c3e26bce3b88cd0c081e63ae87b8c60b47a634b79966e7fa"
+      "download_sha256": "6d919bb7702aaddb56995d71f456891e70dec97e4a0345815ee9e029b7fa10c5"
     },
     {
       "id": "fluent",

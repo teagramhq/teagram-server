@@ -36,6 +36,33 @@ class EmojiDefinitionTests(unittest.TestCase):
         self.assertEqual([pack.short_name for pack in packs], ["twemoji_smileys_emotion_01", "twemoji_smileys_emotion_02"])
         self.assertEqual([len(pack.stickers) for pack in packs], [120, 1])
 
+    def test_source_asset_lookup_prefers_raw_zwj_filename_then_falls_back(self):
+        codepoints = (0x1F937, 0x200D, 0x2640, 0xFE0F)
+        source_files = (
+            (
+                {"name": "Twemoji", "kind": "twemoji"},
+                "assets/svg/1f937-200d-2640-fe0f.svg",
+                "assets/svg/1f937-200d-2640.svg",
+            ),
+            (
+                {"name": "OpenMoji", "kind": "openmoji"},
+                "color/svg/1F937-200D-2640-FE0F.svg",
+                "color/svg/1F937-200D-2640.svg",
+            ),
+        )
+
+        for source, raw_path, normalized_path in source_files:
+            with self.subTest(source=source["name"]):
+                self.assertEqual(generate.source_asset_path(source, codepoints, {raw_path: {}}), raw_path)
+                self.assertEqual(
+                    generate.source_asset_path(source, codepoints, {normalized_path: {}}),
+                    normalized_path,
+                )
+                self.assertEqual(
+                    generate.source_asset_path(source, codepoints, {raw_path: {}, normalized_path: {}}),
+                    raw_path,
+                )
+
     def test_source_digest_changes_when_downloaded_content_changes(self):
         first = {"assets/a.svg": b"first", "LICENSE": b"license"}
         same = {"LICENSE": b"license", "assets/a.svg": b"first"}
