@@ -213,7 +213,7 @@ func serveMTProto(ctx context.Context, server *mtproto.Server, tcp net.Listener,
 		}
 		if public != nil {
 			group.Go(func(ctx context.Context) error {
-				return server.ServeWebSocketWithHandlerAndDiscovery(ctx, public.listener, public.handler, public.originPatterns, public.discovery)
+				return server.ServePublicWebSocketWithHandlerAndDiscovery(ctx, public.listener, public.handler, public.originPatterns, public.discovery, public.cfTrustedPeers)
 			})
 		}
 		serveErr = group.Wait()

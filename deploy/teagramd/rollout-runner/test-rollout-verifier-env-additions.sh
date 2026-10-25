@@ -258,6 +258,7 @@ public_ws_compose=$(jq -c '
     TG_PUBLIC_WEBSOCKET_ADVERTISE_ADDR:"",
     TG_PUBLIC_REGISTRATION:"closed",
     TG_PUBLIC_WEBSOCKET_ALLOWED_ORIGINS:"",
+    TG_PUBLIC_WEBSOCKET_CF_CONNECTING_IP_TRUSTED_PEERS:"",
     TG_WELCOME_CHANNEL:""
   }
 ' <<< "$COMPOSE_JSON")
@@ -267,6 +268,7 @@ public_ws_inspect=$(printf '%s' "$legacy_inspect" | jq -c '
     "TG_PUBLIC_WEBSOCKET_ADVERTISE_ADDR=",
     "TG_PUBLIC_REGISTRATION=closed",
     "TG_PUBLIC_WEBSOCKET_ALLOWED_ORIGINS=",
+    "TG_PUBLIC_WEBSOCKET_CF_CONNECTING_IP_TRUSTED_PEERS=",
     "TG_WELCOME_CHANNEL="
   ]
 ')
@@ -368,11 +370,12 @@ fi
 printf '%s\n' 'PASS rollback equivalence rejects a changed inspected logging driver'
 printf '%s\n' 'PASS reviewed syslog policy is isolated, exact, and verified against the target container'
 
-for setting in TG_PUBLIC_WEBSOCKET_LISTEN_ADDR TG_PUBLIC_WEBSOCKET_ADVERTISE_ADDR TG_PUBLIC_REGISTRATION TG_PUBLIC_WEBSOCKET_ALLOWED_ORIGINS TG_WELCOME_CHANNEL; do
+for setting in TG_PUBLIC_WEBSOCKET_LISTEN_ADDR TG_PUBLIC_WEBSOCKET_ADVERTISE_ADDR TG_PUBLIC_REGISTRATION TG_PUBLIC_WEBSOCKET_ALLOWED_ORIGINS TG_PUBLIC_WEBSOCKET_CF_CONNECTING_IP_TRUSTED_PEERS TG_WELCOME_CHANNEL; do
   case "$setting" in
     TG_PUBLIC_REGISTRATION) unsafe_value=invite ;;
     TG_WELCOME_CHANNEL) unsafe_value=welcome ;;
     TG_PUBLIC_WEBSOCKET_ADVERTISE_ADDR) unsafe_value=server.example.com:443 ;;
+    TG_PUBLIC_WEBSOCKET_CF_CONNECTING_IP_TRUSTED_PEERS) unsafe_value=not-an-ip ;;
     *) unsafe_value=https://public.example ;;
   esac
   unsafe_compose=$(jq -c --arg setting "$setting" --arg value "$unsafe_value" \
@@ -399,13 +402,20 @@ for setting_value in \
   TG_PUBLIC_WEBSOCKET_LISTEN_ADDR=0.0.0.0:2444 \
   TG_PUBLIC_WEBSOCKET_ADVERTISE_ADDR=server.example.com:443 \
   TG_PUBLIC_REGISTRATION=invite \
-  TG_PUBLIC_WEBSOCKET_ALLOWED_ORIGINS=https://web.teagram.io; do
+  TG_PUBLIC_WEBSOCKET_ALLOWED_ORIGINS=https://web.teagram.io \
+  TG_PUBLIC_WEBSOCKET_CF_CONNECTING_IP_TRUSTED_PEERS=127.0.0.1; do
   setting=${setting_value%%=*}
   value=${setting_value#*=}
   named_public_snapshot=$(public_setting_snapshot "$setting" "$value" "$setting=$value" target "$setting")
   [ "$(jq -r '.container_env_added' <<< "$named_public_snapshot")" = "$setting" ]
   printf 'PASS named public setting reaches the resolved Compose and target container: %s\n' "$setting"
 done
+
+setting=TG_PUBLIC_WEBSOCKET_CF_CONNECTING_IP_TRUSTED_PEERS
+value=172.18.0.1
+changed_public_snapshot=$(public_setting_snapshot "$setting" "$value" "$setting=$value" target "" "$setting")
+[ "$(jq -r '.container_env_changed' <<< "$changed_public_snapshot")" = "$setting" ]
+printf '%s\n' 'PASS named public tunnel peer change reaches the resolved Compose and target container'
 
 setting=TG_PUBLIC_WEBSOCKET_LISTEN_ADDR
 value=0.0.0.0:2444

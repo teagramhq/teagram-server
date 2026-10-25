@@ -72,18 +72,21 @@ host directory so later authority validation reads the published report.
 
 Preflight treats disabled public WebSocket settings and an empty
 `TG_WELCOME_CHANNEL` as equivalent when they are unset or passed through as
-empty Compose values. An active value for `TG_PUBLIC_WEBSOCKET_LISTEN_ADDR`,
-`TG_PUBLIC_WEBSOCKET_ADVERTISE_ADDR`, `TG_PUBLIC_REGISTRATION`, or
-`TG_PUBLIC_WEBSOCKET_ALLOWED_ORIGINS` is accepted only when the operator names
-that setting in `ROLLOUT_RUNNER_ADDED_ENV` and adds one assignment to the
-verified `.env`. The resolved Compose value and replacement container must
-match. `TG_PUBLIC_REGISTRATION` accepts `invite` or `closed`; `open` is always
-rejected. Active Compose defaults without a named `.env` addition still fail
-closed, as does any non-empty `TG_WELCOME_CHANNEL`. After an addition is
-verified, ordinary rollouts retain its exact value without repeating the name.
-Change a retained value only through `ROLLOUT_RUNNER_CHANGED_ENV` with the
-previous `.env` backup. If a rollout that added public settings rolls back, the
-runner restores that previous `.env` before recreating the previous container.
+empty Compose values. Active values for `TG_PUBLIC_WEBSOCKET_LISTEN_ADDR`,
+`TG_PUBLIC_WEBSOCKET_ADVERTISE_ADDR`, `TG_PUBLIC_REGISTRATION`,
+`TG_PUBLIC_WEBSOCKET_ALLOWED_ORIGINS`, and
+`TG_PUBLIC_WEBSOCKET_CF_CONNECTING_IP_TRUSTED_PEERS` are accepted only when the
+operator names that setting in `ROLLOUT_RUNNER_ADDED_ENV` and adds one
+assignment to the verified `.env`. The resolved Compose value and replacement
+container must match. The Cloudflare setting accepts exact socket peer IPs only;
+use the host-side tunnel address seen by the container. `TG_PUBLIC_REGISTRATION`
+accepts `invite` or `closed`; `open` is always rejected. Active Compose defaults
+without a named `.env` addition still fail closed, as does any non-empty
+`TG_WELCOME_CHANNEL`. After an addition is verified, ordinary rollouts retain
+its exact value without repeating the name. Change a retained value only through
+`ROLLOUT_RUNNER_CHANGED_ENV` with the previous `.env` backup. If a rollout that
+added public settings rolls back, the runner restores that previous `.env`
+before recreating the previous container.
 
 The only approved Compose listener addition is `127.0.0.1:2446:2446` for the
 public WebSocket listener. Preflight and post-start comparisons normalize that

@@ -22,7 +22,7 @@ func (a shutdownTestAddr) Network() string { return string(a) }
 func (a shutdownTestAddr) String() string  { return string(a) }
 
 func TestWebSocketWaitTracksHandlerAfterSocketClose(t *testing.T) {
-	listener := newWebSocketListener(shutdownTestListener{}, nil, store.RateLimitListenerTailnet)
+	listener := newWebSocketListener(shutdownTestListener{}, nil, store.RateLimitListenerTailnet, nil)
 	close(listener.acceptDone)
 	serverConn, peerConn := net.Pipe()
 	defer func() {

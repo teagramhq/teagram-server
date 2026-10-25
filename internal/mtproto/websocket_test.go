@@ -37,7 +37,10 @@ import (
 
 	"github.com/teagramhq/teagram-server/internal/discovery"
 	"github.com/teagramhq/teagram-server/internal/mtproto"
+	"github.com/teagramhq/teagram-server/internal/store"
 )
+
+const cfConnectingIPHeaderName = "Cf-Connecting-Ip"
 
 func TestServeWebSocketHandlesMessageBoundaries(t *testing.T) {
 	t.Parallel()
@@ -229,6 +232,158 @@ func TestServeWebSocketUsesProxyAddress(t *testing.T) {
 	case <-ctx.Done():
 		t.Fatal("request did not reach handler")
 	}
+}
+
+func TestPublicWebSocketUsesCFConnectingIPOnlyFromTrustedPeers(t *testing.T) {
+	t.Parallel()
+
+	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
+	defer cancel()
+	base := mustListenTCP(t, ctx, "127.0.0.1:0")
+	peers := make(chan netip.Addr, 5)
+	ln := &webSocketPeerAddressListener{Listener: base, peers: peers}
+	rsaKey, err := rsa.GenerateKey(rand.Reader, crypto.RSAKeyBits)
+	if err != nil {
+		t.Fatalf("generate discovery RSA key: %v", err)
+	}
+	doc, err := discovery.NewDocument("public.example.test:443", 2, &rsaKey.PublicKey, false)
+	if err != nil {
+		t.Fatalf("build discovery document: %v", err)
+	}
+	key := rebindTestKey()
+	seen := make(chan netip.Addr, 1)
+	handler := mtproto.HandlerFunc(func(c *mtproto.Conn, req *mtproto.Request) error {
+		seen <- req.ClientAddr
+		return c.SendResult(req, &tg.BoolTrue{})
+	})
+	srv := mtproto.New(exchange.PrivateKey{}, 2, &websocketAuthKeyStore{key: key}, handler, nil)
+	trustedPeers := []netip.Addr{netip.MustParseAddr("127.0.0.1")}
+	served := make(chan error, 1)
+	go func() {
+		served <- srv.ServePublicWebSocketWithHandlerAndDiscovery(ctx, ln, handler, nil, doc, trustedPeers)
+	}()
+	t.Cleanup(func() {
+		cancel()
+		if err := <-served; err != nil {
+			t.Errorf("serve public websocket: %v", err)
+		}
+	})
+
+	tests := []struct {
+		name           string
+		peer           netip.Addr
+		header         string
+		repeatedHeader bool
+		want           netip.Addr
+	}{
+		{name: "first visitor", peer: netip.MustParseAddr("127.0.0.1"), header: "203.0.113.9", want: netip.MustParseAddr("203.0.113.9")},
+		{name: "second visitor gets a separate bucket", peer: netip.MustParseAddr("127.0.0.1"), header: "198.51.100.7", want: netip.MustParseAddr("198.51.100.7")},
+		{name: "missing header falls back to proxy bucket", peer: netip.MustParseAddr("127.0.0.1"), want: netip.MustParseAddr("127.0.0.1")},
+		{name: "invalid header falls back to proxy bucket", peer: netip.MustParseAddr("127.0.0.1"), header: "not-an-ip", want: netip.MustParseAddr("127.0.0.1")},
+		{name: "repeated header falls back to proxy bucket", peer: netip.MustParseAddr("127.0.0.1"), header: "203.0.113.9", repeatedHeader: true, want: netip.MustParseAddr("127.0.0.1")},
+		{name: "forged header from an untrusted peer is ignored", peer: netip.MustParseAddr("198.51.100.31"), header: "203.0.113.99", want: netip.MustParseAddr("198.51.100.31")},
+	}
+	var visitorBuckets []netip.Prefix
+	for i, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			peers <- tt.peer
+			headers := make(http.Header)
+			if tt.header != "" {
+				headers.Add(cfConnectingIPHeaderName, tt.header)
+				if tt.repeatedHeader {
+					headers.Add(cfConnectingIPHeaderName, "198.51.100.7")
+				}
+			}
+			ws, err := dialWebSocketWithHeaders(ctx, ln.Addr().String(), headers)
+			if err != nil {
+				t.Fatalf("dial websocket: %v", err)
+			}
+			client, err := transport.Intermediate.Handshake(websocket.NetConn(ctx, ws, websocket.MessageBinary))
+			if err != nil {
+				closeWebSocket(t, ws)
+				t.Fatalf("transport handshake: %v", err)
+			}
+			frame := clientFrame(t, key, 42, int64(1)<<32, &tg.HelpGetConfigRequest{})
+			if err := client.Send(ctx, &bin.Buffer{Buf: frame}); err != nil {
+				closeWebSocket(t, ws)
+				t.Fatalf("send request: %v", err)
+			}
+			select {
+			case got := <-seen:
+				if got != tt.want {
+					t.Fatalf("handler saw client address %s, want %s", got, tt.want)
+				}
+				bucket, ok := store.IPBucketKey(got)
+				if !ok {
+					t.Fatal("handler address did not produce a rate-limit bucket")
+				}
+				if i < 2 {
+					visitorBuckets = append(visitorBuckets, bucket)
+				}
+			case <-ctx.Done():
+				closeWebSocket(t, ws)
+				t.Fatal("request did not reach handler")
+			}
+			receiveBoolResult(t, ctx, client, key)
+			closeWebSocket(t, ws)
+		})
+	}
+	if len(visitorBuckets) != 2 || visitorBuckets[0] == visitorBuckets[1] {
+		t.Fatalf("visitor buckets = %v, want separate buckets for the two CF-Connecting-IP values", visitorBuckets)
+	}
+}
+
+func TestTailnetWebSocketIgnoresCFConnectingIP(t *testing.T) {
+	t.Parallel()
+
+	ctx, cancel := context.WithTimeout(t.Context(), 15*time.Second)
+	defer cancel()
+	base := mustListenTCP(t, ctx, "127.0.0.1:0")
+	peer := netip.MustParseAddr("198.51.100.31")
+	peers := make(chan netip.Addr, 1)
+	peers <- peer
+	ln := &webSocketPeerAddressListener{Listener: base, peers: peers}
+	key := rebindTestKey()
+	seen := make(chan netip.Addr, 1)
+	handler := mtproto.HandlerFunc(func(c *mtproto.Conn, req *mtproto.Request) error {
+		seen <- req.ClientAddr
+		return c.SendResult(req, &tg.BoolTrue{})
+	})
+	srv := mtproto.New(exchange.PrivateKey{}, 2, &websocketAuthKeyStore{key: key}, handler, nil)
+	served := make(chan error, 1)
+	go func() { served <- srv.ServeWebSocket(ctx, ln) }()
+	t.Cleanup(func() {
+		cancel()
+		if err := <-served; err != nil {
+			t.Errorf("serve tailnet websocket: %v", err)
+		}
+	})
+
+	ws, err := dialWebSocketWithHeaders(ctx, ln.Addr().String(), http.Header{cfConnectingIPHeaderName: []string{"203.0.113.99"}})
+	if err != nil {
+		t.Fatalf("dial websocket: %v", err)
+	}
+	client, err := transport.Intermediate.Handshake(websocket.NetConn(ctx, ws, websocket.MessageBinary))
+	if err != nil {
+		closeWebSocket(t, ws)
+		t.Fatalf("transport handshake: %v", err)
+	}
+	frame := clientFrame(t, key, 42, int64(1)<<32, &tg.HelpGetConfigRequest{})
+	if err := client.Send(ctx, &bin.Buffer{Buf: frame}); err != nil {
+		closeWebSocket(t, ws)
+		t.Fatalf("send request: %v", err)
+	}
+	select {
+	case got := <-seen:
+		if got != peer {
+			t.Fatalf("tailnet handler saw client address %s, want socket peer %s", got, peer)
+		}
+	case <-ctx.Done():
+		closeWebSocket(t, ws)
+		t.Fatal("request did not reach handler")
+	}
+	receiveBoolResult(t, ctx, client, key)
+	closeWebSocket(t, ws)
 }
 
 func TestServeWebSocketProxyAddressDoesNotBlockNextAccept(t *testing.T) {
@@ -1370,6 +1525,19 @@ func dialWebSocket(ctx context.Context, addr string) (*websocket.Conn, error) {
 	return dialWebSocketOrigin(ctx, addr, "")
 }
 
+func dialWebSocketWithHeaders(ctx context.Context, addr string, headers http.Header) (*websocket.Conn, error) {
+	ws, resp, err := websocket.Dial(ctx, "ws://"+addr+"/apiws", &websocket.DialOptions{
+		HTTPHeader:   headers,
+		Subprotocols: []string{"binary"},
+	})
+	if resp != nil && resp.Body != nil {
+		if closeErr := resp.Body.Close(); err == nil && closeErr != nil {
+			err = closeErr
+		}
+	}
+	return ws, err
+}
+
 func dialWebSocketOrigin(ctx context.Context, addr, origin string) (*websocket.Conn, error) {
 	var headers http.Header
 	if origin != "" {
@@ -1480,6 +1648,37 @@ func (l *timestampWebSocketListener) Accept() (net.Conn, error) {
 	}
 	return conn, nil
 }
+
+type webSocketPeerAddressListener struct {
+	net.Listener
+
+	peers <-chan netip.Addr
+}
+
+func (l *webSocketPeerAddressListener) Accept() (net.Conn, error) {
+	conn, err := l.Listener.Accept()
+	if err != nil {
+		return nil, err
+	}
+	select {
+	case peer := <-l.peers:
+		return &webSocketPeerAddressConn{Conn: conn, peer: &net.TCPAddr{IP: net.ParseIP(peer.String()), Port: 12345}}, nil
+	case <-time.After(5 * time.Second):
+		closeErr := conn.Close()
+		if closeErr != nil {
+			return nil, errors.Join(errors.New("no test peer address supplied"), closeErr)
+		}
+		return nil, errors.New("no test peer address supplied")
+	}
+}
+
+type webSocketPeerAddressConn struct {
+	net.Conn
+
+	peer net.Addr
+}
+
+func (c *webSocketPeerAddressConn) RemoteAddr() net.Addr { return c.peer }
 
 type websocketAuthKeyStore struct {
 	key crypto.AuthKey

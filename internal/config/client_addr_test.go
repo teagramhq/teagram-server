@@ -76,6 +76,56 @@ func TestLoadClientAddrTrustAcceptsSocket(t *testing.T) {
 	}
 }
 
+func TestLoadPublicWebSocketCFTrustedPeers(t *testing.T) {
+	t.Setenv("TG_POSTGRES_DSN", "postgres://localhost/tg")
+	t.Setenv("TG_AUTHKEY_ENC_KEY", validEncKey)
+	t.Setenv("TG_PUBLIC_WEBSOCKET_LISTEN_ADDR", ":2446")
+	t.Setenv("TG_PUBLIC_WEBSOCKET_CF_CONNECTING_IP_TRUSTED_PEERS", "127.0.0.1,172.18.0.1")
+
+	cfg, err := config.Load(discardLog())
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	want := []netip.Addr{
+		netip.MustParseAddr("127.0.0.1"),
+		netip.MustParseAddr("172.18.0.1"),
+	}
+	if !slices.Equal(cfg.PublicWebSocketCFTrustedPeers, want) {
+		t.Errorf("PublicWebSocketCFTrustedPeers = %v, want %v", cfg.PublicWebSocketCFTrustedPeers, want)
+	}
+}
+
+func TestLoadPublicWebSocketCFTrustedPeersRejectsInvalidConfiguration(t *testing.T) {
+	for _, tt := range []struct {
+		name        string
+		listen      string
+		trust       string
+		trustedPeer string
+		wantError   string
+	}{
+		{name: "invalid address", listen: ":2446", trust: "socket", trustedPeer: "not-an-ip", wantError: "not an IP address"},
+		{name: "CIDR is broader than an exact peer", listen: ":2446", trust: "socket", trustedPeer: "127.0.0.0/8", wantError: "not an IP address"},
+		{name: "public listener required", trust: "socket", trustedPeer: "127.0.0.1", wantError: "TG_PUBLIC_WEBSOCKET_LISTEN_ADDR"},
+		{name: "proxy-v2 trust mode is separate", listen: ":2446", trust: "proxy-v2", trustedPeer: "127.0.0.1", wantError: "TG_CLIENT_ADDR_TRUST=socket"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv("TG_POSTGRES_DSN", "postgres://localhost/tg")
+			t.Setenv("TG_AUTHKEY_ENC_KEY", validEncKey)
+			t.Setenv("TG_PUBLIC_WEBSOCKET_LISTEN_ADDR", tt.listen)
+			t.Setenv("TG_CLIENT_ADDR_TRUST", tt.trust)
+			t.Setenv("TG_PUBLIC_WEBSOCKET_CF_CONNECTING_IP_TRUSTED_PEERS", tt.trustedPeer)
+			if tt.trust == "proxy-v2" {
+				t.Setenv("TG_CLIENT_ADDR_PROXY_CIDRS", "127.0.0.1")
+			}
+
+			_, err := config.Load(discardLog())
+			if err == nil || !strings.Contains(err.Error(), tt.wantError) {
+				t.Fatalf("Load error = %v, want it to contain %q", err, tt.wantError)
+			}
+		})
+	}
+}
+
 // TestLoadClientAddrTrustEnvOverridesLimits proves each per-IP knob reaches its
 // own counter. Distinct values on all four, so a name typo or a value landing on
 // the wrong counter fails here rather than shipping.

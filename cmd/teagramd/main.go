@@ -13,6 +13,7 @@ import (
 	"math/rand/v2"
 	"net"
 	"net/http"
+	"net/netip"
 	"os"
 	"os/signal"
 	"regexp"
@@ -65,6 +66,7 @@ type publicWebSocketListener struct {
 	listener       net.Listener
 	handler        mtproto.Handler
 	originPatterns []string
+	cfTrustedPeers []netip.Addr
 	discovery      discovery.Document
 }
 

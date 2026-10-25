@@ -4,7 +4,7 @@ umask 077
 
 SCRIPT_DIR=$(cd -P "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 SCRIPT_SOURCE="$SCRIPT_DIR/$(basename "${BASH_SOURCE[0]}")"
-readonly APPROVED_VERIFIER_SHA=e80bd36461a7418032ef569e95514179fdeb8ec19e819aefbbc066522f1bd807
+readonly APPROVED_VERIFIER_SHA=104897a63071e9a1b63db9c8d14621641818cb9780de5b432f09f7b0898f14f9
 readonly APPROVED_SCHEMA_GATE_SHA=ac54d3cf0480383a52414a8bc8b856b5e1d5f6f8d19034c9c576c64627e097c8
 readonly APPROVED_SCHEMA_GATE_HELPER_SHA=7ae06c2872c60b434068b3715a9ddd5e19b03d4be98dc9881c8dd8f294953d41
 readonly APPROVED_INITIAL_LOCAL_COMPOSE_SHA=d764d291ad2ea91cff841d14a0cd2bbcb5981961dbc67406bfeba1196a7b3fa4
@@ -1316,7 +1316,7 @@ public_env_addition_requested() {
   IFS=, read -r -a requested <<< "$ADDED_ENV"
   for name in "${requested[@]}"; do
     case "$name" in
-      TG_PUBLIC_WEBSOCKET_LISTEN_ADDR|TG_PUBLIC_WEBSOCKET_ADVERTISE_ADDR|TG_PUBLIC_REGISTRATION|TG_PUBLIC_WEBSOCKET_ALLOWED_ORIGINS)
+      TG_PUBLIC_WEBSOCKET_LISTEN_ADDR|TG_PUBLIC_WEBSOCKET_ADVERTISE_ADDR|TG_PUBLIC_REGISTRATION|TG_PUBLIC_WEBSOCKET_ALLOWED_ORIGINS|TG_PUBLIC_WEBSOCKET_CF_CONNECTING_IP_TRUSTED_PEERS)
         return 0
         ;;
     esac
@@ -1678,7 +1678,7 @@ validate_env_baseline() {
       for name in "${requested[@]}"; do
         [[ "$name" =~ ^[A-Z][A-Z0-9_]*$ ]] || { fail 'environment value changes must be upper-case variable names'; return 1; }
         case "$name" in
-          TG_REGISTRATION|TG_TURNSTILE_SIGNIN_ENABLED|TG_WEBSOCKET_ALLOWED_ORIGINS|TG_PUBLIC_WEBSOCKET_LISTEN_ADDR|TG_PUBLIC_WEBSOCKET_ADVERTISE_ADDR|TG_PUBLIC_REGISTRATION|TG_PUBLIC_WEBSOCKET_ALLOWED_ORIGINS) ;;
+          TG_REGISTRATION|TG_TURNSTILE_SIGNIN_ENABLED|TG_WEBSOCKET_ALLOWED_ORIGINS|TG_PUBLIC_WEBSOCKET_LISTEN_ADDR|TG_PUBLIC_WEBSOCKET_ADVERTISE_ADDR|TG_PUBLIC_REGISTRATION|TG_PUBLIC_WEBSOCKET_ALLOWED_ORIGINS|TG_PUBLIC_WEBSOCKET_CF_CONNECTING_IP_TRUSTED_PEERS) ;;
           *) fail "environment value change $name is not an approved setting"; return 1 ;;
         esac
         change_names+="$name "
@@ -1730,6 +1730,7 @@ validate_env_baseline() {
             TG_PUBLIC_WEBSOCKET_LISTEN_ADDR:*) [ "$old_value" != "$new_value" ] || { fail 'TG_PUBLIC_WEBSOCKET_LISTEN_ADDR change must change the value'; return 1; } ;;
             TG_PUBLIC_WEBSOCKET_ADVERTISE_ADDR:*) [ "$old_value" != "$new_value" ] || { fail 'TG_PUBLIC_WEBSOCKET_ADVERTISE_ADDR change must change the value'; return 1; } ;;
             TG_PUBLIC_WEBSOCKET_ALLOWED_ORIGINS:*) [ "$old_value" != "$new_value" ] || { fail 'TG_PUBLIC_WEBSOCKET_ALLOWED_ORIGINS change must change the value'; return 1; } ;;
+            TG_PUBLIC_WEBSOCKET_CF_CONNECTING_IP_TRUSTED_PEERS:*) [ "$old_value" != "$new_value" ] || { fail 'TG_PUBLIC_WEBSOCKET_CF_CONNECTING_IP_TRUSTED_PEERS change must change the value'; return 1; } ;;
             TG_WEBSOCKET_ALLOWED_ORIGINS:*) [ "$old_value" != "$new_value" ] || { fail 'TG_WEBSOCKET_ALLOWED_ORIGINS change must change the value'; return 1; } ;;
             TG_REGISTRATION:*) fail 'TG_REGISTRATION may change only between closed and open'; return 1 ;;
             TG_TURNSTILE_SIGNIN_ENABLED:*) fail 'TG_TURNSTILE_SIGNIN_ENABLED may change only between true and false'; return 1 ;;

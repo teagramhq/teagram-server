@@ -66,6 +66,7 @@ Configuration is read from environment variables. The full reference is in [docs
 | `TG_LISTEN_ADDR` | `:2443` | MTProto listener address |
 | `TG_WEBSOCKET_LISTEN_ADDR` | unset | Optional WebSocket MTProto listener |
 | `TG_PUBLIC_WEBSOCKET_LISTEN_ADDR` | unset | Optional separate public WebSocket MTProto listener |
+| `TG_PUBLIC_WEBSOCKET_CF_CONNECTING_IP_TRUSTED_PEERS` | unset | Exact peer IPs trusted to supply `CF-Connecting-IP` on the public WebSocket listener |
 | `TG_PUBLIC_REGISTRATION` | `closed` | Public-listener account registration policy |
 | `TG_ADVERTISE_ADDR` | derived | Public `host:port` advertised to clients |
 | `TG_PUBLIC_LINK_PREFIX` | required | HTTPS origin for client and invite links |

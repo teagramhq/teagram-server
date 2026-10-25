@@ -292,6 +292,9 @@ services:
       TG_PUBLIC_WEBSOCKET_ADVERTISE_ADDR: ${TG_PUBLIC_WEBSOCKET_ADVERTISE_ADDR:-}
       TG_PUBLIC_REGISTRATION: ${TG_PUBLIC_REGISTRATION:-closed}
       TG_PUBLIC_WEBSOCKET_ALLOWED_ORIGINS: ${TG_PUBLIC_WEBSOCKET_ALLOWED_ORIGINS:-}
+      # Only the named tunnel socket peers may supply CF-Connecting-IP. Keep
+      # this empty until the exact host-side tunnel peer is approved in .env.
+      TG_PUBLIC_WEBSOCKET_CF_CONNECTING_IP_TRUSTED_PEERS: ${TG_PUBLIC_WEBSOCKET_CF_CONNECTING_IP_TRUSTED_PEERS:-}
       TG_WELCOME_CHANNEL: ${TG_WELCOME_CHANNEL:-}
       TG_REPLICA_ID: ${TG_REPLICA_ID:-}
       # Keep the Compose deployment count aligned across the legacy listener

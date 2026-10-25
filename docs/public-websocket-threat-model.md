@@ -45,16 +45,14 @@ boundary.
 
 ## Abuse limits and residual risk
 
-The production Compose configuration uses `TG_CLIENT_ADDR_TRUST=socket`. The
-authentication counters therefore use the address of the socket peer, not a
-forwarded HTTP header. With a host-local tunnel connection, public visitors
-may share one observed network bucket. This caps aggregate public RPC traffic
-but is not a per-visitor limit and may also throttle legitimate users together.
-The public listener's budgets are selected from the accepted listener; request
-headers cannot select or merge them with the tailnet budget. Do not trust
-`X-Forwarded-For` to change this; any client-address proxy mode requires an
-explicitly allowlisted, trusted proxy that supplies the supported PROXY-v2
-metadata.
+The production Compose configuration keeps `TG_CLIENT_ADDR_TRUST=socket` for
+TCP and tailnet listeners. The public WebSocket listener may use
+`CF-Connecting-IP` only when `TG_PUBLIC_WEBSOCKET_CF_CONNECTING_IP_TRUSTED_PEERS`
+names the exact tunnel socket peer address. A header from every other peer is
+ignored. A missing, repeated, or invalid value uses the tunnel peer's shared,
+fail-closed bucket. Public and tailnet budgets remain separate. Do not trust
+`X-Forwarded-For`; add or change the live trusted-peer value through the rollout
+runner's approved environment path.
 
 Unauthenticated callers can still consume connection and shared service
 capacity; per-RPC authentication limits do not by themselves prevent a

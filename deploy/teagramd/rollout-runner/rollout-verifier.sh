@@ -73,7 +73,8 @@ verify_added_container_environment() {
               $actual[0] == $compose_env[$runtime_name] and
               (($name | IN(
                 "TG_PUBLIC_WEBSOCKET_LISTEN_ADDR", "TG_PUBLIC_WEBSOCKET_ADVERTISE_ADDR",
-                "TG_PUBLIC_REGISTRATION", "TG_PUBLIC_WEBSOCKET_ALLOWED_ORIGINS"
+                "TG_PUBLIC_REGISTRATION", "TG_PUBLIC_WEBSOCKET_ALLOWED_ORIGINS",
+                "TG_PUBLIC_WEBSOCKET_CF_CONNECTING_IP_TRUSTED_PEERS"
               )) | not or dotenv_value($assignments[0]) == $compose_env[$runtime_name])
           )
       end
@@ -131,7 +132,7 @@ verify_changed_container_environment() {
                 (($name == "TG_REGISTRATION" and (dotenv_value($assignments[0]) | IN("open","closed"))) or
                  ($name == "TG_TURNSTILE_SIGNIN_ENABLED" and ($assignments[0] | IN("true","false"))) or
                  ($name == "TG_PUBLIC_REGISTRATION" and (dotenv_value($assignments[0]) | IN("invite","closed"))) or
-                 ($name | IN("TG_WEBSOCKET_ALLOWED_ORIGINS", "TG_PUBLIC_WEBSOCKET_LISTEN_ADDR", "TG_PUBLIC_WEBSOCKET_ADVERTISE_ADDR", "TG_PUBLIC_WEBSOCKET_ALLOWED_ORIGINS"))) and
+                 ($name | IN("TG_WEBSOCKET_ALLOWED_ORIGINS", "TG_PUBLIC_WEBSOCKET_LISTEN_ADDR", "TG_PUBLIC_WEBSOCKET_ADVERTISE_ADDR", "TG_PUBLIC_WEBSOCKET_ALLOWED_ORIGINS", "TG_PUBLIC_WEBSOCKET_CF_CONNECTING_IP_TRUSTED_PEERS"))) and
                 ($assignments | length) == 1 and
                 ($compose_env | has($name)) and
                 ($compose_env[$name] == dotenv_value($assignments[0])) and
@@ -188,6 +189,7 @@ verify_safe_public_environment() {
           "TG_PUBLIC_WEBSOCKET_ADVERTISE_ADDR",
           "TG_PUBLIC_REGISTRATION",
           "TG_PUBLIC_WEBSOCKET_ALLOWED_ORIGINS",
+          "TG_PUBLIC_WEBSOCKET_CF_CONNECTING_IP_TRUSTED_PEERS",
           "TG_WELCOME_CHANNEL"
         ][];
           . as $name
@@ -760,7 +762,8 @@ snapshot_from_json() {
        | select(IN(
            "TG_TURNSTILE_SITE_KEY=", "TG_TURNSTILE_SECRET_KEY_FILE=", "TG_TURNSTILE_SIGNIN_ENABLED=false",
            "TG_PUBLIC_WEBSOCKET_LISTEN_ADDR=", "TG_PUBLIC_WEBSOCKET_ADVERTISE_ADDR=",
-           "TG_PUBLIC_REGISTRATION=closed", "TG_PUBLIC_WEBSOCKET_ALLOWED_ORIGINS="
+           "TG_PUBLIC_REGISTRATION=closed", "TG_PUBLIC_WEBSOCKET_ALLOWED_ORIGINS=",
+           "TG_PUBLIC_WEBSOCKET_CF_CONNECTING_IP_TRUSTED_PEERS="
          ) | not)
        | split("=")[0]] as $keys
       | [$added[] | select(. as $name | ($name | runtime_name($name)) as $runtime | any($keys[]; . == $runtime))]
@@ -799,7 +802,7 @@ snapshot_from_json() {
         map(select(type != "string" or (startswith("TG_REPLICA_COUNT=") | not)))
         | map(select(type != "string" or (startswith("TG_CLIENT_ADDR_TRUST=") | not)))
         | map(select(type != "string" or (startswith("TG_LOG_LOGIN_CODES=") | not)))
-        | map(select(type != "string" or ((split("=")[0]) as $key | (["TG_PUBLIC_WEBSOCKET_LISTEN_ADDR", "TG_PUBLIC_WEBSOCKET_ADVERTISE_ADDR", "TG_PUBLIC_REGISTRATION", "TG_PUBLIC_WEBSOCKET_ALLOWED_ORIGINS", "TG_WELCOME_CHANNEL"] | index($key) == null))))
+        | map(select(type != "string" or ((split("=")[0]) as $key | (["TG_PUBLIC_WEBSOCKET_LISTEN_ADDR", "TG_PUBLIC_WEBSOCKET_ADVERTISE_ADDR", "TG_PUBLIC_REGISTRATION", "TG_PUBLIC_WEBSOCKET_ALLOWED_ORIGINS", "TG_PUBLIC_WEBSOCKET_CF_CONNECTING_IP_TRUSTED_PEERS", "TG_WELCOME_CHANNEL"] | index($key) == null))))
         | map(select(type != "string" or ((split("=")[0]) as $key | any($added[]; runtime_name(.) == $key) | not)))
         | map(select(type != "string" or ((split("=")[0]) as $key | any($changed[]; . == $key) | not)))
         | map(select(type != "string" or (IN(
@@ -831,7 +834,8 @@ snapshot_from_json() {
               (IN(
                 "TG_TURNSTILE_SITE_KEY=", "TG_TURNSTILE_SECRET_KEY_FILE=", "TG_TURNSTILE_SIGNIN_ENABLED=false",
                 "TG_PUBLIC_WEBSOCKET_LISTEN_ADDR=", "TG_PUBLIC_WEBSOCKET_ADVERTISE_ADDR=",
-                "TG_PUBLIC_REGISTRATION=closed", "TG_PUBLIC_WEBSOCKET_ALLOWED_ORIGINS="
+                "TG_PUBLIC_REGISTRATION=closed", "TG_PUBLIC_WEBSOCKET_ALLOWED_ORIGINS=",
+                "TG_PUBLIC_WEBSOCKET_CF_CONNECTING_IP_TRUSTED_PEERS="
               ) | not))
      | split("=")[0]] as $keys
     | [$added[] | select(. as $name | ($name | runtime_name($name)) as $runtime | any($keys[]; . == $runtime))]
@@ -919,7 +923,8 @@ snapshot_from_json() {
           .TG_WEBSOCKET_ALLOWED_ORIGINS,
           .TG_PUBLIC_WEBSOCKET_LISTEN_ADDR, .TG_PUBLIC_REGISTRATION,
           .TG_PUBLIC_WEBSOCKET_ADVERTISE_ADDR,
-          .TG_PUBLIC_WEBSOCKET_ALLOWED_ORIGINS, .TG_WELCOME_CHANNEL,
+          .TG_PUBLIC_WEBSOCKET_ALLOWED_ORIGINS,
+          .TG_PUBLIC_WEBSOCKET_CF_CONNECTING_IP_TRUSTED_PEERS, .TG_WELCOME_CHANNEL,
           .TG_LOG_LOGIN_CODES,
           .TG_MEDIA_KEY_DIR, .TG_MEDIA_KEY_CURRENT,
           .TG_TURNSTILE_SITE_KEY, .TG_TURNSTILE_SECRET_KEY_FILE,

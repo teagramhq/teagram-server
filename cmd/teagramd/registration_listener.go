@@ -3,6 +3,7 @@ package main
 import (
 	"log/slog"
 	"net"
+	"net/netip"
 
 	"github.com/gotd/td/exchange"
 
@@ -36,6 +37,7 @@ func newPublicWebSocketListener(cfg config.Config, listener net.Listener, handle
 		listener:       listener,
 		handler:        handler,
 		originPatterns: cfg.PublicWebSocketOriginPatterns,
+		cfTrustedPeers: append([]netip.Addr(nil), cfg.PublicWebSocketCFTrustedPeers...),
 		discovery:      doc,
 	}
 }

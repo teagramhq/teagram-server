@@ -415,7 +415,7 @@ if [ "${1:-}" = inspect ]; then
     elif { [ "$cfg" = target ] || [ "$cfg" = rollback ]; } && [ "${MOCK_SCENARIO:-success}" = runtime-backend-mismatch ]; then
       env_json='["TG_RSA_KEY_PATH=/var/lib/teagramd/server_key.pem","TG_SYNTHETIC_FLAG=fixture","TG_BLOB_DIR=/unexpected-blob-dir","TG_REPLICA_COUNT=1","TG_CLIENT_ADDR_TRUST=socket"]'
     elif { [ "$cfg" = target ] || [ "$cfg" = rollback ]; } && [ "${MOCK_SCENARIO:-}" = public-websocket-defaults ]; then
-      env_json='["TG_RSA_KEY_PATH=/var/lib/teagramd/server_key.pem","TG_SYNTHETIC_FLAG=fixture","TG_BLOB_DIR=/var/lib/teagramd-blobs","TG_PUBLIC_WEBSOCKET_LISTEN_ADDR=","TG_PUBLIC_WEBSOCKET_ADVERTISE_ADDR=","TG_PUBLIC_REGISTRATION=closed","TG_PUBLIC_WEBSOCKET_ALLOWED_ORIGINS=","TG_REPLICA_COUNT=1","TG_CLIENT_ADDR_TRUST=socket"]'
+      env_json='["TG_RSA_KEY_PATH=/var/lib/teagramd/server_key.pem","TG_SYNTHETIC_FLAG=fixture","TG_BLOB_DIR=/var/lib/teagramd-blobs","TG_PUBLIC_WEBSOCKET_LISTEN_ADDR=","TG_PUBLIC_WEBSOCKET_ADVERTISE_ADDR=","TG_PUBLIC_REGISTRATION=closed","TG_PUBLIC_WEBSOCKET_ALLOWED_ORIGINS=","TG_PUBLIC_WEBSOCKET_CF_CONNECTING_IP_TRUSTED_PEERS=","TG_REPLICA_COUNT=1","TG_CLIENT_ADDR_TRUST=socket"]'
     elif { [ "$cfg" = target ] || [ "$cfg" = rollback ]; } && [[ "${MOCK_SCENARIO:-}" == target-local-welcome-channel-* ]]; then
       env_json='["TG_RSA_KEY_PATH=/var/lib/teagramd/server_key.pem","TG_SYNTHETIC_FLAG=fixture","TG_BLOB_DIR=/var/lib/teagramd-blobs","TG_REPLICA_COUNT=1","TG_CLIENT_ADDR_TRUST=socket","TG_WELCOME_CHANNEL="]'
     elif { [ "$cfg" = target ] || [ "$cfg" = rollback ]; } && [ "${MOCK_SCENARIO:-success}" != config-drift ]; then
@@ -424,11 +424,20 @@ if [ "${1:-}" = inspect ]; then
       env_json='["TG_RSA_KEY_PATH=/var/lib/teagramd/server_key.pem","TG_SYNTHETIC_FLAG=fixture","TG_BLOB_DIR=/var/lib/teagramd-blobs","TG_REPLICA_COUNT=1","TG_CLIENT_ADDR_TRUST=socket","TG_UNRELATED=drift"]'
     fi
     if [ "$id" = "$MOCK_BASE_ID" ] && [ -n "${MOCK_BASE_ENV_EXTRA:-}" ]; then
-      env_json=$(jq -c --arg extra "$MOCK_BASE_ENV_EXTRA" '. + [$extra]' <<< "$env_json")
+      while IFS= read -r extra; do
+        [ -n "$extra" ] || continue
+        env_json=$(jq -c --arg extra "$extra" '. + [$extra]' <<< "$env_json")
+      done <<< "$MOCK_BASE_ENV_EXTRA"
     elif [ "$id" = "$MOCK_REPLACEMENT_ID" ] && [ -n "${MOCK_TARGET_ENV_EXTRA:-}" ]; then
-      env_json=$(jq -c --arg extra "$MOCK_TARGET_ENV_EXTRA" '. + [$extra]' <<< "$env_json")
+      while IFS= read -r extra; do
+        [ -n "$extra" ] || continue
+        env_json=$(jq -c --arg extra "$extra" '. + [$extra]' <<< "$env_json")
+      done <<< "$MOCK_TARGET_ENV_EXTRA"
     elif [ "$id" = "$MOCK_ROLLBACK_ID" ] && [ -n "${MOCK_ROLLBACK_ENV_EXTRA:-}" ]; then
-      env_json=$(jq -c --arg extra "$MOCK_ROLLBACK_ENV_EXTRA" '. + [$extra]' <<< "$env_json")
+      while IFS= read -r extra; do
+        [ -n "$extra" ] || continue
+        env_json=$(jq -c --arg extra "$extra" '. + [$extra]' <<< "$env_json")
+      done <<< "$MOCK_ROLLBACK_ENV_EXTRA"
     fi
     if [ -f "$MOCK_STATE/websocket-origin-override-change" ]; then
       case "$id" in
@@ -560,7 +569,7 @@ fi
           while IFS= read -r env_line; do
             key=${env_line%%=*}
             case "$key" in
-              TG_PUBLIC_WEBSOCKET_LISTEN_ADDR|TG_PUBLIC_WEBSOCKET_ADVERTISE_ADDR|TG_PUBLIC_REGISTRATION|TG_PUBLIC_WEBSOCKET_ALLOWED_ORIGINS)
+              TG_PUBLIC_WEBSOCKET_LISTEN_ADDR|TG_PUBLIC_WEBSOCKET_ADVERTISE_ADDR|TG_PUBLIC_REGISTRATION|TG_PUBLIC_WEBSOCKET_ALLOWED_ORIGINS|TG_PUBLIC_WEBSOCKET_CF_CONNECTING_IP_TRUSTED_PEERS)
                 public_compose=$(jq -c --arg key "$key" --arg value "${env_line#*=}" \
                   '.services.teagramd.environment[$key]=$value' <<< "$public_compose")
                 ;;
@@ -881,9 +890,9 @@ write_compose_fixture() {
   if [ "$scenario" = config-drift ]; then
     cp -- "$base_config" "$target_config"
   elif [ "$scenario" = public-websocket-defaults ]; then
-    jq -c '.services.teagramd.environment += {TG_PUBLIC_WEBSOCKET_LISTEN_ADDR:"",TG_PUBLIC_WEBSOCKET_ADVERTISE_ADDR:"",TG_PUBLIC_REGISTRATION:"closed",TG_PUBLIC_WEBSOCKET_ALLOWED_ORIGINS:""}' "$base_config" > "$target_config"
+    jq -c '.services.teagramd.environment += {TG_PUBLIC_WEBSOCKET_LISTEN_ADDR:"",TG_PUBLIC_WEBSOCKET_ADVERTISE_ADDR:"",TG_PUBLIC_REGISTRATION:"closed",TG_PUBLIC_WEBSOCKET_ALLOWED_ORIGINS:"",TG_PUBLIC_WEBSOCKET_CF_CONNECTING_IP_TRUSTED_PEERS:""}' "$base_config" > "$target_config"
   elif [ "$scenario" = public-websocket-enabled ]; then
-    jq -c '.services.teagramd.environment += {TG_PUBLIC_WEBSOCKET_LISTEN_ADDR:"0.0.0.0:2444",TG_PUBLIC_WEBSOCKET_ADVERTISE_ADDR:"",TG_PUBLIC_REGISTRATION:"closed",TG_PUBLIC_WEBSOCKET_ALLOWED_ORIGINS:""}' "$base_config" > "$target_config"
+    jq -c '.services.teagramd.environment += {TG_PUBLIC_WEBSOCKET_LISTEN_ADDR:"0.0.0.0:2444",TG_PUBLIC_WEBSOCKET_ADVERTISE_ADDR:"",TG_PUBLIC_REGISTRATION:"closed",TG_PUBLIC_WEBSOCKET_ALLOWED_ORIGINS:"",TG_PUBLIC_WEBSOCKET_CF_CONNECTING_IP_TRUSTED_PEERS:""}' "$base_config" > "$target_config"
   elif [ "$scenario" = missing-mode-mount ]; then
     jq -c '.services.teagramd.volumes |= map(select(.target != "/run/teagramd/blob-mode"))' "$base_config" > "$target_config"
   elif [ "$scenario" = wrong-blob-backend ]; then
@@ -3541,8 +3550,10 @@ else
   fail 'mapped Turnstile .env additions must deploy through apply'
 fi
 
-prepare_env_addition_fixture public-websocket-addition-rollback TG_PUBLIC_WEBSOCKET_LISTEN_ADDR '' \
-  'TG_PUBLIC_WEBSOCKET_LISTEN_ADDR=0.0.0.0:2444' TG_PUBLIC_WEBSOCKET_LISTEN_ADDR=0.0.0.0:2444 \
+prepare_env_addition_fixture public-websocket-addition-rollback \
+  TG_PUBLIC_WEBSOCKET_LISTEN_ADDR,TG_PUBLIC_WEBSOCKET_CF_CONNECTING_IP_TRUSTED_PEERS '' \
+  $'TG_PUBLIC_WEBSOCKET_LISTEN_ADDR=0.0.0.0:2444\nTG_PUBLIC_WEBSOCKET_CF_CONNECTING_IP_TRUSTED_PEERS=127.0.0.1' \
+  $'TG_PUBLIC_WEBSOCKET_LISTEN_ADDR=0.0.0.0:2444\nTG_PUBLIC_WEBSOCKET_CF_CONNECTING_IP_TRUSTED_PEERS=127.0.0.1' \
   target-local-df9-rollback "$DF9_LOCAL_COMPOSE_TARGET_SHA" "$TARGET_LOCAL_COMPOSE_TARGET_SHA"
 state=$(cat "$TMP/public-websocket-addition-rollback-state-path")
 checkout=$(cat "$TMP/public-websocket-addition-rollback-checkout-path")
@@ -3552,6 +3563,7 @@ jq -c '.services.teagramd.environment += {
   TG_PUBLIC_WEBSOCKET_ADVERTISE_ADDR:"",
   TG_PUBLIC_REGISTRATION:"closed",
   TG_PUBLIC_WEBSOCKET_ALLOWED_ORIGINS:"",
+  TG_PUBLIC_WEBSOCKET_CF_CONNECTING_IP_TRUSTED_PEERS:"",
   TG_WELCOME_CHANNEL:""
 }' "$state/base-compose.json" > "$TMP/public-websocket-addition-rollback-base-compose.json"
 mv -- "$TMP/public-websocket-addition-rollback-base-compose.json" "$state/base-compose.json"
@@ -3559,6 +3571,7 @@ jq -c '.services.teagramd.environment += {
   TG_PUBLIC_WEBSOCKET_ADVERTISE_ADDR:"",
   TG_PUBLIC_REGISTRATION:"closed",
   TG_PUBLIC_WEBSOCKET_ALLOWED_ORIGINS:"",
+  TG_PUBLIC_WEBSOCKET_CF_CONNECTING_IP_TRUSTED_PEERS:"",
   TG_WELCOME_CHANNEL:""
 }' "$state/target-compose.json" > "$TMP/public-websocket-addition-rollback-target-compose.json"
 mv -- "$TMP/public-websocket-addition-rollback-target-compose.json" "$state/target-compose.json"
@@ -3566,7 +3579,7 @@ mv -- "$TMP/public-websocket-addition-rollback-target-compose.json" "$state/targ
 previous_env_sha=$(sha256sum "$TMP/public-websocket-addition-rollback-previous.env" | awk '{print $1}')
 status=$(run_fixture public-websocket-addition-rollback built 0 '' 2 '' '' apply "$APPLY_TARGET_SHA")
 if [ "$status" != 0 ] && grep -q "rollback=verified baseline_sha=$TARGET_LOCAL_COMPOSE_TARGET_SHA" "$TMP/public-websocket-addition-rollback.stdout" && \
-   [ "$(jq -r '.container_env_added' "$root.target/target.snapshot.json")" = TG_PUBLIC_WEBSOCKET_LISTEN_ADDR ] && \
+   [ "$(jq -r '.container_env_added' "$root.target/target.snapshot.json")" = TG_PUBLIC_WEBSOCKET_CF_CONNECTING_IP_TRUSTED_PEERS,TG_PUBLIC_WEBSOCKET_LISTEN_ADDR ] && \
    [ "$(jq -r '.container_env_added' "$root.rollback/rollback.snapshot.json")" = none ] && \
    [ "$(sha256sum "$checkout/.env" | awk '{print $1}')" = "$previous_env_sha" ] && \
    grep -qx "env_sha256=$previous_env_sha source_sha=$TARGET_LOCAL_COMPOSE_TARGET_SHA" "$checkout/.state/rollout-env" && \

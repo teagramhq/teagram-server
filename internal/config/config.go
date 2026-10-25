@@ -61,6 +61,10 @@ type Config struct {
 	// PublicWebSocketOriginPatterns is the independent browser-origin allowlist
 	// for the public WebSocket endpoint.
 	PublicWebSocketOriginPatterns []string
+	// PublicWebSocketCFTrustedPeers lists the socket peers allowed to supply
+	// CF-Connecting-IP on the public WebSocket endpoint. Empty disables header
+	// trust; the default and every other listener continue to use the socket peer.
+	PublicWebSocketCFTrustedPeers []netip.Addr
 	// AdminListenAddr is the address the admin HTTP server binds to.
 	// Empty disables the admin server entirely.
 	AdminListenAddr string
@@ -866,12 +870,20 @@ func load(log *slog.Logger, allowKeyGeneration bool) (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
+	publicCFTrustedPeers, err := parsePublicWebSocketCFTrustedPeers(os.Getenv("TG_PUBLIC_WEBSOCKET_CF_CONNECTING_IP_TRUSTED_PEERS"))
+	if err != nil {
+		return Config{}, err
+	}
+	if len(publicCFTrustedPeers) > 0 && identity.PublicWebSocketListenAddr == "" {
+		return Config{}, errors.New("TG_PUBLIC_WEBSOCKET_CF_CONNECTING_IP_TRUSTED_PEERS requires TG_PUBLIC_WEBSOCKET_LISTEN_ADDR")
+	}
 	cfg := Config{
 		ListenAddr:                    identity.ListenAddr,
 		WebSocketListenAddr:           os.Getenv("TG_WEBSOCKET_LISTEN_ADDR"),
 		WebSocketOriginPatterns:       originPatterns,
 		PublicWebSocketListenAddr:     identity.PublicWebSocketListenAddr,
 		PublicWebSocketOriginPatterns: publicOriginPatterns,
+		PublicWebSocketCFTrustedPeers: publicCFTrustedPeers,
 		PublicWebSocketAdvertiseHost:  publicAdvertiseHost,
 		PublicWebSocketAdvertisePort:  publicAdvertisePort,
 		AdminListenAddr:               os.Getenv("TG_ADMIN_LISTEN_ADDR"),
@@ -1603,6 +1615,9 @@ func load(log *slog.Logger, allowKeyGeneration bool) (Config, error) {
 		return Config{}, err
 	}
 	cfg.ClientAddrProxies = proxies
+	if len(publicCFTrustedPeers) > 0 && trust != ClientAddrSocket {
+		return Config{}, errors.New("TG_PUBLIC_WEBSOCKET_CF_CONNECTING_IP_TRUSTED_PEERS requires TG_CLIENT_ADDR_TRUST=socket")
+	}
 	// Admin server requires both env vars or neither: a listener without auth
 	// is a denial-of-service vector, and a hash with no listener is wasted work.
 	adminErr := validateAdmin(&cfg)
@@ -2162,6 +2177,26 @@ func parsePrefixes(raw string) ([]netip.Prefix, error) {
 		prefixes = append(prefixes, netip.PrefixFrom(addr, addr.BitLen()))
 	}
 	return prefixes, nil
+}
+
+// parsePublicWebSocketCFTrustedPeers reads exact socket peer addresses that
+// may supply CF-Connecting-IP on the public WebSocket listener. Exact addresses
+// keep a broad network from gaining the ability to choose another client's
+// rate-limit bucket.
+func parsePublicWebSocketCFTrustedPeers(raw string) ([]netip.Addr, error) {
+	var peers []netip.Addr
+	for entry := range strings.SplitSeq(raw, ",") {
+		entry = strings.TrimSpace(entry)
+		if entry == "" {
+			continue
+		}
+		addr, err := netip.ParseAddr(entry)
+		if err != nil || addr.Zone() != "" {
+			return nil, fmt.Errorf("TG_PUBLIC_WEBSOCKET_CF_CONNECTING_IP_TRUSTED_PEERS entry %q is not an IP address", entry)
+		}
+		peers = append(peers, addr.Unmap())
+	}
+	return peers, nil
 }
 
 // parseWebSocketOriginPatterns reads and validates the browser-origin

@@ -715,6 +715,7 @@ class BlobModeStateTests(unittest.TestCase):
             "TG_PUBLIC_WEBSOCKET_ADVERTISE_ADDR": "server.teagram.io:443",
             "TG_PUBLIC_REGISTRATION": "open",
             "TG_PUBLIC_WEBSOCKET_ALLOWED_ORIGINS": "https://example.invalid",
+            "TG_PUBLIC_WEBSOCKET_CF_CONNECTING_IP_TRUSTED_PEERS": "127.0.0.1",
         }
         for key, disabled_value in blob_mode.INITIAL_LOCAL_DISABLED_ENV.items():
             with self.subTest(key=key):
