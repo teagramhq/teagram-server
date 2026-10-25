@@ -159,6 +159,8 @@ def main() -> int:
     ], "public backend must disable reuse and send PROXY-v2 only to the dedicated public replicas")
     require("X-Forwarded-For" not in config, "public HAProxy must not use X-Forwarded-For")
     require("public_peer=%[var(sess.peer)]" in config, "public HAProxy must log the socket peer for smoke verification")
+    require("capture request header CF-Connecting-IP len 64" in frontend, "public HAProxy must capture the validated client address for logs")
+    require("client=%[capture.req.hdr(0)]" in config, "public HAProxy must log the captured client address")
     print("public WebSocket trust boundary validated")
     return 0
 

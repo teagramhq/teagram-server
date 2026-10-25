@@ -395,10 +395,10 @@ stage_public_replica_count() {
   esac
   previous_env="$R/teagramd-env-before-${S}-${TS}"
   [[ ! -e "$previous_env" && ! -L "$previous_env" ]] || { echo 'replica-count backup path already exists' >&2; return 1; }
-  cp -p -- "$env_file" "$previous_env" && chmod 600 -- "$previous_env" || {
+  if ! cp -p -- "$env_file" "$previous_env" || ! chmod 600 -- "$previous_env"; then
     echo 'cannot protect the pre-change .env for replica-count rollback' >&2
     return 1
-  }
+  fi
   temp=$(mktemp "$LIVE_CHECKOUT/.env.public-count.XXXXXXXX") || return 1
   if [[ "$count" == 1 ]] && ! awk '
       BEGIN { count=0; invalid=0 }

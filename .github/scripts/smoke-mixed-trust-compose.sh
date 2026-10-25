@@ -311,8 +311,9 @@ assert rules[4] == "http-request set-src req.hdr_ip(CF-Connecting-IP)"
 assert "http-reuse never" in backend
 assert "send-proxy-v2" in backend
 assert "X-Forwarded-For" not in content
+assert "capture request header CF-Connecting-IP len 64" in frontend
 assert 'public_peer=%[var(sess.peer)]' in content
-assert 'client=%[req.hdr_ip(CF-Connecting-IP)]' in content
+assert 'client=%[capture.req.hdr(0)]' in content
 print("public HAProxy pins its socket peer, validates one Cloudflare address, and disables backend reuse")
 PY
 compose_public run --rm --no-deps public-haproxy haproxy -c -f /usr/local/etc/haproxy/haproxy.cfg
@@ -666,7 +667,7 @@ if [ "$ingress_gateway" != 198.18.131.1 ]; then
 	exit 1
 fi
 if default_network_output=$(docker run --rm --network "$default_network" --read-only --cap-drop ALL \
-		busybox:1.37 sh -ec 'nc -z -w 2 198.18.131.10 2446' 2>&1); then
+		mirror.gcr.io/library/busybox:1.37 sh -ec 'nc -z -w 2 198.18.131.10 2446' 2>&1); then
 	echo "a container on the Compose default network reached the public HAProxy frontend" >&2
 	exit 1
 else
