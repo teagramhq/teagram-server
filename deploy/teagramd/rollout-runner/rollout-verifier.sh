@@ -923,6 +923,8 @@ snapshot_from_json() {
       # Empty key-exchange mappings use binary defaults; active values remain
       # subject to the Compose and container environment checks.
       | .services.teagramd.environment |= with_entries(select(empty_key_exchange_default | not))
+      # This Compose extension supplies values already checked on the service.
+      | del(."x-media-keys")
       # Reviewed logger and login-code transitions are checked separately.
       # Keep both out of the unrelated config digest.
       | .services.teagramd |= del(.logging)

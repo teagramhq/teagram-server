@@ -825,6 +825,17 @@ media_key_target=$(snapshot_from_json \
 [ "$(jq -r '.config_sha256' <<< "$media_key_baseline")" = "$(jq -r '.config_sha256' <<< "$media_key_target")" ]
 [ "$(jq -r '.mounts_sha256' <<< "$media_key_baseline")" = "$(jq -r '.mounts_sha256' <<< "$media_key_target")" ]
 [ "$(jq -r '.container_env_sha256' <<< "$media_key_baseline")" = "$(jq -r '.container_env_sha256' <<< "$media_key_target")" ]
+media_key_extension_compose=$(jq -c '
+  .["x-media-keys"]={
+    TG_MEDIA_KEY_DIR:"/run/teagramd/media-keys",
+    TG_MEDIA_KEY_CURRENT:"${TG_MEDIA_KEY_CURRENT:-1}"
+  }
+' <<< "$media_key_compose")
+media_key_extension_target=$(snapshot_from_json \
+  "$media_key_inspect" "$media_key_extension_compose" \
+  "$ENV_FILE" "$OVERRIDE_FILE" selected-compose-render target)
+[ "$(jq -r '.config_sha256' <<< "$media_key_baseline")" = "$(jq -r '.config_sha256' <<< "$media_key_extension_target")" ]
+printf '%s\n' 'PASS media-key Compose extension metadata does not count as runtime drift'
 media_key_normalized_compose=$(jq -c '
   .services.teagramd.volumes[-1].bind={}
 ' <<< "$media_key_compose")
