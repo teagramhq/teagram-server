@@ -203,6 +203,31 @@ func NewS3Store(ctx context.Context, cfg S3Config, keys *KeyRing, encrypt bool) 
 	return serving, remote, nil
 }
 
+// NewMigratedS3Store constructs and checks the serving store for an S3 backend
+// whose blob-mode authority is encrypted: envelopes are read and written under
+// [EncryptedObjectsPrefix], where the migration from accepted plaintext put them.
+func NewMigratedS3Store(ctx context.Context, cfg S3Config, keys *KeyRing) (Store, error) {
+	if keys == nil {
+		return nil, errors.New("S3 media encryption requires TG_MEDIA_KEY_DIR and TG_MEDIA_KEY_CURRENT")
+	}
+	remote, err := NewS3(cfg)
+	if err != nil {
+		return nil, fmt.Errorf("object store configuration is invalid; check TG_BLOB_S3_* settings: %w", err)
+	}
+	if err := remote.Check(ctx); err != nil {
+		return nil, fmt.Errorf("object store startup check failed: %w", err)
+	}
+	prefixed, err := NewPrefixedStore(remote, EncryptedObjectsPrefix)
+	if err != nil {
+		return nil, fmt.Errorf("construct encrypted object namespace: %w", err)
+	}
+	sealed, err := NewEncrypted(prefixed, keys, DefaultChunkSize)
+	if err != nil {
+		return nil, fmt.Errorf("construct encrypted object store: %w", err)
+	}
+	return sealed, nil
+}
+
 // OperationTimeout reports the configured bound for one S3 operation,
 // including its bounded retries.
 func (s *S3) OperationTimeout() time.Duration { return s.operationTimeout }

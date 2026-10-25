@@ -35,9 +35,7 @@ import (
 const migrationTestBucket = "blob-migration-test"
 
 func TestBlobEncryptionMigrationKillResume(t *testing.T) {
-	if !requireRootMigrationFixture(t) {
-		return
-	}
+	root := requireMigrationRoot(t)
 	ctx, cancel := context.WithTimeout(t.Context(), 180*time.Second)
 	defer cancel()
 
@@ -59,9 +57,14 @@ func TestBlobEncryptionMigrationKillResume(t *testing.T) {
 	const phone = "+15550124777"
 	initial := startMigrationMediaHarness(t, ctx, dsn, serverKey, phone, plainStore, true)
 	payload := mediaPayload(mediaPartSize + 37)
-	doc := uploadMediaDocument(t, ctx, initial.client, initial.client.id, 0x5ED24777, "migration.bin", payload)
+	// Sent, not only uploaded: upload.getFile serves a document through a message
+	// that references it.
+	self := peerUser(initial.client.id, initial.client.id)
+	doc := sendUploadedDocument(t, ctx, initial.client, self, 0x5ED24777,
+		uploadParts(t, ctx, initial.client, 0x5ED24777, payload), "migration.bin", "", 0x5ED24777)
 	secondPayload := []byte("second plaintext file survives cutover")
-	secondDoc := uploadMediaDocument(t, ctx, initial.client, initial.client.id, 0x5ED24779, "second.bin", secondPayload)
+	secondDoc := sendUploadedDocument(t, ctx, initial.client, self, 0x5ED24779,
+		uploadParts(t, ctx, initial.client, 0x5ED24779, secondPayload), "second.bin", "", 0x5ED24779)
 	livePartPayload := []byte("live upload part survives migration")
 	saveMediaPart(t, ctx, initial.client, 0x5ED24778, 0, livePartPayload)
 	references, err := initial.store.BlobInventoryReferences(ctx)
@@ -98,10 +101,16 @@ func TestBlobEncryptionMigrationKillResume(t *testing.T) {
 	if err := publishAcceptedS3Fixture(t, stateRoot, s3Config); err != nil {
 		t.Fatalf("create accepted S3 authority fixture: %v", err)
 	}
+	root.ownAuthority(t, ctx, stateRoot, filepath.Join(stateRoot, "checkout"), reportDir)
 	if _, err := blobmode.Read(authorityDir, blobmode.EffectiveConfig{BlobS3: &s3Config}); err != nil {
 		t.Fatalf("read accepted S3 authority fixture: %v", err)
 	}
 	progressPath := filepath.Join(t.TempDir(), "migration-progress.jsonl")
+	// Created by the test so the progress journal stays readable after the root
+	// command appends to it.
+	if err := os.WriteFile(progressPath, nil, 0o600); err != nil {
+		t.Fatalf("create migration progress journal: %v", err)
+	}
 	mediaKeyDir := filepath.Join(t.TempDir(), "media-keys")
 	if err := os.Mkdir(mediaKeyDir, 0o700); err != nil {
 		t.Fatalf("create media key directory: %v", err)
@@ -110,15 +119,12 @@ func TestBlobEncryptionMigrationKillResume(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(mediaKeyDir, "4.key"), []byte(hex.EncodeToString(mediaKey)), 0o600); err != nil {
 		t.Fatalf("write test media key: %v", err)
 	}
-	env := migrationCommandEnv(dsn, s3Config, mediaKeyDir)
-	binary := buildMigrationCommand(t)
+	migration := root.migration(t, buildMigrationCommand(t), migrationCommandEnv(dsn, s3Config, mediaKeyDir))
 	remote.blockNextPut("teagramd/" + blob.EncryptedObjectsPrefix + "/" + partKey)
-	// #nosec G204 -- The built command is repository code; all arguments name this test's private fixtures.
-	command := osexec.CommandContext(ctx, binary,
+	command, pidPath := migration.command(ctx,
 		"--writes", "drained", "--progress", progressPath,
 		"--authority-dir", authorityDir, "--report-dir", reportDir,
 	)
-	command.Env = env
 	var firstStdout, firstStderr bytes.Buffer
 	command.Stdout, command.Stderr = &firstStdout, &firstStderr
 	if err := command.Start(); err != nil {
@@ -127,17 +133,17 @@ func TestBlobEncryptionMigrationKillResume(t *testing.T) {
 	childFinished := false
 	t.Cleanup(func() {
 		if !childFinished {
-			killAndWaitMigration(t, command)
+			migration.killAndWait(t, ctx, command, pidPath)
 		}
 	})
 	select {
 	case <-remote.blockedPut:
 	case <-ctx.Done():
-		killAndWaitMigration(t, command)
+		migration.killAndWait(t, ctx, command, pidPath)
 		childFinished = true
 		t.Fatalf("migration did not reach the live-part write: %v\nstdout: %s\nstderr: %s", ctx.Err(), firstStdout.String(), firstStderr.String())
 	case <-time.After(45 * time.Second):
-		killAndWaitMigration(t, command)
+		migration.killAndWait(t, ctx, command, pidPath)
 		childFinished = true
 		t.Fatalf("migration did not reach the live-part write\nstdout: %s\nstderr: %s", firstStdout.String(), firstStderr.String())
 	}
@@ -148,7 +154,7 @@ func TestBlobEncryptionMigrationKillResume(t *testing.T) {
 	if !hasVerifiedProgress(progress, fileKey) || !hasVerifiedProgress(progress, secondFileKey) {
 		t.Fatalf("progress before killing subprocess does not verify both files %q and %q: %s", fileKey, secondFileKey, progress)
 	}
-	if err := command.Process.Kill(); err != nil {
+	if err := migration.kill(ctx, command, pidPath); err != nil {
 		t.Fatalf("kill migration subprocess: %v", err)
 	}
 	waitErr := command.Wait()
@@ -157,8 +163,12 @@ func TestBlobEncryptionMigrationKillResume(t *testing.T) {
 	if !errors.As(waitErr, &exitErr) {
 		t.Fatalf("migration subprocess wait = %v, want SIGKILL", waitErr)
 	}
+	// Through sudo the status is sudo's own, which reports a command killed by a
+	// signal either by raising it on itself or as exit status 128+signal.
 	waitStatus, ok := exitErr.Sys().(syscall.WaitStatus)
-	if !ok || !waitStatus.Signaled() || waitStatus.Signal() != syscall.SIGKILL {
+	killed := ok && (waitStatus.Signaled() && waitStatus.Signal() == syscall.SIGKILL ||
+		waitStatus.Exited() && waitStatus.ExitStatus() == 128+int(syscall.SIGKILL))
+	if !killed {
 		t.Fatalf("migration subprocess status = %v, want SIGKILL", exitErr.ProcessState)
 	}
 
@@ -177,7 +187,7 @@ func TestBlobEncryptionMigrationKillResume(t *testing.T) {
 	}
 	cleanupArgs := []string{"--writes", "drained", "--progress", progressPath,
 		"--authority-dir", authorityDir, "--report-dir", reportDir, "--cleanup"}
-	if stdout, stderr, err := runMigrationCommand(ctx, binary, env, cleanupArgs...); err == nil ||
+	if stdout, stderr, err := migration.run(ctx, cleanupArgs...); err == nil ||
 		!strings.Contains(stderr, "plaintext cleanup requires encrypted blob-mode authority") {
 		t.Fatalf("cleanup before authority switch = %v, stdout=%s stderr=%s", err, stdout, stderr)
 	}
@@ -186,7 +196,7 @@ func TestBlobEncryptionMigrationKillResume(t *testing.T) {
 	}
 
 	remote.allowBlockedPuts()
-	stdout, stderr, err := runMigrationCommand(ctx, binary, env,
+	stdout, stderr, err := migration.run(ctx,
 		"--writes", "drained", "--progress", progressPath,
 		"--authority-dir", authorityDir, "--report-dir", reportDir,
 	)
@@ -219,7 +229,7 @@ func TestBlobEncryptionMigrationKillResume(t *testing.T) {
 		t.Fatalf("authority after completed migration = %+v, %v; want encrypted", authority, err)
 	}
 
-	stdout, stderr, err = runMigrationCommand(ctx, binary, env, cleanupArgs...)
+	stdout, stderr, err = migration.run(ctx, cleanupArgs...)
 	if err != nil {
 		t.Fatalf("explicit plaintext cleanup: %v\nstdout: %s\nstderr: %s", err, stdout, stderr)
 	}
@@ -241,7 +251,7 @@ func TestBlobEncryptionMigrationKillResume(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create serving media key ring: %v", err)
 	}
-	encryptedStore, _, err := blob.NewS3Store(ctx, s3Config, keys, true)
+	encryptedStore, err := blob.NewMigratedS3Store(ctx, s3Config, keys)
 	if err != nil {
 		t.Fatalf("create encrypted serving store after restart: %v", err)
 	}
@@ -256,58 +266,136 @@ func TestBlobEncryptionMigrationKillResume(t *testing.T) {
 	}
 }
 
-func requireRootMigrationFixture(t *testing.T) bool {
+// migrationRoot runs the commands that need root: publishing the encrypted
+// authority requires it. Only those commands are elevated, through
+// non-interactive sudo when the test itself is not root, so the database,
+// servers, fixtures and builds all stay in this unprivileged test process and
+// under its deadlines.
+type migrationRoot struct {
+	sudo string
+}
+
+func requireMigrationRoot(t *testing.T) migrationRoot {
 	t.Helper()
 	if os.Geteuid() == 0 {
-		return true
+		return migrationRoot{}
 	}
 	sudo, err := osexec.LookPath("sudo")
 	if err != nil {
-		t.Skip("blob-mode publication integration requires the CI root test environment")
-		return false
+		t.Skip("blob-mode publication integration requires root or non-interactive sudo")
 	}
-	testBinary, err := os.Executable()
+	root := migrationRoot{sudo: sudo}
+	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
+	defer cancel()
+	if output, err := root.command(ctx, "true").CombinedOutput(); err != nil {
+		t.Fatalf("non-interactive sudo for the migration command: %v\n%s", err, output)
+	}
+	return root
+}
+
+func (r migrationRoot) command(ctx context.Context, args ...string) *osexec.Cmd {
+	if r.sudo != "" {
+		args = append([]string{r.sudo, "-n"}, args...)
+	}
+	// #nosec G204 G702 -- Fixed system tools and this test's own migration build, run on its private fixtures.
+	command := osexec.CommandContext(ctx, args[0], args[1:]...)
+	// A root process left behind by a killed sudo must not hold the test on its pipes.
+	command.WaitDelay = 5 * time.Second
+	return command
+}
+
+func (r migrationRoot) run(ctx context.Context, args ...string) error {
+	if output, err := r.command(ctx, args...).CombinedOutput(); err != nil {
+		return fmt.Errorf("%s: %w\n%s", strings.Join(args, " "), err, output)
+	}
+	return nil
+}
+
+// ownAuthority hands the authority fixture to root, as the rollout runner
+// leaves it, and gives it back to the test user for TempDir cleanup.
+func (r migrationRoot) ownAuthority(t *testing.T, ctx context.Context, fixtureRoot string, paths ...string) {
+	t.Helper()
+	if r.sudo == "" {
+		return
+	}
+	if err := r.run(ctx, append([]string{"chown", "-R", "0:0"}, paths...)...); err != nil {
+		t.Fatalf("hand authority fixture to root: %v", err)
+	}
+	t.Cleanup(func() {
+		cleanupContext, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
+		defer cancel()
+		owner := strconv.Itoa(os.Getuid()) + ":" + strconv.Itoa(os.Getgid())
+		if err := r.run(cleanupContext, "chown", "-R", owner, fixtureRoot); err != nil {
+			t.Errorf("return authority fixture to the test user: %v", err)
+		}
+	})
+}
+
+func (r migrationRoot) migration(t *testing.T, binary string, env []string) migrationProcess {
+	t.Helper()
+	return migrationProcess{root: r, binary: binary, env: env, pidDir: t.TempDir()}
+}
+
+// migrationProcess runs the migration command as root with exactly env. A
+// shell records the command's own pid before exec, because the test signals
+// the root process directly rather than sudo, which cannot relay SIGKILL.
+type migrationProcess struct {
+	root   migrationRoot
+	binary string
+	env    []string
+	pidDir string
+}
+
+func (m migrationProcess) command(ctx context.Context, args ...string) (*osexec.Cmd, string) {
+	pidFile, err := os.CreateTemp(m.pidDir, "migration-*.pid")
+	pidPath := ""
+	if err == nil {
+		pidPath = pidFile.Name()
+		err = pidFile.Close()
+	}
 	if err != nil {
-		t.Fatalf("locate test binary: %v", err)
+		pidPath = filepath.Join(m.pidDir, "unavailable.pid")
 	}
-	// #nosec G204 G702 -- Re-run this exact test binary with the runner's container runtime and Go environment.
-	args := append([]string{"-n", "env"}, rootMigrationEnvironment()...)
-	args = append(args, testBinary, "-test.run=^TestBlobEncryptionMigrationKillResume$")
-	command := osexec.CommandContext(t.Context(), sudo, args...)
-	if output, err := command.CombinedOutput(); err != nil {
-		t.Fatalf("root migration integration test failed: %v\n%s", err, output)
-	}
-	return false
+	argv := []string{"/bin/sh", "-c", `echo "$$" >"$0" && exec "$@"`, pidPath, "env", "-i"}
+	argv = append(argv, m.env...)
+	argv = append(argv, m.binary)
+	return m.root.command(ctx, append(argv, args...)...), pidPath
 }
 
-func TestRootMigrationEnvironmentPreservesContainerSettings(t *testing.T) {
-	t.Setenv("TESTCONTAINERS_HUB_IMAGE_NAME_PREFIX", "mirror.gcr.io")
-	t.Setenv("TESTCONTAINERS_RYUK_DISABLED", "true")
-	t.Setenv("DOCKER_HOST", "unix:///var/run/docker.sock")
-
-	got := strings.Join(rootMigrationEnvironment(), "\n")
-	for _, setting := range []string{
-		"TESTCONTAINERS_HUB_IMAGE_NAME_PREFIX=mirror.gcr.io",
-		"TESTCONTAINERS_RYUK_DISABLED=true",
-		"DOCKER_HOST=unix:///var/run/docker.sock",
-	} {
-		if !strings.Contains(got, setting) {
-			t.Errorf("root migration environment omitted %q: %q", setting, got)
-		}
-	}
+func (m migrationProcess) run(ctx context.Context, args ...string) (string, string, error) {
+	command, _ := m.command(ctx, args...)
+	var stdout, stderr bytes.Buffer
+	command.Stdout, command.Stderr = &stdout, &stderr
+	err := command.Run()
+	return stdout.String(), stderr.String(), err
 }
 
-func rootMigrationEnvironment() []string {
-	var env []string
-	for _, setting := range os.Environ() {
-		key, _, _ := strings.Cut(setting, "=")
-		if key == "PATH" || key == "DOCKER_HOST" || key == "DOCKER_CONTEXT" ||
-			key == "DOCKER_TLS_VERIFY" || key == "DOCKER_CERT_PATH" || key == "DOCKER_CONFIG" ||
-			strings.HasPrefix(key, "TESTCONTAINERS_") || key == "GOTOOLCHAIN" || key == "GOMODCACHE" {
-			env = append(env, setting)
+func (m migrationProcess) kill(ctx context.Context, command *osexec.Cmd, pidPath string) error {
+	pid, err := os.ReadFile(pidPath)
+	if err != nil || strings.TrimSpace(string(pid)) == "" {
+		if killErr := command.Process.Kill(); killErr != nil && !errors.Is(killErr, os.ErrProcessDone) {
+			return errors.Join(fmt.Errorf("read migration pid: %w", err), killErr)
+		}
+		return fmt.Errorf("read migration pid: %w", err)
+	}
+	if m.root.sudo == "" {
+		return command.Process.Kill()
+	}
+	killContext, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
+	defer cancel()
+	return m.root.run(killContext, "kill", "-KILL", strings.TrimSpace(string(pid)))
+}
+
+func (m migrationProcess) killAndWait(t *testing.T, ctx context.Context, command *osexec.Cmd, pidPath string) {
+	t.Helper()
+	if err := m.kill(ctx, command, pidPath); err != nil && !errors.Is(err, os.ErrProcessDone) {
+		t.Errorf("kill migration subprocess: %v", err)
+	}
+	if err := command.Wait(); err != nil {
+		if exitErr, ok := errors.AsType[*osexec.ExitError](err); !ok || exitErr.ProcessState == nil {
+			t.Errorf("wait for killed migration subprocess: %v", err)
 		}
 	}
-	return env
 }
 
 type migrationMediaHarness struct {
@@ -455,28 +543,6 @@ func migrationCommandEnv(dsn string, s3Config blob.S3Config, mediaKeyDir string)
 	return env
 }
 
-func runMigrationCommand(ctx context.Context, binary string, env []string, args ...string) (string, string, error) {
-	// #nosec G204 -- The binary is built by this test and arguments refer only to its private fixtures.
-	command := osexec.CommandContext(ctx, binary, args...)
-	command.Env = env
-	var stdout, stderr bytes.Buffer
-	command.Stdout, command.Stderr = &stdout, &stderr
-	err := command.Run()
-	return stdout.String(), stderr.String(), err
-}
-
-func killAndWaitMigration(t *testing.T, command *osexec.Cmd) {
-	t.Helper()
-	if err := command.Process.Kill(); err != nil && !errors.Is(err, os.ErrProcessDone) {
-		t.Errorf("kill migration subprocess: %v", err)
-	}
-	if err := command.Wait(); err != nil {
-		if exitErr, ok := errors.AsType[*osexec.ExitError](err); !ok || exitErr.ProcessState == nil {
-			t.Errorf("wait for killed migration subprocess: %v", err)
-		}
-	}
-}
-
 func hasVerifiedProgress(progress []byte, key string) bool {
 	for line := range bytes.SplitSeq(progress, []byte{'\n'}) {
 		var event struct {
@@ -509,6 +575,7 @@ type migrationS3 struct {
 	blockedKey string
 	blockPuts  bool
 	blockedPut chan struct{}
+	release    chan struct{}
 }
 
 type migrationS3Listing struct {
@@ -526,9 +593,14 @@ type migrationS3Object struct {
 
 func newMigrationS3(t *testing.T) *migrationS3 {
 	t.Helper()
-	remote := &migrationS3{objects: make(map[string][]byte), puts: make(map[string]int), blockedPut: make(chan struct{}, 1)}
+	remote := &migrationS3{
+		objects: make(map[string][]byte), puts: make(map[string]int),
+		blockedPut: make(chan struct{}, 1), release: make(chan struct{}),
+	}
 	remote.server = httptest.NewServer(http.HandlerFunc(remote.serveHTTP))
 	t.Cleanup(remote.server.Close)
+	// Runs before Close: a blocked handler would otherwise hold Close forever.
+	t.Cleanup(func() { close(remote.release) })
 	var err error
 	remote.raw, err = blob.NewS3(blob.S3Config{
 		Endpoint: remote.server.URL, Bucket: migrationTestBucket, Prefix: "teagramd/",
@@ -609,7 +681,15 @@ func (s *migrationS3) servePut(w http.ResponseWriter, r *http.Request, key strin
 		case s.blockedPut <- struct{}{}:
 		default:
 		}
-		<-r.Context().Done()
+		// Drain the body so the server notices when the killed client's
+		// connection closes; release ends the wait if it never does.
+		if _, err := io.Copy(io.Discard, r.Body); err != nil {
+			return
+		}
+		select {
+		case <-r.Context().Done():
+		case <-s.release:
+		}
 		return
 	}
 	body, err := io.ReadAll(r.Body)
