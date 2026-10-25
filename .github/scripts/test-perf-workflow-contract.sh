@@ -7,6 +7,7 @@ runner="${PERF_RUNNER:-.github/scripts/perf-run.sh}"
 postgres="${PERF_POSTGRES:-.github/scripts/perf-postgres.sh}"
 expected_restore_if="steps.snapshot.outputs.cache-hit == 'true'"
 expected_seed_if="steps.snapshot.outputs.cache-hit != 'true'"
+expected_fixture_key="perf-fixture-\${{ hashFiles('test/perf/fixture_test.go', 'test/perf/server_test.go') }}"
 
 fail() {
   printf '%s: %s\n' "$workflow" "$1" >&2
@@ -28,6 +29,13 @@ query() {
 
 missing_snapshot_step="$(query '.jobs."rpc-performance".steps[] | select(.name == "No snapshot for this fixture") | .name')"
 [[ -z "$missing_snapshot_step" ]] || fail 'a missing main snapshot must not be a standalone failure'
+
+[[ "$(query '.jobs."fixture-snapshot".steps[] | select(.name == "Look up the snapshot") | .with.key')" == "$expected_fixture_key" ]] ||
+  fail 'the snapshot lookup key must include fixture and server setup helpers'
+[[ "$(query '.jobs."fixture-snapshot".steps[] | select(.name == "Store the snapshot") | .with.key')" == "$expected_fixture_key" ]] ||
+  fail 'the snapshot save key must match the fixture and server setup helpers'
+[[ "$(query '.jobs."rpc-performance".steps[] | select(.name == "Restore the snapshot") | .with.key')" == "$expected_fixture_key" ]] ||
+  fail 'the RPC job restore key must include fixture and server setup helpers'
 
 runner_contents="$(<"$runner")"
 [[ "$runner_contents" == *"RPC performance fixture seed / infrastructure failure"* ]] ||

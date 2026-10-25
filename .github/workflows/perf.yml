@@ -41,15 +41,14 @@ jobs:
         with:
           persist-credentials: false
 
-      # The snapshot is keyed on the seeder alone. A new migration is applied
-      # on top of the restored data, as production applies it, so only a change
-      # to the fixture's shape needs a new snapshot.
+      # Track both the fixture writer and server setup helper: either can
+      # change the seeded data. Migrations apply on top of restored data.
       - name: Look up the snapshot
         id: snapshot
         uses: actions/cache/restore@v6.1.0
         with:
           path: .perf-cache
-          key: perf-fixture-${{ hashFiles('test/perf/fixture_test.go') }}
+          key: perf-fixture-${{ hashFiles('test/perf/fixture_test.go', 'test/perf/server_test.go') }}
           lookup-only: true
 
       - uses: actions/setup-go@v7.0.0
@@ -77,7 +76,7 @@ jobs:
         uses: actions/cache/save@v6.1.0
         with:
           path: .perf-cache
-          key: perf-fixture-${{ hashFiles('test/perf/fixture_test.go') }}
+          key: perf-fixture-${{ hashFiles('test/perf/fixture_test.go', 'test/perf/server_test.go') }}
 
       - name: Report fixture snapshot infrastructure failure
         if: failure() && steps.seed.outcome != 'failure'
@@ -115,7 +114,7 @@ jobs:
         uses: actions/cache/restore@v6.1.0
         with:
           path: .perf-cache
-          key: perf-fixture-${{ hashFiles('test/perf/fixture_test.go') }}
+          key: perf-fixture-${{ hashFiles('test/perf/fixture_test.go', 'test/perf/server_test.go') }}
 
       - uses: actions/setup-go@v7.0.0
         with:
