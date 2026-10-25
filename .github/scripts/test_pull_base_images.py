@@ -124,7 +124,7 @@ class PullBaseImagesTests(unittest.TestCase):
             "run: bash .github/scripts/pull-base-images.sh "
             "--image mirror.gcr.io/postgres:18-alpine"
         )
-        for job_name in ("smoke", "e2e-admin"):
+        for job_name in ("ci-main", "smoke", "e2e-admin"):
             with self.subTest(job=job_name):
                 job = re.search(
                     rf"(?ms)^  {re.escape(job_name)}:\n(.*?)(?=^  [a-z0-9-]+:|\Z)",

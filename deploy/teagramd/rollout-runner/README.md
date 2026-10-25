@@ -133,14 +133,18 @@ reviewed artifact and content pin before rollout.
 
 Ordinary `apply` compares the checked-out baseline Compose project and
 persistent mounts with the target render before creating evidence, dumping the
-database, building, or stopping a container. The only permitted layout change
-is adding the exact read-only `/etc/teagramd/media-keys` bind mount at
-`/run/teagramd/media-keys` to the existing `teagramd` service. Any project,
-volume, or other mount change fails closed and asks for the explicit
-`move-stack` action. `deploy-main.sh` continues to call `apply`, so a
-main-branch deployment that contains the project rename exits before changing
-the running stack until the move action is run. The normal readiness and
-rollback gates still apply when adding the media-key mount.
+database, building, or stopping a container. The only additional layout change
+allowed during an ordinary rollout is the initial exact read-only bind from
+`/etc/teagramd/media-keys` to `/run/teagramd/media-keys` on the existing
+`teagramd` service. It requires `TG_MEDIA_KEY_CURRENT=1` and a matching
+mode-0600 key file owned by uid/gid 65532 in a mode-0700 directory outside the
+application checkout. The runner pins the host path and key version after that
+first rollout; later changes remain blocked. Any project, volume, or other
+mount change fails closed and asks for the explicit `move-stack` action.
+`deploy-main.sh` continues to call `apply`, so a main-branch deployment that
+contains the project rename exits before changing the running stack until the
+move action is run. The normal readiness and rollback gates still apply when
+adding the media-key mount.
 
 The move action accepts only a reviewed fast-forward target on `origin/main`.
 It takes both the old and new deploy locks, stages `/opt/teagram` as a worktree,
