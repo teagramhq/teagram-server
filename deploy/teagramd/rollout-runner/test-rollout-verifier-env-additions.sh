@@ -39,15 +39,15 @@ export PATH
 COMPOSE_JSON='{"services":{"teagramd":{"stop_grace_period":"2m0s","ports":[],"volumes":[],"network_mode":"","networks":{},"environment":{"TG_REPLICA_COUNT":"1","TG_CLIENT_ADDR_TRUST":"socket","TG_LOG_LOGIN_CODES":"false","POSTGRES_PASSWORD":"fixture-secret-postgres-password","DATABASE_URL":"postgres://fixture:dsn-secret@db/teagram"}}}}'
 
 inspect_json() {
-  local extra=$1
-  jq -cn --arg extra "$extra" '
+  local extra=$1 log_config=${INSPECT_LOG_CONFIG:-'{"Type":"json-file","Config":{}}'}
+  jq -cn --arg extra "$extra" --argjson log_config "$log_config" '
     ["TG_REPLICA_COUNT=1","TG_CLIENT_ADDR_TRUST=socket","TG_LOG_LOGIN_CODES=false"] as $base
     | {
         Id:"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
         Image:"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
         Config:{Env:($base + (if $extra == "" then [] else [$extra] end)),StopTimeout:120},
         State:{Status:"running",ExitCode:0,StartedAt:"2026-10-16T12:00:00Z",FinishedAt:"0001-01-01T00:00:00Z"},
-        HostConfig:{LogConfig:{Type:"json-file",Config:{}},PortBindings:{}},Mounts:[]
+        HostConfig:{LogConfig:$log_config,PortBindings:{}},Mounts:[]
       }
   '
 }
@@ -126,6 +126,9 @@ exchange_budget_snapshot() {
 }
 
 : > "$ENV_FILE"
+default_compose_json=$COMPOSE_JSON
+COMPOSE_JSON=$(jq -c '.services.teagramd.logging={driver:"syslog",options:{"syslog-address":"unixgram:///dev/log","syslog-facility":"daemon","syslog-format":"rfc5424",tag:"teagramd"}}' <<< "$COMPOSE_JSON")
+INSPECT_LOG_CONFIG='{"Type":"syslog","Config":{"syslog-address":"unixgram:///dev/log","syslog-facility":"daemon","syslog-format":"rfc5424","tag":"teagramd"}}'
 empty_env=$(snapshot_from_json \
   "$(inspect_json '')" "$COMPOSE_JSON" "$ENV_FILE" "$OVERRIDE_FILE" selected-compose-render baseline)
 empty_exchange_env=$(exchange_budget_snapshot target '' '')
@@ -142,6 +145,8 @@ if ! compare_snapshots \
   cat "$TMP/key-exchange-empty-comparisons.tsv" >&2
   exit 1
 fi
+COMPOSE_JSON=$default_compose_json
+unset INSPECT_LOG_CONFIG
 printf '%s\n' 'PASS full baseline-to-target comparison accepts empty key-exchange mappings'
 printf '%s\n' 'PASS empty key-exchange settings retain the binary-default environment baseline'
 
