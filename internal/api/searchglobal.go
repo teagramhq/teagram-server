@@ -252,7 +252,7 @@ func (h *handlers) globalSearchSlice(r *mtproto.Request, hits []store.GlobalSear
 		case hit.Post != nil:
 			post := *hit.Post
 			post.Poll = channelPolls[channelPollKey{channelID: post.ChannelID, localID: post.LocalID}]
-			message, renderErr := channelMessageToTL(post, r.UserID, postFiles, broadcasts[post.ChannelID], h.dcID)
+			message, renderErr := h.channelMessageToTL(post, r.UserID, postFiles, broadcasts[post.ChannelID], h.dcID)
 			if renderErr != nil {
 				h.log.Error("render global channel poll description", "user_id", r.UserID, "channel_id", post.ChannelID, "local_id", post.LocalID, "err", renderErr)
 				return nil, errInternal
@@ -270,7 +270,7 @@ func (h *handlers) globalSearchSlice(r *mtproto.Request, hits []store.GlobalSear
 				}
 				msgs = append(msgs, message)
 			} else {
-				msgs = append(msgs, messageToTL(*hit.Owned, createUsers[hit.PeerID], ownedFiles, nil, nil, h.dcID))
+				msgs = append(msgs, h.messageToTL(*hit.Owned, createUsers[hit.PeerID], ownedFiles, nil, nil, h.dcID))
 			}
 			users[hit.Owned.FromID] = true
 			// A service row names people the row itself does not author, and a

@@ -418,7 +418,7 @@ func (h *handlers) handleSendMediaAfterReplyOnConn(c *mtproto.Conn, r *mtproto.R
 			if message.StickerDocumentID == nil || *message.StickerDocumentID != stickerDocumentID {
 				return nil, nil, nil, errMediaInvalid
 			}
-			valid, catalogErr := validStickerRetryIdentity(stickerInput.ID, stickerInput.AccessHash)
+			valid, catalogErr := h.validStickerRetryIdentity(stickerInput.ID, stickerInput.AccessHash)
 			if catalogErr != nil {
 				h.log.Error("channel sticker retry catalogue", "user_id", r.UserID, "channel_id", toID, "err", catalogErr)
 				return nil, nil, nil, errInternal
@@ -492,7 +492,7 @@ func (h *handlers) handleSendMediaAfterReplyOnConn(c *mtproto.Conn, r *mtproto.R
 				if existing.StickerDocumentID == nil || *existing.StickerDocumentID != stickerDocumentID {
 					return nil, nil, nil, errMediaInvalid
 				}
-				valid, catalogErr := validStickerRetryIdentity(stickerInput.ID, stickerInput.AccessHash)
+				valid, catalogErr := h.validStickerRetryIdentity(stickerInput.ID, stickerInput.AccessHash)
 				if catalogErr != nil {
 					h.log.Error("sticker retry catalogue", "user_id", r.UserID, "err", catalogErr)
 					return nil, nil, nil, errInternal
@@ -527,7 +527,7 @@ func (h *handlers) handleSendMediaAfterReplyOnConn(c *mtproto.Conn, r *mtproto.R
 				res := &tg.Updates{
 					Updates: []tg.UpdateClass{
 						&tg.UpdateMessageID{ID: int(existing.LocalID), RandomID: req.RandomID},
-						&tg.UpdateNewMessage{Message: messageToTL(existing, nil, files, nil, nil, h.dcID), Pts: pts, PtsCount: 1},
+						&tg.UpdateNewMessage{Message: h.messageToTL(existing, nil, files, nil, nil, h.dcID), Pts: pts, PtsCount: 1},
 					},
 					Users: users,
 					Chats: chats,
@@ -552,7 +552,7 @@ func (h *handlers) handleSendMediaAfterReplyOnConn(c *mtproto.Conn, r *mtproto.R
 			res := &tg.Updates{
 				Updates: []tg.UpdateClass{
 					&tg.UpdateMessageID{ID: int(existing.LocalID), RandomID: req.RandomID},
-					&tg.UpdateNewMessage{Message: messageToTL(existing, nil, files, nil, nil, h.dcID), Pts: pts, PtsCount: 1},
+					&tg.UpdateNewMessage{Message: h.messageToTL(existing, nil, files, nil, nil, h.dcID), Pts: pts, PtsCount: 1},
 				},
 				Users: users,
 				Date:  int(existing.Date.Unix()),
@@ -569,7 +569,7 @@ func (h *handlers) handleSendMediaAfterReplyOnConn(c *mtproto.Conn, r *mtproto.R
 	case isPhoto:
 		mediaRights = []string{"send_photos"}
 	case isSticker:
-		valid, catalogErr := resolveStickerDocument(stickerInput.ID, stickerInput.AccessHash)
+		valid, catalogErr := h.resolveStickerDocument(stickerInput.ID, stickerInput.AccessHash)
 		if catalogErr != nil {
 			h.log.Error("resolve sticker catalogue document", "user_id", r.UserID, "err", catalogErr)
 			return nil, nil, nil, errInternal
@@ -751,7 +751,7 @@ func (h *handlers) handleSendMediaAfterReplyOnConn(c *mtproto.Conn, r *mtproto.R
 	res := &tg.Updates{
 		Updates: []tg.UpdateClass{
 			&tg.UpdateMessageID{ID: int(sender.LocalID), RandomID: req.RandomID},
-			&tg.UpdateNewMessage{Message: messageToTL(sender, nil, files, nil, nil, h.dcID), Pts: senderPts, PtsCount: 1},
+			&tg.UpdateNewMessage{Message: h.messageToTL(sender, nil, files, nil, nil, h.dcID), Pts: senderPts, PtsCount: 1},
 		},
 		Users: users,
 		Date:  int(sender.Date.Unix()),
@@ -853,7 +853,7 @@ func (h *handlers) sendChatMedia(
 	result := &tg.Updates{
 		Updates: []tg.UpdateClass{
 			&tg.UpdateMessageID{ID: int(sender.LocalID), RandomID: req.RandomID},
-			&tg.UpdateNewMessage{Message: messageToTL(sender, nil, files, nil, nil, h.dcID), Pts: senderPts, PtsCount: 1},
+			&tg.UpdateNewMessage{Message: h.messageToTL(sender, nil, files, nil, nil, h.dcID), Pts: senderPts, PtsCount: 1},
 		},
 		Users: users,
 		Chats: chats,
@@ -982,7 +982,7 @@ func (h *handlers) channelPhotoSendResponse(
 		h.log.Error("load channel photo kind", "channel_id", channelID, "err", err)
 		return nil, nil, nil, errInternal
 	}
-	messageTL, err := channelMessageToTL(message, r.UserID, files, broadcast, h.dcID)
+	messageTL, err := h.channelMessageToTL(message, r.UserID, files, broadcast, h.dcID)
 	if err != nil {
 		h.log.Error("render channel photo message", "channel_id", channelID, "local_id", message.LocalID, "err", err)
 		return nil, nil, nil, errInternal

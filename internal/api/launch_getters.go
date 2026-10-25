@@ -111,7 +111,7 @@ func (h *handlers) handleGetFeaturedStickers(r *mtproto.Request) (bin.Encoder, e
 	if err := decodeLaunchGetterRequest(r, &req); err != nil {
 		return nil, err
 	}
-	catalog, err := getStickerSetCatalog()
+	catalog, err := h.stickerSetCatalog()
 	if err != nil {
 		h.log.Error("load featured sticker sets", "err", err)
 		return nil, errInternal
@@ -127,31 +127,67 @@ func (h *handlers) handleGetFeaturedStickers(r *mtproto.Request) (bin.Encoder, e
 			installedAt[item.ID] = item.InstalledAt
 		}
 	}
-	set, ok := catalog.byShortName[twemojiReactionSetShortName]
-	if !ok || len(set.documents) == 0 {
+	if len(catalog.featured) == 0 {
 		return nil, errInternal
 	}
-	var setInstalledAt *time.Time
-	if value, ok := installedAt[set.set.ID]; ok {
-		setInstalledAt = &value
-	}
-	hash := featuredStickerSetsHash(set.set, setInstalledAt, set.documents[0].ID)
+	hash := featuredStickerSetsHashList(catalog.featured, installedAt)
 	if req.Hash != 0 && req.Hash == hash {
 		return &tg.MessagesFeaturedStickersNotModified{}, nil
 	}
-	documents := set.responseDocuments(h.dcID)
-	if len(documents) == 0 {
-		return nil, errInternal
-	}
-	return &tg.MessagesFeaturedStickers{
-		Hash:  hash,
-		Count: 1,
-		Sets: []tg.StickerSetCoveredClass{&tg.StickerSetCovered{
+	coveredSets := make([]tg.StickerSetCoveredClass, 0, len(catalog.featured))
+	for _, set := range catalog.featured {
+		documents := set.responseDocuments(h.dcID)
+		if len(documents) == 0 {
+			return nil, errInternal
+		}
+		var setInstalledAt *time.Time
+		if value, ok := installedAt[set.set.ID]; ok {
+			setInstalledAt = &value
+		}
+		coveredSets = append(coveredSets, &tg.StickerSetCovered{
 			Set:   set.responseSet(setInstalledAt),
 			Cover: documents[0],
-		}},
+		})
+	}
+	return &tg.MessagesFeaturedStickers{
+		Hash:   hash,
+		Count:  len(coveredSets),
+		Sets:   coveredSets,
 		Unread: []int64{},
 	}, nil
+}
+
+func featuredStickerSetsHashList(sets []*builtInStickerSet, installedAt map[int64]time.Time) int64 {
+	if len(sets) == 1 {
+		var installed *time.Time
+		if value, ok := installedAt[sets[0].set.ID]; ok {
+			installed = &value
+		}
+		return featuredStickerSetsHash(sets[0].set, installed, sets[0].documents[0].ID)
+	}
+	input := make([]byte, 0, len(sets)*40)
+	var long [8]byte
+	for _, set := range sets {
+		binary.BigEndian.PutUint64(long[:], uint64(set.set.ID)) //nolint:gosec // Catalogue ids use a reserved negative namespace.
+		input = append(input, long[:]...)
+		binary.BigEndian.PutUint64(long[:], uint64(set.set.AccessHash)) //nolint:gosec // Hashes are serialized as their two's-complement bit pattern.
+		input = append(input, long[:]...)
+		binary.BigEndian.PutUint64(long[:], uint64(int64(set.set.Hash))) //nolint:gosec // Set hashes are constrained to signed 31-bit values.
+		input = append(input, long[:]...)
+		binary.BigEndian.PutUint64(long[:], uint64(set.documents[0].ID)) //nolint:gosec // Catalogue document ids use a reserved negative namespace.
+		input = append(input, long[:]...)
+		var installed int64
+		if value, ok := installedAt[set.set.ID]; ok {
+			installed = value.Unix()
+		}
+		binary.BigEndian.PutUint64(long[:], uint64(installed))
+		input = append(input, long[:]...)
+	}
+	hash := int64(crc32.ChecksumIEEE(input) & 0x7fffffff)
+	if hash == 0 {
+		return 1
+	}
+	return hash
 }
 
 func featuredStickerSetsHash(set tg.StickerSet, installedAt *time.Time, coverID int64) int64 {
