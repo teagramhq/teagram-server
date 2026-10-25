@@ -4,6 +4,7 @@ set -euo pipefail
 
 workflow="${PERF_WORKFLOW:-.github/workflows/perf.yml}"
 runner="${PERF_RUNNER:-.github/scripts/perf-run.sh}"
+postgres="${PERF_POSTGRES:-.github/scripts/perf-postgres.sh}"
 expected_restore_if="steps.snapshot.outputs.cache-hit == 'true'"
 expected_seed_if="steps.snapshot.outputs.cache-hit != 'true'"
 
@@ -32,5 +33,7 @@ rg -Fq 'RPC performance fixture seed / infrastructure failure' "$runner" ||
   fail 'fixture seed and infrastructure errors need an explicit summary label'
 rg -Fq 'fixture seeder changed; skipping the base comparison' "$runner" ||
   fail 'a changed fixture seeder must still allow head measurements without an incompatible base comparison'
+rg -Fq 'pg_isready -h 127.0.0.1 -U postgres -q' "$postgres" ||
+  fail 'Postgres readiness must wait for the TCP listener used by the workflow'
 
 printf 'RPC performance workflow contract holds\n'
