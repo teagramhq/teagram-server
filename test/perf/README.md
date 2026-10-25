@@ -1,11 +1,11 @@
 # RPC performance harness
 
 Measures every RPC desktop and web send at startup and in normal use against
-an in-process teagramd on two fixtures: the scale account (up to 5,000
-contacts, the store's account limit, 5,000 dialogs, a 1,000,000-message
-private chat, a 100,000-subscriber channel and a 200,000-message group with
-photos) and its one-hundredth-size counterpart, subject to account limits.
-Both are seeded through the store's write methods and the RPC upload path.
+an in-process teagramd on two fixtures: the scale account (10,000 contacts,
+5,000 dialogs, a 1,000,000-message private chat, a 100,000-subscriber channel
+and a 200,000-message group with photos) and the same account at one hundredth
+of the data. Both are seeded through the store's write methods and the RPC
+upload path.
 
 Per scenario and fixture it records p50 and p95 latency, statements per call
 (including the delivery work the call triggers), rows read (from `EXPLAIN
