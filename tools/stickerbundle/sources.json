@@ -59,6 +59,23 @@
       "license_marker": "MIT License",
       "attribution": "Emoji artwork by Microsoft Fluent Emoji.",
       "download_sha256": "2604f0ee845dce433eaf443197870d12a14fc3813905bf60763de5477f0bbd80"
+    },
+    {
+      "id": "noto_animated",
+      "name": "Animated Noto Emoji",
+      "source_url": "https://googlefonts.github.io/noto-emoji-animation/",
+      "kind": "noto_animation",
+      "format": "tgs",
+      "asset_version": "17.0",
+      "asset_url_template": "https://fonts.gstatic.com/s/e/notoemoji/{version}/{codepoint}/lottie.json",
+      "index_url": "https://googlefonts.github.io/noto-emoji-animation/data/api.json",
+      "index_sha256": "caf9ebf0b461216e6638e4d660740d8e9fb78ba74c7b67d89045d2b399d3d3a6",
+      "license": "CC-BY-4.0",
+      "license_url": "https://googlefonts.github.io/noto-emoji-files/?view=docs",
+      "license_sha256": "e8122e73fb652a5e805c517d90416f5c07c474f7f9560412cab5667d5881d2e0",
+      "license_marker": "Animated Noto Emoji is licensed under",
+      "attribution": "Animated Noto Emoji by Google.",
+      "download_sha256": "192cf9e21d9377fb07e1fb74eef76acc1ed83a7b7241767a81fe0e52774c25a2"
     }
   ]
 }

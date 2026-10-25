@@ -4,7 +4,7 @@ umask 077
 
 SCRIPT_DIR=$(cd -P "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 SCRIPT_SOURCE="$SCRIPT_DIR/$(basename "${BASH_SOURCE[0]}")"
-readonly APPROVED_VERIFIER_SHA=e80bd36461a7418032ef569e95514179fdeb8ec19e819aefbbc066522f1bd807
+readonly APPROVED_VERIFIER_SHA=20fc5c53ffb8dd0035bf91428f84340d34a14f418038394548ec57eaefa9c331
 readonly APPROVED_SCHEMA_GATE_SHA=ac54d3cf0480383a52414a8bc8b856b5e1d5f6f8d19034c9c576c64627e097c8
 readonly APPROVED_SCHEMA_GATE_HELPER_SHA=7ae06c2872c60b434068b3715a9ddd5e19b03d4be98dc9881c8dd8f294953d41
 readonly APPROVED_INITIAL_LOCAL_COMPOSE_SHA=d764d291ad2ea91cff841d14a0cd2bbcb5981961dbc67406bfeba1196a7b3fa4
@@ -2241,7 +2241,7 @@ compare_rollback_to_baseline() {
     local render_file="$ROLLBACK_DIR/initial-local-target-render.snapshot.json"
     local target_render="$BASELINE_DIR/initial-local-target-render.snapshot.json"
     local live_fields=(image_id mounts_sha256 container_stop_timeout exposure_sha256 exposure_public_ws_2446 container_env_sha256 container_logging_sha256 container_log_login_codes)
-    local render_fields=(config_sha256 env_sha256 override_sha256 stop_grace_period compose_replica_count compose_client_addr_trust compose_public_ws_2446 compose_logging_policy compose_log_login_codes)
+    local render_fields=(config_sha256 env_sha256 override_sha256 stop_grace_period compose_replica_count compose_client_addr_trust compose_public_ws_2446 compose_logging_policy compose_log_login_codes media_key_source media_key_current)
     [ "$(jq -er '.provenance.compose_source' "$baseline_file")" = live-container-inspection ] && \
       [ "$(jq -er '.provenance.compose_source' "$target_render")" = selected-compose-render ] && \
       [ "$(jq -er '.provenance.compose_source' "$rollback_file")" = selected-compose-render ] || {
