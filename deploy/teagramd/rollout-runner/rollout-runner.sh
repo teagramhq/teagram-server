@@ -4,7 +4,7 @@ umask 077
 
 SCRIPT_DIR=$(cd -P "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 SCRIPT_SOURCE="$SCRIPT_DIR/$(basename "${BASH_SOURCE[0]}")"
-readonly APPROVED_VERIFIER_SHA=a0afd70911d641abc509d2bf6d06ea44aaafa71935d12f8a29aa1f1448126a2a
+readonly APPROVED_VERIFIER_SHA=b1fef5a29988ef0c017bec2f5ad7fe9260c1ddd80cd3c17751b7e84db2bce5fc
 readonly APPROVED_SCHEMA_GATE_SHA=ac54d3cf0480383a52414a8bc8b856b5e1d5f6f8d19034c9c576c64627e097c8
 readonly APPROVED_SCHEMA_GATE_HELPER_SHA=7ae06c2872c60b434068b3715a9ddd5e19b03d4be98dc9881c8dd8f294953d41
 readonly APPROVED_INITIAL_LOCAL_COMPOSE_SHA=d764d291ad2ea91cff841d14a0cd2bbcb5981961dbc67406bfeba1196a7b3fa4
@@ -50,6 +50,7 @@ BUILD_IDENTITY_REJECTION_REASON=built-image-id-invalid
 ROLLOUT_RUNNER_TEST_MODE=${ROLLOUT_RUNNER_TEST_MODE:-0}
 ROLLOUT_PINNED_EXECUTION=${ROLLOUT_PINNED_EXECUTION:-0}
 INITIALIZE_LOCAL=0
+ROLLOUT_COMPOSE_SERVICE=teagramd
 INITIAL_LOCAL_ARTIFACT_SHA=
 RUNNER_ACTION=apply
 TARGET_DATABASE=
@@ -863,9 +864,29 @@ current_service_id() {
   printf '%s' "$id"
 }
 
+rollout_compose_service() {
+  printf '%s\n' "$ROLLOUT_COMPOSE_SERVICE"
+}
+
+select_rollout_compose_service() {
+  [ "$INITIALIZE_LOCAL" = 1 ] || return 0
+  local services
+  services=$(docker compose config --services </dev/null) || {
+    fail 'cannot list services from the pinned initial-local Compose render'
+    return 1
+  }
+  ROLLOUT_COMPOSE_SERVICE=$(printf '%s\n' "$services" | awk '
+    $0 == "telegramd" || $0 == "teagramd" { selected=$0; count++ }
+    END {if (count == 1) print selected; else exit 1}
+  ') || {
+    fail 'pinned initial-local Compose render must define exactly one supported server service'
+    return 1
+  }
+}
+
 archive_pre_rollout_teagramd_logs() {
   local container_id driver since archive_dir captured combined
-  container_id=$(current_service_id teagramd) || {
+  container_id=$(current_service_id "$(rollout_compose_service)") || {
     fail 'cannot resolve the current teagramd container before replacement'
     return 1
   }
@@ -952,7 +973,7 @@ capture_snapshot() {
       return 1
     }
   fi
-  if ! verifier_error=$(ROLLOUT_CHECKOUT_PATH="$CHECKOUT" ROLLOUT_ADDED_ENV="$ADDED_ENV" \
+  if ! verifier_error=$(ROLLOUT_CHECKOUT_PATH="$CHECKOUT" ROLLOUT_COMPOSE_SERVICE="$(rollout_compose_service)" ROLLOUT_ADDED_ENV="$ADDED_ENV" \
     ROLLOUT_CHANGED_ENV="$CHANGED_ENV" ROLLOUT_CHANGED_ENV_SOURCE="$CHANGED_ENV_SOURCE" \
     ROLLOUT_OVERRIDE_ORIGIN_VALUE="${override_origin_value:-}" \
     ROLLOUT_PREVIOUS_OVERRIDE_ORIGIN_VALUE="${previous_override_origin_value:-}" \
@@ -1013,7 +1034,8 @@ capture_compose_blob_inventory() {
 
 capture_running_blob_inventory() {
   local path=$1 allow_empty=${2:-0} reference_id reference_inspect project ids id inventory
-  local reference_service=teagramd
+  local reference_service
+  reference_service=$(rollout_compose_service)
   local -a container_ids=()
   [ "$RUNNER_ACTION" = move-stack ] && reference_service=telegramd
   [ ! -e "$path" ] && [ ! -L "$path" ] || { fail 'running blob inventory evidence already exists'; return 1; }
@@ -1928,14 +1950,15 @@ capture_backup_and_restore() {
 }
 
 record_build_identity() {
-  local built_image checked_out_sha image_file revision_label revision_label_json
+  local built_image checked_out_sha image_file image_tag revision_label revision_label_json
+  image_tag="$(rollout_compose_service):local"
   BUILD_IDENTITY_REJECTION_REASON=built-image-id-invalid
   checked_out_sha=$(git rev-parse HEAD) || { fail 'cannot read checked-out SHA after fast-forward'; return 1; }
   [ "$checked_out_sha" = "$TARGET_SHA" ] || { fail 'checked-out SHA changed before image capture'; return 1; }
-  built_image=$(docker image inspect teagramd:local --format '{{.Id}}' 2>/dev/null) || { fail 'cannot inspect built teagramd tag'; return 1; }
+  built_image=$(docker image inspect "$image_tag" --format '{{.Id}}' 2>/dev/null) || { fail 'cannot inspect built application image tag'; return 1; }
   [[ "$built_image" =~ ^sha256:[0-9a-f]{64}$ ]] || { fail 'built teagramd image ID is missing or malformed'; return 1; }
   BUILD_IDENTITY_REJECTION_REASON=built-image-revision-label-unavailable
-  revision_label=$(docker image inspect teagramd:local \
+  revision_label=$(docker image inspect "$image_tag" \
     --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}' 2>/dev/null) || {
     fail 'cannot inspect built teagramd revision label'
     return 1
@@ -2323,7 +2346,7 @@ rollback_after_target_failure() {
 
 restore_checkout_and_tag() {
   (umask 022; git reset --hard "$PREVIOUS_SHA") >/dev/null || { fail 'cannot restore the previous checkout'; return 1; }
-  docker image tag "${BASE_IMAGE_ID#sha256:}" teagramd:local >/dev/null 2>&1 || { fail 'cannot restore the baseline image tag'; return 1; }
+  docker image tag "${BASE_IMAGE_ID#sha256:}" "$(rollout_compose_service):local" >/dev/null 2>&1 || { fail 'cannot restore the baseline image tag'; return 1; }
 }
 
 require_clean_build_checkout() {
@@ -2351,8 +2374,8 @@ perform_rollback() {
     fail 'current containers or baseline rollback render do not satisfy durable blob authority; baseline was not started'
     return 1
   fi
-  docker compose up -d --no-build --no-deps teagramd </dev/null || { fail 'baseline teagramd recreation failed'; return 1; }
-  rollback_id=$(current_service_id teagramd) || { fail 'rollback teagramd container ID is unavailable'; return 1; }
+  docker compose up -d --no-build --no-deps "$(rollout_compose_service)" </dev/null || { fail "baseline $(rollout_compose_service) recreation failed"; return 1; }
+  rollback_id=$(current_service_id "$(rollout_compose_service)") || { fail "rollback $(rollout_compose_service) container ID is unavailable"; return 1; }
   capture_snapshot "$rollback_id" "$ROLLBACK_DIR" rollback || return 1
   local equivalence_rc=0 readiness_rc=0
   if compare_rollback_to_baseline; then :; else equivalence_rc=$?; fi
@@ -2491,7 +2514,8 @@ run_apply() {
   fi
 
   require_clean_build_checkout || return 1
-  baseline_id=$(current_service_id teagramd) || { fail 'baseline teagramd container ID is unavailable'; return 1; }
+  select_rollout_compose_service || return 1
+  baseline_id=$(current_service_id "$(rollout_compose_service)") || { fail "baseline $(rollout_compose_service) container ID is unavailable"; return 1; }
   if [ "$INITIALIZE_LOCAL" = 1 ]; then
     capture_snapshot "$baseline_id" "$BASELINE_DIR" baseline live-container-inspection || return 1
   else
@@ -2622,7 +2646,7 @@ run_apply() {
     fail 'Compose build provenance rejected; baseline checkout and tag restored'
     return 1
   fi
-  TEAGRAMD_SOURCE_REVISION="$TARGET_SHA" docker compose build -q teagramd </dev/null || {
+  TEAGRAMD_SOURCE_REVISION="$TARGET_SHA" docker compose build -q "$(rollout_compose_service)" </dev/null || {
     rc=$?
     if ! write_immutable "$BUILD_DIR/build-result.txt" "result=failed exit=$rc source_sha=$TARGET_SHA"; then
       restore_checkout_and_tag || return 1
@@ -2657,7 +2681,7 @@ run_apply() {
     rollback_after_target_failure "compose_up_exit_$rc" || return 2
     return 1
   fi
-  target_id=$(current_service_id teagramd) || target_id=''
+  target_id=$(current_service_id "$(rollout_compose_service)") || target_id=''
   if [ -n "$target_id" ]; then
     if capture_snapshot "$target_id" "$TARGET_DIR" target; then :; else
       rollback_after_target_failure snapshot_capture_failed || return 2
