@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"net"
 	"os"
+	"path/filepath"
 	"reflect"
 	"sync"
 	"testing"
@@ -26,6 +27,7 @@ import (
 	"github.com/teagramhq/teagram-server/internal/config"
 	"github.com/teagramhq/teagram-server/internal/mtproto"
 	"github.com/teagramhq/teagram-server/internal/pgtest"
+	"github.com/teagramhq/teagram-server/internal/rsakey"
 	"github.com/teagramhq/teagram-server/internal/store"
 )
 
@@ -38,11 +40,12 @@ const channelParticipantCap = 200_000
 // server is one in-process teagramd: the shipped handler, updater and LISTEN
 // fan-out, over a store whose every query passes through tracer.
 type server struct {
-	store  *store.Store
-	tracer *queryTracer
-	key    *rsa.PrivateKey
-	port   int
-	stop   func()
+	store    *store.Store
+	tracer   *queryTracer
+	registry *mtproto.SessionRegistry
+	key      *rsa.PrivateKey
+	port     int
+	stop     func()
 	// accepted receives the meter of every connection the server accepts.
 	accepted chan *meter
 }
@@ -100,7 +103,7 @@ func bootServer(t *testing.T, ctx context.Context, dsn, blobDir string, key *rsa
 	srvCtx, cancel := context.WithCancel(ctx)
 	serveErr := make(chan error, 1)
 	go func() { serveErr <- srv.Serve(srvCtx, metered) }()
-	s := &server{store: st, tracer: tracer, key: key, port: addr.Port, accepted: metered.accepted}
+	s := &server{store: st, tracer: tracer, registry: srv.Registry(), key: key, port: addr.Port, accepted: metered.accepted}
 	s.stop = func() {
 		cancel()
 		if err := <-serveErr; err != nil && !errors.Is(err, context.Canceled) {
@@ -318,4 +321,82 @@ func serverLog() *slog.Logger {
 		return slog.New(slog.DiscardHandler)
 	}
 	return slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelDebug}))
+}
+
+func TestFreshSessionPushesOnlyUpdatesAfterGetState(t *testing.T) {
+	dir := perfDir(t)
+	spec := fixtures[0]
+	dsn, ok := fixtureDSN(spec)
+	if !ok {
+		t.Skip("TG_PERF_DSN_1X is not set")
+	}
+	f, err := loadFixture(fixturePath(dir, spec))
+	if err != nil {
+		t.Fatalf("load fixture: %v", err)
+	}
+	key, err := rsakey.Bootstrap(filepath.Join(t.TempDir(), "key.pem"))
+	if err != nil {
+		t.Fatalf("generate server key: %v", err)
+	}
+	ctx, cancel := context.WithTimeout(t.Context(), time.Minute)
+	defer cancel()
+	srv := bootServer(t, ctx, dsn, blobDir(dir, spec), key)
+	client := srv.login(t, ctx, f.Owner)
+	defer client.close()
+	sender := srv.login(t, ctx, f.Partner)
+	defer sender.close()
+	conns := srv.registry.Conns(f.Owner)
+	if len(conns) != 1 {
+		t.Fatalf("registered connections = %d, want one", len(conns))
+	}
+	state, err := srv.store.StateWithoutUnread(ctx, f.Owner)
+	if err != nil {
+		t.Fatalf("read owner state: %v", err)
+	}
+	if got := conns[0].LastPushedPts(); got != state.Pts {
+		t.Fatalf("watermark after getState = %d, want state pts %d", got, state.Pts)
+	}
+	if err := srv.tracer.awaitQuiet(ctx, 10*time.Second); err != nil {
+		t.Fatalf("server did not go quiet after getState: %v", err)
+	}
+	drain(client)
+	drain(sender)
+
+	const messageText = "only the new update"
+	if _, err := sender.api.MessagesSendMessage(ctx, &tg.MessagesSendMessageRequest{
+		Peer: userPeer(f.Partner, f.Owner), Message: messageText, RandomID: randomIDs.Add(1),
+	}); err != nil {
+		t.Fatalf("send post-state message: %v", err)
+	}
+	var got tg.UpdatesClass
+	select {
+	case got = <-client.updates:
+	case <-time.After(10 * time.Second):
+		t.Fatal("fresh session did not receive the post-state message")
+	case <-ctx.Done():
+		t.Fatalf("wait for post-state update: %v", ctx.Err())
+	}
+	if err := srv.tracer.awaitQuiet(ctx, 10*time.Second); err != nil {
+		t.Fatalf("server did not go quiet after delivery: %v", err)
+	}
+	updates, ok := got.(*tg.Updates)
+	if !ok {
+		t.Fatalf("push = %T, want *tg.Updates", got)
+	}
+	if len(updates.Updates) != 1 {
+		t.Fatalf("push contains %d updates, want exactly one new update", len(updates.Updates))
+	}
+	newMessage, ok := updates.Updates[0].(*tg.UpdateNewMessage)
+	if !ok {
+		t.Fatalf("update = %T, want *tg.UpdateNewMessage", updates.Updates[0])
+	}
+	message, ok := newMessage.Message.(*tg.Message)
+	if !ok || message.Message != messageText {
+		t.Fatalf("pushed message = %#v, want only %q", newMessage.Message, messageText)
+	}
+	select {
+	case extra := <-client.updates:
+		t.Fatalf("fresh session received an extra update: %T", extra)
+	default:
+	}
 }

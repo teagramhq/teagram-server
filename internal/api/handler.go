@@ -175,10 +175,11 @@ type registeredFunc func(c *mtproto.Conn, req *mtproto.Request) (bin.Encoder, fu
 type orderedRegisteredFunc func(c *mtproto.Conn, req *mtproto.Request) (bin.Encoder, *replyUpdate, func(), error)
 
 type replyUpdate struct {
-	owner     int64
-	authKey   int64
-	pts       int
-	onFailure func()
+	owner            int64
+	authKey          int64
+	pts              int
+	setPushWatermark bool
+	onFailure        func()
 }
 
 // revokeFunc is a methodFunc that also returns work to run once the reply is on
@@ -427,7 +428,22 @@ func newWithPhotoThumbsAndDialogFilterSyncAndUploadPartTTLAndTurnstile(s *store.
 	register(d, tg.AuthRecoverPasswordRequestTypeID, h.handleRecoveryCodeInvalid)
 	register(d, tg.AccountUpdatePasswordSettingsRequestTypeID, h.handleUpdatePasswordSettings)
 	register(d, tg.AccountGetPasswordSettingsRequestTypeID, h.handleGetPasswordSettings)
-	register(d, tg.UpdatesGetStateRequestTypeID, h.handleGetState)
+	registerReplyAfterSuccess(d, tg.UpdatesGetStateRequestTypeID, func(_ *mtproto.Conn, req *mtproto.Request) (bin.Encoder, *replyUpdate, func(), error) {
+		result, err := h.handleGetState(req)
+		if err != nil {
+			return nil, nil, nil, err
+		}
+		state, ok := result.(*tg.UpdatesState)
+		if !ok {
+			return nil, nil, nil, fmt.Errorf("updates.getState returned %T", result)
+		}
+		return result, &replyUpdate{
+			owner:            req.UserID,
+			authKey:          mtproto.AuthKeyIDInt64(req.AuthKeyID),
+			pts:              state.Pts,
+			setPushWatermark: true,
+		}, nil, nil
+	})
 	registerReplyAfterSuccess(d, tg.UpdatesGetDifferenceRequestTypeID, func(c *mtproto.Conn, req *mtproto.Request) (bin.Encoder, *replyUpdate, func(), error) {
 		result, afterReply, err := h.handleGetDifferenceForConn(c, req)
 		return result, nil, afterReply, err
@@ -891,9 +907,12 @@ func registerReplyAfterSuccess(d *mtproto.Dispatcher, id uint32, fn orderedRegis
 			return c.SendErr(req, rpc)
 		}
 		var sendErr error
-		if update == nil {
+		switch {
+		case update == nil:
 			sendErr = c.SendResult(req, res)
-		} else {
+		case update.setPushWatermark:
+			sendErr = c.SendResultAndSetPushWatermark(req, res, update.owner, update.authKey, update.pts)
+		default:
 			sendErr = c.SendResultAndMarkRPCUpdate(req, res, update.owner, update.authKey, update.pts)
 		}
 		if sendErr != nil {

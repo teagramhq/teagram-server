@@ -1365,6 +1365,21 @@ func (c *Conn) SendResultAndMarkRPCUpdate(req *Request, msg bin.Encoder, owner, 
 	})
 }
 
+// SendResultAndSetPushWatermark writes a state result and advances the
+// connection's push watermark to at least the state pts while the result write
+// still holds writeMu. A concurrent delivery built from the previous watermark
+// therefore either finishes before this state response or is rejected as stale.
+func (c *Conn) SendResultAndSetPushWatermark(req *Request, msg bin.Encoder, owner, authKeyID int64, pts int) error {
+	return c.sendResult(req, msg, func() {
+		if owner <= 0 || authKeyID == 0 || pts <= 0 || c.owner != owner || c.authKeyID.Load() != authKeyID {
+			return
+		}
+		if int64(pts) > c.lastPushedPts.Load() {
+			c.lastPushedPts.Store(int64(pts))
+		}
+	})
+}
+
 // markRPCResultLocked advances the contiguous push watermark for an RPC result.
 // A result can carry a later pts while this connection still lacks an earlier
 // event. Keep the barrier active across that gap so a generic notification

@@ -502,6 +502,49 @@ func TestSendResultAndMarkRPCUpdate(t *testing.T) {
 	}
 }
 
+func TestSendResultAndSetPushWatermarkAfterSuccess(t *testing.T) {
+	t.Parallel()
+	key := testKey(t)
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	c := mtproto.NewTestConn(&fakeConn{entered: entered, block: release}, key)
+	c.SetOwner(7)
+	keyID := mtproto.AuthKeyIDInt64(key.ID)
+	result := make(chan error, 1)
+	go func() {
+		result <- c.SendResultAndSetPushWatermark(
+			&mtproto.Request{Ctx: context.Background(), MsgID: 3},
+			&mt.Pong{PingID: 3}, 7, keyID, 10,
+		)
+	}()
+	<-entered
+	if got := c.LastPushedPts(); got != 0 {
+		t.Fatalf("watermark during result write = %d, want 0", got)
+	}
+	close(release)
+	if err := <-result; err != nil {
+		t.Fatalf("send result and set watermark: %v", err)
+	}
+	if got := c.LastPushedPts(); got != 10 {
+		t.Fatalf("watermark = %d, want state pts 10 after successful result", got)
+	}
+
+	later := mtproto.NewTestConn(&fakeConn{}, key)
+	later.SetOwner(7)
+	if !later.MarkRPCUpdate(7, keyID, 11) {
+		t.Fatal("seed a newer pushed event")
+	}
+	if err := later.SendResultAndSetPushWatermark(
+		&mtproto.Request{Ctx: context.Background(), MsgID: 4},
+		&mt.Pong{PingID: 4}, 7, keyID, 10,
+	); err != nil {
+		t.Fatalf("send older state result: %v", err)
+	}
+	if got := later.LastPushedPts(); got != 11 {
+		t.Fatalf("older state regressed watermark to %d, want 11", got)
+	}
+}
+
 func TestPushToAtWatermarkRejectsStaleBatch(t *testing.T) {
 	t.Parallel()
 	key := testKey(t)
