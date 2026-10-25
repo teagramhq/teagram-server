@@ -61,7 +61,7 @@ func buildReactionDocumentCatalog() (*reactionDocumentCatalog, error) {
 
 	catalog := &reactionDocumentCatalog{
 		reactions: make([]tg.AvailableReaction, 0, len(entries)),
-		documents: make(map[reactionDocumentIdentity]builtInReactionDocument, len(entries)*2),
+		documents: make(map[reactionDocumentIdentity]builtInReactionDocument, len(entries)*3),
 	}
 	hashInput := make([]byte, 0, len(entries)*64)
 	// Metadata is part of the response too; changing it must invalidate client caches.
@@ -84,17 +84,23 @@ func buildReactionDocumentCatalog() (*reactionDocumentCatalog, error) {
 		if err != nil {
 			return nil, fmt.Errorf("read reaction %q WebP: %w", emoji, err)
 		}
+		centerData, err := reactionassets.Files.ReadFile("center/" + staticName)
+		if err != nil {
+			return nil, fmt.Errorf("read reaction %q center WebP: %w", emoji, err)
+		}
 		animationData, err := reactionassets.Files.ReadFile("tgs/" + animationAssetName)
 		if err != nil {
 			return nil, fmt.Errorf("read reaction %q TGS: %w", emoji, err)
 		}
-		if len(staticData) == 0 || len(animationData) == 0 {
+		if len(staticData) == 0 || len(centerData) == 0 || len(animationData) == 0 {
 			return nil, fmt.Errorf("reaction %q has empty artwork", emoji)
 		}
 
 		staticID := -int64(2*i + 1)
 		animationID := -int64(2*i + 2)
+		centerID := -int64(2*len(entries) + i + 1)
 		staticDoc := newReactionDocument(emoji, staticID, staticName, "image/webp", staticData)
+		centerDoc := newReactionDocument(emoji, centerID, staticName, "image/webp", centerData)
 		animationDoc := newReactionDocument(emoji, animationID, animationFileName, "application/x-tgsticker", animationData)
 		reaction := tg.AvailableReaction{
 			Reaction:          emoji,
@@ -105,13 +111,17 @@ func buildReactionDocumentCatalog() (*reactionDocumentCatalog, error) {
 			ActivateAnimation: animationDoc,
 			EffectAnimation:   animationDoc,
 		}
-		reaction.SetCenterIcon(staticDoc)
+		reaction.SetCenterIcon(centerDoc)
 		reaction.SetAroundAnimation(animationDoc)
 		catalog.reactions = append(catalog.reactions, reaction)
 
 		catalog.documents[reactionDocumentIdentity{staticDoc.ID, staticDoc.AccessHash}] = builtInReactionDocument{
 			file: reactionStoreFile(staticDoc, staticData),
 			data: staticData,
+		}
+		catalog.documents[reactionDocumentIdentity{centerDoc.ID, centerDoc.AccessHash}] = builtInReactionDocument{
+			file: reactionStoreFile(centerDoc, centerData),
+			data: centerData,
 		}
 		catalog.documents[reactionDocumentIdentity{animationDoc.ID, animationDoc.AccessHash}] = builtInReactionDocument{
 			file: reactionStoreFile(animationDoc, animationData),
@@ -123,6 +133,9 @@ func buildReactionDocumentCatalog() (*reactionDocumentCatalog, error) {
 		hashInput = append(hashInput, staticName...)
 		hashInput = append(hashInput, 0)
 		hashInput = append(hashInput, staticData...)
+		hashInput = append(hashInput, staticName...)
+		hashInput = append(hashInput, 0)
+		hashInput = append(hashInput, centerData...)
 		hashInput = append(hashInput, animationFileName...)
 		hashInput = append(hashInput, 0)
 		hashInput = append(hashInput, animationData...)
@@ -201,7 +214,18 @@ func (c *reactionDocumentCatalog) responseReactions(dcID int) ([]tg.AvailableRea
 		staticCopy := *static
 		staticCopy.DCID = dcID
 		reaction.StaticIcon = &staticCopy
-		reaction.SetCenterIcon(&staticCopy)
+
+		center, ok := reaction.GetCenterIcon()
+		if !ok {
+			return nil, fmt.Errorf("reaction %q has no center icon", reaction.Reaction)
+		}
+		centerDocument, ok := center.(*tg.Document)
+		if !ok {
+			return nil, fmt.Errorf("reaction %q center icon has type %T", reaction.Reaction, center)
+		}
+		centerCopy := *centerDocument
+		centerCopy.DCID = dcID
+		reaction.SetCenterIcon(&centerCopy)
 
 		animation, ok := reaction.AppearAnimation.(*tg.Document)
 		if !ok {

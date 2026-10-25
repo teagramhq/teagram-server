@@ -54,6 +54,11 @@ func TestGetAvailableReactionsReturnsStableStandardDocuments(t *testing.T) {
 	if _, ok := previousHashResult.(*tg.MessagesAvailableReactions); !ok {
 		t.Fatalf("previous reaction hash result = %T, want a refreshed reaction list", previousHashResult)
 	}
+	const unpaddedReactionCatalogHash = 1976891679
+	unpaddedHashResult := availableReactionsResponse(t, nil, 7, unpaddedReactionCatalogHash)
+	if _, ok := unpaddedHashResult.(*tg.MessagesAvailableReactions); !ok {
+		t.Fatalf("unpadded reaction hash result = %T, want a refreshed reaction list", unpaddedHashResult)
+	}
 
 	var missingDates []string
 	for i, want := range wantEmoticons {
@@ -62,11 +67,17 @@ func TestGetAvailableReactionsReturnsStableStandardDocuments(t *testing.T) {
 			t.Errorf("reaction %d = %q, want %q", i, reaction.Reaction, want)
 		}
 		static := requireReactionDocument(t, reaction.StaticIcon, want, "image/webp", ".webp")
-		center, ok := reaction.GetCenterIcon()
-		if !ok {
+		centerIcon, hasCenterIcon := reaction.GetCenterIcon()
+		if !hasCenterIcon {
 			t.Errorf("reaction %q has no center_icon", want)
-		} else if got := requireReactionDocument(t, center, want, "image/webp", ".webp"); !sameReactionDocument(got, static) {
-			t.Errorf("reaction %q center_icon is not its static WebP document", want)
+		} else {
+			centerDocument := requireReactionDocument(t, centerIcon, want, "image/webp", ".webp")
+			if centerDocument.ID == static.ID {
+				t.Errorf("reaction %q center_icon reuses its full-size static icon document", want)
+			}
+			if centerDocument.Date == 0 {
+				missingDates = append(missingDates, want+" center")
+			}
 		}
 
 		animation := requireReactionDocument(t, reaction.AppearAnimation, want, "application/x-tgsticker", ".tgs")
@@ -204,6 +215,10 @@ func TestAvailableReactionDocumentsDownloadForAnySignedInUser(t *testing.T) {
 		if reaction.Reaction != entry.Emoji {
 			t.Fatalf("reaction %d = %q, asset manifest emoji = %q", i, reaction.Reaction, entry.Emoji)
 		}
+		centerIcon, ok := reaction.GetCenterIcon()
+		if !ok {
+			t.Fatalf("reaction %q has no center_icon", reaction.Reaction)
+		}
 		assetStem := strings.TrimSuffix(entry.SVG, ".svg")
 		for _, item := range []struct {
 			class     tg.DocumentClass
@@ -212,6 +227,7 @@ func TestAvailableReactionDocumentsDownloadForAnySignedInUser(t *testing.T) {
 			extension string
 		}{
 			{reaction.StaticIcon, "static", "image/webp", ".webp"},
+			{centerIcon, "center", "image/webp", ".webp"},
 			{reaction.AppearAnimation, "tgs", "application/x-tgsticker", ".tgs"},
 		} {
 			document := requireReactionDocument(t, item.class, reaction.Reaction, item.mimeType, item.extension)
