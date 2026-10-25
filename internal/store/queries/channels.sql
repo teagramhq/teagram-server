@@ -233,6 +233,13 @@ WHERE cp.channel_id = sqlc.arg(channel_id)::bigint
        OR u.name_tsv @@ plainto_tsquery('simple', sqlc.arg(query)::text)
        OR strpos(lower(COALESCE(un.handle, '')), lower(sqlc.arg(query)::text)) > 0);
 
+-- Recent participant responses report the exact stored channel row count.
+-- Unlike the filtered count below, this is constant-cost as a channel grows.
+-- name: ChannelParticipantStoredCount :one
+SELECT participant_count
+FROM channel_participant_counts
+WHERE channel_id = $1;
+
 -- name: ChannelParticipantsPage :many
 SELECT cp.*
 FROM channel_participants cp

@@ -172,12 +172,17 @@ func (s *Store) ChannelParticipantsPageForViewer(
 	if hook := s.channelParticipantsSnapshotHook; hook != nil {
 		hook()
 	}
-	count, err := qtx.ChannelParticipantsPageCount(ctx, db.ChannelParticipantsPageCountParams{
-		ChannelID: channelID,
-		ViewerID:  viewerID,
-		Filter:    filter,
-		Query:     query,
-	})
+	var count int64
+	if filter == ChannelParticipantFilterRecent {
+		count, err = qtx.ChannelParticipantStoredCount(ctx, channelID)
+	} else {
+		count, err = qtx.ChannelParticipantsPageCount(ctx, db.ChannelParticipantsPageCountParams{
+			ChannelID: channelID,
+			ViewerID:  viewerID,
+			Filter:    filter,
+			Query:     query,
+		})
+	}
 	if err != nil {
 		return snapshot, false, fmt.Errorf("count channel participants page: %w", err)
 	}

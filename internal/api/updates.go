@@ -962,9 +962,22 @@ func (h *handlers) loadUsersWithAuthorizedIDs(ctx context.Context, ids map[int64
 	if err != nil {
 		return nil, err
 	}
-	entitled, err := h.entitledUserIDs(ctx, viewerID, list)
-	if err != nil {
-		return nil, err
+	// Skip the live-edge query when the caller already admitted every requested
+	// id (or it is the viewer); otherwise the query repeats the same membership
+	// walk for rows that are already authorized.
+	needsEntitlement := false
+	for id := range ids {
+		if id != viewerID && !authorizedIDs[id] {
+			needsEntitlement = true
+			break
+		}
+	}
+	var entitled map[int64]bool
+	if needsEntitlement {
+		entitled, err = h.entitledUserIDs(ctx, viewerID, list)
+		if err != nil {
+			return nil, err
+		}
 	}
 	return h.renderUsers(ctx, users, viewerID, entitled, authorizedIDs)
 }
