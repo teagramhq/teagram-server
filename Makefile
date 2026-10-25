@@ -1,4 +1,4 @@
-.PHONY: tools-check check-catalog-deps sqlc generate templ css migrate-new migrate test test-unit test-fleet-cap test-db docker-bridge lint lint-format lint-sql sqlfluff-install build run
+.PHONY: tools-check check-catalog-deps sqlc generate templ css migrate-new migrate test test-unit test-fleet-cap test-db perf docker-bridge lint lint-format lint-sql sqlfluff-install build run
 
 # sqlc lives in a separate tools module (tools/go.mod) so its broken transitive
 # dep graph (grpc test deps -> a non-existent gonum package) stays out of the
@@ -86,6 +86,12 @@ test-unit: docker-bridge
 # does not consume its statement timeout.
 test-fleet-cap: docker-bridge
 	$(TESTENV) go test -race -count=1 -run '$(FLEET_CAP_TEST)' ./internal/store
+
+# The RPC performance harness against already seeded fixtures (see
+# test/perf/README.md), judged the way CI judges it, without a base branch.
+perf:
+	TG_PERF_REPORT="$${TG_PERF_DIR:?}/head-1.json" go test -tags performance -count=1 -timeout 30m -run '^TestRPCPerformance$$' -v ./test/perf
+	go run ./test/perf/cmd/perfreport -head "$$TG_PERF_DIR/head-1.json" -waivers test/perf/known_violations.json
 
 # The store suite alone, for a quick check while working in internal/store.
 # Deliberately not ./test/... — e2e wants the whole machine to itself and is

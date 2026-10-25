@@ -1,0 +1,237 @@
+package perfreport_test
+
+import (
+	"strings"
+	"testing"
+
+	"github.com/teagramhq/teagram-server/test/perf/perfreport"
+)
+
+func result(p50, p95 float64, queries int, rows int64) perfreport.Result {
+	return perfreport.Result{P50Ms: p50, P95Ms: p95, Queries: queries, RowsRead: rows, AllocBytes: 1 << 20}
+}
+
+func report(results ...perfreport.Result) perfreport.Report {
+	return perfreport.Report{Version: perfreport.Version, Results: results}
+}
+
+func pair(name string, kind perfreport.Kind, small, large perfreport.Result) []perfreport.Result {
+	small.Name, large.Name = name, name
+	small.Fixture, large.Fixture = perfreport.Small, perfreport.Large
+	small.Kind, large.Kind = kind, kind
+	return []perfreport.Result{small, large}
+}
+
+func rounds(rs ...perfreport.Result) []perfreport.Report { return []perfreport.Report{report(rs...)} }
+
+// calibrated is main's history for one scenario: n runs whose 100x p50
+// alternates around p50 by jitter.
+func calibrated(name string, n int, p50, jitter float64) []perfreport.Report {
+	reps := make([]perfreport.Report, 0, n)
+	for i := range n {
+		x := p50 + jitter
+		if i%2 == 1 {
+			x = p50 - jitter
+		}
+		reps = append(reps, report(perfreport.Result{Name: name, Fixture: perfreport.Large, P50Ms: x}))
+	}
+	return reps
+}
+
+func reasons(fs []perfreport.Failure) string {
+	var b strings.Builder
+	for _, f := range fs {
+		b.WriteString(f.Scenario + ": " + f.Reason + "\n")
+	}
+	return b.String()
+}
+
+func TestEvaluatePassesInvariantScenarioWithinBudget(t *testing.T) {
+	v := perfreport.Evaluate(perfreport.Input{Head: rounds(pair("messages.getDialogs", perfreport.Read,
+		result(2, 3, 5, 120), result(2.5, 4, 5, 130))...)})
+	if len(v.Failures)+len(v.TimingFailures)+len(v.Reported) != 0 {
+		t.Fatalf("failures = %s%s%s", reasons(v.Failures), reasons(v.TimingFailures), reasons(v.Reported))
+	}
+}
+
+func TestEvaluateBlocksQueryCountThatGrowsWithData(t *testing.T) {
+	v := perfreport.Evaluate(perfreport.Input{Head: rounds(pair("messages.getDialogs", perfreport.Read,
+		result(2, 3, 5, 120), result(2, 3, 104, 120))...)})
+	if got := reasons(v.Failures); !strings.Contains(got, "messages.getDialogs: queries 5 at 1x, 104 at 100x") {
+		t.Fatalf("failures = %q, want the query-count growth", got)
+	}
+}
+
+func TestEvaluateBlocksRowsThatFollowAccountSize(t *testing.T) {
+	v := perfreport.Evaluate(perfreport.Input{Head: rounds(pair("contacts.search", perfreport.Read,
+		result(2, 3, 4, 100), result(2, 3, 4, 10_000))...)})
+	if got := reasons(v.Failures); !strings.Contains(got, "contacts.search: rows read 10000 at 100x is 100.0x the 1x 100") {
+		t.Fatalf("failures = %q", got)
+	}
+}
+
+func TestEvaluateBlocksSequentialScan(t *testing.T) {
+	rs := pair("messages.search", perfreport.Read, result(1, 2, 3, 10), result(1, 2, 3, 10))
+	rs[1].SeqScans = []string{"messages (1000000 rows)"}
+	v := perfreport.Evaluate(perfreport.Input{Head: rounds(rs...)})
+	if got := reasons(v.Failures); !strings.Contains(got, "messages.search: sequential scan on messages (1000000 rows) at 100x") {
+		t.Fatalf("failures = %q, want the sequential scan", got)
+	}
+}
+
+func TestEvaluateBlocksCounterRegressionAgainstBase(t *testing.T) {
+	base := rounds(pair("messages.getHistory", perfreport.Read, result(4, 5, 5, 100), result(4, 5, 5, 100))...)
+	head := rounds(pair("messages.getHistory", perfreport.Read, result(4, 5, 6, 100), result(4, 5, 6, 400))...)
+	got := reasons(perfreport.Evaluate(perfreport.Input{Head: head, Base: base}).Failures)
+	for _, want := range []string{
+		"messages.getHistory: queries 6 at 100x, main runs 5",
+		"messages.getHistory: rows read 400 at 100x, main reads 100",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("failures = %q, want %q", got, want)
+		}
+	}
+}
+
+func TestEvaluateReportsTimingsUntilCalibrated(t *testing.T) {
+	rs := make([]perfreport.Result, 0, 8)
+	rs = append(rs, pair("read", perfreport.Read, result(15, 18, 1, 1), result(15, 21, 1, 1))...)
+	rs = append(rs, pair("write", perfreport.Write, result(30, 45, 1, 1), result(30, 51, 1, 1))...)
+	rs = append(rs, pair("fanout", perfreport.FanOut, result(1000, 1500, 1, 1), result(1200, 2100, 1, 1))...)
+	rs = append(rs, pair("scaled", perfreport.Read, result(2, 3, 1, 1), result(6, 8, 1, 1))...)
+	v := perfreport.Evaluate(perfreport.Input{Head: rounds(rs...), History: calibrated("read", perfreport.Calibration-1, 15, 1)})
+	if len(v.Failures)+len(v.TimingFailures) != 0 {
+		t.Fatalf("uncalibrated timings blocked: %s%s", reasons(v.Failures), reasons(v.TimingFailures))
+	}
+	got := reasons(v.Reported)
+	for _, want := range []string{
+		"read: p95 21.0 ms at 100x, budget 20 ms",
+		"write: p95 51.0 ms at 100x, budget 50 ms",
+		"fanout: p95 2100.0 ms at 100x, budget 2000 ms",
+		"scaled: p50 6.0 ms at 100x is 3.0x the 1x 2.0 ms",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("reported = %q, want %q", got, want)
+		}
+	}
+	if md := perfreport.Markdown(v); !strings.Contains(md, "calibrating 19/20") || !strings.Contains(md, "timing reported") {
+		t.Errorf("markdown = %s", md)
+	}
+}
+
+func TestEvaluateBlocksTimingsOnceCalibrated(t *testing.T) {
+	rs := pair("read", perfreport.Read, result(15, 18, 1, 1), result(15, 21, 1, 1))
+	v := perfreport.Evaluate(perfreport.Input{Head: rounds(rs...), History: calibrated("read", perfreport.Calibration, 15, 0.5)})
+	if got := reasons(v.TimingFailures); !strings.Contains(got, "read: p95 21.0 ms at 100x, budget 20 ms") {
+		t.Fatalf("timing failures = %q", got)
+	}
+	if len(v.Failures) != 0 {
+		t.Fatalf("a timing check counted as deterministic: %s", reasons(v.Failures))
+	}
+	if md := perfreport.Markdown(v); !strings.Contains(md, "±0.5 ms (20 runs)") {
+		t.Errorf("markdown = %s", md)
+	}
+}
+
+func TestEvaluateSlowerThanBaseNeedsNoiseBandAndTwoMilliseconds(t *testing.T) {
+	base := rounds(pair("h", perfreport.Read, result(10, 12, 5, 100), result(10, 12, 5, 100))...)
+	history := calibrated("h", perfreport.Calibration, 10, 1)
+	for _, tc := range []struct {
+		p50  float64
+		fail bool
+	}{
+		{11.9, false}, // 19% slower but under 2 ms
+		{13.0, false}, // 30% slower, inside 3 sigma (3.08 ms)
+		{13.5, true},
+	} {
+		head := rounds(pair("h", perfreport.Read, result(tc.p50, 12, 5, 100), result(tc.p50, 12, 5, 100))...)
+		v := perfreport.Evaluate(perfreport.Input{Head: head, Base: base, History: history})
+		if failed := strings.Contains(reasons(v.TimingFailures), "slower than main"); failed != tc.fail {
+			t.Errorf("p50 %.1f against 10: failed = %v, want %v (%s)", tc.p50, failed, tc.fail, reasons(v.TimingFailures))
+		}
+	}
+}
+
+func TestEvaluateExemptsFullSetScenarioFromSizeInvarianceOnly(t *testing.T) {
+	rs := pair("contacts.getContacts", perfreport.Read, result(1, 2, 3, 100), result(10, 15, 3, 10_000))
+	rs[0].FullSet, rs[1].FullSet = true, true
+	if v := perfreport.Evaluate(perfreport.Input{Head: rounds(rs...)}); len(v.Failures)+len(v.Reported) != 0 {
+		t.Fatalf("failures = %s%s", reasons(v.Failures), reasons(v.Reported))
+	}
+	rs[1].Queries = 4
+	if v := perfreport.Evaluate(perfreport.Input{Head: rounds(rs...)}); len(v.Failures) != 1 {
+		t.Fatalf("failures = %s, want the query-count change", reasons(v.Failures))
+	}
+}
+
+func TestEvaluateTakesMedianAcrossRounds(t *testing.T) {
+	head := make([]perfreport.Report, 0, 3)
+	for _, q := range []int{5, 40, 5} {
+		head = append(head, report(pair("messages.getHistory", perfreport.Read, result(2, 3, 5, 100), result(2, 3, q, 100))...))
+	}
+	if v := perfreport.Evaluate(perfreport.Input{Head: head}); len(v.Failures) != 0 {
+		t.Fatalf("one odd round failed the gate: %s", reasons(v.Failures))
+	}
+}
+
+func TestEvaluateBlocksMissingFixtureAndHarnessError(t *testing.T) {
+	missing := perfreport.Result{Name: "messages.getHistory", Fixture: perfreport.Large, Kind: perfreport.Read}
+	rs := pair("upload.getFile", perfreport.Read, result(1, 1, 1, 1), result(1, 1, 1, 1))
+	rs[1].Error = "FILE_REFERENCE_EXPIRED"
+	got := reasons(perfreport.Evaluate(perfreport.Input{Head: rounds(append(rs, missing)...)}).Failures)
+	for _, want := range []string{"messages.getHistory: no 1x measurement", "upload.getFile: 100x run failed: FILE_REFERENCE_EXPIRED"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("failures = %q, want %q", got, want)
+		}
+	}
+}
+
+func TestEvaluateWaivesKnownViolationButNotRegression(t *testing.T) {
+	base := rounds(pair("messages.getHistory", perfreport.Read, result(20, 25, 5, 100), result(20, 25, 105, 100))...)
+	head := rounds(pair("messages.getHistory", perfreport.Read, result(20, 25, 5, 100), result(20, 25, 125, 100))...)
+	waivers := []perfreport.Waiver{
+		{Scenario: "messages.getHistory", Check: perfreport.CheckQueries, Issue: "MAIN-2"},
+		{Scenario: "messages.getHistory", Check: perfreport.CheckSeqScan, Issue: "MAIN-3"},
+	}
+	v := perfreport.Evaluate(perfreport.Input{Head: head, Base: base, Waivers: waivers})
+	got := reasons(v.Failures)
+	if !strings.Contains(got, "queries 125 at 100x, main runs 105") {
+		t.Fatalf("failures = %q, want the regression to stay a failure", got)
+	}
+	if strings.Contains(got, "queries 5 at 1x") || len(v.Waived) != 1 {
+		t.Fatalf("failures = %q, waived = %+v, want the query-count difference waived", got, v.Waived)
+	}
+	md := perfreport.Markdown(v)
+	if !strings.Contains(md, "known: MAIN-2") || !strings.Contains(md, "`messages.getHistory` seqscan (MAIN-3) no longer fails") {
+		t.Fatalf("markdown = %s", md)
+	}
+}
+
+func TestParseWaiversRejectsUnwaivableChecks(t *testing.T) {
+	for _, raw := range []string{
+		`[{"scenario":"x","check":"regression","issue":"MAIN-1"}]`,
+		`[{"scenario":"x","check":"slower","issue":"MAIN-1"}]`,
+		`[{"scenario":"x","check":"budget"}]`,
+	} {
+		if _, err := perfreport.ParseWaivers([]byte(raw)); err == nil {
+			t.Errorf("%s was accepted", raw)
+		}
+	}
+	if w, err := perfreport.ParseWaivers([]byte(`[{"scenario":"x","check":"seqscan","issue":"MAIN-1"}]`)); err != nil || len(w) != 1 {
+		t.Fatalf("waivers = %v, %v", w, err)
+	}
+}
+
+func TestMarkdownListsEveryScenarioWithBudgetAndBand(t *testing.T) {
+	v := perfreport.Evaluate(perfreport.Input{Head: rounds(pair("messages.getDialogs", perfreport.Read,
+		result(2, 3, 5, 120), result(2.5, 4, 5, 130))...)})
+	md := perfreport.Markdown(v)
+	for _, want := range []string{
+		"| messages.getDialogs | read | 2.0 | 2.5 | 4.0 | 20 | calibrating 0/20 | 5 / 5 | 120 / 130 | 1.0 MiB | n/a | pass |",
+		"All blocking checks passed.",
+	} {
+		if !strings.Contains(md, want) {
+			t.Errorf("markdown = %s\nwant %q", md, want)
+		}
+	}
+}
