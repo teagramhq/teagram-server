@@ -25,20 +25,29 @@ const (
 var errKeyExchangeRateLimited = errors.New("key exchange rate limited")
 
 // ExchangeLimits bounds anonymous server key-exchange work. The connection
-// count is local to one connection, the network budget is shared by the rate
+// count is local to one connection, per-network budgets are shared by the rate
 // limit store, and the ceiling is process local and divided across replicas.
 type ExchangeLimits struct {
 	PerConnection int
-	PerNetwork    store.RateLimitConfig
-	GlobalRate    int
-	GlobalBurst   int
+	// PerNetwork bounds exchanges from one client network on the public listener.
+	PerNetwork store.RateLimitConfig
+	// TailnetPerNetwork bounds exchanges on tailnet listeners.
+	TailnetPerNetwork store.RateLimitConfig
+	GlobalRate        int
+	GlobalBurst       int
 }
 
-// DefaultExchangeLimits returns the production key-exchange budgets.
+// DefaultExchangeLimits returns the production key-exchange budgets. Both
+// listener families start with a per-network bound; config may disable the
+// tailnet bound through its explicit tailnet override.
 func DefaultExchangeLimits() ExchangeLimits {
 	return ExchangeLimits{
 		PerConnection: defaultKeyExchangesPerConnection,
 		PerNetwork: store.RateLimitConfig{
+			Limit:  defaultKeyExchangesPerNetwork,
+			Window: defaultKeyExchangeNetworkWindow,
+		},
+		TailnetPerNetwork: store.RateLimitConfig{
 			Limit:  defaultKeyExchangesPerNetwork,
 			Window: defaultKeyExchangeNetworkWindow,
 		},
@@ -55,6 +64,10 @@ func validateExchangeLimits(limits ExchangeLimits) error {
 		return fmt.Errorf("key exchange per-network limit is %d: must not be negative, and 0 disables the cap", limits.PerNetwork.Limit)
 	case limits.PerNetwork.Window < 0:
 		return fmt.Errorf("key exchange per-network window is %s: must not be negative, and 0 disables the cap", limits.PerNetwork.Window)
+	case limits.TailnetPerNetwork.Limit < 0:
+		return fmt.Errorf("key exchange tailnet per-network limit is %d: must not be negative, and 0 disables the cap", limits.TailnetPerNetwork.Limit)
+	case limits.TailnetPerNetwork.Window < 0:
+		return fmt.Errorf("key exchange tailnet per-network window is %s: must not be negative, and 0 disables the cap", limits.TailnetPerNetwork.Window)
 	case limits.GlobalRate < 0:
 		return fmt.Errorf("key exchange global rate is %d: must not be negative, and 0 disables the ceiling", limits.GlobalRate)
 	case limits.GlobalBurst < 0:
@@ -123,7 +136,11 @@ func (b *keyExchangeBudget) charge(
 		}
 	}
 
-	if b.limits.PerNetwork.Enabled() {
+	networkLimit := b.limits.PerNetwork
+	if listener == store.RateLimitListenerTailnet {
+		networkLimit = b.limits.TailnetPerNetwork
+	}
+	if networkLimit.Enabled() {
 		if _, keyable := store.IPBucketKey(addr); keyable {
 			surface, ok := keyExchangeSurface(listener)
 			if !ok {
@@ -133,7 +150,7 @@ func (b *keyExchangeBudget) charge(
 			if !ok {
 				return "network_store", errors.New("key exchange rate-limit store is unavailable")
 			}
-			result, err := limiter.CheckIPRateLimit(ctx, addr, surface, b.limits.PerNetwork)
+			result, err := limiter.CheckIPRateLimit(ctx, addr, surface, networkLimit)
 			if err != nil {
 				return "network_store", err
 			}

@@ -92,8 +92,9 @@ Configuration is read from environment variables in `internal/config/config.go`:
 | `TG_MAX_PREAUTH_CONNS`| `1024`       | Cluster-wide concurrent connections that have not authenticated yet. `TG_REPLICA_COUNT` divides this into per-replica accept-loop caps, so sockets past a share are closed before they cost a goroutine, a deadline or a read. `0` disables it; a negative or non-integer value fails startup |
 | `TG_MAX_PREAUTH_CONNS_PER_IP`| `64`    | The same, per client network, divided by `TG_REPLICA_COUNT` and enforced in each replica's memory. Keyed on the network the per-IP rate limits already use — an address for IPv4, a **/64** for IPv6, since a host on a routed v6 allocation mints addresses inside its own /64 for free — and on the address `TG_CLIENT_ADDR_TRUST` names, which in `proxy-v2` mode is the one the balancer reports and never the socket peer. A connection carrying no address at all (a `LOCAL` health check, or a socket peer the transport could not report) is charged to nothing and stays bounded by the other two. It is a concurrency cap and not a rate. `0` disables it; a negative or non-integer value fails startup |
 | `TG_KEY_EXCHANGE_PER_CONNECTION` | `2` | Maximum anonymous key exchanges on one connection. The count survives the pre-auth slot clearing after the first MAC-valid frame. `0` disables it; a negative or non-integer value fails startup |
-| `TG_RATE_LIMIT_KEY_EXCHANGE_IP` | `20` | Fixed-window anonymous key exchanges per client network, enforced in Postgres and shared by replicas. Uses the same IPv4-address / IPv6-**/64** key and trusted client address as the other per-IP limits; public WebSocket and TCP/tailnet listeners use separate budgets. A connection with no keyable address skips only this layer. Store errors refuse the exchange. `0` disables it; a negative or non-integer value fails startup |
-| `TG_RATE_LIMIT_KEY_EXCHANGE_IP_WINDOW` | `1h` | Fixed window for the per-network key-exchange budget. `0` disables that layer; a negative or invalid duration fails startup |
+| `TG_RATE_LIMIT_KEY_EXCHANGE_IP` | `20` | Fixed-window anonymous key exchanges per client network, enforced in Postgres and shared by replicas. Uses the same IPv4-address / IPv6-**/64** key and trusted client address as the other per-IP limits; public WebSocket and TCP/tailnet listeners keep separate counters. If explicitly set, this value applies to both listener families unless the tailnet setting below overrides it. A connection with no keyable address skips only this layer. Store errors refuse the exchange. `0` disables it; a negative or non-integer value fails startup |
+| `TG_RATE_LIMIT_KEY_EXCHANGE_IP_TAILNET` | `20` | Tailnet-only per-network key-exchange limit for TCP and tailnet WebSocket listeners. An explicit value overrides `TG_RATE_LIMIT_KEY_EXCHANGE_IP`; `0` disables it. A negative or non-integer value fails startup |
+| `TG_RATE_LIMIT_KEY_EXCHANGE_IP_WINDOW` | `1h` | Fixed window for the public and tailnet per-network key-exchange budgets. `0` disables those layers; a negative or invalid duration fails startup |
 | `TG_KEY_EXCHANGE_GLOBAL_RATE` | `5` | Deployment-wide in-memory key-exchange ceiling in attempts per second. `TG_REPLICA_COUNT` divides it across replicas. `0` disables the ceiling; when enabled, a value smaller than the replica count fails startup. A negative or non-integer value also fails startup |
 | `TG_KEY_EXCHANGE_GLOBAL_BURST` | `30` | Burst capacity of the deployment-wide in-memory key-exchange ceiling, divided across replicas. `0` disables the ceiling; when enabled, a value smaller than the replica count fails startup. A negative or non-integer value also fails startup |
 | `TG_PREAUTH_LIFETIME`| `2m`          | How long a connection may stay unauthenticated, measured from accept. Past it the socket is closed whatever it is sending, which is the only bound that reaches a peer that stays inside every deadline by dripping one small frame per read timeout. It ends at the first frame that decrypts under a key the server issued, so a client completing its password challenge is not cut off. Do not set it below a minute: gotd applies a 60s timeout per read inside key exchange, a shorter ceiling starts cutting handshakes that are merely slow, and the server warns at startup if you do. `0` disables it; a negative or unparseable duration fails startup |
@@ -395,16 +396,25 @@ most `TG_PREAUTH_LIFETIME`.
 They end at the first frame that decrypts under a key the server issued, not at
 sign-in: a client completing its password challenge must not be closed. Each
 zero-key-id exchange is separately charged before RSA work to
-`TG_KEY_EXCHANGE_PER_CONNECTION`, the per-network Postgres budget, and the
-deployment-wide in-memory ceiling, in that order. A normal client exchanges
-once and may continue signing in or reconnecting on that key; encrypted frames
-and reconnects on an existing key are not charged. A refused exchange receives
-`-429` and the connection closes. The per-connection count survives pre-auth
-slot clearing and renegotiation.
+`TG_KEY_EXCHANGE_PER_CONNECTION`, the listener's per-network Postgres budget
+when enabled, and the deployment-wide in-memory ceiling, in that order. A
+normal client exchanges once and may continue signing in or reconnecting on
+that key; encrypted frames and reconnects on an existing key are not charged.
+A refused exchange receives `-429` and the connection closes. The
+per-connection count survives pre-auth slot clearing and renegotiation.
 
 The per-network limit uses the same IPv4 address or IPv6 **/64** key as the
 other per-IP limits, with separate public WebSocket and TCP/tailnet budgets.
-Unkeyable addresses skip that layer only. The in-memory ceiling is divided by
+With no network-limit settings, the public and default listeners both keep the
+20-per-hour default in every topology. The default listener's `tailnet`
+classification does not prove a peer came through Tailscale, and
+`TG_LISTEN_ADDR` binds all interfaces by default. Set
+`TG_RATE_LIMIT_KEY_EXCHANGE_IP` to apply the same network limit to both listener
+families. `TG_RATE_LIMIT_KEY_EXCHANGE_IP_TAILNET` overrides that value for only
+the tailnet listeners; set it to `0` only when the deployment independently
+restricts their reachability to the tailnet. The per-connection cap and
+in-memory ceiling still apply. Unkeyable addresses skip the network layer only.
+The in-memory ceiling is divided by
 `TG_REPLICA_COUNT`, so it bounds exchange work even when an attacker spreads
 requests across many networks. `TG_MAX_CONNS_PER_UNBOUND_KEY` still bounds the
 connections one unbound key can hold: a peer with m keys nobody has signed in on
