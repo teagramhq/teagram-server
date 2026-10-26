@@ -27,6 +27,16 @@ type fakeConn struct {
 	block   chan struct{}
 }
 
+type signalingEncoder struct {
+	entered chan<- struct{}
+	inner   bin.Encoder
+}
+
+func (e signalingEncoder) Encode(b *bin.Buffer) error {
+	e.entered <- struct{}{}
+	return e.inner.Encode(b)
+}
+
 func (f *fakeConn) Send(_ context.Context, _ *bin.Buffer) error {
 	if f.block != nil {
 		f.entered <- struct{}{}
@@ -542,6 +552,64 @@ func TestSendResultAndSetPushWatermarkAfterSuccess(t *testing.T) {
 	}
 	if got := later.LastPushedPts(); got != 11 {
 		t.Fatalf("older state regressed watermark to %d, want 11", got)
+	}
+}
+
+func TestPushDeliveryBarrierBlocksAndRejectsStaleBatch(t *testing.T) {
+	t.Parallel()
+	key := testKey(t)
+	fc := &fakeConn{}
+	c := mtproto.NewTestConn(fc, key)
+	c.SetOwner(7)
+	keyID := mtproto.AuthKeyIDInt64(key.ID)
+
+	release := c.BeginPushDeliveryBarrier()
+	var releaseOnce sync.Once
+	unlock := func() { releaseOnce.Do(release) }
+	defer unlock()
+	encoded := make(chan struct{}, 1)
+	started := make(chan struct{})
+	pushResult := make(chan struct {
+		pushed bool
+		stale  bool
+		err    error
+	}, 1)
+	go func() {
+		close(started)
+		pushed, stale, err := c.PushToAtWatermark(
+			context.Background(), 7, 0,
+			signalingEncoder{entered: encoded, inner: &mt.Pong{PingID: 1}}, 1,
+		)
+		pushResult <- struct {
+			pushed bool
+			stale  bool
+			err    error
+		}{pushed: pushed, stale: stale, err: err}
+	}()
+	<-started
+	select {
+	case <-encoded:
+		t.Fatal("push encoded while the state snapshot barrier was held")
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	if err := c.SendResultAndSetPushWatermark(
+		&mtproto.Request{Ctx: context.Background(), MsgID: 2},
+		&mt.Pong{PingID: 2}, 7, keyID, 10,
+	); err != nil {
+		t.Fatalf("send state result: %v", err)
+	}
+	unlock()
+
+	result := <-pushResult
+	if result.err != nil {
+		t.Fatalf("push after state result: %v", result.err)
+	}
+	if result.pushed || !result.stale {
+		t.Fatalf("push result = pushed:%v stale:%v, want false:true", result.pushed, result.stale)
+	}
+	if got := fc.writes(); got != 1 {
+		t.Fatalf("transport writes = %d, want only the state result", got)
 	}
 }
 

@@ -428,13 +428,16 @@ func newWithPhotoThumbsAndDialogFilterSyncAndUploadPartTTLAndTurnstile(s *store.
 	register(d, tg.AuthRecoverPasswordRequestTypeID, h.handleRecoveryCodeInvalid)
 	register(d, tg.AccountUpdatePasswordSettingsRequestTypeID, h.handleUpdatePasswordSettings)
 	register(d, tg.AccountGetPasswordSettingsRequestTypeID, h.handleGetPasswordSettings)
-	registerReplyAfterSuccess(d, tg.UpdatesGetStateRequestTypeID, func(_ *mtproto.Conn, req *mtproto.Request) (bin.Encoder, *replyUpdate, func(), error) {
+	registerReplyAfterSuccess(d, tg.UpdatesGetStateRequestTypeID, func(c *mtproto.Conn, req *mtproto.Request) (bin.Encoder, *replyUpdate, func(), error) {
+		releaseDeliveryBarrier := c.BeginPushDeliveryBarrier()
 		result, err := h.handleGetState(req)
 		if err != nil {
+			releaseDeliveryBarrier()
 			return nil, nil, nil, err
 		}
 		state, ok := result.(*tg.UpdatesState)
 		if !ok {
+			releaseDeliveryBarrier()
 			return nil, nil, nil, fmt.Errorf("updates.getState returned %T", result)
 		}
 		return result, &replyUpdate{
@@ -442,7 +445,8 @@ func newWithPhotoThumbsAndDialogFilterSyncAndUploadPartTTLAndTurnstile(s *store.
 			authKey:          mtproto.AuthKeyIDInt64(req.AuthKeyID),
 			pts:              state.Pts,
 			setPushWatermark: true,
-		}, nil, nil
+			onFailure:        releaseDeliveryBarrier,
+		}, releaseDeliveryBarrier, nil
 	})
 	registerReplyAfterSuccess(d, tg.UpdatesGetDifferenceRequestTypeID, func(c *mtproto.Conn, req *mtproto.Request) (bin.Encoder, *replyUpdate, func(), error) {
 		result, afterReply, err := h.handleGetDifferenceForConn(c, req)

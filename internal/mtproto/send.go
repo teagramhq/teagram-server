@@ -94,12 +94,15 @@ type Conn struct {
 	writeTimeout time.Duration
 	log          *slog.Logger
 
+	// pushDeliveryMu forms a barrier between update delivery and state snapshots.
+	// Pushes take its read lock before writeMu; updates.getState holds its write
+	// lock from before the snapshot through the reply and watermark update.
+	pushDeliveryMu sync.RWMutex
 	// writeMu serializes socket writes and guards the mutable session state
 	// (authKey, sessionID, owner) it reads, so a server-initiated push from the
 	// delivery goroutine cannot interleave with a reply write on the serve
 	// goroutine, nor write an update for a user this conn has stopped belonging
-	// to. It is the only lock taken here and is never held across the registry
-	// lock, in either direction.
+	// to. Never acquire pushDeliveryMu while holding writeMu.
 	writeMu   sync.Mutex
 	authKey   crypto.AuthKey
 	sessionID int64
@@ -174,8 +177,8 @@ type Conn struct {
 	pendingRPCOverflow          []pendingRPCOverflowEntry
 	pendingRPCOverflowSaturated bool
 	// pushState closes push admission at retirement and counts existing calls,
-	// including ones waiting for writeMu. The channel closes when those calls
-	// finish, so ownership is not revoked underneath a queued write.
+	// including ones waiting for pushDeliveryMu or writeMu. The channel closes
+	// when those calls finish, so ownership is not revoked underneath a queued write.
 	pushState   atomic.Uint64
 	pushDrained chan struct{}
 	// transportClosed lets retirement skip staggering after a push closes it.
@@ -297,6 +300,14 @@ const maxPendingRPCOverflowUpdates = maxPendingRPCUpdates
 // connection or accounted for by a successful RPC result.
 func (c *Conn) LastPushedPts() int {
 	return int(c.lastPushedPts.Load())
+}
+
+// BeginPushDeliveryBarrier prevents pushes from being written until the
+// returned release function is called. Updates.getState uses it before reading
+// state and releases it only after replying and publishing the state watermark.
+func (c *Conn) BeginPushDeliveryBarrier() func() {
+	c.pushDeliveryMu.Lock()
+	return c.pushDeliveryMu.Unlock
 }
 
 // AuthKeyID returns the id of the auth key this connection last set, 0 before
@@ -1257,6 +1268,8 @@ func (c *Conn) pushTo(ctx context.Context, owner, authKeyID, sessionID int64, ch
 		return false, nil
 	}
 	defer c.finishPush()
+	c.pushDeliveryMu.RLock()
+	defer c.pushDeliveryMu.RUnlock()
 	ctx, cancel := c.boundedWriteContext(ctx)
 	defer cancel()
 
@@ -1440,6 +1453,8 @@ func (c *Conn) PushToAtWatermark(ctx context.Context, owner int64, expectedPts i
 		return false, false, nil
 	}
 	defer c.finishPush()
+	c.pushDeliveryMu.RLock()
+	defer c.pushDeliveryMu.RUnlock()
 	ctx, cancel := c.boundedWriteContext(ctx)
 	defer cancel()
 
