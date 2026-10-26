@@ -22,6 +22,12 @@ const LookupWindow = 24 * time.Hour
 // may look up within LookupWindow.
 const LookupLimit = 20
 
+// ContactImportLookupLimit is the maximum number of distinct, non-contact phone
+// numbers an account may probe through contacts.importContacts in LookupWindow.
+// It is intentionally sized for one full address book while bounding repeated
+// enumeration across calls.
+const ContactImportLookupLimit = 5000
+
 // CheckAndChargeLookup checks whether callerID has room in their lookup quota
 // for the given phone number, and records the attempt. It returns nil when the
 // lookup is allowed, ErrLookupQuotaExceeded when the caller has exhausted their

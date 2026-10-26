@@ -258,6 +258,10 @@ func TestSmoke(t *testing.T) {
 		t.Parallel()
 		testSmokeContactsImportPrivacy(t)
 	})
+	t.Run("contacts-import-budget", func(t *testing.T) {
+		t.Parallel()
+		testSmokeContactsImportBudget(t)
+	})
 	t.Run("full-user-profile", func(t *testing.T) {
 		t.Parallel()
 		testSmokeFullUserProfile(t)

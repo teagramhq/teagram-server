@@ -156,7 +156,7 @@ func TestMaxContactsPerUserOptionBoundsImport(t *testing.T) {
 	if _, err := s.ImportContacts(ctx, owner.ID, book); !errors.Is(err, store.ErrContactLimit) {
 		t.Fatalf("import past a two-seat bound error = %v, want ErrContactLimit", err)
 	}
-	if matches, err := s.ImportContacts(ctx, owner.ID, book[:1]); err != nil || len(matches) != 1 {
+	if matches, err := s.ImportContacts(ctx, owner.ID, book[:1]); err != nil || len(matches.Matches) != 1 {
 		t.Fatalf("import up to the bound = %+v err=%v, want one match", matches, err)
 	}
 }

@@ -126,6 +126,33 @@ func TestResolvePhoneHit(t *testing.T) {
 	}
 }
 
+func TestResolvePhoneRespectsAddedByPhonePrivacy(t *testing.T) {
+	t.Parallel()
+	dsn := pgtest.DSN(t)
+	s, err := store.Open(context.Background(), dsn, pgtest.EncKey(), store.WithBlobStore(testBlobs(t)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = s.Close() }() //nolint:errcheck // best-effort close
+
+	caller, err := s.CreateUser(context.Background(), "15550000011")
+	if err != nil {
+		t.Fatal(err)
+	}
+	target, err := s.CreateUser(context.Background(), "15550000012")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SetAddedByPhonePrivacy(context.Background(), target.ID, store.AddedByPhonePrivacyRule{BaseRule: "nobody"}); err != nil {
+		t.Fatalf("set target added-by-phone privacy: %v", err)
+	}
+
+	_, err = api.ResolvePhoneForTest(s, caller.ID, &tg.ContactsResolvePhoneRequest{Phone: target.Phone})
+	if !tgerr.Is(err, "PHONE_NOT_OCCUPIED") {
+		t.Fatalf("resolve phone error = %v, want indistinguishable PHONE_NOT_OCCUPIED", err)
+	}
+}
+
 func TestResolvePhoneQuota(t *testing.T) {
 	t.Parallel()
 	dsn := pgtest.DSN(t)

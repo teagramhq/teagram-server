@@ -95,10 +95,14 @@ func (h *handlers) handleImportContacts(r *mtproto.Request) (bin.Encoder, error)
 		}
 	}
 
-	matches, err := h.store.ImportContacts(r.Ctx, r.UserID, inputs)
+	result, err := h.store.ImportContacts(r.Ctx, r.UserID, inputs)
 	if err != nil {
+		if errors.Is(err, store.ErrLookupQuotaExceeded) {
+			return nil, errLookupFloodWait
+		}
 		return nil, h.contactMutationError("import contacts", r.UserID, err)
 	}
+	matches := result.Matches
 	imported := make([]tg.ImportedContact, len(matches))
 	userIDs := make([]int64, 0, len(matches))
 	seen := make(map[int64]struct{}, len(matches))
@@ -136,7 +140,7 @@ func (h *handlers) handleImportContacts(r *mtproto.Request) (bin.Encoder, error)
 	return &tg.ContactsImportedContacts{
 		Imported:       imported,
 		PopularInvites: []tg.PopularContact{},
-		RetryContacts:  []int64{},
+		RetryContacts:  result.RetryClientIDs,
 		Users:          wireUsers,
 	}, nil
 }

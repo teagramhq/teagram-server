@@ -616,6 +616,7 @@ type PhoneLookup struct {
 	CallerID   int64
 	Phone      string
 	LookedUpAt pgtype.Timestamptz
+	LookupType string
 }
 
 type PhotoDerivative struct {

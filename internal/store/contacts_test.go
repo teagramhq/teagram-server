@@ -407,11 +407,11 @@ func TestImportContactsEnforcesLimitAtomicallyAndIsIdempotent(t *testing.T) {
 	}
 
 	firstImport, err := s.ImportContacts(ctx, owner.ID, book[:1])
-	if err != nil || len(firstImport) != 1 || firstImport[0] != (store.ContactImportMatch{ClientID: 1, UserID: first.ID}) {
+	if err != nil || len(firstImport.Matches) != 1 || firstImport.Matches[0] != (store.ContactImportMatch{ClientID: 1, UserID: first.ID}) {
 		t.Fatalf("first import = %+v err=%v, want one match at the cap", firstImport, err)
 	}
 	secondImport, err := s.ImportContacts(ctx, owner.ID, book[:1])
-	if err != nil || len(secondImport) != 1 || secondImport[0].ClientID != firstImport[0].ClientID || secondImport[0].UserID != firstImport[0].UserID || !secondImport[0].Existing {
+	if err != nil || len(secondImport.Matches) != 1 || secondImport.Matches[0].ClientID != firstImport.Matches[0].ClientID || secondImport.Matches[0].UserID != firstImport.Matches[0].UserID || !secondImport.Matches[0].Existing {
 		t.Fatalf("repeated import = %+v err=%v, want an idempotent match", secondImport, err)
 	}
 	if _, err := s.ImportContacts(ctx, owner.ID, book[1:]); !errors.Is(err, store.ErrContactLimit) {
@@ -471,8 +471,8 @@ func TestImportContactsAppliesAddedByPhonePrivacy(t *testing.T) {
 		{ClientID: 2, UserID: allowed.ID, Mutual: true},
 		{ClientID: 3, UserID: contacts.ID, Mutual: true},
 	}
-	if !reflect.DeepEqual(matches, want) {
-		t.Fatalf("privacy-filtered imports = %+v, want %+v", matches, want)
+	if !reflect.DeepEqual(matches.Matches, want) {
+		t.Fatalf("privacy-filtered imports = %+v, want %+v", matches.Matches, want)
 	}
 	usersByID, err := s.UsersByID(ctx, []int64{allowed.ID, contacts.ID})
 	if err != nil {
@@ -486,6 +486,33 @@ func TestImportContactsAppliesAddedByPhonePrivacy(t *testing.T) {
 		if visibility[userID].Level != store.LastSeenAccessExact {
 			t.Errorf("status visibility to imported user %d = %v, want exact", userID, visibility[userID].Level)
 		}
+	}
+}
+
+func TestImportContactsDoesNotBypassAddedByPhonePrivacyForExistingContact(t *testing.T) {
+	t.Parallel()
+	s := open(t)
+	ctx := context.Background()
+	owner := mustUser(t, s, "+15551900801")
+	target := mustUser(t, s, "+15551900802")
+	if err := s.SetAddedByPhonePrivacy(ctx, target.ID, store.AddedByPhonePrivacyRule{
+		BaseRule: "nobody", DisallowedUserIDs: []int64{owner.ID},
+	}); err != nil {
+		t.Fatalf("set target added-by-phone privacy: %v", err)
+	}
+	if _, err := s.AddContact(ctx, owner.ID, target.ID); err != nil {
+		t.Fatalf("add target by ID: %v", err)
+	}
+
+	matches, err := s.ImportContacts(ctx, owner.ID, []store.ContactImportInput{{ClientID: 1, Phone: target.Phone}})
+	if err != nil {
+		t.Fatalf("import target phone: %v", err)
+	}
+	if len(matches.Matches) != 0 {
+		t.Fatalf("phone import matches = %+v, want target privacy to hide it", matches.Matches)
+	}
+	if exists, err := s.IsContact(ctx, owner.ID, target.ID); err != nil || !exists {
+		t.Fatalf("contact added by ID exists=%v err=%v, want it preserved", exists, err)
 	}
 }
 
@@ -549,8 +576,8 @@ func TestImportContactsStatusReconcileQueryCountIsConstantWithContactsOnlyLastSe
 	if err != nil {
 		t.Fatalf("import one contact: %v", err)
 	}
-	if len(smallMatches) != 1 || smallMatches[0].ClientID != book[0].ClientID {
-		t.Fatalf("imported %d contacts in small batch, want one: %+v", len(smallMatches), smallMatches)
+	if len(smallMatches.Matches) != 1 || smallMatches.Matches[0].ClientID != book[0].ClientID {
+		t.Fatalf("imported %d contacts in small batch, want one: %+v", len(smallMatches.Matches), smallMatches.Matches)
 	}
 	tracer.mu.Lock()
 	smallSQLs := append([]string(nil), tracer.sqls...)
@@ -560,8 +587,8 @@ func TestImportContactsStatusReconcileQueryCountIsConstantWithContactsOnlyLastSe
 	if err != nil {
 		t.Fatalf("import remaining contacts: %v", err)
 	}
-	if len(largeMatches) != 4999 {
-		t.Fatalf("imported %d contacts in large batch, want 4999", len(largeMatches))
+	if len(largeMatches.Matches) != 4999 {
+		t.Fatalf("imported %d contacts in large batch, want 4999", len(largeMatches.Matches))
 	}
 	tracer.mu.Lock()
 	largeSQLs := append([]string(nil), tracer.sqls...)

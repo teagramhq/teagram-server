@@ -6,6 +6,7 @@ import (
 
 	"github.com/gotd/td/tg"
 	"github.com/gotd/td/tgerr"
+	"github.com/jackc/pgx/v5"
 
 	"github.com/teagramhq/teagram-server/internal/store"
 )
@@ -179,5 +180,78 @@ func testSmokeContactsImportPrivacy(t *testing.T) {
 	}
 	if exists {
 		t.Fatal("denied target was added to the contact list")
+	}
+}
+
+func testSmokeContactsImportBudget(t *testing.T) {
+	t.Helper()
+	f := newSmokeFixture(t)
+	const ownerPhone, missingPhone, targetPhone = "+15551099301", "+15551099302", "+15551099303"
+	seedSmokeUsers(t, f, ownerPhone)
+	owner := newSmokeClient(t, f, "Contacts import budget owner", ownerPhone)
+	target, err := f.store.CreateUser(f.ctx, targetPhone)
+	if err != nil {
+		t.Fatalf("create target for over-budget import: %v", err)
+	}
+	conn, err := pgx.Connect(f.ctx, f.dsn)
+	if err != nil {
+		t.Fatalf("connect to fixture database: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := conn.Close(f.ctx); err != nil {
+			t.Errorf("close fixture database connection: %v", err)
+		}
+	})
+	if _, err := conn.Exec(f.ctx, `
+		INSERT INTO phone_lookups (caller_id, lookup_type, phone, looked_up_at)
+		SELECT $1, 'contacts_import', 'budget-seed-' || n, now()
+		FROM generate_series(1, $2) AS n
+	`, owner.id, store.MaxContactsPerUser-1); err != nil {
+		t.Fatalf("seed contact import quota: %v", err)
+	}
+
+	importContacts := func(inputs ...tg.InputPhoneContact) (*tg.ContactsImportedContacts, error) {
+		t.Helper()
+		var imported *tg.ContactsImportedContacts
+		err := owner.call(f.ctx, func(ctx context.Context, client *tg.Client) error {
+			var err error
+			imported, err = client.ContactsImportContacts(ctx, inputs)
+			return err
+		})
+		return imported, err
+	}
+	initial, err := importContacts(tg.InputPhoneContact{ClientID: 301, Phone: missingPhone})
+	if err != nil {
+		t.Fatalf("charge last import slot with missing phone: %v", err)
+	}
+	if len(initial.Imported) != 0 || len(initial.RetryContacts) != 0 {
+		t.Fatalf("initial missing-phone result imported=%+v retry=%v, want empty", initial.Imported, initial.RetryContacts)
+	}
+
+	resync, err := importContacts(tg.InputPhoneContact{ClientID: 302, Phone: missingPhone})
+	if err != nil {
+		t.Fatalf("resync an already-probed phone: %v", err)
+	}
+	if len(resync.Imported) != 0 || len(resync.RetryContacts) != 0 {
+		t.Fatalf("resync result imported=%+v retry=%v, want empty", resync.Imported, resync.RetryContacts)
+	}
+
+	partial, err := importContacts(
+		tg.InputPhoneContact{ClientID: 303, Phone: missingPhone},
+		tg.InputPhoneContact{ClientID: 304, Phone: targetPhone},
+	)
+	if err != nil {
+		t.Fatalf("import with one cached and one over-budget phone: %v", err)
+	}
+	if len(partial.Imported) != 0 || len(partial.RetryContacts) != 1 || partial.RetryContacts[0] != 304 {
+		t.Fatalf("partial import = imported %+v retry %v, want no matches and retry client 304", partial.Imported, partial.RetryContacts)
+	}
+	if exists, err := f.store.IsContact(f.ctx, owner.id, target.ID); err != nil || exists {
+		t.Fatalf("over-budget target contact exists=%v err=%v, want absent", exists, err)
+	}
+
+	_, err = importContacts(tg.InputPhoneContact{ClientID: 305, Phone: targetPhone})
+	if !tgerr.Is(err, "FLOOD_WAIT") {
+		t.Fatalf("all-over-budget import error = %v, want FLOOD_WAIT", err)
 	}
 }

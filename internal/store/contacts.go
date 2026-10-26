@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 
@@ -54,21 +55,28 @@ type ContactImportMatch struct {
 	Mutual   bool
 }
 
+// ContactImportResult contains the permitted matches and client IDs postponed
+// because the caller's import lookup budget is exhausted.
+type ContactImportResult struct {
+	Matches        []ContactImportMatch
+	RetryClientIDs []int64
+}
+
 func validContactIDs(ownerID, contactID int64) bool {
 	return ownerID > 0 && contactID > 0 && ownerID != contactID
 }
 
 // ImportContacts matches a phone book in one batch, applies each target's
 // added-by-phone privacy rule, and adds all permitted accounts atomically.
-func (s *Store) ImportContacts(ctx context.Context, ownerID int64, inputs []ContactImportInput) ([]ContactImportMatch, error) {
+func (s *Store) ImportContacts(ctx context.Context, ownerID int64, inputs []ContactImportInput) (ContactImportResult, error) {
 	if ownerID <= 0 {
-		return nil, ErrInvalidContact
+		return ContactImportResult{}, ErrInvalidContact
 	}
 	if len(inputs) > MaxContactsPerUser {
-		return nil, ErrContactLimit
+		return ContactImportResult{}, ErrContactLimit
 	}
 	if len(inputs) == 0 {
-		return []ContactImportMatch{}, nil
+		return ContactImportResult{Matches: []ContactImportMatch{}}, nil
 	}
 
 	clientIDs := make([]int64, len(inputs))
@@ -78,20 +86,53 @@ func (s *Store) ImportContacts(ctx context.Context, ownerID int64, inputs []Cont
 		phones[i] = NormalizePhone(input.Phone)
 	}
 
+	// Persist the quota charge before attempting contact mutations. A rejected
+	// contact-list-cap operation must not roll back phone probes already made.
+	chargeTx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return ContactImportResult{}, fmt.Errorf("import contacts quota begin: %w", err)
+	}
+	defer func() { _ = chargeTx.Rollback(ctx) }() //nolint:errcheck // no-op after commit
+	if err := lockOwners(ctx, chargeTx, ownerID); err != nil {
+		return ContactImportResult{}, err
+	}
+
+	// Charge distinct probes in one batch statement. The owner lock serializes
+	// the quota check with contact writes and other lookup surfaces.
+	withinBudget, retryClientIDs, err := chargeContactImportLookups(ctx, chargeTx, ownerID, clientIDs, phones)
+	if err != nil {
+		return ContactImportResult{}, err
+	}
+	if err := chargeTx.Commit(ctx); err != nil {
+		return ContactImportResult{}, fmt.Errorf("import contacts quota commit: %w", err)
+	}
+	var eligibleClientIDs []int64
+	var eligiblePhones []string
+	for i, allowed := range withinBudget {
+		if !allowed {
+			continue
+		}
+		eligibleClientIDs = append(eligibleClientIDs, clientIDs[i])
+		eligiblePhones = append(eligiblePhones, phones[i])
+	}
+	if len(eligiblePhones) == 0 {
+		return ContactImportResult{}, ErrLookupQuotaExceeded
+	}
+
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("import contacts begin: %w", err)
+		return ContactImportResult{}, fmt.Errorf("import contacts begin: %w", err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }() //nolint:errcheck // no-op after commit
 	if err := lockOwners(ctx, tx, ownerID); err != nil {
-		return nil, err
+		return ContactImportResult{}, err
 	}
 
-	// Resolve phones and privacy in one statement snapshot. The owner lock
-	// serializes this import's edge and cap changes with other owner writes.
-	matches, err := importContactMatches(ctx, tx, ownerID, clientIDs, phones)
+	// Resolve permitted phone matches in one statement snapshot. This same
+	// predicate is used by contacts.resolvePhone.
+	matches, err := matchContactPhones(ctx, tx, ownerID, eligibleClientIDs, eligiblePhones, false)
 	if err != nil {
-		return nil, err
+		return ContactImportResult{}, err
 	}
 	newIDs := make([]int64, 0, len(matches))
 	seenUsers := make(map[int64]struct{}, len(matches))
@@ -110,23 +151,23 @@ func (s *Store) ImportContacts(ctx context.Context, ownerID int64, inputs []Cont
 		qtx := s.q.WithTx(tx)
 		state, err := qtx.CountContactsForImport(ctx, ownerID)
 		if err != nil {
-			return nil, fmt.Errorf("import contacts read owner state: %w", err)
+			return ContactImportResult{}, fmt.Errorf("import contacts read owner state: %w", err)
 		}
 		if state.ContactCount+int64(len(newIDs)) > int64(s.maxContactsPerUser) {
-			return nil, ErrContactLimit
+			return ContactImportResult{}, ErrContactLimit
 		}
 
 		var changedViewers []int64
 		if state.LastSeenContactsRule {
 			inputsByViewer, err := lastSeenPrivacyInputsForViewers(ctx, qtx, ownerID, newIDs)
 			if err != nil {
-				return nil, fmt.Errorf("import contacts evaluate status access: %w", err)
+				return ContactImportResult{}, fmt.Errorf("import contacts evaluate status access: %w", err)
 			}
 			changedViewers, err = changedLastSeenAccessViewers(inputsByViewer, func(_ int64, inputs *lastSeenPrivacyInputs) {
 				inputs.ownerContact = true
 			})
 			if err != nil {
-				return nil, fmt.Errorf("import contacts compare status access: %w", err)
+				return ContactImportResult{}, fmt.Errorf("import contacts compare status access: %w", err)
 			}
 		}
 
@@ -136,24 +177,127 @@ func (s *Store) ImportContacts(ctx context.Context, ownerID int64, inputs []Cont
 		}
 		inserted, err := tx.CopyFrom(ctx, pgx.Identifier{"user_contacts"}, []string{"owner_id", "contact_id"}, pgx.CopyFromRows(copyRows))
 		if err != nil {
-			return nil, fmt.Errorf("import contacts copy edges: %w", err)
+			return ContactImportResult{}, fmt.Errorf("import contacts copy edges: %w", err)
 		}
 		if inserted != int64(len(newIDs)) {
-			return nil, fmt.Errorf("import contacts inserted %d of %d edges", inserted, len(newIDs))
+			return ContactImportResult{}, fmt.Errorf("import contacts inserted %d of %d edges", inserted, len(newIDs))
 		}
 		if err := notifyStatusReconcile(ctx, tx, ownerID, changedViewers...); err != nil {
-			return nil, fmt.Errorf("import contacts notify status: %w", err)
+			return ContactImportResult{}, fmt.Errorf("import contacts notify status: %w", err)
 		}
 	}
 
 	if err := tx.Commit(ctx); err != nil {
-		return nil, fmt.Errorf("import contacts commit: %w", err)
+		return ContactImportResult{}, fmt.Errorf("import contacts commit: %w", err)
 	}
-	return matches, nil
+	return ContactImportResult{Matches: matches, RetryClientIDs: retryClientIDs}, nil
 }
 
-func importContactMatches(ctx context.Context, tx pgx.Tx, ownerID int64, clientIDs []int64, phones []string) ([]ContactImportMatch, error) {
+func chargeContactImportLookups(ctx context.Context, tx pgx.Tx, ownerID int64, clientIDs []int64, phones []string) ([]bool, []int64, error) {
 	rows, err := tx.Query(ctx, `
+		WITH requested AS (
+			SELECT entry.client_id, entry.phone, entry.ordinality
+			FROM UNNEST($2::BIGINT[], $3::TEXT[]) WITH ORDINALITY
+				AS entry(client_id, phone, ordinality)
+		), contact_phones AS (
+			SELECT DISTINCT requested.phone
+			FROM requested
+			JOIN LATERAL (
+				SELECT u.id FROM users u WHERE u.phone = requested.phone LIMIT 1
+			) target ON true
+			JOIN user_contacts existing
+			  ON existing.owner_id = $1
+			 AND existing.contact_id = target.id
+		), probes AS (
+			SELECT DISTINCT requested.phone
+			FROM requested
+			WHERE NOT EXISTS (
+				SELECT 1 FROM contact_phones existing
+				WHERE existing.phone = requested.phone
+			)
+		), expired AS (
+			DELETE FROM phone_lookups
+			WHERE caller_id = $1
+			  AND lookup_type = 'contacts_import'
+			  AND looked_up_at < $4
+			RETURNING phone
+		), current_lookups AS (
+			SELECT DISTINCT phone
+			FROM phone_lookups
+			WHERE caller_id = $1
+			  AND lookup_type = 'contacts_import'
+			  AND looked_up_at >= $4
+		), quota AS (
+			SELECT COUNT(*)::BIGINT AS used FROM current_lookups
+		), new_probes AS (
+			SELECT probes.phone
+			FROM probes
+			WHERE NOT EXISTS (
+				SELECT 1 FROM current_lookups current
+				WHERE current.phone = probes.phone
+			)
+		), ranked AS (
+			SELECT phone, ROW_NUMBER() OVER (ORDER BY phone) AS position
+			FROM new_probes
+		), accepted AS (
+			SELECT ranked.phone
+			FROM ranked CROSS JOIN quota
+			WHERE quota.used + ranked.position <= $5
+		), inserted AS (
+			INSERT INTO phone_lookups (caller_id, lookup_type, phone, looked_up_at)
+			SELECT $1, 'contacts_import', accepted.phone, now()
+			FROM accepted
+			RETURNING phone
+		), eligible AS (
+			SELECT phone FROM contact_phones
+			UNION
+			SELECT phone FROM current_lookups
+			UNION
+			SELECT phone FROM inserted
+		)
+		SELECT requested.ordinality, eligible.phone IS NOT NULL
+		FROM requested
+		LEFT JOIN eligible USING (phone)
+		ORDER BY requested.ordinality
+	`, ownerID, clientIDs, phones, time.Now().Add(-LookupWindow), ContactImportLookupLimit)
+	if err != nil {
+		return nil, nil, fmt.Errorf("charge contact import lookups: %w", err)
+	}
+	defer rows.Close()
+	withinBudget := make([]bool, len(clientIDs))
+	retryClientIDs := make([]int64, 0)
+	var rowCount int
+	for rows.Next() {
+		var ordinality int64
+		var allowed bool
+		if err := rows.Scan(&ordinality, &allowed); err != nil {
+			return nil, nil, fmt.Errorf("charge contact import lookups scan: %w", err)
+		}
+		if ordinality < 1 || ordinality > int64(len(clientIDs)) {
+			return nil, nil, fmt.Errorf("charge contact import lookups: invalid input position %d", ordinality)
+		}
+		index := int(ordinality - 1)
+		withinBudget[index] = allowed
+		if !allowed {
+			retryClientIDs = append(retryClientIDs, clientIDs[index])
+		}
+		rowCount++
+	}
+	if err := rows.Err(); err != nil {
+		return nil, nil, fmt.Errorf("charge contact import lookups: %w", err)
+	}
+	if rowCount != len(clientIDs) {
+		return nil, nil, fmt.Errorf("charge contact import lookups: got %d results for %d inputs", rowCount, len(clientIDs))
+	}
+	return withinBudget, retryClientIDs, nil
+}
+
+type contactPhoneQueryer interface {
+	Query(context.Context, string, ...any) (pgx.Rows, error)
+}
+
+func matchContactPhones(ctx context.Context, queryer contactPhoneQueryer, ownerID int64, clientIDs []int64, phones []string, includeOwner bool) ([]ContactImportMatch, error) {
+	rows, err := queryer.Query(ctx, `
 		WITH requested AS (
 			SELECT entry.client_id, entry.phone, entry.ordinality
 			FROM UNNEST($2::BIGINT[], $3::TEXT[]) WITH ORDINALITY
@@ -185,9 +329,9 @@ func importContactMatches(ctx context.Context, tx pgx.Tx, ownerID int64, clientI
 		LEFT JOIN user_contacts existing
 		  ON existing.owner_id = $1
 		 AND existing.contact_id = target.id
-		WHERE target.id <> $1
+		WHERE (target.id <> $1 OR $4::BOOLEAN)
 		  AND (
-			existing.contact_id IS NOT NULL
+			target.id = $1
 			OR (
 				disallowed.user_id IS NULL
 				AND (
@@ -198,23 +342,44 @@ func importContactMatches(ctx context.Context, tx pgx.Tx, ownerID int64, clientI
 			)
 		  )
 		ORDER BY requested.ordinality
-	`, ownerID, clientIDs, phones)
+	`, ownerID, clientIDs, phones, includeOwner)
 	if err != nil {
-		return nil, fmt.Errorf("import contacts match phones: %w", err)
+		return nil, fmt.Errorf("match contact phones: %w", err)
 	}
 	defer rows.Close()
 	var matches []ContactImportMatch
 	for rows.Next() {
 		var match ContactImportMatch
 		if err := rows.Scan(&match.ClientID, &match.UserID, &match.Existing, &match.Mutual); err != nil {
-			return nil, fmt.Errorf("import contacts match phones scan: %w", err)
+			return nil, fmt.Errorf("match contact phones scan: %w", err)
 		}
 		matches = append(matches, match)
 	}
 	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("import contacts match phones: %w", err)
+		return nil, fmt.Errorf("match contact phones: %w", err)
 	}
 	return matches, nil
+}
+
+// UserByPhoneForCaller returns a phone match only when the target permits the
+// caller under its added-by-phone privacy rule. The same predicate gates batch
+// imports.
+func (s *Store) UserByPhoneForCaller(ctx context.Context, callerID int64, phone string) (User, bool, error) {
+	if callerID <= 0 {
+		return User{}, false, ErrInvalidContact
+	}
+	matches, err := matchContactPhones(ctx, s.pool, callerID, []int64{0}, []string{NormalizePhone(phone)}, true)
+	if err != nil {
+		return User{}, false, err
+	}
+	if len(matches) == 0 {
+		return User{}, false, nil
+	}
+	user, ok, err := s.UserByID(ctx, matches[0].UserID)
+	if err != nil {
+		return User{}, false, fmt.Errorf("load permitted phone match: %w", err)
+	}
+	return user, ok, nil
 }
 
 // AddContact adds contactID to ownerID's directed contact list. The existing
