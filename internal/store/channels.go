@@ -526,6 +526,40 @@ func (s *Store) ChannelDeliverySnapshot(ctx context.Context, channelID int64) ([
 	return members, int(rows[0].Pts), nil
 }
 
+// ChannelDeliverySnapshotForUsers reads membership and its event ceiling from
+// one statement snapshot, limited to live accounts on this replica.
+func (s *Store) ChannelDeliverySnapshotForUsers(ctx context.Context, channelID int64, userIDs []int64) ([]ChannelMember, int, error) {
+	if len(userIDs) == 0 {
+		return nil, 0, nil
+	}
+	rows, err := s.q.ChannelDeliverySnapshotForUsers(ctx, db.ChannelDeliverySnapshotForUsersParams{
+		ChannelID: channelID,
+		UserIds:   userIDs,
+	})
+	if err != nil {
+		return nil, 0, fmt.Errorf("channel delivery snapshot for live users: %w", err)
+	}
+	if len(rows) == 0 {
+		return nil, 0, nil
+	}
+
+	members := make([]ChannelMember, len(rows))
+	for i, r := range rows {
+		members[i] = channelMemberFromRow(db.ChannelParticipant{
+			ChannelID:       r.ChannelID,
+			UserID:          r.UserID,
+			Role:            r.Role,
+			AdminChangeInfo: r.AdminChangeInfo,
+			BannedUntil:     r.BannedUntil,
+			JoinPts:         r.JoinPts,
+			Date:            r.Date,
+			LastPostAt:      r.LastPostAt,
+			AvailableMinID:  r.AvailableMinID,
+		})
+	}
+	return members, int(rows[0].Pts), nil
+}
+
 // ChannelMemberOf returns userID's participant row of channelID; ok=false when
 // there is none. The row is returned as it stands: a ban is data here, not a
 // verdict, and the caller decides what it means by calling ChannelMember.Banned.
