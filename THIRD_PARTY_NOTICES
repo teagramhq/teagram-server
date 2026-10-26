@@ -30,6 +30,20 @@ License: MIT.
 Source: https://github.com/microsoft/fluentui-emoji
 Pinned revision: commit 1ffb34c752ecf5d402f04cfb4b392c77f57c54bc. The generated packs use the Color artwork.
 
+Animated Noto Emoji
+
+Copyright Google.
+License: Creative Commons Attribution 4.0 International (CC BY 4.0):
+https://creativecommons.org/licenses/by/4.0/
+Source: https://googlefonts.github.io/noto-emoji-animation/
+License confirmation: https://googlefonts.github.io/noto-emoji-files/?view=docs
+(SHA-256 e8122e73fb652a5e805c517d90416f5c07c474f7f9560412cab5667d5881d2e0).
+Pinned release: Google Fonts CDN 17.0. The animation index is pinned by SHA-256
+caf9ebf0b461216e6638e4d660740d8e9fb78ba74c7b67d89045d2b399d3d3a6; the
+selected license, index and Lottie files have aggregate SHA-256
+192cf9e21d9377fb07e1fb74eef76acc1ed83a7b7241767a81fe0e52774c25a2.
+Attribution: Animated Noto Emoji by Google.
+
 Unicode Emoji data
 
 Copyright 2026 Unicode, Inc.

@@ -34,6 +34,15 @@ def main() -> None:
         fail("loopback-port must be between 1 and 65535")
     base_url = f"http://127.0.0.1:{port}"
     expected = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
+    try:
+        with urllib.request.urlopen(base_url + "/", timeout=5) as response:
+            if response.status != 200:
+                fail(f"root HTTP status is {response.status}")
+            if response.read() != b"Teagram demo server":
+                fail("root response does not match the demo status message")
+    except (OSError, urllib.error.URLError) as error:
+        fail(f"root request failed: {error}")
+
     request = urllib.request.Request(
         base_url + "/.well-known/teagramd/client",
         headers={"Origin": "https://web.teagram.io"},
