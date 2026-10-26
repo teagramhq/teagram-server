@@ -141,9 +141,14 @@ type Config struct {
 	// are stored on authorization rows and returned by account.getAuthorizations.
 	// It defaults on for compatibility with existing device management behavior.
 	SessionDeviceLabels bool
-	// MaxFileBytes caps one uploaded file. A user's outstanding unassembled
-	// bytes are capped at twice this, which is two concurrent max-size uploads.
+	// MaxFileBytes caps one uploaded file. TG_UPLOAD_MAX_BYTES overrides the
+	// existing TG_MAX_FILE_BYTES setting when provided. A user's outstanding
+	// unassembled bytes are capped at twice this, which is two concurrent
+	// max-size uploads.
 	MaxFileBytes int64
+	// UploadMaxFileBytes is the optional TG_UPLOAD_MAX_BYTES value advertised
+	// to clients. Zero means that setting was not provided.
+	UploadMaxFileBytes int64
 	// BlobDir is where uploaded file bodies are stored. It must be outside the
 	// repository and outside anything a future HTTP surface serves statically.
 	BlobDir string
@@ -439,6 +444,10 @@ type RateLimitsConfig struct {
 	// account, on one shared budget: both write the same rows, so a budget each
 	// would let an account double its part rate by alternating between them.
 	SaveFilePart store.RateLimitConfig
+	// UploadBytes limits uploaded bytes per account. The limit uses raw byte
+	// units, defaults to a one-hour window, and is disabled until
+	// TG_RATE_LIMIT_UPLOAD_BYTES is set.
+	UploadBytes store.RateLimitConfig
 	// GetFile limits upload.getFile per account. It is backed by the existing
 	// Postgres rate-limit counter, so concurrent requests for one account are
 	// admitted exactly across connections and replicas.
@@ -517,7 +526,9 @@ type RateLimitsConfig struct {
 // per account, 50
 // upload.getFile calls per second per account, and 400 upload.getFile calls per
 // second across the deployment.
-// Zero disables enforcement for a surface.
+// Zero disables enforcement for a surface. UploadBytes is an optional budget
+// in byte tokens with a one-hour default window; deployments enable it by
+// setting TG_RATE_LIMIT_UPLOAD_BYTES.
 //
 // The upload number is the one derived rather than chosen: at the 512 KiB
 // protocol part size it is roughly 300 MB/min, past any real client's upload
@@ -538,6 +549,7 @@ func DefaultRateLimits() RateLimitsConfig {
 		SearchGlobal:   store.RateLimitConfig{Limit: 300, Window: time.Hour},
 		PollVote:       store.RateLimitConfig{Limit: 60, Window: 60 * time.Second},
 		SaveFilePart:   store.RateLimitConfig{Limit: 600, Window: 60 * time.Second},
+		UploadBytes:    store.RateLimitConfig{Window: time.Hour},
 		GetFile:        store.RateLimitConfig{Limit: 50, Window: time.Second},
 		GetFileReplica: store.RateLimitConfig{Limit: 400, Window: time.Second},
 		SendCodeIP: store.SendCodeIPLimits{
@@ -589,11 +601,12 @@ func validateRateLimitSurface(limitName, windowName string, cfg store.RateLimitC
 	return nil
 }
 
-// MaxFileBytesLimit is the ceiling on TG_MAX_FILE_BYTES. It is a bound on the
-// arithmetic, not a product decision: the derived part count rounds up by the
-// part size and the per-user cap doubles the per-file one, so a value near
-// MaxInt64 overflows both and turns every save into a rejection. 1 TiB is far
-// past any file a client can upload and leaves both terms in range.
+// MaxFileBytesLimit is the ceiling on TG_MAX_FILE_BYTES and TG_UPLOAD_MAX_BYTES.
+// It is a bound on the arithmetic, not a product decision: the derived part
+// count rounds up by the part size and the per-user cap doubles the per-file
+// one, so a value near MaxInt64 overflows both and turns every save into a
+// rejection. 1 TiB is far past any file a client can upload and leaves both
+// terms in range.
 const MaxFileBytesLimit int64 = 1 << 40
 
 // DefaultStatementTimeout is the shipped Postgres statement_timeout. It bounds
@@ -959,6 +972,20 @@ func load(log *slog.Logger, allowKeyGeneration bool) (Config, error) {
 			return Config{}, errors.New("TG_MAX_FILE_BYTES must be at most 1099511627776")
 		}
 		cfg.MaxFileBytes = n
+	}
+	if v := os.Getenv("TG_UPLOAD_MAX_BYTES"); v != "" {
+		n, err := strconv.ParseInt(v, 10, 64)
+		if err != nil {
+			return Config{}, errors.New("TG_UPLOAD_MAX_BYTES must be an integer")
+		}
+		if n <= 0 {
+			return Config{}, errors.New("TG_UPLOAD_MAX_BYTES must be positive")
+		}
+		if n > MaxFileBytesLimit {
+			return Config{}, errors.New("TG_UPLOAD_MAX_BYTES must be at most 1099511627776")
+		}
+		cfg.MaxFileBytes = n
+		cfg.UploadMaxFileBytes = n
 	}
 	if v := os.Getenv("TG_MAX_USER_STORAGE_BYTES"); v != "" {
 		n, err := strconv.ParseInt(v, 10, 64)
@@ -1330,6 +1357,20 @@ func load(log *slog.Logger, allowKeyGeneration bool) (Config, error) {
 		}
 		cfg.RateLimits.SaveFilePart.Window = d
 	}
+	if v := os.Getenv("TG_RATE_LIMIT_UPLOAD_BYTES"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil {
+			return Config{}, errors.New("TG_RATE_LIMIT_UPLOAD_BYTES must be an integer")
+		}
+		cfg.RateLimits.UploadBytes.Limit = n
+	}
+	if v := os.Getenv("TG_RATE_LIMIT_UPLOAD_BYTES_WINDOW"); v != "" {
+		d, err := time.ParseDuration(v)
+		if err != nil {
+			return Config{}, errors.New("TG_RATE_LIMIT_UPLOAD_BYTES_WINDOW must be a duration")
+		}
+		cfg.RateLimits.UploadBytes.Window = d
+	}
 	if v := os.Getenv("TG_RATE_LIMIT_GET_FILE"); v != "" {
 		n, err := strconv.Atoi(v)
 		if err != nil {
@@ -1377,6 +1418,9 @@ func load(log *slog.Logger, allowKeyGeneration bool) (Config, error) {
 		return Config{}, err
 	}
 	if err := validateRateLimitSurface("TG_RATE_LIMIT_GET_FILE_REPLICA", "TG_RATE_LIMIT_GET_FILE_REPLICA_WINDOW", cfg.RateLimits.GetFileReplica); err != nil {
+		return Config{}, err
+	}
+	if err := validateRateLimitSurface("TG_RATE_LIMIT_UPLOAD_BYTES", "TG_RATE_LIMIT_UPLOAD_BYTES_WINDOW", cfg.RateLimits.UploadBytes); err != nil {
 		return Config{}, err
 	}
 	if v := os.Getenv("TG_RATE_LIMIT_SEND_CODE_IP"); v != "" {

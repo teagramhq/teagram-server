@@ -1,6 +1,9 @@
 package api
 
 import (
+	"encoding/binary"
+	"hash/crc32"
+
 	"github.com/gotd/td/bin"
 	"github.com/gotd/td/tg"
 
@@ -9,7 +12,7 @@ import (
 )
 
 const (
-	appConfigHash       = 5
+	appConfigHash       = 6
 	emptyWallPapersHash = 1
 	emptyChatThemesHash = 1
 )
@@ -95,6 +98,12 @@ func (h *handlers) handleGetAppConfig(r *mtproto.Request) (bin.Encoder, error) {
 		Key:   "chat_read_mark_size_threshold",
 		Value: &tg.JSONNumber{Value: store.ChatReadMarkSizeThreshold},
 	}, {
+		Key:   "upload_max_fileparts_default",
+		Value: &tg.JSONNumber{Value: float64(h.maxFileParts())},
+	}, {
+		Key:   "upload_max_fileparts_premium",
+		Value: &tg.JSONNumber{Value: float64(h.maxFileParts())},
+	}, {
 		Key:   "dialog_filters_chats_limit_default",
 		Value: &tg.JSONNumber{Value: 100},
 	}, {
@@ -125,6 +134,12 @@ func (h *handlers) handleGetAppConfig(r *mtproto.Request) (bin.Encoder, error) {
 		Key:   "reactions_user_max_premium",
 		Value: &tg.JSONNumber{Value: 1},
 	}}
+	if h.appConfigUploadMaxFileBytes > 0 {
+		values = append(values, tg.JSONObjectValue{
+			Key:   "upload_max_file_bytes",
+			Value: &tg.JSONNumber{Value: float64(h.appConfigUploadMaxFileBytes)},
+		})
+	}
 	if h.turnstileSiteKey != "" && h.turnstileVerifier != nil {
 		values = append(values, tg.JSONObjectValue{
 			Key: "turnstile",
@@ -135,7 +150,20 @@ func (h *handlers) handleGetAppConfig(r *mtproto.Request) (bin.Encoder, error) {
 		})
 	}
 	return &tg.HelpAppConfig{
-		Hash:   appConfigHash,
+		Hash:   appConfigHashForUploadLimit(h.appConfigUploadMaxFileBytes),
 		Config: &tg.JSONObject{Value: values},
 	}, nil
+}
+
+func appConfigHashForUploadLimit(maxFileBytes int64) int {
+	if maxFileBytes <= 0 {
+		return appConfigHash
+	}
+	var encoded [8]byte
+	binary.LittleEndian.PutUint64(encoded[:], uint64(maxFileBytes))
+	hash := crc32.ChecksumIEEE(encoded[:]) & 0x7fffffff
+	if int(hash) == appConfigHash {
+		hash++
+	}
+	return int(hash)
 }

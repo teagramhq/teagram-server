@@ -128,8 +128,8 @@ var (
 	// errFilePartInvalid rejects a part index that is negative or past the
 	// per-file maximum, and a zero file id.
 	errFilePartInvalid = rpcErr(400, "FILE_PART_INVALID")
-	// errFilePartTooBig rejects a part over the 512 KiB protocol maximum, and a
-	// file whose parts would exceed TG_MAX_FILE_BYTES.
+	// errFilePartTooBig rejects a part over the protocol maximum, and a file
+	// whose parts would exceed the configured upload limit.
 	errFilePartTooBig = rpcErr(400, "FILE_PART_TOO_BIG")
 	// errStorageQuota rejects an upload that would take the account past its
 	// outstanding-bytes cap. FLOOD_WAIT is the closest Telegram signal: the

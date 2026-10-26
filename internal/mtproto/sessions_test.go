@@ -39,6 +39,40 @@ func TestSessionRegistryAddRemove(t *testing.T) {
 	}
 }
 
+func TestSessionRegistryLiveUserIDsReturnsDistinctActiveAccounts(t *testing.T) {
+	t.Parallel()
+	r := mtproto.NewSessionRegistry()
+	c1, c2, c3 := &mtproto.Conn{}, &mtproto.Conn{}, &mtproto.Conn{}
+	r.Add(7, c1)
+	r.Add(7, c2)
+	r.Add(9, c3)
+
+	assertIDs := func(want ...int64) {
+		t.Helper()
+		got := r.LiveUserIDs()
+		if len(got) != len(want) {
+			t.Fatalf("LiveUserIDs() = %v, want %v", got, want)
+		}
+		seen := make(map[int64]bool, len(got))
+		for _, id := range got {
+			seen[id] = true
+		}
+		for _, id := range want {
+			if !seen[id] {
+				t.Errorf("LiveUserIDs() = %v, missing account %d", got, id)
+			}
+		}
+	}
+	assertIDs(7, 9)
+
+	r.Remove(7, c1)
+	assertIDs(7, 9)
+	r.Remove(7, c2)
+	assertIDs(9)
+	r.Remove(9, c3)
+	assertIDs()
+}
+
 // TestSessionRegistryCap covers the per-user connection cap: past it a new
 // connection is refused and no live one is evicted, and a slot freed by a
 // departing connection is reusable.

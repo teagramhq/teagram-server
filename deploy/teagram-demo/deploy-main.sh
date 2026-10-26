@@ -200,7 +200,7 @@ chmod 0600 "$BACKUP_DIR/previous-image-id.txt" "$BACKUP_DIR/active-server.txt" \
 demo_backup_database
 
 export TEAGRAM_DEMO_IMAGE_REF="$CANDIDATE_IMAGE_REF"
-demo_compose run --rm --no-deps teagramd client-config > "$TMP_DIR/client.json"
+demo_compose run --rm --no-deps "$CANDIDATE_SERVER" client-config > "$TMP_DIR/client.json"
 jq -e '
   .version == 1
   and .mtproto.endpoint == "demo.teagram.io:443"
