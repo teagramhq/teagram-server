@@ -19,14 +19,29 @@ REGISTRY_ERROR = (
 )
 FAKE_DOCKER = """#!/usr/bin/env bash
 set -euo pipefail
-[ "$1" = pull ] || { echo "unexpected docker $*" >&2; exit 64; }
-printf '%s\\n' "$2" >> "$FAKE_DOCKER_DIR/calls"
-failures=$(grep -cxF "$2" "$FAKE_DOCKER_DIR/calls")
-if [ "$failures" -le "$FAKE_DOCKER_FAILURES" ]; then
-  echo "Error response from daemon: $FAKE_DOCKER_ERROR" >&2
-  exit 1
-fi
-echo "pulled $2"
+case "$1" in
+  pull)
+    printf '%s\\n' "$2" >> "$FAKE_DOCKER_DIR/calls"
+    if [[ "$2" == docker.io/* ]]; then
+      echo "pulled $2"
+      exit 0
+    fi
+    failures=$(grep -cxF "$2" "$FAKE_DOCKER_DIR/calls")
+    if [ "$failures" -le "$FAKE_DOCKER_FAILURES" ]; then
+      echo "Error response from daemon: $FAKE_DOCKER_ERROR" >&2
+      exit 1
+    fi
+    echo "pulled $2"
+    ;;
+  tag)
+    printf '%s %s\\n' "$2" "$3" >> "$FAKE_DOCKER_DIR/tags"
+    echo "tagged $2 as $3"
+    ;;
+  *)
+    echo "unexpected docker $*" >&2
+    exit 64
+    ;;
+esac
 """
 DOCKERFILE = """\
 FROM --platform=$BUILDPLATFORM mirror.gcr.io/library/golang:1.27 AS build
@@ -51,6 +66,7 @@ class PullBaseImagesTests(unittest.TestCase):
         docker.write_text(FAKE_DOCKER, encoding="utf-8")
         docker.chmod(0o755)
         (self.dir / "calls").touch()
+        (self.dir / "tags").touch()
         self.dockerfile = self.dir / "Dockerfile"
         self.dockerfile.write_text(DOCKERFILE, encoding="utf-8")
         self.env = {
@@ -88,6 +104,9 @@ class PullBaseImagesTests(unittest.TestCase):
     def calls(self) -> list[str]:
         return (self.dir / "calls").read_text(encoding="utf-8").splitlines()
 
+    def tags(self) -> list[str]:
+        return (self.dir / "tags").read_text(encoding="utf-8").splitlines()
+
     def test_pulls_each_external_base_image_once(self) -> None:
         result = self.run_script(failures=0)
         self.assertEqual(0, result.returncode, result.stderr)
@@ -117,6 +136,30 @@ class PullBaseImagesTests(unittest.TestCase):
                 f"::warning::pull of {image} failed (attempt {attempt}); retrying",
                 result.stdout,
             )
+
+    def test_mirror_failure_falls_back_to_docker_hub_and_tags_mirror_name(self) -> None:
+        image = "mirror.gcr.io/library/golang:1.27"
+        fallback = "docker.io/library/golang:1.27"
+        result = self.run_image(failures=4, image=image)
+        self.assertEqual(0, result.returncode, result.stdout + result.stderr)
+        self.assertEqual([image] * 4 + [fallback], self.calls())
+        self.assertEqual([f"{fallback} {image}"], self.tags())
+        self.assertIn(f"::warning::falling back to {fallback}", result.stdout)
+
+    def test_mirror_short_name_fallback_uses_library_namespace(self) -> None:
+        image = "mirror.gcr.io/postgres:18-alpine"
+        fallback = "docker.io/library/postgres:18-alpine"
+        result = self.run_image(failures=4, image=image)
+        self.assertEqual(0, result.returncode, result.stdout + result.stderr)
+        self.assertEqual([image] * 4 + [fallback], self.calls())
+        self.assertEqual([f"{fallback} {image}"], self.tags())
+
+    def test_digest_pinned_mirror_image_does_not_attempt_invalid_retag(self) -> None:
+        image = "mirror.gcr.io/library/node@sha256:5711"
+        result = self.run_image(failures=4, image=image)
+        self.assertNotEqual(0, result.returncode)
+        self.assertEqual([image] * 4, self.calls())
+        self.assertEqual([], self.tags())
 
     def test_testcontainers_jobs_preload_postgres_with_retry(self) -> None:
         workflow = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")

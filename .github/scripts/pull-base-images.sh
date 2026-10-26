@@ -64,6 +64,22 @@ for image in "${images[@]}"; do
   for attempt in $(seq "$attempts"); do
     docker pull "$image" && continue 2
     if [ "$attempt" -eq "$attempts" ]; then
+      # Digest pins cannot be retagged, so preserve their exact-source failure.
+      if [[ "$image" == mirror.gcr.io/* && "$image" != *@* ]]; then
+        fallback_image="${image#mirror.gcr.io/}"
+        [[ "$fallback_image" == */* ]] || fallback_image="library/$fallback_image"
+        fallback_image="docker.io/$fallback_image"
+        echo "::warning::falling back to $fallback_image"
+        if docker pull "$fallback_image"; then
+          if docker tag "$fallback_image" "$image"; then
+            continue 2
+          fi
+          echo "::error::could not tag $fallback_image as $image"
+          exit 1
+        fi
+        echo "::error::fallback pull of $fallback_image failed for $image"
+        exit 1
+      fi
       echo "::error::pull of $image failed after $attempts attempts"
       exit 1
     fi
