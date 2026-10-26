@@ -581,6 +581,84 @@ func TestLoadMaxFileBytes(t *testing.T) {
 	}
 }
 
+func TestLoadUploadMaxBytesOverridesMaxFileBytes(t *testing.T) {
+	t.Setenv("TG_POSTGRES_DSN", "postgres://localhost/tg")
+	t.Setenv("TG_AUTHKEY_ENC_KEY", validEncKey)
+	t.Setenv("TG_MAX_FILE_BYTES", "2097152")
+	t.Setenv("TG_UPLOAD_MAX_BYTES", "512000")
+
+	cfg, err := config.Load(discardLog())
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.MaxFileBytes != 512000 {
+		t.Fatalf("MaxFileBytes = %d, want TG_UPLOAD_MAX_BYTES value 512000", cfg.MaxFileBytes)
+	}
+}
+
+func TestLoadUploadMaxBytesUnsetKeepsCurrentLimit(t *testing.T) {
+	t.Setenv("TG_POSTGRES_DSN", "postgres://localhost/tg")
+	t.Setenv("TG_AUTHKEY_ENC_KEY", validEncKey)
+	t.Setenv("TG_MAX_FILE_BYTES", "2097152")
+	t.Setenv("TG_UPLOAD_MAX_BYTES", "")
+
+	cfg, err := config.Load(discardLog())
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.MaxFileBytes != 2097152 {
+		t.Fatalf("MaxFileBytes = %d, want existing TG_MAX_FILE_BYTES value 2097152", cfg.MaxFileBytes)
+	}
+}
+
+func TestLoadUploadMaxBytesRequiresPositiveInteger(t *testing.T) {
+	t.Setenv("TG_POSTGRES_DSN", "postgres://localhost/tg")
+	t.Setenv("TG_AUTHKEY_ENC_KEY", validEncKey)
+	t.Setenv("TG_MAX_FILE_BYTES", "2097152")
+	for _, raw := range []string{"0", "-1", "not-a-number"} {
+		t.Run(raw, func(t *testing.T) {
+			t.Setenv("TG_UPLOAD_MAX_BYTES", raw)
+			_, err := config.Load(discardLog())
+			if err == nil || !strings.Contains(err.Error(), "TG_UPLOAD_MAX_BYTES") {
+				t.Fatalf("Load error = %v, want TG_UPLOAD_MAX_BYTES validation error", err)
+			}
+		})
+	}
+}
+
+func TestLoadUploadByteRateLimit(t *testing.T) {
+	t.Setenv("TG_POSTGRES_DSN", "postgres://localhost/tg")
+	t.Setenv("TG_AUTHKEY_ENC_KEY", validEncKey)
+	t.Setenv("TG_RATE_LIMIT_UPLOAD_BYTES", "20971520")
+	t.Setenv("TG_RATE_LIMIT_UPLOAD_BYTES_WINDOW", "1h")
+
+	cfg, err := config.Load(discardLog())
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if got := cfg.RateLimits.UploadBytes.Limit; got != 20971520 {
+		t.Errorf("upload byte limit = %d, want 20971520", got)
+	}
+	if got := cfg.RateLimits.UploadBytes.Window; got != time.Hour {
+		t.Errorf("upload byte window = %s, want 1h", got)
+	}
+}
+
+func TestLoadUploadByteRateLimitDisabledByDefault(t *testing.T) {
+	t.Setenv("TG_POSTGRES_DSN", "postgres://localhost/tg")
+	t.Setenv("TG_AUTHKEY_ENC_KEY", validEncKey)
+	t.Setenv("TG_RATE_LIMIT_UPLOAD_BYTES", "")
+	t.Setenv("TG_RATE_LIMIT_UPLOAD_BYTES_WINDOW", "")
+
+	cfg, err := config.Load(discardLog())
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.RateLimits.UploadBytes.Limit != 0 || cfg.RateLimits.UploadBytes.Window != time.Hour {
+		t.Fatalf("upload byte budget = %+v, want disabled with 1h window", cfg.RateLimits.UploadBytes)
+	}
+}
+
 func TestLoadUploadPartTTL(t *testing.T) {
 	t.Setenv("TG_POSTGRES_DSN", "postgres://localhost/tg")
 	t.Setenv("TG_AUTHKEY_ENC_KEY", validEncKey)

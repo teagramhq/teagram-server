@@ -1401,14 +1401,16 @@ func (u *Updater) pushTypingToUsers(ctx context.Context, userIDs []int64, fromID
 // member that holds a live connection on this replica. It is the channelPost
 // callback for StartListener (part 2 of MAIN-96 / MAIN-114).
 //
-// Membership and the event ceiling come from one database statement snapshot.
+// The registry supplies locally connected candidates; the database still
+// checks membership and the event ceiling in one statement snapshot.
 // The per-connection channel-pts watermark does not exist on Conn. The window is
 // anchored one step below that ceiling (or at JoinPts if that is higher), so
 // the triggering event is included when it belongs to the snapshot. A duplicate
 // UpdateNewChannelMessage is safe (the client dedups on pts); a missed one is
 // backfilled by the next getChannelDifference.
 func (u *Updater) DeliverChannelPost(ctx context.Context, channelID int64) {
-	u.deliverChannelPost(ctx, channelID, func(userID int64) []pushConn {
+	userIDs := u.registry.LiveUserIDs()
+	u.deliverChannelPost(ctx, channelID, userIDs, func(userID int64) []pushConn {
 		raw := u.registry.Conns(userID)
 		if len(raw) == 0 {
 			return nil
@@ -1421,8 +1423,8 @@ func (u *Updater) DeliverChannelPost(ctx context.Context, channelID int64) {
 	})
 }
 
-func (u *Updater) deliverChannelPost(ctx context.Context, channelID int64, connsFor func(int64) []pushConn) {
-	members, currentPts, err := u.h.store.ChannelDeliverySnapshot(ctx, channelID)
+func (u *Updater) deliverChannelPost(ctx context.Context, channelID int64, userIDs []int64, connsFor func(int64) []pushConn) {
+	members, currentPts, err := u.h.store.ChannelDeliverySnapshotForUsers(ctx, channelID, userIDs)
 	if err != nil {
 		u.log.Error("deliver channel post snapshot", "channel_id", channelID, "err", err)
 		return
