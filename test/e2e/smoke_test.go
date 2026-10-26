@@ -5368,12 +5368,12 @@ func requireSmokeFullUser(users []tg.UserClass, userID int64, source string) (*t
 }
 
 type smokeFixture struct {
-	ctx                         context.Context
-	failures                    *clientFailureSignal
-	key                         *rsa.PrivateKey
-	dsn                         string
-	store                       *store.Store
-	blobs                       blob.Store
+	ctx      context.Context
+	failures *clientFailureSignal
+	key      *rsa.PrivateKey
+	dsn      string
+	store    *store.Store
+	blobs    blob.Store
 	// uploadMaxFileBytes simulates TG_UPLOAD_MAX_BYTES in smoke fixtures.
 	uploadMaxFileBytes          int64
 	stickerSets                 *api.StickerSetCatalog
