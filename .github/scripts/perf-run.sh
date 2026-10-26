@@ -58,6 +58,8 @@ analyze() {
 }
 
 restore() {
+  # Database dumps retain ACLs but not the cluster-global roles they reference.
+  psql_admin -c "CREATE ROLE browser_acceptance_probe LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOREPLICATION NOBYPASSRLS"
   for f in "${fixtures[@]}"; do
     psql_admin -c "CREATE DATABASE perf_$f"
     docker exec "$PERF_PG_CONTAINER" pg_restore -U postgres -d "perf_$f" -j 4 --no-owner "/cache/perf_$f.dump"
