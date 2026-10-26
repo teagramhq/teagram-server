@@ -922,6 +922,8 @@ jobs:
           bash -n deploy/teagram/deploy-main.sh
           bash -n deploy/teagram/ops/preflight-replay.sh
           bash -n deploy/teagram/test-preflight-replay.sh
+          bash -n .github/scripts/perf-run.sh
+          bash -n .github/scripts/test-perf-run-restore.sh
           bash -n deploy/teagram/teagram-logs.sh
           bash -n deploy/teagram/test-teagram-logs.sh
           bash -n deploy/telegram-server/deploy-main.sh
@@ -945,6 +947,7 @@ jobs:
             deploy/teagram/deploy-main.sh \
             deploy/teagram/ops/preflight-replay.sh \
             deploy/teagram/test-preflight-replay.sh \
+            .github/scripts/test-perf-run-restore.sh \
             deploy/teagram/teagram-logs.sh \
             deploy/teagram/test-teagram-logs.sh \
             deploy/telegram-server/deploy-main.sh \
@@ -973,6 +976,9 @@ jobs:
 
       - name: Check read-only Compose preflight replay
         run: deploy/teagram/test-preflight-replay.sh
+
+      - name: Check RPC performance fixture restore
+        run: bash .github/scripts/test-perf-run-restore.sh
 
       - name: Check teagram log access command
         run: deploy/teagram/test-teagram-logs.sh
