@@ -193,10 +193,10 @@ output=$(PREFLIGHT_REPLAY_TEST_FORCE_COMPAT=1 run_replay "$pass_sha" 'docker-com
 printf '%s\n' 'PASS non-default live selection is followed in order'
 
 output=$(run_replay "$drift_sha" 'docker-compose.alternate.yml,docker-compose.override.yml')
-[[ "$(cat "$TMP/last-rc")" != 0 ]] && grep -Fq $'stop_grace_period\tfail' <<< "$output" || {
+if [[ "$(cat "$TMP/last-rc")" == 0 ]] || ! grep -Fq $'stop_grace_period\tfail' <<< "$output"; then
   printf 'FAIL drifted replay was not rejected:\n%s\n' "$output" >&2
   exit 1
-}
+fi
 if grep -Eq '2m0s|3m0s|fixture-password' <<< "$output"; then
   printf 'FAIL drifted replay exposed values:\n%s\n' "$output" >&2
   exit 1
@@ -210,10 +210,10 @@ printf '%s\n' 'PASS unavailable exact SHA is rejected'
 
 before_removals=$(wc -l < "$FIXTURE_REMOVE_LOG" | tr -d ' ')
 output=$(FIXTURE_BAD_MKTEMP=1 run_replay "$pass_sha" 'docker-compose.alternate.yml,docker-compose.override.yml')
-[[ "$(cat "$TMP/last-rc")" != 0 ]] && grep -Fq 'cleanup refused a path outside its mktemp directory' <<< "$output" || {
+if [[ "$(cat "$TMP/last-rc")" == 0 ]] || ! grep -Fq 'cleanup refused a path outside its mktemp directory' <<< "$output"; then
   printf 'FAIL unsafe temporary path was not rejected:\n%s\n' "$output" >&2
   exit 1
-}
+fi
 after_removals=$(wc -l < "$FIXTURE_REMOVE_LOG" | tr -d ' ')
 [[ "$before_removals" == "$after_removals" ]] && [ ! -s "$FIXTURE_UNSAFE_REMOVE_LOG" ] || {
   printf '%s\n' 'FAIL cleanup attempted to remove outside its mktemp directory' >&2

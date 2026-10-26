@@ -2,8 +2,10 @@
 set -Eeuo pipefail
 umask 077
 
-readonly SCRIPT_DIR=$(cd -P "$(dirname "${BASH_SOURCE[0]}")" && pwd)
-readonly REPO_ROOT=$(git -C "$SCRIPT_DIR" rev-parse --show-toplevel 2>/dev/null || true)
+SCRIPT_DIR=$(cd -P "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+readonly SCRIPT_DIR
+REPO_ROOT=$(git -C "$SCRIPT_DIR" rev-parse --show-toplevel 2>/dev/null || true)
+readonly REPO_ROOT
 readonly BASE_RUNNER="$REPO_ROOT/deploy/teagramd/rollout-runner/rollout-runner.sh"
 readonly BASE_VERIFIER="$REPO_ROOT/deploy/teagramd/rollout-runner/rollout-verifier.sh"
 readonly TEMP_PREFIX=/tmp/teagram-preflight-replay.
@@ -83,6 +85,7 @@ prepare_target_runner() {
   local source=$1 output="$TMP_DIR/rollout-runner-replay.sh" helper="$TMP_DIR/runner-replay-function.sh"
   if [ "${PREFLIGHT_REPLAY_TEST_MODE:-0}" != 1 ] || \
      [ "${PREFLIGHT_REPLAY_TEST_FORCE_COMPAT:-0}" != 1 ]; then
+    # shellcheck disable=SC2016 # literal source text, not an expansion
     if grep -Fq 'compare_resolved_preflight_command "$2"' "$source"; then
       printf '%s\n' "$source"
       return 0
@@ -272,10 +275,10 @@ done
 for checkout in "$TMP_DIR/baseline" "$TMP_DIR/target"; do
   for name in .env docker-compose.override.yml; do
     destination="$checkout/$name"
-    [ ! -L "$destination" ] && { [ ! -e "$destination" ] || [ -f "$destination" ]; } || {
+    if [ -L "$destination" ] || { [ -e "$destination" ] && [ ! -f "$destination" ]; }; then
       fail 'live Compose input path is not a regular file'
       exit 1
-    }
+    fi
   done
   install -m 600 -- "$live_env" "$checkout/.env" || { fail 'cannot stage the live environment file'; exit 1; }
   install -m 600 -- "$live_override" "$checkout/docker-compose.override.yml" || {
