@@ -38,9 +38,8 @@ import (
 // of an older shape is never measured as if it were this one.
 const fixtureVersion = 2
 
-// spec is one fixture size. The large fixture is the account the parent issue
-// defines; the small one is the same account at one hundredth of the data, so
-// the pair shows whether an RPC's cost follows account size.
+// spec is one fixture size. The small fixture uses one hundredth of the large
+// fixture's scalable data, subject to per-account store limits.
 type spec struct {
 	Name          string `json:"name"`
 	Contacts      int    `json:"contacts"`
@@ -79,7 +78,7 @@ func shrink() int {
 func scaled(name string, divisor int) spec {
 	return spec{
 		Name:          name,
-		Contacts:      10_000 / divisor,
+		Contacts:      min(10_000/divisor, store.MaxContactsPerUser),
 		Dialogs:       5_000 / divisor,
 		ChatMessages:  1_000_000 / divisor,
 		Subscribers:   100_000 / divisor,
@@ -150,6 +149,12 @@ func loadFixture(path string) (fixture, error) {
 // upload path. It is idempotent per fixture: a fixture whose description is
 // already on disk is left alone.
 func TestSeedFixtures(t *testing.T) {
+	for _, s := range fixtures {
+		if s.Contacts > store.MaxContactsPerUser {
+			t.Fatalf("%s fixture has %d contacts, store limit is %d", s.Name, s.Contacts, store.MaxContactsPerUser)
+		}
+	}
+
 	dir := perfDir(t)
 	for _, s := range fixtures {
 		t.Run(s.Name, func(t *testing.T) {

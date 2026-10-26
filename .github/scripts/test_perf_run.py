@@ -76,6 +76,7 @@ class PerfRunTests(unittest.TestCase):
                 "PERF_ROUNDS": "1",
                 "PERF_TEST_CALLS": str(calls),
                 "PERF_WORK": str(root / "work"),
+                "GITHUB_ACTIONS": "true",
             }
             env.pop("GITHUB_STEP_SUMMARY", None)
             result = subprocess.run(
@@ -90,7 +91,7 @@ class PerfRunTests(unittest.TestCase):
 
             self.assertNotEqual(0, result.returncode, result.stdout)
             self.assertIn(
-                f"could not compare fixture seeder with base {base_sha}",
+                f"Could not compare fixture seeder with base {base_sha}",
                 result.stdout + result.stderr,
             )
             self.assertFalse(calls.exists(), "measurement started with an invalid base SHA")
