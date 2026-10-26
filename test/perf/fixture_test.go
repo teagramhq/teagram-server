@@ -78,7 +78,7 @@ func shrink() int {
 func scaled(name string, divisor int) spec {
 	return spec{
 		Name:          name,
-		Contacts:      min(10_000/divisor, contactCap),
+		Contacts:      min(contactCap, max(groupMembers, 10_000/divisor)),
 		Dialogs:       5_000 / divisor,
 		ChatMessages:  1_000_000 / divisor,
 		Subscribers:   100_000 / divisor,
@@ -88,14 +88,25 @@ func scaled(name string, divisor int) spec {
 	}
 }
 
-func TestFixtureContactsRespectStoreLimit(t *testing.T) {
+func TestFixtureContactsRespectPerformanceStoreLimit(t *testing.T) {
 	small := scaled("1x", 100)
 	large := scaled("100x", 1)
-	if want := min(100, store.MaxContactsPerUser); small.Contacts != want {
+	if want := min(groupMembers, contactCap); small.Contacts != want {
 		t.Fatalf("1x fixture contacts = %d, want %d", small.Contacts, want)
 	}
-	if want := min(10_000, store.MaxContactsPerUser); large.Contacts != want {
+	if want := min(10_000, contactCap); large.Contacts != want {
 		t.Fatalf("100x fixture contacts = %d, want capped value %d", large.Contacts, want)
+	}
+}
+
+func TestFixtureContactsStayWithinAccountBounds(t *testing.T) {
+	for _, fixture := range fixtures {
+		if fixture.Contacts < groupMembers {
+			t.Errorf("%s contacts = %d, want at least %d for group membership", fixture.Name, fixture.Contacts, groupMembers)
+		}
+		if fixture.Contacts > contactCap {
+			t.Errorf("%s contacts = %d, performance store limit = %d", fixture.Name, fixture.Contacts, contactCap)
+		}
 	}
 }
 
