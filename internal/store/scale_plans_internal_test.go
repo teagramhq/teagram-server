@@ -323,7 +323,17 @@ func TestEntitledUserIDsUsesDialogIndexForLargeOwner(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer traced.Close()
-	rows, err := db.New(traced).EntitledUserIDs(ctx, db.EntitledUserIDsParams{ViewerID: 1, Ids: ids})
+	q := db.New(traced)
+	page, err := q.DialogsForOwnerWithPins(ctx, db.DialogsForOwnerWithPinsParams{
+		OwnerID: 1, Lim: 100,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(page) != 100 {
+		t.Fatalf("dialog page has %d rows, want 100", len(page))
+	}
+	rows, err := q.EntitledUserIDs(ctx, db.EntitledUserIDsParams{ViewerID: 1, Ids: ids})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -354,12 +364,94 @@ func TestEntitledUserIDsUsesDialogIndexForLargeOwner(t *testing.T) {
 	recorded.mu.Lock()
 	queries := append([]pgx.TraceQueryStartData(nil), recorded.queries...)
 	recorded.mu.Unlock()
+	if len(queries) != 2 {
+		t.Fatalf("dialog and entitlement query count = %d, want 2", len(queries))
+	}
+	for _, query := range queries {
+		var raw []byte
+		if err := pool.QueryRow(ctx, "EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) "+query.SQL, query.Args...).Scan(&raw); err != nil {
+			t.Fatalf("explain dialog query: %v", err)
+		}
+		var plans []struct {
+			Plan scalePlan `json:"Plan"`
+		}
+		if err := json.Unmarshal(raw, &plans); err != nil {
+			t.Fatal(err)
+		}
+		for _, table := range plans[0].Plan.sequentialTables() {
+			if table == "dialogs" {
+				t.Fatalf("dialog query sequentially scans dialogs: %s", raw)
+			}
+		}
+		if strings.Contains(query.SQL, "DialogsForOwnerWithPins") {
+			if rows := plans[0].Plan.rowsReadFrom("dialogs"); rows > 100 {
+				t.Fatalf("dialog page reads %.0f rows for 100 returned dialogs", rows)
+			}
+			continue
+		}
+		if rows := plans[0].Plan.rowsReadFrom("dialogs"); rows > float64(2*len(ids)) {
+			t.Fatalf("entitlement query reads %.0f dialog rows for %d candidate ids", rows, len(ids))
+		}
+	}
+}
+
+func TestContactStatesBoundsReverseLookupForLargeOwner(t *testing.T) {
+	t.Parallel()
+	ctx := t.Context()
+	dsn := pgtest.DSN(t)
+	pool, err := pgxpool.New(ctx, dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pool.Close()
+	for _, query := range []string{
+		`UPDATE server_administration SET election_closed = true WHERE singleton_id = 1`,
+		`INSERT INTO users (id, phone, first_name)
+		 SELECT n, '+contact-scale' || n, 'Scale ' || n FROM generate_series(1, 5001) n`,
+		`INSERT INTO user_contacts (owner_id, contact_id)
+		 SELECT 1, n FROM generate_series(2, 5001) n`,
+		`ANALYZE user_contacts`,
+	} {
+		if _, err := pool.Exec(ctx, query); err != nil {
+			t.Fatalf("seed contact-state plan: %v", err)
+		}
+	}
+
+	ids := make([]int64, 100)
+	for i := range ids {
+		ids[i] = int64(i + 2)
+	}
+	recorded := &scaleQueries{}
+	cfg, err := pgxpool.ParseConfig(dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.ConnConfig.Tracer = recorded
+	traced, err := pgxpool.NewWithConfig(ctx, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer traced.Close()
+	contacts, err := db.New(traced).ContactStates(ctx, db.ContactStatesParams{OwnerID: 1, ContactIds: ids})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(contacts) != len(ids) {
+		t.Fatalf("contact states = %d, want %d", len(contacts), len(ids))
+	}
+	recorded.mu.Lock()
+	queries := append([]pgx.TraceQueryStartData(nil), recorded.queries...)
+	recorded.mu.Unlock()
 	if len(queries) != 1 {
-		t.Fatalf("entitlement query count = %d, want 1", len(queries))
+		t.Fatalf("contact-state query count = %d, want 1", len(queries))
 	}
 	var raw []byte
-	if err := pool.QueryRow(ctx, "EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) "+queries[0].SQL, queries[0].Args...).Scan(&raw); err != nil {
-		t.Fatalf("explain entitlement query: %v", err)
+	_, query, ok := strings.Cut(queries[0].SQL, "\n")
+	if !ok {
+		t.Fatalf("contact-state query is missing its sqlc header: %s", queries[0].SQL)
+	}
+	if err := pool.QueryRow(ctx, "EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) "+query, queries[0].Args...).Scan(&raw); err != nil {
+		t.Fatalf("explain contact-state query: %v", err)
 	}
 	var plans []struct {
 		Plan scalePlan `json:"Plan"`
@@ -368,12 +460,12 @@ func TestEntitledUserIDsUsesDialogIndexForLargeOwner(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, table := range plans[0].Plan.sequentialTables() {
-		if table == "dialogs" {
-			t.Fatalf("entitlement query sequentially scans dialogs: %s", raw)
+		if table == "user_contacts" {
+			t.Fatalf("contact-state query sequentially scans user_contacts: %s", raw)
 		}
 	}
-	if rows := plans[0].Plan.rowsReadFrom("dialogs"); rows > float64(2*len(ids)) {
-		t.Fatalf("entitlement query reads %.0f dialog rows for %d candidate ids", rows, len(ids))
+	if rows := plans[0].Plan.rowsReadFrom("user_contacts"); rows > float64(2*len(ids)) {
+		t.Fatalf("contact-state query reads %.0f contact rows for %d selected users", rows, len(ids))
 	}
 }
 
