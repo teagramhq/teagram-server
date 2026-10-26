@@ -43,6 +43,7 @@ const (
 	DefaultUploadPartTTL                            = 6 * time.Hour
 	DefaultAuthKeySweepIdleWindow                   = 24 * time.Hour
 	DefaultAuthKeySweepMaxAge                       = 72 * time.Hour
+	DefaultSignUpTermsOfService                     = "Teagram is software. Its authors hold no liability for what operators or users do with a self-hosted Teagram instance. Each instance's operator and its users are responsible for the content on that instance, including sticker and emoji packs users import."
 )
 
 // Config holds server configuration.
@@ -86,6 +87,8 @@ type Config struct {
 	AdvertiseDemoGuestSignUp bool
 	// RegistrationMode controls whether auth.signUp is available.
 	RegistrationMode RegistrationMode
+	// SignUpTermsOfService is shown to new accounts in auth.authorizationSignUpRequired.
+	SignUpTermsOfService string
 	// RecoveryEmailMode controls whether password changes retain a contact email.
 	RecoveryEmailMode RecoveryEmailMode
 	// PublicRegistrationMode controls auth.signUp on the public WebSocket
@@ -932,9 +935,10 @@ func load(log *slog.Logger, allowKeyGeneration bool) (Config, error) {
 		ProfileReceiptRetention:         ProfileIdentifierRetentionFloor,
 		ProfileDeleteOperationRetention: ProfileIdentifierRetentionFloor,
 
-		RegistrationMode:    RegistrationClosed,
-		RecoveryEmailMode:   recoveryEmailMode,
-		SessionDeviceLabels: true,
+		RegistrationMode:     RegistrationClosed,
+		SignUpTermsOfService: envOr("TG_TERMS_OF_SERVICE", DefaultSignUpTermsOfService),
+		RecoveryEmailMode:    recoveryEmailMode,
+		SessionDeviceLabels:  true,
 	}
 	if bundleDir := os.Getenv("TG_STICKER_CATALOG_BUNDLE"); bundleDir != "" {
 		cfg.StickerBundle, err = stickerbundle.Load(bundleDir)

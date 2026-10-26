@@ -99,7 +99,7 @@ jobs:
       contents: read
       actions: write
     env:
-      PERF_BASE_SHA: ${{ github.event_name == 'push' && github.event.before || '' }}
+      PERF_BASE_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before }}
       PERF_RECORD: ${{ github.event_name == 'push' && 'main' || '' }}
     steps:
       - uses: actions/checkout@v7.0.1
@@ -114,6 +114,9 @@ jobs:
       - name: Resolve PR comparison base
         if: github.event_name == 'pull_request'
         run: echo "PERF_BASE_SHA=$(git rev-parse HEAD^1)" >> "$GITHUB_ENV"
+
+      - name: Test invalid performance base SHA handling
+        run: python3 -B .github/scripts/test_perf_run.py
 
       - name: Restore the snapshot
         id: snapshot
