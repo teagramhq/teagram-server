@@ -1209,11 +1209,14 @@ secure_evidence_dir() {
     return 1
   fi
   case "$dir" in
-    /root/*) ;;
-    *) printf '%s\n' 'evidence directory must be below /root' >&2; return 1 ;;
+    /root/*|/tmp/teagram-replay-check.*) ;;
+    *) printf '%s\n' 'evidence directory must be below /root or use the approved replay path in /tmp' >&2; return 1 ;;
   esac
   case "$dir" in
-    /root/*/*) printf '%s\n' 'evidence directory must be a direct child of /root' >&2; return 1 ;;
+    /root/*/*|/tmp/teagram-replay-check.*/*)
+      printf '%s\n' 'evidence directory must be a direct child of its approved root' >&2
+      return 1
+      ;;
   esac
   case "$dir" in
     *'/../'*|*/..|*'/./'*) printf '%s\n' 'evidence directory must be canonical' >&2; return 1 ;;

@@ -51,6 +51,32 @@ identity record and fingerprint pin. Its last line is `deployed <sha>` or
 `already at <sha> with runner provenance`; any failure exits nonzero and fails
 the run.
 
+## Operations command
+
+`deploy-main.sh` installs `deploy/teagram/teagram-ops.sh` from the deployed
+commit as `/usr/local/sbin/teagram-ops` after the server and link-edge checks
+pass. The reviewed commit is therefore the source of every forced-command
+update. The installer keeps a changed prior file at
+`/root/teagram-ops-before-<7-char-sha>` with mode 0600; the installed command
+is root-only mode 0700. Older commits without the tracked file leave the
+installed command in place.
+
+There is no staging LXC. The preview gate is `deploy/teagram/test-deploy-main.sh`
+plus the forced-command fixture suite in CI; these verify the installed bytes,
+permissions, and rollback copy without applying changes to the live host. To
+restore the saved command after a failed update, replace `<7-char-sha>` with the
+prefix printed by the deploy and run as root on the LXC:
+
+```sh
+install -o root -g root -m 0700 /root/teagram-ops-before-<7-char-sha> /usr/local/sbin/teagram-ops
+```
+
+After a successful deploy, `ssh teagram run <deployed-sha> replay-check
+<target-sha>` replays the target's runner verifier against the live container.
+The target SHA must be on `origin/main` and match the live image revision. The
+readiness evidence stays in a root-owned mode-0700 directory under `/tmp`; the
+command prints that directory with its result.
+
 After server readiness and link-edge update, the canonical script runs the
 deployed image's `/usr/local/bin/mtproto-smoke` in a read-only, non-root
 container using the host network. The probe fetches client discovery through
