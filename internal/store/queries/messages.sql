@@ -95,10 +95,7 @@ OFFSET GREATEST(0::bigint, sqlc.arg(add_offset)::bigint);
 -- the shifted messages for the returned page. The materialized window is
 -- capped at the page size even when add_offset is larger.
 -- name: HistoryPageByDateAround :many
-WITH shift_count AS MATERIALIZED (
-    SELECT -sqlc.arg(add_offset)::bigint AS value
-),
-shifted_window AS MATERIALIZED (
+WITH shifted_window AS MATERIALIZED (
     SELECT messages.*
     FROM messages
     WHERE messages.owner_id = sqlc.arg(owner_id)
@@ -108,8 +105,11 @@ shifted_window AS MATERIALIZED (
       AND (messages.expires_at IS NULL OR messages.expires_at > statement_timestamp())
       AND messages.date >= to_timestamp(sqlc.arg(offset_date)::bigint::double precision)
     ORDER BY messages.date ASC, messages.local_id ASC
-    OFFSET GREATEST(0::bigint, (SELECT value FROM shift_count) - sqlc.arg(lim)::bigint)::int
-    LIMIT LEAST((SELECT value FROM shift_count), sqlc.arg(lim)::bigint)::int
+    LIMIT LEAST(-sqlc.arg(add_offset)::bigint, sqlc.arg(lim)::bigint)::int
+    OFFSET GREATEST(
+        0::bigint,
+        -sqlc.arg(add_offset)::bigint - sqlc.arg(lim)::bigint
+    )::int
 ),
 window_state AS MATERIALIZED (
     SELECT count(*)::bigint AS row_count
@@ -119,7 +119,7 @@ shifted_page AS (
     SELECT window_message.*
     FROM shifted_window AS window_message
     WHERE (SELECT row_count FROM window_state) =
-          LEAST((SELECT value FROM shift_count), sqlc.arg(lim)::bigint)
+          LEAST(-sqlc.arg(add_offset)::bigint, sqlc.arg(lim)::bigint)
     ORDER BY window_message.date DESC, window_message.local_id DESC
     LIMIT sqlc.arg(lim)::int
 ),
@@ -138,9 +138,12 @@ older_page AS (
           LIMIT 1
       )
       AND (SELECT row_count FROM window_state) =
-          LEAST((SELECT value FROM shift_count), sqlc.arg(lim)::bigint)
+          LEAST(-sqlc.arg(add_offset)::bigint, sqlc.arg(lim)::bigint)
     ORDER BY page_message.date DESC, page_message.local_id DESC
-    LIMIT GREATEST(0::bigint, sqlc.arg(lim)::bigint - (SELECT value FROM shift_count))::int
+    LIMIT GREATEST(
+        0::bigint,
+        sqlc.arg(lim)::bigint + sqlc.arg(add_offset)::bigint
+    )::int
 ),
 latest_page AS (
     SELECT page_message.*
@@ -151,7 +154,7 @@ latest_page AS (
       AND page_message.deleted = false
       AND (page_message.expires_at IS NULL OR page_message.expires_at > statement_timestamp())
       AND (SELECT row_count FROM window_state) <
-          LEAST((SELECT value FROM shift_count), sqlc.arg(lim)::bigint)
+          LEAST(-sqlc.arg(add_offset)::bigint, sqlc.arg(lim)::bigint)
     ORDER BY page_message.date DESC, page_message.local_id DESC
     LIMIT sqlc.arg(lim)::int
 )
