@@ -28,7 +28,7 @@ func TestValidateAcceptsEachFormatForEveryTarget(t *testing.T) {
 			t.Run(string(target)+"/"+string(format), func(t *testing.T) {
 				width, height := targetDimensions(target)
 				wantWidth, wantHeight := width, height
-				if format == stickervalidation.FormatWEBM && width == 512 && height == 320 {
+				if (format == stickervalidation.FormatWEBM || format == stickervalidation.FormatTGS) && width == 512 && height == 320 {
 					wantHeight = 512
 				}
 				body := testValidFile(format, wantWidth, wantHeight)
@@ -156,6 +156,15 @@ func TestValidateEnforcesTargetDimensions(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			_, err := stickervalidation.Validate(tc.body, tc.target)
+			assertReason(t, err, "STICKER_PNG_DIMENSIONS")
+		})
+	}
+}
+
+func TestValidateRejectsRectangularStickerTGS(t *testing.T) {
+	for _, target := range []stickervalidation.Target{stickervalidation.TargetSticker, stickervalidation.TargetMaskSticker} {
+		t.Run(string(target), func(t *testing.T) {
+			_, err := stickervalidation.Validate(testTGS(512, 320, ""), target)
 			assertReason(t, err, "STICKER_PNG_DIMENSIONS")
 		})
 	}

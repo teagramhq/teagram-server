@@ -16,7 +16,7 @@ func validateWEBP(data []byte, target Target) (int, int, error) {
 	if err != nil {
 		return 0, 0, errInvalidWEBP
 	}
-	if !validDimensions(target, width, height) {
+	if !validDimensions(target, FormatWEBP, width, height) {
 		return width, height, errWEBPDimensions
 	}
 	decoded, err := webp.Decode(bytes.NewReader(data))

@@ -93,7 +93,7 @@ func Validate(data []byte, target Target) (metadata Metadata, err error) {
 		if err != nil {
 			return Metadata{}, reject("STICKER_TGS_NOTGS")
 		}
-		if !validDimensions(target, width, height) {
+		if !validDimensions(target, FormatTGS, width, height) {
 			return Metadata{}, reject("STICKER_PNG_DIMENSIONS")
 		}
 		return Metadata{Format: FormatTGS, Width: width, Height: height, Duration: duration}, nil
@@ -105,7 +105,7 @@ func Validate(data []byte, target Target) (metadata Metadata, err error) {
 		if err != nil {
 			return Metadata{}, reject("STICKER_VIDEO_NOWEBM")
 		}
-		if !validDimensions(target, width, height) {
+		if !validDimensions(target, FormatWEBM, width, height) {
 			return Metadata{}, reject("STICKER_PNG_DIMENSIONS")
 		}
 		if duration > 3 {
@@ -128,12 +128,15 @@ func targetSizeLimits(target Target) (sizeLimits, bool) {
 	}
 }
 
-func validDimensions(target Target, width, height int) bool {
+func validDimensions(target Target, format Format, width, height int) bool {
 	if width <= 0 || height <= 0 {
 		return false
 	}
 	switch target {
 	case TargetSticker, TargetMaskSticker:
+		if format == FormatTGS {
+			return width == 512 && height == 512
+		}
 		return width <= 512 && height <= 512 && (width == 512 || height == 512)
 	case TargetCustomEmoji, TargetSetThumbnail:
 		return width == 100 && height == 100
