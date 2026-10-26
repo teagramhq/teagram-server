@@ -932,6 +932,7 @@ jobs:
           bash -n deploy/teagram-demo/forced-command.sh
           bash -n deploy/teagram-demo/ops/teagram-demo-ops
           bash -n deploy/teagram-demo/ops/install-teagram-demo-ops.sh
+          bash -n deploy/teagram-demo/test-install-teagram-demo-ops.sh
           bash -n deploy/teagram-demo/test-ops-menu.sh
           bash -n deploy/teagram-demo/deploy-main.sh
           bash -n deploy/teagram-demo/wipe-weekly.sh
@@ -958,6 +959,7 @@ jobs:
             deploy/teagram-demo/forced-command.sh \
             deploy/teagram-demo/ops/teagram-demo-ops \
             deploy/teagram-demo/ops/install-teagram-demo-ops.sh \
+            deploy/teagram-demo/test-install-teagram-demo-ops.sh \
             deploy/teagram-demo/test-ops-menu.sh \
             deploy/teagram-demo/deploy-main.sh \
             deploy/teagram-demo/wipe-weekly.sh \
@@ -989,6 +991,9 @@ jobs:
 
       - name: Check demo ops command menu
         run: deploy/teagram-demo/test-ops-menu.sh
+
+      - name: Check demo ops installer key transaction
+        run: sudo -n bash deploy/teagram-demo/test-install-teagram-demo-ops.sh
 
       - name: Check demo Turnstile secret access
         run: sudo -n deploy/teagram-demo/test-turnstile-secret-access.sh
