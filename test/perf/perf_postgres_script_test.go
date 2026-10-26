@@ -25,17 +25,25 @@ case "$1" in
   pull|run) exit 0 ;;
   exec)
     shift 2
-    if [[ "$1" != "pg_isready" ]]; then
-      echo "unexpected docker exec: $*" >&2
-      exit 2
-    fi
-    shift
-    for arg in "$@"; do
-      [[ "$arg" == "127.0.0.1" ]] && exit 0
-    done
-    # The temporary server used during image initialization only has a Unix
-    # socket. The test server is ready only once its TCP listener accepts.
-    exit 1
+    case "$1" in
+      pg_isready)
+        shift
+        for arg in "$@"; do
+          [[ "$arg" == "127.0.0.1" ]] && exit 0
+        done
+        # The temporary server used during image initialization only has a
+        # Unix socket. Readiness requires the final server's TCP listener.
+        exit 1
+        ;;
+      psql)
+        [[ "$*" == *"CREATE ROLE browser_acceptance_probe NOLOGIN"* ]] || {
+          echo "unexpected Postgres setup: $*" >&2
+          exit 2
+        }
+        exit 0
+        ;;
+      *) echo "unexpected docker exec: $*" >&2; exit 2 ;;
+    esac
     ;;
   *) echo "unexpected docker command: $*" >&2; exit 2 ;;
 esac
@@ -65,8 +73,14 @@ esac
 	if err != nil {
 		t.Fatalf("read docker log: %v", err)
 	}
-	if !strings.Contains(string(log), "pg_isready -h 127.0.0.1 -U postgres -q") {
+	logText := string(log)
+	readyAt := strings.Index(logText, "pg_isready -h 127.0.0.1 -U postgres -q")
+	if readyAt < 0 {
 		t.Fatalf("Postgres readiness did not check its TCP listener:\n%s", log)
+	}
+	roleAt := strings.Index(logText, "CREATE ROLE browser_acceptance_probe NOLOGIN")
+	if roleAt < 0 || roleAt < readyAt {
+		t.Fatalf("the fixture restore role was not provisioned after Postgres became ready:\n%s", log)
 	}
 }
 
