@@ -35,6 +35,7 @@ compose=(
   --file "$SCRIPT_DIR/compose.yaml"
 )
 env -u COMPOSE_FILE -u COMPOSE_PROJECT_NAME -u COMPOSE_PROFILES \
+  -u TG_UPLOAD_MAX_BYTES -u TG_RATE_LIMIT_UPLOAD_BYTES \
   -u TEAGRAM_DEMO_TURNSTILE_SITE_KEY -u TEAGRAM_DEMO_TURNSTILE_SECRET_KEY_FILE \
   "${compose[@]}" config --format json > "$TMP_DIR/target.json"
 jq -e \
@@ -91,6 +92,10 @@ jq -e \
   and .services.teagramd.environment.TG_LOG_LOGIN_CODES == "false"
   and .services.teagramd.environment.TG_MAX_FILE_BYTES == "16777216"
   and .services.teagramd.environment.TG_MAX_USER_STORAGE_BYTES == "268435456"
+  and .services.teagramd.environment.TG_UPLOAD_MAX_BYTES == "512000"
+  and .services.teagramd.environment.TG_RATE_LIMIT_UPLOAD_BYTES == "20971520"
+  and .services["teagramd-next"].environment.TG_UPLOAD_MAX_BYTES == "512000"
+  and .services["teagramd-next"].environment.TG_RATE_LIMIT_UPLOAD_BYTES == "20971520"
   and .services.teagramd.environment.TG_WEBSOCKET_LISTEN_ADDR == ":2446"
   and .services.teagramd.environment.TG_WEBSOCKET_ALLOWED_ORIGINS == "https://web.teagram.io"
   and .services.teagramd.environment.TG_CLIENT_ADDR_TRUST == "proxy-v2"
