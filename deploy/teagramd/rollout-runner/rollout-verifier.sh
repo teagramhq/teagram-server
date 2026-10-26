@@ -842,8 +842,7 @@ snapshot_from_json() {
     *) printf '%s\n' 'container login-code logging configuration is invalid' >&2; return 1 ;;
   esac
   if [ "$compose_source" = selected-compose-render ] && \
-     { [ "$snapshot_name" = baseline ] || [ "$snapshot_name" = preflight ] || \
-       [ "$snapshot_name" = target ] || [ "$snapshot_name" = rollback ]; } && \
+     { [ "$snapshot_name" = baseline ] || [ "$snapshot_name" = target ] || [ "$snapshot_name" = rollback ]; } && \
      [ "$compose_log_login_codes" != "$container_log_login_codes" ]; then
     printf '%s\n' 'resolved Compose login-code logging setting does not match the inspected container' >&2
     return 1
