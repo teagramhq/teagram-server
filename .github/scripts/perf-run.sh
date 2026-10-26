@@ -93,10 +93,16 @@ base_ready() {
     echo "no base commit" >"$PERF_WORK/base-skipped"
     return 1
   fi
-  if ! git diff --quiet "$PERF_BASE_SHA" HEAD -- test/perf/fixture_test.go; then
-    echo "the fixture seeder changed; the base harness cannot read its versioned snapshot" >"$PERF_WORK/base-skipped"
-    return 1
-  fi
+  local diff_status=0
+  git diff --quiet "$PERF_BASE_SHA" HEAD -- test/perf/fixture_test.go || diff_status=$?
+  case "$diff_status" in
+    0) ;;
+    1)
+      echo "the fixture seeder changed; the base harness cannot read its versioned snapshot" >"$PERF_WORK/base-skipped"
+      return 1
+      ;;
+    *) fatal "compare fixture seeder with base $PERF_BASE_SHA" ;;
+  esac
   local tree="$PERF_WORK/base"
   git worktree add --detach "$tree" "$PERF_BASE_SHA" >/dev/null || fatal "check out base $PERF_BASE_SHA"
   if [ ! -f "$tree/test/perf/harness_test.go" ]; then
