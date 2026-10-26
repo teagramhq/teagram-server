@@ -1135,12 +1135,31 @@ class RestoreReadinessContractTests(unittest.TestCase):
                     diagnostic.getvalue().strip(),
                     f"restore readiness foreign Docker inventory changed: {summary}",
                 )
+                self.assertEqual(drill.manifest["foreign_inventory_diagnostic"], f"changed:{summary}")
                 failure = RESTORE_READINESS.foreign_inventory_failure(drill.manifest)
                 self.assertIsNotNone(failure)
                 self.assertEqual(failure.phase, "cleanup")
                 self.assertEqual(failure.category, "isolation_refusal")
                 report = RESTORE_READINESS.report_document("cleanup", failure.category, "unverified", 0)
                 self.assertEqual(report["category"], "isolation_refusal")
+
+    def test_cleanup_resources_persists_safe_failed_step_names(self) -> None:
+        drill = object.__new__(RESTORE_READINESS.Drill)
+        drill.manifest = {"resource_creation_started": False, "cleanup_deadline": 1.0}
+        drill.gateway = None
+        drill.cleanup_budget_available = Mock(return_value=True)
+        drill.cleanup_processes = Mock(return_value=False)
+        drill.remove_build_inputs = Mock(return_value=True)
+        drill.remove_unmounted_files = Mock(return_value=True)
+        drill.verify_foreign_inventory = Mock(return_value=True)
+        drill.save = Mock()
+        diagnostic = io.StringIO()
+
+        with redirect_stderr(diagnostic):
+            self.assertFalse(drill.cleanup_resources())
+
+        self.assertEqual(drill.manifest["cleanup_failures"], ["processes"])
+        self.assertEqual(diagnostic.getvalue().strip(), "restore readiness cleanup failed: processes")
 
     def test_foreign_inventory_comparison_excludes_only_manifest_owned_containers(self) -> None:
         owned_id = "1" * 64

@@ -121,6 +121,14 @@ SAFE_CATEGORIES = {
     "assertions_passed",
     "rollout_in_progress",
 }
+CLEANUP_FAILURE_STEPS = frozenset(
+    {"gateway", "processes", "build-inputs", "files", "foreign-inventory", "containers", "images", "networks-and-volumes"}
+)
+FOREIGN_INVENTORY_SUMMARY_ITEM = r"(?:[a-z-]+\(invalid-shape\)|(?:containers|volumes|networks)\(added=[0-9]+,removed=[0-9]+,fields=(?:none|[a-z_,]+)\))"
+FOREIGN_INVENTORY_DIAGNOSTIC = re.compile(
+    rf"(?:unverified:(?:DrillFailure|KeyError|TypeError|ValueError|JSONDecodeError|UnicodeDecodeError)|"
+    rf"changed:(?:unknown|{FOREIGN_INVENTORY_SUMMARY_ITEM}(?:;{FOREIGN_INVENTORY_SUMMARY_ITEM})*))"
+)
 IMAGE_TOKEN_LABEL = "com.teagram.restore-readiness.token"
 IMAGE_ROLE_LABEL = "com.teagram.restore-readiness.role"
 COMPOSE_PROJECT_LABEL = "com.docker.compose.project"
@@ -2942,6 +2950,15 @@ def load_manifest(path: Path) -> dict[str, Any]:
         or not isinstance(manifest.get("prepared_runtime"), dict)
         or not isinstance(manifest.get("work_deadline"), (float, int))
         or not isinstance(manifest.get("cleanup_deadline"), (float, int))
+        or not isinstance(manifest.get("cleanup_failures", []), list)
+        or any(step not in CLEANUP_FAILURE_STEPS for step in manifest.get("cleanup_failures", []))
+        or (
+            manifest.get("foreign_inventory_diagnostic") is not None
+            and (
+                not isinstance(manifest.get("foreign_inventory_diagnostic"), str)
+                or FOREIGN_INVENTORY_DIAGNOSTIC.fullmatch(manifest["foreign_inventory_diagnostic"]) is None
+            )
+        )
     ):
         raise DrillFailure("cleanup", "cleanup_failure")
     lock_record = manifest["global_lock"]
@@ -3348,6 +3365,7 @@ class Drill(Docker):
             )
         except (DrillFailure, KeyError, TypeError, ValueError) as exc:
             self.manifest["foreign_inventory_unverified"] = True
+            self.manifest["foreign_inventory_diagnostic"] = f"unverified:{type(exc).__name__}"
             print(
                 f"restore readiness foreign Docker inventory could not be verified during {phase}: "
                 f"{type(exc).__name__}",
@@ -3356,9 +3374,11 @@ class Drill(Docker):
             return False
         if foreign != baseline:
             self.manifest["foreign_inventory_changed"] = True
+            summary = foreign_inventory_change_summary(baseline, foreign)
+            self.manifest["foreign_inventory_diagnostic"] = f"changed:{summary}"
             print(
                 "restore readiness foreign Docker inventory changed: "
-                + foreign_inventory_change_summary(baseline, foreign),
+                + summary,
                 file=sys.stderr,
             )
             return False
@@ -6669,6 +6689,7 @@ dump_path=$2
             clean = record_step("files", self.remove_unmounted_files(keep_all=False)) and clean
             clean = record_step("foreign-inventory", self.verify_foreign_inventory()) and clean
             self.manifest["cleanup_verified"] = bool(clean)
+            self.manifest["cleanup_failures"] = failed_steps
             self.save()
             if failed_steps:
                 print("restore readiness cleanup failed: " + ",".join(failed_steps), file=sys.stderr)
@@ -6693,6 +6714,7 @@ dump_path=$2
         clean = record_step("files", files_clean) and clean
         clean = record_step("foreign-inventory", self.verify_foreign_inventory()) and clean
         self.manifest["cleanup_verified"] = bool(clean)
+        self.manifest["cleanup_failures"] = failed_steps
         self.save()
         if failed_steps:
             print("restore readiness cleanup failed: " + ",".join(failed_steps), file=sys.stderr)
@@ -7406,6 +7428,7 @@ def run_primary(args: argparse.Namespace) -> int:
         "resource_creation_started": False,
         "parent_done": False,
         "cleanup_verified": False,
+        "cleanup_failures": [],
     }
     drill = Drill(args, run_dir, manifest)
     drill.save()
@@ -7649,6 +7672,23 @@ def run_primary(args: argparse.Namespace) -> int:
     if run_dir.exists():
         try:
             final_manifest = load_manifest(drill.manifest_path)
+            cleanup_failures = final_manifest.get("cleanup_failures", [])
+            if cleanup_failures:
+                print("restore readiness cleanup failed: " + ",".join(cleanup_failures), file=sys.stderr)
+            inventory_diagnostic = final_manifest.get("foreign_inventory_diagnostic")
+            if isinstance(inventory_diagnostic, str):
+                if inventory_diagnostic.startswith("changed:"):
+                    print(
+                        "restore readiness foreign Docker inventory "
+                        + inventory_diagnostic.replace(":", " ", 1),
+                        file=sys.stderr,
+                    )
+                elif inventory_diagnostic.startswith("unverified:"):
+                    print(
+                        "restore readiness foreign Docker inventory could not be verified: "
+                        + inventory_diagnostic.removeprefix("unverified:"),
+                        file=sys.stderr,
+                    )
             foreign_failure = foreign_inventory_failure(final_manifest)
             foreign_inventory_changed = foreign_failure is not None
         except DrillFailure:
