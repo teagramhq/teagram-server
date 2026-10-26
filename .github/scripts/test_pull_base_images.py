@@ -47,13 +47,23 @@ case "$1" in
   pull) exit 0 ;;
   run) echo fake-container-id ;;
   exec)
-    [ "$3" = pg_isready ] || { echo "unexpected docker $*" >&2; exit 64; }
-    if [ "${4:-}" = -h ] && [ "${5:-}" = 127.0.0.1 ]; then
-      printf 'tcp\\n' >> "$FAKE_DOCKER_DIR/probes"
-      [ "$(wc -l < "$FAKE_DOCKER_DIR/probes")" -ge 3 ]
+    if [ "$3" = pg_isready ]; then
+      if [ "${4:-}" = -h ] && [ "${5:-}" = 127.0.0.1 ]; then
+        printf 'tcp\\n' >> "$FAKE_DOCKER_DIR/probes"
+        [ "$(wc -l < "$FAKE_DOCKER_DIR/probes")" -ge 3 ]
+      else
+        printf 'socket\\n' >> "$FAKE_DOCKER_DIR/probes"
+        exit 0
+      fi
+    elif [ "$3" = psql ] && [[ "$*" == *"CREATE ROLE browser_acceptance_probe NOLOGIN"* ]]; then
+      [ "$(wc -l < "$FAKE_DOCKER_DIR/probes")" -ge 3 ] || {
+        echo "role created before TCP readiness" >&2
+        exit 64
+      }
+      printf 'role\\n' >> "$FAKE_DOCKER_DIR/probes"
     else
-      printf 'socket\\n' >> "$FAKE_DOCKER_DIR/probes"
-      exit 0
+      echo "unexpected docker $*" >&2
+      exit 64
     fi
     ;;
   *) echo "unexpected docker $*" >&2; exit 64 ;;
@@ -307,7 +317,7 @@ class PullBaseImagesTests(unittest.TestCase):
         )
         self.assertEqual(0, result.returncode, result.stdout + result.stderr)
         self.assertEqual(
-            ["tcp", "tcp", "tcp"],
+            ["tcp", "tcp", "tcp", "role"],
             (self.dir / "probes").read_text(encoding="utf-8").splitlines(),
         )
 
