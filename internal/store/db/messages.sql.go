@@ -604,7 +604,7 @@ shifted_window AS MATERIALIZED (
       AND (expires_at IS NULL OR expires_at > statement_timestamp())
       AND date >= to_timestamp($6::bigint::double precision)
     ORDER BY date ASC, local_id ASC
-    LIMIT (SELECT value FROM shift_count)
+    LIMIT GREATEST(0::bigint, -$5::bigint)
 ),
 shifted_anchor AS MATERIALIZED (
     SELECT date, local_id
