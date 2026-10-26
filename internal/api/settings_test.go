@@ -33,8 +33,8 @@ type settingsHandler struct {
 
 func assertAppConfig(t *testing.T, got *tg.HelpAppConfig, mode config.RegistrationMode) {
 	t.Helper()
-	if got.Hash != 5 {
-		t.Fatalf("app config hash = %d, want 5", got.Hash)
+	if got.Hash != 6 {
+		t.Fatalf("app config hash = %d, want 6", got.Hash)
 	}
 	object, ok := got.Config.(*tg.JSONObject)
 	if !ok {
@@ -47,8 +47,8 @@ func assertAppConfig(t *testing.T, got *tg.HelpAppConfig, mode config.Registrati
 		}
 		values[value.Key] = value.Value
 	}
-	if len(values) != 12 {
-		t.Fatalf("app config has %d keys, want 12", len(values))
+	if len(values) != 14 {
+		t.Fatalf("app config has %d keys, want 14", len(values))
 	}
 	if value, ok := values["dialog_filters_enabled"].(*tg.JSONBool); !ok || !value.Value {
 		t.Fatalf("dialog_filters_enabled = %v, want true", values["dialog_filters_enabled"])
@@ -73,6 +73,12 @@ func assertAppConfig(t *testing.T, got *tg.HelpAppConfig, mode config.Registrati
 	}
 	if value, ok := values["chat_read_mark_expire_period"].(*tg.JSONNumber); !ok || value.Value != 604800 {
 		t.Fatalf("chat_read_mark_expire_period = %v, want 604800", values["chat_read_mark_expire_period"])
+	}
+	if value, ok := values["upload_max_fileparts_default"].(*tg.JSONNumber); !ok || value.Value != 3200 {
+		t.Fatalf("upload_max_fileparts_default = %v, want 3200", values["upload_max_fileparts_default"])
+	}
+	if value, ok := values["upload_max_fileparts_premium"].(*tg.JSONNumber); !ok || value.Value != 3200 {
+		t.Fatalf("upload_max_fileparts_premium = %v, want 3200", values["upload_max_fileparts_premium"])
 	}
 	if value, ok := values["registration_mode"].(*tg.JSONString); !ok || value.Value != string(mode) {
 		t.Fatalf("registration_mode = %v, want %q", values["registration_mode"], mode)
@@ -297,7 +303,7 @@ func TestSettingsHandlersThroughDispatcher(t *testing.T) {
 		&tg.Config{},
 		slog.New(slog.DiscardHandler),
 		false,
-		1,
+		100<<20,
 		nil,
 		1,
 		pgtest.PeerDeriver(), pgtest.PhotoDeriver(),
