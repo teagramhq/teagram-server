@@ -1,6 +1,8 @@
 package stickerbundle_test
 
 import (
+	"bytes"
+	"compress/gzip"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -23,7 +25,9 @@ type testPack struct {
 	Source      string        `json:"source"`
 	License     string        `json:"license,omitempty"`
 	Attribution string        `json:"attribution"`
+	Format      string        `json:"format,omitempty"`
 	Stickers    []testSticker `json:"stickers"`
+	Art         []byte        `json:"-"`
 }
 
 type testSticker struct {
@@ -52,6 +56,53 @@ func TestLoadValidatesBundleAndBuildsTitles(t *testing.T) {
 	}
 	if pack.Stickers[0].Size != int64(len(testWebP)) || pack.Stickers[0].Path == "" {
 		t.Fatalf("loaded sticker = %+v, want a checked file path and size", pack.Stickers[0])
+	}
+}
+
+func TestLoadAcceptsTelegramStickerBundleFile(t *testing.T) {
+	pack := validTestPack("noto_animated_smileys_emotion")
+	art := testTGS(t)
+	pack.Stickers[0].File = "art/grinning_face.tgs"
+	pack.Format = "tgs"
+	pack.Stickers[0].Size = int64(len(art))
+	checksum := sha256.Sum256(art)
+	pack.Stickers[0].SHA256 = hex.EncodeToString(checksum[:])
+
+	bundle, err := stickerbundle.Load(writeTestBundle(t, testManifest{Version: 1, Packs: []testPack{pack}}))
+	if err != nil {
+		t.Fatalf("load TGS sticker bundle: %v", err)
+	}
+	if len(bundle.Packs) != 1 || len(bundle.Packs[0].Stickers) != 1 {
+		t.Fatalf("loaded TGS bundle = %+v, want one pack with one sticker", bundle)
+	}
+	sticker := bundle.Packs[0].Stickers[0]
+	if bundle.Packs[0].Format != "tgs" || sticker.Format != "tgs" || sticker.MimeType != "application/x-tgsticker" || !sticker.Animated {
+		t.Fatalf("loaded TGS sticker metadata = pack=%+v sticker=%+v", bundle.Packs[0], sticker)
+	}
+}
+
+func TestLoadRejectsInvalidAndOversizedTGSFilesWithPackName(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		art  []byte
+	}{
+		{name: "gzip header", art: []byte("not gzip")},
+		{name: "size limit", art: append([]byte{0x1f, 0x8b}, bytes.Repeat([]byte("x"), 64*1024)...)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			pack := validTestPack("noto_animated_bad")
+			pack.Format = "tgs"
+			pack.Stickers[0].File = "art/grinning_face.tgs"
+			pack.Art = tc.art
+			pack.Stickers[0].Size = int64(len(tc.art))
+			checksum := sha256.Sum256(tc.art)
+			pack.Stickers[0].SHA256 = hex.EncodeToString(checksum[:])
+
+			_, err := stickerbundle.Load(writeTestBundle(t, testManifest{Version: 1, Packs: []testPack{pack}}))
+			if err == nil || !strings.Contains(err.Error(), pack.ShortName) {
+				t.Fatalf("load invalid TGS error = %v, want pack %q named", err, pack.ShortName)
+			}
+		})
 	}
 }
 
@@ -165,7 +216,14 @@ func writeTestBundle(t *testing.T, manifest testManifest) string {
 				if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 					t.Fatalf("create bundle artwork directory: %v", err)
 				}
-				if err := os.WriteFile(path, testWebP, 0o600); err != nil {
+				art := pack.Art
+				if art == nil {
+					art = testWebP
+					if pack.Format == "tgs" {
+						art = testTGS(t)
+					}
+				}
+				if err := os.WriteFile(path, art, 0o600); err != nil {
 					t.Fatalf("write bundle artwork: %v", err)
 				}
 			}
@@ -179,4 +237,17 @@ func writeTestBundle(t *testing.T, manifest testManifest) string {
 		t.Fatalf("write manifest: %v", err)
 	}
 	return dir
+}
+
+func testTGS(t *testing.T) []byte {
+	t.Helper()
+	var output bytes.Buffer
+	writer := gzip.NewWriter(&output)
+	if _, err := writer.Write([]byte(`{"tgs":1,"fr":60,"ip":0,"op":1,"w":512,"h":512,"layers":[],"assets":[]}`)); err != nil {
+		t.Fatalf("write TGS test data: %v", err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatalf("close TGS test data: %v", err)
+	}
+	return output.Bytes()
 }

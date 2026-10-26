@@ -615,6 +615,9 @@ jobs:
         with:
           persist-credentials: false
 
+      - name: Pre-pull the shared PostgreSQL test image with retry
+        run: bash .github/scripts/pull-base-images.sh --image mirror.gcr.io/postgres:18-alpine
+
       - name: Pin migration timestamps for the test cache
         run: touch -d @0 migrations/* migrations
 
@@ -897,16 +900,25 @@ jobs:
       - name: Require shellcheck and yq
         run: shellcheck --version && yq --version
 
-      - name: Lint deployment and real-client workflows
+      - name: Lint deployment, performance, and real-client workflows
         run: |
           actionlint -ignore 'label "ubuntu-26.04" is unknown' \
             .github/workflows/deploy.yml \
+            .github/workflows/perf.yml \
             .github/workflows/real-client-browser-flow.yml
           actionlint -shellcheck= -ignore 'label "ubuntu-26.04" is unknown' .github/workflows/ci.yml
           node --check test/e2e/real_server_fixture/run_real_client_browser_flow.mjs
 
       - name: Check the deploy workflow contract
         run: .github/scripts/test-deploy-workflow-contract.sh
+
+      - name: Check RPC performance workflow contract
+        run: .github/scripts/test-perf-workflow-contract.sh
+
+      - name: Check RPC performance script syntax
+        run: |
+          bash -n .github/scripts/perf-run.sh .github/scripts/test-perf-workflow-contract.sh
+          shellcheck .github/scripts/test-perf-workflow-contract.sh
 
       - name: Check deploy script syntax
         run: |
