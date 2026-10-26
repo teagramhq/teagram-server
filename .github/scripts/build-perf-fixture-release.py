@@ -62,6 +62,8 @@ def main() -> int:
     args = parser.parse_args()
 
     try:
+        if args.metadata.is_symlink():
+            raise ValueError(f"metadata file is a symlink: {args.metadata}")
         metadata = json.loads(args.metadata.read_text(encoding="utf-8"))
         fixture = metadata["fixture"]
         server_commit = metadata["server_commit"]
@@ -72,7 +74,10 @@ def main() -> int:
             raise ValueError(f"snapshot directory does not exist: {args.snapshot}")
 
         args.output.mkdir(parents=True, exist_ok=False)
-        files = sorted(args.snapshot.rglob("*"))
+        metadata_path = args.metadata.absolute()
+        files = sorted(
+            path for path in args.snapshot.rglob("*") if path.absolute() != metadata_path
+        )
         symlinks = [path for path in files if path.is_symlink()]
         if symlinks:
             raise ValueError(f"snapshot contains a symlink: {symlinks[0]}")

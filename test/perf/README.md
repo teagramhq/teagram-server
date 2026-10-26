@@ -59,12 +59,16 @@ other scan in that scenario still fails.
 ## CI
 
 `.github/workflows/perf.yml`. The fixture cache key includes
-`fixture_test.go` and `server_test.go`. Main seeds and stores a snapshot when
-that key is missing. PRs restore a matching snapshot or seed fixtures on their
-branch when none is available, then measure the base and head interleaved. If
-the fixture seeder changed, the head is measured without a base comparison.
+`fixture_test.go` and `server_test.go`. Main stores a v2 snapshot with a
+`.fixture-metadata.json` provenance sidecar when that key is missing. PRs prefer
+that snapshot, reuse the legacy cache for measurement only, or seed fixtures on
+their branch when neither cache is available; they then measure the base and
+head interleaved. If the fixture seeder changed, the head is measured without a
+base comparison.
 
-Each `main` run also publishes the snapshot as a public prerelease named
+The provenance sidecar records the commit that seeded the dump. It is cache
+metadata, not a fixture asset. Each `main` run also publishes the snapshot as a
+public prerelease named
 `perf-fixture-<fixture version>`, where the version is the cache key suffix
 (the Actions `hashFiles` value for `test/perf/fixture_test.go` and
 `test/perf/server_test.go`). The release includes every file under the snapshot
@@ -72,7 +76,7 @@ directory and a `manifest.json`. Snapshot paths are
 flattened into asset names by replacing `/` with `__`; a dump larger than
 1,900,000,000 bytes is split into `<asset name>.part000`, `.part001`, and so
 on; join numbered parts in order to reconstruct the file. The manifest has
-`fixture`, `server_commit`, `migration_revision`, and an
+`fixture`, `server_commit` (the seeding commit), `migration_revision`, and an
 `assets` array containing each asset's `name` and `sha256`. The manifest itself
 is not listed in that array. Releases stay prereleases and are never marked
 latest. Consumers can download the assets anonymously from the release URL.
