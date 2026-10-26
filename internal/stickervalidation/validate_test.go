@@ -167,7 +167,6 @@ func TestValidateEnforcesDurationAndFrameRate(t *testing.T) {
 	frameEndPastLimitWEBM := testWEBMWithFrameTimestamp(512, 512, 2.99, false, 2990, 0, testWEBMFrameOptions{defaultDurationNS: 20_000_000})
 	blockDurationPastLimitWEBM := testWEBMWithFrameTimestamp(512, 512, 2.99, false, 2990, 0, testWEBMFrameOptions{blockDurationTicks: 20})
 	lacedFramesPastLimitWEBM := testWEBMWithFrameTimestamp(512, 512, 2.97, false, 2970, 0, testWEBMFrameOptions{defaultDurationNS: 20_000_000, frameCount: 2})
-	unboundedFrameWEBM := testWEBMWithFrameTimestamp(512, 512, 2, false, 0, 0, testWEBMFrameOptions{})
 	tooLongTGS := testTGSWithTiming(512, 512, 30, 0, 91, "")
 	tooFastTGS := testTGSWithTiming(512, 512, 61, 0, 60, "")
 
@@ -181,7 +180,6 @@ func TestValidateEnforcesDurationAndFrameRate(t *testing.T) {
 		{name: "WEBM final frame ends past duration limit", body: frameEndPastLimitWEBM, want: "STICKER_VIDEO_DURATION"},
 		{name: "WEBM block duration ends past duration limit", body: blockDurationPastLimitWEBM, want: "STICKER_VIDEO_DURATION"},
 		{name: "WEBM laced frame extent ends past duration limit", body: lacedFramesPastLimitWEBM, want: "STICKER_VIDEO_DURATION"},
-		{name: "WEBM frame without bounded duration", body: unboundedFrameWEBM, want: "STICKER_VIDEO_NOWEBM"},
 		{name: "TGS duration", body: tooLongTGS, want: "STICKER_TGS_NOTGS"},
 		{name: "TGS frame rate", body: tooFastTGS, want: "STICKER_TGS_NOTGS"},
 	} {
@@ -189,6 +187,35 @@ func TestValidateEnforcesDurationAndFrameRate(t *testing.T) {
 			_, err := stickervalidation.Validate(tc.body, stickervalidation.TargetSticker)
 			assertReason(t, err, tc.want)
 		})
+	}
+}
+
+func TestValidateInfersWEBMBlockDurationsFromPresentationTimeline(t *testing.T) {
+	body := testWEBMWithFrameTimestamp(512, 512, 3, false, 2900, 90, testWEBMFrameOptions{additionalRelativeTimecodes: []uint16{50}})
+	got, err := stickervalidation.Validate(body, stickervalidation.TargetSticker)
+	if err != nil {
+		t.Fatalf("Validate() rejected WEBM with inferred block durations: %v", err)
+	}
+	if got.Duration != 3*time.Second {
+		t.Fatalf("inferred WEBM duration = %s, want 3s", got.Duration)
+	}
+}
+
+func TestValidateBoundsWEBMFinalBlockByInfoDuration(t *testing.T) {
+	body := testWEBMWithFrameTimestamp(512, 512, 2, false, 1000, 0, testWEBMFrameOptions{})
+	got, err := stickervalidation.Validate(body, stickervalidation.TargetSticker)
+	if err != nil {
+		t.Fatalf("Validate() rejected WEBM final block bounded by Info.Duration: %v", err)
+	}
+	if got.Duration != 2*time.Second {
+		t.Fatalf("Info.Duration-bounded WEBM duration = %s, want 2s", got.Duration)
+	}
+}
+
+func TestValidatePrefersWEBMBlockDurationToDefaultDuration(t *testing.T) {
+	body := testWEBMWithFrameTimestamp(512, 512, 2.99, false, 2990, 0, testWEBMFrameOptions{defaultDurationNS: 20_000_000, blockDurationTicks: 5})
+	if _, err := stickervalidation.Validate(body, stickervalidation.TargetSticker); err != nil {
+		t.Fatalf("Validate() rejected explicit BlockDuration shorter than DefaultDuration: %v", err)
 	}
 }
 
@@ -416,9 +443,10 @@ func testWEBM(width, height int, duration float64, withAudio bool) []byte {
 }
 
 type testWEBMFrameOptions struct {
-	defaultDurationNS  uint64
-	blockDurationTicks uint64
-	frameCount         int
+	defaultDurationNS           uint64
+	blockDurationTicks          uint64
+	frameCount                  int
+	additionalRelativeTimecodes []uint16
 }
 
 func testWEBMWithFrameTimestamp(width, height int, duration float64, withAudio bool, clusterTimecode uint64, relativeTimecode uint16, options testWEBMFrameOptions) []byte {
@@ -455,23 +483,27 @@ func testWEBMWithFrameTimestamp(width, height int, duration float64, withAudio b
 	}
 	segment := append(testEBMLElement(0x1549a966, info), testEBMLElement(0x1654ae6b, tracks)...)
 	frame := testVP9Frame(width, height)
-	block := []byte{0x81, 0, 0, 0x80}
-	binary.BigEndian.PutUint16(block[1:3], relativeTimecode)
-	if options.frameCount > 1 {
-		block[3] |= 0x04 // fixed-size lacing
-		block = append(block, byte(options.frameCount-1))
+	cluster := testEBMLElement(0xe7, testEBMLUint(clusterTimecode))
+	blockTimecodes := append([]uint16{relativeTimecode}, options.additionalRelativeTimecodes...)
+	for _, blockTimecode := range blockTimecodes {
+		block := []byte{0x81, 0, 0, 0x80}
+		binary.BigEndian.PutUint16(block[1:3], blockTimecode)
+		if options.frameCount > 1 {
+			block[3] |= 0x04 // fixed-size lacing
+			block = append(block, byte(options.frameCount-1))
+		}
+		for range options.frameCount {
+			block = append(block, frame...)
+		}
+		var blockElement []byte
+		if options.blockDurationTicks > 0 {
+			blockGroup := append(testEBMLElement(0xa1, block), testEBMLElement(0x9b, testEBMLUint(options.blockDurationTicks))...)
+			blockElement = testEBMLElement(0xa0, blockGroup)
+		} else {
+			blockElement = testEBMLElement(0xa3, block)
+		}
+		cluster = append(cluster, blockElement...)
 	}
-	for range options.frameCount {
-		block = append(block, frame...)
-	}
-	var blockElement []byte
-	if options.blockDurationTicks > 0 {
-		blockGroup := append(testEBMLElement(0xa1, block), testEBMLElement(0x9b, testEBMLUint(options.blockDurationTicks))...)
-		blockElement = testEBMLElement(0xa0, blockGroup)
-	} else {
-		blockElement = testEBMLElement(0xa3, block)
-	}
-	cluster := append(testEBMLElement(0xe7, testEBMLUint(clusterTimecode)), blockElement...)
 	segment = append(segment, testEBMLElement(0x1f43b675, cluster)...)
 	return append(header, testEBMLElement(0x18538067, segment)...)
 }

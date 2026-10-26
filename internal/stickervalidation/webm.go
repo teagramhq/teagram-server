@@ -4,6 +4,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"math"
+	"sort"
 )
 
 const (
@@ -64,8 +65,8 @@ func parseWebMSegment(data []byte) (int, int, float64, error) {
 		blockTrackNumber    uint64
 		blockTrackSeen      bool
 		mixedBlockTracks    bool
-		maxBlockEndNS       float64
 		clusterPayloads     [][]byte
+		blocks              []webMPresentationBlock
 		width               int
 		height              int
 	)
@@ -120,16 +121,15 @@ func parseWebMSegment(data []byte) (int, int, float64, error) {
 			mixedBlockTracks = true
 		}
 		mixedBlockTracks = mixedBlockTracks || timeline.mixedTrackNumbers
-		if timeline.maxFrameEndNS > maxBlockEndNS {
-			maxBlockEndNS = timeline.maxFrameEndNS
-		}
+		blocks = append(blocks, timeline.blocks...)
 	}
 	if !blockTrackSeen || mixedBlockTracks || blockTrackNumber != videoTrackNumber {
 		return 0, 0, 0, errInvalidWEBM
 	}
 	containerDurationNS := containerDuration * float64(timeScale)
-	if containerDurationNS > maxBlockEndNS {
-		maxBlockEndNS = containerDurationNS
+	maxBlockEndNS, err := webMFrameTimelineEndNS(blocks, containerDurationNS)
+	if err != nil {
+		return 0, 0, 0, errInvalidWEBM
 	}
 	seconds := maxBlockEndNS / 1_000_000_000
 	if !isFinite(seconds) || seconds <= 0 {
@@ -348,8 +348,8 @@ func parseWebMVideo(data []byte) (int, int, error) {
 
 type webMClusterTimeline struct {
 	trackNumber       uint64
-	maxFrameEndNS     float64
 	mixedTrackNumbers bool
+	blocks            []webMPresentationBlock
 }
 
 type webMBlockTimestamp struct {
@@ -358,6 +358,12 @@ type webMBlockTimestamp struct {
 	frameCount         uint64
 	blockDurationTicks uint64
 	hasBlockDuration   bool
+}
+
+type webMPresentationBlock struct {
+	startNS     float64
+	durationNS  float64
+	hasDuration bool
 }
 
 func parseWebMCluster(data []byte, timeScale uint64, trackTimestampScale float64, defaultDurationNS uint64) (webMClusterTimeline, error) {
@@ -416,13 +422,11 @@ func parseWebMCluster(data []byte, timeScale uint64, trackTimestampScale float64
 			continue
 		}
 		addWebMClusterBlock(block, &blockSeen, &timeline.trackNumber, &timeline.mixedTrackNumbers)
-		frameEndNS, err := webMBlockEndNS(clusterTimecode, block, timeScale, trackTimestampScale, defaultDurationNS)
+		presentationBlock, err := webMBlockPresentation(clusterTimecode, block, timeScale, trackTimestampScale, defaultDurationNS)
 		if err != nil {
 			return webMClusterTimeline{}, errInvalidWEBM
 		}
-		if frameEndNS > timeline.maxFrameEndNS {
-			timeline.maxFrameEndNS = frameEndNS
-		}
+		timeline.blocks = append(timeline.blocks, presentationBlock)
 		rest = element.rest
 	}
 	if !blockSeen {
@@ -564,31 +568,62 @@ func validateWebMEBMLLacing(data []byte, frameCount int) error {
 	return nil
 }
 
-func webMBlockEndNS(clusterTimecode uint64, block webMBlockTimestamp, timeScale uint64, trackTimestampScale float64, defaultDurationNS uint64) (float64, error) {
+func webMBlockPresentation(clusterTimecode uint64, block webMBlockTimestamp, timeScale uint64, trackTimestampScale float64, defaultDurationNS uint64) (webMPresentationBlock, error) {
 	relativeTimecode := int32(block.relativeTimecode)
 	if block.relativeTimecode&0x8000 != 0 {
 		relativeTimecode -= 1 << 16
 	}
 	startTicks := float64(clusterTimecode) + float64(relativeTimecode)*trackTimestampScale
 	if !isFinite(startTicks) || startTicks < 0 {
-		return 0, errInvalidWEBM
+		return webMPresentationBlock{}, errInvalidWEBM
 	}
 	startNS := startTicks * float64(timeScale)
-	durationNS := float64(defaultDurationNS) * float64(block.frameCount)
+	var durationNS float64
+	var hasDuration bool
 	if block.hasBlockDuration {
-		blockDurationNS := float64(block.blockDurationTicks) * trackTimestampScale * float64(timeScale)
-		if blockDurationNS > durationNS {
-			durationNS = blockDurationNS
+		durationNS = float64(block.blockDurationTicks) * trackTimestampScale * float64(timeScale)
+		hasDuration = true
+	} else if defaultDurationNS > 0 {
+		durationNS = float64(defaultDurationNS) * float64(block.frameCount)
+		hasDuration = true
+	}
+	if !isFinite(startNS) || (hasDuration && (!isFinite(durationNS) || durationNS <= 0)) {
+		return webMPresentationBlock{}, errInvalidWEBM
+	}
+	return webMPresentationBlock{
+		startNS:     startNS,
+		durationNS:  durationNS,
+		hasDuration: hasDuration,
+	}, nil
+}
+
+func webMFrameTimelineEndNS(blocks []webMPresentationBlock, infoDurationNS float64) (float64, error) {
+	if len(blocks) == 0 || !isFinite(infoDurationNS) || infoDurationNS <= 0 {
+		return 0, errInvalidWEBM
+	}
+	sort.SliceStable(blocks, func(i, j int) bool {
+		return blocks[i].startNS < blocks[j].startNS
+	})
+
+	maxEndNS := infoDurationNS
+	for i, block := range blocks {
+		var endNS float64
+		switch {
+		case block.hasDuration:
+			endNS = block.startNS + block.durationNS
+		case i+1 < len(blocks):
+			endNS = blocks[i+1].startNS
+		default:
+			endNS = infoDurationNS
+		}
+		if !isFinite(endNS) || endNS <= block.startNS {
+			return 0, errInvalidWEBM
+		}
+		if endNS > maxEndNS {
+			maxEndNS = endNS
 		}
 	}
-	if !isFinite(startNS) || !isFinite(durationNS) || durationNS <= 0 {
-		return 0, errInvalidWEBM
-	}
-	endNS := startNS + durationNS
-	if !isFinite(endNS) || endNS <= 0 {
-		return 0, errInvalidWEBM
-	}
-	return endNS, nil
+	return maxEndNS, nil
 }
 
 func parseWebMBlockGroup(data []byte) (webMBlockTimestamp, error) {
