@@ -1706,11 +1706,131 @@ compare_command() {
   fi
 }
 
+secure_replay_evidence_dir() {
+  local dir=$1 canonical owner=0
+  if [ "${ROLLOUT_PREFLIGHT_TEST_MODE:-0}" = 1 ]; then
+    owner=$(id -u) || return 1
+  else
+    [ "$(id -u)" = 0 ] || { printf '%s\n' 'preflight replay requires uid 0' >&2; return 1; }
+  fi
+  case "$dir" in
+    /tmp/*) ;;
+    *) printf '%s\n' 'preflight replay evidence must be directly below /tmp' >&2; return 1 ;;
+  esac
+  case "$dir" in
+    /tmp/*/*) printf '%s\n' 'preflight replay evidence must be directly below /tmp' >&2; return 1 ;;
+  esac
+  case "$dir" in
+    *'/../'*|*/..|*'/./'*) printf '%s\n' 'preflight replay evidence path must be canonical' >&2; return 1 ;;
+  esac
+  [ -d "$dir" ] && [ ! -L "$dir" ] || { printf '%s\n' 'preflight replay evidence directory is unavailable' >&2; return 1; }
+  canonical=$(readlink -f -- "$dir") || return 1
+  [ "$canonical" = "$dir" ] && [ "$(stat -c %u:%a -- "$dir")" = "$owner:700" ] || {
+    printf '%s\n' 'preflight replay evidence has an invalid owner or mode' >&2
+    return 1
+  }
+}
+
+preflight_snapshot_command() {
+  local container_id=$1 project_dir=$2 evidence_dir=$3 name=$4 project_name=$5 selection=$6
+  local env_file override_file compose_files_value='' compose_json inspect_json snapshot output entry file canonical owner=0
+  local -a compose_entries=() compose_args=()
+  secure_replay_evidence_dir "$evidence_dir" || return 1
+  if [ "${ROLLOUT_PREFLIGHT_TEST_MODE:-0}" = 1 ]; then owner=$(id -u) || return 1; fi
+  case "$project_dir" in
+    "$evidence_dir"/*) ;;
+    *) printf '%s\n' 'preflight replay checkout must be inside its evidence directory' >&2; return 64 ;;
+  esac
+  case "$project_dir" in
+    *'/../'*|*/..|*'/./'*) printf '%s\n' 'preflight replay checkout path must be canonical' >&2; return 64 ;;
+  esac
+  [ -d "$project_dir" ] && [ ! -L "$project_dir" ] || { printf '%s\n' 'preflight replay checkout is unavailable' >&2; return 1; }
+  canonical=$(readlink -f -- "$project_dir") || return 1
+  [ "$canonical" = "$project_dir" ] || { printf '%s\n' 'preflight replay checkout path must be canonical' >&2; return 64; }
+  [ "$(stat -c %u:%a -- "$project_dir")" = "$owner:700" ] || {
+    printf '%s\n' 'preflight replay checkout has an invalid owner or mode' >&2
+    return 1
+  }
+  validate_container_id "$container_id" || return 64
+  case "$name" in
+    baseline|preflight) ;;
+    *) printf '%s\n' 'preflight replay snapshot name is invalid' >&2; return 64 ;;
+  esac
+  [[ "$project_name" =~ ^[a-z0-9][a-z0-9_-]*$ ]] || {
+    printf '%s\n' 'preflight replay project name is invalid' >&2
+    return 64
+  }
+  [ -n "$selection" ] || { printf '%s\n' 'preflight replay Compose selection is empty' >&2; return 64; }
+  IFS=, read -r -a compose_entries <<< "$selection"
+  [ "${#compose_entries[@]}" -gt 0 ] || { printf '%s\n' 'preflight replay Compose selection is empty' >&2; return 64; }
+  for entry in "${compose_entries[@]}"; do
+    [[ "$entry" =~ ^[A-Za-z0-9._/-]+$ ]] && [ "$entry" != .. ] && \
+      [[ "$entry" != ../* && "$entry" != */../* && "$entry" != */.. && "$entry" != *//* ]] || {
+      printf '%s\n' 'preflight replay Compose selection is invalid' >&2
+      return 64
+    }
+    file="$project_dir/$entry"
+    [ -f "$file" ] && [ ! -L "$file" ] || { printf '%s\n' 'selected preflight Compose file is unavailable' >&2; return 1; }
+    canonical=$(readlink -f -- "$file") || return 1
+    [ "$canonical" = "$file" ] || { printf '%s\n' 'selected preflight Compose file is symlinked' >&2; return 1; }
+    if [ -n "$compose_files_value" ]; then compose_files_value+=:; fi
+    compose_files_value+="$file"
+    compose_args+=(--file "$file")
+  done
+  env_file="$project_dir/.env"
+  override_file="$project_dir/docker-compose.override.yml"
+  for file in "$env_file" "$override_file"; do
+    [ -f "$file" ] && [ ! -L "$file" ] || { printf '%s\n' 'live Compose input is unavailable' >&2; return 1; }
+    canonical=$(readlink -f -- "$file") || return 1
+    [ "$canonical" = "$file" ] || { printf '%s\n' 'live Compose input is symlinked' >&2; return 1; }
+  done
+  [ "$(stat -c %u:%a -- "$env_file")" = "$owner:600" ] || {
+    printf '%s\n' 'live environment file has an invalid owner or mode' >&2
+    return 1
+  }
+  [ ! -e "$evidence_dir/$name.snapshot.json" ] && [ ! -L "$evidence_dir/$name.snapshot.json" ] || {
+    printf '%s\n' 'preflight replay snapshot already exists' >&2
+    return 64
+  }
+
+  unset COMPOSE_PROFILES COMPOSE_ENV_FILES
+  COMPOSE_FILE=$compose_files_value
+  COMPOSE_PROJECT_NAME=$project_name
+  ROLLOUT_CHECKOUT_PATH=$project_dir
+  ROLLOUT_COMPOSE_SERVICE=teagramd
+  ROLLOUT_ADDED_ENV=
+  ROLLOUT_CHANGED_ENV=
+  export COMPOSE_FILE COMPOSE_PROJECT_NAME ROLLOUT_CHECKOUT_PATH ROLLOUT_COMPOSE_SERVICE
+  export ROLLOUT_ADDED_ENV ROLLOUT_CHANGED_ENV
+  inspect_json=$(docker inspect "$container_id" 2>/dev/null) || {
+    printf '%s\n' 'cannot inspect the live teagramd container' >&2
+    return 1
+  }
+  compose_json=$(docker compose --project-directory "$project_dir" --project-name "$project_name" \
+    "${compose_args[@]}" config --format json </dev/null 2>/dev/null) || {
+    printf '%s\n' 'cannot render the selected Compose files' >&2
+    return 1
+  }
+  snapshot=$(snapshot_from_json "$inspect_json" "$compose_json" "$env_file" "$override_file" \
+    selected-compose-render "$name" "$compose_files_value") || {
+    printf '%s\n' 'preflight replay snapshot validation failed' >&2
+    return 1
+  }
+  output="$evidence_dir/$name.snapshot.json"
+  write_private_file "$output" "$snapshot" || {
+    printf '%s\n' 'cannot write private preflight replay snapshot' >&2
+    return 1
+  }
+}
+
 main() {
-  [ "$#" -ge 1 ] || { printf '%s\n' 'commands: snapshot, compare, ready, ready-pair' >&2; return 64; }
+  [ "$#" -ge 1 ] || { printf '%s\n' 'commands: preflight-snapshot, snapshot, compare, ready, ready-pair' >&2; return 64; }
   local command=$1
   shift
   case "$command" in
+    preflight-snapshot)
+      [ "$#" -eq 6 ] || { printf '%s\n' 'usage: rollout-verifier.sh preflight-snapshot CONTAINER_ID CHECKOUT EVIDENCE_DIR baseline|preflight PROJECT_NAME COMPOSE_SELECTION' >&2; return 64; }
+      preflight_snapshot_command "$@" ;;
     snapshot)
       [ "$#" -ge 5 ] && [ "$#" -le 6 ] || { printf '%s\n' 'usage: rollout-verifier.sh snapshot CONTAINER_ID EVIDENCE_DIR NAME ENV_FILE OVERRIDE_FILE [selected-compose-render|live-container-inspection]' >&2; return 64; }
       snapshot_command "$@" ;;
@@ -1732,7 +1852,7 @@ main() {
       secure_evidence_dir "$(dirname "$3")"
       wait_readiness "$1" "$2" "$3" "${ROLLOUT_READY_SECONDS:-120}" 5 probe_live ;;
     *)
-      printf '%s\n' 'commands: snapshot, compare, ready, ready-pair' >&2
+      printf '%s\n' 'commands: preflight-snapshot, snapshot, compare, ready, ready-pair' >&2
       return 64 ;;
   esac
 }

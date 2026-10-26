@@ -65,6 +65,20 @@ successful CI push run), or from a checkout of `main`:
 ssh teagram-server 'DEPLOY_SHA=<full sha> bash -s' < deploy/teagram/deploy-main.sh
 ```
 
+## Read-only Compose preflight replay
+
+After `preflight-replay` is merged to `main`, compare a reviewed PR head with
+the live baseline using the forced ops command:
+
+```sh
+ssh teagram run <merge-sha> preflight-replay <pr-head-sha>
+```
+
+The command follows the running `teagramd` container's Compose file label and
+uses the live `.env` and override in private temporary checkouts. It runs the
+PR head's preflight comparison and prints only `field<TAB>result` rows. Every
+row must be `pass`; for PR #870, post the rows on MAIN-2563.
+
 `teagramd` uses the host's BusyBox syslog socket, with `tag=teagramd`. The
 deploy installs `deploy/teagram/syslog.conf` as `/etc/conf.d/syslog` before
 replacing the server container. BusyBox keeps a 512 MiB active file and 15

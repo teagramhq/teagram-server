@@ -4,7 +4,7 @@ umask 077
 
 SCRIPT_DIR=$(cd -P "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 SCRIPT_SOURCE="$SCRIPT_DIR/$(basename "${BASH_SOURCE[0]}")"
-readonly APPROVED_VERIFIER_SHA=20fc5c53ffb8dd0035bf91428f84340d34a14f418038394548ec57eaefa9c331
+readonly APPROVED_VERIFIER_SHA=72addd5b7c073581e040f5664a7f5567ffc735cb7f21f08beccb6ffab688d40f
 readonly APPROVED_SCHEMA_GATE_SHA=ac54d3cf0480383a52414a8bc8b856b5e1d5f6f8d19034c9c576c64627e097c8
 readonly APPROVED_SCHEMA_GATE_HELPER_SHA=7ae06c2872c60b434068b3715a9ddd5e19b03d4be98dc9881c8dd8f294953d41
 readonly APPROVED_INITIAL_LOCAL_COMPOSE_SHA=d764d291ad2ea91cff841d14a0cd2bbcb5981961dbc67406bfeba1196a7b3fa4
@@ -57,6 +57,7 @@ TARGET_DATABASE=
 CHECKOUT=${ROLLOUT_RUNNER_CHECKOUT:-/opt/teagram}
 TARGET_CHECKOUT=${ROLLOUT_RUNNER_TARGET_CHECKOUT:-/opt/teagram}
 EVIDENCE_ROOT=${ROLLOUT_RUNNER_EVIDENCE_ROOT:-/root}
+PREFLIGHT_EVIDENCE_OWNER=0
 if [ "$ROLLOUT_RUNNER_TEST_MODE" = 1 ]; then
   LEGACY_LOG_ARCHIVE=${ROLLOUT_RUNNER_TEST_LOG_ARCHIVE:-}
 else
@@ -178,6 +179,7 @@ usage() {
   printf '%s\n' 'usage: rollout-runner.sh apply|initialize-local TARGET_SHA EXPECTED_BASELINE_SHA' >&2
   printf '%s\n' '       rollout-runner.sh move-stack TARGET_SHA EXPECTED_BASELINE_SHA' >&2
   printf '%s\n' '       rollout-runner.sh reconcile TARGET_SHA' >&2
+  printf '%s\n' '       rollout-runner.sh compare-resolved-preflight EVIDENCE_DIR' >&2
 }
 
 sha256_file() {
@@ -667,7 +669,10 @@ check_private_dir() {
   [ -d "$dir" ] && [ ! -L "$dir" ] || { fail 'evidence phase directory missing or symlinked'; return 1; }
   mode=$(stat -c %a -- "$dir") || { fail 'cannot inspect evidence directory mode'; return 1; }
   owner=$(stat -c %u -- "$dir") || { fail 'cannot inspect evidence directory owner'; return 1; }
-  [ "$mode" = 700 ] && [ "$owner" = 0 ] || { fail 'evidence phase directory must be root-owned mode 0700'; return 1; }
+  [ "$mode" = 700 ] && [ "$owner" = "$PREFLIGHT_EVIDENCE_OWNER" ] || {
+    fail 'evidence phase directory must have the expected owner and mode 0700'
+    return 1
+  }
 }
 
 create_phase_dirs() {
@@ -725,7 +730,10 @@ write_immutable() {
   rm -- "$temp" || { fail 'cannot remove evidence staging link'; return 1; }
   mode=$(stat -c %a -- "$path") || { fail 'cannot inspect evidence file mode'; return 1; }
   owner=$(stat -c %u -- "$path") || { fail 'cannot inspect evidence file owner'; return 1; }
-  [ "$mode" = 600 ] && [ "$owner" = 0 ] || { fail 'evidence file is not root-owned mode 0600'; return 1; }
+  [ "$mode" = 600 ] && [ "$owner" = "$PREFLIGHT_EVIDENCE_OWNER" ] || {
+    fail 'evidence file does not have the expected owner and mode 0600'
+    return 1
+  }
   sync || { fail 'cannot sync published evidence'; return 1; }
 }
 
@@ -2224,6 +2232,54 @@ compare_resolved_preflight() {
   [ "$failures" -eq 0 ] || { fail 'resolved Compose preflight rejected unapproved drift'; return 1; }
 }
 
+compare_resolved_preflight_command() {
+  local evidence_dir=$1 canonical input results rc=0 timestamp phase field before after result owner=0
+  if [ "${ROLLOUT_PREFLIGHT_TEST_MODE:-0}" = 1 ]; then
+    owner=$(id -u) || { fail 'cannot inspect preflight replay owner'; return 1; }
+  else
+    [ "$(id -u)" = 0 ] || { fail 'preflight replay requires uid 0'; return 1; }
+  fi
+  PREFLIGHT_EVIDENCE_OWNER=$owner
+  case "$evidence_dir" in
+    /tmp/*) ;;
+    *) fail 'preflight replay evidence must be directly below /tmp'; return 64 ;;
+  esac
+  case "$evidence_dir" in
+    /tmp/*/*) fail 'preflight replay evidence must be directly below /tmp'; return 64 ;;
+  esac
+  case "$evidence_dir" in
+    *'/../'*|*/..|*'/./'*) fail 'preflight replay evidence path must be canonical'; return 64 ;;
+  esac
+  [ -d "$evidence_dir" ] && [ ! -L "$evidence_dir" ] || { fail 'preflight replay evidence directory is unavailable'; return 1; }
+  canonical=$(readlink -f -- "$evidence_dir") || return 1
+  [ "$canonical" = "$evidence_dir" ] && [ "$(stat -c %u:%a -- "$evidence_dir")" = "$owner:700" ] || {
+    fail 'preflight replay evidence has an invalid owner or mode'
+    return 1
+  }
+  for input in "$evidence_dir/baseline.snapshot.json" "$evidence_dir/preflight.snapshot.json"; do
+    [ -f "$input" ] && [ ! -L "$input" ] && [ "$(stat -c %u:%a -- "$input")" = "$owner:600" ] || {
+      fail 'preflight replay snapshots have an invalid owner or mode'
+      return 1
+    }
+  done
+  results="$evidence_dir/preflight-comparisons.tsv"
+  [ ! -e "$results" ] && [ ! -L "$results" ] || { fail 'preflight replay comparison already exists'; return 64; }
+  BASELINE_DIR=$evidence_dir
+  TARGET_DIR=$evidence_dir
+  INITIALIZE_LOCAL=0
+  if compare_resolved_preflight; then :; else rc=$?; fi
+  [ -f "$results" ] && [ ! -L "$results" ] && [ "$(stat -c %u:%a -- "$results")" = "$owner:600" ] || {
+    fail 'preflight replay comparison evidence is unavailable'
+    return 1
+  }
+  while IFS=$'\t' read -r timestamp phase field before after result; do
+    [ -n "$phase" ] || continue
+    [ "$phase" = preflight ] || { fail 'preflight replay comparison evidence is malformed'; return 1; }
+    printf '%s\t%s\n' "$field" "$result"
+  done < "$results"
+  return "$rc"
+}
+
 compare_rollback_to_baseline() {
   local baseline_file="$ROLLBACK_DIR/baseline.snapshot.json"
   local rollback_file="$ROLLBACK_DIR/rollback.snapshot.json"
@@ -2882,6 +2938,10 @@ run_stack_move() {
 }
 
 main() {
+  if [ "$#" -eq 2 ] && [ "$1" = compare-resolved-preflight ]; then
+    compare_resolved_preflight_command "$2"
+    return $?
+  fi
   if [ "$#" -eq 2 ] && [ "$1" = reconcile ]; then
     configure_action_paths apply
     TARGET_SHA=$2
