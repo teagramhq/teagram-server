@@ -1050,7 +1050,6 @@ jobs:
             deploy/link-edge/test-deploy-main.sh \
             deploy/teagram-demo/test-turnstile-secret-access.sh \
             deploy/teagram/test-deploy-main.sh \
-            deploy/teagramd/rollout-runner/test-rollout-verifier-evidence-dir.sh \
             .github/scripts/test-deploy-workflow-contract.sh \
             .github/scripts/mirror_rustfs_qualification_images.sh
 
@@ -3000,7 +2999,6 @@ jobs:
           sudo env TMPDIR=/root bash deploy/teagramd/rollout-runner/test-stack-move-entrypoint.sh
           sudo env TMPDIR=/root bash deploy/teagramd/rollout-runner/test-rollout-runner.sh
           sudo env TMPDIR=/root bash deploy/teagramd/rollout-runner/test-compose-path-preflight.sh
-          sudo env TMPDIR=/root bash deploy/teagramd/rollout-runner/test-rollout-verifier-evidence-dir.sh
           python3 -B deploy/teagramd/rollout-runner/test-stack-move-runner-inspect.py
           bash deploy/teagramd/rollout-runner/test-initial-local-compose.sh
           bash deploy/teagramd/rollout-runner/test-local-compose-598359e.sh

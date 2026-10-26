@@ -96,14 +96,90 @@ fi
 printf 'target_sha=%s\nlive_sha=%s\ncontainer_id=%s\ncompose_files=%s\nverifier_sha=%s\n' \
   "$TARGET_SHA" "$LIVE_SHA" "$CONTAINER_ID" "$LIVE_COMPOSE" "$ACTUAL_VERIFIER_SHA" > "$EVIDENCE/replay-check.txt"
 
-if (cd "$REPO" && ROLLOUT_CHECKOUT_PATH="$REPO" bash "$VERIFIER" ready target "$CONTAINER_ID" "$EVIDENCE"); then
+PRIVATE_EVIDENCE=
+cleanup_private_evidence() {
+  [[ -n "$PRIVATE_EVIDENCE" ]] || return 0
+  case "$PRIVATE_EVIDENCE" in
+    "/root/teagram-replay-check.${TARGET_SHA:0:12}."*) ;;
+    *) printf '%s\n' 'replay-check: refusing cleanup of an unexpected private path' >&2; return 1 ;;
+  esac
+  if [[ -L "$PRIVATE_EVIDENCE" || ! -d "$PRIVATE_EVIDENCE" || \
+    "$(dirname -- "$PRIVATE_EVIDENCE")" != /root || \
+    "$(realpath -e -- "$PRIVATE_EVIDENCE")" != "$PRIVATE_EVIDENCE" || \
+    "$(stat -c '%u:%a' -- "$PRIVATE_EVIDENCE")" != 0:700 ]]; then
+    printf '%s\n' 'replay-check: private verifier evidence directory failed cleanup checks' >&2
+    return 1
+  fi
+  for name in readiness-target.tsv readiness-target.result; do
+    path="$PRIVATE_EVIDENCE/$name"
+    if [[ -e "$path" || -L "$path" ]]; then
+      if [[ -L "$path" || ! -f "$path" || "$(stat -c '%u:%a' -- "$path")" != 0:600 ]]; then
+        printf '%s\n' 'replay-check: private verifier evidence file failed cleanup checks' >&2
+        return 1
+      fi
+      rm -f -- "$path"
+    fi
+  done
+  rmdir -- "$PRIVATE_EVIDENCE"
+  PRIVATE_EVIDENCE=
+}
+trap cleanup_private_evidence EXIT
+
+copy_readiness_evidence() {
+  local name source destination
+  for name in readiness-target.tsv readiness-target.result; do
+    source="$PRIVATE_EVIDENCE/$name"
+    destination="$EVIDENCE/$name"
+    if [[ -L "$source" || ! -f "$source" || "$(stat -c '%u:%a' -- "$source")" != 0:600 || \
+      -e "$destination" || -L "$destination" ]]; then
+      printf '%s\n' 'replay-check: verifier readiness evidence failed validation' >&2
+      return 1
+    fi
+    cp -- "$source" "$destination"
+    chmod 0600 -- "$destination"
+    if [[ -L "$destination" || ! -f "$destination" || "$(stat -c '%u:%a' -- "$destination")" != 0:600 ]]; then
+      printf '%s\n' 'replay-check: copied readiness evidence failed validation' >&2
+      return 1
+    fi
+  done
+}
+
+PRIVATE_EVIDENCE=$(mktemp -d "/root/teagram-replay-check.${TARGET_SHA:0:12}.XXXXXX")
+if [[ -L "$PRIVATE_EVIDENCE" || ! -d "$PRIVATE_EVIDENCE" || \
+  "$(dirname -- "$PRIVATE_EVIDENCE")" != /root || \
+  "$(realpath -e -- "$PRIVATE_EVIDENCE")" != "$PRIVATE_EVIDENCE" || \
+  "$(stat -c '%u:%a' -- "$PRIVATE_EVIDENCE")" != 0:700 ]]; then
+  printf '%s\n' 'replay-check: private verifier evidence directory failed validation' >&2
+  exit 1
+fi
+
+verifier_status=0
+if (cd "$REPO" && ROLLOUT_CHECKOUT_PATH="$REPO" bash "$VERIFIER" ready target "$CONTAINER_ID" "$PRIVATE_EVIDENCE"); then
+  :
+else
+  verifier_status=$?
+fi
+if ! copy_readiness_evidence; then
+  printf 'result=failed target_sha=%s reason=invalid-readiness-evidence evidence=%s\n' \
+    "$TARGET_SHA" "$EVIDENCE" > "$EVIDENCE/replay-check.result"
+  cleanup_private_evidence
+  trap - EXIT
+  printf 'replay_check=failed target_sha=%s reason=invalid-readiness-evidence evidence=%s\n' \
+    "$TARGET_SHA" "$EVIDENCE" >&2
+  exit 1
+fi
+if [[ "$verifier_status" == 0 ]]; then
   printf 'result=pass target_sha=%s container_id=%s evidence=%s\n' \
     "$TARGET_SHA" "$CONTAINER_ID" "$EVIDENCE" > "$EVIDENCE/replay-check.result"
+  cleanup_private_evidence
+  trap - EXIT
   printf 'replay_check=pass target_sha=%s evidence=%s\n' "$TARGET_SHA" "$EVIDENCE"
 else
-  rc=$?
   printf 'result=failed exit=%s target_sha=%s container_id=%s evidence=%s\n' \
-    "$rc" "$TARGET_SHA" "$CONTAINER_ID" "$EVIDENCE" > "$EVIDENCE/replay-check.result"
-  printf 'replay_check=failed exit=%s target_sha=%s evidence=%s\n' "$rc" "$TARGET_SHA" "$EVIDENCE" >&2
-  exit "$rc"
+    "$verifier_status" "$TARGET_SHA" "$CONTAINER_ID" "$EVIDENCE" > "$EVIDENCE/replay-check.result"
+  cleanup_private_evidence
+  trap - EXIT
+  printf 'replay_check=failed exit=%s target_sha=%s evidence=%s\n' \
+    "$verifier_status" "$TARGET_SHA" "$EVIDENCE" >&2
+  exit "$verifier_status"
 fi

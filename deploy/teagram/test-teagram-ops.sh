@@ -12,6 +12,8 @@ cleanup() {
 trap cleanup EXIT
 
 mkdir -p "$tmp/bin" "$tmp/repo/.state" "$tmp/root"
+MOCK_OWNER_UID=$(id -u)
+export MOCK_OWNER_UID
 printf 'TG_RSA_KEY_FINGERPRINT=fixture-value-never-print\nFIXTURE_EMPTY=\n' > "$tmp/repo/.env"
 printf 'override fixture\n' > "$tmp/repo/docker-compose.override.yml"
 printf 'state fixture\n' > "$tmp/repo/.state/rollout-env"
@@ -28,6 +30,7 @@ export MOCK_CURRENT_SHA="$TARGET_SHA" MOCK_REPO="$tmp/repo"
 export MOCK_OP_SCRIPT="$replay_script" MOCK_VERIFIER="$tmp/verifier.sh" MOCK_RUNNER="$tmp/runner.sh"
 export MOCK_RUN_TEMP_LOG="$tmp/run-temp.log" MOCK_RM_LOG="$tmp/rm.log"
 export MOCK_VERIFIER_CALL="$tmp/verifier-call.log"
+export MOCK_PRIVATE_EVIDENCE_LOG="$tmp/private-evidence.log" MOCK_ROOT="$tmp/root"
 
 cat > "$tmp/bin/git" <<'GIT'
 #!/usr/bin/env bash
@@ -54,7 +57,10 @@ case "$1" in
     ;;
   show)
     case "${2:-}" in
-      "$OPS_SHA:deploy/teagram/ops/replay-check.sh") sed "s|/opt/teagram|$MOCK_REPO|g" "$MOCK_OP_SCRIPT" ;;
+      "$OPS_SHA:deploy/teagram/ops/replay-check.sh")
+        sed -e "s|/opt/teagram|$MOCK_REPO|g" -e "s|/root|$MOCK_ROOT|g" \
+          -e "s|0:700|$MOCK_OWNER_UID:700|g" -e "s|0:600|$MOCK_OWNER_UID:600|g" "$MOCK_OP_SCRIPT"
+        ;;
       "$TARGET_SHA:deploy/teagramd/rollout-runner/rollout-runner.sh") cat "$MOCK_RUNNER" ;;
       "$TARGET_SHA:deploy/teagramd/rollout-runner/rollout-verifier.sh") cat "$MOCK_VERIFIER" ;;
       *) exit 1 ;;
@@ -93,7 +99,7 @@ cat > "$tmp/bin/mktemp" <<'MKTEMP'
 for arg do
   if [ "$arg" = /tmp/teagram-ops.XXXXXX ]; then
     path=$(/usr/bin/mktemp "$@")
-    printf '%s\n' "$path" > "$MOCK_RUN_TEMP_LOG"
+    printf '%s\n' "$path" >> "$MOCK_RUN_TEMP_LOG"
     printf '%s\n' "$path"
     exit 0
   fi
@@ -122,9 +128,19 @@ set -euo pipefail
 [[ "$PWD" == "$MOCK_REPO" && "$ROLLOUT_CHECKOUT_PATH" == "$MOCK_REPO" ]]
 printf 'sha=%s args=%s compose=%s env_files=%s cwd=%s\n' \
   "$TARGET_SHA" "$*" "$COMPOSE_FILE" "$COMPOSE_ENV_FILES" "$PWD" > "$MOCK_VERIFIER_CALL"
+printf '%s\n' "$4" > "$MOCK_PRIVATE_EVIDENCE_LOG"
+if [[ "${MOCK_VERIFIER_NO_EVIDENCE:-0}" == 1 ]]; then
+  exit 0
+fi
 printf 'sample=ready\n' > "$4/readiness-target.tsv"
-printf 'role=target result=ready max_seconds=120\n' > "$4/readiness-target.result"
-printf '%s\n' 'role=target result=ready max_seconds=120'
+if [[ "${MOCK_VERIFIER_STATUS:-0}" == 0 ]]; then
+  printf 'role=target result=ready max_seconds=120\n' > "$4/readiness-target.result"
+  printf '%s\n' 'role=target result=ready max_seconds=120'
+else
+  printf 'role=target result=failed exit=%s max_seconds=120\n' "$MOCK_VERIFIER_STATUS" > "$4/readiness-target.result"
+  printf 'role=target result=failed exit=%s max_seconds=120\n' "$MOCK_VERIFIER_STATUS"
+  exit "$MOCK_VERIFIER_STATUS"
+fi
 VERIFIER
 chmod 755 "$MOCK_VERIFIER"
 verifier_sha=$(sha256sum "$MOCK_VERIFIER" | cut -d' ' -f1)
@@ -132,6 +148,8 @@ printf 'readonly APPROVED_VERIFIER_SHA=%s\n' "$verifier_sha" > "$MOCK_RUNNER"
 
 sed \
   -e "s|/opt/teagram|$tmp/repo|g" \
+  -e "s|0:700|$MOCK_OWNER_UID:700|g" \
+  -e "s|0:600|$MOCK_OWNER_UID:600|g" \
   -e "s|/usr/local/sbin/teagram-logs|$tmp/bin/teagram-logs|g" \
   "$script" > "$tmp/teagram-ops.sh"
 chmod 755 "$tmp/teagram-ops.sh"
@@ -187,12 +205,38 @@ output=$(run_command "run $OPS_SHA replay-check $TARGET_SHA")
 evidence=${output##*evidence=}
 [[ -d "$evidence" && -f "$evidence/readiness-target.tsv" && -f "$evidence/replay-check.result" ]]
 [[ "$(cat "$evidence/replay-check.result")" == "result=pass target_sha=$TARGET_SHA container_id=$CONTAINER_ID evidence=$evidence" ]]
-[[ "$(cat "$MOCK_VERIFIER_CALL")" == *"sha=$TARGET_SHA args=ready target $CONTAINER_ID $evidence compose=$MOCK_REPO/docker-compose.yml:$MOCK_REPO/docker-compose.override.yml env_files=$MOCK_REPO/.env,$MOCK_REPO/.env.rustfs-parked cwd=$MOCK_REPO"* ]]
+private_evidence=$(<"$MOCK_PRIVATE_EVIDENCE_LOG")
+[[ "$private_evidence" == "$MOCK_ROOT"/teagram-replay-check."${TARGET_SHA:0:12}."* && ! -e "$private_evidence" ]]
+[[ "$(cat "$MOCK_VERIFIER_CALL")" == *"sha=$TARGET_SHA args=ready target $CONTAINER_ID $private_evidence compose=$MOCK_REPO/docker-compose.yml:$MOCK_REPO/docker-compose.override.yml env_files=$MOCK_REPO/.env,$MOCK_REPO/.env.rustfs-parked cwd=$MOCK_REPO"* ]]
 
-runner_temp=$(<"$MOCK_RUN_TEMP_LOG")
-[[ "$runner_temp" == /tmp/teagram-ops.* && ! -e "$runner_temp" ]]
-[[ "$(<"$MOCK_RM_LOG")" == "$runner_temp" ]]
+status=0
+output=$(MOCK_VERIFIER_STATUS=2 run_command "run $OPS_SHA replay-check $TARGET_SHA" 2>&1) || status=$?
+[[ "$status" == 2 && "$output" == *"replay_check=failed exit=2 target_sha=$TARGET_SHA evidence="* ]]
+failed_evidence=${output##*evidence=}
+[[ -d "$failed_evidence" && -f "$failed_evidence/readiness-target.tsv" && \
+  "$(cat "$failed_evidence/readiness-target.result")" == 'role=target result=failed exit=2 max_seconds=120' ]]
+private_evidence=$(<"$MOCK_PRIVATE_EVIDENCE_LOG")
+[[ "$private_evidence" == "$MOCK_ROOT"/teagram-replay-check."${TARGET_SHA:0:12}."* && ! -e "$private_evidence" ]]
+
+status=0
+output=$(MOCK_VERIFIER_NO_EVIDENCE=1 run_command "run $OPS_SHA replay-check $TARGET_SHA" 2>&1) || status=$?
+[[ "$status" == 1 && "$output" == *"reason=invalid-readiness-evidence evidence="* ]]
+invalid_evidence=${output##*evidence=}
+[[ -d "$invalid_evidence" && "$(cat "$invalid_evidence/replay-check.result")" == \
+  "result=failed target_sha=$TARGET_SHA reason=invalid-readiness-evidence evidence=$invalid_evidence" ]]
+private_evidence=$(<"$MOCK_PRIVATE_EVIDENCE_LOG")
+[[ "$private_evidence" == "$MOCK_ROOT"/teagram-replay-check."${TARGET_SHA:0:12}."* && ! -e "$private_evidence" ]]
+
+mapfile -t runner_temps < "$MOCK_RUN_TEMP_LOG"
+mapfile -t removed_temps < "$MOCK_RM_LOG"
+[[ "${#runner_temps[@]}" == 3 && "${#removed_temps[@]}" == "${#runner_temps[@]}" ]]
+for index in "${!runner_temps[@]}"; do
+  runner_temp=${runner_temps[$index]}
+  [[ "$runner_temp" == /tmp/teagram-ops.* && "${removed_temps[$index]}" == "$runner_temp" && ! -e "$runner_temp" ]]
+done
 [[ -f "$unrelated/keep/sentinel" ]]
 /bin/rm -rf -- "$evidence"
+/bin/rm -rf -- "$failed_evidence"
+/bin/rm -rf -- "$invalid_evidence"
 
 printf '%s\n' 'teagram-ops fixture cases pass'

@@ -75,7 +75,9 @@ After a successful deploy, `ssh teagram run <deployed-sha> replay-check
 <target-sha>` replays the target's runner verifier against the live container.
 The target SHA must be on `origin/main` and match the live image revision. The
 readiness evidence stays in a root-owned mode-0700 directory under `/tmp`; the
-command prints that directory with its result.
+verifier's transient private directory under `/root` is removed after the
+validated readiness files are copied. The command prints the `/tmp` evidence
+directory with its result.
 
 After server readiness and link-edge update, the canonical script runs the
 deployed image's `/usr/local/bin/mtproto-smoke` in a read-only, non-root
