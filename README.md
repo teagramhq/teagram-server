@@ -11,6 +11,11 @@ accounts and messages, local media storage, and an admin metrics dashboard. The
 live deployment is for development and has no real users. Teagram is an
 independent project and is not affiliated with Telegram.
 
+Teagram is software. Its authors hold no liability for what operators or users
+do with a self-hosted Teagram instance. Each instance's operator and its users
+are responsible for the content on that instance, including sticker and emoji
+packs users import.
+
 To run a server on your own Linux host, follow the
 [self-hosting guide](docs/self-hosting.md).
 
