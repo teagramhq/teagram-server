@@ -80,7 +80,9 @@ analyze() {
 restore() {
   for f in "${fixtures[@]}"; do
     psql_admin -c "CREATE DATABASE perf_$f" || fatal "create the $f fixture database"
-    docker exec "$PERF_PG_CONTAINER" pg_restore -U postgres -d "perf_$f" -j 4 --no-owner "/cache/perf_$f.dump" ||
+    # The snapshot includes ACLs but not cluster-wide role definitions. The
+    # performance harness connects as postgres, so those grants are unnecessary.
+    docker exec "$PERF_PG_CONTAINER" pg_restore -U postgres -d "perf_$f" -j 4 --no-owner --no-acl "/cache/perf_$f.dump" ||
       fatal "restore the $f fixture snapshot"
     # Before base_ready copies it, so the copies carry the same statistics.
     analyze "perf_$f" || fatal "analyze the $f fixture"
