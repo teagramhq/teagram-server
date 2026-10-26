@@ -2115,8 +2115,15 @@ def assert_containers_match(
     docker_volume_exists(record["volumes"]["tgblobs"])
 
 
-def validate_runtime(args: argparse.Namespace, allow_no_teagramd: bool = False) -> dict[str, object]:
-    record = current_authority(args.state_dir, args.report_root)
+def validate_runtime(
+    args: argparse.Namespace,
+    allow_no_teagramd: bool = False,
+    allow_missing_reports: bool = False,
+) -> dict[str, object]:
+    if allow_missing_reports:
+        record, _missing_report_count = current_deployment_authority(args.state_dir, args.report_root)
+    else:
+        record = current_authority(args.state_dir, args.report_root)
     containers = read_json(args.containers)
     compose = read_json(args.compose)
     if not isinstance(containers, dict) or not isinstance(compose, dict):
@@ -2858,16 +2865,21 @@ def main() -> int:
     containers = commands.add_parser("containers")
     containers.add_argument("--checkout", type=pathlib.Path, required=True)
     containers.add_argument("--allow-empty", action="store_true")
+    def add_validate_arguments(command: argparse.ArgumentParser) -> None:
+        command.add_argument("--state-dir", type=pathlib.Path, required=True)
+        command.add_argument("--report-root", type=pathlib.Path, required=True)
+        command.add_argument("--containers", type=pathlib.Path, required=True)
+        command.add_argument("--compose", type=pathlib.Path, required=True)
+        command.add_argument("--override", type=pathlib.Path, required=True)
+        command.add_argument("--checkout", type=pathlib.Path, required=True)
+        command.add_argument("--allow-empty-containers", action="store_true")
+        command.add_argument("--allow-unguarded-initial-local", action="store_true")
+        command.add_argument("--allow-unguarded-initial-local-containers", action="store_true")
+
     validate = commands.add_parser("validate")
-    validate.add_argument("--state-dir", type=pathlib.Path, required=True)
-    validate.add_argument("--report-root", type=pathlib.Path, required=True)
-    validate.add_argument("--containers", type=pathlib.Path, required=True)
-    validate.add_argument("--compose", type=pathlib.Path, required=True)
-    validate.add_argument("--override", type=pathlib.Path, required=True)
-    validate.add_argument("--checkout", type=pathlib.Path, required=True)
-    validate.add_argument("--allow-empty-containers", action="store_true")
-    validate.add_argument("--allow-unguarded-initial-local", action="store_true")
-    validate.add_argument("--allow-unguarded-initial-local-containers", action="store_true")
+    add_validate_arguments(validate)
+    deployment_validate = commands.add_parser("deployment-validate")
+    add_validate_arguments(deployment_validate)
     authority = commands.add_parser("authority")
     authority.add_argument("--state-dir", type=pathlib.Path, required=True)
     authority.add_argument("--report-root", type=pathlib.Path, required=True)
@@ -2900,8 +2912,12 @@ def main() -> int:
             print(json.dumps(compose_inventory(stdin_json(), args.checkout), sort_keys=True, separators=(",", ":")))
         elif args.command == "containers":
             print(json.dumps(container_inventory(stdin_json(), args.checkout, args.allow_empty), sort_keys=True, separators=(",", ":")))
-        elif args.command == "validate":
-            record = validate_runtime(args, args.allow_empty_containers)
+        elif args.command in ("validate", "deployment-validate"):
+            record = validate_runtime(
+                args,
+                args.allow_empty_containers,
+                allow_missing_reports=args.command == "deployment-validate",
+            )
             print(f"blob_mode=valid outcome={record['outcome']} generation={record['generation']} transition_id={record['transition_id']}")
         elif args.command == "authority":
             record = current_authority(args.state_dir, args.report_root)

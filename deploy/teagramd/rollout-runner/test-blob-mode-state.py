@@ -1634,6 +1634,45 @@ class BlobModeStateTests(unittest.TestCase):
                 self.assertEqual(records[-1]["evidence"]["retained_cutover_key_count"], 1)
                 self.assertEqual(head, mode_bytes)
 
+    def test_deployment_runtime_validation_accepts_missing_reports(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = pathlib.Path(temporary)
+            state_dir, report_root, lock_path = self.create_initial_authority(root)
+            args = SimpleNamespace(
+                state_dir=state_dir,
+                report_root=report_root,
+                containers=root / "containers.json",
+                compose=root / "compose.json",
+                checkout=root,
+                override=root / "docker-compose.override.yml",
+                allow_unguarded_initial_local=False,
+                allow_unguarded_initial_local_containers=False,
+            )
+            args.containers.write_text('{"containers":[]}', encoding="utf-8")
+            args.containers.chmod(0o600)
+            args.compose.write_text('{"services":[]}', encoding="utf-8")
+            args.compose.chmod(0o600)
+            with (
+                patch.object(blob_mode, "require_runner_lock"),
+                patch.object(blob_mode, "file_stat", side_effect=self.allow_unowned_private_files),
+                patch.object(blob_mode.os, "fchown"),
+                patch.object(blob_mode.os, "chown"),
+            ):
+                self.publish(state_dir, report_root, lock_path, root, "s3-accepted")
+                shutil.rmtree(report_root)
+
+                self.assert_rejects(
+                    lambda: blob_mode.validate_runtime(args),
+                    "state-unavailable",
+                )
+                with (
+                    patch.object(blob_mode, "assert_containers_match"),
+                    patch.object(blob_mode, "assert_compose_matches"),
+                ):
+                    record = blob_mode.validate_runtime(args, allow_missing_reports=True)
+
+            self.assertEqual(record["outcome"], "s3-accepted")
+
     def test_deployment_authority_accepts_missing_reports_but_normal_reads_reject(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = pathlib.Path(temporary)
