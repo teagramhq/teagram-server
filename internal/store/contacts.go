@@ -161,7 +161,11 @@ func importContactMatches(ctx context.Context, tx pgx.Tx, ownerID int64, clientI
 		)
 		SELECT requested.client_id, target.id, existing.contact_id IS NOT NULL, target_contact.contact_id IS NOT NULL
 		FROM requested
-		JOIN users target ON target.phone = requested.phone
+		-- A plain join hash-joins users and reads every account; the LIMIT keeps
+		-- this a per-phone probe of users_phone_unique.
+		JOIN LATERAL (
+			SELECT u.id FROM users u WHERE u.phone = requested.phone LIMIT 1
+		) target ON true
 		LEFT JOIN user_privacy_rules privacy
 		  ON privacy.owner_id = target.id
 		 AND privacy.privacy_key = 'added_by_phone'
