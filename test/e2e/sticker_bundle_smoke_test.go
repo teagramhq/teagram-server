@@ -42,6 +42,7 @@ func testSmokeStickerBundleCatalogue(t *testing.T) {
 	})
 	const phoneA, phoneB = "+15551049801", "+15551049802"
 	seedSmokeUsers(t, f, phoneA, phoneB)
+	f.codes.chFor(smokeAuthHandle(f, phoneA)) <- "not-a-login-code"
 	a := newSmokeClient(t, f, "bundle sticker owner", phoneA)
 	b := newSmokeClient(t, f, "bundle sticker recipient", phoneB)
 
@@ -164,6 +165,9 @@ func testSmokeRunningStickerBundleCatalogue(t *testing.T) {
 	f := newRunningServerSmokeFixture(t)
 	const phone = "+15551049801"
 	seedSmokeUsers(t, f, phone)
+	// Username sign-in validates the issued hash and then the password; it
+	// ignores the code value. The remote server cannot feed this process-local sink.
+	f.codes.chFor(smokeAuthHandle(f, phone)) <- "not-a-login-code"
 	client := newSmokeClient(t, f, "running bundle smoke", phone)
 
 	var featured *tg.MessagesFeaturedStickers
