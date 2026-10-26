@@ -298,6 +298,13 @@ if ! compare_snapshots \
 fi
 printf '%s\n' 'PASS named tailnet addition is value-checked and passes baseline-to-target comparison'
 
+if tailnet_limit_snapshot target 20 'TG_RATE_LIMIT_KEY_EXCHANGE_IP_TAILNET=0' added 20 \
+  >/dev/null 2>"$TMP/tailnet-dotenv-compose-mismatch.err"; then
+  printf '%s\n' 'FAIL mismatched tailnet .env and resolved Compose values were accepted' >&2
+  exit 1
+fi
+printf '%s\n' 'PASS tailnet .env addition must match the resolved Compose value'
+
 : > "$ENV_FILE"
 empty_tailnet_rollback_inspect=$(jq -c '.Config.Env += ["TG_RATE_LIMIT_KEY_EXCHANGE_IP_TAILNET="]' \
   <<< "$(inspect_json '')")

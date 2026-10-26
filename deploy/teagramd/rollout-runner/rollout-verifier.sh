@@ -74,6 +74,7 @@ verify_added_container_environment() {
               ($name != "TG_RATE_LIMIT_KEY_EXCHANGE_IP_TAILNET" or
                (dotenv_value($assignments[0]) | test("^[0-9]+$"))) and
               (($name | IN(
+                "TG_RATE_LIMIT_KEY_EXCHANGE_IP_TAILNET",
                 "TG_PUBLIC_WEBSOCKET_LISTEN_ADDR", "TG_PUBLIC_WEBSOCKET_ADVERTISE_ADDR",
                 "TG_PUBLIC_REGISTRATION", "TG_PUBLIC_WEBSOCKET_ALLOWED_ORIGINS"
               )) | not or dotenv_value($assignments[0]) == $compose_env[$runtime_name])
