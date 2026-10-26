@@ -60,14 +60,42 @@ fi
 [ "${#images[@]}" -gt 0 ] || { echo "::error::no base images found in ${dockerfiles[*]}"; exit 1; }
 mapfile -t images < <(printf '%s\n' "${images[@]}" | sort -u)
 
-for image in "${images[@]}"; do
+docker_hub_fallback() {
+  case "$1" in
+    *@sha256:*) return 1 ;; # docker tag cannot create a repository-digest alias.
+    mirror.gcr.io/library/*) printf '%s\n' "${1#mirror.gcr.io/library/}" ;;
+    mirror.gcr.io/*) printf '%s\n' "${1#mirror.gcr.io/}" ;;
+    *) return 1 ;;
+  esac
+}
+
+pull_with_retry() {
+  local image=$1 attempt
   for attempt in $(seq "$attempts"); do
-    docker pull "$image" && continue 2
+    if docker pull "$image"; then
+      return 0
+    fi
     if [ "$attempt" -eq "$attempts" ]; then
-      echo "::error::pull of $image failed after $attempts attempts"
-      exit 1
+      return 1
     fi
     echo "::warning::pull of $image failed (attempt $attempt); retrying"
     sleep $((attempt * delay))
   done
+}
+
+for image in "${images[@]}"; do
+  pull_with_retry "$image" && continue
+  if fallback=$(docker_hub_fallback "$image"); then
+    echo "::warning::mirror pull of $image failed; trying Docker Hub source $fallback"
+    if pull_with_retry "$fallback"; then
+      docker tag "$fallback" "$image" || {
+        echo "::error::could not tag Docker Hub fallback $fallback as $image"
+        exit 1
+      }
+      continue
+    fi
+    echo "::error::Docker Hub fallback $fallback also failed"
+  fi
+  echo "::error::pull of $image failed after $attempts attempts"
+  exit 1
 done
