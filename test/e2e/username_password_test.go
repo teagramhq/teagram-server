@@ -497,9 +497,9 @@ func TestSequentialUsernameAccountSignInsFromSameClientIP(t *testing.T) {
 
 // TestFreshUsernameSignInAfterSameIPExchangeBudgetIsSpent reproduces a fresh
 // client sign-in after earlier contexts have spent the shared per-network
-// exchange budget.
+// exchange budget. It spends the default budget through fresh clients, so it
+// runs serially to avoid contention with E2E tests sharing the Postgres harness.
 func TestFreshUsernameSignInAfterSameIPExchangeBudgetIsSpent(t *testing.T) {
-	t.Parallel()
 	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 	defer cancel()
 
@@ -551,6 +551,10 @@ func TestFreshUsernameSignInAfterSameIPExchangeBudgetIsSpent(t *testing.T) {
 		})
 		attemptCancel()
 		if err != nil {
+			count, layer, listener := budgetLogs.refusal()
+			if count == 0 || layer != "network" || listener != "tailnet" {
+				t.Fatalf("fresh context %d failed before tailnet network budget refusal: %v; first refusal = count %d, layer %q, listener %q", attempt, err, count, layer, listener)
+			}
 			refused = true
 			break
 		}
@@ -558,10 +562,6 @@ func TestFreshUsernameSignInAfterSameIPExchangeBudgetIsSpent(t *testing.T) {
 	if !refused {
 		t.Fatalf("%d fresh contexts did not exhaust the default tailnet exchange budget", limit)
 	}
-	if count, layer, listener := budgetLogs.refusal(); count == 0 || layer != "network" || listener != "tailnet" {
-		t.Fatalf("first refusal = count %d, layer %q, listener %q; want network/tailnet", count, layer, listener)
-	}
-
 	secondClient := newUsernameClient(addr.Port, key, dcID, nil)
 	secondCtx, secondCancel := context.WithTimeout(ctx, 10*time.Second)
 	var appConfigAttempted atomic.Bool
