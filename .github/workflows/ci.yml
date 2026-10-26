@@ -598,6 +598,16 @@ jobs:
           docker logs --tail 50 tg-test-pg 2>&1 || true
           free -m
 
+      # This job already restored and used the previous snapshot. Remove older
+      # Go snapshots before saving this run's unique key so they cannot crowd
+      # out the fixture caches when the repository is near its cache limit.
+      - name: Prune previous Go build snapshots
+        if: ${{ success() && github.ref == 'refs/heads/main' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GO_BUILD_CACHE_KEY: go-build-${{ runner.os }}-${{ hashFiles('**/go.sum') }}-${{ github.run_id }}-${{ github.run_attempt }}
+        run: python3 .github/scripts/prune_go_build_cache.py
+
       - name: Save Go build and test results
         if: ${{ success() && github.ref == 'refs/heads/main' }}
         uses: actions/cache/save@v6.1.0
