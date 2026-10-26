@@ -14,7 +14,8 @@ import (
 
 // RateLimitConfig holds the parameters for a single rate-limit surface.
 type RateLimitConfig struct {
-	// Limit is the maximum number of tokens (requests) allowed per window.
+	// Limit is the maximum number of tokens allowed per window. Most surfaces
+	// spend one token per request; weighted surfaces may use a different unit.
 	// Zero disables enforcement for this surface.
 	Limit int
 	// Window is the duration of the fixed window.

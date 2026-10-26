@@ -276,7 +276,7 @@ func GatedUnhandledForTest(log *slog.Logger, c *mtproto.Conn, req *mtproto.Reque
 }
 
 // TestMaxFileBytes is the per-file upload cap test handlers run with. It is the
-// production default, so MaxFileParts is the same 200 a real server enforces.
+// production default, so MaxFileParts matches the advertised client part cap.
 const TestMaxFileBytes int64 = 100 << 20
 
 const testPublicLinkPrefix = "https://test.example/"
@@ -580,6 +580,21 @@ func SaveFilePartCappedForTest(s *store.Store, userID int64, maxFileBytes int64,
 	return h.handleSaveFilePart(&mtproto.Request{Ctx: context.Background(), UserID: userID, Buf: &buf})
 }
 
+// SaveBigFilePartCappedForTest invokes upload.saveBigFilePart with a custom
+// per-file cap, matching SaveFilePartCappedForTest.
+func SaveBigFilePartCappedForTest(s *store.Store, userID int64, maxFileBytes int64, req *tg.UploadSaveBigFilePartRequest) (bin.Encoder, error) {
+	var buf bin.Buffer
+	if err := req.Encode(&buf); err != nil {
+		return nil, err
+	}
+	blobs, err := blob.NewLocal(testBlobsDir)
+	if err != nil {
+		panic(err)
+	}
+	h := &handlers{store: s, log: slog.New(slog.DiscardHandler), maxFileBytes: maxFileBytes, blobs: blobs}
+	return h.handleSaveBigFilePart(&mtproto.Request{Ctx: context.Background(), UserID: userID, Buf: &buf})
+}
+
 // SaveFilePartForTestWithLimits is SaveFilePartForTest against a custom
 // saveFilePart rate limit.
 func SaveFilePartForTestWithLimits(s *store.Store, userID int64, rateLimit store.RateLimitConfig, req *tg.UploadSaveFilePartRequest) (bin.Encoder, error) {
@@ -592,6 +607,19 @@ func SaveFilePartForTestWithLimits(s *store.Store, userID int64, rateLimit store
 	return h.handleSaveFilePart(&mtproto.Request{Ctx: context.Background(), UserID: userID, Buf: &buf})
 }
 
+// SaveFilePartForTestWithRateLimits invokes upload.saveFilePart with custom
+// per-call and per-byte budgets.
+func SaveFilePartForTestWithRateLimits(s *store.Store, userID int64, callLimit, byteLimit store.RateLimitConfig, req *tg.UploadSaveFilePartRequest) (bin.Encoder, error) {
+	var buf bin.Buffer
+	if err := req.Encode(&buf); err != nil {
+		return nil, err
+	}
+	h := testHandlers(s)
+	h.rateLimitSaveFilePart = callLimit
+	h.rateLimitUploadBytes = byteLimit
+	return h.handleSaveFilePart(&mtproto.Request{Ctx: context.Background(), UserID: userID, Buf: &buf})
+}
+
 // SaveBigFilePartForTestWithLimits is SaveBigFilePartForTest against a custom
 // saveFilePart rate limit, which both save surfaces share.
 func SaveBigFilePartForTestWithLimits(s *store.Store, userID int64, rateLimit store.RateLimitConfig, req *tg.UploadSaveBigFilePartRequest) (bin.Encoder, error) {
@@ -601,6 +629,19 @@ func SaveBigFilePartForTestWithLimits(s *store.Store, userID int64, rateLimit st
 	}
 	h := testHandlers(s)
 	h.rateLimitSaveFilePart = rateLimit
+	return h.handleSaveBigFilePart(&mtproto.Request{Ctx: context.Background(), UserID: userID, Buf: &buf})
+}
+
+// SaveBigFilePartForTestWithRateLimits invokes upload.saveBigFilePart with
+// custom per-call and per-byte budgets.
+func SaveBigFilePartForTestWithRateLimits(s *store.Store, userID int64, callLimit, byteLimit store.RateLimitConfig, req *tg.UploadSaveBigFilePartRequest) (bin.Encoder, error) {
+	var buf bin.Buffer
+	if err := req.Encode(&buf); err != nil {
+		return nil, err
+	}
+	h := testHandlers(s)
+	h.rateLimitSaveFilePart = callLimit
+	h.rateLimitUploadBytes = byteLimit
 	return h.handleSaveBigFilePart(&mtproto.Request{Ctx: context.Background(), UserID: userID, Buf: &buf})
 }
 
