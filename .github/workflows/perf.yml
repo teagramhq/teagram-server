@@ -6,6 +6,7 @@ on:
   pull_request:
     paths:
       - 'internal/api/**'
+      - 'internal/blob/**'
       - 'internal/config/**'
       - 'internal/mtproto/**'
       - 'internal/store/**'
