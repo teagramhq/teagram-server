@@ -27,9 +27,8 @@ env:
   PERF_HISTORY: ${{ github.workspace }}/.perf-history
 
 jobs:
-  # Built on main only, and only when the fixture's shape changed: seeding the
-  # 100x account through the store's write path takes most of an hour, so a
-  # PR never does it. PRs restore the snapshot this job stores.
+  # Main stores a snapshot whenever the fixture shape changes. PRs restore it
+  # when available and seed their own copy when the cache is missing or stale.
   fixture-snapshot:
     if: github.event_name != 'pull_request'
     runs-on: ubuntu-26.04
@@ -42,15 +41,14 @@ jobs:
         with:
           persist-credentials: false
 
-      # The snapshot is keyed on the seeder alone. A new migration is applied
-      # on top of the restored data, as production applies it, so only a change
-      # to the fixture's shape needs a new snapshot.
+      # Track both the fixture writer and server setup helper: either can
+      # change the seeded data. Migrations apply on top of restored data.
       - name: Look up the snapshot
         id: snapshot
         uses: actions/cache/restore@v6.1.0
         with:
           path: .perf-cache
-          key: perf-fixture-${{ hashFiles('test/perf/fixture_test.go') }}
+          key: perf-fixture-${{ hashFiles('test/perf/fixture_test.go', 'test/perf/server_test.go') }}
           lookup-only: true
 
       - uses: actions/setup-go@v7.0.0
@@ -69,6 +67,7 @@ jobs:
         run: bash .github/scripts/perf-postgres.sh
 
       - name: Seed fixtures
+        id: seed
         if: steps.snapshot.outputs.cache-hit != 'true'
         run: bash .github/scripts/perf-run.sh seed
 
@@ -77,7 +76,17 @@ jobs:
         uses: actions/cache/save@v6.1.0
         with:
           path: .perf-cache
-          key: perf-fixture-${{ hashFiles('test/perf/fixture_test.go') }}
+          key: perf-fixture-${{ hashFiles('test/perf/fixture_test.go', 'test/perf/server_test.go') }}
+
+      - name: Report fixture snapshot infrastructure failure
+        if: failure() && steps.seed.outcome != 'failure'
+        run: |
+          echo "::error title=RPC performance fixture snapshot infrastructure failure::Fixture snapshot setup or storage failed before measurement."
+          {
+            echo "## RPC performance fixture snapshot infrastructure failure"
+            echo
+            echo "Fixture snapshot setup or storage failed before measurement. Check the failed workflow step for its cause."
+          } >>"$GITHUB_STEP_SUMMARY"
 
   # Runs beside ci-main and finishes well inside it, so it adds no time to
   # the server's CI.
@@ -85,7 +94,7 @@ jobs:
     needs: fixture-snapshot
     if: ${{ !cancelled() && needs.fixture-snapshot.result != 'failure' }}
     runs-on: ubuntu-26.04
-    timeout-minutes: 30
+    timeout-minutes: 150
     permissions:
       contents: read
       actions: write
@@ -105,35 +114,9 @@ jobs:
         uses: actions/cache/restore@v6.1.0
         with:
           path: .perf-cache
-          key: perf-fixture-${{ hashFiles('test/perf/fixture_test.go') }}
-
-      # A missing snapshot is expected only when this branch is the one that
-      # changes the fixture: main builds the new snapshot on merge. For an
-      # unchanged fixture it means the snapshot was lost, and a green check
-      # without measurements would hide every regression, so the gate fails.
-      - name: No snapshot for this fixture
-        if: steps.snapshot.outputs.cache-hit != 'true'
-        run: |
-          fixture=test/perf/fixture_test.go
-          if [ -n "$PERF_BASE_SHA" ] && git cat-file -e "$PERF_BASE_SHA:$fixture" 2>/dev/null \
-            && git diff --quiet "$PERF_BASE_SHA" HEAD -- "$fixture"; then
-            {
-              echo "## RPC performance"
-              echo
-              echo "Not measured: the fixture snapshot for this unchanged fixture is missing. Rerun this workflow on main to rebuild it."
-            } >>"$GITHUB_STEP_SUMMARY"
-            echo "::error::Fixture snapshot missing for an unchanged $fixture; rerun RPC performance on main."
-            exit 1
-          fi
-          {
-            echo "## RPC performance"
-            echo
-            echo "Not measured: this branch changes the fixture's shape, and main builds its snapshot on merge."
-          } >>"$GITHUB_STEP_SUMMARY"
-          echo "::notice::No fixture snapshot for this fixture version; main builds it on merge."
+          key: perf-fixture-${{ hashFiles('test/perf/fixture_test.go', 'test/perf/server_test.go') }}
 
       - uses: actions/setup-go@v7.0.0
-        if: steps.snapshot.outputs.cache-hit == 'true'
         with:
           go-version-file: go.mod
           cache: false
@@ -147,13 +130,11 @@ jobs:
           restore-keys: go-mod-${{ runner.os }}-
 
       - uses: ariga/setup-atlas@v0.3
-        if: steps.snapshot.outputs.cache-hit == 'true'
         with:
           version: v1.2.0
 
       # Earlier main runs, one aggregated report each, set the noise bands.
       - name: Restore main's history
-        if: steps.snapshot.outputs.cache-hit == 'true'
         uses: actions/cache/restore@v6.1.0
         with:
           path: .perf-history
@@ -161,19 +142,24 @@ jobs:
           restore-keys: perf-history-
 
       - name: Start Postgres
-        if: steps.snapshot.outputs.cache-hit == 'true'
         run: bash .github/scripts/perf-postgres.sh
 
       - name: Restore fixtures
+        id: restore-fixtures
         if: steps.snapshot.outputs.cache-hit == 'true'
         run: bash .github/scripts/perf-run.sh restore
 
+      - name: Seed fixtures from this branch
+        id: seed-fixtures
+        if: steps.snapshot.outputs.cache-hit != 'true'
+        run: bash .github/scripts/perf-run.sh seed
+
       - name: Measure base and head
-        if: steps.snapshot.outputs.cache-hit == 'true'
+        id: measure
         run: bash .github/scripts/perf-run.sh measure
 
       - name: Keep main's history
-        if: steps.snapshot.outputs.cache-hit == 'true' && github.event_name == 'push' && always()
+        if: github.event_name == 'push' && always()
         uses: actions/cache/save@v6.1.0
         with:
           path: .perf-history
@@ -186,3 +172,13 @@ jobs:
           name: rpc-performance
           path: ${{ runner.temp }}/perf/*.json
           if-no-files-found: ignore
+
+      - name: Report RPC performance infrastructure failure
+        if: failure() && steps.measure.outcome != 'failure' && steps.restore-fixtures.outcome != 'failure' && steps.seed-fixtures.outcome != 'failure'
+        run: |
+          echo "::error title=RPC performance infrastructure failure::Setup, cache, or report handling failed before a performance verdict."
+          {
+            echo "## RPC performance infrastructure failure"
+            echo
+            echo "Setup, cache, or report handling failed before a performance verdict. Check the failed workflow step for its cause."
+          } >>"$GITHUB_STEP_SUMMARY"

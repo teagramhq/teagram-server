@@ -65,7 +65,7 @@ esac
 	if err != nil {
 		t.Fatalf("read docker log: %v", err)
 	}
-	if !strings.Contains(string(log), "pg_isready -h 127.0.0.1 -p 5432") {
+	if !strings.Contains(string(log), "pg_isready -h 127.0.0.1 -U postgres -q") {
 		t.Fatalf("Postgres readiness did not check its TCP listener:\n%s", log)
 	}
 }
