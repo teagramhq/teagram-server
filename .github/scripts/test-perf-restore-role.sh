@@ -27,14 +27,17 @@ psql_admin() {
 
 ready=false
 for _ in $(seq 1 60); do
-  if docker exec "$container" pg_isready -U postgres -q; then
+  # The image first starts a temporary socket-only server to initialize the
+  # data directory. Wait for the final server's TCP listener instead.
+  if docker exec "$container" pg_isready -h 127.0.0.1 -U postgres -q; then
     ready=true
     break
   fi
   sleep 1
 done
 if [[ "$ready" != true ]]; then
-  echo 'Postgres did not become ready' >&2
+  echo 'Postgres did not become ready for TCP connections' >&2
+  docker logs "$container"
   exit 1
 fi
 
