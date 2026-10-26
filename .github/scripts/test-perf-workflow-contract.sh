@@ -41,6 +41,8 @@ missing_snapshot_step="$(query '.jobs."rpc-performance".steps[] | select(.name =
   fail 'the seed provenance must be recorded in the fixture cache'
 [[ "$(query '.jobs."fixture-snapshot".steps[] | select(.name == "Record snapshot metadata") | .if')" == "steps.snapshot.outputs.cache-hit != 'true' && steps.release.outputs.exists != 'true'" ]] ||
   fail 'seed provenance must be captured only when this run creates the snapshot'
+# Inspect the literal GitHub expression in the workflow text.
+# shellcheck disable=SC2016
 [[ "$(query '.jobs."fixture-snapshot".steps[] | select(.name == "Record snapshot metadata") | .run | contains("--arg server_commit \"$GITHUB_SHA\"")')" == 'true' ]] ||
   fail 'the snapshot metadata must record the seeding commit'
 [[ "$(query '.jobs."fixture-snapshot".steps[] | select(.name == "Store the snapshot") | .with.path')" == '.perf-cache' ]] ||
