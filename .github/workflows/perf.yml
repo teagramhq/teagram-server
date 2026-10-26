@@ -144,6 +144,9 @@ jobs:
           key: perf-history-${{ github.run_id }}
           restore-keys: perf-history-
 
+      - name: Verify fixture restore provisions cluster roles
+        run: bash .github/scripts/test-perf-restore-role.sh
+
       - name: Start Postgres
         run: bash .github/scripts/perf-postgres.sh
 
