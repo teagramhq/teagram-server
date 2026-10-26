@@ -96,6 +96,9 @@ type handlers struct {
 	// rateLimitSaveFilePart limits upload.saveFilePart and upload.saveBigFilePart
 	// to one shared budget per account: both write the same parts table.
 	rateLimitSaveFilePart store.RateLimitConfig
+	// rateLimitUploadBytes bounds part bytes received per account on one shared
+	// budget for both upload save methods.
+	rateLimitUploadBytes store.RateLimitConfig
 	// rateLimitGetFile limits upload.getFile per account through the shared
 	// Postgres-backed rate limiter.
 	rateLimitGetFile store.RateLimitConfig
@@ -350,6 +353,7 @@ func newWithPhotoThumbsAndDialogFilterSyncAndUploadPartTTLAndTurnstile(s *store.
 		rateLimitSearchGlobal:        rateLimits.SearchGlobal,
 		rateLimitChannelUnreadCounts: channelUnreadCountRateLimit,
 		rateLimitSaveFilePart:        rateLimits.SaveFilePart,
+		rateLimitUploadBytes:         rateLimits.UploadBytes,
 		rateLimitGetFile:             rateLimits.GetFile,
 		rateLimitGetFileReplica:      rateLimits.GetFileReplica,
 		rateLimitSendCodeIP:          rateLimits.SendCodeIP,

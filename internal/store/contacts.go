@@ -18,9 +18,20 @@ var ErrInvalidContact = errors.New("invalid contact")
 // contacts and tries to add a new one.
 var ErrContactLimit = errors.New("contact limit reached")
 
-// MaxContactsPerUser is the maximum number of directed contacts one account
-// may store.
+// MaxContactsPerUser is the shipped maximum number of directed contacts one
+// account may store.
 const MaxContactsPerUser = 5000
+
+// WithMaxContactsPerUser replaces the per-account contact bound for one Store.
+// The server never sets it; the performance fixture needs more contacts than
+// the shipped bound to measure account-scale behavior.
+func WithMaxContactsPerUser(n int) Option {
+	return func(s *Store) {
+		if n > 0 {
+			s.maxContactsPerUser = n
+		}
+	}
+}
 
 // Contact is one owner-scoped contact edge. Mutual is derived from the
 // recipient's reverse edge when the list is read; it is never stored.
@@ -234,7 +245,7 @@ func (s *Store) AddContact(ctx context.Context, ownerID, contactID int64) (chang
 	if err != nil {
 		return false, fmt.Errorf("count contacts: %w", err)
 	}
-	if count >= MaxContactsPerUser {
+	if count >= int64(s.maxContactsPerUser) {
 		return false, ErrContactLimit
 	}
 	inputsByViewer, err := lastSeenPrivacyInputsForViewers(ctx, qtx, ownerID, []int64{contactID})

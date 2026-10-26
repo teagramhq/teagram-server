@@ -51,6 +51,9 @@ type Store struct {
 	// t.Parallel().
 	maxChannelParticipants int
 	maxChannelsPerUser     int
+	// maxContactsPerUser defaults to the shipped bound; only the performance
+	// fixture overrides it.
+	maxContactsPerUser int
 
 	// newChannelID draws a new channel's id, seeded with randomChannelID. It is
 	// a field for the reason the bounds above are: the collision retry and the
@@ -397,6 +400,7 @@ func Open(ctx context.Context, dsn string, encKey []byte, opts ...Option) (*Stor
 		cipher:                 cipher,
 		maxChannelParticipants: defaultMaxChannelParticipants,
 		maxChannelsPerUser:     defaultMaxChannelsPerUser,
+		maxContactsPerUser:     MaxContactsPerUser,
 		newChannelID:           randomChannelID,
 		newPollID:              randomPollID,
 		log:                    slog.Default(),
