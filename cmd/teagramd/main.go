@@ -819,7 +819,7 @@ func runAtBlobModePath(log *slog.Logger, blobModePath string) error {
 			verifier = turnstileVerifier
 		}
 		return api.NewWithPhotoThumbsAndDialogFilterSyncAndUploadPartTTLAndTurnstileAndWelcomeChannelAndSignInAndStickerCatalog(
-			st, cfg.DCID, tgcfg, log, cfg.LogLoginCodes, cfg.MaxFileBytes, blobs,
+			st, cfg.DCID, tgcfg, log, cfg.LogLoginCodes, cfg.MaxFileBytes, cfg.UploadMaxFileBytes, blobs,
 			cfg.MaxUserStorageBytes, peers, photos, cfg.RateLimits, registrationMode,
 			dialogFilterSync, photoThumbs, cfg.UploadPartTTL, turnstileSiteKey,
 			verifier, cfg.WelcomeChannel, turnstileSignInEnabled, cfg.RecoveryEmailMode,

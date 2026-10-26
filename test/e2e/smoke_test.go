@@ -127,6 +127,10 @@ func TestSmoke(t *testing.T) {
 		t.Parallel()
 		testSmokeUploadMedia(t)
 	})
+	t.Run("upload-app-config-byte-limit", func(t *testing.T) {
+		t.Parallel()
+		testSmokeUploadAppConfigByteLimit(t)
+	})
 	t.Run("saved-gifs", func(t *testing.T) {
 		t.Parallel()
 		testSmokeSavedGIFs(t)
@@ -5376,12 +5380,14 @@ func requireSmokeFullUser(users []tg.UserClass, userID int64, source string) (*t
 }
 
 type smokeFixture struct {
-	ctx                         context.Context
-	failures                    *clientFailureSignal
-	key                         *rsa.PrivateKey
-	dsn                         string
-	store                       *store.Store
-	blobs                       blob.Store
+	ctx      context.Context
+	failures *clientFailureSignal
+	key      *rsa.PrivateKey
+	dsn      string
+	store    *store.Store
+	blobs    blob.Store
+	// uploadMaxFileBytes simulates TG_UPLOAD_MAX_BYTES in smoke fixtures.
+	uploadMaxFileBytes          int64
 	stickerSets                 *api.StickerSetCatalog
 	photoThumbs                 *photothumb.Supervisor
 	codes                       *multiCodeSink
@@ -5861,7 +5867,7 @@ func (f *smokeFixture) start(t *testing.T, address string) {
 		t, f.ctx, f.key, f.dcID, f.store, f.dsn, f.codes.Logger(), ln, f.rateLimits, f.regMode,
 		f.blobs, f.persistStatus, nil, f.turnstileSiteKey, f.turnstileVerifier, f.welcomeChannel,
 		f.turnstileSignInEnabled, f.recoveryEmailMode, f.suppressChannelPostDelivery, f.signUpTermsOfService,
-		f.stickerSets, f.photoThumbs,
+		f.stickerSets, f.uploadMaxFileBytes, f.photoThumbs,
 	)
 	f.registry = registry
 	f.setServerStop(t.Cleanup, stop)

@@ -31,6 +31,10 @@ import (
 
 const dcID = 2
 
+// contactCap admits the fixture's 10,000 owner contacts; the shipped
+// per-account bound is 5,000.
+const contactCap = 10_000
+
 // channelParticipantCap admits the fixture's 100,000-subscriber channel; the
 // shipped per-channel bound is 10,000.
 const channelParticipantCap = 200_000
@@ -57,6 +61,7 @@ func bootServer(t *testing.T, ctx context.Context, dsn, blobDir string, key *rsa
 	st, err := store.Open(ctx, dsn, pgtest.EncKey(),
 		store.WithBlobStore(blobs),
 		store.WithQueryTracer(tracer),
+		store.WithMaxContactsPerUser(contactCap),
 		store.WithMaxChannelParticipants(channelParticipantCap),
 		store.WithLogger(slog.New(slog.DiscardHandler)))
 	if err != nil {
