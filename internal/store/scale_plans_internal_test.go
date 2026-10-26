@@ -522,39 +522,66 @@ func TestChannelHistoryPageByDateReadsOnlyItsWindow(t *testing.T) {
 	}
 	defer traced.Close()
 	const pageSize = 100
+	assertReadBound := func(label string) {
+		t.Helper()
+		recorded.mu.Lock()
+		queries := append([]pgx.TraceQueryStartData(nil), recorded.queries...)
+		recorded.mu.Unlock()
+		if len(queries) != 1 {
+			t.Fatalf("%s issued %d statements, want 1", label, len(queries))
+		}
+		var raw []byte
+		if err := pool.QueryRow(ctx, "EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) "+queries[0].SQL, queries[0].Args...).Scan(&raw); err != nil {
+			t.Fatalf("explain %s: %v", label, err)
+		}
+		var plans []struct {
+			Plan scalePlan `json:"Plan"`
+		}
+		if err := json.Unmarshal(raw, &plans); err != nil {
+			t.Fatalf("decode %s plan: %v", label, err)
+		}
+		if len(plans) != 1 {
+			t.Fatalf("%s explain returned %d plans, want 1", label, len(plans))
+		}
+		readRows := plans[0].Plan.rowsReadFor("channel_messages")
+		if readRows > 2*pageSize+10 {
+			t.Fatalf("%s read %.0f channel rows for a %d-row page, want at most %d", label, readRows, pageSize, 2*pageSize+10)
+		}
+	}
 	rows, err := db.New(traced).ChannelHistoryPageByDate(ctx, db.ChannelHistoryPageByDateParams{
 		ChannelID: 1, OwnerID: 1, OffsetDate: 10000, Lim: pageSize,
 	})
 	if err != nil {
 		t.Fatalf("channel history page by date: %v", err)
 	}
-	if len(rows) != pageSize || rows[0].LocalID != 9999 || rows[len(rows)-1].LocalID != 9900 {
-		t.Fatalf("channel date history page = %d rows from %d to %d, want %d rows from 9999 to 9900", len(rows), rows[0].LocalID, rows[len(rows)-1].LocalID, pageSize)
+	if len(rows) != pageSize {
+		t.Fatalf("channel date history page returned %d rows, want %d", len(rows), pageSize)
+	}
+	if rows[0].LocalID != 9999 || rows[len(rows)-1].LocalID != 9900 {
+		t.Fatalf("channel date history page starts at %d and ends at %d, want 9999 to 9900", rows[0].LocalID, rows[len(rows)-1].LocalID)
 	}
 
+	assertReadBound("channel date history page")
+
+	if _, err := pool.Exec(ctx, `UPDATE channel_participants SET available_min_id = 19800 WHERE channel_id = 1 AND user_id = 1`); err != nil {
+		t.Fatalf("set channel date history floor: %v", err)
+	}
 	recorded.mu.Lock()
-	queries := append([]pgx.TraceQueryStartData(nil), recorded.queries...)
+	recorded.queries = nil
 	recorded.mu.Unlock()
-	if len(queries) != 1 {
-		t.Fatalf("channel date history page issued %d statements, want 1", len(queries))
+	rows, err = db.New(traced).ChannelHistoryPageByDate(ctx, db.ChannelHistoryPageByDateParams{
+		ChannelID: 1, OwnerID: 1, OffsetDate: 10000, AddOffset: -pageSize, Lim: pageSize,
+	})
+	if err != nil {
+		t.Fatalf("channel history page by date with hidden pre-history: %v", err)
 	}
-	var raw []byte
-	if err := pool.QueryRow(ctx, "EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) "+queries[0].SQL, queries[0].Args...).Scan(&raw); err != nil {
-		t.Fatalf("explain channel date history page: %v", err)
+	if len(rows) != pageSize {
+		t.Fatalf("channel date history page with hidden pre-history returned %d rows, want %d", len(rows), pageSize)
 	}
-	var plans []struct {
-		Plan scalePlan `json:"Plan"`
+	if rows[0].LocalID != 19900 || rows[len(rows)-1].LocalID != 19801 {
+		t.Fatalf("channel date history page with hidden pre-history starts at %d and ends at %d, want 19900 to 19801", rows[0].LocalID, rows[len(rows)-1].LocalID)
 	}
-	if err := json.Unmarshal(raw, &plans); err != nil {
-		t.Fatalf("decode channel date history page plan: %v", err)
-	}
-	if len(plans) != 1 {
-		t.Fatalf("channel date history page explain returned %d plans, want 1", len(plans))
-	}
-	readRows := plans[0].Plan.rowsReadFor("channel_messages")
-	if readRows > 2*pageSize+10 {
-		t.Fatalf("channel date history page read %.0f channel rows for a %d-row page, want at most %d", readRows, pageSize, 2*pageSize+10)
-	}
+	assertReadBound("channel date history page with hidden pre-history")
 }
 
 func scaleQueryError[T any](_ T, err error) error { return err }

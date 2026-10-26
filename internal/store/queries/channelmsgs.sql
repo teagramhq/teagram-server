@@ -363,9 +363,32 @@ WITH history_tail AS MATERIALIZED (
       )
     ORDER BY cm.local_id DESC
     LIMIT 1
+), first_visible AS MATERIALIZED (
+    -- Find the member's floor by local_id first, so a date jump into hidden
+    -- pre-history anchors at the first visible post without scanning that range.
+    SELECT visible.local_id, visible.date
+    FROM channel_participants cp
+    CROSS JOIN LATERAL (
+        SELECT cm.local_id, cm.date
+        FROM channel_messages cm
+        WHERE cm.channel_id = cp.channel_id
+          AND cm.deleted = false
+          AND (cm.expires_at IS NULL OR cm.expires_at > statement_timestamp())
+          AND cm.local_id > cp.available_min_id
+        ORDER BY cm.local_id
+        LIMIT 1
+    ) AS visible
+    WHERE cp.channel_id = sqlc.arg(channel_id)::bigint
+      AND cp.user_id = sqlc.arg(owner_id)::bigint
+      AND (cp.banned_until IS NULL OR cp.banned_until <= now())
+      AND EXISTS (
+          SELECT 1 FROM channels c
+          WHERE c.id = sqlc.arg(channel_id)::bigint AND c.deleted_at IS NULL
+      )
 ), date_anchor AS MATERIALIZED (
     SELECT cm.local_id
-    FROM channel_messages cm
+    FROM first_visible fv
+    JOIN channel_messages cm ON cm.channel_id = sqlc.arg(channel_id)::bigint
     JOIN channel_participants cp
       ON cp.channel_id = cm.channel_id
      AND cp.user_id = sqlc.arg(owner_id)::bigint
@@ -374,6 +397,7 @@ WITH history_tail AS MATERIALIZED (
       AND (cm.expires_at IS NULL OR cm.expires_at > statement_timestamp())
       AND cm.local_id > cp.available_min_id
       AND (cp.banned_until IS NULL OR cp.banned_until <= now())
+      AND fv.date < to_timestamp(sqlc.arg(offset_date)::bigint::double precision)
       AND cm.date >= to_timestamp(sqlc.arg(offset_date)::bigint::double precision)
       AND EXISTS (
           SELECT 1 FROM channels c
@@ -383,6 +407,8 @@ WITH history_tail AS MATERIALIZED (
     LIMIT 1
 ), cursor AS MATERIALIZED (
     SELECT COALESCE(
+        (SELECT local_id FROM first_visible
+         WHERE date >= to_timestamp(sqlc.arg(offset_date)::bigint::double precision)),
         (SELECT local_id FROM date_anchor),
         (SELECT local_id + 1 FROM history_tail)
     ) AS local_id
