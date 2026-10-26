@@ -170,6 +170,15 @@ def _inventory_labels(value: str) -> dict[str, str] | None:
     return labels
 
 
+def _inventory_mounts(value: str) -> list[dict[str, Any]]:
+    mounts = _inventory_json(value, list)
+    if mounts is None:
+        return []
+    if any(not isinstance(mount, dict) for mount in mounts):
+        raise ValueError("invalid Docker mount inventory")
+    return sorted(mounts, key=lambda mount: json.dumps(mount, sort_keys=True, separators=(",", ":")))
+
+
 def collect_docker_resource_inventory(call: Callable[[list[str]], bytes]) -> dict[str, Any]:
     """Read only Docker metadata needed to prove foreign-resource isolation."""
     containers: dict[str, dict[str, Any]] = {}
@@ -194,7 +203,7 @@ def collect_docker_resource_inventory(call: Callable[[list[str]], bytes]) -> dic
             raise ValueError("Docker container identity changed during inventory")
         labels = _inventory_labels(fields[4])
         attachments = _inventory_json(fields[14], dict)
-        mounts = _inventory_json(fields[15], list)
+        mounts = _inventory_mounts(fields[15])
         exposed_ports = _inventory_json(fields[16], dict)
         port_bindings = _inventory_json(fields[17], dict)
         containers[identifier] = {
@@ -6479,27 +6488,50 @@ dump_path=$2
                 return None
             return set()
         try:
-            containers = self.cleanup_container_inventory()
-        except DrillFailure:
+            containers = self.docker_resource_inventory("cleanup")["containers"]
+        except (DrillFailure, KeyError, TypeError, ValueError):
             return None
-        identifiers = {identifier for identifier, _ in containers}
-        names = {name for _, name in containers}
-        known = {
-            (record.get("id"), record.get("name"))
-            for record in self.manifest.get("containers", [])
-        }
+        if not isinstance(containers, dict):
+            return None
+        known = {record.get("id"): record.get("name") for record in self.manifest.get("containers", [])}
         pending = self.manifest.get("pending_container") or {}
-        if pending:
-            known.add((pending.get("id") or "", pending.get("name")))
-        if any((identifier, name) not in known for identifier, name in containers):
+        if pending.get("name"):
+            known[pending.get("id") or ""] = pending["name"]
+        known_names = set(known.values())
+        try:
+            run_dir = self.run_dir.resolve()
+        except (OSError, RuntimeError):
             return None
         retained: set[str] = set()
-        for record in self.manifest.get("containers", []):
-            if record.get("id") in identifiers and record.get("name") in names:
-                retained.update(mount.get("source", "") for mount in record.get("mounts", []))
-        if pending and any(name == pending.get("name") for _, name in containers):
-            for mount in pending.get("mounts", []):
-                retained.add(mount.get("source", ""))
+        for identifier, record in containers.items():
+            if not isinstance(record, dict):
+                return None
+            name = record.get("name")
+            if identifier in known and name != known[identifier]:
+                return None
+            if identifier not in known and name in known_names:
+                return None
+            mounts = record.get("mounts")
+            if not isinstance(mounts, list):
+                return None
+            for mount in mounts:
+                if not isinstance(mount, dict):
+                    return None
+                source = mount.get("Source")
+                if source is not None and not isinstance(source, str):
+                    return None
+                if source:
+                    source_path = Path(source)
+                    if not source_path.is_absolute():
+                        return None
+                    try:
+                        source_path = source_path.resolve()
+                    except (OSError, RuntimeError):
+                        return None
+                    # Keep unrelated workloads, but refuse mounts that expose or retain this private run tree.
+                    if source_path == run_dir or source_path in run_dir.parents or run_dir in source_path.parents:
+                        return None
+                    retained.add(str(source_path))
         return {path for path in retained if path}
 
     def remove_unmounted_files(self, *, keep_all: bool) -> bool:

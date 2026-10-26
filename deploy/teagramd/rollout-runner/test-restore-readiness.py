@@ -948,7 +948,15 @@ class RestoreReadinessContractTests(unittest.TestCase):
                 "Mode": "z",
                 "RW": True,
                 "Propagation": "rprivate",
-            }
+            },
+            {
+                "Type": "bind",
+                "Source": "/srv/foreign-config",
+                "Destination": "/etc/foreign-config",
+                "Mode": "ro",
+                "RW": False,
+                "Propagation": "rprivate",
+            },
         ]
         port_bindings = {"5432/tcp": [{"HostIp": "127.0.0.1", "HostPort": "49153"}]}
         attachments = {
@@ -1043,11 +1051,14 @@ class RestoreReadinessContractTests(unittest.TestCase):
         self.assertEqual(container["name"], container_name)
         self.assertEqual(container["labels"], labels)
         self.assertEqual(container["attachments"], attachments)
-        self.assertEqual(container["mounts"], mounts)
+        expected_mounts = sorted(mounts, key=lambda item: json.dumps(item, sort_keys=True, separators=(",", ":")))
+        self.assertEqual(container["mounts"], expected_mounts)
         self.assertEqual(container["published_ports"], port_bindings)
         self.assertEqual(container["state"]["running"], "true")
         self.assertEqual(inventory["volumes"][volume_name]["labels"], labels)
         self.assertEqual(inventory["networks"][network_id]["attachments"][container_id]["Name"], container_name)
+        container_fields[15] = json.dumps(list(reversed(mounts)))
+        self.assertEqual(RESTORE_READINESS.collect_docker_resource_inventory(call), inventory)
         RESTORE_READINESS.require_no_docker_identity_collisions(inventory, "9" * 32, "preflight")
         self.assertNotIn(".Config.Env", RESTORE_READINESS.CONTAINER_INVENTORY_TEMPLATE)
         self.assertNotIn(".State.Health.Log", RESTORE_READINESS.CONTAINER_INVENTORY_TEMPLATE)
@@ -1070,6 +1081,61 @@ class RestoreReadinessContractTests(unittest.TestCase):
             self.assertIn(f'(index .{parent} "{key}")', RESTORE_READINESS.CONTAINER_INVENTORY_TEMPLATE)
         with self.assertRaises(ValueError):
             RESTORE_READINESS._inventory_labels('{"unexpected":[]}')
+
+    def test_mounted_sources_includes_foreign_container_mounts(self) -> None:
+        foreign_id = "e" * 64
+        foreign_mount = {
+            "Type": "volume",
+            "Source": "/var/lib/docker/volumes/foreign-volume/_data",
+            "Destination": "/foreign",
+        }
+        drill = object.__new__(RESTORE_READINESS.Drill)
+        drill.manifest = {
+            "resource_creation_started": True,
+            "containers": [],
+            "pending_container": None,
+        }
+        drill.run_dir = Path("/run/restore-readiness.1234abcd")
+        drill.docker_resource_inventory = Mock(
+            return_value={
+                "containers": {
+                    foreign_id: {
+                        "name": "foreign-postgres",
+                        "mounts": [foreign_mount],
+                    }
+                }
+            }
+        )
+
+        self.assertEqual(drill.mounted_sources(), {foreign_mount["Source"]})
+
+    def test_mounted_sources_refuses_foreign_mount_of_private_run_directory(self) -> None:
+        foreign_id = "e" * 64
+        drill = object.__new__(RESTORE_READINESS.Drill)
+        drill.manifest = {
+            "resource_creation_started": True,
+            "containers": [],
+            "pending_container": None,
+        }
+        drill.run_dir = Path("/run/restore-readiness.1234abcd")
+        drill.docker_resource_inventory = Mock(
+            return_value={
+                "containers": {
+                    foreign_id: {
+                        "name": "foreign-host-runtime",
+                        "mounts": [
+                            {
+                                "Type": "bind",
+                                "Source": "/run",
+                                "Destination": "/host-run",
+                            }
+                        ],
+                    }
+                }
+            }
+        )
+
+        self.assertIsNone(drill.mounted_sources())
 
     def test_docker_identity_collision_fixtures_refuse_with_fixed_category(self) -> None:
         token = "a" * 32
