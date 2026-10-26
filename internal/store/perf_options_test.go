@@ -123,3 +123,40 @@ func TestMaxContactsPerUserOptionBoundsAdmission(t *testing.T) {
 		t.Fatalf("third contact: changed=%v err=%v, want ErrContactLimit", changed, err)
 	}
 }
+
+func TestMaxContactsPerUserOptionBoundsImport(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	s, err := store.Open(ctx, pgtest.DSN(t), pgtest.EncKey(), store.WithoutBlobStore(), store.WithMaxContactsPerUser(2))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := s.Close(); err != nil {
+			t.Error(err)
+		}
+	})
+	owner, err := s.CreateUser(ctx, "+15553330201")
+	if err != nil {
+		t.Fatal(err)
+	}
+	users := make([]store.User, 3)
+	for i, phone := range []string{"+15553330202", "+15553330203", "+15553330204"} {
+		if users[i], err = s.CreateUser(ctx, phone); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if changed, err := s.AddContact(ctx, owner.ID, users[0].ID); err != nil || !changed {
+		t.Fatalf("seed contact: changed=%v err=%v", changed, err)
+	}
+	book := []store.ContactImportInput{
+		{ClientID: 1, Phone: users[1].Phone},
+		{ClientID: 2, Phone: users[2].Phone},
+	}
+	if _, err := s.ImportContacts(ctx, owner.ID, book); !errors.Is(err, store.ErrContactLimit) {
+		t.Fatalf("import past a two-seat bound error = %v, want ErrContactLimit", err)
+	}
+	if matches, err := s.ImportContacts(ctx, owner.ID, book[:1]); err != nil || len(matches) != 1 {
+		t.Fatalf("import up to the bound = %+v err=%v, want one match", matches, err)
+	}
+}

@@ -112,7 +112,7 @@ func (s *Store) ImportContacts(ctx context.Context, ownerID int64, inputs []Cont
 		if err != nil {
 			return nil, fmt.Errorf("import contacts read owner state: %w", err)
 		}
-		if state.ContactCount+int64(len(newIDs)) > MaxContactsPerUser {
+		if state.ContactCount+int64(len(newIDs)) > int64(s.maxContactsPerUser) {
 			return nil, ErrContactLimit
 		}
 
