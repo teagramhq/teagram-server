@@ -1819,7 +1819,10 @@ jobs:
         env:
           TESTCONTAINERS_RYUK_DISABLED: "true"
         run: |
-          env -u TG_POSTGRES_DSN -u TG_AUTHKEY_ENC_KEY -u TG_PUBLIC_LINK_PREFIX \
+          docker cp teagramd:/var/lib/teagramd/server_key.pem "$RUNNER_TEMP/sticker-smoke-server-key.pem"
+          chmod 600 "$RUNNER_TEMP/sticker-smoke-server-key.pem"
+          TG_STICKER_BUNDLE_SMOKE_ADDRESS=127.0.0.1:2443 \
+            TG_STICKER_BUNDLE_SMOKE_RSA_KEY="$RUNNER_TEMP/sticker-smoke-server-key.pem" \
             TG_STICKER_CATALOG_BUNDLE="$PWD/build/sticker-bundle" \
             go test ./test/e2e -run '^TestStickerBundleCatalogue$' -count=1
 
@@ -2263,7 +2266,21 @@ jobs:
       - name: Smoke featured bundle packs through the real client
         run: |
           go mod download
-          env -u TG_POSTGRES_DSN -u TG_AUTHKEY_ENC_KEY -u TG_PUBLIC_LINK_PREFIX \
+          export COMPOSE_FILE=docker-compose.yml:docker-compose.local-blobs.yml
+          teagramd_id=$(docker compose ps -q teagramd)
+          postgres_id=$(docker compose ps -q postgres)
+          test -n "$teagramd_id" && test -n "$postgres_id"
+          key_volume=$(docker inspect "$teagramd_id" --format '{{range .Mounts}}{{if and (eq .Type "volume") (eq .Destination "/var/lib/teagramd")}}{{.Name}}{{end}}{{end}}')
+          test -n "$key_volume"
+          TG_AUTHKEY_ENC_KEY=$(docker run --rm -v "$key_volume":/key "$BUSYBOX_IMAGE" cat /key/enc_key.hex)
+          postgres_ip=$(docker inspect "$postgres_id" --format '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}')
+          test -n "$postgres_ip"
+          docker cp "$teagramd_id":/var/lib/teagramd/server_key.pem "$RUNNER_TEMP/sticker-smoke-server-key.pem"
+          chmod 600 "$RUNNER_TEMP/sticker-smoke-server-key.pem"
+          TG_POSTGRES_DSN="postgres://postgres:ci-local-mode-postgres@${postgres_ip}:5432/teagram?sslmode=disable" \
+            TG_AUTHKEY_ENC_KEY="$TG_AUTHKEY_ENC_KEY" \
+            TG_STICKER_BUNDLE_SMOKE_ADDRESS=127.0.0.1:2443 \
+            TG_STICKER_BUNDLE_SMOKE_RSA_KEY="$RUNNER_TEMP/sticker-smoke-server-key.pem" \
             TG_STICKER_CATALOG_BUNDLE="$PWD/build/sticker-bundle" \
             go test ./test/e2e -run '^TestStickerBundleCatalogue$' -count=1
 
