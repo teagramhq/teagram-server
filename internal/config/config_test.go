@@ -66,6 +66,7 @@ func TestLoadRejectsRetiredBootstrapEnvBeforeInitialization(t *testing.T) {
 func TestLoadDefaults(t *testing.T) {
 	t.Setenv("TG_POSTGRES_DSN", "postgres://localhost/tg")
 	t.Setenv("TG_AUTHKEY_ENC_KEY", validEncKey)
+	t.Setenv("TG_UPLOAD_MAX_BYTES", "")
 	t.Setenv("TG_RECOVERY_EMAIL", "off")
 	cfg, err := config.Load(discardLog())
 	if err != nil {
@@ -91,6 +92,9 @@ func TestLoadDefaults(t *testing.T) {
 	}
 	if cfg.MaxFileBytes != 104857600 {
 		t.Errorf("MaxFileBytes = %d, want 104857600", cfg.MaxFileBytes)
+	}
+	if cfg.UploadMaxFileBytes != 0 {
+		t.Errorf("UploadMaxFileBytes = %d, want 0 when TG_UPLOAD_MAX_BYTES is unset", cfg.UploadMaxFileBytes)
 	}
 	if cfg.UploadPartTTL != 6*time.Hour {
 		t.Errorf("UploadPartTTL = %v, want 6h", cfg.UploadPartTTL)
@@ -544,6 +548,7 @@ func TestLoadMaxUserStorageBytes(t *testing.T) {
 func TestLoadMaxFileBytes(t *testing.T) {
 	t.Setenv("TG_POSTGRES_DSN", "postgres://localhost/tg")
 	t.Setenv("TG_AUTHKEY_ENC_KEY", validEncKey)
+	t.Setenv("TG_UPLOAD_MAX_BYTES", "")
 	tests := map[string]struct {
 		raw     string
 		want    int64
@@ -577,6 +582,9 @@ func TestLoadMaxFileBytes(t *testing.T) {
 			if cfg.MaxFileBytes != tc.want {
 				t.Errorf("MaxFileBytes = %d, want %d", cfg.MaxFileBytes, tc.want)
 			}
+			if cfg.UploadMaxFileBytes != 0 {
+				t.Errorf("UploadMaxFileBytes = %d, want 0 when TG_UPLOAD_MAX_BYTES is unset", cfg.UploadMaxFileBytes)
+			}
 		})
 	}
 }
@@ -594,6 +602,9 @@ func TestLoadUploadMaxBytesOverridesMaxFileBytes(t *testing.T) {
 	if cfg.MaxFileBytes != 512000 {
 		t.Fatalf("MaxFileBytes = %d, want TG_UPLOAD_MAX_BYTES value 512000", cfg.MaxFileBytes)
 	}
+	if cfg.UploadMaxFileBytes != 512000 {
+		t.Fatalf("UploadMaxFileBytes = %d, want TG_UPLOAD_MAX_BYTES value 512000", cfg.UploadMaxFileBytes)
+	}
 }
 
 func TestLoadUploadMaxBytesUnsetKeepsCurrentLimit(t *testing.T) {
@@ -608,6 +619,9 @@ func TestLoadUploadMaxBytesUnsetKeepsCurrentLimit(t *testing.T) {
 	}
 	if cfg.MaxFileBytes != 2097152 {
 		t.Fatalf("MaxFileBytes = %d, want existing TG_MAX_FILE_BYTES value 2097152", cfg.MaxFileBytes)
+	}
+	if cfg.UploadMaxFileBytes != 0 {
+		t.Fatalf("UploadMaxFileBytes = %d, want 0 when TG_UPLOAD_MAX_BYTES is unset", cfg.UploadMaxFileBytes)
 	}
 }
 
