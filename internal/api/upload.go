@@ -10,12 +10,10 @@ import (
 	"github.com/teagramhq/teagram-server/internal/store"
 )
 
-// maxFileParts bounds a part index. It is derived rather than configured:
-// TG_MAX_FILE_BYTES over the 512 KiB protocol part size is the most parts a
-// legal file can have, so anything past it is rejected at save time instead of
-// letting the parts table absorb the difference until assembly.
+// maxFileParts bounds a part index using the smallest part size real clients
+// choose. The byte total in the store remains the per-file size gate.
 func (h *handlers) maxFileParts() int {
-	return int((h.maxFileBytes + store.MaxPartBytes - 1) / store.MaxPartBytes)
+	return int((h.maxFileBytes + store.MinPartBytesForRowCap - 1) / store.MinPartBytesForRowCap)
 }
 
 // handleSaveFilePart serves upload.saveFilePart: it stores one part of an
@@ -29,7 +27,10 @@ func (h *handlers) handleSaveFilePart(r *mtproto.Request) (bin.Encoder, error) {
 	if r.UserID == 0 {
 		return nil, errAuthKeyUnreg
 	}
-	if req.FileID == 0 || req.FilePart < 0 || req.FilePart >= h.maxFileParts() {
+	if req.FileID == 0 || req.FilePart < 0 {
+		return nil, errFilePartInvalid
+	}
+	if req.FilePart >= h.maxFileParts() {
 		return nil, errFilePartInvalid
 	}
 	if err := h.saveUploadPart(r, req.FileID, req.FilePart, req.Bytes); err != nil {
@@ -38,12 +39,10 @@ func (h *handlers) handleSaveFilePart(r *mtproto.Request) (bin.Encoder, error) {
 	return &tg.BoolTrue{}, nil
 }
 
-// handleSaveBigFilePart serves upload.saveBigFilePart. It validates
-// file_total_parts but does not store it: the per-file byte cap is enforced on
-// every single save inside the store transaction, so a client that changes its
-// declared total between calls cannot get more bytes into the parts table than
-// the cap allows, and assembly re-derives the true part count from the rows
-// rather than trusting anything the client said.
+// handleSaveBigFilePart serves upload.saveBigFilePart. It rejects a declared
+// upload that already exceeds the per-file cap before writing its first part.
+// The store also checks the accumulated bytes in every save transaction, so a
+// client that changes its declared total between calls cannot exceed the cap.
 func (h *handlers) handleSaveBigFilePart(r *mtproto.Request) (bin.Encoder, error) {
 	var req tg.UploadSaveBigFilePartRequest
 	if err := req.Decode(r.Buf); err != nil {
@@ -52,13 +51,25 @@ func (h *handlers) handleSaveBigFilePart(r *mtproto.Request) (bin.Encoder, error
 	if r.UserID == 0 {
 		return nil, errAuthKeyUnreg
 	}
-	if req.FileID == 0 || req.FilePart < 0 || req.FilePart >= h.maxFileParts() {
+	if req.FileID == 0 || req.FilePart < 0 {
 		return nil, errFilePartInvalid
 	}
-	if req.FileTotalParts <= 0 || req.FileTotalParts > h.maxFileParts() {
+	if req.FileTotalParts <= 0 {
 		return nil, errFilePartInvalid
 	}
 	if req.FilePart >= req.FileTotalParts {
+		return nil, errFilePartInvalid
+	}
+	if req.FileTotalParts > h.maxFileParts() || declaredUploadTooLarge(req.FileTotalParts, len(req.Bytes), h.maxFileBytes) {
+		if err := h.checkUploadPartRateLimit(r, req.Bytes); err != nil {
+			return nil, err
+		}
+		if err := h.discardOversizedUpload(r, req.FileID); err != nil {
+			return nil, err
+		}
+		return nil, errFilePartTooBig
+	}
+	if req.FilePart >= h.maxFileParts() {
 		return nil, errFilePartInvalid
 	}
 	if err := h.saveUploadPart(r, req.FileID, req.FilePart, req.Bytes); err != nil {
@@ -67,8 +78,8 @@ func (h *handlers) handleSaveBigFilePart(r *mtproto.Request) (bin.Encoder, error
 	return &tg.BoolTrue{}, nil
 }
 
-// saveUploadPart is the rate limit, the store call and the error mapping both
-// save handlers share.
+// saveUploadPart is the rate limits, store call and error mapping both save
+// handlers share.
 //
 // The limit is checked here rather than in each handler so the two surfaces
 // cannot drift onto separate budgets — they write the same rows, and a budget
@@ -77,7 +88,7 @@ func (h *handlers) handleSaveBigFilePart(r *mtproto.Request) (bin.Encoder, error
 // caps are enforced by writing first and reading the sums back, so reaching the
 // store at all is the write amplification this limit exists to bound.
 func (h *handlers) saveUploadPart(r *mtproto.Request, fileID int64, part int, payload []byte) error {
-	if err := h.checkRateLimit(r, "save_file_part", h.rateLimitSaveFilePart); err != nil {
+	if err := h.checkUploadPartRateLimit(r, payload); err != nil {
 		return err
 	}
 	err := h.store.SaveUploadPart(r.Ctx, r.UserID, fileID, part, payload, h.maxFileBytes)
@@ -85,6 +96,9 @@ func (h *handlers) saveUploadPart(r *mtproto.Request, fileID int64, part int, pa
 	case err == nil:
 		return nil
 	case errors.Is(err, store.ErrPartTooLarge), errors.Is(err, store.ErrFileTooLarge):
+		if err := h.discardOversizedUpload(r, fileID); err != nil {
+			return err
+		}
 		return errFilePartTooBig
 	// ErrTooManyParts is the row-count half of the same outstanding cap as
 	// ErrUploadQuota, and clears the same way, so it reports the same error.
@@ -94,4 +108,30 @@ func (h *handlers) saveUploadPart(r *mtproto.Request, fileID int64, part int, pa
 		h.log.Error("save file part", "user_id", r.UserID, "err", err)
 		return errInternal
 	}
+}
+
+func (h *handlers) checkUploadPartRateLimit(r *mtproto.Request, payload []byte) error {
+	if err := h.checkRateLimit(r, "save_file_part", h.rateLimitSaveFilePart); err != nil {
+		return err
+	}
+	if len(payload) == 0 {
+		return nil
+	}
+	result, err := h.store.CheckRateLimitCost(r.Ctx, r.UserID, "save_file_part_bytes", h.rateLimitUploadBytes, len(payload))
+	return h.finishRateLimitCost(r, "save_file_part", result, err)
+}
+
+func (h *handlers) discardOversizedUpload(r *mtproto.Request, fileID int64) error {
+	if _, err := h.store.DeleteUploadParts(r.Ctx, r.UserID, fileID); err != nil {
+		h.log.Error("discard oversized upload", "user_id", r.UserID, "file_id", fileID, "err", err)
+		return errInternal
+	}
+	return nil
+}
+
+func declaredUploadTooLarge(totalParts, partSize int, maxFileBytes int64) bool {
+	if totalParts <= 0 || partSize <= 0 {
+		return false
+	}
+	return int64(totalParts) > maxFileBytes/int64(partSize)
 }
