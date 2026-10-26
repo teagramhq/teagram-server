@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run pull-base-images.sh against a fake docker that fails on demand."""
+"""Exercise base-image pulls and performance Postgres setup with fake Docker."""
 
 from __future__ import annotations
 
@@ -142,7 +142,9 @@ class PullBaseImagesTests(unittest.TestCase):
             f"::error::pull of {IMAGES[0]} failed after 4 attempts", result.stdout
         )
 
-    def test_perf_postgres_waits_for_tcp_listener(self) -> None:
+    def test_perf_postgres_waits_for_tcp_listener_and_provisions_restore_role(
+        self,
+    ) -> None:
         fake_docker = """#!/usr/bin/env bash
 set -euo pipefail
 case "$1" in
@@ -151,9 +153,15 @@ case "$1" in
   exec)
     shift
     shift
-    printf '%s\\n' "$*" >> "$FAKE_DOCKER_DIR/readiness"
-    [[ " $* " == *" -h 127.0.0.1 "* ]] || exit 0
-    [ "$(wc -l < "$FAKE_DOCKER_DIR/readiness")" -gt 1 ]
+    if [[ " $* " == *" pg_isready "* ]]; then
+      printf '%s\\n' "$*" >> "$FAKE_DOCKER_DIR/readiness"
+      [ "$(wc -l < "$FAKE_DOCKER_DIR/readiness")" -gt 1 ]
+    elif [[ " $* " == *" psql "* ]]; then
+      printf '%s\\n' "$*" >> "$FAKE_DOCKER_DIR/sql"
+    else
+      echo "unexpected docker exec $*" >&2
+      exit 64
+    fi
     ;;
   *) echo "unexpected docker $*" >&2; exit 64 ;;
 esac
@@ -161,6 +169,7 @@ esac
         docker = self.dir / "bin" / "docker"
         docker.write_text(fake_docker, encoding="utf-8")
         cache = self.dir / "perf-cache"
+        (self.dir / "sql").touch()
         result = subprocess.run(
             ["bash", str(ROOT / ".github/scripts/perf-postgres.sh")],
             env={
@@ -174,10 +183,17 @@ esac
             check=False,
         )
         readiness = (self.dir / "readiness").read_text(encoding="utf-8").splitlines()
+        sql = (self.dir / "sql").read_text(encoding="utf-8").splitlines()
 
         self.assertEqual(0, result.returncode, result.stdout + result.stderr)
         self.assertEqual(2, len(readiness))
         self.assertTrue(all("-h 127.0.0.1" in call for call in readiness))
+        self.assertEqual(1, len(sql))
+        self.assertIn(
+            "CREATE ROLE browser_acceptance_probe LOGIN NOSUPERUSER NOCREATEDB "
+            "NOCREATEROLE NOINHERIT NOREPLICATION NOBYPASSRLS",
+            sql[0],
+        )
 
     def test_real_client_workflow_pulls_fixture_bases_before_starting(self) -> None:
         workflow = (
