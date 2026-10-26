@@ -70,6 +70,13 @@ func bootServerWithRegMode(t *testing.T, ctx context.Context, key *rsa.PrivateKe
 // and rate-limit config, and returns a stop function.
 func bootServerWithRegAndLimits(t *testing.T, ctx context.Context, key *rsa.PrivateKey, dcID int, st *store.Store, log *slog.Logger, ln net.Listener, regMode config.RegistrationMode, rateLimits config.RateLimitsConfig) func() {
 	t.Helper()
+	return bootServerWithExchangeLimits(t, ctx, key, dcID, st, log, ln, regMode, rateLimits, mtproto.DefaultExchangeLimits())
+}
+
+// bootServerWithExchangeLimits boots a server like bootServerWithRegAndLimits
+// with the given key-exchange budgets, and returns a stop function.
+func bootServerWithExchangeLimits(t *testing.T, ctx context.Context, key *rsa.PrivateKey, dcID int, st *store.Store, log *slog.Logger, ln net.Listener, regMode config.RegistrationMode, rateLimits config.RateLimitsConfig, exchangeLimits mtproto.ExchangeLimits) func() {
+	t.Helper()
 	tgcfg := fixtureConfigForListener(t, dcID, ln)
 	blobs, err := blob.NewLocal(t.TempDir())
 	if err != nil {
@@ -77,6 +84,9 @@ func bootServerWithRegAndLimits(t *testing.T, ctx context.Context, key *rsa.Priv
 	}
 	handler := api.New(st, dcID, tgcfg, log, true, 100<<20, blobs, 2<<30, pgtest.PeerDeriver(), pgtest.PhotoDeriver(), rateLimits, regMode)
 	server := mtproto.New(exchange.PrivateKey{RSA: key}, dcID, mtproto.NewPgAuthKeyStore(st), handler, log)
+	if err := server.SetExchangeLimits(exchangeLimits); err != nil {
+		t.Fatalf("exchange limits: %v", err)
+	}
 
 	srvCtx, srvCancel := context.WithCancel(ctx)
 	serveErr := make(chan error, 1)
@@ -497,9 +507,10 @@ func TestSequentialUsernameAccountSignInsFromSameClientIP(t *testing.T) {
 
 // TestFreshUsernameSignInAfterSameIPExchangeBudgetIsSpent reproduces a fresh
 // client sign-in after earlier contexts have spent the shared per-network
-// exchange budget. It spends the default budget through fresh clients, so it
-// runs serially to avoid contention with E2E tests sharing the Postgres harness.
+// exchange budget. The tailnet budget is lowered so spending it takes a few
+// exchanges rather than the production default's twenty.
 func TestFreshUsernameSignInAfterSameIPExchangeBudgetIsSpent(t *testing.T) {
+	t.Parallel()
 	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 	defer cancel()
 
@@ -524,7 +535,9 @@ func TestFreshUsernameSignInAfterSameIPExchangeBudgetIsSpent(t *testing.T) {
 	if !ok {
 		t.Fatalf("listener addr type = %T", ln.Addr())
 	}
-	stop := bootServerWithRegMode(t, ctx, key, dcID, st, slog.New(budgetLogs), ln, config.RegistrationInvite)
+	exchangeLimits := mtproto.DefaultExchangeLimits()
+	exchangeLimits.TailnetPerNetwork.Limit = 2
+	stop := bootServerWithExchangeLimits(t, ctx, key, dcID, st, slog.New(budgetLogs), ln, config.RegistrationInvite, config.RateLimitsConfig{}, exchangeLimits)
 	t.Cleanup(stop)
 
 	const password = "testpassword"
@@ -540,7 +553,7 @@ func TestFreshUsernameSignInAfterSameIPExchangeBudgetIsSpent(t *testing.T) {
 		t.Fatalf("first account sign-in: %v", err)
 	}
 
-	limit := mtproto.DefaultExchangeLimits().TailnetPerNetwork.Limit
+	limit := exchangeLimits.TailnetPerNetwork.Limit
 	refused := false
 	for attempt := 1; attempt <= limit; attempt++ {
 		client := newUsernameClient(addr.Port, key, dcID, nil)
@@ -560,7 +573,7 @@ func TestFreshUsernameSignInAfterSameIPExchangeBudgetIsSpent(t *testing.T) {
 		}
 	}
 	if !refused {
-		t.Fatalf("%d fresh contexts did not exhaust the default tailnet exchange budget", limit)
+		t.Fatalf("%d fresh contexts did not exhaust the tailnet exchange budget", limit)
 	}
 	secondClient := newUsernameClient(addr.Port, key, dcID, nil)
 	secondCtx, secondCancel := context.WithTimeout(ctx, 10*time.Second)
