@@ -245,7 +245,7 @@ unset COMPOSE_ENV_FILES
 # origin/main, and the same files are used by the rollout after the backup.
 # shellcheck disable=SC2174 # only the runner directory is new
 mkdir -m 700 -p "$R/teagramd-rollout-runner"
-for f in rollout-runner.sh rollout-verifier.sh schema-result-gate.sh schema-result-gate.py blob-mode-state.py blob-transition-runner.py qualify-rustfs-transition.py stack-move-runner.py; do
+for f in rollout-runner.sh rollout-safe-remove-tree.sh rollout-verifier.sh schema-result-gate.sh schema-result-gate.py blob-mode-state.py blob-transition-runner.py qualify-rustfs-transition.py stack-move-runner.py; do
   git show "$SHA:deploy/teagramd/rollout-runner/$f" > "$R/teagramd-rollout-runner/$f"; chmod 600 "$R/teagramd-rollout-runner/$f"
 done
 LIVE_CF=$(docker inspect --format '{{index .Config.Labels "com.docker.compose.project.config_files"}}' $C | tr , :)

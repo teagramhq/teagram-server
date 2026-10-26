@@ -1,105 +1,111 @@
 #!/usr/bin/env bash
-set -Eeuo pipefail
-umask 077
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+  set -Eeuo pipefail
+  umask 077
+fi
 
-SCRIPT_DIR=$(cd -P "$(dirname "${BASH_SOURCE[0]}")" && pwd)
-SCRIPT_SOURCE="$SCRIPT_DIR/$(basename "${BASH_SOURCE[0]}")"
-readonly APPROVED_VERIFIER_SHA=20fc5c53ffb8dd0035bf91428f84340d34a14f418038394548ec57eaefa9c331
-readonly APPROVED_SCHEMA_GATE_SHA=ac54d3cf0480383a52414a8bc8b856b5e1d5f6f8d19034c9c576c64627e097c8
-readonly APPROVED_SCHEMA_GATE_HELPER_SHA=7ae06c2872c60b434068b3715a9ddd5e19b03d4be98dc9881c8dd8f294953d41
-readonly APPROVED_INITIAL_LOCAL_COMPOSE_SHA=d764d291ad2ea91cff841d14a0cd2bbcb5981961dbc67406bfeba1196a7b3fa4
-readonly APPROVED_LOCAL_COMPOSE_CONTENT_SHA=d025a25d3e388489ddaf181e3d38b4ecd56906aeab75a9f9fbabdc38e017cfdb
-readonly SOURCE_LOCAL_COMPOSE_TARGET_SHA=5602c7c13eb1571278f43129345a4b52f0630377
-readonly SOURCE_LOCAL_COMPOSE_SHA=05fc5a3e7dbdc2feac58fce870796baebc055b617bc81f6d6b206c5a2c184cc5
-readonly SOURCE_LOCAL_COMPOSE_CONTENT_SHA=577dd9885aa9babd3370a97417d1653884f0567c6f50e7feb208ca9d11ca15bd
-readonly SOURCE_LOCAL_COMPOSE_SOURCE_FILE=deploy/teagramd/rollout-runner/local-compose-5602c7c.yml
-readonly SOURCE_LOCAL_COMPOSE_RUNTIME_FILE=.rollout-compose.local-5602c7c.yml
-readonly E58_LOCAL_COMPOSE_TARGET_SHA=e58ba203505a37bf5ad3181f22e59a934d4a7442
-readonly E58_LOCAL_COMPOSE_SHA=d3426792677d0510a75dd254fbbd5fd9d9b19a01d710ec5b9b59f3e8a31447c7
-readonly E58_LOCAL_COMPOSE_SOURCE_FILE=deploy/teagramd/rollout-runner/local-compose-e58ba20.yml
-readonly E58_LOCAL_COMPOSE_RUNTIME_FILE=.rollout-compose.local-e58ba20.yml
-readonly TARGET_LOCAL_COMPOSE_TARGET_SHA=598359e900130c307dd84022b0077fd3276f6f36
-readonly TARGET_LOCAL_COMPOSE_SHA=714d7f870645e2581234feba81a86e9e529facd0b664b32b2f429eb583dc754f
-readonly TARGET_LOCAL_COMPOSE_SOURCE_FILE=deploy/teagramd/rollout-runner/local-compose-598359e.yml
-readonly TARGET_LOCAL_COMPOSE_RUNTIME_FILE=.rollout-compose.local-598359e.yml
-readonly DF9_LOCAL_COMPOSE_TARGET_SHA=df9ffe538defd4b99bd9edb2405caacddd1aa1f6
-readonly DF9_LOCAL_COMPOSE_SHA=b48e1bc4727b9ed5e05d247fb7f5e3424eca8c1f9b496727e56127b67f7a5ce1
-readonly DF9_LOCAL_COMPOSE_SOURCE_FILE=deploy/teagramd/rollout-runner/local-compose-df9ffe5.yml
-readonly DF9_LOCAL_COMPOSE_RUNTIME_FILE=.rollout-compose.local-df9ffe5.yml
-readonly CCE_LOCAL_COMPOSE_TARGET_SHA=cce00d185e8e7734b482f116e465647f6ec1fa26
-readonly CCE_LOCAL_COMPOSE_SHA=72a91a77db188f106b0062420722166436d38c6cb1974b73b9dd2873fbc5c11c
-readonly CCE_LOCAL_COMPOSE_CONTENT_SHA=577dd9885aa9babd3370a97417d1653884f0567c6f50e7feb208ca9d11ca15bd
-readonly CCE_LOCAL_COMPOSE_SOURCE_FILE=deploy/teagramd/rollout-runner/local-compose-cce00d1.yml
-readonly CCE_LOCAL_COMPOSE_RUNTIME_FILE=.rollout-compose.local-cce00d1.yml
-readonly INITIAL_LOCAL_COMPOSE_TARGET_SHA=777742cc4b3ab0fda6b504a82b314a90aa60918b
-readonly INITIAL_LOCAL_COMPOSE_FILE=.rollout-compose.initial-local.yml
-readonly INITIAL_LOCAL_LEGACY_BASELINE_SHA=932994e26a86eb1c9ad60f81b3d222b19d3f40b7
-readonly PROJECT_MOVE_SOURCE=telegram-server
-readonly PROJECT_MOVE_TARGET=teagram
-readonly PROJECT_MOVE_PG_IMAGE=postgres:18-alpine
-PINNED_LOCAL_COMPOSE_TARGET_SHA=
-PINNED_LOCAL_COMPOSE_SHA=
-PINNED_LOCAL_COMPOSE_CONTENT_SHA=
-PINNED_LOCAL_COMPOSE_SOURCE_FILE=
-PINNED_LOCAL_COMPOSE_RUNTIME_FILE=
-PINNED_LOCAL_COMPOSE_CARRIED=0
-TRACKED_LOCAL_AUTHORITY=0
-TRACKED_LOCAL_BLOB_DIR=
-BUILD_IDENTITY_REJECTION_REASON=built-image-id-invalid
+source "$(cd -P "$(dirname "${BASH_SOURCE[0]}")" && pwd)/rollout-safe-remove-tree.sh"
 
-ROLLOUT_RUNNER_TEST_MODE=${ROLLOUT_RUNNER_TEST_MODE:-0}
-ROLLOUT_PINNED_EXECUTION=${ROLLOUT_PINNED_EXECUTION:-0}
-INITIALIZE_LOCAL=0
-ROLLOUT_COMPOSE_SERVICE=teagramd
-INITIAL_LOCAL_ARTIFACT_SHA=
-RUNNER_ACTION=apply
-TARGET_DATABASE=
-CHECKOUT=${ROLLOUT_RUNNER_CHECKOUT:-/opt/teagram}
-TARGET_CHECKOUT=${ROLLOUT_RUNNER_TARGET_CHECKOUT:-/opt/teagram}
-EVIDENCE_ROOT=${ROLLOUT_RUNNER_EVIDENCE_ROOT:-/root}
-if [ "$ROLLOUT_RUNNER_TEST_MODE" = 1 ]; then
-  LEGACY_LOG_ARCHIVE=${ROLLOUT_RUNNER_TEST_LOG_ARCHIVE:-}
-else
-  LEGACY_LOG_ARCHIVE=/root/teagramd-legacy-logs.log
-fi
-if [ "${ROLLOUT_RUNNER_TEST_MODE:-0}" = 1 ]; then
-  LOCK_PATH=${ROLLOUT_RUNNER_LOCK_PATH:-/tmp/teagram-deploy.lock}
-  TARGET_LOCK_PATH=${ROLLOUT_RUNNER_TARGET_LOCK_PATH:-/tmp/teagram-deploy.lock}
-  SOURCE_LOCK_PATH=${ROLLOUT_RUNNER_SOURCE_LOCK_PATH:-/tmp/telegram-server-deploy.lock}
-else
-  LOCK_PATH=/tmp/teagram-deploy.lock
-  TARGET_LOCK_PATH=/tmp/teagram-deploy.lock
-  SOURCE_LOCK_PATH=/tmp/telegram-server-deploy.lock
-fi
-ENV_FILE=${ROLLOUT_RUNNER_ENV_FILE:-/opt/teagram/.env}
-OVERRIDE_FILE=${ROLLOUT_RUNNER_OVERRIDE_FILE:-/opt/teagram/docker-compose.override.yml}
-ADDED_ENV=${ROLLOUT_RUNNER_ADDED_ENV:-}
-CHANGED_ENV=${ROLLOUT_RUNNER_CHANGED_ENV:-}
-PREVIOUS_ENV_FILE=${ROLLOUT_RUNNER_PREVIOUS_ENV_FILE:-}
-PREVIOUS_OVERRIDE_FILE=${ROLLOUT_RUNNER_PREVIOUS_OVERRIDE_FILE:-}
-CHANGED_ENV_SOURCE=dotenv
-if [ -n "$PREVIOUS_OVERRIDE_FILE" ]; then CHANGED_ENV_SOURCE=override; fi
-RECORDED_OVERRIDE_SHA=
-RECORDED_OVERRIDE_FROM=
-ADOPT_ENV=${ROLLOUT_RUNNER_ADOPT_ENV:-0}
-ENV_RECORD="$CHECKOUT/.state/rollout-env"
-RECORDED_ENV_SHA=
-RECORDED_ENV_FROM=
-READY_SECONDS=${ROLLOUT_RUNNER_READY_SECONDS:-120}
-if [ "$ROLLOUT_PINNED_EXECUTION" = 1 ]; then
-  VERIFIER="$SCRIPT_DIR/rollout-verifier.pinned"
-  SCHEMA_GATE="$SCRIPT_DIR/schema-result-gate.pinned"
-  SCHEMA_GATE_HELPER="$SCRIPT_DIR/schema-result-gate.py"
-  MODE_HELPER="$SCRIPT_DIR/blob-mode-state.pinned"
-  STACK_MOVE_HELPER="$SCRIPT_DIR/stack-move-runner.pinned"
-else
-  VERIFIER="$SCRIPT_DIR/rollout-verifier.sh"
-  SCHEMA_GATE="$SCRIPT_DIR/schema-result-gate.sh"
-  SCHEMA_GATE_HELPER="$SCRIPT_DIR/schema-result-gate.py"
-  MODE_HELPER="$SCRIPT_DIR/blob-mode-state.py"
-  STACK_MOVE_HELPER="$SCRIPT_DIR/stack-move-runner.py"
-fi
-QUALIFIER_HELPER="$SCRIPT_DIR/qualify-rustfs-transition.py"
+initialize_runner_config() {
+  SCRIPT_DIR=$(cd -P "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+  SCRIPT_SOURCE="$SCRIPT_DIR/$(basename "${BASH_SOURCE[0]}")"
+  readonly APPROVED_VERIFIER_SHA=16d0470293dff8593135f710e8aa306270cec585d7bcd7bb2220d7fc56f74d92
+  readonly APPROVED_SCHEMA_GATE_SHA=ac54d3cf0480383a52414a8bc8b856b5e1d5f6f8d19034c9c576c64627e097c8
+  readonly APPROVED_SCHEMA_GATE_HELPER_SHA=7ae06c2872c60b434068b3715a9ddd5e19b03d4be98dc9881c8dd8f294953d41
+  readonly APPROVED_INITIAL_LOCAL_COMPOSE_SHA=d764d291ad2ea91cff841d14a0cd2bbcb5981961dbc67406bfeba1196a7b3fa4
+  readonly APPROVED_LOCAL_COMPOSE_CONTENT_SHA=d025a25d3e388489ddaf181e3d38b4ecd56906aeab75a9f9fbabdc38e017cfdb
+  readonly SOURCE_LOCAL_COMPOSE_TARGET_SHA=5602c7c13eb1571278f43129345a4b52f0630377
+  readonly SOURCE_LOCAL_COMPOSE_SHA=05fc5a3e7dbdc2feac58fce870796baebc055b617bc81f6d6b206c5a2c184cc5
+  readonly SOURCE_LOCAL_COMPOSE_CONTENT_SHA=577dd9885aa9babd3370a97417d1653884f0567c6f50e7feb208ca9d11ca15bd
+  readonly SOURCE_LOCAL_COMPOSE_SOURCE_FILE=deploy/teagramd/rollout-runner/local-compose-5602c7c.yml
+  readonly SOURCE_LOCAL_COMPOSE_RUNTIME_FILE=.rollout-compose.local-5602c7c.yml
+  readonly E58_LOCAL_COMPOSE_TARGET_SHA=e58ba203505a37bf5ad3181f22e59a934d4a7442
+  readonly E58_LOCAL_COMPOSE_SHA=d3426792677d0510a75dd254fbbd5fd9d9b19a01d710ec5b9b59f3e8a31447c7
+  readonly E58_LOCAL_COMPOSE_SOURCE_FILE=deploy/teagramd/rollout-runner/local-compose-e58ba20.yml
+  readonly E58_LOCAL_COMPOSE_RUNTIME_FILE=.rollout-compose.local-e58ba20.yml
+  readonly TARGET_LOCAL_COMPOSE_TARGET_SHA=598359e900130c307dd84022b0077fd3276f6f36
+  readonly TARGET_LOCAL_COMPOSE_SHA=714d7f870645e2581234feba81a86e9e529facd0b664b32b2f429eb583dc754f
+  readonly TARGET_LOCAL_COMPOSE_SOURCE_FILE=deploy/teagramd/rollout-runner/local-compose-598359e.yml
+  readonly TARGET_LOCAL_COMPOSE_RUNTIME_FILE=.rollout-compose.local-598359e.yml
+  readonly DF9_LOCAL_COMPOSE_TARGET_SHA=df9ffe538defd4b99bd9edb2405caacddd1aa1f6
+  readonly DF9_LOCAL_COMPOSE_SHA=b48e1bc4727b9ed5e05d247fb7f5e3424eca8c1f9b496727e56127b67f7a5ce1
+  readonly DF9_LOCAL_COMPOSE_SOURCE_FILE=deploy/teagramd/rollout-runner/local-compose-df9ffe5.yml
+  readonly DF9_LOCAL_COMPOSE_RUNTIME_FILE=.rollout-compose.local-df9ffe5.yml
+  readonly CCE_LOCAL_COMPOSE_TARGET_SHA=cce00d185e8e7734b482f116e465647f6ec1fa26
+  readonly CCE_LOCAL_COMPOSE_SHA=72a91a77db188f106b0062420722166436d38c6cb1974b73b9dd2873fbc5c11c
+  readonly CCE_LOCAL_COMPOSE_CONTENT_SHA=577dd9885aa9babd3370a97417d1653884f0567c6f50e7feb208ca9d11ca15bd
+  readonly CCE_LOCAL_COMPOSE_SOURCE_FILE=deploy/teagramd/rollout-runner/local-compose-cce00d1.yml
+  readonly CCE_LOCAL_COMPOSE_RUNTIME_FILE=.rollout-compose.local-cce00d1.yml
+  readonly INITIAL_LOCAL_COMPOSE_TARGET_SHA=777742cc4b3ab0fda6b504a82b314a90aa60918b
+  readonly INITIAL_LOCAL_COMPOSE_FILE=.rollout-compose.initial-local.yml
+  readonly INITIAL_LOCAL_LEGACY_BASELINE_SHA=932994e26a86eb1c9ad60f81b3d222b19d3f40b7
+  readonly PROJECT_MOVE_SOURCE=telegram-server
+  readonly PROJECT_MOVE_TARGET=teagram
+  readonly PROJECT_MOVE_PG_IMAGE=postgres:18-alpine
+  PINNED_LOCAL_COMPOSE_TARGET_SHA=
+  PINNED_LOCAL_COMPOSE_SHA=
+  PINNED_LOCAL_COMPOSE_CONTENT_SHA=
+  PINNED_LOCAL_COMPOSE_SOURCE_FILE=
+  PINNED_LOCAL_COMPOSE_RUNTIME_FILE=
+  PINNED_LOCAL_COMPOSE_CARRIED=0
+  TRACKED_LOCAL_AUTHORITY=0
+  TRACKED_LOCAL_BLOB_DIR=
+  BUILD_IDENTITY_REJECTION_REASON=built-image-id-invalid
+  ROLLOUT_RUNNER_TEST_MODE=${ROLLOUT_RUNNER_TEST_MODE:-0}
+  ROLLOUT_PINNED_EXECUTION=${ROLLOUT_PINNED_EXECUTION:-0}
+  INITIALIZE_LOCAL=0
+  ROLLOUT_COMPOSE_SERVICE=teagramd
+  INITIAL_LOCAL_ARTIFACT_SHA=
+  RUNNER_ACTION=apply
+  TARGET_DATABASE=
+  CHECKOUT=${ROLLOUT_RUNNER_CHECKOUT:-/opt/teagram}
+  TARGET_CHECKOUT=${ROLLOUT_RUNNER_TARGET_CHECKOUT:-/opt/teagram}
+  EVIDENCE_ROOT=${ROLLOUT_RUNNER_EVIDENCE_ROOT:-/root}
+  if [ "$ROLLOUT_RUNNER_TEST_MODE" = 1 ]; then
+    LEGACY_LOG_ARCHIVE=${ROLLOUT_RUNNER_TEST_LOG_ARCHIVE:-}
+  else
+    LEGACY_LOG_ARCHIVE=/root/teagramd-legacy-logs.log
+  fi
+  if [ "${ROLLOUT_RUNNER_TEST_MODE:-0}" = 1 ]; then
+    LOCK_PATH=${ROLLOUT_RUNNER_LOCK_PATH:-/tmp/teagram-deploy.lock}
+    TARGET_LOCK_PATH=${ROLLOUT_RUNNER_TARGET_LOCK_PATH:-/tmp/teagram-deploy.lock}
+    SOURCE_LOCK_PATH=${ROLLOUT_RUNNER_SOURCE_LOCK_PATH:-/tmp/telegram-server-deploy.lock}
+  else
+    LOCK_PATH=/tmp/teagram-deploy.lock
+    TARGET_LOCK_PATH=/tmp/teagram-deploy.lock
+    SOURCE_LOCK_PATH=/tmp/telegram-server-deploy.lock
+  fi
+  ENV_FILE=${ROLLOUT_RUNNER_ENV_FILE:-/opt/teagram/.env}
+  OVERRIDE_FILE=${ROLLOUT_RUNNER_OVERRIDE_FILE:-/opt/teagram/docker-compose.override.yml}
+  ADDED_ENV=${ROLLOUT_RUNNER_ADDED_ENV:-}
+  CHANGED_ENV=${ROLLOUT_RUNNER_CHANGED_ENV:-}
+  PREVIOUS_ENV_FILE=${ROLLOUT_RUNNER_PREVIOUS_ENV_FILE:-}
+  PREVIOUS_OVERRIDE_FILE=${ROLLOUT_RUNNER_PREVIOUS_OVERRIDE_FILE:-}
+  CHANGED_ENV_SOURCE=dotenv
+  if [ -n "$PREVIOUS_OVERRIDE_FILE" ]; then CHANGED_ENV_SOURCE=override; fi
+  RECORDED_OVERRIDE_SHA=
+  RECORDED_OVERRIDE_FROM=
+  ADOPT_ENV=${ROLLOUT_RUNNER_ADOPT_ENV:-0}
+  ENV_RECORD="$CHECKOUT/.state/rollout-env"
+  RECORDED_ENV_SHA=
+  RECORDED_ENV_FROM=
+  READY_SECONDS=${ROLLOUT_RUNNER_READY_SECONDS:-120}
+  SAFE_REMOVE_TREE_HELPER="$SCRIPT_DIR/rollout-safe-remove-tree.sh"
+  if [ "$ROLLOUT_PINNED_EXECUTION" = 1 ]; then
+    VERIFIER="$SCRIPT_DIR/rollout-verifier.pinned"
+    SCHEMA_GATE="$SCRIPT_DIR/schema-result-gate.pinned"
+    SCHEMA_GATE_HELPER="$SCRIPT_DIR/schema-result-gate.py"
+    MODE_HELPER="$SCRIPT_DIR/blob-mode-state.pinned"
+    STACK_MOVE_HELPER="$SCRIPT_DIR/stack-move-runner.pinned"
+  else
+    VERIFIER="$SCRIPT_DIR/rollout-verifier.sh"
+    SCHEMA_GATE="$SCRIPT_DIR/schema-result-gate.sh"
+    SCHEMA_GATE_HELPER="$SCRIPT_DIR/schema-result-gate.py"
+    MODE_HELPER="$SCRIPT_DIR/blob-mode-state.py"
+    STACK_MOVE_HELPER="$SCRIPT_DIR/stack-move-runner.py"
+  fi
+  QUALIFIER_HELPER="$SCRIPT_DIR/qualify-rustfs-transition.py"
+}
 
 fail() {
   printf 'rollout runner rejected: %s\n' "$1" >&2
@@ -301,6 +307,7 @@ verify_runtime_sources() {
   [[ "$runtime_source_sha" =~ ^[0-9a-f]{40}$ ]] || { fail 'rollout runtime source SHA must be a full commit ID'; return 1; }
   tracked_paths=(
     deploy/teagramd/rollout-runner/rollout-runner.sh
+    deploy/teagramd/rollout-runner/rollout-safe-remove-tree.sh
     deploy/teagramd/rollout-runner/rollout-verifier.sh
     deploy/teagramd/rollout-runner/schema-result-gate.sh
     deploy/teagramd/rollout-runner/schema-result-gate.py
@@ -309,9 +316,9 @@ verify_runtime_sources() {
     deploy/teagramd/rollout-runner/stack-move-runner.py
   )
   if [ "$ROLLOUT_PINNED_EXECUTION" = 1 ]; then
-    source_paths=("$SCRIPT_SOURCE" "$VERIFIER" "$SCHEMA_GATE" "$SCHEMA_GATE_HELPER" "$MODE_HELPER" "$QUALIFIER_HELPER" "$STACK_MOVE_HELPER")
+    source_paths=("$SCRIPT_SOURCE" "$SAFE_REMOVE_TREE_HELPER" "$VERIFIER" "$SCHEMA_GATE" "$SCHEMA_GATE_HELPER" "$MODE_HELPER" "$QUALIFIER_HELPER" "$STACK_MOVE_HELPER")
   else
-    source_paths=("$SCRIPT_SOURCE" "$SCRIPT_DIR/rollout-verifier.sh" "$SCRIPT_DIR/schema-result-gate.sh" "$SCHEMA_GATE_HELPER" "$MODE_HELPER" "$QUALIFIER_HELPER" "$SCRIPT_DIR/stack-move-runner.py")
+    source_paths=("$SCRIPT_SOURCE" "$SAFE_REMOVE_TREE_HELPER" "$SCRIPT_DIR/rollout-verifier.sh" "$SCRIPT_DIR/schema-result-gate.sh" "$SCHEMA_GATE_HELPER" "$MODE_HELPER" "$QUALIFIER_HELPER" "$SCRIPT_DIR/stack-move-runner.py")
   fi
   if [ "$INITIALIZE_LOCAL" != 1 ] && set_target_local_compose_pin; then
     tracked_paths+=("$PINNED_LOCAL_COMPOSE_SOURCE_FILE")
@@ -810,6 +817,7 @@ pin_runtime() {
   local target_local_compose_reviewed_origin=not-selected
   local target_local_compose_content_sha=not-selected target_local_compose_source=not-selected target_local_compose_runtime=not-selected
   pin_runtime_file "$SCRIPT_SOURCE" "$BASELINE_DIR/rollout-runner.pinned" || return 1
+  pin_runtime_file "$SAFE_REMOVE_TREE_HELPER" "$BASELINE_DIR/rollout-safe-remove-tree.sh" || return 1
   pin_runtime_file "$SCRIPT_DIR/rollout-verifier.sh" "$BASELINE_DIR/rollout-verifier.pinned" || return 1
   pin_runtime_file "$SCRIPT_DIR/schema-result-gate.sh" "$BASELINE_DIR/schema-result-gate.pinned" || return 1
   pin_runtime_file "$SCHEMA_GATE_HELPER" "$BASELINE_DIR/schema-result-gate.py" || return 1
@@ -822,6 +830,7 @@ pin_runtime() {
   MODE_HELPER="$BASELINE_DIR/blob-mode-state.pinned"
   QUALIFIER_HELPER="$BASELINE_DIR/qualify-rustfs-transition.py"
   STACK_MOVE_HELPER="$BASELINE_DIR/stack-move-runner.pinned"
+  SAFE_REMOVE_TREE_HELPER="$BASELINE_DIR/rollout-safe-remove-tree.sh"
   verify_approved_gates || return 1
   runner_sha=$(sha256_file "$BASELINE_DIR/rollout-runner.pinned") || { fail 'cannot hash pinned runner'; return 1; }
   verifier_sha=$(sha256_file "$VERIFIER") || { fail 'cannot hash pinned verifier'; return 1; }
@@ -2884,6 +2893,7 @@ run_stack_move() {
 }
 
 main() {
+  initialize_runner_config
   if [ "$#" -eq 2 ] && [ "$1" = reconcile ]; then
     configure_action_paths apply
     TARGET_SHA=$2
@@ -2947,6 +2957,6 @@ main() {
   fi
 }
 
-if [ "${ROLLOUT_RUNNER_SOURCE_ONLY:-0}" != 1 ]; then
+if [[ "${BASH_SOURCE[0]}" == "$0" && "${ROLLOUT_RUNNER_SOURCE_ONLY:-0}" != 1 ]]; then
   main "$@"
 fi

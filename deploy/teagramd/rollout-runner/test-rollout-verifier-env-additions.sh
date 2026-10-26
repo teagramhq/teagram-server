@@ -4,6 +4,7 @@ set -Eeuo pipefail
 SCRIPT_DIR=$(cd -P "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 ROLLOUT_VERIFIER_SOURCE_ONLY=1
 source "$SCRIPT_DIR/rollout-verifier.sh"
+initialize_verifier_config
 
 TMP=$(mktemp -d)
 trap 'rm -rf -- "$TMP"' EXIT
@@ -1090,6 +1091,7 @@ verifier_test_env_file=$ENV_FILE
 verifier_test_override_file=$OVERRIDE_FILE
 ROLLOUT_RUNNER_SOURCE_ONLY=1
 source "$SCRIPT_DIR/rollout-runner.sh"
+initialize_runner_config
 ENV_FILE=$verifier_test_env_file
 OVERRIDE_FILE=$verifier_test_override_file
 write_immutable() { : > "$1"; }

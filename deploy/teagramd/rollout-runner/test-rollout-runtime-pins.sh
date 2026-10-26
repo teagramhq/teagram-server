@@ -5,7 +5,7 @@ SCRIPT_DIR=$(cd -P "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 RUNNER="$SCRIPT_DIR/rollout-runner.sh"
 VERIFIER="$SCRIPT_DIR/rollout-verifier.sh"
 
-approved_verifier_sha=$(sed -n 's/^readonly APPROVED_VERIFIER_SHA=//p' "$RUNNER")
+approved_verifier_sha=$(sed -n 's/^[[:space:]]*readonly APPROVED_VERIFIER_SHA=//p' "$RUNNER")
 actual_verifier_sha=$(sha256sum "$VERIFIER" | awk '{print $1}')
 
 if [ "$approved_verifier_sha" = "$actual_verifier_sha" ]; then

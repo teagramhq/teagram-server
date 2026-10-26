@@ -1,18 +1,23 @@
 #!/usr/bin/env bash
-set -euo pipefail
-umask 077
-
-ROLLOUT_MAX_READY_SECONDS=${ROLLOUT_READY_SECONDS:-120}
-ROLLOUT_REQUIRED_GRACE=2m0s
-ROLLOUT_ADMIN_URL=https://teagram.tailaa4918.ts.net/admin/
-ROLLOUT_TCP_HOST=teagram.tailaa4918.ts.net
-ROLLOUT_TCP_PORT=2443
-ROLLOUT_CHECKOUT_PATH=${ROLLOUT_CHECKOUT_PATH:-/opt/teagram}
-ROLLOUT_VERIFIER_PATH=$(cd "$(dirname "$0")" && pwd)/$(basename "$0")
-
-if ! declare -p ROLLOUT_VERIFIER_SOURCE_ONLY >/dev/null 2>&1; then
-  ROLLOUT_VERIFIER_SOURCE_ONLY=0
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+  set -euo pipefail
+  umask 077
 fi
+
+source "$(cd -P "$(dirname "${BASH_SOURCE[0]}")" && pwd)/rollout-safe-remove-tree.sh"
+
+initialize_verifier_config() {
+  ROLLOUT_MAX_READY_SECONDS=${ROLLOUT_READY_SECONDS:-120}
+  ROLLOUT_REQUIRED_GRACE=2m0s
+  ROLLOUT_ADMIN_URL=https://teagram.tailaa4918.ts.net/admin/
+  ROLLOUT_TCP_HOST=teagram.tailaa4918.ts.net
+  ROLLOUT_TCP_PORT=2443
+  ROLLOUT_CHECKOUT_PATH=${ROLLOUT_CHECKOUT_PATH:-/opt/teagram}
+  ROLLOUT_VERIFIER_PATH=$(cd -P "$(dirname "${BASH_SOURCE[0]}")" && pwd)/$(basename "${BASH_SOURCE[0]}")
+  MEDIA_KEY_MOUNT_CONFIGURED=false
+  MEDIA_KEY_SOURCE_PATH=
+  MEDIA_KEY_VERSION=
+}
 
 sha256_text() {
   printf '%s' "$1" | sha256sum | awk '{print $1}'
@@ -382,10 +387,6 @@ verify_turnstile_secret_mount() {
   fi
   return 0
 }
-
-MEDIA_KEY_MOUNT_CONFIGURED=false
-MEDIA_KEY_SOURCE_PATH=
-MEDIA_KEY_VERSION=
 
 verify_media_key_mount() {
   local inspect_json=$1 compose_json=$2 snapshot_name=$3 compose_files_value=${4:-${COMPOSE_FILE:-}}
@@ -1707,6 +1708,7 @@ compare_command() {
 }
 
 main() {
+  initialize_verifier_config
   [ "$#" -ge 1 ] || { printf '%s\n' 'commands: snapshot, compare, ready, ready-pair' >&2; return 64; }
   local command=$1
   shift
@@ -1737,6 +1739,6 @@ main() {
   esac
 }
 
-if [ "$ROLLOUT_VERIFIER_SOURCE_ONLY" != 1 ]; then
+if [[ "${BASH_SOURCE[0]}" == "$0" && "${ROLLOUT_VERIFIER_SOURCE_ONLY:-0}" != 1 ]]; then
   main "$@"
 fi

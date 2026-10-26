@@ -276,7 +276,7 @@ sudo env TOOL_SHA="$TOOL_SHA" bash -c '
   set -eu
   umask 077
   [[ "$TOOL_SHA" =~ ^[0-9a-f]{40}$ ]]
-  for name in rollout-runner.sh rollout-verifier.sh schema-result-gate.sh schema-result-gate.py blob-mode-state.py qualify-rustfs-transition.py stack-move-runner.py; do
+  for name in rollout-runner.sh rollout-safe-remove-tree.sh rollout-verifier.sh schema-result-gate.sh schema-result-gate.py blob-mode-state.py qualify-rustfs-transition.py stack-move-runner.py; do
     git -C /opt/teagram show \
       "$TOOL_SHA:deploy/teagramd/rollout-runner/$name" \
       > "/root/teagramd-rollout-runner/$name"
@@ -404,7 +404,7 @@ sudo env TOOL_SHA="$TOOL_SHA" bash -c '
   set -eu
   umask 077
   [[ "$TOOL_SHA" =~ ^[0-9a-f]{40}$ ]]
-  for name in rollout-runner.sh rollout-verifier.sh schema-result-gate.sh schema-result-gate.py blob-mode-state.py qualify-rustfs-transition.py stack-move-runner.py; do
+  for name in rollout-runner.sh rollout-safe-remove-tree.sh rollout-verifier.sh schema-result-gate.sh schema-result-gate.py blob-mode-state.py qualify-rustfs-transition.py stack-move-runner.py; do
     git -C /opt/teagram show \
       "$TOOL_SHA:deploy/teagramd/rollout-runner/$name" \
       > "/root/teagramd-rollout-runner/$name"
@@ -474,7 +474,7 @@ sudo env TOOL_SHA="$TOOL_SHA" bash -c '
   set -eu
   umask 077
   [[ "$TOOL_SHA" =~ ^[0-9a-f]{40}$ ]]
-  for name in rollout-runner.sh rollout-verifier.sh schema-result-gate.sh schema-result-gate.py blob-mode-state.py qualify-rustfs-transition.py stack-move-runner.py; do
+  for name in rollout-runner.sh rollout-safe-remove-tree.sh rollout-verifier.sh schema-result-gate.sh schema-result-gate.py blob-mode-state.py qualify-rustfs-transition.py stack-move-runner.py; do
     git -C /opt/teagram show \
       "$TOOL_SHA:deploy/teagramd/rollout-runner/$name" \
       > "/root/teagramd-rollout-runner/$name"
@@ -529,7 +529,7 @@ sudo mkdir -m 700 -p /root/teagramd-rollout-runner
 sudo env TOOL_SHA="$TOOL_SHA" bash -c '
   set -eu
   umask 077
-  for name in rollout-runner.sh rollout-verifier.sh schema-result-gate.sh schema-result-gate.py blob-mode-state.py qualify-rustfs-transition.py stack-move-runner.py; do
+  for name in rollout-runner.sh rollout-safe-remove-tree.sh rollout-verifier.sh schema-result-gate.sh schema-result-gate.py blob-mode-state.py qualify-rustfs-transition.py stack-move-runner.py; do
     git -C /opt/teagram show \
       "$TOOL_SHA:deploy/teagramd/rollout-runner/$name" \
       > "/root/teagramd-rollout-runner/$name"
@@ -591,7 +591,7 @@ sudo env TOOL_SHA="$TOOL_SHA" bash -c '
   set -eu
   umask 077
   [[ "$TOOL_SHA" =~ ^[0-9a-f]{40}$ ]]
-  for name in rollout-runner.sh rollout-verifier.sh schema-result-gate.sh schema-result-gate.py blob-mode-state.py qualify-rustfs-transition.py stack-move-runner.py; do
+  for name in rollout-runner.sh rollout-safe-remove-tree.sh rollout-verifier.sh schema-result-gate.sh schema-result-gate.py blob-mode-state.py qualify-rustfs-transition.py stack-move-runner.py; do
     git -C /opt/teagram show \
       "$TOOL_SHA:deploy/teagramd/rollout-runner/$name" \
       > "/root/teagramd-rollout-runner/$name"
@@ -642,7 +642,7 @@ COMPOSE_FILE=$LIVE_COMPOSE_FILES
 sudo env TOOL_SHA="$TOOL_SHA" bash -c '
   set -eu
   umask 077
-  for name in rollout-runner.sh rollout-verifier.sh schema-result-gate.sh schema-result-gate.py blob-mode-state.py qualify-rustfs-transition.py stack-move-runner.py; do
+  for name in rollout-runner.sh rollout-safe-remove-tree.sh rollout-verifier.sh schema-result-gate.sh schema-result-gate.py blob-mode-state.py qualify-rustfs-transition.py stack-move-runner.py; do
     git -C /opt/teagram show \
       "$TOOL_SHA:deploy/teagramd/rollout-runner/$name" \
       > "/root/teagramd-rollout-runner/$name"

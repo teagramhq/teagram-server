@@ -9,6 +9,7 @@ SCHEMA_GATE="$SCRIPT_DIR/schema-result-gate.sh"
 MODE_HELPER="$SCRIPT_DIR/blob-mode-state.py"
 STACK_MOVE_HELPER="$SCRIPT_DIR/stack-move-runner.py"
 bash "$SCRIPT_DIR/test-rollout-runtime-pins.sh"
+bash "$SCRIPT_DIR/test-rollout-source-and-delete-safety.sh"
 if [ "$(id -u)" != 0 ]; then
   printf '%s\n' 'run the rollout runner fixtures as root to exercise production evidence checks' >&2
   exit 77
@@ -148,6 +149,7 @@ case "$*" in
     printf '%s\n' docker-compose.local-blobs.yml docker-compose.yml
     ;;
   "show $MOCK_SOURCE_SHA:deploy/teagramd/rollout-runner/rollout-runner.sh") cat "$MOCK_TARGET_RUNTIME_DIR/rollout-runner.sh" ;;
+  "show $MOCK_SOURCE_SHA:deploy/teagramd/rollout-runner/rollout-safe-remove-tree.sh") cat "$MOCK_TARGET_RUNTIME_DIR/rollout-safe-remove-tree.sh" ;;
   "show $MOCK_SOURCE_SHA:deploy/teagramd/rollout-runner/rollout-verifier.sh") cat "$MOCK_TARGET_RUNTIME_DIR/rollout-verifier.sh" ;;
   "show $MOCK_SOURCE_SHA:deploy/teagramd/rollout-runner/schema-result-gate.sh") cat "$MOCK_TARGET_RUNTIME_DIR/schema-result-gate.sh" ;;
   "show $MOCK_SOURCE_SHA:deploy/teagramd/rollout-runner/schema-result-gate.py") cat "$MOCK_TARGET_RUNTIME_DIR/schema-result-gate.py" ;;
@@ -941,7 +943,7 @@ make_fixture() {
   mkdir -p -m 700 "$checkout/deploy/teagramd/rollout-runner" "$checkout/cmd" "$checkout/internal" "$checkout/components" "$checkout/utils"
   source_root=$(cd "$SCRIPT_DIR/../../.." && pwd -P)
   cp -a "$source_root/migrations" "$checkout/migrations"
-  cp "$SCRIPT_DIR/rollout-runner.sh" "$SCRIPT_DIR/rollout-verifier.sh" \
+  cp "$SCRIPT_DIR/rollout-runner.sh" "$SCRIPT_DIR/rollout-safe-remove-tree.sh" "$SCRIPT_DIR/rollout-verifier.sh" \
     "$SCRIPT_DIR/schema-result-gate.sh" "$SCRIPT_DIR/schema-result-gate.py" "$MODE_HELPER" \
     "$SCRIPT_DIR/qualify-rustfs-transition.py" "$STACK_MOVE_HELPER" "$checkout/deploy/teagramd/rollout-runner/"
   cp "$SCRIPT_DIR/local-compose-e58ba20.yml" "$SCRIPT_DIR/local-compose-598359e.yml" \
@@ -951,7 +953,7 @@ make_fixture() {
   chmod 600 "$checkout/deploy/teagramd/rollout-runner/"*.sh "$checkout/deploy/teagramd/rollout-runner/"*.py
   target_runtime="$state/target-runtime"
   mkdir -m 700 "$target_runtime"
-  cp "$SCRIPT_DIR/rollout-runner.sh" "$SCRIPT_DIR/rollout-verifier.sh" \
+  cp "$SCRIPT_DIR/rollout-runner.sh" "$SCRIPT_DIR/rollout-safe-remove-tree.sh" "$SCRIPT_DIR/rollout-verifier.sh" \
     "$SCRIPT_DIR/schema-result-gate.sh" "$SCRIPT_DIR/schema-result-gate.py" "$MODE_HELPER" \
     "$SCRIPT_DIR/qualify-rustfs-transition.py" "$STACK_MOVE_HELPER" "$target_runtime/"
   cp "$SCRIPT_DIR/local-compose-e58ba20.yml" "$SCRIPT_DIR/local-compose-598359e.yml" \
@@ -1102,7 +1104,7 @@ make_real_git_fixture() {
   git -C "$checkout" update-ref refs/heads/main "$baseline_sha"
   git -C "$checkout" reset --hard "$baseline_sha" >/dev/null
   mkdir -m 700 "$runtime_dir"
-  cp "$SCRIPT_DIR/rollout-runner.sh" "$SCRIPT_DIR/rollout-verifier.sh" \
+  cp "$SCRIPT_DIR/rollout-runner.sh" "$SCRIPT_DIR/rollout-safe-remove-tree.sh" "$SCRIPT_DIR/rollout-verifier.sh" \
     "$SCRIPT_DIR/schema-result-gate.sh" "$SCRIPT_DIR/schema-result-gate.py" "$MODE_HELPER" \
     "$SCRIPT_DIR/qualify-rustfs-transition.py" "$STACK_MOVE_HELPER" "$runtime_dir/"
   chmod 600 "$runtime_dir/"*.sh "$runtime_dir/"*.py
@@ -1213,7 +1215,7 @@ make_fixed_target_transition_fixture() {
   git -C "$checkout" fetch origin refs/fixture/legacy:refs/fixture/legacy >/dev/null
   git -C "$checkout" reset --hard "$baseline_sha" >/dev/null
 
-  cp "$SCRIPT_DIR/rollout-runner.sh" "$SCRIPT_DIR/rollout-verifier.sh" \
+  cp "$SCRIPT_DIR/rollout-runner.sh" "$SCRIPT_DIR/rollout-safe-remove-tree.sh" "$SCRIPT_DIR/rollout-verifier.sh" \
     "$SCRIPT_DIR/schema-result-gate.sh" "$SCRIPT_DIR/schema-result-gate.py" "$MODE_HELPER" \
     "$SCRIPT_DIR/qualify-rustfs-transition.py" "$STACK_MOVE_HELPER" "$runtime_dir/"
   chmod 600 "$runtime_dir/"*.sh "$runtime_dir/"*.py

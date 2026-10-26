@@ -75,7 +75,7 @@ if [[ "${FIXTURE_EXPECT_S3_ENV:-0}" == 1 && \
   exit 96
 fi
 runtime_dir="$DEPLOY_ROOT/teagramd-rollout-runner"
-for file in rollout-runner.sh rollout-verifier.sh schema-result-gate.sh schema-result-gate.py blob-mode-state.py blob-transition-runner.py qualify-rustfs-transition.py stack-move-runner.py; do
+for file in rollout-runner.sh rollout-safe-remove-tree.sh rollout-verifier.sh schema-result-gate.sh schema-result-gate.py blob-mode-state.py blob-transition-runner.py qualify-rustfs-transition.py stack-move-runner.py; do
   if ! git -C "$DEPLOY_DIR" show "$2:deploy/teagramd/rollout-runner/$file" | cmp - "$runtime_dir/$file"; then
     printf 'staged runtime is missing or stale: %s\n' "$file" >&2
     exit 90
@@ -94,7 +94,7 @@ set -euo pipefail
 printf '%s\n' "$1" >> "${LINK_EDGE_DEPLOY_LOG:?}"
 printf 'link-edge\n' >> "${DEPLOY_ACTION_LOG:?}"
 EDGE
-for file in rollout-verifier.sh schema-result-gate.sh schema-result-gate.py blob-mode-state.py qualify-rustfs-transition.py stack-move-runner.py; do
+for file in rollout-safe-remove-tree.sh rollout-verifier.sh schema-result-gate.sh schema-result-gate.py blob-mode-state.py qualify-rustfs-transition.py stack-move-runner.py; do
   printf 'fixture\n' > "$tmp/work/deploy/teagramd/rollout-runner/$file"
 done
 cat > "$tmp/work/deploy/teagramd/rollout-runner/blob-transition-runner.py" <<'PYTHON'
