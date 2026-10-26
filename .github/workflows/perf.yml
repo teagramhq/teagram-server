@@ -90,7 +90,7 @@ jobs:
       contents: read
       actions: write
     env:
-      PERF_BASE_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before }}
+      PERF_BASE_SHA: ${{ github.event_name == 'push' && github.event.before || '' }}
       PERF_RECORD: ${{ github.event_name == 'push' && 'main' || '' }}
     steps:
       - uses: actions/checkout@v7.0.1
@@ -99,6 +99,12 @@ jobs:
           # The base commit is checked out into a worktree and measured in the
           # same job.
           fetch-depth: 0
+
+      # A queued pull_request run can check out a merge ref with a newer base
+      # than the event's base.sha. Compare against the merge ref's first parent.
+      - name: Resolve PR comparison base
+        if: github.event_name == 'pull_request'
+        run: echo "PERF_BASE_SHA=$(git rev-parse HEAD^1)" >> "$GITHUB_ENV"
 
       - name: Restore the snapshot
         id: snapshot

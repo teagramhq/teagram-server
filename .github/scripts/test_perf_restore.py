@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import os
+import re
 import subprocess
 import tempfile
 import unittest
@@ -25,6 +26,30 @@ fi
 
 
 class PerfRestoreTests(unittest.TestCase):
+    def test_pr_comparison_base_matches_the_checked_out_merge_parent(self) -> None:
+        workflow = (ROOT / ".github/workflows/perf.yml").read_text(
+            encoding="utf-8"
+        )
+        step = re.search(
+            r"(?ms)^      - name: Resolve PR comparison base\n(.*?)(?=^      - name:|\Z)",
+            workflow,
+        )
+
+        self.assertIsNotNone(step, "PR base resolution step is missing")
+        self.assertIn("if: github.event_name == 'pull_request'", step.group(1))
+        self.assertIn(
+            'echo "PERF_BASE_SHA=$(git rev-parse HEAD^1)" >> "$GITHUB_ENV"',
+            step.group(1),
+        )
+        self.assertLess(
+            workflow.index("- uses: actions/checkout@v7.0.1"),
+            workflow.index("name: Resolve PR comparison base"),
+        )
+        self.assertLess(
+            workflow.index("name: Resolve PR comparison base"),
+            workflow.index("name: Restore the snapshot"),
+        )
+
     def test_fixture_restore_ignores_grants_to_cluster_local_roles(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             temp = Path(temporary)
