@@ -47,7 +47,7 @@ postgres_contents="$(<"$postgres")"
   fail 'Postgres readiness must wait for the TCP listener used by the workflow'
 [[ "$runner_contents" == *'pg_dump -U postgres -Fc -Z 3 --no-acl'* ]] ||
   fail 'fixture snapshots must omit ACLs that depend on cluster-global roles'
-[[ "$runner_contents" == *'pg_restore -U postgres -d "perf_$f" -j 4 --no-owner --no-acl'* ]] ||
+[[ "$runner_contents" == *"pg_restore -U postgres -d \"perf_\$f\" -j 4 --no-owner --no-acl"* ]] ||
   fail 'fixture restores must not require cluster-global roles from the snapshot'
 
 printf 'RPC performance workflow contract holds\n'
