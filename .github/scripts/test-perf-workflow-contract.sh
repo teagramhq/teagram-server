@@ -38,13 +38,18 @@ missing_snapshot_step="$(query '.jobs."rpc-performance".steps[] | select(.name =
   fail 'the RPC job restore key must include fixture and server setup helpers'
 
 runner_contents="$(<"$runner")"
-restore_command='pg_restore -U postgres -d "perf_$f" -j 4 --no-owner --no-acl "/cache/perf_$f.dump"'
-[[ "$runner_contents" == *"$restore_command"* ]] ||
-  fail 'fixture restore must skip ACL entries for cluster-wide roles'
+# shellcheck disable=SC2016 # These patterns intentionally match literal runner source.
+[[ "$runner_contents" == *'pg_restore -U postgres -d "perf_$f" -j 4 --no-owner --no-acl "/cache/perf_$f.dump"'* ]] ||
+  fail 'restoring fixture snapshots must not replay database privileges'
+# shellcheck disable=SC2016 # This pattern intentionally matches literal runner source.
+[[ "$runner_contents" == *'fatal "restore the $f fixture snapshot"'* ]] ||
+  fail 'a missing or corrupt fixture snapshot must still fail the job'
 [[ "$runner_contents" == *"RPC performance fixture seed / infrastructure failure"* ]] ||
   fail 'fixture seed and infrastructure errors need an explicit summary label'
 [[ "$runner_contents" == *"fixture seeder changed; skipping the base comparison"* ]] ||
   fail 'a changed fixture seeder must still allow head measurements without an incompatible base comparison'
+[[ "$runner_contents" == *"^Test(LoadFixtureRejectsOlderVersion|OwnerUsernamePasswordLogin|RPCPerformance)$"* ]] ||
+  fail 'the performance harness selection must run the stale fixture version regression test'
 postgres_contents="$(<"$postgres")"
 [[ "$postgres_contents" == *"pg_isready -h 127.0.0.1 -U postgres -q"* ]] ||
   fail 'Postgres readiness must wait for the TCP listener used by the workflow'

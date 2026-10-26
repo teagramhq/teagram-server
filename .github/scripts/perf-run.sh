@@ -116,12 +116,18 @@ base_ready() {
     echo "no base commit" >"$PERF_WORK/base-skipped"
     return 1
   fi
+  local diff_status=0
+  git diff --quiet "$PERF_BASE_SHA" HEAD -- test/perf/fixture_test.go || diff_status=$?
+  case "$diff_status" in
+    0) ;;
+    1)
+      echo "fixture seeder changed; skipping the base comparison" >"$PERF_WORK/base-skipped"
+      return 1
+      ;;
+    *) fatal "compare fixture seeder with base $PERF_BASE_SHA" ;;
+  esac
   local tree="$PERF_WORK/base"
   git worktree add --detach "$tree" "$PERF_BASE_SHA" >/dev/null || fatal "check out base $PERF_BASE_SHA"
-  if ! git diff --quiet "$PERF_BASE_SHA" HEAD -- test/perf/fixture_test.go; then
-    echo "fixture seeder changed; skipping the base comparison" >"$PERF_WORK/base-skipped"
-    return 1
-  fi
   if [ ! -f "$tree/test/perf/harness_test.go" ]; then
     echo "base has no harness" >"$PERF_WORK/base-skipped"
     return 1
@@ -153,7 +159,7 @@ run_branch() {
   TG_PERF_DIR="$PERF_CACHE" \
     TG_PERF_DSN_1X="$(dsn 1x "$suffix")" TG_PERF_DSN_100X="$(dsn 100x "$suffix")" \
     TG_PERF_REPORT="$PERF_WORK/$branch-$round.json" \
-    "$PERF_WORK/$branch.test" -test.run '^TestRPCPerformance$' -test.count=1 -test.timeout 30m -test.v ||
+    "$PERF_WORK/$branch.test" -test.run '^Test(LoadFixtureRejectsOlderVersion|OwnerUsernamePasswordLogin|RPCPerformance)$' -test.count=1 -test.timeout 30m -test.v ||
     fatal "run the $branch RPC performance harness"
   echo "::endgroup::"
 }
@@ -223,6 +229,7 @@ measure() {
   # widen the noise band that is meant to catch it.
   if [ -n "${PERF_RECORD:-}" ] && [ "$status" -eq 0 ] && [ -f "$PERF_WORK/aggregate.json" ]; then
     cp "$PERF_WORK/aggregate.json" "$PERF_HISTORY/$(date -u +%Y%m%dT%H%M%S).json"
+    # shellcheck disable=SC2012 # UTC timestamp filenames sort chronologically and contain no spaces.
     ls -1 "$PERF_HISTORY"/*.json | head -n -"$history_keep" | xargs -r rm --
   fi
   return "$status"
