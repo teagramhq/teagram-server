@@ -1553,9 +1553,26 @@ def validate_report(
     report_root: pathlib.Path,
     record: dict[str, object],
     previous_record: dict[str, object] | None = None,
-) -> None:
+    allow_missing: bool = False,
+) -> bool:
+    try:
+        report_root.lstat()
+    except FileNotFoundError:
+        if allow_missing:
+            return False
+        secure_dir(report_root)
+    except OSError:
+        reject("state-unavailable")
     secure_dir(report_root)
     report_file = report_read_path(report_root, record["transition_id"])
+    try:
+        report_file.lstat()
+    except FileNotFoundError:
+        if allow_missing:
+            return False
+        file_stat(report_file, stat.S_IFREG, 0o600)
+    except OSError:
+        reject("report-unavailable")
     file_stat(report_file, stat.S_IFREG, 0o600)
     try:
         raw = report_file.read_bytes()
@@ -1621,7 +1638,7 @@ def validate_report(
             or missing["count"] != 0
         ):
             reject("transition-report-evidence")
-        return
+        return True
     if record["outcome"] == "initial-local":
         if report.get("schema") != REPORT_SCHEMA:
             reject("report-schema")
@@ -1768,9 +1785,19 @@ def validate_report(
             or phases.get("local_census_pass_1_sha256") != record["evidence"]["restored_manifest_sha256"]
         ):
             reject("transition-report-evidence")
+    return True
 
 
 def read_authority(state_dir: pathlib.Path, report_root: pathlib.Path) -> tuple[list[dict[str, object]], bytes, bytes | None]:
+    records, head, mode_bytes, _missing_report_count = _read_authority(state_dir, report_root)
+    return records, head, mode_bytes
+
+
+def _read_authority(
+    state_dir: pathlib.Path,
+    report_root: pathlib.Path,
+    allow_missing_reports: bool = False,
+) -> tuple[list[dict[str, object]], bytes, bytes | None, int]:
     secure_dir(state_dir)
     root_temporaries: list[tuple[pathlib.Path, bytes]] = []
     try:
@@ -1823,6 +1850,7 @@ def read_authority(state_dir: pathlib.Path, report_root: pathlib.Path) -> tuple[
     previous_id = None
     previous_outcome = None
     head = b""
+    missing_report_count = 0
     for generation, name in enumerate(committed, start=1):
         path = journal / name
         info = file_stat(path, stat.S_IFREG)
@@ -1834,7 +1862,13 @@ def read_authority(state_dir: pathlib.Path, report_root: pathlib.Path) -> tuple[
             reject("record-reused")
         transitions.add(valid["transition_id"])
         reports.add(valid["evidence"]["report_sha256"])
-        validate_report(report_root, valid, records[-1] if records else None)
+        if not validate_report(
+            report_root,
+            valid,
+            records[-1] if records else None,
+            allow_missing=allow_missing_reports,
+        ):
+            missing_report_count += 1
         raw = path.read_bytes()
         records.append(valid)
         head = raw
@@ -1859,7 +1893,7 @@ def read_authority(state_dir: pathlib.Path, report_root: pathlib.Path) -> tuple[
         transition = records[-1]["transition_id"]
         if len(journal_temporaries) != 1 or journal_temporaries[0] != (f".tmp-{transition}", head):
             reject("journal-ambiguous")
-    return records, head, mode_bytes
+    return records, head, mode_bytes, missing_report_count
 
 
 def current_authority(state_dir: pathlib.Path, report_root: pathlib.Path) -> dict[str, object]:
@@ -1867,6 +1901,17 @@ def current_authority(state_dir: pathlib.Path, report_root: pathlib.Path) -> dic
     if mode_bytes != head:
         reject("mode-head-mismatch")
     return records[-1]
+
+
+def current_deployment_authority(
+    state_dir: pathlib.Path, report_root: pathlib.Path
+) -> tuple[dict[str, object], int]:
+    records, head, mode_bytes, missing_report_count = _read_authority(
+        state_dir, report_root, allow_missing_reports=True
+    )
+    if mode_bytes != head:
+        reject("mode-head-mismatch")
+    return records[-1], missing_report_count
 
 
 def docker_volume_exists(name: str) -> None:
