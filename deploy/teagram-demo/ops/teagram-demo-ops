@@ -107,15 +107,20 @@ show_fingerprints() {
 show_logs() {
   since=$1
   valid_since "$since" || fail 'logs requires a UTC timestamp in RFC3339 seconds format'
-  ids=$(docker ps -q --filter label=com.docker.compose.project=teagram-demo \
-    --filter label=com.docker.compose.service=teagramd)
-  [ -n "$ids" ] || fail 'demo server containers are not running'
-  printf '%s\n' "$ids" | while IFS= read -r id; do
-    [ -n "$id" ] || continue
-    name=$(docker inspect --format '{{.Name}}' "$id") || fail 'could not read a demo container name'
-    printf '%s\n' "--- ${name#/} ---"
-    docker logs --since "$since" --tail 200 "$id"
+  found=0
+  for service in teagramd teagramd-next; do
+    ids=$(docker ps -q --filter label=com.docker.compose.project=teagram-demo \
+      --filter label=com.docker.compose.service="$service")
+    [ -n "$ids" ] || continue
+    found=1
+    printf '%s\n' "$ids" | while IFS= read -r id; do
+      [ -n "$id" ] || continue
+      name=$(docker inspect --format '{{.Name}}' "$id") || fail 'could not read a demo container name'
+      printf '%s\n' "--- ${name#/} ---"
+      docker logs --since "$since" --tail 200 "$id"
+    done
   done
+  [ "$found" -eq 1 ] || fail 'demo server containers are not running'
 }
 
 run_reviewed_script() {

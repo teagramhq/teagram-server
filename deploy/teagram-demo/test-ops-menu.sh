@@ -40,9 +40,44 @@ git -C "$CHECKOUT" add unreviewed.txt
 git -C "$CHECKOUT" commit --quiet -m 'unreviewed fixture'
 UNREVIEWED_SHA=$(git -C "$CHECKOUT" rev-parse HEAD)
 mkdir -p "$WORK_DIR/home"
+FIXTURE_BIN=$WORK_DIR/bin
+mkdir -p "$FIXTURE_BIN"
+cat >"$FIXTURE_BIN/docker" <<'SH'
+#!/bin/sh
+set -eu
+case "$1" in
+  ps)
+    service=
+    while [ "$#" -gt 0 ]; do
+      if [ "$1" = --filter ]; then
+        shift
+        case "$1" in
+          label=com.docker.compose.service=*) service=${1#label=com.docker.compose.service=} ;;
+        esac
+      fi
+      shift
+    done
+    if [ "$service" = "${DEMO_TEST_RUNNING_SLOT:-}" ]; then
+      printf 'id-%s\n' "$service"
+    fi
+    ;;
+  inspect)
+    printf '/%s\n' "$4"
+    ;;
+  logs)
+    printf 'logs-%s\n' "$6"
+    ;;
+  *)
+    printf 'unexpected docker command: %s\n' "$1" >&2
+    exit 1
+    ;;
+esac
+SH
+chmod 0755 "$FIXTURE_BIN/docker"
 
 sed \
   -e "s|^REPO=/opt/teagram-demo$|REPO=$CHECKOUT|" \
+  -e "s|^PATH=/usr/sbin:/usr/bin:/sbin:/bin$|PATH=$FIXTURE_BIN:/usr/sbin:/usr/bin:/sbin:/bin|" \
   -e "s|^HOME=/root$|HOME=$WORK_DIR/home|" \
   -e 's|^ROOT_UID=.*|ROOT_UID=0|' \
   "$SCRIPT_DIR/ops/teagram-demo-ops" >"$WORK_DIR/teagram-demo-ops"
@@ -79,5 +114,18 @@ if output=$(SSH_ORIGINAL_COMMAND="run $MAIN_SHA probe; touch $INJECT_MARKER" "$W
 fi
 [ ! -e "$INJECT_MARKER" ] || { printf '%s\n' 'shell syntax executed through the ops menu' >&2; exit 1; }
 case "$output" in *'usage: teagram-demo-ops'*) ;; *) printf '%s\n' "$output" >&2; exit 1 ;; esac
+
+for slot in teagramd teagramd-next; do
+  LOG_OUTPUT=$(DEMO_TEST_RUNNING_SLOT=$slot SSH_ORIGINAL_COMMAND='logs 2026-10-26T00:00:00Z' \
+    "$WORK_DIR/teagram-demo-ops")
+  printf '%s\n' "$LOG_OUTPUT" | grep -Fq -- "--- id-$slot ---" || {
+    printf 'logs did not include the running %s slot: %s\n' "$slot" "$LOG_OUTPUT" >&2
+    exit 1
+  }
+  printf '%s\n' "$LOG_OUTPUT" | grep -Fq -- "logs-id-$slot" || {
+    printf 'logs did not fetch output from the running %s slot: %s\n' "$slot" "$LOG_OUTPUT" >&2
+    exit 1
+  }
+done
 
 printf '%s\n' 'demo ops menu limits SSH commands and runs only executable scripts from main'
