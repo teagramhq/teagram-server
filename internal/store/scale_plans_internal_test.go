@@ -37,6 +37,7 @@ type scalePlan struct {
 	Relation string      `json:"Relation Name"`
 	Cost     float64     `json:"Total Cost"`
 	Rows     float64     `json:"Actual Rows"`
+	Loops    float64     `json:"Actual Loops"`
 	Hits     int64       `json:"Shared Hit Blocks"`
 	Reads    int64       `json:"Shared Read Blocks"`
 	Plans    []scalePlan `json:"Plans"`
@@ -51,6 +52,17 @@ func (p scalePlan) sequentialTables() []string {
 		tables = append(tables, child.sequentialTables()...)
 	}
 	return tables
+}
+
+func (p scalePlan) rowsReadFrom(table string) float64 {
+	var rows float64
+	if p.Relation == table {
+		rows += p.Rows * p.Loops
+	}
+	for _, child := range p.Plans {
+		rows += child.rowsReadFrom(table)
+	}
+	return rows
 }
 
 func (p scalePlan) recordRelations(seen map[string]bool) {
@@ -155,6 +167,10 @@ func TestHotQueryPlansAtScale(t *testing.T) {
 	}
 	defer traced.Close()
 	q := db.New(traced)
+	scaleUserIDs := make([]int64, 100)
+	for i := range scaleUserIDs {
+		scaleUserIDs[i] = int64(i + 1)
+	}
 	// Both initial and cursor pages, and both pinned-dialog modes, must keep
 	// their indexed access. No enable_seqscan override masks planner decisions.
 	for _, offset := range []int64{0, 95} {
@@ -188,6 +204,10 @@ func TestHotQueryPlansAtScale(t *testing.T) {
 		scaleQueryError(q.UsersByID(ctx, []int64{42, 43})),
 		scaleQueryError(q.GetUsernameByHandle(ctx, "SCALE42")),
 		scaleQueryError(q.GetUserByUsername(ctx, "SCALE42")),
+		scaleQueryError(q.EntitledUserIDs(ctx, db.EntitledUserIDsParams{
+			ViewerID: 42,
+			Ids:      scaleUserIDs,
+		})),
 		scaleQueryError(q.GetState(ctx, 42)),
 		scaleQueryError(q.EventsSince(ctx, db.EventsSinceParams{OwnerID: 42, Pts: 50})),
 		scaleQueryError(q.EventsWindow(ctx, db.EventsWindowParams{OwnerID: 42, FromPts: 50, ToPts: 90, Lim: 20})),
@@ -253,6 +273,107 @@ func TestHotQueryPlansAtScale(t *testing.T) {
 		if !seen[table] {
 			t.Errorf("no hot query plan exercised seeded table %s", table)
 		}
+	}
+}
+
+func TestEntitledUserIDsUsesDialogIndexForLargeOwner(t *testing.T) {
+	t.Parallel()
+	ctx := t.Context()
+	dsn := pgtest.DSN(t)
+	pool, err := pgxpool.New(ctx, dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pool.Close()
+	for _, sql := range []string{
+		`UPDATE server_administration SET election_closed = true WHERE singleton_id = 1`,
+		`INSERT INTO users (id, phone, first_name)
+		 SELECT n, '+entitlement-scale' || n, 'Scale ' || n FROM generate_series(1, 10000) n`,
+		`ALTER TABLE dialogs DISABLE TRIGGER dialogs_track_owner_count`,
+		`INSERT INTO dialogs (owner_id, peer_type, peer_id, top_message)
+		 SELECT 1, 1, n, n FROM generate_series(5001, 10000) n
+		 UNION ALL
+		 SELECT n, 1, 1, n FROM generate_series(1001, 6000) n`,
+		`ALTER TABLE dialogs ENABLE TRIGGER dialogs_track_owner_count`,
+		`ANALYZE dialogs`,
+	} {
+		if _, err := pool.Exec(ctx, sql); err != nil {
+			t.Fatalf("seed entitlement plan: %v", err)
+		}
+	}
+
+	ids := []int64{1}
+	for id := int64(8001); id <= 8100; id++ {
+		ids = append(ids, id)
+	}
+	for id := int64(1001); id <= 1100; id++ {
+		ids = append(ids, id)
+	}
+	for id := int64(10001); id <= 10100; id++ {
+		ids = append(ids, id)
+	}
+	recorded := &scaleQueries{}
+	cfg, err := pgxpool.ParseConfig(dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.ConnConfig.Tracer = recorded
+	traced, err := pgxpool.NewWithConfig(ctx, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer traced.Close()
+	rows, err := db.New(traced).EntitledUserIDs(ctx, db.EntitledUserIDsParams{ViewerID: 1, Ids: ids})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := map[int64]bool{1: true}
+	for id := int64(8001); id <= 8100; id++ {
+		want[id] = true
+	}
+	for id := int64(1001); id <= 1100; id++ {
+		want[id] = true
+	}
+	got := make(map[int64]bool, len(rows))
+	for _, row := range rows {
+		id, ok := row.(int64)
+		if !ok {
+			t.Fatalf("entitled id has type %T, want int64", row)
+		}
+		got[id] = true
+	}
+	if len(got) != len(want) {
+		t.Fatalf("entitled ids = %v, want %v", got, want)
+	}
+	for id := range want {
+		if !got[id] {
+			t.Errorf("entitled ids missing %d", id)
+		}
+	}
+
+	recorded.mu.Lock()
+	queries := append([]pgx.TraceQueryStartData(nil), recorded.queries...)
+	recorded.mu.Unlock()
+	if len(queries) != 1 {
+		t.Fatalf("entitlement query count = %d, want 1", len(queries))
+	}
+	var raw []byte
+	if err := pool.QueryRow(ctx, "EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) "+queries[0].SQL, queries[0].Args...).Scan(&raw); err != nil {
+		t.Fatalf("explain entitlement query: %v", err)
+	}
+	var plans []struct {
+		Plan scalePlan `json:"Plan"`
+	}
+	if err := json.Unmarshal(raw, &plans); err != nil {
+		t.Fatal(err)
+	}
+	for _, table := range plans[0].Plan.sequentialTables() {
+		if table == "dialogs" {
+			t.Fatalf("entitlement query sequentially scans dialogs: %s", raw)
+		}
+	}
+	if rows := plans[0].Plan.rowsReadFrom("dialogs"); rows > float64(2*len(ids)) {
+		t.Fatalf("entitlement query reads %.0f dialog rows for %d candidate ids", rows, len(ids))
 	}
 }
 

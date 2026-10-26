@@ -48,36 +48,43 @@ func (q *Queries) CreateUsernameUser(ctx context.Context, arg CreateUsernameUser
 }
 
 const entitledUserIDs = `-- name: EntitledUserIDs :many
-SELECT id FROM (
-    SELECT $1::bigint[] AS id_arr
-) seed, UNNEST(seed.id_arr) AS id
-WHERE id = $2::bigint
-   OR EXISTS (
-       SELECT 1 FROM dialogs d
-       WHERE d.owner_id = $2::bigint
-         AND d.peer_type = 1
-         AND d.peer_id = id
-   )
-   OR EXISTS (
-       SELECT 1 FROM dialogs d
-       WHERE d.owner_id = id
-         AND d.peer_type = 1
-         AND d.peer_id = $2::bigint
-   )
-   OR EXISTS (
-       SELECT 1 FROM chat_participants p1
-       JOIN chat_participants p2 ON p1.chat_id = p2.chat_id
-       WHERE p1.user_id = $2::bigint
-         AND p2.user_id = id
-   )
-   OR EXISTS (
-       SELECT 1 FROM channel_participants v
-       JOIN channel_participants m ON v.channel_id = m.channel_id
-       WHERE v.user_id = $2::bigint
-         AND m.user_id = id
-         AND (v.banned_until IS NULL OR v.banned_until <= now())
-         AND (m.banned_until IS NULL OR m.banned_until <= now())
-   )
+WITH candidate_ids AS MATERIALIZED (
+    SELECT candidate.id, candidate.ordinality
+    FROM UNNEST($1::bigint[]) WITH ORDINALITY AS candidate(id, ordinality)
+), entitled_ids AS (
+    SELECT $2::bigint AS id
+    WHERE $2::bigint = ANY($1::bigint[])
+    UNION
+    SELECT d.peer_id
+    FROM dialogs d
+    WHERE d.owner_id = $2::bigint
+      AND d.peer_type = 1
+      AND d.peer_id = ANY($1::bigint[])
+    UNION
+    SELECT d.owner_id
+    FROM dialogs d
+    WHERE d.owner_id = ANY($1::bigint[])
+      AND d.peer_type = 1
+      AND d.peer_id = $2::bigint
+    UNION
+    SELECT p2.user_id
+    FROM chat_participants p1
+    JOIN chat_participants p2 ON p1.chat_id = p2.chat_id
+    WHERE p1.user_id = $2::bigint
+      AND p2.user_id = ANY($1::bigint[])
+    UNION
+    SELECT m.user_id
+    FROM channel_participants v
+    JOIN channel_participants m ON v.channel_id = m.channel_id
+    WHERE v.user_id = $2::bigint
+      AND m.user_id = ANY($1::bigint[])
+      AND (v.banned_until IS NULL OR v.banned_until <= now())
+      AND (m.banned_until IS NULL OR m.banned_until <= now())
+)
+SELECT candidate.id
+FROM candidate_ids candidate
+JOIN entitled_ids USING (id)
+ORDER BY candidate.ordinality
 `
 
 type EntitledUserIDsParams struct {
@@ -96,6 +103,9 @@ type EntitledUserIDsParams struct {
 // banned viewer is not a current member, so the channel admits nothing for
 // them. The ban predicate is the same one ChannelMember.Banned uses in Go:
 // banned_until IS NULL OR banned_until <= now().
+// Keep each edge as an independent indexed branch. Combining these checks in
+// one OR makes PostgreSQL hash a large owner's complete dialog list instead
+// of probing its owner-scoped primary key for the requested peers.
 func (q *Queries) EntitledUserIDs(ctx context.Context, arg EntitledUserIDsParams) ([]interface{}, error) {
 	rows, err := q.db.Query(ctx, entitledUserIDs, arg.Ids, arg.ViewerID)
 	if err != nil {
