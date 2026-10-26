@@ -118,6 +118,9 @@ jobs:
       - name: Test invalid performance base SHA handling
         run: python3 -B .github/scripts/test_perf_run.py
 
+      - name: Test fixture restore options
+        run: bash .github/scripts/test-perf-run-restore.sh
+
       - name: Restore the snapshot
         id: snapshot
         uses: actions/cache/restore@v6.1.0
