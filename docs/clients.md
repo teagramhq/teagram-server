@@ -653,6 +653,15 @@ blindly replay a whole-table dump into a live database.
 
 ## 6. Supported Teagram clients
 
+| Client | Status |
+|---|---|
+| Teagram Desktop | Supported macOS client. It lets users choose a server, verifies and pins the server identity to the account, then requests username and password. See the [desktop README](https://github.com/teagramhq/teagram-desktop/blob/dev/README.md) and [server enrollment guide](https://github.com/teagramhq/teagram-desktop/blob/dev/docs/server_enrollment.md). |
+| Teagram Web | Username/password sign-in is in progress and does not work yet (MAIN-1541). |
+| Stock Telegram clients | Unsupported. They use Telegram production DC addresses and RSA keys. |
+
+Other Teagram clients must use the server advertised address and DC id, and
+verify its RSA identity before sending account credentials.
+
 ### Sticker pack import
 
 Before uploading files for a sticker or emoji pack, a client can call
@@ -662,15 +671,6 @@ sets. `off` means the client should hide or disable “Import pack” and explai
 that this instance has disabled pack imports. The setting applies to every
 account on the instance. Existing sets remain available to resolve, install,
 send, and use.
-
-| Client | Status |
-|---|---|
-| Teagram Desktop | Supported macOS client. It lets users choose a server, verifies and pins the server identity to the account, then requests username and password. See the [desktop README](https://github.com/teagramhq/teagram-desktop/blob/dev/README.md) and [server enrollment guide](https://github.com/teagramhq/teagram-desktop/blob/dev/docs/server_enrollment.md). |
-| Teagram Web | Username/password sign-in is in progress and does not work yet (MAIN-1541). |
-| Stock Telegram clients | Unsupported. They use Telegram production DC addresses and RSA keys. |
-
-Other Teagram clients must use the server advertised address and DC id, and
-verify its RSA identity before sending account credentials.
 
 ## Known ceilings
 
