@@ -186,14 +186,23 @@ func (s *Store) ChannelParticipantsPageForViewer(
 	if err != nil {
 		return snapshot, false, fmt.Errorf("count channel participants page: %w", err)
 	}
-	rows, err := qtx.ChannelParticipantsPage(ctx, db.ChannelParticipantsPageParams{
-		ChannelID:  channelID,
-		ViewerID:   viewerID,
-		Filter:     filter,
-		Query:      query,
-		PageOffset: offset,
-		PageLimit:  limit,
-	})
+	var rows []db.ChannelParticipant
+	if filter == ChannelParticipantFilterRecent {
+		rows, err = qtx.ChannelParticipantsRecentPage(ctx, db.ChannelParticipantsRecentPageParams{
+			ChannelID:  channelID,
+			PageLimit:  limit,
+			PageOffset: offset,
+		})
+	} else {
+		rows, err = qtx.ChannelParticipantsPage(ctx, db.ChannelParticipantsPageParams{
+			ChannelID:  channelID,
+			ViewerID:   viewerID,
+			Filter:     filter,
+			Query:      query,
+			PageOffset: offset,
+			PageLimit:  limit,
+		})
+	}
 	if err != nil {
 		return snapshot, false, fmt.Errorf("select channel participants page: %w", err)
 	}

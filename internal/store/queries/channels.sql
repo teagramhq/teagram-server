@@ -240,6 +240,15 @@ SELECT participant_count
 FROM channel_participant_counts
 WHERE channel_id = $1;
 
+-- Recent rows need no user profile data. Keep this page on the membership
+-- index instead of scanning unrelated users for the user-id ordering.
+-- name: ChannelParticipantsRecentPage :many
+SELECT * FROM channel_participants
+WHERE channel_id = sqlc.arg(channel_id)::bigint
+  AND (banned_until IS NULL OR banned_until <= now())
+ORDER BY user_id
+LIMIT sqlc.arg(page_limit)::int OFFSET sqlc.arg(page_offset)::int;
+
 -- name: ChannelParticipantsPage :many
 SELECT cp.*
 FROM channel_participants cp
