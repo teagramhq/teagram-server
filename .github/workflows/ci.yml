@@ -1790,6 +1790,13 @@ jobs:
           bash .github/scripts/pull-base-images.sh Dockerfile Dockerfile.mc
           deploy/teagramd/mixed-trust-probe.Dockerfile
 
+      - name: Preload Compose service images
+        timeout-minutes: 10
+        run: >-
+          bash .github/scripts/pull-base-images.sh
+          --image mirror.gcr.io/library/postgres:18-alpine
+          --image mirror.gcr.io/arigaio/atlas:1.2.0-alpine
+
       - name: Build image
         uses: docker/build-push-action@v7.4.0
         with:
