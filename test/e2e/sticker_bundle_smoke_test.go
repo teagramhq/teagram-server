@@ -136,7 +136,7 @@ func testSmokeStickerBundleCatalogue(t *testing.T) {
 				t.Fatalf("animated sticker attributes = %#v, want 512x512 image size and sticker attributes without documentAttributeAnimated", document.Attributes)
 			}
 		}
-		transferSmokeBundleSticker(t, f, a, b, document, wantBytes, fmt.Sprintf("bundle sticker smoke %s", pack.ShortName), 1049801+int64(i))
+		transferSmokeBundleSticker(t, f, a, b, document, wantBytes, "bundle sticker smoke "+pack.ShortName, 1049801+int64(i))
 	}
 }
 
