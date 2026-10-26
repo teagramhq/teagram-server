@@ -9,6 +9,9 @@ readonly REPO_ROOT
 readonly BASE_RUNNER="$REPO_ROOT/deploy/teagramd/rollout-runner/rollout-runner.sh"
 readonly BASE_VERIFIER="$REPO_ROOT/deploy/teagramd/rollout-runner/rollout-verifier.sh"
 readonly TEMP_PREFIX=/tmp/teagram-preflight-replay.
+readonly SANDBOX_UID=65534
+readonly SANDBOX_PATH=/bin:/usr/bin
+readonly TRUSTED_BIN_PATH=/usr/sbin:/usr/bin:/sbin:/bin
 
 fail() {
   printf 'preflight replay rejected: %s\n' "$1" >&2
@@ -85,8 +88,8 @@ prepare_target_runner() {
   local source=$1 output="$TMP_DIR/rollout-runner-replay.sh" helper="$TMP_DIR/runner-replay-function.sh"
   if [ "${PREFLIGHT_REPLAY_TEST_MODE:-0}" != 1 ] || \
      [ "${PREFLIGHT_REPLAY_TEST_FORCE_COMPAT:-0}" != 1 ]; then
-    # shellcheck disable=SC2016 # literal source text, not an expansion
-    if grep -Fq 'compare_resolved_preflight_command "$2"' "$source"; then
+    if grep -Fq 'ROLLOUT_PREFLIGHT_REPLAY_SANDBOX' "$source" && \
+       grep -Fq 'compare_resolved_preflight_command "${@:2}"' "$source"; then
       printf '%s\n' "$source"
       return 0
     fi
@@ -98,8 +101,8 @@ prepare_target_runner() {
       while ((getline line < helper_file) > 0) print line
       close(helper_file)
       print
-      print "  if [ \"$#\" -eq 2 ] && [ \"$1\" = compare-resolved-preflight ]; then"
-      print "    compare_resolved_preflight_command \"$2\""
+      print "  if [ \"$#\" -ge 2 ] && [ \"$#\" -le 3 ] && [ \"$1\" = compare-resolved-preflight ]; then"
+      print "    compare_resolved_preflight_command \"${@:2}\""
       print "    return $?"
       print "  fi"
       inserted=1
@@ -115,44 +118,142 @@ prepare_target_runner() {
   printf '%s\n' "$output"
 }
 
-prepare_target_verifier() {
-  local source=$1 output="$TMP_DIR/rollout-verifier-replay.sh" helper="$TMP_DIR/verifier-replay-functions.sh"
-  if [ "${PREFLIGHT_REPLAY_TEST_MODE:-0}" != 1 ] || \
-     [ "${PREFLIGHT_REPLAY_TEST_FORCE_COMPAT:-0}" != 1 ]; then
-    if grep -Fq 'preflight_snapshot_command "$@"' "$source"; then
-      printf '%s\n' "$source"
-      return 0
+copy_sandbox_binary() {
+  local name=$1 destination=$2 source dependencies line dep target
+  source=$(PATH="$TRUSTED_BIN_PATH" command -v "$name") || {
+    fail "sandbox runtime tool is unavailable: $name"
+    return 1
+  }
+  case "$source" in /*) ;; *) fail "sandbox runtime path is invalid: $name"; return 1 ;; esac
+  [ -f "$source" ] || { fail "sandbox runtime tool is not a regular file: $name"; return 1; }
+  mkdir -p -- "$SANDBOX_ROOT$(dirname -- "$destination")" || return 1
+  chmod 755 "$SANDBOX_ROOT$(dirname -- "$destination")" || return 1
+  install -m 755 -- "$source" "$SANDBOX_ROOT$destination" || return 1
+  dependencies=$(PATH="$TRUSTED_BIN_PATH" ldd "$source" 2>&1) || {
+    case "$dependencies" in
+      *'not a dynamic executable'*|*'statically linked'*) return 0 ;;
+      *) fail "cannot inspect sandbox runtime dependencies: $name"; return 1 ;;
+    esac
+  }
+  while IFS= read -r line; do
+    dep=
+    for target in $line; do
+      case "$target" in /*) dep=$target; break ;; esac
+    done
+    case "$line" in *'not found'*) fail "sandbox runtime dependency is unavailable: $name"; return 1 ;; esac
+    [ -n "$dep" ] || continue
+    [ -f "$dep" ] || { fail "sandbox runtime dependency is not a regular file: $name"; return 1; }
+    if [ ! -e "$SANDBOX_ROOT$dep" ]; then
+      mkdir -p -- "$SANDBOX_ROOT$(dirname -- "$dep")" || return 1
+      chmod 755 "$SANDBOX_ROOT$(dirname -- "$dep")" || return 1
+      install -m 755 -- "$dep" "$SANDBOX_ROOT$dep" || return 1
     fi
-  fi
-  awk '
-    /^secure_replay_evidence_dir\(\) \{$/ { copying=1 }
-    copying { print }
-    copying && /^}$/ { closed++ ; if (closed == 2) exit }
-    END { if (closed != 2) exit 1 }
-  ' "$BASE_VERIFIER" > "$helper" || return 1
-  [ -s "$helper" ] || { fail 'reviewed preflight snapshot command is unavailable'; return 1; }
-  if ! awk -v helper_file="$helper" '
-    /^main\(\) \{/ && !functions_inserted {
-      while ((getline line < helper_file) > 0) print line
-      close(helper_file)
-      print
-      functions_inserted=1
-      next
-    }
-    /^    snapshot\)/ && functions_inserted && !command_inserted {
-      print "    preflight-snapshot)"
-      print "      [ \"$#\" -eq 6 ] || return 64"
-      print "      preflight_snapshot_command \"$@\" ;;"
-      command_inserted=1
-    }
-    { print }
-    END { if (!functions_inserted || !command_inserted) exit 1 }
-  ' "$source" > "$output"; then
-    fail 'cannot prepare the PR-head snapshot verifier'
+  done <<< "$dependencies"
+}
+
+prepare_sandbox() {
+  local command path
+  local -a commands=(bash jq id readlink stat dirname basename awk sha256sum date mktemp chmod rm ln sync mkdir)
+  SANDBOX_ROOT="$TMP_DIR/sandbox"
+  SANDBOX_INPUT="$SANDBOX_ROOT/tmp/replay-input"
+  SANDBOX_OUTPUT="$SANDBOX_ROOT/tmp/replay-output"
+  SANDBOX_RUNNER=/workspace/deploy/teagramd/rollout-runner/rollout-runner.sh
+  SANDBOX_VERIFIER=/workspace/deploy/teagramd/rollout-runner/rollout-verifier.sh
+  SANDBOX_EVIDENCE=/tmp/replay-input
+  SANDBOX_RESULTS=/tmp/replay-output
+  readonly SANDBOX_ROOT SANDBOX_INPUT SANDBOX_OUTPUT SANDBOX_RUNNER SANDBOX_VERIFIER SANDBOX_EVIDENCE SANDBOX_RESULTS
+
+  if ! PATH="$TRUSTED_BIN_PATH" command -v chroot >/dev/null 2>&1; then
+    fail 'unprivileged chroot sandbox is unavailable'
+    return 1
+  elif PATH="$TRUSTED_BIN_PATH" chroot --help 2>&1 | grep -Fq -- '--userspec'; then
+    CHROOT_KIND=coreutils
+    CHROOT_BIN=$(PATH="$TRUSTED_BIN_PATH" command -v chroot)
+  elif PATH="$TRUSTED_BIN_PATH" busybox chroot --help 2>&1 | grep -Fq -- '-u USER'; then
+    CHROOT_KIND=busybox
+    CHROOT_BIN=$(PATH="$TRUSTED_BIN_PATH" command -v busybox)
+  else
+    fail 'chroot does not support dropping sandbox privileges'
     return 1
   fi
-  chmod 700 "$output" || return 1
-  printf '%s\n' "$output"
+  HOST_ENV=$(PATH="$TRUSTED_BIN_PATH" command -v env) || { fail 'sandbox launcher is unavailable'; return 1; }
+  HOST_TIMEOUT=$(PATH="$TRUSTED_BIN_PATH" command -v timeout) || { fail 'sandbox timeout is unavailable'; return 1; }
+  readonly CHROOT_KIND CHROOT_BIN HOST_ENV HOST_TIMEOUT
+
+  install -d -m 755 "$SANDBOX_ROOT" "$SANDBOX_ROOT/etc" "$SANDBOX_ROOT/dev" \
+    "$SANDBOX_ROOT/workspace/deploy/teagramd/rollout-runner"
+  install -d -m 1777 "$SANDBOX_ROOT/tmp"
+  install -d -m 755 "$SANDBOX_INPUT"
+  install -d -m 700 "$SANDBOX_OUTPUT"
+  printf 'nobody:x:%s:%s:nobody:/:/sbin/nologin\n' "$SANDBOX_UID" "$SANDBOX_UID" > "$SANDBOX_ROOT/etc/passwd"
+  printf 'nobody:x:%s:\n' "$SANDBOX_UID" > "$SANDBOX_ROOT/etc/group"
+  chmod 644 "$SANDBOX_ROOT/etc/passwd" "$SANDBOX_ROOT/etc/group"
+  install -m 666 /dev/null "$SANDBOX_ROOT/dev/null"
+
+  for command in "${commands[@]}"; do
+    case "$command" in
+      bash) path=/bin/bash ;;
+      jq) path=/usr/bin/jq ;;
+      *) path=$(PATH="$TRUSTED_BIN_PATH" command -v "$command") || { fail "sandbox runtime tool is unavailable: $command"; return 1; } ;;
+    esac
+    copy_sandbox_binary "$command" "$path" || return 1
+  done
+  chown 0:0 "$SANDBOX_ROOT" "$SANDBOX_ROOT/tmp" "$SANDBOX_INPUT" || return 1
+  chown "$SANDBOX_UID:$SANDBOX_UID" "$SANDBOX_OUTPUT" || return 1
+  PATH="$TRUSTED_BIN_PATH" find "$SANDBOX_ROOT" -type d ! -path "$SANDBOX_OUTPUT" \
+    -exec chmod 755 {} + || return 1
+  chmod 755 "$SANDBOX_ROOT" "$SANDBOX_ROOT/etc" "$SANDBOX_ROOT/dev" \
+    "$SANDBOX_ROOT/workspace" "$SANDBOX_ROOT/workspace/deploy" \
+    "$SANDBOX_ROOT/workspace/deploy/teagramd" \
+    "$SANDBOX_ROOT/workspace/deploy/teagramd/rollout-runner"
+  chmod 1777 "$SANDBOX_ROOT/tmp"
+  chmod 755 "$SANDBOX_INPUT"
+  chmod 700 "$SANDBOX_OUTPUT"
+  install -m 444 "$TMP_DIR/baseline.snapshot.json" "$SANDBOX_INPUT/baseline.snapshot.json"
+  install -m 444 "$TMP_DIR/preflight.snapshot.json" "$SANDBOX_INPUT/preflight.snapshot.json"
+  chown 0:0 "$SANDBOX_INPUT/baseline.snapshot.json" "$SANDBOX_INPUT/preflight.snapshot.json"
+  install -m 555 "$target_runner" "$SANDBOX_ROOT$SANDBOX_RUNNER"
+  install -m 555 "$target_verifier_source" "$SANDBOX_ROOT$SANDBOX_VERIFIER"
+  [ "$(stat -c %u:%a -- "$SANDBOX_ROOT")" = '0:755' ] && \
+    [ "$(stat -c %u:%a -- "$SANDBOX_INPUT")" = '0:755' ] && \
+    [ "$(stat -c %u:%a -- "$SANDBOX_OUTPUT")" = "$SANDBOX_UID:700" ] || {
+    fail 'preflight replay sandbox permissions are invalid'
+    return 1
+  }
+}
+
+run_in_sandbox() {
+  local command=$1 rc=0 descriptor fd
+  shift
+  (
+    ulimit -c 0
+    ulimit -f 2048
+    ulimit -n 64
+    ulimit -t 30
+    ulimit -v 262144
+    ulimit -u 64
+    for descriptor in /proc/"$BASHPID"/fd/*; do
+      fd=${descriptor##*/}
+      [[ "$fd" =~ ^[0-9]+$ ]] || continue
+      case "$fd" in 0|1|2) continue ;; esac
+      eval "exec ${fd}>&-" 2>/dev/null || :
+    done
+    if [ "$CHROOT_KIND" = coreutils ]; then
+      exec "$HOST_TIMEOUT" -k 5 45 "$HOST_ENV" -i PATH="$SANDBOX_PATH" HOME=/nonexistent LANG=C LC_ALL=C TZ=UTC \
+        ROLLOUT_PREFLIGHT_REPLAY_SANDBOX=1 \
+        ROLLOUT_VERIFIER_SOURCE_ONLY=1 \
+        PREFLIGHT_REPLAY_SANDBOX_EVIDENCE_DIR="$SANDBOX_RESULTS" \
+        "$CHROOT_BIN" --groups="$SANDBOX_UID" --userspec="$SANDBOX_UID:$SANDBOX_UID" \
+        "$SANDBOX_ROOT" /bin/bash "$command" "$@"
+    fi
+    exec "$HOST_TIMEOUT" -k 5 45 "$HOST_ENV" -i PATH="$SANDBOX_PATH" HOME=/nonexistent LANG=C LC_ALL=C TZ=UTC \
+      ROLLOUT_PREFLIGHT_REPLAY_SANDBOX=1 \
+      ROLLOUT_VERIFIER_SOURCE_ONLY=1 \
+      PREFLIGHT_REPLAY_SANDBOX_EVIDENCE_DIR="$SANDBOX_RESULTS" \
+      "$CHROOT_BIN" chroot -u "$SANDBOX_UID:$SANDBOX_UID" "$SANDBOX_ROOT" \
+      /bin/bash "$command" "$@"
+  ) </dev/null >/dev/null 2>&1 || rc=$?
+  return "$rc"
 }
 
 if ! TMP_DIR=$(mktemp -d "${TEMP_PREFIX}XXXXXXXXXX"); then
@@ -289,19 +390,68 @@ done
 
 target_runner_source="$TMP_DIR/target/deploy/teagramd/rollout-runner/rollout-runner.sh"
 target_verifier_source="$TMP_DIR/target/deploy/teagramd/rollout-runner/rollout-verifier.sh"
+[ -d "$TMP_DIR/target/deploy" ] && [ ! -L "$TMP_DIR/target/deploy" ] && \
+  [ -d "$TMP_DIR/target/deploy/teagramd" ] && [ ! -L "$TMP_DIR/target/deploy/teagramd" ] && \
+  [ -d "$TMP_DIR/target/deploy/teagramd/rollout-runner" ] && \
+  [ ! -L "$TMP_DIR/target/deploy/teagramd/rollout-runner" ] || {
+  fail 'PR head rollout runtime path is symlinked'
+  exit 1
+}
 [ -f "$target_runner_source" ] && [ ! -L "$target_runner_source" ] && \
   [ -f "$target_verifier_source" ] && [ ! -L "$target_verifier_source" ] || {
   fail 'PR head rollout runtime is unavailable'
   exit 1
 }
 target_runner=$(prepare_target_runner "$target_runner_source") || exit 1
-target_verifier=$(prepare_target_verifier "$target_verifier_source") || exit 1
 
 for checkout in "$TMP_DIR/baseline" "$TMP_DIR/target"; do
   name=preflight
   [ "$checkout" = "$TMP_DIR/baseline" ] && name=baseline
-  bash "$target_verifier" preflight-snapshot "$container_id" "$checkout" "$TMP_DIR" \
+  bash "$BASE_VERIFIER" preflight-snapshot "$container_id" "$checkout" "$TMP_DIR" \
     "$name" "$project_name" "$compose_selection" >/dev/null || exit $?
 done
 
-bash "$target_runner" compare-resolved-preflight "$TMP_DIR"
+for checkout in "$TMP_DIR/baseline" "$TMP_DIR/target"; do
+  rm -f -- "$checkout/.env" "$checkout/docker-compose.override.yml" || {
+    fail 'cannot remove private Compose inputs from replay checkouts'
+    exit 1
+  }
+done
+
+prepare_sandbox || exit 1
+if ! run_in_sandbox "$SANDBOX_VERIFIER"; then
+  fail 'PR-head verifier could not load in the unprivileged sandbox'
+  exit 1
+fi
+
+runner_rc=0
+if run_in_sandbox "$SANDBOX_RUNNER" compare-resolved-preflight "$SANDBOX_EVIDENCE" "$SANDBOX_RESULTS"; then
+  :
+else
+  runner_rc=$?
+fi
+
+comparison_file="$SANDBOX_OUTPUT/preflight-comparisons.tsv"
+[ -f "$comparison_file" ] && [ ! -L "$comparison_file" ] && \
+  [ "$(stat -c %u:%a -- "$comparison_file")" = "$SANDBOX_UID:600" ] && \
+  [ "$(stat -c %s -- "$comparison_file")" -le 65536 ] || {
+  fail 'sandbox comparison evidence is unavailable or malformed'
+  exit 1
+}
+declare -A printed_fields=()
+comparison_count=0
+while IFS=$'\t' read -r timestamp phase field before after result extra; do
+  [[ "$timestamp" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$ ]] && \
+    [ "$phase" = preflight ] && [ -z "$extra" ] && \
+    [[ "$field" =~ ^(config_sha256|env_sha256|override_sha256|stop_grace_period|compose_logging_policy|compose_log_login_codes|media_key_source|media_key_current|compose_public_ws_2446|exposure_public_ws_2446|compose_replica_count|compose_client_addr_trust)$ ]] && \
+    [[ "$result" =~ ^(pass|fail)$ ]] || {
+    fail 'sandbox comparison evidence is malformed'
+    exit 1
+  }
+  [ -z "${printed_fields[$field]:-}" ] || { fail 'sandbox comparison evidence has duplicate fields'; exit 1; }
+  printed_fields[$field]=1
+  comparison_count=$((comparison_count + 1))
+  printf '%s\t%s\n' "$field" "$result"
+done < "$comparison_file"
+[ "$comparison_count" -eq 12 ] || { fail 'sandbox comparison evidence is incomplete'; exit 1; }
+[ "$runner_rc" -eq 0 ] || exit "$runner_rc"

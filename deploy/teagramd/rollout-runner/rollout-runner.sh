@@ -2136,9 +2136,9 @@ run_rollback_readiness() {
 }
 
 compare_resolved_preflight() {
-  local old_file="$BASELINE_DIR/baseline.snapshot.json"
-  local target_file="$TARGET_DIR/preflight.snapshot.json"
-  local results="$TARGET_DIR/preflight-comparisons.tsv"
+  local old_file=${PREFLIGHT_BASELINE_SNAPSHOT:-"$BASELINE_DIR/baseline.snapshot.json"}
+  local target_file=${PREFLIGHT_TARGET_SNAPSHOT:-"$TARGET_DIR/preflight.snapshot.json"}
+  local results=${PREFLIGHT_RESULTS_FILE:-"$TARGET_DIR/preflight-comparisons.tsv"}
   local fields=(config_sha256 env_sha256 override_sha256 stop_grace_period compose_logging_policy compose_log_login_codes media_key_source media_key_current)
   local field before after result expected failures=0
   if [ "$INITIALIZE_LOCAL" = 1 ]; then
@@ -2233,48 +2233,68 @@ compare_resolved_preflight() {
 }
 
 compare_resolved_preflight_command() {
-  local evidence_dir=$1 canonical input results rc=0 timestamp phase field before after result owner=0
-  if [ "${ROLLOUT_PREFLIGHT_TEST_MODE:-0}" = 1 ]; then
+  local evidence_dir=$1 output_dir=${2:-$1} canonical input results rc=0 timestamp phase field before after result owner=0 sandbox=0 path expected_owner_mode
+  if [ "${ROLLOUT_PREFLIGHT_REPLAY_SANDBOX:-0}" = 1 ]; then
+    [ "$(id -u)" = 65534 ] || { fail 'preflight replay sandbox requires uid 65534'; return 1; }
+    owner=65534
+    sandbox=1
+  elif [ "${ROLLOUT_PREFLIGHT_TEST_MODE:-0}" = 1 ]; then
     owner=$(id -u) || { fail 'cannot inspect preflight replay owner'; return 1; }
   else
     [ "$(id -u)" = 0 ] || { fail 'preflight replay requires uid 0'; return 1; }
   fi
   PREFLIGHT_EVIDENCE_OWNER=$owner
-  case "$evidence_dir" in
-    /tmp/*) ;;
-    *) fail 'preflight replay evidence must be directly below /tmp'; return 64 ;;
-  esac
-  case "$evidence_dir" in
-    /tmp/*/*) fail 'preflight replay evidence must be directly below /tmp'; return 64 ;;
-  esac
-  case "$evidence_dir" in
-    *'/../'*|*/..|*'/./'*) fail 'preflight replay evidence path must be canonical'; return 64 ;;
-  esac
-  [ -d "$evidence_dir" ] && [ ! -L "$evidence_dir" ] || { fail 'preflight replay evidence directory is unavailable'; return 1; }
-  canonical=$(readlink -f -- "$evidence_dir") || return 1
-  [ "$canonical" = "$evidence_dir" ] && [ "$(stat -c %u:%a -- "$evidence_dir")" = "$owner:700" ] || {
-    fail 'preflight replay evidence has an invalid owner or mode'
-    return 1
-  }
+  for path in "$evidence_dir" "$output_dir"; do
+    case "$path" in
+      /tmp/*) ;;
+      *) fail 'preflight replay evidence must be directly below /tmp'; return 64 ;;
+    esac
+    case "$path" in
+      /tmp/*/*) fail 'preflight replay evidence must be directly below /tmp'; return 64 ;;
+    esac
+    case "$path" in
+      *'/../'*|*/..|*'/./'*) fail 'preflight replay evidence path must be canonical'; return 64 ;;
+    esac
+    [ -d "$path" ] && [ ! -L "$path" ] || { fail 'preflight replay evidence directory is unavailable'; return 1; }
+    canonical=$(readlink -f -- "$path") || return 1
+    if [ "$sandbox" = 1 ] && [ "$path" = "$evidence_dir" ]; then
+      [ "$canonical" = "$path" ] && [ "$(stat -c %u:%a -- "$path")" = "0:755" ] || {
+        fail 'preflight replay snapshots have an invalid owner or mode'
+        return 1
+      }
+    else
+      [ "$canonical" = "$path" ] && [ "$(stat -c %u:%a -- "$path")" = "$owner:700" ] || {
+        fail 'preflight replay evidence has an invalid owner or mode'
+        return 1
+      }
+    fi
+  done
   for input in "$evidence_dir/baseline.snapshot.json" "$evidence_dir/preflight.snapshot.json"; do
-    [ -f "$input" ] && [ ! -L "$input" ] && [ "$(stat -c %u:%a -- "$input")" = "$owner:600" ] || {
+    expected_owner_mode="$owner:600"
+    [ "$sandbox" = 1 ] && expected_owner_mode=0:444
+    [ -f "$input" ] && [ ! -L "$input" ] && [ "$(stat -c %u:%a -- "$input")" = "$expected_owner_mode" ] || {
       fail 'preflight replay snapshots have an invalid owner or mode'
       return 1
     }
   done
-  results="$evidence_dir/preflight-comparisons.tsv"
+  results="$output_dir/preflight-comparisons.tsv"
   [ ! -e "$results" ] && [ ! -L "$results" ] || { fail 'preflight replay comparison already exists'; return 64; }
   BASELINE_DIR=$evidence_dir
-  TARGET_DIR=$evidence_dir
+  TARGET_DIR=$output_dir
+  PREFLIGHT_BASELINE_SNAPSHOT="$evidence_dir/baseline.snapshot.json"
+  PREFLIGHT_TARGET_SNAPSHOT="$evidence_dir/preflight.snapshot.json"
+  PREFLIGHT_RESULTS_FILE=$results
   INITIALIZE_LOCAL=0
   if compare_resolved_preflight; then :; else rc=$?; fi
   [ -f "$results" ] && [ ! -L "$results" ] && [ "$(stat -c %u:%a -- "$results")" = "$owner:600" ] || {
     fail 'preflight replay comparison evidence is unavailable'
     return 1
   }
-  while IFS=$'\t' read -r timestamp phase field before after result; do
+  while IFS=$'\t' read -r timestamp phase field before after result extra; do
     [ -n "$phase" ] || continue
-    [ "$phase" = preflight ] || { fail 'preflight replay comparison evidence is malformed'; return 1; }
+    [ "$phase" = preflight ] && [ -z "$extra" ] && \
+      [[ "$field" =~ ^(config_sha256|env_sha256|override_sha256|stop_grace_period|compose_logging_policy|compose_log_login_codes|media_key_source|media_key_current|compose_public_ws_2446|exposure_public_ws_2446|compose_replica_count|compose_client_addr_trust)$ ]] && \
+      [[ "$result" =~ ^(pass|fail)$ ]] || { fail 'preflight replay comparison evidence is malformed'; return 1; }
     printf '%s\t%s\n' "$field" "$result"
   done < "$results"
   return "$rc"
@@ -2938,8 +2958,8 @@ run_stack_move() {
 }
 
 main() {
-  if [ "$#" -eq 2 ] && [ "$1" = compare-resolved-preflight ]; then
-    compare_resolved_preflight_command "$2"
+  if [ "$#" -ge 2 ] && [ "$#" -le 3 ] && [ "$1" = compare-resolved-preflight ]; then
+    compare_resolved_preflight_command "${@:2}"
     return $?
   fi
   if [ "$#" -eq 2 ] && [ "$1" = reconcile ]; then

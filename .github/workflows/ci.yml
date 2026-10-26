@@ -983,7 +983,7 @@ jobs:
         run: deploy/teagram/test-deploy-main.sh
 
       - name: Check read-only Compose preflight replay
-        run: deploy/teagram/test-preflight-replay.sh
+        run: sudo -n deploy/teagram/test-preflight-replay.sh
 
       - name: Check RPC performance fixture restore
         run: bash .github/scripts/test-perf-run-restore.sh

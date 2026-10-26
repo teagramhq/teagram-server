@@ -2,6 +2,8 @@
 set -Eeuo pipefail
 umask 077
 
+[ "$(id -u)" = 0 ] || { printf '%s\n' 'run this fixture as root to exercise the privilege drop' >&2; exit 1; }
+
 SCRIPT_DIR=$(cd -P "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 SCRIPT="$SCRIPT_DIR/ops/preflight-replay.sh"
 TMP=$(mktemp -d /tmp/teagram-preflight-replay-test.XXXXXXXXXX)
@@ -9,6 +11,8 @@ REAL_RM=$(command -v rm)
 REAL_MKTEMP=$(command -v mktemp)
 trap '"$REAL_RM" -rf -- "$TMP"' EXIT
 chmod 700 "$TMP"
+chmod 755 "$TMP"
+mkdir -m 777 "$TMP/host-exposure"
 
 export GIT_AUTHOR_NAME=fixture GIT_AUTHOR_EMAIL=fixture@example.invalid
 export GIT_COMMITTER_NAME=fixture GIT_COMMITTER_EMAIL=fixture@example.invalid
@@ -43,6 +47,35 @@ git -C "$TMP/source" add docker-compose.alternate.yml
 git -C "$TMP/source" commit -q -m drift
 git -C "$TMP/source" push -q origin drift
 drift_sha=$(git -C "$TMP/source" rev-parse HEAD)
+
+git -C "$TMP/source" switch -q main
+test_tmp_name=${TMP##*/}
+for kind in runner verifier; do
+  if [ "$kind" = runner ]; then
+    source_script="$TMP/source/deploy/teagramd/rollout-runner/rollout-runner.sh"
+  else
+    source_script="$TMP/source/deploy/teagramd/rollout-runner/rollout-verifier.sh"
+  fi
+  cat > "$TMP/$kind-attack-prefix.sh" <<PREFIX
+if [ "\${ROLLOUT_PREFLIGHT_REPLAY_SANDBOX:-0}" = 1 ]; then
+  printf '%s\\n' "\$(id -u)" > "\$PREFLIGHT_REPLAY_SANDBOX_EVIDENCE_DIR/$kind.uid"
+  mkdir -p "/tmp/$test_tmp_name/host-exposure"
+  printf '%s\\n' attacked > "/tmp/$test_tmp_name/host-exposure/sentinel"
+fi
+PREFIX
+  {
+    sed -n '1,2p' "$source_script"
+    cat "$TMP/$kind-attack-prefix.sh"
+    sed -n '3,$p' "$source_script"
+  } > "$source_script.attacked"
+  chmod --reference="$source_script" "$source_script.attacked"
+  mv -- "$source_script.attacked" "$source_script"
+done
+git -C "$TMP/source" add deploy/teagramd/rollout-runner/rollout-runner.sh \
+  deploy/teagramd/rollout-runner/rollout-verifier.sh
+git -C "$TMP/source" commit -q -m sandbox-attack-fixture
+git -C "$TMP/source" push -q origin HEAD:sandbox-attack
+sandbox_attack_sha=$(git -C "$TMP/source" rev-parse HEAD)
 
 git clone -q "$TMP/origin.git" "$TMP/live"
 git -C "$TMP/live" switch -q main
@@ -129,6 +162,15 @@ set -Eeuo pipefail
 path=${!#}
 case "$path" in
   /tmp/teagram-preflight-replay.[A-Za-z0-9]*|/tmp/teagram-preflight-replay.[A-Za-z0-9]*/*)
+    if [[ "$path" == /tmp/teagram-preflight-replay.[A-Za-z0-9]* ]] && [ -d "$path/sandbox/tmp/replay-output" ]; then
+      for kind in verifier runner; do
+        marker="$path/sandbox/tmp/replay-output/$kind.uid"
+        if [ -f "$marker" ] && [ ! -L "$marker" ]; then
+          printf '%s\t' "$kind" >> "${FIXTURE_SANDBOX_UID_LOG:?}"
+          cat -- "$marker" >> "${FIXTURE_SANDBOX_UID_LOG:?}"
+        fi
+      done
+    fi
     printf '%s\n' "$path" >> "${FIXTURE_REMOVE_LOG:?}"
     exec "$REAL_RM" "$@"
     ;;
@@ -156,11 +198,15 @@ export REAL_RM REAL_MKTEMP
 export FIXTURE_LIVE_ROOT="$TMP/live"
 export FIXTURE_REMOVE_LOG="$TMP/removals.log"
 export FIXTURE_UNSAFE_REMOVE_LOG="$TMP/unsafe-removals.log"
+export FIXTURE_SANDBOX_UID_LOG="$TMP/sandbox-uids.log"
+export FIXTURE_HOST_SENTINEL="$TMP/host-exposure/sentinel"
 export PREFLIGHT_REPLAY_TEST_MODE=1
 export PREFLIGHT_REPLAY_TEST_LIVE_CHECKOUT="$TMP/live"
 export PREFLIGHT_REPLAY_TEST_REPOSITORY_URL="$TMP/origin.git"
 : > "$FIXTURE_REMOVE_LOG"
 : > "$FIXTURE_UNSAFE_REMOVE_LOG"
+: > "$FIXTURE_SANDBOX_UID_LOG"
+"$REAL_RM" -f -- "$FIXTURE_HOST_SENTINEL"
 
 run_replay() {
   local sha=$1 selection=$2 output rc=0
@@ -170,6 +216,8 @@ run_replay() {
       FIXTURE_LIVE_ROOT="$TMP/live" FIXTURE_LABEL_FILES="$selection" \
       FIXTURE_EXPECTED_FILES="$selection" FIXTURE_REMOVE_LOG="$FIXTURE_REMOVE_LOG" \
       FIXTURE_UNSAFE_REMOVE_LOG="$FIXTURE_UNSAFE_REMOVE_LOG" REAL_RM="$REAL_RM" \
+      FIXTURE_SANDBOX_UID_LOG="$FIXTURE_SANDBOX_UID_LOG" \
+      FIXTURE_HOST_SENTINEL="$FIXTURE_HOST_SENTINEL" \
       REAL_MKTEMP="$REAL_MKTEMP" FIXTURE_BAD_MKTEMP="${FIXTURE_BAD_MKTEMP:-0}" \
       PREFLIGHT_REPLAY_TEST_FORCE_COMPAT="${PREFLIGHT_REPLAY_TEST_FORCE_COMPAT:-0}" \
       PATH="$PATH" bash "$SCRIPT" "$sha" 2>&1) || rc=$?
@@ -202,6 +250,21 @@ if grep -Eq '2m0s|3m0s|fixture-password' <<< "$output"; then
   exit 1
 fi
 printf '%s\n' 'PASS drifted replay exits non-zero and redacts values'
+
+: > "$FIXTURE_SANDBOX_UID_LOG"
+rm -f -- "$FIXTURE_HOST_SENTINEL"
+output=$(run_replay "$sandbox_attack_sha" 'docker-compose.fixture.yml,docker-compose.override.yml')
+[[ "$(cat "$TMP/last-rc")" == 0 ]] || { printf 'FAIL sandbox attack replay:\n%s\n' "$output" >&2; exit 1; }
+[[ "$(cat "$FIXTURE_SANDBOX_UID_LOG")" == $'verifier\t65534\nrunner\t65534' ]] || {
+  printf 'FAIL PR verifier and runner did not both execute as uid 65534:\n%s\n' \
+    "$(cat "$FIXTURE_SANDBOX_UID_LOG")" >&2
+  exit 1
+}
+[ ! -e "$FIXTURE_HOST_SENTINEL" ] || {
+  printf '%s\n' 'FAIL PR code wrote through the sandbox to a host path' >&2
+  exit 1
+}
+printf '%s\n' 'PASS PR verifier and runner are unprivileged and cannot write to host paths'
 
 bad_sha=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 output=$(run_replay "$bad_sha" 'docker-compose.alternate.yml,docker-compose.override.yml')
