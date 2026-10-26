@@ -672,7 +672,7 @@ func historyPage(ctx context.Context, q *db.Queries, ownerID int64, peerType Pee
 	}
 	if offsetID == 0 && offsetDate > 0 {
 		if addOffset < 0 {
-			return q.HistoryPageByDateAround(ctx, db.HistoryPageByDateAroundParams{
+			rows, err := q.HistoryPageByDateAround(ctx, db.HistoryPageByDateAroundParams{
 				OwnerID:    ownerID,
 				PeerType:   int16(peerType),
 				PeerID:     peerID,
@@ -680,6 +680,14 @@ func historyPage(ctx context.Context, q *db.Queries, ownerID int64, peerType Pee
 				AddOffset:  int64(addOffset),
 				Lim:        int32(limit), //nolint:gosec // limit is a small validated page size
 			})
+			if err != nil {
+				return nil, err
+			}
+			messages := make([]db.Message, len(rows))
+			for i, row := range rows {
+				messages[i] = db.Message(row)
+			}
+			return messages, nil
 		}
 		return q.HistoryPageByDate(ctx, db.HistoryPageByDateParams{
 			OwnerID:    ownerID,

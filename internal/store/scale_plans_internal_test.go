@@ -359,8 +359,9 @@ func TestHistoryPageByDateAroundReadsOnlyItsWindow(t *testing.T) {
 	for _, sql := range []string{
 		`UPDATE server_administration SET election_closed = true WHERE singleton_id = 1`,
 		`INSERT INTO users (id, phone, first_name) VALUES (1, '+history-date-plan-owner', 'Owner'), (2, '+history-date-plan-peer', 'Peer')`,
-		`INSERT INTO messages (owner_id, local_id, peer_type, peer_id, from_id, message, out)
-		 SELECT 1, n, 1, 2, 1, 'history date plan message', true FROM generate_series(1, 20000) n`,
+		`INSERT INTO messages (owner_id, local_id, peer_type, peer_id, from_id, message, out, date)
+		 SELECT 1, n, 1, 2, 1, 'history date plan message', true, to_timestamp(n::double precision)
+		 FROM generate_series(1, 20000) n`,
 		`ANALYZE messages`,
 	} {
 		if _, err := pool.Exec(ctx, sql); err != nil {
@@ -380,14 +381,21 @@ func TestHistoryPageByDateAroundReadsOnlyItsWindow(t *testing.T) {
 	}
 	defer traced.Close()
 	const pageSize = 100
+	const shiftCount = pageSize / 2
 	rows, err := db.New(traced).HistoryPageByDateAround(ctx, db.HistoryPageByDateAroundParams{
-		OwnerID: 1, PeerType: 1, PeerID: 2, OffsetDate: 1, AddOffset: -pageSize, Lim: pageSize,
+		OwnerID: 1, PeerType: 1, PeerID: 2, OffsetDate: 10001, AddOffset: -shiftCount, Lim: pageSize,
 	})
 	if err != nil {
 		t.Fatalf("history page by date around: %v", err)
 	}
-	if len(rows) != pageSize || rows[0].LocalID != pageSize || rows[len(rows)-1].LocalID != 1 {
-		t.Fatalf("oldest date history page = %d rows from %d to %d, want %d rows from %d to 1", len(rows), rows[0].LocalID, rows[len(rows)-1].LocalID, pageSize, pageSize)
+	if len(rows) != pageSize {
+		t.Fatalf("date history page has %d rows, want %d", len(rows), pageSize)
+	}
+	if rows[0].LocalID != 10000+shiftCount || rows[shiftCount-1].LocalID != 10001 ||
+		rows[shiftCount].LocalID != 10000 || rows[len(rows)-1].LocalID != 10001-shiftCount {
+		t.Fatalf("date history page boundaries = %d, %d, %d, %d, want %d, 10001, 10000, %d",
+			rows[0].LocalID, rows[shiftCount-1].LocalID, rows[shiftCount].LocalID, rows[len(rows)-1].LocalID,
+			10000+shiftCount, 10001-shiftCount)
 	}
 
 	recorded.mu.Lock()
@@ -410,8 +418,8 @@ func TestHistoryPageByDateAroundReadsOnlyItsWindow(t *testing.T) {
 		t.Fatalf("date history page explain returned %d plans, want 1", len(plans))
 	}
 	readRows := plans[0].Plan.rowsFor("messages")
-	if readRows > 2*pageSize+10 {
-		t.Fatalf("date history page read %.0f message rows for a %d-row page, want at most %d", readRows, pageSize, 2*pageSize+10)
+	if readRows > pageSize+10 {
+		t.Fatalf("date history page read %.0f message rows for a %d-row page, want at most %d", readRows, pageSize, pageSize+10)
 	}
 }
 

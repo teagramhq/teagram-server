@@ -10,11 +10,12 @@ import (
 	"github.com/teagramhq/teagram-server/internal/mtproto"
 )
 
-func TestGetAppConfigAdvertisesUploadPartLimits(t *testing.T) {
+func TestGetAppConfigAdvertisesUploadByteAndPartLimits(t *testing.T) {
 	h := testHandlers(nil)
 	h.maxFileBytes = 512000
+	h.appConfigUploadMaxFileBytes = 512000
 	var request bin.Buffer
-	if err := (&tg.HelpGetAppConfigRequest{}).Encode(&request); err != nil {
+	if err := (&tg.HelpGetAppConfigRequest{Hash: 6}).Encode(&request); err != nil {
 		t.Fatal(err)
 	}
 	result, err := h.handleGetAppConfig(&mtproto.Request{Ctx: context.Background(), Buf: &request})
@@ -29,7 +30,11 @@ func TestGetAppConfigAdvertisesUploadPartLimits(t *testing.T) {
 	if !ok {
 		t.Fatalf("config = %T, want *tg.JSONObject", appConfig.Config)
 	}
+	if appConfig.Hash == 6 {
+		t.Fatalf("app config hash = %d, want a hash that includes the upload byte limit", appConfig.Hash)
+	}
 	want := map[string]float64{
+		"upload_max_file_bytes":        512000,
 		"upload_max_fileparts_default": 16,
 		"upload_max_fileparts_premium": 16,
 	}
