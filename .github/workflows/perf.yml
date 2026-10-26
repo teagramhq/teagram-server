@@ -121,6 +121,9 @@ jobs:
       - name: Test fixture restore options
         run: bash .github/scripts/test-perf-run-restore.sh
 
+      - name: Test PostgreSQL readiness probe
+        run: bash .github/scripts/test-perf-postgres-readiness.sh
+
       - name: Restore the snapshot
         id: snapshot
         uses: actions/cache/restore@v6.1.0
