@@ -25,10 +25,11 @@ const MaxContactsPerUser = 5000
 // WithMaxContactsPerUser replaces the per-account contact bound for one Store.
 // This process-level option can only be set by trusted code constructing the
 // Store; request data cannot change it. The server keeps the shipped 5,000
-// contact bound, while the performance fixture raises it to 10,000. A higher
-// bound allows each account to persist more contact edges, increasing database
-// use and the work of contact-list and reconciliation operations; it does not
-// change contact access or privacy rules. Non-positive values are ignored.
+// contact bound, while the performance fixture raises it to 15,000 to admit
+// 10,000 seeded contacts plus 5,000 imported book users. A higher bound allows
+// each account to persist more contact edges, increasing database use and the
+// work of contact-list and reconciliation operations; it does not change
+// contact access or privacy rules. Non-positive values are ignored.
 func WithMaxContactsPerUser(n int) Option {
 	return func(s *Store) {
 		if n > 0 {
