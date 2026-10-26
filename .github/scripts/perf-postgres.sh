@@ -31,7 +31,7 @@ if [ "$ready" != true ]; then
   exit 1
 fi
 
-# pg_dump includes ACLs but not cluster-wide roles. The cached fixture can
-# grant functions to this migration-managed role, so provision it before restore.
+# Fixture dumps carry ACLs for this cluster-wide role, which pg_dump does not
+# include. Keep it non-login here; perf-run.sh enables login when it needs it.
 docker exec "$PERF_PG_CONTAINER" psql -v ON_ERROR_STOP=1 -U postgres -qAt \
-  -c "CREATE ROLE browser_acceptance_probe LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOREPLICATION NOBYPASSRLS"
+  -c "CREATE ROLE browser_acceptance_probe NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOREPLICATION NOBYPASSRLS"

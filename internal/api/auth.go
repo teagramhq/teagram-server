@@ -126,6 +126,18 @@ func newSentCode(hash string) *tg.AuthSentCode {
 	}
 }
 
+func (h *handlers) signUpRequired() *tg.AuthAuthorizationSignUpRequired {
+	terms := tg.HelpTermsOfService{
+		ID:   tg.DataJSON{Data: `{"id":"teagram-self-hosted-signup-v1"}`},
+		Text: h.signUpTermsOfService,
+	}
+	terms.SetPopup(true)
+
+	required := &tg.AuthAuthorizationSignUpRequired{}
+	required.SetTermsOfService(terms)
+	return required
+}
+
 func verifyToRPC(err error) *tgerr.Error {
 	switch {
 	case err == nil:
@@ -473,7 +485,7 @@ func (h *handlers) handleSignInUsername(c *mtproto.Conn, r *mtproto.Request, use
 				return nil, errInternal
 			}
 		}
-		return &tg.AuthAuthorizationSignUpRequired{}, nil
+		return h.signUpRequired(), nil
 	}
 
 	// The login_mode check and fail-closed invariant MUST precede SetPendingUser.

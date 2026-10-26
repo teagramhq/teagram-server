@@ -50,6 +50,9 @@ func assertAppConfig(t *testing.T, got *tg.HelpAppConfig, mode config.Registrati
 	if len(values) != 14 {
 		t.Fatalf("app config has %d keys, want 14", len(values))
 	}
+	if _, ok := values["upload_max_file_bytes"]; ok {
+		t.Fatal("app config advertised upload_max_file_bytes while TG_UPLOAD_MAX_BYTES is unset")
+	}
 	if value, ok := values["dialog_filters_enabled"].(*tg.JSONBool); !ok || !value.Value {
 		t.Fatalf("dialog_filters_enabled = %v, want true", values["dialog_filters_enabled"])
 	}

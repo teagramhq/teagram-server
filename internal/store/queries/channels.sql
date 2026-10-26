@@ -245,6 +245,22 @@ WHERE cp.channel_id = sqlc.arg(channel_id)::bigint
        OR u.name_tsv @@ plainto_tsquery('simple', sqlc.arg(query)::text)
        OR strpos(lower(COALESCE(un.handle, '')), lower(sqlc.arg(query)::text)) > 0);
 
+-- Recent participant responses report the exact stored channel row count.
+-- Unlike the filtered count below, this is constant-cost as a channel grows.
+-- name: ChannelParticipantStoredCount :one
+SELECT participant_count
+FROM channel_participant_counts
+WHERE channel_id = $1;
+
+-- Recent rows need no user profile data. Keep this page on the membership
+-- index instead of scanning unrelated users for the user-id ordering.
+-- name: ChannelParticipantsRecentPage :many
+SELECT * FROM channel_participants
+WHERE channel_id = sqlc.arg(channel_id)::bigint
+  AND (banned_until IS NULL OR banned_until <= now())
+ORDER BY user_id
+LIMIT sqlc.arg(page_limit)::int OFFSET sqlc.arg(page_offset)::int;
+
 -- name: ChannelParticipantsPage :many
 SELECT cp.*
 FROM channel_participants cp
