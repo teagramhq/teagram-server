@@ -335,4 +335,71 @@ func TestHistoryPageAroundReadsOnlyItsWindow(t *testing.T) {
 	}
 }
 
+func TestHistoryPageByDateAroundReadsOnlyItsWindow(t *testing.T) {
+	ctx := context.Background()
+	dsn := pgtest.DSN(t)
+	pool, err := pgxpool.New(ctx, dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pool.Close()
+	for _, sql := range []string{
+		`UPDATE server_administration SET election_closed = true WHERE singleton_id = 1`,
+		`INSERT INTO users (id, phone, first_name) VALUES (1, '+history-date-plan-owner', 'Owner'), (2, '+history-date-plan-peer', 'Peer')`,
+		`INSERT INTO messages (owner_id, local_id, peer_type, peer_id, from_id, message, out)
+		 SELECT 1, n, 1, 2, 1, 'history date plan message', true FROM generate_series(1, 20000) n`,
+		`ANALYZE messages`,
+	} {
+		if _, err := pool.Exec(ctx, sql); err != nil {
+			t.Fatalf("seed date history plan data: %v", err)
+		}
+	}
+
+	recorded := &scaleQueries{}
+	cfg, err := pgxpool.ParseConfig(dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.ConnConfig.Tracer = recorded
+	traced, err := pgxpool.NewWithConfig(ctx, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer traced.Close()
+	const pageSize = 100
+	rows, err := db.New(traced).HistoryPageByDateAround(ctx, db.HistoryPageByDateAroundParams{
+		OwnerID: 1, PeerType: 1, PeerID: 2, OffsetDate: 1, AddOffset: -pageSize, Lim: pageSize,
+	})
+	if err != nil {
+		t.Fatalf("history page by date around: %v", err)
+	}
+	if len(rows) != pageSize || rows[0].LocalID != pageSize || rows[len(rows)-1].LocalID != 1 {
+		t.Fatalf("oldest date history page = %d rows from %d to %d, want %d rows from %d to 1", len(rows), rows[0].LocalID, rows[len(rows)-1].LocalID, pageSize, pageSize)
+	}
+
+	recorded.mu.Lock()
+	queries := append([]pgx.TraceQueryStartData(nil), recorded.queries...)
+	recorded.mu.Unlock()
+	if len(queries) != 1 {
+		t.Fatalf("date history page issued %d statements, want 1", len(queries))
+	}
+	var raw []byte
+	if err := pool.QueryRow(ctx, "EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) "+queries[0].SQL, queries[0].Args...).Scan(&raw); err != nil {
+		t.Fatalf("explain date history page: %v", err)
+	}
+	var plans []struct {
+		Plan scalePlan `json:"Plan"`
+	}
+	if err := json.Unmarshal(raw, &plans); err != nil {
+		t.Fatalf("decode date history page plan: %v", err)
+	}
+	if len(plans) != 1 {
+		t.Fatalf("date history page explain returned %d plans, want 1", len(plans))
+	}
+	readRows := plans[0].Plan.rowsFor("messages")
+	if readRows > 2*pageSize+10 {
+		t.Fatalf("date history page read %.0f message rows for a %d-row page, want at most %d", readRows, pageSize, 2*pageSize+10)
+	}
+}
+
 func scaleQueryError[T any](_ T, err error) error { return err }

@@ -590,6 +590,136 @@ func (q *Queries) HistoryPageByDate(ctx context.Context, arg HistoryPageByDatePa
 	return items, nil
 }
 
+const historyPageByDateAround = `-- name: HistoryPageByDateAround :many
+WITH shift_count AS MATERIALIZED (
+    SELECT -$5::bigint AS value
+),
+shifted_window AS MATERIALIZED (
+    SELECT date, local_id
+    FROM messages
+    WHERE owner_id = $1
+      AND peer_type = $2
+      AND peer_id = $3
+      AND deleted = false
+      AND (expires_at IS NULL OR expires_at > statement_timestamp())
+      AND date >= to_timestamp($6::bigint::double precision)
+    ORDER BY date ASC, local_id ASC
+    LIMIT (SELECT value FROM shift_count)
+),
+shifted_anchor AS MATERIALIZED (
+    SELECT date, local_id
+    FROM shifted_window
+    ORDER BY date DESC, local_id DESC
+    LIMIT 1
+),
+latest_anchor AS MATERIALIZED (
+    SELECT date, local_id
+    FROM messages
+    WHERE owner_id = $1
+      AND peer_type = $2
+      AND peer_id = $3
+      AND deleted = false
+      AND (expires_at IS NULL OR expires_at > statement_timestamp())
+    ORDER BY date DESC, local_id DESC
+    LIMIT 1
+),
+anchor AS (
+    SELECT CASE
+               WHEN (SELECT count(*) FROM shifted_window) = (SELECT value FROM shift_count)
+                   THEN shifted_anchor.date
+               ELSE latest_anchor.date
+           END AS date,
+           CASE
+               WHEN (SELECT count(*) FROM shifted_window) = (SELECT value FROM shift_count)
+                   THEN shifted_anchor.local_id
+               ELSE latest_anchor.local_id
+           END AS local_id
+    FROM (VALUES (1)) AS singleton(value)
+    LEFT JOIN shifted_anchor ON true
+    LEFT JOIN latest_anchor ON true
+)
+SELECT page_message.owner_id, page_message.local_id, page_message.peer_id, page_message.from_id, page_message.date, page_message.message, page_message.out, page_message.edit_date, page_message.deleted, page_message.random_id, page_message.peer_local_id, page_message.peer_type, page_message.fanout_id, page_message.action_type, page_message.action_user_id, page_message.file_id, page_message.reply_to_msg_id, page_message.fwd_from_id, page_message.fwd_date, page_message.fwd_channel_id, page_message.fwd_channel_post, page_message.message_tsv, page_message.reply_to_trusted, page_message.grouped_id, page_message.fwd_post_author, page_message.ttl_period, page_message.expires_at, page_message.entities, page_message.sticker_document_id FROM anchor
+CROSS JOIN LATERAL (
+    SELECT owner_id, local_id, peer_id, from_id, date, message, out, edit_date, deleted, random_id, peer_local_id, peer_type, fanout_id, action_type, action_user_id, file_id, reply_to_msg_id, fwd_from_id, fwd_date, fwd_channel_id, fwd_channel_post, message_tsv, reply_to_trusted, grouped_id, fwd_post_author, ttl_period, expires_at, entities, sticker_document_id FROM messages AS page_message
+    WHERE page_message.owner_id = $1
+      AND page_message.peer_type = $2
+      AND page_message.peer_id = $3
+      AND page_message.deleted = false
+      AND (page_message.expires_at IS NULL OR page_message.expires_at > statement_timestamp())
+      AND (page_message.date, page_message.local_id) <= (anchor.date, anchor.local_id)
+    ORDER BY page_message.date DESC, page_message.local_id DESC
+    LIMIT $4::int
+) AS page_message
+`
+
+type HistoryPageByDateAroundParams struct {
+	OwnerID    int64
+	PeerType   int16
+	PeerID     int64
+	Lim        int32
+	AddOffset  int64
+	OffsetDate int64
+}
+
+// HistoryPageByDateAround shifts negative add_offset across the date anchor
+// using bounded reads from messages_owner_peer_date_idx.
+func (q *Queries) HistoryPageByDateAround(ctx context.Context, arg HistoryPageByDateAroundParams) ([]Message, error) {
+	rows, err := q.db.Query(ctx, historyPageByDateAround,
+		arg.OwnerID,
+		arg.PeerType,
+		arg.PeerID,
+		arg.Lim,
+		arg.AddOffset,
+		arg.OffsetDate,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []Message
+	for rows.Next() {
+		var i Message
+		if err := rows.Scan(
+			&i.OwnerID,
+			&i.LocalID,
+			&i.PeerID,
+			&i.FromID,
+			&i.Date,
+			&i.Message,
+			&i.Out,
+			&i.EditDate,
+			&i.Deleted,
+			&i.RandomID,
+			&i.PeerLocalID,
+			&i.PeerType,
+			&i.FanoutID,
+			&i.ActionType,
+			&i.ActionUserID,
+			&i.FileID,
+			&i.ReplyToMsgID,
+			&i.FwdFromID,
+			&i.FwdDate,
+			&i.FwdChannelID,
+			&i.FwdChannelPost,
+			&i.MessageTsv,
+			&i.ReplyToTrusted,
+			&i.GroupedID,
+			&i.FwdPostAuthor,
+			&i.TtlPeriod,
+			&i.ExpiresAt,
+			&i.Entities,
+			&i.StickerDocumentID,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const insertMessage = `-- name: InsertMessage :exec
 INSERT INTO messages (owner_id, local_id, peer_type, peer_id, from_id, message, out, random_id, peer_local_id,
                       fanout_id, action_type, action_user_id, file_id, sticker_document_id, reply_to_msg_id,

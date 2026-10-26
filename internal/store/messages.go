@@ -657,7 +657,7 @@ func (s *Store) HistoryWithOffset(ctx context.Context, ownerID int64, peerType P
 	return messagesFromRows(rows), nil
 }
 
-// HistoryWithDate returns the page of the owner's peer history sent before offsetDate.
+// HistoryWithDate returns a newest-first page around offsetDate. Negative addOffset shifts toward newer messages.
 func (s *Store) HistoryWithDate(ctx context.Context, ownerID int64, peerType PeerType, peerID int64, offsetDate, addOffset, limit int) ([]Message, error) {
 	rows, err := historyPage(ctx, s.q, ownerID, peerType, peerID, 0, offsetDate, addOffset, limit)
 	if err != nil {
@@ -671,6 +671,16 @@ func historyPage(ctx context.Context, q *db.Queries, ownerID int64, peerType Pee
 		return []db.Message{}, nil
 	}
 	if offsetID == 0 && offsetDate > 0 {
+		if addOffset < 0 {
+			return q.HistoryPageByDateAround(ctx, db.HistoryPageByDateAroundParams{
+				OwnerID:    ownerID,
+				PeerType:   int16(peerType),
+				PeerID:     peerID,
+				OffsetDate: int64(offsetDate),
+				AddOffset:  int64(addOffset),
+				Lim:        int32(limit), //nolint:gosec // limit is a small validated page size
+			})
+		}
 		return q.HistoryPageByDate(ctx, db.HistoryPageByDateParams{
 			OwnerID:    ownerID,
 			PeerType:   int16(peerType),

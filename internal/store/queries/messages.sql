@@ -90,6 +90,69 @@ ORDER BY date DESC, local_id DESC
 LIMIT sqlc.arg(lim)::int
 OFFSET GREATEST(0::bigint, sqlc.arg(add_offset)::bigint);
 
+-- HistoryPageByDateAround shifts negative add_offset across the date anchor
+-- using bounded reads from messages_owner_peer_date_idx.
+-- name: HistoryPageByDateAround :many
+WITH shift_count AS MATERIALIZED (
+    SELECT -sqlc.arg(add_offset)::bigint AS value
+),
+shifted_window AS MATERIALIZED (
+    SELECT date, local_id
+    FROM messages
+    WHERE owner_id = sqlc.arg(owner_id)
+      AND peer_type = sqlc.arg(peer_type)
+      AND peer_id = sqlc.arg(peer_id)
+      AND deleted = false
+      AND (expires_at IS NULL OR expires_at > statement_timestamp())
+      AND date >= to_timestamp(sqlc.arg(offset_date)::bigint::double precision)
+    ORDER BY date ASC, local_id ASC
+    LIMIT (SELECT value FROM shift_count)
+),
+shifted_anchor AS MATERIALIZED (
+    SELECT date, local_id
+    FROM shifted_window
+    ORDER BY date DESC, local_id DESC
+    LIMIT 1
+),
+latest_anchor AS MATERIALIZED (
+    SELECT date, local_id
+    FROM messages
+    WHERE owner_id = sqlc.arg(owner_id)
+      AND peer_type = sqlc.arg(peer_type)
+      AND peer_id = sqlc.arg(peer_id)
+      AND deleted = false
+      AND (expires_at IS NULL OR expires_at > statement_timestamp())
+    ORDER BY date DESC, local_id DESC
+    LIMIT 1
+),
+anchor AS (
+    SELECT CASE
+               WHEN (SELECT count(*) FROM shifted_window) = (SELECT value FROM shift_count)
+                   THEN shifted_anchor.date
+               ELSE latest_anchor.date
+           END AS date,
+           CASE
+               WHEN (SELECT count(*) FROM shifted_window) = (SELECT value FROM shift_count)
+                   THEN shifted_anchor.local_id
+               ELSE latest_anchor.local_id
+           END AS local_id
+    FROM (VALUES (1)) AS singleton(value)
+    LEFT JOIN shifted_anchor ON true
+    LEFT JOIN latest_anchor ON true
+)
+SELECT page_message.* FROM anchor
+CROSS JOIN LATERAL (
+    SELECT * FROM messages AS page_message
+    WHERE page_message.owner_id = sqlc.arg(owner_id)
+      AND page_message.peer_type = sqlc.arg(peer_type)
+      AND page_message.peer_id = sqlc.arg(peer_id)
+      AND page_message.deleted = false
+      AND (page_message.expires_at IS NULL OR page_message.expires_at > statement_timestamp())
+      AND (page_message.date, page_message.local_id) <= (anchor.date, anchor.local_id)
+    ORDER BY page_message.date DESC, page_message.local_id DESC
+    LIMIT sqlc.arg(lim)::int
+) AS page_message;
+
 -- HistoryPageAround shifts a negative add_offset with a bounded ascending
 -- index walk from offset_id before reading the requested page.
 -- name: HistoryPageAround :many
