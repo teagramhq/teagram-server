@@ -354,6 +354,69 @@ def foreign_resource_inventory(
     }
 
 
+def manifest_owned_volume_names(
+    records: list[dict[str, Any]],
+    inventory: dict[str, Any] | None = None,
+) -> set[str]:
+    """Return volumes proven attached to an exact manifest-owned container."""
+    owned: set[str] = set()
+    for record in records:
+        identifier = record.get("id")
+        name = record.get("name")
+        if not isinstance(identifier, str) or not re.fullmatch(r"[0-9a-f]{64}", identifier):
+            continue
+        if not isinstance(name, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*", name):
+            continue
+        claimed = record.get("unexpected_volumes")
+        if not isinstance(claimed, list):
+            continue
+        mounts = record.get("unexpected_volume_mounts")
+        if not isinstance(mounts, list):
+            continue
+        if inventory is not None:
+            container = inventory.get("containers", {}).get(identifier)
+            if not isinstance(container, dict) or container.get("name") != name:
+                continue
+            actual_mounts = container.get("mounts")
+            if not isinstance(actual_mounts, list):
+                continue
+        else:
+            actual_mounts = None
+        for mount in mounts:
+            if not isinstance(mount, dict) or mount.get("type") != "volume":
+                continue
+            volume_name = mount.get("name")
+            source = mount.get("source")
+            destination = mount.get("destination")
+            rw = mount.get("rw")
+            if (
+                not isinstance(volume_name, str)
+                or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*", volume_name)
+                or volume_name not in claimed
+                or not isinstance(source, str)
+                or not source.startswith("/")
+                or not isinstance(destination, str)
+                or not destination.startswith("/")
+                or not isinstance(rw, bool)
+            ):
+                continue
+            if actual_mounts is not None:
+                matching_mounts = [
+                    actual
+                    for actual in actual_mounts
+                    if isinstance(actual, dict)
+                    and actual.get("Type") == "volume"
+                    and actual.get("Name") == volume_name
+                    and actual.get("Source") == source
+                    and actual.get("Destination") == destination
+                    and actual.get("RW") is rw
+                ]
+                if len(matching_mounts) != 1:
+                    continue
+            owned.add(volume_name)
+    return owned
+
+
 def foreign_inventory_change_summary(baseline: dict[str, Any], current: dict[str, Any]) -> str:
     changes: list[str] = []
     for kind in ("containers", "volumes", "networks"):
@@ -3358,11 +3421,10 @@ class Drill(Docker):
             pending = self.manifest.get("pending_container") or {}
             if pending.get("id"):
                 owned_container_ids.add(pending["id"])
-            owned_volume_names = {
-                name
-                for record in self.manifest.get("containers", []) + ([pending] if pending else [])
-                for name in record.get("unexpected_volumes", [])
-            }
+            volume_records = self.manifest.get("containers", []) + ([pending] if pending else [])
+            owned_volume_names = manifest_owned_volume_names(volume_records, current)
+            owned_volume_names.intersection_update(current.get("volumes", {}))
+            owned_volume_names.difference_update(baseline.get("volumes", {}))
             owned_network_ids = {
                 record.get("id") for record in self.manifest.get("networks", []) if record.get("id")
             }
@@ -3704,8 +3766,7 @@ class Drill(Docker):
         volumes_after = self.list_volumes("fixture_generation")
         baseline = set(record["volumes_before"])
         created_volumes = volumes_after - baseline
-        record["unexpected_volumes"] = sorted(created_volumes)
-        record["unexpected_volume_mounts"] = sorted(
+        observed_volume_mounts = sorted(
             (
                 {
                     "type": "volume",
@@ -3719,6 +3780,13 @@ class Drill(Docker):
             ),
             key=lambda item: item["destination"],
         )
+        attached_created_volumes = {
+            mount["name"] for mount in observed_volume_mounts if mount["name"] in created_volumes
+        }
+        record["unexpected_volumes"] = sorted(attached_created_volumes)
+        record["unexpected_volume_mounts"] = [
+            mount for mount in observed_volume_mounts if mount["name"] in attached_created_volumes
+        ]
         record["unexpected_volume_records"] = [
             volume for name in record["unexpected_volumes"]
             if (volume := self.inspect_volume(name, "fixture_generation")) is not None
@@ -3730,7 +3798,7 @@ class Drill(Docker):
             not validate_container_inspect(document, record)
             or actual_volume_mounts
             or created_volumes
-            or len(record["unexpected_volume_records"]) != len(created_volumes)
+            or len(record["unexpected_volume_records"]) != len(attached_created_volumes)
             or networks_after != baseline_networks
         ):
             raise DrillFailure("fixture_generation", "isolation_refusal")
@@ -6133,8 +6201,8 @@ dump_path=$2
         except DrillFailure:
             return False
         before_volumes = set(recovered.get("volumes_before", []))
-        recovered["unexpected_volumes"] = sorted(current_volumes - before_volumes)
-        recovered["unexpected_volume_mounts"] = sorted(
+        created_volumes = current_volumes - before_volumes
+        observed_volume_mounts = sorted(
             (
                 {
                     "type": "volume",
@@ -6148,13 +6216,20 @@ dump_path=$2
             ),
             key=lambda item: item["destination"],
         )
+        attached_created_volumes = {
+            mount["name"] for mount in observed_volume_mounts if mount["name"] in created_volumes
+        }
+        recovered["unexpected_volumes"] = sorted(attached_created_volumes)
+        recovered["unexpected_volume_mounts"] = [
+            mount for mount in observed_volume_mounts if mount["name"] in attached_created_volumes
+        ]
         recovered["unexpected_volume_records"] = [
             volume for name in recovered["unexpected_volumes"]
             if (volume := self.inspect_volume(name, "cleanup")) is not None
         ]
-        if {item.get("name") for item in recovered["unexpected_volume_mounts"]} != set(recovered["unexpected_volumes"]):
+        if set(recovered["unexpected_volumes"]) != attached_created_volumes:
             return False
-        if len(recovered["unexpected_volume_records"]) != len(recovered["unexpected_volumes"]):
+        if len(recovered["unexpected_volume_records"]) != len(attached_created_volumes):
             return False
         if not validate_container_inspect(document, recovered):
             return False
@@ -6332,13 +6407,9 @@ dump_path=$2
             volumes = self.cleanup_volume_inventory()
         except DrillFailure:
             return False
-        expected_created = {
-            name
-            for record in self.manifest.get("containers", [])
-            for name in record.get("unexpected_volumes", [])
-        }
         pending = self.manifest.get("pending_container") or {}
-        expected_created.update(pending.get("unexpected_volumes", []))
+        volume_records = self.manifest.get("containers", []) + ([pending] if pending else [])
+        expected_created = manifest_owned_volume_names(volume_records)
         baseline_volumes = set(baseline.get("volumes", []))
         created_now = set(volumes) - baseline_volumes
         if created_now != expected_created:

@@ -1243,6 +1243,74 @@ class RestoreReadinessContractTests(unittest.TestCase):
         )
         self.assertTrue(drill.verify_foreign_inventory())
 
+    def test_unattached_volume_between_container_snapshots_stays_foreign(self) -> None:
+        owned_id = "1" * 64
+        race_volume = "foreign-created-during-container-create"
+        baseline = {"containers": {}, "volumes": {}, "networks": {}}
+        current = {
+            "containers": {owned_id: {"name": "restore-readiness-owned", "mounts": []}},
+            "volumes": {race_volume: {"name": race_volume}},
+            "networks": {},
+        }
+        drill = object.__new__(RESTORE_READINESS.Drill)
+        drill.manifest = {
+            "baseline": {"docker_inventory": baseline},
+            "resource_creation_started": True,
+            "containers": [
+                {
+                    "id": owned_id,
+                    "name": "restore-readiness-owned",
+                    # Old manifests recorded every volume created during the snapshot window.
+                    "unexpected_volumes": [race_volume],
+                    "unexpected_volume_mounts": [],
+                }
+            ],
+            "pending_container": None,
+            "networks": [],
+        }
+        drill.docker_resource_inventory = Mock(return_value=current)
+
+        self.assertFalse(drill.verify_foreign_inventory())
+        self.assertTrue(drill.manifest["foreign_inventory_changed"])
+
+        drill.manifest["baseline"] = {"volumes": [], "networks": []}
+        drill.manifest["cleanup_deadline"] = time.monotonic() + 10
+        drill.cleanup_volume_inventory = Mock(return_value=[race_volume])
+        calls: list[list[str]] = []
+
+        def cleanup_call(args: list[str], **_kwargs: Any) -> tuple[int, bytes]:
+            calls.append(args)
+            return (0, b"")
+
+        drill.cleanup_call = cleanup_call
+        drill.cleanup_budget_available = Mock(return_value=True)
+
+        self.assertFalse(drill.cleanup_networks_and_volumes())
+        self.assertNotIn(["volume", "rm", race_volume], calls)
+
+    def test_pending_container_recovery_does_not_claim_unattached_race_volume(self) -> None:
+        document, record = container_fixture()
+        pending = dict(record)
+        pending.update(
+            {
+                "id": "",
+                "volumes_before": [],
+                "containers_before": [],
+                "unexpected_volumes": [],
+                "unexpected_volume_mounts": [],
+                "unexpected_volume_records": [],
+            }
+        )
+        drill = object.__new__(RESTORE_READINESS.Drill)
+        drill.manifest = {"pending_container": pending, "containers": []}
+        drill.save = lambda: None
+        drill.cleanup_volume_inventory = lambda: ["foreign-created-during-container-create"]
+        drill.cleanup_container_inspect = lambda _identifier: document
+
+        self.assertTrue(drill.cleanup_recover_pending_container([(record["id"], record["name"])]))
+        self.assertEqual(drill.manifest["containers"][0]["unexpected_volumes"], [])
+        self.assertEqual(drill.manifest["containers"][0]["unexpected_volume_records"], [])
+
     def test_local_dump_metadata_is_bounded(self) -> None:
         name = "pgdump-pre-" + "a" * 40 + ".sql"
 
@@ -2120,6 +2188,39 @@ class RestoreReadinessContractTests(unittest.TestCase):
         )
         self.assertTrue(RESTORE_READINESS.validate_container_inspect(document, created))
         self.assertNotIn("--cpus", created_args)
+
+    def test_created_container_does_not_claim_unattached_race_volume(self) -> None:
+        document, record = container_fixture()
+        drill = RESTORE_READINESS.Drill.__new__(RESTORE_READINESS.Drill)
+        drill.manifest = {"token": record["token"], "containers": []}
+        drill.save = lambda: None
+        drill.list_containers = lambda _phase: []
+        volume_snapshots = iter((set(), {"foreign-created-during-container-create"}))
+        drill.list_volumes = lambda _phase: next(volume_snapshots)
+        drill.list_networks = lambda _phase: {"none"}
+        drill.call = lambda _args, **_kwargs: (record["id"] + "\n").encode()
+        drill.inspect_container = lambda _identifier, _phase: document
+
+        with self.assertRaises(RESTORE_READINESS.DrillFailure) as failure:
+            drill.create_container(
+                role=record["role"],
+                image_id=record["image_id"],
+                name=record["name"],
+                user=record["user"],
+                memory=record["memory"],
+                pids_limit=record["pids_limit"],
+                mounts=[],
+                tmpfs_options=record["tmpfs_options"],
+                environment={"LANG": "C", "PATH": "/usr/bin:/bin"},
+                explicit_environment={},
+                command_args=[],
+                expected_entrypoint=record["entrypoint"],
+                expected_command=record["command"],
+            )
+
+        self.assertEqual(failure.exception.category, "isolation_refusal")
+        self.assertEqual(drill.manifest["containers"][0]["unexpected_volumes"], [])
+        self.assertEqual(drill.manifest["containers"][0]["unexpected_volume_records"], [])
 
     def test_finished_run_removal_accepts_directories_already_cleaned(self) -> None:
         class RootOwnedPath(type(Path())):
