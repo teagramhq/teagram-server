@@ -1111,11 +1111,11 @@ class RestoreReadinessContractTests(unittest.TestCase):
         changed_network = json.loads(json.dumps(baseline))
         changed_network["networks"][network_id]["attachments"] = {foreign_id: {"IPAddress": "172.25.0.2"}}
 
-        for name, current in (
-            ("changed state", changed_state),
-            ("added container", added_container),
-            ("removed volume", removed_volume),
-            ("changed network attachment", changed_network),
+        for name, current, summary in (
+            ("changed state", changed_state, "containers(added=0,removed=0,fields=state)"),
+            ("added container", added_container, "containers(added=1,removed=0,fields=none)"),
+            ("removed volume", removed_volume, "volumes(added=0,removed=1,fields=none)"),
+            ("changed network attachment", changed_network, "networks(added=0,removed=0,fields=attachments)"),
         ):
             with self.subTest(change=name):
                 drill = object.__new__(RESTORE_READINESS.Drill)
@@ -1127,8 +1127,14 @@ class RestoreReadinessContractTests(unittest.TestCase):
                     "networks": [],
                 }
                 drill.docker_resource_inventory = Mock(return_value=current)
-                self.assertFalse(drill.verify_foreign_inventory())
+                diagnostic = io.StringIO()
+                with redirect_stderr(diagnostic):
+                    self.assertFalse(drill.verify_foreign_inventory())
                 self.assertTrue(drill.manifest["foreign_inventory_changed"])
+                self.assertEqual(
+                    diagnostic.getvalue().strip(),
+                    f"restore readiness foreign Docker inventory changed: {summary}",
+                )
                 failure = RESTORE_READINESS.foreign_inventory_failure(drill.manifest)
                 self.assertIsNotNone(failure)
                 self.assertEqual(failure.phase, "cleanup")

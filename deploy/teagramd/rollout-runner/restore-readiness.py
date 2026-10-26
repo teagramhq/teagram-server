@@ -337,6 +337,33 @@ def foreign_resource_inventory(
     }
 
 
+def foreign_inventory_change_summary(baseline: dict[str, Any], current: dict[str, Any]) -> str:
+    changes: list[str] = []
+    for kind in ("containers", "volumes", "networks"):
+        before = baseline.get(kind)
+        after = current.get(kind)
+        if not isinstance(before, dict) or not isinstance(after, dict):
+            return f"{kind}(invalid-shape)"
+        added = after.keys() - before.keys()
+        removed = before.keys() - after.keys()
+        fields: set[str] = set()
+        for identity in before.keys() & after.keys():
+            old_record = before[identity]
+            new_record = after[identity]
+            if not isinstance(old_record, dict) or not isinstance(new_record, dict):
+                fields.add("record")
+                continue
+            fields.update(
+                field
+                for field in old_record.keys() | new_record.keys()
+                if old_record.get(field) != new_record.get(field)
+            )
+        if added or removed or fields:
+            changed_fields = ",".join(sorted(fields)) or "none"
+            changes.append(f"{kind}(added={len(added)},removed={len(removed)},fields={changed_fields})")
+    return ";".join(changes) or "unknown"
+
+
 def foreign_inventory_failure(manifest: dict[str, Any]) -> DrillFailure | None:
     if manifest.get("foreign_inventory_changed"):
         return DrillFailure("cleanup", "isolation_refusal")
@@ -3319,11 +3346,21 @@ class Drill(Docker):
                 owned_volume_names=owned_volume_names,
                 owned_network_ids=owned_network_ids,
             )
-        except (DrillFailure, KeyError, TypeError, ValueError):
+        except (DrillFailure, KeyError, TypeError, ValueError) as exc:
             self.manifest["foreign_inventory_unverified"] = True
+            print(
+                f"restore readiness foreign Docker inventory could not be verified during {phase}: "
+                f"{type(exc).__name__}",
+                file=sys.stderr,
+            )
             return False
         if foreign != baseline:
             self.manifest["foreign_inventory_changed"] = True
+            print(
+                "restore readiness foreign Docker inventory changed: "
+                + foreign_inventory_change_summary(baseline, foreign),
+                file=sys.stderr,
+            )
             return False
         return True
 
@@ -6604,50 +6641,61 @@ dump_path=$2
             self.save()
             return False
         clean = True
+        failed_steps: list[str] = []
+
+        def record_step(name: str, outcome: bool) -> bool:
+            if not outcome:
+                failed_steps.append(name)
+            return outcome
+
         if self.gateway is not None:
-            clean = self.gateway.close(self.manifest["cleanup_deadline"]) and clean
+            clean = record_step("gateway", self.gateway.close(self.manifest["cleanup_deadline"])) and clean
             self.gateway = None
         if not self.cleanup_budget_available():
             self.manifest["cleanup_verified"] = False
             self.save()
             return False
-        clean = self.cleanup_processes() and clean
+        clean = record_step("processes", self.cleanup_processes()) and clean
         if not self.cleanup_budget_available():
             self.manifest["cleanup_verified"] = False
             self.save()
             return False
-        clean = self.remove_build_inputs() and clean
+        clean = record_step("build-inputs", self.remove_build_inputs()) and clean
         if not self.cleanup_budget_available():
             self.manifest["cleanup_verified"] = False
             self.save()
             return False
         if not self.manifest.get("resource_creation_started"):
-            clean = self.remove_unmounted_files(keep_all=False) and clean
-            clean = self.verify_foreign_inventory() and clean
+            clean = record_step("files", self.remove_unmounted_files(keep_all=False)) and clean
+            clean = record_step("foreign-inventory", self.verify_foreign_inventory()) and clean
             self.manifest["cleanup_verified"] = bool(clean)
             self.save()
+            if failed_steps:
+                print("restore readiness cleanup failed: " + ",".join(failed_steps), file=sys.stderr)
             return clean
-        containers_clean = self.cleanup_owned_containers()
+        containers_clean = record_step("containers", self.cleanup_owned_containers())
         clean = containers_clean and clean
         if not self.cleanup_budget_available():
             self.manifest["cleanup_verified"] = False
             self.save()
             return False
-        clean = self.cleanup_owned_images() and clean
+        clean = record_step("images", self.cleanup_owned_images()) and clean
         if not self.cleanup_budget_available():
             self.manifest["cleanup_verified"] = False
             self.save()
             return False
-        clean = self.cleanup_networks_and_volumes() and clean
+        clean = record_step("networks-and-volumes", self.cleanup_networks_and_volumes()) and clean
         if not self.cleanup_budget_available():
             self.manifest["cleanup_verified"] = False
             self.save()
             return False
         files_clean = self.remove_unmounted_files(keep_all=not containers_clean)
-        clean = files_clean and clean
-        clean = self.verify_foreign_inventory() and clean
+        clean = record_step("files", files_clean) and clean
+        clean = record_step("foreign-inventory", self.verify_foreign_inventory()) and clean
         self.manifest["cleanup_verified"] = bool(clean)
         self.save()
+        if failed_steps:
+            print("restore readiness cleanup failed: " + ",".join(failed_steps), file=sys.stderr)
         return clean
 
     def local_command(self, args: list[str], phase: str, timeout: float = 30) -> bytes:
