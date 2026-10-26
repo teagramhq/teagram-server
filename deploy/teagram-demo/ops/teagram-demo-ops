@@ -1,0 +1,178 @@
+#!/bin/sh
+set -eu
+
+PATH=/usr/sbin:/usr/bin:/sbin:/bin
+IFS=' '
+umask 077
+export PATH IFS
+
+ORIGINAL_COMMAND=${SSH_ORIGINAL_COMMAND:-}
+unset SSH_ORIGINAL_COMMAND CDPATH ENV BASH_ENV GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE \
+  GIT_CONFIG GIT_CONFIG_COUNT GIT_CONFIG_PARAMETERS GIT_CONFIG_SYSTEM GIT_CONFIG_GLOBAL \
+  GIT_CONFIG_KEY_0 GIT_CONFIG_VALUE_0 GIT_SSH_COMMAND GIT_TRACE GIT_OBJECT_DIRECTORY \
+  GIT_ALTERNATE_OBJECT_DIRECTORIES GIT_ASKPASS SSH_ASKPASS XDG_CONFIG_HOME
+HOME=/root
+export HOME
+
+REPO=/opt/teagram-demo
+MAIN_REF=refs/remotes/origin/main
+OPS_PREFIX=deploy/teagram-demo/ops
+WORK_DIR=
+
+fail() {
+  printf 'teagram-demo ops: %s\n' "$1" >&2
+  exit 1
+}
+
+usage() {
+  printf '%s\n' 'usage: teagram-demo-ops <hostname|live|ps|env-names|fingerprints|logs <RFC3339-UTC>|run <40-hex-main-sha> <name>>' >&2
+}
+
+cleanup() {
+  status=$?
+  trap - EXIT HUP INT TERM
+  case "$WORK_DIR" in
+    /tmp/teagram-demo-ops.????????) rm -rf -- "$WORK_DIR" || status=1 ;;
+    '') ;;
+    *)
+      printf '%s\n' 'teagram-demo ops: refusing to remove an unexpected temporary path' >&2
+      status=1
+      ;;
+  esac
+  exit "$status"
+}
+
+valid_sha() {
+  [ "${#1}" -eq 40 ] || return 1
+  case "$1" in *[!a-f0-9]*) return 1 ;; esac
+}
+
+valid_name() {
+  case "$1" in ''|*[!a-z0-9-]*) return 1 ;; esac
+  case "$1" in [a-z0-9]*) return 0 ;; esac
+  return 1
+}
+
+valid_since() {
+  case "$1" in ????-??-??T??:??:??Z) ;; *) return 1 ;; esac
+  case "$1" in *[!0123456789T:Z-]*) return 1 ;; esac
+  date -u -d "$1" +%s >/dev/null 2>&1
+}
+
+require_repo() {
+  [ -d "$REPO/.git" ] && [ ! -L "$REPO" ] || fail 'demo checkout is unavailable'
+}
+
+show_live() {
+  require_repo
+  sha=$(git -C "$REPO" rev-parse HEAD) || fail 'could not read the demo checkout revision'
+  branch=$(git -C "$REPO" symbolic-ref --short -q HEAD || printf '%s' detached)
+  status=$(git -C "$REPO" status --porcelain) || fail 'could not inspect the demo checkout'
+  if [ -n "$status" ]; then dirty=$(printf '%s\n' "$status" | wc -l | tr -d ' '); else dirty=0; fi
+  printf 'host=%s\nsha=%s\nbranch=%s\ndirty_entries=%s\n' "$(hostname)" "$sha" "$branch" "$dirty"
+  release_file=$REPO/.state/teagram-demo/active-release.json
+  if [ -f "$release_file" ] && [ ! -L "$release_file" ]; then
+    jq -er '"active_server=\(.server)\nactive_image=\(.image_ref)"' "$release_file" \
+      || fail 'active release record is invalid'
+  else
+    printf '%s\n' 'active_release=unavailable'
+  fi
+}
+
+show_ps() {
+  docker ps --filter label=com.docker.compose.project=teagram-demo \
+    --format 'table {{.Names}}\t{{.Image}}\t{{.Status}}'
+}
+
+show_env_names() {
+  env_file=$REPO/deploy/teagram-demo/.env
+  [ -f "$env_file" ] && [ ! -L "$env_file" ] || fail 'demo environment file is unavailable'
+  awk -F= '$1 ~ /^[A-Za-z_][A-Za-z0-9_]*$/ { print $1 }' "$env_file" | sort -u
+}
+
+show_fingerprints() {
+  for path in \
+    "$REPO/deploy/teagram-demo/.env" \
+    "$REPO/deploy/teagram-demo/compose.yaml" \
+    "$REPO/deploy/teagram-demo/compose.empty-overrides.yaml" \
+    "$REPO/deploy/teagram-demo/haproxy.cfg" \
+    "$REPO/deploy/teagram-demo/nginx.conf" \
+    /root/.ssh/authorized_keys \
+    /usr/local/sbin/teagram-demo-ops; do
+    [ -f "$path" ] && [ ! -L "$path" ] || fail "fingerprint source is missing: $path"
+    sha256sum -- "$path"
+  done
+}
+
+show_logs() {
+  since=$1
+  valid_since "$since" || fail 'logs requires a UTC timestamp in RFC3339 seconds format'
+  ids=$(docker ps -q --filter label=com.docker.compose.project=teagram-demo \
+    --filter label=com.docker.compose.service=teagramd)
+  [ -n "$ids" ] || fail 'demo server containers are not running'
+  printf '%s\n' "$ids" | while IFS= read -r id; do
+    [ -n "$id" ] || continue
+    name=$(docker inspect --format '{{.Name}}' "$id") || fail 'could not read a demo container name'
+    printf '%s\n' "--- ${name#/} ---"
+    docker logs --since "$since" --tail 200 "$id"
+  done
+}
+
+run_reviewed_script() {
+  sha=$1
+  name=$2
+  valid_sha "$sha" || fail 'run requires a full lowercase 40-hex commit SHA'
+  valid_name "$name" || fail 'run requires a lowercase script name'
+  require_repo
+  git -C "$REPO" fetch --quiet --no-tags origin "+refs/heads/main:$MAIN_REF" \
+    || fail 'could not fetch main from origin'
+  git -C "$REPO" merge-base --is-ancestor "$sha" "$MAIN_REF" \
+    || fail "commit $sha is not on origin/main"
+  script_path=$OPS_PREFIX/$name.sh
+  entry=$(git -C "$REPO" ls-tree "$sha" -- "$script_path" | awk '{ print $1 " " $2 }') \
+    || fail 'could not inspect the reviewed ops script'
+  # shellcheck disable=SC2086
+  set -- $entry
+  [ "$#" -eq 2 ] && [ "$1" = 100755 ] && [ "$2" = blob ] \
+    || fail "reviewed ops script is missing or not executable: $name"
+  WORK_DIR=$(mktemp -d /tmp/teagram-demo-ops.XXXXXXXX) \
+    || fail 'could not create a temporary ops directory'
+trap cleanup EXIT
+trap 'exit 1' HUP INT TERM
+  archive=$WORK_DIR/script.tar
+  git -C "$REPO" archive --format=tar "$sha" "$script_path" >"$archive" \
+    || fail 'could not read the reviewed ops script'
+  tar -xf "$archive" -C "$WORK_DIR" || fail 'could not extract the reviewed ops script'
+  script=$WORK_DIR/$script_path
+  [ -f "$script" ] && [ ! -L "$script" ] && [ -x "$script" ] \
+    || fail 'reviewed ops script is not a regular executable file'
+  env -i PATH="$PATH" HOME=/root OPS_SHA="$sha" OPS_NAME="$name" "$script"
+}
+
+ROOT_UID=$(id -u)
+[ "$ROOT_UID" -eq 0 ] || fail 'must run as root on the demo LXC'
+[ "${#ORIGINAL_COMMAND}" -le 256 ] || { usage; exit 1; }
+set -f
+# shellcheck disable=SC2086
+set -- $ORIGINAL_COMMAND
+case "$#" in
+  1)
+    case "$1" in
+      hostname) hostname ;;
+      live) show_live ;;
+      ps) show_ps ;;
+      env-names) show_env_names ;;
+      fingerprints) show_fingerprints ;;
+      *) usage; exit 1 ;;
+    esac
+    ;;
+  2)
+    [ "$1" = logs ] || { usage; exit 1; }
+    show_logs "$2"
+    ;;
+  3)
+    [ "$1" = run ] || { usage; exit 1; }
+    run_reviewed_script "$2" "$3"
+    ;;
+  *) usage; exit 1 ;;
+esac

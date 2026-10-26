@@ -927,6 +927,9 @@ jobs:
           bash -n deploy/teagram-demo/demo-common.sh
           bash -n deploy/teagram-demo/init-demo.sh
           bash -n deploy/teagram-demo/forced-command.sh
+          bash -n deploy/teagram-demo/ops/teagram-demo-ops
+          bash -n deploy/teagram-demo/ops/install-teagram-demo-ops.sh
+          bash -n deploy/teagram-demo/test-ops-menu.sh
           bash -n deploy/teagram-demo/deploy-main.sh
           bash -n deploy/teagram-demo/wipe-weekly.sh
           bash -n deploy/teagram-demo/install-weekly-wipe.sh
@@ -948,6 +951,9 @@ jobs:
             deploy/teagram-demo/demo-common.sh \
             deploy/teagram-demo/init-demo.sh \
             deploy/teagram-demo/forced-command.sh \
+            deploy/teagram-demo/ops/teagram-demo-ops \
+            deploy/teagram-demo/ops/install-teagram-demo-ops.sh \
+            deploy/teagram-demo/test-ops-menu.sh \
             deploy/teagram-demo/deploy-main.sh \
             deploy/teagram-demo/wipe-weekly.sh \
             deploy/teagram-demo/install-weekly-wipe.sh \
@@ -972,6 +978,9 @@ jobs:
 
       - name: Check public demo Compose policy
         run: deploy/teagram-demo/test-demo-compose.sh
+
+      - name: Check demo ops command menu
+        run: deploy/teagram-demo/test-ops-menu.sh
 
       - name: Check demo Turnstile secret access
         run: sudo -n deploy/teagram-demo/test-turnstile-secret-access.sh
