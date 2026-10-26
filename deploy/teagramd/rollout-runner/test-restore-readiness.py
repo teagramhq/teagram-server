@@ -468,11 +468,12 @@ class RestoreReadinessContractTests(unittest.TestCase):
                 item.unlink()
             prepared_path.rmdir()
 
-    def test_local_dump_head_is_known_and_uses_the_latest_repo_migration(self) -> None:
+    def test_local_dump_uses_latest_head_and_pinned_fixture_schema(self) -> None:
         versions = RESTORE_READINESS.repo_migration_versions()
         self.assertTrue(versions)
         self.assertEqual(RESTORE_READINESS.HEAD_SCHEMA, versions[-1])
-        self.assertEqual(RESTORE_READINESS.LOCAL_FIXTURE_SCHEMA, versions[-2])
+        self.assertEqual(RESTORE_READINESS.LOCAL_FIXTURE_SCHEMA, "20261024000002")
+        self.assertIn(RESTORE_READINESS.LOCAL_FIXTURE_SCHEMA, versions)
         self.assertGreater(RESTORE_READINESS.LOCAL_FIXTURE_SCHEMA, RESTORE_READINESS.BASE_SCHEMA)
         self.assertLess(RESTORE_READINESS.LOCAL_FIXTURE_SCHEMA, RESTORE_READINESS.HEAD_SCHEMA)
         self.assertGreater(RESTORE_READINESS.HEAD_SCHEMA, "20261021000004")
