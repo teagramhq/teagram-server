@@ -4,6 +4,17 @@ on:
   push:
     branches: [main]
   pull_request:
+    paths:
+      - 'internal/api/**'
+      - 'internal/config/**'
+      - 'internal/mtproto/**'
+      - 'internal/store/**'
+      - 'migrations/**'
+      - 'test/perf/**'
+      - 'go.mod'
+      - 'go.sum'
+      - '.github/scripts/perf-*'
+      - '.github/scripts/test_perf_run.py'
   workflow_dispatch:
     inputs:
       issue:

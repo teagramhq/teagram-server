@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Guards the RPC performance workflow's fixture fallback and failure labels.
+# Guards the RPC performance workflow's triggers, fixture fallback, and failure labels.
 set -euo pipefail
 
 workflow="${PERF_WORKFLOW:-.github/workflows/perf.yml}"
@@ -17,6 +17,14 @@ fail() {
 query() {
   yq -r "$1" "$workflow"
 }
+
+expected_pr_paths='internal/api/**,internal/config/**,internal/mtproto/**,internal/store/**,migrations/**,test/perf/**,go.mod,go.sum,.github/scripts/perf-*,.github/scripts/test_perf_run.py'
+[[ "$(query '.on.pull_request.paths | join(",")')" == "$expected_pr_paths" ]] ||
+  fail 'PR performance runs must cover RPC handlers, transport, storage, and performance harness changes'
+[[ "$(query '.on.push.branches | join(",")')" == 'main' ]] ||
+  fail 'main pushes must continue to run the performance workflow'
+[[ "$(query '.on.workflow_dispatch.inputs.issue.type')" == 'string' ]] ||
+  fail 'manual performance dispatch must remain available'
 
 [[ "$(query '.jobs."rpc-performance".timeout-minutes')" == '150' ]] ||
   fail 'the performance job must allow a cache-miss fixture seed to finish'
