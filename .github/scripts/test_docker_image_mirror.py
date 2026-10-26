@@ -266,10 +266,11 @@ class DockerImageMirrorTests(unittest.TestCase):
             workflow,
         )
         self.assertIn(
-            "mirror.gcr.io/library/node:24-alpine3.22@sha256:"
-            "191c9f0080fcbbc6547a85dc0ff7988072214a355aabdc1d2ec55a7dae5eea8a",
+            "mirror.gcr.io/library/node@sha256:"
+            "8106d433c31d51dfd2fcce29763020619e334dd8c5b34a2f0a357c6656d1ca97",
             busybox_runner,
         )
+        self.assertIn("docker run --rm\n  --platform linux/amd64", busybox_runner)
         self.assertIn(
             "mirror.gcr.io/library/node@sha256:"
             "5711a0d445a1af54af9589066c646df387d1831a608226f4cd694fc59e745059",

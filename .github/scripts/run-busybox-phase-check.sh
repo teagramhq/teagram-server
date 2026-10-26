@@ -3,7 +3,9 @@ set -Eeuo pipefail
 set +x
 umask 077
 
-readonly BUSYBOX_IMAGE="mirror.gcr.io/library/node:24-alpine3.22@sha256:191c9f0080fcbbc6547a85dc0ff7988072214a355aabdc1d2ec55a7dae5eea8a"
+# The mirror can omit the index's in-toto attestation blobs, so pin the
+# amd64 child manifest.
+readonly BUSYBOX_IMAGE="mirror.gcr.io/library/node@sha256:8106d433c31d51dfd2fcce29763020619e334dd8c5b34a2f0a357c6656d1ca97"
 workspace="${GITHUB_WORKSPACE:-}"
 phase_dir=""
 lane=""
@@ -92,6 +94,7 @@ fi
 
 docker_command=(
   docker run --rm
+  --platform linux/amd64
   --volume "$workspace:/workspace:ro"
   --volume "$phase_dir:/phase:rw"
   --workdir /workspace
