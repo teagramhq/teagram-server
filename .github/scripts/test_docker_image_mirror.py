@@ -363,5 +363,16 @@ class DockerImageMirrorTests(unittest.TestCase):
         )
 
 
+class PerformancePostgresReadinessTests(unittest.TestCase):
+    def test_readiness_probe_waits_for_postgres_tcp_listener(self) -> None:
+        script = (ROOT / ".github/scripts/perf-postgres.sh").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn(
+            'docker exec "$PERF_PG_CONTAINER" pg_isready -h 127.0.0.1 -U postgres -q',
+            script,
+        )
+
+
 if __name__ == "__main__":
     unittest.main()
