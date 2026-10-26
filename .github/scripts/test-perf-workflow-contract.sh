@@ -42,6 +42,8 @@ runner_contents="$(<"$runner")"
   fail 'fixture seed and infrastructure errors need an explicit summary label'
 [[ "$runner_contents" == *"fixture seeder changed; skipping the base comparison"* ]] ||
   fail 'a changed fixture seeder must still allow head measurements without an incompatible base comparison'
+[[ "$runner_contents" == *"^Test(LoadFixtureRejectsOlderVersion|OwnerUsernamePasswordLogin|RPCPerformance)$"* ]] ||
+  fail 'the performance harness selection must run the stale fixture version regression test'
 postgres_contents="$(<"$postgres")"
 [[ "$postgres_contents" == *"pg_isready -h 127.0.0.1 -U postgres -q"* ]] ||
   fail 'Postgres readiness must wait for the TCP listener used by the workflow'
