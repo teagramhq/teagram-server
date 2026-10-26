@@ -18,7 +18,7 @@ docker run -d --name "$PERF_PG_CONTAINER" -p 5432:5432 --shm-size=1g \
 for _ in $(seq 1 60); do
   # The image uses a temporary socket-only server while initializing. The
   # workflow needs TCP, so wait for the final server instead of that socket.
-  if docker exec "$PERF_PG_CONTAINER" pg_isready -h 127.0.0.1 -U postgres -q; then
+  if docker exec "$PERF_PG_CONTAINER" pg_isready -h 127.0.0.1 -p 5432 -U postgres -q; then
     # Fixture dumps carry ACLs for this cluster-wide role, which pg_dump does
     # not include. Keep it non-login here; the performance job only restores
     # the grants, and the migration sets the role up when seeding from scratch.

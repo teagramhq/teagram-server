@@ -1025,6 +1025,7 @@ jobs:
           bash -n deploy/link-edge/deploy-main.sh
           bash -n deploy/link-edge/test-deploy-main.sh
           bash -n deploy/teagram-demo/test-turnstile-secret-access.sh
+          bash -n .github/scripts/perf-postgres.sh .github/scripts/test-perf-postgres.sh
           shellcheck \
             deploy/teagram/deploy-main.sh \
             deploy/teagram/teagram-logs.sh \
@@ -1050,6 +1051,8 @@ jobs:
             deploy/link-edge/test-deploy-main.sh \
             deploy/teagram-demo/test-turnstile-secret-access.sh \
             deploy/teagram/test-deploy-main.sh \
+            .github/scripts/perf-postgres.sh \
+            .github/scripts/test-perf-postgres.sh \
             .github/scripts/test-deploy-workflow-contract.sh \
             .github/scripts/mirror_rustfs_qualification_images.sh
 
@@ -1061,6 +1064,9 @@ jobs:
 
       - name: Check teagram ops command
         run: deploy/teagram/test-teagram-ops.sh
+
+      - name: Check performance Postgres startup readiness
+        run: bash .github/scripts/test-perf-postgres.sh
 
       - name: Check public demo Compose policy
         run: deploy/teagram-demo/test-demo-compose.sh
