@@ -3115,6 +3115,7 @@ class Drill(Docker):
             raise DrillFailure(self.phase, "isolation_refusal") from exc
 
     def build_images(self) -> None:
+        self.preflight_step = "build drill images"
         self.phase = "fixture_generation"
         build_root = self.run_dir / "work" / "build"
         app_context, tools_context = create_image_build_contexts(build_root)
@@ -3717,11 +3718,30 @@ class Drill(Docker):
         self.call(["pull", reference], phase="preflight", category="preflight_failure", timeout=180)
         document = self.image_inspect(reference, "preflight")
         if reference not in (document.get("RepoDigests") or []):
+            print(
+                "restore readiness preflight image validation failed: "
+                f"reference={json.dumps(reference)} check=RepoDigests "
+                f"observed={json.dumps(document.get('RepoDigests'), separators=(',', ':'))}",
+                file=sys.stderr,
+            )
             raise DrillFailure("preflight", "preflight_failure")
         if document.get("Os") != "linux" or document.get("Architecture") != self.args.go_arch:
+            observed_platform = {"Os": document.get("Os"), "Architecture": document.get("Architecture")}
+            print(
+                "restore readiness preflight image validation failed: "
+                f"reference={json.dumps(reference)} check=Os/Architecture "
+                f"observed={json.dumps(observed_platform, separators=(',', ':'))}",
+                file=sys.stderr,
+            )
             raise DrillFailure("preflight", "preflight_failure")
         identifier = document.get("Id", "")
         if not re.fullmatch(r"sha256:[0-9a-f]{64}", identifier):
+            print(
+                "restore readiness preflight image validation failed: "
+                f"reference={json.dumps(reference)} check=Id "
+                f"observed={json.dumps(identifier, separators=(',', ':'))}",
+                file=sys.stderr,
+            )
             raise DrillFailure("preflight", "preflight_failure")
         return identifier
 

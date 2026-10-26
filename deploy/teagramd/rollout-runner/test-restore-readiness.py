@@ -728,6 +728,42 @@ class RestoreReadinessContractTests(unittest.TestCase):
         self.assertIn('stderr="Docker daemon is still starting\\n"', diagnostic)
         self.assertEqual(drill.manifest["processes"], [])
 
+    def test_preload_image_validation_failure_reports_reference_check_and_value(self) -> None:
+        reference = "mirror.gcr.io/library/postgres@sha256:" + "a" * 64
+        valid_image = {
+            "RepoDigests": [reference],
+            "Os": "linux",
+            "Architecture": "amd64",
+            "Id": "sha256:" + "b" * 64,
+        }
+        failures = (
+            ("RepoDigests", {**valid_image, "RepoDigests": ["unexpected"]}, ["unexpected"]),
+            (
+                "Os/Architecture",
+                {**valid_image, "Architecture": "arm64"},
+                {"Os": "linux", "Architecture": "arm64"},
+            ),
+            ("Id", {**valid_image, "Id": "unexpected"}, "unexpected"),
+        )
+
+        for check, document, observed in failures:
+            with self.subTest(check=check):
+                drill = object.__new__(RESTORE_READINESS.Drill)
+                drill.args = Mock(go_arch="amd64")
+                drill.call = Mock()
+                drill.image_inspect = Mock(return_value=document)
+                error = io.StringIO()
+
+                with redirect_stderr(error):
+                    with self.assertRaises(RESTORE_READINESS.DrillFailure) as failure:
+                        drill.preload_image(reference)
+
+                self.assertEqual(failure.exception.category, "preflight_failure")
+                diagnostic = error.getvalue()
+                self.assertIn(f"reference={json.dumps(reference)}", diagnostic)
+                self.assertIn(f"check={check}", diagnostic)
+                self.assertIn(f"observed={json.dumps(observed, separators=(',', ':'))}", diagnostic)
+
     def test_preload_sets_specific_preflight_stage_for_each_image(self) -> None:
         drill = object.__new__(RESTORE_READINESS.Drill)
         drill.images = {}
@@ -744,6 +780,15 @@ class RestoreReadinessContractTests(unittest.TestCase):
             stages,
             ["preload source database image", "preload restore database image"],
         )
+        drill.run_dir = Path(".")
+        with patch.object(
+            RESTORE_READINESS,
+            "create_image_build_contexts",
+            side_effect=RuntimeError("stop after stage update"),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "stop after stage update"):
+                drill.build_images()
+        self.assertEqual(drill.preflight_step, "build drill images")
 
     def test_startup_report_names_a_rejected_docker_executable(self) -> None:
         with tempfile.TemporaryDirectory(prefix="rr-path-shadow-") as temporary_directory:
