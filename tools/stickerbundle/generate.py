@@ -1,13 +1,16 @@
 #!/usr/bin/env python3
-"""Build the pinned free emoji art sources into a static sticker bundle."""
+"""Build the pinned free emoji art sources into a sticker catalogue bundle."""
 
 from __future__ import annotations
 
 import argparse
 import base64
 import concurrent.futures
+import gzip
 import hashlib
+import io
 import json
+import math
 import shutil
 import struct
 import subprocess
@@ -25,6 +28,10 @@ from typing import Iterable
 MAX_STICKERS_PER_PACK = 120
 MAX_BUNDLE_BYTES = 150_000_000
 MAX_WORKERS = 12
+MAX_TGS_GZIP_BYTES = 64 * 1024
+MAX_TGS_CANVAS = 512
+MAX_TGS_FPS = 60
+MAX_TGS_DURATION_SECONDS = 3
 GROUPS = (
     ("Smileys & Emotion", "smileys_emotion"),
     ("People & Body", "people_body"),
@@ -58,6 +65,7 @@ class Pack:
     source: str
     license_id: str
     attribution: str
+    file_format: str
     stickers: tuple[Sticker, ...]
 
 
@@ -103,10 +111,13 @@ def make_packs(
     emojis: Iterable[Emoji],
     available: set[tuple[int, ...]],
     attribution: str = "",
+    file_format: str = "webp",
 ) -> list[Pack]:
     slug = dict(GROUPS).get(group_name)
     if slug is None:
         raise GeneratorError(f"unknown emoji group {group_name!r}")
+    if file_format not in {"webp", "tgs"}:
+        raise GeneratorError(f"unsupported sticker file format {file_format!r}")
     stickers = [
         Sticker(emoji, "")
         for emoji in emojis
@@ -122,7 +133,7 @@ def make_packs(
         suffix = f"_{sequence:02d}" if numbered else ""
         short_name = f"{source_id}_{slug}{suffix}"
         named_stickers = tuple(
-            Sticker(sticker.emoji, f"{short_name}/{emoji_filename(sticker.emoji.codepoints)}.webp")
+            Sticker(sticker.emoji, f"{short_name}/{emoji_filename(sticker.emoji.codepoints)}.{file_format}")
             for sticker in chunk
         )
         name_suffix = f" {sequence:02d}" if numbered else ""
@@ -132,6 +143,7 @@ def make_packs(
                 source=f"{source_name} {group_name}{name_suffix}",
                 license_id=license_id,
                 attribution=attribution,
+                file_format=file_format,
                 stickers=named_stickers,
             )
         )
@@ -350,6 +362,8 @@ def selected_source_files(
 
 
 def load_source_inputs(source: dict, emojis: list[Emoji], print_digests: bool) -> tuple[dict[str, bytes], dict[tuple[int, ...], str]]:
+    if source["kind"] == "noto_animation":
+        return load_noto_animation_inputs(source, emojis, print_digests)
     resolve_tag(source)
     tree = source_tree(source)
     selected, assets, prefetched = selected_source_files(source, tree, emojis)
@@ -367,6 +381,84 @@ def load_source_inputs(source: dict, emojis: list[Emoji], print_digests: bool) -
     if not print_digests:
         verify_source_checksum(source["name"], expected_digest, downloaded)
     return downloaded, assets
+
+
+def parse_noto_animation_index(contents: bytes, emojis: list[Emoji], source_name: str) -> dict[tuple[int, ...], tuple[str, str]]:
+    try:
+        data = json.loads(contents.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise GeneratorError(f"{source_name} animation index is invalid: {error}") from error
+    if not isinstance(data, dict) or not isinstance(data.get("icons"), list):
+        raise GeneratorError(f"{source_name} animation index is missing its icon list")
+
+    wanted = {normalized_codepoints(emoji.codepoints) for emoji in emojis}
+    result: dict[tuple[int, ...], tuple[str, str]] = {}
+    for icon in data["icons"]:
+        if not isinstance(icon, dict) or not isinstance(icon.get("codepoint"), str):
+            raise GeneratorError(f"{source_name} animation index has an invalid icon entry")
+        codepoint_text = icon["codepoint"].lower()
+        try:
+            codepoints = tuple(int(value, 16) for value in codepoint_text.replace("_", "-").split("-"))
+        except ValueError as error:
+            raise GeneratorError(f"{source_name} animation index has invalid codepoint {codepoint_text!r}") from error
+        key = normalized_codepoints(codepoints)
+        if not key or any(value < 0 or value > 0x10FFFF for value in key):
+            raise GeneratorError(f"{source_name} animation index has invalid codepoint {codepoint_text!r}")
+        if key not in wanted:
+            continue
+        path = f"assets/{emoji_filename(key)}.json"
+        if key in result:
+            raise GeneratorError(f"{source_name} animation index duplicates codepoint {codepoint_text}")
+        result[key] = (codepoint_text, path)
+    return result
+
+
+def load_noto_animation_inputs(
+    source: dict,
+    emojis: list[Emoji],
+    print_digests: bool,
+) -> tuple[dict[str, bytes], dict[tuple[int, ...], str]]:
+    name = source["name"]
+    license_documentation = request_bytes(source["license_url"], f"{name} published license")
+    animation_index = request_bytes(source["index_url"], f"{name} animation index")
+    for label, content, expected in (
+        ("published license", license_documentation, source.get("license_sha256", "")),
+        ("animation index", animation_index, source.get("index_sha256", "")),
+    ):
+        actual = hashlib.sha256(content).hexdigest()
+        if not print_digests and (not expected or actual != expected):
+            raise GeneratorError(
+                f"{name} {label} checksum mismatch: expected {expected or 'a pinned SHA-256'}, got {actual}"
+            )
+
+    documentation_text = license_documentation.decode("utf-8", errors="replace")
+    if source["license_marker"] not in documentation_text:
+        raise GeneratorError(
+            f"{name} published license does not confirm {source['license']}"
+        )
+    indexed_assets = parse_noto_animation_index(animation_index, emojis, name)
+    if not indexed_assets:
+        raise GeneratorError(f"{name} animation index has no selected emoji artwork")
+
+    def fetch(item: tuple[tuple[int, ...], tuple[str, str]]) -> tuple[str, bytes]:
+        _, (codepoint_text, path) = item
+        escaped_version = urllib.parse.quote(source["asset_version"], safe=".")
+        escaped_codepoint = urllib.parse.quote(codepoint_text, safe="-")
+        url = source["asset_url_template"].format(version=escaped_version, codepoint=escaped_codepoint)
+        content = request_bytes(url, f"{name} Lottie file {codepoint_text}")
+        return path, content
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=MAX_WORKERS) as pool:
+        assets = dict(pool.map(fetch, sorted(indexed_assets.items(), key=lambda item: item[1][1])))
+    downloaded = {
+        "source-license/documentation.html": license_documentation,
+        "source-index/api.json": animation_index,
+        **assets,
+    }
+    expected_digest = source.get("download_sha256", "")
+    if not print_digests:
+        verify_source_checksum(name, expected_digest, downloaded)
+    return downloaded, {key: value[1] for key, value in indexed_assets.items()}
 
 
 class RendererWorker:
@@ -423,6 +515,99 @@ def render_webp(svg: bytes, renderer: RendererWorker, context: str) -> tuple[byt
     return content, len(content), hashlib.sha256(content).hexdigest()
 
 
+def convert_lottie_to_tgs(lottie_bytes: bytes, context: str) -> bytes:
+    try:
+        animation = json.loads(lottie_bytes.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise GeneratorError(f"{context}: Lottie file is invalid JSON: {error}") from error
+    if not isinstance(animation, dict):
+        raise GeneratorError(f"{context}: Lottie file is not a JSON object")
+
+    def finite_number(field: str) -> float:
+        value = animation.get(field)
+        if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
+            raise GeneratorError(f"{context}: Lottie {field} is not a finite number")
+        return float(value)
+
+    frame_rate = finite_number("fr")
+    in_frame = finite_number("ip")
+    out_frame = finite_number("op")
+    if frame_rate <= 0:
+        raise GeneratorError(f"{context}: Lottie frame rate must be positive")
+    if frame_rate > MAX_TGS_FPS:
+        raise GeneratorError(
+            f"{context}: frame rate {frame_rate:g} fps exceeds the {MAX_TGS_FPS} fps limit"
+        )
+    if out_frame <= in_frame:
+        raise GeneratorError(f"{context}: Lottie has an invalid frame range")
+    duration = (out_frame - in_frame) / frame_rate
+    if duration > MAX_TGS_DURATION_SECONDS:
+        raise GeneratorError(
+            f"{context}: duration {duration:g}s exceeds the {MAX_TGS_DURATION_SECONDS}s TGS limit"
+        )
+
+    width = finite_number("w")
+    height = finite_number("h")
+    if width <= 0 or height <= 0:
+        raise GeneratorError(f"{context}: Lottie canvas dimensions must be positive")
+    scale = min(MAX_TGS_CANVAS / width, MAX_TGS_CANVAS / height)
+    offset_x = (MAX_TGS_CANVAS - width * scale) / 2
+    offset_y = (MAX_TGS_CANVAS - height * scale) / 2
+
+    layers = animation.get("layers")
+    if not isinstance(layers, list) or any(not isinstance(layer, dict) for layer in layers):
+        raise GeneratorError(f"{context}: Lottie layers are invalid")
+    indices = [layer.get("ind") for layer in layers]
+    if any(isinstance(index, bool) or not isinstance(index, int) or index <= 0 for index in indices):
+        raise GeneratorError(f"{context}: Lottie layer indices are invalid")
+    if len(set(indices)) != len(indices):
+        raise GeneratorError(f"{context}: Lottie has duplicate layer indices")
+
+    animation["w"] = MAX_TGS_CANVAS
+    animation["h"] = MAX_TGS_CANVAS
+    animation["tgs"] = 1
+    if scale != 1 or offset_x != 0 or offset_y != 0:
+        parent_index = max(indices, default=0) + 1
+        for layer in layers:
+            if "parent" not in layer:
+                layer["parent"] = parent_index
+        layers.append(
+            {
+                "ddd": 0,
+                "ind": parent_index,
+                "ty": 3,
+                "nm": "TGS canvas scale",
+                "sr": 1,
+                "ks": {
+                    "o": {"a": 0, "k": 100},
+                    "r": {"a": 0, "k": 0},
+                    "p": {"a": 0, "k": [offset_x, offset_y, 0]},
+                    "a": {"a": 0, "k": [0, 0, 0]},
+                    "s": {"a": 0, "k": [scale * 100, scale * 100, 100]},
+                },
+                "ao": 0,
+                "ip": in_frame,
+                "op": out_frame,
+                "st": in_frame,
+                "bm": 0,
+            }
+        )
+
+    try:
+        serialized = json.dumps(animation, ensure_ascii=False, separators=(",", ":"), allow_nan=False).encode("utf-8")
+    except (TypeError, ValueError) as error:
+        raise GeneratorError(f"{context}: Lottie contains values that cannot be encoded in TGS: {error}") from error
+    output = io.BytesIO()
+    with gzip.GzipFile(filename="", mode="wb", fileobj=output, compresslevel=9, mtime=0) as compressed:
+        compressed.write(serialized)
+    result = output.getvalue()
+    if len(result) > MAX_TGS_GZIP_BYTES:
+        raise GeneratorError(
+            f"{context}: TGS gzip size is {len(result)} bytes, above the {MAX_TGS_GZIP_BYTES}-byte limit"
+        )
+    return result
+
+
 def manifest_bytes(packs: list[dict]) -> bytes:
     value = {"version": 1, "packs": packs}
     return (json.dumps(value, ensure_ascii=False, indent=2) + "\n").encode("utf-8")
@@ -433,9 +618,10 @@ def source_manifest(
     source: dict,
     inputs: dict[str, bytes],
     assets: dict[tuple[int, ...], str],
+    converted_animations: dict[tuple[int, ...], bytes],
     stage: Path,
     renderer: RendererWorker,
-) -> dict:
+) -> dict | None:
     file_lookup = {path: content for path, content in inputs.items()}
     manifest_stickers = []
     for sticker in pack.stickers:
@@ -443,7 +629,12 @@ def source_manifest(
         asset_path = assets[key]
         context = f"{source['name']} {sticker.emoji.text}"
         output_path = stage / sticker.file
-        content, size, checksum = render_webp(file_lookup[asset_path], renderer, context)
+        if pack.file_format == "tgs":
+            content = converted_animations[key]
+            size = len(content)
+            checksum = hashlib.sha256(content).hexdigest()
+        else:
+            content, size, checksum = render_webp(file_lookup[asset_path], renderer, context)
         output_path.parent.mkdir(parents=True, exist_ok=True)
         output_path.write_bytes(content)
         manifest_stickers.append(
@@ -454,13 +645,18 @@ def source_manifest(
                 "sha256": checksum,
             }
         )
-    return {
+    if not manifest_stickers:
+        return None
+    result = {
         "short_name": pack.short_name,
         "source": pack.source,
         "license": pack.license_id,
         "attribution": pack.attribution,
         "stickers": manifest_stickers,
     }
+    if pack.file_format != "webp":
+        result["format"] = pack.file_format
+    return result
 
 
 def load_config() -> dict:
@@ -471,7 +667,7 @@ def load_config() -> dict:
         raise GeneratorError(f"read {path}: {error}") from error
 
 
-def write_bundle(output: Path, configuration: dict, print_digests: bool) -> tuple[int, int, int]:
+def write_bundle(output: Path, configuration: dict, print_digests: bool) -> tuple[int, int, int, int]:
     if not print_digests and output.exists():
         raise GeneratorError(f"output path already exists: {output}")
     emoji_data = configuration["unicode_emoji"]
@@ -492,16 +688,31 @@ def write_bundle(output: Path, configuration: dict, print_digests: bool) -> tupl
         if print_digests:
             print(f"{source['name']}: {source_digest(downloaded)} ({len(downloaded)} files)")
     if print_digests:
-        return 0, 0, 0
+        return 0, 0, 0, 0
 
     output.parent.mkdir(parents=True, exist_ok=True)
     stage = Path(tempfile.mkdtemp(prefix=f".{output.name}.", dir=output.parent))
     try:
+        rejected_animations: list[str] = []
         with RendererWorker() as renderer:
             all_packs: list[dict] = []
             for source in configuration["sources"]:
                 downloaded, assets = source_inputs[source["id"]]
+                file_format = source.get("format", "webp")
+                converted_animations: dict[tuple[int, ...], bytes] = {}
                 available = set(assets)
+                if file_format == "tgs":
+                    emojis_by_key = {
+                        normalized_codepoints(emoji.codepoints): emoji.text
+                        for emoji in parsed_emojis
+                    }
+                    for key in sorted(assets):
+                        context = f"{source['name']} {emojis_by_key[key]}"
+                        try:
+                            converted_animations[key] = convert_lottie_to_tgs(downloaded[assets[key]], context)
+                        except GeneratorError as error:
+                            rejected_animations.append(str(error))
+                    available = set(converted_animations)
                 for group_name, _ in GROUPS:
                     packs = make_packs(
                         source_id=source["id"],
@@ -511,9 +722,14 @@ def write_bundle(output: Path, configuration: dict, print_digests: bool) -> tupl
                         emojis=grouped[group_name],
                         available=available,
                         attribution=source["attribution"],
+                        file_format=file_format,
                     )
                     for pack in packs:
-                        all_packs.append(source_manifest(pack, source, downloaded, assets, stage, renderer))
+                        output_pack = source_manifest(
+                            pack, source, downloaded, assets, converted_animations, stage, renderer,
+                        )
+                        if output_pack is not None:
+                            all_packs.append(output_pack)
         if not all_packs:
             raise GeneratorError("no sticker packs were produced")
         bundle_manifest = manifest_bytes(all_packs)
@@ -526,7 +742,9 @@ def write_bundle(output: Path, configuration: dict, print_digests: bool) -> tupl
         stage.chmod(0o755)
         stage.rename(output)
         sticker_count = sum(len(pack["stickers"]) for pack in all_packs)
-        return len(all_packs), sticker_count, file_size
+        for rejected in rejected_animations:
+            print(f"Dropped animated sticker: {rejected}", file=sys.stderr)
+        return len(all_packs), sticker_count, file_size, len(rejected_animations)
     except Exception:
         shutil.rmtree(stage)
         raise
@@ -545,10 +763,15 @@ def main(argv: list[str] | None = None) -> int:
         parser.error("--output is required unless --print-source-digests is used")
     started = time.monotonic()
     try:
-        packs, stickers, size = write_bundle(args.output or Path("."), load_config(), args.print_source_digests)
+        packs, stickers, size, dropped = write_bundle(
+            args.output or Path("."), load_config(), args.print_source_digests,
+        )
         if not args.print_source_digests:
             elapsed = time.monotonic() - started
-            print(f"Generated {packs} packs with {stickers} stickers ({size} bytes) in {elapsed:.1f}s")
+            print(
+                f"Generated {packs} packs with {stickers} stickers ({size} bytes) in {elapsed:.1f}s; "
+                f"dropped {dropped} animated stickers"
+            )
         return 0
     except (GeneratorError, OSError, KeyError, ValueError) as error:
         print(error, file=sys.stderr)

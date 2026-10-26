@@ -9,7 +9,7 @@ import (
 )
 
 const (
-	appConfigHash       = 5
+	appConfigHash       = 6
 	emptyWallPapersHash = 1
 	emptyChatThemesHash = 1
 )
@@ -94,6 +94,12 @@ func (h *handlers) handleGetAppConfig(r *mtproto.Request) (bin.Encoder, error) {
 	}, {
 		Key:   "chat_read_mark_size_threshold",
 		Value: &tg.JSONNumber{Value: store.ChatReadMarkSizeThreshold},
+	}, {
+		Key:   "upload_max_fileparts_default",
+		Value: &tg.JSONNumber{Value: float64(h.maxFileParts())},
+	}, {
+		Key:   "upload_max_fileparts_premium",
+		Value: &tg.JSONNumber{Value: float64(h.maxFileParts())},
 	}, {
 		Key:   "dialog_filters_chats_limit_default",
 		Value: &tg.JSONNumber{Value: 100},

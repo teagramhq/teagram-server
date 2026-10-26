@@ -845,14 +845,114 @@ media_key_target=$(snapshot_from_json \
 printf '%s\n' 'PASS Compose extension anchors do not change the resolved runtime digest'
 [ "$(jq -r '.mounts_sha256' <<< "$media_key_baseline")" = "$(jq -r '.mounts_sha256' <<< "$media_key_target")" ]
 [ "$(jq -r '.container_env_sha256' <<< "$media_key_baseline")" = "$(jq -r '.container_env_sha256' <<< "$media_key_target")" ]
-media_key_normalized_compose=$(jq -c '
-  .services.teagramd.volumes[-1].bind={}
-' <<< "$media_key_compose")
-media_key_normalized_target=$(snapshot_from_json \
-  "$media_key_inspect" "$media_key_normalized_compose" \
-  "$ENV_FILE" "$OVERRIDE_FILE" selected-compose-render target)
-[ "$(jq -r '.media_key_source' <<< "$media_key_normalized_target")" = "$media_key_source" ]
-printf '%s\n' 'PASS media-key validation accepts Compose-normalized empty bind options'
+media_key_compose_empty_bind=$(jq -c '.services.teagramd.volumes[-1].bind={}' <<< "$media_key_compose")
+printf '%s\n' "$media_key_compose_empty_bind" > "$TMP/media-key-empty-bind-render.json"
+docker() {
+  local compose_file=
+  [ "${1:-}" = compose ] || return 127
+  shift
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --project-directory|--file) [ "$#" -ge 2 ] || return 64; [ "$1" = --file ] && compose_file=$2; shift 2 ;;
+      --format) [ "$#" -ge 2 ] || return 64; shift 2 ;;
+      *) shift ;;
+    esac
+  done
+  case "$compose_file" in
+    "$TMP/media-key-explicit-false.yml"|"$TMP/media-key-default-create-host-path.yml"|"$TMP/media-key-empty-bind-default.yml"|"$TMP/media-key-interpolated-base.yml") cat "$TMP/media-key-empty-bind-render.json" ;;
+    "$TMP/media-key-interpolated-override.yml")
+      [ "${TG_MEDIA_KEY_TARGET:-}" = /run/teagramd/media-keys ] || return 1
+      cat "$TMP/media-key-empty-bind-render.json"
+      ;;
+    *) return 1 ;;
+  esac
+}
+cat > "$TMP/media-key-explicit-false.yml" <<'YAML'
+services:
+  teagramd:
+    volumes:
+      - type: bind
+        source: /etc/teagramd/media-keys
+        target: /run/teagramd/media-keys
+        read_only: true
+        bind:
+          create_host_path: false
+YAML
+media_key_empty_bind_target=$(snapshot_from_json \
+  "$media_key_inspect" "$media_key_compose_empty_bind" \
+  "$ENV_FILE" "$OVERRIDE_FILE" selected-compose-render target \
+  "$TMP/media-key-explicit-false.yml")
+[ "$(jq -r '.media_key_source' <<< "$media_key_empty_bind_target")" = "$media_key_source" ]
+[ "$(jq -r '.config_sha256' <<< "$media_key_target")" = "$(jq -r '.config_sha256' <<< "$media_key_empty_bind_target")" ]
+printf '%s\n' 'PASS source-proven bind:{} normalizes with explicit create_host_path:false'
+cat > "$TMP/media-key-default-create-host-path.yml" <<'YAML'
+services:
+  teagramd:
+    volumes:
+      - type: bind
+        source: /etc/teagramd/media-keys
+        target: /run/teagramd/media-keys
+        read_only: true
+YAML
+cat > "$TMP/media-key-empty-bind-default.yml" <<'YAML'
+services:
+  teagramd:
+    volumes:
+      - type: bind
+        source: /etc/teagramd/media-keys
+        target: /run/teagramd/media-keys
+        read_only: true
+        bind: {}
+YAML
+if snapshot_from_json \
+  "$media_key_inspect" "$media_key_compose_empty_bind" \
+  "$ENV_FILE" "$OVERRIDE_FILE" selected-compose-render target \
+  "$TMP/media-key-default-create-host-path.yml" >/dev/null 2>&1; then
+  printf '%s\n' 'FAIL source Compose default create_host_path:true was accepted' >&2
+  exit 1
+fi
+if snapshot_from_json \
+  "$media_key_inspect" "$media_key_compose_empty_bind" \
+  "$ENV_FILE" "$OVERRIDE_FILE" selected-compose-render target \
+  "$TMP/media-key-empty-bind-default.yml" >/dev/null 2>&1; then
+  printf '%s\n' 'FAIL source Compose bind:{} default was treated as create_host_path:false' >&2
+  exit 1
+fi
+printf '%s\n' 'PASS source Compose default and empty bind reject create_host_path:true'
+cat > "$TMP/media-key-interpolated-base.yml" <<'YAML'
+services:
+  teagramd:
+    volumes:
+      - type: bind
+        source: /etc/teagramd/media-keys
+        target: /run/teagramd/media-keys
+        read_only: true
+        bind:
+          create_host_path: false
+YAML
+cat > "$TMP/media-key-interpolated-override.yml" <<'YAML'
+services:
+  teagramd:
+    volumes:
+      - type: bind
+        source: /etc/teagramd/media-keys
+        target: ${TG_MEDIA_KEY_TARGET}
+        read_only: true
+        bind:
+          create_host_path: true
+YAML
+TG_MEDIA_KEY_TARGET=/run/teagramd/media-keys
+export TG_MEDIA_KEY_TARGET
+if snapshot_from_json \
+  "$media_key_inspect" "$media_key_compose_empty_bind" \
+  "$ENV_FILE" "$OVERRIDE_FILE" selected-compose-render target \
+  "$TMP/media-key-interpolated-base.yml:$TMP/media-key-interpolated-override.yml" \
+  >/dev/null 2>&1; then
+  printf '%s\n' 'FAIL base media-key bind proof hid an interpolated override with create_host_path:true' >&2
+  exit 1
+fi
+printf '%s\n' 'PASS interpolated override cannot inherit the base media-key bind proof'
+unset -f docker
 printf '%064s' '' | tr ' ' A > "$media_key_source/1.key"
 snapshot_from_json "$media_key_inspect" "$media_key_compose" \
   "$ENV_FILE" "$OVERRIDE_FILE" selected-compose-render target >/dev/null
@@ -978,3 +1078,51 @@ if snapshot_from_json "$media_key_wrong_path" "$media_key_compose" \
   exit 1
 fi
 printf '%s\n' 'PASS media-key container mount must match the resolved Compose source'
+
+media_key_preflight=$(snapshot_from_json \
+  "$media_key_inspect" "$media_key_compose" \
+  "$ENV_FILE" "$OVERRIDE_FILE" selected-compose-render preflight)
+media_key_initial_local_drift=$(snapshot_from_json \
+  "$legacy_inspect" "$COMPOSE_JSON" "$ENV_FILE" "$OVERRIDE_FILE" selected-compose-render rollback)
+[ "$(jq -r '.config_sha256' <<< "$media_key_preflight")" = \
+  "$(jq -r '.config_sha256' <<< "$media_key_initial_local_drift")" ]
+verifier_test_env_file=$ENV_FILE
+verifier_test_override_file=$OVERRIDE_FILE
+ROLLOUT_RUNNER_SOURCE_ONLY=1
+source "$SCRIPT_DIR/rollout-runner.sh"
+ENV_FILE=$verifier_test_env_file
+OVERRIDE_FILE=$verifier_test_override_file
+write_immutable() { : > "$1"; }
+append_evidence_row() { printf '%s\t%s\t%s\t%s\t%s\n' "$2" "$3" "$4" "$5" "$6" >> "$1"; }
+fail() { printf '%s\n' "$1" >&2; return 1; }
+copy_immutable() { cp -- "$1" "$2" && chmod 600 -- "$2"; }
+media_key_initial_local_baseline=$(jq -c '
+  .provenance.compose_source="live-container-inspection"
+  | .provenance.stop_grace_period_source="docker-inspect-config-stop-timeout"
+  | .compose_replica_count="not-captured"
+  | .compose_client_addr_trust="not-captured"
+' <<< "$media_key_baseline")
+INITIALIZE_LOCAL=1
+BASELINE_DIR="$TMP/media-key-initial-local.baseline"
+ROLLBACK_DIR="$TMP/media-key-initial-local.rollback"
+mkdir -m 700 "$BASELINE_DIR" "$ROLLBACK_DIR"
+printf '%s\n' "$media_key_initial_local_baseline" > "$BASELINE_DIR/baseline.snapshot.json"
+printf '%s\n' "$media_key_target" > "$BASELINE_DIR/initial-local-target-render.snapshot.json"
+printf '%s\n' "$media_key_target" > "$ROLLBACK_DIR/rollback.snapshot.json"
+if ! compare_rollback_to_baseline; then
+  printf '%s\n' 'FAIL initial-local rollback rejected the pinned media-key configuration' >&2
+  cat "$ROLLBACK_DIR/rollback-equivalence.tsv" >&2
+  exit 1
+fi
+printf '%s\n' "$media_key_initial_local_drift" > "$ROLLBACK_DIR/rollback.snapshot.json"
+if compare_rollback_to_baseline >/dev/null 2>&1; then
+  printf '%s\n' 'FAIL initial-local rollback accepted media-key drift with normalized digests' >&2
+  exit 1
+fi
+if ! grep -q $'rollback\tselected_render_media_key_source\t.*\tfail' \
+    "$ROLLBACK_DIR/rollback-equivalence.tsv"; then
+  printf '%s\n' 'FAIL initial-local rollback did not record media-key render mismatch' >&2
+  cat "$ROLLBACK_DIR/rollback-equivalence.tsv" >&2
+  exit 1
+fi
+printf '%s\n' 'PASS initial-local rollback compares the pinned media-key render'
