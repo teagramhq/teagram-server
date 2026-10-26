@@ -348,7 +348,8 @@ func (s *Store) UploadPart(ctx context.Context, userID, fileID int64, partIndex 
 }
 
 // DeleteUploadParts drops every part of one in-flight upload, returning how
-// many rows it retired. Called once an upload has been assembled.
+// many rows it retired. Called after assembly or when a save proves the upload
+// exceeds its configured byte limit.
 //
 // The bytes go before the rows and again after them, and both halves are
 // load-bearing. Before: a failure between them leaves rows that name objects,
