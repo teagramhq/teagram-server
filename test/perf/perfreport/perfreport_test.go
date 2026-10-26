@@ -236,6 +236,28 @@ func TestMarkdownListsEveryScenarioWithBudgetAndBand(t *testing.T) {
 	}
 }
 
+func TestMarkdownSeparatesPerformanceRegressionsFromRPCFailures(t *testing.T) {
+	counters := pair("messages.getDialogs", perfreport.Read,
+		result(2, 3, 5, 120), result(2, 3, 104, 120))
+	rpcFailure := perfreport.Result{
+		Name: "contacts.getContacts", Fixture: perfreport.Large,
+		Kind: perfreport.Read, Error: "connection refused",
+	}
+	v := perfreport.Evaluate(perfreport.Input{Head: rounds(append(counters, rpcFailure)...)})
+	md := perfreport.Markdown(v)
+	for _, want := range []string{
+		"| contacts.getContacts | read | | | | | | | | | | **ERROR** |",
+		"Performance regressions",
+		"- `messages.getDialogs` (`queries`): queries 5 at 1x, 104 at 100x",
+		"RPC or harness failures",
+		"- `contacts.getContacts` (`error`): 100x run failed: connection refused",
+	} {
+		if !strings.Contains(md, want) {
+			t.Errorf("markdown = %s\nwant %q", md, want)
+		}
+	}
+}
+
 func TestEvaluateWaivesOnlyTheNamedSequentialScan(t *testing.T) {
 	known := "messages#1a2b3c4d (40200 rows): SELECT f.id FROM files f"
 	added := "messages#99887766 (40200 rows): SELECT f.id FROM files f JOIN messages m"
