@@ -82,6 +82,7 @@ export PATH="$BIN:$PATH"
 export ROLLOUT_RUNNER_SOURCE_ONLY=1
 export ROLLOUT_RUNNER_CHECKOUT="$CHECKOUT"
 source "$SCRIPT_DIR/rollout-runner.sh"
+initialize_runner_config
 MODE_HELPER="$CAPTURE_HELPER"
 if [ "$(id -u)" != 0 ]; then
   write_immutable() {

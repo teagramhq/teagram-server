@@ -11,8 +11,10 @@ trap 'rm -rf -- "$TMP"' EXIT
 
 export ROLLOUT_RUNNER_SOURCE_ONLY=1
 source "$SCRIPT_DIR/rollout-runner.sh"
+initialize_runner_config
 export ROLLOUT_VERIFIER_SOURCE_ONLY=1
 source "$SCRIPT_DIR/rollout-verifier.sh"
+initialize_verifier_config
 
 pass() {
   printf 'PASS %s\n' "$1"

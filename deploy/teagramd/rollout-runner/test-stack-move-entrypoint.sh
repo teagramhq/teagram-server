@@ -34,6 +34,7 @@ if ! (unset ROLLOUT_RUNNER_CHECKOUT ROLLOUT_RUNNER_TARGET_CHECKOUT \
     ROLLOUT_RUNNER_TEST_MODE; \
   ROLLOUT_RUNNER_SOURCE_ONLY=1 bash -c '
     source "$1"
+    initialize_runner_config
     configure_action_paths move-stack
     [ "$CHECKOUT" = "/opt/$PROJECT_MOVE_SOURCE" ] &&
       [ "$TARGET_CHECKOUT" = /opt/teagram ] &&
@@ -54,7 +55,7 @@ COMMANDS="$TMP/docker-commands"
 CONTAINER_ID=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 mkdir -m 700 "$CHECKOUT" "$TARGET_DIR" "$RUNTIME_DIR" "$BIN"
 
-for runtime_file in rollout-runner.sh rollout-verifier.sh schema-result-gate.sh schema-result-gate.py blob-mode-state.py qualify-rustfs-transition.py stack-move-runner.py; do
+for runtime_file in rollout-runner.sh rollout-safe-remove-tree.sh rollout-verifier.sh schema-result-gate.sh schema-result-gate.py blob-mode-state.py qualify-rustfs-transition.py stack-move-runner.py; do
   cp "$SCRIPT_DIR/$runtime_file" "$RUNTIME_DIR/$runtime_file"
 done
 cp "$RUNTIME_DIR/rollout-verifier.sh" "$RUNTIME_DIR/rollout-verifier.pinned"
@@ -218,6 +219,7 @@ PATH="$BIN:$PATH"
 export PATH
 
 source "$RUNTIME_DIR/rollout-runner.sh"
+initialize_runner_config
 cd "$CHECKOUT"
 verify_approved_gates() { return 0; }
 verify_runtime_sources() { return 0; }
