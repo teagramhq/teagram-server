@@ -84,7 +84,7 @@ func TestLivePushPreservesChannelMessageGroupedID(t *testing.T) {
 	conn := &fakePushConn{}
 	log := slog.New(slog.DiscardHandler)
 	u := &Updater{h: &handlers{store: s, log: log, peers: pgtest.PeerDeriver()}, log: log}
-	u.deliverChannelPost(ctx, channel.ID, func(userID int64) []pushConn {
+	u.deliverChannelPost(ctx, channel.ID, []int64{owner.ID}, func(userID int64) []pushConn {
 		if userID == owner.ID {
 			return []pushConn{conn}
 		}
