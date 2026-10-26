@@ -15,14 +15,23 @@ chmod 0777 "$PERF_CACHE"
 docker run -d --name "$PERF_PG_CONTAINER" -p 5432:5432 --shm-size=1g \
   -e POSTGRES_PASSWORD=perf -v "$PERF_CACHE:/cache" \
   mirror.gcr.io/postgres:18-alpine -c shared_buffers=1GB -c max_connections=200 -c autovacuum=off
+ready=false
 for _ in $(seq 1 60); do
   # The image uses a temporary socket-only server while initializing. The
   # workflow needs TCP, so wait for the final server instead of that socket.
   if docker exec "$PERF_PG_CONTAINER" pg_isready -h 127.0.0.1 -U postgres -q; then
-    exit 0
+    ready=true
+    break
   fi
   sleep 1
 done
-echo "::error::Postgres did not become ready for TCP connections"
-docker logs "$PERF_PG_CONTAINER"
-exit 1
+if [ "$ready" != true ]; then
+  echo "::error::Postgres did not become ready for TCP connections"
+  docker logs "$PERF_PG_CONTAINER"
+  exit 1
+fi
+
+# pg_dump includes ACLs but not cluster-wide roles. The cached fixture can
+# grant functions to this migration-managed role, so provision it before restore.
+docker exec "$PERF_PG_CONTAINER" psql -v ON_ERROR_STOP=1 -U postgres -qAt \
+  -c "CREATE ROLE browser_acceptance_probe LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOREPLICATION NOBYPASSRLS"
