@@ -1434,10 +1434,18 @@ func notifyStatusReconcile(ctx context.Context, tx pgx.Tx, userID int64, viewerI
 			return fmt.Errorf("notify status reconciliation: invalid owner/viewer pair %d/%d", userID, viewerID)
 		}
 	}
-	for i, payload := range statusReconcilePayloads(userID, viewerIDs) {
-		if _, err := tx.Exec(ctx, `SELECT pg_notify($1, $2)`, ChannelStatus, payload); err != nil {
-			return fmt.Errorf("notify status reconciliation chunk %d: %w", i+1, err)
-		}
+	payloads := statusReconcilePayloads(userID, viewerIDs)
+	if len(payloads) == 0 {
+		return nil
+	}
+	// Keep each payload below Postgres' NOTIFY limit while making query count
+	// independent of the number of payload chunks.
+	if _, err := tx.Exec(ctx, `
+		SELECT pg_notify($1, notification.payload)
+		FROM UNNEST($2::TEXT[]) WITH ORDINALITY AS notification(payload, ordinal)
+		ORDER BY notification.ordinal
+	`, ChannelStatus, payloads); err != nil {
+		return fmt.Errorf("notify status reconciliation: %w", err)
 	}
 	return nil
 }

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"reflect"
 	"slices"
+	"strings"
 	"sync"
 	"testing"
 
@@ -485,5 +486,97 @@ func TestImportContactsAppliesAddedByPhonePrivacy(t *testing.T) {
 		if visibility[userID].Level != store.LastSeenAccessExact {
 			t.Errorf("status visibility to imported user %d = %v, want exact", userID, visibility[userID].Level)
 		}
+	}
+}
+
+func TestImportContactsStatusReconcileQueryCountIsConstantWithContactsOnlyLastSeen(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	tracer := &recordingTracer{}
+	s, err := store.Open(ctx, pgtest.DSN(t), pgtest.EncKey(), store.WithoutBlobStore(), store.WithQueryTracer(tracer))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := s.Close(); err != nil {
+			t.Errorf("close store: %v", err)
+		}
+	})
+	owner := mustUser(t, s, "+155590000001")
+	if err := s.SetLastSeenPrivacy(ctx, owner.ID, store.LastSeenPrivacyRule{BaseRule: "contacts"}); err != nil {
+		t.Fatalf("set contacts-only last-seen privacy: %v", err)
+	}
+
+	rows, err := store.StorePool(s).Query(ctx, `
+		WITH created AS (
+			INSERT INTO users (phone)
+			SELECT '155599' || lpad(n::text, 6, '0')
+			FROM generate_series(1, 5000) AS n
+			RETURNING id, phone
+		), seeded AS (
+			INSERT INTO update_state (user_id)
+			SELECT id FROM created
+			RETURNING user_id
+		)
+		SELECT id, phone FROM created ORDER BY id
+	`)
+	if err != nil {
+		t.Fatalf("create import targets: %v", err)
+	}
+	book := make([]store.ContactImportInput, 0, 5000)
+	for rows.Next() {
+		var userID int64
+		var phone string
+		if err := rows.Scan(&userID, &phone); err != nil {
+			rows.Close()
+			t.Fatalf("scan import target: %v", err)
+		}
+		book = append(book, store.ContactImportInput{ClientID: int64(len(book) + 1), Phone: phone})
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		t.Fatalf("read import targets: %v", err)
+	}
+	rows.Close()
+	if len(book) != 5000 {
+		t.Fatalf("created %d import targets, want 5000", len(book))
+	}
+
+	tracer.mu.Lock()
+	tracer.sqls = nil
+	tracer.mu.Unlock()
+	smallMatches, err := s.ImportContacts(ctx, owner.ID, book[:1])
+	if err != nil {
+		t.Fatalf("import one contact: %v", err)
+	}
+	if len(smallMatches) != 1 || smallMatches[0].ClientID != book[0].ClientID {
+		t.Fatalf("imported %d contacts in small batch, want one: %+v", len(smallMatches), smallMatches)
+	}
+	tracer.mu.Lock()
+	smallSQLs := append([]string(nil), tracer.sqls...)
+	tracer.sqls = nil
+	tracer.mu.Unlock()
+	largeMatches, err := s.ImportContacts(ctx, owner.ID, book[1:])
+	if err != nil {
+		t.Fatalf("import remaining contacts: %v", err)
+	}
+	if len(largeMatches) != 4999 {
+		t.Fatalf("imported %d contacts in large batch, want 4999", len(largeMatches))
+	}
+	tracer.mu.Lock()
+	largeSQLs := append([]string(nil), tracer.sqls...)
+	tracer.mu.Unlock()
+
+	if len(largeSQLs) != len(smallSQLs) {
+		t.Fatalf("store statements for 4999 contacts = %d, for one contact = %d; want constant count", len(largeSQLs), len(smallSQLs))
+	}
+	var notifyStatements int
+	for _, sql := range largeSQLs {
+		if strings.Contains(strings.ToLower(sql), "pg_notify") {
+			notifyStatements++
+		}
+	}
+	if notifyStatements != 1 {
+		t.Fatalf("status notification statements for 4999 contacts = %d, want one", notifyStatements)
 	}
 }
