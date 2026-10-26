@@ -53,18 +53,21 @@ func validWebMDocType(data []byte) bool {
 
 func parseWebMSegment(data []byte) (int, int, float64, error) {
 	var (
-		infoSeen          bool
-		tracksSeen        bool
-		clusterSeen       bool
-		timeScale         uint64 = 1_000_000
-		containerDuration float64
-		videoTrackNumber  uint64
-		blockTrackNumber  uint64
-		blockTrackSeen    bool
-		mixedBlockTracks  bool
-		maxBlockTimestamp uint64
-		width             int
-		height            int
+		infoSeen            bool
+		tracksSeen          bool
+		clusterSeen         bool
+		timeScale           uint64 = 1_000_000
+		containerDuration   float64
+		videoTrackNumber    uint64
+		defaultDurationNS   uint64
+		trackTimestampScale float64 = 1
+		blockTrackNumber    uint64
+		blockTrackSeen      bool
+		mixedBlockTracks    bool
+		maxBlockEndNS       float64
+		clusterPayloads     [][]byte
+		width               int
+		height              int
 	)
 	for len(data) > 0 {
 		element, err := readEBMLElement(data)
@@ -89,39 +92,46 @@ func parseWebMSegment(data []byte) (int, int, float64, error) {
 				return 0, 0, 0, errInvalidWEBM
 			}
 			tracksSeen = true
-			videoTrackNumber, width, height, err = parseWebMTracks(element.payload)
+			videoTrackNumber, width, height, defaultDurationNS, trackTimestampScale, err = parseWebMTracks(element.payload)
 			if err != nil {
 				return 0, 0, 0, errInvalidWEBM
 			}
 		case ebmlClusterID:
-			timeline, err := parseWebMCluster(element.payload)
-			if err != nil {
-				return 0, 0, 0, errInvalidWEBM
-			}
 			clusterSeen = true
-			if !blockTrackSeen {
-				blockTrackNumber = timeline.trackNumber
-				blockTrackSeen = true
-			} else if timeline.trackNumber != blockTrackNumber {
-				mixedBlockTracks = true
-			}
-			mixedBlockTracks = mixedBlockTracks || timeline.mixedTrackNumbers
-			if timeline.maxTimestamp > maxBlockTimestamp {
-				maxBlockTimestamp = timeline.maxTimestamp
-			}
+			clusterPayloads = append(clusterPayloads, element.payload)
 		}
 		data = element.rest
 		if element.unknown {
 			data = nil
 		}
 	}
-	if !infoSeen || !tracksSeen || !clusterSeen || !blockTrackSeen || mixedBlockTracks || blockTrackNumber != videoTrackNumber || timeScale == 0 || !isFinite(containerDuration) || containerDuration <= 0 {
+	if !infoSeen || !tracksSeen || !clusterSeen || timeScale == 0 || !isFinite(trackTimestampScale) || trackTimestampScale <= 0 || !isFinite(containerDuration) || containerDuration <= 0 {
 		return 0, 0, 0, errInvalidWEBM
 	}
-	if float64(maxBlockTimestamp) > containerDuration {
-		containerDuration = float64(maxBlockTimestamp)
+	for _, clusterPayload := range clusterPayloads {
+		timeline, err := parseWebMCluster(clusterPayload, timeScale, trackTimestampScale, defaultDurationNS)
+		if err != nil {
+			return 0, 0, 0, errInvalidWEBM
+		}
+		if !blockTrackSeen {
+			blockTrackNumber = timeline.trackNumber
+			blockTrackSeen = true
+		} else if timeline.trackNumber != blockTrackNumber {
+			mixedBlockTracks = true
+		}
+		mixedBlockTracks = mixedBlockTracks || timeline.mixedTrackNumbers
+		if timeline.maxFrameEndNS > maxBlockEndNS {
+			maxBlockEndNS = timeline.maxFrameEndNS
+		}
 	}
-	seconds := containerDuration * float64(timeScale) / 1_000_000_000
+	if !blockTrackSeen || mixedBlockTracks || blockTrackNumber != videoTrackNumber {
+		return 0, 0, 0, errInvalidWEBM
+	}
+	containerDurationNS := containerDuration * float64(timeScale)
+	if containerDurationNS > maxBlockEndNS {
+		maxBlockEndNS = containerDurationNS
+	}
+	seconds := maxBlockEndNS / 1_000_000_000
 	if !isFinite(seconds) || seconds <= 0 {
 		return 0, 0, 0, errInvalidWEBM
 	}
@@ -170,100 +180,126 @@ func parseWebMInfo(data []byte) (uint64, float64, error) {
 	return timeScale, duration, nil
 }
 
-func parseWebMTracks(data []byte) (uint64, int, int, error) {
+func parseWebMTracks(data []byte) (uint64, int, int, uint64, float64, error) {
 	trackCount := 0
 	var trackNumber uint64
+	var defaultDurationNS uint64
+	trackTimestampScale := float64(1)
 	var width, height int
 	for len(data) > 0 {
 		element, err := readEBMLElement(data)
 		if err != nil || element.unknown {
-			return 0, 0, 0, errInvalidWEBM
+			return 0, 0, 0, 0, 0, errInvalidWEBM
 		}
 		if element.id == ebmlTrackEntryID {
 			trackCount++
 			if trackCount > 1 {
-				return 0, 0, 0, errInvalidWEBM
+				return 0, 0, 0, 0, 0, errInvalidWEBM
 			}
-			trackNumber, width, height, err = parseWebMTrack(element.payload)
+			trackNumber, width, height, defaultDurationNS, trackTimestampScale, err = parseWebMTrack(element.payload)
 			if err != nil {
-				return 0, 0, 0, errInvalidWEBM
+				return 0, 0, 0, 0, 0, errInvalidWEBM
 			}
 		}
 		data = element.rest
 	}
 	if trackCount != 1 {
-		return 0, 0, 0, errInvalidWEBM
+		return 0, 0, 0, 0, 0, errInvalidWEBM
 	}
-	return trackNumber, width, height, nil
+	return trackNumber, width, height, defaultDurationNS, trackTimestampScale, nil
 }
 
-func parseWebMTrack(data []byte) (uint64, int, int, error) {
+func parseWebMTrack(data []byte) (uint64, int, int, uint64, float64, error) {
 	const (
-		trackNumberID = 0xd7
-		trackTypeID   = 0x83
-		codecID       = 0x86
-		videoID       = 0xe0
-		audioID       = 0xe1
+		trackNumberID         = 0xd7
+		trackTypeID           = 0x83
+		codecID               = 0x86
+		videoID               = 0xe0
+		audioID               = 0xe1
+		defaultDurationID     = 0x23e383
+		trackTimestampScaleID = 0x23314f
 	)
 	var (
-		trackNumberSeen bool
-		typeSeen        bool
-		codecSeen       bool
-		videoSeen       bool
-		trackNumber     uint64
-		trackType       uint64
-		codec           string
-		width           int
-		height          int
+		trackNumberSeen     bool
+		typeSeen            bool
+		codecSeen           bool
+		videoSeen           bool
+		defaultDurationSeen bool
+		trackTimestampSeen  bool
+		trackNumber         uint64
+		trackType           uint64
+		defaultDurationNS   uint64
+		trackTimestampScale float64 = 1
+		codec               string
+		width               int
+		height              int
 	)
 	for len(data) > 0 {
 		element, err := readEBMLElement(data)
 		if err != nil || element.unknown {
-			return 0, 0, 0, errInvalidWEBM
+			return 0, 0, 0, 0, 0, errInvalidWEBM
 		}
 		switch element.id {
 		case trackNumberID:
 			if trackNumberSeen {
-				return 0, 0, 0, errInvalidWEBM
+				return 0, 0, 0, 0, 0, errInvalidWEBM
 			}
 			trackNumberSeen = true
 			trackNumber, err = ebmlUnsigned(element.payload)
 			if err != nil || trackNumber == 0 {
-				return 0, 0, 0, errInvalidWEBM
+				return 0, 0, 0, 0, 0, errInvalidWEBM
 			}
 		case trackTypeID:
 			if typeSeen {
-				return 0, 0, 0, errInvalidWEBM
+				return 0, 0, 0, 0, 0, errInvalidWEBM
 			}
 			typeSeen = true
 			trackType, err = ebmlUnsigned(element.payload)
 			if err != nil {
-				return 0, 0, 0, errInvalidWEBM
+				return 0, 0, 0, 0, 0, errInvalidWEBM
 			}
 		case codecID:
 			if codecSeen {
-				return 0, 0, 0, errInvalidWEBM
+				return 0, 0, 0, 0, 0, errInvalidWEBM
 			}
 			codecSeen = true
 			codec = string(element.payload)
 		case videoID:
 			if videoSeen {
-				return 0, 0, 0, errInvalidWEBM
+				return 0, 0, 0, 0, 0, errInvalidWEBM
 			}
 			videoSeen = true
 			width, height, err = parseWebMVideo(element.payload)
 			if err != nil {
-				return 0, 0, 0, errInvalidWEBM
+				return 0, 0, 0, 0, 0, errInvalidWEBM
 			}
 		case audioID:
-			return 0, 0, 0, errInvalidWEBM
+			return 0, 0, 0, 0, 0, errInvalidWEBM
+		case defaultDurationID:
+			if defaultDurationSeen {
+				return 0, 0, 0, 0, 0, errInvalidWEBM
+			}
+			defaultDurationSeen = true
+			defaultDurationNS, err = ebmlUnsigned(element.payload)
+			if err != nil || defaultDurationNS == 0 {
+				return 0, 0, 0, 0, 0, errInvalidWEBM
+			}
+		case trackTimestampScaleID:
+			if trackTimestampSeen {
+				return 0, 0, 0, 0, 0, errInvalidWEBM
+			}
+			trackTimestampSeen = true
+			trackTimestampScale, err = ebmlFloat(element.payload)
+			if err != nil || !isFinite(trackTimestampScale) || trackTimestampScale <= 0 {
+				return 0, 0, 0, 0, 0, errInvalidWEBM
+			}
 		}
 		data = element.rest
 	}
 	if !trackNumberSeen || !typeSeen || trackType != 1 || !codecSeen || codec != "V_VP9" || !videoSeen {
-		return 0, 0, 0, errInvalidWEBM
+		return 0, 0, 0, 0, 0, errInvalidWEBM
 	}
-	return trackNumber, width, height, nil
+	return trackNumber, width, height, defaultDurationNS, trackTimestampScale, nil
 }
 
 func parseWebMVideo(data []byte) (int, int, error) {
@@ -312,37 +348,35 @@ func parseWebMVideo(data []byte) (int, int, error) {
 
 type webMClusterTimeline struct {
 	trackNumber       uint64
-	maxTimestamp      uint64
+	maxFrameEndNS     float64
 	mixedTrackNumbers bool
 }
 
 type webMBlockTimestamp struct {
-	trackNumber      uint64
-	relativeTimecode uint16
+	trackNumber        uint64
+	relativeTimecode   uint16
+	frameCount         uint64
+	blockDurationTicks uint64
+	hasBlockDuration   bool
 }
 
-func parseWebMCluster(data []byte) (webMClusterTimeline, error) {
+func parseWebMCluster(data []byte, timeScale uint64, trackTimestampScale float64, defaultDurationNS uint64) (webMClusterTimeline, error) {
 	const (
 		timecodeID    = 0xe7
 		simpleBlockID = 0xa3
 		blockGroupID  = 0xa0
 	)
-	var (
-		timecodeSeen        bool
-		clusterTimecode     uint64
-		blockSeen           bool
-		trackNumber         uint64
-		mixedTrackNumbers   bool
-		minRelativeTimecode uint16
-		maxRelativeTimecode uint16
-	)
-	for len(data) > 0 {
-		element, err := readEBMLElement(data)
+	if timeScale == 0 || !isFinite(trackTimestampScale) || trackTimestampScale <= 0 {
+		return webMClusterTimeline{}, errInvalidWEBM
+	}
+	var clusterTimecode uint64
+	timecodeSeen := false
+	for rest := data; len(rest) > 0; {
+		element, err := readEBMLElement(rest)
 		if err != nil || element.unknown {
 			return webMClusterTimeline{}, errInvalidWEBM
 		}
-		switch element.id {
-		case timecodeID:
+		if element.id == timecodeID {
 			if timecodeSeen {
 				return webMClusterTimeline{}, errInvalidWEBM
 			}
@@ -351,50 +385,60 @@ func parseWebMCluster(data []byte) (webMClusterTimeline, error) {
 			if err != nil {
 				return webMClusterTimeline{}, errInvalidWEBM
 			}
-		case simpleBlockID:
-			block, err := parseWebMBlock(element.payload)
-			if err != nil {
-				return webMClusterTimeline{}, errInvalidWEBM
-			}
-			addWebMClusterBlock(block, &blockSeen, &trackNumber, &mixedTrackNumbers, &minRelativeTimecode, &maxRelativeTimecode)
-		case blockGroupID:
-			block, err := parseWebMBlockGroup(element.payload)
-			if err != nil {
-				return webMClusterTimeline{}, errInvalidWEBM
-			}
-			addWebMClusterBlock(block, &blockSeen, &trackNumber, &mixedTrackNumbers, &minRelativeTimecode, &maxRelativeTimecode)
 		}
-		data = element.rest
+		rest = element.rest
 	}
-	if !timecodeSeen || !blockSeen {
+	if !timecodeSeen {
 		return webMClusterTimeline{}, errInvalidWEBM
 	}
-	if _, err := webMAbsoluteTimestamp(clusterTimecode, minRelativeTimecode); err != nil {
+
+	var timeline webMClusterTimeline
+	blockSeen := false
+	for rest := data; len(rest) > 0; {
+		element, err := readEBMLElement(rest)
+		if err != nil || element.unknown {
+			return webMClusterTimeline{}, errInvalidWEBM
+		}
+		var block webMBlockTimestamp
+		switch element.id {
+		case simpleBlockID:
+			block, err = parseWebMBlock(element.payload)
+			if err != nil {
+				return webMClusterTimeline{}, errInvalidWEBM
+			}
+		case blockGroupID:
+			block, err = parseWebMBlockGroup(element.payload)
+			if err != nil {
+				return webMClusterTimeline{}, errInvalidWEBM
+			}
+		default:
+			rest = element.rest
+			continue
+		}
+		addWebMClusterBlock(block, &blockSeen, &timeline.trackNumber, &timeline.mixedTrackNumbers)
+		frameEndNS, err := webMBlockEndNS(clusterTimecode, block, timeScale, trackTimestampScale, defaultDurationNS)
+		if err != nil {
+			return webMClusterTimeline{}, errInvalidWEBM
+		}
+		if frameEndNS > timeline.maxFrameEndNS {
+			timeline.maxFrameEndNS = frameEndNS
+		}
+		rest = element.rest
+	}
+	if !blockSeen {
 		return webMClusterTimeline{}, errInvalidWEBM
 	}
-	maxTimestamp, err := webMAbsoluteTimestamp(clusterTimecode, maxRelativeTimecode)
-	if err != nil {
-		return webMClusterTimeline{}, errInvalidWEBM
-	}
-	return webMClusterTimeline{trackNumber: trackNumber, maxTimestamp: maxTimestamp, mixedTrackNumbers: mixedTrackNumbers}, nil
+	return timeline, nil
 }
 
-func addWebMClusterBlock(block webMBlockTimestamp, blockSeen *bool, trackNumber *uint64, mixedTrackNumbers *bool, minRelativeTimecode, maxRelativeTimecode *uint16) {
+func addWebMClusterBlock(block webMBlockTimestamp, blockSeen *bool, trackNumber *uint64, mixedTrackNumbers *bool) {
 	if !*blockSeen {
 		*blockSeen = true
 		*trackNumber = block.trackNumber
-		*minRelativeTimecode = block.relativeTimecode
-		*maxRelativeTimecode = block.relativeTimecode
 		return
 	}
 	if block.trackNumber != *trackNumber {
 		*mixedTrackNumbers = true
-	}
-	if block.relativeTimecode^0x8000 < *minRelativeTimecode^0x8000 {
-		*minRelativeTimecode = block.relativeTimecode
-	}
-	if block.relativeTimecode^0x8000 > *maxRelativeTimecode^0x8000 {
-		*maxRelativeTimecode = block.relativeTimecode
 	}
 }
 
@@ -403,34 +447,168 @@ func parseWebMBlock(data []byte) (webMBlockTimestamp, error) {
 	if err != nil || unknown || trackNumber == 0 || len(data) <= trackLength+3 {
 		return webMBlockTimestamp{}, errInvalidWEBM
 	}
-	return webMBlockTimestamp{trackNumber: trackNumber, relativeTimecode: binary.BigEndian.Uint16(data[trackLength : trackLength+2])}, nil
+	frameCount, err := webMBlockFrameCount(data[trackLength+3:], data[trackLength+2])
+	if err != nil {
+		return webMBlockTimestamp{}, errInvalidWEBM
+	}
+	return webMBlockTimestamp{
+		trackNumber:      trackNumber,
+		relativeTimecode: binary.BigEndian.Uint16(data[trackLength : trackLength+2]),
+		frameCount:       frameCount,
+	}, nil
 }
 
-func webMAbsoluteTimestamp(clusterTimecode uint64, relativeTimecode uint16) (uint64, error) {
-	if relativeTimecode&0x8000 != 0 {
-		before := uint64(^relativeTimecode + 1)
-		if clusterTimecode < before {
-			return 0, errInvalidWEBM
-		}
-		return clusterTimecode - before, nil
-	}
-	after := uint64(relativeTimecode)
-	if clusterTimecode > ^uint64(0)-after {
+func webMBlockFrameCount(data []byte, flags byte) (uint64, error) {
+	if len(data) == 0 {
 		return 0, errInvalidWEBM
 	}
-	return clusterTimecode + after, nil
+	lacing := (flags >> 1) & 0x03
+	if lacing == 0 {
+		return 1, nil
+	}
+	if len(data) < 2 {
+		return 0, errInvalidWEBM
+	}
+	frameCount := int(data[0]) + 1
+	if frameCount < 2 {
+		return 0, errInvalidWEBM
+	}
+	laceData := data[1:]
+	switch lacing {
+	case 1:
+		if err := validateWebMXiphLacing(laceData, frameCount); err != nil {
+			return 0, errInvalidWEBM
+		}
+	case 2:
+		if len(laceData) == 0 || len(laceData)%frameCount != 0 {
+			return 0, errInvalidWEBM
+		}
+	case 3:
+		if err := validateWebMEBMLLacing(laceData, frameCount); err != nil {
+			return 0, errInvalidWEBM
+		}
+	}
+	return uint64(frameCount), nil
+}
+
+func validateWebMXiphLacing(data []byte, frameCount int) error {
+	offset := 0
+	frameBytes := 0
+	for range frameCount - 1 {
+		size := 0
+		for {
+			if offset >= len(data) {
+				return errInvalidWEBM
+			}
+			part := int(data[offset])
+			offset++
+			size += part
+			if part < 255 {
+				break
+			}
+		}
+		if size == 0 || size > len(data)-offset-frameBytes {
+			return errInvalidWEBM
+		}
+		frameBytes += size
+	}
+	if len(data)-offset-frameBytes <= 0 {
+		return errInvalidWEBM
+	}
+	return nil
+}
+
+func validateWebMEBMLLacing(data []byte, frameCount int) error {
+	firstSize, sizeLength, unknown, err := readEBMLVINT(data, false)
+	if err != nil || unknown || firstSize == 0 {
+		return errInvalidWEBM
+	}
+	offset := sizeLength
+	frameBytes := firstSize
+	previousSize := firstSize
+	for i := 1; i < frameCount-1; i++ {
+		encodedDelta, deltaLength, _, err := readEBMLVINT(data[offset:], false)
+		if err != nil {
+			return errInvalidWEBM
+		}
+		offset += deltaLength
+		bias := (uint64(1) << (uint(deltaLength)*7 - 1)) - 1
+		var size uint64
+		if encodedDelta >= bias {
+			delta := encodedDelta - bias
+			if previousSize > ^uint64(0)-delta {
+				return errInvalidWEBM
+			}
+			size = previousSize + delta
+		} else {
+			delta := bias - encodedDelta
+			if previousSize <= delta {
+				return errInvalidWEBM
+			}
+			size = previousSize - delta
+		}
+		if size == 0 || frameBytes > ^uint64(0)-size {
+			return errInvalidWEBM
+		}
+		frameBytes += size
+		previousSize = size
+	}
+	if offset > len(data) {
+		return errInvalidWEBM
+	}
+	remaining := len(data) - offset
+	maxInt := uint64(^uint(0) >> 1)
+	if frameBytes >= maxInt || int(frameBytes) >= remaining {
+		return errInvalidWEBM
+	}
+	return nil
+}
+
+func webMBlockEndNS(clusterTimecode uint64, block webMBlockTimestamp, timeScale uint64, trackTimestampScale float64, defaultDurationNS uint64) (float64, error) {
+	relativeTimecode := int32(block.relativeTimecode)
+	if block.relativeTimecode&0x8000 != 0 {
+		relativeTimecode -= 1 << 16
+	}
+	startTicks := float64(clusterTimecode) + float64(relativeTimecode)*trackTimestampScale
+	if !isFinite(startTicks) || startTicks < 0 {
+		return 0, errInvalidWEBM
+	}
+	startNS := startTicks * float64(timeScale)
+	durationNS := float64(defaultDurationNS) * float64(block.frameCount)
+	if block.hasBlockDuration {
+		blockDurationNS := float64(block.blockDurationTicks) * trackTimestampScale * float64(timeScale)
+		if blockDurationNS > durationNS {
+			durationNS = blockDurationNS
+		}
+	}
+	if !isFinite(startNS) || !isFinite(durationNS) || durationNS <= 0 {
+		return 0, errInvalidWEBM
+	}
+	endNS := startNS + durationNS
+	if !isFinite(endNS) || endNS <= 0 {
+		return 0, errInvalidWEBM
+	}
+	return endNS, nil
 }
 
 func parseWebMBlockGroup(data []byte) (webMBlockTimestamp, error) {
-	const blockID = 0xa1
-	var block webMBlockTimestamp
-	blockSeen := false
+	const (
+		blockID         = 0xa1
+		blockDurationID = 0x9b
+	)
+	var (
+		block             webMBlockTimestamp
+		blockSeen         bool
+		blockDurationSeen bool
+		blockDuration     uint64
+	)
 	for len(data) > 0 {
 		element, err := readEBMLElement(data)
 		if err != nil || element.unknown {
 			return webMBlockTimestamp{}, errInvalidWEBM
 		}
-		if element.id == blockID {
+		switch element.id {
+		case blockID:
 			if blockSeen {
 				return webMBlockTimestamp{}, errInvalidWEBM
 			}
@@ -439,12 +617,23 @@ func parseWebMBlockGroup(data []byte) (webMBlockTimestamp, error) {
 				return webMBlockTimestamp{}, errInvalidWEBM
 			}
 			blockSeen = true
+		case blockDurationID:
+			if blockDurationSeen {
+				return webMBlockTimestamp{}, errInvalidWEBM
+			}
+			blockDurationSeen = true
+			blockDuration, err = ebmlUnsigned(element.payload)
+			if err != nil || blockDuration == 0 {
+				return webMBlockTimestamp{}, errInvalidWEBM
+			}
 		}
 		data = element.rest
 	}
 	if !blockSeen {
 		return webMBlockTimestamp{}, errInvalidWEBM
 	}
+	block.hasBlockDuration = blockDurationSeen
+	block.blockDurationTicks = blockDuration
 	return block, nil
 }
 
