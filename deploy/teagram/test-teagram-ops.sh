@@ -206,7 +206,7 @@ evidence=${output##*evidence=}
 [[ -d "$evidence" && -f "$evidence/readiness-target.tsv" && -f "$evidence/replay-check.result" ]]
 [[ "$(cat "$evidence/replay-check.result")" == "result=pass target_sha=$TARGET_SHA container_id=$CONTAINER_ID evidence=$evidence" ]]
 private_evidence=$(<"$MOCK_PRIVATE_EVIDENCE_LOG")
-[[ "$private_evidence" == "$MOCK_ROOT"/teagram-replay-check."${TARGET_SHA:0:12}."* && ! -e "$private_evidence" ]]
+[[ "$private_evidence" == "$MOCK_ROOT/teagram-replay-check.${TARGET_SHA:0:12}."* && ! -e "$private_evidence" ]]
 [[ "$(cat "$MOCK_VERIFIER_CALL")" == *"sha=$TARGET_SHA args=ready target $CONTAINER_ID $private_evidence compose=$MOCK_REPO/docker-compose.yml:$MOCK_REPO/docker-compose.override.yml env_files=$MOCK_REPO/.env,$MOCK_REPO/.env.rustfs-parked cwd=$MOCK_REPO"* ]]
 
 status=0
@@ -216,7 +216,7 @@ failed_evidence=${output##*evidence=}
 [[ -d "$failed_evidence" && -f "$failed_evidence/readiness-target.tsv" && \
   "$(cat "$failed_evidence/readiness-target.result")" == 'role=target result=failed exit=2 max_seconds=120' ]]
 private_evidence=$(<"$MOCK_PRIVATE_EVIDENCE_LOG")
-[[ "$private_evidence" == "$MOCK_ROOT"/teagram-replay-check."${TARGET_SHA:0:12}."* && ! -e "$private_evidence" ]]
+[[ "$private_evidence" == "$MOCK_ROOT/teagram-replay-check.${TARGET_SHA:0:12}."* && ! -e "$private_evidence" ]]
 
 status=0
 output=$(MOCK_VERIFIER_NO_EVIDENCE=1 run_command "run $OPS_SHA replay-check $TARGET_SHA" 2>&1) || status=$?
@@ -225,7 +225,7 @@ invalid_evidence=${output##*evidence=}
 [[ -d "$invalid_evidence" && "$(cat "$invalid_evidence/replay-check.result")" == \
   "result=failed target_sha=$TARGET_SHA reason=invalid-readiness-evidence evidence=$invalid_evidence" ]]
 private_evidence=$(<"$MOCK_PRIVATE_EVIDENCE_LOG")
-[[ "$private_evidence" == "$MOCK_ROOT"/teagram-replay-check."${TARGET_SHA:0:12}."* && ! -e "$private_evidence" ]]
+[[ "$private_evidence" == "$MOCK_ROOT/teagram-replay-check.${TARGET_SHA:0:12}."* && ! -e "$private_evidence" ]]
 
 mapfile -t runner_temps < "$MOCK_RUN_TEMP_LOG"
 mapfile -t removed_temps < "$MOCK_RM_LOG"
