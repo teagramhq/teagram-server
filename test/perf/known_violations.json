@@ -15,5 +15,5 @@
   {"scenario": "updates.getDifference 30 days offline", "check": "rows", "issue": "MAIN-2580"},
   {"scenario": "upload.getFile first part", "check": "seqscan", "issue": "MAIN-2538", "scan": "messages#ae47d53d"},
   {"scenario": "upload.getFile first part", "check": "rows", "issue": "MAIN-2538"},
-  {"scenario": "messages.readHistory", "check": "rows", "issue": "MAIN-2540"}
+  {"scenario": "contacts.importContacts 5000", "check": "error", "issue": "MAIN-2541"}
 ]
