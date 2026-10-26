@@ -245,6 +245,25 @@ The discovery document must report the expected server name, DC, and public RSA
 key. Caddy must have a valid certificate, and the server must be active before
 you enroll a client.
 
+## Sign-up terms
+
+Teagram is software. Its authors hold no liability for what operators or users
+do with a self-hosted Teagram instance. Each instance's operator and its users
+are responsible for the content on that instance, including sticker and emoji
+packs users import.
+
+New accounts receive this text in Telegram's standard sign-up terms prompt.
+To replace it for this instance, set `TG_TERMS_OF_SERVICE` in
+`/etc/teagram/teagram.env` to the replacement text, then restart `teagramd`.
+The setting applies to sign-ups after the restart; existing accounts are not
+prompted again.
+
+For example, add a line like this with your own wording:
+
+```sh
+TG_TERMS_OF_SERVICE="Terms for this self-hosted instance."
+```
+
 ## Create the first account
 
 While `TG_REGISTRATION=open`, a new user can sign up without an invite. Add

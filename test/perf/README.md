@@ -7,6 +7,28 @@ and a 200,000-message group with photos) and the same account at one hundredth
 of the data. Both are seeded through the store's write methods and the RPC
 upload path.
 
+The fixture owner can sign in with username `perftestowner` and password
+`perf-fixture-password-2026`. These fixed credentials exist only in this test
+fixture.
+
+### Fixture credential threat model
+
+These are public test credentials, not secrets. The performance workflow stores
+the PostgreSQL dumps in the GitHub Actions cache on `main`, and pull-request
+runs restore that cache. Anyone who obtains a dump can sign in as its owner on
+a server restored from it and access or change the fixture data. Neither the
+password nor cache visibility protects the owner account.
+
+The fixture contains synthetic performance data only; production or user data
+must never be seeded into it. The login test binds its in-process server to
+loopback and must use disposable databases. Never restore these snapshots into
+production or a shared service, and never reuse these credentials for another
+account. Publishing or distributing a snapshot or a service restored from it
+is out of scope and requires separate review. If live data enters a fixture,
+treat it as exposed, remove it, rebuild the snapshot, and rotate any real
+credentials it contained; deleting the cache cannot recall copies already
+restored by PR runs.
+
 Per scenario and fixture it records p50 and p95 latency, statements per call
 (including the delivery work the call triggers), rows read (from `EXPLAIN
 ANALYZE` of every statement), allocated bytes and every sequential scan over a
@@ -51,6 +73,7 @@ atlas migrate apply --url "$DSN_1X" --dir file://migrations
 atlas migrate apply --url "$DSN_100X" --dir file://migrations
 export TG_PERF_DIR=/tmp/perf TG_PERF_DSN_1X=$DSN_1X TG_PERF_DSN_100X=$DSN_100X
 TG_PERF_SHRINK=50 go test -tags performance -run '^TestSeedFixtures$' -timeout 2h ./test/perf
+go test -tags performance -run '^TestOwnerUsernamePasswordLogin$' -timeout 5m ./test/perf
 make perf
 ```
 
