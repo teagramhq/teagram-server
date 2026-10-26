@@ -1,6 +1,9 @@
 package api
 
 import (
+	"encoding/binary"
+	"hash/crc32"
+
 	"github.com/gotd/td/bin"
 	"github.com/gotd/td/tg"
 
@@ -131,6 +134,12 @@ func (h *handlers) handleGetAppConfig(r *mtproto.Request) (bin.Encoder, error) {
 		Key:   "reactions_user_max_premium",
 		Value: &tg.JSONNumber{Value: 1},
 	}}
+	if h.appConfigUploadMaxFileBytes > 0 {
+		values = append(values, tg.JSONObjectValue{
+			Key:   "upload_max_file_bytes",
+			Value: &tg.JSONNumber{Value: float64(h.appConfigUploadMaxFileBytes)},
+		})
+	}
 	if h.turnstileSiteKey != "" && h.turnstileVerifier != nil {
 		values = append(values, tg.JSONObjectValue{
 			Key: "turnstile",
@@ -141,7 +150,20 @@ func (h *handlers) handleGetAppConfig(r *mtproto.Request) (bin.Encoder, error) {
 		})
 	}
 	return &tg.HelpAppConfig{
-		Hash:   appConfigHash,
+		Hash:   appConfigHashForUploadLimit(h.appConfigUploadMaxFileBytes),
 		Config: &tg.JSONObject{Value: values},
 	}, nil
+}
+
+func appConfigHashForUploadLimit(maxFileBytes int64) int {
+	if maxFileBytes <= 0 {
+		return appConfigHash
+	}
+	var encoded [8]byte
+	binary.LittleEndian.PutUint64(encoded[:], uint64(maxFileBytes))
+	hash := crc32.ChecksumIEEE(encoded[:]) & 0x7fffffff
+	if int(hash) == appConfigHash {
+		hash++
+	}
+	return int(hash)
 }
