@@ -374,5 +374,13 @@ class PerformancePostgresReadinessTests(unittest.TestCase):
         )
 
 
+class PerformanceFixtureRestoreTests(unittest.TestCase):
+    def test_restore_omits_acls_that_reference_cluster_roles(self) -> None:
+        script = (ROOT / ".github/scripts/perf-run.sh").read_text(encoding="utf-8")
+        restore = re.search(r"(?ms)^restore\(\) \{\n(.*?)(?=^\})", script)
+        self.assertIsNotNone(restore, "Performance fixture restore function is missing")
+        self.assertIn("--no-acl", restore.group(1))
+
+
 if __name__ == "__main__":
     unittest.main()
