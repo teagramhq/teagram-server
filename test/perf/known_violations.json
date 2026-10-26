@@ -19,7 +19,5 @@
   {"scenario": "channels.getParticipants", "check": "seqscan", "issue": "MAIN-2537", "scan": "channel_participants#01e0cfe4"},
   {"scenario": "upload.getFile first part", "check": "seqscan", "issue": "MAIN-2538", "scan": "messages#ae47d53d"},
   {"scenario": "upload.getFile first part", "check": "rows", "issue": "MAIN-2538"},
-  {"scenario": "messages.sendMessage channel", "check": "rows", "issue": "MAIN-2539"},
-  {"scenario": "channel post fan-out", "check": "rows", "issue": "MAIN-2539"},
   {"scenario": "contacts.importContacts 5000", "check": "error", "issue": "MAIN-2541"}
 ]

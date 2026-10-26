@@ -527,6 +527,7 @@ deploy_steps = [
     'CANDIDATE_IMAGE_REF=$(demo_pull_image_by_sha "$SHA" "$IMAGE_DIGEST")',
     "demo_backup_database\n",
     'export TEAGRAM_DEMO_IMAGE_REF="$CANDIDATE_IMAGE_REF"',
+    'demo_compose run --rm --no-deps "$CANDIDATE_SERVER" client-config > "$TMP_DIR/client.json"',
     "demo_compose up -d migrate",
     "demo_wait_migration demo_compose 'deployment migrations'",
     'demo_seed_compose up -d "$CANDIDATE_SERVER"',
@@ -667,6 +668,13 @@ if "demo_wait_migration demo_compose 'post-reset migrations'" not in Path(sys.ar
     raise SystemExit("wipe-weekly.sh: reset must wait for migration completion")
 if "demo_prune_deploy_backups()" not in Path(sys.argv[1]).read_text(encoding="utf-8"):
     raise SystemExit("wipe-weekly.sh: weekly reset must remove old deploy snapshots")
+assert_text_order(wipe, "wipe-weekly.sh persistent identity check", [
+    'demo_compose up -d edge',
+    'python3 "$SCRIPT_DIR/smoke.py" "$CLIENT_CONFIG"',
+    'demo_compose exec -T "$ACTIVE_SERVER" /usr/local/bin/teagramd client-config > "$TMP_DIR/client-after-wipe.json"',
+    "AFTER_SPKI=$(jq -er '.mtproto.rsa_spki' \"$TMP_DIR/client-after-wipe.json\")",
+    '[[ "$AFTER_SPKI" == "$BEFORE_SPKI" ]]',
+])
 PY
 
 INIT_LOCK_FUNCTION="$TMP_DIR/init-lock-function.sh"
