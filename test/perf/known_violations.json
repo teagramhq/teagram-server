@@ -21,6 +21,5 @@
   {"scenario": "upload.getFile first part", "check": "rows", "issue": "MAIN-2538"},
   {"scenario": "messages.sendMessage channel", "check": "rows", "issue": "MAIN-2539"},
   {"scenario": "channel post fan-out", "check": "rows", "issue": "MAIN-2539"},
-  {"scenario": "messages.readHistory", "check": "rows", "issue": "MAIN-2540"},
   {"scenario": "contacts.importContacts 5000", "check": "error", "issue": "MAIN-2541"}
 ]
