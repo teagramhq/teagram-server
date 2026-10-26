@@ -9,6 +9,7 @@
       "contacts": [
         {
           "type": "inputPhoneContact",
+          "flags": 0,
           "fields": {
             "client_id": 801,
             "phone": "+15551048909",

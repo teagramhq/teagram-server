@@ -46,6 +46,8 @@ SMOKE_SCENARIOS=(
   client-request-fixtures
   megagroup-slow-mode
   contacts-search
+  contacts-import
+  contacts-import-privacy
   full-user-profile
   common-chats
   help-countries
