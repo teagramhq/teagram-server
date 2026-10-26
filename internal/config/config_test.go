@@ -66,6 +66,7 @@ func TestLoadRejectsRetiredBootstrapEnvBeforeInitialization(t *testing.T) {
 func TestLoadDefaults(t *testing.T) {
 	t.Setenv("TG_POSTGRES_DSN", "postgres://localhost/tg")
 	t.Setenv("TG_AUTHKEY_ENC_KEY", validEncKey)
+	t.Setenv("TG_UPLOAD_MAX_BYTES", "")
 	t.Setenv("TG_RECOVERY_EMAIL", "off")
 	cfg, err := config.Load(discardLog())
 	if err != nil {
@@ -91,6 +92,9 @@ func TestLoadDefaults(t *testing.T) {
 	}
 	if cfg.MaxFileBytes != 104857600 {
 		t.Errorf("MaxFileBytes = %d, want 104857600", cfg.MaxFileBytes)
+	}
+	if cfg.UploadMaxFileBytes != 0 {
+		t.Errorf("UploadMaxFileBytes = %d, want 0 when TG_UPLOAD_MAX_BYTES is unset", cfg.UploadMaxFileBytes)
 	}
 	if cfg.UploadPartTTL != 6*time.Hour {
 		t.Errorf("UploadPartTTL = %v, want 6h", cfg.UploadPartTTL)
@@ -194,6 +198,32 @@ func TestLoadDefaults(t *testing.T) {
 	}
 	if cfg.RateLimits.DiscardEncryption.Window != time.Hour {
 		t.Errorf("DiscardEncryption window = %v, want 1h", cfg.RateLimits.DiscardEncryption.Window)
+	}
+}
+
+func TestLoadSignUpTermsOfService(t *testing.T) {
+	t.Setenv("TG_POSTGRES_DSN", "postgres://localhost/tg")
+	t.Setenv("TG_AUTHKEY_ENC_KEY", validEncKey)
+	t.Setenv("TG_AUTHKEY_ENC_KEY_FILE", "")
+	t.Setenv("TG_RECOVERY_EMAIL", "off")
+	t.Setenv("TG_TERMS_OF_SERVICE", "")
+	readTerms := func() string {
+		t.Helper()
+		cfg, err := config.Load(discardLog())
+		if err != nil {
+			t.Fatalf("Load: %v", err)
+		}
+		return cfg.SignUpTermsOfService
+	}
+
+	const statement = "Teagram is software. Its authors hold no liability for what operators or users do with a self-hosted Teagram instance. Each instance's operator and its users are responsible for the content on that instance, including sticker and emoji packs users import."
+	if got := readTerms(); got != statement {
+		t.Fatalf("default sign-up terms = %q, want %q", got, statement)
+	}
+	const custom = "This instance is operated independently."
+	t.Setenv("TG_TERMS_OF_SERVICE", custom)
+	if got := readTerms(); got != custom {
+		t.Fatalf("configured sign-up terms = %q, want %q", got, custom)
 	}
 }
 
@@ -544,6 +574,7 @@ func TestLoadMaxUserStorageBytes(t *testing.T) {
 func TestLoadMaxFileBytes(t *testing.T) {
 	t.Setenv("TG_POSTGRES_DSN", "postgres://localhost/tg")
 	t.Setenv("TG_AUTHKEY_ENC_KEY", validEncKey)
+	t.Setenv("TG_UPLOAD_MAX_BYTES", "")
 	tests := map[string]struct {
 		raw     string
 		want    int64
@@ -577,6 +608,9 @@ func TestLoadMaxFileBytes(t *testing.T) {
 			if cfg.MaxFileBytes != tc.want {
 				t.Errorf("MaxFileBytes = %d, want %d", cfg.MaxFileBytes, tc.want)
 			}
+			if cfg.UploadMaxFileBytes != 0 {
+				t.Errorf("UploadMaxFileBytes = %d, want 0 when TG_UPLOAD_MAX_BYTES is unset", cfg.UploadMaxFileBytes)
+			}
 		})
 	}
 }
@@ -594,6 +628,9 @@ func TestLoadUploadMaxBytesOverridesMaxFileBytes(t *testing.T) {
 	if cfg.MaxFileBytes != 512000 {
 		t.Fatalf("MaxFileBytes = %d, want TG_UPLOAD_MAX_BYTES value 512000", cfg.MaxFileBytes)
 	}
+	if cfg.UploadMaxFileBytes != 512000 {
+		t.Fatalf("UploadMaxFileBytes = %d, want TG_UPLOAD_MAX_BYTES value 512000", cfg.UploadMaxFileBytes)
+	}
 }
 
 func TestLoadUploadMaxBytesUnsetKeepsCurrentLimit(t *testing.T) {
@@ -608,6 +645,9 @@ func TestLoadUploadMaxBytesUnsetKeepsCurrentLimit(t *testing.T) {
 	}
 	if cfg.MaxFileBytes != 2097152 {
 		t.Fatalf("MaxFileBytes = %d, want existing TG_MAX_FILE_BYTES value 2097152", cfg.MaxFileBytes)
+	}
+	if cfg.UploadMaxFileBytes != 0 {
+		t.Fatalf("UploadMaxFileBytes = %d, want 0 when TG_UPLOAD_MAX_BYTES is unset", cfg.UploadMaxFileBytes)
 	}
 }
 
