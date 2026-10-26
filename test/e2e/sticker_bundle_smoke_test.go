@@ -8,16 +8,23 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"net"
 	"os"
 	"path/filepath"
+	"strconv"
 	"testing"
+	"time"
 
 	"github.com/gotd/td/tg"
 
 	"github.com/teagramhq/teagram-server/internal/api"
 	"github.com/teagramhq/teagram-server/internal/config"
+	"github.com/teagramhq/teagram-server/internal/rsakey"
 	"github.com/teagramhq/teagram-server/internal/stickerbundle"
+	"github.com/teagramhq/teagram-server/internal/store"
 )
+
+const stickerBundleSmokeAddressEnv = "TG_STICKER_BUNDLE_SMOKE_ADDRESS"
 
 func TestStickerBundleCatalogue(t *testing.T) {
 	testSmokeStickerBundleCatalogue(t)
@@ -25,6 +32,10 @@ func TestStickerBundleCatalogue(t *testing.T) {
 
 func testSmokeStickerBundleCatalogue(t *testing.T) {
 	t.Helper()
+	if os.Getenv(stickerBundleSmokeAddressEnv) != "" {
+		testSmokeRunningStickerBundleCatalogue(t)
+		return
+	}
 	stickerSets, bundle := loadSmokeStickerBundleCatalogue(t)
 	f := newSmokeFixtureWithSetup(t, config.RegistrationClosed, func(f *smokeFixture) {
 		f.stickerSets = stickerSets
@@ -137,6 +148,104 @@ func testSmokeStickerBundleCatalogue(t *testing.T) {
 			}
 		}
 		transferSmokeBundleSticker(t, f, a, b, document, wantBytes, "bundle sticker smoke "+pack.ShortName, 1049801+int64(i))
+	}
+}
+
+func testSmokeRunningStickerBundleCatalogue(t *testing.T) {
+	t.Helper()
+	bundleDir := os.Getenv("TG_STICKER_CATALOG_BUNDLE")
+	if bundleDir == "" {
+		t.Fatal("TG_STICKER_CATALOG_BUNDLE is required for the running-server smoke")
+	}
+	bundle, err := stickerbundle.Load(bundleDir)
+	if err != nil {
+		t.Fatalf("load generated sticker bundle: %v", err)
+	}
+	f := newRunningServerSmokeFixture(t)
+	const phone = "+15551049801"
+	seedSmokeUsers(t, f, phone)
+	client := newSmokeClient(t, f, "running bundle smoke", phone)
+
+	var featured *tg.MessagesFeaturedStickers
+	if err := client.call(f.ctx, func(ctx context.Context, api *tg.Client) error {
+		result, err := api.MessagesGetFeaturedStickers(ctx, 0)
+		if err != nil {
+			return err
+		}
+		var ok bool
+		featured, ok = result.(*tg.MessagesFeaturedStickers)
+		if !ok || featured == nil {
+			return fmt.Errorf("featured sticker sets = %T, want *tg.MessagesFeaturedStickers", result)
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("get featured sticker packs from running image: %v", err)
+	}
+
+	got := make(map[string]struct{}, len(featured.Sets))
+	for _, item := range featured.Sets {
+		covered, ok := item.(*tg.StickerSetCovered)
+		if !ok {
+			t.Fatalf("featured sticker set = %T, want *tg.StickerSetCovered", item)
+		}
+		got[covered.Set.ShortName] = struct{}{}
+	}
+	if _, ok := got["twemoji_reactions"]; !ok {
+		t.Fatal("running image featured sets omitted twemoji_reactions")
+	}
+	for _, pack := range bundle.Packs {
+		if _, ok := got[pack.ShortName]; !ok {
+			t.Errorf("running image featured sets omitted bundled pack %q", pack.ShortName)
+		}
+	}
+}
+
+func newRunningServerSmokeFixture(t *testing.T) *smokeFixture {
+	t.Helper()
+	address := os.Getenv(stickerBundleSmokeAddressEnv)
+	host, portText, err := net.SplitHostPort(address)
+	if err != nil || host == "" {
+		t.Fatalf("parse %s %q: expected host:port", stickerBundleSmokeAddressEnv, address)
+	}
+	port, err := strconv.Atoi(portText)
+	if err != nil || port < 1 || port > 65535 {
+		t.Fatalf("parse %s port %q: invalid TCP port", stickerBundleSmokeAddressEnv, portText)
+	}
+	keyPath := os.Getenv("TG_STICKER_BUNDLE_SMOKE_RSA_KEY")
+	if keyPath == "" {
+		t.Fatal("TG_STICKER_BUNDLE_SMOKE_RSA_KEY is required for the running-server smoke")
+	}
+	key, err := rsakey.Load(keyPath)
+	if err != nil {
+		t.Fatalf("load running server identity key: %v", err)
+	}
+	dsn := os.Getenv("TG_POSTGRES_DSN")
+	if dsn == "" {
+		t.Fatal("TG_POSTGRES_DSN is required to seed the running server smoke account")
+	}
+	encKey, err := hex.DecodeString(os.Getenv("TG_AUTHKEY_ENC_KEY"))
+	if err != nil || len(encKey) != 32 {
+		t.Fatal("TG_AUTHKEY_ENC_KEY must be a 64-character hex key for the running-server smoke")
+	}
+
+	deadlineCtx, cancelDeadline := context.WithTimeout(context.Background(), 90*time.Second)
+	t.Cleanup(cancelDeadline)
+	deadlineCtx = withRegistrySnapshotState(deadlineCtx)
+	ctx, cancelFailure := context.WithCancelCause(deadlineCtx)
+	t.Cleanup(func() { cancelFailure(nil) })
+	st, err := store.Open(ctx, dsn, encKey, store.WithoutBlobStore())
+	if err != nil {
+		t.Fatalf("open running server database for smoke account: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := st.Close(); err != nil {
+			t.Errorf("close running server smoke store: %v", err)
+		}
+	})
+	return &smokeFixture{
+		ctx: ctx, failures: newClientFailureSignal(cancelFailure), key: key, dsn: dsn,
+		store: st, codes: newMultiCodeSink(), authHandles: make(map[string]string), dcID: 2,
+		port: port, regMode: config.RegistrationClosed,
 	}
 }
 
