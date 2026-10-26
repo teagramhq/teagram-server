@@ -9,7 +9,7 @@ source "$(cd -P "$(dirname "${BASH_SOURCE[0]}")" && pwd)/rollout-safe-remove-tre
 initialize_runner_config() {
   SCRIPT_DIR=$(cd -P "$(dirname "${BASH_SOURCE[0]}")" && pwd)
   SCRIPT_SOURCE="$SCRIPT_DIR/$(basename "${BASH_SOURCE[0]}")"
-  readonly APPROVED_VERIFIER_SHA=16d0470293dff8593135f710e8aa306270cec585d7bcd7bb2220d7fc56f74d92
+  readonly APPROVED_VERIFIER_SHA=44520d2fc08bb87505341e97421c652e4f7a857d3d78d2f8c19d5d51fbfa5c4e
   readonly APPROVED_SCHEMA_GATE_SHA=ac54d3cf0480383a52414a8bc8b856b5e1d5f6f8d19034c9c576c64627e097c8
   readonly APPROVED_SCHEMA_GATE_HELPER_SHA=7ae06c2872c60b434068b3715a9ddd5e19b03d4be98dc9881c8dd8f294953d41
   readonly APPROVED_INITIAL_LOCAL_COMPOSE_SHA=d764d291ad2ea91cff841d14a0cd2bbcb5981961dbc67406bfeba1196a7b3fa4
@@ -184,6 +184,7 @@ usage() {
   printf '%s\n' 'usage: rollout-runner.sh apply|initialize-local TARGET_SHA EXPECTED_BASELINE_SHA' >&2
   printf '%s\n' '       rollout-runner.sh move-stack TARGET_SHA EXPECTED_BASELINE_SHA' >&2
   printf '%s\n' '       rollout-runner.sh reconcile TARGET_SHA' >&2
+  printf '%s\n' '       rollout-runner.sh compare-preflight BASELINE_DIR PREFLIGHT_DIR' >&2
 }
 
 sha256_file() {
@@ -2235,6 +2236,48 @@ compare_resolved_preflight() {
   [ "$failures" -eq 0 ] || { fail 'resolved Compose preflight rejected unapproved drift'; return 1; }
 }
 
+compare_preflight_command() {
+  [ "$#" -eq 2 ] || { printf '%s\n' 'usage: rollout-runner.sh compare-preflight BASELINE_DIR PREFLIGHT_DIR' >&2; return 64; }
+
+  local root_real baseline_real preflight_real path owner mode
+  [[ "$EVIDENCE_ROOT" =~ ^/tmp/main2612-replay\.[A-Za-z0-9]{8}$ ]] || {
+    fail 'preflight replay evidence root must use the guarded /tmp/main2612-replay prefix'
+    return 64
+  }
+  root_real=$(realpath -e -- "$EVIDENCE_ROOT") || { fail 'preflight replay evidence root is missing'; return 1; }
+  [ "$root_real" = "$EVIDENCE_ROOT" ] || { fail 'preflight replay evidence root is not canonical'; return 1; }
+  check_private_dir "$root_real" || return 1
+
+  baseline_real=$(realpath -e -- "$1") || { fail 'preflight baseline directory is missing'; return 1; }
+  preflight_real=$(realpath -e -- "$2") || { fail 'preflight target directory is missing'; return 1; }
+  [ "$baseline_real" = "$EVIDENCE_ROOT/baseline" ] && \
+    [ "$preflight_real" = "$EVIDENCE_ROOT/preflight" ] || {
+    fail 'preflight comparison directories are outside the guarded replay tree'
+    return 1
+  }
+  for path in "$baseline_real" "$preflight_real"; do
+    [ "$path" = "$(realpath -e -- "$path")" ] || { fail 'preflight comparison directory is not canonical'; return 1; }
+    check_private_dir "$path" || return 1
+  done
+  for path in "$baseline_real/baseline.snapshot.json" "$preflight_real/preflight.snapshot.json"; do
+    [ -f "$path" ] && [ ! -L "$path" ] || { fail 'preflight snapshot is missing or symlinked'; return 1; }
+    owner=$(stat -c %u -- "$path") || { fail 'cannot inspect preflight snapshot owner'; return 1; }
+    mode=$(stat -c %a -- "$path") || { fail 'cannot inspect preflight snapshot mode'; return 1; }
+    [ "$owner" = 0 ] && [ "$mode" = 600 ] || { fail 'preflight snapshot must be root-owned mode 0600'; return 1; }
+  done
+
+  BASELINE_DIR=$baseline_real
+  TARGET_DIR=$preflight_real
+  INITIALIZE_LOCAL=0
+  compare_resolved_preflight || return $?
+  awk -F '\t' '
+    BEGIN { print "field\tresult" }
+    NF != 6 || $2 != "preflight" || $6 != "pass" { failed = 1 }
+    { print $3 "\t" $6; rows++ }
+    END { if (failed || rows == 0) exit 1 }
+  ' "$TARGET_DIR/preflight-comparisons.tsv"
+}
+
 compare_rollback_to_baseline() {
   local baseline_file="$ROLLBACK_DIR/baseline.snapshot.json"
   local rollback_file="$ROLLBACK_DIR/rollback.snapshot.json"
@@ -2894,6 +2937,11 @@ run_stack_move() {
 
 main() {
   initialize_runner_config
+  if [ "${1:-}" = compare-preflight ]; then
+    shift
+    compare_preflight_command "$@"
+    return $?
+  fi
   if [ "$#" -eq 2 ] && [ "$1" = reconcile ]; then
     configure_action_paths apply
     TARGET_SHA=$2

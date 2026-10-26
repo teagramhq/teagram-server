@@ -1204,21 +1204,33 @@ snapshot_from_json() {
 }
 
 secure_evidence_dir() {
-  local dir=$1
+  local dir=$1 parent parent_real parent_owner parent_mode
   if [ "$(id -u)" != 0 ]; then
     printf '%s\n' 'evidence operations require uid 0' >&2
     return 1
   fi
-  case "$dir" in
-    /root/*) ;;
-    *) printf '%s\n' 'evidence directory must be below /root' >&2; return 1 ;;
-  esac
-  case "$dir" in
-    /root/*/*) printf '%s\n' 'evidence directory must be a direct child of /root' >&2; return 1 ;;
-  esac
-  case "$dir" in
-    *'/../'*|*/..|*'/./'*) printf '%s\n' 'evidence directory must be canonical' >&2; return 1 ;;
-  esac
+  if [[ "$dir" =~ ^/tmp/main2612-replay\.[A-Za-z0-9]{8}/(baseline|preflight)$ ]]; then
+    parent=${dir%/*}
+    parent_real=$(realpath -e -- "$parent") || { printf '%s\n' 'replay evidence parent is missing' >&2; return 1; }
+    [ "$parent_real" = "$parent" ] || { printf '%s\n' 'replay evidence parent is not canonical' >&2; return 1; }
+    parent_owner=$(stat -c %u -- "$parent") || return 1
+    parent_mode=$(stat -c %a -- "$parent") || return 1
+    [ -d "$parent" ] && [ ! -L "$parent" ] && [ "$parent_owner" = 0 ] && [ "$parent_mode" = 700 ] || {
+      printf '%s\n' 'replay evidence parent must be root-owned mode 0700' >&2
+      return 1
+    }
+  else
+    case "$dir" in
+      /root/*) ;;
+      *) printf '%s\n' 'evidence directory must be under /root or its guarded replay tree' >&2; return 1 ;;
+    esac
+    case "$dir" in
+      /root/*/*) printf '%s\n' 'evidence directory must be a direct child of /root' >&2; return 1 ;;
+    esac
+    case "$dir" in
+      *'/../'*|*/..|*'/./'*) printf '%s\n' 'evidence directory must be canonical' >&2; return 1 ;;
+    esac
+  fi
   if [ -L "$dir" ]; then
     printf '%s\n' 'evidence directory cannot be a symlink' >&2
     return 1
@@ -1664,7 +1676,8 @@ live_ready_command() {
 snapshot_command() {
   local container_id=$1 evidence_dir=$2 name=$3 env_file=$4 override_file=$5
   local compose_source=${6:-selected-compose-render}
-  local inspect_json compose_json snapshot output
+  local inspect_json compose_json snapshot output project_directory canonical_project_directory env_path
+  local -a compose_command=(docker compose) compose_env_files=()
   secure_evidence_dir "$evidence_dir"
   validate_container_id "$container_id"
   if [ "$PWD" != "$ROLLOUT_CHECKOUT_PATH" ] || [ "$env_file" != "$ROLLOUT_CHECKOUT_PATH/.env" ] || [ "$override_file" != "$ROLLOUT_CHECKOUT_PATH/docker-compose.override.yml" ]; then
@@ -1679,7 +1692,48 @@ snapshot_command() {
   output="$evidence_dir/$name.snapshot.json"
   inspect_json=$(docker inspect "$container_id" 2>/dev/null) || { printf '%s\n' 'container snapshot unavailable' >&2; return 1; }
   if [ "$compose_source" = selected-compose-render ]; then
-    compose_json=$(docker compose config --format json </dev/null 2>/dev/null) || { printf '%s\n' 'resolved compose configuration unavailable' >&2; return 1; }
+    project_directory=${ROLLOUT_COMPOSE_PROJECT_DIRECTORY:-}
+    if [ -n "$project_directory" ]; then
+      [ -d "$project_directory" ] && [ ! -L "$project_directory" ] || {
+        printf '%s\n' 'Compose project directory is missing or symlinked' >&2
+        return 1
+      }
+      canonical_project_directory=$(realpath -e -- "$project_directory") || return 1
+      [ "$canonical_project_directory" = "$project_directory" ] || {
+        printf '%s\n' 'Compose project directory is not canonical' >&2
+        return 1
+      }
+      [ -f "$env_file" ] && [ ! -L "$env_file" ] && [ "$(stat -c %a -- "$env_file")" = 600 ] || {
+        printf '%s\n' 'Compose replay environment file must be a regular mode-0600 file' >&2
+        return 1
+      }
+      if [ -n "${ROLLOUT_COMPOSE_ENV_FILES:-}" ]; then
+        IFS=, read -r -a compose_env_files <<< "$ROLLOUT_COMPOSE_ENV_FILES"
+      else
+        compose_env_files=("$env_file")
+      fi
+      [ "${#compose_env_files[@]}" -ge 1 ] && [ "${#compose_env_files[@]}" -le 2 ] && \
+        [ "${compose_env_files[0]}" = "$env_file" ] || {
+        printf '%s\n' 'Compose replay environment files are invalid' >&2
+        return 1
+      }
+      compose_command+=(--project-directory "$project_directory")
+      for env_path in "${compose_env_files[@]}"; do
+        case "$env_path" in
+          "$ROLLOUT_CHECKOUT_PATH"/*) ;;
+          *) printf '%s\n' 'Compose replay environment files must stay in the checkout tree' >&2; return 1 ;;
+        esac
+        [ -f "$env_path" ] && [ ! -L "$env_path" ] && [ "$(stat -c %a -- "$env_path")" = 600 ] || {
+          printf '%s\n' 'Compose replay environment files must be regular mode-0600 files' >&2
+          return 1
+        }
+        compose_command+=(--env-file "$env_path")
+      done
+    elif [ -n "${ROLLOUT_COMPOSE_ENV_FILES:-}" ]; then
+      printf '%s\n' 'Compose replay environment files require a project directory' >&2
+      return 64
+    fi
+    compose_json=$("${compose_command[@]}" config --format json </dev/null 2>/dev/null) || { printf '%s\n' 'resolved compose configuration unavailable' >&2; return 1; }
   else
     compose_json='{}'
   fi

@@ -15,6 +15,8 @@ if [ "$(id -u)" != 0 ]; then
   exit 77
 fi
 bash "$SCRIPT_DIR/test-rollout-verifier-env-additions.sh"
+bash "$SCRIPT_DIR/test-rollout-preflight-replay.sh"
+bash "$SCRIPT_DIR/test-rollout-verifier-replay-project-directory.sh"
 TMP=$(mktemp -d "${TMPDIR:-/root}/main1238-rollout-fixtures.XXXXXXXX")
 chmod 700 "$TMP"
 cleanup_fixtures() {
