@@ -38,6 +38,13 @@ const (
 	requestFailureTransport         requestFailureCause = "transport"
 	requestFailureRPCError          requestFailureCause = "rpc_error"
 	requestFailureRequestProcessing requestFailureCause = "request_processing"
+	requestFailureDecode            requestFailureCause = "request_decode"
+	requestFailureDecrypt           requestFailureCause = "request_decrypt"
+	requestFailureBeforeDispatch    requestFailureCause = "before_dispatch"
+	requestFailureSessionCreated    requestFailureCause = "session_created_write"
+	requestFailurePendingLoginStore requestFailureCause = "pending_login_store"
+	requestFailureValidation        requestFailureCause = "request_validation"
+	requestFailureUnknownMethod     requestFailureCause = "unknown_method"
 	requestFailureOther             requestFailureCause = "other"
 )
 
@@ -53,6 +60,11 @@ func (e *requestFailureCauseError) Unwrap() error { return e.err }
 func markRequestFailureCause(cause requestFailureCause, err error) error {
 	if err == nil {
 		return nil
+	}
+	if cause == requestFailureHandlerError {
+		if existing, ok := errors.AsType[*requestFailureCauseError](err); ok && existing != nil {
+			return err
+		}
 	}
 	return &requestFailureCauseError{cause: cause, err: err}
 }
@@ -229,12 +241,12 @@ func (s *Server) admitRPC(ctx context.Context) (*rpcAdmission, bool) {
 func (s *Server) rpcHandle(ctx context.Context, c *Conn, b *bin.Buffer, userID int64, provisional bool, clientAddr netip.Addr, slot *preAuthSlot, handler Handler, beforeDispatch func() error) error {
 	m := &crypto.EncryptedMessage{}
 	if err := m.DecodeWithoutCopy(b); err != nil {
-		return fmt.Errorf("decode encrypted message: %w", err)
+		return markRequestFailureCause(requestFailureDecode, fmt.Errorf("decode encrypted message: %w", err))
 	}
 
 	msg, err := s.cipher.Decrypt(c.authKey, m)
 	if err != nil {
-		return fmt.Errorf("decrypt message: %w", err)
+		return markRequestFailureCause(requestFailureDecrypt, fmt.Errorf("decrypt message: %w", err))
 	}
 	// The moment the connection stops being one of the anonymous ones the
 	// pre-auth bounds hold back: the frame's MAC verified under a key this
@@ -249,14 +261,14 @@ func (s *Server) rpcHandle(ctx context.Context, c *Conn, b *bin.Buffer, userID i
 	}
 	if beforeDispatch != nil {
 		if err := beforeDispatch(); err != nil {
-			return err
+			return markRequestFailureCause(requestFailureBeforeDispatch, err)
 		}
 	}
 
 	if err := s.registry.sendSessionCreatedOnce(ctx, c.authKey.ID, msg.SessionID, s.clock.Now, func() error {
 		return c.sendSessionCreated(ctx, saltFromKeyID(c.authKey.ID))
 	}); err != nil {
-		return err
+		return markRequestFailureCause(requestFailureSessionCreated, err)
 	}
 
 	// RPC deadlines start when work is admitted. Entries in one container share
@@ -317,7 +329,7 @@ func (s *Server) handleWithHandler(c *Conn, req *Request, handler Handler) (err 
 	in := req.Buf
 	id, err := in.PeekID()
 	if err != nil {
-		return fmt.Errorf("peek id: %w", err)
+		return markRequestFailureCause(requestFailureDecode, fmt.Errorf("peek id: %w", err))
 	}
 	if c != nil && !req.ackQueued && needsAck(req.seqNo, id) {
 		c.queueAcks(req.MsgID)
@@ -340,14 +352,14 @@ func (s *Server) handleWithHandler(c *Conn, req *Request, handler Handler) (err 
 	case mt.PingRequestTypeID:
 		ping := mt.PingRequest{}
 		if err := ping.Decode(in); err != nil {
-			return err
+			return markRequestFailureCause(requestFailureDecode, err)
 		}
 		return c.sendPong(req, ping.PingID)
 
 	case mt.PingDelayDisconnectRequestTypeID:
 		ping := mt.PingDelayDisconnectRequest{}
 		if err := ping.Decode(in); err != nil {
-			return err
+			return markRequestFailureCause(requestFailureDecode, err)
 		}
 		c.pingDelayDisconnectDeadline = time.Now().Add(
 			pingDelayDisconnectReadTimeout(ping.DisconnectDelay, s.authenticatedReadTimeout),
@@ -357,14 +369,14 @@ func (s *Server) handleWithHandler(c *Conn, req *Request, handler Handler) (err 
 	case mt.GetFutureSaltsRequestTypeID:
 		salts := mt.GetFutureSaltsRequest{}
 		if err := salts.Decode(in); err != nil {
-			return err
+			return markRequestFailureCause(requestFailureDecode, err)
 		}
 		return c.sendEternalSalt(req)
 
 	case mt.MsgsAckTypeID:
 		ack := mt.MsgsAck{}
 		if err := ack.Decode(in); err != nil {
-			return err
+			return markRequestFailureCause(requestFailureDecode, err)
 		}
 		// Acknowledgements need no response.
 		return nil
@@ -372,20 +384,20 @@ func (s *Server) handleWithHandler(c *Conn, req *Request, handler Handler) (err 
 	case mt.MsgsStateReqTypeID:
 		state := mt.MsgsStateReq{}
 		if err := state.Decode(in); err != nil {
-			return err
+			return markRequestFailureCause(requestFailureDecode, err)
 		}
 		if len(state.MsgIDs) > maxMTProtoMessageIDs {
-			return fmt.Errorf("msgs_state_req has %d message ids, limit is %d", len(state.MsgIDs), maxMTProtoMessageIDs)
+			return markRequestFailureCause(requestFailureValidation, fmt.Errorf("msgs_state_req has %d message ids, limit is %d", len(state.MsgIDs), maxMTProtoMessageIDs))
 		}
 		return c.sendMsgsStateInfo(req, state.MsgIDs)
 
 	case mt.MsgResendReqTypeID:
 		resend := mt.MsgResendReq{}
 		if err := resend.Decode(in); err != nil {
-			return err
+			return markRequestFailureCause(requestFailureDecode, err)
 		}
 		if len(resend.MsgIDs) > maxMTProtoMessageIDs {
-			return fmt.Errorf("msg_resend_req has %d message ids, limit is %d", len(resend.MsgIDs), maxMTProtoMessageIDs)
+			return markRequestFailureCause(requestFailureValidation, fmt.Errorf("msg_resend_req has %d message ids, limit is %d", len(resend.MsgIDs), maxMTProtoMessageIDs))
 		}
 		// This server does not retain a per-session message resend queue. Report
 		// the state of every requested id instead, as MTProto requires when at
@@ -395,10 +407,10 @@ func (s *Server) handleWithHandler(c *Conn, req *Request, handler Handler) (err 
 	case mt.MsgsAllInfoTypeID:
 		info := mt.MsgsAllInfo{}
 		if err := info.Decode(in); err != nil {
-			return err
+			return markRequestFailureCause(requestFailureDecode, err)
 		}
 		if len(info.MsgIDs) > maxMTProtoMessageIDs {
-			return fmt.Errorf("msgs_all_info has %d message ids, limit is %d", len(info.MsgIDs), maxMTProtoMessageIDs)
+			return markRequestFailureCause(requestFailureValidation, fmt.Errorf("msgs_all_info has %d message ids, limit is %d", len(info.MsgIDs), maxMTProtoMessageIDs))
 		}
 		// msgs_all_info is an unacknowledged status notification.
 		return nil
@@ -406,14 +418,14 @@ func (s *Server) handleWithHandler(c *Conn, req *Request, handler Handler) (err 
 	case proto.GZIPTypeID:
 		var content proto.GZIP
 		if err := content.Decode(in); err != nil {
-			return fmt.Errorf("gzip: %w", err)
+			return markRequestFailureCause(requestFailureDecode, fmt.Errorf("gzip: %w", err))
 		}
 		req.Buf = &bin.Buffer{Buf: content.Data}
 
 	case proto.MessageContainerTypeID:
 		var container proto.MessageContainer
 		if err := container.Decode(in); err != nil {
-			return fmt.Errorf("container: %w", err)
+			return markRequestFailureCause(requestFailureDecode, fmt.Errorf("container: %w", err))
 		}
 		admission := req.admission
 		if admission == nil {
@@ -522,7 +534,7 @@ func (s *Server) dispatchRPC(c *Conn, req *Request, handler Handler) error {
 			s.logServerFailure(serverFailureRequest, requestFailureContext(req, req.Ctx.Err()).logAttrs()...)
 			return c.SendErr(req, errInternalRPC)
 		}
-		return err
+		return markRequestFailureCause(requestFailureHandlerError, err)
 	}
 	return nil
 }

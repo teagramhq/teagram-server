@@ -1240,7 +1240,7 @@ func (s *Server) serveConnModeWithDiagnostics(readCtx, requestCtx context.Contex
 			admitted, err := observePendingLogin(pendingLogin.StartedAt, pendingLogin.Remaining)
 			if err != nil {
 				s.log.Error("maintain pending login limit lease", "err", err)
-				return errors.Join(errRequestHandlingFailure, err)
+				return errors.Join(errRequestHandlingFailure, markRequestFailureCause(requestFailurePendingLoginStore, err))
 			}
 			if !admitted {
 				return nil
@@ -1292,7 +1292,7 @@ func (s *Server) serveConnModeWithDiagnostics(readCtx, requestCtx context.Contex
 			admitted, err := observePendingLogin(conn.pendingLoginSince(), conn.pendingLoginRemaining())
 			if err != nil {
 				s.log.Error("maintain pending login limit lease", "err", err)
-				return errors.Join(errRequestHandlingFailure, err)
+				return errors.Join(errRequestHandlingFailure, markRequestFailureCause(requestFailurePendingLoginStore, err))
 			}
 			if !admitted {
 				return nil

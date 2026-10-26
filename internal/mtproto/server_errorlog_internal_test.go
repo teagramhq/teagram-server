@@ -793,6 +793,55 @@ func TestRequestHandlingFailureLogsSafeRPCContext(t *testing.T) {
 	}
 }
 
+func TestUnknownMethodDecodeFailureLogsDecodeCause(t *testing.T) {
+	sink := &serverErrorLogSink{}
+	server := New(exchange.PrivateKey{}, 2, NewMemoryAuthKeyStore(), nil, slog.New(sink))
+	err := server.handle(nil, &Request{
+		Buf: &bin.Buffer{Buf: []byte{1}},
+		Ctx: context.Background(),
+	})
+	if err == nil {
+		t.Fatal("handle succeeded with a truncated request constructor")
+	}
+	server.logConnectionFailure(errors.Join(errRequestHandlingFailure, err))
+
+	if len(sink.records) != 1 {
+		t.Fatalf("failure records = %d, want 1", len(sink.records))
+	}
+	for key, want := range map[string]any{
+		"rpc_method": UnknownRPCMethod,
+		"cause":      "request_decode",
+	} {
+		if got := sink.records[0].attrs[key]; got != want {
+			t.Errorf("%s = %v, want %v", key, got, want)
+		}
+	}
+}
+
+func TestUnregisteredMethodFailureLogsUnknownMethodCause(t *testing.T) {
+	sink := &serverErrorLogSink{}
+	server := New(exchange.PrivateKey{}, 2, NewMemoryAuthKeyStore(), NewDispatcher(), slog.New(sink))
+	var body bin.Buffer
+	body.PutID(0xffffffff)
+	err := server.handle(nil, &Request{Buf: &body, Ctx: context.Background()})
+	if err == nil {
+		t.Fatal("handle succeeded with an unregistered request constructor")
+	}
+	server.logConnectionFailure(errors.Join(errRequestHandlingFailure, err))
+
+	if len(sink.records) != 1 {
+		t.Fatalf("failure records = %d, want 1", len(sink.records))
+	}
+	for key, want := range map[string]any{
+		"rpc_method": UnknownRPCMethod,
+		"cause":      "unknown_method",
+	} {
+		if got := sink.records[0].attrs[key]; got != want {
+			t.Errorf("%s = %v, want %v", key, got, want)
+		}
+	}
+}
+
 func TestPlainHandlerFailureLogNamesRPCAndCause(t *testing.T) {
 	const cause = "PRIVATE-HANDLER-DETAIL"
 	sink := &serverErrorLogSink{}

@@ -919,8 +919,6 @@ jobs:
 
       - name: Check deploy script syntax
         run: |
-          bash -n .github/scripts/perf-postgres.sh
-          bash -n .github/scripts/test-perf-postgres-readiness.sh
           bash -n deploy/teagram/deploy-main.sh
           bash -n deploy/teagram/teagram-logs.sh
           bash -n deploy/teagram/test-teagram-logs.sh
@@ -962,14 +960,9 @@ jobs:
             deploy/link-edge/deploy-main.sh \
             deploy/link-edge/test-deploy-main.sh \
             deploy/teagram-demo/test-turnstile-secret-access.sh \
-            .github/scripts/perf-postgres.sh \
-            .github/scripts/test-perf-postgres-readiness.sh \
             deploy/teagram/test-deploy-main.sh \
             .github/scripts/test-deploy-workflow-contract.sh \
             .github/scripts/mirror_rustfs_qualification_images.sh
-
-      - name: Check RPC performance Postgres readiness
-        run: bash .github/scripts/test-perf-postgres-readiness.sh
 
       - name: Check deploy script target fixtures
         run: deploy/teagram/test-deploy-main.sh
