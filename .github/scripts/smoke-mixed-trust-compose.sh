@@ -271,7 +271,8 @@ for name, expected_ip in (("teagramd-public-1", "198.18.132.21"), ("teagramd-pub
     assert environment["TG_WEBSOCKET_LISTEN_ADDR"] == ""
     assert environment["TG_WEBSOCKET_ALLOWED_ORIGINS"] == ""
     assert environment["TG_REPLICA_COUNT"] == "3"
-    assert environment["TG_RATE_LIMIT_KEY_EXCHANGE_IP"] == "1"
+    # gotd's initial PFS connection performs two exchanges: permanent and temporary.
+    assert environment["TG_RATE_LIMIT_KEY_EXCHANGE_IP"] == "2"
     assert replica.get("ports", []) == []
     assert replica["networks"]["public-backend"]["ipv4_address"] == expected_ip
     assert "public-ingress" not in replica["networks"]

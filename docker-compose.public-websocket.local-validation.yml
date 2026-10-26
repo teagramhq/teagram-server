@@ -3,12 +3,12 @@
 services:
   teagramd-public-1:
     environment:
-      TG_RATE_LIMIT_KEY_EXCHANGE_IP: "1"
+      TG_RATE_LIMIT_KEY_EXCHANGE_IP: "2"
       TG_RATE_LIMIT_KEY_EXCHANGE_IP_WINDOW: 1h
 
   teagramd-public-2:
     environment:
-      TG_RATE_LIMIT_KEY_EXCHANGE_IP: "1"
+      TG_RATE_LIMIT_KEY_EXCHANGE_IP: "2"
       TG_RATE_LIMIT_KEY_EXCHANGE_IP_WINDOW: 1h
 
   public-haproxy:
