@@ -38,6 +38,8 @@ type scalePlan struct {
 	Cost     float64     `json:"Total Cost"`
 	Rows     float64     `json:"Actual Rows"`
 	Loops    float64     `json:"Actual Loops"`
+	Removed  float64     `json:"Rows Removed by Filter"`
+	Recheck  float64     `json:"Rows Removed by Index Recheck"`
 	Hits     int64       `json:"Shared Hit Blocks"`
 	Reads    int64       `json:"Shared Read Blocks"`
 	Plans    []scalePlan `json:"Plans"`
@@ -50,6 +52,17 @@ func (p scalePlan) rowsFor(relation string) float64 {
 	}
 	for _, child := range p.Plans {
 		rows += child.rowsFor(relation)
+	}
+	return rows
+}
+
+func (p scalePlan) rowsReadFor(relation string) float64 {
+	var rows float64
+	if p.Relation == relation {
+		rows += (p.Rows + p.Removed + p.Recheck) * p.Loops
+	}
+	for _, child := range p.Plans {
+		rows += child.rowsReadFor(relation)
 	}
 	return rows
 }
@@ -466,6 +479,81 @@ func TestHistoryPageByDateAroundReadsMiddleWindow(t *testing.T) {
 	readRows := plans[0].Plan.rowsFor("messages")
 	if readRows > 2*pageSize+10 {
 		t.Fatalf("middle date history page read %.0f message rows for a %d-row page, want at most %d", readRows, pageSize, 2*pageSize+10)
+	}
+}
+
+func TestChannelHistoryPageByDateReadsOnlyItsWindow(t *testing.T) {
+	ctx := t.Context()
+	dsn := pgtest.DSN(t)
+	pool, err := pgxpool.New(ctx, dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pool.Close()
+	for _, sql := range []string{
+		`UPDATE server_administration SET election_closed = true WHERE singleton_id = 1`,
+		`INSERT INTO users (id, phone, first_name) VALUES (1, '+channel-history-date-plan-owner', 'Owner')`,
+		`INSERT INTO channels (id, title, creator_id) VALUES (1, 'Channel date history plan', 1)`,
+		`INSERT INTO channel_state (channel_id) VALUES (1)`,
+		`INSERT INTO channel_participants (channel_id, user_id) VALUES (1, 1)`,
+		`ALTER TABLE channel_messages DISABLE TRIGGER channel_messages_stamp_history_ttl`,
+		`ALTER TABLE channel_messages DISABLE TRIGGER channel_messages_summary_maintain`,
+		`INSERT INTO channel_messages (channel_id, local_id, from_id, date, message)
+		 SELECT 1, n, 1, to_timestamp(n), 'channel history date plan message'
+		 FROM generate_series(1, 20000) n`,
+		`ALTER TABLE channel_messages ENABLE TRIGGER channel_messages_summary_maintain`,
+		`ALTER TABLE channel_messages ENABLE TRIGGER channel_messages_stamp_history_ttl`,
+		`ANALYZE channel_messages`,
+	} {
+		if _, err := pool.Exec(ctx, sql); err != nil {
+			t.Fatalf("seed channel date history plan data: %v", err)
+		}
+	}
+
+	recorded := &scaleQueries{}
+	cfg, err := pgxpool.ParseConfig(dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.ConnConfig.Tracer = recorded
+	traced, err := pgxpool.NewWithConfig(ctx, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer traced.Close()
+	const pageSize = 100
+	rows, err := db.New(traced).ChannelHistoryPageByDate(ctx, db.ChannelHistoryPageByDateParams{
+		ChannelID: 1, OwnerID: 1, OffsetDate: 10000, Lim: pageSize,
+	})
+	if err != nil {
+		t.Fatalf("channel history page by date: %v", err)
+	}
+	if len(rows) != pageSize || rows[0].LocalID != 9999 || rows[len(rows)-1].LocalID != 9900 {
+		t.Fatalf("channel date history page = %d rows from %d to %d, want %d rows from 9999 to 9900", len(rows), rows[0].LocalID, rows[len(rows)-1].LocalID, pageSize)
+	}
+
+	recorded.mu.Lock()
+	queries := append([]pgx.TraceQueryStartData(nil), recorded.queries...)
+	recorded.mu.Unlock()
+	if len(queries) != 1 {
+		t.Fatalf("channel date history page issued %d statements, want 1", len(queries))
+	}
+	var raw []byte
+	if err := pool.QueryRow(ctx, "EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) "+queries[0].SQL, queries[0].Args...).Scan(&raw); err != nil {
+		t.Fatalf("explain channel date history page: %v", err)
+	}
+	var plans []struct {
+		Plan scalePlan `json:"Plan"`
+	}
+	if err := json.Unmarshal(raw, &plans); err != nil {
+		t.Fatalf("decode channel date history page plan: %v", err)
+	}
+	if len(plans) != 1 {
+		t.Fatalf("channel date history page explain returned %d plans, want 1", len(plans))
+	}
+	readRows := plans[0].Plan.rowsReadFor("channel_messages")
+	if readRows > 2*pageSize+10 {
+		t.Fatalf("channel date history page read %.0f channel rows for a %d-row page, want at most %d", readRows, pageSize, 2*pageSize+10)
 	}
 }
 
