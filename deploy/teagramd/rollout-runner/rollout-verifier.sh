@@ -388,14 +388,29 @@ MEDIA_KEY_SOURCE_PATH=
 MEDIA_KEY_VERSION=
 
 verify_media_key_mount() {
-  local inspect_json=$1 compose_json=$2 snapshot_name=$3 record media_source media_version container_present service_name
+  local inspect_json=$1 compose_json=$2 snapshot_name=$3 compose_files_value=${4:-${COMPOSE_FILE:-}}
+  local record media_source media_version container_present source_bind_false=false service_name
   service_name=${ROLLOUT_COMPOSE_SERVICE:-teagramd}
   local resolved_source checkout_root directory_mode key_file key_mode key_owner
   # Compose omits create_host_path: false from the resolved config.
-  if ! record=$(printf '%s\n' "$inspect_json" "$compose_json" | jq -ser --arg snapshot_name "$snapshot_name" --arg service_name "$service_name" '
+  if printf '%s' "$compose_json" | jq -e --arg service_name "$service_name" '
+      [.services[$service_name].volumes[]? | select(.target == "/run/teagramd/media-keys" and .bind == {})]
+      | length > 0
+    ' >/dev/null; then
+    verify_media_key_source_bind_false "$compose_files_value" "$service_name" || {
+      printf '%s\n' 'source Compose does not explicitly disable media-key host-path creation' >&2
+      return 1
+    }
+    source_bind_false=true
+  fi
+  if ! record=$(printf '%s\n' "$inspect_json" "$compose_json" | jq -ser \
+    --arg snapshot_name "$snapshot_name" --arg service_name "$service_name" \
+    --argjson source_bind_false "$source_bind_false" '
     def item: if type == "array" then .[0] else . end;
     def env_values($env; $name):
       [$env[] | select(type == "string" and startswith($name + "=")) | .[($name | length) + 1:]];
+    def approved_media_key_bind:
+      . == {create_host_path:false} or ($source_bind_false and . == {});
     .[0] as $inspect
     | .[1] as $compose
     | ($compose.services[$service_name] // null) as $service
@@ -423,13 +438,9 @@ verify_media_key_mount() {
         | ($mount.source // "") as $source
         | if ($mount | keys) != ["bind", "read_only", "source", "target", "type"] then
              error("Compose media-key mount has unexpected fields")
-          elif ($mount.bind | type) != "object" then
-             error("Compose media-key bind options are invalid")
-          elif ($mount.bind | keys) != [] and
-               (($mount.bind | keys) != ["create_host_path"] or $mount.bind.create_host_path != false) then
+          elif ($mount.bind | type) != "object" or ($mount.bind | approved_media_key_bind | not) then
              error("Compose media-key bind options are invalid")
           elif $mount.type != "bind" or $mount.read_only != true or
-               ($mount.bind.create_host_path // false) != false or
                ($source | startswith("/") | not) or
                (($source | split("/")) | index("..") != null) or
                ($source | contains("\t")) or
@@ -534,6 +545,164 @@ canonical_blob_mode_source() {
   fi
 }
 
+verify_media_key_source_bind_false() {
+  local compose_files_value=${1:-} service_name=${2:-${ROLLOUT_COMPOSE_SERVICE:-teagramd}}
+  local compose_file resolved_source_compose raw_bind_flags source_bind_flags source_result source_count source_approved total_matches=0
+  local -a compose_files
+  [ -n "$compose_files_value" ] || return 1
+  IFS=: read -r -a compose_files <<< "$compose_files_value"
+  [ "${#compose_files[@]}" -gt 0 ] || return 1
+  for compose_file in "${compose_files[@]}"; do
+    [ -n "$compose_file" ] && [ -f "$compose_file" ] && [ ! -L "$compose_file" ] || return 1
+    resolved_source_compose=$(COMPOSE_FILE="$compose_file" docker compose \
+      --project-directory "$ROLLOUT_CHECKOUT_PATH" --file "$compose_file" \
+      config --no-consistency --format json </dev/null 2>/dev/null) || return 1
+    raw_bind_flags=$(awk -v service_name="$service_name" '
+      function trim(value) {
+        sub(/^[[:space:]]+/, "", value)
+        sub(/[[:space:]]+$/, "", value)
+        return value
+      }
+      function close_volume() {
+        if (in_volume) {
+          print (!volume_invalid && bind_count == 1 && create_host_path_count == 1 &&
+                 create_host_path_value == "false") ? "true" : "false"
+        }
+        in_volume = 0
+        item_indent = -1
+        volume_invalid = 0
+        bind_count = 0
+        bind_indent = -1
+        bind_child_indent = -1
+        create_host_path_count = 0
+        create_host_path_value = ""
+      }
+      function parse_entry(text, key_indent, key, value, compact) {
+        if (!match(text, /^[A-Za-z_][A-Za-z0-9_-]*:[[:space:]]*/)) return
+        key = substr(text, 1, index(text, ":") - 1)
+        value = trim(substr(text, index(text, ":") + 1))
+        if (key == "bind") {
+          bind_count++
+          bind_indent = key_indent
+          bind_child_indent = -1
+          if (value != "") {
+            compact = value
+            gsub(/[[:space:]]/, "", compact)
+            if (compact == "{create_host_path:false}") {
+              create_host_path_count++
+              create_host_path_value = "false"
+            } else if (compact == "{create_host_path:true}") {
+              create_host_path_count++
+              create_host_path_value = "true"
+            }
+          }
+          return
+        }
+        if (bind_indent >= 0) {
+          if (key_indent > bind_indent) {
+            if (bind_child_indent < 0) bind_child_indent = key_indent
+            if (key_indent != bind_child_indent || key != "create_host_path") {
+              volume_invalid = 1
+            } else {
+              create_host_path_count++
+              create_host_path_value = trim(value)
+            }
+            return
+          }
+          if (key_indent > item_indent) {
+            bind_indent = -1
+            bind_child_indent = -1
+          }
+        }
+      }
+      {
+        line = $0
+        if (index(line, sprintf("%c", 9)) > 0) {
+          if (in_volume) volume_invalid = 1
+          next
+        }
+        sub(/\r$/, "", line)
+        sub(/[[:space:]]+#.*/, "", line)
+        if (line ~ /^[[:space:]]*$/) next
+        match(line, /[^ ]/)
+        indent = RSTART - 1
+        text = substr(line, RSTART)
+
+        if (in_teagramd && indent <= service_indent) {
+          close_volume()
+          in_volumes = 0
+          in_teagramd = 0
+        }
+        if (in_services && !in_teagramd && indent <= services_indent &&
+            text !~ /^services:[[:space:]]*$/) in_services = 0
+        if (indent == 0 && text ~ /^services:[[:space:]]*$/) {
+          close_volume()
+          in_services = 1
+          services_indent = indent
+          in_teagramd = 0
+          in_volumes = 0
+          next
+        }
+        if (in_services && !in_teagramd && indent > services_indent &&
+            trim(text) == service_name ":") {
+          in_teagramd = 1
+          service_indent = indent
+          next
+        }
+        if (in_teagramd && in_volumes && indent <= volumes_indent) {
+          close_volume()
+          in_volumes = 0
+        }
+        if (in_teagramd && !in_volumes && indent > service_indent &&
+            text ~ /^volumes:[[:space:]]*$/) {
+          in_volumes = 1
+          volumes_indent = indent
+          next
+        }
+        if (in_volumes && indent > volumes_indent && text ~ /^-[[:space:]]*/) {
+          if (in_volume) close_volume()
+          in_volume = 1
+          item_indent = indent
+          rest = text
+          sub(/^-[[:space:]]*/, "", rest)
+          if (rest != "") parse_entry(rest, indent + 2)
+          next
+        }
+        if (in_volume) {
+          if (indent <= item_indent) {
+            close_volume()
+          } else {
+            parse_entry(text, indent)
+            next
+          }
+        }
+      }
+      END { close_volume() }
+    ' "$compose_file") || return 1
+    if [ -n "$raw_bind_flags" ]; then
+      source_bind_flags=$(printf '%s\n' "$raw_bind_flags" | jq -Rsc \
+        'split("\n") | map(select(length > 0) | . == "true")') || return 1
+    else
+      source_bind_flags='[]'
+    fi
+    source_result=$(printf '%s' "$resolved_source_compose" | jq -c \
+      --arg service_name "$service_name" --argjson source_bind_flags "$source_bind_flags" '
+      (.services[$service_name].volumes // []) as $volumes
+      | if ($volumes | type) != "array" or ($volumes | length) != ($source_bind_flags | length) then
+          error("resolved Compose volume order does not match its source")
+        else
+          [$volumes | to_entries[] | select(.value.target == "/run/teagramd/media-keys")] as $matching
+          | {count:($matching | length), source_bind_false:all($matching[]; $source_bind_flags[.key] == true)}
+        end
+    ') || return 1
+    source_count=$(printf '%s' "$source_result" | jq -er '.count') || return 1
+    source_approved=$(printf '%s' "$source_result" | jq -er '.source_bind_false') || return 1
+    [ "$source_approved" = true ] || return 1
+    total_matches=$((total_matches + source_count))
+  done
+  [ "$total_matches" -gt 0 ]
+}
+
 snapshot_from_json() {
   local inspect_json=$1
   local compose_json=$2
@@ -541,6 +710,7 @@ snapshot_from_json() {
   local override_file=$4
   local compose_source=${5:-selected-compose-render}
   local snapshot_name=${6:-}
+  local compose_files_value=${7:-${COMPOSE_FILE:-}}
   local mounts exposure exposure_for_hash resolved_config canonical_compose container_env container_logging_config container_id image_id state exit_code started_at finished_at grace stop_timeout mode_source mode_mount_target compose_logging_policy compose_log_login_codes container_log_login_codes
   local mounts_sha exposure_sha config_sha env_sha override_sha container_env_sha container_logging_sha mount_count
   local compose_replica_count compose_client_addr_trust container_replica_count container_client_addr_trust
@@ -670,7 +840,7 @@ snapshot_from_json() {
     verify_turnstile_container_configuration \
       "$inspect_json" "$compose_json" "$snapshot_name" "$added_env_names" "$changed_env_names" || return 1
     verify_turnstile_secret_mount "$inspect_json" "$compose_json" "$snapshot_name" || return 1
-    verify_media_key_mount "$inspect_json" "$compose_json" "$snapshot_name" || return 1
+    verify_media_key_mount "$inspect_json" "$compose_json" "$snapshot_name" "$compose_files_value" || return 1
   fi
   media_key_source=${MEDIA_KEY_SOURCE_PATH:-unset}
   media_key_current=${MEDIA_KEY_VERSION:-unset}
@@ -1512,7 +1682,7 @@ snapshot_command() {
   else
     compose_json='{}'
   fi
-  snapshot=$(snapshot_from_json "$inspect_json" "$compose_json" "$env_file" "$override_file" "$compose_source" "$name") || { printf '%s\n' 'allowlisted snapshot generation failed' >&2; return 1; }
+  snapshot=$(snapshot_from_json "$inspect_json" "$compose_json" "$env_file" "$override_file" "$compose_source" "$name" "${COMPOSE_FILE:-}") || { printf '%s\n' 'allowlisted snapshot generation failed' >&2; return 1; }
   write_private_file "$output" "$snapshot"
   printf 'snapshot_written=%s container_id=%s image_id=%s\n' "$output" \
     "$(printf '%s' "$snapshot" | jq -r '.container_id')" \

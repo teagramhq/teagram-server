@@ -35,9 +35,8 @@ import (
 // of an older shape is never measured as if it were this one.
 const fixtureVersion = 2
 
-// spec is one fixture size. The large fixture is the account the parent issue
-// defines; the small one is the same account at one hundredth of the data, so
-// the pair shows whether an RPC's cost follows account size.
+// spec is one fixture size. The small fixture uses one hundredth of the large
+// fixture's scalable data, subject to per-account store limits.
 type spec struct {
 	Name          string `json:"name"`
 	Contacts      int    `json:"contacts"`
@@ -76,7 +75,7 @@ func shrink() int {
 func scaled(name string, divisor int) spec {
 	return spec{
 		Name:          name,
-		Contacts:      store.MaxContactsPerUser / divisor,
+		Contacts:      min(10_000/divisor, store.MaxContactsPerUser),
 		Dialogs:       5_000 / divisor,
 		ChatMessages:  1_000_000 / divisor,
 		Subscribers:   100_000 / divisor,
@@ -89,11 +88,11 @@ func scaled(name string, divisor int) spec {
 func TestFixtureContactsRespectStoreLimit(t *testing.T) {
 	small := scaled("1x", 100)
 	large := scaled("100x", 1)
-	if large.Contacts > store.MaxContactsPerUser {
-		t.Fatalf("100x fixture has %d contacts, store limit is %d", large.Contacts, store.MaxContactsPerUser)
+	if want := min(100, store.MaxContactsPerUser); small.Contacts != want {
+		t.Fatalf("1x fixture contacts = %d, want %d", small.Contacts, want)
 	}
-	if small.Contacts*100 != large.Contacts {
-		t.Fatalf("contact scale = %d to %d, want 100x", small.Contacts, large.Contacts)
+	if want := min(10_000, store.MaxContactsPerUser); large.Contacts != want {
+		t.Fatalf("100x fixture contacts = %d, want capped value %d", large.Contacts, want)
 	}
 }
 
@@ -158,6 +157,12 @@ func loadFixture(path string) (fixture, error) {
 // upload path. It is idempotent per fixture: a fixture whose description is
 // already on disk is left alone.
 func TestSeedFixtures(t *testing.T) {
+	for _, s := range fixtures {
+		if s.Contacts > store.MaxContactsPerUser {
+			t.Fatalf("%s fixture has %d contacts, store limit is %d", s.Name, s.Contacts, store.MaxContactsPerUser)
+		}
+	}
+
 	dir := perfDir(t)
 	for _, s := range fixtures {
 		t.Run(s.Name, func(t *testing.T) {

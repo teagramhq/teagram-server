@@ -46,8 +46,9 @@ policy. Required layout and policy:
   requests to `/turnstile/v0/siteverify`. The proxy has no host-published port.
 - Run the demo's Cloudflare Tunnel connector in the demo LXC and route only
   `demo.teagram.io` to `http://127.0.0.1:8080`. The edge container publishes
-  that origin on loopback only. It serves the client discovery document and
-  `/apiws`, returns 404 for `/admin`, and returns 404 for all other paths. For
+  that origin on loopback only. The root returns a plain status message with
+  HTTP 200. The edge serves the client discovery document and `/apiws`, returns
+  404 for `/admin` and all other paths. For
   `/apiws`, Nginx forwards Cloudflare's `CF-Connecting-IP` to the private
   HAProxy service. HAProxy validates that there is exactly one IP address,
   sends it to teagramd in a PROXY-v2 header, and teagramd trusts only HAProxy's
