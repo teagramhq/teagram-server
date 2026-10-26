@@ -122,8 +122,6 @@ TG_PUBLIC_WEBSOCKET_ADVERTISE_ADDR=server.example.test:443
 TG_PUBLIC_REGISTRATION=invite
 TG_PUBLIC_WEBSOCKET_ALLOWED_ORIGINS=https://web.example.test
 TG_PUBLIC_HAPROXY_HOST_PORT=${mixed_ports[4]}
-TG_RATE_LIMIT_KEY_EXCHANGE_IP=1
-TG_RATE_LIMIT_KEY_EXCHANGE_IP_WINDOW=1h
 TG_MIXED_TRUST_SUBNET=${mixed_network_values[0]}
 TG_MIXED_TRUST_PROXY_IP=${mixed_network_values[1]}
 TG_MIXED_TRUST_REPLICA_1_IP=${mixed_network_values[2]}
@@ -249,6 +247,7 @@ services = public["services"]
 base = services["teagramd"]
 proxy = services["public-haproxy"]
 assert base["environment"]["TG_PUBLIC_WEBSOCKET_LISTEN_ADDR"] == ""
+assert base["environment"]["TG_RATE_LIMIT_KEY_EXCHANGE_IP"] == ""
 assert not any(str(port.get("target")) == "2446" for port in base.get("ports", []))
 assert proxy["image"].split("@sha256:")[-1] and "@sha256:" in proxy["image"]
 assert proxy["networks"]["public-ingress"]["ipv4_address"] == "198.18.131.10"
@@ -272,6 +271,7 @@ for name, expected_ip in (("teagramd-public-1", "198.18.132.21"), ("teagramd-pub
     assert environment["TG_WEBSOCKET_LISTEN_ADDR"] == ""
     assert environment["TG_WEBSOCKET_ALLOWED_ORIGINS"] == ""
     assert environment["TG_REPLICA_COUNT"] == "3"
+    assert environment["TG_RATE_LIMIT_KEY_EXCHANGE_IP"] == "1"
     assert replica.get("ports", []) == []
     assert replica["networks"]["public-backend"]["ipv4_address"] == expected_ip
     assert "public-ingress" not in replica["networks"]
