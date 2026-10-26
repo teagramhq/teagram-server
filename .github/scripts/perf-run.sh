@@ -60,7 +60,7 @@ analyze() {
 restore() {
   for f in "${fixtures[@]}"; do
     psql_admin -c "CREATE DATABASE perf_$f"
-    docker exec "$PERF_PG_CONTAINER" pg_restore -U postgres -d "perf_$f" -j 4 --no-owner "/cache/perf_$f.dump"
+    docker exec "$PERF_PG_CONTAINER" pg_restore -U postgres -d "perf_$f" -j 4 --no-owner --no-acl "/cache/perf_$f.dump"
     # Before base_ready copies it, so the copies carry the same statistics.
     analyze "perf_$f"
   done

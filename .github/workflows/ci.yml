@@ -32,6 +32,9 @@ jobs:
       - name: Test Docker Hub mirror routing
         run: python3 .github/scripts/test_docker_image_mirror.py
 
+      - name: Test RPC performance fixture restore ACL handling
+        run: python3 .github/scripts/test_perf_restore.py
+
       - name: Test base image pull retries
         run: python3 .github/scripts/test_pull_base_images.py
 
