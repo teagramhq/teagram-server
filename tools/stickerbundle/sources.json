@@ -13,7 +13,7 @@
       "tag": "v14.0.3",
       "commit": "edfe80f9dc0ca034b8071115c5fd377ce5182905",
       "kind": "twemoji",
-      "license": "CC-BY-4.0",
+      "license": "GPL-3.0-only",
       "license_file": "LICENSE-GRAPHICS",
       "license_marker": "Attribution 4.0 International",
       "attribution": "Graphics by Twitter, Inc. and other contributors.",
