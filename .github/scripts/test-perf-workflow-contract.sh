@@ -38,6 +38,8 @@ missing_snapshot_step="$(query '.jobs."rpc-performance".steps[] | select(.name =
   fail 'the RPC job restore key must include fixture and server setup helpers'
 
 runner_contents="$(<"$runner")"
+[[ "$runner_contents" == *'pg_restore -U postgres -d "perf_$f" -j 4 --no-owner --no-acl "/cache/perf_$f.dump"'* ]] ||
+  fail 'fixture restoration must skip ACLs for cluster roles absent from cached database dumps'
 [[ "$runner_contents" == *"RPC performance fixture seed / infrastructure failure"* ]] ||
   fail 'fixture seed and infrastructure errors need an explicit summary label'
 [[ "$runner_contents" == *"fixture seeder changed; skipping the base comparison"* ]] ||
