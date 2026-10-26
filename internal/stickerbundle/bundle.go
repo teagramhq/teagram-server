@@ -1,4 +1,4 @@
-// Package stickerbundle validates generated, static sticker catalogue bundles.
+// Package stickerbundle validates generated sticker catalogue bundles.
 package stickerbundle
 
 import (
@@ -23,6 +23,7 @@ const (
 	maxShortNameBytes  = 64
 	maxEmojiBytes      = 64
 	maxTitleCharacters = 64
+	maxTGSSize         = 64 << 10
 )
 
 var allowedLicenses = map[string]struct{}{
@@ -48,16 +49,20 @@ type Pack struct {
 	Source      string
 	License     string
 	Attribution string
+	Format      string
 	Stickers    []Sticker
 }
 
-// Sticker describes one WebP file in the bundle.
+// Sticker describes one validated file in the bundle.
 type Sticker struct {
-	Emoji  string
-	File   string
-	Path   string
-	Size   int64
-	SHA256 [sha256.Size]byte
+	Emoji    string
+	File     string
+	Path     string
+	Size     int64
+	SHA256   [sha256.Size]byte
+	Format   string
+	MimeType string
+	Animated bool
 }
 
 type manifest struct {
@@ -70,6 +75,7 @@ type manifestPack struct {
 	Source      string            `json:"source"`
 	License     string            `json:"license"`
 	Attribution string            `json:"attribution"`
+	Format      string            `json:"format,omitempty"`
 	Stickers    []manifestSticker `json:"stickers"`
 }
 
@@ -174,6 +180,13 @@ func loadPack(root string, raw manifestPack) (Pack, error) {
 		Source:      raw.Source,
 		License:     raw.License,
 		Attribution: raw.Attribution,
+		Format:      raw.Format,
+	}
+	if pack.Format == "" {
+		pack.Format = "webp"
+	}
+	if pack.Format != "webp" && pack.Format != "tgs" {
+		return Pack{}, fmt.Errorf("sticker bundle pack %q has unsupported format %q", pack.ShortName, pack.Format)
 	}
 	if !validShortName(pack.ShortName) {
 		return Pack{}, fmt.Errorf("sticker bundle pack %q has an invalid short name", pack.ShortName)
@@ -199,7 +212,7 @@ func loadPack(root string, raw manifestPack) (Pack, error) {
 	}
 	pack.Stickers = make([]Sticker, 0, len(raw.Stickers))
 	for _, rawSticker := range raw.Stickers {
-		sticker, err := loadSticker(root, pack.ShortName, rawSticker)
+		sticker, err := loadSticker(root, pack.ShortName, pack.Format, rawSticker)
 		if err != nil {
 			return Pack{}, err
 		}
@@ -221,15 +234,21 @@ func displayLicense(license string) string {
 	}
 }
 
-func loadSticker(root, shortName string, raw manifestSticker) (Sticker, error) {
+func loadSticker(root, shortName, format string, raw manifestSticker) (Sticker, error) {
 	if !validText(raw.Emoji) || strings.TrimSpace(raw.Emoji) != raw.Emoji || len(raw.Emoji) > maxEmojiBytes {
 		return Sticker{}, fmt.Errorf("sticker bundle pack %q has an invalid sticker emoji", shortName)
 	}
 	if !fs.ValidPath(raw.File) || strings.Contains(raw.File, "\\") || !filepath.IsLocal(filepath.FromSlash(raw.File)) {
 		return Sticker{}, fmt.Errorf("sticker bundle pack %q sticker %q has an unsafe file path", shortName, raw.Emoji)
 	}
+	if filepath.Ext(raw.File) != "."+format {
+		return Sticker{}, fmt.Errorf("sticker bundle pack %q sticker %q file extension does not match %s format", shortName, raw.Emoji, format)
+	}
 	if raw.Size <= 0 {
 		return Sticker{}, fmt.Errorf("sticker bundle pack %q sticker %q has invalid size %d", shortName, raw.Emoji, raw.Size)
+	}
+	if format == "tgs" && raw.Size > maxTGSSize {
+		return Sticker{}, fmt.Errorf("sticker bundle pack %q sticker %q TGS size %d exceeds %d bytes", shortName, raw.Emoji, raw.Size, maxTGSSize)
 	}
 	checksum, err := hex.DecodeString(raw.SHA256)
 	if err != nil || len(checksum) != sha256.Size {
@@ -249,7 +268,7 @@ func loadSticker(root, shortName string, raw manifestSticker) (Sticker, error) {
 	if err != nil {
 		return Sticker{}, fmt.Errorf("sticker bundle pack %q sticker %q open file: %w", shortName, raw.Emoji, err)
 	}
-	sticker, validateErr := validateStickerFile(file, canonicalPath, shortName, raw, expected)
+	sticker, validateErr := validateStickerFile(file, canonicalPath, shortName, format, raw, expected)
 	closeErr := file.Close()
 	if validateErr != nil || closeErr != nil {
 		return Sticker{}, errors.Join(validateErr, wrapCloseError(fmt.Sprintf("sticker bundle pack %q sticker %q close file", shortName, raw.Emoji), closeErr))
@@ -264,7 +283,7 @@ func wrapCloseError(context string, err error) error {
 	return fmt.Errorf("%s: %w", context, err)
 }
 
-func validateStickerFile(file *os.File, canonicalPath, shortName string, raw manifestSticker, expected [sha256.Size]byte) (Sticker, error) {
+func validateStickerFile(file *os.File, canonicalPath, shortName, format string, raw manifestSticker, expected [sha256.Size]byte) (Sticker, error) {
 	info, err := file.Stat()
 	if err != nil {
 		return Sticker{}, fmt.Errorf("sticker bundle pack %q sticker %q inspect file: %w", shortName, raw.Emoji, err)
@@ -276,11 +295,22 @@ func validateStickerFile(file *os.File, canonicalPath, shortName string, raw man
 		return Sticker{}, fmt.Errorf("sticker bundle pack %q sticker %q size is %d, manifest says %d", shortName, raw.Emoji, info.Size(), raw.Size)
 	}
 	var header [12]byte
-	if _, err := io.ReadFull(file, header[:]); err != nil {
-		return Sticker{}, fmt.Errorf("sticker bundle pack %q sticker %q read WebP header: %w", shortName, raw.Emoji, err)
+	headerSize := 12
+	if format == "tgs" {
+		headerSize = 2
 	}
-	if string(header[:4]) != "RIFF" || string(header[8:]) != "WEBP" {
-		return Sticker{}, fmt.Errorf("sticker bundle pack %q sticker %q is not a WebP file", shortName, raw.Emoji)
+	if _, err := io.ReadFull(file, header[:headerSize]); err != nil {
+		return Sticker{}, fmt.Errorf("sticker bundle pack %q sticker %q read %s header: %w", shortName, raw.Emoji, format, err)
+	}
+	switch format {
+	case "webp":
+		if string(header[:4]) != "RIFF" || string(header[8:]) != "WEBP" {
+			return Sticker{}, fmt.Errorf("sticker bundle pack %q sticker %q is not a WebP file", shortName, raw.Emoji)
+		}
+	case "tgs":
+		if header[0] != 0x1f || header[1] != 0x8b {
+			return Sticker{}, fmt.Errorf("sticker bundle pack %q sticker %q is not a gzip-compressed TGS file", shortName, raw.Emoji)
+		}
 	}
 	if _, err := file.Seek(0, io.SeekStart); err != nil {
 		return Sticker{}, fmt.Errorf("sticker bundle pack %q sticker %q rewind file: %w", shortName, raw.Emoji, err)
@@ -296,7 +326,16 @@ func validateStickerFile(file *os.File, canonicalPath, shortName string, raw man
 	if !equalChecksum(digest.Sum(nil), expected[:]) {
 		return Sticker{}, fmt.Errorf("sticker bundle pack %q sticker %q checksum does not match manifest", shortName, raw.Emoji)
 	}
-	return Sticker{Emoji: raw.Emoji, File: raw.File, Path: canonicalPath, Size: raw.Size, SHA256: expected}, nil
+	mimeType := "image/webp"
+	animated := false
+	if format == "tgs" {
+		mimeType = "application/x-tgsticker"
+		animated = true
+	}
+	return Sticker{
+		Emoji: raw.Emoji, File: raw.File, Path: canonicalPath, Size: raw.Size, SHA256: expected,
+		Format: format, MimeType: mimeType, Animated: animated,
+	}, nil
 }
 
 func validShortName(value string) bool {
