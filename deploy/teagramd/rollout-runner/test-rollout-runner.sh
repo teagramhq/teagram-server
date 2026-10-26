@@ -3413,7 +3413,7 @@ if [ "$status" = 0 ] && grep -q "rollout=verified sha=$APPLY_TARGET_SHA" \
      "$root.baseline/env-baseline.txt" && \
    [ "$(jq -r '.container_env_changed' "$root.target/target.snapshot.json")" = TG_RATE_LIMIT_KEY_EXCHANGE_IP_TAILNET ] && \
    grep -q $'preflight\tconfig_sha256\t.*\tpass' "$root.target/preflight-comparisons.tsv" && \
-   grep -q $'target\tcontainer_env_sha256\t.*\tpass' "$root.target/target-comparisons.tsv" && \
+   grep -q $'\tcontainer_env_sha256\t.*\tpass' "$root.target/target-comparisons.tsv" && \
    grep -qx "env_sha256=$current_env_sha source_sha=$APPLY_TARGET_SHA" "$checkout/.state/rollout-env"; then
   pass 'named tailnet limit changes verify the configured value and preserve remaining rollout digests'
 else
