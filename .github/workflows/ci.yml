@@ -17,6 +17,8 @@ concurrency:
 env:
   TESTCONTAINERS_HUB_IMAGE_NAME_PREFIX: mirror.gcr.io
 
+# PR runs can restore default-branch cache scopes. Keep large Go and BuildKit
+# snapshots on main instead of creating a separate copy for every PR.
 jobs:
   lint:
     name: lint
@@ -40,6 +42,9 @@ jobs:
 
       - name: Test Playwright apt retry cache
         run: python3 .github/scripts/test_playwright_apt_cache.py
+
+      - name: Test Actions cache write policy
+        run: python3 .github/scripts/test_actions_cache_policy.py
 
       - uses: actions/setup-go@v7.0.0
         with:
@@ -380,12 +385,10 @@ jobs:
       - name: Pin migration timestamps for the test cache
         run: touch -d @0 migrations/* migrations
 
-      # cache: false because setup-go keys its cache on go.sum alone and saves
-      # only when that key missed. A run that changed no dependency therefore
-      # restores $GOCACHE and never writes it back, so the test results Go
-      # recorded during the run are discarded and the next run re-runs
-      # everything. The two steps below split the two caches and give the build
-      # cache a key that always misses, so it is always saved.
+      # Split module and build caches so module data follows go.sum while the
+      # build/test snapshot is refreshed each main run. PRs can restore the
+      # default-branch snapshot without saving another large copy under their
+      # own ref.
       - uses: actions/setup-go@v7.0.0
         with:
           go-version-file: go.mod
@@ -401,17 +404,11 @@ jobs:
           key: go-mod-${{ runner.os }}-${{ hashFiles('**/go.sum') }}
           restore-keys: go-mod-${{ runner.os }}-
 
-      # $GOCACHE holds both compiled packages and Go's test result cache, and it
-      # is only useful if it comes back richer than it went in. run_id/run_attempt
-      # make the primary key miss on every run, which is what forces the save; the
-      # restore key then loads the newest cache for this go.sum. run_attempt is in
-      # there because a re-run of the same run keeps its run_id, and without it a
-      # re-run would hit its own key and save nothing.
-      #
-      # The cache grows by one entry per run. GitHub evicts by age and by the
-      # 10 GB repository limit, so it is self-trimming.
-      - name: Cache Go build and test results
-        uses: actions/cache@v6.1.0
+      # The run-specific key makes the restore miss exactly and load the newest
+      # cache for this go.sum through the prefix. Only main saves the richer
+      # snapshot produced by this run.
+      - name: Restore Go build and test results
+        uses: actions/cache/restore@v6.1.0
         with:
           path: ~/.cache/go-build
           key: go-build-${{ runner.os }}-${{ hashFiles('**/go.sum') }}-${{ github.run_id }}-${{ github.run_attempt }}
@@ -569,7 +566,7 @@ jobs:
           tags: quay.io/minio/minio:latest
           load: true
           cache-from: type=gha,scope=minio-test
-          cache-to: type=gha,scope=minio-test,mode=max
+          cache-to: ${{ github.ref == 'refs/heads/main' && 'type=gha,scope=minio-test,mode=max' || '' }}
 
       - name: Measure flat parts directory ceiling
         run: PARTS_DIR_CEILING_PROBE=1 go test -count=1 -timeout 30m ./internal/blob/ -run TestFlatPartsDirEntryCeiling -v
@@ -600,6 +597,13 @@ jobs:
           docker inspect -f '{{.State.Status}} exit={{.State.ExitCode}} oomkilled={{.State.OOMKilled}} error={{.State.Error}}' tg-test-pg || echo "container gone"
           docker logs --tail 50 tg-test-pg 2>&1 || true
           free -m
+
+      - name: Save Go build and test results
+        if: ${{ success() && github.ref == 'refs/heads/main' }}
+        uses: actions/cache/save@v6.1.0
+        with:
+          path: ~/.cache/go-build
+          key: go-build-${{ runner.os }}-${{ hashFiles('**/go.sum') }}-${{ github.run_id }}-${{ github.run_attempt }}
 
   real-server-fixtures:
     runs-on: ubuntu-26.04
@@ -1078,7 +1082,7 @@ jobs:
             org.opencontainers.image.source=https://github.com/teagramhq/teagram-server
             org.opencontainers.image.revision=${{ github.sha }}
           cache-from: type=gha,scope=teagram-demo-image
-          cache-to: type=gha,scope=teagram-demo-image,mode=max
+          cache-to: ${{ github.ref == 'refs/heads/main' && 'type=gha,scope=teagram-demo-image,mode=max' || '' }}
 
       - name: Save tested demo image digest
         env:
@@ -1633,7 +1637,7 @@ jobs:
           build-args: |
             TEAGRAMD_SOURCE_REVISION=${{ github.sha }}
           cache-from: type=gha
-          cache-to: type=gha,mode=max
+          cache-to: ${{ github.ref == 'refs/heads/main' && 'type=gha,mode=max' || '' }}
 
       - name: Show image
         run: docker images teagramd:ci
@@ -1799,7 +1803,7 @@ jobs:
           build-args: |
             TEAGRAMD_SOURCE_REVISION=${{ github.sha }}
           cache-from: type=gha
-          cache-to: type=gha,mode=max
+          cache-to: ${{ github.ref == 'refs/heads/main' && 'type=gha,mode=max' || '' }}
 
       - name: Assert Compose image revision label
         run: |
@@ -1861,7 +1865,7 @@ jobs:
           tags: teagramd-mc-init:local
           load: true
           cache-from: type=gha,scope=teagramd-mc-init
-          cache-to: type=gha,scope=teagramd-mc-init,mode=max
+          cache-to: ${{ github.ref == 'refs/heads/main' && 'type=gha,scope=teagramd-mc-init,mode=max' || '' }}
 
       - name: Verify RustFS client image
         run: docker run --rm --entrypoint /bin/sh teagramd-mc-init:local -ec 'command -v mc && mc --version'
