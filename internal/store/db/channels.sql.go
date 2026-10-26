@@ -223,6 +223,68 @@ func (q *Queries) ChannelDeliverySnapshot(ctx context.Context, channelID int64) 
 	return items, nil
 }
 
+const channelDeliverySnapshotForUsers = `-- name: ChannelDeliverySnapshotForUsers :many
+SELECT participant.channel_id, participant.user_id, participant.role, participant.banned_until, participant.join_pts, participant.date, participant.last_post_at, participant.admin_change_info, participant.available_min_id, state.pts
+FROM channel_participants AS participant
+JOIN channel_state AS state ON state.channel_id = participant.channel_id
+WHERE participant.channel_id = $1::bigint
+  AND participant.user_id = ANY($2::bigint[])
+ORDER BY participant.user_id
+`
+
+type ChannelDeliverySnapshotForUsersParams struct {
+	ChannelID int64
+	UserIds   []int64
+}
+
+type ChannelDeliverySnapshotForUsersRow struct {
+	ChannelID       int64
+	UserID          int64
+	Role            int16
+	BannedUntil     pgtype.Timestamptz
+	JoinPts         int64
+	Date            pgtype.Timestamptz
+	LastPostAt      pgtype.Timestamptz
+	AdminChangeInfo bool
+	AvailableMinID  int64
+	Pts             int64
+}
+
+// ChannelDeliverySnapshotForUsers keeps the membership and event ceiling in
+// one statement snapshot while restricting work to accounts connected here.
+// Membership remains the authorization source; the user IDs only bound the
+// candidate set to connections that can receive a live push on this replica.
+func (q *Queries) ChannelDeliverySnapshotForUsers(ctx context.Context, arg ChannelDeliverySnapshotForUsersParams) ([]ChannelDeliverySnapshotForUsersRow, error) {
+	rows, err := q.db.Query(ctx, channelDeliverySnapshotForUsers, arg.ChannelID, arg.UserIds)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ChannelDeliverySnapshotForUsersRow
+	for rows.Next() {
+		var i ChannelDeliverySnapshotForUsersRow
+		if err := rows.Scan(
+			&i.ChannelID,
+			&i.UserID,
+			&i.Role,
+			&i.BannedUntil,
+			&i.JoinPts,
+			&i.Date,
+			&i.LastPostAt,
+			&i.AdminChangeInfo,
+			&i.AvailableMinID,
+			&i.Pts,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const channelDialogsForUser = `-- name: ChannelDialogsForUser :many
 SELECT
     c.id AS channel_id,

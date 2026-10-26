@@ -14,6 +14,7 @@ SMOKE_SCENARIOS=(
   profile-photo-upload
   profile-bio
   upload-media
+  upload-app-config-byte-limit
   saved-gifs
   saved-gifs-client-request-fixtures
   album-media

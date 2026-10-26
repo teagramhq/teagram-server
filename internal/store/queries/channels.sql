@@ -137,6 +137,18 @@ JOIN channel_state AS state ON state.channel_id = participant.channel_id
 WHERE participant.channel_id = $1
 ORDER BY participant.user_id;
 
+-- ChannelDeliverySnapshotForUsers keeps the membership and event ceiling in
+-- one statement snapshot while restricting work to accounts connected here.
+-- Membership remains the authorization source; the user IDs only bound the
+-- candidate set to connections that can receive a live push on this replica.
+-- name: ChannelDeliverySnapshotForUsers :many
+SELECT participant.*, state.pts
+FROM channel_participants AS participant
+JOIN channel_state AS state ON state.channel_id = participant.channel_id
+WHERE participant.channel_id = sqlc.arg(channel_id)::bigint
+  AND participant.user_id = ANY(sqlc.arg(user_ids)::bigint[])
+ORDER BY participant.user_id;
+
 -- name: ChannelParticipantByUser :one
 SELECT * FROM channel_participants WHERE channel_id = $1 AND user_id = $2;
 

@@ -453,6 +453,17 @@ func (r *SessionRegistry) Conns(userID int64) []*Conn {
 	return out
 }
 
+// LiveUserIDs returns a detached snapshot of accounts with live connections.
+func (r *SessionRegistry) LiveUserIDs() []int64 {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	ids := make([]int64, 0, len(r.m))
+	for userID := range r.m {
+		ids = append(ids, userID)
+	}
+	return ids
+}
+
 // TotalConns returns the total number of live connections across all users.
 func (r *SessionRegistry) TotalConns() int {
 	return int(r.totalConns.Load())

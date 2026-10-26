@@ -750,12 +750,13 @@ func (h *handlers) buildUpdateBatch(ctx context.Context, userID int64, fromPts i
 	return b, nil
 }
 
-// batchMessages loads, once per distinct local id, the message rows the batch's
-// events name, keyed by local id. A row that has since vanished is absent, which
-// is the same skip its per-event lookup used to produce. Loading them up front is
-// what lets the batch's media be hydrated in a single query.
+// batchMessages loads, in one statement, the message rows the batch's events
+// name, keyed by local id. A row that has since vanished is absent, which is the
+// same skip its per-event lookup used to produce. Loading them up front is what
+// lets the batch's media be hydrated in a single query.
 func (h *handlers) batchMessages(ctx context.Context, userID int64, events []store.Event) (map[int64]store.Message, error) {
-	msgs := make(map[int64]store.Message, len(events))
+	seen := make(map[int64]bool, len(events))
+	localIDs := make([]int64, 0, len(events))
 	for _, ev := range events {
 		switch ev.Type {
 		case store.EventNewMessage, store.EventEdit, store.EventReadIn, store.EventReadOut, store.EventPin, store.EventUnpin:
@@ -765,19 +766,13 @@ func (h *handlers) batchMessages(ctx context.Context, userID int64, events []sto
 		if ev.LocalID == 0 {
 			continue
 		}
-		if _, done := msgs[ev.LocalID]; done {
+		if seen[ev.LocalID] {
 			continue
 		}
-		m, ok, err := h.store.MessageByOwnerLocal(ctx, userID, ev.LocalID)
-		if err != nil {
-			return nil, err
-		}
-		if !ok {
-			continue
-		}
-		msgs[ev.LocalID] = m
+		seen[ev.LocalID] = true
+		localIDs = append(localIDs, ev.LocalID)
 	}
-	return msgs, nil
+	return h.store.MessagesByOwnerLocalIDs(ctx, userID, localIDs)
 }
 
 // eventToUpdate builds the wire update for one event owned by userID, returning
