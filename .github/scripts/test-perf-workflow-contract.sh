@@ -46,4 +46,38 @@ postgres_contents="$(<"$postgres")"
 [[ "$postgres_contents" == *"pg_isready -h 127.0.0.1 -U postgres -q"* ]] ||
   fail 'Postgres readiness must wait for the TCP listener used by the workflow'
 
+mock_dir="$(mktemp -d)"
+trap 'rm -rf "$mock_dir"' EXIT
+cat >"$mock_dir/docker" <<'MOCK_DOCKER'
+#!/usr/bin/env bash
+set -euo pipefail
+[[ "${1:-}" == exec ]] || exit 64
+shift
+[[ -n "${1:-}" ]] || exit 64
+shift
+command="${1:-}"
+shift || true
+case "$command" in
+  psql)
+    sql=""
+    for arg in "$@"; do sql="$arg"; done
+    printf 'psql\t%s\n' "$sql" >>"${PERF_DOCKER_EVENTS:?}"
+    ;;
+  pg_restore|vacuumdb)
+    printf '%s\t%s\n' "$command" "$*" >>"${PERF_DOCKER_EVENTS:?}"
+    ;;
+  *) exit 64 ;;
+esac
+MOCK_DOCKER
+chmod +x "$mock_dir/docker"
+events="$mock_dir/events"
+PERF_DOCKER_EVENTS="$events" PATH="$mock_dir:$PATH" \
+  PERF_PG_CONTAINER=perf-pg PERF_PG_URL=postgres://postgres:perf@localhost:5432/ \
+  PERF_CACHE="$mock_dir/cache" RUNNER_TEMP="$mock_dir" \
+  bash "$runner" restore
+role_line="$(grep -n $'^psql\t.*CREATE ROLE browser_acceptance_probe NOLOGIN' "$events" | head -n1 | cut -d: -f1 || true)"
+restore_line="$(grep -n $'^pg_restore\t' "$events" | head -n1 | cut -d: -f1 || true)"
+[[ -n "$role_line" && -n "$restore_line" && "$role_line" -lt "$restore_line" ]] ||
+  fail 'fixture restore must provision the cached dump role before pg_restore'
+
 printf 'RPC performance workflow contract holds\n'

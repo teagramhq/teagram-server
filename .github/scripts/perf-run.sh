@@ -78,6 +78,9 @@ analyze() {
 }
 
 restore() {
+  # Database dumps include ACLs, but the cluster-wide probe role is not in them.
+  psql_admin -c "CREATE ROLE browser_acceptance_probe NOLOGIN" ||
+    fatal "create the role required by the fixture snapshot"
   for f in "${fixtures[@]}"; do
     psql_admin -c "CREATE DATABASE perf_$f" || fatal "create the $f fixture database"
     docker exec "$PERF_PG_CONTAINER" pg_restore -U postgres -d "perf_$f" -j 4 --no-owner "/cache/perf_$f.dump" ||
