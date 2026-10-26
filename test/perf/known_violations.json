@@ -13,6 +13,5 @@
   {"scenario": "updates.getDifference 1 day offline", "check": "rows", "issue": "MAIN-2580"},
   {"scenario": "updates.getDifference 30 days offline", "check": "seqscan", "issue": "MAIN-2580", "scan": "dialogs#7749668c"},
   {"scenario": "updates.getDifference 30 days offline", "check": "rows", "issue": "MAIN-2580"},
-  {"scenario": "messages.readHistory", "check": "rows", "issue": "MAIN-2540"},
   {"scenario": "contacts.importContacts 5000", "check": "error", "issue": "MAIN-2541"}
 ]

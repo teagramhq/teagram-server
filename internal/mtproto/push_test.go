@@ -27,6 +27,16 @@ type fakeConn struct {
 	block   chan struct{}
 }
 
+type signalingEncoder struct {
+	entered chan<- struct{}
+	inner   bin.Encoder
+}
+
+func (e signalingEncoder) Encode(b *bin.Buffer) error {
+	e.entered <- struct{}{}
+	return e.inner.Encode(b)
+}
+
 func (f *fakeConn) Send(_ context.Context, _ *bin.Buffer) error {
 	if f.block != nil {
 		f.entered <- struct{}{}
@@ -499,6 +509,107 @@ func TestSendResultAndMarkRPCUpdate(t *testing.T) {
 	}
 	if got := c.LastPushedPts(); got != 5 {
 		t.Fatalf("watermark = %d, want 5 after successful result", got)
+	}
+}
+
+func TestSendResultAndSetPushWatermarkAfterSuccess(t *testing.T) {
+	t.Parallel()
+	key := testKey(t)
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	c := mtproto.NewTestConn(&fakeConn{entered: entered, block: release}, key)
+	c.SetOwner(7)
+	keyID := mtproto.AuthKeyIDInt64(key.ID)
+	result := make(chan error, 1)
+	go func() {
+		result <- c.SendResultAndSetPushWatermark(
+			&mtproto.Request{Ctx: context.Background(), MsgID: 3},
+			&mt.Pong{PingID: 3}, 7, keyID, 10,
+		)
+	}()
+	<-entered
+	if got := c.LastPushedPts(); got != 0 {
+		t.Fatalf("watermark during result write = %d, want 0", got)
+	}
+	close(release)
+	if err := <-result; err != nil {
+		t.Fatalf("send result and set watermark: %v", err)
+	}
+	if got := c.LastPushedPts(); got != 10 {
+		t.Fatalf("watermark = %d, want state pts 10 after successful result", got)
+	}
+
+	later := mtproto.NewTestConn(&fakeConn{}, key)
+	later.SetOwner(7)
+	if !later.MarkRPCUpdate(7, keyID, 11) {
+		t.Fatal("seed a newer pushed event")
+	}
+	if err := later.SendResultAndSetPushWatermark(
+		&mtproto.Request{Ctx: context.Background(), MsgID: 4},
+		&mt.Pong{PingID: 4}, 7, keyID, 10,
+	); err != nil {
+		t.Fatalf("send older state result: %v", err)
+	}
+	if got := later.LastPushedPts(); got != 11 {
+		t.Fatalf("older state regressed watermark to %d, want 11", got)
+	}
+}
+
+func TestPushDeliveryBarrierBlocksAndRejectsStaleBatch(t *testing.T) {
+	t.Parallel()
+	key := testKey(t)
+	fc := &fakeConn{}
+	c := mtproto.NewTestConn(fc, key)
+	c.SetOwner(7)
+	keyID := mtproto.AuthKeyIDInt64(key.ID)
+
+	release := c.BeginPushDeliveryBarrier()
+	var releaseOnce sync.Once
+	unlock := func() { releaseOnce.Do(release) }
+	defer unlock()
+	encoded := make(chan struct{}, 1)
+	started := make(chan struct{})
+	pushResult := make(chan struct {
+		pushed bool
+		stale  bool
+		err    error
+	}, 1)
+	go func() {
+		close(started)
+		pushed, stale, err := c.PushToAtWatermark(
+			context.Background(), 7, 0,
+			signalingEncoder{entered: encoded, inner: &mt.Pong{PingID: 1}}, 1,
+		)
+		pushResult <- struct {
+			pushed bool
+			stale  bool
+			err    error
+		}{pushed: pushed, stale: stale, err: err}
+	}()
+	<-started
+	select {
+	case <-encoded:
+		t.Fatal("push encoded while the state snapshot barrier was held")
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	if err := c.SendResultAndSetPushWatermark(
+		&mtproto.Request{Ctx: context.Background(), MsgID: 2},
+		&mt.Pong{PingID: 2}, 7, keyID, 10,
+	); err != nil {
+		t.Fatalf("send state result: %v", err)
+	}
+	unlock()
+
+	result := <-pushResult
+	if result.err != nil {
+		t.Fatalf("push after state result: %v", result.err)
+	}
+	if result.pushed || !result.stale {
+		t.Fatalf("push result = pushed:%v stale:%v, want false:true", result.pushed, result.stale)
+	}
+	if got := fc.writes(); got != 1 {
+		t.Fatalf("transport writes = %d, want only the state result", got)
 	}
 }
 
