@@ -2,6 +2,7 @@ package store_test
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"sync"
 	"testing"
@@ -86,5 +87,39 @@ func TestMaxChannelParticipantsOptionBoundsAdmission(t *testing.T) {
 	}
 	if len(added) != 1 || added[0] != a.ID {
 		t.Fatalf("added = %v, want only %d under a two-seat bound", added, a.ID)
+	}
+}
+
+func TestMaxContactsPerUserOptionBoundsAdmission(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	s, err := store.Open(ctx, pgtest.DSN(t), pgtest.EncKey(), store.WithoutBlobStore(), store.WithMaxContactsPerUser(2))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := s.Close(); err != nil {
+			t.Error(err)
+		}
+	})
+	owner, err := s.CreateUser(ctx, "+15553330101")
+	if err != nil {
+		t.Fatal(err)
+	}
+	contacts := make([]int64, 3)
+	for i, phone := range []string{"+15553330102", "+15553330103", "+15553330104"} {
+		user, err := s.CreateUser(ctx, phone)
+		if err != nil {
+			t.Fatal(err)
+		}
+		contacts[i] = user.ID
+	}
+	for _, contactID := range contacts[:2] {
+		if changed, err := s.AddContact(ctx, owner.ID, contactID); err != nil || !changed {
+			t.Fatalf("add contact %d: changed=%v err=%v", contactID, changed, err)
+		}
+	}
+	if changed, err := s.AddContact(ctx, owner.ID, contacts[2]); changed || !errors.Is(err, store.ErrContactLimit) {
+		t.Fatalf("third contact: changed=%v err=%v, want ErrContactLimit", changed, err)
 	}
 }

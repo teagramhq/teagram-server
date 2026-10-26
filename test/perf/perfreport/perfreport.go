@@ -171,6 +171,9 @@ type Row struct {
 	Band   float64
 	Runs   int
 	Failed bool
+	// MeasurementFailed marks RPC, report, or query-plan failures that are not
+	// performance regressions.
+	MeasurementFailed bool
 	// Reported is set when a timing check missed while uncalibrated.
 	Reported bool
 	// Known lists the issues of the waived failures on this row.
@@ -284,6 +287,9 @@ func Evaluate(in Input) Verdict {
 					v.Waived = append(v.Waived, f)
 					return
 				}
+			}
+			if check == CheckError || check == CheckUnexplained || check == checkMissing {
+				row.MeasurementFailed = true
 			}
 			switch {
 			case !timing(check):
@@ -526,6 +532,9 @@ func Markdown(v Verdict) string {
 		}
 		if row.Failed {
 			status = "**FAIL**"
+			if row.MeasurementFailed {
+				status = "**ERROR**"
+			}
 			if len(row.Known) > 0 {
 				status += " (known: " + strings.Join(row.Known, ", ") + ")"
 			}
@@ -561,10 +570,20 @@ func Markdown(v Verdict) string {
 		}
 		fmt.Fprintf(&b, "\n%s (%d):\n\n", title, len(fs))
 		for _, f := range fs {
-			fmt.Fprintf(&b, "- `%s`: %s\n", f.Scenario, f.Reason)
+			fmt.Fprintf(&b, "- `%s` (`%s`): %s\n", f.Scenario, f.Check, f.Reason)
 		}
 	}
-	list("Failed checks", v.Failures)
+	var performanceFailures, measurementFailures []Failure
+	for _, f := range v.Failures {
+		switch f.Check {
+		case CheckError, CheckUnexplained, checkMissing:
+			measurementFailures = append(measurementFailures, f)
+		default:
+			performanceFailures = append(performanceFailures, f)
+		}
+	}
+	list("Performance regressions", performanceFailures)
+	list("RPC or harness failures", measurementFailures)
 	list("Failed timing checks", v.TimingFailures)
 	list("Timing findings, reported until calibrated", v.Reported)
 	if len(v.Waived) > 0 {
