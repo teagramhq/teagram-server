@@ -100,6 +100,9 @@ jobs:
           # same job.
           fetch-depth: 0
 
+      - name: Check Postgres readiness probe
+        run: bash .github/scripts/test-perf-postgres-readiness.sh
+
       - name: Restore the snapshot
         id: snapshot
         uses: actions/cache/restore@v6.1.0
