@@ -78,6 +78,12 @@ analyze() {
 }
 
 restore() {
+  # pg_dump stores ACLs but not cluster roles. Provision the role referenced
+  # by the fixture migrations before pg_restore replays those ACLs.
+  if [ "$(psql_admin -c "SELECT EXISTS (SELECT 1 FROM pg_catalog.pg_roles WHERE rolname = 'browser_acceptance_probe')")" != t ]; then
+    psql_admin -c "CREATE ROLE browser_acceptance_probe"
+  fi
+  psql_admin -c "ALTER ROLE browser_acceptance_probe LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOREPLICATION NOBYPASSRLS"
   for f in "${fixtures[@]}"; do
     psql_admin -c "CREATE DATABASE perf_$f" || fatal "create the $f fixture database"
     docker exec "$PERF_PG_CONTAINER" pg_restore -U postgres -d "perf_$f" -j 4 --no-owner "/cache/perf_$f.dump" ||
