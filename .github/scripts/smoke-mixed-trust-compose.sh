@@ -640,7 +640,8 @@ if [ "$public_haproxy_health" != healthy ]; then
 fi
 
 public_config="$work_dir/public-client-config.json"
-compose_public run --rm --no-deps -T teagramd-public-1 client-config > "$public_config"
+# Reuse the running replica; `run` would request its already-assigned static IP.
+compose_public exec -T teagramd-public-1 /usr/local/bin/teagramd client-config > "$public_config"
 start_hold websocket "127.0.0.1:${mixed_ports[4]}" "$work_dir/public-ws-a.log" \
 	--config "$public_config" --origin https://web.example.test --cf-connecting-ip 203.0.113.10
 public_ws_pid_a=$started_hold_pid
