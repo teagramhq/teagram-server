@@ -127,6 +127,10 @@ func TestSmoke(t *testing.T) {
 		t.Parallel()
 		testSmokeUploadMedia(t)
 	})
+	t.Run("upload-app-config-byte-limit", func(t *testing.T) {
+		t.Parallel()
+		testSmokeUploadAppConfigByteLimit(t)
+	})
 	t.Run("saved-gifs", func(t *testing.T) {
 		t.Parallel()
 		testSmokeSavedGIFs(t)
@@ -5047,10 +5051,12 @@ func smokeReservedUsernameSignUp(f *smokeFixture, username, pendingPhone string)
 func testSmokeUsernameRegistration(t *testing.T) {
 	t.Helper()
 	const username, pendingPhone, password, welcomeHandle = "smokenewacct", "+15551049003", "smoke-password-1049", "smokewelcome"
+	const signUpTerms = "Terms for this self-hosted smoke instance."
 	var welcomeChannelID int64
 	var welcomeLatestMessageID int64
 	f := newSmokeFixtureWithSetup(t, config.RegistrationOpen, func(f *smokeFixture) {
 		f.welcomeChannel = welcomeHandle
+		f.signUpTermsOfService = signUpTerms
 		owner, err := f.store.CreateUser(f.ctx, "+15551049005")
 		if err != nil {
 			t.Fatalf("create welcome channel owner: %v", err)
@@ -5129,11 +5135,21 @@ func testSmokeUsernameRegistration(t *testing.T) {
 
 		response, err := signInUsername(ctx, api, username, codeHash, code)
 		if err != nil {
-			if !isSignUpRequired(err) {
-				return smokeRegistrationStepFailure(branchSignupSignIn, err)
-			}
-		} else if _, ok := response.(*tg.AuthAuthorizationSignUpRequired); !ok {
+			return smokeRegistrationStepFailure(branchSignupSignIn, err)
+		}
+		signUpRequired, ok := response.(*tg.AuthAuthorizationSignUpRequired)
+		if !ok {
 			return smokeRegistrationCheckFailure(branchSignupSignInResponse, fmt.Sprintf("%T", response))
+		}
+		terms, ok := signUpRequired.GetTermsOfService()
+		if !ok {
+			return smokeRegistrationCheckFailure(branchSignupSignInResponse, "sign-up terms omitted")
+		}
+		if !terms.GetPopup() {
+			return smokeRegistrationCheckFailure(branchSignupSignInResponse, "sign-up terms prompt disabled")
+		}
+		if got := terms.GetText(); got != signUpTerms {
+			return smokeRegistrationCheckFailure(branchSignupSignInResponse, "unexpected sign-up terms: "+got)
 		}
 
 		response, err = signUpUsername(ctx, api, username, codeHash, "Smoke", "Account")
@@ -5364,12 +5380,14 @@ func requireSmokeFullUser(users []tg.UserClass, userID int64, source string) (*t
 }
 
 type smokeFixture struct {
-	ctx                         context.Context
-	failures                    *clientFailureSignal
-	key                         *rsa.PrivateKey
-	dsn                         string
-	store                       *store.Store
-	blobs                       blob.Store
+	ctx      context.Context
+	failures *clientFailureSignal
+	key      *rsa.PrivateKey
+	dsn      string
+	store    *store.Store
+	blobs    blob.Store
+	// uploadMaxFileBytes simulates TG_UPLOAD_MAX_BYTES in smoke fixtures.
+	uploadMaxFileBytes          int64
 	stickerSets                 *api.StickerSetCatalog
 	photoThumbs                 *photothumb.Supervisor
 	codes                       *multiCodeSink
@@ -5387,6 +5405,7 @@ type smokeFixture struct {
 	turnstileVerifier           api.SignUpTurnstileVerifier
 	turnstileSignInEnabled      bool
 	recoveryEmailMode           config.RecoveryEmailMode
+	signUpTermsOfService        string
 	persistStatus               bool
 	// rateLimits is the per-surface budget set the booted server gets.
 	// Zero, the fixture default, means no surface is limited, which is what
@@ -5821,6 +5840,7 @@ func newSmokeFixtureWithDeadline(t *testing.T, regMode config.RegistrationMode, 
 		ctx: ctx, failures: newClientFailureSignal(cancelFailure), key: key, dsn: dsn,
 		store: st, blobs: blobs, codes: newMultiCodeSink(), dcID: 2,
 		regMode: regMode, recoveryEmailMode: config.RecoveryEmailOff,
+		signUpTermsOfService: config.DefaultSignUpTermsOfService,
 	}
 	if beforeStart != nil {
 		beforeStart(f)
@@ -5846,7 +5866,8 @@ func (f *smokeFixture) start(t *testing.T, address string) {
 	registry, stop := bootServerWithLimitsAndRegistrationModeAndBlobsAndStatusWithDeliveryHookAndTurnstileAndWelcomeChannelAndStickerCatalog(
 		t, f.ctx, f.key, f.dcID, f.store, f.dsn, f.codes.Logger(), ln, f.rateLimits, f.regMode,
 		f.blobs, f.persistStatus, nil, f.turnstileSiteKey, f.turnstileVerifier, f.welcomeChannel,
-		f.turnstileSignInEnabled, f.recoveryEmailMode, f.suppressChannelPostDelivery, f.stickerSets, f.photoThumbs,
+		f.turnstileSignInEnabled, f.recoveryEmailMode, f.suppressChannelPostDelivery, f.signUpTermsOfService,
+		f.stickerSets, f.uploadMaxFileBytes, f.photoThumbs,
 	)
 	f.registry = registry
 	f.setServerStop(t.Cleanup, stop)

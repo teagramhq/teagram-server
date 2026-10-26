@@ -413,7 +413,7 @@ func bootServerWithLimitsAndRegistrationModeAndBlobsAndStatusWithDeliveryHookAnd
 	return bootServerWithLimitsAndRegistrationModeAndBlobsAndStatusWithDeliveryHookAndTurnstileAndWelcomeChannelAndStickerCatalog(
 		t, ctx, key, dcID, st, dsn, log, ln, rateLimits, regMode, blobs, persistStatus,
 		beforeDelivery, turnstileSiteKey, turnstileVerifier, welcomeChannel, turnstileSignInEnabled,
-		recoveryEmailMode, suppressChannelPostDelivery, nil, photoThumbs...,
+		recoveryEmailMode, suppressChannelPostDelivery, config.DefaultSignUpTermsOfService, nil, 0, photoThumbs...,
 	)
 }
 
@@ -425,7 +425,9 @@ func bootServerWithLimitsAndRegistrationModeAndBlobsAndStatusWithDeliveryHookAnd
 	turnstileVerifier api.SignUpTurnstileVerifier, welcomeChannel string, turnstileSignInEnabled bool,
 	recoveryEmailMode config.RecoveryEmailMode,
 	suppressChannelPostDelivery func(channelID int64) bool,
+	signUpTermsOfService string,
 	stickerSets *api.StickerSetCatalog,
+	uploadMaxFileBytes int64,
 	photoThumbs ...*photothumb.Supervisor,
 ) (*mtproto.SessionRegistry, func()) {
 	t.Helper()
@@ -436,12 +438,16 @@ func bootServerWithLimitsAndRegistrationModeAndBlobsAndStatusWithDeliveryHookAnd
 	if len(photoThumbs) > 0 {
 		photoThumb = photoThumbs[0]
 	}
+	maxFileBytes := int64(100 << 20)
+	if uploadMaxFileBytes > 0 {
+		maxFileBytes = uploadMaxFileBytes
+	}
 	handler := api.NewWithPhotoThumbsAndDialogFilterSyncAndUploadPartTTLAndTurnstileAndWelcomeChannelAndSignInAndStickerCatalog(
-		st, dcID, tgcfg, log, true, 100<<20, blobs, 2<<30,
+		st, dcID, tgcfg, log, true, maxFileBytes, uploadMaxFileBytes, blobs, 2<<30,
 		pgtest.PeerDeriver(), pgtest.PhotoDeriver(), rateLimits, regMode,
 		dialogFilterSync, photoThumb, config.DefaultUploadPartTTL,
 		turnstileSiteKey, turnstileVerifier, welcomeChannel, turnstileSignInEnabled, recoveryEmailMode,
-		stickerSets,
+		signUpTermsOfService, stickerSets,
 	)
 	server := mtproto.New(exchange.PrivateKey{RSA: key}, dcID, mtproto.NewPgAuthKeyStore(st), handler, log)
 	if persistStatus {

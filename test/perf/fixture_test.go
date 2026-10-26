@@ -5,6 +5,7 @@ package perf_test
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -21,6 +22,7 @@ import (
 	"testing"
 	"time"
 
+	gotdsrp "github.com/gotd/td/crypto/srp"
 	"github.com/gotd/td/tg"
 	"github.com/jackc/pgx/v5"
 	"golang.org/x/sync/errgroup"
@@ -28,16 +30,16 @@ import (
 	"github.com/teagramhq/teagram-server/internal/peerhash"
 	"github.com/teagramhq/teagram-server/internal/pgtest"
 	"github.com/teagramhq/teagram-server/internal/rsakey"
+	tsrp "github.com/teagramhq/teagram-server/internal/srp"
 	"github.com/teagramhq/teagram-server/internal/store"
 )
 
 // fixtureVersion changes whenever the seeded shape changes, so a cached dump
 // of an older shape is never measured as if it were this one.
-const fixtureVersion = 2
+const fixtureVersion = 3
 
-// spec is one fixture size. The large fixture is the account the parent issue
-// defines; the small one is the same account at one hundredth of the data, so
-// the pair shows whether an RPC's cost follows account size.
+// spec is one fixture size. The small fixture uses one hundredth of the large
+// fixture's scalable data, subject to per-account store limits.
 type spec struct {
 	Name          string `json:"name"`
 	Contacts      int    `json:"contacts"`
@@ -150,11 +152,27 @@ func loadFixture(path string) (fixture, error) {
 	return f, nil
 }
 
+func TestLoadFixtureRejectsOlderVersion(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "fixture.json")
+	if err := os.WriteFile(path, []byte(`{"version":2}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := loadFixture(path); err == nil || !strings.Contains(err.Error(), "fixture version 2, want 3") {
+		t.Fatalf("loadFixture error = %v, want fixture version 2 mismatch", err)
+	}
+}
+
 // TestSeedFixtures writes both fixtures through the store's own write
 // methods, the ones the RPC handlers call, and the photos through the RPC
 // upload path. It is idempotent per fixture: a fixture whose description is
 // already on disk is left alone.
 func TestSeedFixtures(t *testing.T) {
+	for _, s := range fixtures {
+		if s.Contacts > store.MaxContactsPerUser {
+			t.Fatalf("%s fixture has %d contacts, store limit is %d", s.Name, s.Contacts, store.MaxContactsPerUser)
+		}
+	}
+
 	dir := perfDir(t)
 	for _, s := range fixtures {
 		t.Run(s.Name, func(t *testing.T) {
@@ -196,7 +214,7 @@ func seed(t *testing.T, ctx context.Context, dsn, blobs string, s spec) fixture 
 	st := srv.store
 	f := fixture{Version: fixtureVersion, Spec: s}
 
-	owner := mustUser(t, ctx, st, "+19990000001", "Perf", "Owner")
+	owner := mustPerfOwner(t, ctx, st)
 	partner := mustUser(t, ctx, st, "+19990000002", "Perf", "Partner")
 	f.Owner, f.Partner = owner, partner
 	f.Contacts = createUsers(t, ctx, st, "+1991", s.Contacts, true)
@@ -325,6 +343,44 @@ func mustUser(t *testing.T, ctx context.Context, st *store.Store, phone, first, 
 		t.Fatalf("name user %s: %v", phone, err)
 	}
 	return u.ID
+}
+
+func mustPerfOwner(t *testing.T, ctx context.Context, st *store.Store) int64 {
+	t.Helper()
+	salt1 := make([]byte, 32)
+	if _, err := rand.Read(salt1); err != nil {
+		t.Fatalf("generate owner password salt1: %v", err)
+	}
+	defer clear(salt1)
+	salt2 := make([]byte, 32)
+	if _, err := rand.Read(salt2); err != nil {
+		t.Fatalf("generate owner password salt2: %v", err)
+	}
+	defer clear(salt2)
+
+	password := []byte(fixtureOwnerPassword)
+	defer clear(password)
+	verifier, augmentedSalt1, err := gotdsrp.NewSRP(rand.Reader).NewHash(password, gotdsrp.Input{
+		Salt1: salt1,
+		Salt2: salt2,
+		G:     tsrp.G,
+		P:     tsrp.PBytes(),
+	})
+	if err != nil {
+		t.Fatalf("generate owner password verifier: %v", err)
+	}
+	defer clear(verifier)
+	defer clear(augmentedSalt1)
+
+	owner, err := st.CreateUsernameAccountWithPassword(ctx, fixtureOwnerUsername, augmentedSalt1, salt2, verifier)
+	if err != nil {
+		t.Fatalf("create owner username account: %v", err)
+	}
+	first, last := "Perf", "Owner"
+	if err := st.UpdateProfile(ctx, owner.ID, &first, &last); err != nil {
+		t.Fatalf("name owner: %v", err)
+	}
+	return owner.ID
 }
 
 // createUsers creates n accounts in parallel. Named ones carry a last name

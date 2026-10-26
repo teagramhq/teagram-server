@@ -427,8 +427,13 @@ grep -Fq 'set $teagramd http://haproxy:2446;' "$SCRIPT_DIR/nginx.conf"
 # shellcheck disable=SC2016
 grep -Fq 'proxy_set_header CF-Connecting-IP $http_cf_connecting_ip;' "$SCRIPT_DIR/nginx.conf"
 grep -Fq '"CF-Connecting-IP": "192.0.2.1"' "$SCRIPT_DIR/smoke.py"
+grep -Fq 'location = / { default_type text/plain; return 200 "Teagram demo server"; }' "$SCRIPT_DIR/nginx.conf"
+grep -Fq 'base_url + "/"' "$SCRIPT_DIR/smoke.py"
 grep -Fq 'location = /admin { return 404; }' "$SCRIPT_DIR/nginx.conf"
 grep -Fq 'location ^~ /admin/ { return 404; }' "$SCRIPT_DIR/nginx.conf"
+grep -Fq 'fastcgi_temp_path /tmp/fastcgi_temp;' "$SCRIPT_DIR/nginx.conf"
+grep -Fq 'uwsgi_temp_path /tmp/uwsgi_temp;' "$SCRIPT_DIR/nginx.conf"
+grep -Fq 'scgi_temp_path /tmp/scgi_temp;' "$SCRIPT_DIR/nginx.conf"
 grep -Fq 'image: mirror.gcr.io/library/nginx:1.28.0-alpine@sha256:' "$SCRIPT_DIR/compose.yaml"
 grep -Fq 'http-request set-src req.hdr_ip(CF-Connecting-IP)' "$SCRIPT_DIR/haproxy.cfg"
 grep -Fq 'req.hdr_cnt(CF-Connecting-IP) eq 1' "$SCRIPT_DIR/haproxy.cfg"
@@ -522,6 +527,7 @@ deploy_steps = [
     'CANDIDATE_IMAGE_REF=$(demo_pull_image_by_sha "$SHA" "$IMAGE_DIGEST")',
     "demo_backup_database\n",
     'export TEAGRAM_DEMO_IMAGE_REF="$CANDIDATE_IMAGE_REF"',
+    'demo_compose run --rm --no-deps "$CANDIDATE_SERVER" client-config > "$TMP_DIR/client.json"',
     "demo_compose up -d migrate",
     "demo_wait_migration demo_compose 'deployment migrations'",
     'demo_seed_compose up -d "$CANDIDATE_SERVER"',
@@ -662,6 +668,13 @@ if "demo_wait_migration demo_compose 'post-reset migrations'" not in Path(sys.ar
     raise SystemExit("wipe-weekly.sh: reset must wait for migration completion")
 if "demo_prune_deploy_backups()" not in Path(sys.argv[1]).read_text(encoding="utf-8"):
     raise SystemExit("wipe-weekly.sh: weekly reset must remove old deploy snapshots")
+assert_text_order(wipe, "wipe-weekly.sh persistent identity check", [
+    'demo_compose up -d edge',
+    'python3 "$SCRIPT_DIR/smoke.py" "$CLIENT_CONFIG"',
+    'demo_compose exec -T "$ACTIVE_SERVER" /usr/local/bin/teagramd client-config > "$TMP_DIR/client-after-wipe.json"',
+    "AFTER_SPKI=$(jq -er '.mtproto.rsa_spki' \"$TMP_DIR/client-after-wipe.json\")",
+    '[[ "$AFTER_SPKI" == "$BEFORE_SPKI" ]]',
+])
 PY
 
 INIT_LOCK_FUNCTION="$TMP_DIR/init-lock-function.sh"

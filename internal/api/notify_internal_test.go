@@ -1555,7 +1555,7 @@ func TestDeliverChannelPostDoesNotPushPostCommittedAfterBan(t *testing.T) {
 			t.Fatalf("post after ban: %v", err)
 		}
 	}
-	u.deliverChannelPost(ctx, ch.ID, connsFor)
+	u.deliverChannelPost(ctx, ch.ID, []int64{creator.ID, banned.ID, active.ID}, connsFor)
 	u.channelPostSnapshotHook = nil
 
 	if len(bannedConn.got) != 0 {
@@ -1571,7 +1571,7 @@ func TestDeliverChannelPostDoesNotPushPostCommittedAfterBan(t *testing.T) {
 	// A later delivery observes the committed post with current membership: C
 	// receives it, while B is now excluded. The creator's original create event
 	// remains in its earlier push.
-	u.deliverChannelPost(ctx, ch.ID, connsFor)
+	u.deliverChannelPost(ctx, ch.ID, []int64{creator.ID, banned.ID, active.ID}, connsFor)
 	if len(bannedConn.got) != 0 {
 		t.Fatalf("banned member B got %d post-ban pushes, want none", len(bannedConn.got))
 	}
@@ -1656,11 +1656,11 @@ func TestDeliverChannelPostReplaysPreLeavePostButExcludesPostAfterLeave(t *testi
 	}
 
 	// The first delivery reaches B while B is a member.
-	u.deliverChannelPost(ctx, channel.ID, connsFor)
+	u.deliverChannelPost(ctx, channel.ID, []int64{member.ID}, connsFor)
 	assertReplay(0)
 	// A repeated notification can deliver the same pre-leave pts again while B
 	// remains a member.
-	u.deliverChannelPost(ctx, channel.ID, connsFor)
+	u.deliverChannelPost(ctx, channel.ID, []int64{member.ID}, connsFor)
 	assertReplay(1)
 
 	// The third delivery takes its membership and pts snapshot while B is still
@@ -1679,7 +1679,7 @@ func TestDeliverChannelPostReplaysPreLeavePostButExcludesPostAfterLeave(t *testi
 		}
 		postAfterLeave, postAfterLeavePts, hookDuplicate, hookErr = s.PostChannelMessageAs(ctx, channel.ID, creator.ID, "post after removal", 9911002, nil, 0)
 	}
-	u.deliverChannelPost(ctx, channel.ID, connsFor)
+	u.deliverChannelPost(ctx, channel.ID, []int64{member.ID}, connsFor)
 	u.channelPostSnapshotHook = nil
 	if hookErr != nil {
 		t.Fatalf("leave and post after snapshot: %v", hookErr)
@@ -1705,7 +1705,7 @@ func TestDeliverChannelPostReplaysPreLeavePostButExcludesPostAfterLeave(t *testi
 
 	// A fresh snapshot after the acknowledged leave excludes B entirely, even
 	// though the channel now has a committed pts-3 post.
-	u.deliverChannelPost(ctx, channel.ID, connsFor)
+	u.deliverChannelPost(ctx, channel.ID, []int64{member.ID}, connsFor)
 	if len(conn.got) != 3 {
 		t.Fatalf("member got %d pushes after leave snapshot, want no new delivery", len(conn.got))
 	}
@@ -1950,7 +1950,7 @@ func TestDeliverChannelPostMapsSenderRandomIDBeforeSendResult(t *testing.T) {
 
 	// Deliver the committed event before the sendMessage RPC result, matching
 	// the ordering that exposed duplicate optimistic posts in the web client.
-	u.deliverChannelPost(ctx, ch.ID, func(userID int64) []pushConn {
+	u.deliverChannelPost(ctx, ch.ID, []int64{alice.ID, bob.ID}, func(userID int64) []pushConn {
 		return connections[userID]
 	})
 
@@ -2160,7 +2160,7 @@ func TestDeliverChannelPostSkipsFlooredDeleteForJoiner(t *testing.T) {
 		h:   &handlers{store: s, log: slog.New(slog.DiscardHandler), peers: pgtest.PeerDeriver()},
 		log: slog.New(slog.DiscardHandler),
 	}
-	u.deliverChannelPost(ctx, channel.ID, func(userID int64) []pushConn {
+	u.deliverChannelPost(ctx, channel.ID, []int64{creator.ID, joiner.ID}, func(userID int64) []pushConn {
 		switch userID {
 		case creator.ID:
 			return []pushConn{creatorConn}

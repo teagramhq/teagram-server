@@ -2,7 +2,6 @@
 # RPC performance gate.
 #
 #   perf-run.sh seed      seed both fixtures and dump them into $PERF_CACHE
-#                         (main only; a PR never seeds)
 #   perf-run.sh restore   restore the fixture snapshot from $PERF_CACHE
 #   perf-run.sh measure   measure base and head interleaved, then judge
 #
@@ -35,16 +34,37 @@ migrate() {
   atlas migrate apply --url "$(dsn "$db" "")" --dir "file://$dir/migrations"
 }
 
+report_failure() {
+  local title="$1" detail="$2"
+  if [ -n "${GITHUB_ACTIONS:-}" ]; then
+    echo "::error title=$title::$detail"
+  fi
+  if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
+    {
+      printf '## %s\n\n' "$title"
+      printf '%s\n\n' "$detail"
+    } >>"$GITHUB_STEP_SUMMARY"
+  fi
+}
+
+seed_failure() {
+  report_failure "RPC performance fixture seed / infrastructure failure" \
+    "Could not $1; no RPC performance comparison was produced."
+  exit 1
+}
+
 seed() {
-  mkdir -p "$PERF_CACHE"
+  mkdir -p "$PERF_CACHE" || seed_failure "create the fixture cache directory"
   for f in "${fixtures[@]}"; do
-    psql_admin -c "CREATE DATABASE perf_$f"
-    migrate . "$f"
+    psql_admin -c "CREATE DATABASE perf_$f" || seed_failure "create the $f fixture database"
+    migrate . "$f" || seed_failure "apply migrations to the $f fixture database"
   done
   TG_PERF_DIR="$PERF_CACHE" TG_PERF_DSN_1X="$(dsn 1x "")" TG_PERF_DSN_100X="$(dsn 100x "")" \
-    go test -tags performance -count=1 -timeout 100m -run '^TestSeedFixtures$' -v ./test/perf
+    go test -tags performance -count=1 -timeout 100m -run '^TestSeedFixtures$' -v ./test/perf ||
+    seed_failure "populate the 1x and 100x fixture databases"
   for f in "${fixtures[@]}"; do
-    docker exec "$PERF_PG_CONTAINER" pg_dump -U postgres -Fc -Z 3 -f "/cache/perf_$f.dump" "perf_$f"
+    docker exec "$PERF_PG_CONTAINER" pg_dump -U postgres -Fc -Z 3 -f "/cache/perf_$f.dump" "perf_$f" ||
+      seed_failure "snapshot the $f fixture database"
   done
 }
 
@@ -58,11 +78,20 @@ analyze() {
 }
 
 restore() {
+  # pg_dump stores ACLs but not cluster roles. Provision the role referenced
+  # by the fixture migrations before pg_restore replays those ACLs.
+  if [ "$(psql_admin -c "SELECT EXISTS (SELECT 1 FROM pg_catalog.pg_roles WHERE rolname = 'browser_acceptance_probe')")" != t ]; then
+    psql_admin -c "CREATE ROLE browser_acceptance_probe"
+  fi
+  psql_admin -c "ALTER ROLE browser_acceptance_probe LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOREPLICATION NOBYPASSRLS"
   for f in "${fixtures[@]}"; do
-    psql_admin -c "CREATE DATABASE perf_$f"
-    docker exec "$PERF_PG_CONTAINER" pg_restore -U postgres -d "perf_$f" -j 4 --no-owner "/cache/perf_$f.dump"
+    psql_admin -c "CREATE DATABASE perf_$f" || fatal "create the $f fixture database"
+    # Per-database dumps omit cluster roles; the benchmark connects as postgres
+    # and does not depend on the fixture's ACLs.
+    docker exec "$PERF_PG_CONTAINER" pg_restore -U postgres -d "perf_$f" -j 4 --no-owner --no-acl "/cache/perf_$f.dump" ||
+      fatal "restore the $f fixture snapshot"
     # Before base_ready copies it, so the copies carry the same statistics.
-    analyze "perf_$f"
+    analyze "perf_$f" || fatal "analyze the $f fixture"
   done
 }
 
@@ -83,16 +112,26 @@ revision_ahead_of() {
 
 # base_ready prepares the base branch's databases and test binary. It returns
 # 1 only for the documented skips: no base commit, a base without the harness,
-# and a cached fixture already past base's migrations. Anything else that goes
-# wrong, a broken migration included, fails the job, since skipping would
-# silently drop every base check.
-# Its databases are copies of the restored fixtures, migrated with the base
+# a changed fixture seeder, and a cached fixture already past base's migrations.
+# Anything else that goes wrong, a broken migration included, fails the job.
+# Skipping in those cases would silently drop every base check.
+# Its databases are copies of the head fixtures, migrated with the base
 # branch's own migrations before head's are applied.
 base_ready() {
   if [ -z "${PERF_BASE_SHA:-}" ]; then
     echo "no base commit" >"$PERF_WORK/base-skipped"
     return 1
   fi
+  local diff_status=0
+  git diff --quiet "$PERF_BASE_SHA" HEAD -- test/perf/fixture_test.go || diff_status=$?
+  case "$diff_status" in
+    0) ;;
+    1)
+      echo "fixture seeder changed; skipping the base comparison" >"$PERF_WORK/base-skipped"
+      return 1
+      ;;
+    *) fatal "compare fixture seeder with base $PERF_BASE_SHA" ;;
+  esac
   local tree="$PERF_WORK/base"
   git worktree add --detach "$tree" "$PERF_BASE_SHA" >/dev/null || fatal "check out base $PERF_BASE_SHA"
   if [ ! -f "$tree/test/perf/harness_test.go" ]; then
@@ -115,7 +154,7 @@ base_ready() {
 }
 
 fatal() {
-  echo "::error::could not $1"
+  report_failure "RPC performance infrastructure failure" "Could not $1; no performance verdict was produced."
   exit 1
 }
 
@@ -126,7 +165,8 @@ run_branch() {
   TG_PERF_DIR="$PERF_CACHE" \
     TG_PERF_DSN_1X="$(dsn 1x "$suffix")" TG_PERF_DSN_100X="$(dsn 100x "$suffix")" \
     TG_PERF_REPORT="$PERF_WORK/$branch-$round.json" \
-    "$PERF_WORK/$branch.test" -test.run '^TestRPCPerformance$' -test.count=1 -test.timeout 30m -test.v
+    "$PERF_WORK/$branch.test" -test.run '^Test(LoadFixtureRejectsOlderVersion|OwnerUsernamePasswordLogin|RPCPerformance)$' -test.count=1 -test.timeout 30m -test.v ||
+    fatal "run the $branch RPC performance harness"
   echo "::endgroup::"
 }
 
@@ -148,12 +188,16 @@ run_rounds() {
 }
 
 judge() {
-  local tag="$1" base_glob=""
+  local tag="$1" base_glob="" status=0
   [ "$with_base" = true ] && base_glob="$PERF_WORK/base-$tag*.json"
   go run ./test/perf/cmd/perfreport -head "$PERF_WORK/head-$tag*.json" -base "$base_glob" \
     -history "$PERF_HISTORY/*.json" -waivers test/perf/known_violations.json \
     -required test/perf/required_scenarios.json \
-    -aggregate "$PERF_WORK/aggregate.json" >"$PERF_WORK/summary.md"
+    -aggregate "$PERF_WORK/aggregate.json" >"$PERF_WORK/summary.md" || status=$?
+  if [ ! -s "$PERF_WORK/summary.md" ] || [ "$status" -eq 2 ]; then
+    fatal "judge the RPC performance reports"
+  fi
+  return "$status"
 }
 
 measure() {
@@ -165,10 +209,10 @@ measure() {
   # A migration can rewrite a table and drop its statistics, so each side is
   # analyzed again after its own migrations.
   for f in "${fixtures[@]}"; do
-    migrate . "$f"
-    analyze "perf_$f"
+    migrate . "$f" || fatal "apply current migrations to the $f fixture"
+    analyze "perf_$f" || fatal "analyze the $f fixture"
   done
-  go test -c -tags performance -o "$PERF_WORK/head.test" ./test/perf
+  go test -c -tags performance -o "$PERF_WORK/head.test" ./test/perf || fatal "build the head RPC performance harness"
   run_rounds a
   local status=0
   judge a || status=$?
@@ -191,6 +235,7 @@ measure() {
   # widen the noise band that is meant to catch it.
   if [ -n "${PERF_RECORD:-}" ] && [ "$status" -eq 0 ] && [ -f "$PERF_WORK/aggregate.json" ]; then
     cp "$PERF_WORK/aggregate.json" "$PERF_HISTORY/$(date -u +%Y%m%dT%H%M%S).json"
+    # shellcheck disable=SC2012 # UTC timestamp filenames sort chronologically and contain no spaces.
     ls -1 "$PERF_HISTORY"/*.json | head -n -"$history_keep" | xargs -r rm --
   fi
   return "$status"

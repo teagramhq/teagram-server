@@ -134,7 +134,7 @@ demo_compose up -d --wait --wait-timeout 120 "$ACTIVE_SERVER" haproxy
 "$SEED_SCRIPT" --verify-turnstile --endpoint haproxy:2443
 demo_compose up -d edge
 python3 "$SCRIPT_DIR/smoke.py" "$CLIENT_CONFIG"
-demo_compose run --rm --no-deps "$ACTIVE_SERVER" client-config > "$TMP_DIR/client-after-wipe.json"
+demo_compose exec -T "$ACTIVE_SERVER" /usr/local/bin/teagramd client-config > "$TMP_DIR/client-after-wipe.json"
 AFTER_SPKI=$(jq -er '.mtproto.rsa_spki' "$TMP_DIR/client-after-wipe.json")
 [[ "$AFTER_SPKI" == "$BEFORE_SPKI" ]] || demo_fail 'weekly wipe changed the persistent RSA identity'
 if [[ -f "$ACTIVITY_SERVICE" ]]; then
