@@ -113,6 +113,74 @@ def container_fixture() -> tuple[dict[str, Any], dict[str, Any]]:
     return document, record
 
 
+def cleanup_deadline_drill_type(inventory_calls: list[list[str]], instances: list[Any]) -> type:
+    class CleanupDeadlineDrill(RESTORE_READINESS.Drill):
+        def __init__(self, _args: Any, run_dir: Path, manifest: dict[str, Any]) -> None:
+            self.manifest = manifest
+            self.run_dir = run_dir
+            self.manifest_path = run_dir / "ownership.json"
+            self.gateway = None
+            self.save = lambda: None
+
+            def cleanup_call(args: list[str], **_kwargs: Any) -> tuple[int, bytes]:
+                inventory_calls.append(args)
+                return 0, b""
+
+            self.cleanup_call = Mock(side_effect=cleanup_call)
+            self.cleanup_processes = lambda: True
+            self.remove_build_inputs = lambda: True
+            self.cleanup_owned_containers = lambda: True
+            self.cleanup_owned_images = lambda: True
+            self.cleanup_networks_and_volumes = lambda: True
+            instances.append(self)
+
+    return CleanupDeadlineDrill
+
+
+def expired_work_cleanup_manifest(
+    run_dir: Path,
+    global_lock: dict[str, int],
+    rollout_lock: dict[str, int],
+) -> tuple[dict[str, Any], Path]:
+    private_path = run_dir / "secrets" / "fixture.bin"
+    private_path.parent.mkdir()
+    private_path.write_bytes(b"private fixture")
+    info = private_path.lstat()
+    manifest = {
+        "global_lock": global_lock,
+        "rollout_lock": rollout_lock,
+        "supervisor": {"pid": 0, "start_ticks": 0},
+        "parent": {"pid": 999999, "start_ticks": 1},
+        "parent_done": True,
+        "work_deadline": time.monotonic() - 1,
+        "cleanup_deadline": time.monotonic() + 60,
+        "resource_creation_started": True,
+        "baseline": {
+            "docker_inventory": {"containers": {}, "volumes": {}, "networks": {}},
+            "containers": [],
+            "volumes": [],
+            "networks": [],
+        },
+        "containers": [],
+        "pending_container": None,
+        "images": [],
+        "networks": [],
+        "files": [
+            {
+                "path": str(private_path),
+                "device": info.st_dev,
+                "inode": info.st_ino,
+                "mode": stat.S_IMODE(info.st_mode),
+                "uid": info.st_uid,
+                "gid": info.st_gid,
+            }
+        ],
+        "processes": [],
+        "build_directory": None,
+    }
+    return manifest, private_path
+
+
 class RestoreReadinessContractTests(unittest.TestCase):
     def test_suite_work_budget_caps_each_run_and_is_shared_by_shell_gate(self) -> None:
         self.assertEqual(RESTORE_READINESS.bounded_work_seconds(None, None), 30 * 60)
@@ -1242,6 +1310,21 @@ class RestoreReadinessContractTests(unittest.TestCase):
             return_value={"containers": {owned_id: owned}, "volumes": {}, "networks": {}}
         )
         self.assertTrue(drill.verify_foreign_inventory())
+
+    def test_cleanup_inventory_checks_cleanup_command_status(self) -> None:
+        drill = object.__new__(RESTORE_READINESS.Drill)
+        drill.manifest = {
+            "work_deadline": time.monotonic() - 1,
+            "cleanup_deadline": time.monotonic() + 60,
+        }
+        drill.cleanup_call = Mock(return_value=(1, b""))
+
+        with self.assertRaises(RESTORE_READINESS.DrillFailure) as failure:
+            drill.docker_resource_inventory("cleanup")
+
+        self.assertEqual(failure.exception.phase, "cleanup")
+        self.assertEqual(failure.exception.category, "cleanup_failure")
+        self.assertEqual(drill.cleanup_call.call_count, 1)
 
     def test_unattached_volume_between_container_snapshots_stays_foreign(self) -> None:
         owned_id = "1" * 64
@@ -2564,6 +2647,94 @@ class RestoreReadinessContractTests(unittest.TestCase):
                 patch.object(RESTORE_READINESS, "remove_finished_run", return_value=True),
             ):
                 self.assertEqual(RESTORE_READINESS.supervise(Path(directory) / "ownership.json", lock_fd, rollout_fd), 0)
+
+    def test_supervisor_cleanup_uses_cleanup_budget_after_work_deadline(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="rr-supervisor-expired-work-") as directory:
+            run_dir = Path(directory)
+            lock_path = run_dir / "lock"
+            lock_path.write_bytes(b"")
+            lock_fd = RESTORE_READINESS.os.open(lock_path, RESTORE_READINESS.os.O_RDWR)
+            lock_info = RESTORE_READINESS.os.fstat(lock_fd)
+            rollout_path = run_dir / "rollout-lock"
+            rollout_path.write_bytes(b"")
+            rollout_fd = RESTORE_READINESS.os.open(rollout_path, RESTORE_READINESS.os.O_RDWR)
+            rollout_info = RESTORE_READINESS.os.fstat(rollout_fd)
+            global_lock = {"device": lock_info.st_dev, "inode": lock_info.st_ino}
+            rollout_lock = {"device": rollout_info.st_dev, "inode": rollout_info.st_ino}
+            manifest, private_path = expired_work_cleanup_manifest(run_dir, global_lock, rollout_lock)
+            inventory_calls: list[list[str]] = []
+            instances: list[Any] = []
+
+            with (
+                patch.object(RESTORE_READINESS, "load_manifest", return_value=manifest),
+                patch.object(
+                    RESTORE_READINESS,
+                    "process_start_ticks",
+                    side_effect=lambda pid: 77 if pid == RESTORE_READINESS.os.getpid() else None,
+                ),
+                patch.object(RESTORE_READINESS, "make_runtime_args", return_value=None),
+                patch.object(
+                    RESTORE_READINESS,
+                    "Drill",
+                    cleanup_deadline_drill_type(inventory_calls, instances),
+                ),
+                patch.object(RESTORE_READINESS, "remove_finished_run", return_value=True),
+            ):
+                status = RESTORE_READINESS.supervise(
+                    run_dir / "ownership.json", lock_fd, rollout_fd
+                )
+
+            self.assertEqual(status, 0)
+            self.assertFalse(private_path.exists())
+            self.assertEqual(len(inventory_calls), 6)
+            self.assertEqual(instances[-1].cleanup_call.call_count, 6)
+
+    def test_recovery_uses_cleanup_budget_after_work_deadline(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="rr-recover-expired-work-") as directory:
+            run_dir = Path(directory)
+            lock_path = run_dir / "lock"
+            lock_path.write_bytes(b"")
+            lock_fd = RESTORE_READINESS.os.open(lock_path, RESTORE_READINESS.os.O_RDWR)
+            lock_info = RESTORE_READINESS.os.fstat(lock_fd)
+            rollout_path = run_dir / "rollout-lock"
+            rollout_path.write_bytes(b"")
+            rollout_fd = RESTORE_READINESS.os.open(rollout_path, RESTORE_READINESS.os.O_RDWR)
+            rollout_info = RESTORE_READINESS.os.fstat(rollout_fd)
+            global_lock = {"device": lock_info.st_dev, "inode": lock_info.st_ino}
+            rollout_lock = {
+                "path": str(RESTORE_READINESS.ROLLOUT_LOCK_PATH),
+                "device": rollout_info.st_dev,
+                "inode": rollout_info.st_ino,
+            }
+            manifest, private_path = expired_work_cleanup_manifest(run_dir, global_lock, rollout_lock)
+            inventory_calls: list[list[str]] = []
+            instances: list[Any] = []
+            output = io.StringIO()
+
+            with (
+                patch.object(RESTORE_READINESS.os, "geteuid", return_value=0),
+                patch.object(RESTORE_READINESS, "open_rollout_lock", return_value=(rollout_fd, rollout_lock)),
+                patch.object(RESTORE_READINESS, "load_manifest", return_value=manifest),
+                patch.object(RESTORE_READINESS, "open_global_lock", return_value=(lock_fd, global_lock)),
+                patch.object(RESTORE_READINESS, "make_runtime_args", return_value=None),
+                patch.object(
+                    RESTORE_READINESS,
+                    "Drill",
+                    cleanup_deadline_drill_type(inventory_calls, instances),
+                ),
+                patch.object(RESTORE_READINESS, "remove_finished_run", return_value=True),
+                redirect_stdout(output),
+            ):
+                status = RESTORE_READINESS.recover(run_dir / "ownership.json")
+
+            self.assertEqual(status, 1)
+            self.assertFalse(private_path.exists())
+            self.assertLess(manifest["work_deadline"], time.monotonic())
+            self.assertGreater(manifest["cleanup_deadline"], time.monotonic())
+            self.assertEqual(len(inventory_calls), 6)
+            self.assertEqual(instances[-1].cleanup_call.call_count, 6)
+            report = json.loads(output.getvalue())
+            self.assertEqual(report["cleanup"], "verified")
 
     def test_supervisor_bounds_delayed_cleanup_command_and_leaves_cleanup_unverified(self) -> None:
         with tempfile.TemporaryDirectory(prefix="rr-cleanup-deadline-") as directory:

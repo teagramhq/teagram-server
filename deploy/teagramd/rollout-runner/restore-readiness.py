@@ -3606,6 +3606,11 @@ class Drill(Docker):
 
     def docker_resource_inventory(self, phase: str) -> dict[str, Any]:
         def invoke(args: list[str]) -> bytes:
+            if phase == "cleanup":
+                status, output = self.cleanup_call(args, timeout=20)
+                if status != 0:
+                    raise DrillFailure("cleanup", "cleanup_failure")
+                return output
             return self.call(args, phase=phase, category="isolation_refusal", timeout=20)
 
         try:
