@@ -115,6 +115,9 @@ jobs:
         if: github.event_name == 'pull_request'
         run: echo "PERF_BASE_SHA=$(git rev-parse HEAD^1)" >> "$GITHUB_ENV"
 
+      - name: Check Postgres readiness probe
+        run: bash .github/scripts/test-perf-postgres-readiness.sh
+
       - name: Test invalid performance base SHA handling
         run: python3 -B .github/scripts/test_perf_run.py
 
