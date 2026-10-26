@@ -44,7 +44,7 @@ mkdir -p "$WORK_DIR/home"
 sed \
   -e "s|^REPO=/opt/teagram-demo$|REPO=$CHECKOUT|" \
   -e "s|^HOME=/root$|HOME=$WORK_DIR/home|" \
-  -e 's|^ROOT_UID=$(id -u)$|ROOT_UID=0|' \
+  -e 's|^ROOT_UID=.*|ROOT_UID=0|' \
   "$SCRIPT_DIR/ops/teagram-demo-ops" >"$WORK_DIR/teagram-demo-ops"
 chmod 0755 "$WORK_DIR/teagram-demo-ops"
 
