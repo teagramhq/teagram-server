@@ -28,6 +28,24 @@ if [ "$failures" -le "$FAKE_DOCKER_FAILURES" ]; then
 fi
 echo "pulled $2"
 """
+FAKE_POSTGRES_DOCKER = """#!/usr/bin/env bash
+set -euo pipefail
+case "$1" in
+  pull) exit 0 ;;
+  run) echo fake-container-id ;;
+  exec)
+    [ "$3" = pg_isready ] || { echo "unexpected docker $*" >&2; exit 64; }
+    if [ "${4:-}" = -h ] && [ "${5:-}" = 127.0.0.1 ]; then
+      printf 'tcp\\n' >> "$FAKE_DOCKER_DIR/probes"
+      [ "$(wc -l < "$FAKE_DOCKER_DIR/probes")" -ge 3 ]
+    else
+      printf 'socket\\n' >> "$FAKE_DOCKER_DIR/probes"
+      exit 0
+    fi
+    ;;
+  *) echo "unexpected docker $*" >&2; exit 64 ;;
+esac
+"""
 DOCKERFILE = """\
 FROM --platform=$BUILDPLATFORM mirror.gcr.io/library/golang:1.27 AS build
 FROM mirror.gcr.io/library/golang:1.27 AS probe-build
@@ -197,6 +215,33 @@ class PullBaseImagesTests(unittest.TestCase):
         self.assertNotEqual(0, result.returncode)
         self.assertIn(f"::error::{missing} not found", result.stdout)
         self.assertEqual([], self.calls())
+
+    def test_perf_postgres_waits_for_tcp_listener(self) -> None:
+        docker = self.dir / "bin/docker"
+        docker.write_text(FAKE_POSTGRES_DOCKER, encoding="utf-8")
+        docker.chmod(0o755)
+        (self.dir / "probes").touch()
+        sleep = self.dir / "bin/sleep"
+        sleep.write_text("#!/usr/bin/env bash\nexit 0\n", encoding="utf-8")
+        sleep.chmod(0o755)
+        cache = self.dir / "perf-cache"
+        result = subprocess.run(
+            ["bash", str(ROOT / ".github/scripts/perf-postgres.sh")],
+            env={
+                **self.env,
+                "PERF_PG_CONTAINER": "perf-pg",
+                "PERF_CACHE": str(cache),
+            },
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
+        )
+        self.assertEqual(0, result.returncode, result.stdout + result.stderr)
+        self.assertEqual(
+            ["tcp", "tcp", "tcp"],
+            (self.dir / "probes").read_text(encoding="utf-8").splitlines(),
+        )
 
 
 if __name__ == "__main__":
