@@ -112,6 +112,7 @@ umask 077
     "TG_CLIENT_ADDR_PROXY_CIDRS=127.0.0.1/32,::1/128" \
     "TG_WEBSOCKET_ALLOWED_ORIGINS=https://web.example.net" \
     "TG_REGISTRATION=open" \
+    "TG_STICKER_IMPORT=on" \
     "TG_LOG_LOGIN_CODES=false"
 } > /etc/teagram/teagram.env'
 ```
@@ -120,6 +121,13 @@ No `TG_BLOB_S3_*` variables are set, so uploads use the persistent local
 directory in `TG_BLOB_DIR`. Keep `TG_AUTHKEY_ENC_KEY` stable: the server needs
 it to decrypt stored authorization keys. Do not enable login-code logging;
 username/password sign-in does not use phone codes.
+
+`TG_STICKER_IMPORT` controls whether accounts may create sticker sets or add
+stickers to their sets. It accepts `on` or `off` and defaults to `on`; any
+other value, including `members`, prevents the server from starting. Set it to
+`off` to reject create and add requests for every account. Existing sets can
+still be resolved, installed, and sent, and owners can remove stickers or
+delete their sets.
 
 Apply the schema migrations from the checked-out source. Atlas uses Docker for
 its temporary validation database, so run it as an account with access to the

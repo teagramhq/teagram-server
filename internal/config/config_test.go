@@ -1638,6 +1638,44 @@ func TestLoadRegistrationMode(t *testing.T) {
 	}
 }
 
+func TestLoadRejectsUnsupportedStickerImportMode(t *testing.T) {
+	t.Setenv("TG_POSTGRES_DSN", "postgres://localhost/tg")
+	t.Setenv("TG_AUTHKEY_ENC_KEY", validEncKey)
+	t.Setenv("TG_STICKER_IMPORT", "members")
+
+	_, err := config.Load(discardLog())
+	if err == nil || !strings.Contains(err.Error(), "TG_STICKER_IMPORT") {
+		t.Fatalf("Load error = %v, want error naming TG_STICKER_IMPORT", err)
+	}
+}
+
+func TestLoadStickerImportMode(t *testing.T) {
+	tests := []struct {
+		name string
+		raw  string
+		want config.StickerImportMode
+	}{
+		{name: "unset defaults on", raw: "", want: config.StickerImportOn},
+		{name: "on", raw: "on", want: config.StickerImportOn},
+		{name: "off", raw: "off", want: config.StickerImportOff},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv("TG_POSTGRES_DSN", "postgres://localhost/tg")
+			t.Setenv("TG_AUTHKEY_ENC_KEY", validEncKey)
+			t.Setenv("TG_STICKER_IMPORT", tt.raw)
+
+			cfg, err := config.Load(discardLog())
+			if err != nil {
+				t.Fatalf("Load: %v", err)
+			}
+			if cfg.StickerImportMode != tt.want {
+				t.Fatalf("StickerImportMode = %q, want %q", cfg.StickerImportMode, tt.want)
+			}
+		})
+	}
+}
+
 func TestLoadWelcomeChannel(t *testing.T) {
 	t.Setenv("TG_POSTGRES_DSN", "postgres://localhost/tg")
 	t.Setenv("TG_AUTHKEY_ENC_KEY", validEncKey)

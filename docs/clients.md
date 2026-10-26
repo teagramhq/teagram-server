@@ -652,6 +652,16 @@ blindly replay a whole-table dump into a live database.
 
 ## 6. Supported Teagram clients
 
+### Sticker pack import
+
+Before uploading files for a sticker or emoji pack, a client can call
+`help.getAppConfig` and read the `sticker_import_mode` string. `on` means the
+instance permits accounts to create sticker sets and add stickers to their
+sets. `off` means the client should hide or disable “Import pack” and explain
+that this instance has disabled pack imports. The setting applies to every
+account on the instance. Existing sets remain available to resolve, install,
+send, and use.
+
 | Client | Status |
 |---|---|
 | Teagram Desktop | Supported macOS client. It lets users choose a server, verifies and pins the server identity to the account, then requests username and password. See the [desktop README](https://github.com/teagramhq/teagram-desktop/blob/dev/README.md) and [server enrollment guide](https://github.com/teagramhq/teagram-desktop/blob/dev/docs/server_enrollment.md). |

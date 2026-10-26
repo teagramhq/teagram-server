@@ -307,6 +307,7 @@ func testHandlers(s *store.Store, linkPrefixes ...string) *handlers {
 	}
 	return &handlers{
 		store:                    s,
+		stickerImportMode:        config.StickerImportOn,
 		cfg:                      &tg.Config{MeURLPrefix: linkPrefix},
 		log:                      slog.New(slog.DiscardHandler),
 		maxFileBytes:             TestMaxFileBytes,
