@@ -15,6 +15,7 @@ func testSmokeUploadMedia(t *testing.T) {
 	const phoneA, phoneB = "+15551048401", "+15551048402"
 	seedSmokeUsers(t, f, phoneA, phoneB)
 	uploader, peer := newSmokeClient(t, f, "upload-media sender", phoneA), newSmokeClient(t, f, "upload-media peer", phoneB)
+	assertSmokeUploadPartLimits(t, f.ctx, uploader, 3200)
 
 	documentBody := []byte("uploadMedia smoke document")
 	const documentFileID = int64(1048401)
@@ -81,6 +82,47 @@ func testSmokeUploadMedia(t *testing.T) {
 	}
 	assertSmokeUploadMediaDownloadRefused(t, f.ctx, uploader, photo)
 	assertSmokeUploadMediaDownloadRefused(t, f.ctx, peer, photo)
+}
+
+func assertSmokeUploadPartLimits(t *testing.T, ctx context.Context, client *smokeClient, want int) {
+	t.Helper()
+	if err := client.call(ctx, func(ctx context.Context, api *tg.Client) error {
+		result, err := api.HelpGetAppConfig(ctx, 0)
+		if err != nil {
+			return err
+		}
+		appConfig, ok := result.(*tg.HelpAppConfig)
+		if !ok {
+			return fmt.Errorf("help.getAppConfig = %T, want *tg.HelpAppConfig", result)
+		}
+		object, ok := appConfig.Config.(*tg.JSONObject)
+		if !ok {
+			return fmt.Errorf("app config = %T, want *tg.JSONObject", appConfig.Config)
+		}
+		limits := map[string]bool{
+			"upload_max_fileparts_default": false,
+			"upload_max_fileparts_premium": false,
+		}
+		for _, value := range object.Value {
+			_, found := limits[value.Key]
+			if !found {
+				continue
+			}
+			number, ok := value.Value.(*tg.JSONNumber)
+			if !ok || number.Value != float64(want) {
+				return fmt.Errorf("%s = %#v, want %d", value.Key, value.Value, want)
+			}
+			limits[value.Key] = true
+		}
+		for key, found := range limits {
+			if !found {
+				return fmt.Errorf("help.getAppConfig omitted %s", key)
+			}
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("help.getAppConfig upload limits: %v", err)
+	}
 }
 
 func uploadSmokeMediaParts(t *testing.T, ctx context.Context, client *smokeClient, fileID int64, body []byte, partSize int) int {
