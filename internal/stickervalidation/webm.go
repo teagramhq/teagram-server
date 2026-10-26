@@ -71,7 +71,7 @@ func parseWebMSegment(data []byte) (int, int, float64, error) {
 		height              int
 	)
 	for len(data) > 0 {
-		element, err := readEBMLElement(data)
+		element, err := readWebMSegmentElement(data)
 		if err != nil {
 			return 0, 0, 0, errInvalidWEBM
 		}
@@ -102,9 +102,6 @@ func parseWebMSegment(data []byte) (int, int, float64, error) {
 			clusterPayloads = append(clusterPayloads, element.payload)
 		}
 		data = element.rest
-		if element.unknown {
-			data = nil
-		}
 	}
 	if !infoSeen || !tracksSeen || !clusterSeen || timeScale == 0 || !isFinite(trackTimestampScale) || trackTimestampScale <= 0 || !isFinite(containerDuration) || containerDuration <= 0 {
 		return 0, 0, 0, errInvalidWEBM
@@ -136,6 +133,35 @@ func parseWebMSegment(data []byte) (int, int, float64, error) {
 		return 0, 0, 0, errInvalidWEBM
 	}
 	return width, height, seconds, nil
+}
+
+func readWebMSegmentElement(data []byte) (ebmlElement, error) {
+	element, err := readEBMLElement(data)
+	if err != nil || !element.unknown {
+		return element, err
+	}
+	if element.id != ebmlClusterID {
+		return ebmlElement{}, errInvalidWEBM
+	}
+
+	for rest := element.payload; len(rest) > 0; {
+		childID, _, _, err := readEBMLVINT(rest, true)
+		if err != nil {
+			return ebmlElement{}, errInvalidWEBM
+		}
+		if childID == ebmlClusterID {
+			consumed := len(element.payload) - len(rest)
+			element.payload = element.payload[:consumed]
+			element.rest = rest
+			return element, nil
+		}
+		child, err := readEBMLElement(rest)
+		if err != nil || child.unknown {
+			return ebmlElement{}, errInvalidWEBM
+		}
+		rest = child.rest
+	}
+	return element, nil
 }
 
 func parseWebMInfo(data []byte) (uint64, float64, error) {

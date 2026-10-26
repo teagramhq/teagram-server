@@ -219,6 +219,16 @@ func TestValidatePrefersWEBMBlockDurationToDefaultDuration(t *testing.T) {
 	}
 }
 
+func TestValidateCountsLaterClusterAfterUnknownSizeCluster(t *testing.T) {
+	body := testWEBMWithFrameTimestamp(512, 512, 2, false, 0, 0, testWEBMFrameOptions{
+		blockDurationTicks:      20,
+		additionalClusterTimes:  []uint64{4000},
+		unknownSizeFirstCluster: true,
+	})
+	_, err := stickervalidation.Validate(body, stickervalidation.TargetSticker)
+	assertReason(t, err, "STICKER_VIDEO_DURATION")
+}
+
 func TestValidateRejectsOversizedInputBeforeParsing(t *testing.T) {
 	body := bytes.Repeat([]byte{0}, 512*1024+1)
 	_, err := stickervalidation.Validate(body, stickervalidation.TargetSticker)
@@ -447,6 +457,8 @@ type testWEBMFrameOptions struct {
 	blockDurationTicks          uint64
 	frameCount                  int
 	additionalRelativeTimecodes []uint16
+	additionalClusterTimes      []uint64
+	unknownSizeFirstCluster     bool
 }
 
 func testWEBMWithFrameTimestamp(width, height int, duration float64, withAudio bool, clusterTimecode uint64, relativeTimecode uint16, options testWEBMFrameOptions) []byte {
@@ -483,29 +495,41 @@ func testWEBMWithFrameTimestamp(width, height int, duration float64, withAudio b
 	}
 	segment := append(testEBMLElement(0x1549a966, info), testEBMLElement(0x1654ae6b, tracks)...)
 	frame := testVP9Frame(width, height)
-	cluster := testEBMLElement(0xe7, testEBMLUint(clusterTimecode))
+	clusterTimes := append([]uint64{clusterTimecode}, options.additionalClusterTimes...)
 	blockTimecodes := append([]uint16{relativeTimecode}, options.additionalRelativeTimecodes...)
-	for _, blockTimecode := range blockTimecodes {
-		block := []byte{0x81, 0, 0, 0x80}
-		binary.BigEndian.PutUint16(block[1:3], blockTimecode)
-		if options.frameCount > 1 {
-			block[3] |= 0x04 // fixed-size lacing
-			block = append(block, byte(options.frameCount-1))
+	for clusterIndex, clusterTime := range clusterTimes {
+		cluster := testEBMLElement(0xe7, testEBMLUint(clusterTime))
+		for _, blockTimecode := range blockTimecodes {
+			block := []byte{0x81, 0, 0, 0x80}
+			binary.BigEndian.PutUint16(block[1:3], blockTimecode)
+			if options.frameCount > 1 {
+				block[3] |= 0x04 // fixed-size lacing
+				block = append(block, byte(options.frameCount-1))
+			}
+			for range options.frameCount {
+				block = append(block, frame...)
+			}
+			var blockElement []byte
+			if options.blockDurationTicks > 0 {
+				blockGroup := append(testEBMLElement(0xa1, block), testEBMLElement(0x9b, testEBMLUint(options.blockDurationTicks))...)
+				blockElement = testEBMLElement(0xa0, blockGroup)
+			} else {
+				blockElement = testEBMLElement(0xa3, block)
+			}
+			cluster = append(cluster, blockElement...)
 		}
-		for range options.frameCount {
-			block = append(block, frame...)
-		}
-		var blockElement []byte
-		if options.blockDurationTicks > 0 {
-			blockGroup := append(testEBMLElement(0xa1, block), testEBMLElement(0x9b, testEBMLUint(options.blockDurationTicks))...)
-			blockElement = testEBMLElement(0xa0, blockGroup)
+		if options.unknownSizeFirstCluster && clusterIndex == 0 {
+			segment = append(segment, testUnknownSizeEBMLElement(0x1f43b675, cluster)...)
 		} else {
-			blockElement = testEBMLElement(0xa3, block)
+			segment = append(segment, testEBMLElement(0x1f43b675, cluster)...)
 		}
-		cluster = append(cluster, blockElement...)
 	}
-	segment = append(segment, testEBMLElement(0x1f43b675, cluster)...)
 	return append(header, testEBMLElement(0x18538067, segment)...)
+}
+
+func testUnknownSizeEBMLElement(id uint32, payload []byte) []byte {
+	encodedID := testEBMLElement(id, nil)
+	return append(append(encodedID[:len(encodedID)-1], 0xff), payload...)
 }
 
 // These self-made solid-color VP9 keyframes were encoded and decoded with libvpx.
