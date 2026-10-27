@@ -60,7 +60,7 @@ seed() {
     migrate . "$f" || seed_failure "apply migrations to the $f fixture database"
   done
   TG_PERF_DIR="$PERF_CACHE" TG_PERF_DSN_1X="$(dsn 1x "")" TG_PERF_DSN_100X="$(dsn 100x "")" \
-    go test -tags performance -count=1 -timeout 100m -run '^TestSeedFixtures$' -v ./test/perf ||
+    go test -tags performance -count=1 -timeout 125m -run '^TestSeedFixtures$' -v ./test/perf ||
     seed_failure "populate the 1x and 100x fixture databases"
   # Database dumps do not include cluster roles, so omit ACLs that can refer to
   # roles unavailable on the fresh Postgres runner that restores this cache.

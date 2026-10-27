@@ -107,6 +107,8 @@ expected_restore_command="pg_restore -U postgres -d \"perf_\$f\" -j 4 --no-owner
   fail 'a missing or corrupt fixture snapshot must still fail the job'
 [[ "$runner_contents" == *"RPC performance fixture seed / infrastructure failure"* ]] ||
   fail 'fixture seed and infrastructure errors need an explicit summary label'
+[[ "$runner_contents" == *'go test -tags performance -count=1 -timeout 125m '* ]] ||
+  fail 'a cache-miss fixture seed must fit within the 150-minute performance job budget'
 [[ "$runner_contents" == *"fixture seeder changed; skipping the base comparison"* ]] ||
   fail 'a changed fixture seeder must still allow head measurements without an incompatible base comparison'
 [[ "$runner_contents" == *"^Test(LoadFixtureRejectsOlderVersion|OwnerUsernamePasswordLogin|RPCPerformance)$"* ]] ||
