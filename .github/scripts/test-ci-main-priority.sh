@@ -62,7 +62,7 @@ done <<< "$always_jobs"
 ci_needs="$(query '.jobs.ci.needs[]')"
 [[ "$ci_needs" == *'prioritize-main'* ]] ||
   fail 'the required ci summary must depend on the priority job'
-[[ "$(query '.jobs.ci.steps[] | select(.name == "Require all CI lanes to pass") | .env.MAIN_PRIORITY_RESULT')" == '${{ needs.prioritize-main.result }}' ]] ||
+[[ "$(query '.jobs.ci.steps[] | select(.name == "Require all CI lanes to pass") | .env.MAIN_PRIORITY_RESULT')" == "\${{ needs.prioritize-main.result }}" ]] ||
   fail 'the required ci summary must inspect the priority result'
 [[ "$(query '.jobs.ci.steps[] | select(.name == "Require all CI lanes to pass") | .run')" == *'expected_priority_result=success'* ]] ||
   fail 'the required ci summary must fail when main priority does not succeed'
