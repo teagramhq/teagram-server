@@ -206,7 +206,7 @@ class RealServerFixtureGateTests(unittest.TestCase):
         self.assertRegex(body, r"(?m)^    if: \$\{\{ always\(\) \}\}$")
         self.assertRegex(
             body,
-            r"(?ms)^    needs:\n      - ci-main\n      - sticker-bundle\n      - photothumb-runtime\n      - real-server-fixtures\n",
+            r"(?ms)^    needs:\n      - prioritize-main\n      - ci-main\n      - sticker-bundle\n      - photothumb-runtime\n      - real-server-fixtures\n",
         )
         self.assertIn("${{ needs.ci-main.result }}", body)
         self.assertIn("${{ needs.sticker-bundle.result }}", body)

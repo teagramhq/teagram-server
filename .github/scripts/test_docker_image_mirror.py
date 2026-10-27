@@ -74,6 +74,11 @@ def is_unqualified_hub_image(image: str) -> bool:
     return "." not in registry and ":" not in registry
 
 
+def job_needs(job: str) -> str:
+    match = re.search(r"(?ms)^    needs:(.*?)(?=^    [A-Za-z_-]+:|\Z)", job)
+    return match.group(1) if match else ""
+
+
 class DockerImageMirrorTests(unittest.TestCase):
     def test_ci_server_images_use_the_validated_sticker_bundle_context(self) -> None:
         dockerfile = (ROOT / "Dockerfile").read_text(encoding="utf-8")
@@ -124,7 +129,7 @@ class DockerImageMirrorTests(unittest.TestCase):
         )
         self.assertIsNotNone(photo_job, "Photo worker runtime job is missing")
         job = photo_job.group(1)
-        self.assertIn("needs: sticker-bundle", job)
+        self.assertIn("sticker-bundle", job_needs(job))
         self.assertIn("actions: read", job)
         self.assertIn("path: build/sticker-bundle", job)
         self.assertIn("uses: docker/setup-buildx-action@v4.4.1", job)
@@ -191,10 +196,8 @@ class DockerImageMirrorTests(unittest.TestCase):
             "ghcr.io/teagramhq/teagram-server-busybox:1.37@sha256:"
             "bdf57e528e45e4433820e045b29b4597825a1c9e38353532d90a01445013f82e"
         )
-        self.assertRegex(
-            job,
-            r"(?m)^    needs:\n      - mirror-rustfs-qualification-images\n      - sticker-bundle$",
-        )
+        self.assertIn("mirror-rustfs-qualification-images", job_needs(job))
+        self.assertIn("sticker-bundle", job_needs(job))
         self.assertIn("needs.sticker-bundle.result == 'success'", job)
         self.assertIn("packages: read", job)
         self.assertIn("docker login ghcr.io", job)
@@ -306,7 +309,10 @@ class DockerImageMirrorTests(unittest.TestCase):
         self.assertIsNotNone(qualification_job, "RustFS qualification job is missing")
         self.assertIn("packages: write", mirror_job.group(1))
         self.assertIn("packages: read", qualification_job.group(1))
-        self.assertIn("needs: mirror-rustfs-qualification-images", qualification_job.group(1))
+        self.assertIn(
+            "mirror-rustfs-qualification-images",
+            job_needs(qualification_job.group(1)),
+        )
         self.assertIn("docker login ghcr.io", qualification_job.group(1))
 
         mirror_script = (
