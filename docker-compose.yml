@@ -477,7 +477,9 @@ networks:
       com.docker.network.bridge.gateway_mode_ipv4: isolated
   public-ingress:
     driver: bridge
-    internal: true
+    # Host-side cloudflared reaches HAProxy through its loopback-published
+    # port. An internal bridge prevents Docker from installing that mapping.
+    internal: false
     enable_ipv6: false
     ipam:
       config:

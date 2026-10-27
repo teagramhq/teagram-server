@@ -259,6 +259,7 @@ assert legacy["secrets"]["teagramd_turnstile"]["file"] == "/dev/null"
 services = public["services"]
 base = services["teagramd"]
 proxy = services["public-haproxy"]
+assert public["networks"]["public-ingress"].get("internal", False) is False
 assert base["environment"]["TG_PUBLIC_WEBSOCKET_LISTEN_ADDR"] == ""
 assert base["environment"]["TG_RATE_LIMIT_KEY_EXCHANGE_IP"] == ""
 assert not any(str(port.get("target")) == "2446" for port in base.get("ports", []))
