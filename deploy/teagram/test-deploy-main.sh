@@ -6,6 +6,7 @@ umask 077
 
 script="$(cd "$(dirname "$0")" && pwd)/deploy-main.sh"
 logs_script="$(cd "$(dirname "$0")" && pwd)/teagram-logs.sh"
+ops_script="$(cd "$(dirname "$0")" && pwd)/teagram-ops.sh"
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
 
@@ -127,8 +128,10 @@ first=$(commit first)
 mkdir -p "$tmp/work/deploy/teagram"
 cp "$logs_script" "$tmp/work/deploy/teagram/teagram-logs.sh"
 chmod 755 "$tmp/work/deploy/teagram/teagram-logs.sh"
+cp "$ops_script" "$tmp/work/deploy/teagram/teagram-ops.sh"
+chmod 755 "$tmp/work/deploy/teagram/teagram-ops.sh"
 printf 'SYSLOGD_OPTS="-t -s 524288 -b 15"\n' > "$tmp/work/deploy/teagram/syslog.conf"
-git -C "$tmp/work" add deploy/teagram/teagram-logs.sh deploy/teagram/syslog.conf
+git -C "$tmp/work" add deploy/teagram/teagram-logs.sh deploy/teagram/teagram-ops.sh deploy/teagram/syslog.conf
 second=$(commit second)
 git -C "$tmp/work" checkout -q -b side "$first"
 side=$(commit side)
@@ -157,6 +160,8 @@ printf 'SYSLOGD_OPTS="-t"\n' > "$tmp/root/etc/conf.d/syslog"
 chmod 644 "$tmp/root/etc/conf.d/syslog"
 printf '#!/bin/sh\nprintf "legacy wrapper\\n"\n' > "$tmp/root/usr/local/sbin/teagram-logs"
 chmod 755 "$tmp/root/usr/local/sbin/teagram-logs"
+printf '#!/bin/sh\nprintf "legacy ops wrapper\\n"\n' > "$tmp/root/usr/local/sbin/teagram-ops"
+chmod 700 "$tmp/root/usr/local/sbin/teagram-ops"
 cat > "$tmp/bin/docker" <<'DOCKER'
 #!/usr/bin/env bash
 set -euo pipefail
@@ -277,6 +282,11 @@ if ! cmp -s "$tmp/root/usr/local/sbin/teagram-logs" "$tmp/work/deploy/teagram/te
   echo 'FAIL deploy did not install the commit-tracked teagram-logs command' >&2
   failures=$((failures + 1))
 fi
+if ! cmp -s "$tmp/root/usr/local/sbin/teagram-ops" "$tmp/work/deploy/teagram/teagram-ops.sh" || \
+  [[ "$(stat -c '%a' "$tmp/root/usr/local/sbin/teagram-ops")" != 700 ]]; then
+  echo 'FAIL deploy did not install the commit-tracked root-only teagram-ops command' >&2
+  failures=$((failures + 1))
+fi
 if ! cmp -s "$tmp/root/etc/conf.d/syslog" "$tmp/work/deploy/teagram/syslog.conf"; then
   echo 'FAIL deploy did not install the bounded syslog rotation configuration' >&2
   failures=$((failures + 1))
@@ -290,6 +300,11 @@ fi
 backup="$tmp/root/teagram-logs-before-${second:0:7}"
 if [[ ! -s "$backup" || "$(stat -c '%a' "$backup")" != 600 || "$(<"$backup")" != *'legacy wrapper'* ]]; then
   echo 'FAIL deploy did not keep a root-only copy of the prior teagram-logs command' >&2
+  failures=$((failures + 1))
+fi
+ops_backup="$tmp/root/teagram-ops-before-${second:0:7}"
+if [[ ! -s "$ops_backup" || "$(stat -c '%a' "$ops_backup")" != 600 || "$(<"$ops_backup")" != *'legacy ops wrapper'* ]]; then
+  echo 'FAIL deploy did not keep a root-only copy of the prior teagram-ops command' >&2
   failures=$((failures + 1))
 fi
 if [[ "$(tail -n 1 "$LINK_EDGE_DEPLOY_LOG")" != "$second" ]]; then
