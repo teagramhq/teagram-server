@@ -121,6 +121,7 @@ func TestValidateRejectsRequiredMalformedFiles(t *testing.T) {
 	animatedWEBP := testAnimatedWEBP(512, 512)
 	imageAssetTGS := testTGS(512, 512, `,"assets":[{"id":"img","w":1,"h":1,"p":"data:image/png;base64,AA=="}]`)
 	withExpressionTGS := testTGS(512, 512, `,"layers":[{"x":"value"}]`)
+	withArrayExpressionTGS := testTGS(512, 512, `,"layers":[{"ks":{"o":{"a":0,"k":100,"x":["alert(1)"]}}}]`)
 	webmWithAudio := testWEBM(512, 512, 2, true)
 
 	for _, tc := range []struct {
@@ -135,6 +136,7 @@ func TestValidateRejectsRequiredMalformedFiles(t *testing.T) {
 		{name: "animated WEBP", body: animatedWEBP, target: stickervalidation.TargetSticker, want: "STICKER_FILE_INVALID"},
 		{name: "TGS image asset", body: imageAssetTGS, target: stickervalidation.TargetSticker, want: "STICKER_TGS_NOTGS"},
 		{name: "TGS expression", body: withExpressionTGS, target: stickervalidation.TargetSticker, want: "STICKER_TGS_NOTGS"},
+		{name: "TGS array expression", body: withArrayExpressionTGS, target: stickervalidation.TargetSticker, want: "STICKER_TGS_NOTGS"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			_, err := stickervalidation.Validate(tc.body, tc.target)
