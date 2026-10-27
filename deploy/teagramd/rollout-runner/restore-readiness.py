@@ -179,8 +179,15 @@ def _inventory_mounts(value: str) -> list[dict[str, Any]]:
     return sorted(mounts, key=lambda mount: json.dumps(mount, sort_keys=True, separators=(",", ":")))
 
 
-def collect_docker_resource_inventory(call: Callable[[list[str]], bytes]) -> dict[str, Any]:
+def collect_docker_resource_inventory(
+    call: Callable[[list[str]], bytes], image_token: str | None = None
+) -> dict[str, Any]:
     """Read only Docker metadata needed to prove foreign-resource isolation."""
+    image_label_filter = f"label={IMAGE_TOKEN_LABEL}"
+    if image_token is not None:
+        if not re.fullmatch(r"[0-9a-f]{32}", image_token):
+            raise ValueError("invalid Docker image token")
+        image_label_filter += f"={image_token}"
     containers: dict[str, dict[str, Any]] = {}
     container_ids = [
         item for item in call(["ps", "--all", "--no-trunc", "--format", "{{.ID}}"])
@@ -282,7 +289,7 @@ def collect_docker_resource_inventory(call: Callable[[list[str]], bytes]) -> dic
                 "--quiet",
                 "--no-trunc",
                 "--filter",
-                f"label={IMAGE_TOKEN_LABEL}",
+                image_label_filter,
             ]
         )
         .decode("utf-8", "strict")
@@ -3675,7 +3682,7 @@ class Drill(Docker):
             return self.call(args, phase=phase, category="isolation_refusal", timeout=20)
 
         try:
-            return collect_docker_resource_inventory(invoke)
+            return collect_docker_resource_inventory(invoke, self.manifest["token"])
         except (KeyError, TypeError, UnicodeDecodeError, ValueError) as exc:
             raise DrillFailure(phase, "isolation_refusal") from exc
 

@@ -154,6 +154,7 @@ def expired_work_cleanup_manifest(
         "parent_done": True,
         "work_deadline": time.monotonic() - 1,
         "cleanup_deadline": time.monotonic() + 60,
+        "token": "c" * 32,
         "resource_creation_started": True,
         "baseline": {
             "docker_inventory": {"containers": {}, "volumes": {}, "networks": {}, "images": {}},
@@ -1431,6 +1432,7 @@ class RestoreReadinessContractTests(unittest.TestCase):
         drill.manifest = {
             "work_deadline": time.monotonic() - 1,
             "cleanup_deadline": time.monotonic() + 60,
+            "token": "c" * 32,
         }
         drill.cleanup_call = Mock(return_value=(1, b""))
 
@@ -2823,8 +2825,26 @@ class RestoreReadinessContractTests(unittest.TestCase):
                 "inode": rollout_info.st_ino,
             }
             manifest, _private_path = expired_work_cleanup_manifest(run_dir, global_lock, rollout_lock)
+            token = "c" * 32
+            other_run_image = "sha256:" + "d" * 64
+            manifest["token"] = token
             manifest["baseline"]["docker_inventory"].pop("images")
             verify_foreign_inventory = RESTORE_READINESS.Drill.verify_foreign_inventory
+
+            def docker_call(arguments: list[str]) -> bytes:
+                if arguments[:3] == ["ps", "--all", "--no-trunc"]:
+                    return b""
+                if arguments[:2] == ["volume", "ls"]:
+                    return b""
+                if arguments[:2] == ["image", "ls"]:
+                    if arguments[-1] == f"label={RESTORE_READINESS.IMAGE_TOKEN_LABEL}={token}":
+                        return b""
+                    if arguments[-1] == f"label={RESTORE_READINESS.IMAGE_TOKEN_LABEL}":
+                        return f"{other_run_image}\n".encode()
+                    raise AssertionError(f"unexpected image inventory filter: {arguments[-1]}")
+                if arguments[:2] == ["network", "ls"]:
+                    return b""
+                raise AssertionError(f"unexpected Docker inventory command: {arguments[0]}")
 
             class RecoveryDrill:
                 def __init__(self, _args: Any, _run_dir: Path, recovery_manifest: dict[str, Any]) -> None:
@@ -2834,7 +2854,7 @@ class RestoreReadinessContractTests(unittest.TestCase):
                     return None
 
                 def docker_resource_inventory(self, _phase: str) -> dict[str, Any]:
-                    return {"containers": {}, "volumes": {}, "networks": {}, "images": {}}
+                    return RESTORE_READINESS.collect_docker_resource_inventory(docker_call, self.manifest["token"])
 
                 def cleanup_resources(self) -> bool:
                     return verify_foreign_inventory(self)
