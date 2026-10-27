@@ -152,15 +152,16 @@ image_env_inspect=$(jq -c \
   | .Id=$container_id
   | .Config.Env += ["TG_STICKER_CATALOG_BUNDLE=/usr/share/teagram/sticker-bundle"]
 ' <<< "$(inspect_json '')")
+image_env_json='["TG_STICKER_CATALOG_BUNDLE=/usr/share/teagram/sticker-bundle"]'
 image_env_snapshot=$(snapshot_from_json \
-  "$image_env_inspect" "$COMPOSE_JSON" "$ENV_FILE" "$OVERRIDE_FILE" selected-compose-render target)
+  "$image_env_inspect" "$COMPOSE_JSON" "$ENV_FILE" "$OVERRIDE_FILE" selected-compose-render target '' "$image_env_json")
 if [ "$(jq -r '.container_env_sha256' <<< "$empty_env")" != \
      "$(jq -r '.container_env_sha256' <<< "$image_env_snapshot")" ]; then
   printf '%s\n' 'FAIL image-provided environment changed the operator environment digest' >&2
   exit 1
 fi
 live_image_env_snapshot=$(snapshot_from_json \
-  "$image_env_inspect" "$COMPOSE_JSON" "$ENV_FILE" "$OVERRIDE_FILE" live-container-inspection baseline)
+  "$image_env_inspect" "$COMPOSE_JSON" "$ENV_FILE" "$OVERRIDE_FILE" live-container-inspection baseline '' "$image_env_json")
 if [ "$(jq -r '.container_env_sha256' <<< "$empty_env")" != \
      "$(jq -r '.container_env_sha256' <<< "$live_image_env_snapshot")" ]; then
   printf '%s\n' 'FAIL image-provided environment changed the live-inspection operator digest' >&2
@@ -176,6 +177,16 @@ if ! compare_snapshots \
   exit 1
 fi
 printf '%s\n' 'PASS image-provided environment does not change operator environment equivalence'
+
+unexpected_runtime_inspect=$(jq -c '.Config.Env += ["TG_UNDECLARED_RUNTIME_FLAG=on"]' <<< "$image_env_inspect")
+unexpected_runtime_snapshot=$(snapshot_from_json \
+  "$unexpected_runtime_inspect" "$COMPOSE_JSON" "$ENV_FILE" "$OVERRIDE_FILE" selected-compose-render target '' "$image_env_json")
+if [ "$(jq -r '.container_env_sha256' <<< "$empty_env")" = \
+     "$(jq -r '.container_env_sha256' <<< "$unexpected_runtime_snapshot")" ]; then
+  printf '%s\n' 'FAIL unmodeled runtime environment addition was ignored with image defaults' >&2
+  exit 1
+fi
+printf '%s\n' 'PASS unmodeled runtime environment additions remain pinned'
 
 operator_env_baseline_compose=$(jq -c \
   '.services.teagramd.environment.TG_OPERATOR_FLAG="baseline"' <<< "$COMPOSE_JSON")
