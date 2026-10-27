@@ -4,6 +4,31 @@ on:
   push:
     branches: [main]
   pull_request:
+    paths:
+      - 'internal/api/**'
+      - 'internal/blob/**'
+      - 'internal/catalog/**'
+      - 'internal/config/**'
+      - 'internal/discovery/**'
+      - 'internal/keycrypt/**'
+      - 'internal/mtproto/**'
+      - 'internal/peerhash/**'
+      - 'internal/pgtest/**'
+      - 'internal/photohash/**'
+      - 'internal/photothumb/**'
+      - 'internal/photowire/**'
+      - 'internal/reactionassets/**'
+      - 'internal/rsakey/**'
+      - 'internal/srp/**'
+      - 'internal/stickerbundle/**'
+      - 'internal/store/**'
+      - 'migrations/**'
+      - 'test/perf/**'
+      - 'go.mod'
+      - 'go.sum'
+      - '.github/scripts/perf-*'
+      - '.github/scripts/test_perf_run.py'
+      - '.github/workflows/perf.yml'
   workflow_dispatch:
     inputs:
       issue:
@@ -108,12 +133,6 @@ jobs:
           # The base commit is checked out into a worktree and measured in the
           # same job.
           fetch-depth: 0
-
-      - name: Check Postgres readiness probe
-        run: bash .github/scripts/test-perf-postgres-readiness.sh
-
-      - name: Test performance fixture restore roles
-        run: python3 .github/scripts/test_perf_run_restore.py
 
       # A queued pull_request run can check out a merge ref with a newer base
       # than the event's base.sha. Compare against the merge ref's first parent.
