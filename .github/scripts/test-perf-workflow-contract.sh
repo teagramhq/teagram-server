@@ -18,7 +18,7 @@ query() {
   yq -r "$1" "$workflow"
 }
 
-expected_pr_paths='internal/api/**,internal/blob/**,internal/config/**,internal/mtproto/**,internal/store/**,migrations/**,test/perf/**,go.mod,go.sum,.github/scripts/perf-*,.github/scripts/test_perf_run.py'
+expected_pr_paths='internal/api/**,internal/blob/**,internal/config/**,internal/mtproto/**,internal/peerhash/**,internal/store/**,migrations/**,test/perf/**,go.mod,go.sum,.github/scripts/perf-*,.github/scripts/test_perf_run.py'
 [[ "$(query '.on.pull_request.paths | join(",")')" == "$expected_pr_paths" ]] ||
   fail 'PR performance runs must cover RPC handlers, transport, storage, and performance harness changes'
 [[ "$(query '.on.push.branches | join(",")')" == 'main' ]] ||

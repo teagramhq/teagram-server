@@ -9,6 +9,7 @@ on:
       - 'internal/blob/**'
       - 'internal/config/**'
       - 'internal/mtproto/**'
+      - 'internal/peerhash/**'
       - 'internal/store/**'
       - 'migrations/**'
       - 'test/perf/**'
