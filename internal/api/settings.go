@@ -140,6 +140,9 @@ func (h *handlers) handleGetAppConfig(r *mtproto.Request) (bin.Encoder, error) {
 		Key:   "upload_max_part_bytes",
 		Value: &tg.JSONNumber{Value: store.MaxPartBytes},
 	}, {
+		Key:   "upload_max_file_bytes",
+		Value: &tg.JSONNumber{Value: float64(h.maxFileBytes)},
+	}, {
 		Key:   "upload_max_fileparts_default",
 		Value: &tg.JSONNumber{Value: float64(h.maxFileParts())},
 	}, {
@@ -179,12 +182,6 @@ func (h *handlers) handleGetAppConfig(r *mtproto.Request) (bin.Encoder, error) {
 		Key:   "reactions_user_max_premium",
 		Value: &tg.JSONNumber{Value: 1},
 	}}
-	if h.appConfigUploadMaxFileBytes > 0 {
-		values = append(values, tg.JSONObjectValue{
-			Key:   "upload_max_file_bytes",
-			Value: &tg.JSONNumber{Value: float64(h.appConfigUploadMaxFileBytes)},
-		})
-	}
 	if h.turnstileSiteKey != "" && h.turnstileVerifier != nil {
 		values = append(values, tg.JSONObjectValue{
 			Key: "turnstile",
@@ -195,7 +192,7 @@ func (h *handlers) handleGetAppConfig(r *mtproto.Request) (bin.Encoder, error) {
 		})
 	}
 	return &tg.HelpAppConfig{
-		Hash:   appConfigHashForUploadLimit(h.appConfigUploadMaxFileBytes),
+		Hash:   appConfigHashForUploadLimit(h.maxFileBytes),
 		Config: &tg.JSONObject{Value: values},
 	}, nil
 }

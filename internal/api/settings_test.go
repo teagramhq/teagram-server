@@ -33,8 +33,8 @@ type settingsHandler struct {
 
 func assertAppConfig(t *testing.T, got *tg.HelpAppConfig, mode config.RegistrationMode) {
 	t.Helper()
-	if got.Hash != 8 {
-		t.Fatalf("app config hash = %d, want 8", got.Hash)
+	if got.Hash == 8 {
+		t.Fatalf("app config hash = %d, want a hash that includes the effective upload cap", got.Hash)
 	}
 	object, ok := got.Config.(*tg.JSONObject)
 	if !ok {
@@ -47,11 +47,11 @@ func assertAppConfig(t *testing.T, got *tg.HelpAppConfig, mode config.Registrati
 		}
 		values[value.Key] = value.Value
 	}
-	if len(values) != 29 {
-		t.Fatalf("app config has %d keys, want 29", len(values))
+	if len(values) != 30 {
+		t.Fatalf("app config has %d keys, want 30", len(values))
 	}
-	if _, ok := values["upload_max_file_bytes"]; ok {
-		t.Fatal("app config advertised upload_max_file_bytes while TG_UPLOAD_MAX_BYTES is unset")
+	if value, ok := values["upload_max_file_bytes"].(*tg.JSONNumber); !ok || value.Value != float64(api.TestMaxFileBytes) {
+		t.Fatalf("upload_max_file_bytes = %v, want %d", values["upload_max_file_bytes"], api.TestMaxFileBytes)
 	}
 	if _, ok := values["password_min_length"]; ok {
 		t.Fatal("app config advertised a password minimum without a server rule")
