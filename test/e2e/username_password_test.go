@@ -10,6 +10,8 @@ import (
 	"log/slog"
 	"net"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -68,6 +70,13 @@ func bootServerWithRegMode(t *testing.T, ctx context.Context, key *rsa.PrivateKe
 // and rate-limit config, and returns a stop function.
 func bootServerWithRegAndLimits(t *testing.T, ctx context.Context, key *rsa.PrivateKey, dcID int, st *store.Store, log *slog.Logger, ln net.Listener, regMode config.RegistrationMode, rateLimits config.RateLimitsConfig) func() {
 	t.Helper()
+	return bootServerWithExchangeLimits(t, ctx, key, dcID, st, log, ln, regMode, rateLimits, mtproto.DefaultExchangeLimits())
+}
+
+// bootServerWithExchangeLimits boots a server like bootServerWithRegAndLimits
+// with the given key-exchange budgets, and returns a stop function.
+func bootServerWithExchangeLimits(t *testing.T, ctx context.Context, key *rsa.PrivateKey, dcID int, st *store.Store, log *slog.Logger, ln net.Listener, regMode config.RegistrationMode, rateLimits config.RateLimitsConfig, exchangeLimits mtproto.ExchangeLimits) func() {
+	t.Helper()
 	tgcfg := fixtureConfigForListener(t, dcID, ln)
 	blobs, err := blob.NewLocal(t.TempDir())
 	if err != nil {
@@ -75,6 +84,9 @@ func bootServerWithRegAndLimits(t *testing.T, ctx context.Context, key *rsa.Priv
 	}
 	handler := api.New(st, dcID, tgcfg, log, true, 100<<20, blobs, 2<<30, pgtest.PeerDeriver(), pgtest.PhotoDeriver(), rateLimits, regMode)
 	server := mtproto.New(exchange.PrivateKey{RSA: key}, dcID, mtproto.NewPgAuthKeyStore(st), handler, log)
+	if err := server.SetExchangeLimits(exchangeLimits); err != nil {
+		t.Fatalf("exchange limits: %v", err)
+	}
 
 	srvCtx, srvCancel := context.WithCancel(ctx)
 	serveErr := make(chan error, 1)
@@ -169,6 +181,73 @@ func checkPasswordUsername(ctx context.Context, api *tg.Client, password string)
 		return fmt.Errorf("checkPassword: unexpected response type %T, want *tg.AuthAuthorization", resp)
 	}
 	return nil
+}
+
+func runUsernamePasswordSignIn(ctx context.Context, client *telegram.Client, username, password string) error {
+	api := client.API()
+	if _, err := api.HelpGetAppConfig(ctx, 0); err != nil {
+		return fmt.Errorf("help.getAppConfig for %s: %w", username, err)
+	}
+	hash, err := sendCodeUsername(ctx, api, username)
+	if err != nil {
+		return fmt.Errorf("auth.sendCode for %s: %w", username, err)
+	}
+	if _, err := signInUsername(ctx, api, username, hash, ""); err == nil {
+		return fmt.Errorf("auth.signIn for %s succeeded, want SESSION_PASSWORD_NEEDED", username)
+	} else if !isSessionPasswordNeeded(err) {
+		return fmt.Errorf("auth.signIn for %s: expected SESSION_PASSWORD_NEEDED, got %w", username, err)
+	}
+	if err := checkPasswordUsername(ctx, api, password); err != nil {
+		return fmt.Errorf("auth.checkPassword for %s: %w", username, err)
+	}
+	status, err := client.Auth().Status(ctx)
+	if err != nil {
+		return fmt.Errorf("authorization status for %s: %w", username, err)
+	}
+	if !status.Authorized {
+		return fmt.Errorf("%s was not authorized", username)
+	}
+	return nil
+}
+
+type exchangeBudgetRefusalLog struct {
+	mu       sync.Mutex
+	count    int
+	layer    string
+	listener string
+}
+
+func (*exchangeBudgetRefusalLog) Enabled(context.Context, slog.Level) bool { return true }
+
+func (s *exchangeBudgetRefusalLog) Handle(_ context.Context, record slog.Record) error {
+	if record.Message != "key exchange refused at budget" {
+		return nil
+	}
+	var layer, listener string
+	record.Attrs(func(attr slog.Attr) bool {
+		switch attr.Key {
+		case "layer":
+			layer = attr.Value.String()
+		case "listener":
+			listener = attr.Value.String()
+		}
+		return true
+	})
+	s.mu.Lock()
+	s.count++
+	s.layer = layer
+	s.listener = listener
+	s.mu.Unlock()
+	return nil
+}
+
+func (s *exchangeBudgetRefusalLog) WithAttrs([]slog.Attr) slog.Handler { return s }
+func (s *exchangeBudgetRefusalLog) WithGroup(string) slog.Handler      { return s }
+
+func (s *exchangeBudgetRefusalLog) refusal() (int, string, string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.count, s.layer, s.listener
 }
 
 // isSignUpRequired checks if the error is auth.authorizationSignUpRequired.
@@ -374,6 +453,141 @@ func TestUsernamePasswordSignIn(t *testing.T) {
 		return nil
 	}); err != nil {
 		t.Fatalf("login flow: %v", err)
+	}
+}
+
+// TestSequentialUsernameAccountSignInsFromSameClientIP exercises the first
+// account followed by a fresh client signing into a second account from the
+// same loopback address, including the app-config request shown by the web
+// sign-in card.
+func TestSequentialUsernameAccountSignInsFromSameClientIP(t *testing.T) {
+	t.Parallel()
+	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+	defer cancel()
+
+	key, err := rsakey.Bootstrap(t.TempDir() + "/key.pem")
+	if err != nil {
+		t.Fatal(err)
+	}
+	st, err := store.Open(ctx, pgtest.DSN(t), pgtest.EncKey(), store.WithBlobStore(testBlobs(t)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if cerr := st.Close(); cerr != nil {
+			t.Errorf("store close: %v", cerr)
+		}
+	})
+
+	const dcID = 2
+	codes := newCodeSink()
+	ln := mustListen(t, ctx, "127.0.0.1:0")
+	addr, ok := ln.Addr().(*net.TCPAddr)
+	if !ok {
+		t.Fatalf("listener addr type = %T", ln.Addr())
+	}
+	stop := bootServerWithRegMode(t, ctx, key, dcID, st, codes.Logger(), ln, config.RegistrationInvite)
+	t.Cleanup(stop)
+
+	const password = "testpassword"
+	usernames := []string{"sameip_first", "sameip_second"}
+	for _, username := range usernames {
+		seedUsernameUser(t, ctx, st, username, "Same IP", password)
+	}
+
+	for _, username := range usernames {
+		client := newUsernameClient(addr.Port, key, dcID, nil)
+		if err := client.Run(ctx, func(ctx context.Context) error {
+			return runUsernamePasswordSignIn(ctx, client, username, password)
+		}); err != nil {
+			t.Fatalf("fresh-client login from shared loopback IP for %s: %v", username, err)
+		}
+	}
+}
+
+// TestFreshUsernameSignInAfterSameIPExchangeBudgetIsSpent reproduces a fresh
+// client sign-in after earlier contexts have spent the shared per-network
+// exchange budget. The tailnet budget is lowered so spending it takes a few
+// exchanges rather than the production default's twenty.
+func TestFreshUsernameSignInAfterSameIPExchangeBudgetIsSpent(t *testing.T) {
+	t.Parallel()
+	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+	defer cancel()
+
+	key, err := rsakey.Bootstrap(t.TempDir() + "/key.pem")
+	if err != nil {
+		t.Fatal(err)
+	}
+	st, err := store.Open(ctx, pgtest.DSN(t), pgtest.EncKey(), store.WithBlobStore(testBlobs(t)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if cerr := st.Close(); cerr != nil {
+			t.Errorf("store close: %v", cerr)
+		}
+	})
+
+	const dcID = 2
+	budgetLogs := &exchangeBudgetRefusalLog{}
+	ln := mustListen(t, ctx, "127.0.0.1:0")
+	addr, ok := ln.Addr().(*net.TCPAddr)
+	if !ok {
+		t.Fatalf("listener addr type = %T", ln.Addr())
+	}
+	exchangeLimits := mtproto.DefaultExchangeLimits()
+	exchangeLimits.TailnetPerNetwork.Limit = 2
+	stop := bootServerWithExchangeLimits(t, ctx, key, dcID, st, slog.New(budgetLogs), ln, config.RegistrationInvite, config.RateLimitsConfig{}, exchangeLimits)
+	t.Cleanup(stop)
+
+	const password = "testpassword"
+	usernames := []string{"budget_first", "budget_second"}
+	for _, username := range usernames {
+		seedUsernameUser(t, ctx, st, username, "Budget", password)
+	}
+
+	firstClient := newUsernameClient(addr.Port, key, dcID, nil)
+	if err := firstClient.Run(ctx, func(ctx context.Context) error {
+		return runUsernamePasswordSignIn(ctx, firstClient, usernames[0], password)
+	}); err != nil {
+		t.Fatalf("first account sign-in: %v", err)
+	}
+
+	limit := exchangeLimits.TailnetPerNetwork.Limit
+	refused := false
+	for attempt := 1; attempt <= limit; attempt++ {
+		client := newUsernameClient(addr.Port, key, dcID, nil)
+		attemptCtx, attemptCancel := context.WithTimeout(ctx, 10*time.Second)
+		err := client.Run(attemptCtx, func(ctx context.Context) error {
+			_, err := client.API().HelpGetAppConfig(ctx, 0)
+			return err
+		})
+		attemptCancel()
+		if err != nil {
+			count, layer, listener := budgetLogs.refusal()
+			if count == 0 || layer != "network" || listener != "tailnet" {
+				t.Fatalf("fresh context %d failed before tailnet network budget refusal: %v; first refusal = count %d, layer %q, listener %q", attempt, err, count, layer, listener)
+			}
+			refused = true
+			break
+		}
+	}
+	if !refused {
+		t.Fatalf("%d fresh contexts did not exhaust the tailnet exchange budget", limit)
+	}
+	secondClient := newUsernameClient(addr.Port, key, dcID, nil)
+	secondCtx, secondCancel := context.WithTimeout(ctx, 10*time.Second)
+	var appConfigAttempted atomic.Bool
+	err = secondClient.Run(secondCtx, func(ctx context.Context) error {
+		appConfigAttempted.Store(true)
+		return runUsernamePasswordSignIn(ctx, secondClient, usernames[1], password)
+	})
+	secondCancel()
+	if err == nil {
+		t.Fatal("fresh sign-in succeeded after the same-IP exchange budget was spent")
+	}
+	if appConfigAttempted.Load() {
+		t.Fatalf("fresh sign-in reached the RPC callback despite exchange refusal: %v", err)
 	}
 }
 

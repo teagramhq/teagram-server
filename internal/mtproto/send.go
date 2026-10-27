@@ -1509,7 +1509,7 @@ func (c *Conn) sendResult(req *Request, msg bin.Encoder, onSuccess func()) error
 	var buf bin.Buffer
 	if err := msg.Encode(&buf); err != nil {
 		req.rpcResult = RPCResultInternal
-		return fmt.Errorf("encode result: %w", err)
+		return markRequestFailureCause(requestFailureResponseEncoding, fmt.Errorf("encode result: %w", err))
 	}
 	var wire bin.Buffer
 	if err := (&proto.Result{
@@ -1517,7 +1517,7 @@ func (c *Conn) sendResult(req *Request, msg bin.Encoder, onSuccess func()) error
 		Result:           buf.Raw(),
 	}).Encode(&wire); err != nil {
 		req.rpcResult = RPCResultInternal
-		return fmt.Errorf("encode result envelope: %w", err)
+		return markRequestFailureCause(requestFailureResponseEncoding, fmt.Errorf("encode result envelope: %w", err))
 	}
 	var sendErr error
 	func() {
@@ -1549,7 +1549,7 @@ func (c *Conn) sendResult(req *Request, msg bin.Encoder, onSuccess func()) error
 		if closeErr := c.closeAfterSendFailure(sendErr); closeErr != nil {
 			sendErr = errors.Join(sendErr, fmt.Errorf("close failed RPC transport: %w", closeErr))
 		}
-		return fmt.Errorf("send result [%T]: %w", msg, sendErr)
+		return markRequestFailureCause(requestFailureResponseWrite, fmt.Errorf("send result [%T]: %w", msg, sendErr))
 	}
 	return nil
 }
