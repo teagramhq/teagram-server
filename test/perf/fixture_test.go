@@ -36,7 +36,7 @@ import (
 
 // fixtureVersion changes whenever the seeded shape changes, so a cached dump
 // of an older shape is never measured as if it were this one.
-const fixtureVersion = 3
+const fixtureVersion = 4
 
 // spec is one fixture size. The small fixture uses one hundredth of the large
 // fixture's scalable data, subject to its Store's per-account contact cap.
@@ -152,11 +152,11 @@ func TestContactCapIncludesSeedAndBook(t *testing.T) {
 
 func TestLoadFixtureRejectsOlderVersion(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "fixture.json")
-	if err := os.WriteFile(path, []byte(`{"version":2}`), 0o600); err != nil {
+	if err := os.WriteFile(path, []byte(`{"version":3}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := loadFixture(path); err == nil || !strings.Contains(err.Error(), "fixture version 2, want 3") {
-		t.Fatalf("loadFixture error = %v, want fixture version 2 mismatch", err)
+	if _, err := loadFixture(path); err == nil || !strings.Contains(err.Error(), "fixture version 3, want 4") {
+		t.Fatalf("loadFixture error = %v, want fixture version 3 mismatch", err)
 	}
 }
 
