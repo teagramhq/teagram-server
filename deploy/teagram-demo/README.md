@@ -47,8 +47,8 @@ policy. Required layout and policy:
 - Run the demo's Cloudflare Tunnel connector in the demo LXC and route only
   `demo.teagram.io` to `http://127.0.0.1:8080`. The edge container publishes
   that origin on loopback only. The root serves the pinned Teagram Web private
-  artifact after its first successful publication; before then it returns the
-  plain status page with HTTP 200. `/teagram-config.json` provides the fixed
+  artifact after its first eligible master publication; before then it returns
+  the plain status page with HTTP 200. `/teagram-config.json` provides the fixed
   demo server and auto-guest settings. The edge also serves the client
   discovery document and `/apiws`, returns 404 for `/admin`, and applies SPA
   fallback only to client routes. For
@@ -68,9 +68,10 @@ both `https://web.teagram.io` and `https://demo.teagram.io`. The app CSP keeps
 the current web directives and restricts `connect-src` to the demo WSS origin
 and Cloudflare Turnstile. Registration is open, the existing signup
 limit remains five attempts per IP per hour, login-code logging is disabled,
-and uploads are capped at 16 MiB per file and 256 MiB per account. Sticker and
-custom emoji pack imports are disabled (`TG_STICKER_IMPORT=off`); catalogue
-packs remain available to install and send.
+uploads are capped at 500 KB per file, and per-account storage remains capped
+at 256 MiB.
+Sticker and custom emoji pack imports are disabled (`TG_STICKER_IMPORT=off`);
+catalogue packs remain available to install and send.
 
 `prepare-env.sh` keeps the Turnstile site key in `.env` and writes the secret
 key to `/var/lib/teagram-demo/secrets/turnstile-secret-key` with root ownership
@@ -185,13 +186,15 @@ command="/opt/teagram-demo/deploy/teagram-demo/forced-command.sh",restrict ssh-e
 then separately accepts a bounded web archive tied to the current demo
 checkout. It fetches `origin/main`, rejects non-main revisions and skips stale
 server deploys. The `Deploy.` workflow downloads the server digest from the
-successful server CI run. For the web app it reads the deployed
-`mtproto-target.json`, confirms that its source commit has a successful
-teagram-web publication run and matching checksum-named CI artifact, rebuilds
-that exact commit on the hosted runner, and requires the upstream artifact
-verifier to reproduce the published digest. The LXC receives only the
-checksum-pinned archive; it never installs Node or builds the web app. The web
-source commit and artifact digest are stored in
+successful server CI run. `web-artifact-pin.json` first records teagram-web
+PR #121's head, successful validation run, and the artifact digest reported by
+that run's log; this candidate pin is never deployed. After #121 merges, the
+pin changes to the green `master` publication. The
+read-only deploy preflight then requires the pin to match the public web
+manifest and a successful, checksum-named publication artifact. CI rebuilds
+the exact pinned source and verifies the artifact digest before the LXC
+receives a checksum-pinned archive; the LXC never installs Node or builds the
+web app. The web source commit and artifact digest are stored in
 `.state/teagram-demo/active-release.json`. A PR workflow cannot influence the
 server image digest by overwriting the package's SHA tag. `deploy-main.sh` pulls
 only the supplied server digest and checks both its repository digest and

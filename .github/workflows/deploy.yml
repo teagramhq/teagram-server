@@ -115,9 +115,47 @@ jobs:
         if: ${{ always() }}
         run: rm -rf "$RUNNER_TEMP/ssh"
 
+  resolve-demo-web:
+    name: resolve pinned demo web artifact
+    needs: deploy
+    if: ${{ needs.deploy.result == 'success' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    outputs:
+      deployable: ${{ steps.pin.outputs.deployable }}
+      source_commit: ${{ steps.pin.outputs.source_commit }}
+      artifact_digest: ${{ steps.pin.outputs.artifact_digest }}
+
+    steps:
+      - name: Check out the deployed server commit
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ needs.deploy.outputs.sha }}
+          persist-credentials: false
+
+      - name: Resolve the pinned web artifact
+        id: pin
+        run: |
+          pin=$(python3 deploy/teagram-demo/resolve_web_artifact_pin.py --require-live-manifest)
+          deployable=$(jq -er '.deployable | tostring' <<<"$pin")
+          source_commit=$(jq -er '.sourceCommit' <<<"$pin")
+          artifact_digest=$(jq -er '.artifactDigest' <<<"$pin")
+          [[ "$deployable" == true || "$deployable" == false ]]
+          [[ "$source_commit" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$artifact_digest" =~ ^sha256:[0-9a-f]{64}$ ]]
+          {
+            printf 'deployable=%s\n' "$deployable"
+            printf 'source_commit=%s\n' "$source_commit"
+            printf 'artifact_digest=%s\n' "$artifact_digest"
+          } >> "$GITHUB_OUTPUT"
+
   deploy-demo:
     name: deploy public demo
-    needs: deploy
+    needs:
+      - deploy
+      - resolve-demo-web
     if: ${{ needs.deploy.result == 'success' }}
     runs-on: ubuntu-26.04
     timeout-minutes: 60
@@ -133,6 +171,7 @@ jobs:
           TEAGRAM_DEMO_DEPLOY_ENABLED: ${{ vars.TEAGRAM_DEMO_DEPLOY_ENABLED }}
           TS_OAUTH_CLIENT_ID: ${{ secrets.TS_OAUTH_CLIENT_ID }}
           TS_OAUTH_SECRET: ${{ secrets.TS_OAUTH_SECRET }}
+          DEMO_WEB_DEPLOYABLE: ${{ needs.resolve-demo-web.outputs.deployable }}
         run: |
           if [[ "$TEAGRAM_DEMO_DEPLOY_ENABLED" != 'true' ]]; then
             echo "enabled=false" >> "$GITHUB_OUTPUT"
@@ -140,6 +179,9 @@ jobs:
           elif [[ -z "$TS_OAUTH_CLIENT_ID" || -z "$TS_OAUTH_SECRET" ]]; then
             echo "enabled=false" >> "$GITHUB_OUTPUT"
             echo "::notice::Public demo deployment skipped: Tailscale OAuth credentials are missing"
+          elif [[ "$DEMO_WEB_DEPLOYABLE" != 'true' ]]; then
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::Public demo deployment skipped: the web pin is not deployable"
           else
             echo "enabled=true" >> "$GITHUB_OUTPUT"
           fi
@@ -163,91 +205,45 @@ jobs:
           [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]
           echo "digest=$digest" >> "$GITHUB_OUTPUT"
 
-      - name: Resolve the green teagram-web publication
-        id: web-release
-        run: |
-          manifest="$RUNNER_TEMP/teagram-web-target.json"
-          curl --fail --silent --show-error --location --max-time 20 \
-            https://web.teagram.io/mtproto-target.json --output "$manifest"
-          jq -e '
-            type == "object"
-            and .mode == "private"
-            and (.sourceCommit | type == "string" and test("^[0-9a-f]{40}$"))
-            and (.artifactDigest | type == "string" and test("^sha256:[0-9a-f]{64}$"))
-            and (.endpoint | type == "string" and startswith("wss://"))
-          ' "$manifest" >/dev/null
-          source_sha=$(jq -r '.sourceCommit' "$manifest")
-          artifact_digest=$(jq -r '.artifactDigest' "$manifest")
-          artifact_hex=${artifact_digest#sha256:}
-          runs=$(curl --fail --silent --show-error \
-            'https://api.github.com/repos/teagramhq/teagram-web/actions/workflows/private-artifact.yml/runs?branch=master&event=push&status=success&per_page=100')
-          run_id=$(jq -r --arg sha "$source_sha" '
-            [.workflow_runs[] | select(.head_sha == $sha and .head_branch == "master" and .event == "push" and .status == "completed" and .conclusion == "success")] |
-            first | .id // empty
-          ' <<< "$runs")
-          [[ "$run_id" =~ ^[0-9]+$ ]] || {
-            echo "::error::no green teagram-web publication run found for $source_sha"
-            exit 1
-          }
-          artifact_name="private-mtproto-$source_sha-$artifact_hex"
-          artifacts=$(curl --fail --silent --show-error \
-            "https://api.github.com/repos/teagramhq/teagram-web/actions/runs/$run_id/artifacts?per_page=100")
-          jq -e --arg name "$artifact_name" 'any(.artifacts[]; .name == $name)' <<< "$artifacts" >/dev/null || {
-            echo "::error::green publication run $run_id has no artifact matching $artifact_digest"
-            exit 1
-          }
-          {
-            printf 'source_commit=%s\n' "$source_sha"
-            printf 'artifact_digest=%s\n' "$artifact_digest"
-            printf 'artifact_hex=%s\n' "$artifact_hex"
-            printf 'publication_run_id=%s\n' "$run_id"
-          } >> "$GITHUB_OUTPUT"
+      - name: Check out the deployed server scripts
+        if: ${{ steps.demo-gate.outputs.enabled == 'true' }}
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ needs.deploy.outputs.sha }}
+          persist-credentials: false
 
       - name: Check out the pinned teagram-web source
+        if: ${{ steps.demo-gate.outputs.enabled == 'true' }}
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
           repository: teagramhq/teagram-web
-          ref: ${{ steps.web-release.outputs.source_commit }}
+          ref: ${{ needs.resolve-demo-web.outputs.source_commit }}
           path: teagram-web
           persist-credentials: false
 
       - name: Set up pnpm for the pinned web build
+        if: ${{ steps.demo-gate.outputs.enabled == 'true' }}
         uses: pnpm/action-setup@0c17529a66aca453f9227af23103ed11469b1e47
         with:
           version: 11.16.0
 
       - name: Set up Node.js for the pinned web build
+        if: ${{ steps.demo-gate.outputs.enabled == 'true' }}
         uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
         with:
           node-version: 24.18.0
           cache: pnpm
           cache-dependency-path: teagram-web/pnpm-lock.yaml
 
-      - name: Rebuild and verify the green web artifact
+      - name: Rebuild and verify the pinned web artifact
+        id: web-build
+        if: ${{ steps.demo-gate.outputs.enabled == 'true' }}
         working-directory: teagram-web
         env:
-          WEB_SOURCE_SHA: ${{ steps.web-release.outputs.source_commit }}
-          WEB_ARTIFACT_DIGEST: ${{ steps.web-release.outputs.artifact_digest }}
+          WEB_SOURCE_SHA: ${{ needs.resolve-demo-web.outputs.source_commit }}
+          WEB_ARTIFACT_DIGEST: ${{ needs.resolve-demo-web.outputs.artifact_digest }}
         run: |
-          reviewed_mode=$(jq -r '.MTPROTO_TARGET_MODE' ci/private-mtproto-target.json)
-          reviewed_endpoint=$(jq -r '.MTPROTO_PRIVATE_ENDPOINT' ci/private-mtproto-target.json)
-          reviewed_key=$(jq -r '.MTPROTO_PRIVATE_RSA_PUBLIC_KEY_FILE' ci/private-mtproto-target.json)
-          [[ "$reviewed_mode" == private && "$reviewed_endpoint" == "$(jq -r '.endpoint' "$RUNNER_TEMP/teagram-web-target.json")" ]]
-          pnpm install --frozen-lockfile
-          MTPROTO_TARGET_MODE="$reviewed_mode" \
-            MTPROTO_PRIVATE_ENDPOINT="$reviewed_endpoint" \
-            MTPROTO_PRIVATE_RSA_PUBLIC_KEY_FILE="$reviewed_key" \
-            pnpm exec vite build --outDir dist-private
-          MTPROTO_TARGET_MODE="$reviewed_mode" \
-            MTPROTO_PRIVATE_ENDPOINT="$reviewed_endpoint" \
-            MTPROTO_PRIVATE_RSA_PUBLIC_KEY_FILE="$reviewed_key" \
-            node scripts/private-artifact-release.mjs verify \
-              --dist dist-private --commit "$WEB_SOURCE_SHA" --ref refs/heads/master
-          jq -e --arg sha "$WEB_SOURCE_SHA" --arg digest "$WEB_ARTIFACT_DIGEST" \
-            '.sourceCommit == $sha and .artifactDigest == $digest' dist-private/mtproto-target.json >/dev/null || {
-              echo '::error::rebuilt web output differs from the green published artifact identity'
-              exit 1
-            }
+          bash "$GITHUB_WORKSPACE/deploy/teagram-demo/build-web-artifact.sh"
           archive="$RUNNER_TEMP/demo-web-$WEB_SOURCE_SHA.tar.gz"
           tar -czf "$archive" -C dist-private .
           archive_sha256=$(sha256sum "$archive" | awk '{print $1}')
@@ -299,12 +295,13 @@ jobs:
             "root@$DEMO_DEPLOY_HOST" "$DEPLOY_SHA $DEPLOY_IMAGE_DIGEST" </dev/null
 
       - name: Publish the pinned web artifact on the demo origin
+        if: ${{ steps.demo-gate.outputs.enabled == 'true' }}
         env:
           DEPLOY_SHA: ${{ needs.deploy.outputs.sha }}
-          WEB_SOURCE_SHA: ${{ steps.web-release.outputs.source_commit }}
-          WEB_ARTIFACT_DIGEST: ${{ steps.web-release.outputs.artifact_digest }}
-          WEB_ARCHIVE_SHA256: ${{ steps.web-release.outputs.archive_sha256 }}
-          WEB_ARCHIVE: ${{ steps.web-release.outputs.archive }}
+          WEB_SOURCE_SHA: ${{ needs.resolve-demo-web.outputs.source_commit }}
+          WEB_ARTIFACT_DIGEST: ${{ needs.resolve-demo-web.outputs.artifact_digest }}
+          WEB_ARCHIVE_SHA256: ${{ steps.web-build.outputs.archive_sha256 }}
+          WEB_ARCHIVE: ${{ steps.web-build.outputs.archive }}
           DEMO_DEPLOY_HOST: ${{ vars.DEMO_DEPLOY_HOST }}
           DEMO_DEPLOY_PORT: ${{ vars.DEMO_DEPLOY_PORT }}
         run: |
