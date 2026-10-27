@@ -484,15 +484,15 @@ func aggregate(reports []Report) (map[key]*Result, []string) {
 	return out, order
 }
 
-// median takes the lower middle value, so an even count never reports a
-// value no round measured.
+// median takes the upper middle value, so an even count never reports a
+// value no round measured and a noisy low round cannot hide a regression.
 func median(rs []Result, f func(Result) float64) float64 {
 	vals := make([]float64, len(rs))
 	for i, r := range rs {
 		vals[i] = f(r)
 	}
 	slices.Sort(vals)
-	return vals[(len(vals)-1)/2]
+	return vals[len(vals)/2]
 }
 
 func ratio(a, b int64) float64 {

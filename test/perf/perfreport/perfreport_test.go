@@ -70,6 +70,19 @@ func TestEvaluateBlocksRowsThatFollowAccountSize(t *testing.T) {
 	}
 }
 
+func TestEvaluateDoesNotLetOneLowSmallFixtureRoundCauseRowsFailure(t *testing.T) {
+	first := pair("messages.getDialogs", perfreport.Read,
+		result(6, 10, 24, 859), result(10, 13, 24, 947))
+	second := pair("messages.getDialogs", perfreport.Read,
+		result(7, 11, 24, 626), result(11, 14, 24, 964))
+	v := perfreport.Evaluate(perfreport.Input{Head: []perfreport.Report{
+		report(first...), report(second...),
+	}})
+	if got := reasons(v.Failures); got != "" {
+		t.Fatalf("failures = %q, want repeated measurements to remain within the row budget", got)
+	}
+}
+
 func TestEvaluateBlocksSequentialScan(t *testing.T) {
 	rs := pair("messages.search", perfreport.Read, result(1, 2, 3, 10), result(1, 2, 3, 10))
 	rs[1].SeqScans = []string{"messages#1a2b3c4d (1000000 rows): SELECT id FROM messages"}
