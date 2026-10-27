@@ -33,14 +33,16 @@ func (s *scaleQueries) TraceQueryStart(ctx context.Context, _ *pgx.Conn, data pg
 func (*scaleQueries) TraceQueryEnd(context.Context, *pgx.Conn, pgx.TraceQueryEndData) {}
 
 type scalePlan struct {
-	Node     string      `json:"Node Type"`
-	Relation string      `json:"Relation Name"`
-	Cost     float64     `json:"Total Cost"`
-	Rows     float64     `json:"Actual Rows"`
-	Loops    float64     `json:"Actual Loops"`
-	Hits     int64       `json:"Shared Hit Blocks"`
-	Reads    int64       `json:"Shared Read Blocks"`
-	Plans    []scalePlan `json:"Plans"`
+	Node                  string      `json:"Node Type"`
+	Relation              string      `json:"Relation Name"`
+	Cost                  float64     `json:"Total Cost"`
+	Rows                  float64     `json:"Actual Rows"`
+	Loops                 float64     `json:"Actual Loops"`
+	RemovedByFilter       float64     `json:"Rows Removed by Filter"`
+	RemovedByIndexRecheck float64     `json:"Rows Removed by Index Recheck"`
+	Hits                  int64       `json:"Shared Hit Blocks"`
+	Reads                 int64       `json:"Shared Read Blocks"`
+	Plans                 []scalePlan `json:"Plans"`
 }
 
 func (p scalePlan) sequentialTables() []string {
@@ -57,12 +59,23 @@ func (p scalePlan) sequentialTables() []string {
 func (p scalePlan) rowsReadFrom(table string) float64 {
 	var rows float64
 	if p.Relation == table {
-		rows += p.Rows * p.Loops
+		rows += (p.Rows + p.RemovedByFilter + p.RemovedByIndexRecheck) * p.Loops
 	}
 	for _, child := range p.Plans {
 		rows += child.rowsReadFrom(table)
 	}
 	return rows
+}
+
+func TestScalePlanRowsReadIncludesRemovedRowsAndLoops(t *testing.T) {
+	var plan scalePlan
+	if err := json.Unmarshal([]byte(`{"Relation Name":"dialogs","Actual Rows":2,"Actual Loops":3,"Rows Removed by Filter":5,"Rows Removed by Index Recheck":7}`), &plan); err != nil {
+		t.Fatal(err)
+	}
+
+	if got, want := plan.rowsReadFrom("dialogs"), float64(42); got != want {
+		t.Fatalf("rows read = %.0f, want %.0f", got, want)
+	}
 }
 
 func (p scalePlan) recordRelations(seen map[string]bool) {
