@@ -762,6 +762,8 @@ if len(servers) != 1:
 lines[servers[0]] = "  server attribution 198.18.132.23:2446 send-proxy-v2"
 open(target, "w", encoding="utf-8").write("\n".join(lines) + "\n")
 PY
+# This generated config has no secrets; the validation container drops all caps.
+chmod 644 "$work_dir/haproxy-attribution.cfg"
 docker run --rm --network none --read-only --cap-drop ALL \
 	-v "$work_dir/haproxy-attribution.cfg:/usr/local/etc/haproxy/haproxy.cfg:ro" \
 	"$haproxy_image" haproxy -c -f /usr/local/etc/haproxy/haproxy.cfg
