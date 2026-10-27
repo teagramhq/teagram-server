@@ -6,10 +6,21 @@ readonly LIVE_CHECKOUT=/opt/teagram
 OPS_SHA=${OPS_SHA:-}
 TMP=
 TMP_TOKEN=
+RESULT_ROWS=
 unset COMPOSE_ENV_FILES
 
+report_cleanup_failure() {
+  local target=$1 status=$2 detail=$3
+  if [ -n "$detail" ]; then
+    printf 'live Compose replay cleanup failed for %s (exit %s): %s\n' "$target" "$status" "$detail" >&2
+  else
+    printf 'live Compose replay cleanup failed for %s (exit %s): owned-tree guard refused removal or recursive deletion failed without a diagnostic\n' \
+      "$target" "$status" >&2
+  fi
+}
+
 cleanup() {
-  local status=$? cleanup_status=0 owner mode real_tmp marker child target remaining
+  local status=$? cleanup_status=0 owner mode real_tmp marker child target remaining remove_status remove_error
   trap - EXIT
   if [ -n "$TMP" ]; then
     case "$TMP" in
@@ -25,7 +36,13 @@ cleanup() {
               for child in live pr baseline preflight logs; do
                 target="$TMP/$child"
                 if [ -e "$target" ] || [ -L "$target" ]; then
-                  rollout_safe_remove_tree "$target" "$TMP" "$TMP_TOKEN" "$LIVE_CHECKOUT" || cleanup_status=1
+                  if remove_error=$(rollout_safe_remove_tree "$target" "$TMP" "$TMP_TOKEN" "$LIVE_CHECKOUT" 2>&1); then
+                    :
+                  else
+                    remove_status=$?
+                    report_cleanup_failure "$target" "$remove_status" "$remove_error"
+                    cleanup_status=1
+                  fi
                 fi
               done
             fi
@@ -69,14 +86,21 @@ cleanup() {
     esac
   fi
   [ "$cleanup_status" -eq 0 ] || status=1
+  if [ "$status" -eq 0 ] && [ "$cleanup_status" -eq 0 ] && [ -n "$RESULT_ROWS" ]; then
+    printf '%s\n' "$RESULT_ROWS"
+  fi
   exit "$status"
 }
-trap cleanup EXIT
 
 die() {
   printf 'live Compose replay failed: %s\n' "$1" >&2
   exit 1
 }
+
+if [[ "${BASH_SOURCE[0]}" != "$0" ]]; then
+  return 0
+fi
+trap cleanup EXIT
 
 [[ "$OPS_SHA" =~ ^[0-9a-f]{40}$ ]] || die 'OPS_SHA must be a full commit ID'
 live_git_root=$(git -C "$LIVE_CHECKOUT" rev-parse --show-toplevel 2>/dev/null) || die 'live checkout is unavailable'
@@ -317,4 +341,4 @@ awk -F '\t' '
   NF != 2 || $2 != "pass" { failed = 1 }
   END { if (failed || NR < 2) exit 1 }
 ' "$TMP/logs/field-results.tsv" || die 'runner emitted invalid preflight result rows'
-cat -- "$TMP/logs/field-results.tsv"
+RESULT_ROWS=$(<"$TMP/logs/field-results.tsv")

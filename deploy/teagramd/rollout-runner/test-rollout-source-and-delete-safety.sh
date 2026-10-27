@@ -9,11 +9,15 @@ OWNED="$TMP/owned"
 TOKEN=$(source "$SCRIPT_DIR/rollout-safe-remove-tree.sh"; rollout_create_owned_dir "$OWNED")
 MARKED=
 MARKED_TOKEN=
+CLEANUP_FIXTURE=
 CHECKOUT_FIXTURE="$OWNED/checkout"
 OUTSIDE="$TMP/outside"
 mkdir -m 700 "$CHECKOUT_FIXTURE" "$OUTSIDE"
 
 cleanup() {
+  if [ -n "$CLEANUP_FIXTURE" ]; then
+    rmdir -- "$CLEANUP_FIXTURE/live" "$CLEANUP_FIXTURE" || return 1
+  fi
   local marker="$OWNED/.rollout-owned-$TOKEN"
   if [ -n "$MARKED" ] && [ -d "$MARKED" ]; then
     if [ -d "$MARKED/replay" ]; then
@@ -115,4 +119,48 @@ grep -Fq 'TMP_TOKEN=$(rollout_mark_owned_dir "$TMP")' "$OPS_SCRIPT"
 grep -Fq 'rollout_safe_remove_tree "$target" "$TMP" "$TMP_TOKEN" "$LIVE_CHECKOUT"' "$OPS_SCRIPT"
 grep -Fq 'chmod 600 -- "$tree/$env_name"' "$OPS_SCRIPT"
 grep -Fq 'unlink -- "$env_path"' "$OPS_SCRIPT"
+grep -Fq 'RESULT_ROWS=$(<"$TMP/logs/field-results.tsv")' "$OPS_SCRIPT"
+grep -Fq 'printf '\''%s\n'\'' "$RESULT_ROWS"' "$OPS_SCRIPT"
+if grep -Fq 'cat -- "$TMP/logs/field-results.tsv"' "$OPS_SCRIPT"; then
+  printf '%s\n' 'FAIL live replay prints field rows before protected-tree cleanup' >&2
+  exit 1
+fi
+
+CLEANUP_FIXTURE=$(mktemp -d /tmp/main2612-replay.XXXXXXXX)
+mkdir -m 700 "$CLEANUP_FIXTURE/live"
+cleanup_status=0
+if cleanup_output=$(bash -c '
+  set -Eeuo pipefail
+  source "$1"
+  TMP=$2
+  TMP_TOKEN=0123456789abcdef0123456789abcdef
+  RESULT_ROWS=$3
+  realpath() { printf "%s\n" "$3"; }
+  stat() {
+    case "$2" in
+      %u) printf "0\n" ;;
+      %a) printf "700\n" ;;
+      *) return 2 ;;
+    esac
+  }
+  rollout_safe_remove_tree() {
+    printf "synthetic ownership marker mismatch\n" >&2
+    return 23
+  }
+  cleanup
+' _ "$OPS_SCRIPT" "$CLEANUP_FIXTURE" $'field\tresult\ncompose\tpass' 2>&1); then
+  printf '%s\n' 'FAIL live replay cleanup fixture accepted a guarded-delete failure' >&2
+  exit 1
+else
+  cleanup_status=$?
+fi
+[ "$cleanup_status" -eq 1 ]
+expected_cleanup_error="live Compose replay cleanup failed for $CLEANUP_FIXTURE/live (exit 23): synthetic ownership marker mismatch"
+[ "$cleanup_output" = "$expected_cleanup_error" ] || {
+  printf 'FAIL unexpected live replay cleanup diagnostic: %s\n' "$cleanup_output" >&2
+  exit 1
+}
+rmdir -- "$CLEANUP_FIXTURE/live" "$CLEANUP_FIXTURE"
+CLEANUP_FIXTURE=
 printf '%s\n' 'PASS live replay uses prefix-checked owned-tree cleanup and short-lived private env copies'
+printf '%s\n' 'PASS replay withholds passing rows and reports the failed child path and cleanup error'

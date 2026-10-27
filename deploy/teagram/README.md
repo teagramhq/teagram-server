@@ -78,9 +78,11 @@ not secure erasure. On success or an ordinary command failure, the EXIT trap
 removes each work-tree child through `rollout-safe-remove-tree.sh`, which checks
 the ownership marker, owner, mode, canonical path and protected-path rules.
 The outer temp path is prefix-checked and removed with `rmdir` only after it is
-empty. An uncatchable kill or host failure can bypass the trap and leave a
-root-only temp tree behind; treat any such stale copy as a credential and do
-not remove it with a broad recursive command.
+empty. Field/result rows are printed only after cleanup succeeds; a failed
+guarded deletion reports the child path and cleanup error and returns nonzero.
+An uncatchable kill or host failure can bypass the trap and leave a root-only
+temp tree behind; treat any such stale copy as a credential and do not remove
+it with a broad recursive command.
 
 To redeploy by hand, run the `Deploy.` workflow from the Actions tab
 (`workflow_dispatch`, no inputs; it deploys the newest `main` commit with a
