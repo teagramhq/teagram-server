@@ -9,6 +9,12 @@ DEMO_STATE_DIR="$DEMO_REPO_ROOT/.state/teagram-demo"
 # shellcheck disable=SC2034
 DEMO_CLIENT_CONFIG_DIR="$DEMO_STATE_DIR/public-client"
 # shellcheck disable=SC2034
+DEMO_WEB_ROOT="$DEMO_CLIENT_CONFIG_DIR/web"
+# shellcheck disable=SC2034
+DEMO_WEB_RELEASES_DIR="$DEMO_WEB_ROOT/releases"
+# shellcheck disable=SC2034
+DEMO_WEB_CURRENT_LINK="$DEMO_WEB_ROOT/current"
+# shellcheck disable=SC2034
 DEMO_CLIENT_CONFIG="$DEMO_CLIENT_CONFIG_DIR/client"
 # shellcheck disable=SC2034
 DEMO_AUTHORITY_DIR="$DEMO_REPO_ROOT/.state/blob-mode"
@@ -86,11 +92,33 @@ demo_require_proxy_configuration_current() {
     demo_fail "$service target Compose hash is invalid"
     return 1
   }
-  [[ "$live_hash" == "$target_hash" && "$live_source_hash" == "$expected_source_hash" ]] ||
-    {
-      demo_fail "$service proxy image or configuration changed; apply proxy changes during maintenance before deploying"
-      return 1
-    }
+  if [[ "$live_hash" == "$target_hash" && "$live_source_hash" == "$expected_source_hash" ]]; then
+    return 0
+  fi
+  if [[ "$service" == edge && "$live_source_hash" =~ ^[0-9a-f]{64}$ ]]; then
+    local normalized_hash
+    normalized_hash=$(demo_edge_compose_hash_for_source "$live_source_hash") || {
+        demo_fail 'edge normalized Compose hash could not be read'
+        return 1
+      }
+    if [[ "$live_hash" == "$normalized_hash" ]]; then
+      return 0
+    fi
+  fi
+  demo_fail "$service proxy image or configuration changed; apply proxy changes during maintenance before deploying"
+  return 1
+}
+
+demo_edge_compose_hash_for_source() {
+  local source_hash="$1" image_ref
+  image_ref=$(demo_compose_image_ref) || return 1
+  env -u COMPOSE_FILE -u COMPOSE_PROJECT_NAME -u COMPOSE_PROFILES \
+    -u TEAGRAM_DEMO_TURNSTILE_SITE_KEY -u TEAGRAM_DEMO_TURNSTILE_SECRET_KEY_FILE \
+    -u TEAGRAM_DEMO_EDGE_BIND \
+    "TEAGRAM_DEMO_IMAGE_REF=$image_ref" \
+    "TEAGRAM_DEMO_EDGE_CONFIG_SHA256=$source_hash" \
+    docker compose "${DEMO_COMPOSE_ARGS[@]}" config --hash edge |
+    awk '$1 == "edge" {print $2}'
 }
 
 demo_wait_migration() {
@@ -165,6 +193,7 @@ demo_require_env() {
     demo_fail 'deploy/teagram-demo/.env is missing or not a regular file'
     return 1
   }
+  python3 "$DEMO_SCRIPT_DIR/update-websocket-origins.py" "$DEMO_ENV_FILE" || return 1
   demo_prepare_turnstile_secret_access || return 1
   python3 "$DEMO_SCRIPT_DIR/validate-env.py" "$DEMO_ENV_FILE" || return 1
 }
@@ -254,7 +283,7 @@ demo_inactive_server() {
 }
 
 demo_write_active_release() {
-  local active="$1" image_ref="$2" temporary
+  local active="$1" image_ref="$2" web_sha="${3:-}" web_digest="${4:-}" temporary
   if [[ "$active" != teagramd && "$active" != teagramd-next ]]; then
     demo_fail 'invalid active server selection'
     return 1
@@ -263,6 +292,12 @@ demo_write_active_release() {
     demo_fail 'invalid active release image reference'
     return 1
   fi
+  if [[ -n "$web_sha" || -n "$web_digest" ]]; then
+    [[ "$web_sha" =~ ^[0-9a-f]{40}$ && "$web_digest" =~ ^sha256:[0-9a-f]{64}$ ]] || {
+      demo_fail 'invalid active web artifact identity'
+      return 1
+    }
+  fi
   if [[ -L "$DEMO_STATE_DIR" ]]; then
     demo_fail 'demo state directory must not be a symlink'
     return 1
@@ -270,10 +305,42 @@ demo_write_active_release() {
   install -d -o root -g root -m 0755 "$DEMO_STATE_DIR"
   temporary=$(mktemp "$DEMO_STATE_DIR/active-release.XXXXXXXX")
   jq -n --arg server "$active" --arg image_ref "$image_ref" \
-    '{server: $server, image_ref: $image_ref}' > "$temporary"
+    --arg web_sha "$web_sha" --arg web_digest "$web_digest" '
+    {server: $server, image_ref: $image_ref}
+    + if $web_sha != "" and $web_digest != "" then
+        {web: {source_commit: $web_sha, artifact_digest: $web_digest}}
+      else {} end
+  ' > "$temporary"
   chown root:root "$temporary"
   chmod 0600 "$temporary"
   mv -f -- "$temporary" "$DEMO_ACTIVE_RELEASE_FILE"
+}
+
+demo_active_web_release() {
+  local web_sha web_digest
+  if [[ ! -e "$DEMO_ACTIVE_RELEASE_FILE" && ! -L "$DEMO_ACTIVE_RELEASE_FILE" ]]; then
+    printf '\n'
+    return 0
+  fi
+  if [[ ! -f "$DEMO_ACTIVE_RELEASE_FILE" || -L "$DEMO_ACTIVE_RELEASE_FILE" ||
+    "$(stat -c '%u:%a' "$DEMO_ACTIVE_RELEASE_FILE")" != '0:600' ]]; then
+    demo_fail 'active release file must be a root-owned mode 0600 file'
+    return 1
+  fi
+  if ! web_sha=$(jq -er '.web.source_commit // ""' "$DEMO_ACTIVE_RELEASE_FILE") ||
+    ! web_digest=$(jq -er '.web.artifact_digest // ""' "$DEMO_ACTIVE_RELEASE_FILE"); then
+    demo_fail 'active web artifact identity is invalid'
+    return 1
+  fi
+  if [[ -z "$web_sha" && -z "$web_digest" ]]; then
+    printf '\n'
+    return 0
+  fi
+  [[ "$web_sha" =~ ^[0-9a-f]{40}$ && "$web_digest" =~ ^sha256:[0-9a-f]{64}$ ]] || {
+    demo_fail 'active web artifact identity is invalid'
+    return 1
+  }
+  printf '%s %s\n' "$web_sha" "${web_digest#sha256:}"
 }
 
 demo_pull_image_by_sha() {
@@ -313,9 +380,127 @@ demo_pull_image_by_sha() {
 }
 
 demo_prepare_client_config_dir() {
+  local config_file="$DEMO_CLIENT_CONFIG_DIR/teagram-config.json" temporary
+  local expected_config='{"server":"demo.teagram.io","autoGuest":true}'
   [[ ! -L "$DEMO_STATE_DIR" ]] || demo_fail 'demo state directory must not be a symlink'
   [[ ! -L "$DEMO_CLIENT_CONFIG_DIR" ]] || demo_fail 'public client config directory must not be a symlink'
+  [[ ! -L "$DEMO_WEB_ROOT" ]] || demo_fail 'public web root must not be a symlink'
+  [[ ! -L "$DEMO_WEB_RELEASES_DIR" ]] || demo_fail 'public web release directory must not be a symlink'
   install -d -o root -g root -m 0755 "$DEMO_CLIENT_CONFIG_DIR"
+  install -d -o root -g root -m 0755 "$DEMO_WEB_RELEASES_DIR"
+  if [[ -e "$config_file" || -L "$config_file" ]]; then
+    [[ -f "$config_file" && ! -L "$config_file" &&
+      "$(stat -c '%u:%a' "$config_file")" == '0:644' &&
+      "$(stat -c '%s' "$config_file")" == "${#expected_config}" &&
+      "$(<"$config_file")" == "$expected_config" ]] || {
+      demo_fail 'demo web config file is invalid'
+      return 1
+    }
+    return 0
+  fi
+  temporary=$(mktemp "$DEMO_CLIENT_CONFIG_DIR/.teagram-config.XXXXXXXX")
+  printf '%s' "$expected_config" > "$temporary"
+  chown root:root "$temporary"
+  chmod 0644 "$temporary"
+  mv -f -- "$temporary" "$config_file"
+}
+
+demo_reload_edge() {
+  local -a edge_ids=()
+  mapfile -t edge_ids < <(demo_compose ps -q edge)
+  ((${#edge_ids[@]} == 1)) || {
+    demo_fail 'running edge proxy is missing or ambiguous'
+    return 1
+  }
+  docker exec "${edge_ids[0]}" nginx -t >/dev/null || {
+    demo_fail 'edge nginx configuration failed its syntax check'
+    return 1
+  }
+  docker exec "${edge_ids[0]}" nginx -s reload >/dev/null || {
+    demo_fail 'edge nginx graceful reload failed'
+    return 1
+  }
+}
+
+demo_current_web_release() {
+  local target
+  if [[ ! -e "$DEMO_WEB_CURRENT_LINK" && ! -L "$DEMO_WEB_CURRENT_LINK" ]]; then
+    printf '\n'
+    return 0
+  fi
+  if [[ ! -L "$DEMO_WEB_CURRENT_LINK" ]]; then
+    demo_fail 'current public web release must be a symlink'
+    return 1
+  fi
+  target=$(readlink -- "$DEMO_WEB_CURRENT_LINK") || return 1
+  [[ "$target" =~ ^releases/([0-9a-f]{40})-([0-9a-f]{64})$ ]] || {
+    demo_fail 'current public web release target is invalid'
+    return 1
+  }
+  [[ -d "$DEMO_WEB_ROOT/$target" && ! -L "$DEMO_WEB_ROOT/$target" ]] || {
+    demo_fail 'current public web release directory is missing or unsafe'
+    return 1
+  }
+  printf '%s %s\n' "${BASH_REMATCH[1]}" "${BASH_REMATCH[2]}"
+}
+
+demo_verify_web_release_manifest() {
+  local directory="$1" source_commit="$2" digest_hex="$3"
+  jq -e --arg source "$source_commit" --arg digest "sha256:$digest_hex" '
+    type == "object"
+    and (keys | sort) == ["artifactDigest", "endpoint", "fingerprint", "mode", "sourceCommit"]
+    and .mode == "private"
+    and .sourceCommit == $source
+    and .artifactDigest == $digest
+    and (.endpoint | type == "string" and startswith("wss://"))
+    and (.fingerprint | type == "string" and test("^[0-9a-f]{16}$"))
+  ' "$directory/mtproto-target.json" >/dev/null || {
+    demo_fail 'public web release manifest does not match its release identity'
+    return 1
+  }
+}
+
+demo_reconcile_web_release() {
+  local active_web current_web source_commit digest_hex image_ref server target temporary
+  active_web=$(demo_active_web_release) || return 1
+  current_web=$(demo_current_web_release) || return 1
+  if [[ "$active_web" == "$current_web" ]]; then
+    printf '%s\n' "$active_web"
+    return 0
+  fi
+
+  if [[ -n "$current_web" ]]; then
+    source_commit=${current_web%% *}
+    digest_hex=${current_web#* }
+    demo_verify_web_release_manifest "$DEMO_WEB_ROOT/releases/$source_commit-$digest_hex" \
+      "$source_commit" "$digest_hex" || return 1
+    server=$(demo_active_server) || return 1
+    image_ref=$(demo_active_image_ref) || return 1
+    demo_write_active_release "$server" "$image_ref" "$source_commit" "sha256:$digest_hex" || return 1
+    printf '%s\n' "$current_web"
+    return 0
+  fi
+
+  if [[ -n "$active_web" ]]; then
+    source_commit=${active_web%% *}
+    digest_hex=${active_web#* }
+    target="releases/$source_commit-$digest_hex"
+    demo_verify_web_release_manifest "$DEMO_WEB_ROOT/$target" "$source_commit" "$digest_hex" || return 1
+    temporary="$DEMO_WEB_CURRENT_LINK.recover.$$"
+    [[ ! -e "$temporary" && ! -L "$temporary" ]] || {
+      demo_fail 'temporary web release recovery link already exists'
+      return 1
+    }
+    ln -s -- "$target" "$temporary" && mv -Tf -- "$temporary" "$DEMO_WEB_CURRENT_LINK" || {
+      rm -f -- "$temporary"
+      demo_fail 'current public web release could not be recovered'
+      return 1
+    }
+    printf '%s\n' "$active_web"
+    return 0
+  fi
+
+  printf '\n'
 }
 
 demo_prepare_haproxy_runtime() {
@@ -443,6 +628,8 @@ demo_render_config() {
     and .services.teagramd.environment.TG_MAX_FILE_BYTES == "16777216"
     and .services.teagramd.environment.TG_MAX_USER_STORAGE_BYTES == "268435456"
     and .services.teagramd.environment.TG_WEBSOCKET_LISTEN_ADDR == ":2446"
+    and .services.teagramd.environment.TG_WEBSOCKET_ALLOWED_ORIGINS == "https://web.teagram.io,https://demo.teagram.io"
+    and .services["teagramd-next"].environment.TG_WEBSOCKET_ALLOWED_ORIGINS == "https://web.teagram.io,https://demo.teagram.io"
     and .services.teagramd.environment.GOMAXPROCS == "1"
     and .services.teagramd.environment.GOMEMLIMIT == "320MiB"
     and (.services.teagramd.mem_limit | tostring) == "469762048"

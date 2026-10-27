@@ -320,8 +320,12 @@ check_contract() {
     grep -Fq 'root@100.124.236.66 "$DEPLOY_SHA"' ||
     fail 'the dev ssh step must send DEPLOY_SHA as its command'
   local checkout_steps setup_go_steps smoke_steps dev_step_names
-  checkout_steps="$(query '[.jobs[].steps[] | select(.uses // "" | test("^actions/checkout@"))] | length')"
-  [[ "$checkout_steps" == 0 ]] || fail 'the deploy workflow must not check out tested source on the runner'
+  checkout_steps="$(query '[.jobs.deploy.steps[] | select(.uses // "" | test("^actions/checkout@"))] | length')"
+  [[ "$checkout_steps" == 0 ]] || fail 'the server deploy runner must not check out tested source'
+  checkout_steps="$(query '[.jobs.deploy-demo.steps[] | select(.uses // "" | test("^actions/checkout@"))] | length')"
+  [[ "$checkout_steps" == 1 ]] || fail 'the demo job must check out only the pinned public web source'
+  [[ "$(query '.jobs.deploy-demo.steps[] | select(.uses // "" | test("^actions/checkout@")) | .with.repository')" == 'teagramhq/teagram-web' ]] ||
+    fail 'the demo job must build the separate teagram-web source'
   setup_go_steps="$(query '[.jobs.deploy.steps[] | select(.uses // "" | test("^actions/setup-go@"))] | length')"
   [[ "$setup_go_steps" == 0 ]] || fail 'the deploy runner must not install Go for a host-side smoke'
   smoke_steps="$(query '[.jobs.deploy.steps[] | select(.name == "Run MTProto smoke on port 2443")] | length')"
@@ -336,13 +340,13 @@ check_contract() {
   [[ "$(query '.jobs.deploy.steps[] | select(.name == "Remove the deploy key") | .if')" == '${{ always() }}' ]] ||
     fail 'the deploy key must be removed even when deployment fails'
   demo_ssh_steps="$(query '[.jobs.deploy-demo.steps[] | select(.run // "" | test("(^|\s)ssh\s"))] | length')"
-  [[ "$demo_ssh_steps" == 1 ]] || fail "expected one demo ssh step, found $demo_ssh_steps"
-  [[ "$(query '.jobs.deploy-demo.steps[] | select(.run // "" | test("(^|\s)ssh\s")) | .env.DEPLOY_SHA')" == '${{ needs.deploy.outputs.sha }}' ]] ||
+  [[ "$demo_ssh_steps" == 2 ]] || fail "expected server and web demo ssh steps, found $demo_ssh_steps"
+  [[ "$(query '.jobs.deploy-demo.steps[] | select(.name == "Deploy the tested server commit after the dev deploy") | .env.DEPLOY_SHA')" == '${{ needs.deploy.outputs.sha }}' ]] ||
     fail 'the demo ssh step must deploy the exact SHA from the dev job'
-  query '.jobs.deploy-demo.steps[] | select(.run // "" | test("(^|\s)ssh\s")) | .run' |
+  query '.jobs.deploy-demo.steps[] | select(.name == "Deploy the tested server commit after the dev deploy") | .run' |
     grep -Fq '"root@$DEMO_DEPLOY_HOST" "$DEPLOY_SHA $DEPLOY_IMAGE_DIGEST"' ||
     fail 'the demo ssh step must send the tested SHA and trusted image digest to the separate demo host'
-  [[ "$(query '.jobs.deploy-demo.steps[] | select(.run // "" | contains("ssh -T -p")) | .env.DEPLOY_IMAGE_DIGEST')" == '${{ steps.demo-image.outputs.digest }}' ]] ||
+  [[ "$(query '.jobs.deploy-demo.steps[] | select(.name == "Deploy the tested server commit after the dev deploy") | .env.DEPLOY_IMAGE_DIGEST')" == '${{ steps.demo-image.outputs.digest }}' ]] ||
     fail 'the demo ssh step must take its image digest from the trusted CI artifact'
   [[ "$(query '.jobs.deploy-demo.steps[] | select(.id == "demo-image") | .env.CI_RUN_ID')" == '${{ needs.deploy.outputs.ci_run_id }}' ]] ||
     fail 'the demo digest must be downloaded from the selected CI run'
@@ -354,10 +358,26 @@ check_contract() {
     fail 'the demo digest artifact must be selected by the exact tested SHA'
   grep -Fq '^sha256:[0-9a-f]{64}$' <<< "$digest_run" ||
     fail 'the downloaded image digest must be validated before SSH'
+  local web_release_run web_build_run
+  web_release_run="$(query '.jobs.deploy-demo.steps[] | select(.id == "web-release") | .run')"
+  grep -Fq 'actions/workflows/private-artifact.yml/runs?branch=master&event=push&status=success' <<< "$web_release_run" ||
+    fail 'the demo web source must match a successful teagram-web publication run'
+  grep -Fq 'private-mtproto-$source_sha-$artifact_hex' <<< "$web_release_run" ||
+    fail 'the demo web source must have a CI artifact whose name carries its checksum'
+  web_build_run="$(query '.jobs.deploy-demo.steps[] | select(.name == "Rebuild and verify the green web artifact") | .run')"
+  grep -Fq 'pnpm exec vite build --outDir dist-private' <<< "$web_build_run" ||
+    fail 'the demo web artifact must be built on the hosted runner'
+  grep -Fq 'private-artifact-release.mjs verify' <<< "$web_build_run" ||
+    fail 'the rebuilt demo web artifact must pass the upstream verifier'
+  grep -Fq '.artifactDigest == $digest' <<< "$web_build_run" ||
+    fail 'the rebuilt demo web artifact checksum must match the green publication'
+  query '.jobs.deploy-demo.steps[] | select(.name == "Publish the pinned web artifact on the demo origin") | .run' |
+    grep -Fq '"web $DEPLOY_SHA $WEB_SOURCE_SHA $WEB_ARTIFACT_DIGEST $WEB_ARCHIVE_SHA256" < "$WEB_ARCHIVE"' ||
+    fail 'the verified web archive must be streamed to the forced demo command'
   [[ "$(query '.jobs.deploy-demo.steps[] | select(.name == "Install the demo deploy key") | .env.DEMO_DEPLOY_PORT')" == '${{ vars.DEMO_DEPLOY_PORT }}' ]] ||
     fail 'the demo key step must validate the configured SSH port'
-  [[ "$(query '.jobs.deploy-demo.steps[] | select(.run // "" | test("(^|\\s)ssh\\s")) | .env.DEMO_DEPLOY_PORT')" == '${{ vars.DEMO_DEPLOY_PORT }}' ]] ||
-    fail 'the demo SSH step must use the configured SSH port'
+  [[ "$(query '[.jobs.deploy-demo.steps[] | select(.run // "" | test("(^|\\s)ssh\\s")) | .env.DEMO_DEPLOY_PORT] | unique | .[0]')" == '${{ vars.DEMO_DEPLOY_PORT }}' ]] ||
+    fail 'both demo SSH steps must use the configured SSH port'
   query '.jobs.deploy-demo.steps[] | select(.run // "" | test("(^|\\s)ssh\\s")) | .run' |
     grep -Fq 'ssh -T -p "$DEMO_DEPLOY_PORT"' || fail 'demo SSH must pass the non-default port'
   demo_port_run="$(query '.jobs.deploy-demo.steps[] | select(.name == "Install the demo deploy key") | .run')"

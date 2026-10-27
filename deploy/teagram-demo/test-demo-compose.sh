@@ -15,7 +15,7 @@ TG_PUBLIC_LINK_PREFIX=https://demo.teagram.io/
 TG_ADVERTISE_ADDR=demo.teagram.io:443
 TG_ADVERTISE_DEMO_GUEST_SIGN_UP=true
 TG_WEBSOCKET_LISTEN_ADDR=:2446
-TG_WEBSOCKET_ALLOWED_ORIGINS=https://web.teagram.io
+TG_WEBSOCKET_ALLOWED_ORIGINS=https://web.teagram.io,https://demo.teagram.io
 TG_LOG_LOGIN_CODES=false
 TG_REGISTRATION=open
 TG_MAX_FILE_BYTES=16777216
@@ -99,7 +99,8 @@ jq -e \
   and .services["teagramd-next"].environment.TG_UPLOAD_MAX_BYTES == "512000"
   and .services["teagramd-next"].environment.TG_RATE_LIMIT_UPLOAD_BYTES == "20971520"
   and .services.teagramd.environment.TG_WEBSOCKET_LISTEN_ADDR == ":2446"
-  and .services.teagramd.environment.TG_WEBSOCKET_ALLOWED_ORIGINS == "https://web.teagram.io"
+  and .services.teagramd.environment.TG_WEBSOCKET_ALLOWED_ORIGINS == "https://web.teagram.io,https://demo.teagram.io"
+  and .services["teagramd-next"].environment.TG_WEBSOCKET_ALLOWED_ORIGINS == "https://web.teagram.io,https://demo.teagram.io"
   and .services.teagramd.environment.TG_CLIENT_ADDR_TRUST == "proxy-v2"
   and .services.teagramd.environment.TG_CLIENT_ADDR_PROXY_CIDRS == "198.18.130.2/32"
   and .services.teagramd.environment.TG_TURNSTILE_SITE_KEY == "fixture-site-key"
@@ -141,6 +142,10 @@ jq -e \
       return 1
     fi
   }
+  demo_edge_compose_hash_for_source() {
+    [[ "$1" =~ ^[0-9a-f]{64}$ ]] || return 1
+    printf '%s\n' "$MOCK_TARGET_HASH"
+  }
   docker() {
     [[ "$1" == inspect && "$2" == --format ]] || return 1
     case "$3" in
@@ -168,12 +173,13 @@ jq -e \
 
     if [[ "$MOCK_SERVICE" == haproxy ]]; then
       MOCK_HAPROXY_SOURCE_HASH=$MOCK_OTHER_HASH
+      if demo_require_proxy_configuration_current "$MOCK_SERVICE" "$expected_source_hash" >/dev/null 2>&1; then
+        printf '%s\n' "$MOCK_SERVICE accepted a stale source configuration hash" >&2
+        exit 1
+      fi
     else
       MOCK_EDGE_SOURCE_HASH=$MOCK_OTHER_HASH
-    fi
-    if demo_require_proxy_configuration_current "$MOCK_SERVICE" "$expected_source_hash" >/dev/null 2>&1; then
-      printf '%s\n' "$MOCK_SERVICE accepted a stale source configuration hash" >&2
-      exit 1
+      demo_require_proxy_configuration_current "$MOCK_SERVICE" "$expected_source_hash"
     fi
     MOCK_HAPROXY_SOURCE_HASH=$TEAGRAM_DEMO_HAPROXY_CONFIG_SHA256
     MOCK_EDGE_SOURCE_HASH=$TEAGRAM_DEMO_EDGE_CONFIG_SHA256
@@ -432,13 +438,19 @@ jq -e --slurpfile bootstrap "$TMP_DIR/bootstrap-inventory.json" '
 ' "$TMP_DIR/seed-inventory.json" >/dev/null
 
 grep -Fq 'location = /apiws {' "$SCRIPT_DIR/nginx.conf"
+grep -Fq 'root /usr/share/nginx/html/.well-known/teagramd/web/current;' "$SCRIPT_DIR/nginx.conf"
+grep -Fq 'location = /teagram-config.json {' "$SCRIPT_DIR/nginx.conf"
+grep -Fq 'connect-src '\''self'\'' wss://demo.teagram.io https://challenges.cloudflare.com;' "$SCRIPT_DIR/nginx.conf"
 # These patterns match literal Nginx variables.
 # shellcheck disable=SC2016
 grep -Fq 'set $teagramd http://haproxy:2446;' "$SCRIPT_DIR/nginx.conf"
 # shellcheck disable=SC2016
 grep -Fq 'proxy_set_header CF-Connecting-IP $http_cf_connecting_ip;' "$SCRIPT_DIR/nginx.conf"
 grep -Fq '"CF-Connecting-IP": "192.0.2.1"' "$SCRIPT_DIR/smoke.py"
-grep -Fq 'location = / { default_type text/plain; return 200 "Teagram demo server"; }' "$SCRIPT_DIR/nginx.conf"
+grep -Fq 'return 200 "Teagram demo server";' "$SCRIPT_DIR/nginx.conf"
+grep -Fq 'args.bootstrap' "$SCRIPT_DIR/smoke.py"
+grep -Fq 'https://foreign.example", 403' "$SCRIPT_DIR/smoke.py"
+grep -Fq 'args.web_source_commit' "$SCRIPT_DIR/smoke.py"
 grep -Fq 'base_url + "/"' "$SCRIPT_DIR/smoke.py"
 grep -Fq 'location = /admin { return 404; }' "$SCRIPT_DIR/nginx.conf"
 grep -Fq 'location ^~ /admin/ { return 404; }' "$SCRIPT_DIR/nginx.conf"
@@ -544,6 +556,7 @@ assert_text_order(deploy_preflight, "deploy-main.sh proxy preflight", [
     'mapfile -t CONTAINER_IDS < <(demo_compose ps -q)',
     'demo_require_proxy_configuration_current haproxy "$TEAGRAM_DEMO_HAPROXY_CONFIG_SHA256"',
     'demo_require_proxy_configuration_current edge "$TEAGRAM_DEMO_EDGE_CONFIG_SHA256"',
+    'demo_reload_edge',
     'demo_render_config "$TARGET_RENDER"',
 ])
 deploy_steps = [
@@ -563,7 +576,7 @@ deploy_steps = [
     'demo_haproxy_control wait-healthy "$CANDIDATE_SERVER" --timeout 60',
     'demo_haproxy_control drain "$ACTIVE_SERVER"',
     'install -o root -g root -m 0644 "$TMP_DIR/client.json" "$DEMO_CLIENT_CONFIG.next"',
-    'python3 "$SCRIPT_DIR/smoke.py" "$DEMO_CLIENT_CONFIG"',
+    '--web-artifact-digest "sha256:${PREV_WEB_RELEASE#* }"',
     '"$SCRIPT_DIR/seed-demo.sh" --verify-turnstile --endpoint haproxy:2443',
     'demo_write_active_release "$CANDIDATE_SERVER" "$CANDIDATE_IMAGE_REF"',
     'demo_compose stop "$ACTIVE_SERVER"',
@@ -576,6 +589,8 @@ if "PUBLIC_ACTIVATION_STARTED=1" not in deploy or "migrated database preserved" 
     raise SystemExit("deploy-main.sh: failed cutover must retain the migrated database and dump")
 if 'demo_compose stop edge' in deploy or 'demo_compose stop haproxy' in deploy:
     raise SystemExit("deploy-main.sh: normal deploy must keep the public edge and HAProxy running")
+if 'python3 "$SCRIPT_DIR/smoke.py" --bootstrap "$DEMO_CLIENT_CONFIG"' not in deploy:
+    raise SystemExit("deploy-main.sh: server-only handoff must smoke the bootstrap status only when no web artifact exists")
 backup_function = deploy.split("demo_backup_database() {", 1)[1].split("\n}", 1)[0]
 assert_text_order(backup_function, "deploy-main.sh backup function", [
     'DB_DUMP="$BACKUP_DIR/postgres.dump"',
@@ -686,7 +701,7 @@ assert_order(Path(sys.argv[2]), [
     'demo_compose up -d --wait --wait-timeout 120 "$ACTIVE_SERVER" haproxy',
     '"$SEED_SCRIPT" --verify-turnstile --endpoint haproxy:2443',
     "demo_compose up -d edge",
-    'python3 "$SCRIPT_DIR/smoke.py" "$DEMO_CLIENT_CONFIG"',
+    'python3 "$SCRIPT_DIR/smoke.py" --bootstrap "$DEMO_CLIENT_CONFIG"',
     "exit 0",
 ])
 assert_order(Path(sys.argv[2]), [
@@ -694,7 +709,7 @@ assert_order(Path(sys.argv[2]), [
     'demo_compose up -d --wait --wait-timeout 120 "$ACTIVE_SERVER" haproxy',
     '"$SEED_SCRIPT" --verify-turnstile --endpoint haproxy:2443',
     "demo_compose up -d edge",
-    'python3 "$SCRIPT_DIR/smoke.py" "$DEMO_CLIENT_CONFIG"',
+    'python3 "$SCRIPT_DIR/smoke.py" --bootstrap "$DEMO_CLIENT_CONFIG"',
 ], start=init.index("exit 0") + len("exit 0"))
 assert_order(Path(sys.argv[2]), [
     'demo_compose stop edge haproxy turnstile-egress',

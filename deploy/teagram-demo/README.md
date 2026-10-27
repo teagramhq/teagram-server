@@ -46,9 +46,12 @@ policy. Required layout and policy:
   requests to `/turnstile/v0/siteverify`. The proxy has no host-published port.
 - Run the demo's Cloudflare Tunnel connector in the demo LXC and route only
   `demo.teagram.io` to `http://127.0.0.1:8080`. The edge container publishes
-  that origin on loopback only. The root returns a plain status message with
-  HTTP 200. The edge serves the client discovery document and `/apiws`, returns
-  404 for `/admin` and all other paths. For
+  that origin on loopback only. The root serves the pinned Teagram Web private
+  artifact after its first successful publication; before then it returns the
+  plain status page with HTTP 200. `/teagram-config.json` provides the fixed
+  demo server and auto-guest settings. The edge also serves the client
+  discovery document and `/apiws`, returns 404 for `/admin`, and applies SPA
+  fallback only to client routes. For
   `/apiws`, Nginx forwards Cloudflare's `CF-Connecting-IP` to the private
   HAProxy service. HAProxy validates that there is exactly one IP address,
   sends it to teagramd in a PROXY-v2 header, and teagramd trusts only HAProxy's
@@ -59,8 +62,11 @@ policy. Required layout and policy:
   The demo does not serve the dev hostname or admin dashboard.
 
 The public origin and discovery document advertise
-`demo.teagram.io:443`; browser clients use the separate WSS endpoint. CORS is
-limited to `https://web.teagram.io`. Registration is open, the existing signup
+`demo.teagram.io:443`; browser clients use the separate WSS endpoint. Discovery
+CORS remains limited to `https://web.teagram.io`; WebSocket origin checks allow
+both `https://web.teagram.io` and `https://demo.teagram.io`. The app CSP keeps
+the current web directives and restricts `connect-src` to the demo WSS origin
+and Cloudflare Turnstile. Registration is open, the existing signup
 limit remains five attempts per IP per hour, login-code logging is disabled,
 and uploads are capped at 16 MiB per file and 256 MiB per account. Sticker and
 custom emoji pack imports are disabled (`TG_STICKER_IMPORT=off`); catalogue
@@ -175,13 +181,21 @@ The key's `authorized_keys` entry must have no shell, forwarding or PTY access:
 command="/opt/teagram-demo/deploy/teagram-demo/forced-command.sh",restrict ssh-ed25519 <public-key> teagram-demo-deploy
 ```
 
-`forced-command.sh` accepts one full commit SHA and its trusted CI image digest,
-fetches `origin/main`, rejects non-main revisions and skips stale deploys. The
-`Deploy.` workflow downloads the digest artifact from the successful push-on-main
-CI run for that exact SHA and sends both values. A PR workflow cannot influence
-the digest by overwriting the package's SHA tag. `deploy-main.sh` pulls only the
-supplied digest and checks both its repository digest and revision label before
-touching the database. It revalidates the blob authority and
+`forced-command.sh` accepts the full commit SHA and trusted server image digest,
+then separately accepts a bounded web archive tied to the current demo
+checkout. It fetches `origin/main`, rejects non-main revisions and skips stale
+server deploys. The `Deploy.` workflow downloads the server digest from the
+successful server CI run. For the web app it reads the deployed
+`mtproto-target.json`, confirms that its source commit has a successful
+teagram-web publication run and matching checksum-named CI artifact, rebuilds
+that exact commit on the hosted runner, and requires the upstream artifact
+verifier to reproduce the published digest. The LXC receives only the
+checksum-pinned archive; it never installs Node or builds the web app. The web
+source commit and artifact digest are stored in
+`.state/teagram-demo/active-release.json`. A PR workflow cannot influence the
+server image digest by overwriting the package's SHA tag. `deploy-main.sh` pulls
+only the supplied server digest and checks both its repository digest and
+revision label before touching the database. It revalidates the blob authority and
 running containers, then takes and validates a root-only PostgreSQL dump while
 the existing server and public edge keep running. It applies migrations while
 the old server remains live, starts the candidate in the inactive slot,
@@ -193,10 +207,12 @@ the old process drain during its configured 120-second graceful stop.
 
 Before rendering the mounted HAProxy config, a deploy compares the running
 HAProxy and edge Compose hashes and their recorded config source hashes with
-the target. A proxy image, `haproxy.cfg`, HAProxy renderer or `nginx.conf`
-change makes the deploy stop before it rewrites the live HAProxy config. Apply
-proxy changes through the maintenance path, which recreates both proxies,
-before resuming routine server deploys.
+the target. A proxy image, `haproxy.cfg` or HAProxy renderer change still stops
+the deploy for the maintenance path. An edge-only Nginx source change is
+validated against the existing Compose hash with only its config-source label
+normalized, then applied with `nginx -t` and a graceful reload while the edge
+container stays up. If the server rollout fails, the Nginx config is restored
+and gracefully reloaded from the previous commit.
 
 On a pre-cutover failure, the old server and edge stay available, the candidate
 stops, and the previous release reference remains active. If traffic has reached

@@ -1035,6 +1035,7 @@ jobs:
           bash -n deploy/teagram-demo/test-install-teagram-demo-ops.sh
           bash -n deploy/teagram-demo/test-ops-menu.sh
           bash -n deploy/teagram-demo/deploy-main.sh
+          bash -n deploy/teagram-demo/publish-web-release.sh
           bash -n deploy/teagram-demo/wipe-weekly.sh
           bash -n deploy/teagram-demo/install-weekly-wipe.sh
           bash -n deploy/teagram-demo/run-activity.sh
@@ -1069,6 +1070,7 @@ jobs:
             deploy/teagram-demo/test-install-teagram-demo-ops.sh \
             deploy/teagram-demo/test-ops-menu.sh \
             deploy/teagram-demo/deploy-main.sh \
+            deploy/teagram-demo/publish-web-release.sh \
             deploy/teagram-demo/wipe-weekly.sh \
             deploy/teagram-demo/install-weekly-wipe.sh \
             deploy/teagram-demo/run-activity.sh \
@@ -1112,6 +1114,9 @@ jobs:
 
       - name: Check demo ops installer key transaction
         run: sudo -n bash deploy/teagram-demo/test-install-teagram-demo-ops.sh
+
+      - name: Check pinned demo web artifact handling
+        run: python3 deploy/teagram-demo/test-web-release.py
 
       - name: Check demo Turnstile secret access
         run: sudo -n deploy/teagram-demo/test-turnstile-secret-access.sh

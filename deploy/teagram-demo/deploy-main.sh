@@ -30,6 +30,10 @@ CANDIDATE_STARTED=0
 PUBLIC_ACTIVATION_STARTED=0
 CUTOVER_COMMITTED=0
 CLIENT_CONFIG_UPDATED=0
+EDGE_CONFIG_RELOADED=0
+EDGE_CONTAINER_ID=
+PREV_WEB_RELEASE=
+PREV_WEB_LINK=
 
 demo_remove_previous_image() {
   local previous_image_id="$1" active_image_id="$2"
@@ -40,7 +44,7 @@ demo_remove_previous_image() {
 
 demo_cleanup() {
   local rc=$?
-  local rollback_rc=0 rollback_confirmed=1
+  local rollback_rc=0 rollback_confirmed=1 nginx_rollback_file
   trap - EXIT
   if (( rc != 0 && BACKUP_READY == 1 )); then
     if (( CUTOVER_COMMITTED == 1 )); then
@@ -59,7 +63,12 @@ demo_cleanup() {
             mv -f -- "$DEMO_CLIENT_CONFIG.next" "$DEMO_CLIENT_CONFIG" || rollback_rc=1
           fi
           export TEAGRAM_DEMO_IMAGE_REF="$PREV_IMAGE_REF"
-          demo_write_active_release "$ACTIVE_SERVER" "$PREV_IMAGE_REF" || rollback_rc=1
+          if [[ -n "${PREV_WEB_RELEASE:-}" ]]; then
+            demo_write_active_release "$ACTIVE_SERVER" "$PREV_IMAGE_REF" \
+              "${PREV_WEB_RELEASE%% *}" "sha256:${PREV_WEB_RELEASE#* }" || rollback_rc=1
+          else
+            demo_write_active_release "$ACTIVE_SERVER" "$PREV_IMAGE_REF" || rollback_rc=1
+          fi
           demo_prepare_haproxy_runtime || rollback_rc=1
           if (( rollback_rc == 0 )); then
             rollback_confirmed=1
@@ -86,6 +95,20 @@ demo_cleanup() {
       fi
       printf 'demo rollout retained previous server=%s database state and backup=%s\n' \
         "$ACTIVE_SERVER" "$BACKUP_DIR" >&2
+    fi
+  fi
+  if (( rc != 0 && ${CUTOVER_COMMITTED:-0} == 0 && ${EDGE_CONFIG_RELOADED:-0} == 1 )); then
+    nginx_rollback_file="$SCRIPT_DIR/.nginx.conf.rollback.$$"
+    if git -C "$DEMO_REPO_ROOT" show "$PREV_SHA:deploy/teagram-demo/nginx.conf" > "$nginx_rollback_file" &&
+      chown root:root "$nginx_rollback_file" && chmod 0644 "$nginx_rollback_file" &&
+      mv -f -- "$nginx_rollback_file" "$SCRIPT_DIR/nginx.conf" &&
+      [[ -n "${EDGE_CONTAINER_ID:-}" ]] && docker exec "$EDGE_CONTAINER_ID" nginx -t >/dev/null &&
+      docker exec "$EDGE_CONTAINER_ID" nginx -s reload >/dev/null; then
+      printf 'demo edge configuration rolled back to %s\n' "$PREV_SHA" >&2
+    else
+      rm -f -- "$nginx_rollback_file"
+      printf 'demo edge configuration rollback could not be confirmed; inspect the public edge\n' >&2
+      rc=1
     fi
   fi
   if [[ -n "$RESTORE_DB" && "$RESTORE_DB_CREATED" == 1 ]]; then
@@ -133,7 +156,6 @@ demo_backup_database() {
 }
 
 demo_require_root
-demo_require_env
 [[ "$SHA" =~ ^[0-9a-f]{40}$ ]] || demo_fail 'DEPLOY_SHA must be a full 40-hex commit SHA'
 [[ "$IMAGE_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]] || demo_fail 'DEPLOY_IMAGE_DIGEST must be a trusted sha256 digest'
 [[ "$PREV_SHA" =~ ^[0-9a-f]{40}$ ]] || demo_fail 'PREVIOUS_SHA must be a full 40-hex commit SHA'
@@ -143,6 +165,7 @@ if [[ "${DEMO_DEPLOY_LOCK_HELD:-0}" != 1 ]]; then
   exec 9> "$LOCK_PATH"
   flock -x 9
 fi
+demo_require_env
 [[ "$(git -C "$DEMO_REPO_ROOT" rev-parse HEAD)" == "$SHA" ]] || demo_fail 'checkout is not the requested deployment SHA'
 git -C "$DEMO_REPO_ROOT" fetch -q origin +refs/heads/main:refs/remotes/origin/main
 git -C "$DEMO_REPO_ROOT" merge-base --is-ancestor "$SHA" origin/main || demo_fail 'deployment SHA is no longer on origin/main'
@@ -166,6 +189,14 @@ mapfile -t CONTAINER_IDS < <(demo_compose ps -q)
   demo_fail 'candidate server slot is already running; reconcile the rollout before deploying'
 demo_require_proxy_configuration_current haproxy "$TEAGRAM_DEMO_HAPROXY_CONFIG_SHA256"
 demo_require_proxy_configuration_current edge "$TEAGRAM_DEMO_EDGE_CONFIG_SHA256"
+mapfile -t EDGE_IDS < <(demo_compose ps -q edge)
+((${#EDGE_IDS[@]} == 1)) || demo_fail 'running edge proxy is missing or ambiguous'
+EDGE_CONTAINER_ID=${EDGE_IDS[0]}
+demo_reload_edge
+EDGE_CONFIG_RELOADED=1
+demo_prepare_client_config_dir
+PREV_WEB_RELEASE=$(demo_reconcile_web_release)
+PREV_WEB_LINK=$PREV_WEB_RELEASE
 demo_render_config "$TARGET_RENDER"
 demo_check_blob_mount "$TARGET_RENDER"
 docker inspect "${CONTAINER_IDS[@]}" > "$TMP_DIR/containers.raw.json"
@@ -200,10 +231,11 @@ printf '%s\n' "$PREV_IMAGE_ID" > "$BACKUP_DIR/previous-image-id.txt"
 printf '%s\n' "$ACTIVE_SERVER" > "$BACKUP_DIR/active-server.txt"
 printf '%s\n' "$PREV_IMAGE_REF" > "$BACKUP_DIR/previous-image-ref.txt"
 cp -- "$DEMO_CLIENT_CONFIG" "$BACKUP_DIR/client.json"
+printf '%s\n' "${PREV_WEB_LINK:-none}" > "$BACKUP_DIR/previous-web-release.txt"
 chown root:root "$BACKUP_DIR/previous-image-id.txt" "$BACKUP_DIR/active-server.txt" \
-  "$BACKUP_DIR/previous-image-ref.txt" "$BACKUP_DIR/client.json"
+  "$BACKUP_DIR/previous-image-ref.txt" "$BACKUP_DIR/client.json" "$BACKUP_DIR/previous-web-release.txt"
 chmod 0600 "$BACKUP_DIR/previous-image-id.txt" "$BACKUP_DIR/active-server.txt" \
-  "$BACKUP_DIR/previous-image-ref.txt" "$BACKUP_DIR/client.json"
+  "$BACKUP_DIR/previous-image-ref.txt" "$BACKUP_DIR/client.json" "$BACKUP_DIR/previous-web-release.txt"
 
 # The snapshot is taken online. Existing clients keep using the old server while
 # the tested image is pulled, migrations apply, and the candidate is checked.
@@ -270,15 +302,27 @@ demo_haproxy_control drain "$ACTIVE_SERVER"
 install -o root -g root -m 0644 "$TMP_DIR/client.json" "$DEMO_CLIENT_CONFIG.next"
 mv -f -- "$DEMO_CLIENT_CONFIG.next" "$DEMO_CLIENT_CONFIG"
 CLIENT_CONFIG_UPDATED=1
-python3 "$SCRIPT_DIR/smoke.py" "$DEMO_CLIENT_CONFIG"
+if [[ -n "$PREV_WEB_RELEASE" ]]; then
+  python3 "$SCRIPT_DIR/smoke.py" \
+    --web-source-commit "${PREV_WEB_RELEASE%% *}" \
+    --web-artifact-digest "sha256:${PREV_WEB_RELEASE#* }" \
+    "$DEMO_CLIENT_CONFIG"
+else
+  python3 "$SCRIPT_DIR/smoke.py" --bootstrap "$DEMO_CLIENT_CONFIG"
+fi
 "$SCRIPT_DIR/seed-demo.sh" --verify-turnstile --endpoint haproxy:2443
-demo_write_active_release "$CANDIDATE_SERVER" "$CANDIDATE_IMAGE_REF"
+if [[ -n "$PREV_WEB_RELEASE" ]]; then
+  demo_write_active_release "$CANDIDATE_SERVER" "$CANDIDATE_IMAGE_REF" \
+    "${PREV_WEB_RELEASE%% *}" "sha256:${PREV_WEB_RELEASE#* }"
+else
+  demo_write_active_release "$CANDIDATE_SERVER" "$CANDIDATE_IMAGE_REF"
+fi
 demo_prepare_haproxy_runtime
-CUTOVER_COMMITTED=1
 
 # New sessions route to the candidate while HAProxy drains the old server's
 # existing connections before its graceful stop signal.
 demo_compose stop "$ACTIVE_SERVER"
+CUTOVER_COMMITTED=1
 demo_remove_previous_image "$PREV_IMAGE_ID" "$CANDIDATE_IMAGE_ID"
 BACKUP_READY=0
 printf 'demo deployed sha=%s previous_sha=%s active_server=%s backup=%s\n' \
