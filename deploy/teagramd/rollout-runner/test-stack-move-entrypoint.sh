@@ -342,7 +342,7 @@ create_phase_dirs() {
   : > "$LOCK_PROBE_REACHED"
   return 1
 }
-cd "$CHECKOUT"
+cd "$ROLLOUT_RUNNER_CHECKOUT"
 main move-stack "$1" "$2"
 SH
 chmod 700 "$TMP/lock-probe.sh"

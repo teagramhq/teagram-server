@@ -3,7 +3,7 @@
   "env_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
   "override_sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
   "stop_grace_period": "2m0s",
-  "compose_logging_policy": "default",
+  "compose_logging_policy": "syslog-v1",
   "compose_log_login_codes": "false",
   "media_key_source": "unset",
   "media_key_current": "unset",

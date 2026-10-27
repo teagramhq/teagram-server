@@ -9,39 +9,41 @@ source "$(cd -P "$(dirname "${BASH_SOURCE[0]}")" && pwd)/rollout-safe-remove-tre
 initialize_runner_config() {
   SCRIPT_DIR=$(cd -P "$(dirname "${BASH_SOURCE[0]}")" && pwd)
   SCRIPT_SOURCE="$SCRIPT_DIR/$(basename "${BASH_SOURCE[0]}")"
-  readonly APPROVED_VERIFIER_SHA=44520d2fc08bb87505341e97421c652e4f7a857d3d78d2f8c19d5d51fbfa5c4e
-  readonly APPROVED_SCHEMA_GATE_SHA=ac54d3cf0480383a52414a8bc8b856b5e1d5f6f8d19034c9c576c64627e097c8
-  readonly APPROVED_SCHEMA_GATE_HELPER_SHA=7ae06c2872c60b434068b3715a9ddd5e19b03d4be98dc9881c8dd8f294953d41
-  readonly APPROVED_INITIAL_LOCAL_COMPOSE_SHA=d764d291ad2ea91cff841d14a0cd2bbcb5981961dbc67406bfeba1196a7b3fa4
-  readonly APPROVED_LOCAL_COMPOSE_CONTENT_SHA=d025a25d3e388489ddaf181e3d38b4ecd56906aeab75a9f9fbabdc38e017cfdb
-  readonly SOURCE_LOCAL_COMPOSE_TARGET_SHA=5602c7c13eb1571278f43129345a4b52f0630377
-  readonly SOURCE_LOCAL_COMPOSE_SHA=05fc5a3e7dbdc2feac58fce870796baebc055b617bc81f6d6b206c5a2c184cc5
-  readonly SOURCE_LOCAL_COMPOSE_CONTENT_SHA=577dd9885aa9babd3370a97417d1653884f0567c6f50e7feb208ca9d11ca15bd
-  readonly SOURCE_LOCAL_COMPOSE_SOURCE_FILE=deploy/teagramd/rollout-runner/local-compose-5602c7c.yml
-  readonly SOURCE_LOCAL_COMPOSE_RUNTIME_FILE=.rollout-compose.local-5602c7c.yml
-  readonly E58_LOCAL_COMPOSE_TARGET_SHA=e58ba203505a37bf5ad3181f22e59a934d4a7442
-  readonly E58_LOCAL_COMPOSE_SHA=d3426792677d0510a75dd254fbbd5fd9d9b19a01d710ec5b9b59f3e8a31447c7
-  readonly E58_LOCAL_COMPOSE_SOURCE_FILE=deploy/teagramd/rollout-runner/local-compose-e58ba20.yml
-  readonly E58_LOCAL_COMPOSE_RUNTIME_FILE=.rollout-compose.local-e58ba20.yml
-  readonly TARGET_LOCAL_COMPOSE_TARGET_SHA=598359e900130c307dd84022b0077fd3276f6f36
-  readonly TARGET_LOCAL_COMPOSE_SHA=714d7f870645e2581234feba81a86e9e529facd0b664b32b2f429eb583dc754f
-  readonly TARGET_LOCAL_COMPOSE_SOURCE_FILE=deploy/teagramd/rollout-runner/local-compose-598359e.yml
-  readonly TARGET_LOCAL_COMPOSE_RUNTIME_FILE=.rollout-compose.local-598359e.yml
-  readonly DF9_LOCAL_COMPOSE_TARGET_SHA=df9ffe538defd4b99bd9edb2405caacddd1aa1f6
-  readonly DF9_LOCAL_COMPOSE_SHA=b48e1bc4727b9ed5e05d247fb7f5e3424eca8c1f9b496727e56127b67f7a5ce1
-  readonly DF9_LOCAL_COMPOSE_SOURCE_FILE=deploy/teagramd/rollout-runner/local-compose-df9ffe5.yml
-  readonly DF9_LOCAL_COMPOSE_RUNTIME_FILE=.rollout-compose.local-df9ffe5.yml
-  readonly CCE_LOCAL_COMPOSE_TARGET_SHA=cce00d185e8e7734b482f116e465647f6ec1fa26
-  readonly CCE_LOCAL_COMPOSE_SHA=72a91a77db188f106b0062420722166436d38c6cb1974b73b9dd2873fbc5c11c
-  readonly CCE_LOCAL_COMPOSE_CONTENT_SHA=577dd9885aa9babd3370a97417d1653884f0567c6f50e7feb208ca9d11ca15bd
-  readonly CCE_LOCAL_COMPOSE_SOURCE_FILE=deploy/teagramd/rollout-runner/local-compose-cce00d1.yml
-  readonly CCE_LOCAL_COMPOSE_RUNTIME_FILE=.rollout-compose.local-cce00d1.yml
-  readonly INITIAL_LOCAL_COMPOSE_TARGET_SHA=777742cc4b3ab0fda6b504a82b314a90aa60918b
-  readonly INITIAL_LOCAL_COMPOSE_FILE=.rollout-compose.initial-local.yml
-  readonly INITIAL_LOCAL_LEGACY_BASELINE_SHA=932994e26a86eb1c9ad60f81b3d222b19d3f40b7
-  readonly PROJECT_MOVE_SOURCE=telegram-server
-  readonly PROJECT_MOVE_TARGET=teagram
-  readonly PROJECT_MOVE_PG_IMAGE=postgres:18-alpine
+  if [[ "$(declare -p PROJECT_MOVE_PG_IMAGE 2>/dev/null)" != 'declare -r '* ]]; then
+    readonly APPROVED_VERIFIER_SHA=44520d2fc08bb87505341e97421c652e4f7a857d3d78d2f8c19d5d51fbfa5c4e
+    readonly APPROVED_SCHEMA_GATE_SHA=ac54d3cf0480383a52414a8bc8b856b5e1d5f6f8d19034c9c576c64627e097c8
+    readonly APPROVED_SCHEMA_GATE_HELPER_SHA=7ae06c2872c60b434068b3715a9ddd5e19b03d4be98dc9881c8dd8f294953d41
+    readonly APPROVED_INITIAL_LOCAL_COMPOSE_SHA=d764d291ad2ea91cff841d14a0cd2bbcb5981961dbc67406bfeba1196a7b3fa4
+    readonly APPROVED_LOCAL_COMPOSE_CONTENT_SHA=d025a25d3e388489ddaf181e3d38b4ecd56906aeab75a9f9fbabdc38e017cfdb
+    readonly SOURCE_LOCAL_COMPOSE_TARGET_SHA=5602c7c13eb1571278f43129345a4b52f0630377
+    readonly SOURCE_LOCAL_COMPOSE_SHA=05fc5a3e7dbdc2feac58fce870796baebc055b617bc81f6d6b206c5a2c184cc5
+    readonly SOURCE_LOCAL_COMPOSE_CONTENT_SHA=577dd9885aa9babd3370a97417d1653884f0567c6f50e7feb208ca9d11ca15bd
+    readonly SOURCE_LOCAL_COMPOSE_SOURCE_FILE=deploy/teagramd/rollout-runner/local-compose-5602c7c.yml
+    readonly SOURCE_LOCAL_COMPOSE_RUNTIME_FILE=.rollout-compose.local-5602c7c.yml
+    readonly E58_LOCAL_COMPOSE_TARGET_SHA=e58ba203505a37bf5ad3181f22e59a934d4a7442
+    readonly E58_LOCAL_COMPOSE_SHA=d3426792677d0510a75dd254fbbd5fd9d9b19a01d710ec5b9b59f3e8a31447c7
+    readonly E58_LOCAL_COMPOSE_SOURCE_FILE=deploy/teagramd/rollout-runner/local-compose-e58ba20.yml
+    readonly E58_LOCAL_COMPOSE_RUNTIME_FILE=.rollout-compose.local-e58ba20.yml
+    readonly TARGET_LOCAL_COMPOSE_TARGET_SHA=598359e900130c307dd84022b0077fd3276f6f36
+    readonly TARGET_LOCAL_COMPOSE_SHA=714d7f870645e2581234feba81a86e9e529facd0b664b32b2f429eb583dc754f
+    readonly TARGET_LOCAL_COMPOSE_SOURCE_FILE=deploy/teagramd/rollout-runner/local-compose-598359e.yml
+    readonly TARGET_LOCAL_COMPOSE_RUNTIME_FILE=.rollout-compose.local-598359e.yml
+    readonly DF9_LOCAL_COMPOSE_TARGET_SHA=df9ffe538defd4b99bd9edb2405caacddd1aa1f6
+    readonly DF9_LOCAL_COMPOSE_SHA=b48e1bc4727b9ed5e05d247fb7f5e3424eca8c1f9b496727e56127b67f7a5ce1
+    readonly DF9_LOCAL_COMPOSE_SOURCE_FILE=deploy/teagramd/rollout-runner/local-compose-df9ffe5.yml
+    readonly DF9_LOCAL_COMPOSE_RUNTIME_FILE=.rollout-compose.local-df9ffe5.yml
+    readonly CCE_LOCAL_COMPOSE_TARGET_SHA=cce00d185e8e7734b482f116e465647f6ec1fa26
+    readonly CCE_LOCAL_COMPOSE_SHA=72a91a77db188f106b0062420722166436d38c6cb1974b73b9dd2873fbc5c11c
+    readonly CCE_LOCAL_COMPOSE_CONTENT_SHA=577dd9885aa9babd3370a97417d1653884f0567c6f50e7feb208ca9d11ca15bd
+    readonly CCE_LOCAL_COMPOSE_SOURCE_FILE=deploy/teagramd/rollout-runner/local-compose-cce00d1.yml
+    readonly CCE_LOCAL_COMPOSE_RUNTIME_FILE=.rollout-compose.local-cce00d1.yml
+    readonly INITIAL_LOCAL_COMPOSE_TARGET_SHA=777742cc4b3ab0fda6b504a82b314a90aa60918b
+    readonly INITIAL_LOCAL_COMPOSE_FILE=.rollout-compose.initial-local.yml
+    readonly INITIAL_LOCAL_LEGACY_BASELINE_SHA=932994e26a86eb1c9ad60f81b3d222b19d3f40b7
+    readonly PROJECT_MOVE_SOURCE=telegram-server
+    readonly PROJECT_MOVE_TARGET=teagram
+    readonly PROJECT_MOVE_PG_IMAGE=postgres:18-alpine
+  fi
   PINNED_LOCAL_COMPOSE_TARGET_SHA=
   PINNED_LOCAL_COMPOSE_SHA=
   PINNED_LOCAL_COMPOSE_CONTENT_SHA=
@@ -2272,6 +2274,7 @@ compare_preflight_command() {
   compare_resolved_preflight || return $?
   awk -F '\t' '
     BEGIN { print "field\tresult" }
+    NF == 0 { next }
     NF != 6 || $2 != "preflight" || $6 != "pass" { failed = 1 }
     { print $3 "\t" $6; rows++ }
     END { if (failed || rows == 0) exit 1 }

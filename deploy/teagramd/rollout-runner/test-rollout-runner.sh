@@ -1185,6 +1185,7 @@ make_fixed_target_transition_fixture() {
   GIT_INDEX_FILE="$index" git -C "$origin" read-tree "$target_sha^{tree}"
   for tracked_path in \
     deploy/teagramd/rollout-runner/rollout-runner.sh \
+    deploy/teagramd/rollout-runner/rollout-safe-remove-tree.sh \
     deploy/teagramd/rollout-runner/rollout-verifier.sh \
     deploy/teagramd/rollout-runner/schema-result-gate.sh \
     deploy/teagramd/rollout-runner/schema-result-gate.py \

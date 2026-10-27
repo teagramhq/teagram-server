@@ -47,6 +47,15 @@ source "$SCRIPT_DIR/rollout-verifier.sh"
 [ "$(umask)" = "$umask_before" ]
 printf '%s\n' 'PASS sourcing runner and verifier preserves caller variables, trap, options, and umask'
 
+if ! (initialize_runner_config && initialize_runner_config) >"$TMP/reinitialize.out" 2>&1; then
+  printf '%s\n' 'FAIL runner configuration cannot be initialized twice' >&2
+  cat "$TMP/reinitialize.out" >&2
+  rm -f -- "$TMP/reinitialize.out"
+  exit 1
+fi
+rm -f -- "$TMP/reinitialize.out"
+printf '%s\n' 'PASS runner configuration initializes again after a fixture initialized it'
+
 for protected in / /root /opt /opt/teagram "$CHECKOUT"; do
   if rollout_safe_remove_tree "$protected" "$OWNED" "$TOKEN" "$CHECKOUT"; then
     printf 'FAIL recursive removal accepted protected path: %s\n' "$protected" >&2
