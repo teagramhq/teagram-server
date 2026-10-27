@@ -421,7 +421,7 @@ WHERE f.id = $1 AND f.access_hash = $2 AND f.stored = true
   AND (
       EXISTS (
           SELECT 1 FROM messages m
-          WHERE m.owner_id = $3 AND m.file_id = f.id AND m.deleted = false
+          WHERE m.owner_id = $3 AND m.file_id = f.id AND m.file_id <> 0 AND m.deleted = false
             AND (m.expires_at IS NULL OR m.expires_at > statement_timestamp())
       )
       OR EXISTS (
@@ -465,6 +465,10 @@ type FileForDownloadParams struct {
 // files.id is dense BIGSERIAL, so distinguishing "no such file" from "wrong
 // hash" from "not yours" would turn this into an enumeration oracle over every
 // file on the server.
+// The messages file index is partial on file_id <> 0. files.id's positive
+// check makes that predicate redundant for a matching file, but Postgres
+// cannot prove it from file_id = f.id while f is an outer row. Keep the
+// explicit predicate in each message entitlement check below.
 func (q *Queries) FileForDownload(ctx context.Context, arg FileForDownloadParams) (File, error) {
 	row := q.db.QueryRow(ctx, fileForDownload, arg.ID, arg.AccessHash, arg.OwnerID)
 	var i File
@@ -1021,7 +1025,7 @@ WHERE f.id = $3
   AND (
       EXISTS (
           SELECT 1 FROM messages m
-          WHERE m.owner_id = $5 AND m.file_id = f.id AND m.deleted = false
+          WHERE m.owner_id = $5 AND m.file_id = f.id AND m.file_id <> 0 AND m.deleted = false
             AND (m.expires_at IS NULL OR m.expires_at > statement_timestamp())
       )
       OR EXISTS (
@@ -1088,7 +1092,7 @@ WHERE f.id = $1
   AND (
       EXISTS (
           SELECT 1 FROM messages m
-          WHERE m.owner_id = $3 AND m.file_id = f.id AND m.deleted = false
+          WHERE m.owner_id = $3 AND m.file_id = f.id AND m.file_id <> 0 AND m.deleted = false
             AND (m.expires_at IS NULL OR m.expires_at > statement_timestamp())
       )
       OR EXISTS (
