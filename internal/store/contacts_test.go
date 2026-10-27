@@ -516,6 +516,37 @@ func TestImportContactsDoesNotBypassAddedByPhonePrivacyForExistingContact(t *tes
 	}
 }
 
+func TestImportContactsPrivateExistingContactAtExhaustedQuotaReturnsFloodWait(t *testing.T) {
+	t.Parallel()
+	s := open(t)
+	ctx := context.Background()
+	owner := mustUser(t, s, "+15551900811")
+	target := mustUser(t, s, "+15551900812")
+	if err := s.SetAddedByPhonePrivacy(ctx, target.ID, store.AddedByPhonePrivacyRule{
+		BaseRule: "nobody", DisallowedUserIDs: []int64{owner.ID},
+	}); err != nil {
+		t.Fatalf("set target added-by-phone privacy: %v", err)
+	}
+	if _, err := s.AddContact(ctx, owner.ID, target.ID); err != nil {
+		t.Fatalf("add target by ID: %v", err)
+	}
+	if _, err := store.StorePool(s).Exec(ctx, `
+		INSERT INTO phone_lookups (caller_id, lookup_type, phone, looked_up_at)
+		SELECT $1, 'contacts_import', 'quota-seed-' || n::TEXT, now()
+		FROM generate_series(1, $2::INTEGER) AS n
+	`, owner.ID, store.ContactImportLookupLimit); err != nil {
+		t.Fatalf("fill contact import lookup quota: %v", err)
+	}
+
+	result, err := s.ImportContacts(ctx, owner.ID, []store.ContactImportInput{{ClientID: 1, Phone: target.Phone}})
+	if !errors.Is(err, store.ErrLookupQuotaExceeded) {
+		t.Fatalf("import hidden existing contact at exhausted quota error = %v, want ErrLookupQuotaExceeded", err)
+	}
+	if len(result.Matches) != 0 {
+		t.Fatalf("import hidden existing contact at exhausted quota matches = %+v, want none", result.Matches)
+	}
+}
+
 func TestImportContactsStatusReconcileQueryCountIsConstantWithContactsOnlyLastSeen(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()

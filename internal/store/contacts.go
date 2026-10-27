@@ -213,6 +213,28 @@ func chargeContactImportLookups(ctx context.Context, tx pgx.Tx, ownerID int64, c
 			JOIN user_contacts existing
 			  ON existing.owner_id = $1
 			 AND existing.contact_id = target.id
+			LEFT JOIN user_privacy_rules privacy
+			  ON privacy.owner_id = target.id
+			 AND privacy.privacy_key = 'added_by_phone'
+			LEFT JOIN user_privacy_rule_users disallowed
+			  ON disallowed.owner_id = target.id
+			 AND disallowed.privacy_key = 'added_by_phone'
+			 AND disallowed.user_id = $1
+			 AND disallowed.entry_type = 'disallow'
+			LEFT JOIN user_privacy_rule_users allowed
+			  ON allowed.owner_id = target.id
+			 AND allowed.privacy_key = 'added_by_phone'
+			 AND allowed.user_id = $1
+			 AND allowed.entry_type = 'allow'
+			LEFT JOIN user_contacts target_contact
+			  ON target_contact.owner_id = target.id
+			 AND target_contact.contact_id = $1
+			WHERE disallowed.user_id IS NULL
+			  AND (
+				allowed.user_id IS NOT NULL
+				OR COALESCE(privacy.base_rule, 'everybody') = 'everybody'
+				OR (privacy.base_rule = 'contacts' AND target_contact.contact_id IS NOT NULL)
+			  )
 		), probes AS (
 			SELECT DISTINCT requested.phone
 			FROM requested
