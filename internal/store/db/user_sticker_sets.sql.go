@@ -503,6 +503,41 @@ func (q *Queries) UserCreatedStickerSetItemsBySetIDs(ctx context.Context, dollar
 	return items, nil
 }
 
+const userCreatedStickerSetSearchCandidates = `-- name: UserCreatedStickerSetSearchCandidates :many
+SELECT id, access_hash
+FROM user_created_sticker_sets
+WHERE is_live = true
+  AND (strpos(lower(title), lower($1)) > 0 OR strpos(lower(short_name), lower($1)) > 0)
+ORDER BY id
+`
+
+type UserCreatedStickerSetSearchCandidatesRow struct {
+	ID         int64
+	AccessHash int64
+}
+
+// Search returns only credentials for live sets. Callers must resolve these
+// through UserCreatedStickerSetByID before exposing a result.
+func (q *Queries) UserCreatedStickerSetSearchCandidates(ctx context.Context, lower string) ([]UserCreatedStickerSetSearchCandidatesRow, error) {
+	rows, err := q.db.Query(ctx, userCreatedStickerSetSearchCandidates, lower)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []UserCreatedStickerSetSearchCandidatesRow
+	for rows.Next() {
+		var i UserCreatedStickerSetSearchCandidatesRow
+		if err := rows.Scan(&i.ID, &i.AccessHash); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const userCreatedStickerSetsByInstalledIDs = `-- name: UserCreatedStickerSetsByInstalledIDs :many
 SELECT id, access_hash, creator_id, title, short_name, software, kind,
        text_color, is_live, created_at

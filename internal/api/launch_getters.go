@@ -206,11 +206,73 @@ func (h *handlers) handleSearchStickerSets(r *mtproto.Request) (bin.Encoder, err
 		h.log.Error("build sticker set search response", "err", err)
 		return nil, errInternal
 	}
+
+	// Search is an enumeration surface. Only return user sets that still pass
+	// the same live-set and exact-access-hash resolver used by getStickerSet.
+	userSetCount := 0
+	candidates, err := h.store.UserStickerSetSearchCandidates(r.Ctx, req.Q)
+	if err != nil {
+		h.log.Error("search user sticker sets", "user_id", r.UserID, "err", err)
+		return nil, errInternal
+	}
+	for _, candidate := range candidates {
+		set, resolveErr := h.userStickerSetByRef(r, &tg.InputStickerSetID{ID: candidate.ID, AccessHash: candidate.AccessHash})
+		if errors.Is(resolveErr, store.ErrStickerSetNotFound) {
+			continue
+		}
+		if resolveErr != nil {
+			h.log.Error("resolve user sticker set search candidate", "user_id", r.UserID, "set_id", candidate.ID, "err", resolveErr)
+			return nil, errInternal
+		}
+		if !set.IsLive || len(set.Items) == 0 ||
+			(!strings.Contains(strings.ToLower(set.Title), query) && !strings.Contains(strings.ToLower(set.ShortName), query)) {
+			continue
+		}
+		userSet := userStickerSetTL(set, r.UserID, h.dcID, nil)
+		coveredSets = append(coveredSets, &tg.StickerSetCovered{
+			Set: userSet.Set, Cover: userStickerDocumentTL(set, set.Items[0], h.dcID),
+		})
+		userSetCount++
+	}
 	hash := featuredStickerSetsHashList(matches, nil)
+	if userSetCount > 0 {
+		hash, err = searchStickerSetsHashList(coveredSets)
+		if err != nil {
+			h.log.Error("hash sticker set search response", "err", err)
+			return nil, errInternal
+		}
+	}
 	if req.Hash != 0 && req.Hash == hash {
 		return &tg.MessagesFoundStickerSetsNotModified{}, nil
 	}
 	return &tg.MessagesFoundStickerSets{Hash: hash, Sets: coveredSets}, nil
+}
+
+func searchStickerSetsHashList(sets []tg.StickerSetCoveredClass) (int64, error) {
+	if len(sets) == 0 {
+		return 1, nil
+	}
+	input := make([]byte, 0, len(sets)*32)
+	var long [8]byte
+	for _, result := range sets {
+		covered, ok := result.(*tg.StickerSetCovered)
+		if !ok || covered == nil || covered.Cover == nil {
+			return 0, fmt.Errorf("unexpected sticker set search result %T", result)
+		}
+		cover, ok := covered.Cover.(*tg.Document)
+		if !ok || cover == nil {
+			return 0, fmt.Errorf("unexpected sticker set search cover %T", covered.Cover)
+		}
+		for _, value := range [...]int64{covered.Set.ID, covered.Set.AccessHash, int64(covered.Set.Hash), cover.ID} {
+			binary.BigEndian.PutUint64(long[:], uint64(value)) //nolint:gosec // IDs, access hashes, and set hashes are opaque serialized 64-bit values.
+			input = append(input, long[:]...)
+		}
+	}
+	hash := int64(crc32.ChecksumIEEE(input) & 0x7fffffff)
+	if hash == 0 {
+		return 1, nil
+	}
+	return hash, nil
 }
 
 func (h *handlers) featuredStickerSetInstalledAt(r *mtproto.Request, catalog *stickerSetCatalog) (map[int64]time.Time, error) {

@@ -42,6 +42,15 @@ SELECT id, access_hash, creator_id, title, short_name, software, kind,
 FROM user_created_sticker_sets
 WHERE id = $1 AND access_hash = $2 AND is_live = true;
 
+-- Search returns only credentials for live sets. Callers must resolve these
+-- through UserCreatedStickerSetByID before exposing a result.
+-- name: UserCreatedStickerSetSearchCandidates :many
+SELECT id, access_hash
+FROM user_created_sticker_sets
+WHERE is_live = true
+  AND (strpos(lower(title), lower($1)) > 0 OR strpos(lower(short_name), lower($1)) > 0)
+ORDER BY id;
+
 -- name: UserCreatedStickerSetByInstalledID :one
 SELECT id, access_hash, creator_id, title, short_name, software, kind,
        text_color, is_live, created_at

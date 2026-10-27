@@ -47,6 +47,13 @@ type UserStickerSet struct {
 	Items      []UserStickerSetItem
 }
 
+// UserStickerSetSearchCandidate is a live-set identity that must be resolved
+// with its access hash before returning it to a caller.
+type UserStickerSetSearchCandidate struct {
+	ID         int64
+	AccessHash int64
+}
+
 // UserStickerSetItem is one stored document in an account-created set.
 type UserStickerSetItem struct {
 	Position   int
@@ -245,6 +252,23 @@ func (s *Store) UserStickerSetByID(ctx context.Context, id, accessHash int64) (U
 		return UserStickerSet{}, fmt.Errorf("lookup user sticker set by id: %w", err)
 	}
 	return s.userStickerSetWithItems(ctx, userStickerSetFromRow(row))
+}
+
+// UserStickerSetSearchCandidates returns identities matching the query. The
+// caller must resolve each candidate with UserStickerSetByID before exposing it.
+func (s *Store) UserStickerSetSearchCandidates(ctx context.Context, query string) ([]UserStickerSetSearchCandidate, error) {
+	if query == "" {
+		return []UserStickerSetSearchCandidate{}, nil
+	}
+	rows, err := s.q.UserCreatedStickerSetSearchCandidates(ctx, query)
+	if err != nil {
+		return nil, fmt.Errorf("search user sticker set candidates: %w", err)
+	}
+	result := make([]UserStickerSetSearchCandidate, 0, len(rows))
+	for _, row := range rows {
+		result = append(result, UserStickerSetSearchCandidate{ID: row.ID, AccessHash: row.AccessHash})
+	}
+	return result, nil
 }
 
 // UserStickerSetByInstalledID returns a live set for an account's install row.

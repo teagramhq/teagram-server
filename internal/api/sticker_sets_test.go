@@ -12,6 +12,7 @@ import (
 	"github.com/gotd/td/bin"
 	"github.com/gotd/td/mt"
 	"github.com/gotd/td/tg"
+	"github.com/jackc/pgx/v5"
 
 	"github.com/teagramhq/teagram-server/internal/api"
 	"github.com/teagramhq/teagram-server/internal/mtproto"
@@ -497,6 +498,65 @@ func TestSearchStickerSetsMatchesCatalogueCaseInsensitivelyAndSupportsHash(t *te
 	}
 	if modified := searchStickerSets(t, h, owner.ID, &tg.MessagesSearchStickerSetsRequest{Q: "TWEMOJI", Hash: full.Hash}); modified != nil {
 		t.Fatal("searchStickerSets with current hash returned a full result")
+	}
+}
+
+func TestSearchStickerSetsIncludesOnlyCallerVisibleUserSets(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	blobs := testBlobs(t)
+	dsn := pgtest.DSN(t)
+	s := openStickerStore(t, blobs, dsn)
+	owner, err := s.CreateUser(ctx, "+15551810014")
+	if err != nil {
+		t.Fatalf("create owner: %v", err)
+	}
+	viewer, err := s.CreateUser(ctx, "+15551810015")
+	if err != nil {
+		t.Fatalf("create viewer: %v", err)
+	}
+	file := storedStickerDocument(t, s, blobs, owner.ID, validStickerTGS(t))
+	created := createStickerSet(t, fullChannelDispatcher(s), owner.ID, createStickerRequest("generated_cats", file, false, false))
+
+	search := func() *tg.MessagesFoundStickerSets {
+		t.Helper()
+		result := searchStickerSets(t, fullChannelDispatcher(s), viewer.ID, &tg.MessagesSearchStickerSetsRequest{Q: "GENERATED", ExcludeFeatured: true})
+		full, ok := result.(*tg.MessagesFoundStickerSets)
+		if !ok {
+			t.Fatalf("searchStickerSets = %T, want full result", result)
+		}
+		return full
+	}
+	full := search()
+	if full.Hash == 0 || len(full.Sets) != 1 {
+		t.Fatalf("searchStickerSets user set result = hash %d, %d sets; want one caller-visible user set", full.Hash, len(full.Sets))
+	}
+	covered, ok := full.Sets[0].(*tg.StickerSetCovered)
+	if !ok || covered.Set.ShortName != "generated_cats" || covered.Set.Creator {
+		t.Fatalf("searchStickerSets result = %T (%v); want non-creator view of generated_cats", full.Sets[0], full.Sets[0])
+	}
+	resolved := getStickerSet(t, fullChannelDispatcher(s), viewer.ID, &tg.InputStickerSetID{ID: covered.Set.ID, AccessHash: covered.Set.AccessHash}, 0)
+	if resolved.Set.ShortName != created.Set.ShortName || resolved.Set.Creator {
+		t.Fatalf("getStickerSet for search result = %+v; want the viewer-visible non-creator set", resolved.Set)
+	}
+	if modified := searchStickerSets(t, fullChannelDispatcher(s), viewer.ID, &tg.MessagesSearchStickerSetsRequest{Q: "GENERATED", ExcludeFeatured: true, Hash: full.Hash}); modified != nil {
+		t.Fatal("searchStickerSets with current user-set hash returned a full result")
+	}
+
+	conn, err := pgx.Connect(ctx, dsn)
+	if err != nil {
+		t.Fatalf("connect for set liveness change: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := conn.Close(ctx); err != nil {
+			t.Errorf("close set liveness connection: %v", err)
+		}
+	})
+	if _, err := conn.Exec(ctx, `UPDATE user_created_sticker_sets SET is_live = false WHERE id = $1`, created.Set.ID); err != nil {
+		t.Fatalf("disable user set: %v", err)
+	}
+	if inactive := search(); len(inactive.Sets) != 0 || inactive.Hash == full.Hash {
+		t.Fatalf("searchStickerSets after set deactivation = hash %d, %d sets; want it excluded and hash changed", inactive.Hash, len(inactive.Sets))
 	}
 }
 
