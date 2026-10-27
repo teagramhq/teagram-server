@@ -118,7 +118,7 @@ jobs:
   deploy-demo:
     name: deploy public demo
     needs: deploy
-    if: ${{ needs.deploy.result == 'success' && vars.TEAGRAM_DEMO_DEPLOY_ENABLED == 'true' }}
+    if: ${{ needs.deploy.result == 'success' }}
     runs-on: ubuntu-26.04
     timeout-minutes: 60
     environment: demo
@@ -127,8 +127,21 @@ jobs:
       contents: read
 
     steps:
+      - name: Check the demo deployment gate
+        id: demo-gate
+        env:
+          TEAGRAM_DEMO_DEPLOY_ENABLED: ${{ vars.TEAGRAM_DEMO_DEPLOY_ENABLED }}
+        run: |
+          if [[ "$TEAGRAM_DEMO_DEPLOY_ENABLED" == 'true' ]]; then
+            echo "enabled=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::Public demo deployment is disabled"
+          fi
+
       - name: Resolve the tested image digest
         id: demo-image
+        if: ${{ steps.demo-gate.outputs.enabled == 'true' }}
         env:
           GH_TOKEN: ${{ github.token }}
           CI_RUN_ID: ${{ needs.deploy.outputs.ci_run_id }}
@@ -146,6 +159,7 @@ jobs:
           echo "digest=$digest" >> "$GITHUB_OUTPUT"
 
       - name: Join the tailnet
+        if: ${{ steps.demo-gate.outputs.enabled == 'true' }}
         uses: tailscale/github-action@d1b6cd204f8dceda5b3eaad7f1f767be390056cd # v4.2.0
         with:
           oauth-client-id: ${{ secrets.TS_OAUTH_CLIENT_ID }}
@@ -154,6 +168,7 @@ jobs:
           ping: ${{ vars.DEMO_DEPLOY_HOST }}
 
       - name: Install the demo deploy key
+        if: ${{ steps.demo-gate.outputs.enabled == 'true' }}
         env:
           DEMO_DEPLOY_SSH_KEY: ${{ secrets.DEMO_DEPLOY_SSH_KEY }}
           DEMO_DEPLOY_KNOWN_HOSTS: ${{ vars.DEMO_DEPLOY_KNOWN_HOSTS }}
@@ -169,6 +184,7 @@ jobs:
           printf '%s\n' "$DEMO_DEPLOY_KNOWN_HOSTS" > "$RUNNER_TEMP/ssh-demo/known_hosts"
 
       - name: Deploy the tested commit after the dev deploy
+        if: ${{ steps.demo-gate.outputs.enabled == 'true' }}
         env:
           DEPLOY_SHA: ${{ needs.deploy.outputs.sha }}
           DEPLOY_IMAGE_DIGEST: ${{ steps.demo-image.outputs.digest }}
@@ -184,5 +200,5 @@ jobs:
             "root@$DEMO_DEPLOY_HOST" "$DEPLOY_SHA $DEPLOY_IMAGE_DIGEST" </dev/null
 
       - name: Remove the demo deploy key
-        if: ${{ always() }}
+        if: ${{ always() && steps.demo-gate.outputs.enabled == 'true' }}
         run: rm -rf "$RUNNER_TEMP/ssh-demo"

@@ -62,7 +62,9 @@ The public origin and discovery document advertise
 `demo.teagram.io:443`; browser clients use the separate WSS endpoint. CORS is
 limited to `https://web.teagram.io`. Registration is open, the existing signup
 limit remains five attempts per IP per hour, login-code logging is disabled,
-and uploads are capped at 16 MiB per file and 256 MiB per account.
+and uploads are capped at 16 MiB per file and 256 MiB per account. Sticker and
+custom emoji pack imports are disabled (`TG_STICKER_IMPORT=off`); catalogue
+packs remain available to install and send.
 
 `prepare-env.sh` keeps the Turnstile site key in `.env` and writes the secret
 key to `/var/lib/teagram-demo/secrets/turnstile-secret-key` with root ownership
@@ -204,6 +206,34 @@ online snapshot that could discard writes accepted during rollout. Keep schema
 changes backward-compatible with the previous server for this rollback path.
 The dump and metadata remain under `.state/teagram-demo/backups/` until the
 weekly wipe.
+
+## Agent operations menu
+
+The separate `multica-daemon@delta` root key is restricted to
+`/usr/local/sbin/teagram-demo-ops`. It accepts `hostname`, `live`, `ps`,
+`env-names`, `fingerprints`, `logs <RFC3339-UTC>`, and
+`run <main-sha> <name>`. `run` fetches `origin/main` and executes only the
+executable `deploy/teagram-demo/ops/<name>.sh` blob from that commit. The menu
+does not accept shell commands. The `DEMO_DEPLOY_SSH_KEY` remains bound to
+`forced-command.sh`; demo deploys still send a tested SHA and image digest.
+
+After the installer commit is on `main`, stream that reviewed installer from
+a trusted checkout to the demo LXC. It fetches and verifies the requested main
+SHA before writing:
+
+```sh
+set -e
+git show <main-sha>:deploy/teagram-demo/ops/install-teagram-demo-ops.sh |
+  ssh -T teagram-demo 'sh -s -- check <main-sha>'
+git show <main-sha>:deploy/teagram-demo/ops/install-teagram-demo-ops.sh |
+  ssh -T teagram-demo 'sh -s -- apply <main-sha>'
+```
+
+The installer changes only the `multica-daemon@delta` line. Before replacing
+it, it saves and verifies `authorized_keys` under the root-only
+`/var/backups/teagram-demo-ops/` directory. Restore that saved file from a
+separate root channel if the menu must be rolled back. The Gatus definitions
+in `gatus.yaml` are HTTPS probes and do not use an SSH key.
 
 Do not use `docker compose down -v`. The named `pgdata`, `tgkey` and `tgblobs`
 volumes have independent lifetimes; especially, removing `tgkey` changes the

@@ -125,6 +125,13 @@ if [[ -e "$MODE_FILE" || -L "$MODE_FILE" ]]; then
     --owner-password-file "$DEMO_SEED_PASSWORD_FILE"
   "$SEED_SCRIPT" --verify-seed --endpoint "$ACTIVE_ENDPOINT"
   "$SCRIPT_DIR/test-seed-compose.sh"
+
+  # The seed and convergence checks exercise auth flows with relaxed rate
+  # limits. Remove only the limiter state they created before the private
+  # production-config Turnstile probe runs.
+  demo_compose exec -T postgres psql -v ON_ERROR_STOP=1 -U postgres -d teagram \
+    -c 'DELETE FROM rate_limits; DELETE FROM send_code_ip_calls; DELETE FROM send_code_ip_phones; DELETE FROM public_send_code_ip_calls; DELETE FROM public_send_code_ip_phones;'
+
   PUBLIC_SERVICES_MAY_BE_RUNNING=1
   demo_compose up -d --wait --wait-timeout 120 "$ACTIVE_SERVER" haproxy
   "$SEED_SCRIPT" --verify-turnstile --endpoint haproxy:2443
@@ -214,6 +221,13 @@ demo_prepare_seed_owner "$TMP_DIR"
   --owner-password-file "$DEMO_SEED_PASSWORD_FILE"
 "$SEED_SCRIPT" --verify-seed --endpoint teagramd:2443
 "$SCRIPT_DIR/test-seed-compose.sh"
+
+# The seed and convergence checks exercise auth flows with relaxed rate
+# limits. Remove only the limiter state they created before the private
+# production-config Turnstile probe runs.
+demo_compose exec -T postgres psql -v ON_ERROR_STOP=1 -U postgres -d teagram \
+  -c 'DELETE FROM rate_limits; DELETE FROM send_code_ip_calls; DELETE FROM send_code_ip_phones; DELETE FROM public_send_code_ip_calls; DELETE FROM public_send_code_ip_phones;'
+
 PUBLIC_SERVICES_MAY_BE_RUNNING=1
 demo_compose up -d --wait --wait-timeout 120 "$ACTIVE_SERVER" haproxy
 "$SEED_SCRIPT" --verify-turnstile --endpoint haproxy:2443

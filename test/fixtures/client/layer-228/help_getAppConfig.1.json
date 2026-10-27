@@ -1,0 +1,12 @@
+{
+  "layer": 228,
+  "client": "gotd/td v0.162.0",
+  "source": "source-derived/help_getAppConfig.1.txt",
+  "method": "help.getAppConfig",
+  "request": {
+    "type": "help.getAppConfig",
+    "fields": {
+      "hash": 0
+    }
+  }
+}

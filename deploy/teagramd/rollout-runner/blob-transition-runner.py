@@ -3421,7 +3421,7 @@ def deployment_environment(args: argparse.Namespace) -> None:
         reject("transition-input-invalid")
     try:
         checkout = checkout.resolve(strict=True)
-        report_root = report_root.resolve(strict=True)
+        report_root = report_root.resolve(strict=False)
     except OSError:
         reject("transition-input-unavailable")
     if not checkout.is_dir():
@@ -3437,7 +3437,7 @@ def deployment_environment(args: argparse.Namespace) -> None:
     mode = import_mode_helper()
     try:
         mode.require_runner_lock(lock_path)
-        record = mode.current_authority(state_dir, report_root)
+        record, missing_report_count = mode.current_deployment_authority(state_dir, report_root)
     except mode.Reject as error:
         reject(str(error))
     backend = record.get("backend")
@@ -3450,6 +3450,11 @@ def deployment_environment(args: argparse.Namespace) -> None:
     environment_files = rustfs_compose_environment_files(checkout)
     if environment_files[0] != str(checkout / ".env"):
         reject("rustfs-credentials-invalid")
+    if missing_report_count:
+        print(
+            f"blob transition deployment accepted {missing_report_count} journal records without reports",
+            file=sys.stderr,
+        )
     print(json.dumps(
         {"outcome": "s3-accepted", "env_files": environment_files},
         sort_keys=True,

@@ -1102,12 +1102,14 @@ capture_running_blob_inventory() {
 }
 
 validate_blob_authority() {
-  local containers_file=$1 compose_file=$2 allow_empty=${3:-0} allow_unguarded_containers=${4:-0} allow_unguarded_compose=${5:-0}
+  local containers_file=$1 compose_file=$2 allow_empty=${3:-0} allow_unguarded_containers=${4:-0} allow_unguarded_compose=${5:-0} allow_missing_reports=${6:-0}
+  local mode_action=validate
   local -a mode_args=()
+  [ "$allow_missing_reports" = 1 ] && mode_action=deployment-validate
   [ "$allow_empty" = 1 ] && mode_args+=(--allow-empty-containers)
   [ "$allow_unguarded_containers" = 1 ] && mode_args+=(--allow-unguarded-initial-local-containers)
   [ "$allow_unguarded_compose" = 1 ] && mode_args+=(--allow-unguarded-initial-local)
-  python3 "$MODE_HELPER" validate \
+  python3 "$MODE_HELPER" "$mode_action" \
     --state-dir "$CHECKOUT/.state/blob-mode" --report-root "$EVIDENCE_ROOT" \
     --containers "$containers_file" --compose "$compose_file" \
     --override "$OVERRIDE_FILE" --checkout "$CHECKOUT" "${mode_args[@]}"
@@ -1240,7 +1242,7 @@ preflight_target_local_blob_authority() {
     return 1
   }
   compose_sha=$(sha256_file "$compose_file") || { fail 'cannot hash the pre-backup Compose authority render'; return 1; }
-  if ! validate_blob_authority "$containers_file" "$compose_file"; then
+  if ! validate_blob_authority "$containers_file" "$compose_file" 0 0 0 1; then
     write_immutable "$TARGET_DIR/pre-backup-blob-authority-rejected.txt" \
       "result=rejected target_sha=$TARGET_SHA expected_baseline_sha=$EXPECTED_BASELINE_SHA compose_sha256=$artifact_sha render_sha256=$compose_sha" || return 1
     fail 'durable blob authority rejected before backup; target was not started'
@@ -2417,7 +2419,7 @@ validate_rollback_blob_authority() {
   local containers_file="$ROLLBACK_DIR/rollback-pre-up-blob-containers.json"
   capture_compose_blob_inventory "$compose_file" || return 1
   capture_running_blob_inventory "$containers_file" 1 || return 1
-  validate_blob_authority "$containers_file" "$compose_file" 1 1 1
+  validate_blob_authority "$containers_file" "$compose_file" 1 1 1 1
 }
 
 target_failure_marker() {
@@ -2710,7 +2712,7 @@ run_apply() {
       fail 'inspected initial-local authority could not be published; baseline checkout and tag restored, target was not started'
       return 1
     }
-  elif ! validate_blob_authority "$target_blob_containers" "$target_blob_compose" 0 1 0; then
+  elif ! validate_blob_authority "$target_blob_containers" "$target_blob_compose" 0 1 0 1; then
     write_immutable "$TARGET_DIR/blob-authority-rejected.txt" \
       "result=rejected target_sha=$TARGET_SHA reason=durable-blob-authority-mismatch" || {
       restore_checkout_and_tag || return 1
@@ -2806,7 +2808,7 @@ run_apply() {
   local target_runtime_containers="$TARGET_DIR/target-blob-containers.json"
   if ! capture_compose_blob_inventory "$target_runtime_compose" || \
      ! capture_running_blob_inventory "$target_runtime_containers" || \
-     ! validate_blob_authority "$target_runtime_containers" "$target_runtime_compose"; then
+     ! validate_blob_authority "$target_runtime_containers" "$target_runtime_compose" 0 0 0 1; then
     rollback_after_target_failure target_blob_authority_rejected || return 2
     return 1
   fi

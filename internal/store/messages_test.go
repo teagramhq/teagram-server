@@ -431,6 +431,45 @@ func TestHistoryWithOffsetKeepsOwnerAndDeletedFilters(t *testing.T) {
 	assertHistory("around anchor", around, []int64{3, 1})
 }
 
+func TestHistoryWithDateNegativeAddOffsetShiftsAcrossDateAnchor(t *testing.T) {
+	t.Parallel()
+	s := open(t)
+	ctx := context.Background()
+	a := mustUser(t, s, "+15551250131")
+	b := mustUser(t, s, "+15551250132")
+
+	messages := []store.Message{
+		send(t, s, a, b, "before older", 3131),
+		send(t, s, a, b, "before nearest", 3132),
+		send(t, s, a, b, "after nearest", 3133),
+		send(t, s, a, b, "after newest", 3134),
+	}
+	for i, message := range messages {
+		if _, err := store.StorePool(s).Exec(ctx,
+			`UPDATE messages SET date = to_timestamp($3) WHERE owner_id = $1 AND local_id = $2`,
+			a.ID, message.LocalID, int64(98+2*i)); err != nil {
+			t.Fatalf("set message %d date: %v", message.LocalID, err)
+		}
+	}
+
+	for _, tc := range []struct {
+		addOffset int
+		wantID    int64
+	}{
+		{addOffset: -1, wantID: messages[2].LocalID},
+		{addOffset: -2, wantID: messages[3].LocalID},
+		{addOffset: -3, wantID: messages[3].LocalID},
+	} {
+		got, err := s.HistoryWithDate(ctx, a.ID, store.PeerTypeUser, b.ID, 101, tc.addOffset, 1)
+		if err != nil {
+			t.Fatalf("history with date and add_offset %d: %v", tc.addOffset, err)
+		}
+		if len(got) != 1 || got[0].LocalID != tc.wantID {
+			t.Errorf("history with date and add_offset %d = %+v, want local_id %d", tc.addOffset, got, tc.wantID)
+		}
+	}
+}
+
 func TestEditMessageBothSides(t *testing.T) {
 	t.Parallel()
 	s := open(t)

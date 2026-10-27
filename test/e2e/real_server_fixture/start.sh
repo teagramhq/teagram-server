@@ -745,6 +745,7 @@ docker run --detach --name "$BROWSER" --label "$OWNER_LABEL=$OWNER_TOKEN" --labe
 	--env ALL_PROXY= --env all_proxy= --env NO_PROXY= --env no_proxy= \
 	--entrypoint node "$IMAGE" -e 'setInterval(() => {}, 1 << 30)' >/dev/null
 docker exec -i "$BROWSER" /bin/sh -c 'umask 077; cat > /tmp/probe.cjs' < "$SCRIPT_DIR/probe.cjs"
+docker exec -i "$BROWSER" /bin/sh -c 'umask 077; cat > /tmp/artifact_response_policy.cjs' < "$SCRIPT_DIR/artifact_response_policy.cjs"
 
 network_line() {
 	docker inspect --format '{{range $name, $value := .NetworkSettings.Networks}}{{$name}}={{$value.IPAddress}};{{end}}' "$1" | tr ';' '\n' | sed '/^$/d' | sort | tr '\n' ';'

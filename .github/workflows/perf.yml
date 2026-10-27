@@ -4,6 +4,31 @@ on:
   push:
     branches: [main]
   pull_request:
+    paths:
+      - 'internal/api/**'
+      - 'internal/blob/**'
+      - 'internal/catalog/**'
+      - 'internal/config/**'
+      - 'internal/discovery/**'
+      - 'internal/keycrypt/**'
+      - 'internal/mtproto/**'
+      - 'internal/peerhash/**'
+      - 'internal/pgtest/**'
+      - 'internal/photohash/**'
+      - 'internal/photothumb/**'
+      - 'internal/photowire/**'
+      - 'internal/reactionassets/**'
+      - 'internal/rsakey/**'
+      - 'internal/srp/**'
+      - 'internal/stickerbundle/**'
+      - 'internal/store/**'
+      - 'migrations/**'
+      - 'test/perf/**'
+      - 'go.mod'
+      - 'go.sum'
+      - '.github/scripts/perf-*'
+      - '.github/scripts/test_perf_run.py'
+      - '.github/workflows/perf.yml'
   workflow_dispatch:
     inputs:
       issue:
@@ -109,6 +134,12 @@ jobs:
           # same job.
           fetch-depth: 0
 
+      # A queued pull_request run can check out a merge ref with a newer base
+      # than the event's base.sha. Compare against the merge ref's first parent.
+      - name: Resolve PR comparison base
+        if: github.event_name == 'pull_request'
+        run: echo "PERF_BASE_SHA=$(git rev-parse HEAD^1)" >> "$GITHUB_ENV"
+
       - name: Test invalid performance base SHA handling
         run: python3 -B .github/scripts/test_perf_run.py
 
@@ -155,6 +186,9 @@ jobs:
           path: .perf-history
           key: perf-history-${{ github.run_id }}
           restore-keys: perf-history-
+
+      - name: Verify fixture restore provisions cluster roles
+        run: bash .github/scripts/test-perf-restore-role.sh
 
       - name: Start Postgres
         run: bash .github/scripts/perf-postgres.sh

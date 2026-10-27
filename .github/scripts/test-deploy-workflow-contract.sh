@@ -10,7 +10,9 @@ workflow="${DEPLOY_WORKFLOW:-.github/workflows/deploy.yml}"
 ci_workflow="${CI_WORKFLOW:-.github/workflows/ci.yml}"
 dockerfile="${DEPLOY_DOCKERFILE:-Dockerfile}"
 expected_if="\${{ github.event_name == 'workflow_dispatch' || (github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push') }}"
-expected_demo_if="\${{ needs.deploy.result == 'success' && vars.TEAGRAM_DEMO_DEPLOY_ENABLED == 'true' }}"
+expected_demo_if="\${{ needs.deploy.result == 'success' }}"
+expected_demo_step_if="\${{ steps.demo-gate.outputs.enabled == 'true' }}"
+expected_demo_cleanup_if="\${{ always() && steps.demo-gate.outputs.enabled == 'true' }}"
 expected_ci_group="\${{ github.workflow }}-\${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || (github.event_name == 'push' && github.ref == 'refs/heads/main' && 'main') || format('run-{0}-{1}', github.run_id, github.run_attempt) }}"
 expected_ci_cancel="\${{ github.event_name == 'pull_request' }}"
 expected_run_name="\${{ inputs.issue && format('{0} [{1}]', github.workflow, inputs.issue) || '' }}"
@@ -45,7 +47,7 @@ check_ci_contract() {
     ci_fail 'only pull request updates may cancel in-progress CI runs'
   [[ "$(ci_query '.jobs."publish-demo-image".if')" == "\${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}" ]] ||
     ci_fail 'the demo image may publish only from main pushes'
-  [[ "$(ci_query '.jobs."publish-demo-image".needs | sort | join(",")')" == 'browser-acceptance,browser-acceptance-image,ci,ci-main,compose,css,deploy-workflow,docker,e2e-admin,lint,mirror-rustfs-qualification-images,photothumb-runtime,real-server-fixtures,restore-readiness,rustfs-transition-qualification,schema-gate-postgres,smoke,sql-lint,sqlc,websocket-d1,websocket-permanent-exchange' ]] ||
+  [[ "$(ci_query '.jobs."publish-demo-image".needs | sort | join(",")')" == 'browser-acceptance,browser-acceptance-image,ci,ci-main,compose,css,deploy-workflow,docker,e2e-admin,lint,mirror-rustfs-qualification-images,photothumb-runtime,real-server-fixtures,restore-readiness,rustfs-transition-qualification,schema-gate-postgres,smoke,sql-lint,sqlc,sticker-bundle,websocket-d1,websocket-permanent-exchange' ]] ||
     ci_fail 'the demo image publish must wait for every CI lane'
   [[ "$(ci_query '.jobs."publish-demo-image".permissions | to_entries | sort_by(.key) | map(.key + "=" + .value) | join(",")')" == 'actions=write,contents=read,packages=write' ]] ||
     ci_fail 'the demo image publisher must use only the required package and cache permissions'
@@ -231,9 +233,25 @@ check_contract() {
   [[ "$(query '.jobs.deploy-demo.needs')" == 'deploy' ]] ||
     fail 'the demo job must wait for a successful dev deployment'
   [[ "$(query '.jobs.deploy-demo.if')" == "$expected_demo_if" ]] ||
-    fail 'the demo job must require both a successful dev job and the explicit feature gate'
+    fail 'the demo job must wait for a successful dev deployment before evaluating its environment gate'
   [[ "$(query '.jobs.deploy-demo.environment')" == 'demo' ]] ||
     fail 'the demo job must use the separate demo environment'
+  [[ "$(query '.jobs.deploy-demo.steps[0].id')" == 'demo-gate' ]] ||
+    fail 'the demo environment gate must be the first step in the demo environment'
+  [[ "$(query '.jobs.deploy-demo.steps[0].env.TEAGRAM_DEMO_DEPLOY_ENABLED')" == '${{ vars.TEAGRAM_DEMO_DEPLOY_ENABLED }}' ]] ||
+    fail 'the demo gate must read the environment-scoped deployment variable after environment setup'
+  [[ "$(query '.jobs.deploy-demo.steps[0].run')" == *'enabled=true'* && "$(query '.jobs.deploy-demo.steps[0].run')" == *'enabled=false'* ]] ||
+    fail 'the demo gate must explicitly set its output for both enabled and disabled states'
+  [[ "$(query '.jobs.deploy-demo.steps[] | select(.id == "demo-image") | .if')" == "$expected_demo_step_if" ]] ||
+    fail 'the demo image download must run only when the environment gate is enabled'
+  [[ "$(query '.jobs.deploy-demo.steps[] | select(.name == "Join the tailnet") | .if')" == "$expected_demo_step_if" ]] ||
+    fail 'the demo tailnet connection must run only when the environment gate is enabled'
+  [[ "$(query '.jobs.deploy-demo.steps[] | select(.name == "Install the demo deploy key") | .if')" == "$expected_demo_step_if" ]] ||
+    fail 'the demo key installation must run only when the environment gate is enabled'
+  [[ "$(query '.jobs.deploy-demo.steps[] | select(.name == "Deploy the tested commit after the dev deploy") | .if')" == "$expected_demo_step_if" ]] ||
+    fail 'the demo deployment must run only when the environment gate is enabled'
+  [[ "$(query '.jobs.deploy-demo.steps[] | select(.name == "Remove the demo deploy key") | .if')" == "$expected_demo_cleanup_if" ]] ||
+    fail 'the demo deploy key must be removed even when deployment fails'
   [[ "$(query '.jobs.deploy-demo.permissions // {} | to_entries | map(select(.value != "read")) | length')" == 0 ]] ||
     fail 'the demo job must not request write permissions'
   [[ "$(query '.jobs.deploy-demo.permissions.actions')" == 'read' ]] ||
@@ -368,6 +386,8 @@ self_test() {
     'del(.jobs."deploy-demo")'
     '.jobs."deploy-demo".needs = []'
     '.jobs."deploy-demo".if = "${{ github.event_name == '"'"'workflow_dispatch'"'"' }}"'
+    '.jobs."deploy-demo".steps[0].env.TEAGRAM_DEMO_DEPLOY_ENABLED = "true"'
+    '(.jobs."deploy-demo".steps[] | select(.name == "Deploy the tested commit after the dev deploy") | .if) = "${{ always() }}"'
     '.jobs."deploy-demo".environment = "production"'
     '(.jobs."deploy-demo".steps[] | select(.name == "Install the demo deploy key") | .env.DEMO_DEPLOY_SSH_KEY) = "${{ secrets.DEPLOY_SSH_KEY }}"'
     '(.jobs."deploy-demo".steps[] | select(.name == "Install the demo deploy key") | .env.DEMO_DEPLOY_PORT) = "${{ vars.WRONG_PORT }}"'

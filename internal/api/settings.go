@@ -12,7 +12,7 @@ import (
 )
 
 const (
-	appConfigHash       = 6
+	appConfigHash       = 7
 	emptyWallPapersHash = 1
 	emptyChatThemesHash = 1
 )
@@ -124,6 +124,9 @@ func (h *handlers) handleGetAppConfig(r *mtproto.Request) (bin.Encoder, error) {
 	}, {
 		Key:   "registration_mode",
 		Value: &tg.JSONString{Value: string(h.registrationMode)},
+	}, {
+		Key:   "sticker_import_mode",
+		Value: &tg.JSONString{Value: string(h.stickerImportMode)},
 	}, {
 		Key:   "reactions_uniq_max",
 		Value: &tg.JSONNumber{Value: 11},

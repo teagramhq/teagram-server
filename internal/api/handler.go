@@ -147,6 +147,8 @@ type handlers struct {
 	registrationMode config.RegistrationMode
 	// signUpTermsOfService is shown to new accounts before auth.signUp.
 	signUpTermsOfService string
+	// stickerImportMode controls whether accounts may create or add to sticker sets.
+	stickerImportMode config.StickerImportMode
 	// recoveryEmailMode controls whether proved password settings may expose a contact email.
 	recoveryEmailMode config.RecoveryEmailMode
 	// welcomeChannel is the operator-configured public broadcast channel new users may join.
@@ -183,10 +185,11 @@ type registeredFunc func(c *mtproto.Conn, req *mtproto.Request) (bin.Encoder, fu
 type orderedRegisteredFunc func(c *mtproto.Conn, req *mtproto.Request) (bin.Encoder, *replyUpdate, func(), error)
 
 type replyUpdate struct {
-	owner     int64
-	authKey   int64
-	pts       int
-	onFailure func()
+	owner            int64
+	authKey          int64
+	pts              int
+	setPushWatermark bool
+	onFailure        func()
 }
 
 // revokeFunc is a methodFunc that also returns work to run once the reply is on
@@ -258,7 +261,7 @@ func NewWithPhotoThumbsAndDialogFilterSyncAndWelcomeChannel(s *store.Store, dcID
 		s, dcID, cfg, log, logLoginCodes, maxFileBytes, blobs, maxUserStorageBytes,
 		peers, photos, rateLimits, registrationMode, dialogFilterSync, photoThumbs,
 		config.DefaultUploadPartTTL, welcomeChannel, "", nil, false, config.RecoveryEmailOff,
-		config.DefaultSignUpTermsOfService, nil, 0, rateLimitMetrics...,
+		config.DefaultSignUpTermsOfService, nil, 0, config.StickerImportOn, rateLimitMetrics...,
 	)
 }
 
@@ -269,7 +272,7 @@ func NewWithPhotoThumbsAndDialogFilterSyncAndUploadPartTTL(s *store.Store, dcID 
 		s, dcID, cfg, log, logLoginCodes, maxFileBytes, blobs, maxUserStorageBytes,
 		peers, photos, rateLimits, registrationMode, dialogFilterSync, photoThumbs,
 		uploadPartTTL, "", "", nil, false, config.RecoveryEmailOff,
-		config.DefaultSignUpTermsOfService, nil, 0, rateLimitMetrics...,
+		config.DefaultSignUpTermsOfService, nil, 0, config.StickerImportOn, rateLimitMetrics...,
 	)
 }
 
@@ -280,7 +283,7 @@ func NewWithPhotoThumbsAndDialogFilterSyncAndUploadPartTTLAndTurnstile(s *store.
 		s, dcID, cfg, log, logLoginCodes, maxFileBytes, blobs, maxUserStorageBytes,
 		peers, photos, rateLimits, registrationMode, dialogFilterSync, photoThumbs,
 		uploadPartTTL, "", turnstileSiteKey, turnstileVerifier, false, config.RecoveryEmailOff,
-		config.DefaultSignUpTermsOfService, nil, 0, rateLimitMetrics...,
+		config.DefaultSignUpTermsOfService, nil, 0, config.StickerImportOn, rateLimitMetrics...,
 	)
 }
 
@@ -292,7 +295,7 @@ func NewWithPhotoThumbsAndDialogFilterSyncAndUploadPartTTLAndTurnstileAndWelcome
 		s, dcID, cfg, log, logLoginCodes, maxFileBytes, blobs, maxUserStorageBytes,
 		peers, photos, rateLimits, registrationMode, dialogFilterSync, photoThumbs,
 		uploadPartTTL, welcomeChannel, turnstileSiteKey, turnstileVerifier, false, config.RecoveryEmailOff,
-		config.DefaultSignUpTermsOfService, nil, 0, rateLimitMetrics...,
+		config.DefaultSignUpTermsOfService, nil, 0, config.StickerImportOn, rateLimitMetrics...,
 	)
 }
 
@@ -303,23 +306,23 @@ func NewWithPhotoThumbsAndDialogFilterSyncAndUploadPartTTLAndTurnstileAndWelcome
 		s, dcID, cfg, log, logLoginCodes, maxFileBytes, blobs, maxUserStorageBytes,
 		peers, photos, rateLimits, registrationMode, dialogFilterSync, photoThumbs,
 		uploadPartTTL, welcomeChannel, turnstileSiteKey, turnstileVerifier, turnstileSignInEnabled, recoveryEmailMode,
-		config.DefaultSignUpTermsOfService, nil, 0, rateLimitMetrics...,
+		config.DefaultSignUpTermsOfService, nil, 0, config.StickerImportOn, rateLimitMetrics...,
 	)
 }
 
 // NewWithPhotoThumbsAndDialogFilterSyncAndUploadPartTTLAndTurnstileAndWelcomeChannelAndSignInAndStickerCatalog
 // builds an RPC handler with the server's validated sticker catalogue and
 // configured sign-up terms.
-func NewWithPhotoThumbsAndDialogFilterSyncAndUploadPartTTLAndTurnstileAndWelcomeChannelAndSignInAndStickerCatalog(s *store.Store, dcID int, cfg *tg.Config, log *slog.Logger, logLoginCodes bool, maxFileBytes int64, appConfigUploadMaxFileBytes int64, blobs blob.Store, maxUserStorageBytes int64, peers *peerhash.Deriver, photos *photohash.Deriver, rateLimits config.RateLimitsConfig, registrationMode config.RegistrationMode, dialogFilterSync *DialogFilterSync, photoThumbs *photothumb.Supervisor, uploadPartTTL time.Duration, turnstileSiteKey string, turnstileVerifier SignUpTurnstileVerifier, welcomeChannel string, turnstileSignInEnabled bool, recoveryEmailMode config.RecoveryEmailMode, signUpTermsOfService string, stickerSets *StickerSetCatalog, rateLimitMetrics ...*store.NotificationMetrics) mtproto.Handler {
+func NewWithPhotoThumbsAndDialogFilterSyncAndUploadPartTTLAndTurnstileAndWelcomeChannelAndSignInAndStickerCatalog(s *store.Store, dcID int, cfg *tg.Config, log *slog.Logger, logLoginCodes bool, maxFileBytes int64, appConfigUploadMaxFileBytes int64, blobs blob.Store, maxUserStorageBytes int64, peers *peerhash.Deriver, photos *photohash.Deriver, rateLimits config.RateLimitsConfig, registrationMode config.RegistrationMode, dialogFilterSync *DialogFilterSync, photoThumbs *photothumb.Supervisor, uploadPartTTL time.Duration, turnstileSiteKey string, turnstileVerifier SignUpTurnstileVerifier, welcomeChannel string, turnstileSignInEnabled bool, recoveryEmailMode config.RecoveryEmailMode, signUpTermsOfService string, stickerSets *StickerSetCatalog, stickerImportMode config.StickerImportMode, rateLimitMetrics ...*store.NotificationMetrics) mtproto.Handler {
 	return newWithPhotoThumbsAndDialogFilterSyncAndUploadPartTTLAndTurnstile(
 		s, dcID, cfg, log, logLoginCodes, maxFileBytes, blobs, maxUserStorageBytes,
 		peers, photos, rateLimits, registrationMode, dialogFilterSync, photoThumbs,
 		uploadPartTTL, welcomeChannel, turnstileSiteKey, turnstileVerifier, turnstileSignInEnabled, recoveryEmailMode,
-		signUpTermsOfService, stickerSets, appConfigUploadMaxFileBytes, rateLimitMetrics...,
+		signUpTermsOfService, stickerSets, appConfigUploadMaxFileBytes, stickerImportMode, rateLimitMetrics...,
 	)
 }
 
-func newWithPhotoThumbsAndDialogFilterSyncAndUploadPartTTLAndTurnstile(s *store.Store, dcID int, cfg *tg.Config, log *slog.Logger, logLoginCodes bool, maxFileBytes int64, blobs blob.Store, maxUserStorageBytes int64, peers *peerhash.Deriver, photos *photohash.Deriver, rateLimits config.RateLimitsConfig, registrationMode config.RegistrationMode, dialogFilterSync *DialogFilterSync, photoThumbs *photothumb.Supervisor, uploadPartTTL time.Duration, welcomeChannel, turnstileSiteKey string, turnstileVerifier SignUpTurnstileVerifier, turnstileSignInEnabled bool, recoveryEmailMode config.RecoveryEmailMode, signUpTermsOfService string, stickerSets *stickerSetCatalog, appConfigUploadMaxFileBytes int64, rateLimitMetrics ...*store.NotificationMetrics) mtproto.Handler {
+func newWithPhotoThumbsAndDialogFilterSyncAndUploadPartTTLAndTurnstile(s *store.Store, dcID int, cfg *tg.Config, log *slog.Logger, logLoginCodes bool, maxFileBytes int64, blobs blob.Store, maxUserStorageBytes int64, peers *peerhash.Deriver, photos *photohash.Deriver, rateLimits config.RateLimitsConfig, registrationMode config.RegistrationMode, dialogFilterSync *DialogFilterSync, photoThumbs *photothumb.Supervisor, uploadPartTTL time.Duration, welcomeChannel, turnstileSiteKey string, turnstileVerifier SignUpTurnstileVerifier, turnstileSignInEnabled bool, recoveryEmailMode config.RecoveryEmailMode, signUpTermsOfService string, stickerSets *stickerSetCatalog, appConfigUploadMaxFileBytes int64, stickerImportMode config.StickerImportMode, rateLimitMetrics ...*store.NotificationMetrics) mtproto.Handler {
 	if peers == nil {
 		panic("api: nil peer hash deriver")
 	}
@@ -343,6 +346,7 @@ func newWithPhotoThumbsAndDialogFilterSyncAndUploadPartTTLAndTurnstile(s *store.
 		photoThumbs:                  photoThumbs,
 		store:                        s,
 		stickerSets:                  stickerSets,
+		stickerImportMode:            stickerImportMode,
 		langpack:                     newLangpackService(langpackSnapshot, dcID),
 		cfg:                          cfg,
 		dcID:                         dcID,
@@ -445,7 +449,26 @@ func newWithPhotoThumbsAndDialogFilterSyncAndUploadPartTTLAndTurnstile(s *store.
 	register(d, tg.AuthRecoverPasswordRequestTypeID, h.handleRecoveryCodeInvalid)
 	register(d, tg.AccountUpdatePasswordSettingsRequestTypeID, h.handleUpdatePasswordSettings)
 	register(d, tg.AccountGetPasswordSettingsRequestTypeID, h.handleGetPasswordSettings)
-	register(d, tg.UpdatesGetStateRequestTypeID, h.handleGetState)
+	registerReplyAfterSuccess(d, tg.UpdatesGetStateRequestTypeID, func(c *mtproto.Conn, req *mtproto.Request) (bin.Encoder, *replyUpdate, func(), error) {
+		releaseDeliveryBarrier := c.BeginPushDeliveryBarrier()
+		result, err := h.handleGetState(req)
+		if err != nil {
+			releaseDeliveryBarrier()
+			return nil, nil, nil, err
+		}
+		state, ok := result.(*tg.UpdatesState)
+		if !ok {
+			releaseDeliveryBarrier()
+			return nil, nil, nil, fmt.Errorf("updates.getState returned %T", result)
+		}
+		return result, &replyUpdate{
+			owner:            req.UserID,
+			authKey:          mtproto.AuthKeyIDInt64(req.AuthKeyID),
+			pts:              state.Pts,
+			setPushWatermark: true,
+			onFailure:        releaseDeliveryBarrier,
+		}, releaseDeliveryBarrier, nil
+	})
 	registerReplyAfterSuccess(d, tg.UpdatesGetDifferenceRequestTypeID, func(c *mtproto.Conn, req *mtproto.Request) (bin.Encoder, *replyUpdate, func(), error) {
 		result, afterReply, err := h.handleGetDifferenceForConn(c, req)
 		return result, nil, afterReply, err
@@ -909,9 +932,12 @@ func registerReplyAfterSuccess(d *mtproto.Dispatcher, id uint32, fn orderedRegis
 			return c.SendErr(req, rpc)
 		}
 		var sendErr error
-		if update == nil {
+		switch {
+		case update == nil:
 			sendErr = c.SendResult(req, res)
-		} else {
+		case update.setPushWatermark:
+			sendErr = c.SendResultAndSetPushWatermark(req, res, update.owner, update.authKey, update.pts)
+		default:
 			sendErr = c.SendResultAndMarkRPCUpdate(req, res, update.owner, update.authKey, update.pts)
 		}
 		if sendErr != nil {

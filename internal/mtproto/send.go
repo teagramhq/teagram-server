@@ -94,12 +94,15 @@ type Conn struct {
 	writeTimeout time.Duration
 	log          *slog.Logger
 
+	// pushDeliveryMu forms a barrier between update delivery and state snapshots.
+	// Pushes take its read lock before writeMu; updates.getState holds its write
+	// lock from before the snapshot through the reply and watermark update.
+	pushDeliveryMu sync.RWMutex
 	// writeMu serializes socket writes and guards the mutable session state
 	// (authKey, sessionID, owner) it reads, so a server-initiated push from the
 	// delivery goroutine cannot interleave with a reply write on the serve
 	// goroutine, nor write an update for a user this conn has stopped belonging
-	// to. It is the only lock taken here and is never held across the registry
-	// lock, in either direction.
+	// to. Never acquire pushDeliveryMu while holding writeMu.
 	writeMu   sync.Mutex
 	authKey   crypto.AuthKey
 	sessionID int64
@@ -174,8 +177,8 @@ type Conn struct {
 	pendingRPCOverflow          []pendingRPCOverflowEntry
 	pendingRPCOverflowSaturated bool
 	// pushState closes push admission at retirement and counts existing calls,
-	// including ones waiting for writeMu. The channel closes when those calls
-	// finish, so ownership is not revoked underneath a queued write.
+	// including ones waiting for pushDeliveryMu or writeMu. The channel closes
+	// when those calls finish, so ownership is not revoked underneath a queued write.
 	pushState   atomic.Uint64
 	pushDrained chan struct{}
 	// transportClosed lets retirement skip staggering after a push closes it.
@@ -297,6 +300,14 @@ const maxPendingRPCOverflowUpdates = maxPendingRPCUpdates
 // connection or accounted for by a successful RPC result.
 func (c *Conn) LastPushedPts() int {
 	return int(c.lastPushedPts.Load())
+}
+
+// BeginPushDeliveryBarrier prevents pushes from being written until the
+// returned release function is called. Updates.getState uses it before reading
+// state and releases it only after replying and publishing the state watermark.
+func (c *Conn) BeginPushDeliveryBarrier() func() {
+	c.pushDeliveryMu.Lock()
+	return c.pushDeliveryMu.Unlock
 }
 
 // AuthKeyID returns the id of the auth key this connection last set, 0 before
@@ -1257,6 +1268,8 @@ func (c *Conn) pushTo(ctx context.Context, owner, authKeyID, sessionID int64, ch
 		return false, nil
 	}
 	defer c.finishPush()
+	c.pushDeliveryMu.RLock()
+	defer c.pushDeliveryMu.RUnlock()
 	ctx, cancel := c.boundedWriteContext(ctx)
 	defer cancel()
 
@@ -1365,6 +1378,21 @@ func (c *Conn) SendResultAndMarkRPCUpdate(req *Request, msg bin.Encoder, owner, 
 	})
 }
 
+// SendResultAndSetPushWatermark writes a state result and advances the
+// connection's push watermark to at least the state pts while the result write
+// still holds writeMu. A concurrent delivery built from the previous watermark
+// therefore either finishes before this state response or is rejected as stale.
+func (c *Conn) SendResultAndSetPushWatermark(req *Request, msg bin.Encoder, owner, authKeyID int64, pts int) error {
+	return c.sendResult(req, msg, func() {
+		if owner <= 0 || authKeyID == 0 || pts <= 0 || c.owner != owner || c.authKeyID.Load() != authKeyID {
+			return
+		}
+		if int64(pts) > c.lastPushedPts.Load() {
+			c.lastPushedPts.Store(int64(pts))
+		}
+	})
+}
+
 // markRPCResultLocked advances the contiguous push watermark for an RPC result.
 // A result can carry a later pts while this connection still lacks an earlier
 // event. Keep the barrier active across that gap so a generic notification
@@ -1425,6 +1453,8 @@ func (c *Conn) PushToAtWatermark(ctx context.Context, owner int64, expectedPts i
 		return false, false, nil
 	}
 	defer c.finishPush()
+	c.pushDeliveryMu.RLock()
+	defer c.pushDeliveryMu.RUnlock()
 	ctx, cancel := c.boundedWriteContext(ctx)
 	defer cancel()
 
@@ -1479,7 +1509,7 @@ func (c *Conn) sendResult(req *Request, msg bin.Encoder, onSuccess func()) error
 	var buf bin.Buffer
 	if err := msg.Encode(&buf); err != nil {
 		req.rpcResult = RPCResultInternal
-		return fmt.Errorf("encode result: %w", err)
+		return markRequestFailureCause(requestFailureResponseEncoding, fmt.Errorf("encode result: %w", err))
 	}
 	var wire bin.Buffer
 	if err := (&proto.Result{
@@ -1487,7 +1517,7 @@ func (c *Conn) sendResult(req *Request, msg bin.Encoder, onSuccess func()) error
 		Result:           buf.Raw(),
 	}).Encode(&wire); err != nil {
 		req.rpcResult = RPCResultInternal
-		return fmt.Errorf("encode result envelope: %w", err)
+		return markRequestFailureCause(requestFailureResponseEncoding, fmt.Errorf("encode result envelope: %w", err))
 	}
 	var sendErr error
 	func() {
@@ -1519,7 +1549,7 @@ func (c *Conn) sendResult(req *Request, msg bin.Encoder, onSuccess func()) error
 		if closeErr := c.closeAfterSendFailure(sendErr); closeErr != nil {
 			sendErr = errors.Join(sendErr, fmt.Errorf("close failed RPC transport: %w", closeErr))
 		}
-		return fmt.Errorf("send result [%T]: %w", msg, sendErr)
+		return markRequestFailureCause(requestFailureResponseWrite, fmt.Errorf("send result [%T]: %w", msg, sendErr))
 	}
 	return nil
 }

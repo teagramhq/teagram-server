@@ -139,10 +139,10 @@ class BlobTransitionEnvironmentTests(unittest.TestCase):
         mode = SimpleNamespace(
             Reject=RuntimeError,
             require_runner_lock=lambda _path: None,
-            current_authority=lambda _state, _reports: {
-                "outcome": "s3-accepted",
-                "backend": {"kind": "s3"},
-            },
+            current_deployment_authority=lambda _state, _reports: (
+                {"outcome": "s3-accepted", "backend": {"kind": "s3"}},
+                2,
+            ),
         )
         with tempfile.TemporaryDirectory(prefix="deploy-s3-environment.") as temporary:
             checkout = Path(temporary) / "teagram"
@@ -154,11 +154,13 @@ class BlobTransitionEnvironmentTests(unittest.TestCase):
                 str(Path(temporary) / "telegram-server/.env.rustfs-parked"),
             ]
             output = io.StringIO()
+            errors = io.StringIO()
             with (
                 patch.object(runner, "TEST_MODE", True),
                 patch.object(runner, "import_mode_helper", return_value=mode),
                 patch.object(runner, "rustfs_compose_environment_files", return_value=env_files),
                 contextlib.redirect_stdout(output),
+                contextlib.redirect_stderr(errors),
             ):
                 runner.deployment_environment(
                     SimpleNamespace(
@@ -172,11 +174,18 @@ class BlobTransitionEnvironmentTests(unittest.TestCase):
                 json.loads(output.getvalue()),
                 {"outcome": "s3-accepted", "env_files": env_files},
             )
+            self.assertEqual(
+                errors.getvalue(),
+                "blob transition deployment accepted 2 journal records without reports\n",
+            )
 
-            mode.current_authority = lambda _state, _reports: {
-                "outcome": "initial-local",
-                "backend": {"kind": "local", "dir": "/var/lib/teagramd-blobs"},
-            }
+            mode.current_deployment_authority = lambda _state, _reports: (
+                {
+                    "outcome": "initial-local",
+                    "backend": {"kind": "local", "dir": "/var/lib/teagramd-blobs"},
+                },
+                0,
+            )
             with (
                 patch.object(runner, "TEST_MODE", True),
                 patch.object(runner, "import_mode_helper", return_value=mode),
@@ -192,6 +201,60 @@ class BlobTransitionEnvironmentTests(unittest.TestCase):
                         )
                     )
                 credentials.assert_not_called()
+
+    def test_deployment_environment_accepts_missing_reports_and_logs_count(self) -> None:
+        runner = import_from_path("blob_transition_runner_missing_reports", RUNNER)
+        fixtures = mode_fixtures.BlobModeStateTests()
+        fixtures.setUp()
+        with tempfile.TemporaryDirectory(prefix="deploy-s3-missing-reports.") as temporary:
+            root = Path(temporary)
+            state_dir, report_root, lock_path = fixtures.create_initial_authority(root)
+            with (
+                patch.object(mode_fixtures.blob_mode, "require_runner_lock"),
+                patch.object(mode_fixtures.blob_mode, "file_stat", side_effect=fixtures.allow_unowned_private_files),
+                patch.object(mode_fixtures.blob_mode.os, "fchown"),
+                patch.object(mode_fixtures.blob_mode.os, "chown"),
+            ):
+                fixtures.publish(state_dir, report_root, lock_path, root, "s3-accepted")
+                records, _head, _mode_bytes = mode_fixtures.blob_mode.read_authority(state_dir, report_root)
+                shutil.rmtree(report_root)
+
+            env_files = [
+                str(root / "checkout" / ".env"),
+                str(root / "telegram-server" / ".env.rustfs-parked"),
+            ]
+            output = io.StringIO()
+            errors = io.StringIO()
+            with (
+                patch.object(runner, "TEST_MODE", True),
+                patch.object(runner, "import_mode_helper", return_value=mode_fixtures.blob_mode),
+                patch.object(runner, "rustfs_compose_environment_files", return_value=env_files),
+                patch.object(mode_fixtures.blob_mode, "require_runner_lock"),
+                patch.object(
+                    mode_fixtures.blob_mode,
+                    "file_stat",
+                    side_effect=fixtures.allow_unowned_private_files,
+                ),
+                contextlib.redirect_stdout(output),
+                contextlib.redirect_stderr(errors),
+            ):
+                runner.deployment_environment(
+                    SimpleNamespace(
+                        checkout=root / "checkout",
+                        state_dir=state_dir,
+                        report_root=report_root,
+                        lock_path=lock_path,
+                    )
+                )
+
+            self.assertEqual(
+                json.loads(output.getvalue()),
+                {"outcome": "s3-accepted", "env_files": env_files},
+            )
+            self.assertEqual(
+                errors.getvalue(),
+                f"blob transition deployment accepted {len(records)} journal records without reports\n",
+            )
 
     def test_rustfs_commands_load_parked_credentials_after_the_checkout_env(self) -> None:
         if os.geteuid() != 0:
