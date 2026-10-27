@@ -143,18 +143,6 @@ jobs:
       - name: Test invalid performance base SHA handling
         run: python3 -B .github/scripts/test_perf_run.py
 
-      - name: Detect performance-affecting changes
-        id: perf_scope
-        if: github.event_name == 'pull_request'
-        run: |
-          measure=$(bash .github/scripts/perf-scope.sh "$PERF_BASE_SHA" HEAD)
-          echo "measure=$measure" >> "$GITHUB_OUTPUT"
-
-      - name: Explain skipped RPC measurements
-        if: github.event_name == 'pull_request' && steps.perf_scope.outputs.measure == 'false'
-        run: |
-          echo "Not measured: this PR changes no Go source, migrations, store queries, or performance fixtures." >> "$GITHUB_STEP_SUMMARY"
-
       - name: Restore the snapshot
         id: snapshot
         uses: actions/cache/restore@v6.1.0
@@ -205,7 +193,6 @@ jobs:
 
       - name: Measure base and head
         id: measure
-        if: github.event_name != 'pull_request' || steps.perf_scope.outputs.measure == 'true'
         run: bash .github/scripts/perf-run.sh measure
 
       - name: Keep main's history
