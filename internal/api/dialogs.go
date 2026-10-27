@@ -132,6 +132,15 @@ func (h *handlers) handleGetDialogs(r *mtproto.Request) (bin.Encoder, error) {
 	topCreateUsers := make([][]int64, 0, len(dialogs))
 	peerIDs := map[int64]bool{r.UserID: true}
 	chatIDs := map[int64]bool{}
+	topIDs := make([]int64, len(dialogs))
+	for i, d := range dialogs {
+		topIDs[i] = d.TopMessage
+	}
+	topMessages, err := h.store.MessagesByOwnerLocalIDs(r.Ctx, r.UserID, topIDs)
+	if err != nil {
+		h.log.Error("get dialogs top messages", "user_id", r.UserID, "err", err)
+		return nil, errInternal
+	}
 	for _, d := range dialogs {
 		dialog := &tg.Dialog{
 			Peer:            peerToTL(d.PeerType, d.PeerID),
@@ -149,11 +158,7 @@ func (h *handlers) handleGetDialogs(r *mtproto.Request) (bin.Encoder, error) {
 			peerIDs[d.PeerID] = true
 		}
 
-		m, ok, err := h.store.MessageByOwnerLocal(r.Ctx, r.UserID, d.TopMessage)
-		if err != nil {
-			h.log.Error("get dialogs top message", "user_id", r.UserID, "err", err)
-			return nil, errInternal
-		}
+		m, ok := topMessages[d.TopMessage]
 		if ok && !m.Deleted {
 			// The author is the peer in a 1:1 but any member in a group, so it is
 			// taken off the message rather than off the dialog's peer id.
@@ -285,17 +290,15 @@ func (h *handlers) handleGetDialogs(r *mtproto.Request) (bin.Encoder, error) {
 		return nil, errInternal
 	}
 	chats = append(chats, channelPeers...)
-	// A short page reached the end of the list, so the plain reply is accurate. A
-	// full page may have more behind it and must say so, the way getDifference
-	// returns differenceSlice when it truncates. The count is only paid for on
-	// that branch.
-	if len(dialogs) < limit {
-		return &tg.MessagesDialogs{Dialogs: tlDialogs, Messages: tlMsgs, Users: users, Chats: chats}, nil
-	}
+	// Read the exact total on every page so short and full pages issue the same
+	// statements. The maintained count makes this lookup independent of list size.
 	total, err := h.store.CountDialogsWithPins(r.Ctx, r.UserID, req.ExcludePinned)
 	if err != nil {
 		h.log.Error("get dialogs count", "user_id", r.UserID, "err", err)
 		return nil, errInternal
+	}
+	if len(dialogs) < limit {
+		return &tg.MessagesDialogs{Dialogs: tlDialogs, Messages: tlMsgs, Users: users, Chats: chats}, nil
 	}
 	// CountDialogs counts dialogs rows, and channels have none, so the appended
 	// block has to be added or this page would advertise a total smaller than the
