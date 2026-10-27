@@ -2497,6 +2497,8 @@ class Docker:
     ) -> tuple[int, bytes]:
         active = getattr(self, "cleanup_active", False)
         operation = docker_cleanup_operation(args)
+        if active:
+            self.active_cleanup_operation = operation
         record_failure = getattr(self, "record_cleanup_failure", None)
         try:
             status, output = self._run_child(
@@ -3023,6 +3025,7 @@ class Drill(Docker):
         self.interrupted: str | None = None
         self.cleanup_active = False
         self.cleanup_failure: dict[str, Any] | None = None
+        self.active_cleanup_operation: str | None = None
 
     def record_cleanup_failure(
         self,
@@ -5824,6 +5827,7 @@ dump_path=$2
                     raise ValueError("invalid container listing")
                 containers.append((fields[0], fields[1]))
         except (UnicodeDecodeError, ValueError) as exc:
+            self.record_cleanup_failure("docker_container_inventory", "invalid_output")
             raise DrillFailure("cleanup", "cleanup_failure") from exc
         return containers
 
@@ -6476,6 +6480,7 @@ dump_path=$2
 
     def cleanup_resources(self) -> bool:
         self.cleanup_active = True
+        self.active_cleanup_operation = "cleanup_resources"
         if not self.cleanup_budget_available():
             self.record_cleanup_failure("cleanup_deadline", "deadline_expired")
             self.manifest["cleanup_verified"] = False
@@ -6483,6 +6488,7 @@ dump_path=$2
             return False
         clean = True
         if self.gateway is not None:
+            self.active_cleanup_operation = "gateway_shutdown"
             gateway_clean = self.gateway.close(self.manifest["cleanup_deadline"])
             if not gateway_clean:
                 self.record_cleanup_failure("gateway_shutdown", "verification_failed")
@@ -6493,6 +6499,7 @@ dump_path=$2
             self.manifest["cleanup_verified"] = False
             self.save()
             return False
+        self.active_cleanup_operation = "cleanup_processes"
         processes_clean = self.cleanup_processes()
         if not processes_clean:
             self.record_cleanup_failure("cleanup_processes", "verification_failed")
@@ -6502,6 +6509,7 @@ dump_path=$2
             self.manifest["cleanup_verified"] = False
             self.save()
             return False
+        self.active_cleanup_operation = "build_input_removal"
         build_inputs_clean = self.remove_build_inputs()
         if not build_inputs_clean:
             self.record_cleanup_failure("build_input_removal", "verification_failed")
@@ -6512,6 +6520,7 @@ dump_path=$2
             self.save()
             return False
         if not self.manifest.get("resource_creation_started"):
+            self.active_cleanup_operation = "run_file_removal"
             files_clean = self.remove_unmounted_files(keep_all=False)
             if not files_clean:
                 self.record_cleanup_failure("run_file_removal", "verification_failed")
@@ -6521,6 +6530,7 @@ dump_path=$2
                 self.record_cleanup_failure("cleanup_resources", "verification_failed")
             self.save()
             return clean
+        self.active_cleanup_operation = "owned_container_cleanup"
         containers_clean = self.cleanup_owned_containers()
         if not containers_clean:
             self.record_cleanup_failure("owned_container_cleanup", "verification_failed")
@@ -6530,6 +6540,7 @@ dump_path=$2
             self.manifest["cleanup_verified"] = False
             self.save()
             return False
+        self.active_cleanup_operation = "owned_image_cleanup"
         images_clean = self.cleanup_owned_images()
         if not images_clean:
             self.record_cleanup_failure("owned_image_cleanup", "verification_failed")
@@ -6539,6 +6550,7 @@ dump_path=$2
             self.manifest["cleanup_verified"] = False
             self.save()
             return False
+        self.active_cleanup_operation = "network_volume_cleanup"
         network_volumes_clean = self.cleanup_networks_and_volumes()
         if not network_volumes_clean:
             self.record_cleanup_failure("network_volume_cleanup", "verification_failed")
@@ -6548,6 +6560,7 @@ dump_path=$2
             self.manifest["cleanup_verified"] = False
             self.save()
             return False
+        self.active_cleanup_operation = "run_file_removal"
         files_clean = self.remove_unmounted_files(keep_all=not containers_clean)
         if not files_clean:
             self.record_cleanup_failure("run_file_removal", "verification_failed")
@@ -6983,6 +6996,19 @@ def remove_finished_run(drill: Drill, deadline: float | None = None) -> bool:
         return False
 
 
+def cleanup_supervisor_failure(drill: Drill | None) -> dict[str, Any]:
+    if drill is not None:
+        recorded = getattr(drill, "cleanup_failure", None)
+        if recorded is not None:
+            return recorded
+        if getattr(drill, "cleanup_active", False):
+            operation = getattr(drill, "active_cleanup_operation", None)
+            if operation not in SAFE_CLEANUP_OPERATIONS:
+                operation = "cleanup_resources"
+            return cleanup_failure_document(operation, "supervisor_failed")
+    return cleanup_failure_document("supervisor_setup", "supervisor_failed")
+
+
 def supervise(manifest_path: Path, lock_fd: int, rollout_lock_fd: int) -> int:
     drill: Drill | None = None
     try:
@@ -7063,6 +7089,7 @@ def supervise(manifest_path: Path, lock_fd: int, rollout_lock_fd: int) -> int:
                 or cleanup_failure_document("cleanup_resources", "verification_failed")
             )
             return 1
+        drill.active_cleanup_operation = "run_directory_finalization"
         if not remove_finished_run(drill, manifest["cleanup_deadline"]):
             drill.record_cleanup_failure("run_directory_finalization", "verification_failed")
             drill.manifest["cleanup_verified"] = False
@@ -7074,16 +7101,10 @@ def supervise(manifest_path: Path, lock_fd: int, rollout_lock_fd: int) -> int:
             return 1
         return 0
     except DrillFailure:
-        emit_cleanup_failure(
-            (getattr(drill, "cleanup_failure", None) if drill is not None else None)
-            or cleanup_failure_document("supervisor_setup", "supervisor_failed")
-        )
+        emit_cleanup_failure(cleanup_supervisor_failure(drill))
         return 1
     except (OSError, ValueError, TypeError, KeyError, json.JSONDecodeError):
-        emit_cleanup_failure(
-            (getattr(drill, "cleanup_failure", None) if drill is not None else None)
-            or cleanup_failure_document("supervisor_setup", "supervisor_failed")
-        )
+        emit_cleanup_failure(cleanup_supervisor_failure(drill))
         return 1
     finally:
         try:

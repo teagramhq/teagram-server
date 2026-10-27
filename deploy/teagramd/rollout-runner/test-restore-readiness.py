@@ -2200,6 +2200,112 @@ class RestoreReadinessContractTests(unittest.TestCase):
             )
             self.assertNotIn("container-id", output.getvalue())
 
+    def test_supervisor_reports_malformed_later_container_inventory(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="rr-supervisor-invalid-inventory-") as directory:
+            lock_path = Path(directory) / "lock"
+            lock_path.write_bytes(b"")
+            lock_fd = RESTORE_READINESS.os.open(lock_path, RESTORE_READINESS.os.O_RDWR)
+            lock_info = RESTORE_READINESS.os.fstat(lock_fd)
+            rollout_path = Path(directory) / "rollout-lock"
+            rollout_path.write_bytes(b"")
+            rollout_fd = RESTORE_READINESS.os.open(rollout_path, RESTORE_READINESS.os.O_RDWR)
+            rollout_info = RESTORE_READINESS.os.fstat(rollout_fd)
+            container_id = "a" * 64
+            manifest = {
+                "global_lock": {"device": lock_info.st_dev, "inode": lock_info.st_ino},
+                "rollout_lock": {"device": rollout_info.st_dev, "inode": rollout_info.st_ino},
+                "supervisor": {"pid": 0, "start_ticks": 0},
+                "parent": {"pid": 999999, "start_ticks": 1},
+                "parent_done": True,
+                "cleanup_deadline": RESTORE_READINESS.time.monotonic() + 60,
+                "resource_creation_started": True,
+                "containers": [{"id": container_id, "name": "owned"}],
+                "pending_container": None,
+            }
+            inventories = iter((f"{container_id} owned\n".encode(), b"malformed inventory\n"))
+
+            class MalformedInventoryDrill(RESTORE_READINESS.Drill):
+                def __init__(self, _args: Any, _run_dir: Path, recovered_manifest: dict[str, Any]) -> None:
+                    self.manifest = recovered_manifest
+                    self.cleanup_active = False
+                    self.cleanup_failure = None
+                    self.active_cleanup_operation = None
+                    self.gateway = None
+                    self.save = lambda: None
+                    self.cleanup_budget_available = lambda: True
+                    self.cleanup_processes = lambda: True
+                    self.remove_build_inputs = lambda: True
+                    self.cleanup_call = lambda *_args, **_kwargs: (0, next(inventories))
+
+            output = io.StringIO()
+            with (
+                patch.object(RESTORE_READINESS, "load_manifest", return_value=manifest),
+                patch.object(RESTORE_READINESS, "process_start_ticks", side_effect=lambda pid: 77 if pid == RESTORE_READINESS.os.getpid() else None),
+                patch.object(RESTORE_READINESS, "make_runtime_args", return_value=None),
+                patch.object(RESTORE_READINESS, "Drill", MalformedInventoryDrill),
+                redirect_stdout(output),
+            ):
+                status = RESTORE_READINESS.supervise(Path(directory) / "ownership.json", lock_fd, rollout_fd)
+
+            self.assertEqual(status, 1)
+            self.assertEqual(
+                json.loads(output.getvalue()),
+                {"operation": "docker_container_inventory", "error": "invalid_output"},
+            )
+            self.assertNotIn(container_id, output.getvalue())
+            self.assertNotIn("owned", output.getvalue())
+
+    def test_supervisor_retains_active_cleanup_operation_for_other_exceptions(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="rr-supervisor-cleanup-exception-") as directory:
+            lock_path = Path(directory) / "lock"
+            lock_path.write_bytes(b"")
+            lock_fd = RESTORE_READINESS.os.open(lock_path, RESTORE_READINESS.os.O_RDWR)
+            lock_info = RESTORE_READINESS.os.fstat(lock_fd)
+            rollout_path = Path(directory) / "rollout-lock"
+            rollout_path.write_bytes(b"")
+            rollout_fd = RESTORE_READINESS.os.open(rollout_path, RESTORE_READINESS.os.O_RDWR)
+            rollout_info = RESTORE_READINESS.os.fstat(rollout_fd)
+            manifest = {
+                "global_lock": {"device": lock_info.st_dev, "inode": lock_info.st_ino},
+                "rollout_lock": {"device": rollout_info.st_dev, "inode": rollout_info.st_ino},
+                "supervisor": {"pid": 0, "start_ticks": 0},
+                "parent": {"pid": 999999, "start_ticks": 1},
+                "parent_done": True,
+                "cleanup_deadline": RESTORE_READINESS.time.monotonic() + 60,
+            }
+
+            class UnexpectedCleanupDrill(RESTORE_READINESS.Drill):
+                def __init__(self, _args: Any, _run_dir: Path, recovered_manifest: dict[str, Any]) -> None:
+                    self.manifest = recovered_manifest
+                    self.cleanup_active = False
+                    self.cleanup_failure = None
+                    self.active_cleanup_operation = None
+                    self.gateway = None
+                    self.save = lambda: None
+                    self.cleanup_budget_available = lambda: True
+
+                    def fail_cleanup_processes() -> bool:
+                        raise ValueError("private cleanup detail")
+
+                    self.cleanup_processes = fail_cleanup_processes
+
+            output = io.StringIO()
+            with (
+                patch.object(RESTORE_READINESS, "load_manifest", return_value=manifest),
+                patch.object(RESTORE_READINESS, "process_start_ticks", side_effect=lambda pid: 77 if pid == RESTORE_READINESS.os.getpid() else None),
+                patch.object(RESTORE_READINESS, "make_runtime_args", return_value=None),
+                patch.object(RESTORE_READINESS, "Drill", UnexpectedCleanupDrill),
+                redirect_stdout(output),
+            ):
+                status = RESTORE_READINESS.supervise(Path(directory) / "ownership.json", lock_fd, rollout_fd)
+
+            self.assertEqual(status, 1)
+            self.assertEqual(
+                json.loads(output.getvalue()),
+                {"operation": "cleanup_processes", "error": "supervisor_failed"},
+            )
+            self.assertNotIn("private cleanup detail", output.getvalue())
+
     def test_cleanup_command_failure_diagnostic_omits_command_output_and_identifiers(self) -> None:
         drill = object.__new__(RESTORE_READINESS.Drill)
         drill.executable = "/usr/bin/docker"
