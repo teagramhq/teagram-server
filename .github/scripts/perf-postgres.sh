@@ -32,6 +32,7 @@ if [ "$ready" != true ]; then
 fi
 
 # Fixture dumps carry ACLs for this cluster-wide role, which pg_dump does not
-# include. Keep it non-login here; perf-run.sh enables login when it needs it.
+# include. Keep it non-login here; perf-run.sh enables login when restoring
+# fixtures, while the migration provisions it when seeding from scratch.
 docker exec "$PERF_PG_CONTAINER" psql -v ON_ERROR_STOP=1 -U postgres -qAt \
   -c "CREATE ROLE browser_acceptance_probe NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOREPLICATION NOBYPASSRLS"

@@ -46,13 +46,14 @@ WHERE uc.owner_id = $1
 ORDER BY uc.contact_id;
 
 -- name: ContactStates :many
+-- Use a join for the reciprocal edge so the bounded selected contacts drive
+-- primary-key probes instead of a hashed scan of the owner's full contact set.
 SELECT uc.contact_id,
-       EXISTS (
-           SELECT 1 FROM user_contacts reverse
-           WHERE reverse.owner_id = uc.contact_id
-             AND reverse.contact_id = uc.owner_id
-       ) AS mutual
-FROM user_contacts uc
+       COALESCE(reverse.owner_id IS NOT NULL, false)::boolean AS mutual
+FROM user_contacts AS uc
+LEFT JOIN user_contacts AS reverse
+  ON reverse.owner_id = uc.contact_id
+ AND reverse.contact_id = uc.owner_id
 WHERE uc.owner_id = $1
   AND uc.contact_id = ANY(sqlc.arg(contact_ids)::bigint[])
 ORDER BY uc.contact_id;
