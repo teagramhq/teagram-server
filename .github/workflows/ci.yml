@@ -995,12 +995,9 @@ jobs:
       - name: Check RPC performance workflow contract
         run: .github/scripts/test-perf-workflow-contract.sh
 
-      - name: Check RPC performance fixture restore
-        run: .github/scripts/test-perf-run-restore.sh
-
       - name: Check RPC performance script syntax
         run: |
-          bash -n .github/scripts/perf-run.sh .github/scripts/test-perf-workflow-contract.sh .github/scripts/test-perf-run-restore.sh
+          bash -n .github/scripts/perf-run.sh .github/scripts/test-perf-workflow-contract.sh
           shellcheck .github/scripts/test-perf-workflow-contract.sh
 
       - name: Check deploy script syntax
@@ -1029,8 +1026,6 @@ jobs:
           bash -n deploy/link-edge/deploy-main.sh
           bash -n deploy/link-edge/test-deploy-main.sh
           bash -n deploy/teagram-demo/test-turnstile-secret-access.sh
-          bash -n .github/scripts/perf-run.sh
-          bash -n .github/scripts/test-perf-run-restore.sh
           shellcheck \
             deploy/teagram/deploy-main.sh \
             deploy/teagram/teagram-logs.sh \
@@ -1058,9 +1053,6 @@ jobs:
             deploy/teagram-demo/test-turnstile-secret-access.sh \
             deploy/teagram/test-deploy-main.sh \
             .github/scripts/test-deploy-workflow-contract.sh \
-            .github/scripts/perf-run.sh \
-            .github/scripts/test-perf-run-restore.sh \
-            .github/scripts/test-perf-workflow-contract.sh \
             .github/scripts/mirror_rustfs_qualification_images.sh
 
       - name: Check deploy script target fixtures

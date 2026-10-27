@@ -237,10 +237,8 @@ measure() {
   # widen the noise band that is meant to catch it.
   if [ -n "${PERF_RECORD:-}" ] && [ "$status" -eq 0 ] && [ -f "$PERF_WORK/aggregate.json" ]; then
     cp "$PERF_WORK/aggregate.json" "$PERF_HISTORY/$(date -u +%Y%m%dT%H%M%S).json"
-    find "$PERF_HISTORY" -maxdepth 1 -type f -name '*.json' -print0 \
-      | sort -z \
-      | head -z -n -"$history_keep" \
-      | xargs -0 -r rm --
+    # shellcheck disable=SC2012 # UTC timestamp filenames sort chronologically and contain no spaces.
+    ls -1 "$PERF_HISTORY"/*.json | head -n -"$history_keep" | xargs -r rm --
   fi
   return "$status"
 }

@@ -67,7 +67,7 @@ show_live() {
   require_repo
   sha=$(git -C "$REPO" rev-parse HEAD) || fail 'could not read the demo checkout revision'
   branch=$(git -C "$REPO" symbolic-ref --short -q HEAD || printf '%s' detached)
-  status=$(git -C "$REPO" status --porcelain) || fail 'could not inspect the demo checkout'
+  status=$(git --no-optional-locks -C "$REPO" status --porcelain) || fail 'could not inspect the demo checkout'
   if [ -n "$status" ]; then dirty=$(printf '%s\n' "$status" | wc -l | tr -d ' '); else dirty=0; fi
   printf 'host=%s\nsha=%s\nbranch=%s\ndirty_entries=%s\n' "$(hostname)" "$sha" "$branch" "$dirty"
   release_file=$REPO/.state/teagram-demo/active-release.json

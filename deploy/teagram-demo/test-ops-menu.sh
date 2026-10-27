@@ -2,6 +2,8 @@
 set -Eeuo pipefail
 
 SCRIPT_DIR=$(cd -P "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+REAL_GIT=$(command -v git)
+export REAL_GIT
 WORK_DIR=$(mktemp -d /tmp/teagram-demo-ops-test.XXXXXXXX)
 cleanup() {
   status=$?
@@ -86,6 +88,20 @@ case "$1" in
 esac
 SH
 chmod 0755 "$FIXTURE_BIN/docker"
+cat >"$FIXTURE_BIN/git" <<'SH'
+#!/bin/sh
+set -eu
+case "$*" in
+  *" status --porcelain")
+    [ "${1:-}" = --no-optional-locks ] || {
+      printf '%s\n' 'live status must disable optional Git index locking' >&2
+      exit 1
+    }
+    ;;
+esac
+exec "$REAL_GIT" "$@"
+SH
+chmod 0755 "$FIXTURE_BIN/git"
 
 sed \
   -e "s|^REPO=/opt/teagram-demo$|REPO=$CHECKOUT|" \
@@ -98,6 +114,12 @@ chmod 0755 "$WORK_DIR/teagram-demo-ops"
 HOSTNAME_OUTPUT=$(SSH_ORIGINAL_COMMAND=hostname "$WORK_DIR/teagram-demo-ops")
 [ -n "$HOSTNAME_OUTPUT" ] || {
   printf '%s\n' 'hostname verb returned no output' >&2
+  exit 1
+}
+
+LIVE_OUTPUT=$(SSH_ORIGINAL_COMMAND=live "$WORK_DIR/teagram-demo-ops")
+printf '%s\n' "$LIVE_OUTPUT" | grep -Fq -- 'dirty_entries=0' || {
+  printf 'live verb returned unexpected checkout status: %s\n' "$LIVE_OUTPUT" >&2
   exit 1
 }
 
