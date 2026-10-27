@@ -55,26 +55,9 @@ jobs:
           FIXTURE_VERSION: ${{ hashFiles('test/perf/fixture_test.go', 'test/perf/server_test.go') }}
         run: |
           tag="perf-fixture-$FIXTURE_VERSION"
-          status=$(curl --silent --show-error \
-            --output "$RUNNER_TEMP/perf-fixture-release.json" \
-            --write-out '%{http_code}' \
-            --header 'Accept: application/vnd.github+json' \
-            --header "Authorization: Bearer $GH_TOKEN" \
-            "$GITHUB_API_URL/repos/$GITHUB_REPOSITORY/releases/tags/$tag")
-          case "$status" in
-            200)
-              echo "exists=true" >>"$GITHUB_OUTPUT"
-              echo "draft=$(jq -r '.draft' "$RUNNER_TEMP/perf-fixture-release.json")" >>"$GITHUB_OUTPUT"
-              ;;
-            404)
-              echo "exists=false" >>"$GITHUB_OUTPUT"
-              echo "draft=false" >>"$GITHUB_OUTPUT"
-              ;;
-            *)
-              echo "::error::GitHub returned HTTP $status while looking up $tag"
-              exit 1
-              ;;
-          esac
+          release=$(python3 -B .github/scripts/perf_fixture_release.py lookup "$tag")
+          echo "exists=$(jq -r '.exists' <<<"$release")" >>"$GITHUB_OUTPUT"
+          echo "draft=$(jq -r '.draft' <<<"$release")" >>"$GITHUB_OUTPUT"
 
       - name: Look up the snapshot
         id: snapshot
@@ -171,26 +154,9 @@ jobs:
           FIXTURE_VERSION: ${{ hashFiles('test/perf/fixture_test.go', 'test/perf/server_test.go') }}
         run: |
           tag="perf-fixture-$FIXTURE_VERSION"
-          status=$(curl --silent --show-error \
-            --output "$RUNNER_TEMP/perf-fixture-release.json" \
-            --write-out '%{http_code}' \
-            --header 'Accept: application/vnd.github+json' \
-            --header "Authorization: Bearer $GH_TOKEN" \
-            "$GITHUB_API_URL/repos/$GITHUB_REPOSITORY/releases/tags/$tag")
-          case "$status" in
-            200)
-              echo "exists=true" >>"$GITHUB_OUTPUT"
-              echo "draft=$(jq -r '.draft' "$RUNNER_TEMP/perf-fixture-release.json")" >>"$GITHUB_OUTPUT"
-              ;;
-            404)
-              echo "exists=false" >>"$GITHUB_OUTPUT"
-              echo "draft=false" >>"$GITHUB_OUTPUT"
-              ;;
-            *)
-              echo "::error::GitHub returned HTTP $status while looking up $tag"
-              exit 1
-              ;;
-          esac
+          release=$(python3 -B .github/scripts/perf_fixture_release.py lookup "$tag")
+          echo "exists=$(jq -r '.exists' <<<"$release")" >>"$GITHUB_OUTPUT"
+          echo "draft=$(jq -r '.draft' <<<"$release")" >>"$GITHUB_OUTPUT"
 
       - name: Restore the fixture snapshot
         id: snapshot
@@ -225,51 +191,14 @@ jobs:
             --metadata .perf-cache/.fixture-metadata.json \
             --output "$RUNNER_TEMP/perf-fixture-assets"
 
-      - name: Create a draft release
-        if: steps.release.outputs.exists != 'true'
-        env:
-          GH_TOKEN: ${{ github.token }}
-          FIXTURE_VERSION: ${{ hashFiles('test/perf/fixture_test.go', 'test/perf/server_test.go') }}
-        run: |
-          tag="perf-fixture-$FIXTURE_VERSION"
-          gh release create "$tag" \
-            --target "$GITHUB_SHA" \
-            --draft \
-            --prerelease \
-            --latest=false \
-            --title "$tag" \
-            --notes "Scale performance fixture snapshot for fixture version $FIXTURE_VERSION."
-
-      - name: Upload all fixture assets to the draft
+      - name: Publish complete fixture release
         if: steps.release.outputs.exists != 'true' || steps.release.outputs.draft == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
           FIXTURE_VERSION: ${{ hashFiles('test/perf/fixture_test.go', 'test/perf/server_test.go') }}
         run: |
-          tag="perf-fixture-$FIXTURE_VERSION"
-          gh release upload "$tag" "$RUNNER_TEMP"/perf-fixture-assets/* --clobber
-
-      - name: Verify the draft has every asset
-        if: steps.release.outputs.exists != 'true' || steps.release.outputs.draft == 'true'
-        env:
-          GH_TOKEN: ${{ github.token }}
-          FIXTURE_VERSION: ${{ hashFiles('test/perf/fixture_test.go', 'test/perf/server_test.go') }}
-        run: |
-          tag="perf-fixture-$FIXTURE_VERSION"
-          release_id=$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/$tag" --jq '.id')
-          find "$RUNNER_TEMP/perf-fixture-assets" -maxdepth 1 -type f -printf '%f\n' | sort > "$RUNNER_TEMP/perf-fixture-expected.txt"
-          gh api --paginate "repos/$GITHUB_REPOSITORY/releases/$release_id/assets?per_page=100" --jq '.[].name' \
-            | sort > "$RUNNER_TEMP/perf-fixture-actual.txt"
-          diff -u "$RUNNER_TEMP/perf-fixture-expected.txt" "$RUNNER_TEMP/perf-fixture-actual.txt"
-
-      - name: Publish the complete release
-        if: steps.release.outputs.exists != 'true' || steps.release.outputs.draft == 'true'
-        env:
-          GH_TOKEN: ${{ github.token }}
-          FIXTURE_VERSION: ${{ hashFiles('test/perf/fixture_test.go', 'test/perf/server_test.go') }}
-        run: |
-          tag="perf-fixture-$FIXTURE_VERSION"
-          gh release edit "$tag" --draft=false --prerelease --latest=false
+          python3 -B .github/scripts/perf_fixture_release.py publish \
+            "perf-fixture-$FIXTURE_VERSION" "$GITHUB_SHA" "$RUNNER_TEMP/perf-fixture-assets"
 
       - name: Verify anonymous asset downloads
         if: steps.release.outputs.exists != 'true' || steps.release.outputs.draft == 'true'

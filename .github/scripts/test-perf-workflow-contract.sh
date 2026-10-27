@@ -65,6 +65,24 @@ missing_snapshot_step="$(query '.jobs."rpc-performance".steps[] | select(.name =
   fail 'the release manifest must use the cached seed provenance'
 [[ -z "$(query '.jobs."publish-fixture".steps[] | select(.name == "Recover metadata for an older snapshot cache") | .name')" ]] ||
   fail 'the publisher must not fabricate the seed commit for a legacy cache'
+[[ "$(query '.jobs."fixture-snapshot".steps[] | select(.name == "Check for an existing fixture release") | .run | contains("perf_fixture_release.py lookup")')" == 'true' ]] ||
+  fail 'snapshot preparation must find published releases and drafts by tag'
+[[ "$(query '.jobs."publish-fixture".steps[] | select(.name == "Recheck release after acquiring the publisher slot") | .run | contains("perf_fixture_release.py lookup")')" == 'true' ]] ||
+  fail 'the serialized publisher must recheck draft releases before uploading'
+[[ "$(query '.jobs."publish-fixture".steps[] | select(.name == "Publish complete fixture release") | .run | contains("perf_fixture_release.py publish")')" == 'true' ]] ||
+  fail 'release creation, resumable upload, verification, and publication must use the tested publisher'
+[[ "$(query '.jobs."fixture-snapshot".permissions.contents')" == 'read' ]] ||
+  fail 'snapshot preparation must keep read-only release permissions'
+[[ "$(query '.jobs."publish-fixture".permissions.contents')" == 'write' ]] ||
+  fail 'only the publisher job may write release contents'
+
+release_publisher="$(<.github/scripts/perf_fixture_release.py)"
+[[ "$release_publisher" == *'release(tagName: $tagName)'* ]] ||
+  fail 'release lookups must include drafts through GraphQL rather than the published-only tag REST endpoint'
+[[ "$release_publisher" == *'releases/{database_id}/assets?per_page=100'* ]] ||
+  fail 'draft assets must be verified by release ID'
+[[ "$release_publisher" == *'"--clobber"'* ]] ||
+  fail 'a retry must safely replace any partially uploaded draft assets'
 
 runner_contents="$(<"$runner")"
 # shellcheck disable=SC2016 # These patterns intentionally match literal runner source.
