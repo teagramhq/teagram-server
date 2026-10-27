@@ -3,15 +3,27 @@ set -Eeuo pipefail
 
 SCRIPT_DIR=$(cd -P "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 CHECKOUT=$(git -C "$SCRIPT_DIR/../../.." rev-parse --show-toplevel)
+OPS_SCRIPT="$SCRIPT_DIR/../../teagram/ops/main2612-live-compose-replay.sh"
 TMP=$(mktemp -d /tmp/main2612-rollout-safety.XXXXXXXX)
 OWNED="$TMP/owned"
 TOKEN=$(source "$SCRIPT_DIR/rollout-safe-remove-tree.sh"; rollout_create_owned_dir "$OWNED")
+MARKED=
+MARKED_TOKEN=
 CHECKOUT_FIXTURE="$OWNED/checkout"
 OUTSIDE="$TMP/outside"
 mkdir -m 700 "$CHECKOUT_FIXTURE" "$OUTSIDE"
 
 cleanup() {
   local marker="$OWNED/.rollout-owned-$TOKEN"
+  if [ -n "$MARKED" ] && [ -d "$MARKED" ]; then
+    if [ -d "$MARKED/replay" ]; then
+      rollout_safe_remove_tree "$MARKED/replay" "$MARKED" "$MARKED_TOKEN" "$CHECKOUT" || return 1
+    fi
+    if [ -n "$MARKED_TOKEN" ] && [ -f "$MARKED/.rollout-owned-$MARKED_TOKEN" ]; then
+      unlink -- "$MARKED/.rollout-owned-$MARKED_TOKEN" || return 1
+    fi
+    rmdir -- "$MARKED" || return 1
+  fi
   if [ -d "$OWNED/remove-me" ]; then
     rollout_safe_remove_tree "$OWNED/remove-me" "$OWNED" "$TOKEN" "$CHECKOUT" || return 1
   fi
@@ -47,6 +59,18 @@ source "$SCRIPT_DIR/rollout-verifier.sh"
 [ "$(umask)" = "$umask_before" ]
 printf '%s\n' 'PASS sourcing runner and verifier preserves caller variables, trap, options, and umask'
 
+MARKED="$TMP/marked"
+mkdir -m 700 "$MARKED"
+MARKED_TOKEN=$(source "$SCRIPT_DIR/rollout-safe-remove-tree.sh"; rollout_mark_owned_dir "$MARKED")
+mkdir -m 700 "$MARKED/replay"
+printf '%s\n' 'fixture-only' > "$MARKED/replay/.env"
+chmod 600 "$MARKED/replay/.env"
+rollout_safe_remove_tree "$MARKED/replay" "$MARKED" "$MARKED_TOKEN" "$CHECKOUT"
+[ ! -e "$MARKED/replay" ]
+unlink -- "$MARKED/.rollout-owned-$MARKED_TOKEN"
+rmdir -- "$MARKED"
+printf '%s\n' 'PASS existing mktemp trees can be marked and child cleanup uses the owned-tree guard'
+
 if ! (initialize_runner_config && initialize_runner_config) >"$TMP/reinitialize.out" 2>&1; then
   printf '%s\n' 'FAIL runner configuration cannot be initialized twice' >&2
   cat "$TMP/reinitialize.out" >&2
@@ -80,3 +104,15 @@ mkdir -m 700 "$OWNED/remove-me/nested"
 rollout_safe_remove_tree "$OWNED/remove-me" "$OWNED" "$TOKEN" "$CHECKOUT"
 [ ! -e "$OWNED/remove-me" ]
 printf '%s\n' 'PASS recursive removal deletes a run-owned child'
+
+if grep -Eq '(^|[[:space:]])(/bin/)?rm[[:space:]]+-rf([[:space:]]|$)' "$OPS_SCRIPT"; then
+  printf '%s\n' 'FAIL live replay bypasses the owned-tree cleanup helper' >&2
+  exit 1
+fi
+bash -n "$OPS_SCRIPT"
+grep -Fq 'case "$TMP" in' "$OPS_SCRIPT"
+grep -Fq 'TMP_TOKEN=$(rollout_mark_owned_dir "$TMP")' "$OPS_SCRIPT"
+grep -Fq 'rollout_safe_remove_tree "$target" "$TMP" "$TMP_TOKEN" "$LIVE_CHECKOUT"' "$OPS_SCRIPT"
+grep -Fq 'chmod 600 -- "$tree/$env_name"' "$OPS_SCRIPT"
+grep -Fq 'unlink -- "$env_path"' "$OPS_SCRIPT"
+printf '%s\n' 'PASS live replay uses prefix-checked owned-tree cleanup and short-lived private env copies'

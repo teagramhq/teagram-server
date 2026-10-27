@@ -2984,6 +2984,7 @@ jobs:
 
       - name: Check offline teagramd rollout runner
         run: |
+          bash deploy/teagramd/rollout-runner/test-rollout-source-and-delete-safety.sh
           sudo env TMPDIR=/root bash -n deploy/teagramd/rollout-runner/*.sh
           python3 -B deploy/teagramd/rollout-runner/stack-move-runner.py --help >/dev/null
           sudo env TMPDIR=/root bash deploy/teagramd/rollout-runner/test-container-id-enumeration.sh

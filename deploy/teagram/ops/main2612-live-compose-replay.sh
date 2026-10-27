@@ -5,10 +5,11 @@ umask 077
 readonly LIVE_CHECKOUT=/opt/teagram
 OPS_SHA=${OPS_SHA:-}
 TMP=
+TMP_TOKEN=
 unset COMPOSE_ENV_FILES
 
 cleanup() {
-  local status=$? owner mode real_tmp
+  local status=$? cleanup_status=0 owner mode real_tmp marker child target remaining
   trap - EXIT
   if [ -n "$TMP" ]; then
     case "$TMP" in
@@ -18,18 +19,56 @@ cleanup() {
            real_tmp=$(realpath -e -- "$TMP") && [ "$real_tmp" = "$TMP" ] && \
            owner=$(stat -c %u -- "$TMP") && [ "$owner" = 0 ] && \
            mode=$(stat -c %a -- "$TMP") && [ "$mode" = 700 ]; then
-          /bin/rm -rf -- "$TMP" || status=1
+          if [ -n "$TMP_TOKEN" ]; then
+            [[ "$TMP_TOKEN" =~ ^[0-9a-f]{32}$ ]] || cleanup_status=1
+            if [ "$cleanup_status" -eq 0 ]; then
+              for child in live pr baseline preflight logs; do
+                target="$TMP/$child"
+                if [ -e "$target" ] || [ -L "$target" ]; then
+                  rollout_safe_remove_tree "$target" "$TMP" "$TMP_TOKEN" "$LIVE_CHECKOUT" || cleanup_status=1
+                fi
+              done
+            fi
+            if [ "$cleanup_status" -eq 0 ]; then
+              marker="$TMP/.rollout-owned-$TMP_TOKEN"
+              case "$marker" in
+                "$TMP"/.rollout-owned-*)
+                  if [ -f "$marker" ] && [ ! -L "$marker" ] && \
+                     [ "$(stat -c %u -- "$marker")" = 0 ] && \
+                     [ "$(stat -c %a -- "$marker")" = 600 ] && \
+                     [ "$(cat -- "$marker")" = "$TMP_TOKEN" ]; then
+                    remaining=$(find "$TMP" -mindepth 1 -maxdepth 1 ! -name ".rollout-owned-$TMP_TOKEN" -print -quit) || cleanup_status=1
+                    [ -z "$remaining" ] || cleanup_status=1
+                    if [ "$cleanup_status" -eq 0 ]; then
+                      unlink -- "$marker" || cleanup_status=1
+                    fi
+                  else
+                    printf '%s\n' 'refusing to remove an invalid replay ownership marker' >&2
+                    cleanup_status=1
+                  fi
+                  ;;
+                *)
+                  printf '%s\n' 'refusing to remove an ownership marker outside the replay tree' >&2
+                  cleanup_status=1
+                  ;;
+              esac
+            fi
+          fi
+          if [ "$cleanup_status" -eq 0 ]; then
+            rmdir -- "$TMP" || cleanup_status=1
+          fi
         else
           printf '%s\n' 'refusing to remove an unverified replay temp tree' >&2
-          status=1
+          cleanup_status=1
         fi
         ;;
       *)
         printf '%s\n' 'refusing to remove a replay path outside its mktemp prefix' >&2
-        status=1
+        cleanup_status=1
         ;;
     esac
   fi
+  [ "$cleanup_status" -eq 0 ] || status=1
   exit "$status"
 }
 trap cleanup EXIT
@@ -43,10 +82,15 @@ die() {
 live_git_root=$(git -C "$LIVE_CHECKOUT" rev-parse --show-toplevel 2>/dev/null) || die 'live checkout is unavailable'
 [ "$live_git_root" = "$LIVE_CHECKOUT" ] || die 'live checkout path is not canonical'
 git -C "$LIVE_CHECKOUT" cat-file -e "$OPS_SHA^{commit}" 2>/dev/null || die 'OPS_SHA is unavailable in the live checkout'
+safe_remove_tree_source=$(git -C "$LIVE_CHECKOUT" show "$OPS_SHA:deploy/teagramd/rollout-runner/rollout-safe-remove-tree.sh" 2>/dev/null) || die 'OPS_SHA is missing the owned-tree cleanup helper'
+source /dev/stdin <<< "$safe_remove_tree_source"
+unset safe_remove_tree_source
+declare -F rollout_mark_owned_dir >/dev/null && declare -F rollout_safe_remove_tree >/dev/null || die 'owned-tree cleanup helper is incomplete'
 
 TMP=$(mktemp -d /tmp/main2612-replay.XXXXXXXX) || die 'cannot create the replay temp tree'
 [[ "$TMP" =~ ^/tmp/main2612-replay\.[A-Za-z0-9]{8}$ ]] || die 'mktemp returned an unexpected path'
 [ "$(stat -c %u -- "$TMP")" = 0 ] && [ "$(stat -c %a -- "$TMP")" = 700 ] || die 'replay temp tree is not root-owned mode 0700'
+TMP_TOKEN=$(rollout_mark_owned_dir "$TMP") || die 'cannot mark the replay temp tree as owned'
 mkdir -m 700 -- "$TMP/live" "$TMP/pr" "$TMP/baseline" "$TMP/preflight" "$TMP/logs"
 mkdir -m 700 -p -- "$TMP/pr/deploy/teagramd/rollout-runner"
 for runtime_file in rollout-runner.sh rollout-verifier.sh rollout-safe-remove-tree.sh blob-mode-state.py blob-transition-runner.py; do
@@ -127,6 +171,7 @@ esac
 [ -f "$LIVE_CHECKOUT/docker-compose.override.yml" ] && [ ! -L "$LIVE_CHECKOUT/docker-compose.override.yml" ] || die 'live Compose override is missing or symlinked'
 [ "$(realpath -e -- "$LIVE_CHECKOUT/.env")" = "$LIVE_CHECKOUT/.env" ] || die 'live environment file path is not canonical'
 [ "$(realpath -e -- "$LIVE_CHECKOUT/docker-compose.override.yml")" = "$LIVE_CHECKOUT/docker-compose.override.yml" ] || die 'live override path is not canonical'
+[ "$(stat -c %u -- "$LIVE_CHECKOUT/.env")" = 0 ] && [ "$(stat -c %a -- "$LIVE_CHECKOUT/.env")" = 600 ] || die 'live environment file is not root-owned mode 0600'
 
 for relative in "${selected_rel[@]}"; do
   if [ "$relative" = docker-compose.override.yml ]; then
@@ -179,6 +224,8 @@ if [ "${#selected_rel[@]}" -eq 2 ] && \
 fi
 
 selected_env_names=()
+# The verifier enforces each tree's own .env path; keep these credential copies
+# inside the private replay tree and unlink them after both snapshots.
 for index in "${!selected_env_sources[@]}"; do
   env_source=${selected_env_sources[$index]}
   if [ "$index" -eq 0 ]; then
@@ -188,6 +235,7 @@ for index in "${!selected_env_sources[@]}"; do
   fi
   [ -f "$env_source" ] && [ ! -L "$env_source" ] || die 'live environment input is missing or symlinked'
   [ "$(realpath -e -- "$env_source")" = "$env_source" ] || die 'live environment input path is not canonical'
+  [ "$(stat -c %u -- "$env_source")" = 0 ] && [ "$(stat -c %a -- "$env_source")" = 600 ] || die 'live environment input is not root-owned mode 0600'
   selected_env_names+=("$env_name")
   for tree in "$TMP/live" "$TMP/pr"; do
     cp -- "$env_source" "$tree/$env_name" || die 'cannot stage the live environment input'
@@ -242,6 +290,22 @@ run_snapshot "$TMP/live" "$TMP/baseline" baseline \
   "$(compose_files_for_tree "$TMP/live")" "$(compose_env_files_for_tree "$TMP/live")"
 run_snapshot "$TMP/pr" "$TMP/preflight" preflight \
   "$(compose_files_for_tree "$TMP/pr")" "$(compose_env_files_for_tree "$TMP/pr")"
+
+# The verifier requires each checkout's own .env path. Remove those private
+# copies once both snapshots have reduced them to environment fingerprints.
+for tree in "$TMP/live" "$TMP/pr"; do
+  for env_name in "${selected_env_names[@]}"; do
+    env_path="$tree/$env_name"
+    case "$env_path" in
+      "$TMP/live/.env"|"$TMP/live/.env.rustfs-parked"|"$TMP/pr/.env"|"$TMP/pr/.env.rustfs-parked") ;;
+      *) die 'staged environment cleanup path is outside the replay trees' ;;
+    esac
+    [ -f "$env_path" ] && [ ! -L "$env_path" ] && \
+      [ "$(stat -c %u -- "$env_path")" = 0 ] && [ "$(stat -c %a -- "$env_path")" = 600 ] || \
+      die 'staged environment input is not a private regular file'
+    unlink -- "$env_path" || die 'cannot remove a staged environment input'
+  done
+done
 
 if ! env ROLLOUT_RUNNER_EVIDENCE_ROOT="$TMP" \
   bash "$RUNNER" compare-preflight "$TMP/baseline" "$TMP/preflight" \

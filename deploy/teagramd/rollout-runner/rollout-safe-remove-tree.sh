@@ -1,8 +1,29 @@
 #!/usr/bin/env bash
 
+rollout_mark_owned_dir() {
+  [ "$#" -eq 1 ] || return 64
+  local directory=$1 resolved_directory token marker directory_owner directory_mode current_owner first_entry
+  case "$directory" in /*) ;; *) return 64 ;; esac
+  case "$directory" in *$'\n'*|*//*|*/../*|*/./*) return 64 ;; esac
+  [ -d "$directory" ] && [ ! -L "$directory" ] || return 1
+  resolved_directory=$(realpath -e -- "$directory") || return 1
+  [ "$resolved_directory" = "$directory" ] || return 1
+  directory_owner=$(stat -c %u -- "$directory") || return 1
+  directory_mode=$(stat -c %a -- "$directory") || return 1
+  current_owner=$(id -u) || return 1
+  [ "$directory_owner" = "$current_owner" ] && [ "$directory_mode" = 700 ] || return 1
+  first_entry=$(find "$directory" -mindepth 1 -maxdepth 1 -print -quit) || return 1
+  [ -z "$first_entry" ] || return 1
+  token=$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n') || return 1
+  [[ "$token" =~ ^[0-9a-f]{32}$ ]] || return 1
+  marker="$directory/.rollout-owned-$token"
+  (umask 077; set -o noclobber; printf '%s\n' "$token" > "$marker") || return 1
+  printf '%s\n' "$token"
+}
+
 rollout_create_owned_dir() {
   [ "$#" -eq 1 ] || return 64
-  local directory=$1 parent name resolved_parent token marker
+  local directory=$1 parent name resolved_parent token
   case "$directory" in /*) ;; *) return 64 ;; esac
   [ ! -e "$directory" ] && [ ! -L "$directory" ] || return 1
   parent=$(dirname -- "$directory") || return 1
@@ -11,10 +32,10 @@ rollout_create_owned_dir() {
   resolved_parent=$(realpath -e -- "$parent") || return 1
   [ "$resolved_parent/$name" = "$directory" ] || return 1
   mkdir -m 700 -- "$directory" || return 1
-  token=$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n') || return 1
-  [[ "$token" =~ ^[0-9a-f]{32}$ ]] || return 1
-  marker="$directory/.rollout-owned-$token"
-  (umask 077; set -o noclobber; printf '%s\n' "$token" > "$marker") || return 1
+  token=$(rollout_mark_owned_dir "$directory") || {
+    rmdir -- "$directory" || return 1
+    return 1
+  }
   printf '%s\n' "$token"
 }
 

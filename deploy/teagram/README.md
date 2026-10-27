@@ -57,6 +57,31 @@ container using the host network. The probe fetches client discovery through
 the host's Tailscale Serve endpoint and checks the MTProto auth-key exchange;
 the GitHub runner does not need Serve access.
 
+### MAIN-2612 pre-merge live Compose replay
+
+The one-shot `ops/main2612-live-compose-replay.sh` must render both the live and
+PR Compose trees with the same environment inputs. The verifier requires each
+tree's own `.env` path, so the script stages the live `.env` and, when the live
+selection uses it, `.env.rustfs-parked` in both trees. These full credential
+files stay on the LXC: the source files and staged copies must be root-owned
+mode 0600, the exact `/tmp/main2612-replay.<8 random characters>` work tree is
+root-owned mode 0700, and the script sets `umask 077`. Environment values are
+read by Compose through file paths, never put in command arguments or printed.
+Verifier diagnostics stay in that private tree; snapshots retain hashes and
+allowlisted preflight fields, while the final output contains only field and
+result rows. The script unlinks staged environment files immediately after
+both snapshots are captured.
+
+The LXC root account and Docker daemon are trusted; this staging does not
+protect credentials from a host-root or daemon compromise, and file unlink is
+not secure erasure. On success or an ordinary command failure, the EXIT trap
+removes each work-tree child through `rollout-safe-remove-tree.sh`, which checks
+the ownership marker, owner, mode, canonical path and protected-path rules.
+The outer temp path is prefix-checked and removed with `rmdir` only after it is
+empty. An uncatchable kill or host failure can bypass the trap and leave a
+root-only temp tree behind; treat any such stale copy as a credential and do
+not remove it with a broad recursive command.
+
 To redeploy by hand, run the `Deploy.` workflow from the Actions tab
 (`workflow_dispatch`, no inputs; it deploys the newest `main` commit with a
 successful CI push run), or from a checkout of `main`:
