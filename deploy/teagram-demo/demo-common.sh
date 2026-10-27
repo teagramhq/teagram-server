@@ -491,11 +491,11 @@ demo_reconcile_web_release() {
       demo_fail 'temporary web release recovery link already exists'
       return 1
     }
-    ln -s -- "$target" "$temporary" && mv -Tf -- "$temporary" "$DEMO_WEB_CURRENT_LINK" || {
+    if ! ln -s -- "$target" "$temporary" || ! mv -Tf -- "$temporary" "$DEMO_WEB_CURRENT_LINK"; then
       rm -f -- "$temporary"
       demo_fail 'current public web release could not be recovered'
       return 1
-    }
+    fi
     printf '%s\n' "$active_web"
     return 0
   fi

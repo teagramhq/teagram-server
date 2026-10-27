@@ -83,10 +83,7 @@ else
 fi
 archive="$incoming_dir/web-${WEB_SOURCE_SHA}-${WEB_ARTIFACT_DIGEST#sha256:}-$$.tar.gz"
 python3 "$REPO/deploy/teagram-demo/receive-web-artifact.py" "$archive" "$WEB_ARCHIVE_SHA256"
-cleanup() {
-  rm -f -- "$archive"
-}
-trap cleanup EXIT
+trap 'rm -f -- "$archive"' EXIT
 deploy_rc=0
 DEMO_DEPLOY_LOCK_HELD=1 \
   DEPLOY_WEB_SOURCE_SHA="$WEB_SOURCE_SHA" \
