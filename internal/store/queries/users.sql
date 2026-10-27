@@ -50,30 +50,46 @@ WHERE u.id = ANY(sqlc.arg(ids)::bigint[]);
 -- banned viewer is not a current member, so the channel admits nothing for
 -- them. The ban predicate is the same one ChannelMember.Banned uses in Go:
 -- banned_until IS NULL OR banned_until <= now().
-SELECT id FROM (
-    SELECT sqlc.arg(ids)::bigint[] AS id_arr
-) seed, UNNEST(seed.id_arr) AS id
-WHERE id = sqlc.arg(viewer_id)::bigint
-   OR EXISTS (
-       SELECT 1 FROM dialogs d
-       WHERE d.peer_type = 1
-         AND ((d.owner_id = sqlc.arg(viewer_id)::bigint AND d.peer_id = id)
-           OR (d.owner_id = id AND d.peer_id = sqlc.arg(viewer_id)::bigint))
-   )
-   OR EXISTS (
-       SELECT 1 FROM chat_participants p1
-       JOIN chat_participants p2 ON p1.chat_id = p2.chat_id
-       WHERE p1.user_id = sqlc.arg(viewer_id)::bigint
-         AND p2.user_id = id
-   )
-   OR EXISTS (
-       SELECT 1 FROM channel_participants v
-       JOIN channel_participants m ON v.channel_id = m.channel_id
-       WHERE v.user_id = sqlc.arg(viewer_id)::bigint
-         AND m.user_id = id
-         AND (v.banned_until IS NULL OR v.banned_until <= now())
-         AND (m.banned_until IS NULL OR m.banned_until <= now())
-   );
+-- Keep each edge as an independent indexed branch. Combining these checks in
+-- one OR makes PostgreSQL hash a large owner's complete dialog list instead
+-- of probing its owner-scoped primary key for the requested peers.
+WITH candidate_ids AS MATERIALIZED (
+    SELECT candidate.id, candidate.ordinality
+    FROM UNNEST(sqlc.arg(ids)::bigint[]) WITH ORDINALITY AS candidate(id, ordinality)
+), entitled_ids AS (
+    SELECT sqlc.arg(viewer_id)::bigint AS id
+    WHERE sqlc.arg(viewer_id)::bigint = ANY(sqlc.arg(ids)::bigint[])
+    UNION
+    SELECT d.peer_id
+    FROM dialogs d
+    WHERE d.owner_id = sqlc.arg(viewer_id)::bigint
+      AND d.peer_type = 1
+      AND d.peer_id = ANY(sqlc.arg(ids)::bigint[])
+    UNION
+    SELECT d.owner_id
+    FROM dialogs d
+    WHERE d.owner_id = ANY(sqlc.arg(ids)::bigint[])
+      AND d.peer_type = 1
+      AND d.peer_id = sqlc.arg(viewer_id)::bigint
+    UNION
+    SELECT p2.user_id
+    FROM chat_participants p1
+    JOIN chat_participants p2 ON p1.chat_id = p2.chat_id
+    WHERE p1.user_id = sqlc.arg(viewer_id)::bigint
+      AND p2.user_id = ANY(sqlc.arg(ids)::bigint[])
+    UNION
+    SELECT m.user_id
+    FROM channel_participants v
+    JOIN channel_participants m ON v.channel_id = m.channel_id
+    WHERE v.user_id = sqlc.arg(viewer_id)::bigint
+      AND m.user_id = ANY(sqlc.arg(ids)::bigint[])
+      AND (v.banned_until IS NULL OR v.banned_until <= now())
+      AND (m.banned_until IS NULL OR m.banned_until <= now())
+)
+SELECT candidate.id
+FROM candidate_ids candidate
+JOIN entitled_ids USING (id)
+ORDER BY candidate.ordinality;
 
 -- name: SetUserStatus :execrows
 UPDATE users SET is_online = $2, last_seen_at = now() WHERE id = $1;
