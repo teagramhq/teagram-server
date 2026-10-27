@@ -38,8 +38,8 @@ missing_snapshot_step="$(query '.jobs."rpc-performance".steps[] | select(.name =
   fail 'the RPC job restore key must include fixture and server setup helpers'
 
 runner_contents="$(<"$runner")"
-# shellcheck disable=SC2016 # These patterns intentionally match literal runner source.
-[[ "$runner_contents" == *'pg_restore -U postgres -d "perf_$f" -j 4 --no-owner --no-acl "/cache/perf_$f.dump"'* ]] ||
+expected_restore_command="pg_restore -U postgres -d \"perf_\$f\" -j 4 --no-owner --no-acl \"/cache/perf_\$f.dump\""
+[[ "$runner_contents" == *"$expected_restore_command"* ]] ||
   fail 'restoring fixture snapshots must not replay database privileges'
 # shellcheck disable=SC2016 # This pattern intentionally matches literal runner source.
 [[ "$runner_contents" == *'fatal "restore the $f fixture snapshot"'* ]] ||
@@ -53,6 +53,10 @@ runner_contents="$(<"$runner")"
 postgres_contents="$(<"$postgres")"
 [[ "$postgres_contents" == *"pg_isready -h 127.0.0.1 -U postgres -q"* ]] ||
   fail 'Postgres readiness must wait for the TCP listener used by the workflow'
+[[ "$runner_contents" == *'pg_dump -U postgres -Fc -Z 3 --no-acl'* ]] ||
+  fail 'fixture snapshots must omit ACLs that depend on cluster-global roles'
+[[ "$runner_contents" == *"pg_restore -U postgres -d \"perf_\$f\" -j 4 --no-owner --no-acl"* ]] ||
+  fail 'fixture restores must not require cluster-global roles from the snapshot'
 
 mock_dir="$(mktemp -d)"
 trap 'rm -rf "$mock_dir"' EXIT

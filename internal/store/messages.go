@@ -657,7 +657,7 @@ func (s *Store) HistoryWithOffset(ctx context.Context, ownerID int64, peerType P
 	return messagesFromRows(rows), nil
 }
 
-// HistoryWithDate returns a newest-first page around offsetDate, shifted by addOffset.
+// HistoryWithDate returns a newest-first page around offsetDate. Negative addOffset shifts toward newer messages.
 func (s *Store) HistoryWithDate(ctx context.Context, ownerID int64, peerType PeerType, peerID int64, offsetDate, addOffset, limit int) ([]Message, error) {
 	rows, err := historyPage(ctx, s.q, ownerID, peerType, peerID, 0, offsetDate, addOffset, limit)
 	if err != nil {

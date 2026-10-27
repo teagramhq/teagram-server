@@ -56,13 +56,17 @@ VALUES ($1, $2, $3, $4, $5, $6);
 -- files.id is dense BIGSERIAL, so distinguishing "no such file" from "wrong
 -- hash" from "not yours" would turn this into an enumeration oracle over every
 -- file on the server.
+-- The messages file index is partial on file_id <> 0. files.id's positive
+-- check makes that predicate redundant for a matching file, but Postgres
+-- cannot prove it from file_id = f.id while f is an outer row. Keep the
+-- explicit predicate in each message entitlement check below.
 -- name: FileForDownload :one
 SELECT f.* FROM files f
 WHERE f.id = $1 AND f.access_hash = $2 AND f.stored = true
   AND (
       EXISTS (
           SELECT 1 FROM messages m
-          WHERE m.owner_id = $3 AND m.file_id = f.id AND m.deleted = false
+          WHERE m.owner_id = $3 AND m.file_id = f.id AND m.file_id <> 0 AND m.deleted = false
             AND (m.expires_at IS NULL OR m.expires_at > statement_timestamp())
       )
       OR EXISTS (
@@ -240,7 +244,7 @@ WHERE f.id = sqlc.arg(id)
   AND (
       EXISTS (
           SELECT 1 FROM messages m
-          WHERE m.owner_id = sqlc.arg(owner_id) AND m.file_id = f.id AND m.deleted = false
+          WHERE m.owner_id = sqlc.arg(owner_id) AND m.file_id = f.id AND m.file_id <> 0 AND m.deleted = false
             AND (m.expires_at IS NULL OR m.expires_at > statement_timestamp())
       )
       OR EXISTS (
@@ -286,7 +290,7 @@ WHERE f.id = sqlc.arg(id)
   AND (
       EXISTS (
           SELECT 1 FROM messages m
-          WHERE m.owner_id = sqlc.arg(owner_id) AND m.file_id = f.id AND m.deleted = false
+          WHERE m.owner_id = sqlc.arg(owner_id) AND m.file_id = f.id AND m.file_id <> 0 AND m.deleted = false
             AND (m.expires_at IS NULL OR m.expires_at > statement_timestamp())
       )
       OR EXISTS (

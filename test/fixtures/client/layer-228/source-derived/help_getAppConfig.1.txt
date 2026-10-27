@@ -1,0 +1,4 @@
+# source: gotd/td v0.162.0 layer-228 TL request
+body: { help.getAppConfig
+  hash: 0 [INT],
+}

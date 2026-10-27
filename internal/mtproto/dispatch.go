@@ -175,7 +175,7 @@ func (d *Dispatcher) OnMessage(c *Conn, req *Request) error {
 	if fallback != nil {
 		return fallback.OnMessage(c, req)
 	}
-	return fmt.Errorf("unexpected type %#x", id)
+	return markRequestFailureCause(requestFailureUnknownMethod, fmt.Errorf("unexpected type %#x", id))
 }
 
 // compiledMethodName resolves an id through gotd's generated type registry.

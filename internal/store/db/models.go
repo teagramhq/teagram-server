@@ -144,6 +144,11 @@ type ChannelParticipant struct {
 	AvailableMinID  int64
 }
 
+type ChannelParticipantCount struct {
+	ChannelID        int64
+	ParticipantCount int64
+}
+
 type ChannelPollMessage struct {
 	ChannelID int64
 	LocalID   int64

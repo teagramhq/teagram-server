@@ -62,8 +62,10 @@ seed() {
   TG_PERF_DIR="$PERF_CACHE" TG_PERF_DSN_1X="$(dsn 1x "")" TG_PERF_DSN_100X="$(dsn 100x "")" \
     go test -tags performance -count=1 -timeout 100m -run '^TestSeedFixtures$' -v ./test/perf ||
     seed_failure "populate the 1x and 100x fixture databases"
+  # Database dumps do not include cluster roles, so omit ACLs that can refer to
+  # roles unavailable on the fresh Postgres runner that restores this cache.
   for f in "${fixtures[@]}"; do
-    docker exec "$PERF_PG_CONTAINER" pg_dump -U postgres -Fc -Z 3 -f "/cache/perf_$f.dump" "perf_$f" ||
+    docker exec "$PERF_PG_CONTAINER" pg_dump -U postgres -Fc -Z 3 --no-acl -f "/cache/perf_$f.dump" "perf_$f" ||
       seed_failure "snapshot the $f fixture database"
   done
 }
@@ -78,13 +80,16 @@ analyze() {
 }
 
 restore() {
-  # Database dumps include ACLs, but the cluster-wide probe role is not in them.
-  psql_admin -c "CREATE ROLE browser_acceptance_probe NOLOGIN" ||
-    fatal "create the role required by the fixture snapshot"
+  # pg_dump stores ACLs but not cluster roles. Provision the role referenced
+  # by the fixture migrations before pg_restore replays those ACLs.
+  if [ "$(psql_admin -c "SELECT EXISTS (SELECT 1 FROM pg_catalog.pg_roles WHERE rolname = 'browser_acceptance_probe')")" != t ]; then
+    psql_admin -c "CREATE ROLE browser_acceptance_probe"
+  fi
+  psql_admin -c "ALTER ROLE browser_acceptance_probe LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOREPLICATION NOBYPASSRLS"
   for f in "${fixtures[@]}"; do
     psql_admin -c "CREATE DATABASE perf_$f" || fatal "create the $f fixture database"
-    # The snapshot includes grants to cluster roles that a fresh server does
-    # not create. The benchmark connects as postgres and does not need them.
+    # Per-database dumps omit cluster roles; the harness runs as postgres and
+    # does not need ACLs that may reference roles absent from this fresh cluster.
     docker exec "$PERF_PG_CONTAINER" pg_restore -U postgres -d "perf_$f" -j 4 --no-owner --no-acl "/cache/perf_$f.dump" ||
       fatal "restore the $f fixture snapshot"
     # Before base_ready copies it, so the copies carry the same statistics.

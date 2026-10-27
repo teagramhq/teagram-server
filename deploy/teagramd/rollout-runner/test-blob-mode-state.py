@@ -7,6 +7,7 @@ import importlib.util
 import json
 import os
 import pathlib
+import shutil
 import stat
 import tempfile
 import unittest
@@ -1632,6 +1633,112 @@ class BlobModeStateTests(unittest.TestCase):
                 self.assertEqual(records[-1]["outcome"], "recovered-local")
                 self.assertEqual(records[-1]["evidence"]["retained_cutover_key_count"], 1)
                 self.assertEqual(head, mode_bytes)
+
+    def test_deployment_runtime_validation_accepts_missing_reports(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = pathlib.Path(temporary)
+            state_dir, report_root, lock_path = self.create_initial_authority(root)
+            args = SimpleNamespace(
+                state_dir=state_dir,
+                report_root=report_root,
+                containers=root / "containers.json",
+                compose=root / "compose.json",
+                checkout=root,
+                override=root / "docker-compose.override.yml",
+                allow_unguarded_initial_local=False,
+                allow_unguarded_initial_local_containers=False,
+            )
+            args.containers.write_text('{"containers":[]}', encoding="utf-8")
+            args.containers.chmod(0o600)
+            args.compose.write_text('{"services":[]}', encoding="utf-8")
+            args.compose.chmod(0o600)
+            with (
+                patch.object(blob_mode, "require_runner_lock"),
+                patch.object(blob_mode, "file_stat", side_effect=self.allow_unowned_private_files),
+                patch.object(blob_mode.os, "fchown"),
+                patch.object(blob_mode.os, "chown"),
+            ):
+                self.publish(state_dir, report_root, lock_path, root, "s3-accepted")
+                shutil.rmtree(report_root)
+
+                self.assert_rejects(
+                    lambda: blob_mode.validate_runtime(args),
+                    "state-unavailable",
+                )
+                with (
+                    patch.object(blob_mode, "assert_containers_match"),
+                    patch.object(blob_mode, "assert_compose_matches"),
+                ):
+                    record = blob_mode.validate_runtime(args, allow_missing_reports=True)
+
+            self.assertEqual(record["outcome"], "s3-accepted")
+
+    def test_deployment_authority_accepts_missing_reports_but_normal_reads_reject(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = pathlib.Path(temporary)
+            state_dir, report_root, lock_path = self.create_initial_authority(root)
+            with (
+                patch.object(blob_mode, "require_runner_lock"),
+                patch.object(blob_mode, "file_stat", side_effect=self.allow_unowned_private_files),
+                patch.object(blob_mode.os, "fchown"),
+                patch.object(blob_mode.os, "chown"),
+            ):
+                self.publish(state_dir, report_root, lock_path, root, "s3-accepted")
+                records, _head, _mode_bytes = blob_mode.read_authority(state_dir, report_root)
+                shutil.rmtree(report_root)
+                report_root.mkdir(mode=0o700)
+
+                record, missing_report_count = blob_mode.current_deployment_authority(state_dir, report_root)
+
+                self.assertEqual(record["outcome"], "s3-accepted")
+                self.assertEqual(missing_report_count, len(records))
+                shutil.rmtree(report_root)
+                record, missing_report_count = blob_mode.current_deployment_authority(state_dir, report_root)
+                self.assertEqual(record["outcome"], "s3-accepted")
+                self.assertEqual(missing_report_count, len(records))
+                self.assert_rejects(lambda: blob_mode.read_authority(state_dir, report_root), "state-unavailable")
+                self.assert_rejects(
+                    lambda: blob_mode.publish_transition(SimpleNamespace(
+                        outcome="s3-accepted",
+                        proof=root / "unused-proof.json",
+                        state_dir=state_dir,
+                        report_root=report_root,
+                        lock_path=lock_path,
+                    )),
+                    "state-unavailable",
+                )
+
+    def test_deployment_authority_rejects_present_mismatched_report(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = pathlib.Path(temporary)
+            state_dir, report_root, lock_path = self.create_initial_authority(root)
+            with (
+                patch.object(blob_mode, "require_runner_lock"),
+                patch.object(blob_mode, "file_stat", side_effect=self.allow_unowned_private_files),
+                patch.object(blob_mode.os, "fchown"),
+                patch.object(blob_mode.os, "chown"),
+            ):
+                self.publish(state_dir, report_root, lock_path, root, "s3-accepted")
+                records, _head, _mode_bytes = blob_mode.read_authority(state_dir, report_root)
+                report = blob_mode.report_path(report_root, records[-1]["transition_id"])
+                report.write_bytes(b"{}")
+
+                self.assert_rejects(
+                    lambda: blob_mode.current_deployment_authority(state_dir, report_root),
+                    "report-digest",
+                )
+
+    def test_deployment_authority_rejects_missing_journal(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = pathlib.Path(temporary)
+            state_dir, report_root, _lock_path = self.create_initial_authority(root)
+            shutil.rmtree(state_dir / "journal")
+
+            with patch.object(blob_mode, "file_stat", side_effect=self.allow_unowned_private_files):
+                self.assert_rejects(
+                    lambda: blob_mode.current_deployment_authority(state_dir, report_root),
+                    "state-unavailable",
+                )
 
     def test_simple_s3_transition_accepts_current_migrations_and_one_verified_copy(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
