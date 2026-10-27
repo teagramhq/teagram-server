@@ -773,7 +773,7 @@ func (h *handlers) handleGetHistory(r *mtproto.Request) (bin.Encoder, error) {
 		return h.channelHistory(r, toID, &req, limit)
 	}
 	if peerType == store.PeerTypeChat {
-		snapshot, serr := h.store.ChatHistoryForMemberSnapshot(r.Ctx, r.UserID, toID, req.OffsetID, req.AddOffset, limit)
+		snapshot, serr := h.store.ChatHistoryForMemberSnapshot(r.Ctx, r.UserID, toID, req.OffsetID, req.OffsetDate, req.AddOffset, limit)
 		if errors.Is(serr, store.ErrNotMember) {
 			return nil, errPeerIDInvalid
 		}
@@ -784,7 +784,12 @@ func (h *handlers) handleGetHistory(r *mtproto.Request) (bin.Encoder, error) {
 		return h.chatHistory(r, snapshot)
 	}
 
-	msgs, err := h.store.HistoryWithOffset(r.Ctx, r.UserID, peerType, toID, req.OffsetID, req.AddOffset, limit)
+	var msgs []store.Message
+	if req.OffsetID == 0 && req.OffsetDate > 0 {
+		msgs, err = h.store.HistoryWithDate(r.Ctx, r.UserID, peerType, toID, req.OffsetDate, req.AddOffset, limit)
+	} else {
+		msgs, err = h.store.HistoryWithOffset(r.Ctx, r.UserID, peerType, toID, req.OffsetID, req.AddOffset, limit)
+	}
 	if err != nil {
 		h.log.Error("get history", "user_id", r.UserID, "err", err)
 		return nil, errInternal
@@ -795,17 +800,14 @@ func (h *handlers) handleGetHistory(r *mtproto.Request) (bin.Encoder, error) {
 		h.log.Error("get history files", "user_id", r.UserID, "err", err)
 		return nil, errInternal
 	}
-	// Load reactions for each message.
-	reactionsByMsg := make(map[int64][]store.Reaction, len(msgs))
-	for _, m := range msgs {
-		reactions, rerr := h.store.ReactionsByOwnerLocal(r.Ctx, r.UserID, m.LocalID)
-		if rerr != nil {
-			h.log.Error("get history reactions", "user_id", r.UserID, "local_id", m.LocalID, "err", rerr)
-			return nil, errInternal
-		}
-		if len(reactions) > 0 {
-			reactionsByMsg[m.LocalID] = reactions
-		}
+	localIDs := make([]int64, len(msgs))
+	for i, message := range msgs {
+		localIDs[i] = message.LocalID
+	}
+	reactionsByMsg, err := h.store.ReactionsByOwnerLocalIDs(r.Ctx, r.UserID, localIDs)
+	if err != nil {
+		h.log.Error("get history reactions", "user_id", r.UserID, "err", err)
+		return nil, errInternal
 	}
 	pollViews, err := h.pollViewsForMessages(r.Ctx, r.UserID, msgs)
 	if err != nil {
@@ -996,17 +998,14 @@ func (h *handlers) chatHistory(r *mtproto.Request, snapshot store.ChatHistorySna
 		h.log.Error("get history files", "user_id", r.UserID, "chat_id", snapshot.Chat.ID, "err", err)
 		return nil, errInternal
 	}
-	// Load reactions for each message.
-	reactionsByMsg := make(map[int64][]store.Reaction, len(msgs))
-	for _, m := range msgs {
-		reactions, rerr := h.store.ReactionsByOwnerLocal(r.Ctx, r.UserID, m.LocalID)
-		if rerr != nil {
-			h.log.Error("get history reactions", "user_id", r.UserID, "local_id", m.LocalID, "err", rerr)
-			return nil, errInternal
-		}
-		if len(reactions) > 0 {
-			reactionsByMsg[m.LocalID] = reactions
-		}
+	localIDs := make([]int64, len(msgs))
+	for i, message := range msgs {
+		localIDs[i] = message.LocalID
+	}
+	reactionsByMsg, err := h.store.ReactionsByOwnerLocalIDs(r.Ctx, r.UserID, localIDs)
+	if err != nil {
+		h.log.Error("get history reactions", "user_id", r.UserID, "chat_id", snapshot.Chat.ID, "err", err)
+		return nil, errInternal
 	}
 	pollViews, err := h.pollViewsForMessages(r.Ctx, r.UserID, msgs)
 	if err != nil {

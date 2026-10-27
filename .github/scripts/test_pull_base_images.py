@@ -296,8 +296,8 @@ esac
         ).read_text(encoding="utf-8")
         pull_step = (
             "run: bash .github/scripts/pull-base-images.sh "
-            "--image mirror.gcr.io/arigaio/atlas:1.2.0-alpine "
             "--image mirror.gcr.io/library/postgres:18-alpine "
+            "--image mirror.gcr.io/arigaio/atlas:1.2.0-alpine "
             "test/e2e/real_server_fixture/Dockerfile"
         )
         fixture_step = (

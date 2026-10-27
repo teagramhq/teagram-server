@@ -5401,6 +5401,7 @@ type smokeFixture struct {
 	// uploadMaxFileBytes simulates TG_UPLOAD_MAX_BYTES in smoke fixtures.
 	uploadMaxFileBytes          int64
 	stickerSets                 *api.StickerSetCatalog
+	stickerImportMode           config.StickerImportMode
 	photoThumbs                 *photothumb.Supervisor
 	codes                       *multiCodeSink
 	authHandles                 map[string]string
@@ -5851,8 +5852,8 @@ func newSmokeFixtureWithDeadline(t *testing.T, regMode config.RegistrationMode, 
 	f := &smokeFixture{
 		ctx: ctx, failures: newClientFailureSignal(cancelFailure), key: key, dsn: dsn,
 		store: st, blobs: blobs, codes: newMultiCodeSink(), dcID: 2,
-		regMode: regMode, recoveryEmailMode: config.RecoveryEmailOff,
-		signUpTermsOfService: config.DefaultSignUpTermsOfService,
+		regMode: regMode, stickerImportMode: config.StickerImportOn,
+		recoveryEmailMode: config.RecoveryEmailOff, signUpTermsOfService: config.DefaultSignUpTermsOfService,
 	}
 	if beforeStart != nil {
 		beforeStart(f)
@@ -5879,7 +5880,7 @@ func (f *smokeFixture) start(t *testing.T, address string) {
 		t, f.ctx, f.key, f.dcID, f.store, f.dsn, f.codes.Logger(), ln, f.rateLimits, f.regMode,
 		f.blobs, f.persistStatus, nil, f.turnstileSiteKey, f.turnstileVerifier, f.welcomeChannel,
 		f.turnstileSignInEnabled, f.recoveryEmailMode, f.suppressChannelPostDelivery, f.signUpTermsOfService,
-		f.stickerSets, f.uploadMaxFileBytes, f.photoThumbs,
+		f.stickerSets, f.uploadMaxFileBytes, f.stickerImportMode, f.photoThumbs,
 	)
 	f.registry = registry
 	f.setServerStop(t.Cleanup, stop)

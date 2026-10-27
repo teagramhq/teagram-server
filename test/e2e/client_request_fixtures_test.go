@@ -467,6 +467,7 @@ func TestSmokeClientRequestFixturesAreLayer228Shapes(t *testing.T) {
 	for _, name := range []string{
 		"auth.sendCode.1",
 		"auth.signIn.1",
+		"help_getAppConfig.1",
 		"account_updatePasswordSettings.contact.1",
 		"account_getCollectibleEmojiStatuses.1",
 		"auth.invokeWithReCaptcha.signUp.1",
@@ -612,6 +613,22 @@ func testSmokeClientRequestFixtures(t *testing.T) {
 		if err := creator.requests.matchFixtureSince(0, fixtureName); err != nil {
 			t.Fatalf("replay login fixture %s: %v", fixtureName, err)
 		}
+	}
+	if err := fixtureClientCall(t, creator, "help_getAppConfig.1", func(ctx context.Context, api *tg.Client) error {
+		appConfig, err := api.HelpGetAppConfig(ctx, 0)
+		if err != nil {
+			return err
+		}
+		mode, err := stickerImportModeFromAppConfig(appConfig)
+		if err != nil {
+			return err
+		}
+		if mode != string(config.StickerImportOn) {
+			return fmt.Errorf("sticker_import_mode = %q, want %q", mode, config.StickerImportOn)
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("replay app-config sticker import preflight fixture: %v", err)
 	}
 	if err := fixtureClientCall(t, creator, "messages_getAllDrafts.1", func(ctx context.Context, api *tg.Client) error {
 		response, err := api.MessagesGetAllDrafts(ctx)

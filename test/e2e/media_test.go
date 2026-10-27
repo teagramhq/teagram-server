@@ -1245,7 +1245,8 @@ func TestMediaDownloadRequiresOwnMessage(t *testing.T) {
 func TestMediaInChatFanOut(t *testing.T) {
 	t.Parallel()
 	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
-	defer cancel()
+	// Keep the server context alive until bootMediaEnv has stopped its clients.
+	t.Cleanup(cancel)
 
 	clients := bootMediaEnv(t, ctx, "+15551312001", "+15551312002", "+15551312003")
 	a, b, c := clients[0], clients[1], clients[2]
