@@ -9,6 +9,7 @@ permissions:
   contents: read
 
 # Main pushes keep one running and the newest pending check; PR updates supersede older checks.
+# The priority gate cancels queued PR workflows before a main push fans out jobs.
 concurrency:
   group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || (github.event_name == 'push' && github.ref == 'refs/heads/main' && 'main') || format('run-{0}-{1}', github.run_id, github.run_attempt) }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
@@ -20,8 +21,44 @@ env:
 # PR runs can restore default-branch cache scopes. Keep large Go and BuildKit
 # snapshots on main instead of creating a separate copy for every PR.
 jobs:
+  prioritize-main:
+    name: prioritize main CI
+    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+    runs-on: ubuntu-26.04
+    timeout-minutes: 5
+    permissions:
+      actions: write
+
+    steps:
+      - name: Cancel queued pull request CI runs
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          runs="$(gh api --paginate \
+            "repos/${GITHUB_REPOSITORY}/actions/workflows/ci.yml/runs?event=pull_request&status=queued&per_page=100" \
+            --jq '.workflow_runs[]?.id')"
+          if [[ -z "$runs" ]]; then
+            echo "No queued pull request CI runs."
+            exit 0
+          fi
+          while IFS= read -r run_id; do
+            [[ "$run_id" =~ ^[0-9]+$ ]] || {
+              echo "::error::invalid workflow run id"
+              exit 1
+            }
+            run_status="$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${run_id}" --jq '.status')"
+            if [[ "$run_status" != queued ]]; then
+              echo "Leaving pull request CI run ${run_id} in status ${run_status}."
+              continue
+            fi
+            gh run cancel --force "$run_id" --repo "$GITHUB_REPOSITORY"
+          done <<< "$runs"
+
   sticker-bundle:
     name: sticker bundle license gate
+    needs: prioritize-main
+    if: ${{ always() && (needs.prioritize-main.result == 'success' || (needs.prioritize-main.result == 'skipped' && github.event_name == 'pull_request')) }}
     runs-on: ubuntu-26.04
     timeout-minutes: 20
     permissions:
@@ -88,6 +125,8 @@ jobs:
 
   lint:
     name: lint
+    needs: prioritize-main
+    if: ${{ always() && (needs.prioritize-main.result == 'success' || (needs.prioritize-main.result == 'skipped' && github.event_name == 'pull_request')) }}
     runs-on: ubuntu-26.04
     # Keep lint's timeout aligned with its former step in ci.
     timeout-minutes: 20
@@ -130,6 +169,8 @@ jobs:
 
   sql-lint:
     name: sql lint
+    needs: prioritize-main
+    if: ${{ always() && (needs.prioritize-main.result == 'success' || (needs.prioritize-main.result == 'skipped' && github.event_name == 'pull_request')) }}
     runs-on: ubuntu-26.04
     timeout-minutes: 10
     permissions:
@@ -168,6 +209,8 @@ jobs:
 
   browser-acceptance:
     name: browser acceptance runtime
+    needs: prioritize-main
+    if: ${{ always() && (needs.prioritize-main.result == 'success' || (needs.prioritize-main.result == 'skipped' && github.event_name == 'pull_request')) }}
     runs-on: ubuntu-26.04
     timeout-minutes: 10
     permissions:
@@ -410,6 +453,8 @@ jobs:
           '
 
   ci-main:
+    needs: prioritize-main
+    if: ${{ always() && (needs.prioritize-main.result == 'success' || (needs.prioritize-main.result == 'skipped' && github.event_name == 'pull_request')) }}
     runs-on: ubuntu-26.04
     permissions:
       contents: read
@@ -685,6 +730,8 @@ jobs:
           key: go-build-${{ runner.os }}-${{ hashFiles('**/go.sum') }}-${{ github.run_id }}-${{ github.run_attempt }}
 
   real-server-fixtures:
+    needs: prioritize-main
+    if: ${{ always() && (needs.prioritize-main.result == 'success' || (needs.prioritize-main.result == 'skipped' && github.event_name == 'pull_request')) }}
     runs-on: ubuntu-26.04
     timeout-minutes: 60
     env:
@@ -778,6 +825,8 @@ jobs:
 
   websocket-d1:
     name: web client WebSocket D1
+    needs: prioritize-main
+    if: ${{ always() && (needs.prioritize-main.result == 'success' || (needs.prioritize-main.result == 'skipped' && github.event_name == 'pull_request')) }}
     runs-on: ubuntu-26.04
     timeout-minutes: 20
     permissions:
@@ -857,6 +906,8 @@ jobs:
 
   websocket-permanent-exchange:
     name: Web single permanent exchange
+    needs: prioritize-main
+    if: ${{ always() && (needs.prioritize-main.result == 'success' || (needs.prioritize-main.result == 'skipped' && github.event_name == 'pull_request')) }}
     runs-on: ubuntu-26.04
     timeout-minutes: 20
     permissions:
@@ -900,6 +951,8 @@ jobs:
 
   restore-readiness:
     name: confined restore-to-application
+    needs: prioritize-main
+    if: ${{ always() && (needs.prioritize-main.result == 'success' || (needs.prioritize-main.result == 'skipped' && github.event_name == 'pull_request')) }}
     runs-on: ubuntu-26.04
     timeout-minutes: 80
     permissions:
@@ -957,6 +1010,8 @@ jobs:
   # lane mandatory. `always()` runs this when a lane fails or is skipped.
   deploy-workflow:
     name: deploy workflow contract
+    needs: prioritize-main
+    if: ${{ always() && (needs.prioritize-main.result == 'success' || (needs.prioritize-main.result == 'skipped' && github.event_name == 'pull_request')) }}
     runs-on: ubuntu-26.04
     timeout-minutes: 10
     permissions:
@@ -995,10 +1050,13 @@ jobs:
       - name: Check RPC performance workflow contract
         run: .github/scripts/test-perf-workflow-contract.sh
 
-      - name: Check RPC performance script syntax
+      - name: Check main CI queue priority contract
+        run: .github/scripts/test-ci-main-priority.sh
+
+      - name: Check workflow contract script syntax
         run: |
-          bash -n .github/scripts/perf-run.sh .github/scripts/test-perf-workflow-contract.sh
-          shellcheck .github/scripts/test-perf-workflow-contract.sh
+          bash -n .github/scripts/perf-run.sh .github/scripts/test-perf-workflow-contract.sh .github/scripts/test-ci-main-priority.sh
+          shellcheck .github/scripts/test-perf-workflow-contract.sh .github/scripts/test-ci-main-priority.sh
 
       - name: Check deploy script syntax
         run: |
@@ -1066,6 +1124,7 @@ jobs:
     name: ci
     if: ${{ always() }}
     needs:
+      - prioritize-main
       - ci-main
       - sticker-bundle
       - photothumb-runtime
@@ -1086,6 +1145,7 @@ jobs:
     steps:
       - name: Require all CI lanes to pass
         env:
+          MAIN_PRIORITY_RESULT: ${{ needs.prioritize-main.result }}
           CI_MAIN_RESULT: ${{ needs.ci-main.result }}
           STICKER_BUNDLE_RESULT: ${{ needs.sticker-bundle.result }}
           PHOTOTHUMB_RUNTIME_RESULT: ${{ needs.photothumb-runtime.result }}
@@ -1101,8 +1161,12 @@ jobs:
           DEPLOY_WORKFLOW_RESULT: ${{ needs.deploy-workflow.result }}
           RESTORE_READINESS_RESULT: ${{ needs.restore-readiness.result }}
         run: |
-          if [[ "$CI_MAIN_RESULT" != "success" || "$STICKER_BUNDLE_RESULT" != "success" || "$PHOTOTHUMB_RUNTIME_RESULT" != "success" || "$REAL_SERVER_FIXTURES_RESULT" != "success" || "$WEBSOCKET_D1_RESULT" != "success" || "$WEB_PERMANENT_EXCHANGE_RESULT" != "success" || "$SQL_LINT_RESULT" != "success" || "$CSS_RESULT" != "success" || "$BROWSER_ACCEPTANCE_RESULT" != "success" || "$BROWSER_ACCEPTANCE_IMAGE_RESULT" != "success" || "$RUSTFS_TRANSITION_RESULT" != "success" || "$SCHEMA_GATE_POSTGRES_RESULT" != "success" || "$DEPLOY_WORKFLOW_RESULT" != "success" || "$RESTORE_READINESS_RESULT" != "success" ]]; then
-            echo "::error::Required CI lanes did not pass (ci-main=$CI_MAIN_RESULT, sticker-bundle=$STICKER_BUNDLE_RESULT, photothumb-runtime=$PHOTOTHUMB_RUNTIME_RESULT, real-server-fixtures=$REAL_SERVER_FIXTURES_RESULT, websocket-d1=$WEBSOCKET_D1_RESULT, websocket-permanent-exchange=$WEB_PERMANENT_EXCHANGE_RESULT, sql-lint=$SQL_LINT_RESULT, css=$CSS_RESULT, browser-acceptance=$BROWSER_ACCEPTANCE_RESULT, browser-acceptance-image=$BROWSER_ACCEPTANCE_IMAGE_RESULT, rustfs-transition-qualification=$RUSTFS_TRANSITION_RESULT, schema-gate-postgres=$SCHEMA_GATE_POSTGRES_RESULT, deploy-workflow=$DEPLOY_WORKFLOW_RESULT, restore-readiness=$RESTORE_READINESS_RESULT)"
+          expected_priority_result=success
+          if [[ "$GITHUB_EVENT_NAME" == pull_request ]]; then
+            expected_priority_result=skipped
+          fi
+          if [[ "$MAIN_PRIORITY_RESULT" != "$expected_priority_result" || "$CI_MAIN_RESULT" != "success" || "$STICKER_BUNDLE_RESULT" != "success" || "$PHOTOTHUMB_RUNTIME_RESULT" != "success" || "$REAL_SERVER_FIXTURES_RESULT" != "success" || "$WEBSOCKET_D1_RESULT" != "success" || "$WEB_PERMANENT_EXCHANGE_RESULT" != "success" || "$SQL_LINT_RESULT" != "success" || "$CSS_RESULT" != "success" || "$BROWSER_ACCEPTANCE_RESULT" != "success" || "$BROWSER_ACCEPTANCE_IMAGE_RESULT" != "success" || "$RUSTFS_TRANSITION_RESULT" != "success" || "$SCHEMA_GATE_POSTGRES_RESULT" != "success" || "$DEPLOY_WORKFLOW_RESULT" != "success" || "$RESTORE_READINESS_RESULT" != "success" ]]; then
+            echo "::error::Required CI lanes did not pass (prioritize-main=$MAIN_PRIORITY_RESULT, ci-main=$CI_MAIN_RESULT, sticker-bundle=$STICKER_BUNDLE_RESULT, photothumb-runtime=$PHOTOTHUMB_RUNTIME_RESULT, real-server-fixtures=$REAL_SERVER_FIXTURES_RESULT, websocket-d1=$WEBSOCKET_D1_RESULT, websocket-permanent-exchange=$WEB_PERMANENT_EXCHANGE_RESULT, sql-lint=$SQL_LINT_RESULT, css=$CSS_RESULT, browser-acceptance=$BROWSER_ACCEPTANCE_RESULT, browser-acceptance-image=$BROWSER_ACCEPTANCE_IMAGE_RESULT, rustfs-transition-qualification=$RUSTFS_TRANSITION_RESULT, schema-gate-postgres=$SCHEMA_GATE_POSTGRES_RESULT, deploy-workflow=$DEPLOY_WORKFLOW_RESULT, restore-readiness=$RESTORE_READINESS_RESULT)"
             exit 1
           fi
           echo "All required CI lanes passed"
@@ -1198,6 +1262,8 @@ jobs:
   # required check reports as skipped rather than passing, which stalls the
   # merge gate on every PR that does not touch internal/admin.
   css:
+    needs: prioritize-main
+    if: ${{ always() && (needs.prioritize-main.result == 'success' || (needs.prioritize-main.result == 'skipped' && github.event_name == 'pull_request')) }}
     runs-on: ubuntu-26.04
     timeout-minutes: 10
 
@@ -1234,6 +1300,8 @@ jobs:
   # that module rather than installing one on the runner — a sqlc release
   # cannot turn the repo red on its own.
   sqlc:
+    needs: prioritize-main
+    if: ${{ always() && (needs.prioritize-main.result == 'success' || (needs.prioritize-main.result == 'skipped' && github.event_name == 'pull_request')) }}
     runs-on: ubuntu-26.04
     timeout-minutes: 10
 
@@ -1264,6 +1332,8 @@ jobs:
   # test/e2e/adminserver builds its own server and Postgres from the pgtest
   # harness, so this check can run beside ci without shared services or files.
   e2e-admin:
+    needs: prioritize-main
+    if: ${{ always() && (needs.prioritize-main.result == 'success' || (needs.prioritize-main.result == 'skipped' && github.event_name == 'pull_request')) }}
     runs-on: ubuntu-26.04
     # The suite is a handful of specs against a local server; this only catches
     # a hang (a browser that never launches, a webServer that never binds). A
@@ -1656,7 +1726,8 @@ jobs:
   # available in the environments the Dockerfile is edited from, so this job is
   # the only place it is ever built — it is the gate that stops it rotting.
   docker:
-    needs: sticker-bundle
+    needs: [prioritize-main, sticker-bundle]
+    if: ${{ always() && (needs.prioritize-main.result == 'success' || (needs.prioritize-main.result == 'skipped' && github.event_name == 'pull_request')) && needs.sticker-bundle.result == 'success' }}
     runs-on: ubuntu-26.04
     # The build is the slow part at roughly a minute; this only catches a hang
     # (a stalled pull, a container that never logs) before it burns six hours.
@@ -1866,10 +1937,8 @@ jobs:
   # docker-compose.yml is edited from, so this job is the only place it ever
   # runs — the gate that stops it rotting.
   compose:
-    needs:
-      - mirror-rustfs-qualification-images
-      - sticker-bundle
-    if: ${{ always() && needs.mirror-rustfs-qualification-images.result != 'failure' && needs.mirror-rustfs-qualification-images.result != 'cancelled' && needs.sticker-bundle.result == 'success' }}
+    needs: [prioritize-main, mirror-rustfs-qualification-images, sticker-bundle]
+    if: ${{ always() && (needs.prioritize-main.result == 'success' || (needs.prioritize-main.result == 'skipped' && github.event_name == 'pull_request')) && needs.mirror-rustfs-qualification-images.result != 'failure' && needs.mirror-rustfs-qualification-images.result != 'cancelled' && needs.sticker-bundle.result == 'success' }}
     runs-on: ubuntu-26.04
     # The image build plus RustFS and media verification, which is the slow part
     # at roughly a minute; this only catches a hang before it
@@ -2793,7 +2862,8 @@ jobs:
 
   photothumb-runtime:
     name: photo worker runtime (${{ matrix.arch }})
-    needs: sticker-bundle
+    needs: [prioritize-main, sticker-bundle]
+    if: ${{ always() && (needs.prioritize-main.result == 'success' || (needs.prioritize-main.result == 'skipped' && github.event_name == 'pull_request')) && needs.sticker-bundle.result == 'success' }}
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 20
     permissions:
@@ -2942,6 +3012,8 @@ jobs:
   # TestSmoke uses pgtest's disposable, per-test databases; the hosted runner
   # and its Postgres container are discarded with this job.
   smoke:
+    needs: prioritize-main
+    if: ${{ always() && (needs.prioritize-main.result == 'success' || (needs.prioritize-main.result == 'skipped' && github.event_name == 'pull_request')) }}
     runs-on: ubuntu-26.04
     timeout-minutes: 60
     permissions:
@@ -3081,7 +3153,8 @@ jobs:
 
   mirror-rustfs-qualification-images:
     name: Mirror RustFS qualification images
-    if: ${{ github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository }}
+    needs: prioritize-main
+    if: ${{ always() && (needs.prioritize-main.result == 'success' || (needs.prioritize-main.result == 'skipped' && github.event_name == 'pull_request')) && (github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository) }}
     runs-on: ubuntu-26.04
     timeout-minutes: 10
     permissions:
@@ -3104,8 +3177,8 @@ jobs:
   rustfs-transition-qualification:
     name: RustFS transition qualification
     runs-on: ubuntu-26.04
-    needs: mirror-rustfs-qualification-images
-    if: ${{ always() && needs.mirror-rustfs-qualification-images.result != 'failure' && needs.mirror-rustfs-qualification-images.result != 'cancelled' }}
+    needs: [prioritize-main, mirror-rustfs-qualification-images]
+    if: ${{ always() && (needs.prioritize-main.result == 'success' || (needs.prioritize-main.result == 'skipped' && github.event_name == 'pull_request')) && needs.mirror-rustfs-qualification-images.result != 'failure' && needs.mirror-rustfs-qualification-images.result != 'cancelled' }}
     # The complete R69/R70 fixture matrix can exceed 45 minutes on slower hosted runners.
     timeout-minutes: 60
     permissions:
@@ -3149,6 +3222,8 @@ jobs:
 
   schema-gate-postgres:
     name: PostgreSQL Atlas schema gate
+    needs: prioritize-main
+    if: ${{ always() && (needs.prioritize-main.result == 'success' || (needs.prioritize-main.result == 'skipped' && github.event_name == 'pull_request')) }}
     runs-on: ubuntu-26.04
     timeout-minutes: 15
     permissions:
