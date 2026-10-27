@@ -269,23 +269,17 @@ func (h *handlers) handleContactsSearch(r *mtproto.Request) (bin.Encoder, error)
 	// These reads are independent. Run them together so account-sized search
 	// work overlaps, while keeping the username quota ahead of its lookup.
 	var searches sync.WaitGroup
-	searches.Add(3)
-	go func() {
-		defer searches.Done()
+	searches.Go(func() {
 		contacts, contactsErr = h.store.SearchContacts(r.Ctx, r.UserID, req.Q, limit)
-	}()
-	go func() {
-		defer searches.Done()
+	})
+	searches.Go(func() {
 		myChannels, memberChannelsErr = h.store.SearchMemberChannels(r.Ctx, r.UserID, req.Q, limit)
-	}()
-	go func() {
-		defer searches.Done()
+	})
+	searches.Go(func() {
 		publicChannels, publicChannelsErr = h.store.SearchPublicChannels(r.Ctx, req.Q, limit)
-	}()
+	})
 	if validateUsername(username) {
-		searches.Add(1)
-		go func() {
-			defer searches.Done()
+		searches.Go(func() {
 			// Share resolveUsername's per-account distinct-handle and burst budgets.
 			// Charge before any username lookup, even when this resolves to a channel
 			// or misses, so contacts.search cannot buy a second lookup path.
@@ -303,7 +297,7 @@ func (h *handlers) handleContactsSearch(r *mtproto.Request) (bin.Encoder, error)
 			if ok && resolution.Kind == store.UsernameKindUser {
 				exactUser = &resolution.User
 			}
-		}()
+		})
 	}
 	searches.Wait()
 	if usernameQuotaErr != nil {
