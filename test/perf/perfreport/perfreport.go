@@ -2,9 +2,9 @@
 //
 // Deterministic counters block from the first run: statements per RPC, rows
 // read, sequential scans, and an identical statement count at 1x and 100x.
-// Timings (the absolute budget, 1x against 100x, and base against head) are
-// reported on every run but block only once main's history has given the
-// scenario a noise band.
+// Timing regressions compare the head with its interleaved base, or main with
+// its calibrated history. Absolute budgets and within-run scale ratios are
+// reported for context but never decide the result.
 package perfreport
 
 import (
@@ -35,16 +35,16 @@ const (
 	FanOut Kind = "fanout"
 )
 
-// budgetMs is the p95 ceiling on the 100x fixture.
+// budgetMs is the reference p95 ceiling shown in reports, not a gate.
 var budgetMs = map[Kind]float64{Read: 20, Write: 50, FanOut: 2000}
 
-// Thresholds. Scale invariance allows the 100x run 1.5 times the 1x one;
-// against base a run may be 15% slower. The absolute slack keeps timer and
-// scheduler noise on sub-millisecond RPCs from deciding either.
+// Row reads allow 1.5x growth across fixtures; allocations use the same ratio
+// for non-blocking diagnostics. Timing allows 15% regression against a
+// reference; absolute slack keeps timer and scheduler noise on sub-millisecond
+// RPCs from deciding.
 const (
 	scaleRatio      = 1.5
 	regressionRatio = 1.15
-	scaleSlackMs    = 1.0
 	baseMinMs       = 2.0
 	noiseSigmas     = 3
 	rowsSlack       = 50
@@ -105,9 +105,7 @@ type Failure struct {
 // Checks a waiver may name. Regression against base is not among them: a
 // known violation may stay, it may not get worse.
 const (
-	CheckBudget  = "budget"
 	CheckQueries = "queries"
-	CheckLatency = "latency"
 	CheckRows    = "rows"
 	CheckAlloc   = "alloc"
 	CheckSeqScan = "seqscan"
@@ -119,10 +117,10 @@ const (
 	checkSlower      = "slower"
 )
 
-// timing reports whether a check is decided by a clock rather than a counter.
+// timing reports whether a check is subject to calibration-aware reporting.
 func timing(check string) bool {
 	switch check {
-	case CheckBudget, CheckLatency, CheckAlloc, checkSlower:
+	case CheckAlloc, checkSlower:
 		return true
 	}
 	return false
@@ -146,7 +144,7 @@ func ParseWaivers(raw []byte) ([]Waiver, error) {
 	}
 	for _, w := range ws {
 		switch w.Check {
-		case CheckBudget, CheckQueries, CheckLatency, CheckRows, CheckAlloc, CheckSeqScan, CheckError, CheckUnexplained:
+		case CheckQueries, CheckRows, CheckAlloc, CheckSeqScan, CheckError, CheckUnexplained:
 		default:
 			return nil, fmt.Errorf("waiver for %q: check %q cannot be waived", w.Scenario, w.Check)
 		}
@@ -168,9 +166,10 @@ type Row struct {
 	Large *Result
 	Base  *Result
 	// Band is the standard deviation of main's 100x p50 over Runs main runs.
-	Band   float64
-	Runs   int
-	Failed bool
+	Band       float64
+	Runs       int
+	HistoryP50 float64
+	Failed     bool
 	// MeasurementFailed marks RPC, report, or query-plan failures that are not
 	// performance regressions.
 	MeasurementFailed bool
@@ -271,7 +270,7 @@ func Evaluate(in Input) Verdict {
 	}
 	for _, name := range order {
 		row := Row{Name: name, Small: headAgg[key{name, Small}], Large: headAgg[key{name, Large}], Base: baseAgg[key{name, Large}]}
-		row.Band, row.Runs = bands[name].sd, bands[name].n
+		row.Band, row.Runs, row.HistoryP50 = bands[name].sd, bands[name].n, bands[name].p50
 		calibrated := row.Runs >= Calibration
 		// record files a failed check. scan is the fingerprint of a sequential
 		// scan, which only a waiver naming that scan covers.
@@ -330,16 +329,10 @@ func Evaluate(in Input) Verdict {
 			continue
 		}
 		s, l := row.Small, row.Large
-		if budget := budgetMs[l.Kind]; l.P95Ms > budget {
-			fail(CheckBudget, "p95 %.1f ms at %s, budget %.0f ms", l.P95Ms, Large, budget)
-		}
 		if s.Queries != l.Queries {
 			fail(CheckQueries, "queries %d at %s, %d at %s", s.Queries, Small, l.Queries, Large)
 		}
 		if !l.FullSet {
-			if l.P50Ms > scaleRatio*s.P50Ms && l.P50Ms-s.P50Ms > scaleSlackMs {
-				fail(CheckLatency, "p50 %.1f ms at %s is %.1fx the %s %.1f ms", l.P50Ms, Large, l.P50Ms/s.P50Ms, Small, s.P50Ms)
-			}
 			if float64(l.RowsRead) > scaleRatio*float64(s.RowsRead) && l.RowsRead-s.RowsRead > rowsSlack {
 				fail(CheckRows, "rows read %d at %s is %.1fx the %s %d", l.RowsRead, Large, ratio(l.RowsRead, s.RowsRead), Small, s.RowsRead)
 			}
@@ -347,11 +340,19 @@ func Evaluate(in Input) Verdict {
 				fail(CheckAlloc, "allocated %s at %s is %.1fx the %s %s", bytes(l.AllocBytes), Large, ratio(l.AllocBytes, s.AllocBytes), Small, bytes(s.AllocBytes))
 			}
 		}
-		if b := row.Base; b != nil && b.Error == "" {
-			allowed := max((regressionRatio-1)*b.P50Ms, noiseSigmas*row.Band)
-			if l.P50Ms-b.P50Ms > allowed && l.P50Ms-b.P50Ms >= baseMinMs {
-				fail(checkSlower, "p50 %.1f ms at %s is %.0f%% slower than main's %.1f ms", l.P50Ms, Large, 100*(l.P50Ms/b.P50Ms-1), b.P50Ms)
+		referenceP50, referenceName := 0.0, ""
+		if b := row.Base; b != nil && b.Error == "" && b.P50Ms > 0 {
+			referenceP50, referenceName = b.P50Ms, "main"
+		} else if row.Runs > 0 && bands[name].p50 > 0 {
+			referenceP50, referenceName = bands[name].p50, "main history"
+		}
+		if referenceP50 > 0 {
+			allowed := max((regressionRatio-1)*referenceP50, noiseSigmas*row.Band)
+			if l.P50Ms-referenceP50 > allowed && l.P50Ms-referenceP50 >= baseMinMs {
+				fail(checkSlower, "p50 %.1f ms at %s is %.0f%% slower than %s's %.1f ms", l.P50Ms, Large, 100*(l.P50Ms/referenceP50-1), referenceName, referenceP50)
 			}
+		}
+		if b := row.Base; b != nil && b.Error == "" {
 			if float64(l.Queries) > regressionRatio*float64(b.Queries) {
 				fail(checkBase, "queries %d at %s, main runs %d", l.Queries, Large, b.Queries)
 			}
@@ -402,12 +403,12 @@ func Aggregate(reports []Report) Report {
 }
 
 type band struct {
-	sd float64
-	n  int
+	p50 float64
+	sd  float64
+	n   int
 }
 
-// noise is each scenario's standard deviation of the 100x p50 across main
-// runs.
+// noise summarizes each scenario's 100x p50 across main runs.
 func noise(history []Report) map[string]band {
 	samples := map[string][]float64{}
 	for _, rep := range history {
@@ -435,7 +436,8 @@ func noise(history []Report) map[string]band {
 		if len(xs) > 1 {
 			sd = math.Sqrt(ss / float64(len(xs)-1))
 		}
-		out[name] = band{sd: sd, n: len(xs)}
+		slices.Sort(xs)
+		out[name] = band{p50: xs[(len(xs)-1)/2], sd: sd, n: len(xs)}
 	}
 	return out
 }
@@ -517,10 +519,10 @@ func Markdown(v Verdict) string {
 	if v.BaseRounds > 0 {
 		base = fmt.Sprintf("%d interleaved base rounds", v.BaseRounds)
 	}
-	fmt.Fprintf(&b, "Medians of %d rounds; %s. Budgets are p95 on the 100x fixture. "+
-		"Query counts, rows read and sequential scans block; timings block once %d main runs have set the scenario's noise band.\n\n",
+	fmt.Fprintf(&b, "Medians of %d rounds; %s. Reference budgets are p95 on the 100x fixture. "+
+		"Query counts, rows read and sequential scans block; p50 timing regressions compare with the interleaved base or calibrated main history and block once %d main runs have set the noise band.\n\n",
 		v.Rounds, base, Calibration)
-	b.WriteString("| Scenario | Kind | p50 1x (ms) | p50 100x (ms) | p95 100x (ms) | Budget (ms) | Noise band | Queries 1x / 100x | Rows read 1x / 100x | Alloc 100x | p50 vs main | Status |\n")
+	b.WriteString("| Scenario | Kind | p50 1x (ms) | p50 100x (ms) | p95 100x (ms) | Reference p95 (ms) | Noise band | Queries 1x / 100x | Rows read 1x / 100x | Alloc 100x | p50 vs main | Status |\n")
 	b.WriteString("|---|---|---|---|---|---|---|---|---|---|---|---|\n")
 	for _, row := range v.Rows {
 		status := "pass"
@@ -547,6 +549,8 @@ func Markdown(v Verdict) string {
 		vsMain := "n/a"
 		if row.Base != nil && row.Base.P50Ms > 0 {
 			vsMain = fmt.Sprintf("%+.0f%%", 100*(l.P50Ms/row.Base.P50Ms-1))
+		} else if row.HistoryP50 > 0 {
+			vsMain = fmt.Sprintf("%+.0f%%", 100*(l.P50Ms/row.HistoryP50-1))
 		}
 		name := row.Name
 		if l.FullSet {

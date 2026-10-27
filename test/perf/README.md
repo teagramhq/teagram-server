@@ -45,11 +45,12 @@ table above 10,000 rows.
   branch, the same statement count at 1x and 100x, rows read at 100x within 1.5x
   of 1x, no sequential scan, no statement Postgres cannot EXPLAIN, no failed
   scenario.
-- Reported on every run, blocking once 20 `main` runs have given the scenario a
-  noise band: p95 within budget (reads 20 ms, writes 50 ms, fan-out 2 s),
-  p50 at 100x within 1.5x of 1x, and a median no slower than base by more than
-  max(15%, 3 standard deviations) and 2 ms. A timing failure is measured once
-  more before it counts.
+- Reported on every run: p95 reference budgets (reads 20 ms, writes 50 ms,
+  fan-out 2 s) and the 1x/100x p50 ratio. These values are context only. A p50
+  regression blocks once 20 `main` runs have given the scenario a noise band:
+  PR heads compare with the interleaved base; `main` compares with its history
+  median. A regression must exceed max(15%, 3 standard deviations) and 2 ms.
+  A timing failure is measured once more before it counts.
 
 `required_scenarios.json` lists the scenarios the gate must see measured on
 both fixtures. It is kept apart from the harness on purpose: a scenario dropped

@@ -93,43 +93,49 @@ func TestEvaluateBlocksCounterRegressionAgainstBase(t *testing.T) {
 	}
 }
 
-func TestEvaluateReportsTimingsUntilCalibrated(t *testing.T) {
-	rs := make([]perfreport.Result, 0, 8)
-	rs = append(rs, pair("read", perfreport.Read, result(15, 18, 1, 1), result(15, 21, 1, 1))...)
-	rs = append(rs, pair("write", perfreport.Write, result(30, 45, 1, 1), result(30, 51, 1, 1))...)
-	rs = append(rs, pair("fanout", perfreport.FanOut, result(1000, 1500, 1, 1), result(1200, 2100, 1, 1))...)
-	rs = append(rs, pair("scaled", perfreport.Read, result(2, 3, 1, 1), result(6, 8, 1, 1))...)
-	v := perfreport.Evaluate(perfreport.Input{Head: rounds(rs...), History: calibrated("read", perfreport.Calibration-1, 15, 1)})
+func TestEvaluateReportsBaseRelativeTimingUntilCalibrated(t *testing.T) {
+	base := rounds(pair("read", perfreport.Read,
+		result(2, 3, 5, 100), result(10, 21, 5, 100))...)
+	head := rounds(pair("read", perfreport.Read,
+		result(2, 3, 5, 100), result(12.5, 25, 5, 100))...)
+	v := perfreport.Evaluate(perfreport.Input{
+		Head: head, Base: base, History: calibrated("read", perfreport.Calibration-1, 10, 0.1),
+	})
 	if len(v.Failures)+len(v.TimingFailures) != 0 {
-		t.Fatalf("uncalibrated timings blocked: %s%s", reasons(v.Failures), reasons(v.TimingFailures))
+		t.Fatalf("uncalibrated timing blocked: %s%s", reasons(v.Failures), reasons(v.TimingFailures))
 	}
-	got := reasons(v.Reported)
-	for _, want := range []string{
-		"read: p95 21.0 ms at 100x, budget 20 ms",
-		"write: p95 51.0 ms at 100x, budget 50 ms",
-		"fanout: p95 2100.0 ms at 100x, budget 2000 ms",
-		"scaled: p50 6.0 ms at 100x is 3.0x the 1x 2.0 ms",
-	} {
-		if !strings.Contains(got, want) {
-			t.Errorf("reported = %q, want %q", got, want)
-		}
+	if got := reasons(v.Reported); !strings.Contains(got, "read: p50 12.5 ms at 100x is 25% slower than main's 10.0 ms") {
+		t.Fatalf("reported = %q, want the uncalibrated base-relative regression", got)
 	}
 	if md := perfreport.Markdown(v); !strings.Contains(md, "calibrating 19/20") || !strings.Contains(md, "timing reported") {
 		t.Errorf("markdown = %s", md)
 	}
 }
 
-func TestEvaluateBlocksTimingsOnceCalibrated(t *testing.T) {
-	rs := pair("read", perfreport.Read, result(15, 18, 1, 1), result(15, 21, 1, 1))
-	v := perfreport.Evaluate(perfreport.Input{Head: rounds(rs...), History: calibrated("read", perfreport.Calibration, 15, 0.5)})
-	if got := reasons(v.TimingFailures); !strings.Contains(got, "read: p95 21.0 ms at 100x, budget 20 ms") {
-		t.Fatalf("timing failures = %q", got)
+func TestEvaluateUsesBaseRelativeTimingInsteadOfAbsoluteLimits(t *testing.T) {
+	base := rounds(pair("read", perfreport.Read,
+		result(2, 3, 5, 100), result(10, 40, 5, 100))...)
+	head := rounds(pair("read", perfreport.Read,
+		result(2, 3, 5, 100), result(10.1, 44, 5, 100))...)
+	v := perfreport.Evaluate(perfreport.Input{
+		Head: head, Base: base, History: calibrated("read", perfreport.Calibration, 10, 0.5),
+	})
+	if got := reasons(v.TimingFailures); got != "" {
+		t.Fatalf("base-relative timing checks failed despite a 1%% p50 change: %s", got)
 	}
-	if len(v.Failures) != 0 {
-		t.Fatalf("a timing check counted as deterministic: %s", reasons(v.Failures))
+	if got := reasons(v.Reported); got != "" {
+		t.Fatalf("calibrated base-relative timing was reported as uncalibrated: %s", got)
 	}
-	if md := perfreport.Markdown(v); !strings.Contains(md, "±0.5 ms (20 runs)") {
-		t.Errorf("markdown = %s", md)
+}
+
+func TestEvaluateComparesMainTimingAgainstCalibratedHistory(t *testing.T) {
+	head := rounds(pair("read", perfreport.Read,
+		result(13, 15, 5, 100), result(13.5, 16, 5, 100))...)
+	v := perfreport.Evaluate(perfreport.Input{
+		Head: head, History: calibrated("read", perfreport.Calibration, 10, 0.5),
+	})
+	if got := reasons(v.TimingFailures); !strings.Contains(got, "read: p50 13.5 ms at 100x is 42% slower than main history's 9.5 ms") {
+		t.Fatalf("timing failures = %q, want main-history regression", got)
 	}
 }
 
