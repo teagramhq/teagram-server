@@ -212,10 +212,10 @@ func (s *Store) SendMessageWithEntities(ctx context.Context, fromID, toID int64,
 	return s.sendMessageWithMediaEntities(ctx, fromID, toID, text, randomID, fileID, nil, replyToMsgID, entities)
 }
 
-// SendStickerMessageWithEntities stores a built-in catalogue document on each
-// owner row without treating its id as a files-table reference.
+// SendStickerMessageWithEntities stores a catalogue or live user-set document
+// on each owner row without treating its id as a files-table reference.
 func (s *Store) SendStickerMessageWithEntities(ctx context.Context, fromID, toID int64, text string, randomID, stickerDocumentID, replyToMsgID int64, entities []PollDescriptionEntity) (sender Message, senderPts, recipientPts int, dup bool, err error) {
-	if stickerDocumentID >= 0 {
+	if stickerDocumentID == 0 {
 		return Message{}, 0, 0, false, ErrMessageInvalid
 	}
 	return s.sendMessageWithMediaEntities(ctx, fromID, toID, text, randomID, 0, &stickerDocumentID, replyToMsgID, entities)
@@ -238,6 +238,11 @@ func (s *Store) sendMessageWithMediaEntities(ctx context.Context, fromID, toID i
 	// on the update_state unique-key insert; locking first serializes them.
 	if err = lockOwners(ctx, tx, fromID, toID); err != nil {
 		return Message{}, 0, 0, false, err
+	}
+	if stickerDocumentID != nil {
+		if err = lockLiveUserStickerDocuments(ctx, qtx, *stickerDocumentID); err != nil {
+			return Message{}, 0, 0, false, err
+		}
 	}
 	// Both rows below carry fileID, so the file's row is locked here and held to
 	// commit. Taken after the advisory locks and before any insert; see
@@ -1806,7 +1811,7 @@ func (s *Store) ForwardMessages(ctx context.Context, fromID int64, destPeerType 
 		return nil, nil, ErrMessageInvalid
 	}
 	for _, src := range sources {
-		if src.StickerDocumentID > 0 || (src.StickerDocumentID != 0 && src.FileID != 0) {
+		if src.StickerDocumentID != 0 && src.FileID != 0 {
 			return nil, nil, ErrMessageInvalid
 		}
 	}
@@ -1869,6 +1874,15 @@ func (s *Store) ForwardMessages(ctx context.Context, fromID int64, destPeerType 
 	if err = lockChannelForwardSources(ctx, qtx, fromID, sources); err != nil {
 		return nil, nil, err
 	}
+	stickerDocumentIDs := make([]int64, 0, len(sources))
+	for _, src := range sources {
+		if src.StickerDocumentID > 0 {
+			stickerDocumentIDs = append(stickerDocumentIDs, src.StickerDocumentID)
+		}
+	}
+	if err = lockLiveUserStickerDocuments(ctx, qtx, stickerDocumentIDs...); err != nil {
+		return nil, nil, err
+	}
 
 	// Every source's file is locked here, before the first insert, rather than
 	// per source inside the loop: one batch is one ascending pass, which a
@@ -1919,7 +1933,7 @@ func (s *Store) ForwardMessages(ctx context.Context, fromID int64, destPeerType 
 	for i, src := range sources {
 		randomID := randomIDs[i]
 		var stickerDocumentID *int64
-		if src.StickerDocumentID < 0 {
+		if src.StickerDocumentID != 0 {
 			stickerDocumentID = &src.StickerDocumentID
 		}
 

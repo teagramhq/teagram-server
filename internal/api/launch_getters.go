@@ -215,11 +215,40 @@ func featuredStickerSetsHash(set tg.StickerSet, installedAt *time.Time, coverID 
 }
 
 func (h *handlers) handleGetEmojiStickers(r *mtproto.Request) (bin.Encoder, error) {
+	if r.UserID == 0 {
+		return nil, errAuthKeyUnreg
+	}
 	var req tg.MessagesGetEmojiStickersRequest
 	if err := decodeLaunchGetterRequest(r, &req); err != nil {
 		return nil, err
 	}
-	return &tg.MessagesAllStickers{Hash: 0, Sets: []tg.StickerSet{}}, nil
+	installed, err := h.store.InstalledStickerSets(r.Ctx, r.UserID)
+	if err != nil {
+		h.log.Error("load installed emoji sticker sets", "user_id", r.UserID, "err", err)
+		return nil, errInternal
+	}
+	sets := make([]tg.StickerSet, 0, len(installed))
+	for _, item := range installed {
+		if item.ID <= 0 {
+			continue
+		}
+		set, setErr := h.store.UserStickerSetByInstalledID(r.Ctx, item.ID)
+		if errors.Is(setErr, store.ErrStickerSetNotFound) {
+			continue
+		}
+		if setErr != nil {
+			h.log.Error("load installed emoji sticker set", "user_id", r.UserID, "set_id", item.ID, "err", setErr)
+			return nil, errInternal
+		}
+		if set.Kind == "emojis" {
+			sets = append(sets, userStickerSetTL(set, r.UserID, h.dcID, &item.InstalledAt).Set)
+		}
+	}
+	hash := installedStickerSetsHash(sets)
+	if req.Hash != 0 && req.Hash == hash {
+		return &tg.MessagesAllStickersNotModified{}, nil
+	}
+	return &tg.MessagesAllStickers{Hash: hash, Sets: sets}, nil
 }
 
 func (h *handlers) handleGetFeaturedEmojiStickers(r *mtproto.Request) (bin.Encoder, error) {

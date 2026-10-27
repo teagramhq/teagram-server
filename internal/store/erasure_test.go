@@ -614,6 +614,9 @@ func TestMediaErasureSummaryWalksEveryClass(t *testing.T) {
 	if counts.SkippedMessageRef != 1 {
 		t.Fatalf("SkippedMessageRef = %d, want 1; counts = %+v", counts.SkippedMessageRef, counts)
 	}
+	if counts.SkippedStickerSetRef != 0 {
+		t.Fatalf("SkippedStickerSetRef = %d, want 0; counts = %+v", counts.SkippedStickerSetRef, counts)
+	}
 	if counts.SkippedGalleryRef != 1 {
 		t.Fatalf("SkippedGalleryRef = %d, want 1; counts = %+v", counts.SkippedGalleryRef, counts)
 	}
@@ -628,7 +631,7 @@ func TestMediaErasureSummaryWalksEveryClass(t *testing.T) {
 	// channel post exists and the cutoff is past every file, so those two classes
 	// are covered by their focused tests.
 	sum := counts.Unreferenced + counts.Unassembled +
-		counts.SkippedMessageRef + counts.SkippedChannelRef +
+		counts.SkippedMessageRef + counts.SkippedChannelRef + counts.SkippedStickerSetRef +
 		counts.SkippedGalleryRef + counts.SkippedChatRef + counts.SkippedTooNew
 	if sum != counts.Scanned {
 		t.Fatalf("classes sum to %d, scanned %d; counts = %+v", sum, counts.Scanned, counts)

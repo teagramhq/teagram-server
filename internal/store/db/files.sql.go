@@ -263,6 +263,10 @@ WHERE f.id = $1
       WHERE cm.file_id = f.id AND cm.deleted = false
   )
   AND NOT EXISTS (
+      SELECT 1 FROM user_created_sticker_set_items i
+      WHERE i.file_id = f.id
+  )
+  AND NOT EXISTS (
       SELECT 1 FROM user_photos up WHERE up.file_id = f.id
   )
   AND NOT EXISTS (
@@ -312,6 +316,10 @@ WHERE f.id = $1
   AND NOT EXISTS (
       SELECT 1 FROM channel_messages cm
       WHERE cm.file_id = f.id AND cm.deleted = false
+  )
+  AND NOT EXISTS (
+      SELECT 1 FROM user_created_sticker_set_items i
+      WHERE i.file_id = f.id
   )
   AND NOT EXISTS (
       SELECT 1 FROM user_photos up WHERE up.file_id = f.id
@@ -881,6 +889,10 @@ SELECT f.id, f.size, f.stored,
            SELECT 1 FROM channel_messages cm
            WHERE cm.file_id = f.id AND cm.deleted = false
        ) AS channel_ref,
+       EXISTS (
+           SELECT 1 FROM user_created_sticker_set_items i
+           WHERE i.file_id = f.id
+       ) AS sticker_set_ref,
        coalesce(gallery.found, false) AS gallery_ref,
        coalesce(chat_photo.found, false) AS chat_ref,
        coalesce(channel_photo.found, false) AS channel_photo_ref
@@ -924,6 +936,7 @@ type MediaErasureScanRow struct {
 	Aged            bool
 	MessageRef      bool
 	ChannelRef      bool
+	StickerSetRef   bool
 	GalleryRef      bool
 	ChatRef         bool
 	ChannelPhotoRef bool
@@ -998,6 +1011,7 @@ func (q *Queries) MediaErasureScan(ctx context.Context, arg MediaErasureScanPara
 			&i.Aged,
 			&i.MessageRef,
 			&i.ChannelRef,
+			&i.StickerSetRef,
 			&i.GalleryRef,
 			&i.ChatRef,
 			&i.ChannelPhotoRef,

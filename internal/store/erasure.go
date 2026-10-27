@@ -58,6 +58,9 @@ type ErasureCounts struct {
 	// SkippedChannelRef counts files a non-deleted channel_messages row names
 	// and no live messages row does.
 	SkippedChannelRef int
+	// SkippedStickerSetRef counts files named by a user-created sticker set,
+	// regardless of whether that set is currently live.
+	SkippedStickerSetRef int
 	// SkippedGalleryRef counts files a profile gallery entry still names.
 	SkippedGalleryRef int
 	// SkippedChatRef counts files selected as a current basic-group photo.
@@ -81,6 +84,7 @@ func (c *ErasureCounts) add(o ErasureCounts) {
 	c.UnassembledBytes += o.UnassembledBytes
 	c.SkippedMessageRef += o.SkippedMessageRef
 	c.SkippedChannelRef += o.SkippedChannelRef
+	c.SkippedStickerSetRef += o.SkippedStickerSetRef
 	c.SkippedGalleryRef += o.SkippedGalleryRef
 	c.SkippedChatRef += o.SkippedChatRef
 	c.SkippedChannelPhotoRef += o.SkippedChannelPhotoRef
@@ -156,6 +160,8 @@ func (s *Store) MediaErasureScan(ctx context.Context, olderThan time.Time, after
 			scan.Counts.SkippedMessageRef++
 		case r.ChannelRef:
 			scan.Counts.SkippedChannelRef++
+		case r.StickerSetRef:
+			scan.Counts.SkippedStickerSetRef++
 		case r.GalleryRef:
 			scan.Counts.SkippedGalleryRef++
 		case !r.Aged:

@@ -199,7 +199,7 @@ func fanOut(ctx context.Context, tx pgx.Tx, qtx *db.Queries, log *slog.Logger, f
 			return Message{}, nil, false, ErrMessageInvalid
 		}
 	}
-	if f.StickerDocumentID != nil && (*f.StickerDocumentID >= 0 || f.FileID != 0) {
+	if f.StickerDocumentID != nil && (*f.StickerDocumentID == 0 || f.FileID != 0) {
 		return Message{}, nil, false, ErrMessageInvalid
 	}
 
@@ -272,6 +272,11 @@ func fanOut(ctx context.Context, tx pgx.Tx, qtx *db.Queries, log *slog.Logger, f
 
 	if err = lockOwners(ctx, tx, owners...); err != nil {
 		return Message{}, nil, false, err
+	}
+	if f.StickerDocumentID != nil {
+		if err = lockLiveUserStickerDocuments(ctx, qtx, *f.StickerDocumentID); err != nil {
+			return Message{}, nil, false, err
+		}
 	}
 
 	// One lock for the whole fan-out, taken before the first per-member insert,

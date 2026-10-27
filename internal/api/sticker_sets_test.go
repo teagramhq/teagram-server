@@ -1101,6 +1101,10 @@ func getAllStickerSets(t *testing.T, h mtproto.Handler, userID int64, hash int64
 func getStickerSet(t *testing.T, h mtproto.Handler, userID int64, ref tg.InputStickerSetClass, hash int) *tg.MessagesStickerSet {
 	t.Helper()
 	body := dispatchChatMethod(t, h, userID, "messages.getStickerSet", &tg.MessagesGetStickerSetRequest{Stickerset: ref, Hash: hash})
+	var rpc mt.RPCError
+	if err := rpc.Decode(&bin.Buffer{Buf: body}); err == nil {
+		t.Fatalf("getStickerSet RPC error = %q", rpc.ErrorMessage)
+	}
 	var box tg.MessagesStickerSetBox
 	if err := box.Decode(&bin.Buffer{Buf: body}); err != nil {
 		t.Fatalf("decode getStickerSet: %v", err)

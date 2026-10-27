@@ -484,7 +484,7 @@ func TestSyntheticProviderWaitAttemptsCountEvenWhenStalled(t *testing.T) {
 func TestAbsoluteReservationRecoveryBounds(t *testing.T) {
 	t.Parallel()
 	absolute := []string{
-		"users_id_seq", "files_id_seq", "chats_id_seq", "secret_chats_id_seq",
+		"users_id_seq", "files_id_seq", "user_created_sticker_sets_id_seq", "chats_id_seq", "secret_chats_id_seq",
 		"message_fanout_seq", "chat_admin_events_id_seq",
 		// These internal-only identities remain explicitly classified too.
 		"phone_codes_id_seq", "registration_invites_id_seq",
@@ -493,9 +493,9 @@ func TestAbsoluteReservationRecoveryBounds(t *testing.T) {
 	keySeeds := [][2]byte{
 		{0x10, 0x11}, {0x12, 0x13}, {0x14, 0x15},
 		{0x16, 0x17}, {0x18, 0x19}, {0x1a, 0x1b},
-		{0x1c, 0x1d}, {0x1e, 0x1f}, {0x20, 0x21},
+		{0x1c, 0x1d}, {0x1e, 0x1f}, {0x20, 0x21}, {0x2c, 0x2d},
 	}
-	lowerKeySeeds := [...]byte{0x22, 0x23, 0x24, 0x25, 0x26, 0x27, 0x28, 0x29, 0x2a}
+	lowerKeySeeds := [...]byte{0x22, 0x23, 0x24, 0x25, 0x26, 0x27, 0x28, 0x29, 0x2a, 0x2b}
 	for i, allocator := range absolute {
 		t.Run(allocator, func(t *testing.T) {
 			t.Parallel()
