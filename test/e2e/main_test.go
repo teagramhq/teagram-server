@@ -17,13 +17,25 @@ import (
 // deadline. Without this, the first e2e run on a fresh machine can exceed the
 // per-test timeout while the container boots.
 func TestMain(m *testing.M) {
-	if !fixtureAuthProgressFocusedRun(os.Args) {
+	if !fixtureAuthProgressFocusedRun(os.Args) && !runningServerStickerBundleFocusedRun(os.Args) {
 		if err := pgtest.Prewarm(); err != nil {
 			fmt.Fprintf(os.Stderr, "pgtest prewarm: %v\n", err)
 			os.Exit(1)
 		}
 	}
 	os.Exit(m.Run())
+}
+
+func runningServerStickerBundleFocusedRun(args []string) bool {
+	if os.Getenv(stickerBundleSmokeAddressEnv) == "" {
+		return false
+	}
+	for _, arg := range args {
+		if strings.HasPrefix(arg, "-test.run=") && strings.HasPrefix(strings.TrimPrefix(arg, "-test.run="), "^TestStickerBundleCatalogue") {
+			return true
+		}
+	}
+	return false
 }
 
 func fixtureAuthProgressFocusedRun(args []string) bool {

@@ -28,7 +28,7 @@ func SetChatHistorySnapshotHook(s *Store, fn func()) { s.chatHistorySnapshotHook
 // ChatHistoryForMemberSnapshot returns history and its required hydration only
 // when viewerID is a current member. An absent chat and a non-member both
 // return ErrNotMember.
-func (s *Store) ChatHistoryForMemberSnapshot(ctx context.Context, viewerID, chatID int64, offsetID, addOffset, limit int) (ChatHistorySnapshot, error) {
+func (s *Store) ChatHistoryForMemberSnapshot(ctx context.Context, viewerID, chatID int64, offsetID, offsetDate, addOffset, limit int) (ChatHistorySnapshot, error) {
 	snapshot := ChatHistorySnapshot{
 		Users:         map[int64]User{},
 		EntitledUsers: map[int64]bool{},
@@ -58,7 +58,7 @@ func (s *Store) ChatHistoryForMemberSnapshot(ctx context.Context, viewerID, chat
 		hook()
 	}
 
-	messageRows, err := historyPage(ctx, qtx, viewerID, PeerTypeChat, chatID, offsetID, addOffset, limit)
+	messageRows, err := historyPage(ctx, qtx, viewerID, PeerTypeChat, chatID, offsetID, offsetDate, addOffset, limit)
 	if err != nil {
 		return ChatHistorySnapshot{}, fmt.Errorf("select chat history page: %w", err)
 	}

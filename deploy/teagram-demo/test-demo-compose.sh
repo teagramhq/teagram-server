@@ -83,6 +83,8 @@ jq -e \
   and .networks.backend.ipam.config[0].ip_range == "198.18.130.128/26"
   and (.services.edge.networks | keys | sort) == ["backend", "edge"]
   and .services.teagramd.environment.TG_REGISTRATION == "open"
+  and .services.teagramd.environment.TG_STICKER_IMPORT == "off"
+  and .services["teagramd-next"].environment.TG_STICKER_IMPORT == "off"
   and .services.teagramd.environment.TG_ADVERTISE_DEMO_GUEST_SIGN_UP == "true"
   and .services["teagramd-next"].environment.TG_ADVERTISE_DEMO_GUEST_SIGN_UP == "true"
   and .services.teagramd.environment.GOMAXPROCS == "1"
@@ -241,6 +243,8 @@ jq -e '
   and .services.teagramd.environment.HTTPS_PROXY == ""
   and (.services.teagramd.depends_on | keys) == ["migrate"]
   and .services.teagramd.environment.TG_CLIENT_ADDR_TRUST == "socket"
+  and .services.teagramd.environment.TG_STICKER_IMPORT == "off"
+  and .services["teagramd-next"].environment.TG_STICKER_IMPORT == "off"
   and .services.teagramd.environment.TG_CLIENT_ADDR_PROXY_CIDRS == ""
   and .services.teagramd.environment.TG_TURNSTILE_SITE_KEY == ""
   and .services.teagramd.environment.TG_TURNSTILE_SECRET_KEY_FILE == ""
@@ -257,6 +261,8 @@ env -u COMPOSE_FILE -u COMPOSE_PROJECT_NAME -u COMPOSE_PROFILES \
   "${compose[@]}" --file "$SCRIPT_DIR/compose.seed.yaml" config --format json > "$TMP_DIR/seed.json"
 jq -e '
   .services.teagramd.environment.TG_CLIENT_ADDR_TRUST == "socket"
+  and .services.teagramd.environment.TG_STICKER_IMPORT == "off"
+  and .services["teagramd-next"].environment.TG_STICKER_IMPORT == "off"
   and .services.teagramd.environment.TG_CLIENT_ADDR_PROXY_CIDRS == ""
   and .services.teagramd.environment.HTTP_PROXY == ""
   and .services.teagramd.environment.HTTPS_PROXY == ""
@@ -485,10 +491,9 @@ def assert_order(path: Path, fragments: list[str], start: int = 0) -> None:
     assert_text_order(path.read_text(encoding="utf-8"), path.name, fragments, start)
 
 
-rate_limit_reset = (
-    "demo_compose exec -T postgres psql -v ON_ERROR_STOP=1 -U postgres -d teagram \\\n"
-    "  -c 'DELETE FROM rate_limits; DELETE FROM send_code_ip_calls; DELETE FROM send_code_ip_phones; DELETE FROM public_send_code_ip_calls; DELETE FROM public_send_code_ip_phones;'"
-)
+rate_limit_reset_command = "demo_compose exec -T postgres psql -v ON_ERROR_STOP=1 -U postgres -d teagram"
+rate_limit_reset_sql = "-c 'DELETE FROM rate_limits; DELETE FROM send_code_ip_calls; DELETE FROM send_code_ip_phones; DELETE FROM public_send_code_ip_calls; DELETE FROM public_send_code_ip_phones;'"
+rate_limit_reset = rate_limit_reset_command + " \\\n  " + rate_limit_reset_sql
 assert_order(Path(sys.argv[1]), [
     'demo_compose stop edge haproxy "$ACTIVE_SERVER" turnstile-egress',
     "demo_prune_deploy_backups\n",
@@ -668,6 +673,19 @@ assert_order(Path(sys.argv[2]), [
 resume_path = init.split('if [[ -e "$MODE_FILE" || -L "$MODE_FILE" ]]; then\n', 1)[1].split(
     '\nfi\n[[ "$ACTIVE_SERVER"', 1
 )[0]
+assert_text_order(resume_path, "init-demo.sh resume rate limit reset", [
+    '"$SCRIPT_DIR/test-seed-compose.sh"',
+    rate_limit_reset_command,
+    rate_limit_reset_sql,
+    '"$SEED_SCRIPT" --verify-turnstile --endpoint haproxy:2443',
+])
+fresh_path = init.split('[[ "$ACTIVE_SERVER" == teagramd ]] || demo_fail', 1)[1]
+assert_text_order(fresh_path, "init-demo.sh fresh rate limit reset", [
+    '"$SCRIPT_DIR/test-seed-compose.sh"',
+    rate_limit_reset_command,
+    rate_limit_reset_sql,
+    '"$SEED_SCRIPT" --verify-turnstile --endpoint haproxy:2443',
+])
 if 'demo_compose down --volumes' in resume_path or 'demo_compose down -v' in resume_path:
     raise SystemExit("init-demo.sh: resume network recreation must preserve named volumes")
 if "demo_wait_migration demo_bootstrap_compose 'bootstrap migrations'" not in init:

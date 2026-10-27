@@ -662,6 +662,16 @@ blindly replay a whole-table dump into a live database.
 Other Teagram clients must use the server advertised address and DC id, and
 verify its RSA identity before sending account credentials.
 
+### Sticker pack import
+
+Before uploading files for a sticker or emoji pack, a client can call
+`help.getAppConfig` and read the `sticker_import_mode` string. `on` means the
+instance permits accounts to create sticker sets and add stickers to their
+sets. `off` means the client should hide or disable “Import pack” and explain
+that this instance has disabled pack imports. The setting applies to every
+account on the instance. Existing sets remain available to resolve, install,
+send, and use.
+
 ## Known ceilings
 
 - **Single DC.** The server only ever advertises itself (`api.DefaultConfig`
