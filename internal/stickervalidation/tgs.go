@@ -14,6 +14,15 @@ import (
 
 const maxTGSJSONNesting = 64
 
+type tgsValueContext uint8
+
+const (
+	tgsValueDefault tgsValueContext = iota
+	tgsValueSplitPosition
+	tgsValueEasingHandleCandidate
+	tgsValueEasingCoordinate
+)
+
 var errInvalidTGS = errors.New("invalid TGS")
 
 func validateTGS(data []byte, _ Target) (int, int, time.Duration, error) {
@@ -111,7 +120,11 @@ func parseTGSJSON(data []byte) (int, int, float64, float64, float64, error) {
 			assetsSeen = true
 			err = scanTGSAssets(decoder, 2)
 		default:
-			err = scanTGSValue(decoder, 2, false, key == "x")
+			context := tgsValueDefault
+			if key == "x" {
+				context = tgsValueSplitPosition
+			}
+			err = scanTGSValue(decoder, 2, false, context)
 		}
 		if err != nil {
 			return 0, 0, 0, 0, 0, errInvalidTGS
@@ -174,7 +187,7 @@ func scanTGSAssets(decoder *json.Decoder, depth int) error {
 		return errInvalidTGS
 	}
 	for decoder.More() {
-		if err := scanTGSValue(decoder, depth+1, true, false); err != nil {
+		if err := scanTGSValue(decoder, depth+1, true, tgsValueDefault); err != nil {
 			return errInvalidTGS
 		}
 	}
@@ -184,7 +197,7 @@ func scanTGSAssets(decoder *json.Decoder, depth int) error {
 	return nil
 }
 
-func scanTGSValue(decoder *json.Decoder, depth int, assetObject, xField bool) error {
+func scanTGSValue(decoder *json.Decoder, depth int, assetObject bool, context tgsValueContext) error {
 	if depth > maxTGSJSONNesting {
 		return errInvalidTGS
 	}
@@ -192,8 +205,14 @@ func scanTGSValue(decoder *json.Decoder, depth int, assetObject, xField bool) er
 	if err != nil {
 		return errInvalidTGS
 	}
-	if xField && token != json.Delim('{') {
+	if context == tgsValueSplitPosition && token != json.Delim('{') {
 		return errInvalidTGS
+	}
+	if context == tgsValueEasingCoordinate {
+		return scanTGSEasingCoordinate(decoder, token)
+	}
+	if context == tgsValueEasingHandleCandidate && token != json.Delim('{') {
+		context = tgsValueDefault
 	}
 	switch value := token.(type) {
 	case json.Delim:
@@ -205,7 +224,16 @@ func scanTGSValue(decoder *json.Decoder, depth int, assetObject, xField bool) er
 				if err != nil || !ok || assetObject && key == "p" {
 					return errInvalidTGS
 				}
-				if err := scanTGSValue(decoder, depth+1, false, key == "x"); err != nil {
+				childContext := tgsValueDefault
+				switch {
+				case context == tgsValueEasingHandleCandidate && key == "x":
+					childContext = tgsValueEasingCoordinate
+				case key == "x":
+					childContext = tgsValueSplitPosition
+				case key == "i" || key == "o":
+					childContext = tgsValueEasingHandleCandidate
+				}
+				if err := scanTGSValue(decoder, depth+1, false, childContext); err != nil {
 					return errInvalidTGS
 				}
 			}
@@ -214,7 +242,7 @@ func scanTGSValue(decoder *json.Decoder, depth int, assetObject, xField bool) er
 			}
 		case '[':
 			for decoder.More() {
-				if err := scanTGSValue(decoder, depth+1, false, false); err != nil {
+				if err := scanTGSValue(decoder, depth+1, false, tgsValueDefault); err != nil {
 					return errInvalidTGS
 				}
 			}
@@ -228,6 +256,36 @@ func scanTGSValue(decoder *json.Decoder, depth int, assetObject, xField bool) er
 		if strings.HasPrefix(strings.ToLower(value), "data:") {
 			return errInvalidTGS
 		}
+	}
+	return nil
+}
+
+func scanTGSEasingCoordinate(decoder *json.Decoder, token json.Token) error {
+	if number, ok := token.(json.Number); ok {
+		value, err := strconv.ParseFloat(number.String(), 64)
+		if err == nil && isFinite(value) {
+			return nil
+		}
+		return errInvalidTGS
+	}
+	if token != json.Delim('[') {
+		return errInvalidTGS
+	}
+	count := 0
+	for decoder.More() {
+		token, err := decoder.Token()
+		number, ok := token.(json.Number)
+		if err != nil || !ok {
+			return errInvalidTGS
+		}
+		value, err := strconv.ParseFloat(number.String(), 64)
+		if err != nil || !isFinite(value) {
+			return errInvalidTGS
+		}
+		count++
+	}
+	if token, err := decoder.Token(); err != nil || token != json.Delim(']') || count == 0 {
+		return errInvalidTGS
 	}
 	return nil
 }

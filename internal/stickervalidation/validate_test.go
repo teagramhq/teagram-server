@@ -156,6 +156,27 @@ func TestValidateAcceptsTGSSplitPosition(t *testing.T) {
 	}
 }
 
+func TestValidateAcceptsTGSEasingCoordinates(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		property   string
+		startValue string
+		endValue   string
+		handles    string
+	}{
+		{name: "scalar", property: "o", startValue: "[0]", endValue: "[100]", handles: `"o":{"x":0.333,"y":0},"i":{"x":0.667,"y":1}`},
+		{name: "array", property: "p", startValue: "[0,0]", endValue: "[100,100]", handles: `"o":{"x":[0.333,0.333],"y":[0,0]},"i":{"x":[0.667,0.667],"y":[1,1]}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			extra := `,"layers":[{"ks":{"` + tc.property + `":{"a":1,"k":[{"t":0,"s":` + tc.startValue + `,` + tc.handles + `},{"t":60,"s":` + tc.endValue + `}]}}}]`
+			body := testTGS(512, 512, extra)
+			if _, err := stickervalidation.Validate(body, stickervalidation.TargetSticker); err != nil {
+				t.Fatalf("Validate() rejected %s easing coordinates: %v", tc.name, err)
+			}
+		})
+	}
+}
+
 func TestValidateEnforcesTargetDimensions(t *testing.T) {
 	for _, tc := range []struct {
 		name   string
