@@ -85,11 +85,12 @@ cleanup() {
 }
 
 prepare_target_runner() {
-  local source=$1 output="$TMP_DIR/rollout-runner-replay.sh" helper="$TMP_DIR/runner-replay-function.sh"
+  local source=$1 output="$TMP_DIR/rollout-runner-replay.sh" helper="$TMP_DIR/runner-replay-function.sh" dispatch_marker
+  dispatch_marker="compare_resolved_preflight_command \"\${@:2}\""
   if [ "${PREFLIGHT_REPLAY_TEST_MODE:-0}" != 1 ] || \
      [ "${PREFLIGHT_REPLAY_TEST_FORCE_COMPAT:-0}" != 1 ]; then
     if grep -Fq 'ROLLOUT_PREFLIGHT_REPLAY_SANDBOX' "$source" && \
-       grep -Fq 'compare_resolved_preflight_command "${@:2}"' "$source"; then
+       grep -Fq "$dispatch_marker" "$source"; then
       printf '%s\n' "$source"
       return 0
     fi
@@ -440,6 +441,7 @@ comparison_file="$SANDBOX_OUTPUT/preflight-comparisons.tsv"
 }
 declare -A printed_fields=()
 comparison_count=0
+# shellcheck disable=SC2034 # original TSV values stay private and are not printed
 while IFS=$'\t' read -r timestamp phase field before after result extra; do
   [[ "$timestamp" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$ ]] && \
     [ "$phase" = preflight ] && [ -z "$extra" ] && \
