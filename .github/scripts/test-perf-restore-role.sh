@@ -5,8 +5,8 @@
 set -euo pipefail
 
 readonly container="perf-restore-role-test-${GITHUB_RUN_ID:-local}-$$"
-readonly tmp
 tmp="$(mktemp -d)"
+readonly tmp
 readonly image=mirror.gcr.io/postgres:18-alpine
 mkdir -p "$tmp/cache"
 chmod 0777 "$tmp/cache"
