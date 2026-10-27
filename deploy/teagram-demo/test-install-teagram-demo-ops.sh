@@ -72,12 +72,6 @@ TARGET_BEFORE='ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIAAAAAAAAAAAAAAAAAAAAAAAAAAAA
 TARGET_AFTER='restrict,command="/usr/local/sbin/teagram-demo-ops" ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAC multica-daemon@delta'
 grep -Fxq -- "$TARGET_BEFORE" "$ORIGINAL_KEYS"
 
-if output=$(sh "$INSTALLER" check "$STALE_SHA" 2>&1); then
-  printf '%s\n' 'installer accepted a wrapper version that differs from origin/main' >&2
-  exit 1
-fi
-case "$output" in *'does not match origin/main'*) ;; *) printf '%s\n' "$output" >&2; exit 1 ;; esac
-
 cat >"$EXPECTED_KEYS" <<'KEYS'
 ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA retained-key
 no-agent-forwarding,command="fixture-command" ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAB retained-options
@@ -95,6 +89,12 @@ sed \
   -e "s|/var/backups ]|$FIXTURE_BACKUPS ]|g" \
   -e "s|/var/backups)|$FIXTURE_BACKUPS)|g" \
   "$SCRIPT_DIR/ops/install-teagram-demo-ops.sh" >"$INSTALLER"
+
+if output=$(sh "$INSTALLER" check "$STALE_SHA" 2>&1); then
+  printf '%s\n' 'installer accepted a wrapper version that differs from origin/main' >&2
+  exit 1
+fi
+case "$output" in *'does not match origin/main'*) ;; *) printf '%s\n' "$output" >&2; exit 1 ;; esac
 
 OUTPUT=$(sh "$INSTALLER" apply "$MAIN_SHA")
 [[ "$OUTPUT" == *'key_state=restricted'* ]]
