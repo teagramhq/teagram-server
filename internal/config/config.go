@@ -31,6 +31,9 @@ import (
 // RegistrationMode controls whether new accounts can be created via auth.signUp.
 type RegistrationMode string
 
+// StickerImportMode controls whether accounts may create or add to sticker sets.
+type StickerImportMode string
+
 // RecoveryEmailMode controls whether client-supplied recovery emails are retained.
 type RecoveryEmailMode string
 
@@ -38,6 +41,8 @@ const (
 	RegistrationClosed            RegistrationMode  = "closed"
 	RegistrationInvite            RegistrationMode  = "invite"
 	RegistrationOpen              RegistrationMode  = "open"
+	StickerImportOn               StickerImportMode = "on"
+	StickerImportOff              StickerImportMode = "off"
 	RecoveryEmailOff              RecoveryEmailMode = "off"
 	RecoveryEmailContact          RecoveryEmailMode = "contact"
 	DefaultUploadPartTTL                            = 6 * time.Hour
@@ -87,6 +92,8 @@ type Config struct {
 	AdvertiseDemoGuestSignUp bool
 	// RegistrationMode controls whether auth.signUp is available.
 	RegistrationMode RegistrationMode
+	// StickerImportMode controls whether accounts may create or add to sticker sets.
+	StickerImportMode StickerImportMode
 	// SignUpTermsOfService is shown to new accounts in auth.authorizationSignUpRequired.
 	SignUpTermsOfService string
 	// RecoveryEmailMode controls whether password changes retain a contact email.
@@ -864,6 +871,10 @@ func load(log *slog.Logger, allowKeyGeneration bool) (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
+	stickerImportMode, err := parseStickerImportMode(os.Getenv("TG_STICKER_IMPORT"))
+	if err != nil {
+		return Config{}, err
+	}
 	identity, err := loadClientIdentityConfig()
 	if err != nil {
 		return Config{}, err
@@ -936,6 +947,7 @@ func load(log *slog.Logger, allowKeyGeneration bool) (Config, error) {
 		ProfileDeleteOperationRetention: ProfileIdentifierRetentionFloor,
 
 		RegistrationMode:     RegistrationClosed,
+		StickerImportMode:    stickerImportMode,
 		SignUpTermsOfService: envOr("TG_TERMS_OF_SERVICE", DefaultSignUpTermsOfService),
 		RecoveryEmailMode:    recoveryEmailMode,
 		SessionDeviceLabels:  true,
@@ -2656,6 +2668,17 @@ func registrationMode(raw string) RegistrationMode {
 		return RegistrationOpen
 	}
 	return RegistrationMode(raw)
+}
+
+func parseStickerImportMode(raw string) (StickerImportMode, error) {
+	switch StickerImportMode(raw) {
+	case "", StickerImportOn:
+		return StickerImportOn, nil
+	case StickerImportOff:
+		return StickerImportOff, nil
+	default:
+		return "", fmt.Errorf("TG_STICKER_IMPORT must be unset, %q, or %q; got %q", StickerImportOn, StickerImportOff, raw)
+	}
 }
 
 // ValidateRegistrationMode checks that the registration mode is one of the

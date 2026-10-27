@@ -8,16 +8,21 @@ import (
 	"testing"
 
 	"github.com/gotd/td/tg"
+
+	"github.com/teagramhq/teagram-server/internal/config"
 )
 
 func testSmokeStickerSetCatalogue(t *testing.T) {
 	t.Helper()
-	f := newSmokeFixture(t)
+	f := newSmokeFixtureWithSetup(t, config.RegistrationClosed, func(f *smokeFixture) {
+		f.stickerImportMode = config.StickerImportOff
+	})
 	const phoneA, phoneB = "+15551049701", "+15551049702"
 	seedSmokeUsers(t, f, phoneA, phoneB)
 	a1 := newSmokeClient(t, f, "sticker set owner", phoneA)
 	a2 := newSmokeClient(t, f, "sticker set owner second session", phoneA)
 	b := newSmokeClient(t, f, "sticker set other account", phoneB)
+	assertSmokeStickerImportMode(t, f, a1, string(config.StickerImportOff))
 
 	assertEmpty := func(client *smokeClient, label string) {
 		t.Helper()
@@ -345,6 +350,48 @@ func testSmokeStickerSetCatalogue(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("repeat sticker set uninstall: %v", err)
 	}
+}
+
+func assertSmokeStickerImportMode(t *testing.T, f *smokeFixture, client *smokeClient, want string) {
+	t.Helper()
+	if err := client.call(f.ctx, func(ctx context.Context, api *tg.Client) error {
+		appConfig, err := api.HelpGetAppConfig(ctx, 0)
+		if err != nil {
+			return fmt.Errorf("help.getAppConfig: %w", err)
+		}
+		got, err := stickerImportModeFromAppConfig(appConfig)
+		if err != nil {
+			return err
+		}
+		if got != want {
+			return fmt.Errorf("sticker_import_mode = %q, want %q", got, want)
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("sticker import preflight: %v", err)
+	}
+}
+
+func stickerImportModeFromAppConfig(appConfig tg.HelpAppConfigClass) (string, error) {
+	got, ok := appConfig.(*tg.HelpAppConfig)
+	if !ok {
+		return "", fmt.Errorf("help.appConfig = %T, want *tg.HelpAppConfig", appConfig)
+	}
+	object, ok := got.Config.(*tg.JSONObject)
+	if !ok {
+		return "", fmt.Errorf("help.appConfig config = %T, want *tg.JSONObject", got.Config)
+	}
+	for _, value := range object.Value {
+		if value.Key != "sticker_import_mode" {
+			continue
+		}
+		mode, ok := value.Value.(*tg.JSONString)
+		if !ok {
+			return "", fmt.Errorf("sticker_import_mode = %T, want *tg.JSONString", value.Value)
+		}
+		return mode.Value, nil
+	}
+	return "", errors.New("help.appConfig omitted sticker_import_mode")
 }
 
 func lenStickerSets(result tg.MessagesAllStickersClass) int {

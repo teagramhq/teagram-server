@@ -33,8 +33,8 @@ type settingsHandler struct {
 
 func assertAppConfig(t *testing.T, got *tg.HelpAppConfig, mode config.RegistrationMode) {
 	t.Helper()
-	if got.Hash != 6 {
-		t.Fatalf("app config hash = %d, want 6", got.Hash)
+	if got.Hash != 7 {
+		t.Fatalf("app config hash = %d, want 7", got.Hash)
 	}
 	object, ok := got.Config.(*tg.JSONObject)
 	if !ok {
@@ -47,8 +47,8 @@ func assertAppConfig(t *testing.T, got *tg.HelpAppConfig, mode config.Registrati
 		}
 		values[value.Key] = value.Value
 	}
-	if len(values) != 14 {
-		t.Fatalf("app config has %d keys, want 14", len(values))
+	if len(values) != 15 {
+		t.Fatalf("app config has %d keys, want 15", len(values))
 	}
 	if _, ok := values["upload_max_file_bytes"]; ok {
 		t.Fatal("app config advertised upload_max_file_bytes while TG_UPLOAD_MAX_BYTES is unset")
@@ -85,6 +85,9 @@ func assertAppConfig(t *testing.T, got *tg.HelpAppConfig, mode config.Registrati
 	}
 	if value, ok := values["registration_mode"].(*tg.JSONString); !ok || value.Value != string(mode) {
 		t.Fatalf("registration_mode = %v, want %q", values["registration_mode"], mode)
+	}
+	if value, ok := values["sticker_import_mode"].(*tg.JSONString); !ok || value.Value != "on" {
+		t.Fatalf("sticker_import_mode = %v, want %q", values["sticker_import_mode"], "on")
 	}
 }
 

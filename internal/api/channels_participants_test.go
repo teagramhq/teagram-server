@@ -257,6 +257,34 @@ func TestGetParticipantsEnforcesBroadcastVisibilityAndRendersStoredRoles(t *test
 	}
 }
 
+func TestGetParticipantsRecentCountIncludesBannedParticipantRows(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	s, dsn := openStoreDSN(t)
+	creator := mustUser(t, s, "+15551982101")
+	banned := mustUser(t, s, "+15551982102")
+	group := createChannel(t, s, creator.ID, &tg.ChannelsCreateChannelRequest{Megagroup: true, Title: "Recent count"})
+	joinChannel(t, ctx, dsn, group.ID, banned.ID)
+	banChannelMember(t, ctx, dsn, group.ID, banned.ID, time.Now().Add(time.Hour))
+
+	page, rpc := getParticipantsViaDispatcher(
+		t,
+		fullChannelDispatcher(s),
+		creator.ID,
+		false,
+		api.InputChannel(creator.ID, group.ID),
+		&tg.ChannelParticipantsRecent{},
+		0,
+		20,
+	)
+	if rpc != nil {
+		t.Fatalf("get recent participants: %d %s", rpc.ErrorCode, rpc.ErrorMessage)
+	}
+	if page.Count != 2 || len(page.Participants) != 1 {
+		t.Fatalf("recent participant count/page = %d/%d, want all 2 participant rows and 1 visible row", page.Count, len(page.Participants))
+	}
+}
+
 func TestGetParticipantsMegagroupFiltersExcludeBansAndRequireAdmin(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
@@ -276,8 +304,8 @@ func TestGetParticipantsMegagroupFiltersExcludeBansAndRequireAdmin(t *testing.T)
 	if rpc != nil {
 		t.Fatalf("megagroup member list: %d %s", rpc.ErrorCode, rpc.ErrorMessage)
 	}
-	if listed.Count != 2 || len(listed.Participants) != 2 {
-		t.Fatalf("active megagroup members count/rows = %d/%d, want 2/2", listed.Count, len(listed.Participants))
+	if listed.Count != 3 || len(listed.Participants) != 2 {
+		t.Fatalf("recent participant count/visible rows = %d/%d, want 3/2", listed.Count, len(listed.Participants))
 	}
 	for _, row := range listed.Participants {
 		if participantID(row) == banned.ID {

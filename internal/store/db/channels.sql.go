@@ -704,6 +704,21 @@ func (q *Queries) ChannelParticipantForForward(ctx context.Context, arg ChannelP
 	return i, err
 }
 
+const channelParticipantStoredCount = `-- name: ChannelParticipantStoredCount :one
+SELECT participant_count
+FROM channel_participant_counts
+WHERE channel_id = $1
+`
+
+// Recent participant responses report the exact stored channel row count.
+// Unlike the filtered count below, this is constant-cost as a channel grows.
+func (q *Queries) ChannelParticipantStoredCount(ctx context.Context, channelID int64) (int64, error) {
+	row := q.db.QueryRow(ctx, channelParticipantStoredCount, channelID)
+	var participant_count int64
+	err := row.Scan(&participant_count)
+	return participant_count, err
+}
+
 const channelParticipants = `-- name: ChannelParticipants :many
 SELECT channel_id, user_id, role, banned_until, join_pts, date, last_post_at, admin_change_info, available_min_id FROM channel_participants WHERE channel_id = $1 ORDER BY user_id
 `
@@ -903,6 +918,52 @@ func (q *Queries) ChannelParticipantsPageCount(ctx context.Context, arg ChannelP
 	var column_1 int64
 	err := row.Scan(&column_1)
 	return column_1, err
+}
+
+const channelParticipantsRecentPage = `-- name: ChannelParticipantsRecentPage :many
+SELECT channel_id, user_id, role, banned_until, join_pts, date, last_post_at, admin_change_info, available_min_id FROM channel_participants
+WHERE channel_id = $1::bigint
+  AND (banned_until IS NULL OR banned_until <= now())
+ORDER BY user_id
+LIMIT $3::int OFFSET $2::int
+`
+
+type ChannelParticipantsRecentPageParams struct {
+	ChannelID  int64
+	PageOffset int32
+	PageLimit  int32
+}
+
+// Recent rows need no user profile data. Keep this page on the membership
+// index instead of scanning unrelated users for the user-id ordering.
+func (q *Queries) ChannelParticipantsRecentPage(ctx context.Context, arg ChannelParticipantsRecentPageParams) ([]ChannelParticipant, error) {
+	rows, err := q.db.Query(ctx, channelParticipantsRecentPage, arg.ChannelID, arg.PageOffset, arg.PageLimit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ChannelParticipant
+	for rows.Next() {
+		var i ChannelParticipant
+		if err := rows.Scan(
+			&i.ChannelID,
+			&i.UserID,
+			&i.Role,
+			&i.BannedUntil,
+			&i.JoinPts,
+			&i.Date,
+			&i.LastPostAt,
+			&i.AdminChangeInfo,
+			&i.AvailableMinID,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
 }
 
 const channelPinnedMessageForViewer = `-- name: ChannelPinnedMessageForViewer :one
