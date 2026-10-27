@@ -66,5 +66,10 @@ ci_needs="$(query '.jobs.ci.needs[]')"
   fail 'the required ci summary must inspect the priority result'
 [[ "$(query '.jobs.ci.steps[] | select(.name == "Require all CI lanes to pass") | .run')" == *'expected_priority_result=success'* ]] ||
   fail 'the required ci summary must fail when main priority does not succeed'
+summary_run="$(query '.jobs.ci.steps[] | select(.name == "Require all CI lanes to pass") | .run')"
+[[ "$summary_run" == *'expected_browser_acceptance_image_result=success'* && "$summary_run" == *'expected_browser_acceptance_image_result=skipped'* ]] ||
+  fail 'the required ci summary must account for the browser image lane being skipped on pull requests'
+[[ "$summary_run" == *"\"\$BROWSER_ACCEPTANCE_IMAGE_RESULT\" != \"\$expected_browser_acceptance_image_result\""* && "$summary_run" == *'GITHUB_EVENT_NAME" == pull_request'* ]] ||
+  fail 'the required ci summary must still require browser images on main pushes'
 
 printf 'main CI priority contract holds\n'
