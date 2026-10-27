@@ -27,9 +27,10 @@ env:
   PERF_HISTORY: ${{ github.workspace }}/.perf-history
 
 jobs:
-  # Main stores a snapshot whenever the fixture shape changes. V2 adds seed
-  # provenance; v1 caches predate that metadata and cannot be published safely.
-  # PRs prefer v2, reuse v1 for measurement only, and seed when both miss.
+  # Main always looks up and refills the snapshot cache, even when its public
+  # release already exists. V2 adds seed provenance; v1 caches predate that
+  # metadata and cannot be published safely. PRs prefer v2, reuse v1 for
+  # measurement only, and seed when both miss.
   fixture-snapshot:
     if: github.event_name != 'pull_request'
     runs-on: ubuntu-26.04
@@ -61,7 +62,6 @@ jobs:
 
       - name: Look up the snapshot
         id: snapshot
-        if: steps.release.outputs.exists != 'true'
         uses: actions/cache/restore@v6.1.0
         with:
           path: .perf-cache
@@ -69,27 +69,27 @@ jobs:
           lookup-only: true
 
       - uses: actions/setup-go@v7.0.0
-        if: steps.snapshot.outputs.cache-hit != 'true' && steps.release.outputs.exists != 'true'
+        if: steps.snapshot.outputs.cache-hit != 'true'
         with:
           go-version-file: go.mod
           cache: false
 
       - uses: ariga/setup-atlas@v0.3
-        if: steps.snapshot.outputs.cache-hit != 'true' && steps.release.outputs.exists != 'true'
+        if: steps.snapshot.outputs.cache-hit != 'true'
         with:
           version: v1.2.0
 
       - name: Start Postgres
-        if: steps.snapshot.outputs.cache-hit != 'true' && steps.release.outputs.exists != 'true'
+        if: steps.snapshot.outputs.cache-hit != 'true'
         run: bash .github/scripts/perf-postgres.sh
 
       - name: Seed fixtures
         id: seed
-        if: steps.snapshot.outputs.cache-hit != 'true' && steps.release.outputs.exists != 'true'
+        if: steps.snapshot.outputs.cache-hit != 'true'
         run: bash .github/scripts/perf-run.sh seed
 
       - name: Record snapshot metadata
-        if: steps.snapshot.outputs.cache-hit != 'true' && steps.release.outputs.exists != 'true'
+        if: steps.snapshot.outputs.cache-hit != 'true'
         env:
           FIXTURE_VERSION: ${{ hashFiles('test/perf/fixture_test.go', 'test/perf/server_test.go') }}
         run: |
@@ -113,7 +113,7 @@ jobs:
             > .perf-cache/.fixture-metadata.json
 
       - name: Store the snapshot
-        if: steps.snapshot.outputs.cache-hit != 'true' && steps.release.outputs.exists != 'true'
+        if: steps.snapshot.outputs.cache-hit != 'true'
         uses: actions/cache/save@v6.1.0
         with:
           path: .perf-cache

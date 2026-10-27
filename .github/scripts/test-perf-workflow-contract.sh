@@ -35,12 +35,22 @@ missing_snapshot_step="$(query '.jobs."rpc-performance".steps[] | select(.name =
   fail 'the snapshot lookup key must include fixture and server setup helpers'
 [[ "$(query '.jobs."fixture-snapshot".steps[] | select(.name == "Look up the snapshot") | .with.path')" == '.perf-cache' ]] ||
   fail 'the snapshot lookup must use the same cache path as its save'
+snapshot_lookup_if="$(query '.jobs."fixture-snapshot".steps[] | select(.name == "Look up the snapshot") | .if')"
+[[ -z "$snapshot_lookup_if" || "$snapshot_lookup_if" == 'null' ]] ||
+  fail 'snapshot lookup must run when a matching public release already exists'
 [[ "$(query '.jobs."fixture-snapshot".steps[] | select(.name == "Store the snapshot") | .with.key')" == "$expected_fixture_key" ]] ||
   fail 'the snapshot save key must match the fixture and server setup helpers'
+snapshot_cache_miss_if="steps.snapshot.outputs.cache-hit != 'true'"
+[[ "$(query '.jobs."fixture-snapshot".steps[] | select(.uses == "actions/setup-go@v7.0.0") | .if')" == "$snapshot_cache_miss_if" ]] ||
+  fail 'release-exists plus cache-miss must install Go and refill the cache'
+[[ "$(query '.jobs."fixture-snapshot".steps[] | select(.uses == "ariga/setup-atlas@v0.3") | .if')" == "$snapshot_cache_miss_if" ]] ||
+  fail 'release-exists plus cache-miss must install Atlas and refill the cache'
+for step in 'Start Postgres' 'Seed fixtures' 'Record snapshot metadata' 'Store the snapshot'; do
+  [[ "$(query ".jobs.\"fixture-snapshot\".steps[] | select(.name == \"$step\") | .if")" == "$snapshot_cache_miss_if" ]] ||
+    fail "release-exists plus cache-miss must still refill the cache at $step"
+done
 [[ "$(query '.jobs."fixture-snapshot".steps[] | select(.name == "Record snapshot metadata") | .run | contains(".perf-cache/.fixture-metadata.json")')" == 'true' ]] ||
   fail 'the seed provenance must be recorded in the fixture cache'
-[[ "$(query '.jobs."fixture-snapshot".steps[] | select(.name == "Record snapshot metadata") | .if')" == "steps.snapshot.outputs.cache-hit != 'true' && steps.release.outputs.exists != 'true'" ]] ||
-  fail 'seed provenance must be captured only when this run creates the snapshot'
 # Inspect the literal GitHub expression in the workflow text.
 # shellcheck disable=SC2016
 [[ "$(query '.jobs."fixture-snapshot".steps[] | select(.name == "Record snapshot metadata") | .run | contains("--arg server_commit \"$GITHUB_SHA\"")')" == 'true' ]] ||
@@ -71,6 +81,10 @@ missing_snapshot_step="$(query '.jobs."rpc-performance".steps[] | select(.name =
   fail 'the serialized publisher must recheck draft releases before uploading'
 [[ "$(query '.jobs."publish-fixture".steps[] | select(.name == "Publish complete fixture release") | .run | contains("perf_fixture_release.py publish")')" == 'true' ]] ||
   fail 'release creation, resumable upload, verification, and publication must use the tested publisher'
+publish_if="$(query '.jobs."publish-fixture".if')"
+[[ "$publish_if" == *"needs.fixture-snapshot.outputs.release_exists != 'true'"* &&
+   "$publish_if" == *"needs.fixture-snapshot.outputs.release_draft == 'true'"* ]] ||
+  fail 'a published release must remain unchanged while a cache miss refills the snapshot'
 [[ "$(query '.jobs."fixture-snapshot".permissions.contents')" == 'read' ]] ||
   fail 'snapshot preparation must keep read-only release permissions'
 [[ "$(query '.jobs."publish-fixture".permissions.contents')" == 'write' ]] ||

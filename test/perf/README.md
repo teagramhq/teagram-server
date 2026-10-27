@@ -13,21 +13,26 @@ fixture.
 
 ### Fixture credential threat model
 
-These are public test credentials, not secrets. The performance workflow stores
-the PostgreSQL dumps in the GitHub Actions cache on `main`, and pull-request
-runs restore that cache. Anyone who obtains a dump can sign in as its owner on
-a server restored from it and access or change the fixture data. Neither the
-password nor cache visibility protects the owner account.
+These are public test credentials, not secrets. The performance workflow makes
+the PostgreSQL dumps anonymously downloadable in a public GitHub prerelease.
+Anyone can download them and the manifest. A dump contains the
+`perftestowner` account and the fixed password above; anyone restoring it into
+an isolated test server can sign in and read or change that dump's fixture
+database. The password and the release's visibility are not security
+boundaries.
 
 The fixture contains synthetic performance data only; production or user data
 must never be seeded into it. The login test binds its in-process server to
-loopback and must use disposable databases. Never restore these snapshots into
-production or a shared service, and never reuse these credentials for another
-account. Publishing or distributing a snapshot or a service restored from it
-is out of scope and requires separate review. If live data enters a fixture,
-treat it as exposed, remove it, rebuild the snapshot, and rotate any real
-credentials it contained; deleting the cache cannot recall copies already
-restored by PR runs.
+loopback and must use disposable databases. This public distribution is
+acceptable only because the account and its data are dedicated to performance
+tests: the credentials grant access only where this fixture database is
+restored. They do not grant access to production or any server without this
+fixture account. Never restore these snapshots into production or a shared
+service, and never reuse these credentials for another account. A release can
+be removed from GitHub, but copies already downloaded, restored, cached,
+archived, or mirrored cannot be recalled. If live data enters a fixture, treat
+it as exposed, remove the release, rebuild the snapshot, and rotate any real
+credentials it contained.
 
 Per scenario and fixture it records p50 and p95 latency, statements per call
 (including the delivery work the call triggers), rows read (from `EXPLAIN
@@ -60,11 +65,13 @@ other scan in that scenario still fails.
 
 `.github/workflows/perf.yml`. The fixture cache key includes
 `fixture_test.go` and `server_test.go`. Main stores a v2 snapshot with a
-`.fixture-metadata.json` provenance sidecar when that key is missing. PRs prefer
-that snapshot, reuse the legacy cache for measurement only, or seed fixtures on
-their branch when neither cache is available; they then measure the base and
-head interleaved. If the fixture seeder changed, the head is measured without a
-base comparison.
+`.fixture-metadata.json` provenance sidecar when that key is missing. Main
+checks the cache on every run and refills it on a miss, even when the matching
+public release already exists. A published release is left unchanged, while
+an existing draft is resumed for publication. PRs prefer that snapshot, reuse
+the legacy cache for measurement only, or seed fixtures on their branch when
+neither cache is available; they then measure the base and head interleaved.
+If the fixture seeder changed, the head is measured without a base comparison.
 
 The provenance sidecar records the commit that seeded the dump. It is cache
 metadata, not a fixture asset. Each `main` run also publishes the snapshot as a
