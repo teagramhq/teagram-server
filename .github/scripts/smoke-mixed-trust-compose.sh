@@ -461,6 +461,9 @@ compose_base run --rm --no-deps -T teagramd client-config > "$legacy_config"
 
 probe_binary="$work_dir/mixed-trust-probe"
 go build -o "$probe_binary" ./cmd/mixed-trust-probe
+# The umask above makes Go emit mode 700, but validation containers run as
+# uid 65532 and execute this bind-mounted probe.
+chmod 755 "$probe_binary"
 
 start_hold() {
 	local transport_name=$1
