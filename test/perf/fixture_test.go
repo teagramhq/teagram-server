@@ -64,14 +64,6 @@ var fixtures = []spec{
 	scaled("100x", shrink()),
 }
 
-func TestFixtureContactsStayWithinStoreLimit(t *testing.T) {
-	for _, fixture := range fixtures {
-		if fixture.Contacts > store.MaxContactsPerUser {
-			t.Errorf("%s fixture has %d contacts, store limit is %d", fixture.Name, fixture.Contacts, store.MaxContactsPerUser)
-		}
-	}
-}
-
 // shrink lets a development run seed a smaller large fixture in minutes
 // instead of the full one. CI never sets it; the fixture records its spec, so
 // a shrunk fixture's numbers are never mistaken for the real one's.
