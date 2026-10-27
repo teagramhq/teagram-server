@@ -79,6 +79,17 @@ verifier's transient private directory under `/root` is removed after the
 validated readiness files are copied. The command prints the `/tmp` evidence
 directory with its result.
 
+For a failed target rollout, the read-only `target-failure-report` operation
+prints the validated failure marker, readiness counters and schema gate summary
+from one matching root-only `.target` directory:
+
+```sh
+ssh teagram run <main-sha-with-reader> target-failure-report <target-sha-prefix>
+```
+
+It does not print application logs, snapshots, environment values or container
+IDs.
+
 After server readiness and link-edge update, the canonical script runs the
 deployed image's `/usr/local/bin/mtproto-smoke` in a read-only, non-root
 container using the host network. The probe fetches client discovery through

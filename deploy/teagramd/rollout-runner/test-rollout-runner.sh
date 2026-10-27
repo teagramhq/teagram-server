@@ -2114,6 +2114,7 @@ preflight_rows="$root.target/preflight-comparisons.tsv"
 default_json_logging_sha=$(printf '%s' '{"config":{},"type":"json-file"}' | sha256sum | awk '{print $1}')
 approved_syslog_logging_sha=$(printf '%s' '{"config":{"syslog-address":"unixgram:///dev/log","syslog-facility":"daemon","syslog-format":"rfc5424","tag":"teagramd"},"type":"syslog"}' | sha256sum | awk '{print $1}')
 if [ "$status" != 0 ] && grep -q 'rollback=verified' "$TMP/real-fixed-initial-local-legacy-logging-rollback.stdout" && \
+   grep -Eq 'target_failure_gate=target_readiness_rejected_exit_[0-9]+ rollback_exit=0$' "$TMP/real-fixed-initial-local-legacy-logging-rollback.stdout" && \
    grep -q $'preflight\tinitial_local_logging_transition\tjson-file:true\tsyslog-v1:false\tpass' "$preflight_rows" && \
    awk -F '\t' -v expected="$default_json_logging_sha" \
      '$3 == "live_baseline_container_logging_sha256" && $4 == expected && $5 == expected && $6 == "pass" {found=1} END {exit !found}' \
