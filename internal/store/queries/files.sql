@@ -441,6 +441,10 @@ SELECT f.id, f.size, f.stored,
            SELECT 1 FROM channel_messages cm
            WHERE cm.file_id = f.id AND cm.deleted = false
        ) AS channel_ref,
+       EXISTS (
+           SELECT 1 FROM user_created_sticker_set_items i
+           WHERE i.file_id = f.id
+       ) AS sticker_set_ref,
        coalesce(gallery.found, false) AS gallery_ref,
        coalesce(chat_photo.found, false) AS chat_ref,
        coalesce(channel_photo.found, false) AS channel_photo_ref
@@ -564,6 +568,10 @@ WHERE f.id = sqlc.arg(id)
       WHERE cm.file_id = f.id AND cm.deleted = false
   )
   AND NOT EXISTS (
+      SELECT 1 FROM user_created_sticker_set_items i
+      WHERE i.file_id = f.id
+  )
+  AND NOT EXISTS (
       SELECT 1 FROM user_photos up WHERE up.file_id = f.id
   )
   AND NOT EXISTS (
@@ -599,6 +607,10 @@ WHERE f.id = sqlc.arg(id)
   AND NOT EXISTS (
       SELECT 1 FROM channel_messages cm
       WHERE cm.file_id = f.id AND cm.deleted = false
+  )
+  AND NOT EXISTS (
+      SELECT 1 FROM user_created_sticker_set_items i
+      WHERE i.file_id = f.id
   )
   AND NOT EXISTS (
       SELECT 1 FROM user_photos up WHERE up.file_id = f.id

@@ -263,12 +263,23 @@ func (h *handlers) twoUsers(ctx context.Context, selfID, peerID int64) ([]tg.Use
 // site needs a nil check or a branch of its own.
 func (h *handlers) loadFiles(ctx context.Context, msgs []store.Message) (map[int64]tg.MessageMediaClass, error) {
 	var ids []int64
+	var stickerIDs []int64
 	for _, m := range msgs {
 		if m.FileID != 0 {
 			ids = append(ids, m.FileID)
 		}
+		if m.StickerDocumentID != nil && *m.StickerDocumentID > 0 {
+			stickerIDs = append(stickerIDs, *m.StickerDocumentID)
+		}
 	}
-	return h.fileMedia(ctx, ids)
+	media, err := h.fileMedia(ctx, ids)
+	if err != nil {
+		return nil, err
+	}
+	if err = h.addUserStickerMedia(ctx, media, stickerIDs); err != nil {
+		return nil, err
+	}
+	return media, nil
 }
 
 // loadChannelFiles is loadFiles for channel posts. It is a separate collector
@@ -277,12 +288,23 @@ func (h *handlers) loadFiles(ctx context.Context, msgs []store.Message) (map[int
 // reference is not hydrated even when the files row still exists.
 func (h *handlers) loadChannelFiles(ctx context.Context, msgs []store.ChannelMessage) (map[int64]tg.MessageMediaClass, error) {
 	var ids []int64
+	var stickerIDs []int64
 	for _, m := range msgs {
 		if !m.Deleted && m.FileID != nil {
 			ids = append(ids, *m.FileID)
 		}
+		if !m.Deleted && m.StickerDocumentID != nil && *m.StickerDocumentID > 0 {
+			stickerIDs = append(stickerIDs, *m.StickerDocumentID)
+		}
 	}
-	return h.fileMedia(ctx, ids)
+	media, err := h.fileMedia(ctx, ids)
+	if err != nil {
+		return nil, err
+	}
+	if err = h.addUserStickerMedia(ctx, media, stickerIDs); err != nil {
+		return nil, err
+	}
+	return media, nil
 }
 
 // fileMedia hydrates file ids into wire media, by stored kind: a photo row

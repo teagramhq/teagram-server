@@ -61,6 +61,7 @@ case "$1" in
         exit 64
       }
       printf 'role\\n' >> "$FAKE_DOCKER_DIR/probes"
+      printf '%s\\n' "$*" >> "$FAKE_DOCKER_DIR/sql"
     else
       echo "unexpected docker $*" >&2
       exit 64
@@ -319,6 +320,13 @@ class PullBaseImagesTests(unittest.TestCase):
         self.assertEqual(
             ["tcp", "tcp", "tcp", "role"],
             (self.dir / "probes").read_text(encoding="utf-8").splitlines(),
+        )
+        sql = (self.dir / "sql").read_text(encoding="utf-8").splitlines()
+        self.assertEqual(1, len(sql))
+        self.assertIn(
+            "CREATE ROLE browser_acceptance_probe NOLOGIN NOSUPERUSER NOCREATEDB "
+            "NOCREATEROLE NOINHERIT NOREPLICATION NOBYPASSRLS",
+            sql[0],
         )
 
 
