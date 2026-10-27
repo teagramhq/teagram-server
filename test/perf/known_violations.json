@@ -2,8 +2,6 @@
   {"scenario": "messages.getDialogs", "check": "queries", "issue": "MAIN-2534"},
   {"scenario": "messages.getDialogs", "check": "rows", "issue": "MAIN-2534"},
   {"scenario": "messages.getDialogs", "check": "seqscan", "issue": "MAIN-2534", "scan": "dialogs#222b5fb1"},
-  {"scenario": "messages.getHistory oldest page", "check": "rows", "issue": "MAIN-2535"},
-  {"scenario": "messages.getHistory oldest page", "check": "seqscan", "issue": "MAIN-2535", "scan": "messages#14089f47"},
   {"scenario": "messages.getHistory group", "check": "seqscan", "issue": "MAIN-2577", "scan": "channel_messages#b5121179"},
   {"scenario": "messages.getHistory group", "check": "queries", "issue": "MAIN-2577"},
   {"scenario": "messages.getHistory group", "check": "rows", "issue": "MAIN-2577"},

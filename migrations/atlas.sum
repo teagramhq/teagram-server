@@ -1,4 +1,4 @@
-h1:Ii10Es6+dA1VlE31Axnwt/uuCekcrqzqxBZezSvNoy0=
+h1:aiad1HHo61H1nETMJn25vgOYIV3HtrM1nTe9EnQUjvo=
 20260721000001_baseline.sql h1:cnO6K1z0Uv3goEvecgJixKSio6ziaB1rF7cQLoCWOxs=
 20260721000002_auth_keys.sql h1:+vNabm6vdEAgu3H5ZGw2Wr8D/Y6i4ikAAUO3JbfZQeE=
 20260721000003_code_hardening.sql h1:8pbAqUpqcwOONUfac+qC51QjfC1JnObNCcXa1HC/dr0=
@@ -128,3 +128,4 @@ h1:Ii10Es6+dA1VlE31Axnwt/uuCekcrqzqxBZezSvNoy0=
 20261024000003_auth_keys_never_bound_sweep_idx.sql h1:zkr7uXRJIyGi4ZmDqoq8ztycEWpezkWGJ76KGAu6RbA=
 20261025000001_channel_participant_counts.sql h1:q8o2PKj6KTyQVhEOFxrtIPCnrdUaUHNZVq5hA8j3VNg=
 20261025000002_channel_participant_counts_backfill.sql h1:0BfG+fEx/6foV7IrN//UJMc6nawzdTcv/xmDOMfuEHE=
+20261026000001_messages_history_date_idx.sql h1:d7NQ1M14a/uVs4OQTgackfz9/HpO5sj4wb/i5CMliyE=
