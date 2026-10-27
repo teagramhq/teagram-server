@@ -126,6 +126,9 @@ type handlers struct {
 	rateLimitGetPasswordIP store.RateLimitConfig
 	// rateLimitSignUpIP limits auth.signUp calls per client network.
 	rateLimitSignUpIP store.RateLimitConfig
+	// rateLimitCheckUsernameIP limits unauthenticated account.checkUsername
+	// calls per client network.
+	rateLimitCheckUsernameIP store.RateLimitConfig
 	// rateLimitPasswordProof limits account.getPasswordSettings and
 	// account.updatePasswordSettings (proof-required path) per account, on one
 	// shared budget. Both call consumeAndVerify against the same secret.
@@ -379,6 +382,7 @@ func newWithPhotoThumbsAndDialogFilterSyncAndUploadPartTTLAndTurnstile(s *store.
 		rateLimitCheckPasswordIP:     rateLimits.CheckPasswordIP,
 		rateLimitGetPasswordIP:       rateLimits.GetPasswordIP,
 		rateLimitSignUpIP:            rateLimits.SignUpIP,
+		rateLimitCheckUsernameIP:     rateLimits.CheckUsernameIP,
 		rateLimitPasswordProof:       rateLimits.PasswordProof,
 		rateLimitGetPassword:         rateLimits.GetPassword,
 		rateLimitUpdateProfile:       rateLimits.UpdateProfile,

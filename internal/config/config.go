@@ -487,6 +487,9 @@ type RateLimitsConfig struct {
 	// SignUpIP limits auth.signUp calls per client network. Applied only when
 	// TG_REGISTRATION is invite or open; no-op in closed mode.
 	SignUpIP store.RateLimitConfig
+	// CheckUsernameIP limits unauthenticated account.checkUsername calls per
+	// client network to bound registration username enumeration.
+	CheckUsernameIP store.RateLimitConfig
 	// PasswordProof limits account.getPasswordSettings and
 	// account.updatePasswordSettings (the proof-required path) per account, on
 	// one shared budget. Both call consumeAndVerify against the same secret,
@@ -522,13 +525,15 @@ type RateLimitsConfig struct {
 // DefaultRateLimits returns the shipped per-surface defaults: 60 sends per 60s,
 // 20 chat creates per 24h, 120 member adds per 24h, 20 channel creates per 24h,
 // 300 message searches per hour, 300 contacts searches per hour, 300 global
-// searches per hour, 60 poll votes per 60s, 600 upload parts per 60s, per client network 10 sendCode
-// calls per hour across at most 20 distinct phone numbers per 24h, 10 failed
+// searches per hour, 60 poll votes per 60s, 600 upload parts per 60s, per client
+// network 10 sendCode calls per hour across at most 20 distinct phone numbers
+// per 24h, 10 failed
 // signIn attempts per hour per client network, 5 failed checkPassword attempts
 // per 10 min per account, 10 failed checkPassword attempts per hour per client
 // network, 20 getPassword calls per hour per client network (unauthenticated
-// callers only), 5 signUp calls per hour per client network, 5 password proof
-// attempts per 10 min per account (shared by getPasswordSettings and
+// callers only), 5 signUp calls and 20 unauthenticated account.checkUsername
+// calls per hour per client network, 5 password proof attempts per 10 min per
+// account (shared by getPasswordSettings and
 // updatePasswordSettings), 20 getPassword calls per hour per account
 // (authorized callers only), 120 getMessages calls per minute per account,
 // 20 updateProfile calls per 24h per account, 10
@@ -571,6 +576,7 @@ func DefaultRateLimits() RateLimitsConfig {
 		CheckPasswordIP: store.RateLimitConfig{Limit: 10, Window: time.Hour},
 		GetPasswordIP:   store.RateLimitConfig{Limit: 20, Window: time.Hour},
 		SignUpIP:        store.RateLimitConfig{Limit: 5, Window: time.Hour},
+		CheckUsernameIP: store.RateLimitConfig{Limit: 20, Window: time.Hour},
 		PasswordProof:   store.RateLimitConfig{Limit: 5, Window: 10 * time.Minute},
 		GetPassword:     store.RateLimitConfig{Limit: 20, Window: time.Hour},
 		UpdateProfile:   store.RateLimitConfig{Limit: 20, Window: 24 * time.Hour},
@@ -1527,6 +1533,21 @@ func load(log *slog.Logger, allowKeyGeneration bool) (Config, error) {
 		}
 		cfg.RateLimits.SignUpIP.Window = d
 	}
+	// Unauthenticated account.checkUsername calls (username enumeration).
+	if v := os.Getenv("TG_RATE_LIMIT_CHECK_USERNAME_IP"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil {
+			return Config{}, errors.New("TG_RATE_LIMIT_CHECK_USERNAME_IP must be an integer")
+		}
+		cfg.RateLimits.CheckUsernameIP.Limit = n
+	}
+	if v := os.Getenv("TG_RATE_LIMIT_CHECK_USERNAME_IP_WINDOW"); v != "" {
+		d, err := time.ParseDuration(v)
+		if err != nil {
+			return Config{}, errors.New("TG_RATE_LIMIT_CHECK_USERNAME_IP_WINDOW must be a duration")
+		}
+		cfg.RateLimits.CheckUsernameIP.Window = d
+	}
 	// PasswordProof per-account rate limit (shared by getPasswordSettings and
 	// updatePasswordSettings proof path).
 	if v := os.Getenv("TG_RATE_LIMIT_PASSWORD_PROOF"); v != "" {
@@ -2271,7 +2292,8 @@ func parseWebSocketOriginPatterns(raw, name string) ([]string, error) {
 func (c Config) WarnClientAddrTrust(log *slog.Logger) {
 	perIPLimits := c.RateLimits.SendCodeIP.Enabled() || c.RateLimits.SignInFailIP.Enabled() ||
 		c.RateLimits.CheckPasswordIP.Enabled() || c.RateLimits.GetPasswordIP.Enabled() ||
-		c.RateLimits.SignUpIP.Enabled() || c.PreAuth.MaxConnsPerNet > 0
+		c.RateLimits.SignUpIP.Enabled() || c.RateLimits.CheckUsernameIP.Enabled() ||
+		c.PreAuth.MaxConnsPerNet > 0
 	if c.ClientAddrTrust != ClientAddrSocket || !perIPLimits {
 		return
 	}

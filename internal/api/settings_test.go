@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"net/netip"
 	"slices"
 	"sync"
 	"testing"
@@ -281,6 +282,16 @@ func dispatchSettings(t *testing.T, h mtproto.Handler, method settingsHandler, u
 
 func dispatchSettingsWithContext(t *testing.T, h mtproto.Handler, method settingsHandler, userID int64, provisional bool, ctx context.Context) []byte {
 	t.Helper()
+	return dispatchSettingsWithContextAndAddr(t, h, method, userID, provisional, ctx, netip.Addr{})
+}
+
+func dispatchSettingsWithAddr(t *testing.T, h mtproto.Handler, method settingsHandler, userID int64, provisional bool, addr netip.Addr) []byte {
+	t.Helper()
+	return dispatchSettingsWithContextAndAddr(t, h, method, userID, provisional, context.Background(), addr)
+}
+
+func dispatchSettingsWithContextAndAddr(t *testing.T, h mtproto.Handler, method settingsHandler, userID int64, provisional bool, ctx context.Context, addr netip.Addr) []byte {
+	t.Helper()
 	key := testKey()
 	transport := &settingsDispatcherTransport{}
 	conn := mtproto.NewTestConn(transport, key)
@@ -293,6 +304,7 @@ func dispatchSettingsWithContext(t *testing.T, h mtproto.Handler, method setting
 		AuthKeyID:   key.ID,
 		UserID:      userID,
 		Provisional: provisional,
+		ClientAddr:  addr,
 		MsgID:       msgID,
 		Buf:         &body,
 		Ctx:         ctx,

@@ -36,6 +36,44 @@ func TestLoadClientAddrTrustDefault(t *testing.T) {
 	}
 }
 
+func TestCheckUsernameIPRateLimitDefaultAndOverrides(t *testing.T) {
+	t.Setenv("TG_POSTGRES_DSN", "postgres://localhost/tg")
+	t.Setenv("TG_AUTHKEY_ENC_KEY", validEncKey)
+
+	cfg, err := config.Load(discardLog())
+	if err != nil {
+		t.Fatalf("Load defaults: %v", err)
+	}
+	if got := cfg.RateLimits.CheckUsernameIP; got.Limit != 20 || got.Window != time.Hour {
+		t.Errorf("CheckUsernameIP default = %+v, want 20 per hour", got)
+	}
+
+	t.Setenv("TG_RATE_LIMIT_CHECK_USERNAME_IP", "12")
+	t.Setenv("TG_RATE_LIMIT_CHECK_USERNAME_IP_WINDOW", "30m")
+	cfg, err = config.Load(discardLog())
+	if err != nil {
+		t.Fatalf("Load overrides: %v", err)
+	}
+	if got := cfg.RateLimits.CheckUsernameIP; got.Limit != 12 || got.Window != 30*time.Minute {
+		t.Errorf("CheckUsernameIP override = %+v, want 12 per 30m", got)
+	}
+}
+
+func TestWarnClientAddrTrustWhenUsernameCheckIsOnlyIPLimit(t *testing.T) {
+	cfg := config.Config{
+		ClientAddrTrust: config.ClientAddrSocket,
+		RateLimits: config.RateLimitsConfig{
+			CheckUsernameIP: store.RateLimitConfig{Limit: 1, Window: time.Hour},
+		},
+	}
+
+	var buf bytes.Buffer
+	cfg.WarnClientAddrTrust(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn})))
+	if !strings.Contains(buf.String(), "per-IP") {
+		t.Fatalf("no per-IP trust warning for username-check-only limit:\n%s", buf.String())
+	}
+}
+
 // TestLoadClientAddrTrustRejectsUnsupported is why the knob exists at all: an
 // operator naming a mode this build does not implement must be told, not quietly
 // served socket addresses. Behind a load balancer that fallback would key every
@@ -174,6 +212,7 @@ func TestWarnClientAddrTrust(t *testing.T) {
 	cfg.RateLimits.CheckPasswordIP = store.RateLimitConfig{}
 	cfg.RateLimits.GetPasswordIP = store.RateLimitConfig{}
 	cfg.RateLimits.SignUpIP = store.RateLimitConfig{}
+	cfg.RateLimits.CheckUsernameIP = store.RateLimitConfig{}
 	cfg.WarnClientAddrTrust(log)
 	if buf.Len() != 0 {
 		t.Errorf("warned with every per-IP limit disabled:\n%s", buf.String())

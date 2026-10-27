@@ -304,36 +304,47 @@ func (h *handlers) handleUpdateUsername(r *mtproto.Request) (bin.Encoder, error)
 	return wireUser, nil
 }
 
-// handleCheckUsername reports whether a valid username is available to the
-// authenticated account. A username held by the caller is available to them;
-// login-mode handles keep the same immutable answers as account.updateUsername.
+// handleCheckUsername reports whether a valid username is available. Unauthenticated
+// callers use sign-up validation and a client-network rate limit; authenticated
+// callers keep the same immutable answers as account.updateUsername.
 func (h *handlers) handleCheckUsername(r *mtproto.Request) (bin.Encoder, error) {
 	var req tg.AccountCheckUsernameRequest
 	if err := req.Decode(r.Buf); err != nil {
 		return nil, errMethodNotImpl
 	}
-	if r.UserID == 0 {
-		return nil, errAuthKeyUnreg
+	preAuth := r.UserID == 0
+	if preAuth {
+		if err := h.checkAndChargeRateLimitIP(r, "check_username_ip", h.rateLimitCheckUsernameIP); err != nil {
+			return nil, err
+		}
 	}
 	if !validateUsername(req.Username) || isReservedUsername(req.Username) {
 		return nil, errUsernameInvalid
 	}
-	if err := h.checkUsernameImmutable(r.Ctx, r.UserID, req.Username); err != nil {
-		return nil, err
-	}
-
 	username := strings.ToLower(req.Username)
-	if err := h.checkUsernameClaimQuota(r.Ctx, r.UserID, username); err != nil {
-		return nil, err
+	if !preAuth {
+		if err := h.checkUsernameImmutable(r.Ctx, r.UserID, req.Username); err != nil {
+			return nil, err
+		}
+		if err := h.checkUsernameClaimQuota(r.Ctx, r.UserID, username); err != nil {
+			return nil, err
+		}
 	}
 
 	taken, err := h.store.UsernameHandleTaken(r.Ctx, username)
 	if err != nil {
-		h.log.Error("check account username: lookup availability", "user_id", r.UserID, "err", err)
+		if preAuth {
+			h.log.Error("check pre-auth username: lookup availability", "err", err)
+		} else {
+			h.log.Error("check account username: lookup availability", "user_id", r.UserID, "err", err)
+		}
 		return nil, errInternal
 	}
 	if !taken {
 		return &tg.BoolTrue{}, nil
+	}
+	if preAuth {
+		return &tg.BoolFalse{}, nil
 	}
 
 	resolved, found, err := h.store.UsernameByHandle(r.Ctx, username)
