@@ -23,6 +23,7 @@ proxy_tcp_pid=
 proxy_ws_pid=
 public_ws_pid_a=
 public_ws_pid_b=
+public_smoke_started=0
 test_haproxy_name="${project}-attribution-proxy"
 test_echo_name="${project}-attribution-echo"
 
@@ -182,6 +183,18 @@ stop_probe() {
 
 cleanup() {
 	status=$?
+	if [ "$status" -ne 0 ] && [ "$public_smoke_started" -eq 1 ]; then
+		echo "public WebSocket smoke diagnostics:" >&2
+		compose_public ps -a >&2 || true
+		compose_public logs --no-color public-haproxy teagramd-public-1 teagramd-public-2 >&2 || true
+		for probe_log in "$work_dir"/public-ws-*.log; do
+			if [ ! -f "$probe_log" ]; then
+				continue
+			fi
+			echo "public probe output ($probe_log):" >&2
+			cat "$probe_log" >&2 || true
+		done
+	fi
 	docker rm -f "$test_haproxy_name" "$test_echo_name" >/dev/null 2>&1 || true
 	stop_probe "$legacy_tcp_pid"
 	stop_probe "$legacy_ws_pid"
@@ -609,6 +622,7 @@ for pid in "$legacy_tcp_pid" "$legacy_ws_pid" "$proxy_tcp_pid" "$proxy_ws_pid"; 
 	fi
 done
 
+public_smoke_started=1
 compose_public up -d teagramd-public-1 teagramd-public-2 public-haproxy
 for service in teagramd-public-1 teagramd-public-2; do
 	for _ in $(seq 60); do

@@ -101,7 +101,9 @@ func runHold(args []string) error {
 			_, err := client.API().HelpGetConfig(rpcCtx)
 			return err
 		}); err != nil {
-			return fmt.Errorf("initial application RPC: %w", err)
+			probeErr := fmt.Errorf("initial application RPC: %w", err)
+			fmt.Fprintln(os.Stderr, probeErr)
+			return probeErr
 		}
 		initialDials := dials.Load()
 		if initialDials == 0 {
@@ -120,7 +122,9 @@ func runHold(args []string) error {
 					_, err := client.API().HelpGetConfig(rpcCtx)
 					return err
 				}); err != nil {
-					return fmt.Errorf("application RPC on established stream: %w", err)
+					probeErr := fmt.Errorf("application RPC on established stream: %w", err)
+					fmt.Fprintln(os.Stderr, probeErr)
+					return probeErr
 				}
 				if current := dials.Load(); current != initialDials {
 					return fmt.Errorf("transport reconnected during hold: dials changed from %d to %d", initialDials, current)
