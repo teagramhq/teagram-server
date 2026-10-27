@@ -24,8 +24,8 @@ cancel_step="$(query '.jobs."prioritize-main".steps[] | select(.name == "Cancel 
   fail 'the priority job must list queued pull request CI runs only'
 [[ "$cancel_step" == *'run_status" != queued'* ]] ||
   fail 'the priority job must recheck each run before cancelling it'
-[[ "$cancel_step" == *'gh run cancel --force'* ]] ||
-  fail 'queued PR runs must be force-cancelled so main jobs can use the runners'
+[[ "$cancel_step" == *"gh run cancel \"\$run_id\" --repo \"\$GITHUB_REPOSITORY\""* && "$cancel_step" != *'gh run cancel --force'* ]] ||
+  fail 'queued PR runs must use ordinary cancellation so always() cleanup can run'
 [[ "$cancel_step" != *'status=in_progress'* && "$cancel_step" != *'/jobs?per_page=100'* ]] ||
   fail 'queued PR workflows must be cancelled even when they have started jobs'
 [[ "$cancel_step" != *'grep -qx in_progress'* ]] ||
@@ -36,6 +36,37 @@ expected_roots=$'browser-acceptance\nci-main\ncompose\ncss\ndeploy-workflow\ndoc
 actual_roots="$(query '.jobs | to_entries[] | select(.key != "prioritize-main" and .key != "ci" and (.value.needs == "prioritize-main" or (.value.needs[] == "prioritize-main"))) | .key' | LC_ALL=C sort)"
 [[ "$actual_roots" == "$expected_roots" ]] ||
   fail 'every CI fan-out root must depend on the main priority job'
+
+declare -A gated_cache
+is_gated() {
+  local job="$1"
+  [[ "$job" == prioritize-main ]] && return 0
+  [[ "${gated_cache[$job]:-}" == yes ]] && return 0
+  [[ "${gated_cache[$job]:-}" == no ]] && return 1
+
+  local job_needs
+  job_needs="$(query ".jobs.\"$job\".needs // [] | if tag == \"!!seq\" then .[] else . end")"
+  if [[ -z "$job_needs" ]]; then
+    gated_cache[$job]=no
+    return 1
+  fi
+
+  while IFS= read -r dependency; do
+    if is_gated "$dependency"; then
+      gated_cache[$job]=yes
+      return 0
+    fi
+  done <<< "$job_needs"
+
+  gated_cache[$job]=no
+  return 1
+}
+
+all_jobs="$(query '.jobs | keys | .[]')"
+while IFS= read -r job; do
+  [[ -n "$job" && "$job" != prioritize-main ]] || continue
+  is_gated "$job" || fail "$job can run without waiting for the main priority job"
+done <<< "$all_jobs"
 
 while IFS= read -r job; do
   [[ -n "$job" ]] || continue

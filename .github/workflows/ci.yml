@@ -52,7 +52,7 @@ jobs:
               echo "Leaving pull request CI run ${run_id} in status ${run_status}."
               continue
             fi
-            gh run cancel --force "$run_id" --repo "$GITHUB_REPOSITORY"
+            gh run cancel "$run_id" --repo "$GITHUB_REPOSITORY"
           done <<< "$runs"
 
   sticker-bundle:
