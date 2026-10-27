@@ -2255,6 +2255,26 @@ class RestoreReadinessContractTests(unittest.TestCase):
             self.assertNotIn(container_id, output.getvalue())
             self.assertNotIn("owned", output.getvalue())
 
+    def test_malformed_cleanup_volume_and_image_inventories_record_diagnostics(self) -> None:
+        cases = (
+            ("cleanup_volume_inventory", "docker_volume_inventory"),
+            ("cleanup_image_inventory", "docker_image_inventory"),
+        )
+        for method_name, operation in cases:
+            with self.subTest(method=method_name):
+                drill = object.__new__(RESTORE_READINESS.Drill)
+                drill.cleanup_failure = None
+                drill.cleanup_active = True
+                drill.cleanup_call = Mock(return_value=(0, b"malformed inventory\n"))
+
+                with self.assertRaises(RESTORE_READINESS.DrillFailure):
+                    getattr(drill, method_name)()
+
+                self.assertEqual(
+                    drill.cleanup_failure,
+                    {"operation": operation, "error": "invalid_output"},
+                )
+
     def test_supervisor_retains_active_cleanup_operation_for_other_exceptions(self) -> None:
         with tempfile.TemporaryDirectory(prefix="rr-supervisor-cleanup-exception-") as directory:
             lock_path = Path(directory) / "lock"

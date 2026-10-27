@@ -5837,10 +5837,11 @@ dump_path=$2
             raise DrillFailure("cleanup", "cleanup_failure")
         try:
             volumes = output.decode("utf-8", "strict").splitlines()
-        except UnicodeDecodeError as exc:
+            if any(not re.fullmatch(r"[0-9a-f]{64}", name) for name in volumes):
+                raise ValueError("invalid volume listing")
+        except (UnicodeDecodeError, ValueError) as exc:
+            self.record_cleanup_failure("docker_volume_inventory", "invalid_output")
             raise DrillFailure("cleanup", "cleanup_failure") from exc
-        if any(not re.fullmatch(r"[0-9a-f]{64}", name) for name in volumes):
-            raise DrillFailure("cleanup", "cleanup_failure")
         return sorted(name for name in volumes if name)
 
     def inspect_volume(self, name: str, phase: str) -> dict[str, Any] | None:
@@ -5908,6 +5909,7 @@ dump_path=$2
                     raise ValueError("invalid image listing")
                 result.append((fields[0], fields[1]))
         except (UnicodeDecodeError, ValueError) as exc:
+            self.record_cleanup_failure("docker_image_inventory", "invalid_output")
             raise DrillFailure("cleanup", "cleanup_failure") from exc
         return result
 
