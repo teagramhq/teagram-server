@@ -19,16 +19,31 @@ case "$1" in
     shift
     [[ "${1:-}" == "$PERF_PG_CONTAINER" ]] || { echo "unexpected docker exec: $*" >&2; exit 99; }
     shift
-    [[ "${1:-}" == pg_isready ]] || { echo "unexpected docker command: $*" >&2; exit 99; }
-    shift
-    if [[ " $* " != *' -h 127.0.0.1 '* ]]; then
-      # The official image's temporary init server accepts socket probes.
-      exit 0
-    fi
-    probes=$(<"$PERF_TCP_PROBES")
-    probes=$((probes + 1))
-    printf '%s\n' "$probes" > "$PERF_TCP_PROBES"
-    [[ "$probes" != 1 ]]
+    case "${1:-}" in
+      pg_isready)
+        shift
+        if [[ " $* " != *' -h 127.0.0.1 '* ]]; then
+          # The official image's temporary init server accepts socket probes.
+          exit 0
+        fi
+        probes=$(<"$PERF_TCP_PROBES")
+        probes=$((probes + 1))
+        printf '%s\n' "$probes" > "$PERF_TCP_PROBES"
+        [[ "$probes" != 1 ]]
+        ;;
+      psql)
+        shift
+        [[ "$*" == *"CREATE ROLE browser_acceptance_probe"* ]] || {
+          echo "unexpected Postgres bootstrap: $*" >&2
+          exit 99
+        }
+        [[ "$(<"$PERF_TCP_PROBES")" == 2 ]] || {
+          echo "Postgres role bootstrap ran before TCP readiness" >&2
+          exit 99
+        }
+        ;;
+      *) echo "unexpected docker command: $*" >&2; exit 99 ;;
+    esac
     ;;
   *) echo "unexpected docker command: $*" >&2; exit 99 ;;
 esac
