@@ -650,16 +650,53 @@ func (s *Store) History(ctx context.Context, ownerID int64, peerType PeerType, p
 // messages with peer. offsetID locates the inclusive anchor in the newest-first
 // result set, and addOffset shifts the start relative to that position.
 func (s *Store) HistoryWithOffset(ctx context.Context, ownerID int64, peerType PeerType, peerID int64, offsetID, addOffset, limit int) ([]Message, error) {
-	rows, err := historyPage(ctx, s.q, ownerID, peerType, peerID, offsetID, addOffset, limit)
+	rows, err := historyPage(ctx, s.q, ownerID, peerType, peerID, offsetID, 0, addOffset, limit)
 	if err != nil {
 		return nil, fmt.Errorf("history page: %w", err)
 	}
 	return messagesFromRows(rows), nil
 }
 
-func historyPage(ctx context.Context, q *db.Queries, ownerID int64, peerType PeerType, peerID int64, offsetID, addOffset, limit int) ([]db.Message, error) {
+// HistoryWithDate returns a newest-first page around offsetDate. Negative addOffset shifts toward newer messages.
+func (s *Store) HistoryWithDate(ctx context.Context, ownerID int64, peerType PeerType, peerID int64, offsetDate, addOffset, limit int) ([]Message, error) {
+	rows, err := historyPage(ctx, s.q, ownerID, peerType, peerID, 0, offsetDate, addOffset, limit)
+	if err != nil {
+		return nil, fmt.Errorf("history page by date: %w", err)
+	}
+	return messagesFromRows(rows), nil
+}
+
+func historyPage(ctx context.Context, q *db.Queries, ownerID int64, peerType PeerType, peerID int64, offsetID, offsetDate, addOffset, limit int) ([]db.Message, error) {
 	if offsetID < 0 {
 		return []db.Message{}, nil
+	}
+	if offsetID == 0 && offsetDate > 0 {
+		if addOffset < 0 {
+			rows, err := q.HistoryPageByDateAround(ctx, db.HistoryPageByDateAroundParams{
+				OwnerID:    ownerID,
+				PeerType:   int16(peerType),
+				PeerID:     peerID,
+				OffsetDate: int64(offsetDate),
+				AddOffset:  int64(addOffset),
+				Lim:        int32(limit), //nolint:gosec // limit is a small validated page size
+			})
+			if err != nil {
+				return nil, err
+			}
+			messages := make([]db.Message, len(rows))
+			for i, row := range rows {
+				messages[i] = db.Message(row)
+			}
+			return messages, nil
+		}
+		return q.HistoryPageByDate(ctx, db.HistoryPageByDateParams{
+			OwnerID:    ownerID,
+			PeerType:   int16(peerType),
+			PeerID:     peerID,
+			OffsetDate: int64(offsetDate),
+			AddOffset:  int64(addOffset),
+			Lim:        int32(limit), //nolint:gosec // limit is a small validated page size
+		})
 	}
 	if offsetID > 0 && addOffset < 0 {
 		return q.HistoryPageAround(ctx, db.HistoryPageAroundParams{

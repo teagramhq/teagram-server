@@ -112,6 +112,7 @@ umask 077
     "TG_CLIENT_ADDR_PROXY_CIDRS=127.0.0.1/32,::1/128" \
     "TG_WEBSOCKET_ALLOWED_ORIGINS=https://web.example.net" \
     "TG_REGISTRATION=open" \
+    "TG_STICKER_IMPORT=on" \
     "TG_LOG_LOGIN_CODES=false"
 } > /etc/teagram/teagram.env'
 ```
@@ -120,6 +121,13 @@ No `TG_BLOB_S3_*` variables are set, so uploads use the persistent local
 directory in `TG_BLOB_DIR`. Keep `TG_AUTHKEY_ENC_KEY` stable: the server needs
 it to decrypt stored authorization keys. Do not enable login-code logging;
 username/password sign-in does not use phone codes.
+
+`TG_STICKER_IMPORT` controls whether accounts may create sticker sets or add
+stickers to their sets. It accepts `on` or `off` and defaults to `on`; any
+other value, including `members`, prevents the server from starting. Set it to
+`off` to reject create and add requests for every account. Existing sets can
+still be resolved, installed, and sent, and owners can remove stickers or
+delete their sets.
 
 Apply the schema migrations from the checked-out source. Atlas uses Docker for
 its temporary validation database, so run it as an account with access to the
@@ -236,6 +244,25 @@ sudo journalctl -u teagramd --since=-10m
 The discovery document must report the expected server name, DC, and public RSA
 key. Caddy must have a valid certificate, and the server must be active before
 you enroll a client.
+
+## Sign-up terms
+
+Teagram is software. Its authors hold no liability for what operators or users
+do with a self-hosted Teagram instance. Each instance's operator and its users
+are responsible for the content on that instance, including sticker and emoji
+packs users import.
+
+New accounts receive this text in Telegram's standard sign-up terms prompt.
+To replace it for this instance, set `TG_TERMS_OF_SERVICE` in
+`/etc/teagram/teagram.env` to the replacement text, then restart `teagramd`.
+The setting applies to sign-ups after the restart; existing accounts are not
+prompted again.
+
+For example, add a line like this with your own wording:
+
+```sh
+TG_TERMS_OF_SERVICE="Terms for this self-hosted instance."
+```
 
 ## Create the first account
 

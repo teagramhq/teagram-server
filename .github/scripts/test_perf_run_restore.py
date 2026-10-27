@@ -13,8 +13,9 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 PERF_RUN = ROOT / ".github/scripts/perf-run.sh"
-ROLE_SQL = (
-    "CREATE ROLE browser_acceptance_probe LOGIN NOSUPERUSER NOCREATEDB "
+CREATE_ROLE_SQL = "CREATE ROLE browser_acceptance_probe"
+ALTER_ROLE_SQL = (
+    "ALTER ROLE browser_acceptance_probe LOGIN NOSUPERUSER NOCREATEDB "
     "NOCREATEROLE NOINHERIT NOREPLICATION NOBYPASSRLS"
 )
 FAKE_DOCKER = """#!/usr/bin/env python3
@@ -29,7 +30,7 @@ with open(os.environ["FAKE_DOCKER_LOG"], "a", encoding="utf-8") as log:
 
 
 class PerfRunRestoreTests(unittest.TestCase):
-    def test_restore_creates_probe_role_before_restoring_database_acls(self) -> None:
+    def test_restore_configures_probe_role_before_restoring_database_acls(self) -> None:
         with tempfile.TemporaryDirectory(prefix="perf-run-restore-") as temporary:
             root = Path(temporary)
             fake_bin = root / "bin"
@@ -60,8 +61,11 @@ class PerfRunRestoreTests(unittest.TestCase):
             docker_calls = [
                 json.loads(line) for line in log.read_text(encoding="utf-8").splitlines()
             ]
-            role_calls = [
-                index for index, call in enumerate(docker_calls) if ROLE_SQL in call
+            create_calls = [
+                index for index, call in enumerate(docker_calls) if CREATE_ROLE_SQL in call
+            ]
+            alter_calls = [
+                index for index, call in enumerate(docker_calls) if ALTER_ROLE_SQL in call
             ]
             restore_calls = [
                 index
@@ -69,9 +73,11 @@ class PerfRunRestoreTests(unittest.TestCase):
                 if len(call) > 2 and call[2] == "pg_restore"
             ]
 
-            self.assertEqual(len(role_calls), 1, docker_calls)
+            self.assertEqual(len(create_calls), 1, docker_calls)
+            self.assertEqual(len(alter_calls), 1, docker_calls)
             self.assertEqual(len(restore_calls), 2, docker_calls)
-            self.assertLess(role_calls[0], restore_calls[0], docker_calls)
+            self.assertLess(create_calls[0], restore_calls[0], docker_calls)
+            self.assertLess(alter_calls[0], restore_calls[0], docker_calls)
 
 
 if __name__ == "__main__":

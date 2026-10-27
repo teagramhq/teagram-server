@@ -22,20 +22,18 @@ set -euo pipefail
 case "$1" in
   pull)
     printf '%s\\n' "$2" >> "$FAKE_DOCKER_DIR/calls"
-    if [[ "$2" == docker.io/* ]]; then
-      echo "pulled $2"
-      exit 0
-    fi
-    failures=$(grep -cxF "$2" "$FAKE_DOCKER_DIR/calls")
-    if [ "$failures" -le "$FAKE_DOCKER_FAILURES" ]; then
-      echo "Error response from daemon: $FAKE_DOCKER_ERROR" >&2
-      exit 1
+    fail_image="${FAKE_DOCKER_FAIL_IMAGE:-}"
+    if [ -z "$fail_image" ] || [ "$2" = "$fail_image" ]; then
+      failures=$(grep -cxF "$2" "$FAKE_DOCKER_DIR/calls")
+      if [ "$failures" -le "$FAKE_DOCKER_FAILURES" ]; then
+        echo "Error response from daemon: $FAKE_DOCKER_ERROR" >&2
+        exit 1
+      fi
     fi
     echo "pulled $2"
     ;;
   tag)
-    printf '%s %s\\n' "$2" "$3" >> "$FAKE_DOCKER_DIR/tags"
-    echo "tagged $2 as $3"
+    printf 'tag %s %s\\n' "$2" "$3" >> "$FAKE_DOCKER_DIR/calls"
     ;;
   *)
     echo "unexpected docker $*" >&2
@@ -49,13 +47,23 @@ case "$1" in
   pull) exit 0 ;;
   run) echo fake-container-id ;;
   exec)
-    [ "$3" = pg_isready ] || { echo "unexpected docker $*" >&2; exit 64; }
-    if [ "${4:-}" = -h ] && [ "${5:-}" = 127.0.0.1 ]; then
-      printf 'tcp\\n' >> "$FAKE_DOCKER_DIR/probes"
-      [ "$(wc -l < "$FAKE_DOCKER_DIR/probes")" -ge 3 ]
+    if [ "$3" = pg_isready ]; then
+      if [ "${4:-}" = -h ] && [ "${5:-}" = 127.0.0.1 ]; then
+        printf 'tcp\\n' >> "$FAKE_DOCKER_DIR/probes"
+        [ "$(wc -l < "$FAKE_DOCKER_DIR/probes")" -ge 3 ]
+      else
+        printf 'socket\\n' >> "$FAKE_DOCKER_DIR/probes"
+        exit 0
+      fi
+    elif [ "$3" = psql ] && [[ "$*" == *"CREATE ROLE browser_acceptance_probe NOLOGIN"* ]]; then
+      [ "$(wc -l < "$FAKE_DOCKER_DIR/probes")" -ge 3 ] || {
+        echo "role created before TCP readiness" >&2
+        exit 64
+      }
+      printf 'role\\n' >> "$FAKE_DOCKER_DIR/probes"
     else
-      printf 'socket\\n' >> "$FAKE_DOCKER_DIR/probes"
-      exit 0
+      echo "unexpected docker $*" >&2
+      exit 64
     fi
     ;;
   *) echo "unexpected docker $*" >&2; exit 64 ;;
@@ -84,7 +92,6 @@ class PullBaseImagesTests(unittest.TestCase):
         docker.write_text(FAKE_DOCKER, encoding="utf-8")
         docker.chmod(0o755)
         (self.dir / "calls").touch()
-        (self.dir / "tags").touch()
         self.dockerfile = self.dir / "Dockerfile"
         self.dockerfile.write_text(DOCKERFILE, encoding="utf-8")
         self.env = {
@@ -108,11 +115,15 @@ class PullBaseImagesTests(unittest.TestCase):
         )
 
     def run_image(
-        self, failures: int, image: str
+        self, failures: int, image: str, fail_image: str = ""
     ) -> subprocess.CompletedProcess[str]:
         return subprocess.run(
             ["bash", str(SCRIPT), "--image", image],
-            env={**self.env, "FAKE_DOCKER_FAILURES": str(failures)},
+            env={
+                **self.env,
+                "FAKE_DOCKER_FAILURES": str(failures),
+                "FAKE_DOCKER_FAIL_IMAGE": fail_image,
+            },
             capture_output=True,
             text=True,
             timeout=60,
@@ -121,9 +132,6 @@ class PullBaseImagesTests(unittest.TestCase):
 
     def calls(self) -> list[str]:
         return (self.dir / "calls").read_text(encoding="utf-8").splitlines()
-
-    def tags(self) -> list[str]:
-        return (self.dir / "tags").read_text(encoding="utf-8").splitlines()
 
     def test_pulls_each_external_base_image_once(self) -> None:
         result = self.run_script(failures=0)
@@ -155,29 +163,36 @@ class PullBaseImagesTests(unittest.TestCase):
                 result.stdout,
             )
 
-    def test_mirror_failure_falls_back_to_docker_hub_and_tags_mirror_name(self) -> None:
-        image = "mirror.gcr.io/library/golang:1.27"
-        fallback = "docker.io/library/golang:1.27"
-        result = self.run_image(failures=4, image=image)
-        self.assertEqual(0, result.returncode, result.stdout + result.stderr)
-        self.assertEqual([image] * 4 + [fallback], self.calls())
-        self.assertEqual([f"{fallback} {image}"], self.tags())
-        self.assertIn(f"::warning::falling back to {fallback}", result.stdout)
+    def test_broken_mirror_falls_back_to_docker_hub_and_tags_image(self) -> None:
+        cases = (
+            ("mirror.gcr.io/library/postgres:18-alpine", "postgres:18-alpine"),
+            (
+                "mirror.gcr.io/arigaio/atlas:1.2.0-alpine",
+                "arigaio/atlas:1.2.0-alpine",
+            ),
+        )
+        for image, fallback in cases:
+            with self.subTest(image=image):
+                (self.dir / "calls").write_text("", encoding="utf-8")
+                result = self.run_image(
+                    failures=4, image=image, fail_image=image
+                )
+                self.assertEqual(0, result.returncode, result.stdout + result.stderr)
+                self.assertEqual(
+                    [image] * 4 + [fallback, f"tag {fallback} {image}"],
+                    self.calls(),
+                )
+                self.assertIn(
+                    f"::warning::mirror pull of {image} failed; trying Docker Hub source {fallback}",
+                    result.stdout,
+                )
 
-    def test_mirror_short_name_fallback_uses_library_namespace(self) -> None:
-        image = "mirror.gcr.io/postgres:18-alpine"
-        fallback = "docker.io/library/postgres:18-alpine"
-        result = self.run_image(failures=4, image=image)
-        self.assertEqual(0, result.returncode, result.stdout + result.stderr)
-        self.assertEqual([image] * 4 + [fallback], self.calls())
-        self.assertEqual([f"{fallback} {image}"], self.tags())
-
-    def test_digest_pinned_mirror_image_does_not_attempt_invalid_retag(self) -> None:
+    def test_pinned_mirror_image_does_not_use_invalid_tag_fallback(self) -> None:
         image = "mirror.gcr.io/library/node@sha256:5711"
-        result = self.run_image(failures=4, image=image)
+        result = self.run_image(failures=4, image=image, fail_image=image)
         self.assertNotEqual(0, result.returncode)
         self.assertEqual([image] * 4, self.calls())
-        self.assertEqual([], self.tags())
+        self.assertIn(f"::error::pull of {image} failed after 4 attempts", result.stdout)
 
     def test_testcontainers_jobs_preload_postgres_with_retry(self) -> None:
         workflow = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
@@ -194,6 +209,25 @@ class PullBaseImagesTests(unittest.TestCase):
                 self.assertIsNotNone(job, f"{job_name} job is missing")
                 self.assertIn(command, job.group(1))
 
+    def test_compose_job_preloads_images_through_the_fallback_helper(self) -> None:
+        workflow = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
+        job = re.search(
+            r"(?ms)^  compose:\n(.*?)(?=^  [a-z0-9-]+:|\Z)", workflow
+        )
+        self.assertIsNotNone(job, "compose job is missing")
+        body = job.group(1)
+        self.assertIn("- name: Preload Compose service images", body)
+        for image in (
+            "mirror.gcr.io/library/postgres:18-alpine",
+            "mirror.gcr.io/arigaio/atlas:1.2.0-alpine",
+        ):
+            with self.subTest(image=image):
+                self.assertIn(f"--image {image}", body)
+        self.assertLess(
+            body.index("Preload Compose service images"),
+            body.index("docker compose"),
+        )
+
     def test_persistent_failure_fails_with_the_registry_error(self) -> None:
         result = self.run_script(failures=4)
         self.assertNotEqual(0, result.returncode)
@@ -209,6 +243,7 @@ class PullBaseImagesTests(unittest.TestCase):
         ).read_text(encoding="utf-8")
         pull_step = (
             "run: bash .github/scripts/pull-base-images.sh "
+            "--image mirror.gcr.io/library/postgres:18-alpine "
             "--image mirror.gcr.io/arigaio/atlas:1.2.0-alpine "
             "test/e2e/real_server_fixture/Dockerfile"
         )
@@ -282,7 +317,7 @@ class PullBaseImagesTests(unittest.TestCase):
         )
         self.assertEqual(0, result.returncode, result.stdout + result.stderr)
         self.assertEqual(
-            ["tcp", "tcp", "tcp"],
+            ["tcp", "tcp", "tcp", "role"],
             (self.dir / "probes").read_text(encoding="utf-8").splitlines(),
         )
 

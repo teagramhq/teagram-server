@@ -86,6 +86,44 @@ func TestSignInUsernameUnknownReturnsSignUpRequired(t *testing.T) {
 	}
 }
 
+func TestSignInUsernameUnknownIncludesTermsOfService(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	s, _ := openStoreDSN(t)
+	hash, _, err := s.IssueCodeForUsername(ctx, "termsuser")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	result, err := api.SignInForTestWithLimits(s, [8]byte{1}, netip.MustParseAddr("10.0.0.2"), store.RateLimitConfig{}, &tg.AuthSignInRequest{
+		PhoneNumber:   "termsuser",
+		PhoneCodeHash: hash,
+	})
+	if err != nil {
+		t.Fatalf("signIn with unknown username: %v", err)
+	}
+	required, ok := result.(*tg.AuthAuthorizationSignUpRequired)
+	if !ok {
+		t.Fatalf("result = %T, want *tg.AuthAuthorizationSignUpRequired", result)
+	}
+	terms, ok := required.GetTermsOfService()
+	if !ok {
+		t.Fatal("sign-up terms are absent")
+	}
+	if !terms.GetPopup() {
+		t.Fatal("sign-up terms do not require a prompt")
+	}
+	const termsID = `{"id":"teagram-self-hosted-signup-v1"}`
+	id := terms.GetID()
+	if got := id.GetData(); got != termsID {
+		t.Fatalf("sign-up terms ID = %q, want %q", got, termsID)
+	}
+	const statement = "Teagram is software. Its authors hold no liability for what operators or users do with a self-hosted Teagram instance. Each instance's operator and its users are responsible for the content on that instance, including sticker and emoji packs users import."
+	if got := terms.GetText(); got != statement {
+		t.Fatalf("sign-up terms = %q, want %q", got, statement)
+	}
+}
+
 func TestSignInUsernameUnknownCodeIsBounded(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
