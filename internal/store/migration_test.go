@@ -3,9 +3,11 @@ package store_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/netip"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -168,6 +170,22 @@ func TestOpenRejectsMissingNotifySettingsTable(t *testing.T) {
 	defer func() { _ = conn.Close(ctx) }() //nolint:errcheck // best-effort close
 	if _, err := conn.Exec(ctx, `DROP TABLE user_notify_settings`); err != nil {
 		t.Fatalf("drop notify settings table: %v", err)
+	}
+
+	requireOpenMigrationError(t, ctx, dsn)
+}
+
+func TestOpenRejectsMissingOwnerDialogCounts(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	dsn := pgtest.DSN(t)
+	conn, err := pgx.Connect(ctx, dsn)
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	defer func() { _ = conn.Close(ctx) }() //nolint:errcheck // best-effort close
+	if _, err := conn.Exec(ctx, `DROP TABLE owner_dialog_counts`); err != nil {
+		t.Fatalf("drop owner dialog counts: %v", err)
 	}
 
 	requireOpenMigrationError(t, ctx, dsn)
@@ -477,6 +495,189 @@ func TestOwnerDialogCountsBackfillExistingDialogs(t *testing.T) {
 	}
 	if stored != 0 {
 		t.Fatalf("backfilled zero dialog count = %d, want 0", stored)
+	}
+}
+
+func TestDialogCountBackfillsReleaseLocksPerOwner(t *testing.T) {
+	for _, filename := range []string{
+		"20261026000004_backfill_owner_dialog_counts.sql",
+		"20261026000006_backfill_zero_dialog_counts.sql",
+	} {
+		name := strings.TrimSuffix(filename, ".sql")
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			testDialogCountBackfillReleasesLocksPerOwner(t, filename)
+		})
+	}
+}
+
+func testDialogCountBackfillReleasesLocksPerOwner(t *testing.T, filename string) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	dsn := pgtest.DSN(t)
+	s := openStore(t, dsn)
+	setup, err := pgx.Connect(ctx, dsn)
+	if err != nil {
+		t.Fatalf("connect setup: %v", err)
+	}
+	t.Cleanup(func() {
+		if _, err := setup.Exec(context.Background(), `
+			DROP TRIGGER IF EXISTS test_pause_owner_dialog_backfill ON public.owner_dialog_counts;
+			DROP FUNCTION IF EXISTS public.test_pause_owner_dialog_backfill();
+		`); err != nil {
+			t.Errorf("drop test backfill pause trigger: %v", err)
+		}
+		if err := setup.Close(context.Background()); err != nil {
+			t.Errorf("close setup connection: %v", err)
+		}
+	})
+
+	ownerA := mustUser(t, s, "+15551263840")
+	ownerB := mustUser(t, s, "+15551263841")
+	if ownerA.ID >= ownerB.ID {
+		t.Fatalf("test owners are out of order: %d then %d", ownerA.ID, ownerB.ID)
+	}
+	if _, err := setup.Exec(ctx, `
+		INSERT INTO dialogs (owner_id, peer_type, peer_id, top_message)
+		VALUES ($1, 1, 740001, 0), ($2, 1, 740002, 0)
+	`, ownerA.ID, ownerB.ID); err != nil {
+		t.Fatalf("seed backfill owners: %v", err)
+	}
+	if _, err := setup.Exec(ctx, `
+		UPDATE owner_dialog_counts
+		SET dialog_count = 0, initialized = FALSE
+		WHERE owner_id IN ($1, $2)
+	`, ownerA.ID, ownerB.ID); err != nil {
+		t.Fatalf("mark backfill owners uninitialized: %v", err)
+	}
+	if _, err := setup.Exec(ctx, `
+		CREATE FUNCTION public.test_pause_owner_dialog_backfill()
+		RETURNS TRIGGER
+		LANGUAGE plpgsql
+		AS $function$
+		BEGIN
+		    IF NEW.owner_id = current_setting('test.backfill_pause_owner', TRUE)::BIGINT
+		       AND NOT OLD.initialized AND NEW.initialized THEN
+		        PERFORM pg_sleep(2);
+		    END IF;
+		    RETURN NEW;
+		END;
+		$function$
+	`); err != nil {
+		t.Fatalf("create test backfill pause function: %v", err)
+	}
+	if _, err := setup.Exec(ctx, `
+		CREATE TRIGGER test_pause_owner_dialog_backfill
+		BEFORE UPDATE OF initialized ON public.owner_dialog_counts
+		FOR EACH ROW
+		EXECUTE FUNCTION public.test_pause_owner_dialog_backfill()
+	`); err != nil {
+		t.Fatalf("create test backfill pause trigger: %v", err)
+	}
+
+	migration, err := os.ReadFile(filepath.Join("..", "..", "migrations", filename))
+	if err != nil {
+		t.Fatalf("read migration %s: %v", filename, err)
+	}
+	migrationDone := make(chan error, 1)
+	go func() {
+		conn, err := pgx.Connect(ctx, dsn)
+		if err != nil {
+			migrationDone <- fmt.Errorf("connect migration: %w", err)
+			return
+		}
+		defer func() { _ = conn.Close(context.Background()) }() //nolint:errcheck // test connection cleanup
+		if _, err := conn.Exec(ctx, `SELECT set_config('test.backfill_pause_owner', $1, FALSE)`, strconv.FormatInt(ownerA.ID, 10)); err != nil {
+			migrationDone <- fmt.Errorf("set backfill pause owner: %w", err)
+			return
+		}
+		_, err = conn.Exec(ctx, string(migration))
+		migrationDone <- err
+	}()
+
+	probe, err := pgx.Connect(ctx, dsn)
+	if err != nil {
+		t.Fatalf("connect lock probe: %v", err)
+	}
+	defer func() { _ = probe.Close(context.Background()) }() //nolint:errcheck // best-effort close
+	ticker := time.NewTicker(10 * time.Millisecond)
+	defer ticker.Stop()
+	locked := false
+	for !locked {
+		select {
+		case err := <-migrationDone:
+			if err != nil {
+				t.Fatalf("run migration before lock probe: %v", err)
+			}
+			t.Fatal("backfill completed before locking the uninitialized owner")
+		case <-ctx.Done():
+			t.Fatalf("backfill did not lock owner %d: %v", ownerA.ID, ctx.Err())
+		case <-ticker.C:
+			var initialized bool
+			err := probe.QueryRow(ctx, `
+				SELECT initialized
+				FROM owner_dialog_counts
+				WHERE owner_id = $1
+				FOR UPDATE NOWAIT
+			`, ownerA.ID).Scan(&initialized)
+			if err == nil {
+				continue
+			}
+			var pgErr *pgconn.PgError
+			if !errors.As(err, &pgErr) || pgErr.Code != "55P03" {
+				t.Fatalf("probe owner count lock: %v", err)
+			}
+			locked = true
+		}
+	}
+
+	live, err := pgx.Connect(ctx, dsn)
+	if err != nil {
+		t.Fatalf("connect live sender: %v", err)
+	}
+	defer func() { _ = live.Close(context.Background()) }() //nolint:errcheck // best-effort close
+	tx, err := live.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin live send: %v", err)
+	}
+	defer func() { _ = tx.Rollback(context.Background()) }() //nolint:errcheck // rollback after commit is expected
+	if _, err := tx.Exec(ctx, `
+		INSERT INTO dialogs (owner_id, peer_type, peer_id, top_message)
+		VALUES ($1, 1, 740003, 0)
+	`, ownerB.ID); err != nil {
+		t.Fatalf("insert sender dialog: %v", err)
+	}
+	if _, err := tx.Exec(ctx, `
+		INSERT INTO dialogs (owner_id, peer_type, peer_id, top_message)
+		VALUES ($1, 1, 740004, 0)
+	`, ownerA.ID); err != nil {
+		t.Fatalf("insert recipient dialog while backfill runs: %v", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		t.Fatalf("commit live send: %v", err)
+	}
+	if err := <-migrationDone; err != nil {
+		t.Fatalf("complete migration with concurrent send: %v", err)
+	}
+
+	for _, owner := range []struct {
+		id   int64
+		name string
+	}{{ownerA.ID, "recipient"}, {ownerB.ID, "sender"}} {
+		var stored, actual int64
+		if err := setup.QueryRow(ctx, `
+			SELECT counts.dialog_count, (
+				SELECT count(*) FROM dialogs WHERE owner_id = counts.owner_id
+			)
+			FROM owner_dialog_counts AS counts
+			WHERE counts.owner_id = $1 AND counts.initialized
+		`, owner.id).Scan(&stored, &actual); err != nil {
+			t.Fatalf("read %s count: %v", owner.name, err)
+		}
+		if stored != 2 || actual != 2 {
+			t.Errorf("%s count = %d, dialogs rows = %d; want both 2", owner.name, stored, actual)
+		}
 	}
 }
 
@@ -985,6 +1186,28 @@ func TestOpenRejectsInvalidMessageFileIdx(t *testing.T) {
 	}
 	if _, err := conn.Exec(ctx, `UPDATE pg_index SET indisvalid = false WHERE indexrelid = 'public.messages_file_idx'::regclass`); err != nil {
 		t.Fatalf("mark index invalid: %v", err)
+	}
+
+	requireOpenMigrationError(t, ctx, dsn)
+}
+
+func TestOpenRejectsInvalidDialogsOwnerPageIdx(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	dsn := pgtest.DSN(t)
+	conn, err := pgx.Connect(ctx, dsn)
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	defer func() { _ = conn.Close(ctx) }() //nolint:errcheck // best-effort close
+	if _, err := conn.Exec(ctx, `DROP INDEX dialogs_owner_page_idx`); err != nil {
+		t.Fatalf("drop dialogs owner page index: %v", err)
+	}
+	if _, err := conn.Exec(ctx, `CREATE INDEX dialogs_owner_page_idx ON dialogs (owner_id, top_message DESC, peer_type, peer_id)`); err != nil {
+		t.Fatalf("recreate dialogs owner page index: %v", err)
+	}
+	if _, err := conn.Exec(ctx, `UPDATE pg_index SET indisvalid = false WHERE indexrelid = 'public.dialogs_owner_page_idx'::regclass`); err != nil {
+		t.Fatalf("mark dialogs owner page index invalid: %v", err)
 	}
 
 	requireOpenMigrationError(t, ctx, dsn)

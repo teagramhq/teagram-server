@@ -1,5 +1,6 @@
--- Backfill existing owners in committed batches. The same counter-row locks as
--- dialog writes make each owner's exact count stable against concurrent changes.
+-- Backfill existing owners in committed per-owner steps. This releases each
+-- counter-row lock before moving to the next owner, so it cannot deadlock with a
+-- live send that holds two owners in sender/recipient order.
 -- atlas:txmode none
 
 DO $migration$
@@ -24,10 +25,10 @@ BEGIN
 
         FOREACH owner_id IN ARRAY batch_owner_ids LOOP
             PERFORM public.apply_owner_dialog_count_delta(owner_id, 0);
+            COMMIT;
         END LOOP;
 
         last_owner_id := batch_owner_ids[array_length(batch_owner_ids, 1)];
-        COMMIT;
     END LOOP;
 END
 $migration$;

@@ -1,5 +1,7 @@
 -- Include accounts without dialogs so the exact count lookup always uses the
 -- owner's primary-key row. New accounts are initialized by the users trigger.
+-- Commit each owner separately so live two-owner writes cannot deadlock with a
+-- batch of retained counter-row locks.
 -- atlas:txmode none
 
 DO $migration$
@@ -23,10 +25,10 @@ BEGIN
 
         FOREACH owner_id IN ARRAY batch_owner_ids LOOP
             PERFORM public.apply_owner_dialog_count_delta(owner_id, 0);
+            COMMIT;
         END LOOP;
 
         last_owner_id := batch_owner_ids[array_length(batch_owner_ids, 1)];
-        COMMIT;
     END LOOP;
 END
 $migration$;
