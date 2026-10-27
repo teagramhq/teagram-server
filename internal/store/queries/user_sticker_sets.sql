@@ -48,6 +48,15 @@ SELECT id, access_hash, creator_id, title, short_name, software, kind,
 FROM user_created_sticker_sets
 WHERE id = $1 AND is_live = true;
 
+-- The installed-set getters resolve every positive id together, then fetch
+-- all their ordered items in one query to keep the 200-set cap bounded.
+-- name: UserCreatedStickerSetsByInstalledIDs :many
+SELECT id, access_hash, creator_id, title, short_name, software, kind,
+       text_color, is_live, created_at
+FROM user_created_sticker_sets
+WHERE id = ANY($1::bigint[]) AND is_live = true
+ORDER BY id;
+
 -- Set items reference files independently of message state. The set's live
 -- state controls serving, but does not decide whether a file remains referenced.
 -- name: UserCreatedStickerSetItems :many
@@ -59,6 +68,16 @@ JOIN user_created_sticker_sets s ON s.id = i.set_id
 JOIN files f ON f.id = i.file_id
 WHERE i.set_id = $1 AND s.is_live = true AND f.stored = true
 ORDER BY i.position;
+
+-- name: UserCreatedStickerSetItemsBySetIDs :many
+SELECT i.set_id, i.position, i.file_id, f.access_hash, f.size, f.date,
+       i.emoji, i.keywords, i.format, i.width, i.height, i.duration_ns,
+       COALESCE(i.mask_coords::text, '')::varchar AS mask_coords
+FROM user_created_sticker_set_items i
+JOIN user_created_sticker_sets s ON s.id = i.set_id
+JOIN files f ON f.id = i.file_id
+WHERE i.set_id = ANY($1::bigint[]) AND s.is_live = true AND f.stored = true
+ORDER BY i.set_id, i.position;
 
 -- name: UserCreatedStickerSetItemsByFileIDs :many
 SELECT s.id AS set_id, s.access_hash AS set_access_hash, s.creator_id,

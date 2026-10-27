@@ -655,6 +655,17 @@ func (h *handlers) handleGetAllStickers(r *mtproto.Request) (bin.Encoder, error)
 		h.log.Error("load installed sticker sets", "user_id", r.UserID, "err", err)
 		return nil, errInternal
 	}
+	userSetIDs := make([]int64, 0, len(installed))
+	for _, item := range installed {
+		if item.ID > 0 {
+			userSetIDs = append(userSetIDs, item.ID)
+		}
+	}
+	userSets, err := h.store.UserStickerSetsByInstalledIDs(r.Ctx, userSetIDs)
+	if err != nil {
+		h.log.Error("load installed user sticker sets", "user_id", r.UserID, "err", err)
+		return nil, errInternal
+	}
 	sets := make([]tg.StickerSet, 0, len(installed))
 	for _, item := range installed {
 		if item.ID < 0 {
@@ -665,13 +676,9 @@ func (h *handlers) handleGetAllStickers(r *mtproto.Request) (bin.Encoder, error)
 			sets = append(sets, set.responseSet(&item.InstalledAt))
 			continue
 		}
-		userSet, setErr := h.store.UserStickerSetByInstalledID(r.Ctx, item.ID)
-		if errors.Is(setErr, store.ErrStickerSetNotFound) {
+		userSet, ok := userSets[item.ID]
+		if !ok {
 			continue
-		}
-		if setErr != nil {
-			h.log.Error("load installed user sticker set", "user_id", r.UserID, "set_id", item.ID, "err", setErr)
-			return nil, errInternal
 		}
 		if userSet.Kind == "emojis" {
 			continue

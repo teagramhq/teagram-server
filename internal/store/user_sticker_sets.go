@@ -259,6 +259,52 @@ func (s *Store) UserStickerSetByInstalledID(ctx context.Context, id int64) (User
 	return s.userStickerSetWithItems(ctx, userStickerSetFromRow(row))
 }
 
+// UserStickerSetsByInstalledIDs loads live installed user sets and their
+// ordered items in two bounded queries, independent of the number of IDs.
+func (s *Store) UserStickerSetsByInstalledIDs(ctx context.Context, ids []int64) (map[int64]UserStickerSet, error) {
+	positiveIDs := make([]int64, 0, len(ids))
+	for _, id := range ascendingUnique(ids) {
+		if id > 0 {
+			positiveIDs = append(positiveIDs, id)
+		}
+	}
+	result := make(map[int64]UserStickerSet, len(positiveIDs))
+	if len(positiveIDs) == 0 {
+		return result, nil
+	}
+
+	rows, err := s.q.UserCreatedStickerSetsByInstalledIDs(ctx, positiveIDs)
+	if err != nil {
+		return nil, fmt.Errorf("lookup installed user sticker sets: %w", err)
+	}
+	setIDs := make([]int64, 0, len(rows))
+	for _, row := range rows {
+		set := userStickerSetFromRow(row)
+		set.Items = []UserStickerSetItem{}
+		result[set.ID] = set
+		setIDs = append(setIDs, set.ID)
+	}
+	if len(setIDs) == 0 {
+		return result, nil
+	}
+
+	itemRows, err := s.q.UserCreatedStickerSetItemsBySetIDs(ctx, setIDs)
+	if err != nil {
+		return nil, fmt.Errorf("load installed user sticker set items: %w", err)
+	}
+	for _, row := range itemRows {
+		set := result[row.SetID]
+		set.Items = append(set.Items, UserStickerSetItem{
+			Position: int(row.Position), FileID: row.FileID, AccessHash: row.AccessHash,
+			Size: row.Size, Date: row.Date.Time, Emoji: row.Emoji, Keywords: row.Keywords,
+			Format: row.Format, Width: int(row.Width), Height: int(row.Height),
+			Duration: row.DurationNs, MaskCoords: row.MaskCoords,
+		})
+		result[row.SetID] = set
+	}
+	return result, nil
+}
+
 func (s *Store) userStickerSetWithItems(ctx context.Context, set UserStickerSet) (UserStickerSet, error) {
 	rows, err := s.q.UserCreatedStickerSetItems(ctx, set.ID)
 	if err != nil {

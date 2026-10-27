@@ -1,0 +1,15 @@
+# source: gotd/td v0.162.0 TL client method exercised by user_sticker_sets_smoke_test.go
+stickers.createStickerSet#9021ab67
+  flags: # [emojis bit 5, text_color bit 6, software bit 3]
+  emojis: flags.5?true
+  text_color: flags.6?true
+  user_id: InputUserSelf
+  title: "Smoke emoji set"
+  short_name: "smoke_custom_emoji"
+  stickers: [
+    inputStickerSetItem#32da9e9c
+      flags: #
+      document: inputDocument#1abfb575(id: <N>, access_hash: <N>, file_reference: REDACTED)
+      emoji: "⭐"
+  ]
+  software: flags.3?"teagram-smoke"

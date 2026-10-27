@@ -227,18 +227,25 @@ func (h *handlers) handleGetEmojiStickers(r *mtproto.Request) (bin.Encoder, erro
 		h.log.Error("load installed emoji sticker sets", "user_id", r.UserID, "err", err)
 		return nil, errInternal
 	}
+	userSetIDs := make([]int64, 0, len(installed))
+	for _, item := range installed {
+		if item.ID > 0 {
+			userSetIDs = append(userSetIDs, item.ID)
+		}
+	}
+	userSets, err := h.store.UserStickerSetsByInstalledIDs(r.Ctx, userSetIDs)
+	if err != nil {
+		h.log.Error("load installed emoji sticker sets", "user_id", r.UserID, "err", err)
+		return nil, errInternal
+	}
 	sets := make([]tg.StickerSet, 0, len(installed))
 	for _, item := range installed {
 		if item.ID <= 0 {
 			continue
 		}
-		set, setErr := h.store.UserStickerSetByInstalledID(r.Ctx, item.ID)
-		if errors.Is(setErr, store.ErrStickerSetNotFound) {
+		set, ok := userSets[item.ID]
+		if !ok {
 			continue
-		}
-		if setErr != nil {
-			h.log.Error("load installed emoji sticker set", "user_id", r.UserID, "set_id", item.ID, "err", setErr)
-			return nil, errInternal
 		}
 		if set.Kind == "emojis" {
 			sets = append(sets, userStickerSetTL(set, r.UserID, h.dcID, &item.InstalledAt).Set)

@@ -442,6 +442,108 @@ func (q *Queries) UserCreatedStickerSetItemsByFileIDs(ctx context.Context, dolla
 	return items, nil
 }
 
+const userCreatedStickerSetItemsBySetIDs = `-- name: UserCreatedStickerSetItemsBySetIDs :many
+SELECT i.set_id, i.position, i.file_id, f.access_hash, f.size, f.date,
+       i.emoji, i.keywords, i.format, i.width, i.height, i.duration_ns,
+       COALESCE(i.mask_coords::text, '')::varchar AS mask_coords
+FROM user_created_sticker_set_items i
+JOIN user_created_sticker_sets s ON s.id = i.set_id
+JOIN files f ON f.id = i.file_id
+WHERE i.set_id = ANY($1::bigint[]) AND s.is_live = true AND f.stored = true
+ORDER BY i.set_id, i.position
+`
+
+type UserCreatedStickerSetItemsBySetIDsRow struct {
+	SetID      int64
+	Position   int32
+	FileID     int64
+	AccessHash int64
+	Size       int64
+	Date       pgtype.Timestamptz
+	Emoji      string
+	Keywords   string
+	Format     string
+	Width      int32
+	Height     int32
+	DurationNs int64
+	MaskCoords string
+}
+
+func (q *Queries) UserCreatedStickerSetItemsBySetIDs(ctx context.Context, dollar_1 []int64) ([]UserCreatedStickerSetItemsBySetIDsRow, error) {
+	rows, err := q.db.Query(ctx, userCreatedStickerSetItemsBySetIDs, dollar_1)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []UserCreatedStickerSetItemsBySetIDsRow
+	for rows.Next() {
+		var i UserCreatedStickerSetItemsBySetIDsRow
+		if err := rows.Scan(
+			&i.SetID,
+			&i.Position,
+			&i.FileID,
+			&i.AccessHash,
+			&i.Size,
+			&i.Date,
+			&i.Emoji,
+			&i.Keywords,
+			&i.Format,
+			&i.Width,
+			&i.Height,
+			&i.DurationNs,
+			&i.MaskCoords,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const userCreatedStickerSetsByInstalledIDs = `-- name: UserCreatedStickerSetsByInstalledIDs :many
+SELECT id, access_hash, creator_id, title, short_name, software, kind,
+       text_color, is_live, created_at
+FROM user_created_sticker_sets
+WHERE id = ANY($1::bigint[]) AND is_live = true
+ORDER BY id
+`
+
+// The installed-set getters resolve every positive id together, then fetch
+// all their ordered items in one query to keep the 200-set cap bounded.
+func (q *Queries) UserCreatedStickerSetsByInstalledIDs(ctx context.Context, dollar_1 []int64) ([]UserCreatedStickerSet, error) {
+	rows, err := q.db.Query(ctx, userCreatedStickerSetsByInstalledIDs, dollar_1)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []UserCreatedStickerSet
+	for rows.Next() {
+		var i UserCreatedStickerSet
+		if err := rows.Scan(
+			&i.ID,
+			&i.AccessHash,
+			&i.CreatorID,
+			&i.Title,
+			&i.ShortName,
+			&i.Software,
+			&i.Kind,
+			&i.TextColor,
+			&i.IsLive,
+			&i.CreatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const userStickerDocumentExists = `-- name: UserStickerDocumentExists :one
 SELECT EXISTS (
     SELECT 1

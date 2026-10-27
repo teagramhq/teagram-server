@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/gotd/td/bin"
@@ -293,6 +294,76 @@ func TestUserStickerSetCreationAndInstallLimits(t *testing.T) {
 	}
 	if got := installStickerSet(t, h, owner.ID, &tg.InputStickerSetID{ID: set.Set.ID, AccessHash: set.Set.AccessHash}); got != "STICKERS_TOO_MUCH" {
 		t.Fatalf("201st installed set = %q, want STICKERS_TOO_MUCH", got)
+	}
+}
+
+type stickerQueryCounter struct{ n atomic.Int64 }
+
+func (c *stickerQueryCounter) TraceQueryStart(ctx context.Context, _ *pgx.Conn, _ pgx.TraceQueryStartData) context.Context {
+	c.n.Add(1)
+	return ctx
+}
+
+func (*stickerQueryCounter) TraceQueryEnd(context.Context, *pgx.Conn, pgx.TraceQueryEndData) {}
+
+func TestInstalledUserStickerSetGettersUseBoundedQueries(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	dsn := pgtest.DSN(t)
+	tracer := &stickerQueryCounter{}
+	s, err := store.Open(ctx, dsn, pgtest.EncKey(), store.WithoutBlobStore(), store.WithQueryTracer(tracer))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := s.Close(); err != nil {
+			t.Errorf("close store: %v", err)
+		}
+	})
+	owner, err := s.CreateUser(ctx, "+15551819012")
+	if err != nil {
+		t.Fatalf("create owner: %v", err)
+	}
+	conn, err := pgx.Connect(ctx, dsn)
+	if err != nil {
+		t.Fatalf("connect to seed sticker sets: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := conn.Close(ctx); err != nil {
+			t.Errorf("close sticker seed connection: %v", err)
+		}
+	})
+	if _, err := conn.Exec(ctx, `
+		WITH seeded AS (
+			INSERT INTO user_created_sticker_sets (access_hash, creator_id, title, short_name, kind)
+			SELECT 7000000000000 + n, $1, 'Batch set', 'batch_' || n::text,
+			       CASE WHEN n <= $2 / 2 THEN 'regular' ELSE 'emojis' END
+			FROM generate_series(1, $2) AS n
+			RETURNING id
+		)
+		INSERT INTO user_sticker_sets (user_id, set_id)
+		SELECT $1, id FROM seeded`, owner.ID, store.MaxInstalledStickerSets); err != nil {
+		t.Fatalf("seed installed sticker sets: %v", err)
+	}
+	h := fullChannelDispatcher(s)
+	for _, test := range []struct {
+		name string
+		get  func() *tg.MessagesAllStickers
+		want int
+	}{
+		{name: "regular", get: func() *tg.MessagesAllStickers { return getAllStickerSets(t, h, owner.ID, 0) }, want: store.MaxInstalledStickerSets / 2},
+		{name: "emoji", get: func() *tg.MessagesAllStickers { return getEmojiStickerSets(t, h, owner.ID, 0) }, want: store.MaxInstalledStickerSets / 2},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			tracer.n.Store(0)
+			sets := test.get()
+			if len(sets.Sets) != test.want {
+				t.Fatalf("returned %d sets, want %d", len(sets.Sets), test.want)
+			}
+			if n := tracer.n.Load(); n != 3 {
+				t.Fatalf("getter made %d database queries at the %d-set install cap, want 3", n, store.MaxInstalledStickerSets)
+			}
+		})
 	}
 }
 
