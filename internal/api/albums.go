@@ -48,6 +48,9 @@ func (h *handlers) handleSendMultiMediaAfterReplyOnConn(c *mtproto.Conn, r *mtpr
 		if !validText(single.Message) {
 			return nil, nil, nil, errMessageEmpty
 		}
+		if textExceedsLimit(single.Message, captionLengthMax) {
+			return nil, nil, nil, errMediaCaptionTooLong
+		}
 	}
 	peerType, toID, err := h.inputPeer(req.Peer, r.UserID)
 	if err != nil {
