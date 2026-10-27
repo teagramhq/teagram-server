@@ -414,9 +414,10 @@ jobs:
     permissions:
       contents: read
       actions: write
-    # Allow the full 20-minute E2E timeout after the observed 6m29s preparation,
-    # with about eight minutes for failure diagnostics and cleanup.
-    timeout-minutes: 35
+    # Preparation took 17m in the latest CI run. Leave room for the full 20m
+    # E2E limit, eight minutes for diagnostics and cleanup, and five minutes
+    # of variance.
+    timeout-minutes: 50
 
     env:
       # Ryuk is testcontainers' reaper: it kills the containers of a test
