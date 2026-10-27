@@ -41,6 +41,9 @@ jobs:
       - name: Test performance fixture release publishing and recovery
         run: python3 -B .github/scripts/test_perf_fixture_release.py
 
+      - name: Test anonymous performance fixture release verification
+        run: python3 -B .github/scripts/test_verify_perf_fixture_release.py
+
       - name: Test base image pull retries
         run: python3 .github/scripts/test_pull_base_images.py
 

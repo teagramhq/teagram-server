@@ -200,20 +200,32 @@ jobs:
           python3 -B .github/scripts/perf_fixture_release.py publish \
             "perf-fixture-$FIXTURE_VERSION" "$GITHUB_SHA" "$RUNNER_TEMP/perf-fixture-assets"
 
-      - name: Verify anonymous asset downloads
-        if: steps.release.outputs.exists != 'true' || steps.release.outputs.draft == 'true'
+  # Keep verification independent of publication so every main run can retry
+  # anonymous downloads against an already-published release.
+  verify-fixture-release:
+    needs:
+      - fixture-snapshot
+      - publish-fixture
+    if: >-
+      always() &&
+      github.ref == 'refs/heads/main' &&
+      needs.fixture-snapshot.result == 'success' &&
+      (needs.publish-fixture.result == 'success' || needs.publish-fixture.result == 'skipped')
+    runs-on: ubuntu-26.04
+    timeout-minutes: 60
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Verify anonymous fixture asset downloads
         env:
           FIXTURE_VERSION: ${{ hashFiles('test/perf/fixture_test.go', 'test/perf/server_test.go') }}
-        run: |
-          tag="perf-fixture-$FIXTURE_VERSION"
-          release_url="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/releases/download/$tag"
-          curl --fail --location --silent --show-error "$release_url/manifest.json" \
-            --output "$RUNNER_TEMP/perf-fixture-manifest.json"
-          while IFS=$'\t' read -r name expected; do
-            curl --fail --location --silent --show-error "$release_url/$name" \
-              --output "$RUNNER_TEMP/$name"
-            printf '%s  %s\n' "$expected" "$RUNNER_TEMP/$name" | sha256sum --check --status
-          done < <(jq -r '.assets[] | [.name, .sha256] | @tsv' "$RUNNER_TEMP/perf-fixture-manifest.json")
+        run: >-
+          python3 -B .github/scripts/verify_perf_fixture_release.py
+          "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/releases/download/perf-fixture-$FIXTURE_VERSION"
 
   # Runs beside ci-main and finishes well inside it, so it adds no time to
   # the server's CI.

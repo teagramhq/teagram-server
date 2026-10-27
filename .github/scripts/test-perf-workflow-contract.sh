@@ -75,6 +75,19 @@ missing_snapshot_step="$(query '.jobs."rpc-performance".steps[] | select(.name =
   fail 'snapshot preparation must keep read-only release permissions'
 [[ "$(query '.jobs."publish-fixture".permissions.contents')" == 'write' ]] ||
   fail 'only the publisher job may write release contents'
+[[ "$(query '.jobs."verify-fixture-release".needs[0]')" == 'fixture-snapshot' ]] ||
+  fail 'public release verification must wait for the fixture snapshot lookup'
+[[ "$(query '.jobs."verify-fixture-release".needs[1]')" == 'publish-fixture' ]] ||
+  fail 'public release verification must wait for the publisher when it runs'
+[[ "$(query '.jobs."verify-fixture-release".permissions.contents')" == 'read' ]] ||
+  fail 'public release verification must not have permission to modify releases'
+verify_if="$(query '.jobs."verify-fixture-release".if')"
+[[ "$verify_if" == *'always()'* && "$verify_if" == *"needs.publish-fixture.result == 'skipped'"* ]] ||
+  fail 'public release verification must still run when an existing published release skips the publisher'
+[[ "$(query '.jobs."verify-fixture-release".steps[] | select(.name == "Verify anonymous fixture asset downloads") | .run | contains("verify_perf_fixture_release.py")')" == 'true' ]] ||
+  fail 'each eligible main run must verify release downloads anonymously'
+[[ -z "$(query '.jobs."publish-fixture".steps[] | select(.name == "Verify anonymous asset downloads") | .name')" ]] ||
+  fail 'anonymous verification must remain independent of release publication'
 
 release_publisher="$(<.github/scripts/perf_fixture_release.py)"
 [[ "$release_publisher" == *"release(tagName: \$tagName)"* ]] ||
