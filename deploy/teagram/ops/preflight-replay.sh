@@ -439,21 +439,24 @@ comparison_file="$SANDBOX_OUTPUT/preflight-comparisons.tsv"
   fail 'sandbox comparison evidence is unavailable or malformed'
   exit 1
 }
-declare -A printed_fields=()
-comparison_count=0
-# shellcheck disable=SC2034 # original TSV values stay private and are not printed
-while IFS=$'\t' read -r timestamp phase field before after result extra; do
-  [[ "$timestamp" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$ ]] && \
-    [ "$phase" = preflight ] && [ -z "$extra" ] && \
-    [[ "$field" =~ ^(config_sha256|env_sha256|override_sha256|stop_grace_period|compose_logging_policy|compose_log_login_codes|media_key_source|media_key_current|compose_public_ws_2446|exposure_public_ws_2446|compose_replica_count|compose_client_addr_trust)$ ]] && \
-    [[ "$result" =~ ^(pass|fail)$ ]] || {
-    fail 'sandbox comparison evidence is malformed'
-    exit 1
+# The timestamp is private metadata; preserve exact TSV fields without printing values.
+if ! comparison_rows=$(awk -F '\t' '
+  BEGIN {
+    count = split("config_sha256 env_sha256 override_sha256 stop_grace_period compose_logging_policy compose_log_login_codes media_key_source media_key_current compose_public_ws_2446 exposure_public_ws_2446 compose_replica_count compose_client_addr_trust", fields, " ")
+    for (i = 1; i <= count; i++) allowed[fields[i]] = 1
   }
-  [ -z "${printed_fields[$field]:-}" ] || { fail 'sandbox comparison evidence has duplicate fields'; exit 1; }
-  printed_fields[$field]=1
-  comparison_count=$((comparison_count + 1))
-  printf '%s\t%s\n' "$field" "$result"
-done < "$comparison_file"
-[ "$comparison_count" -eq 12 ] || { fail 'sandbox comparison evidence is incomplete'; exit 1; }
+  {
+    if (NF != 6 || $2 != "preflight" || !($3 in allowed) || $6 !~ /^(pass|fail)$/ || seen[$3]++) {
+      invalid = 1
+      exit 1
+    }
+    comparison_count++
+    printf "%s\t%s\n", $3, $6
+  }
+  END { if (invalid || comparison_count != 12) exit 1 }
+' "$comparison_file"); then
+  fail 'sandbox comparison evidence is malformed or incomplete'
+  exit 1
+fi
+printf '%s\n' "$comparison_rows"
 [ "$runner_rc" -eq 0 ] || exit "$runner_rc"

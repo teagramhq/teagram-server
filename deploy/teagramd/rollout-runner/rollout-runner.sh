@@ -2233,7 +2233,7 @@ compare_resolved_preflight() {
 }
 
 compare_resolved_preflight_command() {
-  local evidence_dir=$1 output_dir=${2:-$1} canonical input results rc=0 timestamp phase field before after result owner=0 sandbox=0 path expected_owner_mode
+  local evidence_dir=$1 output_dir=${2:-$1} canonical input results public_rows rc=0 owner=0 sandbox=0 path expected_owner_mode
   if [ "${ROLLOUT_PREFLIGHT_REPLAY_SANDBOX:-0}" = 1 ]; then
     [ "$(id -u)" = 65534 ] || { fail 'preflight replay sandbox requires uid 65534'; return 1; }
     owner=65534
@@ -2290,13 +2290,19 @@ compare_resolved_preflight_command() {
     fail 'preflight replay comparison evidence is unavailable'
     return 1
   }
-  while IFS=$'\t' read -r timestamp phase field before after result extra; do
-    [ -n "$phase" ] || continue
-    [ "$phase" = preflight ] && [ -z "$extra" ] && \
-      [[ "$field" =~ ^(config_sha256|env_sha256|override_sha256|stop_grace_period|compose_logging_policy|compose_log_login_codes|media_key_source|media_key_current|compose_public_ws_2446|exposure_public_ws_2446|compose_replica_count|compose_client_addr_trust)$ ]] && \
-      [[ "$result" =~ ^(pass|fail)$ ]] || { fail 'preflight replay comparison evidence is malformed'; return 1; }
-    printf '%s\t%s\n' "$field" "$result"
-  done < "$results"
+  # Preserve empty private values; Bash treats TSV tabs as collapsible IFS whitespace.
+  if ! public_rows=$(awk -F '\t' '
+    BEGIN {
+      count = split("config_sha256 env_sha256 override_sha256 stop_grace_period compose_logging_policy compose_log_login_codes media_key_source media_key_current compose_public_ws_2446 exposure_public_ws_2446 compose_replica_count compose_client_addr_trust", fields, " ")
+      for (i = 1; i <= count; i++) allowed[fields[i]] = 1
+    }
+    NF != 6 || $2 != "preflight" || !($3 in allowed) || $6 !~ /^(pass|fail)$/ { exit 1 }
+    { printf "%s\t%s\n", $3, $6 }
+  ' "$results"); then
+    fail 'preflight replay comparison evidence is malformed'
+    return 1
+  fi
+  printf '%s\n' "$public_rows"
   return "$rc"
 }
 
