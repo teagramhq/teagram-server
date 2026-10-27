@@ -592,4 +592,89 @@ func TestChannelHistoryPageByDateReadsOnlyItsWindow(t *testing.T) {
 	assertReadBound("channel date history page with hidden pre-history")
 }
 
+func TestChannelHistoryPageByDateReadsOnlyItsWindowWithExpiredBacklog(t *testing.T) {
+	ctx := t.Context()
+	dsn := pgtest.DSN(t)
+	pool, err := pgxpool.New(ctx, dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pool.Close()
+	for _, sql := range []string{
+		`UPDATE server_administration SET election_closed = true WHERE singleton_id = 1`,
+		`INSERT INTO users (id, phone, first_name) VALUES (1, '+channel-history-date-expired-owner', 'Owner')`,
+		`INSERT INTO channels (id, title, creator_id) VALUES (1, 'Channel date expired history plan', 1)`,
+		`INSERT INTO channel_state (channel_id) VALUES (1)`,
+		`INSERT INTO channel_participants (channel_id, user_id, available_min_id) VALUES (1, 1, 25000)`,
+		`ALTER TABLE channel_messages DISABLE TRIGGER channel_messages_stamp_history_ttl`,
+		`ALTER TABLE channel_messages DISABLE TRIGGER channel_messages_summary_maintain`,
+		`INSERT INTO channel_messages (channel_id, local_id, from_id, date, message)
+		 SELECT 1, n, 1, to_timestamp(n), 'channel history hidden post'
+		 FROM generate_series(1, 25000) n`,
+		`INSERT INTO channel_messages (channel_id, local_id, from_id, date, message, ttl_period, expires_at)
+		 SELECT 1, n, 1, to_timestamp(n), 'expired channel history post', 86400,
+		        to_timestamp(n) + make_interval(secs => 86400)
+		 FROM generate_series(25001, 29000) n`,
+		`INSERT INTO channel_messages (channel_id, local_id, from_id, date, message)
+		 SELECT 1, n, 1, to_timestamp(n), 'live channel history post'
+		 FROM generate_series(29001, 30000) n`,
+		`ALTER TABLE channel_messages ENABLE TRIGGER channel_messages_summary_maintain`,
+		`ALTER TABLE channel_messages ENABLE TRIGGER channel_messages_stamp_history_ttl`,
+		`ANALYZE channel_messages`,
+	} {
+		if _, err := pool.Exec(ctx, sql); err != nil {
+			t.Fatalf("seed expired channel date history plan data: %v", err)
+		}
+	}
+
+	recorded := &scaleQueries{}
+	cfg, err := pgxpool.ParseConfig(dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.ConnConfig.Tracer = recorded
+	traced, err := pgxpool.NewWithConfig(ctx, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer traced.Close()
+	const pageSize = 100
+	rows, err := db.New(traced).ChannelHistoryPageByDate(ctx, db.ChannelHistoryPageByDateParams{
+		ChannelID: 1, OwnerID: 1, OffsetDate: 20000, AddOffset: -pageSize, Lim: pageSize,
+	})
+	if err != nil {
+		t.Fatalf("channel history page by date with expired backlog: %v", err)
+	}
+	if len(rows) != pageSize {
+		t.Fatalf("channel date history page with expired backlog returned %d rows, want %d", len(rows), pageSize)
+	}
+	if rows[0].LocalID != 29100 || rows[len(rows)-1].LocalID != 29001 {
+		t.Fatalf("channel date history page with expired backlog starts at %d and ends at %d, want 29100 to 29001", rows[0].LocalID, rows[len(rows)-1].LocalID)
+	}
+
+	recorded.mu.Lock()
+	queries := append([]pgx.TraceQueryStartData(nil), recorded.queries...)
+	recorded.mu.Unlock()
+	if len(queries) != 1 {
+		t.Fatalf("expired backlog date history issued %d statements, want 1", len(queries))
+	}
+	var raw []byte
+	if err := pool.QueryRow(ctx, "EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) "+queries[0].SQL, queries[0].Args...).Scan(&raw); err != nil {
+		t.Fatalf("explain expired backlog date history: %v", err)
+	}
+	var plans []struct {
+		Plan scalePlan `json:"Plan"`
+	}
+	if err := json.Unmarshal(raw, &plans); err != nil {
+		t.Fatalf("decode expired backlog date history plan: %v", err)
+	}
+	if len(plans) != 1 {
+		t.Fatalf("expired backlog date history explain returned %d plans, want 1", len(plans))
+	}
+	readRows := plans[0].Plan.rowsReadFor("channel_messages")
+	if readRows > 2*pageSize+10 {
+		t.Fatalf("expired backlog date history read %.0f channel rows for a %d-row page, want at most %d", readRows, pageSize, 2*pageSize+10)
+	}
+}
+
 func scaleQueryError[T any](_ T, err error) error { return err }
