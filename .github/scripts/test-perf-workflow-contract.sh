@@ -38,8 +38,8 @@ missing_snapshot_step="$(query '.jobs."rpc-performance".steps[] | select(.name =
   fail 'the RPC job restore key must include fixture and server setup helpers'
 
 runner_contents="$(<"$runner")"
-# shellcheck disable=SC2016 # These patterns intentionally match literal runner source.
-[[ "$runner_contents" == *'pg_restore -U postgres -d "perf_$f" -j 4 --no-owner --no-acl "/cache/perf_$f.dump"'* ]] ||
+expected_restore_command="pg_restore -U postgres -d \"perf_\$f\" -j 4 --no-owner --no-acl \"/cache/perf_\$f.dump\""
+[[ "$runner_contents" == *"$expected_restore_command"* ]] ||
   fail 'restoring fixture snapshots must not replay database privileges'
 # shellcheck disable=SC2016 # This pattern intentionally matches literal runner source.
 [[ "$runner_contents" == *'fatal "restore the $f fixture snapshot"'* ]] ||
