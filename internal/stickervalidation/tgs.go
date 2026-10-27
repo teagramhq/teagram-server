@@ -64,7 +64,7 @@ func parseTGSJSON(data []byte) (int, int, float64, float64, float64, error) {
 	for decoder.More() {
 		keyToken, err := decoder.Token()
 		key, ok := keyToken.(string)
-		if err != nil || !ok || key == "x" {
+		if err != nil || !ok {
 			return 0, 0, 0, 0, 0, errInvalidTGS
 		}
 		switch key {
@@ -111,7 +111,7 @@ func parseTGSJSON(data []byte) (int, int, float64, float64, float64, error) {
 			assetsSeen = true
 			err = scanTGSAssets(decoder, 2)
 		default:
-			err = scanTGSValue(decoder, 2, false)
+			err = scanTGSValue(decoder, 2, false, key == "x")
 		}
 		if err != nil {
 			return 0, 0, 0, 0, 0, errInvalidTGS
@@ -174,7 +174,7 @@ func scanTGSAssets(decoder *json.Decoder, depth int) error {
 		return errInvalidTGS
 	}
 	for decoder.More() {
-		if err := scanTGSValue(decoder, depth+1, true); err != nil {
+		if err := scanTGSValue(decoder, depth+1, true, false); err != nil {
 			return errInvalidTGS
 		}
 	}
@@ -184,7 +184,7 @@ func scanTGSAssets(decoder *json.Decoder, depth int) error {
 	return nil
 }
 
-func scanTGSValue(decoder *json.Decoder, depth int, assetObject bool) error {
+func scanTGSValue(decoder *json.Decoder, depth int, assetObject, rejectString bool) error {
 	if depth > maxTGSJSONNesting {
 		return errInvalidTGS
 	}
@@ -199,10 +199,10 @@ func scanTGSValue(decoder *json.Decoder, depth int, assetObject bool) error {
 			for decoder.More() {
 				keyToken, err := decoder.Token()
 				key, ok := keyToken.(string)
-				if err != nil || !ok || key == "x" || assetObject && key == "p" {
+				if err != nil || !ok || assetObject && key == "p" {
 					return errInvalidTGS
 				}
-				if err := scanTGSValue(decoder, depth+1, false); err != nil {
+				if err := scanTGSValue(decoder, depth+1, false, key == "x"); err != nil {
 					return errInvalidTGS
 				}
 			}
@@ -211,7 +211,7 @@ func scanTGSValue(decoder *json.Decoder, depth int, assetObject bool) error {
 			}
 		case '[':
 			for decoder.More() {
-				if err := scanTGSValue(decoder, depth+1, false); err != nil {
+				if err := scanTGSValue(decoder, depth+1, false, false); err != nil {
 					return errInvalidTGS
 				}
 			}
@@ -222,7 +222,7 @@ func scanTGSValue(decoder *json.Decoder, depth int, assetObject bool) error {
 			return errInvalidTGS
 		}
 	case string:
-		if strings.HasPrefix(strings.ToLower(value), "data:") {
+		if rejectString || strings.HasPrefix(strings.ToLower(value), "data:") {
 			return errInvalidTGS
 		}
 	}

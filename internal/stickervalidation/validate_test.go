@@ -143,6 +143,17 @@ func TestValidateRejectsRequiredMalformedFiles(t *testing.T) {
 	}
 }
 
+func TestValidateAcceptsTGSSplitPosition(t *testing.T) {
+	body := testTGS(512, 512, `,"layers":[{"ks":{"p":{"s":true,"x":{"a":0,"k":10},"y":{"a":0,"k":20}}}}]`)
+	got, err := stickervalidation.Validate(body, stickervalidation.TargetSticker)
+	if err != nil {
+		t.Fatalf("Validate() rejected TGS split-position dimensions: %v", err)
+	}
+	if got.Format != stickervalidation.FormatTGS || got.Width != 512 || got.Height != 512 {
+		t.Fatalf("Validate() = %+v, want TGS 512x512", got)
+	}
+}
+
 func TestValidateEnforcesTargetDimensions(t *testing.T) {
 	for _, tc := range []struct {
 		name   string
