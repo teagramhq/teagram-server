@@ -62,8 +62,10 @@ seed() {
   TG_PERF_DIR="$PERF_CACHE" TG_PERF_DSN_1X="$(dsn 1x "")" TG_PERF_DSN_100X="$(dsn 100x "")" \
     go test -tags performance -count=1 -timeout 100m -run '^TestSeedFixtures$' -v ./test/perf ||
     seed_failure "populate the 1x and 100x fixture databases"
+  # Database dumps do not include cluster roles, so omit ACLs that can refer to
+  # roles unavailable on the fresh Postgres runner that restores this cache.
   for f in "${fixtures[@]}"; do
-    docker exec "$PERF_PG_CONTAINER" pg_dump -U postgres -Fc -Z 3 -f "/cache/perf_$f.dump" "perf_$f" ||
+    docker exec "$PERF_PG_CONTAINER" pg_dump -U postgres -Fc -Z 3 --no-acl -f "/cache/perf_$f.dump" "perf_$f" ||
       seed_failure "snapshot the $f fixture database"
   done
 }
