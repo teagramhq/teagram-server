@@ -684,13 +684,23 @@ if [ "$ingress_gateway" != 198.18.131.1 ]; then
 	exit 1
 fi
 if default_network_output=$(docker run --rm --network "$default_network" --read-only --cap-drop ALL \
-		mirror.gcr.io/library/busybox:1.37 sh -ec 'nc -z -w 2 198.18.131.10 2446' 2>&1); then
+		mirror.gcr.io/library/busybox:1.37 sh -ec '
+			command -v nc >/dev/null
+			if nc -z -w 2 198.18.131.10 2446; then
+				echo tcp-connect=connected
+				exit 0
+			else
+				status=$?
+				echo "tcp-connect=failed status=$status"
+				exit "$status"
+			fi
+		' 2>&1); then
 	echo "a container on the Compose default network reached the public HAProxy frontend" >&2
 	exit 1
 else
-	if ! printf '%s\n' "$default_network_output" | grep -Fiq 'connection refused'; then
+	if ! printf '%s\n' "$default_network_output" | grep -Fxq 'tcp-connect=failed status=1'; then
 		printf '%s\n' "$default_network_output" >&2
-		echo "default-network connection did not receive a TCP refusal from the public frontend" >&2
+		echo "could not confirm the default-network TCP connection was refused" >&2
 		exit 1
 	fi
 fi
