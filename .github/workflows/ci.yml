@@ -103,6 +103,15 @@ jobs:
       - name: Test RPC performance fixture restore ACL handling
         run: python3 .github/scripts/test_perf_restore.py
 
+      - name: Test performance fixture release builder
+        run: python3 -B .github/scripts/test_build_perf_fixture_release.py
+
+      - name: Test performance fixture release publishing and recovery
+        run: python3 -B .github/scripts/test_perf_fixture_release.py
+
+      - name: Test anonymous performance fixture release verification
+        run: python3 -B .github/scripts/test_verify_perf_fixture_release.py
+
       - name: Test base image pull retries
         run: python3 .github/scripts/test_pull_base_images.py
 
@@ -414,9 +423,10 @@ jobs:
     permissions:
       contents: read
       actions: write
-    # Allow the full 20-minute E2E timeout after the observed 6m29s preparation,
-    # with about eight minutes for failure diagnostics and cleanup.
-    timeout-minutes: 35
+    # Preparation took 17m in the latest CI run. Leave room for the full 20m
+    # E2E limit, eight minutes for diagnostics and cleanup, and five minutes
+    # of variance.
+    timeout-minutes: 50
 
     env:
       # Ryuk is testcontainers' reaper: it kills the containers of a test

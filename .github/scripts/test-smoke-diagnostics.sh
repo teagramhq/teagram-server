@@ -50,6 +50,13 @@ require_literal "$script_dir/run-real-server-fixture-gate.sh" \
 
 ci_main_workflow=$(sed -n '/^  ci-main:/,/^  real-server-fixtures:/p' \
   "$source_root/.github/workflows/ci.yml")
+ci_main_timeout=$(sed -nE 's/^    timeout-minutes: ([0-9]+)$/\1/p' \
+  <<<"$ci_main_workflow")
+if [[ ! "$ci_main_timeout" =~ ^[0-9]+$ ]] || (( ci_main_timeout < 50 )); then
+  printf 'ci-main timeout must cover preparation, E2E, and diagnostics (got %s)\n' \
+    "${ci_main_timeout:-missing}" >&2
+  exit 1
+fi
 ci_main_phase_steps=$(sed -nE 's/^      - name: (build|label-check)$/\1/p' \
   <<<"$ci_main_workflow")
 if [[ "$ci_main_phase_steps" != $'build\nlabel-check' ]] \

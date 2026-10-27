@@ -52,8 +52,10 @@ env:
   PERF_HISTORY: ${{ github.workspace }}/.perf-history
 
 jobs:
-  # Main stores a snapshot whenever the fixture shape changes. PRs restore it
-  # when available and seed their own copy when the cache is missing or stale.
+  # Main always looks up and refills the snapshot cache, even when its public
+  # release already exists. V2 adds seed provenance; v1 caches predate that
+  # metadata and cannot be published safely. PRs prefer v2, reuse v1 for
+  # measurement only, and seed when both miss.
   fixture-snapshot:
     if: github.event_name != 'pull_request'
     runs-on: ubuntu-26.04
@@ -61,6 +63,9 @@ jobs:
     permissions:
       contents: read
       actions: write
+    outputs:
+      release_exists: ${{ steps.release.outputs.exists }}
+      release_draft: ${{ steps.release.outputs.draft }}
     steps:
       - uses: actions/checkout@v7.0.1
         with:
@@ -68,12 +73,24 @@ jobs:
 
       # Track both the fixture writer and server setup helper: either can
       # change the seeded data. Migrations apply on top of restored data.
+      - name: Check for an existing fixture release
+        id: release
+        if: github.ref == 'refs/heads/main'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          FIXTURE_VERSION: ${{ hashFiles('test/perf/fixture_test.go', 'test/perf/server_test.go') }}
+        run: |
+          tag="perf-fixture-$FIXTURE_VERSION"
+          release=$(python3 -B .github/scripts/perf_fixture_release.py lookup "$tag")
+          echo "exists=$(jq -r '.exists' <<<"$release")" >>"$GITHUB_OUTPUT"
+          echo "draft=$(jq -r '.draft' <<<"$release")" >>"$GITHUB_OUTPUT"
+
       - name: Look up the snapshot
         id: snapshot
         uses: actions/cache/restore@v6.1.0
         with:
           path: .perf-cache
-          key: perf-fixture-${{ hashFiles('test/perf/fixture_test.go', 'test/perf/server_test.go') }}
+          key: perf-fixture-v2-${{ hashFiles('test/perf/fixture_test.go', 'test/perf/server_test.go') }}
           lookup-only: true
 
       - uses: actions/setup-go@v7.0.0
@@ -96,12 +113,36 @@ jobs:
         if: steps.snapshot.outputs.cache-hit != 'true'
         run: bash .github/scripts/perf-run.sh seed
 
+      - name: Record snapshot metadata
+        if: steps.snapshot.outputs.cache-hit != 'true'
+        env:
+          FIXTURE_VERSION: ${{ hashFiles('test/perf/fixture_test.go', 'test/perf/server_test.go') }}
+        run: |
+          newest_revision=
+          for fixture in 1x 100x; do
+            revision=$(docker exec "$PERF_PG_CONTAINER" psql -v ON_ERROR_STOP=1 -U postgres -d "perf_$fixture" -qAt \
+              -c 'SELECT version FROM atlas_schema_revisions.atlas_schema_revisions ORDER BY version DESC LIMIT 1')
+            if [ -z "$revision" ]; then
+              echo "::error::No migration revision found in perf_$fixture"
+              exit 1
+            fi
+            if [ -z "$newest_revision" ] || [[ "$revision" > "$newest_revision" ]]; then
+              newest_revision=$revision
+            fi
+          done
+          jq -n \
+            --arg fixture "$FIXTURE_VERSION" \
+            --arg server_commit "$GITHUB_SHA" \
+            --arg migration_revision "$newest_revision" \
+            '{fixture: $fixture, server_commit: $server_commit, migration_revision: $migration_revision}' \
+            > .perf-cache/.fixture-metadata.json
+
       - name: Store the snapshot
         if: steps.snapshot.outputs.cache-hit != 'true'
         uses: actions/cache/save@v6.1.0
         with:
           path: .perf-cache
-          key: perf-fixture-${{ hashFiles('test/perf/fixture_test.go', 'test/perf/server_test.go') }}
+          key: perf-fixture-v2-${{ hashFiles('test/perf/fixture_test.go', 'test/perf/server_test.go') }}
 
       - name: Report fixture snapshot infrastructure failure
         if: failure() && steps.seed.outcome != 'failure'
@@ -112,6 +153,104 @@ jobs:
             echo
             echo "Fixture snapshot setup or storage failed before measurement. Check the failed workflow step for its cause."
           } >>"$GITHUB_STEP_SUMMARY"
+
+  publish-fixture:
+    needs: fixture-snapshot
+    if: >-
+      github.ref == 'refs/heads/main' &&
+      (needs.fixture-snapshot.outputs.release_exists != 'true' || needs.fixture-snapshot.outputs.release_draft == 'true')
+    runs-on: ubuntu-26.04
+    timeout-minutes: 60
+    concurrency:
+      group: perf-fixture-release-${{ github.repository }}
+      cancel-in-progress: false
+    permissions:
+      actions: read
+      contents: write
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Recheck release after acquiring the publisher slot
+        id: release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          FIXTURE_VERSION: ${{ hashFiles('test/perf/fixture_test.go', 'test/perf/server_test.go') }}
+        run: |
+          tag="perf-fixture-$FIXTURE_VERSION"
+          release=$(python3 -B .github/scripts/perf_fixture_release.py lookup "$tag")
+          echo "exists=$(jq -r '.exists' <<<"$release")" >>"$GITHUB_OUTPUT"
+          echo "draft=$(jq -r '.draft' <<<"$release")" >>"$GITHUB_OUTPUT"
+
+      - name: Restore the fixture snapshot
+        id: snapshot
+        if: steps.release.outputs.exists != 'true' || steps.release.outputs.draft == 'true'
+        uses: actions/cache/restore@v6.1.0
+        with:
+          path: .perf-cache
+          key: perf-fixture-v2-${{ hashFiles('test/perf/fixture_test.go', 'test/perf/server_test.go') }}
+
+      - name: Require the cached snapshot
+        if: steps.release.outputs.exists != 'true' || steps.release.outputs.draft == 'true'
+        run: |
+          if [ "${{ steps.snapshot.outputs.cache-hit }}" != true ]; then
+            echo "::error::Fixture snapshot cache is missing; refusing to publish an empty fixture release"
+            exit 1
+          fi
+
+      - name: Require snapshot seed metadata
+        if: steps.release.outputs.exists != 'true' || steps.release.outputs.draft == 'true'
+        run: |
+          if [ ! -s .perf-cache/.fixture-metadata.json ]; then
+            echo "::error::Fixture snapshot cache has no seed provenance; refusing to publish an inaccurate server_commit"
+            exit 1
+          fi
+
+      - name: Build release assets and manifest
+        id: assets
+        if: steps.release.outputs.exists != 'true' || steps.release.outputs.draft == 'true'
+        run: |
+          python3 .github/scripts/build-perf-fixture-release.py \
+            --snapshot .perf-cache \
+            --metadata .perf-cache/.fixture-metadata.json \
+            --output "$RUNNER_TEMP/perf-fixture-assets"
+
+      - name: Publish complete fixture release
+        if: steps.release.outputs.exists != 'true' || steps.release.outputs.draft == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          FIXTURE_VERSION: ${{ hashFiles('test/perf/fixture_test.go', 'test/perf/server_test.go') }}
+        run: |
+          python3 -B .github/scripts/perf_fixture_release.py publish \
+            "perf-fixture-$FIXTURE_VERSION" "$GITHUB_SHA" "$RUNNER_TEMP/perf-fixture-assets"
+
+  # Keep verification independent of publication so every main run can retry
+  # anonymous downloads against an already-published release.
+  verify-fixture-release:
+    needs:
+      - fixture-snapshot
+      - publish-fixture
+    if: >-
+      always() &&
+      github.ref == 'refs/heads/main' &&
+      needs.fixture-snapshot.result == 'success' &&
+      (needs.publish-fixture.result == 'success' || needs.publish-fixture.result == 'skipped')
+    runs-on: ubuntu-26.04
+    timeout-minutes: 60
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Verify anonymous fixture asset downloads
+        env:
+          FIXTURE_VERSION: ${{ hashFiles('test/perf/fixture_test.go', 'test/perf/server_test.go') }}
+        run: >-
+          python3 -B .github/scripts/verify_perf_fixture_release.py
+          "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/releases/download/perf-fixture-$FIXTURE_VERSION"
 
   # Runs beside ci-main and finishes well inside it, so it adds no time to
   # the server's CI.
@@ -148,6 +287,14 @@ jobs:
         uses: actions/cache/restore@v6.1.0
         with:
           path: .perf-cache
+          key: perf-fixture-v2-${{ hashFiles('test/perf/fixture_test.go', 'test/perf/server_test.go') }}
+
+      - name: Restore legacy cache for PR measurements
+        id: legacy-snapshot
+        if: github.event_name == 'pull_request' && steps.snapshot.outputs.cache-hit != 'true'
+        uses: actions/cache/restore@v6.1.0
+        with:
+          path: .perf-cache
           key: perf-fixture-${{ hashFiles('test/perf/fixture_test.go', 'test/perf/server_test.go') }}
 
       - uses: actions/setup-go@v7.0.0
@@ -156,7 +303,7 @@ jobs:
           cache: false
 
       - name: Cache Go modules
-        if: steps.snapshot.outputs.cache-hit == 'true'
+        if: steps.snapshot.outputs.cache-hit == 'true' || steps.legacy-snapshot.outputs.cache-hit == 'true'
         uses: actions/cache@v6.1.0
         with:
           path: ~/go/pkg/mod
@@ -183,12 +330,12 @@ jobs:
 
       - name: Restore fixtures
         id: restore-fixtures
-        if: steps.snapshot.outputs.cache-hit == 'true'
+        if: steps.snapshot.outputs.cache-hit == 'true' || steps.legacy-snapshot.outputs.cache-hit == 'true'
         run: bash .github/scripts/perf-run.sh restore
 
       - name: Seed fixtures from this branch
         id: seed-fixtures
-        if: steps.snapshot.outputs.cache-hit != 'true'
+        if: steps.snapshot.outputs.cache-hit != 'true' && steps.legacy-snapshot.outputs.cache-hit != 'true'
         run: bash .github/scripts/perf-run.sh seed
 
       - name: Measure base and head
