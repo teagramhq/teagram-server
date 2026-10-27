@@ -213,9 +213,11 @@ HAProxy and edge Compose hashes and their recorded config source hashes with
 the target. A proxy image, `haproxy.cfg` or HAProxy renderer change still stops
 the deploy for the maintenance path. An edge-only Nginx source change is
 validated against the existing Compose hash with only its config-source label
-normalized, then applied with `nginx -t` and a graceful reload while the edge
-container stays up. If the server rollout fails, the Nginx config is restored
-and gracefully reloaded from the previous commit.
+normalized. The edge container is recreated so its single-file bind mount sees
+the checked-out inode, then `nginx -t` and a graceful reload verify the new
+configuration. This briefly interrupts requests at the public demo origin. If
+the server rollout fails, the previous Nginx config is restored, remounted in a
+fresh edge container and verified.
 
 On a pre-cutover failure, the old server and edge stay available, the candidate
 stops, and the previous release reference remains active. If traffic has reached
@@ -272,6 +274,34 @@ Its freshly generated password is kept in the root-only
 all expected handles through the API, the wipe recreates teagramd with the
 production proxy and Turnstile settings, requires a bare sign-up probe to
 return `RECAPTCHA_CHECK`, and only then starts HAProxy and the public edge.
+
+## Public guest account threat model
+
+`autoGuest=true` removes signup friction on the public demo, so an anonymous
+internet user can create a guest identity and use the public messaging and file
+APIs. The primary abuse risks are automated account creation, spam, attempts to
+consume shared CPU, connection and storage capacity, and content that users
+should not treat as private. Demo accounts and their data are visible to the
+server operator, are not suitable for sensitive information, and are removed
+with the database and blob files during the weekly wipe.
+
+Signup requires a valid Cloudflare Turnstile `signup` challenge before the
+server charges its per-client-network limit of 5 signup attempts per hour.
+Authentication code requests are limited to 10 calls per network per hour and
+20 target phone numbers per network per 24 hours. Unauthenticated connections
+are capped at 64 per client network and 1,024 per server process, with a
+120-second lifetime. Per-account limits are 60 message sends per minute,
+20 MiB uploaded per hour, and 256 MiB stored. Each file is capped at 512,000
+bytes (`TG_UPLOAD_MAX_BYTES` overrides the 16 MiB base setting). Sticker
+imports are disabled, and the HTTP admin paths return 404.
+
+These are application-level abuse limits, not a global DDoS boundary. An
+attacker with many source networks can distribute signup and connection load;
+users behind the same carrier NAT or corporate egress can also share and exhaust
+a per-network bucket. Resource limits bound the local blast radius but cannot
+guarantee availability under a distributed flood. Turnstile and rate limits do
+not make guest content private or retained: users should expect account, message
+and file data to be inspectable by the operator and erased by the weekly reset.
 
 ## Stack data-retention threat model
 

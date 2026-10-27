@@ -186,6 +186,65 @@ jq -e \
   done
 )
 
+(
+  MOCK_EXPECTED_EDGE_SOURCE_HASH=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+  MOCK_OLD_EDGE_SOURCE_HASH=fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210
+  MOCK_EDGE_RECREATED=0
+  MOCK_EDGE_RECREATE_COUNT=0
+  MOCK_EDGE_CONFIG_TESTED=0
+  MOCK_EDGE_RELOADED=0
+  TEAGRAM_DEMO_EDGE_CONFIG_SHA256=$MOCK_EXPECTED_EDGE_SOURCE_HASH
+
+  demo_compose() {
+    if [[ "$*" == 'ps -q edge' ]]; then
+      if (( MOCK_EDGE_RECREATED == 1 )); then
+        printf 'refreshed-edge\n'
+      else
+        printf 'stale-edge\n'
+      fi
+    elif [[ "$*" == 'up -d --no-deps --force-recreate edge' ]]; then
+      MOCK_EDGE_RECREATED=1
+      ((MOCK_EDGE_RECREATE_COUNT += 1))
+    else
+      printf 'unexpected demo_compose invocation: %s\n' "$*" >&2
+      return 1
+    fi
+  }
+  docker() {
+    if [[ "$1" == inspect && "$2" == --format && "$3" == *com.teagram.demo.edge-config-sha256* ]]; then
+      if [[ "$4" == stale-edge ]]; then
+        printf '%s\n' "$MOCK_OLD_EDGE_SOURCE_HASH"
+      elif [[ "$4" == refreshed-edge ]]; then
+        printf '%s\n' "$TEAGRAM_DEMO_EDGE_CONFIG_SHA256"
+      else
+        printf 'unexpected inspected edge id: %s\n' "$4" >&2
+        return 1
+      fi
+    elif [[ "$1" == exec && "$2" == refreshed-edge && "$3" == nginx && "$4" == -t ]]; then
+      MOCK_EDGE_CONFIG_TESTED=1
+    elif [[ "$1" == exec && "$2" == refreshed-edge && "$3" == nginx && "$4" == -s && "$5" == reload ]]; then
+      MOCK_EDGE_RELOADED=1
+    else
+      printf 'unexpected docker invocation: %s\n' "$*" >&2
+      return 1
+    fi
+  }
+
+  EDGE_CONTAINER_ID=
+  demo_reload_edge
+  [[ "$EDGE_CONTAINER_ID" == refreshed-edge && "$MOCK_EDGE_RECREATED" == 1 &&
+    "$MOCK_EDGE_RECREATE_COUNT" == 1 && "$MOCK_EDGE_CONFIG_TESTED" == 1 &&
+    "$MOCK_EDGE_RELOADED" == 1 ]] || {
+    printf 'edge reload did not recreate the stale single-file mount before validating it\n' >&2
+    exit 1
+  }
+  demo_reload_edge
+  [[ "$MOCK_EDGE_RECREATE_COUNT" == 1 ]] || {
+    printf 'edge reload recreated a container whose config source was already current\n' >&2
+    exit 1
+  }
+)
+
 python3 - "$SCRIPT_DIR/render-haproxy-config.py" "$SCRIPT_DIR/haproxy.cfg" "$TMP_DIR" <<'PY'
 from pathlib import Path
 import subprocess
@@ -558,6 +617,12 @@ assert_text_order(deploy_preflight, "deploy-main.sh proxy preflight", [
     'demo_require_proxy_configuration_current edge "$TEAGRAM_DEMO_EDGE_CONFIG_SHA256"',
     'demo_reload_edge',
     'demo_render_config "$TARGET_RENDER"',
+])
+deploy_edge_refresh = deploy.split('EDGE_CONFIG_REFRESH_ATTEMPTED=1\ndemo_reload_edge\n', 1)[1]
+assert_text_order(deploy_edge_refresh, "deploy-main.sh refreshed edge inventory", [
+    'mapfile -t CONTAINER_IDS < <(demo_compose ps -q)',
+    'demo_prepare_client_config_dir',
+    'docker inspect "${CONTAINER_IDS[@]}"',
 ])
 deploy_steps = [
     'CANDIDATE_IMAGE_REF=$(demo_pull_image_by_sha "$SHA" "$IMAGE_DIGEST")',

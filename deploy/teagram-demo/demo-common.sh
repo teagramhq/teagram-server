@@ -406,17 +406,39 @@ demo_prepare_client_config_dir() {
 }
 
 demo_reload_edge() {
+  local live_source_hash
   local -a edge_ids=()
   mapfile -t edge_ids < <(demo_compose ps -q edge)
   ((${#edge_ids[@]} == 1)) || {
     demo_fail 'running edge proxy is missing or ambiguous'
     return 1
   }
-  docker exec "${edge_ids[0]}" nginx -t >/dev/null || {
+  EDGE_CONTAINER_ID=${edge_ids[0]}
+  live_source_hash=$(docker inspect --format '{{index .Config.Labels "com.teagram.demo.edge-config-sha256"}}' \
+    "$EDGE_CONTAINER_ID") || {
+    demo_fail 'edge configuration source hash could not be read'
+    return 1
+  }
+  if [[ "$live_source_hash" != "$TEAGRAM_DEMO_EDGE_CONFIG_SHA256" ]]; then
+    # A single-file bind mount pins the inode that existed when the container
+    # started. Git replaces that inode during checkout, so reload only after
+    # Compose has mounted the checked-out file in a fresh edge container.
+    demo_compose up -d --no-deps --force-recreate edge || {
+      demo_fail 'edge proxy could not be recreated with the current configuration'
+      return 1
+    }
+    mapfile -t edge_ids < <(demo_compose ps -q edge)
+    ((${#edge_ids[@]} == 1)) || {
+      demo_fail 'refreshed edge proxy is missing or ambiguous'
+      return 1
+    }
+    EDGE_CONTAINER_ID=${edge_ids[0]}
+  fi
+  docker exec "$EDGE_CONTAINER_ID" nginx -t >/dev/null || {
     demo_fail 'edge nginx configuration failed its syntax check'
     return 1
   }
-  docker exec "${edge_ids[0]}" nginx -s reload >/dev/null || {
+  docker exec "$EDGE_CONTAINER_ID" nginx -s reload >/dev/null || {
     demo_fail 'edge nginx graceful reload failed'
     return 1
   }

@@ -30,7 +30,7 @@ CANDIDATE_STARTED=0
 PUBLIC_ACTIVATION_STARTED=0
 CUTOVER_COMMITTED=0
 CLIENT_CONFIG_UPDATED=0
-EDGE_CONFIG_RELOADED=0
+EDGE_CONFIG_REFRESH_ATTEMPTED=0
 EDGE_CONTAINER_ID=
 PREV_WEB_RELEASE=
 PREV_WEB_LINK=
@@ -97,13 +97,14 @@ demo_cleanup() {
         "$ACTIVE_SERVER" "$BACKUP_DIR" >&2
     fi
   fi
-  if (( rc != 0 && ${CUTOVER_COMMITTED:-0} == 0 && ${EDGE_CONFIG_RELOADED:-0} == 1 )); then
+  if (( rc != 0 && ${CUTOVER_COMMITTED:-0} == 0 && ${EDGE_CONFIG_REFRESH_ATTEMPTED:-0} == 1 )); then
     nginx_rollback_file="$SCRIPT_DIR/.nginx.conf.rollback.$$"
     if git -C "$DEMO_REPO_ROOT" show "$PREV_SHA:deploy/teagram-demo/nginx.conf" > "$nginx_rollback_file" &&
       chown root:root "$nginx_rollback_file" && chmod 0644 "$nginx_rollback_file" &&
+      TEAGRAM_DEMO_EDGE_CONFIG_SHA256=$(sha256sum -- "$nginx_rollback_file" | awk '{print $1}') &&
+      export TEAGRAM_DEMO_EDGE_CONFIG_SHA256 &&
       mv -f -- "$nginx_rollback_file" "$SCRIPT_DIR/nginx.conf" &&
-      [[ -n "${EDGE_CONTAINER_ID:-}" ]] && docker exec "$EDGE_CONTAINER_ID" nginx -t >/dev/null &&
-      docker exec "$EDGE_CONTAINER_ID" nginx -s reload >/dev/null; then
+      demo_reload_edge; then
       printf 'demo edge configuration rolled back to %s\n' "$PREV_SHA" >&2
     else
       rm -f -- "$nginx_rollback_file"
@@ -192,8 +193,10 @@ demo_require_proxy_configuration_current edge "$TEAGRAM_DEMO_EDGE_CONFIG_SHA256"
 mapfile -t EDGE_IDS < <(demo_compose ps -q edge)
 ((${#EDGE_IDS[@]} == 1)) || demo_fail 'running edge proxy is missing or ambiguous'
 EDGE_CONTAINER_ID=${EDGE_IDS[0]}
+EDGE_CONFIG_REFRESH_ATTEMPTED=1
 demo_reload_edge
-EDGE_CONFIG_RELOADED=1
+mapfile -t CONTAINER_IDS < <(demo_compose ps -q)
+((${#CONTAINER_IDS[@]} >= 4)) || demo_fail 'demo database, server, HAProxy, or refreshed edge container is not running'
 demo_prepare_client_config_dir
 PREV_WEB_RELEASE=$(demo_reconcile_web_release)
 PREV_WEB_LINK=$PREV_WEB_RELEASE
