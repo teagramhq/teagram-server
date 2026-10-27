@@ -447,6 +447,82 @@ func TestFeaturedStickerSetsReflectOnlyTheViewersInstalledState(t *testing.T) {
 	}
 }
 
+func TestGetOldFeaturedStickerSetsSupportsPaginationAndHash(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	s := openStore(t)
+	owner, err := s.CreateUser(ctx, "+15551810011")
+	if err != nil {
+		t.Fatalf("create owner: %v", err)
+	}
+	h := fullChannelDispatcher(s)
+
+	full := getOldFeaturedStickerSets(t, h, owner.ID, 0, 1, 0)
+	if full.Hash == 0 || full.Count != 1 || len(full.Sets) != 1 {
+		t.Fatalf("old featured sets = hash %d, count %d, %d sets; want the catalogue set", full.Hash, full.Count, len(full.Sets))
+	}
+	covered, ok := full.Sets[0].(*tg.StickerSetCovered)
+	if !ok || covered.Set.ShortName != "twemoji_reactions" {
+		t.Fatalf("old featured set = %T (%v), want the Twemoji catalogue set", full.Sets[0], full.Sets[0])
+	}
+	if got := getOldFeaturedStickerSets(t, h, owner.ID, 0, 0, 0); len(got.Sets) != 0 || got.Count != full.Count {
+		t.Fatalf("zero-limit old featured sets = count %d, %d entries; want total count %d and no entries", got.Count, len(got.Sets), full.Count)
+	}
+	if got := getOldFeaturedStickerSets(t, h, owner.ID, 1, 1, 0); len(got.Sets) != 0 || got.Count != full.Count {
+		t.Fatalf("past-end old featured sets = count %d, %d entries; want total count %d and no entries", got.Count, len(got.Sets), full.Count)
+	}
+	if modified := getOldFeaturedStickerSets(t, h, owner.ID, 0, 1, full.Hash); modified != nil {
+		t.Fatal("getOldFeaturedStickers with current hash returned a full result")
+	}
+}
+
+func TestSearchStickerSetsMatchesCatalogueCaseInsensitivelyAndSupportsHash(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	s := openStore(t)
+	owner, err := s.CreateUser(ctx, "+15551810012")
+	if err != nil {
+		t.Fatalf("create owner: %v", err)
+	}
+	h := fullChannelDispatcher(s)
+
+	result := searchStickerSets(t, h, owner.ID, &tg.MessagesSearchStickerSetsRequest{Q: "TWEMOJI"})
+	full, ok := result.(*tg.MessagesFoundStickerSets)
+	if !ok || full.Hash == 0 || len(full.Sets) != 1 {
+		t.Fatalf("searchStickerSets = %T with hash %d and %d sets; want one catalogue match", result, foundStickerSetsHash(result), foundStickerSetsCount(result))
+	}
+	covered, ok := full.Sets[0].(*tg.StickerSetCovered)
+	if !ok || covered.Set.ShortName != "twemoji_reactions" {
+		t.Fatalf("searchStickerSets result = %T (%v), want the Twemoji catalogue set", full.Sets[0], full.Sets[0])
+	}
+	if modified := searchStickerSets(t, h, owner.ID, &tg.MessagesSearchStickerSetsRequest{Q: "TWEMOJI", Hash: full.Hash}); modified != nil {
+		t.Fatal("searchStickerSets with current hash returned a full result")
+	}
+}
+
+func TestSearchStickerSetsReturnsEmptyForUnmatchedAndEmptyQueries(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	s := openStore(t)
+	owner, err := s.CreateUser(ctx, "+15551810013")
+	if err != nil {
+		t.Fatalf("create owner: %v", err)
+	}
+	h := fullChannelDispatcher(s)
+
+	for _, req := range []*tg.MessagesSearchStickerSetsRequest{
+		{Q: "no matching catalogue set"},
+		{Q: "twemoji", ExcludeFeatured: true},
+		{Q: "", Hash: 123},
+	} {
+		result := searchStickerSets(t, h, owner.ID, req)
+		full, ok := result.(*tg.MessagesFoundStickerSets)
+		if !ok || len(full.Sets) != 0 {
+			t.Errorf("searchStickerSets(%q, excludeFeatured=%t, hash=%d) = %T with %d sets; want an empty full result", req.Q, req.ExcludeFeatured, req.Hash, result, foundStickerSetsCount(result))
+		}
+	}
+}
+
 func getFeaturedStickerSets(t *testing.T, h mtproto.Handler, userID int64, hash int64) *tg.MessagesFeaturedStickers {
 	t.Helper()
 	body := dispatchChatMethod(t, h, userID, "messages.getFeaturedStickers", &tg.MessagesGetFeaturedStickersRequest{Hash: hash})
@@ -462,6 +538,62 @@ func getFeaturedStickerSets(t *testing.T, h mtproto.Handler, userID int64, hash 
 		t.Fatalf("getFeaturedStickers = %T, want full or notModified", box.FeaturedStickers)
 	}
 	return full
+}
+
+func getOldFeaturedStickerSets(t *testing.T, h mtproto.Handler, userID int64, offset, limit int, hash int64) *tg.MessagesFeaturedStickers {
+	t.Helper()
+	body := dispatchChatMethod(t, h, userID, "messages.getOldFeaturedStickers", &tg.MessagesGetOldFeaturedStickersRequest{Offset: offset, Limit: limit, Hash: hash})
+	var rpc mt.RPCError
+	if err := rpc.Decode(&bin.Buffer{Buf: body}); err == nil {
+		t.Fatalf("getOldFeaturedStickers returned RPC error %d %s", rpc.ErrorCode, rpc.ErrorMessage)
+	}
+	var box tg.MessagesFeaturedStickersBox
+	if err := box.Decode(&bin.Buffer{Buf: body}); err != nil {
+		t.Fatalf("decode getOldFeaturedStickers: %v", err)
+	}
+	if _, ok := box.FeaturedStickers.(*tg.MessagesFeaturedStickersNotModified); ok {
+		return nil
+	}
+	full, ok := box.FeaturedStickers.(*tg.MessagesFeaturedStickers)
+	if !ok {
+		t.Fatalf("getOldFeaturedStickers = %T, want full or notModified", box.FeaturedStickers)
+	}
+	return full
+}
+
+func searchStickerSets(t *testing.T, h mtproto.Handler, userID int64, req *tg.MessagesSearchStickerSetsRequest) tg.MessagesFoundStickerSetsClass {
+	t.Helper()
+	body := dispatchChatMethod(t, h, userID, "messages.searchStickerSets", req)
+	var rpc mt.RPCError
+	if err := rpc.Decode(&bin.Buffer{Buf: body}); err == nil {
+		t.Fatalf("searchStickerSets returned RPC error %d %s", rpc.ErrorCode, rpc.ErrorMessage)
+	}
+	var box tg.MessagesFoundStickerSetsBox
+	if err := box.Decode(&bin.Buffer{Buf: body}); err != nil {
+		t.Fatalf("decode searchStickerSets: %v", err)
+	}
+	if _, ok := box.FoundStickerSets.(*tg.MessagesFoundStickerSetsNotModified); ok {
+		return nil
+	}
+	full, ok := box.FoundStickerSets.(*tg.MessagesFoundStickerSets)
+	if !ok {
+		t.Fatalf("searchStickerSets = %T, want full or notModified", box.FoundStickerSets)
+	}
+	return full
+}
+
+func foundStickerSetsCount(result tg.MessagesFoundStickerSetsClass) int {
+	if full, ok := result.(*tg.MessagesFoundStickerSets); ok && full != nil {
+		return len(full.Sets)
+	}
+	return 0
+}
+
+func foundStickerSetsHash(result tg.MessagesFoundStickerSetsClass) int64 {
+	if full, ok := result.(*tg.MessagesFoundStickerSets); ok && full != nil {
+		return full.Hash
+	}
+	return 0
 }
 
 func TestBuiltInStickerSendRendersToRecipientWithoutFileEntitlement(t *testing.T) {
