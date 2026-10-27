@@ -49,6 +49,7 @@ SMOKE_SCENARIOS=(
   contacts-search
   contacts-import
   contacts-import-privacy
+  contacts-import-budget
   full-user-profile
   common-chats
   help-countries
