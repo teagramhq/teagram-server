@@ -460,9 +460,10 @@ legacy_config="$work_dir/legacy-client-config.json"
 compose_base run --rm --no-deps -T teagramd client-config > "$legacy_config"
 
 probe_binary="$work_dir/mixed-trust-probe"
-go build -o "$probe_binary" ./cmd/mixed-trust-probe
-# The umask above makes Go emit mode 700, but validation containers run as
-# uid 65532 and execute this bind-mounted probe.
+# The probe is bind-mounted into the static teagramd image; match the probe
+# image's CGO-disabled build. The restrictive umask still needs this executable
+# to be accessible to validation containers running as uid 65532.
+CGO_ENABLED=0 go build -o "$probe_binary" ./cmd/mixed-trust-probe
 chmod 755 "$probe_binary"
 
 start_hold() {
