@@ -77,7 +77,7 @@ missing_snapshot_step="$(query '.jobs."rpc-performance".steps[] | select(.name =
   fail 'only the publisher job may write release contents'
 
 release_publisher="$(<.github/scripts/perf_fixture_release.py)"
-[[ "$release_publisher" == *'release(tagName: $tagName)'* ]] ||
+[[ "$release_publisher" == *"release(tagName: \$tagName)"* ]] ||
   fail 'release lookups must include drafts through GraphQL rather than the published-only tag REST endpoint'
 [[ "$release_publisher" == *'releases/{database_id}/assets?per_page=100'* ]] ||
   fail 'draft assets must be verified by release ID'
