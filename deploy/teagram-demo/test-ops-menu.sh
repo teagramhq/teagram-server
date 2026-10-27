@@ -39,6 +39,18 @@ printf '%s\n' 'unreviewed' >"$CHECKOUT/unreviewed.txt"
 git -C "$CHECKOUT" add unreviewed.txt
 git -C "$CHECKOUT" commit --quiet -m 'unreviewed fixture'
 UNREVIEWED_SHA=$(git -C "$CHECKOUT" rev-parse HEAD)
+STALE_SHA=$MAIN_SHA
+git -C "$CHECKOUT" checkout --quiet main
+cat >"$CHECKOUT/deploy/teagram-demo/ops/probe.sh" <<'SH'
+#!/bin/sh
+set -eu
+printf 'current ops-script sha=%s name=%s\n' "$OPS_SHA" "$OPS_NAME"
+SH
+chmod 0755 "$CHECKOUT/deploy/teagram-demo/ops/probe.sh"
+git -C "$CHECKOUT" add deploy/teagram-demo/ops/probe.sh
+git -C "$CHECKOUT" commit --quiet -m 'update reviewed ops fixture'
+git -C "$CHECKOUT" push --quiet origin main
+MAIN_SHA=$(git -C "$CHECKOUT" rev-parse HEAD)
 mkdir -p "$WORK_DIR/home"
 FIXTURE_BIN=$WORK_DIR/bin
 mkdir -p "$FIXTURE_BIN"
@@ -90,10 +102,16 @@ HOSTNAME_OUTPUT=$(SSH_ORIGINAL_COMMAND=hostname "$WORK_DIR/teagram-demo-ops")
 }
 
 RUN_OUTPUT=$(SSH_ORIGINAL_COMMAND="run $MAIN_SHA probe" "$WORK_DIR/teagram-demo-ops")
-[ "$RUN_OUTPUT" = "ops-script sha=$MAIN_SHA name=probe" ] || {
+[ "$RUN_OUTPUT" = "current ops-script sha=$MAIN_SHA name=probe" ] || {
   printf 'reviewed script output mismatch: %s\n' "$RUN_OUTPUT" >&2
   exit 1
 }
+
+if output=$(SSH_ORIGINAL_COMMAND="run $STALE_SHA probe" "$WORK_DIR/teagram-demo-ops" 2>&1); then
+  printf '%s\n' 'run accepted a script version that differs from origin/main' >&2
+  exit 1
+fi
+case "$output" in *'does not match origin/main'*) ;; *) printf '%s\n' "$output" >&2; exit 1 ;; esac
 
 if output=$(SSH_ORIGINAL_COMMAND="run $UNREVIEWED_SHA probe" "$WORK_DIR/teagram-demo-ops" 2>&1); then
   printf '%s\n' 'run accepted a commit outside origin/main' >&2

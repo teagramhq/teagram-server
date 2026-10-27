@@ -121,6 +121,14 @@ set -- $entry
 [ "$#" -eq 3 ] && [ "$1" = 100755 ] && [ "$2" = blob ] \
   || fail 'main commit does not contain an executable ops wrapper'
 WRAPPER_BLOB=$3
+main_entry=$(git -C "$REPO" ls-tree "$MAIN_REF" -- "$WRAPPER_SOURCE" | awk '{ print $1 " " $2 }') \
+  || fail 'could not inspect the current origin/main ops wrapper'
+[ "$main_entry" = '100755 blob' ] \
+  || fail 'current origin/main does not contain an executable ops wrapper'
+main_blob=$(git -C "$REPO" rev-parse "$MAIN_REF:$WRAPPER_SOURCE") \
+  || fail 'current origin/main ops wrapper is missing'
+[ "$WRAPPER_BLOB" = "$main_blob" ] \
+  || fail 'requested ops wrapper does not match origin/main'
 [ -f "$AUTHORIZED_KEYS" ] && [ ! -L "$AUTHORIZED_KEYS" ] \
   || fail 'root authorized_keys is missing or a symbolic link'
 [ "$(stat -c '%u:%g:%a' "$SSH_DIR")" = 0:0:700 ] \

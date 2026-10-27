@@ -140,6 +140,16 @@ run_reviewed_script() {
   set -- $entry
   [ "$#" -eq 2 ] && [ "$1" = 100755 ] && [ "$2" = blob ] \
     || fail "reviewed ops script is missing or not executable: $name"
+  main_entry=$(git -C "$REPO" ls-tree "$MAIN_REF" -- "$script_path" | awk '{ print $1 " " $2 }') \
+    || fail 'could not inspect the current origin/main ops script'
+  [ "$main_entry" = '100755 blob' ] \
+    || fail "current origin/main ops script is missing or not executable: $name"
+  script_blob=$(git -C "$REPO" rev-parse "$sha:$script_path") \
+    || fail "reviewed ops script is missing from commit $sha: $name"
+  main_blob=$(git -C "$REPO" rev-parse "$MAIN_REF:$script_path") \
+    || fail "current origin/main ops script is missing: $name"
+  [ "$script_blob" = "$main_blob" ] \
+    || fail "reviewed ops script does not match origin/main: $name"
   WORK_DIR=$(mktemp -d /tmp/teagram-demo-ops.XXXXXXXX) \
     || fail 'could not create a temporary ops directory'
 trap cleanup EXIT

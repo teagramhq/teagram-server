@@ -52,6 +52,11 @@ chmod 0755 "$FIXTURE_REPO/deploy/teagram-demo/ops/teagram-demo-ops"
 git -C "$FIXTURE_REPO" add deploy/teagram-demo/ops/teagram-demo-ops
 git -C "$FIXTURE_REPO" commit --quiet -m 'test demo ops installer fixture'
 git -C "$FIXTURE_REPO" push --quiet --set-upstream origin main
+STALE_SHA=$(git -C "$FIXTURE_REPO" rev-parse HEAD)
+printf '\n# updated at the current main tip\n' >>"$FIXTURE_REPO/deploy/teagram-demo/ops/teagram-demo-ops"
+git -C "$FIXTURE_REPO" add deploy/teagram-demo/ops/teagram-demo-ops
+git -C "$FIXTURE_REPO" commit --quiet -m 'update demo ops installer fixture'
+git -C "$FIXTURE_REPO" push --quiet origin main
 MAIN_SHA=$(git -C "$FIXTURE_REPO" rev-parse HEAD)
 
 cat >"$FIXTURE_SSH/authorized_keys" <<'KEYS'
@@ -66,6 +71,12 @@ cp -p "$FIXTURE_SSH/authorized_keys" "$ORIGINAL_KEYS"
 TARGET_BEFORE='ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAC multica-daemon@delta'
 TARGET_AFTER='restrict,command="/usr/local/sbin/teagram-demo-ops" ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAC multica-daemon@delta'
 grep -Fxq -- "$TARGET_BEFORE" "$ORIGINAL_KEYS"
+
+if output=$(sh "$INSTALLER" check "$STALE_SHA" 2>&1); then
+  printf '%s\n' 'installer accepted a wrapper version that differs from origin/main' >&2
+  exit 1
+fi
+case "$output" in *'does not match origin/main'*) ;; *) printf '%s\n' "$output" >&2; exit 1 ;; esac
 
 cat >"$EXPECTED_KEYS" <<'KEYS'
 ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA retained-key
