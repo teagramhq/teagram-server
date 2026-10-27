@@ -14,6 +14,7 @@ fi
 docker_bin=/usr/bin/docker
 inventory_tool="$script_dir/test-restore-readiness-inventory.py"
 inventory_snapshot=""
+fixture_snapshot=""
 foreign_container_id=""
 foreign_volume_name=""
 foreign_volume_created_at=""
@@ -24,7 +25,7 @@ cleanup_foreign_fixture() {
   local status=$?
   local current_volume_identity expected_volume_identity
   trap - EXIT
-  if [[ -n $foreign_container_id ]] && ! "$docker_bin" rm --force "$foreign_container_id" >/dev/null 2>&1; then
+  if [[ -n $foreign_container_id ]] && ! "$docker_bin" rm --force --volumes "$foreign_container_id" >/dev/null 2>&1; then
     status=1
   fi
   if [[ -n $foreign_network_id ]] && ! "$docker_bin" network rm "$foreign_network_id" >/dev/null 2>&1; then
@@ -39,7 +40,19 @@ cleanup_foreign_fixture() {
       status=1
     fi
   fi
+  if [[ -n $fixture_snapshot ]] && ! sudo -n -- env -i \
+    HOME=/root \
+    LANG=C \
+    LC_ALL=C \
+    PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
+    PYTHONDONTWRITEBYTECODE=1 \
+    /usr/bin/python3 -B "$inventory_tool" compare "$fixture_snapshot"; then
+    status=1
+  fi
   if [[ -n $inventory_snapshot ]] && ! /usr/bin/rm -f -- "$inventory_snapshot"; then
+    status=1
+  fi
+  if [[ -n $fixture_snapshot ]] && ! /usr/bin/rm -f -- "$fixture_snapshot"; then
     status=1
   fi
   exit "$status"
@@ -61,6 +74,17 @@ if "$docker_bin" container inspect "$foreign_container_name" >/dev/null 2>&1 ||
 fi
 
 "$docker_bin" pull "$source_image" >/dev/null
+fixture_snapshot=$(/usr/bin/mktemp /tmp/restore-readiness-fixture.XXXXXXXX)
+if ! sudo -n -- env -i \
+  HOME=/root \
+  LANG=C \
+  LC_ALL=C \
+  PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
+  PYTHONDONTWRITEBYTECODE=1 \
+  /usr/bin/python3 -B "$inventory_tool" snapshot >"$fixture_snapshot"; then
+  printf '%s\n' 'could not snapshot Docker state before foreign fixture setup' >&2
+  exit 1
+fi
 "$docker_bin" volume create \
   --label "com.docker.compose.project=$foreign_project" \
   --label "restore-readiness.fixture=foreign" \
@@ -76,10 +100,12 @@ foreign_network_id=$("$docker_bin" network create \
   --label "com.docker.compose.project=$foreign_project" \
   --label "restore-readiness.fixture=foreign" \
   "$foreign_network_name")
+# The Postgres 16 source image declares this path as a volume.
 foreign_container_id=$("$docker_bin" run --detach \
   --name "$foreign_container_name" \
   --network "$foreign_network_id" \
   --mount "type=volume,source=$foreign_volume_name,target=/foreign" \
+  --tmpfs '/var/lib/postgresql/data:rw,nosuid,nodev,noexec,size=16m' \
   --publish '127.0.0.1::5432' \
   --label "com.docker.compose.project=$foreign_project" \
   --label "restore-readiness.fixture=foreign" \

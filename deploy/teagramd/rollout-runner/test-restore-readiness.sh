@@ -496,6 +496,7 @@ report = json.load(sys.stdin)
 if not (report.get("result") == "fail" and report.get("phase") == "restore" and report.get("category") == "restore_failure" and report.get("cleanup") == "verified" and report.get("exit") == 1):
     raise SystemExit(1)
 '; then
+  printf 'restore readiness malformed SQL fault returned unexpected report: %s\n' "$malformed_report" >&2
   emit_preflight_failure
 fi
 
