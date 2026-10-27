@@ -21,6 +21,7 @@ on:
       - 'internal/rsakey/**'
       - 'internal/srp/**'
       - 'internal/stickerbundle/**'
+      - 'internal/stickervalidation/**'
       - 'internal/store/**'
       - 'migrations/**'
       - 'test/perf/**'
