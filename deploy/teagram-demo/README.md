@@ -62,7 +62,9 @@ The public origin and discovery document advertise
 `demo.teagram.io:443`; browser clients use the separate WSS endpoint. CORS is
 limited to `https://web.teagram.io`. Registration is open, the existing signup
 limit remains five attempts per IP per hour, login-code logging is disabled,
-and uploads are capped at 16 MiB per file and 256 MiB per account.
+and uploads are capped at 16 MiB per file and 256 MiB per account. Sticker and
+custom emoji pack imports are disabled (`TG_STICKER_IMPORT=off`); catalogue
+packs remain available to install and send.
 
 `prepare-env.sh` keeps the Turnstile site key in `.env` and writes the secret
 key to `/var/lib/teagram-demo/secrets/turnstile-secret-key` with root ownership
