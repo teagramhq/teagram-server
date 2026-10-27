@@ -161,7 +161,7 @@ cat > "$TMP/bin/rm" <<'RM'
 set -Eeuo pipefail
 path=${!#}
 case "$path" in
-  /tmp/teagram-preflight-replay.[A-Za-z0-9]*|/tmp/teagram-preflight-replay.[A-Za-z0-9]*/*)
+  "$FIXTURE_TEST_ROOT"|"$FIXTURE_TEST_ROOT"/*|/tmp/teagram-preflight-replay.[A-Za-z0-9]*|/tmp/teagram-preflight-replay.[A-Za-z0-9]*/*)
     if [[ "$path" == /tmp/teagram-preflight-replay.[A-Za-z0-9]* ]] && [ -d "$path/sandbox/tmp/replay-output" ]; then
       for kind in verifier runner; do
         marker="$path/sandbox/tmp/replay-output/$kind.uid"
@@ -196,6 +196,7 @@ chmod 700 "$TMP/bin/mktemp"
 export PATH="$TMP/bin:$PATH"
 export REAL_RM REAL_MKTEMP
 export FIXTURE_LIVE_ROOT="$TMP/live"
+export FIXTURE_TEST_ROOT="$TMP"
 export FIXTURE_REMOVE_LOG="$TMP/removals.log"
 export FIXTURE_UNSAFE_REMOVE_LOG="$TMP/unsafe-removals.log"
 export FIXTURE_SANDBOX_UID_LOG="$TMP/sandbox-uids.log"

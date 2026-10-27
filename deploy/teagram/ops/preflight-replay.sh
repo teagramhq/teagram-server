@@ -445,6 +445,8 @@ if ! comparison_rows=$(awk -F '\t' '
     count = split("config_sha256 env_sha256 override_sha256 stop_grace_period compose_logging_policy compose_log_login_codes media_key_source media_key_current compose_public_ws_2446 exposure_public_ws_2446 compose_replica_count compose_client_addr_trust", fields, " ")
     for (i = 1; i <= count; i++) allowed[fields[i]] = 1
   }
+  # write_immutable creates an empty TSV with one newline before rows append.
+  NR == 1 && NF == 0 { next }
   {
     if (NF != 6 || $2 != "preflight" || !($3 in allowed) || $6 !~ /^(pass|fail)$/ || seen[$3]++) {
       invalid = 1
