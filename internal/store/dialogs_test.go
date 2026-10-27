@@ -91,6 +91,31 @@ func TestDialogsAndReadState(t *testing.T) {
 	}
 }
 
+func TestReadHistoryWithStaleMaxPreservesUnreadCount(t *testing.T) {
+	t.Parallel()
+	s := open(t)
+	ctx := context.Background()
+	a := mustUser(t, s, "+15551260011")
+	b := mustUser(t, s, "+15551260012")
+	send(t, s, a, b, "first", 11)
+	send(t, s, a, b, "second", 12)
+
+	if _, _, err := s.ReadHistory(ctx, b.ID, a.ID, 1); err != nil {
+		t.Fatalf("read first message: %v", err)
+	}
+	if _, _, err := s.ReadHistory(ctx, b.ID, a.ID, 0); err != nil {
+		t.Fatalf("repeat stale read: %v", err)
+	}
+
+	got := dialogWith(t, s, b.ID, a.ID)
+	if got.ReadInboxMaxID != 1 {
+		t.Fatalf("read_inbox_max_id = %d, want 1", got.ReadInboxMaxID)
+	}
+	if got.UnreadCount != 1 {
+		t.Fatalf("unread_count = %d after stale read, want 1", got.UnreadCount)
+	}
+}
+
 // A page is bounded by limit, walks strictly older with no overlap and no gap,
 // and runs off the end as a short page then an empty one. CountDialogs stays the
 // whole-list total throughout, since that is what a truncated reply advertises.

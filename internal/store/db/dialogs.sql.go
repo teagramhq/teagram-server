@@ -57,12 +57,15 @@ UPDATE dialogs SET
       THEN GREATEST(dialogs.read_outbox_max_id, $1::bigint)
     ELSE dialogs.read_outbox_max_id
   END,
-  unread_count = (
-    SELECT count(*) FROM messages m
-    WHERE m.owner_id = dialogs.owner_id AND m.peer_type = dialogs.peer_type AND m.peer_id = dialogs.peer_id
-      AND m.out = false AND m.deleted = false
-      AND m.local_id > GREATEST(dialogs.read_inbox_max_id, $1::bigint)
-  )::int
+  unread_count = CASE
+    WHEN $1::bigint <= dialogs.read_inbox_max_id THEN dialogs.unread_count
+    ELSE (
+      SELECT count(*) FROM messages m
+      WHERE m.owner_id = dialogs.owner_id AND m.peer_type = dialogs.peer_type AND m.peer_id = dialogs.peer_id
+        AND m.out = false AND m.deleted = false
+        AND m.local_id > $1::bigint
+    )::int
+  END
 WHERE owner_id = $2::bigint AND peer_type = $3::smallint
   AND peer_id = $4::bigint
 RETURNING read_inbox_max_id, unread_count
@@ -81,7 +84,9 @@ type AdvanceReadInboxRow struct {
 }
 
 // AdvanceReadInbox raises the reader's read_inbox_max_id monotonically and
-// recomputes unread as the count of still-unread inbound messages above it.
+// recomputes unread as the count of still-unread inbound messages above it
+// only when the marker advances. A stale/equal read is a no-op for unread
+// state and should not scan the conversation.
 func (q *Queries) AdvanceReadInbox(ctx context.Context, arg AdvanceReadInboxParams) (AdvanceReadInboxRow, error) {
 	row := q.db.QueryRow(ctx, advanceReadInbox,
 		arg.MaxID,

@@ -17,7 +17,75 @@ concurrency:
 env:
   TESTCONTAINERS_HUB_IMAGE_NAME_PREFIX: mirror.gcr.io
 
+# PR runs can restore default-branch cache scopes. Keep large Go and BuildKit
+# snapshots on main instead of creating a separate copy for every PR.
 jobs:
+  sticker-bundle:
+    name: sticker bundle license gate
+    runs-on: ubuntu-26.04
+    timeout-minutes: 20
+    permissions:
+      actions: write
+      contents: read
+
+    steps:
+      - uses: actions/checkout@v7.0.1
+
+      - uses: actions/setup-go@v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: false
+
+      # This cache is keyed by every input that can change the output bundle.
+      # PRs can restore the main-branch snapshot, while a changed pin or
+      # generator gets one fresh build and cache entry.
+      - name: Restore sticker bundle snapshot
+        id: sticker-bundle-cache
+        uses: actions/cache@v6.1.0
+        with:
+          path: ${{ runner.temp }}/sticker-bundle
+          key: sticker-bundle-${{ runner.os }}-node22-python3.12.15-${{ hashFiles('tools/stickerbundle/generate.sh', 'tools/stickerbundle/generate.py', 'tools/stickerbundle/render.mjs', 'tools/stickerbundle/sources.json', 'tools/stickerbundle/package.json', 'tools/stickerbundle/package-lock.json') }}
+
+      - uses: actions/setup-node@v7.0.0
+        if: steps.sticker-bundle-cache.outputs.cache-hit != 'true'
+        with:
+          node-version: 22
+
+      - uses: actions/setup-python@v6.0.0
+        if: steps.sticker-bundle-cache.outputs.cache-hit != 'true'
+        with:
+          python-version: "3.12.15"
+
+      - name: Generate pinned sticker bundle on cache miss
+        if: steps.sticker-bundle-cache.outputs.cache-hit != 'true'
+        timeout-minutes: 15
+        run: tools/stickerbundle/generate.sh --output "$RUNNER_TEMP/sticker-bundle"
+
+      - name: Gate bundle licenses and report cache state
+        run: |
+          test -s "$RUNNER_TEMP/sticker-bundle/manifest.json"
+          go run ./cmd/stickerbundle-check "$RUNNER_TEMP/sticker-bundle"
+          packs=$(jq '.packs | length' "$RUNNER_TEMP/sticker-bundle/manifest.json")
+          bytes=$(du -sb "$RUNNER_TEMP/sticker-bundle" | cut -f1)
+          echo "cache hit: ${{ steps.sticker-bundle-cache.outputs.cache-hit == 'true' }}"
+          echo "bundle packs: $packs"
+          echo "bundle bytes: $bytes"
+          {
+            echo '### Sticker bundle cache'
+            echo "- Cache hit: ${{ steps.sticker-bundle-cache.outputs.cache-hit == 'true' }}"
+            echo "- Packs: $packs"
+            echo "- Bytes: $bytes"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload sticker bundle for image jobs
+        uses: actions/upload-artifact@v7.0.1
+        with:
+          name: sticker-catalogue-bundle
+          path: ${{ runner.temp }}/sticker-bundle
+          if-no-files-found: error
+          retention-days: 1
+          compression-level: 0
+
   lint:
     name: lint
     runs-on: ubuntu-26.04
@@ -32,6 +100,9 @@ jobs:
       - name: Test Docker Hub mirror routing
         run: python3 .github/scripts/test_docker_image_mirror.py
 
+      - name: Test RPC performance fixture restore ACL handling
+        run: python3 .github/scripts/test_perf_restore.py
+
       - name: Test base image pull retries
         run: python3 .github/scripts/test_pull_base_images.py
 
@@ -40,6 +111,9 @@ jobs:
 
       - name: Test Playwright apt retry cache
         run: python3 .github/scripts/test_playwright_apt_cache.py
+
+      - name: Test Actions cache write policy
+        run: python3 .github/scripts/test_actions_cache_policy.py
 
       - uses: actions/setup-go@v7.0.0
         with:
@@ -381,12 +455,10 @@ jobs:
       - name: Pin migration timestamps for the test cache
         run: touch -d @0 migrations/* migrations
 
-      # cache: false because setup-go keys its cache on go.sum alone and saves
-      # only when that key missed. A run that changed no dependency therefore
-      # restores $GOCACHE and never writes it back, so the test results Go
-      # recorded during the run are discarded and the next run re-runs
-      # everything. The two steps below split the two caches and give the build
-      # cache a key that always misses, so it is always saved.
+      # Split module and build caches so module data follows go.sum while the
+      # build/test snapshot is refreshed each main run. PRs can restore the
+      # default-branch snapshot without saving another large copy under their
+      # own ref.
       - uses: actions/setup-go@v7.0.0
         with:
           go-version-file: go.mod
@@ -402,17 +474,11 @@ jobs:
           key: go-mod-${{ runner.os }}-${{ hashFiles('**/go.sum') }}
           restore-keys: go-mod-${{ runner.os }}-
 
-      # $GOCACHE holds both compiled packages and Go's test result cache, and it
-      # is only useful if it comes back richer than it went in. run_id/run_attempt
-      # make the primary key miss on every run, which is what forces the save; the
-      # restore key then loads the newest cache for this go.sum. run_attempt is in
-      # there because a re-run of the same run keeps its run_id, and without it a
-      # re-run would hit its own key and save nothing.
-      #
-      # The cache grows by one entry per run. GitHub evicts by age and by the
-      # 10 GB repository limit, so it is self-trimming.
-      - name: Cache Go build and test results
-        uses: actions/cache@v6.1.0
+      # The run-specific key makes the restore miss exactly and load the newest
+      # cache for this go.sum through the prefix. Only main saves the richer
+      # snapshot produced by this run.
+      - name: Restore Go build and test results
+        uses: actions/cache/restore@v6.1.0
         with:
           path: ~/.cache/go-build
           key: go-build-${{ runner.os }}-${{ hashFiles('**/go.sum') }}-${{ github.run_id }}-${{ github.run_attempt }}
@@ -570,7 +636,7 @@ jobs:
           tags: quay.io/minio/minio:latest
           load: true
           cache-from: type=gha,scope=minio-test
-          cache-to: type=gha,scope=minio-test,mode=max
+          cache-to: ${{ github.ref == 'refs/heads/main' && 'type=gha,scope=minio-test,mode=max' || '' }}
 
       - name: Measure flat parts directory ceiling
         run: PARTS_DIR_CEILING_PROBE=1 go test -count=1 -timeout 30m ./internal/blob/ -run TestFlatPartsDirEntryCeiling -v
@@ -601,6 +667,23 @@ jobs:
           docker inspect -f '{{.State.Status}} exit={{.State.ExitCode}} oomkilled={{.State.OOMKilled}} error={{.State.Error}}' tg-test-pg || echo "container gone"
           docker logs --tail 50 tg-test-pg 2>&1 || true
           free -m
+
+      # This job already restored and used the previous snapshot. Remove older
+      # Go snapshots before saving this run's unique key so they cannot crowd
+      # out the fixture caches when the repository is near its cache limit.
+      - name: Prune previous Go build snapshots
+        if: ${{ success() && github.ref == 'refs/heads/main' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GO_BUILD_CACHE_KEY: go-build-${{ runner.os }}-${{ hashFiles('**/go.sum') }}-${{ github.run_id }}-${{ github.run_attempt }}
+        run: python3 .github/scripts/prune_go_build_cache.py
+
+      - name: Save Go build and test results
+        if: ${{ success() && github.ref == 'refs/heads/main' }}
+        uses: actions/cache/save@v6.1.0
+        with:
+          path: ~/.cache/go-build
+          key: go-build-${{ runner.os }}-${{ hashFiles('**/go.sum') }}-${{ github.run_id }}-${{ github.run_attempt }}
 
   real-server-fixtures:
     runs-on: ubuntu-26.04
@@ -985,6 +1068,7 @@ jobs:
     if: ${{ always() }}
     needs:
       - ci-main
+      - sticker-bundle
       - photothumb-runtime
       - real-server-fixtures
       - websocket-d1
@@ -1004,6 +1088,7 @@ jobs:
       - name: Require all CI lanes to pass
         env:
           CI_MAIN_RESULT: ${{ needs.ci-main.result }}
+          STICKER_BUNDLE_RESULT: ${{ needs.sticker-bundle.result }}
           PHOTOTHUMB_RUNTIME_RESULT: ${{ needs.photothumb-runtime.result }}
           REAL_SERVER_FIXTURES_RESULT: ${{ needs.real-server-fixtures.result }}
           WEBSOCKET_D1_RESULT: ${{ needs.websocket-d1.result }}
@@ -1017,8 +1102,8 @@ jobs:
           DEPLOY_WORKFLOW_RESULT: ${{ needs.deploy-workflow.result }}
           RESTORE_READINESS_RESULT: ${{ needs.restore-readiness.result }}
         run: |
-          if [[ "$CI_MAIN_RESULT" != "success" || "$PHOTOTHUMB_RUNTIME_RESULT" != "success" || "$REAL_SERVER_FIXTURES_RESULT" != "success" || "$WEBSOCKET_D1_RESULT" != "success" || "$WEB_PERMANENT_EXCHANGE_RESULT" != "success" || "$SQL_LINT_RESULT" != "success" || "$CSS_RESULT" != "success" || "$BROWSER_ACCEPTANCE_RESULT" != "success" || "$BROWSER_ACCEPTANCE_IMAGE_RESULT" != "success" || "$RUSTFS_TRANSITION_RESULT" != "success" || "$SCHEMA_GATE_POSTGRES_RESULT" != "success" || "$DEPLOY_WORKFLOW_RESULT" != "success" || "$RESTORE_READINESS_RESULT" != "success" ]]; then
-            echo "::error::Required CI lanes did not pass (ci-main=$CI_MAIN_RESULT, photothumb-runtime=$PHOTOTHUMB_RUNTIME_RESULT, real-server-fixtures=$REAL_SERVER_FIXTURES_RESULT, websocket-d1=$WEBSOCKET_D1_RESULT, websocket-permanent-exchange=$WEB_PERMANENT_EXCHANGE_RESULT, sql-lint=$SQL_LINT_RESULT, css=$CSS_RESULT, browser-acceptance=$BROWSER_ACCEPTANCE_RESULT, browser-acceptance-image=$BROWSER_ACCEPTANCE_IMAGE_RESULT, rustfs-transition-qualification=$RUSTFS_TRANSITION_RESULT, schema-gate-postgres=$SCHEMA_GATE_POSTGRES_RESULT, deploy-workflow=$DEPLOY_WORKFLOW_RESULT, restore-readiness=$RESTORE_READINESS_RESULT)"
+          if [[ "$CI_MAIN_RESULT" != "success" || "$STICKER_BUNDLE_RESULT" != "success" || "$PHOTOTHUMB_RUNTIME_RESULT" != "success" || "$REAL_SERVER_FIXTURES_RESULT" != "success" || "$WEBSOCKET_D1_RESULT" != "success" || "$WEB_PERMANENT_EXCHANGE_RESULT" != "success" || "$SQL_LINT_RESULT" != "success" || "$CSS_RESULT" != "success" || "$BROWSER_ACCEPTANCE_RESULT" != "success" || "$BROWSER_ACCEPTANCE_IMAGE_RESULT" != "success" || "$RUSTFS_TRANSITION_RESULT" != "success" || "$SCHEMA_GATE_POSTGRES_RESULT" != "success" || "$DEPLOY_WORKFLOW_RESULT" != "success" || "$RESTORE_READINESS_RESULT" != "success" ]]; then
+            echo "::error::Required CI lanes did not pass (ci-main=$CI_MAIN_RESULT, sticker-bundle=$STICKER_BUNDLE_RESULT, photothumb-runtime=$PHOTOTHUMB_RUNTIME_RESULT, real-server-fixtures=$REAL_SERVER_FIXTURES_RESULT, websocket-d1=$WEBSOCKET_D1_RESULT, websocket-permanent-exchange=$WEB_PERMANENT_EXCHANGE_RESULT, sql-lint=$SQL_LINT_RESULT, css=$CSS_RESULT, browser-acceptance=$BROWSER_ACCEPTANCE_RESULT, browser-acceptance-image=$BROWSER_ACCEPTANCE_IMAGE_RESULT, rustfs-transition-qualification=$RUSTFS_TRANSITION_RESULT, schema-gate-postgres=$SCHEMA_GATE_POSTGRES_RESULT, deploy-workflow=$DEPLOY_WORKFLOW_RESULT, restore-readiness=$RESTORE_READINESS_RESULT)"
             exit 1
           fi
           echo "All required CI lanes passed"
@@ -1035,6 +1120,7 @@ jobs:
       - css
       - deploy-workflow
       - docker
+      - sticker-bundle
       - e2e-admin
       - lint
       - mirror-rustfs-qualification-images
@@ -1058,6 +1144,11 @@ jobs:
     steps:
       - uses: actions/checkout@v7.0.1
 
+      - uses: actions/download-artifact@v8.0.2
+        with:
+          name: sticker-catalogue-bundle
+          path: build/sticker-bundle
+
       - name: Set up Buildx
         uses: docker/setup-buildx-action@v4.4.1
 
@@ -1071,15 +1162,17 @@ jobs:
         uses: docker/build-push-action@v7.4.0
         with:
           context: .
+          build-contexts: sticker-bundle=build
           push: true
           tags: ghcr.io/teagramhq/teagram-server-demo:sha-${{ github.sha }}
           build-args: |
+            STICKER_BUNDLE_SOURCE=sticker-bundle
             TEAGRAMD_SOURCE_REVISION=${{ github.sha }}
           labels: |
             org.opencontainers.image.source=https://github.com/teagramhq/teagram-server
             org.opencontainers.image.revision=${{ github.sha }}
           cache-from: type=gha,scope=teagram-demo-image
-          cache-to: type=gha,scope=teagram-demo-image,mode=max
+          cache-to: ${{ github.ref == 'refs/heads/main' && 'type=gha,scope=teagram-demo-image,mode=max' || '' }}
 
       - name: Save tested demo image digest
         env:
@@ -1564,6 +1657,7 @@ jobs:
   # available in the environments the Dockerfile is edited from, so this job is
   # the only place it is ever built — it is the gate that stops it rotting.
   docker:
+    needs: sticker-bundle
     runs-on: ubuntu-26.04
     # The build is the slow part at roughly a minute; this only catches a hang
     # (a stalled pull, a container that never logs) before it burns six hours.
@@ -1608,6 +1702,11 @@ jobs:
     steps:
       - uses: actions/checkout@v7.0.1
 
+      - uses: actions/download-artifact@v8.0.2
+        with:
+          name: sticker-catalogue-bundle
+          path: build/sticker-bundle
+
       # The daemon's builder, not a docker-container one, so the build uses the
       # base images pulled below instead of fetching them again. The runner's
       # containerd image store is what lets it export to type=gha.
@@ -1629,12 +1728,14 @@ jobs:
         uses: docker/build-push-action@v7.4.0
         with:
           context: .
+          build-contexts: sticker-bundle=build
           tags: teagramd:ci
           load: true
           build-args: |
+            STICKER_BUNDLE_SOURCE=sticker-bundle
             TEAGRAMD_SOURCE_REVISION=${{ github.sha }}
           cache-from: type=gha
-          cache-to: type=gha,mode=max
+          cache-to: ${{ github.ref == 'refs/heads/main' && 'type=gha,mode=max' || '' }}
 
       - name: Show image
         run: docker images teagramd:ci
@@ -1649,12 +1750,25 @@ jobs:
           test "$source" = "https://github.com/teagramhq/teagram-server" \
             || { echo "image source label is '$source'"; exit 1; }
 
+      - name: Assert image contains the gated bundle and loader path
+        run: |
+          docker image inspect teagramd:ci --format '{{json .Config.Env}}' \
+            | jq -e 'index("TG_STICKER_CATALOG_BUNDLE=/usr/share/teagram/sticker-bundle") != null'
+          cid=$(docker create teagramd:ci)
+          mkdir -p "$RUNNER_TEMP/sticker-bundle-image"
+          docker cp "$cid":/usr/share/teagram/sticker-bundle/. "$RUNNER_TEMP/sticker-bundle-image/"
+          docker rm "$cid" > /dev/null
+          diff -qr build/sticker-bundle "$RUNNER_TEMP/sticker-bundle-image"
+
       - name: Assert missing source revision stays empty
         uses: docker/build-push-action@v7.4.0
         with:
           context: .
+          build-contexts: sticker-bundle=build
           tags: teagramd:ci-no-revision
           load: true
+          build-args: |
+            STICKER_BUNDLE_SOURCE=sticker-bundle
           cache-from: type=gha
 
       - name: Check missing source revision label
@@ -1692,6 +1806,14 @@ jobs:
         with:
           version: v1.2.0
 
+      - uses: actions/setup-go@v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: false
+
+      - name: Download Go modules for the bundle smoke client
+        run: go mod download
+
       - name: Apply migrations
         run: atlas migrate apply --dir file://migrations --url "$TG_POSTGRES_DSN"
 
@@ -1723,6 +1845,17 @@ jobs:
           echo "server never reached msg=listening"
           exit 1
 
+      - name: Smoke featured bundle packs through the real client
+        env:
+          TESTCONTAINERS_RYUK_DISABLED: "true"
+        run: |
+          docker cp teagramd:/var/lib/teagramd/server_key.pem "$RUNNER_TEMP/sticker-smoke-server-key.pem"
+          chmod 600 "$RUNNER_TEMP/sticker-smoke-server-key.pem"
+          TG_STICKER_BUNDLE_SMOKE_ADDRESS=127.0.0.1:2443 \
+            TG_STICKER_BUNDLE_SMOKE_RSA_KEY="$RUNNER_TEMP/sticker-smoke-server-key.pem" \
+            TG_STICKER_CATALOG_BUNDLE="$PWD/build/sticker-bundle" \
+            go test ./test/e2e -run '^TestStickerBundleCatalogue$' -count=1
+
       - name: Stop container
         if: always()
         run: docker rm -f teagramd
@@ -1734,8 +1867,10 @@ jobs:
   # docker-compose.yml is edited from, so this job is the only place it ever
   # runs — the gate that stops it rotting.
   compose:
-    needs: mirror-rustfs-qualification-images
-    if: ${{ always() && needs.mirror-rustfs-qualification-images.result != 'failure' && needs.mirror-rustfs-qualification-images.result != 'cancelled' }}
+    needs:
+      - mirror-rustfs-qualification-images
+      - sticker-bundle
+    if: ${{ always() && needs.mirror-rustfs-qualification-images.result != 'failure' && needs.mirror-rustfs-qualification-images.result != 'cancelled' && needs.sticker-bundle.result == 'success' }}
     runs-on: ubuntu-26.04
     # The image build plus RustFS and media verification, which is the slow part
     # at roughly a minute; this only catches a hang before it
@@ -1759,6 +1894,11 @@ jobs:
 
     steps:
       - uses: actions/checkout@v7.0.1
+
+      - uses: actions/download-artifact@v8.0.2
+        with:
+          name: sticker-catalogue-bundle
+          path: build/sticker-bundle
 
       - name: Log in to GHCR
         env:
@@ -1802,12 +1942,14 @@ jobs:
         uses: docker/build-push-action@v7.4.0
         with:
           context: .
+          build-contexts: sticker-bundle=build
           tags: teagramd:local
           load: true
           build-args: |
+            STICKER_BUNDLE_SOURCE=sticker-bundle
             TEAGRAMD_SOURCE_REVISION=${{ github.sha }}
           cache-from: type=gha
-          cache-to: type=gha,mode=max
+          cache-to: ${{ github.ref == 'refs/heads/main' && 'type=gha,mode=max' || '' }}
 
       - name: Assert Compose image revision label
         run: |
@@ -1815,6 +1957,16 @@ jobs:
           revision=$(docker image inspect teagramd:local --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}')
           test "$revision" = "$TEAGRAMD_SOURCE_REVISION" \
             || { echo "Compose image revision label is '$revision'"; exit 1; }
+
+      - name: Assert Compose image contains the gated bundle and loader path
+        run: |
+          docker image inspect teagramd:local --format '{{json .Config.Env}}' \
+            | jq -e 'index("TG_STICKER_CATALOG_BUNDLE=/usr/share/teagram/sticker-bundle") != null'
+          cid=$(docker create teagramd:local)
+          mkdir -p "$RUNNER_TEMP/sticker-bundle-image"
+          docker cp "$cid":/usr/share/teagram/sticker-bundle/. "$RUNNER_TEMP/sticker-bundle-image/"
+          docker rm "$cid" > /dev/null
+          diff -qr build/sticker-bundle "$RUNNER_TEMP/sticker-bundle-image"
 
       - name: Verify pinned local Compose revision forwarding
         timeout-minutes: 15
@@ -1869,7 +2021,7 @@ jobs:
           tags: teagramd-mc-init:local
           load: true
           cache-from: type=gha,scope=teagramd-mc-init
-          cache-to: type=gha,scope=teagramd-mc-init,mode=max
+          cache-to: ${{ github.ref == 'refs/heads/main' && 'type=gha,scope=teagramd-mc-init,mode=max' || '' }}
 
       - name: Verify RustFS client image
         run: docker run --rm --entrypoint /bin/sh teagramd-mc-init:local -ec 'command -v mc && mc --version'
@@ -2147,6 +2299,27 @@ jobs:
           # logged. What the scenario claims is that it survived the restart and
           # the assertions above it, so ask again at the end.
           assert_running "after the migrate assertions"
+
+      - name: Smoke featured bundle packs through the real client
+        run: |
+          go mod download
+          export COMPOSE_FILE=docker-compose.yml:docker-compose.local-blobs.yml
+          teagramd_id=$(docker compose ps -q teagramd)
+          postgres_id=$(docker compose ps -q postgres)
+          test -n "$teagramd_id" && test -n "$postgres_id"
+          key_volume=$(docker inspect "$teagramd_id" --format '{{range .Mounts}}{{if and (eq .Type "volume") (eq .Destination "/var/lib/teagramd")}}{{.Name}}{{end}}{{end}}')
+          test -n "$key_volume"
+          TG_AUTHKEY_ENC_KEY=$(docker run --rm -v "$key_volume":/key "$BUSYBOX_IMAGE" cat /key/enc_key.hex)
+          postgres_ip=$(docker inspect "$postgres_id" --format '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}')
+          test -n "$postgres_ip"
+          docker cp "$teagramd_id":/var/lib/teagramd/server_key.pem "$RUNNER_TEMP/sticker-smoke-server-key.pem"
+          chmod 600 "$RUNNER_TEMP/sticker-smoke-server-key.pem"
+          TG_POSTGRES_DSN="postgres://postgres:ci-local-mode-postgres@${postgres_ip}:5432/teagram?sslmode=disable" \
+            TG_AUTHKEY_ENC_KEY="$TG_AUTHKEY_ENC_KEY" \
+            TG_STICKER_BUNDLE_SMOKE_ADDRESS=127.0.0.1:2443 \
+            TG_STICKER_BUNDLE_SMOKE_RSA_KEY="$RUNNER_TEMP/sticker-smoke-server-key.pem" \
+            TG_STICKER_CATALOG_BUNDLE="$PWD/build/sticker-bundle" \
+            go test ./test/e2e -run '^TestStickerBundleCatalogue$' -count=1
 
       - name: Write throwaway RustFS credentials and verify S3 rendering
         run: |
@@ -2621,9 +2794,11 @@ jobs:
 
   photothumb-runtime:
     name: photo worker runtime (${{ matrix.arch }})
+    needs: sticker-bundle
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 20
     permissions:
+      actions: read
       contents: read
     strategy:
       fail-fast: false
@@ -2638,6 +2813,15 @@ jobs:
 
     steps:
       - uses: actions/checkout@v7.0.1
+
+      - uses: actions/download-artifact@v8.0.2
+        with:
+          name: sticker-catalogue-bundle
+          path: build/sticker-bundle
+
+      - uses: docker/setup-buildx-action@v4.4.1
+        with:
+          driver: docker
 
       - name: Prepare the qualified replacement fixture
         run: |
@@ -2663,7 +2847,11 @@ jobs:
         run: |
           set -euo pipefail
           fixture="$RUNNER_TEMP/replacement-1600x1600.jpg"
-          docker build --tag photothumb-runtime:qualification .
+          docker buildx build \
+            --load \
+            --build-context sticker-bundle=build \
+            --build-arg STICKER_BUNDLE_SOURCE=sticker-bundle \
+            --tag photothumb-runtime:qualification .
           image_arch=$(docker image inspect --format '{{.Architecture}}' photothumb-runtime:qualification)
           [ "$image_arch" = "$EXPECTED_ARCH" ] || {
             echo "built image architecture is '$image_arch', want '$EXPECTED_ARCH'"

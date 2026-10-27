@@ -183,6 +183,9 @@ func TestMessagingSenderSessionEchoSuppression(t *testing.T) {
 	waitClient(c)
 	waitForDistinctAuthKeys(t, ctx, registry, b1.id, 2, "B1", b1.lifecycle)
 	waitForDistinctAuthKeys(t, ctx, registry, a1.id, 2, "A1", a1.lifecycle)
+	// Both A sessions' getState includes the seed, so it must not be replayed as a push.
+	assertNoMessageFor(t, ctx, pushA1.newMsg, "A1 pre-state push")
+	assertNoMessageFor(t, ctx, pushA2.newMsg, "A2 pre-state push")
 
 	var warmup tg.UpdatesClass
 	if err := exec(a1, func(ctx context.Context, api *tg.Client) error {
@@ -205,8 +208,6 @@ func TestMessagingSenderSessionEchoSuppression(t *testing.T) {
 	assertObservedMessage(t, ctx, collA2, "A to B warmup", warmupMessage.ID, true, b1.id, warmupPts, "A2 other session", true)
 	assertObservedMessage(t, ctx, collB1, "A to B warmup", 1, false, a1.id, 1, "B1 incoming", true)
 	assertObservedMessage(t, ctx, collB2, "A to B warmup", 1, false, a1.id, 1, "B2 incoming", true)
-	assertObservedMessage(t, ctx, pushA1, "A saved id seed", int(seedMessage.LocalID), true, a1.id, seedPts, "A1 initial catch-up push")
-	assertObservedMessage(t, ctx, pushA2, "A saved id seed", int(seedMessage.LocalID), true, a1.id, seedPts, "A2 initial catch-up push")
 	assertObservedMessage(t, ctx, pushA2, "A to B warmup", warmupMessage.ID, true, b1.id, warmupPts, "A2 push")
 	assertObservedMessage(t, ctx, pushB1, "A to B warmup", 1, false, a1.id, 1, "B1 push")
 	assertObservedMessage(t, ctx, pushB2, "A to B warmup", 1, false, a1.id, 1, "B2 push")

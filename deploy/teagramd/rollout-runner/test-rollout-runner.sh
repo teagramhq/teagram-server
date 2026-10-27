@@ -1815,6 +1815,23 @@ with (
 PY
 }
 
+remove_authority_reports() {
+  local state_dir=$1 report_root=$2 record transition report phase_dir
+  for record in "$state_dir"/journal/*.json; do
+    [ -f "$record" ] || continue
+    transition=$(jq -er '.transition_id' "$record") || return 1
+    report="$report_root/teagramd-blob-mode-report-$transition.json"
+    [ -f "$report" ] || continue
+    while IFS= read -r phase_dir; do
+      case "$phase_dir" in
+        transition-proof-fixtures-*) rm -rf -- "$report_root/$phase_dir" || return 1 ;;
+        *) return 1 ;;
+      esac
+    done < <(jq -r '.phase_files[]? | split("/")[0]' "$report" | sort -u)
+    rm -f -- "$report" || return 1
+  done
+}
+
 configure_s3_compose_fixture() {
   local state=$1 rustfs_volume=$2 private_network=$3
   local config next
@@ -2514,6 +2531,54 @@ if prepare_apply_fixture s3-accepted-apply s3-accepted-apply; then
   fi
 else
   fail 'S3 apply fixture requires a valid initialized local authority'
+fi
+
+missing_reports_apply_name=s3-accepted-apply-missing-reports
+if prepare_apply_fixture "$missing_reports_apply_name" s3-accepted-apply; then
+  state=$(cat "$TMP/$missing_reports_apply_name-state-path")
+  checkout=$(cat "$TMP/$missing_reports_apply_name-checkout-path")
+  root=$(cat "$TMP/$missing_reports_apply_name-root-path")
+  if create_transition_authority_fixture "$SCRIPT_DIR/test-blob-mode-state.py" \
+    "$TMP/$missing_reports_apply_name-authority" "$checkout/.state/blob-mode" /root s3-accepted && \
+    configure_s3_compose_fixture "$state" fixture_rustfsdata fixture_rustfs_private; then
+    printf '%s\n' 'TG_BLOB_S3_ACCESS_KEY_ID=fixture-access-key' \
+      'TG_BLOB_S3_SECRET_ACCESS_KEY=fixture-secret' > "$checkout/.env.rustfs-parked"
+    chmod 600 "$checkout/.env.rustfs-parked"
+    expected_env_files="$checkout/.env,$checkout/.env.rustfs-parked"
+    printf '%s\n' "$expected_env_files" > "$TMP/$missing_reports_apply_name-compose-env-files"
+    if remove_authority_reports "$checkout/.state/blob-mode" /root; then
+      status=$(run_fixture "$missing_reports_apply_name" built 0 '' 2 '' '' apply "$APPLY_TARGET_SHA")
+      deployment_validation_count=$(grep -c \
+        '^python3 blob-mode-state.pinned deployment-validate$' \
+        "$TMP/$missing_reports_apply_name-events" || true)
+      if python3 "$SCRIPT_DIR/blob-mode-state.py" validate \
+        --state-dir "$checkout/.state/blob-mode" --report-root /root \
+        --containers "$root.target/pre-backup-blob-containers.json" \
+        --compose "$root.target/pre-backup-blob-compose.json" \
+        --override "$checkout/docker-compose.override.yml" --checkout "$checkout" \
+        >/dev/null 2>&1; then
+        strict_validation_rejected=0
+      else
+        strict_validation_rejected=1
+      fi
+      if [ "$status" = 0 ] && \
+         grep -q "rollout=verified sha=$APPLY_TARGET_SHA" "$TMP/$missing_reports_apply_name.stdout" && \
+         [ "$(cat "$state/head")" = "$APPLY_TARGET_SHA" ] && \
+         [ "$deployment_validation_count" -ge 3 ] && [ "$strict_validation_rejected" = 1 ] && \
+         grep -q 'backend=s3 ' "$root.target/pre-backup-blob-authority.txt" && assert_evidence_mode "$root"; then
+        pass 'S3 apply tolerates missing reports through read-only rollout validations while strict validation rejects them'
+      else
+        show_fixture_failure "$missing_reports_apply_name" "$status"
+        fail 'S3 apply must tolerate missing reports through replacement without weakening strict validation'
+      fi
+    else
+      fail 'missing-report apply fixture could not remove its authority reports'
+    fi
+  else
+    fail 'missing-report S3 apply fixture requires publishable authority and a matching Compose render'
+  fi
+else
+  fail 'missing-report S3 apply fixture requires a valid initialized local authority'
 fi
 
 recovered_apply_name=moved-stack-9ef1110-to-da0107d-recovered-local-apply

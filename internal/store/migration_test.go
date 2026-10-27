@@ -436,10 +436,10 @@ func TestOwnerDialogCountsBackfillExistingDialogs(t *testing.T) {
 	}
 
 	for _, filename := range []string{
-		"20261026000002_owner_dialog_counts.sql",
-		"20261026000003_backfill_owner_dialog_counts.sql",
-		"20261026000004_owner_dialog_counts_for_users.sql",
-		"20261026000005_backfill_zero_dialog_counts.sql",
+		"20261026000003_owner_dialog_counts.sql",
+		"20261026000004_backfill_owner_dialog_counts.sql",
+		"20261026000005_owner_dialog_counts_for_users.sql",
+		"20261026000006_backfill_zero_dialog_counts.sql",
 	} {
 		migration, err := os.ReadFile(filepath.Join("..", "..", "migrations", filename))
 		if err != nil {
