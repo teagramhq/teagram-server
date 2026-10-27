@@ -2144,6 +2144,103 @@ class RestoreReadinessContractTests(unittest.TestCase):
             ):
                 self.assertEqual(RESTORE_READINESS.supervise(Path(directory) / "ownership.json", lock_fd, rollout_fd), 0)
 
+    def test_supervisor_reports_allowlisted_cleanup_operation_and_error(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="rr-supervisor-cleanup-failure-") as directory:
+            lock_path = Path(directory) / "lock"
+            lock_path.write_bytes(b"")
+            lock_fd = RESTORE_READINESS.os.open(lock_path, RESTORE_READINESS.os.O_RDWR)
+            lock_info = RESTORE_READINESS.os.fstat(lock_fd)
+            rollout_path = Path(directory) / "rollout-lock"
+            rollout_path.write_bytes(b"")
+            rollout_fd = RESTORE_READINESS.os.open(rollout_path, RESTORE_READINESS.os.O_RDWR)
+            rollout_info = RESTORE_READINESS.os.fstat(rollout_fd)
+            manifest = {
+                "global_lock": {"device": lock_info.st_dev, "inode": lock_info.st_ino},
+                "rollout_lock": {"device": rollout_info.st_dev, "inode": rollout_info.st_ino},
+                "supervisor": {"pid": 0, "start_ticks": 0},
+                "parent": {"pid": 999999, "start_ticks": 1},
+                "parent_done": True,
+                "cleanup_deadline": RESTORE_READINESS.time.monotonic() + 60,
+            }
+
+            class FailedCleanupDrill:
+                def __init__(self, _args: Any, _run_dir: Path, recovered_manifest: dict[str, Any]) -> None:
+                    self.manifest = recovered_manifest
+                    self.cleanup_failure = {
+                        "operation": "docker_container_remove",
+                        "error": "command_failed",
+                        "exit_status": 1,
+                    }
+
+                def cleanup_resources(self) -> bool:
+                    return False
+
+                def save(self) -> None:
+                    return None
+
+            output = io.StringIO()
+            with (
+                patch.object(RESTORE_READINESS, "load_manifest", return_value=manifest),
+                patch.object(RESTORE_READINESS, "process_start_ticks", side_effect=lambda pid: 77 if pid == RESTORE_READINESS.os.getpid() else None),
+                patch.object(RESTORE_READINESS, "make_runtime_args", return_value=None),
+                patch.object(RESTORE_READINESS, "Drill", FailedCleanupDrill),
+                redirect_stdout(output),
+            ):
+                status = RESTORE_READINESS.supervise(Path(directory) / "ownership.json", lock_fd, rollout_fd)
+
+            self.assertEqual(status, 1)
+            diagnostic = json.loads(output.getvalue())
+            self.assertEqual(
+                diagnostic,
+                {
+                    "operation": "docker_container_remove",
+                    "error": "command_failed",
+                    "exit_status": 1,
+                },
+            )
+            self.assertNotIn("container-id", output.getvalue())
+
+    def test_cleanup_command_failure_diagnostic_omits_command_output_and_identifiers(self) -> None:
+        drill = object.__new__(RESTORE_READINESS.Drill)
+        drill.executable = "/usr/bin/docker"
+        drill.cleanup_active = True
+        drill.cleanup_failure = None
+        drill._run_child = lambda *_args, **_kwargs: (1, b"private-container-id daemon error")
+
+        status, output = RESTORE_READINESS.Docker.cleanup_call(
+            drill,
+            ["rm", "private-container-id"],
+        )
+
+        self.assertEqual(status, 1)
+        self.assertEqual(output, b"private-container-id daemon error")
+        self.assertEqual(
+            drill.cleanup_failure,
+            {
+                "operation": "docker_container_remove",
+                "error": "command_failed",
+                "exit_status": 1,
+            },
+        )
+        message = RESTORE_READINESS.cleanup_failure_log_message(drill.cleanup_failure)
+        self.assertEqual(
+            message,
+            "restore readiness cleanup failed: operation=docker_container_remove "
+            "error=command_failed exit_status=1",
+        )
+        self.assertEqual(
+            RESTORE_READINESS.parse_cleanup_failure_output(
+                b'{"operation":"docker_container_remove","error":"command_failed","exit_status":1}\n'
+            ),
+            message,
+        )
+        self.assertNotIn("private-container-id", message)
+        self.assertIsNone(
+            RESTORE_READINESS.parse_cleanup_failure_output(
+                b'{"operation":"docker_container_remove","error":"private-container-id"}\n'
+            )
+        )
+
     def test_supervisor_bounds_delayed_cleanup_command_and_leaves_cleanup_unverified(self) -> None:
         with tempfile.TemporaryDirectory(prefix="rr-cleanup-deadline-") as directory:
             lock_path = Path(directory) / "lock"
@@ -2169,6 +2266,8 @@ class RestoreReadinessContractTests(unittest.TestCase):
                     self.manifest = recovered_manifest
                     self.executable = "/usr/bin/sleep"
                     self.environment = {"PATH": "/usr/bin:/bin"}
+                    self.cleanup_active = True
+                    self.cleanup_failure = None
                     self.save = lambda: None
 
                 def cleanup_resources(self) -> bool:
@@ -2188,18 +2287,24 @@ class RestoreReadinessContractTests(unittest.TestCase):
                 return process_start_ticks(pid)
 
             started = time.monotonic()
+            output = io.StringIO()
             with (
                 patch.object(RESTORE_READINESS, "load_manifest", return_value=manifest),
                 patch.object(RESTORE_READINESS, "process_start_ticks", side_effect=start_ticks),
                 patch.object(RESTORE_READINESS, "make_runtime_args", return_value=None),
                 patch.object(RESTORE_READINESS, "Drill", DelayedCleanupDrill),
                 patch.object(RESTORE_READINESS, "remove_finished_run", return_value=True),
+                redirect_stdout(output),
             ):
                 status = RESTORE_READINESS.supervise(Path(directory) / "ownership.json", lock_fd, rollout_fd)
 
             self.assertEqual(status, 1)
             self.assertLess(time.monotonic() - started, 1)
             self.assertFalse(manifest["cleanup_verified"])
+            self.assertEqual(
+                json.loads(output.getvalue()),
+                {"operation": "cleanup_resources", "error": "command_timeout"},
+            )
 
     def test_disposable_dns_fixture_answers_only_its_query(self) -> None:
         query = RESTORE_READINESS.dns_fixture_query()
