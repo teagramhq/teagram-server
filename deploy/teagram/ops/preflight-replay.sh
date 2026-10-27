@@ -179,7 +179,11 @@ prepare_sandbox() {
   fi
   HOST_ENV=$(PATH="$TRUSTED_BIN_PATH" command -v env) || { fail 'sandbox launcher is unavailable'; return 1; }
   HOST_TIMEOUT=$(PATH="$TRUSTED_BIN_PATH" command -v timeout) || { fail 'sandbox timeout is unavailable'; return 1; }
-  readonly CHROOT_KIND CHROOT_BIN HOST_ENV HOST_TIMEOUT
+  HOST_UNSHARE=$(PATH="$TRUSTED_BIN_PATH" command -v unshare) || {
+    fail 'network-isolated sandbox launcher is unavailable'
+    return 1
+  }
+  readonly CHROOT_KIND CHROOT_BIN HOST_ENV HOST_TIMEOUT HOST_UNSHARE
 
   install -d -m 755 "$SANDBOX_ROOT" "$SANDBOX_ROOT/etc" "$SANDBOX_ROOT/dev" \
     "$SANDBOX_ROOT/workspace/deploy/teagramd/rollout-runner"
@@ -240,14 +244,16 @@ run_in_sandbox() {
       eval "exec ${fd}>&-" 2>/dev/null || :
     done
     if [ "$CHROOT_KIND" = coreutils ]; then
-      exec "$HOST_TIMEOUT" -k 5 45 "$HOST_ENV" -i PATH="$SANDBOX_PATH" HOME=/nonexistent LANG=C LC_ALL=C TZ=UTC \
+      exec "$HOST_TIMEOUT" -k 5 45 "$HOST_UNSHARE" -n -- \
+        "$HOST_ENV" -i PATH="$SANDBOX_PATH" HOME=/nonexistent LANG=C LC_ALL=C TZ=UTC \
         ROLLOUT_PREFLIGHT_REPLAY_SANDBOX=1 \
         ROLLOUT_VERIFIER_SOURCE_ONLY=1 \
         PREFLIGHT_REPLAY_SANDBOX_EVIDENCE_DIR="$SANDBOX_RESULTS" \
         "$CHROOT_BIN" --groups="$SANDBOX_UID" --userspec="$SANDBOX_UID:$SANDBOX_UID" \
         "$SANDBOX_ROOT" /bin/bash "$command" "$@"
     fi
-    exec "$HOST_TIMEOUT" -k 5 45 "$HOST_ENV" -i PATH="$SANDBOX_PATH" HOME=/nonexistent LANG=C LC_ALL=C TZ=UTC \
+    exec "$HOST_TIMEOUT" -k 5 45 "$HOST_UNSHARE" -n -- \
+      "$HOST_ENV" -i PATH="$SANDBOX_PATH" HOME=/nonexistent LANG=C LC_ALL=C TZ=UTC \
       ROLLOUT_PREFLIGHT_REPLAY_SANDBOX=1 \
       ROLLOUT_VERIFIER_SOURCE_ONLY=1 \
       PREFLIGHT_REPLAY_SANDBOX_EVIDENCE_DIR="$SANDBOX_RESULTS" \

@@ -6,13 +6,92 @@ umask 077
 
 SCRIPT_DIR=$(cd -P "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 SCRIPT="$SCRIPT_DIR/ops/preflight-replay.sh"
-TMP=$(mktemp -d /tmp/teagram-preflight-replay-test.XXXXXXXXXX)
 REAL_RM=$(command -v rm)
 REAL_MKTEMP=$(command -v mktemp)
-trap '"$REAL_RM" -rf -- "$TMP"' EXIT
+readonly TMP_PREFIX=/tmp/teagram-preflight-replay-test.
+TMP=
+TMP_VALIDATED=0
+NETWORK_PROBE_PID=
+
+fixture_tmp_is_direct_child() {
+  local path=$1 suffix
+  case "$path" in
+    "$TMP_PREFIX"*) suffix=${path#"$TMP_PREFIX"} ;;
+    *) return 1 ;;
+  esac
+  [[ "$suffix" =~ ^[A-Za-z0-9]{10}$ ]] || return 1
+  [ ! -L "$path" ] && [ "$(readlink -f -- "$path" 2>/dev/null)" = "$path" ]
+}
+
+cleanup() {
+  local rc=$?
+  trap - EXIT
+  if [ -n "$NETWORK_PROBE_PID" ]; then
+    kill "$NETWORK_PROBE_PID" 2>/dev/null || :
+    wait "$NETWORK_PROBE_PID" 2>/dev/null || :
+  fi
+  if [ -n "$TMP" ]; then
+    if [ "$TMP_VALIDATED" = 1 ] && fixture_tmp_is_direct_child "$TMP"; then
+      "$REAL_RM" -rf -- "$TMP" || rc=1
+    else
+      printf '%s\n' 'fixture cleanup refused an unvalidated or unsafe temporary path' >&2
+      rc=1
+    fi
+  fi
+  exit "$rc"
+}
+
+if ! TMP=$("$REAL_MKTEMP" -d "$TMP_PREFIX"XXXXXXXXXX); then
+  printf '%s\n' 'cannot create preflight replay fixture directory' >&2
+  exit 1
+fi
+trap cleanup EXIT
+fixture_tmp_is_direct_child "$TMP" && [ -d "$TMP" ] && \
+  [ "$(stat -c %u:%a -- "$TMP")" = '0:700' ] || {
+  printf '%s\n' 'fixture temporary directory is outside its private prefix' >&2
+  exit 1
+}
+TMP_VALIDATED=1
+if [ "${FIXTURE_TEST_ROOT_TMP_ONLY:-0}" = 1 ]; then
+  exit 0
+fi
+
 chmod 700 "$TMP"
 chmod 755 "$TMP"
 mkdir -m 777 "$TMP/host-exposure"
+
+cat > "$TMP/network-probe-listener.py" <<'PYTHON'
+import socket
+import sys
+
+port_file, connection_file = sys.argv[1:]
+listener = socket.socket()
+listener.bind(("127.0.0.1", 0))
+listener.listen(4)
+with open(port_file, "w", encoding="ascii") as output:
+    output.write(f"{listener.getsockname()[1]}\n")
+while True:
+    connection, _ = listener.accept()
+    connection.close()
+    with open(connection_file, "a", encoding="ascii") as output:
+        output.write("connected\n")
+PYTHON
+python3 "$TMP/network-probe-listener.py" "$TMP/network-probe.port" \
+  "$TMP/network-probe-connections.log" &
+NETWORK_PROBE_PID=$!
+for ((attempt = 1; attempt <= 50; attempt++)); do
+  [ -s "$TMP/network-probe.port" ] && break
+  kill -0 "$NETWORK_PROBE_PID" 2>/dev/null || {
+    printf '%s\n' 'host network probe did not start' >&2
+    exit 1
+  }
+  sleep 0.1
+done
+NETWORK_PROBE_PORT=$(cat "$TMP/network-probe.port")
+[[ "$NETWORK_PROBE_PORT" =~ ^[0-9]+$ ]] || {
+  printf '%s\n' 'host network probe returned an invalid port' >&2
+  exit 1
+}
 
 export GIT_AUTHOR_NAME=fixture GIT_AUTHOR_EMAIL=fixture@example.invalid
 export GIT_COMMITTER_NAME=fixture GIT_COMMITTER_EMAIL=fixture@example.invalid
@@ -61,6 +140,12 @@ if [ "\${ROLLOUT_PREFLIGHT_REPLAY_SANDBOX:-0}" = 1 ]; then
   printf '%s\\n' "\$(id -u)" > "\$PREFLIGHT_REPLAY_SANDBOX_EVIDENCE_DIR/$kind.uid"
   mkdir -p "/tmp/$test_tmp_name/host-exposure"
   printf '%s\\n' attacked > "/tmp/$test_tmp_name/host-exposure/sentinel"
+  if (exec 9<>/dev/tcp/127.0.0.1/$NETWORK_PROBE_PORT) 2>/dev/null; then
+    printf '%s\\n' exposed > "\$PREFLIGHT_REPLAY_SANDBOX_EVIDENCE_DIR/$kind.network"
+    exec 9<&- 9>&-
+  else
+    printf '%s\\n' blocked > "\$PREFLIGHT_REPLAY_SANDBOX_EVIDENCE_DIR/$kind.network"
+  fi
 fi
 PREFIX
   {
@@ -169,6 +254,11 @@ case "$path" in
           printf '%s\t' "$kind" >> "${FIXTURE_SANDBOX_UID_LOG:?}"
           cat -- "$marker" >> "${FIXTURE_SANDBOX_UID_LOG:?}"
         fi
+        network_marker="$path/sandbox/tmp/replay-output/$kind.network"
+        if [ -f "$network_marker" ] && [ ! -L "$network_marker" ]; then
+          printf '%s\t' "$kind" >> "${FIXTURE_SANDBOX_NETWORK_LOG:?}"
+          cat -- "$network_marker" >> "${FIXTURE_SANDBOX_NETWORK_LOG:?}"
+        fi
       done
     fi
     printf '%s\n' "$path" >> "${FIXTURE_REMOVE_LOG:?}"
@@ -185,6 +275,10 @@ chmod 700 "$TMP/bin/rm"
 cat > "$TMP/bin/mktemp" <<'MKTEMP'
 #!/usr/bin/env bash
 set -Eeuo pipefail
+if [[ "${FIXTURE_BAD_ROOT_MKTEMP:-0}" == 1 ]]; then
+  printf '%s\n' "${FIXTURE_BAD_ROOT_PATH:?}"
+  exit 0
+fi
 if [[ "${FIXTURE_BAD_MKTEMP:-0}" == 1 ]]; then
   printf '%s\n' /tmp/outside-preflight-replay
   exit 0
@@ -193,13 +287,37 @@ exec "$REAL_MKTEMP" "$@"
 MKTEMP
 chmod 700 "$TMP/bin/mktemp"
 
+before_host_exposure_mode=$(stat -c %a -- "$TMP/host-exposure")
+: > "$TMP/unsafe-root-removals.log"
+if FIXTURE_BAD_ROOT_MKTEMP=1 \
+   FIXTURE_BAD_ROOT_PATH="$TMP/host-exposure" \
+   FIXTURE_TEST_ROOT_TMP_ONLY=1 \
+   FIXTURE_TEST_ROOT=/tmp/preflight-replay-no-match \
+   FIXTURE_REMOVE_LOG="$TMP/removals.log" \
+   FIXTURE_UNSAFE_REMOVE_LOG="$TMP/unsafe-root-removals.log" \
+   PATH="$TMP/bin:$PATH" bash "${BASH_SOURCE[0]}" > "$TMP/unsafe-root-mktmp.log" 2>&1; then
+  printf '%s\n' 'FAIL root fixture accepted an unsafe mktemp path' >&2
+  exit 1
+fi
+grep -Fq 'fixture temporary directory is outside its private prefix' "$TMP/unsafe-root-mktmp.log" && \
+  grep -Fq 'fixture cleanup refused an unvalidated or unsafe temporary path' "$TMP/unsafe-root-mktmp.log" && \
+  [ "$(stat -c %a -- "$TMP/host-exposure")" = "$before_host_exposure_mode" ] && \
+  [ ! -s "$TMP/unsafe-root-removals.log" ] || {
+  printf '%s\n' 'FAIL root fixture used or removed an unsafe mktemp path' >&2
+  cat "$TMP/unsafe-root-mktmp.log" >&2
+  exit 1
+}
+printf '%s\n' 'PASS root fixture rejects unsafe mktemp paths before use and cleanup'
+
 export PATH="$TMP/bin:$PATH"
 export REAL_RM REAL_MKTEMP
+export FIXTURE_SYSTEM_MKTEMP="$REAL_MKTEMP"
 export FIXTURE_LIVE_ROOT="$TMP/live"
 export FIXTURE_TEST_ROOT="$TMP"
 export FIXTURE_REMOVE_LOG="$TMP/removals.log"
 export FIXTURE_UNSAFE_REMOVE_LOG="$TMP/unsafe-removals.log"
 export FIXTURE_SANDBOX_UID_LOG="$TMP/sandbox-uids.log"
+export FIXTURE_SANDBOX_NETWORK_LOG="$TMP/sandbox-network.log"
 export FIXTURE_HOST_SENTINEL="$TMP/host-exposure/sentinel"
 export PREFLIGHT_REPLAY_TEST_MODE=1
 export PREFLIGHT_REPLAY_TEST_LIVE_CHECKOUT="$TMP/live"
@@ -207,6 +325,7 @@ export PREFLIGHT_REPLAY_TEST_REPOSITORY_URL="$TMP/origin.git"
 : > "$FIXTURE_REMOVE_LOG"
 : > "$FIXTURE_UNSAFE_REMOVE_LOG"
 : > "$FIXTURE_SANDBOX_UID_LOG"
+: > "$FIXTURE_SANDBOX_NETWORK_LOG"
 "$REAL_RM" -f -- "$FIXTURE_HOST_SENTINEL"
 
 run_replay() {
@@ -218,6 +337,7 @@ run_replay() {
       FIXTURE_EXPECTED_FILES="$selection" FIXTURE_REMOVE_LOG="$FIXTURE_REMOVE_LOG" \
       FIXTURE_UNSAFE_REMOVE_LOG="$FIXTURE_UNSAFE_REMOVE_LOG" REAL_RM="$REAL_RM" \
       FIXTURE_SANDBOX_UID_LOG="$FIXTURE_SANDBOX_UID_LOG" \
+      FIXTURE_SANDBOX_NETWORK_LOG="$FIXTURE_SANDBOX_NETWORK_LOG" \
       FIXTURE_HOST_SENTINEL="$FIXTURE_HOST_SENTINEL" \
       REAL_MKTEMP="$REAL_MKTEMP" FIXTURE_BAD_MKTEMP="${FIXTURE_BAD_MKTEMP:-0}" \
       PREFLIGHT_REPLAY_TEST_FORCE_COMPAT="${PREFLIGHT_REPLAY_TEST_FORCE_COMPAT:-0}" \
@@ -253,6 +373,7 @@ fi
 printf '%s\n' 'PASS drifted replay exits non-zero and redacts values'
 
 : > "$FIXTURE_SANDBOX_UID_LOG"
+: > "$FIXTURE_SANDBOX_NETWORK_LOG"
 rm -f -- "$FIXTURE_HOST_SENTINEL"
 output=$(run_replay "$sandbox_attack_sha" 'docker-compose.fixture.yml,docker-compose.override.yml')
 [[ "$(cat "$TMP/last-rc")" == 0 ]] || { printf 'FAIL sandbox attack replay:\n%s\n' "$output" >&2; exit 1; }
@@ -261,11 +382,18 @@ output=$(run_replay "$sandbox_attack_sha" 'docker-compose.fixture.yml,docker-com
     "$(cat "$FIXTURE_SANDBOX_UID_LOG")" >&2
   exit 1
 }
+[[ "$(cat "$FIXTURE_SANDBOX_NETWORK_LOG")" == $'verifier\tblocked\nrunner\tblocked' ]] && \
+  [ ! -s "$TMP/network-probe-connections.log" ] || {
+  printf 'FAIL PR code reached the host network canary:\n%s\n' \
+    "$(cat "$FIXTURE_SANDBOX_NETWORK_LOG")" >&2
+  exit 1
+}
 [ ! -e "$FIXTURE_HOST_SENTINEL" ] || {
   printf '%s\n' 'FAIL PR code wrote through the sandbox to a host path' >&2
   exit 1
 }
 printf '%s\n' 'PASS PR verifier and runner are unprivileged and cannot write to host paths'
+printf '%s\n' 'PASS PR verifier and runner cannot reach a host network service'
 
 bad_sha=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 output=$(run_replay "$bad_sha" 'docker-compose.alternate.yml,docker-compose.override.yml')
