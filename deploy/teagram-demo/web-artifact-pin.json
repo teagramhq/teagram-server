@@ -1,8 +1,7 @@
 {
   "schemaVersion": 1,
-  "mode": "candidate",
-  "pullRequest": 121,
-  "runId": 40528697363,
-  "sourceCommit": "090404b26b90e225fbb8adbee50201a6fd49820b",
-  "artifactDigest": "sha256:03d4b8a7a6f1421f8cc78abac46985d020c24ece6ab8e60375358967843ce33d"
+  "mode": "published",
+  "runId": 40565630475,
+  "sourceCommit": "54bcaf2f758823a2d4a635a53056661d745aa442",
+  "artifactDigest": "sha256:987491a07e290ed655dc98aaaf273a3d291e1d1ff7f074352c685f996de47396"
 }
