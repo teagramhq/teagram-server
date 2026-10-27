@@ -7437,6 +7437,15 @@ def recover(manifest_path: Path) -> int:
             raise ValueError("deployment rollout is active")
         rollout_descriptor, rollout_record = rollout_lock
         manifest = load_manifest(manifest_path)
+        baseline = manifest.get("baseline")
+        if isinstance(baseline, dict):
+            inventory = baseline.get("docker_inventory")
+            if (
+                isinstance(inventory, dict)
+                and set(inventory) == {"containers", "volumes", "networks"}
+            ):
+                # Earlier schema-v1 runs rejected token-labeled images before saving this inventory.
+                inventory["images"] = {}
         lock = open_global_lock()
         if lock is not None:
             descriptor, _ = lock

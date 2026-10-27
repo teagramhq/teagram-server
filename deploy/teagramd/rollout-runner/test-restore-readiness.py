@@ -2805,6 +2805,58 @@ class RestoreReadinessContractTests(unittest.TestCase):
             self.assertEqual(len(inventory_calls), 8)
             self.assertEqual(instances[-1].cleanup_call.call_count, 8)
 
+    def test_recovery_accepts_legacy_baseline_without_image_inventory(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="rr-recover-legacy-inventory-") as directory:
+            run_dir = Path(directory)
+            lock_path = run_dir / "lock"
+            lock_path.write_bytes(b"")
+            lock_fd = RESTORE_READINESS.os.open(lock_path, RESTORE_READINESS.os.O_RDWR)
+            lock_info = RESTORE_READINESS.os.fstat(lock_fd)
+            rollout_path = run_dir / "rollout-lock"
+            rollout_path.write_bytes(b"")
+            rollout_fd = RESTORE_READINESS.os.open(rollout_path, RESTORE_READINESS.os.O_RDWR)
+            rollout_info = RESTORE_READINESS.os.fstat(rollout_fd)
+            global_lock = {"device": lock_info.st_dev, "inode": lock_info.st_ino}
+            rollout_lock = {
+                "path": str(RESTORE_READINESS.ROLLOUT_LOCK_PATH),
+                "device": rollout_info.st_dev,
+                "inode": rollout_info.st_ino,
+            }
+            manifest, _private_path = expired_work_cleanup_manifest(run_dir, global_lock, rollout_lock)
+            manifest["baseline"]["docker_inventory"].pop("images")
+            verify_foreign_inventory = RESTORE_READINESS.Drill.verify_foreign_inventory
+
+            class RecoveryDrill:
+                def __init__(self, _args: Any, _run_dir: Path, recovery_manifest: dict[str, Any]) -> None:
+                    self.manifest = recovery_manifest
+
+                def save(self) -> None:
+                    return None
+
+                def docker_resource_inventory(self, _phase: str) -> dict[str, Any]:
+                    return {"containers": {}, "volumes": {}, "networks": {}, "images": {}}
+
+                def cleanup_resources(self) -> bool:
+                    return verify_foreign_inventory(self)
+
+            output = io.StringIO()
+            with (
+                patch.object(RESTORE_READINESS.os, "geteuid", return_value=0),
+                patch.object(RESTORE_READINESS, "open_rollout_lock", return_value=(rollout_fd, rollout_lock)),
+                patch.object(RESTORE_READINESS, "load_manifest", return_value=manifest),
+                patch.object(RESTORE_READINESS, "open_global_lock", return_value=(lock_fd, global_lock)),
+                patch.object(RESTORE_READINESS, "make_runtime_args", return_value=None),
+                patch.object(RESTORE_READINESS, "Drill", RecoveryDrill),
+                patch.object(RESTORE_READINESS, "remove_finished_run", return_value=True),
+                redirect_stdout(output),
+            ):
+                status = RESTORE_READINESS.recover(run_dir / "ownership.json")
+
+            self.assertEqual(status, 1)
+            self.assertEqual(manifest["baseline"]["docker_inventory"]["images"], {})
+            report = json.loads(output.getvalue())
+            self.assertEqual(report["cleanup"], "verified")
+
     def test_recovery_uses_cleanup_budget_after_work_deadline(self) -> None:
         with tempfile.TemporaryDirectory(prefix="rr-recover-expired-work-") as directory:
             run_dir = Path(directory)
