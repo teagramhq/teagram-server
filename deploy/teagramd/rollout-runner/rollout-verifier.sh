@@ -955,18 +955,26 @@ snapshot_from_json() {
     return 1
   }
   container_logging_sha=$(sha256_text "$container_logging_config")
+  # Compose's resolved environment includes operator values from .env. Docker's
+  # Config.Env also includes image ENV defaults, which are covered by image identity.
   # Empty mapped key-exchange values use the binary defaults, so they stay
   # equivalent to an absent variable; configured values remain pinned.
-  container_env=$(printf '%s' "$inspect_json" | jq -ce --argjson added "$added_env_names" --argjson changed "$changed_env_names" \
+  container_env=$(printf '%s\n' "$inspect_json" "$compose_json" | jq -sce --argjson added "$added_env_names" --argjson changed "$changed_env_names" \
     --argjson media_key_enabled "$MEDIA_KEY_MOUNT_CONFIGURED" '
     def item: if type == "array" then .[0] else . end;
     def runtime_name($name):
       if $name == "TEAGRAM_TURNSTILE_SITE_KEY" then "TG_TURNSTILE_SITE_KEY"
       elif $name == "TEAGRAM_TURNSTILE_SECRET_KEY_FILE" then "TG_TURNSTILE_SECRET_KEY_FILE"
       else $name end;
-    (item.Config.Env // [])
-    | if type != "array" then error("container environment must be an array") else
-        map(select(type != "string" or (startswith("TG_REPLICA_COUNT=") | not)))
+    .[0] as $inspect
+    | .[1] as $compose
+    | ($compose.services[env.ROLLOUT_COMPOSE_SERVICE // "teagramd"].environment // null) as $operator_env
+    | ($inspect | item | .Config.Env // []) as $raw_env
+    | if ($operator_env | type) != "object" then error("resolved Compose environment must be an object")
+      elif ($raw_env | type) != "array" or any($raw_env[]; type != "string") then error("container environment must be an array of strings")
+      else $raw_env
+        | map(select(. as $entry | ($entry | split("="))[0] as $key | ($operator_env | has($key))))
+        | map(select(type != "string" or (startswith("TG_REPLICA_COUNT=") | not)))
         | map(select(type != "string" or (startswith("TG_CLIENT_ADDR_TRUST=") | not)))
         | map(select(type != "string" or (startswith("TG_LOG_LOGIN_CODES=") | not)))
         | map(select(type != "string" or ((split("=")[0]) as $key | (["TG_PUBLIC_WEBSOCKET_LISTEN_ADDR", "TG_PUBLIC_WEBSOCKET_ADVERTISE_ADDR", "TG_PUBLIC_REGISTRATION", "TG_PUBLIC_WEBSOCKET_ALLOWED_ORIGINS", "TG_WELCOME_CHANNEL"] | index($key) == null))))
@@ -1677,11 +1685,7 @@ snapshot_command() {
   esac
   output="$evidence_dir/$name.snapshot.json"
   inspect_json=$(docker inspect "$container_id" 2>/dev/null) || { printf '%s\n' 'container snapshot unavailable' >&2; return 1; }
-  if [ "$compose_source" = selected-compose-render ]; then
-    compose_json=$(docker compose config --format json </dev/null 2>/dev/null) || { printf '%s\n' 'resolved compose configuration unavailable' >&2; return 1; }
-  else
-    compose_json='{}'
-  fi
+  compose_json=$(docker compose config --format json </dev/null 2>/dev/null) || { printf '%s\n' 'resolved compose configuration unavailable' >&2; return 1; }
   snapshot=$(snapshot_from_json "$inspect_json" "$compose_json" "$env_file" "$override_file" "$compose_source" "$name" "${COMPOSE_FILE:-}") || { printf '%s\n' 'allowlisted snapshot generation failed' >&2; return 1; }
   write_private_file "$output" "$snapshot"
   printf 'snapshot_written=%s container_id=%s image_id=%s\n' "$output" \

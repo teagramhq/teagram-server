@@ -145,6 +145,54 @@ if ! compare_snapshots \
   cat "$TMP/key-exchange-empty-comparisons.tsv" >&2
   exit 1
 fi
+image_env_inspect=$(jq -c \
+  --arg image_id sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc \
+  --arg container_id cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc '
+  .Image=$image_id
+  | .Id=$container_id
+  | .Config.Env += ["TG_STICKER_CATALOG_BUNDLE=/usr/share/teagram/sticker-bundle"]
+' <<< "$(inspect_json '')")
+image_env_snapshot=$(snapshot_from_json \
+  "$image_env_inspect" "$COMPOSE_JSON" "$ENV_FILE" "$OVERRIDE_FILE" selected-compose-render target)
+if [ "$(jq -r '.container_env_sha256' <<< "$empty_env")" != \
+     "$(jq -r '.container_env_sha256' <<< "$image_env_snapshot")" ]; then
+  printf '%s\n' 'FAIL image-provided environment changed the operator environment digest' >&2
+  exit 1
+fi
+live_image_env_snapshot=$(snapshot_from_json \
+  "$image_env_inspect" "$COMPOSE_JSON" "$ENV_FILE" "$OVERRIDE_FILE" live-container-inspection baseline)
+if [ "$(jq -r '.container_env_sha256' <<< "$empty_env")" != \
+     "$(jq -r '.container_env_sha256' <<< "$live_image_env_snapshot")" ]; then
+  printf '%s\n' 'FAIL image-provided environment changed the live-inspection operator digest' >&2
+  exit 1
+fi
+printf '%s\n' "$image_env_snapshot" > "$TMP/image-env-target.snapshot.json"
+if ! compare_snapshots \
+  "$TMP/key-exchange-baseline.snapshot.json" "$TMP/image-env-target.snapshot.json" \
+  sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc \
+  "$TMP/image-env-comparisons.tsv"; then
+  printf '%s\n' 'FAIL full baseline-to-target comparison rejected image-provided environment' >&2
+  cat "$TMP/image-env-comparisons.tsv" >&2
+  exit 1
+fi
+printf '%s\n' 'PASS image-provided environment does not change operator environment equivalence'
+
+operator_env_baseline_compose=$(jq -c \
+  '.services.teagramd.environment.TG_OPERATOR_FLAG="baseline"' <<< "$COMPOSE_JSON")
+operator_env_target_compose=$(jq -c \
+  '.services.teagramd.environment.TG_OPERATOR_FLAG="target"' <<< "$COMPOSE_JSON")
+operator_env_baseline=$(snapshot_from_json \
+  "$(inspect_json 'TG_OPERATOR_FLAG=baseline')" "$operator_env_baseline_compose" \
+  "$ENV_FILE" "$OVERRIDE_FILE" selected-compose-render baseline)
+operator_env_target=$(snapshot_from_json \
+  "$(inspect_json 'TG_OPERATOR_FLAG=target')" "$operator_env_target_compose" \
+  "$ENV_FILE" "$OVERRIDE_FILE" selected-compose-render target)
+if [ "$(jq -r '.container_env_sha256' <<< "$operator_env_baseline")" = \
+     "$(jq -r '.container_env_sha256' <<< "$operator_env_target")" ]; then
+  printf '%s\n' 'FAIL Compose-provided environment did not change the operator environment digest' >&2
+  exit 1
+fi
+printf '%s\n' 'PASS Compose-provided environment remains in operator environment equivalence'
 COMPOSE_JSON=$default_compose_json
 unset INSPECT_LOG_CONFIG
 printf '%s\n' 'PASS full baseline-to-target comparison accepts empty key-exchange mappings'
