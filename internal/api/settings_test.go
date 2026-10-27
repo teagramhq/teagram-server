@@ -33,8 +33,8 @@ type settingsHandler struct {
 
 func assertAppConfig(t *testing.T, got *tg.HelpAppConfig, mode config.RegistrationMode) {
 	t.Helper()
-	if got.Hash != 7 {
-		t.Fatalf("app config hash = %d, want 7", got.Hash)
+	if got.Hash != 8 {
+		t.Fatalf("app config hash = %d, want 8", got.Hash)
 	}
 	object, ok := got.Config.(*tg.JSONObject)
 	if !ok {
@@ -47,11 +47,14 @@ func assertAppConfig(t *testing.T, got *tg.HelpAppConfig, mode config.Registrati
 		}
 		values[value.Key] = value.Value
 	}
-	if len(values) != 15 {
-		t.Fatalf("app config has %d keys, want 15", len(values))
+	if len(values) != 29 {
+		t.Fatalf("app config has %d keys, want 29", len(values))
 	}
 	if _, ok := values["upload_max_file_bytes"]; ok {
 		t.Fatal("app config advertised upload_max_file_bytes while TG_UPLOAD_MAX_BYTES is unset")
+	}
+	if _, ok := values["password_min_length"]; ok {
+		t.Fatal("app config advertised a password minimum without a server rule")
 	}
 	if value, ok := values["dialog_filters_enabled"].(*tg.JSONBool); !ok || !value.Value {
 		t.Fatalf("dialog_filters_enabled = %v, want true", values["dialog_filters_enabled"])
@@ -88,6 +91,28 @@ func assertAppConfig(t *testing.T, got *tg.HelpAppConfig, mode config.Registrati
 	}
 	if value, ok := values["sticker_import_mode"].(*tg.JSONString); !ok || value.Value != "on" {
 		t.Fatalf("sticker_import_mode = %v, want %q", values["sticker_import_mode"], "on")
+	}
+	for key, want := range map[string]float64{
+		"username_min_length":      2,
+		"username_max_length":      32,
+		"display_name_max_length":  64,
+		"bio_max_length":           70,
+		"group_title_min_length":   1,
+		"group_title_max_length":   255,
+		"group_about_max_length":   255,
+		"channel_title_min_length": 1,
+		"channel_title_max_length": 255,
+		"channel_about_max_length": 255,
+		"message_max_length":       4096,
+		"caption_max_length":       1024,
+		"upload_max_part_bytes":    512 * 1024,
+	} {
+		if value, ok := values[key].(*tg.JSONNumber); !ok || value.Value != want {
+			t.Errorf("%s = %v, want %g", key, values[key], want)
+		}
+	}
+	if value, ok := values["username_pattern"].(*tg.JSONString); !ok || value.Value != `^[a-zA-Z][a-zA-Z0-9_]{1,31}$` {
+		t.Errorf("username_pattern = %v, want %q", values["username_pattern"], `^[a-zA-Z][a-zA-Z0-9_]{1,31}$`)
 	}
 }
 

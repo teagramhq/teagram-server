@@ -11,6 +11,11 @@ import (
 // staleness of the DC list against load from every connected client at once.
 const configTTL = time.Hour
 
+const (
+	messageLengthMax = 4096
+	captionLengthMax = 1024
+)
+
 // DefaultConfig builds a minimal tg.Config advertising a single DC (ourselves).
 // It carries no date or expires: handleGetConfig stamps both from the clock on
 // every response, since a value stored here would be the process start time.
@@ -35,8 +40,8 @@ func DefaultConfig(dcID int, host string, port int) *tg.Config {
 		NotifyDefaultDelayMs: 1500,
 		PushChatPeriodMs:     60000,
 		PushChatLimit:        2,
-		CaptionLengthMax:     1024,
-		MessageLengthMax:     4096,
+		CaptionLengthMax:     captionLengthMax,
+		MessageLengthMax:     messageLengthMax,
 		WebfileDCID:          dcID,
 	}
 	config.SetReactionsDefault(&tg.ReactionEmoji{Emoticon: "👍"})
