@@ -42,7 +42,7 @@ jobs:
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           repository: teagramhq/teagram-web
-          ref: 0ba84d2145b6058ae212a9ecc9b8910e2735455f
+          ref: 1e37163ab53b4eeef02eff797e6f6a57654266d7
           path: web-source
           persist-credentials: false
 
