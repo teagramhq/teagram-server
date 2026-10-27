@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gotd/td/bin"
@@ -256,40 +257,73 @@ func (h *handlers) handleContactsSearch(r *mtproto.Request) (bin.Encoder, error)
 
 	username := strings.ToLower(strings.TrimPrefix(req.Q, "@"))
 	var exactUser *store.User
+	var usernameQuotaErr error
+	var usernameLookupErr error
+	var contacts []store.User
+	var contactsErr error
+	var myChannels []store.MemberChannelMatch
+	var memberChannelsErr error
+	var publicChannels []store.PublicChannelMatch
+	var publicChannelsErr error
+
+	// These reads are independent. Run them together so account-sized search
+	// work overlaps, while keeping the username quota ahead of its lookup.
+	var searches sync.WaitGroup
+	searches.Add(3)
+	go func() {
+		defer searches.Done()
+		contacts, contactsErr = h.store.SearchContacts(r.Ctx, r.UserID, req.Q, limit)
+	}()
+	go func() {
+		defer searches.Done()
+		myChannels, memberChannelsErr = h.store.SearchMemberChannels(r.Ctx, r.UserID, req.Q, limit)
+	}()
+	go func() {
+		defer searches.Done()
+		publicChannels, publicChannelsErr = h.store.SearchPublicChannels(r.Ctx, req.Q, limit)
+	}()
 	if validateUsername(username) {
-		// Share resolveUsername's per-account distinct-handle and burst budgets.
-		// Charge before any username lookup, even when this resolves to a channel
-		// or misses, so contacts.search cannot buy a second lookup path.
-		if err := h.store.CheckAndChargeUsernameLookup(r.Ctx, r.UserID, username); err != nil {
-			if !errors.Is(err, store.ErrUsernameLookupQuotaExceeded) {
-				h.log.Error("contacts.search: username quota", "user_id", r.UserID, "err", err)
-				return nil, errInternal
+		searches.Add(1)
+		go func() {
+			defer searches.Done()
+			// Share resolveUsername's per-account distinct-handle and burst budgets.
+			// Charge before any username lookup, even when this resolves to a channel
+			// or misses, so contacts.search cannot buy a second lookup path.
+			if err := h.store.CheckAndChargeUsernameLookup(r.Ctx, r.UserID, username); err != nil {
+				if !errors.Is(err, store.ErrUsernameLookupQuotaExceeded) {
+					usernameQuotaErr = err
+				}
+				return
 			}
-		} else {
 			resolution, ok, err := h.store.UsernameByHandle(r.Ctx, username)
 			if err != nil {
-				h.log.Error("contacts.search: username lookup", "user_id", r.UserID, "err", err)
-				return nil, errInternal
+				usernameLookupErr = err
+				return
 			}
 			if ok && resolution.Kind == store.UsernameKindUser {
 				exactUser = &resolution.User
 			}
-		}
+		}()
 	}
-
-	contacts, err := h.store.SearchContacts(r.Ctx, r.UserID, req.Q, limit)
-	if err != nil {
-		h.log.Error("contacts.search: store query", "user_id", r.UserID, "err", err)
+	searches.Wait()
+	if usernameQuotaErr != nil {
+		h.log.Error("contacts.search: username quota", "user_id", r.UserID, "err", usernameQuotaErr)
 		return nil, errInternal
 	}
-	myChannels, err := h.store.SearchMemberChannels(r.Ctx, r.UserID, req.Q, limit)
-	if err != nil {
-		h.log.Error("contacts.search: member channels", "user_id", r.UserID, "err", err)
+	if usernameLookupErr != nil {
+		h.log.Error("contacts.search: username lookup", "user_id", r.UserID, "err", usernameLookupErr)
 		return nil, errInternal
 	}
-	publicChannels, err := h.store.SearchPublicChannels(r.Ctx, req.Q, limit)
-	if err != nil {
-		h.log.Error("contacts.search: public channels", "user_id", r.UserID, "err", err)
+	if contactsErr != nil {
+		h.log.Error("contacts.search: store query", "user_id", r.UserID, "err", contactsErr)
+		return nil, errInternal
+	}
+	if memberChannelsErr != nil {
+		h.log.Error("contacts.search: member channels", "user_id", r.UserID, "err", memberChannelsErr)
+		return nil, errInternal
+	}
+	if publicChannelsErr != nil {
+		h.log.Error("contacts.search: public channels", "user_id", r.UserID, "err", publicChannelsErr)
 		return nil, errInternal
 	}
 
