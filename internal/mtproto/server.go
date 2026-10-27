@@ -756,7 +756,11 @@ func (s *Server) logConnectionFailure(err error) {
 		}
 	}
 	if category == serverFailureRequest {
-		details = withSafeRPCErrorCode([]any{"rpc_method", UnknownRPCMethod, "error", safeRPCErrorName(err)}, err)
+		details = withSafeRPCErrorCode([]any{
+			"rpc_method", UnknownRPCMethod,
+			"cause", string(classifyRequestFailure(nil, err)),
+			"error", safeRPCErrorName(err),
+		}, err)
 		if diagnostic, ok := errors.AsType[*rpcRequestError](err); ok {
 			details = diagnostic.logAttrs()
 		}
@@ -1236,7 +1240,7 @@ func (s *Server) serveConnModeWithDiagnostics(readCtx, requestCtx context.Contex
 			admitted, err := observePendingLogin(pendingLogin.StartedAt, pendingLogin.Remaining)
 			if err != nil {
 				s.log.Error("maintain pending login limit lease", "err", err)
-				return errors.Join(errRequestHandlingFailure, err)
+				return errors.Join(errRequestHandlingFailure, markRequestFailureCause(requestFailurePendingLoginStore, err))
 			}
 			if !admitted {
 				return nil
@@ -1288,7 +1292,7 @@ func (s *Server) serveConnModeWithDiagnostics(readCtx, requestCtx context.Contex
 			admitted, err := observePendingLogin(conn.pendingLoginSince(), conn.pendingLoginRemaining())
 			if err != nil {
 				s.log.Error("maintain pending login limit lease", "err", err)
-				return errors.Join(errRequestHandlingFailure, err)
+				return errors.Join(errRequestHandlingFailure, markRequestFailureCause(requestFailurePendingLoginStore, err))
 			}
 			if !admitted {
 				return nil

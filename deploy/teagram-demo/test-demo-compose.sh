@@ -35,6 +35,7 @@ compose=(
   --file "$SCRIPT_DIR/compose.yaml"
 )
 env -u COMPOSE_FILE -u COMPOSE_PROJECT_NAME -u COMPOSE_PROFILES \
+  -u TG_UPLOAD_MAX_BYTES -u TG_RATE_LIMIT_UPLOAD_BYTES \
   -u TEAGRAM_DEMO_TURNSTILE_SITE_KEY -u TEAGRAM_DEMO_TURNSTILE_SECRET_KEY_FILE \
   "${compose[@]}" config --format json > "$TMP_DIR/target.json"
 jq -e \
@@ -91,6 +92,10 @@ jq -e \
   and .services.teagramd.environment.TG_LOG_LOGIN_CODES == "false"
   and .services.teagramd.environment.TG_MAX_FILE_BYTES == "16777216"
   and .services.teagramd.environment.TG_MAX_USER_STORAGE_BYTES == "268435456"
+  and .services.teagramd.environment.TG_UPLOAD_MAX_BYTES == "512000"
+  and .services.teagramd.environment.TG_RATE_LIMIT_UPLOAD_BYTES == "20971520"
+  and .services["teagramd-next"].environment.TG_UPLOAD_MAX_BYTES == "512000"
+  and .services["teagramd-next"].environment.TG_RATE_LIMIT_UPLOAD_BYTES == "20971520"
   and .services.teagramd.environment.TG_WEBSOCKET_LISTEN_ADDR == ":2446"
   and .services.teagramd.environment.TG_WEBSOCKET_ALLOWED_ORIGINS == "https://web.teagram.io"
   and .services.teagramd.environment.TG_CLIENT_ADDR_TRUST == "proxy-v2"
@@ -480,6 +485,10 @@ def assert_order(path: Path, fragments: list[str], start: int = 0) -> None:
     assert_text_order(path.read_text(encoding="utf-8"), path.name, fragments, start)
 
 
+rate_limit_reset = (
+    "demo_compose exec -T postgres psql -v ON_ERROR_STOP=1 -U postgres -d teagram \\\n"
+    "  -c 'DELETE FROM rate_limits; DELETE FROM send_code_ip_calls; DELETE FROM send_code_ip_phones; DELETE FROM public_send_code_ip_calls; DELETE FROM public_send_code_ip_phones;'"
+)
 assert_order(Path(sys.argv[1]), [
     'demo_compose stop edge haproxy "$ACTIVE_SERVER" turnstile-egress',
     "demo_prune_deploy_backups\n",
@@ -489,6 +498,7 @@ assert_order(Path(sys.argv[1]), [
     '"$SEED_SCRIPT" --seed',
     '"$SEED_SCRIPT" --verify-seed --endpoint "$ACTIVE_ENDPOINT"',
     '"$SCRIPT_DIR/test-seed-compose.sh"',
+    rate_limit_reset,
     'demo_compose up -d --wait --wait-timeout 120 "$ACTIVE_SERVER" haproxy',
     '"$SEED_SCRIPT" --verify-turnstile --endpoint haproxy:2443',
     "demo_compose up -d edge",

@@ -2671,6 +2671,7 @@ class Docker:
         environment: dict[str, str] | None = None,
         phase: str,
         category: str,
+        capture_stderr: bool = False,
     ) -> tuple[int, bytes]:
         cleanup_deadline: float | None = None
         if phase == "cleanup":
@@ -2683,11 +2684,17 @@ class Docker:
                 args,
                 stdin=subprocess.PIPE if input_bytes is not None else stdin,
                 stdout=stdout,
-                stderr=subprocess.DEVNULL,
+                stderr=subprocess.PIPE if capture_stderr else subprocess.DEVNULL,
                 env=environment or self.environment,
                 close_fds=True,
             )
         except OSError as exc:
+            if capture_stderr:
+                self.report_command_failure(
+                    args,
+                    f"could not start ({type(exc).__name__}: {exc})",
+                    b"",
+                )
             raise DrillFailure(phase, category) from exc
         try:
             tracked = self._track_child(process)
@@ -2704,14 +2711,16 @@ class Docker:
                     )
                     if timeout <= 0:
                         raise DrillFailure("cleanup", "cleanup_failure")
-                output, _ = process.communicate(input_bytes, timeout=timeout)
+                output, error_output = process.communicate(input_bytes, timeout=timeout)
             except subprocess.TimeoutExpired as exc:
                 try:
                     process.kill()
                 except ProcessLookupError:
                     pass
                 if cleanup_deadline is None:
-                    process.communicate()
+                    _, error_output = process.communicate()
+                    if capture_stderr:
+                        self.report_command_failure(args, "timed out", error_output or exc.stderr or b"")
                     raise DrillFailure(phase, "timeout") from exc
                 remaining = max(0.0, cleanup_deadline - time.monotonic() - CLEANUP_FINALIZE_SECONDS)
                 if remaining:
@@ -2720,6 +2729,8 @@ class Docker:
                     except subprocess.TimeoutExpired:
                         pass
                 raise DrillFailure("cleanup", "cleanup_failure") from exc
+            if capture_stderr and process.returncode != 0:
+                self.report_command_failure(args, f"exit {process.returncode}", error_output or b"")
             return process.returncode, output or b""
         finally:
             if process.poll() is None:
@@ -2743,6 +2754,14 @@ class Docker:
             if process.poll() is not None:
                 self._untrack_child(tracked)
 
+    def report_command_failure(self, args: list[str], outcome: str, stderr: bytes) -> None:
+        command = json.dumps(args, separators=(",", ":"))
+        detail = json.dumps(stderr.decode("utf-8", "replace"), ensure_ascii=True)
+        print(
+            f"restore readiness preflight Docker command failed: command={command} outcome={outcome} stderr={detail}",
+            file=sys.stderr,
+        )
+
     def call(
         self,
         args: list[str],
@@ -2762,6 +2781,7 @@ class Docker:
             input_bytes=input_bytes,
             phase=phase,
             category=category,
+            capture_stderr=phase == "preflight",
         )
         if getattr(self, "interrupted", None) and not allow_interrupted:
             raise DrillFailure(phase, "interrupted")
@@ -3368,7 +3388,21 @@ class Drill(Docker):
             "docker_inventory": docker_inventory,
         }
         self.preflight_step = "save baseline Docker inventory"
-        self.save()
+        try:
+            self.save()
+        except DrillFailure as exc:
+            print(
+                f"restore readiness baseline Docker inventory save failed: category={exc.category}",
+                file=sys.stderr,
+            )
+            raise
+        except (OSError, TypeError, ValueError) as exc:
+            print(
+                "restore readiness baseline Docker inventory save failed: "
+                f"{type(exc).__name__}: {exc}",
+                file=sys.stderr,
+            )
+            raise DrillFailure(self.phase, "preflight_failure") from exc
         self.preflight_step = "check Docker resource ownership identities"
         require_no_docker_identity_collisions(docker_inventory, self.manifest["token"], self.phase)
         project_name = f"restore-readiness-{self.manifest['token'][:16]}"
@@ -3480,7 +3514,9 @@ class Drill(Docker):
         return True
 
     def preload(self) -> None:
+        self.preflight_step = "preload source database image"
         self.images["source"] = {"id": self.preload_image(SOURCE_IMAGE), "reference": SOURCE_IMAGE}
+        self.preflight_step = "preload restore database image"
         self.images["target"] = {"id": self.preload_image(RESTORE_IMAGE), "reference": RESTORE_IMAGE}
 
     def image_environment(self, image_id: str) -> tuple[dict[str, str], dict[str, Any]]:
@@ -3492,6 +3528,7 @@ class Drill(Docker):
             raise DrillFailure(self.phase, "isolation_refusal") from exc
 
     def build_images(self) -> None:
+        self.preflight_step = "build drill images"
         self.phase = "fixture_generation"
         build_root = self.run_dir / "work" / "build"
         app_context, tools_context = create_image_build_contexts(build_root)
@@ -4122,11 +4159,30 @@ class Drill(Docker):
         self.call(["pull", reference], phase="preflight", category="preflight_failure", timeout=180)
         document = self.image_inspect(reference, "preflight")
         if reference not in (document.get("RepoDigests") or []):
+            print(
+                "restore readiness preflight image validation failed: "
+                f"reference={json.dumps(reference)} check=RepoDigests "
+                f"observed={json.dumps(document.get('RepoDigests'), separators=(',', ':'))}",
+                file=sys.stderr,
+            )
             raise DrillFailure("preflight", "preflight_failure")
         if document.get("Os") != "linux" or document.get("Architecture") != self.args.go_arch:
+            observed_platform = {"Os": document.get("Os"), "Architecture": document.get("Architecture")}
+            print(
+                "restore readiness preflight image validation failed: "
+                f"reference={json.dumps(reference)} check=Os/Architecture "
+                f"observed={json.dumps(observed_platform, separators=(',', ':'))}",
+                file=sys.stderr,
+            )
             raise DrillFailure("preflight", "preflight_failure")
         identifier = document.get("Id", "")
         if not re.fullmatch(r"sha256:[0-9a-f]{64}", identifier):
+            print(
+                "restore readiness preflight image validation failed: "
+                f"reference={json.dumps(reference)} check=Id "
+                f"observed={json.dumps(identifier, separators=(',', ':'))}",
+                file=sys.stderr,
+            )
             raise DrillFailure("preflight", "preflight_failure")
         return identifier
 
@@ -7613,6 +7669,7 @@ def run_primary(args: argparse.Namespace) -> int:
         drill.save()
         drill.preload()
         drill.build_images()
+        drill.preflight_step = "verify no-network egress confinement"
         drill.create_egress_probe(gateway)
         if drill.gateway is None or not drill.gateway.close():
             drill.gateway = None

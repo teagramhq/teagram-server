@@ -218,6 +218,15 @@ class DockerImageMirrorTests(unittest.TestCase):
             script,
         )
 
+    def test_rpc_performance_postgres_waits_for_final_tcp_server(self) -> None:
+        script = (ROOT / ".github/scripts/perf-postgres.sh").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn(
+            'pg_isready -h 127.0.0.1 -U postgres -q',
+            script,
+        )
+
     def test_rustfs_fixture_mirror_is_digest_pinned_and_precedes_qualification(self) -> None:
         workflow = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
         mirror_job = re.search(

@@ -127,6 +127,12 @@ demo_prepare_seed_owner "$TMP_DIR"
 # Re-run the API seeder in the private seed lane and compare verified counts.
 "$SCRIPT_DIR/test-seed-compose.sh"
 
+# The seed and convergence checks deliberately exercise many auth flows while
+# production rate limits are relaxed. Remove only the limiter state they
+# created before the private production-config Turnstile probe runs.
+demo_compose exec -T postgres psql -v ON_ERROR_STOP=1 -U postgres -d teagram \
+  -c 'DELETE FROM rate_limits; DELETE FROM send_code_ip_calls; DELETE FROM send_code_ip_phones; DELETE FROM public_send_code_ip_calls; DELETE FROM public_send_code_ip_phones;'
+
 # Recreate teagramd from the production config and start HAProxy's private
 # MTProto path while edge stays down. The probe must prove Turnstile is active
 # before the public edge starts.
