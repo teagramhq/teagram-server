@@ -134,9 +134,11 @@ if [[ "${MOCK_VERIFIER_NO_EVIDENCE:-0}" == 1 ]]; then
 fi
 printf 'sample=ready\n' > "$4/readiness-target.tsv"
 if [[ "${MOCK_VERIFIER_STATUS:-0}" == 0 ]]; then
+  printf 'role=target result=ready elapsed=0\n' > "$4/readiness-target.tsv.result"
   printf 'role=target result=ready max_seconds=120\n' > "$4/readiness-target.result"
   printf '%s\n' 'role=target result=ready max_seconds=120'
 else
+  printf 'role=target result=timeout max_seconds=120 elapsed=0\n' > "$4/readiness-target.tsv.result"
   printf 'role=target result=failed exit=%s max_seconds=120\n' "$MOCK_VERIFIER_STATUS" > "$4/readiness-target.result"
   printf 'role=target result=failed exit=%s max_seconds=120\n' "$MOCK_VERIFIER_STATUS"
   exit "$MOCK_VERIFIER_STATUS"
@@ -203,7 +205,9 @@ printf 'keep this directory\n' > "$unrelated/keep/sentinel"
 output=$(run_command "run $OPS_SHA replay-check $TARGET_SHA")
 [[ "$output" == *'role=target result=ready'* && "$output" == *"replay_check=pass target_sha=$TARGET_SHA evidence="* ]]
 evidence=${output##*evidence=}
-[[ -d "$evidence" && -f "$evidence/readiness-target.tsv" && -f "$evidence/replay-check.result" ]]
+[[ -d "$evidence" && -f "$evidence/readiness-target.tsv" && \
+  "$(cat "$evidence/readiness-target.tsv.result")" == 'role=target result=ready elapsed=0' && \
+  -f "$evidence/replay-check.result" ]]
 [[ "$(cat "$evidence/replay-check.result")" == "result=pass target_sha=$TARGET_SHA container_id=$CONTAINER_ID evidence=$evidence" ]]
 private_evidence=$(<"$MOCK_PRIVATE_EVIDENCE_LOG")
 [[ "$private_evidence" == "$MOCK_ROOT/teagram-replay-check.${TARGET_SHA:0:12}."* && ! -e "$private_evidence" ]]
@@ -214,6 +218,7 @@ output=$(MOCK_VERIFIER_STATUS=2 run_command "run $OPS_SHA replay-check $TARGET_S
 [[ "$status" == 2 && "$output" == *"replay_check=failed exit=2 target_sha=$TARGET_SHA evidence="* ]]
 failed_evidence=${output##*evidence=}
 [[ -d "$failed_evidence" && -f "$failed_evidence/readiness-target.tsv" && \
+  "$(cat "$failed_evidence/readiness-target.tsv.result")" == 'role=target result=timeout max_seconds=120 elapsed=0' && \
   "$(cat "$failed_evidence/readiness-target.result")" == 'role=target result=failed exit=2 max_seconds=120' ]]
 private_evidence=$(<"$MOCK_PRIVATE_EVIDENCE_LOG")
 [[ "$private_evidence" == "$MOCK_ROOT/teagram-replay-check.${TARGET_SHA:0:12}."* && ! -e "$private_evidence" ]]

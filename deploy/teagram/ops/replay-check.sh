@@ -110,7 +110,7 @@ cleanup_private_evidence() {
     printf '%s\n' 'replay-check: private verifier evidence directory failed cleanup checks' >&2
     return 1
   fi
-  for name in readiness-target.tsv readiness-target.result; do
+  for name in readiness-target.tsv readiness-target.tsv.result readiness-target.result; do
     path="$PRIVATE_EVIDENCE/$name"
     if [[ -e "$path" || -L "$path" ]]; then
       if [[ -L "$path" || ! -f "$path" || "$(stat -c '%u:%a' -- "$path")" != 0:600 ]]; then
@@ -127,7 +127,7 @@ trap cleanup_private_evidence EXIT
 
 copy_readiness_evidence() {
   local name source destination
-  for name in readiness-target.tsv readiness-target.result; do
+  for name in readiness-target.tsv readiness-target.tsv.result readiness-target.result; do
     source="$PRIVATE_EVIDENCE/$name"
     destination="$EVIDENCE/$name"
     if [[ -L "$source" || ! -f "$source" || "$(stat -c '%u:%a' -- "$source")" != 0:600 || \
