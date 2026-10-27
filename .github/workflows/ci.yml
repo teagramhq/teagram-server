@@ -414,9 +414,10 @@ jobs:
     permissions:
       contents: read
       actions: write
-    # Allow the full 20-minute E2E timeout after the observed 6m29s preparation,
-    # with about eight minutes for failure diagnostics and cleanup.
-    timeout-minutes: 35
+    # Preparation took 17m in the latest CI run. Leave room for the full 20m
+    # E2E limit, eight minutes for diagnostics and cleanup, and five minutes
+    # of variance.
+    timeout-minutes: 50
 
     env:
       # Ryuk is testcontainers' reaper: it kills the containers of a test
@@ -1010,6 +1011,10 @@ jobs:
           bash -n deploy/teagram-demo/demo-common.sh
           bash -n deploy/teagram-demo/init-demo.sh
           bash -n deploy/teagram-demo/forced-command.sh
+          bash -n deploy/teagram-demo/ops/teagram-demo-ops
+          bash -n deploy/teagram-demo/ops/install-teagram-demo-ops.sh
+          bash -n deploy/teagram-demo/test-install-teagram-demo-ops.sh
+          bash -n deploy/teagram-demo/test-ops-menu.sh
           bash -n deploy/teagram-demo/deploy-main.sh
           bash -n deploy/teagram-demo/wipe-weekly.sh
           bash -n deploy/teagram-demo/install-weekly-wipe.sh
@@ -1031,6 +1036,10 @@ jobs:
             deploy/teagram-demo/demo-common.sh \
             deploy/teagram-demo/init-demo.sh \
             deploy/teagram-demo/forced-command.sh \
+            deploy/teagram-demo/ops/teagram-demo-ops \
+            deploy/teagram-demo/ops/install-teagram-demo-ops.sh \
+            deploy/teagram-demo/test-install-teagram-demo-ops.sh \
+            deploy/teagram-demo/test-ops-menu.sh \
             deploy/teagram-demo/deploy-main.sh \
             deploy/teagram-demo/wipe-weekly.sh \
             deploy/teagram-demo/install-weekly-wipe.sh \
@@ -1055,6 +1064,12 @@ jobs:
 
       - name: Check public demo Compose policy
         run: deploy/teagram-demo/test-demo-compose.sh
+
+      - name: Check demo ops command menu
+        run: deploy/teagram-demo/test-ops-menu.sh
+
+      - name: Check demo ops installer key transaction
+        run: sudo -n bash deploy/teagram-demo/test-install-teagram-demo-ops.sh
 
       - name: Check demo Turnstile secret access
         run: sudo -n deploy/teagram-demo/test-turnstile-secret-access.sh

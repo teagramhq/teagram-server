@@ -2,6 +2,7 @@ const fs = require('node:fs');
 const net = require('node:net');
 const { createHash } = require('node:crypto');
 const { chromium } = require('playwright');
+const { assessArtifactResponses } = require('./artifact_response_policy.cjs');
 
 const origin = 'https://teagramd.test';
 const targets = [
@@ -734,35 +735,28 @@ async function artifactMain() {
     }
 
     failedStage = 'artifact_response_headers';
-    const artifactResponses = observer.responses.filter((response) => {
+    const capturedArtifactResponses = observer.responses.filter((response) => {
       let parsed;
       try { parsed = new URL(response.url); } catch { return false; }
       return parsed.origin === origin && parsed.pathname !== '/healthz' && !parsed.pathname.startsWith('/_fixture_probe/');
     });
-    const artifactResponsesWithPrivateCSP = artifactResponses.filter((response) =>
-      response.content_security_policy === PRIVATE_CSP
-    ).length;
-    const loadedScripts = artifactResponses.some((response) => /\.m?js$/i.test(new URL(response.url).pathname));
-    const loadedStyles = artifactResponses.some((response) => /\.css$/i.test(new URL(response.url).pathname));
-    const workerResponses = artifactResponses.filter((response) =>
+    const responseAssessment = assessArtifactResponses(capturedArtifactResponses, origin, PRIVATE_CSP);
+    const workerResponses = capturedArtifactResponses.filter((response) =>
       ['shared_worker', 'service_worker'].includes(response.context)
     );
     const unexpectedAttempts = observer.events.filter((event) => event.classification === 'unexpected');
-    const passed = artifactResponses.length >= 4 && artifactResponsesWithPrivateCSP === artifactResponses.length &&
-      artifactResponses.every((response) => response.status === 200) && loadedScripts && loadedStyles &&
+    const passed = responseAssessment.passed &&
       unexpectedAttempts.length === 0 && observer.errors.length === 0;
     if (!passed) return fail('artifact_browser_assertions_failed', undefined, failedStage, {
-      artifact_responses: artifactResponses.length,
-      artifact_responses_with_private_csp: artifactResponsesWithPrivateCSP,
-      loaded_scripts: loadedScripts,
-      loaded_styles: loadedStyles,
+      artifact_responses: responseAssessment.artifactResponses.length,
+      artifact_responses_with_private_csp: responseAssessment.artifactResponsesWithPrivateCSP,
+      loaded_scripts: responseAssessment.loadedScripts,
+      loaded_styles: responseAssessment.loadedStyles,
       worker_responses: workerResponses.length,
-      failed_artifact_responses: artifactResponses
-        .filter((response) => response.status !== 200)
+      failed_artifact_responses: responseAssessment.failedArtifactResponses
         .slice(0, 12)
         .map((response) => ({ path: new URL(response.url).pathname, status: response.status })),
-      missing_private_csp_responses: artifactResponses
-        .filter((response) => response.content_security_policy !== PRIVATE_CSP)
+      missing_private_csp_responses: responseAssessment.missingPrivateCSPResponses
         .slice(0, 12)
         .map((response) => ({ context: response.context, path: new URL(response.url).pathname })),
       unexpected_attempts: unexpectedAttempts.length,
@@ -781,8 +775,8 @@ async function artifactMain() {
       manifest_sha256: manifestSHA256,
       entry_response_status: entryResponse.status(),
       manifest_response_status: manifestResult.status,
-      artifact_responses: artifactResponses.length,
-      artifact_responses_with_private_csp: artifactResponsesWithPrivateCSP,
+      artifact_responses: responseAssessment.artifactResponses.length,
+      artifact_responses_with_private_csp: responseAssessment.artifactResponsesWithPrivateCSP,
       worker_targets: workerTargets,
       service_worker_controller: controllerURL,
       unexpected_attempts: unexpectedAttempts.length,

@@ -33,38 +33,16 @@ func (s *scaleQueries) TraceQueryStart(ctx context.Context, _ *pgx.Conn, data pg
 func (*scaleQueries) TraceQueryEnd(context.Context, *pgx.Conn, pgx.TraceQueryEndData) {}
 
 type scalePlan struct {
-	Node     string      `json:"Node Type"`
-	Relation string      `json:"Relation Name"`
-	Cost     float64     `json:"Total Cost"`
-	Rows     float64     `json:"Actual Rows"`
-	Loops    float64     `json:"Actual Loops"`
-	Removed  float64     `json:"Rows Removed by Filter"`
-	Recheck  float64     `json:"Rows Removed by Index Recheck"`
-	Hits     int64       `json:"Shared Hit Blocks"`
-	Reads    int64       `json:"Shared Read Blocks"`
-	Plans    []scalePlan `json:"Plans"`
-}
-
-func (p scalePlan) rowsFor(relation string) float64 {
-	var rows float64
-	if p.Relation == relation {
-		rows += p.Rows * p.Loops
-	}
-	for _, child := range p.Plans {
-		rows += child.rowsFor(relation)
-	}
-	return rows
-}
-
-func (p scalePlan) rowsReadFor(relation string) float64 {
-	var rows float64
-	if p.Relation == relation {
-		rows += (p.Rows + p.Removed + p.Recheck) * p.Loops
-	}
-	for _, child := range p.Plans {
-		rows += child.rowsReadFor(relation)
-	}
-	return rows
+	Node                  string      `json:"Node Type"`
+	Relation              string      `json:"Relation Name"`
+	Cost                  float64     `json:"Total Cost"`
+	Rows                  float64     `json:"Actual Rows"`
+	Loops                 float64     `json:"Actual Loops"`
+	RemovedByFilter       float64     `json:"Rows Removed by Filter"`
+	RemovedByIndexRecheck float64     `json:"Rows Removed by Index Recheck"`
+	Hits                  int64       `json:"Shared Hit Blocks"`
+	Reads                 int64       `json:"Shared Read Blocks"`
+	Plans                 []scalePlan `json:"Plans"`
 }
 
 func (p scalePlan) sequentialTables() []string {
@@ -76,6 +54,28 @@ func (p scalePlan) sequentialTables() []string {
 		tables = append(tables, child.sequentialTables()...)
 	}
 	return tables
+}
+
+func (p scalePlan) rowsReadFrom(table string) float64 {
+	var rows float64
+	if p.Relation == table {
+		rows += (p.Rows + p.RemovedByFilter + p.RemovedByIndexRecheck) * p.Loops
+	}
+	for _, child := range p.Plans {
+		rows += child.rowsReadFrom(table)
+	}
+	return rows
+}
+
+func TestScalePlanRowsReadIncludesRemovedRowsAndLoops(t *testing.T) {
+	var plan scalePlan
+	if err := json.Unmarshal([]byte(`{"Relation Name":"dialogs","Actual Rows":2,"Actual Loops":3,"Rows Removed by Filter":5,"Rows Removed by Index Recheck":7}`), &plan); err != nil {
+		t.Fatal(err)
+	}
+
+	if got, want := plan.rowsReadFrom("dialogs"), float64(42); got != want {
+		t.Fatalf("rows read = %.0f, want %.0f", got, want)
+	}
 }
 
 func (p scalePlan) recordRelations(seen map[string]bool) {
@@ -180,6 +180,10 @@ func TestHotQueryPlansAtScale(t *testing.T) {
 	}
 	defer traced.Close()
 	q := db.New(traced)
+	scaleUserIDs := make([]int64, 100)
+	for i := range scaleUserIDs {
+		scaleUserIDs[i] = int64(i + 1)
+	}
 	// Both initial and cursor pages, and both pinned-dialog modes, must keep
 	// their indexed access. No enable_seqscan override masks planner decisions.
 	for _, offset := range []int64{0, 95} {
@@ -213,6 +217,10 @@ func TestHotQueryPlansAtScale(t *testing.T) {
 		scaleQueryError(q.UsersByID(ctx, []int64{42, 43})),
 		scaleQueryError(q.GetUsernameByHandle(ctx, "SCALE42")),
 		scaleQueryError(q.GetUserByUsername(ctx, "SCALE42")),
+		scaleQueryError(q.EntitledUserIDs(ctx, db.EntitledUserIDsParams{
+			ViewerID: 42,
+			Ids:      scaleUserIDs,
+		})),
 		scaleQueryError(q.GetState(ctx, 42)),
 		scaleQueryError(q.EventsSince(ctx, db.EventsSinceParams{OwnerID: 42, Pts: 50})),
 		scaleQueryError(q.EventsWindow(ctx, db.EventsWindowParams{OwnerID: 42, FromPts: 50, ToPts: 90, Lim: 20})),
@@ -281,6 +289,201 @@ func TestHotQueryPlansAtScale(t *testing.T) {
 	}
 }
 
+func TestEntitledUserIDsUsesDialogIndexForLargeOwner(t *testing.T) {
+	t.Parallel()
+	ctx := t.Context()
+	dsn := pgtest.DSN(t)
+	pool, err := pgxpool.New(ctx, dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pool.Close()
+	for _, sql := range []string{
+		`UPDATE server_administration SET election_closed = true WHERE singleton_id = 1`,
+		`INSERT INTO users (id, phone, first_name)
+		 SELECT n, '+entitlement-scale' || n, 'Scale ' || n FROM generate_series(1, 10000) n`,
+		`ALTER TABLE dialogs DISABLE TRIGGER dialogs_initialize_owner_count_before_write`,
+		`ALTER TABLE dialogs DISABLE TRIGGER dialogs_track_owner_count`,
+		`INSERT INTO dialogs (owner_id, peer_type, peer_id, top_message)
+		 SELECT 1, 1, n, n FROM generate_series(5001, 10000) n
+		 UNION ALL
+		 SELECT n, 1, 1, n FROM generate_series(1001, 6000) n`,
+		`ALTER TABLE dialogs ENABLE TRIGGER dialogs_track_owner_count`,
+		`ALTER TABLE dialogs ENABLE TRIGGER dialogs_initialize_owner_count_before_write`,
+		`ANALYZE dialogs`,
+	} {
+		if _, err := pool.Exec(ctx, sql); err != nil {
+			t.Fatalf("seed entitlement plan: %v", err)
+		}
+	}
+
+	ids := []int64{1}
+	for id := int64(8001); id <= 8100; id++ {
+		ids = append(ids, id)
+	}
+	for id := int64(1001); id <= 1100; id++ {
+		ids = append(ids, id)
+	}
+	for id := int64(10001); id <= 10100; id++ {
+		ids = append(ids, id)
+	}
+	recorded := &scaleQueries{}
+	cfg, err := pgxpool.ParseConfig(dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.ConnConfig.Tracer = recorded
+	traced, err := pgxpool.NewWithConfig(ctx, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer traced.Close()
+	q := db.New(traced)
+	page, err := q.DialogsForOwnerWithPins(ctx, db.DialogsForOwnerWithPinsParams{
+		OwnerID: 1, Lim: 100,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(page) != 100 {
+		t.Fatalf("dialog page has %d rows, want 100", len(page))
+	}
+	rows, err := q.EntitledUserIDs(ctx, db.EntitledUserIDsParams{ViewerID: 1, Ids: ids})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := map[int64]bool{1: true}
+	for id := int64(8001); id <= 8100; id++ {
+		want[id] = true
+	}
+	for id := int64(1001); id <= 1100; id++ {
+		want[id] = true
+	}
+	got := make(map[int64]bool, len(rows))
+	for _, row := range rows {
+		id, ok := row.(int64)
+		if !ok {
+			t.Fatalf("entitled id has type %T, want int64", row)
+		}
+		got[id] = true
+	}
+	if len(got) != len(want) {
+		t.Fatalf("entitled ids = %v, want %v", got, want)
+	}
+	for id := range want {
+		if !got[id] {
+			t.Errorf("entitled ids missing %d", id)
+		}
+	}
+
+	recorded.mu.Lock()
+	queries := append([]pgx.TraceQueryStartData(nil), recorded.queries...)
+	recorded.mu.Unlock()
+	if len(queries) != 2 {
+		t.Fatalf("dialog and entitlement query count = %d, want 2", len(queries))
+	}
+	for _, query := range queries {
+		var raw []byte
+		if err := pool.QueryRow(ctx, "EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) "+query.SQL, query.Args...).Scan(&raw); err != nil {
+			t.Fatalf("explain dialog query: %v", err)
+		}
+		var plans []struct {
+			Plan scalePlan `json:"Plan"`
+		}
+		if err := json.Unmarshal(raw, &plans); err != nil {
+			t.Fatal(err)
+		}
+		for _, table := range plans[0].Plan.sequentialTables() {
+			if table == "dialogs" {
+				t.Fatalf("dialog query sequentially scans dialogs: %s", raw)
+			}
+		}
+		if strings.Contains(query.SQL, "DialogsForOwnerWithPins") {
+			if rows := plans[0].Plan.rowsReadFrom("dialogs"); rows > 100 {
+				t.Fatalf("dialog page reads %.0f rows for 100 returned dialogs", rows)
+			}
+			continue
+		}
+		if rows := plans[0].Plan.rowsReadFrom("dialogs"); rows > float64(2*len(ids)) {
+			t.Fatalf("entitlement query reads %.0f dialog rows for %d candidate ids", rows, len(ids))
+		}
+	}
+}
+
+func TestContactStatesBoundsReverseLookupForLargeOwner(t *testing.T) {
+	t.Parallel()
+	ctx := t.Context()
+	dsn := pgtest.DSN(t)
+	pool, err := pgxpool.New(ctx, dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pool.Close()
+	for _, query := range []string{
+		`UPDATE server_administration SET election_closed = true WHERE singleton_id = 1`,
+		`INSERT INTO users (id, phone, first_name)
+		 SELECT n, '+contact-scale' || n, 'Scale ' || n FROM generate_series(1, 5001) n`,
+		`INSERT INTO user_contacts (owner_id, contact_id)
+		 SELECT 1, n FROM generate_series(2, 5001) n`,
+		`ANALYZE user_contacts`,
+	} {
+		if _, err := pool.Exec(ctx, query); err != nil {
+			t.Fatalf("seed contact-state plan: %v", err)
+		}
+	}
+
+	ids := make([]int64, 100)
+	for i := range ids {
+		ids[i] = int64(i + 2)
+	}
+	recorded := &scaleQueries{}
+	cfg, err := pgxpool.ParseConfig(dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.ConnConfig.Tracer = recorded
+	traced, err := pgxpool.NewWithConfig(ctx, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer traced.Close()
+	contacts, err := db.New(traced).ContactStates(ctx, db.ContactStatesParams{OwnerID: 1, ContactIds: ids})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(contacts) != len(ids) {
+		t.Fatalf("contact states = %d, want %d", len(contacts), len(ids))
+	}
+	recorded.mu.Lock()
+	queries := append([]pgx.TraceQueryStartData(nil), recorded.queries...)
+	recorded.mu.Unlock()
+	if len(queries) != 1 {
+		t.Fatalf("contact-state query count = %d, want 1", len(queries))
+	}
+	var raw []byte
+	_, query, ok := strings.Cut(queries[0].SQL, "\n")
+	if !ok {
+		t.Fatalf("contact-state query is missing its sqlc header: %s", queries[0].SQL)
+	}
+	if err := pool.QueryRow(ctx, "EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) "+query, queries[0].Args...).Scan(&raw); err != nil {
+		t.Fatalf("explain contact-state query: %v", err)
+	}
+	var plans []struct {
+		Plan scalePlan `json:"Plan"`
+	}
+	if err := json.Unmarshal(raw, &plans); err != nil {
+		t.Fatal(err)
+	}
+	for _, table := range plans[0].Plan.sequentialTables() {
+		if table == "user_contacts" {
+			t.Fatalf("contact-state query sequentially scans user_contacts: %s", raw)
+		}
+	}
+	if rows := plans[0].Plan.rowsReadFrom("user_contacts"); rows > float64(2*len(ids)) {
+		t.Fatalf("contact-state query reads %.0f contact rows for %d selected users", rows, len(ids))
+	}
+}
+
 func TestHistoryPageAroundReadsOnlyItsWindow(t *testing.T) {
 	ctx := context.Background()
 	dsn := pgtest.DSN(t)
@@ -293,7 +496,7 @@ func TestHistoryPageAroundReadsOnlyItsWindow(t *testing.T) {
 		`UPDATE server_administration SET election_closed = true WHERE singleton_id = 1`,
 		`INSERT INTO users (id, phone, first_name) VALUES (1, '+history-plan-owner', 'Owner'), (2, '+history-plan-peer', 'Peer')`,
 		`INSERT INTO messages (owner_id, local_id, peer_type, peer_id, from_id, message, out)
-		 SELECT 1, n, 1, 2, 1, 'history plan message', true FROM generate_series(1, 20000) n`,
+			 SELECT 1, n, 1, 2, 1, 'history plan message', true FROM generate_series(1, 20000) n`,
 		`ANALYZE messages`,
 	} {
 		if _, err := pool.Exec(ctx, sql); err != nil {
@@ -342,7 +545,7 @@ func TestHistoryPageAroundReadsOnlyItsWindow(t *testing.T) {
 	if len(plans) != 1 {
 		t.Fatalf("history page explain returned %d plans, want 1", len(plans))
 	}
-	readRows := plans[0].Plan.rowsFor("messages")
+	readRows := plans[0].Plan.rowsReadFrom("messages")
 	if readRows > 2*pageSize+10 {
 		t.Fatalf("history page read %.0f message rows for a %d-row page, want at most %d", readRows, pageSize, 2*pageSize+10)
 	}
@@ -360,8 +563,8 @@ func TestHistoryPageByDateAroundReadsOnlyItsWindow(t *testing.T) {
 		`UPDATE server_administration SET election_closed = true WHERE singleton_id = 1`,
 		`INSERT INTO users (id, phone, first_name) VALUES (1, '+history-date-plan-owner', 'Owner'), (2, '+history-date-plan-peer', 'Peer')`,
 		`INSERT INTO messages (owner_id, local_id, peer_type, peer_id, from_id, message, out, date)
-		 SELECT 1, n, 1, 2, 1, 'history date plan message', true, to_timestamp(n::double precision)
-		 FROM generate_series(1, 20000) n`,
+			 SELECT 1, n, 1, 2, 1, 'history date plan message', true, to_timestamp(n::double precision)
+			 FROM generate_series(1, 20000) n`,
 		`ANALYZE messages`,
 	} {
 		if _, err := pool.Exec(ctx, sql); err != nil {
@@ -417,7 +620,7 @@ func TestHistoryPageByDateAroundReadsOnlyItsWindow(t *testing.T) {
 	if len(plans) != 1 {
 		t.Fatalf("date history page explain returned %d plans, want 1", len(plans))
 	}
-	readRows := plans[0].Plan.rowsFor("messages")
+	readRows := plans[0].Plan.rowsReadFrom("messages")
 	if readRows > pageSize+10 {
 		t.Fatalf("date history page read %.0f message rows for a %d-row page, want at most %d", readRows, pageSize, pageSize+10)
 	}
@@ -484,7 +687,7 @@ func TestHistoryPageByDateAroundReadsMiddleWindow(t *testing.T) {
 	if len(plans) != 1 {
 		t.Fatalf("middle date history page explain returned %d plans, want 1", len(plans))
 	}
-	readRows := plans[0].Plan.rowsFor("messages")
+	readRows := plans[0].Plan.rowsReadFrom("messages")
 	if readRows > 2*pageSize+10 {
 		t.Fatalf("middle date history page read %.0f message rows for a %d-row page, want at most %d", readRows, pageSize, 2*pageSize+10)
 	}
@@ -551,7 +754,7 @@ func TestChannelHistoryPageByDateReadsOnlyItsWindow(t *testing.T) {
 		if len(plans) != 1 {
 			t.Fatalf("%s explain returned %d plans, want 1", label, len(plans))
 		}
-		readRows := plans[0].Plan.rowsReadFor("channel_messages")
+		readRows := plans[0].Plan.rowsReadFrom("channel_messages")
 		if readRows > 2*pageSize+10 {
 			t.Fatalf("%s read %.0f channel rows for a %d-row page, want at most %d", label, readRows, pageSize, 2*pageSize+10)
 		}
@@ -671,7 +874,7 @@ func TestChannelHistoryPageByDateReadsOnlyItsWindowWithExpiredBacklog(t *testing
 	if len(plans) != 1 {
 		t.Fatalf("expired backlog date history explain returned %d plans, want 1", len(plans))
 	}
-	readRows := plans[0].Plan.rowsReadFor("channel_messages")
+	readRows := plans[0].Plan.rowsReadFrom("channel_messages")
 	if readRows > 2*pageSize+10 {
 		t.Fatalf("expired backlog date history read %.0f channel rows for a %d-row page, want at most %d", readRows, pageSize, 2*pageSize+10)
 	}
