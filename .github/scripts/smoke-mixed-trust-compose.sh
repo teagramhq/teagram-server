@@ -194,6 +194,12 @@ cleanup() {
 			echo "public probe output ($probe_log):" >&2
 			cat "$probe_log" >&2 || true
 		done
+		for diagnostic_container in "$test_haproxy_name" "$test_echo_name"; do
+			if docker inspect "$diagnostic_container" >/dev/null 2>&1; then
+				echo "$diagnostic_container logs:" >&2
+				docker logs --timestamps "$diagnostic_container" >&2 || true
+			fi
+		done
 	fi
 	docker rm -f "$test_haproxy_name" "$test_echo_name" >/dev/null 2>&1 || true
 	stop_probe "$legacy_tcp_pid"
