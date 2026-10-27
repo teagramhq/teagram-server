@@ -81,7 +81,7 @@ if ! sudo -n -- env -i \
   LC_ALL=C \
   PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
   PYTHONDONTWRITEBYTECODE=1 \
-  /usr/bin/python3 -B "$inventory_tool" snapshot >"$fixture_snapshot"; then
+  /usr/bin/python3 -B "$inventory_tool" snapshot | /usr/bin/tee "$fixture_snapshot" >/dev/null; then
   printf '%s\n' 'could not snapshot Docker state before foreign fixture setup' >&2
   exit 1
 fi
