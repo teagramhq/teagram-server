@@ -7,7 +7,7 @@ ENV PATH="/usr/local/bin:/usr/bin:/bin"
 
 WORKDIR /opt/real-server-fixture
 RUN npm install --prefix /opt/real-server-fixture --save-exact --ignore-scripts --no-audit --no-fund playwright@1.61.1
-COPY front.mjs probe.cjs /opt/real-server-fixture/
+COPY front.mjs probe.cjs artifact_response_policy.cjs /opt/real-server-fixture/
 ENV NODE_PATH=/opt/real-server-fixture/node_modules \
     PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
 USER 1001:1001

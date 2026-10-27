@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Guards the RPC performance workflow's fixture fallback and failure labels.
+# Guards the RPC performance workflow's triggers, fixture fallback, and failure labels.
 set -euo pipefail
 
 workflow="${PERF_WORKFLOW:-.github/workflows/perf.yml}"
@@ -17,6 +17,67 @@ fail() {
 query() {
   yq -r "$1" "$workflow"
 }
+
+mapfile -t pull_request_paths < <(query '.on.pull_request.paths[]')
+
+contains_pr_path() {
+  local expected="$1"
+  local path
+  for path in "${pull_request_paths[@]}"; do
+    if [[ "$path" == "$expected" ]]; then
+      return 0
+    fi
+  done
+  return 1
+}
+
+required_pr_paths=(
+  '.github/scripts/perf-*'
+  '.github/scripts/test_perf_run.py'
+  '.github/workflows/perf.yml'
+  'go.mod'
+  'go.sum'
+  'migrations/**'
+  'test/perf/**'
+)
+for required_path in "${required_pr_paths[@]}"; do
+  contains_pr_path "$required_path" || fail "PR performance runs must include '$required_path'"
+done
+
+# The harness uses test-only files behind the performance build tag; include test imports.
+module_root="$(go list -m -f '{{.Dir}}')"
+dependency_dirs="$(
+  go list -deps -test -tags=performance -f '{{.Dir}}' ./test/perf |
+    awk -v root="$module_root" '
+      $0 == root { print "."; next }
+      index($0, root "/") == 1 { print substr($0, length(root) + 2) }
+    ' |
+    sort -u
+)"
+[[ -n "$dependency_dirs" ]] || fail 'could not derive the performance harness Go dependency paths'
+
+while IFS= read -r dependency_dir; do
+  if [[ "$dependency_dir" == '.' ]]; then
+    dependency_file='__perf_dependency_contract__.go'
+  else
+    dependency_file="$dependency_dir/__perf_dependency_contract__.go"
+  fi
+  dependency_covered=false
+  for path_pattern in "${pull_request_paths[@]}"; do
+    # shellcheck disable=SC2053 # Match workflow path filters as glob patterns.
+    if [[ "$dependency_file" == $path_pattern ]]; then
+      dependency_covered=true
+      break
+    fi
+  done
+  [[ "$dependency_covered" == true ]] ||
+    fail "PR performance paths must cover Go dependency '$dependency_dir'"
+done <<< "$dependency_dirs"
+
+[[ "$(query '.on.push.branches | join(",")')" == 'main' ]] ||
+  fail 'main pushes must continue to run the performance workflow'
+[[ "$(query '.on.workflow_dispatch.inputs.issue.type')" == 'string' ]] ||
+  fail 'manual performance dispatch must remain available'
 
 [[ "$(query '.jobs."rpc-performance".timeout-minutes')" == '150' ]] ||
   fail 'the performance job must allow a cache-miss fixture seed to finish'

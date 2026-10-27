@@ -20,11 +20,15 @@ WHERE owner_id = sqlc.arg(owner_id)
 ORDER BY top_message DESC, peer_type, peer_id
 LIMIT sqlc.arg(lim)::int;
 
--- CountDialogsForOwner is the total the truncated reply advertises, so a client
--- knows more pages exist. Unfiltered by offset on purpose: it is the size of the
--- whole list, not of the remainder.
+-- CountDialogsForOwner is the exact total the truncated reply advertises. It is
+-- maintained for every dialogs row, unfiltered by offset, so this lookup stays
+-- constant cost as the owner's list grows.
 -- name: CountDialogsForOwner :one
-SELECT count(*)::int FROM dialogs WHERE owner_id = $1;
+SELECT COALESCE((
+    SELECT dialog_count::int
+    FROM owner_dialog_counts
+    WHERE owner_id = $1 AND initialized
+), 0)::int;
 
 -- PeerDialogExists is the caller-owned 1:1 dialog predicate for peer settings.
 -- name: PeerDialogExists :one
