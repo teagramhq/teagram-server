@@ -156,7 +156,7 @@ def expired_work_cleanup_manifest(
         "cleanup_deadline": time.monotonic() + 60,
         "resource_creation_started": True,
         "baseline": {
-            "docker_inventory": {"containers": {}, "volumes": {}, "networks": {}},
+            "docker_inventory": {"containers": {}, "volumes": {}, "networks": {}, "images": {}},
             "containers": [],
             "volumes": [],
             "networks": [],
@@ -1108,6 +1108,20 @@ class RestoreReadinessContractTests(unittest.TestCase):
                 return f"{volume_name}\n".encode()
             if arguments[:2] == ["volume", "inspect"]:
                 return ("\n".join(volume_fields) + "\n").encode()
+            if arguments[:2] == ["image", "ls"]:
+                self.assertEqual(
+                    arguments,
+                    [
+                        "image",
+                        "ls",
+                        "--all",
+                        "--quiet",
+                        "--no-trunc",
+                        "--filter",
+                        f"label={RESTORE_READINESS.IMAGE_TOKEN_LABEL}",
+                    ],
+                )
+                return f"{image_id}\n".encode()
             if arguments[:2] == ["network", "ls"]:
                 return f"{network_id}\t{network_name}\n".encode()
             if arguments[:2] == ["network", "inspect"]:
@@ -1125,6 +1139,7 @@ class RestoreReadinessContractTests(unittest.TestCase):
         self.assertEqual(container["state"]["running"], "true")
         self.assertEqual(inventory["volumes"][volume_name]["labels"], labels)
         self.assertEqual(inventory["networks"][network_id]["attachments"][container_id]["Name"], container_name)
+        self.assertEqual(inventory["images"], {image_id: {"id": image_id}})
         container_fields[15] = json.dumps(list(reversed(mounts)))
         self.assertEqual(RESTORE_READINESS.collect_docker_resource_inventory(call), inventory)
         RESTORE_READINESS.require_no_docker_identity_collisions(inventory, "9" * 32, "preflight")
@@ -1235,6 +1250,7 @@ class RestoreReadinessContractTests(unittest.TestCase):
             "containers": {foreign_id: {"name": "foreign", "state": {"running": "true"}}},
             "volumes": {"foreign-volume": {"labels": {}}},
             "networks": {network_id: {"name": "foreign-network", "attachments": {}}},
+            "images": {},
         }
         changed_state = json.loads(json.dumps(baseline))
         changed_state["containers"][foreign_id]["state"]["running"] = "false"
@@ -1244,12 +1260,15 @@ class RestoreReadinessContractTests(unittest.TestCase):
         removed_volume["volumes"].clear()
         changed_network = json.loads(json.dumps(baseline))
         changed_network["networks"][network_id]["attachments"] = {foreign_id: {"IPAddress": "172.25.0.2"}}
+        added_image = json.loads(json.dumps(baseline))
+        added_image["images"]["sha256:" + "b" * 64] = {"id": "sha256:" + "b" * 64}
 
         for name, current, summary in (
             ("changed state", changed_state, "containers(added=0,removed=0,fields=state)"),
             ("added container", added_container, "containers(added=1,removed=0,fields=none)"),
             ("removed volume", removed_volume, "volumes(added=0,removed=1,fields=none)"),
             ("changed network attachment", changed_network, "networks(added=0,removed=0,fields=attachments)"),
+            ("added token-labeled image", added_image, "images(added=1,removed=0,fields=none)"),
         ):
             with self.subTest(change=name):
                 drill = object.__new__(RESTORE_READINESS.Drill)
@@ -1270,6 +1289,9 @@ class RestoreReadinessContractTests(unittest.TestCase):
                     f"restore readiness foreign Docker inventory changed: {summary}",
                 )
                 self.assertEqual(drill.manifest["foreign_inventory_diagnostic"], f"changed:{summary}")
+                self.assertIsNotNone(
+                    RESTORE_READINESS.FOREIGN_INVENTORY_DIAGNOSTIC.fullmatch(f"changed:{summary}")
+                )
                 failure = RESTORE_READINESS.foreign_inventory_failure(drill.manifest)
                 self.assertIsNotNone(failure)
                 self.assertEqual(failure.phase, "cleanup")
@@ -1300,14 +1322,14 @@ class RestoreReadinessContractTests(unittest.TestCase):
         owned = {"name": "restore-readiness-owned", "labels": {}}
         drill = object.__new__(RESTORE_READINESS.Drill)
         drill.manifest = {
-            "baseline": {"docker_inventory": {"containers": {}, "volumes": {}, "networks": {}}},
+            "baseline": {"docker_inventory": {"containers": {}, "volumes": {}, "networks": {}, "images": {}}},
             "resource_creation_started": True,
             "containers": [{"id": owned_id}],
             "pending_container": None,
             "networks": [],
         }
         drill.docker_resource_inventory = Mock(
-            return_value={"containers": {owned_id: owned}, "volumes": {}, "networks": {}}
+            return_value={"containers": {owned_id: owned}, "volumes": {}, "networks": {}, "images": {}}
         )
         self.assertTrue(drill.verify_foreign_inventory())
 
@@ -1329,11 +1351,12 @@ class RestoreReadinessContractTests(unittest.TestCase):
     def test_unattached_volume_between_container_snapshots_stays_foreign(self) -> None:
         owned_id = "1" * 64
         race_volume = "foreign-created-during-container-create"
-        baseline = {"containers": {}, "volumes": {}, "networks": {}}
+        baseline = {"containers": {}, "volumes": {}, "networks": {}, "images": {}}
         current = {
             "containers": {owned_id: {"name": "restore-readiness-owned", "mounts": []}},
             "volumes": {race_volume: {"name": race_volume}},
             "networks": {},
+            "images": {},
         }
         drill = object.__new__(RESTORE_READINESS.Drill)
         drill.manifest = {
@@ -2686,8 +2709,8 @@ class RestoreReadinessContractTests(unittest.TestCase):
 
             self.assertEqual(status, 0)
             self.assertFalse(private_path.exists())
-            self.assertEqual(len(inventory_calls), 6)
-            self.assertEqual(instances[-1].cleanup_call.call_count, 6)
+            self.assertEqual(len(inventory_calls), 8)
+            self.assertEqual(instances[-1].cleanup_call.call_count, 8)
 
     def test_recovery_uses_cleanup_budget_after_work_deadline(self) -> None:
         with tempfile.TemporaryDirectory(prefix="rr-recover-expired-work-") as directory:
@@ -2731,8 +2754,8 @@ class RestoreReadinessContractTests(unittest.TestCase):
             self.assertFalse(private_path.exists())
             self.assertLess(manifest["work_deadline"], time.monotonic())
             self.assertGreater(manifest["cleanup_deadline"], time.monotonic())
-            self.assertEqual(len(inventory_calls), 6)
-            self.assertEqual(instances[-1].cleanup_call.call_count, 6)
+            self.assertEqual(len(inventory_calls), 8)
+            self.assertEqual(instances[-1].cleanup_call.call_count, 8)
             report = json.loads(output.getvalue())
             self.assertEqual(report["cleanup"], "verified")
 

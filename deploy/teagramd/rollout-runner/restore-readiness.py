@@ -124,7 +124,7 @@ SAFE_CATEGORIES = {
 CLEANUP_FAILURE_STEPS = frozenset(
     {"gateway", "processes", "build-inputs", "files", "foreign-inventory", "containers", "images", "networks-and-volumes"}
 )
-FOREIGN_INVENTORY_SUMMARY_ITEM = r"(?:[a-z-]+\(invalid-shape\)|(?:containers|volumes|networks)\(added=[0-9]+,removed=[0-9]+,fields=(?:none|[a-z_,]+)\))"
+FOREIGN_INVENTORY_SUMMARY_ITEM = r"(?:[a-z-]+\(invalid-shape\)|(?:containers|volumes|networks|images)\(added=[0-9]+,removed=[0-9]+,fields=(?:none|[a-z_,]+)\))"
 FOREIGN_INVENTORY_DIAGNOSTIC = re.compile(
     rf"(?:unverified:(?:DrillFailure|KeyError|TypeError|ValueError|JSONDecodeError|UnicodeDecodeError)|"
     rf"changed:(?:unknown|{FOREIGN_INVENTORY_SUMMARY_ITEM}(?:;{FOREIGN_INVENTORY_SUMMARY_ITEM})*))"
@@ -272,6 +272,29 @@ def collect_docker_resource_inventory(call: Callable[[list[str]], bytes]) -> dic
             "options": options,
         }
 
+    image_ids = [
+        item
+        for item in call(
+            [
+                "image",
+                "ls",
+                "--all",
+                "--quiet",
+                "--no-trunc",
+                "--filter",
+                f"label={IMAGE_TOKEN_LABEL}",
+            ]
+        )
+        .decode("utf-8", "strict")
+        .splitlines()
+        if item
+    ]
+    images: dict[str, dict[str, str]] = {}
+    for identifier in image_ids:
+        if not re.fullmatch(r"sha256:[0-9a-f]{64}", identifier):
+            raise ValueError("invalid Docker image identity")
+        images[identifier] = {"id": identifier}
+
     networks: dict[str, dict[str, Any]] = {}
     listed_networks = call(["network", "ls", "--no-trunc", "--format", '{{.ID}}{{"\\t"}}{{.Name}}'])
     for line in listed_networks.decode("utf-8", "strict").splitlines():
@@ -307,7 +330,7 @@ def collect_docker_resource_inventory(call: Callable[[list[str]], bytes]) -> dic
             "attachments": containers_attached,
         }
 
-    return {"containers": containers, "volumes": volumes, "networks": networks}
+    return {"containers": containers, "volumes": volumes, "networks": networks, "images": images}
 
 
 def require_no_docker_identity_collisions(inventory: dict[str, Any], token: str, phase: str) -> None:
@@ -351,6 +374,7 @@ def foreign_resource_inventory(
             for identifier, record in inventory["networks"].items()
             if identifier not in owned_network_ids
         },
+        "images": inventory["images"],
     }
 
 
@@ -419,7 +443,7 @@ def manifest_owned_volume_names(
 
 def foreign_inventory_change_summary(baseline: dict[str, Any], current: dict[str, Any]) -> str:
     changes: list[str] = []
-    for kind in ("containers", "volumes", "networks"):
+    for kind in ("containers", "volumes", "networks", "images"):
         before = baseline.get(kind)
         after = current.get(kind)
         if not isinstance(before, dict) or not isinstance(after, dict):

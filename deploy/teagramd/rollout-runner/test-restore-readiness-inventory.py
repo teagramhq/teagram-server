@@ -65,7 +65,7 @@ def read_snapshot(path: Path) -> dict[str, Any]:
         if len(raw) > MAX_SNAPSHOT:
             raise ValueError("inventory snapshot too large")
         parsed = json.loads(raw)
-        if not isinstance(parsed, dict) or set(parsed) != {"containers", "volumes", "networks"}:
+        if not isinstance(parsed, dict) or set(parsed) != {"containers", "volumes", "networks", "images"}:
             raise ValueError("invalid inventory snapshot")
         return parsed
     except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
