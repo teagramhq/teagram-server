@@ -591,7 +591,6 @@ func runBoundInteractive(
 }
 
 func TestMessagingRealtime(t *testing.T) {
-	t.Parallel()
 	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 	defer cancel()
 
