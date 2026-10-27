@@ -417,7 +417,9 @@ func TestOwnerDialogCountsBackfillExistingDialogs(t *testing.T) {
 	})
 
 	if _, err := conn.Exec(ctx, `
+		DROP TRIGGER dialogs_initialize_owner_count_before_write ON public.dialogs;
 		DROP TRIGGER dialogs_track_owner_count ON public.dialogs;
+		DROP FUNCTION public.initialize_owner_dialog_count_before_write();
 		DROP TRIGGER users_initialize_owner_dialog_count ON public.users;
 		DROP FUNCTION public.initialize_owner_dialog_count_for_user();
 		DROP FUNCTION public.track_owner_dialog_count();

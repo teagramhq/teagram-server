@@ -302,12 +302,14 @@ func TestEntitledUserIDsUsesDialogIndexForLargeOwner(t *testing.T) {
 		`UPDATE server_administration SET election_closed = true WHERE singleton_id = 1`,
 		`INSERT INTO users (id, phone, first_name)
 		 SELECT n, '+entitlement-scale' || n, 'Scale ' || n FROM generate_series(1, 10000) n`,
+		`ALTER TABLE dialogs DISABLE TRIGGER dialogs_initialize_owner_count_before_write`,
 		`ALTER TABLE dialogs DISABLE TRIGGER dialogs_track_owner_count`,
 		`INSERT INTO dialogs (owner_id, peer_type, peer_id, top_message)
 		 SELECT 1, 1, n, n FROM generate_series(5001, 10000) n
 		 UNION ALL
 		 SELECT n, 1, 1, n FROM generate_series(1001, 6000) n`,
 		`ALTER TABLE dialogs ENABLE TRIGGER dialogs_track_owner_count`,
+		`ALTER TABLE dialogs ENABLE TRIGGER dialogs_initialize_owner_count_before_write`,
 		`ANALYZE dialogs`,
 	} {
 		if _, err := pool.Exec(ctx, sql); err != nil {

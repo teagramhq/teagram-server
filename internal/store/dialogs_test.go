@@ -328,3 +328,68 @@ func TestMaintainedDialogCount(t *testing.T) {
 	}
 	assertCount(0)
 }
+
+func TestMaintainedDialogCountBatchWritesDuringInitialization(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	dsn := pgtest.DSN(t)
+	s := openStore(t, dsn)
+	pool, err := pgxpool.New(ctx, dsn)
+	if err != nil {
+		t.Fatalf("open test pool: %v", err)
+	}
+	t.Cleanup(pool.Close)
+
+	owner := mustUser(t, s, "+15551263996")
+	if _, err := pool.Exec(ctx, `
+		UPDATE owner_dialog_counts
+		SET dialog_count = 0, initialized = FALSE
+		WHERE owner_id = $1
+	`, owner.ID); err != nil {
+		t.Fatalf("mark dialog count uninitialized: %v", err)
+	}
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO dialogs (owner_id, peer_type, peer_id, top_message)
+		SELECT $1, 1, 730000 + peer_id, 0
+		FROM generate_series(1, 3) AS peer_id
+	`, owner.ID); err != nil {
+		t.Fatalf("insert dialogs while count is uninitialized: %v", err)
+	}
+
+	var stored, actual int64
+	if err := pool.QueryRow(ctx, `
+		SELECT counts.dialog_count, (
+			SELECT count(*) FROM dialogs WHERE owner_id = counts.owner_id
+		)
+		FROM owner_dialog_counts AS counts
+		WHERE counts.owner_id = $1 AND counts.initialized
+	`, owner.ID).Scan(&stored, &actual); err != nil {
+		t.Fatalf("read initialized dialog count: %v", err)
+	}
+	if stored != 3 || actual != 3 {
+		t.Fatalf("initialized dialog count = %d, dialogs rows = %d; want both 3", stored, actual)
+	}
+
+	if _, err := pool.Exec(ctx, `
+		UPDATE owner_dialog_counts
+		SET dialog_count = 0, initialized = FALSE
+		WHERE owner_id = $1
+	`, owner.ID); err != nil {
+		t.Fatalf("mark dialog count uninitialized before delete: %v", err)
+	}
+	if _, err := pool.Exec(ctx, `DELETE FROM dialogs WHERE owner_id = $1`, owner.ID); err != nil {
+		t.Fatalf("delete dialogs while count is uninitialized: %v", err)
+	}
+	if err := pool.QueryRow(ctx, `
+		SELECT counts.dialog_count, (
+			SELECT count(*) FROM dialogs WHERE owner_id = counts.owner_id
+		)
+		FROM owner_dialog_counts AS counts
+		WHERE counts.owner_id = $1 AND counts.initialized
+	`, owner.ID).Scan(&stored, &actual); err != nil {
+		t.Fatalf("read dialog count after bulk delete: %v", err)
+	}
+	if stored != 0 || actual != 0 {
+		t.Fatalf("dialog count after bulk delete = %d, dialogs rows = %d; want both 0", stored, actual)
+	}
+}

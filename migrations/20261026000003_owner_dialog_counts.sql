@@ -4,8 +4,9 @@ CREATE TABLE public.owner_dialog_counts (
     initialized BOOLEAN NOT NULL DEFAULT FALSE
 );
 
--- A missing or uninitialized counter is reconciled from dialogs while holding
--- its row lock. Once initialized, writes use an atomic delta on that same row.
+-- A missing or uninitialized counter is reconciled from dialogs before each
+-- write while holding its row lock. Once initialized, writes use an atomic delta
+-- on that same row.
 CREATE FUNCTION public.apply_owner_dialog_count_delta(p_owner_id BIGINT, p_delta BIGINT)
 RETURNS VOID
 LANGUAGE plpgsql
@@ -51,6 +52,39 @@ BEGIN
     WHERE owner_id = p_owner_id;
 END;
 $function$;
+
+-- Seed before changing dialogs; AFTER ROW triggers see the final rows from a
+-- multi-row statement and would otherwise apply the remaining deltas twice.
+CREATE FUNCTION public.initialize_owner_dialog_count_before_write()
+RETURNS TRIGGER
+LANGUAGE plpgsql
+SET search_path = pg_catalog
+AS $function$
+BEGIN
+    IF TG_OP = 'INSERT' THEN
+        PERFORM public.apply_owner_dialog_count_delta(NEW.owner_id, 0);
+        RETURN NEW;
+    ELSIF TG_OP = 'DELETE' THEN
+        PERFORM public.apply_owner_dialog_count_delta(OLD.owner_id, 0);
+        RETURN OLD;
+    ELSIF NEW.owner_id IS DISTINCT FROM OLD.owner_id THEN
+        -- Keep two-owner updates on a stable counter-row lock order.
+        IF OLD.owner_id < NEW.owner_id THEN
+            PERFORM public.apply_owner_dialog_count_delta(OLD.owner_id, 0);
+            PERFORM public.apply_owner_dialog_count_delta(NEW.owner_id, 0);
+        ELSE
+            PERFORM public.apply_owner_dialog_count_delta(NEW.owner_id, 0);
+            PERFORM public.apply_owner_dialog_count_delta(OLD.owner_id, 0);
+        END IF;
+    END IF;
+    RETURN NEW;
+END;
+$function$;
+
+CREATE TRIGGER dialogs_initialize_owner_count_before_write
+BEFORE INSERT OR DELETE OR UPDATE OF owner_id ON public.dialogs
+FOR EACH ROW
+EXECUTE FUNCTION public.initialize_owner_dialog_count_before_write();
 
 CREATE FUNCTION public.track_owner_dialog_count()
 RETURNS TRIGGER
