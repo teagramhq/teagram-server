@@ -121,6 +121,18 @@ SAFE_CATEGORIES = {
     "assertions_passed",
     "rollout_in_progress",
 }
+SAFE_FIXTURE_CHECKS = {
+    "build_images",
+    "create_source_database",
+    "fixture_setup",
+    "prepare_materials",
+    "seed_source_fixture",
+    "source_auth_key_fixture",
+    "create_local_dump_fixture",
+    "run_local_fixture_sql",
+    "run_local_hostile_fixture_tests",
+    "write_sigkill_marker",
+}
 SAFE_CLEANUP_OPERATIONS = {
     "build_input_removal",
     "cleanup_deadline",
@@ -1735,12 +1747,17 @@ WHERE index_schema.nspname = 'public' AND index_table.relname = 'profile_upload_
 
 
 class DrillFailure(Exception):
-    def __init__(self, phase: str, category: str) -> None:
+    def __init__(self, phase: str, category: str, *, fixture_check: str | None = None) -> None:
         if phase not in SAFE_PHASES or category not in SAFE_CATEGORIES:
             raise ValueError("unsafe report value")
+        if fixture_check is not None and (
+            phase != "fixture_generation" or fixture_check not in SAFE_FIXTURE_CHECKS
+        ):
+            raise ValueError("unsafe fixture check")
         super().__init__(category)
         self.phase = phase
         self.category = category
+        self.fixture_check = fixture_check
 
 
 def write_sigkill_marker(fd: int) -> None:
@@ -1748,9 +1765,17 @@ def write_sigkill_marker(fd: int) -> None:
     try:
         written = os.write(fd, marker)
     except OSError as exc:
-        raise DrillFailure("fixture_generation", "fixture_failure") from exc
+        raise DrillFailure(
+            "fixture_generation",
+            "fixture_failure",
+            fixture_check="write_sigkill_marker",
+        ) from exc
     if written != len(marker):
-        raise DrillFailure("fixture_generation", "fixture_failure")
+        raise DrillFailure(
+            "fixture_generation",
+            "fixture_failure",
+            fixture_check="write_sigkill_marker",
+        )
 
 
 def validate_ambient_environment(environment: dict[str, str]) -> bool:
@@ -2024,6 +2049,7 @@ def report_document(
     synthetic_signin: str = "not_run",
     auth_keys_cleared: str = "not_run",
     input_mode: str = "synthetic",
+    fixture_check: str | None = None,
 ) -> dict[str, Any]:
     if phase not in SAFE_PHASES | {"preflight"} or category not in SAFE_CATEGORIES:
         raise ValueError("invalid report value")
@@ -2039,6 +2065,12 @@ def report_document(
         raise ValueError("invalid auth-key clearing assertion")
     if input_mode not in {"synthetic", "local"}:
         raise ValueError("invalid restore input mode")
+    if phase == "fixture_generation" and fixture_check not in SAFE_FIXTURE_CHECKS:
+        raise ValueError("missing fixture check")
+    if fixture_check is not None and (
+        phase != "fixture_generation" or fixture_check not in SAFE_FIXTURE_CHECKS
+    ):
+        raise ValueError("invalid fixture check")
     success = category == "assertions_passed" and cleanup == "verified"
     if success:
         if (
@@ -2061,7 +2093,7 @@ def report_document(
         if input_mode == "local":
             result["input_mode"] = input_mode
         return result
-    return {
+    result = {
         "result": "fail",
         "phase": phase,
         "category": category,
@@ -2072,6 +2104,9 @@ def report_document(
         "elapsed_ms": max(0, int(elapsed_ms)),
         "exit": 1,
     }
+    if fixture_check is not None:
+        result["fixture_check"] = fixture_check
+    return result
 
 
 class GatewayFixture:
@@ -3043,6 +3078,7 @@ class Drill(Docker):
         self.auth_keys_cleared = False
         self.supervisor: subprocess.Popen[bytes] | None = None
         self.interrupted: str | None = None
+        self.fixture_check = "fixture_setup"
         self.cleanup_active = False
         self.cleanup_failure: dict[str, Any] | None = None
         self.active_cleanup_operation: str | None = None
@@ -3282,6 +3318,7 @@ class Drill(Docker):
     def build_images(self) -> None:
         self.preflight_step = "build drill images"
         self.phase = "fixture_generation"
+        self.fixture_check = "build_images"
         build_root = self.run_dir / "work" / "build"
         app_context, tools_context = create_image_build_contexts(build_root)
         artifacts = {
@@ -4243,6 +4280,8 @@ class Drill(Docker):
 
     def create_database(self, name: str) -> dict[str, Any]:
         self.phase = "fixture_generation" if name == "source" else "restore"
+        if self.phase == "fixture_generation":
+            self.fixture_check = "create_source_database"
         image = self.images[name]
         secret = self.files[f"{name}_init_password"]
         env_path = self.files[f"{name}_database_env"]
@@ -4567,6 +4606,7 @@ class Drill(Docker):
 
     def seed_source_fixture(self, database: dict[str, Any]) -> None:
         self.phase = "fixture_generation"
+        self.fixture_check = "seed_source_fixture"
         mounts = [
             self.mount(self.files["source_dsn"], "/run/secrets/postgres.dsn", writable=False),
             self.mount(self.files["seed_authkey"], "/run/secrets/authkey.hex", writable=False),
@@ -4594,6 +4634,7 @@ class Drill(Docker):
 
     def seed_source_auth_key_fixture(self, database: dict[str, Any]) -> None:
         self.phase = "fixture_generation"
+        self.fixture_check = "source_auth_key_fixture"
         generated_ids: list[int] = []
         while len(generated_ids) < AUTH_KEY_FIXTURE_COUNT:
             candidate = -(secrets.randbelow(9_000_000_000_000_000_000) + 1)
@@ -4602,7 +4643,11 @@ class Drill(Docker):
         self.synthetic_auth_key_ids = validate_synthetic_auth_key_ids(generated_ids)
         self.sql(database, synthetic_auth_key_fixture_sql(self.synthetic_auth_key_ids), self.phase)
         if self.sql(database, AUTH_KEY_STATE_SQL, self.phase).split("|") != AUTH_KEY_FIXTURE_STATE:
-            raise DrillFailure(self.phase, "fixture_failure")
+            raise DrillFailure(
+                self.phase,
+                "fixture_failure",
+                fixture_check="source_auth_key_fixture",
+            )
 
     def create_egress_probe(self, gateway: str) -> None:
         self.phase = "preflight"
@@ -4761,6 +4806,7 @@ class Drill(Docker):
 
     def create_local_dump_fixture(self, source: dict[str, Any]) -> None:
         self.phase = "fixture_generation"
+        self.fixture_check = "create_local_dump_fixture"
         if not self.args.local_fixture_test or self.local_dump_path is not None:
             raise DrillFailure(self.phase, "isolation_refusal")
         marker = LOCAL_DUMP_LEAK_MARKER.decode("ascii")
@@ -4843,6 +4889,7 @@ class Drill(Docker):
         self.local_dump_path = fixture_path
 
     def run_local_fixture_sql(self, target: dict[str, Any], statement: str) -> tuple[int, bytes]:
+        self.fixture_check = "run_local_fixture_sql"
         return_phase = self.phase
         self.phase = "restore"
         if not self.args.local_fixture_test or target is not self.databases.get("target"):
@@ -4889,6 +4936,7 @@ class Drill(Docker):
         target: dict[str, Any],
         expected_head: str,
     ) -> None:
+        self.fixture_check = "run_local_hostile_fixture_tests"
         if not self.args.local_fixture_test:
             return
         self.phase = "schema_validation"
@@ -6652,6 +6700,8 @@ dump_path=$2
         return output
 
     def generate_rsa_key(self) -> tuple[Path, Path]:
+        if self.phase == "fixture_generation":
+            self.fixture_check = "prepare_materials"
         key_path = self.run_dir / "secrets" / "server-key.pem"
         try:
             status, _ = self._run_child(
@@ -6701,6 +6751,7 @@ dump_path=$2
 
     def prepare_materials(self) -> None:
         self.phase = "fixture_generation"
+        self.fixture_check = "prepare_materials"
         source_db_password = secrets.token_hex(32)
         target_db_password = secrets.token_hex(32)
         self.target_db_password = target_db_password
@@ -7062,6 +7113,28 @@ def remove_finished_run(drill: Drill, deadline: float | None = None) -> bool:
         return False
 
 
+def wait_for_supervisor_registration(
+    manifest_path: Path,
+    supervisor: subprocess.Popen[bytes],
+    supervisor_ticks: int,
+) -> dict[str, Any]:
+    wait_until = time.monotonic() + 10
+    while time.monotonic() < wait_until:
+        if supervisor.poll() is not None:
+            raise DrillFailure("preflight", "preflight_failure")
+        try:
+            manifest = load_manifest(manifest_path)
+        except DrillFailure as exc:
+            raise DrillFailure("preflight", "preflight_failure") from exc
+        if manifest["supervisor"] == {
+            "pid": supervisor.pid,
+            "start_ticks": supervisor_ticks,
+        }:
+            return manifest
+        time.sleep(0.1)
+    raise DrillFailure("preflight", "preflight_failure")
+
+
 def cleanup_supervisor_failure(drill: Drill | None) -> dict[str, Any]:
     if drill is not None:
         recorded = getattr(drill, "cleanup_failure", None)
@@ -7415,8 +7488,12 @@ def run_primary(args: argparse.Namespace) -> int:
         supervisor_ticks = process_start_ticks(supervisor.pid)
         if supervisor_ticks is None:
             raise DrillFailure("preflight", "preflight_failure")
-        manifest["supervisor"] = {"pid": supervisor.pid, "start_ticks": supervisor_ticks}
-        drill.save()
+        manifest = wait_for_supervisor_registration(
+            drill.manifest_path,
+            supervisor,
+            supervisor_ticks,
+        )
+        drill.manifest = manifest
         drill.preflight_step = "private run layout"
         drill.create_private_layout()
         gateway, _ = drill.preflight()
@@ -7556,10 +7633,14 @@ def run_primary(args: argparse.Namespace) -> int:
         drill.run_application_checker(app)
     except DrillFailure as exc:
         failure = exc
+        if exc.phase == "fixture_generation" and exc.fixture_check is None:
+            check = drill.fixture_check
+            exc.fixture_check = check if check in SAFE_FIXTURE_CHECKS else "fixture_setup"
         if exc.phase == "preflight":
             print(f"restore readiness preflight check failed: {drill.preflight_step}", file=sys.stderr)
     except BaseException:
-        failure = DrillFailure(drill.phase, "fixture_failure")
+        fixture_check = drill.fixture_check if drill.phase == "fixture_generation" else None
+        failure = DrillFailure(drill.phase, "fixture_failure", fixture_check=fixture_check)
     finally:
         manifest["parent_done"] = True
         if drill.gateway is not None:
@@ -7575,7 +7656,8 @@ def run_primary(args: argparse.Namespace) -> int:
         drill.save()
     except OSError:
         if failure is None:
-            failure = DrillFailure(drill.phase, "fixture_failure")
+            fixture_check = drill.fixture_check if drill.phase == "fixture_generation" else None
+            failure = DrillFailure(drill.phase, "fixture_failure", fixture_check=fixture_check)
     try:
         os.close(lock_fd)
     except OSError:
@@ -7652,6 +7734,7 @@ def run_primary(args: argparse.Namespace) -> int:
         synthetic_signin=drill.checker_result["synthetic_signin"],
         auth_keys_cleared="pass" if drill.auth_keys_cleared else "not_run",
         input_mode=drill.input_mode,
+        fixture_check=failure.fixture_check if failure is not None else None,
     )
     print(json.dumps(report, separators=(",", ":"), sort_keys=True))
     return report["exit"]

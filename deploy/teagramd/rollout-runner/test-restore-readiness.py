@@ -114,6 +114,102 @@ def container_fixture() -> tuple[dict[str, Any], dict[str, Any]]:
 
 
 class RestoreReadinessContractTests(unittest.TestCase):
+    def test_fixture_generation_failure_names_the_failed_check(self) -> None:
+        drill = object.__new__(RESTORE_READINESS.Drill)
+        drill.synthetic_auth_key_ids = ()
+        drill.sql = lambda *_args, **_kwargs: "unexpected fixture state"
+
+        with self.assertRaises(RESTORE_READINESS.DrillFailure) as failure:
+            drill.seed_source_auth_key_fixture({})
+
+        self.assertEqual(failure.exception.phase, "fixture_generation")
+        self.assertEqual(
+            getattr(failure.exception, "fixture_check", None),
+            "source_auth_key_fixture",
+        )
+
+    def test_fixture_check_in_report_is_allowlisted_and_sanitized(self) -> None:
+        report = RESTORE_READINESS.report_document(
+            "fixture_generation",
+            "fixture_failure",
+            "verified",
+            1,
+            fixture_check="source_auth_key_fixture",
+        )
+
+        self.assertEqual(report["fixture_check"], "source_auth_key_fixture")
+        self.assertNotIn("/", json.dumps(report))
+        with self.assertRaises(ValueError):
+            RESTORE_READINESS.report_document(
+                "fixture_generation",
+                "fixture_failure",
+                "verified",
+                1,
+                fixture_check="/tmp/private-fixture.env",
+            )
+
+    def test_run_primary_waits_for_supervisor_owned_manifest_registration(self) -> None:
+        tree = ast.parse(SCRIPT.read_text(encoding="utf-8"))
+        run_primary = next(
+            node
+            for node in ast.walk(tree)
+            if isinstance(node, ast.FunctionDef) and node.name == "run_primary"
+        )
+        calls = [
+            node
+            for node in ast.walk(run_primary)
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id == "wait_for_supervisor_registration"
+        ]
+
+        self.assertEqual(len(calls), 1, "the supervisor must publish its own manifest record before parent writes")
+        publish_line = next(
+            node.lineno
+            for node in ast.walk(run_primary)
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr == "Popen"
+        )
+        wait_line = calls[0].lineno
+        layout_line = next(
+            node.lineno
+            for node in ast.walk(run_primary)
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr == "create_private_layout"
+        )
+        self.assertLess(publish_line, wait_line)
+        self.assertLess(wait_line, layout_line)
+        self.assertFalse(
+            any(
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Attribute)
+                and node.func.attr == "save"
+                and publish_line < node.lineno < wait_line
+                for node in ast.walk(run_primary)
+            ),
+            "the parent must not save the manifest while the supervisor registers",
+        )
+
+    def test_wait_for_supervisor_registration_reads_the_child_record(self) -> None:
+        supervisor = Mock(pid=123, poll=Mock(return_value=None))
+        initial = {"supervisor": {"pid": 0, "start_ticks": 0}}
+        registered = {"supervisor": {"pid": 123, "start_ticks": 77}}
+
+        with (
+            patch.object(RESTORE_READINESS, "load_manifest", side_effect=(initial, registered)),
+            patch.object(RESTORE_READINESS.time, "sleep"),
+        ):
+            manifest = RESTORE_READINESS.wait_for_supervisor_registration(
+                Path("/run/restore-readiness-test/ownership.json"),
+                supervisor,
+                77,
+            )
+
+        self.assertIs(manifest, registered)
+        self.assertEqual(supervisor.poll.call_count, 2)
+
     def test_suite_work_budget_caps_each_run_and_is_shared_by_shell_gate(self) -> None:
         self.assertEqual(RESTORE_READINESS.bounded_work_seconds(None, None), 30 * 60)
         self.assertEqual(RESTORE_READINESS.bounded_work_seconds(None, 300), 300)
