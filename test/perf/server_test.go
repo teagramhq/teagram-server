@@ -33,9 +33,9 @@ import (
 
 const dcID = 2
 
-// contactCap admits the fixture's 10,000 owner contacts; the shipped
-// per-account bound is 5,000.
-const contactCap = 10_000
+// contactCap admits the fixture's 10,000 owner contacts and the 5,000
+// imported book users; the shipped per-account bound is 5,000.
+const contactCap = 10_000 + bookSize
 
 // channelParticipantCap admits the fixture's 100,000-subscriber channel; the
 // shipped per-channel bound is 10,000.

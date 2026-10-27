@@ -36,10 +36,10 @@ import (
 
 // fixtureVersion changes whenever the seeded shape changes, so a cached dump
 // of an older shape is never measured as if it were this one.
-const fixtureVersion = 3
+const fixtureVersion = 4
 
 // spec is one fixture size. The small fixture uses one hundredth of the large
-// fixture's scalable data, subject to per-account store limits.
+// fixture's scalable data, subject to its Store's per-account contact cap.
 type spec struct {
 	Name          string `json:"name"`
 	Contacts      int    `json:"contacts"`
@@ -78,7 +78,7 @@ func shrink() int {
 func scaled(name string, divisor int) spec {
 	return spec{
 		Name:          name,
-		Contacts:      min(10_000/divisor, store.MaxContactsPerUser),
+		Contacts:      min(10_000/divisor, contactCap),
 		Dialogs:       5_000 / divisor,
 		ChatMessages:  1_000_000 / divisor,
 		Subscribers:   100_000 / divisor,
@@ -144,13 +144,19 @@ func loadFixture(path string) (fixture, error) {
 	return f, nil
 }
 
+func TestContactCapIncludesSeedAndBook(t *testing.T) {
+	if got, want := contactCap, 10_000+bookSize; got < want {
+		t.Fatalf("performance store contact cap = %d, want at least %d for seeded and imported contacts", got, want)
+	}
+}
+
 func TestLoadFixtureRejectsOlderVersion(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "fixture.json")
-	if err := os.WriteFile(path, []byte(`{"version":2}`), 0o600); err != nil {
+	if err := os.WriteFile(path, []byte(`{"version":3}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := loadFixture(path); err == nil || !strings.Contains(err.Error(), "fixture version 2, want 3") {
-		t.Fatalf("loadFixture error = %v, want fixture version 2 mismatch", err)
+	if _, err := loadFixture(path); err == nil || !strings.Contains(err.Error(), "fixture version 3, want 4") {
+		t.Fatalf("loadFixture error = %v, want fixture version 3 mismatch", err)
 	}
 }
 
@@ -160,8 +166,8 @@ func TestLoadFixtureRejectsOlderVersion(t *testing.T) {
 // already on disk is left alone.
 func TestSeedFixtures(t *testing.T) {
 	for _, s := range fixtures {
-		if s.Contacts > store.MaxContactsPerUser {
-			t.Fatalf("%s fixture has %d contacts, store limit is %d", s.Name, s.Contacts, store.MaxContactsPerUser)
+		if s.Contacts > contactCap {
+			t.Fatalf("%s fixture has %d contacts, performance store limit is %d", s.Name, s.Contacts, contactCap)
 		}
 	}
 
