@@ -959,6 +959,8 @@ jobs:
           bash -n deploy/teagram/ops/target-failure-report.sh
           bash -n deploy/teagram/test-teagram-ops.sh
           bash -n deploy/teagram/test-target-failure-report.sh
+          bash -n deploy/teagram/ops/main2612-live-compose-replay.sh
+          bash -n deploy/teagram/ops/test-main2612-live-compose-replay.sh
           bash -n deploy/telegram-server/deploy-main.sh
           bash -n deploy/teagram-demo/prepare-env.sh
           bash -n deploy/teagram-demo/demo-common.sh
@@ -993,6 +995,8 @@ jobs:
             deploy/teagram/ops/target-failure-report.sh \
             deploy/teagram/test-teagram-ops.sh \
             deploy/teagram/test-target-failure-report.sh \
+            deploy/teagram/ops/main2612-live-compose-replay.sh \
+            deploy/teagram/ops/test-main2612-live-compose-replay.sh \
             deploy/telegram-server/deploy-main.sh \
             deploy/teagram-demo/prepare-env.sh \
             deploy/teagram-demo/demo-common.sh \
@@ -1025,6 +1029,9 @@ jobs:
 
       - name: Check read-only Compose preflight replay
         run: sudo -n deploy/teagram/test-preflight-replay.sh
+
+      - name: Check live Compose replay safety
+        run: deploy/teagram/ops/test-main2612-live-compose-replay.sh
 
       - name: Check teagram log access command
         run: deploy/teagram/test-teagram-logs.sh

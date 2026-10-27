@@ -96,6 +96,35 @@ container using the host network. The probe fetches client discovery through
 the host's Tailscale Serve endpoint and checks the MTProto auth-key exchange;
 the GitHub runner does not need Serve access.
 
+### MAIN-2612 pre-merge live Compose replay
+
+Run the reviewed main ops entrypoint with the candidate commit as its argument:
+
+```sh
+ssh teagram run <main-sha> main2612-live-compose-replay <candidate-sha>
+```
+
+If the candidate argument is omitted, the ops menu's selected main SHA is used.
+
+The script reads the live Compose selection from the running container label,
+then fetches the candidate commit into a private bare repository inside its
+guarded `/tmp/main2612-replay.<8 random characters>` tree. It stages the live
+Compose override, `.env` inputs and selected pinned Compose artifact only inside
+that root-owned mode 0700 tree. Credential files and staged copies must be
+root-owned mode 0600; the script sets `umask 077`. Compose and verifier output
+stays in the private tree, while snapshots retain only fingerprints and
+allowlisted fields. Candidate runner and verifier scripts run as child
+processes. The script prints only field/result rows, and only after guarded
+cleanup succeeds.
+
+The LXC root account and Docker daemon are trusted; this staging does not
+protect credentials from a host-root or daemon compromise, and file unlink is
+not secure erasure. An uncatchable kill or host failure can bypass the EXIT
+trap and leave a root-only temp tree behind; treat any such stale copy as a
+credential and do not remove it with a broad recursive command. This replay
+renders snapshots and compares preflight fields; it does not apply a release
+or change the live service.
+
 To redeploy by hand, run the `Deploy.` workflow from the Actions tab
 (`workflow_dispatch`, no inputs; it deploys the newest `main` commit with a
 successful CI push run), or from a checkout of `main`:
