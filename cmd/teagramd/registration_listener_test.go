@@ -100,7 +100,7 @@ func TestRegistrationModesStayBoundToListeners(t *testing.T) {
 	if len(turnstileScopes) != 1 || turnstileScopes[0] != (turnstileScope{signUp: true}) {
 		t.Fatalf("inactive single-listener Turnstile scopes = %v, want signup enabled and signin disabled", turnstileScopes)
 	}
-	clientDiscovery, err := discovery.NewDocument("127.0.0.1:2443", dcID, &key.PublicKey, false)
+	clientDiscovery, err := discovery.NewDocument("127.0.0.1:2443", dcID, &key.PublicKey, false, "")
 	if err != nil {
 		t.Fatal(err)
 	}
