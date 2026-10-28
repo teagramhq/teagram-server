@@ -227,7 +227,7 @@ func requestBody(w http.ResponseWriter, r *http.Request) (present bool, status i
 	}
 	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxRequestBodyBytes))
 	if err != nil {
-		if _, ok := errors.AsType[*http.MaxBytesError](err); ok {
+		if maxBytesErr, ok := errors.AsType[*http.MaxBytesError](err); ok && maxBytesErr != nil {
 			return false, http.StatusRequestEntityTooLarge
 		}
 		return false, http.StatusBadRequest
