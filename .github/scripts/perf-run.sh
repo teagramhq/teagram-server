@@ -66,7 +66,7 @@ seed() {
       seed_failure "drop the $f fixture history index before seeding"
   done
   TG_PERF_DIR="$PERF_CACHE" TG_PERF_DSN_1X="$(dsn 1x "")" TG_PERF_DSN_100X="$(dsn 100x "")" \
-    go test -tags performance -count=1 -timeout 100m -run '^TestSeedFixtures$' -v ./test/perf ||
+    go test -tags performance -count=1 -timeout 125m -run '^TestSeedFixtures$' -v ./test/perf ||
     seed_failure "populate the 1x and 100x fixture databases"
   for f in "${fixtures[@]}"; do
     psql_admin -d "perf_$f" -c \
