@@ -561,7 +561,19 @@ func runInviteCommand(args []string, log *slog.Logger, stdout, stderr io.Writer)
 }
 
 func runBotCommand(args []string, log *slog.Logger, stdout, stderr io.Writer) (err error) {
+	return runBotCommandWithEUID(args, log, stdout, stderr, os.Geteuid())
+}
+
+func runBotCommandWithEUID(args []string, log *slog.Logger, stdout, stderr io.Writer, euid int) (err error) {
 	if len(args) == 0 {
+		return botUsageError()
+	}
+	switch args[0] {
+	case "create", "rotate", "revoke":
+		if euid != 0 {
+			return fmt.Errorf("bot %s requires root", args[0])
+		}
+	default:
 		return botUsageError()
 	}
 

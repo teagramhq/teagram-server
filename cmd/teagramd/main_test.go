@@ -783,7 +783,7 @@ func TestRunBotCommandCreateRotateAndRevoke(t *testing.T) {
 
 	log := slog.New(slog.DiscardHandler)
 	var stdout, stderr bytes.Buffer
-	if err := runCommand([]string{"bot", "create", "Weather_Bot", "Weather"}, log, &stdout, &stderr); err != nil {
+	if err := runBotCommandWithEUID([]string{"create", "Weather_Bot", "Weather"}, log, &stdout, &stderr, 0); err != nil {
 		t.Fatalf("create command: %v", err)
 	}
 	createdToken := strings.TrimSuffix(stdout.String(), "\n")
@@ -814,7 +814,7 @@ func TestRunBotCommandCreateRotateAndRevoke(t *testing.T) {
 
 	stdout.Reset()
 	stderr.Reset()
-	if err := runCommand([]string{"bot", "rotate", strconv.FormatInt(botID, 10)}, log, &stdout, &stderr); err != nil {
+	if err := runBotCommandWithEUID([]string{"rotate", strconv.FormatInt(botID, 10)}, log, &stdout, &stderr, 0); err != nil {
 		t.Fatalf("rotate command: %v", err)
 	}
 	rotatedToken := strings.TrimSuffix(stdout.String(), "\n")
@@ -830,7 +830,7 @@ func TestRunBotCommandCreateRotateAndRevoke(t *testing.T) {
 
 	stdout.Reset()
 	stderr.Reset()
-	if err := runCommand([]string{"bot", "rotate", rotatedToken}, log, &stdout, &stderr); err == nil || strings.Contains(err.Error(), rotatedToken) {
+	if err := runBotCommandWithEUID([]string{"rotate", rotatedToken}, log, &stdout, &stderr, 0); err == nil || strings.Contains(err.Error(), rotatedToken) {
 		t.Fatalf("rotate with token argv error = %v, want a sanitized invalid-id error", err)
 	}
 	if stdout.Len() != 0 || stderr.Len() != 0 {
@@ -842,7 +842,7 @@ func TestRunBotCommandCreateRotateAndRevoke(t *testing.T) {
 
 	stdout.Reset()
 	stderr.Reset()
-	if err := runCommand([]string{"bot", "revoke", strconv.FormatInt(botID, 10)}, log, &stdout, &stderr); err != nil {
+	if err := runBotCommandWithEUID([]string{"revoke", strconv.FormatInt(botID, 10)}, log, &stdout, &stderr, 0); err != nil {
 		t.Fatalf("revoke command: %v", err)
 	}
 	if stdout.Len() != 0 {
@@ -851,6 +851,84 @@ func TestRunBotCommandCreateRotateAndRevoke(t *testing.T) {
 	if _, err := st.BotIDByToken(context.Background(), rotatedToken); !errors.Is(err, store.ErrBotTokenNotFound) {
 		t.Fatalf("revoked token error = %v, want not found", err)
 	}
+}
+
+func TestRunBotCommandRequiresRootBeforeConfigAndMutation(t *testing.T) {
+	ctx := context.Background()
+	dsn := pgtest.DSN(t)
+	t.Setenv("TG_POSTGRES_DSN", dsn)
+	t.Setenv("TG_AUTHKEY_ENC_KEY", strings.Repeat("00", 32))
+	t.Setenv("TG_AUTHKEY_ENC_KEY_FILE", "")
+
+	st, err := store.Open(ctx, dsn, make([]byte, 32), store.WithoutBlobStore())
+	if err != nil {
+		t.Fatalf("open store for bot fixture: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := st.Close(); err != nil {
+			t.Errorf("close fixture store: %v", err)
+		}
+	})
+	bot, _, err := st.CreateBot(ctx, "guarded_existing", "Guarded")
+	if err != nil {
+		t.Fatalf("create bot fixture: %v", err)
+	}
+
+	log := slog.New(slog.DiscardHandler)
+	var stdout, stderr bytes.Buffer
+	t.Setenv("TG_POSTGRES_DSN", "not a postgres DSN")
+	err = runBotCommandWithEUID([]string{"create", "guarded_new", "Guarded"}, log, &stdout, &stderr, 1000)
+	if err == nil || !strings.Contains(err.Error(), "requires root") {
+		t.Errorf("non-root create before config load error = %v, want root refusal", err)
+	}
+	if stdout.Len() != 0 || stderr.Len() != 0 {
+		t.Errorf("non-root create output = stdout %q stderr %q, want empty", stdout.String(), stderr.String())
+	}
+
+	t.Setenv("TG_POSTGRES_DSN", dsn)
+	for _, args := range [][]string{
+		{"create", "guarded_new", "Guarded"},
+		{"rotate", strconv.FormatInt(bot.ID, 10)},
+		{"revoke", strconv.FormatInt(bot.ID, 10)},
+	} {
+		before := botCommandStateSnapshot(t, dsn)
+		stdout.Reset()
+		stderr.Reset()
+		err := runBotCommandWithEUID(args, log, &stdout, &stderr, 1000)
+		if err == nil || !strings.Contains(err.Error(), "requires root") {
+			t.Errorf("non-root bot %s error = %v, want root refusal", args[0], err)
+		}
+		if stdout.Len() != 0 || stderr.Len() != 0 {
+			t.Errorf("non-root bot %s output = stdout %q stderr %q, want empty", args[0], stdout.String(), stderr.String())
+		}
+		if after := botCommandStateSnapshot(t, dsn); after != before {
+			t.Errorf("non-root bot %s changed account or token state:\nbefore %s\nafter  %s", args[0], before, after)
+		}
+	}
+}
+
+func botCommandStateSnapshot(t *testing.T, dsn string) string {
+	t.Helper()
+	ctx := context.Background()
+	conn, err := pgx.Connect(ctx, dsn)
+	if err != nil {
+		t.Fatalf("connect fixture database for bot snapshot: %v", err)
+	}
+	defer func() {
+		if err := conn.Close(ctx); err != nil {
+			t.Errorf("close bot snapshot connection: %v", err)
+		}
+	}()
+	var users, tokens string
+	err = conn.QueryRow(ctx, `
+		SELECT
+		  (SELECT COALESCE(jsonb_agg(to_jsonb(x) ORDER BY x.id)::text, '[]') FROM (SELECT id, username FROM users WHERE kind = 'bot') x),
+		  (SELECT COALESCE(jsonb_agg(to_jsonb(x) ORDER BY x.user_id)::text, '[]') FROM (SELECT user_id, token_hash, issued_at, revoked_at FROM bot_tokens) x)
+	`).Scan(&users, &tokens)
+	if err != nil {
+		t.Fatalf("read bot account state snapshot: %v", err)
+	}
+	return users + "|" + tokens
 }
 
 func TestParseInviteIssueArgs(t *testing.T) {
