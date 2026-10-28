@@ -949,6 +949,8 @@ jobs:
       - name: Check deploy script syntax
         run: |
           bash -n deploy/teagram/deploy-main.sh
+          bash -n deploy/teagram/ops/preflight-replay.sh
+          bash -n deploy/teagram/test-preflight-replay.sh
           bash -n deploy/teagram/teagram-logs.sh
           sh -n deploy/teagram/teagram-ops.sh
           bash -n deploy/teagram/ops/replay-check.sh
@@ -981,6 +983,8 @@ jobs:
           bash -n .github/scripts/perf-postgres.sh .github/scripts/test-perf-postgres.sh
           shellcheck \
             deploy/teagram/deploy-main.sh \
+            deploy/teagram/ops/preflight-replay.sh \
+            deploy/teagram/test-preflight-replay.sh \
             deploy/teagram/teagram-logs.sh \
             deploy/teagram/teagram-ops.sh \
             deploy/teagram/ops/replay-check.sh \
@@ -1018,6 +1022,9 @@ jobs:
 
       - name: Check deploy script target fixtures
         run: deploy/teagram/test-deploy-main.sh
+
+      - name: Check read-only Compose preflight replay
+        run: sudo -n deploy/teagram/test-preflight-replay.sh
 
       - name: Check teagram log access command
         run: deploy/teagram/test-teagram-logs.sh
