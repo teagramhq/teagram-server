@@ -278,6 +278,8 @@ fi
 printf '%s\n' 'PASS configured key-exchange values remain pinned and must match the target container'
 printf '%s\n' 'PASS named key-exchange override is verified without changing the remaining environment baseline'
 
+COMPOSE_JSON=$(jq -c '.services.teagramd.logging={driver:"syslog",options:{"syslog-address":"unixgram:///dev/log","syslog-facility":"daemon","syslog-format":"rfc5424",tag:"teagramd"}}' <<< "$COMPOSE_JSON")
+INSPECT_LOG_CONFIG='{"Type":"syslog","Config":{"syslog-address":"unixgram:///dev/log","syslog-facility":"daemon","syslog-format":"rfc5424","tag":"teagramd"}}'
 tailnet_added_baseline=$(tailnet_limit_snapshot baseline '' 'TG_RATE_LIMIT_KEY_EXCHANGE_IP_TAILNET=0' added 0)
 tailnet_added_target=$(tailnet_limit_snapshot target 0 'TG_RATE_LIMIT_KEY_EXCHANGE_IP_TAILNET=0' added 0)
 [ "$(jq -r '.container_env_added' <<< "$tailnet_added_baseline")" = none ]
