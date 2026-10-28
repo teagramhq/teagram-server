@@ -318,8 +318,10 @@ the credential files it needs, has no database credentials, and runs on the
 internal backend network with a read-only root filesystem.
 
 `test-seed-compose.sh` runs a second seed pass against the private Compose API
-and checks that verified marker counts and search results stay stable. The
-initial install and weekly wipe run this test before the production gate check.
+and checks that verified marker counts and search results stay stable. It also
+checks that the stored wipe generation survives a server restart; the weekly
+wipe passes the previous value so the test confirms a fresh database changed
+it before the public edge starts.
 
 ## Scheduled activity
 

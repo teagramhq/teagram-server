@@ -211,9 +211,8 @@ type Input struct {
 	// History holds one report per earlier main run, for noise bands.
 	History []Report
 	Waivers []Waiver
-	// Required names every scenario the gate must see measured, from a
-	// manifest kept apart from the harness, so dropping a scenario from the
-	// harness cannot also drop it from the check.
+	// Required names every scenario the gate must see measured. When provided,
+	// scenarios omitted from this manifest are retired from base comparisons.
 	Required []string
 }
 
@@ -264,7 +263,8 @@ func Evaluate(in Input) Verdict {
 	}
 	for _, rep := range in.Base {
 		for _, name := range rep.Scenarios {
-			if !slices.ContainsFunc(in.Head, func(h Report) bool { return slices.Contains(h.Scenarios, name) }) &&
+			if (len(in.Required) == 0 || slices.Contains(in.Required, name)) &&
+				!slices.ContainsFunc(in.Head, func(h Report) bool { return slices.Contains(h.Scenarios, name) }) &&
 				!slices.Contains(order, name) {
 				order = append(order, name)
 				v.Failures = append(v.Failures, Failure{Scenario: name, Check: checkMissing,

@@ -1,4 +1,4 @@
-h1:XThOAQTJfUyHxl6rubY7d2/Dm6Vi6PIzSu+ueq0fk5E=
+h1:xi6a/EJsCuzHmneg7PViHBYc3dEqWP1oRw6lR4sfeCs=
 20260721000001_baseline.sql h1:cnO6K1z0Uv3goEvecgJixKSio6ziaB1rF7cQLoCWOxs=
 20260721000002_auth_keys.sql h1:+vNabm6vdEAgu3H5ZGw2Wr8D/Y6i4ikAAUO3JbfZQeE=
 20260721000003_code_hardening.sql h1:8pbAqUpqcwOONUfac+qC51QjfC1JnObNCcXa1HC/dr0=
@@ -134,4 +134,5 @@ h1:XThOAQTJfUyHxl6rubY7d2/Dm6Vi6PIzSu+ueq0fk5E=
 20261026000004_backfill_owner_dialog_counts.sql h1:1xhdLbaFHdepnQ0t2RTifYjpSnxBBNuPOEV9u/eoDFk=
 20261026000005_owner_dialog_counts_for_users.sql h1:QlsMwrcKR8HqR8KPePMncLMAMJy7jJgFneFwIJCvlHA=
 20261026000006_backfill_zero_dialog_counts.sql h1:tt33OohUMR8x4yC1SWDgJ5WIAOTclIWGKCa7Sp0VODU=
-20261028000001_bot_accounts.sql h1:44FWXACm6RHp/o0wfY8Nq+3/H+2AQeTkFBG7KsxUi/o=
+20261027000001_demo_wipe_generation.sql h1:0aBCk8iyJszwUUuI876BwmTERoKODC4PfyCCZAivk44=
+20261028000001_bot_accounts.sql h1:QKlPk2JtnbLKV1IBKzxC/YNoQt+1ll4hme4oHEgJR5I=

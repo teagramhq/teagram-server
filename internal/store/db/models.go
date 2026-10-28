@@ -317,6 +317,11 @@ type CloudDraftSync struct {
 	ChangedAt pgtype.Timestamptz
 }
 
+type DemoWipeGeneration struct {
+	Singleton  int16
+	Generation string
+}
+
 type Dialog struct {
 	OwnerID         int64
 	PeerID          int64

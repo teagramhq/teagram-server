@@ -416,15 +416,30 @@ func TestEvaluateBlocksScenarioDroppedFromBase(t *testing.T) {
 func TestEvaluateBlocksRequiredScenarioMissingFromHarness(t *testing.T) {
 	head := report(pair("help.getConfig", perfreport.Read, result(1, 1, 1, 1), result(1, 1, 1, 1))...)
 	head.Scenarios = []string{"help.getConfig"}
-	v := perfreport.Evaluate(perfreport.Input{Head: []perfreport.Report{head}, Required: []string{"help.getConfig", "contacts.importContacts 5000"}})
+	v := perfreport.Evaluate(perfreport.Input{Head: []perfreport.Report{head}, Required: []string{"help.getConfig", "messages.getDialogs"}})
 	got := reasons(v.Failures)
 	for _, want := range []string{
-		"contacts.importContacts 5000: required, but the harness does not run it",
-		"contacts.importContacts 5000: no 1x measurement",
+		"messages.getDialogs: required, but the harness does not run it",
+		"messages.getDialogs: no 1x measurement",
 	} {
 		if !strings.Contains(got, want) {
 			t.Errorf("failures = %q, want %q", got, want)
 		}
+	}
+}
+
+func TestEvaluateOmitsBaseScenarioRetiredFromRequiredManifest(t *testing.T) {
+	const retired = "contacts.importContacts 5000"
+	head := report(pair("help.getConfig", perfreport.Read, result(1, 1, 1, 1), result(1, 1, 1, 1))...)
+	head.Scenarios = []string{"help.getConfig"}
+	base := report(pair(retired, perfreport.Write, result(1, 1, 1, 1), result(1, 1, 1, 1))...)
+	base.Scenarios = []string{retired}
+
+	got := perfreport.Markdown(perfreport.Evaluate(perfreport.Input{
+		Head: []perfreport.Report{head}, Base: []perfreport.Report{base}, Required: []string{"help.getConfig"},
+	}))
+	if strings.Contains(got, retired) {
+		t.Fatalf("report contains retired scenario %q:\n%s", retired, got)
 	}
 }
 
