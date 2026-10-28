@@ -94,18 +94,31 @@ jobs:
           CANCELLED_PR_RUN_IDS: ${{ needs.prioritize-main.outputs.cancelled_pr_run_ids }}
         run: |
           set -euo pipefail
+          max_status_checks=5
           read -r -a cancelled_pr_run_ids <<< "$CANCELLED_PR_RUN_IDS"
           for run_id in "${cancelled_pr_run_ids[@]}"; do
             if [[ ! "$run_id" =~ ^[0-9]+$ ]]; then
               echo "::warning::Ignoring invalid cancelled pull request CI run id."
               continue
             fi
-            if ! run_state="$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${run_id}" --jq '[.status, (.conclusion // "")] | @tsv' 2>/dev/null)"; then
-              echo "::warning::Could not verify cancelled pull request CI run ${run_id}; rerun it manually if its check remains cancelled."
-              continue
-            fi
+            run_state=""
+            for ((status_check_attempt = 1; status_check_attempt <= max_status_checks; status_check_attempt++)); do
+              if ! run_state="$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${run_id}" --jq '[.status, (.conclusion // "")] | @tsv' 2>/dev/null)"; then
+                run_state=""
+              fi
+              if [[ "$run_state" == $'completed\tcancelled' || "$run_state" == completed$'\t'* ]]; then
+                break
+              fi
+              if (( status_check_attempt < max_status_checks )); then
+                sleep 2
+              fi
+            done
             if [[ "$run_state" != $'completed\tcancelled' ]]; then
-              echo "Pull request CI run ${run_id} is ${run_state}; no rerun is needed."
+              if [[ "$run_state" == completed$'\t'* ]]; then
+                echo "Pull request CI run ${run_id} is ${run_state}; no rerun is needed."
+              else
+                echo "::warning::Could not confirm cancelled pull request CI run ${run_id} after ${max_status_checks} status checks; rerun it manually if its check remains cancelled."
+              fi
               continue
             fi
             if ! gh run rerun "$run_id" --repo "$GITHUB_REPOSITORY"; then
