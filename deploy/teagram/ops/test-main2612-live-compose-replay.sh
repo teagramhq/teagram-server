@@ -30,7 +30,7 @@ trap cleanup_test EXIT
 bash -n "$OPS_SCRIPT"
 grep -Fq 'umask 077' "$OPS_SCRIPT"
 grep -Fq "TMP_TOKEN=\$(mark_replay_tree \"\$TMP\")" "$OPS_SCRIPT"
-grep -Fq 'write_synthetic_env "$env_source" "$tree/$env_name"' "$OPS_SCRIPT"
+grep -Fq "write_synthetic_env \"\$env_source\" \"\$tree/\$env_name\"" "$OPS_SCRIPT"
 grep -Fq "unlink -- \"\$env_path\"" "$OPS_SCRIPT"
 grep -Fq "RESULT_ROWS=\$(<\"\$TMP/logs/field-results.tsv\")" "$OPS_SCRIPT"
 if grep -Fq "cat -- \"\$TMP/logs/field-results.tsv\"" "$OPS_SCRIPT"; then
@@ -48,8 +48,8 @@ if grep -Eq 'source[[:space:]].*rollout-(runner|verifier)\.sh' "$OPS_SCRIPT"; th
 fi
 grep -Fq "git -C \"\$TMP/candidate.git\" fetch --quiet --no-tags --depth=1 \"\$CANDIDATE_REMOTE\" \"\$CANDIDATE_SHA\"" "$OPS_SCRIPT"
 grep -Fq "rollout_safe_remove_tree \"\$target\" \"\$TMP\" \"\$TMP_TOKEN\" \"\$LIVE_CHECKOUT\"" "$OPS_SCRIPT"
-grep -Fq 'run_candidate_sandbox "$tree" /usr/bin/env' "$OPS_SCRIPT"
-grep -Fq 'bash "$tree/deploy/teagramd/rollout-runner/rollout-verifier.sh" snapshot' "$OPS_SCRIPT"
+grep -Fq "run_candidate_sandbox \"\$tree\" /usr/bin/env" "$OPS_SCRIPT"
+grep -Fq "bash \"\$tree/deploy/teagramd/rollout-runner/rollout-verifier.sh\" snapshot" "$OPS_SCRIPT"
 grep -Fq 'run_candidate_sandbox /workspace/pr /usr/bin/env' "$OPS_SCRIPT"
 grep -Fq 'compare-preflight /root/baseline /root/preflight' "$OPS_SCRIPT"
 grep -Fq 'require_replay_sandbox' "$OPS_SCRIPT"

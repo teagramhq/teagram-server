@@ -321,7 +321,7 @@ write_synthetic_authority() {
   state_dir="$checkout/.state/blob-mode"
   first="$state_dir/journal/0000000001.json"
   second="$state_dir/journal/0000000002.json"
-  mkdir -m 755 -p "$state_dir/journal" || return 1
+  mkdir -p "$state_dir/journal" || return 1
   cat > "$first" <<'EOF'
 {"backend":{"dir":"/var/lib/teagramd-blobs","kind":"local"},"evidence":{"report_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},"generation":1,"outcome":"initial-local","published_at":"2026-10-01T00:00:00Z","schema":"teagram.blob-mode/v1","supersedes":null,"transition_id":"00000000-0000-4000-8000-000000000001","volumes":{"rustfsdata":null,"tgblobs":"teagram_tgblobs"}}
 EOF
