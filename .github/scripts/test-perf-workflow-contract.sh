@@ -186,7 +186,7 @@ expected_restore_command="pg_restore -U postgres -d \"perf_\$f\" -j 4 --no-owner
 [[ "$runner_contents" == *"^Test(LoadFixtureRejectsOlderVersion|OwnerUsernamePasswordLogin|RPCPerformance)$"* ]] ||
   fail 'the performance harness selection must run the stale fixture version regression test'
 postgres_contents="$(<"$postgres")"
-[[ "$postgres_contents" == *"pg_isready -h 127.0.0.1 -U postgres -q"* ]] ||
+[[ "$postgres_contents" == *"pg_isready -h 127.0.0.1 -p 5432 -U postgres -q"* ]] ||
   fail 'Postgres readiness must wait for the TCP listener used by the workflow'
 [[ "$runner_contents" == *'pg_dump -U postgres -Fc -Z 3 --no-acl'* ]] ||
   fail 'fixture snapshots must omit ACLs that depend on cluster-global roles'

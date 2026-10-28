@@ -288,7 +288,7 @@ class DockerImageMirrorTests(unittest.TestCase):
             encoding="utf-8"
         )
         self.assertIn(
-            'pg_isready -h 127.0.0.1 -U postgres -q',
+            'pg_isready -h 127.0.0.1 -p 5432 -U postgres -q',
             script,
         )
 
@@ -443,7 +443,7 @@ class PerformancePostgresReadinessTests(unittest.TestCase):
             encoding="utf-8"
         )
         self.assertIn(
-            'docker exec "$PERF_PG_CONTAINER" pg_isready -h 127.0.0.1 -U postgres -q',
+            'docker exec "$PERF_PG_CONTAINER" pg_isready -h 127.0.0.1 -p 5432 -U postgres -q',
             script,
         )
 
