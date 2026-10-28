@@ -116,6 +116,17 @@ if [[ -e "$MODE_FILE" || -L "$MODE_FILE" ]]; then
   demo_compose down --remove-orphans
   demo_bootstrap_compose up -d migrate
   demo_wait_migration demo_bootstrap_compose 'resume migrations'
+  demo_compose run --rm --no-deps "$ACTIVE_SERVER" client-config > "$TMP_DIR/client.json"
+  jq -e '
+    .version == 1
+    and .mtproto.endpoint == "demo.teagram.io:443"
+    and (.mtproto.rsa_spki | type == "string" and length > 0)
+    and .websocket.endpoint == "wss://demo.teagram.io/apiws"
+    and .demo.guest_sign_up == true
+    and (.demo.wipe_generation | type == "string" and test("^[0-9a-f]{64}$"))
+  ' "$TMP_DIR/client.json" >/dev/null || demo_fail 'client-config lacks the approved demo wipe generation binding'
+  install -o root -g root -m 0644 "$TMP_DIR/client.json" "$DEMO_CLIENT_CONFIG.next"
+  mv -f -- "$DEMO_CLIENT_CONFIG.next" "$DEMO_CLIENT_CONFIG"
   demo_write_active_release "$ACTIVE_SERVER" "$IMAGE_REF"
   demo_seed_compose up -d "$ACTIVE_SERVER"
   demo_prepare_seed_owner "$TMP_DIR"
@@ -171,18 +182,19 @@ demo_compose run --rm --no-deps teagramd bootstrap-identity > "$TMP_DIR/bootstra
 FINGERPRINT=$(sed -n 's/.*fingerprint=\(-\{0,1\}[0-9][0-9]*\).*/\1/p' "$TMP_DIR/bootstrap.stdout" | head -n 1)
 [[ "$FINGERPRINT" =~ ^-?[0-9]+$ ]] || demo_fail 'identity bootstrap did not report an RSA fingerprint'
 
+demo_bootstrap_compose up -d migrate
+demo_wait_migration demo_bootstrap_compose 'bootstrap migrations'
 demo_compose run --rm --no-deps teagramd client-config > "$TMP_DIR/client.json"
 jq -e '
   .version == 1
   and .mtproto.endpoint == "demo.teagram.io:443"
   and (.mtproto.rsa_spki | type == "string" and length > 0)
   and .websocket.endpoint == "wss://demo.teagram.io/apiws"
-' "$TMP_DIR/client.json" >/dev/null || demo_fail 'client-config lacks the approved demo WebSocket binding; wait for MAIN-2196'
+  and .demo.guest_sign_up == true
+  and (.demo.wipe_generation | type == "string" and test("^[0-9a-f]{64}$"))
+' "$TMP_DIR/client.json" >/dev/null || demo_fail 'client-config lacks the approved demo wipe generation binding; wait for MAIN-2196'
 install -o root -g root -m 0644 "$TMP_DIR/client.json" "$DEMO_CLIENT_CONFIG.next"
 mv -f -- "$DEMO_CLIENT_CONFIG.next" "$DEMO_CLIENT_CONFIG"
-
-demo_bootstrap_compose up -d migrate
-demo_wait_migration demo_bootstrap_compose 'bootstrap migrations'
 demo_bootstrap_compose up -d teagramd
 
 mapfile -t CONTAINER_IDS < <(demo_bootstrap_compose ps -q)

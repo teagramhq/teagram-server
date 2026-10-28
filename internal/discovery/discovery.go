@@ -21,6 +21,7 @@ import (
 )
 
 var discoverySiteKeyPattern = regexp.MustCompile(`^[A-Za-z0-9_-]{1,256}$`)
+var discoveryWipeGenerationPattern = regexp.MustCompile(`^[0-9a-f]{64}$`)
 
 const (
 	// Version is the version of both the static document and the local
@@ -57,7 +58,8 @@ type Turnstile struct {
 // DemoCapabilities advertises optional demo features without changing the
 // server's authentication or registration policy.
 type DemoCapabilities struct {
-	GuestSignUp bool `json:"guest_sign_up"`
+	GuestSignUp    bool   `json:"guest_sign_up"`
+	WipeGeneration string `json:"wipe_generation"`
 }
 
 // MTProtoBinding is the endpoint, DC and public RSA identity a server uses.
@@ -74,15 +76,15 @@ type WebSocketBinding struct {
 
 // NewDocument constructs the canonical public document from the exact
 // endpoint, DC and key used by the server.
-func NewDocument(endpoint string, dcID int, pub *rsa.PublicKey, advertiseDemoGuestSignUp bool) (Document, error) {
-	return NewDocumentWithWebSocketAdvertiseAddr(endpoint, endpoint, dcID, pub, advertiseDemoGuestSignUp)
+func NewDocument(endpoint string, dcID int, pub *rsa.PublicKey, advertiseDemoGuestSignUp bool, wipeGeneration string) (Document, error) {
+	return NewDocumentWithWebSocketAdvertiseAddr(endpoint, endpoint, dcID, pub, advertiseDemoGuestSignUp, wipeGeneration)
 }
 
 // NewDocumentWithWebSocketAdvertiseAddr constructs a discovery document whose
 // MTProto and browser transports may advertise different hosts. The WebSocket
 // address is listener-scoped; the MTProto address remains the deployment's
 // canonical endpoint.
-func NewDocumentWithWebSocketAdvertiseAddr(endpoint, webSocketAdvertiseAddr string, dcID int, pub *rsa.PublicKey, advertiseDemoGuestSignUp bool) (Document, error) {
+func NewDocumentWithWebSocketAdvertiseAddr(endpoint, webSocketAdvertiseAddr string, dcID int, pub *rsa.PublicKey, advertiseDemoGuestSignUp bool, wipeGeneration string) (Document, error) {
 	if err := ValidateEndpoint(endpoint); err != nil {
 		return Document{}, fmt.Errorf("validate advertised endpoint: %w", err)
 	}
@@ -110,9 +112,21 @@ func NewDocumentWithWebSocketAdvertiseAddr(endpoint, webSocketAdvertiseAddr stri
 		WebSocket: WebSocketBinding{Endpoint: wsEndpoint},
 	}
 	if advertiseDemoGuestSignUp {
-		doc.Demo = &DemoCapabilities{GuestSignUp: true}
+		if err := ValidateWipeGeneration(wipeGeneration); err != nil {
+			return Document{}, err
+		}
+		doc.Demo = &DemoCapabilities{GuestSignUp: true, WipeGeneration: wipeGeneration}
 	}
 	return doc, nil
+}
+
+// ValidateWipeGeneration checks the fixed public representation stored for a
+// demo database generation. It is a change signal, not a capability.
+func ValidateWipeGeneration(generation string) error {
+	if !discoveryWipeGenerationPattern.MatchString(generation) {
+		return errors.New("demo wipe generation must be 64 lowercase hexadecimal characters")
+	}
+	return nil
 }
 
 // MarshalDocument returns one deterministic compact JSON document. Encoding
@@ -123,8 +137,13 @@ func MarshalDocument(doc Document) ([]byte, error) {
 	if doc.Version != Version {
 		return nil, fmt.Errorf("unsupported discovery document version %d", doc.Version)
 	}
-	if doc.Demo != nil && !doc.Demo.GuestSignUp {
-		return nil, errors.New("demo guest sign-up capability must be enabled when present")
+	if doc.Demo != nil {
+		if !doc.Demo.GuestSignUp {
+			return nil, errors.New("demo guest sign-up capability must be enabled when present")
+		}
+		if err := ValidateWipeGeneration(doc.Demo.WipeGeneration); err != nil {
+			return nil, err
+		}
 	}
 	if doc.Turnstile != nil && !discoverySiteKeyPattern.MatchString(doc.Turnstile.SiteKey) {
 		return nil, errors.New("Turnstile site key is invalid")

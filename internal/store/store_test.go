@@ -3,6 +3,7 @@ package store_test
 import (
 	"context"
 	"errors"
+	"regexp"
 	"testing"
 
 	"github.com/teagramhq/teagram-server/internal/blob"
@@ -67,6 +68,69 @@ func TestOpenAllowsExplicitDatabaseOnlyStore(t *testing.T) {
 	}
 	if err := s.Close(); err != nil {
 		t.Fatalf("close: %v", err)
+	}
+}
+
+func TestDemoWipeGenerationMigrationSeedsOneOpaqueValue(t *testing.T) {
+	t.Parallel()
+	st := open(t)
+	ctx := context.Background()
+
+	var generation string
+	if err := store.StorePool(st).QueryRow(ctx, `
+		SELECT generation
+		FROM demo_wipe_generation
+		WHERE singleton = 1
+	`).Scan(&generation); err != nil {
+		t.Fatalf("read migrated demo wipe generation: %v", err)
+	}
+	if !regexp.MustCompile(`^[0-9a-f]{64}$`).MatchString(generation) {
+		t.Fatalf("demo wipe generation = %q, want 64 lowercase hexadecimal characters", generation)
+	}
+
+	var count int
+	if err := store.StorePool(st).QueryRow(ctx, `SELECT count(*) FROM demo_wipe_generation`).Scan(&count); err != nil {
+		t.Fatalf("count migrated demo wipe generations: %v", err)
+	}
+	if count != 1 {
+		t.Fatalf("demo wipe generation rows = %d, want 1", count)
+	}
+
+	readGeneration, err := st.DemoWipeGeneration(ctx)
+	if err != nil {
+		t.Fatalf("read demo wipe generation through Store: %v", err)
+	}
+	if readGeneration != generation {
+		t.Fatalf("Store generation = %q, want migrated value %q", readGeneration, generation)
+	}
+	commandGeneration, err := store.ReadDemoWipeGeneration(ctx, pgtest.DSN(t))
+	if err != nil {
+		t.Fatalf("read demo wipe generation for client-config: %v", err)
+	}
+	if commandGeneration != generation {
+		t.Fatalf("client-config generation = %q, want migrated value %q", commandGeneration, generation)
+	}
+	if _, err := store.StorePool(st).Exec(ctx, `
+		ALTER TABLE demo_wipe_generation
+		DROP CONSTRAINT demo_wipe_generation_generation_check
+	`); err != nil {
+		t.Fatalf("remove generation constraint for invalid-value test: %v", err)
+	}
+	if _, err := store.StorePool(st).Exec(ctx, `
+		UPDATE demo_wipe_generation
+		SET generation = 'bad'
+		WHERE singleton = 1
+	`); err != nil {
+		t.Fatalf("write invalid generation fixture: %v", err)
+	}
+	if _, err := st.DemoWipeGeneration(ctx); err == nil {
+		t.Fatal("Store returned a malformed generation")
+	}
+	if _, err := store.StorePool(st).Exec(ctx, `DELETE FROM demo_wipe_generation WHERE singleton = 1`); err != nil {
+		t.Fatalf("remove demo wipe generation fixture: %v", err)
+	}
+	if _, err := st.DemoWipeGeneration(ctx); err == nil {
+		t.Fatal("Store returned a generation after its row was removed")
 	}
 }
 

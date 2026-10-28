@@ -157,7 +157,7 @@ func TestPreAuthPerNetCapIsolatedByPublicListener(t *testing.T) {
 	if err != nil {
 		t.Fatalf("generate RSA key: %v", err)
 	}
-	doc, err := discovery.NewDocument("tailnet.example.test:2443", 2, &rsaKey.PublicKey, false)
+	doc, err := discovery.NewDocument("tailnet.example.test:2443", 2, &rsaKey.PublicKey, false, "")
 	if err != nil {
 		t.Fatalf("build discovery document: %v", err)
 	}
