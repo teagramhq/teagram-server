@@ -6,6 +6,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -961,6 +962,107 @@ func TestChannelHistoryPageByDateShiftSkipsExpiredRows(t *testing.T) {
 	if readRows > 2*pageSize+10 {
 		t.Fatalf("shifted expired backlog date history read %.0f channel rows for a %d-row page, want at most %d", readRows, pageSize, 2*pageSize+10)
 	}
+}
+
+func TestChannelHistoryPageByDateBoundsOlderOffsetsAndExpiredTail(t *testing.T) {
+	ctx := t.Context()
+	dsn := pgtest.DSN(t)
+	pool, err := pgxpool.New(ctx, dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pool.Close()
+	for _, sql := range []string{
+		`UPDATE server_administration SET election_closed = true WHERE singleton_id = 1`,
+		`INSERT INTO users (id, phone, first_name) VALUES (1, '+channel-history-older-offset-owner', 'Owner')`,
+		`INSERT INTO channels (id, title, creator_id) VALUES (1, 'Channel older offset history plan', 1)`,
+		`INSERT INTO channel_state (channel_id) VALUES (1)`,
+		`INSERT INTO channel_participants (channel_id, user_id) VALUES (1, 1)`,
+		`ALTER TABLE channel_messages DISABLE TRIGGER channel_messages_stamp_history_ttl`,
+		`ALTER TABLE channel_messages DISABLE TRIGGER channel_messages_summary_maintain`,
+		`INSERT INTO channel_messages (channel_id, local_id, from_id, date, message)
+		 SELECT 1, n, 1, to_timestamp(n), 'live older channel post'
+		 FROM generate_series(1, 1000) n`,
+		`INSERT INTO channel_messages (channel_id, local_id, from_id, date, message, ttl_period, expires_at)
+		 SELECT 1, n, 1, to_timestamp(n), 'expired channel post before anchor', 86400,
+		        to_timestamp(n) + make_interval(secs => 86400)
+		 FROM generate_series(1001, 5000) n`,
+		`INSERT INTO channel_messages (channel_id, local_id, from_id, date, message, ttl_period, expires_at)
+		 SELECT 1, n, 1, statement_timestamp() - interval '1 day', 'live channel post before tail', 604800,
+		        statement_timestamp() + interval '6 days'
+		 FROM generate_series(5001, 6999) n`,
+		`INSERT INTO channel_messages (channel_id, local_id, from_id, date, message, ttl_period, expires_at)
+		 VALUES (1, 7000, 1, statement_timestamp(), 'latest live channel post', 604800,
+		         statement_timestamp() + interval '7 days')`,
+		`INSERT INTO channel_messages (channel_id, local_id, from_id, date, message, ttl_period, expires_at)
+		 SELECT 1, n, 1, to_timestamp(n), 'expired channel tail post', 86400,
+		        to_timestamp(n) + make_interval(secs => 86400)
+		 FROM generate_series(7001, 11000) n`,
+		`ALTER TABLE channel_messages ENABLE TRIGGER channel_messages_summary_maintain`,
+		`ALTER TABLE channel_messages ENABLE TRIGGER channel_messages_stamp_history_ttl`,
+		`ANALYZE channel_messages`,
+	} {
+		if _, err := pool.Exec(ctx, sql); err != nil {
+			t.Fatalf("seed older-offset expired channel date history: %v", err)
+		}
+	}
+
+	recorded := &scaleQueries{}
+	cfg, err := pgxpool.ParseConfig(dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.ConnConfig.Tracer = recorded
+	traced, err := pgxpool.NewWithConfig(ctx, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer traced.Close()
+	const pageSize = 100
+	runPage := func(label string, offsetDate, addOffset int64, firstID, lastID int64) {
+		t.Helper()
+		recorded.mu.Lock()
+		recorded.queries = nil
+		recorded.mu.Unlock()
+		rows, err := db.New(traced).ChannelHistoryPageByDate(ctx, db.ChannelHistoryPageByDateParams{
+			ChannelID: 1, OwnerID: 1, OffsetDate: offsetDate, AddOffset: addOffset, Lim: pageSize,
+		})
+		if err != nil {
+			t.Fatalf("%s: %v", label, err)
+		}
+		if len(rows) != pageSize || rows[0].LocalID != firstID || rows[len(rows)-1].LocalID != lastID {
+			t.Fatalf("%s returned %d rows from %d to %d, want %d rows from %d to %d", label, len(rows), rows[0].LocalID, rows[len(rows)-1].LocalID, pageSize, firstID, lastID)
+		}
+
+		recorded.mu.Lock()
+		queries := append([]pgx.TraceQueryStartData(nil), recorded.queries...)
+		recorded.mu.Unlock()
+		if len(queries) != 1 {
+			t.Fatalf("%s issued %d statements, want 1", label, len(queries))
+		}
+		var raw []byte
+		if err := pool.QueryRow(ctx, "EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) "+queries[0].SQL, queries[0].Args...).Scan(&raw); err != nil {
+			t.Fatalf("explain %s: %v", label, err)
+		}
+		var plans []struct {
+			Plan scalePlan `json:"Plan"`
+		}
+		if err := json.Unmarshal(raw, &plans); err != nil {
+			t.Fatalf("decode %s plan: %v", label, err)
+		}
+		if len(plans) != 1 {
+			t.Fatalf("%s explain returned %d plans, want 1", label, len(plans))
+		}
+		readRows := plans[0].Plan.rowsReadFrom("channel_messages")
+		if readRows > 2*pageSize+10 {
+			t.Fatalf("%s read %.0f channel rows for a %d-row page, want at most %d", label, readRows, pageSize, 2*pageSize+10)
+		}
+	}
+
+	now := time.Now()
+	runPage("positive offset skips expired backlog", now.Add(-48*time.Hour).Unix(), pageSize, 900, 801)
+	runPage("negative shift beyond the date anchor uses visible tail", now.Add(-12*time.Hour).Unix(), -pageSize-1, 7000, 6901)
+	runPage("date miss uses visible tail", now.Add(time.Hour).Unix(), -pageSize-1, 7000, 6901)
 }
 
 func scaleQueryError[T any](_ T, err error) error { return err }
