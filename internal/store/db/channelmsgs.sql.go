@@ -302,7 +302,7 @@ func (q *Queries) ChannelHistoryPageAround(ctx context.Context, arg ChannelHisto
 
 const channelHistoryPageByDate = `-- name: ChannelHistoryPageByDate :many
 WITH history_tail AS MATERIALIZED (
-    SELECT cm.local_id
+    SELECT cm.local_id, cm.date
     FROM channel_messages cm
     JOIN channel_participants cp
       ON cp.channel_id = cm.channel_id
@@ -344,7 +344,7 @@ WITH history_tail AS MATERIALIZED (
 ), date_anchor AS MATERIALIZED (
     -- The insert trigger stamps expires_at as date + ttl_period. Splitting the
     -- allowed periods lets each date-index seek skip its expired backlog.
-    SELECT candidates.local_id
+    SELECT candidates.local_id, candidates.date
     FROM (
         (
             SELECT candidate.local_id, candidate.date
@@ -433,32 +433,165 @@ WITH history_tail AS MATERIALIZED (
     LIMIT 1
 ), cursor AS MATERIALIZED (
     SELECT COALESCE(
-        (SELECT local_id FROM date_anchor),
-        (SELECT local_id + 1 FROM history_tail)
-    ) AS local_id
+               (SELECT local_id FROM date_anchor),
+               (SELECT local_id + 1 FROM history_tail)
+           ) AS local_id,
+           COALESCE(
+               (SELECT date FROM date_anchor),
+               (SELECT date FROM history_tail)
+           ) AS date
+), visible_starts AS MATERIALIZED (
+    -- For expiring posts, use the date index to jump over the expired prefix
+    -- before using the local-id index to find the requested offset.
+    SELECT m.channel_id, m.available_min_id, 0::integer AS ttl_period, cur.local_id
+    FROM cursor cur
+    JOIN member m ON true
+    UNION ALL
+    SELECT m.channel_id, m.available_min_id, 86400::integer, first_visible.local_id
+    FROM cursor cur
+    JOIN member m ON true
+    CROSS JOIN LATERAL (
+        SELECT cm.local_id
+        FROM channel_messages cm
+        WHERE cm.channel_id = m.channel_id
+          AND cm.deleted = false
+          AND cm.ttl_period = 86400
+          AND cm.expires_at > statement_timestamp()
+          AND cm.local_id >= cur.local_id
+          AND cm.local_id > m.available_min_id
+          AND cm.date >= GREATEST(
+              cur.date,
+              statement_timestamp() - make_interval(secs => 86400)
+          )
+        ORDER BY cm.date, cm.local_id
+        LIMIT 1
+    ) AS first_visible
+    UNION ALL
+    SELECT m.channel_id, m.available_min_id, 604800::integer, first_visible.local_id
+    FROM cursor cur
+    JOIN member m ON true
+    CROSS JOIN LATERAL (
+        SELECT cm.local_id
+        FROM channel_messages cm
+        WHERE cm.channel_id = m.channel_id
+          AND cm.deleted = false
+          AND cm.ttl_period = 604800
+          AND cm.expires_at > statement_timestamp()
+          AND cm.local_id >= cur.local_id
+          AND cm.local_id > m.available_min_id
+          AND cm.date >= GREATEST(
+              cur.date,
+              statement_timestamp() - make_interval(secs => 604800)
+          )
+        ORDER BY cm.date, cm.local_id
+        LIMIT 1
+    ) AS first_visible
+    UNION ALL
+    SELECT m.channel_id, m.available_min_id, 2592000::integer, first_visible.local_id
+    FROM cursor cur
+    JOIN member m ON true
+    CROSS JOIN LATERAL (
+        SELECT cm.local_id
+        FROM channel_messages cm
+        WHERE cm.channel_id = m.channel_id
+          AND cm.deleted = false
+          AND cm.ttl_period = 2592000
+          AND cm.expires_at > statement_timestamp()
+          AND cm.local_id >= cur.local_id
+          AND cm.local_id > m.available_min_id
+          AND cm.date >= GREATEST(
+              cur.date,
+              statement_timestamp() - make_interval(secs => 2592000)
+          )
+        ORDER BY cm.date, cm.local_id
+        LIMIT 1
+    ) AS first_visible
+), negative_page_start AS MATERIALIZED (
+    SELECT candidates.local_id
+    FROM (
+        (
+            SELECT candidate.local_id
+            FROM visible_starts starts
+            CROSS JOIN LATERAL (
+                SELECT cm.local_id
+                FROM channel_messages cm
+                WHERE cm.channel_id = starts.channel_id
+                  AND cm.deleted = false
+                  AND cm.ttl_period = 0
+                  AND cm.expires_at IS NULL
+                  AND cm.local_id >= starts.local_id
+                  AND cm.local_id > starts.available_min_id
+                ORDER BY cm.local_id
+                LIMIT GREATEST(1::bigint, 0::bigint - $6::bigint)
+            ) AS candidate
+            WHERE starts.ttl_period = 0
+            ORDER BY candidate.local_id
+        )
+        UNION ALL
+        (
+            SELECT candidate.local_id
+            FROM visible_starts starts
+            CROSS JOIN LATERAL (
+                SELECT cm.local_id
+                FROM channel_messages cm
+                WHERE cm.channel_id = starts.channel_id
+                  AND cm.deleted = false
+                  AND cm.ttl_period = 86400
+                  AND cm.expires_at > statement_timestamp()
+                  AND cm.local_id >= starts.local_id
+                  AND cm.local_id > starts.available_min_id
+                ORDER BY cm.local_id
+                LIMIT GREATEST(1::bigint, 0::bigint - $6::bigint)
+            ) AS candidate
+            WHERE starts.ttl_period = 86400
+            ORDER BY candidate.local_id
+        )
+        UNION ALL
+        (
+            SELECT candidate.local_id
+            FROM visible_starts starts
+            CROSS JOIN LATERAL (
+                SELECT cm.local_id
+                FROM channel_messages cm
+                WHERE cm.channel_id = starts.channel_id
+                  AND cm.deleted = false
+                  AND cm.ttl_period = 604800
+                  AND cm.expires_at > statement_timestamp()
+                  AND cm.local_id >= starts.local_id
+                  AND cm.local_id > starts.available_min_id
+                ORDER BY cm.local_id
+                LIMIT GREATEST(1::bigint, 0::bigint - $6::bigint)
+            ) AS candidate
+            WHERE starts.ttl_period = 604800
+            ORDER BY candidate.local_id
+        )
+        UNION ALL
+        (
+            SELECT candidate.local_id
+            FROM visible_starts starts
+            CROSS JOIN LATERAL (
+                SELECT cm.local_id
+                FROM channel_messages cm
+                WHERE cm.channel_id = starts.channel_id
+                  AND cm.deleted = false
+                  AND cm.ttl_period = 2592000
+                  AND cm.expires_at > statement_timestamp()
+                  AND cm.local_id >= starts.local_id
+                  AND cm.local_id > starts.available_min_id
+                ORDER BY cm.local_id
+                LIMIT GREATEST(1::bigint, 0::bigint - $6::bigint)
+            ) AS candidate
+            WHERE starts.ttl_period = 2592000
+            ORDER BY candidate.local_id
+        )
+    ) AS candidates
+    ORDER BY candidates.local_id
+    LIMIT 1
+    OFFSET GREATEST(0::bigint, 0::bigint - $6::bigint - 1)
 ), page_start AS (
     SELECT CASE
         WHEN $6::bigint < 0 THEN COALESCE(
-            (
-                SELECT cm.local_id
-                FROM channel_messages cm
-                JOIN channel_participants cp
-                  ON cp.channel_id = cm.channel_id
-                 AND cp.user_id = $3::bigint
-                WHERE cm.channel_id = $4::bigint
-                  AND cm.deleted = false
-                  AND (cm.expires_at IS NULL OR cm.expires_at > statement_timestamp())
-                  AND cm.local_id > cp.available_min_id
-                  AND (cp.banned_until IS NULL OR cp.banned_until <= now())
-                  AND cm.local_id >= (SELECT local_id FROM cursor)
-                  AND EXISTS (
-                      SELECT 1 FROM channels c
-                      WHERE c.id = $4::bigint AND c.deleted_at IS NULL
-                  )
-                ORDER BY cm.local_id
-                LIMIT 1
-                OFFSET GREATEST(0::bigint, 0::bigint - $6::bigint - 1)
-            ),
+            (SELECT local_id FROM negative_page_start),
             (SELECT local_id FROM history_tail)
         )
         ELSE (
