@@ -4,6 +4,9 @@ umask 077
 
 BASE_RUNNER=
 BASE_VERIFIER=
+LOCK_PATH=
+LIVE_SECRETS=
+MOUNTED_INPUTS=()
 readonly TEMP_PREFIX=/tmp/teagram-preflight-replay.
 readonly SANDBOX_UID=65534
 readonly SANDBOX_PATH=/bin:/usr/bin
@@ -35,10 +38,16 @@ else
   unset ROLLOUT_PREFLIGHT_TEST_MODE
   LIVE_ROOT=/opt/teagram
   REPOSITORY_URL=https://github.com/teagramhq/teagram-server.git
+  LOCK_PATH=/tmp/teagram-deploy.lock
 fi
 
 if [ "$LIVE_ROOT" != /opt/teagram ]; then
   LIVE_ROOT=$(readlink -f -- "$LIVE_ROOT") || { fail 'live checkout is unavailable'; exit 1; }
+fi
+if [ "${PREFLIGHT_REPLAY_TEST_MODE:-0}" = 1 ]; then
+  fixture_root=${LIVE_ROOT%/live}
+  [ "$fixture_root" != "$LIVE_ROOT" ] || { fail 'fixture live checkout path is invalid'; exit 64; }
+  LOCK_PATH="$fixture_root/deploy.lock"
 fi
 [ -d "$LIVE_ROOT" ] && [ ! -L "$LIVE_ROOT" ] || { fail 'live checkout is unavailable'; exit 1; }
 [ "$(git -C "$LIVE_ROOT" rev-parse --is-inside-work-tree 2>/dev/null)" = true ] || {
@@ -63,9 +72,21 @@ target_sha=${1:-}
 [ "$#" -eq 1 ] || { usage; exit 64; }
 [[ "$target_sha" =~ ^[0-9a-f]{40}$ ]] || { fail 'PR head must be a full 40-hex commit SHA'; exit 64; }
 
+[ ! -L "$LOCK_PATH" ] && { [ ! -e "$LOCK_PATH" ] || [ -f "$LOCK_PATH" ]; } || {
+  fail 'deploy lock path is unsafe'
+  exit 1
+}
+exec 9>"$LOCK_PATH" || { fail 'cannot open the deploy lock'; exit 1; }
+[ -f "$LOCK_PATH" ] && [ ! -L "$LOCK_PATH" ] && \
+  [ "$(stat -c %u -- "$LOCK_PATH")" = "$EXPECTED_OWNER" ] || {
+  fail 'deploy lock owner or type is invalid'
+  exit 1
+}
+flock -n 9 || { fail 'deploy is running; preflight replay refused'; exit 1; }
+
 TMP_DIR=
 cleanup() {
-  local rc=$? suffix
+  local rc=$? suffix mounted_path can_remove=1
   trap - EXIT
   if [ -n "$TMP_DIR" ]; then
     case "$TMP_DIR" in
@@ -76,7 +97,31 @@ cleanup() {
             printf '%s\n' 'preflight replay cleanup refused a path outside its mktemp directory' >&2
             rc=1
             ;;
-          *) rm -rf -- "$TMP_DIR" || rc=1 ;;
+          *)
+            for mounted_path in "${MOUNTED_INPUTS[@]}"; do
+              case "$mounted_path" in
+                "$TMP_DIR/baseline/.env"|"$TMP_DIR/baseline/docker-compose.override.yml"|\
+                "$TMP_DIR/baseline/.secrets"|"$TMP_DIR/target/.env"|\
+                "$TMP_DIR/target/docker-compose.override.yml"|"$TMP_DIR/target/.secrets") ;;
+                *)
+                  printf '%s\n' 'preflight replay cleanup refused an unexpected secrets mount path' >&2
+                  rc=1
+                  can_remove=0
+                  continue
+                  ;;
+              esac
+              if ! PATH="$TRUSTED_BIN_PATH" umount "$mounted_path"; then
+                printf 'preflight replay could not unmount its private secrets reference: %s\n' "$mounted_path" >&2
+                rc=1
+                can_remove=0
+              fi
+            done
+            if [ "$can_remove" = 1 ]; then
+              rm -rf -- "$TMP_DIR" || rc=1
+            else
+              printf 'preflight replay temporary directory retained for safe cleanup: %s\n' "$TMP_DIR" >&2
+            fi
+            ;;
         esac
         ;;
       *)
@@ -86,6 +131,74 @@ cleanup() {
     esac
   fi
   exit "$rc"
+}
+
+mount_live_input() {
+  local source=$1 destination=$2 kind=$3 options source_inode mounted_inode
+  [ ! -e "$destination" ] && [ ! -L "$destination" ] || {
+    fail 'checkout already contains a live Compose input path'
+    return 1
+  }
+  case "$kind" in
+    file)
+      [ -f "$source" ] && [ ! -L "$source" ] || { fail 'live Compose input is not a regular file'; return 1; }
+      install -m 600 /dev/null "$destination" || { fail 'cannot prepare the private Compose input reference'; return 1; }
+      ;;
+    directory)
+      [ -d "$source" ] && [ ! -L "$source" ] || { fail 'live secrets source is not a directory'; return 1; }
+      mkdir -m 700 -- "$destination" || { fail 'cannot prepare the private secrets reference'; return 1; }
+      ;;
+    *) fail 'private Compose input type is invalid'; return 1 ;;
+  esac
+  PATH="$TRUSTED_BIN_PATH" mount -o bind "$source" "$destination" || {
+    fail 'cannot reference the live Compose input in the private checkout'
+    return 1
+  }
+  MOUNTED_INPUTS+=("$destination")
+  PATH="$TRUSTED_BIN_PATH" mount -o remount,bind,ro "$destination" || {
+    fail 'cannot make the private Compose input reference read-only'
+    return 1
+  }
+  options=$(awk -v target="$destination" '
+    $5 == target { count++; value=$6 }
+    END { if (count != 1) exit 1; print value }
+  ' /proc/self/mountinfo) || { fail 'cannot verify the private Compose input mount'; return 1; }
+  case ",$options," in *,ro,*) ;; *) fail 'private Compose input reference is not read-only'; return 1 ;; esac
+  if [ "$kind" = directory ] && [ "$(stat -c %u:%a -- "$destination")" != "$EXPECTED_OWNER:700" ]; then
+    fail 'private secrets reference has invalid ownership or permissions'
+    return 1
+  fi
+  source_inode=$(stat -c %d:%i -- "$source") || return 1
+  mounted_inode=$(stat -c %d:%i -- "$destination") || return 1
+  [ "$source_inode" = "$mounted_inode" ] || {
+    fail 'private Compose input reference does not point to its live source'
+    return 1
+  }
+}
+
+unmount_live_inputs() {
+  local mounted_path failed=0
+  local -a remaining=()
+  for mounted_path in "${MOUNTED_INPUTS[@]}"; do
+    case "$mounted_path" in
+      "$TMP_DIR/baseline/.env"|"$TMP_DIR/baseline/docker-compose.override.yml"|\
+      "$TMP_DIR/baseline/.secrets"|"$TMP_DIR/target/.env"|\
+      "$TMP_DIR/target/docker-compose.override.yml"|"$TMP_DIR/target/.secrets") ;;
+      *)
+        fail 'refusing to unmount an unexpected private Compose input path'
+        remaining+=("$mounted_path")
+        failed=1
+        continue
+        ;;
+    esac
+    if ! PATH="$TRUSTED_BIN_PATH" umount "$mounted_path"; then
+      fail 'cannot release a private Compose input reference'
+      remaining+=("$mounted_path")
+      failed=1
+    fi
+  done
+  MOUNTED_INPUTS=("${remaining[@]}")
+  [ "$failed" = 0 ]
 }
 
 prepare_target_runner() {
@@ -322,6 +435,15 @@ live_sha=$(git -C "$LIVE_ROOT" rev-parse --verify 'HEAD^{commit}' 2>/dev/null) |
 [[ "$live_sha" =~ ^[0-9a-f]{40}$ ]] || { fail 'live checkout revision is invalid'; exit 1; }
 git -C "$LIVE_ROOT" diff --quiet HEAD -- || { fail 'live tracked files are modified'; exit 1; }
 
+LIVE_SECRETS="$LIVE_ROOT/.secrets"
+[ -d "$LIVE_SECRETS" ] && [ ! -L "$LIVE_SECRETS" ] && \
+  [ "$(readlink -f -- "$LIVE_SECRETS")" = "$LIVE_SECRETS" ] && \
+  [ "$(stat -c %u:%a -- "$LIVE_SECRETS")" = "$EXPECTED_OWNER:700" ] || {
+  fail 'live secrets directory is unavailable or unsafe'
+  exit 1
+}
+readonly LIVE_SECRETS
+
 if ! git clone --quiet --local --no-hardlinks "$LIVE_ROOT" "$TMP_DIR/baseline" 2>/dev/null; then
   fail 'cannot prepare the live baseline checkout'
   exit 1
@@ -362,6 +484,18 @@ container_id=$(printf '%s' "$container_json" | jq -er '
   | select(.State.Status == "running")
   | .Id | select(type == "string" and test("^[0-9a-f]{64}$"))
 ' 2>/dev/null) || { fail 'running teagramd container identity is invalid'; exit 1; }
+deployed_sha=$(printf '%s' "$container_json" | jq -er '
+  .[0].Config.Labels["org.opencontainers.image.revision"]
+  | select(type == "string" and test("^[0-9a-f]{40}$"))
+' 2>/dev/null) || { fail 'running teagramd deployed revision is invalid'; exit 1; }
+git -C "$LIVE_ROOT" cat-file -e "$deployed_sha^{commit}" 2>/dev/null || {
+  fail 'running teagramd deployed revision is unavailable in the live checkout'
+  exit 1
+}
+if ! git -C "$TMP_DIR/baseline" checkout --quiet --detach "$deployed_sha" 2>/dev/null; then
+  fail 'cannot prepare the deployed revision baseline checkout'
+  exit 1
+fi
 project_name=$(printf '%s' "$container_json" | jq -er '
   .[0].Config.Labels["com.docker.compose.project"]
   | select(type == "string" and test("^[a-z0-9][a-z0-9_-]*$"))
@@ -393,9 +527,19 @@ for live_file in "${live_files[@]}"; do
       exit 1
     fi
     if [ "$relative_file" = docker-compose.override.yml ]; then
-      install -m 600 -- "$live_override" "$destination" || { fail 'cannot stage the live Compose override'; exit 1; }
+      continue
     elif [ "$checkout" = "$TMP_DIR/baseline" ]; then
-      install -m 600 -- "$live_file" "$destination" || { fail 'cannot stage a live Compose file'; exit 1; }
+      if git -C "$checkout" cat-file -e "$deployed_sha:$relative_file" 2>/dev/null; then
+        [ -f "$destination" ] && [ ! -L "$destination" ] || {
+          fail 'deployed revision selected Compose file is unavailable'
+          exit 1
+        }
+      elif [[ "$relative_file" =~ ^\.rollout-compose\.local-[0-9a-f]{7}\.yml$ ]]; then
+        install -m 600 -- "$live_file" "$destination" || { fail 'cannot stage the deployed local Compose artifact'; exit 1; }
+      else
+        fail 'deployed revision is missing a selected Compose file'
+        exit 1
+      fi
     else
       if git -C "$checkout" cat-file -e "$target_sha:$relative_file" 2>/dev/null; then
         [ -f "$destination" ] && [ ! -L "$destination" ] || {
@@ -415,16 +559,14 @@ done
 for checkout in "$TMP_DIR/baseline" "$TMP_DIR/target"; do
   for name in .env docker-compose.override.yml; do
     destination="$checkout/$name"
-    if [ -L "$destination" ] || { [ -e "$destination" ] && [ ! -f "$destination" ]; }; then
-      fail 'live Compose input path is not a regular file'
+    if [ -e "$destination" ] || [ -L "$destination" ]; then
+      fail 'checkout already contains a live Compose input path'
       exit 1
     fi
   done
-  install -m 600 -- "$live_env" "$checkout/.env" || { fail 'cannot stage the live environment file'; exit 1; }
-  install -m 600 -- "$live_override" "$checkout/docker-compose.override.yml" || {
-    fail 'cannot stage the live Compose override'
-    exit 1
-  }
+  mount_live_input "$live_env" "$checkout/.env" file || exit 1
+  mount_live_input "$live_override" "$checkout/docker-compose.override.yml" file || exit 1
+  mount_live_input "$LIVE_SECRETS" "$checkout/.secrets" directory || exit 1
 done
 
 target_runner_source="$TMP_DIR/target/deploy/teagramd/rollout-runner/rollout-runner.sh"
@@ -449,6 +591,7 @@ for checkout in "$TMP_DIR/baseline" "$TMP_DIR/target"; do
   bash "$BASE_VERIFIER" preflight-snapshot "$container_id" "$checkout" "$TMP_DIR" \
     "$name" "$project_name" "$compose_selection" >/dev/null || exit $?
 done
+unmount_live_inputs || exit 1
 
 for checkout in "$TMP_DIR/baseline" "$TMP_DIR/target"; do
   rm -f -- "$checkout/.env" "$checkout/docker-compose.override.yml" || {

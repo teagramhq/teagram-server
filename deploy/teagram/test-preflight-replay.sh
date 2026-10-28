@@ -203,13 +203,31 @@ sandbox_attack_sha=$(git -C "$TMP/source" rev-parse HEAD)
 
 git clone -q "$TMP/origin.git" "$TMP/live"
 git -C "$TMP/live" switch -q main
+printf '%s\n' '# FIXTURE_UNDEPLOYED_CHANGE' >> "$TMP/live/docker-compose.fixture.yml"
+git -C "$TMP/live" add docker-compose.fixture.yml
+git -C "$TMP/live" commit -q -m undeployed-checkout-change
 printf 'fixture-password=never-print\n' > "$TMP/live/.env"
 printf '# fixture override\n' > "$TMP/live/docker-compose.override.yml"
 chmod 600 "$TMP/live/.env" "$TMP/live/docker-compose.override.yml"
+mkdir -m 700 "$TMP/live/.secrets"
+printf '%s\n' 'fixture-turnstile-secret-never-print' > "$TMP/live/.secrets/teagramd-turnstile"
+chmod 444 "$TMP/live/.secrets/teagramd-turnstile"
 
 cat > "$TMP/bin/docker" <<'DOCKER'
 #!/usr/bin/env bash
 set -Eeuo pipefail
+
+check_live_mount() {
+  local target=$1 source=$2 kind=$3 mount_options
+  case "$kind" in
+    file) [ -f "$target" ] && [ ! -L "$target" ] || return 1 ;;
+    directory) [ -d "$target" ] && [ ! -L "$target" ] || return 1 ;;
+    *) return 1 ;;
+  esac
+  mount_options=$(awk -v target="$target" '$5 == target { value=$6; count++ } END { if (count != 1) exit 1; print value }' /proc/self/mountinfo) || return 1
+  case ",$mount_options," in *,ro,*) ;; *) return 1 ;; esac
+  [ "$(stat -c %d:%i -- "$target")" = "$(stat -c %d:%i -- "$source")" ]
+}
 
 if [[ "${1:-}" == inspect ]]; then
   [[ $# == 2 && "$2" == teagram-teagramd-1 || $# == 2 && "$2" == aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa ]] || {
@@ -222,13 +240,15 @@ if [[ "${1:-}" == inspect ]]; then
     if [[ -n "$selection" ]]; then selection+=,; fi
     selection+="${FIXTURE_LIVE_ROOT:?}/$entry"
   done
-  jq -cn --arg selection "$selection" '[{
+  revision=${FIXTURE_DEPLOYED_SHA:?}
+  jq -cn --arg selection "$selection" --arg revision "$revision" '[{
     Id:"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
     Image:"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
     Config:{
       Env:["TG_REPLICA_COUNT=1","TG_CLIENT_ADDR_TRUST=socket","TG_LOG_LOGIN_CODES=false"],
       StopTimeout:120,
-      Labels:{"com.docker.compose.project":"teagram","com.docker.compose.project.config_files":$selection}
+      Labels:{"com.docker.compose.project":"teagram","com.docker.compose.project.config_files":$selection,
+        "org.opencontainers.image.revision":$revision}
     },
     State:{Status:"running",ExitCode:0,StartedAt:"2026-10-16T12:00:00Z",FinishedAt:"0001-01-01T00:00:00Z"},
     HostConfig:{LogConfig:{Type:"syslog",Config:{
@@ -274,17 +294,33 @@ if [[ "${1:-}" == compose ]]; then
     printf '%s\n' 'fixture Compose selection did not follow the live label' >&2
     exit 91
   }
+  check_live_mount "$project_dir/.env" "${FIXTURE_LIVE_ROOT:?}/.env" file && \
+    check_live_mount "$project_dir/docker-compose.override.yml" \
+      "$FIXTURE_LIVE_ROOT/docker-compose.override.yml" file && \
+    check_live_mount "$project_dir/.secrets" "$FIXTURE_LIVE_ROOT/.secrets" directory || {
+    printf '%s\n' 'fixture Compose checkout is not using read-only live inputs' >&2
+    exit 95
+  }
+  if flock -n "${FIXTURE_DEPLOY_LOCK:?}" true; then
+    printf '%s\n' 'fixture replay did not hold the deploy lock' >&2
+    exit 99
+  fi
   grace=2m0s
   if grep -q FIXTURE_DRIFT "$project_dir/docker-compose.alternate.yml" 2>/dev/null; then grace=3m0s; fi
-  jq -cn --arg grace "$grace" '{services:{teagramd:{
+  if grep -q FIXTURE_UNDEPLOYED_CHANGE "$project_dir/docker-compose.fixture.yml" 2>/dev/null; then grace=4m0s; fi
+  jq -cn --arg grace "$grace" --arg source "$project_dir/.secrets/teagramd-turnstile" '{services:{teagramd:{
     stop_grace_period:$grace,
     ports:[],volumes:[],network_mode:"",networks:{},
     logging:{driver:"syslog",options:{
       "syslog-address":"unixgram:///dev/log","syslog-facility":"daemon",
       "syslog-format":"rfc5424",tag:"teagramd"
     }},
-    environment:{TG_REPLICA_COUNT:"1",TG_CLIENT_ADDR_TRUST:"socket",TG_LOG_LOGIN_CODES:"false"}
-  }}}'
+    environment:{TG_REPLICA_COUNT:"1",TG_CLIENT_ADDR_TRUST:"socket",TG_LOG_LOGIN_CODES:"false",
+      TG_TURNSTILE_SITE_KEY:"fixture-site-key",
+      TG_TURNSTILE_SECRET_KEY_FILE:"/run/secrets/teagramd-turnstile",
+      TG_TURNSTILE_SIGNIN_ENABLED:"true"},
+    secrets:[{source:"teagramd_turnstile",target:"teagramd-turnstile"}]
+  }},secrets:{teagramd_turnstile:{file:$source}}}'
   exit 0
 fi
 
@@ -299,6 +335,16 @@ set -Eeuo pipefail
 path=${!#}
 case "$path" in
   "$FIXTURE_TEST_ROOT"|"$FIXTURE_TEST_ROOT"/*|/tmp/teagram-preflight-replay.[A-Za-z0-9]*|/tmp/teagram-preflight-replay.[A-Za-z0-9]*/*)
+    if [[ "$path" == /tmp/teagram-preflight-replay.[A-Za-z0-9]* ]] && [ "${1:-}" = -rf ]; then
+      for input in baseline/.env baseline/docker-compose.override.yml baseline/.secrets \
+        target/.env target/docker-compose.override.yml target/.secrets; do
+        if awk -v target="$path/$input" '$5 == target { found=1 } END { exit !found }' /proc/self/mountinfo; then
+          printf '%s\n' "$path" >> "${FIXTURE_UNSAFE_REMOVE_LOG:?}"
+          printf '%s\n' 'fixture refused to remove a directory with a live mount' >&2
+          exit 94
+        fi
+      done
+    fi
     if [[ "$path" == /tmp/teagram-preflight-replay.[A-Za-z0-9]* ]] && [ -d "$path/sandbox/tmp/replay-output" ]; then
       for kind in verifier runner; do
         marker="$path/sandbox/tmp/replay-output/$kind.uid"
@@ -365,6 +411,8 @@ export PATH="$TMP/bin:$PATH"
 export REAL_RM REAL_MKTEMP
 export FIXTURE_SYSTEM_MKTEMP="$REAL_MKTEMP"
 export FIXTURE_LIVE_ROOT="$TMP/live"
+export FIXTURE_DEPLOYED_SHA="$pass_sha"
+export FIXTURE_DEPLOY_LOCK="$TMP/deploy.lock"
 export FIXTURE_TEST_ROOT="$TMP"
 export FIXTURE_REMOVE_LOG="$TMP/removals.log"
 export FIXTURE_UNSAFE_REMOVE_LOG="$TMP/unsafe-removals.log"
@@ -397,14 +445,40 @@ run_replay() {
   printf '%s' "$output"
 }
 
+exec 8>"$FIXTURE_DEPLOY_LOCK"
+flock -x 8
+output=$(run_replay "$pass_sha" 'docker-compose.fixture.yml,docker-compose.override.yml')
+[[ "$(cat "$TMP/last-rc")" != 0 ]] && \
+  grep -Fq 'deploy is running; preflight replay refused' <<< "$output" || {
+  printf 'FAIL replay did not refuse a held deploy lock:\n%s\n' "$output" >&2
+  exit 1
+}
+flock -u 8
+exec 8>&-
+printf '%s\n' 'PASS replay refuses to overlap a deployment'
+
 output=$(run_replay "$pass_sha" 'docker-compose.fixture.yml,docker-compose.override.yml')
 [[ "$(cat "$TMP/last-rc")" == 0 ]] || { printf 'FAIL all-pass replay:\n%s\n' "$output" >&2; exit 1; }
 [[ "$(wc -l <<< "$output" | tr -d ' ')" == 12 ]] || { printf 'FAIL all-pass row count:\n%s\n' "$output" >&2; exit 1; }
-if grep -qv $'\tpass$' <<< "$output" || grep -Eq '2m0s|3m0s|fixture-password' <<< "$output"; then
+if grep -qv $'\tpass$' <<< "$output" || \
+   grep -Eq '2m0s|3m0s|4m0s|fixture-password|fixture-turnstile-secret-never-print' <<< "$output"; then
   printf 'FAIL all-pass replay exposed values or failed a row:\n%s\n' "$output" >&2
   exit 1
 fi
 printf '%s\n' 'PASS all-pass replay prints only field/result rows'
+printf '%s\n' 'PASS baseline Compose comes from the deployed revision, not the newer checkout'
+
+secret_source="$TMP/live/.secrets/teagramd-turnstile"
+mv -- "$secret_source" "$TMP/turnstile-secret.saved"
+output=$(run_replay "$pass_sha" 'docker-compose.fixture.yml,docker-compose.override.yml')
+mv -- "$TMP/turnstile-secret.saved" "$secret_source"
+if [[ "$(cat "$TMP/last-rc")" == 0 ]] || \
+   ! grep -Fq 'Turnstile secret source must be a root-owned mode-0444 file' <<< "$output" || \
+   grep -Fq 'fixture-turnstile-secret-never-print' <<< "$output"; then
+  printf 'FAIL missing Turnstile source was not rejected safely:\n%s\n' "$output" >&2
+  exit 1
+fi
+printf '%s\n' 'PASS missing Turnstile source fails closed without exposing its contents'
 
 # This authentic pre-replay runner from PR #870 uses the legacy snapshot paths.
 # The Docker stub checks that the verifier follows the exact labeled file order.

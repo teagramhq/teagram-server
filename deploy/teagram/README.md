@@ -113,14 +113,20 @@ the live baseline using the forced ops command:
 ssh teagram run <merge-sha> preflight-replay <pr-head-sha>
 ```
 
-The command follows the running `teagramd` container's Compose file label and
-uses the live `.env` and override in private temporary checkouts to build
-redacted snapshots. It then loads the PR head's verifier and runs its
-comparison as uid 65534 in a minimal chroot containing the snapshots, the PR
-scripts and required shell tools; the chroot has no host paths, Docker socket,
-or credentials. The host requires a `chroot` command that can set the uid and
-gid for its child. The command prints only `field<TAB>result` rows. Every row
-must be `pass`; for PR #870, post the rows on MAIN-2563.
+The command follows the running `teagramd` container's deployed revision and
+Compose file label. It bind-mounts the live `.env`, override and `.secrets`
+directory into private temporary checkouts read-only; secret files stay at
+their live paths and are never copied into the checkouts. It holds
+`/tmp/teagram-deploy.lock` for the replay and refuses if a deployment already
+holds it. The temporary checkouts and mounts are removed when the command
+exits.
+
+The command then loads the PR head's verifier and runs its comparison as uid
+65534 in a minimal chroot containing only the snapshots, PR scripts and
+required shell tools; the chroot has no host paths, Docker socket or
+credentials. The host requires a `chroot` command that can set the uid and gid
+for its child. The command prints only `field<TAB>result` rows. Every row must
+be `pass`; for PR #870, post the rows on MAIN-2563.
 
 `teagramd` uses the host's BusyBox syslog socket, with `tag=teagramd`. The
 deploy installs `deploy/teagram/syslog.conf` as `/etc/conf.d/syslog` before
