@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/teagramhq/teagram-server/internal/pgtest"
 	"github.com/teagramhq/teagram-server/internal/store"
 )
 
@@ -521,8 +522,8 @@ func TestVerifyInviteUsesUniformDatabaseOperations(t *testing.T) {
 		accesses = append(accesses, after-before)
 	}
 	for i, got := range accesses {
-		if got != 1 {
-			t.Errorf("case %s table accesses = %d, want 1", cases[i].name, got)
+		if got != 2 {
+			t.Errorf("case %s table accesses = %d, want digest lookup plus handle guard", cases[i].name, got)
 		}
 	}
 }
@@ -591,8 +592,12 @@ func TestConsumeInviteUsesUniformDatabaseOperations(t *testing.T) {
 		if err != nil {
 			t.Fatalf("%s: read access result: %v", tc.name, err)
 		}
-		if got := after - before; got != 2 {
-			t.Errorf("case %s table accesses = %d, want 2", tc.name, got)
+		wantAccesses := int64(2)
+		if tc.name == "right secret" {
+			wantAccesses++ // successful consume performs the guarded state update.
+		}
+		if got := after - before; got != wantAccesses {
+			t.Errorf("case %s table accesses = %d, want %d", tc.name, got, wantAccesses)
 		}
 	}
 }
@@ -677,5 +682,201 @@ func TestInviteExpiryIsCheckedAfterRowLockAcquisition(t *testing.T) {
 	}
 	if err := <-consumeDone; !errors.Is(err, store.ErrInviteInvalid) {
 		t.Fatalf("consume after lock-held expiry: err = %v, want ErrInviteInvalid", err)
+	}
+}
+
+func TestUserInviteIsResolvedBySecretAndOperatorInviteStillBindsHandle(t *testing.T) {
+	t.Parallel()
+	s := open(t)
+	ctx := context.Background()
+
+	inviter, err := s.CreateUser(ctx, "+1555"+pgtest.RandomHex())
+	if err != nil {
+		t.Fatalf("create inviter: %v", err)
+	}
+	secret := strings.Repeat("a", 64)
+	digest := sha256.Sum256([]byte(secret))
+	if _, err := store.StorePool(s).Exec(ctx, `
+		INSERT INTO registration_invites (handle, secret_digest, inviter_user_id, issued_at, expires_at)
+		VALUES (NULL, $1, $2, clock_timestamp(), clock_timestamp() + interval '7 days')
+	`, digest[:], inviter.ID); err != nil {
+		t.Fatalf("insert user invite: %v", err)
+	}
+
+	for _, handle := range []string{"alice", "bob"} {
+		if err := s.VerifyInvite(ctx, handle, secret); err != nil {
+			t.Errorf("verify user invite for %q: %v", handle, err)
+		}
+	}
+
+	operator, operatorSecret, err := s.IssueInvite(ctx, "reserved")
+	if err != nil {
+		t.Fatalf("issue operator invite: %v", err)
+	}
+	if err := s.VerifyInvite(ctx, operator.Handle+"-other", operatorSecret); !errors.Is(err, store.ErrInviteInvalid) {
+		t.Errorf("verify operator invite for a different handle: err = %v, want ErrInviteInvalid", err)
+	}
+}
+
+func TestIssueUserInviteStoresOnlyDigestAndInviter(t *testing.T) {
+	t.Parallel()
+	s := open(t)
+	ctx := context.Background()
+
+	inviter, err := s.CreateUser(ctx, "+1555"+pgtest.RandomHex())
+	if err != nil {
+		t.Fatalf("create inviter: %v", err)
+	}
+	issuer, ok := any(s).(interface {
+		IssueUserInvite(context.Context, int64, ...time.Duration) (store.RegistrationInvite, string, error)
+	})
+	if !ok {
+		t.Fatal("store does not expose user invite issuance")
+	}
+	invite, secret, err := issuer.IssueUserInvite(ctx, inviter.ID)
+	if err != nil {
+		t.Fatalf("issue user invite: %v", err)
+	}
+	if invite.Handle != "" {
+		t.Errorf("handle = %q, want empty for a user invite", invite.Handle)
+	}
+	if invite.InviterUserID == nil || *invite.InviterUserID != inviter.ID {
+		t.Errorf("invite inviter = %v, want %d", invite.InviterUserID, inviter.ID)
+	}
+	if invite.State != store.InviteIssued {
+		t.Errorf("state = %q, want issued", invite.State)
+	}
+	if lifetime := invite.ExpiresAt.Sub(invite.IssuedAt); lifetime < store.DefaultInviteLifetime-2*time.Second || lifetime > store.DefaultInviteLifetime+2*time.Second {
+		t.Errorf("lifetime = %s, want about %s", lifetime, store.DefaultInviteLifetime)
+	}
+
+	var handle *string
+	var storedInviterID int64
+	var storedRedeemerID *int64
+	var storedDigest []byte
+	if err := store.StorePool(s).QueryRow(ctx, `
+		SELECT handle, inviter_user_id, consumed_by_user_id, secret_digest
+		FROM registration_invites WHERE id = $1
+	`, invite.ID).Scan(&handle, &storedInviterID, &storedRedeemerID, &storedDigest); err != nil {
+		t.Fatalf("read user invite row: %v", err)
+	}
+	wantDigest := sha256.Sum256([]byte(secret))
+	if handle != nil || storedInviterID != inviter.ID || storedRedeemerID != nil {
+		t.Errorf("stored row handle=%v inviter=%d redeemer=%v; want NULL/%d/NULL", handle, storedInviterID, storedRedeemerID, inviter.ID)
+	}
+	if !bytes.Equal(storedDigest, wantDigest[:]) || bytes.Equal(storedDigest, []byte(secret)) {
+		t.Errorf("stored digest = %x, want SHA-256 digest only", storedDigest)
+	}
+	listed, err := s.ListInvites(ctx)
+	if err != nil {
+		t.Fatalf("list user invite: %v", err)
+	}
+	if len(listed) != 1 || listed[0].Handle != "" || listed[0].InviterUserID == nil || *listed[0].InviterUserID != inviter.ID {
+		t.Fatalf("listed user invite = %#v, want handle-less invite attributed to %d", listed, inviter.ID)
+	}
+}
+
+func TestConsumeUserInviteRequiresQuotaAndInviteListenerAndRecordsRedeemer(t *testing.T) {
+	t.Parallel()
+	s := open(t)
+	ctx := context.Background()
+	inviter, err := s.CreateUser(ctx, "+1555"+pgtest.RandomHex())
+	if err != nil {
+		t.Fatalf("create inviter: %v", err)
+	}
+	redeemer, err := s.CreateUser(ctx, "+1555"+pgtest.RandomHex())
+	if err != nil {
+		t.Fatalf("create redeemer: %v", err)
+	}
+	invite, secret, err := s.IssueUserInvite(ctx, inviter.ID)
+	if err != nil {
+		t.Fatalf("issue user invite: %v", err)
+	}
+
+	for _, tc := range []struct {
+		name    string
+		quota   int
+		allowed bool
+	}{
+		{name: "quota disabled", quota: 0, allowed: true},
+		{name: "listener not in invite mode", quota: 5, allowed: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tx, err := store.StorePool(s).Begin(ctx)
+			if err != nil {
+				t.Fatalf("begin transaction: %v", err)
+			}
+			err = s.ConsumeInviteForUser(ctx, tx, "alice", secret, redeemer.ID, tc.quota, tc.allowed)
+			if !errors.Is(err, store.ErrInviteInvalid) {
+				if rollbackErr := tx.Rollback(ctx); rollbackErr != nil {
+					t.Errorf("rollback refused consume: %v", rollbackErr)
+				}
+				t.Fatalf("consume with quota=%d allowed=%v: err = %v, want ErrInviteInvalid", tc.quota, tc.allowed, err)
+			}
+			if err := tx.Rollback(ctx); err != nil {
+				t.Fatalf("rollback refused consume: %v", err)
+			}
+		})
+	}
+	if err := s.VerifyInvite(ctx, "alice", secret); err != nil {
+		t.Fatalf("verify after disabled attempts: %v", err)
+	}
+
+	reserved, _, err := s.IssueInvite(ctx, "reserved-user-invite")
+	if err != nil {
+		t.Fatalf("issue operator handle invite: %v", err)
+	}
+	reservedUserInvite, reservedSecret, err := s.IssueUserInvite(ctx, inviter.ID)
+	if err != nil {
+		t.Fatalf("issue reserved user invite: %v", err)
+	}
+	tx, err := store.StorePool(s).Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin reserved consume: %v", err)
+	}
+	if err := s.ConsumeInviteForUser(ctx, tx, reserved.Handle, reservedSecret, redeemer.ID, 5, true); !errors.Is(err, store.ErrInviteInvalid) {
+		if rollbackErr := tx.Rollback(ctx); rollbackErr != nil {
+			t.Errorf("rollback refused reserved consume: %v", rollbackErr)
+		}
+		t.Fatalf("consume user invite for operator-reserved handle: err = %v, want ErrInviteInvalid", err)
+	}
+	if err := tx.Rollback(ctx); err != nil {
+		t.Fatalf("rollback reserved consume: %v", err)
+	}
+	if err := s.VerifyInvite(ctx, reserved.Handle, reservedSecret); !errors.Is(err, store.ErrInviteInvalid) {
+		t.Fatalf("verify user invite for operator-reserved handle: err = %v, want ErrInviteInvalid", err)
+	}
+	if err := s.VerifyInvite(ctx, "alice", secret); err != nil {
+		t.Fatalf("verify primary invite before success: %v", err)
+	}
+
+	tx, err = store.StorePool(s).Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin successful consume: %v", err)
+	}
+	if err := s.ConsumeInviteForUser(ctx, tx, "alice", secret, redeemer.ID, 5, true); err != nil {
+		if rollbackErr := tx.Rollback(ctx); rollbackErr != nil {
+			t.Errorf("rollback failed user consume: %v", rollbackErr)
+		}
+		t.Fatalf("consume enabled user invite: %v", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		t.Fatalf("commit enabled user invite: %v", err)
+	}
+	var storedRedeemerID int64
+	var state string
+	if err := store.StorePool(s).QueryRow(ctx, `SELECT consumed_by_user_id, state FROM registration_invites WHERE id = $1`, invite.ID).Scan(&storedRedeemerID, &state); err != nil {
+		t.Fatalf("read consumed user invite: %v", err)
+	}
+	if storedRedeemerID != redeemer.ID || state != string(store.InviteConsumed) {
+		t.Fatalf("consumed invite redeemer=%d state=%q, want %d/consumed", storedRedeemerID, state, redeemer.ID)
+	}
+	if err := s.VerifyInvite(ctx, "alice", secret); !errors.Is(err, store.ErrInviteInvalid) {
+		t.Fatalf("verify after consume: err = %v, want ErrInviteInvalid", err)
+	}
+	if listed, err := s.ListInvites(ctx); err != nil {
+		t.Fatalf("list after user consumes: %v", err)
+	} else if len(listed) != 3 || listed[2].ID != reservedUserInvite.ID || listed[2].InviterUserID == nil {
+		t.Errorf("listed invites after consume = %#v, wanted all three rows with inviter on user rows", listed)
 	}
 }

@@ -2357,7 +2357,7 @@ target_failure_marker() {
 }
 
 rollback_after_target_failure() {
-  local reason=$1
+  local reason=$1 rollback_rc=0
   if ! target_failure_marker "$reason"; then
     printf 'target failure marker unavailable; rolling back anyway (reason=%s)\n' "$reason" >&2
     if ! write_immutable "$ROLLBACK_DIR/target-failure-marker-warning.txt" \
@@ -2365,7 +2365,9 @@ rollback_after_target_failure() {
       printf 'rollback evidence also could not persist the missing-marker warning (reason=%s)\n' "$reason" >&2
     fi
   fi
-  perform_rollback || return 2
+  if perform_rollback; then :; else rollback_rc=$?; fi
+  printf 'target_failure_gate=%s rollback_exit=%s\n' "$reason" "$rollback_rc"
+  [ "$rollback_rc" -eq 0 ] || return 2
 }
 
 restore_checkout_and_tag() {
