@@ -68,20 +68,43 @@ if [[ $(stat -c '%u' -- /home/restore-drill 2>/dev/null) != "$drill_uid" ]] ||
   preflight_failure invalid_restore_home not_started
 fi
 
+remove_work_directory() {
+  local path=$1
+  if [[ ! $path =~ ^/tmp/teagram-restore-drill\.[A-Za-z0-9]{8}$ ||
+    -L $path || ! -d $path || $(dirname -- "$path") != /tmp ||
+    $(realpath -e -- "$path" 2>/dev/null) != "$path" ||
+    $(stat -c '%u:%a' -- "$path" 2>/dev/null) != 0:700 ]]; then
+    return 1
+  fi
+  rm -rf -- "$path" >/dev/null 2>&1 || return 1
+  [[ ! -e $path && ! -L $path ]]
+}
+
 cleanup_work() {
   local status=$?
   trap - EXIT
-  if [[ -n ${work:-} ]]; then
-    if [[ ! $work =~ ^/tmp/teagram-restore-drill\.[A-Za-z0-9]{8}$ ||
-      -L $work || ! -d $work || $(dirname -- "$work") != /tmp ||
-      $(realpath -e -- "$work" 2>/dev/null) != "$work" ||
-      $(stat -c '%u:%a' -- "$work" 2>/dev/null) != 0:700 ]]; then
-      status=1
-    elif ! rm -rf -- "$work"; then
-      status=1
-    fi
+  if [[ -n ${work:-} ]] && ! remove_work_directory "$work"; then
+    printf '%s\n' '{"result":"fail","phase":"cleanup","category":"host_work_cleanup_failed","cleanup":"unverified","exit":1}' >&2
+    status=1
   fi
   exit "$status"
+}
+
+publish_final_output() {
+  local summary_output=$1 report_output=$2 inventory_output=$3 final_status=$4
+  if ! remove_work_directory "$work"; then
+    trap - EXIT
+    printf '%s\n' '{"result":"fail","phase":"cleanup","category":"host_work_cleanup_failed","cleanup":"unverified","exit":1}'
+    exit 1
+  fi
+  work=
+  trap - EXIT
+  printf '%s\n' "$summary_output"
+  printf '%s\n' "$report_output"
+  printf '%s\n' 'dump_inventory_csv_begin'
+  printf '%s\n' "$inventory_output"
+  printf '%s\n' 'dump_inventory_csv_end'
+  return "$final_status"
 }
 work=$(mktemp -d /tmp/teagram-restore-drill.XXXXXXXX 2>/dev/null) || preflight_failure temp_unavailable not_started
 trap cleanup_work EXIT
@@ -100,6 +123,14 @@ as_drill() {
   done
   command=${command% }
   /bin/su -l -s /bin/bash -c "$command" "$DRILL_USER"
+}
+
+checkout_is_clean() {
+  local checkout=$1 status
+  if ! status=$(as_drill git -C "$checkout" status --porcelain --untracked-files=all --ignored 2>/dev/null); then
+    return 2
+  fi
+  [[ -z $status ]]
 }
 
 acquire_deploy_lock() {
@@ -128,8 +159,14 @@ case "$checkout_remote" in
   https://github.com/teagramhq/teagram-server|https://github.com/teagramhq/teagram-server.git|git@github.com:teagramhq/teagram-server.git) ;;
   *) preflight_failure invalid_restore_remote not_started ;;
 esac
-if [[ -n $(as_drill git -C "$CHECKOUT" status --porcelain --untracked-files=all --ignored 2>/dev/null) ]]; then
-  preflight_failure dirty_restore_checkout not_started
+if checkout_is_clean "$CHECKOUT"; then
+  :
+else
+  checkout_status=$?
+  case "$checkout_status" in
+    2) preflight_failure restore_checkout_status_failed not_started ;;
+    *) preflight_failure dirty_restore_checkout not_started ;;
+  esac
 fi
 if ! as_drill git -C "$CHECKOUT" fetch --quiet origin main >/dev/null 2>&1 ||
   ! as_drill git -C "$CHECKOUT" merge-base --is-ancestor "$MIN_BASE" origin/main >/dev/null 2>&1 ||
@@ -155,9 +192,17 @@ if ! git -C "$REPO" merge-base --is-ancestor "$MIN_BASE" "$live_sha" ||
   preflight_failure live_commit_not_ready not_started
 fi
 if ! as_drill git -C "$CHECKOUT" checkout --detach "$live_sha" >/dev/null 2>&1 ||
-  [[ $(as_drill git -C "$CHECKOUT" rev-parse HEAD 2>/dev/null) != "$live_sha" ]] ||
-  [[ -n $(as_drill git -C "$CHECKOUT" status --porcelain --untracked-files=all --ignored 2>/dev/null) ]]; then
+  [[ $(as_drill git -C "$CHECKOUT" rev-parse HEAD 2>/dev/null) != "$live_sha" ]]; then
   preflight_failure source_checkout_failed not_started
+fi
+if checkout_is_clean "$CHECKOUT"; then
+  :
+else
+  checkout_status=$?
+  case "$checkout_status" in
+    2) preflight_failure source_checkout_status_failed not_started ;;
+    *) preflight_failure source_checkout_failed not_started ;;
+  esac
 fi
 readonly HARNESS="$CHECKOUT/deploy/teagramd/rollout-runner/test-restore-readiness.sh"
 if [[ ! -f $HARNESS || -L $HARNESS ]] || ! as_drill sudo -n true >/dev/null 2>&1 ||
@@ -724,14 +769,18 @@ fi
 [[ $live_status == pass && $volume_status == pass && $serve_status == pass &&
   $readiness_status == pass && $prepared_status == absent && $inventory_status == pass ]] || post_status=failed
 
-printf 'base_sha=%s main_ci=green_via_deploy\n' "$live_sha"
-printf 'dump_filename=%s dump_size_bytes=%s dump_size_class=%s dump_age_seconds=%s\n' \
-  "$dump_name" "$dump_size" "$dump_size_class" "$dump_age"
-printf 'wall_clock_duration_ms=%s harness_elapsed_ms=%s headroom_disk_available_bytes=%s headroom_memory_available_bytes=%s cpu_cores=%s cpu_idle_percent=%s\n' \
-  "$duration_ms" "$drill_elapsed_ms" "$disk_available" "$memory_available" "$cpu_cores" "$cpu_idle"
-printf 'live_teagramd=%s teagram_volumes=%s serve_config=%s readiness=%s prepared_runtime=%s dump_metadata=%s post_run=%s recovery=%s\n' \
+release_deploy_lock || exit 1
+final_status=0
+if [[ $post_status != pass || $drill_result != pass || $drill_cleanup != verified || $drill_exit != 0 || $drill_status != 0 ||
+  $drill_input_mode != local || $drill_auth_keys_cleared != pass ||
+  $drill_help_get_config != pass || $drill_synthetic_signin != pass ]]; then
+  final_status=1
+fi
+printf -v summary_output 'base_sha=%s main_ci=green_via_deploy\ndump_filename=%s dump_size_bytes=%s dump_size_class=%s dump_age_seconds=%s\nwall_clock_duration_ms=%s harness_elapsed_ms=%s headroom_disk_available_bytes=%s headroom_memory_available_bytes=%s cpu_cores=%s cpu_idle_percent=%s\nlive_teagramd=%s teagram_volumes=%s serve_config=%s readiness=%s prepared_runtime=%s dump_metadata=%s post_run=%s recovery=%s' \
+  "$live_sha" "$dump_name" "$dump_size" "$dump_size_class" "$dump_age" \
+  "$duration_ms" "$drill_elapsed_ms" "$disk_available" "$memory_available" "$cpu_cores" "$cpu_idle" \
   "$live_status" "$volume_status" "$serve_status" "$readiness_status" "$prepared_status" "$inventory_status" "$post_status" "$recovery_result"
-/usr/bin/python3 - "$report_json" <<'PY'
+report_output=$(/usr/bin/python3 - "$report_json" <<'PY'
 import json
 import sys
 
@@ -739,16 +788,7 @@ with open(sys.argv[1], encoding="utf-8") as source:
     report = json.load(source)
 print(json.dumps(report, ensure_ascii=True, separators=(",", ":")))
 PY
-printf '%s\n' 'dump_inventory_csv_begin'
+)
 inventory_json="$work/dump-inventory.before.json"
-print_inventory_csv
-printf '%s\n' 'dump_inventory_csv_end'
-
-release_deploy_lock || exit 1
-if [[ $post_status != pass || $drill_result != pass || $drill_cleanup != verified || $drill_exit != 0 || $drill_status != 0 ]]; then
-  exit 1
-fi
-if [[ $drill_input_mode != local || $drill_auth_keys_cleared != pass ||
-  $drill_help_get_config != pass || $drill_synthetic_signin != pass ]]; then
-  exit 1
-fi
+inventory_output=$(print_inventory_csv)
+publish_final_output "$summary_output" "$report_output" "$inventory_output" "$final_status"
