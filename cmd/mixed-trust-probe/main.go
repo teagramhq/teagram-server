@@ -326,9 +326,11 @@ func runKeepaliveAttribution(args []string) (resultErr error) {
 		return fmt.Errorf("set test connection deadline: %w", err)
 	}
 	reader := bufio.NewReader(conn)
+	// Exercise per-request attribution on one persistent HTTP connection. A
+	// successful WebSocket 101 turns its connection into a tunnel, so it cannot
+	// carry the next visitor's HTTP request.
 	for index, clientIP := range []string{*firstIP, *secondIP} {
-		key := base64.StdEncoding.EncodeToString([]byte("0123456789abcdef"))
-		request := fmt.Sprintf("GET /apiws HTTP/1.1\r\nHost: example.test\r\nOrigin: https://web.example.test\r\nConnection: keep-alive, Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: %s\r\nCF-Connecting-IP: %s\r\n\r\n", key, clientIP)
+		request := fmt.Sprintf("GET /apiws HTTP/1.1\r\nHost: example.test\r\nOrigin: https://web.example.test\r\nConnection: keep-alive\r\nCF-Connecting-IP: %s\r\n\r\n", clientIP)
 		if _, err := io.WriteString(conn, request); err != nil {
 			return fmt.Errorf("write keepalive request %d: %w", index+1, err)
 		}
