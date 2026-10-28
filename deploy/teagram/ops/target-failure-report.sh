@@ -26,7 +26,7 @@ read_optional_private_file() {
 
 report_readiness() {
   local target_dir=$1 expected_uid=$2 result_path sample_path result contents token key value
-  local result_role= result_state= result_exit= result_max= result_elapsed=
+  local result_role='' result_state='' result_exit='' result_max='' result_elapsed=''
   result_path=$target_dir/readiness-target.result
   if contents=$(read_optional_private_file "$result_path" "$expected_uid"); then
     for token in $contents; do
