@@ -38,5 +38,8 @@ that path to Compose without printing its values.
 `rollout-evidence.sh` is read-only and takes no arguments. Run it through the
 same CLI as `ssh teagram run <main-sha> rollout-evidence`. It reports the
 latest failed target gate, the bounded readiness sample tail when present, and
-the matching runner log tail. It reads only validated root-owned mode-0600
-files from mode-0700 evidence directories and redacts sensitive log lines.
+the matching runner log tail. If the target failure marker could not be
+persisted, it uses the matching rollback warning and identifies the target
+failure marker and capture time as unavailable. It reads only validated
+root-owned mode-0600 files from mode-0700 evidence directories and redacts
+sensitive log lines.

@@ -298,11 +298,28 @@ output=$(run_command "run $OPS_SHA rollout-evidence")
 [[ "$output" != *'secret-runner-password'* && "$output" != *'secret-runner-token'* && \
    "$output" != *'secret-url-password'* && "$output" != *'secret-bearer-token'* && \
    "$output" != *'secret-json-key'* ]]
+
+WARNING_SHA=eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee
+warning_target_dir="$MOCK_ROOT/main1238-${WARNING_SHA:0:12}-20261028T043000Z.target"
+warning_rollback_dir="${warning_target_dir%.target}.rollback"
+mkdir -m 700 "$warning_target_dir" "$warning_rollback_dir"
+printf 'target_sha=%s reason=target_readiness_rejected_exit_3 target_failure_marker=unavailable\n' \
+  "$WARNING_SHA" > "$warning_rollback_dir/target-failure-marker-warning.txt"
+warning_log="$MOCK_ROOT/rollout-${WARNING_SHA:0:7}-20261028T042958Z.log"
+printf 'latest warning-backed rollout log\n' > "$warning_log"
+chmod 600 "$warning_rollback_dir/target-failure-marker-warning.txt" "$warning_log"
+output=$(run_command "run $OPS_SHA rollout-evidence")
+[[ "$output" == *"rollout_failure target_sha=$WARNING_SHA source_sha=unavailable failed_gate=target_readiness_rejected_exit_3 target_failure_marker=unavailable"* ]]
+[[ "$output" == *'failure_marker_warning=target-failure-marker-warning.txt'* ]]
+[[ "$output" == *'evidence_captured_at_utc=unavailable'* && \
+   "$output" == *'rollout_started_at_utc=2026-10-28T04:30:00Z'* ]]
+[[ "$output" == *"runner_log=rollout-${WARNING_SHA:0:7}-20261028T042958Z.log"* && \
+   "$output" != *"runner_log=rollout-${TARGET_SHA:0:7}-20261028T035454Z.log"* ]]
 expect_status 64 "run $OPS_SHA rollout-evidence extra"
 
 mapfile -t runner_temps < "$MOCK_RUN_TEMP_LOG"
 mapfile -t removed_temps < "$MOCK_RM_LOG"
-[[ "${#runner_temps[@]}" == 6 && "${#removed_temps[@]}" == "${#runner_temps[@]}" ]]
+[[ "${#runner_temps[@]}" == 7 && "${#removed_temps[@]}" == "${#runner_temps[@]}" ]]
 for index in "${!runner_temps[@]}"; do
   runner_temp=${runner_temps[$index]}
   [[ "$runner_temp" == /tmp/teagram-ops.* && "${removed_temps[$index]}" == "$runner_temp" && ! -e "$runner_temp" ]]
