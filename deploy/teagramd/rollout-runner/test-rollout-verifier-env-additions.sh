@@ -145,6 +145,87 @@ if ! compare_snapshots \
   cat "$TMP/key-exchange-empty-comparisons.tsv" >&2
   exit 1
 fi
+image_env_inspect=$(jq -c \
+  --arg image_id sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc \
+  --arg container_id cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc '
+  .Image=$image_id
+  | .Id=$container_id
+  | .Config.Env += ["TG_STICKER_CATALOG_BUNDLE=/usr/share/teagram/sticker-bundle"]
+' <<< "$(inspect_json '')")
+image_env_json='["TG_STICKER_CATALOG_BUNDLE=/usr/share/teagram/sticker-bundle"]'
+image_env_snapshot=$(snapshot_from_json \
+  "$image_env_inspect" "$COMPOSE_JSON" "$ENV_FILE" "$OVERRIDE_FILE" selected-compose-render target '' "$image_env_json")
+if [ "$(jq -r '.container_env_sha256' <<< "$empty_env")" != \
+     "$(jq -r '.container_env_sha256' <<< "$image_env_snapshot")" ]; then
+  printf '%s\n' 'FAIL image-provided environment changed the operator environment digest' >&2
+  exit 1
+fi
+live_image_env_snapshot=$(snapshot_from_json \
+  "$image_env_inspect" "$COMPOSE_JSON" "$ENV_FILE" "$OVERRIDE_FILE" live-container-inspection baseline '' "$image_env_json")
+if [ "$(jq -r '.container_env_sha256' <<< "$empty_env")" != \
+     "$(jq -r '.container_env_sha256' <<< "$live_image_env_snapshot")" ]; then
+  printf '%s\n' 'FAIL image-provided environment changed the live-inspection operator digest' >&2
+  exit 1
+fi
+printf '%s\n' "$image_env_snapshot" > "$TMP/image-env-target.snapshot.json"
+if ! compare_snapshots \
+  "$TMP/key-exchange-baseline.snapshot.json" "$TMP/image-env-target.snapshot.json" \
+  sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc \
+  "$TMP/image-env-comparisons.tsv"; then
+  printf '%s\n' 'FAIL full baseline-to-target comparison rejected image-provided environment' >&2
+  cat "$TMP/image-env-comparisons.tsv" >&2
+  exit 1
+fi
+printf '%s\n' 'PASS image-provided environment does not change operator environment equivalence'
+
+blob_dir_compose=$(jq -c \
+  '.services.teagramd.environment.TG_BLOB_DIR="/var/lib/telegramd-blobs"' <<< "$COMPOSE_JSON")
+blob_dir_inspect=$(jq -c \
+  '.Config.Env += ["TG_BLOB_DIR=/var/lib/telegramd-blobs"]' <<< "$(inspect_json '')")
+blob_dir_baseline=$(snapshot_from_json \
+  "$blob_dir_inspect" "$blob_dir_compose" "$ENV_FILE" "$OVERRIDE_FILE" \
+  selected-compose-render baseline '' '["TG_BLOB_DIR=/var/lib/telegramd-blobs"]')
+blob_dir_target=$(snapshot_from_json \
+  "$blob_dir_inspect" "$blob_dir_compose" "$ENV_FILE" "$OVERRIDE_FILE" \
+  selected-compose-render target '' '["TG_BLOB_DIR=/image-default-blobs"]')
+if [ "$(jq -r '.container_env_sha256' <<< "$blob_dir_baseline")" != \
+     "$(jq -r '.container_env_sha256' <<< "$blob_dir_target")" ]; then
+  printf '%s\n' 'FAIL explicit Compose environment matching the baseline image default changed the target environment digest' >&2
+  exit 1
+fi
+if [ "$(jq -r '.container_env_sha256' <<< "$empty_env")" = \
+     "$(jq -r '.container_env_sha256' <<< "$blob_dir_baseline")" ]; then
+  printf '%s\n' 'FAIL explicit Compose environment matching the image default was omitted from the environment digest' >&2
+  exit 1
+fi
+printf '%s\n' 'PASS explicit Compose values matching a baseline image default remain pinned across image default changes'
+
+unexpected_runtime_inspect=$(jq -c '.Config.Env += ["TG_UNDECLARED_RUNTIME_FLAG=on"]' <<< "$image_env_inspect")
+unexpected_runtime_snapshot=$(snapshot_from_json \
+  "$unexpected_runtime_inspect" "$COMPOSE_JSON" "$ENV_FILE" "$OVERRIDE_FILE" selected-compose-render target '' "$image_env_json")
+if [ "$(jq -r '.container_env_sha256' <<< "$empty_env")" = \
+     "$(jq -r '.container_env_sha256' <<< "$unexpected_runtime_snapshot")" ]; then
+  printf '%s\n' 'FAIL unmodeled runtime environment addition was ignored with image defaults' >&2
+  exit 1
+fi
+printf '%s\n' 'PASS unmodeled runtime environment additions remain pinned'
+
+operator_env_baseline_compose=$(jq -c \
+  '.services.teagramd.environment.TG_OPERATOR_FLAG="baseline"' <<< "$COMPOSE_JSON")
+operator_env_target_compose=$(jq -c \
+  '.services.teagramd.environment.TG_OPERATOR_FLAG="target"' <<< "$COMPOSE_JSON")
+operator_env_baseline=$(snapshot_from_json \
+  "$(inspect_json 'TG_OPERATOR_FLAG=baseline')" "$operator_env_baseline_compose" \
+  "$ENV_FILE" "$OVERRIDE_FILE" selected-compose-render baseline)
+operator_env_target=$(snapshot_from_json \
+  "$(inspect_json 'TG_OPERATOR_FLAG=target')" "$operator_env_target_compose" \
+  "$ENV_FILE" "$OVERRIDE_FILE" selected-compose-render target)
+if [ "$(jq -r '.container_env_sha256' <<< "$operator_env_baseline")" = \
+     "$(jq -r '.container_env_sha256' <<< "$operator_env_target")" ]; then
+  printf '%s\n' 'FAIL Compose-provided environment did not change the operator environment digest' >&2
+  exit 1
+fi
+printf '%s\n' 'PASS Compose-provided environment remains in operator environment equivalence'
 COMPOSE_JSON=$default_compose_json
 unset INSPECT_LOG_CONFIG
 printf '%s\n' 'PASS full baseline-to-target comparison accepts empty key-exchange mappings'
@@ -1126,3 +1207,69 @@ if ! grep -q $'rollback\tselected_render_media_key_source\t.*\tfail' \
   exit 1
 fi
 printf '%s\n' 'PASS initial-local rollback compares the pinned media-key render'
+
+blob_dir_initial_compose=$(jq -c \
+  '.services.teagramd.environment.TG_BLOB_DIR="/var/lib/telegramd-blobs"' \
+  <<< "$syslog_compose")
+blob_dir_initial_inspect=$(printf '%s' "$syslog_inspect" | jq -c '
+  .Config.Env |= (map(select(startswith("TG_BLOB_DIR=") | not)) +
+    ["TG_BLOB_DIR=/var/lib/telegramd-blobs"])
+')
+blob_dir_initial_target_inspect=$(printf '%s' "$blob_dir_initial_inspect" | jq -c \
+  --arg image_id sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc \
+  --arg container_id dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd \
+  '.Image=$image_id | .Id=$container_id')
+blob_dir_baseline_image_env='["TG_BLOB_DIR=/var/lib/telegramd-blobs"]'
+blob_dir_target_image_env='["TG_BLOB_DIR=/image-default-blobs"]'
+blob_dir_initial_live_baseline=$(snapshot_from_json \
+  "$blob_dir_initial_inspect" '{}' "$ENV_FILE" "$OVERRIDE_FILE" \
+  live-container-inspection baseline '' "$blob_dir_baseline_image_env")
+blob_dir_initial_render=$(snapshot_from_json \
+  "$blob_dir_initial_inspect" "$blob_dir_initial_compose" "$ENV_FILE" "$OVERRIDE_FILE" \
+  selected-compose-render initial-local-target-render '' "$blob_dir_baseline_image_env")
+blob_dir_initial_preflight=$(snapshot_from_json \
+  "$blob_dir_initial_inspect" "$blob_dir_initial_compose" "$ENV_FILE" "$OVERRIDE_FILE" \
+  selected-compose-render preflight '' "$blob_dir_baseline_image_env")
+blob_dir_initial_target=$(snapshot_from_json \
+  "$blob_dir_initial_target_inspect" "$blob_dir_initial_compose" "$ENV_FILE" "$OVERRIDE_FILE" \
+  selected-compose-render target '' "$blob_dir_target_image_env")
+blob_dir_initial_rollback=$(snapshot_from_json \
+  "$blob_dir_initial_inspect" "$blob_dir_initial_compose" "$ENV_FILE" "$OVERRIDE_FILE" \
+  selected-compose-render rollback '' "$blob_dir_baseline_image_env")
+blob_dir_initial_baseline_sha=$(jq -r '.container_env_sha256' <<< "$blob_dir_initial_live_baseline")
+blob_dir_initial_render_sha=$(jq -r '.container_env_sha256' <<< "$blob_dir_initial_render")
+blob_dir_initial_target_sha=$(jq -r '.container_env_sha256' <<< "$blob_dir_initial_target")
+if [ "$blob_dir_initial_baseline_sha" = "$blob_dir_initial_render_sha" ] || \
+   [ "$blob_dir_initial_render_sha" != "$blob_dir_initial_target_sha" ]; then
+  printf '%s\n' 'FAIL mixed live/selected Compose snapshots did not expose matching explicit TG_BLOB_DIR values' >&2
+  exit 1
+fi
+
+INITIALIZE_LOCAL=1
+BUILT_IMAGE_ID=sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
+BASELINE_DIR="$TMP/blob-dir-initial-local.baseline"
+TARGET_DIR="$TMP/blob-dir-initial-local.target"
+ROLLBACK_DIR="$TMP/blob-dir-initial-local.rollback"
+mkdir -m 700 "$BASELINE_DIR" "$TARGET_DIR" "$ROLLBACK_DIR"
+printf '%s\n' "$blob_dir_initial_live_baseline" > "$BASELINE_DIR/baseline.snapshot.json"
+printf '%s\n' "$blob_dir_initial_render" > "$BASELINE_DIR/initial-local-target-render.snapshot.json"
+printf '%s\n' "$blob_dir_initial_preflight" > "$TARGET_DIR/preflight.snapshot.json"
+printf '%s\n' "$blob_dir_initial_target" > "$TARGET_DIR/target.snapshot.json"
+printf '%s\n' "$blob_dir_initial_rollback" > "$ROLLBACK_DIR/rollback.snapshot.json"
+chmod 600 "$BASELINE_DIR"/*.json "$TARGET_DIR"/*.json "$ROLLBACK_DIR"/*.json
+if ! compare_resolved_preflight; then
+  printf '%s\n' 'FAIL initial-local preflight rejected matching live baseline and selected Compose environment' >&2
+  cat "$TARGET_DIR/preflight-comparisons.tsv" >&2
+  exit 1
+fi
+if ! compare_initial_local_target; then
+  printf '%s\n' 'FAIL initial-local target rejected a TG_BLOB_DIR value pinned by Compose across image defaults' >&2
+  cat "$TARGET_DIR/target-comparisons.tsv" >&2
+  exit 1
+fi
+if ! compare_rollback_to_baseline; then
+  printf '%s\n' 'FAIL initial-local rollback rejected a TG_BLOB_DIR value pinned by Compose across image defaults' >&2
+  cat "$ROLLBACK_DIR/rollback-equivalence.tsv" >&2
+  exit 1
+fi
+printf '%s\n' 'PASS initial-local preflight, target, and rollback normalize live and selected TG_BLOB_DIR environment'

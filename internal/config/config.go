@@ -160,9 +160,6 @@ type Config struct {
 	// unassembled bytes are capped at twice this, which is two concurrent
 	// max-size uploads.
 	MaxFileBytes int64
-	// UploadMaxFileBytes is the optional TG_UPLOAD_MAX_BYTES value advertised
-	// to clients. Zero means that setting was not provided.
-	UploadMaxFileBytes int64
 	// BlobDir is where uploaded file bodies are stored. It must be outside the
 	// repository and outside anything a future HTTP surface serves statically.
 	BlobDir string
@@ -1005,7 +1002,6 @@ func load(log *slog.Logger, allowKeyGeneration bool) (Config, error) {
 			return Config{}, errors.New("TG_UPLOAD_MAX_BYTES must be at most 1099511627776")
 		}
 		cfg.MaxFileBytes = n
-		cfg.UploadMaxFileBytes = n
 	}
 	if v := os.Getenv("TG_MAX_USER_STORAGE_BYTES"); v != "" {
 		n, err := strconv.ParseInt(v, 10, 64)

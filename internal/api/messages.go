@@ -311,6 +311,10 @@ func validText(s string) bool {
 	return utf8.ValidString(s) && !strings.ContainsRune(s, 0)
 }
 
+func textExceedsLimit(s string, limit int) bool {
+	return utf8.RuneCountInString(s) > limit
+}
+
 type unsupportedSendOptions interface {
 	GetScheduleDate() (int, bool)
 	GetScheduleRepeatPeriod() (int, bool)
@@ -399,6 +403,9 @@ func (h *handlers) handleSendMessageAfterReplyOnConn(c *mtproto.Conn, r *mtproto
 	// Validate text and resolve peer before any write.
 	if !validText(req.Message) {
 		return nil, nil, nil, errMessageEmpty
+	}
+	if textExceedsLimit(req.Message, messageLengthMax) {
+		return nil, nil, nil, errMessageTooLong
 	}
 	messageEntities, err := h.encodeMessageEntitiesWithURLs(r.UserID, req.Message, req.Entities)
 	if err != nil {
@@ -1139,6 +1146,13 @@ func (h *handlers) handleEditMessageAfterReplyOnConn(c *mtproto.Conn, r *mtproto
 	}
 	if !validText(req.Message) {
 		return nil, nil, nil, errMessageEmpty
+	}
+	if message.FileID != 0 || message.StickerDocumentID != nil {
+		if textExceedsLimit(req.Message, captionLengthMax) {
+			return nil, nil, nil, errMediaCaptionTooLong
+		}
+	} else if textExceedsLimit(req.Message, messageLengthMax) {
+		return nil, nil, nil, errMessageTooLong
 	}
 	messageEntities, err := h.encodeMessageEntitiesWithURLs(r.UserID, req.Message, req.Entities)
 	if err != nil {
