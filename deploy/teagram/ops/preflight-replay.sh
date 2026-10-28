@@ -53,11 +53,11 @@ if [ "${PREFLIGHT_REPLAY_TEST_MODE:-0}" = 1 ]; then
 else
   runtime_sha=$OPS_SHA
 fi
-[[ "$runtime_sha" =~ ^[0-9a-f]{40}$ ]] && \
-  git -C "$LIVE_ROOT" cat-file -e "$runtime_sha^{commit}" 2>/dev/null || {
+if ! [[ "$runtime_sha" =~ ^[0-9a-f]{40}$ ]] || \
+   ! git -C "$LIVE_ROOT" cat-file -e "$runtime_sha^{commit}" 2>/dev/null; then
   fail 'reviewed rollout runtime commit is unavailable'
   exit 1
-}
+fi
 
 target_sha=${1:-}
 [ "$#" -eq 1 ] || { usage; exit 64; }
