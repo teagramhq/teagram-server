@@ -143,7 +143,9 @@ func TestSignUpBotUsernameReturnsBotAccountRefusal(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
 	s, _ := openStoreDSN(t)
-	bot, _, err := s.CreateBot(ctx, "signup_test_bot", "Sign up bot")
+	// Handles ending in "bot" stop at the reserved-suffix check, so this bot
+	// uses one that reaches the admission refusal.
+	bot, _, err := s.CreateBot(ctx, "signup_test_helper", "Sign up bot")
 	if err != nil {
 		t.Fatalf("create bot: %v", err)
 	}
