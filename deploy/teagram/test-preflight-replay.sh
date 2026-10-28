@@ -117,6 +117,12 @@ git -C "$TMP/source" commit -q -m baseline
 git -C "$TMP/source" push -q -u origin main
 git --git-dir="$TMP/origin.git" symbolic-ref HEAD refs/heads/main
 pass_sha=$(git -C "$TMP/source" rev-parse HEAD)
+git -C "$TMP/source" switch -q -c missing-compose
+git -C "$TMP/source" rm -q docker-compose.alternate.yml
+git -C "$TMP/source" commit -q -m missing-selected-compose
+git -C "$TMP/source" push -q origin missing-compose
+missing_compose_sha=$(git -C "$TMP/source" rev-parse HEAD)
+git -C "$TMP/source" switch -q main
 git -C "$TMP/source" switch -q -c drift
 cat > "$TMP/source/docker-compose.alternate.yml" <<'COMPOSE'
 fixture: alternate
@@ -360,6 +366,14 @@ printf '%s\n' 'PASS all-pass replay prints only field/result rows'
 output=$(PREFLIGHT_REPLAY_TEST_FORCE_COMPAT=1 run_replay "$pass_sha" 'docker-compose.alternate.yml,docker-compose.override.yml')
 [[ "$(cat "$TMP/last-rc")" == 0 ]] || { printf 'FAIL dynamic selection replay:\n%s\n' "$output" >&2; exit 1; }
 printf '%s\n' 'PASS non-default live selection is followed in order'
+
+output=$(run_replay "$missing_compose_sha" 'docker-compose.alternate.yml,docker-compose.override.yml')
+if [[ "$(cat "$TMP/last-rc")" == 0 ]] || \
+   ! grep -Fq 'PR head is missing a selected Compose file' <<< "$output"; then
+  printf 'FAIL missing selected PR Compose file was not rejected:\n%s\n' "$output" >&2
+  exit 1
+fi
+printf '%s\n' 'PASS missing selected PR Compose file is rejected'
 
 output=$(run_replay "$drift_sha" 'docker-compose.alternate.yml,docker-compose.override.yml')
 if [[ "$(cat "$TMP/last-rc")" == 0 ]] || ! grep -Fq $'stop_grace_period\tfail' <<< "$output"; then

@@ -372,7 +372,8 @@ for live_file in "${live_files[@]}"; do
           exit 1
         }
       else
-        install -m 600 -- "$live_file" "$destination" || { fail 'cannot stage the live Compose artifact'; exit 1; }
+        fail 'PR head is missing a selected Compose file'
+        exit 1
       fi
     fi
   done
