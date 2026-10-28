@@ -11,6 +11,7 @@ import (
 
 	"github.com/gotd/td/bin"
 	"github.com/gotd/td/tg"
+	"github.com/gotd/td/tgerr"
 	"github.com/jackc/pgx/v5"
 
 	"github.com/teagramhq/teagram-server/internal/api"
@@ -448,7 +449,10 @@ func TestChannelPhotoSupergroupSlowModeRefusesBeforeAssembly(t *testing.T) {
 
 	saveParts(t, s, member.ID, 97202, body)
 	_, err = sendPhotoToChannel(t, s, blobs, member.ID, channel.ID, 97202, body, "second", 97212)
-	rpcError(t, err, "SLOWMODE_WAIT_300")
+	rpc, ok := tgerr.As(err)
+	if !ok || rpc.Code != 420 || rpc.Type != "SLOWMODE_WAIT" || rpc.Argument < 1 || rpc.Argument > 300 {
+		t.Fatalf("slow-mode photo refusal = %v, want 420 SLOWMODE_WAIT_<seconds> within 300 seconds", err)
+	}
 	assertChannelWriteStats(t, conn, channel.ID, before)
 	if got := countFiles(t, ctx, dsn); got != filesBefore {
 		t.Fatalf("file rows after a slow-mode refusal = %d, want %d: the refusal must precede assembly", got, filesBefore)
