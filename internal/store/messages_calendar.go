@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	"github.com/jackc/pgx/v5"
@@ -29,7 +30,7 @@ func (s *Store) SearchResultsCalendar(
 	offsetID int64,
 	offsetDate int64,
 	limit int,
-) ([]Message, []SearchResultsCalendarPeriod, int, error) {
+) (messages []Message, periods []SearchResultsCalendarPeriod, count int, retErr error) {
 	if peerType != PeerTypeUser && peerType != PeerTypeChat {
 		return nil, nil, 0, fmt.Errorf("unsupported calendar search peer type %d", peerType)
 	}
@@ -44,7 +45,11 @@ func (s *Store) SearchResultsCalendar(
 	if err != nil {
 		return nil, nil, 0, fmt.Errorf("begin search results calendar snapshot: %w", err)
 	}
-	defer func() { _ = tx.Rollback(ctx) }() //nolint:errcheck // no-op after commit
+	defer func() {
+		if rollbackErr := tx.Rollback(ctx); rollbackErr != nil && !errors.Is(rollbackErr, pgx.ErrTxClosed) {
+			retErr = errors.Join(retErr, fmt.Errorf("rollback search results calendar snapshot: %w", rollbackErr))
+		}
+	}()
 	qtx := s.q.WithTx(tx)
 
 	if peerType == PeerTypeChat {
@@ -71,7 +76,7 @@ func (s *Store) SearchResultsCalendar(
 	if err != nil {
 		return nil, nil, 0, fmt.Errorf("query search results calendar periods: %w", err)
 	}
-	periods := make([]SearchResultsCalendarPeriod, len(periodRows))
+	periods = make([]SearchResultsCalendarPeriod, len(periodRows))
 	for i, period := range periodRows {
 		periods[i] = SearchResultsCalendarPeriod{
 			Date: period.Date, MinMsgID: period.MinMsgID, MaxMsgID: period.MaxMsgID,

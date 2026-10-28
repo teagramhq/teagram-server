@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/gotd/td/tg"
+	"github.com/gotd/td/tgerr"
 	"github.com/jackc/pgx/v5"
 
 	"github.com/teagramhq/teagram-server/internal/config"
@@ -138,6 +139,16 @@ func TestSearchResultsCalendarKeepsDateJumpSessionAndHistory(t *testing.T) {
 	if calendar.Count != 2 || len(calendar.Periods) != 2 || len(calendar.Messages) != 2 {
 		t.Fatalf("photo/video calendar = count %d, periods %d, messages %d; want 2/2/2", calendar.Count, len(calendar.Periods), len(calendar.Messages))
 	}
+	forgedPeer := *peer
+	forgedPeer.AccessHash++
+	if err := a.call(f.ctx, func(ctx context.Context, client *tg.Client) error {
+		_, err := client.MessagesGetSearchResultsCalendar(ctx, &tg.MessagesGetSearchResultsCalendarRequest{
+			Peer: &forgedPeer, Filter: &tg.InputMessagesFilterPhotoVideo{}, OffsetDate: monthEnd,
+		})
+		return err
+	}); !tgerr.Is(err, "PEER_ID_INVALID") {
+		t.Fatalf("calendar with forged peer access hash error = %v, want PEER_ID_INVALID", err)
+	}
 	wantPeriods := []tg.SearchResultsCalendarPeriod{
 		{Date: int(time.Date(2024, time.April, 3, 0, 0, 0, 0, time.UTC).Unix()), MinMsgID: int(videoID), MaxMsgID: int(videoID), Count: 1},
 		{Date: int(time.Date(2024, time.April, 2, 0, 0, 0, 0, time.UTC).Unix()), MinMsgID: int(photoID), MaxMsgID: int(photoID), Count: 1},
@@ -221,5 +232,91 @@ func TestSearchResultsCalendarKeepsDateJumpSessionAndHistory(t *testing.T) {
 	}
 	if first.Date <= int(date.Unix()) || last.Date >= int(date.Unix()) {
 		t.Fatalf("date history page does not straddle %s: %s", date.Format(time.RFC3339), fmt.Sprint(page.Messages))
+	}
+}
+
+func TestSearchResultsCalendarRequiresCurrentChatMembership(t *testing.T) {
+	t.Parallel()
+	f := newSmokeFixtureWithSetup(t, config.RegistrationClosed, func(f *smokeFixture) {
+		f.photoThumbs = buildSmokePhotoThumbSupervisor(t)
+	})
+	const phoneA, phoneB, phoneC = "+15552888101", "+15552888102", "+15552888103"
+	seedSmokeUsers(t, f, phoneA, phoneB, phoneC)
+	a := newSmokeClient(t, f, "calendar group creator", phoneA)
+	b := newSmokeClient(t, f, "calendar group member", phoneB)
+	c := newSmokeClient(t, f, "calendar group outsider", phoneC)
+
+	var chatID int64
+	if err := a.call(f.ctx, func(ctx context.Context, client *tg.Client) error {
+		created, err := client.MessagesCreateChat(ctx, &tg.MessagesCreateChatRequest{
+			Title: "Calendar membership", Users: []tg.InputUserClass{inputUser(a.id, b.id)},
+		})
+		if err != nil {
+			return err
+		}
+		updates, ok := created.Updates.(*tg.Updates)
+		if !ok {
+			return fmt.Errorf("createChat result = %T, want *tg.Updates", created.Updates)
+		}
+		if len(updates.Chats) != 1 {
+			return fmt.Errorf("createChat returned %d chats, want one", len(updates.Chats))
+		}
+		chat, ok := updates.Chats[0].(*tg.Chat)
+		if !ok {
+			return fmt.Errorf("createChat chat = %T, want *tg.Chat", updates.Chats[0])
+		}
+		chatID = chat.ID
+		return nil
+	}); err != nil {
+		t.Fatalf("create calendar group: %v", err)
+	}
+
+	photoBody := smokeJPEGAtUploadSize(t, smokePhotoPartCount)
+	const photoFileID = int64(2888041)
+	photoParts := uploadSmokeMediaParts(t, f.ctx, a, photoFileID, photoBody, smokePhotoPartSize)
+	if err := a.call(f.ctx, func(ctx context.Context, client *tg.Client) error {
+		_, err := client.MessagesSendMedia(ctx, &tg.MessagesSendMediaRequest{
+			Peer: &tg.InputPeerChat{ChatID: chatID}, Message: "calendar group photo", RandomID: 2888042,
+			Media: &tg.InputMediaUploadedPhoto{File: &tg.InputFile{
+				ID: photoFileID, Parts: photoParts, Name: "calendar-group.jpg", MD5Checksum: smokePhotoMD5(photoBody),
+			}},
+		})
+		return err
+	}); err != nil {
+		t.Fatalf("send calendar group photo: %v", err)
+	}
+
+	calendarFor := func(caller *smokeClient) (*tg.MessagesSearchResultsCalendar, error) {
+		var calendar *tg.MessagesSearchResultsCalendar
+		err := caller.call(f.ctx, func(ctx context.Context, client *tg.Client) error {
+			var err error
+			calendar, err = client.MessagesGetSearchResultsCalendar(ctx, &tg.MessagesGetSearchResultsCalendarRequest{
+				Peer: &tg.InputPeerChat{ChatID: chatID}, Filter: &tg.InputMessagesFilterPhotoVideo{},
+			})
+			return err
+		})
+		return calendar, err
+	}
+	calendar, err := calendarFor(b)
+	if err != nil {
+		t.Fatalf("current chat member calendar: %v", err)
+	}
+	if calendar.Count != 1 || len(calendar.Periods) != 1 || len(calendar.Messages) != 1 {
+		t.Fatalf("current chat member calendar = count %d, periods %d, messages %d; want 1/1/1", calendar.Count, len(calendar.Periods), len(calendar.Messages))
+	}
+	if _, err := calendarFor(c); !tgerr.Is(err, "PEER_ID_INVALID") {
+		t.Fatalf("non-member calendar error = %v, want PEER_ID_INVALID", err)
+	}
+
+	if err := a.call(f.ctx, func(ctx context.Context, client *tg.Client) error {
+		_, err := client.MessagesDeleteChatUser(ctx, &tg.MessagesDeleteChatUserRequest{
+			ChatID: chatID, UserID: inputUser(a.id, b.id),
+		})
+		return err
+	}); err != nil {
+		t.Fatalf("remove calendar group member: %v", err)
+	}
+	if _, err := calendarFor(b); !tgerr.Is(err, "PEER_ID_INVALID") {
+		t.Fatalf("removed member calendar error = %v, want PEER_ID_INVALID", err)
 	}
 }
