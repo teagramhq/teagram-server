@@ -7576,11 +7576,8 @@ def supervise(manifest_path: Path, lock_fd: int, rollout_lock_fd: int) -> int:
         while time.monotonic() < wait_until:
             manifest = load_manifest(manifest_path)
             record = manifest["supervisor"]
-            if record.get("pid") == 0 and record.get("start_ticks") == 0:
-                manifest["supervisor"] = {"pid": supervisor_pid, "start_ticks": supervisor_ticks}
-                drill = Drill(make_runtime_args(manifest), manifest_path.parent, manifest)
-                drill.save()
-                break
+            # The parent owns manifest writes until it publishes this identity.
+            # Both processes use the same temporary path in Drill.save().
             if record.get("pid") == supervisor_pid and record.get("start_ticks") == supervisor_ticks:
                 break
             time.sleep(0.1)

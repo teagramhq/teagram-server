@@ -2728,7 +2728,7 @@ class RestoreReadinessContractTests(unittest.TestCase):
         ):
             self.assertTrue(drill.cleanup_processes())
 
-    def test_supervisor_recovers_owned_resources_after_parent_disappears(self) -> None:
+    def test_supervisor_waits_for_parent_to_register_it_before_loading_drill(self) -> None:
         with tempfile.TemporaryDirectory(prefix="rr-supervisor-") as directory:
             lock_path = Path(directory) / "lock"
             lock_path.write_bytes(b"")
@@ -2743,28 +2743,53 @@ class RestoreReadinessContractTests(unittest.TestCase):
                 "rollout_lock": {"device": rollout_info.st_dev, "inode": rollout_info.st_ino},
                 "supervisor": {"pid": 0, "start_ticks": 0},
                 "parent": {"pid": 999999, "start_ticks": 1},
-                "parent_done": False,
+                "parent_done": True,
                 "cleanup_deadline": RESTORE_READINESS.time.monotonic() + 60,
             }
+            registered_manifest = {
+                **manifest,
+                "supervisor": {"pid": RESTORE_READINESS.os.getpid(), "start_ticks": 77},
+            }
+            manifests = iter((manifest, manifest, registered_manifest, registered_manifest, registered_manifest))
 
             class RecoveryDrill:
                 def __init__(self, _args: Any, _run_dir: Path, recovered_manifest: dict[str, Any]) -> None:
                     self.manifest = recovered_manifest
+                    self.save_calls = 0
+                    self.cleanup_calls = 0
 
                 def save(self) -> None:
-                    return None
+                    self.save_calls += 1
 
                 def cleanup_resources(self) -> bool:
+                    self.cleanup_calls += 1
                     return True
 
+            instances: list[RecoveryDrill] = []
+
+            def make_drill(*args: Any) -> RecoveryDrill:
+                instance = RecoveryDrill(*args)
+                instances.append(instance)
+                return instance
+
             with (
-                patch.object(RESTORE_READINESS, "load_manifest", return_value=manifest),
+                patch.object(
+                    RESTORE_READINESS,
+                    "load_manifest",
+                    side_effect=lambda _path: next(manifests, registered_manifest),
+                ),
                 patch.object(RESTORE_READINESS, "process_start_ticks", side_effect=lambda pid: 77 if pid == RESTORE_READINESS.os.getpid() else None),
                 patch.object(RESTORE_READINESS, "make_runtime_args", return_value=None),
-                patch.object(RESTORE_READINESS, "Drill", RecoveryDrill),
+                patch.object(RESTORE_READINESS, "Drill", side_effect=make_drill),
                 patch.object(RESTORE_READINESS, "remove_finished_run", return_value=True),
             ):
-                self.assertEqual(RESTORE_READINESS.supervise(Path(directory) / "ownership.json", lock_fd, rollout_fd), 0)
+                status = RESTORE_READINESS.supervise(
+                    Path(directory) / "ownership.json", lock_fd, rollout_fd
+                )
+
+            self.assertEqual(status, 0)
+            self.assertEqual(sum(instance.cleanup_calls for instance in instances), 1)
+            self.assertTrue(all(instance.save_calls == 0 for instance in instances))
 
     def test_supervisor_cleanup_uses_cleanup_budget_after_work_deadline(self) -> None:
         with tempfile.TemporaryDirectory(prefix="rr-supervisor-expired-work-") as directory:
@@ -2780,6 +2805,7 @@ class RestoreReadinessContractTests(unittest.TestCase):
             global_lock = {"device": lock_info.st_dev, "inode": lock_info.st_ino}
             rollout_lock = {"device": rollout_info.st_dev, "inode": rollout_info.st_ino}
             manifest, private_path = expired_work_cleanup_manifest(run_dir, global_lock, rollout_lock)
+            manifest["supervisor"] = {"pid": RESTORE_READINESS.os.getpid(), "start_ticks": 77}
             inventory_calls: list[list[str]] = []
             instances: list[Any] = []
 
@@ -2937,7 +2963,7 @@ class RestoreReadinessContractTests(unittest.TestCase):
             manifest = {
                 "global_lock": {"device": lock_info.st_dev, "inode": lock_info.st_ino},
                 "rollout_lock": {"device": rollout_info.st_dev, "inode": rollout_info.st_ino},
-                "supervisor": {"pid": 0, "start_ticks": 0},
+                "supervisor": {"pid": RESTORE_READINESS.os.getpid(), "start_ticks": 77},
                 "parent": {"pid": 999999, "start_ticks": 1},
                 "parent_done": True,
                 "cleanup_deadline": RESTORE_READINESS.time.monotonic() + 60,
@@ -2994,7 +3020,7 @@ class RestoreReadinessContractTests(unittest.TestCase):
             manifest = {
                 "global_lock": {"device": lock_info.st_dev, "inode": lock_info.st_ino},
                 "rollout_lock": {"device": rollout_info.st_dev, "inode": rollout_info.st_ino},
-                "supervisor": {"pid": 0, "start_ticks": 0},
+                "supervisor": {"pid": RESTORE_READINESS.os.getpid(), "start_ticks": 77},
                 "parent": {"pid": 999999, "start_ticks": 1},
                 "parent_done": True,
                 "cleanup_deadline": RESTORE_READINESS.time.monotonic() + 60,
@@ -3068,7 +3094,7 @@ class RestoreReadinessContractTests(unittest.TestCase):
             manifest = {
                 "global_lock": {"device": lock_info.st_dev, "inode": lock_info.st_ino},
                 "rollout_lock": {"device": rollout_info.st_dev, "inode": rollout_info.st_ino},
-                "supervisor": {"pid": 0, "start_ticks": 0},
+                "supervisor": {"pid": RESTORE_READINESS.os.getpid(), "start_ticks": 77},
                 "parent": {"pid": 999999, "start_ticks": 1},
                 "parent_done": True,
                 "cleanup_deadline": RESTORE_READINESS.time.monotonic() + 60,
@@ -3160,7 +3186,10 @@ class RestoreReadinessContractTests(unittest.TestCase):
             manifest = {
                 "global_lock": {"device": lock_info.st_dev, "inode": lock_info.st_ino},
                 "rollout_lock": {"device": rollout_info.st_dev, "inode": rollout_info.st_ino},
-                "supervisor": {"pid": 0, "start_ticks": 0},
+                "supervisor": {
+                    "pid": os.getpid(),
+                    "start_ticks": RESTORE_READINESS.process_start_ticks(os.getpid()),
+                },
                 "parent": {"pid": 999999, "start_ticks": 1},
                 "parent_done": True,
                 "cleanup_deadline": time.monotonic() + 1.5,
