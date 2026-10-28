@@ -853,6 +853,9 @@ Apply to every milestone.
   `AUTH_KEY_UNREGISTERED`.
 - Wire integers (`pts`/`date`/`seq`/message id) are gotd `int`; DB columns are
   `BIGINT`; convert at the wire boundary.
+- Bot owners' `message_events` rows and `update_state` are permanent; no
+  retention, compaction or renumbering job may delete or renumber them. Future
+  retention must exclude bot owners or move their stored offsets with the data.
 - Per-change gates: `go build ./...`, `go test ./...`, `golangci-lint run`,
   `atlas migrate hash|validate`. Run the tests via `make test` / `make test-db`,
   and read `docs/testing.md` first if you are working inside a container — the
