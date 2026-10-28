@@ -1,4 +1,4 @@
-h1:CbABDjBv9jUWVUJvevw9xxnSMG9oorIVLjyTFs16IvM=
+h1:EKzOIUiQniHSxv6oDtErTEMNkBZoQm3Drc5+mqaiMj8=
 20260721000001_baseline.sql h1:cnO6K1z0Uv3goEvecgJixKSio6ziaB1rF7cQLoCWOxs=
 20260721000002_auth_keys.sql h1:+vNabm6vdEAgu3H5ZGw2Wr8D/Y6i4ikAAUO3JbfZQeE=
 20260721000003_code_hardening.sql h1:8pbAqUpqcwOONUfac+qC51QjfC1JnObNCcXa1HC/dr0=
@@ -136,3 +136,5 @@ h1:CbABDjBv9jUWVUJvevw9xxnSMG9oorIVLjyTFs16IvM=
 20261026000006_backfill_zero_dialog_counts.sql h1:tt33OohUMR8x4yC1SWDgJ5WIAOTclIWGKCa7Sp0VODU=
 20261027000001_demo_wipe_generation.sql h1:0aBCk8iyJszwUUuI876BwmTERoKODC4PfyCCZAivk44=
 20261028000001_user_registration_invites.sql h1:MX4ShT2DW4IVLzSHnB3YTtsJDLryQLzrNVehhDQ6aTk=
+20261028000002_bot_accounts.sql h1:Otr9pK79k9LpD5PmwJnBqj6xxIzbVs2JxM/yEXf2dxo=
+20261028000003_bot_inserts_skip_admin_election.sql h1:y9mESy0Rsx4cK9aeUMQAmsn4KULjoyW+LDXYNHLYRiA=

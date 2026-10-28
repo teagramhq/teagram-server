@@ -73,7 +73,7 @@ func (q *Queries) AuthKeyByID(ctx context.Context, arg AuthKeyByIDParams) (AuthK
 }
 
 const authKeysByUser = `-- name: AuthKeysByUser :many
-SELECT id, key_value, user_id, created_at, last_seen_at, pending_user_id, pending_started_at, device_model, platform, system_version, api_id, app_version, ip, ever_bound_at FROM auth_keys WHERE user_id = $1
+SELECT id, key_value, user_id, created_at, last_seen_at, pending_user_id, pending_started_at, device_model, platform, system_version, api_id, app_version, ip, ever_bound_at, user_kind, pending_user_kind FROM auth_keys WHERE user_id = $1
 `
 
 func (q *Queries) AuthKeysByUser(ctx context.Context, userID *int64) ([]AuthKey, error) {
@@ -100,6 +100,8 @@ func (q *Queries) AuthKeysByUser(ctx context.Context, userID *int64) ([]AuthKey,
 			&i.AppVersion,
 			&i.Ip,
 			&i.EverBoundAt,
+			&i.UserKind,
+			&i.PendingUserKind,
 		); err != nil {
 			return nil, err
 		}

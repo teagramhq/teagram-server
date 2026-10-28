@@ -79,6 +79,8 @@ func runCommand(args []string, log *slog.Logger, stdout, stderr io.Writer) error
 		return run(log)
 	case args[0] == "invite":
 		return runInviteCommand(args[1:], log, stdout, stderr)
+	case args[0] == "bot":
+		return runBotCommand(args[1:], log, stdout, stderr)
 	case args[0] == "maintenance":
 		return runMaintenanceCommand(args[1:], log, stdout, stderr)
 	case args[0] == "admin":
@@ -556,6 +558,104 @@ func runInviteCommand(args []string, log *slog.Logger, stdout, stderr io.Writer)
 	default:
 		return inviteUsageError()
 	}
+}
+
+func runBotCommand(args []string, log *slog.Logger, stdout, stderr io.Writer) (err error) {
+	return runBotCommandWithEUID(args, log, stdout, stderr, os.Geteuid())
+}
+
+func runBotCommandWithEUID(args []string, log *slog.Logger, stdout, stderr io.Writer, euid int) (err error) {
+	if len(args) == 0 {
+		return botUsageError()
+	}
+	switch args[0] {
+	case "create", "rotate", "revoke":
+		if euid != 0 {
+			return fmt.Errorf("bot %s requires root", args[0])
+		}
+	default:
+		return botUsageError()
+	}
+
+	var (
+		username  string
+		firstName string
+		botID     int64
+	)
+	switch args[0] {
+	case "create":
+		if len(args) != 3 {
+			return botUsageError()
+		}
+		username, firstName = args[1], args[2]
+	case "rotate", "revoke":
+		if len(args) != 2 {
+			return botUsageError()
+		}
+		botID, err = strconv.ParseInt(args[1], 10, 64)
+		if err != nil || botID <= 0 {
+			return errors.New("invalid bot id")
+		}
+	default:
+		return botUsageError()
+	}
+
+	cfg, err := config.Load(log)
+	if err != nil {
+		return err
+	}
+	ctx := context.Background()
+	st, err := store.Open(ctx, cfg.PostgresDSN, cfg.AuthKeyEncKey,
+		store.WithLogger(log),
+		store.WithPoolConfig(cfg.PostgresPool),
+		store.WithStatementTimeout(cfg.StatementTimeout),
+		store.WithSessionIP(cfg.SessionIP),
+		store.WithSessionDeviceLabels(cfg.SessionDeviceLabels),
+		store.WithoutBlobStore(),
+	)
+	if err != nil {
+		return fmt.Errorf("open store: %w", err)
+	}
+	defer func() {
+		if closeErr := st.Close(); closeErr != nil {
+			err = errors.Join(err, fmt.Errorf("close store: %w", closeErr))
+		}
+	}()
+
+	switch args[0] {
+	case "create":
+		_, token, err := st.CreateBot(ctx, username, firstName)
+		if err != nil {
+			return fmt.Errorf("create bot: %w", err)
+		}
+		if _, err := fmt.Fprintln(stdout, token); err != nil {
+			return fmt.Errorf("write bot token: %w", err)
+		}
+		return nil
+	case "rotate":
+		token, err := st.RotateBotToken(ctx, botID)
+		if err != nil {
+			return fmt.Errorf("rotate bot token: %w", err)
+		}
+		if _, err := fmt.Fprintln(stdout, token); err != nil {
+			return fmt.Errorf("write bot token: %w", err)
+		}
+		return nil
+	case "revoke":
+		if err := st.RevokeBotToken(ctx, botID); err != nil {
+			return fmt.Errorf("revoke bot token: %w", err)
+		}
+		if _, err := fmt.Fprintf(stderr, "Revoked bot token: id=%d\n", botID); err != nil {
+			return fmt.Errorf("write bot token revocation: %w", err)
+		}
+		return nil
+	default:
+		return botUsageError()
+	}
+}
+
+func botUsageError() error {
+	return errors.New("usage: teagramd bot create <username> <first_name> | teagramd bot rotate <bot_id> | teagramd bot revoke <bot_id>")
 }
 
 func parseInviteIssueArgs(args []string) (string, time.Duration, error) {
