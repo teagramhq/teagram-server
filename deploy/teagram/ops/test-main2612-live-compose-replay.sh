@@ -20,6 +20,11 @@ cleanup_test() {
     [ ! -f "$marker" ] || unlink -- "$marker" || status=1
     rmdir -- "$SUCCESS_FIXTURE" || status=1
   fi
+  [ ! -f "$TMP/expected-field-results.tsv" ] || unlink -- "$TMP/expected-field-results.tsv" || status=1
+  [ ! -f "$TMP/approved-field-results.tsv" ] || unlink -- "$TMP/approved-field-results.tsv" || status=1
+  [ ! -f "$TMP/field-results.valid.tsv" ] || unlink -- "$TMP/field-results.valid.tsv" || status=1
+  [ ! -f "$TMP/field-results.untrusted.tsv" ] || unlink -- "$TMP/field-results.untrusted.tsv" || status=1
+  [ ! -f "$TMP/field-results.oversized.tsv" ] || unlink -- "$TMP/field-results.oversized.tsv" || status=1
   [ ! -f "$TMP/synthetic.env.source" ] || unlink -- "$TMP/synthetic.env.source" || status=1
   [ ! -f "$TMP/synthetic.env.output" ] || unlink -- "$TMP/synthetic.env.output" || status=1
   rmdir -- "$TMP" || status=1
@@ -32,7 +37,15 @@ grep -Fq 'umask 077' "$OPS_SCRIPT"
 grep -Fq "TMP_TOKEN=\$(mark_replay_tree \"\$TMP\")" "$OPS_SCRIPT"
 grep -Fq "write_synthetic_env \"\$env_source\" \"\$tree/\$env_name\"" "$OPS_SCRIPT"
 grep -Fq "unlink -- \"\$env_path\"" "$OPS_SCRIPT"
-grep -Fq "RESULT_ROWS=\$(<\"\$TMP/logs/field-results.tsv\")" "$OPS_SCRIPT"
+grep -Fq 'validate_result_rows "$TMP/logs/field-results.tsv"' "$OPS_SCRIPT"
+grep -Fq 'size=$REPLAY_TMPFS_SIZE_BYTES,nr_inodes=$REPLAY_TMPFS_INODES' "$OPS_SCRIPT"
+grep -Fq 'mount_options=$("$FINDMNT_BIN" -n -o OPTIONS --target "$target")' "$OPS_SCRIPT"
+grep -Fq 'ulimit -t 60' "$OPS_SCRIPT"
+grep -Fq 'ulimit -v 1048576' "$OPS_SCRIPT"
+grep -Fq 'ulimit -f 4096' "$OPS_SCRIPT"
+grep -Fq -- '--property=MemoryMax=1G' "$OPS_SCRIPT"
+grep -Fq -- '--property=CPUQuota=100%' "$OPS_SCRIPT"
+grep -Fq -- '--property=TasksMax=64' "$OPS_SCRIPT"
 if grep -Fq "cat -- \"\$TMP/logs/field-results.tsv\"" "$OPS_SCRIPT"; then
   printf '%s\n' 'FAIL live replay prints result rows before guarded cleanup' >&2
   exit 1
@@ -59,6 +72,53 @@ if grep -Fq 'source /dev/stdin' "$OPS_SCRIPT" || grep -Fq 'safe_remove_tree_sour
   printf '%s\n' 'FAIL live replay executes candidate-controlled cleanup code on the host' >&2
   exit 1
 fi
+EXPECTED_ROWS="$TMP/expected-field-results.tsv"
+printf 'field\tresult\nconfig_sha256\tpass\nenv_sha256\tpass\noverride_sha256\tpass\nstop_grace_period\tpass\ncompose_logging_policy\tpass\ncompose_log_login_codes\tpass\nmedia_key_source\tpass\nmedia_key_current\tpass\ncompose_public_ws_2446\tpass\nexposure_public_ws_2446\tpass\ncompose_replica_count\tpass\ncompose_client_addr_trust\tpass\n' \
+  > "$TMP/approved-field-results.tsv"
+bash -c '
+  set -Eeuo pipefail
+  source "$1"
+  EXPECTED_RESULT_ROWS=$2
+  write_expected_result_rows
+' _ "$OPS_SCRIPT" "$EXPECTED_ROWS"
+cmp -s -- "$TMP/approved-field-results.tsv" "$EXPECTED_ROWS"
+cp -- "$EXPECTED_ROWS" "$TMP/field-results.valid.tsv"
+chmod 600 -- "$TMP/field-results.valid.tsv"
+valid_rows=$(bash -c '
+  set -Eeuo pipefail
+  source "$1"
+  EXPECTED_RESULT_ROWS=$2
+  validate_result_rows "$3"
+  printf "%s" "$RESULT_ROWS"
+' _ "$OPS_SCRIPT" "$EXPECTED_ROWS" "$TMP/field-results.valid.tsv")
+[ "$valid_rows" = "$(<"$TMP/approved-field-results.tsv")" ]
+{
+  head -n 1 "$TMP/approved-field-results.tsv"
+  printf 'operator_setting=synthetic-fixture\tpass\n'
+  tail -n +3 "$TMP/approved-field-results.tsv"
+} > "$TMP/field-results.untrusted.tsv"
+chmod 600 -- "$TMP/field-results.untrusted.tsv"
+if bash -c '
+  set -Eeuo pipefail
+  source "$1"
+  EXPECTED_RESULT_ROWS=$2
+  validate_result_rows "$3"
+' _ "$OPS_SCRIPT" "$EXPECTED_ROWS" "$TMP/field-results.untrusted.tsv"; then
+  printf '%s\n' 'FAIL host row validator accepted a candidate-controlled field' >&2
+  exit 1
+fi
+head -c 1025 /dev/zero > "$TMP/field-results.oversized.tsv"
+chmod 600 -- "$TMP/field-results.oversized.tsv"
+if bash -c '
+  set -Eeuo pipefail
+  source "$1"
+  EXPECTED_RESULT_ROWS=$2
+  validate_result_rows "$3"
+' _ "$OPS_SCRIPT" "$EXPECTED_ROWS" "$TMP/field-results.oversized.tsv"; then
+  printf '%s\n' 'FAIL host row validator accepted oversized candidate output' >&2
+  exit 1
+fi
+printf '%s\n' 'PASS host accepts only bounded, exact preflight result rows'
 cat > "$TMP/synthetic.env.source" <<'EOF'
 POSTGRES_PASSWORD=raw-postgres-fixture-value
 TEAGRAM_TURNSTILE_SITE_KEY=raw-site-fixture-value
@@ -105,6 +165,8 @@ printf '%s\n' 'PASS candidate SHA argument overrides the selected main SHA; the 
 
 CLEANUP_FIXTURE=$(mktemp -d /tmp/main2612-replay.XXXXXXXX)
 mkdir -m 700 "$CLEANUP_FIXTURE/live"
+printf '%s\n' 0123456789abcdef0123456789abcdef > "$CLEANUP_FIXTURE/.rollout-owned-0123456789abcdef0123456789abcdef"
+chmod 600 "$CLEANUP_FIXTURE/.rollout-owned-0123456789abcdef0123456789abcdef"
 cleanup_status=0
 if cleanup_output=$(bash -c '
   set -Eeuo pipefail
@@ -124,6 +186,12 @@ if cleanup_output=$(bash -c '
     printf "synthetic ownership marker mismatch\n" >&2
     return 23
   }
+  TMP_MOUNTED=1
+  unmount_replay_tmpfs() {
+    unlink -- "$TMP/.rollout-owned-$TMP_TOKEN"
+    rmdir -- "$TMP/live"
+    TMP_MOUNTED=0
+  }
   cleanup
 ' _ "$OPS_SCRIPT" "$CLEANUP_FIXTURE" $'field\tresult\ncompose\tpass' 2>&1); then
   printf '%s\n' 'FAIL live replay cleanup fixture accepted a guarded-delete failure' >&2
@@ -137,12 +205,15 @@ expected_cleanup_error="live Compose replay cleanup failed for $CLEANUP_FIXTURE/
   printf 'FAIL unexpected live replay cleanup diagnostic: %s\n' "$cleanup_output" >&2
   exit 1
 }
-rmdir -- "$CLEANUP_FIXTURE/live" "$CLEANUP_FIXTURE"
+[ ! -e "$CLEANUP_FIXTURE" ]
 CLEANUP_FIXTURE=
 printf '%s\n' 'PASS replay withholds passing rows and reports a guarded-delete failure'
 
 SUCCESS_FIXTURE=$(mktemp -d /tmp/main2612-replay.XXXXXXXX)
 mkdir -m 700 "$SUCCESS_FIXTURE/live"
+mkdir -m 700 "$SUCCESS_FIXTURE/live/evidence"
+printf '%s\n' synthetic-owned-evidence > "$SUCCESS_FIXTURE/live/evidence/result.json"
+chmod 600 "$SUCCESS_FIXTURE/live/evidence/result.json"
 printf '%s\n' "$SUCCESS_TOKEN" > "$SUCCESS_FIXTURE/.rollout-owned-$SUCCESS_TOKEN"
 chmod 600 "$SUCCESS_FIXTURE/.rollout-owned-$SUCCESS_TOKEN"
 success_rows=$(bash -c '
@@ -164,11 +235,13 @@ success_rows=$(bash -c '
   rollout_safe_remove_tree() {
     [ "$#" -eq 4 ] && [ "$1" = "$TMP/live" ] && [ "$2" = "$TMP" ] && \
       [ "$3" = "$TMP_TOKEN" ] && [ "$4" = "$LIVE_CHECKOUT" ] || return 64
-    rmdir -- "$1"
+    [ -f "$1/evidence/result.json" ] || return 1
+    find "$1" -xdev -depth -delete
   }
   cleanup
 ' _ "$OPS_SCRIPT" "$SUCCESS_FIXTURE" "$SUCCESS_TOKEN" $'field\tresult\ncompose\tpass')
 [ "$success_rows" = $'field\tresult\ncompose\tpass' ]
+[ ! -e "$SUCCESS_FIXTURE/live/evidence/result.json" ]
 [ ! -e "$SUCCESS_FIXTURE/live" ]
 [ ! -e "$SUCCESS_FIXTURE" ]
 SUCCESS_FIXTURE=

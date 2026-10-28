@@ -52,9 +52,15 @@ are unavailable. Candidate transition, verifier, and runner programs execute as
 UID 0 inside that namespace, with `/root`, `/home`, `/opt`, `/var`, `/run`, and
 `/tmp` isolated from the host, no network, and no Docker socket. They receive
 read-only staged Compose inputs, synthetic environment and secret files, and a
-redacted container inspection; host-backed writable paths are limited to the
-private evidence directories and disposable synthetic fixtures. The host
-process uses the deployed live transition code to validate the real authority
-state and chooses the environment-file paths, but never copies credential
-values into the replay. Candidate-produced pass rows are diagnostic output only
-and do not authorize a deployment.
+redacted container inspection. The staged override and pinned Compose files
+may contain operator settings, so candidate output is accepted only when it
+matches the trusted twelve-field result set byte for byte; the host prints its
+own canonical rows after guarded cleanup. The entire writable replay tree,
+including evidence, fixtures, and captured logs, is an invocation-owned tmpfs
+limited to 128 MiB and 8,192 inodes. Candidate processes run in a systemd scope
+limited to 1 GiB of memory, one CPU, and 64 tasks, with additional per-process
+time, address-space, file-size, and descriptor limits. The host process uses the
+deployed live transition code to validate the real authority state and chooses
+the environment-file paths, but never copies credential values into the
+replay. Candidate-produced pass rows are diagnostic output only and do not
+authorize a deployment.

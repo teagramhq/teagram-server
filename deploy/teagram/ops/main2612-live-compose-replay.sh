@@ -7,11 +7,26 @@ OPS_SHA=${OPS_SHA:-}
 CANDIDATE_SHA=
 TMP=
 TMP_TOKEN=
+TMP_MOUNTED=0
 RESULT_ROWS=
+EXPECTED_RESULT_ROWS=
 BWRAP=
 TIMEOUT=
+SYSTEMD_RUN_BIN=
+MOUNT_BIN=
+UMOUNT_BIN=
+FINDMNT_BIN=
 REAL_DOCKER_SANDBOX_PATH=/sandbox-tools/real-docker
 REAL_STAT_SANDBOX_PATH=/sandbox-tools/real-stat
+readonly REPLAY_TMPFS_SIZE_BYTES=134217728
+readonly REPLAY_TMPFS_INODES=8192
+readonly REPLAY_OUTPUT_MAX_BYTES=1024
+readonly -a REPLAY_RESULT_FIELDS=(
+  config_sha256 env_sha256 override_sha256 stop_grace_period
+  compose_logging_policy compose_log_login_codes media_key_source media_key_current
+  compose_public_ws_2446 exposure_public_ws_2446
+  compose_replica_count compose_client_addr_trust
+)
 unset COMPOSE_ENV_FILES
 
 report_cleanup_failure() {
@@ -22,6 +37,20 @@ report_cleanup_failure() {
     printf 'live Compose replay cleanup failed for %s (exit %s): owned-tree guard refused removal or recursive deletion failed without a diagnostic\n' \
       "$target" "$status" >&2
   fi
+}
+
+replay_tmpfs_mounted() {
+  [ "$TMP_MOUNTED" -eq 1 ] || return 1
+  local filesystem target
+  filesystem=$("$FINDMNT_BIN" -n -o FSTYPE --target "$TMP") || return 1
+  target=$("$FINDMNT_BIN" -n -o TARGET --target "$TMP") || return 1
+  [ "$filesystem" = tmpfs ] && [ "$target" = "$TMP" ]
+}
+
+unmount_replay_tmpfs() {
+  replay_tmpfs_mounted || return 1
+  "$UMOUNT_BIN" -- "$TMP" || return 1
+  TMP_MOUNTED=0
 }
 
 cleanup() {
@@ -81,8 +110,20 @@ cleanup() {
               esac
             fi
           fi
-          if [ "$cleanup_status" -eq 0 ]; then
-            if ! rmdir -- "$TMP"; then
+          if [ "$TMP_MOUNTED" -eq 1 ]; then
+            if ! unmount_replay_tmpfs; then
+              report_cleanup_failure "$TMP" 1 'bounded replay tmpfs could not be safely unmounted'
+              cleanup_status=1
+            fi
+          fi
+          if [ "$TMP_MOUNTED" -eq 0 ]; then
+            remaining=$(find "$TMP" -mindepth 1 -maxdepth 1 -print -quit) || cleanup_status=1
+            if [ -z "$remaining" ]; then
+              rmdir -- "$TMP" || {
+                report_cleanup_failure "$TMP" 1 'outer replay directory could not be removed'
+                cleanup_status=1
+              }
+            else
               report_cleanup_failure "$TMP" 1 'outer replay directory was not empty'
               cleanup_status=1
             fi
@@ -108,6 +149,32 @@ cleanup() {
 die() {
   printf 'live Compose replay failed: %s\n' "$1" >&2
   exit 1
+}
+
+write_expected_result_rows() {
+  [ -n "$EXPECTED_RESULT_ROWS" ] || return 64
+  {
+    printf 'field\tresult\n'
+    printf '%s\tpass\n' "${REPLAY_RESULT_FIELDS[@]}"
+  } > "$EXPECTED_RESULT_ROWS" || return 1
+  chmod 600 -- "$EXPECTED_RESULT_ROWS"
+}
+
+require_bounded_file() {
+  [ "$#" -eq 2 ] || return 64
+  local path=$1 max_bytes=$2 size
+  [ -f "$path" ] && [ ! -L "$path" ] || return 1
+  size=$(stat -c %s -- "$path") || return 1
+  [[ "$size" =~ ^[0-9]+$ ]] && [ "$size" -le "$max_bytes" ]
+}
+
+validate_result_rows() {
+  [ "$#" -eq 1 ] && [ -f "$EXPECTED_RESULT_ROWS" ] && [ ! -L "$EXPECTED_RESULT_ROWS" ] || return 64
+  local result_file=$1
+  require_bounded_file "$result_file" "$REPLAY_OUTPUT_MAX_BYTES" || return 1
+  [ "$(stat -c %a -- "$result_file")" = 600 ] || return 1
+  cmp -s -- "$EXPECTED_RESULT_ROWS" "$result_file" || return 1
+  RESULT_ROWS=$(<"$EXPECTED_RESULT_ROWS")
 }
 
 resolve_candidate_sha() {
@@ -166,8 +233,40 @@ rollout_safe_remove_tree() {
   find "$target" -xdev -depth -delete
 }
 
+mount_replay_tmpfs() {
+  [ "$#" -eq 1 ] || return 64
+  local target=$1 filesystem mounted_target mount_options real_target first_entry
+  [[ "$target" =~ ^/tmp/main2612-replay\.[A-Za-z0-9]{8}$ ]] || return 64
+  [ "$(id -u)" = 0 ] && [ "$TMP_MOUNTED" -eq 0 ] || return 1
+  [ -d "$target" ] && [ ! -L "$target" ] || return 1
+  real_target=$(realpath -e -- "$target") || return 1
+  [ "$real_target" = "$target" ] || return 1
+  [ "$(stat -c %u -- "$target")" = 0 ] && [ "$(stat -c %a -- "$target")" = 700 ] || return 1
+  first_entry=$(find "$target" -mindepth 1 -maxdepth 1 -print -quit) || return 1
+  [ -z "$first_entry" ] || return 1
+  if ! "$MOUNT_BIN" -t tmpfs -o \
+    "size=$REPLAY_TMPFS_SIZE_BYTES,nr_inodes=$REPLAY_TMPFS_INODES,mode=0700,nodev,nosuid" \
+    tmpfs "$target" >/dev/null 2>&1; then
+    return 1
+  fi
+  TMP_MOUNTED=1
+  filesystem=$("$FINDMNT_BIN" -n -o FSTYPE --target "$target") || return 1
+  mounted_target=$("$FINDMNT_BIN" -n -o TARGET --target "$target") || return 1
+  [ "$filesystem" = tmpfs ] && [ "$mounted_target" = "$target" ] || return 1
+  mount_options=$("$FINDMNT_BIN" -n -o OPTIONS --target "$target") || return 1
+  case ",$mount_options," in
+    *,size=131072k,*|*,size=134217728,*) ;;
+    *) return 1 ;;
+  esac
+  case ",$mount_options," in *,nr_inodes=$REPLAY_TMPFS_INODES,*) ;; *) return 1 ;; esac
+  case ",$mount_options," in *,mode=700,*) ;; *) return 1 ;; esac
+  case ",$mount_options," in *,nodev,*) ;; *) return 1 ;; esac
+  case ",$mount_options," in *,nosuid,*) ;; *) return 1 ;; esac
+  [ "$(stat -c %u -- "$target")" = 0 ] && [ "$(stat -c %a -- "$target")" = 700 ]
+}
+
 require_replay_sandbox() {
-  local bwrap_path timeout_path
+  local bwrap_path timeout_path systemd_run_path mount_path umount_path findmnt_path
   bwrap_path=$(command -v bwrap) || die 'bubblewrap is required for candidate replay; no live inputs were read'
   bwrap_path=$(realpath -e -- "$bwrap_path") || die 'bubblewrap path is not canonical; no live inputs were read'
   case "$bwrap_path" in /usr/bin/*|/bin/*) ;; *) die 'bubblewrap is outside the system binary paths; no live inputs were read' ;; esac
@@ -175,6 +274,18 @@ require_replay_sandbox() {
   timeout_path=$(command -v timeout) || die 'timeout is required to bound candidate replay; no live inputs were read'
   timeout_path=$(realpath -e -- "$timeout_path") || die 'timeout path is not canonical; no live inputs were read'
   case "$timeout_path" in /usr/bin/*|/bin/*) ;; *) die 'timeout is outside the system binary paths; no live inputs were read' ;; esac
+  systemd_run_path=$(command -v systemd-run) || die 'systemd-run is required to limit candidate resources; no live inputs were read'
+  systemd_run_path=$(realpath -e -- "$systemd_run_path") || die 'systemd-run path is not canonical; no live inputs were read'
+  case "$systemd_run_path" in /usr/bin/*|/bin/*) ;; *) die 'systemd-run is outside the system binary paths; no live inputs were read' ;; esac
+  mount_path=$(command -v mount) || die 'mount is required for bounded replay storage; no live inputs were read'
+  mount_path=$(realpath -e -- "$mount_path") || die 'mount path is not canonical; no live inputs were read'
+  case "$mount_path" in /usr/bin/*|/bin/*) ;; *) die 'mount is outside the system binary paths; no live inputs were read' ;; esac
+  umount_path=$(command -v umount) || die 'umount is required for bounded replay cleanup; no live inputs were read'
+  umount_path=$(realpath -e -- "$umount_path") || die 'umount path is not canonical; no live inputs were read'
+  case "$umount_path" in /usr/bin/*|/bin/*) ;; *) die 'umount is outside the system binary paths; no live inputs were read' ;; esac
+  findmnt_path=$(command -v findmnt) || die 'findmnt is required to verify bounded replay storage; no live inputs were read'
+  findmnt_path=$(realpath -e -- "$findmnt_path") || die 'findmnt path is not canonical; no live inputs were read'
+  case "$findmnt_path" in /usr/bin/*|/bin/*) ;; *) die 'findmnt is outside the system binary paths; no live inputs were read' ;; esac
   if ! "$bwrap_path" --unshare-user --uid 0 --gid 0 --unshare-net --unshare-pid \
     --unshare-ipc --unshare-uts --cap-drop ALL --disable-userns --die-with-parent \
     --new-session --ro-bind /usr /usr --ro-bind-try /bin /bin \
@@ -184,6 +295,10 @@ require_replay_sandbox() {
   fi
   BWRAP=$bwrap_path
   TIMEOUT=$timeout_path
+  SYSTEMD_RUN_BIN=$systemd_run_path
+  MOUNT_BIN=$mount_path
+  UMOUNT_BIN=$umount_path
+  FINDMNT_BIN=$findmnt_path
 }
 
 run_candidate_sandbox() {
@@ -192,8 +307,15 @@ run_candidate_sandbox() {
   shift
   (
   ulimit -u 128 || exit 1
+  ulimit -t 60 || exit 1
+  ulimit -v 1048576 || exit 1
+  ulimit -f 4096 || exit 1
+  ulimit -n 64 || exit 1
+  ulimit -c 0 || exit 1
   exec 9>&-
-  "$TIMEOUT" --signal=KILL 180 "$BWRAP" --unshare-user --uid 0 --gid 0 --unshare-net --unshare-pid \
+  "$SYSTEMD_RUN_BIN" --scope --quiet --pipe \
+    --property=MemoryMax=1G --property=CPUQuota=100% --property=TasksMax=64 -- \
+    "$TIMEOUT" --signal=KILL 180 "$BWRAP" --unshare-user --uid 0 --gid 0 --unshare-net --unshare-pid \
     --unshare-ipc --unshare-uts --cap-drop ALL --disable-userns --die-with-parent \
     --new-session --clearenv \
     --ro-bind /usr /usr --ro-bind-try /bin /bin \
@@ -212,7 +334,7 @@ run_candidate_sandbox() {
     --bind "$TMP/sandbox/media-keys" /workspace/media-keys \
     --bind "$TMP/sandbox/lock" /tmp/teagram-deploy.lock \
     --setenv HOME /root --setenv PATH /sandbox-tools:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
-    --setenv LANG C.UTF-8 --setenv TZ UTC \
+    --setenv LANG C.UTF-8 --setenv TZ UTC --setenv GOMAXPROCS 2 \
     --setenv REPLAY_CONTAINER_ID "$container_id" \
     --setenv REPLAY_REAL_DOCKER "$REAL_DOCKER_SANDBOX_PATH" \
     --setenv REPLAY_STAT_PATH "$REAL_STAT_SANDBOX_PATH" \
@@ -360,10 +482,13 @@ live_git_root=$(git -C "$LIVE_CHECKOUT" rev-parse --show-toplevel 2>/dev/null) |
 
 TMP=$(mktemp -d /tmp/main2612-replay.XXXXXXXX) || die 'cannot create the replay temp tree'
 [[ "$TMP" =~ ^/tmp/main2612-replay\.[A-Za-z0-9]{8}$ ]] || die 'mktemp returned an unexpected path'
+mount_replay_tmpfs "$TMP" || die 'cannot mount bounded replay storage'
 [ "$(stat -c %u -- "$TMP")" = 0 ] && [ "$(stat -c %a -- "$TMP")" = 700 ] || die 'replay temp tree is not root-owned mode 0700'
 TMP_TOKEN=$(mark_replay_tree "$TMP") || die 'cannot mark the replay temp tree as owned'
 mkdir -m 700 -- "$TMP/live" "$TMP/pr" "$TMP/baseline" "$TMP/preflight" "$TMP/logs" "$TMP/sandbox" "$TMP/trusted"
 mkdir -p -- "$TMP/pr/deploy/teagramd/rollout-runner"
+EXPECTED_RESULT_ROWS="$TMP/trusted/expected-field-results.tsv"
+write_expected_result_rows || die 'cannot stage the trusted replay field allowlist'
 mkdir -m 700 -- "$TMP/sandbox/bin" "$TMP/sandbox/fixtures" "$TMP/sandbox/media-keys"
 : > "$TMP/sandbox/lock"
 chmod 600 "$TMP/sandbox/lock"
@@ -552,13 +677,18 @@ done
 
 if [ "${#selected_env_names[@]}" -eq 2 ]; then
   write_synthetic_authority "$TMP/live" || die 'cannot stage synthetic replay authority state'
-  candidate_deployment_env=$(run_candidate_sandbox /workspace/live /usr/bin/env BLOB_TRANSITION_TEST_MODE=1 bash -c '
+  candidate_deployment_env_file="$TMP/logs/candidate-deployment-env.json"
+  if ! run_candidate_sandbox /workspace/live /usr/bin/env BLOB_TRANSITION_TEST_MODE=1 bash -c '
     exec 9>/tmp/teagram-deploy.lock
     flock -x 9
     exec python3 /workspace/pr/deploy/teagramd/rollout-runner/blob-transition-runner.py \
       deployment-env --checkout /workspace/live --state-dir /workspace/live/.state/blob-mode \
       --report-root /root/reports --lock-path /tmp/teagram-deploy.lock
-  ' 2>"$TMP/logs/candidate-deployment-env.stderr") || die 'candidate transition environment validation failed in the replay sandbox'
+  ' >"$candidate_deployment_env_file" 2>"$TMP/logs/candidate-deployment-env.stderr"; then
+    die 'candidate transition environment validation failed in the replay sandbox'
+  fi
+  require_bounded_file "$candidate_deployment_env_file" 4096 || die 'candidate transition environment output exceeded its byte limit'
+  candidate_deployment_env=$(<"$candidate_deployment_env_file")
   jq -e '.outcome == "s3-accepted" and .env_files == ["/workspace/live/.env", "/workspace/live/.env.rustfs-parked"]' \
     <<< "$candidate_deployment_env" >/dev/null || die 'candidate transition environment output escaped the synthetic replay inputs'
 fi
@@ -703,9 +833,4 @@ if ! run_candidate_sandbox /workspace/pr /usr/bin/env \
   >"$TMP/logs/field-results.tsv" 2>"$TMP/logs/compare-preflight.stderr"; then
   die 'runner rejected the resolved Compose preflight'
 fi
-awk -F '\t' '
-  NR == 1 { if ($1 != "field" || $2 != "result") failed = 1; next }
-  NF != 2 || $2 != "pass" { failed = 1 }
-  END { if (failed || NR < 2) exit 1 }
-' "$TMP/logs/field-results.tsv" || die 'runner emitted invalid preflight result rows'
-RESULT_ROWS=$(<"$TMP/logs/field-results.tsv")
+validate_result_rows "$TMP/logs/field-results.tsv" || die 'runner emitted a row outside the trusted preflight allowlist'
