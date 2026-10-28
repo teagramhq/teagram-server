@@ -45,3 +45,16 @@ and rollback summary shapes; every other line is omitted. If the target failure
 marker could not be persisted, it uses the matching rollback warning and
 identifies the target failure marker and capture time as unavailable. It reads
 only validated root-owned mode-0600 files from mode-0700 evidence directories.
+
+`main2612-live-compose-replay.sh` requires bubblewrap with working user, network,
+and process namespaces; it fails before reading live inputs if those namespaces
+are unavailable. Candidate transition, verifier, and runner programs execute as
+UID 0 inside that namespace, with `/root`, `/home`, `/opt`, `/var`, `/run`, and
+`/tmp` isolated from the host, no network, and no Docker socket. They receive
+read-only staged Compose inputs, synthetic environment and secret files, and a
+redacted container inspection; host-backed writable paths are limited to the
+private evidence directories and disposable synthetic fixtures. The host
+process uses the deployed live transition code to validate the real authority
+state and chooses the environment-file paths, but never copies credential
+values into the replay. Candidate-produced pass rows are diagnostic output only
+and do not authorize a deployment.

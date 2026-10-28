@@ -20,6 +20,8 @@ cleanup_test() {
     [ ! -f "$marker" ] || unlink -- "$marker" || status=1
     rmdir -- "$SUCCESS_FIXTURE" || status=1
   fi
+  [ ! -f "$TMP/synthetic.env.source" ] || unlink -- "$TMP/synthetic.env.source" || status=1
+  [ ! -f "$TMP/synthetic.env.output" ] || unlink -- "$TMP/synthetic.env.output" || status=1
   rmdir -- "$TMP" || status=1
   exit "$status"
 }
@@ -28,7 +30,7 @@ trap cleanup_test EXIT
 bash -n "$OPS_SCRIPT"
 grep -Fq 'umask 077' "$OPS_SCRIPT"
 grep -Fq "TMP_TOKEN=\$(mark_replay_tree \"\$TMP\")" "$OPS_SCRIPT"
-grep -Fq "chmod 600 -- \"\$tree/\$env_name\"" "$OPS_SCRIPT"
+grep -Fq 'write_synthetic_env "$env_source" "$tree/$env_name"' "$OPS_SCRIPT"
 grep -Fq "unlink -- \"\$env_path\"" "$OPS_SCRIPT"
 grep -Fq "RESULT_ROWS=\$(<\"\$TMP/logs/field-results.tsv\")" "$OPS_SCRIPT"
 if grep -Fq "cat -- \"\$TMP/logs/field-results.tsv\"" "$OPS_SCRIPT"; then
@@ -46,8 +48,39 @@ if grep -Eq 'source[[:space:]].*rollout-(runner|verifier)\.sh' "$OPS_SCRIPT"; th
 fi
 grep -Fq "git -C \"\$TMP/candidate.git\" fetch --quiet --no-tags --depth=1 \"\$CANDIDATE_REMOTE\" \"\$CANDIDATE_SHA\"" "$OPS_SCRIPT"
 grep -Fq "rollout_safe_remove_tree \"\$target\" \"\$TMP\" \"\$TMP_TOKEN\" \"\$LIVE_CHECKOUT\"" "$OPS_SCRIPT"
-grep -Fq "bash \"\$VERIFIER\" snapshot" "$OPS_SCRIPT"
-grep -Fq "bash \"\$RUNNER\" compare-preflight" "$OPS_SCRIPT"
+grep -Fq 'run_candidate_sandbox "$tree" /usr/bin/env' "$OPS_SCRIPT"
+grep -Fq 'bash "$tree/deploy/teagramd/rollout-runner/rollout-verifier.sh" snapshot' "$OPS_SCRIPT"
+grep -Fq 'run_candidate_sandbox /workspace/pr /usr/bin/env' "$OPS_SCRIPT"
+grep -Fq 'compare-preflight /root/baseline /root/preflight' "$OPS_SCRIPT"
+grep -Fq 'require_replay_sandbox' "$OPS_SCRIPT"
+grep -Fq -- '--unshare-net' "$OPS_SCRIPT"
+grep -Fq 'stage_synthetic_secrets' "$OPS_SCRIPT"
+if grep -Fq 'source /dev/stdin' "$OPS_SCRIPT" || grep -Fq 'safe_remove_tree_source=' "$OPS_SCRIPT"; then
+  printf '%s\n' 'FAIL live replay executes candidate-controlled cleanup code on the host' >&2
+  exit 1
+fi
+cat > "$TMP/synthetic.env.source" <<'EOF'
+POSTGRES_PASSWORD=raw-postgres-fixture-value
+TEAGRAM_TURNSTILE_SITE_KEY=raw-site-fixture-value
+TEAGRAM_TURNSTILE_SECRET_KEY_FILE=/root/real-turnstile-secret
+TG_BLOB_S3_SECRET_ACCESS_KEY=raw-s3-fixture-value
+EOF
+bash -c '
+  set -Eeuo pipefail
+  source "$1"
+  write_synthetic_env "$2" "$3" /workspace/live
+' _ "$OPS_SCRIPT" "$TMP/synthetic.env.source" "$TMP/synthetic.env.output"
+if grep -Fq 'raw-' "$TMP/synthetic.env.output" || grep -Fq '/root/real-turnstile-secret' "$TMP/synthetic.env.output"; then
+  printf '%s\n' 'FAIL synthetic replay environment retained a source value' >&2
+  exit 1
+fi
+grep -Fqx 'POSTGRES_PASSWORD=replay-postgres-password' "$TMP/synthetic.env.output"
+grep -Fqx 'TEAGRAM_TURNSTILE_SITE_KEY=replay-site-key' "$TMP/synthetic.env.output"
+grep -Fqx 'TEAGRAM_TURNSTILE_SECRET_KEY_FILE=/workspace/live/.secrets/teagramd-turnstile' "$TMP/synthetic.env.output"
+grep -Fqx 'TG_BLOB_S3_SECRET_ACCESS_KEY=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb' "$TMP/synthetic.env.output"
+printf '%s\n' 'PASS replay uses synthetic environment and secret values'
+unlink -- "$TMP/synthetic.env.source"
+unlink -- "$TMP/synthetic.env.output"
 grep -Fq 'com.docker.compose.project.config_files' "$OPS_SCRIPT"
 if grep -Fq "git -C \"\$LIVE_CHECKOUT\" fetch" "$OPS_SCRIPT"; then
   printf '%s\n' 'FAIL candidate fetch writes into the live checkout' >&2
@@ -109,6 +142,7 @@ CLEANUP_FIXTURE=
 printf '%s\n' 'PASS replay withholds passing rows and reports a guarded-delete failure'
 
 SUCCESS_FIXTURE=$(mktemp -d /tmp/main2612-replay.XXXXXXXX)
+mkdir -m 700 "$SUCCESS_FIXTURE/live"
 printf '%s\n' "$SUCCESS_TOKEN" > "$SUCCESS_FIXTURE/.rollout-owned-$SUCCESS_TOKEN"
 chmod 600 "$SUCCESS_FIXTURE/.rollout-owned-$SUCCESS_TOKEN"
 success_rows=$(bash -c '
@@ -122,14 +156,20 @@ success_rows=$(bash -c '
     case "$2" in
       %u) printf "0\n" ;;
       %a)
-        if [ "$4" = "$TMP" ]; then printf "700\n"; else printf "600\n"; fi
+        if [ "$4" = "$TMP" ] || [ "$4" = "$TMP/live" ]; then printf "700\n"; else printf "600\n"; fi
         ;;
       *) return 2 ;;
     esac
   }
+  rollout_safe_remove_tree() {
+    [ "$#" -eq 4 ] && [ "$1" = "$TMP/live" ] && [ "$2" = "$TMP" ] && \
+      [ "$3" = "$TMP_TOKEN" ] && [ "$4" = "$LIVE_CHECKOUT" ] || return 64
+    rmdir -- "$1"
+  }
   cleanup
 ' _ "$OPS_SCRIPT" "$SUCCESS_FIXTURE" "$SUCCESS_TOKEN" $'field\tresult\ncompose\tpass')
 [ "$success_rows" = $'field\tresult\ncompose\tpass' ]
+[ ! -e "$SUCCESS_FIXTURE/live" ]
 [ ! -e "$SUCCESS_FIXTURE" ]
 SUCCESS_FIXTURE=
 printf '%s\n' 'PASS replay prints field/result rows after successful cleanup'

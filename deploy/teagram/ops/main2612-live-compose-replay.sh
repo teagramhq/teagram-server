@@ -8,6 +8,10 @@ CANDIDATE_SHA=
 TMP=
 TMP_TOKEN=
 RESULT_ROWS=
+BWRAP=
+TIMEOUT=
+REAL_DOCKER_SANDBOX_PATH=/sandbox-tools/real-docker
+REAL_STAT_SANDBOX_PATH=/sandbox-tools/real-stat
 unset COMPOSE_ENV_FILES
 
 report_cleanup_failure() {
@@ -34,7 +38,7 @@ cleanup() {
           if [ -n "$TMP_TOKEN" ]; then
             [[ "$TMP_TOKEN" =~ ^[0-9a-f]{32}$ ]] || cleanup_status=1
             if [ "$cleanup_status" -eq 0 ]; then
-              for child in candidate.git live pr baseline preflight logs; do
+              for child in candidate.git live pr baseline preflight logs sandbox trusted; do
                 target="$TMP/$child"
                 if [ -e "$target" ] || [ -L "$target" ]; then
                   if ! declare -F rollout_safe_remove_tree >/dev/null; then
@@ -135,10 +139,220 @@ mark_replay_tree() {
   printf '%s\n' "$token"
 }
 
+rollout_safe_remove_tree() {
+  [ "$#" -eq 4 ] || return 64
+  local target=$1 parent=$2 token=$3 live_checkout=$4 real_parent real_target owner mode marker
+  [[ "$parent" =~ ^/tmp/main2612-replay\.[A-Za-z0-9]{8}$ ]] || return 64
+  [[ "$token" =~ ^[0-9a-f]{32}$ ]] || return 64
+  case "$target" in
+    "$parent"/candidate.git|"$parent"/live|"$parent"/pr|"$parent"/baseline|"$parent"/preflight|"$parent"/logs|"$parent"/sandbox|"$parent"/trusted) ;;
+    *) return 64 ;;
+  esac
+  [ "$live_checkout" = "$LIVE_CHECKOUT" ] || return 64
+  [ "$(id -u)" = 0 ] && [ -d "$parent" ] && [ ! -L "$parent" ] || return 1
+  real_parent=$(realpath -e -- "$parent") || return 1
+  [ "$real_parent" = "$parent" ] || return 1
+  [ "$(stat -c %u -- "$parent")" = 0 ] && [ "$(stat -c %a -- "$parent")" = 700 ] || return 1
+  marker="$parent/.rollout-owned-$token"
+  [ -f "$marker" ] && [ ! -L "$marker" ] && \
+    [ "$(stat -c %u -- "$marker")" = 0 ] && [ "$(stat -c %a -- "$marker")" = 600 ] && \
+    [ "$(cat -- "$marker")" = "$token" ] || return 1
+  [ -d "$target" ] && [ ! -L "$target" ] || return 1
+  real_target=$(realpath -e -- "$target") || return 1
+  [ "$real_target" = "$target" ] || return 1
+  owner=$(stat -c %u -- "$target") || return 1
+  mode=$(stat -c %a -- "$target") || return 1
+  [ "$owner" = 0 ] && [ "$mode" = 700 ] || return 1
+  find "$target" -xdev -depth -delete
+}
+
+require_replay_sandbox() {
+  local bwrap_path timeout_path
+  bwrap_path=$(command -v bwrap) || die 'bubblewrap is required for candidate replay; no live inputs were read'
+  bwrap_path=$(realpath -e -- "$bwrap_path") || die 'bubblewrap path is not canonical; no live inputs were read'
+  case "$bwrap_path" in /usr/bin/*|/bin/*) ;; *) die 'bubblewrap is outside the system binary paths; no live inputs were read' ;; esac
+  [ -x "$bwrap_path" ] || die 'bubblewrap is not executable; no live inputs were read'
+  timeout_path=$(command -v timeout) || die 'timeout is required to bound candidate replay; no live inputs were read'
+  timeout_path=$(realpath -e -- "$timeout_path") || die 'timeout path is not canonical; no live inputs were read'
+  case "$timeout_path" in /usr/bin/*|/bin/*) ;; *) die 'timeout is outside the system binary paths; no live inputs were read' ;; esac
+  if ! "$bwrap_path" --unshare-user --uid 0 --gid 0 --unshare-net --unshare-pid \
+    --unshare-ipc --unshare-uts --cap-drop ALL --disable-userns --die-with-parent \
+    --new-session --ro-bind /usr /usr --ro-bind-try /bin /bin \
+    --ro-bind-try /lib /lib --ro-bind-try /lib64 /lib64 \
+    --proc /proc --dev /dev --tmpfs /tmp -- /usr/bin/true >/dev/null 2>&1; then
+    die 'bubblewrap user, network, and process namespaces are unavailable; no live inputs were read'
+  fi
+  BWRAP=$bwrap_path
+  TIMEOUT=$timeout_path
+}
+
+run_candidate_sandbox() {
+  [ "$#" -ge 2 ] || return 64
+  local workdir=$1
+  shift
+  (
+  ulimit -u 128 || exit 1
+  exec 9>&-
+  "$TIMEOUT" --signal=KILL 180 "$BWRAP" --unshare-user --uid 0 --gid 0 --unshare-net --unshare-pid \
+    --unshare-ipc --unshare-uts --cap-drop ALL --disable-userns --die-with-parent \
+    --new-session --clearenv \
+    --ro-bind /usr /usr --ro-bind-try /bin /bin \
+    --ro-bind-try /lib /lib --ro-bind-try /lib64 /lib64 \
+    --dir /etc --size 16777216 --tmpfs /etc --dir /root --size 67108864 --tmpfs /root \
+    --dir /root/baseline --dir /root/preflight \
+    --dir /home --size 16777216 --tmpfs /home --dir /opt --size 16777216 --tmpfs /opt \
+    --dir /var --size 16777216 --tmpfs /var --dir /run --size 16777216 --tmpfs /run \
+    --size 67108864 --tmpfs /tmp \
+    --proc /proc --dev /dev --dir /workspace --dir /workspace/live --dir /workspace/pr \
+    --dir /workspace/fixtures --dir /workspace/media-keys --dir /sandbox-tools \
+    --ro-bind "$TMP/live" /workspace/live --ro-bind "$TMP/pr" /workspace/pr \
+    --ro-bind "$TMP/sandbox/bin" /sandbox-tools \
+    --ro-bind "$TMP/sandbox/fixtures" /workspace/fixtures \
+    --bind "$TMP/baseline" /root/baseline --bind "$TMP/preflight" /root/preflight \
+    --bind "$TMP/sandbox/media-keys" /workspace/media-keys \
+    --bind "$TMP/sandbox/lock" /tmp/teagram-deploy.lock \
+    --setenv HOME /root --setenv PATH /sandbox-tools:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
+    --setenv LANG C.UTF-8 --setenv TZ UTC \
+    --setenv REPLAY_CONTAINER_ID "$container_id" \
+    --setenv REPLAY_REAL_DOCKER "$REAL_DOCKER_SANDBOX_PATH" \
+    --setenv REPLAY_STAT_PATH "$REAL_STAT_SANDBOX_PATH" \
+    --chdir "$workdir" "$@"
+  )
+}
+
+make_sandbox_tools() {
+  local docker_path stat_path
+  docker_path=$(command -v docker) || die 'docker CLI is unavailable for isolated Compose rendering'
+  docker_path=$(realpath -e -- "$docker_path") || die 'docker CLI path is not canonical'
+  case "$docker_path" in /usr/bin/*|/usr/local/bin/*|/bin/*) ;; *) die 'docker CLI is outside the system binary paths required by the replay sandbox' ;; esac
+  stat_path=$(command -v stat) || die 'stat is unavailable for isolated replay'
+  stat_path=$(realpath -e -- "$stat_path") || die 'stat path is not canonical'
+  case "$stat_path" in /usr/bin/*|/bin/*) ;; *) die 'stat is outside the system binary paths required by the replay sandbox' ;; esac
+  cp -- "$docker_path" "$TMP/sandbox/bin/real-docker" || die 'cannot stage the Docker CLI for isolated Compose rendering'
+  cp -- "$stat_path" "$TMP/sandbox/bin/real-stat" || die 'cannot stage stat for isolated replay'
+  cat > "$TMP/sandbox/bin/docker" <<'EOF'
+#!/bin/sh
+set -eu
+if [ "${1:-}" = inspect ]; then
+  [ "$#" -eq 2 ] && [ "$2" = "$REPLAY_CONTAINER_ID" ] || exit 64
+  cat "${REPLAY_INSPECT_PATH:-/workspace/fixtures/inspect.json}"
+  exit
+fi
+if [ "${1:-}" = compose ]; then
+  shift
+  for argument do
+    if [ "$argument" = config ]; then
+      exec "$REPLAY_REAL_DOCKER" compose "$@"
+    fi
+  done
+fi
+printf '%s\n' 'candidate replay blocked a Docker operation' >&2
+exit 64
+EOF
+  cat > "$TMP/sandbox/bin/stat" <<'EOF'
+#!/bin/sh
+set -eu
+if [ "${1:-}" = -c ] && [ "$#" -eq 3 ]; then
+  case "$2" in
+    %u:%g)
+      case "$3" in
+        /workspace/media-keys|/workspace/media-keys/1.key) printf '%s\n' 65532:65532; exit 0 ;;
+      esac
+      ;;
+  esac
+fi
+exec "$REPLAY_STAT_PATH" "$@"
+EOF
+  chmod 500 "$TMP/sandbox/bin/docker" "$TMP/sandbox/bin/stat" || die 'cannot protect isolated replay shims'
+  chmod 500 "$TMP/sandbox/bin/real-docker" "$TMP/sandbox/bin/real-stat" || die 'cannot protect isolated system tools'
+}
+
+synthetic_value_for_env() {
+  local name=$1 value=$2 tree=$3 nonempty=true
+  case "$value" in "\"\""|"''") value= ;; esac
+  [ -n "$value" ] || nonempty=false
+  case "$name" in
+    POSTGRES_PASSWORD) printf '%s' replay-postgres-password ;;
+    TG_PUBLIC_REGISTRATION) case "$value" in invite|closed) printf '%s' "$value" ;; *) printf '%s' closed ;; esac ;;
+    TG_PUBLIC_WEBSOCKET_LISTEN_ADDR) [ "$nonempty" = true ] && printf '%s' replay-listener || : ;;
+    TG_PUBLIC_WEBSOCKET_ADVERTISE_ADDR) [ "$nonempty" = true ] && printf '%s' replay.invalid || : ;;
+    TG_PUBLIC_WEBSOCKET_ALLOWED_ORIGINS) [ "$nonempty" = true ] && printf '%s' https://replay.invalid || : ;;
+    TG_WELCOME_CHANNEL) : ;;
+    TG_LOG_LOGIN_CODES|TG_TURNSTILE_SIGNIN_ENABLED) case "$value" in true|false) printf '%s' "$value" ;; *) printf '%s' false ;; esac ;;
+    TG_REPLICA_COUNT) printf '%s' 1 ;;
+    TG_CLIENT_ADDR_TRUST) printf '%s' socket ;;
+    TG_MEDIA_KEY_CURRENT) printf '%s' 1 ;;
+    TG_MEDIA_KEY_DIR) printf '%s' /run/teagramd/media-keys ;;
+    TEAGRAM_MEDIA_KEY_SOURCE_DIR) printf '%s' /workspace/media-keys ;;
+    TEAGRAM_TURNSTILE_SITE_KEY) [ "$nonempty" = true ] && printf '%s' replay-site-key || : ;;
+    TEAGRAM_TURNSTILE_SECRET_KEY_FILE) [ "$nonempty" = true ] && printf '%s/.secrets/teagramd-turnstile' "$tree" || : ;;
+    TG_BLOB_S3_ACCESS_KEY_ID) [ "$nonempty" = true ] && printf '%s' 22222222222222222222 || : ;;
+    TG_BLOB_S3_SECRET_ACCESS_KEY) [ "$nonempty" = true ] && printf '%s' bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb || : ;;
+    RUSTFS_ROOT_ACCESS_KEY) printf '%s' 11111111111111111111 ;;
+    RUSTFS_ROOT_SECRET_KEY) printf '%s' aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa ;;
+    *) [ "$nonempty" = true ] && printf 'replay-%s' "$name" || : ;;
+  esac
+}
+
+write_synthetic_env() {
+  [ "$#" -eq 3 ] || return 64
+  local source=$1 destination=$2 tree=$3 line name value synthetic
+  local -A seen=()
+  : > "$destination" || return 1
+  while IFS= read -r line || [ -n "$line" ]; do
+    case "$line" in ''|\#*|[[:space:]]\#*) continue ;; esac
+    if [[ "$line" =~ ^[[:space:]]*(export[[:space:]]+)?([A-Za-z_][A-Za-z0-9_]*)=(.*)$ ]]; then
+      name=${BASH_REMATCH[2]}
+      value=${BASH_REMATCH[3]}
+    else
+      return 1
+    fi
+    [ -z "${seen[$name]+x}" ] || return 1
+    seen[$name]=1
+    synthetic=$(synthetic_value_for_env "$name" "$value" "$tree") || return 1
+    printf '%s=%s\n' "$name" "$synthetic" >> "$destination" || return 1
+  done < "$source"
+  chmod 600 "$destination"
+}
+
+write_synthetic_authority() {
+  [ "$#" -eq 1 ] || return 64
+  local checkout=$1 state_dir first second
+  state_dir="$checkout/.state/blob-mode"
+  first="$state_dir/journal/0000000001.json"
+  second="$state_dir/journal/0000000002.json"
+  mkdir -m 755 -p "$state_dir/journal" || return 1
+  cat > "$first" <<'EOF'
+{"backend":{"dir":"/var/lib/teagramd-blobs","kind":"local"},"evidence":{"report_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},"generation":1,"outcome":"initial-local","published_at":"2026-10-01T00:00:00Z","schema":"teagram.blob-mode/v1","supersedes":null,"transition_id":"00000000-0000-4000-8000-000000000001","volumes":{"rustfsdata":null,"tgblobs":"teagram_tgblobs"}}
+EOF
+  cat > "$second" <<'EOF'
+{"backend":{"bucket":"teagram","endpoint":"http://rustfs:9000","kind":"s3","prefix":"teagramd/"},"evidence":{"byte_total":1,"copy_passes":2,"destination_manifest_sha256":"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc","object_count":1,"report_sha256":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","source_manifest_sha256":"dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"},"generation":2,"outcome":"s3-accepted","published_at":"2026-10-02T00:00:00Z","schema":"teagram.blob-mode/v1","supersedes":"00000000-0000-4000-8000-000000000001","transition_id":"00000000-0000-4000-8000-000000000002","volumes":{"rustfsdata":"teagram_rustfsdata","tgblobs":"teagram_tgblobs"}}
+EOF
+  chmod 644 "$first" "$second" || return 1
+  cp -- "$second" "$state_dir/mode.json" || return 1
+  chmod 644 "$state_dir/mode.json" || return 1
+  chmod 755 "$state_dir" "$state_dir/journal"
+}
+
+stage_synthetic_secrets() {
+  [ "$#" -eq 1 ] || return 64
+  local tree=$1 secret_dir
+  secret_dir="$tree/.secrets"
+  mkdir -m 700 "$secret_dir" || return 1
+  printf '%s\n' bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb \
+    > "$secret_dir/teagramd-blob-secret-key" || return 1
+  printf '%s\n' replay-turnstile-secret \
+    > "$secret_dir/teagramd-turnstile" || return 1
+  chmod 444 "$secret_dir/teagramd-blob-secret-key" "$secret_dir/teagramd-turnstile" || return 1
+  chmod 700 "$secret_dir"
+}
+
 if [[ "${BASH_SOURCE[0]}" != "$0" ]]; then
   return 0
 fi
 trap cleanup EXIT
+
+require_replay_sandbox
 
 resolve_candidate_sha "$@" || die 'supply one full lowercase candidate commit ID (or use the selected main commit)'
 live_git_root=$(git -C "$LIVE_CHECKOUT" rev-parse --show-toplevel 2>/dev/null) || die 'live checkout is unavailable'
@@ -148,8 +362,16 @@ TMP=$(mktemp -d /tmp/main2612-replay.XXXXXXXX) || die 'cannot create the replay 
 [[ "$TMP" =~ ^/tmp/main2612-replay\.[A-Za-z0-9]{8}$ ]] || die 'mktemp returned an unexpected path'
 [ "$(stat -c %u -- "$TMP")" = 0 ] && [ "$(stat -c %a -- "$TMP")" = 700 ] || die 'replay temp tree is not root-owned mode 0700'
 TMP_TOKEN=$(mark_replay_tree "$TMP") || die 'cannot mark the replay temp tree as owned'
-mkdir -m 700 -- "$TMP/live" "$TMP/pr" "$TMP/baseline" "$TMP/preflight" "$TMP/logs"
+mkdir -m 700 -- "$TMP/live" "$TMP/pr" "$TMP/baseline" "$TMP/preflight" "$TMP/logs" "$TMP/sandbox" "$TMP/trusted"
 mkdir -p -- "$TMP/pr/deploy/teagramd/rollout-runner"
+mkdir -m 700 -- "$TMP/sandbox/bin" "$TMP/sandbox/fixtures" "$TMP/sandbox/media-keys"
+: > "$TMP/sandbox/lock"
+chmod 600 "$TMP/sandbox/lock"
+printf '%s\n' aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa > "$TMP/sandbox/media-keys/1.key"
+chmod 700 "$TMP/sandbox/media-keys"
+chmod 600 "$TMP/sandbox/media-keys/1.key"
+chown 65532:65532 "$TMP/sandbox/media-keys" "$TMP/sandbox/media-keys/1.key" || die 'cannot prepare the synthetic media-key ownership fixture'
+make_sandbox_tools
 
 CANDIDATE_REMOTE=$(git -C "$LIVE_CHECKOUT" remote get-url origin 2>"$TMP/logs/origin.stderr") || die 'cannot read the live checkout origin'
 mkdir -m 700 -- "$TMP/candidate.git"
@@ -163,14 +385,9 @@ fi
 fetched_sha=$(git -C "$TMP/candidate.git" rev-parse --verify 'FETCH_HEAD^{commit}' 2>"$TMP/logs/candidate-revision.stderr") || die 'cannot verify the fetched candidate commit'
 [ "$fetched_sha" = "$CANDIDATE_SHA" ] || die 'the fetched candidate commit does not match the requested SHA'
 git -C "$TMP/candidate.git" cat-file -e "$CANDIDATE_SHA^{commit}" 2>/dev/null || die 'candidate commit is unavailable in the private repository'
-safe_remove_tree_source=$(git -C "$TMP/candidate.git" show "$CANDIDATE_SHA:deploy/teagramd/rollout-runner/rollout-safe-remove-tree.sh" 2>/dev/null) || die 'candidate commit is missing the owned-tree cleanup helper'
-# The helper path is selected from the requested commit at runtime.
-# shellcheck disable=SC1091
-source /dev/stdin <<< "$safe_remove_tree_source"
-unset safe_remove_tree_source
 declare -F rollout_safe_remove_tree >/dev/null || die 'owned-tree cleanup helper is incomplete'
 
-for runtime_file in rollout-runner.sh rollout-verifier.sh rollout-safe-remove-tree.sh blob-mode-state.py blob-transition-runner.py; do
+for runtime_file in rollout-runner.sh rollout-verifier.sh blob-mode-state.py blob-transition-runner.py; do
   git -C "$TMP/candidate.git" show "$CANDIDATE_SHA:deploy/teagramd/rollout-runner/$runtime_file" \
     > "$TMP/pr/deploy/teagramd/rollout-runner/$runtime_file" \
     2>"$TMP/logs/$runtime_file.stderr" || die "candidate commit is missing $runtime_file"
@@ -182,6 +399,13 @@ flock -x 9 || die 'cannot acquire the deployment read lock'
 
 LIVE_SHA=$(git -C "$LIVE_CHECKOUT" rev-parse --verify HEAD 2>"$TMP/logs/live-revision.stderr") || die 'cannot read the live checkout revision'
 [[ "$LIVE_SHA" =~ ^[0-9a-f]{40}$ ]] || die 'live checkout revision is invalid'
+mkdir -p -- "$TMP/trusted/deploy/teagramd/rollout-runner"
+for trusted_file in blob-mode-state.py blob-transition-runner.py; do
+  git -C "$LIVE_CHECKOUT" show "$LIVE_SHA:deploy/teagramd/rollout-runner/$trusted_file" \
+    > "$TMP/trusted/deploy/teagramd/rollout-runner/$trusted_file" \
+    2>"$TMP/logs/trusted-$trusted_file.stderr" || die "live commit is missing trusted $trusted_file"
+  chmod 600 -- "$TMP/trusted/deploy/teagramd/rollout-runner/$trusted_file" || die "cannot protect trusted $trusted_file"
+done
 
 container_ids=$(docker ps --no-trunc -q \
   --filter label=com.docker.compose.project=teagram \
@@ -277,7 +501,7 @@ if [ "${#selected_rel[@]}" -eq 2 ] && \
    [ "${selected_rel[1]}" = docker-compose.override.yml ]; then
   previous_directory=$PWD
   cd "$LIVE_CHECKOUT" || die 'cannot enter the live checkout for authority validation'
-  if ! deployment_env_json=$(python3 "$TMP/pr/deploy/teagramd/rollout-runner/blob-transition-runner.py" \
+  if ! deployment_env_json=$(python3 "$TMP/trusted/deploy/teagramd/rollout-runner/blob-transition-runner.py" \
     deployment-env --checkout "$LIVE_CHECKOUT" --state-dir "$LIVE_CHECKOUT/.state/blob-mode" \
     --report-root /root --lock-path /tmp/teagram-deploy.lock \
     2>"$TMP/logs/deployment-env.stderr"); then
@@ -301,8 +525,8 @@ if [ "${#selected_rel[@]}" -eq 2 ] && \
 fi
 
 selected_env_names=()
-# The verifier enforces each tree's own .env path; keep these credential copies
-# inside the private replay tree and unlink them after both snapshots.
+# Keep the verifier's .env paths valid, but replace every value with a synthetic
+# value before any unmerged program can see the replay tree.
 for index in "${!selected_env_sources[@]}"; do
   env_source=${selected_env_sources[$index]}
   if [ "$index" -eq 0 ]; then
@@ -314,11 +538,30 @@ for index in "${!selected_env_sources[@]}"; do
   [ "$(realpath -e -- "$env_source")" = "$env_source" ] || die 'live environment input path is not canonical'
   [ "$(stat -c %u -- "$env_source")" = 0 ] && [ "$(stat -c %a -- "$env_source")" = 600 ] || die 'live environment input is not root-owned mode 0600'
   selected_env_names+=("$env_name")
-  for tree in "$TMP/live" "$TMP/pr"; do
-    cp -- "$env_source" "$tree/$env_name" || die 'cannot stage the live environment input'
-    chmod 600 -- "$tree/$env_name" || die 'cannot protect the staged environment input'
+  for tree_name in live pr; do
+    tree="$TMP/$tree_name"
+    if ! write_synthetic_env "$env_source" "$tree/$env_name" "/workspace/$tree_name"; then
+      die 'cannot create a synthetic replay environment file'
+    fi
   done
 done
+
+for tree in "$TMP/live" "$TMP/pr"; do
+  stage_synthetic_secrets "$tree" || die 'cannot stage synthetic replay secret files'
+done
+
+if [ "${#selected_env_names[@]}" -eq 2 ]; then
+  write_synthetic_authority "$TMP/live" || die 'cannot stage synthetic replay authority state'
+  candidate_deployment_env=$(run_candidate_sandbox /workspace/live /usr/bin/env BLOB_TRANSITION_TEST_MODE=1 bash -c '
+    exec 9>/tmp/teagram-deploy.lock
+    flock -x 9
+    exec python3 /workspace/pr/deploy/teagramd/rollout-runner/blob-transition-runner.py \
+      deployment-env --checkout /workspace/live --state-dir /workspace/live/.state/blob-mode \
+      --report-root /root/reports --lock-path /tmp/teagram-deploy.lock
+  ' 2>"$TMP/logs/candidate-deployment-env.stderr") || die 'candidate transition environment validation failed in the replay sandbox'
+  jq -e '.outcome == "s3-accepted" and .env_files == ["/workspace/live/.env", "/workspace/live/.env.rustfs-parked"]' \
+    <<< "$candidate_deployment_env" >/dev/null || die 'candidate transition environment output escaped the synthetic replay inputs'
+fi
 
 for tree in "$TMP/live" "$TMP/pr"; do
   cp -- "$LIVE_CHECKOUT/docker-compose.override.yml" "$tree/docker-compose.override.yml" || die 'cannot stage the live Compose override'
@@ -343,30 +586,99 @@ compose_env_files_for_tree() {
   printf '%s' "$result"
 }
 
+write_inspect_fixture() {
+  [ "$#" -eq 1 ] || return 64
+  local checkout_path="/workspace/$1"
+  docker inspect "$container_id" 2>"$TMP/logs/docker-sanitized-inspect.stderr" | jq -cer \
+    --arg checkout "$checkout_path" '
+    def replay_value($name; $value):
+      if $value == "" then ""
+      elif $name == "TG_PUBLIC_REGISTRATION" then (if $value == "invite" then "invite" else "closed" end)
+      elif $name == "TG_PUBLIC_WEBSOCKET_LISTEN_ADDR" then "replay-listener"
+      elif $name == "TG_PUBLIC_WEBSOCKET_ADVERTISE_ADDR" then "replay.invalid"
+      elif $name == "TG_PUBLIC_WEBSOCKET_ALLOWED_ORIGINS" then "https://replay.invalid"
+      elif $name == "TG_WELCOME_CHANNEL" then ""
+      elif $name == "TG_LOG_LOGIN_CODES" then (if $value == "true" or $value == "false" then $value else "false" end)
+      elif $name == "TG_REPLICA_COUNT" then (if ($value | test("^[0-9]{1,3}$")) then $value else "1" end)
+      elif $name == "TG_CLIENT_ADDR_TRUST" then "socket"
+      elif $name == "TG_TURNSTILE_SITE_KEY" then "replay-site-key"
+      elif $name == "TG_TURNSTILE_SECRET_KEY_FILE" then "/run/secrets/teagramd-turnstile"
+      elif $name == "TG_TURNSTILE_SIGNIN_ENABLED" then (if $value == "true" or $value == "false" then $value else "false" end)
+      elif $name == "TG_MEDIA_KEY_DIR" then "/run/teagramd/media-keys"
+      elif $name == "TG_MEDIA_KEY_CURRENT" then "1"
+      elif $name == "TG_BLOB_S3_ACCESS_KEY_ID" then "22222222222222222222"
+      elif $name == "TG_BLOB_S3_SECRET_ACCESS_KEY" then "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+      elif $name == "TG_BLOB_S3_SECRET_ACCESS_KEY_FILE" then "/run/secrets/teagramd-blob-secret-key"
+      else "replay-" + $name end;
+    def redacted_env:
+      map(
+        if type != "string" or (index("=") == null) then . else
+          . as $entry
+          | ($entry | index("=")) as $separator
+          | $entry[:$separator] as $name
+          | $entry[($separator + 1):] as $value
+          | $name + "=" + replay_value($name; $value)
+        end
+      );
+    .[0] as $container
+    | [{
+        Id:$container.Id,
+        Image:$container.Image,
+        State:{Status:$container.State.Status,ExitCode:$container.State.ExitCode,
+          StartedAt:$container.State.StartedAt,FinishedAt:$container.State.FinishedAt},
+        Config:{Env:($container.Config.Env // [] | redacted_env),StopTimeout:$container.Config.StopTimeout},
+        HostConfig:{
+          LogConfig:{Type:($container.HostConfig.LogConfig.Type // ""),Config:(
+            ($container.HostConfig.LogConfig.Config // {})
+            | with_entries(select(.key | IN("syslog-address","syslog-facility","syslog-format","tag")))
+          )},
+          PortBindings:($container.HostConfig.PortBindings // {})
+        },
+        Mounts:[
+          ($container.Mounts // []) | to_entries[] as $entry | $entry.value as $mount
+          | {
+              Type:($mount.Type // ""),Name:($mount.Name // ""),
+              Source:(
+                if $mount.Destination == "/run/teagramd/blob-mode" then $checkout + "/.state/blob-mode"
+                elif $mount.Destination == "/run/secrets/teagramd-turnstile" and $mount.Source != "/dev/null" then $checkout + "/.secrets/teagramd-turnstile"
+                elif $mount.Destination == "/run/teagramd/media-keys" then "/workspace/media-keys"
+                elif $mount.Type == "bind" then "/workspace/mounts/" + ($entry.key | tostring)
+                else ($mount.Source // "") end
+              ),
+              Destination:($mount.Destination // ""),Mode:($mount.Mode // ""),
+              RW:($mount.RW // false),Propagation:($mount.Propagation // "")
+            }
+        ]
+      }]
+    '
+}
+
 readonly VERIFIER="$TMP/pr/deploy/teagramd/rollout-runner/rollout-verifier.sh"
 readonly RUNNER="$TMP/pr/deploy/teagramd/rollout-runner/rollout-runner.sh"
 [ -f "$VERIFIER" ] && [ ! -L "$VERIFIER" ] || die 'candidate verifier is missing or symlinked'
 [ -f "$RUNNER" ] && [ ! -L "$RUNNER" ] || die 'candidate runner is missing or symlinked'
+[ -f "$RUNNER" ] && [ ! -L "$RUNNER" ] || die 'candidate runner is missing or symlinked'
 
 run_snapshot() {
-  local tree=$1 evidence=$2 name=$3 compose_files=$4 compose_env_files=$5 previous_directory=$PWD
-  local log="$TMP/logs/$name-snapshot.log"
-  cd "$tree" || die 'cannot enter a Compose replay tree'
-  if ! env ROLLOUT_CHECKOUT_PATH="$tree" ROLLOUT_COMPOSE_PROJECT_DIRECTORY="$LIVE_CHECKOUT" \
-    ROLLOUT_COMPOSE_ENV_FILES="$compose_env_files" ROLLOUT_COMPOSE_SERVICE=teagramd \
-    COMPOSE_PROJECT_NAME=teagram COMPOSE_FILE="$compose_files" \
-    bash "$VERIFIER" snapshot "$container_id" "$evidence" "$name" \
+  local tree_name=$1 name=$2
+  local tree="/workspace/$tree_name" evidence="/root/$name" compose_files compose_env_files log="$TMP/logs/$name-snapshot.log"
+  compose_files=$(compose_files_for_tree "$tree")
+  compose_env_files=$(compose_env_files_for_tree "$tree")
+  write_inspect_fixture "$tree_name" > "$TMP/sandbox/fixtures/$tree_name.inspect.json" || die 'cannot create a redacted container inspection fixture'
+  chmod 600 "$TMP/sandbox/fixtures/$tree_name.inspect.json"
+  if ! run_candidate_sandbox "$tree" /usr/bin/env \
+    ROLLOUT_CHECKOUT_PATH="$tree" ROLLOUT_COMPOSE_PROJECT_DIRECTORY=/workspace/live \
+    ROLLOUT_COMPOSE_ENV_FILES="$compose_env_files" COMPOSE_ENV_FILES="$compose_env_files" \
+    ROLLOUT_COMPOSE_SERVICE=teagramd COMPOSE_PROJECT_NAME=teagram COMPOSE_FILE="$compose_files" \
+    REPLAY_INSPECT_PATH="/workspace/fixtures/$tree_name.inspect.json" \
+    bash "$tree/deploy/teagramd/rollout-runner/rollout-verifier.sh" snapshot "$container_id" "$evidence" "$name" \
       "$tree/.env" "$tree/docker-compose.override.yml" selected-compose-render >"$log" 2>&1; then
-    cd "$previous_directory" || die 'cannot restore the replay working directory'
     die 'runner verifier rejected a replay snapshot'
   fi
-  cd "$previous_directory" || die 'cannot restore the replay working directory'
 }
 
-run_snapshot "$TMP/live" "$TMP/baseline" baseline \
-  "$(compose_files_for_tree "$TMP/live")" "$(compose_env_files_for_tree "$TMP/live")"
-run_snapshot "$TMP/pr" "$TMP/preflight" preflight \
-  "$(compose_files_for_tree "$TMP/pr")" "$(compose_env_files_for_tree "$TMP/pr")"
+run_snapshot live baseline
+run_snapshot pr preflight
 
 # The verifier requires each checkout's own .env path. Remove those private
 # copies once both snapshots have reduced them to environment fingerprints.
@@ -384,8 +696,10 @@ for tree in "$TMP/live" "$TMP/pr"; do
   done
 done
 
-if ! env ROLLOUT_RUNNER_EVIDENCE_ROOT="$TMP" \
-  bash "$RUNNER" compare-preflight "$TMP/baseline" "$TMP/preflight" \
+if ! run_candidate_sandbox /workspace/pr /usr/bin/env \
+  ROLLOUT_RUNNER_EVIDENCE_ROOT=/root \
+  bash /workspace/pr/deploy/teagramd/rollout-runner/rollout-runner.sh \
+    compare-preflight /root/baseline /root/preflight \
   >"$TMP/logs/field-results.tsv" 2>"$TMP/logs/compare-preflight.stderr"; then
   die 'runner rejected the resolved Compose preflight'
 fi
