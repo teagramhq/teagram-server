@@ -312,8 +312,8 @@ WITH member AS MATERIALIZED (
           WHERE c.id = $3::bigint AND c.deleted_at IS NULL
       )
 ), history_tail AS MATERIALIZED (
-    -- Seek the latest live post in each TTL period by date, so an expired
-    -- suffix is skipped without walking backward through it by local_id.
+    -- Seek the latest row in each live stream; service rows with a TTL policy
+    -- but no deadline use their partial local-ID index.
     SELECT candidates.local_id, candidates.date
     FROM (
         (
@@ -325,6 +325,22 @@ WITH member AS MATERIALIZED (
                 WHERE cm.channel_id = m.channel_id
                   AND cm.deleted = false
                   AND cm.ttl_period = 0
+                  AND cm.expires_at IS NULL
+                  AND cm.local_id > m.available_min_id
+                ORDER BY cm.local_id DESC
+                LIMIT 1
+            ) AS candidate
+        )
+        UNION ALL
+        (
+            SELECT candidate.local_id, candidate.date
+            FROM member m
+            CROSS JOIN LATERAL (
+                SELECT cm.local_id, cm.date
+                FROM channel_messages cm
+                WHERE cm.channel_id = m.channel_id
+                  AND cm.deleted = false
+                  AND cm.ttl_period <> 0
                   AND cm.expires_at IS NULL
                   AND cm.local_id > m.available_min_id
                 ORDER BY cm.local_id DESC
@@ -431,6 +447,26 @@ WITH member AS MATERIALIZED (
                 FROM channel_messages cm
                 WHERE cm.channel_id = fa.channel_id
                   AND cm.deleted = false
+                  AND cm.ttl_period <> 0
+                  AND cm.expires_at IS NULL
+                  AND cm.local_id > fa.available_min_id
+                  AND cm.date >= GREATEST(
+                      to_timestamp($5::bigint::double precision),
+                      fa.date
+                  )
+                ORDER BY cm.date, cm.local_id
+                LIMIT 1
+            ) AS candidate
+        )
+        UNION ALL
+        (
+            SELECT candidate.local_id, candidate.date
+            FROM floor_anchor fa
+            CROSS JOIN LATERAL (
+                SELECT cm.local_id, cm.date
+                FROM channel_messages cm
+                WHERE cm.channel_id = fa.channel_id
+                  AND cm.deleted = false
                   AND cm.ttl_period = 86400
                   AND cm.expires_at > statement_timestamp()
                   AND cm.local_id > fa.available_min_id
@@ -498,11 +534,28 @@ WITH member AS MATERIALIZED (
                (SELECT date FROM history_tail)
            ) AS date
 ), visible_starts AS MATERIALIZED (
+    -- Stream marker -1 denotes TTL-change service rows with no expiry.
     -- For expiring posts, use the date index to jump over the expired prefix
     -- before using the local-id index to find the requested offset.
     SELECT m.channel_id, m.available_min_id, 0::integer AS ttl_period, cur.local_id
     FROM cursor cur
     JOIN member m ON true
+    UNION ALL
+    SELECT m.channel_id, m.available_min_id, -1::integer, first_visible.local_id
+    FROM cursor cur
+    JOIN member m ON true
+    CROSS JOIN LATERAL (
+        SELECT cm.local_id
+        FROM channel_messages cm
+        WHERE cm.channel_id = m.channel_id
+          AND cm.deleted = false
+          AND cm.ttl_period <> 0
+          AND cm.expires_at IS NULL
+          AND cm.local_id >= cur.local_id
+          AND cm.local_id > m.available_min_id
+        ORDER BY cm.local_id
+        LIMIT 1
+    ) AS first_visible
     UNION ALL
     SELECT m.channel_id, m.available_min_id, 86400::integer, first_visible.local_id
     FROM cursor cur
@@ -593,6 +646,25 @@ WITH member AS MATERIALIZED (
                 FROM channel_messages cm
                 WHERE cm.channel_id = starts.channel_id
                   AND cm.deleted = false
+                  AND cm.ttl_period <> 0
+                  AND cm.expires_at IS NULL
+                  AND cm.local_id >= starts.local_id
+                  AND cm.local_id > starts.available_min_id
+                ORDER BY cm.local_id
+                LIMIT GREATEST(1::bigint, 0::bigint - $6::bigint)
+            ) AS candidate
+            WHERE starts.ttl_period = -1
+            ORDER BY candidate.local_id
+        )
+        UNION ALL
+        (
+            SELECT candidate.local_id
+            FROM visible_starts starts
+            CROSS JOIN LATERAL (
+                SELECT cm.local_id
+                FROM channel_messages cm
+                WHERE cm.channel_id = starts.channel_id
+                  AND cm.deleted = false
                   AND cm.ttl_period = 86400
                   AND cm.expires_at > statement_timestamp()
                   AND cm.local_id >= starts.local_id
@@ -651,6 +723,22 @@ WITH member AS MATERIALIZED (
     SELECT m.channel_id, m.available_min_id, 0::integer AS ttl_period, cur.local_id, cur.date
     FROM cursor cur
     JOIN member m ON true
+    UNION ALL
+    SELECT m.channel_id, m.available_min_id, -1::integer, last_visible.local_id, last_visible.date
+    FROM cursor cur
+    JOIN member m ON true
+    CROSS JOIN LATERAL (
+        SELECT cm.local_id, cm.date
+        FROM channel_messages cm
+        WHERE cm.channel_id = m.channel_id
+          AND cm.deleted = false
+          AND cm.ttl_period <> 0
+          AND cm.expires_at IS NULL
+          AND cm.local_id > m.available_min_id
+          AND (cm.date, cm.local_id) < (cur.date, cur.local_id)
+        ORDER BY cm.date DESC, cm.local_id DESC
+        LIMIT 1
+    ) AS last_visible
     UNION ALL
     SELECT m.channel_id, m.available_min_id, 86400::integer, last_visible.local_id, last_visible.date
     FROM cursor cur
@@ -721,6 +809,25 @@ WITH member AS MATERIALIZED (
                 LIMIT GREATEST(1::bigint, $6::bigint + 1)
             ) AS candidate
             WHERE starts.ttl_period = 0
+            ORDER BY candidate.local_id DESC
+        )
+        UNION ALL
+        (
+            SELECT candidate.local_id
+            FROM visible_ends starts
+            CROSS JOIN LATERAL (
+                SELECT cm.local_id
+                FROM channel_messages cm
+                WHERE cm.channel_id = starts.channel_id
+                  AND cm.deleted = false
+                  AND cm.ttl_period <> 0
+                  AND cm.expires_at IS NULL
+                  AND cm.local_id <= starts.local_id
+                  AND cm.local_id > starts.available_min_id
+                ORDER BY cm.local_id DESC
+                LIMIT GREATEST(1::bigint, $6::bigint + 1)
+            ) AS candidate
+            WHERE starts.ttl_period = -1
             ORDER BY candidate.local_id DESC
         )
         UNION ALL
