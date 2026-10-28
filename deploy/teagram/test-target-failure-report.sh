@@ -3,7 +3,7 @@ set -Eeuo pipefail
 umask 077
 
 SCRIPT_DIR=$(cd -P "$(dirname "${BASH_SOURCE[0]}")" && pwd)
-# shellcheck source=ops/target-failure-report.sh
+# shellcheck source=deploy/teagram/ops/target-failure-report.sh
 source "$SCRIPT_DIR/ops/target-failure-report.sh"
 TMP=$(mktemp -d "${TMPDIR:-/tmp}/target-failure-report.XXXXXXXX")
 chmod 700 "$TMP"
