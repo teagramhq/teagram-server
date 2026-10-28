@@ -132,7 +132,8 @@ else
     > "$TMP/preflight-replay-91885a6.sh"
 fi
 chmod 700 "$TMP/preflight-replay-91885a6.sh"
-cat > "$TMP/source/docker-compose.fixture.yml" <<'COMPOSE'
+# Match the live container's Compose selection and relative Turnstile path.
+cat > "$TMP/source/docker-compose.yml" <<'COMPOSE'
 services:
   teagramd:
     environment:
@@ -149,7 +150,7 @@ COMPOSE
 cat > "$TMP/source/docker-compose.alternate.yml" <<'COMPOSE'
 fixture: alternate
 COMPOSE
-git -C "$TMP/source" add docker-compose.fixture.yml docker-compose.alternate.yml deploy/teagramd/rollout-runner
+git -C "$TMP/source" add docker-compose.yml docker-compose.alternate.yml deploy/teagramd/rollout-runner
 git -C "$TMP/source" commit -q -m baseline
 git -C "$TMP/source" push -q -u origin main
 git --git-dir="$TMP/origin.git" symbolic-ref HEAD refs/heads/main
@@ -327,7 +328,8 @@ if [[ "${1:-}" == compose ]]; then
   }
   grace=2m0s
   if grep -q FIXTURE_DRIFT "$first_compose_file" 2>/dev/null; then grace=3m0s; fi
-  jq -cn --arg grace "$grace" --arg secret_source "$project_dir/.secrets/teagramd-turnstile" '{services:{teagramd:{
+  jq -cn --arg grace "$grace" \
+    --arg secret_source "${FIXTURE_LIVE_ROOT:?}/.secrets/teagramd-turnstile" '{services:{teagramd:{
     stop_grace_period:$grace,
     ports:[],volumes:[],network_mode:"",networks:{},
     logging:{driver:"syslog",options:{
@@ -459,15 +461,15 @@ run_replay() {
 }
 
 output=$(run_replay_script "$TMP/preflight-replay-91885a6.sh" "$pass_sha" \
-  'docker-compose.fixture.yml,docker-compose.override.yml' "$TMP/live-91885a6")
+  'docker-compose.yml,docker-compose.override.yml' "$TMP/live-91885a6")
 if [[ "$(cat "$TMP/last-rc")" == 0 ]] || \
-   ! grep -Fq 'Turnstile secret source must be a root-owned mode-0444 file' <<< "$output"; then
-  printf 'FAIL 91885a6 did not reject the live-relative Turnstile secret path:\n%s\n' "$output" >&2
+   ! grep -Fq 'resolved Compose Turnstile mapping is incomplete or unsafe' <<< "$output"; then
+  printf 'FAIL 91885a6 did not reject the live-anchored Turnstile mapping:\n%s\n' "$output" >&2
   exit 1
 fi
-printf '%s\n' 'PASS 91885a6 rejects the live-relative Turnstile secret path in the temporary render tree'
+printf '%s\n' 'PASS 91885a6 rejects the live-relative Turnstile mapping rendered in a temporary tree'
 
-output=$(run_replay "$pass_sha" 'docker-compose.fixture.yml,docker-compose.override.yml')
+output=$(run_replay "$pass_sha" 'docker-compose.yml,docker-compose.override.yml')
 [[ "$(cat "$TMP/last-rc")" == 0 ]] || { printf 'FAIL all-pass replay:\n%s\n' "$output" >&2; exit 1; }
 [[ "$(wc -l <<< "$output" | tr -d ' ')" == 12 ]] || { printf 'FAIL all-pass row count:\n%s\n' "$output" >&2; exit 1; }
 if grep -qv $'\tpass$' <<< "$output" || grep -Eq '2m0s|3m0s|fixture-password|fixture-site-key' <<< "$output"; then
@@ -504,7 +506,7 @@ printf '%s\n' 'PASS drifted replay exits non-zero and redacts values'
 : > "$FIXTURE_SANDBOX_UID_LOG"
 : > "$FIXTURE_SANDBOX_NETWORK_LOG"
 rm -f -- "$FIXTURE_HOST_SENTINEL"
-output=$(run_replay "$sandbox_attack_sha" 'docker-compose.fixture.yml,docker-compose.override.yml')
+output=$(run_replay "$sandbox_attack_sha" 'docker-compose.yml,docker-compose.override.yml')
 [[ "$(cat "$TMP/last-rc")" == 0 ]] || { printf 'FAIL sandbox attack replay:\n%s\n' "$output" >&2; exit 1; }
 [[ "$(cat "$FIXTURE_SANDBOX_UID_LOG")" == $'verifier\t65534\nrunner\t65534' ]] || {
   printf 'FAIL PR verifier and runner did not both execute as uid 65534:\n%s\n' \
