@@ -4855,6 +4855,7 @@ const (
 	branchSignupSetPendingUser     smokeRegistrationBranch = "signup-set-pending-user"
 	branchSignupSignIn             smokeRegistrationBranch = "signup-sign-in"
 	branchSignupSignInResponse     smokeRegistrationBranch = "signup-sign-in-response"
+	branchSignupPreAuthCheck       smokeRegistrationBranch = "signup-pre-auth-check"
 	branchSignupSignUp             smokeRegistrationBranch = "signup-sign-up"
 	branchSignupAuthorization      smokeRegistrationBranch = "signup-authorization"
 	branchSignupUser               smokeRegistrationBranch = "signup-user"
@@ -5112,6 +5113,13 @@ func testSmokeUsernameRegistration(t *testing.T) {
 	var accountID int64
 	if err := firstClient.Run(f.ctx, func(ctx context.Context) error {
 		api := firstClient.API()
+		available, err := api.AccountCheckUsername(ctx, username)
+		if err != nil {
+			return smokeRegistrationStepFailure(branchSignupPreAuthCheck, err)
+		}
+		if !available {
+			return smokeRegistrationCheckFailure(branchSignupPreAuthCheck, "candidate was reported occupied")
+		}
 		codeHash, err := sendCodeUsername(ctx, api, username)
 		if err != nil {
 			return smokeRegistrationStepFailure(branchSignupSendCode, err)
@@ -5251,6 +5259,8 @@ func testSmokeUsernameRegistration(t *testing.T) {
 			t.Fatalf("[assert:username-registration.signup-sign-in] signIn before signup: %s", detail)
 		case branchSignupSignInResponse:
 			t.Fatalf("[assert:username-registration.signup-sign-in-response] signIn before signup response, want signup required: %s", detail)
+		case branchSignupPreAuthCheck:
+			t.Fatalf("[assert:username-registration.signup-pre-auth-check] account.checkUsername before signup: %s", detail)
 		case branchSignupSignUp:
 			t.Fatalf("[assert:username-registration.signup-sign-up] auth.signUp: %s", detail)
 		case branchSignupAuthorization:
