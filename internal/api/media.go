@@ -303,6 +303,9 @@ func (h *handlers) handleSendMediaAfterReplyOnConn(c *mtproto.Conn, r *mtproto.R
 	if !isPoll && !validText(req.Message) {
 		return nil, nil, nil, errMessageEmpty
 	}
+	if !isPoll && textExceedsLimit(req.Message, captionLengthMax) {
+		return nil, nil, nil, errMediaCaptionTooLong
+	}
 	var descriptionEntities []store.PollDescriptionEntity
 	var messageEntities []store.PollDescriptionEntity
 	if isPoll {

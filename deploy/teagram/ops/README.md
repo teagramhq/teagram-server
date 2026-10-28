@@ -44,3 +44,14 @@ containers are gone and host port 2446 is free. After it succeeds, revert the
 route commit and let `Deploy.` recreate base `teagramd` with its original
 `127.0.0.1:2446` publish. The operation is repeatable and does not touch
 volumes or the database.
+
+`rollout-evidence.sh` is read-only and takes no arguments. Run it through the
+same CLI as `ssh teagram run <main-sha> rollout-evidence`. It reports the
+latest failed target gate, the bounded readiness sample tail when present, and
+allowlisted summary lines from the matching runner log's final 80 lines. The
+runner log captures child-process stdout and stderr and may contain secrets or
+configuration values, so this operation emits only the validated failure-gate
+and rollback summary shapes; every other line is omitted. If the target failure
+marker could not be persisted, it uses the matching rollback warning and
+identifies the target failure marker and capture time as unavailable. It reads
+only validated root-owned mode-0600 files from mode-0700 evidence directories.

@@ -3,8 +3,10 @@ package config_test
 import (
 	"bytes"
 	"log/slog"
+	"math"
 	"net/netip"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -33,6 +35,114 @@ func TestLoadClientAddrTrustDefault(t *testing.T) {
 	}
 	if got := cfg.RateLimits.SendCodeIP.Phones; got.Limit != 20 || got.Window != 24*time.Hour {
 		t.Errorf("SendCodeIP.Phones = %+v, want 20 per 24h", got)
+	}
+}
+
+func TestCheckUsernameIPRateLimitDefaultAndOverrides(t *testing.T) {
+	t.Setenv("TG_POSTGRES_DSN", "postgres://localhost/tg")
+	t.Setenv("TG_AUTHKEY_ENC_KEY", validEncKey)
+
+	cfg, err := config.Load(discardLog())
+	if err != nil {
+		t.Fatalf("Load defaults: %v", err)
+	}
+	if got := cfg.RateLimits.CheckUsernameIP; got.Limit != 20 || got.Window != time.Hour {
+		t.Errorf("CheckUsernameIP default = %+v, want 20 per hour", got)
+	}
+
+	t.Setenv("TG_RATE_LIMIT_CHECK_USERNAME_IP", "12")
+	t.Setenv("TG_RATE_LIMIT_CHECK_USERNAME_IP_WINDOW", "30m")
+	cfg, err = config.Load(discardLog())
+	if err != nil {
+		t.Fatalf("Load overrides: %v", err)
+	}
+	if got := cfg.RateLimits.CheckUsernameIP; got.Limit != 12 || got.Window != 30*time.Minute {
+		t.Errorf("CheckUsernameIP override = %+v, want 12 per 30m", got)
+	}
+}
+
+func TestLoadCheckUsernameIPRateLimitBounds(t *testing.T) {
+	tests := []struct {
+		name    string
+		limit   string
+		want    int
+		wantErr bool
+	}{
+		{name: "maximum int32", limit: strconv.FormatInt(math.MaxInt32, 10), want: math.MaxInt32},
+		{name: "above maximum int32", limit: strconv.FormatInt(math.MaxInt32+1, 10), wantErr: true},
+		{name: "negative", limit: "-1", wantErr: true},
+		{name: "zero disables", limit: "0", want: 0},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv("TG_POSTGRES_DSN", "postgres://localhost/tg")
+			t.Setenv("TG_AUTHKEY_ENC_KEY", validEncKey)
+			t.Setenv("TG_RATE_LIMIT_CHECK_USERNAME_IP", tt.limit)
+			t.Setenv("TG_RATE_LIMIT_CHECK_USERNAME_IP_WINDOW", "")
+
+			cfg, err := config.Load(discardLog())
+			if tt.wantErr {
+				if err == nil {
+					t.Fatal("Load succeeded with an invalid check-username limit")
+				}
+				if !strings.Contains(err.Error(), "TG_RATE_LIMIT_CHECK_USERNAME_IP") {
+					t.Errorf("Load error %q does not name the setting", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("Load: %v", err)
+			}
+			if got := cfg.RateLimits.CheckUsernameIP.Limit; got != tt.want {
+				t.Errorf("CheckUsernameIP limit = %d, want %d", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestLoadCheckUsernameIPRateLimitWindowCanDisableCounter(t *testing.T) {
+	tests := []struct {
+		name   string
+		window string
+		want   time.Duration
+	}{
+		{name: "zero window", window: "0s"},
+		{name: "negative window", window: "-1s", want: -time.Second},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv("TG_POSTGRES_DSN", "postgres://localhost/tg")
+			t.Setenv("TG_AUTHKEY_ENC_KEY", validEncKey)
+			t.Setenv("TG_RATE_LIMIT_CHECK_USERNAME_IP", "20")
+			t.Setenv("TG_RATE_LIMIT_CHECK_USERNAME_IP_WINDOW", tt.window)
+
+			cfg, err := config.Load(discardLog())
+			if err != nil {
+				t.Fatalf("Load: %v", err)
+			}
+			got := cfg.RateLimits.CheckUsernameIP
+			if got.Window != tt.want {
+				t.Errorf("CheckUsernameIP window = %v, want %v", got.Window, tt.want)
+			}
+			if got.Enabled() {
+				t.Error("CheckUsernameIP is enabled with a non-positive window")
+			}
+		})
+	}
+}
+
+func TestWarnClientAddrTrustWhenUsernameCheckIsOnlyIPLimit(t *testing.T) {
+	cfg := config.Config{
+		ClientAddrTrust: config.ClientAddrSocket,
+		RateLimits: config.RateLimitsConfig{
+			CheckUsernameIP: store.RateLimitConfig{Limit: 1, Window: time.Hour},
+		},
+	}
+
+	var buf bytes.Buffer
+	cfg.WarnClientAddrTrust(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn})))
+	if !strings.Contains(buf.String(), "per-IP") {
+		t.Fatalf("no per-IP trust warning for username-check-only limit:\n%s", buf.String())
 	}
 }
 
@@ -174,6 +284,7 @@ func TestWarnClientAddrTrust(t *testing.T) {
 	cfg.RateLimits.CheckPasswordIP = store.RateLimitConfig{}
 	cfg.RateLimits.GetPasswordIP = store.RateLimitConfig{}
 	cfg.RateLimits.SignUpIP = store.RateLimitConfig{}
+	cfg.RateLimits.CheckUsernameIP = store.RateLimitConfig{}
 	cfg.WarnClientAddrTrust(log)
 	if buf.Len() != 0 {
 		t.Errorf("warned with every per-IP limit disabled:\n%s", buf.String())
