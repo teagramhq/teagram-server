@@ -27,7 +27,7 @@ export MOCK_REPO="$REPO" MOCK_REMOVED="$TMP/removed" MOCK_DOCKER_CALLS="$TMP/doc
 sed \
   -e "s|^REPO=/opt/teagram$|REPO=$REPO|" \
   -e "s|^LOCK_PATH=/tmp/teagram-deploy.lock$|LOCK_PATH=$TMP/deploy.lock|" \
-  -e 's|if \[\[ "$(id -u)" != 0 \]\]; then|if [[ 0 != 0 ]]; then|' \
+  -e "s|if \[\[ \"\$(id -u)\" != 0 \]\]; then|if [[ 0 != 0 ]]; then|" \
   "$SCRIPT" > "$TMP/rollback-public-websocket.sh"
 chmod 700 "$TMP/rollback-public-websocket.sh"
 
