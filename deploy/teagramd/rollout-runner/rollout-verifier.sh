@@ -1789,10 +1789,30 @@ secure_replay_evidence_dir() {
 
 preflight_snapshot_command() {
   local container_id=$1 project_dir=$2 evidence_dir=$3 name=$4 project_name=$5 selection=$6
+  local compose_project_directory=${7:-} expected_compose_project_directory
   local env_file override_file compose_files_value='' compose_json inspect_json snapshot output entry file canonical owner=0
   local -a compose_entries=() compose_args=()
   secure_replay_evidence_dir "$evidence_dir" || return 1
-  if [ "${ROLLOUT_PREFLIGHT_TEST_MODE:-0}" = 1 ]; then owner=$(id -u) || return 1; fi
+  if [ "${ROLLOUT_PREFLIGHT_TEST_MODE:-0}" = 1 ]; then
+    owner=$(id -u) || return 1
+    expected_compose_project_directory=${PREFLIGHT_REPLAY_TEST_LIVE_CHECKOUT:-}
+    [[ "$expected_compose_project_directory" == /tmp/* ]] || {
+      printf '%s\n' 'preflight replay fixture project directory is invalid' >&2
+      return 64
+    }
+  else
+    expected_compose_project_directory=/opt/teagram
+  fi
+  [ "$compose_project_directory" = "$expected_compose_project_directory" ] && \
+    [ -d "$compose_project_directory" ] && [ ! -L "$compose_project_directory" ] || {
+    printf '%s\n' 'preflight replay Compose project directory is invalid' >&2
+    return 64
+  }
+  canonical=$(readlink -f -- "$compose_project_directory") || return 1
+  [ "$canonical" = "$compose_project_directory" ] || {
+    printf '%s\n' 'preflight replay Compose project directory is not canonical' >&2
+    return 64
+  }
   case "$project_dir" in
     "$evidence_dir"/*) ;;
     *) printf '%s\n' 'preflight replay checkout must be inside its evidence directory' >&2; return 64 ;;
@@ -1849,13 +1869,15 @@ preflight_snapshot_command() {
     return 64
   }
 
+  # Resolve relative host paths as on the live checkout; inputs stay staged in
+  # evidence_dir.
   unset COMPOSE_PROFILES COMPOSE_ENV_FILES
   COMPOSE_FILE=$compose_files_value
   COMPOSE_PROJECT_NAME=$project_name
   COMPOSE_EXPERIMENTAL_GIT_REMOTE=false
   COMPOSE_EXPERIMENTAL_OCI_REMOTE=false
   XDG_CACHE_HOME="$evidence_dir/compose-cache"
-  ROLLOUT_CHECKOUT_PATH=$project_dir
+  ROLLOUT_CHECKOUT_PATH=$compose_project_directory
   ROLLOUT_COMPOSE_SERVICE=teagramd
   ROLLOUT_ADDED_ENV=
   ROLLOUT_CHANGED_ENV=
@@ -1867,7 +1889,8 @@ preflight_snapshot_command() {
     printf '%s\n' 'cannot inspect the live teagramd container' >&2
     return 1
   }
-  compose_json=$(docker compose --project-directory "$project_dir" --project-name "$project_name" \
+  compose_json=$(docker compose --env-file "$env_file" \
+    --project-directory "$compose_project_directory" --project-name "$project_name" \
     "${compose_args[@]}" config --format json </dev/null 2>/dev/null) || {
     printf '%s\n' 'cannot render the selected Compose files' >&2
     return 1
@@ -1890,7 +1913,7 @@ main() {
   shift
   case "$command" in
     preflight-snapshot)
-      [ "$#" -eq 6 ] || { printf '%s\n' 'usage: rollout-verifier.sh preflight-snapshot CONTAINER_ID CHECKOUT EVIDENCE_DIR baseline|preflight PROJECT_NAME COMPOSE_SELECTION' >&2; return 64; }
+      [ "$#" -eq 7 ] || { printf '%s\n' 'usage: rollout-verifier.sh preflight-snapshot CONTAINER_ID CHECKOUT EVIDENCE_DIR baseline|preflight PROJECT_NAME COMPOSE_SELECTION COMPOSE_PROJECT_DIRECTORY' >&2; return 64; }
       preflight_snapshot_command "$@" ;;
     snapshot)
       [ "$#" -ge 5 ] && [ "$#" -le 6 ] || { printf '%s\n' 'usage: rollout-verifier.sh snapshot CONTAINER_ID EVIDENCE_DIR NAME ENV_FILE OVERRIDE_FILE [selected-compose-render|live-container-inspection]' >&2; return 64; }

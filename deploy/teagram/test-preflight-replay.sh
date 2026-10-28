@@ -10,6 +10,8 @@ SOURCE_SCRIPT="$SCRIPT_DIR/ops/preflight-replay.sh"
 SCRIPT=
 readonly REPO_ROOT
 readonly SOURCE_SCRIPT
+readonly LEGACY_REPLAY_SHA=91885a6a8bfd5f381fa6385bc15b0278ff8ed41e
+readonly LEGACY_REPLAY_PATH=deploy/teagram/ops/preflight-replay.sh
 readonly LEGACY_RUNNER_SHA=082083851cc458ce3e26fae7c2fdaaea935e0630
 readonly LEGACY_RUNNER_PATH=deploy/teagramd/rollout-runner/rollout-runner.sh
 REAL_RM=$(command -v rm)
@@ -119,8 +121,30 @@ cp -p "$SCRIPT_DIR/../teagramd/rollout-runner/rollout-verifier.sh" \
 git init -q --bare "$TMP/origin.git"
 git init -q -b main "$TMP/source"
 git -C "$TMP/source" remote add origin "$TMP/origin.git"
+if git -c safe.directory="$REPO_ROOT" -C "$REPO_ROOT" \
+   cat-file -e "$LEGACY_REPLAY_SHA:$LEGACY_REPLAY_PATH" 2>/dev/null; then
+  git -c safe.directory="$REPO_ROOT" -C "$REPO_ROOT" \
+    show "$LEGACY_REPLAY_SHA:$LEGACY_REPLAY_PATH" > "$TMP/preflight-replay-91885a6.sh"
+else
+  git -C "$TMP/source" fetch --quiet --depth=1 \
+    https://github.com/teagramhq/teagram-server.git "$LEGACY_REPLAY_SHA"
+  git -C "$TMP/source" show "$LEGACY_REPLAY_SHA:$LEGACY_REPLAY_PATH" \
+    > "$TMP/preflight-replay-91885a6.sh"
+fi
+chmod 700 "$TMP/preflight-replay-91885a6.sh"
 cat > "$TMP/source/docker-compose.fixture.yml" <<'COMPOSE'
-fixture: primary
+services:
+  teagramd:
+    environment:
+      TG_TURNSTILE_SITE_KEY: ${TEAGRAM_TURNSTILE_SITE_KEY:-}
+      TG_TURNSTILE_SECRET_KEY_FILE: ${TEAGRAM_TURNSTILE_SECRET_KEY_FILE:+/run/secrets/teagramd-turnstile}
+      TG_TURNSTILE_SIGNIN_ENABLED: ${TG_TURNSTILE_SIGNIN_ENABLED:-false}
+    secrets:
+      - source: teagramd_turnstile
+        target: teagramd-turnstile
+secrets:
+  teagramd_turnstile:
+    file: ${TEAGRAM_TURNSTILE_SECRET_KEY_FILE:-/dev/null}
 COMPOSE
 cat > "$TMP/source/docker-compose.alternate.yml" <<'COMPOSE'
 fixture: alternate
@@ -203,9 +227,29 @@ sandbox_attack_sha=$(git -C "$TMP/source" rev-parse HEAD)
 
 git clone -q "$TMP/origin.git" "$TMP/live"
 git -C "$TMP/live" switch -q main
-printf 'fixture-password=never-print\n' > "$TMP/live/.env"
-printf '# fixture override\n' > "$TMP/live/docker-compose.override.yml"
-chmod 600 "$TMP/live/.env" "$TMP/live/docker-compose.override.yml"
+git clone -q "$TMP/origin.git" "$TMP/live-91885a6"
+git -C "$TMP/live-91885a6" switch -q main
+for runtime_path in deploy/teagramd/rollout-runner/rollout-runner.sh \
+  deploy/teagramd/rollout-runner/rollout-verifier.sh; do
+  git -C "$TMP/source" show "$LEGACY_REPLAY_SHA:$runtime_path" \
+    > "$TMP/live-91885a6/$runtime_path"
+done
+git -C "$TMP/live-91885a6" add deploy/teagramd/rollout-runner/rollout-runner.sh \
+  deploy/teagramd/rollout-runner/rollout-verifier.sh
+git -C "$TMP/live-91885a6" commit -q -m legacy-preflight-runtime
+for live_root in "$TMP/live" "$TMP/live-91885a6"; do
+  cat > "$live_root/.env" <<'ENV'
+fixture-password=never-print
+TEAGRAM_TURNSTILE_SITE_KEY=fixture-site-key
+TEAGRAM_TURNSTILE_SECRET_KEY_FILE=.secrets/teagramd-turnstile
+TG_TURNSTILE_SIGNIN_ENABLED=false
+ENV
+  printf '# fixture override\n' > "$live_root/docker-compose.override.yml"
+  chmod 600 "$live_root/.env" "$live_root/docker-compose.override.yml"
+  install -d -m 700 "$live_root/.secrets"
+  : > "$live_root/.secrets/teagramd-turnstile"
+  chmod 444 "$live_root/.secrets/teagramd-turnstile"
+done
 
 cat > "$TMP/bin/docker" <<'DOCKER'
 #!/usr/bin/env bash
@@ -243,13 +287,17 @@ fi
 if [[ "${1:-}" == compose ]]; then
   shift
   project_dir=
+  first_compose_file=
+  env_file=
   actual_selection=
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --project-directory) project_dir=$2; shift 2 ;;
       --project-name) shift 2 ;;
+      --env-file) env_file=$2; shift 2 ;;
       --file)
         file=$2
+        if [[ -z "$first_compose_file" ]]; then first_compose_file=$file; fi
         if [[ -n "$actual_selection" ]]; then actual_selection+=,; fi
         actual_selection+="${file##*/}"
         shift 2
@@ -258,12 +306,15 @@ if [[ "${1:-}" == compose ]]; then
     esac
   done
   case "$project_dir" in
-    */baseline|*/target) expected_cache="${project_dir%/*}/compose-cache" ;;
-    *)
-      printf '%s\n' 'fixture Compose project directory is invalid' >&2
-      exit 93
-      ;;
+    "${FIXTURE_LIVE_ROOT:?}"|*/baseline|*/target) ;;
+    *) printf '%s\n' 'fixture Compose project directory is invalid' >&2; exit 93 ;;
   esac
+  checkout_dir=${first_compose_file%/*}
+  expected_cache="${checkout_dir%/*}/compose-cache"
+  if [[ -n "$env_file" ]] && { [ ! -f "$env_file" ] || [ "$(stat -c %a -- "$env_file")" != 600 ]; }; then
+    printf '%s\n' 'fixture Compose environment file is invalid' >&2
+    exit 95
+  fi
   [[ "${COMPOSE_EXPERIMENTAL_GIT_REMOTE:-}" == false && \
      "${COMPOSE_EXPERIMENTAL_OCI_REMOTE:-}" == false && \
      "${XDG_CACHE_HOME:-}" == "$expected_cache" ]] || {
@@ -275,16 +326,22 @@ if [[ "${1:-}" == compose ]]; then
     exit 91
   }
   grace=2m0s
-  if grep -q FIXTURE_DRIFT "$project_dir/docker-compose.alternate.yml" 2>/dev/null; then grace=3m0s; fi
-  jq -cn --arg grace "$grace" '{services:{teagramd:{
+  if grep -q FIXTURE_DRIFT "$first_compose_file" 2>/dev/null; then grace=3m0s; fi
+  jq -cn --arg grace "$grace" --arg secret_source "$project_dir/.secrets/teagramd-turnstile" '{services:{teagramd:{
     stop_grace_period:$grace,
     ports:[],volumes:[],network_mode:"",networks:{},
     logging:{driver:"syslog",options:{
       "syslog-address":"unixgram:///dev/log","syslog-facility":"daemon",
       "syslog-format":"rfc5424",tag:"teagramd"
     }},
-    environment:{TG_REPLICA_COUNT:"1",TG_CLIENT_ADDR_TRUST:"socket",TG_LOG_LOGIN_CODES:"false"}
-  }}}'
+    environment:{
+      TG_REPLICA_COUNT:"1",TG_CLIENT_ADDR_TRUST:"socket",TG_LOG_LOGIN_CODES:"false",
+      TG_TURNSTILE_SITE_KEY:"fixture-site-key",
+      TG_TURNSTILE_SECRET_KEY_FILE:"/run/secrets/teagramd-turnstile",
+      TG_TURNSTILE_SIGNIN_ENABLED:"false"
+    },
+    secrets:[{source:"teagramd_turnstile",target:"teagramd-turnstile"}]
+  }},secrets:{teagramd_turnstile:{file:$secret_source}}}'
   exit 0
 fi
 
@@ -380,27 +437,40 @@ export PREFLIGHT_REPLAY_TEST_REPOSITORY_URL="$TMP/origin.git"
 : > "$FIXTURE_SANDBOX_NETWORK_LOG"
 "$REAL_RM" -f -- "$FIXTURE_HOST_SENTINEL"
 
-run_replay() {
-  local sha=$1 selection=$2 output rc=0
+run_replay_script() {
+  local script=$1 sha=$2 selection=$3 live_root=${4:-$TMP/live} output rc=0
   output=$(PREFLIGHT_REPLAY_TEST_MODE=1 \
-      PREFLIGHT_REPLAY_TEST_LIVE_CHECKOUT="$TMP/live" \
+      PREFLIGHT_REPLAY_TEST_LIVE_CHECKOUT="$live_root" \
       PREFLIGHT_REPLAY_TEST_REPOSITORY_URL="$TMP/origin.git" \
-      FIXTURE_LIVE_ROOT="$TMP/live" FIXTURE_LABEL_FILES="$selection" \
+      FIXTURE_LIVE_ROOT="$live_root" FIXTURE_LABEL_FILES="$selection" \
       FIXTURE_EXPECTED_FILES="$selection" FIXTURE_REMOVE_LOG="$FIXTURE_REMOVE_LOG" \
       FIXTURE_UNSAFE_REMOVE_LOG="$FIXTURE_UNSAFE_REMOVE_LOG" REAL_RM="$REAL_RM" \
       FIXTURE_SANDBOX_UID_LOG="$FIXTURE_SANDBOX_UID_LOG" \
       FIXTURE_SANDBOX_NETWORK_LOG="$FIXTURE_SANDBOX_NETWORK_LOG" \
       FIXTURE_HOST_SENTINEL="$FIXTURE_HOST_SENTINEL" \
       REAL_MKTEMP="$REAL_MKTEMP" FIXTURE_BAD_MKTEMP="${FIXTURE_BAD_MKTEMP:-0}" \
-      PATH="$PATH" bash "$SCRIPT" "$sha" 2>&1) || rc=$?
+      PATH="$PATH" bash "$script" "$sha" 2>&1) || rc=$?
   printf '%s\n' "$rc" > "$TMP/last-rc"
   printf '%s' "$output"
 }
 
+run_replay() {
+  run_replay_script "$SCRIPT" "$@"
+}
+
+output=$(run_replay_script "$TMP/preflight-replay-91885a6.sh" "$pass_sha" \
+  'docker-compose.fixture.yml,docker-compose.override.yml' "$TMP/live-91885a6")
+if [[ "$(cat "$TMP/last-rc")" == 0 ]] || \
+   ! grep -Fq 'Turnstile secret source must be a root-owned mode-0444 file' <<< "$output"; then
+  printf 'FAIL 91885a6 did not reject the live-relative Turnstile secret path:\n%s\n' "$output" >&2
+  exit 1
+fi
+printf '%s\n' 'PASS 91885a6 rejects the live-relative Turnstile secret path in the temporary render tree'
+
 output=$(run_replay "$pass_sha" 'docker-compose.fixture.yml,docker-compose.override.yml')
 [[ "$(cat "$TMP/last-rc")" == 0 ]] || { printf 'FAIL all-pass replay:\n%s\n' "$output" >&2; exit 1; }
 [[ "$(wc -l <<< "$output" | tr -d ' ')" == 12 ]] || { printf 'FAIL all-pass row count:\n%s\n' "$output" >&2; exit 1; }
-if grep -qv $'\tpass$' <<< "$output" || grep -Eq '2m0s|3m0s|fixture-password' <<< "$output"; then
+if grep -qv $'\tpass$' <<< "$output" || grep -Eq '2m0s|3m0s|fixture-password|fixture-site-key' <<< "$output"; then
   printf 'FAIL all-pass replay exposed values or failed a row:\n%s\n' "$output" >&2
   exit 1
 fi
@@ -425,7 +495,7 @@ if [[ "$(cat "$TMP/last-rc")" == 0 ]] || ! grep -Fq $'stop_grace_period\tfail' <
   printf 'FAIL drifted replay was not rejected:\n%s\n' "$output" >&2
   exit 1
 fi
-if grep -Eq '2m0s|3m0s|fixture-password' <<< "$output"; then
+if grep -Eq '2m0s|3m0s|fixture-password|fixture-site-key' <<< "$output"; then
   printf 'FAIL drifted replay exposed values:\n%s\n' "$output" >&2
   exit 1
 fi

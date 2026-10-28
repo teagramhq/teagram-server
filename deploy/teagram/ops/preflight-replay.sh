@@ -447,7 +447,7 @@ for checkout in "$TMP_DIR/baseline" "$TMP_DIR/target"; do
   name=preflight
   [ "$checkout" = "$TMP_DIR/baseline" ] && name=baseline
   bash "$BASE_VERIFIER" preflight-snapshot "$container_id" "$checkout" "$TMP_DIR" \
-    "$name" "$project_name" "$compose_selection" >/dev/null || exit $?
+    "$name" "$project_name" "$compose_selection" "$LIVE_ROOT" >/dev/null || exit $?
 done
 
 for checkout in "$TMP_DIR/baseline" "$TMP_DIR/target"; do
