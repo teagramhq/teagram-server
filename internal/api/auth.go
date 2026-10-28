@@ -238,14 +238,18 @@ func (h *handlers) handleSignUpWithConn(c *mtproto.Conn, r *mtproto.Request) (bi
 		return nil, errLastNameInvalid
 	}
 
-	user, err := h.store.AdmitUsernameWithMetadata(
+	user, err := h.store.AdmitUsernameWithInvitePolicy(
 		r.Ctx,
 		username,
 		req.PhoneCodeHash,
 		mtproto.AuthKeyIDInt64(r.AuthKeyID),
 		req.FirstName,
 		req.LastName,
-		h.registrationMode == config.RegistrationInvite,
+		store.InviteAdmissionPolicy{
+			RequireInvite:    h.registrationMode == config.RegistrationInvite,
+			UserInviteQuota:  h.userInviteQuota,
+			AllowUserInvites: h.registrationMode == config.RegistrationInvite,
+		},
 		authorizationMetadata(r),
 	)
 	if err != nil {
