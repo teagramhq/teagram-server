@@ -156,7 +156,7 @@ jobs:
     needs:
       - deploy
       - resolve-demo-web
-    if: ${{ needs.deploy.result == 'success' }}
+    if: ${{ always() && needs.deploy.result == 'success' }}
     runs-on: ubuntu-26.04
     timeout-minutes: 60
     environment: demo
@@ -171,7 +171,6 @@ jobs:
           TEAGRAM_DEMO_DEPLOY_ENABLED: ${{ vars.TEAGRAM_DEMO_DEPLOY_ENABLED }}
           TS_OAUTH_CLIENT_ID: ${{ secrets.TS_OAUTH_CLIENT_ID }}
           TS_OAUTH_SECRET: ${{ secrets.TS_OAUTH_SECRET }}
-          DEMO_WEB_DEPLOYABLE: ${{ needs.resolve-demo-web.outputs.deployable }}
         run: |
           if [[ "$TEAGRAM_DEMO_DEPLOY_ENABLED" != 'true' ]]; then
             echo "enabled=false" >> "$GITHUB_OUTPUT"
@@ -179,11 +178,22 @@ jobs:
           elif [[ -z "$TS_OAUTH_CLIENT_ID" || -z "$TS_OAUTH_SECRET" ]]; then
             echo "enabled=false" >> "$GITHUB_OUTPUT"
             echo "::notice::Public demo deployment skipped: Tailscale OAuth credentials are missing"
-          elif [[ "$DEMO_WEB_DEPLOYABLE" != 'true' ]]; then
-            echo "enabled=false" >> "$GITHUB_OUTPUT"
-            echo "::notice::Public demo deployment skipped: the web pin is not deployable"
           else
             echo "enabled=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Check the web publication gate
+        id: web-gate
+        if: ${{ steps.demo-gate.outputs.enabled == 'true' }}
+        env:
+          DEMO_WEB_RESOLVER_RESULT: ${{ needs.resolve-demo-web.result }}
+          DEMO_WEB_DEPLOYABLE: ${{ needs.resolve-demo-web.outputs.deployable }}
+        run: |
+          if [[ "$DEMO_WEB_RESOLVER_RESULT" == 'success' && "$DEMO_WEB_DEPLOYABLE" == 'true' ]]; then
+            echo "enabled=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::Pinned web publication is unavailable; the public server deployment will continue"
           fi
 
       - name: Resolve the tested image digest
@@ -204,32 +214,6 @@ jobs:
           digest=$(<"$artifact_dir/demo-image-digest.txt")
           [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]
           echo "digest=$digest" >> "$GITHUB_OUTPUT"
-
-      - name: Download the web artifact from tested CI
-        id: demo-web-artifact
-        if: ${{ steps.demo-gate.outputs.enabled == 'true' }}
-        env:
-          GH_TOKEN: ${{ github.token }}
-          CI_RUN_ID: ${{ needs.deploy.outputs.ci_run_id }}
-          WEB_SOURCE_SHA: ${{ needs.resolve-demo-web.outputs.source_commit }}
-        run: |
-          [[ "$CI_RUN_ID" =~ ^[0-9]+$ ]]
-          [[ "$WEB_SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]
-          artifact_dir="$RUNNER_TEMP/demo-web-artifact"
-          mkdir -p "$artifact_dir"
-          gh run download "$CI_RUN_ID" --repo "$GITHUB_REPOSITORY" \
-            --name "demo-web-release-$WEB_SOURCE_SHA" --dir "$artifact_dir"
-          archive="$artifact_dir/demo-web-$WEB_SOURCE_SHA.tar.gz"
-          checksum_file="$archive.sha256"
-          [[ -f "$archive" && ! -L "$archive" && -f "$checksum_file" && ! -L "$checksum_file" ]]
-          archive_sha256=$(<"$checksum_file")
-          [[ "$archive_sha256" =~ ^[0-9a-f]{64}$ ]]
-          actual_sha256=$(sha256sum "$archive" | awk '{print $1}')
-          [[ "$actual_sha256" == "$archive_sha256" ]]
-          {
-            printf 'archive=%s\n' "$archive"
-            printf 'archive_sha256=%s\n' "$archive_sha256"
-          } >> "$GITHUB_OUTPUT"
 
       - name: Join the tailnet
         if: ${{ steps.demo-gate.outputs.enabled == 'true' }}
@@ -272,8 +256,40 @@ jobs:
             -o ServerAliveInterval=30 -o ServerAliveCountMax=10 \
             "root@$DEMO_DEPLOY_HOST" "$DEPLOY_SHA $DEPLOY_IMAGE_DIGEST" </dev/null
 
+      - name: Download the web artifact from tested CI
+        id: demo-web-artifact
+        if: ${{ steps.web-gate.outputs.enabled == 'true' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CI_RUN_ID: ${{ needs.deploy.outputs.ci_run_id }}
+          WEB_SOURCE_SHA: ${{ needs.resolve-demo-web.outputs.source_commit }}
+        run: |
+          [[ "$CI_RUN_ID" =~ ^[0-9]+$ ]]
+          [[ "$WEB_SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]
+          artifact_dir="$RUNNER_TEMP/demo-web-artifact"
+          mkdir -p "$artifact_dir"
+          gh run download "$CI_RUN_ID" --repo "$GITHUB_REPOSITORY" \
+            --name "demo-web-release-$WEB_SOURCE_SHA" --dir "$artifact_dir"
+          archive="$artifact_dir/demo-web-$WEB_SOURCE_SHA.tar.gz"
+          checksum_file="$archive.sha256"
+          [[ -f "$archive" && ! -L "$archive" && -f "$checksum_file" && ! -L "$checksum_file" ]]
+          archive_sha256=$(<"$checksum_file")
+          [[ "$archive_sha256" =~ ^[0-9a-f]{64}$ ]]
+          actual_sha256=$(sha256sum "$archive" | awk '{print $1}')
+          [[ "$actual_sha256" == "$archive_sha256" ]]
+          {
+            printf 'archive=%s\n' "$archive"
+            printf 'archive_sha256=%s\n' "$archive_sha256"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Fail if the pinned web publication is not deployable
+        if: ${{ steps.demo-gate.outputs.enabled == 'true' && steps.web-gate.outputs.enabled != 'true' }}
+        run: |
+          echo "::error::Public server deployed, but the published web pin does not match the live web manifest"
+          exit 1
+
       - name: Publish the pinned web artifact on the demo origin
-        if: ${{ steps.demo-gate.outputs.enabled == 'true' }}
+        if: ${{ steps.web-gate.outputs.enabled == 'true' }}
         env:
           DEPLOY_SHA: ${{ needs.deploy.outputs.sha }}
           WEB_SOURCE_SHA: ${{ needs.resolve-demo-web.outputs.source_commit }}

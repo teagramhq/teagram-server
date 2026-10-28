@@ -12,9 +12,11 @@ dockerfile="${DEPLOY_DOCKERFILE:-Dockerfile}"
 demo_forced_command="deploy/teagram-demo/forced-command.sh"
 expected_if="\${{ github.event_name == 'workflow_dispatch' || (github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push') }}"
 expected_resolve_demo_if="\${{ needs.deploy.result == 'success' }}"
-expected_demo_if="\${{ needs.deploy.result == 'success' }}"
+expected_demo_if="\${{ always() && needs.deploy.result == 'success' }}"
 expected_demo_step_if="\${{ steps.demo-gate.outputs.enabled == 'true' }}"
 expected_demo_cleanup_if="\${{ always() && steps.demo-gate.outputs.enabled == 'true' }}"
+expected_demo_web_step_if="\${{ steps.web-gate.outputs.enabled == 'true' }}"
+expected_demo_web_failure_if="\${{ steps.demo-gate.outputs.enabled == 'true' && steps.web-gate.outputs.enabled != 'true' }}"
 expected_ci_group="\${{ github.workflow }}-\${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || (github.event_name == 'push' && github.ref == 'refs/heads/main' && 'main') || format('run-{0}-{1}', github.run_id, github.run_attempt) }}"
 expected_ci_cancel="\${{ github.event_name == 'pull_request' }}"
 expected_run_name="\${{ inputs.issue && format('{0} [{1}]', github.workflow, inputs.issue) || '' }}"
@@ -317,8 +319,6 @@ check_contract() {
     fail 'the demo environment gate must be the first step in the demo environment'
   [[ "$(query '.jobs.deploy-demo.steps[0].env.TEAGRAM_DEMO_DEPLOY_ENABLED')" == '${{ vars.TEAGRAM_DEMO_DEPLOY_ENABLED }}' ]] ||
     fail 'the demo gate must read the environment-scoped deployment variable after environment setup'
-  [[ "$(query '.jobs.deploy-demo.steps[0].env.DEMO_WEB_DEPLOYABLE')" == '${{ needs.resolve-demo-web.outputs.deployable }}' ]] ||
-    fail 'the demo gate must reject a candidate web pin before deployment'
   [[ "$(query '.jobs.deploy-demo.steps[0].env.TS_OAUTH_CLIENT_ID')" == '${{ secrets.TS_OAUTH_CLIENT_ID }}' ]] ||
     fail 'the demo gate must read the Tailscale OAuth client ID from the demo environment'
   [[ "$(query '.jobs.deploy-demo.steps[0].env.TS_OAUTH_SECRET')" == '${{ secrets.TS_OAUTH_SECRET }}' ]] ||
@@ -327,24 +327,44 @@ check_contract() {
   demo_gate_run="$(query '.jobs.deploy-demo.steps[0].run')"
   [[ "$demo_gate_run" == *'enabled=true'* && "$demo_gate_run" == *'enabled=false'* ]] ||
     fail 'the demo gate must explicitly set its output for both enabled and disabled states'
-  grep -Fq 'DEMO_WEB_DEPLOYABLE' <<< "$demo_gate_run" ||
-    fail 'the demo gate must skip when the pinned web artifact is not deployable'
-  grep -Fq 'web pin is not deployable' <<< "$demo_gate_run" ||
-    fail 'the demo gate must report why it skipped an unavailable web pin'
   grep -Fq '[[ -z "$TS_OAUTH_CLIENT_ID" || -z "$TS_OAUTH_SECRET" ]]' <<< "$demo_gate_run" ||
     fail 'the demo gate must skip when either Tailscale OAuth credential is missing'
   grep -Fq '::notice::Public demo deployment skipped: Tailscale OAuth credentials are missing' <<< "$demo_gate_run" ||
     fail 'the demo gate must report when it skips for missing Tailscale OAuth credentials'
   [[ "$(query '.jobs.deploy-demo.steps[] | select(.id == "demo-image") | .if')" == "$expected_demo_step_if" ]] ||
-    fail 'the demo image download must run only when both deployment gates are enabled'
+    fail 'the demo image download must run only when public demo deployment is enabled'
+  [[ "$(query '.jobs.deploy-demo.steps[] | select(.id == "web-gate") | .env.DEMO_WEB_DEPLOYABLE')" == '${{ needs.resolve-demo-web.outputs.deployable }}' ]] ||
+    fail 'the web gate must evaluate the resolver deployability output'
+  [[ "$(query '.jobs.deploy-demo.steps[] | select(.id == "web-gate") | .env.DEMO_WEB_RESOLVER_RESULT')" == '${{ needs.resolve-demo-web.result }}' ]] ||
+    fail 'the web gate must detect resolver failure'
+  local demo_web_gate_run
+  demo_web_gate_run="$(query '.jobs.deploy-demo.steps[] | select(.id == "web-gate") | .run')"
+  grep -Fq 'DEMO_WEB_RESOLVER_RESULT' <<< "$demo_web_gate_run" ||
+    fail 'the web gate must reject a failed pin resolver'
+  grep -Fq 'DEMO_WEB_DEPLOYABLE' <<< "$demo_web_gate_run" ||
+    fail 'the web gate must reject a non-deployable web pin'
+  [[ "$(query '.jobs.deploy-demo.steps[] | select(.name == "Download the web artifact from tested CI") | .if')" == "$expected_demo_web_step_if" ]] ||
+    fail 'web artifact download must run only when the published pin is deployable'
   [[ "$(query '.jobs.deploy-demo.steps[] | select(.name == "Join the tailnet") | .if')" == "$expected_demo_step_if" ]] ||
-    fail 'the demo tailnet connection must run only when both deployment gates are enabled'
+    fail 'the demo tailnet connection must run only when public demo deployment is enabled'
   [[ "$(query '.jobs.deploy-demo.steps[] | select(.name == "Install the demo deploy key") | .if')" == "$expected_demo_step_if" ]] ||
-    fail 'the demo key installation must run only when both deployment gates are enabled'
+    fail 'the demo key installation must run only when public demo deployment is enabled'
   [[ "$(query '.jobs.deploy-demo.steps[] | select(.name == "Deploy the tested server commit after the dev deploy") | .if')" == "$expected_demo_step_if" ]] ||
-    fail 'the demo server deployment must run only when both deployment gates are enabled'
-  [[ "$(query '.jobs.deploy-demo.steps[] | select(.name == "Publish the pinned web artifact on the demo origin") | .if')" == "$expected_demo_step_if" ]] ||
-    fail 'the candidate web artifact must not be published to the demo origin'
+    fail 'the demo server deployment must run when public demo deployment is enabled, regardless of web pin state'
+  [[ "$(query '.jobs.deploy-demo.steps[] | select(.name == "Fail if the pinned web publication is not deployable") | .if')" == "$expected_demo_web_failure_if" ]] ||
+    fail 'a rejected web pin must fail visibly after the public server deployment'
+  [[ "$(query '.jobs.deploy-demo.steps[] | select(.name == "Publish the pinned web artifact on the demo origin") | .if')" == "$expected_demo_web_step_if" ]] ||
+    fail 'the web publish step must require a deployable published pin'
+  local demo_server_step_index demo_web_download_step_index demo_web_pin_failure_step_index
+  demo_server_step_index="$(grep -nF -m1 '      - name: Deploy the tested server commit after the dev deploy' "$workflow" | cut -d: -f1)"
+  demo_web_download_step_index="$(grep -nF -m1 '      - name: Download the web artifact from tested CI' "$workflow" | cut -d: -f1)"
+  demo_web_pin_failure_step_index="$(grep -nF -m1 '      - name: Fail if the pinned web publication is not deployable' "$workflow" | cut -d: -f1)"
+  if [[ ! "$demo_server_step_index" =~ ^[0-9]+$ || ! "$demo_web_download_step_index" =~ ^[0-9]+$ ||
+    ! "$demo_web_pin_failure_step_index" =~ ^[0-9]+$ ]] ||
+    (( demo_server_step_index >= demo_web_download_step_index ||
+      demo_web_download_step_index >= demo_web_pin_failure_step_index )); then
+    fail 'web pin or artifact failures must not prevent the public server deployment from running'
+  fi
   [[ "$(query '.jobs.deploy-demo.steps[] | select(.name == "Remove the demo deploy key") | .if')" == "$expected_demo_cleanup_if" ]] ||
     fail 'the demo deploy key must be removed even when deployment fails'
   [[ "$(query '.jobs.deploy-demo.permissions // {} | to_entries | map(select(.value != "read")) | length')" == 0 ]] ||
@@ -414,9 +434,10 @@ check_contract() {
     fail 'the demo digest artifact must be selected by the exact tested SHA'
   grep -Fq '^sha256:[0-9a-f]{64}$' <<< "$digest_run" ||
     fail 'the downloaded image digest must be validated before SSH'
-  grep -Fq 'resolve_web_artifact_pin.py' "$demo_forced_command" &&
-    grep -Fq -- '--verify-release-identity "$WEB_SOURCE_SHA" "$WEB_ARTIFACT_DIGEST"' "$demo_forced_command" ||
+  if ! grep -Fq 'resolve_web_artifact_pin.py' "$demo_forced_command" ||
+    ! grep -Fq -- '--verify-release-identity "$WEB_SOURCE_SHA" "$WEB_ARTIFACT_DIGEST"' "$demo_forced_command"; then
     fail 'the forced demo command must require the exact published web pin before accepting an archive'
+  fi
   local pin_resolver_run
   pin_resolver_run="$(query '.jobs.resolve-demo-web.steps[] | select(.name == "Resolve the pinned web artifact") | .run')"
   grep -Fq 'resolve_web_artifact_pin.py --require-live-manifest' <<< "$pin_resolver_run" ||
@@ -502,18 +523,18 @@ self_test() {
   local demo_mutations=(
     'del(.jobs."deploy-demo")'
     '.jobs."deploy-demo".needs = []'
-    '.jobs."deploy-demo".steps[0].env.DEMO_WEB_DEPLOYABLE = "true"'
+    '.jobs."deploy-demo".steps[1].env.DEMO_WEB_DEPLOYABLE = "true"'
     '.jobs."deploy-demo".steps[0].run = "echo enabled=true"'
     '(.jobs."deploy-demo".steps[] | select(.name == "Publish the pinned web artifact on the demo origin") | .if) = "${{ always() }}"'
     '(.jobs."deploy-demo".steps[] | select(.name == "Deploy the tested server commit after the dev deploy") | .if) = "${{ always() }}"'
     '.jobs."deploy-demo".if = "${{ github.event_name == '"'"'workflow_dispatch'"'"' }}"'
     '.jobs."deploy-demo".steps[0].env.TEAGRAM_DEMO_DEPLOY_ENABLED = "true"'
-    'del(.jobs."deploy-demo".steps[0].env.DEMO_WEB_DEPLOYABLE)'
+    'del(.jobs."deploy-demo".steps[] | select(.id == "web-gate").env.DEMO_WEB_DEPLOYABLE)'
     'del(.jobs."deploy-demo".steps[0].env.TS_OAUTH_CLIENT_ID)'
     'del(.jobs."deploy-demo".steps[0].env.TS_OAUTH_SECRET)'
     '(.jobs."deploy-demo".steps[0].run) |= sub("TS_OAUTH_CLIENT_ID"; "WRONG_OAUTH_CLIENT_ID")'
     '(.jobs."deploy-demo".steps[0].run) |= sub("Tailscale OAuth credentials are missing"; "credentials missing")'
-    '(.jobs."deploy-demo".steps[0].run) |= sub("DEMO_WEB_DEPLOYABLE"; "WRONG_WEB_DEPLOYABLE")'
+    '(.jobs."deploy-demo".steps[] | select(.id == "web-gate").run) |= sub("DEMO_WEB_DEPLOYABLE"; "WRONG_WEB_DEPLOYABLE")'
     '.jobs."deploy-demo".environment = "production"'
     '(.jobs."deploy-demo".steps[] | select(.name == "Install the demo deploy key") | .env.DEMO_DEPLOY_SSH_KEY) = "${{ secrets.DEPLOY_SSH_KEY }}"'
     '(.jobs."deploy-demo".steps[] | select(.name == "Install the demo deploy key") | .env.DEMO_DEPLOY_PORT) = "${{ vars.WRONG_PORT }}"'

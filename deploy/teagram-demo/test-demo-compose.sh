@@ -1082,6 +1082,61 @@ env \
   TMP_DIR="$TMP_DIR" \
   bash "$TMP_DIR/deploy-image-cleanup-regression.sh"
 
+FORCED_EDGE_ROLLBACK_FUNCTION="$TMP_DIR/forced-edge-rollback-function.sh"
+sed -n '/^demo_restore_legacy_edge_after_checkout_rollback() {$/,/^}/p' \
+  "$SCRIPT_DIR/forced-command.sh" > "$FORCED_EDGE_ROLLBACK_FUNCTION"
+cat > "$TMP_DIR/forced-edge-rollback-regression.sh" <<'BASH'
+set -Eeuo pipefail
+source "$FORCED_EDGE_ROLLBACK_FUNCTION"
+REPO="$TEST_REPO"
+mkdir -p "$REPO/deploy/teagram-demo"
+printf '%s\n' 'user nginx;' > "$REPO/deploy/teagram-demo/nginx.conf"
+printf '%s\n' 'global' > "$REPO/deploy/teagram-demo/haproxy.cfg"
+printf '%s\n' 'print("fixture")' > "$REPO/deploy/teagram-demo/render-haproxy-config.py"
+cat > "$REPO/deploy/teagram-demo/compose.yaml" <<'YAML'
+services:
+  edge:
+    volumes:
+      - type: bind
+        source: ./deploy/teagram-demo/nginx.conf
+        target: /etc/nginx/nginx.conf
+YAML
+MOCK_EDGE_MOUNT=directory
+MOCK_RECREATE_COUNT=0
+MOCK_NGINX_TESTED=0
+
+docker() {
+  if [[ "$1" == compose && "$*" == *' ps -q edge' ]]; then
+    printf 'edge-container\n'
+  elif [[ "$1" == compose && "$*" == *' up -d --no-deps --force-recreate edge' ]]; then
+    [[ "$TEAGRAM_DEMO_EDGE_CONFIG_SHA256" =~ ^[0-9a-f]{64}$ &&
+      "$TEAGRAM_DEMO_HAPROXY_CONFIG_SHA256" =~ ^[0-9a-f]{64}$ ]] || return 1
+    MOCK_EDGE_MOUNT=legacy
+    ((MOCK_RECREATE_COUNT += 1))
+  elif [[ "$1" == inspect && "$2" == --format && "$4" == edge-container ]]; then
+    if [[ "$MOCK_EDGE_MOUNT" == directory ]]; then
+      printf 'bind|%s/deploy/teagram-demo/nginx-config|/etc/nginx/demo\n' "$REPO"
+    else
+      printf 'bind|%s/deploy/teagram-demo/nginx.conf|/etc/nginx/nginx.conf\n' "$REPO"
+    fi
+  elif [[ "$1" == exec && "$2" == edge-container && "$3" == nginx && "$4" == -t ]]; then
+    MOCK_NGINX_TESTED=1
+  else
+    printf 'unexpected docker invocation: %s\n' "$*" >&2
+    return 1
+  fi
+}
+
+demo_restore_legacy_edge_after_checkout_rollback
+[[ "$MOCK_EDGE_MOUNT" == legacy && "$MOCK_RECREATE_COUNT" == 1 && "$MOCK_NGINX_TESTED" == 1 ]]
+demo_restore_legacy_edge_after_checkout_rollback
+[[ "$MOCK_RECREATE_COUNT" == 1 ]]
+BASH
+env \
+  FORCED_EDGE_ROLLBACK_FUNCTION="$FORCED_EDGE_ROLLBACK_FUNCTION" \
+  TEST_REPO="$TMP_DIR/legacy-demo-checkout" \
+  bash "$TMP_DIR/forced-edge-rollback-regression.sh"
+
 cat > "$TMP_DIR/deploy-rollback-failure-regression.sh" <<'BASH'
 set -Eeuo pipefail
 source "$CLEANUP_FUNCTION"
