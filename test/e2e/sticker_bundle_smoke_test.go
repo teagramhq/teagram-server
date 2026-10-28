@@ -8,24 +8,17 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
-	"net"
 	"os"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/gotd/td/tg"
 
 	"github.com/teagramhq/teagram-server/internal/api"
 	"github.com/teagramhq/teagram-server/internal/config"
-	"github.com/teagramhq/teagram-server/internal/rsakey"
 	"github.com/teagramhq/teagram-server/internal/stickerbundle"
-	"github.com/teagramhq/teagram-server/internal/store"
 )
-
-const stickerBundleSmokeAddressEnv = "TG_STICKER_BUNDLE_SMOKE_ADDRESS"
 
 func TestStickerBundleCatalogue(t *testing.T) {
 	testSmokeStickerBundleCatalogue(t)
@@ -33,17 +26,12 @@ func TestStickerBundleCatalogue(t *testing.T) {
 
 func testSmokeStickerBundleCatalogue(t *testing.T) {
 	t.Helper()
-	if os.Getenv(stickerBundleSmokeAddressEnv) != "" {
-		testSmokeRunningStickerBundleCatalogue(t)
-		return
-	}
-	stickerSets, bundle := loadSmokeStickerBundleCatalogue(t)
+	stickerSets := loadSmokeStickerBundleCatalogue(t)
 	f := newSmokeFixtureWithSetup(t, config.RegistrationClosed, func(f *smokeFixture) {
 		f.stickerSets = stickerSets
 	})
 	const phoneA, phoneB = "+15551049801", "+15551049802"
 	seedSmokeUsers(t, f, phoneA, phoneB)
-	f.codes.chFor(smokeAuthHandle(f, phoneA)) <- "not-a-login-code"
 	a := newSmokeClient(t, f, "bundle sticker owner", phoneA)
 	b := newSmokeClient(t, f, "bundle sticker recipient", phoneB)
 
@@ -55,9 +43,8 @@ func testSmokeStickerBundleCatalogue(t *testing.T) {
 		}
 		var ok bool
 		featured, ok = result.(*tg.MessagesFeaturedStickers)
-		wantCount := len(bundle.Packs) + 1
-		if !ok || featured.Count != wantCount || len(featured.Sets) != wantCount {
-			return fmt.Errorf("featured sticker sets = %T with count %d and %d entries, want Twemoji and %d bundle packs", result, featuredCount(featured), featuredSetCount(featured), len(bundle.Packs))
+		if !ok || featured.Count != 4 || len(featured.Sets) != 4 {
+			return fmt.Errorf("featured sticker sets = %T with count %d and %d entries, want Twemoji and three bundle packs", result, featuredCount(featured), featuredSetCount(featured))
 		}
 		return nil
 	}); err != nil {
@@ -77,13 +64,18 @@ func testSmokeStickerBundleCatalogue(t *testing.T) {
 	if _, ok := coveredByName["twemoji_reactions"]; !ok {
 		t.Fatal("featured sets omitted twemoji_reactions")
 	}
-	for _, pack := range bundle.Packs {
-		covered, ok := coveredByName[pack.ShortName]
-		if !ok || covered.Set.Title != pack.Title || covered.Set.Count != len(pack.Stickers) {
-			t.Fatalf("featured bundle set %q = %+v, want title %q and %d stickers", pack.ShortName, covered, pack.Title, len(pack.Stickers))
+	for shortName, title := range map[string]string{
+		"openmoji_animals":              "OpenMoji Animals (CC BY-SA 4.0)",
+		"openmoji_food":                 "OpenMoji Food (CC0 1.0)",
+		"noto_animated_smileys_emotion": "Animated Noto Emoji Smileys & Emotion (CC BY 4.0)",
+	} {
+		covered, ok := coveredByName[shortName]
+		if !ok || covered.Set.Title != title || covered.Set.Count != 1 {
+			t.Fatalf("featured bundle set %q = %+v, want title %q and one sticker", shortName, covered, title)
 		}
 	}
-	wantOldCount := len(bundle.Packs) + 1
+
+	wantOldCount := len(featured.Sets)
 	oldNames := make(map[string]struct{}, wantOldCount)
 	if err := a.call(f.ctx, func(ctx context.Context, client *tg.Client) error {
 		for offset := range wantOldCount {
@@ -105,19 +97,13 @@ func testSmokeStickerBundleCatalogue(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("get old featured bundle sticker packs: %v", err)
 	}
-	if len(oldNames) != wantOldCount {
-		t.Fatalf("old featured pages returned %d unique sets, want %d", len(oldNames), wantOldCount)
-	}
-	if _, ok := oldNames["twemoji_reactions"]; !ok {
-		t.Fatal("old featured sets omitted twemoji_reactions")
-	}
-	for _, pack := range bundle.Packs {
-		if _, ok := oldNames[pack.ShortName]; !ok {
-			t.Errorf("old featured sets omitted bundle pack %q", pack.ShortName)
+	for shortName := range coveredByName {
+		if _, ok := oldNames[shortName]; !ok {
+			t.Errorf("old featured sets omitted %q", shortName)
 		}
 	}
 	if err := a.call(f.ctx, func(ctx context.Context, client *tg.Client) error {
-		query := strings.ToUpper(bundle.Packs[0].Title)
+		query := strings.ToUpper("OpenMoji Food")
 		result, err := client.MessagesSearchStickerSets(ctx, &tg.MessagesSearchStickerSetsRequest{Q: query, Hash: 0})
 		if err != nil {
 			return err
@@ -131,17 +117,17 @@ func testSmokeStickerBundleCatalogue(t *testing.T) {
 			return fmt.Errorf("searchStickerSets %q = %T with %d sets, want a bundle title match", query, result, count)
 		}
 		covered, ok := found.Sets[0].(*tg.StickerSetCovered)
-		if !ok || covered.Set.ShortName != bundle.Packs[0].ShortName {
-			return fmt.Errorf("searchStickerSets %q returned %T, want bundle pack %q", query, found.Sets[0], bundle.Packs[0].ShortName)
+		if !ok || covered.Set.ShortName != "openmoji_food" {
+			return fmt.Errorf("searchStickerSets %q returned %T, want bundle pack openmoji_food", query, found.Sets[0])
 		}
 		return nil
 	}); err != nil {
 		t.Fatalf("search catalogue bundle sticker pack: %v", err)
 	}
 
-	installedNames := make(map[string]struct{}, len(bundle.Packs))
-	for _, pack := range bundle.Packs {
-		installedNames[pack.ShortName] = struct{}{}
+	installedNames := map[string]struct{}{
+		"openmoji_animals":              {},
+		"noto_animated_smileys_emotion": {},
 	}
 	if err := a.call(f.ctx, func(ctx context.Context, client *tg.Client) error {
 		for shortName := range installedNames {
@@ -161,7 +147,7 @@ func testSmokeStickerBundleCatalogue(t *testing.T) {
 		}
 		sets, ok := all.(*tg.MessagesAllStickers)
 		if !ok || len(sets.Sets) != len(installedNames) {
-			return fmt.Errorf("getAllStickers = %T with %d sets, want all %d installed bundle packs", all, allStickerCount(all), len(installedNames))
+			return fmt.Errorf("getAllStickers = %T with %d sets, want both installed bundle packs", all, allStickerCount(all))
 		}
 		for _, installed := range sets.Sets {
 			if _, ok := installedNames[installed.ShortName]; !ok {
@@ -173,189 +159,36 @@ func testSmokeStickerBundleCatalogue(t *testing.T) {
 		t.Fatalf("install and list bundle sticker pack: %v", err)
 	}
 
-	for i, pack := range bundle.Packs {
-		if len(pack.Stickers) == 0 {
-			t.Fatalf("bundle pack %q contains no stickers", pack.ShortName)
-		}
-		sticker := pack.Stickers[0]
-		document := getSmokeBundleStickerDocument(t, f, a, pack.ShortName, len(pack.Stickers))
-		wantBytes, err := os.ReadFile(sticker.Path)
-		if err != nil {
-			t.Fatalf("read bundle sticker artwork %q: %v", sticker.Path, err)
-		}
-		if filepath.Ext(sticker.Path) == ".tgs" {
-			if document.MimeType != "application/x-tgsticker" || document.Size != int64(len(wantBytes)) {
-				t.Fatalf("animated sticker MIME and size = %q / %d, want application/x-tgsticker / %d", document.MimeType, document.Size, len(wantBytes))
-			}
-			var hasAnimatedAttribute, hasImageSize, hasStickerAttribute bool
-			var imageWidth, imageHeight int
-			for _, attribute := range document.Attributes {
-				switch value := attribute.(type) {
-				case *tg.DocumentAttributeAnimated:
-					hasAnimatedAttribute = true
-				case *tg.DocumentAttributeImageSize:
-					hasImageSize = true
-					imageWidth, imageHeight = value.W, value.H
-				case *tg.DocumentAttributeSticker:
-					hasStickerAttribute = true
-				}
-			}
-			if hasAnimatedAttribute || !hasImageSize || imageWidth != 512 || imageHeight != 512 || !hasStickerAttribute {
-				t.Fatalf("animated sticker attributes = %#v, want 512x512 image size and sticker attributes without documentAttributeAnimated", document.Attributes)
-			}
-		}
-		transferSmokeBundleSticker(t, f, a, b, document, wantBytes, "bundle sticker smoke "+pack.ShortName, 1049801+int64(i))
+	document := getSmokeBundleStickerDocument(t, f, a, "openmoji_animals")
+	animatedDocument := getSmokeBundleStickerDocument(t, f, a, "noto_animated_smileys_emotion")
+	wantBytes := smokeStickerArt("animal")
+	animatedBytes := smokeStickerTGS(t)
+	if animatedDocument.MimeType != "application/x-tgsticker" || animatedDocument.Size != int64(len(animatedBytes)) {
+		t.Fatalf("animated sticker MIME and size = %q / %d, want application/x-tgsticker / %d", animatedDocument.MimeType, animatedDocument.Size, len(animatedBytes))
 	}
+	var hasAnimatedAttribute, hasImageSize, hasStickerAttribute bool
+	var imageWidth, imageHeight int
+	for _, attribute := range animatedDocument.Attributes {
+		switch value := attribute.(type) {
+		case *tg.DocumentAttributeAnimated:
+			hasAnimatedAttribute = true
+		case *tg.DocumentAttributeImageSize:
+			hasImageSize = true
+			imageWidth, imageHeight = value.W, value.H
+		case *tg.DocumentAttributeSticker:
+			hasStickerAttribute = true
+		}
+	}
+	if hasAnimatedAttribute || !hasImageSize || imageWidth != 512 || imageHeight != 512 || !hasStickerAttribute {
+		t.Fatalf("animated sticker attributes = %#v, want 512x512 image size and sticker attributes without documentAttributeAnimated", animatedDocument.Attributes)
+	}
+
+	transferSmokeBundleSticker(t, f, a, b, document, wantBytes, "static bundle sticker smoke", 1049801)
+	transferSmokeBundleSticker(t, f, a, b, animatedDocument, animatedBytes, "animated bundle sticker smoke", 1049802)
 }
 
-func testSmokeRunningStickerBundleCatalogue(t *testing.T) {
+func loadSmokeStickerBundleCatalogue(t *testing.T) *api.StickerSetCatalog {
 	t.Helper()
-	bundleDir := os.Getenv("TG_STICKER_CATALOG_BUNDLE")
-	if bundleDir == "" {
-		t.Fatal("TG_STICKER_CATALOG_BUNDLE is required for the running-server smoke")
-	}
-	bundle, err := stickerbundle.Load(bundleDir)
-	if err != nil {
-		t.Fatalf("load generated sticker bundle: %v", err)
-	}
-	f := newRunningServerSmokeFixture(t)
-	const phone = "+15551049801"
-	seedSmokeUsers(t, f, phone)
-	// Username sign-in validates the issued hash and then the password; it
-	// ignores the code value. The remote server cannot feed this process-local sink.
-	f.codes.chFor(smokeAuthHandle(f, phone)) <- "not-a-login-code"
-	client := newSmokeClient(t, f, "running bundle smoke", phone)
-
-	var featured *tg.MessagesFeaturedStickers
-	if err := client.call(f.ctx, func(ctx context.Context, api *tg.Client) error {
-		result, err := api.MessagesGetFeaturedStickers(ctx, 0)
-		if err != nil {
-			return err
-		}
-		var ok bool
-		featured, ok = result.(*tg.MessagesFeaturedStickers)
-		if !ok || featured == nil {
-			return fmt.Errorf("featured sticker sets = %T, want *tg.MessagesFeaturedStickers", result)
-		}
-		return nil
-	}); err != nil {
-		t.Fatalf("get featured sticker packs from running image: %v", err)
-	}
-
-	got := make(map[string]struct{}, len(featured.Sets))
-	for _, item := range featured.Sets {
-		covered, ok := item.(*tg.StickerSetCovered)
-		if !ok {
-			t.Fatalf("featured sticker set = %T, want *tg.StickerSetCovered", item)
-		}
-		got[covered.Set.ShortName] = struct{}{}
-	}
-	if _, ok := got["twemoji_reactions"]; !ok {
-		t.Fatal("running image featured sets omitted twemoji_reactions")
-	}
-	for _, pack := range bundle.Packs {
-		if _, ok := got[pack.ShortName]; !ok {
-			t.Errorf("running image featured sets omitted bundled pack %q", pack.ShortName)
-		}
-	}
-	wantOldCount := len(bundle.Packs) + 1
-	oldNames := make(map[string]struct{}, wantOldCount)
-	if err := client.call(f.ctx, func(ctx context.Context, api *tg.Client) error {
-		for offset := range wantOldCount {
-			result, err := api.MessagesGetOldFeaturedStickers(ctx, &tg.MessagesGetOldFeaturedStickersRequest{Offset: offset, Limit: 1, Hash: 0})
-			if err != nil {
-				return err
-			}
-			oldFeatured, ok := result.(*tg.MessagesFeaturedStickers)
-			if !ok || oldFeatured == nil || oldFeatured.Count != wantOldCount || len(oldFeatured.Sets) != 1 {
-				return fmt.Errorf("running image old featured page %d = %T with count %d and %d entries, want one of %d catalogue sets", offset, result, featuredCount(oldFeatured), featuredSetCount(oldFeatured), wantOldCount)
-			}
-			covered, ok := oldFeatured.Sets[0].(*tg.StickerSetCovered)
-			if !ok {
-				return fmt.Errorf("running image old featured sticker set = %T, want *tg.StickerSetCovered", oldFeatured.Sets[0])
-			}
-			oldNames[covered.Set.ShortName] = struct{}{}
-		}
-		return nil
-	}); err != nil {
-		t.Fatalf("get old featured sticker packs from running image: %v", err)
-	}
-	if len(oldNames) != wantOldCount {
-		t.Fatalf("running image old featured pages returned %d unique sets, want %d", len(oldNames), wantOldCount)
-	}
-	if _, ok := oldNames["twemoji_reactions"]; !ok {
-		t.Fatal("running image old featured sets omitted twemoji_reactions")
-	}
-	for _, pack := range bundle.Packs {
-		if _, ok := oldNames[pack.ShortName]; !ok {
-			t.Errorf("running image old featured sets omitted bundled pack %q", pack.ShortName)
-		}
-	}
-}
-
-func newRunningServerSmokeFixture(t *testing.T) *smokeFixture {
-	t.Helper()
-	address := os.Getenv(stickerBundleSmokeAddressEnv)
-	host, portText, err := net.SplitHostPort(address)
-	if err != nil || host == "" {
-		t.Fatalf("parse %s %q: expected host:port", stickerBundleSmokeAddressEnv, address)
-	}
-	port, err := strconv.Atoi(portText)
-	if err != nil || port < 1 || port > 65535 {
-		t.Fatalf("parse %s port %q: invalid TCP port", stickerBundleSmokeAddressEnv, portText)
-	}
-	keyPath := os.Getenv("TG_STICKER_BUNDLE_SMOKE_RSA_KEY")
-	if keyPath == "" {
-		t.Fatal("TG_STICKER_BUNDLE_SMOKE_RSA_KEY is required for the running-server smoke")
-	}
-	key, err := rsakey.Load(keyPath)
-	if err != nil {
-		t.Fatalf("load running server identity key: %v", err)
-	}
-	dsn := os.Getenv("TG_POSTGRES_DSN")
-	if dsn == "" {
-		t.Fatal("TG_POSTGRES_DSN is required to seed the running server smoke account")
-	}
-	encKey, err := hex.DecodeString(os.Getenv("TG_AUTHKEY_ENC_KEY"))
-	if err != nil || len(encKey) != 32 {
-		t.Fatal("TG_AUTHKEY_ENC_KEY must be a 64-character hex key for the running-server smoke")
-	}
-
-	deadlineCtx, cancelDeadline := context.WithTimeout(context.Background(), 90*time.Second)
-	t.Cleanup(cancelDeadline)
-	deadlineCtx = withRegistrySnapshotState(deadlineCtx)
-	ctx, cancelFailure := context.WithCancelCause(deadlineCtx)
-	t.Cleanup(func() { cancelFailure(nil) })
-	st, err := store.Open(ctx, dsn, encKey, store.WithoutBlobStore())
-	if err != nil {
-		t.Fatalf("open running server database for smoke account: %v", err)
-	}
-	t.Cleanup(func() {
-		if err := st.Close(); err != nil {
-			t.Errorf("close running server smoke store: %v", err)
-		}
-	})
-	return &smokeFixture{
-		ctx: ctx, failures: newClientFailureSignal(cancelFailure), key: key, dsn: dsn,
-		store: st, codes: newMultiCodeSink(), authHandles: make(map[string]string), dcID: 2,
-		port: port, regMode: config.RegistrationClosed,
-	}
-}
-
-func loadSmokeStickerBundleCatalogue(t *testing.T) (*api.StickerSetCatalog, *stickerbundle.Bundle) {
-	t.Helper()
-	if dir := os.Getenv("TG_STICKER_CATALOG_BUNDLE"); dir != "" {
-		bundle, err := stickerbundle.Load(dir)
-		if err != nil {
-			t.Fatalf("load generated sticker bundle: %v", err)
-		}
-		catalog, err := api.LoadStickerSetCatalog(bundle)
-		if err != nil {
-			t.Fatalf("build generated sticker catalogue: %v", err)
-		}
-		return catalog, bundle
-	}
-
 	dir := t.TempDir()
 	packs := []struct {
 		shortName, source, license, emoji, filename, format, attribution string
@@ -405,10 +238,10 @@ func loadSmokeStickerBundleCatalogue(t *testing.T) (*api.StickerSetCatalog, *sti
 	if err != nil {
 		t.Fatalf("build bundle catalogue: %v", err)
 	}
-	return catalog, bundle
+	return catalog
 }
 
-func getSmokeBundleStickerDocument(t *testing.T, f *smokeFixture, owner *smokeClient, shortName string, stickerCount int) *tg.Document {
+func getSmokeBundleStickerDocument(t *testing.T, f *smokeFixture, owner *smokeClient, shortName string) *tg.Document {
 	t.Helper()
 	var document *tg.Document
 	if err := owner.call(f.ctx, func(ctx context.Context, client *tg.Client) error {
@@ -419,8 +252,8 @@ func getSmokeBundleStickerDocument(t *testing.T, f *smokeFixture, owner *smokeCl
 			return err
 		}
 		full, ok := result.(*tg.MessagesStickerSet)
-		if !ok || full == nil || len(full.Documents) != stickerCount || len(full.Packs) == 0 || full.Set.Count != stickerCount {
-			return fmt.Errorf("getStickerSet %q = %T with %d documents and %d packs, want %d documents and at least one sticker pack", shortName, result, stickerDocumentCount(full), stickerPackCount(full), stickerCount)
+		if !ok || len(full.Documents) != 1 || len(full.Packs) != 1 || full.Set.Count != 1 {
+			return fmt.Errorf("getStickerSet %q = %T with %d documents and %d packs, want one of each", shortName, result, stickerDocumentCount(full), stickerPackCount(full))
 		}
 		var okDocument bool
 		document, okDocument = full.Documents[0].(*tg.Document)

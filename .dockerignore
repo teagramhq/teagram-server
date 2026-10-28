@@ -1,5 +1,5 @@
-# Build stages copy only explicit Go source directories, the sticker generator,
-# and deploy/photothumb-runtime/, so ignored files cannot reach a layer.
+# The build stage copies only its explicit Go source directories and
+# deploy/photothumb-runtime/, so nothing listed here could reach a layer anyway.
 # This is the second lock: it keeps the files out of the context uploaded to the
 # daemon.
 
@@ -13,8 +13,6 @@ testdata/photothumb/
 
 # Full history — anything ever committed and later removed comes back with it.
 .git
-/build/
-**/node_modules/
 
 # Local-only and agent-runtime directories; the latter can hold credentials.
 bin/
