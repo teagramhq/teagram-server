@@ -149,7 +149,7 @@ TMP=$(mktemp -d /tmp/main2612-replay.XXXXXXXX) || die 'cannot create the replay 
 [ "$(stat -c %u -- "$TMP")" = 0 ] && [ "$(stat -c %a -- "$TMP")" = 700 ] || die 'replay temp tree is not root-owned mode 0700'
 TMP_TOKEN=$(mark_replay_tree "$TMP") || die 'cannot mark the replay temp tree as owned'
 mkdir -m 700 -- "$TMP/live" "$TMP/pr" "$TMP/baseline" "$TMP/preflight" "$TMP/logs"
-mkdir -m 700 -p -- "$TMP/pr/deploy/teagramd/rollout-runner"
+mkdir -p -- "$TMP/pr/deploy/teagramd/rollout-runner"
 
 CANDIDATE_REMOTE=$(git -C "$LIVE_CHECKOUT" remote get-url origin 2>"$TMP/logs/origin.stderr") || die 'cannot read the live checkout origin'
 mkdir -m 700 -- "$TMP/candidate.git"
