@@ -1397,6 +1397,174 @@ func (q *Queries) SearchMessages(ctx context.Context, arg SearchMessagesParams) 
 	return items, nil
 }
 
+const searchResultsCalendarPage = `-- name: SearchResultsCalendarPage :many
+SELECT m.owner_id, m.local_id, m.peer_id, m.from_id, m.date, m.message, m.out, m.edit_date, m.deleted, m.random_id, m.peer_local_id, m.peer_type, m.fanout_id, m.action_type, m.action_user_id, m.file_id, m.reply_to_msg_id, m.fwd_from_id, m.fwd_date, m.fwd_channel_id, m.fwd_channel_post, m.message_tsv, m.reply_to_trusted, m.grouped_id, m.fwd_post_author, m.ttl_period, m.expires_at, m.entities, m.sticker_document_id
+FROM messages AS m
+WHERE m.owner_id = $1::bigint
+  AND m.peer_type = $2::smallint
+  AND m.peer_id = $3::bigint
+  AND m.peer_type IN (1, 2)
+  AND m.deleted = false
+  AND (m.expires_at IS NULL OR m.expires_at > statement_timestamp())
+  AND m.file_id <> 0
+  AND ($4::bigint = 0 OR m.date <= to_timestamp($4::bigint::double precision))
+  AND ($5::bigint = 0 OR m.local_id < $5::bigint)
+  AND (m.peer_type <> 2 OR EXISTS (
+      SELECT 1 FROM chat_participants cp
+      WHERE cp.chat_id = m.peer_id AND cp.user_id = m.owner_id
+  ))
+  AND EXISTS (
+      SELECT 1 FROM files f
+      WHERE f.id = m.file_id AND f.stored = true
+        AND (f.media_kind = 'photo' OR f.subtype_rights @> ARRAY['send_videos']::text[])
+  )
+ORDER BY m.date DESC, m.local_id DESC
+LIMIT $6::int
+`
+
+type SearchResultsCalendarPageParams struct {
+	OwnerID    int64
+	PeerType   int16
+	PeerID     int64
+	OffsetDate int64
+	OffsetID   int64
+	Lim        int32
+}
+
+func (q *Queries) SearchResultsCalendarPage(ctx context.Context, arg SearchResultsCalendarPageParams) ([]Message, error) {
+	rows, err := q.db.Query(ctx, searchResultsCalendarPage,
+		arg.OwnerID,
+		arg.PeerType,
+		arg.PeerID,
+		arg.OffsetDate,
+		arg.OffsetID,
+		arg.Lim,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []Message
+	for rows.Next() {
+		var i Message
+		if err := rows.Scan(
+			&i.OwnerID,
+			&i.LocalID,
+			&i.PeerID,
+			&i.FromID,
+			&i.Date,
+			&i.Message,
+			&i.Out,
+			&i.EditDate,
+			&i.Deleted,
+			&i.RandomID,
+			&i.PeerLocalID,
+			&i.PeerType,
+			&i.FanoutID,
+			&i.ActionType,
+			&i.ActionUserID,
+			&i.FileID,
+			&i.ReplyToMsgID,
+			&i.FwdFromID,
+			&i.FwdDate,
+			&i.FwdChannelID,
+			&i.FwdChannelPost,
+			&i.MessageTsv,
+			&i.ReplyToTrusted,
+			&i.GroupedID,
+			&i.FwdPostAuthor,
+			&i.TtlPeriod,
+			&i.ExpiresAt,
+			&i.Entities,
+			&i.StickerDocumentID,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const searchResultsCalendarPeriods = `-- name: SearchResultsCalendarPeriods :many
+SELECT EXTRACT(EPOCH FROM date_trunc('day', m.date AT TIME ZONE 'UTC'))::bigint AS date,
+       MIN(m.local_id)::bigint AS min_msg_id,
+       MAX(m.local_id)::bigint AS max_msg_id,
+       COUNT(*)::int AS count
+FROM messages AS m
+WHERE m.owner_id = $1::bigint
+  AND m.peer_type = $2::smallint
+  AND m.peer_id = $3::bigint
+  AND m.peer_type IN (1, 2)
+  AND m.deleted = false
+  AND (m.expires_at IS NULL OR m.expires_at > statement_timestamp())
+  AND m.file_id <> 0
+  AND ($4::bigint = 0 OR m.date <= to_timestamp($4::bigint::double precision))
+  AND ($5::bigint = 0 OR m.local_id < $5::bigint)
+  AND (m.peer_type <> 2 OR EXISTS (
+      SELECT 1 FROM chat_participants cp
+      WHERE cp.chat_id = m.peer_id AND cp.user_id = m.owner_id
+  ))
+  AND EXISTS (
+      SELECT 1 FROM files f
+      WHERE f.id = m.file_id AND f.stored = true
+        AND (f.media_kind = 'photo' OR f.subtype_rights @> ARRAY['send_videos']::text[])
+  )
+GROUP BY date_trunc('day', m.date AT TIME ZONE 'UTC')
+ORDER BY date DESC
+`
+
+type SearchResultsCalendarPeriodsParams struct {
+	OwnerID    int64
+	PeerType   int16
+	PeerID     int64
+	OffsetDate int64
+	OffsetID   int64
+}
+
+type SearchResultsCalendarPeriodsRow struct {
+	Date     int64
+	MinMsgID int64
+	MaxMsgID int64
+	Count    int32
+}
+
+// SearchResultsCalendar is the date picker's per-day photo/video preview. Keep
+// file_id <> 0 as a top-level predicate so the partial messages_file_idx can
+// serve a large text-only history without scanning its message rows.
+func (q *Queries) SearchResultsCalendarPeriods(ctx context.Context, arg SearchResultsCalendarPeriodsParams) ([]SearchResultsCalendarPeriodsRow, error) {
+	rows, err := q.db.Query(ctx, searchResultsCalendarPeriods,
+		arg.OwnerID,
+		arg.PeerType,
+		arg.PeerID,
+		arg.OffsetDate,
+		arg.OffsetID,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []SearchResultsCalendarPeriodsRow
+	for rows.Next() {
+		var i SearchResultsCalendarPeriodsRow
+		if err := rows.Scan(
+			&i.Date,
+			&i.MinMsgID,
+			&i.MaxMsgID,
+			&i.Count,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const setDeleted = `-- name: SetDeleted :execrows
 UPDATE messages SET deleted = true WHERE owner_id = $1 AND local_id = $2 AND NOT deleted
 `

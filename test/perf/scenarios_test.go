@@ -83,6 +83,18 @@ func scenarios() []scenario {
 			name: "messages.getHistory jump to date", kind: perfreport.Read, samples: readSamples,
 			setup: jumpToDate,
 		},
+		read("messages.getSearchResultsCalendar photo video", func(e *env) call {
+			peer := userPeer(e.f.Owner, e.f.Partner)
+			middle := time.Unix(int64(e.f.MiddleDate), 0).UTC()
+			monthEnd := time.Date(middle.Year(), middle.Month()+1, 0, 23, 59, 59, 0, time.UTC)
+			return func(ctx context.Context) error {
+				_, err := e.owner.api.MessagesGetSearchResultsCalendar(ctx, &tg.MessagesGetSearchResultsCalendarRequest{
+					Peer: peer, Filter: &tg.InputMessagesFilterPhotoVideo{},
+					OffsetDate: int(monthEnd.Unix()),
+				})
+				return err
+			}
+		}),
 		read("messages.getHistory group", func(e *env) call {
 			peer := channelPeer(e.f.Owner, e.f.Group)
 			return func(ctx context.Context) error {
