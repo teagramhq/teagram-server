@@ -3,8 +3,8 @@
 // Deterministic counters block from the first run: statements per RPC, rows
 // read, sequential scans, and an identical statement count at 1x and 100x.
 // Timing regressions compare the head with its interleaved base, or main with
-// its calibrated history. Absolute budgets and within-run scale ratios are
-// reported for context but never decide the result.
+// its calibrated history. Known-scenario timing waivers can accept the p95
+// budget and within-run scale checks, but never a regression against baseline.
 package perfreport
 
 import (
@@ -35,7 +35,8 @@ const (
 	FanOut Kind = "fanout"
 )
 
-// budgetMs is the reference p95 ceiling shown in reports, not a gate.
+// budgetMs is the p95 ceiling on the 100x fixture unless a timing waiver names
+// the scenario.
 var budgetMs = map[Kind]float64{Read: 20, Write: 50, FanOut: 2000}
 
 // Row reads allow 1.5x growth across fixtures; allocations use the same ratio
@@ -44,6 +45,7 @@ var budgetMs = map[Kind]float64{Read: 20, Write: 50, FanOut: 2000}
 // RPCs from deciding.
 const (
 	scaleRatio      = 1.5
+	scaleSlackMs    = 1.0
 	regressionRatio = 1.15
 	baseMinMs       = 2.0
 	noiseSigmas     = 3
@@ -105,7 +107,11 @@ type Failure struct {
 // Checks a waiver may name. Regression against base is not among them: a
 // known violation may stay, it may not get worse.
 const (
+	CheckBudget = "budget"
+	// CheckTiming waives the p95 budget and 1x-to-100x scale-ratio checks.
+	CheckTiming  = "timing"
 	CheckQueries = "queries"
+	CheckLatency = "latency"
 	CheckRows    = "rows"
 	CheckAlloc   = "alloc"
 	CheckSeqScan = "seqscan"
@@ -120,13 +126,14 @@ const (
 // timing reports whether a check is subject to calibration-aware reporting.
 func timing(check string) bool {
 	switch check {
-	case CheckAlloc, checkSlower:
+	case CheckBudget, CheckLatency, CheckAlloc, checkSlower:
 		return true
 	}
 	return false
 }
 
 // Waiver accepts one check failing on one scenario until Issue fixes it.
+// CheckTiming accepts the p95 budget and scale-ratio checks together.
 type Waiver struct {
 	Scenario string `json:"scenario"`
 	Check    string `json:"check"`
@@ -144,7 +151,7 @@ func ParseWaivers(raw []byte) ([]Waiver, error) {
 	}
 	for _, w := range ws {
 		switch w.Check {
-		case CheckQueries, CheckRows, CheckAlloc, CheckSeqScan, CheckError, CheckUnexplained:
+		case CheckBudget, CheckTiming, CheckQueries, CheckLatency, CheckRows, CheckAlloc, CheckSeqScan, CheckError, CheckUnexplained:
 		default:
 			return nil, fmt.Errorf("waiver for %q: check %q cannot be waived", w.Scenario, w.Check)
 		}
@@ -277,7 +284,7 @@ func Evaluate(in Input) Verdict {
 		record := func(check, scan string, format string, args ...any) {
 			f := Failure{Scenario: name, Check: check, Reason: fmt.Sprintf(format, args...)}
 			for _, w := range in.Waivers {
-				if w.Scenario == name && w.Check == check && w.Scan == scan {
+				if waiverMatches(w, name, check, scan) {
 					used[w] = true
 					f.Issue = w.Issue
 					if !slices.Contains(row.Known, w.Issue) {
@@ -329,10 +336,16 @@ func Evaluate(in Input) Verdict {
 			continue
 		}
 		s, l := row.Small, row.Large
+		if budget := budgetMs[l.Kind]; l.P95Ms > budget {
+			fail(CheckBudget, "p95 %.1f ms at %s, budget %.0f ms", l.P95Ms, Large, budget)
+		}
 		if s.Queries != l.Queries {
 			fail(CheckQueries, "queries %d at %s, %d at %s", s.Queries, Small, l.Queries, Large)
 		}
 		if !l.FullSet {
+			if l.P50Ms > scaleRatio*s.P50Ms && l.P50Ms-s.P50Ms > scaleSlackMs {
+				fail(CheckLatency, "p50 %.1f ms at %s is %.1fx the %s %.1f ms", l.P50Ms, Large, l.P50Ms/s.P50Ms, Small, s.P50Ms)
+			}
 			if float64(l.RowsRead) > scaleRatio*float64(s.RowsRead) && l.RowsRead-s.RowsRead > rowsSlack {
 				fail(CheckRows, "rows read %d at %s is %.1fx the %s %d", l.RowsRead, Large, ratio(l.RowsRead, s.RowsRead), Small, s.RowsRead)
 			}
@@ -369,6 +382,18 @@ func Evaluate(in Input) Verdict {
 		}
 	}
 	return v
+}
+
+// waiverMatches applies a timing waiver to the two size-based checks it names;
+// base regressions and allocation growth remain independently blocking.
+func waiverMatches(w Waiver, scenario, check, scan string) bool {
+	if w.Scenario != scenario {
+		return false
+	}
+	if w.Check == CheckTiming {
+		return scan == "" && (check == CheckBudget || check == CheckLatency)
+	}
+	return w.Check == check && w.Scan == scan
 }
 
 type key struct{ name, fixture string }
@@ -520,7 +545,7 @@ func Markdown(v Verdict) string {
 		base = fmt.Sprintf("%d interleaved base rounds", v.BaseRounds)
 	}
 	fmt.Fprintf(&b, "Medians of %d rounds; %s. Reference budgets are p95 on the 100x fixture. "+
-		"Query counts, rows read and sequential scans block; p50 timing regressions compare with the interleaved base or calibrated main history and block once %d main runs have set the noise band.\n\n",
+		"Query counts, rows read and sequential scans block. P50 regressions compare with the interleaved base or calibrated main history; p95 and 1x/100x checks also block after %d main runs unless a timing waiver names the scenario.\n\n",
 		v.Rounds, base, Calibration)
 	b.WriteString("| Scenario | Kind | p50 1x (ms) | p50 100x (ms) | p95 100x (ms) | Reference p95 (ms) | Noise band | Queries 1x / 100x | Rows read 1x / 100x | Alloc 100x | p50 vs main | Status |\n")
 	b.WriteString("|---|---|---|---|---|---|---|---|---|---|---|---|\n")

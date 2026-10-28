@@ -1,6 +1,7 @@
 package perfreport_test
 
 import (
+	"os"
 	"strings"
 	"testing"
 
@@ -112,19 +113,23 @@ func TestEvaluateReportsBaseRelativeTimingUntilCalibrated(t *testing.T) {
 	}
 }
 
-func TestEvaluateUsesBaseRelativeTimingInsteadOfAbsoluteLimits(t *testing.T) {
+func TestEvaluateWaivesScaleLimitsButChecksBaseRelativeTiming(t *testing.T) {
 	base := rounds(pair("read", perfreport.Read,
 		result(2, 3, 5, 100), result(10, 40, 5, 100))...)
 	head := rounds(pair("read", perfreport.Read,
 		result(2, 3, 5, 100), result(10.1, 44, 5, 100))...)
+	waivers := []perfreport.Waiver{{Scenario: "read", Check: perfreport.CheckTiming, Issue: "MAIN-2811"}}
 	v := perfreport.Evaluate(perfreport.Input{
-		Head: head, Base: base, History: calibrated("read", perfreport.Calibration, 10, 0.5),
+		Head: head, Base: base, History: calibrated("read", perfreport.Calibration, 10, 0.5), Waivers: waivers,
 	})
 	if got := reasons(v.TimingFailures); got != "" {
-		t.Fatalf("base-relative timing checks failed despite a 1%% p50 change: %s", got)
+		t.Fatalf("base-relative timing failed despite a 1%% p50 change: %s", got)
 	}
 	if got := reasons(v.Reported); got != "" {
 		t.Fatalf("calibrated base-relative timing was reported as uncalibrated: %s", got)
+	}
+	if len(v.Waived) != 2 {
+		t.Fatalf("waived = %+v, want the p95 budget and scale-ratio checks", v.Waived)
 	}
 }
 
@@ -136,6 +141,52 @@ func TestEvaluateComparesMainTimingAgainstCalibratedHistory(t *testing.T) {
 	})
 	if got := reasons(v.TimingFailures); !strings.Contains(got, "read: p50 13.5 ms at 100x is 42% slower than main history's 9.5 ms") {
 		t.Fatalf("timing failures = %q, want main-history regression", got)
+	}
+}
+
+func TestEvaluateWaivesKnownTimingChecksOnlyForNamedScenario(t *testing.T) {
+	known := "messages.search"
+	waivers := []perfreport.Waiver{{Scenario: known, Check: perfreport.CheckTiming, Issue: "MAIN-2578"}}
+	base := rounds(pair(known, perfreport.Read, result(2, 3, 3, 100), result(2, 3, 3, 100))...)
+	head := rounds(pair(known, perfreport.Read, result(2, 3, 3, 100), result(6, 25, 3, 100))...)
+	v := perfreport.Evaluate(perfreport.Input{
+		Head: head, Base: base, History: calibrated(known, perfreport.Calibration, 2, 0.1), Waivers: waivers,
+	})
+	if len(v.Waived) != 2 {
+		t.Fatalf("waived = %+v, want the budget and scale-ratio checks", v.Waived)
+	}
+	waivedChecks := map[string]bool{}
+	for _, f := range v.Waived {
+		waivedChecks[f.Check] = true
+		if f.Issue != "MAIN-2578" {
+			t.Errorf("waiver issue = %q, want MAIN-2578", f.Issue)
+		}
+	}
+	if !waivedChecks[perfreport.CheckBudget] || !waivedChecks[perfreport.CheckLatency] {
+		t.Errorf("waived checks = %v, want budget and scale-ratio", waivedChecks)
+	}
+	if len(v.Failures) != 0 {
+		t.Errorf("deterministic failures = %s", reasons(v.Failures))
+	}
+	if got := reasons(v.TimingFailures); !strings.Contains(got, "slower than main") || strings.Contains(got, "budget") || strings.Contains(got, "the 1x") {
+		t.Errorf("timing failures = %q, want only the unwaived base regression", got)
+	}
+
+	counterRegression := pair(known, perfreport.Read, result(2, 3, 3, 100), result(6, 25, 4, 100))
+	v = perfreport.Evaluate(perfreport.Input{Head: rounds(counterRegression...), Waivers: waivers})
+	if got := reasons(v.Failures); !strings.Contains(got, "queries 3 at 1x, 4 at 100x") {
+		t.Errorf("deterministic failures = %q, want query-count growth to block", got)
+	}
+
+	untracked := "upload.getFile"
+	untrackedHead := rounds(pair(untracked, perfreport.Read,
+		result(2, 3, 3, 100), result(6, 25, 3, 100))...)
+	v = perfreport.Evaluate(perfreport.Input{
+		Head: untrackedHead, History: calibrated(untracked, perfreport.Calibration, 2, 0.1), Waivers: waivers,
+	})
+	got := reasons(v.TimingFailures)
+	if !strings.Contains(got, "budget") || !strings.Contains(got, "the 1x") || !strings.Contains(got, "slower than main history") || len(v.TimingFailures) != 3 {
+		t.Fatalf("untracked timing failures = %q, want budget, scale-ratio and baseline checks to block", got)
 	}
 }
 
@@ -217,14 +268,46 @@ func TestParseWaiversRejectsUnwaivableChecks(t *testing.T) {
 	for _, raw := range []string{
 		`[{"scenario":"x","check":"regression","issue":"MAIN-1"}]`,
 		`[{"scenario":"x","check":"slower","issue":"MAIN-1"}]`,
-		`[{"scenario":"x","check":"budget"}]`,
+		`[{"scenario":"x","check":"timing"}]`,
 	} {
 		if _, err := perfreport.ParseWaivers([]byte(raw)); err == nil {
 			t.Errorf("%s was accepted", raw)
 		}
 	}
-	if w, err := perfreport.ParseWaivers([]byte(`[{"scenario":"x","check":"seqscan","issue":"MAIN-1","scan":"messages#1a2b3c4d"}]`)); err != nil || len(w) != 1 {
+	if w, err := perfreport.ParseWaivers([]byte(`[{"scenario":"x","check":"seqscan","issue":"MAIN-1","scan":"messages#1a2b3c4d"},{"scenario":"y","check":"timing","issue":"MAIN-2"}]`)); err != nil || len(w) != 2 {
 		t.Fatalf("waivers = %v, %v", w, err)
+	}
+}
+
+func TestKnownViolationTimingWaiversNameTheirIssues(t *testing.T) {
+	raw, err := os.ReadFile("../known_violations.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	waivers, err := perfreport.ParseWaivers(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]string{
+		"messages.getHistory group":             "MAIN-2577",
+		"messages.search":                       "MAIN-2578",
+		"contacts.getContacts":                  "MAIN-2579",
+		"updates.getDifference 1 day offline":   "MAIN-2580",
+		"updates.getDifference 30 days offline": "MAIN-2580",
+		"contacts.search":                       "MAIN-2797",
+		"messages.getDialogs":                   "MAIN-2802",
+	}
+	for scenario, issue := range want {
+		found := false
+		for _, waiver := range waivers {
+			if waiver.Scenario == scenario && waiver.Check == perfreport.CheckTiming && waiver.Issue == issue {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("known_violations.json has no timing waiver for %s (%s)", scenario, issue)
+		}
 	}
 }
 

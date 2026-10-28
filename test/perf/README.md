@@ -45,12 +45,13 @@ table above 10,000 rows.
   branch, the same statement count at 1x and 100x, rows read at 100x within 1.5x
   of 1x, no sequential scan, no statement Postgres cannot EXPLAIN, no failed
   scenario.
-- Reported on every run: p95 reference budgets (reads 20 ms, writes 50 ms,
-  fan-out 2 s) and the 1x/100x p50 ratio. These values are context only. A p50
-  regression blocks once 20 `main` runs have given the scenario a noise band:
-  PR heads compare with the interleaved base; `main` compares with its history
-  median. A regression must exceed max(15%, 3 standard deviations) and 2 ms.
-  A timing failure is measured once more before it counts.
+- Reported on every run: p95 budgets (reads 20 ms, writes 50 ms, fan-out 2 s)
+  and the 1x/100x p50 ratio. After 20 `main` runs, these checks block unless a
+  scenario has a `timing` waiver. Independently, p50 regressions compare with
+  the interleaved base or calibrated `main` history and remain blocking even
+  when a scenario has a timing waiver. That regression must exceed max(15%, 3
+  standard deviations) and 2 ms. A timing failure is measured once more before
+  it counts.
 
 `required_scenarios.json` lists the scenarios the gate must see measured on
 both fixtures. It is kept apart from the harness on purpose: a scenario dropped
@@ -58,9 +59,11 @@ from `scenarios()` still fails as unmeasured, and a run limited by
 `TG_PERF_ONLY` fails rather than passing on a subset.
 
 A check `main` already fails is listed in `known_violations.json` with the issue
-that fixes it. Base regressions cannot be listed. A sequential-scan entry names one scan by
-the `table#fingerprint` the report prints (a hash of the full statement), so any
-other scan in that scenario still fails.
+that fixes it. A `timing` entry waives the scenario's p95 budget and 1x-to-100x
+scale-ratio checks; it does not waive allocation growth or regressions against
+the base branch. Base regressions cannot be listed. A sequential-scan entry
+names one scan by the `table#fingerprint` the report prints (a hash of the full
+statement), so any other scan in that scenario still fails.
 
 ## CI
 
