@@ -1,0 +1,44 @@
+{
+  "source": {
+    "live_revision": "b5d84718a4a2c0c059acb07d3875e3b212fa06d4",
+    "candidate_head": "35dd14574b0fc94bde1048120629c48cfb97c639",
+    "captured_at_utc": "2026-10-25T19:00:03Z",
+    "tailnet_env": "absent",
+    "container_env_added": "none",
+    "comparison_rows": 12
+  },
+  "baseline": {
+    "config_sha256": "a94c4597e912e70814a39294042c41d1bd144828039bd6fb86040dd9e69dac88",
+    "env_sha256": "2efad4ed1c96f96834f07b81e2a02a9825bbd0b7806f9db3c280ae360df7fa65",
+    "override_sha256": "22d9ec42b6e6460e6bc3365a5e6ca7c1b103c57142097bd571d4dd57b91ca7a4",
+    "stop_grace_period": "2m0s",
+    "compose_logging_policy": "syslog-v1",
+    "compose_log_login_codes": "false",
+    "media_key_source": "/etc/teagramd/media-keys",
+    "media_key_current": "1",
+    "compose_public_ws_2446": "true",
+    "exposure_public_ws_2446": "true",
+    "compose_replica_count": "1",
+    "compose_client_addr_trust": "socket",
+    "provenance": {
+      "compose_source": "selected-compose-render"
+    }
+  },
+  "preflight": {
+    "config_sha256": "a94c4597e912e70814a39294042c41d1bd144828039bd6fb86040dd9e69dac88",
+    "env_sha256": "2efad4ed1c96f96834f07b81e2a02a9825bbd0b7806f9db3c280ae360df7fa65",
+    "override_sha256": "22d9ec42b6e6460e6bc3365a5e6ca7c1b103c57142097bd571d4dd57b91ca7a4",
+    "stop_grace_period": "2m0s",
+    "compose_logging_policy": "syslog-v1",
+    "compose_log_login_codes": "false",
+    "media_key_source": "/etc/teagramd/media-keys",
+    "media_key_current": "1",
+    "compose_public_ws_2446": "true",
+    "exposure_public_ws_2446": "true",
+    "compose_replica_count": "1",
+    "compose_client_addr_trust": "socket",
+    "provenance": {
+      "compose_source": "selected-compose-render"
+    }
+  }
+}
