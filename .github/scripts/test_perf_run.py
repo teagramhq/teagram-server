@@ -45,9 +45,64 @@ SH
   *) exit 64 ;;
 esac
 """
+FAKE_SEED_GO = """#!/usr/bin/env bash
+set -euo pipefail
+printf 'go %s\\n' "$*" >> "$PERF_TEST_CALLS"
+"""
 
 
 class PerfRunTests(unittest.TestCase):
+    def test_seed_rebuilds_the_message_history_index_after_fixture_writes(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            bin_dir = root / "bin"
+            bin_dir.mkdir()
+            runner_temp = root / "runner-temp"
+            runner_temp.mkdir()
+            calls = root / "calls"
+            for name, content in (
+                ("atlas", FAKE_ATLAS),
+                ("docker", FAKE_DOCKER),
+                ("go", FAKE_SEED_GO),
+            ):
+                executable = bin_dir / name
+                executable.write_text(content, encoding="utf-8")
+                executable.chmod(0o755)
+
+            env = {
+                **os.environ,
+                "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}",
+                "PERF_CACHE": str(root / "cache"),
+                "PERF_PG_CONTAINER": "perf-test-pg",
+                "PERF_PG_URL": "postgres://postgres:perf@localhost:5432/",
+                "PERF_TEST_CALLS": str(calls),
+                "RUNNER_TEMP": str(runner_temp),
+            }
+            result = subprocess.run(
+                ["bash", str(SCRIPT), "seed"],
+                cwd=ROOT,
+                env=env,
+                capture_output=True,
+                text=True,
+                timeout=60,
+                check=False,
+            )
+
+            self.assertEqual(0, result.returncode, result.stdout + result.stderr)
+            lines = calls.read_text(encoding="utf-8").splitlines()
+            seed = next(i for i, line in enumerate(lines) if line.startswith("go test -tags performance"))
+            drops = [i for i, line in enumerate(lines) if "DROP INDEX messages_owner_peer_date_idx" in line]
+            creates = [i for i, line in enumerate(lines) if "CREATE INDEX messages_owner_peer_date_idx" in line]
+            analyzes = [i for i, line in enumerate(lines) if "vacuumdb -U postgres -q --analyze" in line]
+            dumps = [i for i, line in enumerate(lines) if "pg_dump -U postgres -Fc -Z 3 --no-acl" in line]
+
+            self.assertEqual(2, len(drops), lines)
+            self.assertEqual(2, len(creates), lines)
+            self.assertLess(max(drops), seed, lines)
+            self.assertLess(seed, min(creates), lines)
+            self.assertLess(max(creates), min(analyzes), lines)
+            self.assertLess(max(analyzes), min(dumps), lines)
+
     def test_invalid_base_sha_fails_before_measurement(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
