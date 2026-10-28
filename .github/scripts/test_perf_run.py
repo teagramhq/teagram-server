@@ -37,11 +37,12 @@ case "${1:-}" in
     [[ -n "$output" ]]
     cat > "$output" <<'SH'
 #!/usr/bin/env bash
+printf 'fixture version %s\\n' "${TG_PERF_FIXTURE_VERSION:-}" >> "$PERF_TEST_CALLS"
 exit 0
 SH
     chmod +x "$output"
     ;;
-  run) ;;
+  run) echo "# fake performance report" ;;
   *) exit 64 ;;
 esac
 """
@@ -150,6 +151,62 @@ class PerfRunTests(unittest.TestCase):
                 result.stdout + result.stderr,
             )
             self.assertFalse(calls.exists(), "measurement started with an invalid base SHA")
+
+    def test_changed_fixture_seeder_passes_fixture_version_to_harness(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            bin_dir = root / "bin"
+            bin_dir.mkdir()
+            runner_temp = root / "runner-temp"
+            runner_temp.mkdir()
+            calls = root / "calls"
+            fake_git = """#!/usr/bin/env bash
+set -euo pipefail
+printf 'git %s\\n' "$*" >> "$PERF_TEST_CALLS"
+if [[ "${1:-}" == diff ]]; then exit 1; fi
+"""
+            for name, content in (
+                ("atlas", FAKE_ATLAS),
+                ("docker", FAKE_DOCKER),
+                ("git", fake_git),
+                ("go", FAKE_GO),
+            ):
+                executable = bin_dir / name
+                executable.write_text(content, encoding="utf-8")
+                executable.chmod(0o755)
+
+            env = {
+                **os.environ,
+                "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}",
+                "PERF_BASE_SHA": "base-sha",
+                "PERF_CACHE": str(root / "cache"),
+                "PERF_HISTORY": str(root / "history"),
+                "PERF_PG_CONTAINER": "perf-test-pg",
+                "PERF_PG_URL": "postgres://postgres:perf@localhost:5432/",
+                "PERF_RECORD": "",
+                "PERF_ROUNDS": "1",
+                "PERF_TEST_CALLS": str(calls),
+                "PERF_WORK": str(root / "work"),
+                "FIXTURE_VERSION": "fixture-current-v2",
+                "RUNNER_TEMP": str(runner_temp),
+            }
+            env.pop("GITHUB_STEP_SUMMARY", None)
+            result = subprocess.run(
+                ["bash", str(SCRIPT), "measure"],
+                cwd=ROOT,
+                env=env,
+                capture_output=True,
+                text=True,
+                timeout=60,
+                check=False,
+            )
+
+            self.assertEqual(0, result.returncode, result.stdout + result.stderr)
+            self.assertIn("Base comparison skipped: fixture seeder changed", result.stdout)
+            self.assertIn(
+                "fixture version fixture-current-v2",
+                calls.read_text(encoding="utf-8").splitlines(),
+            )
 
 
 if __name__ == "__main__":

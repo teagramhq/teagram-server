@@ -15,9 +15,8 @@ import (
 	"strings"
 )
 
-// Version is the report format. A base report in another format is not
-// compared.
-const Version = 1
+// Version is the report format. A report in another format is not compared.
+const Version = 2
 
 // Fixture names.
 const (
@@ -59,6 +58,8 @@ const Calibration = 20
 // Report is one harness run over both fixtures.
 type Report struct {
 	Version int `json:"version"`
+	// FixtureVersion is the hash of the fixture seeder and server setup files.
+	FixtureVersion string `json:"fixture_version,omitempty"`
 	// Scenarios names every scenario the harness was built to run, so one
 	// that produced no result is still judged, as missing.
 	Scenarios []string `json:"scenarios"`
@@ -226,7 +227,7 @@ func Evaluate(in Input) Verdict {
 	v := Verdict{Rounds: len(in.Head), BaseRounds: len(in.Base)}
 	headAgg, order := aggregate(in.Head)
 	baseAgg, _ := aggregate(in.Base)
-	bands := noise(in.History)
+	bands := noise(matchingHistory(in.Head, in.History))
 	// checked holds the scenarios measured on both fixtures, the only ones whose
 	// unused waivers are stale.
 	checked := map[string]bool{}
@@ -410,6 +411,15 @@ func scanKey(scan string) string {
 func Aggregate(reports []Report) Report {
 	agg, order := aggregate(reports)
 	out := Report{Version: Version}
+	if len(reports) > 0 {
+		out.FixtureVersion = reports[0].FixtureVersion
+		for _, rep := range reports[1:] {
+			if rep.FixtureVersion != out.FixtureVersion {
+				out.FixtureVersion = ""
+				break
+			}
+		}
+	}
 	for _, rep := range reports {
 		for _, name := range rep.Scenarios {
 			if !slices.Contains(out.Scenarios, name) {
@@ -431,6 +441,27 @@ type band struct {
 	p50 float64
 	sd  float64
 	n   int
+}
+
+// matchingHistory keeps the timing baseline on the same fixture generation as
+// the current head. Reports without provenance cannot establish that match.
+func matchingHistory(head, history []Report) []Report {
+	if len(head) == 0 || head[0].FixtureVersion == "" {
+		return nil
+	}
+	version := head[0].FixtureVersion
+	for _, rep := range head[1:] {
+		if rep.FixtureVersion != version {
+			return nil
+		}
+	}
+	matching := make([]Report, 0, len(history))
+	for _, rep := range history {
+		if rep.FixtureVersion == version {
+			matching = append(matching, rep)
+		}
+	}
+	return matching
 }
 
 // noise summarizes each scenario's 100x p50 across main runs.

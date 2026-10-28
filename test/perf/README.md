@@ -48,8 +48,9 @@ table above 10,000 rows.
 - Reported on every run: p95 budgets (reads 20 ms, writes 50 ms, fan-out 2 s)
   and the 1x/100x p50 ratio. After 20 `main` runs, these checks block unless a
   scenario has a `timing` waiver. Independently, p50 regressions compare with
-  the interleaved base or calibrated `main` history and remain blocking even
-  when a scenario has a timing waiver. That regression must exceed max(15%, 3
+  the interleaved base or calibrated `main` history from the same fixture
+  version and remain blocking even when a scenario has a timing waiver. That
+  regression must exceed max(15%, 3
   standard deviations) and 2 ms. A timing failure is measured once more before
   it counts.
 
@@ -75,7 +76,9 @@ public release already exists. A published release is left unchanged, while
 an existing draft is resumed for publication. PRs prefer that snapshot, reuse
 the legacy cache for measurement only, or seed fixtures on their branch when
 neither cache is available; they then measure the base and head interleaved.
-If the fixture seeder changed, the head is measured without a base comparison.
+Reports carry the fixture version, and only matching versions contribute to
+main's timing history. If the fixture seeder changed, the head is measured
+without a base comparison.
 
 The provenance sidecar records the commit that seeded the dump. It is cache
 metadata, not a fixture asset. Each `main` run also publishes the snapshot as a

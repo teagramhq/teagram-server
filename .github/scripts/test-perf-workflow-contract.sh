@@ -9,6 +9,7 @@ expected_restore_if="steps.snapshot.outputs.cache-hit == 'true' || steps.legacy-
 expected_seed_if="steps.snapshot.outputs.cache-hit != 'true' && steps.legacy-snapshot.outputs.cache-hit != 'true'"
 expected_fixture_key="perf-fixture-v2-\${{ hashFiles('test/perf/fixture_test.go', 'test/perf/server_test.go') }}"
 expected_legacy_fixture_key="perf-fixture-\${{ hashFiles('test/perf/fixture_test.go', 'test/perf/server_test.go') }}"
+expected_fixture_version="\${{ hashFiles('test/perf/fixture_test.go', 'test/perf/server_test.go') }}"
 
 fail() {
   printf '%s: %s\n' "$workflow" "$1" >&2
@@ -88,6 +89,8 @@ done <<< "$dependency_dirs"
   fail 'the current branch must seed fixtures when the snapshot cache misses'
 [[ "$(query '.jobs."rpc-performance".steps[] | select(.name == "Seed fixtures from this branch") | .run')" == 'bash .github/scripts/perf-run.sh seed' ]] ||
   fail 'a cache miss must use the normal fixture seeder'
+[[ "$(query '.jobs."rpc-performance".steps[] | select(.name == "Measure base and head") | .env.FIXTURE_VERSION')" == "$expected_fixture_version" ]] ||
+  fail 'performance reports must identify the fixture seeder version'
 
 missing_snapshot_step="$(query '.jobs."rpc-performance".steps[] | select(.name == "No snapshot for this fixture") | .name')"
 [[ -z "$missing_snapshot_step" ]] || fail 'a missing main snapshot must not be a standalone failure'
