@@ -135,6 +135,7 @@ type chatParticipantDeleteEnvelope struct {
 }
 
 type updateCollector struct {
+	batches        chan tg.UpdatesClass
 	newMsg         chan *tg.Message
 	newMsgPts      chan messagePtsUpdate
 	editMsg        chan *tg.Message
@@ -172,6 +173,7 @@ type updateCollector struct {
 
 func newUpdateCollector() *updateCollector {
 	return &updateCollector{
+		batches:        make(chan tg.UpdatesClass, 64),
 		newMsg:         make(chan *tg.Message, 4),
 		newMsgPts:      make(chan messagePtsUpdate, 64),
 		editMsg:        make(chan *tg.Message, 4),
@@ -209,6 +211,7 @@ func newUpdateCollector() *updateCollector {
 }
 
 func (u *updateCollector) Handle(_ context.Context, upd tg.UpdatesClass) error {
+	send(u.batches, upd)
 	switch t := upd.(type) {
 	case *tg.Updates:
 		for _, x := range t.Updates {
@@ -588,7 +591,6 @@ func runBoundInteractive(
 }
 
 func TestMessagingRealtime(t *testing.T) {
-	t.Parallel()
 	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 	defer cancel()
 
@@ -636,18 +638,19 @@ func TestMessagingRealtime(t *testing.T) {
 		)
 	}
 
-	collA, collB := newUpdateCollector(), newUpdateCollector()
-	clientA, clientB := newClient(collA), newClient(collB)
+	collA, collB, collB2 := newUpdateCollector(), newUpdateCollector(), newUpdateCollector()
+	clientA, clientB, clientB2 := newClient(collA), newClient(collB), newClient(collB2)
 	const phoneA, phoneB = "+15551280001", "+15551280002"
 	seedUsernameUsers(t, ctx, st, phoneA, phoneB)
 
-	aCmds, bCmds := make(chan command), make(chan command)
-	aID, bID := make(chan int64, 1), make(chan int64, 1)
-	errA, errB := make(chan error, 1), make(chan error, 1)
+	aCmds, bCmds, b2Cmds := make(chan command), make(chan command), make(chan command)
+	aID, bID, b2ID := make(chan int64, 1), make(chan int64, 1), make(chan int64, 1)
+	errA, errB, errB2 := make(chan error, 1), make(chan error, 1), make(chan error, 1)
 	go func() { errA <- runInteractive(ctx, clientA, flowFor(phoneA), aID, aCmds) }()
 	go func() { errB <- runInteractive(ctx, clientB, flowFor(phoneB), bID, bCmds) }()
+	go func() { errB2 <- runInteractive(ctx, clientB2, flowFor(phoneB), b2ID, b2Cmds) }()
 
-	var aUserID, bUserID int64
+	var aUserID, bUserID, b2UserID int64
 	select {
 	case aUserID = <-aID:
 	case <-ctx.Done():
@@ -657,6 +660,14 @@ func TestMessagingRealtime(t *testing.T) {
 	case bUserID = <-bID:
 	case <-ctx.Done():
 		t.Fatalf("client B login timeout: %v", ctx.Err())
+	}
+	select {
+	case b2UserID = <-b2ID:
+	case <-ctx.Done():
+		t.Fatalf("client B second session login timeout: %v", ctx.Err())
+	}
+	if b2UserID != bUserID {
+		t.Fatalf("B second session user id = %d, want %d", b2UserID, bUserID)
 	}
 
 	exec := func(cmds chan command, fn func(ctx context.Context, c *tg.Client) error) error {
@@ -672,7 +683,23 @@ func TestMessagingRealtime(t *testing.T) {
 	peerB := peerUser(aUserID, bUserID)
 	peerA := peerUser(bUserID, aUserID)
 
-	// 1. Real-time proof: A sends, B receives updateNewMessage live.
+	var bDialogsBefore tg.MessagesDialogsClass
+	if err := exec(bCmds, func(ctx context.Context, c *tg.Client) error {
+		result, err := c.MessagesGetDialogs(ctx, &tg.MessagesGetDialogsRequest{
+			OffsetPeer: &tg.InputPeerEmpty{},
+			Limit:      20,
+		})
+		if err != nil {
+			return err
+		}
+		bDialogsBefore = result
+		return nil
+	}); err != nil {
+		t.Fatalf("B getDialogs before first message: %v", err)
+	}
+	assertNoUserDialog(t, bDialogsBefore, aUserID)
+
+	// 1. The first message from A creates B's dialog and reaches both live sessions.
 	if err := exec(aCmds, func(ctx context.Context, c *tg.Client) error {
 		_, err := c.MessagesSendMessage(ctx, &tg.MessagesSendMessageRequest{
 			Peer: peerB, Message: "hello realtime", RandomID: 12345,
@@ -685,6 +712,28 @@ func TestMessagingRealtime(t *testing.T) {
 	if got.Message != "hello realtime" {
 		t.Fatalf("B received %q, want %q", got.Message, "hello realtime")
 	}
+	gotB2 := recvOrCtx(t, ctx, collB2.newMsg, "B second session updateNewMessage")
+	if gotB2.Message != "hello realtime" {
+		t.Fatalf("B second session received %q, want %q", gotB2.Message, "hello realtime")
+	}
+	assertPushHasUserEntity(t, ctx, collB, "hello realtime", aUserID, "B first-message push")
+	assertPushHasUserEntity(t, ctx, collB2, "hello realtime", aUserID, "B second-session first-message push")
+
+	var bDialogsAfter tg.MessagesDialogsClass
+	if err := exec(bCmds, func(ctx context.Context, c *tg.Client) error {
+		result, err := c.MessagesGetDialogs(ctx, &tg.MessagesGetDialogsRequest{
+			OffsetPeer: &tg.InputPeerEmpty{},
+			Limit:      20,
+		})
+		if err != nil {
+			return err
+		}
+		bDialogsAfter = result
+		return nil
+	}); err != nil {
+		t.Fatalf("B getDialogs after first message: %v", err)
+	}
+	assertUserDialog(t, bDialogsAfter, aUserID, "hello realtime")
 
 	// 2. History on both sides shows the message.
 	assertHistory := func(cmds chan command, peer tg.InputPeerClass, who string) {
@@ -752,12 +801,107 @@ func TestMessagingRealtime(t *testing.T) {
 
 	close(aCmds)
 	close(bCmds)
-	if err := <-errA; err != nil && !errors.Is(err, context.Canceled) {
-		t.Errorf("client A run: %v", err)
+	close(b2Cmds)
+	for _, result := range []struct {
+		name string
+		err  error
+	}{{"client A", <-errA}, {"client B", <-errB}, {"client B second session", <-errB2}} {
+		if result.err != nil && !errors.Is(result.err, context.Canceled) {
+			t.Errorf("%s run: %v", result.name, result.err)
+		}
 	}
-	if err := <-errB; err != nil && !errors.Is(err, context.Canceled) {
-		t.Errorf("client B run: %v", err)
+}
+
+func assertPushHasUserEntity(t *testing.T, ctx context.Context, coll *updateCollector, message string, userID int64, label string) {
+	t.Helper()
+	for {
+		batch := recvOrCtx(t, ctx, coll.batches, label+" envelope")
+		var updates []tg.UpdateClass
+		var users []tg.UserClass
+		switch envelope := batch.(type) {
+		case *tg.Updates:
+			updates, users = envelope.Updates, envelope.Users
+		case *tg.UpdatesCombined:
+			updates, users = envelope.Updates, envelope.Users
+		default:
+			continue
+		}
+		for _, raw := range updates {
+			newMessage, ok := raw.(*tg.UpdateNewMessage)
+			if !ok {
+				continue
+			}
+			got, ok := newMessage.Message.(*tg.Message)
+			if ok && got.Message == message {
+				assertLiveUserEntity(t, users, userID, label)
+				return
+			}
+		}
 	}
+}
+
+func assertLiveUserEntity(t *testing.T, users []tg.UserClass, userID int64, label string) {
+	t.Helper()
+	for _, raw := range users {
+		switch user := raw.(type) {
+		case *tg.User:
+			if user.ID == userID {
+				if user.AccessHash == 0 {
+					t.Fatalf("%s user %d has no access hash", label, userID)
+				}
+				return
+			}
+		case *tg.UserEmpty:
+			if user.ID == userID {
+				t.Fatalf("%s contains UserEmpty for sender %d", label, userID)
+			}
+		}
+	}
+	t.Fatalf("%s omits sender %d from its users", label, userID)
+}
+
+func assertNoUserDialog(t *testing.T, result tg.MessagesDialogsClass, userID int64) {
+	t.Helper()
+	for _, raw := range dialogRows(t, result) {
+		dialog, ok := raw.(*tg.Dialog)
+		if !ok {
+			continue
+		}
+		peer, ok := dialog.Peer.(*tg.PeerUser)
+		if ok && peer.UserID == userID {
+			t.Fatalf("B getDialogs already contains a conversation with user %d", userID)
+		}
+	}
+}
+
+func assertUserDialog(t *testing.T, result tg.MessagesDialogsClass, userID int64, message string) {
+	t.Helper()
+	for _, raw := range dialogRows(t, result) {
+		dialog, ok := raw.(*tg.Dialog)
+		if !ok {
+			continue
+		}
+		peer, ok := dialog.Peer.(*tg.PeerUser)
+		if !ok || peer.UserID != userID {
+			continue
+		}
+		if dialog.TopMessage != 1 {
+			t.Fatalf("first-message dialog top_message = %d, want 1", dialog.TopMessage)
+		}
+		modified, ok := result.AsModified()
+		if !ok {
+			t.Fatalf("getDialogs result %T has no user/message vectors", result)
+		}
+		for _, rawMessage := range modified.GetMessages() {
+			got, ok := rawMessage.(*tg.Message)
+			if ok && got.ID == 1 && got.Message == message {
+				assertLiveUserEntity(t, modified.GetUsers(), userID, "B getDialogs")
+				return
+			}
+		}
+		t.Fatalf("first-message dialog omits top message %q", message)
+	}
+	t.Fatalf("B getDialogs omits first-message dialog with user %d", userID)
 }
 
 // TestMessagingOfflineBackfill proves the getDifference backstop: a message sent

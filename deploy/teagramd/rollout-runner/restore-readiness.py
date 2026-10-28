@@ -22,7 +22,7 @@ import tempfile
 import threading
 import time
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 
 # Use the public, digest-preserving mirror because this gate refuses ambient registry credentials.
@@ -121,6 +121,14 @@ SAFE_CATEGORIES = {
     "assertions_passed",
     "rollout_in_progress",
 }
+CLEANUP_FAILURE_STEPS = frozenset(
+    {"gateway", "processes", "build-inputs", "files", "foreign-inventory", "containers", "images", "networks-and-volumes"}
+)
+FOREIGN_INVENTORY_SUMMARY_ITEM = r"(?:[a-z-]+\(invalid-shape\)|(?:containers|volumes|networks|images)\(added=[0-9]+,removed=[0-9]+,fields=(?:none|[a-z_,]+)\))"
+FOREIGN_INVENTORY_DIAGNOSTIC = re.compile(
+    rf"(?:unverified:(?:DrillFailure|KeyError|TypeError|ValueError|JSONDecodeError|UnicodeDecodeError)|"
+    rf"changed:(?:unknown|{FOREIGN_INVENTORY_SUMMARY_ITEM}(?:;{FOREIGN_INVENTORY_SUMMARY_ITEM})*))"
+)
 SAFE_CLEANUP_OPERATIONS = {
     "build_input_removal",
     "cleanup_deadline",
@@ -157,16 +165,354 @@ SAFE_CLEANUP_ERRORS = {
 }
 IMAGE_TOKEN_LABEL = "com.teagram.restore-readiness.token"
 IMAGE_ROLE_LABEL = "com.teagram.restore-readiness.role"
+COMPOSE_PROJECT_LABEL = "com.docker.compose.project"
 APP_MEMORY = 768 * 1024 * 1024
 PG_MEMORY = 1024 * 1024 * 1024
 CLIENT_MEMORY = 512 * 1024 * 1024
 MAX_CAPTURE = 2 * 1024 * 1024
+MAX_FOREIGN_INVENTORY = 1024 * 1024
 MAX_ARCHIVE = 256 * 1024 * 1024
 MAX_LOCAL_DUMP_BYTES = 512 * 1024 * 1024
 MAX_LOCAL_AUTH_KEYS = 100_000
 LOCAL_DUMP_NAME = re.compile(r"^pgdump-pre-(?:[0-9a-f]{7,40}|[0-9a-f]{7}-[0-9]{8}T[0-9]{6}Z)\.sql$")
 LOCAL_DUMP_LEAK_MARKER = b"RESTORE_READINESS_LOCAL_DUMP_LEAK_MARKER"
 RESTORE_BOOTSTRAP_ROLE = "restore_bootstrap"
+
+CONTAINER_INVENTORY_TEMPLATE = r'''{{.Id}}{{"\n"}}{{.Name}}{{"\n"}}{{.Image}}{{"\n"}}{{index .Config "Image"}}{{"\n"}}{{json (index .Config "Labels")}}{{"\n"}}{{index .State "Status"}}{{"\n"}}{{index .State "Running"}}{{"\n"}}{{index .State "Paused"}}{{"\n"}}{{index .State "Restarting"}}{{"\n"}}{{index .State "OOMKilled"}}{{"\n"}}{{index .State "ExitCode"}}{{"\n"}}{{index .State "StartedAt"}}{{"\n"}}{{index .State "FinishedAt"}}{{"\n"}}{{with (index .State "Health")}}{{.Status}}{{else}}none{{end}}{{"\n"}}{{json (index .NetworkSettings "Networks")}}{{"\n"}}{{json .Mounts}}{{"\n"}}{{json (index .Config "ExposedPorts")}}{{"\n"}}{{json (index .HostConfig "PortBindings")}}{{"\n"}}{{index .HostConfig "PublishAllPorts"}}{{"\n"}}{{index .HostConfig "NetworkMode"}}{{"\n"}}{{json (index .HostConfig "Binds")}}{{"\n"}}{{json (index .HostConfig "VolumesFrom")}}{{"\n"}}{{json (index .HostConfig "Links")}}{{"\n"}}{{json (index .HostConfig "ExtraHosts")}}{{"\n"}}{{index .HostConfig "Privileged"}}{{"\n"}}{{json (index .HostConfig "CapAdd")}}{{"\n"}}{{json (index .HostConfig "CapDrop")}}{{"\n"}}{{json (index .HostConfig "SecurityOpt")}}{{"\n"}}{{index .HostConfig "ReadonlyRootfs"}}{{"\n"}}{{json (index .HostConfig "Devices")}}{{"\n"}}{{index .HostConfig "PidMode"}}{{"\n"}}{{index .HostConfig "IpcMode"}}{{"\n"}}{{index .HostConfig "UTSMode"}}{{"\n"}}{{index .HostConfig "UsernsMode"}}{{"\n"}}{{json (index .HostConfig "RestartPolicy")}}'''
+NETWORK_INVENTORY_TEMPLATE = r'''{{.Id}}{{"\n"}}{{.Name}}{{"\n"}}{{.Driver}}{{"\n"}}{{.Scope}}{{"\n"}}{{.Internal}}{{"\n"}}{{.Attachable}}{{"\n"}}{{.Ingress}}{{"\n"}}{{.ConfigOnly}}{{"\n"}}{{.EnableIPv6}}{{"\n"}}{{json .ConfigFrom}}{{"\n"}}{{json .IPAM}}{{"\n"}}{{json .Options}}{{"\n"}}{{json .Labels}}{{"\n"}}{{json .Containers}}'''
+VOLUME_INVENTORY_TEMPLATE = r'''{{.Name}}{{"\n"}}{{.Driver}}{{"\n"}}{{.Scope}}{{"\n"}}{{.Mountpoint}}{{"\n"}}{{.CreatedAt}}{{"\n"}}{{json .Labels}}{{"\n"}}{{json .Options}}'''
+
+
+def _inventory_fields(output: bytes, expected: int) -> list[str]:
+    fields = output.decode("utf-8", "strict").splitlines()
+    if len(fields) != expected:
+        raise ValueError("invalid Docker inventory response")
+    return fields
+
+
+def _inventory_json(value: str, expected_type: type | tuple[type, ...]) -> Any:
+    parsed = json.loads(value)
+    if parsed is not None and not isinstance(parsed, expected_type):
+        raise ValueError("invalid Docker inventory field")
+    return parsed
+
+
+def _inventory_labels(value: str) -> dict[str, str] | None:
+    labels = _inventory_json(value, dict)
+    if labels is not None and any(not isinstance(key, str) or not isinstance(label, str) for key, label in labels.items()):
+        raise ValueError("invalid Docker inventory labels")
+    return labels
+
+
+def _inventory_mounts(value: str) -> list[dict[str, Any]]:
+    mounts = _inventory_json(value, list)
+    if mounts is None:
+        return []
+    if any(not isinstance(mount, dict) for mount in mounts):
+        raise ValueError("invalid Docker mount inventory")
+    return sorted(mounts, key=lambda mount: json.dumps(mount, sort_keys=True, separators=(",", ":")))
+
+
+def collect_docker_resource_inventory(
+    call: Callable[[list[str]], bytes], image_token: str | None = None
+) -> dict[str, Any]:
+    """Read only Docker metadata needed to prove foreign-resource isolation."""
+    image_label_filter = f"label={IMAGE_TOKEN_LABEL}"
+    if image_token is not None:
+        if not re.fullmatch(r"[0-9a-f]{32}", image_token):
+            raise ValueError("invalid Docker image token")
+        image_label_filter += f"={image_token}"
+    containers: dict[str, dict[str, Any]] = {}
+    container_ids = [
+        item for item in call(["ps", "--all", "--no-trunc", "--format", "{{.ID}}"])
+        .decode("utf-8", "strict")
+        .splitlines()
+        if item
+    ]
+    for identifier in container_ids:
+        if not re.fullmatch(r"[0-9a-f]{64}", identifier) or identifier in containers:
+            raise ValueError("invalid Docker container identity")
+        fields = _inventory_fields(
+            call(["inspect", "--type", "container", "--format", CONTAINER_INVENTORY_TEMPLATE, identifier]),
+            35,
+        )
+        if (
+            fields[0] != identifier
+            or not fields[1].startswith("/")
+            or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*", fields[1][1:])
+        ):
+            raise ValueError("Docker container identity changed during inventory")
+        labels = _inventory_labels(fields[4])
+        attachments = _inventory_json(fields[14], dict)
+        mounts = _inventory_mounts(fields[15])
+        exposed_ports = _inventory_json(fields[16], dict)
+        port_bindings = _inventory_json(fields[17], dict)
+        containers[identifier] = {
+            "name": fields[1].lstrip("/"),
+            "image_id": fields[2],
+            "image_reference": fields[3],
+            "labels": labels,
+            "state": {
+                "status": fields[5],
+                "running": fields[6],
+                "paused": fields[7],
+                "restarting": fields[8],
+                "oom_killed": fields[9],
+                "exit_code": fields[10],
+                "started_at": fields[11],
+                "finished_at": fields[12],
+                "health": fields[13],
+            },
+            "attachments": attachments,
+            "mounts": mounts,
+            "exposed_ports": exposed_ports,
+            "published_ports": port_bindings,
+            "publish_all_ports": fields[18],
+            "network_mode": fields[19],
+            "binds": _inventory_json(fields[20], list),
+            "volumes_from": _inventory_json(fields[21], list),
+            "links": _inventory_json(fields[22], list),
+            "extra_hosts": _inventory_json(fields[23], list),
+            "privileged": fields[24],
+            "cap_add": _inventory_json(fields[25], list),
+            "cap_drop": _inventory_json(fields[26], list),
+            "security_options": _inventory_json(fields[27], list),
+            "readonly_rootfs": fields[28],
+            "devices": _inventory_json(fields[29], list),
+            "pid_mode": fields[30],
+            "ipc_mode": fields[31],
+            "uts_mode": fields[32],
+            "userns_mode": fields[33],
+            "restart_policy": _inventory_json(fields[34], dict),
+        }
+
+    volumes: dict[str, dict[str, Any]] = {}
+    volume_names = [
+        item for item in call(["volume", "ls", "--quiet"]).decode("utf-8", "strict").splitlines() if item
+    ]
+    for name in volume_names:
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*", name) or name in volumes:
+            raise ValueError("invalid Docker volume identity")
+        fields = _inventory_fields(
+            call(["volume", "inspect", "--format", VOLUME_INVENTORY_TEMPLATE, name]),
+            7,
+        )
+        if fields[0] != name:
+            raise ValueError("Docker volume identity changed during inventory")
+        labels = _inventory_labels(fields[5])
+        options = _inventory_json(fields[6], dict)
+        if not fields[3].startswith("/"):
+            raise ValueError("incomplete Docker volume inventory")
+        volumes[name] = {
+            "name": name,
+            "driver": fields[1],
+            "scope": fields[2],
+            "mountpoint": fields[3],
+            "created_at": fields[4],
+            "labels": labels,
+            "options": options,
+        }
+
+    image_ids = [
+        item
+        for item in call(
+            [
+                "image",
+                "ls",
+                "--all",
+                "--quiet",
+                "--no-trunc",
+                "--filter",
+                image_label_filter,
+            ]
+        )
+        .decode("utf-8", "strict")
+        .splitlines()
+        if item
+    ]
+    images: dict[str, dict[str, str]] = {}
+    for identifier in image_ids:
+        if not re.fullmatch(r"sha256:[0-9a-f]{64}", identifier):
+            raise ValueError("invalid Docker image identity")
+        images[identifier] = {"id": identifier}
+
+    networks: dict[str, dict[str, Any]] = {}
+    listed_networks = call(["network", "ls", "--no-trunc", "--format", '{{.ID}}{{"\\t"}}{{.Name}}'])
+    for line in listed_networks.decode("utf-8", "strict").splitlines():
+        identity, separator, name = line.partition("\t")
+        if (
+            not separator
+            or not re.fullmatch(r"[0-9a-f]{64}", identity)
+            or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*", name)
+            or identity in networks
+        ):
+            raise ValueError("invalid Docker network identity")
+        fields = _inventory_fields(
+            call(["network", "inspect", "--format", NETWORK_INVENTORY_TEMPLATE, identity]),
+            14,
+        )
+        if fields[0] != identity or fields[1] != name:
+            raise ValueError("Docker network identity changed during inventory")
+        labels = _inventory_labels(fields[12])
+        containers_attached = _inventory_json(fields[13], dict)
+        networks[identity] = {
+            "name": name,
+            "driver": fields[2],
+            "scope": fields[3],
+            "internal": fields[4],
+            "attachable": fields[5],
+            "ingress": fields[6],
+            "config_only": fields[7],
+            "ipv6_enabled": fields[8],
+            "config_from": _inventory_json(fields[9], dict),
+            "ipam": _inventory_json(fields[10], dict),
+            "options": _inventory_json(fields[11], dict),
+            "labels": labels,
+            "attachments": containers_attached,
+        }
+
+    return {"containers": containers, "volumes": volumes, "networks": networks, "images": images}
+
+
+def require_no_docker_identity_collisions(inventory: dict[str, Any], token: str, phase: str) -> None:
+    if not re.fullmatch(r"[0-9a-f]{32}", token):
+        raise DrillFailure(phase, "isolation_refusal")
+    name_prefix = f"restore-readiness-{token[:16]}"
+    project_name = name_prefix
+    for kind in ("containers", "volumes", "networks"):
+        for item in inventory.get(kind, {}).values():
+            name = item.get("name", "")
+            labels = item.get("labels") or {}
+            if (
+                name == name_prefix
+                or name.startswith(f"{name_prefix}-")
+                or name.startswith(f"{name_prefix}_")
+                or any(value == token for value in labels.values())
+                or labels.get(IMAGE_TOKEN_LABEL) == token
+                or labels.get(COMPOSE_PROJECT_LABEL) in {token, project_name}
+            ):
+                raise DrillFailure(phase, "isolation_refusal")
+
+
+def foreign_resource_inventory(
+    inventory: dict[str, Any],
+    *,
+    owned_container_ids: set[str],
+    owned_volume_names: set[str],
+    owned_network_ids: set[str],
+) -> dict[str, Any]:
+    return {
+        "containers": {
+            identifier: record
+            for identifier, record in inventory["containers"].items()
+            if identifier not in owned_container_ids
+        },
+        "volumes": {
+            name: record for name, record in inventory["volumes"].items() if name not in owned_volume_names
+        },
+        "networks": {
+            identifier: record
+            for identifier, record in inventory["networks"].items()
+            if identifier not in owned_network_ids
+        },
+        "images": inventory["images"],
+    }
+
+
+def manifest_owned_volume_names(
+    records: list[dict[str, Any]],
+    inventory: dict[str, Any] | None = None,
+) -> set[str]:
+    """Return volumes proven attached to an exact manifest-owned container."""
+    owned: set[str] = set()
+    for record in records:
+        identifier = record.get("id")
+        name = record.get("name")
+        if not isinstance(identifier, str) or not re.fullmatch(r"[0-9a-f]{64}", identifier):
+            continue
+        if not isinstance(name, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*", name):
+            continue
+        claimed = record.get("unexpected_volumes")
+        if not isinstance(claimed, list):
+            continue
+        mounts = record.get("unexpected_volume_mounts")
+        if not isinstance(mounts, list):
+            continue
+        if inventory is not None:
+            container = inventory.get("containers", {}).get(identifier)
+            if not isinstance(container, dict) or container.get("name") != name:
+                continue
+            actual_mounts = container.get("mounts")
+            if not isinstance(actual_mounts, list):
+                continue
+        else:
+            actual_mounts = None
+        for mount in mounts:
+            if not isinstance(mount, dict) or mount.get("type") != "volume":
+                continue
+            volume_name = mount.get("name")
+            source = mount.get("source")
+            destination = mount.get("destination")
+            rw = mount.get("rw")
+            if (
+                not isinstance(volume_name, str)
+                or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*", volume_name)
+                or volume_name not in claimed
+                or not isinstance(source, str)
+                or not source.startswith("/")
+                or not isinstance(destination, str)
+                or not destination.startswith("/")
+                or not isinstance(rw, bool)
+            ):
+                continue
+            if actual_mounts is not None:
+                matching_mounts = [
+                    actual
+                    for actual in actual_mounts
+                    if isinstance(actual, dict)
+                    and actual.get("Type") == "volume"
+                    and actual.get("Name") == volume_name
+                    and actual.get("Source") == source
+                    and actual.get("Destination") == destination
+                    and actual.get("RW") is rw
+                ]
+                if len(matching_mounts) != 1:
+                    continue
+            owned.add(volume_name)
+    return owned
+
+
+def foreign_inventory_change_summary(baseline: dict[str, Any], current: dict[str, Any]) -> str:
+    changes: list[str] = []
+    for kind in ("containers", "volumes", "networks", "images"):
+        before = baseline.get(kind)
+        after = current.get(kind)
+        if not isinstance(before, dict) or not isinstance(after, dict):
+            return f"{kind}(invalid-shape)"
+        added = after.keys() - before.keys()
+        removed = before.keys() - after.keys()
+        fields: set[str] = set()
+        for identity in before.keys() & after.keys():
+            old_record = before[identity]
+            new_record = after[identity]
+            if not isinstance(old_record, dict) or not isinstance(new_record, dict):
+                fields.add("record")
+                continue
+            fields.update(
+                field
+                for field in old_record.keys() | new_record.keys()
+                if old_record.get(field) != new_record.get(field)
+            )
+        if added or removed or fields:
+            changed_fields = ",".join(sorted(fields)) or "none"
+            changes.append(f"{kind}(added={len(added)},removed={len(removed)},fields={changed_fields})")
+    return ";".join(changes) or "unknown"
+
+
+def foreign_inventory_failure(manifest: dict[str, Any]) -> DrillFailure | None:
+    if manifest.get("foreign_inventory_changed"):
+        return DrillFailure("cleanup", "isolation_refusal")
+    return None
 
 
 def bounded_work_seconds(
@@ -2007,7 +2353,10 @@ def validate_container_inspect(document: dict[str, Any], record: dict[str, Any])
     tmpfs = host.get("Tmpfs") or {}
     if tmpfs != (record.get("tmpfs_options") or {}):
         return False
-    for network in (document.get("NetworkSettings") or {}).get("Networks", {}).values():
+    network_attachments = (document.get("NetworkSettings") or {}).get("Networks") or {}
+    if any(name != "none" for name in network_attachments):
+        return False
+    for network in network_attachments.values():
         if network.get("IPAddress") or network.get("GlobalIPv6Address"):
             return False
     return True
@@ -2877,6 +3226,15 @@ def load_manifest(path: Path) -> dict[str, Any]:
         or not isinstance(manifest.get("prepared_runtime"), dict)
         or not isinstance(manifest.get("work_deadline"), (float, int))
         or not isinstance(manifest.get("cleanup_deadline"), (float, int))
+        or not isinstance(manifest.get("cleanup_failures", []), list)
+        or any(step not in CLEANUP_FAILURE_STEPS for step in manifest.get("cleanup_failures", []))
+        or (
+            manifest.get("foreign_inventory_diagnostic") is not None
+            and (
+                not isinstance(manifest.get("foreign_inventory_diagnostic"), str)
+                or FOREIGN_INVENTORY_DIAGNOSTIC.fullmatch(manifest["foreign_inventory_diagnostic"]) is None
+            )
+        )
     ):
         raise DrillFailure("cleanup", "cleanup_failure")
     lock_record = manifest["global_lock"]
@@ -3187,14 +3545,19 @@ class Drill(Docker):
         except ipaddress.AddressValueError as exc:
             raise DrillFailure(self.phase, "isolation_refusal") from exc
         self.preflight_step = "baseline Docker resource inventory"
-        existing_containers = self.list_containers(self.phase)
-        existing_volumes = self.list_volumes(self.phase)
-        existing_networks = self.list_networks(self.phase)
+        docker_inventory = self.docker_resource_inventory(self.phase)
+        inventory_size = len(json.dumps(docker_inventory, sort_keys=True, separators=(",", ":")).encode("utf-8"))
+        if inventory_size > MAX_FOREIGN_INVENTORY:
+            raise DrillFailure(self.phase, "isolation_refusal")
         self.manifest["baseline"] = {
-            "containers": [list(item) for item in sorted(existing_containers)],
-            "volumes": sorted(existing_volumes),
-            "networks": sorted(existing_networks),
+            "containers": sorted(
+                [identifier, record["name"]]
+                for identifier, record in docker_inventory["containers"].items()
+            ),
+            "volumes": sorted(docker_inventory["volumes"]),
+            "networks": sorted(record["name"] for record in docker_inventory["networks"].values()),
             "docker_processes": baseline_docker_pids,
+            "docker_inventory": docker_inventory,
         }
         self.preflight_step = "save baseline Docker inventory"
         try:
@@ -3212,15 +3575,23 @@ class Drill(Docker):
                 file=sys.stderr,
             )
             raise DrillFailure(self.phase, "preflight_failure") from exc
-        if existing_containers or existing_volumes or existing_networks != {"bridge", "host", "none"}:
-            extra_networks = existing_networks - {"bridge", "host", "none"}
-            missing_networks = {"bridge", "host", "none"} - existing_networks
-            print(
-                "restore readiness baseline Docker inventory is not empty: "
-                f"containers={len(existing_containers)} volumes={len(existing_volumes)} "
-                f"extra_networks={len(extra_networks)} missing_default_networks={len(missing_networks)}",
-                file=sys.stderr,
-            )
+        self.preflight_step = "check Docker resource ownership identities"
+        require_no_docker_identity_collisions(docker_inventory, self.manifest["token"], self.phase)
+        project_name = f"restore-readiness-{self.manifest['token'][:16]}"
+        for label in (IMAGE_TOKEN_LABEL, COMPOSE_PROJECT_LABEL):
+            for value in {self.manifest["token"], project_name}:
+                found = self.call(
+                    ["image", "ls", "--quiet", "--no-trunc", "--filter", f"label={label}={value}"],
+                    phase=self.phase,
+                    category="isolation_refusal",
+                )
+                if found.strip():
+                    raise DrillFailure(self.phase, "isolation_refusal")
+        expected_tags = {
+            f"local/restore-readiness-app:{self.manifest['token']}",
+            f"local/restore-readiness-tools:{self.manifest['token']}",
+        }
+        if expected_tags & {name for _, name in self.list_images(self.phase)}:
             raise DrillFailure(self.phase, "isolation_refusal")
         return gateway, self.args.go_arch
 
@@ -3264,6 +3635,55 @@ class Drill(Docker):
                 raise DrillFailure(self.phase, "preflight_failure")
         self.manifest["prepared_runtime"] = self.prepared_runtime
         self.save()
+
+    def verify_foreign_inventory(self, phase: str = "cleanup") -> bool:
+        baseline = self.manifest.get("baseline", {}).get("docker_inventory")
+        if not isinstance(baseline, dict):
+            if self.manifest.get("resource_creation_started"):
+                self.manifest["foreign_inventory_unverified"] = True
+                return False
+            return True
+        try:
+            current = self.docker_resource_inventory(phase)
+            owned_container_ids = {
+                record.get("id") for record in self.manifest.get("containers", []) if record.get("id")
+            }
+            pending = self.manifest.get("pending_container") or {}
+            if pending.get("id"):
+                owned_container_ids.add(pending["id"])
+            volume_records = self.manifest.get("containers", []) + ([pending] if pending else [])
+            owned_volume_names = manifest_owned_volume_names(volume_records, current)
+            owned_volume_names.intersection_update(current.get("volumes", {}))
+            owned_volume_names.difference_update(baseline.get("volumes", {}))
+            owned_network_ids = {
+                record.get("id") for record in self.manifest.get("networks", []) if record.get("id")
+            }
+            foreign = foreign_resource_inventory(
+                current,
+                owned_container_ids=owned_container_ids,
+                owned_volume_names=owned_volume_names,
+                owned_network_ids=owned_network_ids,
+            )
+        except (DrillFailure, KeyError, TypeError, ValueError) as exc:
+            self.manifest["foreign_inventory_unverified"] = True
+            self.manifest["foreign_inventory_diagnostic"] = f"unverified:{type(exc).__name__}"
+            print(
+                f"restore readiness foreign Docker inventory could not be verified during {phase}: "
+                f"{type(exc).__name__}",
+                file=sys.stderr,
+            )
+            return False
+        if foreign != baseline:
+            self.manifest["foreign_inventory_changed"] = True
+            summary = foreign_inventory_change_summary(baseline, foreign)
+            self.manifest["foreign_inventory_diagnostic"] = f"changed:{summary}"
+            print(
+                "restore readiness foreign Docker inventory changed: "
+                + summary,
+                file=sys.stderr,
+            )
+            return False
+        return True
 
     def preload(self) -> None:
         self.preflight_step = "preload source database image"
@@ -3417,6 +3837,20 @@ class Drill(Docker):
         )
         return {line for line in output.decode("utf-8", "strict").splitlines() if line}
 
+    def docker_resource_inventory(self, phase: str) -> dict[str, Any]:
+        def invoke(args: list[str]) -> bytes:
+            if phase == "cleanup":
+                status, output = self.cleanup_call(args, timeout=20)
+                if status != 0:
+                    raise DrillFailure("cleanup", "cleanup_failure")
+                return output
+            return self.call(args, phase=phase, category="isolation_refusal", timeout=20)
+
+        try:
+            return collect_docker_resource_inventory(invoke, self.manifest["token"])
+        except (KeyError, TypeError, UnicodeDecodeError, ValueError) as exc:
+            raise DrillFailure(phase, "isolation_refusal") from exc
+
     def _record_by_name(self, name: str) -> dict[str, Any] | None:
         return next((item for item in self.manifest["containers"] if item["name"] == name), None)
 
@@ -3453,6 +3887,14 @@ class Drill(Docker):
         interactive: bool = False,
         env_file: Path | None = None,
     ) -> dict[str, Any]:
+        owned_container_ids = {
+            record.get("id") for record in self.manifest.get("containers", []) if record.get("id")
+        }
+        if network_mode != "none":
+            if not network_mode.startswith("container:") or network_mode.removeprefix("container:") not in owned_container_ids:
+                raise DrillFailure("fixture_generation", "isolation_refusal")
+        if any(mount.get("type") != "bind" for mount in mounts):
+            raise DrillFailure("fixture_generation", "isolation_refusal")
         existing = self.list_containers("preflight")
         if any(found_name == name for _, found_name in existing):
             raise DrillFailure("preflight", "isolation_refusal")
@@ -3562,8 +4004,7 @@ class Drill(Docker):
         volumes_after = self.list_volumes("fixture_generation")
         baseline = set(record["volumes_before"])
         created_volumes = volumes_after - baseline
-        record["unexpected_volumes"] = sorted(created_volumes)
-        record["unexpected_volume_mounts"] = sorted(
+        observed_volume_mounts = sorted(
             (
                 {
                     "type": "volume",
@@ -3577,6 +4018,13 @@ class Drill(Docker):
             ),
             key=lambda item: item["destination"],
         )
+        attached_created_volumes = {
+            mount["name"] for mount in observed_volume_mounts if mount["name"] in created_volumes
+        }
+        record["unexpected_volumes"] = sorted(attached_created_volumes)
+        record["unexpected_volume_mounts"] = [
+            mount for mount in observed_volume_mounts if mount["name"] in attached_created_volumes
+        ]
         record["unexpected_volume_records"] = [
             volume for name in record["unexpected_volumes"]
             if (volume := self.inspect_volume(name, "fixture_generation")) is not None
@@ -3588,7 +4036,7 @@ class Drill(Docker):
             not validate_container_inspect(document, record)
             or actual_volume_mounts
             or created_volumes
-            or len(record["unexpected_volume_records"]) != len(created_volumes)
+            or len(record["unexpected_volume_records"]) != len(attached_created_volumes)
             or networks_after != baseline_networks
         ):
             raise DrillFailure("fixture_generation", "isolation_refusal")
@@ -5901,7 +6349,7 @@ dump_path=$2
             raise DrillFailure("cleanup", "cleanup_failure")
         try:
             volumes = output.decode("utf-8", "strict").splitlines()
-            if any(not re.fullmatch(r"[0-9a-f]{64}", name) for name in volumes):
+            if any(not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*", name) for name in volumes):
                 raise ValueError("invalid volume listing")
         except (UnicodeDecodeError, ValueError) as exc:
             self.record_cleanup_failure("docker_volume_inventory", "invalid_output")
@@ -6013,8 +6461,8 @@ dump_path=$2
         except DrillFailure:
             return False
         before_volumes = set(recovered.get("volumes_before", []))
-        recovered["unexpected_volumes"] = sorted(current_volumes - before_volumes)
-        recovered["unexpected_volume_mounts"] = sorted(
+        created_volumes = current_volumes - before_volumes
+        observed_volume_mounts = sorted(
             (
                 {
                     "type": "volume",
@@ -6028,13 +6476,20 @@ dump_path=$2
             ),
             key=lambda item: item["destination"],
         )
+        attached_created_volumes = {
+            mount["name"] for mount in observed_volume_mounts if mount["name"] in created_volumes
+        }
+        recovered["unexpected_volumes"] = sorted(attached_created_volumes)
+        recovered["unexpected_volume_mounts"] = [
+            mount for mount in observed_volume_mounts if mount["name"] in attached_created_volumes
+        ]
         recovered["unexpected_volume_records"] = [
             volume for name in recovered["unexpected_volumes"]
             if (volume := self.inspect_volume(name, "cleanup")) is not None
         ]
-        if {item.get("name") for item in recovered["unexpected_volume_mounts"]} != set(recovered["unexpected_volumes"]):
+        if set(recovered["unexpected_volumes"]) != attached_created_volumes:
             return False
-        if len(recovered["unexpected_volume_records"]) != len(recovered["unexpected_volumes"]):
+        if len(recovered["unexpected_volume_records"]) != len(attached_created_volumes):
             return False
         if not validate_container_inspect(document, recovered):
             return False
@@ -6212,13 +6667,9 @@ dump_path=$2
             volumes = self.cleanup_volume_inventory()
         except DrillFailure:
             return False
-        expected_created = {
-            name
-            for record in self.manifest.get("containers", [])
-            for name in record.get("unexpected_volumes", [])
-        }
         pending = self.manifest.get("pending_container") or {}
-        expected_created.update(pending.get("unexpected_volumes", []))
+        volume_records = self.manifest.get("containers", []) + ([pending] if pending else [])
+        expected_created = manifest_owned_volume_names(volume_records)
         baseline_volumes = set(baseline.get("volumes", []))
         created_now = set(volumes) - baseline_volumes
         if created_now != expected_created:
@@ -6368,27 +6819,50 @@ dump_path=$2
                 return None
             return set()
         try:
-            containers = self.cleanup_container_inventory()
-        except DrillFailure:
+            containers = self.docker_resource_inventory("cleanup")["containers"]
+        except (DrillFailure, KeyError, TypeError, ValueError):
             return None
-        identifiers = {identifier for identifier, _ in containers}
-        names = {name for _, name in containers}
-        known = {
-            (record.get("id"), record.get("name"))
-            for record in self.manifest.get("containers", [])
-        }
+        if not isinstance(containers, dict):
+            return None
+        known = {record.get("id"): record.get("name") for record in self.manifest.get("containers", [])}
         pending = self.manifest.get("pending_container") or {}
-        if pending:
-            known.add((pending.get("id") or "", pending.get("name")))
-        if any((identifier, name) not in known for identifier, name in containers):
+        if pending.get("name"):
+            known[pending.get("id") or ""] = pending["name"]
+        known_names = set(known.values())
+        try:
+            run_dir = self.run_dir.resolve()
+        except (OSError, RuntimeError):
             return None
         retained: set[str] = set()
-        for record in self.manifest.get("containers", []):
-            if record.get("id") in identifiers and record.get("name") in names:
-                retained.update(mount.get("source", "") for mount in record.get("mounts", []))
-        if pending and any(name == pending.get("name") for _, name in containers):
-            for mount in pending.get("mounts", []):
-                retained.add(mount.get("source", ""))
+        for identifier, record in containers.items():
+            if not isinstance(record, dict):
+                return None
+            name = record.get("name")
+            if identifier in known and name != known[identifier]:
+                return None
+            if identifier not in known and name in known_names:
+                return None
+            mounts = record.get("mounts")
+            if not isinstance(mounts, list):
+                return None
+            for mount in mounts:
+                if not isinstance(mount, dict):
+                    return None
+                source = mount.get("Source")
+                if source is not None and not isinstance(source, str):
+                    return None
+                if source:
+                    source_path = Path(source)
+                    if not source_path.is_absolute():
+                        return None
+                    try:
+                        source_path = source_path.resolve()
+                    except (OSError, RuntimeError):
+                        return None
+                    # Keep unrelated workloads, but refuse mounts that expose or retain this private run tree.
+                    if source_path == run_dir or source_path in run_dir.parents or run_dir in source_path.parents:
+                        return None
+                    retained.add(str(source_path))
         return {path for path in retained if path}
 
     def remove_unmounted_files(self, *, keep_all: bool) -> bool:
@@ -6553,12 +7027,18 @@ dump_path=$2
             self.save()
             return False
         clean = True
+        failed_steps: list[str] = []
+
+        def record_step(name: str, outcome: bool, operation: str) -> bool:
+            if not outcome:
+                failed_steps.append(name)
+                self.record_cleanup_failure(operation, "verification_failed")
+            return outcome
+
         if self.gateway is not None:
             self.active_cleanup_operation = "gateway_shutdown"
             gateway_clean = self.gateway.close(self.manifest["cleanup_deadline"])
-            if not gateway_clean:
-                self.record_cleanup_failure("gateway_shutdown", "verification_failed")
-            clean = gateway_clean and clean
+            clean = record_step("gateway", gateway_clean, "gateway_shutdown") and clean
             self.gateway = None
         if not self.cleanup_budget_available():
             self.record_cleanup_failure("cleanup_deadline", "deadline_expired")
@@ -6567,9 +7047,7 @@ dump_path=$2
             return False
         self.active_cleanup_operation = "cleanup_processes"
         processes_clean = self.cleanup_processes()
-        if not processes_clean:
-            self.record_cleanup_failure("cleanup_processes", "verification_failed")
-        clean = processes_clean and clean
+        clean = record_step("processes", processes_clean, "cleanup_processes") and clean
         if not self.cleanup_budget_available():
             self.record_cleanup_failure("cleanup_deadline", "deadline_expired")
             self.manifest["cleanup_verified"] = False
@@ -6577,9 +7055,7 @@ dump_path=$2
             return False
         self.active_cleanup_operation = "build_input_removal"
         build_inputs_clean = self.remove_build_inputs()
-        if not build_inputs_clean:
-            self.record_cleanup_failure("build_input_removal", "verification_failed")
-        clean = build_inputs_clean and clean
+        clean = record_step("build-inputs", build_inputs_clean, "build_input_removal") and clean
         if not self.cleanup_budget_available():
             self.record_cleanup_failure("cleanup_deadline", "deadline_expired")
             self.manifest["cleanup_verified"] = False
@@ -6588,19 +7064,21 @@ dump_path=$2
         if not self.manifest.get("resource_creation_started"):
             self.active_cleanup_operation = "run_file_removal"
             files_clean = self.remove_unmounted_files(keep_all=False)
-            if not files_clean:
-                self.record_cleanup_failure("run_file_removal", "verification_failed")
-            clean = files_clean and clean
+            clean = record_step("files", files_clean, "run_file_removal") and clean
+            self.active_cleanup_operation = "cleanup_resources"
+            inventory_clean = self.verify_foreign_inventory()
+            clean = record_step("foreign-inventory", inventory_clean, "cleanup_resources") and clean
             self.manifest["cleanup_verified"] = bool(clean)
+            self.manifest["cleanup_failures"] = failed_steps
             if not clean and self.cleanup_failure is None:
                 self.record_cleanup_failure("cleanup_resources", "verification_failed")
             self.save()
+            if failed_steps:
+                print("restore readiness cleanup failed: " + ",".join(failed_steps), file=sys.stderr)
             return clean
         self.active_cleanup_operation = "owned_container_cleanup"
         containers_clean = self.cleanup_owned_containers()
-        if not containers_clean:
-            self.record_cleanup_failure("owned_container_cleanup", "verification_failed")
-        clean = containers_clean and clean
+        clean = record_step("containers", containers_clean, "owned_container_cleanup") and clean
         if not self.cleanup_budget_available():
             self.record_cleanup_failure("cleanup_deadline", "deadline_expired")
             self.manifest["cleanup_verified"] = False
@@ -6608,9 +7086,7 @@ dump_path=$2
             return False
         self.active_cleanup_operation = "owned_image_cleanup"
         images_clean = self.cleanup_owned_images()
-        if not images_clean:
-            self.record_cleanup_failure("owned_image_cleanup", "verification_failed")
-        clean = images_clean and clean
+        clean = record_step("images", images_clean, "owned_image_cleanup") and clean
         if not self.cleanup_budget_available():
             self.record_cleanup_failure("cleanup_deadline", "deadline_expired")
             self.manifest["cleanup_verified"] = False
@@ -6618,9 +7094,7 @@ dump_path=$2
             return False
         self.active_cleanup_operation = "network_volume_cleanup"
         network_volumes_clean = self.cleanup_networks_and_volumes()
-        if not network_volumes_clean:
-            self.record_cleanup_failure("network_volume_cleanup", "verification_failed")
-        clean = network_volumes_clean and clean
+        clean = record_step("networks-and-volumes", network_volumes_clean, "network_volume_cleanup") and clean
         if not self.cleanup_budget_available():
             self.record_cleanup_failure("cleanup_deadline", "deadline_expired")
             self.manifest["cleanup_verified"] = False
@@ -6628,13 +7102,17 @@ dump_path=$2
             return False
         self.active_cleanup_operation = "run_file_removal"
         files_clean = self.remove_unmounted_files(keep_all=not containers_clean)
-        if not files_clean:
-            self.record_cleanup_failure("run_file_removal", "verification_failed")
-        clean = files_clean and clean
+        clean = record_step("files", files_clean, "run_file_removal") and clean
+        self.active_cleanup_operation = "cleanup_resources"
+        inventory_clean = self.verify_foreign_inventory()
+        clean = record_step("foreign-inventory", inventory_clean, "cleanup_resources") and clean
         self.manifest["cleanup_verified"] = bool(clean)
+        self.manifest["cleanup_failures"] = failed_steps
         if not clean and self.cleanup_failure is None:
             self.record_cleanup_failure("cleanup_resources", "verification_failed")
         self.save()
+        if failed_steps:
+            print("restore readiness cleanup failed: " + ",".join(failed_steps), file=sys.stderr)
         return clean
 
     def local_command(self, args: list[str], phase: str, timeout: float = 30) -> bytes:
@@ -7189,12 +7667,22 @@ def recover(manifest_path: Path) -> int:
         return 1
     descriptor: int | None = None
     rollout_descriptor: int | None = None
+    foreign_inventory_changed = False
     try:
         rollout_lock = open_rollout_lock()
         if rollout_lock is None:
             raise ValueError("deployment rollout is active")
         rollout_descriptor, rollout_record = rollout_lock
         manifest = load_manifest(manifest_path)
+        baseline = manifest.get("baseline")
+        if isinstance(baseline, dict):
+            inventory = baseline.get("docker_inventory")
+            if (
+                isinstance(inventory, dict)
+                and set(inventory) == {"containers", "volumes", "networks"}
+            ):
+                # Earlier schema-v1 runs rejected token-labeled images before saving this inventory.
+                inventory["images"] = {}
         lock = open_global_lock()
         if lock is not None:
             descriptor, _ = lock
@@ -7203,6 +7691,7 @@ def recover(manifest_path: Path) -> int:
                 drill = Drill(make_runtime_args(manifest), manifest_path.parent, manifest)
                 drill.save()
                 clean = drill.cleanup_resources()
+                foreign_inventory_changed = bool(drill.manifest.get("foreign_inventory_changed"))
                 if clean:
                     if remove_finished_run(drill, drill.manifest["cleanup_deadline"]):
                         print(json.dumps(report_document("cleanup", "cleanup_failure", "verified", 0), separators=(",", ":")))
@@ -7225,7 +7714,8 @@ def recover(manifest_path: Path) -> int:
                 os.close(rollout_descriptor)
             except OSError:
                 pass
-    print(json.dumps(report_document("cleanup", "cleanup_failure", "unverified", 0), separators=(",", ":")))
+    category = "isolation_refusal" if foreign_inventory_changed else "cleanup_failure"
+    print(json.dumps(report_document("cleanup", category, "unverified", 0), separators=(",", ":")))
     return 1
 
 
@@ -7372,6 +7862,7 @@ def run_primary(args: argparse.Namespace) -> int:
         "resource_creation_started": False,
         "parent_done": False,
         "cleanup_verified": False,
+        "cleanup_failures": [],
     }
     drill = Drill(args, run_dir, manifest)
     drill.save()
@@ -7617,6 +8108,34 @@ def run_primary(args: argparse.Namespace) -> int:
         signal.signal(sig, previous)
     if not close_local_dump() and failure is None:
         failure = DrillFailure("cleanup", "cleanup_failure")
+
+    foreign_inventory_changed = False
+    if run_dir.exists():
+        try:
+            final_manifest = load_manifest(drill.manifest_path)
+            cleanup_failures = final_manifest.get("cleanup_failures", [])
+            if cleanup_failures:
+                print("restore readiness cleanup failed: " + ",".join(cleanup_failures), file=sys.stderr)
+            inventory_diagnostic = final_manifest.get("foreign_inventory_diagnostic")
+            if isinstance(inventory_diagnostic, str):
+                if inventory_diagnostic.startswith("changed:"):
+                    print(
+                        "restore readiness foreign Docker inventory "
+                        + inventory_diagnostic.replace(":", " ", 1),
+                        file=sys.stderr,
+                    )
+                elif inventory_diagnostic.startswith("unverified:"):
+                    print(
+                        "restore readiness foreign Docker inventory could not be verified: "
+                        + inventory_diagnostic.removeprefix("unverified:"),
+                        file=sys.stderr,
+                    )
+            foreign_failure = foreign_inventory_failure(final_manifest)
+            foreign_inventory_changed = foreign_failure is not None
+        except DrillFailure:
+            pass
+    if foreign_inventory_changed:
+        failure = foreign_failure
 
     cleanup_verified = supervisor_succeeded and not run_dir.exists()
     category = failure.category if failure is not None else "assertions_passed"
