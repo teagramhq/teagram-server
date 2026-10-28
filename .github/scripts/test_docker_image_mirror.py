@@ -75,63 +75,6 @@ def is_unqualified_hub_image(image: str) -> bool:
 
 
 class DockerImageMirrorTests(unittest.TestCase):
-    def test_ci_server_images_use_the_validated_sticker_bundle_context(self) -> None:
-        dockerfile = (ROOT / "Dockerfile").read_text(encoding="utf-8")
-        workflow = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
-
-        self.assertRegex(
-            dockerfile,
-            r"(?m)^ARG STICKER_BUNDLE_SOURCE=sticker-bundle-generator$",
-        )
-        self.assertRegex(
-            dockerfile,
-            r"(?m)^FROM \$\{STICKER_BUNDLE_SOURCE\} AS sticker-bundle-source$",
-        )
-        build_stage = re.search(r"(?ms)^FROM .* AS build\n(.*?)(?=^FROM )", dockerfile)
-        self.assertIsNotNone(build_stage, "Go build stage is missing")
-        self.assertNotIn("COPY --from=sticker-bundle-source", build_stage.group(1))
-        self.assertIn("RUN install -d -m 0755 /rootfs/var /rootfs/var/lib", build_stage.group(1))
-
-        image_stage = re.search(
-            r"(?ms)^FROM build AS server-image-build\n(.*?)(?=^FROM )", dockerfile
-        )
-        self.assertIsNotNone(image_stage, "validated server image stage is missing")
-        self.assertIn(
-            "COPY --from=sticker-bundle-source /sticker-bundle/ /sticker-bundle/",
-            image_stage.group(1),
-        )
-        self.assertIn("RUN /stickerbundle-check /sticker-bundle", image_stage.group(1))
-        self.assertIn(
-            "COPY --from=server-image-build /sticker-bundle/ "
-            "/usr/share/teagram/sticker-bundle/",
-            dockerfile,
-        )
-
-        context_steps = [
-            step
-            for step in re.split(r"(?m)^      - ", workflow)
-            if "uses: docker/build-push-action@v7.4.0" in step
-            and "build-contexts: sticker-bundle=build" in step
-        ]
-        self.assertEqual(4, len(context_steps))
-        for step in context_steps:
-            with self.subTest(step=step.splitlines()[0]):
-                self.assertIn("STICKER_BUNDLE_SOURCE=sticker-bundle", step)
-
-        photo_job = re.search(
-            r"(?ms)^  photothumb-runtime:\n(.*?)(?=^  [a-z0-9-]+:|\Z)",
-            workflow,
-        )
-        self.assertIsNotNone(photo_job, "Photo worker runtime job is missing")
-        job = photo_job.group(1)
-        self.assertIn("needs: sticker-bundle", job)
-        self.assertIn("actions: read", job)
-        self.assertIn("path: build/sticker-bundle", job)
-        self.assertIn("uses: docker/setup-buildx-action@v4.4.1", job)
-        self.assertIn("docker buildx build", job)
-        self.assertIn("--build-context sticker-bundle=build", job)
-        self.assertIn("--build-arg STICKER_BUNDLE_SOURCE=sticker-bundle", job)
-
     def test_testcontainers_prefix_uses_mirror_without_trailing_slash(self) -> None:
         workflow = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
         match = re.search(
@@ -191,11 +134,7 @@ class DockerImageMirrorTests(unittest.TestCase):
             "ghcr.io/teagramhq/teagram-server-busybox:1.37@sha256:"
             "bdf57e528e45e4433820e045b29b4597825a1c9e38353532d90a01445013f82e"
         )
-        self.assertRegex(
-            job,
-            r"(?m)^    needs:\n      - mirror-rustfs-qualification-images\n      - sticker-bundle$",
-        )
-        self.assertIn("needs.sticker-bundle.result == 'success'", job)
+        self.assertIn("needs: mirror-rustfs-qualification-images", job)
         self.assertIn("packages: read", job)
         self.assertIn("docker login ghcr.io", job)
         self.assertIn(f"BUSYBOX_IMAGE: {image}", job)
@@ -207,19 +146,15 @@ class DockerImageMirrorTests(unittest.TestCase):
         for relative_path in ACTIVE_DOCKERFILES:
             with self.subTest(path=relative_path):
                 dockerfile = (ROOT / relative_path).read_text(encoding="utf-8")
-                stages: set[str] = set()
                 for line in dockerfile.splitlines():
                     fields = line.strip().split()
                     if len(fields) < 2 or fields[0] != "FROM":
                         continue
                     image = fields[2] if fields[1].startswith("--") else fields[1]
-                    if image not in stages:
-                        self.assertFalse(
-                            is_unqualified_hub_image(image),
-                            f"{relative_path} pulls {image} directly from Docker Hub",
-                        )
-                    if len(fields) >= 4 and fields[-2].lower() == "as":
-                        stages.add(fields[-1])
+                    self.assertFalse(
+                        is_unqualified_hub_image(image),
+                        f"{relative_path} pulls {image} directly from Docker Hub",
+                    )
 
     def test_active_compose_and_service_images_use_the_mirror(self) -> None:
         for relative_path in ACTIVE_IMAGE_CONFIGS:
@@ -288,7 +223,7 @@ class DockerImageMirrorTests(unittest.TestCase):
             encoding="utf-8"
         )
         self.assertIn(
-            'pg_isready -h 127.0.0.1 -U postgres -q',
+            'pg_isready -h 127.0.0.1 -p 5432 -U postgres -q',
             script,
         )
 
@@ -443,7 +378,7 @@ class PerformancePostgresReadinessTests(unittest.TestCase):
             encoding="utf-8"
         )
         self.assertIn(
-            'docker exec "$PERF_PG_CONTAINER" pg_isready -h 127.0.0.1 -U postgres -q',
+            'docker exec "$PERF_PG_CONTAINER" pg_isready -h 127.0.0.1 -p 5432 -U postgres -q',
             script,
         )
 

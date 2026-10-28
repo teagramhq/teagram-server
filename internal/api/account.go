@@ -217,9 +217,16 @@ func isReservedUsername(username string) bool {
 	return reservedUsernames[strings.ToLower(username)]
 }
 
+// isReservedAccountUsername adds the bot suffix rule for human account claims.
+// Keep it separate from route reservations so bot creation can still claim
+// usernames ending in bot, and existing usernames remain resolvable.
+func isReservedAccountUsername(username string) bool {
+	return isReservedUsername(username) || strings.HasSuffix(strings.ToLower(username), "bot")
+}
+
 // IsReservedUsername reports whether username conflicts with a server route
-// or a reserved account handle. Local operator tools use the same blocklist as
-// the RPC admission paths.
+// or one of the globally reserved handles. Human account claims also reserve
+// the bot suffix; operator bot creation uses this narrower route blocklist.
 func IsReservedUsername(username string) bool {
 	return isReservedUsername(username)
 }
@@ -252,7 +259,7 @@ func (h *handlers) handleUpdateUsername(r *mtproto.Request) (bin.Encoder, error)
 		if !validateUsername(username) {
 			return nil, errUsernameInvalid
 		}
-		if isReservedUsername(username) {
+		if isReservedAccountUsername(username) {
 			return nil, errUsernameInvalid
 		}
 	}
@@ -315,7 +322,7 @@ func (h *handlers) handleCheckUsername(r *mtproto.Request) (bin.Encoder, error) 
 	if r.UserID == 0 {
 		return nil, errAuthKeyUnreg
 	}
-	if !validateUsername(req.Username) || isReservedUsername(req.Username) {
+	if !validateUsername(req.Username) || isReservedAccountUsername(req.Username) {
 		return nil, errUsernameInvalid
 	}
 	if err := h.checkUsernameImmutable(r.Ctx, r.UserID, req.Username); err != nil {
