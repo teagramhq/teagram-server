@@ -61,6 +61,9 @@ jobs:
       - name: Test cancellation and timeout process-group cleanup
         run: node --test test/e2e/real_server_fixture/process_tree.test.mjs
 
+      - name: Test artifact response policy
+        run: node --test test/e2e/real_server_fixture/artifact_response_policy.test.cjs
+
       - name: Install pinned web dependencies
         working-directory: web-source
         run: pnpm install --frozen-lockfile
@@ -69,7 +72,7 @@ jobs:
       # Postgres directly, so it must be available under this mirror-qualified name.
       - name: Pull fixture base images
         timeout-minutes: 5
-        run: bash .github/scripts/pull-base-images.sh --image mirror.gcr.io/library/postgres:18-alpine --image mirror.gcr.io/arigaio/atlas:1.2.0-alpine test/e2e/real_server_fixture/Dockerfile
+        run: bash .github/scripts/pull-base-images.sh --image mirror.gcr.io/arigaio/atlas:1.2.0-alpine --image mirror.gcr.io/library/postgres:18-alpine test/e2e/real_server_fixture/Dockerfile
 
       - name: Run fixture, private build, and all five browser scenarios
         id: browser-flow

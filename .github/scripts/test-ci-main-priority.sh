@@ -54,7 +54,7 @@ rerun_step="$(query '.jobs."rerun-cancelled-pr-ci".steps[] | select(.name == "Re
   fail 'recorded cancelled pull request runs must be rerun after main fan-out starts'
 printf '%s\n' "$rerun_step" | bash -n
 
-expected_roots=$'browser-acceptance\nbrowser-acceptance-image\nci-main\ncompose\ncss\ndeploy-workflow\ndocker\ne2e-admin\nlint\nmirror-rustfs-qualification-images\nphotothumb-runtime\nreal-server-fixtures\nrestore-readiness\nrustfs-transition-qualification\nschema-gate-postgres\nsmoke\nsql-lint\nsqlc\nsticker-bundle\nwebsocket-d1\nwebsocket-permanent-exchange'
+expected_roots=$'browser-acceptance\nbrowser-acceptance-image\nci-main\ncompose\ncss\ndeploy-workflow\ndocker\ne2e-admin\nlint\nmirror-rustfs-qualification-images\nphotothumb-runtime\nreal-server-fixtures\nrestore-readiness\nrustfs-transition-qualification\nschema-gate-postgres\nsmoke\nsql-lint\nsqlc\nwebsocket-d1\nwebsocket-permanent-exchange'
 actual_roots="$(query '.jobs | to_entries[] | select(.key != "prioritize-main" and .key != "ci" and .key != "rerun-cancelled-pr-ci" and (.value.needs == "prioritize-main" or (.value.needs[] == "prioritize-main"))) | .key' | LC_ALL=C sort)"
 [[ "$actual_roots" == "$expected_roots" ]] ||
   fail 'every CI fan-out root must depend on the main priority job'
@@ -140,5 +140,12 @@ summary_run="$(query '.jobs.ci.steps[] | select(.name == "Require all CI lanes t
 browser_image_if="$(query '.jobs."browser-acceptance-image".if')"
 [[ "$browser_image_if" == *"needs.browser-acceptance.result == 'success'"* ]] ||
   fail 'browser acceptance images must run only after the runtime lane succeeds'
+
+priority_test_step="$(query '.jobs."deploy-workflow".steps[] | select(.name == "Check main CI queue priority contract") | .run')"
+[[ "$priority_test_step" == '.github/scripts/test-ci-main-priority.sh' ]] ||
+  fail 'the deploy workflow contract job must run the priority contract test'
+contract_syntax_step="$(query '.jobs."deploy-workflow".steps[] | select(.name == "Check workflow contract script syntax") | .run')"
+[[ "$contract_syntax_step" == *'.github/scripts/test-ci-main-priority.sh'* && "$contract_syntax_step" == *'shellcheck'* ]] ||
+  fail 'the deploy workflow contract job must syntax-check and lint the priority contract test'
 
 printf 'main CI priority contract holds\n'

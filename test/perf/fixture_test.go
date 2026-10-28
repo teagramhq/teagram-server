@@ -88,6 +88,17 @@ func scaled(name string, divisor int) spec {
 	}
 }
 
+func TestFixtureContactsRespectStoreLimit(t *testing.T) {
+	small := scaled("1x", 100)
+	large := scaled("100x", 1)
+	if want := min(100, store.MaxContactsPerUser); small.Contacts != want {
+		t.Fatalf("1x fixture contacts = %d, want %d", small.Contacts, want)
+	}
+	if want := min(10_000, store.MaxContactsPerUser); large.Contacts != want {
+		t.Fatalf("100x fixture contacts = %d, want capped value %d", large.Contacts, want)
+	}
+}
+
 // fixture is what the seeder leaves for the harness: the ids every scenario
 // addresses. It is written next to the database dump and cached with it.
 type fixture struct {
