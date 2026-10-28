@@ -2,11 +2,13 @@ package api
 
 import (
 	"encoding/binary"
+	"fmt"
 	"hash/crc32"
 
 	"github.com/gotd/td/bin"
 	"github.com/gotd/td/tg"
 
+	"github.com/teagramhq/teagram-server/internal/config"
 	"github.com/teagramhq/teagram-server/internal/mtproto"
 	"github.com/teagramhq/teagram-server/internal/store"
 )
@@ -170,6 +172,12 @@ func (h *handlers) handleGetAppConfig(r *mtproto.Request) (bin.Encoder, error) {
 		Key:   "registration_mode",
 		Value: &tg.JSONString{Value: string(h.registrationMode)},
 	}, {
+		Key:   "user_invites_enabled",
+		Value: &tg.JSONBool{Value: h.registrationMode == config.RegistrationInvite && h.userInviteQuota > 0},
+	}, {
+		Key:   "user_invite_quota",
+		Value: &tg.JSONNumber{Value: float64(h.userInviteQuota)},
+	}, {
 		Key:   "sticker_import_mode",
 		Value: &tg.JSONString{Value: string(h.stickerImportMode)},
 	}, {
@@ -192,18 +200,19 @@ func (h *handlers) handleGetAppConfig(r *mtproto.Request) (bin.Encoder, error) {
 		})
 	}
 	return &tg.HelpAppConfig{
-		Hash:   appConfigHashForUploadLimit(h.maxFileBytes),
+		Hash:   appConfigHashForListenerSettings(h.maxFileBytes, h.registrationMode, h.userInviteQuota),
 		Config: &tg.JSONObject{Value: values},
 	}, nil
 }
 
-func appConfigHashForUploadLimit(maxFileBytes int64) int {
+func appConfigHashForListenerSettings(maxFileBytes int64, mode config.RegistrationMode, userInviteQuota int) int {
 	if maxFileBytes <= 0 {
-		return appConfigHash
+		maxFileBytes = 0
 	}
 	var encoded [8]byte
 	binary.LittleEndian.PutUint64(encoded[:], uint64(maxFileBytes))
-	hash := crc32.ChecksumIEEE(encoded[:]) & 0x7fffffff
+	input := fmt.Sprintf("%x\x00%s\x00%d", encoded, mode, userInviteQuota)
+	hash := crc32.ChecksumIEEE([]byte(input)) & 0x7fffffff
 	if int(hash) == appConfigHash {
 		hash++
 	}

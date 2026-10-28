@@ -203,6 +203,68 @@ func (q *Queries) ListRegistrationInvites(ctx context.Context) ([]ListRegistrati
 	return items, nil
 }
 
+const listUserRegistrationInvitesAt = `-- name: ListUserRegistrationInvitesAt :many
+SELECT id, handle, inviter_user_id, issued_at, expires_at,
+       CASE
+           WHEN state = 'issued' AND expires_at <= $1::timestamptz THEN 'expired'
+           ELSE state
+       END::text AS state,
+       consumed_at, revoked_at
+FROM registration_invites
+WHERE inviter_user_id = $2::bigint
+ORDER BY issued_at DESC, id DESC
+LIMIT $3::bigint
+`
+
+type ListUserRegistrationInvitesAtParams struct {
+	Now           pgtype.Timestamptz
+	InviterUserID int64
+	RowLimit      int64
+}
+
+type ListUserRegistrationInvitesAtRow struct {
+	ID            int64
+	Handle        *string
+	InviterUserID *int64
+	IssuedAt      pgtype.Timestamptz
+	ExpiresAt     pgtype.Timestamptz
+	State         string
+	ConsumedAt    pgtype.Timestamptz
+	RevokedAt     pgtype.Timestamptz
+}
+
+// The caller receives metadata only; the digest and redeeming account are not
+// selected. A single server timestamp determines whether an issued invite has
+// expired for this response.
+func (q *Queries) ListUserRegistrationInvitesAt(ctx context.Context, arg ListUserRegistrationInvitesAtParams) ([]ListUserRegistrationInvitesAtRow, error) {
+	rows, err := q.db.Query(ctx, listUserRegistrationInvitesAt, arg.Now, arg.InviterUserID, arg.RowLimit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListUserRegistrationInvitesAtRow
+	for rows.Next() {
+		var i ListUserRegistrationInvitesAtRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.Handle,
+			&i.InviterUserID,
+			&i.IssuedAt,
+			&i.ExpiresAt,
+			&i.State,
+			&i.ConsumedAt,
+			&i.RevokedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const lockRegistrationInvite = `-- name: LockRegistrationInvite :one
 SELECT id
 FROM registration_invites
@@ -321,4 +383,80 @@ func (q *Queries) RevokeRegistrationInvite(ctx context.Context, id int64) (int64
 		return 0, err
 	}
 	return result.RowsAffected(), nil
+}
+
+const revokeUserRegistrationInvite = `-- name: RevokeUserRegistrationInvite :execrows
+WITH current_clock AS (SELECT clock_timestamp()::timestamptz AS now)
+UPDATE registration_invites
+SET state = 'revoked', revoked_at = current_clock.now
+FROM current_clock
+WHERE id = $1::bigint
+  AND inviter_user_id = $2::bigint
+  AND state = 'issued'
+  AND expires_at > current_clock.now
+`
+
+type RevokeUserRegistrationInviteParams struct {
+	ID            int64
+	InviterUserID int64
+}
+
+// Revoke is scoped in the UPDATE predicate. A missing id and an id owned by
+// someone else both affect zero rows and are indistinguishable to the caller.
+func (q *Queries) RevokeUserRegistrationInvite(ctx context.Context, arg RevokeUserRegistrationInviteParams) (int64, error) {
+	result, err := q.db.Exec(ctx, revokeUserRegistrationInvite, arg.ID, arg.InviterUserID)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
+const userInviteAccountAge = `-- name: UserInviteAccountAge :one
+SELECT created_at, clock_timestamp()::timestamptz AS now
+FROM users
+WHERE id = $1
+`
+
+type UserInviteAccountAgeRow struct {
+	CreatedAt pgtype.Timestamptz
+	Now       pgtype.Timestamptz
+}
+
+// The caller's account age and the database clock are read together so the
+// account-age gate does not depend on a replica's wall clock.
+func (q *Queries) UserInviteAccountAge(ctx context.Context, userID int64) (UserInviteAccountAgeRow, error) {
+	row := q.db.QueryRow(ctx, userInviteAccountAge, userID)
+	var i UserInviteAccountAgeRow
+	err := row.Scan(&i.CreatedAt, &i.Now)
+	return i, err
+}
+
+const userInviteUsage = `-- name: UserInviteUsage :one
+WITH current_clock AS (SELECT clock_timestamp()::timestamptz AS now),
+usage AS (
+    SELECT count(*)::bigint AS weekly_count,
+           min(invite.issued_at)::timestamptz AS oldest_issued_at
+    FROM registration_invites AS invite
+    CROSS JOIN current_clock
+    WHERE invite.inviter_user_id = $1::bigint
+      AND invite.issued_at > current_clock.now - interval '7 days'
+)
+SELECT usage.weekly_count, usage.oldest_issued_at, current_clock.now::timestamptz AS now
+FROM usage CROSS JOIN current_clock
+`
+
+type UserInviteUsageRow struct {
+	WeeklyCount    int64
+	OldestIssuedAt pgtype.Timestamptz
+	Now            pgtype.Timestamptz
+}
+
+// Every invite issued during the trailing seven days counts, regardless of
+// whether it is pending, used, expired, or revoked. The same database clock
+// also anchors the next time a quota slot opens.
+func (q *Queries) UserInviteUsage(ctx context.Context, inviterUserID int64) (UserInviteUsageRow, error) {
+	row := q.db.QueryRow(ctx, userInviteUsage, inviterUserID)
+	var i UserInviteUsageRow
+	err := row.Scan(&i.WeeklyCount, &i.OldestIssuedAt, &i.Now)
+	return i, err
 }

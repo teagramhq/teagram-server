@@ -63,3 +63,18 @@ func GetAppConfigForTestWithModeAndHash(userID int64, mode config.RegistrationMo
 		Buf:    &buf,
 	})
 }
+
+func GetAppConfigForTestWithInviteSettings(userID int64, mode config.RegistrationMode, quota int) (bin.Encoder, error) {
+	var buf bin.Buffer
+	if err := (&tg.HelpGetAppConfigRequest{}).Encode(&buf); err != nil {
+		return nil, err
+	}
+	h := testHandlers(nil)
+	h.registrationMode = mode
+	h.userInviteQuota = quota
+	return h.handleGetAppConfig(&mtproto.Request{
+		Ctx:    context.Background(),
+		UserID: userID,
+		Buf:    &buf,
+	})
+}
