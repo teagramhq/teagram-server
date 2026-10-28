@@ -6,6 +6,7 @@ import (
 	"path"
 	"reflect"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -559,6 +560,67 @@ func TestSearchStickerSetsIncludesOnlyCallerVisibleUserSets(t *testing.T) {
 		t.Fatalf("searchStickerSets after set deactivation = hash %d, %d sets; want it excluded and hash changed", inactive.Hash, len(inactive.Sets))
 	}
 }
+
+func TestSearchStickerSetsLoadsMatchingCoversInBulk(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	blobs := testBlobs(t)
+	dsn := pgtest.DSN(t)
+	tracer := &stickerSearchQueryCounter{}
+	s, err := store.Open(ctx, dsn, pgtest.EncKey(), store.WithBlobStore(blobs), store.WithQueryTracer(tracer))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := s.Close(); err != nil {
+			t.Errorf("close store: %v", err)
+		}
+	})
+	owner, err := s.CreateUser(ctx, "+15551810016")
+	if err != nil {
+		t.Fatalf("create owner: %v", err)
+	}
+	h := fullChannelDispatcher(s)
+	for _, shortName := range []string{"bulk_cats", "bulk_dogs", "bulkcats"} {
+		file := storedStickerDocument(t, s, blobs, owner.ID, validStickerTGS(t))
+		createStickerSet(t, h, owner.ID, createStickerRequest(shortName, file, false, false))
+	}
+
+	tracer.n.Store(0)
+	result := searchStickerSets(t, h, owner.ID, &tg.MessagesSearchStickerSetsRequest{Q: "BULK", ExcludeFeatured: true})
+	full, ok := result.(*tg.MessagesFoundStickerSets)
+	if !ok || len(full.Sets) != 3 {
+		t.Fatalf("searchStickerSets = %T with %d sets; want all three bulk-created sets", result, foundStickerSetsCount(result))
+	}
+	for _, result := range full.Sets {
+		covered, ok := result.(*tg.StickerSetCovered)
+		if !ok || covered.Cover == nil {
+			t.Errorf("search result = %T (%v), want a set with a cover", result, result)
+		}
+	}
+	if got := tracer.n.Load(); got != 2 {
+		t.Fatalf("searchStickerSets used %d database queries for three results, want one indexed search and one bulk resolution", got)
+	}
+
+	tracer.n.Store(0)
+	literalResult := searchStickerSets(t, h, owner.ID, &tg.MessagesSearchStickerSetsRequest{Q: "bulk_cats", ExcludeFeatured: true})
+	literal, ok := literalResult.(*tg.MessagesFoundStickerSets)
+	if !ok || len(literal.Sets) != 1 {
+		t.Fatalf("literal underscore search = %T with %d sets; want only bulk_cats", literalResult, foundStickerSetsCount(literalResult))
+	}
+	if got := tracer.n.Load(); got != 2 {
+		t.Fatalf("literal underscore search used %d database queries, want one search and one bulk resolution", got)
+	}
+}
+
+type stickerSearchQueryCounter struct{ n atomic.Int64 }
+
+func (c *stickerSearchQueryCounter) TraceQueryStart(ctx context.Context, _ *pgx.Conn, _ pgx.TraceQueryStartData) context.Context {
+	c.n.Add(1)
+	return ctx
+}
+
+func (*stickerSearchQueryCounter) TraceQueryEnd(context.Context, *pgx.Conn, pgx.TraceQueryEndData) {}
 
 func TestSearchStickerSetsReturnsEmptyForUnmatchedAndEmptyQueries(t *testing.T) {
 	t.Parallel()

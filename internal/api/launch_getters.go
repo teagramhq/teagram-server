@@ -207,23 +207,20 @@ func (h *handlers) handleSearchStickerSets(r *mtproto.Request) (bin.Encoder, err
 		return nil, errInternal
 	}
 
-	// Search is an enumeration surface. Only return user sets that still pass
-	// the same live-set and exact-access-hash resolver used by getStickerSet.
+	// Search is an enumeration surface. The bulk resolver rechecks each exact
+	// access hash and live state before exposing set metadata or item covers.
 	userSetCount := 0
 	candidates, err := h.store.UserStickerSetSearchCandidates(r.Ctx, req.Q)
 	if err != nil {
 		h.log.Error("search user sticker sets", "user_id", r.UserID, "err", err)
 		return nil, errInternal
 	}
-	for _, candidate := range candidates {
-		set, resolveErr := h.userStickerSetByRef(r, &tg.InputStickerSetID{ID: candidate.ID, AccessHash: candidate.AccessHash})
-		if errors.Is(resolveErr, store.ErrStickerSetNotFound) {
-			continue
-		}
-		if resolveErr != nil {
-			h.log.Error("resolve user sticker set search candidate", "user_id", r.UserID, "set_id", candidate.ID, "err", resolveErr)
-			return nil, errInternal
-		}
+	userSets, err := h.store.UserStickerSetsBySearchCandidates(r.Ctx, candidates)
+	if err != nil {
+		h.log.Error("resolve user sticker set search candidates", "user_id", r.UserID, "err", err)
+		return nil, errInternal
+	}
+	for _, set := range userSets {
 		if !set.IsLive || len(set.Items) == 0 ||
 			(!strings.Contains(strings.ToLower(set.Title), query) && !strings.Contains(strings.ToLower(set.ShortName), query)) {
 			continue

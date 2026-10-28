@@ -255,13 +255,13 @@ func (s *Store) UserStickerSetByID(ctx context.Context, id, accessHash int64) (U
 	return s.userStickerSetWithItems(ctx, userStickerSetFromRow(row))
 }
 
-// UserStickerSetSearchCandidates returns identities matching the query. The
-// caller must resolve each candidate with UserStickerSetByID before exposing it.
+// UserStickerSetSearchCandidates returns at most 50 live identities matching
+// the query. Callers must bulk-resolve them before exposing any metadata.
 func (s *Store) UserStickerSetSearchCandidates(ctx context.Context, query string) ([]UserStickerSetSearchCandidate, error) {
 	if query == "" {
 		return []UserStickerSetSearchCandidate{}, nil
 	}
-	rows, err := s.q.UserCreatedStickerSetSearchCandidates(ctx, query)
+	rows, err := s.q.UserCreatedStickerSetSearchCandidates(ctx, escapeStickerSetSearchQuery(query))
 	if err != nil {
 		return nil, fmt.Errorf("search user sticker set candidates: %w", err)
 	}
@@ -270,6 +270,49 @@ func (s *Store) UserStickerSetSearchCandidates(ctx context.Context, query string
 		result = append(result, UserStickerSetSearchCandidate{ID: row.ID, AccessHash: row.AccessHash})
 	}
 	return result, nil
+}
+
+// UserStickerSetsBySearchCandidates rechecks each candidate's exact access
+// hash and live state while loading its ordered item metadata in one query.
+func (s *Store) UserStickerSetsBySearchCandidates(ctx context.Context, candidates []UserStickerSetSearchCandidate) ([]UserStickerSet, error) {
+	if len(candidates) == 0 {
+		return []UserStickerSet{}, nil
+	}
+	setIDs := make([]int64, 0, len(candidates))
+	accessHashes := make([]int64, 0, len(candidates))
+	for _, candidate := range candidates {
+		setIDs = append(setIDs, candidate.ID)
+		accessHashes = append(accessHashes, candidate.AccessHash)
+	}
+	rows, err := s.q.UserCreatedStickerSetsBySearchCandidates(ctx, db.UserCreatedStickerSetsBySearchCandidatesParams{
+		SetIds: setIDs, AccessHashes: accessHashes,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("resolve user sticker set search candidates: %w", err)
+	}
+	result := make([]UserStickerSet, 0, len(candidates))
+	for _, row := range rows {
+		if len(result) == 0 || result[len(result)-1].ID != row.ID {
+			result = append(result, UserStickerSet{
+				ID: row.ID, AccessHash: row.AccessHash, CreatorID: row.CreatorID,
+				Title: row.Title, ShortName: row.ShortName, Software: row.Software,
+				Kind: row.Kind, TextColor: row.TextColor, IsLive: row.IsLive,
+				CreatedAt: row.CreatedAt.Time, Items: []UserStickerSetItem{},
+			})
+		}
+		set := &result[len(result)-1]
+		set.Items = append(set.Items, UserStickerSetItem{
+			Position: int(row.Position), FileID: row.FileID, AccessHash: row.ItemAccessHash,
+			Size: row.Size, Date: row.Date.Time, Emoji: row.Emoji, Keywords: row.Keywords,
+			Format: row.Format, Width: int(row.Width), Height: int(row.Height),
+			Duration: row.DurationNs, MaskCoords: row.MaskCoords,
+		})
+	}
+	return result, nil
+}
+
+func escapeStickerSetSearchQuery(query string) string {
+	return strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`).Replace(query)
 }
 
 // UserStickerSetByInstalledID returns a live set for an account's install row.
