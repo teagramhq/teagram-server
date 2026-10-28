@@ -42,9 +42,106 @@ demo_remove_previous_image() {
     printf 'could not remove previous image %s\n' "$previous_image_id" >&2
 }
 
+demo_restore_legacy_edge_after_rollback() {
+  local legacy_compose="$TMP_DIR/legacy-edge-compose.yaml"
+  local legacy_nginx="$TMP_DIR/legacy-edge-nginx.conf"
+  local legacy_haproxy="$TMP_DIR/legacy-edge-haproxy.cfg"
+  local legacy_haproxy_renderer="$TMP_DIR/legacy-edge-render-haproxy-config.py"
+  local legacy_edge_hash legacy_haproxy_hash legacy_image_ref mounts
+  local -a edge_ids=()
+
+  if git -C "$DEMO_REPO_ROOT" cat-file -e \
+    "$PREV_SHA:deploy/teagram-demo/nginx-config/nginx.conf" 2>/dev/null; then
+    return 0
+  fi
+  [[ -d "$TMP_DIR" ]] || {
+    demo_fail 'temporary directory is unavailable for legacy edge rollback'
+    return 1
+  }
+  if ! git -C "$DEMO_REPO_ROOT" show "$PREV_SHA:deploy/teagram-demo/compose.yaml" > "$legacy_compose" ||
+    ! git -C "$DEMO_REPO_ROOT" show "$PREV_SHA:deploy/teagram-demo/nginx.conf" > "$legacy_nginx" ||
+    ! git -C "$DEMO_REPO_ROOT" show "$PREV_SHA:deploy/teagram-demo/haproxy.cfg" > "$legacy_haproxy" ||
+    ! git -C "$DEMO_REPO_ROOT" show "$PREV_SHA:deploy/teagram-demo/render-haproxy-config.py" > "$legacy_haproxy_renderer"; then
+    demo_fail 'previous demo proxy configuration could not be restored'
+    return 1
+  fi
+  if ! grep -Fq 'source: ./deploy/teagram-demo/nginx.conf' "$legacy_compose" ||
+    ! grep -Fq 'target: /etc/nginx/nginx.conf' "$legacy_compose"; then
+    demo_fail 'previous demo Compose file does not define the supported legacy edge mount'
+    return 1
+  fi
+
+  mapfile -t edge_ids < <(demo_compose ps -a -q edge)
+  ((${#edge_ids[@]} <= 1)) || {
+    demo_fail 'demo edge is ambiguous during legacy mount rollback'
+    return 1
+  }
+  if ((${#edge_ids[@]} == 1)); then
+    if ! mounts=$(docker inspect --format \
+      '{{range .Mounts}}{{printf "%s|%s|%s\n" .Type .Source .Destination}}{{end}}' "${edge_ids[0]}"); then
+      demo_fail 'demo edge mounts could not be read during legacy mount rollback'
+      return 1
+    fi
+    if grep -Fqx -- "bind|$SCRIPT_DIR/nginx.conf|/etc/nginx/nginx.conf" <<< "$mounts"; then
+      return 0
+    fi
+    grep -Fqx -- "bind|$SCRIPT_DIR/nginx-config|/etc/nginx/demo" <<< "$mounts" || {
+      demo_fail 'demo edge has an unsupported mount during legacy rollback'
+      return 1
+    }
+  fi
+
+  chown root:root "$legacy_nginx" && chmod 0644 "$legacy_nginx" &&
+    mv -f -- "$legacy_nginx" "$SCRIPT_DIR/nginx.conf" || {
+      demo_fail 'previous Nginx config could not be restored at its stable file path'
+      return 1
+    }
+  legacy_edge_hash=$(sha256sum -- "$SCRIPT_DIR/nginx.conf" | awk '{print $1}') || return 1
+  legacy_haproxy_hash=$(
+    sha256sum -- "$legacy_haproxy" "$legacy_haproxy_renderer" |
+      awk '{print $1}' | sha256sum | awk '{print $1}'
+  ) || return 1
+  [[ "$legacy_edge_hash" =~ ^[0-9a-f]{64}$ && "$legacy_haproxy_hash" =~ ^[0-9a-f]{64}$ ]] || {
+    demo_fail 'previous proxy configuration hash is invalid'
+    return 1
+  }
+  if ! legacy_image_ref=$(demo_active_image_ref); then
+    return 1
+  fi
+  env -u COMPOSE_FILE -u COMPOSE_PROJECT_NAME -u COMPOSE_PROFILES \
+    -u TEAGRAM_DEMO_TURNSTILE_SITE_KEY -u TEAGRAM_DEMO_TURNSTILE_SECRET_KEY_FILE \
+    -u TEAGRAM_DEMO_EDGE_BIND \
+    "TEAGRAM_DEMO_IMAGE_REF=$legacy_image_ref" \
+    "TEAGRAM_DEMO_EDGE_CONFIG_SHA256=$legacy_edge_hash" \
+    "TEAGRAM_DEMO_HAPROXY_CONFIG_SHA256=$legacy_haproxy_hash" \
+    docker compose --env-file "$DEMO_ENV_FILE" --project-directory "$DEMO_REPO_ROOT" \
+      --project-name teagram-demo --file "$legacy_compose" \
+      up -d --no-deps --force-recreate edge </dev/null || {
+        demo_fail 'edge could not be restored from the previous file-mount Compose config'
+        return 1
+      }
+  mapfile -t edge_ids < <(docker ps -q \
+    --filter label=com.docker.compose.project=teagram-demo \
+    --filter label=com.docker.compose.service=edge)
+  ((${#edge_ids[@]} == 1)) || {
+    demo_fail 'restored legacy demo edge is missing or ambiguous'
+    return 1
+  }
+  EDGE_CONTAINER_ID=${edge_ids[0]}
+  demo_edge_uses_legacy_file_mount "$EDGE_CONTAINER_ID" || {
+    demo_fail 'restored demo edge does not use the previous single-file config mount'
+    return 1
+  }
+  docker exec "$EDGE_CONTAINER_ID" nginx -t >/dev/null || {
+    demo_fail 'restored legacy edge configuration failed its syntax check'
+    return 1
+  }
+  printf 'demo edge restored to the legacy file mount for checkout %s\n' "$PREV_SHA" >&2
+}
+
 demo_cleanup() {
   local rc=$?
-  local rollback_rc=0 rollback_confirmed=1 nginx_rollback_file
+  local rollback_rc=0 rollback_confirmed=1 edge_rollback_rc nginx_rollback_file
   trap - EXIT
   if (( rc != 0 && BACKUP_READY == 1 )); then
     if (( CUTOVER_COMMITTED == 1 )); then
@@ -99,15 +196,26 @@ demo_cleanup() {
   fi
   if (( rc != 0 && ${CUTOVER_COMMITTED:-0} == 0 && ${EDGE_CONFIG_RELOAD_ATTEMPTED:-0} == 1 )); then
     nginx_rollback_file="$SCRIPT_DIR/nginx-config/.nginx.conf.rollback.$$"
-    if { git -C "$DEMO_REPO_ROOT" show "$PREV_SHA:deploy/teagram-demo/nginx-config/nginx.conf" > "$nginx_rollback_file" ||
-      git -C "$DEMO_REPO_ROOT" show "$PREV_SHA:deploy/teagram-demo/nginx.conf" > "$nginx_rollback_file"; } &&
-      chown root:root "$nginx_rollback_file" && chmod 0644 "$nginx_rollback_file" &&
-      mv -f -- "$nginx_rollback_file" "$SCRIPT_DIR/nginx-config/nginx.conf" &&
-      demo_reload_edge; then
-      printf 'demo edge configuration rolled back to %s\n' "$PREV_SHA" >&2
+    if git -C "$DEMO_REPO_ROOT" show "$PREV_SHA:deploy/teagram-demo/nginx-config/nginx.conf" > "$nginx_rollback_file" 2>/dev/null ||
+      git -C "$DEMO_REPO_ROOT" show "$PREV_SHA:deploy/teagram-demo/nginx.conf" > "$nginx_rollback_file"; then
+      edge_rollback_rc=0
+      if ! chown root:root "$nginx_rollback_file" || ! chmod 0644 "$nginx_rollback_file" ||
+        ! mv -f -- "$nginx_rollback_file" "$SCRIPT_DIR/nginx-config/nginx.conf"; then
+        edge_rollback_rc=1
+      else
+        demo_reload_edge || edge_rollback_rc=1
+        demo_restore_legacy_edge_after_rollback || edge_rollback_rc=1
+      fi
+      if (( edge_rollback_rc == 0 )); then
+        printf 'demo edge configuration rolled back to %s\n' "$PREV_SHA" >&2
+      else
+        rm -f -- "$nginx_rollback_file"
+        printf 'demo edge configuration rollback could not be confirmed; inspect the public edge\n' >&2
+        rc=1
+      fi
     else
       rm -f -- "$nginx_rollback_file"
-      printf 'demo edge configuration rollback could not be confirmed; inspect the public edge\n' >&2
+      printf 'demo edge configuration for %s could not be read; inspect the public edge\n' "$PREV_SHA" >&2
       rc=1
     fi
   fi

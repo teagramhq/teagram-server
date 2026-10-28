@@ -723,6 +723,16 @@ if "markers=133" not in seed_test_text or "search_account=demo_searcher" not in 
     raise SystemExit("test-seed-compose.sh: API convergence check must assert stable marker counts and search account")
 deploy_path = Path(sys.argv[3])
 deploy = deploy_path.read_text(encoding="utf-8")
+cleanup = deploy.split("demo_cleanup() {", 1)[1].split("\n}", 1)[0]
+assert_text_order(cleanup, "deploy-main.sh migration rollback", [
+    "demo_reload_edge || edge_rollback_rc=1",
+    "demo_restore_legacy_edge_after_rollback || edge_rollback_rc=1",
+])
+forced_command = Path(sys.argv[5]).read_text(encoding="utf-8")
+if "demo_restore_legacy_edge_after_rollback" in forced_command:
+    raise SystemExit("forced-command.sh: first migration recovery must run before the old wrapper resets checkout")
+if 'bash "$REPO/deploy/teagram-demo/deploy-main.sh"' not in forced_command:
+    raise SystemExit("forced-command.sh: server deployment must invoke the checked deployment rollback")
 init = Path(sys.argv[2]).read_text(encoding="utf-8")
 assert_text_order(init, "init-demo.sh image release", [
     'IMAGE_REF=$(demo_pull_image_by_sha "$SHA" "$IMAGE_DIGEST")',
@@ -1082,60 +1092,117 @@ env \
   TMP_DIR="$TMP_DIR" \
   bash "$TMP_DIR/deploy-image-cleanup-regression.sh"
 
-FORCED_EDGE_ROLLBACK_FUNCTION="$TMP_DIR/forced-edge-rollback-function.sh"
-sed -n '/^demo_restore_legacy_edge_after_checkout_rollback() {$/,/^}/p' \
-  "$SCRIPT_DIR/forced-command.sh" > "$FORCED_EDGE_ROLLBACK_FUNCTION"
-cat > "$TMP_DIR/forced-edge-rollback-regression.sh" <<'BASH'
+LEGACY_EDGE_ROLLBACK_FUNCTION="$TMP_DIR/demo-restore-legacy-edge.sh"
+sed -n '/^demo_restore_legacy_edge_after_rollback() {$/,/^}/p' \
+  "$SCRIPT_DIR/deploy-main.sh" > "$LEGACY_EDGE_ROLLBACK_FUNCTION"
+cat > "$TMP_DIR/demo-restore-legacy-edge-regression.sh" <<'BASH'
 set -Eeuo pipefail
-source "$FORCED_EDGE_ROLLBACK_FUNCTION"
+source "$DEMO_COMMON"
 REPO="$TEST_REPO"
-mkdir -p "$REPO/deploy/teagram-demo"
-printf '%s\n' 'user nginx;' > "$REPO/deploy/teagram-demo/nginx.conf"
-printf '%s\n' 'global' > "$REPO/deploy/teagram-demo/haproxy.cfg"
-printf '%s\n' 'print("fixture")' > "$REPO/deploy/teagram-demo/render-haproxy-config.py"
-cat > "$REPO/deploy/teagram-demo/compose.yaml" <<'YAML'
-services:
-  edge:
-    volumes:
-      - type: bind
-        source: ./deploy/teagram-demo/nginx.conf
-        target: /etc/nginx/nginx.conf
-YAML
-MOCK_EDGE_MOUNT=directory
-MOCK_RECREATE_COUNT=0
-MOCK_NGINX_TESTED=0
+SCRIPT_DIR="$REPO/deploy/teagram-demo"
+DEMO_SCRIPT_DIR="$SCRIPT_DIR"
+DEMO_REPO_ROOT="$REPO"
+DEMO_ENV_FILE="$SCRIPT_DIR/.env"
+TMP_DIR="$TEST_ROOT/tmp"
+PREV_SHA=1111111111111111111111111111111111111111
+MOCK_EDGE_STATE="$TEST_ROOT/edge-state"
+MOCK_RECREATE_COUNT_FILE="$TEST_ROOT/recreate-count"
+export MOCK_EDGE_STATE MOCK_RECREATE_COUNT_FILE
+mkdir -p "$TMP_DIR" "$SCRIPT_DIR/nginx-config"
+printf '%s\n' 'legacy nginx config fixture' > "$SCRIPT_DIR/nginx.conf"
+printf '%s\n' 'global' > "$SCRIPT_DIR/haproxy.cfg"
+printf '%s\n' 'print("fixture")' > "$SCRIPT_DIR/render-haproxy-config.py"
+printf '%s\n' 'POSTGRES_PASSWORD=fixture' > "$DEMO_ENV_FILE"
+printf '%s\n' directory > "$MOCK_EDGE_STATE"
+printf '0\n' > "$MOCK_RECREATE_COUNT_FILE"
 
+source "$LEGACY_EDGE_ROLLBACK_FUNCTION"
+demo_active_image_ref() { printf '%s\n' 'teagramd:previous'; }
+demo_compose() {
+  [[ "$*" == 'ps -a -q edge' ]] || return 1
+  printf 'old-edge\n'
+}
+demo_edge_uses_legacy_file_mount() {
+  local mounts
+  mounts=$(docker inspect --format ignored "$1") || return 1
+  grep -Fqx -- "bind|$DEMO_SCRIPT_DIR/nginx.conf|/etc/nginx/nginx.conf" <<< "$mounts"
+}
+chown() { return 0; }
+git() {
+  if [[ "$1" == -C && "$2" == "$DEMO_REPO_ROOT" && "$3" == cat-file ]]; then
+    return 1
+  fi
+  if [[ "$1" == -C && "$2" == "$DEMO_REPO_ROOT" && "$3" == show ]]; then
+    case "$4" in
+      "$PREV_SHA:deploy/teagram-demo/compose.yaml")
+        printf '%s\n' 'source: ./deploy/teagram-demo/nginx.conf' \
+          'target: /etc/nginx/nginx.conf'
+        ;;
+      "$PREV_SHA:deploy/teagram-demo/nginx.conf")
+        cat "$SCRIPT_DIR/nginx.conf"
+        ;;
+      "$PREV_SHA:deploy/teagram-demo/haproxy.cfg")
+        cat "$SCRIPT_DIR/haproxy.cfg"
+        ;;
+      "$PREV_SHA:deploy/teagram-demo/render-haproxy-config.py")
+        cat "$SCRIPT_DIR/render-haproxy-config.py"
+        ;;
+      *) return 1 ;;
+    esac
+    return
+  fi
+  return 1
+}
 docker() {
-  if [[ "$1" == compose && "$*" == *' ps -q edge' ]]; then
-    printf 'edge-container\n'
-  elif [[ "$1" == compose && "$*" == *' up -d --no-deps --force-recreate edge' ]]; then
-    [[ "$TEAGRAM_DEMO_EDGE_CONFIG_SHA256" =~ ^[0-9a-f]{64}$ &&
-      "$TEAGRAM_DEMO_HAPROXY_CONFIG_SHA256" =~ ^[0-9a-f]{64}$ ]] || return 1
-    MOCK_EDGE_MOUNT=legacy
-    ((MOCK_RECREATE_COUNT += 1))
-  elif [[ "$1" == inspect && "$2" == --format && "$4" == edge-container ]]; then
-    if [[ "$MOCK_EDGE_MOUNT" == directory ]]; then
-      printf 'bind|%s/deploy/teagram-demo/nginx-config|/etc/nginx/demo\n' "$REPO"
+  if [[ "$1" == ps && "$2" == -q ]]; then
+    printf 'restored-edge\n'
+  elif [[ "$1" == inspect && "$2" == --format ]]; then
+    if [[ "$(<"$MOCK_EDGE_STATE")" == directory ]]; then
+      printf 'bind|%s/nginx-config|/etc/nginx/demo\n' "$DEMO_SCRIPT_DIR"
     else
-      printf 'bind|%s/deploy/teagram-demo/nginx.conf|/etc/nginx/nginx.conf\n' "$REPO"
+      printf 'bind|%s/nginx.conf|/etc/nginx/nginx.conf\n' "$DEMO_SCRIPT_DIR"
     fi
-  elif [[ "$1" == exec && "$2" == edge-container && "$3" == nginx && "$4" == -t ]]; then
-    MOCK_NGINX_TESTED=1
+  elif [[ "$1" == exec && "$2" == restored-edge && "$3" == nginx && "$4" == -t ]]; then
+    printf 'tested\n' >> "$TEST_ROOT/nginx-test"
   else
     printf 'unexpected docker invocation: %s\n' "$*" >&2
     return 1
   fi
 }
-
-demo_restore_legacy_edge_after_checkout_rollback
-[[ "$MOCK_EDGE_MOUNT" == legacy && "$MOCK_RECREATE_COUNT" == 1 && "$MOCK_NGINX_TESTED" == 1 ]]
-demo_restore_legacy_edge_after_checkout_rollback
-[[ "$MOCK_RECREATE_COUNT" == 1 ]]
+demo_restore_legacy_edge_after_rollback
+[[ "$(<"$MOCK_EDGE_STATE")" == legacy ]]
+[[ "$(<"$MOCK_RECREATE_COUNT_FILE")" == 1 ]]
+[[ "$(<"$TEST_ROOT/nginx-test")" == tested ]]
+demo_restore_legacy_edge_after_rollback
+[[ "$(<"$MOCK_RECREATE_COUNT_FILE")" == 1 ]]
 BASH
+mkdir -p "$TMP_DIR/legacy-edge-bin"
+cat > "$TMP_DIR/legacy-edge-bin/docker" <<'BASH'
+#!/usr/bin/env bash
+set -Eeuo pipefail
+if [[ "$1" == compose && "$*" == *' up -d --no-deps --force-recreate edge' ]]; then
+  [[ "$TEAGRAM_DEMO_EDGE_CONFIG_SHA256" =~ ^[0-9a-f]{64}$ ]]
+  [[ "$TEAGRAM_DEMO_HAPROXY_CONFIG_SHA256" =~ ^[0-9a-f]{64}$ ]]
+  [[ "$TEAGRAM_DEMO_IMAGE_REF" == 'teagramd:previous' ]]
+  printf '%s\n' legacy > "$MOCK_EDGE_STATE"
+  count=$(<"$MOCK_RECREATE_COUNT_FILE")
+  printf '%s\n' "$((count + 1))" > "$MOCK_RECREATE_COUNT_FILE"
+elif [[ "$1" == ps ]]; then
+  printf 'restored-edge\n'
+else
+  printf 'unexpected docker executable invocation: %s\n' "$*" >&2
+  exit 1
+fi
+BASH
+chmod +x "$TMP_DIR/legacy-edge-bin/docker"
 env \
-  FORCED_EDGE_ROLLBACK_FUNCTION="$FORCED_EDGE_ROLLBACK_FUNCTION" \
+  DEMO_COMMON="$SCRIPT_DIR/demo-common.sh" \
+  LEGACY_EDGE_ROLLBACK_FUNCTION="$LEGACY_EDGE_ROLLBACK_FUNCTION" \
   TEST_REPO="$TMP_DIR/legacy-demo-checkout" \
-  bash "$TMP_DIR/forced-edge-rollback-regression.sh"
+  TEST_ROOT="$TMP_DIR/legacy-edge-test" \
+  PATH="$TMP_DIR/legacy-edge-bin:$PATH" \
+  bash "$TMP_DIR/demo-restore-legacy-edge-regression.sh"
+
 
 cat > "$TMP_DIR/deploy-rollback-failure-regression.sh" <<'BASH'
 set -Eeuo pipefail
