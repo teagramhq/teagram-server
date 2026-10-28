@@ -4,6 +4,7 @@ set -euo pipefail
 script="$(cd "$(dirname "$0")" && pwd)/teagram-ops.sh"
 replay_script="$(cd "$(dirname "$0")" && pwd)/ops/replay-check.sh"
 failure_report_script="$(cd "$(dirname "$0")" && pwd)/ops/target-failure-report.sh"
+evidence_script="$(cd "$(dirname "$0")" && pwd)/ops/rollout-evidence.sh"
 tmp=$(mktemp -d)
 unrelated=$(mktemp -d /tmp/teagram-ops.test-unrelated.XXXXXX)
 cleanup() {
@@ -33,6 +34,7 @@ REPORT_PREFIX=${REPORT_TARGET_SHA:0:12}
 export OPS_SHA TARGET_SHA OFF_MAIN_SHA CONTAINER_ID REPORT_TARGET_SHA REPORT_SOURCE_SHA REPORT_PREFIX
 export MOCK_CURRENT_SHA="$TARGET_SHA" MOCK_REPO="$tmp/repo"
 export MOCK_OP_SCRIPT="$replay_script" MOCK_REPORT_SCRIPT="$failure_report_script"
+export MOCK_EVIDENCE_SCRIPT="$evidence_script"
 export MOCK_VERIFIER="$tmp/verifier.sh" MOCK_RUNNER="$tmp/runner.sh"
 export MOCK_RUN_TEMP_LOG="$tmp/run-temp.log" MOCK_RM_LOG="$tmp/rm.log"
 export MOCK_VERIFIER_CALL="$tmp/verifier-call.log"
@@ -59,6 +61,7 @@ case "$1" in
     [[ "${2:-}" == -e ]] || exit 99
     [[ "${3:-}" == "$OPS_SHA:deploy/teagram/ops/replay-check.sh" || \
       "${3:-}" == "$OPS_SHA:deploy/teagram/ops/target-failure-report.sh" || \
+      "${3:-}" == "$OPS_SHA:deploy/teagram/ops/rollout-evidence.sh" || \
       "${3:-}" == "$TARGET_SHA:deploy/teagramd/rollout-runner/rollout-runner.sh" || \
       "${3:-}" == "$TARGET_SHA:deploy/teagramd/rollout-runner/rollout-verifier.sh" ]]
     ;;
@@ -70,6 +73,10 @@ case "$1" in
         ;;
       "$OPS_SHA:deploy/teagram/ops/target-failure-report.sh")
         sed -e "s|/root|$MOCK_ROOT|g" "$MOCK_REPORT_SCRIPT"
+        ;;
+      "$OPS_SHA:deploy/teagram/ops/rollout-evidence.sh")
+        sed -e "s|/root|$MOCK_ROOT|g" \
+          -e "s|0:700|$MOCK_OWNER_UID:700|g" -e "s|0:600|$MOCK_OWNER_UID:600|g" "$MOCK_EVIDENCE_SCRIPT"
         ;;
       "$TARGET_SHA:deploy/teagramd/rollout-runner/rollout-runner.sh") cat "$MOCK_RUNNER" ;;
       "$TARGET_SHA:deploy/teagramd/rollout-runner/rollout-verifier.sh") cat "$MOCK_VERIFIER" ;;
@@ -253,9 +260,47 @@ invalid_evidence=${output##*evidence=}
 private_evidence=$(<"$MOCK_PRIVATE_EVIDENCE_LOG")
 [[ "$private_evidence" == "$MOCK_ROOT/teagram-replay-check.${TARGET_SHA:0:12}."* && ! -e "$private_evidence" ]]
 
+chmod 700 "$MOCK_ROOT"
+old_target_dir="$MOCK_ROOT/main1238-${OFF_MAIN_SHA:0:12}-20261027T230000Z.target"
+latest_target_dir="$MOCK_ROOT/main1238-${TARGET_SHA:0:12}-20261028T040000Z.target"
+mkdir -m 700 "$old_target_dir" "$latest_target_dir"
+printf 'captured_at_utc=2026-10-27T23:00:10Z target_sha=%s source_sha=%s reason=target_readiness_rejected_exit_2 target_snapshot=unavailable\n' \
+  "$OFF_MAIN_SHA" "$OPS_SHA" > "$old_target_dir/target-failure.txt"
+printf 'captured_at_utc=2026-10-28T04:03:00Z target_sha=%s source_sha=%s reason=target_readiness_rejected_exit_1 target_snapshot=0123456789abcdef\n' \
+  "$TARGET_SHA" "$OFF_MAIN_SHA" > "$latest_target_dir/target-failure.txt"
+printf '2026-10-28T04:02:57Z\trole=target\telapsed=0\tcontainer_id=%s\tstate=running\texit=0\tadvertise=1\terrors=0\tmigrate=exited/0\tpostgres=healthy\ttcp=failed\ttls=failed\ttls_http=000\ttls_verify=unknown\n' \
+  "$CONTAINER_ID" > "$latest_target_dir/readiness-target.tsv"
+chmod 600 "$old_target_dir/target-failure.txt" "$latest_target_dir/target-failure.txt" \
+  "$latest_target_dir/readiness-target.tsv"
+latest_log="$MOCK_ROOT/rollout-${TARGET_SHA:0:7}-20261028T035454Z.log"
+later_log="$MOCK_ROOT/rollout-${TARGET_SHA:0:7}-20261028T040100Z.log"
+printf 'oldest runner line\n' > "$latest_log"
+for line_number in {1..85}; do
+  printf 'runner line %02d\n' "$line_number" >> "$latest_log"
+done
+printf 'TG_DB_PASSWORD=secret-runner-password\n' >> "$latest_log"
+printf '{"client_key":"secret-json-key"}\n' >> "$latest_log"
+printf 'Authorization: Bearer secret-runner-token\n' >> "$latest_log"
+printf 'remote=postgres://runner:secret-url-password@db/teagram\n' >> "$latest_log"
+printf 'request=Bearer secret-bearer-token\n' >> "$latest_log"
+printf 'rollout runner rejected: target readiness\nrollback=verified baseline_sha=%s\n' "$OFF_MAIN_SHA" >> "$latest_log"
+printf 'later runner log must not be selected\n' > "$later_log"
+chmod 600 "$latest_log" "$later_log"
+output=$(run_command "run $OPS_SHA rollout-evidence")
+[[ "$output" == *"rollout_failure target_sha=$TARGET_SHA source_sha=$OFF_MAIN_SHA failed_gate=target_readiness_rejected_exit_1"* ]]
+[[ "$output" == *'evidence_captured_at_utc=2026-10-28T04:03:00Z'* ]]
+[[ "$output" == *'tcp=failed'* && "$output" == *'tls=failed'* && "$output" != *"$CONTAINER_ID"* ]]
+[[ "$output" == *"runner_log=rollout-${TARGET_SHA:0:7}-20261028T035454Z.log"* ]]
+[[ "$output" == *'runner line 85'* && "$output" != *'oldest runner line'* ]]
+[[ "$output" == *'rollback=verified'* && "$output" != *'later runner log must not be selected'* ]]
+[[ "$output" != *'secret-runner-password'* && "$output" != *'secret-runner-token'* && \
+   "$output" != *'secret-url-password'* && "$output" != *'secret-bearer-token'* && \
+   "$output" != *'secret-json-key'* ]]
+expect_status 64 "run $OPS_SHA rollout-evidence extra"
+
 mapfile -t runner_temps < "$MOCK_RUN_TEMP_LOG"
 mapfile -t removed_temps < "$MOCK_RM_LOG"
-[[ "${#runner_temps[@]}" == 4 && "${#removed_temps[@]}" == "${#runner_temps[@]}" ]]
+[[ "${#runner_temps[@]}" == 6 && "${#removed_temps[@]}" == "${#runner_temps[@]}" ]]
 for index in "${!runner_temps[@]}"; do
   runner_temp=${runner_temps[$index]}
   [[ "$runner_temp" == /tmp/teagram-ops.* && "${removed_temps[$index]}" == "$runner_temp" && ! -e "$runner_temp" ]]
