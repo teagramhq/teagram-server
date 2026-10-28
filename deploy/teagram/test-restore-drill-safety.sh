@@ -7,9 +7,11 @@ tmp=$(mktemp -d)
 trap '/bin/rm -rf -- "$tmp"' EXIT
 functions="$tmp/restore-drill-functions.sh"
 sed -n \
+  -e '/^acquire_operation_lock() {/,/^}/p' \
   -e '/^checkout_is_clean() {/,/^}/p' \
   -e '/^remove_work_directory() {/,/^}/p' \
   -e '/^publish_final_output() {/,/^}/p' \
+  -e '/^teardown_new_prepared() {/,/^}/p' \
   -e '/^volume_snapshot() {/,/^}/p' \
   "$script" | sed "s|/usr/bin/docker|$tmp/bin/docker|g" > "$functions"
 [[ -s $functions ]]
@@ -36,6 +38,36 @@ SORT
 chmod 755 "$tmp/bin/docker" "$tmp/failing-sort/sort"
 # shellcheck disable=SC1090
 source "$functions"
+
+OPERATION_LOCK="$tmp/restore-drill.operation.lock"
+if ! acquire_operation_lock; then
+  printf '%s\n' 'FAIL could not acquire operation lock' >&2
+  exit 1
+fi
+operation_runtime=$(mktemp -d /tmp/teagram-restore-readiness.XXXXXXXX)
+printf '%s\n' 'owned by first invocation' > "$operation_runtime/sentinel"
+competing_status=0
+if (
+  exec {operation_lock_fd}>&-
+  OPERATION_LOCK="$OPERATION_LOCK" bash -c '
+    source "$1"
+    teardown_prepared() {
+      /bin/rm -rf -- "$prepared_dir"
+    }
+    acquire_operation_lock || exit $?
+    teardown_new_prepared
+  ' _ "$functions"
+); then
+  competing_status=0
+else
+  competing_status=$?
+fi
+[[ $competing_status == 1 && -f $operation_runtime/sentinel ]]
+/bin/rm -rf -- "$operation_runtime"
+exec {operation_lock_fd}>&-
+lock_line=$(grep -nF 'if acquire_operation_lock; then' "$script" | cut -d: -f1)
+runtime_line=$(grep -nF 'existing_prepared=$(/usr/bin/python3' "$script" | cut -d: -f1)
+[[ -n $lock_line && -n $runtime_line && $lock_line -lt $runtime_line ]]
 
 snapshot=$(volume_snapshot)
 [[ $snapshot == $'teagram_pgdata\t2026-10-20 12:00:00 +0000 UTC\nteagram_tgkey\t2026-10-21 12:00:00 +0000 UTC' ]]

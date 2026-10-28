@@ -7,6 +7,7 @@ readonly CHECKOUT=/home/restore-drill/teagram-server
 readonly DRILL_USER=restore-drill
 readonly DUMP_DIR=/root
 readonly DEPLOY_LOCK=/tmp/teagram-deploy.lock
+readonly OPERATION_LOCK=/run/teagram-restore-drill-operation.lock
 readonly CONTAINER=teagram-teagramd-1
 readonly MIN_BASE=aa40758600452b422cc10f99a662df8e39ac3ef3
 readonly LOCAL_DUMP_BASE=8cc64750f467b782b81efaddd0077cc619c52113
@@ -149,6 +150,44 @@ release_deploy_lock() {
     unset deploy_lock_fd
   fi
 }
+
+acquire_operation_lock() {
+  local lock_owner_mode expected_owner flock_status
+  if [[ -L $OPERATION_LOCK || ( -e $OPERATION_LOCK && ! -f $OPERATION_LOCK ) ]]; then
+    return 2
+  fi
+  exec {operation_lock_fd}>>"$OPERATION_LOCK" || return 2
+  lock_owner_mode=$(stat -c '%u:%a' -- "$OPERATION_LOCK") || {
+    exec {operation_lock_fd}>&-
+    return 2
+  }
+  expected_owner=$(id -u) || {
+    exec {operation_lock_fd}>&-
+    return 2
+  }
+  if [[ $lock_owner_mode != "$expected_owner:600" ]]; then
+    exec {operation_lock_fd}>&-
+    return 2
+  fi
+  if flock -x -n "$operation_lock_fd"; then
+    return 0
+  else
+    flock_status=$?
+    exec {operation_lock_fd}>&-
+    (( flock_status == 1 )) && return 1
+    return 2
+  fi
+}
+
+if acquire_operation_lock; then
+  :
+else
+  operation_lock_status=$?
+  case "$operation_lock_status" in
+    1) preflight_failure drill_in_progress not_started ;;
+    *) preflight_failure operation_lock_unavailable not_started ;;
+  esac
+fi
 
 if ! acquire_deploy_lock; then preflight_failure rollout_in_progress not_started; fi
 release_deploy_lock || preflight_failure rollout_lock_release_failed not_started
