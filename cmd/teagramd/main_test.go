@@ -687,7 +687,9 @@ func TestMediaErasureUsesSeparateTempAndRowCutoffs(t *testing.T) {
 }
 
 func TestRunInviteCommandIssueAndList(t *testing.T) {
-	t.Setenv("TG_POSTGRES_DSN", pgtest.DSN(t))
+	ctx := context.Background()
+	dsn := pgtest.DSN(t)
+	t.Setenv("TG_POSTGRES_DSN", dsn)
 	t.Setenv("TG_AUTHKEY_ENC_KEY", strings.Repeat("00", 32))
 	t.Setenv("TG_AUTHKEY_ENC_KEY_FILE", "")
 	t.Setenv("TG_REGISTRATION", "open")
@@ -718,6 +720,21 @@ func TestRunInviteCommandIssueAndList(t *testing.T) {
 	if _, err := fmt.Sscanf(stderr.String(), "Invite issued: id=%d", &id); err != nil {
 		t.Fatalf("issue metadata = %q, parse id: %v", stderr.String(), err)
 	}
+	st, err := store.Open(ctx, dsn, pgtest.EncKey(), store.WithoutBlobStore())
+	if err != nil {
+		t.Fatalf("open store for user invite: %v", err)
+	}
+	inviter, err := st.CreateUser(ctx, "+15551239901")
+	if err != nil {
+		t.Fatalf("create user inviter: %v", err)
+	}
+	userInvite, _, err := st.IssueUserInvite(ctx, inviter.ID)
+	if err != nil {
+		t.Fatalf("issue user invite: %v", err)
+	}
+	if err := st.Close(); err != nil {
+		t.Fatalf("close user invite store: %v", err)
+	}
 
 	stdout.Reset()
 	stderr.Reset()
@@ -727,10 +744,20 @@ func TestRunInviteCommandIssueAndList(t *testing.T) {
 	if strings.Contains(stdout.String(), secret) || strings.Contains(stderr.String(), secret) {
 		t.Fatal("list output contains the secret")
 	}
-	for _, want := range []string{"ID", "HANDLE", "STATE", "ISSUED", "EXPIRES", "alice", "issued"} {
+	for _, want := range []string{"ID", "HANDLE", "INVITER", "STATE", "ISSUED", "EXPIRES", "alice", strconv.FormatInt(inviter.ID, 10), "issued"} {
 		if !strings.Contains(stdout.String(), want) {
 			t.Errorf("list output = %q, missing %q", stdout.String(), want)
 		}
+	}
+	userRowShown := false
+	for line := range strings.SplitSeq(stdout.String(), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) > 1 && fields[0] == strconv.FormatInt(userInvite.ID, 10) && fields[1] == strconv.FormatInt(inviter.ID, 10) {
+			userRowShown = true
+		}
+	}
+	if !userRowShown {
+		t.Errorf("user invite row = %q, want invite %d to show inviter %d", stdout.String(), userInvite.ID, inviter.ID)
 	}
 	if stderr.Len() != 0 {
 		t.Fatalf("list stderr = %q, want empty", stderr.String())
@@ -738,7 +765,7 @@ func TestRunInviteCommandIssueAndList(t *testing.T) {
 
 	stdout.Reset()
 	stderr.Reset()
-	err := runInviteCommand([]string{"issue", "alice"}, log, &stdout, &stderr)
+	err = runInviteCommand([]string{"issue", "alice"}, log, &stdout, &stderr)
 	if err == nil || !strings.Contains(err.Error(), "alice") {
 		t.Fatalf("duplicate issue error = %v, want an error naming alice", err)
 	}
