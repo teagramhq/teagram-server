@@ -388,30 +388,6 @@ func (h *handlers) handleGetFile(r *mtproto.Request) (bin.Encoder, error) {
 	gate := h.messageFileGate(loc)
 	if loc.fileID < 0 && !loc.photo {
 		gate = h.builtInDocumentFileGate(loc)
-	} else if loc.fileID > 0 && !loc.photo {
-		messageGate := gate
-		gate = func(ctx context.Context, fileID, callerID int64) (authorizedDownload, error) {
-			file, stickerErr := h.store.UserStickerFileForDownload(ctx, fileID, loc.accessHash)
-			switch {
-			case errors.Is(stickerErr, store.ErrFileNotFound):
-				hasSetReference, refErr := h.store.UserStickerFileHasSetReference(ctx, fileID)
-				if refErr != nil {
-					h.log.Error("check user sticker file membership", "user_id", callerID, "err", refErr)
-					return authorizedDownload{}, errInternal
-				}
-				if hasSetReference {
-					return authorizedDownload{}, errLocationInvalid
-				}
-				return messageGate(ctx, fileID, callerID)
-			case stickerErr != nil:
-				h.log.Error("user sticker file for download", "user_id", callerID, "err", stickerErr)
-				return authorizedDownload{}, errInternal
-			case file.Kind != store.FileKindDocument:
-				return authorizedDownload{}, errLocationInvalid
-			default:
-				return authorizedDownload{file: file}, nil
-			}
-		}
 	}
 	if loc.photo && loc.hasGalleryOwner {
 		galleryGate := h.galleryPhotoFileGate(loc.galleryOwnerID, loc.accessHash, loc.thumbSize)

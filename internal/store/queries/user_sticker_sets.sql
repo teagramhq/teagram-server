@@ -91,24 +91,6 @@ JOIN files f ON f.id = i.file_id
 WHERE i.file_id = ANY($1::bigint[]) AND s.is_live = true AND f.stored = true
 ORDER BY i.file_id;
 
--- The set membership and its live state are the download authorization lane;
--- no direct lookup by file id is sufficient to serve a set document.
--- name: UserCreatedStickerFileForDownload :one
-SELECT f.id, f.uploader_id, f.access_hash, f.size, f.mime_type, f.file_name,
-       f.stored, f.date, f.subtype_rights, f.media_kind, f.width, f.height
-FROM user_created_sticker_set_items i
-JOIN user_created_sticker_sets s ON s.id = i.set_id
-JOIN files f ON f.id = i.file_id
-WHERE f.id = $1 AND f.access_hash = $2 AND f.stored = true AND s.is_live = true;
-
--- This probe decides whether a rejected set-document lookup may fall back to
--- ordinary message entitlement. A file that has ever been enrolled in a set
--- must not escape the live-set gate through an old message's document URL.
--- name: UserStickerFileHasSetReference :one
-SELECT EXISTS (
-    SELECT 1 FROM user_created_sticker_set_items WHERE file_id = $1
-);
-
 -- name: UserStickerSetShortNameExists :one
 SELECT EXISTS (
     SELECT 1 FROM user_created_sticker_sets WHERE lower(short_name) = lower($1)

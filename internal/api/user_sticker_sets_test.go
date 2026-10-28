@@ -467,6 +467,13 @@ func TestUserStickerSetListsDownloadsSendsAndForwards(t *testing.T) {
 	if len(initialEmoji.Sets) != 0 {
 		t.Fatalf("initial getEmojiStickers = %+v, want empty", initialEmoji.Sets)
 	}
+	wrongHashRef := &tg.InputStickerSetID{ID: regular.Set.ID, AccessHash: regular.Set.AccessHash + 1}
+	if got := stickerRPCError(t, dispatchChatMethod(t, h, installer.ID, "messages.getStickerSet", &tg.MessagesGetStickerSetRequest{Stickerset: wrongHashRef})); got != "STICKERSET_INVALID" {
+		t.Fatalf("getStickerSet with correct ID and wrong hash = %q, want STICKERSET_INVALID", got)
+	}
+	if got := installStickerSet(t, h, installer.ID, wrongHashRef); got != "STICKERSET_INVALID" {
+		t.Fatalf("installStickerSet with correct ID and wrong hash = %q, want STICKERSET_INVALID", got)
+	}
 	if got := installStickerSet(t, h, installer.ID, &tg.InputStickerSetID{ID: regular.Set.ID, AccessHash: regular.Set.AccessHash}); got != "success" {
 		t.Fatalf("install regular user sticker set = %q", got)
 	}
