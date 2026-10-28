@@ -113,6 +113,75 @@ def container_fixture() -> tuple[dict[str, Any], dict[str, Any]]:
     return document, record
 
 
+def cleanup_deadline_drill_type(inventory_calls: list[list[str]], instances: list[Any]) -> type:
+    class CleanupDeadlineDrill(RESTORE_READINESS.Drill):
+        def __init__(self, _args: Any, run_dir: Path, manifest: dict[str, Any]) -> None:
+            self.manifest = manifest
+            self.run_dir = run_dir
+            self.manifest_path = run_dir / "ownership.json"
+            self.gateway = None
+            self.save = lambda: None
+
+            def cleanup_call(args: list[str], **_kwargs: Any) -> tuple[int, bytes]:
+                inventory_calls.append(args)
+                return 0, b""
+
+            self.cleanup_call = Mock(side_effect=cleanup_call)
+            self.cleanup_processes = lambda: True
+            self.remove_build_inputs = lambda: True
+            self.cleanup_owned_containers = lambda: True
+            self.cleanup_owned_images = lambda: True
+            self.cleanup_networks_and_volumes = lambda: True
+            instances.append(self)
+
+    return CleanupDeadlineDrill
+
+
+def expired_work_cleanup_manifest(
+    run_dir: Path,
+    global_lock: dict[str, int],
+    rollout_lock: dict[str, int],
+) -> tuple[dict[str, Any], Path]:
+    private_path = run_dir / "secrets" / "fixture.bin"
+    private_path.parent.mkdir()
+    private_path.write_bytes(b"private fixture")
+    info = private_path.lstat()
+    manifest = {
+        "global_lock": global_lock,
+        "rollout_lock": rollout_lock,
+        "supervisor": {"pid": 0, "start_ticks": 0},
+        "parent": {"pid": 999999, "start_ticks": 1},
+        "parent_done": True,
+        "work_deadline": time.monotonic() - 1,
+        "cleanup_deadline": time.monotonic() + 60,
+        "token": "c" * 32,
+        "resource_creation_started": True,
+        "baseline": {
+            "docker_inventory": {"containers": {}, "volumes": {}, "networks": {}, "images": {}},
+            "containers": [],
+            "volumes": [],
+            "networks": [],
+        },
+        "containers": [],
+        "pending_container": None,
+        "images": [],
+        "networks": [],
+        "files": [
+            {
+                "path": str(private_path),
+                "device": info.st_dev,
+                "inode": info.st_ino,
+                "mode": stat.S_IMODE(info.st_mode),
+                "uid": info.st_uid,
+                "gid": info.st_gid,
+            }
+        ],
+        "processes": [],
+        "build_directory": None,
+    }
+    return manifest, private_path
+
+
 class RestoreReadinessContractTests(unittest.TestCase):
     def test_fixture_generation_failure_names_the_failed_check(self) -> None:
         drill = object.__new__(RESTORE_READINESS.Drill)
@@ -240,7 +309,9 @@ class RestoreReadinessContractTests(unittest.TestCase):
         self.assertIn('time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())', SCRIPT.read_text(encoding="utf-8"))
         self.assertLess(shell.index("--validate-local-dump"), shell.index("build_inputs\n"))
         workflow = Path(__file__).parents[3] / ".github" / "workflows" / "ci.yml"
-        self.assertIn("test-restore-readiness.sh --local-fixture-test", workflow.read_text(encoding="utf-8"))
+        workflow_text = workflow.read_text(encoding="utf-8")
+        self.assertIn("test-restore-readiness-foreign-fixture.sh", workflow_text)
+        self.assertIn("test-restore-readiness-foreign-fixture.sh --local-fixture-test", workflow_text)
         self.assertIn("--local-fixture-test --fault-test auth-clear-signal", shell)
         self.assertIn("--local-fixture-test --fault-test sigkill", shell)
         self.assertIn("--attest-prepared", shell)
@@ -1116,6 +1187,426 @@ class RestoreReadinessContractTests(unittest.TestCase):
                 synthetic_signin="pass",
                 auth_keys_cleared="pass",
             )
+
+    def test_docker_resource_inventory_records_isolation_metadata_only(self) -> None:
+        container_id = "a" * 64
+        image_id = "sha256:" + "b" * 64
+        network_id = "c" * 64
+        container_name = "foreign-postgres"
+        network_name = "foreign-network"
+        volume_name = "foreign-volume"
+        labels = {"restore-readiness.fixture": "foreign"}
+        mounts = [
+            {
+                "Type": "volume",
+                "Name": volume_name,
+                "Source": "/var/lib/docker/volumes/foreign-volume/_data",
+                "Destination": "/foreign",
+                "Driver": "local",
+                "Mode": "z",
+                "RW": True,
+                "Propagation": "rprivate",
+            },
+            {
+                "Type": "bind",
+                "Source": "/srv/foreign-config",
+                "Destination": "/etc/foreign-config",
+                "Mode": "ro",
+                "RW": False,
+                "Propagation": "rprivate",
+            },
+        ]
+        port_bindings = {"5432/tcp": [{"HostIp": "127.0.0.1", "HostPort": "49153"}]}
+        attachments = {
+            network_name: {
+                "NetworkID": network_id,
+                "EndpointID": "d" * 64,
+                "Gateway": "172.25.0.1",
+                "IPAddress": "172.25.0.2",
+                "MacAddress": "02:42:ac:19:00:02",
+            }
+        }
+        container_fields = [
+            container_id,
+            "/" + container_name,
+            image_id,
+            "postgres:18",
+            json.dumps(labels),
+            "running",
+            "true",
+            "false",
+            "false",
+            "false",
+            "0",
+            "2026-10-25T17:00:00.000000000Z",
+            "0001-01-01T00:00:00Z",
+            "none",
+            json.dumps(attachments),
+            json.dumps(mounts),
+            json.dumps({"5432/tcp": {}}),
+            json.dumps(port_bindings),
+            "false",
+            network_name,
+            "null",
+            "null",
+            "null",
+            "null",
+            "false",
+            "null",
+            "null",
+            json.dumps(["no-new-privileges:true"]),
+            "false",
+            "null",
+            "",
+            "private",
+            "",
+            "",
+            json.dumps({"Name": "no", "MaximumRetryCount": 0}),
+        ]
+        volume_fields = [
+            volume_name,
+            "local",
+            "local",
+            "/var/lib/docker/volumes/foreign-volume/_data",
+            "2026-10-25T17:00:00Z",
+            json.dumps(labels),
+            "{}",
+        ]
+        network_fields = [
+            network_id,
+            network_name,
+            "bridge",
+            "local",
+            "false",
+            "true",
+            "false",
+            "false",
+            "false",
+            "null",
+            json.dumps({"Driver": "default", "Options": None, "Config": [{"Subnet": "172.25.0.0/16"}]}),
+            "null",
+            json.dumps(labels),
+            json.dumps({container_id: {"Name": container_name, "EndpointID": "d" * 64}}),
+        ]
+
+        def call(arguments: list[str]) -> bytes:
+            if arguments[:3] == ["ps", "--all", "--no-trunc"]:
+                return f"{container_id}\n".encode()
+            if arguments[0] == "inspect" and arguments[1:3] == ["--type", "container"]:
+                return ("\n".join(container_fields) + "\n").encode()
+            if arguments[:2] == ["volume", "ls"]:
+                return f"{volume_name}\n".encode()
+            if arguments[:2] == ["volume", "inspect"]:
+                return ("\n".join(volume_fields) + "\n").encode()
+            if arguments[:2] == ["image", "ls"]:
+                self.assertEqual(
+                    arguments,
+                    [
+                        "image",
+                        "ls",
+                        "--all",
+                        "--quiet",
+                        "--no-trunc",
+                        "--filter",
+                        f"label={RESTORE_READINESS.IMAGE_TOKEN_LABEL}",
+                    ],
+                )
+                return f"{image_id}\n".encode()
+            if arguments[:2] == ["network", "ls"]:
+                return f"{network_id}\t{network_name}\n".encode()
+            if arguments[:2] == ["network", "inspect"]:
+                return ("\n".join(network_fields) + "\n").encode()
+            raise AssertionError(f"unexpected Docker inventory command: {arguments[0]}")
+
+        inventory = RESTORE_READINESS.collect_docker_resource_inventory(call)
+        container = inventory["containers"][container_id]
+        self.assertEqual(container["name"], container_name)
+        self.assertEqual(container["labels"], labels)
+        self.assertEqual(container["attachments"], attachments)
+        expected_mounts = sorted(mounts, key=lambda item: json.dumps(item, sort_keys=True, separators=(",", ":")))
+        self.assertEqual(container["mounts"], expected_mounts)
+        self.assertEqual(container["published_ports"], port_bindings)
+        self.assertEqual(container["state"]["running"], "true")
+        self.assertEqual(inventory["volumes"][volume_name]["labels"], labels)
+        self.assertEqual(inventory["networks"][network_id]["attachments"][container_id]["Name"], container_name)
+        self.assertEqual(inventory["images"], {image_id: {"id": image_id}})
+        container_fields[15] = json.dumps(list(reversed(mounts)))
+        self.assertEqual(RESTORE_READINESS.collect_docker_resource_inventory(call), inventory)
+        RESTORE_READINESS.require_no_docker_identity_collisions(inventory, "9" * 32, "preflight")
+        self.assertNotIn(".Config.Env", RESTORE_READINESS.CONTAINER_INVENTORY_TEMPLATE)
+        self.assertNotIn(".State.Health.Log", RESTORE_READINESS.CONTAINER_INVENTORY_TEMPLATE)
+        for path in (
+            "State.Health",
+            "Config.Labels",
+            "Config.ExposedPorts",
+            "NetworkSettings.Networks",
+            "HostConfig.PortBindings",
+            "HostConfig.Binds",
+            "HostConfig.VolumesFrom",
+            "HostConfig.Links",
+            "HostConfig.ExtraHosts",
+            "HostConfig.CapAdd",
+            "HostConfig.CapDrop",
+            "HostConfig.SecurityOpt",
+            "HostConfig.Devices",
+        ):
+            parent, key = path.split(".")
+            self.assertIn(f'(index .{parent} "{key}")', RESTORE_READINESS.CONTAINER_INVENTORY_TEMPLATE)
+        with self.assertRaises(ValueError):
+            RESTORE_READINESS._inventory_labels('{"unexpected":[]}')
+
+    def test_mounted_sources_includes_foreign_container_mounts(self) -> None:
+        foreign_id = "e" * 64
+        foreign_mount = {
+            "Type": "volume",
+            "Source": "/var/lib/docker/volumes/foreign-volume/_data",
+            "Destination": "/foreign",
+        }
+        drill = object.__new__(RESTORE_READINESS.Drill)
+        drill.manifest = {
+            "resource_creation_started": True,
+            "containers": [],
+            "pending_container": None,
+        }
+        drill.run_dir = Path("/run/restore-readiness.1234abcd")
+        drill.docker_resource_inventory = Mock(
+            return_value={
+                "containers": {
+                    foreign_id: {
+                        "name": "foreign-postgres",
+                        "mounts": [foreign_mount],
+                    }
+                }
+            }
+        )
+
+        self.assertEqual(drill.mounted_sources(), {foreign_mount["Source"]})
+
+    def test_mounted_sources_refuses_foreign_mount_of_private_run_directory(self) -> None:
+        foreign_id = "e" * 64
+        drill = object.__new__(RESTORE_READINESS.Drill)
+        drill.manifest = {
+            "resource_creation_started": True,
+            "containers": [],
+            "pending_container": None,
+        }
+        drill.run_dir = Path("/run/restore-readiness.1234abcd")
+        drill.docker_resource_inventory = Mock(
+            return_value={
+                "containers": {
+                    foreign_id: {
+                        "name": "foreign-host-runtime",
+                        "mounts": [
+                            {
+                                "Type": "bind",
+                                "Source": "/run",
+                                "Destination": "/host-run",
+                            }
+                        ],
+                    }
+                }
+            }
+        )
+
+        self.assertIsNone(drill.mounted_sources())
+
+    def test_docker_identity_collision_fixtures_refuse_with_fixed_category(self) -> None:
+        token = "a" * 32
+        project = "restore-readiness-" + token[:16]
+        fixtures = (
+            (
+                "name",
+                {"containers": {"id": {"name": project + "-application", "labels": {}}}, "volumes": {}, "networks": {}},
+            ),
+            (
+                "token label",
+                {"containers": {}, "volumes": {"volume": {"name": "volume", "labels": {"owner": token}}}, "networks": {}},
+            ),
+            (
+                "Compose project",
+                {"containers": {}, "volumes": {}, "networks": {"id": {"name": "network", "labels": {"com.docker.compose.project": project}}}},
+            ),
+        )
+        for name, inventory in fixtures:
+            with self.subTest(name=name), self.assertRaises(RESTORE_READINESS.DrillFailure) as failure:
+                RESTORE_READINESS.require_no_docker_identity_collisions(inventory, token, "preflight")
+            self.assertEqual(failure.exception.category, "isolation_refusal")
+
+    def test_foreign_inventory_change_fails_with_fixed_isolation_category(self) -> None:
+        foreign_id = "e" * 64
+        second_id = "d" * 64
+        network_id = "f" * 64
+        baseline = {
+            "containers": {foreign_id: {"name": "foreign", "state": {"running": "true"}}},
+            "volumes": {"foreign-volume": {"labels": {}}},
+            "networks": {network_id: {"name": "foreign-network", "attachments": {}}},
+            "images": {},
+        }
+        changed_state = json.loads(json.dumps(baseline))
+        changed_state["containers"][foreign_id]["state"]["running"] = "false"
+        added_container = json.loads(json.dumps(baseline))
+        added_container["containers"][second_id] = {"name": "new-foreign", "state": {"running": "true"}}
+        removed_volume = json.loads(json.dumps(baseline))
+        removed_volume["volumes"].clear()
+        changed_network = json.loads(json.dumps(baseline))
+        changed_network["networks"][network_id]["attachments"] = {foreign_id: {"IPAddress": "172.25.0.2"}}
+        added_image = json.loads(json.dumps(baseline))
+        added_image["images"]["sha256:" + "b" * 64] = {"id": "sha256:" + "b" * 64}
+
+        for name, current, summary in (
+            ("changed state", changed_state, "containers(added=0,removed=0,fields=state)"),
+            ("added container", added_container, "containers(added=1,removed=0,fields=none)"),
+            ("removed volume", removed_volume, "volumes(added=0,removed=1,fields=none)"),
+            ("changed network attachment", changed_network, "networks(added=0,removed=0,fields=attachments)"),
+            ("added token-labeled image", added_image, "images(added=1,removed=0,fields=none)"),
+        ):
+            with self.subTest(change=name):
+                drill = object.__new__(RESTORE_READINESS.Drill)
+                drill.manifest = {
+                    "baseline": {"docker_inventory": baseline},
+                    "resource_creation_started": True,
+                    "containers": [],
+                    "pending_container": None,
+                    "networks": [],
+                }
+                drill.docker_resource_inventory = Mock(return_value=current)
+                diagnostic = io.StringIO()
+                with redirect_stderr(diagnostic):
+                    self.assertFalse(drill.verify_foreign_inventory())
+                self.assertTrue(drill.manifest["foreign_inventory_changed"])
+                self.assertEqual(
+                    diagnostic.getvalue().strip(),
+                    f"restore readiness foreign Docker inventory changed: {summary}",
+                )
+                self.assertEqual(drill.manifest["foreign_inventory_diagnostic"], f"changed:{summary}")
+                self.assertIsNotNone(
+                    RESTORE_READINESS.FOREIGN_INVENTORY_DIAGNOSTIC.fullmatch(f"changed:{summary}")
+                )
+                failure = RESTORE_READINESS.foreign_inventory_failure(drill.manifest)
+                self.assertIsNotNone(failure)
+                self.assertEqual(failure.phase, "cleanup")
+                self.assertEqual(failure.category, "isolation_refusal")
+                report = RESTORE_READINESS.report_document("cleanup", failure.category, "unverified", 0)
+                self.assertEqual(report["category"], "isolation_refusal")
+
+    def test_cleanup_resources_persists_safe_failed_step_names(self) -> None:
+        drill = object.__new__(RESTORE_READINESS.Drill)
+        drill.manifest = {"resource_creation_started": False, "cleanup_deadline": 1.0}
+        drill.gateway = None
+        drill.cleanup_budget_available = Mock(return_value=True)
+        drill.cleanup_processes = Mock(return_value=False)
+        drill.remove_build_inputs = Mock(return_value=True)
+        drill.remove_unmounted_files = Mock(return_value=True)
+        drill.verify_foreign_inventory = Mock(return_value=True)
+        drill.save = Mock()
+        diagnostic = io.StringIO()
+
+        with redirect_stderr(diagnostic):
+            self.assertFalse(drill.cleanup_resources())
+
+        self.assertEqual(drill.manifest["cleanup_failures"], ["processes"])
+        self.assertEqual(diagnostic.getvalue().strip(), "restore readiness cleanup failed: processes")
+
+    def test_foreign_inventory_comparison_excludes_only_manifest_owned_containers(self) -> None:
+        owned_id = "1" * 64
+        owned = {"name": "restore-readiness-owned", "labels": {}}
+        drill = object.__new__(RESTORE_READINESS.Drill)
+        drill.manifest = {
+            "baseline": {"docker_inventory": {"containers": {}, "volumes": {}, "networks": {}, "images": {}}},
+            "resource_creation_started": True,
+            "containers": [{"id": owned_id}],
+            "pending_container": None,
+            "networks": [],
+        }
+        drill.docker_resource_inventory = Mock(
+            return_value={"containers": {owned_id: owned}, "volumes": {}, "networks": {}, "images": {}}
+        )
+        self.assertTrue(drill.verify_foreign_inventory())
+
+    def test_cleanup_inventory_checks_cleanup_command_status(self) -> None:
+        drill = object.__new__(RESTORE_READINESS.Drill)
+        drill.manifest = {
+            "work_deadline": time.monotonic() - 1,
+            "cleanup_deadline": time.monotonic() + 60,
+            "token": "c" * 32,
+        }
+        drill.cleanup_call = Mock(return_value=(1, b""))
+
+        with self.assertRaises(RESTORE_READINESS.DrillFailure) as failure:
+            drill.docker_resource_inventory("cleanup")
+
+        self.assertEqual(failure.exception.phase, "cleanup")
+        self.assertEqual(failure.exception.category, "cleanup_failure")
+        self.assertEqual(drill.cleanup_call.call_count, 1)
+
+    def test_unattached_volume_between_container_snapshots_stays_foreign(self) -> None:
+        owned_id = "1" * 64
+        race_volume = "foreign-created-during-container-create"
+        baseline = {"containers": {}, "volumes": {}, "networks": {}, "images": {}}
+        current = {
+            "containers": {owned_id: {"name": "restore-readiness-owned", "mounts": []}},
+            "volumes": {race_volume: {"name": race_volume}},
+            "networks": {},
+            "images": {},
+        }
+        drill = object.__new__(RESTORE_READINESS.Drill)
+        drill.manifest = {
+            "baseline": {"docker_inventory": baseline},
+            "resource_creation_started": True,
+            "containers": [
+                {
+                    "id": owned_id,
+                    "name": "restore-readiness-owned",
+                    # Old manifests recorded every volume created during the snapshot window.
+                    "unexpected_volumes": [race_volume],
+                    "unexpected_volume_mounts": [],
+                }
+            ],
+            "pending_container": None,
+            "networks": [],
+        }
+        drill.docker_resource_inventory = Mock(return_value=current)
+
+        self.assertFalse(drill.verify_foreign_inventory())
+        self.assertTrue(drill.manifest["foreign_inventory_changed"])
+
+        drill.manifest["baseline"] = {"volumes": [], "networks": []}
+        drill.manifest["cleanup_deadline"] = time.monotonic() + 10
+        drill.cleanup_volume_inventory = Mock(return_value=[race_volume])
+        calls: list[list[str]] = []
+
+        def cleanup_call(args: list[str], **_kwargs: Any) -> tuple[int, bytes]:
+            calls.append(args)
+            return (0, b"")
+
+        drill.cleanup_call = cleanup_call
+        drill.cleanup_budget_available = Mock(return_value=True)
+
+        self.assertFalse(drill.cleanup_networks_and_volumes())
+        self.assertNotIn(["volume", "rm", race_volume], calls)
+
+    def test_pending_container_recovery_does_not_claim_unattached_race_volume(self) -> None:
+        document, record = container_fixture()
+        pending = dict(record)
+        pending.update(
+            {
+                "id": "",
+                "volumes_before": [],
+                "containers_before": [],
+                "unexpected_volumes": [],
+                "unexpected_volume_mounts": [],
+                "unexpected_volume_records": [],
+            }
+        )
+        drill = object.__new__(RESTORE_READINESS.Drill)
+        drill.manifest = {"pending_container": pending, "containers": []}
+        drill.save = lambda: None
+        drill.cleanup_volume_inventory = lambda: ["foreign-created-during-container-create"]
+        drill.cleanup_container_inspect = lambda _identifier: document
+
+        self.assertTrue(drill.cleanup_recover_pending_container([(record["id"], record["name"])]))
+        self.assertEqual(drill.manifest["containers"][0]["unexpected_volumes"], [])
+        self.assertEqual(drill.manifest["containers"][0]["unexpected_volume_records"], [])
 
     def test_local_dump_metadata_is_bounded(self) -> None:
         name = "pgdump-pre-" + "a" * 40 + ".sql"
@@ -2032,6 +2523,41 @@ class RestoreReadinessContractTests(unittest.TestCase):
         self.assertEqual(failure.exception.phase, "restore")
         self.assertIsNone(failure.exception.fixture_check)
 
+    def test_created_container_does_not_claim_unattached_race_volume(self) -> None:
+        document, record = container_fixture()
+        drill = RESTORE_READINESS.Drill.__new__(RESTORE_READINESS.Drill)
+        drill.manifest = {"token": record["token"], "containers": []}
+        drill.save = lambda: None
+        drill.list_containers = lambda _phase: []
+        volume_snapshots = iter((set(), {"foreign-created-during-container-create"}))
+        drill.list_volumes = lambda _phase: next(volume_snapshots)
+        drill.list_networks = lambda _phase: {"none"}
+        drill.call = lambda _args, **_kwargs: (record["id"] + "\n").encode()
+        drill.inspect_container = lambda _identifier, _phase: document
+
+        with self.assertRaises(RESTORE_READINESS.DrillFailure) as failure:
+            drill.create_container(
+                role=record["role"],
+                image_id=record["image_id"],
+                name=record["name"],
+                user=record["user"],
+                memory=record["memory"],
+                pids_limit=record["pids_limit"],
+                mounts=[],
+                tmpfs_options=record["tmpfs_options"],
+                environment={"LANG": "C", "PATH": "/usr/bin:/bin"},
+                explicit_environment={},
+                command_args=[],
+                expected_entrypoint=record["entrypoint"],
+                expected_command=record["command"],
+                phase="fixture_generation",
+                fixture_check=None,
+            )
+
+        self.assertEqual(failure.exception.category, "isolation_refusal")
+        self.assertEqual(drill.manifest["containers"][0]["unexpected_volumes"], [])
+        self.assertEqual(drill.manifest["containers"][0]["unexpected_volume_records"], [])
+
     def test_finished_run_removal_accepts_directories_already_cleaned(self) -> None:
         class RootOwnedPath(type(Path())):
             def lstat(self) -> os.stat_result:  # type: ignore[override]
@@ -2256,6 +2782,11 @@ class RestoreReadinessContractTests(unittest.TestCase):
         drill.cleanup_container_inspect = lambda _identifier: wrong_document
         self.assertFalse(drill.cleanup_recover_pending_container([(record["id"], record["name"])]))
 
+    def test_cleanup_volume_inventory_accepts_named_foreign_volumes(self) -> None:
+        drill = object.__new__(RESTORE_READINESS.Drill)
+        drill.cleanup_call = Mock(return_value=(0, b"restore-readiness-foreign-fixture\n"))
+        self.assertEqual(drill.cleanup_volume_inventory(), ["restore-readiness-foreign-fixture"])
+
     def test_cleanup_listing_and_removal_failures_never_report_absence(self) -> None:
         drill = object.__new__(RESTORE_READINESS.Drill)
         drill.manifest = {"containers": [], "pending_container": None, "baseline": {"containers": []}}
@@ -2369,6 +2900,164 @@ class RestoreReadinessContractTests(unittest.TestCase):
                 patch.object(RESTORE_READINESS, "remove_finished_run", return_value=True),
             ):
                 self.assertEqual(RESTORE_READINESS.supervise(Path(directory) / "ownership.json", lock_fd, rollout_fd), 0)
+
+    def test_supervisor_cleanup_uses_cleanup_budget_after_work_deadline(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="rr-supervisor-expired-work-") as directory:
+            run_dir = Path(directory)
+            lock_path = run_dir / "lock"
+            lock_path.write_bytes(b"")
+            lock_fd = RESTORE_READINESS.os.open(lock_path, RESTORE_READINESS.os.O_RDWR)
+            lock_info = RESTORE_READINESS.os.fstat(lock_fd)
+            rollout_path = run_dir / "rollout-lock"
+            rollout_path.write_bytes(b"")
+            rollout_fd = RESTORE_READINESS.os.open(rollout_path, RESTORE_READINESS.os.O_RDWR)
+            rollout_info = RESTORE_READINESS.os.fstat(rollout_fd)
+            global_lock = {"device": lock_info.st_dev, "inode": lock_info.st_ino}
+            rollout_lock = {"device": rollout_info.st_dev, "inode": rollout_info.st_ino}
+            manifest, private_path = expired_work_cleanup_manifest(run_dir, global_lock, rollout_lock)
+            inventory_calls: list[list[str]] = []
+            instances: list[Any] = []
+
+            with (
+                patch.object(RESTORE_READINESS, "load_manifest", return_value=manifest),
+                patch.object(
+                    RESTORE_READINESS,
+                    "process_start_ticks",
+                    side_effect=lambda pid: 77 if pid == RESTORE_READINESS.os.getpid() else None,
+                ),
+                patch.object(RESTORE_READINESS, "make_runtime_args", return_value=None),
+                patch.object(
+                    RESTORE_READINESS,
+                    "Drill",
+                    cleanup_deadline_drill_type(inventory_calls, instances),
+                ),
+                patch.object(RESTORE_READINESS, "remove_finished_run", return_value=True),
+            ):
+                status = RESTORE_READINESS.supervise(
+                    run_dir / "ownership.json", lock_fd, rollout_fd
+                )
+
+            self.assertEqual(status, 0)
+            self.assertFalse(private_path.exists())
+            self.assertEqual(len(inventory_calls), 8)
+            self.assertEqual(instances[-1].cleanup_call.call_count, 8)
+
+    def test_recovery_accepts_legacy_baseline_without_image_inventory(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="rr-recover-legacy-inventory-") as directory:
+            run_dir = Path(directory)
+            lock_path = run_dir / "lock"
+            lock_path.write_bytes(b"")
+            lock_fd = RESTORE_READINESS.os.open(lock_path, RESTORE_READINESS.os.O_RDWR)
+            lock_info = RESTORE_READINESS.os.fstat(lock_fd)
+            rollout_path = run_dir / "rollout-lock"
+            rollout_path.write_bytes(b"")
+            rollout_fd = RESTORE_READINESS.os.open(rollout_path, RESTORE_READINESS.os.O_RDWR)
+            rollout_info = RESTORE_READINESS.os.fstat(rollout_fd)
+            global_lock = {"device": lock_info.st_dev, "inode": lock_info.st_ino}
+            rollout_lock = {
+                "path": str(RESTORE_READINESS.ROLLOUT_LOCK_PATH),
+                "device": rollout_info.st_dev,
+                "inode": rollout_info.st_ino,
+            }
+            manifest, _private_path = expired_work_cleanup_manifest(run_dir, global_lock, rollout_lock)
+            token = "c" * 32
+            other_run_image = "sha256:" + "d" * 64
+            manifest["token"] = token
+            manifest["baseline"]["docker_inventory"].pop("images")
+            verify_foreign_inventory = RESTORE_READINESS.Drill.verify_foreign_inventory
+
+            def docker_call(arguments: list[str]) -> bytes:
+                if arguments[:3] == ["ps", "--all", "--no-trunc"]:
+                    return b""
+                if arguments[:2] == ["volume", "ls"]:
+                    return b""
+                if arguments[:2] == ["image", "ls"]:
+                    if arguments[-1] == f"label={RESTORE_READINESS.IMAGE_TOKEN_LABEL}={token}":
+                        return b""
+                    if arguments[-1] == f"label={RESTORE_READINESS.IMAGE_TOKEN_LABEL}":
+                        return f"{other_run_image}\n".encode()
+                    raise AssertionError(f"unexpected image inventory filter: {arguments[-1]}")
+                if arguments[:2] == ["network", "ls"]:
+                    return b""
+                raise AssertionError(f"unexpected Docker inventory command: {arguments[0]}")
+
+            class RecoveryDrill:
+                def __init__(self, _args: Any, _run_dir: Path, recovery_manifest: dict[str, Any]) -> None:
+                    self.manifest = recovery_manifest
+
+                def save(self) -> None:
+                    return None
+
+                def docker_resource_inventory(self, _phase: str) -> dict[str, Any]:
+                    return RESTORE_READINESS.collect_docker_resource_inventory(docker_call, self.manifest["token"])
+
+                def cleanup_resources(self) -> bool:
+                    return verify_foreign_inventory(self)
+
+            output = io.StringIO()
+            with (
+                patch.object(RESTORE_READINESS.os, "geteuid", return_value=0),
+                patch.object(RESTORE_READINESS, "open_rollout_lock", return_value=(rollout_fd, rollout_lock)),
+                patch.object(RESTORE_READINESS, "load_manifest", return_value=manifest),
+                patch.object(RESTORE_READINESS, "open_global_lock", return_value=(lock_fd, global_lock)),
+                patch.object(RESTORE_READINESS, "make_runtime_args", return_value=None),
+                patch.object(RESTORE_READINESS, "Drill", RecoveryDrill),
+                patch.object(RESTORE_READINESS, "remove_finished_run", return_value=True),
+                redirect_stdout(output),
+            ):
+                status = RESTORE_READINESS.recover(run_dir / "ownership.json")
+
+            self.assertEqual(status, 1)
+            self.assertEqual(manifest["baseline"]["docker_inventory"]["images"], {})
+            report = json.loads(output.getvalue())
+            self.assertEqual(report["cleanup"], "verified")
+
+    def test_recovery_uses_cleanup_budget_after_work_deadline(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="rr-recover-expired-work-") as directory:
+            run_dir = Path(directory)
+            lock_path = run_dir / "lock"
+            lock_path.write_bytes(b"")
+            lock_fd = RESTORE_READINESS.os.open(lock_path, RESTORE_READINESS.os.O_RDWR)
+            lock_info = RESTORE_READINESS.os.fstat(lock_fd)
+            rollout_path = run_dir / "rollout-lock"
+            rollout_path.write_bytes(b"")
+            rollout_fd = RESTORE_READINESS.os.open(rollout_path, RESTORE_READINESS.os.O_RDWR)
+            rollout_info = RESTORE_READINESS.os.fstat(rollout_fd)
+            global_lock = {"device": lock_info.st_dev, "inode": lock_info.st_ino}
+            rollout_lock = {
+                "path": str(RESTORE_READINESS.ROLLOUT_LOCK_PATH),
+                "device": rollout_info.st_dev,
+                "inode": rollout_info.st_ino,
+            }
+            manifest, private_path = expired_work_cleanup_manifest(run_dir, global_lock, rollout_lock)
+            inventory_calls: list[list[str]] = []
+            instances: list[Any] = []
+            output = io.StringIO()
+
+            with (
+                patch.object(RESTORE_READINESS.os, "geteuid", return_value=0),
+                patch.object(RESTORE_READINESS, "open_rollout_lock", return_value=(rollout_fd, rollout_lock)),
+                patch.object(RESTORE_READINESS, "load_manifest", return_value=manifest),
+                patch.object(RESTORE_READINESS, "open_global_lock", return_value=(lock_fd, global_lock)),
+                patch.object(RESTORE_READINESS, "make_runtime_args", return_value=None),
+                patch.object(
+                    RESTORE_READINESS,
+                    "Drill",
+                    cleanup_deadline_drill_type(inventory_calls, instances),
+                ),
+                patch.object(RESTORE_READINESS, "remove_finished_run", return_value=True),
+                redirect_stdout(output),
+            ):
+                status = RESTORE_READINESS.recover(run_dir / "ownership.json")
+
+            self.assertEqual(status, 1)
+            self.assertFalse(private_path.exists())
+            self.assertLess(manifest["work_deadline"], time.monotonic())
+            self.assertGreater(manifest["cleanup_deadline"], time.monotonic())
+            self.assertEqual(len(inventory_calls), 8)
+            self.assertEqual(instances[-1].cleanup_call.call_count, 8)
+            report = json.loads(output.getvalue())
+            self.assertEqual(report["cleanup"], "verified")
 
     def test_supervisor_reports_allowlisted_cleanup_operation_and_error(self) -> None:
         with tempfile.TemporaryDirectory(prefix="rr-supervisor-cleanup-failure-") as directory:
