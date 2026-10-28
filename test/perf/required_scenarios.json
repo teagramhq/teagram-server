@@ -17,6 +17,5 @@
   "messages.sendMessage private",
   "messages.sendMessage channel",
   "channel post fan-out",
-  "messages.readHistory",
-  "contacts.importContacts 5000"
+  "messages.readHistory"
 ]
