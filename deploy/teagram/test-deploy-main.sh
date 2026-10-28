@@ -209,6 +209,13 @@ case "$*" in
       echo 'sha256:fixture'
     fi
     ;;
+  *'config --format json'*)
+    replica_count=${FIXTURE_COMPOSE_REPLICA_COUNT:-${TG_REPLICA_COUNT:-1}}
+    printf '{"services":{"teagramd":{"environment":{"TG_REPLICA_COUNT":"%s"}}}}\n' "$replica_count"
+    ;;
+  *'{{json .Config.Env}}'*)
+    printf '["TG_REPLICA_COUNT=%s"]\n' "${FIXTURE_RUNNING_REPLICA_COUNT:-1}"
+    ;;
   *'pg_dump'*)
     [[ "${FIXTURE_DEPLOY_SUCCESS:-0}" == 1 ]] || { echo "unexpected docker call: $*" >&2; exit 99; }
     printf 'fixture dump complete\n'
@@ -299,6 +306,13 @@ if [[ "$(cat "$DEPLOY_ACTION_LOG")" != $'link-edge\nmtproto-smoke sha256:already
   echo 'FAIL an already deployed server SHA did not run the host-side smoke after the link edge' >&2
   failures=$((failures + 1))
 fi
+expect 99 'unexpected docker call: compose exec -T postgres pg_dump -U postgres teagram' \
+  DEPLOY_SHA="$second" FIXTURE_COMPOSE_REPLICA_COUNT=3
+expect 99 'unexpected docker call: compose exec -T postgres pg_dump -U postgres teagram' \
+  DEPLOY_SHA="$second" TG_REPLICA_COUNT=3
+expect 99 'unexpected docker call: compose exec -T postgres pg_dump -U postgres teagram' \
+  DEPLOY_SHA="$second" FIXTURE_RUNNING_REPLICA_COUNT=3
+printf '%s\n' 'PASS same-SHA fast path verifies rendered Compose and running base replica counts'
 if ! cmp -s "$tmp/root/usr/local/sbin/teagram-logs" "$tmp/work/deploy/teagram/teagram-logs.sh"; then
   echo 'FAIL deploy did not install the commit-tracked teagram-logs command' >&2
   failures=$((failures + 1))

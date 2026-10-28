@@ -351,11 +351,21 @@ docker_compose() {
     docker compose "$@"
   fi
 }
-public_base_replica_count_is_single() {
-  awk -F= '
-    $1 == "TG_REPLICA_COUNT" { count++; value=$2 }
-    END { exit !(count == 0 || (count == 1 && value == "1")) }
-  ' "$LIVE_CHECKOUT/.env"
+# The same-SHA shortcut still has to honor Compose overrides and the running
+# process; neither is proven by checking only the deployment .env.
+public_base_listener_budget_is_single() {
+  local rendered
+  rendered=$(docker_compose --profile public config --format json </dev/null) || return 1
+  printf '%s' "$rendered" | jq -e \
+    '.services.teagramd.environment.TG_REPLICA_COUNT == "1"' >/dev/null || return 1
+  docker inspect --format '{{json .Config.Env}}' "$C" 2>/dev/null | jq -e '
+    if type != "array" then false else
+      [.[] | select(type == "string" and startswith("TG_REPLICA_COUNT="))] as $counts
+      | if ($counts | length) == 0 then true
+        elif ($counts | length) == 1 then $counts[0] == "TG_REPLICA_COUNT=1"
+        else false end
+    end
+  ' >/dev/null
 }
 public_route_services_running() {
   local service id state health
@@ -383,7 +393,7 @@ run_mtproto_smoke() {
     "$image_id"
 }
 IMG=$(docker inspect --format '{{.Image}}' $C)
-if [ "$PREV" = "$SHA" ] && public_base_replica_count_is_single && public_route_services_running && \
+if [ "$PREV" = "$SHA" ] && public_base_listener_budget_is_single && public_route_services_running && \
    grep -qs "source_sha=$SHA image_id=$IMG " "$R"/main1238-*.build/built-image.identity; then
   umask 077
   install_teagram_logs_command "$SHA"
