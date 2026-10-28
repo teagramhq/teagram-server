@@ -278,12 +278,14 @@ printf 'oldest runner line\n' > "$latest_log"
 for line_number in {1..85}; do
   printf 'runner line %02d\n' "$line_number" >> "$latest_log"
 done
-printf 'TG_DB_PASSWORD=secret-runner-password\n' >> "$latest_log"
-printf '{"client_key":"secret-json-key"}\n' >> "$latest_log"
-printf 'Authorization: Bearer secret-runner-token\n' >> "$latest_log"
-printf 'remote=postgres://runner:secret-url-password@db/teagram\n' >> "$latest_log"
-printf 'request=Bearer secret-bearer-token\n' >> "$latest_log"
-printf 'rollout runner rejected: target readiness\nrollback=verified baseline_sha=%s\n' "$OFF_MAIN_SHA" >> "$latest_log"
+{
+  printf 'TG_DB_PASSWORD=secret-runner-password\n'
+  printf '{"client_key":"secret-json-key"}\n'
+  printf 'Authorization: Bearer secret-runner-token\n'
+  printf 'remote=postgres://runner:secret-url-password@db/teagram\n'
+  printf 'request=Bearer secret-bearer-token\n'
+  printf 'rollout runner rejected: target readiness\nrollback=verified baseline_sha=%s\n' "$OFF_MAIN_SHA"
+} >> "$latest_log"
 printf 'later runner log must not be selected\n' > "$later_log"
 chmod 600 "$latest_log" "$later_log"
 output=$(run_command "run $OPS_SHA rollout-evidence")
