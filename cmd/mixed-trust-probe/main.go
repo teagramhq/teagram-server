@@ -22,6 +22,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"syscall"
 	"time"
@@ -420,60 +421,117 @@ func runProxyV2Echo(args []string) (resultErr error) {
 		return fmt.Errorf("listen for PROXY-v2 test traffic: %w", err)
 	}
 	defer func() {
-		if closeErr := listener.Close(); closeErr != nil {
+		if closeErr := listener.Close(); closeErr != nil && !errors.Is(closeErr, net.ErrClosed) {
 			resultErr = errors.Join(resultErr, fmt.Errorf("close PROXY-v2 test listener: %w", closeErr))
 		}
 	}()
 	fmt.Println("proxy-v2-echo-ready")
+	observed, err := serveProxyV2Echo(listener, *requestCount)
+	if err != nil {
+		return err
+	}
+	fmt.Printf("proxy-v2-attribution=%s\n", strings.Join(observed, ","))
+	return nil
+}
 
-	var observed []string
-	for len(observed) < *requestCount {
-		conn, err := listener.Accept()
-		if err != nil {
-			return fmt.Errorf("accept PROXY-v2 test backend connection: %w", err)
+// serveProxyV2Echo records the PROXY-v2 source of each proxied request, in
+// arrival order. Connections are served concurrently: HAProxy keeps an earlier
+// backend connection idle on the client session and opens a new one when the
+// next request carries a different source address.
+func serveProxyV2Echo(listener net.Listener, requestCount int) ([]string, error) {
+	sources := make(chan string)
+	failures := make(chan error, 1)
+	stop := make(chan struct{})
+	var wg sync.WaitGroup
+	defer wg.Wait()
+	defer close(stop)
+
+	fail := func(err error) {
+		select {
+		case failures <- err:
+		default:
 		}
+	}
+	serve := func(conn net.Conn) {
+		defer func() {
+			if err := closeProbeConn(conn, "close PROXY-v2 test backend connection"); err != nil && !errors.Is(err, net.ErrClosed) {
+				fail(err)
+			}
+		}()
+		go func() {
+			<-stop
+			if err := conn.Close(); err != nil && !errors.Is(err, net.ErrClosed) {
+				fail(fmt.Errorf("close PROXY-v2 test backend connection: %w", err))
+			}
+		}()
 		if err := conn.SetDeadline(time.Now().Add(10 * time.Second)); err != nil {
-			return errors.Join(
-				fmt.Errorf("set PROXY-v2 test backend deadline: %w", err),
-				closeProbeConn(conn, "close PROXY-v2 test backend connection"),
-			)
+			fail(fmt.Errorf("set PROXY-v2 test backend deadline: %w", err))
+			return
 		}
 		reader := bufio.NewReader(conn)
 		clientIP, err := readProxyV2Source(reader)
 		if err != nil {
-			return errors.Join(err, closeProbeConn(conn, "close PROXY-v2 test backend connection"))
+			fail(err)
+			return
 		}
-		for len(observed) < *requestCount {
+		for {
 			request, err := http.ReadRequest(reader)
 			if err != nil {
-				if errors.Is(err, io.EOF) {
-					break
+				select {
+				case <-stop:
+				default:
+					if !errors.Is(err, io.EOF) {
+						fail(fmt.Errorf("read proxied HTTP request: %w", err))
+					}
 				}
-				return errors.Join(
-					fmt.Errorf("read proxied HTTP request: %w", err),
-					closeProbeConn(conn, "close PROXY-v2 test backend connection"),
-				)
+				return
 			}
-			observed = append(observed, clientIP.String())
 			if err := request.Body.Close(); err != nil {
-				return errors.Join(
-					fmt.Errorf("close proxied HTTP request body: %w", err),
-					closeProbeConn(conn, "close PROXY-v2 test backend connection"),
-				)
+				fail(fmt.Errorf("close proxied HTTP request body: %w", err))
+				return
 			}
 			if _, err := io.WriteString(conn, "HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: keep-alive\r\n\r\n"); err != nil {
-				return errors.Join(
-					fmt.Errorf("write test backend response: %w", err),
-					closeProbeConn(conn, "close PROXY-v2 test backend connection"),
-				)
+				fail(fmt.Errorf("write test backend response: %w", err))
+				return
+			}
+			select {
+			case sources <- clientIP.String():
+			case <-stop:
+				return
 			}
 		}
-		if err := closeProbeConn(conn, "close PROXY-v2 test backend connection"); err != nil {
-			return err
+	}
+	wg.Go(func() {
+		for {
+			conn, err := listener.Accept()
+			if err != nil {
+				select {
+				case <-stop:
+				default:
+					fail(fmt.Errorf("accept PROXY-v2 test backend connection: %w", err))
+				}
+				return
+			}
+			wg.Go(func() { serve(conn) })
+		}
+	})
+	go func() {
+		<-stop
+		if err := listener.Close(); err != nil && !errors.Is(err, net.ErrClosed) {
+			fail(fmt.Errorf("close PROXY-v2 test listener: %w", err))
+		}
+	}()
+
+	var observed []string
+	for len(observed) < requestCount {
+		select {
+		case source := <-sources:
+			observed = append(observed, source)
+		case err := <-failures:
+			return nil, err
 		}
 	}
-	fmt.Printf("proxy-v2-attribution=%s\n", strings.Join(observed, ","))
-	return nil
+	return observed, nil
 }
 
 func closeProbeConn(conn net.Conn, description string) error {
