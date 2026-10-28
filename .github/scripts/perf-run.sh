@@ -59,9 +59,23 @@ seed() {
     psql_admin -c "CREATE DATABASE perf_$f" || seed_failure "create the $f fixture database"
     migrate . "$f" || seed_failure "apply migrations to the $f fixture database"
   done
+  # Keep the history index in seeded snapshots and benchmark runs, but build it
+  # after fixture writes so every inserted message does not maintain the index.
+  for f in "${fixtures[@]}"; do
+    psql_admin -d "perf_$f" -c "DROP INDEX messages_owner_peer_date_idx" ||
+      seed_failure "drop the $f fixture history index before seeding"
+  done
   TG_PERF_DIR="$PERF_CACHE" TG_PERF_DSN_1X="$(dsn 1x "")" TG_PERF_DSN_100X="$(dsn 100x "")" \
-    go test -tags performance -count=1 -timeout 100m -run '^TestSeedFixtures$' -v ./test/perf ||
+    go test -tags performance -count=1 -timeout 125m -run '^TestSeedFixtures$' -v ./test/perf ||
     seed_failure "populate the 1x and 100x fixture databases"
+  for f in "${fixtures[@]}"; do
+    psql_admin -d "perf_$f" -c \
+      "CREATE INDEX messages_owner_peer_date_idx ON messages (owner_id, peer_type, peer_id, date DESC, local_id DESC)" ||
+      seed_failure "rebuild the $f fixture history index after seeding"
+  done
+  for f in "${fixtures[@]}"; do
+    analyze "perf_$f" || seed_failure "analyze the $f fixture after rebuilding its history index"
+  done
   # Database dumps do not include cluster roles, so omit ACLs that can refer to
   # roles unavailable on the fresh Postgres runner that restores this cache.
   for f in "${fixtures[@]}"; do

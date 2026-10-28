@@ -175,15 +175,6 @@ func scenarios() []scenario {
 				return err
 			},
 		},
-		{
-			name: "contacts.importContacts 5000", kind: perfreport.Write, samples: 3,
-			note:  "5,000 new contacts per call; removed again between samples",
-			setup: importContacts,
-			cleanup: func(ctx context.Context, e *env) error {
-				_, err := e.srv.store.RemoveContacts(ctx, e.f.Owner, e.f.BookUsers)
-				return err
-			},
-		},
 	}
 }
 
@@ -337,21 +328,4 @@ func carriesPost(u tg.UpdatesClass, channelID int64, text string) bool {
 		}
 	}
 	return false
-}
-
-func importContacts(_ context.Context, e *env) (call, string, error) {
-	book := make([]tg.InputPhoneContact, len(e.f.BookPhones))
-	for i, phone := range e.f.BookPhones {
-		book[i] = tg.InputPhoneContact{ClientID: int64(i + 1), Phone: phone, FirstName: "Book", LastName: fmt.Sprintf("b%05d", i)}
-	}
-	return func(ctx context.Context) error {
-		res, err := e.owner.api.ContactsImportContacts(ctx, book)
-		if err != nil {
-			return err
-		}
-		if len(res.Imported) != len(book) {
-			return fmt.Errorf("imported %d of %d", len(res.Imported), len(book))
-		}
-		return nil
-	}, "", nil
 }

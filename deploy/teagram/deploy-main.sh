@@ -118,6 +118,63 @@ install_teagram_logs_command() {
   printf 'installed teagram-logs command from %s\n' "${sha:0:7}"
 }
 
+install_teagram_ops_command() {
+  local sha=$1 target=/usr/local/sbin/teagram-ops
+  local target_dir temp backup
+
+  if [[ -n ${DEPLOY_DIR:-} ]]; then
+    target="$R/usr/local/sbin/teagram-ops"
+  fi
+
+  # Older deployable commits predate the reviewed operations runner.
+  if ! git cat-file -e "$sha:deploy/teagram/teagram-ops.sh" 2>/dev/null; then
+    return 0
+  fi
+
+  target_dir=${target%/*}
+  if [[ "$target_dir" == "$target" || ! -d "$target_dir" ]]; then
+    printf 'teagram-ops target directory is missing: %s\n' "$target_dir" >&2
+    return 1
+  fi
+  if [[ -L "$target" || ( -e "$target" && ! -f "$target" ) ]]; then
+    printf 'teagram-ops target is not a regular file: %s\n' "$target" >&2
+    return 1
+  fi
+
+  temp=$(mktemp "$target_dir/.teagram-ops.XXXXXX") || return 1
+  if ! git show "$sha:deploy/teagram/teagram-ops.sh" > "$temp"; then
+    rm -f "$temp"
+    return 1
+  fi
+  if ! sh -n "$temp"; then
+    rm -f "$temp"
+    printf 'teagram-ops script from %s failed sh -n\n' "$sha" >&2
+    return 1
+  fi
+  if ! chmod 0700 "$temp"; then
+    rm -f "$temp"
+    return 1
+  fi
+
+  if [[ -f "$target" ]] && ! cmp -s "$temp" "$target"; then
+    backup="$R/teagram-ops-before-${sha:0:7}"
+    if [[ ! -e "$backup" ]]; then
+      if ! cp -p "$target" "$backup"; then
+        rm -f "$temp"
+        return 1
+      fi
+      chmod 0600 "$backup"
+      printf 'saved previous teagram-ops command to %s\n' "$backup"
+    fi
+  fi
+
+  if ! mv -f "$temp" "$target"; then
+    rm -f "$temp"
+    return 1
+  fi
+  printf 'installed teagram-ops command from %s\n' "${sha:0:7}"
+}
+
 restore_previous_teagram_syslog_config() {
   local backup=$1 target=$2
   if ! cp -p "$backup" "$target" || ! chmod 0644 "$target"; then
@@ -309,6 +366,7 @@ if [ "$PREV" = "$SHA" ] && grep -qs "source_sha=$SHA image_id=$IMG " "$R"/main12
   install_teagram_logs_command "$SHA"
   bash "$LIVE_CHECKOUT/deploy/link-edge/deploy-main.sh" "$SHA"
   run_mtproto_smoke "$IMG"
+  install_teagram_ops_command "$SHA"
   echo "already at $SHA with runner provenance"; exit 0
 fi
 echo "deploying ${PREV:0:7} -> $S"; git log --oneline "HEAD..$SHA"
@@ -343,4 +401,5 @@ fi
 install_teagram_logs_command "$SHA"
 bash "$LIVE_CHECKOUT/deploy/link-edge/deploy-main.sh" "$SHA"
 run_mtproto_smoke "$IMG"
+install_teagram_ops_command "$SHA"
 echo "deployed $SHA"

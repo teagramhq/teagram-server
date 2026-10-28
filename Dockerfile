@@ -1,18 +1,5 @@
 # check=skip=SecretsUsedInArgOrEnv
 # The matched environment variables are file paths, not secret values.
-# Production deploys build from the checked-out source on the server, so the
-# pinned bundle generator is the default source. CI passes its already
-# generated, license-checked bundle as the `sticker-bundle` build context.
-ARG STICKER_BUNDLE_SOURCE=sticker-bundle-generator
-FROM mirror.gcr.io/library/node:22-bookworm-slim AS sticker-bundle-generator
-RUN apt-get update \
-    && apt-get install -y --no-install-recommends ca-certificates python3 \
-    && rm -rf /var/lib/apt/lists/*
-WORKDIR /src
-COPY tools/stickerbundle/ ./tools/stickerbundle/
-RUN bash tools/stickerbundle/generate.sh --output /sticker-bundle
-FROM ${STICKER_BUNDLE_SOURCE} AS sticker-bundle-source
-
 # mirror.gcr.io/library/golang:1.27 matches the `go 1.27.1` directive in
 # go.mod; the module file stays the single source of the version, so a bump
 # there is the only thing to change.
@@ -46,8 +33,7 @@ RUN if [ -n "$DEMO_BUILD_GOMAXPROCS" ]; then export GOMAXPROCS="$DEMO_BUILD_GOMA
     && CGO_ENABLED=0 go build -o /blob-encrypt-migrate ./cmd/blob-encrypt-migrate \
     && CGO_ENABLED=0 go build -o /photothumb ./cmd/photothumb \
     && CGO_ENABLED=0 go build -o /demo-seed ./cmd/demo-seed \
-    && CGO_ENABLED=0 go build -o /mtproto-smoke ./cmd/mtproto-smoke \
-    && CGO_ENABLED=0 go build -o /stickerbundle-check ./cmd/stickerbundle-check
+    && CGO_ENABLED=0 go build -o /mtproto-smoke ./cmd/mtproto-smoke
 
 # The server writes exactly one file, its RSA identity key, and the final image
 # has no shell to mkdir with — so the directory is created here and copied in.
@@ -68,13 +54,6 @@ RUN if [ -n "$DEMO_BUILD_GOMAXPROCS" ]; then export GOMAXPROCS="$DEMO_BUILD_GOMA
 RUN install -d -m 0755 /rootfs/var /rootfs/var/lib \
     && install -d -m 0700 -o 65532 -g 65532 /rootfs/var/lib/teagramd \
     && install -d -m 0700 -o 65532 -g 65532 /rootfs/var/lib/teagramd-blobs
-
-# Keep the production deploy path fail-closed too: it copies the bundle into
-# the image only after the server's standalone validator accepts it. This
-# separate stage leaves the photothumb runtime probe independent of the bundle.
-FROM build AS server-image-build
-COPY --from=sticker-bundle-source /sticker-bundle/ /sticker-bundle/
-RUN /stickerbundle-check /sticker-bundle
 
 # Build the CI-only probe in its own stage and copy it only into the isolated
 # probe target below. It uses only the standard library.
@@ -104,7 +83,6 @@ COPY --from=build /blob-encrypt-migrate /usr/local/bin/blob-encrypt-migrate
 COPY --from=build /photothumb /usr/local/bin/photothumb
 COPY --from=build /demo-seed /usr/local/bin/demo-seed
 COPY --from=build /mtproto-smoke /usr/local/bin/mtproto-smoke
-COPY --from=server-image-build /sticker-bundle/ /usr/share/teagram/sticker-bundle/
 
 # No --chown: a stage-to-stage copy preserves the ownership set above, and
 # forcing one here would hand /var and /var/lib to the runtime user too.
@@ -121,10 +99,6 @@ ENV TG_RSA_KEY_PATH=/var/lib/teagramd/server_key.pem
 # relative directory cannot be created and the server refuses to start. Mount a
 # volume here — a separate one from the key volume.
 ENV TG_BLOB_DIR=/var/lib/teagramd-blobs
-
-# The generated sticker catalogue is read-only image content and is validated
-# by the server again at startup.
-ENV TG_STICKER_CATALOG_BUNDLE=/usr/share/teagram/sticker-bundle
 
 # TG_POSTGRES_DSN and TG_AUTHKEY_ENC_KEY are deliberately absent: both are
 # secrets, both are injected at run time, and startup fails loudly without them.

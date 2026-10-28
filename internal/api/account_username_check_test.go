@@ -101,17 +101,20 @@ func TestCheckAccountUsernameAvailabilityAndValidation(t *testing.T) {
 	}
 
 	pool := usernameLookupPool(t, dsn)
-	before := usernameLookupCount(t, pool, caller.ID, "ownhandle") +
-		usernameLookupCount(t, pool, caller.ID, "bad-name") +
-		usernameLookupCount(t, pool, caller.ID, "admin")
-	for _, username := range []string{"bad-name", "admin"} {
+	invalidUsernames := []string{"bad-name", "admin", "bot", "bots", "xbot", "x_Bot", "WeatherBOT"}
+	before := 0
+	for _, username := range invalidUsernames {
+		before += usernameLookupCount(t, pool, caller.ID, username)
+	}
+	for _, username := range invalidUsernames {
 		if _, rpc := checkAccountUsername(t, s, caller.ID, username); rpc == nil || rpc.ErrorMessage != "USERNAME_INVALID" {
 			t.Errorf("check invalid %q error = %v, want USERNAME_INVALID", username, rpc)
 		}
 	}
-	after := usernameLookupCount(t, pool, caller.ID, "ownhandle") +
-		usernameLookupCount(t, pool, caller.ID, "bad-name") +
-		usernameLookupCount(t, pool, caller.ID, "admin")
+	after := 0
+	for _, username := range invalidUsernames {
+		after += usernameLookupCount(t, pool, caller.ID, username)
+	}
 	if after != before {
 		t.Errorf("invalid checks changed lookup rows from %d to %d", before, after)
 	}

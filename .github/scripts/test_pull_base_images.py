@@ -61,6 +61,7 @@ case "$1" in
         exit 64
       }
       printf 'role\\n' >> "$FAKE_DOCKER_DIR/probes"
+      printf '%s\\n' "$*" >> "$FAKE_DOCKER_DIR/sql"
     else
       echo "unexpected docker $*" >&2
       exit 64
@@ -243,8 +244,8 @@ class PullBaseImagesTests(unittest.TestCase):
         ).read_text(encoding="utf-8")
         pull_step = (
             "run: bash .github/scripts/pull-base-images.sh "
-            "--image mirror.gcr.io/library/postgres:18-alpine "
             "--image mirror.gcr.io/arigaio/atlas:1.2.0-alpine "
+            "--image mirror.gcr.io/library/postgres:18-alpine "
             "test/e2e/real_server_fixture/Dockerfile"
         )
         fixture_step = (
@@ -319,6 +320,13 @@ class PullBaseImagesTests(unittest.TestCase):
         self.assertEqual(
             ["tcp", "tcp", "tcp", "role"],
             (self.dir / "probes").read_text(encoding="utf-8").splitlines(),
+        )
+        sql = (self.dir / "sql").read_text(encoding="utf-8").splitlines()
+        self.assertEqual(1, len(sql))
+        self.assertIn(
+            "CREATE ROLE browser_acceptance_probe NOLOGIN NOSUPERUSER NOCREATEDB "
+            "NOCREATEROLE NOINHERIT NOREPLICATION NOBYPASSRLS",
+            sql[0],
         )
 
 

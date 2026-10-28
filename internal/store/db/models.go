@@ -307,6 +307,11 @@ type CloudDraftSync struct {
 	ChangedAt pgtype.Timestamptz
 }
 
+type DemoWipeGeneration struct {
+	Singleton  int16
+	Generation string
+}
+
 type Dialog struct {
 	OwnerID         int64
 	PeerID          int64
@@ -599,6 +604,12 @@ type NotifySettingsDifferenceCursor struct {
 	StateQts               int64
 	StateDate              int64
 	StateSeq               int64
+}
+
+type OwnerDialogCount struct {
+	OwnerID     int64
+	DialogCount int64
+	Initialized bool
 }
 
 type PeerSettingsBarDismissal struct {

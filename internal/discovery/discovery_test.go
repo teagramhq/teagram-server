@@ -22,7 +22,7 @@ func TestDocumentIsCanonicalAndContainsOnlyPublicIdentity(t *testing.T) {
 	if err != nil {
 		t.Fatalf("generate key: %v", err)
 	}
-	doc, err := discovery.NewDocument("mtproto.example.com:443", 2, &key.PublicKey, false)
+	doc, err := discovery.NewDocument("mtproto.example.com:443", 2, &key.PublicKey, false, "")
 	if err != nil {
 		t.Fatalf("new document: %v", err)
 	}
@@ -63,7 +63,8 @@ func TestDocumentAdvertisesDemoGuestSignUpAsLiteralTrue(t *testing.T) {
 	if err != nil {
 		t.Fatalf("generate key: %v", err)
 	}
-	doc, err := discovery.NewDocument("mtproto.example.com:443", 2, &key.PublicKey, true)
+	wipeGeneration := strings.Repeat("a", 64)
+	doc, err := discovery.NewDocument("mtproto.example.com:443", 2, &key.PublicKey, true, wipeGeneration)
 	if err != nil {
 		t.Fatalf("new document: %v", err)
 	}
@@ -71,11 +72,63 @@ func TestDocumentAdvertisesDemoGuestSignUpAsLiteralTrue(t *testing.T) {
 	if err != nil {
 		t.Fatalf("marshal document: %v", err)
 	}
-	if !bytes.HasSuffix(data, []byte(`,"demo":{"guest_sign_up":true}}`)) {
+	if !bytes.HasSuffix(data, []byte(`,"demo":{"guest_sign_up":true,"wipe_generation":"`+wipeGeneration+`"}}`)) {
 		t.Fatalf("document does not contain the exact enabled capability: %s", data)
 	}
 	if doc.MTProto.Endpoint != "mtproto.example.com:443" || doc.MTProto.DCID != 2 || doc.WebSocket.Endpoint != "wss://mtproto.example.com/apiws" {
 		t.Fatalf("identity or transport changed when demo capability was enabled: %+v", doc)
+	}
+}
+
+func TestDocumentDemoAdvertisementIncludesWipeGeneration(t *testing.T) {
+	t.Parallel()
+
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatalf("generate key: %v", err)
+	}
+	wipeGeneration := strings.Repeat("a", 64)
+	doc, err := discovery.NewDocument("mtproto.example.com:443", 2, &key.PublicKey, true, wipeGeneration)
+	if err != nil {
+		t.Fatalf("new document: %v", err)
+	}
+	data, err := discovery.MarshalDocument(doc)
+	if err != nil {
+		t.Fatalf("marshal document: %v", err)
+	}
+	if !bytes.HasSuffix(data, []byte(`,"demo":{"guest_sign_up":true,"wipe_generation":"`+wipeGeneration+`"}}`)) {
+		t.Fatalf("demo document has the wrong wipe generation shape: %s", data)
+	}
+}
+
+func TestNewDocumentRejectsMalformedWipeGeneration(t *testing.T) {
+	t.Parallel()
+
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatalf("generate key: %v", err)
+	}
+	for _, generation := range []string{"", strings.Repeat("a", 63), strings.Repeat("A", 64), strings.Repeat("g", 64)} {
+		if _, err := discovery.NewDocument("mtproto.example.com:443", 2, &key.PublicKey, true, generation); err == nil {
+			t.Errorf("NewDocument accepted malformed generation %q", generation)
+		}
+	}
+}
+
+func TestMarshalDocumentRejectsMalformedWipeGeneration(t *testing.T) {
+	t.Parallel()
+
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatalf("generate key: %v", err)
+	}
+	doc, err := discovery.NewDocument("mtproto.example.com:443", 2, &key.PublicKey, true, strings.Repeat("a", 64))
+	if err != nil {
+		t.Fatalf("new document: %v", err)
+	}
+	doc.Demo.WipeGeneration = "bad"
+	if _, err := discovery.MarshalDocument(doc); err == nil {
+		t.Fatal("MarshalDocument accepted a malformed wipe generation")
 	}
 }
 
@@ -86,7 +139,7 @@ func TestMarshalDocumentAllowsListenerSpecificWebSocketHost(t *testing.T) {
 	if err != nil {
 		t.Fatalf("generate key: %v", err)
 	}
-	doc, err := discovery.NewDocument("tailnet.example.test:2443", 2, &key.PublicKey, true)
+	doc, err := discovery.NewDocument("tailnet.example.test:2443", 2, &key.PublicKey, true, strings.Repeat("b", 64))
 	if err != nil {
 		t.Fatalf("new document: %v", err)
 	}
@@ -127,7 +180,7 @@ func TestMarshalDocumentRejectsMalformedWebSocketEndpoints(t *testing.T) {
 	if err != nil {
 		t.Fatalf("generate key: %v", err)
 	}
-	doc, err := discovery.NewDocument("tailnet.example.test:2443", 2, &key.PublicKey, false)
+	doc, err := discovery.NewDocument("tailnet.example.test:2443", 2, &key.PublicKey, false, "")
 	if err != nil {
 		t.Fatalf("new document: %v", err)
 	}
@@ -154,7 +207,7 @@ func TestMarshalDocumentRejectsDisabledDemoCapability(t *testing.T) {
 	if err != nil {
 		t.Fatalf("generate key: %v", err)
 	}
-	doc, err := discovery.NewDocument("mtproto.example.com:443", 2, &key.PublicKey, false)
+	doc, err := discovery.NewDocument("mtproto.example.com:443", 2, &key.PublicKey, false, "")
 	if err != nil {
 		t.Fatalf("new document: %v", err)
 	}
@@ -171,7 +224,7 @@ func TestMarshalDocumentAdvertisesOnlyValidatedTurnstileSiteKey(t *testing.T) {
 	if err != nil {
 		t.Fatalf("generate key: %v", err)
 	}
-	doc, err := discovery.NewDocument("mtproto.example.com:443", 2, &key.PublicKey, false)
+	doc, err := discovery.NewDocument("mtproto.example.com:443", 2, &key.PublicKey, false, "")
 	if err != nil {
 		t.Fatalf("new document: %v", err)
 	}
