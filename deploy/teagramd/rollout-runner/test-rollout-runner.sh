@@ -269,6 +269,10 @@ if [ -n "${MOCK_REAL_GIT:-}" ]; then
   if [ "$real_head" = "$MOCK_TARGET_SHA" ]; then phase=target; else phase=baseline; fi
 fi
 if [ "${1:-}" = image ] && [ "${2:-}" = inspect ]; then
+  if [ "${3:-}" = --format ] && [ "${4:-}" = '{{json .Config.Env}}' ]; then
+    printf '%s\n' '[]'
+    exit 0
+  fi
   if [[ "$*" == *'org.opencontainers.image.revision'* ]]; then
     case "${MOCK_SCENARIO:-}" in
       target-local-carry-forward-cce-label-empty) printf '\n' ;;
