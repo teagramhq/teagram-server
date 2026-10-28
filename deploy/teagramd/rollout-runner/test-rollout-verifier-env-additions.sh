@@ -1207,3 +1207,69 @@ if ! grep -q $'rollback\tselected_render_media_key_source\t.*\tfail' \
   exit 1
 fi
 printf '%s\n' 'PASS initial-local rollback compares the pinned media-key render'
+
+blob_dir_initial_compose=$(jq -c \
+  '.services.teagramd.environment.TG_BLOB_DIR="/var/lib/telegramd-blobs"' \
+  <<< "$syslog_compose")
+blob_dir_initial_inspect=$(printf '%s' "$syslog_inspect" | jq -c '
+  .Config.Env |= (map(select(startswith("TG_BLOB_DIR=") | not)) +
+    ["TG_BLOB_DIR=/var/lib/telegramd-blobs"])
+')
+blob_dir_initial_target_inspect=$(printf '%s' "$blob_dir_initial_inspect" | jq -c \
+  --arg image_id sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc \
+  --arg container_id dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd \
+  '.Image=$image_id | .Id=$container_id')
+blob_dir_baseline_image_env='["TG_BLOB_DIR=/var/lib/telegramd-blobs"]'
+blob_dir_target_image_env='["TG_BLOB_DIR=/image-default-blobs"]'
+blob_dir_initial_live_baseline=$(snapshot_from_json \
+  "$blob_dir_initial_inspect" '{}' "$ENV_FILE" "$OVERRIDE_FILE" \
+  live-container-inspection baseline '' "$blob_dir_baseline_image_env")
+blob_dir_initial_render=$(snapshot_from_json \
+  "$blob_dir_initial_inspect" "$blob_dir_initial_compose" "$ENV_FILE" "$OVERRIDE_FILE" \
+  selected-compose-render initial-local-target-render '' "$blob_dir_baseline_image_env")
+blob_dir_initial_preflight=$(snapshot_from_json \
+  "$blob_dir_initial_inspect" "$blob_dir_initial_compose" "$ENV_FILE" "$OVERRIDE_FILE" \
+  selected-compose-render preflight '' "$blob_dir_baseline_image_env")
+blob_dir_initial_target=$(snapshot_from_json \
+  "$blob_dir_initial_target_inspect" "$blob_dir_initial_compose" "$ENV_FILE" "$OVERRIDE_FILE" \
+  selected-compose-render target '' "$blob_dir_target_image_env")
+blob_dir_initial_rollback=$(snapshot_from_json \
+  "$blob_dir_initial_inspect" "$blob_dir_initial_compose" "$ENV_FILE" "$OVERRIDE_FILE" \
+  selected-compose-render rollback '' "$blob_dir_baseline_image_env")
+blob_dir_initial_baseline_sha=$(jq -r '.container_env_sha256' <<< "$blob_dir_initial_live_baseline")
+blob_dir_initial_render_sha=$(jq -r '.container_env_sha256' <<< "$blob_dir_initial_render")
+blob_dir_initial_target_sha=$(jq -r '.container_env_sha256' <<< "$blob_dir_initial_target")
+if [ "$blob_dir_initial_baseline_sha" = "$blob_dir_initial_render_sha" ] || \
+   [ "$blob_dir_initial_render_sha" != "$blob_dir_initial_target_sha" ]; then
+  printf '%s\n' 'FAIL mixed live/selected Compose snapshots did not expose matching explicit TG_BLOB_DIR values' >&2
+  exit 1
+fi
+
+INITIALIZE_LOCAL=1
+BUILT_IMAGE_ID=sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
+BASELINE_DIR="$TMP/blob-dir-initial-local.baseline"
+TARGET_DIR="$TMP/blob-dir-initial-local.target"
+ROLLBACK_DIR="$TMP/blob-dir-initial-local.rollback"
+mkdir -m 700 "$BASELINE_DIR" "$TARGET_DIR" "$ROLLBACK_DIR"
+printf '%s\n' "$blob_dir_initial_live_baseline" > "$BASELINE_DIR/baseline.snapshot.json"
+printf '%s\n' "$blob_dir_initial_render" > "$BASELINE_DIR/initial-local-target-render.snapshot.json"
+printf '%s\n' "$blob_dir_initial_preflight" > "$TARGET_DIR/preflight.snapshot.json"
+printf '%s\n' "$blob_dir_initial_target" > "$TARGET_DIR/target.snapshot.json"
+printf '%s\n' "$blob_dir_initial_rollback" > "$ROLLBACK_DIR/rollback.snapshot.json"
+chmod 600 "$BASELINE_DIR"/*.json "$TARGET_DIR"/*.json "$ROLLBACK_DIR"/*.json
+if ! compare_resolved_preflight; then
+  printf '%s\n' 'FAIL initial-local preflight rejected matching live baseline and selected Compose environment' >&2
+  cat "$TARGET_DIR/preflight-comparisons.tsv" >&2
+  exit 1
+fi
+if ! compare_initial_local_target; then
+  printf '%s\n' 'FAIL initial-local target rejected a TG_BLOB_DIR value pinned by Compose across image defaults' >&2
+  cat "$TARGET_DIR/target-comparisons.tsv" >&2
+  exit 1
+fi
+if ! compare_rollback_to_baseline; then
+  printf '%s\n' 'FAIL initial-local rollback rejected a TG_BLOB_DIR value pinned by Compose across image defaults' >&2
+  cat "$ROLLBACK_DIR/rollback-equivalence.tsv" >&2
+  exit 1
+fi
+printf '%s\n' 'PASS initial-local preflight, target, and rollback normalize live and selected TG_BLOB_DIR environment'

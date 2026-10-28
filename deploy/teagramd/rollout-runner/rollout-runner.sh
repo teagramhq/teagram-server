@@ -2068,7 +2068,11 @@ compare_initial_local_target() {
     return 1
   }
   for field in "${baseline_fields[@]}"; do
-    before=$(jq -er --arg field "$field" '.[$field]' "$baseline_file") || { fail "initial-local baseline is missing $field"; return 1; }
+    if [ "$field" = container_env_sha256 ]; then
+      before=$(jq -er --arg field "$field" '.[$field]' "$render_file") || { fail 'initial-local target render is missing container environment digest'; return 1; }
+    else
+      before=$(jq -er --arg field "$field" '.[$field]' "$baseline_file") || { fail "initial-local baseline is missing $field"; return 1; }
+    fi
     after=$(jq -er --arg field "$field" '.[$field]' "$target_file") || { fail "initial-local target is missing $field"; return 1; }
     if [ "$before" = "$after" ]; then result=pass; else result=fail; failures=$((failures + 1)); fi
     append_evidence_row "$results" target "live_baseline_$field" "$before" "$after" "$result" || return 1
@@ -2175,7 +2179,11 @@ compare_resolved_preflight() {
     if [ "$before" = "$after" ]; then result=pass; else result=fail; failures=$((failures + 1)); fi
     append_evidence_row "$results" preflight selected_render_compose_public_ws_2446 "$before" "$after" "$result" || return 1
     for field in "${live_fields[@]}"; do
-      before=$(jq -er --arg field "$field" '.[$field]' "$old_file") || { fail 'live baseline is missing an inspected preflight comparison field'; return 1; }
+      if [ "$field" = container_env_sha256 ]; then
+        before=$(jq -er --arg field "$field" '.[$field]' "$render_file") || { fail 'pinned target render is missing its container environment digest'; return 1; }
+      else
+        before=$(jq -er --arg field "$field" '.[$field]' "$old_file") || { fail 'live baseline is missing an inspected preflight comparison field'; return 1; }
+      fi
       after=$(jq -er --arg field "$field" '.[$field]' "$target_file") || { fail 'preflight snapshot is missing an inspected baseline field'; return 1; }
       if [ "$before" = "$after" ]; then result=pass; else result=fail; failures=$((failures + 1)); fi
       append_evidence_row "$results" preflight "live_baseline_$field" "$before" "$after" "$result" || return 1
@@ -2274,7 +2282,11 @@ compare_rollback_to_baseline() {
         "$baseline_logging_transition" syslog-v1:false pass || return 1
     fi
     for field in "${live_fields[@]}"; do
-      before=$(jq -er --arg field "$field" '.[$field]' "$baseline_file") || { fail 'live baseline is missing a rollback comparison field'; return 1; }
+      if [ "$field" = container_env_sha256 ]; then
+        before=$(jq -er --arg field "$field" '.[$field]' "$render_file") || { fail 'pinned target render is missing its container environment digest'; return 1; }
+      else
+        before=$(jq -er --arg field "$field" '.[$field]' "$baseline_file") || { fail 'live baseline is missing a rollback comparison field'; return 1; }
+      fi
       after=$(jq -er --arg field "$field" '.[$field]' "$rollback_file") || { fail 'rollback snapshot is missing an inspected comparison field'; return 1; }
       if [ "$initial_local_logging_transition" = 1 ] && [ "$field" = container_logging_sha256 ]; then
         append_evidence_row "$results" rollback "live_baseline_$field" "$before" "$after" pass || return 1
