@@ -206,7 +206,9 @@ run_rounds() {
 judge() {
   local tag="$1" base_glob="" status=0
   [ "$with_base" = true ] && base_glob="$PERF_WORK/base-$tag*.json"
-  go run ./test/perf/cmd/perfreport -head "$PERF_WORK/head-$tag*.json" -base "$base_glob" \
+  # Run the binary directly so Go's wrapper does not collapse exit status 3
+  # (timing-only failure) into status 1 (deterministic failure).
+  "$PERF_WORK/perfreport" -head "$PERF_WORK/head-$tag*.json" -base "$base_glob" \
     -history "$PERF_HISTORY/*.json" -waivers test/perf/known_violations.json \
     -required test/perf/required_scenarios.json \
     -aggregate "$PERF_WORK/aggregate.json" >"$PERF_WORK/summary.md" || status=$?
@@ -229,6 +231,7 @@ measure() {
     analyze "perf_$f" || fatal "analyze the $f fixture"
   done
   go test -c -tags performance -o "$PERF_WORK/head.test" ./test/perf || fatal "build the head RPC performance harness"
+  go build -o "$PERF_WORK/perfreport" ./test/perf/cmd/perfreport || fatal "build the RPC performance report judge"
   run_rounds a
   local status=0
   judge a || status=$?

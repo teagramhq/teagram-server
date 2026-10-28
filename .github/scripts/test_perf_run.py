@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Regression tests for perf-run.sh base comparison handling."""
+"""Regression tests for perf-run.sh comparison and timing retry handling."""
 
 from __future__ import annotations
 
@@ -37,11 +37,46 @@ case "${1:-}" in
     [[ -n "$output" ]]
     cat > "$output" <<'SH'
 #!/usr/bin/env bash
-exit 0
+set -euo pipefail
+printf 'head\n' >> "$PERF_TEST_CALLS"
+printf '{"version":1,"results":[]}\n' > "$TG_PERF_REPORT"
 SH
     chmod +x "$output"
     ;;
-  run) ;;
+  build)
+    output=
+    while (($#)); do
+      if [[ "$1" == -o ]]; then
+        output=$2
+        shift 2
+      else
+        shift
+      fi
+    done
+    [[ -n "$output" ]]
+    cat > "$output" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+printf 'perfreport\n' >> "$PERF_TEST_CALLS"
+count=0
+if [[ -f "$PERF_TEST_REPORT_COUNT" ]]; then
+  count=$(<"$PERF_TEST_REPORT_COUNT")
+fi
+count=$((count + 1))
+printf '%s\n' "$count" > "$PERF_TEST_REPORT_COUNT"
+if [[ "$count" == 1 ]]; then
+  echo 'timing failure'
+  exit 3
+fi
+echo 'pass'
+SH
+    chmod +x "$output"
+    ;;
+  run)
+    # go run reports a child program's non-zero status as 1, masking 3.
+    echo 'exit status 3' >&2
+    exit 1
+    ;;
   *) exit 64 ;;
 esac
 """
@@ -150,6 +185,61 @@ class PerfRunTests(unittest.TestCase):
                 result.stdout + result.stderr,
             )
             self.assertFalse(calls.exists(), "measurement started with an invalid base SHA")
+
+    def test_timing_failure_retries_before_failing(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            bin_dir = root / "bin"
+            bin_dir.mkdir()
+            runner_temp = root / "runner-temp"
+            runner_temp.mkdir()
+            calls = root / "calls"
+            report_count = root / "report-count"
+            for name, content in (
+                ("atlas", FAKE_ATLAS),
+                ("docker", FAKE_DOCKER),
+                ("go", FAKE_GO),
+            ):
+                executable = bin_dir / name
+                executable.write_text(content, encoding="utf-8")
+                executable.chmod(0o755)
+
+            env = {
+                **os.environ,
+                "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}",
+                "PERF_CACHE": str(root / "cache"),
+                "PERF_HISTORY": str(root / "history"),
+                "PERF_PG_CONTAINER": "perf-test-pg",
+                "PERF_PG_URL": "postgres://postgres:perf@localhost:5432/",
+                "PERF_TEST_CALLS": str(calls),
+                "PERF_TEST_REPORT_COUNT": str(report_count),
+                "PERF_ROUNDS": "1",
+                "PERF_WORK": str(root / "work"),
+                "RUNNER_TEMP": str(runner_temp),
+            }
+            env.pop("PERF_BASE_SHA", None)
+            env.pop("GITHUB_STEP_SUMMARY", None)
+            result = subprocess.run(
+                ["bash", str(SCRIPT), "measure"],
+                cwd=ROOT,
+                env=env,
+                capture_output=True,
+                text=True,
+                timeout=60,
+                check=False,
+            )
+
+            self.assertEqual(0, result.returncode, result.stdout + result.stderr)
+            self.assertIn("timing checks failed; measuring once more", result.stdout)
+            self.assertEqual("2", report_count.read_text(encoding="utf-8").strip())
+            self.assertEqual(
+                ["head", "perfreport", "head", "perfreport"],
+                [
+                    line
+                    for line in calls.read_text(encoding="utf-8").splitlines()
+                    if line in {"head", "perfreport"}
+                ],
+            )
 
 
 if __name__ == "__main__":
