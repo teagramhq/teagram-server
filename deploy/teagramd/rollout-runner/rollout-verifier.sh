@@ -712,7 +712,7 @@ snapshot_from_json() {
   local snapshot_name=${6:-}
   local compose_files_value=${7:-${COMPOSE_FILE:-}}
   local image_env_json=${8:-'[]'}
-  local mounts exposure exposure_for_hash resolved_config canonical_compose container_env container_logging_config container_id image_id state exit_code started_at finished_at grace stop_timeout mode_source mode_mount_target compose_logging_policy compose_log_login_codes container_log_login_codes
+  local mounts exposure exposure_for_hash resolved_config canonical_compose container_env container_logging_config container_id image_id state exit_code started_at finished_at grace stop_timeout mode_source mode_mount_target compose_logging_policy compose_log_login_codes container_log_login_codes compose_env_names
   local mounts_sha exposure_sha config_sha env_sha override_sha container_env_sha container_logging_sha mount_count
   local compose_replica_count compose_client_addr_trust container_replica_count container_client_addr_trust
   local compose_public_ws_2446 exposure_public_ws_2446
@@ -962,19 +962,32 @@ snapshot_from_json() {
   container_logging_sha=$(sha256_text "$container_logging_config")
   # Compose's resolved environment includes operator values from .env. Docker's
   # Config.Env also includes image ENV defaults, which are covered by image identity.
+  # Keep configured Compose keys in the digest even when their value matches an
+  # image default; a later image may change that default while Compose pins its value.
   # Empty mapped key-exchange values use the binary defaults, so they stay
   # equivalent to an absent variable; configured values remain pinned.
-  container_env=$(printf '%s' "$inspect_json" | jq -ce --argjson image_env "$image_env_json" --argjson added "$added_env_names" --argjson changed "$changed_env_names" \
+  compose_env_names='[]'
+  if [ "$compose_source" = selected-compose-render ]; then
+    compose_env_names=$(printf '%s' "$compose_json" | jq -ce '
+      (.services[env.ROLLOUT_COMPOSE_SERVICE // "teagramd"].environment // {}) as $env
+      | if ($env | type) == "object" then ($env | keys)
+        else error("resolved Compose environment must be an object") end
+    ') || return 1
+  fi
+  container_env=$(printf '%s' "$inspect_json" | jq -ce --argjson image_env "$image_env_json" --argjson compose_env_names "$compose_env_names" --argjson added "$added_env_names" --argjson changed "$changed_env_names" \
     --argjson media_key_enabled "$MEDIA_KEY_MOUNT_CONFIGURED" '
     def item: if type == "array" then .[0] else . end;
     def runtime_name($name):
       if $name == "TEAGRAM_TURNSTILE_SITE_KEY" then "TG_TURNSTILE_SITE_KEY"
       elif $name == "TEAGRAM_TURNSTILE_SECRET_KEY_FILE" then "TG_TURNSTILE_SECRET_KEY_FILE"
       else $name end;
-    (item | .Config.Env // []) as $raw_env
+    ($compose_env_names | map(runtime_name(.))) as $configured_env_names
+    | (item | .Config.Env // []) as $raw_env
     | if ($raw_env | type) != "array" or any($raw_env[]; type != "string") then error("container environment must be an array of strings")
       else $raw_env
-        | map(. as $entry | select(($image_env | index($entry)) == null))
+        | map(. as $entry
+          | select(($image_env | index($entry)) == null or
+                  ($configured_env_names | index($entry | split("=")[0])) != null))
         | map(select(type != "string" or (startswith("TG_REPLICA_COUNT=") | not)))
         | map(select(type != "string" or (startswith("TG_CLIENT_ADDR_TRUST=") | not)))
         | map(select(type != "string" or (startswith("TG_LOG_LOGIN_CODES=") | not)))

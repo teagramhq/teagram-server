@@ -178,6 +178,28 @@ if ! compare_snapshots \
 fi
 printf '%s\n' 'PASS image-provided environment does not change operator environment equivalence'
 
+blob_dir_compose=$(jq -c \
+  '.services.teagramd.environment.TG_BLOB_DIR="/var/lib/telegramd-blobs"' <<< "$COMPOSE_JSON")
+blob_dir_inspect=$(jq -c \
+  '.Config.Env += ["TG_BLOB_DIR=/var/lib/telegramd-blobs"]' <<< "$(inspect_json '')")
+blob_dir_baseline=$(snapshot_from_json \
+  "$blob_dir_inspect" "$blob_dir_compose" "$ENV_FILE" "$OVERRIDE_FILE" \
+  selected-compose-render baseline '' '["TG_BLOB_DIR=/var/lib/telegramd-blobs"]')
+blob_dir_target=$(snapshot_from_json \
+  "$blob_dir_inspect" "$blob_dir_compose" "$ENV_FILE" "$OVERRIDE_FILE" \
+  selected-compose-render target '' '["TG_BLOB_DIR=/image-default-blobs"]')
+if [ "$(jq -r '.container_env_sha256' <<< "$blob_dir_baseline")" != \
+     "$(jq -r '.container_env_sha256' <<< "$blob_dir_target")" ]; then
+  printf '%s\n' 'FAIL explicit Compose environment matching the baseline image default changed the target environment digest' >&2
+  exit 1
+fi
+if [ "$(jq -r '.container_env_sha256' <<< "$empty_env")" = \
+     "$(jq -r '.container_env_sha256' <<< "$blob_dir_baseline")" ]; then
+  printf '%s\n' 'FAIL explicit Compose environment matching the image default was omitted from the environment digest' >&2
+  exit 1
+fi
+printf '%s\n' 'PASS explicit Compose values matching a baseline image default remain pinned across image default changes'
+
 unexpected_runtime_inspect=$(jq -c '.Config.Env += ["TG_UNDECLARED_RUNTIME_FLAG=on"]' <<< "$image_env_inspect")
 unexpected_runtime_snapshot=$(snapshot_from_json \
   "$unexpected_runtime_inspect" "$COMPOSE_JSON" "$ENV_FILE" "$OVERRIDE_FILE" selected-compose-render target '' "$image_env_json")
