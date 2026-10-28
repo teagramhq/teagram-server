@@ -707,6 +707,15 @@ and the read-only secret-file mount. The disabled defaults this Compose gives a
 live container (empty site key and secret path, sign-in `false`, secret mounted
 from `/dev/null`) count as unset, so a Turnstile name can be added over them.
 
+`TG_RATE_LIMIT_KEY_EXCHANGE_IP_TAILNET` changes only the tailnet per-network
+key-exchange budget. Add it through `ROLLOUT_RUNNER_ADDED_ENV` or change its
+existing assignment through `ROLLOUT_RUNNER_CHANGED_ENV`; both paths require
+the recorded `.env` backup and verify that the resolved Compose value matches
+the running container. Its exact-empty Compose mapping remains equivalent to
+an absent value, and a configured value stays pinned in the inspected container
+environment. Setting it to `0` disables only the tailnet bucket; the public
+per-network, per-connection, and global budgets remain separately configured.
+
 The runner allows changing `TG_REGISTRATION` between `closed` and `open`,
 `TG_TURNSTILE_SIGNIN_ENABLED` between `false` and `true`, and WebSocket origin
 allowlists through the same named path. `TG_WEBSOCKET_ALLOWED_ORIGINS` accepts
