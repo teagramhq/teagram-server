@@ -2059,11 +2059,45 @@ class RestoreReadinessContractTests(unittest.TestCase):
         self.assertEqual(
             {item["name"] for item in inventory["foreign_keys"]},
             {
+                "auth_keys_pending_user_human_fk",
                 "auth_keys_pending_user_id_fkey",
+                "auth_keys_user_human_fk",
                 "auth_keys_user_id_fkey",
                 "notify_settings_difference_cursors_auth_key_id_fkey",
                 "srp_challenges_auth_key_id_fkey",
             },
+        )
+        self.assertIn(
+            {
+                "name": "auth_keys_pending_user_human_fk",
+                "table": "public.auth_keys",
+                "columns": ["pending_user_id", "pending_user_kind"],
+                "references": "public.users",
+                "referenced_columns": ["id", "kind"],
+                "on_delete": "NO ACTION",
+                "on_update": "NO ACTION",
+                "match": "SIMPLE",
+                "deferrable": False,
+                "initially_deferred": False,
+                "validated": True,
+            },
+            inventory["foreign_keys"],
+        )
+        self.assertIn(
+            {
+                "name": "auth_keys_user_human_fk",
+                "table": "public.auth_keys",
+                "columns": ["user_id", "user_kind"],
+                "references": "public.users",
+                "referenced_columns": ["id", "kind"],
+                "on_delete": "NO ACTION",
+                "on_update": "NO ACTION",
+                "match": "SIMPLE",
+                "deferrable": False,
+                "initially_deferred": False,
+                "validated": True,
+            },
+            inventory["foreign_keys"],
         )
         self.assertEqual(
             {item["name"] for item in inventory["triggers"]},

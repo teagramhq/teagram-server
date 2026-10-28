@@ -64,6 +64,15 @@ func (s *Store) AdmitUsernameWithInvitePolicy(ctx context.Context, handle, phone
 	if err := validateCodeHash(codeRow); err != nil {
 		return User{}, err
 	}
+	existingUser, err := qtx.GetUserByUsernameWithLoginMode(ctx, handle)
+	if err == nil {
+		if existingUser.Kind == UserKindBot {
+			return User{}, ErrBotAccount
+		}
+		return User{}, ErrUsernameOccupied
+	} else if !errors.Is(err, pgx.ErrNoRows) {
+		return User{}, fmt.Errorf("admit username: check username owner: %w", err)
+	}
 	if _, err := qtx.GetUsernameByHandle(ctx, handle); err == nil {
 		return User{}, ErrUsernameOccupied
 	} else if !errors.Is(err, pgx.ErrNoRows) {
@@ -112,6 +121,13 @@ func (s *Store) AdmitUsernameWithInvitePolicy(ctx context.Context, handle, phone
 	})
 	if err != nil {
 		if isUsernameClaimConflict(err) {
+			claimedUser, lookupErr := qtx.GetUserByUsernameWithLoginMode(ctx, handle)
+			if lookupErr == nil && claimedUser.Kind == UserKindBot {
+				return User{}, ErrBotAccount
+			}
+			if lookupErr != nil && !errors.Is(lookupErr, pgx.ErrNoRows) {
+				return User{}, fmt.Errorf("admit username: resolve conflicting owner: %w", lookupErr)
+			}
 			return User{}, ErrUsernameOccupied
 		}
 		return User{}, fmt.Errorf("admit username: claim username: %w", err)

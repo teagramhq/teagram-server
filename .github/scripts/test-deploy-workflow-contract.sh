@@ -47,7 +47,7 @@ check_ci_contract() {
     ci_fail 'only pull request updates may cancel in-progress CI runs'
   [[ "$(ci_query '.jobs."publish-demo-image".if')" == "\${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}" ]] ||
     ci_fail 'the demo image may publish only from main pushes'
-  [[ "$(ci_query '.jobs."publish-demo-image".needs | sort | join(",")')" == 'browser-acceptance,browser-acceptance-image,ci,ci-main,compose,css,deploy-workflow,docker,e2e-admin,lint,mirror-rustfs-qualification-images,photothumb-runtime,real-server-fixtures,restore-readiness,rustfs-transition-qualification,schema-gate-postgres,smoke,sql-lint,sqlc,websocket-d1,websocket-permanent-exchange' ]] ||
+  [[ "$(ci_query '.jobs."publish-demo-image".needs | sort | join(",")')" == 'browser-acceptance,browser-acceptance-image,ci,ci-main,compose,css,deploy-workflow,docker,e2e-admin,lint,mirror-rustfs-qualification-images,photothumb-runtime,real-server-fixtures,restore-readiness,rustfs-transition-qualification,schema-gate-postgres,smoke,sql-lint,sqlc,sticker-bundle,websocket-d1,websocket-permanent-exchange' ]] ||
     ci_fail 'the demo image publish must wait for every CI lane'
   [[ "$(ci_query '.jobs."publish-demo-image".permissions | to_entries | sort_by(.key) | map(.key + "=" + .value) | join(",")')" == 'actions=write,contents=read,packages=write' ]] ||
     ci_fail 'the demo image publisher must use only the required package and cache permissions'
@@ -188,6 +188,43 @@ SH
   fi
 )
 
+check_demo_credential_gate() (
+  set -euo pipefail
+  local tmp
+  tmp="$(mktemp -d)"
+  trap 'rm -rf "$tmp"' EXIT
+  query '.jobs.deploy-demo.steps[] | select(.id == "demo-gate") | .run' > "$tmp/gate.sh"
+  # shellcheck disable=SC2031
+  export GITHUB_OUTPUT="$tmp/output"
+
+  run_gate() {
+    local enabled="$1" client_id="$2" oauth_secret="$3" expected_state="$4" expected_notice="$5" gate_log
+    : > "$GITHUB_OUTPUT"
+    gate_log="$(
+      TEAGRAM_DEMO_DEPLOY_ENABLED="$enabled" \
+        TS_OAUTH_CLIENT_ID="$client_id" \
+        TS_OAUTH_SECRET="$oauth_secret" \
+        bash -euo pipefail "$tmp/gate.sh"
+    )"
+    [[ "$(cat "$GITHUB_OUTPUT")" == "enabled=$expected_state" ]] ||
+      fail 'the demo credential gate produced the wrong enabled state'
+    if [[ -n "$expected_notice" ]]; then
+      grep -Fq -- "$expected_notice" <<< "$gate_log" ||
+        fail 'the demo credential gate must report why deployment was skipped'
+    elif [[ -n "$gate_log" ]]; then
+      fail 'the demo credential gate must not emit a notice when deployment is enabled'
+    fi
+    [[ "$gate_log" != *'fixture-client-id'* && "$gate_log" != *'fixture-oauth-secret'* ]] ||
+      fail 'the demo credential gate must not log credential values'
+  }
+
+  local missing_credentials_notice='::notice::Public demo deployment skipped: Tailscale OAuth credentials are missing'
+  run_gate true '' fixture-oauth-secret false "$missing_credentials_notice"
+  run_gate true fixture-client-id '' false "$missing_credentials_notice"
+  run_gate true fixture-client-id fixture-oauth-secret true ''
+  run_gate false '' '' false '::notice::Public demo deployment is disabled'
+)
+
 check_contract() {
   [[ "$(query '.on | keys | sort | join(",")')" == 'workflow_dispatch,workflow_run' ]] ||
     fail 'triggers must be exactly workflow_run and workflow_dispatch'
@@ -240,8 +277,18 @@ check_contract() {
     fail 'the demo environment gate must be the first step in the demo environment'
   [[ "$(query '.jobs.deploy-demo.steps[0].env.TEAGRAM_DEMO_DEPLOY_ENABLED')" == '${{ vars.TEAGRAM_DEMO_DEPLOY_ENABLED }}' ]] ||
     fail 'the demo gate must read the environment-scoped deployment variable after environment setup'
-  [[ "$(query '.jobs.deploy-demo.steps[0].run')" == *'enabled=true'* && "$(query '.jobs.deploy-demo.steps[0].run')" == *'enabled=false'* ]] ||
+  [[ "$(query '.jobs.deploy-demo.steps[0].env.TS_OAUTH_CLIENT_ID')" == '${{ secrets.TS_OAUTH_CLIENT_ID }}' ]] ||
+    fail 'the demo gate must read the Tailscale OAuth client ID from the demo environment'
+  [[ "$(query '.jobs.deploy-demo.steps[0].env.TS_OAUTH_SECRET')" == '${{ secrets.TS_OAUTH_SECRET }}' ]] ||
+    fail 'the demo gate must read the Tailscale OAuth secret from the demo environment'
+  local demo_gate_run
+  demo_gate_run="$(query '.jobs.deploy-demo.steps[0].run')"
+  [[ "$demo_gate_run" == *'enabled=true'* && "$demo_gate_run" == *'enabled=false'* ]] ||
     fail 'the demo gate must explicitly set its output for both enabled and disabled states'
+  grep -Fq '[[ -z "$TS_OAUTH_CLIENT_ID" || -z "$TS_OAUTH_SECRET" ]]' <<< "$demo_gate_run" ||
+    fail 'the demo gate must skip when either Tailscale OAuth credential is missing'
+  grep -Fq '::notice::Public demo deployment skipped: Tailscale OAuth credentials are missing' <<< "$demo_gate_run" ||
+    fail 'the demo gate must report when it skips for missing Tailscale OAuth credentials'
   [[ "$(query '.jobs.deploy-demo.steps[] | select(.id == "demo-image") | .if')" == "$expected_demo_step_if" ]] ||
     fail 'the demo image download must run only when the environment gate is enabled'
   [[ "$(query '.jobs.deploy-demo.steps[] | select(.name == "Join the tailnet") | .if')" == "$expected_demo_step_if" ]] ||
@@ -387,6 +434,10 @@ self_test() {
     '.jobs."deploy-demo".needs = []'
     '.jobs."deploy-demo".if = "${{ github.event_name == '"'"'workflow_dispatch'"'"' }}"'
     '.jobs."deploy-demo".steps[0].env.TEAGRAM_DEMO_DEPLOY_ENABLED = "true"'
+    'del(.jobs."deploy-demo".steps[0].env.TS_OAUTH_CLIENT_ID)'
+    'del(.jobs."deploy-demo".steps[0].env.TS_OAUTH_SECRET)'
+    '(.jobs."deploy-demo".steps[0].run) |= sub("TS_OAUTH_CLIENT_ID"; "WRONG_OAUTH_CLIENT_ID")'
+    '(.jobs."deploy-demo".steps[0].run) |= sub("Tailscale OAuth credentials are missing"; "credentials missing")'
     '(.jobs."deploy-demo".steps[] | select(.name == "Deploy the tested commit after the dev deploy") | .if) = "${{ always() }}"'
     '.jobs."deploy-demo".environment = "production"'
     '(.jobs."deploy-demo".steps[] | select(.name == "Install the demo deploy key") | .env.DEMO_DEPLOY_SSH_KEY) = "${{ secrets.DEPLOY_SSH_KEY }}"'
@@ -426,6 +477,7 @@ self_test() {
 check_contract
 check_ci_contract
 if [[ "${1:-}" != '--contract-only' ]]; then
+  check_demo_credential_gate
   self_test
   printf 'deploy workflow contract holds\n'
 fi

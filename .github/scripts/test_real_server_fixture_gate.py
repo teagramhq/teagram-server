@@ -208,12 +208,14 @@ class RealServerFixtureGateTests(unittest.TestCase):
         self.assertIn("github.event_name == 'pull_request'", body)
         self.assertRegex(
             body,
-            r"(?ms)^    needs:\n      - prioritize-main\n      - ci-main\n      - photothumb-runtime\n      - real-server-fixtures\n",
+            r"(?ms)^    needs:\n      - prioritize-main\n      - ci-main\n      - sticker-bundle\n      - photothumb-runtime\n      - real-server-fixtures\n",
         )
         self.assertIn("${{ needs.prioritize-main.result }}", body)
         self.assertIn("${{ needs.ci-main.result }}", body)
+        self.assertIn("${{ needs.sticker-bundle.result }}", body)
         self.assertIn("${{ needs.photothumb-runtime.result }}", body)
         self.assertIn("${{ needs.real-server-fixtures.result }}", body)
+        self.assertIn('"$STICKER_BUNDLE_RESULT" != "success"', body)
         self.assertIn('"$PHOTOTHUMB_RUNTIME_RESULT" != "success"', body)
 
     def test_e2e_selectors_partition_fixture_tests_from_remaining_suite(self) -> None:
