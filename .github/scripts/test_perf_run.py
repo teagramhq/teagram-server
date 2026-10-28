@@ -39,6 +39,7 @@ case "${1:-}" in
 #!/usr/bin/env bash
 set -euo pipefail
 printf 'head\n' >> "$PERF_TEST_CALLS"
+printf 'fixture version %s\n' "${TG_PERF_FIXTURE_VERSION:-}" >> "$PERF_TEST_CALLS"
 printf '{"version":1,"results":[]}\n' > "$TG_PERF_REPORT"
 SH
     chmod +x "$output"
@@ -59,12 +60,14 @@ SH
 set -euo pipefail
 printf 'perfreport\n' >> "$PERF_TEST_CALLS"
 count=0
-if [[ -f "$PERF_TEST_REPORT_COUNT" ]]; then
+if [[ -n "${PERF_TEST_REPORT_COUNT:-}" && -f "$PERF_TEST_REPORT_COUNT" ]]; then
   count=$(<"$PERF_TEST_REPORT_COUNT")
 fi
 count=$((count + 1))
-printf '%s\n' "$count" > "$PERF_TEST_REPORT_COUNT"
-if [[ "$count" == 1 ]]; then
+if [[ -n "${PERF_TEST_REPORT_COUNT:-}" ]]; then
+  printf '%s\n' "$count" > "$PERF_TEST_REPORT_COUNT"
+fi
+if [[ -n "${PERF_TEST_REPORT_COUNT:-}" && "$count" == 1 ]]; then
   echo 'timing failure'
   exit 3
 fi
@@ -240,6 +243,63 @@ class PerfRunTests(unittest.TestCase):
                     if line in {"head", "perfreport"}
                 ],
             )
+
+    def test_server_setup_change_skips_base_comparison(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            bin_dir = root / "bin"
+            bin_dir.mkdir()
+            runner_temp = root / "runner-temp"
+            runner_temp.mkdir()
+            calls = root / "calls"
+            fake_git = """#!/usr/bin/env bash
+set -euo pipefail
+printf 'git %s\\n' "$*" >> "$PERF_TEST_CALLS"
+if [[ "${1:-}" == diff && "$*" == *"test/perf/server_test.go"* ]]; then exit 1; fi
+"""
+            for name, content in (
+                ("atlas", FAKE_ATLAS),
+                ("docker", FAKE_DOCKER),
+                ("git", fake_git),
+                ("go", FAKE_GO),
+            ):
+                executable = bin_dir / name
+                executable.write_text(content, encoding="utf-8")
+                executable.chmod(0o755)
+
+            env = {
+                **os.environ,
+                "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}",
+                "PERF_BASE_SHA": "base-sha",
+                "PERF_CACHE": str(root / "cache"),
+                "PERF_HISTORY": str(root / "history"),
+                "PERF_PG_CONTAINER": "perf-test-pg",
+                "PERF_PG_URL": "postgres://postgres:perf@localhost:5432/",
+                "PERF_RECORD": "",
+                "PERF_ROUNDS": "1",
+                "PERF_TEST_CALLS": str(calls),
+                "PERF_WORK": str(root / "work"),
+                "FIXTURE_VERSION": "fixture-current-v2",
+                "RUNNER_TEMP": str(runner_temp),
+            }
+            env.pop("GITHUB_STEP_SUMMARY", None)
+            result = subprocess.run(
+                ["bash", str(SCRIPT), "measure"],
+                cwd=ROOT,
+                env=env,
+                capture_output=True,
+                text=True,
+                timeout=60,
+                check=False,
+            )
+
+            self.assertEqual(0, result.returncode, result.stdout + result.stderr)
+            self.assertIn("Base comparison skipped: fixture seeder changed", result.stdout)
+            call_lines = calls.read_text(encoding="utf-8").splitlines()
+            diff_call = next(line for line in call_lines if line.startswith("git diff --quiet"))
+            self.assertIn("test/perf/fixture_test.go", diff_call)
+            self.assertIn("test/perf/server_test.go", diff_call)
+            self.assertIn("fixture version fixture-current-v2", call_lines)
 
 
 if __name__ == "__main__":
