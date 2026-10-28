@@ -55,7 +55,7 @@ fi
 
 removed=0
 for service in public-haproxy teagramd-public-1 teagramd-public-2; do
-  ids=$(docker ps --all --quiet \
+  ids=$(docker ps --all --quiet --no-trunc \
     --filter "label=com.docker.compose.project=$project" \
     --filter "label=com.docker.compose.service=$service")
   if [[ -z "$ids" ]]; then
@@ -70,7 +70,7 @@ for service in public-haproxy teagramd-public-1 teagramd-public-2; do
     docker rm --force "$container_id" >/dev/null
     removed=$((removed + 1))
   done
-  remaining=$(docker ps --all --quiet \
+  remaining=$(docker ps --all --quiet --no-trunc \
     --filter "label=com.docker.compose.project=$project" \
     --filter "label=com.docker.compose.service=$service")
   if [[ -n "$remaining" ]]; then
