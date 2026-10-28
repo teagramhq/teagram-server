@@ -724,10 +724,12 @@ if "markers=133" not in seed_test_text or "search_account=demo_searcher" not in 
 deploy_path = Path(sys.argv[3])
 deploy = deploy_path.read_text(encoding="utf-8")
 cleanup = deploy.split("demo_cleanup() {", 1)[1].split("\n}", 1)[0]
-assert_text_order(cleanup, "deploy-main.sh migration rollback", [
-    "demo_reload_edge || edge_rollback_rc=1",
-    "demo_restore_legacy_edge_after_rollback || edge_rollback_rc=1",
-])
+if 'cat-file -e \\\n      "$PREV_SHA:deploy/teagram-demo/nginx-config/nginx.conf"' not in cleanup:
+    raise SystemExit("deploy-main.sh: rollback must distinguish old directory and file mounts")
+if "demo_restore_legacy_edge_after_rollback || edge_rollback_rc=1" not in cleanup:
+    raise SystemExit("deploy-main.sh: legacy edge restore must run before the wrapper returns")
+if "demo_reload_edge" not in cleanup:
+    raise SystemExit("deploy-main.sh: directory-mounted edge rollback must reload gracefully")
 forced_command = Path(sys.argv[5]).read_text(encoding="utf-8")
 if "demo_restore_legacy_edge_after_rollback" in forced_command:
     raise SystemExit("forced-command.sh: first migration recovery must run before the old wrapper resets checkout")
@@ -1139,7 +1141,7 @@ git() {
           'target: /etc/nginx/nginx.conf'
         ;;
       "$PREV_SHA:deploy/teagram-demo/nginx.conf")
-        cat "$SCRIPT_DIR/nginx.conf"
+        printf '%s\n' 'legacy nginx config fixture'
         ;;
       "$PREV_SHA:deploy/teagram-demo/haproxy.cfg")
         cat "$SCRIPT_DIR/haproxy.cfg"
@@ -1162,7 +1164,8 @@ docker() {
     else
       printf 'bind|%s/nginx.conf|/etc/nginx/nginx.conf\n' "$DEMO_SCRIPT_DIR"
     fi
-  elif [[ "$1" == exec && "$2" == restored-edge && "$3" == nginx && "$4" == -t ]]; then
+  elif [[ "$1" == exec && ( "$2" == old-edge || "$2" == restored-edge ) &&
+    "$3" == nginx && "$4" == -t ]]; then
     printf 'tested\n' >> "$TEST_ROOT/nginx-test"
   else
     printf 'unexpected docker invocation: %s\n' "$*" >&2
@@ -1173,8 +1176,11 @@ demo_restore_legacy_edge_after_rollback
 [[ "$(<"$MOCK_EDGE_STATE")" == legacy ]]
 [[ "$(<"$MOCK_RECREATE_COUNT_FILE")" == 1 ]]
 [[ "$(<"$TEST_ROOT/nginx-test")" == tested ]]
+printf '%s\n' 'new checkout config' > "$SCRIPT_DIR/nginx.conf"
 demo_restore_legacy_edge_after_rollback
-[[ "$(<"$MOCK_RECREATE_COUNT_FILE")" == 1 ]]
+[[ "$(<"$MOCK_RECREATE_COUNT_FILE")" == 2 ]]
+demo_restore_legacy_edge_after_rollback
+[[ "$(<"$MOCK_RECREATE_COUNT_FILE")" == 2 ]]
 BASH
 mkdir -p "$TMP_DIR/legacy-edge-bin"
 cat > "$TMP_DIR/legacy-edge-bin/docker" <<'BASH'
