@@ -180,12 +180,39 @@ def resolve_for_deploy(
     return verify_upstream(pin, fetch=fetch, require_live_manifest=True)
 
 
+def validate_release_identity(
+    pin: dict[str, Any], source_commit: str, artifact_digest: str
+) -> dict[str, Any]:
+    validated_pin = validate_pin_document(pin)
+    if not re.fullmatch(r"[0-9a-f]{40}", source_commit):
+        raise ValueError("web release source commit is invalid")
+    if not re.fullmatch(r"sha256:[0-9a-f]{64}", artifact_digest):
+        raise ValueError("web release artifact digest is invalid")
+    if validated_pin["mode"] != "published":
+        raise ValueError("only a published web pin can be deployed")
+    if (
+        validated_pin["sourceCommit"] != source_commit
+        or validated_pin["artifactDigest"] != artifact_digest
+    ):
+        raise ValueError("web release identity does not match the checked-in pin")
+    return validated_pin
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--require-live-manifest", action="store_true")
+    parser.add_argument(
+        "--verify-release-identity",
+        nargs=2,
+        metavar=("SOURCE_COMMIT", "ARTIFACT_DIGEST"),
+    )
     args = parser.parse_args()
     try:
         pin = validate_pin_document(json.loads(PIN_PATH.read_text(encoding="utf-8")))
+        if args.verify_release_identity:
+            validate_release_identity(pin, *args.verify_release_identity)
+            print("demo web release identity matches the published pin")
+            return
         result = (
             resolve_for_deploy(pin)
             if args.require_live_manifest

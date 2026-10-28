@@ -9,6 +9,7 @@ set -euo pipefail
 workflow="${DEPLOY_WORKFLOW:-.github/workflows/deploy.yml}"
 ci_workflow="${CI_WORKFLOW:-.github/workflows/ci.yml}"
 dockerfile="${DEPLOY_DOCKERFILE:-Dockerfile}"
+demo_forced_command="deploy/teagram-demo/forced-command.sh"
 expected_if="\${{ github.event_name == 'workflow_dispatch' || (github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push') }}"
 expected_resolve_demo_if="\${{ needs.deploy.result == 'success' }}"
 expected_demo_if="\${{ needs.deploy.result == 'success' }}"
@@ -59,8 +60,25 @@ check_ci_contract() {
     ci_fail 'the required CI gate must reject a failed demo web artifact build'
   [[ "$(ci_query '.jobs."demo-web-artifact".permissions.contents')" == 'read' ]] ||
     ci_fail 'the demo web artifact build must use read-only repository access'
+  [[ "$(ci_query '.jobs."demo-web-artifact".permissions | to_entries | map(.key + "=" + .value) | join(",")')" == 'contents=read' ]] ||
+    ci_fail 'the demo web artifact build must not have action or package write access'
+  [[ "$(ci_query '.jobs."demo-web-artifact".environment // ""')" == '' ]] ||
+    ci_fail 'the demo web artifact build must not use an environment with secrets'
+  if ci_query '.jobs."demo-web-artifact" | to_json' | grep -Fq 'secrets.'; then
+    ci_fail 'the demo web artifact build must not reference secrets'
+  fi
   [[ "$(ci_query '.jobs."demo-web-artifact".steps[] | select(.name == "Rebuild and verify the pinned web artifact") | .env.WEB_SOURCE_SHA')" == '${{ steps.pin.outputs.source_commit }}' ]] ||
     ci_fail 'the demo web build must use the commit resolved from its pin'
+  ci_query '.jobs."demo-web-artifact".steps[] | select(.name == "Package the verified demo web artifact") | .run' |
+    grep -Fq 'tar -czf "$archive" -C teagram-web/dist-private .' ||
+    ci_fail 'the secret-free CI job must package the verified web build'
+  ci_query '.jobs."demo-web-artifact".steps[] | select(.name == "Package the verified demo web artifact") | .run' |
+    grep -Fq 'archive.sha256' ||
+    ci_fail 'the secret-free CI job must package the archive checksum with the web artifact'
+  [[ "$(ci_query '.jobs."demo-web-artifact".steps[] | select(.name == "Upload the verified demo web artifact") | .uses')" == 'actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02' ]] ||
+    ci_fail 'the verified web artifact must use the pinned upload action'
+  [[ "$(ci_query '.jobs."demo-web-artifact".steps[] | select(.name == "Upload the verified demo web artifact") | .with.name')" == 'demo-web-release-${{ steps.pin.outputs.source_commit }}' ]] ||
+    ci_fail 'the verified web artifact name must include its pinned source commit'
   [[ "$(ci_query '.jobs."publish-demo-image".permissions | to_entries | sort_by(.key) | map(.key + "=" + .value) | join(",")')" == 'actions=write,contents=read,packages=write' ]] ||
     ci_fail 'the demo image publisher must use only the required package and cache permissions'
   [[ "$(ci_query '.jobs."publish-demo-image".steps[] | select(.name == "Build and publish the tested demo image") | .id')" == 'publish_image' ]] ||
@@ -333,6 +351,14 @@ check_contract() {
     fail 'the demo job must not request write permissions'
   [[ "$(query '.jobs.deploy-demo.permissions.actions')" == 'read' ]] ||
     fail 'the demo job must use read-only access to the tested CI artifact'
+  local web_download_run
+  web_download_run="$(query '.jobs.deploy-demo.steps[] | select(.name == "Download the web artifact from tested CI") | .run')"
+  grep -Fq 'gh run download "$CI_RUN_ID"' <<< "$web_download_run" ||
+    fail 'the credentialed demo job must download the web artifact from the selected successful CI run'
+  grep -Fq 'demo-web-release-$WEB_SOURCE_SHA' <<< "$web_download_run" ||
+    fail 'the web artifact download must be selected by the resolved pin source commit'
+  grep -Fq 'sha256sum "$archive"' <<< "$web_download_run" ||
+    fail 'the credentialed demo job must verify the archived web artifact checksum'
 
   [[ "$(query '.jobs[].steps[] | select(.id == "target") | .env.RUN_HEAD_SHA')" == '${{ github.event.workflow_run.head_sha }}' ]] ||
     fail 'the target step must take the CI run head_sha'
@@ -353,13 +379,9 @@ check_contract() {
   checkout_steps="$(query '[.jobs.deploy.steps[] | select(.uses // "" | test("^actions/checkout@"))] | length')"
   [[ "$checkout_steps" == 0 ]] || fail 'the server deploy runner must not check out tested source'
   checkout_steps="$(query '[.jobs.deploy-demo.steps[] | select(.uses // "" | test("^actions/checkout@"))] | length')"
-  [[ "$checkout_steps" == 2 ]] || fail 'the demo job must check out its deployed scripts and pinned public web source'
-  [[ "$(query '.jobs.deploy-demo.steps[] | select(.name == "Check out the deployed server scripts") | .with.ref')" == '${{ needs.deploy.outputs.sha }}' ]] ||
-    fail 'the demo job must take its release scripts from the tested server commit'
-  [[ "$(query '[.jobs.deploy-demo.steps[] | select(.with.repository == "teagramhq/teagram-web")] | length')" == 1 ]] ||
-    fail 'the demo job must check out the separate teagram-web source'
-  [[ "$(query '.jobs.deploy-demo.steps[] | select(.with.repository == "teagramhq/teagram-web") | .with.ref')" == '${{ needs.resolve-demo-web.outputs.source_commit }}' ]] ||
-    fail 'the demo job must check out the source commit resolved from the pin'
+  [[ "$checkout_steps" == 0 ]] || fail 'the credentialed demo job must not check out source code'
+  [[ "$(query '[.jobs.deploy-demo.steps[] | select(.uses // "" | test("^pnpm/action-setup@|^actions/setup-node@"))] | length')" == 0 ]] ||
+    fail 'the credentialed demo job must not install or run web build dependencies'
   setup_go_steps="$(query '[.jobs.deploy.steps[] | select(.uses // "" | test("^actions/setup-go@"))] | length')"
   [[ "$setup_go_steps" == 0 ]] || fail 'the deploy runner must not install Go for a host-side smoke'
   smoke_steps="$(query '[.jobs.deploy.steps[] | select(.name == "Run MTProto smoke on port 2443")] | length')"
@@ -392,10 +414,9 @@ check_contract() {
     fail 'the demo digest artifact must be selected by the exact tested SHA'
   grep -Fq '^sha256:[0-9a-f]{64}$' <<< "$digest_run" ||
     fail 'the downloaded image digest must be validated before SSH'
-  local web_build_run
-  web_build_run="$(query '.jobs.deploy-demo.steps[] | select(.name == "Rebuild and verify the pinned web artifact") | .run')"
-  grep -Fq 'build-web-artifact.sh' <<< "$web_build_run" ||
-    fail 'the demo web artifact must be rebuilt and matched to its pinned digest'
+  grep -Fq 'resolve_web_artifact_pin.py' "$demo_forced_command" &&
+    grep -Fq -- '--verify-release-identity "$WEB_SOURCE_SHA" "$WEB_ARTIFACT_DIGEST"' "$demo_forced_command" ||
+    fail 'the forced demo command must require the exact published web pin before accepting an archive'
   local pin_resolver_run
   pin_resolver_run="$(query '.jobs.resolve-demo-web.steps[] | select(.name == "Resolve the pinned web artifact") | .run')"
   grep -Fq 'resolve_web_artifact_pin.py --require-live-manifest' <<< "$pin_resolver_run" ||

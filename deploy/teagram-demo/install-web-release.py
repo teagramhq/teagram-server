@@ -18,6 +18,12 @@ import tempfile
 MAX_ARCHIVE_BYTES = 128 * 1024 * 1024
 MAX_RELEASE_BYTES = 256 * 1024 * 1024
 MAX_MEMBERS = 20_000
+# Mirrors the upstream private-artifact publisher's default JavaScript localeCompare ordering.
+ARTIFACT_PATH_COLLATION = (
+    " _-,;:!?.'\"()[]{}@*/\\&#%`^+<=>|~$"
+    "0123456789abcdefghijklmnopqrstuvwxyz"
+)
+ARTIFACT_PATH_ORDER = {character: index for index, character in enumerate(ARTIFACT_PATH_COLLATION)}
 
 
 def reject(message: str) -> None:
@@ -174,6 +180,37 @@ def verify_manifest(directory: pathlib.Path, source_commit: str, artifact_digest
         reject("artifact-index-type")
     if "<title>Teagram Web</title>" not in index or "type=\"module\"" not in index:
         reject("artifact-index-shell")
+
+    def artifact_path_key(path: pathlib.Path) -> tuple[tuple[int, ...], tuple[int, ...]]:
+        relative_path = path.relative_to(directory).as_posix()
+        if any(
+            not character.isascii() or character.lower() not in ARTIFACT_PATH_ORDER
+            for character in relative_path
+        ):
+            reject("artifact-path-character")
+        primary = tuple(ARTIFACT_PATH_ORDER[character.lower()] for character in relative_path)
+        case = tuple(1 if character.isupper() else 0 for character in relative_path)
+        return primary, case
+
+    digest = hashlib.sha256()
+    files = sorted(
+        (
+            pathlib.Path(current) / name
+            for current, _, names in os.walk(directory, followlinks=False)
+            for name in names
+        ),
+        key=artifact_path_key,
+    )
+    for path in files:
+        relative_path = path.relative_to(directory).as_posix()
+        if relative_path == "mtproto-target.json":
+            continue
+        contents = path.read_bytes()
+        digest.update(f"{relative_path}\0{len(contents)}\0".encode())
+        digest.update(contents)
+        digest.update(b"\0")
+    if f"sha256:{digest.hexdigest()}" != artifact_digest:
+        reject("artifact-content-digest-mismatch")
 
 
 def stage(

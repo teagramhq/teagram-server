@@ -16,7 +16,11 @@ from io import BytesIO
 
 SCRIPT_DIR = pathlib.Path(__file__).resolve().parent
 SOURCE_SHA = "a" * 40
-ARTIFACT_DIGEST = "sha256:" + "b" * 64
+ARTIFACT_PATH_COLLATION = (
+    " _-,;:!?.'\"()[]{}@*/\\&#%`^+<=>|~$"
+    "0123456789abcdefghijklmnopqrstuvwxyz"
+)
+ARTIFACT_PATH_ORDER = {character: index for index, character in enumerate(ARTIFACT_PATH_COLLATION)}
 
 
 def write_archive(path: pathlib.Path, entries: dict[str, bytes]) -> None:
@@ -26,6 +30,25 @@ def write_archive(path: pathlib.Path, entries: dict[str, bytes]) -> None:
             member.size = len(contents)
             member.mode = 0o644
             archive.addfile(member, BytesIO(contents))
+
+
+def artifact_digest(entries: dict[str, bytes]) -> str:
+    digest = hashlib.sha256()
+
+    def path_key(name: str) -> tuple[tuple[int, ...], tuple[int, ...]]:
+        relative_path = name.removeprefix("./")
+        primary = tuple(ARTIFACT_PATH_ORDER[character.lower()] for character in relative_path)
+        case = tuple(1 if character.isupper() else 0 for character in relative_path)
+        return primary, case
+
+    for name, contents in sorted(entries.items(), key=lambda entry: path_key(entry[0])):
+        relative_path = name.removeprefix("./")
+        if relative_path == "mtproto-target.json":
+            continue
+        digest.update(f"{relative_path}\0{len(contents)}\0".encode())
+        digest.update(contents)
+        digest.update(b"\0")
+    return "sha256:" + digest.hexdigest()
 
 
 def run(*args: str, input_bytes: bytes | None = None, env: dict[str, str] | None = None) -> subprocess.CompletedProcess[bytes]:
@@ -40,20 +63,25 @@ def run(*args: str, input_bytes: bytes | None = None, env: dict[str, str] | None
 
 
 def main() -> None:
-    manifest = json.dumps(
+    entries = {
+        "./index.html": b'<title>Teagram Web</title><script type="module" src="/assets/app.js"></script>',
+        "./assets/app.js": b"console.log('demo');",
+        "./assets/about-DysinTlO.js": b"export const about = true;",
+        "./assets/AuthCard-RMGYlx7Z.js": b"export const AuthCard = true;",
+        "./assets/KFOm.woff2": b"font fixture",
+        "./assets/a-b.js": b"export const hyphen = true;",
+        "./assets/a_b.js": b"export const underscore = true;",
+    }
+    artifact_digest_value = artifact_digest(entries)
+    entries["./mtproto-target.json"] = json.dumps(
         {
             "mode": "private",
             "endpoint": "wss://web.example/apiws",
             "fingerprint": "c" * 16,
             "sourceCommit": SOURCE_SHA,
-            "artifactDigest": ARTIFACT_DIGEST,
+            "artifactDigest": artifact_digest_value,
         }
     ).encode()
-    entries = {
-        "./index.html": b'<title>Teagram Web</title><script type="module" src="/assets/app.js"></script>',
-        "./mtproto-target.json": manifest,
-        "./assets/app.js": b"console.log('demo');",
-    }
 
     with tempfile.TemporaryDirectory(prefix="demo-web-release-test-") as temporary:
         root = pathlib.Path(temporary)
@@ -85,10 +113,10 @@ def main() -> None:
             str(received_path),
             str(releases),
             SOURCE_SHA,
-            ARTIFACT_DIGEST,
+            artifact_digest_value,
         )
         staged = run(*install_args, env=install_env)
-        expected_release = f"{SOURCE_SHA}-{ARTIFACT_DIGEST.removeprefix('sha256:')}"
+        expected_release = f"{SOURCE_SHA}-{artifact_digest_value.removeprefix('sha256:')}"
         if staged.returncode != 0 or staged.stdout.decode().strip() != expected_release:
             raise SystemExit(f"web release extraction failed: {staged.stderr.decode(errors='replace')}")
         release_dir = releases / expected_release
@@ -97,6 +125,27 @@ def main() -> None:
         repeated = run(*install_args, env=install_env)
         if repeated.returncode != 0 or repeated.stdout.decode().strip() != expected_release:
             raise SystemExit("web release staging is not idempotent")
+
+        altered_entries = entries.copy()
+        altered_entries["./assets/app.js"] = b"console.log('unverified payload');"
+        altered_archive = root / "altered-web.tar.gz"
+        write_archive(altered_archive, altered_entries)
+        altered_archive.chmod(0o600)
+        altered_env = install_env.copy()
+        altered_env["DEPLOY_WEB_ARCHIVE_SHA256"] = hashlib.sha256(
+            altered_archive.read_bytes()
+        ).hexdigest()
+        altered = run(
+            str(SCRIPT_DIR / "install-web-release.py"),
+            "stage",
+            str(altered_archive),
+            str(releases),
+            SOURCE_SHA,
+            artifact_digest_value,
+            env=altered_env,
+        )
+        if altered.returncode == 0:
+            raise SystemExit("web release installer accepted changed content with a copied pinned identity")
 
         bad_archive = root / "bad.tar.gz"
         write_archive(bad_archive, {"../escape.txt": b"no"})
@@ -108,7 +157,7 @@ def main() -> None:
             str(bad_archive),
             str(releases),
             SOURCE_SHA,
-            ARTIFACT_DIGEST,
+            artifact_digest_value,
             env=bad_env,
         )
         if rejected.returncode == 0 or (root / "escape.txt").exists():

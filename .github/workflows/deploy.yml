@@ -205,49 +205,27 @@ jobs:
           [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]
           echo "digest=$digest" >> "$GITHUB_OUTPUT"
 
-      - name: Check out the deployed server scripts
+      - name: Download the web artifact from tested CI
+        id: demo-web-artifact
         if: ${{ steps.demo-gate.outputs.enabled == 'true' }}
-        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
-        with:
-          ref: ${{ needs.deploy.outputs.sha }}
-          persist-credentials: false
-
-      - name: Check out the pinned teagram-web source
-        if: ${{ steps.demo-gate.outputs.enabled == 'true' }}
-        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
-        with:
-          repository: teagramhq/teagram-web
-          ref: ${{ needs.resolve-demo-web.outputs.source_commit }}
-          path: teagram-web
-          persist-credentials: false
-
-      - name: Set up pnpm for the pinned web build
-        if: ${{ steps.demo-gate.outputs.enabled == 'true' }}
-        uses: pnpm/action-setup@0c17529a66aca453f9227af23103ed11469b1e47
-        with:
-          version: 11.16.0
-
-      - name: Set up Node.js for the pinned web build
-        if: ${{ steps.demo-gate.outputs.enabled == 'true' }}
-        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
-        with:
-          node-version: 24.18.0
-          cache: pnpm
-          cache-dependency-path: teagram-web/pnpm-lock.yaml
-
-      - name: Rebuild and verify the pinned web artifact
-        id: web-build
-        if: ${{ steps.demo-gate.outputs.enabled == 'true' }}
-        working-directory: teagram-web
         env:
+          GH_TOKEN: ${{ github.token }}
+          CI_RUN_ID: ${{ needs.deploy.outputs.ci_run_id }}
           WEB_SOURCE_SHA: ${{ needs.resolve-demo-web.outputs.source_commit }}
-          WEB_ARTIFACT_DIGEST: ${{ needs.resolve-demo-web.outputs.artifact_digest }}
         run: |
-          bash "$GITHUB_WORKSPACE/deploy/teagram-demo/build-web-artifact.sh"
-          archive="$RUNNER_TEMP/demo-web-$WEB_SOURCE_SHA.tar.gz"
-          tar -czf "$archive" -C dist-private .
-          archive_sha256=$(sha256sum "$archive" | awk '{print $1}')
+          [[ "$CI_RUN_ID" =~ ^[0-9]+$ ]]
+          [[ "$WEB_SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]
+          artifact_dir="$RUNNER_TEMP/demo-web-artifact"
+          mkdir -p "$artifact_dir"
+          gh run download "$CI_RUN_ID" --repo "$GITHUB_REPOSITORY" \
+            --name "demo-web-release-$WEB_SOURCE_SHA" --dir "$artifact_dir"
+          archive="$artifact_dir/demo-web-$WEB_SOURCE_SHA.tar.gz"
+          checksum_file="$archive.sha256"
+          [[ -f "$archive" && ! -L "$archive" && -f "$checksum_file" && ! -L "$checksum_file" ]]
+          archive_sha256=$(<"$checksum_file")
           [[ "$archive_sha256" =~ ^[0-9a-f]{64}$ ]]
+          actual_sha256=$(sha256sum "$archive" | awk '{print $1}')
+          [[ "$actual_sha256" == "$archive_sha256" ]]
           {
             printf 'archive=%s\n' "$archive"
             printf 'archive_sha256=%s\n' "$archive_sha256"
@@ -300,8 +278,8 @@ jobs:
           DEPLOY_SHA: ${{ needs.deploy.outputs.sha }}
           WEB_SOURCE_SHA: ${{ needs.resolve-demo-web.outputs.source_commit }}
           WEB_ARTIFACT_DIGEST: ${{ needs.resolve-demo-web.outputs.artifact_digest }}
-          WEB_ARCHIVE_SHA256: ${{ steps.web-build.outputs.archive_sha256 }}
-          WEB_ARCHIVE: ${{ steps.web-build.outputs.archive }}
+          WEB_ARCHIVE_SHA256: ${{ steps.demo-web-artifact.outputs.archive_sha256 }}
+          WEB_ARCHIVE: ${{ steps.demo-web-artifact.outputs.archive }}
           DEMO_DEPLOY_HOST: ${{ vars.DEMO_DEPLOY_HOST }}
           DEMO_DEPLOY_PORT: ${{ vars.DEMO_DEPLOY_PORT }}
         run: |

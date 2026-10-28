@@ -131,6 +131,19 @@ def main() -> None:
     if not published["deployable"]:
         raise SystemExit("matching published master artifact should be deployable")
 
+    MODULE.validate_release_identity(published_pin(), SOURCE_SHA, ARTIFACT_DIGEST)
+    for source_commit, artifact_digest, pin, description in (
+        ("3" * 40, ARTIFACT_DIGEST, published_pin(), "source commit"),
+        (SOURCE_SHA, "sha256:" + "4" * 64, published_pin(), "artifact digest"),
+        (SOURCE_SHA, ARTIFACT_DIGEST, candidate_pin(), "candidate mode"),
+    ):
+        try:
+            MODULE.validate_release_identity(pin, source_commit, artifact_digest)
+        except ValueError:
+            pass
+        else:
+            raise SystemExit(f"host pin validation accepted a mismatched {description}")
+
     stale = candidate_responses()
     stale[f"{API_ROOT}/pulls/{PULL_REQUEST}"]["head"]["sha"] = "3" * 40
     try:

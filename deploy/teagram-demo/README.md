@@ -191,9 +191,14 @@ PR #121's head, successful validation run, and the artifact digest reported by
 that run's log; this candidate pin is never deployed. After #121 merges, the
 pin changes to the green `master` publication. The
 read-only deploy preflight then requires the pin to match the public web
-manifest and a successful, checksum-named publication artifact. CI rebuilds
-the exact pinned source and verifies the artifact digest before the LXC
-receives a checksum-pinned archive; the LXC never installs Node or builds the
+manifest and a successful, checksum-named publication artifact. The
+secret-free `demo-web-artifact` CI job rebuilds and verifies the exact pinned
+source, then uploads its archive and SHA-256 sidecar with that successful
+server CI run. The credentialed deploy job downloads the archive from that
+exact run and verifies its checksum; it does not check out teagram-web or run
+its dependency code. The forced command requires the release identity to match
+the checked-in published pin, and the LXC recomputes the published artifact's
+content digest before activation. The LXC never installs Node or builds the
 web app. The web source commit and artifact digest are stored in
 `.state/teagram-demo/active-release.json`. A PR workflow cannot influence the
 server image digest by overwriting the package's SHA tag. `deploy-main.sh` pulls

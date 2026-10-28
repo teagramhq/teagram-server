@@ -1183,6 +1183,29 @@ jobs:
           WEB_ARTIFACT_DIGEST: ${{ steps.pin.outputs.artifact_digest }}
         run: bash "$GITHUB_WORKSPACE/deploy/teagram-demo/build-web-artifact.sh"
 
+      - name: Package the verified demo web artifact
+        if: steps.pin.outputs.mode == 'published'
+        env:
+          WEB_SOURCE_SHA: ${{ steps.pin.outputs.source_commit }}
+        run: |
+          [[ "$WEB_SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]
+          archive="$RUNNER_TEMP/demo-web-$WEB_SOURCE_SHA.tar.gz"
+          tar -czf "$archive" -C teagram-web/dist-private .
+          archive_sha256=$(sha256sum "$archive" | awk '{print $1}')
+          [[ "$archive_sha256" =~ ^[0-9a-f]{64}$ ]]
+          printf '%s\n' "$archive_sha256" > "$archive.sha256"
+
+      - name: Upload the verified demo web artifact
+        if: steps.pin.outputs.mode == 'published'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: demo-web-release-${{ steps.pin.outputs.source_commit }}
+          path: |
+            ${{ runner.temp }}/demo-web-${{ steps.pin.outputs.source_commit }}.tar.gz
+            ${{ runner.temp }}/demo-web-${{ steps.pin.outputs.source_commit }}.tar.gz.sha256
+          if-no-files-found: error
+          retention-days: 30
+
   ci:
     name: ci
     if: ${{ always() }}

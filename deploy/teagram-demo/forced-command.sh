@@ -71,6 +71,8 @@ git -C "$REPO" merge-base --is-ancestor "$DEMO_SHA" origin/main || {
   echo "$DEMO_SHA is not on origin/main; refusing web release" >&2
   exit 1
 }
+python3 "$REPO/deploy/teagram-demo/resolve_web_artifact_pin.py" \
+  --verify-release-identity "$WEB_SOURCE_SHA" "$WEB_ARTIFACT_DIGEST"
 
 incoming_dir="$REPO/.state/teagram-demo/incoming"
 if [[ -e "$incoming_dir" || -L "$incoming_dir" ]]; then
