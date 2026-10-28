@@ -55,6 +55,13 @@ type RegistrationInvite struct {
 	RevokedAt     *time.Time
 }
 
+// RegistrationInvitee is the account and database redemption time recorded on
+// a user-issued invite row.
+type RegistrationInvitee struct {
+	UserID     int64
+	RedeemedAt time.Time
+}
+
 // Invite is a short alias for callers that do not need to distinguish this
 // record from the other invite types in the store.
 type Invite = RegistrationInvite
@@ -345,6 +352,54 @@ func (s *Store) ListInvites(ctx context.Context) ([]RegistrationInvite, error) {
 		}
 	}
 	return out, nil
+}
+
+// RevokeUserInvites revokes every currently live invite issued by inviterUserID
+// and returns the number of rows changed. Consumed and expired invites are
+// untouched.
+func (s *Store) RevokeUserInvites(ctx context.Context, inviterUserID int64) (int64, error) {
+	count, err := s.q.RevokeUserRegistrationInvites(ctx, inviterUserID)
+	if err != nil {
+		return 0, fmt.Errorf("revoke user invites: %w", err)
+	}
+	return count, nil
+}
+
+// ListInviteesForUser returns every account recorded as redeeming an invite
+// issued by inviterUserID, in redemption order.
+func (s *Store) ListInviteesForUser(ctx context.Context, inviterUserID int64) ([]RegistrationInvitee, error) {
+	rows, err := s.q.ListRegistrationInvitees(ctx, inviterUserID)
+	if err != nil {
+		return nil, fmt.Errorf("list invitees: %w", err)
+	}
+	out := make([]RegistrationInvitee, 0, len(rows))
+	for _, row := range rows {
+		if row.InviteeUserID == nil || !row.RedeemedAt.Valid {
+			return nil, fmt.Errorf("list invitees: invite %d is missing redemption attribution", row.InviteID)
+		}
+		out = append(out, RegistrationInvitee{
+			UserID:     *row.InviteeUserID,
+			RedeemedAt: row.RedeemedAt.Time,
+		})
+	}
+	return out, nil
+}
+
+// InviterForUser reports the user invite attribution stored for redeemerID.
+// found is false when no user-issued invite was recorded, including accounts
+// created through open registration or an operator invite.
+func (s *Store) InviterForUser(ctx context.Context, redeemerID int64) (inviterID int64, found bool, err error) {
+	attributedID, err := s.q.RegistrationInviteForRedeemer(ctx, redeemerID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return 0, false, nil
+	}
+	if err != nil {
+		return 0, false, fmt.Errorf("find invite for redeemer: %w", err)
+	}
+	if attributedID == nil {
+		return 0, false, nil
+	}
+	return *attributedID, true, nil
 }
 
 func registrationInviteFromInsert(row db.InsertRegistrationInviteRow) RegistrationInvite {
