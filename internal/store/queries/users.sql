@@ -25,6 +25,16 @@ FROM users u
 LEFT JOIN usernames un ON un.owner_type = 'user' AND un.owner_id = u.id
 WHERE u.phone = $1;
 
+-- name: UserKindByPhone :one
+SELECT kind
+FROM users
+WHERE phone = $1;
+
+-- name: UserKindByID :one
+SELECT kind
+FROM users
+WHERE id = sqlc.arg(user_id);
+
 -- name: UserByID :one
 SELECT u.id, u.phone, u.first_name, u.last_name, u.created_at, u.is_online, u.last_seen_at,
        un.handle AS username

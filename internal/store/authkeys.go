@@ -324,6 +324,13 @@ func (s *Store) PromotePendingUserWithMetadata(ctx context.Context, id, userID i
 		}
 		return fmt.Errorf("promote pending user: lock auth key: %w", err)
 	}
+	kind, err := qtx.UserKindByID(ctx, userID)
+	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+		return fmt.Errorf("promote pending user: check account kind: %w", err)
+	}
+	if kind == "bot" {
+		return ErrBotAccount
+	}
 
 	started := pgtype.Timestamptz{Time: startedAt, Valid: !startedAt.IsZero()}
 	rows, err := qtx.PromotePendingUser(ctx, db.PromotePendingUserParams{

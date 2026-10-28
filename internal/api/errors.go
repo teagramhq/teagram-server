@@ -50,6 +50,8 @@ var (
 	// errSessionPasswordNeeded is returned by signIn when the account has 2FA:
 	// the client must complete the SRP password step via checkPassword.
 	errSessionPasswordNeeded = rpcErr(401, "SESSION_PASSWORD_NEEDED")
+	// errBotLoginForbidden refuses the MTProto sign-in path for bot accounts.
+	errBotLoginForbidden = rpcErr(403, "BOT_LOGIN_FORBIDDEN")
 	// errPasswordHashInvalid rejects a bad SRP proof (wrong password) on
 	// checkPassword, updatePasswordSettings, and getPasswordSettings.
 	errPasswordHashInvalid = rpcErr(400, "PASSWORD_HASH_INVALID")

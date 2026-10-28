@@ -55,7 +55,17 @@ func (s *Store) AdmitUsernameWithMetadata(ctx context.Context, handle, phoneCode
 	if err := validateCodeHash(codeRow); err != nil {
 		return User{}, err
 	}
-	if _, err := qtx.GetUsernameByHandle(ctx, handle); err == nil {
+	existing, err := qtx.GetUsernameByHandle(ctx, handle)
+	if err == nil {
+		if existing.OwnerType == "user" {
+			kind, err := qtx.UserKindByID(ctx, existing.OwnerID)
+			if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+				return User{}, fmt.Errorf("admit username: check account kind: %w", err)
+			}
+			if kind == "bot" {
+				return User{}, ErrBotAccount
+			}
+		}
 		return User{}, ErrUsernameOccupied
 	} else if !errors.Is(err, pgx.ErrNoRows) {
 		return User{}, fmt.Errorf("admit username: check username: %w", err)

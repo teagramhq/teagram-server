@@ -154,7 +154,7 @@ func (q *Queries) GetUserByUsername(ctx context.Context, handle string) (GetUser
 
 const getUserByUsernameWithLoginMode = `-- name: GetUserByUsernameWithLoginMode :one
 SELECT u.id, u.phone, u.first_name, u.last_name, u.created_at, u.is_online, u.last_seen_at,
-       u.login_mode, un.handle AS username
+       u.login_mode, u.kind, un.handle AS username
 FROM users u
 JOIN usernames un ON un.owner_type = 'user' AND un.owner_id = u.id
 WHERE un.handle = lower($1)
@@ -169,6 +169,7 @@ type GetUserByUsernameWithLoginModeRow struct {
 	IsOnline   bool
 	LastSeenAt pgtype.Timestamptz
 	LoginMode  string
+	Kind       string
 	Username   string
 }
 
@@ -187,6 +188,7 @@ func (q *Queries) GetUserByUsernameWithLoginMode(ctx context.Context, handle str
 		&i.IsOnline,
 		&i.LastSeenAt,
 		&i.LoginMode,
+		&i.Kind,
 		&i.Username,
 	)
 	return i, err

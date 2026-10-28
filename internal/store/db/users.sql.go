@@ -429,6 +429,32 @@ func (q *Queries) UserByPhone(ctx context.Context, phone *string) (UserByPhoneRo
 	return i, err
 }
 
+const userKindByID = `-- name: UserKindByID :one
+SELECT kind
+FROM users
+WHERE id = $1
+`
+
+func (q *Queries) UserKindByID(ctx context.Context, userID int64) (string, error) {
+	row := q.db.QueryRow(ctx, userKindByID, userID)
+	var kind string
+	err := row.Scan(&kind)
+	return kind, err
+}
+
+const userKindByPhone = `-- name: UserKindByPhone :one
+SELECT kind
+FROM users
+WHERE phone = $1
+`
+
+func (q *Queries) UserKindByPhone(ctx context.Context, phone *string) (string, error) {
+	row := q.db.QueryRow(ctx, userKindByPhone, phone)
+	var kind string
+	err := row.Scan(&kind)
+	return kind, err
+}
+
 const usersByID = `-- name: UsersByID :many
 SELECT u.id, u.phone, u.first_name, u.last_name, u.created_at, u.is_online, u.last_seen_at,
        un.handle AS username

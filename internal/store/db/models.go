@@ -18,20 +18,22 @@ type AdminSession struct {
 }
 
 type AuthKey struct {
-	ID               int64
-	KeyValue         []byte
-	UserID           *int64
-	CreatedAt        pgtype.Timestamptz
-	LastSeenAt       pgtype.Timestamptz
-	PendingUserID    *int64
-	PendingStartedAt pgtype.Timestamptz
-	DeviceModel      *string
-	Platform         *string
-	SystemVersion    *string
-	ApiID            *int32
-	AppVersion       *string
-	Ip               *string
-	EverBoundAt      pgtype.Timestamptz
+	ID                  int64
+	KeyValue            []byte
+	UserID              *int64
+	CreatedAt           pgtype.Timestamptz
+	LastSeenAt          pgtype.Timestamptz
+	PendingUserID       *int64
+	PendingStartedAt    pgtype.Timestamptz
+	DeviceModel         *string
+	Platform            *string
+	SystemVersion       *string
+	ApiID               *int32
+	AppVersion          *string
+	Ip                  *string
+	EverBoundAt         pgtype.Timestamptz
+	AuthUserKind        *string
+	AuthPendingUserKind *string
 }
 
 type AuthKeysEverBoundBackfillNewKey struct {
@@ -42,6 +44,13 @@ type BlockedUser struct {
 	BlockerID int64
 	BlockedID int64
 	CreatedAt pgtype.Timestamptz
+}
+
+type BotToken struct {
+	UserID     int64
+	BotKind    *string
+	SecretHash []byte
+	CreatedAt  pgtype.Timestamptz
 }
 
 type BrowserAcceptanceBindingEvidence struct {
@@ -846,6 +855,7 @@ type User struct {
 	LoginMode            string
 	AuthorizationTtlDays int32
 	About                string
+	Kind                 string
 }
 
 type UserContact struct {

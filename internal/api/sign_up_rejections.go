@@ -19,6 +19,7 @@ const (
 	signUpCodeInvalid
 	signUpInviteInvalid
 	signUpHandleOccupied
+	signUpBotAccount
 	signUpSessionStateInvalid
 	signUpChallengeRequired
 	signUpVerifierBusy
@@ -37,6 +38,7 @@ func (c signUpRejectionClass) String() string {
 		"code_invalid",
 		"invite_invalid",
 		"handle_occupied",
+		"bot_account",
 		"session_state_invalid",
 		"challenge_required",
 		"verifier_busy",

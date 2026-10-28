@@ -261,6 +261,9 @@ func (h *handlers) handleSignUpWithConn(c *mtproto.Conn, r *mtproto.Request) (bi
 		case errors.Is(err, store.ErrUsernameOccupied):
 			h.logSignUpRejection(signUpHandleOccupied)
 			return nil, errUsernameOccupied
+		case errors.Is(err, store.ErrBotAccount):
+			h.logSignUpRejection(signUpBotAccount)
+			return nil, errBotLoginForbidden
 		case errors.Is(err, store.ErrAuthKeyNotFound):
 			h.logSignUpRejection(signUpSessionStateInvalid)
 			return nil, errSessionStateInvalid
@@ -428,11 +431,19 @@ func (h *handlers) handleSignIn(c *mtproto.Conn, r *mtproto.Request) (bin.Encode
 		return nil, errMethodNotImpl
 	}
 
-	// Phone-shaped identifiers are unsupported. Refuse them before code,
-	// account, or auth-key state can be read or changed.
+	// Human phone sign-in remains unsupported. Bots get a dedicated refusal,
+	// while neither path reads or changes auth-key state.
 	input := req.PhoneNumber
 	switch {
 	case validatePhone(input) == nil:
+		kind, found, err := h.store.UserKindByPhone(r.Ctx, input)
+		if err != nil {
+			h.log.Error("sign in: resolve phone account kind", "err", err)
+			return nil, errInternal
+		}
+		if found && kind == "bot" {
+			return nil, errBotLoginForbidden
+		}
 		return nil, errPhoneInvalid
 	case validateUsername(input):
 		// Username path — normalise to lowercase.
@@ -471,6 +482,9 @@ func (h *handlers) handleSignInUsername(c *mtproto.Conn, r *mtproto.Request, use
 	if err != nil {
 		h.log.Error("sign in: resolve username", "err", err)
 		return nil, errInternal
+	}
+	if ok && resolved.Kind == "bot" {
+		return nil, errBotLoginForbidden
 	}
 
 	// Unknown username: persist a non-generated caller code for invite admission,

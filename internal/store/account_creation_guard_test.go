@@ -39,7 +39,7 @@ func TestAccountCreationPathsStayBehindAdmission(t *testing.T) {
 			"BindAuthKeyUser":             {"BindAuthKeyUser": true},
 			"BindAuthKeyUserWithMetadata": {"BindAuthKeyUserWithMetadata": true},
 		},
-		// These Store methods are test fixtures, root-only local provisioning, or
+		// These Store methods are test fixtures, local operator provisioning, or
 		// account/channel username management, not unauthenticated RPC issuance.
 		"internal/store/users.go": {
 			"CreateUser":                        {"CreateUser": true},
@@ -48,6 +48,9 @@ func TestAccountCreationPathsStayBehindAdmission(t *testing.T) {
 			"UpdateUsername":                    {"ClaimUsername": true},
 			"ClaimUsername":                     {"ClaimUsername": true},
 			"ClaimChannelUsername":              {"ClaimUsername": true},
+		},
+		"internal/store/bots.go": {
+			"CreateBot": {"ClaimUsername": true},
 		},
 		"internal/store/channels.go": {
 			"EditChannelUsername": {"ClaimUsername": true},

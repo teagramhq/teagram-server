@@ -6,6 +6,7 @@ import (
 	"context"
 	cryptorand "crypto/rand"
 	"crypto/rsa"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"io"
@@ -23,6 +24,7 @@ import (
 	"syscall"
 	"text/tabwriter"
 	"time"
+	"unicode/utf8"
 
 	gotdsrp "github.com/gotd/td/crypto/srp"
 	"github.com/gotd/td/exchange"
@@ -82,7 +84,7 @@ func runCommand(args []string, log *slog.Logger, stdout, stderr io.Writer) error
 	case args[0] == "maintenance":
 		return runMaintenanceCommand(args[1:], log, stdout, stderr)
 	case args[0] == "admin":
-		return runAdminCommand(args[1:], os.Stdin, log, stderr)
+		return runAdminCommandWithOutput(args[1:], os.Stdin, log, stdout, stderr)
 	case args[0] == "client-config":
 		if len(args) == 2 && slices.Contains(args[1:], "--help") {
 			return writeClientConfigUsage(stdout)
@@ -111,11 +113,22 @@ func runAdminCommand(args []string, stdin io.Reader, _ *slog.Logger, stderr io.W
 }
 
 func runAdminCommandWithEUID(args []string, stdin io.Reader, stderr io.Writer, euid int) (err error) {
+	return runAdminCommandWithEUIDAndOutput(args, stdin, io.Discard, stderr, euid)
+}
+
+func runAdminCommandWithOutput(args []string, stdin io.Reader, _ *slog.Logger, stdout, stderr io.Writer) error {
+	return runAdminCommandWithEUIDAndOutput(args, stdin, stdout, stderr, os.Geteuid())
+}
+
+func runAdminCommandWithEUIDAndOutput(args []string, stdin io.Reader, stdout, stderr io.Writer, euid int) (err error) {
 	if len(args) > 0 && args[0] == "create-user" {
 		if euid != 0 {
 			return errors.New("admin create-user requires root")
 		}
 		return runAdminCreateUserCommand(args[1:], stdin, stderr)
+	}
+	if len(args) > 0 && args[0] == "bot" {
+		return runAdminBotCommand(args[1:], stdout, stderr)
 	}
 	if len(args) == 0 || args[0] != "set-password" {
 		return adminUsageError()
@@ -220,6 +233,151 @@ func parseAdminSetPasswordArgs(args []string) (string, error) {
 
 func adminUsageError() error {
 	return errors.New("usage: teagramd admin set-password --username <handle>")
+}
+
+type adminBotAction string
+
+const (
+	adminBotCreate adminBotAction = "create"
+	adminBotRotate adminBotAction = "rotate"
+	adminBotRevoke adminBotAction = "revoke"
+)
+
+func runAdminBotCommand(args []string, stdout, stderr io.Writer) (err error) {
+	action, displayName, handle, err := parseAdminBotArgs(args)
+	if err != nil {
+		return err
+	}
+	handle = strings.TrimPrefix(handle, "@")
+	if !adminUsernameRE.MatchString(handle) || len(handle) < 3 || !strings.EqualFold(handle[len(handle)-3:], "bot") {
+		return errors.New("invalid bot username: username must end in bot")
+	}
+	handle = strings.ToLower(handle)
+	if action == adminBotCreate && (!utf8.ValidString(displayName) || strings.TrimSpace(displayName) == "" || strings.ContainsRune(displayName, 0) || utf8.RuneCountInString(displayName) > 64) {
+		return errors.New("invalid bot display name")
+	}
+
+	var secret []byte
+	if action != adminBotRevoke {
+		secret = make([]byte, store.BotTokenSecretSize)
+		if _, err := io.ReadFull(cryptorand.Reader, secret); err != nil {
+			return fmt.Errorf("generate bot token secret: %w", err)
+		}
+		defer clear(secret)
+	}
+
+	quietLog := slog.New(slog.DiscardHandler)
+	cfg, err := config.Load(quietLog)
+	if err != nil {
+		return err
+	}
+	ctx := context.Background()
+	st, err := store.Open(ctx, cfg.PostgresDSN, cfg.AuthKeyEncKey,
+		store.WithLogger(quietLog),
+		store.WithPoolConfig(cfg.PostgresPool),
+		store.WithStatementTimeout(cfg.StatementTimeout),
+		store.WithSessionIP(cfg.SessionIP),
+		store.WithSessionDeviceLabels(cfg.SessionDeviceLabels),
+		store.WithoutBlobStore(),
+	)
+	if err != nil {
+		return fmt.Errorf("open store: %w", err)
+	}
+	defer func() {
+		if closeErr := st.Close(); closeErr != nil {
+			err = errors.Join(err, fmt.Errorf("close store: %w", closeErr))
+		}
+	}()
+
+	switch action {
+	case adminBotCreate:
+		bot, err := st.CreateBot(ctx, displayName, handle, secret)
+		if err != nil {
+			return fmt.Errorf("create bot: %w", err)
+		}
+		return writeBotToken(stdout, bot.ID, secret)
+	case adminBotRotate:
+		userID, err := st.RotateBotToken(ctx, handle, secret)
+		if err != nil {
+			return fmt.Errorf("rotate bot token: %w", err)
+		}
+		return writeBotToken(stdout, userID, secret)
+	case adminBotRevoke:
+		if err := st.RevokeBotToken(ctx, handle); err != nil {
+			return fmt.Errorf("revoke bot token: %w", err)
+		}
+		if _, err := fmt.Fprintf(stderr, "Bot token revoked: %s\n", handle); err != nil {
+			return fmt.Errorf("write bot token revocation confirmation: %w", err)
+		}
+		return nil
+	default:
+		return adminBotUsageError()
+	}
+}
+
+func writeBotToken(w io.Writer, userID int64, secret []byte) error {
+	token := strconv.FormatInt(userID, 10) + ":" + base64.RawURLEncoding.EncodeToString(secret)
+	if _, err := fmt.Fprintln(w, token); err != nil {
+		return fmt.Errorf("write bot token: %w", err)
+	}
+	return nil
+}
+
+func parseAdminBotArgs(args []string) (adminBotAction, string, string, error) {
+	if len(args) == 0 {
+		return "", "", "", adminBotUsageError()
+	}
+	action := adminBotAction(args[0])
+	if action != adminBotCreate && action != adminBotRotate && action != adminBotRevoke {
+		return "", "", "", adminBotUsageError()
+	}
+	var displayName, username string
+	for i := 1; i < len(args); i++ {
+		arg := args[i]
+		var value string
+		var ok bool
+		switch {
+		case arg == "--display-name":
+			if action != adminBotCreate || displayName != "" || i+1 >= len(args) {
+				return "", "", "", adminBotUsageError()
+			}
+			i++
+			value = args[i]
+			displayName = value
+		case strings.HasPrefix(arg, "--display-name="):
+			if action != adminBotCreate || displayName != "" {
+				return "", "", "", adminBotUsageError()
+			}
+			displayName, ok = strings.CutPrefix(arg, "--display-name=")
+			if !ok {
+				return "", "", "", adminBotUsageError()
+			}
+		case arg == "--username":
+			if username != "" || i+1 >= len(args) {
+				return "", "", "", adminBotUsageError()
+			}
+			i++
+			username = args[i]
+		case strings.HasPrefix(arg, "--username="):
+			if username != "" {
+				return "", "", "", adminBotUsageError()
+			}
+			username, ok = strings.CutPrefix(arg, "--username=")
+			if !ok {
+				return "", "", "", adminBotUsageError()
+			}
+		default:
+			return "", "", "", adminBotUsageError()
+		}
+	}
+	if username == "" || (action == adminBotCreate && displayName == "") || (action != adminBotCreate && displayName != "") {
+		return "", "", "", adminBotUsageError()
+	}
+	return action, displayName, username, nil
+}
+
+func adminBotUsageError() error {
+	return errors.New("usage: teagramd admin bot create --display-name <name> --username <handle> | rotate --username <handle> | revoke --username <handle>")
 }
 
 func runAdminCreateUserCommand(args []string, stdin io.Reader, stderr io.Writer) (err error) {

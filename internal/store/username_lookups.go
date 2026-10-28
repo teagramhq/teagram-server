@@ -200,12 +200,13 @@ type UsernameResolution struct {
 }
 
 // UserByUsernameWithLoginModeResult carries the fields needed to decide the
-// username-mode signIn path: user identity and login_mode.
+// username-mode signIn path: user identity, account kind, and login_mode.
 type UserByUsernameWithLoginModeResult struct {
 	ID        int64
 	FirstName string
 	LastName  string
 	LoginMode string
+	Kind      string
 }
 
 func (s *Store) UserByUsernameWithLoginMode(ctx context.Context, handle string) (UserByUsernameWithLoginModeResult, bool, error) {
@@ -221,5 +222,6 @@ func (s *Store) UserByUsernameWithLoginMode(ctx context.Context, handle string) 
 		FirstName: row.FirstName,
 		LastName:  row.LastName,
 		LoginMode: row.LoginMode,
+		Kind:      row.Kind,
 	}, true, nil
 }
