@@ -306,6 +306,57 @@ func (c *stickerQueryCounter) TraceQueryStart(ctx context.Context, _ *pgx.Conn, 
 
 func (*stickerQueryCounter) TraceQueryEnd(context.Context, *pgx.Conn, pgx.TraceQueryEndData) {}
 
+func TestSuggestStickerSetChecksCandidatesInOneQuery(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	dsn := pgtest.DSN(t)
+	tracer := &stickerQueryCounter{}
+	s, err := store.Open(ctx, dsn, pgtest.EncKey(), store.WithoutBlobStore(), store.WithQueryTracer(tracer))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := s.Close(); err != nil {
+			t.Errorf("close store: %v", err)
+		}
+	})
+	owner, err := s.CreateUser(ctx, "+15551819999")
+	if err != nil {
+		t.Fatalf("create owner: %v", err)
+	}
+	conn, err := pgx.Connect(ctx, dsn)
+	if err != nil {
+		t.Fatalf("connect to seed occupied names: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := conn.Close(ctx); err != nil {
+			t.Errorf("close name seed connection: %v", err)
+		}
+	})
+	if _, err := conn.Exec(ctx, `
+		INSERT INTO user_created_sticker_sets (access_hash, creator_id, title, short_name, kind)
+		SELECT 7000000000000 + n, $1, 'Occupied',
+		       upper('wild_cats' || CASE WHEN n = 0 THEN '' ELSE '_' || n::text END),
+		       'regular'
+		FROM generate_series(0, 998) AS n`, owner.ID); err != nil {
+		t.Fatalf("seed occupied names: %v", err)
+	}
+
+	h := fullChannelDispatcher(s)
+	tracer.n.Store(0)
+	body := dispatchChatMethod(t, h, owner.ID, "stickers.suggestShortName", &tg.StickersSuggestShortNameRequest{Title: "Wild Cats!"})
+	var suggested tg.StickersSuggestedShortName
+	if err := suggested.Decode(&bin.Buffer{Buf: body}); err != nil {
+		t.Fatalf("decode suggestShortName: %v", err)
+	}
+	if suggested.ShortName != "wild_cats_999" {
+		t.Fatalf("suggestShortName = %q, want first free candidate wild_cats_999", suggested.ShortName)
+	}
+	if n := tracer.n.Load(); n != 2 {
+		t.Fatalf("suggestShortName made %d database queries with 999 occupied candidates, want 2 (catalogue and batched candidate lookup)", n)
+	}
+}
+
 func TestInstalledUserStickerSetGettersUseBoundedQueries(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()

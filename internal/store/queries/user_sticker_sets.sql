@@ -114,6 +114,11 @@ SELECT EXISTS (
     SELECT 1 FROM user_created_sticker_sets WHERE lower(short_name) = lower($1)
 );
 
+-- name: UserStickerSetOccupiedShortNames :many
+SELECT lower(short_name) AS short_name
+FROM user_created_sticker_sets
+WHERE lower(short_name) = ANY($1::text[]);
+
 -- name: UserStickerDocumentExists :one
 SELECT EXISTS (
     SELECT 1

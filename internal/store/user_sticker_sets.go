@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -424,4 +425,26 @@ func (s *Store) UserStickerFileHasSetReference(ctx context.Context, id int64) (b
 // sets whose serving state has been turned off.
 func (s *Store) UserStickerSetShortNameExists(ctx context.Context, shortName string) (bool, error) {
 	return s.q.UserStickerSetShortNameExists(ctx, shortName)
+}
+
+// UserStickerSetOccupiedShortNames returns the stored names matching any of
+// the candidates, case-insensitively. Inactive sets remain reserved names.
+func (s *Store) UserStickerSetOccupiedShortNames(ctx context.Context, shortNames []string) (map[string]struct{}, error) {
+	occupied := make(map[string]struct{}, len(shortNames))
+	if len(shortNames) == 0 {
+		return occupied, nil
+	}
+
+	normalized := make([]string, len(shortNames))
+	for i, shortName := range shortNames {
+		normalized[i] = strings.ToLower(shortName)
+	}
+	names, err := s.q.UserStickerSetOccupiedShortNames(ctx, normalized)
+	if err != nil {
+		return nil, fmt.Errorf("read occupied sticker set short names: %w", err)
+	}
+	for _, name := range names {
+		occupied[name] = struct{}{}
+	}
+	return occupied, nil
 }

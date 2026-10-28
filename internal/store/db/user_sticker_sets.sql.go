@@ -633,6 +633,32 @@ func (q *Queries) UserStickerSetAlreadyInstalled(ctx context.Context, arg UserSt
 	return exists, err
 }
 
+const userStickerSetOccupiedShortNames = `-- name: UserStickerSetOccupiedShortNames :many
+SELECT lower(short_name) AS short_name
+FROM user_created_sticker_sets
+WHERE lower(short_name) = ANY($1::text[])
+`
+
+func (q *Queries) UserStickerSetOccupiedShortNames(ctx context.Context, dollar_1 []string) ([]string, error) {
+	rows, err := q.db.Query(ctx, userStickerSetOccupiedShortNames, dollar_1)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []string
+	for rows.Next() {
+		var short_name string
+		if err := rows.Scan(&short_name); err != nil {
+			return nil, err
+		}
+		items = append(items, short_name)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const userStickerSetShortNameExists = `-- name: UserStickerSetShortNameExists :one
 SELECT EXISTS (
     SELECT 1 FROM user_created_sticker_sets WHERE lower(short_name) = lower($1)

@@ -108,22 +108,27 @@ func userStickerSetHash(set store.UserStickerSet) int {
 	return value
 }
 
+func userStickerSetSummaryTL(set store.UserStickerSet, ownerID int64, installedAt *time.Time) tg.StickerSet {
+	result := tg.StickerSet{
+		ID: set.ID, AccessHash: set.AccessHash, Title: set.Title,
+		ShortName: set.ShortName, Count: len(set.Items), Hash: userStickerSetHash(set),
+		Masks: set.Kind == "mask", Emojis: set.Kind == "emojis", TextColor: set.TextColor,
+		Creator: set.CreatorID == ownerID,
+	}
+	if installedAt != nil {
+		result.SetInstalledDate(int(installedAt.Unix()))
+	}
+	result.SetFlags()
+	return result
+}
+
 func userStickerSetTL(set store.UserStickerSet, ownerID int64, dcID int, installedAt *time.Time) *tg.MessagesStickerSet {
 	result := &tg.MessagesStickerSet{
-		Set: tg.StickerSet{
-			ID: set.ID, AccessHash: set.AccessHash, Title: set.Title,
-			ShortName: set.ShortName, Count: len(set.Items), Hash: userStickerSetHash(set),
-			Masks: set.Kind == "mask", Emojis: set.Kind == "emojis", TextColor: set.TextColor,
-			Creator: set.CreatorID == ownerID,
-		},
+		Set:       userStickerSetSummaryTL(set, ownerID, installedAt),
 		Packs:     make([]tg.StickerPack, 0, len(set.Items)),
 		Keywords:  make([]tg.StickerKeyword, 0, len(set.Items)),
 		Documents: make([]tg.DocumentClass, 0, len(set.Items)),
 	}
-	if installedAt != nil {
-		result.Set.SetInstalledDate(int(installedAt.Unix()))
-	}
-	result.Set.SetFlags()
 	packIndexes := make(map[string]int, len(set.Items))
 	for _, item := range set.Items {
 		document := userStickerDocumentTL(set, item, dcID)
@@ -430,18 +435,26 @@ func (h *handlers) handleSuggestStickerSetShortName(_ *mtproto.Conn, r *mtproto.
 		return nil, nil, errInternal
 	}
 	base := stickerNameSlug(req.Title)
+	candidates := make([]string, 0, 1000)
 	for suffix := range 1000 {
 		candidate := base
 		if suffix > 0 {
 			tail := fmt.Sprintf("_%d", suffix)
 			candidate = strings.TrimRight(base[:min(len(base), maxStickerSetShortNameBytes-len(tail))], "_") + tail
 		}
-		occupied, checkErr := h.stickerSetNameExists(r, candidate, catalog)
-		if checkErr != nil {
-			h.log.Error("check suggested sticker set short name", "err", checkErr)
-			return nil, nil, errInternal
+		candidates = append(candidates, candidate)
+	}
+	userOccupied, err := h.store.UserStickerSetOccupiedShortNames(r.Ctx, candidates)
+	if err != nil {
+		h.log.Error("check suggested sticker set short names", "err", err)
+		return nil, nil, errInternal
+	}
+	for _, candidate := range candidates {
+		key := strings.ToLower(candidate)
+		if _, occupied := catalog.byShortName[key]; occupied {
+			continue
 		}
-		if !occupied {
+		if _, occupied := userOccupied[key]; !occupied {
 			return &tg.StickersSuggestedShortName{ShortName: candidate}, nil, nil
 		}
 	}

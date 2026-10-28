@@ -248,7 +248,7 @@ func (h *handlers) handleGetEmojiStickers(r *mtproto.Request) (bin.Encoder, erro
 			continue
 		}
 		if set.Kind == "emojis" {
-			sets = append(sets, userStickerSetTL(set, r.UserID, h.dcID, &item.InstalledAt).Set)
+			sets = append(sets, userStickerSetSummaryTL(set, r.UserID, &item.InstalledAt))
 		}
 	}
 	hash := installedStickerSetsHash(sets)
