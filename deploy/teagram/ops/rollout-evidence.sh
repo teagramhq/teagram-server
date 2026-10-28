@@ -237,15 +237,17 @@ tail_output=$(tail -n 80 -- "$latest_log") || {
   printf '%s\n' 'rollout-evidence: could not read runner log tail' >&2
   exit 1
 }
+allowlisted_log_lines=0
 while IFS= read -r line; do
-  if printf '%s\n' "$line" | grep -Eiq \
-    '(password|passwd|passphrase|pwd|token|secret|credential|private[_-]?key|api[_-]?key|access[_-]?key|database[_-]?url|dsn|authorization|[[:alnum:]_]*key"?[[:space:]]*[:=])'; then
-    printf '%s\n' '[REDACTED sensitive runner log line]'
-    continue
+  if [[ "$line" =~ ^target_failure_gate=((compose_up|target_readiness_rejected|schema_gate_rejected)_exit_[0-9]{1,3}|snapshot_capture_failed|target_container_id_unavailable|target_comparison_rejected|target_container_comparison_evidence_missing|target_blob_authority_rejected)[[:space:]]rollback_exit=([0-9]{1,3})$ ]]; then
+    printf 'target_failure_gate=%s rollback_exit=%s\n' "${BASH_REMATCH[1]}" "${BASH_REMATCH[3]}"
+    allowlisted_log_lines=$((allowlisted_log_lines + 1))
+  elif [[ "$line" =~ ^rollback=verified[[:space:]]baseline_sha=([0-9a-f]{40})[[:space:]]container_id=[0-9a-f]{64}$ ]]; then
+    printf 'rollback=verified baseline_sha=%s container_id=[REDACTED]\n' "${BASH_REMATCH[1]}"
+    allowlisted_log_lines=$((allowlisted_log_lines + 1))
   fi
-  redacted_line=$(printf '%s\n' "$line" | sed -E \
-    -e 's#(://)[^/@[:space:]]+@#\1[REDACTED]@#g' \
-    -e 's#([Bb]earer[[:space:]]+)[^[:space:],;]+#\1[REDACTED]#g')
-  printf '%s\n' "$redacted_line"
 done <<< "$tail_output"
+if [[ "$allowlisted_log_lines" == 0 ]]; then
+  printf '%s\n' 'no allowlisted runner summary lines in the final 80 log lines'
+fi
 printf '%s\n' 'runner_log_tail_end'

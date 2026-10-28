@@ -284,7 +284,13 @@ done
   printf 'Authorization: Bearer secret-runner-token\n'
   printf 'remote=postgres://runner:secret-url-password@db/teagram\n'
   printf 'request=Bearer secret-bearer-token\n'
-  printf 'rollout runner rejected: target readiness\nrollback=verified baseline_sha=%s\n' "$OFF_MAIN_SHA"
+  printf 'TG_DB_PASS=env-value-with-no-blocklist-needle\n'
+  printf '%s\n' '-----BEGIN PRIVATE KEY-----'
+  printf '%s\n' 'MIIEowIBAAKCAQEArandompemfixture'
+  printf 'compose stderr: services.teagram.environment.TG_DB_PASS=compose-value-no-blocklist-needle\n'
+  printf 'target_failure_gate=target_readiness_rejected_exit_1 rollback_exit=0\n'
+  printf 'target_failure_gate=not_a_runner_gate rollback_exit=0\n'
+  printf 'rollback=verified baseline_sha=%s container_id=%s\n' "$OFF_MAIN_SHA" "$CONTAINER_ID"
 } >> "$latest_log"
 printf 'later runner log must not be selected\n' > "$later_log"
 chmod 600 "$latest_log" "$later_log"
@@ -293,11 +299,16 @@ output=$(run_command "run $OPS_SHA rollout-evidence")
 [[ "$output" == *'evidence_captured_at_utc=2026-10-28T04:03:00Z'* ]]
 [[ "$output" == *'tcp=failed'* && "$output" == *'tls=failed'* && "$output" != *"$CONTAINER_ID"* ]]
 [[ "$output" == *"runner_log=rollout-${TARGET_SHA:0:7}-20261028T035454Z.log"* ]]
-[[ "$output" == *'runner line 85'* && "$output" != *'oldest runner line'* ]]
-[[ "$output" == *'rollback=verified'* && "$output" != *'later runner log must not be selected'* ]]
+[[ "$output" == *'target_failure_gate=target_readiness_rejected_exit_1 rollback_exit=0'* ]]
+[[ "$output" == *"rollback=verified baseline_sha=$OFF_MAIN_SHA container_id=[REDACTED]"* ]]
+[[ "$output" != *'target_failure_gate=not_a_runner_gate'* ]]
+[[ "$output" != *'runner line 85'* && "$output" != *'oldest runner line'* ]]
+[[ "$output" != *'later runner log must not be selected'* ]]
 [[ "$output" != *'secret-runner-password'* && "$output" != *'secret-runner-token'* && \
    "$output" != *'secret-url-password'* && "$output" != *'secret-bearer-token'* && \
-   "$output" != *'secret-json-key'* ]]
+   "$output" != *'secret-json-key'* && "$output" != *'env-value-with-no-blocklist-needle'* && \
+   "$output" != *'compose-value-no-blocklist-needle'* && "$output" != *'MIIEowIBAAKCAQEArandompemfixture'* && \
+   "$output" != *'-----BEGIN PRIVATE KEY-----'* && "$output" != *'TG_DB_PASS='* ]]
 
 WARNING_SHA=eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee
 warning_target_dir="$MOCK_ROOT/main1238-${WARNING_SHA:0:12}-20261028T043000Z.target"
