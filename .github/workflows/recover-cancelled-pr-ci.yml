@@ -3,8 +3,8 @@ name: Recover cancelled PR CI
 on:
   workflow_dispatch:
     inputs:
-      cancelled_pr_run_ids:
-        description: Space-separated workflow run IDs cancelled to prioritize main CI
+      cancelled_pr_run_targets:
+        description: Space-separated workflow run IDs and creation timestamps cancelled to prioritize main CI
         required: true
         type: string
       issue:
@@ -27,40 +27,69 @@ jobs:
       - name: Wait for cancellation cleanup and re-run PR CI
         env:
           GH_TOKEN: ${{ github.token }}
-          CANCELLED_PR_RUN_IDS: ${{ inputs.cancelled_pr_run_ids }}
+          CANCELLED_PR_RUN_TARGETS: ${{ inputs.cancelled_pr_run_targets }}
           ISSUE: ${{ inputs.issue }}
         run: |
           set -euo pipefail
           # Cancellation cleanup can take longer than the 2h12m main-run queue
           # delay observed during this incident; allow up to three hours.
           max_status_checks=181
-          read -r -a cancelled_pr_run_ids <<< "$CANCELLED_PR_RUN_IDS"
-          for run_id in "${cancelled_pr_run_ids[@]}"; do
-            if [[ ! "$run_id" =~ ^[0-9]+$ ]]; then
-              echo "::warning::Ignoring invalid cancelled pull request CI run id."
+          read -r -a cancelled_pr_run_targets <<< "$CANCELLED_PR_RUN_TARGETS"
+          declare -A outstanding_pr_run_ids=()
+          oldest_created_at=""
+          for run_target in "${cancelled_pr_run_targets[@]}"; do
+            if [[ ! "$run_target" =~ ^([0-9]+):([0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\.[0-9]+)?Z)$ ]]; then
+              echo "::warning::Ignoring invalid cancelled pull request CI run target."
               continue
             fi
-            run_state=""
-            for ((status_check_attempt = 1; status_check_attempt <= max_status_checks; status_check_attempt++)); do
-              if ! run_state="$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${run_id}" --jq '[.status, (.conclusion // "")] | @tsv' 2>/dev/null)"; then
-                run_state=""
-              fi
-              if [[ "$run_state" == $'completed\tcancelled' || "$run_state" == completed$'\t'* ]]; then
-                break
-              fi
-              if (( status_check_attempt < max_status_checks )); then
-                sleep 60
-              fi
-            done
-            if [[ "$run_state" != $'completed\tcancelled' ]]; then
-              if [[ "$run_state" == completed$'\t'* ]]; then
-                echo "Pull request CI run ${run_id} is ${run_state}; no rerun is needed."
-              else
-                echo "::warning::Could not confirm cancelled pull request CI run ${run_id} after ${max_status_checks} status checks; rerun it manually if its check remains cancelled. Issue: $ISSUE"
-              fi
-              continue
-            fi
-            if ! gh run rerun "$run_id" --repo "$GITHUB_REPOSITORY"; then
-              echo "::warning::Could not re-run cancelled pull request CI run ${run_id}; rerun it manually if its check remains cancelled. Issue: $ISSUE"
+            run_id="${BASH_REMATCH[1]}"
+            run_created_at="${BASH_REMATCH[2]%Z}"
+            run_created_at="${run_created_at%%.*}Z"
+            outstanding_pr_run_ids["$run_id"]="$run_created_at"
+            if [[ -z "$oldest_created_at" || "$run_created_at" < "$oldest_created_at" ]]; then
+              oldest_created_at="$run_created_at"
             fi
           done
+
+          if ((${#outstanding_pr_run_ids[@]} == 0)); then
+            echo "No valid cancelled pull request CI runs to recover."
+            exit 0
+          fi
+
+          for ((status_check_attempt = 1; status_check_attempt <= max_status_checks; status_check_attempt++)); do
+            if ! runs="$(gh api --paginate \
+              --method GET \
+              "repos/${GITHUB_REPOSITORY}/actions/workflows/ci.yml/runs" \
+              -f event=pull_request \
+              -f "created=>=$oldest_created_at" \
+              -F per_page=100 \
+              --jq '.workflow_runs[] | [.id, .status, (.conclusion // "")] | @tsv' 2>/dev/null)"; then
+              echo "::warning::Could not list pull request CI run statuses; retrying."
+              runs=""
+            fi
+
+            while IFS=$'\t' read -r run_id run_status run_conclusion; do
+              [[ "$run_id" =~ ^[0-9]+$ ]] || continue
+              [[ -n "${outstanding_pr_run_ids[$run_id]+present}" && "$run_status" == completed ]] || continue
+              unset "outstanding_pr_run_ids[$run_id]"
+              if [[ "$run_conclusion" != cancelled ]]; then
+                echo "Pull request CI run ${run_id} completed with ${run_conclusion}; no rerun is needed."
+                continue
+              fi
+              if ! gh run rerun "$run_id" --repo "$GITHUB_REPOSITORY"; then
+                echo "::warning::Could not re-run cancelled pull request CI run ${run_id}; rerun it manually if its check remains cancelled. Issue: $ISSUE"
+              fi
+            done <<< "$runs"
+
+            if ((${#outstanding_pr_run_ids[@]} == 0)); then
+              break
+            fi
+            if (( status_check_attempt < max_status_checks )); then
+              sleep 60
+            fi
+          done
+
+          if ((${#outstanding_pr_run_ids[@]} > 0)); then
+            outstanding_run_ids="$(printf '%s\n' "${!outstanding_pr_run_ids[@]}" | LC_ALL=C sort | paste -sd ' ' -)"
+            echo "::warning::Could not confirm cancelled pull request CI runs after ${max_status_checks} status checks: ${outstanding_run_ids}; rerun them manually if their checks remain cancelled. Issue: $ISSUE"
+          fi

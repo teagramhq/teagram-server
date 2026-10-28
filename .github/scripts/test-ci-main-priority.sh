@@ -28,6 +28,8 @@ gate_if="$(query '.jobs."prioritize-main".if')"
 cancel_step="$(query '.jobs."prioritize-main".steps[] | select(.name == "Cancel queued pull request CI runs") | .run')"
 [[ "$cancel_step" == *'event=pull_request&status=queued&per_page=100'* ]] ||
   fail 'the priority job must list queued pull request CI runs only'
+[[ "$cancel_step" == *'.workflow_runs[]? | [.id, .created_at] | @tsv'* && "$cancel_step" == *'${run_id}:${run_created_at}'* ]] ||
+  fail 'cancelled run IDs must retain creation timestamps for grouped recovery polling'
 [[ "$cancel_step" == *'run_status" != queued'* ]] ||
   fail 'the priority job must recheck each run before cancelling it'
 [[ "$cancel_step" == *'if ! runs="$(gh api --paginate'* && "$cancel_step" == *'Could not list queued pull request CI runs; continuing without cancellation.'* ]] ||
@@ -38,14 +40,14 @@ cancel_step="$(query '.jobs."prioritize-main".steps[] | select(.name == "Cancel 
   fail 'queued PR runs must use ordinary cancellation so always() cleanup can run'
 [[ "$cancel_step" == *'if gh run cancel "$run_id" --repo "$GITHUB_REPOSITORY"; then'* && "$cancel_step" == *'Could not cancel queued pull request CI run'* ]] ||
   fail 'a failed cancellation must warn and leave the main priority gate successful'
-[[ "$cancel_step" == *'cancelled_pr_run_ids+="${run_id} "'* ]] ||
+[[ "$cancel_step" == *'cancelled_pr_run_targets+="${run_id}:${run_created_at} "'* ]] ||
   fail 'successfully cancelled pull request runs must be recorded for rerun'
 [[ "$cancel_step" != *'status=in_progress'* && "$cancel_step" != *'/jobs?per_page=100'* ]] ||
   fail 'queued PR workflows must be cancelled even when they have started jobs'
 [[ "$cancel_step" != *'grep -qx in_progress'* ]] ||
   fail 'the priority job must not query or cancel running PR workflows'
 printf '%s\n' "$cancel_step" | bash -n
-[[ "$(query '.jobs."prioritize-main".outputs.cancelled_pr_run_ids')" == *'steps.cancel-queued-pr-runs.outputs.cancelled_pr_run_ids'* ]] ||
+[[ "$(query '.jobs."prioritize-main".outputs.cancelled_pr_run_targets')" == *'steps.cancel-queued-pr-runs.outputs.cancelled_pr_run_targets'* ]] ||
   fail 'the priority job must expose cancelled run ids for recovery'
 
 dispatch_needs="$(query '.jobs."dispatch-cancelled-pr-ci-recovery".needs[]')"
@@ -54,15 +56,16 @@ dispatch_needs="$(query '.jobs."dispatch-cancelled-pr-ci-recovery".needs[]')"
 [[ "$(query '.jobs."dispatch-cancelled-pr-ci-recovery".timeout-minutes')" == 5 ]] ||
   fail 'dispatching PR recovery must remain short-lived in the main concurrency group'
 dispatch_if="$(query '.jobs."dispatch-cancelled-pr-ci-recovery".if')"
-[[ "$dispatch_if" == *"needs.prioritize-main.result == 'success'"* && "$dispatch_if" == *"needs.prioritize-main.result == 'skipped'"* && "$dispatch_if" == *"github.event_name == 'pull_request'"* && "$dispatch_if" == *"github.event_name == 'push'"* && "$dispatch_if" == *'needs.lint.result != '\''skipped'\'''* && "$dispatch_if" == *'outputs.cancelled_pr_run_ids != '\'''\'''* ]] ||
+dispatch_targets_if="outputs.cancelled_pr_run_targets != ''"
+[[ "$dispatch_if" == *"needs.prioritize-main.result == 'success'"* && "$dispatch_if" == *"needs.prioritize-main.result == 'skipped'"* && "$dispatch_if" == *"github.event_name == 'pull_request'"* && "$dispatch_if" == *"github.event_name == 'push'"* && "$dispatch_if" == *'needs.lint.result != '\''skipped'\'''* && "$dispatch_if" == *"$dispatch_targets_if"* ]] ||
   fail 'cancelled PR recovery must dispatch only after main fan-out starts'
 dispatch_step="$(query '.jobs."dispatch-cancelled-pr-ci-recovery".steps[] | select(.name == "Dispatch cancelled pull request CI recovery after main fan-out starts") | .run')"
-[[ "$dispatch_step" == *'gh workflow run recover-cancelled-pr-ci.yml'* && "$dispatch_step" == *'--ref main'* && "$dispatch_step" == *'-f issue=MAIN-2765'* && "$dispatch_step" == *'cancelled_pr_run_ids=$CANCELLED_PR_RUN_IDS'* && "$dispatch_step" != *'sleep 60'* ]] ||
+[[ "$dispatch_step" == *'gh workflow run recover-cancelled-pr-ci.yml'* && "$dispatch_step" == *'--ref main'* && "$dispatch_step" == *'-f issue=MAIN-2765'* && "$dispatch_step" == *'cancelled_pr_run_targets=$CANCELLED_PR_RUN_TARGETS'* && "$dispatch_step" != *'sleep 60'* ]] ||
   fail 'main CI must dispatch recovery with its issue and cancelled run ids without waiting'
 printf '%s\n' "$dispatch_step" | bash -n
 
-[[ "$(recovery_query '.on.workflow_dispatch.inputs.issue.required')" == true && "$(recovery_query '.on.workflow_dispatch.inputs.cancelled_pr_run_ids.required')" == true ]] ||
-  fail 'the recovery workflow must require the issue key and cancelled run ids'
+[[ "$(recovery_query '.on.workflow_dispatch.inputs.issue.required')" == true && "$(recovery_query '.on.workflow_dispatch.inputs.cancelled_pr_run_targets.required')" == true ]] ||
+  fail 'the recovery workflow must require the issue key and cancelled run targets'
 [[ "$(recovery_query '.concurrency // ""')" == '' ]] ||
   fail 'the delayed recovery workflow must not join the main CI concurrency group'
 [[ "$(recovery_query '.jobs."rerun-cancelled-pr-ci".timeout-minutes')" == 210 ]] ||
@@ -70,24 +73,38 @@ printf '%s\n' "$dispatch_step" | bash -n
 [[ "$(recovery_query '.jobs."rerun-cancelled-pr-ci".permissions.actions')" == write ]] ||
   fail 'only the recovery job needs Actions write permission to rerun cancelled runs'
 rerun_step="$(recovery_query '.jobs."rerun-cancelled-pr-ci".steps[] | select(.name == "Wait for cancellation cleanup and re-run PR CI") | .run')"
-[[ "$rerun_step" == *'gh run rerun "$run_id" --repo "$GITHUB_REPOSITORY"'* && "$rerun_step" == *'completed\tcancelled'* && "$rerun_step" == *'max_status_checks=181'* && "$rerun_step" == *'sleep 60'* && "$rerun_step" == *'Could not confirm cancelled pull request CI run'* && "$rerun_step" == *'Could not re-run cancelled pull request CI run'* ]] ||
-  fail 'recorded cancelled pull request runs must be rerun after cancellation cleanup completes'
+[[ "$rerun_step" == *'actions/workflows/ci.yml/runs'* && "$rerun_step" == *'--paginate'* && "$rerun_step" == *'--method GET'* && "$rerun_step" == *'created=>=$oldest_created_at'* && "$rerun_step" != *'/actions/runs/${run_id}'* ]] ||
+  fail 'recovery must poll all outstanding runs together through the workflow runs list'
+[[ "$rerun_step" == *'declare -A outstanding_pr_run_ids'* && "$rerun_step" == *'max_status_checks=181'* && "$rerun_step" == *'sleep 60'* && "$rerun_step" == *'gh run rerun "$run_id" --repo "$GITHUB_REPOSITORY"'* && "$rerun_step" == *'Could not re-run cancelled pull request CI run'* && "$rerun_step" == *'Could not confirm cancelled pull request CI runs'* ]] ||
+  fail 'grouped recovery must retry, rerun completed cancellations, and report unresolved runs'
 printf '%s\n' "$rerun_step" | bash -n
 
 test_tmp="$(mktemp -d)"
 trap 'rm -rf "$test_tmp"' EXIT
 gh() {
   if [[ "$1" == api ]]; then
-    [[ "$2" == "repos/${GITHUB_REPOSITORY}/actions/runs/123" ]] || return 2
+    [[ "$2" == --paginate && "$3" == --method && "$4" == GET && "$5" == "repos/${GITHUB_REPOSITORY}/actions/workflows/ci.yml/runs" && " $* " == *' -f event=pull_request '* && " $* " == *'created=>='* ]] || return 2
     local reads=0
     [[ ! -f "$STATUS_READS_FILE" ]] || reads="$(<"$STATUS_READS_FILE")"
     reads=$((reads + 1))
     printf '%s\n' "$reads" > "$STATUS_READS_FILE"
-    if [[ "$STATUS_MODE" == after-old-bound && "$reads" -ge 10 ]]; then
-      printf 'completed\tcancelled\n'
-    else
-      printf 'in_progress\t\n'
-    fi
+    case "$STATUS_MODE" in
+      after-old-bound)
+        if (( reads >= 10 )); then
+          printf '123\tcompleted\tcancelled\n'
+        else
+          printf '123\tin_progress\t\n'
+        fi
+        ;;
+      staggered)
+        case "$reads" in
+          1) printf '123\tin_progress\t\n456\tin_progress\t\n' ;;
+          2) printf '123\tcompleted\tcancelled\n456\tin_progress\t\n' ;;
+          *) printf '123\tcompleted\tcancelled\n456\tcompleted\tcancelled\n' ;;
+        esac
+        ;;
+      *) printf '123\tin_progress\t\n' ;;
+    esac
     return 0
   fi
   if [[ "$1" == run && "$2" == rerun ]]; then
@@ -102,7 +119,7 @@ export -f gh sleep
 STATUS_MODE=after-old-bound \
 STATUS_READS_FILE="$test_tmp/delayed-reads" \
 RERUN_LOG="$test_tmp/delayed-reruns" \
-CANCELLED_PR_RUN_IDS=123 \
+CANCELLED_PR_RUN_TARGETS=123:2026-10-28T00:00:00Z \
 ISSUE=MAIN-2765 \
 GITHUB_REPOSITORY=example/repo \
   bash -c "$rerun_step" || fail 'a delayed cancelled run must eventually be rerun'
@@ -112,7 +129,7 @@ GITHUB_REPOSITORY=example/repo \
 STATUS_MODE=never \
 STATUS_READS_FILE="$test_tmp/bounded-reads" \
 RERUN_LOG="$test_tmp/bounded-reruns" \
-CANCELLED_PR_RUN_IDS=123 \
+CANCELLED_PR_RUN_TARGETS=123:2026-10-28T00:00:00Z \
 ISSUE=MAIN-2765 \
 GITHUB_REPOSITORY=example/repo \
   bash -c "$rerun_step" > "$test_tmp/bounded-output" 2>&1 || fail 'a delayed status must stop after the bounded retry count'
@@ -120,6 +137,16 @@ GITHUB_REPOSITORY=example/repo \
   fail 'the requeue step must stop after the bounded status checks without rerunning an active cancellation'
 [[ "$(<"$test_tmp/bounded-output")" == *'after 181 status checks'* ]] ||
   fail 'the requeue step must warn when cancellation does not finish within the bound'
+
+STATUS_MODE=staggered \
+STATUS_READS_FILE="$test_tmp/staggered-reads" \
+RERUN_LOG="$test_tmp/staggered-reruns" \
+CANCELLED_PR_RUN_TARGETS='123:2026-10-28T00:00:00Z 456:2026-10-28T00:01:00Z' \
+ISSUE=MAIN-2765 \
+GITHUB_REPOSITORY=example/repo \
+  bash -c "$rerun_step" || fail 'grouped recovery must rerun completed IDs while continuing to poll outstanding IDs'
+[[ "$(<"$test_tmp/staggered-reads")" == 3 && "$(<"$test_tmp/staggered-reruns")" == $'123\n456' ]] ||
+  fail 'recovery must poll both IDs together and rerun each as soon as cancellation completes'
 
 expected_roots=$'browser-acceptance\nbrowser-acceptance-image\nci-main\ncompose\ncss\ndeploy-workflow\ndocker\ne2e-admin\nlint\nmirror-rustfs-qualification-images\nphotothumb-runtime\nreal-server-fixtures\nrestore-readiness\nrustfs-transition-qualification\nschema-gate-postgres\nsmoke\nsql-lint\nsqlc\nwebsocket-d1\nwebsocket-permanent-exchange'
 actual_roots="$(query '.jobs | to_entries[] | select(.key != "prioritize-main" and .key != "ci" and .key != "dispatch-cancelled-pr-ci-recovery" and (.value.needs == "prioritize-main" or (.value.needs[] == "prioritize-main"))) | .key' | LC_ALL=C sort)"
