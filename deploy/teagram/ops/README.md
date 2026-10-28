@@ -45,3 +45,19 @@ and rollback summary shapes; every other line is omitted. If the target failure
 marker could not be persisted, it uses the matching rollback warning and
 identifies the target failure marker and capture time as unavailable. It reads
 only validated root-owned mode-0600 files from mode-0700 evidence directories.
+
+`restore-drill.sh` accepts no arguments. It requires the deployed main revision
+to descend from the operation commit, `aa40758600452b422cc10f99a662df8e39ac3ef3`,
+and `8cc64750f467b782b81efaddd0077cc619c52113`; the deployed revision is the
+green-CI gate because `Deploy.` only publishes a successful main run. It updates
+the clean `/home/restore-drill/teagram-server` checkout to that revision, then
+runs preparation and the local-dump drill as `restore-drill`. It selects the
+newest timestamped Deploy dump by filename timestamp and mtime, inspects only
+filesystem metadata, and emits a metadata-only dump inventory with the newest
+ten marked to keep. The shared deploy lock covers the drill. Before and after,
+it checks the live container identity, `teagram_*` volume identities, Serve
+configuration, and the verified admin readiness response. It refuses to run
+with less than 4 GiB free for preparation, less than the larger of 4 GiB or
+twice the dump size free for the drill, less than 2816 MiB available memory, or
+under 10% aggregate CPU idle. It never reads or prints dump contents and never
+changes `/opt/teagram`.

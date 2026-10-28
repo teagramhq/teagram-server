@@ -39,6 +39,7 @@ export MOCK_VERIFIER="$tmp/verifier.sh" MOCK_RUNNER="$tmp/runner.sh"
 export MOCK_RUN_TEMP_LOG="$tmp/run-temp.log" MOCK_RM_LOG="$tmp/rm.log"
 export MOCK_VERIFIER_CALL="$tmp/verifier-call.log"
 export MOCK_PRIVATE_EVIDENCE_LOG="$tmp/private-evidence.log" MOCK_ROOT="$tmp/root"
+export MOCK_RESTORE_OP_SCRIPT="$tmp/restore-drill.sh"
 
 cat > "$tmp/bin/git" <<'GIT'
 #!/usr/bin/env bash
@@ -62,6 +63,7 @@ case "$1" in
     [[ "${3:-}" == "$OPS_SHA:deploy/teagram/ops/replay-check.sh" || \
       "${3:-}" == "$OPS_SHA:deploy/teagram/ops/target-failure-report.sh" || \
       "${3:-}" == "$OPS_SHA:deploy/teagram/ops/rollout-evidence.sh" || \
+      "${3:-}" == "$OPS_SHA:deploy/teagram/ops/restore-drill.sh" || \
       "${3:-}" == "$TARGET_SHA:deploy/teagramd/rollout-runner/rollout-runner.sh" || \
       "${3:-}" == "$TARGET_SHA:deploy/teagramd/rollout-runner/rollout-verifier.sh" ]]
     ;;
@@ -71,6 +73,7 @@ case "$1" in
         sed -e "s|/opt/teagram|$MOCK_REPO|g" -e "s|/root|$MOCK_ROOT|g" \
           -e "s|0:700|$MOCK_OWNER_UID:700|g" -e "s|0:600|$MOCK_OWNER_UID:600|g" "$MOCK_OP_SCRIPT"
         ;;
+      "$OPS_SHA:deploy/teagram/ops/restore-drill.sh") cat "$MOCK_RESTORE_OP_SCRIPT" ;;
       "$OPS_SHA:deploy/teagram/ops/target-failure-report.sh")
         sed -e "s|/root|$MOCK_ROOT|g" "$MOCK_REPORT_SCRIPT"
         ;;
@@ -164,6 +167,12 @@ VERIFIER
 chmod 755 "$MOCK_VERIFIER"
 verifier_sha=$(sha256sum "$MOCK_VERIFIER" | cut -d' ' -f1)
 printf 'readonly APPROVED_VERIFIER_SHA=%s\n' "$verifier_sha" > "$MOCK_RUNNER"
+cat > "$MOCK_RESTORE_OP_SCRIPT" <<'RESTORE_OP'
+#!/usr/bin/env bash
+set -euo pipefail
+printf 'restore_operation=pass source_sha=%s args=%s\n' "$OPS_SHA" "$#"
+RESTORE_OP
+chmod 755 "$MOCK_RESTORE_OP_SCRIPT"
 
 sed \
   -e "s|/opt/teagram|$tmp/repo|g" \
@@ -227,6 +236,9 @@ expect_status 66 "run $OPS_SHA missing-script $TARGET_SHA"
 for bad_name in 'nested/name' . .. 'Uppercase'; do
   expect_status 64 "run $OPS_SHA $bad_name $TARGET_SHA"
 done
+
+restore_output=$(run_command "run $OPS_SHA restore-drill")
+[[ "$restore_output" == "restore_operation=pass source_sha=$OPS_SHA args=0" ]]
 
 mkdir -p "$unrelated/keep"
 printf 'keep this directory\n' > "$unrelated/keep/sentinel"
