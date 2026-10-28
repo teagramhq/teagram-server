@@ -1397,6 +1397,44 @@ func (q *Queries) SearchMessages(ctx context.Context, arg SearchMessagesParams) 
 	return items, nil
 }
 
+const searchResultsCalendarCount = `-- name: SearchResultsCalendarCount :one
+SELECT COUNT(*)::bigint
+FROM messages AS m
+WHERE m.owner_id = $1::bigint
+  AND m.peer_type = $2::smallint
+  AND m.peer_id = $3::bigint
+  AND m.peer_type IN (1, 2)
+  AND m.deleted = false
+  AND (m.expires_at IS NULL OR m.expires_at > statement_timestamp())
+  AND m.file_id <> 0
+  AND (m.peer_type <> 2 OR EXISTS (
+      SELECT 1 FROM chat_participants cp
+      WHERE cp.chat_id = m.peer_id AND cp.user_id = m.owner_id
+  ))
+  AND EXISTS (
+      SELECT 1 FROM files f
+      WHERE f.id = m.file_id AND f.stored = true
+        AND (f.media_kind = 'photo' OR f.subtype_rights @> ARRAY['send_videos']::text[])
+  )
+`
+
+type SearchResultsCalendarCountParams struct {
+	OwnerID  int64
+	PeerType int16
+	PeerID   int64
+}
+
+// SearchResultsCalendar is the date picker's per-day photo/video preview. Keep
+// file_id <> 0 as a top-level predicate so the partial messages_file_idx can
+// serve a large text-only history without scanning its message rows.
+// Count the full filter here; offset cursors apply only to periods and messages.
+func (q *Queries) SearchResultsCalendarCount(ctx context.Context, arg SearchResultsCalendarCountParams) (int64, error) {
+	row := q.db.QueryRow(ctx, searchResultsCalendarCount, arg.OwnerID, arg.PeerType, arg.PeerID)
+	var column_1 int64
+	err := row.Scan(&column_1)
+	return column_1, err
+}
+
 const searchResultsCalendarPage = `-- name: SearchResultsCalendarPage :many
 SELECT m.owner_id, m.local_id, m.peer_id, m.from_id, m.date, m.message, m.out, m.edit_date, m.deleted, m.random_id, m.peer_local_id, m.peer_type, m.fanout_id, m.action_type, m.action_user_id, m.file_id, m.reply_to_msg_id, m.fwd_from_id, m.fwd_date, m.fwd_channel_id, m.fwd_channel_post, m.message_tsv, m.reply_to_trusted, m.grouped_id, m.fwd_post_author, m.ttl_period, m.expires_at, m.entities, m.sticker_document_id
 FROM messages AS m
@@ -1531,9 +1569,6 @@ type SearchResultsCalendarPeriodsRow struct {
 	Count    int32
 }
 
-// SearchResultsCalendar is the date picker's per-day photo/video preview. Keep
-// file_id <> 0 as a top-level predicate so the partial messages_file_idx can
-// serve a large text-only history without scanning its message rows.
 func (q *Queries) SearchResultsCalendarPeriods(ctx context.Context, arg SearchResultsCalendarPeriodsParams) ([]SearchResultsCalendarPeriodsRow, error) {
 	rows, err := q.db.Query(ctx, searchResultsCalendarPeriods,
 		arg.OwnerID,

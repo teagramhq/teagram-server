@@ -56,6 +56,12 @@ func (s *Store) SearchResultsCalendar(
 			return nil, nil, 0, ErrNotMember
 		}
 	}
+	totalCount, err := qtx.SearchResultsCalendarCount(ctx, db.SearchResultsCalendarCountParams{
+		OwnerID: ownerID, PeerType: int16(peerType), PeerID: peerID,
+	})
+	if err != nil {
+		return nil, nil, 0, fmt.Errorf("count search results calendar: %w", err)
+	}
 
 	params := db.SearchResultsCalendarPeriodsParams{
 		OwnerID: ownerID, PeerType: int16(peerType), PeerID: peerID,
@@ -66,13 +72,11 @@ func (s *Store) SearchResultsCalendar(
 		return nil, nil, 0, fmt.Errorf("query search results calendar periods: %w", err)
 	}
 	periods := make([]SearchResultsCalendarPeriod, len(periodRows))
-	count := 0
 	for i, period := range periodRows {
 		periods[i] = SearchResultsCalendarPeriod{
 			Date: period.Date, MinMsgID: period.MinMsgID, MaxMsgID: period.MaxMsgID,
 			Count: int(period.Count),
 		}
-		count += int(period.Count)
 	}
 
 	var rows []db.Message
@@ -89,5 +93,5 @@ func (s *Store) SearchResultsCalendar(
 	if err := tx.Commit(ctx); err != nil {
 		return nil, nil, 0, fmt.Errorf("commit search results calendar snapshot: %w", err)
 	}
-	return messagesFromRows(rows), periods, count, nil
+	return messagesFromRows(rows), periods, int(totalCount), nil
 }

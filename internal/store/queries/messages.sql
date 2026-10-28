@@ -257,6 +257,27 @@ LIMIT sqlc.arg(lim)::int;
 -- SearchResultsCalendar is the date picker's per-day photo/video preview. Keep
 -- file_id <> 0 as a top-level predicate so the partial messages_file_idx can
 -- serve a large text-only history without scanning its message rows.
+-- Count the full filter here; offset cursors apply only to periods and messages.
+-- name: SearchResultsCalendarCount :one
+SELECT COUNT(*)::bigint
+FROM messages AS m
+WHERE m.owner_id = sqlc.arg(owner_id)::bigint
+  AND m.peer_type = sqlc.arg(peer_type)::smallint
+  AND m.peer_id = sqlc.arg(peer_id)::bigint
+  AND m.peer_type IN (1, 2)
+  AND m.deleted = false
+  AND (m.expires_at IS NULL OR m.expires_at > statement_timestamp())
+  AND m.file_id <> 0
+  AND (m.peer_type <> 2 OR EXISTS (
+      SELECT 1 FROM chat_participants cp
+      WHERE cp.chat_id = m.peer_id AND cp.user_id = m.owner_id
+  ))
+  AND EXISTS (
+      SELECT 1 FROM files f
+      WHERE f.id = m.file_id AND f.stored = true
+        AND (f.media_kind = 'photo' OR f.subtype_rights @> ARRAY['send_videos']::text[])
+  );
+
 -- name: SearchResultsCalendarPeriods :many
 SELECT EXTRACT(EPOCH FROM date_trunc('day', m.date AT TIME ZONE 'UTC'))::bigint AS date,
        MIN(m.local_id)::bigint AS min_msg_id,
