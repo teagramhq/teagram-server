@@ -100,6 +100,37 @@ func TestLoadCheckUsernameIPRateLimitBounds(t *testing.T) {
 	}
 }
 
+func TestLoadCheckUsernameIPRateLimitWindowCanDisableCounter(t *testing.T) {
+	tests := []struct {
+		name   string
+		window string
+		want   time.Duration
+	}{
+		{name: "zero window", window: "0s"},
+		{name: "negative window", window: "-1s", want: -time.Second},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv("TG_POSTGRES_DSN", "postgres://localhost/tg")
+			t.Setenv("TG_AUTHKEY_ENC_KEY", validEncKey)
+			t.Setenv("TG_RATE_LIMIT_CHECK_USERNAME_IP", "20")
+			t.Setenv("TG_RATE_LIMIT_CHECK_USERNAME_IP_WINDOW", tt.window)
+
+			cfg, err := config.Load(discardLog())
+			if err != nil {
+				t.Fatalf("Load: %v", err)
+			}
+			got := cfg.RateLimits.CheckUsernameIP
+			if got.Window != tt.want {
+				t.Errorf("CheckUsernameIP window = %v, want %v", got.Window, tt.want)
+			}
+			if got.Enabled() {
+				t.Error("CheckUsernameIP is enabled with a non-positive window")
+			}
+		})
+	}
+}
+
 func TestWarnClientAddrTrustWhenUsernameCheckIsOnlyIPLimit(t *testing.T) {
 	cfg := config.Config{
 		ClientAddrTrust: config.ClientAddrSocket,

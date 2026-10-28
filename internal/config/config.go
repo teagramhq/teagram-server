@@ -590,22 +590,25 @@ func DefaultRateLimits() RateLimitsConfig {
 	}
 }
 
-// validateRateLimitSurface rejects a per-surface budget that cannot mean
-// anything: a negative limit is not a bound at all, and RateLimitConfig.Enabled
-// treats a zero or negative window as disabled, so accepting either would let an
-// operator turn a shipped bound off by typo rather than by the documented
-// Limit=0. A surface with a positive limit must name a positive window.
-//
-// The ceiling is not cosmetic either. The limiter hands the limit to Postgres as
-// an int4, so a value above MaxInt32 gets there narrowed, and a narrowed negative
-// makes the counter's INSERT refuse while leaving no row behind to read back. The
-// missing-row path then admits the request, so the bound is silently off.
-func validateRateLimitSurface(limitName, windowName string, cfg store.RateLimitConfig) error {
-	if cfg.Limit < 0 {
+// validateRateLimitLimit rejects limits that cannot mean a bound: negative
+// values disable enforcement, and values above MaxInt32 narrow when passed to
+// Postgres as int4, preventing the counter row from being inserted.
+func validateRateLimitLimit(limitName string, limit int) error {
+	if limit < 0 {
 		return fmt.Errorf("%s must not be negative; 0 disables the bound", limitName)
 	}
-	if cfg.Limit > math.MaxInt32 {
+	if limit > math.MaxInt32 {
 		return fmt.Errorf("%s must not exceed math.MaxInt32", limitName)
+	}
+	return nil
+}
+
+// validateRateLimitSurface also ensures that a positive limit has an active
+// window. Surfaces that document a non-positive window as a disable use only
+// validateRateLimitLimit instead.
+func validateRateLimitSurface(limitName, windowName string, cfg store.RateLimitConfig) error {
+	if err := validateRateLimitLimit(limitName, cfg.Limit); err != nil {
+		return err
 	}
 	if cfg.Window < 0 {
 		return fmt.Errorf("%s must not be negative", windowName)
@@ -1546,7 +1549,7 @@ func load(log *slog.Logger, allowKeyGeneration bool) (Config, error) {
 		}
 		cfg.RateLimits.CheckUsernameIP.Window = d
 	}
-	if err := validateRateLimitSurface("TG_RATE_LIMIT_CHECK_USERNAME_IP", "TG_RATE_LIMIT_CHECK_USERNAME_IP_WINDOW", cfg.RateLimits.CheckUsernameIP); err != nil {
+	if err := validateRateLimitLimit("TG_RATE_LIMIT_CHECK_USERNAME_IP", cfg.RateLimits.CheckUsernameIP.Limit); err != nil {
 		return Config{}, err
 	}
 	// PasswordProof per-account rate limit (shared by getPasswordSettings and
