@@ -1061,6 +1061,7 @@ func TestChannelHistoryPageByDateBoundsOlderOffsetsAndExpiredTail(t *testing.T) 
 
 	now := time.Now()
 	runPage("positive offset skips expired backlog", now.Add(-48*time.Hour).Unix(), pageSize, 900, 801)
+	runPage("positive offset includes nearest older TTL post", now.Add(-12*time.Hour).Unix(), 1, 6998, 6899)
 	runPage("negative shift beyond the date anchor uses visible tail", now.Add(-12*time.Hour).Unix(), -pageSize-1, 7000, 6901)
 	runPage("date miss uses visible tail", now.Add(time.Hour).Unix(), -pageSize-1, 7000, 6901)
 }

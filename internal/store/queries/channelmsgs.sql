@@ -779,7 +779,7 @@ WITH member AS MATERIALIZED (
                   AND cm.deleted = false
                   AND cm.ttl_period = 86400
                   AND cm.expires_at > statement_timestamp()
-                  AND cm.local_id < starts.local_id
+                  AND cm.local_id <= starts.local_id
                   AND cm.local_id > starts.available_min_id
                 ORDER BY cm.local_id DESC
                 LIMIT GREATEST(1::bigint, sqlc.arg(add_offset)::bigint + 1)
@@ -798,7 +798,7 @@ WITH member AS MATERIALIZED (
                   AND cm.deleted = false
                   AND cm.ttl_period = 604800
                   AND cm.expires_at > statement_timestamp()
-                  AND cm.local_id < starts.local_id
+                  AND cm.local_id <= starts.local_id
                   AND cm.local_id > starts.available_min_id
                 ORDER BY cm.local_id DESC
                 LIMIT GREATEST(1::bigint, sqlc.arg(add_offset)::bigint + 1)
@@ -817,7 +817,7 @@ WITH member AS MATERIALIZED (
                   AND cm.deleted = false
                   AND cm.ttl_period = 2592000
                   AND cm.expires_at > statement_timestamp()
-                  AND cm.local_id < starts.local_id
+                  AND cm.local_id <= starts.local_id
                   AND cm.local_id > starts.available_min_id
                 ORDER BY cm.local_id DESC
                 LIMIT GREATEST(1::bigint, sqlc.arg(add_offset)::bigint + 1)
