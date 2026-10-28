@@ -81,9 +81,9 @@ done
 
 port_owners=$(docker ps --all --quiet --filter publish=2446)
 if [[ -n "$port_owners" ]]; then
-  printf '%s\n' 'rollback-public-websocket: host port 2446 is still published; refusing the code rollback' >&2
+  printf '%s\n' 'rollback-public-websocket: a container still publishes host port 2446; refusing the code rollback' >&2
   exit 1
 fi
 
-printf 'public_websocket_rollback=ready project=%s removed_containers=%s port=2446-free\n' \
+printf 'public_websocket_rollback=ready project=%s removed_containers=%s docker_port_2446=unpublished\n' \
   "$project" "$removed"
