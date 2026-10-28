@@ -3,6 +3,7 @@ package api_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"reflect"
 	"strings"
 	"sync"
@@ -669,6 +670,45 @@ func TestUpdateUsernameReservedAll(t *testing.T) {
 		} else if found {
 			t.Errorf("reserved handle %q was stored", r)
 		}
+	}
+}
+
+func TestBotSuffixReservationLeavesOperatorBlocklistUnchanged(t *testing.T) {
+	for _, username := range []string{"bot", "bots"} {
+		if !api.IsReservedUsername(username) {
+			t.Errorf("IsReservedUsername(%q) = false, want true", username)
+		}
+	}
+	for _, username := range []string{"xbot", "x_Bot", "WeatherBOT"} {
+		if api.IsReservedUsername(username) {
+			t.Errorf("IsReservedUsername(%q) = true, want operator bot creation to allow it", username)
+		}
+	}
+}
+
+func TestUpdateUsernameRejectsBotSuffixAndAllowsBotanist(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	s := openStore(t)
+	for i, username := range []string{"xbot", "x_Bot", "WeatherBOT"} {
+		user, err := s.CreateUser(ctx, fmt.Sprintf("+155500013%02d", i))
+		if err != nil {
+			t.Fatalf("create user for %q: %v", username, err)
+		}
+		if _, err := api.UpdateUsernameForTest(s, user.ID, username); !tgerr.Is(err, "USERNAME_INVALID") {
+			t.Errorf("updateUsername(%q) = %v, want USERNAME_INVALID", username, err)
+		}
+	}
+
+	user, err := s.CreateUser(ctx, "+15550001399")
+	if err != nil {
+		t.Fatalf("create botanist user: %v", err)
+	}
+	if _, err := api.UpdateUsernameForTest(s, user.ID, "botanist"); err != nil {
+		t.Fatalf("username containing bot before its end: %v", err)
+	}
+	if _, found, err := s.UsernameByHandle(ctx, "botanist"); err != nil || !found {
+		t.Fatalf("lookup botanist: found=%v err=%v, want claimed username", found, err)
 	}
 }
 

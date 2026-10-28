@@ -19,10 +19,13 @@ import (
 
 var (
 	phoneRE    = regexp.MustCompile(`^\+?[0-9]{5,15}$`)
-	usernameRE = regexp.MustCompile(`^[a-zA-Z][a-zA-Z0-9_]{1,31}$`)
+	usernameRE = regexp.MustCompile(usernamePattern)
 )
 
 const (
+	usernameMinLength       = 2
+	usernameMaxLength       = 32
+	usernamePattern         = `^[a-zA-Z][a-zA-Z0-9_]{1,31}$`
 	maxPhoneCodeBytes       = 256
 	maxSignUpNameCodePoints = 64
 )
@@ -87,7 +90,7 @@ func validatePhone(phone string) error {
 }
 
 func validateUsername(username string) bool {
-	return usernameRE.MatchString(username)
+	return len(username) >= usernameMinLength && len(username) <= usernameMaxLength && usernameRE.MatchString(username)
 }
 
 func validateSignUpName(name string) bool {
@@ -225,7 +228,7 @@ func (h *handlers) handleSignUpWithConn(c *mtproto.Conn, r *mtproto.Request) (bi
 		return nil, errUsernameInvalid
 	}
 	username := strings.ToLower(req.PhoneNumber)
-	if isReservedUsername(username) {
+	if isReservedAccountUsername(username) {
 		h.logSignUpRejection(signUpHandleInvalid)
 		return nil, errUsernameInvalid
 	}

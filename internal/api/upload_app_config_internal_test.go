@@ -10,46 +10,62 @@ import (
 	"github.com/teagramhq/teagram-server/internal/mtproto"
 )
 
-func TestGetAppConfigAdvertisesUploadByteAndPartLimits(t *testing.T) {
-	h := testHandlers(nil)
-	h.maxFileBytes = 512000
-	h.appConfigUploadMaxFileBytes = 512000
-	var request bin.Buffer
-	if err := (&tg.HelpGetAppConfigRequest{Hash: 6}).Encode(&request); err != nil {
-		t.Fatal(err)
+func TestGetAppConfigAdvertisesEffectiveUploadLimits(t *testing.T) {
+	tests := []struct {
+		name         string
+		maxFileBytes int64
+		wantParts    float64
+	}{
+		{name: "default", maxFileBytes: 100 << 20, wantParts: 3200},
+		{name: "legacy TG_MAX_FILE_BYTES override", maxFileBytes: 2 << 20, wantParts: 64},
 	}
-	result, err := h.handleGetAppConfig(&mtproto.Request{Ctx: context.Background(), Buf: &request})
-	if err != nil {
-		t.Fatalf("help.getAppConfig: %v", err)
+	var hashes []int
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			h := testHandlers(nil)
+			h.maxFileBytes = tc.maxFileBytes
+			var request bin.Buffer
+			if err := (&tg.HelpGetAppConfigRequest{Hash: appConfigHash}).Encode(&request); err != nil {
+				t.Fatal(err)
+			}
+			result, err := h.handleGetAppConfig(&mtproto.Request{Ctx: context.Background(), Buf: &request})
+			if err != nil {
+				t.Fatalf("help.getAppConfig: %v", err)
+			}
+			appConfig, ok := result.(*tg.HelpAppConfig)
+			if !ok {
+				t.Fatalf("result = %T, want *tg.HelpAppConfig", result)
+			}
+			if appConfig.Hash == appConfigHash {
+				t.Fatalf("app config hash = %d, want a hash that includes the upload byte limit", appConfig.Hash)
+			}
+			hashes = append(hashes, appConfig.Hash)
+			object, ok := appConfig.Config.(*tg.JSONObject)
+			if !ok {
+				t.Fatalf("config = %T, want *tg.JSONObject", appConfig.Config)
+			}
+			want := map[string]float64{
+				"upload_max_file_bytes":        float64(tc.maxFileBytes),
+				"upload_max_fileparts_default": tc.wantParts,
+				"upload_max_fileparts_premium": tc.wantParts,
+			}
+			for _, value := range object.Value {
+				limit, found := want[value.Key]
+				if !found {
+					continue
+				}
+				number, ok := value.Value.(*tg.JSONNumber)
+				if !ok || number.Value != limit {
+					t.Errorf("%s = %#v, want JSON number %g", value.Key, value.Value, limit)
+				}
+				delete(want, value.Key)
+			}
+			if len(want) != 0 {
+				t.Errorf("help.getAppConfig omitted upload limits: %v", want)
+			}
+		})
 	}
-	appConfig, ok := result.(*tg.HelpAppConfig)
-	if !ok {
-		t.Fatalf("result = %T, want *tg.HelpAppConfig", result)
-	}
-	object, ok := appConfig.Config.(*tg.JSONObject)
-	if !ok {
-		t.Fatalf("config = %T, want *tg.JSONObject", appConfig.Config)
-	}
-	if appConfig.Hash == 6 {
-		t.Fatalf("app config hash = %d, want a hash that includes the upload byte limit", appConfig.Hash)
-	}
-	want := map[string]float64{
-		"upload_max_file_bytes":        512000,
-		"upload_max_fileparts_default": 16,
-		"upload_max_fileparts_premium": 16,
-	}
-	for _, value := range object.Value {
-		limit, found := want[value.Key]
-		if !found {
-			continue
-		}
-		number, ok := value.Value.(*tg.JSONNumber)
-		if !ok || number.Value != limit {
-			t.Errorf("%s = %#v, want JSON number %g", value.Key, value.Value, limit)
-		}
-		delete(want, value.Key)
-	}
-	if len(want) != 0 {
-		t.Errorf("help.getAppConfig omitted upload limits: %v", want)
+	if len(hashes) == 2 && hashes[0] == hashes[1] {
+		t.Errorf("app config hashes are identical for different upload caps: %d", hashes[0])
 	}
 }

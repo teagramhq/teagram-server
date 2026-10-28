@@ -67,7 +67,7 @@ func TestPublicSendCodeBudgetIsolatedFromTailnetListeners(t *testing.T) {
 			cfg.MaxUserStorageBytes, pgtest.PeerDeriver(), pgtest.PhotoDeriver(), cfg.RateLimits, mode)
 	}
 	server, publicHandler := newListenerScopedServer(cfg, exchange.PrivateKey{RSA: key}, st, log, newHandler)
-	doc, err := discovery.NewDocument("127.0.0.1:2443", dcID, &key.PublicKey, false)
+	doc, err := discovery.NewDocument("127.0.0.1:2443", dcID, &key.PublicKey, false, "")
 	if err != nil {
 		t.Fatalf("build discovery document: %v", err)
 	}

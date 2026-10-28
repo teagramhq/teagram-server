@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"net/url"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/teagramhq/teagram-server/internal/config"
@@ -31,7 +32,8 @@ func TestListenerDiscoveryDocumentsAdvertisePublicWebSocketHostOnlyOnPublicListe
 			SecretKey: "private-secret-key",
 		},
 	}
-	withoutOverride, withoutPublic, err := listenerDiscoveryDocuments(base, &key.PublicKey)
+	wipeGeneration := strings.Repeat("f", 64)
+	withoutOverride, withoutPublic, err := listenerDiscoveryDocuments(base, &key.PublicKey, wipeGeneration)
 	if err != nil {
 		t.Fatalf("build default listener discovery: %v", err)
 	}
@@ -39,7 +41,7 @@ func TestListenerDiscoveryDocumentsAdvertisePublicWebSocketHostOnlyOnPublicListe
 	withPublicHostConfig := base
 	withPublicHostConfig.PublicWebSocketAdvertiseHost = "server.teagram.io"
 	withPublicHostConfig.PublicWebSocketAdvertisePort = 443
-	withOverride, public, err := listenerDiscoveryDocuments(withPublicHostConfig, &key.PublicKey)
+	withOverride, public, err := listenerDiscoveryDocuments(withPublicHostConfig, &key.PublicKey, wipeGeneration)
 	if err != nil {
 		t.Fatalf("build listener-scoped discovery: %v", err)
 	}
@@ -61,7 +63,7 @@ func TestListenerDiscoveryDocumentsAdvertisePublicWebSocketHostOnlyOnPublicListe
 	if public.MTProto.Endpoint != "tailnet.example.test:2443" || public.WebSocket.Endpoint != "wss://server.teagram.io/apiws" {
 		t.Fatalf("public discovery endpoints = MTProto %q, WebSocket %q", public.MTProto.Endpoint, public.WebSocket.Endpoint)
 	}
-	if public.Demo == nil || !public.Demo.GuestSignUp || public.Turnstile == nil || public.Turnstile.SiteKey != "public-site-key" {
+	if public.Demo == nil || !public.Demo.GuestSignUp || public.Demo.WipeGeneration != wipeGeneration || public.Turnstile == nil || public.Turnstile.SiteKey != "public-site-key" {
 		t.Fatalf("public discovery lost demo or Turnstile fields: %+v", public)
 	}
 	publicEndpoint, err := url.Parse(public.WebSocket.Endpoint)
@@ -71,6 +73,26 @@ func TestListenerDiscoveryDocumentsAdvertisePublicWebSocketHostOnlyOnPublicListe
 	enteredHost := "server.teagram.io"
 	if publicEndpoint.Hostname() != enteredHost {
 		t.Fatalf("web host-match check would reject: entered %q, endpoint host %q", enteredHost, publicEndpoint.Hostname())
+	}
+}
+
+func TestListenerDiscoveryDocumentsRequireValidWipeGenerationWhenDemoAdvertisingIsEnabled(t *testing.T) {
+	t.Parallel()
+
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatalf("generate key: %v", err)
+	}
+	cfg := config.Config{
+		AdvertiseHost:            "demo.example.test",
+		AdvertisePort:            443,
+		DCID:                     2,
+		AdvertiseDemoGuestSignUp: true,
+	}
+	for _, generation := range []string{"", "bad", strings.Repeat("a", 63), strings.Repeat("A", 64)} {
+		if _, _, err := listenerDiscoveryDocuments(cfg, &key.PublicKey, generation); err == nil {
+			t.Errorf("listener discovery accepted malformed generation %q", generation)
+		}
 	}
 }
 

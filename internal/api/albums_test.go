@@ -2,6 +2,7 @@ package api_test
 
 import (
 	"log/slog"
+	"strings"
 	"testing"
 
 	"github.com/gotd/td/bin"
@@ -55,5 +56,32 @@ func TestSendMultiMediaUnboundAndUndecodable(t *testing.T) {
 		if rpc.ErrorCode != tc.code || rpc.ErrorMessage != tc.message {
 			t.Errorf("%s = %d %q, want %d %q", tc.name, rpc.ErrorCode, rpc.ErrorMessage, tc.code, tc.message)
 		}
+	}
+}
+
+func TestSendMultiMediaEnforcesPublishedCaptionLength(t *testing.T) {
+	t.Parallel()
+	s := openStore(t)
+	dispatcher := api.New(
+		s, 2, &tg.Config{}, slog.New(slog.DiscardHandler), false,
+		1<<20, newBlobs(t), api.TestMaxUserStorageBytes, pgtest.PeerDeriver(), pgtest.PhotoDeriver(),
+		config.DefaultRateLimits(), config.RegistrationInvite,
+	)
+	maxLength := api.DefaultConfig(2, "127.0.0.1", 2443).CaptionLengthMax
+	longCaption := strings.Repeat("c", maxLength+1)
+	request := &tg.MessagesSendMultiMediaRequest{
+		Peer: &tg.InputPeerSelf{},
+		MultiMedia: []tg.InputSingleMedia{
+			{Media: &tg.InputMediaPhoto{ID: &tg.InputPhoto{ID: 1, AccessHash: 1}}, Message: longCaption, RandomID: 1},
+			{Media: &tg.InputMediaPhoto{ID: &tg.InputPhoto{ID: 2, AccessHash: 2}}, RandomID: 2},
+		},
+	}
+	response := dispatchRegisteredSend(t, dispatcher, 1, false, request)
+	rpc := &mt.RPCError{}
+	if err := rpc.Decode(&bin.Buffer{Buf: response}); err != nil {
+		t.Fatalf("decode oversized caption rejection: %v", err)
+	}
+	if rpc.ErrorCode != 400 || rpc.ErrorMessage != "MEDIA_CAPTION_TOO_LONG" {
+		t.Fatalf("oversized caption = %d %q, want 400 MEDIA_CAPTION_TOO_LONG", rpc.ErrorCode, rpc.ErrorMessage)
 	}
 }
