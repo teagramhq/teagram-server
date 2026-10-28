@@ -32,6 +32,8 @@ type AuthKey struct {
 	AppVersion       *string
 	Ip               *string
 	EverBoundAt      pgtype.Timestamptz
+	UserKind         *string
+	PendingUserKind  *string
 }
 
 type AuthKeysEverBoundBackfillNewKey struct {
@@ -42,6 +44,14 @@ type BlockedUser struct {
 	BlockerID int64
 	BlockedID int64
 	CreatedAt pgtype.Timestamptz
+}
+
+type BotToken struct {
+	UserID    int64
+	UserKind  *string
+	TokenHash []byte
+	IssuedAt  pgtype.Timestamptz
+	RevokedAt pgtype.Timestamptz
 }
 
 type BrowserAcceptanceBindingEvidence struct {
@@ -748,14 +758,16 @@ type RateLimit struct {
 }
 
 type RegistrationInvite struct {
-	ID           int64
-	Handle       string
-	SecretDigest []byte
-	IssuedAt     pgtype.Timestamptz
-	ExpiresAt    pgtype.Timestamptz
-	State        string
-	ConsumedAt   pgtype.Timestamptz
-	RevokedAt    pgtype.Timestamptz
+	ID               int64
+	Handle           *string
+	SecretDigest     []byte
+	IssuedAt         pgtype.Timestamptz
+	ExpiresAt        pgtype.Timestamptz
+	State            string
+	ConsumedAt       pgtype.Timestamptz
+	RevokedAt        pgtype.Timestamptz
+	InviterUserID    *int64
+	ConsumedByUserID *int64
 }
 
 type SavedGif struct {
@@ -851,6 +863,7 @@ type User struct {
 	LoginMode            string
 	AuthorizationTtlDays int32
 	About                string
+	Kind                 string
 }
 
 type UserContact struct {

@@ -902,6 +902,7 @@ func dashboardDenials(m MetricsResponse, capabilities dashboardCapabilities) Das
 		{ID: "denial-check_password_ip", Label: "check_password_ip", Value: safeCount(m.RateLimitDenialsBySurface.CheckPasswordIP)},
 		{ID: "denial-get_password_ip", Label: "get_password_ip", Value: safeCount(m.RateLimitDenialsBySurface.GetPasswordIP)},
 		{ID: "denial-sign_up_ip", Label: "sign_up_ip", Value: safeCount(m.RateLimitDenialsBySurface.SignUpIP)},
+		{ID: "denial-check_username_ip", Label: "check_username_ip", Value: safeCount(m.RateLimitDenialsBySurface.CheckUsernameIP)},
 		{ID: "denial-password_proof", Label: "password_proof", Value: safeCount(m.RateLimitDenialsBySurface.PasswordProof)},
 		{ID: "denial-get_password", Label: "get_password", Value: safeCount(m.RateLimitDenialsBySurface.GetPassword)},
 		{ID: "denial-update_profile", Label: "update_profile", Value: safeCount(m.RateLimitDenialsBySurface.UpdateProfile)},

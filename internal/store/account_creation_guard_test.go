@@ -29,7 +29,7 @@ func TestAccountCreationPathsStayBehindAdmission(t *testing.T) {
 			"handleSignInPhone": {"BindAuthKeyUser": true},
 		},
 		"internal/store/admission.go": {
-			"AdmitUsernameWithMetadata": {
+			"AdmitUsernameWithInvitePolicy": {
 				"CreateUsernameUser":          true,
 				"ClaimUsername":               true,
 				"BindAuthKeyUserWithMetadata": true,
@@ -48,6 +48,11 @@ func TestAccountCreationPathsStayBehindAdmission(t *testing.T) {
 			"UpdateUsername":                    {"ClaimUsername": true},
 			"ClaimUsername":                     {"ClaimUsername": true},
 			"ClaimChannelUsername":              {"ClaimUsername": true},
+		},
+		// Operator provisioning is local and password-bearing; bot creation is
+		// likewise restricted to the root-only teagramd operator command.
+		"internal/store/bot_accounts.go": {
+			"CreateBot": {"ClaimUsername": true},
 		},
 		"internal/store/channels.go": {
 			"EditChannelUsername": {"ClaimUsername": true},
@@ -97,7 +102,7 @@ func TestAccountCreationPathsStayBehindAdmission(t *testing.T) {
 				if !trackedPrimitive(name) {
 					return true
 				}
-				if rel == "internal/store/admission.go" && function == "AdmitUsernameWithMetadata" {
+				if rel == "internal/store/admission.go" && function == "AdmitUsernameWithInvitePolicy" {
 					seenAdmissionCalls[name] = true
 				}
 				if !allowedCall(allowed, rel, function, name) {
@@ -116,7 +121,7 @@ func TestAccountCreationPathsStayBehindAdmission(t *testing.T) {
 	}
 	for _, name := range []string{"CreateUsernameUser", "ClaimUsername", "BindAuthKeyUserWithMetadata"} {
 		if !seenAdmissionCalls[name] {
-			violations = append(violations, "admission.go:AdmitUsernameWithMetadata does not call "+name)
+			violations = append(violations, "admission.go:AdmitUsernameWithInvitePolicy does not call "+name)
 		}
 	}
 	if len(violations) != 0 {

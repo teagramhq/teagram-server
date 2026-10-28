@@ -18,45 +18,73 @@ SELECT
     issued.at,
     issued.at + (sqlc.arg(lifetime_us)::bigint * interval '1 microsecond')
 FROM issued
-RETURNING id, handle, issued_at, expires_at, state, consumed_at, revoked_at;
+RETURNING id, handle, inviter_user_id, issued_at, expires_at, state, consumed_at, revoked_at;
 
--- The row lock is the decision boundary shared with consume and revoke. A
--- caller holds it for its transaction, so a rollback cannot consume the row.
--- The MATERIALIZED CTE makes the outer database-clock check run after the
--- selected row has been locked. The synthetic row keeps absent and terminal
--- handles on the same one-row query path as an issued or expired handle.
--- name: LiveRegistrationInviteForUpdate :one
-WITH locked AS MATERIALIZED (
-    SELECT id, handle, secret_digest, issued_at, expires_at, state, consumed_at, revoked_at
-    FROM registration_invites
-    WHERE handle = lower(sqlc.arg(handle))
-      AND state = 'issued'
-    ORDER BY id DESC
-    LIMIT 1
+-- User-issued invites are not tied to a username. Their inviter is recorded on
+-- the invite row and the secret digest is the only credential persisted.
+-- name: InsertUserRegistrationInvite :one
+WITH issued AS (SELECT clock_timestamp() AS at)
+INSERT INTO registration_invites (handle, inviter_user_id, secret_digest, issued_at, expires_at)
+SELECT
+    NULL,
+    sqlc.arg(inviter_user_id),
+    sqlc.arg(secret_digest),
+    issued.at,
+    issued.at + (sqlc.arg(lifetime_us)::bigint * interval '1 microsecond')
+FROM issued
+RETURNING id, handle, inviter_user_id, issued_at, expires_at, state, consumed_at, revoked_at;
+
+-- The digest lookup is the single locked invite lookup for verification and
+-- redemption. The handle probe runs in the same query for every request so
+-- absent, terminal, and valid digests use the same database path; user invites
+-- cannot claim a handle reserved by a live operator invite.
+-- name: RegistrationInviteBySecretDigestForUpdate :one
+WITH operator_handle AS MATERIALIZED (
+    SELECT EXISTS (
+        SELECT 1
+        FROM registration_invites candidate
+        WHERE candidate.handle = lower(sqlc.arg(handle))
+          AND candidate.state = 'issued'
+          AND candidate.expires_at > clock_timestamp()
+          AND candidate.inviter_user_id IS NULL
+    ) AS reserved
+), locked AS MATERIALIZED (
+    SELECT id, handle, secret_digest, inviter_user_id, issued_at, expires_at,
+           state, consumed_at, revoked_at, consumed_by_user_id
+    FROM registration_invites invite
+    WHERE invite.secret_digest = sqlc.arg(secret_digest)
     FOR UPDATE
 )
-SELECT id, handle, secret_digest, issued_at, expires_at, state, consumed_at, revoked_at,
+SELECT locked.id, locked.handle, locked.secret_digest, locked.inviter_user_id,
+       locked.issued_at, locked.expires_at, locked.state, locked.consumed_at,
+       locked.revoked_at, locked.consumed_by_user_id,
        true AS found,
-       expires_at > clock_timestamp() AS live
-FROM locked
+       COALESCE(locked.state = 'issued' AND locked.expires_at > clock_timestamp(), false)::boolean AS live,
+       operator_handle.reserved AS operator_handle_reserved
+FROM locked CROSS JOIN operator_handle
 UNION ALL
 SELECT 0::bigint,
-       lower(sqlc.arg(handle))::text,
+       NULL::text,
        decode(repeat('00', 64), 'hex')::bytea,
+       NULL::bigint,
        NULL::timestamptz,
        NULL::timestamptz,
        'expired'::text,
        NULL::timestamptz,
        NULL::timestamptz,
+       NULL::bigint,
        false,
-       false
+       false,
+       operator_handle.reserved
+FROM operator_handle
 WHERE NOT EXISTS (SELECT 1 FROM locked);
 
 -- Guard the state transition as well as taking the row lock above: if expiry
 -- passes while the caller is comparing the secret, the update refuses.
 -- name: ConsumeRegistrationInvite :execrows
 UPDATE registration_invites
-SET state = 'consumed', consumed_at = clock_timestamp()
+SET state = 'consumed', consumed_at = clock_timestamp(),
+    consumed_by_user_id = sqlc.narg(consumed_by_user_id)
 WHERE id = sqlc.arg(id)
   AND secret_digest = sqlc.arg(secret_digest)
   AND state = 'issued'
@@ -77,10 +105,10 @@ WHERE id = sqlc.arg(id)
   AND state = 'issued'
   AND expires_at > clock_timestamp();
 
--- State is projected from database time so a naturally expired row is reported
--- as expired even before another writer retires it.
+-- State is projected from database time so a naturally expired issued row is
+-- reported as expired even before another writer retires it.
 -- name: ListRegistrationInvites :many
-SELECT id, handle, issued_at, expires_at,
+SELECT id, handle, inviter_user_id, issued_at, expires_at,
        CASE
            WHEN state = 'issued' AND expires_at <= clock_timestamp() THEN 'expired'
            ELSE state

@@ -241,14 +241,18 @@ func (h *handlers) handleSignUpWithConn(c *mtproto.Conn, r *mtproto.Request) (bi
 		return nil, errLastNameInvalid
 	}
 
-	user, err := h.store.AdmitUsernameWithMetadata(
+	user, err := h.store.AdmitUsernameWithInvitePolicy(
 		r.Ctx,
 		username,
 		req.PhoneCodeHash,
 		mtproto.AuthKeyIDInt64(r.AuthKeyID),
 		req.FirstName,
 		req.LastName,
-		h.registrationMode == config.RegistrationInvite,
+		store.InviteAdmissionPolicy{
+			RequireInvite:    h.registrationMode == config.RegistrationInvite,
+			UserInviteQuota:  h.userInviteQuota,
+			AllowUserInvites: h.registrationMode == config.RegistrationInvite,
+		},
 		authorizationMetadata(r),
 	)
 	if err != nil {
@@ -264,6 +268,9 @@ func (h *handlers) handleSignUpWithConn(c *mtproto.Conn, r *mtproto.Request) (bi
 		case errors.Is(err, store.ErrUsernameOccupied):
 			h.logSignUpRejection(signUpHandleOccupied)
 			return nil, errUsernameOccupied
+		case errors.Is(err, store.ErrBotAccount):
+			h.logSignUpRejection(signUpHandleOccupied)
+			return nil, errBotAccount
 		case errors.Is(err, store.ErrAuthKeyNotFound):
 			h.logSignUpRejection(signUpSessionStateInvalid)
 			return nil, errSessionStateInvalid
@@ -489,6 +496,9 @@ func (h *handlers) handleSignInUsername(c *mtproto.Conn, r *mtproto.Request, use
 			}
 		}
 		return h.signUpRequired(), nil
+	}
+	if resolved.Kind == store.UserKindBot {
+		return nil, errBotAccount
 	}
 
 	// The login_mode check and fail-closed invariant MUST precede SetPendingUser.

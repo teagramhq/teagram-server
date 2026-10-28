@@ -163,6 +163,15 @@ func dropAndRecreateDemoWipeTestDatabase(t *testing.T, ctx context.Context, name
 
 func applyDemoWipeTestMigrations(t *testing.T, ctx context.Context, dsn string) {
 	t.Helper()
+	unlock, err := pgtest.LockMigrations(ctx)
+	if err != nil {
+		t.Fatalf("lock migration replay: %v", err)
+	}
+	defer func() {
+		if err := unlock(); err != nil {
+			t.Errorf("unlock migration replay: %v", err)
+		}
+	}()
 
 	_, sourceFile, _, ok := runtime.Caller(0)
 	if !ok {

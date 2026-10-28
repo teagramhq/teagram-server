@@ -9,11 +9,37 @@
   ],
   "foreign_keys": [
     {
+      "name": "auth_keys_pending_user_human_fk",
+      "table": "public.auth_keys",
+      "columns": ["pending_user_id", "pending_user_kind"],
+      "references": "public.users",
+      "referenced_columns": ["id", "kind"],
+      "on_delete": "NO ACTION",
+      "on_update": "NO ACTION",
+      "match": "SIMPLE",
+      "deferrable": false,
+      "initially_deferred": false,
+      "validated": true
+    },
+    {
       "name": "auth_keys_pending_user_id_fkey",
       "table": "public.auth_keys",
       "columns": ["pending_user_id"],
       "references": "public.users",
       "referenced_columns": ["id"],
+      "on_delete": "NO ACTION",
+      "on_update": "NO ACTION",
+      "match": "SIMPLE",
+      "deferrable": false,
+      "initially_deferred": false,
+      "validated": true
+    },
+    {
+      "name": "auth_keys_user_human_fk",
+      "table": "public.auth_keys",
+      "columns": ["user_id", "user_kind"],
+      "references": "public.users",
+      "referenced_columns": ["id", "kind"],
       "on_delete": "NO ACTION",
       "on_update": "NO ACTION",
       "match": "SIMPLE",

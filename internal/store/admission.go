@@ -23,6 +23,15 @@ func (s *Store) AdmitUsername(ctx context.Context, handle, phoneCodeHash string,
 // AdmitUsernameWithMetadata atomically creates a username-mode account and
 // binds the initiating auth key with its connection-local metadata.
 func (s *Store) AdmitUsernameWithMetadata(ctx context.Context, handle, phoneCodeHash string, authKeyID int64, firstName, lastName string, requireInvite bool, metadata AuthorizationMetadata) (User, error) {
+	return s.AdmitUsernameWithInvitePolicy(ctx, handle, phoneCodeHash, authKeyID, firstName, lastName, InviteAdmissionPolicy{
+		RequireInvite: requireInvite,
+	}, metadata)
+}
+
+// AdmitUsernameWithInvitePolicy atomically creates a username-mode account,
+// binds the initiating auth key, and consumes the required invite under the
+// listener's policy.
+func (s *Store) AdmitUsernameWithInvitePolicy(ctx context.Context, handle, phoneCodeHash string, authKeyID int64, firstName, lastName string, invitePolicy InviteAdmissionPolicy, metadata AuthorizationMetadata) (User, error) {
 	handle = strings.ToLower(handle)
 	metadataParams := s.authorizationMetadataParams(metadata)
 	tx, err := s.pool.Begin(ctx)
@@ -55,15 +64,30 @@ func (s *Store) AdmitUsernameWithMetadata(ctx context.Context, handle, phoneCode
 	if err := validateCodeHash(codeRow); err != nil {
 		return User{}, err
 	}
+	existingUser, err := qtx.GetUserByUsernameWithLoginMode(ctx, handle)
+	if err == nil {
+		if existingUser.Kind == UserKindBot {
+			return User{}, ErrBotAccount
+		}
+		return User{}, ErrUsernameOccupied
+	} else if !errors.Is(err, pgx.ErrNoRows) {
+		return User{}, fmt.Errorf("admit username: check username owner: %w", err)
+	}
 	if _, err := qtx.GetUsernameByHandle(ctx, handle); err == nil {
 		return User{}, ErrUsernameOccupied
 	} else if !errors.Is(err, pgx.ErrNoRows) {
 		return User{}, fmt.Errorf("admit username: check username: %w", err)
 	}
-	if requireInvite {
-		if err := s.ConsumeInvite(ctx, tx, handle, codeRow.Code); err != nil {
-			return User{}, err
+	var inviteRow *db.RegistrationInviteBySecretDigestForUpdateRow
+	if invitePolicy.RequireInvite {
+		row, err := s.registrationInviteBySecretDigestForUpdate(ctx, tx, handle, codeRow.Code)
+		if err != nil {
+			return User{}, fmt.Errorf("admit username: load invite: %w", err)
 		}
+		if !inviteAcceptsHandle(row, handle, codeRow.Code, invitePolicy.AllowUserInvites, invitePolicy.UserInviteQuota) {
+			return User{}, ErrInviteInvalid
+		}
+		inviteRow = &row
 	}
 	if rows, err := qtx.ConsumeCodeForUsername(ctx, db.ConsumeCodeForUsernameParams{
 		Phone:    handle,
@@ -81,6 +105,11 @@ func (s *Store) AdmitUsernameWithMetadata(ctx context.Context, handle, phoneCode
 	if err != nil {
 		return User{}, fmt.Errorf("admit username: create user: %w", err)
 	}
+	if inviteRow != nil {
+		if err := consumeLockedRegistrationInvite(ctx, qtx, *inviteRow, u.ID); err != nil {
+			return User{}, fmt.Errorf("admit username: consume invite: %w", err)
+		}
+	}
 	if err := qtx.EnsureUpdateState(ctx, u.ID); err != nil {
 		return User{}, fmt.Errorf("admit username: ensure update state: %w", err)
 	}
@@ -92,6 +121,13 @@ func (s *Store) AdmitUsernameWithMetadata(ctx context.Context, handle, phoneCode
 	})
 	if err != nil {
 		if isUsernameClaimConflict(err) {
+			claimedUser, lookupErr := qtx.GetUserByUsernameWithLoginMode(ctx, handle)
+			if lookupErr == nil && claimedUser.Kind == UserKindBot {
+				return User{}, ErrBotAccount
+			}
+			if lookupErr != nil && !errors.Is(lookupErr, pgx.ErrNoRows) {
+				return User{}, fmt.Errorf("admit username: resolve conflicting owner: %w", lookupErr)
+			}
 			return User{}, ErrUsernameOccupied
 		}
 		return User{}, fmt.Errorf("admit username: claim username: %w", err)
