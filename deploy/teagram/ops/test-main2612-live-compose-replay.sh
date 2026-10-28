@@ -27,11 +27,11 @@ trap cleanup_test EXIT
 
 bash -n "$OPS_SCRIPT"
 grep -Fq 'umask 077' "$OPS_SCRIPT"
-grep -Fq 'TMP_TOKEN=$(mark_replay_tree "$TMP")' "$OPS_SCRIPT"
-grep -Fq 'chmod 600 -- "$tree/$env_name"' "$OPS_SCRIPT"
-grep -Fq 'unlink -- "$env_path"' "$OPS_SCRIPT"
-grep -Fq 'RESULT_ROWS=$(<"$TMP/logs/field-results.tsv")' "$OPS_SCRIPT"
-if grep -Fq 'cat -- "$TMP/logs/field-results.tsv"' "$OPS_SCRIPT"; then
+grep -Fq "TMP_TOKEN=\$(mark_replay_tree \"\$TMP\")" "$OPS_SCRIPT"
+grep -Fq "chmod 600 -- \"\$tree/\$env_name\"" "$OPS_SCRIPT"
+grep -Fq "unlink -- \"\$env_path\"" "$OPS_SCRIPT"
+grep -Fq "RESULT_ROWS=\$(<\"\$TMP/logs/field-results.tsv\")" "$OPS_SCRIPT"
+if grep -Fq "cat -- \"\$TMP/logs/field-results.tsv\"" "$OPS_SCRIPT"; then
   printf '%s\n' 'FAIL live replay prints result rows before guarded cleanup' >&2
   exit 1
 fi
@@ -44,12 +44,12 @@ if grep -Eq 'source[[:space:]].*rollout-(runner|verifier)\.sh' "$OPS_SCRIPT"; th
   printf '%s\n' 'FAIL live replay sources candidate runner or verifier code' >&2
   exit 1
 fi
-grep -Fq 'git -C "$TMP/candidate.git" fetch --quiet --no-tags --depth=1 "$CANDIDATE_REMOTE" "$CANDIDATE_SHA"' "$OPS_SCRIPT"
-grep -Fq 'rollout_safe_remove_tree "$target" "$TMP" "$TMP_TOKEN" "$LIVE_CHECKOUT"' "$OPS_SCRIPT"
-grep -Fq 'bash "$VERIFIER" snapshot' "$OPS_SCRIPT"
-grep -Fq 'bash "$RUNNER" compare-preflight' "$OPS_SCRIPT"
+grep -Fq "git -C \"\$TMP/candidate.git\" fetch --quiet --no-tags --depth=1 \"\$CANDIDATE_REMOTE\" \"\$CANDIDATE_SHA\"" "$OPS_SCRIPT"
+grep -Fq "rollout_safe_remove_tree \"\$target\" \"\$TMP\" \"\$TMP_TOKEN\" \"\$LIVE_CHECKOUT\"" "$OPS_SCRIPT"
+grep -Fq "bash \"\$VERIFIER\" snapshot" "$OPS_SCRIPT"
+grep -Fq "bash \"\$RUNNER\" compare-preflight" "$OPS_SCRIPT"
 grep -Fq 'com.docker.compose.project.config_files' "$OPS_SCRIPT"
-if grep -Fq 'git -C "$LIVE_CHECKOUT" fetch' "$OPS_SCRIPT"; then
+if grep -Fq "git -C \"\$LIVE_CHECKOUT\" fetch" "$OPS_SCRIPT"; then
   printf '%s\n' 'FAIL candidate fetch writes into the live checkout' >&2
   exit 1
 fi

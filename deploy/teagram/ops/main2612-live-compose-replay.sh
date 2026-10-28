@@ -164,6 +164,8 @@ fetched_sha=$(git -C "$TMP/candidate.git" rev-parse --verify 'FETCH_HEAD^{commit
 [ "$fetched_sha" = "$CANDIDATE_SHA" ] || die 'the fetched candidate commit does not match the requested SHA'
 git -C "$TMP/candidate.git" cat-file -e "$CANDIDATE_SHA^{commit}" 2>/dev/null || die 'candidate commit is unavailable in the private repository'
 safe_remove_tree_source=$(git -C "$TMP/candidate.git" show "$CANDIDATE_SHA:deploy/teagramd/rollout-runner/rollout-safe-remove-tree.sh" 2>/dev/null) || die 'candidate commit is missing the owned-tree cleanup helper'
+# The helper path is selected from the requested commit at runtime.
+# shellcheck disable=SC1091
 source /dev/stdin <<< "$safe_remove_tree_source"
 unset safe_remove_tree_source
 declare -F rollout_safe_remove_tree >/dev/null || die 'owned-tree cleanup helper is incomplete'
