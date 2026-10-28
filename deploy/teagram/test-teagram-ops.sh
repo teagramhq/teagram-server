@@ -342,7 +342,7 @@ expect_status 64 "run $OPS_SHA rollout-evidence extra"
 
 mapfile -t runner_temps < "$MOCK_RUN_TEMP_LOG"
 mapfile -t removed_temps < "$MOCK_RM_LOG"
-[[ "${#runner_temps[@]}" == 7 && "${#removed_temps[@]}" == "${#runner_temps[@]}" ]]
+[[ "${#runner_temps[@]}" == 8 && "${#removed_temps[@]}" == "${#runner_temps[@]}" ]]
 for index in "${!runner_temps[@]}"; do
   runner_temp=${runner_temps[$index]}
   [[ "$runner_temp" == /tmp/teagram-ops.* && "${removed_temps[$index]}" == "$runner_temp" && ! -e "$runner_temp" ]]
