@@ -2,13 +2,19 @@
 
 ## Synthetic mode
 
-Run the gate only on a disposable Linux CI runner with Docker, Go modules already downloaded, Atlas v1.2.0, and passwordless `sudo`. From the repository root, run:
+Run the gate on a Linux Docker host with Docker, Go modules already downloaded, Atlas v1.2.0, and passwordless `sudo`. Existing unrelated containers, volumes, and user-defined networks may remain on the host. From the repository root, run:
 
 ```sh
 timeout --signal=TERM --kill-after=15s 35m bash deploy/teagramd/rollout-runner/test-restore-readiness.sh
 ```
 
 The shell gate prepares its pinned Go binaries and Atlas input before it starts the 30-minute drill deadline. Preparation has a separate 45-minute bound, compiles with one Go build worker, and writes no database, Docker network, or volume. A root-only attestation binds the read-only artifacts to the checked-out commit, exact Go toolchain digest, and the two PostgreSQL image digests. The run verifies that attestation before taking the restore lock. On completion the gate explicitly tears down the prepared directory and verifies it is absent.
+
+### Existing Docker workloads
+
+Before creating Docker resources, the drill records immutable container and network IDs, volume names, labels, container state, network attachments, mounts, published ports, and the other confinement settings used to check isolation. It reads no container contents, environment values, or logs. The drill uses only its token-labeled containers and images, does not attach them to or mount any foreign Docker object, and refuses a preexisting name, label, Compose project, or token collision. Cleanup and `--recover` remove only manifest-owned container IDs and their attested volumes. On every normal, failed, or recovered run, the drill compares foreign inventory with the baseline. Any added, removed, or changed foreign object returns `category=isolation_refusal` and leaves cleanup unverified, even if the application assertions passed.
+
+CI runs both the synthetic and local-fixture gates beside a disposable labeled container with a mounted volume, a published loopback port, and a user-defined network. It compares the same metadata fields after each gate and requires them to remain unchanged.
 
 With no arguments the command accepts no dump, DSN, account, or service configuration. It creates a fresh fixture from the repository migrations with three synthetic auth keys, two dependent SRP challenges, three dependent notify cursors, and a binding-evidence row enrolled for the synthetic account and updated by the reviewed auth-key trigger. It restores that fixture into the pinned PostgreSQL 18 image and applies the pending migration.
 

@@ -178,6 +178,7 @@ build_parent=/tmp
 build_dir=$prepared_dir
 sigkill_output=""
 seed_source=""
+inventory_baseline=""
 keep_prepared=0
 
 cleanup_prepared_inputs() {
@@ -224,6 +225,9 @@ cleanup_build() {
     status=1
   fi
   if [[ -n $seed_source ]] && ! run_preparation_cleanup_command /usr/bin/rm -rf -- "$seed_source" 2>/dev/null; then
+    status=1
+  fi
+  if [[ -n $inventory_baseline ]] && ! run_preparation_cleanup_command /usr/bin/rm -f -- "$inventory_baseline" 2>/dev/null; then
     status=1
   fi
   if (( keep_prepared == 0 )); then
@@ -340,7 +344,7 @@ run_drill() {
 
 run_sigkill_recovery_drill() {
   local -a drill_args=("$@")
-  local attempt recovered remaining_runs containers volumes networks owned_images sigkill_status original_keep_prepared
+  local attempt recovered remaining_runs sigkill_status original_keep_prepared
   preflight_stage="run SIGKILL recovery drill"
   original_keep_prepared=$keep_prepared
   keep_prepared=1
@@ -375,19 +379,13 @@ run_sigkill_recovery_drill() {
   if [[ $recovered -ne 1 ]]; then
     emit_preflight_failure
   fi
-  if ! containers=$(run_teardown_command "$docker_bin" ps --all --quiet --no-trunc 2>/dev/null) ||
-    ! volumes=$(run_teardown_command "$docker_bin" volume ls --quiet 2>/dev/null) ||
-    ! networks=$(run_teardown_command "$docker_bin" network ls --format '{{.Name}}' 2>/dev/null) ||
-    ! owned_images=$(run_teardown_command "$docker_bin" image ls --all --quiet --no-trunc --filter 'label=com.teagram.restore-readiness.token' 2>/dev/null); then
-    emit_preflight_failure
-  fi
-  if [[ -n $containers || -n $volumes || -n $owned_images ]] ||
-    ! printf '%s\n' "$networks" | /usr/bin/python3 -c '
-import sys
-networks = sorted(line.strip() for line in sys.stdin if line.strip())
-if networks != ["bridge", "host", "none"]:
-    raise SystemExit(1)
-' ||
+  if ! run_teardown_command sudo -n -- env -i \
+      HOME=/root \
+      LANG=C \
+      LC_ALL=C \
+      PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
+      PYTHONDONTWRITEBYTECODE=1 \
+      /usr/bin/python3 -B "$script_dir/test-restore-readiness-inventory.py" compare "$inventory_baseline" ||
     ! run_teardown_command sudo -n -- env -i \
       HOME=/root \
       LANG=C \
@@ -421,6 +419,17 @@ if (( prepare_only == 1 )); then
 fi
 suite_work_deadline=$((SECONDS + 30 * 60))
 suite_teardown_deadline=$((suite_work_deadline + 4 * 60))
+preflight_stage="save baseline Docker resource inventory"
+if ! inventory_baseline=$(run_suite_command /usr/bin/mktemp "$build_parent/restore-readiness-docker-inventory.XXXXXXXX" 2>/dev/null) ||
+  ! run_suite_command sudo -n -- env -i \
+    HOME=/root \
+    LANG=C \
+    LC_ALL=C \
+    PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
+    PYTHONDONTWRITEBYTECODE=1 \
+    /usr/bin/python3 -B "$script_dir/test-restore-readiness-inventory.py" snapshot >"$inventory_baseline"; then
+  emit_preflight_failure
+fi
 
 if [[ -n $local_mode ]]; then
   preflight_stage="run local-dump restore drill"
@@ -487,6 +496,7 @@ report = json.load(sys.stdin)
 if not (report.get("result") == "fail" and report.get("phase") == "restore" and report.get("category") == "restore_failure" and report.get("cleanup") == "verified" and report.get("exit") == 1):
     raise SystemExit(1)
 '; then
+  printf 'restore readiness malformed SQL fault returned unexpected report: %s\n' "$malformed_report" >&2
   emit_preflight_failure
 fi
 

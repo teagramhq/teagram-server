@@ -955,13 +955,15 @@ jobs:
       - name: Check restore drill shell syntax and lint
         run: |
           bash -n deploy/teagramd/rollout-runner/test-restore-readiness.sh
+          bash -n deploy/teagramd/rollout-runner/test-restore-readiness-foreign-fixture.sh
           shellcheck deploy/teagramd/rollout-runner/test-restore-readiness.sh
+          shellcheck deploy/teagramd/rollout-runner/test-restore-readiness-foreign-fixture.sh
 
       - name: Run the bounded synthetic restore-to-application gate
-        run: timeout --signal=TERM --kill-after=15s 35m bash deploy/teagramd/rollout-runner/test-restore-readiness.sh
+        run: bash deploy/teagramd/rollout-runner/test-restore-readiness-foreign-fixture.sh
 
       - name: Run local-dump happy path, signal, and SIGKILL fixtures
-        run: timeout --signal=TERM --kill-after=15s 35m bash deploy/teagramd/rollout-runner/test-restore-readiness.sh --local-fixture-test
+        run: bash deploy/teagramd/rollout-runner/test-restore-readiness-foreign-fixture.sh --local-fixture-test
 
   # Keep the existing required check context while making every verification
   # lane mandatory. `always()` runs this when a lane fails or is skipped.
