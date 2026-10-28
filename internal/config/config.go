@@ -1550,6 +1550,9 @@ func load(log *slog.Logger, allowKeyGeneration bool) (Config, error) {
 		}
 		cfg.RateLimits.CheckUsernameIP.Window = d
 	}
+	if err := validateRateLimitSurface("TG_RATE_LIMIT_CHECK_USERNAME_IP", "TG_RATE_LIMIT_CHECK_USERNAME_IP_WINDOW", cfg.RateLimits.CheckUsernameIP); err != nil {
+		return Config{}, err
+	}
 	// PasswordProof per-account rate limit (shared by getPasswordSettings and
 	// updatePasswordSettings proof path).
 	if v := os.Getenv("TG_RATE_LIMIT_PASSWORD_PROOF"); v != "" {

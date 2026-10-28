@@ -3,8 +3,10 @@ package config_test
 import (
 	"bytes"
 	"log/slog"
+	"math"
 	"net/netip"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -56,6 +58,45 @@ func TestCheckUsernameIPRateLimitDefaultAndOverrides(t *testing.T) {
 	}
 	if got := cfg.RateLimits.CheckUsernameIP; got.Limit != 12 || got.Window != 30*time.Minute {
 		t.Errorf("CheckUsernameIP override = %+v, want 12 per 30m", got)
+	}
+}
+
+func TestLoadCheckUsernameIPRateLimitBounds(t *testing.T) {
+	tests := []struct {
+		name    string
+		limit   string
+		want    int
+		wantErr bool
+	}{
+		{name: "maximum int32", limit: strconv.FormatInt(math.MaxInt32, 10), want: math.MaxInt32},
+		{name: "above maximum int32", limit: strconv.FormatInt(math.MaxInt32+1, 10), wantErr: true},
+		{name: "negative", limit: "-1", wantErr: true},
+		{name: "zero disables", limit: "0", want: 0},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv("TG_POSTGRES_DSN", "postgres://localhost/tg")
+			t.Setenv("TG_AUTHKEY_ENC_KEY", validEncKey)
+			t.Setenv("TG_RATE_LIMIT_CHECK_USERNAME_IP", tt.limit)
+			t.Setenv("TG_RATE_LIMIT_CHECK_USERNAME_IP_WINDOW", "")
+
+			cfg, err := config.Load(discardLog())
+			if tt.wantErr {
+				if err == nil {
+					t.Fatal("Load succeeded with an invalid check-username limit")
+				}
+				if !strings.Contains(err.Error(), "TG_RATE_LIMIT_CHECK_USERNAME_IP") {
+					t.Errorf("Load error %q does not name the setting", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("Load: %v", err)
+			}
+			if got := cfg.RateLimits.CheckUsernameIP.Limit; got != tt.want {
+				t.Errorf("CheckUsernameIP limit = %d, want %d", got, tt.want)
+			}
+		})
 	}
 }
 
