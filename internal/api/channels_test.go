@@ -99,6 +99,10 @@ func createChannel(t *testing.T, s *store.Store, userID int64, req *tg.ChannelsC
 const testPublicLinkPrefix = "https://test.example/"
 
 func fullChannelDispatcher(s *store.Store, linkPrefixes ...string) mtproto.Handler {
+	return fullChannelDispatcherWithRateLimits(s, config.RateLimitsConfig{}, linkPrefixes...)
+}
+
+func fullChannelDispatcherWithRateLimits(s *store.Store, rateLimits config.RateLimitsConfig, linkPrefixes ...string) mtproto.Handler {
 	linkPrefix := testPublicLinkPrefix
 	if len(linkPrefixes) > 0 {
 		linkPrefix = linkPrefixes[0]
@@ -113,7 +117,7 @@ func fullChannelDispatcher(s *store.Store, linkPrefixes ...string) mtproto.Handl
 		nil,
 		1,
 		pgtest.PeerDeriver(), pgtest.PhotoDeriver(),
-		config.RateLimitsConfig{},
+		rateLimits,
 		config.RegistrationInvite,
 	)
 }

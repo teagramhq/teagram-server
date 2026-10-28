@@ -1652,6 +1652,40 @@ func TestLoadRegistrationMode(t *testing.T) {
 	}
 }
 
+func TestLoadUserInviteQuota(t *testing.T) {
+	t.Setenv("TG_POSTGRES_DSN", "postgres://localhost/tg")
+	t.Setenv("TG_AUTHKEY_ENC_KEY", validEncKey)
+	t.Setenv("TG_AUTHKEY_ENC_KEY_FILE", "")
+
+	for _, tc := range []struct {
+		name  string
+		value string
+		want  int
+	}{
+		{name: "unset defaults to disabled", want: 0},
+		{name: "zero disables", value: "0", want: 0},
+		{name: "positive quota", value: "5", want: 5},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("TG_USER_INVITE_QUOTA", tc.value)
+			cfg, err := config.Load(discardLog())
+			if err != nil {
+				t.Fatalf("Load: %v", err)
+			}
+			if got := cfg.UserInviteQuota; got != tc.want {
+				t.Errorf("UserInviteQuota = %d, want %d", got, tc.want)
+			}
+		})
+	}
+
+	for _, value := range []string{"not-an-integer", "-1"} {
+		t.Setenv("TG_USER_INVITE_QUOTA", value)
+		if _, err := config.Load(discardLog()); err == nil || !strings.Contains(err.Error(), "TG_USER_INVITE_QUOTA") {
+			t.Errorf("Load with TG_USER_INVITE_QUOTA=%q error = %v, want setting-specific error", value, err)
+		}
+	}
+}
+
 func TestLoadRejectsUnsupportedStickerImportMode(t *testing.T) {
 	t.Setenv("TG_POSTGRES_DSN", "postgres://localhost/tg")
 	t.Setenv("TG_AUTHKEY_ENC_KEY", validEncKey)

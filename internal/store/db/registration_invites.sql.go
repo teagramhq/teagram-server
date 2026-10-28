@@ -13,22 +13,24 @@ import (
 
 const consumeRegistrationInvite = `-- name: ConsumeRegistrationInvite :execrows
 UPDATE registration_invites
-SET state = 'consumed', consumed_at = clock_timestamp()
-WHERE id = $1
-  AND secret_digest = $2
+SET state = 'consumed', consumed_at = clock_timestamp(),
+    consumed_by_user_id = $1
+WHERE id = $2
+  AND secret_digest = $3
   AND state = 'issued'
   AND expires_at > clock_timestamp()
 `
 
 type ConsumeRegistrationInviteParams struct {
-	ID           int64
-	SecretDigest []byte
+	ConsumedByUserID *int64
+	ID               int64
+	SecretDigest     []byte
 }
 
 // Guard the state transition as well as taking the row lock above: if expiry
 // passes while the caller is comparing the secret, the update refuses.
 func (q *Queries) ConsumeRegistrationInvite(ctx context.Context, arg ConsumeRegistrationInviteParams) (int64, error) {
-	result, err := q.db.Exec(ctx, consumeRegistrationInvite, arg.ID, arg.SecretDigest)
+	result, err := q.db.Exec(ctx, consumeRegistrationInvite, arg.ConsumedByUserID, arg.ID, arg.SecretDigest)
 	if err != nil {
 		return 0, err
 	}
@@ -62,7 +64,7 @@ SELECT
     issued.at,
     issued.at + ($3::bigint * interval '1 microsecond')
 FROM issued
-RETURNING id, handle, issued_at, expires_at, state, consumed_at, revoked_at
+RETURNING id, handle, inviter_user_id, issued_at, expires_at, state, consumed_at, revoked_at
 `
 
 type InsertRegistrationInviteParams struct {
@@ -72,13 +74,14 @@ type InsertRegistrationInviteParams struct {
 }
 
 type InsertRegistrationInviteRow struct {
-	ID         int64
-	Handle     string
-	IssuedAt   pgtype.Timestamptz
-	ExpiresAt  pgtype.Timestamptz
-	State      string
-	ConsumedAt pgtype.Timestamptz
-	RevokedAt  pgtype.Timestamptz
+	ID            int64
+	Handle        *string
+	InviterUserID *int64
+	IssuedAt      pgtype.Timestamptz
+	ExpiresAt     pgtype.Timestamptz
+	State         string
+	ConsumedAt    pgtype.Timestamptz
+	RevokedAt     pgtype.Timestamptz
 }
 
 // Issue returns metadata but never returns the stored digest. The secret is
@@ -89,6 +92,55 @@ func (q *Queries) InsertRegistrationInvite(ctx context.Context, arg InsertRegist
 	err := row.Scan(
 		&i.ID,
 		&i.Handle,
+		&i.InviterUserID,
+		&i.IssuedAt,
+		&i.ExpiresAt,
+		&i.State,
+		&i.ConsumedAt,
+		&i.RevokedAt,
+	)
+	return i, err
+}
+
+const insertUserRegistrationInvite = `-- name: InsertUserRegistrationInvite :one
+WITH issued AS (SELECT clock_timestamp() AS at)
+INSERT INTO registration_invites (handle, inviter_user_id, secret_digest, issued_at, expires_at)
+SELECT
+    NULL,
+    $1,
+    $2,
+    issued.at,
+    issued.at + ($3::bigint * interval '1 microsecond')
+FROM issued
+RETURNING id, handle, inviter_user_id, issued_at, expires_at, state, consumed_at, revoked_at
+`
+
+type InsertUserRegistrationInviteParams struct {
+	InviterUserID *int64
+	SecretDigest  []byte
+	LifetimeUs    int64
+}
+
+type InsertUserRegistrationInviteRow struct {
+	ID            int64
+	Handle        *string
+	InviterUserID *int64
+	IssuedAt      pgtype.Timestamptz
+	ExpiresAt     pgtype.Timestamptz
+	State         string
+	ConsumedAt    pgtype.Timestamptz
+	RevokedAt     pgtype.Timestamptz
+}
+
+// User-issued invites are not tied to a username. Their inviter is recorded on
+// the invite row and the secret digest is the only credential persisted.
+func (q *Queries) InsertUserRegistrationInvite(ctx context.Context, arg InsertUserRegistrationInviteParams) (InsertUserRegistrationInviteRow, error) {
+	row := q.db.QueryRow(ctx, insertUserRegistrationInvite, arg.InviterUserID, arg.SecretDigest, arg.LifetimeUs)
+	var i InsertUserRegistrationInviteRow
+	err := row.Scan(
+		&i.ID,
+		&i.Handle,
+		&i.InviterUserID,
 		&i.IssuedAt,
 		&i.ExpiresAt,
 		&i.State,
@@ -99,7 +151,7 @@ func (q *Queries) InsertRegistrationInvite(ctx context.Context, arg InsertRegist
 }
 
 const listRegistrationInvites = `-- name: ListRegistrationInvites :many
-SELECT id, handle, issued_at, expires_at,
+SELECT id, handle, inviter_user_id, issued_at, expires_at,
        CASE
            WHEN state = 'issued' AND expires_at <= clock_timestamp() THEN 'expired'
            ELSE state
@@ -110,17 +162,18 @@ ORDER BY id
 `
 
 type ListRegistrationInvitesRow struct {
-	ID         int64
-	Handle     string
-	IssuedAt   pgtype.Timestamptz
-	ExpiresAt  pgtype.Timestamptz
-	State      string
-	ConsumedAt pgtype.Timestamptz
-	RevokedAt  pgtype.Timestamptz
+	ID            int64
+	Handle        *string
+	InviterUserID *int64
+	IssuedAt      pgtype.Timestamptz
+	ExpiresAt     pgtype.Timestamptz
+	State         string
+	ConsumedAt    pgtype.Timestamptz
+	RevokedAt     pgtype.Timestamptz
 }
 
-// State is projected from database time so a naturally expired row is reported
-// as expired even before another writer retires it.
+// State is projected from database time so a naturally expired issued row is
+// reported as expired even before another writer retires it.
 func (q *Queries) ListRegistrationInvites(ctx context.Context) ([]ListRegistrationInvitesRow, error) {
 	rows, err := q.db.Query(ctx, listRegistrationInvites)
 	if err != nil {
@@ -133,6 +186,7 @@ func (q *Queries) ListRegistrationInvites(ctx context.Context) ([]ListRegistrati
 		if err := rows.Scan(
 			&i.ID,
 			&i.Handle,
+			&i.InviterUserID,
 			&i.IssuedAt,
 			&i.ExpiresAt,
 			&i.State,
@@ -149,70 +203,6 @@ func (q *Queries) ListRegistrationInvites(ctx context.Context) ([]ListRegistrati
 	return items, nil
 }
 
-const liveRegistrationInviteForUpdate = `-- name: LiveRegistrationInviteForUpdate :one
-WITH locked AS MATERIALIZED (
-    SELECT id, handle, secret_digest, issued_at, expires_at, state, consumed_at, revoked_at
-    FROM registration_invites
-    WHERE handle = lower($1)
-      AND state = 'issued'
-    ORDER BY id DESC
-    LIMIT 1
-    FOR UPDATE
-)
-SELECT id, handle, secret_digest, issued_at, expires_at, state, consumed_at, revoked_at,
-       true AS found,
-       expires_at > clock_timestamp() AS live
-FROM locked
-UNION ALL
-SELECT 0::bigint,
-       lower($1)::text,
-       decode(repeat('00', 64), 'hex')::bytea,
-       NULL::timestamptz,
-       NULL::timestamptz,
-       'expired'::text,
-       NULL::timestamptz,
-       NULL::timestamptz,
-       false,
-       false
-WHERE NOT EXISTS (SELECT 1 FROM locked)
-`
-
-type LiveRegistrationInviteForUpdateRow struct {
-	ID           int64
-	Handle       string
-	SecretDigest []byte
-	IssuedAt     pgtype.Timestamptz
-	ExpiresAt    pgtype.Timestamptz
-	State        string
-	ConsumedAt   pgtype.Timestamptz
-	RevokedAt    pgtype.Timestamptz
-	Found        bool
-	Live         bool
-}
-
-// The row lock is the decision boundary shared with consume and revoke. A
-// caller holds it for its transaction, so a rollback cannot consume the row.
-// The MATERIALIZED CTE makes the outer database-clock check run after the
-// selected row has been locked. The synthetic row keeps absent and terminal
-// handles on the same one-row query path as an issued or expired handle.
-func (q *Queries) LiveRegistrationInviteForUpdate(ctx context.Context, handle string) (LiveRegistrationInviteForUpdateRow, error) {
-	row := q.db.QueryRow(ctx, liveRegistrationInviteForUpdate, handle)
-	var i LiveRegistrationInviteForUpdateRow
-	err := row.Scan(
-		&i.ID,
-		&i.Handle,
-		&i.SecretDigest,
-		&i.IssuedAt,
-		&i.ExpiresAt,
-		&i.State,
-		&i.ConsumedAt,
-		&i.RevokedAt,
-		&i.Found,
-		&i.Live,
-	)
-	return i, err
-}
-
 const lockRegistrationInvite = `-- name: LockRegistrationInvite :one
 SELECT id
 FROM registration_invites
@@ -227,6 +217,94 @@ func (q *Queries) LockRegistrationInvite(ctx context.Context, id int64) (int64, 
 	var id_2 int64
 	err := row.Scan(&id_2)
 	return id_2, err
+}
+
+const registrationInviteBySecretDigestForUpdate = `-- name: RegistrationInviteBySecretDigestForUpdate :one
+WITH operator_handle AS MATERIALIZED (
+    SELECT EXISTS (
+        SELECT 1
+        FROM registration_invites candidate
+        WHERE candidate.handle = lower($1)
+          AND candidate.state = 'issued'
+          AND candidate.expires_at > clock_timestamp()
+          AND candidate.inviter_user_id IS NULL
+    ) AS reserved
+), locked AS MATERIALIZED (
+    SELECT id, handle, secret_digest, inviter_user_id, issued_at, expires_at,
+           state, consumed_at, revoked_at, consumed_by_user_id
+    FROM registration_invites invite
+    WHERE invite.secret_digest = $2
+    FOR UPDATE
+)
+SELECT locked.id, locked.handle, locked.secret_digest, locked.inviter_user_id,
+       locked.issued_at, locked.expires_at, locked.state, locked.consumed_at,
+       locked.revoked_at, locked.consumed_by_user_id,
+       true AS found,
+       COALESCE(locked.state = 'issued' AND locked.expires_at > clock_timestamp(), false)::boolean AS live,
+       operator_handle.reserved AS operator_handle_reserved
+FROM locked CROSS JOIN operator_handle
+UNION ALL
+SELECT 0::bigint,
+       NULL::text,
+       decode(repeat('00', 64), 'hex')::bytea,
+       NULL::bigint,
+       NULL::timestamptz,
+       NULL::timestamptz,
+       'expired'::text,
+       NULL::timestamptz,
+       NULL::timestamptz,
+       NULL::bigint,
+       false,
+       false,
+       operator_handle.reserved
+FROM operator_handle
+WHERE NOT EXISTS (SELECT 1 FROM locked)
+`
+
+type RegistrationInviteBySecretDigestForUpdateParams struct {
+	Handle       string
+	SecretDigest []byte
+}
+
+type RegistrationInviteBySecretDigestForUpdateRow struct {
+	ID                     int64
+	Handle                 *string
+	SecretDigest           []byte
+	InviterUserID          *int64
+	IssuedAt               pgtype.Timestamptz
+	ExpiresAt              pgtype.Timestamptz
+	State                  string
+	ConsumedAt             pgtype.Timestamptz
+	RevokedAt              pgtype.Timestamptz
+	ConsumedByUserID       *int64
+	Found                  bool
+	Live                   bool
+	OperatorHandleReserved bool
+}
+
+// The digest lookup is the single locked invite lookup for verification and
+// redemption. The handle probe runs in the same query for every request so
+// absent, terminal, and valid digests use the same database path; user invites
+// cannot claim a handle reserved by a live operator invite.
+func (q *Queries) RegistrationInviteBySecretDigestForUpdate(ctx context.Context, arg RegistrationInviteBySecretDigestForUpdateParams) (RegistrationInviteBySecretDigestForUpdateRow, error) {
+	row := q.db.QueryRow(ctx, registrationInviteBySecretDigestForUpdate, arg.Handle, arg.SecretDigest)
+	var i RegistrationInviteBySecretDigestForUpdateRow
+	err := row.Scan(
+		&i.ID,
+		&i.Handle,
+		&i.SecretDigest,
+		&i.InviterUserID,
+		&i.IssuedAt,
+		&i.ExpiresAt,
+		&i.State,
+		&i.ConsumedAt,
+		&i.RevokedAt,
+		&i.ConsumedByUserID,
+		&i.Found,
+		&i.Live,
+		&i.OperatorHandleReserved,
+	)
+	return i, err
 }
 
 const revokeRegistrationInvite = `-- name: RevokeRegistrationInvite :execrows

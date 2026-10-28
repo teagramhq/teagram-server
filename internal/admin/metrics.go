@@ -260,6 +260,7 @@ type RateLimitDenialsBySurface struct {
 	CheckPasswordIP           int64 `json:"check_password_ip"`
 	GetPasswordIP             int64 `json:"get_password_ip"`
 	SignUpIP                  int64 `json:"sign_up_ip"`
+	CheckUsernameIP           int64 `json:"check_username_ip"`
 	PasswordProof             int64 `json:"password_proof"`
 	GetPassword               int64 `json:"get_password"`
 	UpdateProfile             int64 `json:"update_profile"`
@@ -571,6 +572,7 @@ func rateLimitDenialsBySurface(counts store.RateLimitDenialSurfaceCounts) RateLi
 		CheckPasswordIP:           counts.CheckPasswordIP,
 		GetPasswordIP:             counts.GetPasswordIP,
 		SignUpIP:                  counts.SignUpIP,
+		CheckUsernameIP:           counts.CheckUsernameIP,
 		PasswordProof:             counts.PasswordProof,
 		GetPassword:               counts.GetPassword,
 		UpdateProfile:             counts.UpdateProfile,

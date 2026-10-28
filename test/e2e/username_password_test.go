@@ -24,6 +24,7 @@ import (
 	"github.com/gotd/td/telegram/dcs"
 	"github.com/gotd/td/tg"
 	"github.com/gotd/td/tgerr"
+	"github.com/jackc/pgx/v5"
 
 	"github.com/teagramhq/teagram-server/internal/api"
 	"github.com/teagramhq/teagram-server/internal/blob"
@@ -1167,5 +1168,61 @@ func TestSignUpUsernameOccupied(t *testing.T) {
 		return nil
 	}); err != nil {
 		t.Fatalf("occupied username flow: %v", err)
+	}
+}
+
+func TestBotSignInRefusal(t *testing.T) {
+	t.Parallel()
+	f := newSmokeFixture(t)
+	bot, _, err := f.store.CreateBot(f.ctx, "e2e_test_bot", "E2E bot")
+	if err != nil {
+		t.Fatalf("create bot: %v", err)
+	}
+	if err := f.store.UpsertPassword(f.ctx, store.UserPassword{
+		UserID:   bot.ID,
+		Salt1:    make([]byte, 32),
+		Salt2:    make([]byte, 32),
+		Verifier: make([]byte, 256),
+	}); err != nil {
+		t.Fatalf("plant bot password verifier: %v", err)
+	}
+
+	client := newUsernameClient(f.port, f.key, f.dcID, nil)
+	if err := client.Run(f.ctx, func(ctx context.Context) error {
+		apiClient := client.API()
+		hash, err := sendCodeUsername(ctx, apiClient, bot.Username)
+		if err != nil {
+			return fmt.Errorf("sendCode: %w", err)
+		}
+		if _, err := signInUsername(ctx, apiClient, bot.Username, hash, ""); !isRPCMessage(err, "BOT_ACCOUNT") {
+			return fmt.Errorf("signIn error, want BOT_ACCOUNT: %w", err)
+		}
+		if _, err := apiClient.AuthCheckPassword(ctx, &tg.InputCheckPasswordSRP{}); !isRPCMessage(err, "AUTH_KEY_UNREGISTERED") {
+			return fmt.Errorf("checkPassword error, want AUTH_KEY_UNREGISTERED after refused signIn: %w", err)
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("bot signIn flow: %v", err)
+	}
+
+	conn, err := pgx.Connect(f.ctx, f.dsn)
+	if err != nil {
+		t.Fatalf("connect to inspect auth key: %v", err)
+	}
+	defer func() {
+		if err := conn.Close(context.Background()); err != nil {
+			t.Errorf("close inspection connection: %v", err)
+		}
+	}()
+	var boundKeys int64
+	if err := conn.QueryRow(f.ctx, `
+		SELECT count(*)
+		FROM auth_keys
+		WHERE user_id = $1 OR pending_user_id = $1
+	`, bot.ID).Scan(&boundKeys); err != nil {
+		t.Fatalf("count bot-bound keys: %v", err)
+	}
+	if boundKeys != 0 {
+		t.Fatalf("auth keys referencing bot = %d, want 0", boundKeys)
 	}
 }
