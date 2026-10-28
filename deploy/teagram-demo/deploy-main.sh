@@ -188,7 +188,7 @@ mapfile -t CONTAINER_IDS < <(demo_compose ps -q)
 [[ -z "$(demo_compose ps --status running -q "$CANDIDATE_SERVER")" ]] ||
   demo_fail 'candidate server slot is already running; reconcile the rollout before deploying'
 demo_require_proxy_configuration_current haproxy "$TEAGRAM_DEMO_HAPROXY_CONFIG_SHA256"
-demo_require_proxy_configuration_current edge "" 1
+demo_require_proxy_configuration_current edge "" 1 "$PREV_SHA"
 mapfile -t EDGE_IDS < <(demo_compose ps -q edge)
 ((${#EDGE_IDS[@]} == 1)) || demo_fail 'running edge proxy is missing or ambiguous'
 EDGE_CONTAINER_ID=${EDGE_IDS[0]}

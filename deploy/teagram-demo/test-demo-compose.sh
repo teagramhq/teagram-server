@@ -128,26 +128,110 @@ jq -e \
 ' "$TMP_DIR/target.json" >/dev/null
 
 (
+  demo_compose() {
+    cat "$TMP_DIR/target.json"
+  }
+  demo_compose_with_file() {
+    docker compose --project-directory "$REPO_ROOT" --project-name teagram-demo \
+      --file "$1" "${@:2}"
+  }
+  LEGACY_SOURCE_HASH=$(printf 'legacy nginx config fixture\n' | sha256sum | awk '{print $1}')
+  LEGACY_HASH=$(demo_edge_legacy_compose_hash "$LEGACY_SOURCE_HASH")
+  [[ "$LEGACY_HASH" =~ ^[0-9a-f]{64}$ ]] || {
+    printf 'normalized legacy edge Compose file did not produce a valid hash\n' >&2
+    exit 1
+  }
+)
+
+(
   MOCK_TARGET_HASH=$(printf 'target config' | sha256sum | awk '{print $1}')
   MOCK_OTHER_HASH=$(printf 'changed config' | sha256sum | awk '{print $1}')
   MOCK_LIVE_HASH=$MOCK_TARGET_HASH
   MOCK_HAPROXY_SOURCE_HASH=$TEAGRAM_DEMO_HAPROXY_CONFIG_SHA256
+  MOCK_PREVIOUS_SHA=1111111111111111111111111111111111111111
+  MOCK_LEGACY_SOURCE_HASH=$(printf 'legacy nginx config fixture\n' | sha256sum | awk '{print $1}')
+  MOCK_LIVE_EDGE_SOURCE_HASH=$MOCK_LEGACY_SOURCE_HASH
   MOCK_MOUNT_LAYOUT=directory
+  MOCK_EDGE_DRIFT=none
+  MOCK_CURRENT_RENDER="$TMP_DIR/current-edge-render.json"
+
+  git() {
+    if [[ "$1" == -C && "$2" == "$DEMO_REPO_ROOT" && "$3" == show &&
+      "$4" == "$MOCK_PREVIOUS_SHA:deploy/teagram-demo/nginx.conf" ]]; then
+      printf 'legacy nginx config fixture\n'
+    else
+      return 1
+    fi
+  }
 
   demo_compose() {
     if [[ "$1" == ps && "$2" == -q ]]; then
       printf 'proxy-container\n'
     elif [[ "$1" == config && "$2" == --hash && "$3" == "$MOCK_SERVICE" ]]; then
       printf '%s %s\n' "$3" "$MOCK_TARGET_HASH"
+    elif [[ "$1" == config && "$2" == --format && "$3" == json ]]; then
+      if [[ "$MOCK_EDGE_DRIFT" == none ]]; then
+        cat "$TMP_DIR/target.json" | tee "$MOCK_CURRENT_RENDER"
+      else
+        jq --arg drift "$MOCK_EDGE_DRIFT" '
+          if $drift == "image" then .services.edge.image += "-drift"
+          elif $drift == "port" then .services.edge.ports[0].published = "18080"
+          elif $drift == "network" then .services.edge.networks.edge.aliases = ["drift"]
+          elif $drift == "resources" then .services.edge.mem_limit = ((.services.edge.mem_limit | tonumber) + 1048576)
+          else error("unknown edge drift fixture") end
+        ' "$TMP_DIR/target.json" | tee "$MOCK_CURRENT_RENDER"
+      fi
     else
       return 1
     fi
   }
+  demo_compose_with_file() {
+    docker compose --file "$1" "${@:2}"
+  }
   docker() {
+    if [[ "$1" == compose ]]; then
+      local config_file=
+      local -a args=("$@")
+      local index
+      for ((index = 1; index < ${#args[@]}; index++)); do
+        if [[ "${args[index]}" == --file ]]; then
+          config_file="${args[index + 1]}"
+          break
+        fi
+      done
+      [[ -f "$config_file" && "${args[-3]} ${args[-2]} ${args[-1]}" == 'config --hash edge' ]] || return 1
+      jq -e \
+        --slurpfile current "$MOCK_CURRENT_RENDER" \
+        --arg legacyFile "$DEMO_SCRIPT_DIR/nginx.conf" \
+        --arg discoveryDir "$DEMO_STATE_DIR/public-client" \
+        --arg legacySourceHash "$MOCK_LEGACY_SOURCE_HASH" '
+          .services.edge as $normalized
+          | $current[0].services.edge as $desired
+          | $normalized.entrypoint == ["nginx", "-g", "daemon off;"]
+            and ($normalized.labels == (($desired.labels // {}) + {
+              "com.teagram.demo.edge-config-sha256": $legacySourceHash
+            }))
+            and $normalized.image == $desired.image
+            and $normalized.ports == $desired.ports
+            and $normalized.networks == $desired.networks
+            and $normalized.mem_limit == $desired.mem_limit
+            and $normalized.memswap_limit == $desired.memswap_limit
+            and $normalized.cpus == $desired.cpus
+            and $normalized.pids_limit == $desired.pids_limit
+            and any($normalized.volumes[]; .type == "bind" and .source == $legacyFile and
+              .target == "/etc/nginx/nginx.conf" and .read_only)
+            and all($normalized.volumes[]; .target != "/etc/nginx/demo")
+            and any($normalized.volumes[]; .source == $discoveryDir and
+              .target == "/usr/share/nginx/html/.well-known/teagramd" and .read_only)
+        ' "$config_file" >/dev/null || return 1
+      jq -c '.services.edge' "$config_file" | sha256sum | awk '{print "edge", $1}'
+      return
+    fi
     [[ "$1" == inspect && "$2" == --format ]] || return 1
     case "$3" in
       *com.docker.compose.config-hash*) printf '%s\n' "$MOCK_LIVE_HASH" ;;
       *com.teagram.demo.haproxy-config-sha256*) printf '%s\n' "$MOCK_HAPROXY_SOURCE_HASH" ;;
+      *com.teagram.demo.edge-config-sha256*) printf '%s\n' "$MOCK_LIVE_EDGE_SOURCE_HASH" ;;
       *'.Mounts'*)
         if [[ "$MOCK_MOUNT_LAYOUT" == directory ]]; then
           printf 'bind|%s/nginx-config|/etc/nginx/demo\n' "$DEMO_SCRIPT_DIR"
@@ -189,7 +273,27 @@ jq -e \
     printf '%s\n' 'edge accepted a legacy mount without deployment migration permission' >&2
     exit 1
   fi
-  demo_require_proxy_configuration_current edge "" 1
+  MOCK_LEGACY_HASH=$(demo_edge_legacy_compose_hash "$MOCK_LEGACY_SOURCE_HASH")
+  MOCK_LIVE_HASH=$MOCK_LEGACY_HASH
+  demo_require_proxy_configuration_current edge "" 1 "$MOCK_PREVIOUS_SHA"
+  MOCK_LIVE_EDGE_SOURCE_HASH=$MOCK_OTHER_HASH
+  if demo_require_proxy_configuration_current edge "" 1 "$MOCK_PREVIOUS_SHA" >/dev/null 2>&1; then
+    printf '%s\n' 'edge accepted a mismatched legacy source configuration hash' >&2
+    exit 1
+  fi
+  MOCK_LIVE_EDGE_SOURCE_HASH=$MOCK_LEGACY_SOURCE_HASH
+  MOCK_LIVE_HASH=$MOCK_OTHER_HASH
+  if demo_require_proxy_configuration_current edge "" 1 "$MOCK_PREVIOUS_SHA" >/dev/null 2>&1; then
+    printf '%s\n' 'edge accepted unrelated Compose drift through legacy migration' >&2
+    exit 1
+  fi
+  MOCK_LIVE_HASH=$MOCK_LEGACY_HASH
+  for MOCK_EDGE_DRIFT in image port network resources; do
+    if demo_require_proxy_configuration_current edge "" 1 "$MOCK_PREVIOUS_SHA" >/dev/null 2>&1; then
+      printf 'edge accepted %s drift through legacy migration\n' "$MOCK_EDGE_DRIFT" >&2
+      exit 1
+    fi
+  done
 )
 
 (

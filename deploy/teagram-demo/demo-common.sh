@@ -58,7 +58,7 @@ export TEAGRAM_DEMO_HAPROXY_CONFIG_SHA256
 
 demo_require_proxy_configuration_current() {
   local service="$1" expected_source_hash="${2:-}" allow_legacy_edge_migration="${3:-0}"
-  local source_label target_hash live_hash live_source_hash
+  local legacy_source_revision="${4:-}" source_label target_hash live_hash live_source_hash legacy_source_hash expected_legacy_hash
   local -a proxy_ids=()
 
   case "$service" in
@@ -94,7 +94,32 @@ demo_require_proxy_configuration_current() {
     fi
     if [[ "$allow_legacy_edge_migration" == 1 ]] &&
       demo_edge_uses_legacy_file_mount "${proxy_ids[0]}"; then
-      return 0
+      [[ "$legacy_source_revision" =~ ^[0-9a-f]{40}$ ]] || {
+        demo_fail 'legacy edge source revision is invalid'
+        return 1
+      }
+      if ! legacy_source_hash=$(git -C "$DEMO_REPO_ROOT" show \
+        "$legacy_source_revision:deploy/teagram-demo/nginx.conf" | sha256sum | awk '{print $1}'); then
+        demo_fail 'legacy edge source configuration hash could not be derived'
+        return 1
+      fi
+      [[ "$legacy_source_hash" =~ ^[0-9a-f]{64}$ ]] || {
+        demo_fail 'legacy edge source configuration hash is invalid'
+        return 1
+      }
+      live_source_hash=$(docker inspect --format \
+        '{{index .Config.Labels "com.teagram.demo.edge-config-sha256"}}' "${proxy_ids[0]}") || {
+        demo_fail 'legacy edge source configuration hash could not be read'
+        return 1
+      }
+      [[ "$live_source_hash" == "$legacy_source_hash" ]] || {
+        demo_fail 'legacy edge source configuration differs from the previous release'
+        return 1
+      }
+      expected_legacy_hash=$(demo_edge_legacy_compose_hash "$legacy_source_hash") || return 1
+      [[ "$live_hash" == "$expected_legacy_hash" ]] && return 0
+      demo_fail 'legacy edge proxy has unrelated image, Compose settings, or config drift; refusing the one-time mount migration'
+      return 1
     fi
     demo_fail 'edge proxy image, Compose settings, or config mount changed; only the single-file to directory mount migration is automatic'
     return 1
@@ -119,6 +144,64 @@ demo_edge_uses_legacy_file_mount() {
   local edge_id="$1" mounts
   mounts=$(docker inspect --format '{{range .Mounts}}{{printf "%s|%s|%s\n" .Type .Source .Destination}}{{end}}' "$edge_id") || return 1
   grep -Fqx -- "bind|$DEMO_SCRIPT_DIR/nginx.conf|/etc/nginx/nginx.conf" <<< "$mounts"
+}
+
+demo_edge_legacy_compose_hash() {
+  local legacy_source_hash="$1" normalized_file hash_output expected_hash
+  [[ "$legacy_source_hash" =~ ^[0-9a-f]{64}$ ]] || {
+    demo_fail 'legacy edge source configuration hash is invalid'
+    return 1
+  }
+  [[ -n "${TMP_DIR:-}" && -d "$TMP_DIR" ]] || {
+    demo_fail 'temporary directory is unavailable for legacy edge validation'
+    return 1
+  }
+  normalized_file=$(mktemp "$TMP_DIR/edge-legacy-compose.XXXXXXXX.json") || {
+    demo_fail 'legacy edge Compose config could not be created'
+    return 1
+  }
+  if ! demo_compose config --format json | jq -e \
+    --arg config_dir "$DEMO_SCRIPT_DIR/nginx-config" \
+    --arg legacy_file "$DEMO_SCRIPT_DIR/nginx.conf" \
+    --arg legacy_source_hash "$legacy_source_hash" '
+      if
+        .services.edge.entrypoint == ["nginx", "-c", "/etc/nginx/demo/nginx.conf", "-g", "daemon off;"]
+        and (((.services.edge.labels // {}) | has("com.teagram.demo.edge-config-sha256")) | not)
+        and ([((.services.edge.volumes // [])[]) | select(
+          .type == "bind" and .source == $config_dir and .target == "/etc/nginx/demo" and .read_only == true
+        )] | length == 1)
+        and ([((.services.edge.volumes // [])[]) | select(.target == "/etc/nginx/nginx.conf")] | length == 0)
+        and ($legacy_source_hash | test("^[0-9a-f]{64}$"))
+      then
+        .services.edge.entrypoint = ["nginx", "-g", "daemon off;"]
+        | .services.edge.labels = ((.services.edge.labels // {}) + {
+            "com.teagram.demo.edge-config-sha256": $legacy_source_hash
+          })
+        | .services.edge.volumes |= map(
+            if .type == "bind" and .source == $config_dir and .target == "/etc/nginx/demo" then
+              .source = $legacy_file | .target = "/etc/nginx/nginx.conf"
+            else . end
+          )
+      else
+        error("current edge Compose config does not match the supported mount migration")
+      end
+    ' > "$normalized_file"; then
+    rm -f -- "$normalized_file"
+    demo_fail 'current edge Compose config could not be normalized for the legacy mount migration'
+    return 1
+  fi
+  if ! hash_output=$(demo_compose_with_file "$normalized_file" config --hash edge); then
+    rm -f -- "$normalized_file"
+    demo_fail 'normalized legacy edge Compose hash could not be read'
+    return 1
+  fi
+  rm -f -- "$normalized_file"
+  expected_hash=$(awk '$1 == "edge" {print $2}' <<< "$hash_output")
+  [[ "$expected_hash" =~ ^[0-9a-f]{64}$ ]] || {
+    demo_fail 'normalized legacy edge Compose hash is invalid'
+    return 1
+  }
+  printf '%s\n' "$expected_hash"
 }
 
 demo_wait_migration() {
@@ -549,16 +632,22 @@ demo_haproxy_control() {
     --socket "$DEMO_STATE_DIR/haproxy-run/admin.sock" "$@"
 }
 
-demo_compose() {
-  local image_ref
+demo_compose_with_file() {
+  local compose_file="$1" image_ref
+  shift
   if ! image_ref=$(demo_compose_image_ref); then
     return 1
   fi
   env -u COMPOSE_FILE -u COMPOSE_PROJECT_NAME -u COMPOSE_PROFILES \
     -u TEAGRAM_DEMO_TURNSTILE_SITE_KEY -u TEAGRAM_DEMO_TURNSTILE_SECRET_KEY_FILE \
-    -u TEAGRAM_DEMO_EDGE_BIND \
+    -u TEAGRAM_DEMO_EDGE_BIND -u TEAGRAM_DEMO_EDGE_CONFIG_SHA256 \
     "TEAGRAM_DEMO_IMAGE_REF=$image_ref" \
-    docker compose "${DEMO_COMPOSE_ARGS[@]}" "$@" </dev/null
+    docker compose --env-file "$DEMO_ENV_FILE" --project-directory "$DEMO_REPO_ROOT" \
+      --project-name teagram-demo --file "$compose_file" "$@" </dev/null
+}
+
+demo_compose() {
+  demo_compose_with_file "$DEMO_SCRIPT_DIR/compose.yaml" "$@"
 }
 
 demo_validation_compose() {
