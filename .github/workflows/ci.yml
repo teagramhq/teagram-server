@@ -26,34 +26,93 @@ jobs:
     if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
     runs-on: ubuntu-26.04
     timeout-minutes: 5
+    outputs:
+      cancelled_pr_run_ids: ${{ steps.cancel-queued-pr-runs.outputs.cancelled_pr_run_ids }}
     permissions:
       actions: write
 
     steps:
       - name: Cancel queued pull request CI runs
+        id: cancel-queued-pr-runs
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          runs="$(gh api --paginate \
+          cancelled_pr_run_ids=""
+          publish_cancelled_pr_run_ids() {
+            printf 'cancelled_pr_run_ids=%s\n' "${cancelled_pr_run_ids% }" >> "$GITHUB_OUTPUT"
+          }
+
+          if ! runs="$(gh api --paginate \
             "repos/${GITHUB_REPOSITORY}/actions/workflows/ci.yml/runs?event=pull_request&status=queued&per_page=100" \
-            --jq '.workflow_runs[]?.id')"
+            --jq '.workflow_runs[]?.id' 2>/dev/null)"; then
+            echo "::warning::Could not list queued pull request CI runs; continuing without cancellation."
+            publish_cancelled_pr_run_ids
+            exit 0
+          fi
           if [[ -z "$runs" ]]; then
             echo "No queued pull request CI runs."
+            publish_cancelled_pr_run_ids
             exit 0
           fi
           while IFS= read -r run_id; do
+            [[ -n "$run_id" ]] || continue
             [[ "$run_id" =~ ^[0-9]+$ ]] || {
-              echo "::error::invalid workflow run id"
-              exit 1
+              echo "::warning::Ignoring invalid pull request workflow run id."
+              continue
             }
-            run_status="$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${run_id}" --jq '.status')"
+            if ! run_status="$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${run_id}" --jq '.status' 2>/dev/null)"; then
+              echo "::warning::Could not check pull request CI run ${run_id}; continuing."
+              continue
+            fi
             if [[ "$run_status" != queued ]]; then
               echo "Leaving pull request CI run ${run_id} in status ${run_status}."
               continue
             fi
-            gh run cancel "$run_id" --repo "$GITHUB_REPOSITORY"
+            if gh run cancel "$run_id" --repo "$GITHUB_REPOSITORY"; then
+              cancelled_pr_run_ids+="${run_id} "
+            else
+              echo "::warning::Could not cancel queued pull request CI run ${run_id}; it may have started or been superseded."
+            fi
           done <<< "$runs"
+          publish_cancelled_pr_run_ids
+
+  rerun-cancelled-pr-ci:
+    name: Requeue cancelled pull request CI
+    needs:
+      - prioritize-main
+      - lint
+    if: ${{ always() && (needs.prioritize-main.result == 'success' || (needs.prioritize-main.result == 'skipped' && github.event_name == 'pull_request')) && github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.lint.result != 'skipped' && needs.prioritize-main.outputs.cancelled_pr_run_ids != '' }}
+    runs-on: ubuntu-26.04
+    timeout-minutes: 5
+    permissions:
+      actions: write
+
+    steps:
+      - name: Re-run cancelled pull request CI after main fan-out starts
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CANCELLED_PR_RUN_IDS: ${{ needs.prioritize-main.outputs.cancelled_pr_run_ids }}
+        run: |
+          set -euo pipefail
+          read -r -a cancelled_pr_run_ids <<< "$CANCELLED_PR_RUN_IDS"
+          for run_id in "${cancelled_pr_run_ids[@]}"; do
+            if [[ ! "$run_id" =~ ^[0-9]+$ ]]; then
+              echo "::warning::Ignoring invalid cancelled pull request CI run id."
+              continue
+            fi
+            if ! run_state="$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${run_id}" --jq '[.status, (.conclusion // "")] | @tsv' 2>/dev/null)"; then
+              echo "::warning::Could not verify cancelled pull request CI run ${run_id}; rerun it manually if its check remains cancelled."
+              continue
+            fi
+            if [[ "$run_state" != $'completed\tcancelled' ]]; then
+              echo "Pull request CI run ${run_id} is ${run_state}; no rerun is needed."
+              continue
+            fi
+            if ! gh run rerun "$run_id" --repo "$GITHUB_REPOSITORY"; then
+              echo "::warning::Could not re-run cancelled pull request CI run ${run_id}; rerun it manually if its check remains cancelled."
+            fi
+          done
 
   sticker-bundle:
     name: sticker bundle license gate
@@ -272,7 +331,10 @@ jobs:
 
   browser-acceptance-image:
     name: browser acceptance image (${{ matrix.arch }})
-    needs: browser-acceptance
+    needs:
+      - prioritize-main
+      - browser-acceptance
+    if: ${{ always() && (needs.prioritize-main.result == 'success' || (needs.prioritize-main.result == 'skipped' && github.event_name == 'pull_request')) && needs.browser-acceptance.result == 'success' }}
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 25
     permissions:
@@ -1122,7 +1184,7 @@ jobs:
 
   ci:
     name: ci
-    if: ${{ always() }}
+    if: ${{ always() && (needs.prioritize-main.result == 'success' || needs.prioritize-main.result == 'failure' || needs.prioritize-main.result == 'cancelled' || (needs.prioritize-main.result == 'skipped' && github.event_name == 'pull_request')) }}
     needs:
       - prioritize-main
       - ci-main
@@ -1162,12 +1224,10 @@ jobs:
           RESTORE_READINESS_RESULT: ${{ needs.restore-readiness.result }}
         run: |
           expected_priority_result=success
-          expected_browser_acceptance_image_result=success
           if [[ "$GITHUB_EVENT_NAME" == pull_request ]]; then
             expected_priority_result=skipped
-            expected_browser_acceptance_image_result=skipped
           fi
-          if [[ "$MAIN_PRIORITY_RESULT" != "$expected_priority_result" || "$CI_MAIN_RESULT" != "success" || "$STICKER_BUNDLE_RESULT" != "success" || "$PHOTOTHUMB_RUNTIME_RESULT" != "success" || "$REAL_SERVER_FIXTURES_RESULT" != "success" || "$WEBSOCKET_D1_RESULT" != "success" || "$WEB_PERMANENT_EXCHANGE_RESULT" != "success" || "$SQL_LINT_RESULT" != "success" || "$CSS_RESULT" != "success" || "$BROWSER_ACCEPTANCE_RESULT" != "success" || "$BROWSER_ACCEPTANCE_IMAGE_RESULT" != "$expected_browser_acceptance_image_result" || "$RUSTFS_TRANSITION_RESULT" != "success" || "$SCHEMA_GATE_POSTGRES_RESULT" != "success" || "$DEPLOY_WORKFLOW_RESULT" != "success" || "$RESTORE_READINESS_RESULT" != "success" ]]; then
+          if [[ "$MAIN_PRIORITY_RESULT" != "$expected_priority_result" || "$CI_MAIN_RESULT" != "success" || "$STICKER_BUNDLE_RESULT" != "success" || "$PHOTOTHUMB_RUNTIME_RESULT" != "success" || "$REAL_SERVER_FIXTURES_RESULT" != "success" || "$WEBSOCKET_D1_RESULT" != "success" || "$WEB_PERMANENT_EXCHANGE_RESULT" != "success" || "$SQL_LINT_RESULT" != "success" || "$CSS_RESULT" != "success" || "$BROWSER_ACCEPTANCE_RESULT" != "success" || "$BROWSER_ACCEPTANCE_IMAGE_RESULT" != "success" || "$RUSTFS_TRANSITION_RESULT" != "success" || "$SCHEMA_GATE_POSTGRES_RESULT" != "success" || "$DEPLOY_WORKFLOW_RESULT" != "success" || "$RESTORE_READINESS_RESULT" != "success" ]]; then
             echo "::error::Required CI lanes did not pass (prioritize-main=$MAIN_PRIORITY_RESULT, ci-main=$CI_MAIN_RESULT, sticker-bundle=$STICKER_BUNDLE_RESULT, photothumb-runtime=$PHOTOTHUMB_RUNTIME_RESULT, real-server-fixtures=$REAL_SERVER_FIXTURES_RESULT, websocket-d1=$WEBSOCKET_D1_RESULT, websocket-permanent-exchange=$WEB_PERMANENT_EXCHANGE_RESULT, sql-lint=$SQL_LINT_RESULT, css=$CSS_RESULT, browser-acceptance=$BROWSER_ACCEPTANCE_RESULT, browser-acceptance-image=$BROWSER_ACCEPTANCE_IMAGE_RESULT, rustfs-transition-qualification=$RUSTFS_TRANSITION_RESULT, schema-gate-postgres=$SCHEMA_GATE_POSTGRES_RESULT, deploy-workflow=$DEPLOY_WORKFLOW_RESULT, restore-readiness=$RESTORE_READINESS_RESULT)"
             exit 1
           fi
