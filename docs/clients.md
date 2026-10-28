@@ -124,13 +124,14 @@ budgets. Defaults are 10
 identifiers per network per 24 hours, 10 failed `auth.signIn` attempts per
 network per hour, 10 failed `auth.checkPassword` attempts per network per hour,
 20 unauthenticated `account.getPassword` calls per network per hour, and 5
-`auth.signUp` calls per network per hour. The `TG_RATE_LIMIT_*` settings above
-can change their limits and windows; setting a configurable limit to `0`
-disables only that counter. The failed `auth.signIn` counter has no environment
-override. Teagram puts a username in the protocol's `phone_number` field and
-rejects phone-shaped identifiers. Its `auth.sendCode` distinct-identifier
-counter may retain those usernames in Postgres for the configured window
-(24h by default), plus up to five minutes before the sweep removes them.
+`auth.signUp` calls and 20 pre-auth `account.checkUsername` calls per network
+per hour. The `TG_RATE_LIMIT_*` settings above can change their limits and
+windows; setting a configurable limit to `0` disables only that counter. The
+failed `auth.signIn` counter has no environment override. Teagram puts a
+username in the protocol's `phone_number` field and rejects phone-shaped
+identifiers. Its `auth.sendCode` distinct-identifier counter may retain those
+usernames in Postgres for the configured window (24h by default), plus up to
+five minutes before the sweep removes them.
 
 Per-network counters use an IPv4 `/32` or IPv6 `/64` bucket based on
 `TG_CLIENT_ADDR_TRUST`. Listener scope comes from the accepted socket, not
@@ -576,6 +577,22 @@ tailnet policy. Existing accounts can sign in in every mode.
 Before a client asks a user to register, it can call `help.getAppConfig` and
 read `registration_mode` to learn whether sign-up is closed, invite-only, or
 open.
+
+An unauthenticated client can call `account.checkUsername` before submission:
+`boolTrue` means the candidate is available, and `boolFalse` means it is
+occupied. This exposes one bit of account occupancy for a chosen handle and
+allows repeated candidate probing; it returns no profile data and is not an
+account-privacy boundary. The default budget is 20 calls per observed network
+per hour, charged before username validation. That is four times the default
+`auth.signUp` call budget of five per hour when sign-up is active, leaving
+headroom for correcting a candidate while keeping the final account-creation
+quota lower. The check is not gated by registration mode, so its occupancy
+signal remains available in closed and invite modes. This is an abuse throttle,
+not a privacy guarantee: targeted probes fit within one window and distributed
+sources multiply the budget. `auth.signUp` remains authoritative if availability
+changes after the check. See the
+[public listener threat model](public-websocket-threat-model.md#authentication-controls)
+for shared-bucket and residual-risk details.
 
 ### 5b. New account flow
 

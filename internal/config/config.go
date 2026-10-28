@@ -488,7 +488,9 @@ type RateLimitsConfig struct {
 	// TG_REGISTRATION is invite or open; no-op in closed mode.
 	SignUpIP store.RateLimitConfig
 	// CheckUsernameIP limits unauthenticated account.checkUsername calls per
-	// client network to bound registration username enumeration.
+	// client network. The 20/hour default is four times the active sign-up call
+	// budget (5/hour) to allow candidate corrections; it throttles bulk scans,
+	// not targeted or distributed enumeration, and is not a privacy boundary.
 	CheckUsernameIP store.RateLimitConfig
 	// PasswordProof limits account.getPasswordSettings and
 	// account.updatePasswordSettings (the proof-required path) per account, on

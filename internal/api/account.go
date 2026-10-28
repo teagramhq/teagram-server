@@ -304,9 +304,10 @@ func (h *handlers) handleUpdateUsername(r *mtproto.Request) (bin.Encoder, error)
 	return wireUser, nil
 }
 
-// handleCheckUsername reports whether a valid username is available. Unauthenticated
-// callers use sign-up validation and a client-network rate limit; authenticated
-// callers keep the same immutable answers as account.updateUsername.
+// handleCheckUsername reports whether a valid username is available. The
+// pre-auth bool is an account-occupancy signal; its network quota throttles
+// bulk probing but is not a privacy guarantee. Authenticated callers keep the
+// same immutable answers as account.updateUsername.
 func (h *handlers) handleCheckUsername(r *mtproto.Request) (bin.Encoder, error) {
 	var req tg.AccountCheckUsernameRequest
 	if err := req.Decode(r.Buf); err != nil {
