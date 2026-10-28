@@ -2,12 +2,8 @@
 set -Eeuo pipefail
 umask 077
 
-SCRIPT_DIR=$(cd -P "$(dirname "${BASH_SOURCE[0]}")" && pwd)
-readonly SCRIPT_DIR
-REPO_ROOT=$(git -C "$SCRIPT_DIR" rev-parse --show-toplevel 2>/dev/null || true)
-readonly REPO_ROOT
-readonly BASE_RUNNER="$REPO_ROOT/deploy/teagramd/rollout-runner/rollout-runner.sh"
-readonly BASE_VERIFIER="$REPO_ROOT/deploy/teagramd/rollout-runner/rollout-verifier.sh"
+BASE_RUNNER=
+BASE_VERIFIER=
 readonly TEMP_PREFIX=/tmp/teagram-preflight-replay.
 readonly SANDBOX_UID=65534
 readonly SANDBOX_PATH=/bin:/usr/bin
@@ -41,17 +37,25 @@ else
   REPOSITORY_URL=https://github.com/teagramhq/teagram-server.git
 fi
 
-[ -n "$REPO_ROOT" ] || { fail 'rollout runtime checkout is unavailable'; exit 1; }
-[ -f "$BASE_RUNNER" ] && [ ! -L "$BASE_RUNNER" ] && [ -f "$BASE_VERIFIER" ] && [ ! -L "$BASE_VERIFIER" ] || {
-  fail 'reviewed rollout runtime is unavailable'
-  exit 1
-}
 if [ "$LIVE_ROOT" != /opt/teagram ]; then
   LIVE_ROOT=$(readlink -f -- "$LIVE_ROOT") || { fail 'live checkout is unavailable'; exit 1; }
 fi
 [ -d "$LIVE_ROOT" ] && [ ! -L "$LIVE_ROOT" ] || { fail 'live checkout is unavailable'; exit 1; }
 [ "$(git -C "$LIVE_ROOT" rev-parse --is-inside-work-tree 2>/dev/null)" = true ] || {
   fail 'live checkout is not a Git worktree'
+  exit 1
+}
+if [ "${PREFLIGHT_REPLAY_TEST_MODE:-0}" = 1 ]; then
+  runtime_sha=$(git -C "$LIVE_ROOT" rev-parse --verify 'HEAD^{commit}' 2>/dev/null) || {
+    fail 'cannot resolve the fixture rollout runtime revision'
+    exit 1
+  }
+else
+  runtime_sha=$OPS_SHA
+fi
+[[ "$runtime_sha" =~ ^[0-9a-f]{40}$ ]] && \
+  git -C "$LIVE_ROOT" cat-file -e "$runtime_sha^{commit}" 2>/dev/null || {
+  fail 'reviewed rollout runtime commit is unavailable'
   exit 1
 }
 
@@ -290,6 +294,26 @@ esac
 }
 mkdir -m 700 "$TMP_DIR/docker-config"
 export DOCKER_CONFIG="$TMP_DIR/docker-config"
+
+BASE_RUNNER="$TMP_DIR/rollout-runner.sh"
+BASE_VERIFIER="$TMP_DIR/rollout-verifier.sh"
+if ! git -C "$LIVE_ROOT" show \
+  "$runtime_sha:deploy/teagramd/rollout-runner/rollout-runner.sh" > "$BASE_RUNNER" 2>/dev/null; then
+  fail 'cannot extract the reviewed rollout runner'
+  exit 1
+fi
+if ! git -C "$LIVE_ROOT" show \
+  "$runtime_sha:deploy/teagramd/rollout-runner/rollout-verifier.sh" > "$BASE_VERIFIER" 2>/dev/null; then
+  fail 'cannot extract the reviewed rollout verifier'
+  exit 1
+fi
+chmod 700 "$BASE_RUNNER" "$BASE_VERIFIER" || { fail 'cannot secure the reviewed rollout runtime'; exit 1; }
+[ -f "$BASE_RUNNER" ] && [ ! -L "$BASE_RUNNER" ] && [ -s "$BASE_RUNNER" ] && \
+  [ -f "$BASE_VERIFIER" ] && [ ! -L "$BASE_VERIFIER" ] && [ -s "$BASE_VERIFIER" ] || {
+  fail 'reviewed rollout runtime is unavailable'
+  exit 1
+}
+readonly BASE_RUNNER BASE_VERIFIER
 
 live_sha=$(git -C "$LIVE_ROOT" rev-parse --verify 'HEAD^{commit}' 2>/dev/null) || {
   fail 'cannot resolve the live checkout revision'

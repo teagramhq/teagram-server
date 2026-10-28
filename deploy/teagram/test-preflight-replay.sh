@@ -6,8 +6,10 @@ umask 077
 
 SCRIPT_DIR=$(cd -P "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 REPO_ROOT=$(cd -P "$SCRIPT_DIR/../.." && pwd)
-SCRIPT="$SCRIPT_DIR/ops/preflight-replay.sh"
+SOURCE_SCRIPT="$SCRIPT_DIR/ops/preflight-replay.sh"
+SCRIPT=
 readonly REPO_ROOT
+readonly SOURCE_SCRIPT
 readonly LEGACY_RUNNER_SHA=082083851cc458ce3e26fae7c2fdaaea935e0630
 readonly LEGACY_RUNNER_PATH=deploy/teagramd/rollout-runner/rollout-runner.sh
 REAL_RM=$(command -v rm)
@@ -58,6 +60,13 @@ fixture_tmp_is_direct_child "$TMP" && [ -d "$TMP" ] && \
 TMP_VALIDATED=1
 if [ "${FIXTURE_TEST_ROOT_TMP_ONLY:-0}" = 1 ]; then
   exit 0
+fi
+
+SCRIPT="$TMP/preflight-replay.sh"
+cp -p "$SOURCE_SCRIPT" "$SCRIPT"
+if git -C "$TMP" rev-parse --show-toplevel >/dev/null 2>&1; then
+  printf '%s\n' 'FAIL replay fixture copy is inside a Git worktree' >&2
+  exit 1
 fi
 
 chmod 700 "$TMP"
