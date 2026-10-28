@@ -194,6 +194,7 @@ check_demo_credential_gate() (
   tmp="$(mktemp -d)"
   trap 'rm -rf "$tmp"' EXIT
   query '.jobs.deploy-demo.steps[] | select(.id == "demo-gate") | .run' > "$tmp/gate.sh"
+  # shellcheck disable=SC2031
   export GITHUB_OUTPUT="$tmp/output"
 
   run_gate() {
