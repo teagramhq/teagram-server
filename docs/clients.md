@@ -621,6 +621,10 @@ invited accounts, issue an invite with
 `teagramd invite issue <username>`; the command prints the secret once.
 Deliver it to the user through a private channel. `teagramd invite list`
 and `teagramd invite revoke <id>` manage outstanding invites.
+For user-issued invites, `teagramd invite revoke-user <user-id>` revokes all of
+that user's live invites, `teagramd invite invitees <user-id>` lists redeemed
+invitees and redemption times, and `teagramd invite inviter <user-id>` shows the
+recorded inviter or that the account was created without a user invite.
 
 ### 5c. Promote an existing operator after the administration migration
 
