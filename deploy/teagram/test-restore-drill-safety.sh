@@ -10,10 +10,42 @@ sed -n \
   -e '/^checkout_is_clean() {/,/^}/p' \
   -e '/^remove_work_directory() {/,/^}/p' \
   -e '/^publish_final_output() {/,/^}/p' \
-  "$script" > "$functions"
+  -e '/^volume_snapshot() {/,/^}/p' \
+  "$script" | sed "s|/usr/bin/docker|$tmp/bin/docker|g" > "$functions"
 [[ -s $functions ]]
+mkdir -p "$tmp/bin" "$tmp/failing-sort"
+cat > "$tmp/bin/docker" <<'DOCKER'
+#!/usr/bin/env bash
+set -euo pipefail
+if [[ $1 == volume && $2 == ls && $3 == --quiet ]]; then
+  printf '%s\n' teagram_tgkey teagram_pgdata
+elif [[ $1 == volume && $2 == inspect && $3 == --format && $4 == '{{.CreatedAt}}' ]]; then
+  case $5 in
+    teagram_pgdata) printf '%s\n' '2026-10-20 12:00:00 +0000 UTC' ;;
+    teagram_tgkey) printf '%s\n' '2026-10-21 12:00:00 +0000 UTC' ;;
+    *) exit 1 ;;
+  esac
+else
+  exit 99
+fi
+DOCKER
+cat > "$tmp/failing-sort/sort" <<'SORT'
+#!/bin/sh
+exit 42
+SORT
+chmod 755 "$tmp/bin/docker" "$tmp/failing-sort/sort"
 # shellcheck disable=SC1090
 source "$functions"
+
+snapshot=$(volume_snapshot)
+[[ $snapshot == $'teagram_pgdata\t2026-10-20 12:00:00 +0000 UTC\nteagram_tgkey\t2026-10-21 12:00:00 +0000 UTC' ]]
+snapshot_status=0
+if snapshot=$(PATH="$tmp/failing-sort:$PATH" volume_snapshot); then
+  snapshot_status=0
+else
+  snapshot_status=$?
+fi
+[[ $snapshot_status == 1 && -z $snapshot ]]
 
 guard_calls=$(grep -Fc "if checkout_is_clean \"\$CHECKOUT\"; then" "$script")
 [[ $guard_calls == 2 ]]

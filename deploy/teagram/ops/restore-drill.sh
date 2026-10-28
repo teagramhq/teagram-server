@@ -482,13 +482,14 @@ identity_after_prepare=$(live_identity 2>/dev/null) || post_prepare_failure live
 if [[ $identity_after_prepare != "$identity" ]]; then post_prepare_failure live_changed_during_prepare; fi
 live_identity > "$work/live.before" 2>/dev/null || post_prepare_failure live_snapshot_failed
 volume_snapshot() {
-  local names name created_at
+  local names sorted_names name created_at
   names=$(/usr/bin/docker volume ls --quiet) || return 1
+  sorted_names=$(printf '%s\n' "$names" | sort) || return 1
   while IFS= read -r name; do
     [[ $name == teagram_* ]] || continue
     created_at=$(/usr/bin/docker volume inspect --format '{{.CreatedAt}}' "$name") || return 1
     printf '%s\t%s\n' "$name" "$created_at"
-  done < <(printf '%s\n' "$names" | sort)
+  done <<< "$sorted_names"
 }
 volume_snapshot > "$work/volumes.before" 2>/dev/null || post_prepare_failure volume_snapshot_failed
 tailscale serve status --json > "$work/serve.before.json" 2>/dev/null || post_prepare_failure serve_snapshot_failed
