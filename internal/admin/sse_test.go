@@ -1069,7 +1069,7 @@ func TestSSE_rateLimitDenialTelemetryHasFixedJSONSchema(t *testing.T) {
 		"rate_limit_denials_window_seconds",
 	}
 	wantSurface := []string{
-		"add_chat_user", "check_password", "check_password_ip", "contacts_search",
+		"add_chat_user", "check_password", "check_password_ip", "check_username_ip", "contacts_search",
 		"create_channel", "create_chat", "dialog_filter_mutation", "get_password", "get_password_ip",
 		"message_send", "messages_search", "messages_search_global", "password_proof",
 		"save_file_part", "send_code_ip_calls", "send_code_ip_distinct_numbers",

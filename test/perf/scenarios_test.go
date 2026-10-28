@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"sync/atomic"
+	"testing"
 	"time"
 
 	"github.com/gotd/td/tg"
@@ -15,15 +16,34 @@ import (
 )
 
 const (
-	readSamples  = 20
-	writeSamples = 10
-	pageLimit    = 100
+	readSamples            = 20
+	writeSamples           = 10
+	authKeyExchangeSamples = 20
+	pageLimit              = 100
 )
 
 // randomIDs keeps every send in every run distinct from the seeded ones.
 var randomIDs atomic.Int64
 
 func init() { randomIDs.Store(time.Now().UnixNano()) }
+
+func TestAuthKeyExchangeP95AllowsOneOutlier(t *testing.T) {
+	for _, sc := range scenarios() {
+		if sc.name != "auth key exchange" {
+			continue
+		}
+		samples := make([]float64, sc.samples)
+		for i := range samples {
+			samples[i] = 10
+		}
+		samples[len(samples)-1] = 100
+		if got := percentile(samples, 95); got >= 50 {
+			t.Fatalf("p95 with one outlier = %.1f ms, want below 50 ms", got)
+		}
+		return
+	}
+	t.Fatal("auth key exchange scenario missing")
+}
 
 type call = func(ctx context.Context) error
 
@@ -43,7 +63,7 @@ func read(name string, build func(e *env) call) scenario {
 func scenarios() []scenario {
 	return []scenario{
 		{
-			name: "auth key exchange", kind: perfreport.Write, samples: writeSamples,
+			name: "auth key exchange", kind: perfreport.Write, samples: authKeyExchangeSamples,
 			note: "server time across a new connection's key exchange and first RPC; gotd's client-side DH prime check is excluded",
 			setup: fixed(func(e *env) call {
 				return func(ctx context.Context) error {
