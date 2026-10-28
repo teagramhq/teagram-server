@@ -57,9 +57,11 @@ from `scenarios()` still fails as unmeasured, and a run limited by
 `TG_PERF_ONLY` fails rather than passing on a subset.
 
 A check `main` already fails is listed in `known_violations.json` with the issue
-that fixes it. Base regressions cannot be listed. A sequential-scan entry names one scan by
-the `table#fingerprint` the report prints (a hash of the full statement), so any
-other scan in that scenario still fails.
+that fixes it. A `timing` entry waives the scenario's p95 budget and 1x-to-100x
+scale-ratio checks; it does not waive allocation growth or regressions against
+the base branch. Base regressions cannot be listed. A sequential-scan entry
+names one scan by the `table#fingerprint` the report prints (a hash of the full
+statement), so any other scan in that scenario still fails.
 
 ## CI
 

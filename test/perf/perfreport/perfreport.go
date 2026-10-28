@@ -105,7 +105,9 @@ type Failure struct {
 // Checks a waiver may name. Regression against base is not among them: a
 // known violation may stay, it may not get worse.
 const (
-	CheckBudget  = "budget"
+	CheckBudget = "budget"
+	// CheckTiming waives the p95 budget and 1x-to-100x scale-ratio checks.
+	CheckTiming  = "timing"
 	CheckQueries = "queries"
 	CheckLatency = "latency"
 	CheckRows    = "rows"
@@ -129,6 +131,7 @@ func timing(check string) bool {
 }
 
 // Waiver accepts one check failing on one scenario until Issue fixes it.
+// CheckTiming accepts the p95 budget and scale-ratio checks together.
 type Waiver struct {
 	Scenario string `json:"scenario"`
 	Check    string `json:"check"`
@@ -146,7 +149,7 @@ func ParseWaivers(raw []byte) ([]Waiver, error) {
 	}
 	for _, w := range ws {
 		switch w.Check {
-		case CheckBudget, CheckQueries, CheckLatency, CheckRows, CheckAlloc, CheckSeqScan, CheckError, CheckUnexplained:
+		case CheckBudget, CheckTiming, CheckQueries, CheckLatency, CheckRows, CheckAlloc, CheckSeqScan, CheckError, CheckUnexplained:
 		default:
 			return nil, fmt.Errorf("waiver for %q: check %q cannot be waived", w.Scenario, w.Check)
 		}
@@ -278,7 +281,7 @@ func Evaluate(in Input) Verdict {
 		record := func(check, scan string, format string, args ...any) {
 			f := Failure{Scenario: name, Check: check, Reason: fmt.Sprintf(format, args...)}
 			for _, w := range in.Waivers {
-				if w.Scenario == name && w.Check == check && w.Scan == scan {
+				if waiverMatches(w, name, check, scan) {
 					used[w] = true
 					f.Issue = w.Issue
 					if !slices.Contains(row.Known, w.Issue) {
@@ -368,6 +371,18 @@ func Evaluate(in Input) Verdict {
 		}
 	}
 	return v
+}
+
+// waiverMatches applies a timing waiver to the two size-based checks it names;
+// base regressions and allocation growth remain independently blocking.
+func waiverMatches(w Waiver, scenario, check, scan string) bool {
+	if w.Scenario != scenario {
+		return false
+	}
+	if w.Check == CheckTiming {
+		return scan == "" && (check == CheckBudget || check == CheckLatency)
+	}
+	return w.Check == check && w.Scan == scan
 }
 
 type key struct{ name, fixture string }
