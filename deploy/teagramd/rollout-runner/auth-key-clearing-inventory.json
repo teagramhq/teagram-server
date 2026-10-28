@@ -1,6 +1,6 @@
 {
   "base_commit": "bdb89970bbd40fb57fdb89f3aa8fafb78925ce93",
-  "schema_head": "20261021000004",
+  "schema_head": "20261028000001",
   "trigger_tables": [
     "public.auth_keys",
     "public.browser_acceptance_binding_evidence",
@@ -27,6 +27,32 @@
       "columns": ["user_id"],
       "references": "public.users",
       "referenced_columns": ["id"],
+      "on_delete": "NO ACTION",
+      "on_update": "NO ACTION",
+      "match": "SIMPLE",
+      "deferrable": false,
+      "initially_deferred": false,
+      "validated": true
+    },
+    {
+      "name": "auth_keys_pending_user_kind_fkey",
+      "table": "public.auth_keys",
+      "columns": ["pending_user_id", "auth_pending_user_kind"],
+      "references": "public.users",
+      "referenced_columns": ["id", "kind"],
+      "on_delete": "NO ACTION",
+      "on_update": "NO ACTION",
+      "match": "SIMPLE",
+      "deferrable": false,
+      "initially_deferred": false,
+      "validated": true
+    },
+    {
+      "name": "auth_keys_user_kind_fkey",
+      "table": "public.auth_keys",
+      "columns": ["user_id", "auth_user_kind"],
+      "references": "public.users",
+      "referenced_columns": ["id", "kind"],
       "on_delete": "NO ACTION",
       "on_update": "NO ACTION",
       "match": "SIMPLE",
