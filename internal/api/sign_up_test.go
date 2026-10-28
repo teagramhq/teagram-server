@@ -146,8 +146,8 @@ func TestSignUpRejectsReservedHandles(t *testing.T) {
 	limits := store.RateLimitConfig{}
 
 	routeReserved := routeConflictingUsernameVariants()
-	handles := make([]string, 0, 3+len(routeReserved))
-	handles = append(handles, "help", "ADMIN", "me")
+	handles := make([]string, 0, 8+len(routeReserved))
+	handles = append(handles, "help", "ADMIN", "me", "bot", "bots", "xbot", "x_Bot", "WeatherBOT")
 	handles = append(handles, routeReserved...)
 	for i, handle := range handles {
 		keyID := int64(i + 1)
@@ -195,6 +195,39 @@ func TestSignUpRejectsReservedHandles(t *testing.T) {
 		if !found || key.UserID != 0 || key.PendingUserID != 0 {
 			t.Errorf("signUp %q changed auth key binding: %#v found=%v", handle, key, found)
 		}
+	}
+}
+
+func TestSignUpAllowsUsernameContainingBotBeforeItsEnd(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	s := openStore(t)
+	addr := netip.MustParseAddr("10.0.0.14")
+	limits := store.RateLimitConfig{}
+	const keyID = int64(51)
+	key := [8]byte{51}
+
+	hash, _, err := s.IssueCodeForUsername(ctx, "botanist")
+	if err != nil {
+		t.Fatalf("issue code: %v", err)
+	}
+	if err := s.SaveAuthKey(ctx, keyID, make([]byte, 256)); err != nil {
+		t.Fatalf("save auth key: %v", err)
+	}
+	if _, err := api.SignInForTestWithLimits(s, key, addr, limits, &tg.AuthSignInRequest{
+		PhoneNumber: "botanist", PhoneCodeHash: hash, PhoneCode: "botanist-proof",
+	}); err != nil {
+		t.Fatalf("signIn: %v", err)
+	}
+
+	res, err := api.SignUpForTest(s, key, addr, limits, config.RegistrationOpen, &tg.AuthSignUpRequest{
+		PhoneNumber: "botanist", PhoneCodeHash: hash, FirstName: "Botanist",
+	})
+	if err != nil {
+		t.Fatalf("signUp botanist: %v", err)
+	}
+	if _, ok := res.(*tg.AuthAuthorization); !ok {
+		t.Fatalf("signUp result = %T, want *tg.AuthAuthorization", res)
 	}
 }
 

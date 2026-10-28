@@ -225,7 +225,7 @@ func (h *handlers) handleSignUpWithConn(c *mtproto.Conn, r *mtproto.Request) (bi
 		return nil, errUsernameInvalid
 	}
 	username := strings.ToLower(req.PhoneNumber)
-	if isReservedUsername(username) {
+	if isReservedAccountUsername(username) {
 		h.logSignUpRejection(signUpHandleInvalid)
 		return nil, errUsernameInvalid
 	}
