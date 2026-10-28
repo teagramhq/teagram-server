@@ -126,6 +126,52 @@ func TestResolveUsernameReportsAuthoritativeUserHandle(t *testing.T) {
 	}
 }
 
+func TestExistingBotSuffixUsernameStillResolvesAndReceivesMessages(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	s := openStore(t)
+
+	caller, err := s.CreateUser(ctx, "15550014023")
+	if err != nil {
+		t.Fatalf("create caller: %v", err)
+	}
+	target, err := s.CreateUser(ctx, "15550014024")
+	if err != nil {
+		t.Fatalf("create existing holder: %v", err)
+	}
+	if err := s.UpdateUsername(ctx, target.ID, "weatherbot"); err != nil {
+		t.Fatalf("seed existing username: %v", err)
+	}
+
+	if _, err := api.UpdateUsernameForTest(s, target.ID, "WeatherBOT"); rpcMessage(t, err) != "USERNAME_INVALID" {
+		t.Fatalf("updateUsername for existing suffix username = %v, want USERNAME_INVALID", err)
+	}
+	if held, found, err := s.UsernameByHandle(ctx, "weatherbot"); err != nil || !found || held.User.ID != target.ID {
+		t.Fatalf("existing username = %#v found=%v err=%v, want it to remain held by user %d", held, found, err, target.ID)
+	}
+
+	resolved, err := api.ResolveUsernameForTest(s, caller.ID, &tg.ContactsResolveUsernameRequest{Username: "WeatherBOT"})
+	if err != nil {
+		t.Fatalf("resolve existing username: %v", err)
+	}
+	peer, ok := resolved.(*tg.ContactsResolvedPeer)
+	if !ok || len(peer.Users) != 1 {
+		t.Fatalf("resolve result = %#v, want one resolved user", resolved)
+	}
+	resolvedUser, ok := peer.Users[0].(*tg.User)
+	if !ok || resolvedUser.ID != target.ID {
+		t.Fatalf("resolved user = %#v, want user %d", peer.Users[0], target.ID)
+	}
+
+	if _, err := api.SendMessageForTest(s, caller.ID, &tg.MessagesSendMessageRequest{
+		Peer:     &tg.InputPeerUser{UserID: resolvedUser.ID, AccessHash: resolvedUser.AccessHash},
+		Message:  "hello existing holder",
+		RandomID: 14023,
+	}); err != nil {
+		t.Fatalf("send to resolved existing holder: %v", err)
+	}
+}
+
 // TestContactsSearchReportsAuthoritativeUsername covers contacts.search, whose
 // contact arm loads dialog partners by name.
 func TestContactsSearchReportsAuthoritativeUsername(t *testing.T) {
