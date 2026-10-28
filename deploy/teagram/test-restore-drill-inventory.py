@@ -34,22 +34,41 @@ class RestoreDrillInventoryTest(unittest.TestCase):
         mode: int = 0o600,
     ) -> Path:
         path = self.root / name
-        path.write_bytes(b"x" * size)
+        with path.open("wb") as dump:
+            dump.truncate(size)
         path.chmod(mode)
         timestamp = mtime.timestamp()
         os.utime(path, (timestamp, timestamp))
         return path
 
-    def inventory(self, *, now: dt.datetime | None = None) -> dict[str, object]:
+    def inventory(
+        self,
+        *,
+        now: dt.datetime | None = None,
+        expected_uid: int | None = None,
+    ) -> dict[str, object]:
         with patch(
             "deploy.teagram.ops.restore_drill_inventory.safe_dump_directory",
             return_value=True,
         ):
             return metadata_inventory(
                 self.root,
-                expected_uid=os.getuid(),
+                expected_uid=os.getuid() if expected_uid is None else expected_uid,
                 now_epoch=int((now or dt.datetime(2026, 10, 28, 4, 0, tzinfo=UTC)).timestamp()),
             )
+
+    def assert_newest_refused(
+        self,
+        newest: Path,
+        reason: str,
+        *,
+        expected_uid: int | None = None,
+    ) -> None:
+        result = self.inventory(expected_uid=expected_uid)
+
+        self.assertEqual(result["selected"]["name"], newest.name)
+        self.assertFalse(result["selected"]["metadata_ok"])
+        self.assertIn(reason, result["selected"]["refusal_reasons"])
 
     def test_selects_by_filename_timestamp_then_mtime(self) -> None:
         newer_by_name = self.add_dump(
@@ -83,28 +102,47 @@ class RestoreDrillInventoryTest(unittest.TestCase):
 
     def test_newest_invalid_dump_is_refused_without_fallback(self) -> None:
         self.add_dump("pgdump-pre-aaaaaaa-20261028T010000Z.sql")
-        self.add_dump(
+        newest = self.add_dump(
             "pgdump-pre-bbbbbbb-20261028T020000Z.sql",
             mode=0o644,
         )
 
-        result = self.inventory()
-
-        self.assertEqual(
-            result["selected"]["name"], "pgdump-pre-bbbbbbb-20261028T020000Z.sql"
-        )
-        self.assertFalse(result["selected"]["metadata_ok"])
-        self.assertEqual(result["selected"]["refusal_reasons"], ["mode"])
+        self.assert_newest_refused(newest, "mode")
 
     def test_symlinked_newest_dump_is_refused(self) -> None:
         self.add_dump("pgdump-pre-aaaaaaa-20261028T010000Z.sql")
-        (self.root / "pgdump-pre-bbbbbbb-20261028T020000Z.sql").symlink_to(
+        newest = self.root / "pgdump-pre-bbbbbbb-20261028T020000Z.sql"
+        newest.symlink_to(
             "pgdump-pre-aaaaaaa-20261028T010000Z.sql"
         )
 
-        result = self.inventory()
+        self.assert_newest_refused(newest, "regular_file")
 
-        self.assertIn("regular_file", result["selected"]["refusal_reasons"])
+    def test_newest_dump_with_owner_mismatch_is_refused_without_fallback(self) -> None:
+        self.add_dump("pgdump-pre-aaaaaaa-20261028T010000Z.sql")
+        newest = self.add_dump("pgdump-pre-bbbbbbb-20261028T020000Z.sql")
+
+        self.assert_newest_refused(
+            newest,
+            "owner",
+            expected_uid=os.getuid() + 1,
+        )
+
+    def test_newest_dump_with_multiple_hard_links_is_refused_without_fallback(self) -> None:
+        self.add_dump("pgdump-pre-aaaaaaa-20261028T010000Z.sql")
+        newest = self.add_dump("pgdump-pre-bbbbbbb-20261028T020000Z.sql")
+        os.link(newest, self.root / "hard-link-target")
+
+        self.assert_newest_refused(newest, "links")
+
+    def test_newest_dump_over_512_mib_is_refused_without_fallback(self) -> None:
+        self.add_dump("pgdump-pre-aaaaaaa-20261028T010000Z.sql")
+        newest = self.add_dump(
+            "pgdump-pre-bbbbbbb-20261028T020000Z.sql",
+            size=512 * 1024 * 1024 + 1,
+        )
+
+        self.assert_newest_refused(newest, "size_over_512_mib")
 
     def test_inventory_marks_prune_candidates_after_ten(self) -> None:
         for day in range(1, 13):
