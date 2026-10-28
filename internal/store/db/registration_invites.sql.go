@@ -150,6 +150,44 @@ func (q *Queries) InsertUserRegistrationInvite(ctx context.Context, arg InsertUs
 	return i, err
 }
 
+const listRegistrationInvitees = `-- name: ListRegistrationInvitees :many
+SELECT id AS invite_id, consumed_by_user_id AS invitee_user_id, consumed_at AS redeemed_at
+FROM registration_invites
+WHERE inviter_user_id = $1::bigint
+  AND state = 'consumed'
+  AND consumed_by_user_id IS NOT NULL
+  AND consumed_at IS NOT NULL
+ORDER BY consumed_at, id
+`
+
+type ListRegistrationInviteesRow struct {
+	InviteID      int64
+	InviteeUserID *int64
+	RedeemedAt    pgtype.Timestamptz
+}
+
+// Return the accounts and redemption times recorded on every redeemed user
+// invite issued by an inviter.
+func (q *Queries) ListRegistrationInvitees(ctx context.Context, inviterUserID int64) ([]ListRegistrationInviteesRow, error) {
+	rows, err := q.db.Query(ctx, listRegistrationInvitees, inviterUserID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListRegistrationInviteesRow
+	for rows.Next() {
+		var i ListRegistrationInviteesRow
+		if err := rows.Scan(&i.InviteID, &i.InviteeUserID, &i.RedeemedAt); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listRegistrationInvites = `-- name: ListRegistrationInvites :many
 SELECT id, handle, inviter_user_id, issued_at, expires_at,
        CASE
@@ -369,6 +407,25 @@ func (q *Queries) RegistrationInviteBySecretDigestForUpdate(ctx context.Context,
 	return i, err
 }
 
+const registrationInviteForRedeemer = `-- name: RegistrationInviteForRedeemer :one
+SELECT inviter_user_id
+FROM registration_invites
+WHERE consumed_by_user_id = $1::bigint
+  AND state = 'consumed'
+ORDER BY id DESC
+LIMIT 1
+`
+
+// Resolve the user-invite attribution for a redeemed account. Operator invites
+// have a NULL inviter and therefore render the same as accounts created with
+// no user invite.
+func (q *Queries) RegistrationInviteForRedeemer(ctx context.Context, redeemerUserID int64) (*int64, error) {
+	row := q.db.QueryRow(ctx, registrationInviteForRedeemer, redeemerUserID)
+	var inviter_user_id *int64
+	err := row.Scan(&inviter_user_id)
+	return inviter_user_id, err
+}
+
 const revokeRegistrationInvite = `-- name: RevokeRegistrationInvite :execrows
 UPDATE registration_invites
 SET state = 'revoked', revoked_at = clock_timestamp()
@@ -405,6 +462,24 @@ type RevokeUserRegistrationInviteParams struct {
 // someone else both affect zero rows and are indistinguishable to the caller.
 func (q *Queries) RevokeUserRegistrationInvite(ctx context.Context, arg RevokeUserRegistrationInviteParams) (int64, error) {
 	result, err := q.db.Exec(ctx, revokeUserRegistrationInvite, arg.ID, arg.InviterUserID)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
+const revokeUserRegistrationInvites = `-- name: RevokeUserRegistrationInvites :execrows
+UPDATE registration_invites
+SET state = 'revoked', revoked_at = clock_timestamp()
+WHERE inviter_user_id = $1::bigint
+  AND state = 'issued'
+  AND expires_at > clock_timestamp()
+`
+
+// Revoke all currently live invites issued by a user. Consumed, revoked, and
+// naturally expired rows stay untouched; the affected-row count is the result.
+func (q *Queries) RevokeUserRegistrationInvites(ctx context.Context, inviterUserID int64) (int64, error) {
+	result, err := q.db.Exec(ctx, revokeUserRegistrationInvites, inviterUserID)
 	if err != nil {
 		return 0, err
 	}

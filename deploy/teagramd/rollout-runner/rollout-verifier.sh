@@ -71,7 +71,10 @@ verify_added_container_environment() {
               ($compose_env[$runtime_name] | type) == "string" and
               ($actual | length) == 1 and
               $actual[0] == $compose_env[$runtime_name] and
+              ($name != "TG_RATE_LIMIT_KEY_EXCHANGE_IP_TAILNET" or
+               (dotenv_value($assignments[0]) | test("^[0-9]+$"))) and
               (($name | IN(
+                "TG_RATE_LIMIT_KEY_EXCHANGE_IP_TAILNET",
                 "TG_PUBLIC_WEBSOCKET_LISTEN_ADDR", "TG_PUBLIC_WEBSOCKET_ADVERTISE_ADDR",
                 "TG_PUBLIC_REGISTRATION", "TG_PUBLIC_WEBSOCKET_ALLOWED_ORIGINS"
               )) | not or dotenv_value($assignments[0]) == $compose_env[$runtime_name])
@@ -131,6 +134,7 @@ verify_changed_container_environment() {
                 (($name == "TG_REGISTRATION" and (dotenv_value($assignments[0]) | IN("open","closed"))) or
                  ($name == "TG_TURNSTILE_SIGNIN_ENABLED" and ($assignments[0] | IN("true","false"))) or
                  ($name == "TG_PUBLIC_REGISTRATION" and (dotenv_value($assignments[0]) | IN("invite","closed"))) or
+                ($name == "TG_RATE_LIMIT_KEY_EXCHANGE_IP_TAILNET" and (dotenv_value($assignments[0]) | test("^[0-9]+$"))) or
                  ($name | IN("TG_WEBSOCKET_ALLOWED_ORIGINS", "TG_PUBLIC_WEBSOCKET_LISTEN_ADDR", "TG_PUBLIC_WEBSOCKET_ADVERTISE_ADDR", "TG_PUBLIC_WEBSOCKET_ALLOWED_ORIGINS"))) and
                 ($assignments | length) == 1 and
                 ($compose_env | has($name)) and
@@ -932,6 +936,7 @@ snapshot_from_json() {
         elif $name == "TEAGRAM_TURNSTILE_SECRET_KEY_FILE" then "TG_TURNSTILE_SECRET_KEY_FILE"
         else $name end;
       [(item.Config.Env // [])[] | select(type == "string")
+       | select(. != "TG_RATE_LIMIT_KEY_EXCHANGE_IP_TAILNET=")
        | select(IN(
            "TG_TURNSTILE_SITE_KEY=", "TG_TURNSTILE_SECRET_KEY_FILE=", "TG_TURNSTILE_SIGNIN_ENABLED=false",
            "TG_PUBLIC_WEBSOCKET_LISTEN_ADDR=", "TG_PUBLIC_WEBSOCKET_ADVERTISE_ADDR=",
@@ -996,6 +1001,7 @@ snapshot_from_json() {
         | map(select(type != "string" or ((split("=")[0]) as $key | any($changed[]; . == $key) | not)))
         | map(select(type != "string" or (IN(
             "TG_RATE_LIMIT_KEY_EXCHANGE_IP=",
+            "TG_RATE_LIMIT_KEY_EXCHANGE_IP_TAILNET=",
             "TG_RATE_LIMIT_KEY_EXCHANGE_IP_WINDOW=",
             "TG_KEY_EXCHANGE_PER_CONNECTION=",
             "TG_KEY_EXCHANGE_GLOBAL_RATE=",
@@ -1019,6 +1025,14 @@ snapshot_from_json() {
       elif $name == "TEAGRAM_TURNSTILE_SECRET_KEY_FILE" then "TG_TURNSTILE_SECRET_KEY_FILE"
       else $name end;
     [(item.Config.Env // [])[] | select(type == "string")
+     | select(IN(
+         "TG_RATE_LIMIT_KEY_EXCHANGE_IP=",
+         "TG_RATE_LIMIT_KEY_EXCHANGE_IP_TAILNET=",
+         "TG_RATE_LIMIT_KEY_EXCHANGE_IP_WINDOW=",
+         "TG_KEY_EXCHANGE_PER_CONNECTION=",
+         "TG_KEY_EXCHANGE_GLOBAL_RATE=",
+         "TG_KEY_EXCHANGE_GLOBAL_BURST="
+       ) | not)
      | select($snapshot_name == "target" or
               (IN(
                 "TG_TURNSTILE_SITE_KEY=", "TG_TURNSTILE_SECRET_KEY_FILE=", "TG_TURNSTILE_SIGNIN_ENABLED=false",
@@ -1084,7 +1098,8 @@ snapshot_from_json() {
         }
     ')
     canonical_compose=$(printf '%s' "$compose_json" | jq -ceS --arg mode_source "$mode_source" --arg mode_target "$mode_mount_target" \
-      --arg media_key_source "$MEDIA_KEY_SOURCE_PATH" --argjson media_key_enabled "$MEDIA_KEY_MOUNT_CONFIGURED" '
+      --arg media_key_source "$MEDIA_KEY_SOURCE_PATH" --argjson media_key_enabled "$MEDIA_KEY_MOUNT_CONFIGURED" \
+      --argjson added "$added_env_names" --argjson changed "$changed_env_names" '
       def approved_public_ws_port:
         type == "object" and
         ((.target | tostring) == "2446") and
@@ -1096,6 +1111,7 @@ snapshot_from_json() {
       def empty_key_exchange_default:
         (.key | IN(
           "TG_RATE_LIMIT_KEY_EXCHANGE_IP",
+          "TG_RATE_LIMIT_KEY_EXCHANGE_IP_TAILNET",
           "TG_RATE_LIMIT_KEY_EXCHANGE_IP_WINDOW",
           "TG_KEY_EXCHANGE_PER_CONNECTION",
           "TG_KEY_EXCHANGE_GLOBAL_RATE",
@@ -1120,6 +1136,12 @@ snapshot_from_json() {
       # Empty key-exchange mappings use binary defaults; active values remain
       # subject to the Compose and container environment checks.
       | .services[env.ROLLOUT_COMPOSE_SERVICE // "teagramd"].environment |= with_entries(select(empty_key_exchange_default | not))
+      # Named tailnet changes are verified against .env, resolved Compose, and
+      # the inspected container; omit only that named value from config drift.
+      | if (any($added[]; . == "TG_RATE_LIMIT_KEY_EXCHANGE_IP_TAILNET") or
+            any($changed[]; . == "TG_RATE_LIMIT_KEY_EXCHANGE_IP_TAILNET")) then
+          del(.services[env.ROLLOUT_COMPOSE_SERVICE // "teagramd"].environment.TG_RATE_LIMIT_KEY_EXCHANGE_IP_TAILNET)
+        else . end
       # Reviewed logger and login-code transitions are checked separately.
       # Keep both out of the unrelated config digest.
       | .services[env.ROLLOUT_COMPOSE_SERVICE // "teagramd"] |= del(.logging)
@@ -1740,11 +1762,136 @@ compare_command() {
   fi
 }
 
+secure_replay_evidence_dir() {
+  local dir=$1 canonical owner=0
+  if [ "${ROLLOUT_PREFLIGHT_TEST_MODE:-0}" = 1 ]; then
+    owner=$(id -u) || return 1
+  else
+    [ "$(id -u)" = 0 ] || { printf '%s\n' 'preflight replay requires uid 0' >&2; return 1; }
+  fi
+  case "$dir" in
+    /tmp/*) ;;
+    *) printf '%s\n' 'preflight replay evidence must be directly below /tmp' >&2; return 1 ;;
+  esac
+  case "$dir" in
+    /tmp/*/*) printf '%s\n' 'preflight replay evidence must be directly below /tmp' >&2; return 1 ;;
+  esac
+  case "$dir" in
+    *'/../'*|*/..|*'/./'*) printf '%s\n' 'preflight replay evidence path must be canonical' >&2; return 1 ;;
+  esac
+  [ -d "$dir" ] && [ ! -L "$dir" ] || { printf '%s\n' 'preflight replay evidence directory is unavailable' >&2; return 1; }
+  canonical=$(readlink -f -- "$dir") || return 1
+  [ "$canonical" = "$dir" ] && [ "$(stat -c %u:%a -- "$dir")" = "$owner:700" ] || {
+    printf '%s\n' 'preflight replay evidence has an invalid owner or mode' >&2
+    return 1
+  }
+}
+
+preflight_snapshot_command() {
+  local container_id=$1 project_dir=$2 evidence_dir=$3 name=$4 project_name=$5 selection=$6
+  local env_file override_file compose_files_value='' compose_json inspect_json snapshot output entry file canonical owner=0
+  local -a compose_entries=() compose_args=()
+  secure_replay_evidence_dir "$evidence_dir" || return 1
+  if [ "${ROLLOUT_PREFLIGHT_TEST_MODE:-0}" = 1 ]; then owner=$(id -u) || return 1; fi
+  case "$project_dir" in
+    "$evidence_dir"/*) ;;
+    *) printf '%s\n' 'preflight replay checkout must be inside its evidence directory' >&2; return 64 ;;
+  esac
+  case "$project_dir" in
+    *'/../'*|*/..|*'/./'*) printf '%s\n' 'preflight replay checkout path must be canonical' >&2; return 64 ;;
+  esac
+  [ -d "$project_dir" ] && [ ! -L "$project_dir" ] || { printf '%s\n' 'preflight replay checkout is unavailable' >&2; return 1; }
+  canonical=$(readlink -f -- "$project_dir") || return 1
+  [ "$canonical" = "$project_dir" ] || { printf '%s\n' 'preflight replay checkout path must be canonical' >&2; return 64; }
+  [ "$(stat -c %u:%a -- "$project_dir")" = "$owner:700" ] || {
+    printf '%s\n' 'preflight replay checkout has an invalid owner or mode' >&2
+    return 1
+  }
+  validate_container_id "$container_id" || return 64
+  case "$name" in
+    baseline|preflight) ;;
+    *) printf '%s\n' 'preflight replay snapshot name is invalid' >&2; return 64 ;;
+  esac
+  [[ "$project_name" =~ ^[a-z0-9][a-z0-9_-]*$ ]] || {
+    printf '%s\n' 'preflight replay project name is invalid' >&2
+    return 64
+  }
+  [ -n "$selection" ] || { printf '%s\n' 'preflight replay Compose selection is empty' >&2; return 64; }
+  IFS=, read -r -a compose_entries <<< "$selection"
+  [ "${#compose_entries[@]}" -gt 0 ] || { printf '%s\n' 'preflight replay Compose selection is empty' >&2; return 64; }
+  for entry in "${compose_entries[@]}"; do
+    [[ "$entry" =~ ^[A-Za-z0-9._/-]+$ ]] && [ "$entry" != .. ] && \
+      [[ "$entry" != ../* && "$entry" != */../* && "$entry" != */.. && "$entry" != *//* ]] || {
+      printf '%s\n' 'preflight replay Compose selection is invalid' >&2
+      return 64
+    }
+    file="$project_dir/$entry"
+    [ -f "$file" ] && [ ! -L "$file" ] || { printf '%s\n' 'selected preflight Compose file is unavailable' >&2; return 1; }
+    canonical=$(readlink -f -- "$file") || return 1
+    [ "$canonical" = "$file" ] || { printf '%s\n' 'selected preflight Compose file is symlinked' >&2; return 1; }
+    if [ -n "$compose_files_value" ]; then compose_files_value+=:; fi
+    compose_files_value+="$file"
+    compose_args+=(--file "$file")
+  done
+  env_file="$project_dir/.env"
+  override_file="$project_dir/docker-compose.override.yml"
+  for file in "$env_file" "$override_file"; do
+    [ -f "$file" ] && [ ! -L "$file" ] || { printf '%s\n' 'live Compose input is unavailable' >&2; return 1; }
+    canonical=$(readlink -f -- "$file") || return 1
+    [ "$canonical" = "$file" ] || { printf '%s\n' 'live Compose input is symlinked' >&2; return 1; }
+  done
+  [ "$(stat -c %u:%a -- "$env_file")" = "$owner:600" ] || {
+    printf '%s\n' 'live environment file has an invalid owner or mode' >&2
+    return 1
+  }
+  [ ! -e "$evidence_dir/$name.snapshot.json" ] && [ ! -L "$evidence_dir/$name.snapshot.json" ] || {
+    printf '%s\n' 'preflight replay snapshot already exists' >&2
+    return 64
+  }
+
+  unset COMPOSE_PROFILES COMPOSE_ENV_FILES
+  COMPOSE_FILE=$compose_files_value
+  COMPOSE_PROJECT_NAME=$project_name
+  COMPOSE_EXPERIMENTAL_GIT_REMOTE=false
+  COMPOSE_EXPERIMENTAL_OCI_REMOTE=false
+  XDG_CACHE_HOME="$evidence_dir/compose-cache"
+  ROLLOUT_CHECKOUT_PATH=$project_dir
+  ROLLOUT_COMPOSE_SERVICE=teagramd
+  ROLLOUT_ADDED_ENV=
+  ROLLOUT_CHANGED_ENV=
+  export COMPOSE_FILE COMPOSE_PROJECT_NAME COMPOSE_EXPERIMENTAL_GIT_REMOTE
+  export COMPOSE_EXPERIMENTAL_OCI_REMOTE XDG_CACHE_HOME
+  export ROLLOUT_CHECKOUT_PATH ROLLOUT_COMPOSE_SERVICE
+  export ROLLOUT_ADDED_ENV ROLLOUT_CHANGED_ENV
+  inspect_json=$(docker inspect "$container_id" 2>/dev/null) || {
+    printf '%s\n' 'cannot inspect the live teagramd container' >&2
+    return 1
+  }
+  compose_json=$(docker compose --project-directory "$project_dir" --project-name "$project_name" \
+    "${compose_args[@]}" config --format json </dev/null 2>/dev/null) || {
+    printf '%s\n' 'cannot render the selected Compose files' >&2
+    return 1
+  }
+  snapshot=$(snapshot_from_json "$inspect_json" "$compose_json" "$env_file" "$override_file" \
+    selected-compose-render "$name" "$compose_files_value") || {
+    printf '%s\n' 'preflight replay snapshot validation failed' >&2
+    return 1
+  }
+  output="$evidence_dir/$name.snapshot.json"
+  write_private_file "$output" "$snapshot" || {
+    printf '%s\n' 'cannot write private preflight replay snapshot' >&2
+    return 1
+  }
+}
+
 main() {
-  [ "$#" -ge 1 ] || { printf '%s\n' 'commands: snapshot, compare, ready, ready-pair' >&2; return 64; }
+  [ "$#" -ge 1 ] || { printf '%s\n' 'commands: preflight-snapshot, snapshot, compare, ready, ready-pair' >&2; return 64; }
   local command=$1
   shift
   case "$command" in
+    preflight-snapshot)
+      [ "$#" -eq 6 ] || { printf '%s\n' 'usage: rollout-verifier.sh preflight-snapshot CONTAINER_ID CHECKOUT EVIDENCE_DIR baseline|preflight PROJECT_NAME COMPOSE_SELECTION' >&2; return 64; }
+      preflight_snapshot_command "$@" ;;
     snapshot)
       [ "$#" -ge 5 ] && [ "$#" -le 6 ] || { printf '%s\n' 'usage: rollout-verifier.sh snapshot CONTAINER_ID EVIDENCE_DIR NAME ENV_FILE OVERRIDE_FILE [selected-compose-render|live-container-inspection]' >&2; return 64; }
       snapshot_command "$@" ;;
@@ -1766,7 +1913,7 @@ main() {
       secure_evidence_dir "$(dirname "$3")"
       wait_readiness "$1" "$2" "$3" "${ROLLOUT_READY_SECONDS:-120}" 5 probe_live ;;
     *)
-      printf '%s\n' 'commands: snapshot, compare, ready, ready-pair' >&2
+      printf '%s\n' 'commands: preflight-snapshot, snapshot, compare, ready, ready-pair' >&2
       return 64 ;;
   esac
 }

@@ -492,6 +492,11 @@ type RateLimitsConfig struct {
 	// SignUpIP limits auth.signUp calls per client network. Applied only when
 	// TG_REGISTRATION is invite or open; no-op in closed mode.
 	SignUpIP store.RateLimitConfig
+	// CheckUsernameIP limits unauthenticated account.checkUsername calls per
+	// client network. The 20/hour default is four times the active sign-up call
+	// budget (5/hour) to allow candidate corrections; it throttles bulk scans,
+	// not targeted or distributed enumeration, and is not a privacy boundary.
+	CheckUsernameIP store.RateLimitConfig
 	// PasswordProof limits account.getPasswordSettings and
 	// account.updatePasswordSettings (the proof-required path) per account, on
 	// one shared budget. Both call consumeAndVerify against the same secret,
@@ -527,13 +532,15 @@ type RateLimitsConfig struct {
 // DefaultRateLimits returns the shipped per-surface defaults: 60 sends per 60s,
 // 20 chat creates per 24h, 120 member adds per 24h, 20 channel creates per 24h,
 // 300 message searches per hour, 300 contacts searches per hour, 300 global
-// searches per hour, 60 poll votes per 60s, 600 upload parts per 60s, per client network 10 sendCode
-// calls per hour across at most 20 distinct phone numbers per 24h, 10 failed
+// searches per hour, 60 poll votes per 60s, 600 upload parts per 60s, per client
+// network 10 sendCode calls per hour across at most 20 distinct phone numbers
+// per 24h, 10 failed
 // signIn attempts per hour per client network, 5 failed checkPassword attempts
 // per 10 min per account, 10 failed checkPassword attempts per hour per client
 // network, 20 getPassword calls per hour per client network (unauthenticated
-// callers only), 5 signUp calls per hour per client network, 5 password proof
-// attempts per 10 min per account (shared by getPasswordSettings and
+// callers only), 5 signUp calls and 20 unauthenticated account.checkUsername
+// calls per hour per client network, 5 password proof attempts per 10 min per
+// account (shared by getPasswordSettings and
 // updatePasswordSettings), 20 getPassword calls per hour per account
 // (authorized callers only), 120 getMessages calls per minute per account,
 // 20 updateProfile calls per 24h per account, 10
@@ -576,6 +583,7 @@ func DefaultRateLimits() RateLimitsConfig {
 		CheckPasswordIP: store.RateLimitConfig{Limit: 10, Window: time.Hour},
 		GetPasswordIP:   store.RateLimitConfig{Limit: 20, Window: time.Hour},
 		SignUpIP:        store.RateLimitConfig{Limit: 5, Window: time.Hour},
+		CheckUsernameIP: store.RateLimitConfig{Limit: 20, Window: time.Hour},
 		PasswordProof:   store.RateLimitConfig{Limit: 5, Window: 10 * time.Minute},
 		GetPassword:     store.RateLimitConfig{Limit: 20, Window: time.Hour},
 		UpdateProfile:   store.RateLimitConfig{Limit: 20, Window: 24 * time.Hour},
@@ -590,22 +598,25 @@ func DefaultRateLimits() RateLimitsConfig {
 	}
 }
 
-// validateRateLimitSurface rejects a per-surface budget that cannot mean
-// anything: a negative limit is not a bound at all, and RateLimitConfig.Enabled
-// treats a zero or negative window as disabled, so accepting either would let an
-// operator turn a shipped bound off by typo rather than by the documented
-// Limit=0. A surface with a positive limit must name a positive window.
-//
-// The ceiling is not cosmetic either. The limiter hands the limit to Postgres as
-// an int4, so a value above MaxInt32 gets there narrowed, and a narrowed negative
-// makes the counter's INSERT refuse while leaving no row behind to read back. The
-// missing-row path then admits the request, so the bound is silently off.
-func validateRateLimitSurface(limitName, windowName string, cfg store.RateLimitConfig) error {
-	if cfg.Limit < 0 {
+// validateRateLimitLimit rejects limits that cannot mean a bound: negative
+// values disable enforcement, and values above MaxInt32 narrow when passed to
+// Postgres as int4, preventing the counter row from being inserted.
+func validateRateLimitLimit(limitName string, limit int) error {
+	if limit < 0 {
 		return fmt.Errorf("%s must not be negative; 0 disables the bound", limitName)
 	}
-	if cfg.Limit > math.MaxInt32 {
+	if limit > math.MaxInt32 {
 		return fmt.Errorf("%s must not exceed math.MaxInt32", limitName)
+	}
+	return nil
+}
+
+// validateRateLimitSurface also ensures that a positive limit has an active
+// window. Surfaces that document a non-positive window as a disable use only
+// validateRateLimitLimit instead.
+func validateRateLimitSurface(limitName, windowName string, cfg store.RateLimitConfig) error {
+	if err := validateRateLimitLimit(limitName, cfg.Limit); err != nil {
+		return err
 	}
 	if cfg.Window < 0 {
 		return fmt.Errorf("%s must not be negative", windowName)
@@ -1546,6 +1557,24 @@ func load(log *slog.Logger, allowKeyGeneration bool) (Config, error) {
 		}
 		cfg.RateLimits.SignUpIP.Window = d
 	}
+	// Unauthenticated account.checkUsername calls (username enumeration).
+	if v := os.Getenv("TG_RATE_LIMIT_CHECK_USERNAME_IP"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil {
+			return Config{}, errors.New("TG_RATE_LIMIT_CHECK_USERNAME_IP must be an integer")
+		}
+		cfg.RateLimits.CheckUsernameIP.Limit = n
+	}
+	if v := os.Getenv("TG_RATE_LIMIT_CHECK_USERNAME_IP_WINDOW"); v != "" {
+		d, err := time.ParseDuration(v)
+		if err != nil {
+			return Config{}, errors.New("TG_RATE_LIMIT_CHECK_USERNAME_IP_WINDOW must be a duration")
+		}
+		cfg.RateLimits.CheckUsernameIP.Window = d
+	}
+	if err := validateRateLimitLimit("TG_RATE_LIMIT_CHECK_USERNAME_IP", cfg.RateLimits.CheckUsernameIP.Limit); err != nil {
+		return Config{}, err
+	}
 	// PasswordProof per-account rate limit (shared by getPasswordSettings and
 	// updatePasswordSettings proof path).
 	if v := os.Getenv("TG_RATE_LIMIT_PASSWORD_PROOF"); v != "" {
@@ -2290,7 +2319,8 @@ func parseWebSocketOriginPatterns(raw, name string) ([]string, error) {
 func (c Config) WarnClientAddrTrust(log *slog.Logger) {
 	perIPLimits := c.RateLimits.SendCodeIP.Enabled() || c.RateLimits.SignInFailIP.Enabled() ||
 		c.RateLimits.CheckPasswordIP.Enabled() || c.RateLimits.GetPasswordIP.Enabled() ||
-		c.RateLimits.SignUpIP.Enabled() || c.PreAuth.MaxConnsPerNet > 0
+		c.RateLimits.SignUpIP.Enabled() || c.RateLimits.CheckUsernameIP.Enabled() ||
+		c.PreAuth.MaxConnsPerNet > 0
 	if c.ClientAddrTrust != ClientAddrSocket || !perIPLimits {
 		return
 	}

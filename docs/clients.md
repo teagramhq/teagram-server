@@ -71,6 +71,8 @@ Configuration is read from environment variables in `internal/config/config.go`:
 | `TG_RATE_LIMIT_GET_PASSWORD_IP_WINDOW` | `1h` | Window for the per-network `account.getPassword` counter; `0` or a negative window also disables this counter |
 | `TG_RATE_LIMIT_SIGN_UP_IP` | `5` | `auth.signUp` calls per client network per window; `0` disables this counter |
 | `TG_RATE_LIMIT_SIGN_UP_IP_WINDOW` | `1h` | Window for the per-network `auth.signUp` counter; `0` or a negative window also disables this counter |
+| `TG_RATE_LIMIT_CHECK_USERNAME_IP` | `20` | Unauthenticated `account.checkUsername` calls per client network per window; `0` disables this counter |
+| `TG_RATE_LIMIT_CHECK_USERNAME_IP_WINDOW` | `1h` | Window for the per-network unauthenticated `account.checkUsername` counter; `0` or a negative window also disables this counter |
 | `TG_REGISTRATION`   | `closed`         | Accepted values are `closed`, `invite`, and `open`. `closed` rejects `auth.signUp`, `invite` requires an operator-issued invite, and `open` admits usernames without one. An unrecognized value fails startup. Sign-in for accounts that already exist is unaffected by this setting |
 | `TG_USER_INVITE_QUOTA` | `0` | Non-negative integer; a positive value enables user-issued invite creation and redemption on listeners in `invite` mode. Every invite created in the trailing seven days counts toward the user's quota, whatever its state. Unset or zero disables it |
 | `TG_USER_INVITE_MIN_ACCOUNT_AGE` | `168h` | Minimum age of an account allowed to create user invites, measured from `users.created_at`; accepts Go duration syntax and must be non-negative |
@@ -124,13 +126,14 @@ budgets. Defaults are 10
 identifiers per network per 24 hours, 10 failed `auth.signIn` attempts per
 network per hour, 10 failed `auth.checkPassword` attempts per network per hour,
 20 unauthenticated `account.getPassword` calls per network per hour, and 5
-`auth.signUp` calls per network per hour. The `TG_RATE_LIMIT_*` settings above
-can change their limits and windows; setting a configurable limit to `0`
-disables only that counter. The failed `auth.signIn` counter has no environment
-override. Teagram puts a username in the protocol's `phone_number` field and
-rejects phone-shaped identifiers. Its `auth.sendCode` distinct-identifier
-counter may retain those usernames in Postgres for the configured window
-(24h by default), plus up to five minutes before the sweep removes them.
+`auth.signUp` calls and 20 pre-auth `account.checkUsername` calls per network
+per hour. The `TG_RATE_LIMIT_*` settings above can change their limits and
+windows; setting a configurable limit to `0` disables only that counter. The
+failed `auth.signIn` counter has no environment override. Teagram puts a
+username in the protocol's `phone_number` field and rejects phone-shaped
+identifiers. Its `auth.sendCode` distinct-identifier counter may retain those
+usernames in Postgres for the configured window (24h by default), plus up to
+five minutes before the sweep removes them.
 
 Per-network counters use an IPv4 `/32` or IPv6 `/64` bucket based on
 `TG_CLIENT_ADDR_TRUST`. Listener scope comes from the accepted socket, not
@@ -585,6 +588,22 @@ Before a client asks a user to register, it can call `help.getAppConfig` and
 read `registration_mode` to learn whether sign-up is closed, invite-only, or
 open.
 
+An unauthenticated client can call `account.checkUsername` before submission:
+`boolTrue` means the candidate is available, and `boolFalse` means it is
+occupied. This exposes one bit of account occupancy for a chosen handle and
+allows repeated candidate probing; it returns no profile data and is not an
+account-privacy boundary. The default budget is 20 calls per observed network
+per hour, charged before username validation. That is four times the default
+`auth.signUp` call budget of five per hour when sign-up is active, leaving
+headroom for correcting a candidate while keeping the final account-creation
+quota lower. The check is not gated by registration mode, so its occupancy
+signal remains available in closed and invite modes. This is an abuse throttle,
+not a privacy guarantee: targeted probes fit within one window and distributed
+sources multiply the budget. `auth.signUp` remains authoritative if availability
+changes after the check. See the
+[public listener threat model](public-websocket-threat-model.md#authentication-controls)
+for shared-bucket and residual-risk details.
+
 ### 5b. New account flow
 
 When registration is enabled, a Teagram client collects a username, display
@@ -605,6 +624,10 @@ invited accounts, issue an invite with
 `teagramd invite issue <username>`; the command prints the secret once.
 Deliver it to the user through a private channel. `teagramd invite list`
 and `teagramd invite revoke <id>` manage outstanding invites.
+For user-issued invites, `teagramd invite revoke-user <user-id>` revokes all of
+that user's live invites, `teagramd invite invitees <user-id>` lists redeemed
+invitees and redemption times, and `teagramd invite inviter <user-id>` shows the
+recorded inviter or that the account was created without a user invite.
 
 ### 5c. User-issued registration invites
 

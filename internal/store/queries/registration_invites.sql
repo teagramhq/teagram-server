@@ -166,3 +166,34 @@ SELECT id, handle, inviter_user_id, issued_at, expires_at,
        consumed_at, revoked_at
 FROM registration_invites
 ORDER BY id;
+
+-- Revoke all currently live invites issued by a user. Consumed, revoked, and
+-- naturally expired rows stay untouched; the affected-row count is the result.
+-- name: RevokeUserRegistrationInvites :execrows
+UPDATE registration_invites
+SET state = 'revoked', revoked_at = clock_timestamp()
+WHERE inviter_user_id = sqlc.arg(inviter_user_id)::bigint
+  AND state = 'issued'
+  AND expires_at > clock_timestamp();
+
+-- Return the accounts and redemption times recorded on every redeemed user
+-- invite issued by an inviter.
+-- name: ListRegistrationInvitees :many
+SELECT id AS invite_id, consumed_by_user_id AS invitee_user_id, consumed_at AS redeemed_at
+FROM registration_invites
+WHERE inviter_user_id = sqlc.arg(inviter_user_id)::bigint
+  AND state = 'consumed'
+  AND consumed_by_user_id IS NOT NULL
+  AND consumed_at IS NOT NULL
+ORDER BY consumed_at, id;
+
+-- Resolve the user-invite attribution for a redeemed account. Operator invites
+-- have a NULL inviter and therefore render the same as accounts created with
+-- no user invite.
+-- name: RegistrationInviteForRedeemer :one
+SELECT inviter_user_id
+FROM registration_invites
+WHERE consumed_by_user_id = sqlc.arg(redeemer_user_id)::bigint
+  AND state = 'consumed'
+ORDER BY id DESC
+LIMIT 1;
