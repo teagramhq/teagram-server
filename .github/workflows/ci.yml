@@ -83,7 +83,7 @@ jobs:
       - lint
     if: ${{ always() && (needs.prioritize-main.result == 'success' || (needs.prioritize-main.result == 'skipped' && github.event_name == 'pull_request')) && github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.lint.result != 'skipped' && needs.prioritize-main.outputs.cancelled_pr_run_ids != '' }}
     runs-on: ubuntu-26.04
-    timeout-minutes: 5
+    timeout-minutes: 210
     permissions:
       actions: write
 
@@ -94,7 +94,9 @@ jobs:
           CANCELLED_PR_RUN_IDS: ${{ needs.prioritize-main.outputs.cancelled_pr_run_ids }}
         run: |
           set -euo pipefail
-          max_status_checks=5
+          # Cancellation cleanup can take longer than the 2h12m main-run queue
+          # delay observed during this incident; allow up to three hours.
+          max_status_checks=181
           read -r -a cancelled_pr_run_ids <<< "$CANCELLED_PR_RUN_IDS"
           for run_id in "${cancelled_pr_run_ids[@]}"; do
             if [[ ! "$run_id" =~ ^[0-9]+$ ]]; then
@@ -110,7 +112,7 @@ jobs:
                 break
               fi
               if (( status_check_attempt < max_status_checks )); then
-                sleep 2
+                sleep 60
               fi
             done
             if [[ "$run_state" != $'completed\tcancelled' ]]; then

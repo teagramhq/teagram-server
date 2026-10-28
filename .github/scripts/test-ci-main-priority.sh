@@ -46,11 +46,13 @@ printf '%s\n' "$cancel_step" | bash -n
 rerun_needs="$(query '.jobs."rerun-cancelled-pr-ci".needs[]')"
 [[ "$rerun_needs" == *'prioritize-main'* && "$rerun_needs" == *'lint'* ]] ||
   fail 'cancelled PR runs must be requeued after the main lint lane starts'
+[[ "$(query '.jobs."rerun-cancelled-pr-ci".timeout-minutes')" == 210 ]] ||
+  fail 'the requeue job timeout must cover its three-hour cancellation wait'
 rerun_if="$(query '.jobs."rerun-cancelled-pr-ci".if')"
 [[ "$rerun_if" == *"needs.prioritize-main.result == 'success'"* && "$rerun_if" == *"needs.prioritize-main.result == 'skipped'"* && "$rerun_if" == *"github.event_name == 'pull_request'"* && "$rerun_if" == *"github.event_name == 'push'"* && "$rerun_if" == *'needs.lint.result != '\''skipped'\'''* && "$rerun_if" == *'outputs.cancelled_pr_run_ids != '\'''\'''* ]] ||
   fail 'cancelled PR runs must be requeued only after main fan-out has started'
 rerun_step="$(query '.jobs."rerun-cancelled-pr-ci".steps[] | select(.name == "Re-run cancelled pull request CI after main fan-out starts") | .run')"
-[[ "$rerun_step" == *'gh run rerun "$run_id" --repo "$GITHUB_REPOSITORY"'* && "$rerun_step" == *'completed\tcancelled'* && "$rerun_step" == *'max_status_checks=5'* && "$rerun_step" == *'sleep 2'* && "$rerun_step" == *'Could not confirm cancelled pull request CI run'* && "$rerun_step" == *'Could not re-run cancelled pull request CI run'* ]] ||
+[[ "$rerun_step" == *'gh run rerun "$run_id" --repo "$GITHUB_REPOSITORY"'* && "$rerun_step" == *'completed\tcancelled'* && "$rerun_step" == *'max_status_checks=181'* && "$rerun_step" == *'sleep 60'* && "$rerun_step" == *'Could not confirm cancelled pull request CI run'* && "$rerun_step" == *'Could not re-run cancelled pull request CI run'* ]] ||
   fail 'recorded cancelled pull request runs must be rerun after main fan-out starts'
 printf '%s\n' "$rerun_step" | bash -n
 
@@ -63,10 +65,10 @@ gh() {
     [[ ! -f "$STATUS_READS_FILE" ]] || reads="$(<"$STATUS_READS_FILE")"
     reads=$((reads + 1))
     printf '%s\n' "$reads" > "$STATUS_READS_FILE"
-    if [[ "$STATUS_MODE" == delayed && "$reads" -ge 2 ]]; then
+    if [[ "$STATUS_MODE" == after-old-bound && "$reads" -ge 10 ]]; then
       printf 'completed\tcancelled\n'
     else
-      printf 'queued\t\n'
+      printf 'in_progress\t\n'
     fi
     return 0
   fi
@@ -79,14 +81,14 @@ gh() {
 sleep() { :; }
 export -f gh sleep
 
-STATUS_MODE=delayed \
+STATUS_MODE=after-old-bound \
 STATUS_READS_FILE="$test_tmp/delayed-reads" \
 RERUN_LOG="$test_tmp/delayed-reruns" \
 CANCELLED_PR_RUN_IDS=123 \
 GITHUB_REPOSITORY=example/repo \
   bash -c "$rerun_step" || fail 'a delayed cancelled run must eventually be rerun'
-[[ "$(<"$test_tmp/delayed-reads")" == 2 && "$(<"$test_tmp/delayed-reruns")" == 123 ]] ||
-  fail 'the requeue step must retry a nonterminal run and rerun it once cancellation completes'
+[[ "$(<"$test_tmp/delayed-reads")" == 10 && "$(<"$test_tmp/delayed-reruns")" == 123 ]] ||
+  fail 'the requeue step must retry beyond the old bound and rerun once cancellation completes'
 
 STATUS_MODE=never \
 STATUS_READS_FILE="$test_tmp/bounded-reads" \
@@ -94,9 +96,9 @@ RERUN_LOG="$test_tmp/bounded-reruns" \
 CANCELLED_PR_RUN_IDS=123 \
 GITHUB_REPOSITORY=example/repo \
   bash -c "$rerun_step" > "$test_tmp/bounded-output" 2>&1 || fail 'a delayed status must stop after the bounded retry count'
-[[ "$(<"$test_tmp/bounded-reads")" == 5 && ! -e "$test_tmp/bounded-reruns" ]] ||
+[[ "$(<"$test_tmp/bounded-reads")" == 181 && ! -e "$test_tmp/bounded-reruns" ]] ||
   fail 'the requeue step must stop after the bounded status checks without rerunning an active cancellation'
-[[ "$(<"$test_tmp/bounded-output")" == *'after 5 status checks'* ]] ||
+[[ "$(<"$test_tmp/bounded-output")" == *'after 181 status checks'* ]] ||
   fail 'the requeue step must warn when cancellation does not finish within the bound'
 
 expected_roots=$'browser-acceptance\nbrowser-acceptance-image\nci-main\ncompose\ncss\ndeploy-workflow\ndocker\ne2e-admin\nlint\nmirror-rustfs-qualification-images\nphotothumb-runtime\nreal-server-fixtures\nrestore-readiness\nrustfs-transition-qualification\nschema-gate-postgres\nsmoke\nsql-lint\nsqlc\nwebsocket-d1\nwebsocket-permanent-exchange'
