@@ -175,6 +175,21 @@ SAFE_CLEANUP_ERRORS = {
     "supervisor_failed",
     "verification_failed",
 }
+SAFE_SUPERVISOR_STAGES = frozenset(
+    {
+        "check_cleanup_deadline",
+        "cleanup_resources",
+        "build_runtime_args",
+        "finalize_run_directory",
+        "initialize_cleanup_drill",
+        "load_final_manifest",
+        "load_initial_manifest",
+        "register_supervisor",
+        "verify_lock_descriptors",
+        "verify_supervisor_identity",
+        "wait_for_parent",
+    }
+)
 IMAGE_TOKEN_LABEL = "com.teagram.restore-readiness.token"
 IMAGE_ROLE_LABEL = "com.teagram.restore-readiness.role"
 COMPOSE_PROJECT_LABEL = "com.docker.compose.project"
@@ -3055,10 +3070,11 @@ def unique_json_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
 
 
 def validate_cleanup_failure_document(value: Any) -> dict[str, Any] | None:
-    if type(value) is not dict or set(value) not in (
-        {"operation", "error"},
-        {"operation", "error", "exit_status"},
-    ):
+    if type(value) is not dict or not {"operation", "error"} <= set(value):
+        return None
+    if set(value) - {"operation", "error", "exit_status", "stage"}:
+        return None
+    if "stage" in value and value["stage"] not in SAFE_SUPERVISOR_STAGES:
         return None
     operation = value.get("operation")
     error = value.get("error")
@@ -3075,6 +3091,8 @@ def validate_cleanup_failure_document(value: Any) -> dict[str, Any] | None:
         if type(status) is not int or status == 0 or not -255 <= status <= 255:
             return None
         result["exit_status"] = status
+    if "stage" in value:
+        result["stage"] = value["stage"]
     return result
 
 
@@ -3082,10 +3100,14 @@ def cleanup_failure_document(
     operation: str,
     error: str,
     exit_status: int | None = None,
+    *,
+    stage: str | None = None,
 ) -> dict[str, Any]:
     value: dict[str, Any] = {"operation": operation, "error": error}
     if exit_status is not None:
         value["exit_status"] = exit_status
+    if stage is not None:
+        value["stage"] = stage
     result = validate_cleanup_failure_document(value)
     if result is None:
         raise ValueError("invalid cleanup failure diagnostic")
@@ -3100,6 +3122,8 @@ def cleanup_failure_log_message(value: Any) -> str | None:
         "restore readiness cleanup failed: "
         f"operation={diagnostic['operation']} error={diagnostic['error']}"
     )
+    if "stage" in diagnostic:
+        message += f" stage={diagnostic['stage']}"
     if "exit_status" in diagnostic:
         message += f" exit_status={diagnostic['exit_status']}"
     return message
@@ -7624,7 +7648,7 @@ def wait_for_supervisor_registration(
     raise DrillFailure("preflight", "preflight_failure")
 
 
-def cleanup_supervisor_failure(drill: Drill | None) -> dict[str, Any]:
+def cleanup_supervisor_failure(drill: Drill | None, stage: str | None = None) -> dict[str, Any]:
     if drill is not None:
         recorded = getattr(drill, "cleanup_failure", None)
         if recorded is not None:
@@ -7634,13 +7658,22 @@ def cleanup_supervisor_failure(drill: Drill | None) -> dict[str, Any]:
             if operation not in SAFE_CLEANUP_OPERATIONS:
                 operation = "cleanup_resources"
             return cleanup_failure_document(operation, "supervisor_failed")
-    return cleanup_failure_document("supervisor_setup", "supervisor_failed")
+    failure = cleanup_failure_document("supervisor_setup", "supervisor_failed")
+    if stage is not None:
+        failure = {**failure, "stage": stage}
+        diagnostic = validate_cleanup_failure_document(failure)
+        if diagnostic is None:
+            raise ValueError("invalid supervisor failure stage")
+        return diagnostic
+    return failure
 
 
 def supervise(manifest_path: Path, lock_fd: int, rollout_lock_fd: int) -> int:
     drill: Drill | None = None
+    stage = "load_initial_manifest"
     try:
         manifest = load_manifest(manifest_path)
+        stage = "verify_lock_descriptors"
         lock_info = os.fstat(lock_fd)
         rollout_info = os.fstat(rollout_lock_fd)
         if (
@@ -7649,14 +7682,24 @@ def supervise(manifest_path: Path, lock_fd: int, rollout_lock_fd: int) -> int:
             or rollout_info.st_dev != manifest["rollout_lock"]["device"]
             or rollout_info.st_ino != manifest["rollout_lock"]["inode"]
         ):
-            emit_cleanup_failure(cleanup_failure_document("supervisor_setup", "verification_failed"))
+            emit_cleanup_failure(
+                cleanup_failure_document(
+                    "supervisor_setup", "verification_failed", stage=stage
+                )
+            )
             return 1
         supervisor_pid = os.getpid()
+        stage = "verify_supervisor_identity"
         supervisor_ticks = process_start_ticks(supervisor_pid)
         if supervisor_ticks is None:
-            emit_cleanup_failure(cleanup_failure_document("supervisor_setup", "verification_failed"))
+            emit_cleanup_failure(
+                cleanup_failure_document(
+                    "supervisor_setup", "verification_failed", stage=stage
+                )
+            )
             return 1
         wait_until = time.monotonic() + 10
+        stage = "register_supervisor"
         while time.monotonic() < wait_until:
             manifest = load_manifest(manifest_path)
             record = manifest["supervisor"]
@@ -7669,10 +7712,15 @@ def supervise(manifest_path: Path, lock_fd: int, rollout_lock_fd: int) -> int:
                 break
             time.sleep(0.1)
         else:
-            emit_cleanup_failure(cleanup_failure_document("supervisor_setup", "verification_failed"))
+            emit_cleanup_failure(
+                cleanup_failure_document(
+                    "supervisor_setup", "verification_failed", stage=stage
+                )
+            )
             return 1
 
         parent = manifest["parent"]
+        stage = "wait_for_parent"
         while True:
             manifest = load_manifest(manifest_path)
             parent_alive = process_start_ticks(parent["pid"]) == parent["start_ticks"]
@@ -7701,11 +7749,21 @@ def supervise(manifest_path: Path, lock_fd: int, rollout_lock_fd: int) -> int:
                 break
             time.sleep(0.2)
 
+        stage = "load_final_manifest"
         manifest = load_manifest(manifest_path)
+        stage = "check_cleanup_deadline"
         if time.monotonic() >= manifest["cleanup_deadline"]:
-            emit_cleanup_failure(cleanup_failure_document("cleanup_deadline", "deadline_expired"))
+            emit_cleanup_failure(
+                cleanup_failure_document(
+                    "cleanup_deadline", "deadline_expired", stage=stage
+                )
+            )
             return 1
-        drill = Drill(make_runtime_args(manifest), manifest_path.parent, manifest)
+        stage = "build_runtime_args"
+        runtime_args = make_runtime_args(manifest)
+        stage = "initialize_cleanup_drill"
+        drill = Drill(runtime_args, manifest_path.parent, manifest)
+        stage = "cleanup_resources"
         clean = drill.cleanup_resources()
         if not clean or time.monotonic() >= manifest["cleanup_deadline"]:
             if time.monotonic() >= manifest["cleanup_deadline"]:
@@ -7717,6 +7775,7 @@ def supervise(manifest_path: Path, lock_fd: int, rollout_lock_fd: int) -> int:
                 or cleanup_failure_document("cleanup_resources", "verification_failed")
             )
             return 1
+        stage = "finalize_run_directory"
         drill.active_cleanup_operation = "run_directory_finalization"
         if not remove_finished_run(drill, manifest["cleanup_deadline"]):
             drill.record_cleanup_failure("run_directory_finalization", "verification_failed")
@@ -7729,10 +7788,10 @@ def supervise(manifest_path: Path, lock_fd: int, rollout_lock_fd: int) -> int:
             return 1
         return 0
     except DrillFailure:
-        emit_cleanup_failure(cleanup_supervisor_failure(drill))
+        emit_cleanup_failure(cleanup_supervisor_failure(drill, stage))
         return 1
     except (OSError, ValueError, TypeError, KeyError, json.JSONDecodeError):
-        emit_cleanup_failure(cleanup_supervisor_failure(drill))
+        emit_cleanup_failure(cleanup_supervisor_failure(drill, stage))
         return 1
     finally:
         try:

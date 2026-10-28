@@ -3115,6 +3115,74 @@ class RestoreReadinessContractTests(unittest.TestCase):
             )
             self.assertNotIn("container-id", output.getvalue())
 
+    def test_supervisor_setup_failure_reports_the_safe_cleanup_stage(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="rr-supervisor-setup-stage-") as directory:
+            lock_path = Path(directory) / "lock"
+            lock_path.write_bytes(b"")
+            lock_fd = RESTORE_READINESS.os.open(lock_path, RESTORE_READINESS.os.O_RDWR)
+            lock_info = RESTORE_READINESS.os.fstat(lock_fd)
+            rollout_path = Path(directory) / "rollout-lock"
+            rollout_path.write_bytes(b"")
+            rollout_fd = RESTORE_READINESS.os.open(rollout_path, RESTORE_READINESS.os.O_RDWR)
+            rollout_info = RESTORE_READINESS.os.fstat(rollout_fd)
+            manifest = {
+                "global_lock": {"device": lock_info.st_dev, "inode": lock_info.st_ino},
+                "rollout_lock": {"device": rollout_info.st_dev, "inode": rollout_info.st_ino},
+                "supervisor": {"pid": 0, "start_ticks": 0},
+                "parent": {"pid": 999999, "start_ticks": 1},
+                "parent_done": True,
+                "cleanup_deadline": RESTORE_READINESS.time.monotonic() + 60,
+            }
+            loads = iter((manifest, manifest, manifest))
+            output = io.StringIO()
+
+            class RegisteredDrill:
+                def __init__(self, _args: Any, _run_dir: Path, current_manifest: dict[str, Any]) -> None:
+                    self.manifest = current_manifest
+                    self.cleanup_active = False
+                    self.cleanup_failure = None
+                    self.active_cleanup_operation = None
+
+                def save(self) -> None:
+                    return None
+
+            def load_then_fail(_path: Path) -> dict[str, Any]:
+                try:
+                    return next(loads)
+                except StopIteration as exc:
+                    raise RESTORE_READINESS.DrillFailure("cleanup", "cleanup_failure") from exc
+
+            with (
+                patch.object(RESTORE_READINESS, "load_manifest", side_effect=load_then_fail),
+                patch.object(
+                    RESTORE_READINESS,
+                    "process_start_ticks",
+                    side_effect=(77, None),
+                ),
+                patch.object(RESTORE_READINESS, "make_runtime_args", return_value=None),
+                patch.object(RESTORE_READINESS, "Drill", RegisteredDrill),
+                redirect_stdout(output),
+            ):
+                status = RESTORE_READINESS.supervise(Path(directory) / "ownership.json", lock_fd, rollout_fd)
+
+            self.assertEqual(status, 1)
+            diagnostic = json.loads(output.getvalue())
+            self.assertEqual(diagnostic["operation"], "supervisor_setup")
+            self.assertEqual(diagnostic["error"], "supervisor_failed")
+            self.assertEqual(diagnostic["stage"], "load_final_manifest")
+            self.assertNotIn(directory, output.getvalue())
+            self.assertEqual(
+                RESTORE_READINESS.parse_cleanup_failure_output(output.getvalue().encode()),
+                "restore readiness cleanup failed: operation=supervisor_setup "
+                "error=supervisor_failed stage=load_final_manifest",
+            )
+            with self.assertRaises(ValueError):
+                RESTORE_READINESS.cleanup_failure_document(
+                    "supervisor_setup",
+                    "supervisor_failed",
+                    stage=directory,
+                )
+
     def test_supervisor_reports_malformed_later_container_inventory(self) -> None:
         with tempfile.TemporaryDirectory(prefix="rr-supervisor-invalid-inventory-") as directory:
             lock_path = Path(directory) / "lock"
