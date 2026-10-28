@@ -34,3 +34,13 @@ operation; only the two validated readiness output files are copied to the
 private `/tmp` evidence directory. For the S3 Compose selection, the script
 accepts exactly one parked environment file at the approved path and passes
 that path to Compose without printing its values.
+
+`rollback-public-websocket.sh` is the pre-revert step for a deployed public
+WebSocket route. Run it through `teagram-ops` with the current deployed SHA;
+it takes `/tmp/teagram-deploy.lock`, verifies the live checkout and base image
+match that SHA, removes only the `teagram` project's `public-haproxy`,
+`teagramd-public-1`, and `teagramd-public-2` containers, then confirms those
+containers are gone and host port 2446 is free. After it succeeds, revert the
+route commit and let `Deploy.` recreate base `teagramd` with its original
+`127.0.0.1:2446` publish. The operation is repeatable and does not touch
+volumes or the database.

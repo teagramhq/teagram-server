@@ -100,6 +100,24 @@ and Origin policy, and their absence of host ports. It also requires the
 bounded HAProxy healthcheck and logs. The runner checks HAProxy health, the
 loopback-only publish, both replica environments and listener readiness after
 startup.
+
+If a deployed route must be reverted, free the public proxy's loopback 2446
+publish before reverting. Read the current deployed SHA, then run the reviewed
+teardown operation from that same commit:
+
+```sh
+set -eu
+DEPLOYED_SHA=$(ssh teagram live | sed -n 's/^live_sha=//p')
+[[ "$DEPLOYED_SHA" =~ ^[0-9a-f]{40}$ ]]
+ssh teagram "run $DEPLOYED_SHA rollback-public-websocket $DEPLOYED_SHA"
+```
+
+The operation takes the shared deploy lock, verifies the live checkout and base
+image revision, removes only the public containers in the `teagram` Compose
+project, and confirms no container still publishes 2446. After it succeeds,
+merge the route revert and let `Deploy.` recreate base `teagramd`; without this
+step Compose retains the orphan HAProxy container and rejects the port binding.
+
 The existing host tunnel keeps its `127.0.0.1:2446` origin; Compose now assigns
 that publish to HAProxy, while the ordinary socket-trust service has no public
 listener or 2446 publish. The public advertise address comes from the same
