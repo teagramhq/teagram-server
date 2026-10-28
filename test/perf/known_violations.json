@@ -7,7 +7,6 @@
   {"scenario": "messages.getHistory group", "check": "timing", "issue": "MAIN-2577"},
   {"scenario": "messages.search", "check": "rows", "issue": "MAIN-2578"},
   {"scenario": "messages.search", "check": "timing", "issue": "MAIN-2578"},
-  {"scenario": "contacts.search", "check": "timing", "issue": "MAIN-2797"},
   {"scenario": "contacts.getContacts", "check": "seqscan", "issue": "MAIN-2579", "scan": "users#f099dce9"},
   {"scenario": "contacts.getContacts", "check": "timing", "issue": "MAIN-2579"},
   {"scenario": "messages.getDialogs", "check": "timing", "issue": "MAIN-2802"},

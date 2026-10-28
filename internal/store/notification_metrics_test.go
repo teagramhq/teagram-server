@@ -183,6 +183,7 @@ func TestNotificationMetricsRateLimitDenialsUseFixedSurfaces(t *testing.T) {
 		"check_password_ip",
 		"get_password_ip",
 		"sign_up_ip",
+		"check_username_ip",
 		"password_proof",
 		"get_password",
 		"update_profile",
@@ -228,6 +229,7 @@ func TestNotificationMetricsRateLimitDenialsUseFixedSurfaces(t *testing.T) {
 		CheckPasswordIP:           1,
 		GetPasswordIP:             1,
 		SignUpIP:                  1,
+		CheckUsernameIP:           1,
 		PasswordProof:             1,
 		GetPassword:               1,
 		UpdateProfile:             1,
@@ -247,6 +249,20 @@ func TestNotificationMetricsRateLimitDenialsUseFixedSurfaces(t *testing.T) {
 	}
 	if got.WindowSeconds != 3_600 || got.RatePerSecond != 0 {
 		t.Errorf("expired denial window/rate = %v/%v, want 3600/0", got.WindowSeconds, got.RatePerSecond)
+	}
+}
+
+func TestNotificationMetricsCheckUsernameIPIsFixedSurface(t *testing.T) {
+	metrics := store.NewNotificationMetricsWithClock(func() time.Time {
+		return time.Unix(1_700_000_000, 0)
+	})
+	metrics.RecordRateLimitDenial("check_username_ip")
+	got := metrics.Snapshot().RateLimitDenials
+	if got.Count != 1 || got.Dropped != 0 {
+		t.Fatalf("check_username_ip denial snapshot = %+v, want one fixed denial and no dropped count", got)
+	}
+	if got.BySurface.CheckUsernameIP != 1 {
+		t.Fatalf("CheckUsernameIP telemetry = %d, want 1", got.BySurface.CheckUsernameIP)
 	}
 }
 

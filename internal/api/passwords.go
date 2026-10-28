@@ -195,6 +195,14 @@ func (h *handlers) handleCheckPasswordWithConn(c *mtproto.Conn, r *mtproto.Reque
 		return nil, rpc
 	}
 	pendingUserID := pending.UserID
+	userKind, found, err := h.store.UserKind(r.Ctx, pendingUserID)
+	if err != nil {
+		h.log.Error("check password: load account kind", "user_id", pendingUserID, "err", err)
+		return nil, errInternal
+	}
+	if found && userKind == store.UserKindBot {
+		return nil, errBotAccount
+	}
 
 	// Reserve tokens atomically before SRP verification. If over limit,
 	// FLOOD_WAIT is returned without evaluating the proof.
