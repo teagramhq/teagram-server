@@ -794,6 +794,16 @@ docker run --detach --name "$test_haproxy_name" --network "$ingress_network" --i
 	-v "$work_dir/haproxy-attribution.cfg:/usr/local/etc/haproxy/haproxy.cfg:ro" \
 	"$haproxy_image" -f /usr/local/etc/haproxy/haproxy.cfg >/dev/null
 docker network connect --ip 198.18.132.11 "$backend_network" "$test_haproxy_name"
+for _ in $(seq 30); do
+	if docker logs "$test_haproxy_name" 2>&1 | grep -F 'Loading success.' >/dev/null; then
+		break
+	fi
+	sleep 1
+done
+if ! docker logs "$test_haproxy_name" 2>&1 | grep -F 'Loading success.' >/dev/null; then
+	echo "attribution HAProxy did not load its configuration" >&2
+	exit 1
+fi
 "$probe_binary" keepalive-attribution --address "127.0.0.1:${mixed_ports[5]}" \
 	--first-ip 203.0.113.101 --second-ip 203.0.114.102
 docker wait "$test_echo_name" >/dev/null
