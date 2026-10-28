@@ -29,7 +29,7 @@ Configuration is read from environment variables in `internal/config/config.go`:
 | `TG_WEBSOCKET_ALLOWED_ORIGINS` | *(unset)* | Comma-separated browser origins allowed to connect to `/apiws`; unset rejects every request carrying an `Origin` header |
 | `TG_PUBLIC_WEBSOCKET_ALLOWED_ORIGINS` | *(unset)* | Comma-separated origins allowed on the public WebSocket listener; set `https://web.teagram.io` for the public web client, and add the demo origin only when it is deployed |
 | `TG_ADVERTISE_ADDR` | *(derived from `TG_LISTEN_ADDR`)* | `host:port` clients are told to dial, used verbatim. Its host also forms the discovery `websocket.endpoint` as `wss://host/apiws`. Derived when unset: the listen address with an empty or wildcard host (`:2443`, `0.0.0.0`, `::`) replaced by `127.0.0.1`. A value that is not `host:port`, has no host, or has a port that is not an integer in 1–65535 fails startup |
-| `TG_ADVERTISE_DEMO_GUEST_SIGN_UP` | `false` | Set to `true` to advertise demo guest sign-up availability in discovery and `client-config`; a non-boolean value fails configuration loading |
+| `TG_ADVERTISE_DEMO_GUEST_SIGN_UP` | `false` | Set to `true` to advertise demo guest sign-up and the stored wipe generation in discovery and `client-config`; requires the migrated Postgres row, and a non-boolean value fails configuration loading |
 | `TG_PUBLIC_LINK_PREFIX` | *(required)* | Lowercase HTTPS origin for client and invite links, with a root path and no port (e.g. `https://links.example.test/`) |
 | `TG_POSTGRES_DSN`   | *(required)*     | Postgres connection string; no default, server fails to start without it |
 | `TG_PG_MAX_CONNS` | `8` | Maximum pooled Postgres sessions per process, at least 2 |
@@ -71,7 +71,10 @@ Configuration is read from environment variables in `internal/config/config.go`:
 | `TG_RATE_LIMIT_GET_PASSWORD_IP_WINDOW` | `1h` | Window for the per-network `account.getPassword` counter; `0` or a negative window also disables this counter |
 | `TG_RATE_LIMIT_SIGN_UP_IP` | `5` | `auth.signUp` calls per client network per window; `0` disables this counter |
 | `TG_RATE_LIMIT_SIGN_UP_IP_WINDOW` | `1h` | Window for the per-network `auth.signUp` counter; `0` or a negative window also disables this counter |
+| `TG_RATE_LIMIT_CHECK_USERNAME_IP` | `20` | Unauthenticated `account.checkUsername` calls per client network per window; `0` disables this counter |
+| `TG_RATE_LIMIT_CHECK_USERNAME_IP_WINDOW` | `1h` | Window for the per-network unauthenticated `account.checkUsername` counter; `0` or a negative window also disables this counter |
 | `TG_REGISTRATION`   | `closed`         | Accepted values are `closed`, `invite`, and `open`. `closed` rejects `auth.signUp`, `invite` requires an operator-issued invite, and `open` admits usernames without one. An unrecognized value fails startup. Sign-in for accounts that already exist is unaffected by this setting |
+| `TG_USER_INVITE_QUOTA` | `0` | Non-negative integer; a positive value enables user-issued invite redemption on listeners in `invite` mode. Unset or zero disables it |
 | `TG_TERMS_OF_SERVICE` | built-in statement | Terms shown to new accounts in `auth.authorizationSignUpRequired`; set it to replace the default. See the [self-hosting guide](self-hosting.md#sign-up-terms) for the default text |
 | `TG_PUBLIC_REGISTRATION` | `closed` | Registration mode for the public WebSocket listener only. Defaults to `closed` even when `TG_REGISTRATION=open`; use `invite` to require an operator-issued invite |
 | `TG_WELCOME_CHANNEL` | *(unset)* | Optional handle of a public broadcast channel joined by new accounts after `auth.signUp`; invalid targets are skipped with a warning |
@@ -122,13 +125,14 @@ budgets. Defaults are 10
 identifiers per network per 24 hours, 10 failed `auth.signIn` attempts per
 network per hour, 10 failed `auth.checkPassword` attempts per network per hour,
 20 unauthenticated `account.getPassword` calls per network per hour, and 5
-`auth.signUp` calls per network per hour. The `TG_RATE_LIMIT_*` settings above
-can change their limits and windows; setting a configurable limit to `0`
-disables only that counter. The failed `auth.signIn` counter has no environment
-override. Teagram puts a username in the protocol's `phone_number` field and
-rejects phone-shaped identifiers. Its `auth.sendCode` distinct-identifier
-counter may retain those usernames in Postgres for the configured window
-(24h by default), plus up to five minutes before the sweep removes them.
+`auth.signUp` calls and 20 pre-auth `account.checkUsername` calls per network
+per hour. The `TG_RATE_LIMIT_*` settings above can change their limits and
+windows; setting a configurable limit to `0` disables only that counter. The
+failed `auth.signIn` counter has no environment override. Teagram puts a
+username in the protocol's `phone_number` field and rejects phone-shaped
+identifiers. Its `auth.sendCode` distinct-identifier counter may retain those
+usernames in Postgres for the configured window (24h by default), plus up to
+five minutes before the sweep removes them.
 
 Per-network counters use an IPv4 `/32` or IPv6 `/64` bucket based on
 `TG_CLIENT_ADDR_TRUST`. Listener scope comes from the accepted socket, not
@@ -199,9 +203,9 @@ available to provisional sessions.
 
 The server-side contract in this section is provided by teagram-server
 revision `b4b18c12` (`MAIN-736`). Deploy that server revision, or a later
-revision that retains the contract, as the document consumer. The command
-renders the public identity without opening Postgres or loading the auth-key
-master secret:
+revision that retains the contract, as the document consumer. With demo
+advertisement disabled, the command renders the public identity without
+opening Postgres or loading the auth-key master secret:
 
 ```bash
 teagramd bootstrap-identity
@@ -232,12 +236,18 @@ host and the `/apiws` path:
 ```
 
 `TG_ADVERTISE_DEMO_GUEST_SIGN_UP` defaults to `false`. When unset or false,
-the document omits `demo` and keeps the existing v1 wire form. When true, it
-adds exactly `"demo":{"guest_sign_up":true}` alongside the existing identity
-and transport fields. This advertises availability only: it does not open
-registration, change password or Turnstile requirements, or grant authentication
-privileges. The server's registration policy and abuse controls remain
-authoritative.
+the document omits `demo`, performs no generation lookup, and keeps the existing
+v1 wire bytes. When true, both `teagramd serve` and `client-config` read the
+database's one stored wipe generation and fail closed if its row is missing or
+the value is not 64 lowercase hexadecimal characters. The document then adds
+`"demo":{"guest_sign_up":true,"wipe_generation":"<64 lowercase hex characters>"}`
+alongside the existing identity and transport fields. A migration seeds the
+value from Postgres's cryptographic random UUID generator; a normal restart or
+deploy keeps it stable, while a fresh database created by the weekly wipe gets
+a new value. The value is public and clients compare it for equality only. It
+does not open registration, change password or Turnstile requirements, or grant
+authentication privileges. The server's registration policy and abuse controls
+remain authoritative.
 
 When Turnstile is configured, discovery also includes
 `"turnstile":{"site_key":"..."}`. The public `site_key` must contain 1–256
@@ -574,6 +584,22 @@ tailnet policy. Existing accounts can sign in in every mode.
 Before a client asks a user to register, it can call `help.getAppConfig` and
 read `registration_mode` to learn whether sign-up is closed, invite-only, or
 open.
+
+An unauthenticated client can call `account.checkUsername` before submission:
+`boolTrue` means the candidate is available, and `boolFalse` means it is
+occupied. This exposes one bit of account occupancy for a chosen handle and
+allows repeated candidate probing; it returns no profile data and is not an
+account-privacy boundary. The default budget is 20 calls per observed network
+per hour, charged before username validation. That is four times the default
+`auth.signUp` call budget of five per hour when sign-up is active, leaving
+headroom for correcting a candidate while keeping the final account-creation
+quota lower. The check is not gated by registration mode, so its occupancy
+signal remains available in closed and invite modes. This is an abuse throttle,
+not a privacy guarantee: targeted probes fit within one window and distributed
+sources multiply the budget. `auth.signUp` remains authoritative if availability
+changes after the check. See the
+[public listener threat model](public-websocket-threat-model.md#authentication-controls)
+for shared-bucket and residual-risk details.
 
 ### 5b. New account flow
 

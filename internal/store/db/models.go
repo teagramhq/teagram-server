@@ -307,6 +307,11 @@ type CloudDraftSync struct {
 	ChangedAt pgtype.Timestamptz
 }
 
+type DemoWipeGeneration struct {
+	Singleton  int16
+	Generation string
+}
+
 type Dialog struct {
 	OwnerID         int64
 	PeerID          int64
@@ -743,14 +748,16 @@ type RateLimit struct {
 }
 
 type RegistrationInvite struct {
-	ID           int64
-	Handle       string
-	SecretDigest []byte
-	IssuedAt     pgtype.Timestamptz
-	ExpiresAt    pgtype.Timestamptz
-	State        string
-	ConsumedAt   pgtype.Timestamptz
-	RevokedAt    pgtype.Timestamptz
+	ID               int64
+	Handle           *string
+	SecretDigest     []byte
+	IssuedAt         pgtype.Timestamptz
+	ExpiresAt        pgtype.Timestamptz
+	State            string
+	ConsumedAt       pgtype.Timestamptz
+	RevokedAt        pgtype.Timestamptz
+	InviterUserID    *int64
+	ConsumedByUserID *int64
 }
 
 type SavedGif struct {

@@ -3,7 +3,10 @@ package api_test
 import (
 	"context"
 	"fmt"
+	"net/netip"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/gotd/td/bin"
 	"github.com/gotd/td/mt"
@@ -11,6 +14,8 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/teagramhq/teagram-server/internal/api"
+	"github.com/teagramhq/teagram-server/internal/config"
+	"github.com/teagramhq/teagram-server/internal/mtproto"
 	"github.com/teagramhq/teagram-server/internal/store"
 )
 
@@ -18,12 +23,19 @@ func checkAccountUsername(
 	t *testing.T, s *store.Store, userID int64, username string,
 ) (bool, *mt.RPCError) {
 	t.Helper()
-	body := dispatchSettings(t, fullChannelDispatcher(s), settingsHandler{
+	return checkAccountUsernameWithAddr(t, fullChannelDispatcher(s), userID, netip.Addr{}, username)
+}
+
+func checkAccountUsernameWithAddr(
+	t *testing.T, h mtproto.Handler, userID int64, addr netip.Addr, username string,
+) (bool, *mt.RPCError) {
+	t.Helper()
+	body := dispatchSettingsWithAddr(t, h, settingsHandler{
 		name: "account.checkUsername",
 		request: func() bin.Encoder {
 			return &tg.AccountCheckUsernameRequest{Username: username}
 		},
-	}, userID, false)
+	}, userID, false, addr)
 
 	var available tg.BoolTrue
 	if err := available.Decode(&bin.Buffer{Buf: body}); err == nil {
@@ -38,6 +50,11 @@ func checkAccountUsername(
 		t.Fatalf("decode account.checkUsername response: %v", err)
 	}
 	return false, &rpc
+}
+
+func checkUsernameLimitConfig(t *testing.T, limit store.RateLimitConfig) config.RateLimitsConfig {
+	t.Helper()
+	return config.RateLimitsConfig{CheckUsernameIP: limit}
 }
 
 func usernameLookupTotalCount(t *testing.T, pool *pgxpool.Pool, callerID int64) int {
@@ -101,23 +118,86 @@ func TestCheckAccountUsernameAvailabilityAndValidation(t *testing.T) {
 	}
 
 	pool := usernameLookupPool(t, dsn)
-	before := usernameLookupCount(t, pool, caller.ID, "ownhandle") +
-		usernameLookupCount(t, pool, caller.ID, "bad-name") +
-		usernameLookupCount(t, pool, caller.ID, "admin")
-	for _, username := range []string{"bad-name", "admin"} {
+	invalidUsernames := []string{"bad-name", "admin", "bot", "bots", "xbot", "x_Bot", "WeatherBOT"}
+	before := 0
+	for _, username := range invalidUsernames {
+		before += usernameLookupCount(t, pool, caller.ID, username)
+	}
+	for _, username := range invalidUsernames {
 		if _, rpc := checkAccountUsername(t, s, caller.ID, username); rpc == nil || rpc.ErrorMessage != "USERNAME_INVALID" {
 			t.Errorf("check invalid %q error = %v, want USERNAME_INVALID", username, rpc)
 		}
 	}
-	after := usernameLookupCount(t, pool, caller.ID, "ownhandle") +
-		usernameLookupCount(t, pool, caller.ID, "bad-name") +
-		usernameLookupCount(t, pool, caller.ID, "admin")
+	after := 0
+	for _, username := range invalidUsernames {
+		after += usernameLookupCount(t, pool, caller.ID, username)
+	}
 	if after != before {
 		t.Errorf("invalid checks changed lookup rows from %d to %d", before, after)
 	}
 
-	if _, rpc := checkAccountUsername(t, s, 0, "validhandle"); rpc == nil || rpc.ErrorMessage != "AUTH_KEY_UNREGISTERED" {
-		t.Errorf("unauthenticated check error = %v, want AUTH_KEY_UNREGISTERED", rpc)
+	if available, rpc := checkAccountUsername(t, s, 0, "validhandle"); rpc != nil || !available {
+		t.Errorf("unauthenticated check = %t, %v; want available", available, rpc)
+	}
+}
+
+func TestCheckPreAuthUsernameAvailabilityAndValidation(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	s := openStore(t)
+	owner, err := s.CreateUser(ctx, "+15551298105")
+	if err != nil {
+		t.Fatalf("owner: %v", err)
+	}
+	if _, err := api.UpdateUsernameForTest(s, owner.ID, "takenhandle"); err != nil {
+		t.Fatalf("claim occupied username: %v", err)
+	}
+
+	h := fullChannelDispatcher(s)
+	for _, tc := range []struct {
+		username string
+		want     bool
+	}{
+		{username: "ab", want: true},
+		{username: "NewHandle", want: true},
+		{username: "Name_123", want: true},
+		{username: "TAKENHANDLE", want: false},
+	} {
+		available, rpc := checkAccountUsernameWithAddr(t, h, 0, netip.Addr{}, tc.username)
+		if rpc != nil || available != tc.want {
+			t.Errorf("pre-auth check %q = %t, %v; want %t", tc.username, available, rpc, tc.want)
+		}
+	}
+
+	for _, username := range []string{"bad-name", "ADMIN", "ApIwS", "a", "1start", strings.Repeat("a", 33)} {
+		if _, rpc := checkAccountUsernameWithAddr(t, h, 0, netip.Addr{}, username); rpc == nil || rpc.ErrorMessage != "USERNAME_INVALID" {
+			t.Errorf("pre-auth check invalid %q error = %v, want USERNAME_INVALID", username, rpc)
+		}
+	}
+}
+
+func TestCheckPreAuthUsernameIsRateLimitedPerNetwork(t *testing.T) {
+	t.Parallel()
+	s := openStore(t)
+	limits := checkUsernameLimitConfig(t, store.RateLimitConfig{Limit: 1, Window: time.Hour})
+	h := fullChannelDispatcherWithRateLimits(s, limits)
+	addr := netip.MustParseAddr("198.51.100.70")
+
+	if available, rpc := checkAccountUsernameWithAddr(t, h, 0, addr, "firsthandle"); rpc != nil || !available {
+		t.Fatalf("first pre-auth check = %t, %v; want available", available, rpc)
+	}
+	if _, rpc := checkAccountUsernameWithAddr(t, h, 0, addr, "secondhandle"); rpc == nil || rpc.ErrorCode != 420 || !strings.HasPrefix(rpc.ErrorMessage, "FLOOD_WAIT_") {
+		t.Fatalf("second pre-auth check error = %v, want FLOOD_WAIT", rpc)
+	}
+	if available, rpc := checkAccountUsernameWithAddr(t, h, 0, netip.MustParseAddr("198.51.100.71"), "thirdhandle"); rpc != nil || !available {
+		t.Errorf("different network check = %t, %v; want available", available, rpc)
+	}
+	user, err := s.CreateUser(context.Background(), "+15551298106")
+	if err != nil {
+		t.Fatalf("authenticated user: %v", err)
+	}
+	if available, rpc := checkAccountUsernameWithAddr(t, h, user.ID, addr, "authenticatedhandle"); rpc != nil || !available {
+		t.Errorf("authenticated check after IP quota exhaustion = %t, %v; want available", available, rpc)
 	}
 }
 
@@ -197,8 +277,8 @@ func TestCheckAccountUsernameMatchesImmutableUsernameAccount(t *testing.T) {
 			t.Errorf("check %q error = %v, want %s", tc.username, rpc, tc.want)
 		}
 	}
-	if _, rpc := checkAccountUsername(t, s, 0, "bad-name"); rpc == nil || rpc.ErrorMessage != "AUTH_KEY_UNREGISTERED" {
-		t.Errorf("unauthenticated invalid check error = %v, want AUTH_KEY_UNREGISTERED", rpc)
+	if _, rpc := checkAccountUsername(t, s, 0, "bad-name"); rpc == nil || rpc.ErrorMessage != "USERNAME_INVALID" {
+		t.Errorf("unauthenticated invalid check error = %v, want USERNAME_INVALID", rpc)
 	}
 
 	pool := usernameLookupPool(t, dsn)

@@ -1525,6 +1525,55 @@ func TestSendAndEditMessageKeepMultiByteText(t *testing.T) {
 	}
 }
 
+func TestSendAndEditMessageEnforcePublishedLength(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	s := openStore(t)
+	a, err := s.CreateUser(ctx, "+15551293021")
+	if err != nil {
+		t.Fatalf("user a: %v", err)
+	}
+	b, err := s.CreateUser(ctx, "+15551293022")
+	if err != nil {
+		t.Fatalf("user b: %v", err)
+	}
+	peer := api.InputPeerUser(a.ID, b.ID)
+	maxLength := api.DefaultConfig(2, "127.0.0.1", 2443).MessageLengthMax
+	maxText := strings.Repeat("x", maxLength)
+	overText := strings.Repeat("x", maxLength+1)
+
+	enc, err := api.SendMessageForTest(s, a.ID, &tg.MessagesSendMessageRequest{
+		Peer: peer, Message: maxText, RandomID: 1,
+	})
+	if err != nil {
+		t.Fatalf("send at message_max_length: %v", err)
+	}
+	sent := messageOf(t, enc)
+
+	_, err = api.SendMessageForTest(s, a.ID, &tg.MessagesSendMessageRequest{
+		Peer: peer, Message: overText, RandomID: 2,
+	})
+	rpcError(t, err, "MESSAGE_TOO_LONG")
+
+	if _, err := api.EditMessageForTest(s, a.ID, &tg.MessagesEditMessageRequest{
+		Peer: peer, ID: sent.ID, Message: maxText,
+	}); err != nil {
+		t.Fatalf("edit at message_max_length: %v", err)
+	}
+	_, err = api.EditMessageForTest(s, a.ID, &tg.MessagesEditMessageRequest{
+		Peer: peer, ID: sent.ID, Message: overText,
+	})
+	rpcError(t, err, "MESSAGE_TOO_LONG")
+
+	after, ok, err := s.MessageByOwnerLocal(ctx, a.ID, int64(sent.ID))
+	if err != nil || !ok {
+		t.Fatalf("message after rejected edit: found=%v err=%v", ok, err)
+	}
+	if after.Text != maxText {
+		t.Fatalf("text length after rejected edit = %d, want %d", len(after.Text), maxLength)
+	}
+}
+
 // dialogsFor gives owner n DM dialogs, top messages 1..n, newest last.
 func dialogsFor(t *testing.T, s *store.Store, phonePrefix string, n int) store.User {
 	t.Helper()

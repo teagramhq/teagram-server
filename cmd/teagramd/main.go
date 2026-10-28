@@ -428,7 +428,14 @@ func runClientConfigCommand(stdout io.Writer) error {
 		return err
 	}
 	endpoint := net.JoinHostPort(cfg.AdvertiseHost, strconv.Itoa(cfg.AdvertisePort))
-	doc, err := discovery.NewDocument(endpoint, cfg.DCID, &key.PublicKey, cfg.AdvertiseDemoGuestSignUp)
+	wipeGeneration := ""
+	if cfg.AdvertiseDemoGuestSignUp {
+		wipeGeneration, err = store.ReadDemoWipeGeneration(context.Background(), os.Getenv("TG_POSTGRES_DSN"))
+		if err != nil {
+			return fmt.Errorf("read demo wipe generation for client-config: %w", err)
+		}
+	}
+	doc, err := discovery.NewDocument(endpoint, cfg.DCID, &key.PublicKey, cfg.AdvertiseDemoGuestSignUp, wipeGeneration)
 	if err != nil {
 		return err
 	}
@@ -582,13 +589,18 @@ func writeInviteIssued(w io.Writer, invite store.RegistrationInvite) error {
 
 func writeInviteList(w io.Writer, invites []store.RegistrationInvite) error {
 	table := tabwriter.NewWriter(w, 0, 4, 2, ' ', 0)
-	if _, err := fmt.Fprintln(table, "ID\tHANDLE\tSTATE\tISSUED\tEXPIRES"); err != nil {
+	if _, err := fmt.Fprintln(table, "ID\tHANDLE\tINVITER\tSTATE\tISSUED\tEXPIRES"); err != nil {
 		return fmt.Errorf("write invite list: %w", err)
 	}
 	for _, invite := range invites {
-		if _, err := fmt.Fprintf(table, "%d\t%s\t%s\t%s\t%s\n",
+		inviter := ""
+		if invite.InviterUserID != nil {
+			inviter = strconv.FormatInt(*invite.InviterUserID, 10)
+		}
+		if _, err := fmt.Fprintf(table, "%d\t%s\t%s\t%s\t%s\t%s\n",
 			invite.ID,
 			invite.Handle,
+			inviter,
 			invite.State,
 			invite.IssuedAt.Format(time.RFC3339),
 			invite.ExpiresAt.Format(time.RFC3339),
@@ -666,10 +678,6 @@ func runAtBlobModePath(log *slog.Logger, blobModePath string) error {
 		return err
 	}
 	advertise := net.JoinHostPort(cfg.AdvertiseHost, strconv.Itoa(cfg.AdvertisePort))
-	clientDiscovery, publicClientDiscovery, err := listenerDiscoveryDocuments(cfg, &key.PublicKey)
-	if err != nil {
-		return err
-	}
 	log.Info("server RSA key", "key_id", keyID, "fingerprint", fingerprint, "path", cfg.RSAKeyPath)
 
 	blobs, err := newBlobStoreWithAuthority(ctx, cfg, log, blobAuthority)
@@ -690,6 +698,17 @@ func runAtBlobModePath(log *slog.Logger, blobModePath string) error {
 			log.Error("store close", "err", cerr)
 		}
 	}()
+	wipeGeneration := ""
+	if cfg.AdvertiseDemoGuestSignUp {
+		wipeGeneration, err = st.DemoWipeGeneration(ctx)
+		if err != nil {
+			return fmt.Errorf("read demo wipe generation: %w", err)
+		}
+	}
+	clientDiscovery, publicClientDiscovery, err := listenerDiscoveryDocuments(cfg, &key.PublicKey, wipeGeneration)
+	if err != nil {
+		return err
+	}
 	hasStoredAuthKeys, err := st.ValidateAuthKeyEncryption(ctx)
 	if err != nil {
 		return fmt.Errorf("validate auth-key encryption identity: %w", err)
@@ -818,12 +837,12 @@ func runAtBlobModePath(log *slog.Logger, blobModePath string) error {
 			turnstileSiteKey = cfg.Turnstile.SiteKey
 			verifier = turnstileVerifier
 		}
-		return api.NewWithPhotoThumbsAndDialogFilterSyncAndUploadPartTTLAndTurnstileAndWelcomeChannelAndSignInAndStickerCatalog(
-			st, cfg.DCID, tgcfg, log, cfg.LogLoginCodes, cfg.MaxFileBytes, cfg.UploadMaxFileBytes, blobs,
+		return api.NewWithPhotoThumbsAndDialogFilterSyncAndUploadPartTTLAndTurnstileAndWelcomeChannelAndSignInAndStickerCatalogAndUserInviteQuota(
+			st, cfg.DCID, tgcfg, log, cfg.LogLoginCodes, cfg.MaxFileBytes, blobs,
 			cfg.MaxUserStorageBytes, peers, photos, cfg.RateLimits, registrationMode,
 			dialogFilterSync, photoThumbs, cfg.UploadPartTTL, turnstileSiteKey,
 			verifier, cfg.WelcomeChannel, turnstileSignInEnabled, cfg.RecoveryEmailMode,
-			cfg.SignUpTermsOfService, stickerSets, cfg.StickerImportMode, notifyMetrics,
+			cfg.SignUpTermsOfService, stickerSets, cfg.StickerImportMode, cfg.UserInviteQuota, notifyMetrics,
 		)
 	}
 	if cfg.LogLoginCodes {
@@ -989,9 +1008,9 @@ func runAtBlobModePath(log *slog.Logger, blobModePath string) error {
 	return serveMTProto(ctx, server, ln, websocketLn, publicWebSocket)
 }
 
-func listenerDiscoveryDocuments(cfg config.Config, pub *rsa.PublicKey) (discovery.Document, discovery.Document, error) {
+func listenerDiscoveryDocuments(cfg config.Config, pub *rsa.PublicKey, wipeGeneration string) (discovery.Document, discovery.Document, error) {
 	advertise := net.JoinHostPort(cfg.AdvertiseHost, strconv.Itoa(cfg.AdvertisePort))
-	clientDiscovery, err := discovery.NewDocument(advertise, cfg.DCID, pub, cfg.AdvertiseDemoGuestSignUp)
+	clientDiscovery, err := discovery.NewDocument(advertise, cfg.DCID, pub, cfg.AdvertiseDemoGuestSignUp, wipeGeneration)
 	if err != nil {
 		return discovery.Document{}, discovery.Document{}, fmt.Errorf("validate discovery identity: %w", err)
 	}
@@ -1006,7 +1025,7 @@ func listenerDiscoveryDocuments(cfg config.Config, pub *rsa.PublicKey) (discover
 	if cfg.PublicWebSocketAdvertiseHost != "" {
 		publicAdvertise := net.JoinHostPort(cfg.PublicWebSocketAdvertiseHost, strconv.Itoa(cfg.PublicWebSocketAdvertisePort))
 		publicClientDiscovery, err = discovery.NewDocumentWithWebSocketAdvertiseAddr(
-			advertise, publicAdvertise, cfg.DCID, pub, cfg.AdvertiseDemoGuestSignUp,
+			advertise, publicAdvertise, cfg.DCID, pub, cfg.AdvertiseDemoGuestSignUp, wipeGeneration,
 		)
 		if err != nil {
 			return discovery.Document{}, discovery.Document{}, fmt.Errorf("validate public WebSocket discovery identity: %w", err)

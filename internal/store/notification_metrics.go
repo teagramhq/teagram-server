@@ -18,7 +18,7 @@ const (
 	pushOutcomeCount            = 4
 	pushLatencyFiniteBuckets    = 15
 	pushLatencyBucketCount      = pushLatencyFiniteBuckets + 1
-	rateLimitDenialSurfaceCount = 26 // twenty-five fixed surfaces plus dropped
+	rateLimitDenialSurfaceCount = 27 // twenty-six fixed surfaces plus dropped
 	rateLimitDenialDroppedIndex = rateLimitDenialSurfaceCount - 1
 )
 
@@ -97,6 +97,7 @@ type RateLimitDenialSurfaceCounts struct {
 	CheckPasswordIP           int64
 	GetPasswordIP             int64
 	SignUpIP                  int64
+	CheckUsernameIP           int64
 	PasswordProof             int64
 	GetPassword               int64
 	UpdateProfile             int64
@@ -459,6 +460,7 @@ func (m *NotificationMetrics) Snapshot() NotificationMetricsSnapshot {
 				CheckPasswordIP:           rateLimitDenials[13],
 				GetPasswordIP:             rateLimitDenials[14],
 				SignUpIP:                  rateLimitDenials[15],
+				CheckUsernameIP:           rateLimitDenials[25],
 				PasswordProof:             rateLimitDenials[16],
 				GetPassword:               rateLimitDenials[17],
 				UpdateProfile:             rateLimitDenials[18],
@@ -649,6 +651,8 @@ func rateLimitDenialSurfaceIndex(surface string) int {
 		return 14
 	case "sign_up_ip":
 		return 15
+	case "check_username_ip":
+		return 25
 	case "password_proof":
 		return 16
 	case "get_password":

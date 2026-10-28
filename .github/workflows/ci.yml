@@ -1084,8 +1084,11 @@ jobs:
           bash -n deploy/teagram/teagram-logs.sh
           sh -n deploy/teagram/teagram-ops.sh
           bash -n deploy/teagram/ops/replay-check.sh
+          bash -n deploy/teagram/ops/rollout-evidence.sh
           bash -n deploy/teagram/test-teagram-logs.sh
+          bash -n deploy/teagram/ops/target-failure-report.sh
           bash -n deploy/teagram/test-teagram-ops.sh
+          bash -n deploy/teagram/test-target-failure-report.sh
           bash -n deploy/telegram-server/deploy-main.sh
           bash -n deploy/teagram-demo/prepare-env.sh
           bash -n deploy/teagram-demo/demo-common.sh
@@ -1113,8 +1116,11 @@ jobs:
             deploy/teagram/teagram-logs.sh \
             deploy/teagram/teagram-ops.sh \
             deploy/teagram/ops/replay-check.sh \
+            deploy/teagram/ops/rollout-evidence.sh \
             deploy/teagram/test-teagram-logs.sh \
+            deploy/teagram/ops/target-failure-report.sh \
             deploy/teagram/test-teagram-ops.sh \
+            deploy/teagram/test-target-failure-report.sh \
             deploy/telegram-server/deploy-main.sh \
             deploy/teagram-demo/prepare-env.sh \
             deploy/teagram-demo/demo-common.sh \
@@ -1153,6 +1159,9 @@ jobs:
 
       - name: Check performance Postgres startup readiness
         run: bash .github/scripts/test-perf-postgres.sh
+
+      - name: Check teagram rollout failure report
+        run: deploy/teagram/test-target-failure-report.sh
 
       - name: Check public demo Compose policy
         run: deploy/teagram-demo/test-demo-compose.sh

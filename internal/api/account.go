@@ -217,9 +217,16 @@ func isReservedUsername(username string) bool {
 	return reservedUsernames[strings.ToLower(username)]
 }
 
+// isReservedAccountUsername adds the bot suffix rule for human account claims.
+// Keep it separate from route reservations so bot creation can still claim
+// usernames ending in bot, and existing usernames remain resolvable.
+func isReservedAccountUsername(username string) bool {
+	return isReservedUsername(username) || strings.HasSuffix(strings.ToLower(username), "bot")
+}
+
 // IsReservedUsername reports whether username conflicts with a server route
-// or a reserved account handle. Local operator tools use the same blocklist as
-// the RPC admission paths.
+// or one of the globally reserved handles. Human account claims also reserve
+// the bot suffix; operator bot creation uses this narrower route blocklist.
 func IsReservedUsername(username string) bool {
 	return isReservedUsername(username)
 }
@@ -252,7 +259,7 @@ func (h *handlers) handleUpdateUsername(r *mtproto.Request) (bin.Encoder, error)
 		if !validateUsername(username) {
 			return nil, errUsernameInvalid
 		}
-		if isReservedUsername(username) {
+		if isReservedAccountUsername(username) {
 			return nil, errUsernameInvalid
 		}
 	}
@@ -304,36 +311,48 @@ func (h *handlers) handleUpdateUsername(r *mtproto.Request) (bin.Encoder, error)
 	return wireUser, nil
 }
 
-// handleCheckUsername reports whether a valid username is available to the
-// authenticated account. A username held by the caller is available to them;
-// login-mode handles keep the same immutable answers as account.updateUsername.
+// handleCheckUsername reports whether a valid username is available. The
+// pre-auth bool is an account-occupancy signal; its network quota throttles
+// bulk probing but is not a privacy guarantee. Authenticated callers keep the
+// same immutable answers as account.updateUsername.
 func (h *handlers) handleCheckUsername(r *mtproto.Request) (bin.Encoder, error) {
 	var req tg.AccountCheckUsernameRequest
 	if err := req.Decode(r.Buf); err != nil {
 		return nil, errMethodNotImpl
 	}
-	if r.UserID == 0 {
-		return nil, errAuthKeyUnreg
+	preAuth := r.UserID == 0
+	if preAuth {
+		if err := h.checkAndChargeRateLimitIP(r, "check_username_ip", h.rateLimitCheckUsernameIP); err != nil {
+			return nil, err
+		}
 	}
-	if !validateUsername(req.Username) || isReservedUsername(req.Username) {
+	if !validateUsername(req.Username) || isReservedAccountUsername(req.Username) {
 		return nil, errUsernameInvalid
 	}
-	if err := h.checkUsernameImmutable(r.Ctx, r.UserID, req.Username); err != nil {
-		return nil, err
-	}
-
 	username := strings.ToLower(req.Username)
-	if err := h.checkUsernameClaimQuota(r.Ctx, r.UserID, username); err != nil {
-		return nil, err
+	if !preAuth {
+		if err := h.checkUsernameImmutable(r.Ctx, r.UserID, req.Username); err != nil {
+			return nil, err
+		}
+		if err := h.checkUsernameClaimQuota(r.Ctx, r.UserID, username); err != nil {
+			return nil, err
+		}
 	}
 
 	taken, err := h.store.UsernameHandleTaken(r.Ctx, username)
 	if err != nil {
-		h.log.Error("check account username: lookup availability", "user_id", r.UserID, "err", err)
+		if preAuth {
+			h.log.Error("check pre-auth username: lookup availability", "err", err)
+		} else {
+			h.log.Error("check account username: lookup availability", "user_id", r.UserID, "err", err)
+		}
 		return nil, errInternal
 	}
 	if !taken {
 		return &tg.BoolTrue{}, nil
+	}
+	if preAuth {
+		return &tg.BoolFalse{}, nil
 	}
 
 	resolved, found, err := h.store.UsernameByHandle(r.Ctx, username)

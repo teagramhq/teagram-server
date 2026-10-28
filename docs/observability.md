@@ -263,7 +263,7 @@ Denial telemetry counts only requests that actually returned `FLOOD_WAIT`:
 | `rate_limit_denials_count` | Rolling count of denials from the fixed surfaces below. It equals the sum of the fixed surface counts. |
 | `rate_limit_denials_rate_per_second` | Denial count divided by `rate_limit_denials_window_seconds`, or zero at zero duration. |
 | `rate_limit_denials_window_seconds` | The same process-local elapsed window used by notification and push telemetry. |
-| `rate_limit_denials_by_surface` | Fixed integer counts for exactly the 19 approved surfaces below. |
+| `rate_limit_denials_by_surface` | Fixed integer counts for exactly the 26 approved surfaces below. |
 | `rate_limit_denials_dropped` | Rolling count of otherwise countable denials whose internal surface was outside the fixed vocabulary. It is excluded from the denial total and has no rate or breakdown. |
 
 The fixed surface keys, in stable order, are:
@@ -273,7 +273,9 @@ The fixed surface keys, in stable order, are:
 `save_file_part`, `upload_get_file`, `send_code_ip_calls`,
 `send_code_ip_distinct_numbers`, `sign_in_fail_ip`, `check_password`,
 `check_password_ip`, `get_password_ip`, `sign_up_ip`, `password_proof`,
-`get_password`, and `update_profile`.
+`get_password`, `update_profile`, `dialog_filter_mutation`,
+`channel_unread_count`, `messages_get_messages`, `secret_chat_request`,
+`secret_chat_discard`, `sticker_set_mutation`, and `check_username_ip`.
 
 Allowed requests, refunded reservations, and storage failures do not count.
 The `_ip` suffix is only a fixed surface name. It does not expose an address.

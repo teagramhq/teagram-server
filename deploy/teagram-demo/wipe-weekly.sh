@@ -74,6 +74,7 @@ python3 "$DEMO_SCRIPT_DIR/../teagramd/rollout-runner/blob-mode-state.py" validat
 CLIENT_CONFIG="$DEMO_CLIENT_CONFIG"
 [[ -f "$CLIENT_CONFIG" && ! -L "$CLIENT_CONFIG" ]] || demo_fail 'current public client config is missing'
 BEFORE_SPKI=$(jq -er '.mtproto.rsa_spki' "$CLIENT_CONFIG")
+BEFORE_GENERATION=$(jq -er '.demo.wipe_generation | select(type == "string" and test("^[0-9a-f]{64}$"))' "$CLIENT_CONFIG")
 [[ "$(jq -er '.websocket.endpoint' "$CLIENT_CONFIG")" == 'wss://demo.teagram.io/apiws' ]] ||
   demo_fail 'current client config does not match the approved demo WebSocket endpoint'
 "$SEED_SCRIPT" --check
@@ -125,7 +126,7 @@ demo_prepare_seed_owner "$TMP_DIR"
 "$SEED_SCRIPT" --verify-seed --endpoint "$ACTIVE_ENDPOINT"
 
 # Re-run the API seeder in the private seed lane and compare verified counts.
-"$SCRIPT_DIR/test-seed-compose.sh"
+"$SCRIPT_DIR/test-seed-compose.sh" "$BEFORE_GENERATION"
 
 # The seed and convergence checks deliberately exercise many auth flows while
 # production rate limits are relaxed. Remove only the limiter state they
@@ -138,11 +139,28 @@ demo_compose exec -T postgres psql -v ON_ERROR_STOP=1 -U postgres -d teagram \
 # before the public edge starts.
 demo_compose up -d --wait --wait-timeout 120 "$ACTIVE_SERVER" haproxy
 "$SEED_SCRIPT" --verify-turnstile --endpoint haproxy:2443
+demo_compose run --rm --no-deps "$ACTIVE_SERVER" client-config > "$TMP_DIR/client-after-wipe.json"
+jq -e '
+  .version == 1
+  and .mtproto.endpoint == "demo.teagram.io:443"
+  and (.mtproto.rsa_spki | type == "string" and length > 0)
+  and .websocket.endpoint == "wss://demo.teagram.io/apiws"
+  and .demo.guest_sign_up == true
+  and (.demo.wipe_generation | type == "string" and test("^[0-9a-f]{64}$"))
+' "$TMP_DIR/client-after-wipe.json" >/dev/null || demo_fail 'client-config lacks the approved demo wipe generation binding'
+AFTER_SPKI=$(jq -er '.mtproto.rsa_spki' "$TMP_DIR/client-after-wipe.json")
+AFTER_GENERATION=$(jq -er '.demo.wipe_generation' "$TMP_DIR/client-after-wipe.json")
+[[ "$AFTER_SPKI" == "$BEFORE_SPKI" ]] || demo_fail 'weekly wipe changed the persistent RSA identity'
+[[ "$AFTER_GENERATION" != "$BEFORE_GENERATION" ]] || demo_fail 'weekly wipe reused the previous wipe generation'
+install -o root -g root -m 0644 "$TMP_DIR/client-after-wipe.json" "$DEMO_CLIENT_CONFIG.next"
+mv -f -- "$DEMO_CLIENT_CONFIG.next" "$DEMO_CLIENT_CONFIG"
 demo_compose up -d edge
 python3 "$SCRIPT_DIR/smoke.py" "$CLIENT_CONFIG"
-demo_compose exec -T "$ACTIVE_SERVER" /usr/local/bin/teagramd client-config > "$TMP_DIR/client-after-wipe.json"
-AFTER_SPKI=$(jq -er '.mtproto.rsa_spki' "$TMP_DIR/client-after-wipe.json")
-[[ "$AFTER_SPKI" == "$BEFORE_SPKI" ]] || demo_fail 'weekly wipe changed the persistent RSA identity'
+demo_compose exec -T "$ACTIVE_SERVER" /usr/local/bin/teagramd client-config > "$TMP_DIR/client-active-after-wipe.json"
+ACTIVE_SPKI=$(jq -er '.mtproto.rsa_spki' "$TMP_DIR/client-active-after-wipe.json")
+[[ "$ACTIVE_SPKI" == "$BEFORE_SPKI" ]] || demo_fail 'weekly wipe changed the persistent RSA identity'
+ACTIVE_GENERATION=$(jq -er '.demo.wipe_generation' "$TMP_DIR/client-active-after-wipe.json")
+[[ "$ACTIVE_GENERATION" == "$AFTER_GENERATION" ]] || demo_fail 'active server advertises a different wipe generation'
 if [[ -f "$ACTIVITY_SERVICE" ]]; then
   systemctl reset-failed teagram-demo-activity.service
   if ((ACTIVITY_TIMER_WAS_ACTIVE)); then

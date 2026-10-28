@@ -93,9 +93,6 @@ func TestLoadDefaults(t *testing.T) {
 	if cfg.MaxFileBytes != 104857600 {
 		t.Errorf("MaxFileBytes = %d, want 104857600", cfg.MaxFileBytes)
 	}
-	if cfg.UploadMaxFileBytes != 0 {
-		t.Errorf("UploadMaxFileBytes = %d, want 0 when TG_UPLOAD_MAX_BYTES is unset", cfg.UploadMaxFileBytes)
-	}
 	if cfg.UploadPartTTL != 6*time.Hour {
 		t.Errorf("UploadPartTTL = %v, want 6h", cfg.UploadPartTTL)
 	}
@@ -608,9 +605,6 @@ func TestLoadMaxFileBytes(t *testing.T) {
 			if cfg.MaxFileBytes != tc.want {
 				t.Errorf("MaxFileBytes = %d, want %d", cfg.MaxFileBytes, tc.want)
 			}
-			if cfg.UploadMaxFileBytes != 0 {
-				t.Errorf("UploadMaxFileBytes = %d, want 0 when TG_UPLOAD_MAX_BYTES is unset", cfg.UploadMaxFileBytes)
-			}
 		})
 	}
 }
@@ -628,9 +622,6 @@ func TestLoadUploadMaxBytesOverridesMaxFileBytes(t *testing.T) {
 	if cfg.MaxFileBytes != 512000 {
 		t.Fatalf("MaxFileBytes = %d, want TG_UPLOAD_MAX_BYTES value 512000", cfg.MaxFileBytes)
 	}
-	if cfg.UploadMaxFileBytes != 512000 {
-		t.Fatalf("UploadMaxFileBytes = %d, want TG_UPLOAD_MAX_BYTES value 512000", cfg.UploadMaxFileBytes)
-	}
 }
 
 func TestLoadUploadMaxBytesUnsetKeepsCurrentLimit(t *testing.T) {
@@ -645,9 +636,6 @@ func TestLoadUploadMaxBytesUnsetKeepsCurrentLimit(t *testing.T) {
 	}
 	if cfg.MaxFileBytes != 2097152 {
 		t.Fatalf("MaxFileBytes = %d, want existing TG_MAX_FILE_BYTES value 2097152", cfg.MaxFileBytes)
-	}
-	if cfg.UploadMaxFileBytes != 0 {
-		t.Fatalf("UploadMaxFileBytes = %d, want 0 when TG_UPLOAD_MAX_BYTES is unset", cfg.UploadMaxFileBytes)
 	}
 }
 
@@ -1661,6 +1649,40 @@ func TestLoadRegistrationMode(t *testing.T) {
 				t.Errorf("RegistrationMode = %q, want %q", cfg.RegistrationMode, tc.want)
 			}
 		})
+	}
+}
+
+func TestLoadUserInviteQuota(t *testing.T) {
+	t.Setenv("TG_POSTGRES_DSN", "postgres://localhost/tg")
+	t.Setenv("TG_AUTHKEY_ENC_KEY", validEncKey)
+	t.Setenv("TG_AUTHKEY_ENC_KEY_FILE", "")
+
+	for _, tc := range []struct {
+		name  string
+		value string
+		want  int
+	}{
+		{name: "unset defaults to disabled", want: 0},
+		{name: "zero disables", value: "0", want: 0},
+		{name: "positive quota", value: "5", want: 5},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("TG_USER_INVITE_QUOTA", tc.value)
+			cfg, err := config.Load(discardLog())
+			if err != nil {
+				t.Fatalf("Load: %v", err)
+			}
+			if got := cfg.UserInviteQuota; got != tc.want {
+				t.Errorf("UserInviteQuota = %d, want %d", got, tc.want)
+			}
+		})
+	}
+
+	for _, value := range []string{"not-an-integer", "-1"} {
+		t.Setenv("TG_USER_INVITE_QUOTA", value)
+		if _, err := config.Load(discardLog()); err == nil || !strings.Contains(err.Error(), "TG_USER_INVITE_QUOTA") {
+			t.Errorf("Load with TG_USER_INVITE_QUOTA=%q error = %v, want setting-specific error", value, err)
+		}
 	}
 }
 
