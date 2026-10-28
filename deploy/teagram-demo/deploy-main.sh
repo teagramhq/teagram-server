@@ -30,7 +30,7 @@ CANDIDATE_STARTED=0
 PUBLIC_ACTIVATION_STARTED=0
 CUTOVER_COMMITTED=0
 CLIENT_CONFIG_UPDATED=0
-EDGE_CONFIG_REFRESH_ATTEMPTED=0
+EDGE_CONFIG_RELOAD_ATTEMPTED=0
 EDGE_CONTAINER_ID=
 PREV_WEB_RELEASE=
 PREV_WEB_LINK=
@@ -97,13 +97,12 @@ demo_cleanup() {
         "$ACTIVE_SERVER" "$BACKUP_DIR" >&2
     fi
   fi
-  if (( rc != 0 && ${CUTOVER_COMMITTED:-0} == 0 && ${EDGE_CONFIG_REFRESH_ATTEMPTED:-0} == 1 )); then
-    nginx_rollback_file="$SCRIPT_DIR/.nginx.conf.rollback.$$"
-    if git -C "$DEMO_REPO_ROOT" show "$PREV_SHA:deploy/teagram-demo/nginx.conf" > "$nginx_rollback_file" &&
+  if (( rc != 0 && ${CUTOVER_COMMITTED:-0} == 0 && ${EDGE_CONFIG_RELOAD_ATTEMPTED:-0} == 1 )); then
+    nginx_rollback_file="$SCRIPT_DIR/nginx-config/.nginx.conf.rollback.$$"
+    if { git -C "$DEMO_REPO_ROOT" show "$PREV_SHA:deploy/teagram-demo/nginx-config/nginx.conf" > "$nginx_rollback_file" ||
+      git -C "$DEMO_REPO_ROOT" show "$PREV_SHA:deploy/teagram-demo/nginx.conf" > "$nginx_rollback_file"; } &&
       chown root:root "$nginx_rollback_file" && chmod 0644 "$nginx_rollback_file" &&
-      TEAGRAM_DEMO_EDGE_CONFIG_SHA256=$(sha256sum -- "$nginx_rollback_file" | awk '{print $1}') &&
-      export TEAGRAM_DEMO_EDGE_CONFIG_SHA256 &&
-      mv -f -- "$nginx_rollback_file" "$SCRIPT_DIR/nginx.conf" &&
+      mv -f -- "$nginx_rollback_file" "$SCRIPT_DIR/nginx-config/nginx.conf" &&
       demo_reload_edge; then
       printf 'demo edge configuration rolled back to %s\n' "$PREV_SHA" >&2
     else
@@ -189,11 +188,11 @@ mapfile -t CONTAINER_IDS < <(demo_compose ps -q)
 [[ -z "$(demo_compose ps --status running -q "$CANDIDATE_SERVER")" ]] ||
   demo_fail 'candidate server slot is already running; reconcile the rollout before deploying'
 demo_require_proxy_configuration_current haproxy "$TEAGRAM_DEMO_HAPROXY_CONFIG_SHA256"
-demo_require_proxy_configuration_current edge "$TEAGRAM_DEMO_EDGE_CONFIG_SHA256"
+demo_require_proxy_configuration_current edge "" 1
 mapfile -t EDGE_IDS < <(demo_compose ps -q edge)
 ((${#EDGE_IDS[@]} == 1)) || demo_fail 'running edge proxy is missing or ambiguous'
 EDGE_CONTAINER_ID=${EDGE_IDS[0]}
-EDGE_CONFIG_REFRESH_ATTEMPTED=1
+EDGE_CONFIG_RELOAD_ATTEMPTED=1
 demo_reload_edge
 mapfile -t CONTAINER_IDS < <(demo_compose ps -q)
 ((${#CONTAINER_IDS[@]} >= 4)) || demo_fail 'demo database, server, HAProxy, or refreshed edge container is not running'

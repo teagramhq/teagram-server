@@ -64,7 +64,7 @@ if [[ -n "$PREVIOUS_WEB_RELEASE" ]]; then
   PREVIOUS_LINK_TARGET="releases/${PREVIOUS_WEB_RELEASE// /-}"
 fi
 
-demo_require_proxy_configuration_current edge "$TEAGRAM_DEMO_EDGE_CONFIG_SHA256"
+demo_require_proxy_configuration_current edge
 STAGED_WEB_RELEASE=$(DEPLOY_WEB_ARCHIVE_SHA256="$WEB_ARCHIVE_SHA256" \
   python3 "$SCRIPT_DIR/install-web-release.py" stage \
     "$WEB_ARCHIVE" "$DEMO_WEB_RELEASES_DIR" "$WEB_SOURCE_SHA" "$WEB_ARTIFACT_DIGEST")

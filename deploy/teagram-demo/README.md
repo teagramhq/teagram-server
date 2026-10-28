@@ -209,15 +209,22 @@ restart recreates the same release. WebSocket sessions already connected to
 the old process drain during its configured 120-second graceful stop.
 
 Before rendering the mounted HAProxy config, a deploy compares the running
-HAProxy and edge Compose hashes and their recorded config source hashes with
-the target. A proxy image, `haproxy.cfg` or HAProxy renderer change still stops
-the deploy for the maintenance path. An edge-only Nginx source change is
-validated against the existing Compose hash with only its config-source label
-normalized. The edge container is recreated so its single-file bind mount sees
-the checked-out inode, then `nginx -t` and a graceful reload verify the new
-configuration. This briefly interrupts requests at the public demo origin. If
-the server rollout fails, the previous Nginx config is restored, remounted in a
-fresh edge container and verified.
+HAProxy and edge Compose hashes with the target. A proxy image, `haproxy.cfg`
+or HAProxy renderer change still stops the deploy for the maintenance path.
+Nginx config is mounted as a directory so a checkout can replace
+`nginx-config/nginx.conf` without leaving the edge container pinned to the old
+file inode. A config-only change is syntax-checked and applied with Nginx's
+graceful reload; the edge container is not recreated, and old workers drain
+existing requests and WebSockets. `nginx.conf` remains an identical compatibility
+copy for already-installed demo ops wrappers that fingerprint that path.
+
+The first deploy that changes the existing single-file mount to this directory
+layout recreates the only edge container once. That migration briefly interrupts
+requests and drops active WebSockets at the public demo origin. This one-time
+interruption is accepted for the weekly-wiped demo. Afterward, normal Nginx
+config updates reload gracefully without recreating edge. If the server rollout
+fails, the previous Nginx config is restored inside the mounted directory and
+gracefully reloaded.
 
 On a pre-cutover failure, the old server and edge stay available, the candidate
 stops, and the previous release reference remains active. If traffic has reached

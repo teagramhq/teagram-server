@@ -46,7 +46,7 @@ demo_fail() {
 }
 
 [[ -f "$DEMO_SCRIPT_DIR/haproxy.cfg" && -f "$DEMO_SCRIPT_DIR/render-haproxy-config.py" &&
-  -f "$DEMO_SCRIPT_DIR/nginx.conf" ]] || {
+  -f "$DEMO_SCRIPT_DIR/nginx-config/nginx.conf" ]] || {
   demo_fail 'proxy configuration source is missing'
   return 1
 }
@@ -54,23 +54,23 @@ TEAGRAM_DEMO_HAPROXY_CONFIG_SHA256=$(
   sha256sum -- "$DEMO_SCRIPT_DIR/haproxy.cfg" "$DEMO_SCRIPT_DIR/render-haproxy-config.py" |
     awk '{print $1}' | sha256sum | awk '{print $1}'
 )
-TEAGRAM_DEMO_EDGE_CONFIG_SHA256=$(sha256sum -- "$DEMO_SCRIPT_DIR/nginx.conf" | awk '{print $1}')
-export TEAGRAM_DEMO_HAPROXY_CONFIG_SHA256 TEAGRAM_DEMO_EDGE_CONFIG_SHA256
+export TEAGRAM_DEMO_HAPROXY_CONFIG_SHA256
 
 demo_require_proxy_configuration_current() {
-  local service="$1" expected_source_hash="$2" source_label target_hash live_hash live_source_hash
+  local service="$1" expected_source_hash="${2:-}" allow_legacy_edge_migration="${3:-0}"
+  local source_label target_hash live_hash live_source_hash
   local -a proxy_ids=()
 
   case "$service" in
     haproxy) source_label='com.teagram.demo.haproxy-config-sha256' ;;
-    edge) source_label='com.teagram.demo.edge-config-sha256' ;;
+    edge) source_label='' ;;
     *) demo_fail "unsupported proxy service: $service"; return 1 ;;
   esac
 
-  [[ "$expected_source_hash" =~ ^[0-9a-f]{64}$ ]] || {
-    demo_fail "$service source configuration hash is invalid"
+  if [[ "$service" == haproxy && ! "$expected_source_hash" =~ ^[0-9a-f]{64}$ ]]; then
+    demo_fail 'haproxy source configuration hash is invalid'
     return 1
-  }
+  fi
   mapfile -t proxy_ids < <(demo_compose ps -q "$service")
   ((${#proxy_ids[@]} == 1)) || {
     demo_fail "running $service proxy is missing or ambiguous"
@@ -84,41 +84,41 @@ demo_require_proxy_configuration_current() {
     demo_fail "$service live Compose hash could not be read"
     return 1
   }
-  live_source_hash=$(docker inspect --format "{{index .Config.Labels \"$source_label\"}}" "${proxy_ids[0]}") || {
-    demo_fail "$service live source configuration hash could not be read"
-    return 1
-  }
   [[ "$target_hash" =~ ^[0-9a-f]{64}$ ]] || {
     demo_fail "$service target Compose hash is invalid"
     return 1
   }
-  if [[ "$live_hash" == "$target_hash" && "$live_source_hash" == "$expected_source_hash" ]]; then
-    return 0
-  fi
-  if [[ "$service" == edge && "$live_source_hash" =~ ^[0-9a-f]{64}$ ]]; then
-    local normalized_hash
-    normalized_hash=$(demo_edge_compose_hash_for_source "$live_source_hash") || {
-        demo_fail 'edge normalized Compose hash could not be read'
-        return 1
-      }
-    if [[ "$live_hash" == "$normalized_hash" ]]; then
+  if [[ "$service" == edge ]]; then
+    if [[ "$live_hash" == "$target_hash" ]] && demo_edge_uses_directory_mount "${proxy_ids[0]}"; then
       return 0
     fi
+    if [[ "$allow_legacy_edge_migration" == 1 ]] &&
+      demo_edge_uses_legacy_file_mount "${proxy_ids[0]}"; then
+      return 0
+    fi
+    demo_fail 'edge proxy image, Compose settings, or config mount changed; only the single-file to directory mount migration is automatic'
+    return 1
   fi
+
+  live_source_hash=$(docker inspect --format "{{index .Config.Labels \"$source_label\"}}" "${proxy_ids[0]}") || {
+    demo_fail "$service live source configuration hash could not be read"
+    return 1
+  }
+  [[ "$live_hash" == "$target_hash" && "$live_source_hash" == "$expected_source_hash" ]] && return 0
   demo_fail "$service proxy image or configuration changed; apply proxy changes during maintenance before deploying"
   return 1
 }
 
-demo_edge_compose_hash_for_source() {
-  local source_hash="$1" image_ref
-  image_ref=$(demo_compose_image_ref) || return 1
-  env -u COMPOSE_FILE -u COMPOSE_PROJECT_NAME -u COMPOSE_PROFILES \
-    -u TEAGRAM_DEMO_TURNSTILE_SITE_KEY -u TEAGRAM_DEMO_TURNSTILE_SECRET_KEY_FILE \
-    -u TEAGRAM_DEMO_EDGE_BIND \
-    "TEAGRAM_DEMO_IMAGE_REF=$image_ref" \
-    "TEAGRAM_DEMO_EDGE_CONFIG_SHA256=$source_hash" \
-    docker compose "${DEMO_COMPOSE_ARGS[@]}" config --hash edge |
-    awk '$1 == "edge" {print $2}'
+demo_edge_uses_directory_mount() {
+  local edge_id="$1" mounts
+  mounts=$(docker inspect --format '{{range .Mounts}}{{printf "%s|%s|%s\n" .Type .Source .Destination}}{{end}}' "$edge_id") || return 1
+  grep -Fqx -- "bind|$DEMO_SCRIPT_DIR/nginx-config|/etc/nginx/demo" <<< "$mounts"
+}
+
+demo_edge_uses_legacy_file_mount() {
+  local edge_id="$1" mounts
+  mounts=$(docker inspect --format '{{range .Mounts}}{{printf "%s|%s|%s\n" .Type .Source .Destination}}{{end}}' "$edge_id") || return 1
+  grep -Fqx -- "bind|$DEMO_SCRIPT_DIR/nginx.conf|/etc/nginx/nginx.conf" <<< "$mounts"
 }
 
 demo_wait_migration() {
@@ -406,7 +406,6 @@ demo_prepare_client_config_dir() {
 }
 
 demo_reload_edge() {
-  local live_source_hash
   local -a edge_ids=()
   mapfile -t edge_ids < <(demo_compose ps -q edge)
   ((${#edge_ids[@]} == 1)) || {
@@ -414,15 +413,19 @@ demo_reload_edge() {
     return 1
   }
   EDGE_CONTAINER_ID=${edge_ids[0]}
-  live_source_hash=$(docker inspect --format '{{index .Config.Labels "com.teagram.demo.edge-config-sha256"}}' \
-    "$EDGE_CONTAINER_ID") || {
-    demo_fail 'edge configuration source hash could not be read'
-    return 1
-  }
-  if [[ "$live_source_hash" != "$TEAGRAM_DEMO_EDGE_CONFIG_SHA256" ]]; then
-    # A single-file bind mount pins the inode that existed when the container
-    # started. Git replaces that inode during checkout, so reload only after
-    # Compose has mounted the checked-out file in a fresh edge container.
+  if ! demo_edge_uses_directory_mount "$EDGE_CONTAINER_ID"; then
+    demo_edge_uses_legacy_file_mount "$EDGE_CONTAINER_ID" || {
+      demo_fail 'edge proxy config mount is neither the supported directory layout nor the legacy single-file layout'
+      return 1
+    }
+    demo_compose run --rm -T --no-deps --entrypoint nginx edge \
+      -c /etc/nginx/demo/nginx.conf -t >/dev/null || {
+      demo_fail 'new edge configuration failed its pre-migration syntax check'
+      return 1
+    }
+    # This is the one-time transition from the legacy single-file bind mount.
+    # Future config updates are visible through the directory mount and reload
+    # Nginx gracefully without stopping the public edge container.
     demo_compose up -d --no-deps --force-recreate edge || {
       demo_fail 'edge proxy could not be recreated with the current configuration'
       return 1
@@ -433,12 +436,16 @@ demo_reload_edge() {
       return 1
     }
     EDGE_CONTAINER_ID=${edge_ids[0]}
+    demo_edge_uses_directory_mount "$EDGE_CONTAINER_ID" || {
+      demo_fail 'recreated edge proxy does not have the directory config mount'
+      return 1
+    }
   fi
-  docker exec "$EDGE_CONTAINER_ID" nginx -t >/dev/null || {
+  docker exec "$EDGE_CONTAINER_ID" nginx -c /etc/nginx/demo/nginx.conf -t >/dev/null || {
     demo_fail 'edge nginx configuration failed its syntax check'
     return 1
   }
-  docker exec "$EDGE_CONTAINER_ID" nginx -s reload >/dev/null || {
+  docker exec "$EDGE_CONTAINER_ID" nginx -c /etc/nginx/demo/nginx.conf -s reload >/dev/null || {
     demo_fail 'edge nginx graceful reload failed'
     return 1
   }
@@ -632,8 +639,7 @@ demo_render_config() {
   demo_compose config --format json > "$destination"
   chmod 0600 "$destination"
   jq -e \
-    --arg haproxyConfigHash "$TEAGRAM_DEMO_HAPROXY_CONFIG_SHA256" \
-    --arg edgeConfigHash "$TEAGRAM_DEMO_EDGE_CONFIG_SHA256" '
+    --arg haproxyConfigHash "$TEAGRAM_DEMO_HAPROXY_CONFIG_SHA256" '
     (.services.teagramd.ports // [] | length) == 0
     and (.services["teagramd-next"].ports // [] | length) == 0
     and (.services.teagramd.build == null)
@@ -678,7 +684,7 @@ demo_render_config() {
     and .services.haproxy.image == "mirror.gcr.io/library/haproxy:3.2-alpine@sha256:51f173c6825753d9e3a888b1004a1c2cb730936cc9178730a5c555246bd161a2"
     and .services.haproxy.labels["com.teagram.demo.haproxy-config-sha256"] == $haproxyConfigHash
     and .services.edge.depends_on.haproxy.condition == "service_healthy"
-    and .services.edge.labels["com.teagram.demo.edge-config-sha256"] == $edgeConfigHash
+    and any(.services.edge.volumes[]; (.source | endswith("/deploy/teagram-demo/nginx-config")) and .target == "/etc/nginx/demo" and .read_only)
     and (.services.edge.networks | keys | sort) == ["backend", "edge"]
     and .secrets.teagram_demo_turnstile.file == "/var/lib/teagram-demo/secrets/turnstile-secret-key"
     and .volumes.tgblobs.driver == "local"
