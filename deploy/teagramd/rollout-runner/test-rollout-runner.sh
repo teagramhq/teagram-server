@@ -1944,8 +1944,9 @@ authority_fingerprint() {
 }
 
 show_fixture_failure() {
-  local name=$1 status=$2 root
+  local name=$1 status=$2 root checkout
   root=$(cat "$TMP/$name-root-path")
+  checkout=$(cat "$TMP/$name-checkout-path")
   printf 'fixture_failure=%s status=%s\nfixture_stdout:\n' "$name" "$status" >&2
   cat "$TMP/$name.stdout" >&2
   printf 'fixture_stderr:\n' >&2
@@ -1961,6 +1962,19 @@ show_fixture_failure() {
   if [ -f "$root.rollback/rollback-equivalence.tsv" ]; then
     printf 'rollback_equivalence:\n' >&2
     cat "$root.rollback/rollback-equivalence.tsv" >&2
+  fi
+  if [ -f "$root.baseline/env-baseline.txt" ]; then
+    printf 'env_baseline:\n' >&2
+    cat "$root.baseline/env-baseline.txt" >&2
+  fi
+  if [ -f "$root.target/target.snapshot.json" ]; then
+    printf 'target_environment_evidence:\n' >&2
+    jq '{env_sha256,container_env_sha256,container_env_added,container_env_changed}' \
+      "$root.target/target.snapshot.json" >&2
+  fi
+  if [ -f "$checkout/.state/rollout-env" ]; then
+    printf 'recorded_environment:\n' >&2
+    cat "$checkout/.state/rollout-env" >&2
   fi
   printf 'fixture_events:\n' >&2
   cat "$TMP/$name-events" >&2
@@ -3383,6 +3397,34 @@ else
   fail 'named TG_REGISTRATION value change must deploy through apply'
 fi
 
+prepare_env_change_fixture tailnet-exchange-limit-change-success \
+  target-local-carry-forward-env-value-change "$APPLY_TARGET_SHA" "$TARGET_SHA" \
+  TG_RATE_LIMIT_KEY_EXCHANGE_IP_TAILNET=0 TG_RATE_LIMIT_KEY_EXCHANGE_IP_TAILNET=12 \
+  TG_RATE_LIMIT_KEY_EXCHANGE_IP_TAILNET 12 0 '' TG_RATE_LIMIT_KEY_EXCHANGE_IP_TAILNET=12
+state=$(cat "$TMP/tailnet-exchange-limit-change-success-state-path")
+checkout=$(cat "$TMP/tailnet-exchange-limit-change-success-checkout-path")
+root=$(cat "$TMP/tailnet-exchange-limit-change-success-root-path")
+jq -c '.services.teagramd.environment.TG_RATE_LIMIT_KEY_EXCHANGE_IP_TAILNET="12"' \
+  "$state/base-compose.json" > "$TMP/tailnet-exchange-limit-change-success-base-compose.json"
+mv -- "$TMP/tailnet-exchange-limit-change-success-base-compose.json" "$state/base-compose.json"
+record_live_render "$state"
+previous_env_sha=$(sha256sum "$TMP/tailnet-exchange-limit-change-success-previous.env" | awk '{print $1}')
+current_env_sha=$(sha256sum "$checkout/.env" | awk '{print $1}')
+status=$(run_fixture tailnet-exchange-limit-change-success built 0 '' 2 '' '' apply "$APPLY_TARGET_SHA")
+if [ "$status" = 0 ] && grep -q "rollout=verified sha=$APPLY_TARGET_SHA" \
+     "$TMP/tailnet-exchange-limit-change-success.stdout" && \
+   grep -qx "recorded_env_sha256=$previous_env_sha recorded_from=record env_sha256=$current_env_sha added=none changed=TG_RATE_LIMIT_KEY_EXCHANGE_IP_TAILNET" \
+     "$root.baseline/env-baseline.txt" && \
+   [ "$(jq -r '.container_env_changed' "$root.target/target.snapshot.json")" = TG_RATE_LIMIT_KEY_EXCHANGE_IP_TAILNET ] && \
+   grep -q $'preflight\tconfig_sha256\t.*\tpass' "$root.target/preflight-comparisons.tsv" && \
+   grep -q $'\tcontainer_env_sha256\t.*\tpass' "$root.target/target-comparisons.tsv" && \
+   grep -qx "env_sha256=$current_env_sha source_sha=$APPLY_TARGET_SHA" "$checkout/.state/rollout-env"; then
+  pass 'named tailnet limit changes verify the configured value and preserve remaining rollout digests'
+else
+  show_fixture_failure tailnet-exchange-limit-change-success "$status"
+  fail 'named tailnet limit change must deploy through apply'
+fi
+
 websocket_origin_before=https://teagram.tailaa4918.ts.net
 websocket_origin_after=https://teagram.tailaa4918.ts.net,https://web.teagram.io
 prepare_env_change_fixture websocket-origin-value-change \
@@ -3650,6 +3692,37 @@ if [ "$status" != 0 ] && grep -q "rollback=verified baseline_sha=$TARGET_LOCAL_C
 else
   show_fixture_failure public-websocket-addition-rollback "$status"
   fail 'public listener addition rollback must restore the previous environment'
+fi
+
+prepare_env_addition_fixture tailnet-exchange-limit-addition-rollback \
+  TG_RATE_LIMIT_KEY_EXCHANGE_IP_TAILNET '' \
+  TG_RATE_LIMIT_KEY_EXCHANGE_IP_TAILNET=0 TG_RATE_LIMIT_KEY_EXCHANGE_IP_TAILNET=0 \
+  target-local-df9-rollback "$DF9_LOCAL_COMPOSE_TARGET_SHA" "$TARGET_LOCAL_COMPOSE_TARGET_SHA" \
+  TG_RATE_LIMIT_KEY_EXCHANGE_IP_TAILNET=
+state=$(cat "$TMP/tailnet-exchange-limit-addition-rollback-state-path")
+checkout=$(cat "$TMP/tailnet-exchange-limit-addition-rollback-checkout-path")
+root=$(cat "$TMP/tailnet-exchange-limit-addition-rollback-root-path")
+jq -c '.services.teagramd.environment.TG_RATE_LIMIT_KEY_EXCHANGE_IP_TAILNET=""' \
+  "$state/base-compose.json" > "$TMP/tailnet-exchange-limit-addition-rollback-base-compose.json"
+mv -- "$TMP/tailnet-exchange-limit-addition-rollback-base-compose.json" "$state/base-compose.json"
+printf '%s\n' TG_RATE_LIMIT_KEY_EXCHANGE_IP_TAILNET= \
+  > "$TMP/tailnet-exchange-limit-addition-rollback-baseline-env-extra"
+record_live_render "$state"
+previous_env_sha=$(sha256sum "$TMP/tailnet-exchange-limit-addition-rollback-previous.env" | awk '{print $1}')
+status=$(run_fixture tailnet-exchange-limit-addition-rollback built 0 '' 2 '' '' apply "$APPLY_TARGET_SHA")
+if [ "$status" != 0 ] && grep -q "rollback=verified baseline_sha=$TARGET_LOCAL_COMPOSE_TARGET_SHA" \
+     "$TMP/tailnet-exchange-limit-addition-rollback.stdout" && \
+   [ "$(jq -r '.container_env_added' "$root.baseline/baseline.snapshot.json")" = none ] && \
+   [ "$(jq -r '.container_env_added' "$root.target/target.snapshot.json")" = TG_RATE_LIMIT_KEY_EXCHANGE_IP_TAILNET ] && \
+   [ "$(jq -r '.container_env_added' "$root.rollback/rollback.snapshot.json")" = none ] && \
+   [ "$(sha256sum "$checkout/.env" | awk '{print $1}')" = "$previous_env_sha" ] && \
+   grep -qx "env_sha256=$previous_env_sha source_sha=$TARGET_LOCAL_COMPOSE_TARGET_SHA" "$checkout/.state/rollout-env" && \
+   grep -q $'rollback\tenv_sha256\t.*\tpass' "$root.rollback/rollback-equivalence.tsv" && \
+   grep -q $'rollback\tcontainer_env_sha256\t.*\tpass' "$root.rollback/rollback-equivalence.tsv"; then
+  pass 'tailnet limit addition rollback restores the recorded .env and preserves the empty baseline mapping'
+else
+  show_fixture_failure tailnet-exchange-limit-addition-rollback "$status"
+  fail 'tailnet limit addition rollback must restore the previous environment'
 fi
 
 prepare_env_addition_fixture env-addition-rollback TG_NEW_FLAG '' 'TG_NEW_FLAG=on' TG_NEW_FLAG=on \

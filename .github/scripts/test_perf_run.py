@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Regression tests for perf-run.sh base comparison handling."""
+"""Regression tests for perf-run.sh comparison and timing retry handling."""
 
 from __future__ import annotations
 
@@ -37,12 +37,49 @@ case "${1:-}" in
     [[ -n "$output" ]]
     cat > "$output" <<'SH'
 #!/usr/bin/env bash
-printf 'fixture version %s\\n' "${TG_PERF_FIXTURE_VERSION:-}" >> "$PERF_TEST_CALLS"
-exit 0
+set -euo pipefail
+printf 'head\n' >> "$PERF_TEST_CALLS"
+printf 'fixture version %s\n' "${TG_PERF_FIXTURE_VERSION:-}" >> "$PERF_TEST_CALLS"
+printf '{"version":1,"results":[]}\n' > "$TG_PERF_REPORT"
 SH
     chmod +x "$output"
     ;;
-  run) echo "# fake performance report" ;;
+  build)
+    output=
+    while (($#)); do
+      if [[ "$1" == -o ]]; then
+        output=$2
+        shift 2
+      else
+        shift
+      fi
+    done
+    [[ -n "$output" ]]
+    cat > "$output" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+printf 'perfreport\n' >> "$PERF_TEST_CALLS"
+count=0
+if [[ -n "${PERF_TEST_REPORT_COUNT:-}" && -f "$PERF_TEST_REPORT_COUNT" ]]; then
+  count=$(<"$PERF_TEST_REPORT_COUNT")
+fi
+count=$((count + 1))
+if [[ -n "${PERF_TEST_REPORT_COUNT:-}" ]]; then
+  printf '%s\n' "$count" > "$PERF_TEST_REPORT_COUNT"
+fi
+if [[ -n "${PERF_TEST_REPORT_COUNT:-}" && "$count" == 1 ]]; then
+  echo 'timing failure'
+  exit 3
+fi
+echo 'pass'
+SH
+    chmod +x "$output"
+    ;;
+  run)
+    # go run reports a child program's non-zero status as 1, masking 3.
+    echo 'exit status 3' >&2
+    exit 1
+    ;;
   *) exit 64 ;;
 esac
 """
@@ -152,6 +189,61 @@ class PerfRunTests(unittest.TestCase):
             )
             self.assertFalse(calls.exists(), "measurement started with an invalid base SHA")
 
+    def test_timing_failure_retries_before_failing(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            bin_dir = root / "bin"
+            bin_dir.mkdir()
+            runner_temp = root / "runner-temp"
+            runner_temp.mkdir()
+            calls = root / "calls"
+            report_count = root / "report-count"
+            for name, content in (
+                ("atlas", FAKE_ATLAS),
+                ("docker", FAKE_DOCKER),
+                ("go", FAKE_GO),
+            ):
+                executable = bin_dir / name
+                executable.write_text(content, encoding="utf-8")
+                executable.chmod(0o755)
+
+            env = {
+                **os.environ,
+                "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}",
+                "PERF_CACHE": str(root / "cache"),
+                "PERF_HISTORY": str(root / "history"),
+                "PERF_PG_CONTAINER": "perf-test-pg",
+                "PERF_PG_URL": "postgres://postgres:perf@localhost:5432/",
+                "PERF_TEST_CALLS": str(calls),
+                "PERF_TEST_REPORT_COUNT": str(report_count),
+                "PERF_ROUNDS": "1",
+                "PERF_WORK": str(root / "work"),
+                "RUNNER_TEMP": str(runner_temp),
+            }
+            env.pop("PERF_BASE_SHA", None)
+            env.pop("GITHUB_STEP_SUMMARY", None)
+            result = subprocess.run(
+                ["bash", str(SCRIPT), "measure"],
+                cwd=ROOT,
+                env=env,
+                capture_output=True,
+                text=True,
+                timeout=60,
+                check=False,
+            )
+
+            self.assertEqual(0, result.returncode, result.stdout + result.stderr)
+            self.assertIn("timing checks failed; measuring once more", result.stdout)
+            self.assertEqual("2", report_count.read_text(encoding="utf-8").strip())
+            self.assertEqual(
+                ["head", "perfreport", "head", "perfreport"],
+                [
+                    line
+                    for line in calls.read_text(encoding="utf-8").splitlines()
+                    if line in {"head", "perfreport"}
+                ],
+            )
+
     def test_server_setup_change_skips_base_comparison(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -203,16 +295,11 @@ if [[ "${1:-}" == diff && "$*" == *"test/perf/server_test.go"* ]]; then exit 1; 
 
             self.assertEqual(0, result.returncode, result.stdout + result.stderr)
             self.assertIn("Base comparison skipped: fixture seeder changed", result.stdout)
-            diff_call = next(
-                line for line in calls.read_text(encoding="utf-8").splitlines()
-                if line.startswith("git diff --quiet")
-            )
+            call_lines = calls.read_text(encoding="utf-8").splitlines()
+            diff_call = next(line for line in call_lines if line.startswith("git diff --quiet"))
             self.assertIn("test/perf/fixture_test.go", diff_call)
             self.assertIn("test/perf/server_test.go", diff_call)
-            self.assertIn(
-                "fixture version fixture-current-v2",
-                calls.read_text(encoding="utf-8").splitlines(),
-            )
+            self.assertIn("fixture version fixture-current-v2", call_lines)
 
 
 if __name__ == "__main__":

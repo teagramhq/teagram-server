@@ -81,6 +81,40 @@ func TestCreateUserElectsOnlyTheFirstNewUser(t *testing.T) {
 	}
 }
 
+func TestBotCreatedBeforeFirstHumanDoesNotConsumeAdministratorElection(t *testing.T) {
+	t.Parallel()
+	s := open(t)
+	ctx := context.Background()
+
+	bot, _, err := s.CreateBot(ctx, "election_test_bot", "Election bot")
+	if err != nil {
+		t.Fatalf("create bot: %v", err)
+	}
+
+	const authKeyID = int64(0x2814)
+	if err := s.SaveAuthKey(ctx, authKeyID, []byte("signup key")); err != nil {
+		t.Fatalf("save signup auth key: %v", err)
+	}
+	codeHash, _, err := s.IssueCodeForUsername(ctx, "election_human")
+	if err != nil {
+		t.Fatalf("issue signup code: %v", err)
+	}
+	human, err := s.AdmitUsername(ctx, "election_human", codeHash, authKeyID, "First", "Human", false)
+	if err != nil {
+		t.Fatalf("sign up first human after bot: %v", err)
+	}
+	if isAdmin, err := s.IsServerAdministrator(ctx, human.ID); err != nil {
+		t.Fatalf("check first human administrator: %v", err)
+	} else if !isAdmin {
+		t.Fatal("first human created after a bot is not the server administrator")
+	}
+	if isAdmin, err := s.IsServerAdministrator(ctx, bot.ID); err != nil {
+		t.Fatalf("check bot administrator: %v", err)
+	} else if isAdmin {
+		t.Fatal("bot received the server administrator role")
+	}
+}
+
 func TestConcurrentCreateUserElectsExactlyOneAdministrator(t *testing.T) {
 	t.Parallel()
 	s := open(t)

@@ -4,7 +4,7 @@ umask 077
 
 SCRIPT_DIR=$(cd -P "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 SCRIPT_SOURCE="$SCRIPT_DIR/$(basename "${BASH_SOURCE[0]}")"
-readonly APPROVED_VERIFIER_SHA=68fce65862c5cd18f096426ea11117d70108b8f40fb50b8c0362a6002ad240a1
+readonly APPROVED_VERIFIER_SHA=19d34c5798bf7fed6e2c4876eaffa1efc2f5cfcfcb08e5cbcd1e2c4bb2b1c2e9
 readonly APPROVED_SCHEMA_GATE_SHA=ac54d3cf0480383a52414a8bc8b856b5e1d5f6f8d19034c9c576c64627e097c8
 readonly APPROVED_SCHEMA_GATE_HELPER_SHA=7ae06c2872c60b434068b3715a9ddd5e19b03d4be98dc9881c8dd8f294953d41
 readonly APPROVED_INITIAL_LOCAL_COMPOSE_SHA=d764d291ad2ea91cff841d14a0cd2bbcb5981961dbc67406bfeba1196a7b3fa4
@@ -1324,14 +1324,14 @@ unquote_dotenv_value() {
   printf '%s' "$value"
 }
 
-public_env_addition_requested() {
+named_env_addition_requested() {
   local name
   local -a requested
   [ -n "$ADDED_ENV" ] || return 1
   IFS=, read -r -a requested <<< "$ADDED_ENV"
   for name in "${requested[@]}"; do
     case "$name" in
-      TG_PUBLIC_WEBSOCKET_LISTEN_ADDR|TG_PUBLIC_WEBSOCKET_ADVERTISE_ADDR|TG_PUBLIC_REGISTRATION|TG_PUBLIC_WEBSOCKET_ALLOWED_ORIGINS)
+      TG_PUBLIC_WEBSOCKET_LISTEN_ADDR|TG_PUBLIC_WEBSOCKET_ADVERTISE_ADDR|TG_PUBLIC_REGISTRATION|TG_PUBLIC_WEBSOCKET_ALLOWED_ORIGINS|TG_RATE_LIMIT_KEY_EXCHANGE_IP_TAILNET)
         return 0
         ;;
     esac
@@ -1350,10 +1350,21 @@ changed_websocket_origins_requested() {
   return 1
 }
 
+changed_tailnet_exchange_limit_requested() {
+  local name
+  local -a requested
+  [ -n "$CHANGED_ENV" ] || return 1
+  IFS=, read -r -a requested <<< "$CHANGED_ENV"
+  for name in "${requested[@]}"; do
+    [ "$name" = TG_RATE_LIMIT_KEY_EXCHANGE_IP_TAILNET ] && return 0
+  done
+  return 1
+}
+
 restore_previous_env_for_named_changes() {
   local env_dir temp
   [ "$CHANGED_ENV_SOURCE" != override ] || return 0
-  public_env_addition_requested || changed_websocket_origins_requested || return 0
+  named_env_addition_requested || changed_websocket_origins_requested || changed_tailnet_exchange_limit_requested || return 0
   [ -n "$PREVIOUS_ENV_FILE" ] && [ -f "$PREVIOUS_ENV_FILE" ] && [ ! -L "$PREVIOUS_ENV_FILE" ] && \
     [ "$(stat -c %a -- "$PREVIOUS_ENV_FILE")" = 600 ] && [ "$(stat -c %u -- "$PREVIOUS_ENV_FILE")" = 0 ] || {
     fail 'named environment rollback requires the root-owned mode-0600 previous .env'
@@ -1693,7 +1704,7 @@ validate_env_baseline() {
       for name in "${requested[@]}"; do
         [[ "$name" =~ ^[A-Z][A-Z0-9_]*$ ]] || { fail 'environment value changes must be upper-case variable names'; return 1; }
         case "$name" in
-          TG_REGISTRATION|TG_TURNSTILE_SIGNIN_ENABLED|TG_WEBSOCKET_ALLOWED_ORIGINS|TG_PUBLIC_WEBSOCKET_LISTEN_ADDR|TG_PUBLIC_WEBSOCKET_ADVERTISE_ADDR|TG_PUBLIC_REGISTRATION|TG_PUBLIC_WEBSOCKET_ALLOWED_ORIGINS) ;;
+          TG_REGISTRATION|TG_TURNSTILE_SIGNIN_ENABLED|TG_WEBSOCKET_ALLOWED_ORIGINS|TG_PUBLIC_WEBSOCKET_LISTEN_ADDR|TG_PUBLIC_WEBSOCKET_ADVERTISE_ADDR|TG_PUBLIC_REGISTRATION|TG_PUBLIC_WEBSOCKET_ALLOWED_ORIGINS|TG_RATE_LIMIT_KEY_EXCHANGE_IP_TAILNET) ;;
           *) fail "environment value change $name is not an approved setting"; return 1 ;;
         esac
         change_names+="$name "
@@ -1742,6 +1753,12 @@ validate_env_baseline() {
             TG_REGISTRATION:closed:open|TG_REGISTRATION:open:closed) ;;
             TG_TURNSTILE_SIGNIN_ENABLED:false:true|TG_TURNSTILE_SIGNIN_ENABLED:true:false) ;;
             TG_PUBLIC_REGISTRATION:closed:invite|TG_PUBLIC_REGISTRATION:invite:closed) ;;
+            TG_RATE_LIMIT_KEY_EXCHANGE_IP_TAILNET:*)
+              [[ "$old_value" =~ ^[0-9]+$ && "$new_value" =~ ^[0-9]+$ && "$old_value" != "$new_value" ]] || {
+                fail 'TG_RATE_LIMIT_KEY_EXCHANGE_IP_TAILNET may change only between distinct non-negative integers'
+                return 1
+              }
+              ;;
             TG_PUBLIC_WEBSOCKET_LISTEN_ADDR:*) [ "$old_value" != "$new_value" ] || { fail 'TG_PUBLIC_WEBSOCKET_LISTEN_ADDR change must change the value'; return 1; } ;;
             TG_PUBLIC_WEBSOCKET_ADVERTISE_ADDR:*) [ "$old_value" != "$new_value" ] || { fail 'TG_PUBLIC_WEBSOCKET_ADVERTISE_ADDR change must change the value'; return 1; } ;;
             TG_PUBLIC_WEBSOCKET_ALLOWED_ORIGINS:*) [ "$old_value" != "$new_value" ] || { fail 'TG_PUBLIC_WEBSOCKET_ALLOWED_ORIGINS change must change the value'; return 1; } ;;
@@ -2418,7 +2435,7 @@ compare_rollback_to_baseline() {
   fi
   write_immutable "$results" '' || return 1
   for field in "${fields[@]}"; do
-    if [ "$field" = env_sha256 ] && { public_env_addition_requested || changed_websocket_origins_requested; }; then
+    if [ "$field" = env_sha256 ] && { named_env_addition_requested || changed_websocket_origins_requested || changed_tailnet_exchange_limit_requested; }; then
       [ -n "$RECORDED_ENV_SHA" ] || { fail 'named environment rollback has no verified previous .env digest'; return 1; }
       before=$RECORDED_ENV_SHA
     elif [ "$field" = override_sha256 ] && [ "$CHANGED_ENV_SOURCE" = override ]; then

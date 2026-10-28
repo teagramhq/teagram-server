@@ -71,7 +71,10 @@ verify_added_container_environment() {
               ($compose_env[$runtime_name] | type) == "string" and
               ($actual | length) == 1 and
               $actual[0] == $compose_env[$runtime_name] and
+              ($name != "TG_RATE_LIMIT_KEY_EXCHANGE_IP_TAILNET" or
+               (dotenv_value($assignments[0]) | test("^[0-9]+$"))) and
               (($name | IN(
+                "TG_RATE_LIMIT_KEY_EXCHANGE_IP_TAILNET",
                 "TG_PUBLIC_WEBSOCKET_LISTEN_ADDR", "TG_PUBLIC_WEBSOCKET_ADVERTISE_ADDR",
                 "TG_PUBLIC_REGISTRATION", "TG_PUBLIC_WEBSOCKET_ALLOWED_ORIGINS"
               )) | not or dotenv_value($assignments[0]) == $compose_env[$runtime_name])
@@ -131,6 +134,7 @@ verify_changed_container_environment() {
                 (($name == "TG_REGISTRATION" and (dotenv_value($assignments[0]) | IN("open","closed"))) or
                  ($name == "TG_TURNSTILE_SIGNIN_ENABLED" and ($assignments[0] | IN("true","false"))) or
                  ($name == "TG_PUBLIC_REGISTRATION" and (dotenv_value($assignments[0]) | IN("invite","closed"))) or
+                ($name == "TG_RATE_LIMIT_KEY_EXCHANGE_IP_TAILNET" and (dotenv_value($assignments[0]) | test("^[0-9]+$"))) or
                  ($name | IN("TG_WEBSOCKET_ALLOWED_ORIGINS", "TG_PUBLIC_WEBSOCKET_LISTEN_ADDR", "TG_PUBLIC_WEBSOCKET_ADVERTISE_ADDR", "TG_PUBLIC_WEBSOCKET_ALLOWED_ORIGINS"))) and
                 ($assignments | length) == 1 and
                 ($compose_env | has($name)) and
@@ -948,6 +952,7 @@ snapshot_from_json() {
         elif $name == "TEAGRAM_TURNSTILE_SECRET_KEY_FILE" then "TG_TURNSTILE_SECRET_KEY_FILE"
         else $name end;
       [(item.Config.Env // [])[] | select(type == "string")
+       | select(. != "TG_RATE_LIMIT_KEY_EXCHANGE_IP_TAILNET=")
        | select(IN(
            "TG_TURNSTILE_SITE_KEY=", "TG_TURNSTILE_SECRET_KEY_FILE=", "TG_TURNSTILE_SIGNIN_ENABLED=false",
            "TG_PUBLIC_WEBSOCKET_LISTEN_ADDR=", "TG_PUBLIC_WEBSOCKET_ADVERTISE_ADDR=",
@@ -1012,6 +1017,7 @@ snapshot_from_json() {
         | map(select(type != "string" or ((split("=")[0]) as $key | any($changed[]; . == $key) | not)))
         | map(select(type != "string" or (IN(
             "TG_RATE_LIMIT_KEY_EXCHANGE_IP=",
+            "TG_RATE_LIMIT_KEY_EXCHANGE_IP_TAILNET=",
             "TG_RATE_LIMIT_KEY_EXCHANGE_IP_WINDOW=",
             "TG_KEY_EXCHANGE_PER_CONNECTION=",
             "TG_KEY_EXCHANGE_GLOBAL_RATE=",
@@ -1035,6 +1041,14 @@ snapshot_from_json() {
       elif $name == "TEAGRAM_TURNSTILE_SECRET_KEY_FILE" then "TG_TURNSTILE_SECRET_KEY_FILE"
       else $name end;
     [(item.Config.Env // [])[] | select(type == "string")
+     | select(IN(
+         "TG_RATE_LIMIT_KEY_EXCHANGE_IP=",
+         "TG_RATE_LIMIT_KEY_EXCHANGE_IP_TAILNET=",
+         "TG_RATE_LIMIT_KEY_EXCHANGE_IP_WINDOW=",
+         "TG_KEY_EXCHANGE_PER_CONNECTION=",
+         "TG_KEY_EXCHANGE_GLOBAL_RATE=",
+         "TG_KEY_EXCHANGE_GLOBAL_BURST="
+       ) | not)
      | select($snapshot_name == "target" or
               (IN(
                 "TG_TURNSTILE_SITE_KEY=", "TG_TURNSTILE_SECRET_KEY_FILE=", "TG_TURNSTILE_SIGNIN_ENABLED=false",
@@ -1101,7 +1115,8 @@ snapshot_from_json() {
         }
     ')
     canonical_compose=$(printf '%s' "$compose_json" | jq -ceS --arg mode_source "$mode_source" --arg mode_target "$mode_mount_target" \
-      --arg media_key_source "$MEDIA_KEY_SOURCE_PATH" --argjson media_key_enabled "$MEDIA_KEY_MOUNT_CONFIGURED" '
+      --arg media_key_source "$MEDIA_KEY_SOURCE_PATH" --argjson media_key_enabled "$MEDIA_KEY_MOUNT_CONFIGURED" \
+      --argjson added "$added_env_names" --argjson changed "$changed_env_names" '
       def approved_public_ws_port:
         type == "object" and
         ((.target | tostring) == "2446") and
@@ -1113,6 +1128,7 @@ snapshot_from_json() {
       def empty_key_exchange_default:
         (.key | IN(
           "TG_RATE_LIMIT_KEY_EXCHANGE_IP",
+          "TG_RATE_LIMIT_KEY_EXCHANGE_IP_TAILNET",
           "TG_RATE_LIMIT_KEY_EXCHANGE_IP_WINDOW",
           "TG_KEY_EXCHANGE_PER_CONNECTION",
           "TG_KEY_EXCHANGE_GLOBAL_RATE",
@@ -1137,6 +1153,12 @@ snapshot_from_json() {
       # Empty key-exchange mappings use binary defaults; active values remain
       # subject to the Compose and container environment checks.
       | .services[env.ROLLOUT_COMPOSE_SERVICE // "teagramd"].environment |= with_entries(select(empty_key_exchange_default | not))
+      # Named tailnet changes are verified against .env, resolved Compose, and
+      # the inspected container; omit only that named value from config drift.
+      | if (any($added[]; . == "TG_RATE_LIMIT_KEY_EXCHANGE_IP_TAILNET") or
+            any($changed[]; . == "TG_RATE_LIMIT_KEY_EXCHANGE_IP_TAILNET")) then
+          del(.services[env.ROLLOUT_COMPOSE_SERVICE // "teagramd"].environment.TG_RATE_LIMIT_KEY_EXCHANGE_IP_TAILNET)
+        else . end
       # Reviewed logger and login-code transitions are checked separately.
       # Keep both out of the unrelated config digest.
       | .services[env.ROLLOUT_COMPOSE_SERVICE // "teagramd"] |= del(.logging)

@@ -19,6 +19,7 @@ import (
 
 	"github.com/teagramhq/teagram-server/internal/api"
 	"github.com/teagramhq/teagram-server/internal/config"
+	"github.com/teagramhq/teagram-server/internal/mtproto"
 	"github.com/teagramhq/teagram-server/internal/store"
 )
 
@@ -466,6 +467,43 @@ func TestConcurrentSignUpsWithOneUserInviteCreateExactlyOneAccount(t *testing.T)
 	}
 	if redeemerID == 0 {
 		t.Fatal("consumed user invite has no redeemer")
+	}
+}
+
+func TestSignUpBotUsernameReturnsBotAccountRefusal(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	s, _ := openStoreDSN(t)
+	// Handles ending in "bot" stop at the reserved-suffix check, so this bot
+	// uses one that reaches the admission refusal.
+	bot, _, err := s.CreateBot(ctx, "signup_test_helper", "Sign up bot")
+	if err != nil {
+		t.Fatalf("create bot: %v", err)
+	}
+	hash, _, err := s.IssueCodeForUsername(ctx, bot.Username)
+	if err != nil {
+		t.Fatalf("issue bot username code: %v", err)
+	}
+	authKeyID := [8]byte{2, 8, 1, 4}
+	keyID := mtproto.AuthKeyIDInt64(authKeyID)
+	if err := s.SaveAuthKey(ctx, keyID, make([]byte, 256)); err != nil {
+		t.Fatalf("save auth key: %v", err)
+	}
+
+	_, err = api.SignUpForTest(s, authKeyID, netip.MustParseAddr("10.0.0.83"), store.RateLimitConfig{}, config.RegistrationOpen, &tg.AuthSignUpRequest{
+		PhoneNumber:   bot.Username,
+		PhoneCodeHash: hash,
+		FirstName:     "New human",
+	})
+	if got := signUpRPCMessage(err); got != "BOT_ACCOUNT" {
+		t.Fatalf("signUp error = %v, want BOT_ACCOUNT", err)
+	}
+	key, found, err := s.AuthKeyByID(ctx, keyID)
+	if err != nil || !found {
+		t.Fatalf("read auth key after signUp refusal: found=%v err=%v", found, err)
+	}
+	if key.UserID != 0 || key.PendingUserID != 0 {
+		t.Fatalf("auth key after signUp refusal = %#v, want unbound with no pending user", key)
 	}
 }
 

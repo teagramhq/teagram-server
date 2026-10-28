@@ -86,6 +86,88 @@ func TestSignInUsernameUnknownReturnsSignUpRequired(t *testing.T) {
 	}
 }
 
+func TestSignInBotWithVerifierRefusesBeforeStagingPendingUser(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	s, _ := openStoreDSN(t)
+	bot, _, err := s.CreateBot(ctx, "signin_test_bot", "Sign in bot")
+	if err != nil {
+		t.Fatalf("create bot: %v", err)
+	}
+	if err := s.UpsertPassword(ctx, store.UserPassword{
+		UserID:   bot.ID,
+		Salt1:    make([]byte, 32),
+		Salt2:    make([]byte, 32),
+		Verifier: make([]byte, 256),
+	}); err != nil {
+		t.Fatalf("plant bot password verifier: %v", err)
+	}
+	hash, _, err := s.IssueCodeForUsername(ctx, bot.Username)
+	if err != nil {
+		t.Fatalf("issue bot username code: %v", err)
+	}
+
+	authKeyID := [8]byte{1, 2, 3, 4, 5, 6, 7, 8}
+	keyID := mtproto.AuthKeyIDInt64(authKeyID)
+	if err := s.SaveAuthKey(ctx, keyID, make([]byte, 256)); err != nil {
+		t.Fatalf("save auth key: %v", err)
+	}
+	_, err = api.SignInForTestWithLimits(s, authKeyID, netip.MustParseAddr("10.0.0.81"), store.RateLimitConfig{}, &tg.AuthSignInRequest{
+		PhoneNumber:   bot.Username,
+		PhoneCodeHash: hash,
+	})
+	var rpc *tgerr.Error
+	if !errors.As(err, &rpc) || rpc.Code != 400 || rpc.Message != "BOT_ACCOUNT" {
+		t.Fatalf("bot signIn error = %v, want 400 BOT_ACCOUNT", err)
+	}
+
+	key, found, err := s.AuthKeyByID(ctx, keyID)
+	if err != nil || !found {
+		t.Fatalf("read auth key after bot refusal: found=%v err=%v", found, err)
+	}
+	if key.UserID != 0 || key.PendingUserID != 0 {
+		t.Fatalf("auth key after bot refusal = %#v, want unbound with no pending user", key)
+	}
+}
+
+func TestCheckPasswordRefusesBotBeforePromotion(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	s, _ := openStoreDSN(t)
+	bot, _, err := s.CreateBot(ctx, "password_test_bot", "Password bot")
+	if err != nil {
+		t.Fatalf("create bot: %v", err)
+	}
+	if err := s.UpsertPassword(ctx, store.UserPassword{
+		UserID:   bot.ID,
+		Salt1:    make([]byte, 32),
+		Salt2:    make([]byte, 32),
+		Verifier: make([]byte, 256),
+	}); err != nil {
+		t.Fatalf("plant bot password verifier: %v", err)
+	}
+	authKeyID := [8]byte{8, 7, 6, 5, 4, 3, 2, 1}
+	keyID := mtproto.AuthKeyIDInt64(authKeyID)
+	if err := s.SaveAuthKey(ctx, keyID, make([]byte, 256)); err != nil {
+		t.Fatalf("save auth key: %v", err)
+	}
+
+	_, err = api.CheckPasswordForTestAsUser(s, bot.ID, authKeyID, netip.MustParseAddr("10.0.0.82"), &tg.AuthCheckPasswordRequest{
+		Password: &tg.InputCheckPasswordSRP{},
+	})
+	var rpc *tgerr.Error
+	if !errors.As(err, &rpc) || rpc.Code != 400 || rpc.Message != "BOT_ACCOUNT" {
+		t.Fatalf("bot checkPassword error = %v, want 400 BOT_ACCOUNT", err)
+	}
+	key, found, err := s.AuthKeyByID(ctx, keyID)
+	if err != nil || !found {
+		t.Fatalf("read auth key after checkPassword refusal: found=%v err=%v", found, err)
+	}
+	if key.UserID != 0 || key.PendingUserID != 0 {
+		t.Fatalf("auth key after checkPassword refusal = %#v, want unbound with no pending user", key)
+	}
+}
+
 func TestSignInUsernameUnknownIncludesTermsOfService(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()

@@ -802,6 +802,485 @@ func TestRunInviteCommandIssueAndList(t *testing.T) {
 	}
 }
 
+func TestRunInviteCommandRevokeUser(t *testing.T) {
+	ctx := context.Background()
+	dsn := prepareInviteCommandTest(t)
+	st, err := store.Open(ctx, dsn, pgtest.EncKey(), store.WithoutBlobStore())
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	issuer, err := st.CreateUser(ctx, "+15551239801")
+	if err != nil {
+		t.Fatalf("create issuer: %v", err)
+	}
+	active, _, err := st.IssueUserInvite(ctx, issuer.ID)
+	if err != nil {
+		t.Fatalf("issue live invite: %v", err)
+	}
+	activeSecond, _, err := st.IssueUserInvite(ctx, issuer.ID)
+	if err != nil {
+		t.Fatalf("issue second live invite: %v", err)
+	}
+	otherIssuer, err := st.CreateUser(ctx, "+15551239803")
+	if err != nil {
+		t.Fatalf("create other issuer: %v", err)
+	}
+	otherInvite, _, err := st.IssueUserInvite(ctx, otherIssuer.ID)
+	if err != nil {
+		t.Fatalf("issue other user's invite: %v", err)
+	}
+	used, usedSecret, err := st.IssueUserInvite(ctx, issuer.ID)
+	if err != nil {
+		t.Fatalf("issue used invite: %v", err)
+	}
+	redeemer, err := st.CreateUser(ctx, "+15551239802")
+	if err != nil {
+		t.Fatalf("create redeemer: %v", err)
+	}
+	conn := inviteCommandTestConn(t, ctx, dsn)
+	tx, err := conn.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin invite redemption: %v", err)
+	}
+	if err := st.ConsumeInviteForUser(ctx, tx, "redeemer", usedSecret, redeemer.ID, 1, true); err != nil {
+		if rollbackErr := tx.Rollback(ctx); rollbackErr != nil {
+			t.Errorf("rollback failed redemption: %v", rollbackErr)
+		}
+		t.Fatalf("consume invite: %v", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		t.Fatalf("commit invite redemption: %v", err)
+	}
+	expired, _, err := st.IssueUserInvite(ctx, issuer.ID)
+	if err != nil {
+		t.Fatalf("issue expired invite: %v", err)
+	}
+	if _, err := conn.Exec(ctx,
+		`UPDATE registration_invites
+		    SET issued_at = clock_timestamp() - interval '2 seconds',
+		        expires_at = clock_timestamp() - interval '1 second'
+		  WHERE id = $1`, expired.ID,
+	); err != nil {
+		t.Fatalf("expire invite: %v", err)
+	}
+	if err := st.Close(); err != nil {
+		t.Fatalf("close store: %v", err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	log := slog.New(slog.DiscardHandler)
+	if err := runInviteCommand([]string{"revoke-user", strconv.FormatInt(issuer.ID, 10)}, log, &stdout, &stderr); err != nil {
+		t.Fatalf("revoke user's invites: %v", err)
+	}
+	want := fmt.Sprintf("Revoked: user_id=%d count=2\n", issuer.ID)
+	if stdout.Len() != 0 || stderr.String() != want {
+		t.Fatalf("revoke output = stdout %q stderr %q, want stderr %q", stdout.String(), stderr.String(), want)
+	}
+	verify, err := store.Open(ctx, dsn, pgtest.EncKey(), store.WithoutBlobStore())
+	if err != nil {
+		t.Fatalf("reopen store: %v", err)
+	}
+	defer func() {
+		if err := verify.Close(); err != nil {
+			t.Errorf("close verification store: %v", err)
+		}
+	}()
+	listed, err := verify.ListInvites(ctx)
+	if err != nil {
+		t.Fatalf("list invites: %v", err)
+	}
+	states := make(map[int64]store.InviteState, len(listed))
+	for _, invite := range listed {
+		states[invite.ID] = invite.State
+	}
+	if states[active.ID] != store.InviteRevoked {
+		t.Errorf("live invite state = %q, want revoked", states[active.ID])
+	}
+	if states[activeSecond.ID] != store.InviteRevoked {
+		t.Errorf("second live invite state = %q, want revoked", states[activeSecond.ID])
+	}
+	if states[used.ID] != store.InviteConsumed {
+		t.Errorf("used invite state = %q, want consumed", states[used.ID])
+	}
+	if states[expired.ID] != store.InviteExpired {
+		t.Errorf("expired invite state = %q, want expired", states[expired.ID])
+	}
+	if states[otherInvite.ID] != store.InviteIssued {
+		t.Errorf("other user's invite state = %q, want issued", states[otherInvite.ID])
+	}
+
+	var noInviteStdout, noInviteStderr bytes.Buffer
+	if err := runInviteCommand([]string{"revoke-user", strconv.FormatInt(redeemer.ID, 10)}, log, &noInviteStdout, &noInviteStderr); err != nil {
+		t.Fatalf("revoke user's empty invite list: %v", err)
+	}
+	if got := noInviteStderr.String(); got != fmt.Sprintf("Revoked: user_id=%d count=0\n", redeemer.ID) {
+		t.Fatalf("empty revoke output = %q", got)
+	}
+}
+
+func TestRunInviteCommandInvitees(t *testing.T) {
+	ctx := context.Background()
+	dsn := prepareInviteCommandTest(t)
+	st, err := store.Open(ctx, dsn, pgtest.EncKey(), store.WithoutBlobStore())
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	issuer, err := st.CreateUser(ctx, "+15551239811")
+	if err != nil {
+		t.Fatalf("create issuer: %v", err)
+	}
+	redeemed, secret, err := st.IssueUserInvite(ctx, issuer.ID)
+	if err != nil {
+		t.Fatalf("issue redeemed invite: %v", err)
+	}
+	redeemer, err := st.CreateUser(ctx, "+15551239812")
+	if err != nil {
+		t.Fatalf("create invitee: %v", err)
+	}
+	conn := inviteCommandTestConn(t, ctx, dsn)
+	tx, err := conn.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin invite redemption: %v", err)
+	}
+	if err := st.ConsumeInviteForUser(ctx, tx, "invitee", secret, redeemer.ID, 1, true); err != nil {
+		if rollbackErr := tx.Rollback(ctx); rollbackErr != nil {
+			t.Errorf("rollback failed redemption: %v", rollbackErr)
+		}
+		t.Fatalf("consume invite: %v", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		t.Fatalf("commit invite redemption: %v", err)
+	}
+	if _, _, err := st.IssueUserInvite(ctx, issuer.ID); err != nil {
+		t.Fatalf("issue unused invite: %v", err)
+	}
+	listedInvites, err := st.ListInvites(ctx)
+	if err != nil {
+		t.Fatalf("list invite metadata: %v", err)
+	}
+	var redeemedAt time.Time
+	for _, candidate := range listedInvites {
+		if candidate.ID == redeemed.ID && candidate.ConsumedAt != nil {
+			redeemedAt = *candidate.ConsumedAt
+		}
+	}
+	if redeemedAt.IsZero() {
+		t.Fatal("redeemed invite has no consumed time")
+	}
+	noInvites, err := st.CreateUser(ctx, "+15551239813")
+	if err != nil {
+		t.Fatalf("create user without invites: %v", err)
+	}
+	if err := st.Close(); err != nil {
+		t.Fatalf("close store: %v", err)
+	}
+
+	log := slog.New(slog.DiscardHandler)
+	var stdout, stderr bytes.Buffer
+	if err := runInviteCommand([]string{"invitees", strconv.FormatInt(issuer.ID, 10)}, log, &stdout, &stderr); err != nil {
+		t.Fatalf("list invitees: %v", err)
+	}
+	if !strings.Contains(stdout.String(), "INVITEE_USER_ID") || !strings.Contains(stdout.String(), "REDEEMED_AT") {
+		t.Fatalf("invitee table header = %q", stdout.String())
+	}
+	if !strings.Contains(stdout.String(), strconv.FormatInt(redeemer.ID, 10)) {
+		t.Fatalf("invitee output = %q, missing redeemed user %d", stdout.String(), redeemer.ID)
+	}
+	if !strings.Contains(stdout.String(), redeemedAt.Format(time.RFC3339)) {
+		t.Fatalf("invitee output = %q, missing redemption time %s", stdout.String(), redeemedAt.Format(time.RFC3339))
+	}
+	if inviteeTableHasUser(stdout.String(), noInvites.ID) {
+		t.Fatalf("invitee output = %q, unexpectedly includes a user without a redemption", stdout.String())
+	}
+	if stderr.Len() != 0 {
+		t.Fatalf("invitees stderr = %q, want empty", stderr.String())
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	if err := runInviteCommand([]string{"invitees", strconv.FormatInt(noInvites.ID, 10)}, log, &stdout, &stderr); err != nil {
+		t.Fatalf("list invitees for user with none: %v", err)
+	}
+	if got := stdout.String(); !strings.Contains(got, "INVITEE_USER_ID") || inviteeTableHasUser(got, redeemer.ID) {
+		t.Fatalf("empty invitees output = %q", got)
+	}
+}
+
+func inviteeTableHasUser(output string, userID int64) bool {
+	want := strconv.FormatInt(userID, 10)
+	for line := range strings.SplitSeq(output, "\n") {
+		fields := strings.Fields(line)
+		if len(fields) > 0 && fields[0] == want {
+			return true
+		}
+	}
+	return false
+}
+
+func TestRunInviteCommandInviter(t *testing.T) {
+	ctx := context.Background()
+	dsn := prepareInviteCommandTest(t)
+	st, err := store.Open(ctx, dsn, pgtest.EncKey(), store.WithoutBlobStore())
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	issuer, err := st.CreateUser(ctx, "+15551239821")
+	if err != nil {
+		t.Fatalf("create issuer: %v", err)
+	}
+	_, secret, err := st.IssueUserInvite(ctx, issuer.ID)
+	if err != nil {
+		t.Fatalf("issue invite: %v", err)
+	}
+	invitee, err := st.CreateUser(ctx, "+15551239822")
+	if err != nil {
+		t.Fatalf("create invitee: %v", err)
+	}
+	conn := inviteCommandTestConn(t, ctx, dsn)
+	tx, err := conn.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin invite redemption: %v", err)
+	}
+	if err := st.ConsumeInviteForUser(ctx, tx, "invitee", secret, invitee.ID, 1, true); err != nil {
+		if rollbackErr := tx.Rollback(ctx); rollbackErr != nil {
+			t.Errorf("rollback failed redemption: %v", rollbackErr)
+		}
+		t.Fatalf("consume invite: %v", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		t.Fatalf("commit invite redemption: %v", err)
+	}
+	withoutInvite, err := st.CreateUser(ctx, "+15551239823")
+	if err != nil {
+		t.Fatalf("create user without invite: %v", err)
+	}
+	if err := st.Close(); err != nil {
+		t.Fatalf("close store: %v", err)
+	}
+
+	log := slog.New(slog.DiscardHandler)
+	var stdout, stderr bytes.Buffer
+	if err := runInviteCommand([]string{"inviter", strconv.FormatInt(invitee.ID, 10)}, log, &stdout, &stderr); err != nil {
+		t.Fatalf("show inviter: %v", err)
+	}
+	if got := stdout.String(); !strings.Contains(got, fmt.Sprintf("was invited by user %d", issuer.ID)) {
+		t.Fatalf("inviter output = %q, want inviter %d", got, issuer.ID)
+	}
+	if stderr.Len() != 0 {
+		t.Fatalf("inviter stderr = %q, want empty", stderr.String())
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	if err := runInviteCommand([]string{"inviter", strconv.FormatInt(withoutInvite.ID, 10)}, log, &stdout, &stderr); err != nil {
+		t.Fatalf("show missing inviter: %v", err)
+	}
+	if got := stdout.String(); !strings.Contains(got, fmt.Sprintf("User %d was created without a user invite", withoutInvite.ID)) {
+		t.Fatalf("missing inviter output = %q", got)
+	}
+	if stderr.Len() != 0 {
+		t.Fatalf("missing inviter stderr = %q, want empty", stderr.String())
+	}
+}
+
+func TestRunInviteCommandsRejectUnknownUser(t *testing.T) {
+	prepareInviteCommandTest(t)
+	log := slog.New(slog.DiscardHandler)
+	unknownID := strconv.FormatInt(1<<62, 10)
+	for _, command := range []string{"revoke-user", "invitees", "inviter"} {
+		t.Run(command, func(t *testing.T) {
+			var stdout, stderr bytes.Buffer
+			err := runInviteCommand([]string{command, unknownID}, log, &stdout, &stderr)
+			if err == nil || !strings.Contains(err.Error(), "unknown user") {
+				t.Fatalf("command error = %v, want unknown user", err)
+			}
+			if stdout.Len() != 0 || stderr.Len() != 0 {
+				t.Fatalf("unknown user output = stdout %q stderr %q, want empty", stdout.String(), stderr.String())
+			}
+		})
+	}
+}
+
+func prepareInviteCommandTest(t *testing.T) string {
+	t.Helper()
+	dsn := pgtest.DSN(t)
+	t.Setenv("TG_POSTGRES_DSN", dsn)
+	t.Setenv("TG_AUTHKEY_ENC_KEY", strings.Repeat("00", 32))
+	t.Setenv("TG_AUTHKEY_ENC_KEY_FILE", "")
+	t.Setenv("TG_REGISTRATION", "open")
+	return dsn
+}
+
+func inviteCommandTestConn(t *testing.T, ctx context.Context, dsn string) *pgx.Conn {
+	t.Helper()
+	conn, err := pgx.Connect(ctx, dsn)
+	if err != nil {
+		t.Fatalf("connect to invite test database: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := conn.Close(ctx); err != nil {
+			t.Errorf("close invite test database connection: %v", err)
+		}
+	})
+	return conn
+}
+
+func TestRunBotCommandCreateRotateAndRevoke(t *testing.T) {
+	dsn := pgtest.DSN(t)
+	t.Setenv("TG_POSTGRES_DSN", dsn)
+	t.Setenv("TG_AUTHKEY_ENC_KEY", strings.Repeat("00", 32))
+	t.Setenv("TG_AUTHKEY_ENC_KEY_FILE", "")
+
+	log := slog.New(slog.DiscardHandler)
+	var stdout, stderr bytes.Buffer
+	if err := runBotCommandWithEUID([]string{"create", "Weather_Bot", "Weather"}, log, &stdout, &stderr, 0); err != nil {
+		t.Fatalf("create command: %v", err)
+	}
+	createdToken := strings.TrimSuffix(stdout.String(), "\n")
+	if createdToken == "" || strings.Count(stdout.String(), "\n") != 1 || strings.Contains(stderr.String(), createdToken) {
+		t.Fatalf("create output = stdout %q stderr %q, want one token line and no token on stderr", stdout.String(), stderr.String())
+	}
+	botIDText, _, ok := strings.Cut(createdToken, ":")
+	if !ok {
+		t.Fatalf("created token = %q, want <bot id>:<secret>", createdToken)
+	}
+	botID, err := strconv.ParseInt(botIDText, 10, 64)
+	if err != nil || botID <= 0 {
+		t.Fatalf("created token id %q = %d, error %v", botIDText, botID, err)
+	}
+
+	st, err := store.Open(context.Background(), dsn, make([]byte, 32), store.WithoutBlobStore())
+	if err != nil {
+		t.Fatalf("open store for token checks: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := st.Close(); err != nil {
+			t.Errorf("close store: %v", err)
+		}
+	})
+	if gotID, err := st.BotIDByToken(context.Background(), createdToken); err != nil || gotID != botID {
+		t.Fatalf("lookup created token = (%d, %v), want (%d, nil)", gotID, err, botID)
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	if err := runBotCommandWithEUID([]string{"rotate", strconv.FormatInt(botID, 10)}, log, &stdout, &stderr, 0); err != nil {
+		t.Fatalf("rotate command: %v", err)
+	}
+	rotatedToken := strings.TrimSuffix(stdout.String(), "\n")
+	if rotatedToken == "" || rotatedToken == createdToken || strings.Count(stdout.String(), "\n") != 1 {
+		t.Fatalf("rotate stdout = %q, want one new token line", stdout.String())
+	}
+	if _, err := st.BotIDByToken(context.Background(), createdToken); !errors.Is(err, store.ErrBotTokenNotFound) {
+		t.Fatalf("old token after rotate error = %v, want not found", err)
+	}
+	if gotID, err := st.BotIDByToken(context.Background(), rotatedToken); err != nil || gotID != botID {
+		t.Fatalf("lookup rotated token = (%d, %v), want (%d, nil)", gotID, err, botID)
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	if err := runBotCommandWithEUID([]string{"rotate", rotatedToken}, log, &stdout, &stderr, 0); err == nil || strings.Contains(err.Error(), rotatedToken) {
+		t.Fatalf("rotate with token argv error = %v, want a sanitized invalid-id error", err)
+	}
+	if stdout.Len() != 0 || stderr.Len() != 0 {
+		t.Fatalf("invalid rotate output = stdout %q stderr %q, want empty", stdout.String(), stderr.String())
+	}
+	if gotID, err := st.BotIDByToken(context.Background(), rotatedToken); err != nil || gotID != botID {
+		t.Fatalf("lookup token after rejected argv = (%d, %v), want (%d, nil)", gotID, err, botID)
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	if err := runBotCommandWithEUID([]string{"revoke", strconv.FormatInt(botID, 10)}, log, &stdout, &stderr, 0); err != nil {
+		t.Fatalf("revoke command: %v", err)
+	}
+	if stdout.Len() != 0 {
+		t.Fatalf("revoke stdout = %q, want empty", stdout.String())
+	}
+	if _, err := st.BotIDByToken(context.Background(), rotatedToken); !errors.Is(err, store.ErrBotTokenNotFound) {
+		t.Fatalf("revoked token error = %v, want not found", err)
+	}
+}
+
+func TestRunBotCommandRequiresRootBeforeConfigAndMutation(t *testing.T) {
+	ctx := context.Background()
+	dsn := pgtest.DSN(t)
+	t.Setenv("TG_POSTGRES_DSN", dsn)
+	t.Setenv("TG_AUTHKEY_ENC_KEY", strings.Repeat("00", 32))
+	t.Setenv("TG_AUTHKEY_ENC_KEY_FILE", "")
+
+	st, err := store.Open(ctx, dsn, make([]byte, 32), store.WithoutBlobStore())
+	if err != nil {
+		t.Fatalf("open store for bot fixture: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := st.Close(); err != nil {
+			t.Errorf("close fixture store: %v", err)
+		}
+	})
+	bot, _, err := st.CreateBot(ctx, "guarded_existing", "Guarded")
+	if err != nil {
+		t.Fatalf("create bot fixture: %v", err)
+	}
+
+	log := slog.New(slog.DiscardHandler)
+	var stdout, stderr bytes.Buffer
+	t.Setenv("TG_POSTGRES_DSN", "not a postgres DSN")
+	err = runBotCommandWithEUID([]string{"create", "guarded_new", "Guarded"}, log, &stdout, &stderr, 1000)
+	if err == nil || !strings.Contains(err.Error(), "requires root") {
+		t.Errorf("non-root create before config load error = %v, want root refusal", err)
+	}
+	if stdout.Len() != 0 || stderr.Len() != 0 {
+		t.Errorf("non-root create output = stdout %q stderr %q, want empty", stdout.String(), stderr.String())
+	}
+
+	t.Setenv("TG_POSTGRES_DSN", dsn)
+	for _, args := range [][]string{
+		{"create", "guarded_new", "Guarded"},
+		{"rotate", strconv.FormatInt(bot.ID, 10)},
+		{"revoke", strconv.FormatInt(bot.ID, 10)},
+	} {
+		before := botCommandStateSnapshot(t, dsn)
+		stdout.Reset()
+		stderr.Reset()
+		err := runBotCommandWithEUID(args, log, &stdout, &stderr, 1000)
+		if err == nil || !strings.Contains(err.Error(), "requires root") {
+			t.Errorf("non-root bot %s error = %v, want root refusal", args[0], err)
+		}
+		if stdout.Len() != 0 || stderr.Len() != 0 {
+			t.Errorf("non-root bot %s output = stdout %q stderr %q, want empty", args[0], stdout.String(), stderr.String())
+		}
+		if after := botCommandStateSnapshot(t, dsn); after != before {
+			t.Errorf("non-root bot %s changed account or token state:\nbefore %s\nafter  %s", args[0], before, after)
+		}
+	}
+}
+
+func botCommandStateSnapshot(t *testing.T, dsn string) string {
+	t.Helper()
+	ctx := context.Background()
+	conn, err := pgx.Connect(ctx, dsn)
+	if err != nil {
+		t.Fatalf("connect fixture database for bot snapshot: %v", err)
+	}
+	defer func() {
+		if err := conn.Close(ctx); err != nil {
+			t.Errorf("close bot snapshot connection: %v", err)
+		}
+	}()
+	var users, tokens string
+	err = conn.QueryRow(ctx, `
+		SELECT
+		  (SELECT COALESCE(jsonb_agg(to_jsonb(x) ORDER BY x.id)::text, '[]') FROM (SELECT id, username FROM users WHERE kind = 'bot') x),
+		  (SELECT COALESCE(jsonb_agg(to_jsonb(x) ORDER BY x.user_id)::text, '[]') FROM (SELECT user_id, token_hash, issued_at, revoked_at FROM bot_tokens) x)
+	`).Scan(&users, &tokens)
+	if err != nil {
+		t.Fatalf("read bot account state snapshot: %v", err)
+	}
+	return users + "|" + tokens
+}
+
 func TestParseInviteIssueArgs(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
