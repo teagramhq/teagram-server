@@ -76,57 +76,31 @@ jobs:
           done <<< "$runs"
           publish_cancelled_pr_run_ids
 
-  rerun-cancelled-pr-ci:
-    name: Requeue cancelled pull request CI
+  dispatch-cancelled-pr-ci-recovery:
+    name: Dispatch cancelled PR CI recovery
     needs:
       - prioritize-main
       - lint
     if: ${{ always() && (needs.prioritize-main.result == 'success' || (needs.prioritize-main.result == 'skipped' && github.event_name == 'pull_request')) && github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.lint.result != 'skipped' && needs.prioritize-main.outputs.cancelled_pr_run_ids != '' }}
     runs-on: ubuntu-26.04
-    timeout-minutes: 210
+    timeout-minutes: 5
     permissions:
       actions: write
 
     steps:
-      - name: Re-run cancelled pull request CI after main fan-out starts
+      - name: Dispatch cancelled pull request CI recovery after main fan-out starts
         env:
           GH_TOKEN: ${{ github.token }}
           CANCELLED_PR_RUN_IDS: ${{ needs.prioritize-main.outputs.cancelled_pr_run_ids }}
         run: |
           set -euo pipefail
-          # Cancellation cleanup can take longer than the 2h12m main-run queue
-          # delay observed during this incident; allow up to three hours.
-          max_status_checks=181
-          read -r -a cancelled_pr_run_ids <<< "$CANCELLED_PR_RUN_IDS"
-          for run_id in "${cancelled_pr_run_ids[@]}"; do
-            if [[ ! "$run_id" =~ ^[0-9]+$ ]]; then
-              echo "::warning::Ignoring invalid cancelled pull request CI run id."
-              continue
-            fi
-            run_state=""
-            for ((status_check_attempt = 1; status_check_attempt <= max_status_checks; status_check_attempt++)); do
-              if ! run_state="$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${run_id}" --jq '[.status, (.conclusion // "")] | @tsv' 2>/dev/null)"; then
-                run_state=""
-              fi
-              if [[ "$run_state" == $'completed\tcancelled' || "$run_state" == completed$'\t'* ]]; then
-                break
-              fi
-              if (( status_check_attempt < max_status_checks )); then
-                sleep 60
-              fi
-            done
-            if [[ "$run_state" != $'completed\tcancelled' ]]; then
-              if [[ "$run_state" == completed$'\t'* ]]; then
-                echo "Pull request CI run ${run_id} is ${run_state}; no rerun is needed."
-              else
-                echo "::warning::Could not confirm cancelled pull request CI run ${run_id} after ${max_status_checks} status checks; rerun it manually if its check remains cancelled."
-              fi
-              continue
-            fi
-            if ! gh run rerun "$run_id" --repo "$GITHUB_REPOSITORY"; then
-              echo "::warning::Could not re-run cancelled pull request CI run ${run_id}; rerun it manually if its check remains cancelled."
-            fi
-          done
+          if ! gh workflow run recover-cancelled-pr-ci.yml \
+            --repo "$GITHUB_REPOSITORY" \
+            --ref main \
+            -f issue=MAIN-2765 \
+            -f "cancelled_pr_run_ids=$CANCELLED_PR_RUN_IDS"; then
+            echo "::warning::Could not dispatch recovery for cancelled pull request CI runs: $CANCELLED_PR_RUN_IDS"
+          fi
 
   lint:
     name: lint
@@ -1061,7 +1035,7 @@ jobs:
             .github/workflows/deploy.yml \
             .github/workflows/perf.yml \
             .github/workflows/real-client-browser-flow.yml
-          actionlint -shellcheck= -ignore 'label "ubuntu-26.04" is unknown' .github/workflows/ci.yml
+          actionlint -shellcheck= -ignore 'label "ubuntu-26.04" is unknown' .github/workflows/ci.yml .github/workflows/recover-cancelled-pr-ci.yml
           node --check test/e2e/real_server_fixture/run_real_client_browser_flow.mjs
 
       - name: Check the deploy workflow contract

@@ -3,6 +3,7 @@
 set -euo pipefail
 
 workflow="${CI_WORKFLOW:-.github/workflows/ci.yml}"
+recovery_workflow="${CI_RECOVERY_WORKFLOW:-.github/workflows/recover-cancelled-pr-ci.yml}"
 
 fail() {
   printf '%s: %s\n' "$workflow" "$1" >&2
@@ -11,6 +12,10 @@ fail() {
 
 query() {
   yq -r "$1" "$workflow"
+}
+
+recovery_query() {
+  yq -r "$1" "$recovery_workflow"
 }
 
 expected_gate_if="github.event_name == 'push' && github.ref == 'refs/heads/main'"
@@ -41,19 +46,32 @@ cancel_step="$(query '.jobs."prioritize-main".steps[] | select(.name == "Cancel 
   fail 'the priority job must not query or cancel running PR workflows'
 printf '%s\n' "$cancel_step" | bash -n
 [[ "$(query '.jobs."prioritize-main".outputs.cancelled_pr_run_ids')" == *'steps.cancel-queued-pr-runs.outputs.cancelled_pr_run_ids'* ]] ||
-  fail 'the priority job must expose cancelled run ids for requeueing'
+  fail 'the priority job must expose cancelled run ids for recovery'
 
-rerun_needs="$(query '.jobs."rerun-cancelled-pr-ci".needs[]')"
-[[ "$rerun_needs" == *'prioritize-main'* && "$rerun_needs" == *'lint'* ]] ||
-  fail 'cancelled PR runs must be requeued after the main lint lane starts'
-[[ "$(query '.jobs."rerun-cancelled-pr-ci".timeout-minutes')" == 210 ]] ||
-  fail 'the requeue job timeout must cover its three-hour cancellation wait'
-rerun_if="$(query '.jobs."rerun-cancelled-pr-ci".if')"
-[[ "$rerun_if" == *"needs.prioritize-main.result == 'success'"* && "$rerun_if" == *"needs.prioritize-main.result == 'skipped'"* && "$rerun_if" == *"github.event_name == 'pull_request'"* && "$rerun_if" == *"github.event_name == 'push'"* && "$rerun_if" == *'needs.lint.result != '\''skipped'\'''* && "$rerun_if" == *'outputs.cancelled_pr_run_ids != '\'''\'''* ]] ||
-  fail 'cancelled PR runs must be requeued only after main fan-out has started'
-rerun_step="$(query '.jobs."rerun-cancelled-pr-ci".steps[] | select(.name == "Re-run cancelled pull request CI after main fan-out starts") | .run')"
+dispatch_needs="$(query '.jobs."dispatch-cancelled-pr-ci-recovery".needs[]')"
+[[ "$dispatch_needs" == *'prioritize-main'* && "$dispatch_needs" == *'lint'* ]] ||
+  fail 'cancelled PR recovery must be dispatched after the main lint lane starts'
+[[ "$(query '.jobs."dispatch-cancelled-pr-ci-recovery".timeout-minutes')" == 5 ]] ||
+  fail 'dispatching PR recovery must remain short-lived in the main concurrency group'
+dispatch_if="$(query '.jobs."dispatch-cancelled-pr-ci-recovery".if')"
+[[ "$dispatch_if" == *"needs.prioritize-main.result == 'success'"* && "$dispatch_if" == *"needs.prioritize-main.result == 'skipped'"* && "$dispatch_if" == *"github.event_name == 'pull_request'"* && "$dispatch_if" == *"github.event_name == 'push'"* && "$dispatch_if" == *'needs.lint.result != '\''skipped'\'''* && "$dispatch_if" == *'outputs.cancelled_pr_run_ids != '\'''\'''* ]] ||
+  fail 'cancelled PR recovery must dispatch only after main fan-out starts'
+dispatch_step="$(query '.jobs."dispatch-cancelled-pr-ci-recovery".steps[] | select(.name == "Dispatch cancelled pull request CI recovery after main fan-out starts") | .run')"
+[[ "$dispatch_step" == *'gh workflow run recover-cancelled-pr-ci.yml'* && "$dispatch_step" == *'--ref main'* && "$dispatch_step" == *'-f issue=MAIN-2765'* && "$dispatch_step" == *'cancelled_pr_run_ids=$CANCELLED_PR_RUN_IDS'* && "$dispatch_step" != *'sleep 60'* ]] ||
+  fail 'main CI must dispatch recovery with its issue and cancelled run ids without waiting'
+printf '%s\n' "$dispatch_step" | bash -n
+
+[[ "$(recovery_query '.on.workflow_dispatch.inputs.issue.required')" == true && "$(recovery_query '.on.workflow_dispatch.inputs.cancelled_pr_run_ids.required')" == true ]] ||
+  fail 'the recovery workflow must require the issue key and cancelled run ids'
+[[ "$(recovery_query '.concurrency // ""')" == '' ]] ||
+  fail 'the delayed recovery workflow must not join the main CI concurrency group'
+[[ "$(recovery_query '.jobs."rerun-cancelled-pr-ci".timeout-minutes')" == 210 ]] ||
+  fail 'the recovery workflow timeout must cover its three-hour cancellation wait'
+[[ "$(recovery_query '.jobs."rerun-cancelled-pr-ci".permissions.actions')" == write ]] ||
+  fail 'only the recovery job needs Actions write permission to rerun cancelled runs'
+rerun_step="$(recovery_query '.jobs."rerun-cancelled-pr-ci".steps[] | select(.name == "Wait for cancellation cleanup and re-run PR CI") | .run')"
 [[ "$rerun_step" == *'gh run rerun "$run_id" --repo "$GITHUB_REPOSITORY"'* && "$rerun_step" == *'completed\tcancelled'* && "$rerun_step" == *'max_status_checks=181'* && "$rerun_step" == *'sleep 60'* && "$rerun_step" == *'Could not confirm cancelled pull request CI run'* && "$rerun_step" == *'Could not re-run cancelled pull request CI run'* ]] ||
-  fail 'recorded cancelled pull request runs must be rerun after main fan-out starts'
+  fail 'recorded cancelled pull request runs must be rerun after cancellation cleanup completes'
 printf '%s\n' "$rerun_step" | bash -n
 
 test_tmp="$(mktemp -d)"
@@ -85,6 +103,7 @@ STATUS_MODE=after-old-bound \
 STATUS_READS_FILE="$test_tmp/delayed-reads" \
 RERUN_LOG="$test_tmp/delayed-reruns" \
 CANCELLED_PR_RUN_IDS=123 \
+ISSUE=MAIN-2765 \
 GITHUB_REPOSITORY=example/repo \
   bash -c "$rerun_step" || fail 'a delayed cancelled run must eventually be rerun'
 [[ "$(<"$test_tmp/delayed-reads")" == 10 && "$(<"$test_tmp/delayed-reruns")" == 123 ]] ||
@@ -94,6 +113,7 @@ STATUS_MODE=never \
 STATUS_READS_FILE="$test_tmp/bounded-reads" \
 RERUN_LOG="$test_tmp/bounded-reruns" \
 CANCELLED_PR_RUN_IDS=123 \
+ISSUE=MAIN-2765 \
 GITHUB_REPOSITORY=example/repo \
   bash -c "$rerun_step" > "$test_tmp/bounded-output" 2>&1 || fail 'a delayed status must stop after the bounded retry count'
 [[ "$(<"$test_tmp/bounded-reads")" == 181 && ! -e "$test_tmp/bounded-reruns" ]] ||
@@ -102,7 +122,7 @@ GITHUB_REPOSITORY=example/repo \
   fail 'the requeue step must warn when cancellation does not finish within the bound'
 
 expected_roots=$'browser-acceptance\nbrowser-acceptance-image\nci-main\ncompose\ncss\ndeploy-workflow\ndocker\ne2e-admin\nlint\nmirror-rustfs-qualification-images\nphotothumb-runtime\nreal-server-fixtures\nrestore-readiness\nrustfs-transition-qualification\nschema-gate-postgres\nsmoke\nsql-lint\nsqlc\nwebsocket-d1\nwebsocket-permanent-exchange'
-actual_roots="$(query '.jobs | to_entries[] | select(.key != "prioritize-main" and .key != "ci" and .key != "rerun-cancelled-pr-ci" and (.value.needs == "prioritize-main" or (.value.needs[] == "prioritize-main"))) | .key' | LC_ALL=C sort)"
+actual_roots="$(query '.jobs | to_entries[] | select(.key != "prioritize-main" and .key != "ci" and .key != "dispatch-cancelled-pr-ci-recovery" and (.value.needs == "prioritize-main" or (.value.needs[] == "prioritize-main"))) | .key' | LC_ALL=C sort)"
 [[ "$actual_roots" == "$expected_roots" ]] ||
   fail 'every CI fan-out root must depend on the main priority job'
 
