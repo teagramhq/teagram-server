@@ -475,6 +475,7 @@ func runInviteCommand(args []string, log *slog.Logger, stdout, stderr io.Writer)
 		handle   string
 		lifetime time.Duration
 		id       int64
+		userID   int64
 	)
 	switch args[0] {
 	case "issue":
@@ -493,6 +494,17 @@ func runInviteCommand(args []string, log *slog.Logger, stdout, stderr io.Writer)
 		id, err = strconv.ParseInt(args[1], 10, 64)
 		if err != nil {
 			return fmt.Errorf("invalid invite id %q: %w", args[1], err)
+		}
+	case "revoke-user", "invitees", "inviter":
+		if len(args) != 2 {
+			return inviteUsageError()
+		}
+		userID, err = strconv.ParseInt(args[1], 10, 64)
+		if err != nil {
+			return fmt.Errorf("invalid user id %q: %w", args[1], err)
+		}
+		if userID <= 0 {
+			return fmt.Errorf("invalid user id %q", args[1])
 		}
 	default:
 		return inviteUsageError()
@@ -555,6 +567,37 @@ func runInviteCommand(args []string, log *slog.Logger, stdout, stderr io.Writer)
 			return fmt.Errorf("write revoke confirmation: %w", err)
 		}
 		return nil
+	case "revoke-user", "invitees", "inviter":
+		if _, exists, err := st.UserByID(ctx, userID); err != nil {
+			return err
+		} else if !exists {
+			return fmt.Errorf("unknown user %d", userID)
+		}
+		switch args[0] {
+		case "revoke-user":
+			count, err := st.RevokeUserInvites(ctx, userID)
+			if err != nil {
+				return err
+			}
+			if _, err := fmt.Fprintf(stderr, "Revoked: user_id=%d count=%d\n", userID, count); err != nil {
+				return fmt.Errorf("write user invite revocation count: %w", err)
+			}
+			return nil
+		case "invitees":
+			invitees, err := st.ListInviteesForUser(ctx, userID)
+			if err != nil {
+				return err
+			}
+			return writeInvitees(stdout, invitees)
+		case "inviter":
+			inviterID, found, err := st.InviterForUser(ctx, userID)
+			if err != nil {
+				return err
+			}
+			return writeInviteAttribution(stdout, userID, inviterID, found)
+		default:
+			return inviteUsageError()
+		}
 	default:
 		return inviteUsageError()
 	}
@@ -677,7 +720,7 @@ func parseInviteIssueArgs(args []string) (string, time.Duration, error) {
 }
 
 func inviteUsageError() error {
-	return errors.New("usage: teagramd invite issue <handle> [--lifetime <duration>] | teagramd invite list | teagramd invite revoke <id>")
+	return errors.New("usage: teagramd invite issue <handle> [--lifetime <duration>] | teagramd invite list | teagramd invite revoke <id> | teagramd invite revoke-user <user-id> | teagramd invite invitees <user-id> | teagramd invite inviter <user-id>")
 }
 
 func writeInviteIssued(w io.Writer, invite store.RegistrationInvite) error {
@@ -710,6 +753,35 @@ func writeInviteList(w io.Writer, invites []store.RegistrationInvite) error {
 	}
 	if err := table.Flush(); err != nil {
 		return fmt.Errorf("write invite list: %w", err)
+	}
+	return nil
+}
+
+func writeInvitees(w io.Writer, invitees []store.RegistrationInvitee) error {
+	table := tabwriter.NewWriter(w, 0, 4, 2, ' ', 0)
+	if _, err := fmt.Fprintln(table, "INVITEE_USER_ID\tREDEEMED_AT"); err != nil {
+		return fmt.Errorf("write invitees: %w", err)
+	}
+	for _, invitee := range invitees {
+		if _, err := fmt.Fprintf(table, "%d\t%s\n", invitee.UserID, invitee.RedeemedAt.Format(time.RFC3339)); err != nil {
+			return fmt.Errorf("write invitees: %w", err)
+		}
+	}
+	if err := table.Flush(); err != nil {
+		return fmt.Errorf("write invitees: %w", err)
+	}
+	return nil
+}
+
+func writeInviteAttribution(w io.Writer, userID, inviterID int64, found bool) error {
+	if !found {
+		if _, err := fmt.Fprintf(w, "User %d was created without a user invite\n", userID); err != nil {
+			return fmt.Errorf("write invite attribution: %w", err)
+		}
+		return nil
+	}
+	if _, err := fmt.Fprintf(w, "User %d was invited by user %d\n", userID, inviterID); err != nil {
+		return fmt.Errorf("write invite attribution: %w", err)
 	}
 	return nil
 }
