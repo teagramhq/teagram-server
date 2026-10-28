@@ -183,6 +183,102 @@ def expired_work_cleanup_manifest(
 
 
 class RestoreReadinessContractTests(unittest.TestCase):
+    def test_fixture_generation_failure_names_the_failed_check(self) -> None:
+        drill = object.__new__(RESTORE_READINESS.Drill)
+        drill.synthetic_auth_key_ids = ()
+        drill.sql = lambda *_args, **_kwargs: "unexpected fixture state"
+
+        with self.assertRaises(RESTORE_READINESS.DrillFailure) as failure:
+            drill.seed_source_auth_key_fixture({})
+
+        self.assertEqual(failure.exception.phase, "fixture_generation")
+        self.assertEqual(
+            getattr(failure.exception, "fixture_check", None),
+            "source_auth_key_fixture",
+        )
+
+    def test_fixture_check_in_report_is_allowlisted_and_sanitized(self) -> None:
+        report = RESTORE_READINESS.report_document(
+            "fixture_generation",
+            "fixture_failure",
+            "verified",
+            1,
+            fixture_check="source_auth_key_fixture",
+        )
+
+        self.assertEqual(report["fixture_check"], "source_auth_key_fixture")
+        self.assertNotIn("/", json.dumps(report))
+        with self.assertRaises(ValueError):
+            RESTORE_READINESS.report_document(
+                "fixture_generation",
+                "fixture_failure",
+                "verified",
+                1,
+                fixture_check="/tmp/private-fixture.env",
+            )
+
+    def test_run_primary_waits_for_supervisor_owned_manifest_registration(self) -> None:
+        tree = ast.parse(SCRIPT.read_text(encoding="utf-8"))
+        run_primary = next(
+            node
+            for node in ast.walk(tree)
+            if isinstance(node, ast.FunctionDef) and node.name == "run_primary"
+        )
+        calls = [
+            node
+            for node in ast.walk(run_primary)
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id == "wait_for_supervisor_registration"
+        ]
+
+        self.assertEqual(len(calls), 1, "the supervisor must publish its own manifest record before parent writes")
+        publish_line = next(
+            node.lineno
+            for node in ast.walk(run_primary)
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr == "Popen"
+        )
+        wait_line = calls[0].lineno
+        layout_line = next(
+            node.lineno
+            for node in ast.walk(run_primary)
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr == "create_private_layout"
+        )
+        self.assertLess(publish_line, wait_line)
+        self.assertLess(wait_line, layout_line)
+        self.assertFalse(
+            any(
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Attribute)
+                and node.func.attr == "save"
+                and publish_line < node.lineno < wait_line
+                for node in ast.walk(run_primary)
+            ),
+            "the parent must not save the manifest while the supervisor registers",
+        )
+
+    def test_wait_for_supervisor_registration_reads_the_child_record(self) -> None:
+        supervisor = Mock(pid=123, poll=Mock(return_value=None))
+        initial = {"supervisor": {"pid": 0, "start_ticks": 0}}
+        registered = {"supervisor": {"pid": 123, "start_ticks": 77}}
+
+        with (
+            patch.object(RESTORE_READINESS, "load_manifest", side_effect=(initial, registered)),
+            patch.object(RESTORE_READINESS.time, "sleep"),
+        ):
+            manifest = RESTORE_READINESS.wait_for_supervisor_registration(
+                Path("/run/restore-readiness-test/ownership.json"),
+                supervisor,
+                77,
+            )
+
+        self.assertIs(manifest, registered)
+        self.assertEqual(supervisor.poll.call_count, 2)
+
     def test_suite_work_budget_caps_each_run_and_is_shared_by_shell_gate(self) -> None:
         self.assertEqual(RESTORE_READINESS.bounded_work_seconds(None, None), 30 * 60)
         self.assertEqual(RESTORE_READINESS.bounded_work_seconds(None, 300), 300)
@@ -354,6 +450,93 @@ class RestoreReadinessContractTests(unittest.TestCase):
         self.assertEqual(report["cleanup"], "not_started")
         trusted_docker.assert_not_called()
         rollout_lock.assert_not_called()
+
+    def test_failed_supervisor_spawn_names_the_cleanup_failure_stage(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="rr-supervisor-spawn-") as directory:
+            run_dir = Path(directory) / "run"
+            run_dir.mkdir(mode=0o700)
+            rollout_lock_path = Path(directory) / "rollout-lock"
+            global_lock_path = Path(directory) / "global-lock"
+            rollout_lock_path.touch()
+            global_lock_path.touch()
+            rollout_lock_fd = os.open(rollout_lock_path, os.O_RDONLY)
+            global_lock_fd = os.open(global_lock_path, os.O_RDONLY)
+
+            prepared = {
+                "atlas_bin": "/tmp/teagram-restore-readiness.abcdefgh/atlas",
+                "build_dir": "/tmp/teagram-restore-readiness.abcdefgh",
+                "prepared_uid": 1000,
+                "go_arch": "amd64",
+                "path": "/tmp/teagram-restore-readiness.abcdefgh",
+                "device": 1,
+                "inode": 2,
+                "attestation_sha256": "a" * 64,
+            }
+
+            class SpawnFailureDrill:
+                def __init__(self, _args: Any, current_run_dir: Path, manifest: dict[str, Any]) -> None:
+                    self.manifest = manifest
+                    self.run_dir = current_run_dir
+                    self.manifest_path = current_run_dir / "ownership.json"
+                    self.phase = "preflight"
+                    self.fixture_check = "fixture_setup"
+                    self.gateway = None
+                    self.checker_result = {"help_getConfig": "not_run", "synthetic_signin": "not_run"}
+                    self.migration_head = "not_reached"
+                    self.auth_keys_cleared = False
+                    self.input_mode = "synthetic"
+
+                def save(self) -> None:
+                    return None
+
+            arguments = argparse.Namespace(
+                prepared_dir=Path(prepared["path"]),
+                docker_bin="/usr/bin/docker",
+                local_dump=None,
+                local_fixture_test=False,
+                fault_test=None,
+                work_seconds=None,
+            )
+            stdout = io.StringIO()
+            stderr = io.StringIO()
+            try:
+                with (
+                    patch.object(RESTORE_READINESS.os, "geteuid", return_value=0),
+                    patch.object(RESTORE_READINESS, "verify_prepared_runtime", return_value=prepared),
+                    patch.object(RESTORE_READINESS, "ensure_trusted_system_executable", return_value="/usr/bin/docker"),
+                    patch.object(
+                        RESTORE_READINESS,
+                        "open_rollout_lock",
+                        return_value=(rollout_lock_fd, {"device": 1, "inode": 2}),
+                    ),
+                    patch.object(
+                        RESTORE_READINESS,
+                        "open_global_lock",
+                        return_value=(global_lock_fd, {"device": 3, "inode": 4}),
+                    ),
+                    patch.object(RESTORE_READINESS.tempfile, "mkdtemp", return_value=str(run_dir)),
+                    patch.object(RESTORE_READINESS, "process_start_ticks", return_value=77),
+                    patch.object(RESTORE_READINESS, "Drill", SpawnFailureDrill),
+                    patch.object(RESTORE_READINESS.subprocess, "Popen", side_effect=OSError("spawn failed")),
+                    patch.object(RESTORE_READINESS, "load_manifest", return_value={}),
+                    patch.object(RESTORE_READINESS, "foreign_inventory_failure", return_value=None),
+                    redirect_stdout(stdout),
+                    redirect_stderr(stderr),
+                ):
+                    status = RESTORE_READINESS.run_primary(arguments)
+            finally:
+                for descriptor in (rollout_lock_fd, global_lock_fd):
+                    try:
+                        os.close(descriptor)
+                    except OSError:
+                        pass
+
+        self.assertEqual(status, 1)
+        self.assertIn(
+            "restore readiness cleanup failed: operation=supervisor_setup "
+            "error=supervisor_failed stage=spawn_supervisor",
+            stderr.getvalue(),
+        )
 
     def test_early_preparation_failure_can_remove_empty_owned_runtime_directory(self) -> None:
         path = Path("/tmp") / ("teagram-restore-readiness." + os.urandom(4).hex())
@@ -2387,9 +2570,46 @@ class RestoreReadinessContractTests(unittest.TestCase):
             command_args=[],
             expected_entrypoint=record["entrypoint"],
             expected_command=record["command"],
+            phase="fixture_generation",
+            fixture_check=None,
         )
         self.assertTrue(RESTORE_READINESS.validate_container_inspect(document, created))
         self.assertNotIn("--cpus", created_args)
+
+    def test_target_container_creation_failure_keeps_restore_phase_and_drops_stale_fixture_check(self) -> None:
+        drill = RESTORE_READINESS.Drill.__new__(RESTORE_READINESS.Drill)
+        drill.phase = "restore"
+        drill.fixture_check = "source_auth_key_fixture"
+        drill.images = {}
+        drill.manifest = {"token": "c" * 32, "containers": []}
+        drill.image_environment = lambda _image: ({}, {})
+        drill.save = lambda: None
+        drill.list_containers = lambda _phase: []
+        drill.list_volumes = lambda _phase: set()
+        drill.list_networks = lambda _phase: set()
+
+        def fail_create(_args: list[str], *, phase: str, category: str, **kwargs: Any) -> bytes:
+            raise RESTORE_READINESS.DrillFailure(
+                phase,
+                category,
+                fixture_check=kwargs.get("fixture_check"),
+            )
+
+        drill.call = fail_create
+
+        with self.assertRaises(RESTORE_READINESS.DrillFailure) as failure:
+            drill.image_container(
+                "sha256:" + "b" * 64,
+                role="target_client",
+                user="65532:70",
+                memory=RESTORE_READINESS.CLIENT_MEMORY,
+                pids_limit=96,
+                mounts=[],
+                tmpfs_options={},
+            )
+
+        self.assertEqual(failure.exception.phase, "restore")
+        self.assertIsNone(failure.exception.fixture_check)
 
     def test_created_container_does_not_claim_unattached_race_volume(self) -> None:
         document, record = container_fixture()
@@ -2418,6 +2638,8 @@ class RestoreReadinessContractTests(unittest.TestCase):
                 command_args=[],
                 expected_entrypoint=record["entrypoint"],
                 expected_command=record["command"],
+                phase="fixture_generation",
+                fixture_check=None,
             )
 
         self.assertEqual(failure.exception.category, "isolation_refusal")
@@ -2980,6 +3202,74 @@ class RestoreReadinessContractTests(unittest.TestCase):
                 },
             )
             self.assertNotIn("container-id", output.getvalue())
+
+    def test_supervisor_setup_failure_reports_the_safe_cleanup_stage(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="rr-supervisor-setup-stage-") as directory:
+            lock_path = Path(directory) / "lock"
+            lock_path.write_bytes(b"")
+            lock_fd = RESTORE_READINESS.os.open(lock_path, RESTORE_READINESS.os.O_RDWR)
+            lock_info = RESTORE_READINESS.os.fstat(lock_fd)
+            rollout_path = Path(directory) / "rollout-lock"
+            rollout_path.write_bytes(b"")
+            rollout_fd = RESTORE_READINESS.os.open(rollout_path, RESTORE_READINESS.os.O_RDWR)
+            rollout_info = RESTORE_READINESS.os.fstat(rollout_fd)
+            manifest = {
+                "global_lock": {"device": lock_info.st_dev, "inode": lock_info.st_ino},
+                "rollout_lock": {"device": rollout_info.st_dev, "inode": rollout_info.st_ino},
+                "supervisor": {"pid": 0, "start_ticks": 0},
+                "parent": {"pid": 999999, "start_ticks": 1},
+                "parent_done": True,
+                "cleanup_deadline": RESTORE_READINESS.time.monotonic() + 60,
+            }
+            loads = iter((manifest, manifest, manifest))
+            output = io.StringIO()
+
+            class RegisteredDrill:
+                def __init__(self, _args: Any, _run_dir: Path, current_manifest: dict[str, Any]) -> None:
+                    self.manifest = current_manifest
+                    self.cleanup_active = False
+                    self.cleanup_failure = None
+                    self.active_cleanup_operation = None
+
+                def save(self) -> None:
+                    return None
+
+            def load_then_fail(_path: Path) -> dict[str, Any]:
+                try:
+                    return next(loads)
+                except StopIteration as exc:
+                    raise RESTORE_READINESS.DrillFailure("cleanup", "cleanup_failure") from exc
+
+            with (
+                patch.object(RESTORE_READINESS, "load_manifest", side_effect=load_then_fail),
+                patch.object(
+                    RESTORE_READINESS,
+                    "process_start_ticks",
+                    side_effect=(77, None),
+                ),
+                patch.object(RESTORE_READINESS, "make_runtime_args", return_value=None),
+                patch.object(RESTORE_READINESS, "Drill", RegisteredDrill),
+                redirect_stdout(output),
+            ):
+                status = RESTORE_READINESS.supervise(Path(directory) / "ownership.json", lock_fd, rollout_fd)
+
+            self.assertEqual(status, 1)
+            diagnostic = json.loads(output.getvalue())
+            self.assertEqual(diagnostic["operation"], "supervisor_setup")
+            self.assertEqual(diagnostic["error"], "supervisor_failed")
+            self.assertEqual(diagnostic["stage"], "load_final_manifest")
+            self.assertNotIn(directory, output.getvalue())
+            self.assertEqual(
+                RESTORE_READINESS.parse_cleanup_failure_output(output.getvalue().encode()),
+                "restore readiness cleanup failed: operation=supervisor_setup "
+                "error=supervisor_failed stage=load_final_manifest",
+            )
+            with self.assertRaises(ValueError):
+                RESTORE_READINESS.cleanup_failure_document(
+                    "supervisor_setup",
+                    "supervisor_failed",
+                    stage=directory,
+                )
 
     def test_supervisor_reports_malformed_later_container_inventory(self) -> None:
         with tempfile.TemporaryDirectory(prefix="rr-supervisor-invalid-inventory-") as directory:
