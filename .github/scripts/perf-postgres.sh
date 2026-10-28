@@ -19,7 +19,7 @@ ready=false
 for _ in $(seq 1 60); do
   # The image uses a temporary socket-only server while initializing. The
   # workflow needs TCP, so wait for the final server instead of that socket.
-  if docker exec "$PERF_PG_CONTAINER" pg_isready -h 127.0.0.1 -p 5432 -U postgres -q; then
+  if docker exec "$PERF_PG_CONTAINER" pg_isready -h 127.0.0.1 -U postgres -q; then
     ready=true
     break
   fi
