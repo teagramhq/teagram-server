@@ -652,7 +652,7 @@ with open(sys.argv[1], "w", encoding="ascii") as target:
     for path in sorted(Path("/run").glob("restore-readiness-*")):
         target.write(path.name + "\n")
 PY
-  manifest=$(/usr/bin/python3 - "$run_dirs.before" "$run_dirs.after" <<'PY'
+  manifest=$(/usr/bin/python3 - "$run_dirs_before" "$run_dirs_after" <<'PY'
 from pathlib import Path
 import sys
 
