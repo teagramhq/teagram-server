@@ -2,9 +2,9 @@
 //
 // Deterministic counters block from the first run: statements per RPC, rows
 // read, sequential scans, and an identical statement count at 1x and 100x.
-// Timings (the absolute budget, 1x against 100x, and base against head) are
-// reported on every run but block only once main's history has given the
-// scenario a noise band.
+// Timing regressions compare the head with its interleaved base, or main with
+// its calibrated history. Known-scenario timing waivers can accept the p95
+// budget and within-run scale checks, but never a regression against baseline.
 package perfreport
 
 import (
@@ -15,9 +15,8 @@ import (
 	"strings"
 )
 
-// Version is the report format. A base report in another format is not
-// compared.
-const Version = 1
+// Version is the report format. A report in another format is not compared.
+const Version = 2
 
 // Fixture names.
 const (
@@ -35,16 +34,18 @@ const (
 	FanOut Kind = "fanout"
 )
 
-// budgetMs is the p95 ceiling on the 100x fixture.
+// budgetMs is the p95 ceiling on the 100x fixture unless a timing waiver names
+// the scenario.
 var budgetMs = map[Kind]float64{Read: 20, Write: 50, FanOut: 2000}
 
-// Thresholds. Scale invariance allows the 100x run 1.5 times the 1x one;
-// against base a run may be 15% slower. The absolute slack keeps timer and
-// scheduler noise on sub-millisecond RPCs from deciding either.
+// Row reads allow 1.5x growth across fixtures; allocations use the same ratio
+// for non-blocking diagnostics. Timing allows 15% regression against a
+// reference; absolute slack keeps timer and scheduler noise on sub-millisecond
+// RPCs from deciding.
 const (
 	scaleRatio      = 1.5
-	regressionRatio = 1.15
 	scaleSlackMs    = 1.0
+	regressionRatio = 1.15
 	baseMinMs       = 2.0
 	noiseSigmas     = 3
 	rowsSlack       = 50
@@ -57,6 +58,8 @@ const Calibration = 20
 // Report is one harness run over both fixtures.
 type Report struct {
 	Version int `json:"version"`
+	// FixtureVersion is the hash of the fixture seeder and server setup files.
+	FixtureVersion string `json:"fixture_version,omitempty"`
 	// Scenarios names every scenario the harness was built to run, so one
 	// that produced no result is still judged, as missing.
 	Scenarios []string `json:"scenarios"`
@@ -121,7 +124,7 @@ const (
 	checkSlower      = "slower"
 )
 
-// timing reports whether a check is decided by a clock rather than a counter.
+// timing reports whether a check is subject to calibration-aware reporting.
 func timing(check string) bool {
 	switch check {
 	case CheckBudget, CheckLatency, CheckAlloc, checkSlower:
@@ -171,9 +174,10 @@ type Row struct {
 	Large *Result
 	Base  *Result
 	// Band is the standard deviation of main's 100x p50 over Runs main runs.
-	Band   float64
-	Runs   int
-	Failed bool
+	Band       float64
+	Runs       int
+	HistoryP50 float64
+	Failed     bool
 	// MeasurementFailed marks RPC, report, or query-plan failures that are not
 	// performance regressions.
 	MeasurementFailed bool
@@ -222,7 +226,7 @@ func Evaluate(in Input) Verdict {
 	v := Verdict{Rounds: len(in.Head), BaseRounds: len(in.Base)}
 	headAgg, order := aggregate(in.Head)
 	baseAgg, _ := aggregate(in.Base)
-	bands := noise(in.History)
+	bands := noise(matchingHistory(in.Head, in.History))
 	// checked holds the scenarios measured on both fixtures, the only ones whose
 	// unused waivers are stale.
 	checked := map[string]bool{}
@@ -274,7 +278,7 @@ func Evaluate(in Input) Verdict {
 	}
 	for _, name := range order {
 		row := Row{Name: name, Small: headAgg[key{name, Small}], Large: headAgg[key{name, Large}], Base: baseAgg[key{name, Large}]}
-		row.Band, row.Runs = bands[name].sd, bands[name].n
+		row.Band, row.Runs, row.HistoryP50 = bands[name].sd, bands[name].n, bands[name].p50
 		calibrated := row.Runs >= Calibration
 		// record files a failed check. scan is the fingerprint of a sequential
 		// scan, which only a waiver naming that scan covers.
@@ -350,11 +354,19 @@ func Evaluate(in Input) Verdict {
 				fail(CheckAlloc, "allocated %s at %s is %.1fx the %s %s", bytes(l.AllocBytes), Large, ratio(l.AllocBytes, s.AllocBytes), Small, bytes(s.AllocBytes))
 			}
 		}
-		if b := row.Base; b != nil && b.Error == "" {
-			allowed := max((regressionRatio-1)*b.P50Ms, noiseSigmas*row.Band)
-			if l.P50Ms-b.P50Ms > allowed && l.P50Ms-b.P50Ms >= baseMinMs {
-				fail(checkSlower, "p50 %.1f ms at %s is %.0f%% slower than main's %.1f ms", l.P50Ms, Large, 100*(l.P50Ms/b.P50Ms-1), b.P50Ms)
+		referenceP50, referenceName := 0.0, ""
+		if b := row.Base; b != nil && b.Error == "" && b.P50Ms > 0 {
+			referenceP50, referenceName = b.P50Ms, "main"
+		} else if row.Runs > 0 && bands[name].p50 > 0 {
+			referenceP50, referenceName = bands[name].p50, "main history"
+		}
+		if referenceP50 > 0 {
+			allowed := max((regressionRatio-1)*referenceP50, noiseSigmas*row.Band)
+			if l.P50Ms-referenceP50 > allowed && l.P50Ms-referenceP50 >= baseMinMs {
+				fail(checkSlower, "p50 %.1f ms at %s is %.0f%% slower than %s's %.1f ms", l.P50Ms, Large, 100*(l.P50Ms/referenceP50-1), referenceName, referenceP50)
 			}
+		}
+		if b := row.Base; b != nil && b.Error == "" {
 			if float64(l.Queries) > regressionRatio*float64(b.Queries) {
 				fail(checkBase, "queries %d at %s, main runs %d", l.Queries, Large, b.Queries)
 			}
@@ -399,6 +411,15 @@ func scanKey(scan string) string {
 func Aggregate(reports []Report) Report {
 	agg, order := aggregate(reports)
 	out := Report{Version: Version}
+	if len(reports) > 0 {
+		out.FixtureVersion = reports[0].FixtureVersion
+		for _, rep := range reports[1:] {
+			if rep.FixtureVersion != out.FixtureVersion {
+				out.FixtureVersion = ""
+				break
+			}
+		}
+	}
 	for _, rep := range reports {
 		for _, name := range rep.Scenarios {
 			if !slices.Contains(out.Scenarios, name) {
@@ -417,12 +438,33 @@ func Aggregate(reports []Report) Report {
 }
 
 type band struct {
-	sd float64
-	n  int
+	p50 float64
+	sd  float64
+	n   int
 }
 
-// noise is each scenario's standard deviation of the 100x p50 across main
-// runs.
+// matchingHistory keeps the timing baseline on the same fixture generation as
+// the current head. Reports without provenance cannot establish that match.
+func matchingHistory(head, history []Report) []Report {
+	if len(head) == 0 || head[0].FixtureVersion == "" {
+		return nil
+	}
+	version := head[0].FixtureVersion
+	for _, rep := range head[1:] {
+		if rep.FixtureVersion != version {
+			return nil
+		}
+	}
+	matching := make([]Report, 0, len(history))
+	for _, rep := range history {
+		if rep.FixtureVersion == version {
+			matching = append(matching, rep)
+		}
+	}
+	return matching
+}
+
+// noise summarizes each scenario's 100x p50 across main runs.
 func noise(history []Report) map[string]band {
 	samples := map[string][]float64{}
 	for _, rep := range history {
@@ -450,7 +492,8 @@ func noise(history []Report) map[string]band {
 		if len(xs) > 1 {
 			sd = math.Sqrt(ss / float64(len(xs)-1))
 		}
-		out[name] = band{sd: sd, n: len(xs)}
+		slices.Sort(xs)
+		out[name] = band{p50: xs[(len(xs)-1)/2], sd: sd, n: len(xs)}
 	}
 	return out
 }
@@ -532,10 +575,10 @@ func Markdown(v Verdict) string {
 	if v.BaseRounds > 0 {
 		base = fmt.Sprintf("%d interleaved base rounds", v.BaseRounds)
 	}
-	fmt.Fprintf(&b, "Medians of %d rounds; %s. Budgets are p95 on the 100x fixture. "+
-		"Query counts, rows read and sequential scans block; timings block once %d main runs have set the scenario's noise band.\n\n",
+	fmt.Fprintf(&b, "Medians of %d rounds; %s. Reference budgets are p95 on the 100x fixture. "+
+		"Query counts, rows read and sequential scans block. P50 regressions compare with the interleaved base or calibrated main history; p95 and 1x/100x checks also block after %d main runs unless a timing waiver names the scenario.\n\n",
 		v.Rounds, base, Calibration)
-	b.WriteString("| Scenario | Kind | p50 1x (ms) | p50 100x (ms) | p95 100x (ms) | Budget (ms) | Noise band | Queries 1x / 100x | Rows read 1x / 100x | Alloc 100x | p50 vs main | Status |\n")
+	b.WriteString("| Scenario | Kind | p50 1x (ms) | p50 100x (ms) | p95 100x (ms) | Reference p95 (ms) | Noise band | Queries 1x / 100x | Rows read 1x / 100x | Alloc 100x | p50 vs main | Status |\n")
 	b.WriteString("|---|---|---|---|---|---|---|---|---|---|---|---|\n")
 	for _, row := range v.Rows {
 		status := "pass"
@@ -562,6 +605,8 @@ func Markdown(v Verdict) string {
 		vsMain := "n/a"
 		if row.Base != nil && row.Base.P50Ms > 0 {
 			vsMain = fmt.Sprintf("%+.0f%%", 100*(l.P50Ms/row.Base.P50Ms-1))
+		} else if row.HistoryP50 > 0 {
+			vsMain = fmt.Sprintf("%+.0f%%", 100*(l.P50Ms/row.HistoryP50-1))
 		}
 		name := row.Name
 		if l.FullSet {

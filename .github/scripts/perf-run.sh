@@ -22,6 +22,8 @@ PERF_WORK="${PERF_WORK:-${RUNNER_TEMP:?}/perf}"
 rounds="${PERF_ROUNDS:-2}"
 history_keep=20
 fixtures=(1x 100x)
+# Keep these inputs aligned with FIXTURE_VERSION in .github/workflows/perf.yml.
+fixture_inputs=(test/perf/fixture_test.go test/perf/server_test.go)
 
 psql_admin() {
   docker exec "$PERF_PG_CONTAINER" psql -v ON_ERROR_STOP=1 -U postgres -qAt "$@"
@@ -139,7 +141,7 @@ base_ready() {
     return 1
   fi
   local diff_status=0
-  git diff --quiet "$PERF_BASE_SHA" HEAD -- test/perf/fixture_test.go || diff_status=$?
+  git diff --quiet "$PERF_BASE_SHA" HEAD -- "${fixture_inputs[@]}" || diff_status=$?
   case "$diff_status" in
     0) ;;
     1)
@@ -179,6 +181,7 @@ run_branch() {
   [ "$branch" = base ] && suffix=_base
   echo "::group::$branch round $round"
   TG_PERF_DIR="$PERF_CACHE" \
+    TG_PERF_FIXTURE_VERSION="${FIXTURE_VERSION:-}" \
     TG_PERF_DSN_1X="$(dsn 1x "$suffix")" TG_PERF_DSN_100X="$(dsn 100x "$suffix")" \
     TG_PERF_REPORT="$PERF_WORK/$branch-$round.json" \
     "$PERF_WORK/$branch.test" -test.run '^Test(LoadFixtureRejectsOlderVersion|OwnerUsernamePasswordLogin|RPCPerformance)$' -test.count=1 -test.timeout 30m -test.v ||

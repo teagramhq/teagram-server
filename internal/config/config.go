@@ -102,6 +102,10 @@ type Config struct {
 	// listener. It defaults to closed so enabling that listener alone cannot
 	// open registration.
 	PublicRegistrationMode RegistrationMode
+	// UserInviteQuota enables redemption of user-issued registration invites
+	// when positive. It defaults to zero so existing invite-mode deployments
+	// must opt in explicitly.
+	UserInviteQuota int
 
 	// WelcomeChannel is the operator-configured public broadcast channel for new accounts.
 	WelcomeChannel string
@@ -156,9 +160,6 @@ type Config struct {
 	// unassembled bytes are capped at twice this, which is two concurrent
 	// max-size uploads.
 	MaxFileBytes int64
-	// UploadMaxFileBytes is the optional TG_UPLOAD_MAX_BYTES value advertised
-	// to clients. Zero means that setting was not provided.
-	UploadMaxFileBytes int64
 	// BlobDir is where uploaded file bodies are stored. It must be outside the
 	// repository and outside anything a future HTTP surface serves statically.
 	BlobDir string
@@ -1001,7 +1002,6 @@ func load(log *slog.Logger, allowKeyGeneration bool) (Config, error) {
 			return Config{}, errors.New("TG_UPLOAD_MAX_BYTES must be at most 1099511627776")
 		}
 		cfg.MaxFileBytes = n
-		cfg.UploadMaxFileBytes = n
 	}
 	if v := os.Getenv("TG_MAX_USER_STORAGE_BYTES"); v != "" {
 		n, err := strconv.ParseInt(v, 10, 64)
@@ -1242,6 +1242,13 @@ func load(log *slog.Logger, allowKeyGeneration bool) (Config, error) {
 	// TG_PUBLIC_REGISTRATION defaults closed independently from the tailnet
 	// listeners so enabling the public endpoint cannot inherit an open policy.
 	cfg.PublicRegistrationMode = registrationMode(os.Getenv("TG_PUBLIC_REGISTRATION"))
+	if value := os.Getenv("TG_USER_INVITE_QUOTA"); value != "" {
+		quota, err := strconv.Atoi(value)
+		if err != nil || quota < 0 {
+			return Config{}, errors.New("TG_USER_INVITE_QUOTA must be a non-negative integer")
+		}
+		cfg.UserInviteQuota = quota
+	}
 	// TG_WELCOME_CHANNEL is resolved after account admission by the auth handler.
 	cfg.WelcomeChannel = os.Getenv("TG_WELCOME_CHANNEL")
 	// Zero or unset disables enforcement for a surface; the numbers and why they

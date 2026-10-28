@@ -357,6 +357,63 @@ func TestSendMediaToUser(t *testing.T) {
 	}
 }
 
+func TestSendAndEditMediaCaptionEnforcePublishedLength(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	s := openStore(t)
+	blobs := newBlobs(t)
+	a, err := s.CreateUser(ctx, "+15551296021")
+	if err != nil {
+		t.Fatalf("user a: %v", err)
+	}
+	b, err := s.CreateUser(ctx, "+15551296022")
+	if err != nil {
+		t.Fatalf("user b: %v", err)
+	}
+	peer := api.InputPeerUser(a.ID, b.ID)
+	maxLength := api.DefaultConfig(2, "127.0.0.1", 2443).CaptionLengthMax
+	maxCaption := strings.Repeat("c", maxLength)
+	overCaption := strings.Repeat("c", maxLength+1)
+	saveParts(t, s, a.ID, 96021, []byte("document"))
+
+	enc, err := api.SendMediaForTest(s, a.ID, blobs, api.TestMaxUserStorageBytes, &tg.MessagesSendMediaRequest{
+		Peer:     peer,
+		Media:    uploadedDocument(96021, 1, "caption.txt", "text/plain"),
+		Message:  maxCaption,
+		RandomID: 1,
+	})
+	if err != nil {
+		t.Fatalf("send at caption_max_length: %v", err)
+	}
+	sent := messageOf(t, enc)
+
+	_, err = api.SendMediaForTest(s, a.ID, blobs, api.TestMaxUserStorageBytes, &tg.MessagesSendMediaRequest{
+		Peer:     peer,
+		Media:    uploadedDocument(96022, 1, "oversized.txt", "text/plain"),
+		Message:  overCaption,
+		RandomID: 2,
+	})
+	rpcError(t, err, "MEDIA_CAPTION_TOO_LONG")
+
+	if _, err := api.EditMessageForTest(s, a.ID, &tg.MessagesEditMessageRequest{
+		Peer: peer, ID: sent.ID, Message: maxCaption,
+	}); err != nil {
+		t.Fatalf("edit at caption_max_length: %v", err)
+	}
+	_, err = api.EditMessageForTest(s, a.ID, &tg.MessagesEditMessageRequest{
+		Peer: peer, ID: sent.ID, Message: overCaption,
+	})
+	rpcError(t, err, "MEDIA_CAPTION_TOO_LONG")
+
+	after, ok, err := s.MessageByOwnerLocal(ctx, a.ID, int64(sent.ID))
+	if err != nil || !ok {
+		t.Fatalf("message after rejected caption edit: found=%v err=%v", ok, err)
+	}
+	if after.Text != maxCaption {
+		t.Fatalf("caption length after rejected edit = %d, want %d", len(after.Text), maxLength)
+	}
+}
+
 // partObjects lists the keys under the parts prefix that blobs still holds.
 func partObjects(t *testing.T, blobs blob.Store) []string {
 	t.Helper()
