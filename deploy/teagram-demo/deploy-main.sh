@@ -24,6 +24,7 @@ CANDIDATE_IMAGE_REF=
 DB_DUMP=
 RESTORE_DB=
 RESTORE_DB_CREATED=0
+BACKUP_GENERATION=
 BACKUP_READY=0
 CANDIDATE_STARTED=0
 PUBLIC_ACTIVATION_STARTED=0
@@ -114,6 +115,15 @@ demo_backup_database() {
   RESTORE_DB_CREATED=1
   demo_compose_input exec -T postgres pg_restore -U postgres --no-owner --no-privileges --exit-on-error \
     -d "$RESTORE_DB" < "$DB_DUMP"
+  BACKUP_HAS_GENERATION=$(demo_compose exec -T postgres psql -U postgres -d "$RESTORE_DB" -Atqc \
+    "SELECT to_regclass('public.demo_wipe_generation') IS NOT NULL" </dev/null)
+  [[ "$BACKUP_HAS_GENERATION" == t || "$BACKUP_HAS_GENERATION" == f ]] ||
+    demo_fail 'could not inspect the database backup for its wipe generation'
+  if [[ "$BACKUP_HAS_GENERATION" == t ]]; then
+    BACKUP_GENERATION=$(demo_compose exec -T postgres psql -U postgres -d "$RESTORE_DB" -Atqc \
+      'SELECT generation FROM demo_wipe_generation WHERE singleton = 1' </dev/null)
+    [[ "$BACKUP_GENERATION" =~ ^[0-9a-f]{64}$ ]] || demo_fail 'database backup has an invalid or missing wipe generation'
+  fi
   demo_compose exec -T postgres dropdb -U postgres "$RESTORE_DB" </dev/null
   RESTORE_DB_CREATED=0
   sha256sum "$DB_DUMP" > "$BACKUP_DIR/postgres.dump.sha256"
@@ -200,6 +210,24 @@ chmod 0600 "$BACKUP_DIR/previous-image-id.txt" "$BACKUP_DIR/active-server.txt" \
 demo_backup_database
 
 export TEAGRAM_DEMO_IMAGE_REF="$CANDIDATE_IMAGE_REF"
+# Check candidate RSA identity before applying migrations. The candidate's
+# discovery generation is intentionally disabled for this probe because the
+# pre-migration database may not have the generation table yet.
+demo_compose run --rm --no-deps -e TG_ADVERTISE_DEMO_GUEST_SIGN_UP=false "$CANDIDATE_SERVER" client-config > "$TMP_DIR/client-before-migration.json"
+jq -e '
+  .version == 1
+  and .mtproto.endpoint == "demo.teagram.io:443"
+  and (.mtproto.rsa_spki | type == "string" and length > 0)
+  and .websocket.endpoint == "wss://demo.teagram.io/apiws"
+  and .demo == null
+' "$TMP_DIR/client-before-migration.json" >/dev/null || demo_fail 'candidate pre-migration client config is invalid'
+OLD_SPKI=$(jq -er '.mtproto.rsa_spki' "$BACKUP_DIR/client.json")
+CANDIDATE_SPKI=$(jq -er '.mtproto.rsa_spki' "$TMP_DIR/client-before-migration.json")
+[[ "$CANDIDATE_SPKI" == "$OLD_SPKI" ]] || demo_fail 'candidate changed the persistent RSA identity'
+
+demo_compose rm -sf migrate >/dev/null
+demo_compose up -d migrate
+demo_wait_migration demo_compose 'deployment migrations'
 demo_compose run --rm --no-deps "$CANDIDATE_SERVER" client-config > "$TMP_DIR/client.json"
 jq -e '
   .version == 1
@@ -207,14 +235,22 @@ jq -e '
   and (.mtproto.rsa_spki | type == "string" and length > 0)
   and .websocket.endpoint == "wss://demo.teagram.io/apiws"
   and .demo.guest_sign_up == true
-' "$TMP_DIR/client.json" >/dev/null || demo_fail 'client-config lacks the approved demo WebSocket or guest signup binding'
+  and (.demo.wipe_generation | type == "string" and test("^[0-9a-f]{64}$"))
+' "$TMP_DIR/client.json" >/dev/null || demo_fail 'client-config lacks the approved demo WebSocket, guest signup, or wipe generation binding'
 OLD_SPKI=$(jq -er '.mtproto.rsa_spki' "$BACKUP_DIR/client.json")
 NEW_SPKI=$(jq -er '.mtproto.rsa_spki' "$TMP_DIR/client.json")
 [[ "$NEW_SPKI" == "$OLD_SPKI" ]] || demo_fail 'deployment changed the persistent RSA identity'
-
-demo_compose rm -sf migrate >/dev/null
-demo_compose up -d migrate
-demo_wait_migration demo_compose 'deployment migrations'
+NEW_GENERATION=$(jq -er '.demo.wipe_generation' "$TMP_DIR/client.json")
+if jq -e '(.demo | type == "object") and (.demo | has("wipe_generation"))' "$BACKUP_DIR/client.json" >/dev/null; then
+  OLD_GENERATION=$(jq -er '.demo.wipe_generation | select(type == "string" and test("^[0-9a-f]{64}$"))' "$BACKUP_DIR/client.json")
+  [[ "$OLD_GENERATION" == "$BACKUP_GENERATION" ]] || demo_fail 'published client generation differs from the database backup'
+else
+  jq -e '(.demo == null) or ((.demo | type == "object") and (.demo | has("wipe_generation") | not))' \
+    "$BACKUP_DIR/client.json" >/dev/null || demo_fail 'backup client config has an invalid wipe generation field'
+fi
+if [[ -n "$BACKUP_GENERATION" ]]; then
+  [[ "$NEW_GENERATION" == "$BACKUP_GENERATION" ]] || demo_fail 'deployment changed the stored wipe generation'
+fi
 CANDIDATE_STARTED=1
 demo_seed_compose up -d "$CANDIDATE_SERVER"
 mapfile -t CANDIDATE_IDS < <(demo_compose ps -q "$CANDIDATE_SERVER")

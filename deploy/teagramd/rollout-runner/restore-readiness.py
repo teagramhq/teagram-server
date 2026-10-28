@@ -71,7 +71,9 @@ def repo_migration_versions(migration_dir: Path | None = None) -> tuple[str, ...
 
 
 HEAD_SCHEMA = repo_migration_versions()[-1]
-LOCAL_FIXTURE_SCHEMA = repo_migration_versions()[-2]
+# Keep the dump fixture on a stable pre-sweep-index schema. New migrations stay
+# in the post-restore upgrade path instead of changing fixture generation.
+LOCAL_FIXTURE_SCHEMA = "20261024000002"
 if not BASE_SCHEMA < LOCAL_FIXTURE_SCHEMA < HEAD_SCHEMA:
     raise ValueError("local fixture needs a repo migration strictly between the base and head")
 AUTH_KEY_INVENTORY_PATH = Path(__file__).with_name("auth-key-clearing-inventory.json")
