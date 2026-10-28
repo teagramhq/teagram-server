@@ -49,6 +49,11 @@ func TestAccountCreationPathsStayBehindAdmission(t *testing.T) {
 			"ClaimUsername":                     {"ClaimUsername": true},
 			"ClaimChannelUsername":              {"ClaimUsername": true},
 		},
+		// Operator provisioning is local and password-bearing; bot creation is
+		// likewise restricted to the root-only teagramd operator command.
+		"internal/store/bot_accounts.go": {
+			"CreateBot": {"ClaimUsername": true},
+		},
 		"internal/store/channels.go": {
 			"EditChannelUsername": {"ClaimUsername": true},
 		},

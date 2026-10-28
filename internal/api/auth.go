@@ -261,6 +261,9 @@ func (h *handlers) handleSignUpWithConn(c *mtproto.Conn, r *mtproto.Request) (bi
 		case errors.Is(err, store.ErrUsernameOccupied):
 			h.logSignUpRejection(signUpHandleOccupied)
 			return nil, errUsernameOccupied
+		case errors.Is(err, store.ErrBotAccount):
+			h.logSignUpRejection(signUpHandleOccupied)
+			return nil, errBotAccount
 		case errors.Is(err, store.ErrAuthKeyNotFound):
 			h.logSignUpRejection(signUpSessionStateInvalid)
 			return nil, errSessionStateInvalid
@@ -486,6 +489,9 @@ func (h *handlers) handleSignInUsername(c *mtproto.Conn, r *mtproto.Request, use
 			}
 		}
 		return h.signUpRequired(), nil
+	}
+	if resolved.Kind == store.UserKindBot {
+		return nil, errBotAccount
 	}
 
 	// The login_mode check and fail-closed invariant MUST precede SetPendingUser.

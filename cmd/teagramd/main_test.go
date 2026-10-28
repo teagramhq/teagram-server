@@ -775,6 +775,84 @@ func TestRunInviteCommandIssueAndList(t *testing.T) {
 	}
 }
 
+func TestRunBotCommandCreateRotateAndRevoke(t *testing.T) {
+	dsn := pgtest.DSN(t)
+	t.Setenv("TG_POSTGRES_DSN", dsn)
+	t.Setenv("TG_AUTHKEY_ENC_KEY", strings.Repeat("00", 32))
+	t.Setenv("TG_AUTHKEY_ENC_KEY_FILE", "")
+
+	log := slog.New(slog.DiscardHandler)
+	var stdout, stderr bytes.Buffer
+	if err := runCommand([]string{"bot", "create", "Weather_Bot", "Weather"}, log, &stdout, &stderr); err != nil {
+		t.Fatalf("create command: %v", err)
+	}
+	createdToken := strings.TrimSuffix(stdout.String(), "\n")
+	if createdToken == "" || strings.Count(stdout.String(), "\n") != 1 || strings.Contains(stderr.String(), createdToken) {
+		t.Fatalf("create output = stdout %q stderr %q, want one token line and no token on stderr", stdout.String(), stderr.String())
+	}
+	botIDText, _, ok := strings.Cut(createdToken, ":")
+	if !ok {
+		t.Fatalf("created token = %q, want <bot id>:<secret>", createdToken)
+	}
+	botID, err := strconv.ParseInt(botIDText, 10, 64)
+	if err != nil || botID <= 0 {
+		t.Fatalf("created token id %q = %d, error %v", botIDText, botID, err)
+	}
+
+	st, err := store.Open(context.Background(), dsn, make([]byte, 32), store.WithoutBlobStore())
+	if err != nil {
+		t.Fatalf("open store for token checks: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := st.Close(); err != nil {
+			t.Errorf("close store: %v", err)
+		}
+	})
+	if gotID, err := st.BotIDByToken(context.Background(), createdToken); err != nil || gotID != botID {
+		t.Fatalf("lookup created token = (%d, %v), want (%d, nil)", gotID, err, botID)
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	if err := runCommand([]string{"bot", "rotate", strconv.FormatInt(botID, 10)}, log, &stdout, &stderr); err != nil {
+		t.Fatalf("rotate command: %v", err)
+	}
+	rotatedToken := strings.TrimSuffix(stdout.String(), "\n")
+	if rotatedToken == "" || rotatedToken == createdToken || strings.Count(stdout.String(), "\n") != 1 {
+		t.Fatalf("rotate stdout = %q, want one new token line", stdout.String())
+	}
+	if _, err := st.BotIDByToken(context.Background(), createdToken); !errors.Is(err, store.ErrBotTokenNotFound) {
+		t.Fatalf("old token after rotate error = %v, want not found", err)
+	}
+	if gotID, err := st.BotIDByToken(context.Background(), rotatedToken); err != nil || gotID != botID {
+		t.Fatalf("lookup rotated token = (%d, %v), want (%d, nil)", gotID, err, botID)
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	if err := runCommand([]string{"bot", "rotate", rotatedToken}, log, &stdout, &stderr); err == nil || strings.Contains(err.Error(), rotatedToken) {
+		t.Fatalf("rotate with token argv error = %v, want a sanitized invalid-id error", err)
+	}
+	if stdout.Len() != 0 || stderr.Len() != 0 {
+		t.Fatalf("invalid rotate output = stdout %q stderr %q, want empty", stdout.String(), stderr.String())
+	}
+	if gotID, err := st.BotIDByToken(context.Background(), rotatedToken); err != nil || gotID != botID {
+		t.Fatalf("lookup token after rejected argv = (%d, %v), want (%d, nil)", gotID, err, botID)
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	if err := runCommand([]string{"bot", "revoke", strconv.FormatInt(botID, 10)}, log, &stdout, &stderr); err != nil {
+		t.Fatalf("revoke command: %v", err)
+	}
+	if stdout.Len() != 0 {
+		t.Fatalf("revoke stdout = %q, want empty", stdout.String())
+	}
+	if _, err := st.BotIDByToken(context.Background(), rotatedToken); !errors.Is(err, store.ErrBotTokenNotFound) {
+		t.Fatalf("revoked token error = %v, want not found", err)
+	}
+}
+
 func TestParseInviteIssueArgs(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
