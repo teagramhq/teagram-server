@@ -1,6 +1,7 @@
 package perfreport_test
 
 import (
+	"encoding/json"
 	"os"
 	"strings"
 	"testing"
@@ -13,7 +14,12 @@ func result(p50, p95 float64, queries int, rows int64) perfreport.Result {
 }
 
 func report(results ...perfreport.Result) perfreport.Report {
-	return perfreport.Report{Version: perfreport.Version, Results: results}
+	return perfreport.Report{Version: perfreport.Version, FixtureVersion: "fixture-test-v2", Results: results}
+}
+
+func withFixtureVersion(r perfreport.Report, version string) perfreport.Report {
+	r.FixtureVersion = version
+	return r
 }
 
 func pair(name string, kind perfreport.Kind, small, large perfreport.Result) []perfreport.Result {
@@ -94,43 +100,100 @@ func TestEvaluateBlocksCounterRegressionAgainstBase(t *testing.T) {
 	}
 }
 
-func TestEvaluateReportsTimingsUntilCalibrated(t *testing.T) {
-	rs := make([]perfreport.Result, 0, 8)
-	rs = append(rs, pair("read", perfreport.Read, result(15, 18, 1, 1), result(15, 21, 1, 1))...)
-	rs = append(rs, pair("write", perfreport.Write, result(30, 45, 1, 1), result(30, 51, 1, 1))...)
-	rs = append(rs, pair("fanout", perfreport.FanOut, result(1000, 1500, 1, 1), result(1200, 2100, 1, 1))...)
-	rs = append(rs, pair("scaled", perfreport.Read, result(2, 3, 1, 1), result(6, 8, 1, 1))...)
-	v := perfreport.Evaluate(perfreport.Input{Head: rounds(rs...), History: calibrated("read", perfreport.Calibration-1, 15, 1)})
+func TestEvaluateReportsBaseRelativeTimingUntilCalibrated(t *testing.T) {
+	base := rounds(pair("read", perfreport.Read,
+		result(2, 3, 5, 100), result(10, 21, 5, 100))...)
+	head := rounds(pair("read", perfreport.Read,
+		result(2, 3, 5, 100), result(12.5, 25, 5, 100))...)
+	v := perfreport.Evaluate(perfreport.Input{
+		Head: head, Base: base, History: calibrated("read", perfreport.Calibration-1, 10, 0.1),
+	})
 	if len(v.Failures)+len(v.TimingFailures) != 0 {
-		t.Fatalf("uncalibrated timings blocked: %s%s", reasons(v.Failures), reasons(v.TimingFailures))
+		t.Fatalf("uncalibrated timing blocked: %s%s", reasons(v.Failures), reasons(v.TimingFailures))
 	}
-	got := reasons(v.Reported)
-	for _, want := range []string{
-		"read: p95 21.0 ms at 100x, budget 20 ms",
-		"write: p95 51.0 ms at 100x, budget 50 ms",
-		"fanout: p95 2100.0 ms at 100x, budget 2000 ms",
-		"scaled: p50 6.0 ms at 100x is 3.0x the 1x 2.0 ms",
-	} {
-		if !strings.Contains(got, want) {
-			t.Errorf("reported = %q, want %q", got, want)
-		}
+	if got := reasons(v.Reported); !strings.Contains(got, "read: p50 12.5 ms at 100x is 25% slower than main's 10.0 ms") {
+		t.Fatalf("reported = %q, want the uncalibrated base-relative regression", got)
 	}
 	if md := perfreport.Markdown(v); !strings.Contains(md, "calibrating 19/20") || !strings.Contains(md, "timing reported") {
 		t.Errorf("markdown = %s", md)
 	}
 }
 
-func TestEvaluateBlocksTimingsOnceCalibrated(t *testing.T) {
-	rs := pair("read", perfreport.Read, result(15, 18, 1, 1), result(15, 21, 1, 1))
-	v := perfreport.Evaluate(perfreport.Input{Head: rounds(rs...), History: calibrated("read", perfreport.Calibration, 15, 0.5)})
-	if got := reasons(v.TimingFailures); !strings.Contains(got, "read: p95 21.0 ms at 100x, budget 20 ms") {
-		t.Fatalf("timing failures = %q", got)
+func TestEvaluateWaivesScaleLimitsButChecksBaseRelativeTiming(t *testing.T) {
+	base := rounds(pair("read", perfreport.Read,
+		result(2, 3, 5, 100), result(10, 40, 5, 100))...)
+	head := rounds(pair("read", perfreport.Read,
+		result(2, 3, 5, 100), result(10.1, 44, 5, 100))...)
+	waivers := []perfreport.Waiver{{Scenario: "read", Check: perfreport.CheckTiming, Issue: "MAIN-2811"}}
+	v := perfreport.Evaluate(perfreport.Input{
+		Head: head, Base: base, History: calibrated("read", perfreport.Calibration, 10, 0.5), Waivers: waivers,
+	})
+	if got := reasons(v.TimingFailures); got != "" {
+		t.Fatalf("base-relative timing failed despite a 1%% p50 change: %s", got)
 	}
-	if len(v.Failures) != 0 {
-		t.Fatalf("a timing check counted as deterministic: %s", reasons(v.Failures))
+	if got := reasons(v.Reported); got != "" {
+		t.Fatalf("calibrated base-relative timing was reported as uncalibrated: %s", got)
 	}
-	if md := perfreport.Markdown(v); !strings.Contains(md, "±0.5 ms (20 runs)") {
-		t.Errorf("markdown = %s", md)
+	if len(v.Waived) != 2 {
+		t.Fatalf("waived = %+v, want the p95 budget and scale-ratio checks", v.Waived)
+	}
+}
+
+func TestEvaluateComparesMainTimingAgainstCalibratedHistory(t *testing.T) {
+	head := rounds(pair("read", perfreport.Read,
+		result(13, 15, 5, 100), result(13.5, 16, 5, 100))...)
+	v := perfreport.Evaluate(perfreport.Input{
+		Head: head, History: calibrated("read", perfreport.Calibration, 10, 0.5),
+	})
+	if got := reasons(v.TimingFailures); !strings.Contains(got, "read: p50 13.5 ms at 100x is 42% slower than main history's 9.5 ms") {
+		t.Fatalf("timing failures = %q, want main-history regression", got)
+	}
+}
+
+func TestEvaluateIgnoresHistoryWithoutMatchingFixtureVersion(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		version string
+	}{
+		{name: "missing provenance"},
+		{name: "different fixture", version: "fixture-old"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			head := rounds(pair("read", perfreport.Read,
+				result(13, 15, 5, 100), result(13.5, 16, 5, 100))...)
+			head[0] = withFixtureVersion(head[0], "fixture-current")
+			history := calibrated("read", perfreport.Calibration, 9.5, 0.5)
+			for i := range history {
+				history[i] = withFixtureVersion(history[i], tc.version)
+			}
+
+			v := perfreport.Evaluate(perfreport.Input{Head: head, History: history})
+			if len(v.TimingFailures) != 0 {
+				t.Fatalf("old fixture history caused timing failures: %s", reasons(v.TimingFailures))
+			}
+			if got := v.Rows[0].Runs; got != 0 {
+				t.Fatalf("calibrated history runs = %d, want no matching fixture history", got)
+			}
+		})
+	}
+}
+
+func TestAggregatePreservesFixtureVersion(t *testing.T) {
+	r := rounds(pair("read", perfreport.Read,
+		result(2, 3, 5, 100), result(2, 3, 5, 100))...)[0]
+	r = withFixtureVersion(r, "fixture-current")
+	raw, err := json.Marshal(perfreport.Aggregate([]perfreport.Report{r}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var aggregated struct {
+		FixtureVersion string `json:"fixture_version"`
+	}
+	if err := json.Unmarshal(raw, &aggregated); err != nil {
+		t.Fatal(err)
+	}
+	if aggregated.FixtureVersion != "fixture-current" {
+		t.Fatalf("fixture version = %q, want fixture-current", aggregated.FixtureVersion)
 	}
 }
 
@@ -175,8 +238,8 @@ func TestEvaluateWaivesKnownTimingChecksOnlyForNamedScenario(t *testing.T) {
 		Head: untrackedHead, History: calibrated(untracked, perfreport.Calibration, 2, 0.1), Waivers: waivers,
 	})
 	got := reasons(v.TimingFailures)
-	if !strings.Contains(got, "budget") || !strings.Contains(got, "the 1x") || len(v.TimingFailures) != 2 {
-		t.Fatalf("untracked timing failures = %q, want both budget and scale-ratio to block", got)
+	if !strings.Contains(got, "budget") || !strings.Contains(got, "the 1x") || !strings.Contains(got, "slower than main history") || len(v.TimingFailures) != 3 {
+		t.Fatalf("untracked timing failures = %q, want budget, scale-ratio and baseline checks to block", got)
 	}
 }
 
@@ -258,7 +321,7 @@ func TestParseWaiversRejectsUnwaivableChecks(t *testing.T) {
 	for _, raw := range []string{
 		`[{"scenario":"x","check":"regression","issue":"MAIN-1"}]`,
 		`[{"scenario":"x","check":"slower","issue":"MAIN-1"}]`,
-		`[{"scenario":"x","check":"budget"}]`,
+		`[{"scenario":"x","check":"timing"}]`,
 	} {
 		if _, err := perfreport.ParseWaivers([]byte(raw)); err == nil {
 			t.Errorf("%s was accepted", raw)
@@ -386,7 +449,7 @@ func TestEvaluateBlocksUnreadableOrEmptyHeadReport(t *testing.T) {
 		want string
 	}{
 		{"empty", perfreport.Report{Version: perfreport.Version}, "head report 1 has no results"},
-		{"old format", perfreport.Report{Version: perfreport.Version + 1, Results: pair("x", perfreport.Read, result(1, 1, 1, 1), result(1, 1, 1, 1))}, "head report 1 has format 2, want 1"},
+		{"old format", perfreport.Report{Version: perfreport.Version + 1, Results: pair("x", perfreport.Read, result(1, 1, 1, 1), result(1, 1, 1, 1))}, "head report 1 has format 3, want 2"},
 	} {
 		v := perfreport.Evaluate(perfreport.Input{Head: []perfreport.Report{tc.head}})
 		if got := reasons(v.Failures); !strings.Contains(got, tc.want) {
@@ -420,15 +483,30 @@ func TestEvaluateBlocksScenarioDroppedFromBase(t *testing.T) {
 func TestEvaluateBlocksRequiredScenarioMissingFromHarness(t *testing.T) {
 	head := report(pair("help.getConfig", perfreport.Read, result(1, 1, 1, 1), result(1, 1, 1, 1))...)
 	head.Scenarios = []string{"help.getConfig"}
-	v := perfreport.Evaluate(perfreport.Input{Head: []perfreport.Report{head}, Required: []string{"help.getConfig", "contacts.importContacts 5000"}})
+	v := perfreport.Evaluate(perfreport.Input{Head: []perfreport.Report{head}, Required: []string{"help.getConfig", "messages.getDialogs"}})
 	got := reasons(v.Failures)
 	for _, want := range []string{
-		"contacts.importContacts 5000: required, but the harness does not run it",
-		"contacts.importContacts 5000: no 1x measurement",
+		"messages.getDialogs: required, but the harness does not run it",
+		"messages.getDialogs: no 1x measurement",
 	} {
 		if !strings.Contains(got, want) {
 			t.Errorf("failures = %q, want %q", got, want)
 		}
+	}
+}
+
+func TestEvaluateOmitsBaseScenarioRetiredFromRequiredManifest(t *testing.T) {
+	const retired = "contacts.importContacts 5000"
+	head := report(pair("help.getConfig", perfreport.Read, result(1, 1, 1, 1), result(1, 1, 1, 1))...)
+	head.Scenarios = []string{"help.getConfig"}
+	base := report(pair(retired, perfreport.Write, result(1, 1, 1, 1), result(1, 1, 1, 1))...)
+	base.Scenarios = []string{retired}
+
+	got := perfreport.Markdown(perfreport.Evaluate(perfreport.Input{
+		Head: []perfreport.Report{head}, Base: []perfreport.Report{base}, Required: []string{"help.getConfig"},
+	}))
+	if strings.Contains(got, retired) {
+		t.Fatalf("report contains retired scenario %q:\n%s", retired, got)
 	}
 }
 

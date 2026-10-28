@@ -73,7 +73,9 @@ func TestRPCPerformance(t *testing.T) {
 		t.Fatal(err)
 	}
 	only := os.Getenv("TG_PERF_ONLY")
-	rep := perfreport.Report{Version: perfreport.Version, Filter: only}
+	rep := perfreport.Report{
+		Version: perfreport.Version, FixtureVersion: os.Getenv("TG_PERF_FIXTURE_VERSION"), Filter: only,
+	}
 	for _, sc := range scenarios() {
 		if only == "" || strings.Contains(sc.name, only) {
 			rep.Scenarios = append(rep.Scenarios, sc.name)

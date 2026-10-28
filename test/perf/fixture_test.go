@@ -36,7 +36,7 @@ import (
 
 // fixtureVersion changes whenever the seeded shape changes, so a cached dump
 // of an older shape is never measured as if it were this one.
-const fixtureVersion = 4
+const fixtureVersion = 5
 
 // spec is one fixture size. The small fixture uses one hundredth of the large
 // fixture's scalable data, subject to its Store's per-account contact cap.
@@ -51,10 +51,9 @@ type spec struct {
 	DayEvents     int    `json:"day_events"`
 }
 
-// The address book and the group's membership stay the same size in both
-// fixtures: they are request shape, not account size.
+// The group's membership stays the same size in both fixtures: it is a fixed
+// request shape, not account size.
 const (
-	bookSize     = 5000
 	groupMembers = 100
 	needleEvery  = 1000
 )
@@ -78,7 +77,7 @@ func shrink() int {
 func scaled(name string, divisor int) spec {
 	return spec{
 		Name:          name,
-		Contacts:      min(10_000/divisor, contactCap),
+		Contacts:      min(contactCap, max(groupMembers, 10_000/divisor)),
 		Dialogs:       5_000 / divisor,
 		ChatMessages:  1_000_000 / divisor,
 		Subscribers:   100_000 / divisor,
@@ -88,32 +87,41 @@ func scaled(name string, divisor int) spec {
 	}
 }
 
-func TestFixtureContactsRespectStoreLimit(t *testing.T) {
+func TestFixtureContactsRespectPerformanceStoreLimit(t *testing.T) {
 	small := scaled("1x", 100)
 	large := scaled("100x", 1)
-	if want := min(100, store.MaxContactsPerUser); small.Contacts != want {
+	if want := min(groupMembers, contactCap); small.Contacts != want {
 		t.Fatalf("1x fixture contacts = %d, want %d", small.Contacts, want)
 	}
-	if want := min(10_000, store.MaxContactsPerUser); large.Contacts != want {
+	if want := min(10_000, contactCap); large.Contacts != want {
 		t.Fatalf("100x fixture contacts = %d, want capped value %d", large.Contacts, want)
+	}
+}
+
+func TestFixtureContactsStayWithinAccountBounds(t *testing.T) {
+	for _, fixture := range fixtures {
+		if fixture.Contacts < groupMembers {
+			t.Errorf("%s contacts = %d, want at least %d for group membership", fixture.Name, fixture.Contacts, groupMembers)
+		}
+		if fixture.Contacts > contactCap {
+			t.Errorf("%s contacts = %d, performance store limit = %d", fixture.Name, fixture.Contacts, contactCap)
+		}
 	}
 }
 
 // fixture is what the seeder leaves for the harness: the ids every scenario
 // addresses. It is written next to the database dump and cached with it.
 type fixture struct {
-	Version      int      `json:"version"`
-	Spec         spec     `json:"spec"`
-	Owner        int64    `json:"owner"`
-	Partner      int64    `json:"partner"`
-	Subscriber   int64    `json:"subscriber"`
-	Channel      int64    `json:"channel"`
-	Group        int64    `json:"group"`
-	Contacts     []int64  `json:"contacts"`
-	BookPhones   []string `json:"book_phones"`
-	BookUsers    []int64  `json:"book_users"`
-	OldestChatID int      `json:"oldest_chat_id"`
-	MiddleDate   int      `json:"middle_date"`
+	Version      int     `json:"version"`
+	Spec         spec    `json:"spec"`
+	Owner        int64   `json:"owner"`
+	Partner      int64   `json:"partner"`
+	Subscriber   int64   `json:"subscriber"`
+	Channel      int64   `json:"channel"`
+	Group        int64   `json:"group"`
+	Contacts     []int64 `json:"contacts"`
+	OldestChatID int     `json:"oldest_chat_id"`
+	MiddleDate   int     `json:"middle_date"`
 }
 
 func fixtureDSN(s spec) (string, bool) {
@@ -155,19 +163,19 @@ func loadFixture(path string) (fixture, error) {
 	return f, nil
 }
 
-func TestContactCapIncludesSeedAndBook(t *testing.T) {
-	if got, want := contactCap, 10_000+bookSize; got < want {
-		t.Fatalf("performance store contact cap = %d, want at least %d for seeded and imported contacts", got, want)
+func TestContactCapIncludesSeededContacts(t *testing.T) {
+	if got, want := contactCap, 10_000; got < want {
+		t.Fatalf("performance store contact cap = %d, want at least %d for seeded contacts", got, want)
 	}
 }
 
 func TestLoadFixtureRejectsOlderVersion(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "fixture.json")
-	if err := os.WriteFile(path, []byte(`{"version":3}`), 0o600); err != nil {
+	if err := os.WriteFile(path, []byte(`{"version":4}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := loadFixture(path); err == nil || !strings.Contains(err.Error(), "fixture version 3, want 4") {
-		t.Fatalf("loadFixture error = %v, want fixture version 3 mismatch", err)
+	if _, err := loadFixture(path); err == nil || !strings.Contains(err.Error(), "fixture version 4, want 5") {
+		t.Fatalf("loadFixture error = %v, want fixture version 4 mismatch", err)
 	}
 }
 
@@ -229,11 +237,6 @@ func seed(t *testing.T, ctx context.Context, dsn, blobs string, s spec) fixture 
 	f.Contacts = createUsers(t, ctx, st, "+1991", s.Contacts, true)
 	subscribers := createUsers(t, ctx, st, "+1992", s.Subscribers, false)
 	f.Subscriber = subscribers[0]
-	f.BookUsers = createUsers(t, ctx, st, "+1993", bookSize, false)
-	for i := range bookSize {
-		f.BookPhones = append(f.BookPhones, phone("+1993", i))
-	}
-
 	channel, err := st.CreateChannel(ctx, owner, "Perf Channel", "", false)
 	if err != nil {
 		t.Fatalf("create channel: %v", err)

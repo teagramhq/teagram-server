@@ -12,7 +12,7 @@ import (
 )
 
 const (
-	appConfigHash       = 7
+	appConfigHash       = 8
 	emptyWallPapersHash = 1
 	emptyChatThemesHash = 1
 )
@@ -98,6 +98,51 @@ func (h *handlers) handleGetAppConfig(r *mtproto.Request) (bin.Encoder, error) {
 		Key:   "chat_read_mark_size_threshold",
 		Value: &tg.JSONNumber{Value: store.ChatReadMarkSizeThreshold},
 	}, {
+		Key:   "username_min_length",
+		Value: &tg.JSONNumber{Value: usernameMinLength},
+	}, {
+		Key:   "username_max_length",
+		Value: &tg.JSONNumber{Value: usernameMaxLength},
+	}, {
+		Key:   "username_pattern",
+		Value: &tg.JSONString{Value: usernamePattern},
+	}, {
+		Key:   "display_name_max_length",
+		Value: &tg.JSONNumber{Value: maxSignUpNameCodePoints},
+	}, {
+		Key:   "bio_max_length",
+		Value: &tg.JSONNumber{Value: maxProfileAboutRunes},
+	}, {
+		Key:   "group_title_min_length",
+		Value: &tg.JSONNumber{Value: minChatTitle},
+	}, {
+		Key:   "group_title_max_length",
+		Value: &tg.JSONNumber{Value: maxChatTitle},
+	}, {
+		Key:   "group_about_max_length",
+		Value: &tg.JSONNumber{Value: maxChatAbout},
+	}, {
+		Key:   "channel_title_min_length",
+		Value: &tg.JSONNumber{Value: minChatTitle},
+	}, {
+		Key:   "channel_title_max_length",
+		Value: &tg.JSONNumber{Value: maxChatTitle},
+	}, {
+		Key:   "channel_about_max_length",
+		Value: &tg.JSONNumber{Value: maxChannelAbout},
+	}, {
+		Key:   "message_max_length",
+		Value: &tg.JSONNumber{Value: messageLengthMax},
+	}, {
+		Key:   "caption_max_length",
+		Value: &tg.JSONNumber{Value: captionLengthMax},
+	}, {
+		Key:   "upload_max_part_bytes",
+		Value: &tg.JSONNumber{Value: store.MaxPartBytes},
+	}, {
+		Key:   "upload_max_file_bytes",
+		Value: &tg.JSONNumber{Value: float64(h.maxFileBytes)},
+	}, {
 		Key:   "upload_max_fileparts_default",
 		Value: &tg.JSONNumber{Value: float64(h.maxFileParts())},
 	}, {
@@ -137,12 +182,6 @@ func (h *handlers) handleGetAppConfig(r *mtproto.Request) (bin.Encoder, error) {
 		Key:   "reactions_user_max_premium",
 		Value: &tg.JSONNumber{Value: 1},
 	}}
-	if h.appConfigUploadMaxFileBytes > 0 {
-		values = append(values, tg.JSONObjectValue{
-			Key:   "upload_max_file_bytes",
-			Value: &tg.JSONNumber{Value: float64(h.appConfigUploadMaxFileBytes)},
-		})
-	}
 	if h.turnstileSiteKey != "" && h.turnstileVerifier != nil {
 		values = append(values, tg.JSONObjectValue{
 			Key: "turnstile",
@@ -153,7 +192,7 @@ func (h *handlers) handleGetAppConfig(r *mtproto.Request) (bin.Encoder, error) {
 		})
 	}
 	return &tg.HelpAppConfig{
-		Hash:   appConfigHashForUploadLimit(h.appConfigUploadMaxFileBytes),
+		Hash:   appConfigHashForUploadLimit(h.maxFileBytes),
 		Config: &tg.JSONObject{Value: values},
 	}, nil
 }

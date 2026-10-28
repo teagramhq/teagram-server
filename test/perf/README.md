@@ -1,11 +1,12 @@
 # RPC performance harness
 
 Measures every RPC desktop and web send at startup and in normal use against
-an in-process teagramd on two fixtures: the scale account (10,000 contacts,
+an in-process teagramd on two fixtures: the scale account (5,000 contacts,
 5,000 dialogs, a 1,000,000-message private chat, a 100,000-subscriber channel
-and a 200,000-message group with photos) and the same account at one hundredth
-of the data. Both are seeded through the store's write methods and the RPC
-upload path.
+and a 200,000-message group with photos) and a smaller account with scaled
+data. The small fixture keeps at least 100 contacts for group membership, and
+both fixtures stay within the server's contact limit. Both are seeded through
+the store's write methods and the RPC upload path.
 
 The fixture owner can sign in with username `perftestowner` and password
 `perf-fixture-password-2026`. These fixed credentials exist only in this test
@@ -45,11 +46,14 @@ table above 10,000 rows.
   branch, the same statement count at 1x and 100x, rows read at 100x within 1.5x
   of 1x, no sequential scan, no statement Postgres cannot EXPLAIN, no failed
   scenario.
-- Reported on every run, blocking once 20 `main` runs have given the scenario a
-  noise band: p95 within budget (reads 20 ms, writes 50 ms, fan-out 2 s),
-  p50 at 100x within 1.5x of 1x, and a median no slower than base by more than
-  max(15%, 3 standard deviations) and 2 ms. A timing failure is measured once
-  more before it counts.
+- Reported on every run: p95 budgets (reads 20 ms, writes 50 ms, fan-out 2 s)
+  and the 1x/100x p50 ratio. After 20 `main` runs, these checks block unless a
+  scenario has a `timing` waiver. Independently, p50 regressions compare with
+  the interleaved base or calibrated `main` history from the same fixture
+  version and remain blocking even when a scenario has a timing waiver. That
+  regression must exceed max(15%, 3
+  standard deviations) and 2 ms. A timing failure is measured once more before
+  it counts.
 
 `required_scenarios.json` lists the scenarios the gate must see measured on
 both fixtures. It is kept apart from the harness on purpose: a scenario dropped
@@ -73,7 +77,9 @@ public release already exists. A published release is left unchanged, while
 an existing draft is resumed for publication. PRs prefer that snapshot, reuse
 the legacy cache for measurement only, or seed fixtures on their branch when
 neither cache is available; they then measure the base and head interleaved.
-If the fixture seeder changed, the head is measured without a base comparison.
+Reports carry the fixture version, and only matching versions contribute to
+main's timing history. If the fixture seeder changed, the head is measured
+without a base comparison.
 
 The provenance sidecar records the commit that seeded the dump. It is cache
 metadata, not a fixture asset. Each `main` run also publishes the snapshot as a
