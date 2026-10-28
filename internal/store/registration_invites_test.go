@@ -16,6 +16,34 @@ import (
 	"github.com/teagramhq/teagram-server/internal/store"
 )
 
+func TestRegistrationInviteHistoryLookupIndexes(t *testing.T) {
+	t.Parallel()
+	s := open(t)
+	ctx := context.Background()
+
+	for _, tc := range []struct {
+		name   string
+		column string
+	}{
+		{name: "registration_invites_inviter_user_id_idx", column: "inviter_user_id"},
+		{name: "registration_invites_consumed_by_user_id_idx", column: "consumed_by_user_id"},
+	} {
+		var definition string
+		if err := store.StorePool(s).QueryRow(ctx,
+			`SELECT indexdef
+			   FROM pg_indexes
+			  WHERE schemaname = current_schema()
+			    AND tablename = 'registration_invites'
+			    AND indexname = $1`, tc.name,
+		).Scan(&definition); err != nil {
+			t.Fatalf("read %s: %v", tc.name, err)
+		}
+		if !strings.Contains(definition, "("+tc.column+")") {
+			t.Errorf("index %s definition = %q, want column %s", tc.name, definition, tc.column)
+		}
+	}
+}
+
 func TestIssueInviteStoresOnlyDigestAndCanonicalizesHandle(t *testing.T) {
 	t.Parallel()
 	s := open(t)
