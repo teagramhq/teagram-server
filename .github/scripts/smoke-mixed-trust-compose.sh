@@ -228,6 +228,10 @@ docker compose --project-name "$project" --env-file .env --env-file "$env_file" 
 	-f docker-compose.yml config --format json > "$compose_default_json"
 compose_base config --format json > "$work_dir/legacy-compose.json"
 compose_public config --format json > "$work_dir/public-compose.json"
+python3 -B deploy/teagramd/rollout-runner/public-websocket-check.py \
+	--haproxy-config deploy/teagramd/haproxy-public-websocket.cfg \
+	--host-port "${mixed_ports[4]}" \
+	< "$work_dir/public-compose.json"
 
 python3 - "$compose_default_json" "$work_dir/legacy-compose.json" "$work_dir/public-compose.json" "${mixed_ports[4]}" <<'PY'
 import json
@@ -267,6 +271,7 @@ base = services["teagramd"]
 proxy = services["public-haproxy"]
 assert public["networks"]["public-ingress"].get("internal", False) is False
 assert base["environment"]["TG_PUBLIC_WEBSOCKET_LISTEN_ADDR"] == ""
+assert base["environment"]["TG_REPLICA_COUNT"] == "1"
 assert base["environment"]["TG_RATE_LIMIT_KEY_EXCHANGE_IP"] == ""
 assert not any(str(port.get("target")) == "2446" for port in base.get("ports", []))
 assert proxy["image"].split("@sha256:")[-1] and "@sha256:" in proxy["image"]

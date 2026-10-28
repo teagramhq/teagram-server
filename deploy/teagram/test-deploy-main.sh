@@ -87,22 +87,9 @@ for file in rollout-runner.sh rollout-verifier.sh schema-result-gate.sh schema-r
   fi
 done
 git -C "$DEPLOY_DIR" merge --ff-only -q "$2"
-if [[ "${ROLLOUT_RUNNER_ADDED_ENV:-}" == TG_REPLICA_COUNT ]]; then
-  [[ -z "${ROLLOUT_RUNNER_CHANGED_ENV:-}" && \
-    "${ROLLOUT_RUNNER_PREVIOUS_ENV_FILE:-}" == "$DEPLOY_ROOT"/teagramd-env-before-* ]] &&
-    ! grep -q '^TG_REPLICA_COUNT=' "$ROLLOUT_RUNNER_PREVIOUS_ENV_FILE" &&
-    grep -Fqx 'TG_REPLICA_COUNT=3' "$DEPLOY_DIR/.env" || {
-      echo 'runner did not receive the named replica-count addition and previous .env backup' >&2
-      exit 96
-    }
-elif [[ "${ROLLOUT_RUNNER_CHANGED_ENV:-}" == TG_REPLICA_COUNT ]]; then
-  [[ -z "${ROLLOUT_RUNNER_ADDED_ENV:-}" && \
-    "${ROLLOUT_RUNNER_PREVIOUS_ENV_FILE:-}" == "$DEPLOY_ROOT"/teagramd-env-before-* ]] &&
-    grep -Fqx 'TG_REPLICA_COUNT=1' "$ROLLOUT_RUNNER_PREVIOUS_ENV_FILE" &&
-    grep -Fqx 'TG_REPLICA_COUNT=3' "$DEPLOY_DIR/.env" || {
-      echo 'runner did not receive the pre-change replica-count backup' >&2
-      exit 96
-    }
+if [[ -n "${ROLLOUT_RUNNER_ADDED_ENV:-}${ROLLOUT_RUNNER_CHANGED_ENV:-}${ROLLOUT_RUNNER_PREVIOUS_ENV_FILE:-}" ]]; then
+  echo 'public WebSocket rollout must not stage or change the base replica count' >&2
+  exit 96
 fi
 image_id=${FIXTURE_POST_IMAGE_ID:-sha256:fixture}
 printf 'source_sha=%s image_id=%s built_at=fixture\n' "$2" "$image_id" \
@@ -168,6 +155,7 @@ third=$(commit third)
 git -C "$tmp/work" push -q "$tmp/origin.git" main
 git -C "$tmp/live" reset -q --hard "$second"
 printf 'TG_RSA_KEY_FINGERPRINT=12345\n' > "$tmp/live/.env"
+cp "$tmp/live/.env" "$tmp/expected-initial-env"
 printf 'fixture dump\n' > "$tmp/live/pgdump-fixture.sql"
 printf 'fixture evidence\n' > "$tmp/live/rollout-evidence.txt"
 chmod 640 "$tmp/live/.env"
@@ -296,20 +284,18 @@ fi
 printf 'sha256:already-deployed\n' > "$DEPLOY_IMAGE_ID_FILE"
 echo "source_sha=$second image_id=sha256:already-deployed built_at=fixture" > "$tmp/root/main1238-fixture.build/built-image.identity"
 : > "$DEPLOY_ACTION_LOG"
-expect 0 "deployed $second" --contains 'runner exit 0' DEPLOY_SHA="$second" \
+expect 0 "already at $second with runner provenance" DEPLOY_SHA="$second" \
   FIXTURE_DEPLOY_SUCCESS=1 FIXTURE_POST_IMAGE_ID=sha256:already-deployed \
   FIXTURE_SMOKE_IMAGE_ID=sha256:already-deployed
-if [[ "$(grep -c '^TG_REPLICA_COUNT=3$' "$tmp/live/.env")" != 1 || "$(stat -c '%a' "$tmp/live/.env")" != 600 ]]; then
-  echo 'FAIL deployment did not stage TG_REPLICA_COUNT=3 in a mode-0600 .env' >&2
+if ! cmp -s "$tmp/expected-initial-env" "$tmp/live/.env" || [[ "$(stat -c '%a' "$tmp/live/.env")" != 640 ]]; then
+  echo 'FAIL deployment changed the base .env while enabling public replicas' >&2
   failures=$((failures + 1))
 fi
-mapfile -t count_backups < <(find "$tmp/root" -maxdepth 1 -type f -name "teagramd-env-before-${second:0:7}-*" -print)
-if [[ "${#count_backups[@]}" != 1 || "$(stat -c '%a' "${count_backups[0]:-missing}")" != 600 ]] || \
-  grep -q '^TG_REPLICA_COUNT=' "${count_backups[0]:-missing}"; then
-  echo 'FAIL deployment did not keep the previous unset replica count in one mode-0600 backup' >&2
+if find "$tmp/root" -maxdepth 1 -type f -name "teagramd-env-before-${second:0:7}-*" -print -quit | grep -q .; then
+  echo 'FAIL deployment created an unnecessary base .env backup for public replicas' >&2
   failures=$((failures + 1))
 fi
-if [[ "$(cat "$DEPLOY_ACTION_LOG")" != $'readiness\nlink-edge\nmtproto-smoke sha256:already-deployed' ]]; then
+if [[ "$(cat "$DEPLOY_ACTION_LOG")" != $'link-edge\nmtproto-smoke sha256:already-deployed' ]]; then
   echo 'FAIL an already deployed server SHA did not run the host-side smoke after the link edge' >&2
   failures=$((failures + 1))
 fi
@@ -361,6 +347,7 @@ expect 99 "unexpected docker call: compose exec -T postgres pg_dump -U postgres 
 # A newer commit on main deploys.
 expect 99 "unexpected docker call: compose exec -T postgres pg_dump -U postgres teagram" DEPLOY_SHA="$third"
 printf 'TG_RSA_KEY_FINGERPRINT=12345\nTG_REPLICA_COUNT=1\n' > "$tmp/live/.env"
+cp "$tmp/live/.env" "$tmp/expected-single-replica-env"
 chmod 600 "$tmp/live/.env"
 mkdir -p "$tmp/root/teagramd-rollout-runner"
 printf 'stale qualifier fixture\n' > "$tmp/root/teagramd-rollout-runner/qualify-rustfs-transition.py"
@@ -377,10 +364,9 @@ if [[ "$(tail -n 1 "$LINK_EDGE_DEPLOY_LOG")" != "$third" ]]; then
   echo 'FAIL a successful server rollout did not refresh the link edge at the same SHA' >&2
   failures=$((failures + 1))
 fi
-mapfile -t changed_count_backups < <(find "$tmp/root" -maxdepth 1 -type f -name "teagramd-env-before-${third:0:7}-*" -print)
-if [[ "${#changed_count_backups[@]}" != 1 || "$(stat -c '%a' "${changed_count_backups[0]:-missing}")" != 600 ]] || \
-  ! grep -Fqx 'TG_REPLICA_COUNT=1' "${changed_count_backups[0]:-missing}"; then
-  echo 'FAIL deployment did not keep the literal prior replica count for the named change path' >&2
+if ! cmp -s "$tmp/expected-single-replica-env" "$tmp/live/.env" || \
+  ! grep -Fqx 'TG_REPLICA_COUNT=1' "$tmp/live/.env" || [[ "$(stat -c '%a' "$tmp/live/.env")" != 600 ]]; then
+  echo 'FAIL deployment changed the single-replica base environment' >&2
   failures=$((failures + 1))
 fi
 if [[ "$(stat -c '%a' "$tmp/live/tracked.txt")" != 644 || \
@@ -395,8 +381,8 @@ if [[ "$local_files_after" != "$local_files_before" ]]; then
   echo 'FAIL untracked host-local file owners or modes changed after rollout' >&2
   failures=$((failures + 1))
 fi
-if [[ "$(grep -c '^TG_REPLICA_COUNT=3$' "$tmp/live/.env")" != 1 || "$(stat -c '%a' "$tmp/live/.env")" != 600 ]]; then
-  echo 'FAIL later rollouts did not preserve the staged replica count and protected .env mode' >&2
+if [[ "$(grep -c '^TG_REPLICA_COUNT=1$' "$tmp/live/.env")" != 1 || "$(stat -c '%a' "$tmp/live/.env")" != 600 ]]; then
+  echo 'FAIL later rollouts changed the protected base replica count or .env mode' >&2
   failures=$((failures + 1))
 fi
 

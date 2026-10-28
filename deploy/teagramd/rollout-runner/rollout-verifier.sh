@@ -71,8 +71,6 @@ verify_added_container_environment() {
               ($compose_env[$runtime_name] | type) == "string" and
               ($actual | length) == 1 and
               $actual[0] == $compose_env[$runtime_name] and
-              ($name != "TG_REPLICA_COUNT" or
-                (dotenv_value($assignments[0]) == "3" and $compose_env[$runtime_name] == "3" and $actual[0] == "3")) and
               (($name | IN(
                 "TG_PUBLIC_WEBSOCKET_LISTEN_ADDR", "TG_PUBLIC_WEBSOCKET_ADVERTISE_ADDR",
                 "TG_PUBLIC_REGISTRATION", "TG_PUBLIC_WEBSOCKET_ALLOWED_ORIGINS"
@@ -129,18 +127,6 @@ verify_changed_container_environment() {
                 (if $snapshot_name == "baseline" or $snapshot_name == "preflight"
                  then $actual[0] == $previous_override_value
                  else $actual[0] == $compose_env[$name] end)
-              elif $name == "TG_REPLICA_COUNT" then
-                ($assignments | length) == 1 and
-                ($compose_env | has($name)) and
-                ($compose_env[$name] == dotenv_value($assignments[0])) and
-                ($actual | length) == 1 and
-                (if ($snapshot_name | IN("baseline", "preflight")) then
-                   dotenv_value($assignments[0]) == "3" and $actual[0] == "1"
-                 elif $snapshot_name == "target" then
-                   dotenv_value($assignments[0]) == "3" and $actual[0] == "3"
-                 elif $snapshot_name == "rollback" then
-                   dotenv_value($assignments[0]) == "1" and $actual[0] == "1"
-                 else false end)
               else
                 (($name == "TG_REGISTRATION" and (dotenv_value($assignments[0]) | IN("open","closed"))) or
                  ($name == "TG_TURNSTILE_SIGNIN_ENABLED" and ($assignments[0] | IN("true","false"))) or
@@ -954,10 +940,6 @@ snapshot_from_json() {
   if [ "$compose_source" = selected-compose-render ] && [ "$snapshot_name" = target ]; then
     verify_added_container_environment "$inspect_json" "$compose_json" "$env_file" "$added_env_names" || return 1
     verify_changed_container_environment "$inspect_json" "$compose_json" "$env_file" "$changed_env_names" "$snapshot_name" || return 1
-  elif [ "$compose_source" = selected-compose-render ] && \
-       { [ "$snapshot_name" = baseline ] || [ "$snapshot_name" = preflight ]; } && \
-       [ "$changed_env_names" = '["TG_REPLICA_COUNT"]' ]; then
-    verify_changed_container_environment "$inspect_json" "$compose_json" "$env_file" "$changed_env_names" "$snapshot_name" || return 1
   elif [ "$compose_source" = selected-compose-render ] && [ "$snapshot_name" = rollback ]; then
     retained_added_env_names=$(printf '%s' "$inspect_json" | jq -c --argjson added "$added_env_names" '
       def item: if type == "array" then .[0] else . end;
@@ -969,8 +951,7 @@ snapshot_from_json() {
        | select(IN(
            "TG_TURNSTILE_SITE_KEY=", "TG_TURNSTILE_SECRET_KEY_FILE=", "TG_TURNSTILE_SIGNIN_ENABLED=false",
            "TG_PUBLIC_WEBSOCKET_LISTEN_ADDR=", "TG_PUBLIC_WEBSOCKET_ADVERTISE_ADDR=",
-           "TG_PUBLIC_REGISTRATION=closed", "TG_PUBLIC_WEBSOCKET_ALLOWED_ORIGINS=",
-           "TG_REPLICA_COUNT=1"
+           "TG_PUBLIC_REGISTRATION=closed", "TG_PUBLIC_WEBSOCKET_ALLOWED_ORIGINS="
          ) | not)
        | split("=")[0]] as $keys
       | [$added[] | select(. as $name | ($name | runtime_name($name)) as $runtime | any($keys[]; . == $runtime))]
@@ -1378,25 +1359,9 @@ record_comparison() {
   return 0
 }
 
-replica_count_addition_is_named() {
-  local name
-  local -a requested
-  IFS=, read -r -a requested <<< "${ROLLOUT_ADDED_ENV:-}"
-  for name in "${requested[@]}"; do
-    [ "$name" = TG_REPLICA_COUNT ] && return 0
-  done
-  return 1
-}
-
 record_ordinary_setting() {
   local output=$1 field=$2 before=$3 after=$4 expected=$5 result
   if { [ "$before" = unset ] || [ "$before" = "$expected" ]; } && [ "$after" = "$expected" ]; then
-    result=pass
-  elif [[ "$field" == *TG_REPLICA_COUNT ]] && [ "${ROLLOUT_CHANGED_ENV:-}" = TG_REPLICA_COUNT ] && \
-      [ "$after" = 3 ] && { [ "$before" = 1 ] || [ "$before" = 3 ]; }; then
-    result=pass
-  elif [[ "$field" == *TG_REPLICA_COUNT ]] && replica_count_addition_is_named && \
-      [ "$after" = 3 ] && { [ "$before" = 1 ] || [ "$before" = 3 ]; }; then
     result=pass
   else
     result=fail

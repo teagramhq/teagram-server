@@ -4,7 +4,7 @@ umask 077
 
 SCRIPT_DIR=$(cd -P "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 SCRIPT_SOURCE="$SCRIPT_DIR/$(basename "${BASH_SOURCE[0]}")"
-readonly APPROVED_VERIFIER_SHA=d7afb50b8aba36c5dabc04f2b23f89143a1e94cd429f6976cdc860cccb727c4b
+readonly APPROVED_VERIFIER_SHA=bc5ee89f2803a364d7e150421d2dce5926240b5998d349efc630dd5a79081630
 readonly APPROVED_SCHEMA_GATE_SHA=ac54d3cf0480383a52414a8bc8b856b5e1d5f6f8d19034c9c576c64627e097c8
 readonly APPROVED_SCHEMA_GATE_HELPER_SHA=7ae06c2872c60b434068b3715a9ddd5e19b03d4be98dc9881c8dd8f294953d41
 readonly APPROVED_INITIAL_LOCAL_COMPOSE_SHA=d764d291ad2ea91cff841d14a0cd2bbcb5981961dbc67406bfeba1196a7b3fa4
@@ -1299,10 +1299,6 @@ validate_baseline() {
 
 protected_env_name() {
   case "$1" in
-    TG_REPLICA_COUNT)
-      [ "${ROLLOUT_RUNNER_PUBLIC_WEBSOCKET:-0}" != 1 ] && return 0
-      return 1
-      ;;
     TG_RSA_KEY_*|TG_AUTHKEY_ENC_KEY*|TG_POSTGRES_*|POSTGRES_*|TG_BLOB_*|RUSTFS_*|TG_REPLICA_*|TG_CLIENT_ADDR_TRUST|COMPOSE_*|DOCKER_*) return 0 ;;
   esac
   return 1
@@ -1335,32 +1331,6 @@ public_env_addition_requested() {
   return 1
 }
 
-replica_count_addition_requested() {
-  local name
-  local -a requested
-  [ "${ROLLOUT_RUNNER_PUBLIC_WEBSOCKET:-0}" = 1 ] && [ -n "$ADDED_ENV" ] || return 1
-  IFS=, read -r -a requested <<< "$ADDED_ENV"
-  for name in "${requested[@]}"; do
-    [ "$name" = TG_REPLICA_COUNT ] && return 0
-  done
-  return 1
-}
-
-replica_count_change_requested() {
-  [ "$CHANGED_ENV" = TG_REPLICA_COUNT ]
-}
-
-read_replica_count_from_env() {
-  awk -F= '
-    $1 == "TG_REPLICA_COUNT" { count++; value=$2 }
-    END {
-      if (count == 0) print "unset"
-      else if (count > 1) print "duplicate"
-      else print value
-    }
-  ' "$ENV_FILE"
-}
-
 changed_websocket_origins_requested() {
   local name
   local -a requested
@@ -1375,8 +1345,7 @@ changed_websocket_origins_requested() {
 restore_previous_env_for_named_changes() {
   local env_dir temp
   [ "$CHANGED_ENV_SOURCE" != override ] || return 0
-  public_env_addition_requested || replica_count_addition_requested || \
-    changed_websocket_origins_requested || replica_count_change_requested || return 0
+  public_env_addition_requested || changed_websocket_origins_requested || return 0
   [ -n "$PREVIOUS_ENV_FILE" ] && [ -f "$PREVIOUS_ENV_FILE" ] && [ ! -L "$PREVIOUS_ENV_FILE" ] && \
     [ "$(stat -c %a -- "$PREVIOUS_ENV_FILE")" = 600 ] && [ "$(stat -c %u -- "$PREVIOUS_ENV_FILE")" = 0 ] || {
     fail 'named environment rollback requires the root-owned mode-0600 previous .env'
@@ -1716,7 +1685,7 @@ validate_env_baseline() {
       for name in "${requested[@]}"; do
         [[ "$name" =~ ^[A-Z][A-Z0-9_]*$ ]] || { fail 'environment value changes must be upper-case variable names'; return 1; }
         case "$name" in
-          TG_REGISTRATION|TG_TURNSTILE_SIGNIN_ENABLED|TG_WEBSOCKET_ALLOWED_ORIGINS|TG_PUBLIC_WEBSOCKET_LISTEN_ADDR|TG_PUBLIC_WEBSOCKET_ADVERTISE_ADDR|TG_PUBLIC_REGISTRATION|TG_PUBLIC_WEBSOCKET_ALLOWED_ORIGINS|TG_REPLICA_COUNT) ;;
+          TG_REGISTRATION|TG_TURNSTILE_SIGNIN_ENABLED|TG_WEBSOCKET_ALLOWED_ORIGINS|TG_PUBLIC_WEBSOCKET_LISTEN_ADDR|TG_PUBLIC_WEBSOCKET_ADVERTISE_ADDR|TG_PUBLIC_REGISTRATION|TG_PUBLIC_WEBSOCKET_ALLOWED_ORIGINS) ;;
           *) fail "environment value change $name is not an approved setting"; return 1 ;;
         esac
         change_names+="$name "
@@ -1765,7 +1734,6 @@ validate_env_baseline() {
             TG_REGISTRATION:closed:open|TG_REGISTRATION:open:closed) ;;
             TG_TURNSTILE_SIGNIN_ENABLED:false:true|TG_TURNSTILE_SIGNIN_ENABLED:true:false) ;;
             TG_PUBLIC_REGISTRATION:closed:invite|TG_PUBLIC_REGISTRATION:invite:closed) ;;
-            TG_REPLICA_COUNT:1:3) ;;
             TG_PUBLIC_WEBSOCKET_LISTEN_ADDR:*) [ "$old_value" != "$new_value" ] || { fail 'TG_PUBLIC_WEBSOCKET_LISTEN_ADDR change must change the value'; return 1; } ;;
             TG_PUBLIC_WEBSOCKET_ADVERTISE_ADDR:*) [ "$old_value" != "$new_value" ] || { fail 'TG_PUBLIC_WEBSOCKET_ADVERTISE_ADDR change must change the value'; return 1; } ;;
             TG_PUBLIC_WEBSOCKET_ALLOWED_ORIGINS:*) [ "$old_value" != "$new_value" ] || { fail 'TG_PUBLIC_WEBSOCKET_ALLOWED_ORIGINS change must change the value'; return 1; } ;;
@@ -1773,7 +1741,6 @@ validate_env_baseline() {
             TG_REGISTRATION:*) fail 'TG_REGISTRATION may change only between closed and open'; return 1 ;;
             TG_TURNSTILE_SIGNIN_ENABLED:*) fail 'TG_TURNSTILE_SIGNIN_ENABLED may change only between true and false'; return 1 ;;
             TG_PUBLIC_REGISTRATION:*) fail 'TG_PUBLIC_REGISTRATION may change only between invite and closed'; return 1 ;;
-            TG_REPLICA_COUNT:*) fail 'TG_REPLICA_COUNT may change only from 1 to 3 for the public WebSocket replicas'; return 1 ;;
             *) fail "environment value change $key is not an approved setting"; return 1 ;;
           esac
           [[ "$changed" != *" $key "* ]] || { fail "environment value $key is assigned more than once"; return 1; }
@@ -1815,13 +1782,6 @@ validate_env_baseline() {
   for name in "${requested[@]}"; do
     [[ "$name" =~ ^[A-Z][A-Z0-9_]*$ ]] || { fail 'environment additions must be upper-case variable names'; return 1; }
     ! protected_env_name "$name" || { fail "environment addition $name is a protected deployment setting"; return 1; }
-    if [ "$name" = TG_REPLICA_COUNT ]; then
-      [ "${ROLLOUT_RUNNER_PUBLIC_WEBSOCKET:-0}" = 1 ] && \
-        [ "$(read_replica_count_from_env)" = 3 ] || {
-        fail 'TG_REPLICA_COUNT addition is limited to value 3 for the public WebSocket rollout'
-        return 1
-      }
-    fi
     [[ "$names" != *" $name "* ]] || { fail "environment addition $name is named twice"; return 1; }
     names+="$name "
   done
@@ -2279,10 +2239,6 @@ compare_resolved_preflight() {
     after=$(jq -er --arg field "$field" '.[$field]' "$target_file") || { fail 'resolved target is missing an approved environment setting'; return 1; }
     if [ "$field" = compose_replica_count ]; then
       expected=1
-      if [ "${ROLLOUT_RUNNER_PUBLIC_WEBSOCKET:-0}" = 1 ] && \
-         [ "$(read_replica_count_from_env)" = 3 ]; then
-        expected=3
-      fi
     else
       expected=socket
     fi
@@ -2378,8 +2334,7 @@ compare_rollback_to_baseline() {
   fi
   write_immutable "$results" '' || return 1
   for field in "${fields[@]}"; do
-    if [ "$field" = env_sha256 ] && { public_env_addition_requested || replica_count_addition_requested || \
-      changed_websocket_origins_requested || replica_count_change_requested; }; then
+    if [ "$field" = env_sha256 ] && { public_env_addition_requested || changed_websocket_origins_requested; }; then
       [ -n "$RECORDED_ENV_SHA" ] || { fail 'named environment rollback has no verified previous .env digest'; return 1; }
       before=$RECORDED_ENV_SHA
     elif [ "$field" = override_sha256 ] && [ "$CHANGED_ENV_SOURCE" = override ]; then
@@ -2389,14 +2344,7 @@ compare_rollback_to_baseline() {
       before=$(jq -er --arg field "$field" '.[$field]' "$baseline_file") || { fail 'baseline snapshot is missing an equivalence field'; return 1; }
     fi
     after=$(jq -er --arg field "$field" '.[$field]' "$rollback_file") || { fail 'rollback snapshot is missing an equivalence field'; return 1; }
-    if [ "$field" = compose_replica_count ] && \
-       { replica_count_change_requested || replica_count_addition_requested; }; then
-      if [ "$before" = 3 ] && [ "$after" = 1 ]; then result=pass; else result=fail; fi
-      append_evidence_row "$results" rollback "$field" "$before" "$after" "$result" || return 1
-      [ "$result" = pass ] || ROLLBACK_COMPARE_FAILURES=$((ROLLBACK_COMPARE_FAILURES + 1))
-    else
-      record_rollback_row "$results" "$field" "$before" "$after" || return 1
-    fi
+    record_rollback_row "$results" "$field" "$before" "$after" || return 1
   done
   state=$(jq -er '.state' "$rollback_file") || { fail 'rollback state is missing'; return 1; }
   record_rollback_row "$results" rollback_state running "$state" || return 1

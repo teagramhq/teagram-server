@@ -294,9 +294,8 @@ services:
       TG_PUBLIC_WEBSOCKET_ALLOWED_ORIGINS: ${TG_PUBLIC_WEBSOCKET_ALLOWED_ORIGINS:-}
       TG_WELCOME_CHANNEL: ${TG_WELCOME_CHANNEL:-}
       TG_REPLICA_ID: ${TG_REPLICA_ID:-}
-      # Keep the Compose deployment count aligned across the legacy listener
-      # and any explicitly enabled replacement replicas. The default remains
-      # the existing single-replica behavior.
+      # Keep the base socket-trust listener at its own process-local budget.
+      # Public replicas set their count independently below.
       TG_REPLICA_COUNT: ${TG_REPLICA_COUNT:-1}
       # Public auth Turnstile is optional on this stack. Only the app-facing
       # site key and mounted-file path enter the container; the host secret
@@ -373,6 +372,7 @@ services:
       TG_CLIENT_ADDR_TRUST: proxy-v2
       TG_CLIENT_ADDR_PROXY_CIDRS: 198.18.132.10/32
       TG_REPLICA_ID: public-1
+      TG_REPLICA_COUNT: "3"
       TG_WEBSOCKET_LISTEN_ADDR: ""
       TG_WEBSOCKET_ALLOWED_ORIGINS: ""
       TG_PUBLIC_WEBSOCKET_LISTEN_ADDR: ${TG_PUBLIC_WEBSOCKET_LISTEN_ADDR:-}
@@ -401,6 +401,7 @@ services:
       TG_CLIENT_ADDR_TRUST: proxy-v2
       TG_CLIENT_ADDR_PROXY_CIDRS: 198.18.132.10/32
       TG_REPLICA_ID: public-2
+      TG_REPLICA_COUNT: "3"
       TG_WEBSOCKET_LISTEN_ADDR: ""
       TG_WEBSOCKET_ALLOWED_ORIGINS: ""
       TG_PUBLIC_WEBSOCKET_LISTEN_ADDR: ${TG_PUBLIC_WEBSOCKET_LISTEN_ADDR:-}

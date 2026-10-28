@@ -351,14 +351,10 @@ docker_compose() {
     docker compose "$@"
   fi
 }
-public_replica_count() {
+public_base_replica_count_is_single() {
   awk -F= '
     $1 == "TG_REPLICA_COUNT" { count++; value=$2 }
-    END {
-      if (count == 0) print "unset"
-      else if (count > 1) print "duplicate"
-      else print value
-    }
+    END { exit !(count == 0 || (count == 1 && value == "1")) }
   ' "$LIVE_CHECKOUT/.env"
 }
 public_route_services_running() {
@@ -374,67 +370,6 @@ public_route_services_running() {
     fi
   done
 }
-stage_public_replica_count() {
-  local env_file="$LIVE_CHECKOUT/.env" previous_env temp count
-  [[ ! -L "$env_file" && -f "$env_file" ]] || { echo 'public WebSocket rollout requires a regular .env file' >&2; return 1; }
-  if [[ -z ${DEPLOY_DIR:-} ]]; then
-    [[ "$(stat -c '%u:%a' -- "$env_file")" == 0:600 ]] || {
-      echo 'public WebSocket rollout requires a root-owned mode-0600 .env file' >&2
-      return 1
-    }
-  fi
-  [ -z "$(tail -c 1 -- "$env_file")" ] || { echo '.env must end with a newline before changing replica count' >&2; return 1; }
-  count=$(public_replica_count) || return 1
-  case "$count" in
-    3) return 0 ;;
-    1|unset) ;;
-    *)
-      echo "public WebSocket rollout requires an unset, 1, or 3 TG_REPLICA_COUNT value (found $count)" >&2
-      return 1
-      ;;
-  esac
-  previous_env="$R/teagramd-env-before-${S}-${TS}"
-  [[ ! -e "$previous_env" && ! -L "$previous_env" ]] || { echo 'replica-count backup path already exists' >&2; return 1; }
-  if ! cp -p -- "$env_file" "$previous_env" || ! chmod 600 -- "$previous_env"; then
-    echo 'cannot protect the pre-change .env for replica-count rollback' >&2
-    return 1
-  fi
-  temp=$(mktemp "$LIVE_CHECKOUT/.env.public-count.XXXXXXXX") || return 1
-  if [[ "$count" == 1 ]] && ! awk '
-      BEGIN { count=0; invalid=0 }
-      /^TG_REPLICA_COUNT=/ {
-        count++
-        if ($0 != "TG_REPLICA_COUNT=1") invalid=1
-        print "TG_REPLICA_COUNT=3"
-        next
-      }
-      { print }
-      END { if (count != 1 || invalid) exit 1 }
-    ' "$env_file" > "$temp"; then
-    rm -f -- "$temp"
-    echo 'only a literal TG_REPLICA_COUNT=1 value may be raised for the public replicas' >&2
-    return 1
-  elif [[ "$count" == unset ]] && ! {
-    cat -- "$env_file" && printf '%s\n' 'TG_REPLICA_COUNT=3'
-  } > "$temp"; then
-    rm -f -- "$temp"
-    echo 'cannot stage TG_REPLICA_COUNT=3 as an approved environment addition' >&2
-    return 1
-  fi
-  if ! chmod 600 -- "$temp" || ! sync || ! mv -f -- "$temp" "$env_file" || ! sync; then
-    rm -f -- "$temp"
-    echo 'cannot atomically stage TG_REPLICA_COUNT=3' >&2
-    return 1
-  fi
-  export ROLLOUT_RUNNER_PREVIOUS_ENV_FILE="$previous_env"
-  if [[ "$count" == unset ]]; then
-    export ROLLOUT_RUNNER_ADDED_ENV=TG_REPLICA_COUNT
-    printf 'staged TG_REPLICA_COUNT=3 as a named environment addition through the rollout runner\n'
-  else
-    export ROLLOUT_RUNNER_CHANGED_ENV=TG_REPLICA_COUNT
-    printf 'staged TG_REPLICA_COUNT=3 through the rollout runner approved environment change path\n'
-  fi
-}
 install_teagram_syslog_config "$SHA"
 run_mtproto_smoke() {
   local image_id=$1
@@ -448,8 +383,8 @@ run_mtproto_smoke() {
     "$image_id"
 }
 IMG=$(docker inspect --format '{{.Image}}' $C)
-if [ "$PREV" = "$SHA" ] && [ "$(public_replica_count)" = 3 ] && \
-   public_route_services_running && grep -qs "source_sha=$SHA image_id=$IMG " "$R"/main1238-*.build/built-image.identity; then
+if [ "$PREV" = "$SHA" ] && public_base_replica_count_is_single && public_route_services_running && \
+   grep -qs "source_sha=$SHA image_id=$IMG " "$R"/main1238-*.build/built-image.identity; then
   umask 077
   install_teagram_logs_command "$SHA"
   bash "$LIVE_CHECKOUT/deploy/link-edge/deploy-main.sh" "$SHA"
@@ -463,7 +398,6 @@ umask 077
 docker_compose exec -T postgres pg_dump -U postgres teagram > "$R/pgdump-pre-$S-$TS.sql" </dev/null
 tail -c 200 "$R/pgdump-pre-$S-$TS.sql" | grep -q "dump complete"
 echo "dump $R/pgdump-pre-$S-$TS.sql"
-stage_public_replica_count
 flock -u 9; exec 9>&-
 rc=0
 ROLLOUT_RUNNER_SOURCE_SHA=$SHA bash "$R/teagramd-rollout-runner/rollout-runner.sh" apply "$SHA" "$PREV" \

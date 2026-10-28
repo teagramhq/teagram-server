@@ -49,10 +49,10 @@
       "compose_client_addr_trust": "socket"
     }
   },
-  "staged_pair": {
+  "public_pair": {
     "baseline": {
       "config_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
-      "env_sha256": "3333333333333333333333333333333333333333333333333333333333333333",
+      "env_sha256": "1111111111111111111111111111111111111111111111111111111111111111",
       "override_sha256": "2222222222222222222222222222222222222222222222222222222222222222",
       "stop_grace_period": "2m0s",
       "compose_logging_policy": "syslog-v1",
@@ -61,12 +61,12 @@
       "media_key_current": "1",
       "compose_public_ws_2446": "true",
       "exposure_public_ws_2446": "true",
-      "compose_replica_count": "3",
+      "compose_replica_count": "1",
       "compose_client_addr_trust": "socket"
     },
     "preflight": {
       "config_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
-      "env_sha256": "3333333333333333333333333333333333333333333333333333333333333333",
+      "env_sha256": "1111111111111111111111111111111111111111111111111111111111111111",
       "override_sha256": "2222222222222222222222222222222222222222222222222222222222222222",
       "stop_grace_period": "2m0s",
       "compose_logging_policy": "syslog-v1",
@@ -75,7 +75,7 @@
       "media_key_current": "1",
       "compose_public_ws_2446": "false",
       "exposure_public_ws_2446": "true",
-      "compose_replica_count": "3",
+      "compose_replica_count": "1",
       "compose_client_addr_trust": "socket"
     }
   }

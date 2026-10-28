@@ -21,7 +21,9 @@ def environment(service: dict, name: str) -> dict:
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--haproxy-config", required=True)
+    parser.add_argument("--host-port", type=int, default=2446)
     args = parser.parse_args()
+    require(1 <= args.host_port <= 65535, "public HAProxy host port is outside the TCP port range")
     compose = json.load(sys.stdin)
     services = compose.get("services")
     require(isinstance(services, dict), "Compose services are missing")
@@ -35,7 +37,7 @@ def main() -> int:
     require(base_env.get("TG_PUBLIC_WEBSOCKET_LISTEN_ADDR", "") == "", "base teagramd must not bind the public WebSocket listener")
     require(base_env.get("TG_PUBLIC_WEBSOCKET_ADVERTISE_ADDR", "") == "", "base teagramd must not advertise the public WebSocket listener")
     require(not any(str(port.get("target")) == "2446" for port in base.get("ports", [])), "base teagramd must not publish port 2446")
-    require(base_env.get("TG_REPLICA_COUNT") == "3", "the active base and public replicas must share TG_REPLICA_COUNT=3")
+    require(base_env.get("TG_REPLICA_COUNT") == "1", "base teagramd must retain TG_REPLICA_COUNT=1 for its process-local listener budgets")
 
     proxy_env = proxy.get("environment") or {}
     require(isinstance(proxy_env, dict), "public HAProxy environment must be an object when present")
@@ -60,16 +62,16 @@ def main() -> int:
     port = published[0]
     require(
         port.get("host_ip") == "127.0.0.1"
-        and str(port.get("published")) == "2446"
+        and str(port.get("published")) == str(args.host_port)
         and str(port.get("target")) == "2446"
         and port.get("protocol", "tcp") == "tcp",
-        "public HAProxy must publish only loopback port 2446",
+        "public HAProxy must publish one loopback host port to container port 2446",
     )
 
     networks = compose.get("networks", {})
     ingress_network = networks.get("public-ingress", {})
     backend_network = networks.get("public-backend", {})
-    require(ingress_network.get("internal") is True, "public ingress network must be internal")
+    require(ingress_network.get("internal") is not True, "public ingress network must allow the host loopback port publish")
     require(backend_network.get("internal") is True, "public backend network must be internal")
     ingress_ipam = ingress_network.get("ipam", {}).get("config", [])
     backend_ipam = backend_network.get("ipam", {}).get("config", [])
