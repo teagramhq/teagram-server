@@ -556,6 +556,9 @@ func TestCreateUsernameUserReturnsUsernameMode(t *testing.T) {
 	if u.ID == 0 {
 		t.Fatal("zero id")
 	}
+	if u.Kind != store.UserKindHuman {
+		t.Errorf("kind = %q, want %q", u.Kind, store.UserKindHuman)
+	}
 	if u.Phone != "" {
 		t.Errorf("phone = %q, want empty", u.Phone)
 	}
