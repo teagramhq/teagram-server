@@ -15,6 +15,7 @@ import (
 	"github.com/gotd/td/bin"
 	"github.com/gotd/td/mt"
 	"github.com/gotd/td/tg"
+	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/teagramhq/teagram-server/internal/api"
 	"github.com/teagramhq/teagram-server/internal/config"
@@ -180,6 +181,67 @@ func TestUserInviteRPCCreateListAndRevoke(t *testing.T) {
 		if bytes.Contains(logs.Bytes(), []byte(secret)) || bytes.Contains(logs.Bytes(), digest[:]) || bytes.Contains(logs.Bytes(), []byte(hex.EncodeToString(digest[:]))) {
 			t.Fatal("create path logged an invite secret or digest")
 		}
+	}
+}
+
+func TestUserInviteRPCLogsStoreFailuresWithoutLoggingCredential(t *testing.T) {
+	ctx := context.Background()
+	s, dsn := openStoreDSN(t)
+	owner, err := s.CreateUser(ctx, "+15559911003")
+	if err != nil {
+		t.Fatalf("create owner: %v", err)
+	}
+
+	conn, err := pgxpool.New(ctx, dsn)
+	if err != nil {
+		t.Fatalf("open test connection: %v", err)
+	}
+	t.Cleanup(conn.Close)
+	if _, err := conn.Exec(ctx, `
+CREATE FUNCTION fail_user_invite_insert() RETURNS trigger
+LANGUAGE plpgsql AS $$
+BEGIN
+    RAISE EXCEPTION 'user invite insert rejected digest=%', encode(NEW.secret_digest, 'hex');
+END;
+$$`); err != nil {
+		t.Fatalf("create invite failure trigger function: %v", err)
+	}
+	if _, err := conn.Exec(ctx, `
+CREATE TRIGGER fail_user_invite_insert
+BEFORE INSERT ON registration_invites
+FOR EACH ROW EXECUTE FUNCTION fail_user_invite_insert()`); err != nil {
+		t.Fatalf("create invite failure trigger: %v", err)
+	}
+
+	var logs bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&logs, nil))
+	h := newUserInviteTestHandler(s, config.RegistrationInvite, 3, 0, logger)
+	create := dispatchRawUserInviteRequest(t, h, rawUserInviteRequest{id: createUserInviteRequestID}, owner.ID, false)
+	assertUserInviteRPCError(t, create, 500, "INTERNAL")
+	credentialPattern := regexp.MustCompile(`(?i)[0-9a-f]{64}`)
+	if credentialPattern.MatchString(logs.String()) {
+		t.Fatalf("create failure log contains a 64-character invite credential: %s", logs.String())
+	}
+
+	if err := s.Close(); err != nil {
+		t.Fatalf("close store to simulate outage: %v", err)
+	}
+	list := dispatchRawUserInviteRequest(t, h, rawUserInviteRequest{id: listUserInvitesRequestID}, owner.ID, false)
+	assertUserInviteRPCError(t, list, 500, "INTERNAL")
+	revoke := dispatchRawUserInviteRequest(t, h, rawUserInviteRequest{id: revokeUserInviteRequestID, inviteID: 1, hasID: true}, owner.ID, false)
+	assertUserInviteRPCError(t, revoke, 500, "INTERNAL")
+
+	logOutput := logs.String()
+	for _, operation := range []string{"create", "list", "revoke"} {
+		if !strings.Contains(logOutput, "operation="+operation) {
+			t.Errorf("store failure log missing operation %q: %s", operation, logOutput)
+		}
+	}
+	if !strings.Contains(logOutput, "user_id="+strconv.FormatInt(owner.ID, 10)) {
+		t.Errorf("store failure log missing user id %d: %s", owner.ID, logOutput)
+	}
+	if !strings.Contains(logOutput, "err=") || !strings.Contains(logOutput, "user invite insert rejected digest=[redacted]") {
+		t.Errorf("store failure logs do not include a redacted error cause: %s", logOutput)
 	}
 }
 

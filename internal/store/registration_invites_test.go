@@ -1329,3 +1329,23 @@ func TestListUserInvitesIsBoundedNewestFirst(t *testing.T) {
 		}
 	}
 }
+
+func TestUserInviteHistoryIndexSupportsOwnerQueries(t *testing.T) {
+	t.Parallel()
+	s := open(t)
+
+	var definition string
+	err := store.StorePool(s).QueryRow(context.Background(), `
+		SELECT indexdef
+		FROM pg_indexes
+		WHERE schemaname = current_schema()
+		  AND tablename = 'registration_invites'
+		  AND indexname = 'registration_invites_inviter_issued_at_idx'
+	`).Scan(&definition)
+	if err != nil {
+		t.Fatalf("read user invite history index: %v", err)
+	}
+	if !strings.Contains(definition, "(inviter_user_id, issued_at DESC, id DESC)") {
+		t.Fatalf("user invite history index = %q, want inviter, issue time, and id ordering", definition)
+	}
+}

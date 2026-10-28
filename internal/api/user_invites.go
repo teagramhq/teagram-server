@@ -2,6 +2,7 @@ package api
 
 import (
 	"errors"
+	"regexp"
 	"time"
 
 	"github.com/gotd/td/bin"
@@ -24,6 +25,8 @@ const (
 	// always ends in '/', so appending this segment produces /invite#<secret>.
 	userInviteLandingPath = "invite"
 )
+
+var userInviteCredentialPattern = regexp.MustCompile(`(?i)[0-9a-f]{64}`)
 
 type userInviteLinkResponse struct {
 	ID        int64
@@ -103,6 +106,7 @@ func (h *handlers) handleCreateUserInvite(r *mtproto.Request) (bin.Encoder, erro
 		case errors.As(err, &tooNew):
 			return nil, userInviteAccountTooNewError(tooNew.RemainingWaitSeconds)
 		default:
+			h.logUserInviteStoreFailure("create", r.UserID, err)
 			return nil, errInternal
 		}
 	}
@@ -125,6 +129,7 @@ func (h *handlers) handleListUserInvites(r *mtproto.Request) (bin.Encoder, error
 	}
 	invites, weeklyCount, nextAvailableAt, err := h.store.ListUserInvites(r.Ctx, r.UserID)
 	if err != nil {
+		h.logUserInviteStoreFailure("list", r.UserID, err)
 		return nil, errInternal
 	}
 	response := userInvitesResponse{
@@ -156,9 +161,18 @@ func (h *handlers) handleRevokeUserInvite(r *mtproto.Request) (bin.Encoder, erro
 		return nil, errInternal
 	}
 	if err := h.store.RevokeUserInvite(r.Ctx, r.UserID, id); err != nil {
+		h.logUserInviteStoreFailure("revoke", r.UserID, err)
 		return nil, errInternal
 	}
 	return &tg.BoolTrue{}, nil
+}
+
+func (h *handlers) logUserInviteStoreFailure(operation string, userID int64, err error) {
+	h.log.Error("user invite store failure",
+		"operation", operation,
+		"user_id", userID,
+		"err", userInviteCredentialPattern.ReplaceAllString(err.Error(), "[redacted]"),
+	)
 }
 
 func decodeUserInviteRequest(b *bin.Buffer, constructor uint32) error {
