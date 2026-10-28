@@ -88,9 +88,6 @@ func (s *Store) CreateBot(ctx context.Context, username, firstName string) (BotA
 	if err := qtx.InsertBotToken(ctx, db.InsertBotTokenParams{UserID: botID, TokenHash: tokenHash[:]}); err != nil {
 		return BotAccount{}, "", fmt.Errorf("create bot: store token hash: %w", err)
 	}
-	if err := closeServerAdministratorElection(ctx, qtx); err != nil {
-		return BotAccount{}, "", fmt.Errorf("create bot: close administrator election: %w", err)
-	}
 	if err := tx.Commit(ctx); err != nil {
 		return BotAccount{}, "", fmt.Errorf("create bot: commit: %w", err)
 	}
