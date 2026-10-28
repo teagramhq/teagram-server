@@ -40,12 +40,8 @@ func (h *handlers) handleGetSearchResultsCalendar(r *mtproto.Request) (bin.Encod
 	msgs, periods, count, err := h.store.SearchResultsCalendar(
 		r.Ctx, r.UserID, peerType, peerID, int64(req.OffsetID), int64(req.OffsetDate), defaultHistoryLimit,
 	)
-	if errors.Is(err, store.ErrNotMember) {
-		return nil, errPeerIDInvalid
-	}
 	if err != nil {
-		h.log.Error("get search results calendar", "user_id", r.UserID, "err", err)
-		return nil, errInternal
+		return nil, h.calendarStoreError(r.UserID, err)
 	}
 
 	files, err := h.loadFiles(r.Ctx, msgs)
@@ -104,4 +100,16 @@ func (h *handlers) handleGetSearchResultsCalendar(r *mtproto.Request) (bin.Encod
 		response.MinDate, response.MinMsgID = int(minDate), int(minMsgID)
 	}
 	return response, nil
+}
+
+func (h *handlers) calendarStoreError(userID int64, err error) error {
+	if errors.Is(err, store.ErrNotMember) {
+		var joinedErr interface{ Unwrap() []error }
+		if errors.As(err, &joinedErr) {
+			h.log.Error("get search results calendar", "user_id", userID, "err", err)
+		}
+		return errPeerIDInvalid
+	}
+	h.log.Error("get search results calendar", "user_id", userID, "err", err)
+	return errInternal
 }
