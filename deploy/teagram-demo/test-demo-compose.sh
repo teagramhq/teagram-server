@@ -502,7 +502,7 @@ assert_order(Path(sys.argv[1]), [
     "demo_prepare_seed_owner \"$TMP_DIR\"",
     '"$SEED_SCRIPT" --seed',
     '"$SEED_SCRIPT" --verify-seed --endpoint "$ACTIVE_ENDPOINT"',
-    '"$SCRIPT_DIR/test-seed-compose.sh"',
+    '"$SCRIPT_DIR/test-seed-compose.sh" "$BEFORE_GENERATION"',
     rate_limit_reset,
     'demo_compose up -d --wait --wait-timeout 120 "$ACTIVE_SERVER" haproxy',
     '"$SEED_SCRIPT" --verify-turnstile --endpoint haproxy:2443',
@@ -514,6 +514,14 @@ assert_order(seed_test, [
     '"$SEED_SCRIPT" --seed --endpoint "$ACTIVE_ENDPOINT"',
     'after=$(capture_seed_report)',
     '[[ "$before" == "$after" ]]',
+])
+assert_order(seed_test, [
+    'before_generation=$(capture_wipe_generation)',
+    'after_generation=$(capture_wipe_generation)',
+    '[[ "$after_generation" == "$before_generation" ]]',
+    'demo_seed_compose up -d --force-recreate --wait --wait-timeout 120 "$ACTIVE_SERVER"',
+    'after_restart_generation=$(capture_wipe_generation)',
+    '[[ "$after_restart_generation" == "$before_generation" ]]',
 ])
 seed_test_text = seed_test.read_text(encoding="utf-8")
 if "markers=133" not in seed_test_text or "search_account=demo_searcher" not in seed_test_text:
@@ -542,9 +550,12 @@ deploy_steps = [
     'CANDIDATE_IMAGE_REF=$(demo_pull_image_by_sha "$SHA" "$IMAGE_DIGEST")',
     "demo_backup_database\n",
     'export TEAGRAM_DEMO_IMAGE_REF="$CANDIDATE_IMAGE_REF"',
-    'demo_compose run --rm --no-deps "$CANDIDATE_SERVER" client-config > "$TMP_DIR/client.json"',
+    'demo_compose run --rm --no-deps -e TG_ADVERTISE_DEMO_GUEST_SIGN_UP=false "$CANDIDATE_SERVER" client-config > "$TMP_DIR/client-before-migration.json"',
+    'CANDIDATE_SPKI=$(jq -er',
+    '[[ "$CANDIDATE_SPKI" == "$OLD_SPKI" ]]',
     "demo_compose up -d migrate",
     "demo_wait_migration demo_compose 'deployment migrations'",
+    'demo_compose run --rm --no-deps "$CANDIDATE_SERVER" client-config > "$TMP_DIR/client.json"',
     'demo_seed_compose up -d "$CANDIDATE_SERVER"',
     '"$SCRIPT_DIR/seed-demo.sh" --verify-seed --endpoint "$CANDIDATE_ENDPOINT"',
     'demo_compose up -d --wait --wait-timeout 120 "$CANDIDATE_SERVER"',
@@ -606,6 +617,37 @@ forced_command = Path(sys.argv[5]).read_text(encoding="utf-8")
 wipe = Path(sys.argv[1]).read_text(encoding="utf-8")
 if 'LOCK_PATH="$DEMO_REPO_ROOT/.state/deploy.lock"' not in wipe:
     raise SystemExit("wipe-weekly.sh: deploy and wipe must share the deploy lock")
+assert_text_order(wipe, "wipe-weekly.sh wipe generation publication", [
+    'BEFORE_GENERATION=$(jq -er',
+    'dropdb -U postgres --if-exists teagram',
+    "demo_wait_migration demo_compose 'post-reset migrations'",
+    'client-config > "$TMP_DIR/client-after-wipe.json"',
+    'AFTER_GENERATION=$(jq -er',
+    '[[ "$AFTER_GENERATION" != "$BEFORE_GENERATION" ]]',
+    'install -o root -g root -m 0644 "$TMP_DIR/client-after-wipe.json" "$DEMO_CLIENT_CONFIG.next"',
+    'mv -f -- "$DEMO_CLIENT_CONFIG.next" "$DEMO_CLIENT_CONFIG"',
+    'demo_compose up -d edge',
+])
+assert_text_order(init, "init-demo.sh resume client config after migrations", [
+    "demo_wait_migration demo_bootstrap_compose 'resume migrations'",
+    'client-config > "$TMP_DIR/client.json"',
+    'mv -f -- "$DEMO_CLIENT_CONFIG.next" "$DEMO_CLIENT_CONFIG"',
+])
+bootstrap_wait = init.index("demo_wait_migration demo_bootstrap_compose 'bootstrap migrations'")
+assert_text_order(init, "init-demo.sh fresh client config after migrations", [
+    "demo_wait_migration demo_bootstrap_compose 'bootstrap migrations'",
+    'client-config > "$TMP_DIR/client.json"',
+    'mv -f -- "$DEMO_CLIENT_CONFIG.next" "$DEMO_CLIENT_CONFIG"',
+], start=bootstrap_wait)
+assert_text_order(deploy, "deploy-main.sh client config after migrations", [
+    "demo_wait_migration demo_compose 'deployment migrations'",
+    'client-config > "$TMP_DIR/client.json"',
+    'and .demo.guest_sign_up == true',
+    'NEW_GENERATION=$(jq -er',
+    'OLD_GENERATION=$(jq -er',
+])
+if 'capture_wipe_generation()' not in seed_test.read_text(encoding="utf-8"):
+    raise SystemExit("test-seed-compose.sh: must verify the stored wipe generation remains stable during seed convergence")
 assert_text_order(forced_command, "forced-command.sh deploy lock", [
     "unset DEMO_DEPLOY_LOCK_HELD",
     'readonly IMAGE_DIGEST=${BASH_REMATCH[2]}',
@@ -699,9 +741,11 @@ if "demo_prune_deploy_backups()" not in Path(sys.argv[1]).read_text(encoding="ut
 assert_text_order(wipe, "wipe-weekly.sh persistent identity check", [
     'demo_compose up -d edge',
     'python3 "$SCRIPT_DIR/smoke.py" "$CLIENT_CONFIG"',
-    'demo_compose exec -T "$ACTIVE_SERVER" /usr/local/bin/teagramd client-config > "$TMP_DIR/client-after-wipe.json"',
-    "AFTER_SPKI=$(jq -er '.mtproto.rsa_spki' \"$TMP_DIR/client-after-wipe.json\")",
-    '[[ "$AFTER_SPKI" == "$BEFORE_SPKI" ]]',
+    'demo_compose exec -T "$ACTIVE_SERVER" /usr/local/bin/teagramd client-config > "$TMP_DIR/client-active-after-wipe.json"',
+    "ACTIVE_SPKI=$(jq -er '.mtproto.rsa_spki' \"$TMP_DIR/client-active-after-wipe.json\")",
+    '[[ "$ACTIVE_SPKI" == "$BEFORE_SPKI" ]]',
+    "ACTIVE_GENERATION=$(jq -er '.demo.wipe_generation' \"$TMP_DIR/client-active-after-wipe.json\")",
+    '[[ "$ACTIVE_GENERATION" == "$AFTER_GENERATION" ]]',
 ])
 PY
 
@@ -932,6 +976,8 @@ demo_compose() {
   if [[ "$*" == *'pg_dump -U postgres -Fc teagram'* ]]; then
     [[ "$INGRESS_OPEN" == 1 && "$SERVER_RUNNING" == 1 ]] || return 1
     printf 'live-database-snapshot\n'
+  elif [[ "$*" == *"to_regclass('public.demo_wipe_generation')"* ]]; then
+    printf 'f\n'
   elif [[ "$*" == *'psql -U postgres -Atqc'* ]]; then
     : # The isolated restore database does not exist yet.
   elif [[ "$*" == *'createdb -U postgres'* || "$*" == *'dropdb -U postgres'* ]]; then

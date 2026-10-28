@@ -16,6 +16,8 @@ import (
 )
 
 const (
+	// minChatTitle is the minimum non-whitespace title length in code points.
+	minChatTitle = 1
 	// maxChatTitle bounds the title a client may set. chats.title is an unbounded
 	// TEXT column and every rename copies the title into one messages row per
 	// member, so an unbounded title is a 200x write amplifier. The store
@@ -40,7 +42,8 @@ const (
 // on differently.
 func chatTitle(raw string) (string, error) {
 	title := strings.TrimSpace(raw)
-	if title == "" || !validText(title) || utf8.RuneCountInString(title) > maxChatTitle {
+	titleLength := utf8.RuneCountInString(title)
+	if titleLength < minChatTitle || !validText(title) || titleLength > maxChatTitle {
 		return "", errChatTitleInvalid
 	}
 	return title, nil

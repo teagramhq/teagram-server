@@ -134,3 +134,27 @@ photo metadata.
 | Concurrent retries repeat the clear or consume extra rate budget | The shared per-owner lock serializes replicas. Only the first request with a new tuple clears and charges `update_profile`; same-tuple retries return through the receipt path without another charge. Each fresh tuple is rate-limited. Same-tuple retries still use database and lock capacity, and lock contention can return `FLOOD_WAIT_1` after the one-second wait. |
 | A database error leaves a photo cleared but no receipt, or charges without clearing | The clear, receipt insert, and rate-limit update share one transaction, so a failed transaction rolls back all three. Database unavailability can reduce availability; the handler returns a generic internal error for storage failures. |
 | Operators mistake profile clear for complete personal-data erasure | The operation removes the current gallery reference, not the underlying file bytes or references outside the profile gallery. Those have separate retention and erasure controls and must be considered for a full erasure request. |
+
+# Threat model: published input policies and username authentication
+
+## Assets and boundaries
+
+The protected assets are account identity, username ownership, authentication
+code state, and the binding between an authenticated key and its account. An
+unauthenticated client can request `help.getAppConfig` before sign-in. That
+response publishes the accepted username syntax and other client-facing input
+bounds. Username values also arrive from untrusted clients through
+`auth.sendCode`, `auth.signIn`, and `auth.signUp`; client-side checks do not
+establish trust.
+
+## Abuse cases and controls
+
+| Abuse case | Control and remaining risk |
+|---|---|
+| A client ignores the advertised username rules or sends a crafted username | The server validates usernames in each auth entry point using the same minimum length, maximum length, and pattern constants that `help.getAppConfig` publishes. Auth handlers normalize accepted usernames to lowercase. Reserved-name checks remain server-side. A client can still submit arbitrary requests, but malformed values do not skip server validation. |
+| A caller probes usernames or floods code and sign-up requests | `auth.sendCode` and active-mode `auth.signUp` apply per-IP rate limits before identifier-dependent lookup or admission. Registration mode, invite checks, and configured Turnstile verification gate account creation. These controls bound abuse volume; the existing sign-in flow can return different states for existing and new usernames, so it is not an account-privacy boundary. |
+| A caller reads app config to obtain authentication data | `help.getAppConfig` is intentionally available before sign-in and exposes policy values and registration mode. It contains no login codes, credentials, or account records. The rules make valid client behavior predictable but do not grant authentication or account creation. |
+
+The published username policy is advisory to clients; the server remains the
+enforcement boundary. This change does not alter login-code verification,
+password verification, session binding, or account admission semantics.

@@ -15,8 +15,6 @@ import (
 	"github.com/teagramhq/teagram-server/internal/store"
 )
 
-const maxCloudDraftTextRunes = 4096
-
 // cloudDraftToTL builds the only draft shape this service persists. Entity and
 // quote data, webpage media, and unsupported rich features are not retained.
 func cloudDraftToTL(draft store.CloudDraft, hasDraft bool, date time.Time) tg.DraftMessageClass {
@@ -101,7 +99,7 @@ func (h *handlers) handleSaveDraftAfterReplyOnConn(_ *mtproto.Conn, r *mtproto.R
 	if req.GetInvertMedia() {
 		return nil, nil, nil, errInputRequestInvalid
 	}
-	if !utf8.ValidString(req.Message) || strings.IndexByte(req.Message, 0) >= 0 || utf8.RuneCountInString(req.Message) > maxCloudDraftTextRunes {
+	if !utf8.ValidString(req.Message) || strings.IndexByte(req.Message, 0) >= 0 || textExceedsLimit(req.Message, messageLengthMax) {
 		return nil, nil, nil, errMessageTooLong
 	}
 	if !validText(req.Message) {

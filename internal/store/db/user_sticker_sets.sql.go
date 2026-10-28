@@ -169,42 +169,6 @@ func (q *Queries) StickerFileForOwner(ctx context.Context, arg StickerFileForOwn
 	return i, err
 }
 
-const userCreatedStickerFileForDownload = `-- name: UserCreatedStickerFileForDownload :one
-SELECT f.id, f.uploader_id, f.access_hash, f.size, f.mime_type, f.file_name,
-       f.stored, f.date, f.subtype_rights, f.media_kind, f.width, f.height
-FROM user_created_sticker_set_items i
-JOIN user_created_sticker_sets s ON s.id = i.set_id
-JOIN files f ON f.id = i.file_id
-WHERE f.id = $1 AND f.access_hash = $2 AND f.stored = true AND s.is_live = true
-`
-
-type UserCreatedStickerFileForDownloadParams struct {
-	ID         int64
-	AccessHash int64
-}
-
-// The set membership and its live state are the download authorization lane;
-// no direct lookup by file id is sufficient to serve a set document.
-func (q *Queries) UserCreatedStickerFileForDownload(ctx context.Context, arg UserCreatedStickerFileForDownloadParams) (File, error) {
-	row := q.db.QueryRow(ctx, userCreatedStickerFileForDownload, arg.ID, arg.AccessHash)
-	var i File
-	err := row.Scan(
-		&i.ID,
-		&i.UploaderID,
-		&i.AccessHash,
-		&i.Size,
-		&i.MimeType,
-		&i.FileName,
-		&i.Stored,
-		&i.Date,
-		&i.SubtypeRights,
-		&i.MediaKind,
-		&i.Width,
-		&i.Height,
-	)
-	return i, err
-}
-
 const userCreatedStickerSetByID = `-- name: UserCreatedStickerSetByID :one
 SELECT id, access_hash, creator_id, title, short_name, software, kind,
        text_color, is_live, created_at
@@ -634,22 +598,6 @@ func (q *Queries) UserStickerDocumentSetIDs(ctx context.Context, dollar_1 []int6
 	return items, nil
 }
 
-const userStickerFileHasSetReference = `-- name: UserStickerFileHasSetReference :one
-SELECT EXISTS (
-    SELECT 1 FROM user_created_sticker_set_items WHERE file_id = $1
-)
-`
-
-// This probe decides whether a rejected set-document lookup may fall back to
-// ordinary message entitlement. A file that has ever been enrolled in a set
-// must not escape the live-set gate through an old message's document URL.
-func (q *Queries) UserStickerFileHasSetReference(ctx context.Context, fileID int64) (bool, error) {
-	row := q.db.QueryRow(ctx, userStickerFileHasSetReference, fileID)
-	var exists bool
-	err := row.Scan(&exists)
-	return exists, err
-}
-
 const userStickerSetAlreadyInstalled = `-- name: UserStickerSetAlreadyInstalled :one
 SELECT EXISTS (
     SELECT 1 FROM user_sticker_sets WHERE user_id = $1 AND set_id = $2
@@ -666,6 +614,32 @@ func (q *Queries) UserStickerSetAlreadyInstalled(ctx context.Context, arg UserSt
 	var exists bool
 	err := row.Scan(&exists)
 	return exists, err
+}
+
+const userStickerSetOccupiedShortNames = `-- name: UserStickerSetOccupiedShortNames :many
+SELECT lower(short_name) AS short_name
+FROM user_created_sticker_sets
+WHERE lower(short_name) = ANY($1::text[])
+`
+
+func (q *Queries) UserStickerSetOccupiedShortNames(ctx context.Context, dollar_1 []string) ([]string, error) {
+	rows, err := q.db.Query(ctx, userStickerSetOccupiedShortNames, dollar_1)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []string
+	for rows.Next() {
+		var short_name string
+		if err := rows.Scan(&short_name); err != nil {
+			return nil, err
+		}
+		items = append(items, short_name)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
 }
 
 const userStickerSetShortNameExists = `-- name: UserStickerSetShortNameExists :one

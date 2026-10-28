@@ -725,6 +725,42 @@ func TestGetFileRanges(t *testing.T) {
 	}
 }
 
+type downloadEntitlementQueryCounter struct{ n atomic.Int64 }
+
+func (c *downloadEntitlementQueryCounter) TraceQueryStart(ctx context.Context, _ *pgx.Conn, data pgx.TraceQueryStartData) context.Context {
+	query := strings.ToLower(data.SQL)
+	if strings.Contains(query, "user_created_sticker_set_items") ||
+		(strings.Contains(query, "from files f") && strings.Contains(query, "from messages m")) {
+		c.n.Add(1)
+	}
+	return ctx
+}
+
+func (*downloadEntitlementQueryCounter) TraceQueryEnd(context.Context, *pgx.Conn, pgx.TraceQueryEndData) {
+}
+
+func TestGetFileOrdinaryDocumentUsesOneEntitlementQuery(t *testing.T) {
+	t.Parallel()
+	tracer := &downloadEntitlementQueryCounter{}
+	s, _ := openStoreDSNWithOptions(t, store.WithQueryTracer(tracer))
+	blobs := newBlobs(t)
+	fixtureStore, fixtureBlobs, sender, recipient, doc := downloadFixtureOn(t, s, blobs, "+15551297901", "+15551297902")
+	for _, reader := range []struct {
+		name string
+		user store.User
+	}{{name: "sender", user: sender}, {name: "recipient", user: recipient}} {
+		t.Run(reader.name, func(t *testing.T) {
+			tracer.n.Store(0)
+			if got := string(getBytes(t, fixtureStore, fixtureBlobs, reader.user.ID, doc, 0, 64)); got != downloadPayload {
+				t.Fatalf("download = %q, want %q", got, downloadPayload)
+			}
+			if n := tracer.n.Load(); n != 1 {
+				t.Fatalf("ordinary document download made %d entitlement queries, want 1", n)
+			}
+		})
+	}
+}
+
 func TestGetFileRejectsBadWindow(t *testing.T) {
 	t.Parallel()
 	s, blobs, a, _, doc := downloadFixture(t, "+15551297011", "+15551297012")

@@ -506,7 +506,7 @@ func TestServeWebSocketDiscoveryCORSIsPathScoped(t *testing.T) {
 	if err != nil {
 		t.Fatalf("generate RSA key: %v", err)
 	}
-	doc, err := discovery.NewDocument("configured.example.test:443", 2, &rsaKey.PublicKey, true)
+	doc, err := discovery.NewDocument("configured.example.test:443", 2, &rsaKey.PublicKey, true, strings.Repeat("d", 64))
 	if err != nil {
 		t.Fatalf("build discovery document: %v", err)
 	}
@@ -721,13 +721,13 @@ func TestServeWebSocketUsesListenerScopedDiscovery(t *testing.T) {
 	if err != nil {
 		t.Fatalf("generate RSA key: %v", err)
 	}
-	defaultDoc, err := discovery.NewDocument("tailnet.example.test:2443", 2, &rsaKey.PublicKey, false)
+	defaultDoc, err := discovery.NewDocument("tailnet.example.test:2443", 2, &rsaKey.PublicKey, false, "")
 	if err != nil {
 		t.Fatalf("build default discovery document: %v", err)
 	}
 	publicDoc := defaultDoc
 	publicDoc.WebSocket.Endpoint = "wss://server.teagram.io/apiws"
-	publicDoc.Demo = &discovery.DemoCapabilities{GuestSignUp: true}
+	publicDoc.Demo = &discovery.DemoCapabilities{GuestSignUp: true, WipeGeneration: strings.Repeat("e", 64)}
 	publicDoc.Turnstile = &discovery.Turnstile{SiteKey: "public-site-key"}
 	srv := mtproto.New(exchange.PrivateKey{}, 2, mtproto.NewMemoryAuthKeyStore(), nil, nil)
 	if err := srv.SetClientDiscoveryDocument(defaultDoc); err != nil {
