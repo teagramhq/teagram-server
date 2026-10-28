@@ -451,6 +451,93 @@ class RestoreReadinessContractTests(unittest.TestCase):
         trusted_docker.assert_not_called()
         rollout_lock.assert_not_called()
 
+    def test_failed_supervisor_spawn_names_the_cleanup_failure_stage(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="rr-supervisor-spawn-") as directory:
+            run_dir = Path(directory) / "run"
+            run_dir.mkdir(mode=0o700)
+            rollout_lock_path = Path(directory) / "rollout-lock"
+            global_lock_path = Path(directory) / "global-lock"
+            rollout_lock_path.touch()
+            global_lock_path.touch()
+            rollout_lock_fd = os.open(rollout_lock_path, os.O_RDONLY)
+            global_lock_fd = os.open(global_lock_path, os.O_RDONLY)
+
+            prepared = {
+                "atlas_bin": "/tmp/teagram-restore-readiness.abcdefgh/atlas",
+                "build_dir": "/tmp/teagram-restore-readiness.abcdefgh",
+                "prepared_uid": 1000,
+                "go_arch": "amd64",
+                "path": "/tmp/teagram-restore-readiness.abcdefgh",
+                "device": 1,
+                "inode": 2,
+                "attestation_sha256": "a" * 64,
+            }
+
+            class SpawnFailureDrill:
+                def __init__(self, _args: Any, current_run_dir: Path, manifest: dict[str, Any]) -> None:
+                    self.manifest = manifest
+                    self.run_dir = current_run_dir
+                    self.manifest_path = current_run_dir / "ownership.json"
+                    self.phase = "preflight"
+                    self.fixture_check = "fixture_setup"
+                    self.gateway = None
+                    self.checker_result = {"help_getConfig": "not_run", "synthetic_signin": "not_run"}
+                    self.migration_head = "not_reached"
+                    self.auth_keys_cleared = False
+                    self.input_mode = "synthetic"
+
+                def save(self) -> None:
+                    return None
+
+            arguments = argparse.Namespace(
+                prepared_dir=Path(prepared["path"]),
+                docker_bin="/usr/bin/docker",
+                local_dump=None,
+                local_fixture_test=False,
+                fault_test=None,
+                work_seconds=None,
+            )
+            stdout = io.StringIO()
+            stderr = io.StringIO()
+            try:
+                with (
+                    patch.object(RESTORE_READINESS.os, "geteuid", return_value=0),
+                    patch.object(RESTORE_READINESS, "verify_prepared_runtime", return_value=prepared),
+                    patch.object(RESTORE_READINESS, "ensure_trusted_system_executable", return_value="/usr/bin/docker"),
+                    patch.object(
+                        RESTORE_READINESS,
+                        "open_rollout_lock",
+                        return_value=(rollout_lock_fd, {"device": 1, "inode": 2}),
+                    ),
+                    patch.object(
+                        RESTORE_READINESS,
+                        "open_global_lock",
+                        return_value=(global_lock_fd, {"device": 3, "inode": 4}),
+                    ),
+                    patch.object(RESTORE_READINESS.tempfile, "mkdtemp", return_value=str(run_dir)),
+                    patch.object(RESTORE_READINESS, "process_start_ticks", return_value=77),
+                    patch.object(RESTORE_READINESS, "Drill", SpawnFailureDrill),
+                    patch.object(RESTORE_READINESS.subprocess, "Popen", side_effect=OSError("spawn failed")),
+                    patch.object(RESTORE_READINESS, "load_manifest", return_value={}),
+                    patch.object(RESTORE_READINESS, "foreign_inventory_failure", return_value=None),
+                    redirect_stdout(stdout),
+                    redirect_stderr(stderr),
+                ):
+                    status = RESTORE_READINESS.run_primary(arguments)
+            finally:
+                for descriptor in (rollout_lock_fd, global_lock_fd):
+                    try:
+                        os.close(descriptor)
+                    except OSError:
+                        pass
+
+        self.assertEqual(status, 1)
+        self.assertIn(
+            "restore readiness cleanup failed: operation=supervisor_setup "
+            "error=supervisor_failed stage=spawn_supervisor",
+            stderr.getvalue(),
+        )
+
     def test_early_preparation_failure_can_remove_empty_owned_runtime_directory(self) -> None:
         path = Path("/tmp") / ("teagram-restore-readiness." + os.urandom(4).hex())
         path.mkdir(mode=0o700)

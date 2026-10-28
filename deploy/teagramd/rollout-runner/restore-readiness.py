@@ -185,6 +185,7 @@ SAFE_SUPERVISOR_STAGES = frozenset(
         "load_final_manifest",
         "load_initial_manifest",
         "register_supervisor",
+        "spawn_supervisor",
         "verify_lock_descriptors",
         "verify_supervisor_identity",
         "wait_for_parent",
@@ -8299,7 +8300,11 @@ def run_primary(args: argparse.Namespace) -> int:
             if supervisor_succeeded:
                 fallback = cleanup_failure_document("run_directory_finalization", "verification_failed")
             elif supervisor is None:
-                fallback = cleanup_failure_document("supervisor_setup", "supervisor_failed")
+                fallback = cleanup_failure_document(
+                    "supervisor_setup",
+                    "supervisor_failed",
+                    stage="spawn_supervisor",
+                )
             else:
                 status = supervisor.returncode
                 fallback = cleanup_failure_document(
