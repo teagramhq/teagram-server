@@ -85,18 +85,25 @@ cleanup() {
 }
 
 prepare_target_runner() {
-  local source=$1 output="$TMP_DIR/rollout-runner-replay.sh" helper="$TMP_DIR/runner-replay-function.sh" dispatch_marker
+  local source=$1 output="$TMP_DIR/rollout-runner-replay.sh" helper="$TMP_DIR/runner-replay-functions.sh" dispatch_marker
   dispatch_marker="compare_resolved_preflight_command \"\${@:2}\""
-  if [ "${PREFLIGHT_REPLAY_TEST_MODE:-0}" != 1 ] || \
-     [ "${PREFLIGHT_REPLAY_TEST_FORCE_COMPAT:-0}" != 1 ]; then
-    if grep -Fq 'ROLLOUT_PREFLIGHT_REPLAY_SANDBOX' "$source" && \
-       grep -Fq "$dispatch_marker" "$source"; then
-      printf '%s\n' "$source"
-      return 0
-    fi
+  if grep -Fq 'ROLLOUT_PREFLIGHT_REPLAY_SANDBOX' "$source" && \
+     grep -Fq "$dispatch_marker" "$source"; then
+    printf '%s\n' "$source"
+    return 0
   fi
-  sed -n '/^compare_resolved_preflight_command() {$/,/^}/p' "$BASE_RUNNER" > "$helper" || return 1
-  [ -s "$helper" ] || { fail 'reviewed preflight comparison command is unavailable'; return 1; }
+  sed -n \
+    -e '/^check_private_dir() {$/,/^}/p' \
+    -e '/^write_immutable() {$/,/^}/p' \
+    -e '/^compare_resolved_preflight_command() {$/,/^}/p' \
+    "$BASE_RUNNER" > "$helper" || return 1
+  if [ ! -s "$helper" ] || \
+     ! grep -Fq 'check_private_dir() {' "$helper" || \
+     ! grep -Fq 'write_immutable() {' "$helper" || \
+     ! grep -Fq 'compare_resolved_preflight_command() {' "$helper"; then
+    fail 'reviewed preflight compatibility functions are unavailable'
+    return 1
+  fi
   if ! awk -v helper_file="$helper" '
     /^main\(\) \{/ && !inserted {
       while ((getline line < helper_file) > 0) print line
@@ -430,6 +437,15 @@ prepare_sandbox || exit 1
 if ! run_in_sandbox "$SANDBOX_VERIFIER"; then
   fail 'PR-head verifier could not load in the unprivileged sandbox'
   exit 1
+fi
+
+if [ "$target_runner" != "$target_runner_source" ]; then
+  # Legacy comparators read the target render from TARGET_DIR rather than the input directory.
+  install -m 444 "$SANDBOX_INPUT/preflight.snapshot.json" \
+    "$SANDBOX_OUTPUT/preflight.snapshot.json" || {
+    fail 'cannot stage the legacy preflight snapshot path'
+    exit 1
+  }
 fi
 
 runner_rc=0

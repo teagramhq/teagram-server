@@ -5,7 +5,11 @@ umask 077
 [ "$(id -u)" = 0 ] || { printf '%s\n' 'run this fixture as root to exercise the privilege drop' >&2; exit 1; }
 
 SCRIPT_DIR=$(cd -P "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+REPO_ROOT=$(cd -P "$SCRIPT_DIR/../.." && pwd)
 SCRIPT="$SCRIPT_DIR/ops/preflight-replay.sh"
+readonly REPO_ROOT
+readonly LEGACY_RUNNER_SHA=082083851cc458ce3e26fae7c2fdaaea935e0630
+readonly LEGACY_RUNNER_PATH=deploy/teagramd/rollout-runner/rollout-runner.sh
 REAL_RM=$(command -v rm)
 REAL_MKTEMP=$(command -v mktemp)
 readonly TMP_PREFIX=/tmp/teagram-preflight-replay-test.
@@ -117,6 +121,26 @@ git -C "$TMP/source" commit -q -m baseline
 git -C "$TMP/source" push -q -u origin main
 git --git-dir="$TMP/origin.git" symbolic-ref HEAD refs/heads/main
 pass_sha=$(git -C "$TMP/source" rev-parse HEAD)
+if git -c safe.directory="$REPO_ROOT" -C "$REPO_ROOT" \
+   cat-file -e "$LEGACY_RUNNER_SHA:$LEGACY_RUNNER_PATH" 2>/dev/null; then
+  git -c safe.directory="$REPO_ROOT" -C "$REPO_ROOT" \
+    show "$LEGACY_RUNNER_SHA:$LEGACY_RUNNER_PATH" > "$TMP/source/$LEGACY_RUNNER_PATH"
+else
+  git -C "$TMP/source" fetch --quiet --depth=1 \
+    https://github.com/teagramhq/teagram-server.git "$LEGACY_RUNNER_SHA"
+  git -C "$TMP/source" show "$LEGACY_RUNNER_SHA:$LEGACY_RUNNER_PATH" \
+    > "$TMP/source/$LEGACY_RUNNER_PATH"
+fi
+chmod 755 "$TMP/source/$LEGACY_RUNNER_PATH"
+if grep -Fq 'compare_resolved_preflight_command' "$TMP/source/$LEGACY_RUNNER_PATH"; then
+  printf '%s\n' 'FAIL legacy runner fixture unexpectedly has the replay command' >&2
+  exit 1
+fi
+git -C "$TMP/source" add "$LEGACY_RUNNER_PATH"
+git -C "$TMP/source" commit -q -m legacy-runner
+git -C "$TMP/source" push -q origin HEAD:legacy-runner
+legacy_runner_sha=$(git -C "$TMP/source" rev-parse HEAD)
+git -C "$TMP/source" reset -q --hard "$pass_sha"
 git -C "$TMP/source" switch -q -c missing-compose
 git -C "$TMP/source" rm -q docker-compose.alternate.yml
 git -C "$TMP/source" commit -q -m missing-selected-compose
@@ -224,6 +248,19 @@ if [[ "${1:-}" == compose ]]; then
       *) shift ;;
     esac
   done
+  case "$project_dir" in
+    */baseline|*/target) expected_cache="${project_dir%/*}/compose-cache" ;;
+    *)
+      printf '%s\n' 'fixture Compose project directory is invalid' >&2
+      exit 93
+      ;;
+  esac
+  [[ "${COMPOSE_EXPERIMENTAL_GIT_REMOTE:-}" == false && \
+     "${COMPOSE_EXPERIMENTAL_OCI_REMOTE:-}" == false && \
+     "${XDG_CACHE_HOME:-}" == "$expected_cache" ]] || {
+    printf '%s\n' 'Compose remote loaders or evidence cache are not isolated' >&2
+    exit 94
+  }
   [[ "$actual_selection" == "${FIXTURE_EXPECTED_FILES:?}" ]] || {
     printf '%s\n' 'fixture Compose selection did not follow the live label' >&2
     exit 91
@@ -346,7 +383,6 @@ run_replay() {
       FIXTURE_SANDBOX_NETWORK_LOG="$FIXTURE_SANDBOX_NETWORK_LOG" \
       FIXTURE_HOST_SENTINEL="$FIXTURE_HOST_SENTINEL" \
       REAL_MKTEMP="$REAL_MKTEMP" FIXTURE_BAD_MKTEMP="${FIXTURE_BAD_MKTEMP:-0}" \
-      PREFLIGHT_REPLAY_TEST_FORCE_COMPAT="${PREFLIGHT_REPLAY_TEST_FORCE_COMPAT:-0}" \
       PATH="$PATH" bash "$SCRIPT" "$sha" 2>&1) || rc=$?
   printf '%s\n' "$rc" > "$TMP/last-rc"
   printf '%s' "$output"
@@ -361,11 +397,11 @@ if grep -qv $'\tpass$' <<< "$output" || grep -Eq '2m0s|3m0s|fixture-password' <<
 fi
 printf '%s\n' 'PASS all-pass replay prints only field/result rows'
 
-# The alternate filename differs from the default Compose selection. The Docker
-# stub checks that the verifier received the exact label order.
-output=$(PREFLIGHT_REPLAY_TEST_FORCE_COMPAT=1 run_replay "$pass_sha" 'docker-compose.alternate.yml,docker-compose.override.yml')
-[[ "$(cat "$TMP/last-rc")" == 0 ]] || { printf 'FAIL dynamic selection replay:\n%s\n' "$output" >&2; exit 1; }
-printf '%s\n' 'PASS non-default live selection is followed in order'
+# This authentic pre-replay runner from PR #870 uses the legacy snapshot paths.
+# The Docker stub checks that the verifier follows the exact labeled file order.
+output=$(run_replay "$legacy_runner_sha" 'docker-compose.alternate.yml,docker-compose.override.yml')
+[[ "$(cat "$TMP/last-rc")" == 0 ]] || { printf 'FAIL legacy runner compatibility replay:\n%s\n' "$output" >&2; exit 1; }
+printf '%s\n' 'PASS pre-replay runner compatibility follows the live selection'
 
 output=$(run_replay "$missing_compose_sha" 'docker-compose.alternate.yml,docker-compose.override.yml')
 if [[ "$(cat "$TMP/last-rc")" == 0 ]] || \
