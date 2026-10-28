@@ -3489,12 +3489,14 @@ class Drill(Docker):
         entrypoint: str | None = None,
         interactive: bool = False,
         env_file: Path | None = None,
+        phase: str,
+        fixture_check: str | None,
     ) -> dict[str, Any]:
-        existing = self.list_containers("preflight")
+        existing = self.list_containers(phase)
         if any(found_name == name for _, found_name in existing):
-            raise DrillFailure("preflight", "isolation_refusal")
-        baseline_volumes = self.list_volumes("preflight")
-        baseline_networks = self.list_networks("preflight")
+            raise DrillFailure(phase, "isolation_refusal", fixture_check=fixture_check)
+        baseline_volumes = self.list_volumes(phase)
+        baseline_networks = self.list_networks(phase)
         record = {
             "name": name,
             "role": role,
@@ -3587,16 +3589,21 @@ class Drill(Docker):
             args.extend(["--entrypoint", entrypoint])
         args.append(image_id)
         args.extend(command_args)
-        output = self.call(args, phase="fixture_generation", category="fixture_failure")
+        try:
+            output = self.call(args, phase=phase, category="fixture_failure")
+        except DrillFailure as exc:
+            if exc.fixture_check is None and fixture_check is not None:
+                exc.fixture_check = fixture_check
+            raise
         identifier = output.decode("ascii", "strict").strip()
         if not re.fullmatch(r"[0-9a-f]{64}", identifier):
-            raise DrillFailure("fixture_generation", "fixture_failure")
+            raise DrillFailure(phase, "fixture_failure", fixture_check=fixture_check)
         record["id"] = identifier
         self.manifest["containers"].append(record)
         self.manifest["pending_container"] = None
         self.save()
-        document = self.inspect_container(record["id"], "fixture_generation")
-        volumes_after = self.list_volumes("fixture_generation")
+        document = self.inspect_container(record["id"], phase)
+        volumes_after = self.list_volumes(phase)
         baseline = set(record["volumes_before"])
         created_volumes = volumes_after - baseline
         record["unexpected_volumes"] = sorted(created_volumes)
@@ -3616,9 +3623,9 @@ class Drill(Docker):
         )
         record["unexpected_volume_records"] = [
             volume for name in record["unexpected_volumes"]
-            if (volume := self.inspect_volume(name, "fixture_generation")) is not None
+            if (volume := self.inspect_volume(name, phase)) is not None
         ]
-        networks_after = self.list_networks("fixture_generation")
+        networks_after = self.list_networks(phase)
         self.save()
         actual_volume_mounts = [mount for mount in document.get("Mounts", []) if mount.get("Type") == "volume"]
         if (
@@ -3628,7 +3635,7 @@ class Drill(Docker):
             or len(record["unexpected_volume_records"]) != len(created_volumes)
             or networks_after != baseline_networks
         ):
-            raise DrillFailure("fixture_generation", "isolation_refusal")
+            raise DrillFailure(phase, "isolation_refusal", fixture_check=fixture_check)
         return record
 
     def start_container(self, record: dict[str, Any], phase: str, category: str) -> None:
@@ -4137,6 +4144,8 @@ class Drill(Docker):
         env_file: Path | None = None,
         interactive: bool = False,
     ) -> dict[str, Any]:
+        phase = self.phase
+        fixture_check = self.fixture_check if phase == "fixture_generation" else None
         image_id = self.images[image]["id"] if image in self.images else image
         base_environment, image_config = self.image_environment(image_id)
         environment = dict(base_environment)
@@ -4166,6 +4175,8 @@ class Drill(Docker):
             entrypoint=entrypoint,
             interactive=interactive,
             env_file=env_file,
+            phase=phase,
+            fixture_check=fixture_check,
         )
 
     def mount(self, source: Path, destination: str, *, writable: bool) -> dict[str, Any]:

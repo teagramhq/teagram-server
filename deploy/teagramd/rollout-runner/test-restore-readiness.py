@@ -1991,9 +1991,46 @@ class RestoreReadinessContractTests(unittest.TestCase):
             command_args=[],
             expected_entrypoint=record["entrypoint"],
             expected_command=record["command"],
+            phase="fixture_generation",
+            fixture_check=None,
         )
         self.assertTrue(RESTORE_READINESS.validate_container_inspect(document, created))
         self.assertNotIn("--cpus", created_args)
+
+    def test_target_container_creation_failure_keeps_restore_phase_and_drops_stale_fixture_check(self) -> None:
+        drill = RESTORE_READINESS.Drill.__new__(RESTORE_READINESS.Drill)
+        drill.phase = "restore"
+        drill.fixture_check = "source_auth_key_fixture"
+        drill.images = {}
+        drill.manifest = {"token": "c" * 32, "containers": []}
+        drill.image_environment = lambda _image: ({}, {})
+        drill.save = lambda: None
+        drill.list_containers = lambda _phase: []
+        drill.list_volumes = lambda _phase: set()
+        drill.list_networks = lambda _phase: set()
+
+        def fail_create(_args: list[str], *, phase: str, category: str, **kwargs: Any) -> bytes:
+            raise RESTORE_READINESS.DrillFailure(
+                phase,
+                category,
+                fixture_check=kwargs.get("fixture_check"),
+            )
+
+        drill.call = fail_create
+
+        with self.assertRaises(RESTORE_READINESS.DrillFailure) as failure:
+            drill.image_container(
+                "sha256:" + "b" * 64,
+                role="target_client",
+                user="65532:70",
+                memory=RESTORE_READINESS.CLIENT_MEMORY,
+                pids_limit=96,
+                mounts=[],
+                tmpfs_options={},
+            )
+
+        self.assertEqual(failure.exception.phase, "restore")
+        self.assertIsNone(failure.exception.fixture_check)
 
     def test_finished_run_removal_accepts_directories_already_cleaned(self) -> None:
         class RootOwnedPath(type(Path())):
