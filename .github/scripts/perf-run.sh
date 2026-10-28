@@ -22,6 +22,8 @@ PERF_WORK="${PERF_WORK:-${RUNNER_TEMP:?}/perf}"
 rounds="${PERF_ROUNDS:-2}"
 history_keep=20
 fixtures=(1x 100x)
+# Keep these inputs aligned with FIXTURE_VERSION in .github/workflows/perf.yml.
+fixture_inputs=(test/perf/fixture_test.go test/perf/server_test.go)
 
 psql_admin() {
   docker exec "$PERF_PG_CONTAINER" psql -v ON_ERROR_STOP=1 -U postgres -qAt "$@"
@@ -139,7 +141,7 @@ base_ready() {
     return 1
   fi
   local diff_status=0
-  git diff --quiet "$PERF_BASE_SHA" HEAD -- test/perf/fixture_test.go || diff_status=$?
+  git diff --quiet "$PERF_BASE_SHA" HEAD -- "${fixture_inputs[@]}" || diff_status=$?
   case "$diff_status" in
     0) ;;
     1)

@@ -152,7 +152,7 @@ class PerfRunTests(unittest.TestCase):
             )
             self.assertFalse(calls.exists(), "measurement started with an invalid base SHA")
 
-    def test_changed_fixture_seeder_passes_fixture_version_to_harness(self) -> None:
+    def test_server_setup_change_skips_base_comparison(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             bin_dir = root / "bin"
@@ -163,7 +163,7 @@ class PerfRunTests(unittest.TestCase):
             fake_git = """#!/usr/bin/env bash
 set -euo pipefail
 printf 'git %s\\n' "$*" >> "$PERF_TEST_CALLS"
-if [[ "${1:-}" == diff ]]; then exit 1; fi
+if [[ "${1:-}" == diff && "$*" == *"test/perf/server_test.go"* ]]; then exit 1; fi
 """
             for name, content in (
                 ("atlas", FAKE_ATLAS),
@@ -203,6 +203,12 @@ if [[ "${1:-}" == diff ]]; then exit 1; fi
 
             self.assertEqual(0, result.returncode, result.stdout + result.stderr)
             self.assertIn("Base comparison skipped: fixture seeder changed", result.stdout)
+            diff_call = next(
+                line for line in calls.read_text(encoding="utf-8").splitlines()
+                if line.startswith("git diff --quiet")
+            )
+            self.assertIn("test/perf/fixture_test.go", diff_call)
+            self.assertIn("test/perf/server_test.go", diff_call)
             self.assertIn(
                 "fixture version fixture-current-v2",
                 calls.read_text(encoding="utf-8").splitlines(),
