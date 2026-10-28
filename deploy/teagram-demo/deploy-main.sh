@@ -74,11 +74,11 @@ demo_restore_legacy_edge_after_rollback() {
   if cmp -s "$legacy_nginx" "$SCRIPT_DIR/nginx.conf"; then
     rm -f -- "$legacy_nginx"
   else
-    chown root:root "$legacy_nginx" && chmod 0644 "$legacy_nginx" &&
-      mv -f -- "$legacy_nginx" "$SCRIPT_DIR/nginx.conf" || {
-        demo_fail 'previous Nginx config could not be restored at its stable file path'
-        return 1
-      }
+    if ! chown root:root "$legacy_nginx" || ! chmod 0644 "$legacy_nginx" ||
+      ! mv -f -- "$legacy_nginx" "$SCRIPT_DIR/nginx.conf"; then
+      demo_fail 'previous Nginx config could not be restored at its stable file path'
+      return 1
+    fi
     legacy_nginx_changed=1
   fi
   legacy_edge_hash=$(sha256sum -- "$SCRIPT_DIR/nginx.conf" | awk '{print $1}') || return 1
