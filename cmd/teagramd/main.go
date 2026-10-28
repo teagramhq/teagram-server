@@ -689,13 +689,18 @@ func writeInviteIssued(w io.Writer, invite store.RegistrationInvite) error {
 
 func writeInviteList(w io.Writer, invites []store.RegistrationInvite) error {
 	table := tabwriter.NewWriter(w, 0, 4, 2, ' ', 0)
-	if _, err := fmt.Fprintln(table, "ID\tHANDLE\tSTATE\tISSUED\tEXPIRES"); err != nil {
+	if _, err := fmt.Fprintln(table, "ID\tHANDLE\tINVITER\tSTATE\tISSUED\tEXPIRES"); err != nil {
 		return fmt.Errorf("write invite list: %w", err)
 	}
 	for _, invite := range invites {
-		if _, err := fmt.Fprintf(table, "%d\t%s\t%s\t%s\t%s\n",
+		inviter := ""
+		if invite.InviterUserID != nil {
+			inviter = strconv.FormatInt(*invite.InviterUserID, 10)
+		}
+		if _, err := fmt.Fprintf(table, "%d\t%s\t%s\t%s\t%s\t%s\n",
 			invite.ID,
 			invite.Handle,
+			inviter,
 			invite.State,
 			invite.IssuedAt.Format(time.RFC3339),
 			invite.ExpiresAt.Format(time.RFC3339),
@@ -932,12 +937,12 @@ func runAtBlobModePath(log *slog.Logger, blobModePath string) error {
 			turnstileSiteKey = cfg.Turnstile.SiteKey
 			verifier = turnstileVerifier
 		}
-		return api.NewWithPhotoThumbsAndDialogFilterSyncAndUploadPartTTLAndTurnstileAndWelcomeChannelAndSignInAndStickerCatalog(
+		return api.NewWithPhotoThumbsAndDialogFilterSyncAndUploadPartTTLAndTurnstileAndWelcomeChannelAndSignInAndStickerCatalogAndUserInviteQuota(
 			st, cfg.DCID, tgcfg, log, cfg.LogLoginCodes, cfg.MaxFileBytes, blobs,
 			cfg.MaxUserStorageBytes, peers, photos, cfg.RateLimits, registrationMode,
 			dialogFilterSync, photoThumbs, cfg.UploadPartTTL, turnstileSiteKey,
 			verifier, cfg.WelcomeChannel, turnstileSignInEnabled, cfg.RecoveryEmailMode,
-			cfg.SignUpTermsOfService, stickerSets, cfg.StickerImportMode, notifyMetrics,
+			cfg.SignUpTermsOfService, stickerSets, cfg.StickerImportMode, cfg.UserInviteQuota, notifyMetrics,
 		)
 	}
 	if cfg.LogLoginCodes {

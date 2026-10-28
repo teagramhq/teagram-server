@@ -29,7 +29,7 @@ func TestAccountCreationPathsStayBehindAdmission(t *testing.T) {
 			"handleSignInPhone": {"BindAuthKeyUser": true},
 		},
 		"internal/store/admission.go": {
-			"AdmitUsernameWithMetadata": {
+			"AdmitUsernameWithInvitePolicy": {
 				"CreateUsernameUser":          true,
 				"ClaimUsername":               true,
 				"BindAuthKeyUserWithMetadata": true,
@@ -102,7 +102,7 @@ func TestAccountCreationPathsStayBehindAdmission(t *testing.T) {
 				if !trackedPrimitive(name) {
 					return true
 				}
-				if rel == "internal/store/admission.go" && function == "AdmitUsernameWithMetadata" {
+				if rel == "internal/store/admission.go" && function == "AdmitUsernameWithInvitePolicy" {
 					seenAdmissionCalls[name] = true
 				}
 				if !allowedCall(allowed, rel, function, name) {
@@ -121,7 +121,7 @@ func TestAccountCreationPathsStayBehindAdmission(t *testing.T) {
 	}
 	for _, name := range []string{"CreateUsernameUser", "ClaimUsername", "BindAuthKeyUserWithMetadata"} {
 		if !seenAdmissionCalls[name] {
-			violations = append(violations, "admission.go:AdmitUsernameWithMetadata does not call "+name)
+			violations = append(violations, "admission.go:AdmitUsernameWithInvitePolicy does not call "+name)
 		}
 	}
 	if len(violations) != 0 {

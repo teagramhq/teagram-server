@@ -2,9 +2,9 @@
 set -euo pipefail
 
 script="${PERF_POSTGRES_SCRIPT:-.github/scripts/perf-postgres.sh}"
-probe='pg_isready -h 127.0.0.1'
+probe='pg_isready -h 127\.0\.0\.1( -p [0-9]+)? -U postgres -q'
 
-if ! grep -Fq "$probe" "$script"; then
+if ! grep -Eq "$probe" "$script"; then
   printf 'Postgres readiness must probe TCP to avoid the init-only Unix socket: %s\n' "$script" >&2
   exit 1
 fi

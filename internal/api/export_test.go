@@ -123,6 +123,20 @@ func SignUpForTest(s *store.Store, authKeyID [8]byte, addr netip.Addr, rateLimit
 	return h.handleSignUp(&mtproto.Request{Ctx: context.Background(), AuthKeyID: authKeyID, ClientAddr: addr, Buf: &buf})
 }
 
+// SignUpForTestWithUserInviteQuota invokes sign-up with an explicit invite
+// quota, matching the operator setting supplied to a server handler.
+func SignUpForTestWithUserInviteQuota(s *store.Store, authKeyID [8]byte, addr netip.Addr, rateLimit store.RateLimitConfig, registrationMode config.RegistrationMode, userInviteQuota int, req *tg.AuthSignUpRequest) (bin.Encoder, error) {
+	var buf bin.Buffer
+	if err := req.Encode(&buf); err != nil {
+		return nil, err
+	}
+	h := testHandlers(s)
+	h.rateLimitSignUpIP = rateLimit
+	h.registrationMode = registrationMode
+	h.userInviteQuota = userInviteQuota
+	return h.handleSignUp(&mtproto.Request{Ctx: context.Background(), AuthKeyID: authKeyID, ClientAddr: addr, Buf: &buf})
+}
+
 // SignUpTestRunner keeps one handler alive so rejection-sampling tests observe
 // the same per-class counters across requests.
 type SignUpTestRunner struct {
@@ -161,6 +175,11 @@ func NewSignUpTestRunner(
 // SetRegistrationModeForTest changes the configured mode between test calls.
 func (r *SignUpTestRunner) SetRegistrationModeForTest(mode config.RegistrationMode) {
 	r.handler.registrationMode = mode
+}
+
+// SetUserInviteQuotaForTest controls the operator-configured redemption quota.
+func (r *SignUpTestRunner) SetUserInviteQuotaForTest(quota int) {
+	r.handler.userInviteQuota = quota
 }
 
 // SetWelcomeChannelForTest configures the channel used after account admission.

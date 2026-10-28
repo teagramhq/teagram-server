@@ -1,8 +1,12 @@
 package api_test
 
 import (
+	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
+	"log/slog"
 	"net/netip"
 	"strings"
 	"sync"
@@ -136,6 +140,333 @@ func TestSignUpInviteAdmissionCreatesProvisionalAccount(t *testing.T) {
 	}
 	if storedCode != "" {
 		t.Fatalf("stored code after admission = %q, want empty", storedCode)
+	}
+}
+
+func TestSignUpAcceptsUserInviteAndRecordsAttributionWithoutLoggingSecret(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	s, dsn := openStoreDSN(t)
+	inviter, err := s.CreateUser(ctx, "+15551239801")
+	if err != nil {
+		t.Fatalf("create inviter: %v", err)
+	}
+	invite, secret, err := s.IssueUserInvite(ctx, inviter.ID)
+	if err != nil {
+		t.Fatalf("issue user invite: %v", err)
+	}
+
+	var logs bytes.Buffer
+	log := slog.New(slog.NewTextHandler(&logs, nil))
+	addr := netip.MustParseAddr("10.0.0.81")
+	const firstHandle = "userinvitealice"
+	firstHash, _, err := s.IssueCodeForUsername(ctx, firstHandle)
+	if err != nil {
+		t.Fatalf("issue phone code hash: %v", err)
+	}
+	if err := s.SaveAuthKey(ctx, 0x81, make([]byte, 256)); err != nil {
+		t.Fatalf("save auth key: %v", err)
+	}
+	if result, err := api.SignInForTestWithLimitsAndLogger(s, [8]byte{0x81}, addr, store.RateLimitConfig{}, &tg.AuthSignInRequest{
+		PhoneNumber: firstHandle, PhoneCodeHash: firstHash, PhoneCode: secret,
+	}, log); err != nil || !isAuthSignUpRequired(result) {
+		t.Fatalf("signIn result=%T err=%v, want sign-up required", result, err)
+	}
+	runner := api.NewSignUpTestRunner(s, [8]byte{0x81}, addr, store.RateLimitConfig{}, config.RegistrationInvite, log)
+	runner.SetUserInviteQuotaForTest(5)
+	result, err := runner.SignUp(&tg.AuthSignUpRequest{
+		PhoneNumber: firstHandle, PhoneCodeHash: firstHash, FirstName: "Alice",
+	})
+	if err != nil {
+		t.Fatalf("signUp: %v", err)
+	}
+	authorization, ok := result.(*tg.AuthAuthorization)
+	if !ok {
+		t.Fatalf("signUp result = %T, want *tg.AuthAuthorization", result)
+	}
+	user, ok := authorization.User.(*tg.User)
+	if !ok {
+		t.Fatalf("authorization user = %T, want *tg.User", authorization.User)
+	}
+	resolved, found, err := s.UserByUsernameWithLoginMode(ctx, firstHandle)
+	if err != nil || !found || resolved.ID != user.ID {
+		t.Fatalf("resolved user=%#v found=%v err=%v, want admitted account %d", resolved, found, err, user.ID)
+	}
+	var inviterID, redeemerID int64
+	var state string
+	conn, err := pgx.Connect(ctx, dsn)
+	if err != nil {
+		t.Fatalf("connect to inspect invite: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := conn.Close(ctx); err != nil {
+			t.Errorf("close invite inspection connection: %v", err)
+		}
+	})
+	if err := conn.QueryRow(ctx, `
+		SELECT inviter_user_id, consumed_by_user_id, state
+		FROM registration_invites WHERE id = $1
+	`, invite.ID).Scan(&inviterID, &redeemerID, &state); err != nil {
+		t.Fatalf("read consumed invite: %v", err)
+	}
+	if inviterID != inviter.ID || redeemerID != user.ID || state != "consumed" {
+		t.Fatalf("invite attribution inviter=%d redeemer=%d state=%q, want %d/%d/consumed", inviterID, redeemerID, state, inviter.ID, user.ID)
+	}
+
+	const secondHandle = "userinvitebob"
+	secondHash, _, err := s.IssueCodeForUsername(ctx, secondHandle)
+	if err != nil {
+		t.Fatalf("issue second phone code hash: %v", err)
+	}
+	if err := s.SaveAuthKey(ctx, 0x82, make([]byte, 256)); err != nil {
+		t.Fatalf("save second auth key: %v", err)
+	}
+	if result, err := api.SignInForTestWithLimitsAndLogger(s, [8]byte{0x82}, addr, store.RateLimitConfig{}, &tg.AuthSignInRequest{
+		PhoneNumber: secondHandle, PhoneCodeHash: secondHash, PhoneCode: secret,
+	}, log); err != nil || !isAuthSignUpRequired(result) {
+		t.Fatalf("second signIn result=%T err=%v, want sign-up required", result, err)
+	}
+	secondRunner := api.NewSignUpTestRunner(s, [8]byte{0x82}, addr, store.RateLimitConfig{}, config.RegistrationInvite, log)
+	secondRunner.SetUserInviteQuotaForTest(5)
+	if _, err := secondRunner.SignUp(&tg.AuthSignUpRequest{
+		PhoneNumber: secondHandle, PhoneCodeHash: secondHash, FirstName: "Bob",
+	}); signUpRPCMessage(err) != "INVITE_HASH_INVALID" {
+		t.Fatalf("second signUp error = %v, want INVITE_HASH_INVALID", err)
+	}
+	if _, found, err := s.UserByUsernameWithLoginMode(ctx, secondHandle); err != nil || found {
+		t.Fatalf("second handle found=%v err=%v, want no account", found, err)
+	}
+	if after := countUsers(t, dsn); after != 2 {
+		t.Fatalf("users after one successful and one refused signup = %d, want inviter plus one invitee", after)
+	}
+	digest := sha256.Sum256([]byte(secret))
+	for _, sensitive := range []string{secret, hex.EncodeToString(digest[:])} {
+		if strings.Contains(logs.String(), sensitive) {
+			t.Fatalf("sign-in/sign-up logs contain invite credential %q", sensitive)
+		}
+	}
+}
+
+func TestSignUpRejectsUserInviteWhenQuotaIsZeroAtRedemption(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	s, dsn := openStoreDSN(t)
+	inviter, err := s.CreateUser(ctx, "+15551239802")
+	if err != nil {
+		t.Fatalf("create inviter: %v", err)
+	}
+	invite, secret, err := s.IssueUserInvite(ctx, inviter.ID)
+	if err != nil {
+		t.Fatalf("issue user invite: %v", err)
+	}
+	const handle = "disableduserinvite"
+	hash, _, err := s.IssueCodeForUsername(ctx, handle)
+	if err != nil {
+		t.Fatalf("issue phone code hash: %v", err)
+	}
+	if err := s.SaveAuthKey(ctx, 0x83, make([]byte, 256)); err != nil {
+		t.Fatal(err)
+	}
+	addr := netip.MustParseAddr("10.0.0.83")
+	if result, err := api.SignInForTestWithLimits(s, [8]byte{0x83}, addr, store.RateLimitConfig{}, &tg.AuthSignInRequest{
+		PhoneNumber: handle, PhoneCodeHash: hash, PhoneCode: secret,
+	}); err != nil || !isAuthSignUpRequired(result) {
+		t.Fatalf("signIn result=%T err=%v, want sign-up required", result, err)
+	}
+	if _, err := api.SignUpForTestWithUserInviteQuota(s, [8]byte{0x83}, addr, store.RateLimitConfig{}, config.RegistrationInvite, 0, &tg.AuthSignUpRequest{
+		PhoneNumber: handle, PhoneCodeHash: hash, FirstName: "Disabled",
+	}); signUpRPCMessage(err) != "INVITE_HASH_INVALID" {
+		t.Fatalf("signUp error = %v, want INVITE_HASH_INVALID", err)
+	}
+	if _, found, err := s.UserByUsernameWithLoginMode(ctx, handle); err != nil || found {
+		t.Fatalf("handle found=%v err=%v, want no account", found, err)
+	}
+	listed, err := s.ListInvites(ctx)
+	if err != nil {
+		t.Fatalf("list invites after refusal: %v", err)
+	}
+	if len(listed) != 1 || listed[0].ID != invite.ID || listed[0].State != store.InviteIssued {
+		t.Fatalf("invites after refusal = %#v, want invite %d still issued", listed, invite.ID)
+	}
+	if after := countUsers(t, dsn); after != 1 {
+		t.Fatalf("users after disabled redemption = %d, want inviter only", after)
+	}
+}
+
+func TestSignUpUserInviteCannotClaimOperatorReservedHandle(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	s := openStore(t)
+	inviter, err := s.CreateUser(ctx, "+15551239803")
+	if err != nil {
+		t.Fatalf("create inviter: %v", err)
+	}
+	userInvite, secret, err := s.IssueUserInvite(ctx, inviter.ID)
+	if err != nil {
+		t.Fatalf("issue user invite: %v", err)
+	}
+	operatorInvite, _, err := s.IssueInvite(ctx, "operatorreserved")
+	if err != nil {
+		t.Fatalf("issue operator invite: %v", err)
+	}
+	hash, _, err := s.IssueCodeForUsername(ctx, "operatorreserved")
+	if err != nil {
+		t.Fatalf("issue phone code hash: %v", err)
+	}
+	if err := s.SaveAuthKey(ctx, 0x84, make([]byte, 256)); err != nil {
+		t.Fatal(err)
+	}
+	addr := netip.MustParseAddr("10.0.0.84")
+	if result, err := api.SignInForTestWithLimits(s, [8]byte{0x84}, addr, store.RateLimitConfig{}, &tg.AuthSignInRequest{
+		PhoneNumber: "operatorreserved", PhoneCodeHash: hash, PhoneCode: secret,
+	}); err != nil || !isAuthSignUpRequired(result) {
+		t.Fatalf("signIn result=%T err=%v, want sign-up required", result, err)
+	}
+	if _, err := api.SignUpForTestWithUserInviteQuota(s, [8]byte{0x84}, addr, store.RateLimitConfig{}, config.RegistrationInvite, 5, &tg.AuthSignUpRequest{
+		PhoneNumber: "operatorreserved", PhoneCodeHash: hash, FirstName: "Not Owner",
+	}); signUpRPCMessage(err) != "INVITE_HASH_INVALID" {
+		t.Fatalf("signUp error = %v, want INVITE_HASH_INVALID", err)
+	}
+	if _, found, err := s.UserByUsernameWithLoginMode(ctx, "operatorreserved"); err != nil || found {
+		t.Fatalf("reserved handle found=%v err=%v, want no account", found, err)
+	}
+	listed, err := s.ListInvites(ctx)
+	if err != nil {
+		t.Fatalf("list invites: %v", err)
+	}
+	for _, id := range []int64{userInvite.ID, operatorInvite.ID} {
+		found := false
+		for _, item := range listed {
+			if item.ID == id {
+				found = true
+				if item.State != store.InviteIssued {
+					t.Errorf("invite %d state = %q, want issued", id, item.State)
+				}
+			}
+		}
+		if !found {
+			t.Errorf("invite %d missing from list", id)
+		}
+	}
+}
+
+func TestSignUpOperatorInviteRejectsDifferentHandle(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	s := openStore(t)
+	invite, secret, err := s.IssueInvite(ctx, "operatorbound")
+	if err != nil {
+		t.Fatalf("issue operator invite: %v", err)
+	}
+	const requestedHandle = "differentoperator"
+	hash, _, err := s.IssueCodeForUsername(ctx, requestedHandle)
+	if err != nil {
+		t.Fatalf("issue phone code hash: %v", err)
+	}
+	if err := s.SaveAuthKey(ctx, 0x87, make([]byte, 256)); err != nil {
+		t.Fatal(err)
+	}
+	addr := netip.MustParseAddr("10.0.0.87")
+	if result, err := api.SignInForTestWithLimits(s, [8]byte{0x87}, addr, store.RateLimitConfig{}, &tg.AuthSignInRequest{
+		PhoneNumber: requestedHandle, PhoneCodeHash: hash, PhoneCode: secret,
+	}); err != nil || !isAuthSignUpRequired(result) {
+		t.Fatalf("signIn result=%T err=%v, want sign-up required", result, err)
+	}
+	if _, err := api.SignUpForTest(s, [8]byte{0x87}, addr, store.RateLimitConfig{}, config.RegistrationInvite, &tg.AuthSignUpRequest{
+		PhoneNumber: requestedHandle, PhoneCodeHash: hash, FirstName: "Wrong Handle",
+	}); signUpRPCMessage(err) != "INVITE_HASH_INVALID" {
+		t.Fatalf("signUp error = %v, want INVITE_HASH_INVALID", err)
+	}
+	if _, found, err := s.UserByUsernameWithLoginMode(ctx, requestedHandle); err != nil || found {
+		t.Fatalf("different handle found=%v err=%v, want no account", found, err)
+	}
+	if err := s.VerifyInvite(ctx, invite.Handle, secret); err != nil {
+		t.Fatalf("original operator invite was not left live: %v", err)
+	}
+}
+
+func TestConcurrentSignUpsWithOneUserInviteCreateExactlyOneAccount(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	s, dsn := openStoreDSN(t)
+	inviter, err := s.CreateUser(ctx, "+15551239804")
+	if err != nil {
+		t.Fatalf("create inviter: %v", err)
+	}
+	invite, secret, err := s.IssueUserInvite(ctx, inviter.ID)
+	if err != nil {
+		t.Fatalf("issue user invite: %v", err)
+	}
+	handles := []string{"concurrentinvitea", "concurrentinviteb"}
+	keys := [][8]byte{{0x85}, {0x86}}
+	hashes := make([]string, len(handles))
+	addr := netip.MustParseAddr("10.0.0.85")
+	for i, handle := range handles {
+		hash, _, err := s.IssueCodeForUsername(ctx, handle)
+		if err != nil {
+			t.Fatalf("issue phone code hash for %s: %v", handle, err)
+		}
+		hashes[i] = hash
+		if err := s.SaveAuthKey(ctx, int64(keys[i][0]), make([]byte, 256)); err != nil {
+			t.Fatalf("save auth key %x: %v", keys[i], err)
+		}
+		if result, err := api.SignInForTestWithLimits(s, keys[i], addr, store.RateLimitConfig{}, &tg.AuthSignInRequest{
+			PhoneNumber: handle, PhoneCodeHash: hash, PhoneCode: secret,
+		}); err != nil || !isAuthSignUpRequired(result) {
+			t.Fatalf("signIn for %s result=%T err=%v, want sign-up required", handle, result, err)
+		}
+	}
+	before := countUsers(t, dsn)
+	results := make([]error, len(handles))
+	ready := make(chan struct{})
+	var readyWG, wg sync.WaitGroup
+	readyWG.Add(len(handles))
+	wg.Add(len(handles))
+	for i := range handles {
+		go func(i int) {
+			defer wg.Done()
+			readyWG.Done()
+			<-ready
+			_, results[i] = api.SignUpForTestWithUserInviteQuota(s, keys[i], addr, store.RateLimitConfig{}, config.RegistrationInvite, 5, &tg.AuthSignUpRequest{
+				PhoneNumber: handles[i], PhoneCodeHash: hashes[i], FirstName: "Race",
+			})
+		}(i)
+	}
+	readyWG.Wait()
+	close(ready)
+	wg.Wait()
+	var succeeded, refused int
+	for i, err := range results {
+		switch {
+		case err == nil:
+			succeeded++
+		case signUpRPCMessage(err) == "INVITE_HASH_INVALID":
+			refused++
+		default:
+			t.Errorf("signUp for %s error = %v, want success or INVITE_HASH_INVALID", handles[i], err)
+		}
+	}
+	if succeeded != 1 || refused != 1 {
+		t.Fatalf("concurrent signups: succeeded=%d refused=%d, want 1/1", succeeded, refused)
+	}
+	if after := countUsers(t, dsn); after != before+1 {
+		t.Fatalf("users changed from %d to %d, want exactly one new account", before, after)
+	}
+	var redeemerID int64
+	conn, err := pgx.Connect(ctx, dsn)
+	if err != nil {
+		t.Fatalf("connect to inspect winning redeemer: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := conn.Close(ctx); err != nil {
+			t.Errorf("close redeemer inspection connection: %v", err)
+		}
+	})
+	if err := conn.QueryRow(ctx, `SELECT consumed_by_user_id FROM registration_invites WHERE id = $1`, invite.ID).Scan(&redeemerID); err != nil {
+		t.Fatalf("read winning redeemer: %v", err)
+	}
+	if redeemerID == 0 {
+		t.Fatal("consumed user invite has no redeemer")
 	}
 }
 
