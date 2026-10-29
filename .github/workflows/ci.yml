@@ -1326,10 +1326,17 @@ jobs:
       - ops-prioritize-main
       - ci-main
       - sticker-bundle
+      - lint
+      - sqlc
+      - docker
+      - compose
+      - smoke
+      - e2e-admin
       - photothumb-runtime
       - real-server-fixtures
       - websocket-d1
       - websocket-permanent-exchange
+      - mirror-rustfs-qualification-images
       - sql-lint
       - css
       - browser-acceptance
@@ -1348,10 +1355,17 @@ jobs:
           MAIN_PRIORITY_RESULT: ${{ needs.ops-prioritize-main.result }}
           CI_MAIN_RESULT: ${{ needs.ci-main.result }}
           STICKER_BUNDLE_RESULT: ${{ needs.sticker-bundle.result }}
+          LINT_RESULT: ${{ needs.lint.result }}
+          SQLC_RESULT: ${{ needs.sqlc.result }}
+          DOCKER_RESULT: ${{ needs.docker.result }}
+          COMPOSE_RESULT: ${{ needs.compose.result }}
+          SMOKE_RESULT: ${{ needs.smoke.result }}
+          E2E_ADMIN_RESULT: ${{ needs.e2e-admin.result }}
           PHOTOTHUMB_RUNTIME_RESULT: ${{ needs.photothumb-runtime.result }}
           REAL_SERVER_FIXTURES_RESULT: ${{ needs.real-server-fixtures.result }}
           WEBSOCKET_D1_RESULT: ${{ needs.websocket-d1.result }}
           WEB_PERMANENT_EXCHANGE_RESULT: ${{ needs.websocket-permanent-exchange.result }}
+          MIRROR_RUSTFS_RESULT: ${{ needs.mirror-rustfs-qualification-images.result }}
           SQL_LINT_RESULT: ${{ needs.sql-lint.result }}
           CSS_RESULT: ${{ needs.css.result }}
           BROWSER_ACCEPTANCE_RESULT: ${{ needs.browser-acceptance.result }}
@@ -1366,8 +1380,42 @@ jobs:
           if [[ "$GITHUB_EVENT_NAME" == pull_request ]]; then
             expected_priority_result=skipped
           fi
-          if [[ "$MAIN_PRIORITY_RESULT" != "$expected_priority_result" || "$CI_MAIN_RESULT" != "success" || "$STICKER_BUNDLE_RESULT" != "success" || "$PHOTOTHUMB_RUNTIME_RESULT" != "success" || "$REAL_SERVER_FIXTURES_RESULT" != "success" || "$WEBSOCKET_D1_RESULT" != "success" || "$WEB_PERMANENT_EXCHANGE_RESULT" != "success" || "$SQL_LINT_RESULT" != "success" || "$CSS_RESULT" != "success" || "$BROWSER_ACCEPTANCE_RESULT" != "success" || "$BROWSER_ACCEPTANCE_IMAGE_RESULT" != "success" || "$RUSTFS_TRANSITION_RESULT" != "success" || "$SCHEMA_GATE_POSTGRES_RESULT" != "success" || "$DEPLOY_WORKFLOW_RESULT" != "success" || "$DEMO_WEB_ARTIFACT_RESULT" != "success" || "$RESTORE_READINESS_RESULT" != "success" ]]; then
-            echo "::error::Required CI lanes did not pass (ops-prioritize-main=$MAIN_PRIORITY_RESULT, ci-main=$CI_MAIN_RESULT, sticker-bundle=$STICKER_BUNDLE_RESULT, photothumb-runtime=$PHOTOTHUMB_RUNTIME_RESULT, real-server-fixtures=$REAL_SERVER_FIXTURES_RESULT, websocket-d1=$WEBSOCKET_D1_RESULT, websocket-permanent-exchange=$WEB_PERMANENT_EXCHANGE_RESULT, sql-lint=$SQL_LINT_RESULT, css=$CSS_RESULT, browser-acceptance=$BROWSER_ACCEPTANCE_RESULT, browser-acceptance-image=$BROWSER_ACCEPTANCE_IMAGE_RESULT, rustfs-transition-qualification=$RUSTFS_TRANSITION_RESULT, schema-gate-postgres=$SCHEMA_GATE_POSTGRES_RESULT, deploy-workflow=$DEPLOY_WORKFLOW_RESULT, demo-web-artifact=$DEMO_WEB_ARTIFACT_RESULT, restore-readiness=$RESTORE_READINESS_RESULT)"
+          required_results=(
+            "ci-main=$CI_MAIN_RESULT"
+            "sticker-bundle=$STICKER_BUNDLE_RESULT"
+            "lint=$LINT_RESULT"
+            "sqlc=$SQLC_RESULT"
+            "docker=$DOCKER_RESULT"
+            "compose=$COMPOSE_RESULT"
+            "smoke=$SMOKE_RESULT"
+            "e2e-admin=$E2E_ADMIN_RESULT"
+            "photothumb-runtime=$PHOTOTHUMB_RUNTIME_RESULT"
+            "real-server-fixtures=$REAL_SERVER_FIXTURES_RESULT"
+            "websocket-d1=$WEBSOCKET_D1_RESULT"
+            "websocket-permanent-exchange=$WEB_PERMANENT_EXCHANGE_RESULT"
+            "mirror-rustfs-qualification-images=$MIRROR_RUSTFS_RESULT"
+            "sql-lint=$SQL_LINT_RESULT"
+            "css=$CSS_RESULT"
+            "browser-acceptance=$BROWSER_ACCEPTANCE_RESULT"
+            "browser-acceptance-image=$BROWSER_ACCEPTANCE_IMAGE_RESULT"
+            "rustfs-transition-qualification=$RUSTFS_TRANSITION_RESULT"
+            "schema-gate-postgres=$SCHEMA_GATE_POSTGRES_RESULT"
+            "deploy-workflow=$DEPLOY_WORKFLOW_RESULT"
+            "demo-web-artifact=$DEMO_WEB_ARTIFACT_RESULT"
+            "restore-readiness=$RESTORE_READINESS_RESULT"
+          )
+          failed_results=()
+          if [[ "$MAIN_PRIORITY_RESULT" != "$expected_priority_result" ]]; then
+            failed_results+=("ops-prioritize-main=$MAIN_PRIORITY_RESULT")
+          fi
+          for result in "${required_results[@]}"; do
+            if [[ "$result" != *=success ]]; then
+              failed_results+=("$result")
+            fi
+          done
+          if (( ${#failed_results[@]} > 0 )); then
+            echo "::error::Required CI lanes did not pass"
+            printf '%s\n' "${failed_results[@]}"
             exit 1
           fi
           echo "All required CI lanes passed"
@@ -3371,14 +3419,21 @@ jobs:
       packages: write
 
     steps:
+      - name: Skip image mirroring for fork pull requests
+        if: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository }}
+        run: echo "RustFS qualification images are mirrored only for same-repository pull requests"
+
       - uses: actions/checkout@v7.0.1
+        if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
 
       - name: Install Skopeo
+        if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
         run: |
           sudo apt-get update
           sudo apt-get install --no-install-recommends --yes skopeo
 
       - name: Mirror digest-pinned official images to GHCR
+        if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: bash .github/scripts/mirror_rustfs_qualification_images.sh
