@@ -110,7 +110,7 @@ jobs:
   check-sticker-license:
     name: 'check: sticker-license'
     needs: ops-prioritize-main
-    if: ${{ (github.event_name == 'pull_request' && !cancelled() || github.event_name != 'pull_request' && always()) && (needs.ops-prioritize-main.result == 'success' || (needs.ops-prioritize-main.result == 'skipped' && github.event_name == 'pull_request')) }}
+    if: ${{ (github.event_name == 'pull_request' && !cancelled() || github.event_name != 'pull_request' && always()) && (needs.ops-prioritize-main.result == 'success' || (needs.ops-prioritize-main.result == 'skipped' && (github.event_name == 'pull_request' || github.event_name == 'merge_group'))) }}
     runs-on: ubuntu-26.04
     timeout-minutes: 20
     permissions:
@@ -1350,6 +1350,8 @@ jobs:
 
   check-k8s-manifests:
     name: "check: k8s-manifests"
+    needs: ops-prioritize-main
+    if: ${{ always() && (needs.ops-prioritize-main.result == 'success' || (needs.ops-prioritize-main.result == 'skipped' && github.event_name == 'pull_request')) }}
     runs-on: ubuntu-26.04
     timeout-minutes: 15
     permissions:
@@ -1444,7 +1446,9 @@ jobs:
   test-k8s-deploy:
     name: "test: k8s-deploy"
     needs:
-      - sticker-bundle
+      - ops-prioritize-main
+      - check-sticker-license
+    if: ${{ always() && (needs.ops-prioritize-main.result == 'success' || (needs.ops-prioritize-main.result == 'skipped' && (github.event_name == 'pull_request' || github.event_name == 'merge_group'))) && needs.check-sticker-license.result == 'success' }}
     runs-on: ubuntu-26.04
     timeout-minutes: 35
     permissions:
@@ -1699,7 +1703,7 @@ jobs:
 
   ci:
     name: ci
-    if: ${{ always() && (needs.ops-prioritize-main.result == 'success' || needs.ops-prioritize-main.result == 'failure' || needs.ops-prioritize-main.result == 'cancelled' || (needs.ops-prioritize-main.result == 'skipped' && github.event_name == 'pull_request')) }}
+    if: ${{ always() && (needs.ops-prioritize-main.result == 'success' || needs.ops-prioritize-main.result == 'failure' || needs.ops-prioritize-main.result == 'cancelled' || (needs.ops-prioritize-main.result == 'skipped' && (github.event_name == 'pull_request' || github.event_name == 'merge_group'))) }}
     needs:
       - ops-prioritize-main
       - test-go
@@ -1752,6 +1756,14 @@ jobs:
           K8S_MANIFESTS_RESULT: ${{ needs.check-k8s-manifests.result }}
           K8S_DEPLOY_RESULT: ${{ needs.test-k8s-deploy.result }}
         run: |
+          if [[ "$GITHUB_EVENT_NAME" == merge_group ]]; then
+            if [[ "$MAIN_PRIORITY_RESULT" != skipped || "$K8S_DEPLOY_RESULT" != success ]]; then
+              echo "::error::Merge-group deployment lane did not pass (ops-prioritize-main=$MAIN_PRIORITY_RESULT, k8s-deploy=$K8S_DEPLOY_RESULT)"
+              exit 1
+            fi
+            echo "Merge-group deployment lane passed"
+            exit 0
+          fi
           expected_priority_result=success
           if [[ "$GITHUB_EVENT_NAME" == pull_request ]]; then
             expected_priority_result=skipped
@@ -1812,10 +1824,20 @@ jobs:
     name: "publish: k8s-images"
     if: >-
       ${{
+        always() &&
+        (needs.ops-prioritize-main.result == 'success' ||
+          (needs.ops-prioritize-main.result == 'skipped' &&
+            github.event_name == 'pull_request')) &&
+        needs.ci.result == 'success' &&
+        needs.check-k8s-manifests.result == 'success' &&
+        needs.test-k8s-deploy.result == 'success' &&
+        (
         (github.event_name == 'push' && github.ref == 'refs/heads/main') ||
         (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository)
+        )
       }}
     needs:
+      - ops-prioritize-main
       - ci
       - check-k8s-manifests
       - test-k8s-deploy
