@@ -11,4 +11,8 @@ FROM mirror.gcr.io/library/alpine:3.22
 COPY --from=build /go/bin/mc /usr/local/bin/mc
 COPY deploy/rustfs/init.sh /usr/local/bin/rustfs-init.sh
 
+ARG TEAGRAMD_SOURCE_REVISION
+LABEL org.opencontainers.image.source="https://github.com/teagramhq/teagram-server" \
+      org.opencontainers.image.revision="${TEAGRAMD_SOURCE_REVISION}"
+
 ENTRYPOINT ["mc"]

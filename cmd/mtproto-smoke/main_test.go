@@ -8,6 +8,8 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -64,6 +66,13 @@ func TestProbePerformsObfuscatedAbridgedAuthKeyExchange(t *testing.T) {
 
 	if err := probe(ctx, listener.Addr().String(), discoveryServer.URL, discoveryServer.Client()); err != nil {
 		t.Fatalf("probe MTProto listener: %v", err)
+	}
+	discoveryPath := filepath.Join(t.TempDir(), "client.json")
+	if err := os.WriteFile(discoveryPath, body, 0o600); err != nil {
+		t.Fatalf("write local client discovery: %v", err)
+	}
+	if err := probeFile(ctx, listener.Addr().String(), discoveryPath); err != nil {
+		t.Fatalf("probe MTProto listener with local client discovery: %v", err)
 	}
 }
 
