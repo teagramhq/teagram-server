@@ -502,7 +502,7 @@ class LinkEdgeControl:
         for name, service in services.items():
             if not isinstance(service, dict):
                 raise ControlFailure("compose_policy_failed")
-            expected_environment = expected_invite_environment if name in {"linklanding", "selector"} else {}
+            expected_environment = expected_invite_environment if name in {"linklanding", "selector", "web"} else {}
             if (
                 service.get("read_only") is not True
                 or service.get("cap_drop") != ["ALL"]

@@ -38,6 +38,9 @@ services:
     image: ${LINK_EDGE_CONTROL_PROJECT:?required}-linklanding:control
     pull_policy: never
     command: ["-listen-address", "0.0.0.0", "-port", "8080"]
+    environment:
+      TG_INVITE_WEB_SIGNUP_URL: ${TG_INVITE_WEB_SIGNUP_URL:?required}
+      TG_INVITE_DESKTOP_URL: ${TG_INVITE_DESKTOP_URL:-}
     networks:
       - web-edge
     read_only: true

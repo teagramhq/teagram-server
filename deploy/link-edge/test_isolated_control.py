@@ -159,7 +159,14 @@ class TimingAndCleanupTests(unittest.TestCase):
                     "depends_on": {"linklanding": {"condition": "service_healthy"}},
                     "healthcheck": {"test": ["CMD", "/usr/local/bin/linkprobe", "selector"]},
                 },
-                "web": {**secure_service, "networks": {"web-edge": None}},
+                "web": {
+                    **secure_service,
+                    "environment": {
+                        "TG_INVITE_WEB_SIGNUP_URL": "https://web.example.invalid/signup",
+                        "TG_INVITE_DESKTOP_URL": "",
+                    },
+                    "networks": {"web-edge": None},
+                },
                 "probe": {
                     **secure_service,
                     "networks": {"private-edge": None},
