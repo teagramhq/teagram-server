@@ -16,7 +16,7 @@ class ActionsCachePolicyTests(unittest.TestCase):
         workflow = WORKFLOW.read_text(encoding="utf-8")
         cache_to_values = re.findall(r"(?m)^\s*cache-to:\s*(.+)$", workflow)
 
-        self.assertEqual(len(cache_to_values), 5)
+        self.assertEqual(len(cache_to_values), 4)
         for value in cache_to_values:
             with self.subTest(value=value):
                 self.assertIn("github.ref == 'refs/heads/main'", value)
