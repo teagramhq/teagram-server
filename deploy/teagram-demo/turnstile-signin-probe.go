@@ -39,57 +39,67 @@ type clientConfig struct {
 
 func main() {
 	if len(os.Args) != 2 || (os.Args[1] != "active" && os.Args[1] != "disabled") {
-		fatal("usage: go run ./deploy/teagram-demo/turnstile-signin-probe.go active|disabled")
+		fatalf("usage: go run ./deploy/teagram-demo/turnstile-signin-probe.go active|disabled")
 	}
 	mode := os.Args[1]
 	siteKey := os.Getenv("TEAGRAM_DEMO_TURNSTILE_SITE_KEY")
 	if siteKey == "" {
-		fatal("TEAGRAM_DEMO_TURNSTILE_SITE_KEY is required")
+		fatalf("TEAGRAM_DEMO_TURNSTILE_SITE_KEY is required")
 	}
 
-	cfg, key := discover()
 	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
 	defer cancel()
+	cfg, key, err := discover(ctx)
+	if err != nil {
+		fatalf("discovery: %v", err)
+	}
 	if err := runPublic(ctx, cfg, key, siteKey, mode); err != nil {
-		fatal("public probe: %v", err)
+		fatalf("public probe: %v", err)
 	}
 	fmt.Println("public_probe=pass")
 }
 
-func discover() (clientConfig, *rsa.PublicKey) {
+func discover(ctx context.Context) (cfg clientConfig, publicKey *rsa.PublicKey, returnErr error) {
 	client := &http.Client{Timeout: 10 * time.Second}
-	resp, err := client.Get(discoveryURL)
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, discoveryURL, nil)
 	if err != nil {
-		fatal("fetch discovery document: %v", err)
+		return clientConfig{}, nil, fmt.Errorf("create discovery request: %w", err)
 	}
-	defer resp.Body.Close()
+	resp, err := client.Do(request)
+	if err != nil {
+		return clientConfig{}, nil, fmt.Errorf("fetch discovery document: %w", err)
+	}
+	defer func() {
+		if closeErr := resp.Body.Close(); closeErr != nil {
+			returnErr = errors.Join(returnErr, fmt.Errorf("close discovery response: %w", closeErr))
+		}
+	}()
 	if resp.StatusCode != http.StatusOK {
-		fatal("discovery status=%d", resp.StatusCode)
+		return clientConfig{}, nil, fmt.Errorf("discovery status=%d", resp.StatusCode)
 	}
-	var cfg clientConfig
 	if err := json.NewDecoder(resp.Body).Decode(&cfg); err != nil {
-		fatal("decode discovery document: %v", err)
+		return clientConfig{}, nil, fmt.Errorf("decode discovery document: %w", err)
 	}
 	if cfg.MTProto.DCID <= 0 || cfg.WebSocket.Endpoint == "" {
-		fatal("discovery document lacks a DC or WebSocket endpoint")
+		return clientConfig{}, nil, errors.New("discovery document lacks a DC or WebSocket endpoint")
 	}
 	endpoint, err := url.Parse(cfg.WebSocket.Endpoint)
 	if err != nil || endpoint.Scheme != "wss" || endpoint.Host == "" || endpoint.Path != "/apiws" {
-		fatal("discovery WebSocket endpoint is not the expected public route")
+		return clientConfig{}, nil, errors.New("discovery WebSocket endpoint is not the expected public route")
 	}
 	der, err := base64.StdEncoding.DecodeString(cfg.MTProto.RSASPKI)
 	if err != nil {
-		fatal("decode discovery RSA key")
+		return clientConfig{}, nil, errors.New("decode discovery RSA key")
 	}
 	parsed, err := x509.ParsePKIXPublicKey(der)
 	if err != nil {
-		fatal("parse discovery RSA key")
+		return clientConfig{}, nil, errors.New("parse discovery RSA key")
 	}
 	key, ok := parsed.(*rsa.PublicKey)
 	if !ok {
-		fatal("discovery key is not RSA")
+		return clientConfig{}, nil, errors.New("discovery key is not RSA")
 	}
-	return cfg, key
+	return cfg, key, nil
 }
 
 func runPublic(ctx context.Context, cfg clientConfig, key *rsa.PublicKey, siteKey, mode string) error {
@@ -153,7 +163,7 @@ func unexpected(operation string, err error) error {
 	if rpc, ok := tgerr.As(err); ok {
 		message := rpc.Message
 		if strings.HasPrefix(message, "RECAPTCHA_CHECK_") {
-			prefix := strings.SplitN(message, "__", 2)[0]
+			prefix, _, _ := strings.Cut(message, "__")
 			message = prefix + "__<redacted>"
 		}
 		return fmt.Errorf("%s returned RPC message %s", operation, message)
@@ -161,7 +171,7 @@ func unexpected(operation string, err error) error {
 	return fmt.Errorf("%s returned %T", operation, errors.Unwrap(err))
 }
 
-func fatal(format string, args ...any) {
+func fatalf(format string, args ...any) {
 	fmt.Fprintf(os.Stderr, format+"\n", args...)
 	os.Exit(1)
 }
