@@ -1130,6 +1130,8 @@ jobs:
           bash -n deploy/teagram/test-preflight-replay.sh
           bash -n deploy/teagram/teagram-logs.sh
           sh -n deploy/teagram/teagram-ops.sh
+          bash -n deploy/teagram/ops/invite-web-signup-url.sh
+          bash -n deploy/teagram/test-invite-web-signup-url.sh
           bash -n deploy/teagram/ops/replay-check.sh
           bash -n deploy/teagram/ops/rollout-evidence.sh
           bash -n deploy/teagram/test-teagram-logs.sh
@@ -1166,6 +1168,8 @@ jobs:
             deploy/teagram/test-preflight-replay.sh \
             deploy/teagram/teagram-logs.sh \
             deploy/teagram/teagram-ops.sh \
+            deploy/teagram/ops/invite-web-signup-url.sh \
+            deploy/teagram/test-invite-web-signup-url.sh \
             deploy/teagram/ops/replay-check.sh \
             deploy/teagram/ops/rollout-evidence.sh \
             deploy/teagram/test-teagram-logs.sh \
@@ -1203,6 +1207,9 @@ jobs:
 
       - name: Check deploy script target fixtures
         run: deploy/teagram/test-deploy-main.sh
+
+      - name: Check invite signup URL operation fixtures
+        run: sudo -n env "PATH=$PATH" bash deploy/teagram/test-invite-web-signup-url.sh
 
       - name: Check read-only Compose preflight replay
         run: sudo -n deploy/teagram/test-preflight-replay.sh
