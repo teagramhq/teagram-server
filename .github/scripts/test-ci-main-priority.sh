@@ -72,9 +72,15 @@ printf '%s\n' "$dispatch_step" | bash -n
   fail 'the recovery workflow timeout must cover its three-hour cancellation wait'
 [[ "$(recovery_query '.jobs."rerun-cancelled-pr-ci".permissions.actions')" == write ]] ||
   fail 'only the recovery job needs Actions write permission to rerun cancelled runs'
+[[ "$(recovery_query '.jobs."rerun-cancelled-pr-ci".permissions."pull-requests"')" == read ]] ||
+  fail 'the recovery job needs read-only PR access to avoid rerunning stale heads'
 rerun_step="$(recovery_query '.jobs."rerun-cancelled-pr-ci".steps[] | select(.name == "Wait for cancellation cleanup and re-run PR CI") | .run')"
 [[ "$rerun_step" == *'actions/workflows/ci.yml/runs'* && "$rerun_step" == *'--paginate'* && "$rerun_step" == *'--method GET'* && "$rerun_step" == *'created=>=$oldest_created_at'* && "$rerun_step" != *'/actions/runs/${run_id}'* ]] ||
   fail 'recovery must poll all outstanding runs together through the workflow runs list'
+[[ "$rerun_step" == *'.head_sha'* && "$rerun_step" == *'.pull_requests // []'* && "$rerun_step" == *'.number'* ]] ||
+  fail 'recovery must read each cancelled run head SHA and associated pull request numbers'
+[[ "$rerun_step" == *'pulls/${pull_request_number}'* && "$rerun_step" == *'pull_request_head_sha" != "$run_head_sha"'* && "$rerun_step" == *'pull_request_state" != open'* && "$rerun_step" == *'Skipping cancelled pull request CI run'* ]] ||
+  fail 'recovery must skip closed PRs and runs whose head no longer matches the PR'
 [[ "$rerun_step" == *'declare -A outstanding_pr_run_ids'* && "$rerun_step" == *'max_status_checks=181'* && "$rerun_step" == *'sleep 60'* && "$rerun_step" == *'gh run rerun "$run_id" --repo "$GITHUB_REPOSITORY"'* && "$rerun_step" == *'Could not re-run cancelled pull request CI run'* && "$rerun_step" == *'Could not confirm cancelled pull request CI runs'* ]] ||
   fail 'grouped recovery must retry, rerun completed cancellations, and report unresolved runs'
 printf '%s\n' "$rerun_step" | bash -n
@@ -83,29 +89,48 @@ test_tmp="$(mktemp -d)"
 trap 'rm -rf "$test_tmp"' EXIT
 gh() {
   if [[ "$1" == api ]]; then
-    [[ "$2" == --paginate && "$3" == --method && "$4" == GET && "$5" == "repos/${GITHUB_REPOSITORY}/actions/workflows/ci.yml/runs" && " $* " == *' -f event=pull_request '* && " $* " == *'created=>='* ]] || return 2
-    local reads=0
-    [[ ! -f "$STATUS_READS_FILE" ]] || reads="$(<"$STATUS_READS_FILE")"
-    reads=$((reads + 1))
-    printf '%s\n' "$reads" > "$STATUS_READS_FILE"
-    case "$STATUS_MODE" in
-      after-old-bound)
-        if (( reads >= 10 )); then
-          printf '123\tcompleted\tcancelled\n'
-        else
-          printf '123\tin_progress\t\n'
-        fi
-        ;;
-      staggered)
-        case "$reads" in
-          1) printf '123\tin_progress\t\n456\tin_progress\t\n' ;;
-          2) printf '123\tcompleted\tcancelled\n456\tin_progress\t\n' ;;
-          *) printf '123\tcompleted\tcancelled\n456\tcompleted\tcancelled\n' ;;
-        esac
-        ;;
-      *) printf '123\tin_progress\t\n' ;;
-    esac
-    return 0
+    if [[ "$2" == --paginate ]]; then
+      [[ "$3" == --method && "$4" == GET && "$5" == "repos/${GITHUB_REPOSITORY}/actions/workflows/ci.yml/runs" && " $* " == *' -f event=pull_request '* && " $* " == *'created=>='* ]] || return 2
+      local reads=0
+      [[ ! -f "$STATUS_READS_FILE" ]] || reads="$(<"$STATUS_READS_FILE")"
+      reads=$((reads + 1))
+      printf '%s\n' "$reads" > "$STATUS_READS_FILE"
+      case "$STATUS_MODE" in
+        after-old-bound)
+          if (( reads >= 10 )); then
+            printf '123\tcompleted\tcancelled\taaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\t123\n'
+          else
+            printf '123\tin_progress\t\taaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\t123\n'
+          fi
+          ;;
+        stale-head)
+          printf '123\tcompleted\tcancelled\taaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\t123\n'
+          ;;
+        closed-pr)
+          printf '123\tcompleted\tcancelled\taaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\t123\n'
+          ;;
+        staggered)
+          case "$reads" in
+            1) printf '123\tin_progress\t\taaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\t123\n456\tin_progress\t\tbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\t456\n' ;;
+            2) printf '123\tcompleted\tcancelled\taaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\t123\n456\tin_progress\t\tbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\t456\n' ;;
+            *) printf '123\tcompleted\tcancelled\taaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\t123\n456\tcompleted\tcancelled\tbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\t456\n' ;;
+          esac
+          ;;
+        *) printf '123\tin_progress\t\taaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\t123\n' ;;
+      esac
+      return 0
+    fi
+    if [[ "$2" == "repos/${GITHUB_REPOSITORY}/pulls/123" || "$2" == "repos/${GITHUB_REPOSITORY}/pulls/456" ]]; then
+      [[ "$3" == --jq && "$4" == '[.state, .head.sha] | @tsv' ]] || return 2
+      case "$STATUS_MODE:$2" in
+        stale-head:*/pulls/123) printf 'open\tbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\n' ;;
+        closed-pr:*/pulls/123) printf 'closed\taaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n' ;;
+        *:*/pulls/123) printf 'open\taaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n' ;;
+        *:*/pulls/456) printf 'open\tbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\n' ;;
+      esac
+      return 0
+    fi
+    return 2
   fi
   if [[ "$1" == run && "$2" == rerun ]]; then
     printf '%s\n' "$3" >> "$RERUN_LOG"
@@ -137,6 +162,28 @@ GITHUB_REPOSITORY=example/repo \
   fail 'the requeue step must stop after the bounded status checks without rerunning an active cancellation'
 [[ "$(<"$test_tmp/bounded-output")" == *'after 181 status checks'* ]] ||
   fail 'the requeue step must warn when cancellation does not finish within the bound'
+
+STATUS_MODE=stale-head \
+STATUS_READS_FILE="$test_tmp/stale-head-reads" \
+RERUN_LOG="$test_tmp/stale-head-reruns" \
+CANCELLED_PR_RUN_TARGETS=123:2026-10-28T00:00:00Z \
+ISSUE=MAIN-2765 \
+GITHUB_REPOSITORY=example/repo \
+  bash -c "$rerun_step" > "$test_tmp/stale-head-output" || fail 'a cancelled run for an older PR head must be skipped'
+[[ "$(<"$test_tmp/stale-head-reads")" == 1 && ! -e "$test_tmp/stale-head-reruns" ]] ||
+  fail 'recovery must not rerun a cancelled run after its PR head has moved'
+[[ "$(<"$test_tmp/stale-head-output")" == *'not the cancelled run head'* ]] ||
+  fail 'recovery must report why a stale-head run was skipped'
+
+STATUS_MODE=closed-pr \
+STATUS_READS_FILE="$test_tmp/closed-pr-reads" \
+RERUN_LOG="$test_tmp/closed-pr-reruns" \
+CANCELLED_PR_RUN_TARGETS=123:2026-10-28T00:00:00Z \
+ISSUE=MAIN-2765 \
+GITHUB_REPOSITORY=example/repo \
+  bash -c "$rerun_step" > "$test_tmp/closed-pr-output" || fail 'a cancelled run for a closed PR must be skipped'
+[[ "$(<"$test_tmp/closed-pr-reads")" == 1 && ! -e "$test_tmp/closed-pr-reruns" ]] ||
+  fail 'recovery must not rerun a cancelled run after its PR has closed'
 
 STATUS_MODE=staggered \
 STATUS_READS_FILE="$test_tmp/staggered-reads" \
