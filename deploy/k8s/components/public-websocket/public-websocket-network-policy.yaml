@@ -10,10 +10,7 @@ spec:
     - Ingress
   ingress:
     - from:
-        - namespaceSelector:
-            matchLabels:
-              kubernetes.io/metadata.name: cloudflared
-          podSelector:
+        - podSelector:
             matchLabels:
               app.kubernetes.io/name: cloudflared
       ports:

@@ -39,6 +39,11 @@ spec:
               valueFrom:
                 fieldRef:
                   fieldPath: metadata.name
+            - name: TG_RSA_KEY_FINGERPRINT
+              valueFrom:
+                configMapKeyRef:
+                  name: teagramd-public-identity
+                  key: TG_RSA_KEY_FINGERPRINT
         - name: public-haproxy
           image: mirror.gcr.io/library/haproxy:3.2-alpine@sha256:51f173c6825753d9e3a888b1004a1c2cb730936cc9178730a5c555246bd161a2
           args:

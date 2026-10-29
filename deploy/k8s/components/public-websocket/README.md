@@ -10,7 +10,7 @@ Kustomization's `components` list.
 HAProxy and teagramd share a Pod network namespace. HAProxy sends PROXY v2 to
 `127.0.0.1:2447`, and the app trusts only `127.0.0.1/32`. The Service is
 ClusterIP-only. The NetworkPolicy permits its public port only from pods labeled
-`app.kubernetes.io/name: cloudflared` in the `cloudflared` namespace. Keep the
+`app.kubernetes.io/name: cloudflared` in the `teagram` namespace. Keep the
 Cloudflare connector in that namespace with that label and point the tunnel's
 `server.teagram.io` ingress at
 `http://teagramd-public.teagram.svc.cluster.local:2446`.
@@ -25,7 +25,9 @@ allowlist stays `https://web.teagram.io`.
 
 The `teagramd-public` deployment must have two replicas while
 `TG_REPLICA_COUNT=2`; change both values together so process-local admission
-limits retain their intended total. This component deliberately does not
+limits retain their intended total. Supply a `teagramd-public-identity`
+ConfigMap containing `TG_RSA_KEY_FINGERPRINT`, matching the primary server
+identity created by `teagramd ensure-identity`. This component deliberately does not
 publish the ordinary MTProto or WebSocket ports. During a rollout HAProxy
 soft-stops accepting new connections and waits up to the app's 90-second drain
 window before Kubernetes sends its final termination signal.
