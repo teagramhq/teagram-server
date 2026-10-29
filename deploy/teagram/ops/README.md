@@ -54,3 +54,15 @@ an existing different or duplicate target, or any `TG_INVITE_DESKTOP_URL`
 assignment. The target is the live Web app root at
 `https://web.teagram.io/`; the `/signup` path is not the app route. To undo the
 addition, run `ssh teagram run <main-sha> invite-web-signup-url --rollback`.
+
+`apply-tailnet-exchange-limit.sh` is a one-shot operation for MAIN-2478 and
+takes no arguments. It requires the live checkout and container to be at the
+same reviewed `main` revision, the approved Compose selection, and the live
+`.env` plus `/root/.env.main-2478-pre-key-exchange-20261025T170009Z` to match
+the recorded environment digest byte for byte. It adds only
+`TG_RATE_LIMIT_KEY_EXCHANGE_IP_TAILNET=0`, then calls the rollout runner with
+`ROLLOUT_RUNNER_ADDED_ENV` and that pre-change backup. The runner takes its
+verified database backup and restores the previous container and `.env` if a
+target gate fails. The operation reports success only when the runner record,
+live container value, and retained public, per-connection, and global budgets
+all verify.
