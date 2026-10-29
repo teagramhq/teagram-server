@@ -34,6 +34,7 @@ export OPS_SHA TARGET_SHA OFF_MAIN_SHA OLD_MAIN_SHA CONTAINER_ID \
 export MOCK_CURRENT_SHA="$TARGET_SHA" MOCK_REPO="$tmp/repo"
 export MOCK_REPORT_SCRIPT="$failure_report_script"
 export MOCK_EVIDENCE_SCRIPT="$evidence_script"
+export MOCK_INVITE_SCRIPT="$tmp/invite-web-signup-url.sh"
 export MOCK_RUN_TEMP_LOG="$tmp/run-temp.log" MOCK_RM_LOG="$tmp/rm.log"
 export MOCK_ROOT="$tmp/root"
 export MOCK_RETIRED_SCRIPT_MARKER="$tmp/retired-operation-ran"
@@ -61,6 +62,7 @@ case "$1" in
     case "${3:-}" in
       "$OPS_SHA:deploy/teagram/ops/target-failure-report.sh"|\
       "$OPS_SHA:deploy/teagram/ops/rollout-evidence.sh"|\
+      "$OPS_SHA:deploy/teagram/ops/invite-web-signup-url.sh"|\
       "$OLD_MAIN_SHA:deploy/teagram/ops/preflight-replay.sh"|\
       "$OLD_MAIN_SHA:deploy/teagram/ops/replay-check.sh") ;;
       *) exit 1 ;;
@@ -74,6 +76,9 @@ case "$1" in
       "$OPS_SHA:deploy/teagram/ops/rollout-evidence.sh")
         sed -e "s|/root|$MOCK_ROOT|g" \
           -e "s|0:700|$MOCK_OWNER_UID:700|g" -e "s|0:600|$MOCK_OWNER_UID:600|g" "$MOCK_EVIDENCE_SCRIPT"
+        ;;
+      "$OPS_SHA:deploy/teagram/ops/invite-web-signup-url.sh")
+        cat "$MOCK_INVITE_SCRIPT"
         ;;
       "$OLD_MAIN_SHA:deploy/teagram/ops/preflight-replay.sh"|\
       "$OLD_MAIN_SHA:deploy/teagram/ops/replay-check.sh")
@@ -137,6 +142,14 @@ printf 'log_reader=%s\n' "${SSH_ORIGINAL_COMMAND:-}"
 LOGS
 chmod 755 "$tmp/bin/"*
 
+cat > "$MOCK_INVITE_SCRIPT" <<'INVITE'
+#!/usr/bin/env bash
+set -euo pipefail
+printf 'invite-operation args:'
+printf ' <%s>' "$@"
+printf '\n'
+INVITE
+
 sed \
   -e "s|/opt/teagram|$tmp/repo|g" \
   -e "s|0:700|$MOCK_OWNER_UID:700|g" \
@@ -175,7 +188,7 @@ fingerprints=$(run_command fingerprints)
 for help in help -h --help; do
   help_output=$(run_command "$help" 2>&1)
   [[ "$help_output" == *'hostname'* && "$help_output" == *'env-names'* && "$help_output" == *'run'* ]]
-  [[ "$help_output" == *'target-failure-report|rollout-evidence'* ]]
+  [[ "$help_output" == *'target-failure-report|rollout-evidence|invite-web-signup-url'* ]]
 done
 
 report_dir="$MOCK_ROOT/main1238-${REPORT_PREFIX}-20261027T124539Z.target"
@@ -188,6 +201,13 @@ report_output=$(run_command "run $OPS_SHA target-failure-report $REPORT_PREFIX")
 [[ "$report_output" == *"target_sha=$REPORT_TARGET_SHA"* && \
   "$report_output" == *'target_failure_gate=target_readiness_rejected_exit_1'* && \
   "$report_output" == *'readiness_result=failed'* ]]
+
+invite_check=$(run_command "run $OPS_SHA invite-web-signup-url --check")
+[[ "$invite_check" == 'invite-operation args: <--check>' ]]
+invite_apply=$(run_command "run $OPS_SHA invite-web-signup-url")
+[[ "$invite_apply" == 'invite-operation args: <>' ]]
+invite_rollback=$(run_command "run $OPS_SHA invite-web-signup-url --rollback")
+[[ "$invite_rollback" == 'invite-operation args: <--rollback>' ]]
 
 sentinel="$tmp/arbitrary-command-ran"
 expect_status 64 "touch $sentinel"
@@ -275,7 +295,7 @@ expect_status 64 "run $OPS_SHA rollout-evidence extra"
 
 mapfile -t runner_temps < "$MOCK_RUN_TEMP_LOG"
 mapfile -t removed_temps < "$MOCK_RM_LOG"
-[[ "${#runner_temps[@]}" == 4 && "${#removed_temps[@]}" == "${#runner_temps[@]}" ]]
+[[ "${#runner_temps[@]}" == 7 && "${#removed_temps[@]}" == "${#runner_temps[@]}" ]]
 for index in "${!runner_temps[@]}"; do
   runner_temp=${runner_temps[$index]}
   [[ "$runner_temp" == /tmp/teagram-ops.* && "${removed_temps[$index]}" == "$runner_temp" && ! -e "$runner_temp" ]]
