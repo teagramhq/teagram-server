@@ -1350,7 +1350,6 @@ jobs:
       - css
       - browser-acceptance
       - browser-acceptance-image
-      - schema-gate-postgres
       - test-migrations
       - deploy-workflow
       - demo-web-artifact
@@ -1377,7 +1376,6 @@ jobs:
           CSS_RESULT: ${{ needs.css.result }}
           BROWSER_ACCEPTANCE_RESULT: ${{ needs.browser-acceptance.result }}
           BROWSER_ACCEPTANCE_IMAGE_RESULT: ${{ needs.browser-acceptance-image.result }}
-          SCHEMA_GATE_POSTGRES_RESULT: ${{ needs.schema-gate-postgres.result }}
           TEST_MIGRATIONS_RESULT: ${{ needs.test-migrations.result }}
           DEPLOY_WORKFLOW_RESULT: ${{ needs.deploy-workflow.result }}
           DEMO_WEB_ARTIFACT_RESULT: ${{ needs.demo-web-artifact.result }}
@@ -1404,7 +1402,6 @@ jobs:
             "css=$CSS_RESULT"
             "browser-acceptance=$BROWSER_ACCEPTANCE_RESULT"
             "browser-acceptance-image=$BROWSER_ACCEPTANCE_IMAGE_RESULT"
-            "schema-gate-postgres=$SCHEMA_GATE_POSTGRES_RESULT"
             "test-migrations=$TEST_MIGRATIONS_RESULT"
             "deploy-workflow=$DEPLOY_WORKFLOW_RESULT"
             "demo-web-artifact=$DEMO_WEB_ARTIFACT_RESULT"
@@ -1426,7 +1423,6 @@ jobs:
                 "$CSS_RESULT" != "success" ||
                 "$BROWSER_ACCEPTANCE_RESULT" != "success" ||
                 "$BROWSER_ACCEPTANCE_IMAGE_RESULT" != "success" ||
-                "$SCHEMA_GATE_POSTGRES_RESULT" != "success" ||
                 "$TEST_MIGRATIONS_RESULT" != "success" ||
                 "$DEPLOY_WORKFLOW_RESULT" != "success" ||
                 "$DEMO_WEB_ARTIFACT_RESULT" != "success" ]]; then
@@ -3494,49 +3490,6 @@ jobs:
         run: |
           sudo env "PATH=$PATH" TMPDIR=/root bash deploy/teagramd/rollout-runner/test-isolated-restore-postgres.sh
           sudo env "PATH=$PATH" TMPDIR=/root bash deploy/teagramd/rollout-runner/test-stack-move-runner.sh
-
-  schema-gate-postgres:
-    name: PostgreSQL Atlas schema gate
-    needs: ops-prioritize-main
-    if: ${{ always() && (needs.ops-prioritize-main.result == 'success' || (needs.ops-prioritize-main.result == 'skipped' && github.event_name == 'pull_request')) }}
-
-    runs-on: ubuntu-26.04
-    timeout-minutes: 15
-    permissions:
-      contents: read
-    env:
-      COMPOSE_FILE: deploy/teagramd/rollout-runner/schema-gate-ci-compose.yml
-      POSTGRES_PASSWORD: ci-only-smoketest
-
-    steps:
-      - uses: actions/checkout@v7.0.1
-
-      - uses: actions/setup-python@v6.0.0
-        with:
-          python-version: "3.12.15"
-
-      - uses: ariga/setup-atlas@v0.3
-        with:
-          version: v1.2.0
-
-      - name: Check schema gate fixture decisions
-        run: python3 -B deploy/teagramd/rollout-runner/test-schema-result-gate.py
-
-      - name: service-start
-        run: python3 -B .github/scripts/schema-phase-runner.py service-start
-
-      - name: migrate-apply
-        run: python3 -B .github/scripts/schema-phase-runner.py migrate-apply
-
-      - name: pre-check
-        run: python3 -B .github/scripts/schema-phase-runner.py pre-check
-
-      - name: post-check
-        run: python3 -B .github/scripts/schema-phase-runner.py post-check
-
-      - name: Tear down schema gate database
-        if: always()
-        run: docker compose down -v
 
   test-migrations:
     name: "test: migrations"

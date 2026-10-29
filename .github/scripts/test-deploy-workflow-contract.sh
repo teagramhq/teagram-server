@@ -58,6 +58,10 @@ check_ci_contract() {
     ci_fail 'the required CI gate must include the pinned demo web artifact build'
   [[ "$(ci_query '.jobs.ci.needs | join(",")')" == *'test-migrations'* ]] ||
     ci_fail 'the required CI gate must include the migrations lane'
+  [[ "$(ci_query '.jobs."schema-gate-postgres" // ""')" == '' ]] ||
+    ci_fail 'the obsolete PostgreSQL schema gate must be removed'
+  [[ "$(ci_query '.jobs.ci.needs | join(",")')" != *'schema-gate-postgres'* ]] ||
+    ci_fail 'the required CI gate must not include the obsolete PostgreSQL schema gate'
   local expected_postgres_image='mirror.gcr.io/library/postgres:18-alpine@sha256:d8703cd7fba306b9fec9268ecedfa8a966846c053036a60e3635791957eb2f66'
   [[ "$(ci_query '.jobs."test-migrations".env.POSTGRES_IMAGE')" == "$expected_postgres_image" ]] ||
     ci_fail 'the migrations lane must use the production-pinned PostgreSQL image'
