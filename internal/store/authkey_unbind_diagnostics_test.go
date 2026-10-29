@@ -104,6 +104,36 @@ func TestResetAuthorizationsWritesClientResetAllDiagnostic(t *testing.T) {
 	assertAuthKeyUnbindDiagnostic(t, &output, "auth.resetAuthorizations", "client_reset_all", "cleared", targetKeyID, owner.ID)
 }
 
+func TestSweepExpiredAuthorizationsWritesTTLUnbindDiagnostic(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	var output bytes.Buffer
+	s := openAuthKeyUnbindDiagnosticStore(t, &output, true)
+	owner, err := s.CreateUser(ctx, "+15551262912")
+	if err != nil {
+		t.Fatalf("create user: %v", err)
+	}
+	const keyID = int64(0x6f2912)
+	saveBoundAuthKey(t, ctx, s, keyID, owner.ID)
+	settings := requireAuthorizationTTLSettings(t, s)
+	if err := settings.SetAuthorizationTTL(ctx, owner.ID, keyID, 7); err != nil {
+		t.Fatalf("set authorization TTL: %v", err)
+	}
+	if _, err := store.StorePool(s).Exec(ctx, `
+		UPDATE auth_keys
+		SET last_seen_at = clock_timestamp() - interval '8 days'
+		WHERE id = $1
+	`, keyID); err != nil {
+		t.Fatalf("expire auth key: %v", err)
+	}
+
+	revoked, err := s.SweepExpiredAuthorizations(ctx, 10)
+	if err != nil || len(revoked) != 1 || revoked[0].ID != keyID || revoked[0].UserID != owner.ID {
+		t.Fatalf("sweep expired authorizations = (%+v, %v), want only key %d for user %d", revoked, err, keyID, owner.ID)
+	}
+	assertAuthKeyUnbindDiagnostic(t, &output, "authorization_ttl_sweep", "authorization_ttl_expired", "cleared", keyID, owner.ID)
+}
+
 func assertAuthKeyUnbindDiagnostic(t *testing.T, output *bytes.Buffer, operation, reason, outcome string, keyID, userID int64) {
 	t.Helper()
 	if output.Len() == 0 {
