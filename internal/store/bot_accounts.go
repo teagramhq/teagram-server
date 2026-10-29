@@ -20,6 +20,7 @@ import (
 )
 
 const (
+	UserKindHuman   = "human"
 	UserKindBot     = "bot"
 	botSecretSize   = 32
 	maxBotNameRunes = 64

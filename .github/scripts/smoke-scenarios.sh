@@ -49,10 +49,12 @@ SMOKE_SCENARIOS=(
   megagroup-slow-mode
   contacts-search
   full-user-profile
+  bot-user-profile
   common-chats
   help-countries
   langpack
   username-registration
+  user-invites
   turnstile-signup
   turnstile-signin
   username-password-reset

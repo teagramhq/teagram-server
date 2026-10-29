@@ -1,4 +1,4 @@
-h1:XcD1kTLKBP+AVDHtJwf4imPFmp09Bui4nEyn8jFPy2E=
+h1:hTDovz26FKjb1b05Z4IjDzHwik+MPyGgTUS0SMrSnRE=
 20260721000001_baseline.sql h1:cnO6K1z0Uv3goEvecgJixKSio6ziaB1rF7cQLoCWOxs=
 20260721000002_auth_keys.sql h1:+vNabm6vdEAgu3H5ZGw2Wr8D/Y6i4ikAAUO3JbfZQeE=
 20260721000003_code_hardening.sql h1:8pbAqUpqcwOONUfac+qC51QjfC1JnObNCcXa1HC/dr0=
@@ -141,3 +141,4 @@ h1:XcD1kTLKBP+AVDHtJwf4imPFmp09Bui4nEyn8jFPy2E=
 20261028000004_registration_invite_lookup_indexes.sql h1:kCULUf6PP+XcGyVPQRh7/CIEf9woQtxbhOisP9QsEKU=
 20261028000005_registration_invite_consumed_by_user_id_idx.sql h1:EcBTwRBJIMJ2xhww4Y3RhJyuESwHYM1Hsj9nkC/bPwY=
 20261028000006_user_created_sticker_sets.sql h1:Ik34tQY+Q5OOb+/NBO3M9MmHd5p7AUUcKVh4UCDX5xA=
+20261029000001_registration_inviter_issued_at_idx.sql h1:H/zNuawlw8cedvpFlwqzBkz/QF3v5yDS+mM8zWXE1qw=

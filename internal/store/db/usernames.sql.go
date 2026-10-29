@@ -117,7 +117,7 @@ func (q *Queries) GetChannelByUsername(ctx context.Context, handle string) (Chan
 
 const getUserByUsername = `-- name: GetUserByUsername :one
 SELECT u.id, u.phone, u.first_name, u.last_name, u.created_at, u.is_online, u.last_seen_at,
-       un.handle AS username
+       un.handle AS username, u.kind
 FROM users u
 JOIN usernames un ON un.owner_type = 'user' AND un.owner_id = u.id
 WHERE un.handle = lower($1)
@@ -132,6 +132,7 @@ type GetUserByUsernameRow struct {
 	IsOnline   bool
 	LastSeenAt pgtype.Timestamptz
 	Username   string
+	Kind       string
 }
 
 // The handle reported back is the joined usernames row — the one that admitted
@@ -148,6 +149,7 @@ func (q *Queries) GetUserByUsername(ctx context.Context, handle string) (GetUser
 		&i.IsOnline,
 		&i.LastSeenAt,
 		&i.Username,
+		&i.Kind,
 	)
 	return i, err
 }

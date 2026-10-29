@@ -496,6 +496,7 @@ func TestSmokeClientRequestFixturesAreLayer228Shapes(t *testing.T) {
 		"messages_editChatPhoto.1",
 		"messages_editChatPhoto.2",
 		"messages_getCommonChats.1",
+		"users_getFullUser.bot.1",
 		"messages_deleteHistory.1",
 		"messages_editChatAbout.1",
 		"messages_editChatAbout.2",

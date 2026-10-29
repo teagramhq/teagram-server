@@ -7,7 +7,7 @@ RETURNING id;
 -- name: CreateUsernameUser :one
 INSERT INTO users (phone, login_mode, first_name, last_name)
 VALUES (NULL, 'username', $1, $2)
-RETURNING id, phone, first_name, last_name, created_at, is_online, last_seen_at;
+RETURNING id, phone, first_name, last_name, created_at, is_online, last_seen_at, kind;
 
 -- Every query that loads a user reads the handle from the usernames row, never
 -- from the denormalized users.username column. The two are written in one
@@ -20,21 +20,21 @@ RETURNING id, phone, first_name, last_name, created_at, is_online, last_seen_at;
 
 -- name: UserByPhone :one
 SELECT u.id, u.phone, u.first_name, u.last_name, u.created_at, u.is_online, u.last_seen_at,
-       un.handle AS username
+       un.handle AS username, u.kind
 FROM users u
 LEFT JOIN usernames un ON un.owner_type = 'user' AND un.owner_id = u.id
 WHERE u.phone = $1;
 
 -- name: UserByID :one
 SELECT u.id, u.phone, u.first_name, u.last_name, u.created_at, u.is_online, u.last_seen_at,
-       un.handle AS username
+       un.handle AS username, u.kind
 FROM users u
 LEFT JOIN usernames un ON un.owner_type = 'user' AND un.owner_id = u.id
 WHERE u.id = $1;
 
 -- name: UsersByID :many
 SELECT u.id, u.phone, u.first_name, u.last_name, u.created_at, u.is_online, u.last_seen_at,
-       un.handle AS username
+       un.handle AS username, u.kind
 FROM users u
 LEFT JOIN usernames un ON un.owner_type = 'user' AND un.owner_id = u.id
 WHERE u.id = ANY(sqlc.arg(ids)::bigint[]);
@@ -174,7 +174,7 @@ WITH matched AS MATERIALIZED (
       )
 )
 SELECT u.id, u.phone, u.first_name, u.last_name, u.created_at, u.is_online, u.last_seen_at,
-       un.handle AS username
+       un.handle AS username, u.kind
 FROM users u
 LEFT JOIN usernames un ON un.owner_type = 'user' AND un.owner_id = u.id
 WHERE u.id IN (SELECT id FROM matched)
