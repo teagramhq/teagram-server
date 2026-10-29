@@ -34,6 +34,56 @@ SELECT
 FROM issued
 RETURNING id, handle, inviter_user_id, issued_at, expires_at, state, consumed_at, revoked_at;
 
+-- The caller's account age and the database clock are read together so the
+-- account-age gate does not depend on a replica's wall clock.
+-- name: UserInviteAccountAge :one
+SELECT created_at, clock_timestamp()::timestamptz AS now
+FROM users
+WHERE id = sqlc.arg(user_id);
+
+-- Every invite issued during the trailing seven days counts, regardless of
+-- whether it is pending, used, expired, or revoked. The same database clock
+-- also anchors the next time a quota slot opens.
+-- name: UserInviteUsage :one
+WITH current_clock AS (SELECT clock_timestamp()::timestamptz AS now),
+usage AS (
+    SELECT count(*)::bigint AS weekly_count,
+           min(invite.issued_at)::timestamptz AS oldest_issued_at
+    FROM registration_invites AS invite
+    CROSS JOIN current_clock
+    WHERE invite.inviter_user_id = sqlc.arg(inviter_user_id)::bigint
+      AND invite.issued_at > current_clock.now - interval '7 days'
+)
+SELECT usage.weekly_count, usage.oldest_issued_at, current_clock.now::timestamptz AS now
+FROM usage CROSS JOIN current_clock;
+
+-- Revoke is scoped in the UPDATE predicate. A missing id and an id owned by
+-- someone else both affect zero rows and are indistinguishable to the caller.
+-- name: RevokeUserRegistrationInvite :execrows
+WITH current_clock AS (SELECT clock_timestamp()::timestamptz AS now)
+UPDATE registration_invites
+SET state = 'revoked', revoked_at = current_clock.now
+FROM current_clock
+WHERE id = sqlc.arg(id)::bigint
+  AND inviter_user_id = sqlc.arg(inviter_user_id)::bigint
+  AND state = 'issued'
+  AND expires_at > current_clock.now;
+
+-- The caller receives metadata only; the digest and redeeming account are not
+-- selected. A single server timestamp determines whether an issued invite has
+-- expired for this response.
+-- name: ListUserRegistrationInvitesAt :many
+SELECT id, handle, inviter_user_id, issued_at, expires_at,
+       CASE
+           WHEN state = 'issued' AND expires_at <= sqlc.arg(now)::timestamptz THEN 'expired'
+           ELSE state
+       END::text AS state,
+       consumed_at, revoked_at
+FROM registration_invites
+WHERE inviter_user_id = sqlc.arg(inviter_user_id)::bigint
+ORDER BY issued_at DESC, id DESC
+LIMIT sqlc.arg(row_limit)::bigint;
+
 -- The digest lookup is the single locked invite lookup for verification and
 -- redemption. The handle probe runs in the same query for every request so
 -- absent, terminal, and valid digests use the same database path; user invites

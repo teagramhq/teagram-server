@@ -274,6 +274,10 @@ func TestSmoke(t *testing.T) {
 		t.Parallel()
 		testSmokeUsernameRegistration(t)
 	})
+	t.Run("user-invites", func(t *testing.T) {
+		t.Parallel()
+		testSmokeUserInvites(t)
+	})
 	t.Run("username-password-reset", func(t *testing.T) {
 		t.Parallel()
 		testSmokeUsernamePasswordReset(t)
@@ -5455,6 +5459,8 @@ type smokeFixture struct {
 	stopCleanupRegistered       bool
 	suppressChannelPostDelivery func(channelID int64) bool
 	regMode                     config.RegistrationMode
+	userInviteQuota             int
+	userInviteMinAccountAge     time.Duration
 	welcomeChannel              string
 	turnstileSiteKey            string
 	turnstileVerifier           api.SignUpTurnstileVerifier
@@ -5895,7 +5901,8 @@ func newSmokeFixtureWithDeadline(t *testing.T, regMode config.RegistrationMode, 
 		ctx: ctx, failures: newClientFailureSignal(cancelFailure), key: key, dsn: dsn,
 		store: st, blobs: blobs, codes: newMultiCodeSink(), dcID: 2,
 		regMode: regMode, stickerImportMode: config.StickerImportOn,
-		recoveryEmailMode: config.RecoveryEmailOff, signUpTermsOfService: config.DefaultSignUpTermsOfService,
+		userInviteMinAccountAge: config.DefaultUserInviteMinAccountAge,
+		recoveryEmailMode:       config.RecoveryEmailOff, signUpTermsOfService: config.DefaultSignUpTermsOfService,
 	}
 	if beforeStart != nil {
 		beforeStart(f)
@@ -5922,7 +5929,7 @@ func (f *smokeFixture) start(t *testing.T, address string) {
 		t, f.ctx, f.key, f.dcID, f.store, f.dsn, f.codes.Logger(), ln, f.rateLimits, f.regMode,
 		f.blobs, f.persistStatus, nil, f.turnstileSiteKey, f.turnstileVerifier, f.welcomeChannel,
 		f.turnstileSignInEnabled, f.recoveryEmailMode, f.suppressChannelPostDelivery, f.signUpTermsOfService,
-		f.stickerSets, f.uploadMaxFileBytes, f.stickerImportMode, f.photoThumbs,
+		f.stickerSets, f.uploadMaxFileBytes, f.stickerImportMode, f.userInviteQuota, f.userInviteMinAccountAge, f.photoThumbs,
 	)
 	f.registry = registry
 	f.setServerStop(t.Cleanup, stop)

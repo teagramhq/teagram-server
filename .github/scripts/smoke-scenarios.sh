@@ -53,6 +53,7 @@ SMOKE_SCENARIOS=(
   help-countries
   langpack
   username-registration
+  user-invites
   turnstile-signup
   turnstile-signin
   username-password-reset
