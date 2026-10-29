@@ -55,3 +55,29 @@ the change. Run it only after the invite RPC release is live:
 ```sh
 ssh teagram run <reviewed-main-sha> apply-user-invite-quota
 ```
+
+## User-invite quota threat model
+
+The protected asset is the account-admission boundary. A user-issued invite is
+a bearer link that lets its holder create an account; it does not grant access
+to the inviter's account. The relevant actors are an abusive or compromised
+authenticated account, someone who obtains a live invite link, and an operator
+misconfiguration.
+
+- An authenticated inviter can issue links only on an invite-mode listener
+  after the inviter account is seven days old. The configured limit is five
+  issued invites per inviter in a trailing seven-day window. Links expire after
+  seven days, can be revoked by their owner, and are redeemed once. Secrets are
+  generated from `crypto/rand`; only their SHA-256 digests are stored.
+- A leaked link can be used by whoever holds it before it expires or is
+  revoked. Expiry, revocation, single-use consumption, and the issuance limit
+  reduce exposure but do not verify that invitees are trustworthy.
+- Applying the quota could expose the feature on the wrong listener or change
+  the account-age policy. The operation verifies the invite-mode listener,
+  rejects additional WebSocket listeners and an account-age override, backs up
+  `.env`, and checks `help.getAppConfig` after the rollout. Inspection failures
+  reject the operation rather than being treated as absent settings.
+
+An eligible account can still invite up to five new accounts each week. The
+quota limits the rate of expansion; it does not replace signup abuse
+monitoring, account enforcement, or revocation of exposed links.

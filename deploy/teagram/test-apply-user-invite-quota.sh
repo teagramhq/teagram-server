@@ -21,7 +21,19 @@ if [[ "$1" == inspect ]]; then
       ;;
     *'{{.State.Status}}'*) printf '%s\n' running ;;
     *'{{.Image}}'*) printf '%s\n' sha256:invite-fixture ;;
-    *'range .Config.Env'*) cat "$FIXTURE_CONTAINER_ENV" ;;
+    *'range .Config.Env'*)
+      inspect_count=0
+      if [[ -f "$FIXTURE_INSPECT_COUNT" ]]; then
+        IFS= read -r inspect_count < "$FIXTURE_INSPECT_COUNT"
+      fi
+      inspect_count=$((inspect_count + 1))
+      printf '%s\n' "$inspect_count" > "$FIXTURE_INSPECT_COUNT"
+      if [[ "$inspect_count" == "${FIXTURE_INSPECT_FAIL_AT:-0}" ]]; then
+        echo 'fixture docker environment inspect failed' >&2
+        exit 90
+      fi
+      cat "$FIXTURE_CONTAINER_ENV"
+      ;;
     *) echo "unexpected fixture docker inspect: $*" >&2; exit 99 ;;
   esac
 elif [[ "$1" == run ]]; then
@@ -70,6 +82,7 @@ setup_case() {
   FIXTURE_REPO=$case_dir/repo
   FIXTURE_ROOT=$case_dir/root
   FIXTURE_CONTAINER_ENV=$case_dir/container-env
+  FIXTURE_INSPECT_COUNT=$case_dir/container-inspect-count
   FIXTURE_RUNNER_CALLED=$case_dir/runner-called
   origin=$case_dir/origin.git
   mkdir -p "$FIXTURE_REPO/.state" "$FIXTURE_ROOT/teagramd-rollout-runner"
@@ -100,12 +113,13 @@ setup_case() {
     -e "s|EXPECTED_ROOT_UID=0|EXPECTED_ROOT_UID=$MOCK_UID|g" \
     "$OP_SCRIPT" > "$case_dir/op.sh"
   chmod 755 "$case_dir/op.sh"
-  export FIXTURE_REPO FIXTURE_ROOT FIXTURE_CONTAINER_ENV FIXTURE_RUNNER_CALLED FIXTURE_SHA
+  export FIXTURE_REPO FIXTURE_ROOT FIXTURE_CONTAINER_ENV FIXTURE_INSPECT_COUNT FIXTURE_RUNNER_CALLED FIXTURE_SHA
 }
 
 run_operation() {
-  local fail_runner=${1:-0} output status=0
+  local fail_runner=${1:-0} fail_inspect_at=${2:-0} output status=0
   output=$(env OPS_SHA="$FIXTURE_SHA" FIXTURE_RUNNER_FAIL="$fail_runner" \
+    FIXTURE_INSPECT_FAIL_AT="$fail_inspect_at" FIXTURE_INSPECT_COUNT="$FIXTURE_INSPECT_COUNT" \
     PATH="$TMP/bin:$PATH" bash "$TMP/$(basename "$(dirname "$FIXTURE_REPO")")/op.sh" 2>&1) || status=$?
   printf '%s\n' "$status" > "$TMP/operation-status"
   printf '%s\n' "$output"
@@ -146,3 +160,65 @@ output=$(run_operation)
 [[ "$output" == *'user invite quota already exists'* ]]
 [[ ! -e "$FIXTURE_RUNNER_CALLED" ]]
 printf '%s\n' 'PASS existing quota is rejected before invoking the rollout runner'
+
+setup_case inspect-extra-listener
+output=$(run_operation 0 2)
+[[ "$(cat "$TMP/operation-status")" == 1 ]]
+[[ "$output" == *'cannot inspect additional WebSocket listener settings'* ]]
+[[ ! -e "$FIXTURE_RUNNER_CALLED" ]]
+printf '%s\n' 'PASS failed WebSocket listener inspection rejects the operation'
+
+setup_case inspect-public-websocket-listener
+output=$(run_operation 0 3)
+[[ "$(cat "$TMP/operation-status")" == 1 ]]
+[[ "$output" == *'cannot inspect additional WebSocket listener settings'* ]]
+[[ ! -e "$FIXTURE_RUNNER_CALLED" ]]
+printf '%s\n' 'PASS failed public WebSocket listener inspection rejects the operation'
+
+setup_case inspect-account-age
+output=$(run_operation 0 4)
+[[ "$(cat "$TMP/operation-status")" == 1 ]]
+[[ "$output" == *'cannot inspect live account age setting'* ]]
+[[ ! -e "$FIXTURE_RUNNER_CALLED" ]]
+printf '%s\n' 'PASS failed account-age inspection rejects the operation'
+
+setup_case inspect-existing-quota
+output=$(run_operation 0 5)
+[[ "$(cat "$TMP/operation-status")" == 1 ]]
+[[ "$output" == *'cannot inspect live user invite quota'* ]]
+[[ ! -e "$FIXTURE_RUNNER_CALLED" ]]
+printf '%s\n' 'PASS failed quota inspection rejects the operation'
+
+setup_case extra-websocket-listener
+printf 'TG_REGISTRATION=invite\nTG_WEBSOCKET_LISTEN_ADDR=127.0.0.1:2443\n' > "$FIXTURE_CONTAINER_ENV"
+output=$(run_operation)
+[[ "$(cat "$TMP/operation-status")" == 1 ]]
+[[ "$output" == *'additional WebSocket listener is active'* ]]
+[[ ! -e "$FIXTURE_RUNNER_CALLED" ]]
+printf '%s\n' 'PASS active WebSocket listener rejects the operation'
+
+setup_case account-age-override
+printf 'TG_REGISTRATION=invite\nTG_USER_INVITE_MIN_ACCOUNT_AGE=14d\n' > "$FIXTURE_CONTAINER_ENV"
+output=$(run_operation)
+[[ "$(cat "$TMP/operation-status")" == 1 ]]
+[[ "$output" == *'live account age setting is not using the 7d default'* ]]
+[[ ! -e "$FIXTURE_RUNNER_CALLED" ]]
+printf '%s\n' 'PASS account-age override rejects the operation'
+
+setup_case post-apply-age-inspect-failure
+output=$(run_operation 0 8)
+[[ "$(cat "$TMP/operation-status")" == 1 ]]
+[[ "$output" == *'cannot verify live account age setting after apply'* ]]
+[[ -f "$FIXTURE_RUNNER_CALLED" ]]
+printf '%s\n' 'PASS failed post-apply account-age inspection rejects success'
+
+setup_case rollback-inspect-failure
+output=$(run_operation 1 7)
+[[ "$(cat "$TMP/operation-status")" == 42 ]]
+[[ "$output" == *'rollback_env=unverified'* ]]
+if [[ "$output" == *'rollback_env=restored'* ]]; then
+  echo 'failed container inspection falsely reported an environment rollback' >&2
+  exit 1
+fi
+grep -qx 'TG_USER_INVITE_QUOTA=5' "$FIXTURE_REPO/.env"
+printf '%s\n' 'PASS failed post-run inspection does not claim rollback verification'

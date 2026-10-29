@@ -149,12 +149,28 @@ container_state=$(docker inspect --format "$CONTAINER_STATE_FORMAT" "$SERVICE") 
 [[ "$container_state" == running ]] || { fail 'live container is not running'; exit 1; }
 registration_mode=$(container_value TG_REGISTRATION) || { fail 'cannot read default listener registration mode'; exit 1; }
 [[ "$registration_mode" == invite ]] || { fail 'default listener is not in invite mode'; exit 1; }
-[[ -z "$(container_value TG_WEBSOCKET_LISTEN_ADDR)" && -z "$(container_value TG_PUBLIC_WEBSOCKET_LISTEN_ADDR)" ]] || {
+websocket_listen_addr=$(container_value TG_WEBSOCKET_LISTEN_ADDR) || {
+  fail 'cannot inspect additional WebSocket listener settings'
+  exit 1
+}
+public_websocket_listen_addr=$(container_value TG_PUBLIC_WEBSOCKET_LISTEN_ADDR) || {
+  fail 'cannot inspect additional WebSocket listener settings'
+  exit 1
+}
+[[ -z "$websocket_listen_addr" && -z "$public_websocket_listen_addr" ]] || {
   fail 'an additional WebSocket listener is active and needs its own app-config verification'
   exit 1
 }
-[[ -z "$(container_value "$ACCOUNT_AGE_ENV")" ]] || { fail 'live account age setting is not using the 7d default'; exit 1; }
-[[ -z "$(container_value "$QUOTA_ENV")" ]] || { fail 'user invite quota is already present in the live container'; exit 1; }
+account_age_setting=$(container_value "$ACCOUNT_AGE_ENV") || {
+  fail 'cannot inspect live account age setting'
+  exit 1
+}
+[[ -z "$account_age_setting" ]] || { fail 'live account age setting is not using the 7d default'; exit 1; }
+live_quota_setting=$(container_value "$QUOTA_ENV") || {
+  fail 'cannot inspect live user invite quota'
+  exit 1
+}
+[[ -z "$live_quota_setting" ]] || { fail 'user invite quota is already present in the live container'; exit 1; }
 registration_before=$(registration_fingerprint) || { fail 'cannot fingerprint listener registration settings'; exit 1; }
 
 compose_selection=$(docker inspect --format '{{index .Config.Labels "com.docker.compose.project.config_files"}}' "$SERVICE") || {
@@ -226,12 +242,20 @@ acquire_deploy_lock || { fail 'cannot reacquire the deploy lock after rollout'; 
 if [[ "$runner_status" -ne 0 ]]; then
   failed_env_sha=$(file_sha256 "$ENV_FILE" 2>/dev/null || true)
   failed_record=$(cat -- "$ENV_RECORD" 2>/dev/null || true)
+  rollback_container_verified=0
+  failed_image_sha=
+  failed_container_state=
+  failed_live_quota=
+  if failed_image_sha=$(docker inspect --format "$IMAGE_REVISION_FORMAT" "$SERVICE" 2>/dev/null) && \
+     failed_container_state=$(docker inspect --format "$CONTAINER_STATE_FORMAT" "$SERVICE" 2>/dev/null) && \
+     failed_live_quota=$(container_value "$QUOTA_ENV" 2>/dev/null); then
+    rollback_container_verified=1
+  fi
   if [[ "$failed_env_sha" == "$recorded_env_sha" && "$failed_record" == "$record" ]]; then
     printf 'runner_result=failed exit=%s target_sha=%s rollback_env=verified\n' "$runner_status" "$target_sha"
   elif [[ "$failed_env_sha" == "$expected_env_sha" && "$failed_record" == "$record" && \
-      "$(docker inspect --format "$IMAGE_REVISION_FORMAT" "$SERVICE" 2>/dev/null || true)" == "$target_sha" && \
-      "$(docker inspect --format "$CONTAINER_STATE_FORMAT" "$SERVICE" 2>/dev/null || true)" == running && \
-      "$(container_value "$QUOTA_ENV" 2>/dev/null || true)" == '' ]]; then
+      "$rollback_container_verified" == 1 && "$failed_image_sha" == "$target_sha" && \
+      "$failed_container_state" == running && "$failed_live_quota" == '' ]]; then
     TEMP_ENV=$(mktemp "$REPO/.env.main-2844.XXXXXXXX") || {
       printf 'runner_result=failed exit=%s target_sha=%s rollback_env=unverified\n' "$runner_status" "$target_sha"
       exit "$runner_status"
@@ -276,10 +300,16 @@ git -C "$REPO" merge-base --is-ancestor "$actual_image_sha" "$origin_sha" || {
   fail 'live container is not running after apply'
   exit 1
 }
-[[ "$(container_value "$QUOTA_ENV")" == "$QUOTA" ]] || { fail 'live container does not have the requested quota'; exit 1; }
-[[ -z "$(container_value "$ACCOUNT_AGE_ENV")" ]] || { fail 'live account age setting changed from the 7d default'; exit 1; }
+actual_quota_setting=$(container_value "$QUOTA_ENV") || { fail 'cannot verify live user invite quota after apply'; exit 1; }
+[[ "$actual_quota_setting" == "$QUOTA" ]] || { fail 'live container does not have the requested quota'; exit 1; }
+actual_account_age_setting=$(container_value "$ACCOUNT_AGE_ENV") || {
+  fail 'cannot verify live account age setting after apply'
+  exit 1
+}
+[[ -z "$actual_account_age_setting" ]] || { fail 'live account age setting changed from the 7d default'; exit 1; }
 [[ "$(registration_fingerprint)" == "$registration_before" ]] || { fail 'listener registration settings changed'; exit 1; }
-[[ "$(container_value TG_REGISTRATION)" == invite ]] || { fail 'default listener left invite mode'; exit 1; }
+actual_registration_mode=$(container_value TG_REGISTRATION) || { fail 'cannot verify default listener registration mode after apply'; exit 1; }
+[[ "$actual_registration_mode" == invite ]] || { fail 'default listener left invite mode'; exit 1; }
 
 image_id=$(docker inspect --format '{{.Image}}' "$SERVICE") || { fail 'cannot read the live image ID'; exit 1; }
 if ! docker run --rm --network host --read-only --cap-drop ALL \
