@@ -24,16 +24,19 @@ printf 'fixture env only\n' > "$tmp/repo/.env.rustfs-parked"
 OPS_SHA=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 TARGET_SHA=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
 OFF_MAIN_SHA=cccccccccccccccccccccccccccccccccccccccc
+OLD_MAIN_SHA=ffffffffffffffffffffffffffffffffffffffff
 CONTAINER_ID=dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd
 REPORT_TARGET_SHA=abcdef1234567890abcdef1234567890abcdef12
 REPORT_SOURCE_SHA=1234567890abcdef1234567890abcdef12345678
 REPORT_PREFIX=${REPORT_TARGET_SHA:0:12}
-export OPS_SHA TARGET_SHA OFF_MAIN_SHA CONTAINER_ID REPORT_TARGET_SHA REPORT_SOURCE_SHA REPORT_PREFIX
+export OPS_SHA TARGET_SHA OFF_MAIN_SHA OLD_MAIN_SHA CONTAINER_ID \
+  REPORT_TARGET_SHA REPORT_SOURCE_SHA REPORT_PREFIX
 export MOCK_CURRENT_SHA="$TARGET_SHA" MOCK_REPO="$tmp/repo"
 export MOCK_REPORT_SCRIPT="$failure_report_script"
 export MOCK_EVIDENCE_SCRIPT="$evidence_script"
 export MOCK_RUN_TEMP_LOG="$tmp/run-temp.log" MOCK_RM_LOG="$tmp/rm.log"
 export MOCK_ROOT="$tmp/root"
+export MOCK_RETIRED_SCRIPT_MARKER="$tmp/retired-operation-ran"
 
 cat > "$tmp/bin/git" <<'GIT'
 #!/usr/bin/env bash
@@ -47,15 +50,21 @@ case "$1" in
   fetch) exit 0 ;;
   merge-base)
     if [[ "${2:-}" == --is-ancestor && "${4:-}" == origin/main && \
-      ( "${3:-}" == "$OPS_SHA" || "${3:-}" == "$TARGET_SHA" ) ]]; then
+      ( "${3:-}" == "$OPS_SHA" || "${3:-}" == "$TARGET_SHA" || \
+        "${3:-}" == "$OLD_MAIN_SHA" ) ]]; then
       exit 0
     fi
     exit 1
     ;;
   cat-file)
     [[ "${2:-}" == -e ]] || exit 99
-    [[ "${3:-}" == "$OPS_SHA:deploy/teagram/ops/target-failure-report.sh" || \
-      "${3:-}" == "$OPS_SHA:deploy/teagram/ops/rollout-evidence.sh" ]]
+    case "${3:-}" in
+      "$OPS_SHA:deploy/teagram/ops/target-failure-report.sh"|\
+      "$OPS_SHA:deploy/teagram/ops/rollout-evidence.sh"|\
+      "$OLD_MAIN_SHA:deploy/teagram/ops/preflight-replay.sh"|\
+      "$OLD_MAIN_SHA:deploy/teagram/ops/replay-check.sh") ;;
+      *) exit 1 ;;
+    esac
     ;;
   show)
     case "${2:-}" in
@@ -65,6 +74,10 @@ case "$1" in
       "$OPS_SHA:deploy/teagram/ops/rollout-evidence.sh")
         sed -e "s|/root|$MOCK_ROOT|g" \
           -e "s|0:700|$MOCK_OWNER_UID:700|g" -e "s|0:600|$MOCK_OWNER_UID:600|g" "$MOCK_EVIDENCE_SCRIPT"
+        ;;
+      "$OLD_MAIN_SHA:deploy/teagram/ops/preflight-replay.sh"|\
+      "$OLD_MAIN_SHA:deploy/teagram/ops/replay-check.sh")
+        printf '#!/bin/sh\ntouch "%s"\n' "$MOCK_RETIRED_SCRIPT_MARKER"
         ;;
       *) exit 1 ;;
     esac
@@ -162,6 +175,7 @@ fingerprints=$(run_command fingerprints)
 for help in help -h --help; do
   help_output=$(run_command "$help" 2>&1)
   [[ "$help_output" == *'hostname'* && "$help_output" == *'env-names'* && "$help_output" == *'run'* ]]
+  [[ "$help_output" == *'target-failure-report|rollout-evidence'* ]]
 done
 
 report_dir="$MOCK_ROOT/main1238-${REPORT_PREFIX}-20261027T124539Z.target"
@@ -182,7 +196,11 @@ expect_status 64 'run'
 expect_status 64 "run gggggggggggggggggggggggggggggggggggggggg rollout-evidence"
 expect_status 64 "run ${OPS_SHA:0:7} rollout-evidence"
 expect_status 65 "run $OFF_MAIN_SHA rollout-evidence"
-expect_status 66 "run $OPS_SHA missing-script $TARGET_SHA"
+expect_status 64 "run $OPS_SHA missing-script $TARGET_SHA"
+expect_status 66 "run $OLD_MAIN_SHA rollout-evidence"
+expect_status 64 "run $OLD_MAIN_SHA preflight-replay"
+expect_status 64 "run $OLD_MAIN_SHA replay-check"
+[[ ! -e "$MOCK_RETIRED_SCRIPT_MARKER" ]]
 for bad_name in 'nested/name' . .. 'Uppercase'; do
   expect_status 64 "run $OPS_SHA $bad_name $TARGET_SHA"
 done

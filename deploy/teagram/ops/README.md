@@ -3,13 +3,42 @@
 Ops scripts run as root in `/tmp` through the forced command:
 
 ```sh
-ssh teagram run <40-hex-main-sha> <script-name> [args]
+ssh teagram run <40-hex-main-sha> <target-failure-report|rollout-evidence> [args]
 ```
 
-The runner fetches `origin/main`, checks the commit ancestry and script name,
-and executes the script recorded in that commit. Keep every operation narrowly
-scoped to its named purpose. Validate arguments before using them, fail closed,
-and never put secrets in arguments, logs, or output.
+The runner fetches `origin/main`, checks the commit ancestry, and accepts only
+`target-failure-report` and `rollout-evidence`. A script's presence in an older
+main commit does not authorize a retired operation. The allowlist lives in
+`teagram-ops.sh`; tests cover both retired names at an older main SHA. Keep
+every operation narrowly scoped to its named purpose. Validate arguments
+before using them, fail closed, and never put secrets in arguments, logs, or
+output.
+
+## Threat model
+
+Assets at risk include the host filesystem and root-owned evidence,
+`/opt/teagram` configuration and secrets, the Docker daemon, and persistent
+service data. The caller supplies `SSH_ORIGINAL_COMMAND`; `run` executes a
+selected Git blob as root. An ancestor SHA from `origin/main` proves reviewed
+lineage, but does not authorize every path present in that historical tree.
+The host, Git origin,
+protected `main`, review process, and custody of the forced-command key are
+trusted. This command menu is not a sandbox.
+
+The main threat is a caller using the privileged key to select an unintended
+operation or arguments, or a bug in a root operation exposing secrets or
+changing the host. A compromised key or maliciously merged operation can
+therefore become host-root execution. The dispatcher limits `run` to the two
+current operation names before fetching Git data, verifies the full SHA is on
+`origin/main`, constructs the script path itself, and does not evaluate a
+caller-provided shell command. The operations validate their inputs and emit
+only bounded, sanitized evidence; their tests exercise the command boundary,
+including attempts to select deleted scripts from an older main commit.
+
+The allowlist blocks retired operation names at every SHA, while older
+versions of an allowlisted operation remain callable if present on `main`.
+Keep the list narrow and review each operation as root code. Adding an
+operation requires updating the allowlist and its boundary tests.
 
 Do not `source` the deploy runner or rollout verifier. Invoke reviewed tools as
 child processes with explicit arguments and check their exit status. Access
