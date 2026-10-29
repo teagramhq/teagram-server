@@ -126,6 +126,13 @@ func run(args []string, stdout, stderr io.Writer) (retErr error) {
 	if err != nil {
 		return err
 	}
+	reconciledReferences, err := readReferences(ctx, database)
+	if err != nil {
+		return err
+	}
+	if err := requireReferencesUnchanged(currentReferences, reconciledReferences); err != nil {
+		return err
+	}
 	if inventory.Classes.Missing.Count != 0 || inventory.Classes.NoValidEnvelope.Count != 0 {
 		return fmt.Errorf("media key rotation: final referenced inventory is incomplete: %s", inventory.Summary)
 	}
@@ -204,4 +211,23 @@ func readReferences(ctx context.Context, database *store.Store) ([]blobinventory
 		}
 	}
 	return references, nil
+}
+
+func requireReferencesUnchanged(beforeScan, afterScan []blobinventory.Reference) error {
+	remaining := make(map[blobinventory.Reference]int, len(beforeScan))
+	for _, ref := range beforeScan {
+		remaining[ref]++
+	}
+	for _, ref := range afterScan {
+		if remaining[ref] == 0 {
+			return errors.New("media key rotation: references changed during final inventory; rerun rotation")
+		}
+		remaining[ref]--
+	}
+	for _, count := range remaining {
+		if count != 0 {
+			return errors.New("media key rotation: references changed during final inventory; rerun rotation")
+		}
+	}
+	return nil
 }

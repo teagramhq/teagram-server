@@ -34,6 +34,25 @@ func TestRequireCurrentTargetRejectsVersionMismatch(t *testing.T) {
 	}
 }
 
+func TestRequireReferencesUnchangedRejectsPartCommittedDuringInventory(t *testing.T) {
+	t.Parallel()
+
+	// The new part row commits while the full-tree scan is running.
+	beforeScan := []blobinventory.Reference{
+		{Key: "files/21", Kind: "file", ID: "21", LogicalBytes: 5},
+	}
+	partKey := "parts/00000000000000000000000000000000"
+	afterScan := []blobinventory.Reference{
+		{Key: "files/21", Kind: "file", ID: "21", LogicalBytes: 5},
+		{Key: partKey, Kind: "part", ID: partKey, LogicalBytes: 7},
+	}
+
+	err := requireReferencesUnchanged(beforeScan, afterScan)
+	if err == nil || !strings.Contains(err.Error(), "references changed during final inventory") {
+		t.Fatalf("reference reconciliation error = %v, want fail-closed drift error", err)
+	}
+}
+
 func TestCommandResultEncodesRotationAndInventoryForOperators(t *testing.T) {
 	t.Parallel()
 	result := commandResult{
