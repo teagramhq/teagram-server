@@ -440,6 +440,8 @@ demo_render_config() {
     and .services.teagramd.environment.TG_ADVERTISE_DEMO_GUEST_SIGN_UP == "true"
     and .services["teagramd-next"].environment.TG_ADVERTISE_DEMO_GUEST_SIGN_UP == "true"
     and .services.teagramd.environment.TG_LOG_LOGIN_CODES == "false"
+    and .services.teagramd.environment.TG_LOG_AUTH_KEY_UNBINDS == "true"
+    and .services["teagramd-next"].environment.TG_LOG_AUTH_KEY_UNBINDS == "true"
     and .services.teagramd.environment.TG_MAX_FILE_BYTES == "16777216"
     and .services.teagramd.environment.TG_MAX_USER_STORAGE_BYTES == "268435456"
     and .services.teagramd.environment.TG_WEBSOCKET_LISTEN_ADDR == ":2446"
