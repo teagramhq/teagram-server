@@ -417,7 +417,7 @@ func bootServerWithLimitsAndRegistrationModeAndBlobsAndStatusWithDeliveryHookAnd
 		t, ctx, key, dcID, st, dsn, log, ln, rateLimits, regMode, blobs, persistStatus,
 		beforeDelivery, turnstileSiteKey, turnstileVerifier, welcomeChannel, turnstileSignInEnabled,
 		recoveryEmailMode, suppressChannelPostDelivery, config.DefaultSignUpTermsOfService,
-		nil, 0, config.StickerImportOn, photoThumbs...,
+		nil, 0, config.StickerImportOn, 0, config.DefaultUserInviteMinAccountAge, photoThumbs...,
 	)
 }
 
@@ -433,6 +433,8 @@ func bootServerWithLimitsAndRegistrationModeAndBlobsAndStatusWithDeliveryHookAnd
 	stickerSets *api.StickerSetCatalog,
 	uploadMaxFileBytes int64,
 	stickerImportMode config.StickerImportMode,
+	userInviteQuota int,
+	userInviteMinAccountAge time.Duration,
 	photoThumbs ...*photothumb.Supervisor,
 ) (*mtproto.SessionRegistry, func()) {
 	t.Helper()
@@ -447,12 +449,12 @@ func bootServerWithLimitsAndRegistrationModeAndBlobsAndStatusWithDeliveryHookAnd
 	if uploadMaxFileBytes > 0 {
 		maxFileBytes = uploadMaxFileBytes
 	}
-	handler := api.NewWithPhotoThumbsAndDialogFilterSyncAndUploadPartTTLAndTurnstileAndWelcomeChannelAndSignInAndStickerCatalog(
+	handler := api.NewWithPhotoThumbsAndDialogFilterSyncAndUploadPartTTLAndTurnstileAndWelcomeChannelAndSignInAndStickerCatalogAndUserInviteQuota(
 		st, dcID, tgcfg, log, true, maxFileBytes, blobs, 2<<30,
 		pgtest.PeerDeriver(), pgtest.PhotoDeriver(), rateLimits, regMode,
 		dialogFilterSync, photoThumb, config.DefaultUploadPartTTL,
 		turnstileSiteKey, turnstileVerifier, welcomeChannel, turnstileSignInEnabled, recoveryEmailMode,
-		signUpTermsOfService, stickerSets, stickerImportMode,
+		signUpTermsOfService, stickerSets, stickerImportMode, userInviteQuota, userInviteMinAccountAge,
 	)
 	server := mtproto.New(exchange.PrivateKey{RSA: key}, dcID, mtproto.NewPgAuthKeyStore(st), handler, log)
 	if persistStatus {

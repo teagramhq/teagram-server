@@ -38,17 +38,18 @@ type StickerImportMode string
 type RecoveryEmailMode string
 
 const (
-	RegistrationClosed            RegistrationMode  = "closed"
-	RegistrationInvite            RegistrationMode  = "invite"
-	RegistrationOpen              RegistrationMode  = "open"
-	StickerImportOn               StickerImportMode = "on"
-	StickerImportOff              StickerImportMode = "off"
-	RecoveryEmailOff              RecoveryEmailMode = "off"
-	RecoveryEmailContact          RecoveryEmailMode = "contact"
-	DefaultUploadPartTTL                            = 6 * time.Hour
-	DefaultAuthKeySweepIdleWindow                   = 24 * time.Hour
-	DefaultAuthKeySweepMaxAge                       = 72 * time.Hour
-	DefaultSignUpTermsOfService                     = "Teagram is software. Its authors hold no liability for what operators or users do with a self-hosted Teagram instance. Each instance's operator and its users are responsible for the content on that instance, including sticker and emoji packs users import."
+	RegistrationClosed             RegistrationMode  = "closed"
+	RegistrationInvite             RegistrationMode  = "invite"
+	RegistrationOpen               RegistrationMode  = "open"
+	StickerImportOn                StickerImportMode = "on"
+	StickerImportOff               StickerImportMode = "off"
+	RecoveryEmailOff               RecoveryEmailMode = "off"
+	RecoveryEmailContact           RecoveryEmailMode = "contact"
+	DefaultUploadPartTTL                             = 6 * time.Hour
+	DefaultUserInviteMinAccountAge                   = 7 * 24 * time.Hour
+	DefaultAuthKeySweepIdleWindow                    = 24 * time.Hour
+	DefaultAuthKeySweepMaxAge                        = 72 * time.Hour
+	DefaultSignUpTermsOfService                      = "Teagram is software. Its authors hold no liability for what operators or users do with a self-hosted Teagram instance. Each instance's operator and its users are responsible for the content on that instance, including sticker and emoji packs users import."
 )
 
 // Config holds server configuration.
@@ -106,6 +107,9 @@ type Config struct {
 	// when positive. It defaults to zero so existing invite-mode deployments
 	// must opt in explicitly.
 	UserInviteQuota int
+	// UserInviteMinAccountAge controls the age gate for creating user invites.
+	// It defaults to one week and uses the database's users.created_at clock.
+	UserInviteMinAccountAge time.Duration
 
 	// WelcomeChannel is the operator-configured public broadcast channel for new accounts.
 	WelcomeChannel string
@@ -962,11 +966,12 @@ func load(log *slog.Logger, allowKeyGeneration bool) (Config, error) {
 		ProfileReceiptRetention:         ProfileIdentifierRetentionFloor,
 		ProfileDeleteOperationRetention: ProfileIdentifierRetentionFloor,
 
-		RegistrationMode:     RegistrationClosed,
-		StickerImportMode:    stickerImportMode,
-		SignUpTermsOfService: envOr("TG_TERMS_OF_SERVICE", DefaultSignUpTermsOfService),
-		RecoveryEmailMode:    recoveryEmailMode,
-		SessionDeviceLabels:  true,
+		RegistrationMode:        RegistrationClosed,
+		UserInviteMinAccountAge: DefaultUserInviteMinAccountAge,
+		StickerImportMode:       stickerImportMode,
+		SignUpTermsOfService:    envOr("TG_TERMS_OF_SERVICE", DefaultSignUpTermsOfService),
+		RecoveryEmailMode:       recoveryEmailMode,
+		SessionDeviceLabels:     true,
 	}
 	if bundleDir := os.Getenv("TG_STICKER_CATALOG_BUNDLE"); bundleDir != "" {
 		cfg.StickerBundle, err = stickerbundle.Load(bundleDir)
@@ -1263,6 +1268,13 @@ func load(log *slog.Logger, allowKeyGeneration bool) (Config, error) {
 			return Config{}, errors.New("TG_USER_INVITE_QUOTA must be a non-negative integer")
 		}
 		cfg.UserInviteQuota = quota
+	}
+	if value := os.Getenv("TG_USER_INVITE_MIN_ACCOUNT_AGE"); value != "" {
+		minimumAge, err := time.ParseDuration(value)
+		if err != nil || minimumAge < 0 {
+			return Config{}, errors.New("TG_USER_INVITE_MIN_ACCOUNT_AGE must be a non-negative duration")
+		}
+		cfg.UserInviteMinAccountAge = minimumAge
 	}
 	// TG_WELCOME_CHANNEL is resolved after account admission by the auth handler.
 	cfg.WelcomeChannel = os.Getenv("TG_WELCOME_CHANNEL")

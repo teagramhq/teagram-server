@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -906,5 +907,473 @@ func TestConsumeUserInviteRequiresQuotaAndInviteListenerAndRecordsRedeemer(t *te
 		t.Fatalf("list after user consumes: %v", err)
 	} else if len(listed) != 3 || listed[2].ID != reservedUserInvite.ID || listed[2].InviterUserID == nil {
 		t.Errorf("listed invites after consume = %#v, wanted all three rows with inviter on user rows", listed)
+	}
+}
+
+type quotaUserInviteCreator interface {
+	CreateUserInvite(context.Context, int64, int, time.Duration) (store.RegistrationInvite, string, error)
+}
+
+func TestConcurrentCreateUserInviteEnforcesWeeklyQuotaAcrossStates(t *testing.T) {
+	t.Parallel()
+	s := open(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+
+	inviter, err := s.CreateUser(ctx, "+1555"+pgtest.RandomHex())
+	if err != nil {
+		t.Fatalf("create inviter: %v", err)
+	}
+	creator, ok := any(s).(quotaUserInviteCreator)
+	if !ok {
+		t.Fatal("store does not expose quota-checked user invite creation")
+	}
+
+	const quota = 5
+	const attempts = quota + 1
+	results := make([]error, attempts)
+	ready := make(chan struct{})
+	var readyWG, workers sync.WaitGroup
+	readyWG.Add(attempts)
+	workers.Add(attempts)
+	for i := range attempts {
+		go func(i int) {
+			defer workers.Done()
+			readyWG.Done()
+			<-ready
+			_, _, results[i] = creator.CreateUserInvite(ctx, inviter.ID, quota, 0)
+		}(i)
+	}
+	readyWG.Wait()
+	close(ready)
+	workers.Wait()
+
+	succeeded := 0
+	refused := 0
+	for i, err := range results {
+		switch {
+		case err == nil:
+			succeeded++
+		case err.Error() == "user invite weekly limit reached":
+			refused++
+		default:
+			t.Errorf("create attempt %d: unexpected error %v", i, err)
+		}
+	}
+	if succeeded != quota || refused != 1 {
+		t.Fatalf("parallel creates succeeded=%d refused=%d, want %d and 1", succeeded, refused, quota)
+	}
+
+	var issued int
+	if err := store.StorePool(s).QueryRow(ctx, `
+		SELECT count(*) FROM registration_invites WHERE inviter_user_id = $1
+	`, inviter.ID).Scan(&issued); err != nil {
+		t.Fatalf("count created invites: %v", err)
+	}
+	if issued != quota {
+		t.Fatalf("created invites = %d, want quota %d", issued, quota)
+	}
+
+	if _, err := store.StorePool(s).Exec(ctx, `
+		WITH ordered AS (
+			SELECT id, row_number() OVER (ORDER BY id) AS n
+			FROM registration_invites WHERE inviter_user_id = $1
+		)
+		UPDATE registration_invites AS invite
+		SET state = CASE ordered.n
+				WHEN 1 THEN 'consumed'
+				WHEN 2 THEN 'revoked'
+				WHEN 3 THEN 'expired'
+				ELSE 'issued'
+			END,
+			consumed_at = CASE WHEN ordered.n = 1 THEN clock_timestamp() END,
+			revoked_at = CASE WHEN ordered.n = 2 THEN clock_timestamp() END
+		FROM ordered
+		WHERE invite.id = ordered.id
+	`, inviter.ID); err != nil {
+		t.Fatalf("set invite terminal states: %v", err)
+	}
+
+	if _, _, err := creator.CreateUserInvite(ctx, inviter.ID, quota, 0); err == nil || err.Error() != "user invite weekly limit reached" {
+		t.Fatalf("create after terminal transitions: err = %v, want weekly limit reached", err)
+	}
+}
+
+func TestCreateUserInviteEnforcesMinimumAccountAgeAndReturnsWait(t *testing.T) {
+	t.Parallel()
+	s := open(t)
+	ctx := context.Background()
+	inviter, err := s.CreateUser(ctx, "+1555"+pgtest.RandomHex())
+	if err != nil {
+		t.Fatalf("create inviter: %v", err)
+	}
+	creator, ok := any(s).(quotaUserInviteCreator)
+	if !ok {
+		t.Fatal("store does not expose quota-checked user invite creation")
+	}
+
+	_, _, err = creator.CreateUserInvite(ctx, inviter.ID, 5, 7*24*time.Hour)
+	if err == nil {
+		t.Fatal("new account created an invite before the minimum age")
+	}
+	const prefix = "user invite account too new; wait "
+	waitText, ok := strings.CutPrefix(err.Error(), prefix)
+	if !ok {
+		t.Fatalf("error = %q, want account-too-new error with remaining seconds", err)
+	}
+	waitText, ok = strings.CutSuffix(waitText, " seconds")
+	if !ok {
+		t.Fatalf("error = %q, want wait duration in seconds", err)
+	}
+	waitSeconds, err := strconv.ParseInt(waitText, 10, 64)
+	if err != nil || waitSeconds <= 0 || waitSeconds > int64((7*24*time.Hour)/time.Second) {
+		t.Fatalf("remaining wait = %q (%v), want a positive value no greater than seven days", waitText, err)
+	}
+}
+
+type userInviteLister interface {
+	ListUserInvites(context.Context, int64) ([]store.RegistrationInvite, int64, *time.Time, error)
+}
+
+func TestListUserInvitesIsScopedSafeAndReportsWeeklyUsage(t *testing.T) {
+	t.Parallel()
+	s := open(t)
+	ctx := context.Background()
+	inviter, err := s.CreateUser(ctx, "+1555"+pgtest.RandomHex())
+	if err != nil {
+		t.Fatalf("create inviter: %v", err)
+	}
+	other, err := s.CreateUser(ctx, "+1555"+pgtest.RandomHex())
+	if err != nil {
+		t.Fatalf("create other user: %v", err)
+	}
+	redeemer, err := s.CreateUser(ctx, "+1555"+pgtest.RandomHex())
+	if err != nil {
+		t.Fatalf("create redeemer: %v", err)
+	}
+	lister, ok := any(s).(userInviteLister)
+	if !ok {
+		t.Fatal("store does not expose caller-scoped user invite listing")
+	}
+
+	old, _, err := s.IssueUserInvite(ctx, inviter.ID)
+	if err != nil {
+		t.Fatalf("issue old invite: %v", err)
+	}
+	revoked, revokedSecret, err := s.IssueUserInvite(ctx, inviter.ID)
+	if err != nil {
+		t.Fatalf("issue revoked invite: %v", err)
+	}
+	used, usedSecret, err := s.IssueUserInvite(ctx, inviter.ID)
+	if err != nil {
+		t.Fatalf("issue used invite: %v", err)
+	}
+	expired, _, err := s.IssueUserInvite(ctx, inviter.ID)
+	if err != nil {
+		t.Fatalf("issue expired invite: %v", err)
+	}
+	naturalExpired, _, err := s.IssueUserInvite(ctx, inviter.ID)
+	if err != nil {
+		t.Fatalf("issue naturally expired invite: %v", err)
+	}
+	pending, pendingSecret, err := s.IssueUserInvite(ctx, inviter.ID)
+	if err != nil {
+		t.Fatalf("issue pending invite: %v", err)
+	}
+	foreign, _, err := s.IssueUserInvite(ctx, other.ID)
+	if err != nil {
+		t.Fatalf("issue foreign invite: %v", err)
+	}
+
+	for _, tc := range []struct {
+		id  int64
+		sql string
+		arg []any
+	}{
+		{
+			id: revoked.ID,
+			sql: `UPDATE registration_invites SET issued_at = clock_timestamp() - interval '6 days',
+			      expires_at = clock_timestamp() + interval '1 day', state = 'revoked',
+			      revoked_at = clock_timestamp() WHERE id = $1`,
+		},
+		{
+			id: used.ID,
+			sql: `UPDATE registration_invites SET issued_at = clock_timestamp() - interval '3 days',
+			      expires_at = clock_timestamp() + interval '4 days', state = 'consumed',
+			      consumed_at = clock_timestamp(), consumed_by_user_id = $2 WHERE id = $1`,
+			arg: []any{redeemer.ID},
+		},
+		{
+			id: expired.ID,
+			sql: `UPDATE registration_invites SET issued_at = clock_timestamp() - interval '2 days',
+			      expires_at = clock_timestamp() - interval '1 day', state = 'expired' WHERE id = $1`,
+		},
+		{
+			id: naturalExpired.ID,
+			sql: `UPDATE registration_invites SET issued_at = clock_timestamp() - interval '1 day',
+			      expires_at = clock_timestamp() - interval '1 second' WHERE id = $1`,
+		},
+		{
+			id: old.ID,
+			sql: `UPDATE registration_invites SET issued_at = clock_timestamp() - interval '8 days',
+			      expires_at = clock_timestamp() - interval '1 day', state = 'expired' WHERE id = $1`,
+		},
+	} {
+		args := append([]any{tc.id}, tc.arg...)
+		if _, err := store.StorePool(s).Exec(ctx, tc.sql, args...); err != nil {
+			t.Fatalf("set invite %d lifecycle state: %v", tc.id, err)
+		}
+	}
+
+	var oldestCounted time.Time
+	if err := store.StorePool(s).QueryRow(ctx,
+		`SELECT issued_at FROM registration_invites WHERE id = $1`, revoked.ID,
+	).Scan(&oldestCounted); err != nil {
+		t.Fatalf("read oldest counted invite: %v", err)
+	}
+	invites, weeklyCount, nextAvailableAt, err := lister.ListUserInvites(ctx, inviter.ID)
+	if err != nil {
+		t.Fatalf("list user invites: %v", err)
+	}
+	if len(invites) != 6 {
+		t.Fatalf("listed %d invites, want caller's 6 invites", len(invites))
+	}
+	if weeklyCount != 5 {
+		t.Fatalf("weekly count = %d, want 5 including pending, used, expired, and revoked", weeklyCount)
+	}
+	if nextAvailableAt == nil {
+		t.Fatal("next available time is absent while counted invites exist")
+	}
+	wantNext := oldestCounted.Add(7 * 24 * time.Hour)
+	if delta := nextAvailableAt.Sub(wantNext); delta < -2*time.Second || delta > 2*time.Second {
+		t.Errorf("next available time = %s, want oldest creation plus seven days (%s)", *nextAvailableAt, wantNext)
+	}
+	if invites[0].ID != pending.ID || invites[1].ID != naturalExpired.ID || invites[2].ID != expired.ID || invites[3].ID != used.ID || invites[4].ID != revoked.ID || invites[5].ID != old.ID {
+		t.Errorf("invite order = [%d %d %d %d %d %d], want newest first", invites[0].ID, invites[1].ID, invites[2].ID, invites[3].ID, invites[4].ID, invites[5].ID)
+	}
+	states := make(map[int64]store.InviteState, len(invites))
+	for _, invite := range invites {
+		states[invite.ID] = invite.State
+	}
+	for id, want := range map[int64]store.InviteState{
+		pending.ID:        store.InviteIssued,
+		naturalExpired.ID: store.InviteExpired,
+		expired.ID:        store.InviteExpired,
+		used.ID:           store.InviteConsumed,
+		revoked.ID:        store.InviteRevoked,
+		old.ID:            store.InviteExpired,
+	} {
+		if states[id] != want {
+			t.Errorf("invite %d state = %q, want %q", id, states[id], want)
+		}
+	}
+	if states[foreign.ID] != "" {
+		t.Errorf("listing contains another user's invite %d", foreign.ID)
+	}
+	if got := fmt.Sprintf("%+v", invites); strings.Contains(got, revokedSecret) || strings.Contains(got, usedSecret) || strings.Contains(got, pendingSecret) {
+		t.Errorf("invite listing includes a cleartext secret: %s", got)
+	}
+
+	if _, err := store.StorePool(s).Exec(ctx, `
+		UPDATE registration_invites
+		SET issued_at = clock_timestamp() - interval '8 days',
+		    expires_at = clock_timestamp() - interval '1 day'
+		WHERE inviter_user_id = $1
+	`, inviter.ID); err != nil {
+		t.Fatalf("age all inviter invites out of quota window: %v", err)
+	}
+	_, weeklyCount, nextAvailableAt, err = lister.ListUserInvites(ctx, inviter.ID)
+	if err != nil {
+		t.Fatalf("list after quota window: %v", err)
+	}
+	if weeklyCount != 0 || nextAvailableAt != nil {
+		t.Errorf("usage after all invites age out = count %d next %v, want 0 and absent", weeklyCount, nextAvailableAt)
+	}
+}
+
+type userInviteRevoker interface {
+	RevokeUserInvite(context.Context, int64, int64) error
+}
+
+func TestRevokeUserInviteHidesForeignIDsAndIsIdempotent(t *testing.T) {
+	t.Parallel()
+	s := open(t)
+	ctx := context.Background()
+	owner, err := s.CreateUser(ctx, "+1555"+pgtest.RandomHex())
+	if err != nil {
+		t.Fatalf("create owner: %v", err)
+	}
+	other, err := s.CreateUser(ctx, "+1555"+pgtest.RandomHex())
+	if err != nil {
+		t.Fatalf("create other: %v", err)
+	}
+	revoker, ok := any(s).(userInviteRevoker)
+	if !ok {
+		t.Fatal("store does not expose caller-scoped user invite revocation")
+	}
+	foreign, _, err := s.IssueUserInvite(ctx, other.ID)
+	if err != nil {
+		t.Fatalf("issue foreign invite: %v", err)
+	}
+	if err := revoker.RevokeUserInvite(ctx, owner.ID, foreign.ID); err != nil {
+		t.Fatalf("revoke foreign id: %v", err)
+	}
+	if err := revoker.RevokeUserInvite(ctx, owner.ID, foreign.ID+100000); err != nil {
+		t.Fatalf("revoke absent id: %v", err)
+	}
+	var state string
+	if err := store.StorePool(s).QueryRow(ctx, `SELECT state FROM registration_invites WHERE id = $1`, foreign.ID).Scan(&state); err != nil {
+		t.Fatalf("read foreign invite state: %v", err)
+	}
+	if state != string(store.InviteIssued) {
+		t.Fatalf("foreign invite state = %q, want issued", state)
+	}
+
+	revoked, _, err := s.IssueUserInvite(ctx, owner.ID)
+	if err != nil {
+		t.Fatalf("issue owned invite: %v", err)
+	}
+	if err := revoker.RevokeUserInvite(ctx, owner.ID, revoked.ID); err != nil {
+		t.Fatalf("revoke owned invite: %v", err)
+	}
+	if err := revoker.RevokeUserInvite(ctx, owner.ID, revoked.ID); err != nil {
+		t.Fatalf("repeat revoke: %v", err)
+	}
+	if err := store.StorePool(s).QueryRow(ctx, `SELECT state FROM registration_invites WHERE id = $1`, revoked.ID).Scan(&state); err != nil {
+		t.Fatalf("read revoked invite state: %v", err)
+	}
+	if state != string(store.InviteRevoked) {
+		t.Fatalf("revoked invite state = %q, want revoked", state)
+	}
+}
+
+func TestRevokeUserInviteAndRedemptionChooseOneTerminalState(t *testing.T) {
+	t.Parallel()
+	s := open(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	inviter, err := s.CreateUser(ctx, "+1555"+pgtest.RandomHex())
+	if err != nil {
+		t.Fatalf("create inviter: %v", err)
+	}
+	redeemer, err := s.CreateUser(ctx, "+1555"+pgtest.RandomHex())
+	if err != nil {
+		t.Fatalf("create redeemer: %v", err)
+	}
+	invite, secret, err := s.IssueUserInvite(ctx, inviter.ID)
+	if err != nil {
+		t.Fatalf("issue invite: %v", err)
+	}
+	revoker, ok := any(s).(userInviteRevoker)
+	if !ok {
+		t.Fatal("store does not expose caller-scoped user invite revocation")
+	}
+
+	start := make(chan struct{})
+	revokeDone := make(chan error, 1)
+	consumeDone := make(chan error, 1)
+	go func() {
+		<-start
+		revokeDone <- revoker.RevokeUserInvite(ctx, inviter.ID, invite.ID)
+	}()
+	go func() {
+		<-start
+		tx, err := store.StorePool(s).Begin(ctx)
+		if err != nil {
+			consumeDone <- err
+			return
+		}
+		err = s.ConsumeInviteForUser(ctx, tx, "chosen-name", secret, redeemer.ID, 5, true)
+		if err == nil {
+			err = tx.Commit(ctx)
+		} else if rollbackErr := tx.Rollback(ctx); rollbackErr != nil {
+			err = rollbackErr
+		}
+		consumeDone <- err
+	}()
+	close(start)
+
+	revokeErr := <-revokeDone
+	consumeErr := <-consumeDone
+	if revokeErr != nil {
+		t.Fatalf("revoke invite: %v", revokeErr)
+	}
+	var state string
+	var redeemerID *int64
+	if err := store.StorePool(s).QueryRow(ctx,
+		`SELECT state, consumed_by_user_id FROM registration_invites WHERE id = $1`, invite.ID,
+	).Scan(&state, &redeemerID); err != nil {
+		t.Fatalf("read race result: %v", err)
+	}
+	switch state {
+	case string(store.InviteRevoked):
+		if !errors.Is(consumeErr, store.ErrInviteInvalid) || redeemerID != nil {
+			t.Fatalf("revoke won but consume error=%v redeemer=%v, want terminal rejection and no redeemer", consumeErr, redeemerID)
+		}
+	case string(store.InviteConsumed):
+		if consumeErr != nil || redeemerID == nil || *redeemerID != redeemer.ID {
+			t.Fatalf("consume won but error=%v redeemer=%v, want committed redeemer %d", consumeErr, redeemerID, redeemer.ID)
+		}
+	default:
+		t.Fatalf("race state = %q, want exactly one terminal winner", state)
+	}
+}
+
+func TestListUserInvitesIsBoundedNewestFirst(t *testing.T) {
+	t.Parallel()
+	s := open(t)
+	ctx := context.Background()
+	owner, err := s.CreateUser(ctx, "+1555"+pgtest.RandomHex())
+	if err != nil {
+		t.Fatalf("create owner: %v", err)
+	}
+	lister, ok := any(s).(userInviteLister)
+	if !ok {
+		t.Fatal("store does not expose caller-scoped user invite listing")
+	}
+	if _, err := store.StorePool(s).Exec(ctx, `
+		INSERT INTO registration_invites (handle, inviter_user_id, secret_digest, issued_at, expires_at)
+		SELECT NULL, $1, decode(lpad(to_hex(n), 64, '0'), 'hex'),
+		       clock_timestamp() - ((102 - n)::bigint * interval '1 second'),
+		       clock_timestamp() - ((102 - n)::bigint * interval '1 second') + interval '7 days'
+		FROM generate_series(1, 101) AS n
+	`, owner.ID); err != nil {
+		t.Fatalf("insert list-bound fixtures: %v", err)
+	}
+
+	invites, weeklyCount, _, err := lister.ListUserInvites(ctx, owner.ID)
+	if err != nil {
+		t.Fatalf("list user invites: %v", err)
+	}
+	if len(invites) != 100 {
+		t.Fatalf("listed invites = %d, want bound of 100", len(invites))
+	}
+	if weeklyCount != 101 {
+		t.Fatalf("weekly count = %d, want all 101 rows, independent of list bound", weeklyCount)
+	}
+	for i := 1; i < len(invites); i++ {
+		if invites[i].IssuedAt.After(invites[i-1].IssuedAt) {
+			t.Fatalf("invite %d is newer than preceding row: %s > %s", invites[i].ID, invites[i].IssuedAt, invites[i-1].IssuedAt)
+		}
+	}
+}
+
+func TestUserInviteHistoryIndexSupportsOwnerQueries(t *testing.T) {
+	t.Parallel()
+	s := open(t)
+
+	var definition string
+	err := store.StorePool(s).QueryRow(context.Background(), `
+		SELECT indexdef
+		FROM pg_indexes
+		WHERE schemaname = current_schema()
+		  AND tablename = 'registration_invites'
+		  AND indexname = 'registration_invites_inviter_issued_at_idx'
+	`).Scan(&definition)
+	if err != nil {
+		t.Fatalf("read user invite history index: %v", err)
+	}
+	if !strings.Contains(definition, "(inviter_user_id, issued_at DESC, id DESC)") {
+		t.Fatalf("user invite history index = %q, want inviter, issue time, and id ordering", definition)
 	}
 }

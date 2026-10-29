@@ -16,19 +16,27 @@ import (
 // wire error ready to hand back. A target that no user row backs is
 // PEER_ID_INVALID, the same error a bad access hash gets.
 func (h *handlers) resolveTarget(ctx context.Context, u tg.InputUserClass, selfID int64, op string) (int64, error) {
-	target, err := h.inputUserID(u, selfID)
+	target, err := h.resolveTargetUser(ctx, u, selfID, op)
 	if err != nil {
 		return 0, err
 	}
-	_, ok, err := h.store.UserByID(ctx, target)
+	return target.ID, nil
+}
+
+func (h *handlers) resolveTargetUser(ctx context.Context, u tg.InputUserClass, selfID int64, op string) (store.User, error) {
+	target, err := h.inputUserID(u, selfID)
+	if err != nil {
+		return store.User{}, err
+	}
+	user, ok, err := h.store.UserByID(ctx, target)
 	if err != nil {
 		h.log.Error(op, "user_id", selfID, "err", err)
-		return 0, errInternal
+		return store.User{}, errInternal
 	}
 	if !ok {
-		return 0, errPeerIDInvalid
+		return store.User{}, errPeerIDInvalid
 	}
-	return target, nil
+	return user, nil
 }
 
 // chatMemberErr maps a membership mutation's store error to the wire. An absent
@@ -96,12 +104,15 @@ func (h *handlers) handleAddChatUser(r *mtproto.Request) (bin.Encoder, error) {
 	if err := h.checkRateLimit(r, "add_chat_user", h.rateLimitAddChatUser); err != nil {
 		return nil, err
 	}
-	target, err := h.resolveTarget(r.Ctx, req.UserID, r.UserID, "add chat user target")
+	target, err := h.resolveTargetUser(r.Ctx, req.UserID, r.UserID, "add chat user target")
 	if err != nil {
 		return nil, err
 	}
+	if target.Kind == store.UserKindBot {
+		return nil, errBotGroupsBlocked
+	}
 
-	added, sender, perOwner, err := h.store.AddChatUser(r.Ctx, req.ChatID, target, r.UserID)
+	added, sender, perOwner, err := h.store.AddChatUser(r.Ctx, req.ChatID, target.ID, r.UserID)
 	if err != nil {
 		return nil, h.chatMemberErr("add chat user", r.UserID, err)
 	}
@@ -110,7 +121,7 @@ func (h *handlers) handleAddChatUser(r *mtproto.Request) (bin.Encoder, error) {
 	}
 	h.notifyOwners(r.Ctx, perOwner, 0)
 
-	ups, err := h.chatMembershipUpdates(r.Ctx, r.UserID, target, sender, perOwner)
+	ups, err := h.chatMembershipUpdates(r.Ctx, r.UserID, target.ID, sender, perOwner)
 	if err != nil {
 		h.log.Error("add chat user updates", "user_id", r.UserID, "err", err)
 		return nil, errInternal

@@ -157,6 +157,7 @@ func (s *Store) UsernameByHandle(ctx context.Context, handle string) (UsernameRe
 		// the copy must not make two RPCs name the same account differently.
 		return UsernameResolution{Kind: UsernameKindUser, User: UserFromDB(db.UserByIDRow{
 			ID:         u.ID,
+			Kind:       u.Kind,
 			Phone:      u.Phone,
 			FirstName:  u.FirstName,
 			LastName:   u.LastName,
