@@ -7,11 +7,17 @@ umask 077
 script="$(cd "$(dirname "$0")" && pwd)/deploy-main.sh"
 logs_script="$(cd "$(dirname "$0")" && pwd)/teagram-logs.sh"
 ops_script="$(cd "$(dirname "$0")" && pwd)/teagram-ops.sh"
-public_compose_fixture="$(cd "$(dirname "$0")" && pwd)/testdata/public-compose-valid.json"
+public_compose_fixture_template="$(cd "$(dirname "$0")" && pwd)/testdata/public-compose-valid.json"
 public_checker="$(cd "$(dirname "$0")" && pwd)/../teagramd/rollout-runner/public-websocket-check.py"
 public_haproxy_config="$(cd "$(dirname "$0")" && pwd)/../teagramd/haproxy-public-websocket.cfg"
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
+public_compose_fixture="$tmp/public-compose-valid.json"
+jq --arg source "$public_haproxy_config" '
+  .services["public-haproxy"].volumes |= map(
+    if .target == "/usr/local/etc/haproxy/haproxy.cfg" then .source = $source else . end
+  )
+' "$public_compose_fixture_template" > "$public_compose_fixture"
 
 export GIT_AUTHOR_NAME=fixture GIT_AUTHOR_EMAIL=fixture@example.invalid
 export GIT_COMMITTER_NAME=fixture GIT_COMMITTER_EMAIL=fixture@example.invalid
@@ -71,6 +77,14 @@ mkdir -p "$tmp/work/deploy/teagramd/rollout-runner" "$tmp/work/deploy/link-edge"
 cp "$public_checker" "$tmp/work/deploy/teagramd/rollout-runner/public-websocket-check.py"
 cp "$public_haproxy_config" "$tmp/work/deploy/teagramd/haproxy-public-websocket.cfg"
 python3 "$public_checker" --haproxy-config "$public_haproxy_config" < "$public_compose_fixture" >/dev/null
+if jq --arg source "$tmp/override/deploy/teagramd/haproxy-public-websocket.cfg" '
+  .services["public-haproxy"].volumes |= map(
+    if .target == "/usr/local/etc/haproxy/haproxy.cfg" then .source = $source else . end
+  )
+' "$public_compose_fixture" | python3 "$public_checker" --haproxy-config "$public_haproxy_config" >/dev/null 2>&1; then
+  echo 'FAIL public topology checker accepted an alternate HAProxy config source' >&2
+  exit 1
+fi
 printf 'tracked fixture\n' > "$tmp/work/tracked.txt"
 printf '#!/usr/bin/env bash\n' > "$tmp/work/tracked-script.sh"
 cat > "$tmp/work/deploy/teagramd/rollout-runner/rollout-runner.sh" <<'RUNNER'
@@ -219,8 +233,14 @@ case "$*" in
   *'config --format json'*)
     replica_count=${FIXTURE_COMPOSE_REPLICA_COUNT:-${TG_REPLICA_COUNT:-1}}
     jq --arg count "$replica_count" \
+      --arg haproxy_source "$DEPLOY_DIR/deploy/teagramd/haproxy-public-websocket.cfg" \
       --arg rendered_cidr "${FIXTURE_COMPOSE_PUBLIC_PROXY_CIDR:-}" '
         .services.teagramd.environment.TG_REPLICA_COUNT = $count |
+        .services["public-haproxy"].volumes |= map(
+          if .target == "/usr/local/etc/haproxy/haproxy.cfg" then
+            .source = $haproxy_source
+          else . end
+        ) |
         if $rendered_cidr == "" then . else
           .services["teagramd-public-1"].environment.TG_CLIENT_ADDR_PROXY_CIDRS = $rendered_cidr |
           .services["teagramd-public-2"].environment.TG_CLIENT_ADDR_PROXY_CIDRS = $rendered_cidr
@@ -229,6 +249,13 @@ case "$*" in
     ;;
   *'{{json .Config.Env}}'*)
     printf '["TG_REPLICA_COUNT=%s"]\n' "${FIXTURE_RUNNING_REPLICA_COUNT:-1}"
+    ;;
+  *'exec '*'/usr/local/etc/haproxy/haproxy.cfg'*)
+    if [[ "${FIXTURE_RUNNING_PUBLIC_HAPROXY_CONFIG:-reviewed}" == permissive ]]; then
+      printf 'permissive HAProxy config\n'
+    else
+      cat "$DEPLOY_DIR/deploy/teagramd/haproxy-public-websocket.cfg"
+    fi
     ;;
   *'pg_dump'*)
     [[ "${FIXTURE_DEPLOY_SUCCESS:-0}" == 1 ]] || { echo "unexpected docker call: $*" >&2; exit 99; }
@@ -240,10 +267,15 @@ case "$*" in
   *'compose ps -q teagramd-public-1'*) echo bbbbbbbbbbbb ;;
   *'compose ps -q teagramd-public-2'*) echo cccccccccccc ;;
   *aaaaaaaaaaaa*)
-    jq -cn '{
+    mount_source="$DEPLOY_DIR/deploy/teagramd/haproxy-public-websocket.cfg"
+    if [[ "${FIXTURE_RUNNING_PUBLIC_HAPROXY_MOUNT:-reviewed}" == alternate ]]; then
+      mount_source=/tmp/override/deploy/teagramd/haproxy-public-websocket.cfg
+    fi
+    jq -cn --arg mount_source "$mount_source" '{
       Config:{Env:[]}, State:{Status:"running",Health:{Status:"healthy"}},
       HostConfig:{PortBindings:{"2446/tcp":[{HostIp:"127.0.0.1",HostPort:"2446"}]}},
-      NetworkSettings:{Ports:{"2446/tcp":[{HostIp:"127.0.0.1",HostPort:"2446"}]}}
+      NetworkSettings:{Ports:{"2446/tcp":[{HostIp:"127.0.0.1",HostPort:"2446"}]}},
+      Mounts:[{Type:"bind",Source:$mount_source,Destination:"/usr/local/etc/haproxy/haproxy.cfg",RW:false}]
     }' | jq -s .
     ;;
   *bbbbbbbbbbbb*|*cccccccccccc*)
@@ -360,7 +392,11 @@ expect 99 'unexpected docker call: compose exec -T postgres pg_dump -U postgres 
   DEPLOY_SHA="$second" FIXTURE_RUNNING_PUBLIC_PROXY_CIDR=0.0.0.0/0
 expect 99 'unexpected docker call: compose exec -T postgres pg_dump -U postgres teagram' \
   DEPLOY_SHA="$second" FIXTURE_RUNNING_PUBLIC_PORT_BINDINGS=1
-printf '%s\n' 'PASS same-SHA fast path validates rendered public topology, runtime trust, and replica bindings'
+expect 99 'unexpected docker call: compose exec -T postgres pg_dump -U postgres teagram' \
+  DEPLOY_SHA="$second" FIXTURE_RUNNING_PUBLIC_HAPROXY_MOUNT=alternate
+expect 99 'unexpected docker call: compose exec -T postgres pg_dump -U postgres teagram' \
+  DEPLOY_SHA="$second" FIXTURE_RUNNING_PUBLIC_HAPROXY_CONFIG=permissive
+printf '%s\n' 'PASS same-SHA fast path validates rendered public topology, runtime HAProxy config, trust, and replica bindings'
 if ! cmp -s "$tmp/root/usr/local/sbin/teagram-logs" "$tmp/work/deploy/teagram/teagram-logs.sh"; then
   echo 'FAIL deploy did not install the commit-tracked teagram-logs command' >&2
   failures=$((failures + 1))

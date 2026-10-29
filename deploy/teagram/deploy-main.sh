@@ -372,7 +372,8 @@ public_base_listener_budget_is_single() {
   ' >/dev/null
 }
 public_route_services_running() {
-  local service id inspect_json state health ports
+  local service id inspect_json state health ports haproxy_config
+  haproxy_config="$LIVE_CHECKOUT/deploy/teagramd/haproxy-public-websocket.cfg"
   for service in public-haproxy teagramd-public-1 teagramd-public-2; do
     id=$(docker_compose ps -q "$service" </dev/null 2>/dev/null) || return 1
     [[ "$id" =~ ^[0-9a-f]{12,64}$ ]] || return 1
@@ -390,6 +391,18 @@ public_route_services_running() {
         [.[0].HostConfig.PortBindings // {} | to_entries[] | .key as $port | .value[]? | {port:$port,host_ip:.HostIp,host_port:.HostPort}] | sort_by(.port)
       ') || return 1
       [ "$ports" = '[{"port":"2446/tcp","host_ip":"127.0.0.1","host_port":"2446"}]' ] || return 1
+      if ! printf '%s' "$inspect_json" | jq -e --arg source "$haproxy_config" '
+        [.[0].Mounts[]? | select(.Destination == "/usr/local/etc/haproxy/haproxy.cfg")] as $mounts |
+        ($mounts | length) == 1 and
+        $mounts[0].Type == "bind" and
+        $mounts[0].Source == $source and
+        $mounts[0].RW == false
+      ' >/dev/null; then
+        return 1
+      fi
+      if ! docker exec "$id" cat /usr/local/etc/haproxy/haproxy.cfg 2>/dev/null | cmp -s - "$haproxy_config"; then
+        return 1
+      fi
     else
       if ! { printf '%s\n' "$inspect_json" "$PUBLIC_RENDERED_COMPOSE"; } | jq -se --arg service "$service" '
         .[0] as $inspect | .[1] as $compose |

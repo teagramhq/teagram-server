@@ -3,6 +3,7 @@
 
 import argparse
 import json
+import os
 import re
 import sys
 
@@ -121,14 +122,20 @@ def main() -> int:
         require("public-ingress" not in networks, f"{name} must not join public ingress")
 
     volumes = proxy.get("volumes", [])
+    require(isinstance(volumes, list) and all(isinstance(volume, dict) for volume in volumes), "public HAProxy volumes are invalid")
+    config_mounts = [
+        volume for volume in volumes
+        if volume.get("target") == "/usr/local/etc/haproxy/haproxy.cfg"
+    ]
+    require(len(config_mounts) == 1, "public HAProxy must mount exactly one config file")
+    config_mount = config_mounts[0]
+    config_source = config_mount.get("source")
     require(
-        any(
-            volume.get("target") == "/usr/local/etc/haproxy/haproxy.cfg"
-            and volume.get("read_only") is True
-            and volume.get("source", "").endswith("deploy/teagramd/haproxy-public-websocket.cfg")
-            for volume in volumes
-        ),
-        "public HAProxy must mount the reviewed config read-only",
+        config_mount.get("type") == "bind"
+        and config_mount.get("read_only") is True
+        and isinstance(config_source, str)
+        and os.path.realpath(config_source) == os.path.realpath(args.haproxy_config),
+        "public HAProxy must mount the reviewed config file read-only",
     )
     require(proxy.get("healthcheck", {}).get("test", [])[-1:] == ["http://127.0.0.1:8404/healthz"], "public HAProxy must expose a private readiness monitor")
     require(proxy.get("logging", {}).get("driver") == "json-file", "public HAProxy must retain bounded container logs")
