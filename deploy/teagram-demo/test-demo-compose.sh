@@ -375,6 +375,32 @@ jq -e \
   }
 )
 
+(
+  MOCK_EDGE_RELOAD_COMPLETED=0
+  demo_prepare_edge_config_permissions() { return 1; }
+  demo_compose() {
+    [[ "$*" == 'ps -q edge' ]] || return 1
+    printf 'edge\n'
+  }
+  demo_edge_uses_directory_mount() { return 0; }
+  docker() {
+    if [[ "$*" == 'exec edge nginx -c /etc/nginx/demo/nginx.conf -s reload' ]]; then
+      MOCK_EDGE_RELOAD_COMPLETED=1
+    fi
+    return 0
+  }
+
+  if ! demo_reload_edge; then
+    [[ "$MOCK_EDGE_RELOAD_COMPLETED" == 0 ]] || {
+      printf 'edge reload proceeded after permission preparation failed\n' >&2
+      exit 1
+    }
+  else
+    printf 'edge reload masked a failed permission preparation\n' >&2
+    exit 1
+  fi
+)
+
 python3 - "$SCRIPT_DIR/render-haproxy-config.py" "$SCRIPT_DIR/haproxy.cfg" "$TMP_DIR" <<'PY'
 from pathlib import Path
 import subprocess

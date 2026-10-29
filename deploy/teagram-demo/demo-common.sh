@@ -512,7 +512,7 @@ demo_prepare_edge_config_permissions() {
 
 demo_reload_edge() {
   local -a edge_ids=()
-  demo_prepare_edge_config_permissions
+  demo_prepare_edge_config_permissions || return 1
   mapfile -t edge_ids < <(demo_compose ps -q edge)
   ((${#edge_ids[@]} == 1)) || {
     demo_fail 'running edge proxy is missing or ambiguous'
