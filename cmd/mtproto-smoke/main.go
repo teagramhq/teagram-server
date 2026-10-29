@@ -226,7 +226,7 @@ func probeFile(ctx context.Context, endpoint, path string) (returnErr error) {
 	if err := discovery.ValidateEndpoint(endpoint); err != nil {
 		return fmt.Errorf("validate target endpoint: %w", err)
 	}
-	file, err := os.Open(path)
+	file, err := os.Open(path) // #nosec G304 -- the operator selects a local discovery file; its contents are size-limited and parsed below.
 	if err != nil {
 		return fmt.Errorf("open client discovery file: %w", err)
 	}

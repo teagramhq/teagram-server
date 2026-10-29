@@ -50,8 +50,10 @@ ci_query() {
 }
 
 check_ci_contract() {
-  [[ "$(ci_query '.on | keys | sort | join(",")')" == 'pull_request,push' ]] ||
-    ci_fail 'triggers must be exactly push and pull_request'
+  [[ "$(ci_query '.on | keys | sort | join(",")')" == 'merge_group,pull_request,push' ]] ||
+    ci_fail 'triggers must be exactly merge_group, pull_request, and push'
+  [[ "$(ci_query '.on.merge_group.types | join(",")')" == 'checks_requested' ]] ||
+    ci_fail 'merge-group CI must run when checks are requested'
   [[ "$(ci_query '.on.push.branches | join(",")')" == 'main' ]] ||
     ci_fail 'push CI must be limited to main'
   [[ "$(ci_query '.concurrency.group')" == "$expected_ci_group" ]] ||
@@ -781,6 +783,8 @@ self_test() {
   done
 
   local ci_mutations=(
+    'del(.on.merge_group)'
+    '.on.merge_group.types = ["workflow_dispatch"]'
     '.on.push.branches = ["main", "release"]'
     '.concurrency.group = "CI-run"'
     '.concurrency."cancel-in-progress" = false'

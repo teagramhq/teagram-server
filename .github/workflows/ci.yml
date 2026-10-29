@@ -1351,11 +1351,12 @@ jobs:
   check-k8s-manifests:
     name: "check: k8s-manifests"
     runs-on: ubuntu-26.04
-    timeout-minutes: 10
+    timeout-minutes: 15
     permissions:
       contents: read
 
     env:
+      K3S_IMAGE: rancher/k3s:v1.37.1-k3s1@sha256:8d298cb81ca94e875d31e804e5aa10b56355d1d7d95d7e1ef8a8d9239f15ada0
       KUBECTL_VERSION: v1.37.1
       KUBECONFORM_VERSION: v0.8.0
       KUBERNETES_VERSION: 1.37.1
@@ -1385,9 +1386,33 @@ jobs:
           chmod 0755 "$tools_dir/kubeconform"
           echo "$tools_dir" >> "$GITHUB_PATH"
 
+      - name: Start pinned k3s API for client dry-run
+        run: |
+          set -euo pipefail
+          docker run --detach --privileged --name k8s-manifest-check \
+            --publish 127.0.0.1:6443:6443 \
+            "$K3S_IMAGE" server \
+            --disable=traefik \
+            --disable=servicelb \
+            --disable=metrics-server \
+            --tls-san=127.0.0.1 \
+            --write-kubeconfig-mode=644
+          for attempt in $(seq 1 90); do
+            if docker exec k8s-manifest-check k3s kubectl get nodes --no-headers >/dev/null 2>&1; then
+              break
+            fi
+            sleep 2
+          done
+          docker exec k8s-manifest-check k3s kubectl wait \
+            --for=condition=Ready node --all --timeout=180s
+          docker cp k8s-manifest-check:/etc/rancher/k3s/k3s.yaml "$RUNNER_TEMP/k3s.yaml"
+          export KUBECONFIG="$RUNNER_TEMP/k3s.yaml"
+          kubectl wait --for=condition=Ready node --all --timeout=180s
+
       - name: Render and validate production and CI overlays
         run: |
           set -euo pipefail
+          export KUBECONFIG="$RUNNER_TEMP/k3s.yaml"
           latest_migration=$(find migrations -maxdepth 1 -type f -name '*.sql' -printf '%f\n' | sort | tail -n 1 | cut -d_ -f1)
           required_migration=$(tr -d '\r\n' < deploy/k8s/base/migration-version)
           test "$required_migration" = "$latest_migration"
@@ -1411,6 +1436,10 @@ jobs:
 
       - name: Check public WebSocket ingress invariants
         run: bash deploy/k8s/test-public-websocket-component.sh
+
+      - name: Remove k3s manifest-check server
+        if: always()
+        run: docker rm --force --volumes k8s-manifest-check || true
 
   test-k8s-deploy:
     name: "test: k8s-deploy"
@@ -1443,7 +1472,7 @@ jobs:
         run: |
           set -euo pipefail
           docker buildx build \
-            --build-context sticker-bundle=build/sticker-bundle \
+            --build-context sticker-bundle=build \
             --build-arg STICKER_BUNDLE_SOURCE=sticker-bundle \
             --build-arg "TEAGRAMD_SOURCE_REVISION=$GITHUB_SHA" \
             --tag ghcr.io/teagramhq/teagramd:ci --load .
