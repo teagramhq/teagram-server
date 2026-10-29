@@ -100,6 +100,32 @@ printf '%s\n' "$rerun_step" | bash -n
 test_tmp="$(mktemp -d)"
 trap 'rm -rf "$test_tmp"' EXIT
 gh() {
+  if [[ "${GH_MOCK_MODE:-}" == priority-cancel ]]; then
+    if [[ "$1" == api && "$2" == --paginate ]]; then
+      [[ "$3" == "repos/${GITHUB_REPOSITORY}/actions/workflows/ci.yml/runs?event=pull_request&status=queued&per_page=100" && "$4" == --jq && "$5" == '.workflow_runs[]? | [.id, .created_at] | @tsv' ]] || return 2
+      printf '123\t2026-10-28T00:00:00Z\n456\t2026-10-28T00:01:00Z\n789\t2026-10-28T00:02:00Z\n'
+      return 0
+    fi
+    if [[ "$1" == api && "$2" == "repos/${GITHUB_REPOSITORY}/actions/runs/"* ]]; then
+      [[ "$3" == --jq && "$4" == '.status' ]] || return 2
+      local run_id="${2##*/}"
+      printf '%s\n' "$run_id" >> "$PRIORITY_STATUS_LOG"
+      case "$run_id" in
+        123|789) printf 'queued\n' ;;
+        456) printf 'in_progress\n' ;;
+        *) return 2 ;;
+      esac
+      return 0
+    fi
+    if [[ "$1" == run && "$2" == cancel ]]; then
+      [[ "$4" == --repo && "$5" == "$GITHUB_REPOSITORY" ]] || return 2
+      printf '%s\n' "$3" >> "$PRIORITY_CANCEL_LOG"
+      [[ "$3" != 789 ]]
+      return
+    fi
+    return 2
+  fi
+
   if [[ "$1" == api ]]; then
     if [[ "$2" == --paginate ]]; then
       [[ "$3" == --method && "$4" == GET && "$5" == "repos/${GITHUB_REPOSITORY}/actions/workflows/ci.yml/runs" && " $* " == *' -f event=pull_request '* && " $* " == *'created=>='* ]] || return 2
@@ -152,6 +178,21 @@ gh() {
 }
 sleep() { :; }
 export -f gh sleep
+
+GH_MOCK_MODE=priority-cancel \
+PRIORITY_STATUS_LOG="$test_tmp/priority-statuses" \
+PRIORITY_CANCEL_LOG="$test_tmp/priority-cancels" \
+GITHUB_OUTPUT="$test_tmp/priority-output" \
+GITHUB_REPOSITORY=example/repo \
+  bash -c "$cancel_step" > "$test_tmp/priority-output-log" 2>&1 || fail 'the priority gate must continue when a queued-run cancellation races with a run failure'
+[[ "$(<"$test_tmp/priority-statuses")" == $'123\n456\n789' ]] ||
+  fail 'the priority gate must recheck every queued PR run before cancellation'
+[[ "$(<"$test_tmp/priority-cancels")" == $'123\n789' ]] ||
+  fail 'the priority gate must cancel still-queued runs and leave transitioned runs alone'
+[[ "$(<"$test_tmp/priority-output")" == 'cancelled_pr_run_targets=123:2026-10-28T00:00:00Z' ]] ||
+  fail 'recovery targets must contain only successfully cancelled PR runs'
+[[ "$(<"$test_tmp/priority-output-log")" == *'Could not cancel queued pull request CI run 789'* ]] ||
+  fail 'a failed cancellation must warn while allowing main CI to proceed'
 
 STATUS_MODE=after-old-bound \
 STATUS_READS_FILE="$test_tmp/delayed-reads" \
