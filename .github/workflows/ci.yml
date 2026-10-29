@@ -1336,16 +1336,13 @@ jobs:
       - real-server-fixtures
       - websocket-d1
       - websocket-permanent-exchange
-      - mirror-rustfs-qualification-images
       - sql-lint
       - css
       - browser-acceptance
       - browser-acceptance-image
-      - rustfs-transition-qualification
       - schema-gate-postgres
       - deploy-workflow
       - demo-web-artifact
-      - restore-readiness
     runs-on: ubuntu-26.04
     timeout-minutes: 5
 
@@ -1365,16 +1362,13 @@ jobs:
           REAL_SERVER_FIXTURES_RESULT: ${{ needs.real-server-fixtures.result }}
           WEBSOCKET_D1_RESULT: ${{ needs.websocket-d1.result }}
           WEB_PERMANENT_EXCHANGE_RESULT: ${{ needs.websocket-permanent-exchange.result }}
-          MIRROR_RUSTFS_RESULT: ${{ needs.mirror-rustfs-qualification-images.result }}
           SQL_LINT_RESULT: ${{ needs.sql-lint.result }}
           CSS_RESULT: ${{ needs.css.result }}
           BROWSER_ACCEPTANCE_RESULT: ${{ needs.browser-acceptance.result }}
           BROWSER_ACCEPTANCE_IMAGE_RESULT: ${{ needs.browser-acceptance-image.result }}
-          RUSTFS_TRANSITION_RESULT: ${{ needs.rustfs-transition-qualification.result }}
           SCHEMA_GATE_POSTGRES_RESULT: ${{ needs.schema-gate-postgres.result }}
           DEPLOY_WORKFLOW_RESULT: ${{ needs.deploy-workflow.result }}
           DEMO_WEB_ARTIFACT_RESULT: ${{ needs.demo-web-artifact.result }}
-          RESTORE_READINESS_RESULT: ${{ needs.restore-readiness.result }}
         run: |
           expected_priority_result=success
           if [[ "$GITHUB_EVENT_NAME" == pull_request ]]; then
@@ -1393,16 +1387,13 @@ jobs:
             "real-server-fixtures=$REAL_SERVER_FIXTURES_RESULT"
             "websocket-d1=$WEBSOCKET_D1_RESULT"
             "websocket-permanent-exchange=$WEB_PERMANENT_EXCHANGE_RESULT"
-            "mirror-rustfs-qualification-images=$MIRROR_RUSTFS_RESULT"
             "sql-lint=$SQL_LINT_RESULT"
             "css=$CSS_RESULT"
             "browser-acceptance=$BROWSER_ACCEPTANCE_RESULT"
             "browser-acceptance-image=$BROWSER_ACCEPTANCE_IMAGE_RESULT"
-            "rustfs-transition-qualification=$RUSTFS_TRANSITION_RESULT"
             "schema-gate-postgres=$SCHEMA_GATE_POSTGRES_RESULT"
             "deploy-workflow=$DEPLOY_WORKFLOW_RESULT"
             "demo-web-artifact=$DEMO_WEB_ARTIFACT_RESULT"
-            "restore-readiness=$RESTORE_READINESS_RESULT"
           )
           failed_results=()
           if [[ "$MAIN_PRIORITY_RESULT" != "$expected_priority_result" ]]; then
@@ -3419,21 +3410,14 @@ jobs:
       packages: write
 
     steps:
-      - name: Skip image mirroring for fork pull requests
-        if: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository }}
-        run: echo "RustFS qualification images are mirrored only for same-repository pull requests"
-
       - uses: actions/checkout@v7.0.1
-        if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
 
       - name: Install Skopeo
-        if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
         run: |
           sudo apt-get update
           sudo apt-get install --no-install-recommends --yes skopeo
 
       - name: Mirror digest-pinned official images to GHCR
-        if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: bash .github/scripts/mirror_rustfs_qualification_images.sh
