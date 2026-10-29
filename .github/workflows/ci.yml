@@ -1326,14 +1326,14 @@ jobs:
       - ops-prioritize-main
       - ci-main
       - sticker-bundle
+      - photothumb-runtime
+      - real-server-fixtures
       - lint
       - sqlc
       - docker
       - compose
       - smoke
       - e2e-admin
-      - photothumb-runtime
-      - real-server-fixtures
       - websocket-d1
       - websocket-permanent-exchange
       - sql-lint
@@ -1374,17 +1374,18 @@ jobs:
           if [[ "$GITHUB_EVENT_NAME" == pull_request ]]; then
             expected_priority_result=skipped
           fi
-          required_results=(
+          lane_results=(
+            "ops-prioritize-main=$MAIN_PRIORITY_RESULT"
             "ci-main=$CI_MAIN_RESULT"
             "sticker-bundle=$STICKER_BUNDLE_RESULT"
+            "photothumb-runtime=$PHOTOTHUMB_RUNTIME_RESULT"
+            "real-server-fixtures=$REAL_SERVER_FIXTURES_RESULT"
             "lint=$LINT_RESULT"
             "sqlc=$SQLC_RESULT"
             "docker=$DOCKER_RESULT"
             "compose=$COMPOSE_RESULT"
             "smoke=$SMOKE_RESULT"
             "e2e-admin=$E2E_ADMIN_RESULT"
-            "photothumb-runtime=$PHOTOTHUMB_RUNTIME_RESULT"
-            "real-server-fixtures=$REAL_SERVER_FIXTURES_RESULT"
             "websocket-d1=$WEBSOCKET_D1_RESULT"
             "websocket-permanent-exchange=$WEB_PERMANENT_EXCHANGE_RESULT"
             "sql-lint=$SQL_LINT_RESULT"
@@ -1395,18 +1396,28 @@ jobs:
             "deploy-workflow=$DEPLOY_WORKFLOW_RESULT"
             "demo-web-artifact=$DEMO_WEB_ARTIFACT_RESULT"
           )
-          failed_results=()
-          if [[ "$MAIN_PRIORITY_RESULT" != "$expected_priority_result" ]]; then
-            failed_results+=("ops-prioritize-main=$MAIN_PRIORITY_RESULT")
-          fi
-          for result in "${required_results[@]}"; do
-            if [[ "$result" != *=success ]]; then
-              failed_results+=("$result")
-            fi
-          done
-          if (( ${#failed_results[@]} > 0 )); then
+          if [[ "$MAIN_PRIORITY_RESULT" != "$expected_priority_result" ||
+                "$CI_MAIN_RESULT" != "success" ||
+                "$STICKER_BUNDLE_RESULT" != "success" ||
+                "$PHOTOTHUMB_RUNTIME_RESULT" != "success" ||
+                "$REAL_SERVER_FIXTURES_RESULT" != "success" ||
+                "$LINT_RESULT" != "success" ||
+                "$SQLC_RESULT" != "success" ||
+                "$DOCKER_RESULT" != "success" ||
+                "$COMPOSE_RESULT" != "success" ||
+                "$SMOKE_RESULT" != "success" ||
+                "$E2E_ADMIN_RESULT" != "success" ||
+                "$WEBSOCKET_D1_RESULT" != "success" ||
+                "$WEB_PERMANENT_EXCHANGE_RESULT" != "success" ||
+                "$SQL_LINT_RESULT" != "success" ||
+                "$CSS_RESULT" != "success" ||
+                "$BROWSER_ACCEPTANCE_RESULT" != "success" ||
+                "$BROWSER_ACCEPTANCE_IMAGE_RESULT" != "success" ||
+                "$SCHEMA_GATE_POSTGRES_RESULT" != "success" ||
+                "$DEPLOY_WORKFLOW_RESULT" != "success" ||
+                "$DEMO_WEB_ARTIFACT_RESULT" != "success" ]]; then
             echo "::error::Required CI lanes did not pass"
-            printf '%s\n' "${failed_results[@]}"
+            printf '%s\n' "${lane_results[@]}"
             exit 1
           fi
           echo "All required CI lanes passed"
