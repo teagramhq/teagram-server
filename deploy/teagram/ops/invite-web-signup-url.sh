@@ -122,7 +122,9 @@ trap cleanup EXIT
 
 cp -- "$ENV_FILE" "$work_dir/env.backup" || fail 'cannot stage .env rollback copy'
 cp -- "$ENV_RECORD" "$work_dir/record.backup" || fail 'cannot stage rollout record rollback copy'
-chmod 600 -- "$work_dir/env.backup" "$work_dir/record.backup" || fail 'cannot secure rollback copies'
+chgrp "$env_group" "$work_dir/env.backup" || fail 'cannot preserve .env rollback group'
+chmod "$env_mode" -- "$work_dir/env.backup" || fail 'cannot preserve .env rollback mode'
+chmod 600 -- "$work_dir/record.backup" || fail 'cannot secure rollout record rollback copy'
 
 if [[ "$mode" == apply ]]; then
   cp -- "$ENV_FILE" "$work_dir/env.new" || fail 'cannot stage updated .env'
