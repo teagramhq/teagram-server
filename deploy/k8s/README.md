@@ -1,6 +1,8 @@
 ## Kustomize layouts
 
 `base/` contains the single-replica teagramd, PostgreSQL, and RustFS workloads,
+the two-replica public WebSocket deployment with its NetworkPolicy-gated
+HAProxy sidecar,
 the RustFS initialization and Atlas migration Jobs, the link landing and
 selector services, and the Cloudflare Tunnel connector. `prod/` pins the
 application images by digest. `ci/` supplies disposable runtime settings and
@@ -25,6 +27,7 @@ by the cluster's secret and configuration management before it is applied:
 | `rustfs-credentials` Secret | `RUSTFS_ACCESS_KEY`, `RUSTFS_SECRET_KEY` |
 | `teagramd-blob-credentials` Secret | `TG_BLOB_S3_ACCESS_KEY_ID`, `TG_BLOB_S3_SECRET_ACCESS_KEY` |
 | `teagramd-media-keys` Secret | Current key file `1.key` and any retained key versions |
+| `teagramd-public-identity` ConfigMap | `TG_RSA_KEY_FINGERPRINT` from the primary pod's `ensure-identity` init container |
 | `cloudflared-token` Secret | `token` |
 | `ghcr-pull` Secret | Docker config for the private GHCR packages |
 
@@ -35,6 +38,25 @@ back up and restore that volume together with Postgres when moving an existing
 installation. `legacy-blobs` is mounted read-only and retained for recovery.
 RustFS data lives on its own PVC.
 
+The `teagramd-public` deployment shares the `key-data`, `legacy-blobs`, and
+`blob-mode` claims with the primary `teagramd-0` pod. Its two replicas and
+`TG_REPLICA_COUNT=2` must stay aligned.
+
+The primary `teagramd` StatefulSet runs `ensure-identity` against its key PVC
+before serving. That command bootstraps an empty PVC and validates an existing
+RSA key without replacing it. The primary server keeps its auth-key encryption
+key on the same PVC. On the first install, apply the overlay to initialize the
+primary pod, then create the identity ConfigMap from its init-container output:
+
+```sh
+kubectl logs --namespace teagram teagramd-0 --container ensure-server-identity
+kubectl create configmap teagramd-public-identity --namespace teagram \
+  --from-literal=TG_RSA_KEY_FINGERPRINT=<fingerprint>
+```
+
+The public replicas wait for that ConfigMap and pin their loaded RSA identity
+to its fingerprint while reading the shared auth-key encryption key.
+
 The first deployment applies the Atlas Job before teagramd can become ready.
 On later releases, applying a new image digest creates a new migration Job and
 the updated teagramd pod stays in its init phase until the required migration
@@ -44,7 +66,9 @@ digests and reapplies the overlay; schema rollback requires restoring the
 matching database snapshot because the Job does not run down migrations.
 
 The Cloudflare Tunnel's remotely managed public hostname route for links should
-target `http://linkselector:8081`; the selector sends teagramd links to
+target `http://linkselector:8081`; route `server.teagram.io` to
+`http://teagramd-public:2446` for the public WebSocket listener. The selector
+sends teagramd links to
 `http://linklanding:8082` and ordinary web traffic to the `web` Service on
 port 8080. `teagramd` is exposed only by a ClusterIP Service here. Configure
 its external TCP route separately before setting `TG_ADVERTISE_ADDR`; the

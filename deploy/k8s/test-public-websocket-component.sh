@@ -27,6 +27,11 @@ one("Deployment") as $deployment
   and $env.TG_PUBLIC_REGISTRATION == "invite"
   and $env.TG_PUBLIC_WEBSOCKET_ALLOWED_ORIGINS == "https://web.teagram.io"
   and $env.TG_REPLICA_COUNT == "2"
+  and ([ $deployment.spec.template.spec.containers[]
+    | select(.name == "teagramd") | .env[]
+    | select(.name == "TG_RSA_KEY_FINGERPRINT")
+    | .valueFrom.configMapKeyRef.name == "teagramd-public-identity"
+      and .valueFrom.configMapKeyRef.key == "TG_RSA_KEY_FINGERPRINT"] | any)
   and $env.TG_WEBSOCKET_LISTEN_ADDR == ""
   and $env.TG_WEBSOCKET_ALLOWED_ORIGINS == ""
   and $service.spec.type == "ClusterIP"
@@ -34,7 +39,6 @@ one("Deployment") as $deployment
   and $service.spec.ports[0].targetPort == "public-proxy"
   and ($policy.spec.ingress | length) == 1
   and ($policy.spec.ingress[0].from | length) == 1
-  and $policy.spec.ingress[0].from[0].namespaceSelector.matchLabels["kubernetes.io/metadata.name"] == "cloudflared"
   and $policy.spec.ingress[0].from[0].podSelector.matchLabels["app.kubernetes.io/name"] == "cloudflared"
   and $policy.spec.ingress[0].ports[0].port == 2446
   and $policy.spec.policyTypes == ["Ingress"]
