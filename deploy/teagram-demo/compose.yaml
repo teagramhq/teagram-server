@@ -289,9 +289,7 @@ services:
   edge:
     image: mirror.gcr.io/library/nginx:1.28.0-alpine@sha256:09ab424a8c788f8d0fe3a64429f6d19dfa526885c8609b748d0943a75dcb9f8c
     platform: linux/amd64
-    labels:
-      com.teagram.demo.edge-config-sha256: ${TEAGRAM_DEMO_EDGE_CONFIG_SHA256:?missing edge configuration hash}
-    entrypoint: ["nginx", "-g", "daemon off;"]
+    entrypoint: ["nginx", "-c", "/etc/nginx/demo/nginx.conf", "-g", "daemon off;"]
     user: "101:101"
     ports:
       - "${TEAGRAM_DEMO_EDGE_BIND:-127.0.0.1:8080}:8080"
@@ -306,8 +304,8 @@ services:
       - /tmp:size=16m,mode=1777
     volumes:
       - type: bind
-        source: ./deploy/teagram-demo/nginx.conf
-        target: /etc/nginx/nginx.conf
+        source: ./deploy/teagram-demo/nginx-config
+        target: /etc/nginx/demo
         read_only: true
       # The discovery file is atomically replaced during a rollout.
       - type: bind

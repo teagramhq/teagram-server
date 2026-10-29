@@ -14,7 +14,6 @@ EXPECTED = {
     "TG_PUBLIC_LINK_PREFIX": "https://demo.teagram.io/",
     "TG_ADVERTISE_ADDR": "demo.teagram.io:443",
     "TG_WEBSOCKET_LISTEN_ADDR": ":2446",
-    "TG_WEBSOCKET_ALLOWED_ORIGINS": "https://web.teagram.io",
     "TG_REGISTRATION": "open",
     "TG_LOG_LOGIN_CODES": "false",
     "TG_MAX_FILE_BYTES": "16777216",
@@ -103,6 +102,7 @@ def main() -> None:
         values[name] = value
 
     expected_names = set(EXPECTED) | {
+        "TG_WEBSOCKET_ALLOWED_ORIGINS",
         "POSTGRES_PASSWORD", "TG_AUTHKEY_ENC_KEY",
         "TEAGRAM_DEMO_TURNSTILE_SITE_KEY",
     }
@@ -131,6 +131,8 @@ def main() -> None:
     if qa_bypass_token in {site_key, secret_key}:
         reject("turnstile-qa-bypass-token-reuse")
     if any(values[name] != value for name, value in EXPECTED.items()):
+        reject("fixed-demo-settings")
+    if values["TG_WEBSOCKET_ALLOWED_ORIGINS"] != "https://web.teagram.io,https://demo.teagram.io":
         reject("fixed-demo-settings")
     if any(values[name] != value for name, value in OPTIONAL_EXPECTED.items() if name in values):
         reject("fixed-demo-settings")

@@ -40,15 +40,19 @@ type photoUploadS3Put struct {
 }
 
 type photoUploadS3Server struct {
-	mu       sync.Mutex
-	objects  map[string][]byte
-	puts     []photoUploadS3Put
-	filePuts []photoUploadS3Put
-	gets     int
+	mu              sync.Mutex
+	objects         map[string][]byte
+	puts            []photoUploadS3Put
+	filePuts        []photoUploadS3Put
+	filePutObserved chan struct{}
+	gets            int
 }
 
 func newPhotoUploadS3Server() *photoUploadS3Server {
-	return &photoUploadS3Server{objects: make(map[string][]byte)}
+	return &photoUploadS3Server{
+		objects:         make(map[string][]byte),
+		filePutObserved: make(chan struct{}, 1),
+	}
 }
 
 func (s *photoUploadS3Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -87,15 +91,22 @@ func (s *photoUploadS3Server) ServeHTTP(w http.ResponseWriter, r *http.Request) 
 			body:          append([]byte(nil), body...),
 			readErr:       readErr,
 		}
+		_, isFile := blob.ParseKey(key)
 		s.mu.Lock()
 		s.puts = append(s.puts, put)
-		if _, isFile := blob.ParseKey(key); isFile {
+		if isFile {
 			s.filePuts = append(s.filePuts, put)
 		}
 		if readErr == nil {
 			s.objects[key] = append([]byte(nil), body...)
 		}
 		s.mu.Unlock()
+		if isFile {
+			select {
+			case s.filePutObserved <- struct{}{}:
+			default:
+			}
+		}
 		if readErr != nil {
 			w.WriteHeader(http.StatusBadRequest)
 			return
@@ -159,6 +170,22 @@ func (s *photoUploadS3Server) filePutSnapshot() []photoUploadS3Put {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return append([]photoUploadS3Put(nil), s.filePuts...)
+}
+
+func (s *photoUploadS3Server) waitForFilePuts(ctx context.Context, count int) error {
+	for {
+		s.mu.Lock()
+		observed := len(s.filePuts)
+		s.mu.Unlock()
+		if observed >= count {
+			return nil
+		}
+		select {
+		case <-s.filePutObserved:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
 }
 
 func (s *photoUploadS3Server) putSnapshot() []photoUploadS3Put {
@@ -592,6 +619,11 @@ func TestUploadMediaPhotoEarlyS3StreamDoesNotPublishOrConsumeParts(t *testing.T)
 	part, found, err := s.UploadPart(ctx, user.ID, clientFileID, 0)
 	if err != nil || !found || !bytes.Equal(part, body) {
 		t.Fatalf("retained upload part = %d bytes, found %v, err %v; want original %d bytes", len(part), found, err, len(body))
+	}
+	waitCtx, cancelWait := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancelWait()
+	if err := s3Server.waitForFilePuts(waitCtx, 1); err != nil {
+		t.Fatalf("wait for truncated assembled S3 PUT: %v", err)
 	}
 	puts := s3Server.filePutSnapshot()
 	if len(puts) != 1 || puts[0].contentLength != int64(len(body)) || puts[0].readErr == nil || len(puts[0].body) >= len(body) {

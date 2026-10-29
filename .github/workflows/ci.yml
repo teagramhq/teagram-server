@@ -1035,6 +1035,8 @@ jobs:
           bash -n deploy/teagram-demo/test-install-teagram-demo-ops.sh
           bash -n deploy/teagram-demo/test-ops-menu.sh
           bash -n deploy/teagram-demo/deploy-main.sh
+          bash -n deploy/teagram-demo/publish-web-release.sh
+          bash -n deploy/teagram-demo/build-web-artifact.sh
           bash -n deploy/teagram-demo/wipe-weekly.sh
           bash -n deploy/teagram-demo/install-weekly-wipe.sh
           bash -n deploy/teagram-demo/run-activity.sh
@@ -1069,6 +1071,8 @@ jobs:
             deploy/teagram-demo/test-install-teagram-demo-ops.sh \
             deploy/teagram-demo/test-ops-menu.sh \
             deploy/teagram-demo/deploy-main.sh \
+            deploy/teagram-demo/publish-web-release.sh \
+            deploy/teagram-demo/build-web-artifact.sh \
             deploy/teagram-demo/wipe-weekly.sh \
             deploy/teagram-demo/install-weekly-wipe.sh \
             deploy/teagram-demo/run-activity.sh \
@@ -1113,11 +1117,94 @@ jobs:
       - name: Check demo ops installer key transaction
         run: sudo -n bash deploy/teagram-demo/test-install-teagram-demo-ops.sh
 
+      - name: Check pinned demo web artifact handling
+        run: python3 deploy/teagram-demo/test-web-release.py
+
+      - name: Check demo web artifact pin contract
+        run: python3 deploy/teagram-demo/test-web-artifact-pin.py
+
       - name: Check demo Turnstile secret access
         run: sudo -n deploy/teagram-demo/test-turnstile-secret-access.sh
 
       - name: Check demo image release pinning
         run: deploy/teagram-demo/test-image-release.sh
+
+  demo-web-artifact:
+    name: demo web artifact pin
+    runs-on: ubuntu-26.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+
+    steps:
+      - uses: actions/checkout@v7.0.1
+
+      - name: Verify the pinned upstream artifact
+        id: pin
+        run: |
+          pin=$(python3 deploy/teagram-demo/resolve_web_artifact_pin.py)
+          mode=$(jq -er '.mode' <<<"$pin")
+          source_commit=$(jq -er '.sourceCommit' <<<"$pin")
+          artifact_digest=$(jq -er '.artifactDigest' <<<"$pin")
+          [[ "$mode" == candidate || "$mode" == published ]]
+          [[ "$source_commit" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$artifact_digest" =~ ^sha256:[0-9a-f]{64}$ ]]
+          {
+            printf 'mode=%s\n' "$mode"
+            printf 'source_commit=%s\n' "$source_commit"
+            printf 'artifact_digest=%s\n' "$artifact_digest"
+          } >> "$GITHUB_OUTPUT"
+
+      - uses: actions/checkout@v7.0.1
+        if: steps.pin.outputs.mode == 'published'
+        with:
+          repository: teagramhq/teagram-web
+          ref: ${{ steps.pin.outputs.source_commit }}
+          path: teagram-web
+          persist-credentials: false
+
+      - uses: pnpm/action-setup@0c17529a66aca453f9227af23103ed11469b1e47
+        if: steps.pin.outputs.mode == 'published'
+        with:
+          version: 11.16.0
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        if: steps.pin.outputs.mode == 'published'
+        with:
+          node-version: 24.18.0
+          cache: pnpm
+          cache-dependency-path: teagram-web/pnpm-lock.yaml
+
+      - name: Rebuild and verify the pinned web artifact
+        if: steps.pin.outputs.mode == 'published'
+        working-directory: teagram-web
+        env:
+          WEB_SOURCE_SHA: ${{ steps.pin.outputs.source_commit }}
+          WEB_ARTIFACT_DIGEST: ${{ steps.pin.outputs.artifact_digest }}
+        run: bash "$GITHUB_WORKSPACE/deploy/teagram-demo/build-web-artifact.sh"
+
+      - name: Package the verified demo web artifact
+        if: steps.pin.outputs.mode == 'published'
+        env:
+          WEB_SOURCE_SHA: ${{ steps.pin.outputs.source_commit }}
+        run: |
+          [[ "$WEB_SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]
+          archive="$RUNNER_TEMP/demo-web-$WEB_SOURCE_SHA.tar.gz"
+          tar -czf "$archive" -C teagram-web/dist-private .
+          archive_sha256=$(sha256sum "$archive" | awk '{print $1}')
+          [[ "$archive_sha256" =~ ^[0-9a-f]{64}$ ]]
+          printf '%s\n' "$archive_sha256" > "$archive.sha256"
+
+      - name: Upload the verified demo web artifact
+        if: steps.pin.outputs.mode == 'published'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: demo-web-release-${{ steps.pin.outputs.source_commit }}
+          path: |
+            ${{ runner.temp }}/demo-web-${{ steps.pin.outputs.source_commit }}.tar.gz
+            ${{ runner.temp }}/demo-web-${{ steps.pin.outputs.source_commit }}.tar.gz.sha256
+          if-no-files-found: error
+          retention-days: 30
 
   ci:
     name: ci
@@ -1136,6 +1223,7 @@ jobs:
       - rustfs-transition-qualification
       - schema-gate-postgres
       - deploy-workflow
+      - demo-web-artifact
       - restore-readiness
     runs-on: ubuntu-26.04
     timeout-minutes: 5
@@ -1156,10 +1244,11 @@ jobs:
           RUSTFS_TRANSITION_RESULT: ${{ needs.rustfs-transition-qualification.result }}
           SCHEMA_GATE_POSTGRES_RESULT: ${{ needs.schema-gate-postgres.result }}
           DEPLOY_WORKFLOW_RESULT: ${{ needs.deploy-workflow.result }}
+          DEMO_WEB_ARTIFACT_RESULT: ${{ needs.demo-web-artifact.result }}
           RESTORE_READINESS_RESULT: ${{ needs.restore-readiness.result }}
         run: |
-          if [[ "$CI_MAIN_RESULT" != "success" || "$STICKER_BUNDLE_RESULT" != "success" || "$PHOTOTHUMB_RUNTIME_RESULT" != "success" || "$REAL_SERVER_FIXTURES_RESULT" != "success" || "$WEBSOCKET_D1_RESULT" != "success" || "$WEB_PERMANENT_EXCHANGE_RESULT" != "success" || "$SQL_LINT_RESULT" != "success" || "$CSS_RESULT" != "success" || "$BROWSER_ACCEPTANCE_RESULT" != "success" || "$BROWSER_ACCEPTANCE_IMAGE_RESULT" != "success" || "$RUSTFS_TRANSITION_RESULT" != "success" || "$SCHEMA_GATE_POSTGRES_RESULT" != "success" || "$DEPLOY_WORKFLOW_RESULT" != "success" || "$RESTORE_READINESS_RESULT" != "success" ]]; then
-            echo "::error::Required CI lanes did not pass (ci-main=$CI_MAIN_RESULT, sticker-bundle=$STICKER_BUNDLE_RESULT, photothumb-runtime=$PHOTOTHUMB_RUNTIME_RESULT, real-server-fixtures=$REAL_SERVER_FIXTURES_RESULT, websocket-d1=$WEBSOCKET_D1_RESULT, websocket-permanent-exchange=$WEB_PERMANENT_EXCHANGE_RESULT, sql-lint=$SQL_LINT_RESULT, css=$CSS_RESULT, browser-acceptance=$BROWSER_ACCEPTANCE_RESULT, browser-acceptance-image=$BROWSER_ACCEPTANCE_IMAGE_RESULT, rustfs-transition-qualification=$RUSTFS_TRANSITION_RESULT, schema-gate-postgres=$SCHEMA_GATE_POSTGRES_RESULT, deploy-workflow=$DEPLOY_WORKFLOW_RESULT, restore-readiness=$RESTORE_READINESS_RESULT)"
+          if [[ "$CI_MAIN_RESULT" != "success" || "$STICKER_BUNDLE_RESULT" != "success" || "$PHOTOTHUMB_RUNTIME_RESULT" != "success" || "$REAL_SERVER_FIXTURES_RESULT" != "success" || "$WEBSOCKET_D1_RESULT" != "success" || "$WEB_PERMANENT_EXCHANGE_RESULT" != "success" || "$SQL_LINT_RESULT" != "success" || "$CSS_RESULT" != "success" || "$BROWSER_ACCEPTANCE_RESULT" != "success" || "$BROWSER_ACCEPTANCE_IMAGE_RESULT" != "success" || "$RUSTFS_TRANSITION_RESULT" != "success" || "$SCHEMA_GATE_POSTGRES_RESULT" != "success" || "$DEPLOY_WORKFLOW_RESULT" != "success" || "$DEMO_WEB_ARTIFACT_RESULT" != "success" || "$RESTORE_READINESS_RESULT" != "success" ]]; then
+            echo "::error::Required CI lanes did not pass (ci-main=$CI_MAIN_RESULT, sticker-bundle=$STICKER_BUNDLE_RESULT, photothumb-runtime=$PHOTOTHUMB_RUNTIME_RESULT, real-server-fixtures=$REAL_SERVER_FIXTURES_RESULT, websocket-d1=$WEBSOCKET_D1_RESULT, websocket-permanent-exchange=$WEB_PERMANENT_EXCHANGE_RESULT, sql-lint=$SQL_LINT_RESULT, css=$CSS_RESULT, browser-acceptance=$BROWSER_ACCEPTANCE_RESULT, browser-acceptance-image=$BROWSER_ACCEPTANCE_IMAGE_RESULT, rustfs-transition-qualification=$RUSTFS_TRANSITION_RESULT, schema-gate-postgres=$SCHEMA_GATE_POSTGRES_RESULT, deploy-workflow=$DEPLOY_WORKFLOW_RESULT, demo-web-artifact=$DEMO_WEB_ARTIFACT_RESULT, restore-readiness=$RESTORE_READINESS_RESULT)"
             exit 1
           fi
           echo "All required CI lanes passed"
@@ -1175,6 +1264,7 @@ jobs:
       - compose
       - css
       - deploy-workflow
+      - demo-web-artifact
       - docker
       - sticker-bundle
       - e2e-admin

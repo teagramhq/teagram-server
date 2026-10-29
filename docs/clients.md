@@ -74,9 +74,10 @@ Configuration is read from environment variables in `internal/config/config.go`:
 | `TG_RATE_LIMIT_CHECK_USERNAME_IP` | `20` | Unauthenticated `account.checkUsername` calls per client network per window; `0` disables this counter |
 | `TG_RATE_LIMIT_CHECK_USERNAME_IP_WINDOW` | `1h` | Window for the per-network unauthenticated `account.checkUsername` counter; `0` or a negative window also disables this counter |
 | `TG_REGISTRATION`   | `closed`         | Accepted values are `closed`, `invite`, and `open`. `closed` rejects `auth.signUp`, `invite` requires an operator-issued invite, and `open` admits usernames without one. An unrecognized value fails startup. Sign-in for accounts that already exist is unaffected by this setting |
-| `TG_USER_INVITE_QUOTA` | `0` | Non-negative integer; a positive value enables user-issued invite redemption on listeners in `invite` mode. Unset or zero disables it |
+| `TG_USER_INVITE_QUOTA` | `0` | Non-negative integer; a positive value enables user-issued invite creation and redemption on listeners in `invite` mode. Every invite created in the trailing seven days counts toward the user's quota, whatever its state. Unset or zero disables it |
+| `TG_USER_INVITE_MIN_ACCOUNT_AGE` | `168h` | Minimum age of an account allowed to create user invites, measured from `users.created_at`; accepts Go duration syntax and must be non-negative |
 | `TG_TERMS_OF_SERVICE` | built-in statement | Terms shown to new accounts in `auth.authorizationSignUpRequired`; set it to replace the default. See the [self-hosting guide](self-hosting.md#sign-up-terms) for the default text |
-| `TG_PUBLIC_REGISTRATION` | `closed` | Registration mode for the public WebSocket listener only. Defaults to `closed` even when `TG_REGISTRATION=open`; use `invite` to require an operator-issued invite |
+| `TG_PUBLIC_REGISTRATION` | `closed` | Registration mode for the public WebSocket listener only. Defaults to `closed` even when `TG_REGISTRATION=open`; `invite` requires an operator-issued invite and permits user-issued invites when the quota is positive |
 | `TG_WELCOME_CHANNEL` | *(unset)* | Optional handle of a public broadcast channel joined by new accounts after `auth.signUp`; invalid targets are skipped with a warning |
 | `TG_RECOVERY_EMAIL` | `off` | Exact lowercase `off` or `contact`; any other set value, including empty or whitespace, fails startup. `off` discards emails sent with a password set/change. `contact` retains them for operator-assisted reset; no mail transport or automated recovery RPC is provided |
 | `TG_TURNSTILE_SITE_KEY` | *(unset)* | Public Cloudflare Turnstile widget key. Required together with one secret source to enable the `auth.signUp` challenge |
@@ -210,10 +211,12 @@ the server also sends the client IP to Cloudflare for verification.
 Before asking for registration details, an unauthenticated client may call
 `help.getAppConfig`. The `help.appConfig` response keeps its standard TL shape;
 its JSON object contains a `registration_mode` string with one of `closed`,
-`invite`, or `open`. Its value is the policy configured for the listener that
-accepted the connection. The field is an extension to the JSON object, so
-clients that do not read it can continue to ignore it. This call is also
-available to provisional sessions.
+`invite`, or `open`, plus `user_invites_enabled` and `user_invite_quota`. These
+values describe the listener that accepted the connection. User invites are
+enabled only when that listener is in `invite` mode and
+`TG_USER_INVITE_QUOTA` is positive. The fields are extensions to the JSON
+object, so clients that do not read them can continue to ignore them. This call
+is also available to provisional sessions.
 
 ### Public enrollment discovery and local preflight
 
@@ -642,7 +645,54 @@ that user's live invites, `teagramd invite invitees <user-id>` lists redeemed
 invitees and redemption times, and `teagramd invite inviter <user-id>` shows the
 recorded inviter or that the account was created without a user invite.
 
-### 5c. Promote an existing operator after the administration migration
+### 5c. User-issued registration invites
+
+Signed-in, non-provisional accounts can create invite links on a listener in
+`invite` mode when its configured `TG_USER_INVITE_QUOTA` is positive. The
+account must be at least `TG_USER_INVITE_MIN_ACCOUNT_AGE` old. The quota counts
+all invites created by that account during the trailing seven days, including
+used, expired and revoked invites. Revoking an invite does not free a quota
+slot. The default minimum account age is seven days; the default quota is zero.
+
+The create response is the only response that contains the secret. Copy or
+share the link when it is created. The fixed landing path is `/invite`, and the
+link format is `TG_PUBLIC_LINK_PREFIX` + `invite#` + the 64-character lowercase
+hexadecimal secret. The server stores only the SHA-256 digest. List responses
+never include the secret, digest or redeemer.
+
+The methods and result constructors below extend the pinned Telegram layer with
+these custom `teagram.*` definitions. `int` dates are Unix seconds and `long`
+fields are signed 64-bit integers.
+
+```text
+teagram.createUserInvite#bf4f8b0e = teagram.UserInviteLink;
+teagram.listUserInvites#2ad32052 = teagram.UserInvites;
+teagram.revokeUserInvite#a483022c id:long = Bool;
+
+teagram.userInviteLink#0078b3b0 id:long link:string expires_at:int = teagram.UserInviteLink;
+teagram.userInvite#ff81dc6c id:long state:string created_at:int expires_at:int = teagram.UserInvite;
+teagram.userInvites#b5cfec46 invites:Vector<teagram.UserInvite> quota:long weekly_count:long flags:# next_available_at:flags.0?long = teagram.UserInvites;
+```
+
+`teagram.listUserInvites` returns only the caller's invites, newest first, up to
+100 entries. The state is `pending`, `used`, `expired` or `revoked`. Its summary
+contains the configured quota, the number of invites that currently count
+toward it, and the creation time plus seven days for the oldest counted invite.
+`next_available_at` is absent when no invites count toward the quota.
+`teagram.revokeUserInvite` returns `BoolTrue` for an owned live invite and also
+for an absent, foreign, expired, used or already revoked id, so it does not
+reveal whether another user's id exists.
+
+Create errors are stable: `USER_INVITE_REGISTRATION_CLOSED` (400) when the
+accepting listener is not in `invite` mode, `USER_INVITES_DISABLED` (400) when
+the quota is zero, `USER_INVITE_ACCOUNT_TOO_NEW_WAIT_<seconds>` (420) with the
+remaining wait rounded up to seconds, and `USER_INVITE_WEEKLY_LIMIT_REACHED`
+(400) when the trailing-seven-day quota is full. An unauthenticated or
+provisional session receives `AUTH_KEY_UNREGISTERED` (401). List and revoke
+require an authorized session but remain available if invite creation has
+since been disabled.
+
+### 5d. Promote an existing operator after the administration migration
 
 When applying the server-administration migration to a non-empty deployment,
 the existing account remains unchanged and the durable administrator grant is
@@ -659,7 +709,7 @@ verifier and a closed, unassigned administration singleton. A retry after a
 successful assignment is a no-op; account, username, and verifier data are
 never created or changed.
 
-### 5d. Reset an existing username password from the local CLI
+### 5e. Reset an existing username password from the local CLI
 
 `teagramd admin set-password` is a local operator command. It has no RPC or
 admin-dashboard route. Run it inside the deployment container with a protected

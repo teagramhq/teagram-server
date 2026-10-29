@@ -10,38 +10,88 @@ if [[ "$EUID" -ne 0 ]]; then
   echo 'demo deploy key must run as root' >&2
   exit 1
 fi
-if [[ ! "$COMMAND" =~ ^([0-9a-f]{40})\ (sha256:[0-9a-f]{64})$ ]]; then
-  echo 'demo deploy key accepts a full commit SHA and a sha256 image digest' >&2
+
+ACTION=server
+if [[ "$COMMAND" =~ ^([0-9a-f]{40})\ (sha256:[0-9a-f]{64})$ ]]; then
+  readonly SHA=${BASH_REMATCH[1]}
+  readonly IMAGE_DIGEST=${BASH_REMATCH[2]}
+elif [[ "$COMMAND" =~ ^web\ ([0-9a-f]{40})\ ([0-9a-f]{40})\ (sha256:[0-9a-f]{64})\ ([0-9a-f]{64})$ ]]; then
+  ACTION=web
+  readonly DEMO_SHA=${BASH_REMATCH[1]}
+  readonly WEB_SOURCE_SHA=${BASH_REMATCH[2]}
+  readonly WEB_ARTIFACT_DIGEST=${BASH_REMATCH[3]}
+  readonly WEB_ARCHIVE_SHA256=${BASH_REMATCH[4]}
+else
+  echo 'demo deploy key accepts a server image release or a pinned web artifact release' >&2
   exit 1
 fi
-readonly SHA=${BASH_REMATCH[1]}
-readonly IMAGE_DIGEST=${BASH_REMATCH[2]}
+
 [[ -d "$REPO/.git" && ! -L "$REPO" ]] || { echo 'demo checkout is unavailable' >&2; exit 1; }
+[[ ! -L "$REPO/.state" && ! -L "$REPO/.state/teagram-demo" ]] || {
+  echo 'demo state path is unsafe' >&2
+  exit 1
+}
 LOCK_PATH="$REPO/.state/deploy.lock"
 mkdir -p "$(dirname "$LOCK_PATH")"
 exec 9> "$LOCK_PATH"
 flock -x 9
 git -C "$REPO" diff --quiet HEAD -- || { echo 'demo checkout has tracked changes' >&2; exit 1; }
 git -C "$REPO" fetch -q origin +refs/heads/main:refs/remotes/origin/main
-git -C "$REPO" merge-base --is-ancestor "$SHA" origin/main || {
-  echo "$SHA is not on origin/main; refusing" >&2
-  exit 1
-}
 
-previous=$(git -C "$REPO" rev-parse HEAD)
-if [[ "$SHA" != "$previous" ]] && git -C "$REPO" merge-base --is-ancestor "$SHA" "$previous"; then
-  echo "live checkout is newer ($previous), skipped $SHA"
-  exit 0
-fi
 
-git -C "$REPO" reset --hard "$SHA"
-deploy_rc=0
-DEMO_DEPLOY_LOCK_HELD=1 DEPLOY_SHA="$SHA" DEPLOY_IMAGE_DIGEST="$IMAGE_DIGEST" PREVIOUS_SHA="$previous" \
-  bash "$REPO/deploy/teagram-demo/deploy-main.sh" || deploy_rc=$?
-if (( deploy_rc != 0 )); then
-  git -C "$REPO" reset --hard "$previous" || {
-    echo "deploy failed and checkout restore failed; requested=$SHA previous=$previous" >&2
+if [[ "$ACTION" == server ]]; then
+  git -C "$REPO" merge-base --is-ancestor "$SHA" origin/main || {
+    echo "$SHA is not on origin/main; refusing" >&2
     exit 1
   }
+
+  previous=$(git -C "$REPO" rev-parse HEAD)
+  if [[ "$SHA" != "$previous" ]] && git -C "$REPO" merge-base --is-ancestor "$SHA" "$previous"; then
+    echo "live checkout is newer ($previous), skipped $SHA"
+    exit 0
+  fi
+
+  git -C "$REPO" reset --hard "$SHA"
+  deploy_rc=0
+  DEMO_DEPLOY_LOCK_HELD=1 DEPLOY_SHA="$SHA" DEPLOY_IMAGE_DIGEST="$IMAGE_DIGEST" PREVIOUS_SHA="$previous" \
+    bash "$REPO/deploy/teagram-demo/deploy-main.sh" || deploy_rc=$?
+  if (( deploy_rc != 0 )); then
+    git -C "$REPO" reset --hard "$previous" || {
+      echo "deploy failed and checkout restore failed; requested=$SHA previous=$previous" >&2
+      exit 1
+    }
+  fi
+  exit "$deploy_rc"
 fi
+
+[[ "$(git -C "$REPO" rev-parse HEAD)" == "$DEMO_SHA" ]] || {
+  echo "web release targets demo checkout $DEMO_SHA, but the live checkout changed" >&2
+  exit 1
+}
+git -C "$REPO" merge-base --is-ancestor "$DEMO_SHA" origin/main || {
+  echo "$DEMO_SHA is not on origin/main; refusing web release" >&2
+  exit 1
+}
+python3 "$REPO/deploy/teagram-demo/resolve_web_artifact_pin.py" \
+  --verify-release-identity "$WEB_SOURCE_SHA" "$WEB_ARTIFACT_DIGEST"
+
+incoming_dir="$REPO/.state/teagram-demo/incoming"
+if [[ -e "$incoming_dir" || -L "$incoming_dir" ]]; then
+  [[ -d "$incoming_dir" && ! -L "$incoming_dir" && "$(stat -c '%u:%a' "$incoming_dir")" == '0:700' ]] || {
+    echo 'demo web incoming directory has unsafe ownership or mode' >&2
+    exit 1
+  }
+else
+  install -d -o root -g root -m 0700 "$incoming_dir"
+fi
+archive="$incoming_dir/web-${WEB_SOURCE_SHA}-${WEB_ARTIFACT_DIGEST#sha256:}-$$.tar.gz"
+python3 "$REPO/deploy/teagram-demo/receive-web-artifact.py" "$archive" "$WEB_ARCHIVE_SHA256"
+trap 'rm -f -- "$archive"' EXIT
+deploy_rc=0
+DEMO_DEPLOY_LOCK_HELD=1 \
+  DEPLOY_WEB_SOURCE_SHA="$WEB_SOURCE_SHA" \
+  DEPLOY_WEB_ARTIFACT_DIGEST="$WEB_ARTIFACT_DIGEST" \
+  DEPLOY_WEB_ARCHIVE_SHA256="$WEB_ARCHIVE_SHA256" \
+  DEPLOY_WEB_ARCHIVE="$archive" \
+  bash "$REPO/deploy/teagram-demo/publish-web-release.sh" || deploy_rc=$?
 exit "$deploy_rc"

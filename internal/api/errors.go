@@ -23,6 +23,11 @@ func FloodWaitError(seconds int) *tgerr.Error {
 var (
 	// errInputRequestInvalid rejects a request that cannot be handled as sent.
 	errInputRequestInvalid = rpcErr(400, "INPUT_REQUEST_INVALID")
+	// User invite errors are stable custom RPC errors documented with the
+	// teagram.* methods in docs/clients.md.
+	errUserInviteRegistrationClosed = rpcErr(400, "USER_INVITE_REGISTRATION_CLOSED")
+	errUserInvitesDisabled          = rpcErr(400, "USER_INVITES_DISABLED")
+	errUserInviteWeeklyLimitReached = rpcErr(400, "USER_INVITE_WEEKLY_LIMIT_REACHED")
 	// errAboutTooLong rejects a profile biography the server cannot store.
 	errAboutTooLong         = rpcErr(400, "ABOUT_TOO_LONG")
 	errProfilePhotosTooMuch = rpcErr(400, "PHOTOS_TOO_MUCH")
@@ -306,3 +311,10 @@ var (
 	// interpreted as a normal page or an exact max_id refresh.
 	errOffsetInvalid = rpcErr(400, "OFFSET_INVALID")
 )
+
+func userInviteAccountTooNewError(seconds int64) *tgerr.Error {
+	if seconds < 1 {
+		seconds = 1
+	}
+	return rpcErr(420, fmt.Sprintf("USER_INVITE_ACCOUNT_TOO_NEW_WAIT_%d", seconds))
+}
