@@ -1156,7 +1156,7 @@ func runAtBlobModePath(log *slog.Logger, blobModePath string) error {
 	}
 
 	if cfg.BotAPIListenAddr != "" {
-		botAPIServer := botapi.NewServer(cfg.BotAPIListenAddr, st, log)
+		botAPIServer := botapi.NewServer(cfg.BotAPIListenAddr, st, log, cfg.RateLimits.MessageSend)
 		var botAPILC net.ListenConfig
 		botAPILn, err := botAPILC.Listen(ctx, "tcp", cfg.BotAPIListenAddr)
 		if err != nil {

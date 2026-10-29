@@ -315,6 +315,8 @@ check_contract() {
     fail 'the demo web resolver must wait for the tested server commit'
   [[ "$(query '.jobs.resolve-demo-web.if')" == "$expected_resolve_demo_if" ]] ||
     fail 'the demo web resolver must run only after the server deploy'
+  [[ "$(query '.jobs.resolve-demo-web.continue-on-error')" == 'true' ]] ||
+    fail 'the optional demo web resolver must not fail the server deploy workflow'
   [[ "$(query '.jobs.resolve-demo-web.steps[] | select(.name == "Check out the workflow source commit") | .with.ref')" == "$expected_demo_resolver_ref" ]] ||
     fail 'the demo web resolver must use the workflow revision that contains its pin verifier'
   [[ "$(query '.jobs.resolve-demo-web.permissions // {} | to_entries | map(select(.value != "read")) | length')" == '0' ]] ||
@@ -327,6 +329,8 @@ check_contract() {
     fail 'the demo deploy must wait for the server and web pin resolver'
   [[ "$(query '.jobs.deploy-demo.if')" == "$expected_demo_if" ]] ||
     fail 'the demo job must start after the server deploy to evaluate its environment gate'
+  [[ "$(query '.jobs.deploy-demo.continue-on-error')" == 'true' ]] ||
+    fail 'the optional demo deployment must not fail the server deploy workflow'
   [[ "$(query '.jobs.deploy-demo.environment')" == 'demo' ]] ||
     fail 'the demo job must use the separate demo environment'
   [[ "$(query '.jobs.deploy-demo.steps[0].id')" == 'demo-gate' ]] ||
