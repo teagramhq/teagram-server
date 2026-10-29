@@ -15,9 +15,11 @@ import (
 	"github.com/gotd/td/mt"
 	"github.com/gotd/td/tg"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/teagramhq/teagram-server/internal/api"
 	"github.com/teagramhq/teagram-server/internal/blob"
+	"github.com/teagramhq/teagram-server/internal/config"
 	"github.com/teagramhq/teagram-server/internal/mtproto"
 	"github.com/teagramhq/teagram-server/internal/pgtest"
 	"github.com/teagramhq/teagram-server/internal/store"
@@ -39,6 +41,153 @@ func TestCreateStickerSetRejectsEmptyStickerList(t *testing.T) {
 	})
 	if got := stickerSetRPCMessage(t, body); got != "STICKERS_EMPTY" {
 		t.Fatalf("createStickerSet with no stickers = %q, want STICKERS_EMPTY", got)
+	}
+}
+
+func TestCreateStickerSetPreflightsAllFilesBeforeReadingBytes(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	blobs := &countingDownloadBlobStore{Store: testBlobs(t)}
+	s := openStickerStore(t, blobs)
+	owner, err := s.CreateUser(ctx, "+15551819021")
+	if err != nil {
+		t.Fatalf("create owner: %v", err)
+	}
+	other, err := s.CreateUser(ctx, "+15551819022")
+	if err != nil {
+		t.Fatalf("create other account: %v", err)
+	}
+	ownedFile := storedStickerDocument(t, s, blobs, owner.ID, validStickerTGS(t))
+	foreignFile := storedStickerDocument(t, s, blobs, other.ID, validStickerTGS(t))
+	request := createStickerRequest("foreign_last", ownedFile, false, false)
+	request.Stickers = append(request.Stickers, tg.InputStickerSetItem{
+		Document: &tg.InputDocument{ID: foreignFile.ID, AccessHash: foreignFile.AccessHash},
+		Emoji:    "⭐",
+	})
+	blobs.reads.Store(0)
+
+	got := stickerRPCError(t, dispatchChatMethod(t, fullChannelDispatcher(s), owner.ID, "stickers.createStickerSet", request))
+	if got != "STICKER_DOCUMENT_INVALID" {
+		t.Fatalf("foreign last document create = %q, want STICKER_DOCUMENT_INVALID", got)
+	}
+	if reads := blobs.reads.Load(); reads != 0 {
+		t.Fatalf("foreign last document caused %d blob reads before rejection, want zero", reads)
+	}
+	createStickerSet(t, fullChannelDispatcher(s), owner.ID, createStickerRequest("first_set", ownedFile, false, false))
+	blobs.reads.Store(0)
+	got = stickerRPCError(t, dispatchChatMethod(t, fullChannelDispatcher(s), owner.ID, "stickers.createStickerSet", createStickerRequest("reused_file", ownedFile, false, false)))
+	if got != "STICKER_DOCUMENT_INVALID" {
+		t.Fatalf("already-used document create = %q, want STICKER_DOCUMENT_INVALID", got)
+	}
+	if reads := blobs.reads.Load(); reads != 0 {
+		t.Fatalf("already-used document caused %d blob reads before rejection, want zero", reads)
+	}
+}
+
+func TestCreateStickerSetHasIndependentBudgetAndChargesFailures(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	s := openStore(t)
+	owner, err := s.CreateUser(ctx, "+15551819023")
+	if err != nil {
+		t.Fatalf("create owner: %v", err)
+	}
+	h := fullChannelDispatcherWithRateLimits(s, config.DefaultRateLimits())
+	for call := 1; call <= 60; call++ {
+		body := dispatchChatMethod(t, h, owner.ID, "stickers.checkShortName", &tg.StickersCheckShortNameRequest{ShortName: fmt.Sprintf("candidate_%d", call)})
+		var available tg.BoolTrue
+		if err := available.Decode(&bin.Buffer{Buf: body}); err != nil {
+			t.Fatalf("checkShortName call %d: %v", call, err)
+		}
+	}
+	request := &tg.StickersCreateStickerSetRequest{UserID: &tg.InputUserSelf{}, Title: "Cats", ShortName: "empty_set"}
+	for call := 1; call <= 3; call++ {
+		if got := stickerRPCError(t, dispatchChatMethod(t, h, owner.ID, "stickers.createStickerSet", request)); got != "STICKERS_EMPTY" {
+			t.Fatalf("failed create call %d after lookup budget exhaustion = %q, want STICKERS_EMPTY", call, got)
+		}
+	}
+	if got := stickerRPCError(t, dispatchChatMethod(t, h, owner.ID, "stickers.createStickerSet", request)); !strings.HasPrefix(got, "FLOOD_WAIT_") {
+		t.Fatalf("fourth failed create = %q, want FLOOD_WAIT after charging the first three failures", got)
+	}
+}
+
+func TestCreateStickerSetBoundsEmojiAndKeywords(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	blobs := testBlobs(t)
+	dsn := pgtest.DSN(t)
+	s := openStickerStore(t, blobs, dsn)
+	owner, err := s.CreateUser(ctx, "+15551819024")
+	if err != nil {
+		t.Fatalf("create owner: %v", err)
+	}
+	h := fullChannelDispatcher(s)
+	keyword := strings.Repeat("k", 64)
+	tooManyTerms := make([]string, 21)
+	for i := range tooManyTerms {
+		tooManyTerms[i] = keyword
+	}
+	for _, test := range []struct {
+		name   string
+		mutate func(*tg.InputStickerSetItem)
+	}{
+		{name: "emoji", mutate: func(item *tg.InputStickerSetItem) { item.Emoji = strings.Repeat("x", 21) }},
+		{name: "keyword bytes", mutate: func(item *tg.InputStickerSetItem) { item.SetKeywords(strings.Repeat("k", 65)) }},
+		{name: "keyword count", mutate: func(item *tg.InputStickerSetItem) { item.SetKeywords(strings.Join(tooManyTerms, ",")) }},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			file := storedStickerDocument(t, s, blobs, owner.ID, validStickerTGS(t))
+			request := createStickerRequest("too_long_"+strings.ReplaceAll(test.name, " ", "_"), file, false, false)
+			test.mutate(&request.Stickers[0])
+			if got := stickerRPCError(t, dispatchChatMethod(t, h, owner.ID, "stickers.createStickerSet", request)); got != "STICKERSET_INVALID" {
+				t.Fatalf("invalid %s = %q, want STICKERSET_INVALID", test.name, got)
+			}
+		})
+	}
+	file := storedStickerDocument(t, s, blobs, owner.ID, validStickerTGS(t))
+	keywords := make([]string, 20)
+	for i := range keywords {
+		keywords[i] = keyword
+	}
+	valid := createStickerRequest("boundary_text", file, false, false)
+	valid.Stickers[0].Emoji = strings.Repeat("⭐", 20)
+	valid.Stickers[0].SetKeywords(strings.Join(keywords, ","))
+	created := createStickerSet(t, h, owner.ID, valid)
+	if created.Set.Count != 1 {
+		t.Fatalf("boundary text set count = %d, want 1", created.Set.Count)
+	}
+	conn, err := pgx.Connect(ctx, dsn)
+	if err != nil {
+		t.Fatalf("connect for text constraint checks: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := conn.Close(ctx); err != nil {
+			t.Errorf("close text constraint connection: %v", err)
+		}
+	})
+	for i, test := range []struct {
+		name       string
+		emoji      string
+		keywords   string
+		constraint string
+	}{
+		{name: "emoji", emoji: strings.Repeat("x", 21), constraint: "user_created_sticker_set_items_emoji_limit"},
+		{name: "keyword bytes", emoji: "⭐", keywords: strings.Repeat("k", 65), constraint: "user_created_sticker_set_items_keywords_limit"},
+		{name: "keyword count", emoji: "⭐", keywords: strings.Join(tooManyTerms, ","), constraint: "user_created_sticker_set_items_keywords_limit"},
+	} {
+		file := storedStickerDocument(t, s, blobs, owner.ID, validStickerTGS(t))
+		if _, err := conn.Exec(ctx, `
+			INSERT INTO user_created_sticker_set_items
+			    (set_id, position, file_id, emoji, keywords, format, width, height)
+			VALUES ($1, $2, $3, $4, $5, 'TGS', 1, 1)`,
+			created.Set.ID, int32(i+1), file.ID, test.emoji, test.keywords); err == nil {
+			t.Errorf("database accepted oversized %s", test.name)
+		} else {
+			var pgErr *pgconn.PgError
+			if !errors.As(err, &pgErr) || pgErr.ConstraintName != test.constraint {
+				t.Errorf("database rejected oversized %s with %v, want constraint %s", test.name, err, test.constraint)
+			}
+		}
 	}
 }
 

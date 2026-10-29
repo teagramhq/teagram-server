@@ -71,34 +71,63 @@ type UserStickerSetItem struct {
 	MaskCoords string
 }
 
-// StickerFileForSet returns the caller's exact stored document and the bytes
-// behind its server-chosen blob key. Client metadata never participates.
-func (s *Store) StickerFileForSet(ctx context.Context, ownerID, fileID, accessHash int64) (File, []byte, error) {
-	if ownerID <= 0 || fileID <= 0 || accessHash == 0 || s.withoutBlobStore {
-		return File{}, nil, ErrStickerDocumentInvalid
+// StickerFileRef identifies a client-supplied file reference that must match
+// both the owner's uploaded file and its access hash.
+type StickerFileRef struct {
+	ID         int64
+	AccessHash int64
+}
+
+// StickerFilesForSet resolves all requested documents in one query. Files
+// already assigned to a set are rejected here, before callers read blob bytes.
+func (s *Store) StickerFilesForSet(ctx context.Context, ownerID int64, refs []StickerFileRef) ([]File, error) {
+	if ownerID <= 0 || len(refs) == 0 || s.withoutBlobStore {
+		return nil, ErrStickerDocumentInvalid
 	}
-	row, err := s.q.StickerFileForOwner(ctx, db.StickerFileForOwnerParams{ID: fileID, UploaderID: ownerID, AccessHash: accessHash})
-	if errors.Is(err, pgx.ErrNoRows) {
-		return File{}, nil, ErrStickerDocumentInvalid
+	fileIDs := make([]int64, len(refs))
+	accessHashes := make([]int64, len(refs))
+	seen := make(map[int64]struct{}, len(refs))
+	for i, ref := range refs {
+		if ref.ID <= 0 || ref.AccessHash == 0 {
+			return nil, ErrStickerDocumentInvalid
+		}
+		if _, ok := seen[ref.ID]; ok {
+			return nil, ErrStickerDocumentInvalid
+		}
+		seen[ref.ID] = struct{}{}
+		fileIDs[i] = ref.ID
+		accessHashes[i] = ref.AccessHash
 	}
+	rows, err := s.q.StickerFilesForOwner(ctx, db.StickerFilesForOwnerParams{
+		FileIds: fileIDs, AccessHashes: accessHashes, UploaderID: ownerID,
+	})
 	if err != nil {
-		return File{}, nil, fmt.Errorf("read sticker file row: %w", err)
+		return nil, fmt.Errorf("resolve sticker file rows: %w", err)
 	}
-	file := fileFromRow(row)
-	if file.Size <= 0 {
-		return File{}, nil, ErrStickerDocumentInvalid
+	files := make([]File, len(rows))
+	for i, row := range rows {
+		files[i] = fileFromRow(row)
+	}
+	return files, nil
+}
+
+// ReadStickerFileForSet reads bytes only after StickerFilesForSet preflights
+// the full request. The blob key is always derived from the stored row.
+func (s *Store) ReadStickerFileForSet(ctx context.Context, file File) ([]byte, error) {
+	if file.ID <= 0 || !file.Stored || file.Size <= 0 || s.withoutBlobStore {
+		return nil, ErrStickerDocumentInvalid
 	}
 	if file.Size > MaxStoredStickerBytes {
-		return File{}, nil, ErrStickerFileTooLarge
+		return nil, ErrStickerFileTooLarge
 	}
 	data, err := s.blobs.ReadAt(ctx, blob.Key(file.ID), 0, file.Size)
 	if err != nil {
-		return File{}, nil, fmt.Errorf("read stored sticker bytes: %w", err)
+		return nil, fmt.Errorf("read stored sticker bytes: %w", err)
 	}
 	if int64(len(data)) != file.Size {
-		return File{}, nil, ErrStickerDocumentInvalid
+		return nil, ErrStickerDocumentInvalid
 	}
-	return file, data, nil
+	return data, nil
 }
 
 // CreateUserStickerSet uses the M17 file-reference interlock before adding any
@@ -118,12 +147,14 @@ func (s *Store) CreateUserStickerSet(ctx context.Context, set UserStickerSet, it
 		return UserStickerSet{}, ErrStickerDocumentInvalid
 	}
 	fileIDs := make([]int64, 0, len(items))
+	accessHashes := make([]int64, 0, len(items))
 	for _, item := range items {
 		if item.FileID <= 0 || item.AccessHash == 0 || item.Size <= 0 || item.Size > MaxStoredStickerBytes ||
 			item.Width <= 0 || item.Width > 512 || item.Height <= 0 || item.Height > 512 || item.Duration < 0 {
 			return UserStickerSet{}, ErrStickerDocumentInvalid
 		}
 		fileIDs = append(fileIDs, item.FileID)
+		accessHashes = append(accessHashes, item.AccessHash)
 	}
 	if len(ascendingUnique(fileIDs)) != len(fileIDs) {
 		return UserStickerSet{}, ErrStickerDocumentInvalid
@@ -153,18 +184,16 @@ func (s *Store) CreateUserStickerSet(ctx context.Context, set UserStickerSet, it
 		}
 		return UserStickerSet{}, err
 	}
-	// Recheck ownership and access hashes after the interlock has been acquired.
-	// No file row can be erased until this transaction commits.
-	for _, item := range items {
-		_, checkErr := qtx.StickerFileForOwner(ctx, db.StickerFileForOwnerParams{
-			ID: item.FileID, UploaderID: set.CreatorID, AccessHash: item.AccessHash,
-		})
-		if errors.Is(checkErr, pgx.ErrNoRows) {
-			return UserStickerSet{}, ErrStickerDocumentInvalid
-		}
-		if checkErr != nil {
-			return UserStickerSet{}, fmt.Errorf("recheck sticker file ownership: %w", checkErr)
-		}
+	// Recheck ownership, hashes, and file membership after the interlock. No file
+	// row can be erased until this transaction commits.
+	checkedFiles, err := qtx.StickerFilesForOwner(ctx, db.StickerFilesForOwnerParams{
+		FileIds: fileIDs, UploaderID: set.CreatorID, AccessHashes: accessHashes,
+	})
+	if err != nil {
+		return UserStickerSet{}, fmt.Errorf("recheck sticker file references: %w", err)
+	}
+	if len(checkedFiles) != len(items) {
+		return UserStickerSet{}, ErrStickerDocumentInvalid
 	}
 
 	accessHash, err := newAccessHash()

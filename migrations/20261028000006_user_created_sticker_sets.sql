@@ -1,3 +1,15 @@
+CREATE FUNCTION user_created_sticker_keywords_within_limits(keywords_text text)
+RETURNS boolean
+LANGUAGE sql IMMUTABLE STRICT
+AS $$
+    SELECT cardinality(string_to_array(keywords_text, ',')) <= 20
+       AND NOT EXISTS (
+           SELECT 1
+           FROM unnest(string_to_array(keywords_text, ',')) AS keyword(value)
+           WHERE octet_length(keyword.value) > 64
+       )
+$$;
+
 CREATE TABLE user_created_sticker_sets (
     id          BIGSERIAL PRIMARY KEY CHECK (id > 0),
     access_hash BIGINT NOT NULL UNIQUE CHECK (access_hash <> 0),
@@ -20,8 +32,10 @@ CREATE TABLE user_created_sticker_set_items (
     set_id       BIGINT NOT NULL REFERENCES user_created_sticker_sets (id) ON DELETE CASCADE,
     position     INT NOT NULL CHECK (position >= 0),
     file_id      BIGINT NOT NULL REFERENCES files (id) ON DELETE RESTRICT,
-    emoji        TEXT NOT NULL,
-    keywords     TEXT NOT NULL DEFAULT '',
+    emoji        TEXT NOT NULL
+                 CONSTRAINT user_created_sticker_set_items_emoji_limit CHECK (char_length(emoji) <= 20),
+    keywords     TEXT NOT NULL DEFAULT ''
+                 CONSTRAINT user_created_sticker_set_items_keywords_limit CHECK (user_created_sticker_keywords_within_limits(keywords)),
     format       TEXT NOT NULL CHECK (format IN ('WEBP', 'TGS', 'WEBM')),
     width        INT NOT NULL CHECK (width > 0),
     height       INT NOT NULL CHECK (height > 0),

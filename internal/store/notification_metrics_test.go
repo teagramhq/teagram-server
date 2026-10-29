@@ -189,6 +189,7 @@ func TestNotificationMetricsRateLimitDenialsUseFixedSurfaces(t *testing.T) {
 		"update_profile",
 		"dialog_filter_mutation",
 		"sticker_set_mutation",
+		"sticker_set_create",
 		"channel_unread_count",
 		"messages_get_messages",
 	}
@@ -234,7 +235,7 @@ func TestNotificationMetricsRateLimitDenialsUseFixedSurfaces(t *testing.T) {
 		GetPassword:               1,
 		UpdateProfile:             1,
 		DialogFilterMutation:      1,
-		StickerSetMutation:        1,
+		StickerSetMutation:        2,
 		ChannelUnreadCount:        1,
 		MessagesGetMessages:       1,
 	}
