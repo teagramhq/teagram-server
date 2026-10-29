@@ -164,6 +164,8 @@ runner_lock_status=0
 exec 9>"$TMP/inherited-runner.lock"
 flock -x 9
 export ROLLOUT_RUNNER_TEST_MODE=1 ROLLOUT_RUNNER_LOCK_PATH="$TMP/inherited-runner.lock"
+# Child Bash expands the inherited lock path after it starts.
+# shellcheck disable=SC2016
 timeout 3s bash -c '
   set -Eeuo pipefail
   export ROLLOUT_RUNNER_SOURCE_ONLY=1
