@@ -16,6 +16,26 @@ import (
 	"github.com/gotd/td/tgerr"
 )
 
+func TestEndpointDialHostUsesSelectedInternalService(t *testing.T) {
+	for _, test := range []struct {
+		endpoint string
+		wantHost string
+	}{
+		{endpoint: defaultEndpoint, wantHost: "teagramd"},
+		{endpoint: candidateEndpoint, wantHost: "teagramd-next"},
+	} {
+		t.Run(test.endpoint, func(t *testing.T) {
+			got, err := endpointDialHost(test.endpoint)
+			if err != nil {
+				t.Fatalf("resolve dial host for %q: %v", test.endpoint, err)
+			}
+			if got != test.wantHost {
+				t.Fatalf("dial host for %q = %q, want %q", test.endpoint, got, test.wantHost)
+			}
+		})
+	}
+}
+
 func TestValidateEndpointAllowsOnlyInternalDemoService(t *testing.T) {
 	for _, endpoint := range []string{defaultEndpoint, candidateEndpoint} {
 		if err := validateEndpoint(endpoint); err != nil {

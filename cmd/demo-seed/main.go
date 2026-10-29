@@ -30,7 +30,8 @@ import (
 const (
 	defaultEndpointHost      = "teagramd"
 	defaultEndpoint          = defaultEndpointHost + ":2443"
-	candidateEndpoint        = "teagramd-next:2443"
+	candidateEndpointHost    = "teagramd-next"
+	candidateEndpoint        = candidateEndpointHost + ":2443"
 	defaultClientConfig      = "/run/teagram-demo/client.json"
 	defaultOwnerPasswordFile = "/run/secrets/seed-owner-password"
 	defaultAccountInventory  = "/run/secrets/demo-accounts/inventory.json"
@@ -193,10 +194,19 @@ func parseOptions(args []string) (seedOptions, error) {
 }
 
 func validateEndpoint(endpoint string) error {
-	if endpoint != defaultEndpoint && endpoint != candidateEndpoint {
-		return errors.New("endpoint must be an internal teagramd service")
+	_, err := endpointDialHost(endpoint)
+	return err
+}
+
+func endpointDialHost(endpoint string) (string, error) {
+	switch endpoint {
+	case defaultEndpoint:
+		return defaultEndpointHost, nil
+	case candidateEndpoint:
+		return candidateEndpointHost, nil
+	default:
+		return "", errors.New("endpoint must be an internal teagramd service")
 	}
-	return nil
 }
 
 func validateEndpointForMode(endpoint string, verifyTurnstile bool) error {
@@ -388,10 +398,6 @@ func randomPassword() (string, error) {
 	return hex.EncodeToString(value), nil
 }
 
-func newTelegramClient(cfg apiConfig) *telegram.Client {
-	return newTelegramClientAt(cfg, defaultEndpointHost)
-}
-
 func newTelegramClientAt(cfg apiConfig, host string) *telegram.Client {
 	return newTelegramClientWithStorageAt(cfg, host, &session.StorageMemory{})
 }
@@ -410,8 +416,12 @@ func newTelegramClientWithStorageAt(cfg apiConfig, host string, storage session.
 	})
 }
 
-func withAccount(ctx context.Context, cfg apiConfig, account accountSpec, password string, savePassword func(string) error, action apiAction) error {
-	client := newTelegramClient(cfg)
+func withAccount(ctx context.Context, cfg apiConfig, endpoint string, account accountSpec, password string, savePassword func(string) error, action apiAction) error {
+	host, err := endpointDialHost(endpoint)
+	if err != nil {
+		return fmt.Errorf("resolve demo account endpoint: %w", err)
+	}
+	client := newTelegramClientAt(cfg, host)
 	return client.Run(ctx, func(runCtx context.Context) error {
 		api := client.API()
 		if err := authenticate(runCtx, api, account, &password, savePassword); err != nil {
