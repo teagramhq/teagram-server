@@ -448,11 +448,11 @@ run_replay() {
 exec 8>"$FIXTURE_DEPLOY_LOCK"
 flock -x 8
 output=$(run_replay "$pass_sha" 'docker-compose.fixture.yml,docker-compose.override.yml')
-[[ "$(cat "$TMP/last-rc")" != 0 ]] && \
-  grep -Fq 'deploy is running; preflight replay refused' <<< "$output" || {
+if [[ "$(cat "$TMP/last-rc")" == 0 ]] || \
+   ! grep -Fq 'deploy is running; preflight replay refused' <<< "$output"; then
   printf 'FAIL replay did not refuse a held deploy lock:\n%s\n' "$output" >&2
   exit 1
-}
+fi
 flock -u 8
 exec 8>&-
 printf '%s\n' 'PASS replay refuses to overlap a deployment'

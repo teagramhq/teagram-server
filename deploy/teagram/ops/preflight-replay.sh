@@ -72,10 +72,10 @@ target_sha=${1:-}
 [ "$#" -eq 1 ] || { usage; exit 64; }
 [[ "$target_sha" =~ ^[0-9a-f]{40}$ ]] || { fail 'PR head must be a full 40-hex commit SHA'; exit 64; }
 
-[ ! -L "$LOCK_PATH" ] && { [ ! -e "$LOCK_PATH" ] || [ -f "$LOCK_PATH" ]; } || {
+if [ -L "$LOCK_PATH" ] || { [ -e "$LOCK_PATH" ] && [ ! -f "$LOCK_PATH" ]; }; then
   fail 'deploy lock path is unsafe'
   exit 1
-}
+fi
 exec 9>"$LOCK_PATH" || { fail 'cannot open the deploy lock'; exit 1; }
 [ -f "$LOCK_PATH" ] && [ ! -L "$LOCK_PATH" ] && \
   [ "$(stat -c %u -- "$LOCK_PATH")" = "$EXPECTED_OWNER" ] || {
