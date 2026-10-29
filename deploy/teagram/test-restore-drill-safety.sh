@@ -39,6 +39,7 @@ chmod 755 "$tmp/bin/docker" "$tmp/failing-sort/sort"
 # shellcheck disable=SC1090
 source "$functions"
 
+operation_lock_fd=
 OPERATION_LOCK="$tmp/restore-drill.operation.lock"
 if ! acquire_operation_lock; then
   printf '%s\n' 'FAIL could not acquire operation lock' >&2
@@ -66,7 +67,7 @@ fi
 /bin/rm -rf -- "$operation_runtime"
 exec {operation_lock_fd}>&-
 lock_line=$(grep -nF 'if acquire_operation_lock; then' "$script" | cut -d: -f1)
-runtime_line=$(grep -nF 'existing_prepared=$(/usr/bin/python3' "$script" | cut -d: -f1)
+runtime_line=$(grep -nF "existing_prepared=\$(/usr/bin/python3" "$script" | cut -d: -f1)
 [[ -n $lock_line && -n $runtime_line && $lock_line -lt $runtime_line ]]
 
 snapshot=$(volume_snapshot)
