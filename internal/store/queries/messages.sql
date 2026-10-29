@@ -39,6 +39,19 @@ SELECT EXISTS (
       AND expires_at <= statement_timestamp()
 );
 
+-- BotHasStartedPrivateChat is evaluated inside the same locked transaction as
+-- a Bot API send. Only an incoming direct message from the target user proves
+-- that the user started this bot; bot outbox and non-user peer rows do not.
+-- name: BotHasStartedPrivateChat :one
+SELECT EXISTS (
+    SELECT 1 FROM messages
+    WHERE owner_id = sqlc.arg(bot_id)::bigint
+      AND peer_type = sqlc.arg(peer_type)::smallint
+      AND peer_id = sqlc.arg(user_id)::bigint
+      AND from_id = sqlc.arg(user_id)::bigint
+      AND out = false
+);
+
 -- NextFanoutID allocates the id shared by every per-member copy of one chat
 -- message. One value per fan-out, never 0.
 -- name: NextFanoutID :one
