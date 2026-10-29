@@ -20,6 +20,7 @@ OP=$TMP/apply-tailnet-exchange-limit.sh
 OPS_SHA=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 TARGET_SHA=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
 MOCK_OWNER_UID=$(id -u)
+REAL_SYNC=$(command -v sync)
 mkdir -m 700 "$ROOT_FIXTURE" "$ROOT_FIXTURE/teagramd-rollout-runner" "$REPO_FIXTURE" "$BIN"
 mkdir -m 700 "$REPO_FIXTURE/.state"
 
@@ -69,6 +70,22 @@ esac
 DOCKER
 chmod 755 "$BIN/git" "$BIN/docker"
 
+cat > "$BIN/sync" <<'SYNC'
+#!/usr/bin/env bash
+set -euo pipefail
+sync_count=0
+if [[ -f "$MOCK_SYNC_COUNT" ]]; then
+  read -r sync_count < "$MOCK_SYNC_COUNT"
+fi
+sync_count=$((sync_count + 1))
+printf '%s\n' "$sync_count" > "$MOCK_SYNC_COUNT"
+if [[ "${MOCK_SYNC_FAIL_ON:-}" == "$sync_count" ]]; then
+  exit 1
+fi
+exec "$MOCK_REAL_SYNC" "$@"
+SYNC
+chmod 755 "$BIN/sync"
+
 cat > "$ROOT_FIXTURE/teagramd-rollout-runner/rollout-runner.sh" <<'RUNNER'
 #!/usr/bin/env bash
 set -euo pipefail
@@ -104,6 +121,7 @@ export MOCK_CONTAINER_ENV_FILE="$TMP/container-env" MOCK_RUNNER_MODE=success
 export MOCK_ENV_FILE="$REPO_FIXTURE/.env" MOCK_ENV_RECORD="$REPO_FIXTURE/.state/rollout-env"
 export MOCK_BACKUP="$ROOT_FIXTURE/.env.main-2478-pre-key-exchange-20261025T170009Z"
 export MOCK_DEPLOY_LOCK="$TMP/deploy.lock"
+export MOCK_SYNC_COUNT="$TMP/sync-count" MOCK_REAL_SYNC="$REAL_SYNC" MOCK_SYNC_FAIL_ON=
 
 setup_fixture() {
   printf 'FIXTURE_PRIVATE_VALUE=do-not-print-fixture-value\nTG_LOG_LOGIN_CODES=false\n' > "$MOCK_ENV_FILE"
@@ -114,6 +132,7 @@ setup_fixture() {
   printf 'env_sha256=%s source_sha=%s\n' "$env_sha" "$TARGET_SHA" > "$MOCK_ENV_RECORD"
   chmod 600 "$MOCK_ENV_RECORD"
   printf 'TG_RATE_LIMIT_KEY_EXCHANGE_IP=20\nTG_KEY_EXCHANGE_PER_CONNECTION=2\nTG_KEY_EXCHANGE_GLOBAL_RATE=5\nTG_KEY_EXCHANGE_GLOBAL_BURST=30\n' > "$MOCK_CONTAINER_ENV_FILE"
+  printf '0\n' > "$MOCK_SYNC_COUNT"
   rm -f -- "$TMP/runner-called"
 }
 
@@ -128,6 +147,29 @@ success_output=$(run_operation)
 [[ "$success_output" != *'do-not-print-fixture-value'* && "$success_output" != *'private configuration value'* ]]
 [[ "$(cat "$MOCK_ENV_RECORD")" == "env_sha256=$(sha256sum "$MOCK_ENV_FILE" | cut -d' ' -f1) source_sha=$TARGET_SHA" ]]
 [[ "$(tail -n 1 "$MOCK_ENV_FILE")" == 'TG_RATE_LIMIT_KEY_EXCHANGE_IP_TAILNET=0' ]]
+
+setup_fixture
+MOCK_SYNC_FAIL_ON=2
+export MOCK_SYNC_FAIL_ON
+sync_status=0
+sync_output=$(run_operation 2>&1) || sync_status=$?
+[[ "$sync_status" != 0 ]] || { printf '%s\n' 'post-rename sync failure unexpectedly succeeded' >&2; exit 1; }
+cmp -s -- "$MOCK_ENV_FILE" "$MOCK_BACKUP" || {
+  printf '%s\n' 'post-rename sync failure did not restore the verified .env' >&2
+  exit 1
+}
+restored_env_sha=$(sha256sum "$MOCK_ENV_FILE" | cut -d' ' -f1)
+[[ "$(cat "$MOCK_ENV_RECORD")" == "env_sha256=$restored_env_sha source_sha=$TARGET_SHA" ]] || {
+  printf '%s\n' 'post-rename sync failure left the rollout record inconsistent' >&2
+  exit 1
+}
+[[ ! -e "$TMP/runner-called" ]] || { printf '%s\n' 'runner ran after post-rename sync failure' >&2; exit 1; }
+[[ "$sync_output" == *'rollback_env=restored'* ]] || {
+  printf '%s\n' 'post-rename sync failure did not report verified rollback' >&2
+  exit 1
+}
+MOCK_SYNC_FAIL_ON=
+export MOCK_SYNC_FAIL_ON
 
 setup_fixture
 MOCK_RUNNER_MODE=fail

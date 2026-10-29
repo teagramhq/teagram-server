@@ -32,6 +32,23 @@ file_sha256() {
   printf '%s' "${output%% *}"
 }
 
+restore_recorded_env() {
+  local restored_env_sha restored_record
+  TEMP_ENV=$(mktemp "$REPO/.env.main-2478.XXXXXXXX") || return 1
+  if ! cat -- "$PREVIOUS_ENV_FILE" > "$TEMP_ENV" || ! chmod 600 -- "$TEMP_ENV"; then
+    return 1
+  fi
+  if ! mv -f -- "$TEMP_ENV" "$ENV_FILE"; then
+    return 1
+  fi
+  TEMP_ENV=
+  sync || return 1
+  restored_env_sha=$(file_sha256 "$ENV_FILE") || return 1
+  restored_record=$(cat -- "$ENV_RECORD") || return 1
+  [[ "$restored_env_sha" == "$recorded_env_sha" && "$restored_record" == "$record" ]] || return 1
+  cmp -s -- "$PREVIOUS_ENV_FILE" "$ENV_FILE"
+}
+
 budget_fingerprint() {
   local env_output
   env_output=$(docker inspect --format '{{range .Config.Env}}{{println .}}{{end}}' "$SERVICE") || return 1
@@ -179,7 +196,16 @@ fi
 expected_env_sha=$(file_sha256 "$TEMP_ENV") || { fail 'cannot hash staged .env'; exit 1; }
 mv -f -- "$TEMP_ENV" "$ENV_FILE" || { fail 'cannot atomically publish the named .env addition'; exit 1; }
 TEMP_ENV=
-sync || { fail 'cannot sync the named .env addition'; exit 1; }
+sync_status=0
+sync || sync_status=$?
+if [[ "$sync_status" -ne 0 ]]; then
+  if restore_recorded_env; then
+    printf 'env_update=failed sync_exit=%s target_sha=%s rollback_env=restored\n' "$sync_status" "$target_sha"
+  else
+    printf 'env_update=failed sync_exit=%s target_sha=%s rollback_env=unverified\n' "$sync_status" "$target_sha"
+  fi
+  exit "$sync_status"
+fi
 
 runner_status=0
 if env \
