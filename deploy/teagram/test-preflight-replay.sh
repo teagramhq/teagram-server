@@ -167,6 +167,42 @@ git -C "$TMP/source" push -q origin drift
 drift_sha=$(git -C "$TMP/source" rev-parse HEAD)
 
 git -C "$TMP/source" switch -q main
+git -C "$TMP/source" switch -q -c env-additions
+cat > "$TMP/source/docker-compose.fixture.yml" <<'COMPOSE'
+fixture: primary
+# FIXTURE_ENV_ADDITIONS
+COMPOSE
+git -C "$TMP/source" add docker-compose.fixture.yml
+git -C "$TMP/source" commit -q -m env-additions
+git -C "$TMP/source" push -q origin env-additions
+env_additions_sha=$(git -C "$TMP/source" rev-parse HEAD)
+
+git -C "$TMP/source" switch -q main
+git -C "$TMP/source" switch -q -c local-compose-source
+mkdir -p "$TMP/source/deploy/teagramd/rollout-runner"
+cat > "$TMP/source/deploy/teagramd/rollout-runner/local-compose-a1b2c3d.yml" <<'COMPOSE'
+fixture: generated local artifact
+COMPOSE
+cat >> "$TMP/source/deploy/teagramd/rollout-runner/rollout-runner.sh" <<'PINS'
+readonly FIXTURE_LOCAL_COMPOSE_SOURCE_FILE=deploy/teagramd/rollout-runner/local-compose-a1b2c3d.yml
+readonly FIXTURE_LOCAL_COMPOSE_RUNTIME_FILE=.rollout-compose.local-a1b2c3d.yml
+PINS
+git -C "$TMP/source" add deploy/teagramd/rollout-runner/local-compose-a1b2c3d.yml \
+  deploy/teagramd/rollout-runner/rollout-runner.sh
+git -C "$TMP/source" commit -q -m local-compose-source
+git -C "$TMP/source" push -q origin local-compose-source
+local_compose_sha=$(git -C "$TMP/source" rev-parse HEAD)
+
+git -C "$TMP/source" switch -q main
+git -C "$TMP/source" switch -q -c local-compose-carried
+cp "$SCRIPT_DIR/../teagramd/rollout-runner/local-compose-df9ffe5.yml" \
+  "$TMP/source/deploy/teagramd/rollout-runner/local-compose-df9ffe5.yml"
+git -C "$TMP/source" add deploy/teagramd/rollout-runner/local-compose-df9ffe5.yml
+git -C "$TMP/source" commit -q -m local-compose-carried
+git -C "$TMP/source" push -q origin local-compose-carried
+carried_compose_sha=$(git -C "$TMP/source" rev-parse HEAD)
+
+git -C "$TMP/source" switch -q main
 test_tmp_name=${TMP##*/}
 for kind in runner verifier; do
   if [ "$kind" = runner ]; then
@@ -206,7 +242,7 @@ git -C "$TMP/live" switch -q main
 printf '%s\n' '# FIXTURE_UNDEPLOYED_CHANGE' >> "$TMP/live/docker-compose.fixture.yml"
 git -C "$TMP/live" add docker-compose.fixture.yml
 git -C "$TMP/live" commit -q -m undeployed-checkout-change
-printf 'fixture-password=never-print\n' > "$TMP/live/.env"
+printf 'FIXTURE_PASSWORD=fixture-env-password-never-print\nALREADY_PRESENT=live-value-never-print\nPRESENT_ONLY_IN_TARGET=live-value-target-never-print\n' > "$TMP/live/.env"
 printf '# fixture override\n' > "$TMP/live/docker-compose.override.yml"
 chmod 600 "$TMP/live/.env" "$TMP/live/docker-compose.override.yml"
 mkdir -m 700 "$TMP/live/.secrets"
@@ -241,11 +277,13 @@ if [[ "${1:-}" == inspect ]]; then
     selection+="${FIXTURE_LIVE_ROOT:?}/$entry"
   done
   revision=${FIXTURE_DEPLOYED_SHA:?}
-  jq -cn --arg selection "$selection" --arg revision "$revision" '[{
+  jq -cn --arg selection "$selection" --arg revision "$revision" \
+    --arg secret_source "${FIXTURE_LIVE_ROOT:?}/.secrets/teagramd-turnstile" '[{
     Id:"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
     Image:"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
     Config:{
-      Env:["TG_REPLICA_COUNT=1","TG_CLIENT_ADDR_TRUST=socket","TG_LOG_LOGIN_CODES=false"],
+      Env:["TG_REPLICA_COUNT=1","TG_CLIENT_ADDR_TRUST=socket","TG_LOG_LOGIN_CODES=false",
+        "TG_CONTAINER_ALREADY_PRESENT=container-existing-never-print"],
       StopTimeout:120,
       Labels:{"com.docker.compose.project":"teagram","com.docker.compose.project.config_files":$selection,
         "org.opencontainers.image.revision":$revision}
@@ -255,7 +293,7 @@ if [[ "${1:-}" == inspect ]]; then
       "syslog-address":"unixgram:///dev/log","syslog-facility":"daemon",
       "syslog-format":"rfc5424",tag:"teagramd"
     }},PortBindings:{}},
-    Mounts:[]
+    Mounts:[{Type:"bind",Source:$secret_source,Destination:"/run/secrets/teagramd-turnstile",RW:false}]
   }]'
   exit 0
 fi
@@ -296,11 +334,27 @@ if [[ "${1:-}" == compose ]]; then
   }
   check_live_mount "$project_dir/.env" "${FIXTURE_LIVE_ROOT:?}/.env" file && \
     check_live_mount "$project_dir/docker-compose.override.yml" \
-      "$FIXTURE_LIVE_ROOT/docker-compose.override.yml" file && \
-    check_live_mount "$project_dir/.secrets" "$FIXTURE_LIVE_ROOT/.secrets" directory || {
+      "$FIXTURE_LIVE_ROOT/docker-compose.override.yml" file || {
     printf '%s\n' 'fixture Compose checkout is not using read-only live inputs' >&2
     exit 95
   }
+  case "${project_dir##*/}" in
+    baseline)
+      check_live_mount "$project_dir/.secrets" "$FIXTURE_LIVE_ROOT/.secrets" directory || {
+        printf '%s\n' 'baseline Compose does not reference the live secrets directory read-only' >&2
+        exit 95
+      }
+      ;;
+    target)
+      if awk -v target="$project_dir/.secrets" '$5 == target { found=1 } END { exit !found }' /proc/self/mountinfo || \
+         [ "$(stat -c %u:%a "$project_dir/.secrets/teagramd-turnstile")" != '0:444' ] || \
+         [ -s "$project_dir/.secrets/teagramd-turnstile" ]; then
+        printf '%s\n' 'target Compose received live secrets instead of an empty placeholder' >&2
+        exit 95
+      fi
+      ;;
+    *) exit 95 ;;
+  esac
   if flock -n "${FIXTURE_DEPLOY_LOCK:?}" true; then
     printf '%s\n' 'fixture replay did not hold the deploy lock' >&2
     exit 99
@@ -308,17 +362,22 @@ if [[ "${1:-}" == compose ]]; then
   grace=2m0s
   if grep -q FIXTURE_DRIFT "$project_dir/docker-compose.alternate.yml" 2>/dev/null; then grace=3m0s; fi
   if grep -q FIXTURE_UNDEPLOYED_CHANGE "$project_dir/docker-compose.fixture.yml" 2>/dev/null; then grace=4m0s; fi
-  jq -cn --arg grace "$grace" --arg source "$project_dir/.secrets/teagramd-turnstile" '{services:{teagramd:{
+  additions='{}'
+  if grep -q FIXTURE_ENV_ADDITIONS "$project_dir/docker-compose.fixture.yml" 2>/dev/null; then
+    additions='{"TG_SAFE_ADDITION":"safe-value-never-print","TG_AUTHKEY_ENC_KEY_EXTRA":"auth-secret-never-print","PRESENT_ONLY_IN_TARGET":"live-value-target-never-print","TG_CONTAINER_ALREADY_PRESENT":"container-existing-never-print"}'
+  fi
+  jq -cn --arg grace "$grace" --arg source "$project_dir/.secrets/teagramd-turnstile" \
+    --argjson additions "$additions" '{services:{teagramd:{
     stop_grace_period:$grace,
     ports:[],volumes:[],network_mode:"",networks:{},
     logging:{driver:"syslog",options:{
       "syslog-address":"unixgram:///dev/log","syslog-facility":"daemon",
       "syslog-format":"rfc5424",tag:"teagramd"
     }},
-    environment:{TG_REPLICA_COUNT:"1",TG_CLIENT_ADDR_TRUST:"socket",TG_LOG_LOGIN_CODES:"false",
+    environment:({TG_REPLICA_COUNT:"1",TG_CLIENT_ADDR_TRUST:"socket",TG_LOG_LOGIN_CODES:"false",
       TG_TURNSTILE_SITE_KEY:"fixture-site-key",
       TG_TURNSTILE_SECRET_KEY_FILE:"/run/secrets/teagramd-turnstile",
-      TG_TURNSTILE_SIGNIN_ENABLED:"true"},
+      TG_TURNSTILE_SIGNIN_ENABLED:"true",ALREADY_PRESENT:"live-value-never-print"} + $additions),
     secrets:[{source:"teagramd_turnstile",target:"teagramd-turnstile"}]
   }},secrets:{teagramd_turnstile:{file:$source}}}'
   exit 0
@@ -459,13 +518,14 @@ printf '%s\n' 'PASS replay refuses to overlap a deployment'
 
 output=$(run_replay "$pass_sha" 'docker-compose.fixture.yml,docker-compose.override.yml')
 [[ "$(cat "$TMP/last-rc")" == 0 ]] || { printf 'FAIL all-pass replay:\n%s\n' "$output" >&2; exit 1; }
-[[ "$(wc -l <<< "$output" | tr -d ' ')" == 12 ]] || { printf 'FAIL all-pass row count:\n%s\n' "$output" >&2; exit 1; }
-if grep -qv $'\tpass$' <<< "$output" || \
-   grep -Eq '2m0s|3m0s|4m0s|fixture-password|fixture-turnstile-secret-never-print' <<< "$output"; then
+[[ "$(wc -l <<< "$output" | tr -d ' ')" == 13 ]] || { printf 'FAIL all-pass row count:\n%s\n' "$output" >&2; exit 1; }
+if grep -v '^env_addition[[:space:]]none$' <<< "$output" | grep -qv $'\tpass$' || \
+   ! grep -Fxq $'env_addition\tnone' <<< "$output" || \
+   grep -Eq '2m0s|3m0s|4m0s|fixture-env-password-never-print|fixture-turnstile-secret-never-print|live-value-never-print' <<< "$output"; then
   printf 'FAIL all-pass replay exposed values or failed a row:\n%s\n' "$output" >&2
   exit 1
 fi
-printf '%s\n' 'PASS all-pass replay prints only field/result rows'
+printf '%s\n' 'PASS all-pass replay prints field/result rows and no environment additions'
 printf '%s\n' 'PASS baseline Compose comes from the deployed revision, not the newer checkout'
 
 secret_source="$TMP/live/.secrets/teagramd-turnstile"
@@ -499,11 +559,40 @@ if [[ "$(cat "$TMP/last-rc")" == 0 ]] || ! grep -Fq $'stop_grace_period\tfail' <
   printf 'FAIL drifted replay was not rejected:\n%s\n' "$output" >&2
   exit 1
 fi
-if grep -Eq '2m0s|3m0s|fixture-password' <<< "$output"; then
+if grep -Eq '2m0s|3m0s|fixture-env-password-never-print' <<< "$output"; then
   printf 'FAIL drifted replay exposed values:\n%s\n' "$output" >&2
   exit 1
 fi
 printf '%s\n' 'PASS drifted replay exits non-zero and redacts values'
+
+output=$(run_replay "$env_additions_sha" 'docker-compose.fixture.yml,docker-compose.override.yml')
+if [[ "$(cat "$TMP/last-rc")" == 0 ]] || \
+   ! grep -Fxq $'env_addition\tTG_SAFE_ADDITION' <<< "$output" || \
+   grep -Eq 'TG_AUTHKEY_ENC_KEY_EXTRA|PRESENT_ONLY_IN_TARGET|TG_CONTAINER_ALREADY_PRESENT|safe-value-never-print|auth-secret-never-print|live-value-target-never-print|container-existing-never-print' <<< "$output"; then
+  printf 'FAIL replay did not report only new allowlisted environment addition names:\n%s\n' "$output" >&2
+  exit 1
+fi
+printf '%s\n' 'PASS replay reports only new allowlisted environment names without values'
+
+git -C "$TMP/source" show "$local_compose_sha:deploy/teagramd/rollout-runner/local-compose-a1b2c3d.yml" \
+  > "$TMP/live/.rollout-compose.local-a1b2c3d.yml"
+chmod 600 "$TMP/live/.rollout-compose.local-a1b2c3d.yml"
+output=$(run_replay "$local_compose_sha" '.rollout-compose.local-a1b2c3d.yml,docker-compose.override.yml')
+if [[ "$(cat "$TMP/last-rc")" != 0 ]] || ! grep -Fxq $'env_addition\tnone' <<< "$output"; then
+  printf 'FAIL generated local Compose source replay:\n%s\n' "$output" >&2
+  exit 1
+fi
+printf '%s\n' 'PASS replay stages the target revision pinned local Compose source'
+
+git -C "$TMP/source" show "$carried_compose_sha:deploy/teagramd/rollout-runner/local-compose-df9ffe5.yml" \
+  > "$TMP/live/.rollout-compose.local-f2e3d4a.yml"
+chmod 600 "$TMP/live/.rollout-compose.local-f2e3d4a.yml"
+output=$(run_replay "$carried_compose_sha" '.rollout-compose.local-f2e3d4a.yml,docker-compose.override.yml')
+if [[ "$(cat "$TMP/last-rc")" != 0 ]] || ! grep -Fxq $'env_addition\tnone' <<< "$output"; then
+  printf 'FAIL carried-forward generated local Compose source replay:\n%s\n' "$output" >&2
+  exit 1
+fi
+printf '%s\n' 'PASS replay stages a carried-forward local Compose source by content pin'
 
 : > "$FIXTURE_SANDBOX_UID_LOG"
 : > "$FIXTURE_SANDBOX_NETWORK_LOG"

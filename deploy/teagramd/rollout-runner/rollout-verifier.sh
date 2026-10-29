@@ -359,7 +359,21 @@ verify_turnstile_container_configuration() {
 
 verify_turnstile_secret_mount() {
   local inspect_json=$1 compose_json=$2 snapshot_name=$3
-  if ! printf '%s\n' "$inspect_json" "$compose_json" | jq -se --arg snapshot_name "$snapshot_name" '
+  local replay=${ROLLOUT_PREFLIGHT_REPLAY:-0}
+  local replay_json=false
+  local live_secrets_dir=${ROLLOUT_PREFLIGHT_LIVE_SECRETS_DIR:-}
+  if [ "$replay" = 1 ]; then
+    replay_json=true
+    if [ ! -d "$live_secrets_dir" ] || [ -L "$live_secrets_dir" ] || \
+       [ "$(readlink -f -- "$live_secrets_dir")" != "$live_secrets_dir" ] || \
+       [ "$(stat -c %u:%a -- "$live_secrets_dir")" != "$(id -u):700" ]; then
+      printf '%s\n' 'preflight replay live secrets reference is unavailable or unsafe' >&2
+      return 1
+    fi
+  fi
+  if ! printf '%s\n' "$inspect_json" "$compose_json" | jq -se \
+    --arg snapshot_name "$snapshot_name" --argjson replay "$replay_json" \
+    --arg live_source "$live_secrets_dir/teagramd-turnstile" '
     def item: if type == "array" then .[0] else . end;
     .[0] as $inspect
     | .[1] as $compose
@@ -370,6 +384,19 @@ verify_turnstile_secret_mount() {
       ] as $mounts
     | if $expected_source == null then
         ($mounts | length) == 0
+      elif $replay then
+        if $snapshot_name == "baseline" then
+          ($mounts | length) == 1 and
+          $mounts[0].Type == "bind" and
+          $mounts[0].Source == $live_source and
+          $mounts[0].RW == false
+        else
+          ($mounts | length) == 0 or
+          (($mounts | length) == 1 and
+           $mounts[0].Type == "bind" and
+           $mounts[0].Source == $live_source and
+           $mounts[0].RW == false)
+        end
       else
         if ($mounts | length) == 0 then $snapshot_name != "target"
         elif ($mounts | length) != 1 then false
@@ -716,7 +743,7 @@ snapshot_from_json() {
   local snapshot_name=${6:-}
   local compose_files_value=${7:-${COMPOSE_FILE:-}}
   local image_env_json=${8:-'[]'}
-  local mounts exposure exposure_for_hash resolved_config canonical_compose container_env container_logging_config container_id image_id state exit_code started_at finished_at grace stop_timeout mode_source mode_mount_target compose_logging_policy compose_log_login_codes container_log_login_codes compose_env_names
+  local mounts exposure exposure_for_hash resolved_config canonical_compose container_env container_env_names container_logging_config container_id image_id state exit_code started_at finished_at grace stop_timeout mode_source mode_mount_target compose_logging_policy compose_log_login_codes container_log_login_codes compose_env_names
   local mounts_sha exposure_sha config_sha env_sha override_sha container_env_sha container_logging_sha mount_count
   local compose_replica_count compose_client_addr_trust container_replica_count container_client_addr_trust
   local compose_public_ws_2446 exposure_public_ws_2446
@@ -1016,6 +1043,13 @@ snapshot_from_json() {
         | sort
       end
   ')
+  container_env_names=$(printf '%s' "$inspect_json" | jq -ce '
+    def item: if type == "array" then .[0] else . end;
+    (item | .Config.Env // []) as $env
+    | if ($env | type) == "array" and all($env[]; type == "string") then
+        [$env[] | split("=")[0]] | unique
+      else error("container environment names are invalid") end
+  ') || return 1
   # Disabled Turnstile and public listener defaults count as unset before the
   # target, so a named addition can introduce them and the target must carry it.
   container_env_added=$(printf '%s' "$inspect_json" | jq -er --argjson added "$added_env_names" --arg snapshot_name "$snapshot_name" '
@@ -1219,6 +1253,8 @@ snapshot_from_json() {
     --arg container_logging_sha "$container_logging_sha" \
     --arg container_env_added "$container_env_added" \
     --arg container_env_changed "$container_env_changed" \
+    --argjson compose_env_names "$compose_env_names" \
+    --argjson container_env_names "$container_env_names" \
     --arg compose_source "$compose_source" \
     --arg compose_selection "${COMPOSE_FILE:-unset}" \
     '{container_id:$container_id,image_id:$image_id,state:$state,exit_code:$exit_code,
@@ -1241,6 +1277,8 @@ snapshot_from_json() {
       container_logging_sha256:$container_logging_sha,
       container_env_added:$container_env_added,
       container_env_changed:$container_env_changed,
+      compose_env_names:$compose_env_names,
+      container_env_names:$container_env_names,
       provenance:{container_source:"docker-inspect",compose_source:$compose_source,
         compose_selection:(if $compose_source == "selected-compose-render" then $compose_selection else "not-captured" end),
         stop_grace_period_source:(if $compose_source == "live-container-inspection" then "docker-inspect-config-stop-timeout" else "docker-compose-config" end)}}'

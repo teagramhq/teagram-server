@@ -17,6 +17,8 @@ fail() {
   return 1
 }
 
+unset ROLLOUT_PREFLIGHT_REPLAY ROLLOUT_PREFLIGHT_LIVE_SECRETS_DIR
+
 usage() {
   printf '%s\n' 'usage: preflight-replay.sh <40-hex-pr-head-sha>' >&2
 }
@@ -172,6 +174,117 @@ mount_live_input() {
   mounted_inode=$(stat -c %d:%i -- "$destination") || return 1
   [ "$source_inode" = "$mounted_inode" ] || {
     fail 'private Compose input reference does not point to its live source'
+    return 1
+  }
+}
+
+stage_target_secrets() {
+  local checkout=$1 secret_file secret_name target_dir="$1/.secrets"
+  local had_nullglob=0
+  local -a live_secret_files=()
+  if [ -e "$target_dir" ] || [ -L "$target_dir" ]; then
+    fail 'PR checkout already contains a secrets path'
+    return 1
+  fi
+  mkdir -m 700 -- "$target_dir" || { fail 'cannot prepare sanitized target secrets'; return 1; }
+  shopt -q nullglob && had_nullglob=1
+  shopt -s nullglob
+  live_secret_files=("$LIVE_SECRETS"/*)
+  [ "$had_nullglob" = 1 ] || shopt -u nullglob
+  for secret_file in "${live_secret_files[@]}"; do
+    secret_name=${secret_file##*/}
+    if ! [[ "$secret_name" =~ ^[A-Za-z0-9._-]+$ ]] || [ "$secret_name" = . ] || [ "$secret_name" = .. ] || \
+       [ ! -f "$secret_file" ] || [ -L "$secret_file" ] || \
+       [ "$(stat -c %u -- "$secret_file")" != "$EXPECTED_OWNER" ]; then
+      fail 'live secrets directory contains an unsupported entry'
+      return 1
+    fi
+    install -m 444 /dev/null "$target_dir/$secret_name" || {
+      fail 'cannot stage a sanitized target secret source'
+      return 1
+    }
+  done
+  if [ "$(stat -c %u:%a -- "$target_dir")" != "$EXPECTED_OWNER:700" ]; then
+    fail 'sanitized target secrets directory has invalid ownership or permissions'
+    return 1
+  fi
+}
+
+stage_target_local_compose() {
+  local checkout=$1 destination=$2 relative_file=$3 runner_source=$4
+  local suffix source_file source_prefix line source_pin=0 runtime_pin=0
+  local approved_content_sha source_content_sha approved_source source_source actual_content_sha candidate_source
+  [[ "$relative_file" =~ ^\.rollout-compose\.local-([0-9a-f]{7})\.yml$ ]] || return 1
+  suffix=${BASH_REMATCH[1]}
+  source_file="deploy/teagramd/rollout-runner/local-compose-$suffix.yml"
+  if [ -e "$destination" ] || [ -L "$destination" ]; then
+    fail 'PR head generated local Compose path already exists outside its tracked source'
+    return 1
+  fi
+  while IFS= read -r line; do
+    case "$line" in
+      "readonly "*"_LOCAL_COMPOSE_SOURCE_FILE=$source_file")
+        source_prefix=${line#readonly }
+        source_prefix=${source_prefix%_LOCAL_COMPOSE_SOURCE_FILE=$source_file}
+        if [[ "$source_prefix" =~ ^[A-Z][A-Z0-9_]*$ ]]; then
+          source_pin=1
+          if grep -Fqx "readonly ${source_prefix}_LOCAL_COMPOSE_RUNTIME_FILE=$relative_file" "$runner_source"; then
+            runtime_pin=1
+          fi
+        fi
+        ;;
+    esac
+  done < "$runner_source"
+  if [ "$source_pin" = 1 ] && [ "$runtime_pin" = 1 ]; then
+    if ! git -C "$checkout" cat-file -e "$target_sha:$source_file" 2>/dev/null || \
+       [ ! -f "$checkout/$source_file" ] || [ -L "$checkout/$source_file" ]; then
+      fail 'PR head is missing the pinned local Compose source'
+      return 1
+    fi
+  else
+    approved_content_sha=$(sed -nE 's/^readonly APPROVED_LOCAL_COMPOSE_CONTENT_SHA=([0-9a-f]{64})$/\1/p' "$runner_source")
+    source_content_sha=$(sed -nE 's/^readonly SOURCE_LOCAL_COMPOSE_CONTENT_SHA=([0-9a-f]{64})$/\1/p' "$runner_source")
+    approved_source=$(sed -nE 's/^readonly DF9_LOCAL_COMPOSE_SOURCE_FILE=(deploy\/teagramd\/rollout-runner\/local-compose-[0-9a-f]{7}\.yml)$/\1/p' "$runner_source")
+    source_source=$(sed -nE 's/^readonly CCE_LOCAL_COMPOSE_SOURCE_FILE=(deploy\/teagramd\/rollout-runner\/local-compose-[0-9a-f]{7}\.yml)$/\1/p' "$runner_source")
+    if [ "$(grep -Fc 'case "$artifact_content_sha" in' "$runner_source")" != 1 ] || \
+       [ "$(grep -Fc 'PINNED_LOCAL_COMPOSE_RUNTIME_FILE=${first_entry##*/}' "$runner_source")" != 1 ] || \
+       [ "$(grep -Fc '"$APPROVED_LOCAL_COMPOSE_CONTENT_SHA")' "$runner_source")" -lt 1 ] || \
+       [ "$(grep -Fc 'PINNED_LOCAL_COMPOSE_SOURCE_FILE=$DF9_LOCAL_COMPOSE_SOURCE_FILE' "$runner_source")" -lt 1 ] || \
+       [ "$(grep -Fc '"$SOURCE_LOCAL_COMPOSE_CONTENT_SHA")' "$runner_source")" -lt 1 ] || \
+       [ "$(grep -Fc 'PINNED_LOCAL_COMPOSE_SOURCE_FILE=$CCE_LOCAL_COMPOSE_SOURCE_FILE' "$runner_source")" -lt 1 ] || \
+       ! [[ "$approved_content_sha" =~ ^[0-9a-f]{64}$ && "$source_content_sha" =~ ^[0-9a-f]{64}$ && \
+            "$approved_source" =~ ^deploy/teagramd/rollout-runner/local-compose-[0-9a-f]{7}\.yml$ && \
+            "$source_source" =~ ^deploy/teagramd/rollout-runner/local-compose-[0-9a-f]{7}\.yml$ ]]; then
+      fail 'PR head rollout runner does not pin the selected local Compose source'
+      return 1
+    fi
+    source_file=
+    for candidate_source in "$approved_source" "$source_source"; do
+      if ! git -C "$checkout" cat-file -e "$target_sha:$candidate_source" 2>/dev/null || \
+         [ ! -f "$checkout/$candidate_source" ] || [ -L "$checkout/$candidate_source" ]; then
+        continue
+      fi
+      actual_content_sha=$(awk '!/^[[:space:]]*#/' "$checkout/$candidate_source" | sha256sum) || return 1
+      actual_content_sha=${actual_content_sha%% *}
+      if [ "$candidate_source" = "$approved_source" ] && [ "$actual_content_sha" = "$approved_content_sha" ]; then
+        source_file=$candidate_source
+        break
+      elif [ "$candidate_source" = "$source_source" ] && [ "$actual_content_sha" = "$source_content_sha" ]; then
+        source_file=$candidate_source
+        break
+      fi
+    done
+    [ -n "$source_file" ] || {
+      fail 'PR head has no tracked local Compose source matching its carried-forward pin'
+      return 1
+    }
+  fi
+  [ -n "$source_file" ] || {
+    fail 'PR head rollout runner does not pin the selected local Compose source'
+    return 1
+  }
+  install -m 600 -- "$checkout/$source_file" "$destination" || {
+    fail 'cannot stage the PR head pinned local Compose source'
     return 1
   }
 }
@@ -505,6 +618,21 @@ selection=$(printf '%s' "$container_json" | jq -er '
   | select(type == "string" and length > 0)
 ' 2>/dev/null) || { fail 'running teagramd Compose file label is missing'; exit 1; }
 
+target_runner_source="$TMP_DIR/target/deploy/teagramd/rollout-runner/rollout-runner.sh"
+target_verifier_source="$TMP_DIR/target/deploy/teagramd/rollout-runner/rollout-verifier.sh"
+[ -d "$TMP_DIR/target/deploy" ] && [ ! -L "$TMP_DIR/target/deploy" ] && \
+  [ -d "$TMP_DIR/target/deploy/teagramd" ] && [ ! -L "$TMP_DIR/target/deploy/teagramd" ] && \
+  [ -d "$TMP_DIR/target/deploy/teagramd/rollout-runner" ] && \
+  [ ! -L "$TMP_DIR/target/deploy/teagramd/rollout-runner" ] || {
+  fail 'PR head rollout runtime path is symlinked'
+  exit 1
+}
+[ -f "$target_runner_source" ] && [ ! -L "$target_runner_source" ] && \
+  [ -f "$target_verifier_source" ] && [ ! -L "$target_verifier_source" ] || {
+  fail 'PR head rollout runtime is unavailable'
+  exit 1
+}
+
 IFS=, read -r -a live_files <<< "$selection"
 [ "${#live_files[@]}" -gt 0 ] || { fail 'running Compose selection is empty'; exit 1; }
 compose_selection=
@@ -546,6 +674,8 @@ for live_file in "${live_files[@]}"; do
           fail 'PR head selected Compose file is unavailable'
           exit 1
         }
+      elif [[ "$relative_file" =~ ^\.rollout-compose\.local-[0-9a-f]{7}\.yml$ ]]; then
+        stage_target_local_compose "$checkout" "$destination" "$relative_file" "$target_runner_source" || exit 1
       else
         fail 'PR head is missing a selected Compose file'
         exit 1
@@ -566,29 +696,17 @@ for checkout in "$TMP_DIR/baseline" "$TMP_DIR/target"; do
   done
   mount_live_input "$live_env" "$checkout/.env" file || exit 1
   mount_live_input "$live_override" "$checkout/docker-compose.override.yml" file || exit 1
-  mount_live_input "$LIVE_SECRETS" "$checkout/.secrets" directory || exit 1
 done
+stage_target_secrets "$TMP_DIR/target" || exit 1
+mount_live_input "$LIVE_SECRETS" "$TMP_DIR/baseline/.secrets" directory || exit 1
 
-target_runner_source="$TMP_DIR/target/deploy/teagramd/rollout-runner/rollout-runner.sh"
-target_verifier_source="$TMP_DIR/target/deploy/teagramd/rollout-runner/rollout-verifier.sh"
-[ -d "$TMP_DIR/target/deploy" ] && [ ! -L "$TMP_DIR/target/deploy" ] && \
-  [ -d "$TMP_DIR/target/deploy/teagramd" ] && [ ! -L "$TMP_DIR/target/deploy/teagramd" ] && \
-  [ -d "$TMP_DIR/target/deploy/teagramd/rollout-runner" ] && \
-  [ ! -L "$TMP_DIR/target/deploy/teagramd/rollout-runner" ] || {
-  fail 'PR head rollout runtime path is symlinked'
-  exit 1
-}
-[ -f "$target_runner_source" ] && [ ! -L "$target_runner_source" ] && \
-  [ -f "$target_verifier_source" ] && [ ! -L "$target_verifier_source" ] || {
-  fail 'PR head rollout runtime is unavailable'
-  exit 1
-}
 target_runner=$(prepare_target_runner "$target_runner_source") || exit 1
 
 for checkout in "$TMP_DIR/baseline" "$TMP_DIR/target"; do
   name=preflight
   [ "$checkout" = "$TMP_DIR/baseline" ] && name=baseline
-  bash "$BASE_VERIFIER" preflight-snapshot "$container_id" "$checkout" "$TMP_DIR" \
+  ROLLOUT_PREFLIGHT_REPLAY=1 ROLLOUT_PREFLIGHT_LIVE_SECRETS_DIR="$LIVE_SECRETS" \
+    bash "$BASE_VERIFIER" preflight-snapshot "$container_id" "$checkout" "$TMP_DIR" \
     "$name" "$project_name" "$compose_selection" >/dev/null || exit $?
 done
 unmount_live_inputs || exit 1
@@ -650,5 +768,45 @@ if ! comparison_rows=$(awk -F '\t' '
   fail 'sandbox comparison evidence is malformed or incomplete'
   exit 1
 fi
+if ! env_addition_names=$(jq -nr --slurpfile baseline "$TMP_DIR/baseline.snapshot.json" \
+    --slurpfile target "$TMP_DIR/preflight.snapshot.json" --rawfile env_content "$live_env" '
+  def protected_name:
+    startswith("TG_RSA_KEY_") or startswith("TG_AUTHKEY_ENC_KEY") or
+    startswith("TG_POSTGRES_") or startswith("POSTGRES_") or
+    startswith("TG_BLOB_") or startswith("RUSTFS_") or
+    startswith("TG_REPLICA_") or . == "TG_CLIENT_ADDR_TRUST" or
+    startswith("COMPOSE_") or startswith("DOCKER_");
+  def runtime_name($name):
+    if $name == "TEAGRAM_TURNSTILE_SITE_KEY" then "TG_TURNSTILE_SITE_KEY"
+    elif $name == "TEAGRAM_TURNSTILE_SECRET_KEY_FILE" then "TG_TURNSTILE_SECRET_KEY_FILE"
+    else $name end;
+  def live_env_names:
+    $env_content | split("\n") | map(select(test("^[A-Z][A-Z0-9_]*=")))
+    | map(split("=")[0]) | unique;
+  ($baseline[0].compose_env_names) as $baseline_names
+  | ($target[0].compose_env_names) as $target_names
+  | ($baseline[0].container_env_names) as $container_names
+  | live_env_names as $existing
+  | if ($baseline_names | type) != "array" or ($target_names | type) != "array" or
+      ($container_names | type) != "array" then
+      error("resolved Compose environment names are missing")
+    else . end
+  | ($target_names - $baseline_names)
+  | map(select(type == "string" and test("^[A-Z][A-Z0-9_]*$")))
+  | map(. as $name | select(($name | protected_name) | not))
+  | map(. as $name | select(($existing | index($name)) == null))
+  | map(. as $name | select(($container_names | index(runtime_name($name))) == null))
+  | unique | sort | .[]
+'); then
+  fail 'cannot derive allowlisted environment additions from the resolved snapshots'
+  exit 1
+fi
 printf '%s\n' "$comparison_rows"
+if [ -n "$env_addition_names" ]; then
+  while IFS= read -r env_name; do
+    printf 'env_addition\t%s\n' "$env_name"
+  done <<< "$env_addition_names"
+else
+  printf 'env_addition\tnone\n'
+fi
 [ "$runner_rc" -eq 0 ] || exit "$runner_rc"

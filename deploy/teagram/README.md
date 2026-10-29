@@ -114,19 +114,28 @@ ssh teagram run <merge-sha> preflight-replay <pr-head-sha>
 ```
 
 The command follows the running `teagramd` container's deployed revision and
-Compose file label. It bind-mounts the live `.env`, override and `.secrets`
-directory into private temporary checkouts read-only; secret files stay at
-their live paths and are never copied into the checkouts. It holds
-`/tmp/teagram-deploy.lock` for the replay and refuses if a deployment already
-holds it. The temporary checkouts and mounts are removed when the command
-exits.
+Compose file label. It bind-mounts the live `.env` and override read-only into
+both private temporary checkouts. The deployed baseline also references the
+live `.secrets` directory read-only. The PR checkout gets empty mode-0444
+placeholder files for the live secret filenames, so its Compose render can
+validate paths without access to authentication secret bytes. No secret file
+contents are copied. It holds `/tmp/teagram-deploy.lock` for the replay and
+refuses if a deployment already holds it. The temporary checkouts and mounts
+are removed when the command exits.
 
-The command then loads the PR head's verifier and runs its comparison as uid
-65534 in a minimal chroot containing only the snapshots, PR scripts and
-required shell tools; the chroot has no host paths, Docker socket or
-credentials. The host requires a `chroot` command that can set the uid and gid
-for its child. The command prints only `field<TAB>result` rows. Every row must
-be `pass`; for PR #870, post the rows on MAIN-2563.
+The deployed verifier renders Compose as trusted code. Rendering parses the
+declarative files; it does not build images, start services, or run PR scripts.
+Resolved JSON stays in the verifier process. Snapshots retain hashes and
+allowlisted settings plus Compose and container environment names, never
+environment values or secret contents. The PR head's verifier and comparison
+run only after the live input mounts are removed, as uid 65534 in a minimal
+chroot containing the snapshots, PR scripts and required shell tools; the
+chroot has no host paths, Docker socket or credentials. The host requires a
+`chroot` command that can set the uid and gid for its child. Output is limited
+to `field<TAB>result` rows and `env_addition<TAB>NAME` rows for new, allowlisted
+names relative to deployed Compose that are absent from the live `.env` and
+container; protected names and values are omitted. Every result row must be
+`pass`; for PR #870, post the rows on MAIN-2563.
 
 `teagramd` uses the host's BusyBox syslog socket, with `tag=teagramd`. The
 deploy installs `deploy/teagram/syslog.conf` as `/etc/conf.d/syslog` before
