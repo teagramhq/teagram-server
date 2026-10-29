@@ -26,6 +26,7 @@ mkdir -m 700 "$REPO_FIXTURE/.state"
 sed \
   -e "s@readonly ROOT=/root@readonly ROOT=$ROOT_FIXTURE@" \
   -e "s@readonly REPO=/opt/teagram@readonly REPO=$REPO_FIXTURE@" \
+  -e "s@readonly DEPLOY_LOCK=/tmp/teagram-deploy.lock@readonly DEPLOY_LOCK=$TMP/deploy.lock@" \
   -e "s@readonly EXPECTED_ROOT_UID=0@readonly EXPECTED_ROOT_UID=$MOCK_OWNER_UID@" \
   deploy/teagram/ops/apply-tailnet-exchange-limit.sh > "$OP"
 chmod 700 "$OP"
@@ -33,6 +34,10 @@ chmod 700 "$OP"
 cat > "$BIN/git" <<'GIT'
 #!/usr/bin/env bash
 set -euo pipefail
+if /usr/bin/flock -n "$MOCK_DEPLOY_LOCK" -c true; then
+  printf '%s\n' 'operation lock is not held during git preflight' >&2
+  exit 98
+fi
 [[ "$1" == -C && "$2" == "$MOCK_REPO" ]] || { printf 'unexpected git command\n' >&2; exit 99; }
 shift 2
 case "$*" in
@@ -48,6 +53,10 @@ GIT
 cat > "$BIN/docker" <<'DOCKER'
 #!/usr/bin/env bash
 set -euo pipefail
+if /usr/bin/flock -n "$MOCK_DEPLOY_LOCK" -c true; then
+  printf '%s\n' 'operation lock is not held during docker preflight or verification' >&2
+  exit 98
+fi
 [[ "$1" == inspect && "$2" == --format ]] || { printf 'unexpected docker command\n' >&2; exit 99; }
 format=$3
 case "$format" in
@@ -63,6 +72,14 @@ chmod 755 "$BIN/git" "$BIN/docker"
 cat > "$ROOT_FIXTURE/teagramd-rollout-runner/rollout-runner.sh" <<'RUNNER'
 #!/usr/bin/env bash
 set -euo pipefail
+[[ "$(readlink "/proc/$BASHPID/fd/9")" == "$MOCK_DEPLOY_LOCK" ]] || {
+  printf '%s\n' 'shared deployment lock descriptor was not passed to runner' >&2
+  exit 96
+}
+if /usr/bin/flock -n "$MOCK_DEPLOY_LOCK" -c true; then
+  printf '%s\n' 'operation lock is not held through the runner call' >&2
+  exit 97
+fi
 printf '%s\n' called > "$MOCK_RUNNER_CALL"
 [[ "$#" == 3 && "$1" == apply && "$2" == "$MOCK_TARGET_SHA" && "$3" == "$MOCK_TARGET_SHA" ]]
 [[ "$ROLLOUT_RUNNER_SOURCE_SHA" == "$MOCK_OPS_SHA" ]]
@@ -86,6 +103,7 @@ export OPS_SHA MOCK_REPO="$REPO_FIXTURE" MOCK_TARGET_SHA="$TARGET_SHA" MOCK_OPS_
 export MOCK_CONTAINER_ENV_FILE="$TMP/container-env" MOCK_RUNNER_MODE=success
 export MOCK_ENV_FILE="$REPO_FIXTURE/.env" MOCK_ENV_RECORD="$REPO_FIXTURE/.state/rollout-env"
 export MOCK_BACKUP="$ROOT_FIXTURE/.env.main-2478-pre-key-exchange-20261025T170009Z"
+export MOCK_DEPLOY_LOCK="$TMP/deploy.lock"
 
 setup_fixture() {
   printf 'FIXTURE_PRIVATE_VALUE=do-not-print-fixture-value\nTG_LOG_LOGIN_CODES=false\n' > "$MOCK_ENV_FILE"
@@ -141,5 +159,21 @@ runner_status=0
 existing_output=$(run_operation 2>&1) || runner_status=$?
 [[ "$runner_status" != 0 && "$existing_output" == *'already exists in the pre-change .env'* ]]
 [[ ! -e "$TMP/runner-called" ]]
+
+runner_lock_status=0
+exec 9>"$TMP/inherited-runner.lock"
+flock -x 9
+export ROLLOUT_RUNNER_TEST_MODE=1 ROLLOUT_RUNNER_LOCK_PATH="$TMP/inherited-runner.lock"
+timeout 3s bash -c '
+  set -Eeuo pipefail
+  export ROLLOUT_RUNNER_SOURCE_ONLY=1
+  source deploy/teagramd/rollout-runner/rollout-runner.sh
+  [[ "$(readlink "/proc/$BASHPID/fd/9")" == "$ROLLOUT_RUNNER_LOCK_PATH" ]]
+  acquire_shared_lock
+  [[ "$(readlink "/proc/$BASHPID/fd/9")" == "$ROLLOUT_RUNNER_LOCK_PATH" ]]
+' || runner_lock_status=$?
+flock -u 9
+exec 9>&-
+[[ "$runner_lock_status" == 0 ]]
 
 printf '%s\n' 'tailnet exchange apply operation fixture passed'

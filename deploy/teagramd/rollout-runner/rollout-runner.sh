@@ -654,6 +654,14 @@ require_runtime() {
 }
 
 acquire_shared_lock() {
+  local inherited_lock
+  if [ -e "/proc/$$/fd/9" ]; then
+    inherited_lock=$(readlink "/proc/$$/fd/9") || { fail 'cannot inspect inherited deployment lock'; return 1; }
+    if [ "$inherited_lock" = "$LOCK_PATH" ]; then
+      flock -x 9 || { fail 'cannot acquire inherited deployment lock'; return 1; }
+      return 0
+    fi
+  fi
   if [ "${ROLLOUT_RUNNER_TEST_MODE:-0}" = 1 ]; then
     exec 9>"$LOCK_PATH"
   elif [ "$RUNNER_ACTION" = move-stack ]; then

@@ -4,6 +4,7 @@ umask 077
 
 readonly ROOT=/root
 readonly REPO=/opt/teagram
+readonly DEPLOY_LOCK=/tmp/teagram-deploy.lock
 readonly SERVICE=teagram-teagramd-1
 readonly ENV_FILE=$REPO/.env
 readonly ENV_RECORD=$REPO/.state/rollout-env
@@ -83,6 +84,9 @@ if [[ "$#" -ne 0 ]]; then
 fi
 [[ "$(id -u)" == "$EXPECTED_ROOT_UID" ]] || { fail 'operation requires root'; exit 1; }
 [[ "${OPS_SHA:-}" =~ ^[0-9a-f]{40}$ ]] || { fail 'reviewed operation SHA is invalid'; exit 64; }
+# Keep the rollout runner's shared lock across preflight, the .env update, and apply.
+exec 9>"$DEPLOY_LOCK"
+flock -x 9 || { fail 'cannot acquire shared deployment lock'; exit 1; }
 [[ -d "$ROOT" && ! -L "$ROOT" && "$(stat -c '%u:%a' -- "$ROOT")" == "$EXPECTED_ROOT_UID:700" ]] || {
   fail 'root directory failed ownership or mode checks'
   exit 1
