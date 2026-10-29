@@ -1409,6 +1409,9 @@ jobs:
           grep --fixed-strings --quiet "name: db-migrations-${migrations_digest:0:16}" "$RUNNER_TEMP/k8s-prod.yaml"
           grep --fixed-strings --quiet "name: rustfs-init-${rustfs_init_digest:0:16}" "$RUNNER_TEMP/k8s-prod.yaml"
 
+      - name: Check public WebSocket ingress invariants
+        run: bash deploy/k8s/test-public-websocket-component.sh
+
   test-k8s-deploy:
     name: "test: k8s-deploy"
     needs:
@@ -1574,6 +1577,16 @@ jobs:
             --selector=app.kubernetes.io/name=rustfs-init \
             --namespace teagram --timeout=600s
           kubectl rollout status statefulset/teagramd --namespace teagram --timeout=180s
+          app_pod=$(kubectl get pods --namespace teagram \
+            --selector=app.kubernetes.io/name=teagramd \
+            --output jsonpath='{.items[0].metadata.name}')
+          test -n "$app_pod"
+          identity_log=$(kubectl logs "$app_pod" --namespace teagram --container ensure-server-identity)
+          rsa_fingerprint=$(sed -n 's/^RSA identity ready: fingerprint=\(-\{0,1\}[0-9][0-9]*\) path=.*/\1/p' <<<"$identity_log")
+          grep --extended-regexp --quiet '^-?[0-9]+$' <<<"$rsa_fingerprint"
+          kubectl create configmap teagramd-public-identity --namespace teagram \
+            --from-literal="TG_RSA_KEY_FINGERPRINT=$rsa_fingerprint"
+          kubectl rollout status deployment/teagramd-public --namespace teagram --timeout=240s
           kubectl rollout status deployment/linklanding --namespace teagram --timeout=180s
           kubectl rollout status deployment/linkselector --namespace teagram --timeout=180s
           kubectl rollout status deployment/cloudflared --namespace teagram --timeout=180s
