@@ -290,6 +290,27 @@ Docker logs are size-bounded but are not cleared by the wipe, so application
 and deploy logs must not contain message bodies, authentication tokens or
 passwords.
 
+### Auth-key unbind diagnostic logs
+
+The demo enables `TG_LOG_AUTH_KEY_UNBINDS` on both server slots. Each event
+contains the operation, reason, outcome, numeric auth-key ID and, when known,
+numeric user ID. These identifiers can correlate authorization events and link
+them to a demo account, so treat the entries as sensitive account data even
+though they contain no auth-key bytes, tokens, passwords, phone numbers, IP
+addresses or message content. The IDs are correlators, not login credentials.
+
+LXC root and Docker daemon administrators can read the raw container logs. The
+separate `multica-daemon@delta` root key is restricted to the operations menu;
+its `logs` command can return at most 200 lines per running `teagramd` or
+`teagramd-next` container since a requested UTC timestamp. The CI deploy key is
+restricted to the deploy command and cannot invoke that log reader. Limit
+host/Docker administration and the operations key to trusted demo operators.
+Compose uses Docker's `json-file` driver with `max-size=10m` and `max-file=3`
+per container. This is a size limit, not an age limit: quiet logs can outlive
+the weekly database wipe, which does not clear Docker logs. The stack
+configures no external log forwarder; any exported or forwarded copy needs the
+same access controls and an explicit retention limit.
+
 The seed script interface is:
 
 ```sh
