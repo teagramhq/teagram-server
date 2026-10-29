@@ -45,3 +45,13 @@ and rollback summary shapes; every other line is omitted. If the target failure
 marker could not be persisted, it uses the matching rollback warning and
 identifies the target failure marker and capture time as unavailable. It reads
 only validated root-owned mode-0600 files from mode-0700 evidence directories.
+
+`apply-user-invite-quota.sh` adds `TG_USER_INVITE_QUOTA=5` through the named
+rollout environment path. It requires the invite-mode listener and unset
+account-age override, saves the prior `.env` under `/opt/teagram/.state`, and
+verifies `help.getAppConfig` from the deployed image after the runner applies
+the change. Run it only after the invite RPC release is live:
+
+```sh
+ssh teagram run <reviewed-main-sha> apply-user-invite-quota
+```

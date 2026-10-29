@@ -13,6 +13,7 @@ import (
 
 	"github.com/gotd/td/crypto"
 	"github.com/gotd/td/exchange"
+	"github.com/gotd/td/tg"
 
 	"github.com/teagramhq/teagram-server/internal/discovery"
 	"github.com/teagramhq/teagram-server/internal/mtproto"
@@ -171,5 +172,58 @@ func TestLiveTargetUsesMTProtoPort2443(t *testing.T) {
 	}
 	if port != "2443" {
 		t.Fatalf("live target port = %q, want 2443", port)
+	}
+}
+
+func TestParseInviteAppConfig(t *testing.T) {
+	t.Parallel()
+
+	appConfig := &tg.HelpAppConfig{Config: &tg.JSONObject{Value: []tg.JSONObjectValue{{
+		Key: "registration_mode", Value: &tg.JSONString{Value: "invite"},
+	}, {
+		Key: "user_invites_enabled", Value: &tg.JSONBool{Value: true},
+	}, {
+		Key: "user_invite_quota", Value: &tg.JSONNumber{Value: 5},
+	}}}}
+	got, err := parseInviteAppConfig(appConfig)
+	if err != nil {
+		t.Fatalf("parseInviteAppConfig: %v", err)
+	}
+	if got.registrationMode != "invite" || !got.userInvitesEnabled || got.userInviteQuota != 5 {
+		t.Fatalf("settings = %+v, want invite, enabled, quota 5", got)
+	}
+}
+
+func TestParseInviteAppConfigRejectsIncompleteOrInvalidSettings(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name   string
+		values []tg.JSONObjectValue
+	}{
+		{
+			name: "missing quota",
+			values: []tg.JSONObjectValue{{Key: "registration_mode", Value: &tg.JSONString{Value: "invite"}},
+				{Key: "user_invites_enabled", Value: &tg.JSONBool{Value: true}}},
+		},
+		{
+			name: "fractional quota",
+			values: []tg.JSONObjectValue{{Key: "registration_mode", Value: &tg.JSONString{Value: "invite"}},
+				{Key: "user_invites_enabled", Value: &tg.JSONBool{Value: true}},
+				{Key: "user_invite_quota", Value: &tg.JSONNumber{Value: 5.5}}},
+		},
+		{
+			name: "wrong enabled type",
+			values: []tg.JSONObjectValue{{Key: "registration_mode", Value: &tg.JSONString{Value: "invite"}},
+				{Key: "user_invites_enabled", Value: &tg.JSONString{Value: "true"}},
+				{Key: "user_invite_quota", Value: &tg.JSONNumber{Value: 5}}},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if _, err := parseInviteAppConfig(&tg.HelpAppConfig{Config: &tg.JSONObject{Value: tc.values}}); err == nil {
+				t.Fatal("parseInviteAppConfig succeeded with invalid settings")
+			}
+		})
 	}
 }

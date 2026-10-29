@@ -1025,6 +1025,8 @@ jobs:
           bash -n deploy/teagram/ops/target-failure-report.sh
           bash -n deploy/teagram/test-teagram-ops.sh
           bash -n deploy/teagram/test-target-failure-report.sh
+          bash -n deploy/teagram/ops/apply-user-invite-quota.sh
+          bash -n deploy/teagram/test-apply-user-invite-quota.sh
           bash -n deploy/telegram-server/deploy-main.sh
           bash -n deploy/teagram-demo/prepare-env.sh
           bash -n deploy/teagram-demo/demo-common.sh
@@ -1059,6 +1061,8 @@ jobs:
             deploy/teagram/ops/target-failure-report.sh \
             deploy/teagram/test-teagram-ops.sh \
             deploy/teagram/test-target-failure-report.sh \
+            deploy/teagram/ops/apply-user-invite-quota.sh \
+            deploy/teagram/test-apply-user-invite-quota.sh \
             deploy/telegram-server/deploy-main.sh \
             deploy/teagram-demo/prepare-env.sh \
             deploy/teagram-demo/demo-common.sh \
@@ -1088,6 +1092,9 @@ jobs:
 
       - name: Check deploy script target fixtures
         run: deploy/teagram/test-deploy-main.sh
+
+      - name: Check user invite quota operation
+        run: deploy/teagram/test-apply-user-invite-quota.sh
 
       - name: Check read-only Compose preflight replay
         run: sudo -n deploy/teagram/test-preflight-replay.sh

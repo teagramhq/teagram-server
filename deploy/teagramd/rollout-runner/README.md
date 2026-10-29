@@ -716,6 +716,14 @@ an absent value, and a configured value stays pinned in the inspected container
 environment. Setting it to `0` disables only the tailnet bucket; the public
 per-network, per-connection, and global budgets remain separately configured.
 
+`TG_USER_INVITE_QUOTA` can be added through the same named `.env` path and must
+be a non-negative decimal integer whose value matches the resolved Compose
+value and replacement container. Its exact-empty Compose default is equivalent
+to an absent setting, so rollback restores the disabled default without
+preserving an empty container variable. After the addition is verified, later
+rollouts retain the configured quota in the environment and configuration
+digests.
+
 The runner allows changing `TG_REGISTRATION` between `closed` and `open`,
 `TG_TURNSTILE_SIGNIN_ENABLED` between `false` and `true`, and WebSocket origin
 allowlists through the same named path. `TG_WEBSOCKET_ALLOWED_ORIGINS` accepts
