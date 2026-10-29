@@ -19,6 +19,8 @@ import (
 	"github.com/gotd/td/crypto"
 )
 
+var errAlreadyExists = errors.New("RSA key already exists")
+
 // Load returns the existing RSA private key at path. It never creates or
 // changes the configured identity.
 func Load(path string) (*rsa.PrivateKey, error) {
@@ -48,7 +50,7 @@ func Load(path string) (*rsa.PrivateKey, error) {
 // written PKCS#1 PEM file atomically and refuses to replace any existing path.
 func Bootstrap(path string) (key *rsa.PrivateKey, retErr error) {
 	if _, err := os.Lstat(path); err == nil {
-		return nil, fmt.Errorf("RSA key already exists at %s", path)
+		return nil, fmt.Errorf("%w at %s", errAlreadyExists, path)
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return nil, fmt.Errorf("inspect RSA key destination: %w", err)
 	}
@@ -98,7 +100,7 @@ func Bootstrap(path string) (key *rsa.PrivateKey, retErr error) {
 	tmpClosed = true
 	if err := os.Link(tmpPath, path); err != nil {
 		if errors.Is(err, os.ErrExist) {
-			return nil, fmt.Errorf("RSA key already exists at %s: %w", path, err)
+			return nil, fmt.Errorf("%w at %s: %w", errAlreadyExists, path, err)
 		}
 		return nil, fmt.Errorf("publish RSA key: %w", err)
 	}
@@ -117,6 +119,23 @@ func Bootstrap(path string) (key *rsa.PrivateKey, retErr error) {
 		return nil, fmt.Errorf("sync RSA key directory: %w", err)
 	}
 	return key, nil
+}
+
+// Ensure returns the valid RSA identity at path or bootstraps it if missing.
+// It never replaces an existing file, including one that cannot be parsed.
+func Ensure(path string) (*rsa.PrivateKey, error) {
+	key, err := Load(path)
+	if err == nil {
+		return key, nil
+	}
+	if !errors.Is(err, os.ErrNotExist) {
+		return nil, err
+	}
+	key, err = Bootstrap(path)
+	if !errors.Is(err, errAlreadyExists) {
+		return key, err
+	}
+	return Load(path)
 }
 
 // Fingerprint returns the Telegram RSA fingerprint of the public key.

@@ -104,6 +104,14 @@ func runCommand(args []string, log *slog.Logger, stdout, stderr io.Writer) error
 			return errors.New("bootstrap-identity takes no arguments")
 		}
 		return runBootstrapIdentityCommand(stdout)
+	case args[0] == "ensure-identity":
+		if len(args) == 2 && slices.Contains(args[1:], "--help") {
+			return writeEnsureIdentityUsage(stdout)
+		}
+		if len(args) != 1 {
+			return errors.New("ensure-identity takes no arguments")
+		}
+		return runEnsureIdentityCommand(stdout)
 	default:
 		return fmt.Errorf("unknown command %q", args[0])
 	}
@@ -465,6 +473,25 @@ func runBootstrapIdentityCommand(stdout io.Writer) error {
 	}
 	if _, err := fmt.Fprintf(stdout, "RSA identity bootstrapped: fingerprint=%d path=%s\n", rsakey.Fingerprint(&key.PublicKey), path); err != nil {
 		return fmt.Errorf("write identity bootstrap confirmation: %w", err)
+	}
+	return nil
+}
+
+func writeEnsureIdentityUsage(w io.Writer) error {
+	if _, err := fmt.Fprintln(w, "usage: teagramd ensure-identity"); err != nil {
+		return fmt.Errorf("write ensure-identity usage: %w", err)
+	}
+	return nil
+}
+
+func runEnsureIdentityCommand(stdout io.Writer) error {
+	path := config.RSAKeyPath()
+	key, err := rsakey.Ensure(path)
+	if err != nil {
+		return err
+	}
+	if _, err := fmt.Fprintf(stdout, "RSA identity ready: fingerprint=%d path=%s\n", rsakey.Fingerprint(&key.PublicKey), path); err != nil {
+		return fmt.Errorf("write identity confirmation: %w", err)
 	}
 	return nil
 }
