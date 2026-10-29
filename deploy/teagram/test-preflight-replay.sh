@@ -306,10 +306,10 @@ if [[ "${1:-}" == compose ]]; then
       *) shift ;;
     esac
   done
-  case "$project_dir" in
-    "${FIXTURE_LIVE_ROOT:?}"|*/baseline|*/target) ;;
-    *) printf '%s\n' 'fixture Compose project directory is invalid' >&2; exit 93 ;;
-  esac
+  [[ "$project_dir" == "${FIXTURE_LIVE_ROOT:?}" ]] || {
+    printf '%s\n' 'fixture Compose project directory is not the live checkout' >&2
+    exit 93
+  }
   checkout_dir=${first_compose_file%/*}
   expected_cache="${checkout_dir%/*}/compose-cache"
   if [[ -n "$env_file" ]] && { [ ! -f "$env_file" ] || [ "$(stat -c %a -- "$env_file")" != 600 ]; }; then
@@ -328,8 +328,8 @@ if [[ "${1:-}" == compose ]]; then
   }
   grace=2m0s
   if grep -q FIXTURE_DRIFT "$first_compose_file" 2>/dev/null; then grace=3m0s; fi
-  jq -cn --arg grace "$grace" \
-    --arg secret_source "${FIXTURE_LIVE_ROOT:?}/.secrets/teagramd-turnstile" '{services:{teagramd:{
+  secret_source="$project_dir/.secrets/teagramd-turnstile"
+  jq -cn --arg grace "$grace" --arg secret_source "$secret_source" '{services:{teagramd:{
     stop_grace_period:$grace,
     ports:[],volumes:[],network_mode:"",networks:{},
     logging:{driver:"syslog",options:{
