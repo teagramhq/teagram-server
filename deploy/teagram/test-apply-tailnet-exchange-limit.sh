@@ -100,7 +100,7 @@ setup_fixture() {
 }
 
 run_operation() {
-  env OPS_SHA="$OPS_SHA" MOCK_RUNNER_CALL="$TMP/runner-called" bash "$OP" "$@"
+  env OPS_SHA="$OPS_SHA" MOCK_RUNNER_CALL="$TMP/runner-called" bash "$OP"
 }
 
 setup_fixture
