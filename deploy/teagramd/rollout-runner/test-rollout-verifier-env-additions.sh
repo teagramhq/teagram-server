@@ -19,6 +19,9 @@ ROTATION_MEDIA_SOURCE="$TMP/rotation-media-keys"
 mkdir -m 700 "$ROTATION_MEDIA_SOURCE"
 printf '%064d\n' 0 > "$ROTATION_MEDIA_SOURCE/1.key"
 chmod 600 "$ROTATION_MEDIA_SOURCE/1.key"
+if [ "$(id -u)" = 0 ]; then
+  chown 65532:65532 "$ROTATION_MEDIA_SOURCE" "$ROTATION_MEDIA_SOURCE/1.key"
+fi
 
 REAL_JQ=$(command -v jq)
 JQ_SECRET_ARG_MARKER="$TMP/jq-secret-arg"
