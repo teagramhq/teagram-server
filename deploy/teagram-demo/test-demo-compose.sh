@@ -304,6 +304,9 @@ jq -e \
   MOCK_EDGE_PRECHECKED=0
   MOCK_EDGE_CONFIG_TESTED=0
   MOCK_EDGE_RELOADED=0
+  chmod 0700 "$DEMO_SCRIPT_DIR/nginx-config"
+  chmod 0600 "$DEMO_SCRIPT_DIR/nginx-config/nginx.conf"
+  trap 'chmod 0755 -- "$DEMO_SCRIPT_DIR/nginx-config"; chmod 0644 -- "$DEMO_SCRIPT_DIR/nginx-config/nginx.conf"' EXIT
 
   demo_compose() {
     if [[ "$*" == 'ps -q edge' ]]; then
@@ -316,6 +319,11 @@ jq -e \
       MOCK_MOUNT_LAYOUT=directory
       ((MOCK_EDGE_RECREATE_COUNT += 1))
     elif [[ "$*" == 'run --rm -T --no-deps --entrypoint nginx edge -c /etc/nginx/demo/nginx.conf -t' ]]; then
+      [[ "$(stat -c '%a' "$DEMO_SCRIPT_DIR/nginx-config")" == 755 &&
+        "$(stat -c '%a' "$DEMO_SCRIPT_DIR/nginx-config/nginx.conf")" == 644 ]] || {
+        printf 'edge config is not readable by the unprivileged nginx user during preflight\n' >&2
+        return 1
+      }
       MOCK_EDGE_PRECHECKED=1
     else
       printf 'unexpected demo_compose invocation: %s\n' "$*" >&2
