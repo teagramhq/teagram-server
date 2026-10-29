@@ -19,13 +19,17 @@ recovery_query() {
 }
 
 expected_gate_if="github.event_name == 'push' && github.ref == 'refs/heads/main'"
-gate_if="$(query '.jobs."prioritize-main".if')"
+[[ "$(query '.jobs."ops-prioritize-main".name')" == 'ops: prioritize-main' ]] ||
+  fail 'the priority job must use the ops stage naming contract'
+[[ "$(query '.jobs."ops-prioritize-main".permissions | keys | join(",")')" == 'actions' ]] ||
+  fail 'the priority job must have only Actions write permission'
+gate_if="$(query '.jobs."ops-prioritize-main".if')"
 [[ "$gate_if" == *"$expected_gate_if"* ]] ||
   fail 'the priority job must run only for main pushes'
-[[ "$(query '.jobs."prioritize-main".permissions.actions')" == 'write' ]] ||
+[[ "$(query '.jobs."ops-prioritize-main".permissions.actions')" == 'write' ]] ||
   fail 'only the priority job needs Actions write permission to cancel queued runs'
 
-cancel_step="$(query '.jobs."prioritize-main".steps[] | select(.name == "Cancel queued pull request CI runs") | .run')"
+cancel_step="$(query '.jobs."ops-prioritize-main".steps[] | select(.name == "Cancel queued pull request CI runs") | .run')"
 [[ "$cancel_step" == *'event=pull_request&status=queued&per_page=100'* ]] ||
   fail 'the priority job must list queued pull request CI runs only'
 [[ "$cancel_step" == *'.workflow_runs[]? | [.id, .created_at] | @tsv'* && "$cancel_step" == *'${run_id}:${run_created_at}'* ]] ||
@@ -47,19 +51,23 @@ cancel_step="$(query '.jobs."prioritize-main".steps[] | select(.name == "Cancel 
 [[ "$cancel_step" != *'grep -qx in_progress'* ]] ||
   fail 'the priority job must not query or cancel running PR workflows'
 printf '%s\n' "$cancel_step" | bash -n
-[[ "$(query '.jobs."prioritize-main".outputs.cancelled_pr_run_targets')" == *'steps.cancel-queued-pr-runs.outputs.cancelled_pr_run_targets'* ]] ||
+[[ "$(query '.jobs."ops-prioritize-main".outputs.cancelled_pr_run_targets')" == *'steps.cancel-queued-pr-runs.outputs.cancelled_pr_run_targets'* ]] ||
   fail 'the priority job must expose cancelled run ids for recovery'
 
-dispatch_needs="$(query '.jobs."dispatch-cancelled-pr-ci-recovery".needs[]')"
-[[ "$dispatch_needs" == *'prioritize-main'* && "$dispatch_needs" == *'lint'* ]] ||
+dispatch_needs="$(query '.jobs."ops-dispatch-pr-ci-recovery".needs[]')"
+[[ "$(query '.jobs."ops-dispatch-pr-ci-recovery".name')" == 'ops: dispatch-pr-ci-recovery' ]] ||
+  fail 'the recovery dispatch job must use the ops stage naming contract'
+[[ "$(query '.jobs."ops-dispatch-pr-ci-recovery".permissions | keys | join(",")')" == 'actions' ]] ||
+  fail 'the recovery dispatch job must have only Actions write permission'
+[[ "$dispatch_needs" == *'ops-prioritize-main'* && "$dispatch_needs" == *'lint'* ]] ||
   fail 'cancelled PR recovery must be dispatched after the main lint lane starts'
-[[ "$(query '.jobs."dispatch-cancelled-pr-ci-recovery".timeout-minutes')" == 5 ]] ||
+[[ "$(query '.jobs."ops-dispatch-pr-ci-recovery".timeout-minutes')" == 5 ]] ||
   fail 'dispatching PR recovery must remain short-lived in the main concurrency group'
-dispatch_if="$(query '.jobs."dispatch-cancelled-pr-ci-recovery".if')"
+dispatch_if="$(query '.jobs."ops-dispatch-pr-ci-recovery".if')"
 dispatch_targets_if="outputs.cancelled_pr_run_targets != ''"
-[[ "$dispatch_if" == *"needs.prioritize-main.result == 'success'"* && "$dispatch_if" == *"needs.prioritize-main.result == 'skipped'"* && "$dispatch_if" == *"github.event_name == 'pull_request'"* && "$dispatch_if" == *"github.event_name == 'push'"* && "$dispatch_if" == *'needs.lint.result != '\''skipped'\'''* && "$dispatch_if" == *"$dispatch_targets_if"* ]] ||
+[[ "$dispatch_if" == *"needs.ops-prioritize-main.result == 'success'"* && "$dispatch_if" == *"needs.ops-prioritize-main.result == 'skipped'"* && "$dispatch_if" == *"github.event_name == 'pull_request'"* && "$dispatch_if" == *"github.event_name == 'push'"* && "$dispatch_if" == *'needs.lint.result != '\''skipped'\'''* && "$dispatch_if" == *"$dispatch_targets_if"* ]] ||
   fail 'cancelled PR recovery must dispatch only after main fan-out starts'
-dispatch_step="$(query '.jobs."dispatch-cancelled-pr-ci-recovery".steps[] | select(.name == "Dispatch cancelled pull request CI recovery after main fan-out starts") | .run')"
+dispatch_step="$(query '.jobs."ops-dispatch-pr-ci-recovery".steps[] | select(.name == "Dispatch cancelled pull request CI recovery after main fan-out starts") | .run')"
 [[ "$dispatch_step" == *'gh workflow run recover-cancelled-pr-ci.yml'* && "$dispatch_step" == *'--ref main'* && "$dispatch_step" == *'-f issue=MAIN-2765'* && "$dispatch_step" == *'cancelled_pr_run_targets=$CANCELLED_PR_RUN_TARGETS'* && "$dispatch_step" != *'sleep 60'* ]] ||
   fail 'main CI must dispatch recovery with its issue and cancelled run ids without waiting'
 printf '%s\n' "$dispatch_step" | bash -n
@@ -68,13 +76,17 @@ printf '%s\n' "$dispatch_step" | bash -n
   fail 'the recovery workflow must require the issue key and cancelled run targets'
 [[ "$(recovery_query '.concurrency // ""')" == '' ]] ||
   fail 'the delayed recovery workflow must not join the main CI concurrency group'
-[[ "$(recovery_query '.jobs."rerun-cancelled-pr-ci".timeout-minutes')" == 210 ]] ||
+[[ "$(recovery_query '.jobs."ops-rerun-cancelled-pr-ci".name')" == 'ops: rerun-cancelled-pr-ci' ]] ||
+  fail 'the recovery job must use the ops stage naming contract'
+[[ "$(recovery_query '.jobs."ops-rerun-cancelled-pr-ci".permissions | keys | join(",")')" == 'actions,pull-requests' ]] ||
+  fail 'the recovery job must have only Actions write and pull request read permissions'
+[[ "$(recovery_query '.jobs."ops-rerun-cancelled-pr-ci".timeout-minutes')" == 210 ]] ||
   fail 'the recovery workflow timeout must cover its three-hour cancellation wait'
-[[ "$(recovery_query '.jobs."rerun-cancelled-pr-ci".permissions.actions')" == write ]] ||
+[[ "$(recovery_query '.jobs."ops-rerun-cancelled-pr-ci".permissions.actions')" == write ]] ||
   fail 'only the recovery job needs Actions write permission to rerun cancelled runs'
-[[ "$(recovery_query '.jobs."rerun-cancelled-pr-ci".permissions."pull-requests"')" == read ]] ||
+[[ "$(recovery_query '.jobs."ops-rerun-cancelled-pr-ci".permissions."pull-requests"')" == read ]] ||
   fail 'the recovery job needs read-only PR access to avoid rerunning stale heads'
-rerun_step="$(recovery_query '.jobs."rerun-cancelled-pr-ci".steps[] | select(.name == "Wait for cancellation cleanup and re-run PR CI") | .run')"
+rerun_step="$(recovery_query '.jobs."ops-rerun-cancelled-pr-ci".steps[] | select(.name == "Wait for cancellation cleanup and re-run PR CI") | .run')"
 [[ "$rerun_step" == *'actions/workflows/ci.yml/runs'* && "$rerun_step" == *'--paginate'* && "$rerun_step" == *'--method GET'* && "$rerun_step" == *'created=>=$oldest_created_at'* && "$rerun_step" != *'/actions/runs/${run_id}'* ]] ||
   fail 'recovery must poll all outstanding runs together through the workflow runs list'
 [[ "$rerun_step" == *'.head_sha'* && "$rerun_step" == *'.pull_requests // []'* && "$rerun_step" == *'.number'* ]] ||
@@ -196,14 +208,14 @@ GITHUB_REPOSITORY=example/repo \
   fail 'recovery must poll both IDs together and rerun each as soon as cancellation completes'
 
 expected_roots=$'browser-acceptance\nbrowser-acceptance-image\nci-main\ncompose\ncss\ndemo-web-artifact\ndeploy-workflow\ndocker\ne2e-admin\nlint\nmirror-rustfs-qualification-images\nphotothumb-runtime\nreal-server-fixtures\nrestore-readiness\nrustfs-transition-qualification\nschema-gate-postgres\nsmoke\nsql-lint\nsqlc\nsticker-bundle\nwebsocket-d1\nwebsocket-permanent-exchange'
-actual_roots="$(query '.jobs | to_entries[] | select(.key != "prioritize-main" and .key != "ci" and .key != "dispatch-cancelled-pr-ci-recovery" and (.value.needs == "prioritize-main" or (.value.needs[] == "prioritize-main"))) | .key' | LC_ALL=C sort)"
+actual_roots="$(query '.jobs | to_entries[] | select(.key != "ops-prioritize-main" and .key != "ci" and .key != "ops-dispatch-pr-ci-recovery" and (.value.needs == "ops-prioritize-main" or (.value.needs[] == "ops-prioritize-main"))) | .key' | LC_ALL=C sort)"
 [[ "$actual_roots" == "$expected_roots" ]] ||
   fail 'every CI fan-out root must depend on the main priority job'
 
 declare -A gated_cache
 is_gated() {
   local job="$1"
-  [[ "$job" == prioritize-main ]] && return 0
+  [[ "$job" == ops-prioritize-main ]] && return 0
   [[ "${gated_cache[$job]:-}" == yes ]] && return 0
   [[ "${gated_cache[$job]:-}" == no ]] && return 1
 
@@ -227,27 +239,27 @@ is_gated() {
 
 all_jobs="$(query '.jobs | keys | .[]')"
 while IFS= read -r job; do
-  [[ -n "$job" && "$job" != prioritize-main ]] || continue
+  [[ -n "$job" && "$job" != ops-prioritize-main ]] || continue
   is_gated "$job" || fail "$job can run without waiting for the main priority job"
 done <<< "$all_jobs"
 
-needs_jobs="$(query '.jobs | to_entries[] | select(.key != "prioritize-main" and .key != "publish-demo-image" and .value.needs != null) | .key')"
+needs_jobs="$(query '.jobs | to_entries[] | select(.key != "ops-prioritize-main" and .key != "publish-demo-image" and .value.needs != null) | .key')"
 while IFS= read -r job; do
   [[ -n "$job" ]] || continue
   job_needs="$(query ".jobs.\"$job\".needs")"
-  [[ "$job_needs" == *'prioritize-main'* ]] ||
+  [[ "$job_needs" == *'ops-prioritize-main'* ]] ||
     fail "$job must directly wait for the priority job"
   job_if="$(query ".jobs.\"$job\".if")"
-  [[ "$job_if" == *"needs.prioritize-main.result == 'skipped'"* && "$job_if" == *"github.event_name == 'pull_request'"* ]] ||
+  [[ "$job_if" == *"needs.ops-prioritize-main.result == 'skipped'"* && "$job_if" == *"github.event_name == 'pull_request'"* ]] ||
     fail "$job must bypass the skipped priority job on pull requests"
 done <<< "$needs_jobs"
 
 while IFS= read -r job; do
   [[ -n "$job" ]] || continue
   job_if="$(query ".jobs.\"$job\".if")"
-  [[ "$job_if" == *"needs.prioritize-main.result == 'success'"* ]] ||
+  [[ "$job_if" == *"needs.ops-prioritize-main.result == 'success'"* ]] ||
     fail "$job must run after a successful priority job on main"
-  [[ "$job_if" == *"needs.prioritize-main.result == 'skipped'"* && "$job_if" == *"github.event_name == 'pull_request'"* ]] ||
+  [[ "$job_if" == *"needs.ops-prioritize-main.result == 'skipped'"* && "$job_if" == *"github.event_name == 'pull_request'"* ]] ||
     fail "$job must bypass the skipped priority job on pull requests"
 done <<< "$actual_roots"
 
@@ -255,22 +267,22 @@ always_jobs="$(query '.jobs | to_entries[] | select(.key != "ci" and ((.value.if
 while IFS= read -r job; do
   [[ -n "$job" ]] || continue
   job_needs="$(query ".jobs.\"$job\".needs")"
-  [[ "$job_needs" == *'prioritize-main'* ]] ||
+  [[ "$job_needs" == *'ops-prioritize-main'* ]] ||
     fail "$job must wait for the priority job even when its condition uses always()"
   job_if="$(query ".jobs.\"$job\".if")"
-  [[ "$job_if" == *"needs.prioritize-main.result == 'success'"* ]] ||
+  [[ "$job_if" == *"needs.ops-prioritize-main.result == 'success'"* ]] ||
     fail "$job must stop if the main priority job fails"
-  [[ "$job_if" == *"needs.prioritize-main.result == 'skipped'"* && "$job_if" == *"github.event_name == 'pull_request'"* ]] ||
+  [[ "$job_if" == *"needs.ops-prioritize-main.result == 'skipped'"* && "$job_if" == *"github.event_name == 'pull_request'"* ]] ||
     fail "$job must allow pull request runs when the priority job is skipped"
 done <<< "$always_jobs"
 
 ci_needs="$(query '.jobs.ci.needs[]')"
-[[ "$ci_needs" == *'prioritize-main'* ]] ||
+[[ "$ci_needs" == *'ops-prioritize-main'* ]] ||
   fail 'the required ci summary must depend on the priority job'
 ci_if="$(query '.jobs.ci.if')"
-[[ "$ci_if" == *'always()'* && "$ci_if" == *"needs.prioritize-main.result == 'success'"* && "$ci_if" == *"needs.prioritize-main.result == 'failure'"* && "$ci_if" == *"needs.prioritize-main.result == 'cancelled'"* ]] ||
+[[ "$ci_if" == *'always()'* && "$ci_if" == *"needs.ops-prioritize-main.result == 'success'"* && "$ci_if" == *"needs.ops-prioritize-main.result == 'failure'"* && "$ci_if" == *"needs.ops-prioritize-main.result == 'cancelled'"* ]] ||
   fail 'the required ci summary must run to report priority-gate failures on main'
-[[ "$(query '.jobs.ci.steps[] | select(.name == "Require all CI lanes to pass") | .env.MAIN_PRIORITY_RESULT')" == "\${{ needs.prioritize-main.result }}" ]] ||
+[[ "$(query '.jobs.ci.steps[] | select(.name == "Require all CI lanes to pass") | .env.MAIN_PRIORITY_RESULT')" == "\${{ needs.ops-prioritize-main.result }}" ]] ||
   fail 'the required ci summary must inspect the priority result'
 [[ "$(query '.jobs.ci.steps[] | select(.name == "Require all CI lanes to pass") | .run')" == *'expected_priority_result=success'* ]] ||
   fail 'the required ci summary must fail when main priority does not succeed'

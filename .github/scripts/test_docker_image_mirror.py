@@ -126,10 +126,10 @@ class DockerImageMirrorTests(unittest.TestCase):
         job = photo_job.group(1)
         self.assertRegex(
             job,
-            r"(?m)^    needs:\n      - prioritize-main\n      - sticker-bundle$",
+            r"(?m)^    needs:\n      - ops-prioritize-main\n      - sticker-bundle$",
         )
-        self.assertIn("needs.prioritize-main.result == 'success'", job)
-        self.assertIn("needs.prioritize-main.result == 'skipped'", job)
+        self.assertIn("needs.ops-prioritize-main.result == 'success'", job)
+        self.assertIn("needs.ops-prioritize-main.result == 'skipped'", job)
         self.assertIn("github.event_name == 'pull_request'", job)
         self.assertIn("needs.sticker-bundle.result == 'success'", job)
         self.assertIn("actions: read", job)
@@ -200,10 +200,10 @@ class DockerImageMirrorTests(unittest.TestCase):
         )
         self.assertRegex(
             job,
-            r"(?m)^    needs:\n      - prioritize-main\n      - mirror-rustfs-qualification-images\n      - sticker-bundle$",
+            r"(?m)^    needs:\n      - ops-prioritize-main\n      - mirror-rustfs-qualification-images\n      - sticker-bundle$",
         )
-        self.assertIn("needs.prioritize-main.result == 'success'", job)
-        self.assertIn("needs.prioritize-main.result == 'skipped'", job)
+        self.assertIn("needs.ops-prioritize-main.result == 'success'", job)
+        self.assertIn("needs.ops-prioritize-main.result == 'skipped'", job)
         self.assertIn("github.event_name == 'pull_request'", job)
         self.assertIn("needs.sticker-bundle.result == 'success'", job)
         self.assertIn("packages: read", job)
@@ -317,11 +317,11 @@ class DockerImageMirrorTests(unittest.TestCase):
         self.assertIn("packages: write", mirror_job.group(1))
         self.assertIn("packages: read", qualification_job.group(1))
         self.assertIn(
-            "needs:\n      - prioritize-main\n      - mirror-rustfs-qualification-images",
+            "needs:\n      - ops-prioritize-main\n      - mirror-rustfs-qualification-images",
             qualification_job.group(1),
         )
-        self.assertIn("needs.prioritize-main.result == 'success'", qualification_job.group(1))
-        self.assertIn("needs.prioritize-main.result == 'skipped'", qualification_job.group(1))
+        self.assertIn("needs.ops-prioritize-main.result == 'success'", qualification_job.group(1))
+        self.assertIn("needs.ops-prioritize-main.result == 'skipped'", qualification_job.group(1))
         self.assertIn("github.event_name == 'pull_request'", qualification_job.group(1))
         self.assertIn("docker login ghcr.io", qualification_job.group(1))
 

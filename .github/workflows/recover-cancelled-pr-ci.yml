@@ -16,8 +16,8 @@ permissions:
   contents: read
 
 jobs:
-  rerun-cancelled-pr-ci:
-    name: Re-run cancelled pull request CI
+  ops-rerun-cancelled-pr-ci:
+    name: 'ops: rerun-cancelled-pr-ci'
     runs-on: ubuntu-26.04
     timeout-minutes: 210
     permissions:

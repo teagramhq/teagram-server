@@ -203,14 +203,14 @@ class RealServerFixtureGateTests(unittest.TestCase):
         self.assertIsNotNone(ci_job, "CI workflow has no required ci check")
         body = ci_job.group("body")
         self.assertRegex(body, r"(?m)^    name: ci$")
-        self.assertIn("needs.prioritize-main.result == 'success'", body)
-        self.assertIn("needs.prioritize-main.result == 'skipped'", body)
+        self.assertIn("needs.ops-prioritize-main.result == 'success'", body)
+        self.assertIn("needs.ops-prioritize-main.result == 'skipped'", body)
         self.assertIn("github.event_name == 'pull_request'", body)
         self.assertRegex(
             body,
-            r"(?ms)^    needs:\n      - prioritize-main\n      - ci-main\n      - sticker-bundle\n      - photothumb-runtime\n      - real-server-fixtures\n",
+            r"(?ms)^    needs:\n      - ops-prioritize-main\n      - ci-main\n      - sticker-bundle\n      - photothumb-runtime\n      - real-server-fixtures\n",
         )
-        self.assertIn("${{ needs.prioritize-main.result }}", body)
+        self.assertIn("${{ needs.ops-prioritize-main.result }}", body)
         self.assertIn("${{ needs.ci-main.result }}", body)
         self.assertIn("${{ needs.sticker-bundle.result }}", body)
         self.assertIn("${{ needs.photothumb-runtime.result }}", body)
