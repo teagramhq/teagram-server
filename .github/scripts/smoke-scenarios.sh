@@ -32,6 +32,7 @@ SMOKE_SCENARIOS=(
   unread-acknowledgements
   basic-group
   basic-group-reactions
+  bot-api-get-me
   channel-reactions
   available-reactions
   basic-group-photo
