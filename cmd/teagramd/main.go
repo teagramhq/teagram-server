@@ -860,7 +860,8 @@ func runAtBlobModePath(log *slog.Logger, blobModePath string) error {
 		return err
 	}
 
-	st, err := store.Open(ctx, cfg.PostgresDSN, cfg.AuthKeyEncKey, store.WithLogger(log), store.WithBlobStore(blobs),
+	st, err := store.Open(ctx, cfg.PostgresDSN, cfg.AuthKeyEncKey, store.WithLogger(log),
+		store.WithAuthKeyUnbindLogging(cfg.LogAuthKeyUnbinds), store.WithBlobStore(blobs),
 		store.WithPoolConfig(cfg.PostgresPool),
 		store.WithStatementTimeout(cfg.StatementTimeout),
 		store.WithSessionIP(cfg.SessionIP),

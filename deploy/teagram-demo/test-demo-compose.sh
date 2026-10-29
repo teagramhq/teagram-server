@@ -93,6 +93,8 @@ jq -e \
   and (.services.teagramd.mem_limit | tostring) == "469762048"
   and (.services["teagramd-next"].mem_limit | tostring) == "469762048"
   and .services.teagramd.environment.TG_LOG_LOGIN_CODES == "false"
+  and .services.teagramd.environment.TG_LOG_AUTH_KEY_UNBINDS == "true"
+  and .services["teagramd-next"].environment.TG_LOG_AUTH_KEY_UNBINDS == "true"
   and .services.teagramd.environment.TG_MAX_FILE_BYTES == "16777216"
   and .services.teagramd.environment.TG_MAX_USER_STORAGE_BYTES == "268435456"
   and .services.teagramd.environment.TG_UPLOAD_MAX_BYTES == "512000"

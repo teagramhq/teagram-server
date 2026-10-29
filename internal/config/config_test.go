@@ -1153,6 +1153,42 @@ func TestLoadLogLoginCodes(t *testing.T) {
 	}
 }
 
+func TestLoadLogAuthKeyUnbinds(t *testing.T) {
+	t.Setenv("TG_POSTGRES_DSN", "postgres://localhost/tg")
+	t.Setenv("TG_AUTHKEY_ENC_KEY", validEncKey)
+	tests := map[string]struct {
+		raw     string
+		want    bool
+		wantErr bool
+	}{
+		"unset":       {raw: "", want: false},
+		"true":        {raw: "true", want: true},
+		"false":       {raw: "false", want: false},
+		"not boolean": {raw: "maybe", wantErr: true},
+	}
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Setenv("TG_LOG_AUTH_KEY_UNBINDS", tc.raw)
+			cfg, err := config.Load(discardLog())
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("expected error for %s, got LogAuthKeyUnbinds = %v", name, cfg.LogAuthKeyUnbinds)
+				}
+				if !strings.Contains(err.Error(), "TG_LOG_AUTH_KEY_UNBINDS") {
+					t.Errorf("error %q does not name the variable", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("Load: %v", err)
+			}
+			if cfg.LogAuthKeyUnbinds != tc.want {
+				t.Errorf("LogAuthKeyUnbinds = %v, want %v", cfg.LogAuthKeyUnbinds, tc.want)
+			}
+		})
+	}
+}
+
 func TestLoadAdvertiseAddr(t *testing.T) {
 	t.Setenv("TG_POSTGRES_DSN", "postgres://localhost/tg")
 	t.Setenv("TG_AUTHKEY_ENC_KEY", validEncKey)
