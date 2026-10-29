@@ -190,3 +190,59 @@ func TestBootstrapIdentityRefusesToOverwriteExistingKey(t *testing.T) {
 		t.Fatal("refused bootstrap changed the existing key")
 	}
 }
+
+func TestEnsureIdentityCommandBootstrapsMissingKey(t *testing.T) {
+	keyPath := filepath.Join(t.TempDir(), "server-key.pem")
+	t.Setenv("TG_RSA_KEY_PATH", keyPath)
+	if err := runCommand([]string{"ensure-identity"}, slog.New(slog.DiscardHandler), io.Discard, io.Discard); err != nil {
+		t.Fatalf("ensure missing identity: %v", err)
+	}
+	key, err := rsakey.Load(keyPath)
+	if err != nil {
+		t.Fatalf("load ensured identity: %v", err)
+	}
+	if rsakey.Fingerprint(&key.PublicKey) == 0 {
+		t.Fatal("ensured identity has zero fingerprint")
+	}
+}
+
+func TestEnsureIdentityCommandPreservesExistingKey(t *testing.T) {
+	keyPath := filepath.Join(t.TempDir(), "server-key.pem")
+	t.Setenv("TG_RSA_KEY_PATH", keyPath)
+	if _, err := rsakey.Bootstrap(keyPath); err != nil {
+		t.Fatalf("bootstrap identity fixture: %v", err)
+	}
+	before, err := os.ReadFile(keyPath)
+	if err != nil {
+		t.Fatalf("read identity fixture: %v", err)
+	}
+	if err := runCommand([]string{"ensure-identity"}, slog.New(slog.DiscardHandler), io.Discard, io.Discard); err != nil {
+		t.Fatalf("ensure existing identity: %v", err)
+	}
+	after, err := os.ReadFile(keyPath)
+	if err != nil {
+		t.Fatalf("read identity after ensure: %v", err)
+	}
+	if string(after) != string(before) {
+		t.Fatal("ensure-identity changed the existing key")
+	}
+}
+
+func TestEnsureIdentityCommandRefusesInvalidExistingKey(t *testing.T) {
+	keyPath := filepath.Join(t.TempDir(), "server-key.pem")
+	invalid := []byte("not an RSA key")
+	if err := os.WriteFile(keyPath, invalid, 0o600); err != nil {
+		t.Fatalf("write invalid identity fixture: %v", err)
+	}
+	t.Setenv("TG_RSA_KEY_PATH", keyPath)
+	if err := runCommand([]string{"ensure-identity"}, slog.New(slog.DiscardHandler), io.Discard, io.Discard); err == nil {
+		t.Fatal("ensure-identity succeeded with an invalid existing key")
+	}
+	after, err := os.ReadFile(keyPath)
+	if err != nil {
+		t.Fatalf("read invalid identity after ensure: %v", err)
+	}
+	if string(after) != string(invalid) {
+		t.Fatal("ensure-identity changed the invalid existing key")
+	}
+}
