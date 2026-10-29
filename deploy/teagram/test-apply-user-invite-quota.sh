@@ -130,7 +130,10 @@ output=$(run_operation 1)
 [[ "$output" == *'rollback_env=restored'* ]]
 [[ "$(sha256sum "$FIXTURE_REPO/.env" | awk '{print $1}')" == "$original_env_sha" ]]
 [[ "$(cat "$FIXTURE_REPO/.state/rollout-env")" == "$original_record" ]]
-! grep -q '^TG_USER_INVITE_QUOTA=' "$FIXTURE_CONTAINER_ENV"
+if grep -q '^TG_USER_INVITE_QUOTA=' "$FIXTURE_CONTAINER_ENV"; then
+  echo 'runner failure left the invite quota enabled' >&2
+  exit 1
+fi
 printf '%s\n' 'PASS runner failure restores the prior environment and verified record'
 
 setup_case preexisting
