@@ -1375,11 +1375,11 @@ func (s *Store) ChannelHistory(ctx context.Context, channelID int64, offsetID in
 }
 
 // ChannelHistoryWithOffset returns one Telegram-style history page and the
-// number of active entries above the caller's history floor. Offset position is
-// computed within that visible history; maxID and minID filter the slice.
+// number of active entries above the caller's history floor. Offset ID/date is
+// resolved within that visible history; maxID and minID filter the slice.
 func (s *Store) ChannelHistoryWithOffset(
 	ctx context.Context,
-	channelID, ownerID, offsetID, addOffset, maxID, minID int64,
+	channelID, ownerID, offsetID, offsetDate, addOffset, maxID, minID int64,
 	limit int,
 ) ([]ChannelMessage, int, error) {
 	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{
@@ -1400,7 +1400,25 @@ func (s *Store) ChannelHistoryWithOffset(
 		return nil, 0, fmt.Errorf("count channel history: %w", err)
 	}
 	var msgs []ChannelMessage
-	if offsetID > 0 && addOffset < 0 {
+	switch {
+	case offsetID == 0 && offsetDate != 0:
+		rows, e := qtx.ChannelHistoryPageByDate(ctx, db.ChannelHistoryPageByDateParams{
+			ChannelID:  channelID,
+			OwnerID:    ownerID,
+			OffsetDate: offsetDate,
+			AddOffset:  addOffset,
+			MaxID:      maxID,
+			MinID:      minID,
+			Lim:        int32(limit), //nolint:gosec // limit is validated and capped by the API
+		})
+		if e != nil {
+			return nil, 0, fmt.Errorf("channel history page: %w", e)
+		}
+		msgs = make([]ChannelMessage, len(rows))
+		for i, row := range rows {
+			msgs[i] = channelMessageFromFields(channelMsgFields(row))
+		}
+	case offsetID > 0 && addOffset < 0:
 		rows, e := qtx.ChannelHistoryPageAround(ctx, db.ChannelHistoryPageAroundParams{
 			ChannelID: channelID,
 			OwnerID:   ownerID,
@@ -1417,7 +1435,7 @@ func (s *Store) ChannelHistoryWithOffset(
 		for i, row := range rows {
 			msgs[i] = channelMessageFromFields(channelMsgFields(row))
 		}
-	} else {
+	default:
 		rows, e := qtx.ChannelHistoryPageWithOffset(ctx, db.ChannelHistoryPageWithOffsetParams{
 			ChannelID: channelID,
 			OwnerID:   ownerID,

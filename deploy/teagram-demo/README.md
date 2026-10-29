@@ -46,9 +46,12 @@ policy. Required layout and policy:
   requests to `/turnstile/v0/siteverify`. The proxy has no host-published port.
 - Run the demo's Cloudflare Tunnel connector in the demo LXC and route only
   `demo.teagram.io` to `http://127.0.0.1:8080`. The edge container publishes
-  that origin on loopback only. The root returns a plain status message with
-  HTTP 200. The edge serves the client discovery document and `/apiws`, returns
-  404 for `/admin` and all other paths. For
+  that origin on loopback only. The root serves the pinned Teagram Web private
+  artifact after its first eligible master publication; before then it returns
+  the plain status page with HTTP 200. `/teagram-config.json` provides the fixed
+  demo server and auto-guest settings. The edge also serves the client
+  discovery document and `/apiws`, returns 404 for `/admin`, and applies SPA
+  fallback only to client routes. For
   `/apiws`, Nginx forwards Cloudflare's `CF-Connecting-IP` to the private
   HAProxy service. HAProxy validates that there is exactly one IP address,
   sends it to teagramd in a PROXY-v2 header, and teagramd trusts only HAProxy's
@@ -59,12 +62,16 @@ policy. Required layout and policy:
   The demo does not serve the dev hostname or admin dashboard.
 
 The public origin and discovery document advertise
-`demo.teagram.io:443`; browser clients use the separate WSS endpoint. CORS is
-limited to `https://web.teagram.io`. Registration is open, the existing signup
+`demo.teagram.io:443`; browser clients use the separate WSS endpoint. Discovery
+CORS remains limited to `https://web.teagram.io`; WebSocket origin checks allow
+both `https://web.teagram.io` and `https://demo.teagram.io`. The app CSP keeps
+the current web directives and restricts `connect-src` to the demo WSS origin
+and Cloudflare Turnstile. Registration is open, the existing signup
 limit remains five attempts per IP per hour, login-code logging is disabled,
-and uploads are capped at 16 MiB per file and 256 MiB per account. Sticker and
-custom emoji pack imports are disabled (`TG_STICKER_IMPORT=off`); catalogue
-packs remain available to install and send.
+uploads are capped at 500 KB per file, and per-account storage remains capped
+at 256 MiB.
+Sticker and custom emoji pack imports are disabled (`TG_STICKER_IMPORT=off`);
+catalogue packs remain available to install and send.
 
 `prepare-env.sh` keeps the Turnstile site key in `.env` and writes the secret
 key to `/var/lib/teagram-demo/secrets/turnstile-secret-key` with root ownership
@@ -175,13 +182,28 @@ The key's `authorized_keys` entry must have no shell, forwarding or PTY access:
 command="/opt/teagram-demo/deploy/teagram-demo/forced-command.sh",restrict ssh-ed25519 <public-key> teagram-demo-deploy
 ```
 
-`forced-command.sh` accepts one full commit SHA and its trusted CI image digest,
-fetches `origin/main`, rejects non-main revisions and skips stale deploys. The
-`Deploy.` workflow downloads the digest artifact from the successful push-on-main
-CI run for that exact SHA and sends both values. A PR workflow cannot influence
-the digest by overwriting the package's SHA tag. `deploy-main.sh` pulls only the
-supplied digest and checks both its repository digest and revision label before
-touching the database. It revalidates the blob authority and
+`forced-command.sh` accepts the full commit SHA and trusted server image digest,
+then separately accepts a bounded web archive tied to the current demo
+checkout. It fetches `origin/main`, rejects non-main revisions and skips stale
+server deploys. The `Deploy.` workflow downloads the server digest from the
+successful server CI run. `web-artifact-pin.json` first records teagram-web
+PR #121's head, successful validation run, and the artifact digest reported by
+that run's log; this candidate pin is never deployed. After #121 merges, the
+pin changes to the green `master` publication. The
+read-only deploy preflight then requires the pin to match the public web
+manifest and a successful, checksum-named publication artifact. The
+secret-free `demo-web-artifact` CI job rebuilds and verifies the exact pinned
+source, then uploads its archive and SHA-256 sidecar with that successful
+server CI run. The credentialed deploy job downloads the archive from that
+exact run and verifies its checksum; it does not check out teagram-web or run
+its dependency code. The forced command requires the release identity to match
+the checked-in published pin, and the LXC recomputes the published artifact's
+content digest before activation. The LXC never installs Node or builds the
+web app. The web source commit and artifact digest are stored in
+`.state/teagram-demo/active-release.json`. A PR workflow cannot influence the
+server image digest by overwriting the package's SHA tag. `deploy-main.sh` pulls
+only the supplied server digest and checks both its repository digest and
+revision label before touching the database. It revalidates the blob authority and
 running containers, then takes and validates a root-only PostgreSQL dump while
 the existing server and public edge keep running. It applies migrations while
 the old server remains live, starts the candidate in the inactive slot,
@@ -192,11 +214,22 @@ restart recreates the same release. WebSocket sessions already connected to
 the old process drain during its configured 120-second graceful stop.
 
 Before rendering the mounted HAProxy config, a deploy compares the running
-HAProxy and edge Compose hashes and their recorded config source hashes with
-the target. A proxy image, `haproxy.cfg`, HAProxy renderer or `nginx.conf`
-change makes the deploy stop before it rewrites the live HAProxy config. Apply
-proxy changes through the maintenance path, which recreates both proxies,
-before resuming routine server deploys.
+HAProxy and edge Compose hashes with the target. A proxy image, `haproxy.cfg`
+or HAProxy renderer change still stops the deploy for the maintenance path.
+Nginx config is mounted as a directory so a checkout can replace
+`nginx-config/nginx.conf` without leaving the edge container pinned to the old
+file inode. A config-only change is syntax-checked and applied with Nginx's
+graceful reload; the edge container is not recreated, and old workers drain
+existing requests and WebSockets. `nginx.conf` remains an identical compatibility
+copy for already-installed demo ops wrappers that fingerprint that path.
+
+The first deploy that changes the existing single-file mount to this directory
+layout recreates the only edge container once. That migration briefly interrupts
+requests and drops active WebSockets at the public demo origin. This one-time
+interruption is accepted for the weekly-wiped demo. Afterward, normal Nginx
+config updates reload gracefully without recreating edge. If the server rollout
+fails, the previous Nginx config is restored inside the mounted directory and
+gracefully reloaded.
 
 On a pre-cutover failure, the old server and edge stay available, the candidate
 stops, and the previous release reference remains active. If traffic has reached
@@ -254,6 +287,34 @@ all expected handles through the API, the wipe recreates teagramd with the
 production proxy and Turnstile settings, requires a bare sign-up probe to
 return `RECAPTCHA_CHECK`, and only then starts HAProxy and the public edge.
 
+## Public guest account threat model
+
+`autoGuest=true` removes signup friction on the public demo, so an anonymous
+internet user can create a guest identity and use the public messaging and file
+APIs. The primary abuse risks are automated account creation, spam, attempts to
+consume shared CPU, connection and storage capacity, and content that users
+should not treat as private. Demo accounts and their data are visible to the
+server operator, are not suitable for sensitive information, and are removed
+with the database and blob files during the weekly wipe.
+
+Signup requires a valid Cloudflare Turnstile `signup` challenge before the
+server charges its per-client-network limit of 5 signup attempts per hour.
+Authentication code requests are limited to 10 calls per network per hour and
+20 target phone numbers per network per 24 hours. Unauthenticated connections
+are capped at 64 per client network and 1,024 per server process, with a
+120-second lifetime. Per-account limits are 60 message sends per minute,
+20 MiB uploaded per hour, and 256 MiB stored. Each file is capped at 512,000
+bytes (`TG_UPLOAD_MAX_BYTES` overrides the 16 MiB base setting). Sticker
+imports are disabled, and the HTTP admin paths return 404.
+
+These are application-level abuse limits, not a global DDoS boundary. An
+attacker with many source networks can distribute signup and connection load;
+users behind the same carrier NAT or corporate egress can also share and exhaust
+a per-network bucket. Resource limits bound the local blast radius but cannot
+guarantee availability under a distributed flood. Turnstile and rate limits do
+not make guest content private or retained: users should expect account, message
+and file data to be inspectable by the operator and erased by the weekly reset.
+
 ## Stack data-retention threat model
 
 MAIN-2203 covers sign-up, auto-join, seeding and scheduled activity; this
@@ -289,6 +350,27 @@ and encryption; they are not user content and must not be removed or exposed.
 Docker logs are size-bounded but are not cleared by the wipe, so application
 and deploy logs must not contain message bodies, authentication tokens or
 passwords.
+
+### Auth-key unbind diagnostic logs
+
+The demo enables `TG_LOG_AUTH_KEY_UNBINDS` on both server slots. Each event
+contains the operation, reason, outcome, numeric auth-key ID and, when known,
+numeric user ID. These identifiers can correlate authorization events and link
+them to a demo account, so treat the entries as sensitive account data even
+though they contain no auth-key bytes, tokens, passwords, phone numbers, IP
+addresses or message content. The IDs are correlators, not login credentials.
+
+LXC root and Docker daemon administrators can read the raw container logs. The
+separate `multica-daemon@delta` root key is restricted to the operations menu;
+its `logs` command can return at most 200 lines per running `teagramd` or
+`teagramd-next` container since a requested UTC timestamp. The CI deploy key is
+restricted to the deploy command and cannot invoke that log reader. Limit
+host/Docker administration and the operations key to trusted demo operators.
+Compose uses Docker's `json-file` driver with `max-size=10m` and `max-file=3`
+per container. This is a size limit, not an age limit: quiet logs can outlive
+the weekly database wipe, which does not clear Docker logs. The stack
+configures no external log forwarder; any exported or forwarded copy needs the
+same access controls and an explicit retention limit.
 
 The seed script interface is:
 

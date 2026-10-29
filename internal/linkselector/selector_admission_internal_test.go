@@ -658,6 +658,8 @@ func TestWebOversizeResponsesKeepAdmissionClassification(t *testing.T) {
 }
 
 func TestWebWaitersDoNotBlockLandingRoutesWithRealTransport(t *testing.T) {
+	t.Setenv("TG_INVITE_WEB_SIGNUP_URL", "https://web.example.test/signup")
+	t.Setenv("TG_INVITE_DESKTOP_URL", "")
 	logger, logs, validator := newDiagnosticLogger()
 	webRequests := make(chan string, 9)
 	web := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -855,6 +857,8 @@ func newAdmissionTestSelector(t *testing.T, logger *slog.Logger) *selector {
 
 func newAdmissionTestSelectorWithOrigins(t *testing.T, webOrigin, landingOrigin string, logger *slog.Logger) *selector {
 	t.Helper()
+	t.Setenv("TG_INVITE_WEB_SIGNUP_URL", "https://web.example.test/signup")
+	t.Setenv("TG_INVITE_DESKTOP_URL", "")
 	handler, err := NewHandler(webOrigin, landingOrigin, logger)
 	if err != nil {
 		t.Fatalf("NewHandler: %v", err)

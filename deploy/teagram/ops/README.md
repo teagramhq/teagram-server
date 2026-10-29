@@ -92,3 +92,12 @@ misconfiguration.
 An eligible account can still invite up to five new accounts each week. The
 quota limits the rate of expansion; it does not replace signup abuse
 monitoring, account enforcement, or revocation of exposed links.
+
+`invite-web-signup-url.sh` adds only the public Web signup target to `.env` and
+updates `.state/rollout-env` to keep the next verified rollout's environment
+baseline consistent. Run `ssh teagram run <main-sha> invite-web-signup-url
+--check` before the no-argument apply. It refuses a mismatched rollout record,
+an existing different or duplicate target, or any `TG_INVITE_DESKTOP_URL`
+assignment. The target is the live Web app root at
+`https://web.teagram.io/`; the `/signup` path is not the app route. To undo the
+addition, run `ssh teagram run <main-sha> invite-web-signup-url --rollback`.
