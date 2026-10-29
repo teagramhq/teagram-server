@@ -711,13 +711,16 @@ func (h *handlers) handleInviteToChannel(r *mtproto.Request) (bin.Encoder, error
 		if err != nil {
 			return nil, err
 		}
-		_, found, err := h.store.UserByID(r.Ctx, targetID)
+		target, found, err := h.store.UserByID(r.Ctx, targetID)
 		if err != nil {
 			h.log.Error("invite channel target", "user_id", r.UserID, "err", err)
 			return nil, errInternal
 		}
 		if !found {
 			return nil, errPeerIDInvalid
+		}
+		if target.Kind == store.UserKindBot {
+			return nil, errBotGroupsBlocked
 		}
 		targetIDs[i] = targetID
 	}

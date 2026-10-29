@@ -27,6 +27,8 @@ const (
 	// usable. There is deliberately no unbounded-lifetime option.
 	MaxInviteLifetime = 30 * 24 * time.Hour
 	inviteSecretBytes = 32
+	// UserInviteListLimit bounds the number of invite records returned to one user.
+	UserInviteListLimit = 100
 )
 
 // InviteState is the operator-visible lifecycle state of a registration
@@ -93,6 +95,27 @@ var ErrInviteInviterInvalid = errors.New("registration invite inviter invalid")
 // ErrInviteTransactionRequired is returned when a caller tries to consume an
 // invite without supplying the transaction that must own the state change.
 var ErrInviteTransactionRequired = errors.New("registration invite transaction required")
+
+// ErrUserInviteQuotaReached means the inviter has issued the configured number
+// of invites during the trailing seven days, regardless of their state.
+var ErrUserInviteQuotaReached = errors.New("user invite weekly limit reached")
+
+// ErrUserInvitesDisabled means user-issued invites are disabled by quota.
+var ErrUserInvitesDisabled = errors.New("user invites disabled")
+
+// ErrUserInviteMinimumAgeInvalid means the configured account-age gate is
+// negative.
+var ErrUserInviteMinimumAgeInvalid = errors.New("user invite minimum account age invalid")
+
+// UserInviteAccountTooNewError carries the remaining account-age wait. Seconds
+// are rounded up so a caller never retries before the minimum age is reached.
+type UserInviteAccountTooNewError struct {
+	RemainingWaitSeconds int64
+}
+
+func (e *UserInviteAccountTooNewError) Error() string {
+	return fmt.Sprintf("user invite account too new; wait %d seconds", e.RemainingWaitSeconds)
+}
 
 // IssueInvite creates one invite for handle and returns its metadata plus the
 // cleartext secret. The secret is generated once with crypto/rand and only its
@@ -182,6 +205,141 @@ func (s *Store) IssueUserInvite(ctx context.Context, inviterUserID int64, lifeti
 		return RegistrationInvite{}, "", fmt.Errorf("issue user invite: commit: %w", err)
 	}
 	return registrationInviteFromUserInsert(row), secret, nil
+}
+
+// CreateUserInvite enforces account age and the trailing-seven-day issuance
+// quota in one transaction. lockOwners is the existing per-owner advisory lock
+// used by account-scoped mutations; this path takes it before the count and
+// invite insert, then holds it through commit.
+func (s *Store) CreateUserInvite(ctx context.Context, inviterUserID int64, quota int, minimumAccountAge time.Duration) (RegistrationInvite, string, error) {
+	if inviterUserID <= 0 {
+		return RegistrationInvite{}, "", ErrInviteInviterInvalid
+	}
+	if quota <= 0 {
+		return RegistrationInvite{}, "", ErrUserInvitesDisabled
+	}
+	if minimumAccountAge < 0 {
+		return RegistrationInvite{}, "", ErrUserInviteMinimumAgeInvalid
+	}
+
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return RegistrationInvite{}, "", fmt.Errorf("create user invite: begin: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }() //nolint:errcheck // no-op after commit
+	if err := lockOwners(ctx, tx, inviterUserID); err != nil {
+		return RegistrationInvite{}, "", fmt.Errorf("create user invite: lock inviter: %w", err)
+	}
+	qtx := s.q.WithTx(tx)
+	accountAge, err := qtx.UserInviteAccountAge(ctx, inviterUserID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return RegistrationInvite{}, "", ErrInviteInviterInvalid
+	}
+	if err != nil {
+		return RegistrationInvite{}, "", fmt.Errorf("create user invite: account age: %w", err)
+	}
+	if minimumAccountAge > 0 {
+		eligibleAt := accountAge.CreatedAt.Time.Add(minimumAccountAge)
+		remaining := eligibleAt.Sub(accountAge.Now.Time)
+		if remaining > 0 {
+			seconds := int64(remaining / time.Second)
+			if remaining%time.Second != 0 {
+				seconds++
+			}
+			return RegistrationInvite{}, "", &UserInviteAccountTooNewError{RemainingWaitSeconds: seconds}
+		}
+	}
+
+	usage, err := qtx.UserInviteUsage(ctx, inviterUserID)
+	if err != nil {
+		return RegistrationInvite{}, "", fmt.Errorf("create user invite: quota: %w", err)
+	}
+	if usage.WeeklyCount >= int64(quota) {
+		return RegistrationInvite{}, "", ErrUserInviteQuotaReached
+	}
+
+	secret, digest, err := newRegistrationInviteSecret()
+	if err != nil {
+		return RegistrationInvite{}, "", fmt.Errorf("create user invite: random secret: %w", err)
+	}
+	row, err := qtx.InsertUserRegistrationInvite(ctx, db.InsertUserRegistrationInviteParams{
+		InviterUserID: &inviterUserID,
+		SecretDigest:  digest,
+		LifetimeUs:    DefaultInviteLifetime.Microseconds(),
+	})
+	if err != nil {
+		return RegistrationInvite{}, "", fmt.Errorf("create user invite: insert: %w", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return RegistrationInvite{}, "", fmt.Errorf("create user invite: commit: %w", err)
+	}
+	return registrationInviteFromUserInsert(row), secret, nil
+}
+
+// RevokeUserInvite revokes a live invite only when inviterUserID owns it. The
+// filtered update gives unknown, foreign, expired, consumed, and revoked ids
+// the same successful no-op result. Its row lock races directly with redemption.
+func (s *Store) RevokeUserInvite(ctx context.Context, inviterUserID, id int64) error {
+	if inviterUserID <= 0 || id <= 0 {
+		return nil
+	}
+	if _, err := s.q.RevokeUserRegistrationInvite(ctx, db.RevokeUserRegistrationInviteParams{
+		ID:            id,
+		InviterUserID: inviterUserID,
+	}); err != nil {
+		return fmt.Errorf("revoke user invite: %w", err)
+	}
+	return nil
+}
+
+// ListUserInvites returns only the caller's metadata, newest first. The count
+// and next-available time use one PostgreSQL clock value in a repeatable-read
+// snapshot, while the fixed list bound caps the response size.
+func (s *Store) ListUserInvites(ctx context.Context, inviterUserID int64) ([]RegistrationInvite, int64, *time.Time, error) {
+	if inviterUserID <= 0 {
+		return nil, 0, nil, ErrInviteInviterInvalid
+	}
+	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadOnly})
+	if err != nil {
+		return nil, 0, nil, fmt.Errorf("list user invites: begin: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }() //nolint:errcheck // no-op after commit
+	qtx := s.q.WithTx(tx)
+	usage, err := qtx.UserInviteUsage(ctx, inviterUserID)
+	if err != nil {
+		return nil, 0, nil, fmt.Errorf("list user invites: usage: %w", err)
+	}
+	rows, err := qtx.ListUserRegistrationInvitesAt(ctx, db.ListUserRegistrationInvitesAtParams{
+		Now:           usage.Now,
+		InviterUserID: inviterUserID,
+		RowLimit:      UserInviteListLimit,
+	})
+	if err != nil {
+		return nil, 0, nil, fmt.Errorf("list user invites: rows: %w", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, 0, nil, fmt.Errorf("list user invites: commit: %w", err)
+	}
+
+	var nextAvailableAt *time.Time
+	if usage.OldestIssuedAt.Valid {
+		next := usage.OldestIssuedAt.Time.Add(7 * 24 * time.Hour)
+		nextAvailableAt = &next
+	}
+	out := make([]RegistrationInvite, len(rows))
+	for i, row := range rows {
+		out[i] = RegistrationInvite{
+			ID:            row.ID,
+			Handle:        nullableString(row.Handle),
+			InviterUserID: row.InviterUserID,
+			IssuedAt:      row.IssuedAt.Time,
+			ExpiresAt:     row.ExpiresAt.Time,
+			State:         InviteState(row.State),
+			ConsumedAt:    inviteTimestampPtr(row.ConsumedAt),
+			RevokedAt:     inviteTimestampPtr(row.RevokedAt),
+		}
+	}
+	return out, usage.WeeklyCount, nextAvailableAt, nil
 }
 
 func newRegistrationInviteSecret() (string, []byte, error) {

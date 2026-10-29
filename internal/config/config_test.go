@@ -1686,6 +1686,52 @@ func TestLoadUserInviteQuota(t *testing.T) {
 	}
 }
 
+func TestLoadRejectsInvalidUserInviteMinimumAccountAge(t *testing.T) {
+	t.Setenv("TG_POSTGRES_DSN", "postgres://localhost/tg")
+	t.Setenv("TG_AUTHKEY_ENC_KEY", validEncKey)
+	t.Setenv("TG_AUTHKEY_ENC_KEY_FILE", "")
+	t.Setenv("TG_USER_INVITE_MIN_ACCOUNT_AGE", "not-a-duration")
+
+	if _, err := config.Load(discardLog()); err == nil || !strings.Contains(err.Error(), "TG_USER_INVITE_MIN_ACCOUNT_AGE") {
+		t.Fatalf("Load with invalid minimum account age error = %v, want setting-specific error", err)
+	}
+}
+
+func TestLoadUserInviteMinimumAccountAge(t *testing.T) {
+	t.Setenv("TG_POSTGRES_DSN", "postgres://localhost/tg")
+	t.Setenv("TG_AUTHKEY_ENC_KEY", validEncKey)
+	t.Setenv("TG_AUTHKEY_ENC_KEY_FILE", "")
+
+	for _, tc := range []struct {
+		name  string
+		value string
+		want  time.Duration
+	}{
+		{name: "unset defaults to seven days", want: 7 * 24 * time.Hour},
+		{name: "empty defaults to seven days", value: "", want: 7 * 24 * time.Hour},
+		{name: "zero disables age delay", value: "0s", want: 0},
+		{name: "configured duration", value: "36h", want: 36 * time.Hour},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("TG_USER_INVITE_MIN_ACCOUNT_AGE", tc.value)
+			cfg, err := config.Load(discardLog())
+			if err != nil {
+				t.Fatalf("Load: %v", err)
+			}
+			if cfg.UserInviteMinAccountAge != tc.want {
+				t.Errorf("UserInviteMinAccountAge = %s, want %s", cfg.UserInviteMinAccountAge, tc.want)
+			}
+		})
+	}
+
+	for _, value := range []string{"invalid", "-1s"} {
+		t.Setenv("TG_USER_INVITE_MIN_ACCOUNT_AGE", value)
+		if _, err := config.Load(discardLog()); err == nil || !strings.Contains(err.Error(), "TG_USER_INVITE_MIN_ACCOUNT_AGE") {
+			t.Errorf("Load with TG_USER_INVITE_MIN_ACCOUNT_AGE=%q error = %v, want setting-specific error", value, err)
+		}
+	}
+}
+
 func TestLoadRejectsUnsupportedStickerImportMode(t *testing.T) {
 	t.Setenv("TG_POSTGRES_DSN", "postgres://localhost/tg")
 	t.Setenv("TG_AUTHKEY_ENC_KEY", validEncKey)

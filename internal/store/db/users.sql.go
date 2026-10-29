@@ -14,7 +14,7 @@ import (
 const createUsernameUser = `-- name: CreateUsernameUser :one
 INSERT INTO users (phone, login_mode, first_name, last_name)
 VALUES (NULL, 'username', $1, $2)
-RETURNING id, phone, first_name, last_name, created_at, is_online, last_seen_at
+RETURNING id, phone, first_name, last_name, created_at, is_online, last_seen_at, kind
 `
 
 type CreateUsernameUserParams struct {
@@ -30,6 +30,7 @@ type CreateUsernameUserRow struct {
 	CreatedAt  pgtype.Timestamptz
 	IsOnline   bool
 	LastSeenAt pgtype.Timestamptz
+	Kind       string
 }
 
 func (q *Queries) CreateUsernameUser(ctx context.Context, arg CreateUsernameUserParams) (CreateUsernameUserRow, error) {
@@ -43,6 +44,7 @@ func (q *Queries) CreateUsernameUser(ctx context.Context, arg CreateUsernameUser
 		&i.CreatedAt,
 		&i.IsOnline,
 		&i.LastSeenAt,
+		&i.Kind,
 	)
 	return i, err
 }
@@ -164,7 +166,7 @@ WITH matched AS MATERIALIZED (
       )
 )
 SELECT u.id, u.phone, u.first_name, u.last_name, u.created_at, u.is_online, u.last_seen_at,
-       un.handle AS username
+       un.handle AS username, u.kind
 FROM users u
 LEFT JOIN usernames un ON un.owner_type = 'user' AND un.owner_id = u.id
 WHERE u.id IN (SELECT id FROM matched)
@@ -187,6 +189,7 @@ type SearchContactsByNameRow struct {
 	IsOnline   bool
 	LastSeenAt pgtype.Timestamptz
 	Username   *string
+	Kind       string
 }
 
 // Search users by name within the caller's existing dialogs.
@@ -253,6 +256,7 @@ func (q *Queries) SearchContactsByName(ctx context.Context, arg SearchContactsBy
 			&i.IsOnline,
 			&i.LastSeenAt,
 			&i.Username,
+			&i.Kind,
 		); err != nil {
 			return nil, err
 		}
@@ -352,7 +356,7 @@ func (q *Queries) UserAboutByID(ctx context.Context, id int64) (string, error) {
 
 const userByID = `-- name: UserByID :one
 SELECT u.id, u.phone, u.first_name, u.last_name, u.created_at, u.is_online, u.last_seen_at,
-       un.handle AS username
+       un.handle AS username, u.kind
 FROM users u
 LEFT JOIN usernames un ON un.owner_type = 'user' AND un.owner_id = u.id
 WHERE u.id = $1
@@ -367,6 +371,7 @@ type UserByIDRow struct {
 	IsOnline   bool
 	LastSeenAt pgtype.Timestamptz
 	Username   *string
+	Kind       string
 }
 
 func (q *Queries) UserByID(ctx context.Context, id int64) (UserByIDRow, error) {
@@ -381,6 +386,7 @@ func (q *Queries) UserByID(ctx context.Context, id int64) (UserByIDRow, error) {
 		&i.IsOnline,
 		&i.LastSeenAt,
 		&i.Username,
+		&i.Kind,
 	)
 	return i, err
 }
@@ -388,7 +394,7 @@ func (q *Queries) UserByID(ctx context.Context, id int64) (UserByIDRow, error) {
 const userByPhone = `-- name: UserByPhone :one
 
 SELECT u.id, u.phone, u.first_name, u.last_name, u.created_at, u.is_online, u.last_seen_at,
-       un.handle AS username
+       un.handle AS username, u.kind
 FROM users u
 LEFT JOIN usernames un ON un.owner_type = 'user' AND un.owner_id = u.id
 WHERE u.phone = $1
@@ -403,6 +409,7 @@ type UserByPhoneRow struct {
 	IsOnline   bool
 	LastSeenAt pgtype.Timestamptz
 	Username   *string
+	Kind       string
 }
 
 // Every query that loads a user reads the handle from the usernames row, never
@@ -425,13 +432,14 @@ func (q *Queries) UserByPhone(ctx context.Context, phone *string) (UserByPhoneRo
 		&i.IsOnline,
 		&i.LastSeenAt,
 		&i.Username,
+		&i.Kind,
 	)
 	return i, err
 }
 
 const usersByID = `-- name: UsersByID :many
 SELECT u.id, u.phone, u.first_name, u.last_name, u.created_at, u.is_online, u.last_seen_at,
-       un.handle AS username
+       un.handle AS username, u.kind
 FROM users u
 LEFT JOIN usernames un ON un.owner_type = 'user' AND un.owner_id = u.id
 WHERE u.id = ANY($1::bigint[])
@@ -446,6 +454,7 @@ type UsersByIDRow struct {
 	IsOnline   bool
 	LastSeenAt pgtype.Timestamptz
 	Username   *string
+	Kind       string
 }
 
 func (q *Queries) UsersByID(ctx context.Context, ids []int64) ([]UsersByIDRow, error) {
@@ -466,6 +475,7 @@ func (q *Queries) UsersByID(ctx context.Context, ids []int64) ([]UsersByIDRow, e
 			&i.IsOnline,
 			&i.LastSeenAt,
 			&i.Username,
+			&i.Kind,
 		); err != nil {
 			return nil, err
 		}
