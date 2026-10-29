@@ -43,6 +43,29 @@ class MigrationLockLintTest(unittest.TestCase):
         sql = "ALTER TABLE users ALTER COLUMN phone TYPE VARCHAR(64);"
         self.assertIn("changing a column type", lint_migration(sql)[0])
 
+    def test_fails_closed_for_procedural_ddl_in_do_blocks(self) -> None:
+        sql = """DO $migration$
+BEGIN
+    EXECUTE 'CREATE INDEX users_phone_idx ON users (phone)';
+END;
+$migration$;
+"""
+        self.assertIn("DO blocks can hide procedural DDL", lint_migration(sql)[0])
+
+    def test_does_not_flag_dollar_quoted_function_body(self) -> None:
+        sql = """CREATE FUNCTION example() RETURNS trigger
+LANGUAGE plpgsql AS $function$
+BEGIN
+    RETURN NEW;
+END;
+$function$;
+"""
+        self.assertEqual([], lint_migration(sql))
+
+    def test_ignores_do_examples_in_comments_and_strings(self) -> None:
+        sql = "-- DO $migration$ BEGIN EXECUTE 'CREATE INDEX'; END $migration$;\nSELECT 'DO $migration$';"
+        self.assertEqual([], lint_migration(sql))
+
 
 if __name__ == "__main__":
     unittest.main()

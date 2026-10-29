@@ -70,6 +70,9 @@ def _created_tables(statements: list[str]) -> set[str]:
 
 def _statement_risks(statement: str, created_tables: set[str]) -> list[str]:
     risks: list[str] = []
+    if re.match(r"^\s*DO\b", statement, re.IGNORECASE):
+        risks.append("DO blocks can hide procedural DDL whose lock risk this lint cannot inspect")
+
     index = _CREATE_INDEX.search(statement)
     if index and not index.group("concurrently"):
         if _identifier(index.group("table")) not in created_tables:
