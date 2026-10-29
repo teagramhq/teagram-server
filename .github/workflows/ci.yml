@@ -3546,7 +3546,7 @@ jobs:
       contents: read
     env:
       MIGRATIONS_BASE_REF: ${{ github.event_name == 'pull_request' && format('origin/{0}', github.event.pull_request.base.ref) || github.event.before }}
-      POSTGRES_IMAGE: mirror.gcr.io/library/postgres:18-alpine
+      POSTGRES_IMAGE: mirror.gcr.io/library/postgres:18-alpine@sha256:d8703cd7fba306b9fec9268ecedfa8a966846c053036a60e3635791957eb2f66
       ATLAS_APPLY_IMAGE: mirror.gcr.io/arigaio/atlas:1.2.0-alpine
 
     steps:

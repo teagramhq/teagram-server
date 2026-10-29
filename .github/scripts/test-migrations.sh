@@ -31,7 +31,7 @@ docker run --detach \
   "$postgres_image" >/dev/null
 
 for attempt in $(seq 1 60); do
-  if docker exec "$postgres_container" pg_isready -U postgres -d postgres >/dev/null 2>&1; then
+  if docker exec "$postgres_container" pg_isready -h 127.0.0.1 -U postgres -d postgres >/dev/null 2>&1; then
     break
   fi
   if [ "$attempt" -eq 60 ]; then
@@ -76,6 +76,53 @@ if [ "${#changed_sql_migrations[@]}" -gt 0 ]; then
 else
   printf '%s\n' 'Atlas migration lint skipped: no changed SQL migrations.'
 fi
+
+run_atlas_lint_fixture() {
+  local fixture_name=$1
+  local expected_result=$2
+  local database=$3
+  local fixture_source="$repo_root/.github/scripts/testdata/migrations/atlas-lint/$fixture_name"
+  local fixture_dir="$temp_dir/atlas-lint-$fixture_name"
+  local fixture_dsn="postgres://postgres:${password}@${lint_host}:${postgres_port}/${database}?sslmode=disable"
+  local lint_output="$temp_dir/atlas-lint-$fixture_name.log"
+  local lint_status=0
+
+  mkdir -p "$fixture_dir"
+  cp "$fixture_source"/*.sql "$fixture_dir/"
+  "$atlas_lint_binary" migrate hash --dir "file://$fixture_dir" >/dev/null
+
+  if "$atlas_lint_binary" migrate lint \
+    --dir "file://$fixture_dir" \
+    --dev-url "$fixture_dsn" \
+    --latest 1 >"$lint_output" 2>&1; then
+    lint_status=0
+  else
+    lint_status=$?
+  fi
+
+  if [[ "$expected_result" == pass && "$lint_status" -ne 0 ]]; then
+    cat "$lint_output" >&2
+    printf 'Atlas migration lint rejected the %s fixture.\n' "$fixture_name" >&2
+    return "$lint_status"
+  fi
+  if [[ "$expected_result" == reject && "$lint_status" -eq 0 ]]; then
+    cat "$lint_output"
+    printf 'Atlas migration lint accepted the %s fixture.\n' "$fixture_name" >&2
+    return 1
+  fi
+  if [[ "$expected_result" == reject ]] && ! grep -Fq -- 'destructive changes detected' "$lint_output"; then
+    cat "$lint_output" >&2
+    printf 'Atlas migration lint rejected %s without reporting a destructive change.\n' "$fixture_name" >&2
+    return 1
+  fi
+  cat "$lint_output"
+  printf 'Atlas migration lint %s fixture: %s as expected.\n' "$fixture_name" "$expected_result"
+}
+
+docker exec "$postgres_container" createdb -U postgres migration_lint_additive
+docker exec "$postgres_container" createdb -U postgres migration_lint_destructive
+run_atlas_lint_fixture additive pass migration_lint_additive
+run_atlas_lint_fixture destructive reject migration_lint_destructive
 
 apply_migrations() {
   local migration_dir=$1

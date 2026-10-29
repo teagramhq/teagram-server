@@ -58,6 +58,11 @@ check_ci_contract() {
     ci_fail 'the required CI gate must include the pinned demo web artifact build'
   [[ "$(ci_query '.jobs.ci.needs | join(",")')" == *'test-migrations'* ]] ||
     ci_fail 'the required CI gate must include the migrations lane'
+  local expected_postgres_image='mirror.gcr.io/library/postgres:18-alpine@sha256:d8703cd7fba306b9fec9268ecedfa8a966846c053036a60e3635791957eb2f66'
+  [[ "$(ci_query '.jobs."test-migrations".env.POSTGRES_IMAGE')" == "$expected_postgres_image" ]] ||
+    ci_fail 'the migrations lane must use the production-pinned PostgreSQL image'
+  [[ "$(yq -r '.services.postgres.image' deploy/teagram-demo/compose.yaml)" == "$expected_postgres_image" ]] ||
+    ci_fail 'the production PostgreSQL image pin changed without updating the migrations lane'
   [[ "$(ci_query '.jobs.ci.steps[] | select(.name == "Require all CI lanes to pass") | .env.DEMO_WEB_ARTIFACT_RESULT')" == '${{ needs.demo-web-artifact.result }}' ]] ||
     ci_fail 'the required CI gate must receive the demo web artifact result'
   [[ "$(ci_query '.jobs.ci.steps[] | select(.name == "Require all CI lanes to pass") | .env.TEST_MIGRATIONS_RESULT')" == '${{ needs.test-migrations.result }}' ]] ||
