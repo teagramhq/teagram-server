@@ -64,6 +64,13 @@ jobs:
       - name: Test artifact response policy
         run: node --test test/e2e/real_server_fixture/artifact_response_policy.test.cjs
 
+      - name: Test real-client worker source observation
+        run: node --test test/e2e/real_server_fixture/worker_source_observation.test.cjs test/e2e/real_server_fixture/real_client_worker_observer_patch.test.mjs
+
+      # Keep the web app revision fixed; overlay only the runner's worker evidence collector.
+      - name: Patch pinned worker observer for late attach evidence
+        run: node test/e2e/real_server_fixture/patch_real_client_worker_observer.mjs --web-root "$REAL_CLIENT_WEB_ROOT" --web-revision "$REAL_CLIENT_WEB_REVISION"
+
       - name: Install pinned web dependencies
         working-directory: web-source
         run: pnpm install --frozen-lockfile
