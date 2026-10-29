@@ -77,6 +77,23 @@ func TestGetMeReturnsServerLookedUpBot(t *testing.T) {
 	}
 }
 
+func TestValidGetMeRequestsDoNotConsumeUnauthorizedRateLimit(t *testing.T) {
+	st := newFakeStore()
+	handler := botapi.NewHandler(st, slog.New(slog.DiscardHandler))
+	for i := range authAttemptLimit + 1 {
+		request := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/bot123456:valid-secret/getMe", nil)
+		request.RemoteAddr = "198.51.100.4:3456"
+		response := httptest.NewRecorder()
+		handler.ServeHTTP(response, request)
+		if response.Code != http.StatusOK {
+			t.Fatalf("valid request %d status = %d, want 200; body %q", i, response.Code, response.Body.String())
+		}
+	}
+	if st.lookupCount != authAttemptLimit+1 {
+		t.Fatalf("token lookups = %d, want %d", st.lookupCount, authAttemptLimit+1)
+	}
+}
+
 func TestMalformedUnknownAndRevokedTokensShareUnauthorizedBody(t *testing.T) {
 	st := newFakeStore()
 	st.lookupErrs = map[string]error{

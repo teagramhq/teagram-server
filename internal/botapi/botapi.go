@@ -99,7 +99,7 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}()
 
 	if !h.limiter.allow(r.RemoteAddr, time.Now()) {
-		h.unauthorized(w, botID, method)
+		h.unauthorized(w, botID, method, r.RemoteAddr)
 		return
 	}
 	token, endpointMethod, endpoint := parseEndpoint(r.URL.Path)
@@ -113,14 +113,14 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			}
 			return
 		}
-		h.unauthorized(w, botID, method)
+		h.unauthorized(w, botID, method, r.RemoteAddr)
 		return
 	}
 	method = methodLabel(endpointMethod)
 
 	botID, err := h.store.BotIDByToken(r.Context(), token)
 	if errors.Is(err, store.ErrBotTokenNotFound) {
-		h.unauthorized(w, botID, method)
+		h.unauthorized(w, botID, method, r.RemoteAddr)
 		return
 	}
 	if err != nil {
@@ -129,7 +129,7 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if botID <= 0 {
-		h.unauthorized(w, 0, method)
+		h.unauthorized(w, 0, method, r.RemoteAddr)
 		return
 	}
 
@@ -167,7 +167,7 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !exists {
-		h.unauthorized(w, botID, method)
+		h.unauthorized(w, botID, method, r.RemoteAddr)
 		return
 	}
 	username := ""
@@ -235,7 +235,8 @@ func requestBody(w http.ResponseWriter, r *http.Request) (present bool, status i
 	return len(body) != 0, 0
 }
 
-func (h *handler) unauthorized(w http.ResponseWriter, botID int64, method string) {
+func (h *handler) unauthorized(w http.ResponseWriter, botID int64, method, remoteAddr string) {
+	h.limiter.spend(remoteAddr, time.Now())
 	h.log.Warn("Bot API authentication failed", "bot_id", botID, "method", method)
 	h.write(w, http.StatusUnauthorized, []byte(unauthorizedBody), botID, method)
 }
@@ -274,6 +275,14 @@ func newAuthLimiter() *authLimiter {
 }
 
 func (l *authLimiter) allow(remoteAddr string, now time.Time) bool {
+	return l.update(remoteAddr, now, false)
+}
+
+func (l *authLimiter) spend(remoteAddr string, now time.Time) {
+	l.update(remoteAddr, now, true)
+}
+
+func (l *authLimiter) update(remoteAddr string, now time.Time, spend bool) bool {
 	key := sourceNetwork(remoteAddr)
 	l.mu.Lock()
 	defer l.mu.Unlock()
@@ -311,7 +320,7 @@ func (l *authLimiter) allow(remoteAddr string, now time.Time) bool {
 	}
 	bucket.lastSeen = now
 	allowed := bucket.tokens > 0
-	if allowed {
+	if allowed && spend {
 		bucket.tokens--
 	}
 	if exists {
