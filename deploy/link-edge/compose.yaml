@@ -11,6 +11,9 @@ services:
         EDGE_IMAGE_REVISION: ${EDGE_IMAGE_REVISION-}
     image: teagram-linklanding:local
     command: ["-listen-address", "0.0.0.0", "-port", "8082"]
+    environment:
+      TG_INVITE_WEB_SIGNUP_URL: ${TG_INVITE_WEB_SIGNUP_URL:?set TG_INVITE_WEB_SIGNUP_URL}
+      TG_INVITE_DESKTOP_URL: ${TG_INVITE_DESKTOP_URL:-}
     ports:
       - "127.0.0.1:8082:8082"
     networks:
@@ -44,6 +47,9 @@ services:
         EDGE_IMAGE_SOURCE: ${EDGE_IMAGE_SOURCE-}
         EDGE_IMAGE_REVISION: ${EDGE_IMAGE_REVISION-}
     image: teagram-linkselector:local
+    environment:
+      TG_INVITE_WEB_SIGNUP_URL: ${TG_INVITE_WEB_SIGNUP_URL:?set TG_INVITE_WEB_SIGNUP_URL}
+      TG_INVITE_DESKTOP_URL: ${TG_INVITE_DESKTOP_URL:-}
     command:
       - "-listen-address"
       - "0.0.0.0"

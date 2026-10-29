@@ -557,7 +557,8 @@ func TestFreshUsernameSignInAfterSameIPExchangeBudgetIsSpent(t *testing.T) {
 	refused := false
 	for attempt := 1; attempt <= limit; attempt++ {
 		client := newUsernameClient(addr.Port, key, dcID, nil)
-		attemptCtx, attemptCancel := context.WithTimeout(ctx, 10*time.Second)
+		// One fresh context is still admitted and must complete a full key exchange.
+		attemptCtx, attemptCancel := context.WithTimeout(ctx, 30*time.Second)
 		err := client.Run(attemptCtx, func(ctx context.Context) error {
 			_, err := client.API().HelpGetAppConfig(ctx, 0)
 			return err

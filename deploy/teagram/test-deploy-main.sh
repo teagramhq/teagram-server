@@ -92,6 +92,8 @@ cat > "$tmp/work/deploy/link-edge/deploy-main.sh" <<'EDGE'
 #!/usr/bin/env bash
 set -euo pipefail
 [[ $# == 1 ]]
+[[ ${TG_INVITE_WEB_SIGNUP_URL:-} == https://web.example.test/signup ]]
+[[ ${TG_INVITE_DESKTOP_URL:-} == '' ]]
 printf '%s\n' "$1" >> "${LINK_EDGE_DEPLOY_LOG:?}"
 printf 'link-edge\n' >> "${DEPLOY_ACTION_LOG:?}"
 EDGE
@@ -146,7 +148,7 @@ git -C "$tmp/work" add new-tracked.txt
 third=$(commit third)
 git -C "$tmp/work" push -q "$tmp/origin.git" main
 git -C "$tmp/live" reset -q --hard "$second"
-printf 'TG_RSA_KEY_FINGERPRINT=12345\n' > "$tmp/live/.env"
+printf 'TG_RSA_KEY_FINGERPRINT=12345\nTG_INVITE_WEB_SIGNUP_URL=https://web.example.test/signup\n' > "$tmp/live/.env"
 printf 'fixture dump\n' > "$tmp/live/pgdump-fixture.sql"
 printf 'fixture evidence\n' > "$tmp/live/rollout-evidence.txt"
 chmod 640 "$tmp/live/.env"

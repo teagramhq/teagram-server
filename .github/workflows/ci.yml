@@ -616,6 +616,9 @@ jobs:
       # images in CI. The explicit empty env file keeps server credentials out
       # of Compose interpolation during validation.
       - name: Render isolated link edge Compose projection
+        env:
+          TG_INVITE_WEB_SIGNUP_URL: https://web.example.invalid/signup
+          TG_INVITE_DESKTOP_URL: ''
         run: |
           docker compose --env-file /dev/null --project-directory deploy/link-edge --file deploy/link-edge/compose.yaml config --format json >"$RUNNER_TEMP/link-edge-compose.json"
           jq -e '
@@ -627,7 +630,9 @@ jobs:
             and all(.services[]; ((.volumes // []) | length) == 0)
             and all(.services[]; ((.secrets // []) | length) == 0)
             and all(.services[]; ((.env_file // []) | length) == 0)
-            and all(.services[]; ((.environment // {}) | length) == 0)
+            and (.services.linklanding.environment == {"TG_INVITE_WEB_SIGNUP_URL":"https://web.example.invalid/signup","TG_INVITE_DESKTOP_URL":""})
+            and (.services.selector.environment == {"TG_INVITE_WEB_SIGNUP_URL":"https://web.example.invalid/signup","TG_INVITE_DESKTOP_URL":""})
+            and all([.services.web, .services.probe][]; ((.environment // {}) | length) == 0)
             and all(.services[]; .network_mode == null)
             and all(.services[]; .mem_limit == null)
             and all(.services[]; .pids_limit == null)
@@ -671,6 +676,8 @@ jobs:
         env:
           EDGE_IMAGE_SOURCE: ${{ github.server_url }}/${{ github.repository }}
           EDGE_IMAGE_REVISION: ${{ github.sha }}
+          TG_INVITE_WEB_SIGNUP_URL: https://web.example.invalid/signup
+          TG_INVITE_DESKTOP_URL: ''
         run: |
           test "$(git rev-parse HEAD)" = "$EDGE_IMAGE_REVISION"
           test -z "$(git status --porcelain)"
@@ -686,6 +693,8 @@ jobs:
         env:
           EDGE_IMAGE_SOURCE: ${{ github.server_url }}/${{ github.repository }}
           EDGE_IMAGE_REVISION: ${{ github.sha }}
+          TG_INVITE_WEB_SIGNUP_URL: https://web.example.invalid/signup
+          TG_INVITE_DESKTOP_URL: ''
         run: |
           compose=(docker compose --env-file /dev/null --project-directory deploy/link-edge --file deploy/link-edge/compose.yaml)
           output_file="$RUNNER_TEMP/link-edge-provenance-rejection.log"
@@ -716,6 +725,9 @@ jobs:
             --build-arg "EDGE_IMAGE_SOURCE=$wrong_source"
 
       - name: Verify landing loopback publication on the Docker daemon
+        env:
+          TG_INVITE_WEB_SIGNUP_URL: https://web.example.invalid/signup
+          TG_INVITE_DESKTOP_URL: ''
         run: |
           compose=(docker compose --env-file /dev/null --project-directory deploy/link-edge --file deploy/link-edge/compose.yaml)
           docker network create teagram-web-edge-net
@@ -1057,6 +1069,8 @@ jobs:
           bash -n deploy/teagram/deploy-main.sh
           bash -n deploy/teagram/teagram-logs.sh
           sh -n deploy/teagram/teagram-ops.sh
+          bash -n deploy/teagram/ops/invite-web-signup-url.sh
+          bash -n deploy/teagram/test-invite-web-signup-url.sh
           bash -n deploy/teagram/ops/rollout-evidence.sh
           bash -n deploy/teagram/test-teagram-logs.sh
           bash -n deploy/teagram/ops/target-failure-report.sh
@@ -1090,6 +1104,8 @@ jobs:
             deploy/teagram/deploy-main.sh \
             deploy/teagram/teagram-logs.sh \
             deploy/teagram/teagram-ops.sh \
+            deploy/teagram/ops/invite-web-signup-url.sh \
+            deploy/teagram/test-invite-web-signup-url.sh \
             deploy/teagram/ops/rollout-evidence.sh \
             deploy/teagram/test-teagram-logs.sh \
             deploy/teagram/ops/target-failure-report.sh \
@@ -1126,6 +1142,8 @@ jobs:
       - name: Check deploy script target fixtures
         run: deploy/teagram/test-deploy-main.sh
 
+      - name: Check invite signup URL operation fixtures
+        run: sudo -n env "PATH=$PATH" bash deploy/teagram/test-invite-web-signup-url.sh
       - name: Check teagram log access command
         run: deploy/teagram/test-teagram-logs.sh
 
