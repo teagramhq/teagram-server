@@ -11,6 +11,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -30,6 +32,23 @@ type fakeStore struct {
 	user        store.User
 	userExists  bool
 	panicUser   bool
+}
+
+type blockingLookupStore struct {
+	lookupStarted chan struct{}
+	lookupRelease chan struct{}
+	lookupCount   atomic.Int32
+}
+
+func (s *blockingLookupStore) BotIDByToken(context.Context, string) (int64, error) {
+	s.lookupCount.Add(1)
+	s.lookupStarted <- struct{}{}
+	<-s.lookupRelease
+	return 0, store.ErrBotTokenNotFound
+}
+
+func (*blockingLookupStore) UserByID(context.Context, int64) (store.User, bool, error) {
+	return store.User{}, false, nil
 }
 
 func (s *fakeStore) BotIDByToken(_ context.Context, token string) (int64, error) {
@@ -173,6 +192,65 @@ func TestUnauthorizedRateLimitRunsBeforeTokenLookup(t *testing.T) {
 	}
 	if st.lookupCount != authAttemptLimit {
 		t.Fatalf("token lookups = %d, want %d; throttled request must stop before DB lookup", st.lookupCount, authAttemptLimit)
+	}
+}
+
+func TestConcurrentUnauthorizedRequestsAreCappedBeforeTokenLookup(t *testing.T) {
+	const requestCount = authAttemptLimit + 1
+	st := &blockingLookupStore{
+		lookupStarted: make(chan struct{}, requestCount),
+		lookupRelease: make(chan struct{}),
+	}
+	handler := botapi.NewHandler(st, slog.New(slog.DiscardHandler))
+	start := make(chan struct{})
+	results := make(chan int, requestCount)
+	for range requestCount {
+		go func() {
+			<-start
+			request := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/botbad-token/getMe", nil)
+			request.RemoteAddr = "198.51.100.4:3456"
+			response := httptest.NewRecorder()
+			handler.ServeHTTP(response, request)
+			results <- response.Code
+		}()
+	}
+	close(start)
+
+	var releaseOnce sync.Once
+	releaseLookups := func() {
+		releaseOnce.Do(func() { close(st.lookupRelease) })
+	}
+	defer releaseLookups()
+
+	for range authAttemptLimit {
+		select {
+		case <-st.lookupStarted:
+		case <-time.After(2 * time.Second):
+			t.Fatal("did not reach the expected concurrent token lookups")
+		}
+	}
+	select {
+	case status := <-results:
+		if status != http.StatusTooManyRequests {
+			t.Fatalf("request outside the auth budget returned %d, want 429", status)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("request beyond the auth budget reached token lookup instead of returning 429")
+	}
+
+	releaseLookups()
+	for range authAttemptLimit {
+		select {
+		case status := <-results:
+			if status != http.StatusUnauthorized {
+				t.Fatalf("bad-token request returned %d, want 401", status)
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatal("admitted token lookup did not finish")
+		}
+	}
+	if got := st.lookupCount.Load(); got != authAttemptLimit {
+		t.Fatalf("concurrent token lookups = %d, want %d", got, authAttemptLimit)
 	}
 }
 

@@ -99,9 +99,19 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 	}()
 
-	if !h.limiter.allow(r.RemoteAddr, time.Now()) {
+	if !h.limiter.reserve(r.RemoteAddr, time.Now()) {
 		h.rateLimited(w, botID, method)
 		return
+	}
+	authAttemptReserved := true
+	defer func() {
+		if authAttemptReserved {
+			h.limiter.refund(r.RemoteAddr, time.Now())
+		}
+	}()
+	unauthorized := func(id int64, requestMethod string) {
+		authAttemptReserved = false
+		h.unauthorized(w, id, requestMethod)
 	}
 	token, endpointMethod, endpoint := parseEndpoint(r.URL.Path)
 	if !endpoint {
@@ -114,14 +124,14 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			}
 			return
 		}
-		h.unauthorized(w, botID, method, r.RemoteAddr)
+		unauthorized(botID, method)
 		return
 	}
 	method = methodLabel(endpointMethod)
 
 	botID, err := h.store.BotIDByToken(r.Context(), token)
 	if errors.Is(err, store.ErrBotTokenNotFound) {
-		h.unauthorized(w, botID, method, r.RemoteAddr)
+		unauthorized(botID, method)
 		return
 	}
 	if err != nil {
@@ -130,7 +140,7 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if botID <= 0 {
-		h.unauthorized(w, 0, method, r.RemoteAddr)
+		unauthorized(0, method)
 		return
 	}
 
@@ -168,7 +178,7 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !exists {
-		h.unauthorized(w, botID, method, r.RemoteAddr)
+		unauthorized(botID, method)
 		return
 	}
 	username := ""
@@ -236,8 +246,7 @@ func requestBody(w http.ResponseWriter, r *http.Request) (present bool, status i
 	return len(body) != 0, 0
 }
 
-func (h *handler) unauthorized(w http.ResponseWriter, botID int64, method, remoteAddr string) {
-	h.limiter.spend(remoteAddr, time.Now())
+func (h *handler) unauthorized(w http.ResponseWriter, botID int64, method string) {
 	h.log.Warn("Bot API authentication failed", "bot_id", botID, "method", method)
 	h.write(w, http.StatusUnauthorized, []byte(unauthorizedBody), botID, method)
 }
@@ -280,15 +289,15 @@ func newAuthLimiter() *authLimiter {
 	return &authLimiter{buckets: make(map[string]authBucket)}
 }
 
-func (l *authLimiter) allow(remoteAddr string, now time.Time) bool {
-	return l.update(remoteAddr, now, false)
+func (l *authLimiter) reserve(remoteAddr string, now time.Time) bool {
+	return l.update(remoteAddr, now, true)
 }
 
-func (l *authLimiter) spend(remoteAddr string, now time.Time) {
-	l.update(remoteAddr, now, true)
+func (l *authLimiter) refund(remoteAddr string, now time.Time) {
+	l.update(remoteAddr, now, false)
 }
 
-func (l *authLimiter) update(remoteAddr string, now time.Time, spend bool) bool {
+func (l *authLimiter) update(remoteAddr string, now time.Time, reserve bool) bool {
 	key := sourceNetwork(remoteAddr)
 	l.mu.Lock()
 	defer l.mu.Unlock()
@@ -325,16 +334,25 @@ func (l *authLimiter) update(remoteAddr string, now time.Time, spend bool) bool 
 		bucket.lastRefill = bucket.lastRefill.Add(time.Duration(refill) * authRefillInterval)
 	}
 	bucket.lastSeen = now
-	allowed := bucket.tokens > 0
-	if allowed && spend {
+	if reserve {
+		if bucket.tokens == 0 {
+			if exists {
+				l.buckets[key] = bucket
+			} else {
+				l.overflow = bucket
+			}
+			return false
+		}
 		bucket.tokens--
+	} else if bucket.tokens < authBurst {
+		bucket.tokens++
 	}
 	if exists {
 		l.buckets[key] = bucket
 	} else {
 		l.overflow = bucket
 	}
-	return allowed
+	return true
 }
 
 func sourceNetwork(remoteAddr string) string {
