@@ -68,8 +68,9 @@ both `https://web.teagram.io` and `https://demo.teagram.io`. The app CSP keeps
 the current web directives and restricts `connect-src` to the demo WSS origin
 and Cloudflare Turnstile. Registration is open, the existing signup
 limit remains five attempts per IP per hour, login-code logging is disabled,
-uploads are capped at 500 KB per file, and per-account storage remains capped
-at 256 MiB.
+client uploads are disabled by `TG_UPLOADS_DISABLED=true`, and the existing
+500 KB per-file cap, upload-byte budget and 256 MiB per-account storage cap
+remain as defense in depth.
 Sticker and custom emoji pack imports are disabled (`TG_STICKER_IMPORT=off`);
 catalogue packs remain available to install and send.
 
@@ -77,6 +78,11 @@ catalogue packs remain available to install and send.
 key to `/var/lib/teagram-demo/secrets/turnstile-secret-key` with root ownership
 and mode 0600. Compose mounts that file only into teagramd. It also configures
 `TG_ADVERTISE_DEMO_GUEST_SIGN_UP=true` so web.teagram.io advertises demo signup.
+`TG_UPLOADS_DISABLED=true` is persisted in `.env`; deploy preflight adds it to
+older prepared files and rejects a value that would enable client uploads.
+The private seed overlay temporarily enables uploads only while HAProxy and
+edge are stopped; bootstrap and weekly reseed use that internal lane, then
+recreate teagramd with uploads disabled before either public path starts.
 
 The demo is budgeted for 2 GiB: teagramd uses `GOMAXPROCS=1`,
 `GOMEMLIMIT=320MiB` and a 448 MiB container cap. PostgreSQL is capped at 320 MiB with

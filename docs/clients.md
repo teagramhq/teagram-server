@@ -52,6 +52,7 @@ Configuration is read from environment variables in `internal/config/config.go`:
 | `TG_BLOB_S3_ALLOW_INSECURE_HTTP` | `false` | Explicit loopback/compose-only plaintext opt-in; startup warns when enabled |
 | `TG_MEDIA_KEY_DIR` | *(unset)* | Directory of versioned media keys (`<version>.key`); both media key settings must be set together |
 | `TG_MEDIA_KEY_CURRENT` | *(unset)* | Version used for newly written encrypted S3 objects; old versions remain readable while their key files stay available |
+| `TG_UPLOADS_DISABLED` | `false` | Set to `true` to reject client RPCs that upload file bytes with the stable `UPLOADS_DISABLED` error; existing media downloads continue to work, and the demo's private seed overlay enables its API only while public ingress is stopped |
 | `TEAGRAM_MEDIA_KEY_SOURCE_DIR` | `/etc/teagramd/media-keys` | Host directory bind-mounted read-only into the default Compose server; provision outside the repository |
 | `TG_DC_ID`          | `2`              | DC id this server advertises as `ThisDC`    |
 | `TG_RATE_LIMIT_DISCOVERY` | `60` | Cluster-wide valid local-direct preflight response attempts per fixed window, counted in Postgres; `0` disables this bound, and a negative or non-integer value fails startup |

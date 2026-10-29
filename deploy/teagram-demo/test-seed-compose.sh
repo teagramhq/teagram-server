@@ -24,6 +24,7 @@ mapfile -t SERVER_IDS < <(demo_seed_compose ps --status running -q "$ACTIVE_SERV
 docker inspect "${SERVER_IDS[0]}" | jq -e '
   .[0].Config.Env as $env
   | ($env | any(. == "TG_CLIENT_ADDR_TRUST=socket"))
+    and ($env | any(. == "TG_UPLOADS_DISABLED=false"))
     and ($env | any(. == "TG_TURNSTILE_SITE_KEY="))
     and ($env | any(. == "TG_TURNSTILE_SECRET_KEY_FILE="))
 ' >/dev/null || demo_fail 'seed convergence test requires the private seed-only server configuration'

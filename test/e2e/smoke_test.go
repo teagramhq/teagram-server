@@ -127,6 +127,10 @@ func TestSmoke(t *testing.T) {
 		t.Parallel()
 		testSmokeUploadMedia(t)
 	})
+	t.Run("uploads-disabled", func(t *testing.T) {
+		t.Parallel()
+		testSmokeUploadsDisabled(t)
+	})
 	t.Run("upload-app-config-byte-limit", func(t *testing.T) {
 		t.Parallel()
 		testSmokeUploadAppConfigByteLimit(t)
@@ -5446,6 +5450,7 @@ type smokeFixture struct {
 	blobs    blob.Store
 	// uploadMaxFileBytes simulates TG_UPLOAD_MAX_BYTES in smoke fixtures.
 	uploadMaxFileBytes          int64
+	uploadsDisabled             bool
 	stickerSets                 *api.StickerSetCatalog
 	stickerImportMode           config.StickerImportMode
 	photoThumbs                 *photothumb.Supervisor
@@ -5929,7 +5934,7 @@ func (f *smokeFixture) start(t *testing.T, address string) {
 		t, f.ctx, f.key, f.dcID, f.store, f.dsn, f.codes.Logger(), ln, f.rateLimits, f.regMode,
 		f.blobs, f.persistStatus, nil, f.turnstileSiteKey, f.turnstileVerifier, f.welcomeChannel,
 		f.turnstileSignInEnabled, f.recoveryEmailMode, f.suppressChannelPostDelivery, f.signUpTermsOfService,
-		f.stickerSets, f.uploadMaxFileBytes, f.stickerImportMode, f.userInviteQuota, f.userInviteMinAccountAge, f.photoThumbs,
+		f.stickerSets, f.uploadMaxFileBytes, f.stickerImportMode, f.userInviteQuota, f.userInviteMinAccountAge, f.uploadsDisabled, f.photoThumbs,
 	)
 	f.registry = registry
 	f.setServerStop(t.Cleanup, stop)
