@@ -6,6 +6,8 @@ OPS_SCRIPT="$SCRIPT_DIR/main2612-live-compose-replay.sh"
 TMP=$(mktemp -d /tmp/main2612-replay-safety.XXXXXXXX)
 CLEANUP_FIXTURE=
 SUCCESS_FIXTURE=
+MOUNT_FIXTURE=
+REJECT_FIXTURE=
 SUCCESS_TOKEN=0123456789abcdef0123456789abcdef
 
 cleanup_test() {
@@ -20,6 +22,19 @@ cleanup_test() {
     [ ! -f "$marker" ] || unlink -- "$marker" || status=1
     rmdir -- "$SUCCESS_FIXTURE" || status=1
   fi
+  if [ -n "$MOUNT_FIXTURE" ] && [ -d "$MOUNT_FIXTURE" ]; then
+    [ ! -f "$MOUNT_FIXTURE/live/evidence/result.json" ] || unlink -- "$MOUNT_FIXTURE/live/evidence/result.json" || status=1
+    [ ! -d "$MOUNT_FIXTURE/live/evidence" ] || rmdir -- "$MOUNT_FIXTURE/live/evidence" || status=1
+    [ ! -d "$MOUNT_FIXTURE/live" ] || rmdir -- "$MOUNT_FIXTURE/live" || status=1
+    [ ! -f "$MOUNT_FIXTURE/.rollout-owned-$SUCCESS_TOKEN" ] || unlink -- "$MOUNT_FIXTURE/.rollout-owned-$SUCCESS_TOKEN" || status=1
+    rmdir -- "$MOUNT_FIXTURE" || status=1
+  fi
+  if [ -n "$REJECT_FIXTURE" ] && [ -d "$REJECT_FIXTURE" ]; then
+    rmdir -- "$REJECT_FIXTURE" || status=1
+  fi
+  for file in mock-mount mock-findmnt mock-umount mount.state mount.calls umount.calls; do
+    [ ! -f "$TMP/$file" ] || unlink -- "$TMP/$file" || status=1
+  done
   [ ! -f "$TMP/expected-field-results.tsv" ] || unlink -- "$TMP/expected-field-results.tsv" || status=1
   [ ! -f "$TMP/approved-field-results.tsv" ] || unlink -- "$TMP/approved-field-results.tsv" || status=1
   [ ! -f "$TMP/field-results.valid.tsv" ] || unlink -- "$TMP/field-results.valid.tsv" || status=1
@@ -38,8 +53,7 @@ grep -Fq "TMP_TOKEN=\$(mark_replay_tree \"\$TMP\")" "$OPS_SCRIPT"
 grep -Fq "write_synthetic_env \"\$env_source\" \"\$tree/\$env_name\"" "$OPS_SCRIPT"
 grep -Fq "unlink -- \"\$env_path\"" "$OPS_SCRIPT"
 grep -Fq "validate_result_rows \"\$TMP/logs/field-results.tsv\"" "$OPS_SCRIPT"
-grep -Fq "size=\$REPLAY_TMPFS_SIZE_BYTES,nr_inodes=\$REPLAY_TMPFS_INODES" "$OPS_SCRIPT"
-grep -Fq "mount_options=\$(\"\$FINDMNT_BIN\" -n -o OPTIONS --target \"\$target\")" "$OPS_SCRIPT"
+grep -Fq "mount_replay_tmpfs \"\$TMP\" || die" "$OPS_SCRIPT"
 grep -Fq 'ulimit -t 60' "$OPS_SCRIPT"
 grep -Fq 'ulimit -v 1048576' "$OPS_SCRIPT"
 grep -Fq 'ulimit -f 4096' "$OPS_SCRIPT"
@@ -72,6 +86,123 @@ if grep -Fq 'source /dev/stdin' "$OPS_SCRIPT" || grep -Fq 'safe_remove_tree_sour
   printf '%s\n' 'FAIL live replay executes candidate-controlled cleanup code on the host' >&2
   exit 1
 fi
+
+cat > "$TMP/mock-mount" <<'EOF'
+#!/usr/bin/env bash
+set -Eeuo pipefail
+[ "$#" -eq 6 ] && [ "$1" = -t ] && [ "$2" = tmpfs ] && [ "$3" = -o ] && \
+  [ "$4" = size=134217728,nr_inodes=8192,mode=0700,nodev,nosuid ] && \
+  [ "$5" = tmpfs ] || exit 64
+printf '%s\n' "$*" >> "$MOCK_MOUNT_CALLS"
+printf '%s\n' "$6" > "$MOCK_MOUNT_STATE"
+EOF
+cat > "$TMP/mock-findmnt" <<'EOF'
+#!/usr/bin/env bash
+set -Eeuo pipefail
+[ "$#" -eq 5 ] && [ "$1" = -n ] && [ "$2" = -o ] && [ "$4" = --target ] || exit 64
+[ -f "$MOCK_MOUNT_STATE" ] && [ "$(<"$MOCK_MOUNT_STATE")" = "$5" ] || exit 1
+case "$3" in
+  FSTYPE) printf '%s\n' "${MOCK_FINDMNT_FSTYPE:-tmpfs}" ;;
+  TARGET) printf '%s\n' "${MOCK_FINDMNT_TARGET:-$5}" ;;
+  OPTIONS) printf '%s\n' "${MOCK_FINDMNT_OPTIONS:-}" ;;
+  *) exit 64 ;;
+esac
+EOF
+cat > "$TMP/mock-umount" <<'EOF'
+#!/usr/bin/env bash
+set -Eeuo pipefail
+[ "$#" -eq 2 ] && [ "$1" = -- ] || exit 64
+[ -f "$MOCK_MOUNT_STATE" ] && [ "$(<"$MOCK_MOUNT_STATE")" = "$2" ] || exit 1
+printf '%s\n' "$2" >> "$MOCK_UMOUNT_CALLS"
+unlink -- "$MOCK_MOUNT_STATE"
+EOF
+chmod 700 "$TMP/mock-mount" "$TMP/mock-findmnt" "$TMP/mock-umount"
+
+MOUNT_FIXTURE=$(mktemp -d /tmp/main2612-replay.XXXXXXXX)
+success_rows=$(MOCK_MOUNT_STATE="$TMP/mount.state" MOCK_MOUNT_CALLS="$TMP/mount.calls" \
+  MOCK_UMOUNT_CALLS="$TMP/umount.calls" \
+  MOCK_FINDMNT_OPTIONS='rw,nosuid,nodev,mode=700,nr_inodes=8192,size=131072k' \
+  bash -c '
+  set -Eeuo pipefail
+  source "$1"
+  TMP=$2
+  MOUNT_BIN=$3
+  FINDMNT_BIN=$4
+  UMOUNT_BIN=$5
+  TMP_TOKEN=$6
+  id() { [ "$1" = -u ] || return 2; printf "0\n"; }
+  stat() {
+    case "$2" in
+      %u) printf "0\n" ;;
+      %a)
+        case "$4" in
+          "$TMP"|"$TMP/live"|"$TMP/live/evidence") printf "700\n" ;;
+          "$TMP/.rollout-owned-$TMP_TOKEN") printf "600\n" ;;
+          *) return 2 ;;
+        esac
+        ;;
+      *) return 2 ;;
+    esac
+  }
+  mount_replay_tmpfs "$TMP"
+  [ "$TMP_MOUNTED" -eq 1 ]
+  printf "%s\n" "$TMP_TOKEN" > "$TMP/.rollout-owned-$TMP_TOKEN"
+  chmod 600 "$TMP/.rollout-owned-$TMP_TOKEN"
+  mkdir -m 700 "$TMP/live"
+  mkdir -m 700 "$TMP/live/evidence"
+  printf "%s\n" synthetic-mounted-evidence > "$TMP/live/evidence/result.json"
+  chmod 600 "$TMP/live/evidence/result.json"
+  RESULT_ROWS=$7
+  cleanup
+' _ "$OPS_SCRIPT" "$MOUNT_FIXTURE" "$TMP/mock-mount" "$TMP/mock-findmnt" "$TMP/mock-umount" \
+  "$SUCCESS_TOKEN" $'field\tresult\ncompose\tpass')
+[ "$success_rows" = $'field\tresult\ncompose\tpass' ]
+[ ! -e "$MOUNT_FIXTURE" ]
+grep -Fqx -- "-t tmpfs -o size=134217728,nr_inodes=8192,mode=0700,nodev,nosuid tmpfs $MOUNT_FIXTURE" "$TMP/mount.calls"
+grep -Fqx "$MOUNT_FIXTURE" "$TMP/umount.calls"
+MOUNT_FIXTURE=
+printf '%s\n' 'PASS replay mounts verified bounded tmpfs and unmounts it during guarded cleanup'
+
+for rejected_options in \
+  'rw,nosuid,nodev,mode=700,nr_inodes=8192,size=262144k' \
+  'rw,nosuid,nodev,mode=700,nr_inodes=16384,size=131072k' \
+  'rw,nosuid,nodev,mode=755,nr_inodes=8192,size=131072k' \
+  'rw,nosuid,mode=700,nr_inodes=8192,size=131072k' \
+  'rw,nodev,mode=700,nr_inodes=8192,size=131072k'; do
+  REJECT_FIXTURE=$(mktemp -d /tmp/main2612-replay.XXXXXXXX)
+  rejected=$(MOCK_MOUNT_STATE="$TMP/mount.state" MOCK_MOUNT_CALLS="$TMP/mount.calls" \
+    MOCK_UMOUNT_CALLS="$TMP/umount.calls" MOCK_FINDMNT_OPTIONS="$rejected_options" \
+    bash -c '
+    set -Eeuo pipefail
+    source "$1"
+    TMP=$2
+    MOUNT_BIN=$3
+    FINDMNT_BIN=$4
+    UMOUNT_BIN=$5
+    id() { [ "$1" = -u ] || return 2; printf "0\n"; }
+    stat() {
+      case "$2" in
+        %u) printf "0\n" ;;
+        %a) [ "$4" = "$TMP" ] && printf "700\n" ;;
+        *) return 2 ;;
+      esac
+    }
+    if mount_replay_tmpfs "$TMP"; then
+      printf "%s\n" "FAIL replay accepted invalid tmpfs options: $MOCK_FINDMNT_OPTIONS" >&2
+      exit 1
+    fi
+    [ "$TMP_MOUNTED" -eq 1 ]
+    unmount_replay_tmpfs
+    [ "$TMP_MOUNTED" -eq 0 ]
+    rmdir -- "$TMP"
+    printf "%s\n" rejected
+  ' _ "$OPS_SCRIPT" "$REJECT_FIXTURE" "$TMP/mock-mount" "$TMP/mock-findmnt" "$TMP/mock-umount")
+  [ "$rejected" = rejected ]
+  [ ! -e "$REJECT_FIXTURE" ]
+done
+REJECT_FIXTURE=
+printf '%s\n' 'PASS replay rejects oversized, over-inode, permissive-mode, and missing nodev/nosuid tmpfs options and unmounts rejected mounts'
+
 EXPECTED_ROWS="$TMP/expected-field-results.tsv"
 printf 'field\tresult\nconfig_sha256\tpass\nenv_sha256\tpass\noverride_sha256\tpass\nstop_grace_period\tpass\ncompose_logging_policy\tpass\ncompose_log_login_codes\tpass\nmedia_key_source\tpass\nmedia_key_current\tpass\ncompose_public_ws_2446\tpass\nexposure_public_ws_2446\tpass\ncompose_replica_count\tpass\ncompose_client_addr_trust\tpass\n' \
   > "$TMP/approved-field-results.tsv"
