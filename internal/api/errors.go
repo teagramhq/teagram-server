@@ -295,6 +295,8 @@ var (
 	errPasswordCannotBeRemoved = rpcErr(400, "PASSWORD_HASH_INVALID")
 	// errInputFilterInvalid rejects messages.search with an unsupported filter type.
 	errInputFilterInvalid = rpcErr(400, "INPUT_FILTER_INVALID")
+	// errFilterNotSupported rejects a search-results calendar filter the server cannot serve.
+	errFilterNotSupported = rpcErr(400, "FILTER_NOT_SUPPORTED")
 	// errLimitInvalid rejects a client-supplied id list past its per-call cap. It
 	// is decided on the client's own input, before the peer is resolved and
 	// before any entitlement is checked, so it tells the caller nothing about the
