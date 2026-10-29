@@ -187,11 +187,11 @@ demo_ensure_qa_bypass_token() {
     demo_fail 'could not generate the demo QA bypass token'
     return 1
   fi
-  chown root:65532 "$temporary" && chmod 0440 "$temporary" || {
+  if ! chown root:65532 "$temporary" || ! chmod 0440 "$temporary"; then
     rm -f -- "$temporary"
     demo_fail 'could not secure the demo QA bypass token file'
     return 1
-  }
+  fi
   if ! ln -- "$temporary" "$DEMO_TURNSTILE_QA_BYPASS_FILE"; then
     rm -f -- "$temporary"
     if [[ -e "$DEMO_TURNSTILE_QA_BYPASS_FILE" || -L "$DEMO_TURNSTILE_QA_BYPASS_FILE" ]]; then
