@@ -16,7 +16,8 @@ trap cleanup EXIT
 
 port="$(python3 -c 'import socket; s = socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1]); s.close()')"
 (cd "$repo_root" && go build -o "$temp_dir/linklanding" ./cmd/linklanding)
-env -i "$temp_dir/linklanding" -port "$port" >"$temp_dir/stdout" 2>"$temp_dir/log" &
+env -i TG_INVITE_WEB_SIGNUP_URL=https://web.example.test/signup TG_INVITE_DESKTOP_URL= \
+	"$temp_dir/linklanding" -port "$port" >"$temp_dir/stdout" 2>"$temp_dir/log" &
 service_pid=$!
 
 origin="http://127.0.0.1:$port"
@@ -71,6 +72,33 @@ assert_header 'Referrer-Policy' 'no-referrer' "$temp_dir/headers"
 assert_header 'X-Content-Type-Options' 'nosniff' "$temp_dir/headers"
 assert_header 'Content-Type' 'text/html; charset=utf-8' "$temp_dir/headers"
 assert_header 'Content-Security-Policy' "default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'" "$temp_dir/headers"
+
+invite_status="$(curl --silent --fail --output "$temp_dir/invite-body" --dump-header "$temp_dir/invite-headers" \
+	--write-out '%{http_code}' "$origin/invite?tracking=query-secret")"
+if [[ "$invite_status" != 200 ]]; then
+	printf '/invite returned %s, want 200\n' "$invite_status" >&2
+	exit 1
+fi
+for expected in '<title>Teagram invite</title>' 'You’re invited to Teagram' \
+	'Create account on Teagram Web' 'https://web.example.test/signup'; do
+	if ! grep -Fq -- "$expected" "$temp_dir/invite-body"; then
+		printf '/invite response is missing expected landing content\n' >&2
+		exit 1
+	fi
+done
+if grep -Eq 'Open in Teagram for Mac|Don’t have Teagram for Mac\?|query-secret' "$temp_dir/invite-body"; then
+	printf '/invite response includes desktop controls or request data\n' >&2
+	exit 1
+fi
+invite_script="$(sed -n 's#^<script>\(.*\)</script>$#\1#p' "$temp_dir/invite-body")"
+if [[ -z "$invite_script" ]] || [[ $(grep -c '<script>' "$temp_dir/invite-body") != 1 ]]; then
+	printf '/invite response does not contain exactly one inline script\n' >&2
+	exit 1
+fi
+invite_script_hash="$(printf '%s' "$invite_script" | openssl dgst -sha256 -binary | base64 -w 0)"
+assert_header 'Cache-Control' 'no-store' "$temp_dir/invite-headers"
+assert_header 'Referrer-Policy' 'no-referrer' "$temp_dir/invite-headers"
+assert_header 'Content-Security-Policy' "default-src 'none'; script-src 'sha256-$invite_script_hash'; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'" "$temp_dir/invite-headers"
 
 head_status="$(curl --silent --output /dev/null --dump-header "$temp_dir/head-headers" \
 	--write-out '%{http_code}' --head "$invite_url")"

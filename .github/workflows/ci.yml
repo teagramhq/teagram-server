@@ -621,6 +621,9 @@ jobs:
       # images in CI. The explicit empty env file keeps server credentials out
       # of Compose interpolation during validation.
       - name: Render isolated link edge Compose projection
+        env:
+          TG_INVITE_WEB_SIGNUP_URL: https://web.example.invalid/signup
+          TG_INVITE_DESKTOP_URL: ''
         run: |
           docker compose --env-file /dev/null --project-directory deploy/link-edge --file deploy/link-edge/compose.yaml config --format json >"$RUNNER_TEMP/link-edge-compose.json"
           jq -e '
@@ -632,7 +635,9 @@ jobs:
             and all(.services[]; ((.volumes // []) | length) == 0)
             and all(.services[]; ((.secrets // []) | length) == 0)
             and all(.services[]; ((.env_file // []) | length) == 0)
-            and all(.services[]; ((.environment // {}) | length) == 0)
+            and (.services.linklanding.environment == {"TG_INVITE_WEB_SIGNUP_URL":"https://web.example.invalid/signup","TG_INVITE_DESKTOP_URL":""})
+            and (.services.selector.environment == {"TG_INVITE_WEB_SIGNUP_URL":"https://web.example.invalid/signup","TG_INVITE_DESKTOP_URL":""})
+            and all([.services.web, .services.probe][]; ((.environment // {}) | length) == 0)
             and all(.services[]; .network_mode == null)
             and all(.services[]; .mem_limit == null)
             and all(.services[]; .pids_limit == null)
@@ -676,6 +681,8 @@ jobs:
         env:
           EDGE_IMAGE_SOURCE: ${{ github.server_url }}/${{ github.repository }}
           EDGE_IMAGE_REVISION: ${{ github.sha }}
+          TG_INVITE_WEB_SIGNUP_URL: https://web.example.invalid/signup
+          TG_INVITE_DESKTOP_URL: ''
         run: |
           test "$(git rev-parse HEAD)" = "$EDGE_IMAGE_REVISION"
           test -z "$(git status --porcelain)"
@@ -691,6 +698,8 @@ jobs:
         env:
           EDGE_IMAGE_SOURCE: ${{ github.server_url }}/${{ github.repository }}
           EDGE_IMAGE_REVISION: ${{ github.sha }}
+          TG_INVITE_WEB_SIGNUP_URL: https://web.example.invalid/signup
+          TG_INVITE_DESKTOP_URL: ''
         run: |
           compose=(docker compose --env-file /dev/null --project-directory deploy/link-edge --file deploy/link-edge/compose.yaml)
           output_file="$RUNNER_TEMP/link-edge-provenance-rejection.log"
@@ -721,6 +730,9 @@ jobs:
             --build-arg "EDGE_IMAGE_SOURCE=$wrong_source"
 
       - name: Verify landing loopback publication on the Docker daemon
+        env:
+          TG_INVITE_WEB_SIGNUP_URL: https://web.example.invalid/signup
+          TG_INVITE_DESKTOP_URL: ''
         run: |
           compose=(docker compose --env-file /dev/null --project-directory deploy/link-edge --file deploy/link-edge/compose.yaml)
           docker network create teagram-web-edge-net

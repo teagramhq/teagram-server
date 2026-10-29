@@ -1,4 +1,5 @@
 import contextlib
+import copy
 import errno
 import io
 import os
@@ -141,16 +142,31 @@ class TimingAndCleanupTests(unittest.TestCase):
             "services": {
                 "linklanding": {
                     **secure_service,
+                    "environment": {
+                        "TG_INVITE_WEB_SIGNUP_URL": "https://web.example.invalid/signup",
+                        "TG_INVITE_DESKTOP_URL": "",
+                    },
                     "networks": {"private-edge": None, "landing-publish": None},
                     "healthcheck": {"test": ["CMD", "/usr/local/bin/linkprobe", "landing"]},
                 },
                 "selector": {
                     **secure_service,
+                    "environment": {
+                        "TG_INVITE_WEB_SIGNUP_URL": "https://web.example.invalid/signup",
+                        "TG_INVITE_DESKTOP_URL": "",
+                    },
                     "networks": {"web-edge": None, "private-edge": None},
                     "depends_on": {"linklanding": {"condition": "service_healthy"}},
                     "healthcheck": {"test": ["CMD", "/usr/local/bin/linkprobe", "selector"]},
                 },
-                "web": {**secure_service, "networks": {"web-edge": None}},
+                "web": {
+                    **secure_service,
+                    "environment": {
+                        "TG_INVITE_WEB_SIGNUP_URL": "https://web.example.invalid/signup",
+                        "TG_INVITE_DESKTOP_URL": "",
+                    },
+                    "networks": {"web-edge": None},
+                },
                 "probe": {
                     **secure_service,
                     "networks": {"private-edge": None},
@@ -170,7 +186,21 @@ class TimingAndCleanupTests(unittest.TestCase):
             },
         }
         runner = object.__new__(control.LinkEdgeControl)
+        runner.env = {
+            "TG_INVITE_WEB_SIGNUP_URL": "https://web.example.invalid/signup",
+            "TG_INVITE_DESKTOP_URL": "",
+        }
         runner.validate_projection(config)
+        invalid_config = copy.deepcopy(config)
+        invalid_config["services"]["web"]["environment"] = {
+            "TG_INVITE_WEB_SIGNUP_URL": "https://web.example.invalid/signup"
+        }
+        with self.assertRaisesRegex(control.ControlFailure, "compose_policy_failed"):
+            runner.validate_projection(invalid_config)
+        invalid_invite_config = copy.deepcopy(config)
+        invalid_invite_config["services"]["selector"]["environment"]["UNAPPROVED"] = "unexpected"
+        with self.assertRaisesRegex(control.ControlFailure, "compose_policy_failed"):
+            runner.validate_projection(invalid_invite_config)
 
     def test_timeout_returns_last_complete_observation_at_bound(self):
         now = [0.0]
