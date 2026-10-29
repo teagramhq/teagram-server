@@ -42,6 +42,10 @@ elif [[ "$1" == run ]]; then
     *) echo "invite app-config smoke did not use the reviewed restrictions: $*" >&2; exit 98 ;;
   esac
   [[ "${FIXTURE_SMOKE_FAIL:-0}" == 0 ]] || { echo 'fixture smoke failure' >&2; exit 91; }
+  if [[ "${FIXTURE_SMOKE_MISMATCH:-0}" == 1 ]]; then
+    printf '%s\n' 'help.getAppConfig registration_mode="invite" user_invites_enabled=false user_invite_quota=0; want invite, true, 5'
+    exit 0
+  fi
   printf '%s\n' 'help.getAppConfig passed on 100.124.236.66:2443 registration_mode=invite user_invites_enabled=true user_invite_quota=5'
 else
   echo "unexpected fixture docker call: $*" >&2
@@ -124,11 +128,12 @@ setup_case() {
 }
 
 run_operation() {
-  local fail_runner=${1:-0} fail_inspect_at=${2:-0} mode=${3:-} fail_smoke=${4:-0} output status=0
+  local fail_runner=${1:-0} fail_inspect_at=${2:-0} mode=${3:-} fail_smoke=${4:-0}
+  local fail_smoke_mismatch=${5:-0} output status=0
   local -a operation_args=()
   [[ -z "$mode" ]] || operation_args+=("$mode")
   output=$(env OPS_SHA="$FIXTURE_SHA" FIXTURE_RUNNER_FAIL="$fail_runner" \
-    FIXTURE_SMOKE_FAIL="$fail_smoke" \
+    FIXTURE_SMOKE_FAIL="$fail_smoke" FIXTURE_SMOKE_MISMATCH="$fail_smoke_mismatch" \
     FIXTURE_INSPECT_FAIL_AT="$fail_inspect_at" FIXTURE_INSPECT_COUNT="$FIXTURE_INSPECT_COUNT" \
     PATH="$TMP/bin:$PATH" bash "$TMP/$(basename "$(dirname "$FIXTURE_REPO")")/op.sh" "${operation_args[@]}" 2>&1) || status=$?
   printf '%s\n' "$status" > "$TMP/operation-status"
@@ -239,6 +244,12 @@ output=$(run_operation 0 0 verify)
 [[ "$(cat "$FIXTURE_REPO/.state/rollout-env")" == "$applied_record" ]]
 [[ "$(cat "$FIXTURE_RUNNER_CALL_COUNT")" == 1 ]]
 printf '%s\n' 'PASS transient app-config failure can be retried with read-only verification'
+
+setup_case app-config-probe-mismatch
+output=$(run_operation 0 0 '' 0 1)
+[[ "$(cat "$TMP/operation-status")" == 1 ]]
+[[ "$output" == *'help.getAppConfig registration_mode="invite" user_invites_enabled=false user_invite_quota=0; want invite, true, 5'* ]]
+printf '%s\n' 'PASS app-config mismatch details are printed on probe failure'
 
 setup_case rollback-inspect-failure
 output=$(run_operation 1 7)

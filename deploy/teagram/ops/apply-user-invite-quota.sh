@@ -80,12 +80,18 @@ registration_fingerprint() {
 
 run_app_config_probe() {
   local image_id=$1
-  docker run --rm --network host --read-only --cap-drop ALL \
+  if docker run --rm --network host --read-only --cap-drop ALL \
     --security-opt no-new-privileges --user 65532:65532 \
     --entrypoint /usr/local/bin/mtproto-smoke "$image_id" \
-    --expect-user-invite-quota "$QUOTA" > "$TEMP_DIR/app-config.log" 2>&1 || return 1
-  grep -q "registration_mode=invite user_invites_enabled=true user_invite_quota=$QUOTA" \
-    "$TEMP_DIR/app-config.log"
+    --expect-user-invite-quota "$QUOTA" > "$TEMP_DIR/app-config.log" 2>&1 && \
+      grep -q "registration_mode=invite user_invites_enabled=true user_invite_quota=$QUOTA" \
+        "$TEMP_DIR/app-config.log"; then
+    return 0
+  fi
+  if ! cat -- "$TEMP_DIR/app-config.log" >&2; then
+    printf '%s\n' 'user invite apply: app-config probe output is unavailable' >&2
+  fi
+  return 1
 }
 
 verify_existing_rollout() {
