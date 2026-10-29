@@ -3,8 +3,8 @@ set -Eeuo pipefail
 
 exec 3>&1
 exec 1>&2
-if (($# != 10)); then
-	printf 'fixture runner requires revisions, a run ID, and fixture options\n' >&2
+if (($# != 9)); then
+	printf 'fixture runner requires revisions, a run ID, and auth-progress options\n' >&2
 	exit 2
 fi
 SERVER_REVISION=$1
@@ -16,15 +16,6 @@ AUTH_PROGRESS_OUTPUT=$6
 PAIR_KEY_INPUT=$7
 PAIR_KEY_OUTPUT=$8
 AUTH_PROGRESS_PREBASELINE_CONTROLS=$9
-GUEST_SIGNUP=${10}
-SERVER_REGISTRATION=closed
-ADVERTISE_DEMO_GUEST_SIGN_UP=false
-TURNSTILE_TEST_MODE=false
-if [[ $GUEST_SIGNUP == 1 ]]; then
-	SERVER_REGISTRATION=open
-	ADVERTISE_DEMO_GUEST_SIGN_UP=true
-	TURNSTILE_TEST_MODE=true
-fi
 AUTH_PROGRESS_RUNNER_REVISION=097794ab18ef853ca09c3491b9df4e9a702d0ca6
 AUTH_PROGRESS_ARTIFACT_SOURCE_REVISION=569529c1f36923c098760ef727808254dcb6a662
 AUTH_PROGRESS_RELATIVE_PATH=auth-progress.json
@@ -46,10 +37,6 @@ if [[ $AUTH_PROGRESS != 0 && $AUTH_PROGRESS != 1 || $AUTH_CONTROLS != 0 && $AUTH
 fi
 if [[ $AUTH_PROGRESS_PREBASELINE_CONTROLS == 1 && $AUTH_CONTROLS != 1 ]]; then
 	printf 'prebaseline auth-progress controls require auth controls\n' >&2
-	exit 2
-fi
-if [[ $GUEST_SIGNUP != 0 && $GUEST_SIGNUP != 1 ]] || [[ $GUEST_SIGNUP == 1 && $AUTH_CONTROLS == 1 ]]; then
-	printf 'fixture guest-signup options are invalid or conflict with closed-registration controls\n' >&2
 	exit 2
 fi
 if [[ $AUTH_PROGRESS == 1 && ( $WEB_REVISION != "$AUTH_PROGRESS_ARTIFACT_SOURCE_REVISION" || -z $AUTH_PROGRESS_OUTPUT ) ]]; then
@@ -563,11 +550,9 @@ docker run --detach --name "$BACKEND" --label "$OWNER_LABEL=$OWNER_TOKEN" --labe
 	--tmpfs /var/lib/teagramd-blobs:rw,noexec,nosuid,nodev,size=16m,uid=65532,gid=65532 \
 	--env "TG_POSTGRES_DSN=$DSN" --env TG_AUTHKEY_ENC_KEY_FILE=/run/secrets/authkey.hex \
 	--env TG_RSA_KEY_PATH=/run/secrets/server-key.pem --env TG_PUBLIC_LINK_PREFIX=https://teagramd.test/ \
-	--env TG_LISTEN_ADDR=:2443 --env TG_ADVERTISE_ADDR=teagramd.test:2443 \
+	--env TG_LISTEN_ADDR=:2443 --env TG_ADVERTISE_ADDR=teagramd:2443 \
 	--env TG_WEBSOCKET_LISTEN_ADDR=:2444 --env TG_WEBSOCKET_ALLOWED_ORIGINS=https://teagramd.test \
-	--env "TG_REGISTRATION=$SERVER_REGISTRATION" --env "TG_ADVERTISE_DEMO_GUEST_SIGN_UP=$ADVERTISE_DEMO_GUEST_SIGN_UP" \
-	--env "TG_TURNSTILE_TEST_MODE=$TURNSTILE_TEST_MODE" --env TG_TURNSTILE_HOSTNAMES=teagramd.test \
-	--env TG_LOG_LOGIN_CODES=false \
+	--env TG_REGISTRATION=closed --env TG_LOG_LOGIN_CODES=false \
 	--env TG_BLOB_DIR=/var/lib/teagramd-blobs \
 	--entrypoint /bin/sh mirror.gcr.io/library/postgres:18-alpine -c 'exec sleep 86400' >/dev/null
 docker exec -i "$BACKEND" /bin/sh -c 'umask 077; cat > /run/app/teagramd' < "$BUILD_DIR/teagramd"
@@ -713,29 +698,20 @@ docker exec -i "$FRONT" sh -c 'umask 077; cat > /run/mtproto-target.json' < "$SE
 TLS_SPKI="$(docker exec "$FRONT" sh -c 'openssl x509 -in /run/tls.crt -pubkey -noout | openssl pkey -pubin -outform DER | openssl dgst -sha256 -binary | base64 -w0')"
 docker exec --detach --user 1001:1001 "$FRONT" sh -c 'node /opt/real-server-fixture/front.mjs >/run/front.log 2>&1 & echo $! > /run/front.pid'
 wait_healthy "$FRONT"
-DISCOVERY_JSON="$(docker exec "$FRONT" node -e 'require("https").get("https://127.0.0.1/.well-known/teagramd/client",{rejectUnauthorized:false,headers:{host:"teagramd.test",accept:"application/json"}},response=>response.pipe(process.stdout)).on("error",()=>process.exit(1))')"
-if ! jq -e --arg endpoint "$ENDPOINT" --argjson guestSignUp "$GUEST_SIGNUP" \
-	'.websocket.endpoint == $endpoint and (.demo.guest_sign_up // false) == ($guestSignUp == 1)' <<<"$DISCOVERY_JSON" >/dev/null; then
-	printf 'fixture client discovery does not match the browser artifact and guest-signup configuration\n' >&2
-	jq -c '{websocket, demo}' <<<"$DISCOVERY_JSON" >&2 || true
-	exit 1
-fi
 
 docker exec -i "$CLIENT" /bin/sh -c 'umask 077; cat > /run/secrets/tls.crt' < "$SECRET_DIR/tls.crt"
 docker exec "$CLIENT" chown 1001:1001 /run/secrets/tls.crt
 docker exec "$CLIENT" chmod 0400 /run/secrets/tls.crt
 docker exec "$CLIENT" /run/app/fixture-auth-check --endpoint "$ENDPOINT" --tls-root-file /run/secrets/tls.crt --public-key /run/secrets/server.pub.pem --username "$USER_A" --password-file /run/secrets/a-password >/dev/null
 docker exec "$CLIENT" /run/app/fixture-auth-check --endpoint "$ENDPOINT" --tls-root-file /run/secrets/tls.crt --public-key /run/secrets/server.pub.pem --username "$USER_B" --password-file /run/secrets/b-password >/dev/null
-if [[ $GUEST_SIGNUP == 0 ]]; then
-	docker exec "$CLIENT" /run/app/fixture-auth-check --endpoint "$ENDPOINT" --tls-root-file /run/secrets/tls.crt --public-key /run/secrets/server.pub.pem --closed-signup >/dev/null
-fi
+docker exec "$CLIENT" /run/app/fixture-auth-check --endpoint "$ENDPOINT" --tls-root-file /run/secrets/tls.crt --public-key /run/secrets/server.pub.pem --closed-signup >/dev/null
 
 if [[ $(admin_state) != 'true|NULL' || $(db_count 'SELECT count(*) FROM auth_keys WHERE user_id IS NOT NULL') != 2 ]]; then
 	printf 'administrator election or authenticated-session state changed unexpectedly\n' >&2
 	exit 1
 fi
 if [[ $(db_count 'SELECT count(*) FROM messages') != 0 || $(db_count "SELECT count(*) || '|' || count(*) FILTER (WHERE login_mode = 'username') || '|' || (SELECT count(*) FROM user_passwords) FROM users") != '2|2|2' || $(db_count "SELECT string_agg(handle, ',' ORDER BY handle) FROM usernames") != "$EXPECTED_HANDLES" ]]; then
-	printf 'fixture pre-browser authentication state changed unexpectedly\n' >&2
+	printf 'authentication or closed signup changed account or message state\n' >&2
 	exit 1
 fi
 if docker exec "$BACKEND" /bin/sh -c 'grep -Eq "login code issued|TG_LOG_LOGIN_CODES is on" /run/log/teagramd.log'; then
@@ -743,16 +719,12 @@ if docker exec "$BACKEND" /bin/sh -c 'grep -Eq "login code issued|TG_LOG_LOGIN_C
 	exit 1
 fi
 SERVER_ENV="$(docker inspect --format '{{range .Config.Env}}{{println .}}{{end}}' "$BACKEND")"
-for expected in "TG_REGISTRATION=$SERVER_REGISTRATION" "TG_TURNSTILE_TEST_MODE=$TURNSTILE_TEST_MODE" 'TG_LOG_LOGIN_CODES=false' 'TG_WEBSOCKET_ALLOWED_ORIGINS=https://teagramd.test'; do
+for expected in 'TG_REGISTRATION=closed' 'TG_LOG_LOGIN_CODES=false' 'TG_WEBSOCKET_ALLOWED_ORIGINS=https://teagramd.test'; do
 	if ! printf '%s\n' "$SERVER_ENV" | grep -Fxq "$expected"; then
 		printf 'teagramd security environment assertion failed\n' >&2
 		exit 1
 	fi
 done
-if [[ $GUEST_SIGNUP == 1 ]] && ! printf '%s\n' "$SERVER_ENV" | grep -Fxq 'TG_ADVERTISE_DEMO_GUEST_SIGN_UP=true'; then
-	printf 'teagramd guest-signup advertisement assertion failed\n' >&2
-	exit 1
-fi
 CLIENT_WSS_BASELINE="$(docker exec "$FRONT" node -e 'require("https").get("https://127.0.0.1/healthz",{rejectUnauthorized:false,headers:{host:"teagramd.test"}},response=>response.pipe(process.stdout))' | jq -r '.websocket_101_count')"
 [[ $CLIENT_WSS_BASELINE =~ ^[0-9]+$ ]]
 

@@ -1,5 +1,4 @@
 import fs from 'node:fs';
-import http from 'node:http';
 import https from 'node:https';
 import net from 'node:net';
 
@@ -78,38 +77,6 @@ const server = https.createServer({
     response.setHeader('x-content-type-options', 'nosniff');
     response.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-store' });
     response.end(JSON.stringify({ status: 'ready', websocket_101_count: websocket101Count, route_errors: websocketRouteErrors, route_error_details: websocketRouteErrorDetails }));
-    return;
-  }
-
-  if (request.url.split('?', 1)[0] === '/.well-known/teagramd/client' && ['GET', 'OPTIONS'].includes(request.method)) {
-    const discovery = http.request({
-      hostname: 'teagramd',
-      port: 2444,
-      path: request.url,
-      method: request.method,
-      headers: { accept: 'application/json' },
-    }, (upstream) => {
-      const headers = {};
-      for (const name of ['access-control-allow-methods', 'access-control-allow-origin', 'content-type']) {
-        if (upstream.headers[name]) headers[name] = upstream.headers[name];
-      }
-      response.writeHead(upstream.statusCode || 502, {
-        ...headers,
-        'cache-control': 'no-store',
-        'x-content-type-options': 'nosniff',
-      });
-      upstream.pipe(response);
-    });
-    discovery.on('error', () => {
-      if (!response.headersSent) {
-        response.writeHead(502, {
-          'cache-control': 'no-store',
-          'x-content-type-options': 'nosniff',
-        });
-      }
-      response.end();
-    });
-    discovery.end();
     return;
   }
 

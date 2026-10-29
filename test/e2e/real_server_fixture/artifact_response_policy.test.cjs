@@ -85,37 +85,3 @@ test('fails a 404 for any other artifact path', () => {
     [{ path: '/assets/missing.js', status: 404 }],
   );
 });
-
-test('does not apply the artifact CSP rule to a successful server discovery document', () => {
-  const responses = validArtifactResponses();
-  responses.push({
-    context: 'page',
-    url: `${ORIGIN}/.well-known/teagramd/client`,
-    status: 200,
-    content_security_policy: '',
-  });
-
-  const result = assessArtifactResponses(responses, ORIGIN, PRIVATE_CSP);
-
-  assert.equal(result.passed, true);
-  assert.equal(result.artifactResponses.length, 4);
-  assert.deepEqual(result.failedDiscoveryResponses, []);
-});
-
-test('fails when the server discovery document is unavailable', () => {
-  const responses = validArtifactResponses();
-  responses.push({
-    context: 'page',
-    url: `${ORIGIN}/.well-known/teagramd/client`,
-    status: 404,
-    content_security_policy: '',
-  });
-
-  const result = assessArtifactResponses(responses, ORIGIN, PRIVATE_CSP);
-
-  assert.equal(result.passed, false);
-  assert.deepEqual(
-    result.failedDiscoveryResponses.map(({ url, status }) => ({ path: new URL(url).pathname, status })),
-    [{ path: '/.well-known/teagramd/client', status: 404 }],
-  );
-});
