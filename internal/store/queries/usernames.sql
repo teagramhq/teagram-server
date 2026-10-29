@@ -66,7 +66,7 @@ DELETE FROM usernames WHERE owner_type = sqlc.arg(owner_type) AND owner_id = sql
 -- The handle reported back is the joined usernames row — the one that admitted
 -- the account to this result — not the denormalized users.username copy.
 SELECT u.id, u.phone, u.first_name, u.last_name, u.created_at, u.is_online, u.last_seen_at,
-       un.handle AS username
+       un.handle AS username, u.kind
 FROM users u
 JOIN usernames un ON un.owner_type = 'user' AND un.owner_id = u.id
 WHERE un.handle = lower(sqlc.arg(handle));

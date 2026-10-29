@@ -508,10 +508,9 @@ func TestSequentialUsernameAccountSignInsFromSameClientIP(t *testing.T) {
 
 // TestFreshUsernameSignInAfterSameIPExchangeBudgetIsSpent reproduces a fresh
 // client sign-in after earlier contexts have spent the shared per-network
-// exchange budget. The tailnet budget is lowered so spending it takes a few
-// exchanges rather than the production default's twenty.
+// exchange budget. The small tailnet budget keeps this repro quick; it still
+// runs serially to avoid contention with E2E tests sharing the Postgres harness.
 func TestFreshUsernameSignInAfterSameIPExchangeBudgetIsSpent(t *testing.T) {
-	t.Parallel()
 	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 	defer cancel()
 

@@ -258,6 +258,10 @@ func TestSmoke(t *testing.T) {
 		t.Parallel()
 		testSmokeFullUserProfile(t)
 	})
+	t.Run("bot-user-profile", func(t *testing.T) {
+		t.Parallel()
+		testSmokeBotUserProfile(t)
+	})
 	t.Run("common-chats", func(t *testing.T) {
 		t.Parallel()
 		testSmokeCommonChats(t)
@@ -269,6 +273,10 @@ func TestSmoke(t *testing.T) {
 	t.Run("username-registration", func(t *testing.T) {
 		t.Parallel()
 		testSmokeUsernameRegistration(t)
+	})
+	t.Run("user-invites", func(t *testing.T) {
+		t.Parallel()
+		testSmokeUserInvites(t)
 	})
 	t.Run("username-password-reset", func(t *testing.T) {
 		t.Parallel()
@@ -4546,6 +4554,46 @@ func testSmokeFullUserProfile(t *testing.T) {
 	}
 }
 
+func testSmokeBotUserProfile(t *testing.T) {
+	t.Helper()
+	f := newSmokeFixture(t)
+	bot, _, err := f.store.CreateBot(f.ctx, "smokebotprofile_bot", "Smoke bot")
+	if err != nil {
+		t.Fatalf("create bot: %v", err)
+	}
+
+	const phoneHuman = "+15551049303"
+	seedSmokeUsers(t, f, phoneHuman)
+	requests := &clientRequestRecorder{}
+	human := newSmokeClientWithRequests(t, f, "bot profile human", phoneHuman, requests)
+	var full *tg.UsersUserFull
+	if err := fixtureClientCall(t, human, "users_getFullUser.bot.1", func(ctx context.Context, api *tg.Client) error {
+		var err error
+		full, err = api.UsersGetFullUser(ctx, inputUser(human.id, bot.ID))
+		return err
+	}); err != nil {
+		t.Fatalf("human users.getFullUser for bot fixture: %v", err)
+	}
+
+	user, err := requireSmokeFullUser(full.Users, bot.ID, "human users.getFullUser for bot")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !user.Bot || !user.BotNochats {
+		t.Fatalf("bot user flags = bot:%v nochats:%v, want true/true", user.Bot, user.BotNochats)
+	}
+	if version, ok := user.GetBotInfoVersion(); !ok || version == 0 {
+		t.Fatalf("bot_info_version = (%d, %v), want a nonzero value", version, ok)
+	}
+	if full.FullUser.ID != bot.ID {
+		t.Fatalf("full user id = %d, want bot %d", full.FullUser.ID, bot.ID)
+	}
+	info, ok := full.FullUser.GetBotInfo()
+	if !ok || !info.Zero() {
+		t.Fatalf("bot_info = (%+v, %v), want minimal empty bot info", info, ok)
+	}
+}
+
 func testSmokeCommonChats(t *testing.T) {
 	t.Helper()
 	f := newSmokeFixture(t)
@@ -5411,6 +5459,8 @@ type smokeFixture struct {
 	stopCleanupRegistered       bool
 	suppressChannelPostDelivery func(channelID int64) bool
 	regMode                     config.RegistrationMode
+	userInviteQuota             int
+	userInviteMinAccountAge     time.Duration
 	welcomeChannel              string
 	turnstileSiteKey            string
 	turnstileVerifier           api.SignUpTurnstileVerifier
@@ -5851,7 +5901,8 @@ func newSmokeFixtureWithDeadline(t *testing.T, regMode config.RegistrationMode, 
 		ctx: ctx, failures: newClientFailureSignal(cancelFailure), key: key, dsn: dsn,
 		store: st, blobs: blobs, codes: newMultiCodeSink(), dcID: 2,
 		regMode: regMode, stickerImportMode: config.StickerImportOn,
-		recoveryEmailMode: config.RecoveryEmailOff, signUpTermsOfService: config.DefaultSignUpTermsOfService,
+		userInviteMinAccountAge: config.DefaultUserInviteMinAccountAge,
+		recoveryEmailMode:       config.RecoveryEmailOff, signUpTermsOfService: config.DefaultSignUpTermsOfService,
 	}
 	if beforeStart != nil {
 		beforeStart(f)
@@ -5878,7 +5929,7 @@ func (f *smokeFixture) start(t *testing.T, address string) {
 		t, f.ctx, f.key, f.dcID, f.store, f.dsn, f.codes.Logger(), ln, f.rateLimits, f.regMode,
 		f.blobs, f.persistStatus, nil, f.turnstileSiteKey, f.turnstileVerifier, f.welcomeChannel,
 		f.turnstileSignInEnabled, f.recoveryEmailMode, f.suppressChannelPostDelivery, f.signUpTermsOfService,
-		f.stickerSets, f.uploadMaxFileBytes, f.stickerImportMode, f.photoThumbs,
+		f.stickerSets, f.uploadMaxFileBytes, f.stickerImportMode, f.userInviteQuota, f.userInviteMinAccountAge, f.photoThumbs,
 	)
 	f.registry = registry
 	f.setServerStop(t.Cleanup, stop)

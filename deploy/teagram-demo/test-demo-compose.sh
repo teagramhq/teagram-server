@@ -15,7 +15,7 @@ TG_PUBLIC_LINK_PREFIX=https://demo.teagram.io/
 TG_ADVERTISE_ADDR=demo.teagram.io:443
 TG_ADVERTISE_DEMO_GUEST_SIGN_UP=true
 TG_WEBSOCKET_LISTEN_ADDR=:2446
-TG_WEBSOCKET_ALLOWED_ORIGINS=https://web.teagram.io
+TG_WEBSOCKET_ALLOWED_ORIGINS=https://web.teagram.io,https://demo.teagram.io
 TG_LOG_LOGIN_CODES=false
 TG_REGISTRATION=open
 TG_MAX_FILE_BYTES=16777216
@@ -40,8 +40,7 @@ env -u COMPOSE_FILE -u COMPOSE_PROJECT_NAME -u COMPOSE_PROFILES \
   "${compose[@]}" config --format json > "$TMP_DIR/target.json"
 jq -e \
   --arg secretFile "$secret_file" \
-  --arg haproxyConfigHash "$TEAGRAM_DEMO_HAPROXY_CONFIG_SHA256" \
-  --arg edgeConfigHash "$TEAGRAM_DEMO_EDGE_CONFIG_SHA256" '
+  --arg haproxyConfigHash "$TEAGRAM_DEMO_HAPROXY_CONFIG_SHA256" '
   .name == "teagram-demo"
   and (.services | keys | sort) == ["edge", "haproxy", "migrate", "postgres", "teagramd", "teagramd-next", "turnstile-egress"]
   and ((.services.teagramd.ports // []) | length) == 0
@@ -57,7 +56,9 @@ jq -e \
   and .services.haproxy.networks.backend.ipv4_address == "198.18.130.2"
   and .services.haproxy.healthcheck.test[-1] == "http://127.0.0.1:8404/healthz"
   and .services.edge.depends_on.haproxy.condition == "service_healthy"
-  and .services.edge.labels["com.teagram.demo.edge-config-sha256"] == $edgeConfigHash
+  and .services.edge.entrypoint == ["nginx", "-c", "/etc/nginx/demo/nginx.conf", "-g", "daemon off;"]
+  and (.services.edge.labels // {}) == {}
+  and any(.services.edge.volumes[]; (.source | endswith("/deploy/teagram-demo/nginx-config")) and .target == "/etc/nginx/demo" and .read_only)
   and any(.services.edge.volumes[]; (.source | endswith("/.state/teagram-demo/public-client")) and .target == "/usr/share/nginx/html/.well-known/teagramd" and .read_only)
   and (.services.teagramd.networks | keys) == ["backend"]
   and .services.teagramd.networks.backend.ipv4_address == "198.18.130.253"
@@ -99,7 +100,8 @@ jq -e \
   and .services["teagramd-next"].environment.TG_UPLOAD_MAX_BYTES == "512000"
   and .services["teagramd-next"].environment.TG_RATE_LIMIT_UPLOAD_BYTES == "20971520"
   and .services.teagramd.environment.TG_WEBSOCKET_LISTEN_ADDR == ":2446"
-  and .services.teagramd.environment.TG_WEBSOCKET_ALLOWED_ORIGINS == "https://web.teagram.io"
+  and .services.teagramd.environment.TG_WEBSOCKET_ALLOWED_ORIGINS == "https://web.teagram.io,https://demo.teagram.io"
+  and .services["teagramd-next"].environment.TG_WEBSOCKET_ALLOWED_ORIGINS == "https://web.teagram.io,https://demo.teagram.io"
   and .services.teagramd.environment.TG_CLIENT_ADDR_TRUST == "proxy-v2"
   and .services.teagramd.environment.TG_CLIENT_ADDR_PROXY_CIDRS == "198.18.130.2/32"
   and .services.teagramd.environment.TG_TURNSTILE_SITE_KEY == "fixture-site-key"
@@ -126,58 +128,241 @@ jq -e \
 ' "$TMP_DIR/target.json" >/dev/null
 
 (
+  demo_compose() {
+    cat "$TMP_DIR/target.json"
+  }
+  demo_compose_with_file() {
+    docker compose --project-directory "$REPO_ROOT" --project-name teagram-demo \
+      --file "$1" "${@:2}"
+  }
+  LEGACY_SOURCE_HASH=$(printf 'legacy nginx config fixture\n' | sha256sum | awk '{print $1}')
+  LEGACY_HASH=$(demo_edge_legacy_compose_hash "$LEGACY_SOURCE_HASH")
+  [[ "$LEGACY_HASH" =~ ^[0-9a-f]{64}$ ]] || {
+    printf 'normalized legacy edge Compose file did not produce a valid hash\n' >&2
+    exit 1
+  }
+)
+
+(
   MOCK_TARGET_HASH=$(printf 'target config' | sha256sum | awk '{print $1}')
   MOCK_OTHER_HASH=$(printf 'changed config' | sha256sum | awk '{print $1}')
   MOCK_LIVE_HASH=$MOCK_TARGET_HASH
   MOCK_HAPROXY_SOURCE_HASH=$TEAGRAM_DEMO_HAPROXY_CONFIG_SHA256
-  MOCK_EDGE_SOURCE_HASH=$TEAGRAM_DEMO_EDGE_CONFIG_SHA256
+  MOCK_PREVIOUS_SHA=1111111111111111111111111111111111111111
+  MOCK_LEGACY_SOURCE_HASH=$(printf 'legacy nginx config fixture\n' | sha256sum | awk '{print $1}')
+  MOCK_LIVE_EDGE_SOURCE_HASH=$MOCK_LEGACY_SOURCE_HASH
+  MOCK_MOUNT_LAYOUT=directory
+  MOCK_EDGE_DRIFT=none
+  MOCK_CURRENT_RENDER="$TMP_DIR/current-edge-render.json"
+
+  git() {
+    if [[ "$1" == -C && "$2" == "$DEMO_REPO_ROOT" && "$3" == show &&
+      "$4" == "$MOCK_PREVIOUS_SHA:deploy/teagram-demo/nginx.conf" ]]; then
+      printf 'legacy nginx config fixture\n'
+    else
+      return 1
+    fi
+  }
 
   demo_compose() {
     if [[ "$1" == ps && "$2" == -q ]]; then
       printf 'proxy-container\n'
     elif [[ "$1" == config && "$2" == --hash && "$3" == "$MOCK_SERVICE" ]]; then
       printf '%s %s\n' "$3" "$MOCK_TARGET_HASH"
+    elif [[ "$1" == config && "$2" == --format && "$3" == json ]]; then
+      if [[ "$MOCK_EDGE_DRIFT" == none ]]; then
+        cat "$TMP_DIR/target.json" | tee "$MOCK_CURRENT_RENDER"
+      else
+        jq --arg drift "$MOCK_EDGE_DRIFT" '
+          if $drift == "image" then .services.edge.image += "-drift"
+          elif $drift == "port" then .services.edge.ports[0].published = "18080"
+          elif $drift == "network" then .services.edge.networks.edge.aliases = ["drift"]
+          elif $drift == "resources" then .services.edge.mem_limit = ((.services.edge.mem_limit | tonumber) + 1048576)
+          else error("unknown edge drift fixture") end
+        ' "$TMP_DIR/target.json" | tee "$MOCK_CURRENT_RENDER"
+      fi
     else
       return 1
     fi
   }
+  demo_compose_with_file() {
+    docker compose --file "$1" "${@:2}"
+  }
   docker() {
+    if [[ "$1" == compose ]]; then
+      local config_file=
+      local -a args=("$@")
+      local index
+      for ((index = 1; index < ${#args[@]}; index++)); do
+        if [[ "${args[index]}" == --file ]]; then
+          config_file="${args[index + 1]}"
+          break
+        fi
+      done
+      [[ -f "$config_file" && "${args[-3]} ${args[-2]} ${args[-1]}" == 'config --hash edge' ]] || return 1
+      jq -e \
+        --slurpfile current "$MOCK_CURRENT_RENDER" \
+        --arg legacyFile "$DEMO_SCRIPT_DIR/nginx.conf" \
+        --arg discoveryDir "$DEMO_STATE_DIR/public-client" \
+        --arg legacySourceHash "$MOCK_LEGACY_SOURCE_HASH" '
+          .services.edge as $normalized
+          | $current[0].services.edge as $desired
+          | $normalized.entrypoint == ["nginx", "-g", "daemon off;"]
+            and ($normalized.labels == (($desired.labels // {}) + {
+              "com.teagram.demo.edge-config-sha256": $legacySourceHash
+            }))
+            and $normalized.image == $desired.image
+            and $normalized.ports == $desired.ports
+            and $normalized.networks == $desired.networks
+            and $normalized.mem_limit == $desired.mem_limit
+            and $normalized.memswap_limit == $desired.memswap_limit
+            and $normalized.cpus == $desired.cpus
+            and $normalized.pids_limit == $desired.pids_limit
+            and any($normalized.volumes[]; .type == "bind" and .source == $legacyFile and
+              .target == "/etc/nginx/nginx.conf" and .read_only)
+            and all($normalized.volumes[]; .target != "/etc/nginx/demo")
+            and any($normalized.volumes[]; .source == $discoveryDir and
+              .target == "/usr/share/nginx/html/.well-known/teagramd" and .read_only)
+        ' "$config_file" >/dev/null || return 1
+      jq -c '.services.edge' "$config_file" | sha256sum | awk '{print "edge", $1}'
+      return
+    fi
     [[ "$1" == inspect && "$2" == --format ]] || return 1
     case "$3" in
       *com.docker.compose.config-hash*) printf '%s\n' "$MOCK_LIVE_HASH" ;;
       *com.teagram.demo.haproxy-config-sha256*) printf '%s\n' "$MOCK_HAPROXY_SOURCE_HASH" ;;
-      *com.teagram.demo.edge-config-sha256*) printf '%s\n' "$MOCK_EDGE_SOURCE_HASH" ;;
+      *com.teagram.demo.edge-config-sha256*) printf '%s\n' "$MOCK_LIVE_EDGE_SOURCE_HASH" ;;
+      *'.Mounts'*)
+        if [[ "$MOCK_MOUNT_LAYOUT" == directory ]]; then
+          printf 'bind|%s/nginx-config|/etc/nginx/demo\n' "$DEMO_SCRIPT_DIR"
+        elif [[ "$MOCK_MOUNT_LAYOUT" == legacy ]]; then
+          printf 'bind|%s/nginx.conf|/etc/nginx/nginx.conf\n' "$DEMO_SCRIPT_DIR"
+        else
+          printf 'bind|/unexpected/path|/etc/nginx/other\n'
+        fi
+        ;;
       *) return 1 ;;
     esac
   }
 
-  for MOCK_SERVICE in haproxy edge; do
-    if [[ "$MOCK_SERVICE" == haproxy ]]; then
-      expected_source_hash=$TEAGRAM_DEMO_HAPROXY_CONFIG_SHA256
-    else
-      expected_source_hash=$TEAGRAM_DEMO_EDGE_CONFIG_SHA256
-    fi
-    demo_require_proxy_configuration_current "$MOCK_SERVICE" "$expected_source_hash"
+  MOCK_SERVICE=haproxy
+  demo_require_proxy_configuration_current haproxy "$TEAGRAM_DEMO_HAPROXY_CONFIG_SHA256"
+  MOCK_LIVE_HASH=$MOCK_OTHER_HASH
+  if demo_require_proxy_configuration_current haproxy "$TEAGRAM_DEMO_HAPROXY_CONFIG_SHA256" >/dev/null 2>&1; then
+    printf '%s\n' 'haproxy accepted a stale Compose hash' >&2
+    exit 1
+  fi
+  MOCK_LIVE_HASH=$MOCK_TARGET_HASH
+  MOCK_HAPROXY_SOURCE_HASH=$MOCK_OTHER_HASH
+  if demo_require_proxy_configuration_current haproxy "$TEAGRAM_DEMO_HAPROXY_CONFIG_SHA256" >/dev/null 2>&1; then
+    printf '%s\n' 'haproxy accepted a stale source configuration hash' >&2
+    exit 1
+  fi
 
-    MOCK_LIVE_HASH=$MOCK_OTHER_HASH
-    if demo_require_proxy_configuration_current "$MOCK_SERVICE" "$expected_source_hash" >/dev/null 2>&1; then
-      printf '%s\n' "$MOCK_SERVICE accepted a stale Compose hash" >&2
+  MOCK_SERVICE=edge
+  MOCK_HAPROXY_SOURCE_HASH=$TEAGRAM_DEMO_HAPROXY_CONFIG_SHA256
+  demo_require_proxy_configuration_current edge
+  MOCK_LIVE_HASH=$MOCK_OTHER_HASH
+  if demo_require_proxy_configuration_current edge >/dev/null 2>&1; then
+    printf '%s\n' 'edge accepted a stale Compose hash with the new mount layout' >&2
+    exit 1
+  fi
+  MOCK_LIVE_HASH=$MOCK_OTHER_HASH
+  MOCK_MOUNT_LAYOUT=legacy
+  if demo_require_proxy_configuration_current edge >/dev/null 2>&1; then
+    printf '%s\n' 'edge accepted a legacy mount without deployment migration permission' >&2
+    exit 1
+  fi
+  MOCK_LEGACY_HASH=$(demo_edge_legacy_compose_hash "$MOCK_LEGACY_SOURCE_HASH")
+  MOCK_LIVE_HASH=$MOCK_LEGACY_HASH
+  demo_require_proxy_configuration_current edge "" 1 "$MOCK_PREVIOUS_SHA"
+  MOCK_LIVE_EDGE_SOURCE_HASH=$MOCK_OTHER_HASH
+  if demo_require_proxy_configuration_current edge "" 1 "$MOCK_PREVIOUS_SHA" >/dev/null 2>&1; then
+    printf '%s\n' 'edge accepted a mismatched legacy source configuration hash' >&2
+    exit 1
+  fi
+  MOCK_LIVE_EDGE_SOURCE_HASH=$MOCK_LEGACY_SOURCE_HASH
+  MOCK_LIVE_HASH=$MOCK_OTHER_HASH
+  if demo_require_proxy_configuration_current edge "" 1 "$MOCK_PREVIOUS_SHA" >/dev/null 2>&1; then
+    printf '%s\n' 'edge accepted unrelated Compose drift through legacy migration' >&2
+    exit 1
+  fi
+  MOCK_LIVE_HASH=$MOCK_LEGACY_HASH
+  for MOCK_EDGE_DRIFT in image port network resources; do
+    if demo_require_proxy_configuration_current edge "" 1 "$MOCK_PREVIOUS_SHA" >/dev/null 2>&1; then
+      printf 'edge accepted %s drift through legacy migration\n' "$MOCK_EDGE_DRIFT" >&2
       exit 1
     fi
-    MOCK_LIVE_HASH=$MOCK_TARGET_HASH
-
-    if [[ "$MOCK_SERVICE" == haproxy ]]; then
-      MOCK_HAPROXY_SOURCE_HASH=$MOCK_OTHER_HASH
-    else
-      MOCK_EDGE_SOURCE_HASH=$MOCK_OTHER_HASH
-    fi
-    if demo_require_proxy_configuration_current "$MOCK_SERVICE" "$expected_source_hash" >/dev/null 2>&1; then
-      printf '%s\n' "$MOCK_SERVICE accepted a stale source configuration hash" >&2
-      exit 1
-    fi
-    MOCK_HAPROXY_SOURCE_HASH=$TEAGRAM_DEMO_HAPROXY_CONFIG_SHA256
-    MOCK_EDGE_SOURCE_HASH=$TEAGRAM_DEMO_EDGE_CONFIG_SHA256
   done
+)
+
+(
+  MOCK_MOUNT_LAYOUT=legacy
+  MOCK_EDGE_RECREATE_COUNT=0
+  MOCK_EDGE_PRECHECKED=0
+  MOCK_EDGE_CONFIG_TESTED=0
+  MOCK_EDGE_RELOADED=0
+
+  demo_compose() {
+    if [[ "$*" == 'ps -q edge' ]]; then
+      if [[ "$MOCK_MOUNT_LAYOUT" == directory ]]; then
+        printf 'refreshed-edge\n'
+      else
+        printf 'stale-edge\n'
+      fi
+    elif [[ "$*" == 'up -d --no-deps --force-recreate edge' ]]; then
+      MOCK_MOUNT_LAYOUT=directory
+      ((MOCK_EDGE_RECREATE_COUNT += 1))
+    elif [[ "$*" == 'run --rm -T --no-deps --entrypoint nginx edge -c /etc/nginx/demo/nginx.conf -t' ]]; then
+      MOCK_EDGE_PRECHECKED=1
+    else
+      printf 'unexpected demo_compose invocation: %s\n' "$*" >&2
+      return 1
+    fi
+  }
+  docker() {
+    if [[ "$1" == inspect && "$2" == --format && "$3" == *'.Mounts'* ]]; then
+      if [[ "$MOCK_MOUNT_LAYOUT" == directory ]]; then
+        printf 'bind|%s/nginx-config|/etc/nginx/demo\n' "$DEMO_SCRIPT_DIR"
+      elif [[ "$MOCK_MOUNT_LAYOUT" == legacy ]]; then
+        printf 'bind|%s/nginx.conf|/etc/nginx/nginx.conf\n' "$DEMO_SCRIPT_DIR"
+      else
+        printf 'bind|/unexpected/path|/etc/nginx/other\n'
+      fi
+    elif [[ "$1" == exec && "$2" == refreshed-edge && "$3" == nginx && "$4" == -c &&
+      "$5" == /etc/nginx/demo/nginx.conf && "$6" == -t ]]; then
+      MOCK_EDGE_CONFIG_TESTED=1
+    elif [[ "$1" == exec && "$2" == refreshed-edge && "$3" == nginx && "$4" == -c &&
+      "$5" == /etc/nginx/demo/nginx.conf && "$6" == -s && "$7" == reload ]]; then
+      MOCK_EDGE_RELOADED=1
+    else
+      printf 'unexpected docker invocation: %s\n' "$*" >&2
+      return 1
+    fi
+  }
+
+  EDGE_CONTAINER_ID=
+  demo_reload_edge
+  [[ "$EDGE_CONTAINER_ID" == refreshed-edge && "$MOCK_MOUNT_LAYOUT" == directory &&
+    "$MOCK_EDGE_PRECHECKED" == 1 && "$MOCK_EDGE_RECREATE_COUNT" == 1 && "$MOCK_EDGE_CONFIG_TESTED" == 1 &&
+    "$MOCK_EDGE_RELOADED" == 1 ]] || {
+    printf 'edge reload did not migrate the legacy single-file mount before validating it\n' >&2
+    exit 1
+  }
+  demo_reload_edge
+  [[ "$MOCK_EDGE_RECREATE_COUNT" == 1 ]] || {
+    printf 'edge reload recreated a directory-mounted edge instead of reloading it\n' >&2
+    exit 1
+  }
+  MOCK_MOUNT_LAYOUT=unsupported
+  if demo_reload_edge >/dev/null 2>&1; then
+    printf 'edge reload recreated an unsupported mount layout\n' >&2
+    exit 1
+  fi
+  [[ "$MOCK_EDGE_RECREATE_COUNT" == 1 ]] || {
+    printf 'edge reload recreated a container for a non-migration config change\n' >&2
+    exit 1
+  }
 )
 
 python3 - "$SCRIPT_DIR/render-haproxy-config.py" "$SCRIPT_DIR/haproxy.cfg" "$TMP_DIR" <<'PY'
@@ -431,20 +616,26 @@ jq -e --slurpfile bootstrap "$TMP_DIR/bootstrap-inventory.json" '
   ))
 ' "$TMP_DIR/seed-inventory.json" >/dev/null
 
-grep -Fq 'location = /apiws {' "$SCRIPT_DIR/nginx.conf"
+grep -Fq 'location = /apiws {' "$SCRIPT_DIR/nginx-config/nginx.conf"
+grep -Fq 'root /usr/share/nginx/html/.well-known/teagramd/web/current;' "$SCRIPT_DIR/nginx-config/nginx.conf"
+grep -Fq 'location = /teagram-config.json {' "$SCRIPT_DIR/nginx-config/nginx.conf"
+grep -Fq 'connect-src '\''self'\'' wss://demo.teagram.io https://challenges.cloudflare.com;' "$SCRIPT_DIR/nginx-config/nginx.conf"
 # These patterns match literal Nginx variables.
 # shellcheck disable=SC2016
-grep -Fq 'set $teagramd http://haproxy:2446;' "$SCRIPT_DIR/nginx.conf"
+grep -Fq 'set $teagramd http://haproxy:2446;' "$SCRIPT_DIR/nginx-config/nginx.conf"
 # shellcheck disable=SC2016
-grep -Fq 'proxy_set_header CF-Connecting-IP $http_cf_connecting_ip;' "$SCRIPT_DIR/nginx.conf"
+grep -Fq 'proxy_set_header CF-Connecting-IP $http_cf_connecting_ip;' "$SCRIPT_DIR/nginx-config/nginx.conf"
 grep -Fq '"CF-Connecting-IP": "192.0.2.1"' "$SCRIPT_DIR/smoke.py"
-grep -Fq 'location = / { default_type text/plain; return 200 "Teagram demo server"; }' "$SCRIPT_DIR/nginx.conf"
+grep -Fq 'return 200 "Teagram demo server";' "$SCRIPT_DIR/nginx-config/nginx.conf"
+grep -Fq 'args.bootstrap' "$SCRIPT_DIR/smoke.py"
+grep -Fq 'https://foreign.example", 403' "$SCRIPT_DIR/smoke.py"
+grep -Fq 'args.web_source_commit' "$SCRIPT_DIR/smoke.py"
 grep -Fq 'base_url + "/"' "$SCRIPT_DIR/smoke.py"
-grep -Fq 'location = /admin { return 404; }' "$SCRIPT_DIR/nginx.conf"
-grep -Fq 'location ^~ /admin/ { return 404; }' "$SCRIPT_DIR/nginx.conf"
-grep -Fq 'fastcgi_temp_path /tmp/fastcgi_temp;' "$SCRIPT_DIR/nginx.conf"
-grep -Fq 'uwsgi_temp_path /tmp/uwsgi_temp;' "$SCRIPT_DIR/nginx.conf"
-grep -Fq 'scgi_temp_path /tmp/scgi_temp;' "$SCRIPT_DIR/nginx.conf"
+grep -Fq 'location = /admin { return 404; }' "$SCRIPT_DIR/nginx-config/nginx.conf"
+grep -Fq 'location ^~ /admin/ { return 404; }' "$SCRIPT_DIR/nginx-config/nginx.conf"
+grep -Fq 'fastcgi_temp_path /tmp/fastcgi_temp;' "$SCRIPT_DIR/nginx-config/nginx.conf"
+grep -Fq 'uwsgi_temp_path /tmp/uwsgi_temp;' "$SCRIPT_DIR/nginx-config/nginx.conf"
+grep -Fq 'scgi_temp_path /tmp/scgi_temp;' "$SCRIPT_DIR/nginx-config/nginx.conf"
 grep -Fq 'image: mirror.gcr.io/library/nginx:1.28.0-alpine@sha256:' "$SCRIPT_DIR/compose.yaml"
 grep -Fq 'http-request set-src req.hdr_ip(CF-Connecting-IP)' "$SCRIPT_DIR/haproxy.cfg"
 grep -Fq 'req.hdr_cnt(CF-Connecting-IP) eq 1' "$SCRIPT_DIR/haproxy.cfg"
@@ -470,9 +661,13 @@ grep -Fq 'cache deny all' "$SCRIPT_DIR/turnstile-egress.conf"
 grep -Fq 'level: ready' "$SCRIPT_DIR/pebble-health.yaml"
 grep -Fq 'host: 127.0.0.1' "$SCRIPT_DIR/pebble-health.yaml"
 grep -Fq 'port: 3128' "$SCRIPT_DIR/pebble-health.yaml"
-grep -Fq 'location = /healthz {' "$SCRIPT_DIR/nginx.conf"
+grep -Fq 'location = /healthz {' "$SCRIPT_DIR/nginx-config/nginx.conf"
 grep -Fq 'https://demo.teagram.io/healthz' "$SCRIPT_DIR/gatus.yaml"
 grep -Fq 'base_url + "/healthz"' "$SCRIPT_DIR/smoke.py"
+cmp -s "$SCRIPT_DIR/nginx.conf" "$SCRIPT_DIR/nginx-config/nginx.conf" || {
+  printf 'legacy ops fingerprint config copy does not match the mounted Nginx config\n' >&2
+  exit 1
+}
 
 python3 - "$SCRIPT_DIR/wipe-weekly.sh" "$SCRIPT_DIR/init-demo.sh" \
   "$SCRIPT_DIR/deploy-main.sh" "$SCRIPT_DIR/demo-common.sh" \
@@ -528,6 +723,18 @@ if "markers=133" not in seed_test_text or "search_account=demo_searcher" not in 
     raise SystemExit("test-seed-compose.sh: API convergence check must assert stable marker counts and search account")
 deploy_path = Path(sys.argv[3])
 deploy = deploy_path.read_text(encoding="utf-8")
+cleanup = deploy.split("demo_cleanup() {", 1)[1].split("\n}", 1)[0]
+if 'cat-file -e \\\n      "$PREV_SHA:deploy/teagram-demo/nginx-config/nginx.conf"' not in cleanup:
+    raise SystemExit("deploy-main.sh: rollback must distinguish old directory and file mounts")
+if "demo_restore_legacy_edge_after_rollback || edge_rollback_rc=1" not in cleanup:
+    raise SystemExit("deploy-main.sh: legacy edge restore must run before the wrapper returns")
+if "demo_reload_edge" not in cleanup:
+    raise SystemExit("deploy-main.sh: directory-mounted edge rollback must reload gracefully")
+forced_command = Path(sys.argv[5]).read_text(encoding="utf-8")
+if "demo_restore_legacy_edge_after_rollback" in forced_command:
+    raise SystemExit("forced-command.sh: first migration recovery must run before the old wrapper resets checkout")
+if 'bash "$REPO/deploy/teagram-demo/deploy-main.sh"' not in forced_command:
+    raise SystemExit("forced-command.sh: server deployment must invoke the checked deployment rollback")
 init = Path(sys.argv[2]).read_text(encoding="utf-8")
 assert_text_order(init, "init-demo.sh image release", [
     'IMAGE_REF=$(demo_pull_image_by_sha "$SHA" "$IMAGE_DIGEST")',
@@ -543,8 +750,15 @@ deploy_preflight = deploy.split('TARGET_RENDER="$TMP_DIR/target-render.json"', 1
 assert_text_order(deploy_preflight, "deploy-main.sh proxy preflight", [
     'mapfile -t CONTAINER_IDS < <(demo_compose ps -q)',
     'demo_require_proxy_configuration_current haproxy "$TEAGRAM_DEMO_HAPROXY_CONFIG_SHA256"',
-    'demo_require_proxy_configuration_current edge "$TEAGRAM_DEMO_EDGE_CONFIG_SHA256"',
+    'demo_require_proxy_configuration_current edge "" 1',
+    'demo_reload_edge',
     'demo_render_config "$TARGET_RENDER"',
+])
+deploy_edge_refresh = deploy.split('EDGE_CONFIG_RELOAD_ATTEMPTED=1\ndemo_reload_edge\n', 1)[1]
+assert_text_order(deploy_edge_refresh, "deploy-main.sh reloaded edge inventory", [
+    'mapfile -t CONTAINER_IDS < <(demo_compose ps -q)',
+    'demo_prepare_client_config_dir',
+    'docker inspect "${CONTAINER_IDS[@]}"',
 ])
 deploy_steps = [
     'CANDIDATE_IMAGE_REF=$(demo_pull_image_by_sha "$SHA" "$IMAGE_DIGEST")',
@@ -563,7 +777,7 @@ deploy_steps = [
     'demo_haproxy_control wait-healthy "$CANDIDATE_SERVER" --timeout 60',
     'demo_haproxy_control drain "$ACTIVE_SERVER"',
     'install -o root -g root -m 0644 "$TMP_DIR/client.json" "$DEMO_CLIENT_CONFIG.next"',
-    'python3 "$SCRIPT_DIR/smoke.py" "$DEMO_CLIENT_CONFIG"',
+    '--web-artifact-digest "sha256:${PREV_WEB_RELEASE#* }"',
     '"$SCRIPT_DIR/seed-demo.sh" --verify-turnstile --endpoint haproxy:2443',
     'demo_write_active_release "$CANDIDATE_SERVER" "$CANDIDATE_IMAGE_REF"',
     'demo_compose stop "$ACTIVE_SERVER"',
@@ -576,6 +790,8 @@ if "PUBLIC_ACTIVATION_STARTED=1" not in deploy or "migrated database preserved" 
     raise SystemExit("deploy-main.sh: failed cutover must retain the migrated database and dump")
 if 'demo_compose stop edge' in deploy or 'demo_compose stop haproxy' in deploy:
     raise SystemExit("deploy-main.sh: normal deploy must keep the public edge and HAProxy running")
+if 'python3 "$SCRIPT_DIR/smoke.py" --bootstrap "$DEMO_CLIENT_CONFIG"' not in deploy:
+    raise SystemExit("deploy-main.sh: server-only handoff must smoke the bootstrap status only when no web artifact exists")
 backup_function = deploy.split("demo_backup_database() {", 1)[1].split("\n}", 1)[0]
 assert_text_order(backup_function, "deploy-main.sh backup function", [
     'DB_DUMP="$BACKUP_DIR/postgres.dump"',
@@ -686,7 +902,7 @@ assert_order(Path(sys.argv[2]), [
     'demo_compose up -d --wait --wait-timeout 120 "$ACTIVE_SERVER" haproxy',
     '"$SEED_SCRIPT" --verify-turnstile --endpoint haproxy:2443',
     "demo_compose up -d edge",
-    'python3 "$SCRIPT_DIR/smoke.py" "$DEMO_CLIENT_CONFIG"',
+    'python3 "$SCRIPT_DIR/smoke.py" --bootstrap "$DEMO_CLIENT_CONFIG"',
     "exit 0",
 ])
 assert_order(Path(sys.argv[2]), [
@@ -694,7 +910,7 @@ assert_order(Path(sys.argv[2]), [
     'demo_compose up -d --wait --wait-timeout 120 "$ACTIVE_SERVER" haproxy',
     '"$SEED_SCRIPT" --verify-turnstile --endpoint haproxy:2443',
     "demo_compose up -d edge",
-    'python3 "$SCRIPT_DIR/smoke.py" "$DEMO_CLIENT_CONFIG"',
+    'python3 "$SCRIPT_DIR/smoke.py" --bootstrap "$DEMO_CLIENT_CONFIG"',
 ], start=init.index("exit 0") + len("exit 0"))
 assert_order(Path(sys.argv[2]), [
     'demo_compose stop edge haproxy turnstile-egress',
@@ -877,6 +1093,122 @@ env \
   IMAGE_CLEANUP_FUNCTION="$IMAGE_CLEANUP_FUNCTION" \
   TMP_DIR="$TMP_DIR" \
   bash "$TMP_DIR/deploy-image-cleanup-regression.sh"
+
+LEGACY_EDGE_ROLLBACK_FUNCTION="$TMP_DIR/demo-restore-legacy-edge.sh"
+sed -n '/^demo_restore_legacy_edge_after_rollback() {$/,/^}/p' \
+  "$SCRIPT_DIR/deploy-main.sh" > "$LEGACY_EDGE_ROLLBACK_FUNCTION"
+cat > "$TMP_DIR/demo-restore-legacy-edge-regression.sh" <<'BASH'
+set -Eeuo pipefail
+source "$DEMO_COMMON"
+REPO="$TEST_REPO"
+SCRIPT_DIR="$REPO/deploy/teagram-demo"
+DEMO_SCRIPT_DIR="$SCRIPT_DIR"
+DEMO_REPO_ROOT="$REPO"
+DEMO_ENV_FILE="$SCRIPT_DIR/.env"
+TMP_DIR="$TEST_ROOT/tmp"
+PREV_SHA=1111111111111111111111111111111111111111
+MOCK_EDGE_STATE="$TEST_ROOT/edge-state"
+MOCK_RECREATE_COUNT_FILE="$TEST_ROOT/recreate-count"
+export MOCK_EDGE_STATE MOCK_RECREATE_COUNT_FILE
+mkdir -p "$TMP_DIR" "$SCRIPT_DIR/nginx-config"
+printf '%s\n' 'legacy nginx config fixture' > "$SCRIPT_DIR/nginx.conf"
+printf '%s\n' 'global' > "$SCRIPT_DIR/haproxy.cfg"
+printf '%s\n' 'print("fixture")' > "$SCRIPT_DIR/render-haproxy-config.py"
+printf '%s\n' 'POSTGRES_PASSWORD=fixture' > "$DEMO_ENV_FILE"
+printf '%s\n' directory > "$MOCK_EDGE_STATE"
+printf '0\n' > "$MOCK_RECREATE_COUNT_FILE"
+
+source "$LEGACY_EDGE_ROLLBACK_FUNCTION"
+demo_active_image_ref() { printf '%s\n' 'teagramd:previous'; }
+demo_compose() {
+  [[ "$*" == 'ps -a -q edge' ]] || return 1
+  printf 'old-edge\n'
+}
+demo_edge_uses_legacy_file_mount() {
+  local mounts
+  mounts=$(docker inspect --format ignored "$1") || return 1
+  grep -Fqx -- "bind|$DEMO_SCRIPT_DIR/nginx.conf|/etc/nginx/nginx.conf" <<< "$mounts"
+}
+chown() { return 0; }
+git() {
+  if [[ "$1" == -C && "$2" == "$DEMO_REPO_ROOT" && "$3" == cat-file ]]; then
+    return 1
+  fi
+  if [[ "$1" == -C && "$2" == "$DEMO_REPO_ROOT" && "$3" == show ]]; then
+    case "$4" in
+      "$PREV_SHA:deploy/teagram-demo/compose.yaml")
+        printf '%s\n' 'source: ./deploy/teagram-demo/nginx.conf' \
+          'target: /etc/nginx/nginx.conf'
+        ;;
+      "$PREV_SHA:deploy/teagram-demo/nginx.conf")
+        printf '%s\n' 'legacy nginx config fixture'
+        ;;
+      "$PREV_SHA:deploy/teagram-demo/haproxy.cfg")
+        cat "$SCRIPT_DIR/haproxy.cfg"
+        ;;
+      "$PREV_SHA:deploy/teagram-demo/render-haproxy-config.py")
+        cat "$SCRIPT_DIR/render-haproxy-config.py"
+        ;;
+      *) return 1 ;;
+    esac
+    return
+  fi
+  return 1
+}
+docker() {
+  if [[ "$1" == ps && "$2" == -q ]]; then
+    printf 'restored-edge\n'
+  elif [[ "$1" == inspect && "$2" == --format ]]; then
+    if [[ "$(<"$MOCK_EDGE_STATE")" == directory ]]; then
+      printf 'bind|%s/nginx-config|/etc/nginx/demo\n' "$DEMO_SCRIPT_DIR"
+    else
+      printf 'bind|%s/nginx.conf|/etc/nginx/nginx.conf\n' "$DEMO_SCRIPT_DIR"
+    fi
+  elif [[ "$1" == exec && ( "$2" == old-edge || "$2" == restored-edge ) &&
+    "$3" == nginx && "$4" == -t ]]; then
+    printf 'tested\n' >> "$TEST_ROOT/nginx-test"
+  else
+    printf 'unexpected docker invocation: %s\n' "$*" >&2
+    return 1
+  fi
+}
+demo_restore_legacy_edge_after_rollback
+[[ "$(<"$MOCK_EDGE_STATE")" == legacy ]]
+[[ "$(<"$MOCK_RECREATE_COUNT_FILE")" == 1 ]]
+[[ "$(<"$TEST_ROOT/nginx-test")" == tested ]]
+printf '%s\n' 'new checkout config' > "$SCRIPT_DIR/nginx.conf"
+demo_restore_legacy_edge_after_rollback
+[[ "$(<"$MOCK_RECREATE_COUNT_FILE")" == 2 ]]
+demo_restore_legacy_edge_after_rollback
+[[ "$(<"$MOCK_RECREATE_COUNT_FILE")" == 2 ]]
+BASH
+mkdir -p "$TMP_DIR/legacy-edge-bin"
+cat > "$TMP_DIR/legacy-edge-bin/docker" <<'BASH'
+#!/usr/bin/env bash
+set -Eeuo pipefail
+if [[ "$1" == compose && "$*" == *' up -d --no-deps --force-recreate edge' ]]; then
+  [[ "$TEAGRAM_DEMO_EDGE_CONFIG_SHA256" =~ ^[0-9a-f]{64}$ ]]
+  [[ "$TEAGRAM_DEMO_HAPROXY_CONFIG_SHA256" =~ ^[0-9a-f]{64}$ ]]
+  [[ "$TEAGRAM_DEMO_IMAGE_REF" == 'teagramd:previous' ]]
+  printf '%s\n' legacy > "$MOCK_EDGE_STATE"
+  count=$(<"$MOCK_RECREATE_COUNT_FILE")
+  printf '%s\n' "$((count + 1))" > "$MOCK_RECREATE_COUNT_FILE"
+elif [[ "$1" == ps ]]; then
+  printf 'restored-edge\n'
+else
+  printf 'unexpected docker executable invocation: %s\n' "$*" >&2
+  exit 1
+fi
+BASH
+chmod +x "$TMP_DIR/legacy-edge-bin/docker"
+env \
+  DEMO_COMMON="$SCRIPT_DIR/demo-common.sh" \
+  LEGACY_EDGE_ROLLBACK_FUNCTION="$LEGACY_EDGE_ROLLBACK_FUNCTION" \
+  TEST_REPO="$TMP_DIR/legacy-demo-checkout" \
+  TEST_ROOT="$TMP_DIR/legacy-edge-test" \
+  PATH="$TMP_DIR/legacy-edge-bin:$PATH" \
+  bash "$TMP_DIR/demo-restore-legacy-edge-regression.sh"
+
 
 cat > "$TMP_DIR/deploy-rollback-failure-regression.sh" <<'BASH'
 set -Eeuo pipefail
