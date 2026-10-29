@@ -52,15 +52,22 @@ check_ci_contract() {
     ci_fail 'only pull request updates may cancel in-progress CI runs'
   [[ "$(ci_query '.jobs."publish-demo-image".if')" == "\${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}" ]] ||
     ci_fail 'the demo image may publish only from main pushes'
-  [[ "$(ci_query '.jobs."publish-demo-image".needs | sort | join(",")')" == 'browser-acceptance,browser-acceptance-image,ci,ci-main,compose,css,demo-web-artifact,deploy-workflow,docker,e2e-admin,lint,mirror-rustfs-qualification-images,photothumb-runtime,real-server-fixtures,restore-readiness,rustfs-transition-qualification,schema-gate-postgres,smoke,sql-lint,sqlc,sticker-bundle,websocket-d1,websocket-permanent-exchange' ]] ||
+  [[ "$(ci_query '.jobs."publish-demo-image".needs | sort | join(",")')" == 'browser-acceptance,browser-acceptance-image,ci,ci-main,compose,css,demo-web-artifact,deploy-workflow,docker,e2e-admin,lint,mirror-rustfs-qualification-images,photothumb-runtime,real-server-fixtures,restore-readiness,rustfs-transition-qualification,smoke,sql-lint,sqlc,sticker-bundle,test-migrations,websocket-d1,websocket-permanent-exchange' ]] ||
     ci_fail 'the demo image publish must wait for every CI lane'
   [[ "$(ci_query '.jobs.ci.needs | join(",")')" == *'demo-web-artifact'* ]] ||
     ci_fail 'the required CI gate must include the pinned demo web artifact build'
+  [[ "$(ci_query '.jobs.ci.needs | join(",")')" == *'test-migrations'* ]] ||
+    ci_fail 'the required CI gate must include the migrations lane'
   [[ "$(ci_query '.jobs.ci.steps[] | select(.name == "Require all CI lanes to pass") | .env.DEMO_WEB_ARTIFACT_RESULT')" == '${{ needs.demo-web-artifact.result }}' ]] ||
     ci_fail 'the required CI gate must receive the demo web artifact result'
+  [[ "$(ci_query '.jobs.ci.steps[] | select(.name == "Require all CI lanes to pass") | .env.TEST_MIGRATIONS_RESULT')" == '${{ needs.test-migrations.result }}' ]] ||
+    ci_fail 'the required CI gate must receive the migrations result'
   ci_query '.jobs.ci.steps[] | select(.name == "Require all CI lanes to pass") | .run' |
     grep -Fq '"$DEMO_WEB_ARTIFACT_RESULT" != "success"' ||
     ci_fail 'the required CI gate must reject a failed demo web artifact build'
+  ci_query '.jobs.ci.steps[] | select(.name == "Require all CI lanes to pass") | .run' |
+    grep -Fq '"$TEST_MIGRATIONS_RESULT" != "success"' ||
+    ci_fail 'the required CI gate must reject a failed migrations lane'
   [[ "$(ci_query '.jobs."demo-web-artifact".permissions.contents')" == 'read' ]] ||
     ci_fail 'the demo web artifact build must use read-only repository access'
   [[ "$(ci_query '.jobs."demo-web-artifact".permissions | to_entries | map(.key + "=" + .value) | join(",")')" == 'contents=read' ]] ||
