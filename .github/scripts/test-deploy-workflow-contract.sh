@@ -12,6 +12,7 @@ dockerfile="${DEPLOY_DOCKERFILE:-Dockerfile}"
 demo_forced_command="deploy/teagram-demo/forced-command.sh"
 expected_if="\${{ github.event_name == 'workflow_dispatch' || (github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push') }}"
 expected_resolve_demo_if="\${{ needs.deploy.result == 'success' }}"
+expected_demo_resolver_ref='${{ github.workflow_sha }}'
 expected_demo_if="\${{ always() && needs.deploy.result == 'success' }}"
 expected_demo_step_if="\${{ steps.demo-gate.outputs.enabled == 'true' }}"
 expected_demo_cleanup_if="\${{ always() && steps.demo-gate.outputs.enabled == 'true' }}"
@@ -303,6 +304,8 @@ check_contract() {
     fail 'the demo web resolver must wait for the tested server commit'
   [[ "$(query '.jobs.resolve-demo-web.if')" == "$expected_resolve_demo_if" ]] ||
     fail 'the demo web resolver must run only after the server deploy'
+  [[ "$(query '.jobs.resolve-demo-web.steps[] | select(.name == "Check out the workflow source commit") | .with.ref')" == "$expected_demo_resolver_ref" ]] ||
+    fail 'the demo web resolver must use the workflow revision that contains its pin verifier'
   [[ "$(query '.jobs.resolve-demo-web.permissions // {} | to_entries | map(select(.value != "read")) | length')" == '0' ]] ||
     fail 'the demo web resolver must use read-only permissions'
   [[ "$(query '.jobs.resolve-demo-web.outputs.deployable')" == '${{ steps.pin.outputs.deployable }}' ]] ||

@@ -129,10 +129,10 @@ jobs:
       artifact_digest: ${{ steps.pin.outputs.artifact_digest }}
 
     steps:
-      - name: Check out the deployed server commit
+      - name: Check out the workflow source commit
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
-          ref: ${{ needs.deploy.outputs.sha }}
+          ref: ${{ github.workflow_sha }}
           persist-credentials: false
 
       - name: Resolve the pinned web artifact
