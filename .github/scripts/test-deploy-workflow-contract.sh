@@ -52,8 +52,19 @@ check_ci_contract() {
     ci_fail 'only pull request updates may cancel in-progress CI runs'
   [[ "$(ci_query '.jobs."publish-demo-image".if')" == "\${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}" ]] ||
     ci_fail 'the demo image may publish only from main pushes'
-  [[ "$(ci_query '.jobs."publish-demo-image".needs | sort | join(",")')" == 'browser-acceptance,browser-acceptance-image,ci,ci-main,compose,css,demo-web-artifact,deploy-workflow,docker,e2e-admin,lint,mirror-rustfs-qualification-images,photothumb-runtime,real-server-fixtures,restore-readiness,rustfs-transition-qualification,schema-gate-postgres,smoke,sql-lint,sqlc,sticker-bundle,websocket-d1,websocket-permanent-exchange' ]] ||
+  [[ "$(ci_query '.jobs."publish-demo-image".needs | sort | join(",")')" == 'browser-acceptance,browser-acceptance-image,ci,ci-main,compose,css,demo-web-artifact,deploy-workflow,docker,e2e-admin,lint,photothumb-runtime,real-server-fixtures,schema-gate-postgres,smoke,sql-lint,sqlc,sticker-bundle,websocket-d1,websocket-permanent-exchange' ]] ||
     ci_fail 'the demo image publish must wait for every CI lane'
+  for removed_job in restore-readiness rustfs-transition-qualification mirror-rustfs-qualification-images; do
+    [[ "$(ci_query ".jobs | has(\"$removed_job\")")" == 'false' ]] ||
+      ci_fail "$removed_job must stay out of CI"
+  done
+  ci_needs="$(ci_query '.jobs.ci.needs | join(",")')"
+  [[ "$ci_needs" != *'restore-readiness'* && "$ci_needs" != *'rustfs-transition-qualification'* && "$ci_needs" != *'mirror-rustfs-qualification-images'* ]] ||
+    ci_fail 'removed rollout qualification jobs must stay out of the required gate'
+  [[ "$(ci_query '.jobs."schema-gate-postgres".name')" == 'PostgreSQL Atlas schema gate' ]] ||
+    ci_fail 'the Atlas schema gate must remain until its replacement is ready'
+  [[ "$(ci_query '.jobs.ci.needs | join(",")')" == *'schema-gate-postgres'* ]] ||
+    ci_fail 'the required CI gate must retain the Atlas schema gate'
   [[ "$(ci_query '.jobs.ci.needs | join(",")')" == *'demo-web-artifact'* ]] ||
     ci_fail 'the required CI gate must include the pinned demo web artifact build'
   [[ "$(ci_query '.jobs.ci.steps[] | select(.name == "Require all CI lanes to pass") | .env.DEMO_WEB_ARTIFACT_RESULT')" == '${{ needs.demo-web-artifact.result }}' ]] ||

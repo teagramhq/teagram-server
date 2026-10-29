@@ -152,7 +152,7 @@ func benchmarkBlobBackend(b *testing.B, name string) blob.Store {
 		}
 		return store
 	case "S3":
-		return newMinioStore(b)
+		return newRustFSStore(b)
 	default:
 		b.Fatalf("unknown benchmark backend %q", name)
 		return nil

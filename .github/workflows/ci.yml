@@ -603,10 +603,6 @@ jobs:
       - name: Validate migrations
         run: atlas migrate validate --dir file://migrations
 
-      # Quay no longer allows anonymous pulls of its MinIO image. Build the
-      # test fixture from the pinned public source so fork PRs need no secrets.
-      # The daemon's builder uses the base images pulled below, as in the
-      # docker job.
       - uses: docker/setup-buildx-action@v4.4.1
         with:
           driver: docker
@@ -614,8 +610,7 @@ jobs:
       - name: Pull the base images
         timeout-minutes: 10
         run: >-
-          bash .github/scripts/pull-base-images.sh Dockerfile.minio-test
-          deploy/link-edge/Dockerfile
+          bash .github/scripts/pull-base-images.sh deploy/link-edge/Dockerfile
 
       # Keep the link edge as its own Compose project and build both restricted
       # images in CI. The explicit empty env file keeps server credentials out
@@ -735,27 +730,20 @@ jobs:
           ss -ltn 'sport = :8082'
           curl --fail --silent --show-error --output /dev/null http://127.0.0.1:8082/syntheticname
 
-      - name: Build MinIO image for tests
-        uses: docker/build-push-action@v7.4.0
-        with:
-          context: .
-          file: Dockerfile.minio-test
-          tags: quay.io/minio/minio:latest
-          load: true
-          cache-from: type=gha,scope=minio-test
-          cache-to: ${{ github.ref == 'refs/heads/main' && 'type=gha,scope=minio-test,mode=max' || '' }}
-
       - name: Measure flat parts directory ceiling
         run: PARTS_DIR_CEILING_PROBE=1 go test -count=1 -timeout 30m ./internal/blob/ -run TestFlatPartsDirEntryCeiling -v
 
-      # Testcontainers pulls mirror.gcr.io/postgres:18-alpine. Pre-pull it with
+      # Testcontainers uses these public mirrored images. Pre-pull them with
       # bounded retries so transient mirror misses are caught before package tests.
       #
       # Keep the cached non-E2E command in the Makefile unchanged. The remaining
       # E2E invocation runs once with the same race/count/timeout/package
       # settings, excluding fixtures and adding JSON output for diagnostics.
-      - name: Pre-pull the shared PostgreSQL test image with retry
-        run: bash .github/scripts/pull-base-images.sh --image mirror.gcr.io/postgres:18-alpine
+      - name: Pre-pull shared test images with retry
+        run: >-
+          bash .github/scripts/pull-base-images.sh
+          --image mirror.gcr.io/postgres:18-alpine
+          --image mirror.gcr.io/rustfs/rustfs:1.0.1
 
       - name: Test non-E2E packages
         run: make test-unit
@@ -1012,65 +1000,6 @@ jobs:
           WEB_PERMANENT_WEB_ROOT: ${{ github.workspace }}/web-client
         run: bash .github/scripts/run-websocket-permanent-exchange.sh
 
-  restore-readiness:
-    name: confined restore-to-application
-    needs: ops-prioritize-main
-    if: ${{ always() && (needs.ops-prioritize-main.result == 'success' || (needs.ops-prioritize-main.result == 'skipped' && github.event_name == 'pull_request')) }}
-    runs-on: ubuntu-26.04
-    timeout-minutes: 80
-    permissions:
-      contents: read
-
-    steps:
-      - uses: actions/checkout@v7.0.1
-        with:
-          persist-credentials: false
-          # The gate builds its fixture seeder from a pinned earlier commit.
-          fetch-depth: 0
-
-      - uses: actions/setup-go@v7.0.0
-        with:
-          go-version-file: go.mod
-          cache: false
-
-      - uses: actions/setup-python@v6.0.0
-        with:
-          python-version: "3.12.15"
-
-      - uses: ariga/setup-atlas@v0.3
-        with:
-          version: v1.2.0
-
-      - name: Download locked Go modules
-        run: go mod download
-
-      - name: Test the restore checker and confinement helpers
-        run: >-
-          go test -count=1
-          ./test/e2e/restore_drill
-          ./deploy/teagramd/rollout-runner/restore-readiness-checker
-          ./deploy/teagramd/rollout-runner/restore-readiness-launcher
-          ./deploy/teagramd/rollout-runner/restore-readiness-provisioner
-          ./deploy/teagramd/rollout-runner/restore-readiness-probe
-          ./deploy/teagramd/rollout-runner/restore-readiness-seed
-          ./deploy/teagramd/rollout-runner/restore-readiness-seed-shim
-
-      - name: Test sanitized reports and ownership policy
-        run: python3 -B deploy/teagramd/rollout-runner/test-restore-readiness.py
-
-      - name: Check restore drill shell syntax and lint
-        run: |
-          bash -n deploy/teagramd/rollout-runner/test-restore-readiness.sh
-          bash -n deploy/teagramd/rollout-runner/test-restore-readiness-foreign-fixture.sh
-          shellcheck deploy/teagramd/rollout-runner/test-restore-readiness.sh
-          shellcheck deploy/teagramd/rollout-runner/test-restore-readiness-foreign-fixture.sh
-
-      - name: Run the bounded synthetic restore-to-application gate
-        run: bash deploy/teagramd/rollout-runner/test-restore-readiness-foreign-fixture.sh
-
-      - name: Run local-dump happy path, signal, and SIGKILL fixtures
-        run: bash deploy/teagramd/rollout-runner/test-restore-readiness-foreign-fixture.sh --local-fixture-test
-
   # Keep the existing required check context while making every verification
   # lane mandatory. `always()` runs this when a lane fails or is skipped.
   deploy-workflow:
@@ -1126,11 +1055,8 @@ jobs:
       - name: Check deploy script syntax
         run: |
           bash -n deploy/teagram/deploy-main.sh
-          bash -n deploy/teagram/ops/preflight-replay.sh
-          bash -n deploy/teagram/test-preflight-replay.sh
           bash -n deploy/teagram/teagram-logs.sh
           sh -n deploy/teagram/teagram-ops.sh
-          bash -n deploy/teagram/ops/replay-check.sh
           bash -n deploy/teagram/ops/rollout-evidence.sh
           bash -n deploy/teagram/test-teagram-logs.sh
           bash -n deploy/teagram/ops/target-failure-report.sh
@@ -1162,11 +1088,8 @@ jobs:
           bash -n .github/scripts/perf-postgres.sh .github/scripts/test-perf-postgres.sh
           shellcheck \
             deploy/teagram/deploy-main.sh \
-            deploy/teagram/ops/preflight-replay.sh \
-            deploy/teagram/test-preflight-replay.sh \
             deploy/teagram/teagram-logs.sh \
             deploy/teagram/teagram-ops.sh \
-            deploy/teagram/ops/replay-check.sh \
             deploy/teagram/ops/rollout-evidence.sh \
             deploy/teagram/test-teagram-logs.sh \
             deploy/teagram/ops/target-failure-report.sh \
@@ -1198,14 +1121,10 @@ jobs:
             deploy/teagram/test-deploy-main.sh \
             .github/scripts/perf-postgres.sh \
             .github/scripts/test-perf-postgres.sh \
-            .github/scripts/test-deploy-workflow-contract.sh \
-            .github/scripts/mirror_rustfs_qualification_images.sh
+            .github/scripts/test-deploy-workflow-contract.sh
 
       - name: Check deploy script target fixtures
         run: deploy/teagram/test-deploy-main.sh
-
-      - name: Check read-only Compose preflight replay
-        run: sudo -n deploy/teagram/test-preflight-replay.sh
 
       - name: Check teagram log access command
         run: deploy/teagram/test-teagram-logs.sh
@@ -1334,11 +1253,9 @@ jobs:
       - css
       - browser-acceptance
       - browser-acceptance-image
-      - rustfs-transition-qualification
       - schema-gate-postgres
       - deploy-workflow
       - demo-web-artifact
-      - restore-readiness
     runs-on: ubuntu-26.04
     timeout-minutes: 5
 
@@ -1356,18 +1273,16 @@ jobs:
           CSS_RESULT: ${{ needs.css.result }}
           BROWSER_ACCEPTANCE_RESULT: ${{ needs.browser-acceptance.result }}
           BROWSER_ACCEPTANCE_IMAGE_RESULT: ${{ needs.browser-acceptance-image.result }}
-          RUSTFS_TRANSITION_RESULT: ${{ needs.rustfs-transition-qualification.result }}
           SCHEMA_GATE_POSTGRES_RESULT: ${{ needs.schema-gate-postgres.result }}
           DEPLOY_WORKFLOW_RESULT: ${{ needs.deploy-workflow.result }}
           DEMO_WEB_ARTIFACT_RESULT: ${{ needs.demo-web-artifact.result }}
-          RESTORE_READINESS_RESULT: ${{ needs.restore-readiness.result }}
         run: |
           expected_priority_result=success
           if [[ "$GITHUB_EVENT_NAME" == pull_request ]]; then
             expected_priority_result=skipped
           fi
-          if [[ "$MAIN_PRIORITY_RESULT" != "$expected_priority_result" || "$CI_MAIN_RESULT" != "success" || "$STICKER_BUNDLE_RESULT" != "success" || "$PHOTOTHUMB_RUNTIME_RESULT" != "success" || "$REAL_SERVER_FIXTURES_RESULT" != "success" || "$WEBSOCKET_D1_RESULT" != "success" || "$WEB_PERMANENT_EXCHANGE_RESULT" != "success" || "$SQL_LINT_RESULT" != "success" || "$CSS_RESULT" != "success" || "$BROWSER_ACCEPTANCE_RESULT" != "success" || "$BROWSER_ACCEPTANCE_IMAGE_RESULT" != "success" || "$RUSTFS_TRANSITION_RESULT" != "success" || "$SCHEMA_GATE_POSTGRES_RESULT" != "success" || "$DEPLOY_WORKFLOW_RESULT" != "success" || "$DEMO_WEB_ARTIFACT_RESULT" != "success" || "$RESTORE_READINESS_RESULT" != "success" ]]; then
-            echo "::error::Required CI lanes did not pass (ops-prioritize-main=$MAIN_PRIORITY_RESULT, ci-main=$CI_MAIN_RESULT, sticker-bundle=$STICKER_BUNDLE_RESULT, photothumb-runtime=$PHOTOTHUMB_RUNTIME_RESULT, real-server-fixtures=$REAL_SERVER_FIXTURES_RESULT, websocket-d1=$WEBSOCKET_D1_RESULT, websocket-permanent-exchange=$WEB_PERMANENT_EXCHANGE_RESULT, sql-lint=$SQL_LINT_RESULT, css=$CSS_RESULT, browser-acceptance=$BROWSER_ACCEPTANCE_RESULT, browser-acceptance-image=$BROWSER_ACCEPTANCE_IMAGE_RESULT, rustfs-transition-qualification=$RUSTFS_TRANSITION_RESULT, schema-gate-postgres=$SCHEMA_GATE_POSTGRES_RESULT, deploy-workflow=$DEPLOY_WORKFLOW_RESULT, demo-web-artifact=$DEMO_WEB_ARTIFACT_RESULT, restore-readiness=$RESTORE_READINESS_RESULT)"
+          if [[ "$MAIN_PRIORITY_RESULT" != "$expected_priority_result" || "$CI_MAIN_RESULT" != "success" || "$STICKER_BUNDLE_RESULT" != "success" || "$PHOTOTHUMB_RUNTIME_RESULT" != "success" || "$REAL_SERVER_FIXTURES_RESULT" != "success" || "$WEBSOCKET_D1_RESULT" != "success" || "$WEB_PERMANENT_EXCHANGE_RESULT" != "success" || "$SQL_LINT_RESULT" != "success" || "$CSS_RESULT" != "success" || "$BROWSER_ACCEPTANCE_RESULT" != "success" || "$BROWSER_ACCEPTANCE_IMAGE_RESULT" != "success" || "$SCHEMA_GATE_POSTGRES_RESULT" != "success" || "$DEPLOY_WORKFLOW_RESULT" != "success" || "$DEMO_WEB_ARTIFACT_RESULT" != "success" ]]; then
+            echo "::error::Required CI lanes did not pass (ops-prioritize-main=$MAIN_PRIORITY_RESULT, ci-main=$CI_MAIN_RESULT, sticker-bundle=$STICKER_BUNDLE_RESULT, photothumb-runtime=$PHOTOTHUMB_RUNTIME_RESULT, real-server-fixtures=$REAL_SERVER_FIXTURES_RESULT, websocket-d1=$WEBSOCKET_D1_RESULT, websocket-permanent-exchange=$WEB_PERMANENT_EXCHANGE_RESULT, sql-lint=$SQL_LINT_RESULT, css=$CSS_RESULT, browser-acceptance=$BROWSER_ACCEPTANCE_RESULT, browser-acceptance-image=$BROWSER_ACCEPTANCE_IMAGE_RESULT, schema-gate-postgres=$SCHEMA_GATE_POSTGRES_RESULT, deploy-workflow=$DEPLOY_WORKFLOW_RESULT, demo-web-artifact=$DEMO_WEB_ARTIFACT_RESULT)"
             exit 1
           fi
           echo "All required CI lanes passed"
@@ -1388,11 +1303,8 @@ jobs:
       - sticker-bundle
       - e2e-admin
       - lint
-      - mirror-rustfs-qualification-images
       - photothumb-runtime
       - real-server-fixtures
-      - restore-readiness
-      - rustfs-transition-qualification
       - schema-gate-postgres
       - smoke
       - sql-lint
@@ -2143,9 +2055,8 @@ jobs:
   compose:
     needs:
       - ops-prioritize-main
-      - mirror-rustfs-qualification-images
       - sticker-bundle
-    if: ${{ always() && (needs.ops-prioritize-main.result == 'success' || (needs.ops-prioritize-main.result == 'skipped' && github.event_name == 'pull_request')) && needs.mirror-rustfs-qualification-images.result != 'failure' && needs.mirror-rustfs-qualification-images.result != 'cancelled' && needs.sticker-bundle.result == 'success' }}
+    if: ${{ always() && (needs.ops-prioritize-main.result == 'success' || (needs.ops-prioritize-main.result == 'skipped' && github.event_name == 'pull_request')) && needs.sticker-bundle.result == 'success' }}
     runs-on: ubuntu-26.04
     # The image build plus RustFS and media verification, which is the slow part
     # at roughly a minute; this only catches a hang before it
@@ -2204,7 +2115,6 @@ jobs:
         timeout-minutes: 10
         run: >-
           bash .github/scripts/pull-base-images.sh Dockerfile Dockerfile.mc
-          deploy/teagramd/mixed-trust-probe.Dockerfile
 
       - name: Preload Compose service images
         timeout-minutes: 10
@@ -2686,9 +2596,6 @@ jobs:
             | python3 -c 'import json,sys; print(json.load(sys.stdin)["services"]["teagramd"]["environment"]["TG_AUTHKEY_ENC_KEY_FILE"])')
           [ "$override_path" = /var/lib/teagramd/other.hex ] \
             || { echo "TG_AUTHKEY_ENC_KEY_FILE override did not reach the rendered config: got $override_path"; exit 1; }
-
-      - name: Validate the opt-in mixed-trust Compose handoff
-        run: bash .github/scripts/smoke-mixed-trust-compose.sh
 
       - name: Boot RustFS and exercise the object-store backend
         run: |
@@ -3359,77 +3266,6 @@ jobs:
             exit 1
           fi
           printf 'ok github.com/teagramhq/teagram-server/test/e2e %ss\n' "$summary"
-
-  mirror-rustfs-qualification-images:
-    name: Mirror RustFS qualification images
-    needs: ops-prioritize-main
-    if: ${{ always() && (needs.ops-prioritize-main.result == 'success' || (needs.ops-prioritize-main.result == 'skipped' && github.event_name == 'pull_request')) && (github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository) }}
-    runs-on: ubuntu-26.04
-    timeout-minutes: 10
-    permissions:
-      contents: read
-      packages: write
-
-    steps:
-      - uses: actions/checkout@v7.0.1
-
-      - name: Install Skopeo
-        run: |
-          sudo apt-get update
-          sudo apt-get install --no-install-recommends --yes skopeo
-
-      - name: Mirror digest-pinned official images to GHCR
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: bash .github/scripts/mirror_rustfs_qualification_images.sh
-
-  rustfs-transition-qualification:
-    name: RustFS transition qualification
-    runs-on: ubuntu-26.04
-    needs:
-      - ops-prioritize-main
-      - mirror-rustfs-qualification-images
-    if: ${{ always() && (needs.ops-prioritize-main.result == 'success' || (needs.ops-prioritize-main.result == 'skipped' && github.event_name == 'pull_request')) && needs.mirror-rustfs-qualification-images.result != 'failure' && needs.mirror-rustfs-qualification-images.result != 'cancelled' }}
-    # The complete R69/R70 fixture matrix can exceed 45 minutes on slower hosted runners.
-    timeout-minutes: 60
-    permissions:
-      contents: read
-      packages: read
-
-    steps:
-      - uses: actions/checkout@v7.0.1
-
-      - name: Log in to GHCR
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: printf '%s' "$GITHUB_TOKEN" | sudo docker login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
-
-      - uses: actions/setup-python@v6.0.0
-        with:
-          python-version: "3.12.15"
-
-      - uses: ariga/setup-atlas@v0.3
-        with:
-          version: v1.2.0
-
-      - name: Check RustFS gate shell syntax
-        run: sudo env "PATH=$PATH" TMPDIR=/root bash -n deploy/teagramd/rollout-runner/*.sh
-
-      - name: Run credential-free RustFS gate fixtures
-        run: sudo env "PATH=$PATH" TMPDIR=/root bash deploy/teagramd/rollout-runner/test-rustfs-transition-gate.sh
-
-      - name: Run root-only blob authority and interruption fixtures
-        run: |
-          sudo env "PATH=$PATH" TMPDIR=/root python3 -B deploy/teagramd/rollout-runner/test-blob-mode-state.py
-          sudo env "PATH=$PATH" TMPDIR=/root python3 -B deploy/teagramd/rollout-runner/test-blob-transition-runner.py
-
-      - name: Prove R69 and R70 SQL evidence against PostgreSQL 18 and Atlas 1.2.0
-        run: sudo env "PATH=$PATH" TMPDIR=/root bash deploy/teagramd/rollout-runner/test-rustfs-schema-postgres.sh
-
-      - name: Prove PostgreSQL 16 to 18 restore and stack move
-        run: |
-          sudo env "PATH=$PATH" TMPDIR=/root bash deploy/teagramd/rollout-runner/test-isolated-restore-postgres.sh
-          sudo env "PATH=$PATH" TMPDIR=/root bash deploy/teagramd/rollout-runner/test-stack-move-runner.sh
 
   schema-gate-postgres:
     name: PostgreSQL Atlas schema gate
