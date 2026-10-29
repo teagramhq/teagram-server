@@ -669,7 +669,7 @@ func rateLimitDenialSurfaceIndex(surface string) int {
 		return 22
 	case "secret_chat_discard":
 		return 23
-	case "sticker_set_mutation":
+	case "sticker_set_mutation", "sticker_set_create":
 		return 24
 	default:
 		return -1

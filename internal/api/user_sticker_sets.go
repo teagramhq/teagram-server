@@ -22,9 +22,12 @@ import (
 )
 
 const (
-	stickerSetCreateRateSurface    = stickerSetRateLimitSurface
+	stickerSetCreateRateSurface    = "sticker_set_create"
 	stickerSetShortNameRateSurface = stickerSetRateLimitSurface
 	stickerSetLookupRateSurface    = stickerSetRateLimitSurface
+	maxUserStickerEmojiRunes       = 20
+	maxUserStickerKeywords         = 20
+	maxUserStickerKeywordBytes     = 64
 )
 
 var (
@@ -228,7 +231,7 @@ func (h *handlers) handleCreateStickerSet(_ *mtproto.Conn, r *mtproto.Request) (
 	if r.UserID == 0 {
 		return nil, nil, errAuthKeyUnreg
 	}
-	if err := h.checkRateLimit(r, stickerSetCreateRateSurface, stickerSetMutationRateLimit); err != nil {
+	if err := h.checkRateLimit(r, stickerSetCreateRateSurface, h.rateLimitCreateStickerSet); err != nil {
 		return nil, nil, err
 	}
 	if len(req.Stickers) == 0 {
@@ -283,41 +286,24 @@ func (h *handlers) handleCreateStickerSet(_ *mtproto.Conn, r *mtproto.Request) (
 		return nil, nil, errShortNameOccupied
 	}
 
-	items := make([]store.UserStickerSetItem, 0, len(req.Stickers))
+	refs := make([]store.StickerFileRef, 0, len(req.Stickers))
+	keywordsByPosition := make([]string, len(req.Stickers))
+	maskCoordsByPosition := make([]string, len(req.Stickers))
 	seen := make(map[int64]bool, len(req.Stickers))
-	for _, input := range req.Stickers {
+	for position, input := range req.Stickers {
 		document, ok := input.Document.(*tg.InputDocument)
 		if !ok || document == nil || document.ID <= 0 || document.AccessHash == 0 || seen[document.ID] {
 			return nil, nil, errStickerDocumentInvalid
 		}
 		seen[document.ID] = true
-		file, data, readErr := h.store.StickerFileForSet(r.Ctx, creatorID, document.ID, document.AccessHash)
-		if errors.Is(readErr, store.ErrStickerFileTooLarge) {
-			return nil, nil, rpcErr(400, "STICKER_FILE_SIZE")
+		keywords, _ := input.GetKeywords()
+		if !validUserStickerText(input.Emoji, keywords) {
+			return nil, nil, errStickerSetInvalid
 		}
-		if errors.Is(readErr, store.ErrStickerDocumentInvalid) {
-			return nil, nil, errStickerDocumentInvalid
-		}
-		if readErr != nil {
-			h.log.Error("read stored sticker bytes", "user_id", creatorID, "file_id", document.ID, "err", readErr)
-			return nil, nil, errInternal
-		}
-		target := stickervalidation.TargetSticker
-		switch kind {
-		case "mask":
-			target = stickervalidation.TargetMaskSticker
-		case "emojis":
-			target = stickervalidation.TargetCustomEmoji
-		}
-		metadata, validateErr := stickervalidation.Validate(data, target)
-		if validateErr != nil {
-			if validationErr, ok := errors.AsType[*stickervalidation.ValidationError](validateErr); ok {
-				return nil, nil, rpcErr(400, validationErr.Reason)
-			}
-			return nil, nil, errStickerDocumentInvalid
+		if kind == "mask" && keywords != "" {
+			return nil, nil, errStickerSetInvalid
 		}
 		coords, hasCoords := input.GetMaskCoords()
-		maskJSON := ""
 		if hasCoords {
 			if kind != "mask" || !validMaskCoords(coords) {
 				return nil, nil, errStickerSetInvalid
@@ -326,19 +312,64 @@ func (h *handlers) handleCreateStickerSet(_ *mtproto.Conn, r *mtproto.Request) (
 			if marshalErr != nil {
 				return nil, nil, errStickerSetInvalid
 			}
-			maskJSON = string(encoded)
+			maskCoordsByPosition[position] = string(encoded)
 		}
-		keywords, _ := input.GetKeywords()
-		if !utf8.ValidString(input.Emoji) || strings.ContainsRune(input.Emoji, 0) || !utf8.ValidString(keywords) || strings.ContainsRune(keywords, 0) {
-			return nil, nil, errStickerSetInvalid
+		keywordsByPosition[position] = keywords
+		refs = append(refs, store.StickerFileRef{ID: document.ID, AccessHash: document.AccessHash})
+	}
+
+	files, err := h.store.StickerFilesForSet(r.Ctx, creatorID, refs)
+	if errors.Is(err, store.ErrStickerDocumentInvalid) {
+		return nil, nil, errStickerDocumentInvalid
+	}
+	if err != nil {
+		h.log.Error("resolve stored sticker files", "user_id", creatorID, "err", err)
+		return nil, nil, errInternal
+	}
+	if len(files) != len(req.Stickers) {
+		return nil, nil, errStickerDocumentInvalid
+	}
+	for _, file := range files {
+		if file.Size <= 0 {
+			return nil, nil, errStickerDocumentInvalid
 		}
-		if kind == "mask" && keywords != "" {
-			return nil, nil, errStickerSetInvalid
+		if file.Size > store.MaxStoredStickerBytes {
+			return nil, nil, rpcErr(400, "STICKER_FILE_SIZE")
+		}
+	}
+
+	items := make([]store.UserStickerSetItem, 0, len(req.Stickers))
+	target := stickervalidation.TargetSticker
+	switch kind {
+	case "mask":
+		target = stickervalidation.TargetMaskSticker
+	case "emojis":
+		target = stickervalidation.TargetCustomEmoji
+	}
+	for position, input := range req.Stickers {
+		file := files[position]
+		data, readErr := h.store.ReadStickerFileForSet(r.Ctx, file)
+		if errors.Is(readErr, store.ErrStickerFileTooLarge) {
+			return nil, nil, rpcErr(400, "STICKER_FILE_SIZE")
+		}
+		if errors.Is(readErr, store.ErrStickerDocumentInvalid) {
+			return nil, nil, errStickerDocumentInvalid
+		}
+		if readErr != nil {
+			h.log.Error("read stored sticker bytes", "user_id", creatorID, "file_id", file.ID, "err", readErr)
+			return nil, nil, errInternal
+		}
+		metadata, validateErr := stickervalidation.Validate(data, target)
+		if validateErr != nil {
+			if validationErr, ok := errors.AsType[*stickervalidation.ValidationError](validateErr); ok {
+				return nil, nil, rpcErr(400, validationErr.Reason)
+			}
+			return nil, nil, errStickerDocumentInvalid
 		}
 		items = append(items, store.UserStickerSetItem{
 			FileID: file.ID, AccessHash: file.AccessHash, Size: file.Size, Date: file.Date,
-			Emoji: input.Emoji, Keywords: keywords, Format: string(metadata.Format),
-			Width: metadata.Width, Height: metadata.Height, Duration: int64(metadata.Duration), MaskCoords: maskJSON,
+			Emoji: input.Emoji, Keywords: keywordsByPosition[position], Format: string(metadata.Format),
+			Width: metadata.Width, Height: metadata.Height, Duration: int64(metadata.Duration), MaskCoords: maskCoordsByPosition[position],
 		})
 	}
 	set, err := h.store.CreateUserStickerSet(r.Ctx, store.UserStickerSet{
@@ -359,6 +390,26 @@ func (h *handlers) handleCreateStickerSet(_ *mtproto.Conn, r *mtproto.Request) (
 		return nil, nil, errInternal
 	}
 	return userStickerSetResponse(set, r.UserID, h.dcID, nil), nil, nil
+}
+
+func validUserStickerText(emoji, keywords string) bool {
+	if !utf8.ValidString(emoji) || strings.ContainsRune(emoji, 0) || utf8.RuneCountInString(emoji) > maxUserStickerEmojiRunes ||
+		!utf8.ValidString(keywords) || strings.ContainsRune(keywords, 0) {
+		return false
+	}
+	if keywords == "" {
+		return true
+	}
+	terms := strings.Split(keywords, ",")
+	if len(terms) > maxUserStickerKeywords {
+		return false
+	}
+	for _, term := range terms {
+		if len(term) > maxUserStickerKeywordBytes {
+			return false
+		}
+	}
+	return true
 }
 
 // handleAddStickerToSetUnsupported keeps the mutation entry point rate limited

@@ -133,40 +133,64 @@ func (q *Queries) LockUserStickerSetOwner(ctx context.Context, id int64) (int64,
 	return id_2, err
 }
 
-const stickerFileForOwner = `-- name: StickerFileForOwner :one
+const stickerFilesForOwner = `-- name: StickerFilesForOwner :many
 SELECT id, uploader_id, access_hash, size, mime_type, file_name, stored, date,
        subtype_rights, media_kind, width, height
-FROM files
-WHERE id = $1 AND uploader_id = $2 AND access_hash = $3
-  AND stored = true AND media_kind = 'document'
+FROM unnest($1::bigint[])
+     WITH ORDINALITY AS requested(file_id, request_order)
+JOIN files ON files.id = requested.file_id
+          AND files.uploader_id = $2
+          AND files.access_hash = ($3::bigint[])[requested.request_order]
+          AND files.stored = true
+          AND files.media_kind = 'document'
+WHERE NOT EXISTS (
+    SELECT 1
+    FROM user_created_sticker_set_items
+    WHERE user_created_sticker_set_items.file_id = files.id
+)
+ORDER BY requested.request_order
 `
 
-type StickerFileForOwnerParams struct {
-	ID         int64
-	UploaderID int64
-	AccessHash int64
+type StickerFilesForOwnerParams struct {
+	FileIds      []int64
+	UploaderID   int64
+	AccessHashes []int64
 }
 
-// Sticker inputs are resolved only through a caller-owned, stored document row
-// and its exact access hash. Client MIME and attributes are not selected.
-func (q *Queries) StickerFileForOwner(ctx context.Context, arg StickerFileForOwnerParams) (File, error) {
-	row := q.db.QueryRow(ctx, stickerFileForOwner, arg.ID, arg.UploaderID, arg.AccessHash)
-	var i File
-	err := row.Scan(
-		&i.ID,
-		&i.UploaderID,
-		&i.AccessHash,
-		&i.Size,
-		&i.MimeType,
-		&i.FileName,
-		&i.Stored,
-		&i.Date,
-		&i.SubtypeRights,
-		&i.MediaKind,
-		&i.Width,
-		&i.Height,
-	)
-	return i, err
+// Sticker inputs are resolved together through caller-owned, stored document
+// rows and exact access hashes. Files already assigned to any set are refused
+// before the API reads any blob bytes.
+func (q *Queries) StickerFilesForOwner(ctx context.Context, arg StickerFilesForOwnerParams) ([]File, error) {
+	rows, err := q.db.Query(ctx, stickerFilesForOwner, arg.FileIds, arg.UploaderID, arg.AccessHashes)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []File
+	for rows.Next() {
+		var i File
+		if err := rows.Scan(
+			&i.ID,
+			&i.UploaderID,
+			&i.AccessHash,
+			&i.Size,
+			&i.MimeType,
+			&i.FileName,
+			&i.Stored,
+			&i.Date,
+			&i.SubtypeRights,
+			&i.MediaKind,
+			&i.Width,
+			&i.Height,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
 }
 
 const userCreatedStickerSetByID = `-- name: UserCreatedStickerSetByID :one

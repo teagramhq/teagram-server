@@ -72,6 +72,8 @@ type handlers struct {
 	rateLimitSetTyping store.RateLimitConfig
 	// rateLimitPollVote limits messages.sendVote per account.
 	rateLimitPollVote store.RateLimitConfig
+	// rateLimitCreateStickerSet bounds expensive sticker-byte reads and parsing.
+	rateLimitCreateStickerSet store.RateLimitConfig
 	// rateLimitCreateChat limits messages.createChat per account.
 	rateLimitCreateChat store.RateLimitConfig
 	// rateLimitAddChatUser limits messages.addChatUser per account.
@@ -375,6 +377,7 @@ func newWithPhotoThumbsAndDialogFilterSyncAndUploadPartTTLAndTurnstile(s *store.
 		rateLimitMessageSend:         rateLimits.MessageSend,
 		rateLimitSetTyping:           defaultSetTypingRateLimit,
 		rateLimitPollVote:            rateLimits.PollVote,
+		rateLimitCreateStickerSet:    rateLimits.CreateStickerSet,
 		rateLimitCreateChat:          rateLimits.CreateChat,
 		rateLimitAddChatUser:         rateLimits.AddChatUser,
 		rateLimitCreateChannel:       rateLimits.CreateChannel,

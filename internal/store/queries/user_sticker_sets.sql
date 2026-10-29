@@ -21,14 +21,25 @@ INSERT INTO user_created_sticker_set_items
 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
 ON CONFLICT (file_id) DO NOTHING;
 
--- Sticker inputs are resolved only through a caller-owned, stored document row
--- and its exact access hash. Client MIME and attributes are not selected.
--- name: StickerFileForOwner :one
+-- Sticker inputs are resolved together through caller-owned, stored document
+-- rows and exact access hashes. Files already assigned to any set are refused
+-- before the API reads any blob bytes.
+-- name: StickerFilesForOwner :many
 SELECT id, uploader_id, access_hash, size, mime_type, file_name, stored, date,
        subtype_rights, media_kind, width, height
-FROM files
-WHERE id = $1 AND uploader_id = $2 AND access_hash = $3
-  AND stored = true AND media_kind = 'document';
+FROM unnest(sqlc.arg(file_ids)::bigint[])
+     WITH ORDINALITY AS requested(file_id, request_order)
+JOIN files ON files.id = requested.file_id
+          AND files.uploader_id = sqlc.arg(uploader_id)
+          AND files.access_hash = (sqlc.arg(access_hashes)::bigint[])[requested.request_order]
+          AND files.stored = true
+          AND files.media_kind = 'document'
+WHERE NOT EXISTS (
+    SELECT 1
+    FROM user_created_sticker_set_items
+    WHERE user_created_sticker_set_items.file_id = files.id
+)
+ORDER BY requested.request_order;
 
 -- name: UserCreatedStickerSetByShortName :one
 SELECT id, access_hash, creator_id, title, short_name, software, kind,
