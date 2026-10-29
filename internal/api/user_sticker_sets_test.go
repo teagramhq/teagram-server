@@ -131,6 +131,7 @@ func TestCreateStickerSetBoundsEmojiAndKeywords(t *testing.T) {
 		name   string
 		mutate func(*tg.InputStickerSetItem)
 	}{
+		{name: "empty emoji", mutate: func(item *tg.InputStickerSetItem) { item.Emoji = "" }},
 		{name: "emoji", mutate: func(item *tg.InputStickerSetItem) { item.Emoji = strings.Repeat("x", 21) }},
 		{name: "keyword bytes", mutate: func(item *tg.InputStickerSetItem) { item.SetKeywords(strings.Repeat("k", 65)) }},
 		{name: "keyword count", mutate: func(item *tg.InputStickerSetItem) { item.SetKeywords(strings.Join(tooManyTerms, ",")) }},
@@ -171,6 +172,7 @@ func TestCreateStickerSetBoundsEmojiAndKeywords(t *testing.T) {
 		keywords   string
 		constraint string
 	}{
+		{name: "empty emoji", emoji: "", constraint: "user_created_sticker_set_items_emoji_limit"},
 		{name: "emoji", emoji: strings.Repeat("x", 21), constraint: "user_created_sticker_set_items_emoji_limit"},
 		{name: "keyword bytes", emoji: "⭐", keywords: strings.Repeat("k", 65), constraint: "user_created_sticker_set_items_keywords_limit"},
 		{name: "keyword count", emoji: "⭐", keywords: strings.Join(tooManyTerms, ","), constraint: "user_created_sticker_set_items_keywords_limit"},
@@ -181,11 +183,11 @@ func TestCreateStickerSetBoundsEmojiAndKeywords(t *testing.T) {
 			    (set_id, position, file_id, emoji, keywords, format, width, height)
 			VALUES ($1, $2, $3, $4, $5, 'TGS', 1, 1)`,
 			created.Set.ID, int32(i+1), file.ID, test.emoji, test.keywords); err == nil {
-			t.Errorf("database accepted oversized %s", test.name)
+			t.Errorf("database accepted invalid %s", test.name)
 		} else {
 			var pgErr *pgconn.PgError
 			if !errors.As(err, &pgErr) || pgErr.ConstraintName != test.constraint {
-				t.Errorf("database rejected oversized %s with %v, want constraint %s", test.name, err, test.constraint)
+				t.Errorf("database rejected invalid %s with %v, want constraint %s", test.name, err, test.constraint)
 			}
 		}
 	}

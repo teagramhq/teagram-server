@@ -33,7 +33,7 @@ CREATE TABLE user_created_sticker_set_items (
     position     INT NOT NULL CHECK (position >= 0),
     file_id      BIGINT NOT NULL REFERENCES files (id) ON DELETE RESTRICT,
     emoji        TEXT NOT NULL
-                 CONSTRAINT user_created_sticker_set_items_emoji_limit CHECK (char_length(emoji) <= 20),
+                 CONSTRAINT user_created_sticker_set_items_emoji_limit CHECK (char_length(emoji) BETWEEN 1 AND 20),
     keywords     TEXT NOT NULL DEFAULT ''
                  CONSTRAINT user_created_sticker_set_items_keywords_limit CHECK (
                      user_created_sticker_keywords_within_limits(keywords)

@@ -393,7 +393,7 @@ func (h *handlers) handleCreateStickerSet(_ *mtproto.Conn, r *mtproto.Request) (
 }
 
 func validUserStickerText(emoji, keywords string) bool {
-	if !utf8.ValidString(emoji) || strings.ContainsRune(emoji, 0) || utf8.RuneCountInString(emoji) > maxUserStickerEmojiRunes ||
+	if !utf8.ValidString(emoji) || emoji == "" || strings.ContainsRune(emoji, 0) || utf8.RuneCountInString(emoji) > maxUserStickerEmojiRunes ||
 		!utf8.ValidString(keywords) || strings.ContainsRune(keywords, 0) {
 		return false
 	}
