@@ -1,18 +1,26 @@
 package botapi
 
 import (
+	"bytes"
 	"context"
+	"crypto/rand"
+	"encoding/binary"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log"
 	"log/slog"
+	"mime"
 	"net"
 	"net/http"
 	"net/netip"
+	"net/url"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/teagramhq/teagram-server/internal/store"
 )
@@ -37,18 +45,25 @@ const (
 	tooLargeBody        = "{\"ok\":false,\"error_code\":413,\"description\":\"Request Entity Too Large\"}\n"
 	notFoundBody        = "{\"ok\":false,\"error_code\":404,\"description\":\"Not Found\"}\n"
 	serverErrorBody     = "{\"ok\":false,\"error_code\":500,\"description\":\"Internal Server Error\"}\n"
+	forbiddenBody       = "{\"ok\":false,\"error_code\":403,\"description\":\"Forbidden: bot can't initiate conversation with a user\"}\n"
+	botBlockedBody      = "{\"ok\":false,\"error_code\":403,\"description\":\"Forbidden: bot was blocked by the user\"}\n"
+	messageSendLimit    = 4096
 )
 
 // Store is the server-side identity lookup used by the Bot API listener.
 type Store interface {
 	BotIDByToken(context.Context, string) (int64, error)
 	UserByID(context.Context, int64) (store.User, bool, error)
+	CheckRateLimit(context.Context, int64, string, store.RateLimitConfig) (*store.RateLimitResult, error)
+	SendBotMessage(context.Context, int64, int64, string, int64) (store.Message, int, int, error)
+	Notify(context.Context, string, string) error
 }
 
 type handler struct {
-	store   Store
-	log     *slog.Logger
-	limiter *authLimiter
+	store                Store
+	log                  *slog.Logger
+	limiter              *authLimiter
+	messageSendRateLimit store.RateLimitConfig
 }
 
 type successResponse struct {
@@ -63,26 +78,45 @@ type botAPIUser struct {
 	Username  string `json:"username"`
 }
 
+type sendMessageResponse struct {
+	OK     bool          `json:"ok"`
+	Result botAPIMessage `json:"result"`
+}
+
+type botAPIMessage struct {
+	MessageID int64      `json:"message_id"`
+	From      botAPIUser `json:"from"`
+	Chat      botAPIChat `json:"chat"`
+	Date      int64      `json:"date"`
+	Text      string     `json:"text"`
+}
+
+type botAPIChat struct {
+	ID   int64  `json:"id"`
+	Type string `json:"type"`
+}
+
 // NewHandler builds the independent HTTP router for Bot API requests.
-func NewHandler(st Store, logger *slog.Logger) http.Handler {
+func NewHandler(st Store, logger *slog.Logger, messageSendRateLimit store.RateLimitConfig) http.Handler {
 	if logger == nil {
 		logger = slog.New(slog.DiscardHandler)
 	}
 	return &handler{
-		store:   st,
-		log:     logger,
-		limiter: newAuthLimiter(),
+		store:                st,
+		log:                  logger,
+		limiter:              newAuthLimiter(),
+		messageSendRateLimit: messageSendRateLimit,
 	}
 }
 
 // NewServer creates an HTTP server dedicated to the Bot API listener.
-func NewServer(addr string, st Store, logger *slog.Logger) *http.Server {
+func NewServer(addr string, st Store, logger *slog.Logger, messageSendRateLimit store.RateLimitConfig) *http.Server {
 	if logger == nil {
 		logger = slog.New(slog.DiscardHandler)
 	}
 	return &http.Server{
 		Addr:              addr,
-		Handler:           NewHandler(st, logger),
+		Handler:           NewHandler(st, logger, messageSendRateLimit),
 		ReadHeaderTimeout: readHeaderTimeout,
 		MaxHeaderBytes:    maxHeaderBytes,
 		ErrorLog:          log.New(errorLogWriter{logger: logger}, "", 0),
@@ -144,7 +178,7 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	bodyPresent, bodyStatus := requestBody(w, r)
+	body, bodyStatus := requestBody(w, r)
 	if bodyStatus != 0 {
 		if bodyStatus == http.StatusRequestEntityTooLarge {
 			h.log.Info("Bot API request", "bot_id", botID, "method", method)
@@ -160,14 +194,29 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.write(w, http.StatusNotFound, []byte(notFoundBody), botID, method)
 		return
 	}
-	if endpointMethod != "getMe" {
+	if endpointMethod != "getMe" && endpointMethod != "sendMessage" {
 		h.log.Info("Bot API request", "bot_id", botID, "method", method)
 		h.write(w, http.StatusNotFound, []byte(notFoundBody), botID, method)
 		return
 	}
-	if r.URL.RawQuery != "" || bodyPresent {
+	if endpointMethod == "getMe" && (r.URL.RawQuery != "" || len(body) != 0) {
 		h.log.Info("Bot API request", "bot_id", botID, "method", method)
 		h.write(w, http.StatusBadRequest, []byte(badRequestBody), botID, method)
+		return
+	}
+	if endpointMethod == "sendMessage" {
+		if r.Method == http.MethodGet && len(body) != 0 {
+			h.log.Info("Bot API request", "bot_id", botID, "method", method)
+			h.write(w, http.StatusBadRequest, []byte(badRequestBody), botID, method)
+			return
+		}
+		chatID, text, err := parseSendMessageRequest(r, body)
+		if err != nil {
+			h.log.Info("Bot API request", "bot_id", botID, "method", method)
+			h.write(w, http.StatusBadRequest, []byte(badRequestBody), botID, method)
+			return
+		}
+		h.sendMessage(w, r, botID, method, chatID, text)
 		return
 	}
 
@@ -205,6 +254,217 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	h.write(w, http.StatusOK, encoded, botID, method)
 }
 
+func (h *handler) sendMessage(w http.ResponseWriter, r *http.Request, botID int64, method string, chatID int64, text string) {
+	user, exists, err := h.store.UserByID(r.Context(), botID)
+	if err != nil {
+		h.log.Error("Bot API profile lookup failed", "bot_id", botID, "method", method)
+		h.write(w, http.StatusInternalServerError, []byte(serverErrorBody), botID, method)
+		return
+	}
+	if !exists || user.Kind != store.UserKindBot {
+		h.unauthorized(w, botID, method)
+		return
+	}
+
+	limit, err := h.store.CheckRateLimit(r.Context(), botID, "message_send", h.messageSendRateLimit)
+	if err != nil {
+		h.log.Error("Bot API rate limit check failed", "bot_id", botID, "method", method)
+		h.write(w, http.StatusInternalServerError, []byte(serverErrorBody), botID, method)
+		return
+	}
+	if limit != nil {
+		body := rateLimitedMessageBody(limit.Wait)
+		h.log.Warn("Bot API rate limit exceeded", "bot_id", botID, "method", method)
+		h.write(w, http.StatusTooManyRequests, body, botID, method)
+		return
+	}
+
+	randomID, err := randomMessageID()
+	if err != nil {
+		h.log.Error("Bot API random id generation failed", "bot_id", botID, "method", method)
+		h.write(w, http.StatusInternalServerError, []byte(serverErrorBody), botID, method)
+		return
+	}
+	message, _, recipientPts, err := h.store.SendBotMessage(r.Context(), botID, chatID, text, randomID)
+	switch {
+	case errors.Is(err, store.ErrBotRecipientForbidden) || errors.Is(err, store.ErrYouBlockedUser):
+		h.write(w, http.StatusForbidden, []byte(forbiddenBody), botID, method)
+		return
+	case errors.Is(err, store.ErrBotBlockedByUser):
+		h.write(w, http.StatusForbidden, []byte(botBlockedBody), botID, method)
+		return
+	case err != nil:
+		h.log.Error("Bot API message send failed", "bot_id", botID, "method", method)
+		h.write(w, http.StatusInternalServerError, []byte(serverErrorBody), botID, method)
+		return
+	}
+	if message.PeerLocalID <= 0 {
+		h.log.Error("Bot API message has no recipient id", "bot_id", botID, "method", method)
+		h.write(w, http.StatusInternalServerError, []byte(serverErrorBody), botID, method)
+		return
+	}
+	if recipientPts > 0 {
+		notifyCtx, cancel := store.NotificationContext(r.Context())
+		defer cancel()
+		if err := h.store.Notify(notifyCtx, store.ChannelUpdates, strconv.FormatInt(chatID, 10)); err != nil {
+			h.log.Error("Bot API message notify failed", "bot_id", botID, "method", method)
+		}
+	}
+
+	username := ""
+	if user.Username != nil {
+		username = *user.Username
+	}
+	response := sendMessageResponse{
+		OK: true,
+		Result: botAPIMessage{
+			MessageID: message.PeerLocalID,
+			From: botAPIUser{
+				ID:        botID,
+				IsBot:     true,
+				FirstName: user.FirstName,
+				Username:  username,
+			},
+			Chat: botAPIChat{ID: chatID, Type: "private"},
+			Date: message.Date.Unix(),
+			Text: message.Text,
+		},
+	}
+	encoded, err := json.Marshal(response)
+	if err != nil {
+		h.log.Error("Bot API response encoding failed", "bot_id", botID, "method", method)
+		h.write(w, http.StatusInternalServerError, []byte(serverErrorBody), botID, method)
+		return
+	}
+	encoded = append(encoded, '\n')
+	h.log.Info("Bot API request", "bot_id", botID, "method", method)
+	h.write(w, http.StatusOK, encoded, botID, method)
+}
+
+func parseSendMessageRequest(r *http.Request, body []byte) (int64, string, error) {
+	if len(body) == 0 {
+		return parseFormMessageValues(r.URL.RawQuery)
+	}
+	if r.URL.RawQuery != "" {
+		return 0, "", errors.New("sendMessage cannot mix query and body parameters")
+	}
+	contentType, _, err := mime.ParseMediaType(r.Header.Get("Content-Type"))
+	if err != nil {
+		return 0, "", errors.New("invalid sendMessage content type")
+	}
+	switch contentType {
+	case "application/json":
+		return parseJSONMessage(body)
+	case "application/x-www-form-urlencoded":
+		return parseFormMessageValues(string(body))
+	default:
+		return 0, "", errors.New("unsupported sendMessage content type")
+	}
+}
+
+func parseJSONMessage(body []byte) (int64, string, error) {
+	if !utf8.Valid(body) {
+		return 0, "", errors.New("invalid UTF-8 in sendMessage body")
+	}
+	var request struct {
+		ChatID json.RawMessage `json:"chat_id"`
+		Text   json.RawMessage `json:"text"`
+	}
+	decoder := json.NewDecoder(bytes.NewReader(body))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&request); err != nil {
+		return 0, "", errors.New("invalid sendMessage JSON")
+	}
+	if err := decoder.Decode(new(any)); !errors.Is(err, io.EOF) {
+		return 0, "", errors.New("trailing sendMessage JSON")
+	}
+	if len(request.ChatID) == 0 || len(request.Text) == 0 {
+		return 0, "", errors.New("missing sendMessage field")
+	}
+	chatIDText := strings.TrimSpace(string(request.ChatID))
+	if chatIDText == "" || (chatIDText[0] != '-' && (chatIDText[0] < '0' || chatIDText[0] > '9')) {
+		return 0, "", errors.New("chat_id must be an integer")
+	}
+	chatID, err := strconv.ParseInt(chatIDText, 10, 64)
+	if err != nil {
+		return 0, "", errors.New("chat_id must be an integer")
+	}
+	var text string
+	if err := json.Unmarshal(request.Text, &text); err != nil {
+		return 0, "", errors.New("text must be a string")
+	}
+	if !validBotMessageText(text) {
+		return 0, "", errors.New("invalid sendMessage text")
+	}
+	return chatID, text, nil
+}
+
+func parseFormMessageValues(encoded string) (int64, string, error) {
+	values, err := url.ParseQuery(encoded)
+	if err != nil {
+		return 0, "", errors.New("invalid sendMessage form")
+	}
+	if len(values) != 2 || len(values["chat_id"]) != 1 || len(values["text"]) != 1 {
+		return 0, "", errors.New("sendMessage requires one chat_id and one text")
+	}
+	for key := range values {
+		if key != "chat_id" && key != "text" {
+			return 0, "", errors.New("unsupported sendMessage field")
+		}
+	}
+	chatID, err := strconv.ParseInt(values.Get("chat_id"), 10, 64)
+	if err != nil {
+		return 0, "", errors.New("chat_id must be an integer")
+	}
+	text := values.Get("text")
+	if !validBotMessageText(text) {
+		return 0, "", errors.New("invalid sendMessage text")
+	}
+	return chatID, text, nil
+}
+
+func validBotMessageText(text string) bool {
+	if text == "" || !utf8.ValidString(text) || strings.ContainsRune(text, 0) {
+		return false
+	}
+	units := 0
+	for _, r := range text {
+		if r > 0xffff {
+			units += 2
+		} else {
+			units++
+		}
+		if units > messageSendLimit {
+			return false
+		}
+	}
+	return true
+}
+
+func randomMessageID() (int64, error) {
+	var value [8]byte
+	for {
+		if _, err := io.ReadFull(rand.Reader, value[:]); err != nil {
+			return 0, fmt.Errorf("read random message id: %w", err)
+		}
+		id := int64(binary.LittleEndian.Uint64(value[:]) & 0x7fffffffffffffff)
+		if id != 0 {
+			return id, nil
+		}
+	}
+}
+
+func rateLimitedMessageBody(wait time.Duration) []byte {
+	retryAfter := int(wait / time.Second)
+	if wait%time.Second != 0 {
+		retryAfter++
+	}
+	if retryAfter < 1 {
+		retryAfter = 1
+	}
+	return []byte(fmt.Sprintf("{\"ok\":false,\"error_code\":429,\"description\":\"Too Many Requests: retry after %d\",\"parameters\":{\"retry_after\":%d}}\n", retryAfter, retryAfter))
+}
+
 func parseEndpoint(path string) (token, method string, ok bool) {
 	if !strings.HasPrefix(path, "/bot") {
 		return "", "", false
@@ -229,21 +489,21 @@ func methodLabel(method string) string {
 	return method
 }
 
-func requestBody(w http.ResponseWriter, r *http.Request) (present bool, status int) {
+func requestBody(w http.ResponseWriter, r *http.Request) (body []byte, status int) {
 	if r.Body == nil {
-		return false, 0
+		return nil, 0
 	}
 	if r.ContentLength > maxRequestBodyBytes {
-		return false, http.StatusRequestEntityTooLarge
+		return nil, http.StatusRequestEntityTooLarge
 	}
 	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxRequestBodyBytes))
 	if err != nil {
 		if maxBytesErr, ok := errors.AsType[*http.MaxBytesError](err); ok && maxBytesErr != nil {
-			return false, http.StatusRequestEntityTooLarge
+			return nil, http.StatusRequestEntityTooLarge
 		}
-		return false, http.StatusBadRequest
+		return nil, http.StatusBadRequest
 	}
-	return len(body) != 0, 0
+	return body, 0
 }
 
 func (h *handler) unauthorized(w http.ResponseWriter, botID int64, method string) {

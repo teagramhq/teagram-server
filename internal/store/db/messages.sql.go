@@ -74,6 +74,33 @@ func (q *Queries) ActiveOrdinaryMessageInDialog(ctx context.Context, arg ActiveO
 	return i, err
 }
 
+const botHasStartedPrivateChat = `-- name: BotHasStartedPrivateChat :one
+SELECT EXISTS (
+    SELECT 1 FROM messages
+    WHERE owner_id = $1::bigint
+      AND peer_type = $2::smallint
+      AND peer_id = $3::bigint
+      AND from_id = $3::bigint
+      AND out = false
+)
+`
+
+type BotHasStartedPrivateChatParams struct {
+	BotID    int64
+	PeerType int16
+	UserID   int64
+}
+
+// BotHasStartedPrivateChat is evaluated inside the same locked transaction as
+// a Bot API send. Only an incoming direct message from the target user proves
+// that the user started this bot; bot outbox and non-user peer rows do not.
+func (q *Queries) BotHasStartedPrivateChat(ctx context.Context, arg BotHasStartedPrivateChatParams) (bool, error) {
+	row := q.db.QueryRow(ctx, botHasStartedPrivateChat, arg.BotID, arg.PeerType, arg.UserID)
+	var exists bool
+	err := row.Scan(&exists)
+	return exists, err
+}
+
 const chatMessageCopiesForDeletion = `-- name: ChatMessageCopiesForDeletion :many
 SELECT owner_id, local_id, peer_id, from_id, date, message, out, edit_date, deleted, random_id, peer_local_id, peer_type, fanout_id, action_type, action_user_id, file_id, reply_to_msg_id, fwd_from_id, fwd_date, fwd_channel_id, fwd_channel_post, message_tsv, reply_to_trusted, grouped_id, fwd_post_author, ttl_period, expires_at, entities, sticker_document_id FROM messages
 WHERE peer_type = 2
