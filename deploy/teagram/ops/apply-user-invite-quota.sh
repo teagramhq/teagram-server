@@ -78,6 +78,137 @@ registration_fingerprint() {
   ' | LC_ALL=C sort | sha256sum | cut -d' ' -f1
 }
 
+run_app_config_probe() {
+  local image_id=$1
+  docker run --rm --network host --read-only --cap-drop ALL \
+    --security-opt no-new-privileges --user 65532:65532 \
+    --entrypoint /usr/local/bin/mtproto-smoke "$image_id" \
+    --expect-user-invite-quota "$QUOTA" > "$TEMP_DIR/app-config.log" 2>&1 || return 1
+  grep -q "registration_mode=invite user_invites_enabled=true user_invite_quota=$QUOTA" \
+    "$TEMP_DIR/app-config.log"
+}
+
+verify_existing_rollout() {
+  local recorded_source_sha=$1 recorded_env_sha=$2 current_env_sha=$3
+  local branch baseline_sha origin_sha live_image_sha container_state registration_mode
+  local websocket_listen_addr public_websocket_listen_addr account_age_setting live_quota_setting
+  local compose_selection expected_env_sha image_id
+
+  [[ "$current_env_sha" == "$recorded_env_sha" ]] || {
+    fail 'live .env differs from the verified rollout record'
+    return 1
+  }
+  private_file "$PREVIOUS_ENV_FILE" || { fail 'pre-change .env backup is unsafe'; return 1; }
+  [[ "$(dotenv_count "$PREVIOUS_ENV_FILE" "$QUOTA_ENV")" == 0 && \
+      "$(dotenv_count "$PREVIOUS_ENV_FILE" "$ACCOUNT_AGE_ENV")" == 0 ]] || {
+    fail 'pre-change .env backup contains invite settings'
+    return 1
+  }
+  TEMP_ENV=$(mktemp "$REPO/.env.main-2844.XXXXXXXX") || {
+    fail 'cannot prepare the expected invite environment for verification'
+    return 1
+  }
+  if ! cat -- "$PREVIOUS_ENV_FILE" > "$TEMP_ENV" || \
+     ! printf '%s=%s\n' "$QUOTA_ENV" "$QUOTA" >> "$TEMP_ENV" || \
+     ! chmod 600 -- "$TEMP_ENV" || ! sync; then
+    fail 'cannot prepare the expected invite environment for verification'
+    return 1
+  fi
+  expected_env_sha=$(file_sha256 "$TEMP_ENV") || {
+    fail 'cannot hash the expected invite environment'
+    return 1
+  }
+  if ! cmp -s -- "$TEMP_ENV" "$ENV_FILE" || [[ "$expected_env_sha" != "$recorded_env_sha" ]]; then
+    fail 'live .env is not the verified invite-only addition'
+    return 1
+  fi
+  rm -- "$TEMP_ENV" || { fail 'cannot remove the temporary verification environment'; return 1; }
+  TEMP_ENV=
+
+  branch=$(git -C "$REPO" branch --show-current) || { fail 'cannot read live checkout branch'; return 1; }
+  baseline_sha=$(git -C "$REPO" rev-parse --verify 'HEAD^{commit}') || { fail 'cannot read live checkout SHA'; return 1; }
+  [[ "$branch" == main || -z "$branch" ]] || { fail 'live checkout is not on main'; return 1; }
+  [[ "$OPS_SHA" == "$baseline_sha" ]] || { fail 'reviewed verification source does not match live main'; return 1; }
+  live_image_sha=$(docker inspect --format "$IMAGE_REVISION_FORMAT" "$SERVICE") || {
+    fail 'cannot read live container revision for verification'
+    return 1
+  }
+  [[ "$live_image_sha" =~ ^[0-9a-f]{40}$ && "$live_image_sha" == "$recorded_source_sha" ]] || {
+    fail 'live container revision does not match the verified rollout record'
+    return 1
+  }
+  git -C "$REPO" fetch -q origin main || { fail 'cannot refresh origin/main'; return 1; }
+  origin_sha=$(git -C "$REPO" rev-parse --verify 'origin/main^{commit}') || {
+    fail 'cannot read origin/main SHA'
+    return 1
+  }
+  git -C "$REPO" merge-base --is-ancestor "$live_image_sha" "$OPS_SHA" || {
+    fail 'live image is not an ancestor of the reviewed verification source'
+    return 1
+  }
+  git -C "$REPO" merge-base --is-ancestor "$OPS_SHA" "$origin_sha" || {
+    fail 'reviewed verification source is no longer on origin/main'
+    return 1
+  }
+
+  container_state=$(docker inspect --format "$CONTAINER_STATE_FORMAT" "$SERVICE") || {
+    fail 'cannot read live container state'
+    return 1
+  }
+  [[ "$container_state" == running ]] || { fail 'live container is not running'; return 1; }
+  registration_mode=$(container_value TG_REGISTRATION) || {
+    fail 'cannot inspect default listener registration mode'
+    return 1
+  }
+  [[ "$registration_mode" == invite ]] || { fail 'default listener is not in invite mode'; return 1; }
+  websocket_listen_addr=$(container_value TG_WEBSOCKET_LISTEN_ADDR) || {
+    fail 'cannot inspect additional WebSocket listener settings'
+    return 1
+  }
+  public_websocket_listen_addr=$(container_value TG_PUBLIC_WEBSOCKET_LISTEN_ADDR) || {
+    fail 'cannot inspect additional WebSocket listener settings'
+    return 1
+  }
+  [[ -z "$websocket_listen_addr" && -z "$public_websocket_listen_addr" ]] || {
+    fail 'an additional WebSocket listener needs its own app-config verification'
+    return 1
+  }
+  account_age_setting=$(container_value "$ACCOUNT_AGE_ENV") || {
+    fail 'cannot inspect live account age setting'
+    return 1
+  }
+  [[ -z "$account_age_setting" ]] || { fail 'live account age setting is not using the 7d default'; return 1; }
+  live_quota_setting=$(container_value "$QUOTA_ENV") || {
+    fail 'cannot inspect live user invite quota'
+    return 1
+  }
+  [[ "$live_quota_setting" == "$QUOTA" ]] || { fail 'live container does not have the requested quota'; return 1; }
+  compose_selection=$(docker inspect --format '{{index .Config.Labels "com.docker.compose.project.config_files"}}' "$SERVICE") || {
+    fail 'cannot read live Compose selection'
+    return 1
+  }
+  [[ "$compose_selection" == "$REPO/docker-compose.yml,$REPO/docker-compose.override.yml" ]] || {
+    fail 'live Compose selection is not the reviewed teagram S3 stack'
+    return 1
+  }
+
+  TEMP_DIR=$(mktemp -d /tmp/teagram-user-invite-env-apply.XXXXXXXX) || {
+    fail 'cannot create private runner output directory'
+    return 1
+  }
+  [[ -d "$TEMP_DIR" && ! -L "$TEMP_DIR" && "$(stat -c '%u:%a' -- "$TEMP_DIR")" == "$EXPECTED_ROOT_UID:700" ]] || {
+    fail 'runner output directory failed ownership or mode checks'
+    return 1
+  }
+  image_id=$(docker inspect --format '{{.Image}}' "$SERVICE") || { fail 'cannot read the live image ID'; return 1; }
+  run_app_config_probe "$image_id" || {
+    fail 'help.getAppConfig did not report user invites enabled with the configured quota'
+    return 1
+  }
+  printf 'verification=passed source_sha=%s env_sha256=%s invite_listener=verified quota=%s account_age=7d-default\n' \
+    "$live_image_sha" "$recorded_env_sha" "$QUOTA"
+}
+
 TEMP_ENV=
 TEMP_DIR=
 cleanup() {
@@ -99,8 +230,11 @@ cleanup() {
 }
 trap cleanup EXIT
 
-if [[ "$#" -ne 0 ]]; then
-  printf '%s\n' 'usage: apply-user-invite-quota' >&2
+MODE=apply
+if [[ "$#" -eq 1 && "$1" == verify ]]; then
+  MODE=verify
+elif [[ "$#" -ne 0 ]]; then
+  printf '%s\n' 'usage: apply-user-invite-quota [verify]' >&2
   exit 64
 fi
 [[ "$(id -u)" == "$EXPECTED_ROOT_UID" ]] || { fail 'operation requires root'; exit 1; }
@@ -120,7 +254,12 @@ record=$(cat -- "$ENV_RECORD") || { fail 'cannot read verified .env record'; exi
   exit 1
 }
 recorded_env_sha=${BASH_REMATCH[1]}
+recorded_source_sha=${BASH_REMATCH[2]}
 current_env_sha=$(file_sha256 "$ENV_FILE") || { fail 'cannot hash live .env'; exit 1; }
+if [[ "$MODE" == verify ]]; then
+  verify_existing_rollout "$recorded_source_sha" "$recorded_env_sha" "$current_env_sha" || exit 1
+  exit 0
+fi
 [[ "$current_env_sha" == "$recorded_env_sha" ]] || { fail 'live .env differs from the last verified record'; exit 1; }
 [[ "$(dotenv_count "$ENV_FILE" "$QUOTA_ENV")" == 0 ]] || { fail 'user invite quota already exists in the live .env'; exit 1; }
 [[ "$(dotenv_count "$ENV_FILE" "$ACCOUNT_AGE_ENV")" == 0 ]] || { fail 'account age is explicitly set instead of using the 7d default'; exit 1; }
@@ -312,17 +451,10 @@ actual_registration_mode=$(container_value TG_REGISTRATION) || { fail 'cannot ve
 [[ "$actual_registration_mode" == invite ]] || { fail 'default listener left invite mode'; exit 1; }
 
 image_id=$(docker inspect --format '{{.Image}}' "$SERVICE") || { fail 'cannot read the live image ID'; exit 1; }
-if ! docker run --rm --network host --read-only --cap-drop ALL \
-  --security-opt no-new-privileges --user 65532:65532 \
-  --entrypoint /usr/local/bin/mtproto-smoke "$image_id" \
-  --expect-user-invite-quota "$QUOTA" > "$TEMP_DIR/app-config.log" 2>&1; then
+if ! run_app_config_probe "$image_id"; then
   fail 'help.getAppConfig did not report user invites enabled with the configured quota'
   exit 1
 fi
-grep -q "registration_mode=invite user_invites_enabled=true user_invite_quota=$QUOTA" "$TEMP_DIR/app-config.log" || {
-  fail 'help.getAppConfig output did not confirm the invite-mode quota'
-  exit 1
-}
 
 printf 'rollout=verified target_sha=%s env_sha256=%s invite_listener=verified quota=%s account_age=7d-default other_listeners=none\n' \
   "$actual_image_sha" "$actual_env_sha" "$QUOTA"

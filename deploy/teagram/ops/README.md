@@ -56,6 +56,17 @@ the change. Run it only after the invite RPC release is live:
 ssh teagram run <reviewed-main-sha> apply-user-invite-quota
 ```
 
+If the rollout succeeds but the final `help.getAppConfig` probe fails, retry
+with the read-only verification path:
+
+```sh
+ssh teagram run <reviewed-main-sha> apply-user-invite-quota verify
+```
+
+It checks that the recorded environment is exactly the saved `.env` plus the
+quota setting, then reruns the probe against the current live image without
+applying another rollout.
+
 ## User-invite quota threat model
 
 The protected asset is the account-admission boundary. A user-issued invite is

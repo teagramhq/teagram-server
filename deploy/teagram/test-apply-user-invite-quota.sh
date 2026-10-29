@@ -64,6 +64,12 @@ set -euo pipefail
 [[ "${ROLLOUT_RUNNER_SOURCE_SHA:-}" == "$FIXTURE_SHA" ]]
 [[ "${ROLLOUT_RUNNER_ADDED_ENV:-}" == TG_USER_INVITE_QUOTA ]]
 [[ "${ROLLOUT_RUNNER_PREVIOUS_ENV_FILE:-}" == "$FIXTURE_REPO/.state/.env.main-2844-before-user-invites" ]]
+runner_count=0
+if [[ -f "$FIXTURE_RUNNER_CALL_COUNT" ]]; then
+  IFS= read -r runner_count < "$FIXTURE_RUNNER_CALL_COUNT"
+fi
+runner_count=$((runner_count + 1))
+printf '%s\n' "$runner_count" > "$FIXTURE_RUNNER_CALL_COUNT"
 : > "$FIXTURE_RUNNER_CALLED"
 [[ "${FIXTURE_RUNNER_FAIL:-0}" == 0 ]] || exit 42
 quota=$(awk -F= '$1 == "TG_USER_INVITE_QUOTA" { print $2 }' "$FIXTURE_REPO/.env")
@@ -84,6 +90,7 @@ setup_case() {
   FIXTURE_CONTAINER_ENV=$case_dir/container-env
   FIXTURE_INSPECT_COUNT=$case_dir/container-inspect-count
   FIXTURE_RUNNER_CALLED=$case_dir/runner-called
+  FIXTURE_RUNNER_CALL_COUNT=$case_dir/runner-call-count
   origin=$case_dir/origin.git
   mkdir -p "$FIXTURE_REPO/.state" "$FIXTURE_ROOT/teagramd-rollout-runner"
   chmod 700 "$FIXTURE_REPO/.state"
@@ -113,14 +120,17 @@ setup_case() {
     -e "s|EXPECTED_ROOT_UID=0|EXPECTED_ROOT_UID=$MOCK_UID|g" \
     "$OP_SCRIPT" > "$case_dir/op.sh"
   chmod 755 "$case_dir/op.sh"
-  export FIXTURE_REPO FIXTURE_ROOT FIXTURE_CONTAINER_ENV FIXTURE_INSPECT_COUNT FIXTURE_RUNNER_CALLED FIXTURE_SHA
+  export FIXTURE_REPO FIXTURE_ROOT FIXTURE_CONTAINER_ENV FIXTURE_INSPECT_COUNT FIXTURE_RUNNER_CALLED FIXTURE_RUNNER_CALL_COUNT FIXTURE_SHA
 }
 
 run_operation() {
-  local fail_runner=${1:-0} fail_inspect_at=${2:-0} output status=0
+  local fail_runner=${1:-0} fail_inspect_at=${2:-0} mode=${3:-} fail_smoke=${4:-0} output status=0
+  local -a operation_args=()
+  [[ -z "$mode" ]] || operation_args+=("$mode")
   output=$(env OPS_SHA="$FIXTURE_SHA" FIXTURE_RUNNER_FAIL="$fail_runner" \
+    FIXTURE_SMOKE_FAIL="$fail_smoke" \
     FIXTURE_INSPECT_FAIL_AT="$fail_inspect_at" FIXTURE_INSPECT_COUNT="$FIXTURE_INSPECT_COUNT" \
-    PATH="$TMP/bin:$PATH" bash "$TMP/$(basename "$(dirname "$FIXTURE_REPO")")/op.sh" 2>&1) || status=$?
+    PATH="$TMP/bin:$PATH" bash "$TMP/$(basename "$(dirname "$FIXTURE_REPO")")/op.sh" "${operation_args[@]}" 2>&1) || status=$?
   printf '%s\n' "$status" > "$TMP/operation-status"
   printf '%s\n' "$output"
 }
@@ -211,6 +221,24 @@ output=$(run_operation 0 8)
 [[ "$output" == *'cannot verify live account age setting after apply'* ]]
 [[ -f "$FIXTURE_RUNNER_CALLED" ]]
 printf '%s\n' 'PASS failed post-apply account-age inspection rejects success'
+
+setup_case app-config-probe-retry
+output=$(run_operation 0 0 '' 1)
+[[ "$(cat "$TMP/operation-status")" == 1 ]]
+[[ "$output" == *'help.getAppConfig did not report user invites enabled'* ]]
+grep -qx 'TG_USER_INVITE_QUOTA=5' "$FIXTURE_REPO/.env"
+grep -qx 'TG_USER_INVITE_QUOTA=5' "$FIXTURE_CONTAINER_ENV"
+applied_env=$(sha256sum "$FIXTURE_REPO/.env" | awk '{print $1}')
+applied_record=$(cat "$FIXTURE_REPO/.state/rollout-env")
+[[ "$(cat "$FIXTURE_RUNNER_CALL_COUNT")" == 1 ]]
+
+output=$(run_operation 0 0 verify)
+[[ "$(cat "$TMP/operation-status")" == 0 ]]
+[[ "$output" == *'verification=passed'* ]]
+[[ "$(sha256sum "$FIXTURE_REPO/.env" | awk '{print $1}')" == "$applied_env" ]]
+[[ "$(cat "$FIXTURE_REPO/.state/rollout-env")" == "$applied_record" ]]
+[[ "$(cat "$FIXTURE_RUNNER_CALL_COUNT")" == 1 ]]
+printf '%s\n' 'PASS transient app-config failure can be retried with read-only verification'
 
 setup_case rollback-inspect-failure
 output=$(run_operation 1 7)
