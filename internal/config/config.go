@@ -71,6 +71,9 @@ type Config struct {
 	// AdminListenAddr is the address the admin HTTP server binds to.
 	// Empty disables the admin server entirely.
 	AdminListenAddr string
+	// BotAPIListenAddr is the loopback or tailnet-only Bot API HTTP listener.
+	// Empty disables the listener.
+	BotAPIListenAddr string
 	// AdminOrigin is the fixed Origin accepted by admin login and logout.
 	// It is configured explicitly or derived from AdminListenAddr at startup.
 	AdminOrigin string
@@ -922,6 +925,7 @@ func load(log *slog.Logger, allowKeyGeneration bool) (Config, error) {
 		PublicWebSocketAdvertiseHost:  publicAdvertiseHost,
 		PublicWebSocketAdvertisePort:  publicAdvertisePort,
 		AdminListenAddr:               os.Getenv("TG_ADMIN_LISTEN_ADDR"),
+		BotAPIListenAddr:              os.Getenv("TG_BOT_API_LISTEN_ADDR"),
 		AdminOrigin:                   os.Getenv("TG_ADMIN_ORIGIN"),
 		ReplicaID:                     os.Getenv("TG_REPLICA_ID"),
 		ReplicaCount:                  1,
@@ -1737,6 +1741,9 @@ func load(log *slog.Logger, allowKeyGeneration bool) (Config, error) {
 	adminErr := validateAdmin(&cfg)
 	if adminErr != nil {
 		return Config{}, adminErr
+	}
+	if err := validateBotAPI(&cfg); err != nil {
+		return Config{}, err
 	}
 	cfg.AdminTokenHash = os.Getenv("TG_ADMIN_TOKEN_HASH")
 	if blobS3Configured() {
@@ -2581,6 +2588,11 @@ var adminHashRe = regexp.MustCompile(`^[0-9a-f]{64}$`)
 
 var replicaIDRe = regexp.MustCompile(`^[A-Za-z0-9._-]{1,64}$`)
 
+var (
+	botAPICGNATPrefix   = netip.MustParsePrefix("100.64.0.0/10")
+	botAPITailnetPrefix = netip.MustParsePrefix("fd7a:115c:a1e0::/48")
+)
+
 func validateReplicaID(replicaID string) error {
 	if replicaID != "" && !replicaIDRe.MatchString(replicaID) {
 		return errors.New("TG_REPLICA_ID must be 1-64 characters from [A-Za-z0-9._-]")
@@ -2631,6 +2643,65 @@ func validateAdmin(cfg *Config) error {
 		return fmt.Errorf("TG_ADMIN_ORIGIN %w", err)
 	}
 	return nil
+}
+
+func validateBotAPI(cfg *Config) error {
+	addr := cfg.BotAPIListenAddr
+	if addr == "" {
+		return nil
+	}
+	host, port, err := net.SplitHostPort(addr)
+	if err != nil || host == "" {
+		return errors.New("TG_BOT_API_LISTEN_ADDR must be an explicit loopback or tailnet IP literal with a port")
+	}
+	portNumber, err := strconv.Atoi(port)
+	if err != nil || portNumber < 1 || portNumber > 65535 {
+		return errors.New("TG_BOT_API_LISTEN_ADDR must use a port from 1 to 65535")
+	}
+	ip, err := netip.ParseAddr(host)
+	if err != nil || ip.Zone() != "" {
+		return errors.New("TG_BOT_API_LISTEN_ADDR host must be an unscoped IP literal")
+	}
+	ip = ip.Unmap()
+	if !ip.IsLoopback() && !botAPICGNATPrefix.Contains(ip) && !botAPITailnetPrefix.Contains(ip) {
+		return errors.New("TG_BOT_API_LISTEN_ADDR host must be loopback, in 100.64.0.0/10, or in fd7a:115c:a1e0::/48")
+	}
+
+	for _, other := range []string{
+		cfg.ListenAddr,
+		cfg.WebSocketListenAddr,
+		cfg.PublicWebSocketListenAddr,
+		cfg.AdminListenAddr,
+	} {
+		if other != "" && botAPIAddressConflicts(ip, portNumber, other) {
+			return errors.New("TG_BOT_API_LISTEN_ADDR must not overlap another listener address")
+		}
+	}
+	return nil
+}
+
+func botAPIAddressConflicts(botIP netip.Addr, botPort int, other string) bool {
+	if other == "" {
+		return false
+	}
+	otherHost, otherPort, err := net.SplitHostPort(other)
+	if err != nil {
+		return false
+	}
+	otherPortNumber, err := strconv.Atoi(otherPort)
+	if err != nil || otherPortNumber != botPort {
+		return false
+	}
+	if otherHost == "" {
+		return true
+	}
+	otherIP, err := netip.ParseAddr(otherHost)
+	if err != nil {
+		// A same-port hostname can resolve to the Bot API address at bind time.
+		return true
+	}
+	otherIP = otherIP.Unmap()
+	return otherIP.IsUnspecified() || otherIP == botIP
 }
 
 func validateAdminOrigin(origin string) error {

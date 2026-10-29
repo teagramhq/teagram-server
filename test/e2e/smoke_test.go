@@ -51,6 +51,10 @@ import (
 )
 
 func TestSmoke(t *testing.T) {
+	t.Run("bot-api-get-me", func(t *testing.T) {
+		t.Parallel()
+		testSmokeBotAPIGetMe(t)
+	})
 	t.Run("turnstile-signup", func(t *testing.T) {
 		t.Parallel()
 		testSmokeTurnstileSignUp(t)

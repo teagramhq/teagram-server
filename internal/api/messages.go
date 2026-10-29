@@ -770,7 +770,7 @@ func (h *handlers) handleReportReadMetrics(r *mtproto.Request) (bin.Encoder, err
 }
 
 // handleGetHistory serves messages.getHistory, selecting ordinal pages from
-// newest-first history with offset_id and add_offset.
+// newest-first history with offset_id or offset_date and add_offset.
 func (h *handlers) handleGetHistory(r *mtproto.Request) (bin.Encoder, error) {
 	var req tg.MessagesGetHistoryRequest
 	if err := req.Decode(r.Buf); err != nil {
