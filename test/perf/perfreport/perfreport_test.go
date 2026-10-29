@@ -347,7 +347,6 @@ func TestKnownViolationTimingWaiversNameTheirIssues(t *testing.T) {
 		"contacts.getContacts":                  "MAIN-2579",
 		"updates.getDifference 1 day offline":   "MAIN-2580",
 		"updates.getDifference 30 days offline": "MAIN-2580",
-		"messages.getDialogs":                   "MAIN-2802",
 	}
 	for scenario, issue := range want {
 		found := false
@@ -361,9 +360,11 @@ func TestKnownViolationTimingWaiversNameTheirIssues(t *testing.T) {
 			t.Errorf("known_violations.json has no timing waiver for %s (%s)", scenario, issue)
 		}
 	}
-	for _, waiver := range waivers {
-		if waiver.Scenario == "contacts.search" && waiver.Check == perfreport.CheckTiming {
-			t.Errorf("known_violations.json still has a timing waiver for contacts.search (%s)", waiver.Issue)
+	for _, scenario := range []string{"contacts.search", "messages.getDialogs"} {
+		for _, waiver := range waivers {
+			if waiver.Scenario == scenario && waiver.Check == perfreport.CheckTiming {
+				t.Errorf("known_violations.json still has a timing waiver for %s (%s)", scenario, waiver.Issue)
+			}
 		}
 	}
 }
