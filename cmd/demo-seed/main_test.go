@@ -17,8 +17,10 @@ import (
 )
 
 func TestValidateEndpointAllowsOnlyInternalDemoService(t *testing.T) {
-	if err := validateEndpoint("teagramd:2443"); err != nil {
-		t.Fatalf("internal endpoint: %v", err)
+	for _, endpoint := range []string{defaultEndpoint, candidateEndpoint} {
+		if err := validateEndpoint(endpoint); err != nil {
+			t.Fatalf("internal endpoint %q: %v", endpoint, err)
+		}
 	}
 	if err := validateEndpointForMode(trustedProxyEndpoint, true); err != nil {
 		t.Fatalf("trusted proxy endpoint for Turnstile probe: %v", err)
@@ -41,6 +43,7 @@ func TestValidateEndpointAllowsOnlyInternalDemoService(t *testing.T) {
 		"postgres:5432",
 		"https://teagramd:2443",
 		"teagramd:2444",
+		"teagramd-next:2444",
 	} {
 		t.Run(endpoint, func(t *testing.T) {
 			if err := validateEndpoint(endpoint); err == nil {

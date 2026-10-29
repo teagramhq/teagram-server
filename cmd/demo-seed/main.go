@@ -30,6 +30,7 @@ import (
 const (
 	defaultEndpointHost      = "teagramd"
 	defaultEndpoint          = defaultEndpointHost + ":2443"
+	candidateEndpoint        = "teagramd-next:2443"
 	defaultClientConfig      = "/run/teagram-demo/client.json"
 	defaultOwnerPasswordFile = "/run/secrets/seed-owner-password"
 	defaultAccountInventory  = "/run/secrets/demo-accounts/inventory.json"
@@ -192,8 +193,8 @@ func parseOptions(args []string) (seedOptions, error) {
 }
 
 func validateEndpoint(endpoint string) error {
-	if endpoint != defaultEndpoint {
-		return errors.New("endpoint must be the internal teagramd:2443 service")
+	if endpoint != defaultEndpoint && endpoint != candidateEndpoint {
+		return errors.New("endpoint must be an internal teagramd service")
 	}
 	return nil
 }
