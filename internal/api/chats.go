@@ -71,13 +71,16 @@ func (h *handlers) resolveInvitees(ctx context.Context, users []tg.InputUserClas
 		if err != nil {
 			return nil, nil, err
 		}
-		_, ok, err := h.store.UserByID(ctx, id)
+		user, ok, err := h.store.UserByID(ctx, id)
 		if err != nil {
 			return nil, nil, err
 		}
 		if !ok {
 			missing = append(missing, tg.MissingInvitee{UserID: id})
 			continue
+		}
+		if user.Kind == store.UserKindBot {
+			return nil, nil, errBotGroupsBlocked
 		}
 		members = append(members, id)
 	}
@@ -222,6 +225,9 @@ func (h *handlers) handleCreateChat(r *mtproto.Request) (bin.Encoder, error) {
 	members, missing, err := h.resolveInvitees(r.Ctx, req.Users, r.UserID)
 	if errors.Is(err, errPeerIDInvalid) {
 		return nil, errPeerIDInvalid
+	}
+	if errors.Is(err, errBotGroupsBlocked) {
+		return nil, errBotGroupsBlocked
 	}
 	if err != nil {
 		h.log.Error("create chat: resolve invitees", "user_id", r.UserID, "err", err)

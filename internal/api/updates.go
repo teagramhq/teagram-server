@@ -564,6 +564,11 @@ func (h *handlers) userToTL(u store.User, viewerID int64, self bool, contact sto
 		AccessHash:    h.peers.Derive(viewerID, peerhash.KindUser, u.ID),
 		Status:        userStatusToTL(u, self, visibility),
 	}
+	if u.Kind == store.UserKindBot {
+		tlUser.SetBot(true)
+		tlUser.SetBotNochats(true)
+		tlUser.SetBotInfoVersion(1)
+	}
 	if self {
 		tlUser.Phone = u.Phone
 	}

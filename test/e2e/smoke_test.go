@@ -258,6 +258,10 @@ func TestSmoke(t *testing.T) {
 		t.Parallel()
 		testSmokeFullUserProfile(t)
 	})
+	t.Run("bot-user-profile", func(t *testing.T) {
+		t.Parallel()
+		testSmokeBotUserProfile(t)
+	})
 	t.Run("common-chats", func(t *testing.T) {
 		t.Parallel()
 		testSmokeCommonChats(t)
@@ -4543,6 +4547,46 @@ func testSmokeFullUserProfile(t *testing.T) {
 	if !selfUser.Self || selfUser.Phone != "" || selfUser.Username != wantSelfUsername {
 		t.Fatalf("self user = {self:%t phone:%q username:%q}, want A's own username %q and no phone",
 			selfUser.Self, selfUser.Phone, selfUser.Username, wantSelfUsername)
+	}
+}
+
+func testSmokeBotUserProfile(t *testing.T) {
+	t.Helper()
+	f := newSmokeFixture(t)
+	bot, _, err := f.store.CreateBot(f.ctx, "smokebotprofile_bot", "Smoke bot")
+	if err != nil {
+		t.Fatalf("create bot: %v", err)
+	}
+
+	const phoneHuman = "+15551049303"
+	seedSmokeUsers(t, f, phoneHuman)
+	requests := &clientRequestRecorder{}
+	human := newSmokeClientWithRequests(t, f, "bot profile human", phoneHuman, requests)
+	var full *tg.UsersUserFull
+	if err := fixtureClientCall(t, human, "users_getFullUser.bot.1", func(ctx context.Context, api *tg.Client) error {
+		var err error
+		full, err = api.UsersGetFullUser(ctx, inputUser(human.id, bot.ID))
+		return err
+	}); err != nil {
+		t.Fatalf("human users.getFullUser for bot fixture: %v", err)
+	}
+
+	user, err := requireSmokeFullUser(full.Users, bot.ID, "human users.getFullUser for bot")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !user.Bot || !user.BotNochats {
+		t.Fatalf("bot user flags = bot:%v nochats:%v, want true/true", user.Bot, user.BotNochats)
+	}
+	if version, ok := user.GetBotInfoVersion(); !ok || version == 0 {
+		t.Fatalf("bot_info_version = (%d, %v), want a nonzero value", version, ok)
+	}
+	if full.FullUser.ID != bot.ID {
+		t.Fatalf("full user id = %d, want bot %d", full.FullUser.ID, bot.ID)
+	}
+	info, ok := full.FullUser.GetBotInfo()
+	if !ok || !info.Zero() {
+		t.Fatalf("bot_info = (%+v, %v), want minimal empty bot info", info, ok)
 	}
 }
 

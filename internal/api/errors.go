@@ -30,6 +30,7 @@ var (
 	errCodeInvalid          = rpcErr(400, "PHONE_CODE_INVALID")
 	errCodeExpired          = rpcErr(400, "PHONE_CODE_EXPIRED")
 	errBotAccount           = rpcErr(400, "BOT_ACCOUNT")
+	errBotGroupsBlocked     = rpcErr(400, "BOT_GROUPS_BLOCKED")
 	errInternal             = rpcErr(500, "INTERNAL")
 	errMethodNotImpl        = rpcErr(400, "INPUT_METHOD_INVALID")
 	errLangPackInvalid      = rpcErr(400, "LANG_PACK_INVALID")

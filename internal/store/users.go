@@ -46,6 +46,7 @@ const UsernameChangeLimit = 2
 // User is a persisted account.
 type User struct {
 	ID         int64
+	Kind       string
 	Phone      string
 	FirstName  string
 	LastName   string
@@ -311,6 +312,7 @@ func UserFromDB(u db.UserByIDRow) User {
 	}
 	return User{
 		ID:         u.ID,
+		Kind:       u.Kind,
 		Phone:      phone,
 		FirstName:  u.FirstName,
 		LastName:   u.LastName,
@@ -325,6 +327,7 @@ func UserFromDB(u db.UserByIDRow) User {
 func UserFromCreateUsernameUser(u db.CreateUsernameUserRow) User {
 	return User{
 		ID:         u.ID,
+		Kind:       u.Kind,
 		Phone:      "",
 		FirstName:  u.FirstName,
 		LastName:   u.LastName,
