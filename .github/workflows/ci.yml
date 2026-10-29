@@ -1400,12 +1400,12 @@ jobs:
             --tls-san=127.0.0.1 \
             --write-kubeconfig-mode=644
           for attempt in $(seq 1 90); do
-            if docker exec k8s-manifest-check k3s kubectl get nodes --no-headers >/dev/null 2>&1; then
+            if docker exec k8s-manifest-check kubectl get nodes --no-headers >/dev/null 2>&1; then
               break
             fi
             sleep 2
           done
-          docker exec k8s-manifest-check k3s kubectl wait \
+          docker exec k8s-manifest-check kubectl wait \
             --for=condition=Ready node --all --timeout=180s
           docker cp k8s-manifest-check:/etc/rancher/k3s/k3s.yaml "$RUNNER_TEMP/k3s.yaml"
           export KUBECONFIG="$RUNNER_TEMP/k3s.yaml"
@@ -1540,12 +1540,12 @@ jobs:
             --tls-san=127.0.0.1 \
             --write-kubeconfig-mode=644
           for attempt in $(seq 1 90); do
-            if docker exec teagram-k3s k3s kubectl get nodes --no-headers >/dev/null 2>&1; then
+            if docker exec teagram-k3s kubectl get nodes --no-headers >/dev/null 2>&1; then
               break
             fi
             sleep 2
           done
-          docker exec teagram-k3s k3s kubectl wait --for=condition=Ready node --all --timeout=180s
+          docker exec teagram-k3s kubectl wait --for=condition=Ready node --all --timeout=180s
           docker exec --interactive teagram-k3s k3s ctr images import - < "$RUNNER_TEMP/k8s-images.tar"
           docker cp teagram-k3s:/etc/rancher/k3s/k3s.yaml "$RUNNER_TEMP/k3s.yaml"
           export KUBECONFIG="$RUNNER_TEMP/k3s.yaml"

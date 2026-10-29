@@ -132,6 +132,21 @@ check_ci_contract() {
     ci_fail 'the tested image digest artifact must be named for its source SHA'
   [[ "$(ci_query '.jobs."publish-demo-image".steps[] | select(.name == "Upload tested demo image digest") | .with."if-no-files-found"')" == 'error' ]] ||
     ci_fail 'publishing must fail if the trusted image digest artifact is missing'
+
+  local manifest_start deploy_start
+  manifest_start="$(ci_query '.jobs."check-k8s-manifests".steps[] | select(.name == "Start pinned k3s API for client dry-run") | .run')"
+  [[ "$manifest_start" == *"docker exec k8s-manifest-check kubectl get nodes"* &&
+     "$manifest_start" == *"docker exec k8s-manifest-check kubectl wait"* ]] ||
+    ci_fail 'the manifest check must invoke kubectl directly in its k3s container'
+  [[ "$manifest_start" != *"k3s kubectl"* ]] ||
+    ci_fail 'the manifest check must not invoke kubectl through the k3s CLI'
+
+  deploy_start="$(ci_query '.jobs."test-k8s-deploy".steps[] | select(.name == "Start the pinned k3s server with production disable flags") | .run')"
+  [[ "$deploy_start" == *"docker exec teagram-k3s kubectl get nodes"* &&
+     "$deploy_start" == *"docker exec teagram-k3s kubectl wait"* ]] ||
+    ci_fail 'the deployment check must invoke kubectl directly in its k3s container'
+  [[ "$deploy_start" != *"teagram-k3s k3s kubectl"* ]] ||
+    ci_fail 'the deployment check must not invoke kubectl through the k3s CLI'
 }
 
 # Run the actual target step against controlled forge responses.
