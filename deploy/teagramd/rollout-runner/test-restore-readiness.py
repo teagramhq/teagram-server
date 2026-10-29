@@ -2985,78 +2985,136 @@ class RestoreReadinessContractTests(unittest.TestCase):
         ):
             self.assertTrue(drill.cleanup_processes())
 
-    def test_supervisor_retries_a_transient_parent_manifest_read_failure(self) -> None:
-        with tempfile.TemporaryDirectory(prefix="rr-supervisor-parent-read-") as directory:
-            lock_path = Path(directory) / "lock"
-            lock_path.write_bytes(b"")
-            lock_fd = RESTORE_READINESS.os.open(lock_path, RESTORE_READINESS.os.O_RDWR)
-            lock_info = RESTORE_READINESS.os.fstat(lock_fd)
-            rollout_path = Path(directory) / "rollout-lock"
-            rollout_path.write_bytes(b"")
-            rollout_fd = RESTORE_READINESS.os.open(rollout_path, RESTORE_READINESS.os.O_RDWR)
-            rollout_info = RESTORE_READINESS.os.fstat(rollout_fd)
-
-            def manifest(parent_done: bool, *, registered: bool = False) -> dict[str, Any]:
-                return {
-                    "global_lock": {"device": lock_info.st_dev, "inode": lock_info.st_ino},
-                    "rollout_lock": {"device": rollout_info.st_dev, "inode": rollout_info.st_ino},
-                    "supervisor": (
-                        {"pid": os.getpid(), "start_ticks": 77}
-                        if registered
-                        else {"pid": 0, "start_ticks": 0}
-                    ),
-                    "parent": {"pid": 999999, "start_ticks": 1},
-                    "parent_done": parent_done,
-                    "work_deadline": RESTORE_READINESS.time.monotonic() + 60,
-                    "cleanup_deadline": RESTORE_READINESS.time.monotonic() + 60,
-                }
-
-            loads = iter(
-                (
-                    manifest(False),
-                    manifest(False),
-                    RESTORE_READINESS.DrillFailure("cleanup", "cleanup_failure"),
-                    manifest(True, registered=True),
-                    manifest(True, registered=True),
-                )
+    def test_load_manifest_classifies_only_transient_read_errors(self) -> None:
+        def load_with_read_error(error: OSError) -> RESTORE_READINESS.DrillFailure:
+            path = Path("/run/restore-readiness-test/ownership.json")
+            file_info = argparse.Namespace(
+                st_mode=RESTORE_READINESS.stat.S_IFREG | 0o600,
+                st_uid=0,
+                st_nlink=1,
+                st_size=1,
             )
-            output = io.StringIO()
-
-            def load_then_fail(_path: Path) -> dict[str, Any]:
-                value = next(loads)
-                if isinstance(value, Exception):
-                    raise value
-                return value
-
-            class RecoveryDrill:
-                def __init__(self, _args: Any, _run_dir: Path, current_manifest: dict[str, Any]) -> None:
-                    self.manifest = current_manifest
-                    self.cleanup_failure = None
-                    self.cleanup_active = False
-                    self.active_cleanup_operation = None
-
-                def save(self) -> None:
-                    return None
-
-                def cleanup_resources(self) -> bool:
-                    return True
-
+            directory_info = argparse.Namespace(
+                st_mode=RESTORE_READINESS.stat.S_IFDIR | 0o700,
+                st_uid=0,
+            )
             with (
-                patch.object(RESTORE_READINESS, "load_manifest", side_effect=load_then_fail),
-                patch.object(
-                    RESTORE_READINESS,
-                    "process_start_ticks",
-                    side_effect=lambda pid: 77 if pid == RESTORE_READINESS.os.getpid() else 1,
-                ),
-                patch.object(RESTORE_READINESS, "make_runtime_args", return_value=None),
-                patch.object(RESTORE_READINESS, "Drill", RecoveryDrill),
-                patch.object(RESTORE_READINESS, "remove_finished_run", return_value=True),
-                redirect_stdout(output),
+                patch.object(RESTORE_READINESS.Path, "lstat", side_effect=(file_info, directory_info)),
+                patch.object(RESTORE_READINESS.Path, "is_symlink", return_value=False),
+                patch.object(RESTORE_READINESS.os, "geteuid", return_value=0),
+                patch.object(RESTORE_READINESS.os, "open", return_value=42),
+                patch.object(RESTORE_READINESS.os, "read", side_effect=error),
+                patch.object(RESTORE_READINESS.os, "close", return_value=None),
             ):
-                status = RESTORE_READINESS.supervise(Path(directory) / "ownership.json", lock_fd, rollout_fd)
+                try:
+                    RESTORE_READINESS.load_manifest(path)
+                except RESTORE_READINESS.DrillFailure as failure:
+                    return failure
+            self.fail("manifest read error was not reported")
 
-            self.assertEqual(status, 0)
-            self.assertEqual(output.getvalue(), "")
+        transient_failure = load_with_read_error(
+            OSError(RESTORE_READINESS.errno.EIO, "transient read failure")
+        )
+        self.assertIsInstance(transient_failure, RESTORE_READINESS.TransientManifestReadFailure)
+
+        persistent_failure = load_with_read_error(
+            OSError(RESTORE_READINESS.errno.EPERM, "read was denied")
+        )
+        self.assertIs(type(persistent_failure), RESTORE_READINESS.DrillFailure)
+
+    def test_supervisor_retries_only_transient_parent_manifest_read_failures(self) -> None:
+        def run_supervisor_with_failure(
+            failure: Exception, *, work_deadline_offset: float = 60
+        ) -> tuple[int, str]:
+            with tempfile.TemporaryDirectory(prefix="rr-supervisor-parent-read-") as directory:
+                lock_path = Path(directory) / "lock"
+                lock_path.write_bytes(b"")
+                lock_fd = RESTORE_READINESS.os.open(lock_path, RESTORE_READINESS.os.O_RDWR)
+                lock_info = RESTORE_READINESS.os.fstat(lock_fd)
+                rollout_path = Path(directory) / "rollout-lock"
+                rollout_path.write_bytes(b"")
+                rollout_fd = RESTORE_READINESS.os.open(rollout_path, RESTORE_READINESS.os.O_RDWR)
+                rollout_info = RESTORE_READINESS.os.fstat(rollout_fd)
+
+                def manifest(parent_done: bool, *, registered: bool = False) -> dict[str, Any]:
+                    return {
+                        "global_lock": {"device": lock_info.st_dev, "inode": lock_info.st_ino},
+                        "rollout_lock": {"device": rollout_info.st_dev, "inode": rollout_info.st_ino},
+                        "supervisor": (
+                            {"pid": os.getpid(), "start_ticks": 77}
+                            if registered
+                            else {"pid": 0, "start_ticks": 0}
+                        ),
+                        "parent": {"pid": 999999, "start_ticks": 1},
+                        "parent_done": parent_done,
+                        "work_deadline": RESTORE_READINESS.time.monotonic() + work_deadline_offset,
+                        "cleanup_deadline": RESTORE_READINESS.time.monotonic() + 60,
+                    }
+
+                loads = iter(
+                    (
+                        manifest(False),
+                        manifest(False),
+                        failure,
+                        manifest(True, registered=True),
+                        manifest(True, registered=True),
+                    )
+                )
+                output = io.StringIO()
+
+                def load_then_fail(_path: Path) -> dict[str, Any]:
+                    value = next(loads)
+                    if isinstance(value, Exception):
+                        raise value
+                    return value
+
+                class RecoveryDrill:
+                    def __init__(self, _args: Any, _run_dir: Path, current_manifest: dict[str, Any]) -> None:
+                        self.manifest = current_manifest
+                        self.cleanup_failure = None
+                        self.cleanup_active = False
+                        self.active_cleanup_operation = None
+
+                    def save(self) -> None:
+                        return None
+
+                    def cleanup_resources(self) -> bool:
+                        return True
+
+                with (
+                    patch.object(RESTORE_READINESS, "load_manifest", side_effect=load_then_fail),
+                    patch.object(
+                        RESTORE_READINESS,
+                        "process_start_ticks",
+                        side_effect=lambda pid: 77 if pid == RESTORE_READINESS.os.getpid() else 1,
+                    ),
+                    patch.object(RESTORE_READINESS, "make_runtime_args", return_value=None),
+                    patch.object(RESTORE_READINESS, "Drill", RecoveryDrill),
+                    patch.object(RESTORE_READINESS, "remove_finished_run", return_value=True),
+                    redirect_stdout(output),
+                ):
+                    status = RESTORE_READINESS.supervise(Path(directory) / "ownership.json", lock_fd, rollout_fd)
+
+                return status, output.getvalue()
+
+        status, output = run_supervisor_with_failure(
+            RESTORE_READINESS.TransientManifestReadFailure("cleanup", "cleanup_failure")
+        )
+        self.assertEqual(status, 0)
+        self.assertEqual(output, "")
+
+        status, output = run_supervisor_with_failure(
+            RESTORE_READINESS.DrillFailure("cleanup", "cleanup_failure")
+        )
+        self.assertEqual(status, 1)
+        self.assertIn('"stage":"wait_for_parent"', output)
+
+        status, output = run_supervisor_with_failure(
+            RESTORE_READINESS.TransientManifestReadFailure("cleanup", "cleanup_failure"),
+            work_deadline_offset=-1,
+        )
+        self.assertEqual(status, 1)
+        self.assertIn('"stage":"wait_for_parent"', output)
 
     def test_supervisor_recovers_owned_resources_after_parent_disappears(self) -> None:
         with tempfile.TemporaryDirectory(prefix="rr-supervisor-") as directory:

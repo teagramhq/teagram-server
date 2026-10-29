@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import errno
 import fcntl
 import hashlib
 import ipaddress
@@ -91,6 +92,7 @@ CLEANUP_SECONDS = 4 * 60
 CLEANUP_REAP_SECONDS = 1
 CLEANUP_FINALIZE_SECONDS = 0.25
 SUPERVISOR_SECONDS = WORK_SECONDS + CLEANUP_SECONDS
+TRANSIENT_MANIFEST_READ_ERRNOS = {errno.EAGAIN, errno.EINTR, errno.EIO, errno.ESTALE}
 SAFE_PHASES = {
     "preflight",
     "fixture_generation",
@@ -2124,6 +2126,10 @@ class DrillFailure(Exception):
         self.fixture_check = fixture_check
 
 
+class TransientManifestReadFailure(DrillFailure):
+    """A temporary OS error interrupted reading the ownership manifest."""
+
+
 def write_sigkill_marker(fd: int) -> None:
     marker = b"SIGKILL_INJECTED\n"
     try:
@@ -3263,7 +3269,12 @@ def load_manifest(path: Path) -> dict[str, Any]:
             raise ValueError("invalid ownership file")
         descriptor = os.open(path, os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW)
         try:
-            data = os.read(descriptor, 2 * 1024 * 1024 + 1)
+            try:
+                data = os.read(descriptor, 2 * 1024 * 1024 + 1)
+            except OSError as exc:
+                if exc.errno in TRANSIENT_MANIFEST_READ_ERRNOS:
+                    raise TransientManifestReadFailure("cleanup", "cleanup_failure") from exc
+                raise
         finally:
             os.close(descriptor)
         if len(data) > 2 * 1024 * 1024:
@@ -7727,11 +7738,11 @@ def supervise(manifest_path: Path, lock_fd: int, rollout_lock_fd: int) -> int:
         while True:
             try:
                 manifest = load_manifest(manifest_path)
-            except DrillFailure:
-                if time.monotonic() < manifest["work_deadline"]:
-                    # Keep the last validated snapshot while the parent is active.
-                    time.sleep(0.2)
-                    continue
+            except TransientManifestReadFailure:
+                if time.monotonic() >= manifest["work_deadline"]:
+                    raise
+                time.sleep(0.2)
+                continue
             parent_alive = process_start_ticks(parent["pid"]) == parent["start_ticks"]
             if manifest.get("parent_done") or not parent_alive:
                 break
