@@ -31,8 +31,8 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  deploy:
-    name: deploy teagram-server
+  deploy-server:
+    name: 'deploy: server (prod)'
     if: ${{ github.event_name == 'workflow_dispatch' || (github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push') }}
     runs-on: ubuntu-26.04
     timeout-minutes: 60
@@ -115,11 +115,11 @@ jobs:
         if: ${{ always() }}
         run: rm -rf "$RUNNER_TEMP/ssh"
 
-  resolve-demo-web:
-    name: resolve pinned demo web artifact
+  build-demo-web-resolve:
+    name: 'build: demo-web-resolve'
     continue-on-error: true
-    needs: deploy
-    if: ${{ needs.deploy.result == 'success' }}
+    needs: deploy-server
+    if: ${{ needs.deploy-server.result == 'success' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:
@@ -153,12 +153,12 @@ jobs:
           } >> "$GITHUB_OUTPUT"
 
   deploy-demo:
-    name: deploy public demo
+    name: 'deploy: demo'
     continue-on-error: true
     needs:
-      - deploy
-      - resolve-demo-web
-    if: ${{ always() && needs.deploy.result == 'success' }}
+      - deploy-server
+      - build-demo-web-resolve
+    if: ${{ always() && needs.deploy-server.result == 'success' }}
     runs-on: ubuntu-26.04
     timeout-minutes: 60
     environment: demo
@@ -188,8 +188,8 @@ jobs:
         id: web-gate
         if: ${{ steps.demo-gate.outputs.enabled == 'true' }}
         env:
-          DEMO_WEB_RESOLVER_RESULT: ${{ needs.resolve-demo-web.result }}
-          DEMO_WEB_DEPLOYABLE: ${{ needs.resolve-demo-web.outputs.deployable }}
+          DEMO_WEB_RESOLVER_RESULT: ${{ needs.build-demo-web-resolve.result }}
+          DEMO_WEB_DEPLOYABLE: ${{ needs.build-demo-web-resolve.outputs.deployable }}
         run: |
           if [[ "$DEMO_WEB_RESOLVER_RESULT" == 'success' && "$DEMO_WEB_DEPLOYABLE" == 'true' ]]; then
             echo "enabled=true" >> "$GITHUB_OUTPUT"
@@ -203,8 +203,8 @@ jobs:
         if: ${{ steps.demo-gate.outputs.enabled == 'true' }}
         env:
           GH_TOKEN: ${{ github.token }}
-          CI_RUN_ID: ${{ needs.deploy.outputs.ci_run_id }}
-          DEPLOY_SHA: ${{ needs.deploy.outputs.sha }}
+          CI_RUN_ID: ${{ needs.deploy-server.outputs.ci_run_id }}
+          DEPLOY_SHA: ${{ needs.deploy-server.outputs.sha }}
         run: |
           [[ "$CI_RUN_ID" =~ ^[0-9]+$ ]]
           [[ "$DEPLOY_SHA" =~ ^[0-9a-f]{40}$ ]]
@@ -245,7 +245,7 @@ jobs:
       - name: Deploy the tested server commit after the dev deploy
         if: ${{ steps.demo-gate.outputs.enabled == 'true' }}
         env:
-          DEPLOY_SHA: ${{ needs.deploy.outputs.sha }}
+          DEPLOY_SHA: ${{ needs.deploy-server.outputs.sha }}
           DEPLOY_IMAGE_DIGEST: ${{ steps.demo-image.outputs.digest }}
           DEMO_DEPLOY_HOST: ${{ vars.DEMO_DEPLOY_HOST }}
           DEMO_DEPLOY_PORT: ${{ vars.DEMO_DEPLOY_PORT }}
@@ -263,8 +263,8 @@ jobs:
         if: ${{ steps.web-gate.outputs.enabled == 'true' }}
         env:
           GH_TOKEN: ${{ github.token }}
-          CI_RUN_ID: ${{ needs.deploy.outputs.ci_run_id }}
-          WEB_SOURCE_SHA: ${{ needs.resolve-demo-web.outputs.source_commit }}
+          CI_RUN_ID: ${{ needs.deploy-server.outputs.ci_run_id }}
+          WEB_SOURCE_SHA: ${{ needs.build-demo-web-resolve.outputs.source_commit }}
         run: |
           [[ "$CI_RUN_ID" =~ ^[0-9]+$ ]]
           [[ "$WEB_SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]
@@ -293,9 +293,9 @@ jobs:
       - name: Publish the pinned web artifact on the demo origin
         if: ${{ steps.web-gate.outputs.enabled == 'true' }}
         env:
-          DEPLOY_SHA: ${{ needs.deploy.outputs.sha }}
-          WEB_SOURCE_SHA: ${{ needs.resolve-demo-web.outputs.source_commit }}
-          WEB_ARTIFACT_DIGEST: ${{ needs.resolve-demo-web.outputs.artifact_digest }}
+          DEPLOY_SHA: ${{ needs.deploy-server.outputs.sha }}
+          WEB_SOURCE_SHA: ${{ needs.build-demo-web-resolve.outputs.source_commit }}
+          WEB_ARTIFACT_DIGEST: ${{ needs.build-demo-web-resolve.outputs.artifact_digest }}
           WEB_ARCHIVE_SHA256: ${{ steps.demo-web-artifact.outputs.archive_sha256 }}
           WEB_ARCHIVE: ${{ steps.demo-web-artifact.outputs.archive }}
           DEMO_DEPLOY_HOST: ${{ vars.DEMO_DEPLOY_HOST }}

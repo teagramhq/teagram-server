@@ -71,9 +71,9 @@ class PlaywrightAptCacheTests(unittest.TestCase):
     def test_network_install_retry_budget_covers_slow_archive_mirrors(self) -> None:
         workflow = WORKFLOW.read_text(encoding="utf-8")
         job = re.search(
-            r"(?ms)^  e2e-admin:\n(.*?)(?=^  [a-z0-9-]+:|\Z)", workflow
+            r"(?ms)^  test-e2e-admin:\n(.*?)(?=^  [a-z0-9-]+:|\Z)", workflow
         )
-        self.assertIsNotNone(job, "e2e-admin job is missing")
+        self.assertIsNotNone(job, "test-e2e-admin job is missing")
         step = re.search(
             r"(?ms)^      - name: Install the system dependencies from the network\n(.*?)(?=^      - name:|\Z)",
             job.group(1),
