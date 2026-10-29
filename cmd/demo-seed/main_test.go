@@ -12,6 +12,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/gotd/td/telegram"
 	"github.com/gotd/td/tg"
 	"github.com/gotd/td/tgerr"
 )
@@ -33,6 +34,54 @@ func TestEndpointDialHostUsesSelectedInternalService(t *testing.T) {
 				t.Fatalf("dial host for %q = %q, want %q", test.endpoint, got, test.wantHost)
 			}
 		})
+	}
+}
+
+func TestVerificationClientOptionsUseSelectedEndpoint(t *testing.T) {
+	var gotHost string
+	err := withAccountUsingRunner(context.Background(), apiConfig{dcID: 2}, candidateEndpoint, accountSpec{}, "", nil, nil,
+		func(_ context.Context, options telegram.Options, _ telegramClientAction) error {
+			if len(options.DCList.Options) != 1 {
+				t.Fatalf("verification client DC options = %d, want 1", len(options.DCList.Options))
+			}
+			gotHost = options.DCList.Options[0].IPAddress
+			if got, want := options.DCList.Options[0].Port, 2443; got != want {
+				t.Fatalf("verification client dial port = %d, want %d", got, want)
+			}
+			return nil
+		})
+	if err != nil {
+		t.Fatalf("run verification client setup: %v", err)
+	}
+	if got, want := gotHost, candidateEndpointHost; got != want {
+		t.Fatalf("verification client dial host = %q, want %q", got, want)
+	}
+}
+
+func TestActivityClientOptionsUseSelectedEndpoint(t *testing.T) {
+	var gotHost string
+	err := runActivitySessionUsingRunner(
+		context.Background(),
+		apiConfig{dcID: 2},
+		seedOptions{endpoint: candidateEndpoint},
+		accountSpec{},
+		"",
+		"unused-session.json",
+		false,
+		activityRateLimiter{},
+		func(_ context.Context, options telegram.Options, _ telegramClientAction) error {
+			if len(options.DCList.Options) != 1 {
+				t.Fatalf("activity client DC options = %d, want 1", len(options.DCList.Options))
+			}
+			gotHost = options.DCList.Options[0].IPAddress
+			return nil
+		},
+	)
+	if err != nil {
+		t.Fatalf("run activity client setup: %v", err)
+	}
+	if got, want := gotHost, candidateEndpointHost; got != want {
+		t.Fatalf("activity client dial host = %q, want %q", got, want)
 	}
 }
 
