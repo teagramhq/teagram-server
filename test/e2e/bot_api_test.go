@@ -107,10 +107,7 @@ func testSmokeBotAPISendMessage(t *testing.T) {
 	}
 	const phoneStarted, phoneNever, phoneBlocked = "+15551049311", "+15551049312", "+15551049313"
 	seedSmokeUsers(t, f, phoneStarted, phoneNever, phoneBlocked)
-	neverStarted, exists, err := f.store.UserByPhone(f.ctx, phoneNever)
-	if err != nil || !exists {
-		t.Fatalf("load never-started user: exists=%v err=%v", exists, err)
-	}
+	neverStarted := smokeUserByPhone(t, f, phoneNever)
 	started := newSmokeClient(t, f, "Bot API started user", phoneStarted)
 	blocked := newSmokeClient(t, f, "Bot API blocked user", phoneBlocked)
 	server := startSmokeBotAPIServer(t, f, store.RateLimitConfig{})

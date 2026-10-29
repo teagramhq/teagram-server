@@ -33,6 +33,7 @@ SMOKE_SCENARIOS=(
   basic-group
   basic-group-reactions
   bot-api-get-me
+  bot-api-send-message
   channel-reactions
   available-reactions
   basic-group-photo
