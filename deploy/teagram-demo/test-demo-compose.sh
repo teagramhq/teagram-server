@@ -104,7 +104,16 @@ jq -e \
   and .services.teagramd.environment.TG_CLIENT_ADDR_PROXY_CIDRS == "198.18.130.2/32"
   and .services.teagramd.environment.TG_TURNSTILE_SITE_KEY == "fixture-site-key"
   and .services.teagramd.environment.TG_TURNSTILE_SECRET_KEY_FILE == "/run/secrets/teagram_demo_turnstile"
+  and .services.teagramd.environment.TG_TURNSTILE_TEST_MODE == "false"
+  and .services.teagramd.environment.TG_TURNSTILE_HOSTNAMES == "demo.teagram.io"
+  and .services.teagramd.environment.TG_TURNSTILE_QA_BYPASS_TOKEN_FILE == "/run/secrets/teagram_demo_turnstile_qa_bypass"
+  and .services["teagramd-next"].environment.TG_TURNSTILE_TEST_MODE == "false"
+  and .services["teagramd-next"].environment.TG_TURNSTILE_HOSTNAMES == "demo.teagram.io"
+  and .services["teagramd-next"].environment.TG_TURNSTILE_QA_BYPASS_TOKEN_FILE == "/run/secrets/teagram_demo_turnstile_qa_bypass"
+  and any(.services.teagramd.secrets[]; .source == "teagram_demo_turnstile_qa_bypass" and .target == "/run/secrets/teagram_demo_turnstile_qa_bypass")
+  and any(.services["teagramd-next"].secrets[]; .source == "teagram_demo_turnstile_qa_bypass" and .target == "/run/secrets/teagram_demo_turnstile_qa_bypass")
   and .secrets.teagram_demo_turnstile.file == $secretFile
+  and .secrets.teagram_demo_turnstile_qa_bypass.file == "/var/lib/teagram-demo/secrets/turnstile-qa-bypass-token"
   and .services.postgres.environment.PGDATA == "/var/lib/postgresql/18/docker"
   and .services.postgres.platform == "linux/amd64"
   and .services.postgres.networks.backend.ipv4_address == "198.18.130.3"
@@ -248,6 +257,8 @@ jq -e '
   and .services.teagramd.environment.TG_CLIENT_ADDR_PROXY_CIDRS == ""
   and .services.teagramd.environment.TG_TURNSTILE_SITE_KEY == ""
   and .services.teagramd.environment.TG_TURNSTILE_SECRET_KEY_FILE == ""
+  and .services.teagramd.environment.TG_TURNSTILE_QA_BYPASS_TOKEN_FILE == ""
+  and .services["teagramd-next"].environment.TG_TURNSTILE_QA_BYPASS_TOKEN_FILE == ""
   and .services.teagramd.environment.TG_RATE_LIMIT_SIGN_UP_IP == "32"
   and .services.teagramd.environment.TG_RATE_LIMIT_KEY_EXCHANGE_IP == "256"
   and .services.teagramd.environment.TG_RATE_LIMIT_KEY_EXCHANGE_IP_WINDOW == "1h"
@@ -269,6 +280,8 @@ jq -e '
   and (.services.teagramd.depends_on | keys) == ["migrate"]
   and .services.teagramd.environment.TG_TURNSTILE_SITE_KEY == ""
   and .services.teagramd.environment.TG_TURNSTILE_SECRET_KEY_FILE == ""
+  and .services.teagramd.environment.TG_TURNSTILE_QA_BYPASS_TOKEN_FILE == ""
+  and .services["teagramd-next"].environment.TG_TURNSTILE_QA_BYPASS_TOKEN_FILE == ""
   and .services.teagramd.environment.TG_RATE_LIMIT_SIGN_UP_IP == "32"
   and .services.teagramd.environment.TG_RATE_LIMIT_SIGN_UP_IP_WINDOW == "1h"
   and .services.teagramd.environment.TG_RATE_LIMIT_SEND_CODE_IP == "256"

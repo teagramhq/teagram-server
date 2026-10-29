@@ -22,7 +22,7 @@ jobs:
     env:
       TESTCONTAINERS_HUB_IMAGE_NAME_PREFIX: mirror.gcr.io
       REAL_CLIENT_SERVER_REVISION: ${{ github.sha }}
-      REAL_CLIENT_WEB_REVISION: dacbd2c686a4fb3262e805a4b225ee766e6ac786
+      REAL_CLIENT_WEB_REVISION: afa9b9ee6b4c177ec323eabec200f00d8e4018bf
       REAL_CLIENT_SERVER_ROOT: ${{ github.workspace }}
       REAL_CLIENT_WEB_ROOT: ${{ github.workspace }}/web-source
       REAL_CLIENT_PR_HEAD: ${{ github.event.pull_request.head.sha }}
@@ -74,7 +74,7 @@ jobs:
         timeout-minutes: 5
         run: bash .github/scripts/pull-base-images.sh --image mirror.gcr.io/library/postgres:18-alpine --image mirror.gcr.io/arigaio/atlas:1.2.0-alpine test/e2e/real_server_fixture/Dockerfile
 
-      - name: Run fixture, private build, and all six browser scenarios
+      - name: Run fixture, private build, and all seven browser scenarios
         id: browser-flow
         run: node test/e2e/real_server_fixture/run_real_client_browser_flow.mjs
 

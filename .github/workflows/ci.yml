@@ -2114,6 +2114,9 @@ jobs:
           docker compose config --format json >"$RUNNER_TEMP/teagram-server-local-compose.json"
           jq -e '
             .services.teagramd.environment.TG_BLOB_DIR == "/var/lib/teagramd-blobs"
+            and .services.teagramd.environment.TG_TURNSTILE_TEST_MODE == "true"
+            and .services.teagramd.environment.TG_TURNSTILE_HOSTNAMES == "localhost,127.0.0.1"
+            and .services.teagramd.environment.TG_TURNSTILE_QA_BYPASS_TOKEN_FILE == ""
             and ([.services.teagramd.environment | keys[] | select(startswith("TG_BLOB_S3_"))] | length) == 0
             and ((.services.teagramd.secrets // []) | length) == 1
             and any(.services.teagramd.secrets[]; .source == "teagramd_turnstile" and .target == "teagramd-turnstile")
@@ -2436,6 +2439,7 @@ jobs:
           jq -e '
             (.services.teagramd.environment.TG_TURNSTILE_SITE_KEY == "")
             and (.services.teagramd.environment.TG_TURNSTILE_SECRET_KEY_FILE == "")
+            and (.services.teagramd.environment.TG_TURNSTILE_QA_BYPASS_TOKEN_FILE == "")
             and (.services.teagramd.environment.TG_TURNSTILE_SIGNIN_ENABLED == "false")
             and any(.services.teagramd.secrets[]; .target == "teagramd-turnstile")
             and (.secrets.teagramd_turnstile.file == "/dev/null")

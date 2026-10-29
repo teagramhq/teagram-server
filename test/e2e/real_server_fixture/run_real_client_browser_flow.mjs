@@ -6,7 +6,7 @@ import {join, resolve} from 'node:path';
 import {tmpdir} from 'node:os';
 import {FIXTURE_CLEANUP_TIMEOUT_MS, spawnTracked, terminate, terminateFixture} from './process_tree.mjs';
 
-const SCENARIOS = 'sign-in,first-message,message,group,channel,poll';
+const SCENARIOS = 'sign-in,first-message,message,group,channel,poll,guest-signup';
 const REVISION_PATTERN = /^[0-9a-f]{40}$/;
 const EVENT_TIMEOUTS = {serverReady: 8 * 60_000, artifactReady: 3 * 60_000};
 const TOTAL_BUDGET_MS = 12 * 60_000;
@@ -320,7 +320,8 @@ async function main() {
     fixtureProcess = spawnTracked('bash', [fixtureScript,
       '--server-revision', serverRevision,
       '--web-revision', webRevision,
-      '--run-id', runId
+      '--run-id', runId,
+      '--guest-signup'
     ], {cwd: serverRoot, env: cleanEnvironment(), stdio: ['pipe', 'pipe', 'pipe']});
     fixtureStarted = true;
     const output = createInterface({input: fixtureProcess.stdout});

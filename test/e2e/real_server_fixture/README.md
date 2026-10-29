@@ -106,7 +106,7 @@ It runs the artifact boundary tests and focused Go fixture cases, then checks Go
 
 ## PR real-client browser flow
 
-The `Real-client browser flow / real-client-browser-flow` check runs for pull requests in both repositories on `ubuntu-26.04`. It builds the production web artifact, starts this disposable fixture, and selects all six scenarios. Its summary names the full server and web revisions, PR head, merge revision tested, cleanup result, and complete job duration. The companion checkout is an immutable full SHA reviewed in the PR.
+The `Real-client browser flow / real-client-browser-flow` check runs for pull requests in both repositories on `ubuntu-26.04`. It builds the production web artifact, starts this disposable fixture in explicit guest-signup test mode, and selects all seven scenarios. The guest scenario verifies that demo guest signup succeeds without loading the Turnstile widget when no site key is advertised. Its summary names the full server and web revisions, PR head, merge revision tested, cleanup result, and complete job duration. The companion checkout is an immutable full SHA reviewed in the PR.
 
 The selected-suite command is the same one used by the web lane and local runs:
 
@@ -117,7 +117,7 @@ corepack pnpm run test:real-client -- \
   --server-revision "$SERVER_REVISION" \
   --web-revision "$WEB_REVISION" \
   --run-id "$RUN_ID" \
-  --scenarios sign-in,first-message,message,group,channel,poll
+  --scenarios sign-in,first-message,message,group,channel,poll,guest-signup
 ```
 
 For a local run, use the foreground fixture and artifact-build procedure above, keep the same run ID and readiness record through `artifact-ready`, then run that command from the web checkout containing `test:real-client`. Do not reuse the readiness file, public key, artifact, or run ID from another fixture run.

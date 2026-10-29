@@ -2,12 +2,15 @@ package api
 
 import (
 	"context"
+	"crypto/subtle"
 	"encoding/json"
 	"errors"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/netip"
 	"net/url"
+	"os"
 	"strings"
 	"time"
 )
@@ -37,24 +40,66 @@ type SignUpTurnstileVerifier interface {
 }
 
 type turnstileVerifier struct {
-	secretKey string
-	endpoint  string
-	client    *http.Client
-	semaphore chan struct{}
-	hostnames map[string]struct{}
-	timeout   time.Duration
+	secretKey     string
+	qaBypassToken string
+	endpoint      string
+	client        *http.Client
+	semaphore     chan struct{}
+	hostnames     map[string]struct{}
+	logger        *slog.Logger
+	timeout       time.Duration
 }
 
-// NewTurnstileVerifier builds the production Siteverify client for the demo
-// web application's fixed hostname allowlist.
+// NewTurnstileVerifier builds a Siteverify client from the process environment.
 func NewTurnstileVerifier(secretKey string) SignUpTurnstileVerifier {
 	return newTurnstileVerifier(secretKey)
 }
 
+// NewTurnstileVerifierWithConfig builds a Siteverify client from validated
+// startup configuration.
+func NewTurnstileVerifierWithConfig(secretKey string, hostnames []string, qaBypassToken string, logger *slog.Logger) SignUpTurnstileVerifier {
+	return newTurnstileVerifierWithConfig(secretKey, hostnames, qaBypassToken, logger)
+}
+
 func newTurnstileVerifier(secretKey string) *turnstileVerifier {
+	hostnames := []string{turnstileHostname}
+	if raw := strings.TrimSpace(os.Getenv("TG_TURNSTILE_HOSTNAMES")); raw != "" {
+		hostnames = strings.Split(raw, ",")
+	}
+	for index := range hostnames {
+		hostnames[index] = strings.ToLower(strings.TrimSuffix(strings.TrimSpace(hostnames[index]), "."))
+	}
+	qaBypassToken := ""
+	if path := strings.TrimSpace(os.Getenv("TG_TURNSTILE_QA_BYPASS_TOKEN_FILE")); path != "" {
+		data, err := os.ReadFile(path) // #nosec G304,G703 -- validated operator-configured QA secret path.
+		if err != nil {
+			slog.Default().Error("read Turnstile QA bypass token file", "error", err)
+		} else {
+			qaBypassToken = strings.TrimSpace(string(data))
+			clear(data)
+		}
+	}
+	return newTurnstileVerifierWithConfig(secretKey, hostnames, qaBypassToken, slog.Default())
+}
+
+func newTurnstileVerifierWithConfig(secretKey string, hostnames []string, qaBypassToken string, logger *slog.Logger) *turnstileVerifier {
+	if len(hostnames) == 0 {
+		hostnames = []string{turnstileHostname}
+	}
+	if logger == nil {
+		logger = slog.Default()
+	}
+	allowedHostnames := make(map[string]struct{}, len(hostnames))
+	for _, hostname := range hostnames {
+		hostname = strings.ToLower(strings.TrimSuffix(strings.TrimSpace(hostname), "."))
+		if hostname != "" {
+			allowedHostnames[hostname] = struct{}{}
+		}
+	}
 	return &turnstileVerifier{
-		secretKey: secretKey,
-		endpoint:  turnstileSiteverifyURL,
+		secretKey:     secretKey,
+		qaBypassToken: qaBypassToken,
+		endpoint:      turnstileSiteverifyURL,
 		client: &http.Client{
 			Timeout: turnstileVerifyTimeout,
 			CheckRedirect: func(*http.Request, []*http.Request) error {
@@ -62,7 +107,8 @@ func newTurnstileVerifier(secretKey string) *turnstileVerifier {
 			},
 		},
 		semaphore: make(chan struct{}, turnstileMaxConcurrentChecks),
-		hostnames: map[string]struct{}{turnstileHostname: {}},
+		hostnames: allowedHostnames,
+		logger:    logger,
 		timeout:   turnstileVerifyTimeout,
 	}
 }
@@ -70,6 +116,11 @@ func newTurnstileVerifier(secretKey string) *turnstileVerifier {
 func (v *turnstileVerifier) Verify(ctx context.Context, token, action, remoteIP string) error {
 	if token == "" || len(token) > turnstileMaxTokenBytes {
 		return errTurnstileRejected
+	}
+	if action == "signup" && v.qaBypassToken != "" && len(token) == len(v.qaBypassToken) &&
+		subtle.ConstantTimeCompare([]byte(token), []byte(v.qaBypassToken)) == 1 {
+		v.logger.Info("turnstile QA bypass used", "action", action)
+		return nil
 	}
 	select {
 	case v.semaphore <- struct{}{}:
