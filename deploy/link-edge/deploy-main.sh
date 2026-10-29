@@ -13,6 +13,7 @@ fail() {
 SHA=$1
 case "$SHA" in *[!0-9a-f]*|"") fail 'commit SHA must be a full 40-hex value' ;; esac
 [[ ${#SHA} == 40 ]] || fail 'commit SHA must be a full 40-hex value'
+: "${TG_INVITE_WEB_SIGNUP_URL:?link-edge deploy: set TG_INVITE_WEB_SIGNUP_URL to the public HTTPS sign-up URL}"
 
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)
 REPO_ROOT=$(cd "$SCRIPT_DIR/../.." && pwd -P)

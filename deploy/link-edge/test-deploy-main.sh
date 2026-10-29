@@ -144,10 +144,21 @@ valid_client_json="{\"version\":1,\"mtproto\":{\"endpoint\":\"mtproto.example.te
 export TEST_TARGET_SHA=$sha
 export TEST_CLIENT_JSON="$valid_client_json"
 export TEST_CLIENT_STATUS=200
+export TG_INVITE_WEB_SIGNUP_URL=https://web.example.test/signup
+export TG_INVITE_DESKTOP_URL=
 export MOCK_DOCKER_STATE="$tmp/state"
 export MOCK_DOCKER_LOG="$tmp/docker.log"
 export MOCK_COMPOSE_FILE="$tmp/repo/deploy/link-edge/compose.yaml"
 export PATH="$tmp/bin:$PATH"
+
+if env -u TG_INVITE_WEB_SIGNUP_URL bash "$script" 0123456789abcdef0123456789abcdef01234567 >"$tmp/missing-target.log" 2>&1; then
+  echo 'FAIL deploy accepted a missing invite sign-up target' >&2
+  exit 1
+fi
+[[ ! -s "$tmp/docker.log" ]] || {
+  echo 'FAIL deploy contacted Docker before rejecting a missing invite sign-up target' >&2
+  exit 1
+}
 
 reset_state() {
   rm -f "$tmp/state/"*
