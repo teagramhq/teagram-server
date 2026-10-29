@@ -89,6 +89,110 @@ func TestBotAccountSchemaProtectsKindsAndAuthKeyBindings(t *testing.T) {
 	}
 }
 
+func TestBotUpdatesReadIncomingTextAndKeepConfirmedOffsetMonotonic(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	st, err := store.Open(ctx, pgtest.DSN(t), pgtest.EncKey(), store.WithoutBlobStore())
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := st.Close(); err != nil {
+			t.Errorf("close store: %v", err)
+		}
+	})
+	bot, token, err := st.CreateBot(ctx, "updates_weather_bot", "Weather")
+	if err != nil {
+		t.Fatalf("create bot: %v", err)
+	}
+	human, err := st.CreateUser(ctx, "15551234568")
+	if err != nil {
+		t.Fatalf("create human: %v", err)
+	}
+	_, _, incomingPts, duplicate, err := st.SendMessage(ctx, human.ID, bot.ID, "hello", 93001, 0, 0)
+	if err != nil {
+		t.Fatalf("send incoming text: %v", err)
+	}
+	if duplicate {
+		t.Fatal("incoming text send unexpectedly deduplicated")
+	}
+	if _, _, _, err := st.SendBotMessage(ctx, bot.ID, human.ID, "reply", 93002); err != nil {
+		t.Fatalf("send bot reply: %v", err)
+	}
+	_, _, afterGapPts, duplicate, err := st.SendMessage(ctx, human.ID, bot.ID, "after gap", 93003, 0, 0)
+	if err != nil {
+		t.Fatalf("send text after bot event gap: %v", err)
+	}
+	if duplicate {
+		t.Fatal("text after bot event gap unexpectedly deduplicated")
+	}
+	events, err := st.BotMessageEvents(ctx, bot.ID, 0, 100)
+	if err != nil {
+		t.Fatalf("read bot message events: %v", err)
+	}
+	if len(events) != 2 || events[0].Pts != incomingPts || events[1].Pts != afterGapPts || events[0].Type != store.EventNewMessage || events[1].Type != store.EventNewMessage {
+		t.Fatalf("bot events = %+v, want incoming texts at pts %d and %d around the bot-send gap", events, incomingPts, afterGapPts)
+	}
+
+	confirmed := int64(incomingPts + 1)
+	if _, err := st.AdvanceBotUpdateOffset(ctx, bot.ID, token, confirmed); err != nil {
+		t.Fatalf("advance bot offset: %v", err)
+	}
+	if _, err := st.AdvanceBotUpdateOffset(ctx, bot.ID, token, int64(incomingPts)); err != nil {
+		t.Fatalf("replay older bot offset: %v", err)
+	}
+	offset, err := st.BotUpdateOffset(ctx, bot.ID, token)
+	if err != nil {
+		t.Fatalf("read confirmed bot offset: %v", err)
+	}
+	if offset != confirmed {
+		t.Fatalf("confirmed offset = %d, want monotonic %d", offset, confirmed)
+	}
+	events, err = st.BotMessageEvents(ctx, bot.ID, offset, 100)
+	if err != nil {
+		t.Fatalf("re-read bot message events: %v", err)
+	}
+	if len(events) != 1 || events[0].Pts != afterGapPts {
+		t.Fatalf("events after offset inside bot-send gap = %+v, want pts %d without replaying pts %d", events, afterGapPts, incomingPts)
+	}
+	confirmed = int64(afterGapPts + 1)
+	if _, err := st.AdvanceBotUpdateOffset(ctx, bot.ID, token, confirmed); err != nil {
+		t.Fatalf("advance bot offset over final text: %v", err)
+	}
+	if _, err := st.AdvanceBotUpdateOffset(ctx, bot.ID, token, int64(incomingPts+1)); err != nil {
+		t.Fatalf("replay first bot offset: %v", err)
+	}
+	offset, err = st.BotUpdateOffset(ctx, bot.ID, token)
+	if err != nil {
+		t.Fatalf("read final confirmed bot offset: %v", err)
+	}
+	if offset != confirmed {
+		t.Fatalf("confirmed offset after older replay = %d, want %d", offset, confirmed)
+	}
+	events, err = st.BotMessageEvents(ctx, bot.ID, offset, 100)
+	if err != nil {
+		t.Fatalf("read events after final offset: %v", err)
+	}
+	if len(events) != 0 {
+		t.Fatalf("events after final offset = %+v, want none", events)
+	}
+
+	rotatedToken, err := st.RotateBotToken(ctx, bot.ID)
+	if err != nil {
+		t.Fatalf("rotate bot token: %v", err)
+	}
+	if _, err := st.BotUpdateOffset(ctx, bot.ID, token); !errors.Is(err, store.ErrBotTokenNotFound) {
+		t.Fatalf("old token offset lookup error = %v, want token not found", err)
+	}
+	rotatedOffset, err := st.BotUpdateOffset(ctx, bot.ID, rotatedToken)
+	if err != nil {
+		t.Fatalf("read offset after token rotation: %v", err)
+	}
+	if rotatedOffset != confirmed {
+		t.Fatalf("offset after token rotation = %d, want %d", rotatedOffset, confirmed)
+	}
+}
+
 func isCheckViolation(err error) bool {
 	var pgErr *pgconn.PgError
 	return errors.As(err, &pgErr) && pgErr.Code == "23514"

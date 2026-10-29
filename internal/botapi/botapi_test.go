@@ -49,6 +49,98 @@ type fakeStore struct {
 	notifyPayload string
 }
 
+type fakeUpdatesStore struct {
+	*fakeStore
+
+	offset          int64
+	events          []store.Event
+	messages        map[int64]store.Message
+	users           map[int64]store.User
+	lastFromPts     int64
+	lastLimit       int
+	advancedOffsets []int64
+}
+
+type firstQueryUpdatesStore struct {
+	*fakeUpdatesStore
+
+	firstQuery chan struct{}
+	queryCount atomic.Int32
+}
+
+func (s *firstQueryUpdatesStore) BotMessageEvents(ctx context.Context, botID, fromPts int64, limit int) ([]store.Event, error) {
+	if s.queryCount.Add(1) == 1 {
+		close(s.firstQuery)
+		return nil, nil
+	}
+	return s.fakeUpdatesStore.BotMessageEvents(ctx, botID, fromPts, limit)
+}
+
+type blockingFirstQueryUpdatesStore struct {
+	*fakeUpdatesStore
+
+	firstQuery chan struct{}
+	queryCount atomic.Int32
+}
+
+func (s *blockingFirstQueryUpdatesStore) BotMessageEvents(ctx context.Context, botID, fromPts int64, limit int) ([]store.Event, error) {
+	if s.queryCount.Add(1) == 1 {
+		close(s.firstQuery)
+		<-ctx.Done()
+		return nil, ctx.Err()
+	}
+	return s.fakeUpdatesStore.BotMessageEvents(ctx, botID, fromPts, limit)
+}
+
+func (s *fakeUpdatesStore) BotUpdateOffset(_ context.Context, botID int64, token string) (int64, error) {
+	if botID != 123456 || s.lookupErrs[token] != nil {
+		return 0, store.ErrBotTokenNotFound
+	}
+	return s.offset, nil
+}
+
+func (s *fakeUpdatesStore) AdvanceBotUpdateOffset(_ context.Context, botID int64, token string, offset int64) (int64, error) {
+	if botID != 123456 || s.lookupErrs[token] != nil {
+		return 0, store.ErrBotTokenNotFound
+	}
+	s.advancedOffsets = append(s.advancedOffsets, offset)
+	if offset > s.offset {
+		s.offset = offset
+	}
+	return s.offset, nil
+}
+
+func (s *fakeUpdatesStore) BotMessageEvents(_ context.Context, botID, fromPts int64, limit int) ([]store.Event, error) {
+	if botID != 123456 {
+		return nil, store.ErrBotTokenNotFound
+	}
+	s.lastFromPts = fromPts
+	s.lastLimit = limit
+	var events []store.Event
+	for _, event := range s.events {
+		if event.Pts >= int(fromPts) && event.Type == store.EventNewMessage {
+			events = append(events, event)
+			if len(events) == limit {
+				break
+			}
+		}
+	}
+	return events, nil
+}
+
+func (s *fakeUpdatesStore) MessageByOwnerLocal(_ context.Context, ownerID, localID int64) (store.Message, bool, error) {
+	message, ok := s.messages[localID]
+	return message, ok && message.OwnerID == ownerID, nil
+}
+
+func (s *fakeUpdatesStore) UserByID(ctx context.Context, id int64) (store.User, bool, error) {
+	if id == 123456 {
+		return s.fakeStore.UserByID(ctx, id)
+	}
+	user, ok := s.users[id]
+	return user, ok, nil
+}
+
 type blockingLookupStore struct {
 	lookupStarted chan struct{}
 	lookupRelease chan struct{}
@@ -362,7 +454,7 @@ func TestMalformedUnknownAndRevokedTokensShareUnauthorizedBody(t *testing.T) {
 func TestUnknownBotAPIMethodReturnsBotAPI404(t *testing.T) {
 	st := newFakeStore()
 	handler := botapi.NewHandler(st, slog.New(slog.DiscardHandler), store.RateLimitConfig{})
-	request := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/bot123456:secret-sentinel/getUpdates", nil)
+	request := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/bot123456:secret-sentinel/getWebhookInfo", nil)
 	request.RemoteAddr = "100.64.1.4:3456"
 	response := httptest.NewRecorder()
 	handler.ServeHTTP(response, request)
@@ -591,6 +683,9 @@ func TestHTTPServerSetsRequestLimits(t *testing.T) {
 	if server.ErrorLog == nil {
 		t.Error("ErrorLog is nil")
 	}
+	if server.WriteTimeout <= 50*time.Second {
+		t.Errorf("WriteTimeout = %v, want more than the maximum getUpdates poll", server.WriteTimeout)
+	}
 }
 
 func TestConnectionCapRejectsConcurrentConnectionFromSameIP(t *testing.T) {
@@ -695,5 +790,172 @@ func TestBotAPIWithoutBotTokenRejectsSessionOnlyRequest(t *testing.T) {
 	handler.ServeHTTP(response, request)
 	if response.Code != http.StatusUnauthorized {
 		t.Fatalf("status = %d, want 401", response.Code)
+	}
+}
+
+func TestGetUpdatesReturnsOnlyIncomingPrivateTextWithExactFields(t *testing.T) {
+	st := &fakeUpdatesStore{
+		fakeStore: newFakeStore(),
+		events:    []store.Event{{Pts: 7, Type: store.EventNewMessage, LocalID: 42}},
+		messages: map[int64]store.Message{
+			42: {
+				OwnerID: 123456, LocalID: 42, PeerType: store.PeerTypeUser, PeerID: 987,
+				FromID: 987, Date: time.Unix(1700000000, 0), Text: "hello", FileID: 0,
+			},
+		},
+		users: map[int64]store.User{
+			987: {ID: 987, Kind: store.UserKindHuman, FirstName: "Ada", LastName: "Lovelace", Username: new("ada")},
+		},
+	}
+	handler := botapi.NewHandler(st, slog.New(slog.DiscardHandler), store.RateLimitConfig{})
+	request := httptest.NewRequestWithContext(context.Background(), http.MethodPost,
+		"/bot123456:secret-sentinel/getUpdates", strings.NewReader(`{"offset":0,"limit":100,"timeout":0}`))
+	request.Header.Set("Content-Type", "application/json")
+	request.RemoteAddr = "100.64.1.2:3456"
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	const want = `{"ok":true,"result":[{"update_id":7,"message":{"message_id":42,"from":{"id":987,"first_name":"Ada","last_name":"Lovelace","username":"ada"},"chat":{"id":987,"first_name":"Ada","last_name":"Lovelace","username":"ada","type":"private"},"date":1700000000,"text":"hello"}}]}` + "\n"
+	if response.Code != http.StatusOK || response.Body.String() != want {
+		t.Fatalf("getUpdates response = (%d, %q), want 200 %q", response.Code, response.Body.String(), want)
+	}
+}
+
+func TestGetUpdatesUsesStoredOffsetWhenClientReplaysAnOlderOffset(t *testing.T) {
+	st := &fakeUpdatesStore{
+		fakeStore: newFakeStore(),
+		offset:    9,
+		events:    []store.Event{{Pts: 8, Type: store.EventNewMessage, LocalID: 1}},
+	}
+	handler := botapi.NewHandler(st, slog.New(slog.DiscardHandler), store.RateLimitConfig{})
+	request := httptest.NewRequestWithContext(context.Background(), http.MethodPost,
+		"/bot123456:secret-sentinel/getUpdates", strings.NewReader(`{"offset":2,"timeout":0}`))
+	request.Header.Set("Content-Type", "application/json")
+	request.RemoteAddr = "100.64.1.2:3456"
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusOK || response.Body.String() != "{\"ok\":true,\"result\":[]}\n" {
+		t.Fatalf("getUpdates response = (%d, %q), want empty 200", response.Code, response.Body.String())
+	}
+	if st.lastFromPts != 9 || st.offset != 9 {
+		t.Fatalf("effective offset = %d, stored offset = %d, want both 9", st.lastFromPts, st.offset)
+	}
+}
+
+func TestGetUpdatesWakeupReReadsTheBotLog(t *testing.T) {
+	st := &firstQueryUpdatesStore{
+		fakeUpdatesStore: &fakeUpdatesStore{
+			fakeStore: newFakeStore(),
+			messages: map[int64]store.Message{
+				42: {OwnerID: 123456, LocalID: 42, PeerType: store.PeerTypeUser, PeerID: 987, FromID: 987, Date: time.Unix(1700000000, 0), Text: "hello"},
+			},
+			users: map[int64]store.User{
+				987: {ID: 987, Kind: store.UserKindHuman, FirstName: "Ada"},
+			},
+		},
+		firstQuery: make(chan struct{}),
+	}
+	handler := botapi.NewHandler(st, slog.New(slog.DiscardHandler), store.RateLimitConfig{})
+	request := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/bot123456:secret-sentinel/getUpdates?timeout=5", nil)
+	request.RemoteAddr = "100.64.1.2:3456"
+	response := httptest.NewRecorder()
+	done := make(chan struct{})
+	go func() {
+		handler.ServeHTTP(response, request)
+		close(done)
+	}()
+	select {
+	case <-st.firstQuery:
+	case <-time.After(time.Second):
+		t.Fatal("getUpdates did not read the log")
+	}
+	st.events = []store.Event{{Pts: 7, Type: store.EventNewMessage, LocalID: 42}}
+	handler.NotifyUpdates(123456)
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("getUpdates did not wake after an update notification")
+	}
+	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"update_id":7`) {
+		t.Fatalf("getUpdates response = (%d, %q), want update 7", response.Code, response.Body.String())
+	}
+}
+
+func TestGetUpdatesSecondPollConflictsTheFirst(t *testing.T) {
+	st := &blockingFirstQueryUpdatesStore{
+		fakeUpdatesStore: &fakeUpdatesStore{fakeStore: newFakeStore()},
+		firstQuery:       make(chan struct{}),
+	}
+	handler := botapi.NewHandler(st, slog.New(slog.DiscardHandler), store.RateLimitConfig{})
+	firstRequest := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/bot123456:secret-sentinel/getUpdates?timeout=5", nil)
+	firstRequest.RemoteAddr = "100.64.1.2:3456"
+	firstResponse := httptest.NewRecorder()
+	firstDone := make(chan struct{})
+	go func() {
+		handler.ServeHTTP(firstResponse, firstRequest)
+		close(firstDone)
+	}()
+	select {
+	case <-st.firstQuery:
+	case <-time.After(time.Second):
+		t.Fatal("first getUpdates did not begin reading")
+	}
+	secondRequest := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/bot123456:secret-sentinel/getUpdates", nil)
+	secondRequest.RemoteAddr = "100.64.1.2:3456"
+	secondResponse := httptest.NewRecorder()
+	handler.ServeHTTP(secondResponse, secondRequest)
+	select {
+	case <-firstDone:
+	case <-time.After(time.Second):
+		t.Fatal("first getUpdates was not canceled by the second poll")
+	}
+	if firstResponse.Code != http.StatusConflict || firstResponse.Body.String() != "{\"ok\":false,\"error_code\":409,\"description\":\"Conflict: terminated by other getUpdates request\"}\n" {
+		t.Fatalf("first poll response = (%d, %q), want 409 conflict", firstResponse.Code, firstResponse.Body.String())
+	}
+	if secondResponse.Code != http.StatusOK {
+		t.Fatalf("second poll response = (%d, %q), want 200", secondResponse.Code, secondResponse.Body.String())
+	}
+}
+
+func TestGetUpdatesRevocationBeforeWakeReturnsUnauthorizedWithoutOffsetAdvance(t *testing.T) {
+	st := &firstQueryUpdatesStore{
+		fakeUpdatesStore: &fakeUpdatesStore{
+			fakeStore: newFakeStore(),
+			offset:    2,
+			messages: map[int64]store.Message{
+				42: {OwnerID: 123456, LocalID: 42, PeerType: store.PeerTypeUser, PeerID: 987, FromID: 987, Date: time.Unix(1700000000, 0), Text: "revoked"},
+			},
+			users: map[int64]store.User{
+				987: {ID: 987, Kind: store.UserKindHuman, FirstName: "Ada"},
+			},
+		},
+		firstQuery: make(chan struct{}),
+	}
+	handler := botapi.NewHandler(st, slog.New(slog.DiscardHandler), store.RateLimitConfig{})
+	request := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/bot123456:secret-sentinel/getUpdates?offset=10&timeout=5", nil)
+	request.RemoteAddr = "100.64.1.2:3456"
+	response := httptest.NewRecorder()
+	done := make(chan struct{})
+	go func() {
+		handler.ServeHTTP(response, request)
+		close(done)
+	}()
+	select {
+	case <-st.firstQuery:
+	case <-time.After(time.Second):
+		t.Fatal("getUpdates did not read the log")
+	}
+	st.lookupErrs = map[string]error{"123456:secret-sentinel": store.ErrBotTokenNotFound}
+	st.events = []store.Event{{Pts: 11, Type: store.EventNewMessage, LocalID: 42}}
+	handler.NotifyUpdates(123456)
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("revoked poll did not finish after wakeup")
+	}
+	if response.Code != http.StatusUnauthorized || response.Body.String() != "{\"ok\":false,\"error_code\":401,\"description\":\"Unauthorized\"}\n" {
+		t.Fatalf("revoked poll response = (%d, %q), want 401", response.Code, response.Body.String())
+	}
+	if st.offset != 2 {
+		t.Fatalf("offset after revoked poll = %d, want unchanged 2", st.offset)
 	}
 }

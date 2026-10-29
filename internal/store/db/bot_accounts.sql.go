@@ -23,6 +23,111 @@ func (q *Queries) ActiveBotTokenHash(ctx context.Context, userID int64) ([]byte,
 	return token_hash, err
 }
 
+const activeBotTokenState = `-- name: ActiveBotTokenState :one
+SELECT token_hash, update_offset
+FROM bot_tokens
+WHERE user_id = $1
+  AND revoked_at IS NULL
+`
+
+type ActiveBotTokenStateRow struct {
+	TokenHash    []byte
+	UpdateOffset int64
+}
+
+func (q *Queries) ActiveBotTokenState(ctx context.Context, userID int64) (ActiveBotTokenStateRow, error) {
+	row := q.db.QueryRow(ctx, activeBotTokenState, userID)
+	var i ActiveBotTokenStateRow
+	err := row.Scan(&i.TokenHash, &i.UpdateOffset)
+	return i, err
+}
+
+const advanceBotUpdateOffset = `-- name: AdvanceBotUpdateOffset :one
+UPDATE bot_tokens
+SET update_offset = GREATEST(update_offset, $1::bigint)
+WHERE user_id = $2
+  AND revoked_at IS NULL
+  AND token_hash = $3
+RETURNING update_offset
+`
+
+type AdvanceBotUpdateOffsetParams struct {
+	NextOffset int64
+	UserID     int64
+	TokenHash  []byte
+}
+
+func (q *Queries) AdvanceBotUpdateOffset(ctx context.Context, arg AdvanceBotUpdateOffsetParams) (int64, error) {
+	row := q.db.QueryRow(ctx, advanceBotUpdateOffset, arg.NextOffset, arg.UserID, arg.TokenHash)
+	var update_offset int64
+	err := row.Scan(&update_offset)
+	return update_offset, err
+}
+
+const botMessageEvents = `-- name: BotMessageEvents :many
+SELECT e.pts, e.type, e.local_id
+FROM message_events AS e
+JOIN messages AS m
+  ON m.owner_id = e.owner_id
+ AND m.local_id = e.local_id
+JOIN users AS sender
+  ON sender.id = m.from_id
+ AND sender.kind = 'human'
+WHERE e.owner_id = $1
+  AND e.pts >= $2::bigint
+  AND e.type = 1
+  AND m.peer_type = 1
+  AND m.peer_id = m.from_id
+  AND m.out = false
+  AND m.deleted = false
+  AND (m.expires_at IS NULL OR m.expires_at > statement_timestamp())
+  AND m.action_type = 0
+  AND m.message <> ''
+  AND m.file_id = 0
+  AND m.sticker_document_id IS NULL
+  AND NOT EXISTS (
+      SELECT 1 FROM poll_message_copies AS p
+      WHERE p.owner_id = m.owner_id AND p.local_id = m.local_id
+  )
+ORDER BY e.pts
+LIMIT $3::int
+`
+
+type BotMessageEventsParams struct {
+	OwnerID int64
+	FromPts int64
+	Lim     int32
+}
+
+type BotMessageEventsRow struct {
+	Pts     int64
+	Type    int16
+	LocalID int64
+}
+
+// BotMessageEvents returns only retained incoming private text-message events.
+// Other pts values remain gaps; the lower-bound query never depends on finding
+// a row at every offset.
+func (q *Queries) BotMessageEvents(ctx context.Context, arg BotMessageEventsParams) ([]BotMessageEventsRow, error) {
+	rows, err := q.db.Query(ctx, botMessageEvents, arg.OwnerID, arg.FromPts, arg.Lim)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []BotMessageEventsRow
+	for rows.Next() {
+		var i BotMessageEventsRow
+		if err := rows.Scan(&i.Pts, &i.Type, &i.LocalID); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const createBotUser = `-- name: CreateBotUser :one
 INSERT INTO users (phone, login_mode, first_name, last_name, kind)
 VALUES (NULL, 'username', $1, '', 'bot')
