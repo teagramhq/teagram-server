@@ -80,7 +80,7 @@ func TestGetMeReturnsServerLookedUpBot(t *testing.T) {
 func TestValidGetMeRequestsDoNotConsumeUnauthorizedRateLimit(t *testing.T) {
 	st := newFakeStore()
 	handler := botapi.NewHandler(st, slog.New(slog.DiscardHandler))
-	for i := range authAttemptLimit + 1 {
+	for i := range 25 {
 		request := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/bot123456:valid-secret/getMe", nil)
 		request.RemoteAddr = "198.51.100.4:3456"
 		response := httptest.NewRecorder()
@@ -89,8 +89,8 @@ func TestValidGetMeRequestsDoNotConsumeUnauthorizedRateLimit(t *testing.T) {
 			t.Fatalf("valid request %d status = %d, want 200; body %q", i, response.Code, response.Body.String())
 		}
 	}
-	if st.lookupCount != authAttemptLimit+1 {
-		t.Fatalf("token lookups = %d, want %d", st.lookupCount, authAttemptLimit+1)
+	if st.lookupCount != 25 {
+		t.Fatalf("token lookups = %d, want 25", st.lookupCount)
 	}
 }
 
@@ -151,7 +151,7 @@ func TestUnauthorizedRateLimitRunsBeforeTokenLookup(t *testing.T) {
 	st := newFakeStore()
 	st.lookupErrs = map[string]error{"bad-token": store.ErrBotTokenNotFound}
 	handler := botapi.NewHandler(st, slog.New(slog.DiscardHandler))
-	for i := range authAttemptLimit + 1 {
+	for i := range authAttemptLimit {
 		request := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/botbad-token/getMe", nil)
 		request.RemoteAddr = "198.51.100.4:3456"
 		response := httptest.NewRecorder()
@@ -159,6 +159,17 @@ func TestUnauthorizedRateLimitRunsBeforeTokenLookup(t *testing.T) {
 		if response.Code != http.StatusUnauthorized {
 			t.Fatalf("request %d status = %d, want 401", i, response.Code)
 		}
+	}
+	request := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/bot123456:valid-secret/getMe", nil)
+	request.RemoteAddr = "198.51.100.4:3456"
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusTooManyRequests {
+		t.Fatalf("valid request with empty auth budget status = %d, want 429", response.Code)
+	}
+	const wantBody = "{\"ok\":false,\"error_code\":429,\"description\":\"Too Many Requests: retry after 1\",\"parameters\":{\"retry_after\":1}}\n"
+	if response.Body.String() != wantBody {
+		t.Fatalf("rate limit body = %q, want %q", response.Body.String(), wantBody)
 	}
 	if st.lookupCount != authAttemptLimit {
 		t.Fatalf("token lookups = %d, want %d; throttled request must stop before DB lookup", st.lookupCount, authAttemptLimit)
@@ -178,8 +189,8 @@ func TestUnauthorizedRateLimitIsSharedBySourceNetwork(t *testing.T) {
 	request.RemoteAddr = "198.51.100.200:3456"
 	response := httptest.NewRecorder()
 	handler.ServeHTTP(response, request)
-	if response.Code != http.StatusUnauthorized {
-		t.Fatalf("same-network status = %d, want 401", response.Code)
+	if response.Code != http.StatusTooManyRequests {
+		t.Fatalf("same-network status = %d, want 429", response.Code)
 	}
 	if st.lookupCount != authAttemptLimit {
 		t.Fatalf("same-network token lookups = %d, want %d", st.lookupCount, authAttemptLimit)

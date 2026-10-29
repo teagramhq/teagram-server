@@ -31,11 +31,12 @@ const (
 const DefaultMaxConnectionsPerIP = 32
 
 const (
-	unauthorizedBody = "{\"ok\":false,\"error_code\":401,\"description\":\"Unauthorized\"}\n"
-	badRequestBody   = "{\"ok\":false,\"error_code\":400,\"description\":\"Bad Request\"}\n"
-	tooLargeBody     = "{\"ok\":false,\"error_code\":413,\"description\":\"Request Entity Too Large\"}\n"
-	notFoundBody     = "{\"ok\":false,\"error_code\":404,\"description\":\"Not Found\"}\n"
-	serverErrorBody  = "{\"ok\":false,\"error_code\":500,\"description\":\"Internal Server Error\"}\n"
+	unauthorizedBody    = "{\"ok\":false,\"error_code\":401,\"description\":\"Unauthorized\"}\n"
+	tooManyRequestsBody = "{\"ok\":false,\"error_code\":429,\"description\":\"Too Many Requests: retry after 1\",\"parameters\":{\"retry_after\":1}}\n"
+	badRequestBody      = "{\"ok\":false,\"error_code\":400,\"description\":\"Bad Request\"}\n"
+	tooLargeBody        = "{\"ok\":false,\"error_code\":413,\"description\":\"Request Entity Too Large\"}\n"
+	notFoundBody        = "{\"ok\":false,\"error_code\":404,\"description\":\"Not Found\"}\n"
+	serverErrorBody     = "{\"ok\":false,\"error_code\":500,\"description\":\"Internal Server Error\"}\n"
 )
 
 // Store is the server-side identity lookup used by the Bot API listener.
@@ -99,7 +100,7 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}()
 
 	if !h.limiter.allow(r.RemoteAddr, time.Now()) {
-		h.unauthorized(w, botID, method, r.RemoteAddr)
+		h.rateLimited(w, botID, method)
 		return
 	}
 	token, endpointMethod, endpoint := parseEndpoint(r.URL.Path)
@@ -239,6 +240,11 @@ func (h *handler) unauthorized(w http.ResponseWriter, botID int64, method, remot
 	h.limiter.spend(remoteAddr, time.Now())
 	h.log.Warn("Bot API authentication failed", "bot_id", botID, "method", method)
 	h.write(w, http.StatusUnauthorized, []byte(unauthorizedBody), botID, method)
+}
+
+func (h *handler) rateLimited(w http.ResponseWriter, botID int64, method string) {
+	h.log.Warn("Bot API rate limit exceeded", "bot_id", botID, "method", method)
+	h.write(w, http.StatusTooManyRequests, []byte(tooManyRequestsBody), botID, method)
 }
 
 func (h *handler) write(w http.ResponseWriter, status int, body []byte, botID int64, method string) {
