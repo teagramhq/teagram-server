@@ -199,24 +199,92 @@ class RealServerFixtureGateTests(unittest.TestCase):
     def test_required_ci_check_gates_all_required_lanes(self) -> None:
         repo_root = Path(__file__).resolve().parents[2]
         workflow = (repo_root / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+        jobs_block = re.search(r"(?ms)^jobs:\n(?P<body>.*)\Z", workflow)
         ci_job = re.search(r"(?ms)^  ci:\n(?P<body>.*?)(?=^  [A-Za-z0-9_-]+:\n)", workflow)
+        self.assertIsNotNone(jobs_block, "CI workflow has no jobs")
         self.assertIsNotNone(ci_job, "CI workflow has no required ci check")
         body = ci_job.group("body")
         self.assertRegex(body, r"(?m)^    name: ci$")
         self.assertIn("needs.ops-prioritize-main.result == 'success'", body)
+        self.assertIn("needs.ops-prioritize-main.result == 'failure'", body)
+        self.assertIn("needs.ops-prioritize-main.result == 'cancelled'", body)
         self.assertIn("needs.ops-prioritize-main.result == 'skipped'", body)
         self.assertIn("github.event_name == 'pull_request'", body)
-        self.assertRegex(
-            body,
-            r"(?ms)^    needs:\n      - ops-prioritize-main\n      - ci-main\n      - sticker-bundle\n      - photothumb-runtime\n      - real-server-fixtures\n",
+        self.assertIn("MAIN_PRIORITY_RESULT: ${{ needs.ops-prioritize-main.result }}", body)
+
+        # The publisher is main-push-only. MAIN-2918 is deleting the other three
+        # lanes, and the main-priority job is skipped on PRs.
+        excluded_jobs = {
+            "ci",
+            "publish-demo-image",
+            "ops-prioritize-main",
+            "mirror-rustfs-qualification-images",
+            "restore-readiness",
+            "rustfs-transition-qualification",
+        }
+        workflow_jobs = set(
+            re.findall(r"(?m)^  ([A-Za-z0-9_-]+):\n", jobs_block.group("body"))
         )
-        self.assertIn("${{ needs.ops-prioritize-main.result }}", body)
-        self.assertIn("${{ needs.ci-main.result }}", body)
-        self.assertIn("${{ needs.sticker-bundle.result }}", body)
-        self.assertIn("${{ needs.photothumb-runtime.result }}", body)
-        self.assertIn("${{ needs.real-server-fixtures.result }}", body)
-        self.assertIn('"$STICKER_BUNDLE_RESULT" != "success"', body)
-        self.assertIn('"$PHOTOTHUMB_RUNTIME_RESULT" != "success"', body)
+        expected_lanes = workflow_jobs - excluded_jobs
+
+        needs = re.search(
+            r"(?ms)^    needs:\n(?P<entries>(?:      - [A-Za-z0-9_-]+\n)+)", body
+        )
+        self.assertIsNotNone(needs, "CI aggregate has no explicit needs list")
+        needed_lanes = re.findall(r"(?m)^      - ([A-Za-z0-9_-]+)$", needs.group("entries"))
+        expected_dependencies = expected_lanes | {"ops-prioritize-main"}
+        self.assertEqual(
+            needed_lanes[:5],
+            [
+                "ops-prioritize-main",
+                "ci-main",
+                "sticker-bundle",
+                "photothumb-runtime",
+                "real-server-fixtures",
+            ],
+        )
+        self.assertEqual(len(needed_lanes), len(set(needed_lanes)), "CI aggregate repeats a lane")
+        self.assertEqual(
+            set(needed_lanes), expected_dependencies, "CI aggregate must need every retained PR lane"
+        )
+
+        result_env_entries = re.findall(
+            r"(?m)^          ([A-Z][A-Z0-9_]*_RESULT): \$\{\{ needs\.([A-Za-z0-9_-]+)\.result \}\}$",
+            body,
+        )
+        result_envs = {lane: env_name for env_name, lane in result_env_entries}
+        self.assertEqual(len(result_env_entries), len(result_envs), "CI aggregate repeats a result mapping")
+        self.assertEqual(
+            set(result_envs), expected_dependencies, "CI aggregate must read every lane result"
+        )
+
+        lane_results = re.search(
+            r"(?ms)^          lane_results=\(\n(?P<entries>.*?)^          \)", body
+        )
+        self.assertIsNotNone(lane_results, "CI aggregate has no per-lane result output")
+        result_output_entries = re.findall(
+            r'(?m)^[ \t]*"([A-Za-z0-9_-]+)=\$([A-Z][A-Z0-9_]*_RESULT)"$',
+            lane_results.group("entries"),
+        )
+        result_output = {lane: env_name for lane, env_name in result_output_entries}
+        self.assertEqual(len(result_output_entries), len(result_output), "CI aggregate repeats a result output")
+        self.assertEqual(result_output, result_envs, "CI aggregate must report every lane result")
+
+        result_guard = re.search(
+            r"(?ms)^          if \[\[ (?P<condition>.*?) \]\]; then$", body
+        )
+        self.assertIsNotNone(result_guard, "CI aggregate has no failing result guard")
+        expected_guard = '"$MAIN_PRIORITY_RESULT" != "$expected_priority_result" || '
+        expected_guard += " || ".join(
+            f'"${result_envs[lane]}" != "success"'
+            for lane in needed_lanes
+            if lane != "ops-prioritize-main"
+        )
+        self.assertEqual(
+            " ".join(result_guard.group("condition").split()),
+            expected_guard,
+            "CI aggregate must fail unless every retained PR lane and main-priority check pass",
+        )
 
     def test_e2e_selectors_partition_fixture_tests_from_remaining_suite(self) -> None:
         repo_root = Path(__file__).resolve().parents[2]
