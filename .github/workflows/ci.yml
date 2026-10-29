@@ -3540,6 +3540,8 @@ jobs:
 
   test-migrations:
     name: "test: migrations"
+    needs: ops-prioritize-main
+    if: ${{ always() && (needs.ops-prioritize-main.result == 'success' || (needs.ops-prioritize-main.result == 'skipped' && github.event_name == 'pull_request')) }}
     runs-on: ubuntu-26.04
     timeout-minutes: 20
     permissions:
