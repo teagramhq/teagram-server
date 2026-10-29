@@ -68,8 +68,9 @@ both `https://web.teagram.io` and `https://demo.teagram.io`. The app CSP keeps
 the current web directives and restricts `connect-src` to the demo WSS origin
 and Cloudflare Turnstile. Registration is open, the existing signup
 limit remains five attempts per IP per hour, login-code logging is disabled,
-uploads are capped at 500 KB per file, and per-account storage remains capped
-at 256 MiB.
+client uploads are disabled by `TG_UPLOADS_DISABLED=true`, and the existing
+500 KB per-file cap, upload-byte budget and 256 MiB per-account storage cap
+remain as defense in depth.
 Sticker and custom emoji pack imports are disabled (`TG_STICKER_IMPORT=off`);
 catalogue packs remain available to install and send.
 
@@ -77,6 +78,41 @@ catalogue packs remain available to install and send.
 key to `/var/lib/teagram-demo/secrets/turnstile-secret-key` with root ownership
 and mode 0600. Compose mounts that file only into teagramd. It also configures
 `TG_ADVERTISE_DEMO_GUEST_SIGN_UP=true` so web.teagram.io advertises demo signup.
+`TG_UPLOADS_DISABLED=true` is persisted in `.env`; deploy preflight adds it to
+older prepared files and rejects a value that would enable client uploads.
+The seed overlay temporarily enables uploads for the private API seeder.
+Bootstrap and weekly reseed stop edge and HAProxy before seeding, then recreate
+teagramd with production configuration and verify the private path before edge
+starts. During a rolling deploy, the current server continues serving while
+the candidate is seeded. The candidate has no host-published port and is not
+in HAProxy's backend until seed verification finishes and Compose recreates it
+with production configuration; HAProxy enables it only afterward.
+
+### Upload shutdown threat model
+
+Client uploads may contain personal photos and documents. Their bytes first
+occupy per-user temporary upload parts, then assembled file metadata and blob
+objects; short-lived upload grants bind staged files to their owner. An
+authenticated client could otherwise try the regular or big part RPCs, or
+bypass them through uploaded message media, profile photos, or chat/channel
+photos. With uploads disabled, each of those byte-ingress RPCs returns the
+same `UPLOADS_DISABLED` error before its storage path. The setting is loaded
+at process startup and applies through the shared handler on every listener.
+There is no HTTP file-upload route. Demo sticker import is off, and catalog
+sticker assets are bundled rather than accepted from clients.
+
+`messages.sendMultiMedia` accepts owner-bound grants created by
+`messages.uploadMedia`; it carries no file bytes, and disabled mode prevents
+new grants from being issued. The switch does not erase parts, blobs, or grants
+accepted before it was enabled. Temporary parts and grants keep their existing
+TTL; completed file reads still enforce file-location and owner checks, and
+`upload.getFile` remains available for authorized existing media. The seed
+override is private to the internal Docker backend:
+bootstrap and weekly wipe stop both public proxy paths, while rolling deploys
+keep the candidate out of HAProxy until production configuration is restored.
+The backend network has no external route or published server port. LXC root
+and containers already attached to that backend are trusted; control of either
+can reach the seed API while the override is active.
 
 The demo is budgeted for 2 GiB: teagramd uses `GOMAXPROCS=1`,
 `GOMEMLIMIT=320MiB` and a 448 MiB container cap. PostgreSQL is capped at 320 MiB with

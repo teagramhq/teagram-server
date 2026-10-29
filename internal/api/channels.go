@@ -268,6 +268,11 @@ func (h *handlers) handleEditChannelPhoto(r *mtproto.Request) (bin.Encoder, erro
 	if err := req.Decode(r.Buf); err != nil {
 		return nil, errMethodNotImpl
 	}
+	if h.uploadsDisabled {
+		if _, ok := req.Photo.(*tg.InputChatUploadedPhoto); ok {
+			return nil, errUploadsDisabled
+		}
+	}
 	if r.UserID == 0 {
 		return nil, errAuthKeyUnreg
 	}
