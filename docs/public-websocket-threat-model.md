@@ -4,7 +4,7 @@
 
 This model covers the public MTProto WebSocket listener at
 `server.teagram.io`. The ingress contract sends only `/apiws` and
-`/.well-known/telegramd/client` through the host-side Cloudflare Tunnel to
+`/.well-known/teagramd/client` through the host-side Cloudflare Tunnel to
 `127.0.0.1:2446`; Compose publishes that port for the public HAProxy frontend
 on LXC loopback. Treat the
 hostname as internet-facing: any caller that can reach it can fetch public

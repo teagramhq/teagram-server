@@ -617,6 +617,9 @@ func (h *handlers) handleGetFullUser(r *mtproto.Request) (bin.Encoder, error) {
 		CommonChatsCount: int(commonChatsCount),
 	}
 	fullUser.SetTTLPeriod(ttlPeriod)
+	if snapshot.User.Kind == store.UserKindBot {
+		fullUser.SetBotInfo(tg.BotInfo{})
+	}
 	if about != "" {
 		fullUser.SetAbout(about)
 	}

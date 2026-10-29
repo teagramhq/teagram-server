@@ -206,9 +206,12 @@ var compiledMethodVocabulary = func() map[string]struct{} {
 	for _, name := range compiledMethodNames {
 		methods[name] = struct{}{}
 	}
-	// gotd v0.161.0 does not generate this request, but the application
-	// handler is compiled for it and supplies its fixed name at registration.
+	// gotd does not generate these custom teagram.* requests; the application
+	// handlers provide their fixed names at registration.
 	methods["messages.revokeExportedChatInvite"] = struct{}{}
+	methods["teagram.createUserInvite"] = struct{}{}
+	methods["teagram.listUserInvites"] = struct{}{}
+	methods["teagram.revokeUserInvite"] = struct{}{}
 	return methods
 }()
 

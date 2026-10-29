@@ -48,8 +48,8 @@ func assertAppConfig(t *testing.T, got *tg.HelpAppConfig, mode config.Registrati
 		}
 		values[value.Key] = value.Value
 	}
-	if len(values) != 30 {
-		t.Fatalf("app config has %d keys, want 30", len(values))
+	if len(values) != 32 {
+		t.Fatalf("app config has %d keys, want 32", len(values))
 	}
 	if value, ok := values["upload_max_file_bytes"].(*tg.JSONNumber); !ok || value.Value != float64(api.TestMaxFileBytes) {
 		t.Fatalf("upload_max_file_bytes = %v, want %d", values["upload_max_file_bytes"], api.TestMaxFileBytes)
@@ -89,6 +89,12 @@ func assertAppConfig(t *testing.T, got *tg.HelpAppConfig, mode config.Registrati
 	}
 	if value, ok := values["registration_mode"].(*tg.JSONString); !ok || value.Value != string(mode) {
 		t.Fatalf("registration_mode = %v, want %q", values["registration_mode"], mode)
+	}
+	if value, ok := values["user_invites_enabled"].(*tg.JSONBool); !ok || value.Value {
+		t.Fatalf("user_invites_enabled = %v, want false when test quota is unset", values["user_invites_enabled"])
+	}
+	if value, ok := values["user_invite_quota"].(*tg.JSONNumber); !ok || value.Value != 0 {
+		t.Fatalf("user_invite_quota = %v, want 0 when test quota is unset", values["user_invite_quota"])
 	}
 	if value, ok := values["sticker_import_mode"].(*tg.JSONString); !ok || value.Value != "on" {
 		t.Fatalf("sticker_import_mode = %v, want %q", values["sticker_import_mode"], "on")
@@ -424,6 +430,56 @@ func TestAppConfigAdvertisesFoldersAndRegistrationModeWithoutAuthorization(t *te
 					}
 					assertAppConfig(t, appConfig, mode)
 				})
+			}
+		})
+	}
+}
+
+func TestAppConfigAdvertisesUserInvitesForTheAcceptingListener(t *testing.T) {
+	t.Parallel()
+	hashes := make(map[int]string)
+	for _, tc := range []struct {
+		name    string
+		mode    config.RegistrationMode
+		quota   int
+		enabled bool
+	}{
+		{name: "invite mode with quota", mode: config.RegistrationInvite, quota: 5, enabled: true},
+		{name: "invite mode disabled quota", mode: config.RegistrationInvite},
+		{name: "open mode", mode: config.RegistrationOpen, quota: 5},
+		{name: "closed mode", mode: config.RegistrationClosed, quota: 5},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			result, err := api.GetAppConfigForTestWithInviteSettings(0, tc.mode, tc.quota)
+			if err != nil {
+				t.Fatalf("help.getAppConfig: %v", err)
+			}
+			got, ok := result.(*tg.HelpAppConfig)
+			if !ok {
+				t.Fatalf("response = %T, want *tg.HelpAppConfig", result)
+			}
+			if previous, exists := hashes[got.Hash]; exists && previous != tc.name {
+				t.Errorf("listener app config hash %d is shared by %q and %q", got.Hash, previous, tc.name)
+			}
+			hashes[got.Hash] = tc.name
+			object, ok := got.Config.(*tg.JSONObject)
+			if !ok {
+				t.Fatalf("config = %T, want JSON object", got.Config)
+			}
+			values := make(map[string]any, len(object.Value))
+			for _, value := range object.Value {
+				values[value.Key] = value.Value
+			}
+			if value, ok := values["user_invites_enabled"].(*tg.JSONBool); !ok || value.Value != tc.enabled {
+				t.Errorf("user_invites_enabled = %v, want %v", values["user_invites_enabled"], tc.enabled)
+			}
+			if value, ok := values["user_invite_quota"].(*tg.JSONNumber); !ok || value.Value != float64(tc.quota) {
+				t.Errorf("user_invite_quota = %v, want %d", values["user_invite_quota"], tc.quota)
+			}
+			for _, key := range []string{"user_invite_weekly_count", "user_invite_next_available_at", "inviter_user_id"} {
+				if _, ok := values[key]; ok {
+					t.Errorf("app config exposed user-specific invite value %q", key)
+				}
 			}
 		})
 	}

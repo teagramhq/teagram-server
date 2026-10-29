@@ -9,10 +9,15 @@ set -euo pipefail
 workflow="${DEPLOY_WORKFLOW:-.github/workflows/deploy.yml}"
 ci_workflow="${CI_WORKFLOW:-.github/workflows/ci.yml}"
 dockerfile="${DEPLOY_DOCKERFILE:-Dockerfile}"
+demo_forced_command="deploy/teagram-demo/forced-command.sh"
 expected_if="\${{ github.event_name == 'workflow_dispatch' || (github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push') }}"
-expected_demo_if="\${{ needs.deploy.result == 'success' }}"
+expected_resolve_demo_if="\${{ needs.deploy.result == 'success' }}"
+expected_demo_resolver_ref='${{ github.workflow_sha }}'
+expected_demo_if="\${{ always() && needs.deploy.result == 'success' }}"
 expected_demo_step_if="\${{ steps.demo-gate.outputs.enabled == 'true' }}"
 expected_demo_cleanup_if="\${{ always() && steps.demo-gate.outputs.enabled == 'true' }}"
+expected_demo_web_step_if="\${{ steps.web-gate.outputs.enabled == 'true' }}"
+expected_demo_web_failure_if="\${{ steps.demo-gate.outputs.enabled == 'true' && steps.web-gate.outputs.enabled != 'true' }}"
 expected_ci_group="\${{ github.workflow }}-\${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || (github.event_name == 'push' && github.ref == 'refs/heads/main' && 'main') || format('run-{0}-{1}', github.run_id, github.run_attempt) }}"
 expected_ci_cancel="\${{ github.event_name == 'pull_request' }}"
 expected_run_name="\${{ inputs.issue && format('{0} [{1}]', github.workflow, inputs.issue) || '' }}"
@@ -47,8 +52,36 @@ check_ci_contract() {
     ci_fail 'only pull request updates may cancel in-progress CI runs'
   [[ "$(ci_query '.jobs."publish-demo-image".if')" == "\${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}" ]] ||
     ci_fail 'the demo image may publish only from main pushes'
-  [[ "$(ci_query '.jobs."publish-demo-image".needs | sort | join(",")')" == 'browser-acceptance,browser-acceptance-image,ci,ci-main,compose,css,deploy-workflow,docker,e2e-admin,lint,mirror-rustfs-qualification-images,photothumb-runtime,real-server-fixtures,restore-readiness,rustfs-transition-qualification,schema-gate-postgres,smoke,sql-lint,sqlc,websocket-d1,websocket-permanent-exchange' ]] ||
+  [[ "$(ci_query '.jobs."publish-demo-image".needs | sort | join(",")')" == 'browser-acceptance,browser-acceptance-image,ci,ci-main,compose,css,demo-web-artifact,deploy-workflow,docker,e2e-admin,lint,mirror-rustfs-qualification-images,photothumb-runtime,real-server-fixtures,restore-readiness,rustfs-transition-qualification,schema-gate-postgres,smoke,sql-lint,sqlc,sticker-bundle,websocket-d1,websocket-permanent-exchange' ]] ||
     ci_fail 'the demo image publish must wait for every CI lane'
+  [[ "$(ci_query '.jobs.ci.needs | join(",")')" == *'demo-web-artifact'* ]] ||
+    ci_fail 'the required CI gate must include the pinned demo web artifact build'
+  [[ "$(ci_query '.jobs.ci.steps[] | select(.name == "Require all CI lanes to pass") | .env.DEMO_WEB_ARTIFACT_RESULT')" == '${{ needs.demo-web-artifact.result }}' ]] ||
+    ci_fail 'the required CI gate must receive the demo web artifact result'
+  ci_query '.jobs.ci.steps[] | select(.name == "Require all CI lanes to pass") | .run' |
+    grep -Fq '"$DEMO_WEB_ARTIFACT_RESULT" != "success"' ||
+    ci_fail 'the required CI gate must reject a failed demo web artifact build'
+  [[ "$(ci_query '.jobs."demo-web-artifact".permissions.contents')" == 'read' ]] ||
+    ci_fail 'the demo web artifact build must use read-only repository access'
+  [[ "$(ci_query '.jobs."demo-web-artifact".permissions | to_entries | map(.key + "=" + .value) | join(",")')" == 'contents=read' ]] ||
+    ci_fail 'the demo web artifact build must not have action or package write access'
+  [[ "$(ci_query '.jobs."demo-web-artifact".environment // ""')" == '' ]] ||
+    ci_fail 'the demo web artifact build must not use an environment with secrets'
+  if ci_query '.jobs."demo-web-artifact" | to_json' | grep -Fq 'secrets.'; then
+    ci_fail 'the demo web artifact build must not reference secrets'
+  fi
+  [[ "$(ci_query '.jobs."demo-web-artifact".steps[] | select(.name == "Rebuild and verify the pinned web artifact") | .env.WEB_SOURCE_SHA')" == '${{ steps.pin.outputs.source_commit }}' ]] ||
+    ci_fail 'the demo web build must use the commit resolved from its pin'
+  ci_query '.jobs."demo-web-artifact".steps[] | select(.name == "Package the verified demo web artifact") | .run' |
+    grep -Fq 'tar -czf "$archive" -C teagram-web/dist-private .' ||
+    ci_fail 'the secret-free CI job must package the verified web build'
+  ci_query '.jobs."demo-web-artifact".steps[] | select(.name == "Package the verified demo web artifact") | .run' |
+    grep -Fq 'archive.sha256' ||
+    ci_fail 'the secret-free CI job must package the archive checksum with the web artifact'
+  [[ "$(ci_query '.jobs."demo-web-artifact".steps[] | select(.name == "Upload the verified demo web artifact") | .uses')" == 'actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02' ]] ||
+    ci_fail 'the verified web artifact must use the pinned upload action'
+  [[ "$(ci_query '.jobs."demo-web-artifact".steps[] | select(.name == "Upload the verified demo web artifact") | .with.name')" == 'demo-web-release-${{ steps.pin.outputs.source_commit }}' ]] ||
+    ci_fail 'the verified web artifact name must include its pinned source commit'
   [[ "$(ci_query '.jobs."publish-demo-image".permissions | to_entries | sort_by(.key) | map(.key + "=" + .value) | join(",")')" == 'actions=write,contents=read,packages=write' ]] ||
     ci_fail 'the demo image publisher must use only the required package and cache permissions'
   [[ "$(ci_query '.jobs."publish-demo-image".steps[] | select(.name == "Build and publish the tested demo image") | .id')" == 'publish_image' ]] ||
@@ -253,8 +286,8 @@ check_contract() {
   [[ "$(query '.permissions | to_entries | map(.key + "=" + .value) | join(",")')" == 'contents=read' ]] ||
     fail 'workflow permissions must be contents: read only'
 
-  [[ "$(query '.jobs | keys | sort | join(",")')" == 'deploy,deploy-demo' ]] ||
-    fail 'jobs must contain only the dev deploy and gated demo deploy'
+  [[ "$(query '.jobs | keys | sort | join(",")')" == 'deploy,deploy-demo,resolve-demo-web' ]] ||
+    fail 'jobs must contain the dev deploy, read-only web resolver, and gated demo deploy'
   [[ "$(query '.jobs.deploy.if')" == "$expected_if" ]] ||
     fail 'the dev job must run only on dispatch or a successful CI push run'
   [[ "$(query '.jobs.deploy.environment')" == 'production' ]] ||
@@ -267,10 +300,22 @@ check_contract() {
     fail 'the dev job must expose the tested SHA to the demo job'
   [[ "$(query '.jobs.deploy.outputs.ci_run_id')" == '${{ steps.target.outputs.ci_run_id }}' ]] ||
     fail 'the dev job must expose the exact successful CI run to the demo job'
-  [[ "$(query '.jobs.deploy-demo.needs')" == 'deploy' ]] ||
-    fail 'the demo job must wait for a successful dev deployment'
+  [[ "$(query '.jobs.resolve-demo-web.needs')" == 'deploy' ]] ||
+    fail 'the demo web resolver must wait for the tested server commit'
+  [[ "$(query '.jobs.resolve-demo-web.if')" == "$expected_resolve_demo_if" ]] ||
+    fail 'the demo web resolver must run only after the server deploy'
+  [[ "$(query '.jobs.resolve-demo-web.steps[] | select(.name == "Check out the workflow source commit") | .with.ref')" == "$expected_demo_resolver_ref" ]] ||
+    fail 'the demo web resolver must use the workflow revision that contains its pin verifier'
+  [[ "$(query '.jobs.resolve-demo-web.permissions // {} | to_entries | map(select(.value != "read")) | length')" == '0' ]] ||
+    fail 'the demo web resolver must use read-only permissions'
+  [[ "$(query '.jobs.resolve-demo-web.outputs.deployable')" == '${{ steps.pin.outputs.deployable }}' ]] ||
+    fail 'the resolver must expose whether the pin is safe to deploy'
+  [[ "$(query '.jobs.resolve-demo-web.steps[] | select(.name == "Resolve the pinned web artifact") | .run')" == *'resolve_web_artifact_pin.py --require-live-manifest'* ]] ||
+    fail 'the resolver must validate the pin against the live web manifest'
+  [[ "$(query '.jobs.deploy-demo.needs | sort | join(",")')" == 'deploy,resolve-demo-web' ]] ||
+    fail 'the demo deploy must wait for the server and web pin resolver'
   [[ "$(query '.jobs.deploy-demo.if')" == "$expected_demo_if" ]] ||
-    fail 'the demo job must wait for a successful dev deployment before evaluating its environment gate'
+    fail 'the demo job must start after the server deploy to evaluate its environment gate'
   [[ "$(query '.jobs.deploy-demo.environment')" == 'demo' ]] ||
     fail 'the demo job must use the separate demo environment'
   [[ "$(query '.jobs.deploy-demo.steps[0].id')" == 'demo-gate' ]] ||
@@ -290,19 +335,53 @@ check_contract() {
   grep -Fq '::notice::Public demo deployment skipped: Tailscale OAuth credentials are missing' <<< "$demo_gate_run" ||
     fail 'the demo gate must report when it skips for missing Tailscale OAuth credentials'
   [[ "$(query '.jobs.deploy-demo.steps[] | select(.id == "demo-image") | .if')" == "$expected_demo_step_if" ]] ||
-    fail 'the demo image download must run only when the environment gate is enabled'
+    fail 'the demo image download must run only when public demo deployment is enabled'
+  [[ "$(query '.jobs.deploy-demo.steps[] | select(.id == "web-gate") | .env.DEMO_WEB_DEPLOYABLE')" == '${{ needs.resolve-demo-web.outputs.deployable }}' ]] ||
+    fail 'the web gate must evaluate the resolver deployability output'
+  [[ "$(query '.jobs.deploy-demo.steps[] | select(.id == "web-gate") | .env.DEMO_WEB_RESOLVER_RESULT')" == '${{ needs.resolve-demo-web.result }}' ]] ||
+    fail 'the web gate must detect resolver failure'
+  local demo_web_gate_run
+  demo_web_gate_run="$(query '.jobs.deploy-demo.steps[] | select(.id == "web-gate") | .run')"
+  grep -Fq 'DEMO_WEB_RESOLVER_RESULT' <<< "$demo_web_gate_run" ||
+    fail 'the web gate must reject a failed pin resolver'
+  grep -Fq 'DEMO_WEB_DEPLOYABLE' <<< "$demo_web_gate_run" ||
+    fail 'the web gate must reject a non-deployable web pin'
+  [[ "$(query '.jobs.deploy-demo.steps[] | select(.name == "Download the web artifact from tested CI") | .if')" == "$expected_demo_web_step_if" ]] ||
+    fail 'web artifact download must run only when the published pin is deployable'
   [[ "$(query '.jobs.deploy-demo.steps[] | select(.name == "Join the tailnet") | .if')" == "$expected_demo_step_if" ]] ||
-    fail 'the demo tailnet connection must run only when the environment gate is enabled'
+    fail 'the demo tailnet connection must run only when public demo deployment is enabled'
   [[ "$(query '.jobs.deploy-demo.steps[] | select(.name == "Install the demo deploy key") | .if')" == "$expected_demo_step_if" ]] ||
-    fail 'the demo key installation must run only when the environment gate is enabled'
-  [[ "$(query '.jobs.deploy-demo.steps[] | select(.name == "Deploy the tested commit after the dev deploy") | .if')" == "$expected_demo_step_if" ]] ||
-    fail 'the demo deployment must run only when the environment gate is enabled'
+    fail 'the demo key installation must run only when public demo deployment is enabled'
+  [[ "$(query '.jobs.deploy-demo.steps[] | select(.name == "Deploy the tested server commit after the dev deploy") | .if')" == "$expected_demo_step_if" ]] ||
+    fail 'the demo server deployment must run when public demo deployment is enabled, regardless of web pin state'
+  [[ "$(query '.jobs.deploy-demo.steps[] | select(.name == "Fail if the pinned web publication is not deployable") | .if')" == "$expected_demo_web_failure_if" ]] ||
+    fail 'a rejected web pin must fail visibly after the public server deployment'
+  [[ "$(query '.jobs.deploy-demo.steps[] | select(.name == "Publish the pinned web artifact on the demo origin") | .if')" == "$expected_demo_web_step_if" ]] ||
+    fail 'the web publish step must require a deployable published pin'
+  local demo_server_step_index demo_web_download_step_index demo_web_pin_failure_step_index
+  demo_server_step_index="$(grep -nF -m1 '      - name: Deploy the tested server commit after the dev deploy' "$workflow" | cut -d: -f1)"
+  demo_web_download_step_index="$(grep -nF -m1 '      - name: Download the web artifact from tested CI' "$workflow" | cut -d: -f1)"
+  demo_web_pin_failure_step_index="$(grep -nF -m1 '      - name: Fail if the pinned web publication is not deployable' "$workflow" | cut -d: -f1)"
+  if [[ ! "$demo_server_step_index" =~ ^[0-9]+$ || ! "$demo_web_download_step_index" =~ ^[0-9]+$ ||
+    ! "$demo_web_pin_failure_step_index" =~ ^[0-9]+$ ]] ||
+    (( demo_server_step_index >= demo_web_download_step_index ||
+      demo_web_download_step_index >= demo_web_pin_failure_step_index )); then
+    fail 'web pin or artifact failures must not prevent the public server deployment from running'
+  fi
   [[ "$(query '.jobs.deploy-demo.steps[] | select(.name == "Remove the demo deploy key") | .if')" == "$expected_demo_cleanup_if" ]] ||
     fail 'the demo deploy key must be removed even when deployment fails'
   [[ "$(query '.jobs.deploy-demo.permissions // {} | to_entries | map(select(.value != "read")) | length')" == 0 ]] ||
     fail 'the demo job must not request write permissions'
   [[ "$(query '.jobs.deploy-demo.permissions.actions')" == 'read' ]] ||
     fail 'the demo job must use read-only access to the tested CI artifact'
+  local web_download_run
+  web_download_run="$(query '.jobs.deploy-demo.steps[] | select(.name == "Download the web artifact from tested CI") | .run')"
+  grep -Fq 'gh run download "$CI_RUN_ID"' <<< "$web_download_run" ||
+    fail 'the credentialed demo job must download the web artifact from the selected successful CI run'
+  grep -Fq 'demo-web-release-$WEB_SOURCE_SHA' <<< "$web_download_run" ||
+    fail 'the web artifact download must be selected by the resolved pin source commit'
+  grep -Fq 'sha256sum "$archive"' <<< "$web_download_run" ||
+    fail 'the credentialed demo job must verify the archived web artifact checksum'
 
   [[ "$(query '.jobs[].steps[] | select(.id == "target") | .env.RUN_HEAD_SHA')" == '${{ github.event.workflow_run.head_sha }}' ]] ||
     fail 'the target step must take the CI run head_sha'
@@ -320,8 +399,12 @@ check_contract() {
     grep -Fq 'root@100.124.236.66 "$DEPLOY_SHA"' ||
     fail 'the dev ssh step must send DEPLOY_SHA as its command'
   local checkout_steps setup_go_steps smoke_steps dev_step_names
-  checkout_steps="$(query '[.jobs[].steps[] | select(.uses // "" | test("^actions/checkout@"))] | length')"
-  [[ "$checkout_steps" == 0 ]] || fail 'the deploy workflow must not check out tested source on the runner'
+  checkout_steps="$(query '[.jobs.deploy.steps[] | select(.uses // "" | test("^actions/checkout@"))] | length')"
+  [[ "$checkout_steps" == 0 ]] || fail 'the server deploy runner must not check out tested source'
+  checkout_steps="$(query '[.jobs.deploy-demo.steps[] | select(.uses // "" | test("^actions/checkout@"))] | length')"
+  [[ "$checkout_steps" == 0 ]] || fail 'the credentialed demo job must not check out source code'
+  [[ "$(query '[.jobs.deploy-demo.steps[] | select(.uses // "" | test("^pnpm/action-setup@|^actions/setup-node@"))] | length')" == 0 ]] ||
+    fail 'the credentialed demo job must not install or run web build dependencies'
   setup_go_steps="$(query '[.jobs.deploy.steps[] | select(.uses // "" | test("^actions/setup-go@"))] | length')"
   [[ "$setup_go_steps" == 0 ]] || fail 'the deploy runner must not install Go for a host-side smoke'
   smoke_steps="$(query '[.jobs.deploy.steps[] | select(.name == "Run MTProto smoke on port 2443")] | length')"
@@ -336,13 +419,13 @@ check_contract() {
   [[ "$(query '.jobs.deploy.steps[] | select(.name == "Remove the deploy key") | .if')" == '${{ always() }}' ]] ||
     fail 'the deploy key must be removed even when deployment fails'
   demo_ssh_steps="$(query '[.jobs.deploy-demo.steps[] | select(.run // "" | test("(^|\s)ssh\s"))] | length')"
-  [[ "$demo_ssh_steps" == 1 ]] || fail "expected one demo ssh step, found $demo_ssh_steps"
-  [[ "$(query '.jobs.deploy-demo.steps[] | select(.run // "" | test("(^|\s)ssh\s")) | .env.DEPLOY_SHA')" == '${{ needs.deploy.outputs.sha }}' ]] ||
+  [[ "$demo_ssh_steps" == 2 ]] || fail "expected server and web demo ssh steps, found $demo_ssh_steps"
+  [[ "$(query '.jobs.deploy-demo.steps[] | select(.name == "Deploy the tested server commit after the dev deploy") | .env.DEPLOY_SHA')" == '${{ needs.deploy.outputs.sha }}' ]] ||
     fail 'the demo ssh step must deploy the exact SHA from the dev job'
-  query '.jobs.deploy-demo.steps[] | select(.run // "" | test("(^|\s)ssh\s")) | .run' |
+  query '.jobs.deploy-demo.steps[] | select(.name == "Deploy the tested server commit after the dev deploy") | .run' |
     grep -Fq '"root@$DEMO_DEPLOY_HOST" "$DEPLOY_SHA $DEPLOY_IMAGE_DIGEST"' ||
     fail 'the demo ssh step must send the tested SHA and trusted image digest to the separate demo host'
-  [[ "$(query '.jobs.deploy-demo.steps[] | select(.run // "" | contains("ssh -T -p")) | .env.DEPLOY_IMAGE_DIGEST')" == '${{ steps.demo-image.outputs.digest }}' ]] ||
+  [[ "$(query '.jobs.deploy-demo.steps[] | select(.name == "Deploy the tested server commit after the dev deploy") | .env.DEPLOY_IMAGE_DIGEST')" == '${{ steps.demo-image.outputs.digest }}' ]] ||
     fail 'the demo ssh step must take its image digest from the trusted CI artifact'
   [[ "$(query '.jobs.deploy-demo.steps[] | select(.id == "demo-image") | .env.CI_RUN_ID')" == '${{ needs.deploy.outputs.ci_run_id }}' ]] ||
     fail 'the demo digest must be downloaded from the selected CI run'
@@ -354,10 +437,21 @@ check_contract() {
     fail 'the demo digest artifact must be selected by the exact tested SHA'
   grep -Fq '^sha256:[0-9a-f]{64}$' <<< "$digest_run" ||
     fail 'the downloaded image digest must be validated before SSH'
+  if ! grep -Fq 'resolve_web_artifact_pin.py' "$demo_forced_command" ||
+    ! grep -Fq -- '--verify-release-identity "$WEB_SOURCE_SHA" "$WEB_ARTIFACT_DIGEST"' "$demo_forced_command"; then
+    fail 'the forced demo command must require the exact published web pin before accepting an archive'
+  fi
+  local pin_resolver_run
+  pin_resolver_run="$(query '.jobs.resolve-demo-web.steps[] | select(.name == "Resolve the pinned web artifact") | .run')"
+  grep -Fq 'resolve_web_artifact_pin.py --require-live-manifest' <<< "$pin_resolver_run" ||
+    fail 'the deploy preflight must verify the published pin against the live manifest'
+  query '.jobs.deploy-demo.steps[] | select(.name == "Publish the pinned web artifact on the demo origin") | .run' |
+    grep -Fq '"web $DEPLOY_SHA $WEB_SOURCE_SHA $WEB_ARTIFACT_DIGEST $WEB_ARCHIVE_SHA256" < "$WEB_ARCHIVE"' ||
+    fail 'the verified web archive must be streamed to the forced demo command'
   [[ "$(query '.jobs.deploy-demo.steps[] | select(.name == "Install the demo deploy key") | .env.DEMO_DEPLOY_PORT')" == '${{ vars.DEMO_DEPLOY_PORT }}' ]] ||
     fail 'the demo key step must validate the configured SSH port'
-  [[ "$(query '.jobs.deploy-demo.steps[] | select(.run // "" | test("(^|\\s)ssh\\s")) | .env.DEMO_DEPLOY_PORT')" == '${{ vars.DEMO_DEPLOY_PORT }}' ]] ||
-    fail 'the demo SSH step must use the configured SSH port'
+  [[ "$(query '[.jobs.deploy-demo.steps[] | select(.run // "" | test("(^|\\s)ssh\\s")) | .env.DEMO_DEPLOY_PORT] | unique | .[0]')" == '${{ vars.DEMO_DEPLOY_PORT }}' ]] ||
+    fail 'both demo SSH steps must use the configured SSH port'
   query '.jobs.deploy-demo.steps[] | select(.run // "" | test("(^|\\s)ssh\\s")) | .run' |
     grep -Fq 'ssh -T -p "$DEMO_DEPLOY_PORT"' || fail 'demo SSH must pass the non-default port'
   demo_port_run="$(query '.jobs.deploy-demo.steps[] | select(.name == "Install the demo deploy key") | .run')"
@@ -432,13 +526,18 @@ self_test() {
   local demo_mutations=(
     'del(.jobs."deploy-demo")'
     '.jobs."deploy-demo".needs = []'
+    '.jobs."deploy-demo".steps[1].env.DEMO_WEB_DEPLOYABLE = "true"'
+    '.jobs."deploy-demo".steps[0].run = "echo enabled=true"'
+    '(.jobs."deploy-demo".steps[] | select(.name == "Publish the pinned web artifact on the demo origin") | .if) = "${{ always() }}"'
+    '(.jobs."deploy-demo".steps[] | select(.name == "Deploy the tested server commit after the dev deploy") | .if) = "${{ always() }}"'
     '.jobs."deploy-demo".if = "${{ github.event_name == '"'"'workflow_dispatch'"'"' }}"'
     '.jobs."deploy-demo".steps[0].env.TEAGRAM_DEMO_DEPLOY_ENABLED = "true"'
+    'del(.jobs."deploy-demo".steps[] | select(.id == "web-gate").env.DEMO_WEB_DEPLOYABLE)'
     'del(.jobs."deploy-demo".steps[0].env.TS_OAUTH_CLIENT_ID)'
     'del(.jobs."deploy-demo".steps[0].env.TS_OAUTH_SECRET)'
     '(.jobs."deploy-demo".steps[0].run) |= sub("TS_OAUTH_CLIENT_ID"; "WRONG_OAUTH_CLIENT_ID")'
     '(.jobs."deploy-demo".steps[0].run) |= sub("Tailscale OAuth credentials are missing"; "credentials missing")'
-    '(.jobs."deploy-demo".steps[] | select(.name == "Deploy the tested commit after the dev deploy") | .if) = "${{ always() }}"'
+    '(.jobs."deploy-demo".steps[] | select(.id == "web-gate").run) |= sub("DEMO_WEB_DEPLOYABLE"; "WRONG_WEB_DEPLOYABLE")'
     '.jobs."deploy-demo".environment = "production"'
     '(.jobs."deploy-demo".steps[] | select(.name == "Install the demo deploy key") | .env.DEMO_DEPLOY_SSH_KEY) = "${{ secrets.DEPLOY_SSH_KEY }}"'
     '(.jobs."deploy-demo".steps[] | select(.name == "Install the demo deploy key") | .env.DEMO_DEPLOY_PORT) = "${{ vars.WRONG_PORT }}"'

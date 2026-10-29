@@ -23,6 +23,11 @@ func FloodWaitError(seconds int) *tgerr.Error {
 var (
 	// errInputRequestInvalid rejects a request that cannot be handled as sent.
 	errInputRequestInvalid = rpcErr(400, "INPUT_REQUEST_INVALID")
+	// User invite errors are stable custom RPC errors documented with the
+	// teagram.* methods in docs/clients.md.
+	errUserInviteRegistrationClosed = rpcErr(400, "USER_INVITE_REGISTRATION_CLOSED")
+	errUserInvitesDisabled          = rpcErr(400, "USER_INVITES_DISABLED")
+	errUserInviteWeeklyLimitReached = rpcErr(400, "USER_INVITE_WEEKLY_LIMIT_REACHED")
 	// errAboutTooLong rejects a profile biography the server cannot store.
 	errAboutTooLong         = rpcErr(400, "ABOUT_TOO_LONG")
 	errProfilePhotosTooMuch = rpcErr(400, "PHOTOS_TOO_MUCH")
@@ -30,6 +35,7 @@ var (
 	errCodeInvalid          = rpcErr(400, "PHONE_CODE_INVALID")
 	errCodeExpired          = rpcErr(400, "PHONE_CODE_EXPIRED")
 	errBotAccount           = rpcErr(400, "BOT_ACCOUNT")
+	errBotGroupsBlocked     = rpcErr(400, "BOT_GROUPS_BLOCKED")
 	errInternal             = rpcErr(500, "INTERNAL")
 	errMethodNotImpl        = rpcErr(400, "INPUT_METHOD_INVALID")
 	errLangPackInvalid      = rpcErr(400, "LANG_PACK_INVALID")
@@ -294,6 +300,8 @@ var (
 	errPasswordCannotBeRemoved = rpcErr(400, "PASSWORD_HASH_INVALID")
 	// errInputFilterInvalid rejects messages.search with an unsupported filter type.
 	errInputFilterInvalid = rpcErr(400, "INPUT_FILTER_INVALID")
+	// errFilterNotSupported rejects a search-results calendar filter the server cannot serve.
+	errFilterNotSupported = rpcErr(400, "FILTER_NOT_SUPPORTED")
 	// errLimitInvalid rejects a client-supplied id list past its per-call cap. It
 	// is decided on the client's own input, before the peer is resolved and
 	// before any entitlement is checked, so it tells the caller nothing about the
@@ -303,3 +311,10 @@ var (
 	// interpreted as a normal page or an exact max_id refresh.
 	errOffsetInvalid = rpcErr(400, "OFFSET_INVALID")
 )
+
+func userInviteAccountTooNewError(seconds int64) *tgerr.Error {
+	if seconds < 1 {
+		seconds = 1
+	}
+	return rpcErr(420, fmt.Sprintf("USER_INVITE_ACCOUNT_TOO_NEW_WAIT_%d", seconds))
+}
