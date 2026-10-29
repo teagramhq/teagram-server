@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -81,6 +82,56 @@ func testSmokeStickerBundleCatalogue(t *testing.T) {
 		if !ok || covered.Set.Title != pack.Title || covered.Set.Count != len(pack.Stickers) {
 			t.Fatalf("featured bundle set %q = %+v, want title %q and %d stickers", pack.ShortName, covered, pack.Title, len(pack.Stickers))
 		}
+	}
+
+	wantOldCount := len(featured.Sets)
+	oldNames := make(map[string]struct{}, wantOldCount)
+	if err := a.call(f.ctx, func(ctx context.Context, client *tg.Client) error {
+		for offset := range wantOldCount {
+			result, err := client.MessagesGetOldFeaturedStickers(ctx, &tg.MessagesGetOldFeaturedStickersRequest{Offset: offset, Limit: 1, Hash: 0})
+			if err != nil {
+				return err
+			}
+			oldFeatured, ok := result.(*tg.MessagesFeaturedStickers)
+			if !ok || oldFeatured == nil || oldFeatured.Count != wantOldCount || len(oldFeatured.Sets) != 1 {
+				return fmt.Errorf("old featured page %d = %T with count %d and %d entries, want one of %d catalogue sets", offset, result, featuredCount(oldFeatured), featuredSetCount(oldFeatured), wantOldCount)
+			}
+			covered, ok := oldFeatured.Sets[0].(*tg.StickerSetCovered)
+			if !ok {
+				return fmt.Errorf("old featured sticker set = %T, want *tg.StickerSetCovered", oldFeatured.Sets[0])
+			}
+			oldNames[covered.Set.ShortName] = struct{}{}
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("get old featured bundle sticker packs: %v", err)
+	}
+	for shortName := range coveredByName {
+		if _, ok := oldNames[shortName]; !ok {
+			t.Errorf("old featured sets omitted %q", shortName)
+		}
+	}
+	if err := a.call(f.ctx, func(ctx context.Context, client *tg.Client) error {
+		query := strings.ToUpper("OpenMoji Food")
+		result, err := client.MessagesSearchStickerSets(ctx, &tg.MessagesSearchStickerSetsRequest{Q: query, Hash: 0})
+		if err != nil {
+			return err
+		}
+		found, ok := result.(*tg.MessagesFoundStickerSets)
+		if !ok || found == nil || len(found.Sets) != 1 {
+			count := 0
+			if found != nil {
+				count = len(found.Sets)
+			}
+			return fmt.Errorf("searchStickerSets %q = %T with %d sets, want a bundle title match", query, result, count)
+		}
+		covered, ok := found.Sets[0].(*tg.StickerSetCovered)
+		if !ok || covered.Set.ShortName != "openmoji_food" {
+			return fmt.Errorf("searchStickerSets %q returned %T, want bundle pack openmoji_food", query, found.Sets[0])
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("search catalogue bundle sticker pack: %v", err)
 	}
 
 	installedNames := make(map[string]struct{}, len(bundle.Packs))

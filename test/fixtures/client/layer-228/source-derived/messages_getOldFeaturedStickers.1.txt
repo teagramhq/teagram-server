@@ -1,0 +1,6 @@
+# source: gotd v0.162.0 layer-228 generated request type
+body: { messages.getOldFeaturedStickers#7ed094a1
+  offset: 0 [INT],
+  limit: 100 [INT],
+  hash: 0 [LONG],
+},
