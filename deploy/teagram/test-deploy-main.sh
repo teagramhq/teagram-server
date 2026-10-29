@@ -7,6 +7,9 @@ umask 077
 script="$(cd "$(dirname "$0")" && pwd)/deploy-main.sh"
 logs_script="$(cd "$(dirname "$0")" && pwd)/teagram-logs.sh"
 ops_script="$(cd "$(dirname "$0")" && pwd)/teagram-ops.sh"
+public_compose_fixture="$(cd "$(dirname "$0")" && pwd)/testdata/public-compose-valid.json"
+public_checker="$(cd "$(dirname "$0")" && pwd)/../teagramd/rollout-runner/public-websocket-check.py"
+public_haproxy_config="$(cd "$(dirname "$0")" && pwd)/../teagramd/haproxy-public-websocket.cfg"
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
 
@@ -65,6 +68,9 @@ grep -Fq 'DEPLOY_SHA must be a full 40-hex commit SHA' "$tmp/bridge-invalid.log"
 
 git init -q -b main "$tmp/work"
 mkdir -p "$tmp/work/deploy/teagramd/rollout-runner" "$tmp/work/deploy/link-edge"
+cp "$public_checker" "$tmp/work/deploy/teagramd/rollout-runner/public-websocket-check.py"
+cp "$public_haproxy_config" "$tmp/work/deploy/teagramd/haproxy-public-websocket.cfg"
+python3 "$public_checker" --haproxy-config "$public_haproxy_config" < "$public_compose_fixture" >/dev/null
 printf 'tracked fixture\n' > "$tmp/work/tracked.txt"
 printf '#!/usr/bin/env bash\n' > "$tmp/work/tracked-script.sh"
 cat > "$tmp/work/deploy/teagramd/rollout-runner/rollout-runner.sh" <<'RUNNER'
@@ -103,7 +109,7 @@ set -euo pipefail
 printf '%s\n' "$1" >> "${LINK_EDGE_DEPLOY_LOG:?}"
 printf 'link-edge\n' >> "${DEPLOY_ACTION_LOG:?}"
 EDGE
-for file in rollout-verifier.sh schema-result-gate.sh schema-result-gate.py blob-mode-state.py qualify-rustfs-transition.py stack-move-runner.py public-websocket-check.py; do
+for file in rollout-verifier.sh schema-result-gate.sh schema-result-gate.py blob-mode-state.py qualify-rustfs-transition.py stack-move-runner.py; do
   printf 'fixture\n' > "$tmp/work/deploy/teagramd/rollout-runner/$file"
 done
 cat > "$tmp/work/deploy/teagramd/rollout-runner/blob-transition-runner.py" <<'PYTHON'
@@ -127,7 +133,8 @@ PYTHON
 chmod 644 "$tmp/work/tracked.txt"
 chmod 755 "$tmp/work/tracked-script.sh"
 chmod 644 "$tmp/work/deploy/teagramd/rollout-runner/"*
-git -C "$tmp/work" add tracked.txt tracked-script.sh deploy/teagramd/rollout-runner deploy/link-edge/deploy-main.sh
+git -C "$tmp/work" add tracked.txt tracked-script.sh deploy/teagramd/rollout-runner \
+  deploy/teagramd/haproxy-public-websocket.cfg deploy/link-edge/deploy-main.sh
 commit() {
   git -C "$tmp/work" commit -q --allow-empty -m "$1"
   git -C "$tmp/work" rev-parse HEAD
@@ -211,7 +218,14 @@ case "$*" in
     ;;
   *'config --format json'*)
     replica_count=${FIXTURE_COMPOSE_REPLICA_COUNT:-${TG_REPLICA_COUNT:-1}}
-    printf '{"services":{"teagramd":{"environment":{"TG_REPLICA_COUNT":"%s"}}}}\n' "$replica_count"
+    jq --arg count "$replica_count" \
+      --arg rendered_cidr "${FIXTURE_COMPOSE_PUBLIC_PROXY_CIDR:-}" '
+        .services.teagramd.environment.TG_REPLICA_COUNT = $count |
+        if $rendered_cidr == "" then . else
+          .services["teagramd-public-1"].environment.TG_CLIENT_ADDR_PROXY_CIDRS = $rendered_cidr |
+          .services["teagramd-public-2"].environment.TG_CLIENT_ADDR_PROXY_CIDRS = $rendered_cidr
+        end
+      ' "$FIXTURE_PUBLIC_COMPOSE_JSON"
     ;;
   *'{{json .Config.Env}}'*)
     printf '["TG_REPLICA_COUNT=%s"]\n' "${FIXTURE_RUNNING_REPLICA_COUNT:-1}"
@@ -222,7 +236,34 @@ case "$*" in
     ;;
   *org.opencontainers.image.revision*) echo "$DEPLOY_SHA" ;;
   *'{{range .Config.Env}}'*) echo 'TG_RSA_KEY_FINGERPRINT=12345' ;;
-  *'compose ps -q public-haproxy'*|*'compose ps -q teagramd-public-1'*|*'compose ps -q teagramd-public-2'*) printf '%064d\n' 1 ;;
+  *'compose ps -q public-haproxy'*) echo aaaaaaaaaaaa ;;
+  *'compose ps -q teagramd-public-1'*) echo bbbbbbbbbbbb ;;
+  *'compose ps -q teagramd-public-2'*) echo cccccccccccc ;;
+  *aaaaaaaaaaaa*)
+    jq -cn '{
+      Config:{Env:[]}, State:{Status:"running",Health:{Status:"healthy"}},
+      HostConfig:{PortBindings:{"2446/tcp":[{HostIp:"127.0.0.1",HostPort:"2446"}]}},
+      NetworkSettings:{Ports:{"2446/tcp":[{HostIp:"127.0.0.1",HostPort:"2446"}]}}
+    }' | jq -s .
+    ;;
+  *bbbbbbbbbbbb*|*cccccccccccc*)
+    case "$*" in
+      *bbbbbbbbbbbb*) service=teagramd-public-1 ;;
+      *) service=teagramd-public-2 ;;
+    esac
+    runtime_env=$(jq -c --arg service "$service" --arg cidr "${FIXTURE_RUNNING_PUBLIC_PROXY_CIDR:-}" '
+      .services[$service].environment | to_entries |
+      map(if .key == "TG_CLIENT_ADDR_PROXY_CIDRS" and $cidr != "" then .value = $cidr else . end) |
+      map(.key + "=" + (.value | tostring))
+    ' "$FIXTURE_PUBLIC_COMPOSE_JSON")
+    jq -cn --argjson env "$runtime_env" --arg bind "${FIXTURE_RUNNING_PUBLIC_PORT_BINDINGS:-0}" '
+      [ {
+        Config:{Env:$env}, State:{Status:"running"},
+        HostConfig:{PortBindings:(if $bind == "1" then {"2446/tcp":[{HostIp:"0.0.0.0",HostPort:"2446"}]} else {} end)},
+        NetworkSettings:{Ports:(if $bind == "1" then {"2446/tcp":[{HostIp:"0.0.0.0",HostPort:"2446"}]} else {} end)}
+      } ]
+    '
+    ;;
   *'{{.State.Status}}'*) echo running ;;
   *'{{if .State.Health}}'*) echo healthy ;;
   *'ps -a'*) ;;
@@ -246,6 +287,7 @@ failures=0
 export LINK_EDGE_DEPLOY_LOG="$tmp/link-edge-deploys"
 export DEPLOY_ACTION_LOG="$tmp/deploy-actions"
 export DEPLOY_IMAGE_ID_FILE="$tmp/root/current-image-id"
+export FIXTURE_PUBLIC_COMPOSE_JSON="$public_compose_fixture"
 : > "$LINK_EDGE_DEPLOY_LOG"
 : > "$DEPLOY_ACTION_LOG"
 # expect <exit code> <last line> [VAR=value...]
@@ -312,7 +354,13 @@ expect 99 'unexpected docker call: compose exec -T postgres pg_dump -U postgres 
   DEPLOY_SHA="$second" TG_REPLICA_COUNT=3
 expect 99 'unexpected docker call: compose exec -T postgres pg_dump -U postgres teagram' \
   DEPLOY_SHA="$second" FIXTURE_RUNNING_REPLICA_COUNT=3
-printf '%s\n' 'PASS same-SHA fast path verifies rendered Compose and running base replica counts'
+expect 99 'unexpected docker call: compose exec -T postgres pg_dump -U postgres teagram' \
+  DEPLOY_SHA="$second" FIXTURE_COMPOSE_PUBLIC_PROXY_CIDR=0.0.0.0/0
+expect 99 'unexpected docker call: compose exec -T postgres pg_dump -U postgres teagram' \
+  DEPLOY_SHA="$second" FIXTURE_RUNNING_PUBLIC_PROXY_CIDR=0.0.0.0/0
+expect 99 'unexpected docker call: compose exec -T postgres pg_dump -U postgres teagram' \
+  DEPLOY_SHA="$second" FIXTURE_RUNNING_PUBLIC_PORT_BINDINGS=1
+printf '%s\n' 'PASS same-SHA fast path validates rendered public topology, runtime trust, and replica bindings'
 if ! cmp -s "$tmp/root/usr/local/sbin/teagram-logs" "$tmp/work/deploy/teagram/teagram-logs.sh"; then
   echo 'FAIL deploy did not install the commit-tracked teagram-logs command' >&2
   failures=$((failures + 1))

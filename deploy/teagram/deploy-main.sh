@@ -351,12 +351,16 @@ docker_compose() {
     docker compose "$@"
   fi
 }
-# The same-SHA shortcut still has to honor Compose overrides and the running
-# process; neither is proven by checking only the deployment .env.
+# The same-SHA shortcut must prove that both the rendered public boundary and
+# the running containers still match the reviewed configuration.
+PUBLIC_RENDERED_COMPOSE=
+public_route_topology_is_exact() {
+  PUBLIC_RENDERED_COMPOSE=$(docker_compose --profile public config --format json </dev/null) || return 1
+  printf '%s' "$PUBLIC_RENDERED_COMPOSE" | python3 "$R/teagramd-rollout-runner/public-websocket-check.py" \
+    --haproxy-config "$LIVE_CHECKOUT/deploy/teagramd/haproxy-public-websocket.cfg" >/dev/null
+}
 public_base_listener_budget_is_single() {
-  local rendered
-  rendered=$(docker_compose --profile public config --format json </dev/null) || return 1
-  printf '%s' "$rendered" | jq -e \
+  printf '%s' "$PUBLIC_RENDERED_COMPOSE" | jq -e \
     '.services.teagramd.environment.TG_REPLICA_COUNT == "1"' >/dev/null || return 1
   docker inspect --format '{{json .Config.Env}}' "$C" 2>/dev/null | jq -e '
     if type != "array" then false else
@@ -368,15 +372,45 @@ public_base_listener_budget_is_single() {
   ' >/dev/null
 }
 public_route_services_running() {
-  local service id state health
+  local service id inspect_json state health ports
   for service in public-haproxy teagramd-public-1 teagramd-public-2; do
     id=$(docker_compose ps -q "$service" </dev/null 2>/dev/null) || return 1
     [[ "$id" =~ ^[0-9a-f]{12,64}$ ]] || return 1
-    state=$(docker inspect --format '{{.State.Status}}' "$id" 2>/dev/null) || return 1
+    inspect_json=$(docker inspect "$id" 2>/dev/null) || return 1
+    state=$(printf '%s' "$inspect_json" | jq -er '.[0].State.Status') || return 1
     [ "$state" = running ] || return 1
     if [[ "$service" == public-haproxy ]]; then
-      health=$(docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}missing{{end}}' "$id" 2>/dev/null) || return 1
+      health=$(printf '%s' "$inspect_json" | jq -er '.[0].State.Health.Status // "missing"') || return 1
       [ "$health" = healthy ] || return 1
+      ports=$(printf '%s' "$inspect_json" | jq -ce '
+        [.[0].NetworkSettings.Ports // {} | to_entries[] | .key as $port | .value[]? | {port:$port,host_ip:.HostIp,host_port:.HostPort}] | sort_by(.port)
+      ') || return 1
+      [ "$ports" = '[{"port":"2446/tcp","host_ip":"127.0.0.1","host_port":"2446"}]' ] || return 1
+      ports=$(printf '%s' "$inspect_json" | jq -ce '
+        [.[0].HostConfig.PortBindings // {} | to_entries[] | .key as $port | .value[]? | {port:$port,host_ip:.HostIp,host_port:.HostPort}] | sort_by(.port)
+      ') || return 1
+      [ "$ports" = '[{"port":"2446/tcp","host_ip":"127.0.0.1","host_port":"2446"}]' ] || return 1
+    else
+      if ! { printf '%s\n' "$inspect_json" "$PUBLIC_RENDERED_COMPOSE"; } | jq -se --arg service "$service" '
+        .[0] as $inspect | .[1] as $compose |
+        $inspect[0].Config.Env as $env |
+        $compose.services[$service].environment as $expected |
+        all([
+          "TG_CLIENT_ADDR_TRUST", "TG_CLIENT_ADDR_PROXY_CIDRS", "TG_REPLICA_COUNT",
+          "TG_REPLICA_ID", "TG_WEBSOCKET_LISTEN_ADDR", "TG_WEBSOCKET_ALLOWED_ORIGINS",
+          "TG_PUBLIC_WEBSOCKET_LISTEN_ADDR", "TG_PUBLIC_WEBSOCKET_ADVERTISE_ADDR",
+          "TG_PUBLIC_REGISTRATION", "TG_PUBLIC_WEBSOCKET_ALLOWED_ORIGINS",
+          "TG_TURNSTILE_SITE_KEY", "TG_TURNSTILE_SECRET_KEY_FILE", "TG_TURNSTILE_SIGNIN_ENABLED"
+        ][]; . as $key |
+          ($expected | has($key)) and
+          ([ $env[] | select(type == "string" and startswith($key + "=")) ] | length) == 1 and
+          ([ $env[] | select(type == "string" and startswith($key + "=")) ][0] == ($key + "=" + ($expected[$key] | tostring)))
+        ) and
+        ([ $inspect[0].HostConfig.PortBindings // {} | to_entries[] | select(.value != null and .value != []) ] | length) == 0 and
+        ([ $inspect[0].NetworkSettings.Ports // {} | to_entries[] | select(.value != null and .value != []) ] | length) == 0
+      ' >/dev/null; then
+        return 1
+      fi
     fi
   done
 }
@@ -393,7 +427,7 @@ run_mtproto_smoke() {
     "$image_id"
 }
 IMG=$(docker inspect --format '{{.Image}}' $C)
-if [ "$PREV" = "$SHA" ] && public_base_listener_budget_is_single && public_route_services_running && \
+if [ "$PREV" = "$SHA" ] && public_route_topology_is_exact && public_base_listener_budget_is_single && public_route_services_running && \
    grep -qs "source_sha=$SHA image_id=$IMG " "$R"/main1238-*.build/built-image.identity; then
   umask 077
   install_teagram_logs_command "$SHA"
