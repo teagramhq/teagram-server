@@ -58,6 +58,28 @@ spec:
               mountPath: /var/lib/teagramd-blobs
             - name: blob-mode
               mountPath: /run/teagramd/blob-mode
+        - name: ensure-server-identity
+          image: ghcr.io/teagramhq/teagramd:unreleased
+          imagePullPolicy: IfNotPresent
+          command: ["/usr/local/bin/teagramd", "ensure-identity"]
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 65532
+            runAsGroup: 65532
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          resources:
+            requests:
+              cpu: 25m
+              memory: 64Mi
+            limits:
+              cpu: 250m
+              memory: 256Mi
+          volumeMounts:
+            - name: key-data
+              mountPath: /var/lib/teagramd
         - name: wait-for-database-migrations
           image: mirror.gcr.io/library/postgres:18-alpine@sha256:3b0ef735388b2cb097fc29b8bb421d86d57d0ddbe7aa1fbd6493e06d65028503
           imagePullPolicy: IfNotPresent
@@ -189,6 +211,8 @@ spec:
               value: "1"
             - name: TG_BLOB_DIR
               value: /var/lib/teagramd-blobs
+            - name: TG_AUTHKEY_ENC_KEY_FILE
+              value: /var/lib/teagramd/enc_key.hex
           ports:
             - name: mtproto
               containerPort: 2443
