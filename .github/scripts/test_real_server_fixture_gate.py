@@ -10,6 +10,7 @@ import re
 import subprocess
 import sys
 import tempfile
+import textwrap
 import unittest
 from pathlib import Path
 
@@ -284,6 +285,36 @@ class RealServerFixtureGateTests(unittest.TestCase):
             " ".join(result_guard.group("condition").split()),
             expected_guard,
             "CI aggregate must fail unless every retained PR lane and main-priority check pass",
+        )
+
+        run_script = re.search(r"(?ms)^        run: \|\n(?P<script>.*)\Z", body)
+        self.assertIsNotNone(run_script, "CI aggregate has no executable result gate")
+        shell_script = textwrap.dedent(run_script.group("script"))
+        environment = os.environ.copy()
+        environment.update({env_name: "success" for env_name in result_envs.values()})
+        success = subprocess.run(
+            ["bash", "-e", "-c", shell_script],
+            capture_output=True,
+            check=False,
+            env=environment,
+            text=True,
+        )
+        self.assertEqual(success.returncode, 0, success.stdout + success.stderr)
+
+        environment[result_envs[needed_lanes[0]]] = "failure"
+        failure = subprocess.run(
+            ["bash", "-e", "-c", shell_script],
+            capture_output=True,
+            check=False,
+            env=environment,
+            text=True,
+        )
+        self.assertNotEqual(
+            failure.returncode,
+            0,
+            "CI aggregate returned success when a required lane failed: "
+            + failure.stdout
+            + failure.stderr,
         )
 
     def test_e2e_selectors_partition_fixture_tests_from_remaining_suite(self) -> None:
