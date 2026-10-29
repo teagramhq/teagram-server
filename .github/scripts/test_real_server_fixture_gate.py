@@ -206,6 +206,7 @@ class RealServerFixtureGateTests(unittest.TestCase):
         self.assertIsNotNone(ci_job, "CI workflow has no required ci check")
         body = ci_job.group("body")
         self.assertRegex(body, r"(?m)^    name: ci$")
+        self.assertRegex(body, r"(?m)^    if: \$\{\{ always\(\) &&")
         self.assertIn("needs.ops-prioritize-main.result == 'success'", body)
         self.assertIn("needs.ops-prioritize-main.result == 'failure'", body)
         self.assertIn("needs.ops-prioritize-main.result == 'cancelled'", body)
@@ -213,11 +214,13 @@ class RealServerFixtureGateTests(unittest.TestCase):
         self.assertIn("github.event_name == 'pull_request'", body)
         self.assertIn("MAIN_PRIORITY_RESULT: ${{ needs.ops-prioritize-main.result }}", body)
 
-        # The publisher is main-push-only. MAIN-2918 is deleting the other three
-        # lanes, and the main-priority job is skipped on PRs.
+        # The publisher and recovery dispatcher are main-push-only. The
+        # main-priority job is skipped on PRs and checked separately. MAIN-2918
+        # is deleting the other three lanes.
         excluded_jobs = {
             "ci",
             "publish-demo-image",
+            "ops-dispatch-pr-ci-recovery",
             "ops-prioritize-main",
             "mirror-rustfs-qualification-images",
             "restore-readiness",
@@ -272,7 +275,9 @@ class RealServerFixtureGateTests(unittest.TestCase):
         self.assertEqual(result_output, result_envs, "CI aggregate must report every lane result")
 
         result_guard = re.search(
-            r"(?ms)^          if \[\[ (?P<condition>.*?) \]\]; then$", body
+            r'(?ms)^          if \[\[ (?P<condition>'
+            r'"\$MAIN_PRIORITY_RESULT" != "\$expected_priority_result" \|\|.*?) \]\]; then$',
+            body,
         )
         self.assertIsNotNone(result_guard, "CI aggregate has no failing result guard")
         expected_guard = '"$MAIN_PRIORITY_RESULT" != "$expected_priority_result" || '
@@ -291,7 +296,15 @@ class RealServerFixtureGateTests(unittest.TestCase):
         self.assertIsNotNone(run_script, "CI aggregate has no executable result gate")
         shell_script = textwrap.dedent(run_script.group("script"))
         environment = os.environ.copy()
-        environment.update({env_name: "success" for env_name in result_envs.values()})
+        environment["GITHUB_EVENT_NAME"] = "pull_request"
+        environment.update(
+            {
+                env_name: "success"
+                for lane, env_name in result_envs.items()
+                if lane != "ops-prioritize-main"
+            }
+        )
+        environment[result_envs["ops-prioritize-main"]] = "skipped"
         success = subprocess.run(
             ["bash", "-e", "-c", shell_script],
             capture_output=True,
@@ -301,7 +314,8 @@ class RealServerFixtureGateTests(unittest.TestCase):
         )
         self.assertEqual(success.returncode, 0, success.stdout + success.stderr)
 
-        environment[result_envs[needed_lanes[0]]] = "failure"
+        failed_lane = next(lane for lane in needed_lanes if lane != "ops-prioritize-main")
+        environment[result_envs[failed_lane]] = "failure"
         failure = subprocess.run(
             ["bash", "-e", "-c", shell_script],
             capture_output=True,
