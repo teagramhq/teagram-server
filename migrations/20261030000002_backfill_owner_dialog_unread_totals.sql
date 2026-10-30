@@ -3,7 +3,9 @@
 -- New accounts initialize both totals in the users trigger.
 -- atlas:txmode none
 
-DO $migration$
+CREATE OR REPLACE PROCEDURE public.backfill_owner_dialog_unread_totals()
+LANGUAGE plpgsql
+AS $procedure$
 DECLARE
     last_user_id BIGINT := 0;
     batch_user_ids BIGINT[];
@@ -30,4 +32,8 @@ BEGIN
         last_user_id := batch_user_ids[array_length(batch_user_ids, 1)];
     END LOOP;
 END
-$migration$;
+$procedure$;
+
+CALL public.backfill_owner_dialog_unread_totals();
+
+DROP PROCEDURE public.backfill_owner_dialog_unread_totals();
