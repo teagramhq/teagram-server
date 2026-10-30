@@ -43,6 +43,16 @@ private_dir() {
   [[ -d "$path" && ! -L "$path" && "$(stat -c '%u:%a' -- "$path")" == "$EXPECTED_ROOT_UID:700" ]]
 }
 
+safe_state_dir() {
+  local path=$1 owner mode
+  [[ -d "$path" && ! -L "$path" ]] || return 1
+  owner=$(stat -c '%u' -- "$path") || return 1
+  [[ "$owner" == "$EXPECTED_ROOT_UID" ]] || return 1
+  mode=$(stat -c '%a' -- "$path") || return 1
+  [[ "$mode" =~ ^[0-7]{3,4}$ ]] || return 1
+  (( (8#$mode & 0022) == 0 ))
+}
+
 file_sha256() {
   local output
   output=$(sha256sum -- "$1") || return 1
@@ -247,7 +257,7 @@ fi
 [[ "${OPS_SHA:-}" =~ ^[0-9a-f]{40}$ ]] || { fail 'reviewed operation SHA is invalid'; exit 64; }
 [[ "$(realpath -e -- "$REPO")" == "$REPO" ]] || { fail 'live checkout is missing or symlinked'; exit 1; }
 cd "$REPO" || { fail 'cannot enter the live checkout'; exit 1; }
-private_dir "$STATE_DIR" || { fail 'deployment state directory failed ownership or mode checks'; exit 1; }
+safe_state_dir "$STATE_DIR" || { fail 'deployment state directory failed ownership or mode checks'; exit 1; }
 private_file "$ENV_FILE" || { fail 'live .env is not a root-owned mode-0600 regular file'; exit 1; }
 private_file "$ENV_RECORD" || { fail 'verified .env record is not a root-owned mode-0600 regular file'; exit 1; }
 private_file "$RUNNER" || { fail 'reviewed rollout runner is unavailable or unsafe'; exit 1; }
