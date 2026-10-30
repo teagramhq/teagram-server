@@ -94,6 +94,53 @@ class UpdateTurnstileSigninTests(unittest.TestCase):
         self.assertEqual(backup.read_bytes(), self.environment)
         self.assertEqual(backup.stat().st_mode & 0o777, 0o600)
 
+    def test_first_use_fsyncs_backup_parent_before_writing_snapshot(self) -> None:
+        backup_dir = self.root / "first-use-backups"
+        backup = backup_dir / "env.before-turnstile-first-use"
+        parent_metadata = self.root.stat()
+        real_fsync = os.fsync
+        real_link = os.link
+        parent_synced = False
+
+        def record_parent_fsync(descriptor: int) -> None:
+            nonlocal parent_synced
+            metadata = os.fstat(descriptor)
+            if (
+                stat.S_ISDIR(metadata.st_mode)
+                and (metadata.st_dev, metadata.st_ino)
+                == (parent_metadata.st_dev, parent_metadata.st_ino)
+            ):
+                parent_synced = True
+            real_fsync(descriptor)
+
+        def require_parent_sync_before_link(*args: object, **kwargs: object) -> None:
+            self.assertTrue(parent_synced, "backup parent was not fsynced before snapshot publication")
+            real_link(*args, **kwargs)
+
+        with (
+            mock.patch.object(update_turnstile_signin.os, "fsync", side_effect=record_parent_fsync),
+            mock.patch.object(update_turnstile_signin.os, "link", side_effect=require_parent_sync_before_link),
+            mock.patch.dict(
+                os.environ,
+                {
+                    "ROLLOUT_RUNNER_ADDED_ENV": ENV_NAME,
+                    "ROLLOUT_RUNNER_CHANGED_ENV": ENV_NAME,
+                },
+                clear=True,
+            ),
+        ):
+            result = update_turnstile_signin.update_env_file(
+                self.env_file,
+                backup_dir,
+                "true",
+                backup,
+            )
+
+        self.assertEqual(result["backup"], str(backup))
+        self.assertTrue(backup_dir.is_dir())
+        self.assertEqual(backup.read_bytes(), self.environment)
+        self.assertEqual(self.env_file.read_bytes(), self.environment + f"{ENV_NAME}=true\n".encode())
+
     def test_explicit_backup_path_does_not_replace_an_existing_file(self) -> None:
         backup = self.backup_dir / "env.before-turnstile-existing"
         backup.write_bytes(b"preserve this backup")

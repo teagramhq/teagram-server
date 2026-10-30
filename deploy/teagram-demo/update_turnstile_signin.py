@@ -48,6 +48,14 @@ def require_directory(path: pathlib.Path, expected_mode: int | None = None) -> o
     return metadata
 
 
+def fsync_directory(path: pathlib.Path) -> None:
+    descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
 def atomic_write(
     path: pathlib.Path,
     content: bytes,
@@ -77,11 +85,7 @@ def atomic_write(
                 temporary.unlink()
 
     def sync_parent() -> None:
-        directory_fd = os.open(path.parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
-        try:
-            os.fsync(directory_fd)
-        finally:
-            os.close(directory_fd)
+        fsync_directory(path.parent)
 
     replaced = False
     try:
@@ -110,6 +114,10 @@ def backup_file(
             directory.mkdir(mode=0o700)
         except OSError:
             fail("backup-directory-create")
+        try:
+            fsync_directory(directory.parent)
+        except OSError:
+            fail("backup-directory-sync")
     require_directory(directory, 0o700)
     if backup_path is not None and backup_path.parent != directory:
         fail("environment-backup-outside-directory")
@@ -139,11 +147,7 @@ def backup_file(
         published = True
         temporary.unlink()
         temporary = None
-        directory_fd = os.open(directory, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
-        try:
-            os.fsync(directory_fd)
-        finally:
-            os.close(directory_fd)
+        fsync_directory(directory)
         saved_metadata = require_file(backup, 0o600)
         if saved_metadata.st_uid != metadata.st_uid or backup.read_bytes() != content:
             fail("environment-backup-verification")
