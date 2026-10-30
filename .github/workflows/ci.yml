@@ -1443,6 +1443,8 @@ jobs:
           grep --fixed-strings --quiet "name: rustfs-init-${rustfs_init_digest:0:16}" "$RUNNER_TEMP/k8s-prod.yaml"
 
       - name: Check public WebSocket ingress invariants
+        env:
+          KUBECONFIG: ${{ runner.temp }}/k3s.yaml
         run: bash deploy/k8s/test-public-websocket-component.sh
 
       - name: Remove k3s manifest-check server
@@ -1558,7 +1560,41 @@ jobs:
             exit 1
           fi
           docker exec teagram-k3s kubectl wait --for=condition=Ready node --all --timeout=180s
-          docker exec --interactive teagram-k3s k3s ctr images import - < "$RUNNER_TEMP/k8s-images.tar"
+          docker cp "$RUNNER_TEMP/k8s-images.tar" teagram-k3s:/tmp/k8s-images.tar
+          docker exec teagram-k3s mkdir -p /var/lib/rancher/k3s/agent/images
+          docker exec teagram-k3s mv /tmp/k8s-images.tar \
+            /var/lib/rancher/k3s/agent/images/k8s-images.tar
+          required_images=(
+            ghcr.io/teagramhq/teagramd:ci
+            ghcr.io/teagramhq/link-edge-landing:ci
+            ghcr.io/teagramhq/link-edge-selector:ci
+            ghcr.io/teagramhq/teagram-migrations:ci
+            ghcr.io/teagramhq/teagramd-mc-init:ci
+          )
+          all_images_present=false
+          for attempt in $(seq 1 90); do
+            image_list="$(docker exec teagram-k3s k3s crictl images --output json 2>/dev/null || true)"
+            if [[ -n "$image_list" ]]; then
+              all_images_present=true
+              for image in "${required_images[@]}"; do
+                if ! jq --exit-status --arg image "$image" \
+                  'any(.images[]?; any(.repoTags[]?; . == $image))' \
+                  <<<"$image_list" >/dev/null; then
+                  all_images_present=false
+                  break
+                fi
+              done
+              if [[ "$all_images_present" == true ]]; then
+                break
+              fi
+            fi
+            sleep 2
+          done
+          if [[ "$all_images_present" != true ]]; then
+            echo "K3s did not import all workload images within 180 seconds" >&2
+            docker exec teagram-k3s k3s crictl images >&2 || true
+            exit 1
+          fi
           docker cp teagram-k3s:/etc/rancher/k3s/k3s.yaml "$RUNNER_TEMP/k3s.yaml"
           export KUBECONFIG="$RUNNER_TEMP/k3s.yaml"
           kubectl wait --for=condition=Ready node --all --timeout=180s

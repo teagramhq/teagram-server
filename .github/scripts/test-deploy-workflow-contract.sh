@@ -142,6 +142,8 @@ check_ci_contract() {
     ci_fail 'the manifest check must wait for K3s to register a node before kubectl wait'
   [[ "$manifest_start" != *"k3s kubectl"* ]] ||
     ci_fail 'the manifest check must not invoke kubectl through the k3s CLI'
+  [[ "$(ci_query '.jobs."check-k8s-manifests".steps[] | select(.name == "Check public WebSocket ingress invariants") | .env.KUBECONFIG')" == '${{ runner.temp }}/k3s.yaml' ]] ||
+    ci_fail 'the public WebSocket invariant check must use the job-local k3s API'
 
   deploy_start="$(ci_query '.jobs."test-k8s-deploy".steps[] | select(.name == "Start the pinned k3s server with production disable flags") | .run')"
   [[ "$deploy_start" == *"docker exec teagram-k3s kubectl get nodes"* &&
@@ -149,6 +151,12 @@ check_ci_contract() {
     ci_fail 'the deployment check must invoke kubectl directly in its k3s container'
   [[ "$deploy_start" == *"kubectl get nodes --no-headers 2>/dev/null | grep --quiet ."* ]] ||
     ci_fail 'the deployment check must wait for K3s to register a node before kubectl wait'
+  [[ "$deploy_start" == *"docker exec teagram-k3s mv /tmp/k8s-images.tar"* &&
+     "$deploy_start" == *"/var/lib/rancher/k3s/agent/images/k8s-images.tar"* &&
+     "$deploy_start" == *"k3s crictl images --output json"* ]] ||
+    ci_fail 'the deployment check must use K3s image auto-import and verify the imported images'
+  [[ "$deploy_start" != *"teagram-k3s k3s ctr"* ]] ||
+    ci_fail 'the deployment check must not use the unavailable k3s ctr subcommand'
   [[ "$deploy_start" != *"teagram-k3s k3s kubectl"* ]] ||
     ci_fail 'the deployment check must not invoke kubectl through the k3s CLI'
 }
