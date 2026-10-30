@@ -42,7 +42,7 @@ x-teagramd: &teagramd
     TG_TURNSTILE_SITE_KEY: ${TEAGRAM_DEMO_TURNSTILE_SITE_KEY:?set TEAGRAM_DEMO_TURNSTILE_SITE_KEY in deploy/teagram-demo/.env}
     TG_TURNSTILE_SECRET_KEY_FILE: /run/secrets/teagram_demo_turnstile
     TG_TURNSTILE_TEST_MODE: "false"
-    TG_TURNSTILE_HOSTNAMES: demo.teagram.io
+    TG_TURNSTILE_HOSTNAMES: web.teagram.io,demo.teagram.io
     TG_TURNSTILE_QA_BYPASS_TOKEN_FILE: /run/secrets/teagram_demo_turnstile_qa_bypass
     TG_BLOB_DIR: /var/lib/teagramd-blobs
     GOMAXPROCS: "1"

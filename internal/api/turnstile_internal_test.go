@@ -307,6 +307,24 @@ func TestTurnstileVerifierUsesConfiguredHostnameAllowlist(t *testing.T) {
 	}
 }
 
+func TestTurnstileVerifierAcceptsDemoAndWebHostnames(t *testing.T) {
+	for _, hostname := range []string{"web.teagram.io", "demo.teagram.io"} {
+		t.Run(hostname, func(t *testing.T) {
+			t.Setenv("TG_TURNSTILE_HOSTNAMES", "web.teagram.io,demo.teagram.io")
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				writeTurnstileBody(t, w, `{"success":true,"action":"signup","hostname":"`+hostname+`"}`)
+			}))
+			defer server.Close()
+
+			verifier := newTurnstileVerifier("private-secret")
+			verifier.endpoint = server.URL
+			if err := verifier.Verify(context.Background(), "token", "signup", ""); err != nil {
+				t.Fatalf("Verify with configured hostname %q: %v", hostname, err)
+			}
+		})
+	}
+}
+
 func TestTurnstileVerifierAcceptsQABypassForSignupWithoutLoggingToken(t *testing.T) {
 	const bypassToken = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 	var logOutput bytes.Buffer

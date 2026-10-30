@@ -79,7 +79,7 @@ setup and deploy scripts provision a separate random QA bypass token at
 `/var/lib/teagram-demo/secrets/turnstile-qa-bypass-token`; neither token is
 printed. Both files are root-owned, group-readable only by runtime gid 65532,
 and mounted only into teagramd. The demo sets
-`TG_TURNSTILE_HOSTNAMES=demo.teagram.io` and
+`TG_TURNSTILE_HOSTNAMES=web.teagram.io,demo.teagram.io` and
 `TG_ADVERTISE_DEMO_GUEST_SIGN_UP=true` so web.teagram.io advertises demo signup.
 
 For an authorized browser QA run, a test harness can set the demo QA token in

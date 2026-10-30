@@ -83,7 +83,7 @@ Configuration is read from environment variables in `internal/config/config.go`:
 | `TG_TURNSTILE_SITE_KEY` | *(unset)* | Public Cloudflare Turnstile widget key. Required together with one secret source to enable the `auth.signUp` challenge |
 | `TG_TURNSTILE_SECRET_KEY` | *(unset)* | Private Siteverify key supplied directly through the environment; prefer the file form |
 | `TG_TURNSTILE_SECRET_KEY_FILE` | *(unset)* | Preferred file containing the Siteverify key. The gate stays disabled when both secret sources and the site key are unset |
-| `TG_TURNSTILE_HOSTNAMES` | `web.teagram.io` | Comma-separated DNS hostnames accepted in successful Siteverify responses; the demo sets `demo.teagram.io` |
+| `TG_TURNSTILE_HOSTNAMES` | `web.teagram.io` | Comma-separated DNS hostnames accepted in successful Siteverify responses; the demo sets `web.teagram.io,demo.teagram.io` |
 | `TG_TURNSTILE_TEST_MODE` | `false` | Local/CI-only mode. Allows the gate to stay off or accepts Cloudflare's official test key pairs; rejects real secrets and advertised `*.teagram.io` hosts |
 | `TG_TURNSTILE_QA_BYPASS_TOKEN_FILE` | *(unset)* | Optional demo-only signup bypass token file. Allowed only when the configured deployment hostname is `demo.teagram.io`; never set it on production |
 | `TG_TURNSTILE_SIGNIN_ENABLED` | `false` | Also challenge username sign-in at `auth.sendCode`; requires a valid site key and Siteverify secret |
@@ -187,8 +187,9 @@ Turnstile is disabled by default. Set a site key and a Siteverify secret to
 challenge each `auth.signUp`; users complete a Cloudflare challenge and Cloudflare
 processes its token. The server requires the `signup` action and a hostname from
 `TG_TURNSTILE_HOSTNAMES` in a successful Siteverify response before charging the
-sign-up IP limit. The hostname defaults to `web.teagram.io`; set it to
-`demo.teagram.io` for the demo deployment.
+sign-up IP limit. The hostname defaults to `web.teagram.io`; the demo deployment
+allows both `web.teagram.io` and `demo.teagram.io` so either supported client
+origin can complete verification.
 
 `TG_TURNSTILE_TEST_MODE=true` is for local and CI stacks. With credentials
 unset, Turnstile stays disabled and registration policy is unchanged. With
@@ -196,8 +197,10 @@ credentials set, startup accepts only Cloudflare's official test sitekey and
 secret pairs and rejects any advertised `*.teagram.io` hostname. Cloudflare's
 [always-pass and always-block test keys](https://developers.cloudflare.com/turnstile/troubleshooting/testing/)
 exercise successful and rejected challenge paths without live credentials.
-The local `docker-compose.yml` sets test mode and the `localhost,127.0.0.1`
-hostname allowlist by default.
+The base `docker-compose.yml` keeps test mode off and defaults the hostname
+allowlist to `web.teagram.io` for public deployments. The root `.env.example`
+opts local Compose into test mode explicitly and overrides the allowlist to
+`localhost,127.0.0.1`.
 
 The demo can set `TG_TURNSTILE_QA_BYPASS_TOKEN_FILE` to a root-provisioned
 token file. A matching token bypasses Siteverify only for `auth.signUp`, is

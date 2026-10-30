@@ -805,7 +805,7 @@ demo_render_config() {
     and .services.teagramd.environment.TG_TURNSTILE_SITE_KEY != ""
     and .services.teagramd.environment.TG_TURNSTILE_SECRET_KEY_FILE == "/run/secrets/teagram_demo_turnstile"
     and .services.teagramd.environment.TG_TURNSTILE_TEST_MODE == "false"
-    and .services.teagramd.environment.TG_TURNSTILE_HOSTNAMES == "demo.teagram.io"
+    and .services.teagramd.environment.TG_TURNSTILE_HOSTNAMES == "web.teagram.io,demo.teagram.io"
     and .services.teagramd.environment.TG_TURNSTILE_QA_BYPASS_TOKEN_FILE == "/run/secrets/teagram_demo_turnstile_qa_bypass"
     and (.services.teagramd.networks | keys) == ["backend"]
     and .services.teagramd.networks.backend.ipv4_address == "198.18.130.253"
