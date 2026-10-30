@@ -279,6 +279,23 @@ func TestLoadAllowsQABypassTokenOnlyOnDemoHost(t *testing.T) {
 			t.Fatal("Load did not return the configured demo QA bypass token")
 		}
 	})
+	t.Run("demo host allowing the web origin", func(t *testing.T) {
+		setTurnstileTestEnvironment(t)
+		t.Setenv("TG_TURNSTILE_SITE_KEY", "real-site-key")
+		t.Setenv("TG_TURNSTILE_SECRET_KEY", "real-secret-key")
+		t.Setenv("TG_ADVERTISE_ADDR", "demo.teagram.io:443")
+		t.Setenv("TG_PUBLIC_LINK_PREFIX", "https://demo.teagram.io/")
+		t.Setenv("TG_WEBSOCKET_ALLOWED_ORIGINS", "https://web.teagram.io,https://demo.teagram.io")
+		qaTokenPath := filepath.Join(t.TempDir(), "qa-token")
+		t.Setenv("TG_TURNSTILE_QA_BYPASS_TOKEN_FILE", qaTokenPath)
+		if err := os.WriteFile(qaTokenPath, []byte(strings.Repeat("a", 64)), 0o600); err != nil {
+			t.Fatal(err)
+		}
+
+		if _, err := config.Load(discardLog()); err != nil {
+			t.Fatalf("Load demo QA bypass config with web origin: %v", err)
+		}
+	})
 
 	for _, host := range []string{"", "staging.example.test:443"} {
 		t.Run("non-demo "+host, func(t *testing.T) {

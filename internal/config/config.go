@@ -2080,7 +2080,7 @@ func validTurnstileHostname(hostname string) bool {
 }
 
 func hasPublicTeagramHostname(productionOnly bool) bool {
-	for _, hostname := range configuredTeagramHostnames() {
+	for _, hostname := range effectivePublicTeagramHostnames() {
 		if hostname == "" || !strings.HasSuffix(hostname, ".teagram.io") && hostname != "teagram.io" {
 			continue
 		}
@@ -2093,16 +2093,6 @@ func hasPublicTeagramHostname(productionOnly bool) bool {
 
 func hasDemoTeagramHostname() bool {
 	return slices.Contains(effectivePublicTeagramHostnames(), "demo.teagram.io")
-}
-
-func configuredTeagramHostnames() []string {
-	hostnames := effectivePublicTeagramHostnames()
-	for _, name := range []string{"TG_WEBSOCKET_ALLOWED_ORIGINS", "TG_PUBLIC_WEBSOCKET_ALLOWED_ORIGINS"} {
-		for origin := range strings.SplitSeq(os.Getenv(name), ",") {
-			hostnames = append(hostnames, configuredHostname(origin))
-		}
-	}
-	return hostnames
 }
 
 func effectivePublicTeagramHostnames() []string {
