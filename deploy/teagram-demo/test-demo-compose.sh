@@ -141,10 +141,7 @@ EDGE_CONFIG_FIXTURE="$TMP_DIR/restrictive-checkout/deploy/teagram-demo"
 )
 [[ "$(stat -c '%a' "$EDGE_CONFIG_FIXTURE/nginx-config")" == 700 ]]
 [[ "$(stat -c '%a' "$EDGE_CONFIG_FIXTURE/nginx-config/nginx.conf")" == 600 ]]
-(
-  DEMO_SCRIPT_DIR="$EDGE_CONFIG_FIXTURE"
-  demo_prepare_edge_config_permissions
-)
+DEMO_SCRIPT_DIR="$EDGE_CONFIG_FIXTURE" demo_prepare_edge_config_permissions
 [[ "$(stat -c '%a' "$EDGE_CONFIG_FIXTURE/nginx-config")" == 755 ]]
 [[ "$(stat -c '%a' "$EDGE_CONFIG_FIXTURE/nginx-config/nginx.conf")" == 644 ]]
 
