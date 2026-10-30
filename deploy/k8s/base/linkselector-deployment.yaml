@@ -33,6 +33,18 @@ spec:
             - "http://web:8080"
             - "-landing-upstream"
             - "http://linklanding:8082"
+          env:
+            - name: TG_INVITE_WEB_SIGNUP_URL
+              valueFrom:
+                configMapKeyRef:
+                  name: link-edge-runtime
+                  key: TG_INVITE_WEB_SIGNUP_URL
+            - name: TG_INVITE_DESKTOP_URL
+              valueFrom:
+                configMapKeyRef:
+                  name: link-edge-runtime
+                  key: TG_INVITE_DESKTOP_URL
+                  optional: true
           ports:
             - name: http
               containerPort: 8081

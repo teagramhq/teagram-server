@@ -11,6 +11,9 @@ configMapGenerator:
     literals:
       - TG_PUBLIC_LINK_PREFIX=https://links.example.test/
       - TG_ADVERTISE_ADDR=127.0.0.1:12443
+  - name: link-edge-runtime
+    literals:
+      - TG_INVITE_WEB_SIGNUP_URL=https://web.example.test/signup
 
 images:
   - name: ghcr.io/teagramhq/teagramd
