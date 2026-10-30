@@ -134,6 +134,9 @@ func TestBotUpdatesReadIncomingTextAndKeepConfirmedOffsetMonotonic(t *testing.T)
 	if len(events) != 2 || events[0].Pts != int64(incomingPts) || events[1].Pts != int64(afterGapPts) || events[0].Type != store.EventNewMessage || events[1].Type != store.EventNewMessage {
 		t.Fatalf("bot events = %+v, want incoming texts at pts %d and %d around the bot-send gap", events, incomingPts, afterGapPts)
 	}
+	if page.NextOffset != int64(afterGapPts+1) {
+		t.Fatalf("bot event scan offset = %d, want %d after the last event", page.NextOffset, afterGapPts+1)
+	}
 	if got := events[0]; got.Message.OwnerID != bot.ID || got.Message.LocalID != events[0].LocalID || got.Message.FromID != human.ID || got.Message.Text != "hello" || got.Sender.ID != human.ID || got.Sender.Kind != store.UserKindHuman || got.Sender.FirstName != human.FirstName {
 		t.Fatalf("bot event projection = %+v, want message and sender hydrated in the event query", got)
 	}

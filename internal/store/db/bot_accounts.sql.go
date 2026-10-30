@@ -76,7 +76,7 @@ WITH event_window AS MATERIALIZED (
            e.pts,
            e.type,
            e.local_id,
-           (MAX(e.pts)::bigint + 1::bigint)::bigint AS next_offset
+           (MAX(e.pts) OVER () + 1::bigint)::bigint AS next_offset
     FROM event_window AS e
 )
 SELECT e.pts,
