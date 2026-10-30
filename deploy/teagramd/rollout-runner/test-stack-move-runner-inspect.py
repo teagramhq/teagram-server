@@ -746,6 +746,20 @@ class MoveSecretMigrationTest(unittest.TestCase):
             runner.inspect_target_contract(
                 target_config, source_service["environment"]["TG_BLOB_DIR"],
             )
+            unsafe_report_volume = copy.deepcopy(target_config)
+            unsafe_report_volume["volumes"][runner.TARGET_REPORT_VOLUME]["driver_opts"] = {
+                "type": "none", "o": "bind", "device": "/root",
+            }
+            with self.assertRaisesRegex(runner.MoveError, "Docker-managed local storage"):
+                runner.inspect_target_contract(
+                    unsafe_report_volume, source_service["environment"]["TG_BLOB_DIR"],
+                )
+            unreviewed_volume = copy.deepcopy(target_config)
+            unreviewed_volume["volumes"]["unreviewed"] = {"name": "teagram_unreviewed"}
+            with self.assertRaisesRegex(runner.MoveError, "named volumes do not match"):
+                runner.inspect_target_contract(
+                    unreviewed_volume, source_service["environment"]["TG_BLOB_DIR"],
+                )
             self.assertEqual(
                 pathlib.Path(target_config["secrets"]["teagramd_blob_secret_key"]["file"]),
                 staged_secret.resolve(),

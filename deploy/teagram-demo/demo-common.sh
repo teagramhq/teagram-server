@@ -50,6 +50,28 @@ demo_fail() {
   demo_fail 'proxy configuration source is missing'
   return 1
 }
+
+demo_prepare_edge_config_permissions() {
+  local config_dir="$DEMO_SCRIPT_DIR/nginx-config"
+  local config_file="$config_dir/nginx.conf"
+  [[ -d "$config_dir" && ! -L "$config_dir" ]] || {
+    demo_fail 'edge configuration directory is missing or unsafe'
+    return 1
+  }
+  [[ -f "$config_file" && ! -L "$config_file" ]] || {
+    demo_fail 'edge configuration file is missing or unsafe'
+    return 1
+  }
+  chmod 0755 "$config_dir" || {
+    demo_fail 'edge configuration directory permissions could not be prepared'
+    return 1
+  }
+  chmod 0644 "$config_file" || {
+    demo_fail 'edge configuration file permissions could not be prepared'
+    return 1
+  }
+}
+
 TEAGRAM_DEMO_HAPROXY_CONFIG_SHA256=$(
   sha256sum -- "$DEMO_SCRIPT_DIR/haproxy.cfg" "$DEMO_SCRIPT_DIR/render-haproxy-config.py" |
     awk '{print $1}' | sha256sum | awk '{print $1}'
