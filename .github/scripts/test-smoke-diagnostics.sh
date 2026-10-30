@@ -2297,6 +2297,10 @@ mkdir -p "$busybox_mock_bin" "$busybox_reader_crash_bin" "$runner_temp"
 cat >"$busybox_mock_bin/docker" <<'EOF'
 #!/usr/bin/env bash
 set -eu
+if [[ "${1:-}" == pull ]]; then
+  [[ "${2:-}" == mirror.gcr.io/library/node:24-alpine3.22@sha256:191c9f0080fcbbc6547a85dc0ff7988072214a355aabdc1d2ec55a7dae5eea8a ]] || exit 95
+  exit 0
+fi
 [[ "${1:-}" == run ]] || exit 99
 printf '%s\n' "$@" >"${FAKE_DOCKER_ARGS_FILE:?}"
 phase_dir=''
