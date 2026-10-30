@@ -125,7 +125,9 @@ export MOCK_ENV_FILE="$REPO_FIXTURE/.env" MOCK_ENV_RECORD="$REPO_FIXTURE/.state/
 export MOCK_BACKUP="$ROOT_FIXTURE/.env.main-2478-pre-key-exchange-20261025T170009Z"
 export MOCK_DEPLOY_LOCK="$TMP/deploy.lock"
 export MOCK_SYNC_COUNT="$TMP/sync-count" MOCK_REAL_SYNC="$REAL_SYNC" MOCK_SYNC_FAIL_ON=
-export MOCK_SIGNAL_ON_SYNC= MOCK_SIGNAL=
+MOCK_SIGNAL_ON_SYNC=''
+MOCK_SIGNAL=''
+export MOCK_SIGNAL_ON_SYNC MOCK_SIGNAL
 
 setup_fixture() {
   printf 'FIXTURE_PRIVATE_VALUE=do-not-print-fixture-value\nTG_LOG_LOGIN_CODES=false\n' > "$MOCK_ENV_FILE"
