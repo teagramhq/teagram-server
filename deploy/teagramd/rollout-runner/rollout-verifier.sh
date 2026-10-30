@@ -1078,8 +1078,9 @@ snapshot_from_json() {
   # Config.Env also includes image ENV defaults, which are covered by image identity.
   # Keep configured Compose keys in the digest even when their value matches an
   # image default; a later image may change that default while Compose pins its value.
-  # Empty mapped key-exchange values use the binary defaults, so they stay
-  # equivalent to an absent variable; configured values remain pinned.
+  # Empty key-exchange mappings use binary defaults. The reviewed tailnet zero
+  # default is equivalent to the previous empty mapping; configured values
+  # remain subject to the Compose and container environment checks.
   compose_env_names='[]'
   if [ "$compose_source" = selected-compose-render ]; then
     compose_env_names=$(printf '%s' "$compose_json" | jq -ce '
@@ -1112,6 +1113,7 @@ snapshot_from_json() {
         | map(select(type != "string" or (IN(
             "TG_RATE_LIMIT_KEY_EXCHANGE_IP=",
             "TG_RATE_LIMIT_KEY_EXCHANGE_IP_TAILNET=",
+            "TG_RATE_LIMIT_KEY_EXCHANGE_IP_TAILNET=0",
             "TG_RATE_LIMIT_KEY_EXCHANGE_IP_WINDOW=",
             "TG_KEY_EXCHANGE_PER_CONNECTION=",
             "TG_KEY_EXCHANGE_GLOBAL_RATE=",
@@ -1220,15 +1222,16 @@ snapshot_from_json() {
         ((.protocol // "tcp") == "tcp") and
         ((.mode // "") == "" or (.mode // "") == "ingress") and
         ((keys - ["target", "published", "host_ip", "protocol", "mode"]) | length) == 0;
-      def empty_key_exchange_default:
-        (.key | IN(
+      def approved_key_exchange_default:
+        (.key == "TG_RATE_LIMIT_KEY_EXCHANGE_IP_TAILNET" and .value == "0") or
+        ((.key | IN(
           "TG_RATE_LIMIT_KEY_EXCHANGE_IP",
           "TG_RATE_LIMIT_KEY_EXCHANGE_IP_TAILNET",
           "TG_RATE_LIMIT_KEY_EXCHANGE_IP_WINDOW",
           "TG_KEY_EXCHANGE_PER_CONNECTION",
           "TG_KEY_EXCHANGE_GLOBAL_RATE",
           "TG_KEY_EXCHANGE_GLOBAL_BURST"
-        )) and .value == "";
+        )) and .value == "");
       def empty_user_invite_quota_default:
         .key == "TG_USER_INVITE_QUOTA" and .value == "";
       # Compose includes extension anchors in its rendered output. Their
@@ -1247,9 +1250,9 @@ snapshot_from_json() {
           .TG_TURNSTILE_SITE_KEY, .TG_TURNSTILE_SECRET_KEY_FILE,
           .TG_TURNSTILE_SIGNIN_ENABLED)
       end
-      # Empty key-exchange mappings use binary defaults; active values remain
-      # subject to the Compose and container environment checks.
-      | .services[env.ROLLOUT_COMPOSE_SERVICE // "teagramd"].environment |= with_entries(select((empty_key_exchange_default or empty_user_invite_quota_default) | not))
+      # Empty mappings and the reviewed tailnet zero default are normalized;
+      # other values remain subject to the Compose and container checks.
+      | .services[env.ROLLOUT_COMPOSE_SERVICE // "teagramd"].environment |= with_entries(select((approved_key_exchange_default or empty_user_invite_quota_default) | not))
       # Named tailnet changes are verified against .env, resolved Compose, and
       # the inspected container; omit only that named value from config drift.
       | if (any($added[]; . == "TG_RATE_LIMIT_KEY_EXCHANGE_IP_TAILNET") or

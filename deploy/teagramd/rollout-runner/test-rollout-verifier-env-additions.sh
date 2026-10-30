@@ -321,6 +321,35 @@ if ! compare_snapshots \
   cat "$TMP/key-exchange-empty-comparisons.tsv" >&2
   exit 1
 fi
+
+previous_tailnet_default_inspect=$(jq -c \
+  '.Config.Env += ["TG_RATE_LIMIT_KEY_EXCHANGE_IP_TAILNET="]' <<< "$(inspect_json '')")
+previous_tailnet_default_compose=$(jq -c \
+  '.services.teagramd.environment.TG_RATE_LIMIT_KEY_EXCHANGE_IP_TAILNET=""' \
+  <<< "$COMPOSE_JSON")
+previous_tailnet_default=$(snapshot_from_json \
+  "$previous_tailnet_default_inspect" "$previous_tailnet_default_compose" \
+  "$ENV_FILE" "$OVERRIDE_FILE" selected-compose-render baseline)
+zero_tailnet_default_inspect=$(jq -c \
+  '.Config.Env += ["TG_RATE_LIMIT_KEY_EXCHANGE_IP_TAILNET=0"]' <<< "$(inspect_json '')")
+zero_tailnet_default_compose=$(jq -c \
+  '.services.teagramd.environment.TG_RATE_LIMIT_KEY_EXCHANGE_IP_TAILNET="0"' \
+  <<< "$COMPOSE_JSON")
+zero_tailnet_default=$(snapshot_from_json \
+  "$zero_tailnet_default_inspect" "$zero_tailnet_default_compose" \
+  "$ENV_FILE" "$OVERRIDE_FILE" selected-compose-render target)
+printf '%s\n' "$previous_tailnet_default" > "$TMP/tailnet-default-baseline.snapshot.json"
+printf '%s\n' "$zero_tailnet_default" > "$TMP/tailnet-default-target.snapshot.json"
+if ! compare_snapshots \
+  "$TMP/tailnet-default-baseline.snapshot.json" "$TMP/tailnet-default-target.snapshot.json" \
+  sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb \
+  "$TMP/tailnet-default-comparisons.tsv"; then
+  printf '%s\n' 'FAIL zero tailnet default changed the prior empty baseline' >&2
+  cat "$TMP/tailnet-default-comparisons.tsv" >&2
+  exit 1
+fi
+printf '%s\n' 'PASS zero tailnet default matches the prior empty value in full baseline comparison'
+
 image_env_inspect=$(jq -c \
   --arg image_id sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc \
   --arg container_id cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc '
