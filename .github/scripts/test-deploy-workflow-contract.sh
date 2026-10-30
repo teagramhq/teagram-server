@@ -143,8 +143,8 @@ SH
   # These overrides are consumed by the extracted workflow child process.
   # shellcheck disable=SC2030,SC2031
   export PATH="$tmp:$PATH" GITHUB_REPOSITORY=test/server
-  export RUNNER_TEMP="$tmp/runner"
-  mkdir -p "$RUNNER_TEMP"
+  local runner_temp="$tmp/runner"
+  mkdir -p "$runner_temp"
   export RUN_HEAD_SHA=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
   export RUN_ID=111111111
   export TEST_LATEST_SHA=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
@@ -164,30 +164,30 @@ SH
       expected="$TEST_LATEST_SHA"
     fi
     : > "$GITHUB_OUTPUT"
-    bash -euo pipefail "$tmp/target.sh" > /dev/null
+    RUNNER_TEMP="$runner_temp" bash -euo pipefail "$tmp/target.sh" > /dev/null
     local expected_run_id="$RUN_ID"
     if [[ "$status" == ahead || "$status" == identical ]]; then
       expected_run_id="$TEST_LATEST_RUN_ID"
     fi
     [[ "$(cat "$GITHUB_OUTPUT")" == $'sha='"$expected"$'\nci_run_id='"$expected_run_id" ]] ||
       fail "workflow_run must select a successful descendant and otherwise retain head_sha ($status)"
-    [[ "$(cat "$RUNNER_TEMP/demo-deploy-target.json")" == '{"deploy_sha":"'"$expected"'","ci_run_id":"'"$expected_run_id"'"}' ]] ||
+    [[ "$(cat "$runner_temp/demo-deploy-target.json")" == '{"deploy_sha":"'"$expected"'","ci_run_id":"'"$expected_run_id"'"}' ]] ||
       fail "workflow_run must write the selected SHA and successful CI run to the demo handoff ($status)"
   done
   TEST_COMPARISON=api-error
-  if bash -euo pipefail "$tmp/target.sh" > /dev/null; then
+  if RUNNER_TEMP="$runner_temp" bash -euo pipefail "$tmp/target.sh" > /dev/null; then
     fail 'a failed forge comparison must fail the deploy'
   fi
   GITHUB_EVENT_NAME=workflow_dispatch
   RUN_HEAD_SHA=''
   : > "$GITHUB_OUTPUT"
-  bash -euo pipefail "$tmp/target.sh" > /dev/null
+  RUNNER_TEMP="$runner_temp" bash -euo pipefail "$tmp/target.sh" > /dev/null
   [[ "$(cat "$GITHUB_OUTPUT")" == $'sha='"$TEST_LATEST_SHA"$'\nci_run_id='"$TEST_LATEST_RUN_ID" ]] ||
     fail 'manual dispatch must select the latest successful CI push head'
-  [[ "$(cat "$RUNNER_TEMP/demo-deploy-target.json")" == '{"deploy_sha":"'"$TEST_LATEST_SHA"'","ci_run_id":"'"$TEST_LATEST_RUN_ID"'"}' ]] ||
+  [[ "$(cat "$runner_temp/demo-deploy-target.json")" == '{"deploy_sha":"'"$TEST_LATEST_SHA"'","ci_run_id":"'"$TEST_LATEST_RUN_ID"'"}' ]] ||
     fail 'manual dispatch must write the selected SHA and successful CI run to the demo handoff'
   TEST_LATEST_SHA=null
-  if bash -euo pipefail "$tmp/target.sh" > /dev/null; then
+  if RUNNER_TEMP="$runner_temp" bash -euo pipefail "$tmp/target.sh" > /dev/null; then
     fail 'an invalid successful CI head must fail the deploy'
   fi
 )
