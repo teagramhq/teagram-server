@@ -49,12 +49,27 @@ else
   readonly lint_host=127.0.0.1
 fi
 readonly lint_dsn="postgres://postgres:${password}@${lint_host}:${postgres_port}/migration_lint?sslmode=disable"
+readonly lint_apply_dsn="postgres://postgres:${password}@${postgres_container}:5432/migration_lint?sslmode=disable"
 readonly fresh_dsn="postgres://postgres:${password}@${postgres_container}:5432/migration_fresh?sslmode=disable"
 readonly upgrade_dsn="postgres://postgres:${password}@${postgres_container}:5432/migration_upgrade?sslmode=disable"
+
+apply_migrations() {
+  local migration_dir=$1
+  local database_dsn=$2
+  docker run --rm \
+    --network "$network" \
+    --volume "$migration_dir:/migrations:ro" \
+    "$atlas_apply_image" \
+    migrate apply --dir file:///migrations --url "$database_dsn"
+}
 
 for database in migration_lint migration_fresh migration_upgrade; do
   docker exec "$postgres_container" createdb -U postgres "$database"
 done
+
+mkdir -p "$baseline_dir"
+git -C "$repo_root" archive "$base_ref" migrations | tar -x -C "$baseline_dir"
+chmod -R a+rX "$baseline_dir"
 
 docker run --rm \
   --volume "$repo_root/migrations:/migrations:ro" \
@@ -68,11 +83,20 @@ mapfile -t changed_sql_migrations < <(
     | awk '/\.sql$/ { print }'
 )
 if [ "${#changed_sql_migrations[@]}" -gt 0 ]; then
+  # Atlas lint executes base migrations one statement at a time. Apply the base
+  # with Atlas first, then lint only this PR's files against that schema so
+  # transaction-dependent historical migrations are not replayed outside a tx.
+  apply_migrations "$baseline_dir/migrations" "$lint_apply_dsn"
+  readonly lint_migration_dir="$temp_dir/lint-migrations"
+  mkdir -p "$lint_migration_dir"
+  for migration in "${changed_sql_migrations[@]}"; do
+    cp "$repo_root/$migration" "$lint_migration_dir/"
+  done
+  "$atlas_lint_binary" migrate hash --dir "file://$lint_migration_dir" >/dev/null
   "$atlas_lint_binary" migrate lint \
-    --dir "file://$repo_root/migrations" \
+    --dir "file://$lint_migration_dir" \
     --dev-url "$lint_dsn" \
-    --git-base "$base_ref" \
-    --git-dir "$repo_root"
+    --latest "${#changed_sql_migrations[@]}"
 else
   printf '%s\n' 'Atlas migration lint skipped: no changed SQL migrations.'
 fi
@@ -124,21 +148,8 @@ docker exec "$postgres_container" createdb -U postgres migration_lint_destructiv
 run_atlas_lint_fixture additive pass migration_lint_additive
 run_atlas_lint_fixture destructive reject migration_lint_destructive
 
-apply_migrations() {
-  local migration_dir=$1
-  local database_dsn=$2
-  docker run --rm \
-    --network "$network" \
-    --volume "$migration_dir:/migrations:ro" \
-    "$atlas_apply_image" \
-    migrate apply --dir file:///migrations --url "$database_dsn"
-}
-
 apply_migrations "$repo_root/migrations" "$fresh_dsn"
 
-mkdir -p "$baseline_dir"
-git -C "$repo_root" archive "$base_ref" migrations | tar -x -C "$baseline_dir"
-chmod -R a+rX "$baseline_dir"
 apply_migrations "$baseline_dir/migrations" "$upgrade_dsn"
 
 docker exec "$postgres_container" psql \
