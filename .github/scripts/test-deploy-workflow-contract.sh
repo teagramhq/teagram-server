@@ -52,6 +52,8 @@ ci_query() {
 check_ci_contract() {
   [[ "$(ci_query '.on | keys | sort | join(",")')" == 'merge_group,pull_request,push' ]] ||
     ci_fail 'triggers must be exactly merge_group, pull_request, and push'
+  [[ "$(ci_query '.jobs."check-deploy-workflow".steps[] | select(.name == "Check RPC performance workflow contract") | .env.GOPROXY')" == 'https://proxy.golang.org|direct' ]] ||
+    ci_fail 'the RPC performance contract must fall back to direct downloads when the module proxy fails'
   [[ "$(ci_query '.on.merge_group.types | join(",")')" == 'checks_requested' ]] ||
     ci_fail 'merge-group CI must run when checks are requested'
   [[ "$(ci_query '.on.push.branches | join(",")')" == 'main' ]] ||

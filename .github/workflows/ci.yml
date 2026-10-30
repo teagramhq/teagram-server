@@ -1121,6 +1121,8 @@ jobs:
         run: .github/scripts/test-deploy-workflow-contract.sh
 
       - name: Check RPC performance workflow contract
+        env:
+          GOPROXY: 'https://proxy.golang.org|direct'
         run: .github/scripts/test-perf-workflow-contract.sh
 
       - name: Check main CI queue priority contract
