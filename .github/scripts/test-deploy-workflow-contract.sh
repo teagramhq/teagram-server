@@ -52,7 +52,7 @@ check_ci_contract() {
     ci_fail 'only pull request updates may cancel in-progress CI runs'
   [[ "$(ci_query '.jobs."publish-demo-image".if')" == "\${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}" ]] ||
     ci_fail 'the demo image may publish only from main pushes'
-  [[ "$(ci_query '.jobs."publish-demo-image".needs | sort | join(",")')" == 'browser-acceptance,browser-acceptance-image,ci,ci-main,compose,css,demo-web-artifact,deploy-workflow,docker,e2e-admin,lint,photothumb-runtime,real-server-fixtures,schema-gate-postgres,smoke,sql-lint,sqlc,sticker-bundle,websocket-d1,websocket-permanent-exchange' ]] ||
+  [[ "$(ci_query '.jobs."publish-demo-image".needs | sort | join(",")')" == 'browser-acceptance,browser-acceptance-image,ci,ci-main,compose,css,demo-web-artifact,deploy-workflow,docker,e2e-admin,lint,photothumb-runtime,real-server-fixtures,smoke,sql-lint,sqlc,sticker-bundle,test-migrations,websocket-d1,websocket-permanent-exchange' ]] ||
     ci_fail 'the demo image publish must wait for every CI lane'
   for removed_job in restore-readiness rustfs-transition-qualification mirror-rustfs-qualification-images; do
     [[ "$(ci_query ".jobs | has(\"$removed_job\")")" == 'false' ]] ||
@@ -61,17 +61,29 @@ check_ci_contract() {
   ci_needs="$(ci_query '.jobs.ci.needs | join(",")')"
   [[ "$ci_needs" != *'restore-readiness'* && "$ci_needs" != *'rustfs-transition-qualification'* && "$ci_needs" != *'mirror-rustfs-qualification-images'* ]] ||
     ci_fail 'removed rollout qualification jobs must stay out of the required gate'
-  [[ "$(ci_query '.jobs."schema-gate-postgres".name')" == 'PostgreSQL Atlas schema gate' ]] ||
-    ci_fail 'the Atlas schema gate must remain until its replacement is ready'
-  [[ "$(ci_query '.jobs.ci.needs | join(",")')" == *'schema-gate-postgres'* ]] ||
-    ci_fail 'the required CI gate must retain the Atlas schema gate'
   [[ "$(ci_query '.jobs.ci.needs | join(",")')" == *'demo-web-artifact'* ]] ||
     ci_fail 'the required CI gate must include the pinned demo web artifact build'
+  [[ "$(ci_query '.jobs.ci.needs | join(",")')" == *'test-migrations'* ]] ||
+    ci_fail 'the required CI gate must include the migrations lane'
+  [[ "$(ci_query '.jobs."schema-gate-postgres" // ""')" == '' ]] ||
+    ci_fail 'the obsolete PostgreSQL schema gate must be removed'
+  [[ "$(ci_query '.jobs.ci.needs | join(",")')" != *'schema-gate-postgres'* ]] ||
+    ci_fail 'the required CI gate must not include the obsolete PostgreSQL schema gate'
+  local expected_postgres_image='mirror.gcr.io/library/postgres:18-alpine@sha256:d8703cd7fba306b9fec9268ecedfa8a966846c053036a60e3635791957eb2f66'
+  [[ "$(ci_query '.jobs."test-migrations".env.POSTGRES_IMAGE')" == "$expected_postgres_image" ]] ||
+    ci_fail 'the migrations lane must use the production-pinned PostgreSQL image'
+  [[ "$(yq -r '.services.postgres.image' deploy/teagram-demo/compose.yaml)" == "$expected_postgres_image" ]] ||
+    ci_fail 'the production PostgreSQL image pin changed without updating the migrations lane'
   [[ "$(ci_query '.jobs.ci.steps[] | select(.name == "Require all CI lanes to pass") | .env.DEMO_WEB_ARTIFACT_RESULT')" == '${{ needs.demo-web-artifact.result }}' ]] ||
     ci_fail 'the required CI gate must receive the demo web artifact result'
+  [[ "$(ci_query '.jobs.ci.steps[] | select(.name == "Require all CI lanes to pass") | .env.TEST_MIGRATIONS_RESULT')" == '${{ needs.test-migrations.result }}' ]] ||
+    ci_fail 'the required CI gate must receive the migrations result'
   ci_query '.jobs.ci.steps[] | select(.name == "Require all CI lanes to pass") | .run' |
     grep -Fq '"$DEMO_WEB_ARTIFACT_RESULT" != "success"' ||
     ci_fail 'the required CI gate must reject a failed demo web artifact build'
+  ci_query '.jobs.ci.steps[] | select(.name == "Require all CI lanes to pass") | .run' |
+    grep -Fq '"$TEST_MIGRATIONS_RESULT" != "success"' ||
+    ci_fail 'the required CI gate must reject a failed migrations lane'
   [[ "$(ci_query '.jobs."demo-web-artifact".permissions.contents')" == 'read' ]] ||
     ci_fail 'the demo web artifact build must use read-only repository access'
   [[ "$(ci_query '.jobs."demo-web-artifact".permissions | to_entries | map(.key + "=" + .value) | join(",")')" == 'contents=read' ]] ||
@@ -475,7 +487,7 @@ check_contract() {
   grep -Fq '(( 10#$DEMO_DEPLOY_PORT >= 1 && 10#$DEMO_DEPLOY_PORT <= 65535 ))' <<< "$demo_port_run" ||
     fail 'demo SSH port must be within 1..65535'
   query '.jobs.deploy-demo.steps[] | select(.run // "" | test("(^|\s)ssh\s")) | .run' |
-    grep -Fq 'StrictHostKeyChecking=yes' || fail 'the demo ssh step must verify the host key'
+    grep -F 'StrictHostKeyChecking=yes' >/dev/null || fail 'the demo ssh step must verify the host key'
   [[ "$(query '.jobs.deploy-demo.steps[] | select(.name == "Install the demo deploy key") | .env.DEMO_DEPLOY_SSH_KEY')" == '${{ secrets.DEMO_DEPLOY_SSH_KEY }}' ]] ||
     fail 'the demo job must use its environment-scoped deploy key'
   [[ "$(query '.jobs.deploy-demo.steps[] | select(.name == "Install the demo deploy key") | .env.DEMO_DEPLOY_KNOWN_HOSTS')" == '${{ vars.DEMO_DEPLOY_KNOWN_HOSTS }}' ]] ||

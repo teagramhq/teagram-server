@@ -291,6 +291,12 @@ func (h *handlers) handleSendMediaAfterReplyOnConn(c *mtproto.Conn, r *mtproto.R
 	if err := req.Decode(r.Buf); err != nil {
 		return nil, nil, nil, errMethodNotImpl
 	}
+	if h.uploadsDisabled {
+		switch req.Media.(type) {
+		case *tg.InputMediaUploadedPhoto, *tg.InputMediaUploadedDocument:
+			return nil, nil, nil, errUploadsDisabled
+		}
+	}
 	if r.UserID == 0 {
 		return nil, nil, nil, errAuthKeyUnreg
 	}

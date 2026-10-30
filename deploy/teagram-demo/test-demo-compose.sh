@@ -3,6 +3,7 @@ set -Eeuo pipefail
 
 SCRIPT_DIR=$(cd -P "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 REPO_ROOT=$(cd -P "$SCRIPT_DIR/../.." && pwd)
+unset TG_UPLOADS_DISABLED
 # shellcheck source=deploy/teagram-demo/demo-common.sh
 source "$SCRIPT_DIR/demo-common.sh"
 TMP_DIR=$(mktemp -d)
@@ -20,6 +21,7 @@ TG_LOG_LOGIN_CODES=false
 TG_REGISTRATION=open
 TG_MAX_FILE_BYTES=16777216
 TG_MAX_USER_STORAGE_BYTES=268435456
+TG_UPLOADS_DISABLED=true
 TEAGRAM_DEMO_BLOB_PATH=/srv/teagram-demo-blobs/data
 TEAGRAM_DEMO_TURNSTILE_SITE_KEY=fixture-site-key
 ENV
@@ -34,7 +36,7 @@ compose=(
   --project-name teagram-demo
   --file "$SCRIPT_DIR/compose.yaml"
 )
-env -u COMPOSE_FILE -u COMPOSE_PROJECT_NAME -u COMPOSE_PROFILES \
+TG_UPLOADS_DISABLED=false env -u COMPOSE_FILE -u COMPOSE_PROJECT_NAME -u COMPOSE_PROFILES \
   -u TG_UPLOAD_MAX_BYTES -u TG_RATE_LIMIT_UPLOAD_BYTES \
   -u TEAGRAM_DEMO_TURNSTILE_SITE_KEY -u TEAGRAM_DEMO_TURNSTILE_SECRET_KEY_FILE \
   "${compose[@]}" config --format json > "$TMP_DIR/target.json"
@@ -99,8 +101,10 @@ jq -e \
   and .services.teagramd.environment.TG_MAX_USER_STORAGE_BYTES == "268435456"
   and .services.teagramd.environment.TG_UPLOAD_MAX_BYTES == "512000"
   and .services.teagramd.environment.TG_RATE_LIMIT_UPLOAD_BYTES == "20971520"
+  and .services.teagramd.environment.TG_UPLOADS_DISABLED == "true"
   and .services["teagramd-next"].environment.TG_UPLOAD_MAX_BYTES == "512000"
   and .services["teagramd-next"].environment.TG_RATE_LIMIT_UPLOAD_BYTES == "20971520"
+  and .services["teagramd-next"].environment.TG_UPLOADS_DISABLED == "true"
   and .services.teagramd.environment.TG_WEBSOCKET_LISTEN_ADDR == ":2446"
   and .services.teagramd.environment.TG_WEBSOCKET_ALLOWED_ORIGINS == "https://web.teagram.io,https://demo.teagram.io"
   and .services["teagramd-next"].environment.TG_WEBSOCKET_ALLOWED_ORIGINS == "https://web.teagram.io,https://demo.teagram.io"
@@ -430,6 +434,8 @@ jq -e '
   and .services.teagramd.environment.HTTPS_PROXY == ""
   and (.services.teagramd.depends_on | keys) == ["migrate"]
   and .services.teagramd.environment.TG_CLIENT_ADDR_TRUST == "socket"
+  and .services.teagramd.environment.TG_UPLOADS_DISABLED == "false"
+  and .services["teagramd-next"].environment.TG_UPLOADS_DISABLED == "false"
   and .services.teagramd.environment.TG_STICKER_IMPORT == "off"
   and .services["teagramd-next"].environment.TG_STICKER_IMPORT == "off"
   and .services.teagramd.environment.TG_CLIENT_ADDR_PROXY_CIDRS == ""
@@ -448,6 +454,8 @@ env -u COMPOSE_FILE -u COMPOSE_PROJECT_NAME -u COMPOSE_PROFILES \
   "${compose[@]}" --file "$SCRIPT_DIR/compose.seed.yaml" config --format json > "$TMP_DIR/seed.json"
 jq -e '
   .services.teagramd.environment.TG_CLIENT_ADDR_TRUST == "socket"
+  and .services.teagramd.environment.TG_UPLOADS_DISABLED == "false"
+  and .services["teagramd-next"].environment.TG_UPLOADS_DISABLED == "false"
   and .services.teagramd.environment.TG_STICKER_IMPORT == "off"
   and .services["teagramd-next"].environment.TG_STICKER_IMPORT == "off"
   and .services.teagramd.environment.TG_CLIENT_ADDR_PROXY_CIDRS == ""

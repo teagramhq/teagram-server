@@ -248,7 +248,7 @@ GITHUB_REPOSITORY=example/repo \
 [[ "$(<"$test_tmp/staggered-reads")" == 3 && "$(<"$test_tmp/staggered-reruns")" == $'123\n456' ]] ||
   fail 'recovery must poll both IDs together and rerun each as soon as cancellation completes'
 
-expected_roots=$'browser-acceptance\nbrowser-acceptance-image\nci-main\ncompose\ncss\ndemo-web-artifact\ndeploy-workflow\ndocker\ne2e-admin\nlint\nphotothumb-runtime\nreal-server-fixtures\nschema-gate-postgres\nsmoke\nsql-lint\nsqlc\nsticker-bundle\nwebsocket-d1\nwebsocket-permanent-exchange'
+expected_roots=$'browser-acceptance\nbrowser-acceptance-image\nci-main\ncompose\ncss\ndemo-web-artifact\ndeploy-workflow\ndocker\ne2e-admin\nlint\nphotothumb-runtime\nreal-server-fixtures\nsmoke\nsql-lint\nsqlc\nsticker-bundle\ntest-migrations\nwebsocket-d1\nwebsocket-permanent-exchange'
 actual_roots="$(query '.jobs | to_entries[] | select(.key != "ops-prioritize-main" and .key != "ci" and .key != "ops-dispatch-pr-ci-recovery" and (.value.needs == "ops-prioritize-main" or (.value.needs[] == "ops-prioritize-main"))) | .key' | LC_ALL=C sort)"
 [[ "$actual_roots" == "$expected_roots" ]] ||
   fail 'every CI fan-out root must depend on the main priority job'
