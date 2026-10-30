@@ -49,7 +49,7 @@ else
   readonly lint_host=127.0.0.1
 fi
 readonly lint_dsn="postgres://postgres:${password}@${lint_host}:${postgres_port}/migration_lint?sslmode=disable"
-readonly lint_apply_dsn="postgres://postgres:${password}@${postgres_container}:5432/migration_lint?sslmode=disable"
+readonly lint_base_dsn="postgres://postgres:${password}@${postgres_container}:5432/migration_lint_base?sslmode=disable"
 readonly fresh_dsn="postgres://postgres:${password}@${postgres_container}:5432/migration_fresh?sslmode=disable"
 readonly upgrade_dsn="postgres://postgres:${password}@${postgres_container}:5432/migration_upgrade?sslmode=disable"
 
@@ -63,7 +63,7 @@ apply_migrations() {
     migrate apply --dir file:///migrations --url "$database_dsn"
 }
 
-for database in migration_lint migration_fresh migration_upgrade; do
+for database in migration_lint migration_lint_base migration_fresh migration_upgrade; do
   docker exec "$postgres_container" createdb -U postgres "$database"
 done
 
@@ -83,12 +83,29 @@ mapfile -t changed_sql_migrations < <(
     | awk '/\.sql$/ { print }'
 )
 if [ "${#changed_sql_migrations[@]}" -gt 0 ]; then
-  # Atlas lint executes base migrations one statement at a time. Apply the base
-  # with Atlas first, then lint only this PR's files against that schema so
-  # transaction-dependent historical migrations are not replayed outside a tx.
-  apply_migrations "$baseline_dir/migrations" "$lint_apply_dsn"
+  # Atlas lint executes base migrations one statement at a time. Snapshot the
+  # base schema after applying it transactionally, then lint this PR's files
+  # against a checkpoint in a clean dev database.
+  apply_migrations "$baseline_dir/migrations" "$lint_base_dsn"
   readonly lint_migration_dir="$temp_dir/lint-migrations"
   mkdir -p "$lint_migration_dir"
+  docker exec "$postgres_container" pg_dump \
+    --schema-only \
+    --schema=public \
+    --no-owner \
+    --no-privileges \
+    -U postgres \
+    -d migration_lint_base \
+    | sed \
+      -e '/^\\restrict /d' \
+      -e '/^\\unrestrict /d' \
+      -e '/^CREATE SCHEMA public;$/d' \
+    > "$temp_dir/base-schema.sql"
+  {
+    printf '%s\n' '-- atlas:checkpoint'
+    cat "$temp_dir/base-schema.sql"
+    printf '%s\n' 'SET search_path = public;'
+  } > "$lint_migration_dir/00000000000000_base_checkpoint.sql"
   for migration in "${changed_sql_migrations[@]}"; do
     cp "$repo_root/$migration" "$lint_migration_dir/"
   done
