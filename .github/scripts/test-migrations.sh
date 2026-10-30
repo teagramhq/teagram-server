@@ -51,7 +51,8 @@ fi
 readonly lint_dsn="postgres://postgres:${password}@${lint_host}:${postgres_port}/migration_lint?sslmode=disable"
 readonly fresh_dsn="postgres://postgres:${password}@${postgres_container}:5432/migration_fresh?sslmode=disable"
 readonly upgrade_dsn="postgres://postgres:${password}@${postgres_container}:5432/migration_upgrade?sslmode=disable"
-readonly base_lock_fixture_dsn="postgres://postgres:${password}@${lint_host}:${postgres_port}/migration_lint_base_lock?sslmode=disable"
+readonly lint_apply_dsn="postgres://postgres:${password}@${postgres_container}:5432/migration_lint?sslmode=disable"
+readonly base_lock_fixture_apply_dsn="postgres://postgres:${password}@${postgres_container}:5432/migration_lint_base_lock?sslmode=disable"
 
 apply_migrations() {
   local migration_dir=$1
@@ -99,7 +100,7 @@ if [ "${#changed_sql_migrations[@]}" -gt 0 ]; then
     cp "$repo_root/$migration" "$changed_migration_dir/"
   done
 
-  apply_migrations "$baseline_dir/migrations" "$lint_dsn"
+  apply_migrations "$baseline_dir/migrations" "$lint_apply_dsn"
   run_atlas_migration_lint "$changed_migration_dir" "$lint_dsn" "${#changed_sql_migrations[@]}"
 else
   printf '%s\n' 'Atlas migration lint skipped: no changed SQL migrations.'
@@ -153,7 +154,7 @@ base_lock_fixture_dir="$temp_dir/atlas-lint-base-lock-history"
 mkdir -p "$base_lock_fixture_dir"
 cp "$repo_root/.github/scripts/testdata/migrations/atlas-lint/base-lock-history"/*.sql "$base_lock_fixture_dir/"
 "$atlas_lint_binary" migrate hash --dir "file://$base_lock_fixture_dir" >/dev/null
-apply_migrations "$base_lock_fixture_dir" "$base_lock_fixture_dsn"
+apply_migrations "$base_lock_fixture_dir" "$base_lock_fixture_apply_dsn"
 run_atlas_lint_fixture base-lock-change pass migration_lint_base_lock
 
 apply_migrations "$repo_root/migrations" "$fresh_dsn"
