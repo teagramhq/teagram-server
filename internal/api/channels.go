@@ -1409,7 +1409,12 @@ func (h *handlers) channelMessagesWithCountAndCaller(
 		h.log.Error("channel messages pts", "channel_id", channelID, "err", err)
 		return nil, errInternal
 	}
-	users, err := h.loadUsers(r.Ctx, authors, r.UserID)
+	var users []tg.UserClass
+	if includeCaller {
+		users, err = h.channelHistoryUsers(r.Ctx, authors, r.UserID)
+	} else {
+		users, err = h.loadUsers(r.Ctx, authors, r.UserID)
+	}
 	if err != nil {
 		h.log.Error("channel messages users", "err", err)
 		return nil, errInternal
@@ -1426,6 +1431,33 @@ func (h *handlers) channelMessagesWithCountAndCaller(
 		Chats:    channels,
 		Users:    users,
 	}, nil
+}
+
+func (h *handlers) channelHistoryUsers(ctx context.Context, ids map[int64]bool, viewerID int64) ([]tg.UserClass, error) {
+	userIDs := make([]int64, 0, len(ids))
+	for id := range ids {
+		userIDs = append(userIDs, id)
+	}
+	users, err := h.store.ChannelHistoryUsersForViewer(ctx, viewerID, userIDs)
+	if err != nil {
+		return nil, err
+	}
+
+	result := make([]tg.UserClass, 0, len(users))
+	for _, pageUser := range users {
+		if pageUser.User.ID != viewerID && !pageUser.Entitled {
+			result = append(result, &tg.UserEmpty{ID: pageUser.User.ID})
+			continue
+		}
+		result = append(result, h.userToTL(
+			pageUser.User,
+			viewerID,
+			pageUser.User.ID == viewerID,
+			pageUser.Contact,
+			pageUser.Visibility,
+		))
+	}
+	return result, nil
 }
 
 // legacyInviteLinkPrefix is accepted only when revoking links issued before
