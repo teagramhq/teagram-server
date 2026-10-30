@@ -12,7 +12,7 @@ dockerfile="${DEPLOY_DOCKERFILE:-Dockerfile}"
 demo_forced_command="deploy/teagram-demo/forced-command.sh"
 expected_if="\${{ github.event_name == 'workflow_dispatch' || (github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push') }}"
 expected_demo_resolver_ref='${{ github.workflow_sha }}'
-expected_demo_if="\${{ github.event.workflow_run.conclusion == 'success' }}"
+expected_demo_if="\${{ github.event.workflow_run.conclusion == 'success' && needs.check-server-deploy-result.outputs.succeeded == 'true' }}"
 expected_demo_step_if="\${{ steps.demo-gate.outputs.enabled == 'true' }}"
 expected_demo_cleanup_if="\${{ always() && steps.demo-gate.outputs.enabled == 'true' }}"
 expected_demo_web_step_if="\${{ steps.web-gate.outputs.enabled == 'true' }}"
@@ -239,6 +239,44 @@ SH
   fi
 )
 
+check_demo_deploy_result() (
+  set -euo pipefail
+  local tmp
+  tmp="$(mktemp -d)"
+  trap 'rm -rf "$tmp"' EXIT
+  demo_query '.jobs.check-server-deploy-result.steps[] | select(.id == "verify") | .run' > "$tmp/verify.sh"
+  cat > "$tmp/gh" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+[[ "$1" == api ]]
+[[ "$2" == "repos/test/server/actions/runs/$TEST_DEPLOY_RUN_ID/jobs?per_page=100" ]]
+case "$TEST_DEPLOY_CONCLUSION" in
+  missing) printf '{"jobs":[]}\n' ;;
+  ambiguous) printf '{"jobs":[{"name":"deploy teagram-server","conclusion":"success"},{"name":"deploy teagram-server","conclusion":"success"}]}\n' ;;
+  *) printf '{"jobs":[{"name":"deploy teagram-server","conclusion":"%s"}]}\n' "$TEST_DEPLOY_CONCLUSION" ;;
+esac
+SH
+  chmod +x "$tmp/gh"
+  # These overrides are consumed by the extracted workflow child process.
+  # shellcheck disable=SC2030,SC2031
+  export PATH="$tmp:$PATH" GITHUB_REPOSITORY=test/server
+  export DEPLOY_RUN_ID=111111111 TEST_DEPLOY_RUN_ID=111111111
+  export GITHUB_OUTPUT="$tmp/output"
+
+  local conclusion expected
+  for conclusion in success skipped failure missing ambiguous; do
+    : > "$GITHUB_OUTPUT"
+    expected=false
+    if [[ "$conclusion" == success ]]; then
+      expected=true
+    fi
+    TEST_DEPLOY_CONCLUSION="$conclusion" GH_TOKEN=test-token \
+      bash -euo pipefail "$tmp/verify.sh" > /dev/null
+    [[ "$(cat "$GITHUB_OUTPUT")" == "succeeded=$expected" ]] ||
+      fail "the demo gate must accept only one successful server deploy job ($conclusion)"
+  done
+)
+
 check_demo_credential_gate() (
   set -euo pipefail
   local tmp
@@ -364,8 +402,28 @@ check_contract() {
     fail 'the demo workflow must not trigger on unrelated workflow-run event types'
   [[ "$(demo_query '.on.workflow_run.workflows | length')" == 1 ]] ||
     fail 'the demo workflow must trigger only from Deploy.'
-  [[ "$(demo_query '.jobs | keys | join(",")')" == 'deploy-demo' ]] ||
-    fail 'the demo workflow must have one independently reported deployment job'
+  [[ "$(demo_query '.jobs | keys | sort | join(",")')" == 'check-server-deploy-result,deploy-demo' ]] ||
+    fail 'the demo workflow must verify the triggering server deploy before its deployment job'
+  [[ "$(demo_query '.jobs.check-server-deploy-result.name')" == 'check: server-deploy-result' ]] ||
+    fail 'the server deploy verification job must follow the check-stage naming convention'
+  [[ "$(demo_query '.jobs.check-server-deploy-result.permissions | to_entries | map(.key + "=" + .value) | join(",")')" == 'actions=read' ]] ||
+    fail 'the server deploy verification job must use actions: read only'
+  [[ "$(demo_query '.jobs.check-server-deploy-result.outputs.succeeded')" == '${{ steps.verify.outputs.succeeded }}' ]] ||
+    fail 'the server deploy verification result must gate the demo job'
+  [[ "$(demo_query '.jobs.check-server-deploy-result.steps[] | select(.id == "verify") | .env.DEPLOY_RUN_ID')" == '${{ github.event.workflow_run.id }}' ]] ||
+    fail 'the server deploy verifier must inspect the workflow run that triggered this demo'
+  local server_deploy_verify_run
+  server_deploy_verify_run="$(demo_query '.jobs.check-server-deploy-result.steps[] | select(.id == "verify") | .run')"
+  grep -Fq 'actions/runs/$DEPLOY_RUN_ID/jobs?per_page=100' <<< "$server_deploy_verify_run" ||
+    fail 'the server deploy verifier must inspect the triggering run jobs'
+  grep -Fq 'select(.name == "deploy teagram-server")' <<< "$server_deploy_verify_run" ||
+    fail 'the server deploy verifier must identify the server deploy job'
+  grep -Fq 'succeeded=true' <<< "$server_deploy_verify_run" ||
+    fail 'the server deploy verifier must expose success as a job output'
+  grep -Fq 'succeeded=false' <<< "$server_deploy_verify_run" ||
+    fail 'the server deploy verifier must gate skipped or failed deploy jobs'
+  [[ "$(demo_query '.jobs.deploy-demo.needs | join(",")')" == 'check-server-deploy-result' ]] ||
+    fail 'the demo deployment must wait for the server deploy result check'
   [[ "$(demo_query '.jobs.deploy-demo.name')" == 'deploy: demo' ]] ||
     fail 'the demo job name must follow the deploy stage naming convention'
   [[ "$(demo_query '.jobs.deploy-demo.if')" == "$expected_demo_if" ]] ||
@@ -634,6 +692,10 @@ self_test() {
     '(.jobs."deploy-demo".steps[] | select(.id == "pin") | ."continue-on-error") = false'
     '.jobs."deploy-demo".steps |= map(select(.name != "Fail after server deploy when web resolution failed"))'
     '(.jobs."deploy-demo".steps[] | select(.name == "Fail after server deploy when web resolution failed") | .if) = "${{ always() }}"'
+    'del(.jobs."deploy-demo".needs)'
+    '(.jobs."deploy-demo".if) |= sub(" && needs.check-server-deploy-result.outputs.succeeded == '\''true'\''"; "")'
+    'del(.jobs."check-server-deploy-result")'
+    '(.jobs."check-server-deploy-result".steps[] | select(.id == "verify") | .run) |= sub("deploy teagram-server"; "wrong deploy job")'
     '(.jobs."deploy-demo".steps[] | select(.name == "Publish the pinned web artifact on the demo origin") | .if) = "${{ always() }}"'
     '(.jobs."deploy-demo".steps[] | select(.name == "Deploy the tested server commit after the dev deploy") | .if) = "${{ always() }}"'
     '.jobs."deploy-demo".if = "${{ github.event_name == '"'"'workflow_dispatch'"'"' }}"'
@@ -683,6 +745,7 @@ check_contract
 check_ci_contract
 if [[ "${1:-}" != '--contract-only' ]]; then
   check_demo_credential_gate
+  check_demo_deploy_result
   self_test
   printf 'deploy workflow contract holds\n'
 fi
