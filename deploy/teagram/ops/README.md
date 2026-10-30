@@ -93,6 +93,16 @@ It checks that the recorded environment is exactly the saved `.env` plus the
 quota setting, then reruns the probe against the current live image without
 applying another rollout.
 
+`rollback-public-websocket.sh` is the pre-revert step for a deployed public
+WebSocket route. Run it through `teagram-ops` with the current deployed SHA;
+it takes `/tmp/teagram-deploy.lock`, verifies the live checkout and base image
+match that SHA, removes only the `teagram` project's `public-haproxy`,
+`teagramd-public-1`, and `teagramd-public-2` containers, then confirms those
+containers are gone and no container publishes host port 2446. After it
+succeeds, revert the route commit and let `Deploy.` recreate base `teagramd`
+with its original `127.0.0.1:2446` publish. The operation is repeatable and
+does not touch volumes or the database.
+
 ## User-invite quota threat model
 
 The protected asset is the account-admission boundary. A user-issued invite is

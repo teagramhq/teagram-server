@@ -108,7 +108,7 @@ jobs:
   check-sticker-license:
     name: 'check: sticker-license'
     needs: ops-prioritize-main
-    if: ${{ always() && (needs.ops-prioritize-main.result == 'success' || (needs.ops-prioritize-main.result == 'skipped' && github.event_name == 'pull_request')) }}
+    if: ${{ (github.event_name == 'pull_request' && !cancelled() || github.event_name != 'pull_request' && always()) && (needs.ops-prioritize-main.result == 'success' || (needs.ops-prioritize-main.result == 'skipped' && github.event_name == 'pull_request')) }}
     runs-on: ubuntu-26.04
     timeout-minutes: 20
     permissions:
@@ -176,7 +176,7 @@ jobs:
   lint-go:
     name: 'lint: go'
     needs: ops-prioritize-main
-    if: ${{ always() && (needs.ops-prioritize-main.result == 'success' || (needs.ops-prioritize-main.result == 'skipped' && github.event_name == 'pull_request')) }}
+    if: ${{ (github.event_name == 'pull_request' && !cancelled() || github.event_name != 'pull_request' && always()) && (needs.ops-prioritize-main.result == 'success' || (needs.ops-prioritize-main.result == 'skipped' && github.event_name == 'pull_request')) }}
     runs-on: ubuntu-26.04
     # Keep lint's timeout aligned with its former step in ci.
     timeout-minutes: 20
@@ -229,7 +229,7 @@ jobs:
   lint-sql:
     name: 'lint: sql'
     needs: ops-prioritize-main
-    if: ${{ always() && (needs.ops-prioritize-main.result == 'success' || (needs.ops-prioritize-main.result == 'skipped' && github.event_name == 'pull_request')) }}
+    if: ${{ (github.event_name == 'pull_request' && !cancelled() || github.event_name != 'pull_request' && always()) && (needs.ops-prioritize-main.result == 'success' || (needs.ops-prioritize-main.result == 'skipped' && github.event_name == 'pull_request')) }}
     runs-on: ubuntu-26.04
     timeout-minutes: 10
     permissions:
@@ -269,7 +269,7 @@ jobs:
   test-browser-acceptance:
     name: 'test: browser-acceptance'
     needs: ops-prioritize-main
-    if: ${{ always() && (needs.ops-prioritize-main.result == 'success' || (needs.ops-prioritize-main.result == 'skipped' && github.event_name == 'pull_request')) }}
+    if: ${{ (github.event_name == 'pull_request' && !cancelled() || github.event_name != 'pull_request' && always()) && (needs.ops-prioritize-main.result == 'success' || (needs.ops-prioritize-main.result == 'skipped' && github.event_name == 'pull_request')) }}
     runs-on: ubuntu-26.04
     timeout-minutes: 10
     permissions:
@@ -334,7 +334,7 @@ jobs:
     needs:
       - ops-prioritize-main
       - test-browser-acceptance
-    if: ${{ always() && (needs.ops-prioritize-main.result == 'success' || (needs.ops-prioritize-main.result == 'skipped' && github.event_name == 'pull_request')) && needs.test-browser-acceptance.result == 'success' }}
+    if: ${{ (github.event_name == 'pull_request' && !cancelled() || github.event_name != 'pull_request' && always()) && (needs.ops-prioritize-main.result == 'success' || (needs.ops-prioritize-main.result == 'skipped' && github.event_name == 'pull_request')) && needs.test-browser-acceptance.result == 'success' }}
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 25
     permissions:
@@ -517,7 +517,7 @@ jobs:
   test-go:
     name: 'test: go'
     needs: ops-prioritize-main
-    if: ${{ always() && (needs.ops-prioritize-main.result == 'success' || (needs.ops-prioritize-main.result == 'skipped' && github.event_name == 'pull_request')) }}
+    if: ${{ (github.event_name == 'pull_request' && !cancelled() || github.event_name != 'pull_request' && always()) && (needs.ops-prioritize-main.result == 'success' || (needs.ops-prioritize-main.result == 'skipped' && github.event_name == 'pull_request')) }}
     runs-on: ubuntu-26.04
     permissions:
       contents: read
@@ -606,7 +606,8 @@ jobs:
       - name: Pull the base images
         timeout-minutes: 10
         run: >-
-          bash .github/scripts/pull-base-images.sh deploy/link-edge/Dockerfile
+          bash .github/scripts/pull-base-images.sh Dockerfile.minio-test
+          deploy/link-edge/Dockerfile
 
       # Keep the link edge as its own Compose project and build both restricted
       # images in CI. The explicit empty env file keeps server credentials out
@@ -738,20 +739,27 @@ jobs:
           ss -ltn 'sport = :8082'
           curl --fail --silent --show-error --output /dev/null http://127.0.0.1:8082/syntheticname
 
+      - name: Build MinIO image for tests
+        uses: docker/build-push-action@v7.4.0
+        with:
+          context: .
+          file: Dockerfile.minio-test
+          tags: quay.io/minio/minio:latest
+          load: true
+          cache-from: type=gha,scope=minio-test
+          cache-to: ${{ github.ref == 'refs/heads/main' && 'type=gha,scope=minio-test,mode=max' || '' }}
+
       - name: Measure flat parts directory ceiling
         run: PARTS_DIR_CEILING_PROBE=1 go test -count=1 -timeout 30m ./internal/blob/ -run TestFlatPartsDirEntryCeiling -v
 
-      # Testcontainers uses these public mirrored images. Pre-pull them with
+      # Testcontainers pulls mirror.gcr.io/postgres:18-alpine. Pre-pull it with
       # bounded retries so transient mirror misses are caught before package tests.
       #
       # Keep the cached non-E2E command in the Makefile unchanged. The remaining
       # E2E invocation runs once with the same race/count/timeout/package
       # settings, excluding fixtures and adding JSON output for diagnostics.
-      - name: Pre-pull shared test images with retry
-        run: >-
-          bash .github/scripts/pull-base-images.sh
-          --image mirror.gcr.io/postgres:18-alpine
-          --image mirror.gcr.io/rustfs/rustfs:1.0.1
+      - name: Pre-pull the shared PostgreSQL test image with retry
+        run: bash .github/scripts/pull-base-images.sh --image mirror.gcr.io/postgres:18-alpine
 
       - name: Test non-E2E packages
         run: make test-unit
@@ -791,7 +799,7 @@ jobs:
   test-real-server-fixtures:
     name: 'test: real-server-fixtures'
     needs: ops-prioritize-main
-    if: ${{ always() && (needs.ops-prioritize-main.result == 'success' || (needs.ops-prioritize-main.result == 'skipped' && github.event_name == 'pull_request')) }}
+    if: ${{ (github.event_name == 'pull_request' && !cancelled() || github.event_name != 'pull_request' && always()) && (needs.ops-prioritize-main.result == 'success' || (needs.ops-prioritize-main.result == 'skipped' && github.event_name == 'pull_request')) }}
     runs-on: ubuntu-26.04
     timeout-minutes: 60
     env:
@@ -886,7 +894,7 @@ jobs:
   test-websocket-d1:
     name: 'test: websocket-d1'
     needs: ops-prioritize-main
-    if: ${{ always() && (needs.ops-prioritize-main.result == 'success' || (needs.ops-prioritize-main.result == 'skipped' && github.event_name == 'pull_request')) }}
+    if: ${{ (github.event_name == 'pull_request' && !cancelled() || github.event_name != 'pull_request' && always()) && (needs.ops-prioritize-main.result == 'success' || (needs.ops-prioritize-main.result == 'skipped' && github.event_name == 'pull_request')) }}
     runs-on: ubuntu-26.04
     timeout-minutes: 20
     permissions:
@@ -967,7 +975,7 @@ jobs:
   test-websocket-permanent-exchange:
     name: 'test: websocket-permanent-exchange'
     needs: ops-prioritize-main
-    if: ${{ always() && (needs.ops-prioritize-main.result == 'success' || (needs.ops-prioritize-main.result == 'skipped' && github.event_name == 'pull_request')) }}
+    if: ${{ (github.event_name == 'pull_request' && !cancelled() || github.event_name != 'pull_request' && always()) && (needs.ops-prioritize-main.result == 'success' || (needs.ops-prioritize-main.result == 'skipped' && github.event_name == 'pull_request')) }}
     runs-on: ubuntu-26.04
     timeout-minutes: 20
     permissions:
@@ -1009,12 +1017,10 @@ jobs:
           WEB_PERMANENT_WEB_ROOT: ${{ github.workspace }}/web-client
         run: bash .github/scripts/run-websocket-permanent-exchange.sh
 
-  # Keep the existing required check context while making every verification
-  # lane mandatory. `always()` runs this when a lane fails or is skipped.
   check-deploy-workflow:
     name: 'check: deploy-workflow'
     needs: ops-prioritize-main
-    if: ${{ always() && (needs.ops-prioritize-main.result == 'success' || (needs.ops-prioritize-main.result == 'skipped' && github.event_name == 'pull_request')) }}
+    if: ${{ (github.event_name == 'pull_request' && !cancelled() || github.event_name != 'pull_request' && always()) && (needs.ops-prioritize-main.result == 'success' || (needs.ops-prioritize-main.result == 'skipped' && github.event_name == 'pull_request')) }}
     runs-on: ubuntu-26.04
     timeout-minutes: 10
     permissions:
@@ -1069,6 +1075,8 @@ jobs:
           bash -n deploy/teagram/ops/invite-web-signup-url.sh
           bash -n deploy/teagram/test-invite-web-signup-url.sh
           bash -n deploy/teagram/ops/rollout-evidence.sh
+          bash -n deploy/teagram/ops/rollback-public-websocket.sh
+          bash -n deploy/teagram/test-rollback-public-websocket.sh
           bash -n deploy/teagram/test-teagram-logs.sh
           bash -n deploy/teagram/ops/target-failure-report.sh
           bash -n deploy/teagram/test-teagram-ops.sh
@@ -1106,6 +1114,8 @@ jobs:
             deploy/teagram/ops/invite-web-signup-url.sh \
             deploy/teagram/test-invite-web-signup-url.sh \
             deploy/teagram/ops/rollout-evidence.sh \
+            deploy/teagram/ops/rollback-public-websocket.sh \
+            deploy/teagram/test-rollback-public-websocket.sh \
             deploy/teagram/test-teagram-logs.sh \
             deploy/teagram/ops/target-failure-report.sh \
             deploy/teagram/test-teagram-ops.sh \
@@ -1148,11 +1158,15 @@ jobs:
 
       - name: Check invite signup URL operation fixtures
         run: sudo -n env "PATH=$PATH" bash deploy/teagram/test-invite-web-signup-url.sh
+
       - name: Check teagram log access command
         run: deploy/teagram/test-teagram-logs.sh
 
       - name: Check teagram ops command
         run: deploy/teagram/test-teagram-ops.sh
+
+      - name: Check public WebSocket rollback teardown
+        run: deploy/teagram/test-rollback-public-websocket.sh
 
       - name: Check performance Postgres startup readiness
         run: bash .github/scripts/test-perf-postgres.sh
@@ -1184,7 +1198,7 @@ jobs:
   check-demo-web-pin:
     name: 'check: demo-web-pin'
     needs: ops-prioritize-main
-    if: ${{ always() && (needs.ops-prioritize-main.result == 'success' || (needs.ops-prioritize-main.result == 'skipped' && github.event_name == 'pull_request')) }}
+    if: ${{ (github.event_name == 'pull_request' && !cancelled() || github.event_name != 'pull_request' && always()) && (needs.ops-prioritize-main.result == 'success' || (needs.ops-prioritize-main.result == 'skipped' && github.event_name == 'pull_request')) }}
     runs-on: ubuntu-26.04
     timeout-minutes: 30
     permissions:
@@ -1373,15 +1387,15 @@ jobs:
       - ci
       - test-go
       - test-compose
+      - lint-css
+      - check-deploy-workflow
+      - check-demo-web-pin
+      - build-server-image
       - check-sticker-license
       - test-e2e-admin
       - lint-go
       - test-photo-worker
       - test-real-server-fixtures
-      - lint-css
-      - check-deploy-workflow
-      - check-demo-web-pin
-      - build-server-image
       - test-migrations
       - test-smoke
       - lint-sql
@@ -1455,7 +1469,7 @@ jobs:
   lint-css:
     name: 'lint: css'
     needs: ops-prioritize-main
-    if: ${{ always() && (needs.ops-prioritize-main.result == 'success' || (needs.ops-prioritize-main.result == 'skipped' && github.event_name == 'pull_request')) }}
+    if: ${{ (github.event_name == 'pull_request' && !cancelled() || github.event_name != 'pull_request' && always()) && (needs.ops-prioritize-main.result == 'success' || (needs.ops-prioritize-main.result == 'skipped' && github.event_name == 'pull_request')) }}
     runs-on: ubuntu-26.04
     timeout-minutes: 10
 
@@ -1494,7 +1508,7 @@ jobs:
   check-sqlc-drift:
     name: 'check: sqlc-drift'
     needs: ops-prioritize-main
-    if: ${{ always() && (needs.ops-prioritize-main.result == 'success' || (needs.ops-prioritize-main.result == 'skipped' && github.event_name == 'pull_request')) }}
+    if: ${{ (github.event_name == 'pull_request' && !cancelled() || github.event_name != 'pull_request' && always()) && (needs.ops-prioritize-main.result == 'success' || (needs.ops-prioritize-main.result == 'skipped' && github.event_name == 'pull_request')) }}
     runs-on: ubuntu-26.04
     timeout-minutes: 10
 
@@ -1527,7 +1541,7 @@ jobs:
   test-e2e-admin:
     name: 'test: e2e-admin'
     needs: ops-prioritize-main
-    if: ${{ always() && (needs.ops-prioritize-main.result == 'success' || (needs.ops-prioritize-main.result == 'skipped' && github.event_name == 'pull_request')) }}
+    if: ${{ (github.event_name == 'pull_request' && !cancelled() || github.event_name != 'pull_request' && always()) && (needs.ops-prioritize-main.result == 'success' || (needs.ops-prioritize-main.result == 'skipped' && github.event_name == 'pull_request')) }}
     runs-on: ubuntu-26.04
     # The suite is a handful of specs against a local server; this only catches
     # a hang (a browser that never launches, a webServer that never binds). A
@@ -1924,7 +1938,7 @@ jobs:
     needs:
       - ops-prioritize-main
       - check-sticker-license
-    if: ${{ always() && (needs.ops-prioritize-main.result == 'success' || (needs.ops-prioritize-main.result == 'skipped' && github.event_name == 'pull_request')) && needs.check-sticker-license.result == 'success' }}
+    if: ${{ (github.event_name == 'pull_request' && !cancelled() || github.event_name != 'pull_request' && always()) && (needs.ops-prioritize-main.result == 'success' || (needs.ops-prioritize-main.result == 'skipped' && github.event_name == 'pull_request')) && needs.check-sticker-license.result == 'success' }}
     runs-on: ubuntu-26.04
     # The build is the slow part at roughly a minute; this only catches a hang
     # (a stalled pull, a container that never logs) before it burns six hours.
@@ -2148,7 +2162,7 @@ jobs:
     needs:
       - ops-prioritize-main
       - check-sticker-license
-    if: ${{ always() && (needs.ops-prioritize-main.result == 'success' || (needs.ops-prioritize-main.result == 'skipped' && github.event_name == 'pull_request')) && needs.check-sticker-license.result == 'success' }}
+    if: ${{ (github.event_name == 'pull_request' && !cancelled() || github.event_name != 'pull_request' && always()) && (needs.ops-prioritize-main.result == 'success' || (needs.ops-prioritize-main.result == 'skipped' && github.event_name == 'pull_request')) && needs.check-sticker-license.result == 'success' }}
     runs-on: ubuntu-26.04
     # The image build plus RustFS and media verification, which is the slow part
     # at roughly a minute; this only catches a hang before it
@@ -2704,6 +2718,11 @@ jobs:
           [ "$override_path" = /var/lib/teagramd/other.hex ] \
             || { echo "TG_AUTHKEY_ENC_KEY_FILE override did not reach the rendered config: got $override_path"; exit 1; }
 
+      - name: Validate public WebSocket ingress
+        run: |
+          bash -n .github/scripts/smoke-public-websocket-compose.sh
+          bash .github/scripts/smoke-public-websocket-compose.sh
+
       - name: Boot RustFS and exercise the object-store backend
         run: |
           # Pull the verified upstream GHCR image directly. The Google mirror
@@ -3086,7 +3105,7 @@ jobs:
     needs:
       - ops-prioritize-main
       - check-sticker-license
-    if: ${{ always() && (needs.ops-prioritize-main.result == 'success' || (needs.ops-prioritize-main.result == 'skipped' && github.event_name == 'pull_request')) && needs.check-sticker-license.result == 'success' }}
+    if: ${{ (github.event_name == 'pull_request' && !cancelled() || github.event_name != 'pull_request' && always()) && (needs.ops-prioritize-main.result == 'success' || (needs.ops-prioritize-main.result == 'skipped' && github.event_name == 'pull_request')) && needs.check-sticker-license.result == 'success' }}
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 20
     permissions:
@@ -3237,7 +3256,7 @@ jobs:
   test-smoke:
     name: 'test: smoke'
     needs: ops-prioritize-main
-    if: ${{ always() && (needs.ops-prioritize-main.result == 'success' || (needs.ops-prioritize-main.result == 'skipped' && github.event_name == 'pull_request')) }}
+    if: ${{ (github.event_name == 'pull_request' && !cancelled() || github.event_name != 'pull_request' && always()) && (needs.ops-prioritize-main.result == 'success' || (needs.ops-prioritize-main.result == 'skipped' && github.event_name == 'pull_request')) }}
     runs-on: ubuntu-26.04
     timeout-minutes: 60
     permissions:
@@ -3378,7 +3397,7 @@ jobs:
   test-migrations:
     name: "test: migrations"
     needs: ops-prioritize-main
-    if: ${{ always() && (needs.ops-prioritize-main.result == 'success' || (needs.ops-prioritize-main.result == 'skipped' && github.event_name == 'pull_request')) }}
+    if: ${{ (github.event_name == 'pull_request' && !cancelled() || github.event_name != 'pull_request' && always()) && (needs.ops-prioritize-main.result == 'success' || (needs.ops-prioritize-main.result == 'skipped' && github.event_name == 'pull_request')) }}
     runs-on: ubuntu-26.04
     timeout-minutes: 20
     permissions:
