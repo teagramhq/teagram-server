@@ -16,6 +16,8 @@ spec:
         app.kubernetes.io/name: rustfs
     spec:
       automountServiceAccountToken: false
+      imagePullSecrets:
+        - name: ghcr-pull
       terminationGracePeriodSeconds: 30
       securityContext:
         fsGroup: 10001
