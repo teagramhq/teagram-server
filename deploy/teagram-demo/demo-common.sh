@@ -52,8 +52,8 @@ demo_fail() {
 }
 
 demo_prepare_edge_config_permissions() {
-  local config_dir="$DEMO_SCRIPT_DIR/nginx-config"
-  local config_file="$config_dir/nginx.conf"
+  local config_dir="${1:-$DEMO_SCRIPT_DIR/nginx-config}"
+  local config_file="${2:-$config_dir/nginx.conf}"
   [[ -d "$config_dir" && ! -L "$config_dir" ]] || {
     demo_fail 'edge configuration directory is missing or unsafe'
     return 1
@@ -62,12 +62,20 @@ demo_prepare_edge_config_permissions() {
     demo_fail 'edge configuration file is missing or unsafe'
     return 1
   }
-  chmod 0755 "$config_dir" || {
+  chmod 0755 -- "$config_dir" || {
     demo_fail 'edge configuration directory permissions could not be prepared'
     return 1
   }
-  chmod 0644 "$config_file" || {
+  [[ "$(stat -c '%a' "$config_dir")" == 755 ]] || {
+    demo_fail 'edge configuration directory permissions could not be verified'
+    return 1
+  }
+  chmod 0644 -- "$config_file" || {
     demo_fail 'edge configuration file permissions could not be prepared'
+    return 1
+  }
+  [[ "$(stat -c '%a' "$config_file")" == 644 ]] || {
+    demo_fail 'edge configuration file permissions could not be verified'
     return 1
   }
 }
@@ -510,38 +518,9 @@ demo_prepare_client_config_dir() {
   mv -f -- "$temporary" "$config_file"
 }
 
-demo_prepare_edge_config_mount() {
-  local config_dir="${1:-$DEMO_SCRIPT_DIR/nginx-config}"
-  local config_file="${2:-$config_dir/nginx.conf}"
-  [[ -d "$config_dir" && ! -L "$config_dir" ]] || {
-    demo_fail 'edge config directory is missing or unsafe'
-    return 1
-  }
-  [[ -f "$config_file" && ! -L "$config_file" ]] || {
-    demo_fail 'edge config file is missing or unsafe'
-    return 1
-  }
-  chmod 0755 -- "$config_dir" || {
-    demo_fail 'edge config directory is not traversable by the unprivileged proxy'
-    return 1
-  }
-  [[ "$(stat -c '%a' "$config_dir")" == 755 ]] || {
-    demo_fail 'edge config directory permissions could not be normalized'
-    return 1
-  }
-  chmod 0644 -- "$config_file" || {
-    demo_fail 'edge config file is not readable by the unprivileged proxy'
-    return 1
-  }
-  [[ "$(stat -c '%a' "$config_file")" == 644 ]] || {
-    demo_fail 'edge config file permissions could not be normalized'
-    return 1
-  }
-}
-
 demo_reload_edge() {
   local -a edge_ids=()
-  demo_prepare_edge_config_mount || return 1
+  demo_prepare_edge_config_permissions || return 1
   mapfile -t edge_ids < <(demo_compose ps -q edge)
   ((${#edge_ids[@]} == 1)) || {
     demo_fail 'running edge proxy is missing or ambiguous'
