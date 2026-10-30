@@ -187,7 +187,7 @@ func verifySeed(ctx context.Context, cfg apiConfig, options seedOptions, ownerPa
 	}
 
 	searcher := seedAccounts[len(seedAccounts)-1]
-	if err := withAccount(ctx, cfg, searcher, inventory[searcher.loginID], nil, func(runCtx context.Context, api *tg.Client) error {
+	if err := withAccount(ctx, cfg, options.endpoint, searcher, inventory[searcher.loginID], nil, func(runCtx context.Context, api *tg.Client) error {
 		for _, account := range seedAccounts {
 			if err := verifyAccountProfile(runCtx, api, account); err != nil {
 				return err
@@ -256,7 +256,7 @@ func withSeedOwner(ctx context.Context, cfg apiConfig, options seedOptions, pass
 	if account.username != options.ownerUsername {
 		return errors.New("configured seed-owner username does not match the fixed demo owner")
 	}
-	return withAccount(ctx, cfg, account, password, nil, action)
+	return withAccount(ctx, cfg, options.endpoint, account, password, nil, action)
 }
 
 func withSeedAccount(ctx context.Context, cfg apiConfig, options seedOptions, account accountSpec, ownerPassword string, inventory map[string]string, action apiAction) error {
@@ -268,7 +268,7 @@ func withSeedAccount(ctx context.Context, cfg apiConfig, options seedOptions, ac
 		inventory[account.loginID] = value
 		return writeCredentialInventory(inventory)
 	}
-	return withAccount(ctx, cfg, account, password, save, action)
+	return withAccount(ctx, cfg, options.endpoint, account, password, save, action)
 }
 
 func configureAccount(ctx context.Context, api *tg.Client, account accountSpec) error {

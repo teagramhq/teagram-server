@@ -280,6 +280,25 @@ install_teagram_syslog_config() {
   printf 'installed teagram syslog rotation config from %s\n' "${sha:0:7}"
 }
 
+load_link_edge_invite_targets() {
+  local line='' configured_web_target='' configured_desktop_target=''
+  if [[ -r "$LIVE_CHECKOUT/.env" ]]; then
+    while IFS= read -r line || [[ -n "$line" ]]; do
+      case "$line" in
+        TG_INVITE_WEB_SIGNUP_URL=*) configured_web_target=${line#*=} ;;
+        TG_INVITE_DESKTOP_URL=*) configured_desktop_target=${line#*=} ;;
+      esac
+    done < "$LIVE_CHECKOUT/.env"
+  fi
+  TG_INVITE_WEB_SIGNUP_URL=${TG_INVITE_WEB_SIGNUP_URL:-$configured_web_target}
+  if [[ -z "$TG_INVITE_WEB_SIGNUP_URL" ]]; then
+    echo 'TG_INVITE_WEB_SIGNUP_URL is missing from the deployment environment and .env' >&2
+    return 1
+  fi
+  TG_INVITE_DESKTOP_URL=${TG_INVITE_DESKTOP_URL:-$configured_desktop_target}
+  export TG_INVITE_WEB_SIGNUP_URL TG_INVITE_DESKTOP_URL
+}
+
 SHA=${DEPLOY_SHA:-}
 case "$SHA" in *[!0-9a-f]*|"") echo "DEPLOY_SHA must be a full 40-hex commit SHA"; exit 1;; esac
 [ ${#SHA} = 40 ] || { echo "DEPLOY_SHA must be a full 40-hex commit SHA"; exit 1; }
@@ -297,6 +316,7 @@ if [ "$PREV" != "$SHA" ] && git merge-base --is-ancestor "$SHA" "$PREV"; then
 fi
 C=teagram-teagramd-1
 LIVE_CHECKOUT=$(pwd -P)
+load_link_edge_invite_targets || exit 1
 unset COMPOSE_ENV_FILES
 # Stage the candidate's validator before preflight. The selected SHA is on
 # origin/main, and the same files are used by the rollout after the backup.

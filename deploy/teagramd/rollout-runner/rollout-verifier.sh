@@ -71,9 +71,12 @@ verify_added_container_environment() {
               ($compose_env[$runtime_name] | type) == "string" and
               ($actual | length) == 1 and
               $actual[0] == $compose_env[$runtime_name] and
+              ($name != "TG_USER_INVITE_QUOTA" or
+               (dotenv_value($assignments[0]) | test("^[0-9]+$"))) and
               ($name != "TG_RATE_LIMIT_KEY_EXCHANGE_IP_TAILNET" or
                (dotenv_value($assignments[0]) | test("^[0-9]+$"))) and
               (($name | IN(
+                "TG_USER_INVITE_QUOTA",
                 "TG_RATE_LIMIT_KEY_EXCHANGE_IP_TAILNET",
                 "TG_PUBLIC_WEBSOCKET_LISTEN_ADDR", "TG_PUBLIC_WEBSOCKET_ADVERTISE_ADDR",
                 "TG_PUBLIC_REGISTRATION", "TG_PUBLIC_WEBSOCKET_ALLOWED_ORIGINS"
@@ -1026,6 +1029,7 @@ snapshot_from_json() {
         else $name end;
       [(item.Config.Env // [])[] | select(type == "string")
        | select(. != "TG_RATE_LIMIT_KEY_EXCHANGE_IP_TAILNET=")
+       | select(. != "TG_USER_INVITE_QUOTA=")
        | select(IN(
            "TG_TURNSTILE_SITE_KEY=", "TG_TURNSTILE_SECRET_KEY_FILE=", "TG_TURNSTILE_SIGNIN_ENABLED=false",
            "TG_PUBLIC_WEBSOCKET_LISTEN_ADDR=", "TG_PUBLIC_WEBSOCKET_ADVERTISE_ADDR=",
@@ -1085,6 +1089,7 @@ snapshot_from_json() {
         | map(select(type != "string" or (startswith("TG_REPLICA_COUNT=") | not)))
         | map(select(type != "string" or (startswith("TG_CLIENT_ADDR_TRUST=") | not)))
         | map(select(type != "string" or (startswith("TG_LOG_LOGIN_CODES=") | not)))
+        | map(select(. != "TG_USER_INVITE_QUOTA="))
         | map(select(type != "string" or ((split("=")[0]) as $key | (["TG_PUBLIC_WEBSOCKET_LISTEN_ADDR", "TG_PUBLIC_WEBSOCKET_ADVERTISE_ADDR", "TG_PUBLIC_REGISTRATION", "TG_PUBLIC_WEBSOCKET_ALLOWED_ORIGINS", "TG_WELCOME_CHANNEL"] | index($key) == null))))
         | map(select(type != "string" or ((split("=")[0]) as $key | any($added[]; runtime_name(.) == $key) | not)))
         | map(select(type != "string" or ((split("=")[0]) as $key | any($changed[]; . == $key) | not)))
@@ -1114,6 +1119,7 @@ snapshot_from_json() {
       elif $name == "TEAGRAM_TURNSTILE_SECRET_KEY_FILE" then "TG_TURNSTILE_SECRET_KEY_FILE"
       else $name end;
     [(item.Config.Env // [])[] | select(type == "string")
+     | select(. != "TG_USER_INVITE_QUOTA=")
      | select(IN(
          "TG_RATE_LIMIT_KEY_EXCHANGE_IP=",
          "TG_RATE_LIMIT_KEY_EXCHANGE_IP_TAILNET=",
@@ -1206,6 +1212,8 @@ snapshot_from_json() {
           "TG_KEY_EXCHANGE_GLOBAL_RATE",
           "TG_KEY_EXCHANGE_GLOBAL_BURST"
         )) and .value == "";
+      def empty_user_invite_quota_default:
+        .key == "TG_USER_INVITE_QUOTA" and .value == "";
       # Compose includes extension anchors in its rendered output. Their
       # expanded service fields remain in the digest; the anchors do not.
       with_entries(select((.key | startswith("x-")) | not))
@@ -1224,12 +1232,17 @@ snapshot_from_json() {
       end
       # Empty key-exchange mappings use binary defaults; active values remain
       # subject to the Compose and container environment checks.
-      | .services[env.ROLLOUT_COMPOSE_SERVICE // "teagramd"].environment |= with_entries(select(empty_key_exchange_default | not))
+      | .services[env.ROLLOUT_COMPOSE_SERVICE // "teagramd"].environment |= with_entries(select((empty_key_exchange_default or empty_user_invite_quota_default) | not))
       # Named tailnet changes are verified against .env, resolved Compose, and
       # the inspected container; omit only that named value from config drift.
       | if (any($added[]; . == "TG_RATE_LIMIT_KEY_EXCHANGE_IP_TAILNET") or
             any($changed[]; . == "TG_RATE_LIMIT_KEY_EXCHANGE_IP_TAILNET")) then
           del(.services[env.ROLLOUT_COMPOSE_SERVICE // "teagramd"].environment.TG_RATE_LIMIT_KEY_EXCHANGE_IP_TAILNET)
+        else . end
+      # The first quota is checked against .env, Compose, and the container;
+      # omit it from the unrelated config digest during that named addition.
+      | if any($added[]; . == "TG_USER_INVITE_QUOTA") then
+          del(.services[env.ROLLOUT_COMPOSE_SERVICE // "teagramd"].environment.TG_USER_INVITE_QUOTA)
         else . end
       # Reviewed logger and login-code transitions are checked separately.
       # Keep both out of the unrelated config digest.

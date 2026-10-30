@@ -11,6 +11,7 @@ import (
 	"net"
 	"net/http"
 	"net/netip"
+	"strings"
 	"time"
 
 	"github.com/teagramhq/teagram-server/internal/admin/assets"
@@ -513,7 +514,15 @@ func AdminRouter(cfg LoginHandlerConfig, registry *mtproto.SessionRegistry) http
 		TokenHash: cfg.TokenHash,
 	})(protectedMux))
 
-	h := SecurityHeaders(mux)
+	// Bot API tokens are URL credentials and authenticate only on their own
+	// listener. Reject that URL namespace here instead of treating it as a 404.
+	h := SecurityHeaders(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasPrefix(r.URL.Path, "/bot") {
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		mux.ServeHTTP(w, r)
+	}))
 	// Wrap with protected routes metadata for the gate test.
 	return &adminRouter{Handler: h, patterns: protectedPatterns}
 }

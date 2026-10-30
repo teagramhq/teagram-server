@@ -9,6 +9,7 @@ import (
 	"github.com/gotd/td/tg"
 
 	"github.com/teagramhq/teagram-server/internal/config"
+	"github.com/teagramhq/teagram-server/internal/linklanding"
 	"github.com/teagramhq/teagram-server/internal/mtproto"
 	"github.com/teagramhq/teagram-server/internal/store"
 )
@@ -21,9 +22,9 @@ const (
 	userInviteTypeID              uint32 = 0xff81dc6c
 	userInvitesTypeID             uint32 = 0xb5cfec46
 
-	// userInviteLandingPath is reserved by the link landing route. TG_PUBLIC_LINK_PREFIX
-	// always ends in '/', so appending this segment produces /invite#<secret>.
-	userInviteLandingPath = "invite"
+	// TG_PUBLIC_LINK_PREFIX always ends in '/', so appending this reserved path
+	// segment produces /invite#<secret>.
+	userInviteLandingPath = linklanding.InviteLandingPathSegment
 )
 
 var userInviteCredentialPattern = regexp.MustCompile(`(?i)[0-9a-f]{64}`)

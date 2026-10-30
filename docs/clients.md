@@ -52,6 +52,7 @@ Configuration is read from environment variables in `internal/config/config.go`:
 | `TG_BLOB_S3_ALLOW_INSECURE_HTTP` | `false` | Explicit loopback/compose-only plaintext opt-in; startup warns when enabled |
 | `TG_MEDIA_KEY_DIR` | *(unset)* | Directory of versioned media keys (`<version>.key`); both media key settings must be set together |
 | `TG_MEDIA_KEY_CURRENT` | *(unset)* | Version used for newly written encrypted S3 objects; old versions remain readable while their key files stay available |
+| `TG_UPLOADS_DISABLED` | `false` | Set to `true` to reject client RPCs that upload file bytes with the stable `UPLOADS_DISABLED` error; existing media downloads continue to work, and the demo's private seed overlay enables its API only while public ingress is stopped |
 | `TEAGRAM_MEDIA_KEY_SOURCE_DIR` | `/etc/teagramd/media-keys` | Host directory bind-mounted read-only into the default Compose server; provision outside the repository |
 | `TG_DC_ID`          | `2`              | DC id this server advertises as `ThisDC`    |
 | `TG_RATE_LIMIT_DISCOVERY` | `60` | Cluster-wide valid local-direct preflight response attempts per fixed window, counted in Postgres; `0` disables this bound, and a negative or non-integer value fails startup |
@@ -59,6 +60,7 @@ Configuration is read from environment variables in `internal/config/config.go`:
 | `TG_RATE_LIMIT_DISCOVERY_IP` | `10` | Valid local-direct preflight response attempts per client network (`/32` for IPv4 or `/64` for IPv6) per fixed window, shared through Postgres; `0` disables this bound |
 | `TG_RATE_LIMIT_DISCOVERY_IP_WINDOW` | `1m` | Fixed window for the per-network discovery bound; it must be positive while that bound is enabled |
 | `TG_LOG_LOGIN_CODES`| `false`          | Legacy login-code diagnostic. It is not used by Teagram username/password sign-in; leave it disabled. A non-boolean value fails startup |
+| `TG_LOG_AUTH_KEY_UNBINDS` | `false` | Structured unbind diagnostics with operation, reason, outcome, auth-key ID, and user ID. Demo enables it for troubleshooting; no key bytes, tokens, or credentials are logged. See the [demo log access and retention model](../deploy/teagram-demo/README.md#auth-key-unbind-diagnostic-logs). A non-boolean value fails startup |
 | `TG_SESSION_IP` | `false` | Store session IPs and return them in `account.getAuthorizations`. Unset means no session IP stored by default; a non-boolean value fails startup |
 | `TG_SESSION_DEVICE_LABELS` | `true` | Store and return device model, platform, OS version, API ID, and app version for sessions. A non-boolean value fails startup |
 | `TG_RATE_LIMIT_SEND_CODE_IP` | `10` | `auth.sendCode` calls per client network per window; `0` disables this counter |

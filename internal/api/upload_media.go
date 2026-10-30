@@ -14,6 +14,9 @@ import (
 // grant is not a download right: upload.getFile still requires a live message
 // row naming the file.
 func (h *handlers) handleUploadMedia(r *mtproto.Request) (bin.Encoder, error) {
+	if h.uploadsDisabled {
+		return nil, errUploadsDisabled
+	}
 	var req tg.MessagesUploadMediaRequest
 	if err := req.Decode(r.Buf); err != nil {
 		return nil, errMethodNotImpl

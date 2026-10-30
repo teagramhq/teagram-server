@@ -12,6 +12,7 @@ dockerfile="${DEPLOY_DOCKERFILE:-Dockerfile}"
 demo_forced_command="deploy/teagram-demo/forced-command.sh"
 expected_if="\${{ github.event_name == 'workflow_dispatch' || (github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push') }}"
 expected_resolve_demo_if="\${{ needs.deploy.result == 'success' }}"
+expected_demo_resolver_ref='${{ github.workflow_sha }}'
 expected_demo_if="\${{ always() && needs.deploy.result == 'success' }}"
 expected_demo_step_if="\${{ steps.demo-gate.outputs.enabled == 'true' }}"
 expected_demo_cleanup_if="\${{ always() && steps.demo-gate.outputs.enabled == 'true' }}"
@@ -49,17 +50,33 @@ check_ci_contract() {
     ci_fail 'main pushes must share a group, PR updates must keep per-PR groups, and other runs must stay isolated'
   [[ "$(ci_query '.concurrency."cancel-in-progress"')" == "$expected_ci_cancel" ]] ||
     ci_fail 'only pull request updates may cancel in-progress CI runs'
-  [[ "$(ci_query '.jobs."publish-demo-image".if')" == "\${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}" ]] ||
+  [[ "$(ci_query '.jobs."publish-demo-image".if')" == "\${{ always() && (needs.ops-prioritize-main.result == 'success' || (needs.ops-prioritize-main.result == 'skipped' && github.event_name == 'pull_request')) && success() && github.event_name == 'push' && github.ref == 'refs/heads/main' }}" ]] ||
     ci_fail 'the demo image may publish only from main pushes'
-  [[ "$(ci_query '.jobs."publish-demo-image".needs | sort | join(",")')" == 'browser-acceptance,browser-acceptance-image,ci,ci-main,compose,css,demo-web-artifact,deploy-workflow,docker,e2e-admin,lint,mirror-rustfs-qualification-images,photothumb-runtime,real-server-fixtures,restore-readiness,rustfs-transition-qualification,schema-gate-postgres,smoke,sql-lint,sqlc,sticker-bundle,websocket-d1,websocket-permanent-exchange' ]] ||
+  [[ "$(ci_query '.jobs."publish-demo-image".needs | sort | join(",")')" == 'browser-acceptance,browser-acceptance-image,ci,ci-main,compose,css,demo-web-artifact,deploy-workflow,docker,e2e-admin,lint,mirror-rustfs-qualification-images,ops-prioritize-main,photothumb-runtime,real-server-fixtures,restore-readiness,rustfs-transition-qualification,smoke,sql-lint,sqlc,sticker-bundle,test-migrations,websocket-d1,websocket-permanent-exchange' ]] ||
     ci_fail 'the demo image publish must wait for every CI lane'
   [[ "$(ci_query '.jobs.ci.needs | join(",")')" == *'demo-web-artifact'* ]] ||
     ci_fail 'the required CI gate must include the pinned demo web artifact build'
+  [[ "$(ci_query '.jobs.ci.needs | join(",")')" == *'test-migrations'* ]] ||
+    ci_fail 'the required CI gate must include the migrations lane'
+  [[ "$(ci_query '.jobs."schema-gate-postgres" // ""')" == '' ]] ||
+    ci_fail 'the obsolete PostgreSQL schema gate must be removed'
+  [[ "$(ci_query '.jobs.ci.needs | join(",")')" != *'schema-gate-postgres'* ]] ||
+    ci_fail 'the required CI gate must not include the obsolete PostgreSQL schema gate'
+  local expected_postgres_image='mirror.gcr.io/library/postgres:18-alpine@sha256:d8703cd7fba306b9fec9268ecedfa8a966846c053036a60e3635791957eb2f66'
+  [[ "$(ci_query '.jobs."test-migrations".env.POSTGRES_IMAGE')" == "$expected_postgres_image" ]] ||
+    ci_fail 'the migrations lane must use the production-pinned PostgreSQL image'
+  [[ "$(yq -r '.services.postgres.image' deploy/teagram-demo/compose.yaml)" == "$expected_postgres_image" ]] ||
+    ci_fail 'the production PostgreSQL image pin changed without updating the migrations lane'
   [[ "$(ci_query '.jobs.ci.steps[] | select(.name == "Require all CI lanes to pass") | .env.DEMO_WEB_ARTIFACT_RESULT')" == '${{ needs.demo-web-artifact.result }}' ]] ||
     ci_fail 'the required CI gate must receive the demo web artifact result'
+  [[ "$(ci_query '.jobs.ci.steps[] | select(.name == "Require all CI lanes to pass") | .env.TEST_MIGRATIONS_RESULT')" == '${{ needs.test-migrations.result }}' ]] ||
+    ci_fail 'the required CI gate must receive the migrations result'
   ci_query '.jobs.ci.steps[] | select(.name == "Require all CI lanes to pass") | .run' |
     grep -Fq '"$DEMO_WEB_ARTIFACT_RESULT" != "success"' ||
     ci_fail 'the required CI gate must reject a failed demo web artifact build'
+  ci_query '.jobs.ci.steps[] | select(.name == "Require all CI lanes to pass") | .run' |
+    grep -Fq '"$TEST_MIGRATIONS_RESULT" != "success"' ||
+    ci_fail 'the required CI gate must reject a failed migrations lane'
   [[ "$(ci_query '.jobs."demo-web-artifact".permissions.contents')" == 'read' ]] ||
     ci_fail 'the demo web artifact build must use read-only repository access'
   [[ "$(ci_query '.jobs."demo-web-artifact".permissions | to_entries | map(.key + "=" + .value) | join(",")')" == 'contents=read' ]] ||
@@ -303,6 +320,10 @@ check_contract() {
     fail 'the demo web resolver must wait for the tested server commit'
   [[ "$(query '.jobs.resolve-demo-web.if')" == "$expected_resolve_demo_if" ]] ||
     fail 'the demo web resolver must run only after the server deploy'
+  [[ "$(query '.jobs.resolve-demo-web.continue-on-error')" == 'true' ]] ||
+    fail 'the optional demo web resolver must not fail the server deploy workflow'
+  [[ "$(query '.jobs.resolve-demo-web.steps[] | select(.name == "Check out the workflow source commit") | .with.ref')" == "$expected_demo_resolver_ref" ]] ||
+    fail 'the demo web resolver must use the workflow revision that contains its pin verifier'
   [[ "$(query '.jobs.resolve-demo-web.permissions // {} | to_entries | map(select(.value != "read")) | length')" == '0' ]] ||
     fail 'the demo web resolver must use read-only permissions'
   [[ "$(query '.jobs.resolve-demo-web.outputs.deployable')" == '${{ steps.pin.outputs.deployable }}' ]] ||
@@ -313,6 +334,8 @@ check_contract() {
     fail 'the demo deploy must wait for the server and web pin resolver'
   [[ "$(query '.jobs.deploy-demo.if')" == "$expected_demo_if" ]] ||
     fail 'the demo job must start after the server deploy to evaluate its environment gate'
+  [[ "$(query '.jobs.deploy-demo.continue-on-error')" == 'true' ]] ||
+    fail 'the optional demo deployment must not fail the server deploy workflow'
   [[ "$(query '.jobs.deploy-demo.environment')" == 'demo' ]] ||
     fail 'the demo job must use the separate demo environment'
   [[ "$(query '.jobs.deploy-demo.steps[0].id')" == 'demo-gate' ]] ||
