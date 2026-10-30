@@ -51,6 +51,28 @@ fi
 readonly lint_dsn="postgres://postgres:${password}@${lint_host}:${postgres_port}/migration_lint?sslmode=disable"
 readonly fresh_dsn="postgres://postgres:${password}@${postgres_container}:5432/migration_fresh?sslmode=disable"
 readonly upgrade_dsn="postgres://postgres:${password}@${postgres_container}:5432/migration_upgrade?sslmode=disable"
+readonly base_lock_fixture_dsn="postgres://postgres:${password}@${lint_host}:${postgres_port}/migration_lint_base_lock?sslmode=disable"
+
+apply_migrations() {
+  local migration_dir=$1
+  local database_dsn=$2
+  docker run --rm \
+    --network "$network" \
+    --volume "$migration_dir:/migrations:ro" \
+    "$atlas_apply_image" \
+    migrate apply --dir file:///migrations --url "$database_dsn" --tx-mode file
+}
+
+run_atlas_migration_lint() {
+  local migration_dir=$1
+  local database_dsn=$2
+  local migration_count=$3
+  "$atlas_lint_binary" migrate hash --dir "file://$migration_dir" >/dev/null
+  "$atlas_lint_binary" migrate lint \
+    --dir "file://$migration_dir" \
+    --dev-url "$database_dsn" \
+    --latest "$migration_count"
+}
 
 for database in migration_lint migration_fresh migration_upgrade; do
   docker exec "$postgres_container" createdb -U postgres "$database"
@@ -67,12 +89,18 @@ mapfile -t changed_sql_migrations < <(
   git -C "$repo_root" diff --name-only --diff-filter=AMR "$base_ref...HEAD" -- migrations \
     | awk '/\.sql$/ { print }'
 )
+mkdir -p "$baseline_dir"
+git -C "$repo_root" archive "$base_ref" migrations | tar -x -C "$baseline_dir"
+chmod -R a+rX "$baseline_dir"
 if [ "${#changed_sql_migrations[@]}" -gt 0 ]; then
-  "$atlas_lint_binary" migrate lint \
-    --dir "file://$repo_root/migrations" \
-    --dev-url "$lint_dsn" \
-    --git-base "$base_ref" \
-    --git-dir "$repo_root"
+  changed_migration_dir="$temp_dir/atlas-lint-changed"
+  mkdir -p "$changed_migration_dir"
+  for migration in "${changed_sql_migrations[@]}"; do
+    cp "$repo_root/$migration" "$changed_migration_dir/"
+  done
+
+  apply_migrations "$baseline_dir/migrations" "$lint_dsn"
+  run_atlas_migration_lint "$changed_migration_dir" "$lint_dsn" "${#changed_sql_migrations[@]}"
 else
   printf '%s\n' 'Atlas migration lint skipped: no changed SQL migrations.'
 fi
@@ -89,12 +117,8 @@ run_atlas_lint_fixture() {
 
   mkdir -p "$fixture_dir"
   cp "$fixture_source"/*.sql "$fixture_dir/"
-  "$atlas_lint_binary" migrate hash --dir "file://$fixture_dir" >/dev/null
 
-  if "$atlas_lint_binary" migrate lint \
-    --dir "file://$fixture_dir" \
-    --dev-url "$fixture_dsn" \
-    --latest 1 >"$lint_output" 2>&1; then
+  if run_atlas_migration_lint "$fixture_dir" "$fixture_dsn" 1 >"$lint_output" 2>&1; then
     lint_status=0
   else
     lint_status=$?
@@ -121,24 +145,19 @@ run_atlas_lint_fixture() {
 
 docker exec "$postgres_container" createdb -U postgres migration_lint_additive
 docker exec "$postgres_container" createdb -U postgres migration_lint_destructive
+docker exec "$postgres_container" createdb -U postgres migration_lint_base_lock
 run_atlas_lint_fixture additive pass migration_lint_additive
 run_atlas_lint_fixture destructive reject migration_lint_destructive
 
-apply_migrations() {
-  local migration_dir=$1
-  local database_dsn=$2
-  docker run --rm \
-    --network "$network" \
-    --volume "$migration_dir:/migrations:ro" \
-    "$atlas_apply_image" \
-    migrate apply --dir file:///migrations --url "$database_dsn"
-}
+base_lock_fixture_dir="$temp_dir/atlas-lint-base-lock-history"
+mkdir -p "$base_lock_fixture_dir"
+cp "$repo_root/.github/scripts/testdata/migrations/atlas-lint/base-lock-history"/*.sql "$base_lock_fixture_dir/"
+"$atlas_lint_binary" migrate hash --dir "file://$base_lock_fixture_dir" >/dev/null
+apply_migrations "$base_lock_fixture_dir" "$base_lock_fixture_dsn"
+run_atlas_lint_fixture base-lock-change pass migration_lint_base_lock
 
 apply_migrations "$repo_root/migrations" "$fresh_dsn"
 
-mkdir -p "$baseline_dir"
-git -C "$repo_root" archive "$base_ref" migrations | tar -x -C "$baseline_dir"
-chmod -R a+rX "$baseline_dir"
 apply_migrations "$baseline_dir/migrations" "$upgrade_dsn"
 
 docker exec "$postgres_container" psql \
