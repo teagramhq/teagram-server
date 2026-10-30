@@ -141,7 +141,7 @@ func measureFixture(t *testing.T, ctx context.Context, dsn, blobs string, key *r
 		if only != "" && !strings.Contains(sc.name, only) {
 			continue
 		}
-		r := measure(ctx, e, explain, sc)
+		r := measure(t, ctx, e, explain, sc)
 		r.Fixture = f.Spec.Name
 		t.Logf("%s %s: p50 %.2f ms, p95 %.2f ms, %d queries, %d rows read, %d B allocated %s",
 			f.Spec.Name, sc.name, r.P50Ms, r.P95Ms, r.Queries, r.RowsRead, r.AllocBytes, r.Error)
@@ -150,7 +150,8 @@ func measureFixture(t *testing.T, ctx context.Context, dsn, blobs string, key *r
 	return results
 }
 
-func measure(ctx context.Context, e *env, explain *explainer, sc scenario) perfreport.Result {
+func measure(t *testing.T, ctx context.Context, e *env, explain *explainer, sc scenario) perfreport.Result {
+	t.Helper()
 	r := perfreport.Result{Name: sc.name, Kind: sc.kind, FullSet: sc.fullSet, Note: sc.note}
 	fail := func(err error) perfreport.Result {
 		r.Error = err.Error()
@@ -198,6 +199,9 @@ func measure(ctx context.Context, e *env, explain *explainer, sc scenario) perfr
 			if e.logSQL != nil {
 				e.logSQL(sc.name, captured)
 			}
+			if sc.name == "messages.getDialogs" {
+				logQueryDurations(t, e.f.Spec.Name, elapsed, captured)
+			}
 		}
 		if sc.cleanup != nil {
 			if err := sc.cleanup(ctx, e); err != nil {
@@ -219,6 +223,30 @@ func measure(ctx context.Context, e *env, explain *explainer, sc scenario) perfr
 	r.Queries = int(queries[(len(queries)-1)/2])
 	r.AllocBytes = allocs[(len(allocs)-1)/2]
 	return r
+}
+
+func logQueryDurations(t *testing.T, fixture string, rpcDuration time.Duration, captured []capturedQuery) {
+	t.Helper()
+	totals := make(map[string]time.Duration)
+	counts := make(map[string]int)
+	for _, query := range captured {
+		line := firstLine(statementBody(query.sql) + query.sql)
+		totals[line] += query.duration
+		counts[line]++
+	}
+	statements := make([]string, 0, len(totals))
+	for statement := range totals {
+		statements = append(statements, statement)
+	}
+	slices.Sort(statements)
+	var total time.Duration
+	for _, statement := range statements {
+		duration := totals[statement]
+		total += duration
+		t.Logf("%s messages.getDialogs SQL: %d x %.2f ms %s", fixture, counts[statement], float64(duration.Microseconds())/1000, statement)
+	}
+	t.Logf("%s messages.getDialogs SQL total %.2f ms across %d statements; RPC sample %.2f ms",
+		fixture, float64(total.Microseconds())/1000, len(captured), float64(rpcDuration.Microseconds())/1000)
 }
 
 // percentile is nearest-rank over sorted values.

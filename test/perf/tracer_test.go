@@ -20,32 +20,49 @@ type queryTracer struct {
 	inFlight int
 	last     time.Time
 	queries  int
-	captured []capturedQuery
+	captured []*capturedQuery
 	capture  bool
 }
 
 type capturedQuery struct {
-	sql  string
-	args []any
+	sql       string
+	args      []any
+	startedAt time.Time
+	duration  time.Duration
 }
 
+type queryDurationContextKey struct{}
+
 func (q *queryTracer) TraceQueryStart(ctx context.Context, _ *pgx.Conn, data pgx.TraceQueryStartData) context.Context {
+	startedAt := time.Now()
 	q.mu.Lock()
-	defer q.mu.Unlock()
 	q.inFlight++
-	q.last = time.Now()
+	q.last = startedAt
 	q.queries++
+	var captured *capturedQuery
 	if q.capture {
-		q.captured = append(q.captured, capturedQuery{sql: data.SQL, args: append([]any(nil), data.Args...)})
+		captured = &capturedQuery{
+			sql: data.SQL, args: append([]any(nil), data.Args...), startedAt: startedAt,
+		}
+		q.captured = append(q.captured, captured)
+	}
+	q.mu.Unlock()
+	if captured != nil {
+		return context.WithValue(ctx, queryDurationContextKey{}, captured)
 	}
 	return ctx
 }
 
-func (q *queryTracer) TraceQueryEnd(context.Context, *pgx.Conn, pgx.TraceQueryEndData) {
+func (q *queryTracer) TraceQueryEnd(ctx context.Context, _ *pgx.Conn, _ pgx.TraceQueryEndData) {
+	finishedAt := time.Now()
+	captured, _ := ctx.Value(queryDurationContextKey{}).(*capturedQuery)
 	q.mu.Lock()
 	defer q.mu.Unlock()
+	if captured != nil {
+		captured.duration = finishedAt.Sub(captured.startedAt)
+	}
 	q.inFlight--
-	q.last = time.Now()
+	q.last = finishedAt
 }
 
 // reset starts a new counting window. With capture set, the window also keeps
@@ -61,7 +78,12 @@ func (q *queryTracer) reset(capture bool) {
 func (q *queryTracer) window() (int, []capturedQuery) {
 	q.mu.Lock()
 	defer q.mu.Unlock()
-	return q.queries, q.captured
+	captured := make([]capturedQuery, len(q.captured))
+	for i, query := range q.captured {
+		captured[i] = *query
+		captured[i].args = append([]any(nil), query.args...)
+	}
+	return q.queries, captured
 }
 
 // quietFor is how long the pool must stay idle before the window closes. It
