@@ -49,12 +49,23 @@ else
   readonly lint_host=127.0.0.1
 fi
 readonly lint_dsn="postgres://postgres:${password}@${lint_host}:${postgres_port}/migration_lint?sslmode=disable"
+readonly lint_base_dsn="postgres://postgres:${password}@${postgres_container}:5432/migration_lint_base?sslmode=disable"
 readonly fresh_dsn="postgres://postgres:${password}@${postgres_container}:5432/migration_fresh?sslmode=disable"
 readonly upgrade_dsn="postgres://postgres:${password}@${postgres_container}:5432/migration_upgrade?sslmode=disable"
 
-for database in migration_lint migration_fresh migration_upgrade; do
+for database in migration_lint migration_lint_base migration_fresh migration_upgrade; do
   docker exec "$postgres_container" createdb -U postgres "$database"
 done
+
+apply_migrations() {
+  local migration_dir=$1
+  local database_dsn=$2
+  docker run --rm \
+    --network "$network" \
+    --volume "$migration_dir:/migrations:ro" \
+    "$atlas_apply_image" \
+    migrate apply --dir file:///migrations --url "$database_dsn"
+}
 
 docker run --rm \
   --volume "$repo_root/migrations:/migrations:ro" \
@@ -67,9 +78,49 @@ mapfile -t changed_sql_migrations < <(
   git -C "$repo_root" diff --name-only --diff-filter=AMR "$base_ref...HEAD" -- migrations \
     | awk '/\.sql$/ { print }'
 )
+
+mkdir -p "$baseline_dir"
+git -C "$repo_root" archive "$base_ref" migrations | tar -x -C "$baseline_dir"
+chmod -R a+rX "$baseline_dir"
+
 if [ "${#changed_sql_migrations[@]}" -gt 0 ]; then
+  changed_lint_dir="$temp_dir/atlas-lint-changed"
+  mkdir -p "$changed_lint_dir"
+  for migration in "${changed_sql_migrations[@]}"; do
+    cp -- "$repo_root/$migration" "$changed_lint_dir/"
+  done
+
+  base_checkpoint="$(git -C "$repo_root" ls-tree -r --name-only "$base_ref" -- migrations \
+    | awk '/\.sql$/ { print }' \
+    | LC_ALL=C sort \
+    | tail -n 1)"
+  if [ -z "$base_checkpoint" ]; then
+    printf 'No base migration available for Atlas lint checkpoint (%s).\n' "$base_ref" >&2
+    exit 1
+  fi
+  checkpoint_file="$changed_lint_dir/$(basename "$base_checkpoint")"
+  if [ -e "$checkpoint_file" ]; then
+    printf 'Changed migration overlaps the Atlas lint checkpoint: %s\n' "$checkpoint_file" >&2
+    exit 1
+  fi
+
+  # Atlas lint executes each base statement separately, which cannot replay
+  # historical LOCK TABLE statements. Apply the base with Atlas's migration
+  # runner, then seed lint from a schema-only checkpoint of that database.
+  apply_migrations "$baseline_dir/migrations" "$lint_base_dsn"
+  {
+    printf '%s\n' '-- atlas:checkpoint'
+    docker exec --env "PGPASSWORD=$password" "$postgres_container" pg_dump \
+      --username=postgres \
+      --dbname=migration_lint_base \
+      --schema-only \
+      --no-owner \
+      --no-privileges \
+      --no-comments \
+      --exclude-table=public.atlas_schema_revisions
+  } | sed '/^\\restrict /d; /^\\unrestrict$/d' > "$checkpoint_file"
   "$atlas_lint_binary" migrate lint \
-    --dir "file://$repo_root/migrations" \
+    --dir "file://$changed_lint_dir" \
     --dev-url "$lint_dsn" \
     --git-base "$base_ref" \
     --git-dir "$repo_root"
@@ -124,21 +175,8 @@ docker exec "$postgres_container" createdb -U postgres migration_lint_destructiv
 run_atlas_lint_fixture additive pass migration_lint_additive
 run_atlas_lint_fixture destructive reject migration_lint_destructive
 
-apply_migrations() {
-  local migration_dir=$1
-  local database_dsn=$2
-  docker run --rm \
-    --network "$network" \
-    --volume "$migration_dir:/migrations:ro" \
-    "$atlas_apply_image" \
-    migrate apply --dir file:///migrations --url "$database_dsn"
-}
-
 apply_migrations "$repo_root/migrations" "$fresh_dsn"
 
-mkdir -p "$baseline_dir"
-git -C "$repo_root" archive "$base_ref" migrations | tar -x -C "$baseline_dir"
-chmod -R a+rX "$baseline_dir"
 apply_migrations "$baseline_dir/migrations" "$upgrade_dsn"
 
 docker exec "$postgres_container" psql \

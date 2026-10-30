@@ -2,14 +2,26 @@
 """Regression tests for the migration lock-risk policy."""
 
 import unittest
+from pathlib import Path
 
 from migration_lock_lint import lint_migration
+
+
+FIXTURE_DIR = Path(__file__).parent / "testdata/migrations/atlas-lint"
 
 
 class MigrationLockLintTest(unittest.TestCase):
     def test_rejects_non_concurrent_index_on_existing_table(self) -> None:
         sql = "CREATE INDEX users_phone_idx ON users (phone);"
         self.assertIn("CREATE INDEX", lint_migration(sql)[0])
+
+    def test_concurrent_atlas_lint_fixture_uses_allowed_pattern(self) -> None:
+        migration = FIXTURE_DIR / "additive/20260103000000_add_users_email_index.sql"
+        self.assertEqual([], lint_migration(migration.read_text(encoding="utf-8")))
+
+    def test_blocking_atlas_lint_fixture_is_rejected(self) -> None:
+        migration = FIXTURE_DIR / "blocking/20260102000000_lock_users.sql"
+        self.assertIn("LOCK TABLE", lint_migration(migration.read_text(encoding="utf-8"))[0])
 
     def test_allows_index_on_table_created_by_the_migration(self) -> None:
         sql = "CREATE TABLE new_table (id BIGINT PRIMARY KEY); CREATE INDEX new_table_id_idx ON new_table (id);"
@@ -36,7 +48,12 @@ class MigrationLockLintTest(unittest.TestCase):
         self.assertEqual([], lint_migration(sql))
 
     def test_ignores_lock_examples_in_comments_and_strings(self) -> None:
-        sql = "-- CREATE INDEX example_idx ON users (phone);\nSELECT 'DROP INDEX example_idx';"
+        sql = (
+            "-- LOCK TABLE users IN SHARE MODE;\n"
+            "-- CREATE INDEX example_idx ON users (phone);\n"
+            "SELECT 'LOCK TABLE users IN SHARE MODE';\n"
+            "SELECT 'DROP INDEX example_idx';"
+        )
         self.assertEqual([], lint_migration(sql))
 
     def test_rejects_type_rewrites(self) -> None:

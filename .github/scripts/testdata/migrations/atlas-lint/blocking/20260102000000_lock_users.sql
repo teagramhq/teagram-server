@@ -1,0 +1,1 @@
+LOCK TABLE users IN SHARE MODE;

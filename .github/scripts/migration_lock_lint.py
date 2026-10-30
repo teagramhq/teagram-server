@@ -72,6 +72,8 @@ def _statement_risks(statement: str, created_tables: set[str]) -> list[str]:
     risks: list[str] = []
     if re.match(r"^\s*DO\b", statement, re.IGNORECASE):
         risks.append("DO blocks can hide procedural DDL whose lock risk this lint cannot inspect")
+    if re.match(r"^\s*LOCK\s+TABLE\b", statement, re.IGNORECASE):
+        risks.append("LOCK TABLE can block concurrent table access")
 
     index = _CREATE_INDEX.search(statement)
     if index and not index.group("concurrently"):
