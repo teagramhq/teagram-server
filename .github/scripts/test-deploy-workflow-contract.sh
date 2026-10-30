@@ -17,6 +17,7 @@ expected_demo_step_if="\${{ steps.demo-gate.outputs.enabled == 'true' }}"
 expected_demo_cleanup_if="\${{ always() && steps.demo-gate.outputs.enabled == 'true' }}"
 expected_demo_web_step_if="\${{ steps.web-gate.outputs.enabled == 'true' }}"
 expected_demo_web_failure_if="\${{ steps.demo-gate.outputs.enabled == 'true' && steps.web-gate.outputs.enabled != 'true' }}"
+expected_demo_resolver_failure_if="\${{ always() && steps.demo-gate.outputs.enabled == 'true' && steps.pin.outcome == 'failure' && steps.server-deploy.outcome == 'success' }}"
 expected_ci_group="\${{ github.workflow }}-\${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || (github.event_name == 'push' && github.ref == 'refs/heads/main' && 'main') || format('run-{0}-{1}', github.run_id, github.run_attempt) }}"
 expected_ci_cancel="\${{ github.event_name == 'pull_request' }}"
 expected_run_name="\${{ inputs.issue && format('{0} [{1}]', github.workflow, inputs.issue) || '' }}"
@@ -313,9 +314,12 @@ check_contract() {
     fail 'demo deploys must share their own concurrency group'
   [[ "$(demo_query '.concurrency."cancel-in-progress"')" == 'false' ]] ||
     fail 'demo deploys must not cancel an in-progress rollout'
-  if grep -Fq 'continue-on-error:' "$demo_workflow"; then
-    fail 'demo failures must remain visible in the independent workflow result'
-  fi
+  [[ "$(demo_query '.jobs.deploy-demo.continue-on-error // ""')" == '' ]] ||
+    fail 'the demo job must not hide failures with continue-on-error'
+  [[ "$(demo_query '[.jobs.deploy-demo.steps[] | select(has("continue-on-error")) | .id] | join(",")')" == 'pin' ]] ||
+    fail 'only the web pin resolver may continue so the server deployment can finish'
+  [[ "$(demo_query '.jobs.deploy-demo.steps[] | select(.id == "pin") | ."continue-on-error"')" == 'true' ]] ||
+    fail 'the web resolver outcome must be retained for the post-deploy failure'
 
   [[ "$(query '.jobs | keys | sort | join(",")')" == 'deploy' ]] ||
     fail 'the server deploy workflow must contain only its server deploy job'
@@ -428,19 +432,32 @@ check_contract() {
     fail 'the demo key installation must run only when public demo deployment is enabled'
   [[ "$(query '.jobs.deploy-demo.steps[] | select(.name == "Deploy the tested server commit after the dev deploy") | .if')" == "$expected_demo_step_if" ]] ||
     fail 'the demo server deployment must run when public demo deployment is enabled, regardless of web pin state'
+  [[ "$(query '.jobs.deploy-demo.steps[] | select(.name == "Deploy the tested server commit after the dev deploy") | .id')" == 'server-deploy' ]] ||
+    fail 'the demo server deployment must expose its outcome for the resolver failure gate'
+  [[ "$(query '.jobs.deploy-demo.steps[] | select(.name == "Fail after server deploy when web resolution failed") | .if')" == "$expected_demo_resolver_failure_if" ]] ||
+    fail 'a resolver error must fail visibly only after a successful demo server deployment'
+  local demo_resolver_failure_run
+  demo_resolver_failure_run="$(query '.jobs.deploy-demo.steps[] | select(.name == "Fail after server deploy when web resolution failed") | .run')"
+  grep -Fq '::error::Public server deployed, but pinned web artifact resolution failed' <<< "$demo_resolver_failure_run" ||
+    fail 'a resolver error after server deployment must have an explicit failure annotation'
+  grep -Fq 'exit 1' <<< "$demo_resolver_failure_run" ||
+    fail 'a resolver error after server deployment must fail the demo workflow'
   [[ "$(query '.jobs.deploy-demo.steps[] | select(.name == "Fail if the pinned web publication is not deployable") | .if')" == "$expected_demo_web_failure_if" ]] ||
     fail 'a rejected web pin must fail visibly after the public server deployment'
   [[ "$(query '.jobs.deploy-demo.steps[] | select(.name == "Publish the pinned web artifact on the demo origin") | .if')" == "$expected_demo_web_step_if" ]] ||
     fail 'the web publish step must require a deployable published pin'
-  local demo_server_step_index demo_web_download_step_index demo_web_pin_failure_step_index
+  local demo_server_step_index demo_resolver_failure_step_index demo_web_download_step_index demo_web_pin_failure_step_index
   demo_server_step_index="$(grep -nF -m1 '      - name: Deploy the tested server commit after the dev deploy' "$demo_workflow" | cut -d: -f1)"
+  demo_resolver_failure_step_index="$(grep -nF -m1 '      - name: Fail after server deploy when web resolution failed' "$demo_workflow" | cut -d: -f1)"
   demo_web_download_step_index="$(grep -nF -m1 '      - name: Download the web artifact from tested CI' "$demo_workflow" | cut -d: -f1)"
   demo_web_pin_failure_step_index="$(grep -nF -m1 '      - name: Fail if the pinned web publication is not deployable' "$demo_workflow" | cut -d: -f1)"
-  if [[ ! "$demo_server_step_index" =~ ^[0-9]+$ || ! "$demo_web_download_step_index" =~ ^[0-9]+$ ||
+  if [[ ! "$demo_server_step_index" =~ ^[0-9]+$ || ! "$demo_resolver_failure_step_index" =~ ^[0-9]+$ ||
+    ! "$demo_web_download_step_index" =~ ^[0-9]+$ ||
     ! "$demo_web_pin_failure_step_index" =~ ^[0-9]+$ ]] ||
-    (( demo_server_step_index >= demo_web_download_step_index ||
+    (( demo_server_step_index >= demo_resolver_failure_step_index ||
+      demo_resolver_failure_step_index >= demo_web_download_step_index ||
       demo_web_download_step_index >= demo_web_pin_failure_step_index )); then
-    fail 'a non-deployable web pin must fail visibly after the public server deployment'
+    fail 'resolver and non-deployable pin failures must occur after the public server deployment'
   fi
   [[ "$(query '.jobs.deploy-demo.steps[] | select(.name == "Remove the demo deploy key") | .if')" == "$expected_demo_cleanup_if" ]] ||
     fail 'the demo deploy key must be removed even when deployment fails'
@@ -613,6 +630,10 @@ self_test() {
     '.jobs."deploy-demo".continue-on-error = true'
     '.jobs."deploy-demo".steps |= map(select(.id != "target"))'
     '.jobs."deploy-demo".steps[0].run = "echo enabled=true"'
+    'del(.jobs."deploy-demo".steps[] | select(.id == "pin")."continue-on-error")'
+    '(.jobs."deploy-demo".steps[] | select(.id == "pin") | ."continue-on-error") = false'
+    '.jobs."deploy-demo".steps |= map(select(.name != "Fail after server deploy when web resolution failed"))'
+    '(.jobs."deploy-demo".steps[] | select(.name == "Fail after server deploy when web resolution failed") | .if) = "${{ always() }}"'
     '(.jobs."deploy-demo".steps[] | select(.name == "Publish the pinned web artifact on the demo origin") | .if) = "${{ always() }}"'
     '(.jobs."deploy-demo".steps[] | select(.name == "Deploy the tested server commit after the dev deploy") | .if) = "${{ always() }}"'
     '.jobs."deploy-demo".if = "${{ github.event_name == '"'"'workflow_dispatch'"'"' }}"'

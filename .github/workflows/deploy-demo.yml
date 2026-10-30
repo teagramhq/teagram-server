@@ -74,6 +74,7 @@ jobs:
       - name: Resolve the pinned web artifact
         id: pin
         if: ${{ steps.demo-gate.outputs.enabled == 'true' }}
+        continue-on-error: true
         run: |
           pin=$(python3 deploy/teagram-demo/resolve_web_artifact_pin.py --require-live-manifest)
           deployable=$(jq -er '.deployable | tostring' <<<"$pin")
@@ -146,6 +147,7 @@ jobs:
           printf '%s\n' "$DEMO_DEPLOY_KNOWN_HOSTS" > "$RUNNER_TEMP/ssh-demo/known_hosts"
 
       - name: Deploy the tested server commit after the dev deploy
+        id: server-deploy
         if: ${{ steps.demo-gate.outputs.enabled == 'true' }}
         env:
           DEPLOY_SHA: ${{ steps.target.outputs.sha }}
@@ -160,6 +162,12 @@ jobs:
             -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$RUNNER_TEMP/ssh-demo/known_hosts" \
             -o ServerAliveInterval=30 -o ServerAliveCountMax=10 \
             "root@$DEMO_DEPLOY_HOST" "$DEPLOY_SHA $DEPLOY_IMAGE_DIGEST" </dev/null
+
+      - name: Fail after server deploy when web resolution failed
+        if: ${{ always() && steps.demo-gate.outputs.enabled == 'true' && steps.pin.outcome == 'failure' && steps.server-deploy.outcome == 'success' }}
+        run: |
+          echo "::error::Public server deployed, but pinned web artifact resolution failed"
+          exit 1
 
       - name: Download the web artifact from tested CI
         id: demo-web-artifact
