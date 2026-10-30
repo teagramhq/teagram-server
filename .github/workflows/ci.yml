@@ -1434,7 +1434,7 @@ jobs:
 
   publish-demo-image:
     name: publish demo server image
-    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+    if: ${{ always() && success() && github.event_name == 'push' && github.ref == 'refs/heads/main' }}
     needs:
       - browser-acceptance
       - browser-acceptance-image

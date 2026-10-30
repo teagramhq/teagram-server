@@ -50,7 +50,7 @@ check_ci_contract() {
     ci_fail 'main pushes must share a group, PR updates must keep per-PR groups, and other runs must stay isolated'
   [[ "$(ci_query '.concurrency."cancel-in-progress"')" == "$expected_ci_cancel" ]] ||
     ci_fail 'only pull request updates may cancel in-progress CI runs'
-  [[ "$(ci_query '.jobs."publish-demo-image".if')" == "\${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}" ]] ||
+  [[ "$(ci_query '.jobs."publish-demo-image".if')" == "\${{ always() && success() && github.event_name == 'push' && github.ref == 'refs/heads/main' }}" ]] ||
     ci_fail 'the demo image may publish only from main pushes'
   [[ "$(ci_query '.jobs."publish-demo-image".needs | sort | join(",")')" == 'browser-acceptance,browser-acceptance-image,ci,ci-main,compose,css,demo-web-artifact,deploy-workflow,docker,e2e-admin,lint,mirror-rustfs-qualification-images,photothumb-runtime,real-server-fixtures,restore-readiness,rustfs-transition-qualification,smoke,sql-lint,sqlc,sticker-bundle,test-migrations,websocket-d1,websocket-permanent-exchange' ]] ||
     ci_fail 'the demo image publish must wait for every CI lane'
