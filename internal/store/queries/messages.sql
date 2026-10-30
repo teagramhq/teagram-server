@@ -267,6 +267,66 @@ WHERE owner_id = sqlc.arg(owner_id)
 ORDER BY local_id DESC
 LIMIT sqlc.arg(lim)::int;
 
+-- SearchMessagesWithReadiness keeps pre-existing history on the established
+-- query until its postings have been initialized, using one statement for
+-- both the readiness check and page read.
+-- name: SearchMessagesWithReadiness :many
+WITH dialog_state AS MATERIALIZED (
+    SELECT EXISTS (
+        SELECT 1
+        FROM message_search_unready_dialogs
+        WHERE owner_id = sqlc.arg(owner_id)::bigint
+          AND peer_type = sqlc.arg(peer_type)::smallint
+          AND peer_id = sqlc.arg(peer_id)::bigint
+    ) AS unready
+), parsed_query AS (
+    SELECT plainto_tsquery('simple', sqlc.arg(query)::text) AS tsquery,
+           (tsvector_to_array(to_tsvector('simple', sqlc.arg(query)::text)))[1] AS lexeme
+), legacy_page AS (
+    SELECT m.owner_id, m.local_id
+    FROM dialog_state AS state
+    CROSS JOIN messages AS m
+    WHERE state.unready
+      AND m.owner_id = sqlc.arg(owner_id)::bigint
+      AND m.peer_type = sqlc.arg(peer_type)::smallint
+      AND m.peer_id = sqlc.arg(peer_id)::bigint
+      AND m.deleted = false
+      AND (m.expires_at IS NULL OR m.expires_at > statement_timestamp())
+      AND m.message_tsv @@ (SELECT tsquery FROM parsed_query)
+      AND (sqlc.arg(offset_id)::bigint = 0 OR m.local_id < sqlc.arg(offset_id)::bigint)
+    ORDER BY m.local_id DESC
+    LIMIT sqlc.arg(lim)::int
+), postings_page AS (
+    SELECT p.owner_id, p.local_id
+    FROM dialog_state AS state
+    CROSS JOIN parsed_query AS q
+    JOIN message_search_postings AS p ON p.lexeme = q.lexeme
+    JOIN messages AS m
+      ON m.owner_id = p.owner_id
+     AND m.local_id = p.local_id
+     AND m.peer_type = p.peer_type
+     AND m.peer_id = p.peer_id
+    WHERE NOT state.unready
+      AND p.owner_id = sqlc.arg(owner_id)::bigint
+      AND p.peer_type = sqlc.arg(peer_type)::smallint
+      AND p.peer_id = sqlc.arg(peer_id)::bigint
+      AND m.deleted = false
+      AND (m.expires_at IS NULL OR m.expires_at > statement_timestamp())
+      AND m.message_tsv @@ q.tsquery
+      AND (sqlc.arg(offset_id)::bigint = 0 OR p.local_id < sqlc.arg(offset_id)::bigint)
+    ORDER BY p.local_id DESC
+    LIMIT sqlc.arg(lim)::int
+), page_ids AS (
+    SELECT owner_id, local_id FROM legacy_page
+    UNION ALL
+    SELECT owner_id, local_id FROM postings_page
+)
+SELECT sqlc.embed(m)
+FROM page_ids AS page
+JOIN messages AS m ON m.owner_id = page.owner_id AND m.local_id = page.local_id
+ORDER BY m.local_id DESC
+LIMIT sqlc.arg(lim)::int;
+
 -- SearchResultsCalendar is the date picker's per-day photo/video preview. Keep
 -- file_id <> 0 as a top-level predicate so the partial messages_file_idx can
 -- serve a large text-only history without scanning its message rows.

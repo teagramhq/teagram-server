@@ -785,7 +785,7 @@ func messagesFromRows(rows []db.Message) []Message {
 // matches query, ordered newest-first (descending local_id), with pagination by
 // offsetID. Only non-deleted messages owned by ownerID are returned.
 func (s *Store) SearchMessages(ctx context.Context, ownerID int64, peerType PeerType, peerID int64, query string, offsetID, limit int) ([]Message, error) {
-	rows, err := s.q.SearchMessages(ctx, db.SearchMessagesParams{
+	rows, err := s.q.SearchMessagesWithReadiness(ctx, db.SearchMessagesWithReadinessParams{
 		OwnerID:  ownerID,
 		PeerType: int16(peerType),
 		PeerID:   peerID,
@@ -798,7 +798,7 @@ func (s *Store) SearchMessages(ctx context.Context, ownerID int64, peerType Peer
 	}
 	msgs := make([]Message, len(rows))
 	for i, r := range rows {
-		msgs[i] = messageFromRow(r)
+		msgs[i] = messageFromRow(r.Message)
 	}
 	return msgs, nil
 }

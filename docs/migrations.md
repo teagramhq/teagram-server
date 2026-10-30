@@ -67,6 +67,21 @@ The test harness (`internal/pgtest`) and production both apply these same
 migrations to reach the current schema. (Wiring pgtest to apply them lands in a
 later task.)
 
+### Ordered message-search postings
+
+Migration `20261030000001_message_search_postings.sql` adds an ordered lexeme
+posting table and a marker table for dialogs whose existing history has not
+been initialized. Message inserts, text edits, soft deletes, and hard deletes
+keep the postings in sync transactionally. The migration does not copy
+historical lexemes into the postings table. Existing dialogs with messages
+remain on the original `messages.search` query until the separate history
+initializer runs; dialogs with no messages are ready immediately, and new
+dialogs use postings from their first message.
+
+Reverting the application leaves these additive tables, index, and triggers in
+place. The old search query ignores them, so they remain harmless until the
+application is deployed again.
+
 Browser acceptance binding evidence is an additive, unenrolled expansion.
 Its versioned read API, owner-only enrollment transaction, retention and rollback
 contract are documented in [browser-acceptance-binding-evidence.md](browser-acceptance-binding-evidence.md).

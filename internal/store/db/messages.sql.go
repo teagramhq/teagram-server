@@ -1424,6 +1424,137 @@ func (q *Queries) SearchMessages(ctx context.Context, arg SearchMessagesParams) 
 	return items, nil
 }
 
+const searchMessagesWithReadiness = `-- name: SearchMessagesWithReadiness :many
+WITH dialog_state AS MATERIALIZED (
+    SELECT EXISTS (
+        SELECT 1
+        FROM message_search_unready_dialogs
+        WHERE owner_id = $2::bigint
+          AND peer_type = $3::smallint
+          AND peer_id = $4::bigint
+    ) AS unready
+), parsed_query AS (
+    SELECT plainto_tsquery('simple', $5::text) AS tsquery,
+           (tsvector_to_array(to_tsvector('simple', $5::text)))[1] AS lexeme
+), legacy_page AS (
+    SELECT m.owner_id, m.local_id
+    FROM dialog_state AS state
+    CROSS JOIN messages AS m
+    WHERE state.unready
+      AND m.owner_id = $2::bigint
+      AND m.peer_type = $3::smallint
+      AND m.peer_id = $4::bigint
+      AND m.deleted = false
+      AND (m.expires_at IS NULL OR m.expires_at > statement_timestamp())
+      AND m.message_tsv @@ (SELECT tsquery FROM parsed_query)
+      AND ($6::bigint = 0 OR m.local_id < $6::bigint)
+    ORDER BY m.local_id DESC
+    LIMIT $1::int
+), postings_page AS (
+    SELECT p.owner_id, p.local_id
+    FROM dialog_state AS state
+    CROSS JOIN parsed_query AS q
+    JOIN message_search_postings AS p ON p.lexeme = q.lexeme
+    JOIN messages AS m
+      ON m.owner_id = p.owner_id
+     AND m.local_id = p.local_id
+     AND m.peer_type = p.peer_type
+     AND m.peer_id = p.peer_id
+    WHERE NOT state.unready
+      AND p.owner_id = $2::bigint
+      AND p.peer_type = $3::smallint
+      AND p.peer_id = $4::bigint
+      AND m.deleted = false
+      AND (m.expires_at IS NULL OR m.expires_at > statement_timestamp())
+      AND m.message_tsv @@ q.tsquery
+      AND ($6::bigint = 0 OR p.local_id < $6::bigint)
+    ORDER BY p.local_id DESC
+    LIMIT $1::int
+), page_ids AS (
+    SELECT owner_id, local_id FROM legacy_page
+    UNION ALL
+    SELECT owner_id, local_id FROM postings_page
+)
+SELECT m.owner_id, m.local_id, m.peer_id, m.from_id, m.date, m.message, m.out, m.edit_date, m.deleted, m.random_id, m.peer_local_id, m.peer_type, m.fanout_id, m.action_type, m.action_user_id, m.file_id, m.reply_to_msg_id, m.fwd_from_id, m.fwd_date, m.fwd_channel_id, m.fwd_channel_post, m.message_tsv, m.reply_to_trusted, m.grouped_id, m.fwd_post_author, m.ttl_period, m.expires_at, m.entities, m.sticker_document_id
+FROM page_ids AS page
+JOIN messages AS m ON m.owner_id = page.owner_id AND m.local_id = page.local_id
+ORDER BY m.local_id DESC
+LIMIT $1::int
+`
+
+type SearchMessagesWithReadinessParams struct {
+	Lim      int32
+	OwnerID  int64
+	PeerType int16
+	PeerID   int64
+	Query    string
+	OffsetID int64
+}
+
+type SearchMessagesWithReadinessRow struct {
+	Message Message
+}
+
+// SearchMessagesWithReadiness keeps pre-existing history on the established
+// query until its postings have been initialized, using one statement for
+// both the readiness check and page read.
+func (q *Queries) SearchMessagesWithReadiness(ctx context.Context, arg SearchMessagesWithReadinessParams) ([]SearchMessagesWithReadinessRow, error) {
+	rows, err := q.db.Query(ctx, searchMessagesWithReadiness,
+		arg.Lim,
+		arg.OwnerID,
+		arg.PeerType,
+		arg.PeerID,
+		arg.Query,
+		arg.OffsetID,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []SearchMessagesWithReadinessRow
+	for rows.Next() {
+		var i SearchMessagesWithReadinessRow
+		if err := rows.Scan(
+			&i.Message.OwnerID,
+			&i.Message.LocalID,
+			&i.Message.PeerID,
+			&i.Message.FromID,
+			&i.Message.Date,
+			&i.Message.Message,
+			&i.Message.Out,
+			&i.Message.EditDate,
+			&i.Message.Deleted,
+			&i.Message.RandomID,
+			&i.Message.PeerLocalID,
+			&i.Message.PeerType,
+			&i.Message.FanoutID,
+			&i.Message.ActionType,
+			&i.Message.ActionUserID,
+			&i.Message.FileID,
+			&i.Message.ReplyToMsgID,
+			&i.Message.FwdFromID,
+			&i.Message.FwdDate,
+			&i.Message.FwdChannelID,
+			&i.Message.FwdChannelPost,
+			&i.Message.MessageTsv,
+			&i.Message.ReplyToTrusted,
+			&i.Message.GroupedID,
+			&i.Message.FwdPostAuthor,
+			&i.Message.TtlPeriod,
+			&i.Message.ExpiresAt,
+			&i.Message.Entities,
+			&i.Message.StickerDocumentID,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const searchResultsCalendarCount = `-- name: SearchResultsCalendarCount :one
 SELECT COUNT(*)::bigint
 FROM messages AS m
