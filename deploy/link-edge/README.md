@@ -7,7 +7,18 @@ Compose file. The selector reaches Web through `teagram-web-edge-net` as
 selector and landing containers publish ports, both on host loopback. The
 landing container also joins a dedicated bridge for its published port; that
 bridge has IP masquerading disabled and no other service attached. The project
-has no environment, secret, volume, or server-service dependency.
+has no secrets, volumes, or server-service dependency. The landing page needs
+the public HTTPS sign-up destination in `TG_INVITE_WEB_SIGNUP_URL`; set it in
+the shell before running Compose commands. The optional `TG_INVITE_DESKTOP_URL`
+is unset for the v1 web-only landing. These values are public destinations, not
+credentials. The `--env-file /dev/null` flag still allows explicitly exported
+shell variables while preventing the server stack's `.env` from entering this
+project.
+The production deploy runner reads `TG_INVITE_WEB_SIGNUP_URL` and, when set,
+`TG_INVITE_DESKTOP_URL` from the server `.env` and exports only those values to
+the selector rollout. Keep the entries as plain assignments, for example
+`TG_INVITE_WEB_SIGNUP_URL=https://web.example.test/signup`; configure the real
+Web sign-up URL before the next automated deployment.
 The target LXC provides the resource boundary; its Docker daemon does not expose
 memory or PID cgroup controllers for nested per-container limits.
 
@@ -25,15 +36,22 @@ complete 64-character ID.
 
 ## Validate and build
 
-From the repository root, inspect the resolved service settings and build only
-these images:
+From the repository root, configure the actual public Web sign-up URL (the
+example host below is reserved for documentation), then inspect the resolved
+service settings and build only these images:
 
 ```sh
+export TG_INVITE_WEB_SIGNUP_URL=https://web.example.test/signup
+unset TG_INVITE_DESKTOP_URL
 docker compose --env-file /dev/null --project-directory deploy/link-edge --file deploy/link-edge/compose.yaml config
 docker compose --env-file /dev/null --project-directory deploy/link-edge --file deploy/link-edge/compose.yaml build
 ```
 
-`/dev/null` prevents the server stack's `.env` from entering this project.
+Set `TG_INVITE_DESKTOP_URL` only when the desktop invite destination is ready;
+it accepts an HTTPS or `teagram:` URL. When set, the landing page includes the
+desktop action. The selector deploy script also requires
+`TG_INVITE_WEB_SIGNUP_URL` in its environment. `/dev/null` prevents the server
+stack's `.env` from entering this project.
 Run the focused identity fixtures with
 `bash deploy/link-edge/test-container-identity-gate.sh` before using the gate.
 The selector's Docker health check requests a synthetic username path and Web

@@ -155,6 +155,9 @@ type Config struct {
 	// process output, and the code alone signs in any account that has no
 	// 2FA cloud password — one with a password still needs the SRP step.
 	LogLoginCodes bool
+	// LogAuthKeyUnbinds opts into logging the operation, reason, outcome, and
+	// identifiers when the server clears an auth-key binding. It defaults off.
+	LogAuthKeyUnbinds bool
 	// SessionIP controls whether client addresses are stored on authorization
 	// rows and returned by account.getAuthorizations. It defaults off.
 	SessionIP bool
@@ -180,6 +183,9 @@ type Config struct {
 	// quota per account, not a live one, and it is the number that decides
 	// whether one account can fill the disk.
 	MaxUserStorageBytes int64
+	// UploadsDisabled refuses client RPCs that accept or assemble uploaded file
+	// bytes. It defaults off so existing deployments keep their current behavior.
+	UploadsDisabled bool
 	// UploadPartTTL is how long an unassembled upload part is kept before the
 	// sweeper deletes it. Short on purpose: a real client uploads and sends
 	// within minutes, and the TTL is the term that makes worst-case retained
@@ -977,6 +983,13 @@ func load(log *slog.Logger, allowKeyGeneration bool) (Config, error) {
 		RecoveryEmailMode:       recoveryEmailMode,
 		SessionDeviceLabels:     true,
 	}
+	if value := os.Getenv("TG_UPLOADS_DISABLED"); value != "" {
+		disabled, err := strconv.ParseBool(value)
+		if err != nil {
+			return Config{}, errors.New("TG_UPLOADS_DISABLED must be a boolean")
+		}
+		cfg.UploadsDisabled = disabled
+	}
 	if bundleDir := os.Getenv("TG_STICKER_CATALOG_BUNDLE"); bundleDir != "" {
 		cfg.StickerBundle, err = stickerbundle.Load(bundleDir)
 		if err != nil {
@@ -1246,6 +1259,13 @@ func load(log *slog.Logger, allowKeyGeneration bool) (Config, error) {
 			return Config{}, errors.New("TG_LOG_LOGIN_CODES must be a boolean")
 		}
 		cfg.LogLoginCodes = on
+	}
+	if v := os.Getenv("TG_LOG_AUTH_KEY_UNBINDS"); v != "" {
+		on, err := strconv.ParseBool(v)
+		if err != nil {
+			return Config{}, errors.New("TG_LOG_AUTH_KEY_UNBINDS must be a boolean")
+		}
+		cfg.LogAuthKeyUnbinds = on
 	}
 	if v := os.Getenv("TG_SESSION_IP"); v != "" {
 		on, err := strconv.ParseBool(v)

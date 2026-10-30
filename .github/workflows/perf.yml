@@ -11,6 +11,7 @@ on:
       - 'internal/config/**'
       - 'internal/discovery/**'
       - 'internal/keycrypt/**'
+      - 'internal/linklanding/**'
       - 'internal/mtproto/**'
       - 'internal/peerhash/**'
       - 'internal/pgtest/**'

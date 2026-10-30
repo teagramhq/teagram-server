@@ -860,7 +860,8 @@ func runAtBlobModePath(log *slog.Logger, blobModePath string) error {
 		return err
 	}
 
-	st, err := store.Open(ctx, cfg.PostgresDSN, cfg.AuthKeyEncKey, store.WithLogger(log), store.WithBlobStore(blobs),
+	st, err := store.Open(ctx, cfg.PostgresDSN, cfg.AuthKeyEncKey, store.WithLogger(log),
+		store.WithAuthKeyUnbindLogging(cfg.LogAuthKeyUnbinds), store.WithBlobStore(blobs),
 		store.WithPoolConfig(cfg.PostgresPool),
 		store.WithStatementTimeout(cfg.StatementTimeout),
 		store.WithSessionIP(cfg.SessionIP),
@@ -1017,7 +1018,7 @@ func runAtBlobModePath(log *slog.Logger, blobModePath string) error {
 			cfg.MaxUserStorageBytes, peers, photos, cfg.RateLimits, registrationMode,
 			dialogFilterSync, photoThumbs, cfg.UploadPartTTL, turnstileSiteKey,
 			verifier, cfg.WelcomeChannel, turnstileSignInEnabled, cfg.RecoveryEmailMode,
-			cfg.SignUpTermsOfService, stickerSets, cfg.StickerImportMode, cfg.UserInviteQuota, cfg.UserInviteMinAccountAge, notifyMetrics,
+			cfg.SignUpTermsOfService, stickerSets, cfg.StickerImportMode, cfg.UserInviteQuota, cfg.UserInviteMinAccountAge, cfg.UploadsDisabled, notifyMetrics,
 		)
 	}
 	if cfg.LogLoginCodes {
@@ -1155,7 +1156,7 @@ func runAtBlobModePath(log *slog.Logger, blobModePath string) error {
 	}
 
 	if cfg.BotAPIListenAddr != "" {
-		botAPIServer := botapi.NewServer(cfg.BotAPIListenAddr, st, log)
+		botAPIServer := botapi.NewServer(cfg.BotAPIListenAddr, st, log, cfg.RateLimits.MessageSend)
 		var botAPILC net.ListenConfig
 		botAPILn, err := botAPILC.Listen(ctx, "tcp", cfg.BotAPIListenAddr)
 		if err != nil {

@@ -209,7 +209,54 @@ func (s *Store) SendMessage(ctx context.Context, fromID, toID int64, text string
 // SendMessageWithEntities stores the same entity spans on both owner rows so
 // send replies, updates and history all render one canonical message.
 func (s *Store) SendMessageWithEntities(ctx context.Context, fromID, toID int64, text string, randomID, fileID, replyToMsgID int64, entities []PollDescriptionEntity) (sender Message, senderPts, recipientPts int, dup bool, err error) {
-	return s.sendMessageWithMediaEntities(ctx, fromID, toID, text, randomID, fileID, nil, replyToMsgID, entities)
+	return s.sendMessageWithMediaEntities(ctx, fromID, toID, text, randomID, fileID, nil, replyToMsgID, entities, false)
+}
+
+// SendBotMessage sends a Bot API text message through the regular two-sided
+// message and pts path after proving, under the send transaction's owner locks,
+// that the target human has already sent this bot a private message.
+func (s *Store) SendBotMessage(ctx context.Context, botID, userID int64, text string, randomID int64) (Message, int, int, error) {
+	if botID <= 0 || userID <= 0 || botID == userID {
+		return Message{}, 0, 0, ErrBotRecipientForbidden
+	}
+	sender, senderPts, recipientPts, _, err := s.sendMessageWithMediaEntities(ctx, botID, userID, text, randomID, 0, nil, 0, nil, true)
+	return sender, senderPts, recipientPts, err
+}
+
+func requireBotSendTarget(ctx context.Context, qtx *db.Queries, botID, userID int64) error {
+	botKind, err := qtx.UserKindByID(ctx, botID)
+	if errors.Is(err, pgx.ErrNoRows) || (err == nil && botKind != UserKindBot) {
+		return ErrBotRecipientForbidden
+	}
+	if err != nil {
+		return fmt.Errorf("load Bot API sender kind: %w", err)
+	}
+	userKind, err := qtx.UserKindByID(ctx, userID)
+	if errors.Is(err, pgx.ErrNoRows) || (err == nil && userKind != UserKindHuman) {
+		return ErrBotRecipientForbidden
+	}
+	if err != nil {
+		return fmt.Errorf("load Bot API recipient kind: %w", err)
+	}
+	started, err := qtx.BotHasStartedPrivateChat(ctx, db.BotHasStartedPrivateChatParams{
+		BotID:    botID,
+		PeerType: int16(PeerTypeUser),
+		UserID:   userID,
+	})
+	if err != nil {
+		return fmt.Errorf("check Bot API start message: %w", err)
+	}
+	if !started {
+		return ErrBotRecipientForbidden
+	}
+	blocked, err := qtx.IsBlocked(ctx, db.IsBlockedParams{BlockerID: userID, BlockedID: botID})
+	if err != nil {
+		return fmt.Errorf("check Bot API recipient block: %w", err)
+	}
+	if blocked {
+		return ErrBotBlockedByUser
+	}
+	return nil
 }
 
 // SendStickerMessageWithEntities stores a catalogue or live user-set document
@@ -218,10 +265,10 @@ func (s *Store) SendStickerMessageWithEntities(ctx context.Context, fromID, toID
 	if stickerDocumentID == 0 {
 		return Message{}, 0, 0, false, ErrMessageInvalid
 	}
-	return s.sendMessageWithMediaEntities(ctx, fromID, toID, text, randomID, 0, &stickerDocumentID, replyToMsgID, entities)
+	return s.sendMessageWithMediaEntities(ctx, fromID, toID, text, randomID, 0, &stickerDocumentID, replyToMsgID, entities, false)
 }
 
-func (s *Store) sendMessageWithMediaEntities(ctx context.Context, fromID, toID int64, text string, randomID, fileID int64, stickerDocumentID *int64, replyToMsgID int64, entities []PollDescriptionEntity) (sender Message, senderPts, recipientPts int, dup bool, err error) {
+func (s *Store) sendMessageWithMediaEntities(ctx context.Context, fromID, toID int64, text string, randomID, fileID int64, stickerDocumentID *int64, replyToMsgID int64, entities []PollDescriptionEntity, botSend bool) (sender Message, senderPts, recipientPts int, dup bool, err error) {
 	entityData, err := EncodeMessageEntities(entities)
 	if err != nil {
 		return Message{}, 0, 0, false, fmt.Errorf("encode message entities: %w", err)
@@ -238,6 +285,11 @@ func (s *Store) sendMessageWithMediaEntities(ctx context.Context, fromID, toID i
 	// on the update_state unique-key insert; locking first serializes them.
 	if err = lockOwners(ctx, tx, fromID, toID); err != nil {
 		return Message{}, 0, 0, false, err
+	}
+	if botSend {
+		if err = requireBotSendTarget(ctx, qtx, fromID, toID); err != nil {
+			return Message{}, 0, 0, false, err
+		}
 	}
 	if stickerDocumentID != nil {
 		if err = lockLiveUserStickerDocuments(ctx, qtx, *stickerDocumentID); err != nil {
@@ -277,6 +329,9 @@ func (s *Store) sendMessageWithMediaEntities(ctx context.Context, fromID, toID i
 	withhold, err := withholdDirectSend(ctx, qtx, fromID, toID)
 	if err != nil {
 		return Message{}, 0, 0, false, err
+	}
+	if botSend && withhold {
+		return Message{}, 0, 0, false, ErrBotBlockedByUser
 	}
 	if replyToMsgID < 0 || replyToMsgID > int64(1<<31-1) {
 		return Message{}, 0, 0, false, ErrMessageInvalid

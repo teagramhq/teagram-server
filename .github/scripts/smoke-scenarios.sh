@@ -15,6 +15,7 @@ SMOKE_SCENARIOS=(
   profile-photo-upload
   profile-bio
   upload-media
+  uploads-disabled
   upload-app-config-byte-limit
   saved-gifs
   saved-gifs-client-request-fixtures
@@ -34,6 +35,7 @@ SMOKE_SCENARIOS=(
   basic-group
   basic-group-reactions
   bot-api-get-me
+  bot-api-send-message
   channel-reactions
   available-reactions
   basic-group-photo

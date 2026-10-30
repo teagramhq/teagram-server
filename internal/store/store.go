@@ -38,6 +38,11 @@ type Store struct {
 	// rather than silence.
 	log *slog.Logger
 
+	// logAuthKeyUnbinds enables per-operation auth-key unbind diagnostics. It is
+	// opt-in so deployments only expose these identifiers where troubleshooting
+	// requires them.
+	logAuthKeyUnbinds bool
+
 	// sessionIP and sessionDeviceLabels independently control which authorization
 	// metadata is persisted and exposed. Session IP is privacy-sensitive and
 	// defaults off; labels preserve the existing default-on device view.
@@ -385,6 +390,30 @@ func WithLogger(log *slog.Logger) Option {
 			s.log = log
 		}
 	}
+}
+
+// WithAuthKeyUnbindLogging enables structured diagnostics for auth-key
+// unbinds. Auth-key bytes and credentials are never included.
+func WithAuthKeyUnbindLogging(enabled bool) Option {
+	return func(s *Store) {
+		s.logAuthKeyUnbinds = enabled
+	}
+}
+
+func (s *Store) logAuthKeyUnbind(operation, reason, outcome string, authKeyID, userID int64) {
+	if !s.logAuthKeyUnbinds {
+		return
+	}
+	attrs := []any{
+		"operation", operation,
+		"reason", reason,
+		"outcome", outcome,
+		"auth_key_id", authKeyID,
+	}
+	if userID != 0 {
+		attrs = append(attrs, "user_id", userID)
+	}
+	s.log.Info("auth key unbind", attrs...)
 }
 
 // Open connects to Postgres and verifies the schema is migrated. encKey is the
