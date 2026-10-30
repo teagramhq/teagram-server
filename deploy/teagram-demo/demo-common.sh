@@ -146,6 +146,27 @@ demo_edge_uses_legacy_file_mount() {
   grep -Fqx -- "bind|$DEMO_SCRIPT_DIR/nginx.conf|/etc/nginx/nginx.conf" <<< "$mounts"
 }
 
+demo_prepare_edge_config_permissions() {
+  local config_dir="$DEMO_SCRIPT_DIR/nginx-config"
+  local config_file="$config_dir/nginx.conf"
+  [[ -d "$config_dir" && ! -L "$config_dir" ]] || {
+    demo_fail 'demo Nginx config directory is missing or unsafe'
+    return 1
+  }
+  [[ -f "$config_file" && ! -L "$config_file" ]] || {
+    demo_fail 'demo Nginx config file is missing or unsafe'
+    return 1
+  }
+  chmod 0755 "$config_dir" || {
+    demo_fail 'demo Nginx config directory permissions could not be normalized'
+    return 1
+  }
+  chmod 0644 "$config_file" || {
+    demo_fail 'demo Nginx config file permissions could not be normalized'
+    return 1
+  }
+}
+
 demo_edge_legacy_compose_hash() {
   local legacy_source_hash="$1" normalized_file hash_output expected_hash
   [[ "$legacy_source_hash" =~ ^[0-9a-f]{64}$ ]] || {
@@ -496,11 +517,14 @@ demo_reload_edge() {
     return 1
   }
   EDGE_CONTAINER_ID=${edge_ids[0]}
-  if ! demo_edge_uses_directory_mount "$EDGE_CONTAINER_ID"; then
+  if demo_edge_uses_directory_mount "$EDGE_CONTAINER_ID"; then
+    demo_prepare_edge_config_permissions || return 1
+  else
     demo_edge_uses_legacy_file_mount "$EDGE_CONTAINER_ID" || {
       demo_fail 'edge proxy config mount is neither the supported directory layout nor the legacy single-file layout'
       return 1
     }
+    demo_prepare_edge_config_permissions || return 1
     demo_compose run --rm -T --no-deps --entrypoint nginx edge \
       -c /etc/nginx/demo/nginx.conf -t >/dev/null || {
       demo_fail 'new edge configuration failed its pre-migration syntax check'

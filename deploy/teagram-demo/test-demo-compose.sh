@@ -308,6 +308,10 @@ jq -e \
   MOCK_EDGE_PRECHECKED=0
   MOCK_EDGE_CONFIG_TESTED=0
   MOCK_EDGE_RELOADED=0
+  DEMO_SCRIPT_DIR="$TMP_DIR/restrictive-edge-config"
+  mkdir -m 0700 -p "$DEMO_SCRIPT_DIR/nginx-config"
+  printf '%s\n' 'fixture nginx config' > "$DEMO_SCRIPT_DIR/nginx-config/nginx.conf"
+  chmod 0600 "$DEMO_SCRIPT_DIR/nginx-config/nginx.conf"
 
   demo_compose() {
     if [[ "$*" == 'ps -q edge' ]]; then
@@ -320,6 +324,11 @@ jq -e \
       MOCK_MOUNT_LAYOUT=directory
       ((MOCK_EDGE_RECREATE_COUNT += 1))
     elif [[ "$*" == 'run --rm -T --no-deps --entrypoint nginx edge -c /etc/nginx/demo/nginx.conf -t' ]]; then
+      [[ "$(stat -c '%a' "$DEMO_SCRIPT_DIR/nginx-config")" == 755 &&
+        "$(stat -c '%a' "$DEMO_SCRIPT_DIR/nginx-config/nginx.conf")" == 644 ]] || {
+        printf 'edge precheck could not read config created under umask 077\n' >&2
+        return 1
+      }
       MOCK_EDGE_PRECHECKED=1
     else
       printf 'unexpected demo_compose invocation: %s\n' "$*" >&2
@@ -337,6 +346,11 @@ jq -e \
       fi
     elif [[ "$1" == exec && "$2" == refreshed-edge && "$3" == nginx && "$4" == -c &&
       "$5" == /etc/nginx/demo/nginx.conf && "$6" == -t ]]; then
+      [[ "$(stat -c '%a' "$DEMO_SCRIPT_DIR/nginx-config")" == 755 &&
+        "$(stat -c '%a' "$DEMO_SCRIPT_DIR/nginx-config/nginx.conf")" == 644 ]] || {
+        printf 'running edge could not read config created under umask 077\n' >&2
+        return 1
+      }
       MOCK_EDGE_CONFIG_TESTED=1
     elif [[ "$1" == exec && "$2" == refreshed-edge && "$3" == nginx && "$4" == -c &&
       "$5" == /etc/nginx/demo/nginx.conf && "$6" == -s && "$7" == reload ]]; then
