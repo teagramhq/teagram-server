@@ -1351,7 +1351,7 @@ jobs:
   check-k8s-manifests:
     name: "check: k8s-manifests"
     needs: ops-prioritize-main
-    if: ${{ always() && (needs.ops-prioritize-main.result == 'success' || (needs.ops-prioritize-main.result == 'skipped' && github.event_name == 'pull_request')) }}
+    if: ${{ (github.event_name == 'pull_request' && !cancelled() || github.event_name != 'pull_request' && always()) && (needs.ops-prioritize-main.result == 'success' || (needs.ops-prioritize-main.result == 'skipped' && github.event_name == 'pull_request')) }}
     runs-on: ubuntu-26.04
     timeout-minutes: 15
     permissions:
@@ -1456,7 +1456,7 @@ jobs:
     needs:
       - ops-prioritize-main
       - check-sticker-license
-    if: ${{ always() && (needs.ops-prioritize-main.result == 'success' || (needs.ops-prioritize-main.result == 'skipped' && (github.event_name == 'pull_request' || github.event_name == 'merge_group'))) && needs.check-sticker-license.result == 'success' }}
+    if: ${{ (github.event_name == 'pull_request' && !cancelled() || github.event_name != 'pull_request' && always()) && (needs.ops-prioritize-main.result == 'success' || (needs.ops-prioritize-main.result == 'skipped' && (github.event_name == 'pull_request' || github.event_name == 'merge_group'))) && needs.check-sticker-license.result == 'success' }}
     runs-on: ubuntu-26.04
     timeout-minutes: 35
     permissions:
@@ -1871,6 +1871,8 @@ jobs:
     name: "publish: k8s-images"
     if: >-
       ${{
+        (github.event_name == 'pull_request' && !cancelled() ||
+          github.event_name != 'pull_request' && always()) &&
         always() &&
         (needs.ops-prioritize-main.result == 'success' ||
           (needs.ops-prioritize-main.result == 'skipped' &&
