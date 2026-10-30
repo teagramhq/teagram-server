@@ -1539,8 +1539,11 @@ jobs:
         run: |
           set -euo pipefail
           printf '%s' "$GITHUB_TOKEN" | docker login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
+          mkdir -p "$RUNNER_TEMP/k8s-agent-images"
+          cp "$RUNNER_TEMP/k8s-images.tar" "$RUNNER_TEMP/k8s-agent-images/k8s-images.tar"
           docker run --detach --privileged --name teagram-k3s \
             --publish 127.0.0.1:6443:6443 \
+            --volume "$RUNNER_TEMP/k8s-agent-images:/var/lib/rancher/k3s/agent/images:ro" \
             "$K3S_IMAGE" server \
             --disable=traefik \
             --disable=servicelb \
@@ -1560,10 +1563,9 @@ jobs:
             exit 1
           fi
           docker exec teagram-k3s kubectl wait --for=condition=Ready node --all --timeout=180s
-          docker cp "$RUNNER_TEMP/k8s-images.tar" teagram-k3s:/tmp/k8s-images.tar
-          docker exec teagram-k3s mkdir -p /var/lib/rancher/k3s/agent/images
-          docker exec teagram-k3s mv /tmp/k8s-images.tar \
-            /var/lib/rancher/k3s/agent/images/k8s-images.tar
+          docker cp teagram-k3s:/etc/rancher/k3s/k3s.yaml "$RUNNER_TEMP/k3s.yaml"
+          export KUBECONFIG="$RUNNER_TEMP/k3s.yaml"
+          kubectl wait --for=condition=Ready node --all --timeout=180s
           required_images=(
             ghcr.io/teagramhq/teagramd:ci
             ghcr.io/teagramhq/link-edge-landing:ci
@@ -1573,31 +1575,28 @@ jobs:
           )
           all_images_present=false
           for attempt in $(seq 1 90); do
-            image_list="$(docker exec teagram-k3s k3s crictl images --output json 2>/dev/null || true)"
-            if [[ -n "$image_list" ]]; then
-              all_images_present=true
-              for image in "${required_images[@]}"; do
-                if ! jq --exit-status --arg image "$image" \
-                  'any(.images[]?; any(.repoTags[]?; . == $image))' \
-                  <<<"$image_list" >/dev/null; then
-                  all_images_present=false
-                  break
-                fi
-              done
-              if [[ "$all_images_present" == true ]]; then
+            node_images="$(kubectl get nodes --output json)"
+            all_images_present=true
+            for image in "${required_images[@]}"; do
+              if ! jq --exit-status --arg image "$image" \
+                'any(.items[]?.status.images[]?.names[]?; . == $image)' \
+                <<<"$node_images" >/dev/null; then
+                all_images_present=false
                 break
               fi
+            done
+            if [[ "$all_images_present" == true ]]; then
+              break
             fi
             sleep 2
           done
           if [[ "$all_images_present" != true ]]; then
             echo "K3s did not import all workload images within 180 seconds" >&2
-            docker exec teagram-k3s k3s crictl images >&2 || true
+            kubectl get nodes --output json \
+              | jq -r '.items[] | .metadata.name as $node | .status.images[]?.names[]? | "\($node): \(.)"' \
+              >&2
             exit 1
           fi
-          docker cp teagram-k3s:/etc/rancher/k3s/k3s.yaml "$RUNNER_TEMP/k3s.yaml"
-          export KUBECONFIG="$RUNNER_TEMP/k3s.yaml"
-          kubectl wait --for=condition=Ready node --all --timeout=180s
           kubectl create namespace teagram
           auth=$(printf '%s:%s' "$GITHUB_ACTOR" "$GITHUB_TOKEN" | base64 --wrap=0)
           jq --null-input --arg auth "$auth" '{auths:{"ghcr.io":{auth:$auth}}}' \

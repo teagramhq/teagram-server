@@ -151,12 +151,14 @@ check_ci_contract() {
     ci_fail 'the deployment check must invoke kubectl directly in its k3s container'
   [[ "$deploy_start" == *"kubectl get nodes --no-headers 2>/dev/null | grep --quiet ."* ]] ||
     ci_fail 'the deployment check must wait for K3s to register a node before kubectl wait'
-  [[ "$deploy_start" == *"docker exec teagram-k3s mv /tmp/k8s-images.tar"* &&
-     "$deploy_start" == *"/var/lib/rancher/k3s/agent/images/k8s-images.tar"* &&
-     "$deploy_start" == *"k3s crictl images --output json"* ]] ||
-    ci_fail 'the deployment check must use K3s image auto-import and verify the imported images'
-  [[ "$deploy_start" != *"teagram-k3s k3s ctr"* ]] ||
-    ci_fail 'the deployment check must not use the unavailable k3s ctr subcommand'
+  [[ "$deploy_start" == *'cp "$RUNNER_TEMP/k8s-images.tar" "$RUNNER_TEMP/k8s-agent-images/k8s-images.tar"'* &&
+     "$deploy_start" == *'--volume "$RUNNER_TEMP/k8s-agent-images:/var/lib/rancher/k3s/agent/images:ro"'* &&
+     "$deploy_start" == *'kubectl get nodes --output json'* &&
+     "$deploy_start" == *'status.images[]?.names[]?'* ]] ||
+    ci_fail 'the deployment check must preload workload images and verify them through the Kubernetes node API'
+  [[ "$deploy_start" != *"teagram-k3s k3s ctr"* &&
+     "$deploy_start" != *"teagram-k3s k3s crictl"* ]] ||
+    ci_fail 'the deployment check must not invoke unavailable k3s image subcommands'
   [[ "$deploy_start" != *"teagram-k3s k3s kubectl"* ]] ||
     ci_fail 'the deployment check must not invoke kubectl through the k3s CLI'
 }
