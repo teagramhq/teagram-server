@@ -82,6 +82,9 @@ printf '%s\n' "$sync_count" > "$MOCK_SYNC_COUNT"
 if [[ "${MOCK_SYNC_FAIL_ON:-}" == "$sync_count" ]]; then
   exit 1
 fi
+if [[ "${MOCK_SIGNAL_ON_SYNC:-}" == "$sync_count" ]]; then
+  kill -s "$MOCK_SIGNAL" "$PPID"
+fi
 exec "$MOCK_REAL_SYNC" "$@"
 SYNC
 chmod 755 "$BIN/sync"
@@ -122,6 +125,7 @@ export MOCK_ENV_FILE="$REPO_FIXTURE/.env" MOCK_ENV_RECORD="$REPO_FIXTURE/.state/
 export MOCK_BACKUP="$ROOT_FIXTURE/.env.main-2478-pre-key-exchange-20261025T170009Z"
 export MOCK_DEPLOY_LOCK="$TMP/deploy.lock"
 export MOCK_SYNC_COUNT="$TMP/sync-count" MOCK_REAL_SYNC="$REAL_SYNC" MOCK_SYNC_FAIL_ON=
+export MOCK_SIGNAL_ON_SYNC= MOCK_SIGNAL=
 
 setup_fixture() {
   printf 'FIXTURE_PRIVATE_VALUE=do-not-print-fixture-value\nTG_LOG_LOGIN_CODES=false\n' > "$MOCK_ENV_FILE"
@@ -170,6 +174,43 @@ restored_env_sha=$(sha256sum "$MOCK_ENV_FILE" | cut -d' ' -f1)
 }
 MOCK_SYNC_FAIL_ON=
 export MOCK_SYNC_FAIL_ON
+
+for signal in TERM HUP; do
+  setup_fixture
+  MOCK_SIGNAL_ON_SYNC=2 MOCK_SIGNAL=$signal
+  export MOCK_SIGNAL_ON_SYNC MOCK_SIGNAL
+  interrupted_status=0
+  interrupted_output=$(run_operation 2>&1) || interrupted_status=$?
+  if [[ "$signal" == TERM ]]; then
+    expected_status=143
+  else
+    expected_status=129
+  fi
+  [[ "$interrupted_status" == "$expected_status" ]] || {
+    printf 'post-publish %s did not preserve its signal exit status\n' "$signal" >&2
+    exit 1
+  }
+  cmp -s -- "$MOCK_ENV_FILE" "$MOCK_BACKUP" || {
+    printf 'post-publish %s did not restore the verified .env\n' "$signal" >&2
+    exit 1
+  }
+  restored_env_sha=$(sha256sum "$MOCK_ENV_FILE" | cut -d' ' -f1)
+  [[ "$(cat "$MOCK_ENV_RECORD")" == "env_sha256=$restored_env_sha source_sha=$TARGET_SHA" ]] || {
+    printf 'post-publish %s left the rollout record inconsistent\n' "$signal" >&2
+    exit 1
+  }
+  [[ ! -e "$TMP/runner-called" ]] || {
+    printf 'runner ran after post-publish %s\n' "$signal" >&2
+    exit 1
+  }
+  [[ "$interrupted_output" == *"signal=$signal"*'rollback_env=restored'* ]] || {
+    printf 'post-publish %s did not report verified rollback\n' "$signal" >&2
+    exit 1
+  }
+done
+MOCK_SIGNAL_ON_SYNC=
+MOCK_SIGNAL=
+export MOCK_SIGNAL_ON_SYNC MOCK_SIGNAL
 
 setup_fixture
 MOCK_RUNNER_MODE=fail

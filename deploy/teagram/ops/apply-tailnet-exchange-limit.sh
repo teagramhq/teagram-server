@@ -49,6 +49,26 @@ restore_recorded_env() {
   cmp -s -- "$PREVIOUS_ENV_FILE" "$ENV_FILE"
 }
 
+recover_interrupted_publication() {
+  local signal=$1 exit_status=$2 current_env_sha current_record
+  trap '' HUP TERM
+  current_env_sha=$(file_sha256 "$ENV_FILE" 2>/dev/null || true)
+  current_record=$(cat -- "$ENV_RECORD" 2>/dev/null || true)
+  if [[ "$current_env_sha" == "$expected_env_sha" && "$current_record" == "$record" ]]; then
+    if restore_recorded_env; then
+      printf 'env_update=interrupted signal=%s target_sha=%s rollback_env=restored\n' "$signal" "$target_sha"
+    else
+      printf 'env_update=interrupted signal=%s target_sha=%s rollback_env=unverified\n' "$signal" "$target_sha"
+    fi
+  elif [[ "$current_record" =~ ^env_sha256=([0-9a-f]{64})\ source_sha=[0-9a-f]{40}$ ]] && \
+       [[ "${BASH_REMATCH[1]}" == "$current_env_sha" ]]; then
+    printf 'env_update=interrupted signal=%s target_sha=%s rollback_env=recorded\n' "$signal" "$target_sha"
+  else
+    printf 'env_update=interrupted signal=%s target_sha=%s rollback_env=unverified\n' "$signal" "$target_sha"
+  fi
+  exit "$exit_status"
+}
+
 budget_fingerprint() {
   local env_output
   env_output=$(docker inspect --format '{{range .Config.Env}}{{println .}}{{end}}' "$SERVICE") || return 1
@@ -194,6 +214,8 @@ if ! cat -- "$PREVIOUS_ENV_FILE" > "$TEMP_ENV" || ! printf '%s=0\n' "$TAILNET_EN
   exit 1
 fi
 expected_env_sha=$(file_sha256 "$TEMP_ENV") || { fail 'cannot hash staged .env'; exit 1; }
+trap 'recover_interrupted_publication HUP 129' HUP
+trap 'recover_interrupted_publication TERM 143' TERM
 mv -f -- "$TEMP_ENV" "$ENV_FILE" || { fail 'cannot atomically publish the named .env addition'; exit 1; }
 TEMP_ENV=
 sync_status=0
