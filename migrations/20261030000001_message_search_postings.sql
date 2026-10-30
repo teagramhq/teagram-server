@@ -1,3 +1,5 @@
+-- atlas:txmode file
+
 -- Keep ordered per-dialog lexeme postings for messages.search. Existing message
 -- history is intentionally not copied here; those dialogs stay on the legacy
 -- query until a separate initializer has populated their postings.
