@@ -1,12 +1,16 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import {
+import * as smoke from "./readiness-integration-smoke.mjs";
+
+const {
   assertMixedStatusError,
+  assertQaWssProof,
   assertSilentSharedWorkerError,
   assertSocketTargetMismatch,
+  captureQaWssProof,
   formatSmokeFailure,
-} from "./readiness-integration-smoke.mjs";
+} = smoke;
 
 function silentSharedWorkerResult(diagnostic) {
   return { error: { code: "websocket-not-ready", diagnostic } };
@@ -112,6 +116,26 @@ test("smoke failures identify the scenario, expectation and both values", () => 
   assert.match(line, /expected='websocket-not-ready'/u);
   assert.match(line, /observed=undefined/u);
   assert.equal(line.includes("\n"), false);
+});
+
+test("a failed QA WSS proof reports its original message and failed connection", async () => {
+  assert.equal(typeof captureQaWssProof, "function");
+  assert.equal(typeof assertQaWssProof, "function");
+  const forcedError = new Error("forced proveWss failure");
+  forcedError.code = "websocket-not-ready";
+  forcedError.wssDiagnostic = { wss_diagnostic: "socket-4-no-handshake" };
+  const proof = await captureQaWssProof(async () => { throw forcedError; });
+  let failure;
+  try {
+    assertQaWssProof(proof, { connectionCount: 4, status101: true }, "qaPrivateClientWorker");
+  } catch (error) {
+    failure = error;
+  }
+
+  const line = formatSmokeFailure(failure, "qa-private-client-worker");
+  assert.match(line, /forced proveWss failure/u);
+  assert.match(line, /socket-4-no-handshake/u);
+  assert.doesNotMatch(line, /result=undefined|observed=undefined/u);
 });
 
 test("timing failures preserve the bound and the failed predicate", () => {
