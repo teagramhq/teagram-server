@@ -29,6 +29,7 @@ const (
 var (
 	ErrBotAccount            = errors.New("bot account")
 	ErrBotTokenNotFound      = errors.New("bot token not found")
+	ErrBotPollSuperseded     = errors.New("bot update poll superseded")
 	ErrBotUsernameInvalid    = errors.New("bot username invalid")
 	ErrBotRecipientForbidden = errors.New("bot recipient is not eligible")
 	ErrBotBlockedByUser      = errors.New("user blocked bot")

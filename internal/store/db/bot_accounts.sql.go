@@ -11,6 +11,25 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
+const activeBotPollGeneration = `-- name: ActiveBotPollGeneration :one
+SELECT token_hash, poll_generation
+FROM bot_tokens
+WHERE user_id = $1
+  AND revoked_at IS NULL
+`
+
+type ActiveBotPollGenerationRow struct {
+	TokenHash      []byte
+	PollGeneration int64
+}
+
+func (q *Queries) ActiveBotPollGeneration(ctx context.Context, userID int64) (ActiveBotPollGenerationRow, error) {
+	row := q.db.QueryRow(ctx, activeBotPollGeneration, userID)
+	var i ActiveBotPollGenerationRow
+	err := row.Scan(&i.TokenHash, &i.PollGeneration)
+	return i, err
+}
+
 const activeBotTokenHash = `-- name: ActiveBotTokenHash :one
 SELECT token_hash
 FROM bot_tokens
@@ -42,28 +61,6 @@ func (q *Queries) ActiveBotTokenState(ctx context.Context, userID int64) (Active
 	var i ActiveBotTokenStateRow
 	err := row.Scan(&i.TokenHash, &i.UpdateOffset)
 	return i, err
-}
-
-const advanceBotUpdateOffset = `-- name: AdvanceBotUpdateOffset :one
-UPDATE bot_tokens
-SET update_offset = GREATEST(update_offset, $1::bigint)
-WHERE user_id = $2
-  AND revoked_at IS NULL
-  AND token_hash = $3
-RETURNING update_offset
-`
-
-type AdvanceBotUpdateOffsetParams struct {
-	NextOffset int64
-	UserID     int64
-	TokenHash  []byte
-}
-
-func (q *Queries) AdvanceBotUpdateOffset(ctx context.Context, arg AdvanceBotUpdateOffsetParams) (int64, error) {
-	row := q.db.QueryRow(ctx, advanceBotUpdateOffset, arg.NextOffset, arg.UserID, arg.TokenHash)
-	var update_offset int64
-	err := row.Scan(&update_offset)
-	return update_offset, err
 }
 
 const botMessageEvents = `-- name: BotMessageEvents :many
@@ -203,6 +200,35 @@ func (q *Queries) CreateBotUser(ctx context.Context, firstName string) (int64, e
 	return id, err
 }
 
+const finishBotUpdatePoll = `-- name: FinishBotUpdatePoll :one
+UPDATE bot_tokens
+SET update_offset = GREATEST(update_offset, $1::bigint)
+WHERE user_id = $2
+  AND revoked_at IS NULL
+  AND token_hash = $3
+  AND poll_generation = $4::bigint
+RETURNING update_offset
+`
+
+type FinishBotUpdatePollParams struct {
+	NextOffset     int64
+	UserID         int64
+	TokenHash      []byte
+	PollGeneration int64
+}
+
+func (q *Queries) FinishBotUpdatePoll(ctx context.Context, arg FinishBotUpdatePollParams) (int64, error) {
+	row := q.db.QueryRow(ctx, finishBotUpdatePoll,
+		arg.NextOffset,
+		arg.UserID,
+		arg.TokenHash,
+		arg.PollGeneration,
+	)
+	var update_offset int64
+	err := row.Scan(&update_offset)
+	return update_offset, err
+}
+
 const insertBotToken = `-- name: InsertBotToken :exec
 INSERT INTO bot_tokens (user_id, token_hash)
 VALUES ($1, $2)
@@ -253,6 +279,42 @@ func (q *Queries) RotateBotToken(ctx context.Context, arg RotateBotTokenParams) 
 		return 0, err
 	}
 	return result.RowsAffected(), nil
+}
+
+const startBotUpdatePoll = `-- name: StartBotUpdatePoll :one
+WITH claimed AS (
+    UPDATE bot_tokens
+    SET poll_generation = poll_generation + 1
+    WHERE user_id = $1
+      AND revoked_at IS NULL
+      AND token_hash = $2
+    RETURNING user_id, update_offset, poll_generation
+), notified AS (
+    SELECT pg_notify('tg_updates', user_id::text)
+    FROM claimed
+)
+SELECT claimed.update_offset, claimed.poll_generation
+FROM claimed
+CROSS JOIN notified
+`
+
+type StartBotUpdatePollParams struct {
+	UserID    int64
+	TokenHash []byte
+}
+
+type StartBotUpdatePollRow struct {
+	UpdateOffset   int64
+	PollGeneration int64
+}
+
+// StartBotUpdatePoll atomically claims a new generation and wakes existing
+// polls on every replica through the same update notification channel.
+func (q *Queries) StartBotUpdatePoll(ctx context.Context, arg StartBotUpdatePollParams) (StartBotUpdatePollRow, error) {
+	row := q.db.QueryRow(ctx, startBotUpdatePoll, arg.UserID, arg.TokenHash)
+	var i StartBotUpdatePollRow
+	err := row.Scan(&i.UpdateOffset, &i.PollGeneration)
+	return i, err
 }
 
 const userKindByID = `-- name: UserKindByID :one

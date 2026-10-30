@@ -52,15 +52,15 @@ type fakeStore struct {
 type fakeUpdatesStore struct {
 	*fakeStore
 
-	offset          int64
-	events          []store.Event
-	messages        map[int64]store.Message
-	users           map[int64]store.User
-	lastFromPts     int64
-	lastLimit       int
-	advancedOffsets []int64
-	messageLookups  int
-	senderLookups   int
+	offset         int64
+	pollGeneration int64
+	events         []store.Event
+	messages       map[int64]store.Message
+	users          map[int64]store.User
+	lastFromPts    int64
+	lastLimit      int
+	messageLookups int
+	senderLookups  int
 }
 
 type firstQueryUpdatesStore struct {
@@ -85,6 +85,81 @@ type blockingFirstQueryUpdatesStore struct {
 	queryCount atomic.Int32
 }
 
+type sharedReplicaUpdatesStore struct {
+	*fakeUpdatesStore
+
+	mu          sync.Mutex
+	generation  int64
+	offset      int64
+	events      []store.BotMessageEvent
+	querySignal chan struct{}
+	wakePolls   []func(int64)
+}
+
+func (s *sharedReplicaUpdatesStore) BotUpdateOffset(_ context.Context, botID int64, token string) (int64, error) {
+	if botID != 123456 || s.lookupErrs[token] != nil {
+		return 0, store.ErrBotTokenNotFound
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.offset, nil
+}
+
+func (s *sharedReplicaUpdatesStore) BotMessageEvents(_ context.Context, botID, fromPts int64, _ int) ([]store.BotMessageEvent, error) {
+	if botID != 123456 {
+		return nil, store.ErrBotTokenNotFound
+	}
+	s.querySignal <- struct{}{}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var events []store.BotMessageEvent
+	for _, event := range s.events {
+		if event.Pts >= fromPts {
+			events = append(events, event)
+		}
+	}
+	return events, nil
+}
+
+func (s *sharedReplicaUpdatesStore) StartBotUpdatePoll(_ context.Context, botID int64, token string) (store.BotUpdatePoll, error) {
+	if botID != 123456 || s.lookupErrs[token] != nil {
+		return store.BotUpdatePoll{}, store.ErrBotTokenNotFound
+	}
+	s.mu.Lock()
+	s.generation++
+	generation, offset := s.generation, s.offset
+	wakePolls := append([]func(int64){}, s.wakePolls...)
+	s.mu.Unlock()
+	for _, wake := range wakePolls {
+		wake(botID)
+	}
+	return store.BotUpdatePoll{Offset: offset, Generation: generation}, nil
+}
+
+func (s *sharedReplicaUpdatesStore) CheckBotUpdatePoll(_ context.Context, _ int64, _ string, generation int64) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if generation != s.generation {
+		return store.ErrBotPollSuperseded
+	}
+	return nil
+}
+
+func (s *sharedReplicaUpdatesStore) FinishBotUpdatePoll(_ context.Context, botID int64, token string, generation, offset int64) (int64, error) {
+	if botID != 123456 || s.lookupErrs[token] != nil {
+		return 0, store.ErrBotTokenNotFound
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if generation != s.generation {
+		return 0, store.ErrBotPollSuperseded
+	}
+	if offset > s.offset {
+		s.offset = offset
+	}
+	return s.offset, nil
+}
+
 func (s *blockingFirstQueryUpdatesStore) BotMessageEvents(ctx context.Context, botID, fromPts int64, limit int) ([]store.BotMessageEvent, error) {
 	if s.queryCount.Add(1) == 1 {
 		close(s.firstQuery)
@@ -101,11 +176,28 @@ func (s *fakeUpdatesStore) BotUpdateOffset(_ context.Context, botID int64, token
 	return s.offset, nil
 }
 
-func (s *fakeUpdatesStore) AdvanceBotUpdateOffset(_ context.Context, botID int64, token string, offset int64) (int64, error) {
+func (s *fakeUpdatesStore) StartBotUpdatePoll(_ context.Context, botID int64, token string) (store.BotUpdatePoll, error) {
 	if botID != 123456 || s.lookupErrs[token] != nil {
-		return 0, store.ErrBotTokenNotFound
+		return store.BotUpdatePoll{}, store.ErrBotTokenNotFound
 	}
-	s.advancedOffsets = append(s.advancedOffsets, offset)
+	s.pollGeneration++
+	return store.BotUpdatePoll{Offset: s.offset, Generation: s.pollGeneration}, nil
+}
+
+func (s *fakeUpdatesStore) CheckBotUpdatePoll(_ context.Context, botID int64, token string, generation int64) error {
+	if botID != 123456 || s.lookupErrs[token] != nil {
+		return store.ErrBotTokenNotFound
+	}
+	if generation != s.pollGeneration {
+		return store.ErrBotPollSuperseded
+	}
+	return nil
+}
+
+func (s *fakeUpdatesStore) FinishBotUpdatePoll(_ context.Context, botID int64, token string, generation, offset int64) (int64, error) {
+	if err := s.CheckBotUpdatePoll(context.Background(), botID, token, generation); err != nil {
+		return 0, err
+	}
 	if offset > s.offset {
 		s.offset = offset
 	}
@@ -929,6 +1021,84 @@ func TestGetUpdatesSecondPollConflictsTheFirst(t *testing.T) {
 	}
 	if secondResponse.Code != http.StatusOK {
 		t.Fatalf("second poll response = (%d, %q), want 200", secondResponse.Code, secondResponse.Body.String())
+	}
+}
+
+func TestGetUpdatesAcrossHandlerInstancesSupersedesOlderPoll(t *testing.T) {
+	shared := &sharedReplicaUpdatesStore{
+		fakeUpdatesStore: &fakeUpdatesStore{fakeStore: newFakeStore()},
+		querySignal:      make(chan struct{}, 8),
+		events:           nil,
+	}
+	firstHandler := botapi.NewHandler(shared, slog.New(slog.DiscardHandler), store.RateLimitConfig{})
+	secondHandler := botapi.NewHandler(shared, slog.New(slog.DiscardHandler), store.RateLimitConfig{})
+	shared.wakePolls = []func(int64){firstHandler.NotifyUpdates, secondHandler.NotifyUpdates}
+
+	firstRequest := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/bot123456:secret-sentinel/getUpdates?timeout=5", nil)
+	firstRequest.RemoteAddr = "100.64.1.2:3456"
+	firstResponse := httptest.NewRecorder()
+	firstDone := make(chan struct{})
+	go func() {
+		firstHandler.ServeHTTP(firstResponse, firstRequest)
+		close(firstDone)
+	}()
+	select {
+	case <-shared.querySignal:
+	case <-time.After(time.Second):
+		t.Fatal("first getUpdates did not read the log")
+	}
+
+	secondRequest := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/bot123456:secret-sentinel/getUpdates?offset=3&timeout=5", nil)
+	secondRequest.RemoteAddr = "100.64.1.2:3457"
+	secondResponse := httptest.NewRecorder()
+	secondDone := make(chan struct{})
+	go func() {
+		secondHandler.ServeHTTP(secondResponse, secondRequest)
+		close(secondDone)
+	}()
+	select {
+	case <-shared.querySignal:
+	case <-time.After(time.Second):
+		t.Fatal("second getUpdates did not read the log")
+	}
+
+	select {
+	case <-firstDone:
+	case <-time.After(time.Second):
+		t.Fatal("superseded getUpdates did not finish")
+	}
+
+	shared.mu.Lock()
+	shared.events = []store.BotMessageEvent{{
+		Pts: 4, Type: store.EventNewMessage, LocalID: 42,
+		Message: store.Message{
+			OwnerID: 123456, LocalID: 42, PeerType: store.PeerTypeUser, PeerID: 987,
+			FromID: 987, Date: time.Unix(1700000000, 0), Text: "replica update",
+		},
+		Sender: store.User{ID: 987, Kind: store.UserKindHuman, FirstName: "Ada"},
+	}}
+	wakePolls := append([]func(int64){}, shared.wakePolls...)
+	shared.mu.Unlock()
+	for _, wake := range wakePolls {
+		wake(123456)
+	}
+
+	select {
+	case <-secondDone:
+	case <-time.After(time.Second):
+		t.Fatal("current getUpdates did not finish after update wakeup")
+	}
+	if firstResponse.Code != http.StatusConflict {
+		t.Fatalf("first poll response = (%d, %q), want 409 conflict", firstResponse.Code, firstResponse.Body.String())
+	}
+	if secondResponse.Code != http.StatusOK || !strings.Contains(secondResponse.Body.String(), `"update_id":4`) {
+		t.Fatalf("second poll response = (%d, %q), want update 4", secondResponse.Code, secondResponse.Body.String())
+	}
+	shared.mu.Lock()
+	offset := shared.offset
+	shared.mu.Unlock()
+	if offset != 3 {
+		t.Fatalf("stored offset = %d, want the winning poll's offset 3", offset)
 	}
 }
 

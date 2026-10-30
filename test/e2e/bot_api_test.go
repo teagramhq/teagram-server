@@ -178,6 +178,104 @@ func TestBotAPIGetUpdates(t *testing.T) {
 	}
 }
 
+func TestBotAPIGetUpdatesSupersedesPollAcrossHandlerInstances(t *testing.T) {
+	t.Parallel()
+	f := newSmokeFixture(t)
+	bot, token, err := f.store.CreateBot(f.ctx, "smoke_replica_poll_bot", "Replica")
+	if err != nil {
+		t.Fatalf("create bot: %v", err)
+	}
+	const phone = "+15551049330"
+	seedSmokeUsers(t, f, phone)
+	human := newSmokeClient(t, f, "Bot API replica poll", phone)
+	firstStore := &observedBotUpdateStore{Store: f.store, emptyQuery: make(chan struct{})}
+	secondStore := &observedBotUpdateStore{Store: f.store, emptyQuery: make(chan struct{})}
+	firstHandler := botapi.NewHandler(firstStore, slog.New(slog.DiscardHandler), store.RateLimitConfig{})
+	secondHandler := botapi.NewHandler(secondStore, slog.New(slog.DiscardHandler), store.RateLimitConfig{})
+	firstURL := startSmokeBotAPIServerWithHandler(t, f, firstHandler)
+	secondURL := startSmokeBotAPIServerWithHandler(t, f, secondHandler)
+	startSmokeBotAPINotifyListener(t, f, firstHandler)
+	startSmokeBotAPINotifyListener(t, f, secondHandler)
+	client := &http.Client{Timeout: 15 * time.Second}
+
+	if err := human.call(f.ctx, func(ctx context.Context, api *tg.Client) error {
+		_, err := api.MessagesSendMessage(ctx, &tg.MessagesSendMessageRequest{
+			Peer: peerUser(human.id, bot.ID), Message: "first update", RandomID: 2819030,
+		})
+		return err
+	}); err != nil {
+		t.Fatalf("human sends first message: %v", err)
+	}
+	first := getBotAPIUpdates(t, f.ctx, client, firstURL, token, 0, 0)
+	firstUpdates := decodeBotAPIUpdates(t, first)
+	if first.Code != http.StatusOK || len(firstUpdates) != 1 || firstUpdates[0].Message.Text != "first update" {
+		t.Fatalf("initial updates = (%d, %+v), want first update", first.Code, firstUpdates)
+	}
+	confirmedOffset := firstUpdates[0].UpdateID + 1
+
+	firstPoll := make(chan asyncBotAPIResponse, 1)
+	go func() {
+		response, err := doBotAPIGetUpdates(f.ctx, client, firstURL, token, confirmedOffset+1, 5)
+		firstPoll <- asyncBotAPIResponse{response: response, err: err}
+	}()
+	select {
+	case <-firstStore.emptyQuery:
+	case <-time.After(3 * time.Second):
+		t.Fatal("first replica did not enter the empty-log wait")
+	}
+
+	secondPoll := make(chan asyncBotAPIResponse, 1)
+	go func() {
+		response, err := doBotAPIGetUpdates(f.ctx, client, secondURL, token, confirmedOffset, 5)
+		secondPoll <- asyncBotAPIResponse{response: response, err: err}
+	}()
+	select {
+	case <-secondStore.emptyQuery:
+	case <-time.After(3 * time.Second):
+		t.Fatal("second replica did not enter the empty-log wait")
+	}
+
+	var superseded botAPIHTTPResponse
+	select {
+	case result := <-firstPoll:
+		if result.err != nil {
+			t.Fatalf("superseded poll request failed: %v", result.err)
+		}
+		superseded = result.response
+	case <-time.After(4 * time.Second):
+		t.Fatal("first replica was not woken by the newer poll generation")
+	}
+	if superseded.Code != http.StatusConflict {
+		t.Fatalf("first replica response = (%d, %q), want 409", superseded.Code, superseded.Body)
+	}
+
+	if err := human.call(f.ctx, func(ctx context.Context, api *tg.Client) error {
+		_, err := api.MessagesSendMessage(ctx, &tg.MessagesSendMessageRequest{
+			Peer: peerUser(human.id, bot.ID), Message: "second update", RandomID: 2819031,
+		})
+		return err
+	}); err != nil {
+		t.Fatalf("human sends second message: %v", err)
+	}
+	var current botAPIHTTPResponse
+	select {
+	case result := <-secondPoll:
+		if result.err != nil {
+			t.Fatalf("current poll request failed: %v", result.err)
+		}
+		current = result.response
+	case <-time.After(4 * time.Second):
+		t.Fatal("second replica did not return the update")
+	}
+	updates := decodeBotAPIUpdates(t, current)
+	if current.Code != http.StatusOK || len(updates) != 1 || updates[0].Message.Text != "second update" {
+		t.Fatalf("second replica response = (%d, %+v), want only second update", current.Code, updates)
+	}
+	if offset, err := f.store.BotUpdateOffset(f.ctx, bot.ID, token); err != nil || offset != confirmedOffset {
+		t.Fatalf("confirmed offset = %d, err %v, want winning poll's %d", offset, err, confirmedOffset)
+	}
+}
+
 func TestBotAPIGetUpdatesReReadsAfterMissedNotify(t *testing.T) {
 	t.Parallel()
 	f := newSmokeFixture(t)

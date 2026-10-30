@@ -28,7 +28,9 @@ const getUpdatesConflictBody = "{\"ok\":false,\"error_code\":409,\"description\"
 
 type getUpdatesStore interface {
 	BotUpdateOffset(context.Context, int64, string) (int64, error)
-	AdvanceBotUpdateOffset(context.Context, int64, string, int64) (int64, error)
+	StartBotUpdatePoll(context.Context, int64, string) (store.BotUpdatePoll, error)
+	CheckBotUpdatePoll(context.Context, int64, string, int64) error
+	FinishBotUpdatePoll(context.Context, int64, string, int64, int64) (int64, error)
 	BotMessageEvents(context.Context, int64, int64, int) ([]store.BotMessageEvent, error)
 }
 
@@ -245,7 +247,7 @@ func (h *handler) getUpdates(w http.ResponseWriter, r *http.Request, botID int64
 		h.write(w, http.StatusInternalServerError, []byte(serverErrorBody), botID, method)
 		return
 	}
-	storedOffset, err := st.BotUpdateOffset(r.Context(), botID, token)
+	_, err := st.BotUpdateOffset(r.Context(), botID, token)
 	if errors.Is(err, store.ErrBotTokenNotFound) {
 		h.unauthorized(w, botID, method)
 		return
@@ -255,16 +257,29 @@ func (h *handler) getUpdates(w http.ResponseWriter, r *http.Request, botID int64
 		h.write(w, http.StatusInternalServerError, []byte(serverErrorBody), botID, method)
 		return
 	}
-	effectiveOffset := storedOffset
-	if params.offset != nil && *params.offset > effectiveOffset {
-		effectiveOffset = *params.offset
-	}
 	poll, ok := h.limiter.beginUpdatePoll(r.Context(), botID)
 	if !ok {
 		h.rateLimited(w, botID, method)
 		return
 	}
 	defer h.limiter.endUpdatePoll(botID, poll)
+	claimed, err := st.StartBotUpdatePoll(r.Context(), botID, token)
+	if errors.Is(err, store.ErrBotTokenNotFound) {
+		h.unauthorized(w, botID, method)
+		return
+	}
+	if err != nil {
+		if r.Context().Err() != nil {
+			return
+		}
+		h.log.Error("Bot API update poll claim failed", "bot_id", botID, "method", method, "err", err)
+		h.write(w, http.StatusInternalServerError, []byte(serverErrorBody), botID, method)
+		return
+	}
+	effectiveOffset := claimed.Offset
+	if params.offset != nil && *params.offset > effectiveOffset {
+		effectiveOffset = *params.offset
+	}
 
 	var timeout *time.Timer
 	if params.timeout > 0 {
@@ -277,6 +292,22 @@ func (h *handler) getUpdates(w http.ResponseWriter, r *http.Request, botID int64
 	for {
 		if poll.wasSuperseded() {
 			h.updatePollConflict(w, botID, method)
+			return
+		}
+		if err := st.CheckBotUpdatePoll(poll.ctx, botID, token, claimed.Generation); err != nil {
+			if errors.Is(err, store.ErrBotPollSuperseded) || poll.wasSuperseded() {
+				h.updatePollConflict(w, botID, method)
+				return
+			}
+			if errors.Is(err, store.ErrBotTokenNotFound) {
+				h.unauthorized(w, botID, method)
+				return
+			}
+			if r.Context().Err() != nil {
+				return
+			}
+			h.log.Error("Bot API update poll ownership check failed", "bot_id", botID, "method", method, "err", err)
+			h.write(w, http.StatusInternalServerError, []byte(serverErrorBody), botID, method)
 			return
 		}
 		updates, readErr = h.readBotUpdates(poll.ctx, st, botID, effectiveOffset, params.limit)
@@ -316,10 +347,10 @@ func (h *handler) getUpdates(w http.ResponseWriter, r *http.Request, botID int64
 		return
 	}
 
-	if params.offset != nil {
-		storedOffset, err = st.AdvanceBotUpdateOffset(r.Context(), botID, token, effectiveOffset)
-	} else {
-		storedOffset, err = st.BotUpdateOffset(r.Context(), botID, token)
+	_, err = st.FinishBotUpdatePoll(poll.ctx, botID, token, claimed.Generation, effectiveOffset)
+	if errors.Is(err, store.ErrBotPollSuperseded) || (err != nil && poll.wasSuperseded()) {
+		h.updatePollConflict(w, botID, method)
+		return
 	}
 	if errors.Is(err, store.ErrBotTokenNotFound) {
 		h.unauthorized(w, botID, method)
@@ -331,22 +362,6 @@ func (h *handler) getUpdates(w http.ResponseWriter, r *http.Request, botID int64
 		}
 		h.log.Error("Bot API update offset confirmation failed", "bot_id", botID, "method", method, "err", err)
 		h.write(w, http.StatusInternalServerError, []byte(serverErrorBody), botID, method)
-		return
-	}
-	if storedOffset > effectiveOffset {
-		updates, err = h.readBotUpdates(r.Context(), st, botID, storedOffset, params.limit)
-		if err != nil {
-			if errors.Is(err, store.ErrBotTokenNotFound) {
-				h.unauthorized(w, botID, method)
-				return
-			}
-			h.log.Error("Bot API confirmed update log read failed", "bot_id", botID, "method", method, "err", err)
-			h.write(w, http.StatusInternalServerError, []byte(serverErrorBody), botID, method)
-			return
-		}
-	}
-	if poll.wasSuperseded() {
-		h.updatePollConflict(w, botID, method)
 		return
 	}
 	encoded, err := json.Marshal(getUpdatesResponse{OK: true, Result: updates})

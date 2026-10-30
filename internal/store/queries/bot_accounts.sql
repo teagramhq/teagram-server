@@ -19,12 +19,37 @@ FROM bot_tokens
 WHERE user_id = sqlc.arg(user_id)
   AND revoked_at IS NULL;
 
--- name: AdvanceBotUpdateOffset :one
+-- StartBotUpdatePoll atomically claims a new generation and wakes existing
+-- polls on every replica through the same update notification channel.
+-- name: StartBotUpdatePoll :one
+WITH claimed AS (
+    UPDATE bot_tokens
+    SET poll_generation = poll_generation + 1
+    WHERE user_id = sqlc.arg(user_id)
+      AND revoked_at IS NULL
+      AND token_hash = sqlc.arg(token_hash)
+    RETURNING user_id, update_offset, poll_generation
+), notified AS (
+    SELECT pg_notify('tg_updates', user_id::text)
+    FROM claimed
+)
+SELECT claimed.update_offset, claimed.poll_generation
+FROM claimed
+CROSS JOIN notified;
+
+-- name: ActiveBotPollGeneration :one
+SELECT token_hash, poll_generation
+FROM bot_tokens
+WHERE user_id = sqlc.arg(user_id)
+  AND revoked_at IS NULL;
+
+-- name: FinishBotUpdatePoll :one
 UPDATE bot_tokens
 SET update_offset = GREATEST(update_offset, sqlc.arg(next_offset)::bigint)
 WHERE user_id = sqlc.arg(user_id)
   AND revoked_at IS NULL
   AND token_hash = sqlc.arg(token_hash)
+  AND poll_generation = sqlc.arg(poll_generation)::bigint
 RETURNING update_offset;
 
 -- BotMessageEvents returns only retained incoming private text-message events.

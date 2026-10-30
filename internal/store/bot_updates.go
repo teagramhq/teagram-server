@@ -14,6 +14,12 @@ import (
 
 const maxBotUpdateLimit = 100
 
+// BotUpdatePoll is the shared offset and generation claimed by one getUpdates poll.
+type BotUpdatePoll struct {
+	Offset     int64
+	Generation int64
+}
+
 // BotMessageEvent is a retained incoming text message with its author joined
 // from the same bounded event-log query.
 type BotMessageEvent struct {
@@ -44,25 +50,73 @@ func (s *Store) BotUpdateOffset(ctx context.Context, botID int64, token string) 
 	return row.UpdateOffset, nil
 }
 
-// AdvanceBotUpdateOffset confirms all updates below offset without allowing a
-// replayed older offset or a rotated token to move the stored cursor backward.
-func (s *Store) AdvanceBotUpdateOffset(ctx context.Context, botID int64, token string, offset int64) (int64, error) {
+// StartBotUpdatePoll supersedes prior polls for the bot and notifies every
+// replica so they can check whether they still own the current generation.
+func (s *Store) StartBotUpdatePoll(ctx context.Context, botID int64, token string) (BotUpdatePoll, error) {
+	wantHash, ok := botTokenHashForID(botID, token)
+	if !ok {
+		return BotUpdatePoll{}, ErrBotTokenNotFound
+	}
+
+	row, err := s.q.StartBotUpdatePoll(ctx, db.StartBotUpdatePollParams{
+		UserID: botID, TokenHash: wantHash,
+	})
+	switch {
+	case errors.Is(err, pgx.ErrNoRows):
+		return BotUpdatePoll{}, ErrBotTokenNotFound
+	case err != nil:
+		return BotUpdatePoll{}, fmt.Errorf("start bot update poll: %w", err)
+	default:
+		return BotUpdatePoll{Offset: row.UpdateOffset, Generation: row.PollGeneration}, nil
+	}
+}
+
+// CheckBotUpdatePoll returns ErrBotPollSuperseded unless the token still owns
+// generation. It also treats token revocation and rotation as unauthorized.
+func (s *Store) CheckBotUpdatePoll(ctx context.Context, botID int64, token string, generation int64) error {
+	wantHash, ok := botTokenHashForID(botID, token)
+	if !ok {
+		return ErrBotTokenNotFound
+	}
+
+	row, err := s.q.ActiveBotPollGeneration(ctx, botID)
+	switch {
+	case errors.Is(err, pgx.ErrNoRows):
+		return ErrBotTokenNotFound
+	case err != nil:
+		return fmt.Errorf("read bot update poll generation: %w", err)
+	}
+	if subtle.ConstantTimeCompare(wantHash, row.TokenHash) != 1 {
+		return ErrBotTokenNotFound
+	}
+	if row.PollGeneration != generation {
+		return ErrBotPollSuperseded
+	}
+	return nil
+}
+
+// FinishBotUpdatePoll conditionally confirms the requested offset only while
+// the caller still owns the active token's current poll generation.
+func (s *Store) FinishBotUpdatePoll(ctx context.Context, botID int64, token string, generation, offset int64) (int64, error) {
 	if offset < 0 {
-		return 0, ErrBotTokenNotFound
+		return 0, errors.New("bot update offset cannot be negative")
 	}
 	wantHash, ok := botTokenHashForID(botID, token)
 	if !ok {
 		return 0, ErrBotTokenNotFound
 	}
 
-	stored, err := s.q.AdvanceBotUpdateOffset(ctx, db.AdvanceBotUpdateOffsetParams{
-		UserID: botID, TokenHash: wantHash, NextOffset: offset,
+	stored, err := s.q.FinishBotUpdatePoll(ctx, db.FinishBotUpdatePollParams{
+		UserID: botID, TokenHash: wantHash, PollGeneration: generation, NextOffset: offset,
 	})
 	switch {
 	case errors.Is(err, pgx.ErrNoRows):
-		return 0, ErrBotTokenNotFound
+		if checkErr := s.CheckBotUpdatePoll(ctx, botID, token, generation); checkErr != nil {
+			return 0, checkErr
+		}
+		return 0, errors.New("finish bot update poll returned no row for its current generation")
 	case err != nil:
-		return 0, fmt.Errorf("advance bot update offset: %w", err)
+		return 0, fmt.Errorf("finish bot update poll: %w", err)
 	default:
 		return stored, nil
 	}

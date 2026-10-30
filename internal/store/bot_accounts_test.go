@@ -137,11 +137,15 @@ func TestBotUpdatesReadIncomingTextAndKeepConfirmedOffsetMonotonic(t *testing.T)
 		t.Fatalf("bot event projection = %+v, want message and sender hydrated in the event query", got)
 	}
 
+	poll, err := st.StartBotUpdatePoll(ctx, bot.ID, token)
+	if err != nil {
+		t.Fatalf("start bot update poll: %v", err)
+	}
 	confirmed := int64(incomingPts + 1)
-	if _, err := st.AdvanceBotUpdateOffset(ctx, bot.ID, token, confirmed); err != nil {
+	if _, err := st.FinishBotUpdatePoll(ctx, bot.ID, token, poll.Generation, confirmed); err != nil {
 		t.Fatalf("advance bot offset: %v", err)
 	}
-	if _, err := st.AdvanceBotUpdateOffset(ctx, bot.ID, token, int64(incomingPts)); err != nil {
+	if _, err := st.FinishBotUpdatePoll(ctx, bot.ID, token, poll.Generation, int64(incomingPts)); err != nil {
 		t.Fatalf("replay older bot offset: %v", err)
 	}
 	offset, err := st.BotUpdateOffset(ctx, bot.ID, token)
@@ -159,10 +163,14 @@ func TestBotUpdatesReadIncomingTextAndKeepConfirmedOffsetMonotonic(t *testing.T)
 		t.Fatalf("events after offset inside bot-send gap = %+v, want pts %d without replaying pts %d", events, afterGapPts, incomingPts)
 	}
 	confirmed = int64(afterGapPts + 1)
-	if _, err := st.AdvanceBotUpdateOffset(ctx, bot.ID, token, confirmed); err != nil {
+	poll, err = st.StartBotUpdatePoll(ctx, bot.ID, token)
+	if err != nil {
+		t.Fatalf("start final bot update poll: %v", err)
+	}
+	if _, err := st.FinishBotUpdatePoll(ctx, bot.ID, token, poll.Generation, confirmed); err != nil {
 		t.Fatalf("advance bot offset over final text: %v", err)
 	}
-	if _, err := st.AdvanceBotUpdateOffset(ctx, bot.ID, token, int64(incomingPts+1)); err != nil {
+	if _, err := st.FinishBotUpdatePoll(ctx, bot.ID, token, poll.Generation, int64(incomingPts+1)); err != nil {
 		t.Fatalf("replay first bot offset: %v", err)
 	}
 	offset, err = st.BotUpdateOffset(ctx, bot.ID, token)
@@ -193,6 +201,51 @@ func TestBotUpdatesReadIncomingTextAndKeepConfirmedOffsetMonotonic(t *testing.T)
 	}
 	if rotatedOffset != confirmed {
 		t.Fatalf("offset after token rotation = %d, want %d", rotatedOffset, confirmed)
+	}
+}
+
+func TestBotUpdatePollGenerationFencesOffsetWrites(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	st, err := store.Open(ctx, pgtest.DSN(t), pgtest.EncKey(), store.WithoutBlobStore())
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := st.Close(); err != nil {
+			t.Errorf("close store: %v", err)
+		}
+	})
+	bot, token, err := st.CreateBot(ctx, "generation_weather_bot", "Weather")
+	if err != nil {
+		t.Fatalf("create bot: %v", err)
+	}
+
+	first, err := st.StartBotUpdatePoll(ctx, bot.ID, token)
+	if err != nil {
+		t.Fatalf("start first poll: %v", err)
+	}
+	second, err := st.StartBotUpdatePoll(ctx, bot.ID, token)
+	if err != nil {
+		t.Fatalf("start second poll: %v", err)
+	}
+	if second.Generation != first.Generation+1 || second.Offset != first.Offset {
+		t.Fatalf("poll generations = %+v then %+v, want next generation with same starting offset", first, second)
+	}
+	if err := st.CheckBotUpdatePoll(ctx, bot.ID, token, first.Generation); !errors.Is(err, store.ErrBotPollSuperseded) {
+		t.Fatalf("first poll ownership error = %v, want superseded", err)
+	}
+	if _, err := st.FinishBotUpdatePoll(ctx, bot.ID, token, first.Generation, 5); !errors.Is(err, store.ErrBotPollSuperseded) {
+		t.Fatalf("superseded first poll offset write error = %v, want superseded", err)
+	}
+	if offset, err := st.BotUpdateOffset(ctx, bot.ID, token); err != nil || offset != 0 {
+		t.Fatalf("offset after superseded write = %d, err %v, want unchanged 0", offset, err)
+	}
+	if offset, err := st.FinishBotUpdatePoll(ctx, bot.ID, token, second.Generation, 3); err != nil || offset != 3 {
+		t.Fatalf("winning poll offset write = %d, err %v, want 3", offset, err)
+	}
+	if offset, err := st.FinishBotUpdatePoll(ctx, bot.ID, token, second.Generation, 2); err != nil || offset != 3 {
+		t.Fatalf("winning poll replayed older offset = %d, err %v, want monotonic 3", offset, err)
 	}
 }
 
