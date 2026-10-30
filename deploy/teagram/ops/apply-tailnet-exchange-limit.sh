@@ -121,6 +121,9 @@ if [[ "$#" -ne 0 ]]; then
 fi
 [[ "$(id -u)" == "$EXPECTED_ROOT_UID" ]] || { fail 'operation requires root'; exit 1; }
 [[ "${OPS_SHA:-}" =~ ^[0-9a-f]{40}$ ]] || { fail 'reviewed operation SHA is invalid'; exit 64; }
+SETSID=$(type -P setsid) || { fail 'setsid is required to isolate the rollout runner from process-group signals'; exit 1; }
+[[ "$SETSID" == /* && -x "$SETSID" ]] || { fail 'setsid executable is unavailable'; exit 1; }
+"$SETSID" --wait true >/dev/null || { fail 'setsid cannot wait for an isolated rollout runner'; exit 1; }
 # Keep the rollout runner's shared lock across preflight, the .env update, and apply.
 exec 9>"$DEPLOY_LOCK"
 flock -x 9 || { fail 'cannot acquire shared deployment lock'; exit 1; }
@@ -235,7 +238,7 @@ if env \
   COMPOSE_FILE="$COMPOSE_FILES" \
   ROLLOUT_RUNNER_ADDED_ENV="$TAILNET_ENV" \
   ROLLOUT_RUNNER_PREVIOUS_ENV_FILE="$PREVIOUS_ENV_FILE" \
-  bash "$RUNNER" apply "$target_sha" "$baseline_sha" > "$TEMP_DIR/runner.log" 2>&1; then
+  "$SETSID" --wait bash "$RUNNER" apply "$target_sha" "$baseline_sha" > "$TEMP_DIR/runner.log" 2>&1; then
   :
 else
   runner_status=$?

@@ -111,10 +111,15 @@ printf '%s\n' 'runner output contains a private configuration value' >&2
 if [[ "$MOCK_RUNNER_MODE" == fail ]]; then
   exit 7
 fi
+printf 'TG_RATE_LIMIT_KEY_EXCHANGE_IP=20\nTG_KEY_EXCHANGE_PER_CONNECTION=2\nTG_KEY_EXCHANGE_GLOBAL_RATE=5\nTG_KEY_EXCHANGE_GLOBAL_BURST=30\nTG_RATE_LIMIT_KEY_EXCHANGE_IP_TAILNET=0\n' > "$MOCK_CONTAINER_ENV_FILE"
+if [[ -n "${MOCK_PROCESS_GROUP_SIGNAL:-}" ]]; then
+  operation_pgid=$(ps -o pgid= -p "$PPID" | tr -d '[:space:]')
+  [[ "$operation_pgid" =~ ^[0-9]+$ ]]
+  kill -s "$MOCK_PROCESS_GROUP_SIGNAL" -- "-$operation_pgid"
+fi
 env_sha=$(sha256sum "$MOCK_ENV_FILE" | cut -d' ' -f1)
 printf 'env_sha256=%s source_sha=%s\n' "$env_sha" "$MOCK_TARGET_SHA" > "$MOCK_ENV_RECORD"
 chmod 600 "$MOCK_ENV_RECORD"
-printf 'TG_RATE_LIMIT_KEY_EXCHANGE_IP=20\nTG_KEY_EXCHANGE_PER_CONNECTION=2\nTG_KEY_EXCHANGE_GLOBAL_RATE=5\nTG_KEY_EXCHANGE_GLOBAL_BURST=30\nTG_RATE_LIMIT_KEY_EXCHANGE_IP_TAILNET=0\n' > "$MOCK_CONTAINER_ENV_FILE"
 RUNNER
 chmod 600 "$ROOT_FIXTURE/teagramd-rollout-runner/rollout-runner.sh"
 
@@ -125,9 +130,10 @@ export MOCK_ENV_FILE="$REPO_FIXTURE/.env" MOCK_ENV_RECORD="$REPO_FIXTURE/.state/
 export MOCK_BACKUP="$ROOT_FIXTURE/.env.main-2478-pre-key-exchange-20261025T170009Z"
 export MOCK_DEPLOY_LOCK="$TMP/deploy.lock"
 export MOCK_SYNC_COUNT="$TMP/sync-count" MOCK_REAL_SYNC="$REAL_SYNC" MOCK_SYNC_FAIL_ON=
+MOCK_PROCESS_GROUP_SIGNAL=''
 MOCK_SIGNAL_ON_SYNC=''
 MOCK_SIGNAL=''
-export MOCK_SIGNAL_ON_SYNC MOCK_SIGNAL
+export MOCK_PROCESS_GROUP_SIGNAL MOCK_SIGNAL_ON_SYNC MOCK_SIGNAL
 
 setup_fixture() {
   printf 'FIXTURE_PRIVATE_VALUE=do-not-print-fixture-value\nTG_LOG_LOGIN_CODES=false\n' > "$MOCK_ENV_FILE"
@@ -143,6 +149,16 @@ setup_fixture() {
 }
 
 run_operation() {
+  if [[ -n "$MOCK_PROCESS_GROUP_SIGNAL" ]]; then
+    local operation_status=0
+    if setsid --wait env OPS_SHA="$OPS_SHA" MOCK_RUNNER_CALL="$TMP/runner-called" bash "$OP" > "$TMP/operation.log" 2>&1; then
+      :
+    else
+      operation_status=$?
+    fi
+    cat -- "$TMP/operation.log"
+    return "$operation_status"
+  fi
   env OPS_SHA="$OPS_SHA" MOCK_RUNNER_CALL="$TMP/runner-called" bash "$OP"
 }
 
@@ -213,6 +229,43 @@ done
 MOCK_SIGNAL_ON_SYNC=
 MOCK_SIGNAL=
 export MOCK_SIGNAL_ON_SYNC MOCK_SIGNAL
+
+for signal in TERM HUP; do
+  setup_fixture
+  MOCK_PROCESS_GROUP_SIGNAL=$signal
+  export MOCK_PROCESS_GROUP_SIGNAL
+  interrupted_status=0
+  interrupted_output=$(run_operation 2>&1) || interrupted_status=$?
+  if [[ "$signal" == TERM ]]; then
+    expected_status=143
+  else
+    expected_status=129
+  fi
+  [[ "$interrupted_status" == "$expected_status" ]] || {
+    printf 'runner-session %s did not preserve its signal exit status\n' "$signal" >&2
+    exit 1
+  }
+  [[ "$interrupted_output" == *"signal=$signal"*'rollback_env=recorded'* && \
+    "$interrupted_output" != *'rollback_env=restored'* ]] || {
+    printf 'runner-session %s reported recovery before recording the recreated container\n' "$signal" >&2
+    exit 1
+  }
+  [[ "$(tail -n 1 "$MOCK_ENV_FILE")" == 'TG_RATE_LIMIT_KEY_EXCHANGE_IP_TAILNET=0' ]] || {
+    printf 'runner-session %s did not retain the applied .env with the recreated container\n' "$signal" >&2
+    exit 1
+  }
+  applied_env_sha=$(sha256sum "$MOCK_ENV_FILE" | cut -d' ' -f1)
+  [[ "$(cat "$MOCK_ENV_RECORD")" == "env_sha256=$applied_env_sha source_sha=$TARGET_SHA" ]] || {
+    printf 'runner-session %s did not record the recreated container environment\n' "$signal" >&2
+    exit 1
+  }
+  grep -Fxq 'TG_RATE_LIMIT_KEY_EXCHANGE_IP_TAILNET=0' "$MOCK_CONTAINER_ENV_FILE" || {
+    printf 'runner-session %s did not finish recreating the container\n' "$signal" >&2
+    exit 1
+  }
+done
+MOCK_PROCESS_GROUP_SIGNAL=''
+export MOCK_PROCESS_GROUP_SIGNAL
 
 setup_fixture
 MOCK_RUNNER_MODE=fail
