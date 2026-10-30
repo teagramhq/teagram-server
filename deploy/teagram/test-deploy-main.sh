@@ -120,6 +120,8 @@ cat > "$tmp/work/deploy/link-edge/deploy-main.sh" <<'EDGE'
 #!/usr/bin/env bash
 set -euo pipefail
 [[ $# == 1 ]]
+[[ ${TG_INVITE_WEB_SIGNUP_URL:-} == https://web.example.test/signup ]]
+[[ ${TG_INVITE_DESKTOP_URL:-} == '' ]]
 printf '%s\n' "$1" >> "${LINK_EDGE_DEPLOY_LOG:?}"
 printf 'link-edge\n' >> "${DEPLOY_ACTION_LOG:?}"
 EDGE
@@ -175,7 +177,7 @@ git -C "$tmp/work" add new-tracked.txt
 third=$(commit third)
 git -C "$tmp/work" push -q "$tmp/origin.git" main
 git -C "$tmp/live" reset -q --hard "$second"
-printf 'TG_RSA_KEY_FINGERPRINT=12345\n' > "$tmp/live/.env"
+printf 'TG_RSA_KEY_FINGERPRINT=12345\nTG_INVITE_WEB_SIGNUP_URL=https://web.example.test/signup\n' > "$tmp/live/.env"
 cp "$tmp/live/.env" "$tmp/expected-initial-env"
 printf 'fixture dump\n' > "$tmp/live/pgdump-fixture.sql"
 printf 'fixture evidence\n' > "$tmp/live/rollout-evidence.txt"
@@ -444,7 +446,7 @@ echo "source_sha=$first image_id=sha256:other " > "$tmp/root/main1238-fixture.bu
 expect 99 "unexpected docker call: compose exec -T postgres pg_dump -U postgres teagram" DEPLOY_SHA="$second"
 # A newer commit on main deploys.
 expect 99 "unexpected docker call: compose exec -T postgres pg_dump -U postgres teagram" DEPLOY_SHA="$third"
-printf 'TG_RSA_KEY_FINGERPRINT=12345\nTG_REPLICA_COUNT=1\n' > "$tmp/live/.env"
+printf 'TG_RSA_KEY_FINGERPRINT=12345\nTG_REPLICA_COUNT=1\nTG_INVITE_WEB_SIGNUP_URL=https://web.example.test/signup\n' > "$tmp/live/.env"
 cp "$tmp/live/.env" "$tmp/expected-single-replica-env"
 chmod 600 "$tmp/live/.env"
 mkdir -p "$tmp/root/teagramd-rollout-runner"

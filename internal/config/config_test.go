@@ -7,6 +7,7 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strconv"
 	"strings"
 	"sync"
@@ -195,6 +196,51 @@ func TestLoadDefaults(t *testing.T) {
 	}
 	if cfg.RateLimits.DiscardEncryption.Window != time.Hour {
 		t.Errorf("DiscardEncryption window = %v, want 1h", cfg.RateLimits.DiscardEncryption.Window)
+	}
+}
+
+func TestLoadUploadsDisabledSetting(t *testing.T) {
+	t.Setenv("TG_POSTGRES_DSN", "postgres://localhost/tg")
+	t.Setenv("TG_AUTHKEY_ENC_KEY", validEncKey)
+	t.Setenv("TG_AUTHKEY_ENC_KEY_FILE", "")
+	t.Setenv("TG_RECOVERY_EMAIL", "off")
+
+	readSetting := func(t *testing.T) (bool, error) {
+		t.Helper()
+		cfg, err := config.Load(discardLog())
+		if err != nil {
+			return false, err
+		}
+		setting := reflect.ValueOf(cfg).FieldByName("UploadsDisabled")
+		if !setting.IsValid() || setting.Kind() != reflect.Bool {
+			t.Fatal("config has no boolean UploadsDisabled setting")
+		}
+		return setting.Bool(), nil
+	}
+
+	for _, test := range []struct {
+		value string
+		want  bool
+	}{
+		{value: "", want: false},
+		{value: "false", want: false},
+		{value: "true", want: true},
+	} {
+		t.Run(strconv.Quote(test.value), func(t *testing.T) {
+			t.Setenv("TG_UPLOADS_DISABLED", test.value)
+			got, err := readSetting(t)
+			if err != nil {
+				t.Fatalf("Load: %v", err)
+			}
+			if got != test.want {
+				t.Fatalf("UploadsDisabled = %t, want %t for TG_UPLOADS_DISABLED=%q", got, test.want, test.value)
+			}
+		})
+	}
+
+	t.Setenv("TG_UPLOADS_DISABLED", "maybe")
+	if _, err := config.Load(discardLog()); err == nil || !strings.Contains(err.Error(), "TG_UPLOADS_DISABLED") {
+		t.Fatalf("Load error = %v, want TG_UPLOADS_DISABLED validation error", err)
 	}
 }
 
@@ -1148,6 +1194,42 @@ func TestLoadLogLoginCodes(t *testing.T) {
 			}
 			if cfg.LogLoginCodes != tc.want {
 				t.Errorf("LogLoginCodes = %v, want %v", cfg.LogLoginCodes, tc.want)
+			}
+		})
+	}
+}
+
+func TestLoadLogAuthKeyUnbinds(t *testing.T) {
+	t.Setenv("TG_POSTGRES_DSN", "postgres://localhost/tg")
+	t.Setenv("TG_AUTHKEY_ENC_KEY", validEncKey)
+	tests := map[string]struct {
+		raw     string
+		want    bool
+		wantErr bool
+	}{
+		"unset":       {raw: "", want: false},
+		"true":        {raw: "true", want: true},
+		"false":       {raw: "false", want: false},
+		"not boolean": {raw: "maybe", wantErr: true},
+	}
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Setenv("TG_LOG_AUTH_KEY_UNBINDS", tc.raw)
+			cfg, err := config.Load(discardLog())
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("expected error for %s, got LogAuthKeyUnbinds = %v", name, cfg.LogAuthKeyUnbinds)
+				}
+				if !strings.Contains(err.Error(), "TG_LOG_AUTH_KEY_UNBINDS") {
+					t.Errorf("error %q does not name the variable", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("Load: %v", err)
+			}
+			if cfg.LogAuthKeyUnbinds != tc.want {
+				t.Errorf("LogAuthKeyUnbinds = %v, want %v", cfg.LogAuthKeyUnbinds, tc.want)
 			}
 		})
 	}

@@ -268,6 +268,11 @@ func (h *handlers) handleEditChannelPhoto(r *mtproto.Request) (bin.Encoder, erro
 	if err := req.Decode(r.Buf); err != nil {
 		return nil, errMethodNotImpl
 	}
+	if h.uploadsDisabled {
+		if _, ok := req.Photo.(*tg.InputChatUploadedPhoto); ok {
+			return nil, errUploadsDisabled
+		}
+	}
 	if r.UserID == 0 {
 		return nil, errAuthKeyUnreg
 	}
@@ -1279,6 +1284,7 @@ func (h *handlers) channelHistory(r *mtproto.Request, channelID int64, req *tg.M
 		channelID,
 		r.UserID,
 		int64(req.OffsetID),
+		int64(req.OffsetDate),
 		int64(req.AddOffset),
 		int64(req.MaxID),
 		int64(req.MinID),

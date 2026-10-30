@@ -117,6 +117,7 @@ jobs:
 
   resolve-demo-web:
     name: resolve pinned demo web artifact
+    continue-on-error: true
     needs: deploy
     if: ${{ needs.deploy.result == 'success' }}
     runs-on: ubuntu-24.04
@@ -153,6 +154,7 @@ jobs:
 
   deploy-demo:
     name: deploy public demo
+    continue-on-error: true
     needs:
       - deploy
       - resolve-demo-web

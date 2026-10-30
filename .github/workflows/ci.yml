@@ -594,15 +594,6 @@ jobs:
       - name: Build
         run: go build ./...
 
-      # The action's version input defaults to latest, which resolves to the
-      # canary channel; pin the binary so the checksum gate cannot move on its own.
-      - uses: ariga/setup-atlas@v0.3
-        with:
-          version: v1.2.0
-
-      - name: Validate migrations
-        run: atlas migrate validate --dir file://migrations
-
       # Quay no longer allows anonymous pulls of its MinIO image. Build the
       # test fixture from the pinned public source so fork PRs need no secrets.
       # The daemon's builder uses the base images pulled below, as in the
@@ -621,6 +612,9 @@ jobs:
       # images in CI. The explicit empty env file keeps server credentials out
       # of Compose interpolation during validation.
       - name: Render isolated link edge Compose projection
+        env:
+          TG_INVITE_WEB_SIGNUP_URL: https://web.example.invalid/signup
+          TG_INVITE_DESKTOP_URL: ''
         run: |
           docker compose --env-file /dev/null --project-directory deploy/link-edge --file deploy/link-edge/compose.yaml config --format json >"$RUNNER_TEMP/link-edge-compose.json"
           jq -e '
@@ -632,7 +626,9 @@ jobs:
             and all(.services[]; ((.volumes // []) | length) == 0)
             and all(.services[]; ((.secrets // []) | length) == 0)
             and all(.services[]; ((.env_file // []) | length) == 0)
-            and all(.services[]; ((.environment // {}) | length) == 0)
+            and (.services.linklanding.environment == {"TG_INVITE_WEB_SIGNUP_URL":"https://web.example.invalid/signup","TG_INVITE_DESKTOP_URL":""})
+            and (.services.selector.environment == {"TG_INVITE_WEB_SIGNUP_URL":"https://web.example.invalid/signup","TG_INVITE_DESKTOP_URL":""})
+            and all([.services.web, .services.probe][]; ((.environment // {}) | length) == 0)
             and all(.services[]; .network_mode == null)
             and all(.services[]; .mem_limit == null)
             and all(.services[]; .pids_limit == null)
@@ -676,6 +672,8 @@ jobs:
         env:
           EDGE_IMAGE_SOURCE: ${{ github.server_url }}/${{ github.repository }}
           EDGE_IMAGE_REVISION: ${{ github.sha }}
+          TG_INVITE_WEB_SIGNUP_URL: https://web.example.invalid/signup
+          TG_INVITE_DESKTOP_URL: ''
         run: |
           test "$(git rev-parse HEAD)" = "$EDGE_IMAGE_REVISION"
           test -z "$(git status --porcelain)"
@@ -691,6 +689,8 @@ jobs:
         env:
           EDGE_IMAGE_SOURCE: ${{ github.server_url }}/${{ github.repository }}
           EDGE_IMAGE_REVISION: ${{ github.sha }}
+          TG_INVITE_WEB_SIGNUP_URL: https://web.example.invalid/signup
+          TG_INVITE_DESKTOP_URL: ''
         run: |
           compose=(docker compose --env-file /dev/null --project-directory deploy/link-edge --file deploy/link-edge/compose.yaml)
           output_file="$RUNNER_TEMP/link-edge-provenance-rejection.log"
@@ -721,6 +721,9 @@ jobs:
             --build-arg "EDGE_IMAGE_SOURCE=$wrong_source"
 
       - name: Verify landing loopback publication on the Docker daemon
+        env:
+          TG_INVITE_WEB_SIGNUP_URL: https://web.example.invalid/signup
+          TG_INVITE_DESKTOP_URL: ''
         run: |
           compose=(docker compose --env-file /dev/null --project-directory deploy/link-edge --file deploy/link-edge/compose.yaml)
           docker network create teagram-web-edge-net
@@ -1130,6 +1133,8 @@ jobs:
           bash -n deploy/teagram/test-preflight-replay.sh
           bash -n deploy/teagram/teagram-logs.sh
           sh -n deploy/teagram/teagram-ops.sh
+          bash -n deploy/teagram/ops/invite-web-signup-url.sh
+          bash -n deploy/teagram/test-invite-web-signup-url.sh
           bash -n deploy/teagram/ops/replay-check.sh
           bash -n deploy/teagram/ops/rollout-evidence.sh
           bash -n deploy/teagram/ops/rollback-public-websocket.sh
@@ -1168,6 +1173,8 @@ jobs:
             deploy/teagram/test-preflight-replay.sh \
             deploy/teagram/teagram-logs.sh \
             deploy/teagram/teagram-ops.sh \
+            deploy/teagram/ops/invite-web-signup-url.sh \
+            deploy/teagram/test-invite-web-signup-url.sh \
             deploy/teagram/ops/replay-check.sh \
             deploy/teagram/ops/rollout-evidence.sh \
             deploy/teagram/ops/rollback-public-websocket.sh \
@@ -1207,6 +1214,9 @@ jobs:
 
       - name: Check deploy script target fixtures
         run: deploy/teagram/test-deploy-main.sh
+
+      - name: Check invite signup URL operation fixtures
+        run: sudo -n env "PATH=$PATH" bash deploy/teagram/test-invite-web-signup-url.sh
 
       - name: Check read-only Compose preflight replay
         run: sudo -n deploy/teagram/test-preflight-replay.sh
@@ -1335,17 +1345,21 @@ jobs:
       - sticker-bundle
       - photothumb-runtime
       - real-server-fixtures
+      - lint
+      - sqlc
+      - docker
+      - compose
+      - smoke
+      - e2e-admin
       - websocket-d1
       - websocket-permanent-exchange
       - sql-lint
       - css
       - browser-acceptance
       - browser-acceptance-image
-      - rustfs-transition-qualification
-      - schema-gate-postgres
+      - test-migrations
       - deploy-workflow
       - demo-web-artifact
-      - restore-readiness
     runs-on: ubuntu-26.04
     timeout-minutes: 5
 
@@ -1355,6 +1369,12 @@ jobs:
           MAIN_PRIORITY_RESULT: ${{ needs.ops-prioritize-main.result }}
           CI_MAIN_RESULT: ${{ needs.ci-main.result }}
           STICKER_BUNDLE_RESULT: ${{ needs.sticker-bundle.result }}
+          LINT_RESULT: ${{ needs.lint.result }}
+          SQLC_RESULT: ${{ needs.sqlc.result }}
+          DOCKER_RESULT: ${{ needs.docker.result }}
+          COMPOSE_RESULT: ${{ needs.compose.result }}
+          SMOKE_RESULT: ${{ needs.smoke.result }}
+          E2E_ADMIN_RESULT: ${{ needs.e2e-admin.result }}
           PHOTOTHUMB_RUNTIME_RESULT: ${{ needs.photothumb-runtime.result }}
           REAL_SERVER_FIXTURES_RESULT: ${{ needs.real-server-fixtures.result }}
           WEBSOCKET_D1_RESULT: ${{ needs.websocket-d1.result }}
@@ -1363,18 +1383,58 @@ jobs:
           CSS_RESULT: ${{ needs.css.result }}
           BROWSER_ACCEPTANCE_RESULT: ${{ needs.browser-acceptance.result }}
           BROWSER_ACCEPTANCE_IMAGE_RESULT: ${{ needs.browser-acceptance-image.result }}
-          RUSTFS_TRANSITION_RESULT: ${{ needs.rustfs-transition-qualification.result }}
-          SCHEMA_GATE_POSTGRES_RESULT: ${{ needs.schema-gate-postgres.result }}
+          TEST_MIGRATIONS_RESULT: ${{ needs.test-migrations.result }}
           DEPLOY_WORKFLOW_RESULT: ${{ needs.deploy-workflow.result }}
           DEMO_WEB_ARTIFACT_RESULT: ${{ needs.demo-web-artifact.result }}
-          RESTORE_READINESS_RESULT: ${{ needs.restore-readiness.result }}
         run: |
           expected_priority_result=success
           if [[ "$GITHUB_EVENT_NAME" == pull_request ]]; then
             expected_priority_result=skipped
           fi
-          if [[ "$MAIN_PRIORITY_RESULT" != "$expected_priority_result" || "$CI_MAIN_RESULT" != "success" || "$STICKER_BUNDLE_RESULT" != "success" || "$PHOTOTHUMB_RUNTIME_RESULT" != "success" || "$REAL_SERVER_FIXTURES_RESULT" != "success" || "$WEBSOCKET_D1_RESULT" != "success" || "$WEB_PERMANENT_EXCHANGE_RESULT" != "success" || "$SQL_LINT_RESULT" != "success" || "$CSS_RESULT" != "success" || "$BROWSER_ACCEPTANCE_RESULT" != "success" || "$BROWSER_ACCEPTANCE_IMAGE_RESULT" != "success" || "$RUSTFS_TRANSITION_RESULT" != "success" || "$SCHEMA_GATE_POSTGRES_RESULT" != "success" || "$DEPLOY_WORKFLOW_RESULT" != "success" || "$DEMO_WEB_ARTIFACT_RESULT" != "success" || "$RESTORE_READINESS_RESULT" != "success" ]]; then
-            echo "::error::Required CI lanes did not pass (ops-prioritize-main=$MAIN_PRIORITY_RESULT, ci-main=$CI_MAIN_RESULT, sticker-bundle=$STICKER_BUNDLE_RESULT, photothumb-runtime=$PHOTOTHUMB_RUNTIME_RESULT, real-server-fixtures=$REAL_SERVER_FIXTURES_RESULT, websocket-d1=$WEBSOCKET_D1_RESULT, websocket-permanent-exchange=$WEB_PERMANENT_EXCHANGE_RESULT, sql-lint=$SQL_LINT_RESULT, css=$CSS_RESULT, browser-acceptance=$BROWSER_ACCEPTANCE_RESULT, browser-acceptance-image=$BROWSER_ACCEPTANCE_IMAGE_RESULT, rustfs-transition-qualification=$RUSTFS_TRANSITION_RESULT, schema-gate-postgres=$SCHEMA_GATE_POSTGRES_RESULT, deploy-workflow=$DEPLOY_WORKFLOW_RESULT, demo-web-artifact=$DEMO_WEB_ARTIFACT_RESULT, restore-readiness=$RESTORE_READINESS_RESULT)"
+          lane_results=(
+            "ops-prioritize-main=$MAIN_PRIORITY_RESULT"
+            "ci-main=$CI_MAIN_RESULT"
+            "sticker-bundle=$STICKER_BUNDLE_RESULT"
+            "photothumb-runtime=$PHOTOTHUMB_RUNTIME_RESULT"
+            "real-server-fixtures=$REAL_SERVER_FIXTURES_RESULT"
+            "lint=$LINT_RESULT"
+            "sqlc=$SQLC_RESULT"
+            "docker=$DOCKER_RESULT"
+            "compose=$COMPOSE_RESULT"
+            "smoke=$SMOKE_RESULT"
+            "e2e-admin=$E2E_ADMIN_RESULT"
+            "websocket-d1=$WEBSOCKET_D1_RESULT"
+            "websocket-permanent-exchange=$WEB_PERMANENT_EXCHANGE_RESULT"
+            "sql-lint=$SQL_LINT_RESULT"
+            "css=$CSS_RESULT"
+            "browser-acceptance=$BROWSER_ACCEPTANCE_RESULT"
+            "browser-acceptance-image=$BROWSER_ACCEPTANCE_IMAGE_RESULT"
+            "test-migrations=$TEST_MIGRATIONS_RESULT"
+            "deploy-workflow=$DEPLOY_WORKFLOW_RESULT"
+            "demo-web-artifact=$DEMO_WEB_ARTIFACT_RESULT"
+          )
+          if [[ "$MAIN_PRIORITY_RESULT" != "$expected_priority_result" ||
+                "$CI_MAIN_RESULT" != "success" ||
+                "$STICKER_BUNDLE_RESULT" != "success" ||
+                "$PHOTOTHUMB_RUNTIME_RESULT" != "success" ||
+                "$REAL_SERVER_FIXTURES_RESULT" != "success" ||
+                "$LINT_RESULT" != "success" ||
+                "$SQLC_RESULT" != "success" ||
+                "$DOCKER_RESULT" != "success" ||
+                "$COMPOSE_RESULT" != "success" ||
+                "$SMOKE_RESULT" != "success" ||
+                "$E2E_ADMIN_RESULT" != "success" ||
+                "$WEBSOCKET_D1_RESULT" != "success" ||
+                "$WEB_PERMANENT_EXCHANGE_RESULT" != "success" ||
+                "$SQL_LINT_RESULT" != "success" ||
+                "$CSS_RESULT" != "success" ||
+                "$BROWSER_ACCEPTANCE_RESULT" != "success" ||
+                "$BROWSER_ACCEPTANCE_IMAGE_RESULT" != "success" ||
+                "$TEST_MIGRATIONS_RESULT" != "success" ||
+                "$DEPLOY_WORKFLOW_RESULT" != "success" ||
+                "$DEMO_WEB_ARTIFACT_RESULT" != "success" ]]; then
+            echo "::error::Required CI lanes did not pass"
+            printf '%s\n' "${lane_results[@]}"
             exit 1
           fi
           echo "All required CI lanes passed"
@@ -1400,7 +1460,7 @@ jobs:
       - real-server-fixtures
       - restore-readiness
       - rustfs-transition-qualification
-      - schema-gate-postgres
+      - test-migrations
       - smoke
       - sql-lint
       - sqlc
@@ -3438,44 +3498,41 @@ jobs:
           sudo env "PATH=$PATH" TMPDIR=/root bash deploy/teagramd/rollout-runner/test-isolated-restore-postgres.sh
           sudo env "PATH=$PATH" TMPDIR=/root bash deploy/teagramd/rollout-runner/test-stack-move-runner.sh
 
-  schema-gate-postgres:
-    name: PostgreSQL Atlas schema gate
+  test-migrations:
+    name: "test: migrations"
     needs: ops-prioritize-main
     if: ${{ always() && (needs.ops-prioritize-main.result == 'success' || (needs.ops-prioritize-main.result == 'skipped' && github.event_name == 'pull_request')) }}
     runs-on: ubuntu-26.04
-    timeout-minutes: 15
+    timeout-minutes: 20
     permissions:
       contents: read
     env:
-      COMPOSE_FILE: deploy/teagramd/rollout-runner/schema-gate-ci-compose.yml
-      POSTGRES_PASSWORD: ci-only-smoketest
+      MIGRATIONS_BASE_REF: ${{ github.event_name == 'pull_request' && format('origin/{0}', github.event.pull_request.base.ref) || github.event.before }}
+      POSTGRES_IMAGE: mirror.gcr.io/library/postgres:18-alpine@sha256:d8703cd7fba306b9fec9268ecedfa8a966846c053036a60e3635791957eb2f66
+      ATLAS_APPLY_IMAGE: mirror.gcr.io/arigaio/atlas:1.2.0-alpine
 
     steps:
       - uses: actions/checkout@v7.0.1
-
-      - uses: actions/setup-python@v6.0.0
         with:
-          python-version: "3.12.15"
+          fetch-depth: 0
+          persist-credentials: false
 
-      - uses: ariga/setup-atlas@v0.3
-        with:
-          version: v1.2.0
+      - name: Pull PostgreSQL and Atlas images
+        run: >-
+          bash .github/scripts/pull-base-images.sh
+          --image "$POSTGRES_IMAGE"
+          --image "$ATLAS_APPLY_IMAGE"
 
-      - name: Check schema gate fixture decisions
-        run: python3 -B deploy/teagramd/rollout-runner/test-schema-result-gate.py
+      - name: Install pinned Atlas Community CLI
+        env:
+          ATLAS_LINT_BIN: ${{ runner.temp }}/atlas-community
+        run: |
+          curl -fsSL https://atlasgo.sh | ATLAS_VERSION=v1.2.0 sh -s -- --community --no-install --output "$ATLAS_LINT_BIN"
+          chmod 755 "$ATLAS_LINT_BIN"
 
-      - name: service-start
-        run: python3 -B .github/scripts/schema-phase-runner.py service-start
-
-      - name: migrate-apply
-        run: python3 -B .github/scripts/schema-phase-runner.py migrate-apply
-
-      - name: pre-check
-        run: python3 -B .github/scripts/schema-phase-runner.py pre-check
-
-      - name: post-check
-        run: python3 -B .github/scripts/schema-phase-runner.py post-check
-
-      - name: Tear down schema gate database
-        if: always()
-        run: docker compose down -v
+      - name: Test migration lint and install paths
+        env:
+          ATLAS_LINT_BIN: ${{ runner.temp }}/atlas-community
+        run: |
+          python3 -B .github/scripts/test_migration_lock_lint.py
+          bash .github/scripts/test-migrations.sh
