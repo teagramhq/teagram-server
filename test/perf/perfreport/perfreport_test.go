@@ -243,6 +243,27 @@ func TestEvaluateWaivesKnownTimingChecksOnlyForNamedScenario(t *testing.T) {
 	}
 }
 
+func TestEvaluateReportsPassingTimingWaiverAsNote(t *testing.T) {
+	name := "updates.getDifference 30 days offline"
+	waiver := perfreport.Waiver{Scenario: name, Check: perfreport.CheckTiming, Issue: "MAIN-2580"}
+	head := rounds(pair(name, perfreport.Read,
+		result(2, 3, 5, 100), result(2.5, 4, 5, 100))...)
+	v := perfreport.Evaluate(perfreport.Input{Head: head, Waivers: []perfreport.Waiver{waiver}})
+	if len(v.Failures)+len(v.TimingFailures)+len(v.Reported) != 0 {
+		t.Fatalf("passing timing waiver produced failures: %s%s%s", reasons(v.Failures), reasons(v.TimingFailures), reasons(v.Reported))
+	}
+	if len(v.Stale) != 0 {
+		t.Fatalf("passing timing waiver was marked stale: %+v", v.Stale)
+	}
+	if len(v.TimingWaiverNotes) != 1 || v.TimingWaiverNotes[0] != waiver {
+		t.Fatalf("timing waiver notes = %+v, want %+v", v.TimingWaiverNotes, waiver)
+	}
+	md := perfreport.Markdown(v)
+	if !strings.Contains(md, "timing waiver (MAIN-2580) passed in this run; keep it until it passes consistently on main") || strings.Contains(md, "no longer fails; remove its entry") {
+		t.Fatalf("markdown = %s", md)
+	}
+}
+
 func TestEvaluateSlowerThanBaseNeedsNoiseBandAndTwoMilliseconds(t *testing.T) {
 	base := rounds(pair("h", perfreport.Read, result(10, 12, 5, 100), result(10, 12, 5, 100))...)
 	history := calibrated("h", perfreport.Calibration, 10, 1)
@@ -358,6 +379,20 @@ func TestKnownViolationTimingWaiversNameTheirIssues(t *testing.T) {
 		}
 		if !found {
 			t.Errorf("known_violations.json has no timing waiver for %s (%s)", scenario, issue)
+		}
+	}
+	for _, removed := range []struct {
+		scenario string
+		check    string
+	}{
+		{scenario: "messages.getHistory oldest page", check: perfreport.CheckRows},
+		{scenario: "messages.getHistory oldest page", check: perfreport.CheckSeqScan},
+		{scenario: "messages.getHistory group", check: perfreport.CheckSeqScan},
+	} {
+		for _, waiver := range waivers {
+			if waiver.Scenario == removed.scenario && waiver.Check == removed.check {
+				t.Errorf("known_violations.json still has resolved %s waiver for %s", removed.check, removed.scenario)
+			}
 		}
 	}
 	for _, scenario := range []string{"contacts.search", "messages.getDialogs"} {
