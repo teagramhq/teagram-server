@@ -25,6 +25,8 @@ teagram-ops verbs (read-only unless noted):
   run <40-hex-sha> <target-failure-report|rollout-evidence|invite-web-signup-url> [args]
                             runs an allowlisted script from that commit only if
                             the commit is on origin/main
+                            invite-web-signup-url default (apply) and --rollback
+                            mutate the live .env; --check is read-only
 EOF
 }
 

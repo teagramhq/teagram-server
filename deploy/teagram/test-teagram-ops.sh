@@ -189,6 +189,8 @@ for help in help -h --help; do
   help_output=$(run_command "$help" 2>&1)
   [[ "$help_output" == *'hostname'* && "$help_output" == *'env-names'* && "$help_output" == *'run'* ]]
   [[ "$help_output" == *'target-failure-report|rollout-evidence|invite-web-signup-url'* ]]
+  [[ "$help_output" == *'invite-web-signup-url default (apply) and --rollback'* ]]
+  [[ "$help_output" == *'mutate the live .env; --check is read-only'* ]]
 done
 
 report_dir="$MOCK_ROOT/main1238-${REPORT_PREFIX}-20261027T124539Z.target"
