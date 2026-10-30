@@ -97,7 +97,7 @@ setup_case() {
   FIXTURE_RUNNER_CALL_COUNT=$case_dir/runner-call-count
   origin=$case_dir/origin.git
   mkdir -p "$FIXTURE_REPO/.state" "$FIXTURE_ROOT/teagramd-rollout-runner"
-  chmod 700 "$FIXTURE_REPO/.state"
+  chmod 750 "$FIXTURE_REPO/.state"
   printf 'TG_OTHER=stable\n' > "$FIXTURE_REPO/.env"
   printf 'fixture compose\n' > "$FIXTURE_REPO/docker-compose.yml"
   printf 'fixture override\n' > "$FIXTURE_REPO/docker-compose.override.yml"
@@ -145,11 +145,21 @@ output=$(run_operation)
 [[ "$(cat "$TMP/operation-status")" == 0 ]]
 [[ "$output" == *'invite_listener=verified quota=5'* ]]
 [[ "$output" == *'rollout=verified'* ]]
+[[ "$(stat -c '%a' -- "$FIXTURE_REPO/.state")" == 750 ]]
 grep -qx 'TG_USER_INVITE_QUOTA=5' "$FIXTURE_REPO/.env"
 grep -qx 'TG_USER_INVITE_QUOTA=5' "$FIXTURE_CONTAINER_ENV"
 [[ -f "$FIXTURE_REPO/.state/.env.main-2844-before-user-invites" ]]
 [[ -f "$FIXTURE_RUNNER_CALLED" ]]
 printf '%s\n' 'PASS quota operation records the change and verifies the advertised app config'
+
+setup_case state-dir-group-writable
+chmod 770 "$FIXTURE_REPO/.state"
+output=$(run_operation)
+[[ "$(cat "$TMP/operation-status")" == 1 ]]
+[[ "$output" == *'deployment state directory failed ownership or mode checks'* ]]
+[[ ! -e "$FIXTURE_RUNNER_CALLED" ]]
+[[ ! -e "$FIXTURE_REPO/.state/.env.main-2844-before-user-invites" ]]
+printf '%s\n' 'PASS writable deployment state directory is rejected before mutation'
 
 setup_case rollback
 original_env_sha=$(sha256sum "$FIXTURE_REPO/.env" | awk '{print $1}')
