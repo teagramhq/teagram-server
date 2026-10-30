@@ -369,6 +369,27 @@ func TestKnownViolationTimingWaiversNameTheirIssues(t *testing.T) {
 	}
 }
 
+func TestKnownViolationGetDialogsOnlyWaivesLatencyForItsIssue(t *testing.T) {
+	raw, err := os.ReadFile("../known_violations.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	waivers, err := perfreport.ParseWaivers(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var dialogs []perfreport.Waiver
+	for _, waiver := range waivers {
+		if waiver.Scenario == "messages.getDialogs" {
+			dialogs = append(dialogs, waiver)
+		}
+	}
+	if len(dialogs) != 1 || dialogs[0].Check != perfreport.CheckLatency || dialogs[0].Issue != "MAIN-2984" {
+		t.Fatalf("messages.getDialogs waivers = %+v, want only latency tracked by MAIN-2984", dialogs)
+	}
+}
+
 func TestMarkdownListsEveryScenarioWithBudgetAndBand(t *testing.T) {
 	v := perfreport.Evaluate(perfreport.Input{Head: rounds(pair("messages.getDialogs", perfreport.Read,
 		result(2, 3, 5, 120), result(2.5, 4, 5, 130))...)})
