@@ -84,15 +84,16 @@ jobs:
     name: 'ops: dispatch-pr-ci-recovery'
     needs:
       - ops-prioritize-main
-      - lint-go
-    if: ${{ always() && (needs.ops-prioritize-main.result == 'success' || (needs.ops-prioritize-main.result == 'skipped' && github.event_name == 'pull_request')) && github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.lint-go.result != 'skipped' && needs.ops-prioritize-main.outputs.cancelled_pr_run_targets != '' }}
+    # Evaluate the PR-only skip before main prioritization can cancel a queued
+    # PR run. Main fan-out jobs share the priority dependency and unlock here.
+    if: ${{ always() && (needs.ops-prioritize-main.result == 'success' || (needs.ops-prioritize-main.result == 'skipped' && github.event_name == 'pull_request')) && github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.ops-prioritize-main.outputs.cancelled_pr_run_targets != '' }}
     runs-on: ubuntu-26.04
     timeout-minutes: 5
     permissions:
       actions: write
 
     steps:
-      - name: Dispatch cancelled pull request CI recovery after main fan-out starts
+      - name: Dispatch cancelled pull request CI recovery
         env:
           GH_TOKEN: ${{ github.token }}
           CANCELLED_PR_RUN_TARGETS: ${{ needs.ops-prioritize-main.outputs.cancelled_pr_run_targets }}

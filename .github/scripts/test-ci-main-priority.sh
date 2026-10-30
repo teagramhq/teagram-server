@@ -59,15 +59,15 @@ dispatch_needs="$(query '.jobs."ops-dispatch-pr-ci-recovery".needs[]')"
   fail 'the recovery dispatch job must use the ops stage naming contract'
 [[ "$(query '.jobs."ops-dispatch-pr-ci-recovery".permissions | keys | join(",")')" == 'actions' ]] ||
   fail 'the recovery dispatch job must have only Actions write permission'
-[[ "$dispatch_needs" == *'ops-prioritize-main'* && "$dispatch_needs" == *'lint-go'* ]] ||
-  fail 'cancelled PR recovery must be dispatched after the main lint lane starts'
+[[ "$dispatch_needs" == 'ops-prioritize-main' ]] ||
+  fail 'the recovery dispatch must not wait for the main lint lane before evaluating its PR skip guard'
 [[ "$(query '.jobs."ops-dispatch-pr-ci-recovery".timeout-minutes')" == 5 ]] ||
   fail 'dispatching PR recovery must remain short-lived in the main concurrency group'
 dispatch_if="$(query '.jobs."ops-dispatch-pr-ci-recovery".if')"
 dispatch_targets_if="outputs.cancelled_pr_run_targets != ''"
-[[ "$dispatch_if" == *"needs.ops-prioritize-main.result == 'success'"* && "$dispatch_if" == *"needs.ops-prioritize-main.result == 'skipped'"* && "$dispatch_if" == *"github.event_name == 'pull_request'"* && "$dispatch_if" == *"github.event_name == 'push'"* && "$dispatch_if" == *'needs.lint-go.result != '\''skipped'\'''* && "$dispatch_if" == *"$dispatch_targets_if"* ]] ||
-  fail 'cancelled PR recovery must dispatch only after main fan-out starts'
-dispatch_step="$(query '.jobs."ops-dispatch-pr-ci-recovery".steps[] | select(.name == "Dispatch cancelled pull request CI recovery after main fan-out starts") | .run')"
+[[ "$dispatch_if" == *'always()'* && "$dispatch_if" == *"needs.ops-prioritize-main.result == 'success'"* && "$dispatch_if" == *"github.event_name == 'push'"* && "$dispatch_if" == *"github.ref == 'refs/heads/main'"* && "$dispatch_if" == *"$dispatch_targets_if"* && "$dispatch_if" != *'needs.lint'* ]] ||
+  fail 'cancelled PR recovery must dispatch only for main pushes with cancelled runs'
+dispatch_step="$(query '.jobs."ops-dispatch-pr-ci-recovery".steps[] | select(.name == "Dispatch cancelled pull request CI recovery") | .run')"
 [[ "$dispatch_step" == *'gh workflow run recover-cancelled-pr-ci.yml'* && "$dispatch_step" == *'--ref main'* && "$dispatch_step" == *'-f issue=MAIN-2765'* && "$dispatch_step" == *'cancelled_pr_run_targets=$CANCELLED_PR_RUN_TARGETS'* && "$dispatch_step" != *'sleep 60'* ]] ||
   fail 'main CI must dispatch recovery with its issue and cancelled run ids without waiting'
 printf '%s\n' "$dispatch_step" | bash -n
