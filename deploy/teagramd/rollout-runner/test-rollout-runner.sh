@@ -3725,6 +3725,36 @@ else
   fail 'tailnet limit addition rollback must restore the previous environment'
 fi
 
+prepare_env_addition_fixture invite-quota-addition-rollback \
+  TG_USER_INVITE_QUOTA '' TG_USER_INVITE_QUOTA=5 TG_USER_INVITE_QUOTA=5 \
+  target-local-df9-rollback "$DF9_LOCAL_COMPOSE_TARGET_SHA" "$TARGET_LOCAL_COMPOSE_TARGET_SHA" \
+  TG_USER_INVITE_QUOTA=
+state=$(cat "$TMP/invite-quota-addition-rollback-state-path")
+checkout=$(cat "$TMP/invite-quota-addition-rollback-checkout-path")
+root=$(cat "$TMP/invite-quota-addition-rollback-root-path")
+jq -c '.services.teagramd.environment.TG_USER_INVITE_QUOTA=""' \
+  "$state/base-compose.json" > "$TMP/invite-quota-addition-rollback-base-compose.json"
+mv -- "$TMP/invite-quota-addition-rollback-base-compose.json" "$state/base-compose.json"
+printf '%s\n' TG_USER_INVITE_QUOTA= \
+  > "$TMP/invite-quota-addition-rollback-baseline-env-extra"
+record_live_render "$state"
+previous_env_sha=$(sha256sum "$TMP/invite-quota-addition-rollback-previous.env" | awk '{print $1}')
+status=$(run_fixture invite-quota-addition-rollback built 0 '' 2 '' '' apply "$APPLY_TARGET_SHA")
+if [ "$status" != 0 ] && grep -q "rollback=verified baseline_sha=$TARGET_LOCAL_COMPOSE_TARGET_SHA" \
+     "$TMP/invite-quota-addition-rollback.stdout" && \
+   [ "$(jq -r '.container_env_added' "$root.baseline/baseline.snapshot.json")" = none ] && \
+   [ "$(jq -r '.container_env_added' "$root.target/target.snapshot.json")" = TG_USER_INVITE_QUOTA ] && \
+   [ "$(jq -r '.container_env_added' "$root.rollback/rollback.snapshot.json")" = none ] && \
+   [ "$(sha256sum "$checkout/.env" | awk '{print $1}')" = "$previous_env_sha" ] && \
+   grep -qx "env_sha256=$previous_env_sha source_sha=$TARGET_LOCAL_COMPOSE_TARGET_SHA" "$checkout/.state/rollout-env" && \
+   grep -q $'rollback\tenv_sha256\t.*\tpass' "$root.rollback/rollback-equivalence.tsv" && \
+   grep -q $'rollback\tcontainer_env_sha256\t.*\tpass' "$root.rollback/rollback-equivalence.tsv"; then
+  pass 'invite quota addition rollback restores the prior .env and empty Compose default'
+else
+  show_fixture_failure invite-quota-addition-rollback "$status"
+  fail 'invite quota addition rollback must restore the previous environment'
+fi
+
 prepare_env_addition_fixture env-addition-rollback TG_NEW_FLAG '' 'TG_NEW_FLAG=on' TG_NEW_FLAG=on \
   target-local-df9-rollback "$DF9_LOCAL_COMPOSE_TARGET_SHA" "$TARGET_LOCAL_COMPOSE_TARGET_SHA"
 root=$(cat "$TMP/env-addition-rollback-root-path")
