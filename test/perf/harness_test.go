@@ -103,6 +103,9 @@ func TestRPCPerformance(t *testing.T) {
 
 func measureFixture(t *testing.T, ctx context.Context, dsn, blobs string, key *rsa.PrivateKey, f fixture, only string) []perfreport.Result {
 	t.Helper()
+	if os.Getenv("TG_PERF_REPORT") != "" {
+		t.Setenv("TG_PERF_FIXTURE", f.Spec.Name)
+	}
 	srv := bootServer(t, ctx, dsn, blobs, key)
 	defer srv.stop()
 	e := &env{f: f, srv: srv}
@@ -181,8 +184,14 @@ func measure(t *testing.T, ctx context.Context, e *env, explain *explainer, sc s
 		allocBefore := heapAllocs()
 		e.elapsed = 0
 		start := time.Now()
-		if err := call(ctx); err != nil {
-			return fail(err)
+		var callErr error
+		if sc.name == "messages.getDialogs" && i == warmup {
+			callErr = callWithGetDialogsProfile(ctx, call)
+		} else {
+			callErr = call(ctx)
+		}
+		if callErr != nil {
+			return fail(callErr)
 		}
 		elapsed := time.Since(start)
 		if e.elapsed > 0 {
@@ -225,6 +234,22 @@ func measure(t *testing.T, ctx context.Context, e *env, explain *explainer, sc s
 	return r
 }
 
+func callWithGetDialogsProfile(ctx context.Context, call func(context.Context) error) error {
+	const profileEnv = "TG_PERF_PROFILE_GETDIALOGS"
+	previous, hadPrevious := os.LookupEnv(profileEnv)
+	if err := os.Setenv(profileEnv, "1"); err != nil {
+		return err
+	}
+	defer func() {
+		if hadPrevious {
+			_ = os.Setenv(profileEnv, previous)
+		} else {
+			_ = os.Unsetenv(profileEnv)
+		}
+	}()
+	return call(ctx)
+}
+
 func logQueryDurations(t *testing.T, fixture string, rpcDuration time.Duration, captured []capturedQuery) {
 	t.Helper()
 	totals := make(map[string]time.Duration)
@@ -262,6 +287,24 @@ func heapAllocs() uint64 {
 	s := []metrics.Sample{{Name: "/gc/heap/allocs:bytes"}}
 	metrics.Read(s)
 	return s[0].Value.Uint64()
+}
+
+func TestCallWithGetDialogsProfileRestoresEnvironment(t *testing.T) {
+	const profileEnv = "TG_PERF_PROFILE_GETDIALOGS"
+	t.Setenv(profileEnv, "previous")
+	wantErr := errors.New("call error")
+	err := callWithGetDialogsProfile(context.Background(), func(context.Context) error {
+		if got := os.Getenv(profileEnv); got != "1" {
+			t.Fatalf("profile environment = %q, want 1", got)
+		}
+		return wantErr
+	})
+	if !errors.Is(err, wantErr) {
+		t.Fatalf("call error = %v, want %v", err, wantErr)
+	}
+	if got := os.Getenv(profileEnv); got != "previous" {
+		t.Fatalf("profile environment after call = %q, want previous", got)
+	}
 }
 
 // explainer plans each captured statement on its own connection, outside the
