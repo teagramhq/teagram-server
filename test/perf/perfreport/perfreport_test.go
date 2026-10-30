@@ -368,18 +368,15 @@ func TestKnownViolationWaiversMatchTrackedIssues(t *testing.T) {
 			}
 		}
 	}
-	differenceWaivers := 0
-	for _, waiver := range waivers {
-		if !strings.HasPrefix(waiver.Scenario, "updates.getDifference ") {
-			continue
+	for _, scenario := range []string{
+		"updates.getDifference 1 day offline",
+		"updates.getDifference 30 days offline",
+	} {
+		for _, waiver := range waivers {
+			if waiver.Scenario == scenario {
+				t.Errorf("known_violations.json still has a %s waiver for %s (%s)", waiver.Check, scenario, waiver.Issue)
+			}
 		}
-		differenceWaivers++
-		if waiver.Scenario != "updates.getDifference 1 day offline" || waiver.Check != perfreport.CheckRows || waiver.Issue != "MAIN-3004" {
-			t.Errorf("unexpected getDifference waiver: %+v", waiver)
-		}
-	}
-	if differenceWaivers != 1 {
-		t.Errorf("known_violations.json has %d getDifference waivers, want only the MAIN-3004 1-day rows waiver", differenceWaivers)
 	}
 }
 
