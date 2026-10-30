@@ -21,6 +21,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"golang.org/x/sys/unix"
 )
 
 var (
@@ -257,12 +259,12 @@ func (l *Local) Close() error { return l.root.Close() }
 func (l *Local) RootDir() string { return l.dir }
 
 // Put writes r to a temporary file and renames it into place, so a reader
-// never observes a partially written blob. Local's O_EXCL temporary-file
-// guard is a local-only concurrent-write guarantee: two concurrent Puts to the
-// same key cannot interleave, and the second fails instead of corrupting the
-// first. A remote backend may provide last-writer-wins semantics instead. Keys
-// come from freshly allocated file ids today, so that collision does not arise;
-// the flag keeps it impossible if that ever changes.
+// never observes a partially written blob. An exclusive lock on the temporary
+// file prevents same-key Puts from interleaving and lets a later Put reuse a
+// partial temp left by a killed writer. A remote backend may provide
+// last-writer-wins semantics instead. Keys come from freshly allocated file
+// ids today, so that collision does not arise; the lock keeps it impossible if
+// that ever changes.
 func (l *Local) Put(_ context.Context, key string, r io.Reader) (int64, error) {
 	if err := ValidateKey(key); err != nil {
 		return 0, err
@@ -271,27 +273,99 @@ func (l *Local) Put(_ context.Context, key string, r io.Reader) (int64, error) {
 		return 0, fmt.Errorf("blob mkdir: %w", err)
 	}
 	tmp := key + TempSuffix
-	f, err := l.root.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	f, err := l.openTemporaryFile(tmp)
 	if err != nil {
-		return 0, fmt.Errorf("blob create: %w", err)
+		return 0, err
 	}
 	n, err := io.Copy(f, r)
 	if err != nil {
-		// These cleanups run on an already-failing path, where a second
-		// error has nowhere useful to go.
-		_ = f.Close()          //nolint:errcheck // discarding a partial write
-		_ = l.root.Remove(tmp) //nolint:errcheck // best-effort cleanup of a partial write
-		return 0, fmt.Errorf("blob write: %w", err)
+		return 0, l.discardTemporaryFile(tmp, f, fmt.Errorf("blob write: %w", err))
 	}
-	if err = f.Close(); err != nil {
-		_ = l.root.Remove(tmp) //nolint:errcheck // best-effort cleanup of a partial write
-		return 0, fmt.Errorf("blob close: %w", err)
+	lockFD, err := unix.Dup(int(f.Fd()))
+	if err != nil {
+		return 0, l.discardTemporaryFile(tmp, f, fmt.Errorf("blob duplicate temporary lock: %w", err))
 	}
-	if err = l.root.Rename(tmp, key); err != nil {
-		_ = l.root.Remove(tmp) //nolint:errcheck // best-effort cleanup of a partial write
-		return 0, fmt.Errorf("blob rename: %w", err)
+	unix.CloseOnExec(lockFD)
+	lockFile := os.NewFile(uintptr(lockFD), tmp)
+	if err := f.Close(); err != nil {
+		closeErr := errors.Join(fmt.Errorf("blob close: %w", err), l.removeTemporaryFile(tmp))
+		if lockCloseErr := lockFile.Close(); lockCloseErr != nil {
+			closeErr = errors.Join(closeErr, fmt.Errorf("blob release temporary lock: %w", lockCloseErr))
+		}
+		return 0, closeErr
+	}
+	if err := l.root.Rename(tmp, key); err != nil {
+		renameErr := errors.Join(fmt.Errorf("blob rename: %w", err), l.removeTemporaryFile(tmp))
+		if lockCloseErr := lockFile.Close(); lockCloseErr != nil {
+			renameErr = errors.Join(renameErr, fmt.Errorf("blob release temporary lock: %w", lockCloseErr))
+		}
+		return 0, renameErr
+	}
+	if err := lockFile.Close(); err != nil {
+		return 0, fmt.Errorf("blob release temporary lock: %w", err)
 	}
 	return n, nil
+}
+
+func (l *Local) openTemporaryFile(key string) (*os.File, error) {
+	for {
+		file, err := l.root.OpenFile(key, os.O_RDWR|os.O_CREATE|unix.O_NOFOLLOW, 0o600)
+		if err != nil {
+			return nil, fmt.Errorf("blob create: %w", err)
+		}
+		if err := unix.Flock(int(file.Fd()), unix.LOCK_EX|unix.LOCK_NB); err != nil {
+			return nil, closeTemporaryFile(file, fmt.Errorf("blob lock temporary file: %w", err))
+		}
+		info, err := file.Stat()
+		if err != nil {
+			return nil, closeTemporaryFile(file, fmt.Errorf("blob stat temporary file: %w", err))
+		}
+		pathInfo, err := l.root.Lstat(key)
+		if errors.Is(err, os.ErrNotExist) || (err == nil && !os.SameFile(info, pathInfo)) {
+			if closeErr := file.Close(); closeErr != nil {
+				return nil, fmt.Errorf("blob close temporary file: %w", closeErr)
+			}
+			continue
+		}
+		if err != nil {
+			return nil, closeTemporaryFile(file, fmt.Errorf("blob stat temporary path: %w", err))
+		}
+		if !info.Mode().IsRegular() {
+			return nil, closeTemporaryFile(file, errors.New("blob temporary path is not a regular file"))
+		}
+		if err := file.Chmod(0o600); err != nil {
+			return nil, closeTemporaryFile(file, fmt.Errorf("blob chmod temporary file: %w", err))
+		}
+		if err := file.Truncate(0); err != nil {
+			return nil, closeTemporaryFile(file, fmt.Errorf("blob truncate temporary file: %w", err))
+		}
+		if _, err := file.Seek(0, io.SeekStart); err != nil {
+			return nil, closeTemporaryFile(file, fmt.Errorf("blob seek temporary file: %w", err))
+		}
+		return file, nil
+	}
+}
+
+func closeTemporaryFile(file *os.File, cause error) error {
+	if err := file.Close(); err != nil {
+		return errors.Join(cause, fmt.Errorf("blob close temporary file: %w", err))
+	}
+	return cause
+}
+
+func (l *Local) discardTemporaryFile(key string, file *os.File, cause error) error {
+	cause = errors.Join(cause, l.removeTemporaryFile(key))
+	if err := file.Close(); err != nil {
+		cause = errors.Join(cause, fmt.Errorf("blob close temporary file: %w", err))
+	}
+	return cause
+}
+
+func (l *Local) removeTemporaryFile(key string) error {
+	if err := l.root.Remove(key); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("blob remove temporary file: %w", err)
+	}
+	return nil
 }
 
 // Entry is one path found under a store's root by [Local.Walk] or under a key

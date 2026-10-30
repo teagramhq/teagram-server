@@ -4,10 +4,13 @@ import (
 	"bytes"
 	"context"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -91,6 +94,89 @@ func TestRewriteUsesFreshDataKeyAndKeepsPlaintext(t *testing.T) {
 	if err != nil || !bytes.Equal(got, want[101:101+2048]) {
 		t.Fatalf("ranged read after rewrite differs from source: %v", err)
 	}
+}
+
+func TestRotateResumesAfterInterruptedLocalPut(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	local, dir := newLocal(t)
+	t.Cleanup(func() {
+		if err := local.Close(); err != nil {
+			t.Errorf("close local blob store: %v", err)
+		}
+	})
+	key := blob.Key(81)
+	want := pattern(blob.MinChunkSize + 37)
+	oldRing := newRing(t, 1, 1)
+	if _, err := newEncrypted(t, local, oldRing, blob.MinChunkSize).Put(ctx, key, bytes.NewReader(want)); err != nil {
+		t.Fatalf("write version 1 object: %v", err)
+	}
+	oldObject, err := os.ReadFile(filepath.Join(dir, filepath.FromSlash(key)))
+	if err != nil {
+		t.Fatalf("read original envelope: %v", err)
+	}
+
+	currentRing := newRing(t, 2, 1, 2)
+	interruptedBackend := &interruptedRotationStore{Local: local, key: key}
+	firstRotator := newEncrypted(t, interruptedBackend, currentRing, blob.MinChunkSize)
+	firstPlan, err := firstRotator.PrepareRotation(key, false)
+	if err != nil {
+		t.Fatalf("prepare interrupted rotation: %v", err)
+	}
+	tempPath := filepath.Join(dir, filepath.FromSlash(key+blob.TempSuffix))
+	if err := firstRotator.Rotate(ctx, firstPlan, int64(len(oldObject))); err == nil {
+		t.Fatal("interrupted Put returned success")
+	}
+	got, err := firstRotator.ReadAt(ctx, key, 0, int64(len(want)))
+	if err != nil || !bytes.Equal(got, want) {
+		t.Fatalf("old object after interrupted Put = %v, %v; want original plaintext", got, err)
+	}
+
+	rotator := newEncrypted(t, local, currentRing, blob.MinChunkSize)
+	resumePlan, err := rotator.PrepareRotation(key, false)
+	if err != nil {
+		t.Fatalf("prepare resumed rotation: %v", err)
+	}
+	if err := rotator.Rotate(ctx, resumePlan, int64(len(oldObject))); err != nil {
+		t.Fatalf("resume rotation over interrupted Put temp: %v", err)
+	}
+	newObject, err := os.ReadFile(filepath.Join(dir, filepath.FromSlash(key)))
+	if err != nil {
+		t.Fatalf("read rotated envelope: %v", err)
+	}
+	info, err := blob.InspectEnvelopeHeader(ctx, local, currentRing, key, int64(len(newObject)))
+	if err != nil || info.KeyVersion != 2 {
+		t.Fatalf("resumed rotation header = %+v, %v; want authenticated key version 2", info, err)
+	}
+	got, err = rotator.ReadAt(ctx, key, 0, int64(len(want)))
+	if err != nil || !bytes.Equal(got, want) {
+		t.Fatalf("plaintext after resumed rotation differs from original: %v", err)
+	}
+	if _, err := os.Stat(tempPath); !os.IsNotExist(err) {
+		t.Fatalf("rotation temp after restart = %v, want not-exist", err)
+	}
+}
+
+type interruptedRotationStore struct {
+	*blob.Local
+
+	key string
+}
+
+func (s *interruptedRotationStore) Put(ctx context.Context, key string, r io.Reader) (int64, error) {
+	if key != s.key {
+		return s.Local.Put(ctx, key, r)
+	}
+	partial := make([]byte, 64)
+	n, err := io.ReadFull(r, partial)
+	if err != nil {
+		return 0, fmt.Errorf("read partial rotation replacement: %w", err)
+	}
+	tempPath := filepath.Join(s.RootDir(), filepath.FromSlash(key+blob.TempSuffix))
+	if err := os.WriteFile(tempPath, partial[:n], 0o600); err != nil {
+		return 0, fmt.Errorf("leave interrupted rotation temp: %w", err)
+	}
+	return 0, errors.New("simulated SIGKILL during local Put")
 }
 
 func TestRotationPlanCannotReuseWrappingSaltForChangedObject(t *testing.T) {
