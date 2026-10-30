@@ -1,15 +1,16 @@
 package blob_test
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/hex"
-	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -97,7 +98,10 @@ func TestRewriteUsesFreshDataKeyAndKeepsPlaintext(t *testing.T) {
 }
 
 func TestRotateResumesAfterInterruptedLocalPut(t *testing.T) {
-	t.Parallel()
+	if dir := os.Getenv("TEAGRAM_BLOB_ROTATION_CRASH_DIR"); dir != "" {
+		runRotationPutCrashChild(t, dir)
+		return
+	}
 	ctx := context.Background()
 	local, dir := newLocal(t)
 	t.Cleanup(func() {
@@ -116,23 +120,19 @@ func TestRotateResumesAfterInterruptedLocalPut(t *testing.T) {
 		t.Fatalf("read original envelope: %v", err)
 	}
 
-	currentRing := newRing(t, 2, 1, 2)
-	interruptedBackend := &interruptedRotationStore{Local: local, key: key}
-	firstRotator := newEncrypted(t, interruptedBackend, currentRing, blob.MinChunkSize)
-	firstPlan, err := firstRotator.PrepareRotation(key, false)
-	if err != nil {
-		t.Fatalf("prepare interrupted rotation: %v", err)
-	}
 	tempPath := filepath.Join(dir, filepath.FromSlash(key+blob.TempSuffix))
-	if err := firstRotator.Rotate(ctx, firstPlan, int64(len(oldObject))); err == nil {
-		t.Fatal("interrupted Put returned success")
+	killRotationPutChild(t, dir)
+	tempInfo, err := os.Stat(tempPath)
+	if err != nil || tempInfo.Size() == 0 {
+		t.Fatalf("temporary file after SIGKILL = %+v, %v; want partial replacement bytes", tempInfo, err)
 	}
-	got, err := firstRotator.ReadAt(ctx, key, 0, int64(len(want)))
+	currentRing := newRing(t, 2, 1, 2)
+	rotator := newEncrypted(t, local, currentRing, blob.MinChunkSize)
+	got, err := rotator.ReadAt(ctx, key, 0, int64(len(want)))
 	if err != nil || !bytes.Equal(got, want) {
 		t.Fatalf("old object after interrupted Put = %v, %v; want original plaintext", got, err)
 	}
 
-	rotator := newEncrypted(t, local, currentRing, blob.MinChunkSize)
 	resumePlan, err := rotator.PrepareRotation(key, false)
 	if err != nil {
 		t.Fatalf("prepare resumed rotation: %v", err)
@@ -157,26 +157,122 @@ func TestRotateResumesAfterInterruptedLocalPut(t *testing.T) {
 	}
 }
 
-type interruptedRotationStore struct {
-	*blob.Local
-
-	key string
+func killRotationPutChild(t *testing.T, dir string) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	executable, err := os.Executable()
+	if err != nil {
+		t.Fatalf("find current test executable: %v", err)
+	}
+	cmd := exec.CommandContext(ctx, executable, "-test.run=^TestRotateResumesAfterInterruptedLocalPut$") //nolint:gosec // current test binary and fixed test filter
+	cmd.Env = append(os.Environ(),
+		"TEAGRAM_BLOB_ROTATION_CRASH_DIR="+dir,
+	)
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		t.Fatalf("open rotation child stdout: %v", err)
+	}
+	cmd.Stderr = os.Stderr
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start rotation child: %v", err)
+	}
+	ready := make(chan error, 1)
+	go func() {
+		line, err := bufio.NewReader(stdout).ReadString('\n')
+		if err == nil && line != "ready\n" {
+			err = fmt.Errorf("rotation child readiness line = %q, want ready", line)
+		}
+		ready <- err
+	}()
+	select {
+	case err := <-ready:
+		if err != nil {
+			waitErr := cmd.Wait()
+			t.Fatalf("rotation child failed before Put pause: %v (exit: %v)", err, waitErr)
+		}
+	case <-time.After(10 * time.Second):
+		killErr := cmd.Process.Kill()
+		readerErr := <-ready
+		waitErr := cmd.Wait()
+		t.Fatalf("rotation child did not pause in Put: read=%v, kill=%v, exit=%v", readerErr, killErr, waitErr)
+	}
+	if err := cmd.Process.Kill(); err != nil {
+		waitErr := cmd.Wait()
+		t.Fatalf("kill rotation child in Put: %v (exit: %v)", err, waitErr)
+	}
+	if err := cmd.Wait(); err == nil {
+		t.Fatal("rotation child exited successfully after SIGKILL")
+	}
 }
 
-func (s *interruptedRotationStore) Put(ctx context.Context, key string, r io.Reader) (int64, error) {
+func runRotationPutCrashChild(t *testing.T, dir string) {
+	t.Helper()
+	key := blob.Key(81)
+	local, err := blob.OpenLocal(dir)
+	if err != nil {
+		t.Fatalf("open child blob store: %v", err)
+	}
+	defer func() {
+		if err := local.Close(); err != nil {
+			t.Errorf("close child blob store: %v", err)
+		}
+	}()
+	var physicalBytes int64
+	if err := local.Walk(context.Background(), func(entry blob.Entry) error {
+		if entry.Key == key {
+			physicalBytes = entry.Size
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("walk source envelope: %v", err)
+	}
+	if physicalBytes == 0 {
+		t.Fatal("source envelope missing")
+	}
+	backend := &pausingRotationPutStore{Local: local, key: key, ready: os.Stdout}
+	rotator := newEncrypted(t, backend, newRing(t, 2, 1, 2), blob.MinChunkSize)
+	plan, err := rotator.PrepareRotation(key, false)
+	if err != nil {
+		t.Fatalf("prepare child rotation: %v", err)
+	}
+	if err := rotator.Rotate(context.Background(), plan, physicalBytes); err == nil {
+		t.Fatal("child rotation unexpectedly completed")
+	}
+}
+
+type pausingRotationPutStore struct {
+	*blob.Local
+
+	key   string
+	ready io.Writer
+}
+
+func (s *pausingRotationPutStore) Put(ctx context.Context, key string, r io.Reader) (int64, error) {
 	if key != s.key {
 		return s.Local.Put(ctx, key, r)
 	}
-	partial := make([]byte, 64)
-	n, err := io.ReadFull(r, partial)
-	if err != nil {
-		return 0, fmt.Errorf("read partial rotation replacement: %w", err)
+	return s.Local.Put(ctx, key, &pauseAfterFirstRead{source: r, ready: s.ready})
+}
+
+type pauseAfterFirstRead struct {
+	source   io.Reader
+	ready    io.Writer
+	readOnce bool
+}
+
+func (r *pauseAfterFirstRead) Read(p []byte) (int, error) {
+	if r.readOnce {
+		if _, err := io.WriteString(r.ready, "ready\n"); err != nil {
+			return 0, err
+		}
+		select {}
 	}
-	tempPath := filepath.Join(s.RootDir(), filepath.FromSlash(key+blob.TempSuffix))
-	if err := os.WriteFile(tempPath, partial[:n], 0o600); err != nil {
-		return 0, fmt.Errorf("leave interrupted rotation temp: %w", err)
+	n, err := r.source.Read(p)
+	if n > 0 {
+		r.readOnce = true
 	}
-	return 0, errors.New("simulated SIGKILL during local Put")
+	return n, err
 }
 
 func TestRotationPlanCannotReuseWrappingSaltForChangedObject(t *testing.T) {
