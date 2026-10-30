@@ -60,7 +60,7 @@ migrate:
 # every other package keeps its cache.
 #
 # -timeout 20m: the uncached race-instrumented fixture suite can exceed 15m
-# under runner load. ci-main has a 35m bound; after its observed 6m29s
+# under runner load. test-go has a 35m bound; after its observed 6m29s
 # preparation, that leaves about 8m30s for Go's goroutine dump and diagnostics.
 E2E_PKG := github.com/teagramhq/teagram-server/test/e2e
 FLEET_CAP_TEST := TestFleetSnapshotCountsExactlyAtCapAndDisablesDistinctAboveIt

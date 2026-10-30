@@ -196,13 +196,13 @@ class RealServerFixtureGateTests(unittest.TestCase):
     def test_ci_checkouts_do_not_persist_write_scoped_tokens(self) -> None:
         repo_root = Path(__file__).resolve().parents[2]
         workflow = (repo_root / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
-        ci_job = re.search(r"(?ms)^  ci-main:\n(?P<body>.*?)(?=^  [A-Za-z0-9_-]+:\n)", workflow)
+        ci_job = re.search(r"(?ms)^  test-go:\n(?P<body>.*?)(?=^  [A-Za-z0-9_-]+:\n)", workflow)
         fixture_job = re.search(
-            r"(?ms)^  real-server-fixtures:\n(?P<body>.*?)(?=^  [A-Za-z0-9_-]+:\n)",
+            r"(?ms)^  test-real-server-fixtures:\n(?P<body>.*?)(?=^  [A-Za-z0-9_-]+:\n)",
             workflow,
         )
-        self.assertIsNotNone(ci_job, "CI workflow has no ci-main job")
-        self.assertIsNotNone(fixture_job, "CI workflow has no real-server-fixtures job")
+        self.assertIsNotNone(ci_job, "CI workflow has no test-go job")
+        self.assertIsNotNone(fixture_job, "CI workflow has no test-real-server-fixtures job")
         self.assertRegex(
             ci_job.group("body"),
             r"(?m)^      - uses: actions/checkout@\S+\n        with:\n          persist-credentials: false$",
@@ -245,6 +245,29 @@ class RealServerFixtureGateTests(unittest.TestCase):
             re.findall(r"(?m)^  ([A-Za-z0-9_-]+):\n", jobs_block.group("body"))
         )
         expected_lanes = workflow_jobs - excluded_jobs
+        matrix_names = {
+            "build-browser-acceptance-image": "build: browser-acceptance-image (${{ matrix.arch }})",
+            "test-photo-worker": "test: photo-worker (${{ matrix.arch }})",
+        }
+        retired_jobs = {
+            "mirror-rustfs-qualification-images",
+            "restore-readiness",
+            "rustfs-transition-qualification",
+        }
+        for job_id in sorted(workflow_jobs - {"ci", *retired_jobs}):
+            job = re.search(
+                rf"(?ms)^  {re.escape(job_id)}:\n(?P<body>.*?)(?=^  [A-Za-z0-9_-]+:\n|\Z)",
+                workflow,
+            )
+            self.assertIsNotNone(job, f"CI workflow has no {job_id} job")
+            name = re.search(r"(?m)^    name: ['\"]?(.*?)['\"]?$", job.group("body"))
+            self.assertIsNotNone(name, f"CI job {job_id} has no explicit display name")
+            if job_id in matrix_names:
+                expected_name = matrix_names[job_id]
+            else:
+                stage, _, subject = job_id.partition("-")
+                expected_name = f"{stage}: {subject}"
+            self.assertEqual(name.group(1), expected_name, f"CI job {job_id} violates stage naming")
 
         needs = re.search(
             r"(?ms)^    needs:\n(?P<entries>(?:      - [A-Za-z0-9_-]+\n)+)", body
@@ -256,10 +279,10 @@ class RealServerFixtureGateTests(unittest.TestCase):
             needed_lanes[:5],
             [
                 "ops-prioritize-main",
-                "ci-main",
-                "sticker-bundle",
-                "photothumb-runtime",
-                "real-server-fixtures",
+                "test-go",
+                "check-sticker-license",
+                "test-photo-worker",
+                "test-real-server-fixtures",
             ],
         )
         self.assertEqual(len(needed_lanes), len(set(needed_lanes)), "CI aggregate repeats a lane")
@@ -379,10 +402,10 @@ class RealServerFixtureGateTests(unittest.TestCase):
             encoding="utf-8"
         )
         fixture_job = re.search(
-            r"(?ms)^  real-server-fixtures:\n(?P<body>.*?)(?=^  [A-Za-z0-9_-]+:\n)",
+            r"(?ms)^  test-real-server-fixtures:\n(?P<body>.*?)(?=^  [A-Za-z0-9_-]+:\n)",
             workflow,
         )
-        self.assertIsNotNone(fixture_job, "CI workflow has no real-server-fixtures job")
+        self.assertIsNotNone(fixture_job, "CI workflow has no test-real-server-fixtures job")
         body = fixture_job.group("body")
         download_step = body.find("- name: Download Go modules")
         fixture_test_step = body.find(
@@ -403,10 +426,10 @@ class RealServerFixtureGateTests(unittest.TestCase):
             repo_root / "test" / "e2e" / "real_server_fixture" / "start.sh"
         ).read_text(encoding="utf-8")
         fixture_job = re.search(
-            r"(?ms)^  real-server-fixtures:\n(?P<body>.*?)(?=^  [A-Za-z0-9_-]+:\n)",
+            r"(?ms)^  test-real-server-fixtures:\n(?P<body>.*?)(?=^  [A-Za-z0-9_-]+:\n)",
             workflow,
         )
-        self.assertIsNotNone(fixture_job, "CI workflow has no real-server-fixtures job")
+        self.assertIsNotNone(fixture_job, "CI workflow has no test-real-server-fixtures job")
         self.assertIn('PREFIX="teagram-fixture-$RUN_ID"', start_script)
         self.assertIn('DATABASE="$PREFIX"database', start_script)
         diagnostics = fixture_job.group("body").split(

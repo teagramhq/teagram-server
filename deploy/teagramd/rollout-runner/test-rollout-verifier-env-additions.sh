@@ -15,6 +15,13 @@ OVERRIDE_FILE="$TMP/docker-compose.override.yml"
 printf 'TG_NEW_FLAG=on\n' > "$ENV_FILE"
 : > "$OVERRIDE_FILE"
 chmod 600 "$ENV_FILE" "$OVERRIDE_FILE"
+ROTATION_MEDIA_SOURCE="$TMP/rotation-media-keys"
+mkdir -m 700 "$ROTATION_MEDIA_SOURCE"
+printf '%064d\n' 0 > "$ROTATION_MEDIA_SOURCE/1.key"
+chmod 600 "$ROTATION_MEDIA_SOURCE/1.key"
+if [ "$(id -u)" = 0 ]; then
+  chown 65532:65532 "$ROTATION_MEDIA_SOURCE" "$ROTATION_MEDIA_SOURCE/1.key"
+fi
 
 REAL_JQ=$(command -v jq)
 JQ_SECRET_ARG_MARKER="$TMP/jq-secret-arg"
@@ -50,6 +57,19 @@ inspect_json() {
         HostConfig:{LogConfig:$log_config,PortBindings:{}},Mounts:[]
       }
   '
+}
+
+rotation_inspect_json() {
+  jq -c --arg media_source "$ROTATION_MEDIA_SOURCE" '
+    .Config.Env += [
+      "TG_MEDIA_KEY_DIR=/run/teagramd/media-keys",
+      "TG_MEDIA_KEY_CURRENT=1"
+    ]
+    | .Mounts += [{
+        Type:"bind",Source:$media_source,Destination:"/run/teagramd/media-keys",
+        Mode:"ro",RW:false,Propagation:""
+      }]
+  ' <<< "$(inspect_json '')"
 }
 
 target_snapshot() {
@@ -168,6 +188,94 @@ COMPOSE_JSON=$(jq -c '.services.teagramd.logging={driver:"syslog",options:{"sysl
 INSPECT_LOG_CONFIG='{"Type":"syslog","Config":{"syslog-address":"unixgram:///dev/log","syslog-facility":"daemon","syslog-format":"rfc5424","tag":"teagramd"}}'
 empty_env=$(snapshot_from_json \
   "$(inspect_json '')" "$COMPOSE_JSON" "$ENV_FILE" "$OVERRIDE_FILE" selected-compose-render baseline)
+rotation_base_compose=$(jq -c --arg media_source "$ROTATION_MEDIA_SOURCE" '
+  .services.teagramd.image="teagramd:local"
+  | .services.teagramd.environment += {
+      TG_POSTGRES_DSN:"fixture-dsn",
+      TG_AUTHKEY_ENC_KEY:"",
+      TG_AUTHKEY_ENC_KEY_FILE:"/var/lib/teagramd/enc_key.hex",
+      TG_BLOB_DIR:"/var/lib/teagramd-blobs",
+      TG_BLOB_S3_ENDPOINT:"http://rustfs:9000",
+      TG_BLOB_S3_BUCKET:"teagram",
+      TG_BLOB_S3_PREFIX:"teagramd/",
+      TG_BLOB_S3_REGION:"us-east-1",
+      TG_BLOB_S3_ACCESS_KEY_ID:"",
+      TG_BLOB_S3_SECRET_ACCESS_KEY_FILE:"/run/secrets/teagramd-blob-secret-key",
+      TG_BLOB_S3_ALLOW_INSECURE_HTTP:"true",
+      TG_MEDIA_KEY_DIR:"/run/teagramd/media-keys",
+      TG_MEDIA_KEY_CURRENT:"1"
+    }
+  | .services.teagramd.volumes += [{
+      type:"bind",source:$media_source,target:"/run/teagramd/media-keys",
+      read_only:true,bind:{create_host_path:false}
+    }]
+' <<< "$COMPOSE_JSON")
+rotation_migration_compose=$(jq -c --arg mode_source "$(canonical_blob_mode_source)" --arg media_source "$ROTATION_MEDIA_SOURCE" '
+  .services["blob-key-rotate"] = {
+    image:"teagramd:local",
+    entrypoint:["/usr/local/bin/blob-key-rotate"],
+    command:null,
+    user:"0:0",
+    read_only:true,
+    profiles:["migration"],
+    environment:(.services.teagramd.environment | {
+      TG_POSTGRES_DSN,
+      TG_AUTHKEY_ENC_KEY,
+      TG_AUTHKEY_ENC_KEY_FILE,
+      TG_BLOB_DIR,
+      TG_BLOB_S3_ENDPOINT,
+      TG_BLOB_S3_BUCKET,
+      TG_BLOB_S3_PREFIX,
+      TG_BLOB_S3_REGION,
+      TG_BLOB_S3_ACCESS_KEY_ID,
+      TG_BLOB_S3_SECRET_ACCESS_KEY_FILE,
+      TG_BLOB_S3_ALLOW_INSECURE_HTTP,
+      TG_MEDIA_KEY_DIR,
+      TG_MEDIA_KEY_CURRENT
+    }),
+    depends_on:{
+      postgres:{condition:"service_healthy",required:true},
+      "rustfs-init":{condition:"service_completed_successfully",required:true}
+    },
+    volumes:[
+      {type:"volume",source:"tgkey",target:"/var/lib/teagramd",read_only:true,volume:{}},
+      {type:"bind",source:$mode_source,target:"/run/teagramd/blob-mode",read_only:true,bind:{create_host_path:false}},
+      {type:"volume",source:"blob_key_rotate_reports",target:"/run/teagramd/reports",volume:{}},
+      {type:"bind",source:$media_source,target:"/run/teagramd/media-keys",read_only:true,bind:{create_host_path:false}}
+    ],
+    networks:{default:null,rustfs_private:null},
+    secrets:[{source:"teagramd_blob_secret_key",target:"teagramd-blob-secret-key"}]
+  }
+  | .volumes.blob_key_rotate_reports={name:"teagram_blob_key_rotate_reports",driver:"local"}
+' <<< "$rotation_base_compose")
+rotation_inspect=$(rotation_inspect_json)
+rotation_base_snapshot=$(snapshot_from_json \
+  "$rotation_inspect" "$rotation_base_compose" "$ENV_FILE" "$OVERRIDE_FILE" selected-compose-render baseline)
+rotation_migration_snapshot=$(snapshot_from_json \
+  "$rotation_inspect" "$rotation_migration_compose" "$ENV_FILE" "$OVERRIDE_FILE" selected-compose-render preflight)
+printf '%s\n' "$rotation_base_snapshot" > "$TMP/migration-baseline.snapshot.json"
+printf '%s\n' "$rotation_migration_snapshot" > "$TMP/migration-target.snapshot.json"
+if ! compare_snapshots \
+  "$TMP/migration-baseline.snapshot.json" "$TMP/migration-target.snapshot.json" \
+  sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb \
+  "$TMP/migration-comparisons.tsv"; then
+  printf '%s\n' 'FAIL inactive key-rotation migration profile changed the serving Compose comparison' >&2
+  cat "$TMP/migration-comparisons.tsv" >&2
+  exit 1
+fi
+printf '%s\n' 'PASS inactive key-rotation migration profile is excluded from serving Compose drift'
+unsafe_rotation_migration_compose=$(jq -c '
+  .services["blob-key-rotate"].volumes[2] = {
+    type:"bind",source:"/root",target:"/run/teagramd/reports",bind:{create_host_path:false}
+  }
+' <<< "$rotation_migration_compose")
+if snapshot_from_json \
+  "$rotation_inspect" "$unsafe_rotation_migration_compose" "$ENV_FILE" "$OVERRIDE_FILE" selected-compose-render preflight \
+  >/dev/null 2>"$TMP/unsafe-rotation-profile.err"; then
+  printf '%s\n' 'FAIL key-rotation migration profile with a host bind was accepted' >&2
+  exit 1
+fi
+printf '%s\n' 'PASS unsafe key-rotation migration mounts are rejected'
 empty_invite_quota_mapping=$(invite_quota_snapshot baseline '' '' retained '')
 [ "$(jq -r '.container_env_sha256' <<< "$empty_env")" = \
   "$(jq -r '.container_env_sha256' <<< "$empty_invite_quota_mapping")" ]
