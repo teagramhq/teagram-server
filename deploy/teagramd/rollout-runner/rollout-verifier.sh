@@ -154,6 +154,33 @@ verify_changed_container_environment() {
   return 0
 }
 
+verify_target_tailnet_exchange_limit() {
+  local inspect_json=$1 compose_json=$2 snapshot_name=$3 compose_source=$4
+  [ "$snapshot_name" = target ] && [ "$compose_source" = selected-compose-render ] || return 0
+  if ! printf '%s\n' "$inspect_json" "$compose_json" | jq -se \
+    --arg service "${ROLLOUT_COMPOSE_SERVICE:-teagramd}" '
+    def item: if type == "array" then .[0] else . end;
+    .[0] as $inspect
+    | .[1] as $compose
+    | ($compose.services[$service].environment // null) as $compose_env
+    | (($inspect | item).Config.Env // null) as $container_env
+    | if ($compose_env | type) != "object" or ($container_env | type) != "array" then false
+      elif ($compose_env | has("TG_RATE_LIMIT_KEY_EXCHANGE_IP_TAILNET") | not) or
+           $compose_env.TG_RATE_LIMIT_KEY_EXCHANGE_IP_TAILNET == "" then true
+      else
+        $compose_env.TG_RATE_LIMIT_KEY_EXCHANGE_IP_TAILNET as $resolved
+        | [$container_env[] | select(type == "string" and startswith("TG_RATE_LIMIT_KEY_EXCHANGE_IP_TAILNET="))
+           | .[("TG_RATE_LIMIT_KEY_EXCHANGE_IP_TAILNET=" | length):]] as $actual
+        | ($resolved | type) == "string" and ($resolved | test("^[0-9]+$")) and
+          ($actual | length) == 1 and $actual[0] == $resolved
+      end
+  ' >/dev/null; then
+    printf '%s\n' 'target tailnet exchange limit does not match the resolved Compose environment' >&2
+    return 1
+  fi
+  return 0
+}
+
 verify_safe_public_environment() {
   local inspect_json=$1 compose_json=$2 env_file=$3 added_env_names=$4 changed_env_names=$5
   local snapshot_name=$6 compose_source=$7
@@ -1089,7 +1116,8 @@ snapshot_from_json() {
         else error("resolved Compose environment must be an object") end
     ') || return 1
   fi
-  container_env=$(printf '%s' "$inspect_json" | jq -ce --argjson image_env "$image_env_json" --argjson compose_env_names "$compose_env_names" --argjson added "$added_env_names" --argjson changed "$changed_env_names" \
+  verify_target_tailnet_exchange_limit "$inspect_json" "$compose_json" "$snapshot_name" "$compose_source" || return 1
+  container_env=$(printf '%s' "$inspect_json" | jq -ce --argjson image_env "$image_env_json" --argjson compose_env_names "$compose_env_names" --argjson added "$added_env_names" --argjson changed "$changed_env_names" --arg snapshot_name "$snapshot_name" \
     --argjson media_key_enabled "$MEDIA_KEY_MOUNT_CONFIGURED" '
     def item: if type == "array" then .[0] else . end;
     def runtime_name($name):
@@ -1100,6 +1128,11 @@ snapshot_from_json() {
     | (item | .Config.Env // []) as $raw_env
     | if ($raw_env | type) != "array" or any($raw_env[]; type != "string") then error("container environment must be an array of strings")
       else $raw_env
+        # The old Compose pass-through resolved unset tailnet limits to an empty
+        # value. Normalize only that baseline representation to the new zero
+        # default; target snapshots retain and pin their inspected value.
+        | map(if $snapshot_name == "baseline" and . == "TG_RATE_LIMIT_KEY_EXCHANGE_IP_TAILNET="
+              then "TG_RATE_LIMIT_KEY_EXCHANGE_IP_TAILNET=0" else . end)
         | map(. as $entry
           | select(($image_env | index($entry)) == null or
                   ($configured_env_names | index($entry | split("=")[0])) != null))
@@ -1113,7 +1146,6 @@ snapshot_from_json() {
         | map(select(type != "string" or (IN(
             "TG_RATE_LIMIT_KEY_EXCHANGE_IP=",
             "TG_RATE_LIMIT_KEY_EXCHANGE_IP_TAILNET=",
-            "TG_RATE_LIMIT_KEY_EXCHANGE_IP_TAILNET=0",
             "TG_RATE_LIMIT_KEY_EXCHANGE_IP_WINDOW=",
             "TG_KEY_EXCHANGE_PER_CONNECTION=",
             "TG_KEY_EXCHANGE_GLOBAL_RATE=",
@@ -1213,7 +1245,7 @@ snapshot_from_json() {
     ')
     canonical_compose=$(printf '%s' "$compose_json" | jq -ceS --arg mode_source "$mode_source" --arg mode_target "$mode_mount_target" \
       --arg media_key_source "$MEDIA_KEY_SOURCE_PATH" --argjson media_key_enabled "$MEDIA_KEY_MOUNT_CONFIGURED" \
-      --argjson added "$added_env_names" --argjson changed "$changed_env_names" '
+      --argjson added "$added_env_names" --argjson changed "$changed_env_names" --arg snapshot_name "$snapshot_name" '
       def approved_public_ws_port:
         type == "object" and
         ((.target | tostring) == "2446") and
@@ -1223,7 +1255,6 @@ snapshot_from_json() {
         ((.mode // "") == "" or (.mode // "") == "ingress") and
         ((keys - ["target", "published", "host_ip", "protocol", "mode"]) | length) == 0;
       def approved_key_exchange_default:
-        (.key == "TG_RATE_LIMIT_KEY_EXCHANGE_IP_TAILNET" and .value == "0") or
         ((.key | IN(
           "TG_RATE_LIMIT_KEY_EXCHANGE_IP",
           "TG_RATE_LIMIT_KEY_EXCHANGE_IP_TAILNET",
@@ -1237,6 +1268,12 @@ snapshot_from_json() {
       # Compose includes extension anchors in its rendered output. Their
       # expanded service fields remain in the digest; the anchors do not.
       with_entries(select((.key | startswith("x-")) | not))
+      # The old baseline empty tailnet pass-through is equivalent to the new
+      # zero default. Keep the target value in its digest so it remains pinned.
+      | if $snapshot_name == "baseline" and
+           .services[env.ROLLOUT_COMPOSE_SERVICE // "teagramd"].environment.TG_RATE_LIMIT_KEY_EXCHANGE_IP_TAILNET == "" then
+          .services[env.ROLLOUT_COMPOSE_SERVICE // "teagramd"].environment.TG_RATE_LIMIT_KEY_EXCHANGE_IP_TAILNET = "0"
+        else . end
       |
       if (.services[env.ROLLOUT_COMPOSE_SERVICE // "teagramd"].environment | type) != "object" then error("teagramd environment must be an object") else
         .services[env.ROLLOUT_COMPOSE_SERVICE // "teagramd"].environment |= del(
@@ -1250,8 +1287,8 @@ snapshot_from_json() {
           .TG_TURNSTILE_SITE_KEY, .TG_TURNSTILE_SECRET_KEY_FILE,
           .TG_TURNSTILE_SIGNIN_ENABLED)
       end
-      # Empty mappings and the reviewed tailnet zero default are normalized;
-      # other values remain subject to the Compose and container checks.
+      # Empty mappings are normalized. The tailnet zero default remains in the
+      # target digest after baseline normalization above.
       | .services[env.ROLLOUT_COMPOSE_SERVICE // "teagramd"].environment |= with_entries(select((approved_key_exchange_default or empty_user_invite_quota_default) | not))
       # Named tailnet changes are verified against .env, resolved Compose, and
       # the inspected container; omit only that named value from config drift.

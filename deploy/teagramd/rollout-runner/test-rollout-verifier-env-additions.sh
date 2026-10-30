@@ -541,6 +541,18 @@ if tailnet_limit_snapshot target 20 'TG_RATE_LIMIT_KEY_EXCHANGE_IP_TAILNET=0' ad
 fi
 printf '%s\n' 'PASS tailnet .env addition must match the resolved Compose value'
 
+if tailnet_limit_snapshot target '' '' retained 0 \
+  >/dev/null 2>"$TMP/tailnet-default-missing-container-value.err"; then
+  printf '%s\n' 'FAIL target missing the Compose tailnet default was accepted' >&2
+  exit 1
+fi
+if tailnet_limit_snapshot target 20 '' retained 0 \
+  >/dev/null 2>"$TMP/tailnet-default-wrong-container-value.err"; then
+  printf '%s\n' 'FAIL target using the code default instead of resolved Compose zero was accepted' >&2
+  exit 1
+fi
+printf '%s\n' 'PASS target tailnet value must match the resolved Compose default'
+
 : > "$ENV_FILE"
 empty_tailnet_rollback_inspect=$(jq -c '.Config.Env += ["TG_RATE_LIMIT_KEY_EXCHANGE_IP_TAILNET="]' \
   <<< "$(inspect_json '')")
