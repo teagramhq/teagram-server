@@ -7,9 +7,11 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"flag"
 	"fmt"
 	"io"
 	"log"
+	"math"
 	"net"
 	"net/http"
 	"net/url"
@@ -20,6 +22,10 @@ import (
 	"github.com/gotd/td/mtproxy"
 	"github.com/gotd/td/mtproxy/obfuscator"
 	"github.com/gotd/td/proto/codec"
+	"github.com/gotd/td/session"
+	"github.com/gotd/td/telegram"
+	"github.com/gotd/td/telegram/dcs"
+	"github.com/gotd/td/tg"
 	"github.com/gotd/td/transport"
 
 	"github.com/teagramhq/teagram-server/internal/discovery"
@@ -43,12 +49,29 @@ type serverIdentity struct {
 }
 
 func main() {
-	if err := run(); err != nil {
+	expectedInviteQuota := flag.Int("expect-user-invite-quota", -1, "require help.getAppConfig to advertise the given invite quota")
+	flag.Parse()
+	quotaExpectationSet := false
+	flag.Visit(func(value *flag.Flag) {
+		if value.Name == "expect-user-invite-quota" {
+			quotaExpectationSet = true
+		}
+	})
+	if quotaExpectationSet && *expectedInviteQuota < 0 {
+		log.Fatal("expected user invite quota must be non-negative")
+	}
+	if flag.NArg() != 0 {
+		log.Fatal("unexpected arguments")
+	}
+	if err := run(*expectedInviteQuota); err != nil {
 		log.Fatal(err)
 	}
 }
 
-func run() error {
+func run(expectedInviteQuota int) error {
+	if expectedInviteQuota < -1 {
+		return errors.New("expected user invite quota must be non-negative")
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), probeTimeout)
 	defer cancel()
 
@@ -58,6 +81,21 @@ func run() error {
 			return http.ErrUseLastResponse
 		},
 	}
+	if expectedInviteQuota >= 0 {
+		settings, err := probeAppConfig(ctx, liveMTProtoEndpoint, liveDiscoveryURL, client)
+		if err != nil {
+			return fmt.Errorf("MTProto app-config smoke on %s: %w", liveMTProtoEndpoint, err)
+		}
+		if settings.registrationMode != "invite" || !settings.userInvitesEnabled || settings.userInviteQuota != expectedInviteQuota {
+			return fmt.Errorf("help.getAppConfig registration_mode=%q user_invites_enabled=%t user_invite_quota=%d; want invite, true, %d",
+				settings.registrationMode, settings.userInvitesEnabled, settings.userInviteQuota, expectedInviteQuota)
+		}
+		if _, err := fmt.Printf("help.getAppConfig passed on %s registration_mode=%s user_invites_enabled=%t user_invite_quota=%d\n",
+			liveMTProtoEndpoint, settings.registrationMode, settings.userInvitesEnabled, settings.userInviteQuota); err != nil {
+			return fmt.Errorf("write app-config smoke result: %w", err)
+		}
+		return nil
+	}
 	if err := probe(ctx, liveMTProtoEndpoint, liveDiscoveryURL, client); err != nil {
 		return fmt.Errorf("MTProto smoke on %s: %w", liveMTProtoEndpoint, err)
 	}
@@ -65,6 +103,99 @@ func run() error {
 		return fmt.Errorf("write smoke result: %w", err)
 	}
 	return nil
+}
+
+type inviteAppConfig struct {
+	registrationMode   string
+	userInvitesEnabled bool
+	userInviteQuota    int
+}
+
+func probeAppConfig(ctx context.Context, endpoint, discoveryURL string, httpClient *http.Client) (inviteAppConfig, error) {
+	if err := discovery.ValidateEndpoint(endpoint); err != nil {
+		return inviteAppConfig{}, fmt.Errorf("validate target endpoint: %w", err)
+	}
+	identity, err := fetchIdentity(ctx, discoveryURL, httpClient)
+	if err != nil {
+		return inviteAppConfig{}, err
+	}
+	host, portText, err := net.SplitHostPort(endpoint)
+	if err != nil {
+		return inviteAppConfig{}, fmt.Errorf("split target endpoint: %w", err)
+	}
+	port, err := strconv.Atoi(portText)
+	if err != nil {
+		return inviteAppConfig{}, fmt.Errorf("parse target port: %w", err)
+	}
+	if port != identity.port {
+		return inviteAppConfig{}, fmt.Errorf("target port %d does not match discovery port %d", port, identity.port)
+	}
+
+	client := telegram.NewClient(1, "hash", telegram.Options{
+		DC:             identity.dcID,
+		PublicKeys:     []telegram.PublicKey{{RSA: identity.publicKey}},
+		SessionStorage: &session.StorageMemory{},
+		DCList: dcs.List{Options: []tg.DCOption{{
+			ID: identity.dcID, IPAddress: host, Port: port,
+		}}},
+		Resolver: dcs.Plain(dcs.PlainOptions{}),
+	})
+	var settings inviteAppConfig
+	if err := client.Run(ctx, func(ctx context.Context) error {
+		appConfig, err := client.API().HelpGetAppConfig(ctx, 0)
+		if err != nil {
+			return fmt.Errorf("help.getAppConfig: %w", err)
+		}
+		settings, err = parseInviteAppConfig(appConfig)
+		return err
+	}); err != nil {
+		return inviteAppConfig{}, err
+	}
+	return settings, nil
+}
+
+func parseInviteAppConfig(appConfig tg.HelpAppConfigClass) (inviteAppConfig, error) {
+	full, ok := appConfig.(*tg.HelpAppConfig)
+	if !ok {
+		return inviteAppConfig{}, fmt.Errorf("help.getAppConfig response is %T, want *tg.HelpAppConfig", appConfig)
+	}
+	values, ok := full.Config.(*tg.JSONObject)
+	if !ok {
+		return inviteAppConfig{}, fmt.Errorf("help.getAppConfig config is %T, want *tg.JSONObject", full.Config)
+	}
+	var settings inviteAppConfig
+	var gotMode, gotEnabled, gotQuota bool
+	for _, value := range values.Value {
+		switch value.Key {
+		case "registration_mode":
+			item, ok := value.Value.(*tg.JSONString)
+			if !ok {
+				return inviteAppConfig{}, errors.New("help.getAppConfig registration_mode is not a string")
+			}
+			settings.registrationMode = item.Value
+			gotMode = true
+		case "user_invites_enabled":
+			item, ok := value.Value.(*tg.JSONBool)
+			if !ok {
+				return inviteAppConfig{}, errors.New("help.getAppConfig user_invites_enabled is not a boolean")
+			}
+			settings.userInvitesEnabled = item.Value
+			gotEnabled = true
+		case "user_invite_quota":
+			item, ok := value.Value.(*tg.JSONNumber)
+			maxInt := float64(int(^uint(0) >> 1))
+			if !ok || math.Trunc(item.Value) != item.Value || item.Value < 0 ||
+				item.Value > maxInt || (strconv.IntSize == 64 && item.Value == maxInt) {
+				return inviteAppConfig{}, errors.New("help.getAppConfig user_invite_quota is not a non-negative integer")
+			}
+			settings.userInviteQuota = int(item.Value)
+			gotQuota = true
+		}
+	}
+	if !gotMode || !gotEnabled || !gotQuota {
+		return inviteAppConfig{}, errors.New("help.getAppConfig omitted user invite settings")
+	}
+	return settings, nil
 }
 
 func probe(ctx context.Context, endpoint, discoveryURL string, client *http.Client) error {
