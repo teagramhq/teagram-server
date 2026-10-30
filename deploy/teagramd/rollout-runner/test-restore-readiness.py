@@ -938,8 +938,11 @@ class RestoreReadinessContractTests(unittest.TestCase):
 
         shell = SHELL_GATE.read_text(encoding="utf-8")
         self.assertIn("run_sigkill_recovery_drill --fault-test sigkill", shell)
-        self.assertIn('[[ $sigkill_status -ne 137 ]]', shell)
-        self.assertIn('[[ $(<"$sigkill_output") != "SIGKILL_INJECTED" ]]', shell)
+        self.assertIn('[[ $(<"$sigkill_output") == "SIGKILL_INJECTED" ]]', shell)
+        self.assertIn(
+            'if [[ $sigkill_status -ne 137 ]] || [[ $sigkill_marker != present ]]; then',
+            shell,
+        )
 
     def test_docker_executable_must_be_a_trusted_system_binary(self) -> None:
         trusted = RESTORE_READINESS.ensure_trusted_system_executable("/usr/bin/true")

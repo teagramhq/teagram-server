@@ -43,6 +43,7 @@ RUN if [ -n "$DEMO_BUILD_GOMAXPROCS" ]; then export GOMAXPROCS="$DEMO_BUILD_GOMA
     if [ -n "$DEMO_BUILD_GOFLAGS" ]; then export GOFLAGS="$DEMO_BUILD_GOFLAGS"; fi; \
     CGO_ENABLED=0 go build -o /teagramd ./cmd/teagramd \
     && CGO_ENABLED=0 go build -o /blob-migrate ./cmd/blob-migrate \
+    && CGO_ENABLED=0 go build -o /blob-key-rotate ./cmd/blob-key-rotate \
     && CGO_ENABLED=0 go build -o /blob-encrypt-migrate ./cmd/blob-encrypt-migrate \
     && CGO_ENABLED=0 go build -o /photothumb ./cmd/photothumb \
     && CGO_ENABLED=0 go build -o /demo-seed ./cmd/demo-seed \
@@ -100,6 +101,7 @@ FROM gcr.io/distroless/static-debian12:nonroot
 # it is executing.
 COPY --from=build /teagramd /usr/local/bin/teagramd
 COPY --from=build /blob-migrate /usr/local/bin/blob-migrate
+COPY --from=build /blob-key-rotate /usr/local/bin/blob-key-rotate
 COPY --from=build /blob-encrypt-migrate /usr/local/bin/blob-encrypt-migrate
 COPY --from=build /photothumb /usr/local/bin/photothumb
 COPY --from=build /demo-seed /usr/local/bin/demo-seed

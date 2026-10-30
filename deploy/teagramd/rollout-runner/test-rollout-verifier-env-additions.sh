@@ -15,6 +15,13 @@ OVERRIDE_FILE="$TMP/docker-compose.override.yml"
 printf 'TG_NEW_FLAG=on\n' > "$ENV_FILE"
 : > "$OVERRIDE_FILE"
 chmod 600 "$ENV_FILE" "$OVERRIDE_FILE"
+ROTATION_MEDIA_SOURCE="$TMP/rotation-media-keys"
+mkdir -m 700 "$ROTATION_MEDIA_SOURCE"
+printf '%064d\n' 0 > "$ROTATION_MEDIA_SOURCE/1.key"
+chmod 600 "$ROTATION_MEDIA_SOURCE/1.key"
+if [ "$(id -u)" = 0 ]; then
+  chown 65532:65532 "$ROTATION_MEDIA_SOURCE" "$ROTATION_MEDIA_SOURCE/1.key"
+fi
 
 REAL_JQ=$(command -v jq)
 JQ_SECRET_ARG_MARKER="$TMP/jq-secret-arg"
@@ -50,6 +57,19 @@ inspect_json() {
         HostConfig:{LogConfig:$log_config,PortBindings:{}},Mounts:[]
       }
   '
+}
+
+rotation_inspect_json() {
+  jq -c --arg media_source "$ROTATION_MEDIA_SOURCE" '
+    .Config.Env += [
+      "TG_MEDIA_KEY_DIR=/run/teagramd/media-keys",
+      "TG_MEDIA_KEY_CURRENT=1"
+    ]
+    | .Mounts += [{
+        Type:"bind",Source:$media_source,Destination:"/run/teagramd/media-keys",
+        Mode:"ro",RW:false,Propagation:""
+      }]
+  ' <<< "$(inspect_json '')"
 }
 
 target_snapshot() {
@@ -147,12 +167,126 @@ tailnet_limit_snapshot() {
     "$inspected" "$compose_json" "$ENV_FILE" "$OVERRIDE_FILE" selected-compose-render "$name"
 }
 
+invite_quota_snapshot() {
+  local name=$1 actual_value=$2 env_content=$3 env_mode=$4 compose_value=$5 inspected compose_json added=
+  printf '%s\n' "$env_content" > "$ENV_FILE"
+  inspected=$(inspect_json "TG_USER_INVITE_QUOTA=$actual_value")
+  compose_json=$(jq -c --arg value "$compose_value" \
+    '.services.teagramd.environment.TG_USER_INVITE_QUOTA=$value' <<< "$COMPOSE_JSON")
+  case "$env_mode" in
+    added) added=TG_USER_INVITE_QUOTA ;;
+    retained) ;;
+    *) printf 'invalid invite quota fixture mode: %s\n' "$env_mode" >&2; return 1 ;;
+  esac
+  ROLLOUT_ADDED_ENV="$added" snapshot_from_json \
+    "$inspected" "$compose_json" "$ENV_FILE" "$OVERRIDE_FILE" selected-compose-render "$name"
+}
+
 : > "$ENV_FILE"
 default_compose_json=$COMPOSE_JSON
 COMPOSE_JSON=$(jq -c '.services.teagramd.logging={driver:"syslog",options:{"syslog-address":"unixgram:///dev/log","syslog-facility":"daemon","syslog-format":"rfc5424",tag:"teagramd"}}' <<< "$COMPOSE_JSON")
 INSPECT_LOG_CONFIG='{"Type":"syslog","Config":{"syslog-address":"unixgram:///dev/log","syslog-facility":"daemon","syslog-format":"rfc5424","tag":"teagramd"}}'
 empty_env=$(snapshot_from_json \
   "$(inspect_json '')" "$COMPOSE_JSON" "$ENV_FILE" "$OVERRIDE_FILE" selected-compose-render baseline)
+rotation_base_compose=$(jq -c --arg media_source "$ROTATION_MEDIA_SOURCE" '
+  .services.teagramd.image="teagramd:local"
+  | .services.teagramd.environment += {
+      TG_POSTGRES_DSN:"fixture-dsn",
+      TG_AUTHKEY_ENC_KEY:"",
+      TG_AUTHKEY_ENC_KEY_FILE:"/var/lib/teagramd/enc_key.hex",
+      TG_BLOB_DIR:"/var/lib/teagramd-blobs",
+      TG_BLOB_S3_ENDPOINT:"http://rustfs:9000",
+      TG_BLOB_S3_BUCKET:"teagram",
+      TG_BLOB_S3_PREFIX:"teagramd/",
+      TG_BLOB_S3_REGION:"us-east-1",
+      TG_BLOB_S3_ACCESS_KEY_ID:"",
+      TG_BLOB_S3_SECRET_ACCESS_KEY_FILE:"/run/secrets/teagramd-blob-secret-key",
+      TG_BLOB_S3_ALLOW_INSECURE_HTTP:"true",
+      TG_MEDIA_KEY_DIR:"/run/teagramd/media-keys",
+      TG_MEDIA_KEY_CURRENT:"1"
+    }
+  | .services.teagramd.volumes += [{
+      type:"bind",source:$media_source,target:"/run/teagramd/media-keys",
+      read_only:true,bind:{create_host_path:false}
+    }]
+' <<< "$COMPOSE_JSON")
+rotation_migration_compose=$(jq -c --arg mode_source "$(canonical_blob_mode_source)" --arg media_source "$ROTATION_MEDIA_SOURCE" '
+  .services["blob-key-rotate"] = {
+    image:"teagramd:local",
+    entrypoint:["/usr/local/bin/blob-key-rotate"],
+    command:null,
+    user:"0:0",
+    read_only:true,
+    profiles:["migration"],
+    environment:(.services.teagramd.environment | {
+      TG_POSTGRES_DSN,
+      TG_AUTHKEY_ENC_KEY,
+      TG_AUTHKEY_ENC_KEY_FILE,
+      TG_BLOB_DIR,
+      TG_BLOB_S3_ENDPOINT,
+      TG_BLOB_S3_BUCKET,
+      TG_BLOB_S3_PREFIX,
+      TG_BLOB_S3_REGION,
+      TG_BLOB_S3_ACCESS_KEY_ID,
+      TG_BLOB_S3_SECRET_ACCESS_KEY_FILE,
+      TG_BLOB_S3_ALLOW_INSECURE_HTTP,
+      TG_MEDIA_KEY_DIR,
+      TG_MEDIA_KEY_CURRENT
+    }),
+    depends_on:{
+      postgres:{condition:"service_healthy",required:true},
+      "rustfs-init":{condition:"service_completed_successfully",required:true}
+    },
+    volumes:[
+      {type:"volume",source:"tgkey",target:"/var/lib/teagramd",read_only:true,volume:{}},
+      {type:"bind",source:$mode_source,target:"/run/teagramd/blob-mode",read_only:true,bind:{create_host_path:false}},
+      {type:"volume",source:"blob_key_rotate_reports",target:"/run/teagramd/reports",volume:{}},
+      {type:"bind",source:$media_source,target:"/run/teagramd/media-keys",read_only:true,bind:{create_host_path:false}}
+    ],
+    networks:{default:null,rustfs_private:null},
+    secrets:[{source:"teagramd_blob_secret_key",target:"teagramd-blob-secret-key"}]
+  }
+  | .volumes.blob_key_rotate_reports={name:"teagram_blob_key_rotate_reports",driver:"local"}
+' <<< "$rotation_base_compose")
+rotation_inspect=$(rotation_inspect_json)
+rotation_base_snapshot=$(snapshot_from_json \
+  "$rotation_inspect" "$rotation_base_compose" "$ENV_FILE" "$OVERRIDE_FILE" selected-compose-render baseline)
+rotation_migration_snapshot=$(snapshot_from_json \
+  "$rotation_inspect" "$rotation_migration_compose" "$ENV_FILE" "$OVERRIDE_FILE" selected-compose-render preflight)
+printf '%s\n' "$rotation_base_snapshot" > "$TMP/migration-baseline.snapshot.json"
+printf '%s\n' "$rotation_migration_snapshot" > "$TMP/migration-target.snapshot.json"
+if ! compare_snapshots \
+  "$TMP/migration-baseline.snapshot.json" "$TMP/migration-target.snapshot.json" \
+  sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb \
+  "$TMP/migration-comparisons.tsv"; then
+  printf '%s\n' 'FAIL inactive key-rotation migration profile changed the serving Compose comparison' >&2
+  cat "$TMP/migration-comparisons.tsv" >&2
+  exit 1
+fi
+printf '%s\n' 'PASS inactive key-rotation migration profile is excluded from serving Compose drift'
+unsafe_rotation_migration_compose=$(jq -c '
+  .services["blob-key-rotate"].volumes[2] = {
+    type:"bind",source:"/root",target:"/run/teagramd/reports",bind:{create_host_path:false}
+  }
+' <<< "$rotation_migration_compose")
+if snapshot_from_json \
+  "$rotation_inspect" "$unsafe_rotation_migration_compose" "$ENV_FILE" "$OVERRIDE_FILE" selected-compose-render preflight \
+  >/dev/null 2>"$TMP/unsafe-rotation-profile.err"; then
+  printf '%s\n' 'FAIL key-rotation migration profile with a host bind was accepted' >&2
+  exit 1
+fi
+printf '%s\n' 'PASS unsafe key-rotation migration mounts are rejected'
+empty_invite_quota_mapping=$(invite_quota_snapshot baseline '' '' retained '')
+[ "$(jq -r '.container_env_sha256' <<< "$empty_env")" = \
+  "$(jq -r '.container_env_sha256' <<< "$empty_invite_quota_mapping")" ]
+[ "$(jq -r '.config_sha256' <<< "$empty_env")" = \
+  "$(jq -r '.config_sha256' <<< "$empty_invite_quota_mapping")" ]
+empty_invite_quota_added_baseline=$(invite_quota_snapshot baseline '' TG_USER_INVITE_QUOTA= added '')
+if [ "$(jq -r '.container_env_added' <<< "$empty_invite_quota_added_baseline")" != none ]; then
+  printf '%s\n' 'FAIL exact-empty invite quota mapping was treated as an existing named environment addition' >&2
+  exit 1
+fi
+printf '%s\n' 'PASS empty invite quota mapping remains equivalent to an absent value'
 empty_exchange_env=$(exchange_budget_snapshot target '' '')
 [ "$(jq -r '.container_env_sha256' <<< "$empty_env")" = \
   "$(jq -r '.container_env_sha256' <<< "$empty_exchange_env")" ]
@@ -299,6 +433,41 @@ if ! compare_snapshots \
   exit 1
 fi
 printf '%s\n' 'PASS named tailnet addition is value-checked and passes baseline-to-target comparison'
+
+invite_added_baseline=$(invite_quota_snapshot baseline '' TG_USER_INVITE_QUOTA= added '')
+invite_added_target=$(invite_quota_snapshot target 5 TG_USER_INVITE_QUOTA=5 added 5)
+[ "$(jq -r '.container_env_added' <<< "$invite_added_baseline")" = none ]
+[ "$(jq -r '.container_env_added' <<< "$invite_added_target")" = TG_USER_INVITE_QUOTA ]
+[ "$(jq -r '.container_env_sha256' <<< "$invite_added_baseline")" = \
+  "$(jq -r '.container_env_sha256' <<< "$invite_added_target")" ]
+[ "$(jq -r '.config_sha256' <<< "$invite_added_baseline")" = \
+  "$(jq -r '.config_sha256' <<< "$invite_added_target")" ]
+if invite_quota_snapshot target 5 TG_USER_INVITE_QUOTA=5 added 4 \
+  >/dev/null 2>"$TMP/invite-quota-dotenv-compose-mismatch.err"; then
+  printf '%s\n' 'FAIL mismatched invite quota .env and resolved Compose values were accepted' >&2
+  exit 1
+fi
+if invite_quota_snapshot target -1 TG_USER_INVITE_QUOTA=-1 added -1 \
+  >/dev/null 2>"$TMP/invite-quota-negative.err"; then
+  printf '%s\n' 'FAIL negative invite quota was accepted' >&2
+  exit 1
+fi
+invite_retained=$(invite_quota_snapshot baseline 5 TG_USER_INVITE_QUOTA=5 retained 5)
+[ "$(jq -r '.container_env_sha256' <<< "$invite_retained")" != \
+  "$(jq -r '.container_env_sha256' <<< "$empty_env")" ]
+printf '%s\n' 'PASS named invite quota is value-checked, comparable, and pinned after addition'
+
+: > "$ENV_FILE"
+empty_invite_quota_rollback_inspect=$(jq -c '.Config.Env += ["TG_USER_INVITE_QUOTA="]' \
+  <<< "$(inspect_json '')")
+empty_invite_quota_rollback_compose=$(jq -c \
+  '.services.teagramd.environment.TG_USER_INVITE_QUOTA=""' \
+  <<< "$COMPOSE_JSON")
+empty_invite_quota_rollback=$(ROLLOUT_ADDED_ENV=TG_USER_INVITE_QUOTA \
+  snapshot_from_json "$empty_invite_quota_rollback_inspect" "$empty_invite_quota_rollback_compose" \
+  "$ENV_FILE" "$OVERRIDE_FILE" selected-compose-render rollback)
+[ "$(jq -r '.container_env_added' <<< "$empty_invite_quota_rollback")" = none ]
+printf '%s\n' 'PASS empty retained invite quota mapping does not block rollback of a named addition'
 
 if tailnet_limit_snapshot target 20 'TG_RATE_LIMIT_KEY_EXCHANGE_IP_TAILNET=0' added 20 \
   >/dev/null 2>"$TMP/tailnet-dotenv-compose-mismatch.err"; then

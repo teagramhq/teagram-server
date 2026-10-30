@@ -35,7 +35,7 @@ jobs:
         run: |
           [[ "$DEPLOY_RUN_ID" =~ ^[0-9]+$ ]]
           jobs=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$DEPLOY_RUN_ID/jobs?per_page=100")
-          deploy_conclusion=$(jq -r '[.jobs[] | select(.name == "deploy teagram-server")] | if length == 1 then .[0].conclusion // "missing" else "missing-or-ambiguous" end' <<<"$jobs")
+          deploy_conclusion=$(jq -r '[.jobs[] | select(.name == "deploy: server (prod)")] | if length == 1 then .[0].conclusion // "missing" else "missing-or-ambiguous" end' <<<"$jobs")
           if [[ "$deploy_conclusion" == success ]]; then
             echo "succeeded=true" >> "$GITHUB_OUTPUT"
           else

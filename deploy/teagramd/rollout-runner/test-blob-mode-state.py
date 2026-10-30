@@ -990,6 +990,97 @@ class BlobModeStateTests(unittest.TestCase):
                     "mode-mount-helper",
                 )
 
+    def test_key_rotation_profile_has_only_a_read_only_authority_mount(self) -> None:
+        checkout = pathlib.Path(tempfile.mkdtemp())
+        authority_source = checkout / ".state" / "blob-mode"
+        authority_source.mkdir(parents=True)
+        shared_environment = {
+            "TG_BLOB_DIR": blob_mode.BLOB_TARGET,
+            "TG_BLOB_S3_ENDPOINT": "https://objects.example.test",
+            "TG_BLOB_S3_BUCKET": "teagram",
+            "TG_BLOB_S3_PREFIX": "teagramd/",
+            "TG_POSTGRES_DSN": "postgres://postgres:secret@postgres:5432/teagram",
+            "TG_AUTHKEY_ENC_KEY_FILE": "/var/lib/teagramd/enc_key.hex",
+            "TG_MEDIA_KEY_DIR": "/run/teagramd/media-keys",
+            "TG_MEDIA_KEY_CURRENT": "2",
+        }
+        service = {
+            "profiles": ["migration"],
+            "entrypoint": ["/usr/local/bin/blob-key-rotate"],
+            "user": "0:0",
+            "read_only": True,
+            "environment": dict(shared_environment),
+            "networks": {"default": None, "rustfs_private": None},
+            "volumes": [{
+                "type": "bind", "source": str(authority_source),
+                "target": blob_mode.MODE_TARGET, "read_only": True,
+            }, {
+                "type": "volume", "source": blob_mode.KEY_ROTATION_REPORT_VOLUME,
+                "target": blob_mode.REPORT_TARGET,
+            }, {
+                "type": "volume", "source": "tgkey", "target": "/var/lib/teagramd", "read_only": True,
+            }, {
+                "type": "bind", "source": "/etc/teagramd/media-keys",
+                "target": "/run/teagramd/media-keys", "read_only": True,
+            }],
+        }
+        compose = {
+            "services": {
+                "teagramd": {
+                    "environment": dict(shared_environment),
+                    "volumes": [
+                        {"type": "volume", "source": "tgblobs", "target": blob_mode.BLOB_TARGET, "read_only": True},
+                        {"type": "bind", "source": str(authority_source), "target": blob_mode.MODE_TARGET, "read_only": True},
+                    ],
+                    "networks": {"default": None, "rustfs_private": None},
+                },
+                "blob-key-rotate": service,
+            },
+            "volumes": {
+                "tgblobs": {"name": "teagram_tgblobs"},
+                "rustfsdata": {"name": "teagram_rustfsdata"},
+                "tgkey": {"name": "teagram_tgkey"},
+                blob_mode.KEY_ROTATION_REPORT_VOLUME: {
+                    "name": blob_mode.KEY_ROTATION_REPORT_VOLUME_NAME,
+                },
+            },
+            "networks": {
+                "default": {"name": "teagram_default"},
+                "rustfs_private": {"name": "teagram_rustfs_private"},
+            },
+        }
+        inventory = blob_mode.compose_inventory(compose, checkout)
+        self.assertEqual([item["name"] for item in inventory["services"]], ["teagramd"])
+
+        for name, mutation in (
+            ("not profile-gated", lambda item: item.pop("profiles")),
+            ("missing authority", lambda item: item["volumes"].pop(0)),
+            ("writable authority", lambda item: item["volumes"][0].update(read_only=False)),
+            ("wrong entrypoint", lambda item: item.update(entrypoint=["/bin/sh"])),
+            ("host-wide reports bind", lambda item: item["volumes"][1].update(
+                type="bind", source="/root",
+            )),
+            ("unbounded writable mount", lambda item: item["volumes"].append({
+                "type": "bind", "source": "/tmp", "target": "/tmp",
+            })),
+        ):
+            with self.subTest(name=name):
+                candidate = json.loads(json.dumps(compose))
+                mutation(candidate["services"]["blob-key-rotate"])
+                self.assert_rejects(
+                    lambda: blob_mode.compose_inventory(candidate, checkout),
+                    "mode-mount-helper",
+                )
+
+        candidate = json.loads(json.dumps(compose))
+        candidate["volumes"][blob_mode.KEY_ROTATION_REPORT_VOLUME]["driver_opts"] = {
+            "type": "none", "o": "bind", "device": "/root",
+        }
+        self.assert_rejects(
+            lambda: blob_mode.compose_inventory(candidate, checkout),
+            "mode-mount-helper",
+        )
+
     def test_missing_proxy_guard_rejects_before_replacement(self) -> None:
         self.assert_rejects(
             lambda: blob_mode.assert_compose_matches(
@@ -1063,6 +1154,25 @@ class BlobModeStateTests(unittest.TestCase):
         inspected = [{
             "Id": "b" * 64,
             "Config": {"Labels": {"com.docker.compose.service": "rustfs-init"}},
+            "State": {"Status": "running"},
+            "Mounts": [{
+                "Type": "bind", "Source": self.mode_source,
+                "Destination": blob_mode.MODE_TARGET, "RW": False,
+            }],
+        }]
+        inventory = blob_mode.container_inventory(inspected, self.checkout, allow_empty=True)
+        with patch.object(blob_mode, "docker_volume_exists"):
+            self.assert_rejects(
+                lambda: blob_mode.assert_containers_match(
+                    inventory, self.record, self.mode_source, allow_no_teagramd=True
+                ),
+                "running-mode-mount-helper",
+            )
+
+    def test_running_key_rotation_helper_mode_mount_rejects(self) -> None:
+        inspected = [{
+            "Id": "c" * 64,
+            "Config": {"Labels": {"com.docker.compose.service": "blob-key-rotate"}},
             "State": {"Status": "running"},
             "Mounts": [{
                 "Type": "bind", "Source": self.mode_source,
