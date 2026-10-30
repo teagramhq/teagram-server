@@ -313,6 +313,33 @@ async function runScenario(directory, scenario, certificate) {
   }
 }
 
+export async function captureQaWssProof(proveWss, ...args) {
+  try {
+    const audit = await proveWss(...args);
+    return { result: { connectionCount: audit.connectionCount, status101: audit.status101 } };
+  } catch (error) {
+    return {
+      error: {
+        code: error?.code ?? "unexpected-failure",
+        message: error?.message ?? "unknown error",
+        diagnostic: error?.wssDiagnostic,
+      },
+    };
+  }
+}
+
+export function assertQaWssProof(proof, expected, label) {
+  if (proof.error) {
+    const message = typeof proof.error.message === "string"
+      ? proof.error.message.split(/[\r\n]/u, 1)[0]
+      : "unknown error";
+    const connection = proof.error.diagnostic?.wss_diagnostic;
+    const location = typeof connection === "string" ? `; ${connection}` : "";
+    throw new Error(`${label}.proveWss failed: ${message} (${proof.error.code}${location})`);
+  }
+  assert.deepEqual(proof.result, expected, `${label}.result`);
+}
+
 async function runQaScenario(directory, scenario, certificate, qa) {
   currentScenario = `qa-${scenario}`;
   const fixture = await createFixture(directory, scenario, certificate);
@@ -332,8 +359,10 @@ async function runQaScenario(directory, scenario, certificate, qa) {
     const tracker = await qa.installNetworkGuards(contextInfo, fixture.release, null);
     const progress = createAcceptanceProgress({ sourceCommit: SOURCE_COMMIT });
     const manifest = { endpoint: fixture.manifest.endpoint, fingerprint: fixture.manifest.fingerprint };
-    const audit = await qa.proveWss(contextInfo, fixture.release, manifest, progress, tracker);
-    return { result: { connectionCount: audit.connectionCount, status101: audit.status101 }, upgrades: fixture.upgrades() };
+    const proof = await captureQaWssProof(
+      (...args) => qa.proveWss(...args), contextInfo, fixture.release, manifest, progress, tracker,
+    );
+    return { ...proof, upgrades: fixture.upgrades() };
   } catch (error) {
     return { error: { code: error?.code ?? "unexpected-failure" }, upgrades: fixture.upgrades() };
   } finally {
@@ -566,14 +595,14 @@ async function main() {
     const sharedWorkerSilentDiagnostic = assertSilentSharedWorkerError(sharedWorkerSilent);
 
     const qaSharedWorker = await runQaScenario(directory, "shared-worker", certificate, qa);
-    assert.deepEqual(qaSharedWorker.result, { connectionCount: 1, status101: true }, "qaSharedWorker.result");
+    assertQaWssProof(qaSharedWorker, { connectionCount: 1, status101: true }, "qaSharedWorker");
     const qaPrivateClientWorker = await runQaScenario(directory, "private-client-worker", certificate, qa);
-    assert.deepEqual(qaPrivateClientWorker.result, { connectionCount: 4, status101: true }, "qaPrivateClientWorker.result");
+    assertQaWssProof(qaPrivateClientWorker, { connectionCount: 4, status101: true }, "qaPrivateClientWorker");
     assert.equal(qaPrivateClientWorker.upgrades, 4, "qaPrivateClientWorker.upgrades");
     const qaDedicatedWorker = await runQaScenario(directory, "dedicated-worker", certificate, qa);
-    assert.deepEqual(qaDedicatedWorker.result, { connectionCount: 1, status101: true }, "qaDedicatedWorker.result");
+    assertQaWssProof(qaDedicatedWorker, { connectionCount: 1, status101: true }, "qaDedicatedWorker");
     const qaNestedWorker = await runQaScenario(directory, "nested-worker", certificate, qa);
-    assert.deepEqual(qaNestedWorker.result, { connectionCount: 1, status101: true }, "qaNestedWorker.result");
+    assertQaWssProof(qaNestedWorker, { connectionCount: 1, status101: true }, "qaNestedWorker");
     const qaNestedWorkerMismatch = await runQaScenario(directory, "nested-worker-mismatch", certificate, qa);
     assert.equal(qaNestedWorkerMismatch.error?.code, "websocket-not-ready", "qaNestedWorkerMismatch.error?.code");
     assert.equal(qaNestedWorkerMismatch.upgrades, 2, "qaNestedWorkerMismatch.upgrades");
