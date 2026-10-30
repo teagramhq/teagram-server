@@ -16,6 +16,8 @@ spec:
         app.kubernetes.io/name: postgres
     spec:
       automountServiceAccountToken: false
+      imagePullSecrets:
+        - name: ghcr-pull
       terminationGracePeriodSeconds: 60
       securityContext:
         fsGroup: 70
