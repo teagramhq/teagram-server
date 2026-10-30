@@ -1,12 +1,17 @@
 package main
 
 import (
+	"bytes"
+	"context"
 	"encoding/json"
+	"fmt"
 	"strings"
 	"testing"
 
+	"github.com/teagramhq/teagram-server/internal/blob"
 	"github.com/teagramhq/teagram-server/internal/blobinventory"
 	"github.com/teagramhq/teagram-server/internal/blobmode"
+	"github.com/teagramhq/teagram-server/internal/store"
 )
 
 func TestRequireEncryptedAuthorityRejectsMissingAndPlaintextModes(t *testing.T) {
@@ -34,23 +39,112 @@ func TestRequireCurrentTargetRejectsVersionMismatch(t *testing.T) {
 	}
 }
 
-func TestRequireReferencesUnchangedRejectsPartCommittedDuringInventory(t *testing.T) {
+func TestScanFinalInventoryRejectsVersionOnePartCommittedDuringScan(t *testing.T) {
 	t.Parallel()
 
-	// The new part row commits while the full-tree scan is running.
-	beforeScan := []blobinventory.Reference{
-		{Key: "files/21", Kind: "file", ID: "21", LogicalBytes: 5},
+	ctx := context.Background()
+	local, err := blob.OpenLocal(t.TempDir())
+	if err != nil {
+		t.Fatalf("open local blob store: %v", err)
 	}
-	partKey := "parts/00000000000000000000000000000000"
-	afterScan := []blobinventory.Reference{
-		{Key: "files/21", Kind: "file", ID: "21", LogicalBytes: 5},
-		{Key: partKey, Kind: "part", ID: partKey, LogicalBytes: 7},
+	t.Cleanup(func() {
+		if err := local.Close(); err != nil {
+			t.Errorf("close local blob store: %v", err)
+		}
+	})
+
+	versionOneKey := bytes.Repeat([]byte{1}, blob.MediaKeyLen)
+	versionTwoKey := bytes.Repeat([]byte{2}, blob.MediaKeyLen)
+	oldRing, err := blob.NewKeyRing(1, map[uint32][]byte{1: versionOneKey})
+	if err != nil {
+		t.Fatalf("create version 1 key ring: %v", err)
+	}
+	currentRing, err := blob.NewKeyRing(2, map[uint32][]byte{1: versionOneKey, 2: versionTwoKey})
+	if err != nil {
+		t.Fatalf("create current key ring: %v", err)
+	}
+	oldWriter, err := blob.NewEncrypted(local, oldRing, blob.MinChunkSize)
+	if err != nil {
+		t.Fatalf("create version 1 writer: %v", err)
+	}
+	partKey, err := blob.NewPartKey()
+	if err != nil {
+		t.Fatalf("create part key: %v", err)
+	}
+	payload := []byte("part committed while final inventory scans")
+	database := &changingInventoryReferenceReader{}
+	tree := &finalInventoryWalkHookStore{
+		Local: local,
+		afterWalk: func() error {
+			written, err := oldWriter.Put(ctx, partKey, bytes.NewReader(payload))
+			if err != nil {
+				return err
+			}
+			if written != int64(len(payload)) {
+				return fmt.Errorf("write version 1 part = %d bytes, want %d", written, len(payload))
+			}
+			database.references = []store.BlobInventoryReference{{
+				Key: partKey, Kind: "part", ID: partKey, LogicalBytes: int64(len(payload)),
+			}}
+			return nil
+		},
 	}
 
-	err := requireReferencesUnchanged(beforeScan, afterScan)
+	_, err = scanFinalInventory(ctx, database, tree, currentRing)
 	if err == nil || !strings.Contains(err.Error(), "references changed during final inventory") {
-		t.Fatalf("reference reconciliation error = %v, want fail-closed drift error", err)
+		t.Fatalf("final inventory error = %v, want fail-closed reference drift error", err)
 	}
+	if database.reads != 2 || len(database.references) != 1 {
+		t.Fatalf("reference reads = %d, final references = %d, want before/after reads around committed part", database.reads, len(database.references))
+	}
+
+	var partInfo blob.EnvelopeHeaderInfo
+	foundPart := false
+	if err := local.Walk(ctx, func(entry blob.Entry) error {
+		if entry.Key != partKey {
+			return nil
+		}
+		foundPart = true
+		var inspectErr error
+		partInfo, inspectErr = blob.InspectEnvelopeHeader(ctx, local, currentRing, partKey, entry.Size)
+		return inspectErr
+	}); err != nil {
+		t.Fatalf("inspect concurrently committed part: %v", err)
+	}
+	if !foundPart || !partInfo.HasKeyVersion || partInfo.KeyVersion != 1 {
+		t.Fatalf("concurrent part header = %+v (found=%t), want an authenticated version 1 part", partInfo, foundPart)
+	}
+}
+
+type changingInventoryReferenceReader struct {
+	references []store.BlobInventoryReference
+	reads      int
+}
+
+func (r *changingInventoryReferenceReader) BlobInventoryReferences(ctx context.Context) ([]store.BlobInventoryReference, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	r.reads++
+	return append([]store.BlobInventoryReference(nil), r.references...), nil
+}
+
+type finalInventoryWalkHookStore struct {
+	*blob.Local
+
+	afterWalk func() error
+}
+
+func (s *finalInventoryWalkHookStore) Walk(ctx context.Context, fn func(blob.Entry) error) error {
+	if err := s.Local.Walk(ctx, fn); err != nil {
+		return err
+	}
+	if s.afterWalk != nil {
+		afterWalk := s.afterWalk
+		s.afterWalk = nil
+		return afterWalk()
+	}
+	return nil
 }
 
 func TestCommandResultEncodesRotationAndInventoryForOperators(t *testing.T) {

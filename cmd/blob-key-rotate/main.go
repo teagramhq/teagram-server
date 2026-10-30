@@ -35,6 +35,10 @@ type commandResult struct {
 	Inventory       blobinventory.Report `json:"inventory"`
 }
 
+type inventoryReferenceSource interface {
+	BlobInventoryReferences(context.Context) ([]store.BlobInventoryReference, error)
+}
+
 func main() {
 	if err := run(os.Args[1:], os.Stdout, os.Stderr); err != nil {
 		logger := slog.New(slog.NewTextHandler(os.Stderr, nil))
@@ -118,19 +122,8 @@ func run(args []string, stdout, stderr io.Writer) (retErr error) {
 	if err != nil {
 		return err
 	}
-	currentReferences, err := readReferences(ctx, database)
+	inventory, err := scanFinalInventory(ctx, database, backend, cfg.MediaKeys)
 	if err != nil {
-		return err
-	}
-	inventory, err := blobinventory.Scan(ctx, backend, cfg.MediaKeys, currentReferences)
-	if err != nil {
-		return err
-	}
-	reconciledReferences, err := readReferences(ctx, database)
-	if err != nil {
-		return err
-	}
-	if err := requireReferencesUnchanged(currentReferences, reconciledReferences); err != nil {
 		return err
 	}
 	if inventory.Classes.Missing.Count != 0 || inventory.Classes.NoValidEnvelope.Count != 0 {
@@ -199,7 +192,31 @@ func openEncryptedStore(ctx context.Context, cfg config.Config, log *slog.Logger
 	return prefixed, func() error { return nil }, nil
 }
 
-func readReferences(ctx context.Context, database *store.Store) ([]blobinventory.Reference, error) {
+func scanFinalInventory(
+	ctx context.Context,
+	database inventoryReferenceSource,
+	backend blob.Store,
+	ring *blob.KeyRing,
+) (blobinventory.Report, error) {
+	references, err := readReferences(ctx, database)
+	if err != nil {
+		return blobinventory.Report{}, err
+	}
+	inventory, err := blobinventory.Scan(ctx, backend, ring, references)
+	if err != nil {
+		return blobinventory.Report{}, err
+	}
+	reconciledReferences, err := readReferences(ctx, database)
+	if err != nil {
+		return blobinventory.Report{}, err
+	}
+	if err := requireReferencesUnchanged(references, reconciledReferences); err != nil {
+		return blobinventory.Report{}, err
+	}
+	return inventory, nil
+}
+
+func readReferences(ctx context.Context, database inventoryReferenceSource) ([]blobinventory.Reference, error) {
 	rows, err := database.BlobInventoryReferences(ctx)
 	if err != nil {
 		return nil, err
