@@ -2102,6 +2102,16 @@ jobs:
           docker rm "$cid" > /dev/null
           diff -qr build/sticker-bundle "$RUNNER_TEMP/sticker-bundle-image"
 
+      - name: Assert media key rotation operator is in the final image
+        run: |
+          set -euo pipefail
+          container=$(docker create teagramd:ci)
+          trap 'docker rm "$container" >/dev/null' EXIT
+          operator_entry=$(docker export "$container" | tar --numeric-owner -tvf - usr/local/bin/blob-key-rotate)
+          printf '%s\n' "$operator_entry"
+          printf '%s\n' "$operator_entry" \
+            | awk '$1 == "-rwxr-xr-x" && $2 == "0/0" && $NF == "usr/local/bin/blob-key-rotate" { found = 1 } END { exit !found }'
+
       - name: Assert missing source revision stays empty
         uses: docker/build-push-action@v7.4.0
         with:
@@ -2689,6 +2699,9 @@ jobs:
             and (.volumes.tgkey.name == "teagram_tgkey")
             and (.volumes.tgblobs.name == "teagram_tgblobs")
             and (.volumes.rustfsdata.name == "teagram_rustfsdata")
+            and (.volumes.blob_key_rotate_reports.name == "teagram_blob_key_rotate_reports")
+            and (.volumes.blob_key_rotate_reports.driver == "local")
+            and ((.volumes.blob_key_rotate_reports.driver_opts // {}) == {})
             and (.services.postgres.environment.POSTGRES_DB == "teagram")
             and (.services.teagramd.environment.TG_POSTGRES_DSN | endswith("/teagram?sslmode=disable"))
             and (any(.services.migrate.command[]; endswith("/teagram?sslmode=disable")))
@@ -2706,7 +2719,19 @@ jobs:
             and any(.services.teagramd.volumes[]; .type == "bind" and .target == "/run/teagramd/blob-mode" and .read_only == true)
             and any(.services.teagramd.volumes[]; .type == "bind" and .source == $media_key_dir and .target == "/run/teagramd/media-keys" and .read_only == true)
             and any(.services["blob-encrypt-migrate"].volumes[]; .type == "bind" and .target == "/run/teagramd/blob-mode" and (.read_only // false) == false)
-            and all(.services | to_entries[] | select((.key | startswith("teagramd")) | not) | select(.key != "blob-encrypt-migrate"); all((.value.volumes // [])[]; .target != "/run/teagramd/blob-mode"))
+            and (.services["blob-key-rotate"].profiles == ["migration"])
+            and (.services["blob-key-rotate"].entrypoint == ["/usr/local/bin/blob-key-rotate"])
+            and (.services["blob-key-rotate"].user == "0:0")
+            and (.services["blob-key-rotate"].read_only == true)
+            and (.services["blob-key-rotate"].depends_on["postgres"].condition == "service_healthy")
+            and (.services["blob-key-rotate"].depends_on["rustfs-init"].condition == "service_completed_successfully")
+            and any(.services["blob-key-rotate"].volumes[]; .type == "bind" and .target == "/run/teagramd/blob-mode" and .read_only == true)
+            and any(.services["blob-key-rotate"].volumes[]; .type == "volume" and .source == "blob_key_rotate_reports" and .target == "/run/teagramd/reports" and (.read_only // false) == false)
+            and all(.services["blob-key-rotate"].volumes[]; if (.read_only // false) then true else (.type == "volume" and .source == "blob_key_rotate_reports" and .target == "/run/teagramd/reports") end)
+            and any(.services["blob-key-rotate"].volumes[]; .type == "volume" and .target == "/var/lib/teagramd" and .read_only == true)
+            and any(.services["blob-key-rotate"].volumes[]; .type == "bind" and .source == $media_key_dir and .target == "/run/teagramd/media-keys" and .read_only == true)
+            and any(.services["blob-key-rotate"].secrets[]; .source == "teagramd_blob_secret_key" and .target == "teagramd-blob-secret-key")
+            and all(.services | to_entries[] | select((.key | startswith("teagramd")) | not) | select(.key != "blob-encrypt-migrate" and .key != "blob-key-rotate"); all((.value.volumes // [])[]; .target != "/run/teagramd/blob-mode"))
             and (.services["blob-migrate"].volumes[0].read_only == true)
             and ((.services["blob-migrate"].profiles | index("migration")) != null)
             and (.services["blob-restore"].command == ["--direction", "s3-to-local", "--destination", "/destination"])
