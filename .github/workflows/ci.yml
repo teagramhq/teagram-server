@@ -84,8 +84,8 @@ jobs:
     name: 'ops: dispatch-pr-ci-recovery'
     needs:
       - ops-prioritize-main
-      - lint
-    if: ${{ always() && (needs.ops-prioritize-main.result == 'success' || (needs.ops-prioritize-main.result == 'skipped' && github.event_name == 'pull_request')) && github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.lint.result != 'skipped' && needs.ops-prioritize-main.outputs.cancelled_pr_run_targets != '' }}
+      - lint-go
+    if: ${{ always() && (needs.ops-prioritize-main.result == 'success' || (needs.ops-prioritize-main.result == 'skipped' && github.event_name == 'pull_request')) && github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.lint-go.result != 'skipped' && needs.ops-prioritize-main.outputs.cancelled_pr_run_targets != '' }}
     runs-on: ubuntu-26.04
     timeout-minutes: 5
     permissions:
@@ -105,10 +105,10 @@ jobs:
             -f "cancelled_pr_run_targets=$CANCELLED_PR_RUN_TARGETS"; then
             echo "::warning::Could not dispatch recovery for cancelled pull request CI runs: $CANCELLED_PR_RUN_TARGETS"
           fi
-  sticker-bundle:
-    name: sticker bundle license gate
+  check-sticker-license:
+    name: 'check: sticker-license'
     needs: ops-prioritize-main
-    if: ${{ always() && (needs.ops-prioritize-main.result == 'success' || (needs.ops-prioritize-main.result == 'skipped' && github.event_name == 'pull_request')) }}
+    if: ${{ (github.event_name == 'pull_request' && !cancelled() || github.event_name != 'pull_request' && always()) && (needs.ops-prioritize-main.result == 'success' || (needs.ops-prioritize-main.result == 'skipped' && github.event_name == 'pull_request')) }}
     runs-on: ubuntu-26.04
     timeout-minutes: 20
     permissions:
@@ -173,10 +173,10 @@ jobs:
           retention-days: 1
           compression-level: 0
 
-  lint:
-    name: lint
+  lint-go:
+    name: 'lint: go'
     needs: ops-prioritize-main
-    if: ${{ always() && (needs.ops-prioritize-main.result == 'success' || (needs.ops-prioritize-main.result == 'skipped' && github.event_name == 'pull_request')) }}
+    if: ${{ (github.event_name == 'pull_request' && !cancelled() || github.event_name != 'pull_request' && always()) && (needs.ops-prioritize-main.result == 'success' || (needs.ops-prioritize-main.result == 'skipped' && github.event_name == 'pull_request')) }}
     runs-on: ubuntu-26.04
     # Keep lint's timeout aligned with its former step in ci.
     timeout-minutes: 20
@@ -226,10 +226,10 @@ jobs:
       - name: Check formatting
         run: make lint-format
 
-  sql-lint:
-    name: sql lint
+  lint-sql:
+    name: 'lint: sql'
     needs: ops-prioritize-main
-    if: ${{ always() && (needs.ops-prioritize-main.result == 'success' || (needs.ops-prioritize-main.result == 'skipped' && github.event_name == 'pull_request')) }}
+    if: ${{ (github.event_name == 'pull_request' && !cancelled() || github.event_name != 'pull_request' && always()) && (needs.ops-prioritize-main.result == 'success' || (needs.ops-prioritize-main.result == 'skipped' && github.event_name == 'pull_request')) }}
     runs-on: ubuntu-26.04
     timeout-minutes: 10
     permissions:
@@ -266,10 +266,10 @@ jobs:
             --head "$HEAD_SHA" \
             --sqlfluff .venv-sqlfluff/bin/sqlfluff
 
-  browser-acceptance:
-    name: browser acceptance runtime
+  test-browser-acceptance:
+    name: 'test: browser-acceptance'
     needs: ops-prioritize-main
-    if: ${{ always() && (needs.ops-prioritize-main.result == 'success' || (needs.ops-prioritize-main.result == 'skipped' && github.event_name == 'pull_request')) }}
+    if: ${{ (github.event_name == 'pull_request' && !cancelled() || github.event_name != 'pull_request' && always()) && (needs.ops-prioritize-main.result == 'success' || (needs.ops-prioritize-main.result == 'skipped' && github.event_name == 'pull_request')) }}
     runs-on: ubuntu-26.04
     timeout-minutes: 10
     permissions:
@@ -329,12 +329,12 @@ jobs:
             and (.services.browser.platform == "linux/arm64")
           ' "$RUNNER_TEMP/browser-acceptance-compose.json"
 
-  browser-acceptance-image:
-    name: browser acceptance image (${{ matrix.arch }})
+  build-browser-acceptance-image:
+    name: 'build: browser-acceptance-image (${{ matrix.arch }})'
     needs:
       - ops-prioritize-main
-      - browser-acceptance
-    if: ${{ always() && (needs.ops-prioritize-main.result == 'success' || (needs.ops-prioritize-main.result == 'skipped' && github.event_name == 'pull_request')) && needs.browser-acceptance.result == 'success' }}
+      - test-browser-acceptance
+    if: ${{ (github.event_name == 'pull_request' && !cancelled() || github.event_name != 'pull_request' && always()) && (needs.ops-prioritize-main.result == 'success' || (needs.ops-prioritize-main.result == 'skipped' && github.event_name == 'pull_request')) && needs.test-browser-acceptance.result == 'success' }}
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 25
     permissions:
@@ -514,9 +514,10 @@ jobs:
             and .payloads_retained == 0
           '
 
-  ci-main:
+  test-go:
+    name: 'test: go'
     needs: ops-prioritize-main
-    if: ${{ always() && (needs.ops-prioritize-main.result == 'success' || (needs.ops-prioritize-main.result == 'skipped' && github.event_name == 'pull_request')) }}
+    if: ${{ (github.event_name == 'pull_request' && !cancelled() || github.event_name != 'pull_request' && always()) && (needs.ops-prioritize-main.result == 'success' || (needs.ops-prioritize-main.result == 'skipped' && github.event_name == 'pull_request')) }}
     runs-on: ubuntu-26.04
     permissions:
       contents: read
@@ -594,19 +595,10 @@ jobs:
       - name: Build
         run: go build ./...
 
-      # The action's version input defaults to latest, which resolves to the
-      # canary channel; pin the binary so the checksum gate cannot move on its own.
-      - uses: ariga/setup-atlas@v0.3
-        with:
-          version: v1.2.0
-
-      - name: Validate migrations
-        run: atlas migrate validate --dir file://migrations
-
       # Quay no longer allows anonymous pulls of its MinIO image. Build the
       # test fixture from the pinned public source so fork PRs need no secrets.
       # The daemon's builder uses the base images pulled below, as in the
-      # docker job.
+      # build-server-image job.
       - uses: docker/setup-buildx-action@v4.4.1
         with:
           driver: docker
@@ -804,9 +796,10 @@ jobs:
           path: ~/.cache/go-build
           key: go-build-${{ runner.os }}-${{ hashFiles('**/go.sum') }}-${{ github.run_id }}-${{ github.run_attempt }}
 
-  real-server-fixtures:
+  test-real-server-fixtures:
+    name: 'test: real-server-fixtures'
     needs: ops-prioritize-main
-    if: ${{ always() && (needs.ops-prioritize-main.result == 'success' || (needs.ops-prioritize-main.result == 'skipped' && github.event_name == 'pull_request')) }}
+    if: ${{ (github.event_name == 'pull_request' && !cancelled() || github.event_name != 'pull_request' && always()) && (needs.ops-prioritize-main.result == 'success' || (needs.ops-prioritize-main.result == 'skipped' && github.event_name == 'pull_request')) }}
     runs-on: ubuntu-26.04
     timeout-minutes: 60
     env:
@@ -862,7 +855,7 @@ jobs:
           key: teagram-fixture-pnpm-store-09373cc2713d31e93664c38a4fd0335ea37a5f01-node24
           restore-keys: teagram-fixture-pnpm-store-
 
-      # As in the docker job: the fixture's `docker build` then finds its
+      # As in the build-server-image job: the fixture's `docker build` then finds its
       # mirrored Node base locally. The Playwright base comes from
       # mcr.microsoft.com as a build argument and is not pulled here.
       - name: Pull the base images
@@ -898,10 +891,10 @@ jobs:
           fi
           free -m
 
-  websocket-d1:
-    name: web client WebSocket D1
+  test-websocket-d1:
+    name: 'test: websocket-d1'
     needs: ops-prioritize-main
-    if: ${{ always() && (needs.ops-prioritize-main.result == 'success' || (needs.ops-prioritize-main.result == 'skipped' && github.event_name == 'pull_request')) }}
+    if: ${{ (github.event_name == 'pull_request' && !cancelled() || github.event_name != 'pull_request' && always()) && (needs.ops-prioritize-main.result == 'success' || (needs.ops-prioritize-main.result == 'skipped' && github.event_name == 'pull_request')) }}
     runs-on: ubuntu-26.04
     timeout-minutes: 20
     permissions:
@@ -979,10 +972,10 @@ jobs:
           D1_SANITIZED_ARTIFACT_PATH: ${{ runner.temp }}/teagram-websocket-d1-${{ github.run_id }}-${{ github.run_attempt }}.json
         run: rm -f -- "$D1_SANITIZED_ARTIFACT_PATH"
 
-  websocket-permanent-exchange:
-    name: Web single permanent exchange
+  test-websocket-permanent-exchange:
+    name: 'test: websocket-permanent-exchange'
     needs: ops-prioritize-main
-    if: ${{ always() && (needs.ops-prioritize-main.result == 'success' || (needs.ops-prioritize-main.result == 'skipped' && github.event_name == 'pull_request')) }}
+    if: ${{ (github.event_name == 'pull_request' && !cancelled() || github.event_name != 'pull_request' && always()) && (needs.ops-prioritize-main.result == 'success' || (needs.ops-prioritize-main.result == 'skipped' && github.event_name == 'pull_request')) }}
     runs-on: ubuntu-26.04
     timeout-minutes: 20
     permissions:
@@ -1027,7 +1020,7 @@ jobs:
   restore-readiness:
     name: confined restore-to-application
     needs: ops-prioritize-main
-    if: ${{ always() && (needs.ops-prioritize-main.result == 'success' || (needs.ops-prioritize-main.result == 'skipped' && github.event_name == 'pull_request')) }}
+    if: ${{ (github.event_name == 'pull_request' && !cancelled() || github.event_name != 'pull_request' && always()) && (needs.ops-prioritize-main.result == 'success' || (needs.ops-prioritize-main.result == 'skipped' && github.event_name == 'pull_request')) }}
     runs-on: ubuntu-26.04
     timeout-minutes: 80
     permissions:
@@ -1085,10 +1078,10 @@ jobs:
 
   # Keep the existing required check context while making every verification
   # lane mandatory. `always()` runs this when a lane fails or is skipped.
-  deploy-workflow:
-    name: deploy workflow contract
+  check-deploy-workflow:
+    name: 'check: deploy-workflow'
     needs: ops-prioritize-main
-    if: ${{ always() && (needs.ops-prioritize-main.result == 'success' || (needs.ops-prioritize-main.result == 'skipped' && github.event_name == 'pull_request')) }}
+    if: ${{ (github.event_name == 'pull_request' && !cancelled() || github.event_name != 'pull_request' && always()) && (needs.ops-prioritize-main.result == 'success' || (needs.ops-prioritize-main.result == 'skipped' && github.event_name == 'pull_request')) }}
     runs-on: ubuntu-26.04
     timeout-minutes: 10
     permissions:
@@ -1146,10 +1139,14 @@ jobs:
           bash -n deploy/teagram/test-invite-web-signup-url.sh
           bash -n deploy/teagram/ops/replay-check.sh
           bash -n deploy/teagram/ops/rollout-evidence.sh
+          bash -n deploy/teagram/ops/rollback-public-websocket.sh
+          bash -n deploy/teagram/test-rollback-public-websocket.sh
           bash -n deploy/teagram/test-teagram-logs.sh
           bash -n deploy/teagram/ops/target-failure-report.sh
           bash -n deploy/teagram/test-teagram-ops.sh
           bash -n deploy/teagram/test-target-failure-report.sh
+          bash -n deploy/teagram/ops/apply-user-invite-quota.sh
+          bash -n deploy/teagram/test-apply-user-invite-quota.sh
           bash -n deploy/telegram-server/deploy-main.sh
           bash -n deploy/teagram-demo/prepare-env.sh
           bash -n deploy/teagram-demo/demo-common.sh
@@ -1184,10 +1181,14 @@ jobs:
             deploy/teagram/test-invite-web-signup-url.sh \
             deploy/teagram/ops/replay-check.sh \
             deploy/teagram/ops/rollout-evidence.sh \
+            deploy/teagram/ops/rollback-public-websocket.sh \
+            deploy/teagram/test-rollback-public-websocket.sh \
             deploy/teagram/test-teagram-logs.sh \
             deploy/teagram/ops/target-failure-report.sh \
             deploy/teagram/test-teagram-ops.sh \
             deploy/teagram/test-target-failure-report.sh \
+            deploy/teagram/ops/apply-user-invite-quota.sh \
+            deploy/teagram/test-apply-user-invite-quota.sh \
             deploy/telegram-server/deploy-main.sh \
             deploy/teagram-demo/prepare-env.sh \
             deploy/teagram-demo/demo-common.sh \
@@ -1220,6 +1221,9 @@ jobs:
       - name: Check deploy script target fixtures
         run: deploy/teagram/test-deploy-main.sh
 
+      - name: Check user invite quota operation
+        run: deploy/teagram/test-apply-user-invite-quota.sh
+
       - name: Check invite signup URL operation fixtures
         run: sudo -n env "PATH=$PATH" bash deploy/teagram/test-invite-web-signup-url.sh
 
@@ -1231,6 +1235,9 @@ jobs:
 
       - name: Check teagram ops command
         run: deploy/teagram/test-teagram-ops.sh
+
+      - name: Check public WebSocket rollback teardown
+        run: deploy/teagram/test-rollback-public-websocket.sh
 
       - name: Check performance Postgres startup readiness
         run: bash .github/scripts/test-perf-postgres.sh
@@ -1259,10 +1266,10 @@ jobs:
       - name: Check demo image release pinning
         run: deploy/teagram-demo/test-image-release.sh
 
-  demo-web-artifact:
-    name: demo web artifact pin
+  check-demo-web-pin:
+    name: 'check: demo-web-pin'
     needs: ops-prioritize-main
-    if: ${{ always() && (needs.ops-prioritize-main.result == 'success' || (needs.ops-prioritize-main.result == 'skipped' && github.event_name == 'pull_request')) }}
+    if: ${{ (github.event_name == 'pull_request' && !cancelled() || github.event_name != 'pull_request' && always()) && (needs.ops-prioritize-main.result == 'success' || (needs.ops-prioritize-main.result == 'skipped' && github.event_name == 'pull_request')) }}
     runs-on: ubuntu-26.04
     timeout-minutes: 30
     permissions:
@@ -1343,25 +1350,25 @@ jobs:
     if: ${{ always() && (needs.ops-prioritize-main.result == 'success' || needs.ops-prioritize-main.result == 'failure' || needs.ops-prioritize-main.result == 'cancelled' || (needs.ops-prioritize-main.result == 'skipped' && github.event_name == 'pull_request')) }}
     needs:
       - ops-prioritize-main
-      - ci-main
-      - sticker-bundle
-      - photothumb-runtime
-      - real-server-fixtures
-      - lint
-      - sqlc
-      - docker
-      - compose
-      - smoke
-      - e2e-admin
-      - websocket-d1
-      - websocket-permanent-exchange
-      - sql-lint
-      - css
-      - browser-acceptance
-      - browser-acceptance-image
-      - schema-gate-postgres
-      - deploy-workflow
-      - demo-web-artifact
+      - test-go
+      - check-sticker-license
+      - test-photo-worker
+      - test-real-server-fixtures
+      - lint-go
+      - check-sqlc-drift
+      - build-server-image
+      - test-compose
+      - test-smoke
+      - test-e2e-admin
+      - test-websocket-d1
+      - test-websocket-permanent-exchange
+      - lint-sql
+      - lint-css
+      - test-browser-acceptance
+      - build-browser-acceptance-image
+      - test-migrations
+      - check-deploy-workflow
+      - check-demo-web-pin
     runs-on: ubuntu-26.04
     timeout-minutes: 5
 
@@ -1369,25 +1376,25 @@ jobs:
       - name: Require all CI lanes to pass
         env:
           MAIN_PRIORITY_RESULT: ${{ needs.ops-prioritize-main.result }}
-          CI_MAIN_RESULT: ${{ needs.ci-main.result }}
-          STICKER_BUNDLE_RESULT: ${{ needs.sticker-bundle.result }}
-          LINT_RESULT: ${{ needs.lint.result }}
-          SQLC_RESULT: ${{ needs.sqlc.result }}
-          DOCKER_RESULT: ${{ needs.docker.result }}
-          COMPOSE_RESULT: ${{ needs.compose.result }}
-          SMOKE_RESULT: ${{ needs.smoke.result }}
-          E2E_ADMIN_RESULT: ${{ needs.e2e-admin.result }}
-          PHOTOTHUMB_RUNTIME_RESULT: ${{ needs.photothumb-runtime.result }}
-          REAL_SERVER_FIXTURES_RESULT: ${{ needs.real-server-fixtures.result }}
-          WEBSOCKET_D1_RESULT: ${{ needs.websocket-d1.result }}
-          WEB_PERMANENT_EXCHANGE_RESULT: ${{ needs.websocket-permanent-exchange.result }}
-          SQL_LINT_RESULT: ${{ needs.sql-lint.result }}
-          CSS_RESULT: ${{ needs.css.result }}
-          BROWSER_ACCEPTANCE_RESULT: ${{ needs.browser-acceptance.result }}
-          BROWSER_ACCEPTANCE_IMAGE_RESULT: ${{ needs.browser-acceptance-image.result }}
-          SCHEMA_GATE_POSTGRES_RESULT: ${{ needs.schema-gate-postgres.result }}
-          DEPLOY_WORKFLOW_RESULT: ${{ needs.deploy-workflow.result }}
-          DEMO_WEB_ARTIFACT_RESULT: ${{ needs.demo-web-artifact.result }}
+          TEST_GO_RESULT: ${{ needs.test-go.result }}
+          CHECK_STICKER_LICENSE_RESULT: ${{ needs.check-sticker-license.result }}
+          LINT_GO_RESULT: ${{ needs.lint-go.result }}
+          CHECK_SQLC_DRIFT_RESULT: ${{ needs.check-sqlc-drift.result }}
+          BUILD_SERVER_IMAGE_RESULT: ${{ needs.build-server-image.result }}
+          TEST_COMPOSE_RESULT: ${{ needs.test-compose.result }}
+          TEST_SMOKE_RESULT: ${{ needs.test-smoke.result }}
+          TEST_E2E_ADMIN_RESULT: ${{ needs.test-e2e-admin.result }}
+          TEST_PHOTO_WORKER_RESULT: ${{ needs.test-photo-worker.result }}
+          TEST_REAL_SERVER_FIXTURES_RESULT: ${{ needs.test-real-server-fixtures.result }}
+          TEST_WEBSOCKET_D1_RESULT: ${{ needs.test-websocket-d1.result }}
+          TEST_WEBSOCKET_PERMANENT_EXCHANGE_RESULT: ${{ needs.test-websocket-permanent-exchange.result }}
+          LINT_SQL_RESULT: ${{ needs.lint-sql.result }}
+          LINT_CSS_RESULT: ${{ needs.lint-css.result }}
+          TEST_BROWSER_ACCEPTANCE_RESULT: ${{ needs.test-browser-acceptance.result }}
+          BUILD_BROWSER_ACCEPTANCE_IMAGE_RESULT: ${{ needs.build-browser-acceptance-image.result }}
+          TEST_MIGRATIONS_RESULT: ${{ needs.test-migrations.result }}
+          CHECK_DEPLOY_WORKFLOW_RESULT: ${{ needs.check-deploy-workflow.result }}
+          CHECK_DEMO_WEB_PIN_RESULT: ${{ needs.check-demo-web-pin.result }}
         run: |
           expected_priority_result=success
           if [[ "$GITHUB_EVENT_NAME" == pull_request ]]; then
@@ -1395,46 +1402,46 @@ jobs:
           fi
           lane_results=(
             "ops-prioritize-main=$MAIN_PRIORITY_RESULT"
-            "ci-main=$CI_MAIN_RESULT"
-            "sticker-bundle=$STICKER_BUNDLE_RESULT"
-            "photothumb-runtime=$PHOTOTHUMB_RUNTIME_RESULT"
-            "real-server-fixtures=$REAL_SERVER_FIXTURES_RESULT"
-            "lint=$LINT_RESULT"
-            "sqlc=$SQLC_RESULT"
-            "docker=$DOCKER_RESULT"
-            "compose=$COMPOSE_RESULT"
-            "smoke=$SMOKE_RESULT"
-            "e2e-admin=$E2E_ADMIN_RESULT"
-            "websocket-d1=$WEBSOCKET_D1_RESULT"
-            "websocket-permanent-exchange=$WEB_PERMANENT_EXCHANGE_RESULT"
-            "sql-lint=$SQL_LINT_RESULT"
-            "css=$CSS_RESULT"
-            "browser-acceptance=$BROWSER_ACCEPTANCE_RESULT"
-            "browser-acceptance-image=$BROWSER_ACCEPTANCE_IMAGE_RESULT"
-            "schema-gate-postgres=$SCHEMA_GATE_POSTGRES_RESULT"
-            "deploy-workflow=$DEPLOY_WORKFLOW_RESULT"
-            "demo-web-artifact=$DEMO_WEB_ARTIFACT_RESULT"
+            "test-go=$TEST_GO_RESULT"
+            "check-sticker-license=$CHECK_STICKER_LICENSE_RESULT"
+            "test-photo-worker=$TEST_PHOTO_WORKER_RESULT"
+            "test-real-server-fixtures=$TEST_REAL_SERVER_FIXTURES_RESULT"
+            "lint-go=$LINT_GO_RESULT"
+            "check-sqlc-drift=$CHECK_SQLC_DRIFT_RESULT"
+            "build-server-image=$BUILD_SERVER_IMAGE_RESULT"
+            "test-compose=$TEST_COMPOSE_RESULT"
+            "test-smoke=$TEST_SMOKE_RESULT"
+            "test-e2e-admin=$TEST_E2E_ADMIN_RESULT"
+            "test-websocket-d1=$TEST_WEBSOCKET_D1_RESULT"
+            "test-websocket-permanent-exchange=$TEST_WEBSOCKET_PERMANENT_EXCHANGE_RESULT"
+            "lint-sql=$LINT_SQL_RESULT"
+            "lint-css=$LINT_CSS_RESULT"
+            "test-browser-acceptance=$TEST_BROWSER_ACCEPTANCE_RESULT"
+            "build-browser-acceptance-image=$BUILD_BROWSER_ACCEPTANCE_IMAGE_RESULT"
+            "test-migrations=$TEST_MIGRATIONS_RESULT"
+            "check-deploy-workflow=$CHECK_DEPLOY_WORKFLOW_RESULT"
+            "check-demo-web-pin=$CHECK_DEMO_WEB_PIN_RESULT"
           )
           if [[ "$MAIN_PRIORITY_RESULT" != "$expected_priority_result" ||
-                "$CI_MAIN_RESULT" != "success" ||
-                "$STICKER_BUNDLE_RESULT" != "success" ||
-                "$PHOTOTHUMB_RUNTIME_RESULT" != "success" ||
-                "$REAL_SERVER_FIXTURES_RESULT" != "success" ||
-                "$LINT_RESULT" != "success" ||
-                "$SQLC_RESULT" != "success" ||
-                "$DOCKER_RESULT" != "success" ||
-                "$COMPOSE_RESULT" != "success" ||
-                "$SMOKE_RESULT" != "success" ||
-                "$E2E_ADMIN_RESULT" != "success" ||
-                "$WEBSOCKET_D1_RESULT" != "success" ||
-                "$WEB_PERMANENT_EXCHANGE_RESULT" != "success" ||
-                "$SQL_LINT_RESULT" != "success" ||
-                "$CSS_RESULT" != "success" ||
-                "$BROWSER_ACCEPTANCE_RESULT" != "success" ||
-                "$BROWSER_ACCEPTANCE_IMAGE_RESULT" != "success" ||
-                "$SCHEMA_GATE_POSTGRES_RESULT" != "success" ||
-                "$DEPLOY_WORKFLOW_RESULT" != "success" ||
-                "$DEMO_WEB_ARTIFACT_RESULT" != "success" ]]; then
+                "$TEST_GO_RESULT" != "success" ||
+                "$CHECK_STICKER_LICENSE_RESULT" != "success" ||
+                "$TEST_PHOTO_WORKER_RESULT" != "success" ||
+                "$TEST_REAL_SERVER_FIXTURES_RESULT" != "success" ||
+                "$LINT_GO_RESULT" != "success" ||
+                "$CHECK_SQLC_DRIFT_RESULT" != "success" ||
+                "$BUILD_SERVER_IMAGE_RESULT" != "success" ||
+                "$TEST_COMPOSE_RESULT" != "success" ||
+                "$TEST_SMOKE_RESULT" != "success" ||
+                "$TEST_E2E_ADMIN_RESULT" != "success" ||
+                "$TEST_WEBSOCKET_D1_RESULT" != "success" ||
+                "$TEST_WEBSOCKET_PERMANENT_EXCHANGE_RESULT" != "success" ||
+                "$LINT_SQL_RESULT" != "success" ||
+                "$LINT_CSS_RESULT" != "success" ||
+                "$TEST_BROWSER_ACCEPTANCE_RESULT" != "success" ||
+                "$BUILD_BROWSER_ACCEPTANCE_IMAGE_RESULT" != "success" ||
+                "$TEST_MIGRATIONS_RESULT" != "success" ||
+                "$CHECK_DEPLOY_WORKFLOW_RESULT" != "success" ||
+                "$CHECK_DEMO_WEB_PIN_RESULT" != "success" ]]; then
             echo "::error::Required CI lanes did not pass"
             printf '%s\n' "${lane_results[@]}"
             exit 1
@@ -1442,32 +1449,33 @@ jobs:
           echo "All required CI lanes passed"
 
   publish-demo-image:
-    name: publish demo server image
-    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+    name: 'publish: demo-image'
+    if: ${{ always() && (needs.ops-prioritize-main.result == 'success' || (needs.ops-prioritize-main.result == 'skipped' && github.event_name == 'pull_request')) && success() && github.event_name == 'push' && github.ref == 'refs/heads/main' }}
     needs:
-      - browser-acceptance
-      - browser-acceptance-image
+      - ops-prioritize-main
+      - test-browser-acceptance
+      - build-browser-acceptance-image
       - ci
-      - ci-main
-      - compose
-      - css
-      - deploy-workflow
-      - demo-web-artifact
-      - docker
-      - sticker-bundle
-      - e2e-admin
-      - lint
+      - test-go
+      - test-compose
+      - lint-css
+      - check-deploy-workflow
+      - check-demo-web-pin
+      - build-server-image
+      - check-sticker-license
+      - test-e2e-admin
+      - lint-go
       - mirror-rustfs-qualification-images
-      - photothumb-runtime
-      - real-server-fixtures
+      - test-photo-worker
+      - test-real-server-fixtures
       - restore-readiness
       - rustfs-transition-qualification
-      - schema-gate-postgres
-      - smoke
-      - sql-lint
-      - sqlc
-      - websocket-d1
-      - websocket-permanent-exchange
+      - test-migrations
+      - test-smoke
+      - lint-sql
+      - check-sqlc-drift
+      - test-websocket-d1
+      - test-websocket-permanent-exchange
     runs-on: ubuntu-26.04
     timeout-minutes: 20
     permissions:
@@ -1532,9 +1540,10 @@ jobs:
   # No path filter and no `needs`: this is a seconds-long job, and a filtered
   # required check reports as skipped rather than passing, which stalls the
   # merge gate on every PR that does not touch internal/admin.
-  css:
+  lint-css:
+    name: 'lint: css'
     needs: ops-prioritize-main
-    if: ${{ always() && (needs.ops-prioritize-main.result == 'success' || (needs.ops-prioritize-main.result == 'skipped' && github.event_name == 'pull_request')) }}
+    if: ${{ (github.event_name == 'pull_request' && !cancelled() || github.event_name != 'pull_request' && always()) && (needs.ops-prioritize-main.result == 'success' || (needs.ops-prioritize-main.result == 'skipped' && github.event_name == 'pull_request')) }}
     runs-on: ubuntu-26.04
     timeout-minutes: 10
 
@@ -1570,9 +1579,10 @@ jobs:
   # is whatever tools/go.mod pins, because `make sqlc` builds the binary from
   # that module rather than installing one on the runner — a sqlc release
   # cannot turn the repo red on its own.
-  sqlc:
+  check-sqlc-drift:
+    name: 'check: sqlc-drift'
     needs: ops-prioritize-main
-    if: ${{ always() && (needs.ops-prioritize-main.result == 'success' || (needs.ops-prioritize-main.result == 'skipped' && github.event_name == 'pull_request')) }}
+    if: ${{ (github.event_name == 'pull_request' && !cancelled() || github.event_name != 'pull_request' && always()) && (needs.ops-prioritize-main.result == 'success' || (needs.ops-prioritize-main.result == 'skipped' && github.event_name == 'pull_request')) }}
     runs-on: ubuntu-26.04
     timeout-minutes: 10
 
@@ -1602,9 +1612,10 @@ jobs:
   # Everything the suite needs is started by Playwright's webServer:
   # test/e2e/adminserver builds its own server and Postgres from the pgtest
   # harness, so this check can run beside ci without shared services or files.
-  e2e-admin:
+  test-e2e-admin:
+    name: 'test: e2e-admin'
     needs: ops-prioritize-main
-    if: ${{ always() && (needs.ops-prioritize-main.result == 'success' || (needs.ops-prioritize-main.result == 'skipped' && github.event_name == 'pull_request')) }}
+    if: ${{ (github.event_name == 'pull_request' && !cancelled() || github.event_name != 'pull_request' && always()) && (needs.ops-prioritize-main.result == 'success' || (needs.ops-prioritize-main.result == 'skipped' && github.event_name == 'pull_request')) }}
     runs-on: ubuntu-26.04
     # The suite is a handful of specs against a local server; this only catches
     # a hang (a browser that never launches, a webServer that never binds). A
@@ -1996,11 +2007,12 @@ jobs:
   # Builds the image and boots it against a migrated database. Docker is not
   # available in the environments the Dockerfile is edited from, so this job is
   # the only place it is ever built — it is the gate that stops it rotting.
-  docker:
+  build-server-image:
+    name: 'build: server-image'
     needs:
       - ops-prioritize-main
-      - sticker-bundle
-    if: ${{ always() && (needs.ops-prioritize-main.result == 'success' || (needs.ops-prioritize-main.result == 'skipped' && github.event_name == 'pull_request')) && needs.sticker-bundle.result == 'success' }}
+      - check-sticker-license
+    if: ${{ (github.event_name == 'pull_request' && !cancelled() || github.event_name != 'pull_request' && always()) && (needs.ops-prioritize-main.result == 'success' || (needs.ops-prioritize-main.result == 'skipped' && github.event_name == 'pull_request')) && needs.check-sticker-license.result == 'success' }}
     runs-on: ubuntu-26.04
     # The build is the slow part at roughly a minute; this only catches a hang
     # (a stalled pull, a container that never logs) before it burns six hours.
@@ -2057,7 +2069,7 @@ jobs:
         with:
           driver: docker
 
-      # Same as photothumb-runtime: pull with retries so a transient mirror
+      # Same as test-photo-worker: pull with retries so a transient mirror
       # fetch error cannot fail the build, which still runs once.
       - name: Pull the base images
         timeout-minutes: 10
@@ -2102,6 +2114,16 @@ jobs:
           docker cp "$cid":/usr/share/teagram/sticker-bundle/. "$RUNNER_TEMP/sticker-bundle-image/"
           docker rm "$cid" > /dev/null
           diff -qr build/sticker-bundle "$RUNNER_TEMP/sticker-bundle-image"
+
+      - name: Assert media key rotation operator is in the final image
+        run: |
+          set -euo pipefail
+          container=$(docker create teagramd:ci)
+          trap 'docker rm "$container" >/dev/null' EXIT
+          operator_entry=$(docker export "$container" | tar --numeric-owner -tvf - usr/local/bin/blob-key-rotate)
+          printf '%s\n' "$operator_entry"
+          printf '%s\n' "$operator_entry" \
+            | awk '$1 == "-rwxr-xr-x" && $2 == "0/0" && $NF == "usr/local/bin/blob-key-rotate" { found = 1 } END { exit !found }'
 
       - name: Assert missing source revision stays empty
         uses: docker/build-push-action@v7.4.0
@@ -2209,19 +2231,20 @@ jobs:
   # available in the environments
   # docker-compose.yml is edited from, so this job is the only place it ever
   # runs — the gate that stops it rotting.
-  compose:
+  test-compose:
+    name: 'test: compose'
     needs:
       - ops-prioritize-main
       - mirror-rustfs-qualification-images
-      - sticker-bundle
-    if: ${{ always() && (needs.ops-prioritize-main.result == 'success' || (needs.ops-prioritize-main.result == 'skipped' && github.event_name == 'pull_request')) && needs.mirror-rustfs-qualification-images.result != 'failure' && needs.mirror-rustfs-qualification-images.result != 'cancelled' && needs.sticker-bundle.result == 'success' }}
+      - check-sticker-license
+    if: ${{ (github.event_name == 'pull_request' && !cancelled() || github.event_name != 'pull_request' && always()) && (needs.ops-prioritize-main.result == 'success' || (needs.ops-prioritize-main.result == 'skipped' && github.event_name == 'pull_request')) && needs.mirror-rustfs-qualification-images.result != 'failure' && needs.mirror-rustfs-qualification-images.result != 'cancelled' && needs.check-sticker-license.result == 'success' }}
     runs-on: ubuntu-26.04
     # The image build plus RustFS and media verification, which is the slow part
     # at roughly a minute; this only catches a hang before it
     # burns six hours.
     timeout-minutes: 30
 
-    # Same reason as the docker job: the cache backend is the Actions API, and a
+    # Same reason as the build-server-image job: the cache backend is the Actions API, and a
     # job-level block replaces the workflow-level contents: read entirely.
     permissions:
       contents: read
@@ -2264,7 +2287,7 @@ jobs:
       # loaded into the daemon under the tag the teagramd service names. `up`
       # below finds it present and skips the build — same image, same
       # assertions, just not rebuilt from scratch. The daemon's builder uses
-      # the base images pulled below, as in the docker job.
+      # the base images pulled below, as in the build-server-image job.
       - uses: docker/setup-buildx-action@v4.4.1
         with:
           driver: docker
@@ -2690,6 +2713,9 @@ jobs:
             and (.volumes.tgkey.name == "teagram_tgkey")
             and (.volumes.tgblobs.name == "teagram_tgblobs")
             and (.volumes.rustfsdata.name == "teagram_rustfsdata")
+            and (.volumes.blob_key_rotate_reports.name == "teagram_blob_key_rotate_reports")
+            and (.volumes.blob_key_rotate_reports.driver == "local")
+            and ((.volumes.blob_key_rotate_reports.driver_opts // {}) == {})
             and (.services.postgres.environment.POSTGRES_DB == "teagram")
             and (.services.teagramd.environment.TG_POSTGRES_DSN | endswith("/teagram?sslmode=disable"))
             and (any(.services.migrate.command[]; endswith("/teagram?sslmode=disable")))
@@ -2707,7 +2733,19 @@ jobs:
             and any(.services.teagramd.volumes[]; .type == "bind" and .target == "/run/teagramd/blob-mode" and .read_only == true)
             and any(.services.teagramd.volumes[]; .type == "bind" and .source == $media_key_dir and .target == "/run/teagramd/media-keys" and .read_only == true)
             and any(.services["blob-encrypt-migrate"].volumes[]; .type == "bind" and .target == "/run/teagramd/blob-mode" and (.read_only // false) == false)
-            and all(.services | to_entries[] | select((.key | startswith("teagramd")) | not) | select(.key != "blob-encrypt-migrate"); all((.value.volumes // [])[]; .target != "/run/teagramd/blob-mode"))
+            and (.services["blob-key-rotate"].profiles == ["migration"])
+            and (.services["blob-key-rotate"].entrypoint == ["/usr/local/bin/blob-key-rotate"])
+            and (.services["blob-key-rotate"].user == "0:0")
+            and (.services["blob-key-rotate"].read_only == true)
+            and (.services["blob-key-rotate"].depends_on["postgres"].condition == "service_healthy")
+            and (.services["blob-key-rotate"].depends_on["rustfs-init"].condition == "service_completed_successfully")
+            and any(.services["blob-key-rotate"].volumes[]; .type == "bind" and .target == "/run/teagramd/blob-mode" and .read_only == true)
+            and any(.services["blob-key-rotate"].volumes[]; .type == "volume" and .source == "blob_key_rotate_reports" and .target == "/run/teagramd/reports" and (.read_only // false) == false)
+            and all(.services["blob-key-rotate"].volumes[]; if (.read_only // false) then true else (.type == "volume" and .source == "blob_key_rotate_reports" and .target == "/run/teagramd/reports") end)
+            and any(.services["blob-key-rotate"].volumes[]; .type == "volume" and .target == "/var/lib/teagramd" and .read_only == true)
+            and any(.services["blob-key-rotate"].volumes[]; .type == "bind" and .source == $media_key_dir and .target == "/run/teagramd/media-keys" and .read_only == true)
+            and any(.services["blob-key-rotate"].secrets[]; .source == "teagramd_blob_secret_key" and .target == "teagramd-blob-secret-key")
+            and all(.services | to_entries[] | select((.key | startswith("teagramd")) | not) | select(.key != "blob-encrypt-migrate" and .key != "blob-key-rotate"); all((.value.volumes // [])[]; .target != "/run/teagramd/blob-mode"))
             and (.services["blob-migrate"].volumes[0].read_only == true)
             and ((.services["blob-migrate"].profiles | index("migration")) != null)
             and (.services["blob-restore"].command == ["--direction", "s3-to-local", "--destination", "/destination"])
@@ -3136,12 +3174,12 @@ jobs:
           [ -e .env ] || exit 0
           docker compose down -v
 
-  photothumb-runtime:
-    name: photo worker runtime (${{ matrix.arch }})
+  test-photo-worker:
+    name: 'test: photo-worker (${{ matrix.arch }})'
     needs:
       - ops-prioritize-main
-      - sticker-bundle
-    if: ${{ always() && (needs.ops-prioritize-main.result == 'success' || (needs.ops-prioritize-main.result == 'skipped' && github.event_name == 'pull_request')) && needs.sticker-bundle.result == 'success' }}
+      - check-sticker-license
+    if: ${{ (github.event_name == 'pull_request' && !cancelled() || github.event_name != 'pull_request' && always()) && (needs.ops-prioritize-main.result == 'success' || (needs.ops-prioritize-main.result == 'skipped' && github.event_name == 'pull_request')) && needs.check-sticker-license.result == 'success' }}
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 20
     permissions:
@@ -3289,9 +3327,10 @@ jobs:
   # Keep the core behavioral signal independent from the broader CI suite.
   # TestSmoke uses pgtest's disposable, per-test databases; the hosted runner
   # and its Postgres container are discarded with this job.
-  smoke:
+  test-smoke:
+    name: 'test: smoke'
     needs: ops-prioritize-main
-    if: ${{ always() && (needs.ops-prioritize-main.result == 'success' || (needs.ops-prioritize-main.result == 'skipped' && github.event_name == 'pull_request')) }}
+    if: ${{ (github.event_name == 'pull_request' && !cancelled() || github.event_name != 'pull_request' && always()) && (needs.ops-prioritize-main.result == 'success' || (needs.ops-prioritize-main.result == 'skipped' && github.event_name == 'pull_request')) }}
     runs-on: ubuntu-26.04
     timeout-minutes: 60
     permissions:
@@ -3432,7 +3471,7 @@ jobs:
   mirror-rustfs-qualification-images:
     name: Mirror RustFS qualification images
     needs: ops-prioritize-main
-    if: ${{ always() && (needs.ops-prioritize-main.result == 'success' || (needs.ops-prioritize-main.result == 'skipped' && github.event_name == 'pull_request')) && (github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository) }}
+    if: ${{ (github.event_name == 'pull_request' && !cancelled() || github.event_name != 'pull_request' && always()) && (needs.ops-prioritize-main.result == 'success' || (needs.ops-prioritize-main.result == 'skipped' && github.event_name == 'pull_request')) && (github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository) }}
     runs-on: ubuntu-26.04
     timeout-minutes: 10
     permissions:
@@ -3458,7 +3497,7 @@ jobs:
     needs:
       - ops-prioritize-main
       - mirror-rustfs-qualification-images
-    if: ${{ always() && (needs.ops-prioritize-main.result == 'success' || (needs.ops-prioritize-main.result == 'skipped' && github.event_name == 'pull_request')) && needs.mirror-rustfs-qualification-images.result != 'failure' && needs.mirror-rustfs-qualification-images.result != 'cancelled' }}
+    if: ${{ (github.event_name == 'pull_request' && !cancelled() || github.event_name != 'pull_request' && always()) && (needs.ops-prioritize-main.result == 'success' || (needs.ops-prioritize-main.result == 'skipped' && github.event_name == 'pull_request')) && needs.mirror-rustfs-qualification-images.result != 'failure' && needs.mirror-rustfs-qualification-images.result != 'cancelled' }}
     # The complete R69/R70 fixture matrix can exceed 45 minutes on slower hosted runners.
     timeout-minutes: 60
     permissions:
@@ -3500,44 +3539,41 @@ jobs:
           sudo env "PATH=$PATH" TMPDIR=/root bash deploy/teagramd/rollout-runner/test-isolated-restore-postgres.sh
           sudo env "PATH=$PATH" TMPDIR=/root bash deploy/teagramd/rollout-runner/test-stack-move-runner.sh
 
-  schema-gate-postgres:
-    name: PostgreSQL Atlas schema gate
+  test-migrations:
+    name: "test: migrations"
     needs: ops-prioritize-main
-    if: ${{ always() && (needs.ops-prioritize-main.result == 'success' || (needs.ops-prioritize-main.result == 'skipped' && github.event_name == 'pull_request')) }}
+    if: ${{ (github.event_name == 'pull_request' && !cancelled() || github.event_name != 'pull_request' && always()) && (needs.ops-prioritize-main.result == 'success' || (needs.ops-prioritize-main.result == 'skipped' && github.event_name == 'pull_request')) }}
     runs-on: ubuntu-26.04
-    timeout-minutes: 15
+    timeout-minutes: 20
     permissions:
       contents: read
     env:
-      COMPOSE_FILE: deploy/teagramd/rollout-runner/schema-gate-ci-compose.yml
-      POSTGRES_PASSWORD: ci-only-smoketest
+      MIGRATIONS_BASE_REF: ${{ github.event_name == 'pull_request' && format('origin/{0}', github.event.pull_request.base.ref) || github.event.before }}
+      POSTGRES_IMAGE: mirror.gcr.io/library/postgres:18-alpine@sha256:d8703cd7fba306b9fec9268ecedfa8a966846c053036a60e3635791957eb2f66
+      ATLAS_APPLY_IMAGE: mirror.gcr.io/arigaio/atlas:1.2.0-alpine
 
     steps:
       - uses: actions/checkout@v7.0.1
-
-      - uses: actions/setup-python@v6.0.0
         with:
-          python-version: "3.12.15"
+          fetch-depth: 0
+          persist-credentials: false
 
-      - uses: ariga/setup-atlas@v0.3
-        with:
-          version: v1.2.0
+      - name: Pull PostgreSQL and Atlas images
+        run: >-
+          bash .github/scripts/pull-base-images.sh
+          --image "$POSTGRES_IMAGE"
+          --image "$ATLAS_APPLY_IMAGE"
 
-      - name: Check schema gate fixture decisions
-        run: python3 -B deploy/teagramd/rollout-runner/test-schema-result-gate.py
+      - name: Install pinned Atlas Community CLI
+        env:
+          ATLAS_LINT_BIN: ${{ runner.temp }}/atlas-community
+        run: |
+          curl -fsSL https://atlasgo.sh | ATLAS_VERSION=v1.2.0 sh -s -- --community --no-install --output "$ATLAS_LINT_BIN"
+          chmod 755 "$ATLAS_LINT_BIN"
 
-      - name: service-start
-        run: python3 -B .github/scripts/schema-phase-runner.py service-start
-
-      - name: migrate-apply
-        run: python3 -B .github/scripts/schema-phase-runner.py migrate-apply
-
-      - name: pre-check
-        run: python3 -B .github/scripts/schema-phase-runner.py pre-check
-
-      - name: post-check
-        run: python3 -B .github/scripts/schema-phase-runner.py post-check
-
-      - name: Tear down schema gate database
-        if: always()
-        run: docker compose down -v
+      - name: Test migration lint and install paths
+        env:
+          ATLAS_LINT_BIN: ${{ runner.temp }}/atlas-community
+        run: |
+          python3 -B .github/scripts/test_migration_lock_lint.py
+          bash .github/scripts/test-migrations.sh

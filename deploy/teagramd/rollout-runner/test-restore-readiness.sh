@@ -344,7 +344,7 @@ run_drill() {
 
 run_sigkill_recovery_drill() {
   local -a drill_args=("$@")
-  local attempt recovered remaining_runs sigkill_status original_keep_prepared
+  local attempt recovered remaining_runs sigkill_status original_keep_prepared sigkill_marker
   preflight_stage="run SIGKILL recovery drill"
   original_keep_prepared=$keep_prepared
   keep_prepared=1
@@ -353,13 +353,20 @@ run_sigkill_recovery_drill() {
   fi
   run_drill "${drill_args[@]}" >"$sigkill_output" 2>/dev/null &
   recovery_pid=$!
-  sigkill_status=0
   if wait "$recovery_pid"; then
-    emit_preflight_failure
+    sigkill_status=0
   else
     sigkill_status=$?
   fi
-  if [[ $sigkill_status -ne 137 ]] || [[ $(<"$sigkill_output") != "SIGKILL_INJECTED" ]]; then
+  sigkill_marker=missing
+  if [[ $(<"$sigkill_output") == "SIGKILL_INJECTED" ]]; then
+    sigkill_marker=present
+  elif [[ -s $sigkill_output ]]; then
+    sigkill_marker=other
+  fi
+  if [[ $sigkill_status -ne 137 ]] || [[ $sigkill_marker != present ]]; then
+    printf 'restore readiness SIGKILL drill returned status=%s marker=%s\n' \
+      "$sigkill_status" "$sigkill_marker" >&2
     preserve_prepared_on_unverified_cleanup "$(<"$sigkill_output")"
     emit_preflight_failure
   fi

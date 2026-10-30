@@ -8,6 +8,7 @@ permissions: {}
 
 jobs:
   pr-title:
+    name: pr-title
     runs-on: ubuntu-26.04
     steps:
       - name: Reject issue identifiers in the pull request title

@@ -33,7 +33,8 @@ permissions:
   contents: read
 
 jobs:
-  reconnect-diagnostic:
+  test-reconnect-diagnostic:
+    name: 'test: reconnect-diagnostic'
     runs-on: ubuntu-26.04
     timeout-minutes: 25
 

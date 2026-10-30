@@ -35,6 +35,9 @@ TARGET_VOLUMES = {
     "tgblobs": "teagram_tgblobs",
     "rustfsdata": "teagram_rustfsdata",
 }
+# This journal is Docker-managed metadata, not a data volume to migrate.
+TARGET_REPORT_VOLUME = "blob_key_rotate_reports"
+TARGET_REPORT_VOLUME_NAME = "teagram_blob_key_rotate_reports"
 SOURCE_SERVER = "telegramd"
 TARGET_SERVER = "teagramd"
 TARGET_IMAGE_NAME = "teagramd:local"
@@ -962,8 +965,27 @@ def inspect_target_contract(
 ) -> None:
     if config.get("name") != TARGET_PROJECT:
         raise MoveError("target Compose project must be teagram")
-    if named_volumes(config) != TARGET_VOLUMES:
+    target_volumes = named_volumes(config)
+    report_volume_name = target_volumes.pop(TARGET_REPORT_VOLUME, None)
+    if (
+        target_volumes != TARGET_VOLUMES
+        or report_volume_name not in (None, TARGET_REPORT_VOLUME_NAME)
+    ):
         raise MoveError("target Compose named volumes do not match the reviewed teagram names")
+    if report_volume_name is not None:
+        declared_volumes = config.get("volumes")
+        report_volume = (
+            declared_volumes.get(TARGET_REPORT_VOLUME)
+            if isinstance(declared_volumes, dict)
+            else None
+        )
+        if (
+            not isinstance(report_volume, dict)
+            or report_volume.get("driver") != "local"
+            or report_volume.get("external") not in (None, False)
+            or report_volume.get("driver_opts") not in (None, {})
+        ):
+            raise MoveError("target rotation reports volume must use Docker-managed local storage")
     service = server_service(config, TARGET_SERVER)
     if service.get("image") != TARGET_IMAGE_NAME:
         raise MoveError("target server image must be teagramd:local")

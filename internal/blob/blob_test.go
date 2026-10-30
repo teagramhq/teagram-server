@@ -3,12 +3,14 @@ package blob_test
 import (
 	"context"
 	"errors"
+	"io"
 	"math"
 	"os"
 	"path"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/teagramhq/teagram-server/internal/blob"
 )
@@ -118,6 +120,107 @@ func TestPutReadAt(t *testing.T) {
 			t.Fatalf("temp files left behind: %v", leftover)
 		}
 	})
+}
+
+func TestPutRecoversTemporaryFileLeftByInterruptedWrite(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	l, dir := newLocal(t)
+	key := blob.Key(4242)
+	oldPayload := "old object remains available"
+	if _, err := l.Put(ctx, key, strings.NewReader(oldPayload)); err != nil {
+		t.Fatalf("write old object: %v", err)
+	}
+
+	tempPath := filepath.Join(dir, filepath.FromSlash(key+blob.TempSuffix))
+	if err := os.WriteFile(tempPath, []byte("partial replacement"), 0o600); err != nil {
+		t.Fatalf("create leftover temporary file: %v", err)
+	}
+	oldBytes, err := l.ReadAt(ctx, key, 0, int64(len(oldPayload)))
+	if err != nil || string(oldBytes) != oldPayload {
+		t.Fatalf("read old object while stale temp exists = %q, %v", oldBytes, err)
+	}
+
+	newPayload := "complete replacement after restart"
+	if _, err := l.Put(ctx, key, strings.NewReader(newPayload)); err != nil {
+		t.Fatalf("resume Put over leftover temporary file: %v", err)
+	}
+	got, err := l.ReadAt(ctx, key, 0, int64(len(newPayload)))
+	if err != nil || string(got) != newPayload {
+		t.Fatalf("read replacement = %q, %v; want %q", got, err, newPayload)
+	}
+	if _, err := os.Stat(tempPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("temporary path after resumed Put: stat error %v, want not-exist", err)
+	}
+}
+
+func TestPutDoesNotReplaceTemporaryFileHeldByActiveWriter(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	l, _ := newLocal(t)
+	key := blob.Key(4242)
+	started := make(chan struct{})
+	resume := make(chan struct{})
+	reader := &pausedReader{started: started, resume: resume}
+	firstDone := make(chan error, 1)
+	go func() {
+		_, err := l.Put(ctx, key, reader)
+		firstDone <- err
+	}()
+
+	released := false
+	releaseFirst := func() {
+		if !released {
+			close(resume)
+			released = true
+		}
+	}
+	defer releaseFirst()
+	select {
+	case <-started:
+	case <-time.After(5 * time.Second):
+		t.Fatal("first Put did not enter its temporary write")
+	}
+
+	secondDone := make(chan error, 1)
+	go func() {
+		_, err := l.Put(ctx, key, strings.NewReader("second writer"))
+		secondDone <- err
+	}()
+	select {
+	case err := <-secondDone:
+		if err == nil {
+			t.Fatal("second Put replaced the temporary file held by the first writer")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("second Put blocked on the active temporary file")
+	}
+
+	releaseFirst()
+	if err := <-firstDone; err != nil {
+		t.Fatalf("finish first Put: %v", err)
+	}
+	got, err := l.ReadAt(ctx, key, 0, int64(len("first writer")))
+	if err != nil || string(got) != "first writer" {
+		t.Fatalf("read after concurrent Put = %q, %v; want first writer intact", got, err)
+	}
+}
+
+type pausedReader struct {
+	started chan<- struct{}
+	resume  <-chan struct{}
+	sent    bool
+}
+
+func (r *pausedReader) Read(p []byte) (int, error) {
+	if !r.sent {
+		r.sent = true
+		n := copy(p, "first writer")
+		close(r.started)
+		return n, nil
+	}
+	<-r.resume
+	return 0, io.EOF
 }
 
 func TestReadAtHostileWindow(t *testing.T) {

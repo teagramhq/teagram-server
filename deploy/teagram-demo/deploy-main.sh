@@ -272,6 +272,7 @@ demo_backup_database() {
 }
 
 demo_require_root
+demo_prepare_edge_config_permissions
 [[ "$SHA" =~ ^[0-9a-f]{40}$ ]] || demo_fail 'DEPLOY_SHA must be a full 40-hex commit SHA'
 [[ "$IMAGE_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]] || demo_fail 'DEPLOY_IMAGE_DIGEST must be a trusted sha256 digest'
 [[ "$PREV_SHA" =~ ^[0-9a-f]{40}$ ]] || demo_fail 'PREVIOUS_SHA must be a full 40-hex commit SHA'

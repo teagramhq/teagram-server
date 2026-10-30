@@ -133,6 +133,18 @@ jq -e \
   and .volumes.tgblobs.driver_opts.device == "/srv/teagram-demo-blobs/data"
 ' "$TMP_DIR/target.json" >/dev/null
 
+EDGE_CONFIG_FIXTURE="$TMP_DIR/restrictive-checkout/deploy/teagram-demo"
+(
+  umask 077
+  mkdir -p "$EDGE_CONFIG_FIXTURE/nginx-config"
+  printf '%s\n' 'server {}' > "$EDGE_CONFIG_FIXTURE/nginx-config/nginx.conf"
+)
+[[ "$(stat -c '%a' "$EDGE_CONFIG_FIXTURE/nginx-config")" == 700 ]]
+[[ "$(stat -c '%a' "$EDGE_CONFIG_FIXTURE/nginx-config/nginx.conf")" == 600 ]]
+DEMO_SCRIPT_DIR="$EDGE_CONFIG_FIXTURE" demo_prepare_edge_config_permissions
+[[ "$(stat -c '%a' "$EDGE_CONFIG_FIXTURE/nginx-config")" == 755 ]]
+[[ "$(stat -c '%a' "$EDGE_CONFIG_FIXTURE/nginx-config/nginx.conf")" == 644 ]]
+
 (
   demo_compose() {
     cat "$TMP_DIR/target.json"

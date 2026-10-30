@@ -21,7 +21,7 @@ To run a server on your own Linux host, follow the
 
 [![CI](https://github.com/teagramhq/teagram-server/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/teagramhq/teagram-server/actions/workflows/ci.yml)
 
-Required checks on `main`: `ci`, `docker`, `compose`, `sqlc`, `pr-title`, `smoke`, `e2e-admin`, and `lint`.
+Required checks on `main`: `ci`, `pr-title`, and `real-client-browser-flow`.
 
 ## Features
 
