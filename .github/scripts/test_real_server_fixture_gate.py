@@ -252,12 +252,12 @@ class RealServerFixtureGateTests(unittest.TestCase):
         self.assertRegex(body, r"(?m)^    if: \$\{\{ always\(\) \}\}$")
         self.assertNotIn("ops-prioritize-main", body)
 
-        # The publisher is main-push-only. The demo pin is advisory and must
-        # not gate the production CI aggregate. MAIN-2918 is deleting the
-        # other three lanes.
+        # Publishers depend on the aggregate and cannot be its dependencies.
+        # The demo pin is advisory and must not gate the production aggregate.
         excluded_jobs = {
             "ci",
             "publish-demo-image",
+            "publish-k8s-images",
             "check-demo-web-pin",
             "mirror-rustfs-qualification-images",
             "restore-readiness",
