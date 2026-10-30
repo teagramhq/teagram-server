@@ -225,6 +225,10 @@ case "$*" in
     ;;
   *config_files*teagram-teagramd-1*) echo "${FIXTURE_COMPOSE_FILES:-$DEPLOY_DIR/.rollout-compose.local-abc.yml,$DEPLOY_DIR/docker-compose.override.yml}" ;;
   *config_files*) echo "unexpected live container name: $*" >&2; exit 98 ;;
+  *'compose up -d --no-deps --force-recreate --wait --wait-timeout 120 public-haproxy'*)
+    printf 'reviewed\n' > "${FIXTURE_HAPROXY_LOADED_CONFIG_FILE:?}"
+    printf 'public-haproxy-recreate\n' >> "${DEPLOY_ACTION_LOG:?}"
+    ;;
   *'{{.Image}}'*)
     if [[ -f "${DEPLOY_IMAGE_ID_FILE:?}" ]]; then
       cat "$DEPLOY_IMAGE_ID_FILE"
@@ -321,9 +325,11 @@ failures=0
 export LINK_EDGE_DEPLOY_LOG="$tmp/link-edge-deploys"
 export DEPLOY_ACTION_LOG="$tmp/deploy-actions"
 export DEPLOY_IMAGE_ID_FILE="$tmp/root/current-image-id"
+export FIXTURE_HAPROXY_LOADED_CONFIG_FILE="$tmp/haproxy-loaded-config"
 export FIXTURE_PUBLIC_COMPOSE_JSON="$public_compose_fixture"
 : > "$LINK_EDGE_DEPLOY_LOG"
 : > "$DEPLOY_ACTION_LOG"
+printf 'reviewed\n' > "$FIXTURE_HAPROXY_LOADED_CONFIG_FILE"
 # expect <exit code> <last line> [VAR=value...]
 expect() {
   local want_rc="$1" want_last="$2" want_contains='' out rc=0
@@ -367,9 +373,14 @@ fi
 printf 'sha256:already-deployed\n' > "$DEPLOY_IMAGE_ID_FILE"
 echo "source_sha=$second image_id=sha256:already-deployed built_at=fixture" > "$tmp/root/main1238-fixture.build/built-image.identity"
 : > "$DEPLOY_ACTION_LOG"
+printf 'permissive\n' > "$FIXTURE_HAPROXY_LOADED_CONFIG_FILE"
 expect 0 "already at $second with runner provenance" DEPLOY_SHA="$second" \
   FIXTURE_DEPLOY_SUCCESS=1 FIXTURE_POST_IMAGE_ID=sha256:already-deployed \
   FIXTURE_SMOKE_IMAGE_ID=sha256:already-deployed
+if [[ "$(cat "$FIXTURE_HAPROXY_LOADED_CONFIG_FILE")" != reviewed ]]; then
+  echo 'FAIL same-SHA fast path skipped with stale loaded public HAProxy config' >&2
+  failures=$((failures + 1))
+fi
 if ! cmp -s "$tmp/expected-initial-env" "$tmp/live/.env" || [[ "$(stat -c '%a' "$tmp/live/.env")" != 640 ]]; then
   echo 'FAIL deployment changed the base .env while enabling public replicas' >&2
   failures=$((failures + 1))
@@ -378,8 +389,8 @@ if find "$tmp/root" -maxdepth 1 -type f -name "teagramd-env-before-${second:0:7}
   echo 'FAIL deployment created an unnecessary base .env backup for public replicas' >&2
   failures=$((failures + 1))
 fi
-if [[ "$(cat "$DEPLOY_ACTION_LOG")" != $'link-edge\nmtproto-smoke sha256:already-deployed' ]]; then
-  echo 'FAIL an already deployed server SHA did not run the host-side smoke after the link edge' >&2
+if [[ "$(cat "$DEPLOY_ACTION_LOG")" != $'public-haproxy-recreate\nlink-edge\nmtproto-smoke sha256:already-deployed' ]]; then
+  echo 'FAIL an already deployed server SHA did not recreate HAProxy before the link edge and host-side smoke' >&2
   failures=$((failures + 1))
 fi
 expect 99 'unexpected docker call: compose exec -T postgres pg_dump -U postgres teagram' \
@@ -435,7 +446,7 @@ fi
 : > "$DEPLOY_ACTION_LOG"
 expect 91 'fixture MTProto smoke failure' FIXTURE_SMOKE_SUCCESS=0 DEPLOY_SHA="$second" \
   FIXTURE_SMOKE_IMAGE_ID=sha256:already-deployed
-if [[ "$(cat "$DEPLOY_ACTION_LOG")" != $'link-edge\nmtproto-smoke sha256:already-deployed' ]]; then
+if [[ "$(cat "$DEPLOY_ACTION_LOG")" != $'public-haproxy-recreate\nlink-edge\nmtproto-smoke sha256:already-deployed' ]]; then
   echo 'FAIL a failed host-side smoke did not follow the link-edge update' >&2
   failures=$((failures + 1))
 fi

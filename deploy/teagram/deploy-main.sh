@@ -462,6 +462,16 @@ run_mtproto_smoke() {
 IMG=$(docker inspect --format '{{.Image}}' $C)
 if [ "$PREV" = "$SHA" ] && public_route_topology_is_exact && public_base_listener_budget_is_single && public_route_services_running && \
    grep -qs "source_sha=$SHA image_id=$IMG " "$R"/main1238-*.build/built-image.identity; then
+  # The mounted bytes do not prove the config HAProxy loaded at startup. Recreate
+  # it from the validated mount before accepting the same-SHA shortcut.
+  if ! docker_compose up -d --no-deps --force-recreate --wait --wait-timeout 120 public-haproxy </dev/null; then
+    echo 'could not recreate public HAProxy from the reviewed config; refusing same-SHA shortcut' >&2
+    exit 1
+  fi
+  if ! public_route_services_running; then
+    echo 'public HAProxy failed post-recreate validation; refusing same-SHA shortcut' >&2
+    exit 1
+  fi
   umask 077
   install_teagram_logs_command "$SHA"
   bash "$LIVE_CHECKOUT/deploy/link-edge/deploy-main.sh" "$SHA"
