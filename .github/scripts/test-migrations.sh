@@ -12,8 +12,10 @@ readonly network="migration-ci-${suffix}"
 readonly postgres_container="migration-ci-postgres-${suffix}"
 readonly temp_dir="$(mktemp -d "$repo_root/.migration-ci.XXXXXX")"
 readonly baseline_dir="$temp_dir/base"
+readonly lint_repo="$temp_dir/lint-repo"
 
 cleanup() {
+  git -C "$repo_root" worktree remove --force "$lint_repo" >/dev/null 2>&1 || true
   docker rm --force "$postgres_container" >/dev/null 2>&1 || true
   docker network rm "$network" >/dev/null 2>&1 || true
   rm -rf -- "$temp_dir"
@@ -21,6 +23,8 @@ cleanup() {
 trap cleanup EXIT
 
 chmod 755 "$temp_dir"
+python3 -B "$repo_root/.github/scripts/test_prepare_atlas_lint_history.py"
+
 docker network create "$network" >/dev/null
 docker run --detach \
   --name "$postgres_container" \
@@ -68,11 +72,23 @@ mapfile -t changed_sql_migrations < <(
     | awk '/\.sql$/ { print }'
 )
 if [ "${#changed_sql_migrations[@]}" -gt 0 ]; then
+  # Atlas replays the lint baseline statement-by-statement. Use a disposable
+  # worktree to preserve transaction boundaries for unchanged default-mode
+  # migrations that contain top-level LOCK TABLE statements.
+  git -C "$repo_root" worktree add --detach "$lint_repo" HEAD >/dev/null
+  prepare_args=()
+  for migration in "${changed_sql_migrations[@]}"; do
+    prepare_args+=(--changed-file "$migration")
+  done
+  python3 -B "$repo_root/.github/scripts/prepare_atlas_lint_history.py" \
+    --migrations-dir "$lint_repo/migrations" \
+    "${prepare_args[@]}"
+  "$atlas_lint_binary" migrate hash --dir "file://$lint_repo/migrations" >/dev/null
   "$atlas_lint_binary" migrate lint \
-    --dir "file://$repo_root/migrations" \
+    --dir "file://$lint_repo/migrations" \
     --dev-url "$lint_dsn" \
     --git-base "$base_ref" \
-    --git-dir "$repo_root"
+    --git-dir "$lint_repo"
 else
   printf '%s\n' 'Atlas migration lint skipped: no changed SQL migrations.'
 fi
