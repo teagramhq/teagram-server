@@ -33,11 +33,23 @@ LEFT JOIN usernames un ON un.owner_type = 'user' AND un.owner_id = u.id
 WHERE u.id = $1;
 
 -- name: UsersByID :many
+-- Drive lookups from the selected ids. A large ANY array can make PostgreSQL
+-- scan the users table to find a subset that already came from owner-scoped
+-- edges; the lateral primary-key lookup keeps work bounded by that subset.
 SELECT u.id, u.phone, u.first_name, u.last_name, u.created_at, u.is_online, u.last_seen_at,
        un.handle AS username, u.kind
-FROM users u
-LEFT JOIN usernames un ON un.owner_type = 'user' AND un.owner_id = u.id
-WHERE u.id = ANY(sqlc.arg(ids)::bigint[]);
+FROM (
+    SELECT DISTINCT id
+    FROM unnest(sqlc.arg(ids)::bigint[]) AS requested(id)
+) AS selected
+CROSS JOIN LATERAL (
+    SELECT users.id, users.phone, users.first_name, users.last_name, users.created_at,
+           users.is_online, users.last_seen_at, users.kind
+    FROM users
+    WHERE users.id = selected.id
+    LIMIT 1
+) AS u
+LEFT JOIN usernames un ON un.owner_type = 'user' AND un.owner_id = u.id;
 
 -- name: EntitledUserIDs :many
 -- Returns the subset of ids the viewer is entitled to see live. An id is
