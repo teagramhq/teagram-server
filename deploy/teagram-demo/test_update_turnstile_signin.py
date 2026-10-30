@@ -94,32 +94,34 @@ class UpdateTurnstileSigninTests(unittest.TestCase):
         self.assertEqual(backup.read_bytes(), self.environment)
         self.assertEqual(backup.stat().st_mode & 0o777, 0o600)
 
-    def test_first_use_fsyncs_backup_parent_before_writing_snapshot(self) -> None:
+    def test_failed_first_use_sync_is_retried_before_snapshot(self) -> None:
         backup_dir = self.root / "first-use-backups"
         backup = backup_dir / "env.before-turnstile-first-use"
         parent_metadata = self.root.stat()
         real_fsync = os.fsync
         real_link = os.link
-        parent_synced = False
+        parent_fsyncs = 0
 
-        def record_parent_fsync(descriptor: int) -> None:
-            nonlocal parent_synced
+        def fail_first_parent_fsync(descriptor: int) -> None:
+            nonlocal parent_fsyncs
             metadata = os.fstat(descriptor)
             if (
                 stat.S_ISDIR(metadata.st_mode)
                 and (metadata.st_dev, metadata.st_ino)
                 == (parent_metadata.st_dev, parent_metadata.st_ino)
             ):
-                parent_synced = True
+                parent_fsyncs += 1
+                if parent_fsyncs == 1:
+                    raise OSError("injected backup-parent directory fsync failure")
             real_fsync(descriptor)
 
-        def require_parent_sync_before_link(*args: object, **kwargs: object) -> None:
-            self.assertTrue(parent_synced, "backup parent was not fsynced before snapshot publication")
+        def require_retry_sync_before_link(*args: object, **kwargs: object) -> None:
+            self.assertEqual(parent_fsyncs, 2, "retry did not fsync backup parent before snapshot publication")
             real_link(*args, **kwargs)
 
         with (
-            mock.patch.object(update_turnstile_signin.os, "fsync", side_effect=record_parent_fsync),
-            mock.patch.object(update_turnstile_signin.os, "link", side_effect=require_parent_sync_before_link),
+            mock.patch.object(update_turnstile_signin.os, "fsync", side_effect=fail_first_parent_fsync),
+            mock.patch.object(update_turnstile_signin.os, "link", side_effect=require_retry_sync_before_link),
             mock.patch.dict(
                 os.environ,
                 {
@@ -129,6 +131,19 @@ class UpdateTurnstileSigninTests(unittest.TestCase):
                 clear=True,
             ),
         ):
+            with self.assertRaises(SystemExit):
+                update_turnstile_signin.update_env_file(
+                    self.env_file,
+                    backup_dir,
+                    "true",
+                    backup,
+                )
+
+            self.assertEqual(parent_fsyncs, 1)
+            self.assertTrue(backup_dir.is_dir())
+            self.assertEqual(list(backup_dir.iterdir()), [])
+            self.assertEqual(self.env_file.read_bytes(), self.environment)
+
             result = update_turnstile_signin.update_env_file(
                 self.env_file,
                 backup_dir,
@@ -137,6 +152,7 @@ class UpdateTurnstileSigninTests(unittest.TestCase):
             )
 
         self.assertEqual(result["backup"], str(backup))
+        self.assertEqual(parent_fsyncs, 3)
         self.assertTrue(backup_dir.is_dir())
         self.assertEqual(backup.read_bytes(), self.environment)
         self.assertEqual(self.env_file.read_bytes(), self.environment + f"{ENV_NAME}=true\n".encode())
@@ -243,20 +259,22 @@ update_turnstile_signin.update_env_file(
         real_fsync = os.fsync
         env_directory = self.env_file.parent.stat()
         failed = False
+        parent_fsyncs = 0
         updated = self.environment + f"{ENV_NAME}=true\n".encode()
 
         def fail_directory_fsync(descriptor: int) -> None:
-            nonlocal failed
+            nonlocal failed, parent_fsyncs
             directory_metadata = os.fstat(descriptor)
             if (
                 stat.S_ISDIR(directory_metadata.st_mode)
                 and (directory_metadata.st_dev, directory_metadata.st_ino)
                 == (env_directory.st_dev, env_directory.st_ino)
-                and not failed
             ):
-                failed = True
-                self.assertEqual(self.env_file.read_bytes(), updated)
-                raise OSError("injected parent directory fsync failure")
+                parent_fsyncs += 1
+                if parent_fsyncs == 2:
+                    failed = True
+                    self.assertEqual(self.env_file.read_bytes(), updated)
+                    raise OSError("injected parent directory fsync failure")
             real_fsync(descriptor)
 
         with mock.patch.object(update_turnstile_signin.os, "fsync", side_effect=fail_directory_fsync):
@@ -268,6 +286,7 @@ update_turnstile_signin.update_env_file(
                 )
 
         self.assertTrue(failed)
+        self.assertEqual(parent_fsyncs, 3)
         self.assertEqual(self.env_file.read_bytes(), self.environment)
 
     def test_missing_flag_defaults_false_without_mutation(self) -> None:

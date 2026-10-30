@@ -114,10 +114,10 @@ def backup_file(
             directory.mkdir(mode=0o700)
         except OSError:
             fail("backup-directory-create")
-        try:
-            fsync_directory(directory.parent)
-        except OSError:
-            fail("backup-directory-sync")
+    try:
+        fsync_directory(directory.parent)
+    except OSError:
+        fail("backup-directory-sync")
     require_directory(directory, 0o700)
     if backup_path is not None and backup_path.parent != directory:
         fail("environment-backup-outside-directory")
