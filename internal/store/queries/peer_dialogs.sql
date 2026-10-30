@@ -144,6 +144,9 @@ SELECT ((
 -- BasicUnreadCountForOwner is used by getDifference, which must preserve
 -- ordinary dialog unread state without depending on channel summary readiness.
 -- name: BasicUnreadCountForOwner :one
-SELECT COALESCE(SUM(dialog.unread_count), 0)::bigint AS unread_count
-FROM dialogs AS dialog
-WHERE dialog.owner_id = sqlc.arg(owner_id)::bigint;
+SELECT COALESCE((
+    SELECT counts.dialog_unread_total
+    FROM owner_dialog_counts AS counts
+    WHERE counts.owner_id = sqlc.arg(owner_id)::bigint
+      AND counts.dialog_unread_initialized
+), 0)::bigint AS unread_count;

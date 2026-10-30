@@ -329,6 +329,107 @@ func TestMaintainedDialogCount(t *testing.T) {
 	assertCount(0)
 }
 
+func TestMaintainedDialogUnreadTotal(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	dsn := pgtest.DSN(t)
+	s := openStore(t, dsn)
+	pool, err := pgxpool.New(ctx, dsn)
+	if err != nil {
+		t.Fatalf("open test pool: %v", err)
+	}
+	t.Cleanup(pool.Close)
+
+	owner := mustUser(t, s, "+15551263995")
+	assertUnread := func(want int) {
+		t.Helper()
+		state, err := s.StateWithoutChannelUnread(ctx, owner.ID)
+		if err != nil {
+			t.Fatalf("read update state: %v", err)
+		}
+		if state.UnreadCount != want {
+			t.Fatalf("state unread count = %d, want %d", state.UnreadCount, want)
+		}
+
+		var maintained int64
+		if err := pool.QueryRow(ctx, `
+			SELECT dialog_unread_total
+			FROM owner_dialog_counts
+			WHERE owner_id = $1 AND dialog_unread_initialized
+		`, owner.ID).Scan(&maintained); err != nil {
+			t.Fatalf("read maintained dialog unread total: %v", err)
+		}
+		if maintained != int64(want) {
+			t.Fatalf("maintained dialog unread total = %d, want %d", maintained, want)
+		}
+	}
+
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO dialogs (owner_id, peer_type, peer_id, top_message, unread_count)
+		VALUES ($1, 1, 810001, 0, 4), ($1, 2, 810002, 0, 3)
+	`, owner.ID); err != nil {
+		t.Fatalf("insert unread dialogs: %v", err)
+	}
+	assertUnread(7)
+
+	if _, err := pool.Exec(ctx, `
+		UPDATE dialogs SET unread_count = 2
+		WHERE owner_id = $1 AND peer_type = 1 AND peer_id = 810001
+	`, owner.ID); err != nil {
+		t.Fatalf("change dialog unread count: %v", err)
+	}
+	assertUnread(5)
+
+	if _, err := pool.Exec(ctx, `
+		DELETE FROM dialogs
+		WHERE owner_id = $1 AND peer_type = 2 AND peer_id = 810002
+	`, owner.ID); err != nil {
+		t.Fatalf("delete unread dialog: %v", err)
+	}
+	assertUnread(2)
+
+	if _, err := pool.Exec(ctx, `
+		UPDATE owner_dialog_counts
+		SET dialog_unread_total = 0, dialog_unread_initialized = FALSE
+		WHERE owner_id = $1
+	`, owner.ID); err != nil {
+		t.Fatalf("mark unread total uninitialized: %v", err)
+	}
+	if _, err := pool.Exec(ctx, `
+		UPDATE dialogs SET unread_count = 3
+		WHERE owner_id = $1 AND peer_type = 1 AND peer_id = 810001
+	`, owner.ID); err != nil {
+		t.Fatalf("update dialog while unread total is uninitialized: %v", err)
+	}
+	assertUnread(3)
+
+	const concurrentCreates = 32
+	start := make(chan struct{})
+	errs := make(chan error, concurrentCreates)
+	var wg sync.WaitGroup
+	for i := range concurrentCreates {
+		wg.Add(1)
+		go func(peerID int64) {
+			defer wg.Done()
+			<-start
+			_, err := pool.Exec(ctx, `
+				INSERT INTO dialogs (owner_id, peer_type, peer_id, top_message, unread_count)
+				VALUES ($1, 1, $2, 0, 1)
+			`, owner.ID, peerID)
+			errs <- err
+		}(int64(820001 + i))
+	}
+	close(start)
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			t.Fatalf("concurrent unread dialog create: %v", err)
+		}
+	}
+	assertUnread(concurrentCreates + 3)
+}
+
 func TestMaintainedDialogCountBatchWritesDuringInitialization(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()

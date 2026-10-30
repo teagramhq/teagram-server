@@ -12,9 +12,12 @@ import (
 )
 
 const basicUnreadCountForOwner = `-- name: BasicUnreadCountForOwner :one
-SELECT COALESCE(SUM(dialog.unread_count), 0)::bigint AS unread_count
-FROM dialogs AS dialog
-WHERE dialog.owner_id = $1::bigint
+SELECT COALESCE((
+    SELECT counts.dialog_unread_total
+    FROM owner_dialog_counts AS counts
+    WHERE counts.owner_id = $1::bigint
+      AND counts.dialog_unread_initialized
+), 0)::bigint AS unread_count
 `
 
 // BasicUnreadCountForOwner is used by getDifference, which must preserve
