@@ -243,7 +243,7 @@ func TestEvaluateWaivesKnownTimingChecksOnlyForNamedScenario(t *testing.T) {
 	}
 }
 
-func TestEvaluateReportsPassingTimingWaiverAsNote(t *testing.T) {
+func TestEvaluateMarksPassingTimingWaiverStale(t *testing.T) {
 	name := "updates.getDifference 30 days offline"
 	waiver := perfreport.Waiver{Scenario: name, Check: perfreport.CheckTiming, Issue: "MAIN-2580"}
 	head := rounds(pair(name, perfreport.Read,
@@ -252,14 +252,11 @@ func TestEvaluateReportsPassingTimingWaiverAsNote(t *testing.T) {
 	if len(v.Failures)+len(v.TimingFailures)+len(v.Reported) != 0 {
 		t.Fatalf("passing timing waiver produced failures: %s%s%s", reasons(v.Failures), reasons(v.TimingFailures), reasons(v.Reported))
 	}
-	if len(v.Stale) != 0 {
-		t.Fatalf("passing timing waiver was marked stale: %+v", v.Stale)
-	}
-	if len(v.TimingWaiverNotes) != 1 || v.TimingWaiverNotes[0] != waiver {
-		t.Fatalf("timing waiver notes = %+v, want %+v", v.TimingWaiverNotes, waiver)
+	if len(v.Stale) != 1 || v.Stale[0] != waiver {
+		t.Fatalf("stale waivers = %+v, want %+v", v.Stale, waiver)
 	}
 	md := perfreport.Markdown(v)
-	if !strings.Contains(md, "timing waiver (MAIN-2580) passed in this run; keep it until it passes consistently on main") || strings.Contains(md, "no longer fails; remove its entry") {
+	if !strings.Contains(md, "`updates.getDifference 30 days offline` timing (MAIN-2580) no longer fails; remove its entry from known_violations.json") {
 		t.Fatalf("markdown = %s", md)
 	}
 }

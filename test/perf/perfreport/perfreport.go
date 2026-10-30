@@ -199,13 +199,10 @@ type Verdict struct {
 	Reported []Failure
 	// Waived are failures a waiver accepts; they do not fail the run.
 	Waived []Failure
-	// Stale are unused deterministic waivers whose issue may be fixed.
-	Stale []Waiver
-	// TimingWaiverNotes are timing waivers that passed in this run. One passing
-	// run is not enough to remove a timing waiver because those checks fluctuate.
-	TimingWaiverNotes []Waiver
-	Rounds            int
-	BaseRounds        int
+	// Stale are waivers whose check passed: the issue may be fixed.
+	Stale      []Waiver
+	Rounds     int
+	BaseRounds int
 }
 
 // Input is everything one judgement reads.
@@ -230,8 +227,8 @@ func Evaluate(in Input) Verdict {
 	headAgg, order := aggregate(in.Head)
 	baseAgg, _ := aggregate(in.Base)
 	bands := noise(matchingHistory(in.Head, in.History))
-	// checked holds scenarios measured on both fixtures, the only ones whose
-	// unused waivers can be reported as stale or passing timing notes.
+	// checked holds the scenarios measured on both fixtures, the only ones whose
+	// unused waivers are stale.
 	checked := map[string]bool{}
 	used := map[Waiver]bool{}
 	// A head report that cannot be read measured nothing; passing on it would
@@ -382,18 +379,10 @@ func Evaluate(in Input) Verdict {
 	}
 	for _, w := range in.Waivers {
 		if checked[w.Scenario] && !used[w] {
-			if timingWaiver(w) {
-				v.TimingWaiverNotes = append(v.TimingWaiverNotes, w)
-			} else {
-				v.Stale = append(v.Stale, w)
-			}
+			v.Stale = append(v.Stale, w)
 		}
 	}
 	return v
-}
-
-func timingWaiver(w Waiver) bool {
-	return w.Check == CheckTiming || timing(w.Check)
 }
 
 // waiverMatches applies a timing waiver to the two size-based checks it names;
@@ -666,9 +655,6 @@ func Markdown(v Verdict) string {
 	var notes []string
 	for _, w := range v.Stale {
 		notes = append(notes, fmt.Sprintf("- `%s` %s (%s) no longer fails; remove its entry from known_violations.json", w.Scenario, w.Check, w.Issue))
-	}
-	for _, w := range v.TimingWaiverNotes {
-		notes = append(notes, fmt.Sprintf("- `%s` timing waiver (%s) passed in this run; keep it until it passes consistently on main", w.Scenario, w.Issue))
 	}
 	for _, row := range v.Rows {
 		if row.Large != nil && row.Large.Note != "" {
