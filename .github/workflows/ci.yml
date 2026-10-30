@@ -1151,6 +1151,7 @@ jobs:
           bash -n deploy/teagram-demo/ops/teagram-demo-ops
           bash -n deploy/teagram-demo/ops/install-teagram-demo-ops.sh
           bash -n deploy/teagram-demo/ops/turnstile-signin-rollout.sh
+          bash -n deploy/teagram-demo/ops/turnstile-signin-rollback.sh
           sh -n deploy/teagram-demo/ops/turnstile-signin-on.sh
           sh -n deploy/teagram-demo/ops/turnstile-signin-off.sh
           bash -n deploy/teagram-demo/test-install-teagram-demo-ops.sh
@@ -1164,6 +1165,7 @@ jobs:
           bash -n deploy/teagram-demo/activity-credential.sh
           bash -n deploy/teagram-demo/test-activity-credential-handoff.sh
           bash -n deploy/teagram-demo/test-demo-compose.sh
+          bash -n deploy/teagram-demo/test-turnstile-signin-rollout.sh
           bash -n deploy/teagram-demo/test-image-release.sh
           bash -n deploy/teagram-demo/test-seed-compose.sh
           bash -n deploy/link-edge/deploy-main.sh
@@ -1194,6 +1196,7 @@ jobs:
             deploy/teagram-demo/ops/teagram-demo-ops \
             deploy/teagram-demo/ops/install-teagram-demo-ops.sh \
             deploy/teagram-demo/ops/turnstile-signin-rollout.sh \
+            deploy/teagram-demo/ops/turnstile-signin-rollback.sh \
             deploy/teagram-demo/ops/turnstile-signin-on.sh \
             deploy/teagram-demo/ops/turnstile-signin-off.sh \
             deploy/teagram-demo/test-install-teagram-demo-ops.sh \
@@ -1207,6 +1210,7 @@ jobs:
             deploy/teagram-demo/activity-credential.sh \
             deploy/teagram-demo/test-activity-credential-handoff.sh \
             deploy/teagram-demo/test-demo-compose.sh \
+            deploy/teagram-demo/test-turnstile-signin-rollout.sh \
             deploy/teagram-demo/test-image-release.sh \
             deploy/teagram-demo/test-seed-compose.sh \
             deploy/link-edge/deploy-main.sh \

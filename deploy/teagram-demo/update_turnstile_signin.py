@@ -48,35 +48,62 @@ def require_directory(path: pathlib.Path, expected_mode: int | None = None) -> o
     return metadata
 
 
-def atomic_write(path: pathlib.Path, content: bytes, metadata: os.stat_result, mode: int) -> None:
-    descriptor = -1
-    temporary: pathlib.Path | None = None
-    try:
-        descriptor, name = tempfile.mkstemp(prefix=f".{path.name}.turnstile-", dir=path.parent)
-        temporary = pathlib.Path(name)
-        os.fchown(descriptor, metadata.st_uid, metadata.st_gid)
-        os.fchmod(descriptor, mode)
-        with os.fdopen(descriptor, "wb") as output:
-            descriptor = -1
-            output.write(content)
-            output.flush()
-            os.fsync(output.fileno())
-        os.replace(temporary, path)
+def atomic_write(
+    path: pathlib.Path,
+    content: bytes,
+    metadata: os.stat_result,
+    mode: int,
+    original_content: bytes,
+) -> None:
+    def replace_file(contents: bytes) -> None:
+        descriptor = -1
+        temporary: pathlib.Path | None = None
+        try:
+            descriptor, name = tempfile.mkstemp(prefix=f".{path.name}.turnstile-", dir=path.parent)
+            temporary = pathlib.Path(name)
+            os.fchown(descriptor, metadata.st_uid, metadata.st_gid)
+            os.fchmod(descriptor, mode)
+            with os.fdopen(descriptor, "wb") as output:
+                descriptor = -1
+                output.write(contents)
+                output.flush()
+                os.fsync(output.fileno())
+            os.replace(temporary, path)
+            temporary = None
+        finally:
+            if descriptor >= 0:
+                os.close(descriptor)
+            if temporary is not None and temporary.exists():
+                temporary.unlink()
+
+    def sync_parent() -> None:
         directory_fd = os.open(path.parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
         try:
             os.fsync(directory_fd)
         finally:
             os.close(directory_fd)
+
+    replaced = False
+    try:
+        replace_file(content)
+        replaced = True
+        sync_parent()
     except OSError:
+        if replaced:
+            try:
+                replace_file(original_content)
+                sync_parent()
+            except OSError:
+                fail("environment-file-update-and-rollback")
         fail("environment-file-update")
-    finally:
-        if descriptor >= 0:
-            os.close(descriptor)
-        if temporary is not None and temporary.exists():
-            temporary.unlink()
 
 
-def backup_file(directory: pathlib.Path, content: bytes, metadata: os.stat_result) -> pathlib.Path:
+def backup_file(
+    directory: pathlib.Path,
+    content: bytes,
+    metadata: os.stat_result,
+    backup_path: pathlib.Path | None = None,
+) -> pathlib.Path:
     require_directory(directory.parent)
     if not directory.exists() and not directory.is_symlink():
         try:
@@ -86,9 +113,24 @@ def backup_file(directory: pathlib.Path, content: bytes, metadata: os.stat_resul
     require_directory(directory, 0o700)
     descriptor = -1
     backup: pathlib.Path | None = None
+    complete = False
     try:
-        descriptor, name = tempfile.mkstemp(prefix="env.before-turnstile-", dir=directory)
-        backup = pathlib.Path(name)
+        if backup_path is not None:
+            if backup_path.parent != directory:
+                fail("environment-backup-outside-directory")
+            descriptor = os.open(
+                backup_path,
+                os.O_WRONLY
+                | os.O_CREAT
+                | os.O_EXCL
+                | getattr(os, "O_NOFOLLOW", 0)
+                | getattr(os, "O_CLOEXEC", 0),
+                0o600,
+            )
+            backup = backup_path
+        else:
+            descriptor, name = tempfile.mkstemp(prefix="env.before-turnstile-", dir=directory)
+            backup = pathlib.Path(name)
         os.fchown(descriptor, metadata.st_uid, metadata.st_gid)
         os.fchmod(descriptor, 0o600)
         with os.fdopen(descriptor, "wb") as output:
@@ -99,12 +141,18 @@ def backup_file(directory: pathlib.Path, content: bytes, metadata: os.stat_resul
         saved_metadata = require_file(backup, 0o600)
         if saved_metadata.st_uid != metadata.st_uid or backup.read_bytes() != content:
             fail("environment-backup-verification")
+        complete = True
         return backup
     except OSError:
         fail("environment-backup-write")
     finally:
         if descriptor >= 0:
             os.close(descriptor)
+        if backup is not None and not complete:
+            try:
+                backup.unlink(missing_ok=True)
+            except OSError:
+                fail("environment-backup-cleanup")
 
 
 def flag_lines(content: str) -> list[str]:
@@ -121,7 +169,12 @@ def content_without_flag(content: str) -> str:
     )
 
 
-def update_env_file(env_file: pathlib.Path, backup_dir: pathlib.Path, target: str) -> dict[str, str]:
+def update_env_file(
+    env_file: pathlib.Path,
+    backup_dir: pathlib.Path,
+    target: str,
+    backup_path: pathlib.Path | None = None,
+) -> dict[str, str]:
     if target not in {"false", "true"}:
         fail("target-must-be-boolean")
     metadata = require_file(env_file, 0o600)
@@ -158,7 +211,7 @@ def update_env_file(env_file: pathlib.Path, backup_dir: pathlib.Path, target: st
     if content_without_flag(original) != content_without_flag(updated):
         fail("environment-change-touched-an-unapproved-setting")
 
-    backup = backup_file(backup_dir, original_bytes, metadata)
+    backup = backup_file(backup_dir, original_bytes, metadata, backup_path)
     if mode == "changed":
         previous_file = os.environ.get("ROLLOUT_RUNNER_PREVIOUS_ENV_FILE")
         if previous_file and previous_file != str(backup):
@@ -168,14 +221,14 @@ def update_env_file(env_file: pathlib.Path, backup_dir: pathlib.Path, target: st
         if backup.read_bytes() != original_bytes:
             fail("previous-environment-file-verification")
 
-    atomic_write(env_file, updated.encode("utf-8"), metadata, 0o600)
+    atomic_write(env_file, updated.encode("utf-8"), metadata, 0o600, original_bytes)
     saved = env_file.read_bytes().decode("utf-8")
     if (
         content_without_flag(saved) != content_without_flag(original)
         or len(flag_lines(saved)) != 1
         or flag_lines(saved)[0].rstrip("\r\n") != f"{ENV_NAME}={target}"
     ):
-        atomic_write(env_file, original_bytes, metadata, 0o600)
+        atomic_write(env_file, original_bytes, metadata, 0o600, original_bytes)
         fail("environment-change-verification")
 
     return {
@@ -192,9 +245,10 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--env-file", required=True, type=pathlib.Path)
     parser.add_argument("--backup-dir", required=True, type=pathlib.Path)
+    parser.add_argument("--backup-path", type=pathlib.Path)
     parser.add_argument("--target", required=True, choices=("false", "true"))
     args = parser.parse_args()
-    result = update_env_file(args.env_file, args.backup_dir, args.target)
+    result = update_env_file(args.env_file, args.backup_dir, args.target, args.backup_path)
     fields = [f"changed={result['changed']}", f"effective_flag={result['current']}"]
     if result["changed"] == "true":
         fields.extend([

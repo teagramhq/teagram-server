@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import os
 import pathlib
+import stat
 import sys
 import tempfile
 import unittest
@@ -36,9 +37,19 @@ class UpdateTurnstileSigninTests(unittest.TestCase):
         self.env_file.write_bytes(self.environment)
         self.env_file.chmod(0o600)
 
-    def update(self, target: str, **rollout_env: str) -> dict[str, str]:
+    def update(
+        self,
+        target: str,
+        backup_path: pathlib.Path | None = None,
+        **rollout_env: str,
+    ) -> dict[str, str]:
         with mock.patch.dict(os.environ, rollout_env, clear=True):
-            return update_turnstile_signin.update_env_file(self.env_file, self.backup_dir, target)
+            return update_turnstile_signin.update_env_file(
+                self.env_file,
+                self.backup_dir,
+                target,
+                backup_path,
+            )
 
     def test_addition_uses_approved_env_addition_and_preserves_signup_credentials(self) -> None:
         result = self.update(
@@ -67,6 +78,82 @@ class UpdateTurnstileSigninTests(unittest.TestCase):
         updated = self.env_file.read_bytes()
         self.assertEqual(updated, self.environment + f"{ENV_NAME}=true\n".encode())
         self.assertEqual(pathlib.Path(result["backup"]).read_bytes(), self.environment + f"{ENV_NAME}=false\n".encode())
+
+    def test_explicit_backup_path_is_created_before_environment_update(self) -> None:
+        backup = self.backup_dir / "env.before-turnstile-reviewed-run"
+        result = self.update(
+            "true",
+            backup_path=backup,
+            ROLLOUT_RUNNER_ADDED_ENV=ENV_NAME,
+            ROLLOUT_RUNNER_CHANGED_ENV=ENV_NAME,
+        )
+
+        self.assertEqual(result["backup"], str(backup))
+        self.assertEqual(backup.read_bytes(), self.environment)
+        self.assertEqual(backup.stat().st_mode & 0o777, 0o600)
+
+    def test_explicit_backup_path_does_not_replace_an_existing_file(self) -> None:
+        backup = self.backup_dir / "env.before-turnstile-existing"
+        backup.write_bytes(b"preserve this backup")
+        backup.chmod(0o600)
+
+        with self.assertRaises(SystemExit):
+            self.update(
+                "true",
+                backup_path=backup,
+                ROLLOUT_RUNNER_ADDED_ENV=ENV_NAME,
+                ROLLOUT_RUNNER_CHANGED_ENV=ENV_NAME,
+            )
+
+        self.assertEqual(backup.read_bytes(), b"preserve this backup")
+        self.assertEqual(self.env_file.read_bytes(), self.environment)
+
+    def test_parent_directory_open_failure_restores_original_bytes(self) -> None:
+        real_open = os.open
+
+        def fail_parent_open(
+            path: os.PathLike[str] | str,
+            flags: int,
+            *args: object,
+            **kwargs: object,
+        ) -> int:
+            if pathlib.Path(path) == self.env_file.parent:
+                raise OSError("injected parent directory open failure")
+            return real_open(path, flags, *args, **kwargs)
+
+        with mock.patch.object(update_turnstile_signin.os, "open", side_effect=fail_parent_open):
+            with self.assertRaises(SystemExit):
+                self.update(
+                    "true",
+                    ROLLOUT_RUNNER_ADDED_ENV=ENV_NAME,
+                    ROLLOUT_RUNNER_CHANGED_ENV=ENV_NAME,
+                )
+
+        self.assertEqual(self.env_file.read_bytes(), self.environment)
+
+    def test_parent_directory_fsync_failure_restores_original_bytes(self) -> None:
+        real_fsync = os.fsync
+        failed = False
+        updated = self.environment + f"{ENV_NAME}=true\n".encode()
+
+        def fail_directory_fsync(descriptor: int) -> None:
+            nonlocal failed
+            if stat.S_ISDIR(os.fstat(descriptor).st_mode) and not failed:
+                failed = True
+                self.assertEqual(self.env_file.read_bytes(), updated)
+                raise OSError("injected parent directory fsync failure")
+            real_fsync(descriptor)
+
+        with mock.patch.object(update_turnstile_signin.os, "fsync", side_effect=fail_directory_fsync):
+            with self.assertRaises(SystemExit):
+                self.update(
+                    "true",
+                    ROLLOUT_RUNNER_ADDED_ENV=ENV_NAME,
+                    ROLLOUT_RUNNER_CHANGED_ENV=ENV_NAME,
+                )
+
+        self.assertTrue(failed)
+        self.assertEqual(self.env_file.read_bytes(), self.environment)
 
     def test_missing_flag_defaults_false_without_mutation(self) -> None:
         result = self.update("false")

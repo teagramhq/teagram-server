@@ -11,6 +11,9 @@ readonly OPS_SHA=${OPS_SHA:-}
 readonly OPS_NAME=${OPS_NAME:-}
 TMP_DIR=
 ENV_BACKUP=
+ROLLOUT_COMMITTED=0
+ROLLBACK_CONFIRMED=0
+digest=
 
 fail() {
   printf 'demo Turnstile rollout: %s\n' "$1" >&2
@@ -19,20 +22,6 @@ fail() {
   fi
   exit 1
 }
-
-cleanup() {
-  local status=$?
-  trap - EXIT HUP INT TERM
-  if [[ -n "$TMP_DIR" ]]; then
-    case "$TMP_DIR" in
-      /tmp/teagram-demo-turnstile.????????) rm -rf -- "$TMP_DIR" || status=1 ;;
-      *) printf '%s\n' 'demo Turnstile rollout: refusing unexpected temporary path' >&2; status=1 ;;
-    esac
-  fi
-  exit "$status"
-}
-trap cleanup EXIT
-trap 'exit 1' HUP INT TERM
 
 [[ "$EUID" -eq 0 ]] || fail 'operation must run as root'
 [[ "$TARGET" == true || "$TARGET" == false ]] || fail 'target is invalid'
@@ -48,6 +37,7 @@ git -C "$REPO" merge-base --is-ancestor "$OPS_SHA" refs/remotes/origin/main ||
 
 for tracked in \
   deploy/teagram-demo/ops/turnstile-signin-rollout.sh \
+  deploy/teagram-demo/ops/turnstile-signin-rollback.sh \
   deploy/teagram-demo/update_turnstile_signin.py \
   deploy/teagram-demo/compose.yaml \
   deploy/teagram-demo/validate-env.py \
@@ -69,6 +59,9 @@ flock -x 9
 
 # shellcheck source=deploy/teagram-demo/demo-common.sh
 source "$REPO/deploy/teagram-demo/demo-common.sh"
+# shellcheck source=deploy/teagram-demo/ops/turnstile-signin-rollback.sh
+source "$REPO/deploy/teagram-demo/ops/turnstile-signin-rollback.sh"
+install_turnstile_traps
 python3 "$REPO/deploy/teagram-demo/validate-env.py" "$ENV_FILE" || fail 'current demo environment is invalid'
 
 TMP_DIR=$(mktemp -d /tmp/teagram-demo-turnstile.XXXXXXXX) || fail 'could not create a temporary rollout directory'
@@ -88,9 +81,28 @@ container_flag=$(docker inspect --format '{{json .Config.Env}}' "${active_ids[0]
   fail 'active server signin flag is unavailable'
 [[ "$container_flag" == "$expected_flag" ]] || fail 'active server flag differs from Compose'
 
+run_rollout() {
+  DEMO_DEPLOY_LOCK_HELD=1 DEPLOY_SHA="$OPS_SHA" DEPLOY_IMAGE_DIGEST="$digest" \
+    PREVIOUS_SHA="$OPS_SHA" bash "$REPO/deploy/teagram-demo/deploy-main.sh"
+}
+
+active_flag() {
+  local server
+  local -a ids=()
+  server=$(demo_active_server) || return 1
+  mapfile -t ids < <(demo_compose ps -q "$server")
+  (( ${#ids[@]} == 1 )) || return 1
+  docker inspect --format '{{json .Config.Env}}' "${ids[0]}" | \
+    jq -er --arg flag "$FLAG" '[.[] | select(startswith($flag + "=")) | split("=")[1]] | if length == 1 then .[0] else error("missing or duplicate flag") end'
+}
+
+backup_name="env.before-turnstile-${OPS_SHA}-${BASHPID}-${RANDOM}"
+backup_candidate="$BACKUP_DIR/$backup_name"
+[[ ! -e "$backup_candidate" && ! -L "$backup_candidate" ]] || fail 'environment backup path already exists'
+ENV_BACKUP=$backup_candidate
 if update_output=$(ROLLOUT_RUNNER_ADDED_ENV="$FLAG" ROLLOUT_RUNNER_CHANGED_ENV="$FLAG" \
   python3 "$REPO/deploy/teagram-demo/update_turnstile_signin.py" \
-    --env-file "$ENV_FILE" --backup-dir "$BACKUP_DIR" --target "$TARGET"); then
+    --env-file "$ENV_FILE" --backup-dir "$BACKUP_DIR" --backup-path "$ENV_BACKUP" --target "$TARGET"); then
   :
 else
   printf '%s\n' "$update_output" >&2
@@ -98,26 +110,16 @@ else
 fi
 printf '%s\n' "$update_output"
 changed=$(sed -n 's/.*changed=\([^ ]*\).*/\1/p' <<< "$update_output")
-ENV_BACKUP=$(sed -n 's/.*backup=\([^ ]*\).*/\1/p' <<< "$update_output")
 if [[ "$changed" == false ]]; then
+  ENV_BACKUP=
   [[ "$expected_flag" == "$TARGET" ]] || fail 'no-op environment update does not match the active flag'
   printf 'rollout=already-effective effective_flag=%s active_server=%s\n' "$TARGET" "$active_server"
   exit 0
 fi
+reported_backup=$(sed -n 's/.*backup=\([^ ]*\).*/\1/p' <<< "$update_output")
+[[ "$reported_backup" == "$ENV_BACKUP" ]] || fail 'environment backup record differs from the prepared path'
 [[ "$changed" == true && -f "$ENV_BACKUP" && ! -L "$ENV_BACKUP" ]] || fail 'environment backup record is invalid'
 [[ "$(stat -c '%u:%a' "$ENV_BACKUP")" == 0:600 ]] || fail 'environment backup is not root-only'
-
-restore_env() {
-  local temporary
-  [[ -f "$ENV_BACKUP" && ! -L "$ENV_BACKUP" ]] || return 1
-  [[ "$(stat -c '%u:%a' "$ENV_BACKUP")" == 0:600 ]] || return 1
-  temporary=$(mktemp "$ENV_FILE.rollback.XXXXXXXX") || return 1
-  if ! install -o root -g root -m 0600 -- "$ENV_BACKUP" "$temporary" ||
-    ! mv -f -- "$temporary" "$ENV_FILE"; then
-    rm -f -- "$temporary"
-    return 1
-  fi
-}
 
 if ! python3 "$REPO/deploy/teagram-demo/validate-env.py" "$ENV_FILE"; then
   restore_env || fail 'environment validation failed and the previous environment could not be restored'
@@ -166,37 +168,6 @@ image_revision=$(docker image inspect --format '{{index .Config.Labels "org.open
   fail 'active image revision differs from the reviewed checkout'
 }
 
-run_rollout() {
-  DEMO_DEPLOY_LOCK_HELD=1 DEPLOY_SHA="$OPS_SHA" DEPLOY_IMAGE_DIGEST="$digest" \
-    PREVIOUS_SHA="$OPS_SHA" bash "$REPO/deploy/teagram-demo/deploy-main.sh"
-}
-
-active_flag() {
-  local server
-  local -a ids=()
-  server=$(demo_active_server) || return 1
-  mapfile -t ids < <(demo_compose ps -q "$server")
-  (( ${#ids[@]} == 1 )) || return 1
-  docker inspect --format '{{json .Config.Env}}' "${ids[0]}" | \
-    jq -er --arg flag "$FLAG" '[.[] | select(startswith($flag + "=")) | split("=")[1]] | if length == 1 then .[0] else error("missing or duplicate flag") end'
-}
-
-restore_previous_runtime() {
-  local rollback_flag rollback_image_ref
-  restore_env || fail 'the previous environment could not be restored'
-  rollback_flag=$(active_flag 2>/dev/null || true)
-  if [[ "$rollback_flag" != "$expected_flag" ]]; then
-    rollback_image_ref=$(demo_active_image_ref) || fail 'the previous image reference is unavailable for rollback'
-    digest=${rollback_image_ref##*@}
-    [[ "$rollback_image_ref" == "$DEMO_IMAGE_REPOSITORY@$digest" && "$digest" =~ ^sha256:[0-9a-f]{64}$ ]] ||
-      fail 'the active rollback image is not pinned'
-    run_rollout || fail 'the previous signin flag could not be redeployed'
-    rollback_flag=$(active_flag) || fail 'rollback completed but the active signin flag could not be read'
-  fi
-  [[ "$rollback_flag" == "$expected_flag" ]] || fail 'rollback did not restore the previous signin flag'
-  printf 'rollback=confirmed effective_flag=%s environment_backup=%s\n' "$rollback_flag" "$ENV_BACKUP" >&2
-}
-
 if run_rollout; then
   :
 else
@@ -221,5 +192,6 @@ if ! python3 "$REPO/deploy/teagram-demo/probe_tailnet_isolation.py"; then
   restore_previous_runtime
   fail 'tailnet isolation probe failed; the previous signin flag was restored'
 fi
+ROLLOUT_COMMITTED=1
 printf 'rollout=pass target_revision=%s active_server=%s readiness=pass effective_flag=%s environment_backup=%s\n' \
   "$OPS_SHA" "$active_after" "$flag_after" "$ENV_BACKUP"
