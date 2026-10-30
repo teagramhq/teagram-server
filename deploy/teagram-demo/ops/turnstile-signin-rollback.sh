@@ -19,6 +19,7 @@ restore_env() {
 }
 
 restore_previous_runtime() {
+  local expected_flag=${1:?expected flag is required}
   local rollback_flag rollback_image_ref rollback_digest
   restore_env || return 1
   rollback_flag=$(active_flag 2>/dev/null || true)
@@ -27,8 +28,7 @@ restore_previous_runtime() {
     rollback_digest=${rollback_image_ref##*@}
     [[ "$rollback_image_ref" == "$DEMO_IMAGE_REPOSITORY@$rollback_digest" &&
       "$rollback_digest" =~ ^sha256:[0-9a-f]{64}$ ]] || return 1
-    digest=$rollback_digest
-    run_rollout || return 1
+    run_rollout "$rollback_digest" || return 1
     rollback_flag=$(active_flag) || return 1
   fi
   [[ "$rollback_flag" == "$expected_flag" ]] || return 1
@@ -43,7 +43,7 @@ turnstile_cleanup() {
   trap '' HUP INT TERM
   if [[ -n "$ENV_BACKUP" && -f "$ENV_BACKUP" && ! -L "$ENV_BACKUP" &&
     "$ROLLOUT_COMMITTED" != 1 && "$ROLLBACK_CONFIRMED" != 1 ]]; then
-    if ! restore_previous_runtime; then
+    if ! restore_previous_runtime "$expected_flag"; then
       printf 'demo Turnstile rollout: uncommitted rollback failed environment_backup=%s\n' \
         "$ENV_BACKUP" >&2
       status=1

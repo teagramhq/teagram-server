@@ -13,7 +13,6 @@ TMP_DIR=
 ENV_BACKUP=
 ROLLOUT_COMMITTED=0
 ROLLBACK_CONFIRMED=0
-digest=
 
 fail() {
   printf 'demo Turnstile rollout: %s\n' "$1" >&2
@@ -82,7 +81,8 @@ container_flag=$(docker inspect --format '{{json .Config.Env}}' "${active_ids[0]
 [[ "$container_flag" == "$expected_flag" ]] || fail 'active server flag differs from Compose'
 
 run_rollout() {
-  DEMO_DEPLOY_LOCK_HELD=1 DEPLOY_SHA="$OPS_SHA" DEPLOY_IMAGE_DIGEST="$digest" \
+  local image_digest=${1:?image digest is required}
+  DEMO_DEPLOY_LOCK_HELD=1 DEPLOY_SHA="$OPS_SHA" DEPLOY_IMAGE_DIGEST="$image_digest" \
     PREVIOUS_SHA="$OPS_SHA" bash "$REPO/deploy/teagram-demo/deploy-main.sh"
 }
 
@@ -168,28 +168,28 @@ image_revision=$(docker image inspect --format '{{index .Config.Labels "org.open
   fail 'active image revision differs from the reviewed checkout'
 }
 
-if run_rollout; then
+if run_rollout "$digest"; then
   :
 else
   rollout_status=$?
-  restore_previous_runtime
+  restore_previous_runtime "$expected_flag"
   exit "$rollout_status"
 fi
 
 active_after=$(demo_active_server) || {
-  restore_previous_runtime
+  restore_previous_runtime "$expected_flag"
   fail 'deployment finished but the active server slot is unavailable'
 }
 flag_after=$(active_flag) || {
-  restore_previous_runtime
+  restore_previous_runtime "$expected_flag"
   fail 'deployment finished but the effective flag could not be read'
 }
 if [[ "$flag_after" != "$TARGET" ]]; then
-  restore_previous_runtime
+  restore_previous_runtime "$expected_flag"
   fail 'post-deploy flag did not match the requested target'
 fi
 if ! python3 "$REPO/deploy/teagram-demo/probe_tailnet_isolation.py"; then
-  restore_previous_runtime
+  restore_previous_runtime "$expected_flag"
   fail 'tailnet isolation probe failed; the previous signin flag was restored'
 fi
 ROLLOUT_COMMITTED=1

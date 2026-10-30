@@ -31,12 +31,12 @@ for signal in HUP INT TERM; do
     TMP_DIR=
     DEMO_IMAGE_REPOSITORY=fixture/demo
     OPS_SHA=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
-    digest=sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
     ACTIVE_FILE=$4
     ROLLBACK_LOG=$5
     active_flag() { cat "$ACTIVE_FILE"; }
     demo_active_image_ref() { printf "%s@sha256:%064d\n" "$DEMO_IMAGE_REPOSITORY" 0; }
     run_rollout() {
+      local digest=$1
       sed -n "s/^TG_TURNSTILE_SIGNIN_ENABLED=//p" "$ENV_FILE" > "$ACTIVE_FILE"
       printf "%s\n" "$digest" >> "$ROLLBACK_LOG"
     }
@@ -61,6 +61,11 @@ for signal in HUP INT TERM; do
   }
   [[ "$(wc -l < "$rollback_log")" -eq 1 ]] || {
     printf 'runtime rollback was not executed once after %s\n' "$signal" >&2
+    exit 1
+  }
+  expected_rollback_digest=$(printf 'sha256:%064d' 0)
+  [[ "$(cat "$rollback_log")" == "$expected_rollback_digest" ]] || {
+    printf 'runtime rollback used the wrong image digest after %s\n' "$signal" >&2
     exit 1
   }
   grep -Fq 'rollback=confirmed effective_flag=false' "$case_dir/stderr" || {
