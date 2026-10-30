@@ -183,6 +183,9 @@ type Config struct {
 	// quota per account, not a live one, and it is the number that decides
 	// whether one account can fill the disk.
 	MaxUserStorageBytes int64
+	// UploadsDisabled refuses client RPCs that accept or assemble uploaded file
+	// bytes. It defaults off so existing deployments keep their current behavior.
+	UploadsDisabled bool
 	// UploadPartTTL is how long an unassembled upload part is kept before the
 	// sweeper deletes it. Short on purpose: a real client uploads and sends
 	// within minutes, and the TTL is the term that makes worst-case retained
@@ -975,6 +978,13 @@ func load(log *slog.Logger, allowKeyGeneration bool) (Config, error) {
 		SignUpTermsOfService:    envOr("TG_TERMS_OF_SERVICE", DefaultSignUpTermsOfService),
 		RecoveryEmailMode:       recoveryEmailMode,
 		SessionDeviceLabels:     true,
+	}
+	if value := os.Getenv("TG_UPLOADS_DISABLED"); value != "" {
+		disabled, err := strconv.ParseBool(value)
+		if err != nil {
+			return Config{}, errors.New("TG_UPLOADS_DISABLED must be a boolean")
+		}
+		cfg.UploadsDisabled = disabled
 	}
 	if bundleDir := os.Getenv("TG_STICKER_CATALOG_BUNDLE"); bundleDir != "" {
 		cfg.StickerBundle, err = stickerbundle.Load(bundleDir)

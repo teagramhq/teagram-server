@@ -13,6 +13,7 @@ import tempfile
 OLD_ORIGINS = "https://web.teagram.io"
 NEW_ORIGINS = "https://web.teagram.io,https://demo.teagram.io"
 VARIABLE = "TG_WEBSOCKET_ALLOWED_ORIGINS"
+UPLOADS_DISABLED_VARIABLE = "TG_UPLOADS_DISABLED"
 
 
 def reject(message: str) -> None:
@@ -42,11 +43,34 @@ def update(path: pathlib.Path) -> None:
     line = lines[index]
     current = line.rstrip("\r\n").partition("=")[2]
     newline = line[len(line.rstrip("\r\n")) :]
+    changed = False
     if current == NEW_ORIGINS:
-        return
-    if current != OLD_ORIGINS:
+        pass
+    elif current == OLD_ORIGINS:
+        lines[index] = f"{VARIABLE}={NEW_ORIGINS}{newline}"
+        changed = True
+    else:
         reject("unexpected-origin-list")
-    lines[index] = f"{VARIABLE}={NEW_ORIGINS}{newline}"
+
+    uploads_matches = [
+        index
+        for index, line in enumerate(lines)
+        if line.rstrip("\r\n").startswith(f"{UPLOADS_DISABLED_VARIABLE}=")
+    ]
+    if len(uploads_matches) > 1:
+        reject("uploads-disabled-assignment-count")
+    if uploads_matches:
+        uploads_value = lines[uploads_matches[0]].rstrip("\r\n").partition("=")[2]
+        if uploads_value != "true":
+            reject("uploads-must-remain-disabled")
+    else:
+        if lines and not lines[-1].endswith(("\n", "\r")):
+            lines[-1] = lines[-1] + "\n"
+        lines.append(f"{UPLOADS_DISABLED_VARIABLE}=true\n")
+        changed = True
+
+    if not changed:
+        return
 
     temporary = None
     try:
@@ -77,7 +101,7 @@ def main() -> None:
     if len(sys.argv) != 2:
         reject("usage")
     update(pathlib.Path(sys.argv[1]))
-    print("demo env updated: TG_WEBSOCKET_ALLOWED_ORIGINS")
+    print("demo env updated: TG_WEBSOCKET_ALLOWED_ORIGINS, TG_UPLOADS_DISABLED")
 
 
 if __name__ == "__main__":

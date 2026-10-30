@@ -7,6 +7,7 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strconv"
 	"strings"
 	"sync"
@@ -195,6 +196,51 @@ func TestLoadDefaults(t *testing.T) {
 	}
 	if cfg.RateLimits.DiscardEncryption.Window != time.Hour {
 		t.Errorf("DiscardEncryption window = %v, want 1h", cfg.RateLimits.DiscardEncryption.Window)
+	}
+}
+
+func TestLoadUploadsDisabledSetting(t *testing.T) {
+	t.Setenv("TG_POSTGRES_DSN", "postgres://localhost/tg")
+	t.Setenv("TG_AUTHKEY_ENC_KEY", validEncKey)
+	t.Setenv("TG_AUTHKEY_ENC_KEY_FILE", "")
+	t.Setenv("TG_RECOVERY_EMAIL", "off")
+
+	readSetting := func(t *testing.T) (bool, error) {
+		t.Helper()
+		cfg, err := config.Load(discardLog())
+		if err != nil {
+			return false, err
+		}
+		setting := reflect.ValueOf(cfg).FieldByName("UploadsDisabled")
+		if !setting.IsValid() || setting.Kind() != reflect.Bool {
+			t.Fatal("config has no boolean UploadsDisabled setting")
+		}
+		return setting.Bool(), nil
+	}
+
+	for _, test := range []struct {
+		value string
+		want  bool
+	}{
+		{value: "", want: false},
+		{value: "false", want: false},
+		{value: "true", want: true},
+	} {
+		t.Run(strconv.Quote(test.value), func(t *testing.T) {
+			t.Setenv("TG_UPLOADS_DISABLED", test.value)
+			got, err := readSetting(t)
+			if err != nil {
+				t.Fatalf("Load: %v", err)
+			}
+			if got != test.want {
+				t.Fatalf("UploadsDisabled = %t, want %t for TG_UPLOADS_DISABLED=%q", got, test.want, test.value)
+			}
+		})
+	}
+
+	t.Setenv("TG_UPLOADS_DISABLED", "maybe")
+	if _, err := config.Load(discardLog()); err == nil || !strings.Contains(err.Error(), "TG_UPLOADS_DISABLED") {
+		t.Fatalf("Load error = %v, want TG_UPLOADS_DISABLED validation error", err)
 	}
 }
 
