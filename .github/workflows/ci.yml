@@ -1434,8 +1434,9 @@ jobs:
 
   publish-demo-image:
     name: publish demo server image
-    if: ${{ always() && success() && github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+    if: ${{ always() && (needs.ops-prioritize-main.result == 'success' || (needs.ops-prioritize-main.result == 'skipped' && github.event_name == 'pull_request')) && success() && github.event_name == 'push' && github.ref == 'refs/heads/main' }}
     needs:
+      - ops-prioritize-main
       - browser-acceptance
       - browser-acceptance-image
       - ci
