@@ -242,6 +242,7 @@ SH
   # shellcheck disable=SC2030,SC2031
   export RUNNER_TEMP="$tmp/runner" GITHUB_OUTPUT="$tmp/output"
   export CI_RUN_ID=222222222 DEPLOY_SHA=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+  # shellcheck disable=SC2030,SC2031
   export TEST_CI_RUN_ID="$CI_RUN_ID" TEST_DEPLOY_SHA="$DEPLOY_SHA"
   export TEST_IMAGE_DIGEST=sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
   GH_TOKEN=test-token bash -euo pipefail "$tmp/download.sh"
@@ -310,8 +311,11 @@ SH
   export PATH="$tmp:$PATH" GITHUB_REPOSITORY=test/server
   # shellcheck disable=SC2030,SC2031
   export RUNNER_TEMP="$tmp/runner" GITHUB_OUTPUT="$tmp/output"
+  # shellcheck disable=SC2030,SC2031
   export DEPLOY_RUN_ID=111111111 TEST_DEPLOY_RUN_ID=111111111
+  # shellcheck disable=SC2030,SC2031
   export TEST_DEPLOY_SHA=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+  # shellcheck disable=SC2030,SC2031
   export TEST_CI_RUN_ID=222222222
 
   local target_case
@@ -349,6 +353,7 @@ SH
   # These overrides are consumed by the extracted workflow child process.
   # shellcheck disable=SC2030,SC2031
   export PATH="$tmp:$PATH" GITHUB_REPOSITORY=test/server
+  # shellcheck disable=SC2030,SC2031
   export DEPLOY_RUN_ID=111111111 TEST_DEPLOY_RUN_ID=111111111
   # shellcheck disable=SC2030,SC2031
   export GITHUB_OUTPUT="$tmp/output"
