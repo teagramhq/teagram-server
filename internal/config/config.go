@@ -2092,19 +2092,28 @@ func hasPublicTeagramHostname(productionOnly bool) bool {
 }
 
 func hasDemoTeagramHostname() bool {
-	return slices.Contains(configuredTeagramHostnames(), "demo.teagram.io")
+	return slices.Contains(effectivePublicTeagramHostnames(), "demo.teagram.io")
 }
 
 func configuredTeagramHostnames() []string {
-	values := []string{
-		os.Getenv("TG_ADVERTISE_ADDR"),
-		os.Getenv("TG_PUBLIC_LINK_PREFIX"),
-		os.Getenv("TG_PUBLIC_WEBSOCKET_ADVERTISE_ADDR"),
-	}
+	hostnames := effectivePublicTeagramHostnames()
 	for _, name := range []string{"TG_WEBSOCKET_ALLOWED_ORIGINS", "TG_PUBLIC_WEBSOCKET_ALLOWED_ORIGINS"} {
 		for origin := range strings.SplitSeq(os.Getenv(name), ",") {
-			values = append(values, origin)
+			hostnames = append(hostnames, configuredHostname(origin))
 		}
+	}
+	return hostnames
+}
+
+func effectivePublicTeagramHostnames() []string {
+	advertiseAddr := os.Getenv("TG_ADVERTISE_ADDR")
+	if advertiseAddr == "" {
+		advertiseAddr = os.Getenv("TG_LISTEN_ADDR")
+	}
+	values := []string{
+		advertiseAddr,
+		os.Getenv("TG_PUBLIC_LINK_PREFIX"),
+		os.Getenv("TG_PUBLIC_WEBSOCKET_ADVERTISE_ADDR"),
 	}
 	hostnames := make([]string, 0, len(values))
 	for _, value := range values {

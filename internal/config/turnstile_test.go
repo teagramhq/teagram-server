@@ -218,6 +218,16 @@ func TestLoadRejectsTurnstileTestModeOnPublicTeagramHosts(t *testing.T) {
 			}
 		})
 	}
+	t.Run("listen address fallback", func(t *testing.T) {
+		setTurnstileTestEnvironment(t)
+		t.Setenv("TG_TURNSTILE_TEST_MODE", "true")
+		t.Setenv("TG_LISTEN_ADDR", "api.teagram.io:2443")
+
+		_, err := config.Load(discardLog())
+		if err == nil || !strings.Contains(err.Error(), "TG_TURNSTILE_TEST_MODE") {
+			t.Fatalf("Load error = %v, want test mode to reject public listen host", err)
+		}
+	})
 }
 
 func TestLoadValidatesTurnstileHostnameAllowlist(t *testing.T) {
@@ -288,6 +298,24 @@ func TestLoadAllowsQABypassTokenOnlyOnDemoHost(t *testing.T) {
 			}
 		})
 	}
+	t.Run("demo origin alone is not a demo host", func(t *testing.T) {
+		setTurnstileTestEnvironment(t)
+		t.Setenv("TG_TURNSTILE_SITE_KEY", "real-site-key")
+		t.Setenv("TG_TURNSTILE_SECRET_KEY", "real-secret-key")
+		t.Setenv("TG_ADVERTISE_ADDR", "staging.example.test:443")
+		t.Setenv("TG_PUBLIC_LINK_PREFIX", "https://links.example.test/")
+		t.Setenv("TG_WEBSOCKET_ALLOWED_ORIGINS", "https://demo.teagram.io")
+		qaTokenPath := filepath.Join(t.TempDir(), "qa-token")
+		t.Setenv("TG_TURNSTILE_QA_BYPASS_TOKEN_FILE", qaTokenPath)
+		if err := os.WriteFile(qaTokenPath, []byte(strings.Repeat("a", 64)), 0o600); err != nil {
+			t.Fatal(err)
+		}
+
+		_, err := config.Load(discardLog())
+		if err == nil || !strings.Contains(err.Error(), "demo.teagram.io") {
+			t.Fatalf("Load error = %v, want QA bypass to require demo public identity", err)
+		}
+	})
 }
 
 func TestLoadRejectsWeakQABypassToken(t *testing.T) {
