@@ -201,7 +201,7 @@ class PullBaseImagesTests(unittest.TestCase):
             r"run: (?:>- )?bash \.github/scripts/pull-base-images\.sh "
             r"--image mirror\.gcr\.io/postgres:18-alpine"
         )
-        for job_name in ("ci-main", "smoke", "e2e-admin", "real-server-fixtures"):
+        for job_name in ("test-go", "test-smoke", "test-e2e-admin", "test-real-server-fixtures"):
             with self.subTest(job=job_name):
                 job = re.search(
                     rf"(?ms)^  {re.escape(job_name)}:\n(.*?)(?=^  [a-z0-9-]+:|\Z)",
@@ -213,7 +213,7 @@ class PullBaseImagesTests(unittest.TestCase):
     def test_compose_job_preloads_images_through_the_fallback_helper(self) -> None:
         workflow = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
         job = re.search(
-            r"(?ms)^  compose:\n(.*?)(?=^  [a-z0-9-]+:|\Z)", workflow
+            r"(?ms)^  test-compose:\n(.*?)(?=^  [a-z0-9-]+:|\Z)", workflow
         )
         self.assertIsNotNone(job, "compose job is missing")
         body = job.group(1)

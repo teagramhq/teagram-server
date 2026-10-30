@@ -106,19 +106,19 @@ class DockerImageMirrorTests(unittest.TestCase):
                 self.assertIn("STICKER_BUNDLE_SOURCE=sticker-bundle", step)
 
         photo_job = re.search(
-            r"(?ms)^  photothumb-runtime:\n(.*?)(?=^  [a-z0-9-]+:|\Z)",
+            r"(?ms)^  test-photo-worker:\n(.*?)(?=^  [a-z0-9-]+:|\Z)",
             workflow,
         )
         self.assertIsNotNone(photo_job, "Photo worker runtime job is missing")
         job = photo_job.group(1)
         self.assertRegex(
             job,
-            r"(?m)^    needs:\n      - ops-prioritize-main\n      - sticker-bundle$",
+            r"(?m)^    needs:\n      - ops-prioritize-main\n      - check-sticker-license$",
         )
         self.assertIn("needs.ops-prioritize-main.result == 'success'", job)
         self.assertIn("needs.ops-prioritize-main.result == 'skipped'", job)
         self.assertIn("github.event_name == 'pull_request'", job)
-        self.assertIn("needs.sticker-bundle.result == 'success'", job)
+        self.assertIn("needs.check-sticker-license.result == 'success'", job)
         self.assertIn("actions: read", job)
         self.assertIn("path: build/sticker-bundle", job)
         self.assertIn("uses: docker/setup-buildx-action@v4.4.1", job)
@@ -137,7 +137,7 @@ class DockerImageMirrorTests(unittest.TestCase):
     def test_compose_e2e_reuses_the_loaded_testcontainers_postgres_image(self) -> None:
         workflow = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
         compose_job = re.search(
-            r"(?ms)^  compose:\n(.*?)(?=^  [a-z0-9-]+:|\Z)", workflow
+            r"(?ms)^  test-compose:\n(.*?)(?=^  [a-z0-9-]+:|\Z)", workflow
         )
         self.assertIsNotNone(compose_job, "Compose job is missing")
         job = compose_job.group(1)
@@ -154,7 +154,7 @@ class DockerImageMirrorTests(unittest.TestCase):
     def test_compose_rustfs_lane_uses_digest_pinned_ghcr_image(self) -> None:
         workflow = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
         compose_job = re.search(
-            r"(?ms)^  compose:\n(.*?)(?=^  [a-z0-9-]+:|\Z)", workflow
+            r"(?ms)^  test-compose:\n(.*?)(?=^  [a-z0-9-]+:|\Z)", workflow
         )
         self.assertIsNotNone(compose_job, "Compose job is missing")
         job = compose_job.group(1)
@@ -177,7 +177,7 @@ class DockerImageMirrorTests(unittest.TestCase):
     def test_compose_lane_uses_the_pinned_ghcr_busybox_mirror(self) -> None:
         workflow = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
         compose_job = re.search(
-            r"(?ms)^  compose:\n(.*?)(?=^  [a-z0-9-]+:|\Z)", workflow
+            r"(?ms)^  test-compose:\n(.*?)(?=^  [a-z0-9-]+:|\Z)", workflow
         )
         self.assertIsNotNone(compose_job, "Compose job is missing")
         job = compose_job.group(1)
@@ -187,12 +187,12 @@ class DockerImageMirrorTests(unittest.TestCase):
         )
         self.assertRegex(
             job,
-            r"(?m)^    needs:\n      - ops-prioritize-main\n      - sticker-bundle$",
+            r"(?m)^    needs:\n      - ops-prioritize-main\n      - check-sticker-license$",
         )
         self.assertIn("needs.ops-prioritize-main.result == 'success'", job)
         self.assertIn("needs.ops-prioritize-main.result == 'skipped'", job)
         self.assertIn("github.event_name == 'pull_request'", job)
-        self.assertIn("needs.sticker-bundle.result == 'success'", job)
+        self.assertIn("needs.check-sticker-license.result == 'success'", job)
         self.assertIn("packages: read", job)
         self.assertIn("docker login ghcr.io", job)
         self.assertIn(f"BUSYBOX_IMAGE: {image}", job)

@@ -59,13 +59,13 @@ dispatch_needs="$(query '.jobs."ops-dispatch-pr-ci-recovery".needs[]')"
   fail 'the recovery dispatch job must use the ops stage naming contract'
 [[ "$(query '.jobs."ops-dispatch-pr-ci-recovery".permissions | keys | join(",")')" == 'actions' ]] ||
   fail 'the recovery dispatch job must have only Actions write permission'
-[[ "$dispatch_needs" == *'ops-prioritize-main'* && "$dispatch_needs" == *'lint'* ]] ||
+[[ "$dispatch_needs" == *'ops-prioritize-main'* && "$dispatch_needs" == *'lint-go'* ]] ||
   fail 'cancelled PR recovery must be dispatched after the main lint lane starts'
 [[ "$(query '.jobs."ops-dispatch-pr-ci-recovery".timeout-minutes')" == 5 ]] ||
   fail 'dispatching PR recovery must remain short-lived in the main concurrency group'
 dispatch_if="$(query '.jobs."ops-dispatch-pr-ci-recovery".if')"
 dispatch_targets_if="outputs.cancelled_pr_run_targets != ''"
-[[ "$dispatch_if" == *"needs.ops-prioritize-main.result == 'success'"* && "$dispatch_if" == *"needs.ops-prioritize-main.result == 'skipped'"* && "$dispatch_if" == *"github.event_name == 'pull_request'"* && "$dispatch_if" == *"github.event_name == 'push'"* && "$dispatch_if" == *'needs.lint.result != '\''skipped'\'''* && "$dispatch_if" == *"$dispatch_targets_if"* ]] ||
+[[ "$dispatch_if" == *"needs.ops-prioritize-main.result == 'success'"* && "$dispatch_if" == *"needs.ops-prioritize-main.result == 'skipped'"* && "$dispatch_if" == *"github.event_name == 'pull_request'"* && "$dispatch_if" == *"github.event_name == 'push'"* && "$dispatch_if" == *'needs.lint-go.result != '\''skipped'\'''* && "$dispatch_if" == *"$dispatch_targets_if"* ]] ||
   fail 'cancelled PR recovery must dispatch only after main fan-out starts'
 dispatch_step="$(query '.jobs."ops-dispatch-pr-ci-recovery".steps[] | select(.name == "Dispatch cancelled pull request CI recovery after main fan-out starts") | .run')"
 [[ "$dispatch_step" == *'gh workflow run recover-cancelled-pr-ci.yml'* && "$dispatch_step" == *'--ref main'* && "$dispatch_step" == *'-f issue=MAIN-2765'* && "$dispatch_step" == *'cancelled_pr_run_targets=$CANCELLED_PR_RUN_TARGETS'* && "$dispatch_step" != *'sleep 60'* ]] ||
@@ -248,7 +248,7 @@ GITHUB_REPOSITORY=example/repo \
 [[ "$(<"$test_tmp/staggered-reads")" == 3 && "$(<"$test_tmp/staggered-reruns")" == $'123\n456' ]] ||
   fail 'recovery must poll both IDs together and rerun each as soon as cancellation completes'
 
-expected_roots=$'browser-acceptance\nbrowser-acceptance-image\nci-main\ncompose\ncss\ndemo-web-artifact\ndeploy-workflow\ndocker\ne2e-admin\nlint\nphotothumb-runtime\npublish-demo-image\nreal-server-fixtures\nsmoke\nsql-lint\nsqlc\nsticker-bundle\ntest-migrations\nwebsocket-d1\nwebsocket-permanent-exchange'
+expected_roots=$'build-browser-acceptance-image\nbuild-server-image\ncheck-demo-web-pin\ncheck-deploy-workflow\ncheck-sqlc-drift\ncheck-sticker-license\nlint-css\nlint-go\nlint-sql\npublish-demo-image\ntest-browser-acceptance\ntest-compose\ntest-e2e-admin\ntest-go\ntest-migrations\ntest-photo-worker\ntest-real-server-fixtures\ntest-smoke\ntest-websocket-d1\ntest-websocket-permanent-exchange'
 actual_roots="$(query '.jobs | to_entries[] | select(.key != "ops-prioritize-main" and .key != "ci" and .key != "ops-dispatch-pr-ci-recovery" and (.value.needs == "ops-prioritize-main" or (.value.needs[] == "ops-prioritize-main"))) | .key' | LC_ALL=C sort)"
 [[ "$actual_roots" == "$expected_roots" ]] ||
   fail 'every CI fan-out root must depend on the main priority job'
@@ -328,17 +328,17 @@ ci_if="$(query '.jobs.ci.if')"
 [[ "$(query '.jobs.ci.steps[] | select(.name == "Require all CI lanes to pass") | .run')" == *'expected_priority_result=success'* ]] ||
   fail 'the required ci summary must fail when main priority does not succeed'
 summary_run="$(query '.jobs.ci.steps[] | select(.name == "Require all CI lanes to pass") | .run')"
-[[ "$summary_run" == *'"$BROWSER_ACCEPTANCE_IMAGE_RESULT" != "success"'* && "$summary_run" != *'expected_browser_acceptance_image_result=skipped'* ]] ||
+[[ "$summary_run" == *'"$BUILD_BROWSER_ACCEPTANCE_IMAGE_RESULT" != "success"'* && "$summary_run" != *'expected_browser_acceptance_image_result=skipped'* ]] ||
   fail 'the required ci summary must require browser images on pull requests and main pushes'
 
-browser_image_if="$(query '.jobs."browser-acceptance-image".if')"
-[[ "$browser_image_if" == *"needs.browser-acceptance.result == 'success'"* ]] ||
+browser_image_if="$(query '.jobs."build-browser-acceptance-image".if')"
+[[ "$browser_image_if" == *"needs.test-browser-acceptance.result == 'success'"* ]] ||
   fail 'browser acceptance images must run only after the runtime lane succeeds'
 
-priority_test_step="$(query '.jobs."deploy-workflow".steps[] | select(.name == "Check main CI queue priority contract") | .run')"
+priority_test_step="$(query '.jobs."check-deploy-workflow".steps[] | select(.name == "Check main CI queue priority contract") | .run')"
 [[ "$priority_test_step" == '.github/scripts/test-ci-main-priority.sh' ]] ||
   fail 'the deploy workflow contract job must run the priority contract test'
-contract_syntax_step="$(query '.jobs."deploy-workflow".steps[] | select(.name == "Check workflow contract script syntax") | .run')"
+contract_syntax_step="$(query '.jobs."check-deploy-workflow".steps[] | select(.name == "Check workflow contract script syntax") | .run')"
 [[ "$contract_syntax_step" == *'.github/scripts/test-ci-main-priority.sh'* && "$contract_syntax_step" == *'shellcheck'* ]] ||
   fail 'the deploy workflow contract job must syntax-check and lint the priority contract test'
 

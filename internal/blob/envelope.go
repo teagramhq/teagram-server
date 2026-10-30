@@ -144,6 +144,7 @@ type envelopeHeader struct {
 type EnvelopeHeaderInfo struct {
 	KeyVersion       uint32
 	LogicalBytes     int64
+	WrapSalt         [envelopeSaltLen]byte `json:"-"`
 	HasEnvelopeMagic bool
 	HasKeyVersion    bool
 	HasLogicalBytes  bool
@@ -255,6 +256,7 @@ func InspectEnvelopeHeader(
 	info.KeyVersion = h.keyVersion
 	info.HasKeyVersion = h.keyVersion != 0
 	info.LogicalBytes = h.plainLen
+	copy(info.WrapSalt[:], h.raw[22:envelopeBoundLen])
 	info.HasLogicalBytes = true
 	if h.objectLen() != physicalBytes {
 		return info, fmt.Errorf("%w: physical size does not match header", ErrEnvelope)
@@ -325,6 +327,15 @@ func chunkNonce(nonce *[gcmNonceLen]byte, i int64) []byte {
 
 // openDataKey authenticates h against key and returns the data key's cipher.
 func (e *Encrypted) openDataKey(h *envelopeHeader, key string) (cipher.AEAD, error) {
+	dek, err := e.unwrapDataKey(h, key)
+	if err != nil {
+		return nil, err
+	}
+	defer clear(dek)
+	return newGCM(dek)
+}
+
+func (e *Encrypted) unwrapDataKey(h *envelopeHeader, key string) ([]byte, error) {
 	kek, ok := e.ring.key(h.keyVersion)
 	if !ok {
 		return nil, fmt.Errorf("%w: key version %d not in the ring", ErrEnvelope, h.keyVersion)
@@ -338,7 +349,7 @@ func (e *Encrypted) openDataKey(h *envelopeHeader, key string) (cipher.AEAD, err
 	if err != nil {
 		return nil, fmt.Errorf("%w: header does not authenticate", ErrEnvelope)
 	}
-	return newGCM(dek)
+	return dek, nil
 }
 
 // Put seals r under key and returns the plaintext length stored. r must have a
