@@ -7,6 +7,8 @@ package db
 
 import (
 	"context"
+
+	"github.com/jackc/pgx/v5/pgtype"
 )
 
 const activeBotTokenHash = `-- name: ActiveBotTokenHash :one
@@ -65,7 +67,26 @@ func (q *Queries) AdvanceBotUpdateOffset(ctx context.Context, arg AdvanceBotUpda
 }
 
 const botMessageEvents = `-- name: BotMessageEvents :many
-SELECT e.pts, e.type, e.local_id
+SELECT e.pts,
+       e.type,
+       e.local_id,
+       m.owner_id AS message_owner_id,
+       m.local_id AS message_local_id,
+       m.peer_type AS message_peer_type,
+       m.peer_id AS message_peer_id,
+       m.from_id AS message_from_id,
+       m.date AS message_date,
+       m.message AS message_text,
+       m.out AS message_out,
+       m.deleted AS message_deleted,
+       m.action_type AS message_action_type,
+       m.file_id AS message_file_id,
+       m.sticker_document_id AS message_sticker_document_id,
+       sender.id AS sender_id,
+       sender.kind AS sender_kind,
+       sender.first_name AS sender_first_name,
+       sender.last_name AS sender_last_name,
+       sender_username.handle AS sender_username
 FROM message_events AS e
 JOIN messages AS m
   ON m.owner_id = e.owner_id
@@ -73,6 +94,9 @@ JOIN messages AS m
 JOIN users AS sender
   ON sender.id = m.from_id
  AND sender.kind = 'human'
+LEFT JOIN usernames AS sender_username
+  ON sender_username.owner_type = 'user'
+ AND sender_username.owner_id = sender.id
 WHERE e.owner_id = $1
   AND e.pts >= $2::bigint
   AND e.type = 1
@@ -100,9 +124,26 @@ type BotMessageEventsParams struct {
 }
 
 type BotMessageEventsRow struct {
-	Pts     int64
-	Type    int16
-	LocalID int64
+	Pts                      int64
+	Type                     int16
+	LocalID                  int64
+	MessageOwnerID           int64
+	MessageLocalID           int64
+	MessagePeerType          int16
+	MessagePeerID            int64
+	MessageFromID            int64
+	MessageDate              pgtype.Timestamptz
+	MessageText              string
+	MessageOut               bool
+	MessageDeleted           bool
+	MessageActionType        int16
+	MessageFileID            int64
+	MessageStickerDocumentID *int64
+	SenderID                 int64
+	SenderKind               string
+	SenderFirstName          string
+	SenderLastName           string
+	SenderUsername           *string
 }
 
 // BotMessageEvents returns only retained incoming private text-message events.
@@ -117,7 +158,28 @@ func (q *Queries) BotMessageEvents(ctx context.Context, arg BotMessageEventsPara
 	var items []BotMessageEventsRow
 	for rows.Next() {
 		var i BotMessageEventsRow
-		if err := rows.Scan(&i.Pts, &i.Type, &i.LocalID); err != nil {
+		if err := rows.Scan(
+			&i.Pts,
+			&i.Type,
+			&i.LocalID,
+			&i.MessageOwnerID,
+			&i.MessageLocalID,
+			&i.MessagePeerType,
+			&i.MessagePeerID,
+			&i.MessageFromID,
+			&i.MessageDate,
+			&i.MessageText,
+			&i.MessageOut,
+			&i.MessageDeleted,
+			&i.MessageActionType,
+			&i.MessageFileID,
+			&i.MessageStickerDocumentID,
+			&i.SenderID,
+			&i.SenderKind,
+			&i.SenderFirstName,
+			&i.SenderLastName,
+			&i.SenderUsername,
+		); err != nil {
 			return nil, err
 		}
 		items = append(items, i)

@@ -31,7 +31,26 @@ RETURNING update_offset;
 -- Other pts values remain gaps; the lower-bound query never depends on finding
 -- a row at every offset.
 -- name: BotMessageEvents :many
-SELECT e.pts, e.type, e.local_id
+SELECT e.pts,
+       e.type,
+       e.local_id,
+       m.owner_id AS message_owner_id,
+       m.local_id AS message_local_id,
+       m.peer_type AS message_peer_type,
+       m.peer_id AS message_peer_id,
+       m.from_id AS message_from_id,
+       m.date AS message_date,
+       m.message AS message_text,
+       m.out AS message_out,
+       m.deleted AS message_deleted,
+       m.action_type AS message_action_type,
+       m.file_id AS message_file_id,
+       m.sticker_document_id AS message_sticker_document_id,
+       sender.id AS sender_id,
+       sender.kind AS sender_kind,
+       sender.first_name AS sender_first_name,
+       sender.last_name AS sender_last_name,
+       sender_username.handle AS sender_username
 FROM message_events AS e
 JOIN messages AS m
   ON m.owner_id = e.owner_id
@@ -39,6 +58,9 @@ JOIN messages AS m
 JOIN users AS sender
   ON sender.id = m.from_id
  AND sender.kind = 'human'
+LEFT JOIN usernames AS sender_username
+  ON sender_username.owner_type = 'user'
+ AND sender_username.owner_id = sender.id
 WHERE e.owner_id = sqlc.arg(owner_id)
   AND e.pts >= sqlc.arg(from_pts)::bigint
   AND e.type = 1

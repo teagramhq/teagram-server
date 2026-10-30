@@ -59,6 +59,8 @@ type fakeUpdatesStore struct {
 	lastFromPts     int64
 	lastLimit       int
 	advancedOffsets []int64
+	messageLookups  int
+	senderLookups   int
 }
 
 type firstQueryUpdatesStore struct {
@@ -68,7 +70,7 @@ type firstQueryUpdatesStore struct {
 	queryCount atomic.Int32
 }
 
-func (s *firstQueryUpdatesStore) BotMessageEvents(ctx context.Context, botID, fromPts int64, limit int) ([]store.Event, error) {
+func (s *firstQueryUpdatesStore) BotMessageEvents(ctx context.Context, botID, fromPts int64, limit int) ([]store.BotMessageEvent, error) {
 	if s.queryCount.Add(1) == 1 {
 		close(s.firstQuery)
 		return nil, nil
@@ -83,7 +85,7 @@ type blockingFirstQueryUpdatesStore struct {
 	queryCount atomic.Int32
 }
 
-func (s *blockingFirstQueryUpdatesStore) BotMessageEvents(ctx context.Context, botID, fromPts int64, limit int) ([]store.Event, error) {
+func (s *blockingFirstQueryUpdatesStore) BotMessageEvents(ctx context.Context, botID, fromPts int64, limit int) ([]store.BotMessageEvent, error) {
 	if s.queryCount.Add(1) == 1 {
 		close(s.firstQuery)
 		<-ctx.Done()
@@ -110,25 +112,35 @@ func (s *fakeUpdatesStore) AdvanceBotUpdateOffset(_ context.Context, botID int64
 	return s.offset, nil
 }
 
-func (s *fakeUpdatesStore) BotMessageEvents(_ context.Context, botID, fromPts int64, limit int) ([]store.Event, error) {
+func (s *fakeUpdatesStore) BotMessageEvents(_ context.Context, botID, fromPts int64, limit int) ([]store.BotMessageEvent, error) {
 	if botID != 123456 {
 		return nil, store.ErrBotTokenNotFound
 	}
 	s.lastFromPts = fromPts
 	s.lastLimit = limit
-	var events []store.Event
+	var events []store.BotMessageEvent
 	for _, event := range s.events {
-		if event.Pts >= int(fromPts) && event.Type == store.EventNewMessage {
-			events = append(events, event)
-			if len(events) == limit {
-				break
-			}
+		if int64(event.Pts) < fromPts || event.Type != store.EventNewMessage {
+			continue
+		}
+		message, exists := s.messages[event.LocalID]
+		if !exists || message.OwnerID != botID || message.PeerType != store.PeerTypeUser || message.PeerID != message.FromID || message.FromID <= 0 || message.Out || message.Deleted || message.Action != 0 || message.Text == "" || message.FileID != 0 || message.StickerDocumentID != nil {
+			continue
+		}
+		sender, exists := s.users[message.FromID]
+		if !exists || sender.Kind != store.UserKindHuman {
+			continue
+		}
+		events = append(events, store.BotMessageEvent{Pts: int64(event.Pts), Type: event.Type, LocalID: event.LocalID, Message: message, Sender: sender})
+		if len(events) == limit {
+			break
 		}
 	}
 	return events, nil
 }
 
 func (s *fakeUpdatesStore) MessageByOwnerLocal(_ context.Context, ownerID, localID int64) (store.Message, bool, error) {
+	s.messageLookups++
 	message, ok := s.messages[localID]
 	return message, ok && message.OwnerID == ownerID, nil
 }
@@ -137,6 +149,7 @@ func (s *fakeUpdatesStore) UserByID(ctx context.Context, id int64) (store.User, 
 	if id == 123456 {
 		return s.fakeStore.UserByID(ctx, id)
 	}
+	s.senderLookups++
 	user, ok := s.users[id]
 	return user, ok, nil
 }
@@ -817,6 +830,9 @@ func TestGetUpdatesReturnsOnlyIncomingPrivateTextWithExactFields(t *testing.T) {
 	const want = `{"ok":true,"result":[{"update_id":7,"message":{"message_id":42,"from":{"id":987,"first_name":"Ada","last_name":"Lovelace","username":"ada"},"chat":{"id":987,"first_name":"Ada","last_name":"Lovelace","username":"ada","type":"private"},"date":1700000000,"text":"hello"}}]}` + "\n"
 	if response.Code != http.StatusOK || response.Body.String() != want {
 		t.Fatalf("getUpdates response = (%d, %q), want 200 %q", response.Code, response.Body.String(), want)
+	}
+	if st.messageLookups != 0 || st.senderLookups != 0 {
+		t.Fatalf("getUpdates performed %d message and %d sender lookups, want a single joined event query", st.messageLookups, st.senderLookups)
 	}
 }
 

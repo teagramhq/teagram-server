@@ -29,8 +29,7 @@ const getUpdatesConflictBody = "{\"ok\":false,\"error_code\":409,\"description\"
 type getUpdatesStore interface {
 	BotUpdateOffset(context.Context, int64, string) (int64, error)
 	AdvanceBotUpdateOffset(context.Context, int64, string, int64) (int64, error)
-	BotMessageEvents(context.Context, int64, int64, int) ([]store.Event, error)
-	MessageByOwnerLocal(context.Context, int64, int64) (store.Message, bool, error)
+	BotMessageEvents(context.Context, int64, int64, int) ([]store.BotMessageEvent, error)
 }
 
 type getUpdatesParams struct {
@@ -274,12 +273,13 @@ func (h *handler) getUpdates(w http.ResponseWriter, r *http.Request, botID int64
 	}
 	timedOut := false
 	var updates []botAPIUpdate
+	var readErr error
 	for {
 		if poll.wasSuperseded() {
 			h.updatePollConflict(w, botID, method)
 			return
 		}
-		events, readErr := st.BotMessageEvents(poll.ctx, botID, effectiveOffset, params.limit)
+		updates, readErr = h.readBotUpdates(poll.ctx, st, botID, effectiveOffset, params.limit)
 		if readErr != nil {
 			if poll.wasSuperseded() {
 				h.updatePollConflict(w, botID, method)
@@ -289,19 +289,6 @@ func (h *handler) getUpdates(w http.ResponseWriter, r *http.Request, botID int64
 				return
 			}
 			h.log.Error("Bot API update log read failed", "bot_id", botID, "method", method, "err", readErr)
-			h.write(w, http.StatusInternalServerError, []byte(serverErrorBody), botID, method)
-			return
-		}
-		updates, readErr = h.hydrateBotUpdates(poll.ctx, st, botID, events, effectiveOffset, params.limit)
-		if readErr != nil {
-			if poll.wasSuperseded() {
-				h.updatePollConflict(w, botID, method)
-				return
-			}
-			if r.Context().Err() != nil {
-				return
-			}
-			h.log.Error("Bot API update hydration failed", "bot_id", botID, "method", method, "err", readErr)
 			h.write(w, http.StatusInternalServerError, []byte(serverErrorBody), botID, method)
 			return
 		}
@@ -378,27 +365,20 @@ func (h *handler) readBotUpdates(ctx context.Context, st getUpdatesStore, botID,
 	if err != nil {
 		return nil, err
 	}
-	return h.hydrateBotUpdates(ctx, st, botID, events, offset, limit)
+	return h.hydrateBotUpdates(botID, events, offset, limit), nil
 }
 
-func (h *handler) hydrateBotUpdates(ctx context.Context, st getUpdatesStore, botID int64, events []store.Event, offset int64, limit int) ([]botAPIUpdate, error) {
+func (h *handler) hydrateBotUpdates(botID int64, events []store.BotMessageEvent, offset int64, limit int) []botAPIUpdate {
 	updates := make([]botAPIUpdate, 0, len(events))
 	for _, event := range events {
-		if event.Type != store.EventNewMessage || int64(event.Pts) < offset {
+		if event.Type != store.EventNewMessage || event.Pts < offset {
 			continue
 		}
-		message, exists, err := st.MessageByOwnerLocal(ctx, botID, event.LocalID)
-		if err != nil {
-			return nil, err
-		}
-		if !exists || message.OwnerID != botID || message.LocalID != event.LocalID || message.PeerType != store.PeerTypeUser || message.Out || message.PeerID != message.FromID || message.FromID <= 0 || message.Deleted || message.Action != 0 || message.Text == "" || message.FileID != 0 || message.StickerDocumentID != nil {
+		message, user := event.Message, event.Sender
+		if message.OwnerID != botID || message.LocalID != event.LocalID || message.PeerType != store.PeerTypeUser || message.Out || message.PeerID != message.FromID || message.FromID <= 0 || message.Deleted || message.Action != 0 || message.Text == "" || message.FileID != 0 || message.StickerDocumentID != nil {
 			continue
 		}
-		user, exists, err := h.store.UserByID(ctx, message.FromID)
-		if err != nil {
-			return nil, err
-		}
-		if !exists || user.Kind != store.UserKindHuman {
+		if user.ID != message.FromID || user.Kind != store.UserKindHuman {
 			continue
 		}
 		username := ""
@@ -406,7 +386,7 @@ func (h *handler) hydrateBotUpdates(ctx context.Context, st getUpdatesStore, bot
 			username = *user.Username
 		}
 		updates = append(updates, botAPIUpdate{
-			UpdateID: int64(event.Pts),
+			UpdateID: event.Pts,
 			Message: botAPIUpdateMessage{
 				MessageID: message.LocalID,
 				From:      botAPIUpdateUser{ID: user.ID, FirstName: user.FirstName, LastName: user.LastName, Username: username},
@@ -419,7 +399,7 @@ func (h *handler) hydrateBotUpdates(ctx context.Context, st getUpdatesStore, bot
 			break
 		}
 	}
-	return updates, nil
+	return updates
 }
 
 func (h *handler) updatePollConflict(w http.ResponseWriter, botID int64, method string) {

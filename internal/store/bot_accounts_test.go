@@ -130,8 +130,11 @@ func TestBotUpdatesReadIncomingTextAndKeepConfirmedOffsetMonotonic(t *testing.T)
 	if err != nil {
 		t.Fatalf("read bot message events: %v", err)
 	}
-	if len(events) != 2 || events[0].Pts != incomingPts || events[1].Pts != afterGapPts || events[0].Type != store.EventNewMessage || events[1].Type != store.EventNewMessage {
+	if len(events) != 2 || events[0].Pts != int64(incomingPts) || events[1].Pts != int64(afterGapPts) || events[0].Type != store.EventNewMessage || events[1].Type != store.EventNewMessage {
 		t.Fatalf("bot events = %+v, want incoming texts at pts %d and %d around the bot-send gap", events, incomingPts, afterGapPts)
+	}
+	if got := events[0]; got.Message.OwnerID != bot.ID || got.Message.LocalID != events[0].LocalID || got.Message.FromID != human.ID || got.Message.Text != "hello" || got.Sender.ID != human.ID || got.Sender.Kind != store.UserKindHuman || got.Sender.FirstName != human.FirstName {
+		t.Fatalf("bot event projection = %+v, want message and sender hydrated in the event query", got)
 	}
 
 	confirmed := int64(incomingPts + 1)
@@ -152,7 +155,7 @@ func TestBotUpdatesReadIncomingTextAndKeepConfirmedOffsetMonotonic(t *testing.T)
 	if err != nil {
 		t.Fatalf("re-read bot message events: %v", err)
 	}
-	if len(events) != 1 || events[0].Pts != afterGapPts {
+	if len(events) != 1 || events[0].Pts != int64(afterGapPts) {
 		t.Fatalf("events after offset inside bot-send gap = %+v, want pts %d without replaying pts %d", events, afterGapPts, incomingPts)
 	}
 	confirmed = int64(afterGapPts + 1)

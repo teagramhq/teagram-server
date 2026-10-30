@@ -532,7 +532,7 @@ type observedBotUpdateStore struct {
 	queryOnce  sync.Once
 }
 
-func (s *observedBotUpdateStore) BotMessageEvents(ctx context.Context, botID, fromPts int64, limit int) ([]store.Event, error) {
+func (s *observedBotUpdateStore) BotMessageEvents(ctx context.Context, botID, fromPts int64, limit int) ([]store.BotMessageEvent, error) {
 	events, err := s.Store.BotMessageEvents(ctx, botID, fromPts, limit)
 	if err == nil && len(events) == 0 && s.emptyQuery != nil {
 		s.queryOnce.Do(func() { close(s.emptyQuery) })
