@@ -1112,10 +1112,11 @@ jobs:
       - name: Require shellcheck and yq
         run: shellcheck --version && yq --version
 
-      - name: Lint deployment, performance, and real-client workflows
+      - name: Lint deployment, demo, performance, and real-client workflows
         run: |
           actionlint -ignore 'label "ubuntu-26.04" is unknown' \
             .github/workflows/deploy.yml \
+            .github/workflows/deploy-demo.yml \
             .github/workflows/perf.yml \
             .github/workflows/real-client-browser-flow.yml
           actionlint -shellcheck= -ignore 'label "ubuntu-26.04" is unknown' .github/workflows/ci.yml .github/workflows/recover-cancelled-pr-ci.yml
