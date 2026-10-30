@@ -255,6 +255,79 @@ SH
   fi
 )
 
+check_demo_deploy_target_download() (
+  set -euo pipefail
+  local tmp
+  tmp="$(mktemp -d)"
+  trap 'rm -rf "$tmp"' EXIT
+  demo_query '.jobs.deploy-demo.steps[] | select(.id == "target") | .run' > "$tmp/download.sh"
+  cat > "$tmp/gh" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+[[ "$1" == run && "$2" == download && "$3" == "$TEST_DEPLOY_RUN_ID" ]]
+shift 3
+repo=
+name=
+destination=
+while (($#)); do
+  case "$1" in
+    --repo) repo="$2"; shift 2 ;;
+    --name) name="$2"; shift 2 ;;
+    --dir) destination="$2"; shift 2 ;;
+    *) exit 1 ;;
+  esac
+done
+[[ "$repo" == test/server ]]
+[[ "$name" == "demo-deploy-target-$TEST_DEPLOY_RUN_ID" ]]
+[[ "$destination" == "$RUNNER_TEMP/demo-deploy-target" ]]
+mkdir -p "$destination"
+case "$TEST_TARGET_CASE" in
+  valid)
+    printf '{"deploy_sha":"%s","ci_run_id":"%s"}\n' "$TEST_DEPLOY_SHA" "$TEST_CI_RUN_ID" > "$destination/demo-deploy-target.json"
+    ;;
+  missing-file) ;;
+  malformed-json)
+    printf '{"deploy_sha":"%s","ci_run_id":' "$TEST_DEPLOY_SHA" > "$destination/demo-deploy-target.json"
+    ;;
+  missing-deploy-sha)
+    printf '{"ci_run_id":"%s"}\n' "$TEST_CI_RUN_ID" > "$destination/demo-deploy-target.json"
+    ;;
+  missing-ci-run-id)
+    printf '{"deploy_sha":"%s"}\n' "$TEST_DEPLOY_SHA" > "$destination/demo-deploy-target.json"
+    ;;
+  invalid-deploy-sha)
+    printf '{"deploy_sha":"not-a-sha","ci_run_id":"%s"}\n' "$TEST_CI_RUN_ID" > "$destination/demo-deploy-target.json"
+    ;;
+  invalid-ci-run-id)
+    printf '{"deploy_sha":"%s","ci_run_id":"not-a-run-id"}\n' "$TEST_DEPLOY_SHA" > "$destination/demo-deploy-target.json"
+    ;;
+  *) exit 1 ;;
+esac
+SH
+  chmod +x "$tmp/gh"
+  # These overrides are consumed by the extracted workflow child process.
+  # shellcheck disable=SC2030,SC2031
+  export PATH="$tmp:$PATH" GITHUB_REPOSITORY=test/server
+  # shellcheck disable=SC2030,SC2031
+  export RUNNER_TEMP="$tmp/runner" GITHUB_OUTPUT="$tmp/output"
+  export DEPLOY_RUN_ID=111111111 TEST_DEPLOY_RUN_ID=111111111
+  export TEST_DEPLOY_SHA=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+  export TEST_CI_RUN_ID=222222222
+
+  local target_case
+  for target_case in valid missing-file malformed-json missing-deploy-sha missing-ci-run-id invalid-deploy-sha invalid-ci-run-id; do
+    : > "$GITHUB_OUTPUT"
+    rm -rf "$RUNNER_TEMP/demo-deploy-target"
+    if [[ "$target_case" == valid ]]; then
+      TEST_TARGET_CASE="$target_case" GH_TOKEN=test-token bash -euo pipefail "$tmp/download.sh" > /dev/null 2>&1
+      [[ "$(cat "$GITHUB_OUTPUT")" == $'sha='"$TEST_DEPLOY_SHA"$'\nci_run_id='"$TEST_CI_RUN_ID" ]] ||
+        fail 'the demo deploy must emit the server SHA and selected CI run ID from its target artifact'
+    elif TEST_TARGET_CASE="$target_case" GH_TOKEN=test-token bash -euo pipefail "$tmp/download.sh" > /dev/null 2>&1; then
+      fail "the demo deploy must reject invalid target artifact metadata ($target_case)"
+    fi
+  done
+)
+
 check_demo_deploy_result() (
   set -euo pipefail
   local tmp
@@ -443,6 +516,8 @@ check_contract() {
     fail 'the demo gate must read the Tailscale OAuth client ID from the demo environment'
   [[ "$(query '.jobs.deploy-demo.steps[0].env.TS_OAUTH_SECRET')" == '${{ secrets.TS_OAUTH_SECRET }}' ]] ||
     fail 'the demo gate must read the Tailscale OAuth secret from the demo environment'
+  [[ "$(query '.jobs.deploy-demo.steps[] | select(.id == "target") | .env.DEPLOY_RUN_ID')" == '${{ github.event.workflow_run.id }}' ]] ||
+    fail 'the target artifact must be selected by the triggering Deploy. run ID'
   local demo_gate_run
   demo_gate_run="$(query '.jobs.deploy-demo.steps[0].run')"
   [[ "$demo_gate_run" == *'enabled=true'* && "$demo_gate_run" == *'enabled=false'* ]] ||
@@ -723,6 +798,7 @@ check_ci_contract
 if [[ "${1:-}" != '--contract-only' ]]; then
   check_demo_credential_gate
   check_demo_deploy_result
+  check_demo_deploy_target_download
   self_test
   printf 'deploy workflow contract holds\n'
 fi
