@@ -1399,12 +1399,18 @@ jobs:
             --disable=metrics-server \
             --tls-san=127.0.0.1 \
             --write-kubeconfig-mode=644
+          node_registered=false
           for attempt in $(seq 1 90); do
-            if docker exec k8s-manifest-check kubectl get nodes --no-headers >/dev/null 2>&1; then
+            if docker exec k8s-manifest-check kubectl get nodes --no-headers 2>/dev/null | grep --quiet .; then
+              node_registered=true
               break
             fi
             sleep 2
           done
+          if [[ "$node_registered" != true ]]; then
+            echo "k3s API did not register a node within 180 seconds" >&2
+            exit 1
+          fi
           docker exec k8s-manifest-check kubectl wait \
             --for=condition=Ready node --all --timeout=180s
           docker cp k8s-manifest-check:/etc/rancher/k3s/k3s.yaml "$RUNNER_TEMP/k3s.yaml"
@@ -1539,12 +1545,18 @@ jobs:
             --disable=metrics-server \
             --tls-san=127.0.0.1 \
             --write-kubeconfig-mode=644
+          node_registered=false
           for attempt in $(seq 1 90); do
-            if docker exec teagram-k3s kubectl get nodes --no-headers >/dev/null 2>&1; then
+            if docker exec teagram-k3s kubectl get nodes --no-headers 2>/dev/null | grep --quiet .; then
+              node_registered=true
               break
             fi
             sleep 2
           done
+          if [[ "$node_registered" != true ]]; then
+            echo "k3s API did not register a node within 180 seconds" >&2
+            exit 1
+          fi
           docker exec teagram-k3s kubectl wait --for=condition=Ready node --all --timeout=180s
           docker exec --interactive teagram-k3s k3s ctr images import - < "$RUNNER_TEMP/k8s-images.tar"
           docker cp teagram-k3s:/etc/rancher/k3s/k3s.yaml "$RUNNER_TEMP/k3s.yaml"
@@ -1789,8 +1801,8 @@ jobs:
             "test-migrations=$TEST_MIGRATIONS_RESULT"
             "check-deploy-workflow=$CHECK_DEPLOY_WORKFLOW_RESULT"
             "check-demo-web-pin=$CHECK_DEMO_WEB_PIN_RESULT"
-            "k8s-manifests=$K8S_MANIFESTS_RESULT"
-            "k8s-deploy=$K8S_DEPLOY_RESULT"
+            "check-k8s-manifests=$K8S_MANIFESTS_RESULT"
+            "test-k8s-deploy=$K8S_DEPLOY_RESULT"
           )
           if [[ "$MAIN_PRIORITY_RESULT" != "$expected_priority_result" ||
                 "$TEST_GO_RESULT" != "success" ||

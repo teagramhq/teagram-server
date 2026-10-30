@@ -138,6 +138,8 @@ check_ci_contract() {
   [[ "$manifest_start" == *"docker exec k8s-manifest-check kubectl get nodes"* &&
      "$manifest_start" == *"docker exec k8s-manifest-check kubectl wait"* ]] ||
     ci_fail 'the manifest check must invoke kubectl directly in its k3s container'
+  [[ "$manifest_start" == *"kubectl get nodes --no-headers 2>/dev/null | grep --quiet ."* ]] ||
+    ci_fail 'the manifest check must wait for K3s to register a node before kubectl wait'
   [[ "$manifest_start" != *"k3s kubectl"* ]] ||
     ci_fail 'the manifest check must not invoke kubectl through the k3s CLI'
 
@@ -145,6 +147,8 @@ check_ci_contract() {
   [[ "$deploy_start" == *"docker exec teagram-k3s kubectl get nodes"* &&
      "$deploy_start" == *"docker exec teagram-k3s kubectl wait"* ]] ||
     ci_fail 'the deployment check must invoke kubectl directly in its k3s container'
+  [[ "$deploy_start" == *"kubectl get nodes --no-headers 2>/dev/null | grep --quiet ."* ]] ||
+    ci_fail 'the deployment check must wait for K3s to register a node before kubectl wait'
   [[ "$deploy_start" != *"teagram-k3s k3s kubectl"* ]] ||
     ci_fail 'the deployment check must not invoke kubectl through the k3s CLI'
 }
