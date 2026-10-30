@@ -164,6 +164,7 @@ SH
   export GITHUB_OUTPUT="$tmp/output" TEST_COMPARISON GITHUB_EVENT_NAME
   local runner_temp="$tmp/runner"
   mkdir -p "$runner_temp"
+  # shellcheck disable=SC2030,SC2031
   export RUNNER_TEMP="$runner_temp"
   local expected status
   GITHUB_EVENT_NAME=workflow_run
@@ -276,6 +277,7 @@ SH
   # shellcheck disable=SC2030,SC2031
   export PATH="$tmp:$PATH" GITHUB_REPOSITORY=test/server
   export DEPLOY_RUN_ID=111111111 TEST_DEPLOY_RUN_ID=111111111
+  # shellcheck disable=SC2030,SC2031
   export GITHUB_OUTPUT="$tmp/output"
 
   local conclusion expected
