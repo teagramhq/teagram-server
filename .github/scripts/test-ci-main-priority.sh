@@ -89,7 +89,7 @@ printf '%s\n' "$dispatch_step" | bash -n
 rerun_step="$(recovery_query '.jobs."ops-rerun-cancelled-pr-ci".steps[] | select(.name == "Wait for cancellation cleanup and re-run PR CI") | .run')"
 [[ "$rerun_step" == *'actions/workflows/ci.yml/runs'* && "$rerun_step" == *'--paginate'* && "$rerun_step" == *'--method GET'* && "$rerun_step" == *'created=>=$oldest_created_at'* && "$rerun_step" != *'gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${run_id}"'* ]] ||
   fail 'recovery must poll all outstanding runs together through the workflow runs list'
-[[ "$rerun_step" == *'actions/runs/${run_id}/jobs?per_page=100'* && "$rerun_step" == *'select(.name != "ci" and .conclusion == "failure")'* && "$rerun_step" == *'fail-fast already handled it'* ]] ||
+[[ "$rerun_step" == *'actions/runs/${run_id}/jobs?per_page=100'* && "$rerun_step" == *'select(.name != "ci" and .conclusion == "failure")'* && "$rerun_step" == *'the router already handled fail-fast'* ]] ||
   fail 'recovery must not rerun cancelled runs with a failed non-aggregate CI job'
 [[ "$rerun_step" == *'.head_sha'* && "$rerun_step" == *'.pull_requests // []'* && "$rerun_step" == *'.number'* ]] ||
   fail 'recovery must read each cancelled run head SHA and associated pull request numbers'
@@ -227,8 +227,8 @@ GITHUB_REPOSITORY=example/repo \
   bash -c "$rerun_step" > "$test_tmp/failed-job-output" || fail 'a fail-fast-cancelled run must be skipped'
 [[ "$(<"$test_tmp/failed-job-reads")" == 1 && ! -e "$test_tmp/failed-job-reruns" ]] ||
   fail 'recovery must not rerun a cancelled run with a failed CI job'
-[[ "$(<"$test_tmp/failed-job-output")" == *'fail-fast already handled it'* ]] ||
-  fail 'recovery must explain why a fail-fast-cancelled run was skipped'
+[[ "$(<"$test_tmp/failed-job-output")" == *'the router already handled fail-fast'* ]] ||
+  fail 'recovery must explain why a router-cancelled run with failed CI was skipped'
 
 STATUS_MODE=never \
 STATUS_READS_FILE="$test_tmp/bounded-reads" \
@@ -279,28 +279,21 @@ actual_roots="$(query '.jobs | to_entries[] | select(.key != "ops-prioritize-mai
 [[ "$actual_roots" == "$expected_roots" ]] ||
   fail 'every CI fan-out root must depend on the main priority job'
 
-expected_cancel_jobs="$(printf '%s\n' "$expected_roots" | grep -v '^publish-demo-image$')"
-actual_cancel_jobs="$(query '.jobs | to_entries[] | select((.value.if // "") | contains("!cancelled()")) | .key' | LC_ALL=C sort)"
-[[ "$actual_cancel_jobs" == "$expected_cancel_jobs" ]] ||
+expected_pr_gated_jobs="$(printf '%s\n' "$expected_roots" | grep -v '^publish-demo-image$')"
+actual_pr_gated_jobs="$(query '.jobs | to_entries[] | select((.value.if // "") | contains("!cancelled()")) | .key' | LC_ALL=C sort)"
+[[ "$actual_pr_gated_jobs" == "$expected_pr_gated_jobs" ]] ||
   fail 'every pull request CI job except the final aggregator must stop after cancellation'
+[[ "$(query '.jobs.ci.if | contains("always()")')" == true ]] ||
+  fail 'the final ci aggregator must run after cancellation to report a red result'
+cancel_step_count="$(query '[.jobs[] | .steps[]? | select(.name == "Cancel PR workflow run after job failure")] | length')"
+[[ "$cancel_step_count" == 0 ]] ||
+  fail 'PR jobs must leave run cancellation to the CI router'
 while IFS= read -r job; do
   [[ -n "$job" ]] || continue
-  [[ "$(query ".jobs.\"$job\".permissions.actions")" == write ]] ||
-    fail "$job needs Actions write permission to cancel its PR run"
-  [[ "$(query ".jobs.\"$job\".steps[-1].name")" == 'Cancel PR workflow run after job failure' ]] ||
-    fail "$job must cancel its PR run in the final step"
-  cancel_if="$(query ".jobs.\"$job\".steps[-1].if")"
-  [[ "$cancel_if" == *'failure()'* && "$cancel_if" == *"github.event_name == 'pull_request'"* ]] ||
-    fail "$job must cancel only after a PR job failure"
-  [[ "$(query ".jobs.\"$job\".steps[-1].env.GH_TOKEN")" == '${{ github.token }}' ]] ||
-    fail "$job must use the workflow token for cancellation"
-  cancel_run="$(query ".jobs.\"$job\".steps[-1].run")"
-  [[ "$cancel_run" == *'gh run cancel'* && "$cancel_run" == *'github.run_id'* && "$cancel_run" == *'$GITHUB_REPOSITORY'* ]] ||
-    fail "$job must cancel its current workflow run in the repository"
   job_if="$(query ".jobs.\"$job\".if")"
   [[ "$job_if" == *"github.event_name == 'pull_request' && !cancelled()"* && "$job_if" == *"github.event_name != 'pull_request' && always()"* ]] ||
     fail "$job must stop after a PR cancellation while retaining main-push gates"
-done <<< "$actual_cancel_jobs"
+done <<< "$actual_pr_gated_jobs"
 
 declare -A gated_cache
 is_gated() {

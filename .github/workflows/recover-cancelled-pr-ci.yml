@@ -91,7 +91,7 @@ jobs:
               fi
               if (( failed_job_count > 0 )); then
                 unset "outstanding_pr_run_ids[$run_id]"
-                echo "Skipping cancelled pull request CI run ${run_id}: it has ${failed_job_count} failed CI job(s), so fail-fast already handled it."
+                echo "Skipping cancelled pull request CI run ${run_id}: it has ${failed_job_count} failed CI job(s), so the router already handled fail-fast."
                 continue
               fi
 

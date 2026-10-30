@@ -173,12 +173,6 @@ jobs:
           retention-days: 1
           compression-level: 0
 
-      - name: Cancel PR workflow run after job failure
-        if: ${{ failure() && github.event_name == 'pull_request' }}
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: gh run cancel "${{ github.run_id }}" --repo "$GITHUB_REPOSITORY"
-
   lint-go:
     name: 'lint: go'
     needs: ops-prioritize-main
@@ -188,7 +182,6 @@ jobs:
     timeout-minutes: 20
     permissions:
       contents: read
-      actions: write
 
     steps:
       - uses: actions/checkout@v7.0.1
@@ -233,12 +226,6 @@ jobs:
       - name: Check formatting
         run: make lint-format
 
-      - name: Cancel PR workflow run after job failure
-        if: ${{ failure() && github.event_name == 'pull_request' }}
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: gh run cancel "${{ github.run_id }}" --repo "$GITHUB_REPOSITORY"
-
   lint-sql:
     name: 'lint: sql'
     needs: ops-prioritize-main
@@ -247,7 +234,6 @@ jobs:
     timeout-minutes: 10
     permissions:
       contents: read
-      actions: write
 
     steps:
       - uses: actions/checkout@v7.0.1
@@ -280,12 +266,6 @@ jobs:
             --head "$HEAD_SHA" \
             --sqlfluff .venv-sqlfluff/bin/sqlfluff
 
-      - name: Cancel PR workflow run after job failure
-        if: ${{ failure() && github.event_name == 'pull_request' }}
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: gh run cancel "${{ github.run_id }}" --repo "$GITHUB_REPOSITORY"
-
   test-browser-acceptance:
     name: 'test: browser-acceptance'
     needs: ops-prioritize-main
@@ -294,7 +274,6 @@ jobs:
     timeout-minutes: 10
     permissions:
       contents: read
-      actions: write
 
     steps:
       - uses: actions/checkout@v7.0.1
@@ -350,12 +329,6 @@ jobs:
             and (.services.browser.platform == "linux/arm64")
           ' "$RUNNER_TEMP/browser-acceptance-compose.json"
 
-      - name: Cancel PR workflow run after job failure
-        if: ${{ failure() && github.event_name == 'pull_request' }}
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: gh run cancel "${{ github.run_id }}" --repo "$GITHUB_REPOSITORY"
-
   build-browser-acceptance-image:
     name: 'build: browser-acceptance-image (${{ matrix.arch }})'
     needs:
@@ -366,7 +339,6 @@ jobs:
     timeout-minutes: 25
     permissions:
       contents: read
-      actions: write
     strategy:
       fail-fast: false
       matrix:
@@ -541,12 +513,6 @@ jobs:
             and .qa_shared_worker_silent == "websocket-not-ready"
             and .payloads_retained == 0
           '
-
-      - name: Cancel PR workflow run after job failure
-        if: ${{ failure() && github.event_name == 'pull_request' }}
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: gh run cancel "${{ github.run_id }}" --repo "$GITHUB_REPOSITORY"
 
   test-go:
     name: 'test: go'
@@ -830,21 +796,11 @@ jobs:
           path: ~/.cache/go-build
           key: go-build-${{ runner.os }}-${{ hashFiles('**/go.sum') }}-${{ github.run_id }}-${{ github.run_attempt }}
 
-      - name: Cancel PR workflow run after job failure
-        if: ${{ failure() && github.event_name == 'pull_request' }}
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: gh run cancel "${{ github.run_id }}" --repo "$GITHUB_REPOSITORY"
-
   test-real-server-fixtures:
     name: 'test: real-server-fixtures'
     needs: ops-prioritize-main
     if: ${{ (github.event_name == 'pull_request' && !cancelled() || github.event_name != 'pull_request' && always()) && (needs.ops-prioritize-main.result == 'success' || (needs.ops-prioritize-main.result == 'skipped' && github.event_name == 'pull_request')) }}
     runs-on: ubuntu-26.04
-    permissions:
-      actions: write
-      contents: read
-
     timeout-minutes: 60
     env:
       TESTCONTAINERS_RYUK_DISABLED: "true"
@@ -935,12 +891,6 @@ jobs:
           fi
           free -m
 
-      - name: Cancel PR workflow run after job failure
-        if: ${{ failure() && github.event_name == 'pull_request' }}
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: gh run cancel "${{ github.run_id }}" --repo "$GITHUB_REPOSITORY"
-
   test-websocket-d1:
     name: 'test: websocket-d1'
     needs: ops-prioritize-main
@@ -949,7 +899,6 @@ jobs:
     timeout-minutes: 20
     permissions:
       contents: read
-      actions: write
 
     steps:
       - uses: actions/checkout@v7.0.1
@@ -1023,12 +972,6 @@ jobs:
           D1_SANITIZED_ARTIFACT_PATH: ${{ runner.temp }}/teagram-websocket-d1-${{ github.run_id }}-${{ github.run_attempt }}.json
         run: rm -f -- "$D1_SANITIZED_ARTIFACT_PATH"
 
-      - name: Cancel PR workflow run after job failure
-        if: ${{ failure() && github.event_name == 'pull_request' }}
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: gh run cancel "${{ github.run_id }}" --repo "$GITHUB_REPOSITORY"
-
   test-websocket-permanent-exchange:
     name: 'test: websocket-permanent-exchange'
     needs: ops-prioritize-main
@@ -1037,7 +980,6 @@ jobs:
     timeout-minutes: 20
     permissions:
       contents: read
-      actions: write
 
     steps:
       - uses: actions/checkout@v7.0.1
@@ -1075,12 +1017,6 @@ jobs:
           WEB_PERMANENT_WEB_ROOT: ${{ github.workspace }}/web-client
         run: bash .github/scripts/run-websocket-permanent-exchange.sh
 
-      - name: Cancel PR workflow run after job failure
-        if: ${{ failure() && github.event_name == 'pull_request' }}
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: gh run cancel "${{ github.run_id }}" --repo "$GITHUB_REPOSITORY"
-
   restore-readiness:
     name: confined restore-to-application
     needs: ops-prioritize-main
@@ -1089,7 +1025,6 @@ jobs:
     timeout-minutes: 80
     permissions:
       contents: read
-      actions: write
 
     steps:
       - uses: actions/checkout@v7.0.1
@@ -1141,12 +1076,6 @@ jobs:
       - name: Run local-dump happy path, signal, and SIGKILL fixtures
         run: bash deploy/teagramd/rollout-runner/test-restore-readiness-foreign-fixture.sh --local-fixture-test
 
-      - name: Cancel PR workflow run after job failure
-        if: ${{ failure() && github.event_name == 'pull_request' }}
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: gh run cancel "${{ github.run_id }}" --repo "$GITHUB_REPOSITORY"
-
   # Keep the existing required check context while making every verification
   # lane mandatory. `always()` runs this when a lane fails or is skipped.
   check-deploy-workflow:
@@ -1157,7 +1086,6 @@ jobs:
     timeout-minutes: 10
     permissions:
       contents: read
-      actions: write
 
     steps:
       - uses: actions/checkout@v7.0.1
@@ -1331,12 +1259,6 @@ jobs:
       - name: Check demo image release pinning
         run: deploy/teagram-demo/test-image-release.sh
 
-      - name: Cancel PR workflow run after job failure
-        if: ${{ failure() && github.event_name == 'pull_request' }}
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: gh run cancel "${{ github.run_id }}" --repo "$GITHUB_REPOSITORY"
-
   check-demo-web-pin:
     name: 'check: demo-web-pin'
     needs: ops-prioritize-main
@@ -1345,7 +1267,6 @@ jobs:
     timeout-minutes: 30
     permissions:
       contents: read
-      actions: write
 
     steps:
       - uses: actions/checkout@v7.0.1
@@ -1416,12 +1337,6 @@ jobs:
             ${{ runner.temp }}/demo-web-${{ steps.pin.outputs.source_commit }}.tar.gz.sha256
           if-no-files-found: error
           retention-days: 30
-
-      - name: Cancel PR workflow run after job failure
-        if: ${{ failure() && github.event_name == 'pull_request' }}
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: gh run cancel "${{ github.run_id }}" --repo "$GITHUB_REPOSITORY"
 
   ci:
     name: ci
@@ -1623,10 +1538,6 @@ jobs:
     needs: ops-prioritize-main
     if: ${{ (github.event_name == 'pull_request' && !cancelled() || github.event_name != 'pull_request' && always()) && (needs.ops-prioritize-main.result == 'success' || (needs.ops-prioritize-main.result == 'skipped' && github.event_name == 'pull_request')) }}
     runs-on: ubuntu-26.04
-    permissions:
-      actions: write
-      contents: read
-
     timeout-minutes: 10
 
     steps:
@@ -1647,12 +1558,6 @@ jobs:
       - name: Check the committed CSS matches the templates
         run: git diff --exit-code internal/admin/assets/dashboard.css
 
-      - name: Cancel PR workflow run after job failure
-        if: ${{ failure() && github.event_name == 'pull_request' }}
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: gh run cancel "${{ github.run_id }}" --repo "$GITHUB_REPOSITORY"
-
   # internal/store/db is sqlc output that is committed, so a branch can edit a
   # file under internal/store/queries and never run `make sqlc`. That happened
   # on MAIN-328: a locking invariant written as a query comment never reached
@@ -1672,10 +1577,6 @@ jobs:
     needs: ops-prioritize-main
     if: ${{ (github.event_name == 'pull_request' && !cancelled() || github.event_name != 'pull_request' && always()) && (needs.ops-prioritize-main.result == 'success' || (needs.ops-prioritize-main.result == 'skipped' && github.event_name == 'pull_request')) }}
     runs-on: ubuntu-26.04
-    permissions:
-      actions: write
-      contents: read
-
     timeout-minutes: 10
 
     steps:
@@ -1699,12 +1600,6 @@ jobs:
         run: |
           git add --all internal/store/db
           git diff --cached --exit-code internal/store/db
-
-      - name: Cancel PR workflow run after job failure
-        if: ${{ failure() && github.event_name == 'pull_request' }}
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: gh run cancel "${{ github.run_id }}" --repo "$GITHUB_REPOSITORY"
 
   # Drives the admin dashboard through a real browser (test/e2e/admin.spec.ts).
   # Everything the suite needs is started by Playwright's webServer:
@@ -2102,12 +1997,6 @@ jobs:
           docker logs --tail 50 tg-test-pg 2>&1 || true
           free -m
 
-      - name: Cancel PR workflow run after job failure
-        if: ${{ failure() && github.event_name == 'pull_request' }}
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: gh run cancel "${{ github.run_id }}" --repo "$GITHUB_REPOSITORY"
-
   # Builds the image and boots it against a migrated database. Docker is not
   # available in the environments the Dockerfile is edited from, so this job is
   # the only place it is ever built — it is the gate that stops it rotting.
@@ -2328,12 +2217,6 @@ jobs:
       - name: Stop container
         if: always()
         run: docker rm -f teagramd
-
-      - name: Cancel PR workflow run after job failure
-        if: ${{ failure() && github.event_name == 'pull_request' }}
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: gh run cancel "${{ github.run_id }}" --repo "$GITHUB_REPOSITORY"
 
   # Brings the compose stack up the way a developer does, then restarts it to
   # prove the named volumes carry the state that matters: database rows, the
@@ -3284,12 +3167,6 @@ jobs:
           [ -e .env ] || exit 0
           docker compose down -v
 
-      - name: Cancel PR workflow run after job failure
-        if: ${{ failure() && github.event_name == 'pull_request' }}
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: gh run cancel "${{ github.run_id }}" --repo "$GITHUB_REPOSITORY"
-
   test-photo-worker:
     name: 'test: photo-worker (${{ matrix.arch }})'
     needs:
@@ -3299,7 +3176,7 @@ jobs:
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 20
     permissions:
-      actions: write
+      actions: read
       contents: read
     strategy:
       fail-fast: false
@@ -3440,12 +3317,6 @@ jobs:
             and .oom_cleanup_passed == true
           ' "$RUNNER_TEMP/worker-runtime-report.json"
 
-      - name: Cancel PR workflow run after job failure
-        if: ${{ failure() && github.event_name == 'pull_request' }}
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: gh run cancel "${{ github.run_id }}" --repo "$GITHUB_REPOSITORY"
-
   # Keep the core behavioral signal independent from the broader CI suite.
   # TestSmoke uses pgtest's disposable, per-test databases; the hosted runner
   # and its Postgres container are discarded with this job.
@@ -3457,7 +3328,6 @@ jobs:
     timeout-minutes: 60
     permissions:
       contents: read
-      actions: write
     env:
       TESTCONTAINERS_RYUK_DISABLED: "true"
 
@@ -3591,12 +3461,6 @@ jobs:
           fi
           printf 'ok github.com/teagramhq/teagram-server/test/e2e %ss\n' "$summary"
 
-      - name: Cancel PR workflow run after job failure
-        if: ${{ failure() && github.event_name == 'pull_request' }}
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: gh run cancel "${{ github.run_id }}" --repo "$GITHUB_REPOSITORY"
-
   mirror-rustfs-qualification-images:
     name: Mirror RustFS qualification images
     needs: ops-prioritize-main
@@ -3606,7 +3470,6 @@ jobs:
     permissions:
       contents: read
       packages: write
-      actions: write
 
     steps:
       - uses: actions/checkout@v7.0.1
@@ -3621,12 +3484,6 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: bash .github/scripts/mirror_rustfs_qualification_images.sh
 
-      - name: Cancel PR workflow run after job failure
-        if: ${{ failure() && github.event_name == 'pull_request' }}
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: gh run cancel "${{ github.run_id }}" --repo "$GITHUB_REPOSITORY"
-
   rustfs-transition-qualification:
     name: RustFS transition qualification
     runs-on: ubuntu-26.04
@@ -3639,7 +3496,6 @@ jobs:
     permissions:
       contents: read
       packages: read
-      actions: write
 
     steps:
       - uses: actions/checkout@v7.0.1
@@ -3676,12 +3532,6 @@ jobs:
           sudo env "PATH=$PATH" TMPDIR=/root bash deploy/teagramd/rollout-runner/test-isolated-restore-postgres.sh
           sudo env "PATH=$PATH" TMPDIR=/root bash deploy/teagramd/rollout-runner/test-stack-move-runner.sh
 
-      - name: Cancel PR workflow run after job failure
-        if: ${{ failure() && github.event_name == 'pull_request' }}
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: gh run cancel "${{ github.run_id }}" --repo "$GITHUB_REPOSITORY"
-
   test-migrations:
     name: "test: migrations"
     needs: ops-prioritize-main
@@ -3690,7 +3540,6 @@ jobs:
     timeout-minutes: 20
     permissions:
       contents: read
-      actions: write
     env:
       MIGRATIONS_BASE_REF: ${{ github.event_name == 'pull_request' && format('origin/{0}', github.event.pull_request.base.ref) || github.event.before }}
       POSTGRES_IMAGE: mirror.gcr.io/library/postgres:18-alpine@sha256:d8703cd7fba306b9fec9268ecedfa8a966846c053036a60e3635791957eb2f66
@@ -3721,9 +3570,3 @@ jobs:
         run: |
           python3 -B .github/scripts/test_migration_lock_lint.py
           bash .github/scripts/test-migrations.sh
-
-      - name: Cancel PR workflow run after job failure
-        if: ${{ failure() && github.event_name == 'pull_request' }}
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: gh run cancel "${{ github.run_id }}" --repo "$GITHUB_REPOSITORY"
