@@ -4,10 +4,12 @@ set +x
 umask 077
 
 readonly BUSYBOX_IMAGE="mirror.gcr.io/library/node:24-alpine3.22@sha256:191c9f0080fcbbc6547a85dc0ff7988072214a355aabdc1d2ec55a7dae5eea8a"
+readonly BUSYBOX_HUB_FALLBACK_IMAGE="docker.io/library/node:24-alpine3.22@sha256:191c9f0080fcbbc6547a85dc0ff7988072214a355aabdc1d2ec55a7dae5eea8a"
 workspace="${GITHUB_WORKSPACE:-}"
 phase_dir=""
 lane=""
 container_script=""
+docker_image=""
 
 report_failure() {
   local phase="$2" commit="unavailable" exit_value="$1"
@@ -90,12 +92,24 @@ else
   exit 1
 fi
 
+if docker pull "$BUSYBOX_IMAGE" >/dev/null 2>&1; then
+  docker_image="$BUSYBOX_IMAGE"
+else
+  echo "::warning::pinned image mirror pull failed; trying the same digest from Docker Hub"
+  docker_image="$BUSYBOX_HUB_FALLBACK_IMAGE"
+  if ! docker pull "$docker_image" >/dev/null 2>&1; then
+    echo "::error::could not pull the pinned image from either registry"
+    report_failure 1 container-launch
+    exit 1
+  fi
+fi
+
 docker_command=(
   docker run --rm
   --volume "$workspace:/workspace:ro"
   --volume "$phase_dir:/phase:rw"
   --workdir /workspace
-  "$BUSYBOX_IMAGE"
+  "$docker_image"
   sh -ec "$container_script"
 )
 

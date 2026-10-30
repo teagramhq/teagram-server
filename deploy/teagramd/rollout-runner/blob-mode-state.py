@@ -22,6 +22,9 @@ from collections.abc import Iterator
 
 MODE_TARGET = "/run/teagramd/blob-mode"
 BLOB_TARGET = "/var/lib/teagramd-blobs"
+REPORT_TARGET = "/run/teagramd/reports"
+KEY_ROTATION_REPORT_VOLUME = "blob_key_rotate_reports"
+KEY_ROTATION_REPORT_VOLUME_NAME = "teagram_blob_key_rotate_reports"
 MOVED_BLOB_TARGET = "/var/lib/telegramd-blobs"
 KEY_TARGET = "/var/lib/teagramd"
 PGDATA_TARGET = "/var/lib/postgresql/data"
@@ -45,7 +48,8 @@ STACK_MOVE_TARGET_VOLUMES = {
     "rustfsdata": "teagram_rustfsdata",
 }
 NON_SERVING_SERVICES = {
-    "rustfs", "rustfs-init", "migrate", "blob-migrate", "blob-restore", "blob-encrypt-migrate",
+    "rustfs", "rustfs-init", "migrate", "blob-migrate", "blob-restore",
+    "blob-encrypt-migrate", "blob-key-rotate",
 }
 DATABASE_SERVICES = {"postgres"}
 INITIAL_LOCAL_GUARD_ENV = {"TG_REPLICA_COUNT": "1", "TG_CLIENT_ADDR_TRUST": "socket"}
@@ -591,7 +595,15 @@ def compose_inventory(compose: object, checkout: pathlib.Path) -> dict[str, obje
         if not isinstance(service, dict):
             reject("compose-service")
         modes, _ = service_mounts(service, mode_source, compose)
-        if modes:
+        if name == "blob-key-rotate":
+            serving = services.get("teagramd")
+            if not isinstance(serving, dict):
+                reject("mode-mount-helper")
+            validate_key_rotation_service(
+                service, modes, mode_source, compose,
+                raw_environment_map(serving.get("environment", {}), True),
+            )
+        elif modes:
             if name != "blob-encrypt-migrate":
                 reject("mode-mount-helper")
             serving = services.get("teagramd")
@@ -652,7 +664,7 @@ def validate_encryption_migration_service(
         if not isinstance(mount, dict):
             reject("mode-mount-helper")
         target = mount.get("target")
-        if target == "/run/teagramd/reports":
+        if target == REPORT_TARGET:
             if mount.get("type") != "bind" or mount.get("read_only", False) is True:
                 reject("mode-mount-helper")
             report_mounts.append(mount)
@@ -679,6 +691,104 @@ def validate_encryption_migration_service(
         not maintenance_environment.get("TG_POSTGRES_DSN")
         or not maintenance_environment.get("TG_MEDIA_KEY_DIR")
         or not maintenance_environment.get("TG_MEDIA_KEY_CURRENT")
+    ):
+        reject("mode-mount-helper")
+    declared_networks = compose.get("networks")
+    rustfs_network = declared_networks.get("rustfs_private") if isinstance(declared_networks, dict) else None
+    if not isinstance(rustfs_network, dict) or not isinstance(rustfs_network.get("name"), str):
+        reject("mode-mount-helper")
+    try:
+        network = compose_network(service, compose)
+    except Reject:
+        reject("mode-mount-helper")
+    if not network_includes(network, rustfs_network["name"]):
+        reject("mode-mount-helper")
+
+
+def validate_key_rotation_service(
+    service: dict[str, object],
+    mode_mounts: list[dict[str, object]],
+    mode_source: str,
+    compose: dict[str, object],
+    serving_environment: dict[str, str],
+) -> None:
+    networks = service.get("networks")
+    if (
+        service.get("profiles") != ["migration"]
+        or service.get("entrypoint") != ["/usr/local/bin/blob-key-rotate"]
+        or service.get("user") != "0:0"
+        or service.get("read_only") is not True
+        or service.get("command") not in (None, [])
+        or service.get("ports") not in (None, [])
+        or not isinstance(networks, dict)
+        or set(networks) != {"default", "rustfs_private"}
+    ):
+        reject("mode-mount-helper")
+    if len(mode_mounts) != 1:
+        reject("mode-mount-helper")
+    authority = mode_mounts[0]
+    if (
+        authority.get("type") != "bind"
+        or authority.get("target") != MODE_TARGET
+        or authority.get("read_only") is not True
+        or not isinstance(authority.get("source"), str)
+        or os.path.realpath(authority["source"]) != mode_source
+    ):
+        reject("mode-mount-helper")
+
+    raw_volumes = service.get("volumes", [])
+    if not isinstance(raw_volumes, list):
+        reject("mode-mount-helper")
+    report_mounts = []
+    for mount in raw_volumes:
+        if not isinstance(mount, dict):
+            reject("mode-mount-helper")
+        target = mount.get("target")
+        if target == REPORT_TARGET:
+            if (
+                mount.get("type") != "volume"
+                or mount.get("source") != KEY_ROTATION_REPORT_VOLUME
+                or mount.get("read_only", False) is True
+            ):
+                reject("mode-mount-helper")
+            report_mounts.append(mount)
+        elif target == MODE_TARGET:
+            continue
+        elif mount.get("read_only", False) is not True:
+            reject("mode-mount-helper")
+    if len(report_mounts) != 1:
+        reject("mode-mount-helper")
+    declared_volumes = compose.get("volumes")
+    report_volume = (
+        declared_volumes.get(KEY_ROTATION_REPORT_VOLUME)
+        if isinstance(declared_volumes, dict)
+        else None
+    )
+    if (
+        not isinstance(report_volume, dict)
+        or report_volume.get("name") != KEY_ROTATION_REPORT_VOLUME_NAME
+        or report_volume.get("external") not in (None, False)
+        or report_volume.get("driver") not in (None, "local")
+        or report_volume.get("driver_opts") not in (None, {})
+    ):
+        reject("mode-mount-helper")
+
+    rotation_environment = raw_environment_map(service.get("environment", {}), True)
+    shared_keys = {
+        *S3_FIELDS,
+        "TG_BLOB_DIR",
+        "TG_POSTGRES_DSN",
+        "TG_AUTHKEY_ENC_KEY",
+        "TG_AUTHKEY_ENC_KEY_FILE",
+        "TG_MEDIA_KEY_DIR",
+        "TG_MEDIA_KEY_CURRENT",
+    }
+    if any(rotation_environment.get(key, "") != serving_environment.get(key, "") for key in shared_keys):
+        reject("mode-mount-helper")
+    if (
+        not rotation_environment.get("TG_POSTGRES_DSN")
+        or not rotation_environment.get("TG_MEDIA_KEY_DIR")
+        or not rotation_environment.get("TG_MEDIA_KEY_CURRENT")
     ):
         reject("mode-mount-helper")
     declared_networks = compose.get("networks")

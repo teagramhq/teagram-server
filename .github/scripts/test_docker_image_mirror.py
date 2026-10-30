@@ -3,7 +3,10 @@
 
 from __future__ import annotations
 
+import os
 import re
+import subprocess
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -119,19 +122,19 @@ class DockerImageMirrorTests(unittest.TestCase):
                 self.assertIn("STICKER_BUNDLE_SOURCE=sticker-bundle", step)
 
         photo_job = re.search(
-            r"(?ms)^  photothumb-runtime:\n(.*?)(?=^  [a-z0-9-]+:|\Z)",
+            r"(?ms)^  test-photo-worker:\n(.*?)(?=^  [a-z0-9-]+:|\Z)",
             workflow,
         )
         self.assertIsNotNone(photo_job, "Photo worker runtime job is missing")
         job = photo_job.group(1)
         self.assertRegex(
             job,
-            r"(?m)^    needs:\n      - ops-prioritize-main\n      - sticker-bundle$",
+            r"(?m)^    needs:\n      - ops-prioritize-main\n      - check-sticker-license$",
         )
         self.assertIn("needs.ops-prioritize-main.result == 'success'", job)
         self.assertIn("needs.ops-prioritize-main.result == 'skipped'", job)
         self.assertIn("github.event_name == 'pull_request'", job)
-        self.assertIn("needs.sticker-bundle.result == 'success'", job)
+        self.assertIn("needs.check-sticker-license.result == 'success'", job)
         self.assertIn("actions: read", job)
         self.assertIn("path: build/sticker-bundle", job)
         self.assertIn("uses: docker/setup-buildx-action@v4.4.1", job)
@@ -150,7 +153,7 @@ class DockerImageMirrorTests(unittest.TestCase):
     def test_compose_e2e_reuses_the_loaded_testcontainers_postgres_image(self) -> None:
         workflow = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
         compose_job = re.search(
-            r"(?ms)^  compose:\n(.*?)(?=^  [a-z0-9-]+:|\Z)", workflow
+            r"(?ms)^  test-compose:\n(.*?)(?=^  [a-z0-9-]+:|\Z)", workflow
         )
         self.assertIsNotNone(compose_job, "Compose job is missing")
         job = compose_job.group(1)
@@ -167,7 +170,7 @@ class DockerImageMirrorTests(unittest.TestCase):
     def test_compose_rustfs_lane_uses_digest_pinned_ghcr_image(self) -> None:
         workflow = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
         compose_job = re.search(
-            r"(?ms)^  compose:\n(.*?)(?=^  [a-z0-9-]+:|\Z)", workflow
+            r"(?ms)^  test-compose:\n(.*?)(?=^  [a-z0-9-]+:|\Z)", workflow
         )
         self.assertIsNotNone(compose_job, "Compose job is missing")
         job = compose_job.group(1)
@@ -190,7 +193,7 @@ class DockerImageMirrorTests(unittest.TestCase):
     def test_compose_lane_uses_the_pinned_ghcr_busybox_mirror(self) -> None:
         workflow = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
         compose_job = re.search(
-            r"(?ms)^  compose:\n(.*?)(?=^  [a-z0-9-]+:|\Z)", workflow
+            r"(?ms)^  test-compose:\n(.*?)(?=^  [a-z0-9-]+:|\Z)", workflow
         )
         self.assertIsNotNone(compose_job, "Compose job is missing")
         job = compose_job.group(1)
@@ -200,12 +203,12 @@ class DockerImageMirrorTests(unittest.TestCase):
         )
         self.assertRegex(
             job,
-            r"(?m)^    needs:\n      - ops-prioritize-main\n      - mirror-rustfs-qualification-images\n      - sticker-bundle$",
+            r"(?m)^    needs:\n      - ops-prioritize-main\n      - mirror-rustfs-qualification-images\n      - check-sticker-license$",
         )
         self.assertIn("needs.ops-prioritize-main.result == 'success'", job)
         self.assertIn("needs.ops-prioritize-main.result == 'skipped'", job)
         self.assertIn("github.event_name == 'pull_request'", job)
-        self.assertIn("needs.sticker-bundle.result == 'success'", job)
+        self.assertIn("needs.check-sticker-license.result == 'success'", job)
         self.assertIn("packages: read", job)
         self.assertIn("docker login ghcr.io", job)
         self.assertIn(f"BUSYBOX_IMAGE: {image}", job)
@@ -361,6 +364,11 @@ class DockerImageMirrorTests(unittest.TestCase):
             busybox_runner,
         )
         self.assertIn(
+            "docker.io/library/node:24-alpine3.22@sha256:"
+            "191c9f0080fcbbc6547a85dc0ff7988072214a355aabdc1d2ec55a7dae5eea8a",
+            busybox_runner,
+        )
+        self.assertIn(
             "mirror.gcr.io/library/node@sha256:"
             "5711a0d445a1af54af9589066c646df387d1831a608226f4cd694fc59e745059",
             node_dockerfile,
@@ -370,6 +378,7 @@ class DockerImageMirrorTests(unittest.TestCase):
             "1803faef57627e2d9c2e7d89d655d712ddded5389040054987163043fecb6a3c",
             compose,
         )
+
         postgres_schema = (
             ROOT / "deploy/teagramd/rollout-runner/test-rustfs-schema-postgres.sh"
         ).read_text(encoding="utf-8")
@@ -451,6 +460,66 @@ class DockerImageMirrorTests(unittest.TestCase):
             'docker image tag "$TARGET_POSTGRES_IMAGE_ID" "$TARGET_POSTGRES_IMAGE"',
             stack_move,
         )
+
+    def test_busybox_phase_check_falls_back_when_mirror_pull_fails(self) -> None:
+        script = ROOT / ".github/scripts/run-busybox-phase-check.sh"
+        mirror_image = (
+            "mirror.gcr.io/library/node:24-alpine3.22@sha256:"
+            "191c9f0080fcbbc6547a85dc0ff7988072214a355aabdc1d2ec55a7dae5eea8a"
+        )
+        hub_image = (
+            "docker.io/library/node:24-alpine3.22@sha256:"
+            "191c9f0080fcbbc6547a85dc0ff7988072214a355aabdc1d2ec55a7dae5eea8a"
+        )
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp = Path(temp_dir)
+            bin_dir = temp / "bin"
+            runner_temp = temp / "runner"
+            workspace = temp / "workspace"
+            bin_dir.mkdir()
+            runner_temp.mkdir()
+            workspace.mkdir()
+            calls = temp / "docker-calls"
+            fake_docker = bin_dir / "docker"
+            fake_docker.write_text(
+                """#!/usr/bin/env bash
+set -euo pipefail
+case "$1" in
+  pull)
+    printf 'pull %s\\n' "$2" >> "$FAKE_DOCKER_CALLS"
+    [[ "$2" != "$FAKE_DOCKER_FAIL_IMAGE" ]]
+    ;;
+  run)
+    printf 'run %s\\n' "${9}" >> "$FAKE_DOCKER_CALLS"
+    ;;
+  *) exit 64 ;;
+esac
+""",
+                encoding="utf-8",
+            )
+            fake_docker.chmod(0o755)
+            result = subprocess.run(
+                ["bash", str(script), "compose-path"],
+                env={
+                    **os.environ,
+                    "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}",
+                    "RUNNER_TEMP": str(runner_temp),
+                    "GITHUB_WORKSPACE": str(workspace),
+                    "FAKE_DOCKER_CALLS": str(calls),
+                    "FAKE_DOCKER_FAIL_IMAGE": mirror_image,
+                },
+                capture_output=True,
+                text=True,
+                timeout=60,
+                check=False,
+            )
+
+            self.assertEqual(0, result.returncode, result.stdout + result.stderr)
+            self.assertEqual(
+                [f"pull {mirror_image}", f"pull {hub_image}", f"run {hub_image}"],
+                calls.read_text(encoding="utf-8").splitlines(),
+            )
+            self.assertIn("pinned image mirror pull failed", result.stdout)
 
 
 class PerformancePostgresReadinessTests(unittest.TestCase):

@@ -194,10 +194,11 @@ before retrying.
 
 ## Deploy path
 
-The `Deploy.` workflow runs the existing dev deploy first. The optional
-`deploy-demo` job depends on that job and receives the exact same tested SHA.
-It is disabled unless the `demo` GitHub environment variable
-`TEAGRAM_DEMO_DEPLOY_ENABLED` is set to `true`.
+The `Deploy.` workflow runs the dev server deploy and publishes a small
+handoff artifact containing the exact tested SHA and CI run ID. On success,
+the separate `Deploy demo.` workflow deploys that exact SHA to the public demo
+and reports its own result. The demo deploy is disabled unless the `demo` GitHub
+environment variable `TEAGRAM_DEMO_DEPLOY_ENABLED` is set to `true`.
 
 Before enabling it, configure the `demo` GitHub environment with:
 
@@ -221,11 +222,11 @@ command="/opt/teagram-demo/deploy/teagram-demo/forced-command.sh",restrict ssh-e
 `forced-command.sh` accepts the full commit SHA and trusted server image digest,
 then separately accepts a bounded web archive tied to the current demo
 checkout. It fetches `origin/main`, rejects non-main revisions and skips stale
-server deploys. The `Deploy.` workflow downloads the server digest from the
-successful server CI run. `web-artifact-pin.json` first records teagram-web
-PR #121's head, successful validation run, and the artifact digest reported by
-that run's log; this candidate pin is never deployed. After #121 merges, the
-pin changes to the green `master` publication. The
+server deploys. `Deploy demo.` downloads the server digest from the successful
+server CI run named by the handoff artifact. `web-artifact-pin.json` first
+records teagram-web PR #121's head, successful validation run, and artifact
+digest reported by that run's log; this candidate pin is never deployed. After
+#121 merges, the pin changes to the green `master` publication. The
 read-only deploy preflight then requires the pin to match the public web
 manifest and a successful, checksum-named publication artifact. The
 secret-free `demo-web-artifact` CI job rebuilds and verifies the exact pinned

@@ -186,6 +186,7 @@ verify_safe_public_environment() {
     | .[1] as $compose
     | ($inspect | item | .Config.Env // null) as $container_env
     | ($compose.services[env.ROLLOUT_COMPOSE_SERVICE // "teagramd"].environment // null) as $compose_env
+    | ($compose.services["teagramd-public-1"].environment // null) as $public_env
     | ($env_content | split("\n")) as $env_lines
     | if ($container_env | type) != "array" then false
       elif $compose_source == "selected-compose-render" and ($compose_env | type) != "object" then false
@@ -202,12 +203,24 @@ verify_safe_public_environment() {
           | values($container_env; $name) as $container_values
           | (($compose_source == "selected-compose-render") and ($compose_env | has($name))) as $compose_has
           | (if $compose_has then $compose_env[$name] else $default end) as $compose_value
+          | (($public_env | type) == "object" and
+             ($name | IN("TG_PUBLIC_WEBSOCKET_LISTEN_ADDR", "TG_PUBLIC_WEBSOCKET_ADVERTISE_ADDR")) and
+             ($public_env | has($name))) as $route_moved
+          | (if $route_moved then $public_env[$name] else $compose_value end) as $active_value
           | (if ($container_values | length) == 0 then $default else $container_values[0] end) as $container_value
           | assignments($env_lines; $name) as $env_assignments
           | if ($container_values | length) > 1 or
                ($compose_has and ($compose_value | type) != "string") then false
             elif $compose_source == "live-container-inspection" then
               is_default($name; $container_value)
+            elif $route_moved then
+              ($compose_value == $default) and
+              ($active_value | type) == "string" and
+              (valid_value($name; $active_value)) and
+              ($env_assignments | length) == 1 and
+              (dotenv_value($env_assignments[0]) == $active_value) and
+              (if $snapshot_name == "target" then $container_value == $compose_value
+               else $container_value == $active_value end)
             elif is_default($name; $compose_value) and is_default($name; $container_value) then true
             elif $name == "TG_WELCOME_CHANNEL" or
                  (valid_value($name; $compose_value) | not) or
@@ -710,6 +723,92 @@ verify_media_key_source_bind_false() {
   [ "$total_matches" -gt 0 ]
 }
 
+verify_blob_rotation_migration_profile() {
+  local compose_json=$1 mode_source=$2 media_source=$3
+  if ! printf '%s' "$compose_json" | jq -e \
+    --arg mode_source "$mode_source" --arg media_source "$media_source" '
+    def safe_bind($source; $target):
+      type == "object" and
+      (keys | sort) == ["bind", "read_only", "source", "target", "type"] and
+      .type == "bind" and .source == $source and .target == $target and .read_only == true and
+      .bind == {create_host_path:false};
+    def empty_volume($source; $target):
+      type == "object" and
+      (keys | sort) == ["read_only", "source", "target", "type", "volume"] and
+      .type == "volume" and .source == $source and .target == $target and
+      .read_only == true and .volume == {};
+    . as $compose
+    | ($compose.services["blob-key-rotate"] // null) as $rotation
+    | if $rotation == null then true else
+        ($compose.services.teagramd // {}) as $teagramd
+        | ($rotation.environment // {}) as $rotation_env
+        | ($teagramd.environment // {}) as $teagramd_env
+        | ($rotation.volumes // []) as $volumes
+        | ($rotation.depends_on // {}) as $depends_on
+        | ($rotation.networks // {}) as $networks
+        | ($rotation.secrets // []) as $secrets
+        | ($teagramd.build.context // "") as $build_context
+        | (if ($build_context | type) == "string" and ($build_context | startswith("/"))
+           then ($build_context + "/.state/blob-mode") else $mode_source end) as $target_mode_source
+        | ($rotation | keys | sort) == [
+            "command", "depends_on", "entrypoint", "environment", "image", "networks",
+            "profiles", "read_only", "secrets", "user", "volumes"
+          ] and
+          $rotation.image == $teagramd.image and
+          $rotation.entrypoint == ["/usr/local/bin/blob-key-rotate"] and
+          $rotation.command == null and
+          $rotation.user == "0:0" and
+          $rotation.read_only == true and
+          $rotation.profiles == ["migration"] and
+          ($rotation_env | keys | sort) == [
+            "TG_AUTHKEY_ENC_KEY", "TG_AUTHKEY_ENC_KEY_FILE", "TG_BLOB_DIR",
+            "TG_BLOB_S3_ACCESS_KEY_ID", "TG_BLOB_S3_ALLOW_INSECURE_HTTP", "TG_BLOB_S3_BUCKET",
+            "TG_BLOB_S3_ENDPOINT", "TG_BLOB_S3_PREFIX", "TG_BLOB_S3_REGION",
+            "TG_BLOB_S3_SECRET_ACCESS_KEY_FILE", "TG_MEDIA_KEY_CURRENT", "TG_MEDIA_KEY_DIR",
+            "TG_POSTGRES_DSN"
+          ] and
+          all($rotation_env[]; type == "string") and
+          all([
+            "TG_AUTHKEY_ENC_KEY", "TG_AUTHKEY_ENC_KEY_FILE", "TG_BLOB_DIR",
+            "TG_BLOB_S3_ACCESS_KEY_ID", "TG_BLOB_S3_ALLOW_INSECURE_HTTP", "TG_BLOB_S3_BUCKET",
+            "TG_BLOB_S3_ENDPOINT", "TG_BLOB_S3_PREFIX", "TG_BLOB_S3_REGION",
+            "TG_BLOB_S3_SECRET_ACCESS_KEY_FILE", "TG_MEDIA_KEY_CURRENT", "TG_MEDIA_KEY_DIR",
+            "TG_POSTGRES_DSN"
+          ][]; . as $name | $rotation_env[$name] == $teagramd_env[$name]) and
+          $rotation_env.TG_BLOB_DIR == "/var/lib/teagramd-blobs" and
+          $rotation_env.TG_MEDIA_KEY_DIR == "/run/teagramd/media-keys" and
+          ($media_source | type == "string" and startswith("/")) and
+          ($secrets == [{source:"teagramd_blob_secret_key",target:"teagramd-blob-secret-key"}]) and
+          ($networks | keys | sort) == ["default", "rustfs_private"] and
+          all($networks[]; . == null or . == {}) and
+          ($depends_on | keys | sort) == ["postgres", "rustfs-init"] and
+          ($depends_on.postgres.condition == "service_healthy") and
+          (($depends_on.postgres | keys - ["condition", "required"]) | length) == 0 and
+          (($depends_on.postgres.required // true) == true) and
+          ($depends_on["rustfs-init"].condition == "service_completed_successfully") and
+          (($depends_on["rustfs-init"] | keys - ["condition", "required"]) | length) == 0 and
+          (($depends_on["rustfs-init"].required // true) == true) and
+          ($volumes | length) == 4 and
+          ([$volumes[] | select(empty_volume("tgkey"; "/var/lib/teagramd"))] | length) == 1 and
+          ([$volumes[] | select(
+            safe_bind($mode_source; "/run/teagramd/blob-mode") or
+            safe_bind($target_mode_source; "/run/teagramd/blob-mode")
+          )] | length) == 1 and
+          ([$volumes[] | select(
+            type == "object" and (keys | sort) == ["source", "target", "type", "volume"] and
+            .type == "volume" and .source == "blob_key_rotate_reports" and
+            .target == "/run/teagramd/reports" and .volume == {}
+          )] | length) == 1 and
+          ([$volumes[] | select(safe_bind($media_source; "/run/teagramd/media-keys"))] | length) == 1 and
+          $compose.volumes.blob_key_rotate_reports == {name:"teagram_blob_key_rotate_reports",driver:"local"}
+      end
+  ' >/dev/null; then
+    printf '%s\n' 'key-rotation migration profile is not the approved isolated operator configuration' >&2
+    return 1
+  fi
+  return 0
+}
+
 snapshot_from_json() {
   local inspect_json=$1
   local compose_json=$2
@@ -860,6 +959,9 @@ snapshot_from_json() {
   mode_source=$(canonical_blob_mode_source) || return 1
   mode_mount_target=/run/teagramd/blob-mode
   [ "${ROLLOUT_COMPOSE_SERVICE:-teagramd}" != telegramd ] || mode_mount_target=/run/telegramd/blob-mode
+  if [ "$compose_source" = selected-compose-render ]; then
+    verify_blob_rotation_migration_profile "$compose_json" "$mode_source" "$MEDIA_KEY_SOURCE_PATH" || return 1
+  fi
 
   mounts=$(printf '%s' "$inspect_json" | jq -ce --arg mode_source "$mode_source" --arg mode_target "$mode_mount_target" --arg compose_source "$compose_source" \
     --arg media_key_source "$MEDIA_KEY_SOURCE_PATH" --argjson media_key_enabled "$MEDIA_KEY_MOUNT_CONFIGURED" '
@@ -895,8 +997,11 @@ snapshot_from_json() {
   if [ "$compose_source" = selected-compose-render ] && \
      { [ "$snapshot_name" = baseline ] || [ "$snapshot_name" = target ] || [ "$snapshot_name" = rollback ]; } && \
      [ "$compose_public_ws_2446" != "$exposure_public_ws_2446" ]; then
-    printf '%s\n' 'resolved Compose public WebSocket port does not match the inspected container' >&2
-    return 1
+    if ! { [ "${ROLLOUT_PUBLIC_WEBSOCKET:-0}" = 1 ] && [ "$snapshot_name" = preflight ] && \
+           [ "$compose_public_ws_2446" = false ] && [ "$exposure_public_ws_2446" = true ]; }; then
+      printf '%s\n' 'resolved Compose public WebSocket port does not match the inspected container' >&2
+      return 1
+    fi
   fi
   exposure_for_hash=$(printf '%s' "$exposure" | jq -ce '
     map(
@@ -1043,7 +1148,8 @@ snapshot_from_json() {
               (IN(
                 "TG_TURNSTILE_SITE_KEY=", "TG_TURNSTILE_SECRET_KEY_FILE=", "TG_TURNSTILE_SIGNIN_ENABLED=false",
                 "TG_PUBLIC_WEBSOCKET_LISTEN_ADDR=", "TG_PUBLIC_WEBSOCKET_ADVERTISE_ADDR=",
-                "TG_PUBLIC_REGISTRATION=closed", "TG_PUBLIC_WEBSOCKET_ALLOWED_ORIGINS="
+                "TG_PUBLIC_REGISTRATION=closed", "TG_PUBLIC_WEBSOCKET_ALLOWED_ORIGINS=",
+                "TG_REPLICA_COUNT=1"
               ) | not))
      | split("=")[0]] as $keys
     | [$added[] | select(. as $name | ($name | runtime_name($name)) as $runtime | any($keys[]; . == $runtime))]
@@ -1177,6 +1283,17 @@ snapshot_from_json() {
             .value.volumes |= map(select((.type == "bind" and .source == $mode_source and
                                           .target == $mode_target and .read_only == true) | not))
           else . end)
+      | .services |= with_entries(select(.key | IN("public-haproxy", "teagramd-public-1", "teagramd-public-2") | not))
+      | if (.networks | type) == "object" then
+          .networks |= with_entries(select(.key | IN("public-ingress", "public-backend") | not))
+        else . end
+      # The migration-only operator is validated as an isolated, read-only
+      # profile above. It cannot affect the serving container while inactive.
+      | if .services["blob-key-rotate"] != null then
+          .services |= del(."blob-key-rotate")
+          | .volumes |= del(.blob_key_rotate_reports)
+          | if (.volumes | length) == 0 then del(.volumes) else . end
+        else . end
     ')
     compose_replica_count=$(printf '%s' "$compose_json" | jq -er '
       .services[env.ROLLOUT_COMPOSE_SERVICE // "teagramd"].environment as $env
@@ -1490,7 +1607,9 @@ compare_snapshots() {
   for field in compose_public_ws_2446 exposure_public_ws_2446; do
     if ! before_value=$(jq -er --arg field "$field" '.[$field]' "$before_file"); then return 1; fi
     if ! after_value=$(jq -er --arg field "$field" '.[$field]' "$after_file"); then return 1; fi
-    if [ "$before_value" = "$after_value" ] || { [ "$before_value" = false ] && [ "$after_value" = true ]; }; then
+    if [ "$before_value" = "$after_value" ] || \
+       { [ "$before_value" = false ] && [ "$after_value" = true ]; } || \
+       { [ "${ROLLOUT_PUBLIC_WEBSOCKET:-0}" = 1 ] && [ "$before_value" = true ] && [ "$after_value" = false ]; }; then
       result=pass
     else
       result=fail
