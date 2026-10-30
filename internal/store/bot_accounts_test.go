@@ -126,10 +126,11 @@ func TestBotUpdatesReadIncomingTextAndKeepConfirmedOffsetMonotonic(t *testing.T)
 	if duplicate {
 		t.Fatal("text after bot event gap unexpectedly deduplicated")
 	}
-	events, err := st.BotMessageEvents(ctx, bot.ID, 0, 100)
+	page, err := st.BotMessageEvents(ctx, bot.ID, 0, 100)
 	if err != nil {
 		t.Fatalf("read bot message events: %v", err)
 	}
+	events := page.Events
 	if len(events) != 2 || events[0].Pts != int64(incomingPts) || events[1].Pts != int64(afterGapPts) || events[0].Type != store.EventNewMessage || events[1].Type != store.EventNewMessage {
 		t.Fatalf("bot events = %+v, want incoming texts at pts %d and %d around the bot-send gap", events, incomingPts, afterGapPts)
 	}
@@ -155,10 +156,11 @@ func TestBotUpdatesReadIncomingTextAndKeepConfirmedOffsetMonotonic(t *testing.T)
 	if offset != confirmed {
 		t.Fatalf("confirmed offset = %d, want monotonic %d", offset, confirmed)
 	}
-	events, err = st.BotMessageEvents(ctx, bot.ID, offset, 100)
+	page, err = st.BotMessageEvents(ctx, bot.ID, offset, 100)
 	if err != nil {
 		t.Fatalf("re-read bot message events: %v", err)
 	}
+	events = page.Events
 	if len(events) != 1 || events[0].Pts != int64(afterGapPts) {
 		t.Fatalf("events after offset inside bot-send gap = %+v, want pts %d without replaying pts %d", events, afterGapPts, incomingPts)
 	}
@@ -180,10 +182,11 @@ func TestBotUpdatesReadIncomingTextAndKeepConfirmedOffsetMonotonic(t *testing.T)
 	if offset != confirmed {
 		t.Fatalf("confirmed offset after older replay = %d, want %d", offset, confirmed)
 	}
-	events, err = st.BotMessageEvents(ctx, bot.ID, offset, 100)
+	page, err = st.BotMessageEvents(ctx, bot.ID, offset, 100)
 	if err != nil {
 		t.Fatalf("read events after final offset: %v", err)
 	}
+	events = page.Events
 	if len(events) != 0 {
 		t.Fatalf("events after final offset = %+v, want none", events)
 	}
@@ -201,6 +204,74 @@ func TestBotUpdatesReadIncomingTextAndKeepConfirmedOffsetMonotonic(t *testing.T)
 	}
 	if rotatedOffset != confirmed {
 		t.Fatalf("offset after token rotation = %d, want %d", rotatedOffset, confirmed)
+	}
+}
+
+func TestBotUpdatePhotoHistoryAdvancesScanOffset(t *testing.T) {
+	t.Parallel()
+	s := open(t)
+	ctx := context.Background()
+	bot, token, err := s.CreateBot(ctx, "photo_gap_updates_bot", "Photo gaps")
+	if err != nil {
+		t.Fatalf("create bot: %v", err)
+	}
+	human, err := s.CreateUser(ctx, "15551234569")
+	if err != nil {
+		t.Fatalf("create human: %v", err)
+	}
+	photo, err := s.AllocateFile(ctx, human.ID, 1, "image/jpeg", "photo.jpg", bigQuota)
+	if err != nil {
+		t.Fatalf("allocate photo: %v", err)
+	}
+	const photoCount = 21
+	var lastPts int
+	for i := range photoCount {
+		_, _, recipientPts, duplicate, err := s.SendMessage(ctx, human.ID, bot.ID, "photo", 95000+int64(i), photo.ID, 0)
+		if err != nil || duplicate {
+			t.Fatalf("send photo %d: duplicate=%v err=%v", i, duplicate, err)
+		}
+		lastPts = recipientPts
+	}
+
+	poll, err := s.StartBotUpdatePoll(ctx, bot.ID, token)
+	if err != nil {
+		t.Fatalf("start bot update poll: %v", err)
+	}
+	const scanLimit = 10
+	clientOffset := int64(0)
+	storedOffset := poll.Offset
+	for batch := range 3 {
+		fromPts := max(storedOffset, clientOffset)
+		page, err := s.BotMessageEvents(ctx, bot.ID, fromPts, scanLimit)
+		if err != nil {
+			t.Fatalf("read photo-only scan page %d: %v", batch, err)
+		}
+		if len(page.Events) != 0 {
+			t.Fatalf("photo-only scan page %d returned updates: %+v", batch, page.Events)
+		}
+		if page.NextOffset <= fromPts {
+			t.Fatalf("photo-only scan page %d next offset = %d, want progress beyond %d", batch, page.NextOffset, fromPts)
+		}
+		if batch < 2 && page.NextOffset >= int64(lastPts+1) {
+			t.Fatalf("photo-only scan page %d advanced to %d, past the bounded page before final pts %d", batch, page.NextOffset, lastPts)
+		}
+		if _, err := s.FinishBotUpdatePoll(ctx, bot.ID, token, poll.Generation, page.NextOffset); err != nil {
+			t.Fatalf("store photo-only scan offset %d: %v", page.NextOffset, err)
+		}
+		storedOffset, err = s.BotUpdateOffset(ctx, bot.ID, token)
+		if err != nil || storedOffset != page.NextOffset {
+			t.Fatalf("stored scan offset = %d, err %v; want %d", storedOffset, err, page.NextOffset)
+		}
+	}
+	if storedOffset != int64(lastPts+1) {
+		t.Fatalf("offset after scanning photo-only history = %d, want %d", storedOffset, lastPts+1)
+	}
+	page, err := s.BotMessageEvents(ctx, bot.ID, storedOffset, scanLimit)
+	if err != nil {
+		t.Fatalf("repeat photo-only scan after unchanged client offset: %v", err)
+	}
+	if len(page.Events) != 0 || page.NextOffset != storedOffset {
+		t.Fatalf("repeated photo-only scan = %+v, next offset %d; want no updates and unchanged offset %d", page.Events, page.NextOffset, storedOffset)
 	}
 }
 

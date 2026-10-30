@@ -31,7 +31,7 @@ type getUpdatesStore interface {
 	StartBotUpdatePoll(context.Context, int64, string) (store.BotUpdatePoll, error)
 	CheckBotUpdatePoll(context.Context, int64, string, int64) error
 	FinishBotUpdatePoll(context.Context, int64, string, int64, int64) (int64, error)
-	BotMessageEvents(context.Context, int64, int64, int) ([]store.BotMessageEvent, error)
+	BotMessageEvents(context.Context, int64, int64, int) (store.BotMessageEventPage, error)
 }
 
 type getUpdatesParams struct {
@@ -300,6 +300,7 @@ func (h *handler) getUpdates(w http.ResponseWriter, r *http.Request, botID int64
 	}
 	timedOut := false
 	var updates []botAPIUpdate
+	var nextOffset int64
 	var readErr error
 	for {
 		if poll.wasSuperseded() {
@@ -322,7 +323,7 @@ func (h *handler) getUpdates(w http.ResponseWriter, r *http.Request, botID int64
 			h.write(w, http.StatusInternalServerError, []byte(serverErrorBody), botID, method)
 			return
 		}
-		updates, readErr = h.readBotUpdates(poll.ctx, st, botID, effectiveOffset, params.limit)
+		updates, nextOffset, readErr = h.readBotUpdates(poll.ctx, st, botID, effectiveOffset, params.limit)
 		if readErr != nil {
 			if poll.wasSuperseded() {
 				h.updatePollConflict(w, botID, method)
@@ -334,6 +335,9 @@ func (h *handler) getUpdates(w http.ResponseWriter, r *http.Request, botID int64
 			h.log.Error("Bot API update log read failed", "bot_id", botID, "method", method, "err", readErr)
 			h.write(w, http.StatusInternalServerError, []byte(serverErrorBody), botID, method)
 			return
+		}
+		if nextOffset > effectiveOffset {
+			effectiveOffset = nextOffset
 		}
 		if len(updates) != 0 || timeout == nil || timedOut {
 			break
@@ -387,12 +391,18 @@ func (h *handler) getUpdates(w http.ResponseWriter, r *http.Request, botID int64
 	h.write(w, http.StatusOK, encoded, botID, method)
 }
 
-func (h *handler) readBotUpdates(ctx context.Context, st getUpdatesStore, botID, offset int64, limit int) ([]botAPIUpdate, error) {
-	events, err := st.BotMessageEvents(ctx, botID, offset, limit)
+func (h *handler) readBotUpdates(ctx context.Context, st getUpdatesStore, botID, offset int64, limit int) ([]botAPIUpdate, int64, error) {
+	page, err := st.BotMessageEvents(ctx, botID, offset, maxGetUpdatesLimit)
 	if err != nil {
-		return nil, err
+		return nil, offset, err
 	}
-	return h.hydrateBotUpdates(botID, events, offset, limit), nil
+	updates := h.hydrateBotUpdates(botID, page.Events, offset, limit)
+	nextOffset := max(page.NextOffset, offset)
+	if len(updates) != 0 && nextOffset > updates[0].UpdateID {
+		// Keep the first returned update in the inclusive offset window until acknowledged.
+		nextOffset = updates[0].UpdateID
+	}
+	return updates, nextOffset, nil
 }
 
 func (h *handler) hydrateBotUpdates(botID int64, events []store.BotMessageEvent, offset int64, limit int) []botAPIUpdate {

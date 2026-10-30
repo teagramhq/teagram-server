@@ -630,12 +630,12 @@ type observedBotUpdateStore struct {
 	queryOnce  sync.Once
 }
 
-func (s *observedBotUpdateStore) BotMessageEvents(ctx context.Context, botID, fromPts int64, limit int) ([]store.BotMessageEvent, error) {
-	events, err := s.Store.BotMessageEvents(ctx, botID, fromPts, limit)
-	if err == nil && len(events) == 0 && s.emptyQuery != nil {
+func (s *observedBotUpdateStore) BotMessageEvents(ctx context.Context, botID, fromPts int64, limit int) (store.BotMessageEventPage, error) {
+	page, err := s.Store.BotMessageEvents(ctx, botID, fromPts, limit)
+	if err == nil && len(page.Events) == 0 && s.emptyQuery != nil {
 		s.queryOnce.Do(func() { close(s.emptyQuery) })
 	}
-	return events, err
+	return page, err
 }
 
 func startSmokeBotAPIServerWithHandler(t *testing.T, f *smokeFixture, handler http.Handler) string {

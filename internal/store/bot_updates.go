@@ -30,6 +30,13 @@ type BotMessageEvent struct {
 	Sender  User
 }
 
+// BotMessageEventPage contains eligible updates from one bounded event window
+// and the exclusive offset after the last event scanned in that window.
+type BotMessageEventPage struct {
+	Events     []BotMessageEvent
+	NextOffset int64
+}
+
 // BotUpdateOffset returns the active bot token's confirmed update offset.
 func (s *Store) BotUpdateOffset(ctx context.Context, botID int64, token string) (int64, error) {
 	wantHash, ok := botTokenHashForID(botID, token)
@@ -122,12 +129,12 @@ func (s *Store) FinishBotUpdatePoll(ctx context.Context, botID int64, token stri
 	}
 }
 
-// BotMessageEvents returns retained incoming private text-message events at or
-// above fromPts with each message and sender loaded in the same query. Other
-// event kinds and messages stay as pts gaps.
-func (s *Store) BotMessageEvents(ctx context.Context, botID, fromPts int64, limit int) ([]BotMessageEvent, error) {
+// BotMessageEvents returns eligible updates from a bounded raw event window,
+// with each message and sender loaded in the same query. Other pts values stay
+// as gaps; NextOffset advances past only events included in that window.
+func (s *Store) BotMessageEvents(ctx context.Context, botID, fromPts int64, limit int) (BotMessageEventPage, error) {
 	if botID <= 0 || fromPts < 0 {
-		return nil, errors.New("bot update window invalid")
+		return BotMessageEventPage{}, errors.New("bot update window invalid")
 	}
 	if limit < 1 {
 		limit = 1
@@ -140,11 +147,19 @@ func (s *Store) BotMessageEvents(ctx context.Context, botID, fromPts int64, limi
 		Lim:     int32(limit),
 	})
 	if err != nil {
-		return nil, fmt.Errorf("read bot message events: %w", err)
+		return BotMessageEventPage{}, fmt.Errorf("read bot message events: %w", err)
 	}
-	events := make([]BotMessageEvent, len(rows))
-	for i, row := range rows {
-		events[i] = BotMessageEvent{
+	page := BotMessageEventPage{NextOffset: fromPts}
+	if len(rows) == 0 {
+		return page, nil
+	}
+	page.NextOffset = rows[0].NextOffset
+	page.Events = make([]BotMessageEvent, 0, len(rows))
+	for _, row := range rows {
+		if !row.HasHumanSender {
+			continue
+		}
+		page.Events = append(page.Events, BotMessageEvent{
 			Pts:     row.Pts,
 			Type:    EventType(row.Type),
 			LocalID: row.LocalID,
@@ -169,9 +184,9 @@ func (s *Store) BotMessageEvents(ctx context.Context, botID, fromPts int64, limi
 				LastName:  row.SenderLastName,
 				Username:  row.SenderUsername,
 			},
-		}
+		})
 	}
-	return events, nil
+	return page, nil
 }
 
 func botTokenHashForID(botID int64, token string) ([]byte, bool) {

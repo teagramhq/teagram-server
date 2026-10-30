@@ -64,54 +64,68 @@ func (q *Queries) ActiveBotTokenState(ctx context.Context, userID int64) (Active
 }
 
 const botMessageEvents = `-- name: BotMessageEvents :many
+WITH event_window AS MATERIALIZED (
+    SELECT e.owner_id, e.pts, e.type, e.local_id
+    FROM message_events AS e
+    WHERE e.owner_id = $1
+      AND e.pts >= $2::bigint
+    ORDER BY e.pts
+    LIMIT $3::int
+), bounded_events AS (
+    SELECT e.owner_id,
+           e.pts,
+           e.type,
+           e.local_id,
+           (MAX(e.pts)::bigint + 1::bigint)::bigint AS next_offset
+    FROM event_window AS e
+)
 SELECT e.pts,
        e.type,
        e.local_id,
-       m.owner_id AS message_owner_id,
-       m.local_id AS message_local_id,
-       m.peer_type AS message_peer_type,
-       m.peer_id AS message_peer_id,
-       m.from_id AS message_from_id,
-       m.date AS message_date,
-       m.message AS message_text,
-       m.out AS message_out,
-       m.deleted AS message_deleted,
-       m.action_type AS message_action_type,
-       m.file_id AS message_file_id,
+       e.next_offset,
+       COALESCE(sender.id, 0) > 0 AS has_human_sender,
+       COALESCE(m.owner_id, 0)::bigint AS message_owner_id,
+       COALESCE(m.local_id, 0)::bigint AS message_local_id,
+       COALESCE(m.peer_type, 0)::smallint AS message_peer_type,
+       COALESCE(m.peer_id, 0)::bigint AS message_peer_id,
+       COALESCE(m.from_id, 0)::bigint AS message_from_id,
+       COALESCE(m.date, 'epoch'::timestamptz) AS message_date,
+       COALESCE(m.message, '')::text AS message_text,
+       COALESCE(m.out, false) AS message_out,
+       COALESCE(m.deleted, false) AS message_deleted,
+       COALESCE(m.action_type, 0)::smallint AS message_action_type,
+       COALESCE(m.file_id, 0)::bigint AS message_file_id,
        m.sticker_document_id AS message_sticker_document_id,
-       sender.id AS sender_id,
-       sender.kind AS sender_kind,
-       sender.first_name AS sender_first_name,
-       sender.last_name AS sender_last_name,
+       COALESCE(sender.id, 0)::bigint AS sender_id,
+       COALESCE(sender.kind, 'human')::text AS sender_kind,
+       COALESCE(sender.first_name, '')::text AS sender_first_name,
+       COALESCE(sender.last_name, '')::text AS sender_last_name,
        sender_username.handle AS sender_username
-FROM message_events AS e
-JOIN messages AS m
+FROM bounded_events AS e
+LEFT JOIN messages AS m
   ON m.owner_id = e.owner_id
  AND m.local_id = e.local_id
-JOIN users AS sender
+ AND e.type = 1
+ AND m.peer_type = 1
+ AND m.peer_id = m.from_id
+ AND m.out = false
+ AND m.deleted = false
+ AND (m.expires_at IS NULL OR m.expires_at > statement_timestamp())
+ AND m.action_type = 0
+ AND m.message <> ''
+ AND m.file_id = 0
+ AND m.sticker_document_id IS NULL
+ AND NOT EXISTS (
+     SELECT 1 FROM poll_message_copies AS p
+     WHERE p.owner_id = m.owner_id AND p.local_id = m.local_id
+ )
+LEFT JOIN users AS sender
   ON sender.id = m.from_id
  AND sender.kind = 'human'
 LEFT JOIN usernames AS sender_username
   ON sender_username.owner_type = 'user'
  AND sender_username.owner_id = sender.id
-WHERE e.owner_id = $1
-  AND e.pts >= $2::bigint
-  AND e.type = 1
-  AND m.peer_type = 1
-  AND m.peer_id = m.from_id
-  AND m.out = false
-  AND m.deleted = false
-  AND (m.expires_at IS NULL OR m.expires_at > statement_timestamp())
-  AND m.action_type = 0
-  AND m.message <> ''
-  AND m.file_id = 0
-  AND m.sticker_document_id IS NULL
-  AND NOT EXISTS (
-      SELECT 1 FROM poll_message_copies AS p
-      WHERE p.owner_id = m.owner_id AND p.local_id = m.local_id
-  )
 ORDER BY e.pts
-LIMIT $3::int
 `
 
 type BotMessageEventsParams struct {
@@ -124,6 +138,8 @@ type BotMessageEventsRow struct {
 	Pts                      int64
 	Type                     int16
 	LocalID                  int64
+	NextOffset               int64
+	HasHumanSender           bool
 	MessageOwnerID           int64
 	MessageLocalID           int64
 	MessagePeerType          int16
@@ -143,9 +159,8 @@ type BotMessageEventsRow struct {
 	SenderUsername           *string
 }
 
-// BotMessageEvents returns only retained incoming private text-message events.
-// Other pts values remain gaps; the lower-bound query never depends on finding
-// a row at every offset.
+// BotMessageEvents returns a bounded event window, the retained incoming text
+// messages in that window, and the exclusive offset after the last scanned pts.
 func (q *Queries) BotMessageEvents(ctx context.Context, arg BotMessageEventsParams) ([]BotMessageEventsRow, error) {
 	rows, err := q.db.Query(ctx, botMessageEvents, arg.OwnerID, arg.FromPts, arg.Lim)
 	if err != nil {
@@ -159,6 +174,8 @@ func (q *Queries) BotMessageEvents(ctx context.Context, arg BotMessageEventsPara
 			&i.Pts,
 			&i.Type,
 			&i.LocalID,
+			&i.NextOffset,
+			&i.HasHumanSender,
 			&i.MessageOwnerID,
 			&i.MessageLocalID,
 			&i.MessagePeerType,

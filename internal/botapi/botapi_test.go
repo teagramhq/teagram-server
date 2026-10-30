@@ -70,10 +70,10 @@ type firstQueryUpdatesStore struct {
 	queryCount atomic.Int32
 }
 
-func (s *firstQueryUpdatesStore) BotMessageEvents(ctx context.Context, botID, fromPts int64, limit int) ([]store.BotMessageEvent, error) {
+func (s *firstQueryUpdatesStore) BotMessageEvents(ctx context.Context, botID, fromPts int64, limit int) (store.BotMessageEventPage, error) {
 	if s.queryCount.Add(1) == 1 {
 		close(s.firstQuery)
-		return nil, nil
+		return store.BotMessageEventPage{NextOffset: fromPts}, nil
 	}
 	return s.fakeUpdatesStore.BotMessageEvents(ctx, botID, fromPts, limit)
 }
@@ -114,20 +114,25 @@ func (s *sharedReplicaUpdatesStore) BotUpdateOffset(_ context.Context, botID int
 	return s.offset, nil
 }
 
-func (s *sharedReplicaUpdatesStore) BotMessageEvents(_ context.Context, botID, fromPts int64, _ int) ([]store.BotMessageEvent, error) {
+func (s *sharedReplicaUpdatesStore) BotMessageEvents(_ context.Context, botID, fromPts int64, limit int) (store.BotMessageEventPage, error) {
 	if botID != 123456 {
-		return nil, store.ErrBotTokenNotFound
+		return store.BotMessageEventPage{}, store.ErrBotTokenNotFound
 	}
 	s.querySignal <- struct{}{}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	var events []store.BotMessageEvent
+	page := store.BotMessageEventPage{NextOffset: fromPts}
 	for _, event := range s.events {
-		if event.Pts >= fromPts {
-			events = append(events, event)
+		if event.Pts < fromPts {
+			continue
 		}
+		if len(page.Events) == limit {
+			break
+		}
+		page.Events = append(page.Events, event)
+		page.NextOffset = event.Pts + 1
 	}
-	return events, nil
+	return page, nil
 }
 
 func (s *sharedReplicaUpdatesStore) StartBotUpdatePoll(_ context.Context, botID int64, token string) (store.BotUpdatePoll, error) {
@@ -185,11 +190,11 @@ func (s *sharedReplicaUpdatesStore) FinishBotUpdatePoll(_ context.Context, botID
 	return s.offset, nil
 }
 
-func (s *blockingFirstQueryUpdatesStore) BotMessageEvents(ctx context.Context, botID, fromPts int64, limit int) ([]store.BotMessageEvent, error) {
+func (s *blockingFirstQueryUpdatesStore) BotMessageEvents(ctx context.Context, botID, fromPts int64, limit int) (store.BotMessageEventPage, error) {
 	if s.queryCount.Add(1) == 1 {
 		close(s.firstQuery)
 		<-ctx.Done()
-		return nil, ctx.Err()
+		return store.BotMessageEventPage{}, ctx.Err()
 	}
 	return s.fakeUpdatesStore.BotMessageEvents(ctx, botID, fromPts, limit)
 }
@@ -229,15 +234,28 @@ func (s *fakeUpdatesStore) FinishBotUpdatePoll(_ context.Context, botID int64, t
 	return s.offset, nil
 }
 
-func (s *fakeUpdatesStore) BotMessageEvents(_ context.Context, botID, fromPts int64, limit int) ([]store.BotMessageEvent, error) {
+func (s *fakeUpdatesStore) BotMessageEvents(_ context.Context, botID, fromPts int64, limit int) (store.BotMessageEventPage, error) {
 	if botID != 123456 {
-		return nil, store.ErrBotTokenNotFound
+		return store.BotMessageEventPage{}, store.ErrBotTokenNotFound
 	}
 	s.lastFromPts = fromPts
 	s.lastLimit = limit
-	var events []store.BotMessageEvent
+	rawEvents := make([]store.Event, 0, limit)
 	for _, event := range s.events {
-		if int64(event.Pts) < fromPts || event.Type != store.EventNewMessage {
+		if int64(event.Pts) < fromPts {
+			continue
+		}
+		if len(rawEvents) == limit {
+			break
+		}
+		rawEvents = append(rawEvents, event)
+	}
+	page := store.BotMessageEventPage{NextOffset: fromPts}
+	if len(rawEvents) != 0 {
+		page.NextOffset = int64(rawEvents[len(rawEvents)-1].Pts) + 1
+	}
+	for _, event := range rawEvents {
+		if event.Type != store.EventNewMessage {
 			continue
 		}
 		message, exists := s.messages[event.LocalID]
@@ -248,12 +266,9 @@ func (s *fakeUpdatesStore) BotMessageEvents(_ context.Context, botID, fromPts in
 		if !exists || sender.Kind != store.UserKindHuman {
 			continue
 		}
-		events = append(events, store.BotMessageEvent{Pts: int64(event.Pts), Type: event.Type, LocalID: event.LocalID, Message: message, Sender: sender})
-		if len(events) == limit {
-			break
-		}
+		page.Events = append(page.Events, store.BotMessageEvent{Pts: int64(event.Pts), Type: event.Type, LocalID: event.LocalID, Message: message, Sender: sender})
 	}
-	return events, nil
+	return page, nil
 }
 
 func (s *fakeUpdatesStore) MessageByOwnerLocal(_ context.Context, ownerID, localID int64) (store.Message, bool, error) {
@@ -1049,6 +1064,53 @@ func TestGetUpdatesSecondPollConflictsTheFirst(t *testing.T) {
 	}
 }
 
+func TestGetUpdatesAdvancesStoredOffsetAcrossPhotoGaps(t *testing.T) {
+	st := &fakeUpdatesStore{
+		fakeStore: newFakeStore(),
+		events: []store.Event{
+			{Pts: 1, Type: store.EventNewMessage, LocalID: 10},
+			{Pts: 2, Type: store.EventNewMessage, LocalID: 11},
+		},
+		messages: map[int64]store.Message{
+			10: {OwnerID: 123456, LocalID: 10, PeerType: store.PeerTypeUser, PeerID: 987, FromID: 987, Text: "photo", FileID: 42},
+			11: {OwnerID: 123456, LocalID: 11, PeerType: store.PeerTypeUser, PeerID: 987, FromID: 987, Text: "photo", FileID: 42},
+		},
+		users: map[int64]store.User{
+			987: {ID: 987, Kind: store.UserKindHuman, FirstName: "Ada"},
+		},
+	}
+	handler := botapi.NewHandler(st, slog.New(slog.DiscardHandler), store.RateLimitConfig{})
+	request := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/bot123456:secret-sentinel/getUpdates?offset=0", nil)
+	request.RemoteAddr = "100.64.1.2:3456"
+	firstResponse := httptest.NewRecorder()
+	handler.ServeHTTP(firstResponse, request)
+	if firstResponse.Code != http.StatusOK || !strings.Contains(firstResponse.Body.String(), `"result":[]`) {
+		t.Fatalf("photo-only poll response = (%d, %q), want empty success", firstResponse.Code, firstResponse.Body.String())
+	}
+	if st.offset != 3 {
+		t.Fatalf("offset after photo-only poll = %d, want to skip proven pts gaps through 2", st.offset)
+	}
+
+	st.events = append(st.events, store.Event{Pts: 3, Type: store.EventNewMessage, LocalID: 12})
+	st.messages[12] = store.Message{
+		OwnerID: 123456, LocalID: 12, PeerType: store.PeerTypeUser, PeerID: 987,
+		FromID: 987, Date: time.Unix(1700000000, 0), Text: "after photos",
+	}
+	secondRequest := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/bot123456:secret-sentinel/getUpdates?offset=0", nil)
+	secondRequest.RemoteAddr = "100.64.1.2:3457"
+	secondResponse := httptest.NewRecorder()
+	handler.ServeHTTP(secondResponse, secondRequest)
+	if st.lastFromPts != 3 {
+		t.Fatalf("second poll scanned from pts %d, want stored gap offset 3", st.lastFromPts)
+	}
+	if secondResponse.Code != http.StatusOK || !strings.Contains(secondResponse.Body.String(), `"update_id":3`) {
+		t.Fatalf("poll after photo history = (%d, %q), want update 3", secondResponse.Code, secondResponse.Body.String())
+	}
+	if st.offset != 3 {
+		t.Fatalf("offset after returning the unacknowledged update = %d, want 3", st.offset)
+	}
+}
+
 func TestGetUpdatesAcrossHandlerInstancesSupersedesOlderPoll(t *testing.T) {
 	shared := &sharedReplicaUpdatesStore{
 		fakeUpdatesStore: &fakeUpdatesStore{fakeStore: newFakeStore()},
@@ -1122,8 +1184,8 @@ func TestGetUpdatesAcrossHandlerInstancesSupersedesOlderPoll(t *testing.T) {
 	shared.mu.Lock()
 	offset := shared.offset
 	shared.mu.Unlock()
-	if offset != 3 {
-		t.Fatalf("stored offset = %d, want the winning poll's offset 3", offset)
+	if offset != 4 {
+		t.Fatalf("stored offset = %d, want the winning poll's safe gap offset 4", offset)
 	}
 }
 
@@ -1200,8 +1262,8 @@ func TestGetUpdatesSupersededClaimCannotFinishAfterNewerClaim(t *testing.T) {
 	st.mu.Lock()
 	offset, generation := st.offset, st.generation
 	st.mu.Unlock()
-	if offset != 5 || generation != 1 {
-		t.Fatalf("stored offset/generation = %d/%d, want 5/1", offset, generation)
+	if offset != 6 || generation != 1 {
+		t.Fatalf("stored offset/generation = %d/%d, want 6/1", offset, generation)
 	}
 }
 
