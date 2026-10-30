@@ -96,6 +96,15 @@ type sharedReplicaUpdatesStore struct {
 	wakePolls   []func(int64)
 }
 
+type delayedFirstClaimUpdatesStore struct {
+	*sharedReplicaUpdatesStore
+
+	firstClaimStarted   chan struct{}
+	releaseFirstClaim   chan struct{}
+	secondClaimFinished chan struct{}
+	startCalls          atomic.Int32
+}
+
 func (s *sharedReplicaUpdatesStore) BotUpdateOffset(_ context.Context, botID int64, token string) (int64, error) {
 	if botID != 123456 || s.lookupErrs[token] != nil {
 		return 0, store.ErrBotTokenNotFound
@@ -134,6 +143,22 @@ func (s *sharedReplicaUpdatesStore) StartBotUpdatePoll(_ context.Context, botID 
 		wake(botID)
 	}
 	return store.BotUpdatePoll{Offset: offset, Generation: generation}, nil
+}
+
+func (s *delayedFirstClaimUpdatesStore) StartBotUpdatePoll(ctx context.Context, botID int64, token string) (store.BotUpdatePoll, error) {
+	call := s.startCalls.Add(1)
+	if call == 1 {
+		close(s.firstClaimStarted)
+		<-s.releaseFirstClaim
+		if err := ctx.Err(); err != nil {
+			return store.BotUpdatePoll{}, err
+		}
+	}
+	poll, err := s.sharedReplicaUpdatesStore.StartBotUpdatePoll(ctx, botID, token)
+	if call == 2 && err == nil {
+		close(s.secondClaimFinished)
+	}
+	return poll, err
 }
 
 func (s *sharedReplicaUpdatesStore) CheckBotUpdatePoll(_ context.Context, _ int64, _ string, generation int64) error {
@@ -1099,6 +1124,84 @@ func TestGetUpdatesAcrossHandlerInstancesSupersedesOlderPoll(t *testing.T) {
 	shared.mu.Unlock()
 	if offset != 3 {
 		t.Fatalf("stored offset = %d, want the winning poll's offset 3", offset)
+	}
+}
+
+func TestGetUpdatesSupersededClaimCannotFinishAfterNewerClaim(t *testing.T) {
+	st := &delayedFirstClaimUpdatesStore{
+		sharedReplicaUpdatesStore: &sharedReplicaUpdatesStore{
+			fakeUpdatesStore: &fakeUpdatesStore{fakeStore: newFakeStore()},
+			querySignal:      make(chan struct{}, 8),
+		},
+		firstClaimStarted:   make(chan struct{}),
+		releaseFirstClaim:   make(chan struct{}),
+		secondClaimFinished: make(chan struct{}),
+	}
+	handler := botapi.NewHandler(st, slog.New(slog.DiscardHandler), store.RateLimitConfig{})
+	st.wakePolls = []func(int64){handler.NotifyUpdates}
+
+	firstRequest := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/bot123456:secret-sentinel/getUpdates?timeout=5", nil)
+	firstRequest.RemoteAddr = "100.64.1.2:3456"
+	firstResponse := httptest.NewRecorder()
+	firstDone := make(chan struct{})
+	go func() {
+		handler.ServeHTTP(firstResponse, firstRequest)
+		close(firstDone)
+	}()
+	select {
+	case <-st.firstClaimStarted:
+	case <-time.After(time.Second):
+		t.Fatal("first getUpdates did not begin claiming a generation")
+	}
+
+	secondRequest := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/bot123456:secret-sentinel/getUpdates?offset=5&timeout=5", nil)
+	secondRequest.RemoteAddr = "100.64.1.2:3457"
+	secondResponse := httptest.NewRecorder()
+	secondDone := make(chan struct{})
+	go func() {
+		handler.ServeHTTP(secondResponse, secondRequest)
+		close(secondDone)
+	}()
+	select {
+	case <-st.secondClaimFinished:
+	case <-time.After(time.Second):
+		t.Fatal("newer getUpdates did not finish claiming its generation")
+	}
+
+	close(st.releaseFirstClaim)
+	select {
+	case <-firstDone:
+	case <-time.After(time.Second):
+		t.Fatal("superseded getUpdates did not finish after its claim was released")
+	}
+	if firstResponse.Code != http.StatusConflict {
+		t.Fatalf("superseded poll response = (%d, %q), want 409 conflict", firstResponse.Code, firstResponse.Body.String())
+	}
+
+	st.mu.Lock()
+	st.events = []store.BotMessageEvent{{
+		Pts: 6, Type: store.EventNewMessage, LocalID: 42,
+		Message: store.Message{
+			OwnerID: 123456, LocalID: 42, PeerType: store.PeerTypeUser, PeerID: 987,
+			FromID: 987, Date: time.Unix(1700000000, 0), Text: "newer poll update",
+		},
+		Sender: store.User{ID: 987, Kind: store.UserKindHuman, FirstName: "Ada"},
+	}}
+	st.mu.Unlock()
+	handler.NotifyUpdates(123456)
+	select {
+	case <-secondDone:
+	case <-time.After(time.Second):
+		t.Fatal("newer getUpdates did not finish after the update notification")
+	}
+	if secondResponse.Code != http.StatusOK || !strings.Contains(secondResponse.Body.String(), `"update_id":6`) {
+		t.Fatalf("newer poll response = (%d, %q), want update 6", secondResponse.Code, secondResponse.Body.String())
+	}
+	st.mu.Lock()
+	offset, generation := st.offset, st.generation
+	st.mu.Unlock()
+	if offset != 5 || generation != 1 {
+		t.Fatalf("stored offset/generation = %d/%d, want 5/1", offset, generation)
 	}
 }
 

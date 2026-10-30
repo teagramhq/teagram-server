@@ -263,17 +263,29 @@ func (h *handler) getUpdates(w http.ResponseWriter, r *http.Request, botID int64
 		return
 	}
 	defer h.limiter.endUpdatePoll(botID, poll)
-	claimed, err := st.StartBotUpdatePoll(r.Context(), botID, token)
+	if poll.wasSuperseded() {
+		h.updatePollConflict(w, botID, method)
+		return
+	}
+	claimed, err := st.StartBotUpdatePoll(poll.ctx, botID, token)
 	if errors.Is(err, store.ErrBotTokenNotFound) {
 		h.unauthorized(w, botID, method)
 		return
 	}
 	if err != nil {
-		if r.Context().Err() != nil {
+		if poll.wasSuperseded() || errors.Is(err, store.ErrBotPollSuperseded) {
+			h.updatePollConflict(w, botID, method)
+			return
+		}
+		if r.Context().Err() != nil || poll.ctx.Err() != nil {
 			return
 		}
 		h.log.Error("Bot API update poll claim failed", "bot_id", botID, "method", method, "err", err)
 		h.write(w, http.StatusInternalServerError, []byte(serverErrorBody), botID, method)
+		return
+	}
+	if poll.wasSuperseded() {
+		h.updatePollConflict(w, botID, method)
 		return
 	}
 	effectiveOffset := claimed.Offset
