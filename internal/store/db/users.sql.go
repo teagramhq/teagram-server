@@ -440,18 +440,9 @@ func (q *Queries) UserByPhone(ctx context.Context, phone *string) (UserByPhoneRo
 const usersByID = `-- name: UsersByID :many
 SELECT u.id, u.phone, u.first_name, u.last_name, u.created_at, u.is_online, u.last_seen_at,
        un.handle AS username, u.kind
-FROM (
-    SELECT DISTINCT id
-    FROM unnest($1::bigint[]) AS requested(id)
-) AS selected
-CROSS JOIN LATERAL (
-    SELECT users.id, users.phone, users.first_name, users.last_name, users.created_at,
-           users.is_online, users.last_seen_at, users.kind
-    FROM users
-    WHERE users.id = selected.id
-    LIMIT 1
-) AS u
+FROM users u
 LEFT JOIN usernames un ON un.owner_type = 'user' AND un.owner_id = u.id
+WHERE u.id = ANY($1::bigint[])
 `
 
 type UsersByIDRow struct {
@@ -466,9 +457,6 @@ type UsersByIDRow struct {
 	Kind       string
 }
 
-// Drive lookups from the selected ids. A large ANY array can make PostgreSQL
-// scan the users table to find a subset that already came from owner-scoped
-// edges; the lateral primary-key lookup keeps work bounded by that subset.
 func (q *Queries) UsersByID(ctx context.Context, ids []int64) ([]UsersByIDRow, error) {
 	rows, err := q.db.Query(ctx, usersByID, ids)
 	if err != nil {

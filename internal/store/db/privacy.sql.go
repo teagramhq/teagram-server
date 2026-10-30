@@ -211,8 +211,12 @@ SELECT requested.owner_id::BIGINT AS owner_id,
            )
        ), FALSE)::BOOLEAN AS viewer_hides_from_owner
 FROM UNNEST($2::BIGINT[]) AS requested(owner_id)
-JOIN users owner_user
-  ON owner_user.id = requested.owner_id
+CROSS JOIN LATERAL (
+    SELECT users.id
+    FROM users
+    WHERE users.id = requested.owner_id
+    LIMIT 1
+) AS owner_user
 JOIN users viewer_user
   ON viewer_user.id = $1
 LEFT JOIN user_privacy_rules owner_rule
@@ -236,6 +240,8 @@ type EvaluateLastSeenPrivacyForViewerRow struct {
 }
 
 // Resolve every owner's status visibility to one viewer in a single query.
+// A direct join can scan all users for large batches; make each selected owner
+// drive its primary-key lookup while preserving the missing-owner check.
 func (q *Queries) EvaluateLastSeenPrivacyForViewer(ctx context.Context, arg EvaluateLastSeenPrivacyForViewerParams) ([]EvaluateLastSeenPrivacyForViewerRow, error) {
 	rows, err := q.db.Query(ctx, evaluateLastSeenPrivacyForViewer, arg.ViewerID, arg.OwnerIds)
 	if err != nil {

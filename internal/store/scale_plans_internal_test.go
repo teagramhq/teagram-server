@@ -485,7 +485,7 @@ func TestContactStatesBoundsReverseLookupForLargeOwner(t *testing.T) {
 	}
 }
 
-func TestUsersByIDUsesContactIDsAtLargeUserScale(t *testing.T) {
+func TestLastSeenPrivacyForViewerUsesContactIDsAtLargeUserScale(t *testing.T) {
 	t.Parallel()
 	ctx := t.Context()
 	dsn := pgtest.DSN(t)
@@ -503,7 +503,7 @@ func TestUsersByIDUsesContactIDsAtLargeUserScale(t *testing.T) {
 		`ANALYZE users`,
 	} {
 		if _, err := pool.Exec(ctx, query); err != nil {
-			t.Fatalf("seed users-by-id plan: %v", err)
+			t.Fatalf("seed contact privacy plan: %v", err)
 		}
 	}
 
@@ -530,26 +530,29 @@ func TestUsersByIDUsesContactIDsAtLargeUserScale(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer traced.Close()
-	users, err := db.New(traced).UsersByID(ctx, ids)
+	privacyRows, err := db.New(traced).EvaluateLastSeenPrivacyForViewer(ctx, db.EvaluateLastSeenPrivacyForViewerParams{
+		ViewerID: 1,
+		OwnerIds: ids,
+	})
 	if err != nil {
-		t.Fatalf("load contact users: %v", err)
+		t.Fatalf("evaluate contact privacy: %v", err)
 	}
-	if len(users) != 5000 {
-		t.Fatalf("contact users = %d, want 5000", len(users))
+	if len(privacyRows) != 5000 {
+		t.Fatalf("contact privacy rows = %d, want 5000", len(privacyRows))
 	}
 	recorded.mu.Lock()
 	queries := append([]pgx.TraceQueryStartData(nil), recorded.queries...)
 	recorded.mu.Unlock()
 	if len(queries) != 1 {
-		t.Fatalf("users-by-id query count = %d, want 1", len(queries))
+		t.Fatalf("contact privacy query count = %d, want 1", len(queries))
 	}
 	var raw []byte
 	_, query, ok := strings.Cut(queries[0].SQL, "\n")
 	if !ok {
-		t.Fatalf("users-by-id query is missing its sqlc header: %s", queries[0].SQL)
+		t.Fatalf("contact privacy query is missing its sqlc header: %s", queries[0].SQL)
 	}
 	if err := pool.QueryRow(ctx, "EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) "+query, queries[0].Args...).Scan(&raw); err != nil {
-		t.Fatalf("explain users-by-id query: %v", err)
+		t.Fatalf("explain contact privacy query: %v", err)
 	}
 	var plans []struct {
 		Plan scalePlan `json:"Plan"`
@@ -559,11 +562,11 @@ func TestUsersByIDUsesContactIDsAtLargeUserScale(t *testing.T) {
 	}
 	for _, table := range plans[0].Plan.sequentialTables() {
 		if table == "users" {
-			t.Fatalf("users-by-id query sequentially scans users for caller contact ids: %s", raw)
+			t.Fatalf("contact privacy query sequentially scans users for caller contact ids: %s", raw)
 		}
 	}
-	if rows := plans[0].Plan.rowsReadFrom("users"); rows > 10000 {
-		t.Fatalf("users-by-id query reads %.0f users for 5000 contact ids", rows)
+	if rows := plans[0].Plan.rowsReadFrom("users"); rows > 5001 {
+		t.Fatalf("contact privacy query reads %.0f users for 5000 contact ids", rows)
 	}
 }
 
