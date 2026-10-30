@@ -37,9 +37,6 @@ jobs:
     runs-on: ubuntu-26.04
     timeout-minutes: 60
     environment: production
-    outputs:
-      sha: ${{ steps.target.outputs.sha }}
-      ci_run_id: ${{ steps.target.outputs.ci_run_id }}
     permissions:
       contents: read
       actions: read
@@ -83,6 +80,7 @@ jobs:
           echo "deploying $sha from CI run $ci_run_id"
           echo "sha=$sha" >> "$GITHUB_OUTPUT"
           echo "ci_run_id=$ci_run_id" >> "$GITHUB_OUTPUT"
+          printf '{"deploy_sha":"%s","ci_run_id":"%s"}\n' "$sha" "$ci_run_id" > "$RUNNER_TEMP/demo-deploy-target.json"
 
       - name: Join the tailnet
         uses: tailscale/github-action@d1b6cd204f8dceda5b3eaad7f1f767be390056cd # v4.2.0
@@ -115,204 +113,10 @@ jobs:
         if: ${{ always() }}
         run: rm -rf "$RUNNER_TEMP/ssh"
 
-  build-demo-web-resolve:
-    name: 'build: demo-web-resolve'
-    continue-on-error: true
-    needs: deploy-server
-    if: ${{ needs.deploy-server.result == 'success' }}
-    runs-on: ubuntu-24.04
-    timeout-minutes: 10
-    permissions:
-      contents: read
-    outputs:
-      deployable: ${{ steps.pin.outputs.deployable }}
-      source_commit: ${{ steps.pin.outputs.source_commit }}
-      artifact_digest: ${{ steps.pin.outputs.artifact_digest }}
-
-    steps:
-      - name: Check out the workflow source commit
-        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - name: Upload the demo deployment target
+        continue-on-error: true
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          ref: ${{ github.workflow_sha }}
-          persist-credentials: false
-
-      - name: Resolve the pinned web artifact
-        id: pin
-        run: |
-          pin=$(python3 deploy/teagram-demo/resolve_web_artifact_pin.py --require-live-manifest)
-          deployable=$(jq -er '.deployable | tostring' <<<"$pin")
-          source_commit=$(jq -er '.sourceCommit' <<<"$pin")
-          artifact_digest=$(jq -er '.artifactDigest' <<<"$pin")
-          [[ "$deployable" == true || "$deployable" == false ]]
-          [[ "$source_commit" =~ ^[0-9a-f]{40}$ ]]
-          [[ "$artifact_digest" =~ ^sha256:[0-9a-f]{64}$ ]]
-          {
-            printf 'deployable=%s\n' "$deployable"
-            printf 'source_commit=%s\n' "$source_commit"
-            printf 'artifact_digest=%s\n' "$artifact_digest"
-          } >> "$GITHUB_OUTPUT"
-
-  deploy-demo:
-    name: 'deploy: demo'
-    continue-on-error: true
-    needs:
-      - deploy-server
-      - build-demo-web-resolve
-    if: ${{ always() && needs.deploy-server.result == 'success' }}
-    runs-on: ubuntu-26.04
-    timeout-minutes: 60
-    environment: demo
-    permissions:
-      actions: read
-      contents: read
-
-    steps:
-      - name: Check the demo deployment gate
-        id: demo-gate
-        env:
-          TEAGRAM_DEMO_DEPLOY_ENABLED: ${{ vars.TEAGRAM_DEMO_DEPLOY_ENABLED }}
-          TS_OAUTH_CLIENT_ID: ${{ secrets.TS_OAUTH_CLIENT_ID }}
-          TS_OAUTH_SECRET: ${{ secrets.TS_OAUTH_SECRET }}
-        run: |
-          if [[ "$TEAGRAM_DEMO_DEPLOY_ENABLED" != 'true' ]]; then
-            echo "enabled=false" >> "$GITHUB_OUTPUT"
-            echo "::notice::Public demo deployment is disabled"
-          elif [[ -z "$TS_OAUTH_CLIENT_ID" || -z "$TS_OAUTH_SECRET" ]]; then
-            echo "enabled=false" >> "$GITHUB_OUTPUT"
-            echo "::notice::Public demo deployment skipped: Tailscale OAuth credentials are missing"
-          else
-            echo "enabled=true" >> "$GITHUB_OUTPUT"
-          fi
-
-      - name: Check the web publication gate
-        id: web-gate
-        if: ${{ steps.demo-gate.outputs.enabled == 'true' }}
-        env:
-          DEMO_WEB_RESOLVER_RESULT: ${{ needs.build-demo-web-resolve.result }}
-          DEMO_WEB_DEPLOYABLE: ${{ needs.build-demo-web-resolve.outputs.deployable }}
-        run: |
-          if [[ "$DEMO_WEB_RESOLVER_RESULT" == 'success' && "$DEMO_WEB_DEPLOYABLE" == 'true' ]]; then
-            echo "enabled=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "enabled=false" >> "$GITHUB_OUTPUT"
-            echo "::notice::Pinned web publication is unavailable; the public server deployment will continue"
-          fi
-
-      - name: Resolve the tested image digest
-        id: demo-image
-        if: ${{ steps.demo-gate.outputs.enabled == 'true' }}
-        env:
-          GH_TOKEN: ${{ github.token }}
-          CI_RUN_ID: ${{ needs.deploy-server.outputs.ci_run_id }}
-          DEPLOY_SHA: ${{ needs.deploy-server.outputs.sha }}
-        run: |
-          [[ "$CI_RUN_ID" =~ ^[0-9]+$ ]]
-          [[ "$DEPLOY_SHA" =~ ^[0-9a-f]{40}$ ]]
-          artifact_dir="$RUNNER_TEMP/demo-image"
-          mkdir -p "$artifact_dir"
-          gh run download "$CI_RUN_ID" --repo "$GITHUB_REPOSITORY" \
-            --name "demo-image-digest-$DEPLOY_SHA" --dir "$artifact_dir"
-          [[ -f "$artifact_dir/demo-image-digest.txt" && ! -L "$artifact_dir/demo-image-digest.txt" ]]
-          digest=$(<"$artifact_dir/demo-image-digest.txt")
-          [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]
-          echo "digest=$digest" >> "$GITHUB_OUTPUT"
-
-      - name: Join the tailnet
-        if: ${{ steps.demo-gate.outputs.enabled == 'true' }}
-        uses: tailscale/github-action@d1b6cd204f8dceda5b3eaad7f1f767be390056cd # v4.2.0
-        with:
-          oauth-client-id: ${{ secrets.TS_OAUTH_CLIENT_ID }}
-          oauth-secret: ${{ secrets.TS_OAUTH_SECRET }}
-          tags: tag:ci-deploy
-          ping: ${{ vars.DEMO_DEPLOY_HOST }}
-
-      - name: Install the demo deploy key
-        if: ${{ steps.demo-gate.outputs.enabled == 'true' }}
-        env:
-          DEMO_DEPLOY_SSH_KEY: ${{ secrets.DEMO_DEPLOY_SSH_KEY }}
-          DEMO_DEPLOY_KNOWN_HOSTS: ${{ vars.DEMO_DEPLOY_KNOWN_HOSTS }}
-          DEMO_DEPLOY_HOST: ${{ vars.DEMO_DEPLOY_HOST }}
-          DEMO_DEPLOY_PORT: ${{ vars.DEMO_DEPLOY_PORT }}
-        run: |
-          [[ -n "$DEMO_DEPLOY_SSH_KEY" && -n "$DEMO_DEPLOY_KNOWN_HOSTS" && -n "$DEMO_DEPLOY_HOST" && -n "$DEMO_DEPLOY_PORT" ]]
-          [[ "$DEMO_DEPLOY_HOST" =~ ^[A-Za-z0-9.-]+$ ]]
-          [[ "$DEMO_DEPLOY_PORT" =~ ^[0-9]{1,5}$ ]]
-          (( 10#$DEMO_DEPLOY_PORT >= 1 && 10#$DEMO_DEPLOY_PORT <= 65535 ))
-          install -d -m 700 "$RUNNER_TEMP/ssh-demo"
-          (umask 077 && printf '%s\n' "$DEMO_DEPLOY_SSH_KEY" > "$RUNNER_TEMP/ssh-demo/id_deploy")
-          printf '%s\n' "$DEMO_DEPLOY_KNOWN_HOSTS" > "$RUNNER_TEMP/ssh-demo/known_hosts"
-
-      - name: Deploy the tested server commit after the dev deploy
-        if: ${{ steps.demo-gate.outputs.enabled == 'true' }}
-        env:
-          DEPLOY_SHA: ${{ needs.deploy-server.outputs.sha }}
-          DEPLOY_IMAGE_DIGEST: ${{ steps.demo-image.outputs.digest }}
-          DEMO_DEPLOY_HOST: ${{ vars.DEMO_DEPLOY_HOST }}
-          DEMO_DEPLOY_PORT: ${{ vars.DEMO_DEPLOY_PORT }}
-        run: |
-          [[ "$DEPLOY_SHA" =~ ^[0-9a-f]{40}$ ]]
-          [[ "$DEPLOY_IMAGE_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]
-          ssh -T -p "$DEMO_DEPLOY_PORT" -i "$RUNNER_TEMP/ssh-demo/id_deploy" \
-            -o IdentitiesOnly=yes -o BatchMode=yes \
-            -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$RUNNER_TEMP/ssh-demo/known_hosts" \
-            -o ServerAliveInterval=30 -o ServerAliveCountMax=10 \
-            "root@$DEMO_DEPLOY_HOST" "$DEPLOY_SHA $DEPLOY_IMAGE_DIGEST" </dev/null
-
-      - name: Download the web artifact from tested CI
-        id: demo-web-artifact
-        if: ${{ steps.web-gate.outputs.enabled == 'true' }}
-        env:
-          GH_TOKEN: ${{ github.token }}
-          CI_RUN_ID: ${{ needs.deploy-server.outputs.ci_run_id }}
-          WEB_SOURCE_SHA: ${{ needs.build-demo-web-resolve.outputs.source_commit }}
-        run: |
-          [[ "$CI_RUN_ID" =~ ^[0-9]+$ ]]
-          [[ "$WEB_SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]
-          artifact_dir="$RUNNER_TEMP/demo-web-artifact"
-          mkdir -p "$artifact_dir"
-          gh run download "$CI_RUN_ID" --repo "$GITHUB_REPOSITORY" \
-            --name "demo-web-release-$WEB_SOURCE_SHA" --dir "$artifact_dir"
-          archive="$artifact_dir/demo-web-$WEB_SOURCE_SHA.tar.gz"
-          checksum_file="$archive.sha256"
-          [[ -f "$archive" && ! -L "$archive" && -f "$checksum_file" && ! -L "$checksum_file" ]]
-          archive_sha256=$(<"$checksum_file")
-          [[ "$archive_sha256" =~ ^[0-9a-f]{64}$ ]]
-          actual_sha256=$(sha256sum "$archive" | awk '{print $1}')
-          [[ "$actual_sha256" == "$archive_sha256" ]]
-          {
-            printf 'archive=%s\n' "$archive"
-            printf 'archive_sha256=%s\n' "$archive_sha256"
-          } >> "$GITHUB_OUTPUT"
-
-      - name: Fail if the pinned web publication is not deployable
-        if: ${{ steps.demo-gate.outputs.enabled == 'true' && steps.web-gate.outputs.enabled != 'true' }}
-        run: |
-          echo "::error::Public server deployed, but the published web pin does not match the live web manifest"
-          exit 1
-
-      - name: Publish the pinned web artifact on the demo origin
-        if: ${{ steps.web-gate.outputs.enabled == 'true' }}
-        env:
-          DEPLOY_SHA: ${{ needs.deploy-server.outputs.sha }}
-          WEB_SOURCE_SHA: ${{ needs.build-demo-web-resolve.outputs.source_commit }}
-          WEB_ARTIFACT_DIGEST: ${{ needs.build-demo-web-resolve.outputs.artifact_digest }}
-          WEB_ARCHIVE_SHA256: ${{ steps.demo-web-artifact.outputs.archive_sha256 }}
-          WEB_ARCHIVE: ${{ steps.demo-web-artifact.outputs.archive }}
-          DEMO_DEPLOY_HOST: ${{ vars.DEMO_DEPLOY_HOST }}
-          DEMO_DEPLOY_PORT: ${{ vars.DEMO_DEPLOY_PORT }}
-        run: |
-          [[ "$DEPLOY_SHA" =~ ^[0-9a-f]{40}$ ]]
-          [[ "$WEB_SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]
-          [[ "$WEB_ARTIFACT_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]
-          [[ "$WEB_ARCHIVE_SHA256" =~ ^[0-9a-f]{64}$ ]]
-          [[ -s "$WEB_ARCHIVE" ]]
-          ssh -T -p "$DEMO_DEPLOY_PORT" -i "$RUNNER_TEMP/ssh-demo/id_deploy" \
-            -o IdentitiesOnly=yes -o BatchMode=yes \
-            -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$RUNNER_TEMP/ssh-demo/known_hosts" \
-            -o ServerAliveInterval=30 -o ServerAliveCountMax=10 \
-            "root@$DEMO_DEPLOY_HOST" \
-            "web $DEPLOY_SHA $WEB_SOURCE_SHA $WEB_ARTIFACT_DIGEST $WEB_ARCHIVE_SHA256" < "$WEB_ARCHIVE"
-
-      - name: Remove the demo deploy key
-        if: ${{ always() && steps.demo-gate.outputs.enabled == 'true' }}
-        run: rm -rf "$RUNNER_TEMP/ssh-demo"
+          name: demo-deploy-target-${{ github.run_id }}
+          path: ${{ runner.temp }}/demo-deploy-target.json
+          if-no-files-found: error
