@@ -391,7 +391,15 @@ tailnet_retained_twelve=$(tailnet_limit_snapshot baseline 12 'TG_RATE_LIMIT_KEY_
   "$(jq -r '.config_sha256' <<< "$tailnet_retained_twelve")" ]
 [ "$(jq -r '.container_env_sha256' <<< "$tailnet_retained_zero")" != \
   "$(jq -r '.container_env_sha256' <<< "$tailnet_retained_twelve")" ]
-printf '%s\n' 'PASS retained tailnet values remain pinned in Compose and container digests'
+printf '%s\n' 'PASS nondefault retained tailnet values remain pinned in Compose and container digests'
+
+tailnet_empty_default=$(tailnet_limit_snapshot baseline '' '' retained '')
+tailnet_zero_default=$(tailnet_limit_snapshot target 0 '' retained 0)
+[ "$(jq -r '.config_sha256' <<< "$tailnet_empty_default")" = \
+  "$(jq -r '.config_sha256' <<< "$tailnet_zero_default")" ]
+[ "$(jq -r '.container_env_sha256' <<< "$tailnet_empty_default")" = \
+  "$(jq -r '.container_env_sha256' <<< "$tailnet_zero_default")" ]
+printf '%s\n' 'PASS tailnet zero Compose default remains rollout-equivalent to the prior empty mapping'
 
 tailnet_changed_baseline=$(tailnet_limit_snapshot baseline 12 'TG_RATE_LIMIT_KEY_EXCHANGE_IP_TAILNET=0' changed 0)
 tailnet_changed_target=$(tailnet_limit_snapshot target 0 'TG_RATE_LIMIT_KEY_EXCHANGE_IP_TAILNET=0' changed 0)
