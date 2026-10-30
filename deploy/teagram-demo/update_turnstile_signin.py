@@ -111,26 +111,20 @@ def backup_file(
         except OSError:
             fail("backup-directory-create")
     require_directory(directory, 0o700)
+    if backup_path is not None and backup_path.parent != directory:
+        fail("environment-backup-outside-directory")
     descriptor = -1
+    temporary: pathlib.Path | None = None
     backup: pathlib.Path | None = None
+    published = False
     complete = False
     try:
+        descriptor, name = tempfile.mkstemp(prefix=".env.before-turnstile-", dir=directory)
+        temporary = pathlib.Path(name)
         if backup_path is not None:
-            if backup_path.parent != directory:
-                fail("environment-backup-outside-directory")
-            descriptor = os.open(
-                backup_path,
-                os.O_WRONLY
-                | os.O_CREAT
-                | os.O_EXCL
-                | getattr(os, "O_NOFOLLOW", 0)
-                | getattr(os, "O_CLOEXEC", 0),
-                0o600,
-            )
             backup = backup_path
         else:
-            descriptor, name = tempfile.mkstemp(prefix="env.before-turnstile-", dir=directory)
-            backup = pathlib.Path(name)
+            backup = directory / temporary.name[1:]
         os.fchown(descriptor, metadata.st_uid, metadata.st_gid)
         os.fchmod(descriptor, 0o600)
         with os.fdopen(descriptor, "wb") as output:
@@ -138,6 +132,18 @@ def backup_file(
             output.write(content)
             output.flush()
             os.fsync(output.fileno())
+        saved_metadata = require_file(temporary, 0o600)
+        if saved_metadata.st_uid != metadata.st_uid or temporary.read_bytes() != content:
+            fail("environment-backup-verification")
+        os.link(temporary, backup, follow_symlinks=False)
+        published = True
+        temporary.unlink()
+        temporary = None
+        directory_fd = os.open(directory, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
         saved_metadata = require_file(backup, 0o600)
         if saved_metadata.st_uid != metadata.st_uid or backup.read_bytes() != content:
             fail("environment-backup-verification")
@@ -148,7 +154,12 @@ def backup_file(
     finally:
         if descriptor >= 0:
             os.close(descriptor)
-        if backup is not None and not complete:
+        if temporary is not None:
+            try:
+                temporary.unlink(missing_ok=True)
+            except OSError:
+                fail("environment-backup-cleanup")
+        if published and not complete and backup is not None:
             try:
                 backup.unlink(missing_ok=True)
             except OSError:

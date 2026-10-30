@@ -5,7 +5,9 @@ from __future__ import annotations
 
 import os
 import pathlib
+import signal
 import stat
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -108,6 +110,65 @@ class UpdateTurnstileSigninTests(unittest.TestCase):
         self.assertEqual(backup.read_bytes(), b"preserve this backup")
         self.assertEqual(self.env_file.read_bytes(), self.environment)
 
+    def test_interrupted_backup_is_not_published_at_the_recorded_path(self) -> None:
+        backup = self.backup_dir / "env.before-turnstile-interrupted-run"
+        child = r'''
+import os
+import pathlib
+import signal
+import sys
+
+sys.path.insert(0, sys.argv[1])
+import update_turnstile_signin
+
+real_fdopen = os.fdopen
+
+class InterruptingOutput:
+    def __init__(self, output):
+        self.output = output
+
+    def __enter__(self):
+        self.output.__enter__()
+        return self
+
+    def __exit__(self, *args):
+        return self.output.__exit__(*args)
+
+    def write(self, content):
+        self.output.write(content[:len(content) // 2])
+        self.output.flush()
+        os.kill(os.getpid(), signal.SIGTERM)
+
+    def flush(self):
+        self.output.flush()
+
+    def fileno(self):
+        return self.output.fileno()
+
+def interrupting_fdopen(descriptor, mode):
+    return InterruptingOutput(real_fdopen(descriptor, mode))
+
+os.fdopen = interrupting_fdopen
+os.environ["ROLLOUT_RUNNER_ADDED_ENV"] = update_turnstile_signin.ENV_NAME
+os.environ["ROLLOUT_RUNNER_CHANGED_ENV"] = update_turnstile_signin.ENV_NAME
+update_turnstile_signin.update_env_file(
+    pathlib.Path(sys.argv[2]),
+    pathlib.Path(sys.argv[3]),
+    "true",
+    pathlib.Path(sys.argv[4]),
+)
+'''
+        completed = subprocess.run(
+            [sys.executable, "-c", child, str(SCRIPT_DIR), str(self.env_file), str(self.backup_dir), str(backup)],
+            capture_output=True,
+            check=False,
+            timeout=10,
+        )
+
+        self.assertEqual(completed.returncode, -signal.SIGTERM, completed.stderr.decode())
+        self.assertFalse(backup.exists())
+        self.assertEqual(self.env_file.read_bytes(), self.environment)
+
     def test_parent_directory_open_failure_restores_original_bytes(self) -> None:
         real_open = os.open
 
@@ -133,12 +194,19 @@ class UpdateTurnstileSigninTests(unittest.TestCase):
 
     def test_parent_directory_fsync_failure_restores_original_bytes(self) -> None:
         real_fsync = os.fsync
+        env_directory = self.env_file.parent.stat()
         failed = False
         updated = self.environment + f"{ENV_NAME}=true\n".encode()
 
         def fail_directory_fsync(descriptor: int) -> None:
             nonlocal failed
-            if stat.S_ISDIR(os.fstat(descriptor).st_mode) and not failed:
+            directory_metadata = os.fstat(descriptor)
+            if (
+                stat.S_ISDIR(directory_metadata.st_mode)
+                and (directory_metadata.st_dev, directory_metadata.st_ino)
+                == (env_directory.st_dev, env_directory.st_ino)
+                and not failed
+            ):
                 failed = True
                 self.assertEqual(self.env_file.read_bytes(), updated)
                 raise OSError("injected parent directory fsync failure")
