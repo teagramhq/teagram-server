@@ -23,6 +23,7 @@ func FloodWaitError(seconds int) *tgerr.Error {
 var (
 	// errInputRequestInvalid rejects a request that cannot be handled as sent.
 	errInputRequestInvalid = rpcErr(400, "INPUT_REQUEST_INVALID")
+	errUploadsDisabled     = rpcErr(400, "UPLOADS_DISABLED")
 	// User invite errors are stable custom RPC errors documented with the
 	// teagram.* methods in docs/clients.md.
 	errUserInviteRegistrationClosed = rpcErr(400, "USER_INVITE_REGISTRATION_CLOSED")

@@ -18,6 +18,7 @@ EXPECTED = {
     "TG_LOG_LOGIN_CODES": "false",
     "TG_MAX_FILE_BYTES": "16777216",
     "TG_MAX_USER_STORAGE_BYTES": "268435456",
+    "TG_UPLOADS_DISABLED": "true",
     "TEAGRAM_DEMO_BLOB_PATH": "/srv/teagram-demo-blobs/data",
     "TEAGRAM_DEMO_TURNSTILE_SECRET_KEY_FILE": "/var/lib/teagram-demo/secrets/turnstile-secret-key",
 }

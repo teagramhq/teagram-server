@@ -288,6 +288,8 @@ services:
       TG_REGISTRATION: ${TG_REGISTRATION:-closed}
       TG_TURNSTILE_TEST_MODE: ${TG_TURNSTILE_TEST_MODE:-false}
       TG_TURNSTILE_HOSTNAMES: "${TG_TURNSTILE_HOSTNAMES:-web.teagram.io}"
+      # User-issued invites stay disabled unless the operator sets a quota.
+      TG_USER_INVITE_QUOTA: ${TG_USER_INVITE_QUOTA:-}
       # The separately bound public WebSocket endpoint is disabled by default
       # and keeps sign-up closed unless its own policy is configured.
       TG_PUBLIC_WEBSOCKET_LISTEN_ADDR: ${TG_PUBLIC_WEBSOCKET_LISTEN_ADDR:-}

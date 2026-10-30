@@ -3,8 +3,11 @@ package linklanding_test
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -52,6 +55,128 @@ func TestGETPathsReturnIdenticalStaticPageAndSecurityHeaders(t *testing.T) {
 		if !reflect.DeepEqual(headersWithoutDate(response.Header()), headersWithoutDate(first.Header())) {
 			t.Errorf("GET %s headers differ from the first landing response", path)
 		}
+	}
+}
+
+func TestInvitePathServesWebOnlyLandingWithPinnedScriptPolicy(t *testing.T) {
+	t.Setenv("TG_INVITE_WEB_SIGNUP_URL", "https://web.example.test/signup")
+	t.Setenv("TG_INVITE_DESKTOP_URL", "")
+	handler := linklanding.NewHandler(slog.New(slog.DiscardHandler))
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/invite", nil))
+	if response.Code != http.StatusOK {
+		t.Fatalf("GET /invite status = %d, want %d", response.Code, http.StatusOK)
+	}
+
+	body := response.Body.String()
+	for _, want := range []string{
+		"<title>Teagram invite</title>",
+		"You’re invited to Teagram",
+		"Use this link to create your Teagram account. It works once, so don’t share it.",
+		"Create account on Teagram Web",
+		"https://web.example.test/signup",
+		"New to Teagram? Read about it at",
+		"https://teagram.io/",
+		"history.replaceState",
+		"^[0-9a-f]{64}$",
+		"webTarget.hash=secret",
+		"secret.length===64",
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("invite body does not contain %q", want)
+		}
+	}
+	if strings.Contains(body, "Open in Teagram for Mac") || strings.Contains(body, "Don’t have Teagram for Mac?") {
+		t.Errorf("web-only invite landing includes desktop controls: %s", body)
+	}
+	if got := strings.Count(body, "<script"); got != 1 {
+		t.Errorf("invite landing has %d script elements, want exactly one", got)
+	}
+	if strings.Contains(body, "<script src=") {
+		t.Errorf("invite landing loads an external script")
+	}
+	if strings.Contains(body, strings.Repeat("a", 64)) {
+		t.Errorf("invite landing contains a secret value")
+	}
+	if got := response.Header().Get("Referrer-Policy"); got != "no-referrer" {
+		t.Errorf("Referrer-Policy = %q, want no-referrer", got)
+	}
+	if got := response.Header().Get("Cache-Control"); got != "no-store" {
+		t.Errorf("Cache-Control = %q, want no-store", got)
+	}
+
+	scriptStart := strings.Index(body, "<script>")
+	scriptEnd := strings.Index(body, "</script>")
+	if scriptStart < 0 || scriptEnd <= scriptStart {
+		t.Fatalf("invite landing does not contain one inline script")
+	}
+	script := body[scriptStart+len("<script>") : scriptEnd]
+	digest := sha256.Sum256([]byte(script))
+	wantPolicy := fmt.Sprintf("default-src 'none'; script-src 'sha256-%s'; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'", base64.StdEncoding.EncodeToString(digest[:]))
+	if got := response.Header().Get("Content-Security-Policy"); got != wantPolicy {
+		t.Errorf("invite CSP = %q, want exact hash-pinned policy %q", got, wantPolicy)
+	}
+	for _, blockedDirective := range []string{"connect-src", "img-src", "frame-src"} {
+		if strings.Contains(response.Header().Get("Content-Security-Policy"), blockedDirective) {
+			t.Errorf("invite CSP unexpectedly contains %q", blockedDirective)
+		}
+	}
+}
+
+func TestInvitePathRequiresWebTargetConfiguration(t *testing.T) {
+	t.Setenv("TG_INVITE_WEB_SIGNUP_URL", "")
+	t.Setenv("TG_INVITE_DESKTOP_URL", "")
+	handler := linklanding.NewHandler(slog.New(slog.DiscardHandler))
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/invite", nil))
+	if response.Code != http.StatusServiceUnavailable {
+		t.Errorf("GET /invite without web target status = %d, want %d", response.Code, http.StatusServiceUnavailable)
+	}
+	if strings.Contains(response.Body.String(), "Create account on Teagram Web") {
+		t.Errorf("invite route rendered without a configured web target")
+	}
+}
+
+func TestInviteTargetsRejectUnsafeFixedDestinations(t *testing.T) {
+	for _, target := range []string{
+		"http://web.example.test/signup",
+		"https://user@web.example.test/signup",
+		"https://web.example.test/signup#",
+	} {
+		t.Run(target, func(t *testing.T) {
+			t.Setenv("TG_INVITE_WEB_SIGNUP_URL", target)
+			t.Setenv("TG_INVITE_DESKTOP_URL", "")
+			if _, err := linklanding.InviteTargetsFromEnvironment(); err == nil {
+				t.Errorf("invite target %q was accepted", target)
+			}
+		})
+	}
+}
+
+func TestInvitePathCanRenderOptionalDesktopTarget(t *testing.T) {
+	t.Setenv("TG_INVITE_WEB_SIGNUP_URL", "https://web.example.test/signup")
+	t.Setenv("TG_INVITE_DESKTOP_URL", "teagram://invite")
+	handler := linklanding.NewHandler(slog.New(slog.DiscardHandler))
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/invite", nil))
+	if response.Code != http.StatusOK {
+		t.Fatalf("GET /invite status = %d, want %d", response.Code, http.StatusOK)
+	}
+	for _, want := range []string{"Open in Teagram for Mac", "Don’t have Teagram for Mac?", "teagram://invite"} {
+		if !strings.Contains(response.Body.String(), want) {
+			t.Errorf("invite body does not contain optional desktop target detail %q", want)
+		}
+	}
+}
+
+func TestExistingLandingRouteKeepsItsContentPolicy(t *testing.T) {
+	t.Parallel()
+
+	handler := linklanding.NewHandler(slog.New(slog.DiscardHandler))
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/example", nil))
+	if got, want := response.Header().Get("Content-Security-Policy"), "default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"; got != want {
+		t.Errorf("existing route CSP = %q, want %q", got, want)
 	}
 }
 
