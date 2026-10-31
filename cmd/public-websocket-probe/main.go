@@ -1,5 +1,5 @@
-// Command mixed-trust-probe exercises real Compose listeners during disposable
-// mixed-trust validation. It is not included in the teagramd image.
+// Command public-websocket-probe exercises real Compose listeners in
+// disposable public WebSocket validation. It is not included in the teagramd image.
 package main
 
 import (
@@ -69,7 +69,7 @@ func run(args []string) error {
 }
 
 func usageError() error {
-	return errors.New("usage: mixed-trust-probe hold --transport tcp|websocket --address host:port --config file [--origin https://example.test] [--cf-connecting-ip address] | origin --address host:port --origin URL --status code [--cf-connecting-ip address] | forged --address host:port | proxy-v2-echo --listen host:port --requests count | keepalive-attribution --address host:port --first-ip address --second-ip address | public-signup --address host:port --config file --cf-connecting-ip address")
+	return errors.New("usage: public-websocket-probe hold --transport tcp|websocket --address host:port --config file [--origin https://example.test] [--cf-connecting-ip address] | origin --address host:port --origin URL --status code [--cf-connecting-ip address] | forged --address host:port | proxy-v2-echo --listen host:port --requests count | keepalive-attribution --address host:port --first-ip address --second-ip address | public-signup --address host:port --config file --cf-connecting-ip address")
 }
 
 func runHold(args []string) error {
