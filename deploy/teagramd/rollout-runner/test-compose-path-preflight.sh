@@ -4,7 +4,7 @@ umask 077
 
 SCRIPT_DIR=$(cd -P "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 readonly ARTIFACT_NAME=.rollout-compose.initial-local.yml
-readonly ARTIFACT_SHA=d764d291ad2ea91cff841d14a0cd2bbcb5981961dbc67406bfeba1196a7b3fa4
+readonly ARTIFACT_SHA=0a7568443ed5945214ba36489f0ca923f5cd9adf1b2b337b2038567c56045ac5
 TMP=$(mktemp -d "${TMPDIR:-/tmp}/teagramd-compose-path-preflight.XXXXXXXX")
 chmod 700 "$TMP"
 trap 'rm -rf -- "$TMP"' EXIT

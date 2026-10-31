@@ -77,7 +77,7 @@ CCE_LOCAL_COMPOSE_ARTIFACT_SHA=72a91a77db188f106b0062420722166436d38c6cb1974b73b
 CCE_LOCAL_COMPOSE_CONTENT_SHA=577dd9885aa9babd3370a97417d1653884f0567c6f50e7feb208ca9d11ca15bd
 INITIAL_LOCAL_TARGET_SHA=777742cc4b3ab0fda6b504a82b314a90aa60918b
 INITIAL_LOCAL_LEGACY_BASELINE_SHA=932994e26a86eb1c9ad60f81b3d222b19d3f40b7
-INITIAL_LOCAL_COMPOSE_ARTIFACT_SHA=d764d291ad2ea91cff841d14a0cd2bbcb5981961dbc67406bfeba1196a7b3fa4
+INITIAL_LOCAL_COMPOSE_ARTIFACT_SHA=0a7568443ed5945214ba36489f0ca923f5cd9adf1b2b337b2038567c56045ac5
 BASE_IMAGE=sha256:0000000000000000000000000000000000000000000000000000000000000000
 BUILT_IMAGE=sha256:1111111111111111111111111111111111111111111111111111111111111111
 POSTGRES_IMAGE=sha256:2222222222222222222222222222222222222222222222222222222222222222
@@ -451,6 +451,11 @@ if [ "${1:-}" = inspect ]; then
     fi
     env_json=$(jq -c --arg value "$login_codes" \
       'map(select(type != "string" or (startswith("TG_LOG_LOGIN_CODES=") | not))) + ["TG_LOG_LOGIN_CODES=" + $value]' \
+      <<< "$env_json")
+    tailnet_value=0
+    if [ "$cfg" = baseline ] || [ "$cfg" = rollback ]; then tailnet_value=''; fi
+    env_json=$(jq -c --arg value "$tailnet_value" \
+      'map(select(type != "string" or (startswith("TG_RATE_LIMIT_KEY_EXCHANGE_IP_TAILNET=") | not))) + ["TG_RATE_LIMIT_KEY_EXCHANGE_IP_TAILNET=" + $value]' \
       <<< "$env_json")
     compose_service=teagramd
     if [ "${MOCK_SCENARIO:-}" = initial-local-target-compose-render ]; then
@@ -866,7 +871,7 @@ write_compose_fixture() {
         teagramd:{
           build:{context:$build_context,args:{TEAGRAMD_SOURCE_REVISION:""}},
           stop_grace_period:"2m0s",
-          environment:{TG_SYNTHETIC_FLAG:"fixture",TG_BLOB_DIR:"/var/lib/teagramd-blobs",TG_REPLICA_COUNT:"1",TG_CLIENT_ADDR_TRUST:"socket",TG_LOG_LOGIN_CODES:"false"},
+          environment:{TG_SYNTHETIC_FLAG:"fixture",TG_BLOB_DIR:"/var/lib/teagramd-blobs",TG_REPLICA_COUNT:"1",TG_CLIENT_ADDR_TRUST:"socket",TG_LOG_LOGIN_CODES:"false",TG_RATE_LIMIT_KEY_EXCHANGE_IP_TAILNET:""},
           logging:{driver:"syslog",options:{"syslog-address":"unixgram:///dev/log","syslog-facility":"daemon","syslog-format":"rfc5424",tag:"teagramd"}},
           ports:[{target:2443,published:"2443",host_ip:"127.0.0.1",protocol:"tcp",mode:"ingress"}],
           volumes:[
@@ -928,6 +933,9 @@ write_compose_fixture() {
   else
     cp -- "$base_config" "$target_config"
   fi
+  jq -c '.services.teagramd.environment.TG_RATE_LIMIT_KEY_EXCHANGE_IP_TAILNET="0"' \
+    "$target_config" > "${target_config%.json}.tailnet.json"
+  mv -- "${target_config%.json}.tailnet.json" "$target_config"
   if [ "$scenario" = config-drift ]; then
     jq -c '.services.teagramd.environment.UNRELATED="changed"' "$target_config" > "${target_config%.json}.drift.json"
   fi
