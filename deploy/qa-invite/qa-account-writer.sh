@@ -38,7 +38,9 @@ fi
 if [[ "$ORIGINAL_COMMAND" == store ]]; then
   IFS=$'\t' read -r handle password extra || fail
   [[ -z "${extra:-}" ]] || fail
-  valid_handle "$handle" && valid_password "$password" || fail
+  if ! valid_handle "$handle" || ! valid_password "$password"; then
+    fail
+  fi
   ! awk -F '\t' -v handle="$handle" '$1 == handle { found=1 } END { exit !found }' "$ACCOUNTS_FILE" || fail
   temp=$(mktemp /home/qa/.qa-accounts-invite.XXXXXXXX)
   trap 'rm -f -- "$temp"' EXIT

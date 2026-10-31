@@ -236,7 +236,7 @@ rollback_failed_up() {
 }
 
 do_up() {
-  local sha=$1 digest=$2 image_ref previous_ref= dump= active_file=$STATE_DIR/active-image temp
+  local sha=$1 digest=$2 image_ref previous_ref='' dump='' active_file=$STATE_DIR/active-image temp
   image_ref=$(verify_image "$sha" "$digest")
   if [[ -e "$active_file" || -L "$active_file" ]]; then
     [[ -f "$active_file" && ! -L "$active_file" && "$(stat -c '%u:%a' "$active_file")" == '0:600' ]] ||
