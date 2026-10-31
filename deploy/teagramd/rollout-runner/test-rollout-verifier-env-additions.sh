@@ -566,6 +566,27 @@ if tailnet_limit_snapshot target 20 '' retained 0 \
 fi
 printf '%s\n' 'PASS target tailnet value must match the resolved Compose default'
 
+nonzero_tailnet_target_inspect=$(inspect_json 'TG_RATE_LIMIT_KEY_EXCHANGE_IP_TAILNET=20')
+missing_tailnet_target_compose=$(jq -c \
+  'del(.services.teagramd.environment.TG_RATE_LIMIT_KEY_EXCHANGE_IP_TAILNET)' \
+  <<< "$COMPOSE_JSON")
+if verify_target_tailnet_exchange_limit \
+  "$nonzero_tailnet_target_inspect" "$missing_tailnet_target_compose" target selected-compose-render \
+  >/dev/null 2>"$TMP/tailnet-compose-key-missing.err"; then
+  printf '%s\n' 'FAIL target with an absent Compose tailnet value was accepted' >&2
+  exit 1
+fi
+empty_tailnet_target_compose=$(jq -c \
+  '.services.teagramd.environment.TG_RATE_LIMIT_KEY_EXCHANGE_IP_TAILNET=""' \
+  <<< "$COMPOSE_JSON")
+if verify_target_tailnet_exchange_limit \
+  "$nonzero_tailnet_target_inspect" "$empty_tailnet_target_compose" target selected-compose-render \
+  >/dev/null 2>"$TMP/tailnet-compose-value-empty.err"; then
+  printf '%s\n' 'FAIL target with an empty Compose tailnet value was accepted' >&2
+  exit 1
+fi
+printf '%s\n' 'PASS target renders must resolve a numeric tailnet value'
+
 : > "$ENV_FILE"
 empty_tailnet_rollback_inspect=$(jq -c '.Config.Env += ["TG_RATE_LIMIT_KEY_EXCHANGE_IP_TAILNET="]' \
   <<< "$(inspect_json '')")
