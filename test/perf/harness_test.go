@@ -255,7 +255,7 @@ func callWithGetDialogsProfile(ctx context.Context, call func(context.Context) e
 }
 
 func shouldProfileGetDialogsSample(name string, sample int) bool {
-	return name == "messages.getDialogs" && sample == warmup
+	return name == "messages.getDialogs" && sample >= warmup
 }
 
 func logQueryDurations(t *testing.T, fixture string, rpcDuration time.Duration, captured []capturedQuery) {
@@ -315,15 +315,18 @@ func TestCallWithGetDialogsProfileRestoresEnvironment(t *testing.T) {
 	}
 }
 
-func TestGetDialogsProfilingUsesOneMeasuredSample(t *testing.T) {
+func TestGetDialogsProfilingUsesEveryMeasuredSample(t *testing.T) {
 	profiled := 0
-	for sample := 0; sample < warmup+readSamples; sample++ {
+	for sample := range warmup + readSamples {
 		if shouldProfileGetDialogsSample("messages.getDialogs", sample) {
 			profiled++
 		}
 	}
-	if profiled != 1 {
-		t.Fatalf("profiled samples = %d, want 1", profiled)
+	if profiled != readSamples {
+		t.Fatalf("profiled samples = %d, want all %d measured samples", profiled, readSamples)
+	}
+	if shouldProfileGetDialogsSample("messages.getDialogs", warmup-1) {
+		t.Fatal("profiled a warmup sample")
 	}
 	if shouldProfileGetDialogsSample("messages.getHistory", warmup) {
 		t.Fatal("profiled a different scenario")
