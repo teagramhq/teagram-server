@@ -51,7 +51,7 @@ func TestContactsGetContactsReportsServerSideTimingBoundary(t *testing.T) {
 		if sc.name != "contacts.getContacts" {
 			continue
 		}
-		for _, boundary := range []string{"server-side", "first request byte", "response write"} {
+		for _, boundary := range []string{"server-side", "decrypted contacts RPC", "full response write", "no-reply frames excluded"} {
 			if !strings.Contains(sc.note, boundary) {
 				t.Errorf("contacts.getContacts note %q does not describe %q", sc.note, boundary)
 			}
@@ -155,17 +155,22 @@ func scenarios() []scenario {
 		}),
 		{
 			name: "contacts.getContacts", kind: perfreport.Read, samples: readSamples, fullSet: true,
-			note: "server-side time from the first request byte received through completion of the first response write (client decoding excluded); answers every contact by protocol, so only its query count is held to scale invariance",
+			note: "server-side time from the decrypted contacts RPC dispatch through completion of the full response write (no-reply frames excluded, client decoding excluded); answers every contact by protocol, so only its query count is held to scale invariance",
 			setup: fixed(func(e *env) call {
 				return func(ctx context.Context) error {
-					started := e.owner.meter.responseWrittenTime()
+					if err := e.srv.rpcTimer.start(); err != nil {
+						return err
+					}
 					_, err := e.owner.api.ContactsGetContacts(ctx, 0)
-					elapsed := e.owner.meter.responseWrittenTime() - started
-					if err == nil && elapsed <= 0 {
-						return errors.New("server-side response write timing was not recorded")
+					elapsed, timingErr := e.srv.rpcTimer.finish(ctx)
+					if err != nil {
+						return err
+					}
+					if timingErr != nil {
+						return timingErr
 					}
 					e.elapsed = elapsed
-					return err
+					return nil
 				}
 			}),
 		},
