@@ -36,7 +36,7 @@ import (
 
 // fixtureVersion changes whenever the seeded shape changes, so a cached dump
 // of an older shape is never measured as if it were this one.
-const fixtureVersion = 6
+const fixtureVersion = 7
 
 // spec is one fixture size. The small fixture uses one hundredth of the large
 // fixture's scalable data, subject to its Store's per-account contact cap.
@@ -57,6 +57,10 @@ const (
 	groupMembers = 100
 	needleEvery  = 1000
 )
+
+// Difference measurements hold in-window event volume constant across fixture
+// sizes so row reads measure database scale, not response volume.
+const differenceEventsPerDay = 20
 
 var fixtures = []spec{
 	scaled("1x", 100),
@@ -85,7 +89,7 @@ func scaled(name string, divisor int) spec {
 		Subscribers:   100_000 / divisor,
 		GroupMessages: 200_000 / divisor,
 		GroupPhotos:   max(2, 200/divisor),
-		DayEvents:     2_000 / divisor,
+		DayEvents:     differenceEventsPerDay,
 	}
 }
 
@@ -116,6 +120,14 @@ func TestDialogsFixtureFillsGetDialogsPage(t *testing.T) {
 		if fixture.Dialogs < pageLimit {
 			t.Errorf("%s fixture has %d dialogs, getDialogs page needs %d", fixture.Name, fixture.Dialogs, pageLimit)
 		}
+	}
+}
+
+func TestDifferenceFixtureEventsStayConstantAcrossScale(t *testing.T) {
+	small := scaled("1x", 100)
+	large := scaled("100x", 1)
+	if small.DayEvents != differenceEventsPerDay || large.DayEvents != differenceEventsPerDay {
+		t.Fatalf("difference day events = %d at 1x and %d at 100x, want %d at both scales", small.DayEvents, large.DayEvents, differenceEventsPerDay)
 	}
 }
 
