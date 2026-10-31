@@ -33,6 +33,118 @@ def load_runner(path: pathlib.Path = HELPER):
 
 
 class InspectComposeSelectionTest(unittest.TestCase):
+    def test_public_profile_addition_reuses_existing_data_mounts(self) -> None:
+        runner = load_runner()
+        server_mounts = [
+            {"type": "volume", "source": "tgkey", "target": "/var/lib/teagramd", "read_only": False},
+            {"type": "volume", "source": "tgblobs", "target": "/var/lib/teagramd-blobs", "read_only": True},
+        ]
+        postgres_mounts = [
+            {"type": "volume", "source": "pgdata", "target": "/var/lib/postgresql/18/docker", "read_only": False},
+        ]
+        source_config = {
+            "name": "teagram",
+            "services": {
+                "postgres": {"volumes": copy.deepcopy(postgres_mounts)},
+                "teagramd": {
+                    "environment": {
+                        "TG_MEDIA_KEY_DIR": "/run/teagramd/media-keys",
+                        "TG_MEDIA_KEY_CURRENT": "1",
+                    },
+                    "volumes": copy.deepcopy(server_mounts),
+                },
+            },
+            "volumes": {
+                "pgdata": {"name": "teagram_pgdata"},
+                "tgkey": {"name": "teagram_tgkey"},
+                "tgblobs": {"name": "teagram_tgblobs"},
+            },
+        }
+        target_config = copy.deepcopy(source_config)
+        target_config["services"].update({
+            "public-haproxy": {
+                "profiles": ["public"],
+                "volumes": [{
+                    "type": "bind",
+                    "source": "/opt/teagram/deploy/teagramd/haproxy-public-websocket.cfg",
+                    "target": "/usr/local/etc/haproxy/haproxy.cfg",
+                    "read_only": True,
+                    "bind": {"create_host_path": False},
+                }],
+            },
+            "teagramd-public-1": {
+                "profiles": ["public"],
+                "volumes": copy.deepcopy(server_mounts),
+            },
+            "teagramd-public-2": {
+                "profiles": ["public"],
+                "volumes": copy.deepcopy(server_mounts),
+            },
+        })
+
+        source = runner.layout(source_config, "teagramd")
+        target = runner.layout(target_config, "teagramd")
+
+        with mock.patch.dict(os.environ, {
+            "COMPOSE_PROFILES": "public",
+            "ROLLOUT_RUNNER_PUBLIC_WEBSOCKET": "1",
+        }, clear=True):
+            self.assertFalse(runner.ordinary_rollout_layout_changed(source, target, target_config))
+
+            unprofiled = copy.deepcopy(target_config)
+            unprofiled["services"]["teagramd-public-1"]["profiles"] = []
+            self.assertTrue(
+                runner.ordinary_rollout_layout_changed(
+                    source, runner.layout(unprofiled, "teagramd"), unprofiled,
+                )
+            )
+
+            changed_replica_mount = copy.deepcopy(target_config)
+            changed_replica_mount["services"]["teagramd-public-1"]["volumes"].append(
+                {"type": "volume", "source": "newdata", "target": "/data", "read_only": False},
+            )
+            self.assertTrue(
+                runner.ordinary_rollout_layout_changed(
+                    source, runner.layout(changed_replica_mount, "teagramd"), changed_replica_mount,
+                )
+            )
+
+            added_proxy_mount = copy.deepcopy(target_config)
+            added_proxy_mount["services"]["public-haproxy"]["volumes"].append(
+                {"type": "volume", "source": "newdata", "target": "/data", "read_only": False},
+            )
+            self.assertTrue(
+                runner.ordinary_rollout_layout_changed(
+                    source, runner.layout(added_proxy_mount, "teagramd"), added_proxy_mount,
+                )
+            )
+
+            added_volume = copy.deepcopy(target_config)
+            added_volume["volumes"]["newdata"] = {"name": "teagram_newdata"}
+            self.assertTrue(
+                runner.ordinary_rollout_layout_changed(
+                    source, runner.layout(added_volume, "teagramd"), added_volume,
+                )
+            )
+
+            extra_service = copy.deepcopy(target_config)
+            extra_service["services"]["unexpected"] = {
+                "profiles": ["public"],
+                "volumes": [{"type": "volume", "source": "newdata", "target": "/data"}],
+            }
+            self.assertTrue(
+                runner.ordinary_rollout_layout_changed(
+                    source, runner.layout(extra_service, "teagramd"), extra_service,
+                )
+            )
+
+        for environment in (
+            {"COMPOSE_PROFILES": "public"},
+            {"ROLLOUT_RUNNER_PUBLIC_WEBSOCKET": "1"},
+        ):
+            with mock.patch.dict(os.environ, environment, clear=True):
+                self.assertTrue(runner.ordinary_rollout_layout_changed(source, target, target_config))
+
     def test_only_additive_read_only_media_key_mount_is_a_safe_layout_change(self) -> None:
         runner = load_runner()
         key_mount = {
@@ -201,109 +313,6 @@ class InspectComposeSelectionTest(unittest.TestCase):
             )
         )
         print("PASS rollout layout still rejects writable media mounts and persistent-volume changes")
-
-    def test_public_profile_services_do_not_look_like_a_stack_move(self) -> None:
-        runner = load_runner()
-        key_mount = {
-            "type": "volume",
-            "source": "teagram_tgkey",
-            "target": "/var/lib/teagramd",
-            "read_only": False,
-        }
-        pg_mount = {
-            "type": "volume",
-            "source": "teagram_pgdata",
-            "target": "/var/lib/postgresql",
-            "read_only": False,
-        }
-        source = {
-            "project": "teagram",
-            "server": "teagramd",
-            "server_mounts": [key_mount],
-            "postgres_mounts": [pg_mount],
-            "persistent_service_mounts": {
-                "postgres": [pg_mount],
-                "teagramd": [key_mount],
-                "rustfs": [{"type": "volume", "source": "teagram_rustfsdata", "target": "/data"}],
-            },
-            "volumes": {
-                "pgdata": "teagram_pgdata",
-                "tgkey": "teagram_tgkey",
-                "rustfsdata": "teagram_rustfsdata",
-            },
-        }
-        target = copy.deepcopy(source)
-        media_key_mount = {
-            "type": "bind",
-            "source": "/etc/teagramd/media-keys",
-            "target": "/run/teagramd/media-keys",
-            "read_only": True,
-            "bind": {},
-        }
-        target["server_mounts"].append(media_key_mount)
-        target["persistent_service_mounts"]["teagramd"].append(media_key_mount)
-
-        compose_media_key_mount = copy.deepcopy(media_key_mount)
-        base_mounts = [key_mount, compose_media_key_mount]
-        proxy_mount = {
-            "type": "bind",
-            "source": "/opt/teagram/deploy/teagramd/haproxy-public-websocket.cfg",
-            "target": "/usr/local/etc/haproxy/haproxy.cfg",
-            "read_only": True,
-            "bind": {},
-        }
-        target["persistent_service_mounts"].update({
-            "public-haproxy": [proxy_mount],
-            "teagramd-public-1": copy.deepcopy(base_mounts),
-            "teagramd-public-2": copy.deepcopy(base_mounts),
-        })
-        target_config = {
-            "name": "teagram",
-            "services": {
-                "teagramd": {
-                    "environment": {
-                        "TG_MEDIA_KEY_DIR": "/run/teagramd/media-keys",
-                        "TG_MEDIA_KEY_CURRENT": "1",
-                    },
-                    "volumes": base_mounts,
-                },
-                "public-haproxy": {
-                    "profiles": ["public"],
-                    "volumes": [proxy_mount],
-                },
-                "teagramd-public-1": {
-                    "profiles": ["public"],
-                    "volumes": copy.deepcopy(base_mounts),
-                },
-                "teagramd-public-2": {
-                    "profiles": ["public"],
-                    "volumes": copy.deepcopy(base_mounts),
-                },
-            },
-        }
-
-        self.assertFalse(runner.ordinary_rollout_layout_changed(source, target, target_config))
-
-        changed_replica_mount = copy.deepcopy(target)
-        changed_replica_mount["persistent_service_mounts"]["teagramd-public-1"].append(
-            {"type": "volume", "source": "other", "target": "/data"},
-        )
-        self.assertTrue(
-            runner.ordinary_rollout_layout_changed(source, changed_replica_mount, target_config),
-        )
-
-        unexpected_profile_service = copy.deepcopy(target)
-        unexpected_mount = {"type": "volume", "source": "other", "target": "/data"}
-        unexpected_profile_service["persistent_service_mounts"]["migration-helper"] = [unexpected_mount]
-        unexpected_config = copy.deepcopy(target_config)
-        unexpected_config["services"]["migration-helper"] = {
-            "profiles": ["public"],
-            "volumes": [unexpected_mount],
-        }
-        self.assertTrue(
-            runner.ordinary_rollout_layout_changed(source, unexpected_profile_service, unexpected_config),
-        )
-        print("PASS public profile replicas preserve the existing persistent layout")
 
     def test_pinned_local_compose_is_used_for_both_layouts_without_s3_env(self) -> None:
         runner = load_runner()
