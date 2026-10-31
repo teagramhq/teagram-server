@@ -88,8 +88,27 @@ def severity_classification(vulnerability: dict[str, Any]) -> bool | None:
     return False if has_severity else None
 
 
-def severity_is_high_or_critical(vulnerability: dict[str, Any]) -> bool:
-    return severity_classification(vulnerability) is True
+def severity_classification_with_aliases(
+    vulnerability: dict[str, Any],
+    aliased_severities: dict[str, bool],
+) -> bool | None:
+    severity = severity_classification(vulnerability)
+    if severity is not None:
+        return severity
+
+    identifiers = [vulnerability.get("id")]
+    aliases = vulnerability.get("aliases", [])
+    if isinstance(aliases, list):
+        identifiers.extend(aliases)
+
+    has_severity = False
+    for identifier in identifiers:
+        if not isinstance(identifier, str) or identifier not in aliased_severities:
+            continue
+        has_severity = True
+        if aliased_severities[identifier]:
+            return True
+    return False if has_severity else None
 
 
 def aliased_advisory_severities(report: dict[str, Any]) -> dict[str, bool]:
@@ -160,6 +179,7 @@ def analyze(report: dict[str, Any]) -> tuple[list[str], list[str]]:
     if not isinstance(results, list):
         raise ValueError("OSV-Scanner report is missing a results array")
 
+    aliased_severities = aliased_advisory_severities(report)
     failures: set[str] = set()
     without_fixes: set[str] = set()
     for result in results:
@@ -193,8 +213,18 @@ def analyze(report: dict[str, Any]) -> tuple[list[str], list[str]]:
                 fixes = fixed_versions(vulnerability)
                 if not fixes:
                     without_fixes.add(item)
-                elif severity_is_high_or_critical(vulnerability):
+                    continue
+
+                severity = severity_classification_with_aliases(
+                    vulnerability, aliased_severities
+                )
+                if severity is True:
                     failures.add(f"{item}; fixed versions: {', '.join(fixes)}")
+                elif severity is None:
+                    failures.add(
+                        f"{item}; fixed versions: {', '.join(fixes)}; "
+                        "severity unavailable; failing closed"
+                    )
     return sorted(failures), sorted(without_fixes)
 
 
@@ -302,15 +332,9 @@ def analyze_govulncheck_findings(
             without_fixes.add(item)
             continue
 
-        severity = severity_classification(vulnerability)
-        if severity is None:
-            aliases = vulnerability.get("aliases", [])
-            if isinstance(aliases, list):
-                for alias in aliases:
-                    if isinstance(alias, str) and alias in aliased_severities:
-                        severity = aliased_severities[alias]
-                        if severity:
-                            break
+        severity = severity_classification_with_aliases(
+            vulnerability, aliased_severities
+        )
 
         if severity is True:
             failures.add(f"{item}; fixed version: {fixed_version}")

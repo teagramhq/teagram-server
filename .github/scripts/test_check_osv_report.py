@@ -123,6 +123,88 @@ class CheckOSVReportTest(unittest.TestCase):
         self.assertEqual(failures, [])
         self.assertEqual(without_fixes, [])
 
+    def test_fixed_finding_without_severity_fails_closed(self) -> None:
+        finding = {
+            "id": "GO-2026-10",
+            "affected": [
+                {
+                    "ranges": [
+                        {
+                            "type": "SEMVER",
+                            "events": [{"introduced": "0"}, {"fixed": "go1.27.3"}],
+                        }
+                    ]
+                }
+            ],
+        }
+
+        failures, without_fixes = analyze(report(finding))
+
+        self.assertEqual(without_fixes, [])
+        self.assertEqual(len(failures), 1)
+        self.assertIn("GO-2026-10", failures[0])
+        self.assertIn("severity unavailable; failing closed", failures[0])
+
+    def test_fixed_finding_uses_high_severity_from_alias(self) -> None:
+        finding = {
+            "id": "GO-2026-11",
+            "aliases": ["GHSA-high-alias"],
+            "affected": [
+                {
+                    "ranges": [
+                        {
+                            "type": "SEMVER",
+                            "events": [{"introduced": "0"}, {"fixed": "go1.27.3"}],
+                        }
+                    ]
+                }
+            ],
+        }
+        alias = vulnerability(
+            "GHSA-high-alias",
+            "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:H",
+            None,
+        )
+
+        failures, without_fixes = analyze(report(finding, alias))
+
+        self.assertEqual(
+            without_fixes,
+            ["GHSA-high-alias in example@1.0.0 (pnpm-lock.yaml)"],
+        )
+        self.assertEqual(len(failures), 1)
+        self.assertIn("GO-2026-11", failures[0])
+        self.assertNotIn("severity unavailable", failures[0])
+
+    def test_fixed_finding_uses_known_medium_severity_from_alias(self) -> None:
+        finding = {
+            "id": "GO-2026-12",
+            "aliases": ["GHSA-medium-alias"],
+            "affected": [
+                {
+                    "ranges": [
+                        {
+                            "type": "SEMVER",
+                            "events": [{"introduced": "0"}, {"fixed": "go1.27.3"}],
+                        }
+                    ]
+                }
+            ],
+        }
+        alias = vulnerability(
+            "GHSA-medium-alias",
+            "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:N/I:N/A:L",
+            None,
+        )
+
+        failures, without_fixes = analyze(report(finding, alias))
+
+        self.assertEqual(failures, [])
+        self.assertEqual(
+            without_fixes,
+            ["GHSA-medium-alias in example@1.0.0 (pnpm-lock.yaml)"],
+        )
+
     def test_malformed_cvss_does_not_bypass_a_fixed_finding(self) -> None:
         failures, _ = analyze(
             report(
