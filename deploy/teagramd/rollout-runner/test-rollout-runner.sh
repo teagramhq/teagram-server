@@ -154,7 +154,6 @@ case "$*" in
   "show $MOCK_SOURCE_SHA:deploy/teagramd/rollout-runner/blob-mode-state.py") cat "$MOCK_TARGET_RUNTIME_DIR/blob-mode-state.py" ;;
   "show $MOCK_SOURCE_SHA:deploy/teagramd/rollout-runner/qualify-rustfs-transition.py") cat "$MOCK_TARGET_RUNTIME_DIR/qualify-rustfs-transition.py" ;;
   "show $MOCK_SOURCE_SHA:deploy/teagramd/rollout-runner/stack-move-runner.py") cat "$MOCK_TARGET_RUNTIME_DIR/stack-move-runner.py" ;;
-  "show $MOCK_SOURCE_SHA:deploy/teagramd/rollout-runner/public-websocket-check.py") cat "$MOCK_TARGET_RUNTIME_DIR/public-websocket-check.py" ;;
   "show $MOCK_SOURCE_SHA:deploy/teagramd/rollout-runner/local-compose-e58ba20.yml") cat "$MOCK_TARGET_RUNTIME_DIR/local-compose-e58ba20.yml" ;;
   "show $MOCK_SOURCE_SHA:deploy/teagramd/rollout-runner/local-compose-598359e.yml") cat "$MOCK_TARGET_RUNTIME_DIR/local-compose-598359e.yml" ;;
   "show $MOCK_SOURCE_SHA:deploy/teagramd/rollout-runner/local-compose-df9ffe5.yml") cat "$MOCK_TARGET_RUNTIME_DIR/local-compose-df9ffe5.yml" ;;
@@ -948,8 +947,7 @@ make_fixture() {
   cp -a "$source_root/migrations" "$checkout/migrations"
   cp "$SCRIPT_DIR/rollout-runner.sh" "$SCRIPT_DIR/rollout-verifier.sh" \
     "$SCRIPT_DIR/schema-result-gate.sh" "$SCRIPT_DIR/schema-result-gate.py" "$MODE_HELPER" \
-    "$SCRIPT_DIR/qualify-rustfs-transition.py" "$STACK_MOVE_HELPER" "$SCRIPT_DIR/public-websocket-check.py" \
-    "$checkout/deploy/teagramd/rollout-runner/"
+    "$SCRIPT_DIR/qualify-rustfs-transition.py" "$STACK_MOVE_HELPER" "$checkout/deploy/teagramd/rollout-runner/"
   cp "$SCRIPT_DIR/local-compose-e58ba20.yml" "$SCRIPT_DIR/local-compose-598359e.yml" \
     "$SCRIPT_DIR/local-compose-df9ffe5.yml" "$SCRIPT_DIR/local-compose-5602c7c.yml" \
     "$SCRIPT_DIR/local-compose-cce00d1.yml" \
@@ -959,7 +957,7 @@ make_fixture() {
   mkdir -m 700 "$target_runtime"
   cp "$SCRIPT_DIR/rollout-runner.sh" "$SCRIPT_DIR/rollout-verifier.sh" \
     "$SCRIPT_DIR/schema-result-gate.sh" "$SCRIPT_DIR/schema-result-gate.py" "$MODE_HELPER" \
-    "$SCRIPT_DIR/qualify-rustfs-transition.py" "$STACK_MOVE_HELPER" "$SCRIPT_DIR/public-websocket-check.py" "$target_runtime/"
+    "$SCRIPT_DIR/qualify-rustfs-transition.py" "$STACK_MOVE_HELPER" "$target_runtime/"
   cp "$SCRIPT_DIR/local-compose-e58ba20.yml" "$SCRIPT_DIR/local-compose-598359e.yml" \
     "$SCRIPT_DIR/local-compose-df9ffe5.yml" "$SCRIPT_DIR/local-compose-5602c7c.yml" \
     "$SCRIPT_DIR/local-compose-cce00d1.yml" \
@@ -1073,8 +1071,7 @@ make_real_git_fixture() {
     deploy/teagramd/rollout-runner/schema-result-gate.sh \
     deploy/teagramd/rollout-runner/schema-result-gate.py \
     deploy/teagramd/rollout-runner/blob-mode-state.py \
-    deploy/teagramd/rollout-runner/stack-move-runner.py \
-    deploy/teagramd/rollout-runner/public-websocket-check.py; do
+    deploy/teagramd/rollout-runner/stack-move-runner.py; do
     mode=$(git_for_fixture "$source_root" -C "$source_root" ls-tree "$target_sha" -- "$tracked_path" | awk '{print $1}')
     if [ -z "$mode" ] && [ "$tracked_path" = deploy/teagramd/rollout-runner/stack-move-runner.py ]; then
       mode=100644
@@ -1111,7 +1108,7 @@ make_real_git_fixture() {
   mkdir -m 700 "$runtime_dir"
   cp "$SCRIPT_DIR/rollout-runner.sh" "$SCRIPT_DIR/rollout-verifier.sh" \
     "$SCRIPT_DIR/schema-result-gate.sh" "$SCRIPT_DIR/schema-result-gate.py" "$MODE_HELPER" \
-    "$SCRIPT_DIR/qualify-rustfs-transition.py" "$STACK_MOVE_HELPER" "$SCRIPT_DIR/public-websocket-check.py" "$runtime_dir/"
+    "$SCRIPT_DIR/qualify-rustfs-transition.py" "$STACK_MOVE_HELPER" "$runtime_dir/"
   chmod 600 "$runtime_dir/"*.sh "$runtime_dir/"*.py
   if [ "$scenario" = source-mismatch ]; then
     printf '%s\n' '# fixture source mismatch' >> "$runtime_dir/rollout-runner.sh"
@@ -1193,8 +1190,7 @@ make_fixed_target_transition_fixture() {
     deploy/teagramd/rollout-runner/schema-result-gate.py \
     deploy/teagramd/rollout-runner/blob-mode-state.py \
     deploy/teagramd/rollout-runner/qualify-rustfs-transition.py \
-    deploy/teagramd/rollout-runner/stack-move-runner.py \
-    deploy/teagramd/rollout-runner/public-websocket-check.py; do
+    deploy/teagramd/rollout-runner/stack-move-runner.py; do
     mode=$(git -C "$origin" ls-tree "$target_sha" -- "$tracked_path" | awk '{print $1}')
     if [ -z "$mode" ]; then
       # The immutable target predates the renamed runtime path; use the
@@ -1223,7 +1219,7 @@ make_fixed_target_transition_fixture() {
 
   cp "$SCRIPT_DIR/rollout-runner.sh" "$SCRIPT_DIR/rollout-verifier.sh" \
     "$SCRIPT_DIR/schema-result-gate.sh" "$SCRIPT_DIR/schema-result-gate.py" "$MODE_HELPER" \
-    "$SCRIPT_DIR/qualify-rustfs-transition.py" "$STACK_MOVE_HELPER" "$SCRIPT_DIR/public-websocket-check.py" "$runtime_dir/"
+    "$SCRIPT_DIR/qualify-rustfs-transition.py" "$STACK_MOVE_HELPER" "$runtime_dir/"
   chmod 600 "$runtime_dir/"*.sh "$runtime_dir/"*.py
   printf '%s\n' "$baseline_sha" > "$state/head"
   printf '%s\n' "$runtime_source_sha" > "$state/origin"

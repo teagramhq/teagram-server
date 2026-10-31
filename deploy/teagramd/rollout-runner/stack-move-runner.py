@@ -41,7 +41,6 @@ TARGET_REPORT_VOLUME_NAME = "teagram_blob_key_rotate_reports"
 SOURCE_SERVER = "telegramd"
 TARGET_SERVER = "teagramd"
 TARGET_IMAGE_NAME = "teagramd:local"
-PUBLIC_PROFILE_SERVICES = frozenset({"public-haproxy", "teagramd-public-1", "teagramd-public-2"})
 PGDATA_MOUNT = "/var/lib/postgresql"
 PGDATA_PATH = "/var/lib/postgresql/18/docker"
 MEDIA_KEY_MOUNT = {
@@ -495,89 +494,6 @@ def layout_changed(source: dict[str, object], target: dict[str, object]) -> bool
     return not _is_approved_media_key_mount_addition(source, target)
 
 
-def _without_initial_public_profile_mounts(
-    source: dict[str, object],
-    target: dict[str, object],
-    target_config: dict[str, object],
-) -> dict[str, object] | None:
-    source_services = source.get("persistent_service_mounts")
-    target_services = target.get("persistent_service_mounts")
-    configured_services = target_config.get("services")
-    if not isinstance(source_services, dict) or not isinstance(target_services, dict):
-        return None
-    if not isinstance(configured_services, dict):
-        return None
-
-    additions = set(target_services) - set(source_services)
-    if not additions:
-        return target
-    selected_profiles = {
-        profile.strip()
-        for profile in os.environ.get("COMPOSE_PROFILES", "").split(",")
-        if profile.strip()
-    }
-    if (
-        "public" not in selected_profiles
-        or os.environ.get("ROLLOUT_RUNNER_PUBLIC_WEBSOCKET") != "1"
-    ):
-        return None
-    if additions != PUBLIC_PROFILE_SERVICES:
-        return None
-
-    base_service = configured_services.get(TARGET_SERVER)
-    if not isinstance(base_service, dict) or base_service.get("profiles"):
-        return None
-    try:
-        base_mounts = service_mounts(target_config, TARGET_SERVER)
-    except MoveError:
-        return None
-
-    for name in ("teagramd-public-1", "teagramd-public-2"):
-        service = configured_services.get(name)
-        if not isinstance(service, dict) or service.get("profiles") != ["public"]:
-            return None
-        try:
-            replica_mounts = service_mounts(target_config, name)
-        except MoveError:
-            return None
-        if replica_mounts != base_mounts or target_services.get(name) != target_services.get(TARGET_SERVER):
-            return None
-
-    proxy_service = configured_services.get("public-haproxy")
-    if not isinstance(proxy_service, dict) or proxy_service.get("profiles") != ["public"]:
-        return None
-    try:
-        proxy_mounts = service_mounts(target_config, "public-haproxy")
-    except MoveError:
-        return None
-    proxy_source = proxy_mounts[0].get("source") if len(proxy_mounts) == 1 else None
-    if (
-        len(proxy_mounts) != 1
-        or proxy_mounts[0].get("type") != "bind"
-        or proxy_mounts[0].get("target") != "/usr/local/etc/haproxy/haproxy.cfg"
-        or proxy_mounts[0].get("read_only") is not True
-        or not isinstance(proxy_source, str)
-        or not proxy_source.startswith("/")
-        or not proxy_source.endswith(
-            "/deploy/teagramd/haproxy-public-websocket.cfg"
-        )
-        or proxy_mounts[0].get("bind") not in (None, {}, {"create_host_path": False})
-        or target_services.get("public-haproxy") != proxy_mounts
-    ):
-        return None
-
-    # The public topology validator checks these profile services in detail.
-    # Exclude only this first validated addition from the data-layout compare;
-    # later changes to their mounts still fail against the live baseline.
-    normalized = copy.deepcopy(target)
-    normalized_services = normalized.get("persistent_service_mounts")
-    if not isinstance(normalized_services, dict):
-        return None
-    for name in PUBLIC_PROFILE_SERVICES:
-        normalized_services.pop(name, None)
-    return normalized
-
-
 def ordinary_rollout_layout_changed(
     source: dict[str, object],
     target: dict[str, object],
@@ -599,10 +515,7 @@ def ordinary_rollout_layout_changed(
     if current_version != "1":
         return True
 
-    normalized_target = _without_initial_public_profile_mounts(source, target, target_config)
-    if normalized_target is None:
-        return True
-    return layout_changed(source, normalized_target)
+    return layout_changed(source, target)
 
 
 def write_private(path: pathlib.Path, data: bytes, *, exclusive: bool = True) -> None:

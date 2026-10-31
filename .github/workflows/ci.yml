@@ -1091,8 +1091,6 @@ jobs:
           bash -n deploy/teagram/ops/invite-web-signup-url.sh
           bash -n deploy/teagram/test-invite-web-signup-url.sh
           bash -n deploy/teagram/ops/rollout-evidence.sh
-          bash -n deploy/teagram/ops/rollback-public-websocket.sh
-          bash -n deploy/teagram/test-rollback-public-websocket.sh
           bash -n deploy/teagram/test-teagram-logs.sh
           bash -n deploy/teagram/ops/target-failure-report.sh
           bash -n deploy/teagram/test-teagram-ops.sh
@@ -1135,8 +1133,6 @@ jobs:
             deploy/teagram/ops/invite-web-signup-url.sh \
             deploy/teagram/test-invite-web-signup-url.sh \
             deploy/teagram/ops/rollout-evidence.sh \
-            deploy/teagram/ops/rollback-public-websocket.sh \
-            deploy/teagram/test-rollback-public-websocket.sh \
             deploy/teagram/test-teagram-logs.sh \
             deploy/teagram/ops/target-failure-report.sh \
             deploy/teagram/test-teagram-ops.sh \
@@ -1190,9 +1186,6 @@ jobs:
 
       - name: Check teagram ops command
         run: deploy/teagram/test-teagram-ops.sh
-
-      - name: Check public WebSocket rollback teardown
-        run: deploy/teagram/test-rollback-public-websocket.sh
 
       - name: Check performance Postgres startup readiness
         run: bash .github/scripts/test-perf-postgres.sh
@@ -2748,11 +2741,6 @@ jobs:
             | python3 -c 'import json,sys; print(json.load(sys.stdin)["services"]["teagramd"]["environment"]["TG_AUTHKEY_ENC_KEY_FILE"])')
           [ "$override_path" = /var/lib/teagramd/other.hex ] \
             || { echo "TG_AUTHKEY_ENC_KEY_FILE override did not reach the rendered config: got $override_path"; exit 1; }
-
-      - name: Validate public WebSocket ingress
-        run: |
-          bash -n .github/scripts/smoke-public-websocket-compose.sh
-          bash .github/scripts/smoke-public-websocket-compose.sh
 
       - name: Boot RustFS and exercise the object-store backend
         run: |
