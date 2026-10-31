@@ -185,7 +185,7 @@ func TestSearchMessagesFallsBackForNotReadyDialog(t *testing.T) {
 		DROP TABLE public.message_search_postings;`); err != nil {
 		t.Fatalf("restore pre-migration search schema: %v", err)
 	}
-	migration, err := os.ReadFile(filepath.Join("..", "..", "migrations", "20261030000001_message_search_postings.sql"))
+	migration, err := os.ReadFile(filepath.Join("..", "..", "migrations", "20261030000004_message_search_postings.sql"))
 	if err != nil {
 		t.Fatalf("read message-search migration: %v", err)
 	}
