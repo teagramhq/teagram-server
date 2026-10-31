@@ -35,8 +35,12 @@ func TestCustomPlanDBRunsEveryStatementUnprepared(t *testing.T) {
 	if _, err := conn.Exec(ctx, "SELECT 1", 1); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := conn.Query(ctx, "SELECT 1", 1); err != nil {
+	rows, err := conn.Query(ctx, "SELECT 1", 1)
+	if err != nil {
 		t.Fatal(err)
+	}
+	if rows != nil {
+		rows.Close()
 	}
 	_ = conn.QueryRow(ctx, "SELECT 1", 1)
 	if len(recorded.args) != 3 {
