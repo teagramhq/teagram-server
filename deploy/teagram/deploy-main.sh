@@ -371,6 +371,29 @@ docker_compose() {
     docker compose "$@"
   fi
 }
+# Compose resolves an extended service before applying a later override file.
+# Carry the resolved base advertise address through interpolation so the public
+# replicas receive the same value as the base service.
+resolve_public_advertise_addr() {
+  local rendered advertise_addr
+  rendered=$(docker_compose --profile public config --format json </dev/null) || {
+    echo 'cannot render public Compose config to resolve the base advertise address' >&2
+    return 1
+  }
+  advertise_addr=$(jq -er '
+    (.services.teagramd.environment.TG_ADVERTISE_ADDR // "") |
+    if type == "string" then . else error("TG_ADVERTISE_ADDR must be a string") end
+  ' <<< "$rendered") || {
+    echo 'cannot read the base advertise address from rendered Compose config' >&2
+    return 1
+  }
+  if [[ "$advertise_addr" == *$'\n'* || "$advertise_addr" == *$'\r'* ]]; then
+    echo 'base advertise address contains a line break' >&2
+    return 1
+  fi
+  export TG_ADVERTISE_ADDR="$advertise_addr"
+}
+resolve_public_advertise_addr || exit 1
 # The same-SHA shortcut must prove that both the rendered public boundary and
 # the running containers still match the reviewed configuration.
 PUBLIC_RENDERED_COMPOSE=
