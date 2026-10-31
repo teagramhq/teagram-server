@@ -72,6 +72,16 @@ jobs:
               echo "Leaving pull request CI run ${run_id} in status ${run_status}."
               continue
             fi
+            if ! started_jobs="$(gh api --paginate \
+              "repos/${GITHUB_REPOSITORY}/actions/runs/${run_id}/jobs?per_page=100" \
+              --jq '.jobs[]? | select(.status == "in_progress" or (.status == "completed" and .conclusion != "skipped")) | .id' 2>/dev/null)"; then
+              echo "::warning::Could not check jobs for pull request CI run ${run_id}; leaving it alone."
+              continue
+            fi
+            if [[ -n "$started_jobs" ]]; then
+              echo "Leaving pull request CI run ${run_id}; it has started jobs."
+              continue
+            fi
             if gh run cancel "$run_id" --repo "$GITHUB_REPOSITORY"; then
               cancelled_pr_run_targets+="${run_id}:${run_created_at} "
             else

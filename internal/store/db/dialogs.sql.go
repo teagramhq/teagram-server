@@ -336,6 +336,177 @@ func (q *Queries) DeleteExpiredChatReadReceipts(ctx context.Context, lim int32) 
 	return result.RowsAffected(), nil
 }
 
+const dialogsCursorPageWithPins = `-- name: DialogsCursorPageWithPins :many
+SELECT d.owner_id, d.peer_id, d.top_message, d.unread_count,
+       d.read_inbox_max_id, d.read_outbox_max_id, d.peer_type,
+       (EXISTS (
+            SELECT 1 FROM user_dialog_pins p
+            WHERE p.owner_id = d.owner_id AND p.peer_type = d.peer_type
+              AND p.peer_id = d.peer_id AND p.position IS NOT NULL
+        ) AND (d.peer_type <> 2 OR EXISTS (
+            SELECT 1 FROM chat_participants cp
+            WHERE cp.chat_id = d.peer_id AND cp.user_id = d.owner_id
+        ))) AS pinned
+FROM dialogs d
+WHERE d.owner_id = $1
+  AND d.top_message <= $2::bigint
+  AND (
+        d.top_message < $2::bigint
+        OR ($3::smallint <> 0
+            AND (d.peer_type, d.peer_id) > ($3::smallint, $4::bigint))
+  )
+  AND (NOT $5::boolean OR NOT (
+        EXISTS (
+            SELECT 1 FROM user_dialog_pins p
+            WHERE p.owner_id = d.owner_id AND p.peer_type = d.peer_type
+              AND p.peer_id = d.peer_id AND p.position IS NOT NULL
+        ) AND (d.peer_type <> 2 OR EXISTS (
+            SELECT 1 FROM chat_participants cp
+            WHERE cp.chat_id = d.peer_id AND cp.user_id = d.owner_id
+        ))
+  ))
+ORDER BY d.top_message DESC, d.peer_type, d.peer_id
+LIMIT $6::int
+`
+
+type DialogsCursorPageWithPinsParams struct {
+	OwnerID        int64
+	OffsetID       int64
+	OffsetPeerType int16
+	OffsetPeerID   int64
+	ExcludePinned  bool
+	Lim            int32
+}
+
+type DialogsCursorPageWithPinsRow struct {
+	OwnerID         int64
+	PeerID          int64
+	TopMessage      int64
+	UnreadCount     int32
+	ReadInboxMaxID  int64
+	ReadOutboxMaxID int64
+	PeerType        int16
+	Pinned          *bool
+}
+
+// DialogsCursorPageWithPins continues DialogsFirstPageWithPins with a stable
+// (top_message, peer_type, peer_id) cursor so equal top messages, including
+// empty dialogs at zero, can be paged. The top_message bound keeps the cursor
+// an index range in generic plans.
+func (q *Queries) DialogsCursorPageWithPins(ctx context.Context, arg DialogsCursorPageWithPinsParams) ([]DialogsCursorPageWithPinsRow, error) {
+	rows, err := q.db.Query(ctx, dialogsCursorPageWithPins,
+		arg.OwnerID,
+		arg.OffsetID,
+		arg.OffsetPeerType,
+		arg.OffsetPeerID,
+		arg.ExcludePinned,
+		arg.Lim,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []DialogsCursorPageWithPinsRow
+	for rows.Next() {
+		var i DialogsCursorPageWithPinsRow
+		if err := rows.Scan(
+			&i.OwnerID,
+			&i.PeerID,
+			&i.TopMessage,
+			&i.UnreadCount,
+			&i.ReadInboxMaxID,
+			&i.ReadOutboxMaxID,
+			&i.PeerType,
+			&i.Pinned,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const dialogsFirstPageWithPins = `-- name: DialogsFirstPageWithPins :many
+SELECT d.owner_id, d.peer_id, d.top_message, d.unread_count,
+       d.read_inbox_max_id, d.read_outbox_max_id, d.peer_type,
+       (EXISTS (
+            SELECT 1 FROM user_dialog_pins p
+            WHERE p.owner_id = d.owner_id AND p.peer_type = d.peer_type
+              AND p.peer_id = d.peer_id AND p.position IS NOT NULL
+        ) AND (d.peer_type <> 2 OR EXISTS (
+            SELECT 1 FROM chat_participants cp
+            WHERE cp.chat_id = d.peer_id AND cp.user_id = d.owner_id
+        ))) AS pinned
+FROM dialogs d
+WHERE d.owner_id = $1
+  AND (NOT $2::boolean OR NOT (
+        EXISTS (
+            SELECT 1 FROM user_dialog_pins p
+            WHERE p.owner_id = d.owner_id AND p.peer_type = d.peer_type
+              AND p.peer_id = d.peer_id AND p.position IS NOT NULL
+        ) AND (d.peer_type <> 2 OR EXISTS (
+            SELECT 1 FROM chat_participants cp
+            WHERE cp.chat_id = d.peer_id AND cp.user_id = d.owner_id
+        ))
+  ))
+ORDER BY d.top_message DESC, d.peer_type, d.peer_id
+LIMIT $3::int
+`
+
+type DialogsFirstPageWithPinsParams struct {
+	OwnerID       int64
+	ExcludePinned bool
+	Lim           int32
+}
+
+type DialogsFirstPageWithPinsRow struct {
+	OwnerID         int64
+	PeerID          int64
+	TopMessage      int64
+	UnreadCount     int32
+	ReadInboxMaxID  int64
+	ReadOutboxMaxID int64
+	PeerType        int16
+	Pinned          *bool
+}
+
+// DialogsFirstPageWithPins returns the newest dialog page. It marks only
+// currently visible pins. Removed group members keep their dialog row, but
+// their stale pin neither hides the row nor remains client-visible. The first
+// page and cursor pages are separate statements so a cached generic plan never
+// has to keep a parameter-dependent OR that defeats the page index.
+func (q *Queries) DialogsFirstPageWithPins(ctx context.Context, arg DialogsFirstPageWithPinsParams) ([]DialogsFirstPageWithPinsRow, error) {
+	rows, err := q.db.Query(ctx, dialogsFirstPageWithPins, arg.OwnerID, arg.ExcludePinned, arg.Lim)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []DialogsFirstPageWithPinsRow
+	for rows.Next() {
+		var i DialogsFirstPageWithPinsRow
+		if err := rows.Scan(
+			&i.OwnerID,
+			&i.PeerID,
+			&i.TopMessage,
+			&i.UnreadCount,
+			&i.ReadInboxMaxID,
+			&i.ReadOutboxMaxID,
+			&i.PeerType,
+			&i.Pinned,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const dialogsForOwner = `-- name: DialogsForOwner :many
 SELECT owner_id, peer_id, top_message, unread_count, read_inbox_max_id, read_outbox_max_id, peer_type FROM dialogs
 WHERE owner_id = $1
@@ -381,100 +552,6 @@ func (q *Queries) DialogsForOwner(ctx context.Context, arg DialogsForOwnerParams
 			&i.ReadInboxMaxID,
 			&i.ReadOutboxMaxID,
 			&i.PeerType,
-		); err != nil {
-			return nil, err
-		}
-		items = append(items, i)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	return items, nil
-}
-
-const dialogsForOwnerWithPins = `-- name: DialogsForOwnerWithPins :many
-SELECT d.owner_id, d.peer_id, d.top_message, d.unread_count,
-       d.read_inbox_max_id, d.read_outbox_max_id, d.peer_type,
-       (EXISTS (
-            SELECT 1 FROM user_dialog_pins p
-            WHERE p.owner_id = d.owner_id AND p.peer_type = d.peer_type
-              AND p.peer_id = d.peer_id AND p.position IS NOT NULL
-        ) AND (d.peer_type <> 2 OR EXISTS (
-            SELECT 1 FROM chat_participants cp
-            WHERE cp.chat_id = d.peer_id AND cp.user_id = d.owner_id
-        ))) AS pinned
-FROM dialogs d
-WHERE d.owner_id = $1
-  AND (
-        ($2::bigint = 0 AND $3::smallint = 0)
-        OR d.top_message < $2::bigint
-        OR (d.top_message = $2::bigint
-            AND $3::smallint <> 0
-            AND (d.peer_type, d.peer_id) > ($3::smallint, $4::bigint))
-  )
-  AND (NOT $5::boolean OR NOT (
-        EXISTS (
-            SELECT 1 FROM user_dialog_pins p
-            WHERE p.owner_id = d.owner_id AND p.peer_type = d.peer_type
-              AND p.peer_id = d.peer_id AND p.position IS NOT NULL
-        ) AND (d.peer_type <> 2 OR EXISTS (
-            SELECT 1 FROM chat_participants cp
-            WHERE cp.chat_id = d.peer_id AND cp.user_id = d.owner_id
-        ))
-  ))
-ORDER BY d.top_message DESC, d.peer_type, d.peer_id
-LIMIT $6::int
-`
-
-type DialogsForOwnerWithPinsParams struct {
-	OwnerID        int64
-	OffsetID       int64
-	OffsetPeerType int16
-	OffsetPeerID   int64
-	ExcludePinned  bool
-	Lim            int32
-}
-
-type DialogsForOwnerWithPinsRow struct {
-	OwnerID         int64
-	PeerID          int64
-	TopMessage      int64
-	UnreadCount     int32
-	ReadInboxMaxID  int64
-	ReadOutboxMaxID int64
-	PeerType        int16
-	Pinned          *bool
-}
-
-// DialogsForOwnerWithPins uses a stable (top_message, peer_type, peer_id) cursor
-// so equal top messages, including empty dialogs at zero, can be paged. It
-// marks only currently visible pins. Removed group members keep their dialog
-// row, but their stale pin neither hides the row nor remains client-visible.
-func (q *Queries) DialogsForOwnerWithPins(ctx context.Context, arg DialogsForOwnerWithPinsParams) ([]DialogsForOwnerWithPinsRow, error) {
-	rows, err := q.db.Query(ctx, dialogsForOwnerWithPins,
-		arg.OwnerID,
-		arg.OffsetID,
-		arg.OffsetPeerType,
-		arg.OffsetPeerID,
-		arg.ExcludePinned,
-		arg.Lim,
-	)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	var items []DialogsForOwnerWithPinsRow
-	for rows.Next() {
-		var i DialogsForOwnerWithPinsRow
-		if err := rows.Scan(
-			&i.OwnerID,
-			&i.PeerID,
-			&i.TopMessage,
-			&i.UnreadCount,
-			&i.ReadInboxMaxID,
-			&i.ReadOutboxMaxID,
-			&i.PeerType,
-			&i.Pinned,
 		); err != nil {
 			return nil, err
 		}
