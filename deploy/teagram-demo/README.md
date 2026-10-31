@@ -305,6 +305,31 @@ it, it saves and verifies `authorized_keys` under the root-only
 separate root channel if the menu must be rolled back. The Gatus definitions
 in `gatus.yaml` are HTTPS probes and do not use an SSH key.
 
+The reviewed `turnstile-signin-on` and `turnstile-signin-off` ops scripts change
+only `TG_TURNSTILE_SIGNIN_ENABLED` in the demo `.env`. They use the
+`ROLLOUT_RUNNER_ADDED_ENV` path for the first assignment and the
+`ROLLOUT_RUNNER_CHANGED_ENV` path for later boolean changes. Each change saves
+the prior root-only `.env` under
+`/var/backups/teagram-demo-turnstile-signin/`, validates the rendered Compose
+settings and redeploys the active tested image through `deploy-main.sh`, which
+takes a database dump and checks the candidate before HAProxy cutover. Signup
+keys, signup advertisement and verification remain unchanged. To disable the
+signin challenge, run `ssh -T teagram-demo 'run <main-sha> turnstile-signin-off'`;
+to restore it, use `turnstile-signin-on`. If a deployment fails, the script
+restores the prior `.env` snapshot and redeploys that flag state. It never prints
+Turnstile key values.
+
+After enabling public signin, verify signin and signup challenges from the
+public web origin with
+`go run ./deploy/teagram-demo/turnstile-signin-probe.go active`. The probe reads
+only `TEAGRAM_DEMO_TURNSTILE_SITE_KEY`; it sends an invalid phone number and
+prints the challenge family with the site key redacted. The enable/disable ops
+script also requires TCP timeouts to the documented tailnet host, demo-host
+LAN address and LAN router before reporting success. If the public signin probe
+fails, disable signin with
+`ssh -T teagram-demo 'run <main-sha> turnstile-signin-off'` and verify the
+rollback with `go run ./deploy/teagram-demo/turnstile-signin-probe.go disabled`.
+
 Do not use `docker compose down -v`. The named `pgdata`, `tgkey` and `tgblobs`
 volumes have independent lifetimes; especially, removing `tgkey` changes the
 server fingerprint and invalidates existing client authorizations.

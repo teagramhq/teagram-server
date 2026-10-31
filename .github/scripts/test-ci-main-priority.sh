@@ -40,16 +40,16 @@ cancel_step="$(query '.jobs."ops-prioritize-main".steps[] | select(.name == "Can
   fail 'failure to list queued pull request runs must warn and continue'
 [[ "$cancel_step" == *'if ! run_status="$(gh api'* && "$cancel_step" == *'Could not check pull request CI run'* ]] ||
   fail 'failure to recheck a pull request run must warn and continue'
+[[ "$cancel_step" == *'if ! started_jobs="$(gh api --paginate'* && "$cancel_step" == *'/jobs?per_page=100'* && "$cancel_step" == *'.status == "in_progress"'* && "$cancel_step" == *'.conclusion != "skipped"'* ]] ||
+  fail 'the priority job must preserve PR runs once any non-skipped job has started'
+[[ "$cancel_step" == *'Could not check jobs for pull request CI run'* ]] ||
+  fail 'failure to inspect PR jobs must warn and preserve the run'
 [[ "$cancel_step" == *"gh run cancel \"\$run_id\" --repo \"\$GITHUB_REPOSITORY\""* && "$cancel_step" != *'gh run cancel --force'* ]] ||
   fail 'queued PR runs must use ordinary cancellation so always() cleanup can run'
 [[ "$cancel_step" == *'if gh run cancel "$run_id" --repo "$GITHUB_REPOSITORY"; then'* && "$cancel_step" == *'Could not cancel queued pull request CI run'* ]] ||
   fail 'a failed cancellation must warn and leave the main priority gate successful'
 [[ "$cancel_step" == *'cancelled_pr_run_targets+="${run_id}:${run_created_at} "'* ]] ||
   fail 'successfully cancelled pull request runs must be recorded for rerun'
-[[ "$cancel_step" != *'status=in_progress'* && "$cancel_step" != *'/jobs?per_page=100'* ]] ||
-  fail 'queued PR workflows must be cancelled even when they have started jobs'
-[[ "$cancel_step" != *'grep -qx in_progress'* ]] ||
-  fail 'the priority job must not query or cancel running PR workflows'
 printf '%s\n' "$cancel_step" | bash -n
 [[ "$(query '.jobs."ops-prioritize-main".outputs.cancelled_pr_run_targets')" == *'steps.cancel-queued-pr-runs.outputs.cancelled_pr_run_targets'* ]] ||
   fail 'the priority job must expose cancelled run ids for recovery'
@@ -59,15 +59,15 @@ dispatch_needs="$(query '.jobs."ops-dispatch-pr-ci-recovery".needs[]')"
   fail 'the recovery dispatch job must use the ops stage naming contract'
 [[ "$(query '.jobs."ops-dispatch-pr-ci-recovery".permissions | keys | join(",")')" == 'actions' ]] ||
   fail 'the recovery dispatch job must have only Actions write permission'
-[[ "$dispatch_needs" == *'ops-prioritize-main'* && "$dispatch_needs" == *'lint-go'* ]] ||
-  fail 'cancelled PR recovery must be dispatched after the main lint lane starts'
+[[ "$dispatch_needs" == 'ops-prioritize-main' ]] ||
+  fail 'the recovery dispatch must not wait for the main lint lane before evaluating its PR skip guard'
 [[ "$(query '.jobs."ops-dispatch-pr-ci-recovery".timeout-minutes')" == 5 ]] ||
   fail 'dispatching PR recovery must remain short-lived in the main concurrency group'
 dispatch_if="$(query '.jobs."ops-dispatch-pr-ci-recovery".if')"
 dispatch_targets_if="outputs.cancelled_pr_run_targets != ''"
-[[ "$dispatch_if" == *"needs.ops-prioritize-main.result == 'success'"* && "$dispatch_if" == *"needs.ops-prioritize-main.result == 'skipped'"* && "$dispatch_if" == *"github.event_name == 'pull_request'"* && "$dispatch_if" == *"github.event_name == 'push'"* && "$dispatch_if" == *'needs.lint-go.result != '\''skipped'\'''* && "$dispatch_if" == *"$dispatch_targets_if"* ]] ||
-  fail 'cancelled PR recovery must dispatch only after main fan-out starts'
-dispatch_step="$(query '.jobs."ops-dispatch-pr-ci-recovery".steps[] | select(.name == "Dispatch cancelled pull request CI recovery after main fan-out starts") | .run')"
+[[ "$dispatch_if" == *'always()'* && "$dispatch_if" == *"needs.ops-prioritize-main.result == 'success'"* && "$dispatch_if" == *"github.event_name == 'push'"* && "$dispatch_if" == *"github.ref == 'refs/heads/main'"* && "$dispatch_if" == *"$dispatch_targets_if"* && "$dispatch_if" != *'needs.lint'* ]] ||
+  fail 'cancelled PR recovery must dispatch only for main pushes with cancelled runs'
+dispatch_step="$(query '.jobs."ops-dispatch-pr-ci-recovery".steps[] | select(.name == "Dispatch cancelled pull request CI recovery") | .run')"
 [[ "$dispatch_step" == *'gh workflow run recover-cancelled-pr-ci.yml'* && "$dispatch_step" == *'--ref main'* && "$dispatch_step" == *'-f issue=MAIN-2765'* && "$dispatch_step" == *'cancelled_pr_run_targets=$CANCELLED_PR_RUN_TARGETS'* && "$dispatch_step" != *'sleep 60'* ]] ||
   fail 'main CI must dispatch recovery with its issue and cancelled run ids without waiting'
 printf '%s\n' "$dispatch_step" | bash -n
@@ -104,16 +104,33 @@ trap 'rm -rf "$test_tmp"' EXIT
 gh() {
   if [[ "${GH_MOCK_MODE:-}" == priority-cancel ]]; then
     if [[ "$1" == api && "$2" == --paginate ]]; then
-      [[ "$3" == "repos/${GITHUB_REPOSITORY}/actions/workflows/ci.yml/runs?event=pull_request&status=queued&per_page=100" && "$4" == --jq && "$5" == '.workflow_runs[]? | [.id, .created_at] | @tsv' ]] || return 2
-      printf '123\t2026-10-28T00:00:00Z\n456\t2026-10-28T00:01:00Z\n789\t2026-10-28T00:02:00Z\n'
-      return 0
+      if [[ "$3" == "repos/${GITHUB_REPOSITORY}/actions/workflows/ci.yml/runs?event=pull_request&status=queued&per_page=100" ]]; then
+        [[ "$4" == --jq && "$5" == '.workflow_runs[]? | [.id, .created_at] | @tsv' ]] || return 2
+        printf '123\t2026-10-28T00:00:00Z\n456\t2026-10-28T00:01:00Z\n789\t2026-10-28T00:02:00Z\n1011\t2026-10-28T00:03:00Z\n1213\t2026-10-28T00:04:00Z\n1313\t2026-10-28T00:05:00Z\n'
+        return 0
+      fi
+      if [[ "$3" == "repos/${GITHUB_REPOSITORY}/actions/runs/"*"/jobs?per_page=100" ]]; then
+        [[ "$4" == --jq && "$5" == '.jobs[]? | select(.status == "in_progress" or (.status == "completed" and .conclusion != "skipped")) | .id' ]] || return 2
+        local job_run_id="${3#*runs/}"
+        job_run_id="${job_run_id%%/jobs*}"
+        printf '%s\n' "$job_run_id" >> "$PRIORITY_JOB_LOG"
+        case "$job_run_id" in
+          123|1313) ;;
+          789) printf '789\n' ;;
+          1011) printf '1011\n' ;;
+          1213) return 2 ;;
+          *) return 2 ;;
+        esac
+        return 0
+      fi
+      return 2
     fi
     if [[ "$1" == api && "$2" == "repos/${GITHUB_REPOSITORY}/actions/runs/"* ]]; then
       [[ "$3" == --jq && "$4" == '.status' ]] || return 2
       local run_id="${2##*/}"
       printf '%s\n' "$run_id" >> "$PRIORITY_STATUS_LOG"
       case "$run_id" in
-        123|789) printf 'queued\n' ;;
+        123|789|1011|1213|1313) printf 'queued\n' ;;
         456) printf 'in_progress\n' ;;
         *) return 2 ;;
       esac
@@ -122,7 +139,7 @@ gh() {
     if [[ "$1" == run && "$2" == cancel ]]; then
       [[ "$4" == --repo && "$5" == "$GITHUB_REPOSITORY" ]] || return 2
       printf '%s\n' "$3" >> "$PRIORITY_CANCEL_LOG"
-      [[ "$3" != 789 ]]
+      [[ "$3" != 1313 ]]
       return
     fi
     return 2
@@ -195,17 +212,20 @@ export -f gh sleep
 
 GH_MOCK_MODE=priority-cancel \
 PRIORITY_STATUS_LOG="$test_tmp/priority-statuses" \
+PRIORITY_JOB_LOG="$test_tmp/priority-jobs" \
 PRIORITY_CANCEL_LOG="$test_tmp/priority-cancels" \
 GITHUB_OUTPUT="$test_tmp/priority-output" \
 GITHUB_REPOSITORY=example/repo \
   bash -c "$cancel_step" > "$test_tmp/priority-output-log" 2>&1 || fail 'the priority gate must continue when a queued-run cancellation races with a run failure'
-[[ "$(<"$test_tmp/priority-statuses")" == $'123\n456\n789' ]] ||
+[[ "$(<"$test_tmp/priority-statuses")" == $'123\n456\n789\n1011\n1213\n1313' ]] ||
   fail 'the priority gate must recheck every queued PR run before cancellation'
-[[ "$(<"$test_tmp/priority-cancels")" == $'123\n789' ]] ||
-  fail 'the priority gate must cancel still-queued runs and leave transitioned runs alone'
+[[ "$(<"$test_tmp/priority-jobs")" == $'123\n789\n1011\n1213\n1313' ]] ||
+  fail 'the priority gate must inspect jobs only for runs that still report queued'
+[[ "$(<"$test_tmp/priority-cancels")" == $'123\n1313' ]] ||
+  fail 'the priority gate must preserve queued-status runs with active or completed jobs'
 [[ "$(<"$test_tmp/priority-output")" == 'cancelled_pr_run_targets=123:2026-10-28T00:00:00Z' ]] ||
   fail 'recovery targets must contain only successfully cancelled PR runs'
-[[ "$(<"$test_tmp/priority-output-log")" == *'Could not cancel queued pull request CI run 789'* ]] ||
+[[ "$(<"$test_tmp/priority-output-log")" == *'Could not check jobs for pull request CI run 1213'* && "$(<"$test_tmp/priority-output-log")" == *'Could not cancel queued pull request CI run 1313'* ]] ||
   fail 'a failed cancellation must warn while allowing main CI to proceed'
 
 STATUS_MODE=after-old-bound \
