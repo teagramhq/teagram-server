@@ -22,21 +22,25 @@ type queryTracer struct {
 	inFlight    int
 	last        time.Time
 	queries     int
-	captured    []capturedQuery
+	captured    []*capturedQuery
 	timings     []queryTiming
 	capture     bool
 	timeQueries bool
 }
 
 type capturedQuery struct {
-	sql  string
-	args []any
+	sql       string
+	args      []any
+	startedAt time.Time
+	duration  time.Duration
 }
 
 type queryTiming struct {
 	name    string
 	elapsed time.Duration
 }
+
+type queryDurationContextKey struct{}
 
 type queryTraceContextKey struct{}
 
@@ -46,35 +50,45 @@ type queryTraceSpan struct {
 }
 
 func (q *queryTracer) TraceQueryStart(ctx context.Context, _ *pgx.Conn, data pgx.TraceQueryStartData) context.Context {
+	startedAt := time.Now()
 	q.mu.Lock()
 	q.inFlight++
-	q.last = time.Now()
+	q.last = startedAt
 	q.queries++
 	timeQueries := q.timeQueries
+	var captured *capturedQuery
 	if q.capture {
-		q.captured = append(q.captured, capturedQuery{sql: data.SQL, args: append([]any(nil), data.Args...)})
+		captured = &capturedQuery{
+			sql: data.SQL, args: append([]any(nil), data.Args...), startedAt: startedAt,
+		}
+		q.captured = append(q.captured, captured)
 	}
 	q.mu.Unlock()
-	if !timeQueries {
-		return ctx
+	if captured != nil {
+		ctx = context.WithValue(ctx, queryDurationContextKey{}, captured)
 	}
-	span := queryTraceSpan{name: queryName(data.SQL), started: time.Now()}
-	return context.WithValue(ctx, queryTraceContextKey{}, span)
+	if timeQueries {
+		ctx = context.WithValue(ctx, queryTraceContextKey{}, queryTraceSpan{
+			name: queryName(data.SQL), started: startedAt,
+		})
+	}
+	return ctx
 }
 
 func (q *queryTracer) TraceQueryEnd(ctx context.Context, _ *pgx.Conn, _ pgx.TraceQueryEndData) {
-	var span queryTraceSpan
-	var ok bool
+	finishedAt := time.Now()
+	captured, _ := ctx.Value(queryDurationContextKey{}).(*capturedQuery)
+	span, timed := ctx.Value(queryTraceContextKey{}).(queryTraceSpan)
 	q.mu.Lock()
+	defer q.mu.Unlock()
+	if captured != nil {
+		captured.duration = finishedAt.Sub(captured.startedAt)
+	}
+	if timed {
+		q.timings = append(q.timings, queryTiming{name: span.name, elapsed: finishedAt.Sub(span.started)})
+	}
 	q.inFlight--
-	q.last = time.Now()
-	if q.timeQueries {
-		span, ok = ctx.Value(queryTraceContextKey{}).(queryTraceSpan)
-	}
-	if ok {
-		q.timings = append(q.timings, queryTiming{name: span.name, elapsed: time.Since(span.started)})
-	}
-	q.mu.Unlock()
+	q.last = finishedAt
 }
 
 func queryName(sql string) string {
@@ -100,7 +114,12 @@ func (q *queryTracer) reset(capture, timeQueries bool) {
 func (q *queryTracer) window() (int, []capturedQuery) {
 	q.mu.Lock()
 	defer q.mu.Unlock()
-	return q.queries, q.captured
+	captured := make([]capturedQuery, len(q.captured))
+	for i, query := range q.captured {
+		captured[i] = *query
+		captured[i].args = append([]any(nil), query.args...)
+	}
+	return q.queries, captured
 }
 
 func (q *queryTracer) timingWindow() []queryTiming {

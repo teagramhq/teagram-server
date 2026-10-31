@@ -103,6 +103,9 @@ func TestRPCPerformance(t *testing.T) {
 
 func measureFixture(t *testing.T, ctx context.Context, dsn, blobs string, key *rsa.PrivateKey, f fixture, only string) []perfreport.Result {
 	t.Helper()
+	if os.Getenv("TG_PERF_REPORT") != "" {
+		t.Setenv("TG_PERF_FIXTURE", f.Spec.Name)
+	}
 	srv := bootServer(t, ctx, dsn, blobs, key)
 	defer srv.stop()
 	e := &env{f: f, srv: srv}
@@ -184,8 +187,14 @@ func measure(t *testing.T, ctx context.Context, e *env, explain *explainer, sc s
 		allocBefore := heapAllocs()
 		e.elapsed = 0
 		start := time.Now()
-		if err := call(ctx); err != nil {
-			return fail(err)
+		var callErr error
+		if sc.name == "messages.getDialogs" && measured {
+			callErr = callWithGetDialogsProfile(ctx, call)
+		} else {
+			callErr = call(ctx)
+		}
+		if callErr != nil {
+			return fail(callErr)
 		}
 		elapsed := time.Since(start)
 		if e.elapsed > 0 {
@@ -205,6 +214,9 @@ func measure(t *testing.T, ctx context.Context, e *env, explain *explainer, sc s
 			r.RowsRead, r.SeqScans, r.Unexplained = rows, scans, unexplained
 			if e.logSQL != nil {
 				e.logSQL(sc.name, captured)
+			}
+			if sc.name == "messages.getDialogs" {
+				logQueryDurations(t, e.f.Spec.Name, elapsed, captured)
 			}
 		}
 		if sc.cleanup != nil {
@@ -256,6 +268,50 @@ func measure(t *testing.T, ctx context.Context, e *env, explain *explainer, sc s
 	return r
 }
 
+func callWithGetDialogsProfile(ctx context.Context, call func(context.Context) error) (err error) {
+	const profileEnv = "TG_PERF_PROFILE_GETDIALOGS"
+	previous, hadPrevious := os.LookupEnv(profileEnv)
+	if err := os.Setenv(profileEnv, "1"); err != nil {
+		return err
+	}
+	defer func() {
+		var restoreErr error
+		if hadPrevious {
+			restoreErr = os.Setenv(profileEnv, previous)
+		} else {
+			restoreErr = os.Unsetenv(profileEnv)
+		}
+		if restoreErr != nil {
+			err = errors.Join(err, fmt.Errorf("restore %s: %w", profileEnv, restoreErr))
+		}
+	}()
+	return call(ctx)
+}
+
+func logQueryDurations(t *testing.T, fixture string, rpcDuration time.Duration, captured []capturedQuery) {
+	t.Helper()
+	totals := make(map[string]time.Duration)
+	counts := make(map[string]int)
+	for _, query := range captured {
+		line := firstLine(statementBody(query.sql) + query.sql)
+		totals[line] += query.duration
+		counts[line]++
+	}
+	statements := make([]string, 0, len(totals))
+	for statement := range totals {
+		statements = append(statements, statement)
+	}
+	slices.Sort(statements)
+	var total time.Duration
+	for _, statement := range statements {
+		duration := totals[statement]
+		total += duration
+		t.Logf("%s messages.getDialogs SQL: %d x %.2f ms %s", fixture, counts[statement], float64(duration.Microseconds())/1000, statement)
+	}
+	t.Logf("%s messages.getDialogs SQL total %.2f ms across %d statements; RPC sample %.2f ms",
+		fixture, float64(total.Microseconds())/1000, len(captured), float64(rpcDuration.Microseconds())/1000)
+}
+
 // percentile is nearest-rank over sorted values.
 func percentile(sorted []float64, p int) float64 {
 	rank := (p*len(sorted) + 99) / 100
@@ -269,6 +325,24 @@ func heapAllocs() uint64 {
 	s := []metrics.Sample{{Name: "/gc/heap/allocs:bytes"}}
 	metrics.Read(s)
 	return s[0].Value.Uint64()
+}
+
+func TestCallWithGetDialogsProfileRestoresEnvironment(t *testing.T) {
+	const profileEnv = "TG_PERF_PROFILE_GETDIALOGS"
+	t.Setenv(profileEnv, "previous")
+	wantErr := errors.New("call error")
+	err := callWithGetDialogsProfile(context.Background(), func(context.Context) error {
+		if got := os.Getenv(profileEnv); got != "1" {
+			t.Fatalf("profile environment = %q, want 1", got)
+		}
+		return wantErr
+	})
+	if !errors.Is(err, wantErr) {
+		t.Fatalf("call error = %v, want %v", err, wantErr)
+	}
+	if got := os.Getenv(profileEnv); got != "previous" {
+		t.Fatalf("profile environment after call = %q, want previous", got)
+	}
 }
 
 // explainer plans each captured statement on its own connection, outside the
