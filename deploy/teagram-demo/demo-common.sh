@@ -52,8 +52,8 @@ demo_fail() {
 }
 
 demo_prepare_edge_config_permissions() {
-  local config_dir="$DEMO_SCRIPT_DIR/nginx-config"
-  local config_file="$config_dir/nginx.conf"
+  local config_dir="${1:-$DEMO_SCRIPT_DIR/nginx-config}"
+  local config_file="${2:-$config_dir/nginx.conf}"
   [[ -d "$config_dir" && ! -L "$config_dir" ]] || {
     demo_fail 'edge configuration directory is missing or unsafe'
     return 1
@@ -62,12 +62,20 @@ demo_prepare_edge_config_permissions() {
     demo_fail 'edge configuration file is missing or unsafe'
     return 1
   }
-  chmod 0755 "$config_dir" || {
+  chmod 0755 -- "$config_dir" || {
     demo_fail 'edge configuration directory permissions could not be prepared'
     return 1
   }
-  chmod 0644 "$config_file" || {
+  [[ "$(stat -c '%a' "$config_dir")" == 755 ]] || {
+    demo_fail 'edge configuration directory permissions could not be verified'
+    return 1
+  }
+  chmod 0644 -- "$config_file" || {
     demo_fail 'edge configuration file permissions could not be prepared'
+    return 1
+  }
+  [[ "$(stat -c '%a' "$config_file")" == 644 ]] || {
+    demo_fail 'edge configuration file permissions could not be verified'
     return 1
   }
 }
@@ -512,6 +520,7 @@ demo_prepare_client_config_dir() {
 
 demo_reload_edge() {
   local -a edge_ids=()
+  demo_prepare_edge_config_permissions || return 1
   mapfile -t edge_ids < <(demo_compose ps -q edge)
   ((${#edge_ids[@]} == 1)) || {
     demo_fail 'running edge proxy is missing or ambiguous'
@@ -661,6 +670,7 @@ demo_compose_with_file() {
     return 1
   fi
   env -u COMPOSE_FILE -u COMPOSE_PROJECT_NAME -u COMPOSE_PROFILES \
+    -u TG_TURNSTILE_SIGNIN_ENABLED \
     -u TEAGRAM_DEMO_TURNSTILE_SITE_KEY -u TEAGRAM_DEMO_TURNSTILE_SECRET_KEY_FILE \
     -u TEAGRAM_DEMO_EDGE_BIND -u TEAGRAM_DEMO_EDGE_CONFIG_SHA256 \
     "TEAGRAM_DEMO_IMAGE_REF=$image_ref" \
@@ -678,6 +688,7 @@ demo_validation_compose() {
     return 1
   fi
   env -u COMPOSE_FILE -u COMPOSE_PROJECT_NAME -u COMPOSE_PROFILES \
+    -u TG_TURNSTILE_SIGNIN_ENABLED \
     -u TEAGRAM_DEMO_TURNSTILE_SITE_KEY -u TEAGRAM_DEMO_TURNSTILE_SECRET_KEY_FILE \
     "TEAGRAM_DEMO_IMAGE_REF=$image_ref" \
     TEAGRAM_DEMO_EDGE_BIND=127.0.0.1:18080 \
@@ -690,6 +701,7 @@ demo_compose_input() {
     return 1
   fi
   env -u COMPOSE_FILE -u COMPOSE_PROJECT_NAME -u COMPOSE_PROFILES \
+    -u TG_TURNSTILE_SIGNIN_ENABLED \
     -u TEAGRAM_DEMO_TURNSTILE_SITE_KEY -u TEAGRAM_DEMO_TURNSTILE_SECRET_KEY_FILE \
     -u TEAGRAM_DEMO_EDGE_BIND \
     "TEAGRAM_DEMO_IMAGE_REF=$image_ref" \
@@ -702,6 +714,7 @@ demo_bootstrap_compose() {
     return 1
   fi
   env -u COMPOSE_FILE -u COMPOSE_PROJECT_NAME -u COMPOSE_PROFILES \
+    -u TG_TURNSTILE_SIGNIN_ENABLED \
     -u TEAGRAM_DEMO_TURNSTILE_SITE_KEY -u TEAGRAM_DEMO_TURNSTILE_SECRET_KEY_FILE \
     -u TEAGRAM_DEMO_EDGE_BIND \
     "TEAGRAM_DEMO_IMAGE_REF=$image_ref" \
@@ -716,6 +729,7 @@ demo_seed_compose() {
     return 1
   fi
   env -u COMPOSE_FILE -u COMPOSE_PROJECT_NAME -u COMPOSE_PROFILES \
+    -u TG_TURNSTILE_SIGNIN_ENABLED \
     -u TEAGRAM_DEMO_TURNSTILE_SITE_KEY -u TEAGRAM_DEMO_TURNSTILE_SECRET_KEY_FILE \
     -u TEAGRAM_DEMO_EDGE_BIND \
     "TEAGRAM_DEMO_IMAGE_REF=$image_ref" \
@@ -729,6 +743,7 @@ demo_seed_compose_input() {
     return 1
   fi
   env -u COMPOSE_FILE -u COMPOSE_PROJECT_NAME -u COMPOSE_PROFILES \
+    -u TG_TURNSTILE_SIGNIN_ENABLED \
     -u TEAGRAM_DEMO_TURNSTILE_SITE_KEY -u TEAGRAM_DEMO_TURNSTILE_SECRET_KEY_FILE \
     -u TEAGRAM_DEMO_EDGE_BIND \
     "TEAGRAM_DEMO_IMAGE_REF=$image_ref" \
@@ -763,6 +778,8 @@ demo_render_config() {
     and .services.teagramd.environment.TG_REGISTRATION == "open"
     and .services.teagramd.environment.TG_ADVERTISE_DEMO_GUEST_SIGN_UP == "true"
     and .services["teagramd-next"].environment.TG_ADVERTISE_DEMO_GUEST_SIGN_UP == "true"
+    and (.services.teagramd.environment.TG_TURNSTILE_SIGNIN_ENABLED == "false" or .services.teagramd.environment.TG_TURNSTILE_SIGNIN_ENABLED == "true")
+    and .services.teagramd.environment.TG_TURNSTILE_SIGNIN_ENABLED == .services["teagramd-next"].environment.TG_TURNSTILE_SIGNIN_ENABLED
     and .services.teagramd.environment.TG_LOG_LOGIN_CODES == "false"
     and .services.teagramd.environment.TG_LOG_AUTH_KEY_UNBINDS == "true"
     and .services["teagramd-next"].environment.TG_LOG_AUTH_KEY_UNBINDS == "true"
