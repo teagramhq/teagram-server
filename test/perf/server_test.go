@@ -153,6 +153,7 @@ func raise(v reflect.Value) {
 type client struct {
 	api     *tg.Client
 	updates chan tg.UpdatesClass
+	meter   *meter
 	close   func()
 }
 
@@ -226,7 +227,15 @@ func (s *server) login(t *testing.T, ctx context.Context, userID int64) *client 
 		cancel()
 		t.Fatalf("login %d: timeout", userID)
 	}
+	var m *meter
+	select {
+	case m = <-s.accepted:
+	case <-time.After(60 * time.Second):
+		cancel()
+		t.Fatalf("login %d: accepted connection was not metered", userID)
+	}
 	c.api = tc.API()
+	c.meter = m
 	c.close = func() {
 		cancel()
 		<-done
@@ -278,18 +287,25 @@ func (l *meteredListener) Accept() (net.Conn, error) {
 }
 
 // meter sums, over a connection's life, the time from the first byte of each
-// client request to the server's reply.
+// client request to the start and completion of the server's first reply write.
 type meter struct {
-	mu      sync.Mutex
-	busy    time.Duration
-	readAt  time.Time
-	waiting bool
+	mu              sync.Mutex
+	busy            time.Duration
+	responseWritten time.Duration
+	readAt          time.Time
+	waiting         bool
 }
 
 func (m *meter) serverTime() time.Duration {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return m.busy
+}
+
+func (m *meter) responseWrittenTime() time.Duration {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.responseWritten
 }
 
 type meteredConn struct {
@@ -312,12 +328,19 @@ func (c *meteredConn) Read(b []byte) (int, error) {
 
 func (c *meteredConn) Write(b []byte) (int, error) {
 	c.m.mu.Lock()
+	started, waiting := c.m.readAt, c.m.waiting
 	if c.m.waiting {
-		c.m.busy += time.Since(c.m.readAt)
+		c.m.busy += time.Since(started)
 		c.m.waiting = false
 	}
 	c.m.mu.Unlock()
-	return c.Conn.Write(b)
+	n, err := c.Conn.Write(b)
+	if waiting {
+		c.m.mu.Lock()
+		c.m.responseWritten += time.Since(started)
+		c.m.mu.Unlock()
+	}
+	return n, err
 }
 
 // serverLog discards the server's log unless TG_PERF_LOG is set.

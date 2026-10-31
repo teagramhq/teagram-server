@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -43,6 +44,21 @@ func TestAuthKeyExchangeP95AllowsOneOutlier(t *testing.T) {
 		return
 	}
 	t.Fatal("auth key exchange scenario missing")
+}
+
+func TestContactsGetContactsReportsServerSideTimingBoundary(t *testing.T) {
+	for _, sc := range scenarios() {
+		if sc.name != "contacts.getContacts" {
+			continue
+		}
+		for _, boundary := range []string{"server-side", "first request byte", "response write"} {
+			if !strings.Contains(sc.note, boundary) {
+				t.Errorf("contacts.getContacts note %q does not describe %q", sc.note, boundary)
+			}
+		}
+		return
+	}
+	t.Fatal("contacts.getContacts scenario missing")
 }
 
 type call = func(ctx context.Context) error
@@ -139,10 +155,16 @@ func scenarios() []scenario {
 		}),
 		{
 			name: "contacts.getContacts", kind: perfreport.Read, samples: readSamples, fullSet: true,
-			note: "answers every contact by protocol, so only its query count is held to scale invariance",
+			note: "server-side time from the first request byte received through completion of the first response write (client decoding excluded); answers every contact by protocol, so only its query count is held to scale invariance",
 			setup: fixed(func(e *env) call {
 				return func(ctx context.Context) error {
+					started := e.owner.meter.responseWrittenTime()
 					_, err := e.owner.api.ContactsGetContacts(ctx, 0)
+					elapsed := e.owner.meter.responseWrittenTime() - started
+					if err == nil && elapsed <= 0 {
+						return errors.New("server-side response write timing was not recorded")
+					}
+					e.elapsed = elapsed
 					return err
 				}
 			}),
