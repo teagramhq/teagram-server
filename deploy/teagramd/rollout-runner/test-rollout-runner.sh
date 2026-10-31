@@ -295,6 +295,22 @@ if [ "${1:-}" = image ] && [ "${2:-}" = tag ]; then
   exit 0
 fi
 if [ "${1:-}" = ps ]; then
+  if [ "${2:-}" = --all ] && [ "${3:-}" = --quiet ] && [ "${4:-}" = --no-trunc ]; then
+    project=''
+    service=''
+    for arg in "$@"; do
+      case "$arg" in
+        label=com.docker.compose.project=*) project=${arg#*=}; project=${project#*=} ;;
+        label=com.docker.compose.service=*) service=${arg#*=}; service=${service#*=} ;;
+      esac
+    done
+    [ "$project" = fixture ] || { printf 'unexpected Compose project filter: %s\n' "$project" >&2; exit 95; }
+    case "$service" in
+      public-haproxy|teagramd-public-1|teagramd-public-2) ;;
+      *) printf 'unexpected public profile service filter: %s\n' "$service" >&2; exit 96 ;;
+    esac
+    exit 0
+  fi
   if [ "${2:-}" = --no-trunc ] && [ "${3:-}" = -q ]; then
     if [ "${MOCK_SCENARIO:-}" = initial-local-replica-network-drift ]; then
       printf '%s\n' "${MOCK_BASE_ID//a/1}"
@@ -339,6 +355,7 @@ if [ "${1:-}" = inspect ]; then
   if [ "${1:-}" = --format ]; then
     template=${2:-}
     case "$template" in
+      '{{ index .Config.Labels "com.docker.compose.project" }}') printf 'fixture\n' ;;
       '{{.HostConfig.LogConfig.Type}}')
         if [ -f "$MOCK_STATE/unsupported-live-logger" ] && [ "$subject" = "$MOCK_BASE_ID" ]; then
           printf 'journald\n'
