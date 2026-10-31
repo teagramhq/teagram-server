@@ -874,7 +874,7 @@ write_compose_fixture() {
         teagramd:{
           build:{context:$build_context,args:{TEAGRAMD_SOURCE_REVISION:""}},
           stop_grace_period:"2m0s",
-          environment:{TG_SYNTHETIC_FLAG:"fixture",TG_BLOB_DIR:"/var/lib/teagramd-blobs",TG_REPLICA_COUNT:"1",TG_CLIENT_ADDR_TRUST:"socket",TG_LOG_LOGIN_CODES:"false",TG_RATE_LIMIT_KEY_EXCHANGE_IP_TAILNET:""},
+          environment:{TG_SYNTHETIC_FLAG:"fixture",TG_BLOB_DIR:"/var/lib/teagramd-blobs",TG_REPLICA_COUNT:"1",TG_CLIENT_ADDR_TRUST:"socket",TG_LOG_LOGIN_CODES:"false"},
           logging:{driver:"syslog",options:{"syslog-address":"unixgram:///dev/log","syslog-facility":"daemon","syslog-format":"rfc5424",tag:"teagramd"}},
           ports:[{target:2443,published:"2443",host_ip:"127.0.0.1",protocol:"tcp",mode:"ingress"}],
           volumes:[
