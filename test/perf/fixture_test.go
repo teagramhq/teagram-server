@@ -36,7 +36,7 @@ import (
 
 // fixtureVersion changes whenever the seeded shape changes, so a cached dump
 // of an older shape is never measured as if it were this one.
-const fixtureVersion = 6
+const fixtureVersion = 8
 
 // spec is one fixture size. The small fixture uses one hundredth of the large
 // fixture's scalable data, subject to its Store's per-account contact cap.
@@ -55,7 +55,7 @@ type spec struct {
 // request shape, not account size.
 const (
 	groupMembers = 100
-	needleEvery  = 1000
+	needleEvery  = 10
 )
 
 var fixtures = []spec{
@@ -117,6 +117,20 @@ func TestDialogsFixtureFillsGetDialogsPage(t *testing.T) {
 			t.Errorf("%s fixture has %d dialogs, getDialogs page needs %d", fixture.Name, fixture.Dialogs, pageLimit)
 		}
 	}
+}
+
+func TestMessageSearchFixtureFillsOneXPage(t *testing.T) {
+	small := scaled("1x", 100)
+	if got := needleMessageCount(small.ChatMessages); got < pageLimit {
+		t.Fatalf("1x fixture has %d needle messages, messages.search page needs %d", got, pageLimit)
+	}
+}
+
+func needleMessageCount(messages int) int {
+	if messages <= 0 {
+		return 0
+	}
+	return (messages-1)/needleEvery + 1
 }
 
 // fixture is what the seeder leaves for the harness: the ids every scenario

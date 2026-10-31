@@ -785,20 +785,43 @@ func messagesFromRows(rows []db.Message) []Message {
 // matches query, ordered newest-first (descending local_id), with pagination by
 // offsetID. Only non-deleted messages owned by ownerID are returned.
 func (s *Store) SearchMessages(ctx context.Context, ownerID int64, peerType PeerType, peerID int64, query string, offsetID, limit int) ([]Message, error) {
-	rows, err := s.q.SearchMessages(ctx, db.SearchMessagesParams{
+	params := db.SearchMessagesParams{
 		OwnerID:  ownerID,
 		PeerType: int16(peerType),
 		PeerID:   peerID,
 		Query:    query,
 		OffsetID: int64(offsetID),
 		Lim:      int32(limit), //nolint:gosec // limit is a small validated page size
+	}
+	// Initialization writes postings and removes the marker in one transaction,
+	// so a concurrent completion leaves either selected search path whole.
+	ready, err := s.q.MessageSearchDialogReady(ctx, db.MessageSearchDialogReadyParams{
+		OwnerID:  ownerID,
+		PeerType: int16(peerType),
+		PeerID:   peerID,
 	})
+	if err != nil {
+		return nil, fmt.Errorf("check message search readiness: %w", err)
+	}
+	var rows []db.Message
+	if ready {
+		rows, err = s.q.SearchMessagesByPostings(ctx, db.SearchMessagesByPostingsParams{
+			OwnerID:  ownerID,
+			PeerType: int16(peerType),
+			PeerID:   peerID,
+			Query:    query,
+			OffsetID: int64(offsetID),
+			Lim:      int32(limit), //nolint:gosec // limit is a small validated page size
+		})
+	} else {
+		rows, err = s.q.SearchMessages(ctx, params)
+	}
 	if err != nil {
 		return nil, fmt.Errorf("search messages: %w", err)
 	}
 	msgs := make([]Message, len(rows))
-	for i, r := range rows {
-		msgs[i] = messageFromRow(r)
+	for i, row := range rows {
+		msgs[i] = messageFromRow(row)
 	}
 	return msgs, nil
 }
