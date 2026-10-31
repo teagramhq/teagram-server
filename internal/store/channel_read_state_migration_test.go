@@ -230,21 +230,7 @@ func openPreReadStateDatabase(t *testing.T, ctx context.Context) *pgx.Conn {
 	if _, err := admin.Exec(ctx, `CREATE DATABASE `+name); err != nil {
 		t.Fatalf("create pre-migration database: %v", err)
 	}
-	t.Cleanup(func() {
-		cleanup, err := pgx.Connect(context.Background(), pgtest.AdminDSN())
-		if err != nil {
-			t.Logf("cleanup connect: %v", err)
-			return
-		}
-		defer func() {
-			if err := cleanup.Close(context.Background()); err != nil {
-				t.Logf("cleanup close: %v", err)
-			}
-		}()
-		if _, err := cleanup.Exec(context.Background(), `DROP DATABASE IF EXISTS `+name+` WITH (FORCE)`); err != nil {
-			t.Logf("cleanup drop %s: %v", name, err)
-		}
-	})
+	pgtest.RegisterDatabaseCleanup(t, name)
 
 	dsn := pgtest.DSNFrom(name)
 	conn, err := pgx.Connect(ctx, dsn)
