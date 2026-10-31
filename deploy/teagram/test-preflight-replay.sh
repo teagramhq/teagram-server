@@ -205,6 +205,9 @@ git clone -q "$TMP/origin.git" "$TMP/live"
 git -C "$TMP/live" switch -q main
 printf 'fixture-password=never-print\n' > "$TMP/live/.env"
 printf '# fixture override\n' > "$TMP/live/docker-compose.override.yml"
+mkdir -m 700 "$TMP/live/.secrets"
+: > "$TMP/live/.secrets/teagramd-turnstile"
+chmod 444 "$TMP/live/.secrets/teagramd-turnstile"
 chmod 600 "$TMP/live/.env" "$TMP/live/docker-compose.override.yml"
 
 cat > "$TMP/bin/docker" <<'DOCKER'
@@ -222,11 +225,24 @@ if [[ "${1:-}" == inspect ]]; then
     if [[ -n "$selection" ]]; then selection+=,; fi
     selection+="${FIXTURE_LIVE_ROOT:?}/$entry"
   done
-  jq -cn --arg selection "$selection" '[{
+  inspect_env='["TG_REPLICA_COUNT=1","TG_CLIENT_ADDR_TRUST=socket","TG_LOG_LOGIN_CODES=false"]'
+  inspect_mounts='[]'
+  if [[ "${FIXTURE_TURNSTILE:-0}" == 1 ]]; then
+    inspect_env=$(jq -cn '[
+      "TG_REPLICA_COUNT=1","TG_CLIENT_ADDR_TRUST=socket","TG_LOG_LOGIN_CODES=false",
+      "TG_TURNSTILE_SITE_KEY=fixture-site-key",
+      "TG_TURNSTILE_SECRET_KEY_FILE=/run/secrets/teagramd-turnstile",
+      "TG_TURNSTILE_SIGNIN_ENABLED=false"
+    ]')
+    inspect_mounts=$(jq -cn --arg source "${FIXTURE_TURNSTILE_SECRET_SOURCE:?}" '[{
+      Type:"bind",Source:$source,Destination:"/run/secrets/teagramd-turnstile",RW:false
+    }]')
+  fi
+  jq -cn --arg selection "$selection" --argjson inspect_env "$inspect_env" --argjson inspect_mounts "$inspect_mounts" '[{
     Id:"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
     Image:"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
     Config:{
-      Env:["TG_REPLICA_COUNT=1","TG_CLIENT_ADDR_TRUST=socket","TG_LOG_LOGIN_CODES=false"],
+      Env:$inspect_env,
       StopTimeout:120,
       Labels:{"com.docker.compose.project":"teagram","com.docker.compose.project.config_files":$selection}
     },
@@ -235,7 +251,7 @@ if [[ "${1:-}" == inspect ]]; then
       "syslog-address":"unixgram:///dev/log","syslog-facility":"daemon",
       "syslog-format":"rfc5424",tag:"teagramd"
     }},PortBindings:{}},
-    Mounts:[]
+    Mounts:$inspect_mounts
   }]'
   exit 0
 fi
@@ -276,15 +292,36 @@ if [[ "${1:-}" == compose ]]; then
   }
   grace=2m0s
   if grep -q FIXTURE_DRIFT "$project_dir/docker-compose.alternate.yml" 2>/dev/null; then grace=3m0s; fi
-  jq -cn --arg grace "$grace" '{services:{teagramd:{
-    stop_grace_period:$grace,
-    ports:[],volumes:[],network_mode:"",networks:{},
-    logging:{driver:"syslog",options:{
-      "syslog-address":"unixgram:///dev/log","syslog-facility":"daemon",
-      "syslog-format":"rfc5424",tag:"teagramd"
-    }},
-    environment:{TG_REPLICA_COUNT:"1",TG_CLIENT_ADDR_TRUST:"socket",TG_LOG_LOGIN_CODES:"false"}
-  }}}'
+  if [[ "${FIXTURE_TURNSTILE:-0}" == 1 ]]; then
+    jq -cn --arg grace "$grace" --arg secret "${FIXTURE_TURNSTILE_SECRET_SOURCE:?}" '{
+      services:{teagramd:{
+        stop_grace_period:$grace,
+        ports:[],volumes:[],network_mode:"",networks:{},
+        logging:{driver:"syslog",options:{
+          "syslog-address":"unixgram:///dev/log","syslog-facility":"daemon",
+          "syslog-format":"rfc5424",tag:"teagramd"
+        }},
+        environment:{
+          TG_REPLICA_COUNT:"1",TG_CLIENT_ADDR_TRUST:"socket",TG_LOG_LOGIN_CODES:"false",
+          TG_TURNSTILE_SITE_KEY:"fixture-site-key",
+          TG_TURNSTILE_SECRET_KEY_FILE:"/run/secrets/teagramd-turnstile",
+          TG_TURNSTILE_SIGNIN_ENABLED:"false"
+        },
+        secrets:[{source:"teagramd_turnstile",target:"teagramd-turnstile"}]
+      }},
+      secrets:{teagramd_turnstile:{file:$secret}}
+    }'
+  else
+    jq -cn --arg grace "$grace" '{services:{teagramd:{
+      stop_grace_period:$grace,
+      ports:[],volumes:[],network_mode:"",networks:{},
+      logging:{driver:"syslog",options:{
+        "syslog-address":"unixgram:///dev/log","syslog-facility":"daemon",
+        "syslog-format":"rfc5424",tag:"teagramd"
+      }},
+      environment:{TG_REPLICA_COUNT:"1",TG_CLIENT_ADDR_TRUST:"socket",TG_LOG_LOGIN_CODES:"false"}
+    }}}'
+  fi
   exit 0
 fi
 
@@ -365,6 +402,7 @@ export PATH="$TMP/bin:$PATH"
 export REAL_RM REAL_MKTEMP
 export FIXTURE_SYSTEM_MKTEMP="$REAL_MKTEMP"
 export FIXTURE_LIVE_ROOT="$TMP/live"
+export FIXTURE_TURNSTILE_SECRET_SOURCE="$TMP/live/.secrets/teagramd-turnstile"
 export FIXTURE_TEST_ROOT="$TMP"
 export FIXTURE_REMOVE_LOG="$TMP/removals.log"
 export FIXTURE_UNSAFE_REMOVE_LOG="$TMP/unsafe-removals.log"
@@ -387,6 +425,8 @@ run_replay() {
       PREFLIGHT_REPLAY_TEST_REPOSITORY_URL="$TMP/origin.git" \
       FIXTURE_LIVE_ROOT="$TMP/live" FIXTURE_LABEL_FILES="$selection" \
       FIXTURE_EXPECTED_FILES="$selection" FIXTURE_REMOVE_LOG="$FIXTURE_REMOVE_LOG" \
+      FIXTURE_TURNSTILE="${FIXTURE_TURNSTILE:-0}" \
+      FIXTURE_TURNSTILE_SECRET_SOURCE="$FIXTURE_TURNSTILE_SECRET_SOURCE" \
       FIXTURE_UNSAFE_REMOVE_LOG="$FIXTURE_UNSAFE_REMOVE_LOG" REAL_RM="$REAL_RM" \
       FIXTURE_SANDBOX_UID_LOG="$FIXTURE_SANDBOX_UID_LOG" \
       FIXTURE_SANDBOX_NETWORK_LOG="$FIXTURE_SANDBOX_NETWORK_LOG" \
@@ -405,6 +445,14 @@ if grep -qv $'\tpass$' <<< "$output" || grep -Eq '2m0s|3m0s|fixture-password' <<
   exit 1
 fi
 printf '%s\n' 'PASS all-pass replay prints only field/result rows'
+
+output=$(FIXTURE_TURNSTILE=1 run_replay "$pass_sha" 'docker-compose.fixture.yml,docker-compose.override.yml')
+[[ "$(cat "$TMP/last-rc")" == 0 ]] || { printf 'FAIL configured Turnstile replay:\n%s\n' "$output" >&2; exit 1; }
+if grep -qv $'\tpass$' <<< "$output" || grep -Eq 'fixture-site-key|fixture-password' <<< "$output"; then
+  printf 'FAIL configured Turnstile replay failed or exposed values:\n%s\n' "$output" >&2
+  exit 1
+fi
+printf '%s\n' 'PASS configured Turnstile replay uses the live secret path without exposing values'
 
 # This authentic pre-replay runner from PR #870 uses the legacy snapshot paths.
 # The Docker stub checks that the verifier follows the exact labeled file order.

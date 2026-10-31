@@ -253,7 +253,11 @@ verify_safe_public_environment() {
 verify_turnstile_compose_configuration() {
   local compose_json=$1 checkout_root secret_source file_source secret_dir runtime_uid
   checkout_root=$(readlink -f "$ROLLOUT_CHECKOUT_PATH") || return 1
-  secret_source="$checkout_root/.secrets/teagramd-turnstile"
+  secret_source=${ROLLOUT_PREFLIGHT_TURNSTILE_SECRET_SOURCE:-"$checkout_root/.secrets/teagramd-turnstile"}
+  case "$secret_source" in
+    /*/.secrets/teagramd-turnstile) ;;
+    *) printf '%s\n' 'Turnstile secret source path is invalid' >&2; return 1 ;;
+  esac
   if ! printf '%s\n' "$compose_json" | jq -e --arg secret_source "$secret_source" '
     (.services[env.ROLLOUT_COMPOSE_SERVICE // "teagramd"].environment // {}) as $env
     | (.services[env.ROLLOUT_COMPOSE_SERVICE // "teagramd"].secrets // []) as $service_secrets
