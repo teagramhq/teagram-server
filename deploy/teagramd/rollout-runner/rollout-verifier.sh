@@ -156,7 +156,11 @@ verify_changed_container_environment() {
 
 verify_target_tailnet_exchange_limit() {
   local inspect_json=$1 compose_json=$2 snapshot_name=$3 compose_source=$4
-  [ "$snapshot_name" = target ] && [ "$compose_source" = selected-compose-render ] || return 0
+  [ "$snapshot_name" = target ] || return 0
+  [ "$compose_source" = selected-compose-render ] || {
+    printf '%s\n' 'target tailnet exchange limit requires a resolved Compose render' >&2
+    return 1
+  }
   if ! printf '%s\n' "$inspect_json" "$compose_json" | jq -se \
     --arg service "${ROLLOUT_COMPOSE_SERVICE:-teagramd}" '
     def item: if type == "array" then .[0] else . end;
@@ -165,9 +169,7 @@ verify_target_tailnet_exchange_limit() {
     | ($compose.services[$service].environment // null) as $compose_env
     | (($inspect | item).Config.Env // null) as $container_env
     | if ($compose_env | type) != "object" or ($container_env | type) != "array" then false
-      elif ($compose_env | has("TG_RATE_LIMIT_KEY_EXCHANGE_IP_TAILNET") | not) then
-        # A pinned legacy render predates the mapping; its container must not set it.
-        all($container_env[]; type != "string" or (startswith("TG_RATE_LIMIT_KEY_EXCHANGE_IP_TAILNET=") | not))
+      elif ($compose_env | has("TG_RATE_LIMIT_KEY_EXCHANGE_IP_TAILNET") | not) then false
       else
         $compose_env.TG_RATE_LIMIT_KEY_EXCHANGE_IP_TAILNET as $resolved
         | [$container_env[] | select(type == "string" and startswith("TG_RATE_LIMIT_KEY_EXCHANGE_IP_TAILNET="))
@@ -1129,13 +1131,13 @@ snapshot_from_json() {
     | (item | .Config.Env // []) as $raw_env
     | if ($raw_env | type) != "array" or any($raw_env[]; type != "string") then error("container environment must be an array of strings")
       else $raw_env
-        # The old Compose pass-through resolved unset tailnet limits to an empty
-        # value. Normalize baseline and rollback snapshots to the new zero
-        # default; target snapshots retain and pin their inspected value. The
-        # pinned legacy render omits the limit, which is equivalent everywhere.
+        # Legacy baseline, preflight, rollback, and initial-local render
+        # snapshots can lack this pass-through. Actual targets are checked
+        # against a resolved numeric Compose value and never synthesize one.
         | map(if ($snapshot_name | IN("baseline", "rollback")) and . == "TG_RATE_LIMIT_KEY_EXCHANGE_IP_TAILNET="
               then "TG_RATE_LIMIT_KEY_EXCHANGE_IP_TAILNET=0" else . end)
-        | if all(.[]; startswith("TG_RATE_LIMIT_KEY_EXCHANGE_IP_TAILNET=") | not)
+        | if ($snapshot_name | IN("baseline", "preflight", "rollback", "initial-local-target-render")) and
+             all(.[]; startswith("TG_RATE_LIMIT_KEY_EXCHANGE_IP_TAILNET=") | not)
           then . + ["TG_RATE_LIMIT_KEY_EXCHANGE_IP_TAILNET=0"] else . end
         | map(. as $entry
           | select(($image_env | index($entry)) == null or
@@ -1272,11 +1274,12 @@ snapshot_from_json() {
       # Compose includes extension anchors in its rendered output. Their
       # expanded service fields remain in the digest; the anchors do not.
       with_entries(select((.key | startswith("x-")) | not))
-      # The old baseline and rollback empty tailnet mappings, and the omitted
-      # mapping of the pinned legacy render, are equivalent to the new zero
-      # default. Keep any other target value pinned.
+      # Legacy render snapshots can omit the tailnet mapping; normalize that
+      # compatibility case outside the actual target. Targets must carry the
+      # explicit resolved value checked above.
       | (.services[env.ROLLOUT_COMPOSE_SERVICE // "teagramd"].environment) as $tailnet_env
-      | if ($tailnet_env | type) == "object" and
+      | if ($snapshot_name | IN("baseline", "preflight", "rollback", "initial-local-target-render")) and
+           ($tailnet_env | type) == "object" and
            (($tailnet_env | has("TG_RATE_LIMIT_KEY_EXCHANGE_IP_TAILNET") | not) or
             (($snapshot_name | IN("baseline", "rollback")) and $tailnet_env.TG_RATE_LIMIT_KEY_EXCHANGE_IP_TAILNET == "")) then
           .services[env.ROLLOUT_COMPOSE_SERVICE // "teagramd"].environment.TG_RATE_LIMIT_KEY_EXCHANGE_IP_TAILNET = "0"

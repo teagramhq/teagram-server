@@ -336,6 +336,39 @@ previous_tailnet_default_compose=$(jq -c \
 previous_tailnet_default=$(snapshot_from_json \
   "$previous_tailnet_default_inspect" "$previous_tailnet_default_compose" \
   "$ENV_FILE" "$OVERRIDE_FILE" selected-compose-render baseline)
+omitted_tailnet_target_inspect=$(jq -c \
+  '.Config.Env |= map(select(type != "string" or (startswith("TG_RATE_LIMIT_KEY_EXCHANGE_IP_TAILNET=") | not)))' \
+  <<< "$(inspect_json '')")
+omitted_tailnet_target_compose=$(jq -c \
+  'del(.services.teagramd.environment.TG_RATE_LIMIT_KEY_EXCHANGE_IP_TAILNET)' \
+  <<< "$COMPOSE_JSON")
+if snapshot_from_json \
+  "$omitted_tailnet_target_inspect" "$omitted_tailnet_target_compose" \
+  "$ENV_FILE" "$OVERRIDE_FILE" selected-compose-render target \
+  >/dev/null 2>&1; then
+  printf '%s\n' 'FAIL target without a resolved tailnet limit was accepted' >&2
+  exit 1
+fi
+printf '%s\n' 'PASS target requires a resolved tailnet exchange limit'
+if snapshot_from_json \
+  "$omitted_tailnet_target_inspect" "$COMPOSE_JSON" \
+  "$ENV_FILE" "$OVERRIDE_FILE" selected-compose-render target \
+  >/dev/null 2>&1; then
+  printf '%s\n' 'FAIL target missing the resolved container value was accepted' >&2
+  exit 1
+fi
+printf '%s\n' 'PASS target requires the resolved tailnet value in the inspected container'
+empty_tailnet_target_compose=$(jq -c \
+  '.services.teagramd.environment.TG_RATE_LIMIT_KEY_EXCHANGE_IP_TAILNET=""' \
+  <<< "$COMPOSE_JSON")
+if snapshot_from_json \
+  "$omitted_tailnet_target_inspect" "$empty_tailnet_target_compose" \
+  "$ENV_FILE" "$OVERRIDE_FILE" selected-compose-render target \
+  >/dev/null 2>&1; then
+  printf '%s\n' 'FAIL target with an empty resolved tailnet limit was accepted' >&2
+  exit 1
+fi
+printf '%s\n' 'PASS target rejects an empty resolved tailnet exchange limit'
 zero_tailnet_default_inspect=$(jq -c \
   '.Config.Env |= (map(select(type != "string" or (startswith("TG_RATE_LIMIT_KEY_EXCHANGE_IP_TAILNET=") | not))) + ["TG_RATE_LIMIT_KEY_EXCHANGE_IP_TAILNET=0"])' \
   <<< "$(inspect_json '')")
@@ -595,18 +628,6 @@ if verify_target_tailnet_exchange_limit \
   exit 1
 fi
 printf '%s\n' 'PASS target renders must resolve a numeric tailnet value'
-legacy_tailnet_target_inspect=$(jq -c \
-  '.Config.Env |= map(select(type != "string" or (startswith("TG_RATE_LIMIT_KEY_EXCHANGE_IP_TAILNET=") | not)))' \
-  <<< "$(inspect_json '')")
-if ! verify_target_tailnet_exchange_limit \
-  "$legacy_tailnet_target_inspect" "$missing_tailnet_target_compose" target selected-compose-render \
-  >/dev/null 2>"$TMP/tailnet-legacy-render.err"; then
-  printf '%s\n' 'FAIL pinned legacy render without a tailnet mapping was rejected' >&2
-  cat "$TMP/tailnet-legacy-render.err" >&2
-  exit 1
-fi
-printf '%s\n' 'PASS pinned legacy render without a tailnet mapping is accepted'
-
 : > "$ENV_FILE"
 empty_tailnet_rollback_inspect=$(jq -c \
   '.Config.Env |= (map(select(type != "string" or (startswith("TG_RATE_LIMIT_KEY_EXCHANGE_IP_TAILNET=") | not))) + ["TG_RATE_LIMIT_KEY_EXCHANGE_IP_TAILNET="])' \
