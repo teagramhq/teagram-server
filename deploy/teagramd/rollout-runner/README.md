@@ -224,13 +224,18 @@ reviewed artifact and content pin before rollout.
 Ordinary `apply` compares the checked-out baseline Compose project and
 persistent mounts with the target render before creating evidence, dumping the
 database, building, or stopping a container. The only additional layout change
-allowed during an ordinary rollout is the initial exact read-only bind from
-`/etc/teagramd/media-keys` to `/run/teagramd/media-keys` on the existing
-`teagramd` service. It requires `TG_MEDIA_KEY_CURRENT=1` and a matching
+allowed on an existing service during an ordinary rollout is the initial
+exact read-only bind from `/etc/teagramd/media-keys` to
+`/run/teagramd/media-keys` on the existing `teagramd` service. It requires
+`TG_MEDIA_KEY_CURRENT=1` and a matching
 mode-0600 key file owned by uid/gid 65532 in a mode-0700 directory outside the
 application checkout. The runner pins the host path and key version after that
-first rollout; later changes remain blocked. Any project, volume, or other
-mount change fails closed and asks for the explicit `move-stack` action.
+first rollout; later changes remain blocked. The initial public WebSocket
+profile is the one service-only exception: its
+two replicas must keep the exact `teagramd` mounts and HAProxy must have only
+the reviewed read-only config bind. The public topology preflight validates
+those services before they start. Any other project, volume, or mount change
+fails closed and asks for the explicit `move-stack` action.
 `deploy-main.sh` continues to call `apply`, so a main-branch deployment that
 contains the project rename exits before changing the running stack until the
 move action is run. The normal readiness and rollback gates still apply when
