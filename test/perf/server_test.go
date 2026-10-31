@@ -13,9 +13,11 @@ import (
 	"path/filepath"
 	"reflect"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/gotd/td/bin"
 	"github.com/gotd/td/exchange"
 	"github.com/gotd/td/session"
 	"github.com/gotd/td/telegram"
@@ -46,12 +48,228 @@ const channelParticipantCap = 200_000
 type server struct {
 	store    *store.Store
 	tracer   *queryTracer
+	rpcTimer *rpcTimingHandler
 	registry *mtproto.SessionRegistry
 	key      *rsa.PrivateKey
 	port     int
 	stop     func()
 	// accepted receives the meter of every connection the server accepts.
 	accepted chan *meter
+}
+
+// rpcTimingHandler times dispatched RPCs only while one perf scenario opens a
+// timing window. A dispatched handler returns after Conn.SendResult has
+// completed the full transport write. MTProto service messages such as
+// msgs_ack are handled before this boundary and do not enter the timer.
+type rpcTimingHandler struct {
+	next     mtproto.Handler
+	active   atomic.Bool
+	mu       sync.Mutex
+	enabled  bool
+	inFlight int
+	samples  []time.Duration
+	done     chan struct{}
+}
+
+func (h *rpcTimingHandler) start() error {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.enabled || h.inFlight != 0 {
+		return errors.New("RPC timing window is already active")
+	}
+	h.samples = nil
+	h.done = make(chan struct{})
+	h.enabled = true
+	h.active.Store(true)
+	return nil
+}
+
+func (h *rpcTimingHandler) finish(ctx context.Context) (time.Duration, error) {
+	h.active.Store(false)
+	h.mu.Lock()
+	if !h.enabled || h.done == nil {
+		h.mu.Unlock()
+		return 0, errors.New("RPC timing window is not active")
+	}
+	h.enabled = false
+	done := h.done
+	if h.inFlight == 0 {
+		close(done)
+		h.done = nil
+	}
+	h.mu.Unlock()
+
+	select {
+	case <-done:
+	case <-ctx.Done():
+		return 0, ctx.Err()
+	}
+
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if len(h.samples) != 1 {
+		return 0, fmt.Errorf("timed RPC dispatches = %d, want exactly one", len(h.samples))
+	}
+	return h.samples[0], nil
+}
+
+func (h *rpcTimingHandler) OnMessage(c *mtproto.Conn, req *mtproto.Request) error {
+	if !h.active.Load() || !isContactsGetContacts(req) {
+		return h.next.OnMessage(c, req)
+	}
+	h.mu.Lock()
+	if !h.enabled {
+		h.mu.Unlock()
+		return h.next.OnMessage(c, req)
+	}
+	h.inFlight++
+	h.mu.Unlock()
+
+	started := time.Now()
+	err := h.next.OnMessage(c, req)
+	elapsed := time.Since(started)
+
+	h.mu.Lock()
+	h.samples = append(h.samples, elapsed)
+	h.inFlight--
+	if !h.enabled && h.inFlight == 0 {
+		close(h.done)
+		h.done = nil
+	}
+	h.mu.Unlock()
+	return err
+}
+
+func isContactsGetContacts(req *mtproto.Request) bool {
+	if req == nil || req.Buf == nil {
+		return false
+	}
+	b := &bin.Buffer{Buf: req.Buf.Copy()}
+	id, err := b.PeekID()
+	if err != nil {
+		return false
+	}
+	for {
+		query := &rpcConstructorID{}
+		var wrapper interface{ Decode(*bin.Buffer) error }
+		switch id {
+		case tg.InvokeWithLayerRequestTypeID:
+			wrapper = &tg.InvokeWithLayerRequest{Query: query}
+		case tg.InitConnectionRequestTypeID:
+			wrapper = &tg.InitConnectionRequest{Query: query}
+		case tg.InvokeWithoutUpdatesRequestTypeID:
+			wrapper = &tg.InvokeWithoutUpdatesRequest{Query: query}
+		case tg.InvokeAfterMsgRequestTypeID:
+			wrapper = &tg.InvokeAfterMsgRequest{Query: query}
+		default:
+			return id == tg.ContactsGetContactsRequestTypeID
+		}
+		if err := wrapper.Decode(b); err != nil {
+			return false
+		}
+		id = query.id
+	}
+}
+
+type rpcConstructorID struct {
+	id uint32
+}
+
+func (p *rpcConstructorID) Decode(b *bin.Buffer) error {
+	id, err := b.PeekID()
+	if err == nil {
+		p.id = id
+	}
+	return err
+}
+
+func (*rpcConstructorID) Encode(*bin.Buffer) error {
+	return errors.New("RPC constructor ID peeker is decode-only")
+}
+
+func TestRPCTimingHandlerWaitsForDispatchCompletion(t *testing.T) {
+	started := make(chan struct{})
+	release := make(chan struct{})
+	defer func() {
+		select {
+		case <-release:
+		default:
+			close(release)
+		}
+	}()
+	h := &rpcTimingHandler{next: mtproto.HandlerFunc(func(*mtproto.Conn, *mtproto.Request) error {
+		close(started)
+		<-release
+		return nil
+	})}
+	if err := h.start(); err != nil {
+		t.Fatal(err)
+	}
+
+	dispatchDone := make(chan error, 1)
+	request := perfRPCRequest(t, &tg.ContactsGetContactsRequest{})
+	go func() { dispatchDone <- h.OnMessage(nil, request) }()
+	<-started
+	type result struct {
+		elapsed time.Duration
+		err     error
+	}
+	finished := make(chan result, 1)
+	go func() {
+		elapsed, err := h.finish(context.Background())
+		finished <- result{elapsed: elapsed, err: err}
+	}()
+	select {
+	case got := <-finished:
+		t.Fatalf("finish returned while the reply write was blocked: %+v", got)
+	case <-time.After(10 * time.Millisecond):
+	}
+	close(release)
+	if err := <-dispatchDone; err != nil {
+		t.Fatalf("dispatch: %v", err)
+	}
+	got := <-finished
+	if got.err != nil {
+		t.Fatalf("finish: %v", got.err)
+	}
+	if got.elapsed < 10*time.Millisecond {
+		t.Fatalf("elapsed = %s, want at least the blocked reply duration", got.elapsed)
+	}
+}
+
+func TestRPCTimingHandlerCorrelatesContactsRPC(t *testing.T) {
+	calls := 0
+	h := &rpcTimingHandler{next: mtproto.HandlerFunc(func(*mtproto.Conn, *mtproto.Request) error {
+		calls++
+		return nil
+	})}
+	if err := h.start(); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.OnMessage(nil, perfRPCRequest(t, &tg.HelpGetConfigRequest{})); err != nil {
+		t.Fatalf("dispatch unrelated RPC: %v", err)
+	}
+	contacts := &tg.InvokeWithLayerRequest{Layer: 100, Query: &tg.InitConnectionRequest{
+		Query: &tg.InvokeWithoutUpdatesRequest{Query: &tg.ContactsGetContactsRequest{}},
+	}}
+	if err := h.OnMessage(nil, perfRPCRequest(t, contacts)); err != nil {
+		t.Fatalf("dispatch contacts RPC: %v", err)
+	}
+	if _, err := h.finish(context.Background()); err != nil {
+		t.Fatalf("finish contacts timing: %v", err)
+	}
+	if calls != 2 {
+		t.Fatalf("dispatches = %d, want both RPCs forwarded", calls)
+	}
+}
+
+func perfRPCRequest(t *testing.T, req bin.Encoder) *mtproto.Request {
+	t.Helper()
+	var body bin.Buffer
+	if err := req.Encode(&body); err != nil {
+		t.Fatalf("encode test RPC: %v", err)
+	}
+	return &mtproto.Request{Buf: &body}
 }
 
 func bootServer(t *testing.T, ctx context.Context, dsn, blobDir string, key *rsa.PrivateKey) *server {
@@ -84,7 +302,8 @@ func bootServer(t *testing.T, ctx context.Context, dsn, blobDir string, key *rsa
 	sync := api.NewDialogFilterSync()
 	handler := api.NewWithDialogFilterSync(st, dcID, cfg, log, false, 100<<20, blobs, 2<<30,
 		pgtest.PeerDeriver(), pgtest.PhotoDeriver(), unboundRateLimits(), config.RegistrationClosed, sync)
-	srv := mtproto.New(exchange.PrivateKey{RSA: key}, dcID, mtproto.NewPgAuthKeyStore(st), handler, log)
+	rpcTimer := &rpcTimingHandler{next: handler}
+	srv := mtproto.New(exchange.PrivateKey{RSA: key}, dcID, mtproto.NewPgAuthKeyStore(st), rpcTimer, log)
 	// Every exchange still passes the shipped budget checks; the budget itself
 	// is raised past the samples the harness takes from one address.
 	exchangeLimits := mtproto.DefaultExchangeLimits()
@@ -108,7 +327,7 @@ func bootServer(t *testing.T, ctx context.Context, dsn, blobDir string, key *rsa
 	srvCtx, cancel := context.WithCancel(ctx)
 	serveErr := make(chan error, 1)
 	go func() { serveErr <- srv.Serve(srvCtx, metered) }()
-	s := &server{store: st, tracer: tracer, registry: srv.Registry(), key: key, port: addr.Port, accepted: metered.accepted}
+	s := &server{store: st, tracer: tracer, rpcTimer: rpcTimer, registry: srv.Registry(), key: key, port: addr.Port, accepted: metered.accepted}
 	s.stop = func() {
 		cancel()
 		if err := <-serveErr; err != nil && !errors.Is(err, context.Canceled) {

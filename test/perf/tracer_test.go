@@ -5,7 +5,9 @@ package perf_test
 import (
 	"context"
 	"errors"
+	"strings"
 	"sync"
+	"testing"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -16,12 +18,14 @@ import (
 // quiet points are exactly the work one RPC caused, including what it
 // triggered after its reply (update fan-out, delivery reads).
 type queryTracer struct {
-	mu       sync.Mutex
-	inFlight int
-	last     time.Time
-	queries  int
-	captured []*capturedQuery
-	capture  bool
+	mu          sync.Mutex
+	inFlight    int
+	last        time.Time
+	queries     int
+	captured    []*capturedQuery
+	timings     []queryTiming
+	capture     bool
+	timeQueries bool
 }
 
 type capturedQuery struct {
@@ -31,7 +35,19 @@ type capturedQuery struct {
 	duration  time.Duration
 }
 
+type queryTiming struct {
+	name    string
+	elapsed time.Duration
+}
+
 type queryDurationContextKey struct{}
+
+type queryTraceContextKey struct{}
+
+type queryTraceSpan struct {
+	name    string
+	started time.Time
+}
 
 func (q *queryTracer) TraceQueryStart(ctx context.Context, _ *pgx.Conn, data pgx.TraceQueryStartData) context.Context {
 	startedAt := time.Now()
@@ -39,6 +55,7 @@ func (q *queryTracer) TraceQueryStart(ctx context.Context, _ *pgx.Conn, data pgx
 	q.inFlight++
 	q.last = startedAt
 	q.queries++
+	timeQueries := q.timeQueries
 	var captured *capturedQuery
 	if q.capture {
 		captured = &capturedQuery{
@@ -48,7 +65,12 @@ func (q *queryTracer) TraceQueryStart(ctx context.Context, _ *pgx.Conn, data pgx
 	}
 	q.mu.Unlock()
 	if captured != nil {
-		return context.WithValue(ctx, queryDurationContextKey{}, captured)
+		ctx = context.WithValue(ctx, queryDurationContextKey{}, captured)
+	}
+	if timeQueries {
+		ctx = context.WithValue(ctx, queryTraceContextKey{}, queryTraceSpan{
+			name: queryName(data.SQL), started: startedAt,
+		})
 	}
 	return ctx
 }
@@ -56,23 +78,37 @@ func (q *queryTracer) TraceQueryStart(ctx context.Context, _ *pgx.Conn, data pgx
 func (q *queryTracer) TraceQueryEnd(ctx context.Context, _ *pgx.Conn, _ pgx.TraceQueryEndData) {
 	finishedAt := time.Now()
 	captured, _ := ctx.Value(queryDurationContextKey{}).(*capturedQuery)
+	span, timed := ctx.Value(queryTraceContextKey{}).(queryTraceSpan)
 	q.mu.Lock()
 	defer q.mu.Unlock()
 	if captured != nil {
 		captured.duration = finishedAt.Sub(captured.startedAt)
 	}
+	if timed {
+		q.timings = append(q.timings, queryTiming{name: span.name, elapsed: finishedAt.Sub(span.started)})
+	}
 	q.inFlight--
 	q.last = finishedAt
 }
 
+func queryName(sql string) string {
+	fields := strings.Fields(firstLine(sql))
+	if len(fields) >= 3 && fields[0] == "--" && fields[1] == "name:" {
+		return fields[2]
+	}
+	return "unlabeled"
+}
+
 // reset starts a new counting window. With capture set, the window also keeps
 // each statement for EXPLAIN.
-func (q *queryTracer) reset(capture bool) {
+func (q *queryTracer) reset(capture, timeQueries bool) {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 	q.queries = 0
 	q.captured = nil
+	q.timings = nil
 	q.capture = capture
+	q.timeQueries = timeQueries
 }
 
 func (q *queryTracer) window() (int, []capturedQuery) {
@@ -84,6 +120,23 @@ func (q *queryTracer) window() (int, []capturedQuery) {
 		captured[i].args = append([]any(nil), query.args...)
 	}
 	return q.queries, captured
+}
+
+func (q *queryTracer) timingWindow() []queryTiming {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	return append([]queryTiming(nil), q.timings...)
+}
+
+func TestQueryTracerRecordsStatementDuration(t *testing.T) {
+	tracer := &queryTracer{}
+	tracer.reset(false, true)
+	ctx := tracer.TraceQueryStart(context.Background(), nil, pgx.TraceQueryStartData{SQL: "-- name: Example :one\nSELECT 1"})
+	tracer.TraceQueryEnd(ctx, nil, pgx.TraceQueryEndData{})
+	got := tracer.timingWindow()
+	if len(got) != 1 || got[0].name != "Example" || got[0].elapsed <= 0 {
+		t.Fatalf("query timings = %+v, want a positive duration for Example", got)
+	}
 }
 
 // quietFor is how long the pool must stay idle before the window closes. It
