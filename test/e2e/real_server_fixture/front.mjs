@@ -6,11 +6,6 @@ const PROBE_CSP = "default-src 'self'; connect-src 'self' wss://teagramd.test/ap
 const PRIVATE_CSP = "default-src 'self'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'; frame-src 'self' https://challenges.cloudflare.com; object-src 'none'; script-src 'self' 'wasm-unsafe-eval' https://challenges.cloudflare.com; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; media-src 'self' blob:; worker-src 'self' blob:; manifest-src 'self'; connect-src 'self' wss://teagramd.test/apiws;";
 const PROBE_PREFIX = '/_fixture_probe/';
 const probeTarget = fs.readFileSync('/run/mtproto-target.json');
-const guestSignupFixture = process.env.TEAGRAM_FIXTURE_GUEST_SIGNUP === '1';
-const turnstileTestSecret = '1x0000000000000000000000000000000AA';
-const turnstileTestToken = 'fixture-turnstile-test-token';
-const guestDeploymentConfig = guestSignupFixture ? fs.readFileSync('/run/teagram-config.json') : undefined;
-const guestDiscoveryDocument = guestSignupFixture ? fs.readFileSync('/run/teagramd-client-discovery.json') : undefined;
 const args = process.argv.slice(2);
 const artifactIndex = args.indexOf('--artifact-dir');
 const artifactRoot = artifactIndex === -1 ? null : args[artifactIndex + 1];
@@ -65,53 +60,12 @@ if (artifactRoot) {
 
 let websocket101Count = 0;
 let websocketRouteErrors = 0;
-let siteverifyRequestCount = 0;
 const websocketRouteErrorDetails = [];
-
-function writeJson(response, status, value) {
-  response.writeHead(status, {'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store'});
-  response.end(JSON.stringify(value));
-}
-
-async function handleTurnstileSiteverify(request, response) {
-  if(request.method !== 'POST' || request.url !== '/turnstile/v0/siteverify') {
-    writeJson(response, 404, {success: false});
-    return;
-  }
-
-  let body = '';
-  try {
-    for await (const chunk of request) {
-      body += chunk;
-      if(Buffer.byteLength(body) > 4096) {
-        writeJson(response, 413, {success: false});
-        return;
-      }
-    }
-  } catch {
-    if(!response.headersSent) writeJson(response, 400, {success: false});
-    return;
-  }
-
-  const values = new URLSearchParams(body);
-  if(values.get('secret') !== turnstileTestSecret || values.get('response') !== turnstileTestToken) {
-    writeJson(response, 200, {success: false, 'error-codes': ['invalid-input-response']});
-    return;
-  }
-
-  siteverifyRequestCount++;
-  writeJson(response, 200, {success: true, action: 'signup', hostname: 'teagramd.test'});
-}
 
 const server = https.createServer({
   key: fs.readFileSync('/run/tls.key'),
   cert: fs.readFileSync('/run/tls.crt'),
 }, (request, response) => {
-  if(guestSignupFixture && request.headers.host === 'challenges.cloudflare.com') {
-    void handleTurnstileSiteverify(request, response);
-    return;
-  }
-
   if (request.headers.host !== 'teagramd.test') {
     response.writeHead(421);
     response.end();
@@ -122,23 +76,7 @@ const server = https.createServer({
     response.setHeader('content-security-policy', PROBE_CSP);
     response.setHeader('x-content-type-options', 'nosniff');
     response.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-store' });
-    response.end(JSON.stringify({ status: 'ready', websocket_101_count: websocket101Count, siteverify_request_count: siteverifyRequestCount, route_errors: websocketRouteErrors, route_error_details: websocketRouteErrorDetails }));
-    return;
-  }
-
-  if(guestSignupFixture && request.method === 'GET' && request.url === '/teagram-config.json') {
-    response.setHeader('content-security-policy', PRIVATE_CSP);
-    response.setHeader('x-content-type-options', 'nosniff');
-    response.writeHead(200, {'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store'});
-    response.end(guestDeploymentConfig);
-    return;
-  }
-
-  if(guestSignupFixture && request.method === 'GET' && request.url === '/.well-known/teagramd/client') {
-    response.setHeader('content-security-policy', PRIVATE_CSP);
-    response.setHeader('x-content-type-options', 'nosniff');
-    response.writeHead(200, {'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store'});
-    response.end(guestDiscoveryDocument);
+    response.end(JSON.stringify({ status: 'ready', websocket_101_count: websocket101Count, route_errors: websocketRouteErrors, route_error_details: websocketRouteErrorDetails }));
     return;
   }
 

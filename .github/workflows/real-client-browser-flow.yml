@@ -81,7 +81,7 @@ jobs:
         timeout-minutes: 5
         run: bash .github/scripts/pull-base-images.sh --image mirror.gcr.io/library/postgres:18-alpine --image mirror.gcr.io/arigaio/atlas:1.2.0-alpine test/e2e/real_server_fixture/Dockerfile
 
-      - name: Run fixture, private build, and all seven browser scenarios
+      - name: Run fixture, private build, and all six browser scenarios
         id: browser-flow
         run: node test/e2e/real_server_fixture/run_real_client_browser_flow.mjs
 
