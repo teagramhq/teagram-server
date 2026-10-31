@@ -437,8 +437,8 @@ class SQLFluffRuleTests(unittest.TestCase):
             self.assertEqual(lint.returncode, 0, lint.stdout)
 
     def test_precommit_keeps_fix_when_unfixable_sql_remains(self) -> None:
-        long_literal = "'" + ("x" * 130) + "'"
-        malformed_sql = f"select {long_literal} as long_value;\n"
+        long_comment = "-- " + ("x" * 130)
+        malformed_sql = f"select 1;\n{long_comment}\n"
         with tempfile.TemporaryDirectory() as tempdir:
             root = Path(tempdir)
             probe = root / "probe.sql"
@@ -517,7 +517,7 @@ class SQLFluffRuleTests(unittest.TestCase):
             self.assertEqual(commit.returncode, 0, commit.stdout)
             committed_sql = git("show", "HEAD:internal/store/queries/unfixable.sql")
             self.assertIn("SELECT", committed_sql)
-            self.assertIn(long_literal, committed_sql)
+            self.assertIn(long_comment, committed_sql)
             lint = subprocess.run(
                 [
                     self.sqlfluff,
