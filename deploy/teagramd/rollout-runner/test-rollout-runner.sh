@@ -488,6 +488,14 @@ if [ "${1:-}" = inspect ]; then
         ' <<< "$env_json")
       fi
       turnstile_source=$(jq -r '.secrets.teagramd_turnstile.file // ""' "$turnstile_compose")
+      # Docker sets the tailnet limit only when the starting Compose maps it.
+      env_json=$(jq -c --slurpfile compose "$turnstile_compose" '
+        ($compose[0].services.teagramd // $compose[0].services.telegramd).environment as $env
+        | map(select(type != "string" or (startswith("TG_RATE_LIMIT_KEY_EXCHANGE_IP_TAILNET=") | not)))
+          + (if ($env | has("TG_RATE_LIMIT_KEY_EXCHANGE_IP_TAILNET"))
+             then ["TG_RATE_LIMIT_KEY_EXCHANGE_IP_TAILNET=" + ($env.TG_RATE_LIMIT_KEY_EXCHANGE_IP_TAILNET | tostring)]
+             else [] end)
+      ' <<< "$env_json")
     fi
     log_config_type=syslog
     log_config='{"syslog-address":"unixgram:///dev/log","syslog-facility":"daemon","syslog-format":"rfc5424","tag":"teagramd"}'
@@ -928,6 +936,9 @@ write_compose_fixture() {
   else
     cp -- "$base_config" "$target_config"
   fi
+  jq -c '.services.teagramd.environment.TG_RATE_LIMIT_KEY_EXCHANGE_IP_TAILNET="0"' \
+    "$target_config" > "${target_config%.json}.tailnet.json"
+  mv -- "${target_config%.json}.tailnet.json" "$target_config"
   if [ "$scenario" = config-drift ]; then
     jq -c '.services.teagramd.environment.UNRELATED="changed"' "$target_config" > "${target_config%.json}.drift.json"
   fi
