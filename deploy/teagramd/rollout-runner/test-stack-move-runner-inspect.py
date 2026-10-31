@@ -202,6 +202,109 @@ class InspectComposeSelectionTest(unittest.TestCase):
         )
         print("PASS rollout layout still rejects writable media mounts and persistent-volume changes")
 
+    def test_public_profile_services_do_not_look_like_a_stack_move(self) -> None:
+        runner = load_runner()
+        key_mount = {
+            "type": "volume",
+            "source": "teagram_tgkey",
+            "target": "/var/lib/teagramd",
+            "read_only": False,
+        }
+        pg_mount = {
+            "type": "volume",
+            "source": "teagram_pgdata",
+            "target": "/var/lib/postgresql",
+            "read_only": False,
+        }
+        source = {
+            "project": "teagram",
+            "server": "teagramd",
+            "server_mounts": [key_mount],
+            "postgres_mounts": [pg_mount],
+            "persistent_service_mounts": {
+                "postgres": [pg_mount],
+                "teagramd": [key_mount],
+                "rustfs": [{"type": "volume", "source": "teagram_rustfsdata", "target": "/data"}],
+            },
+            "volumes": {
+                "pgdata": "teagram_pgdata",
+                "tgkey": "teagram_tgkey",
+                "rustfsdata": "teagram_rustfsdata",
+            },
+        }
+        target = copy.deepcopy(source)
+        media_key_mount = {
+            "type": "bind",
+            "source": "/etc/teagramd/media-keys",
+            "target": "/run/teagramd/media-keys",
+            "read_only": True,
+            "bind": {},
+        }
+        target["server_mounts"].append(media_key_mount)
+        target["persistent_service_mounts"]["teagramd"].append(media_key_mount)
+
+        compose_media_key_mount = copy.deepcopy(media_key_mount)
+        base_mounts = [key_mount, compose_media_key_mount]
+        proxy_mount = {
+            "type": "bind",
+            "source": "/opt/teagram/deploy/teagramd/haproxy-public-websocket.cfg",
+            "target": "/usr/local/etc/haproxy/haproxy.cfg",
+            "read_only": True,
+            "bind": {},
+        }
+        target["persistent_service_mounts"].update({
+            "public-haproxy": [proxy_mount],
+            "teagramd-public-1": copy.deepcopy(base_mounts),
+            "teagramd-public-2": copy.deepcopy(base_mounts),
+        })
+        target_config = {
+            "name": "teagram",
+            "services": {
+                "teagramd": {
+                    "environment": {
+                        "TG_MEDIA_KEY_DIR": "/run/teagramd/media-keys",
+                        "TG_MEDIA_KEY_CURRENT": "1",
+                    },
+                    "volumes": base_mounts,
+                },
+                "public-haproxy": {
+                    "profiles": ["public"],
+                    "volumes": [proxy_mount],
+                },
+                "teagramd-public-1": {
+                    "profiles": ["public"],
+                    "volumes": copy.deepcopy(base_mounts),
+                },
+                "teagramd-public-2": {
+                    "profiles": ["public"],
+                    "volumes": copy.deepcopy(base_mounts),
+                },
+            },
+        }
+
+        self.assertFalse(runner.ordinary_rollout_layout_changed(source, target, target_config))
+
+        changed_replica_mount = copy.deepcopy(target)
+        changed_replica_mount["persistent_service_mounts"]["teagramd-public-1"].append(
+            {"type": "volume", "source": "other", "target": "/data"},
+        )
+        self.assertTrue(
+            runner.ordinary_rollout_layout_changed(source, changed_replica_mount, target_config),
+        )
+
+        unexpected_profile_service = copy.deepcopy(target)
+        unexpected_mount = {"type": "volume", "source": "other", "target": "/data"}
+        unexpected_profile_service["persistent_service_mounts"]["migration-helper"] = [unexpected_mount]
+        unexpected_config = copy.deepcopy(target_config)
+        unexpected_config["services"]["migration-helper"] = {
+            "profiles": ["public"],
+            "volumes": [unexpected_mount],
+        }
+        self.assertTrue(
+            runner.ordinary_rollout_layout_changed(source, unexpected_profile_service, unexpected_config),
+        )
+        print("PASS public profile replicas preserve the existing persistent layout")
+
     def test_pinned_local_compose_is_used_for_both_layouts_without_s3_env(self) -> None:
         runner = load_runner()
         with tempfile.TemporaryDirectory(prefix="stack-move-inspect-") as temporary:
