@@ -3,13 +3,14 @@
 Ops scripts run as root in `/tmp` through the forced command:
 
 ```sh
-ssh teagram run <40-hex-main-sha> <target-failure-report|rollout-evidence|invite-web-signup-url> [args]
+ssh teagram run <40-hex-main-sha> <target-failure-report|rollout-evidence|invite-web-signup-url|rollback-public-websocket|apply-user-invite-quota> [args]
 ```
 
 The runner fetches `origin/main`, checks the commit ancestry, and accepts only
-`target-failure-report`, `rollout-evidence`, and `invite-web-signup-url`. A
-script's presence in an older main commit does not authorize a retired
-operation. The allowlist lives in
+the five current operations: `target-failure-report`, `rollout-evidence`,
+`invite-web-signup-url`, `rollback-public-websocket`, and
+`apply-user-invite-quota`. A script's presence in an older main commit does
+not authorize a retired operation. The allowlist lives in
 `teagram-ops.sh`; tests cover both retired names at an older main SHA. Keep
 every operation narrowly scoped to its named purpose. Validate arguments
 before using them, fail closed, and never put secrets in arguments, logs, or
@@ -29,7 +30,7 @@ trusted. This command menu is not a sandbox.
 The main threat is a caller using the privileged key to select an unintended
 operation or arguments, or a bug in a root operation exposing secrets or
 changing the host. A compromised key or maliciously merged operation can
-therefore become host-root execution. The dispatcher limits `run` to the three
+therefore become host-root execution. The dispatcher limits `run` to the five
 current operation names before fetching Git data, verifies the full SHA is on
 `origin/main`, constructs the script path itself, and does not evaluate a
 caller-provided shell command. The evidence operations validate their inputs
@@ -38,7 +39,8 @@ documented no-argument apply, `--check`, and `--rollback` modes; check is
 read-only, and apply or rollback changes only its public URL assignment and the
 matching rollout-environment digest record. It verifies the current record,
 refuses unrelated or desktop URL changes, and stages the update under the
-deployment lock. Dispatcher tests cover all three modes and attempts to select
+deployment lock. Dispatcher tests check every shipped operation at the `git
+show` boundary, cover all three invite URL modes, and refuse attempts to select
 deleted scripts from an older main commit.
 
 The allowlist blocks retired operation names at every SHA, while older

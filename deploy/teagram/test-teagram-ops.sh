@@ -2,6 +2,7 @@
 set -euo pipefail
 
 script="$(cd "$(dirname "$0")" && pwd)/teagram-ops.sh"
+ops_dir="$(cd "$(dirname "$script")" && pwd)/ops"
 failure_report_script="$(cd "$(dirname "$0")" && pwd)/ops/target-failure-report.sh"
 evidence_script="$(cd "$(dirname "$0")" && pwd)/ops/rollout-evidence.sh"
 tmp=$(mktemp -d)
@@ -14,6 +15,7 @@ mkdir -p "$tmp/bin" "$tmp/repo/.state" "$tmp/root"
 chmod 700 "$tmp/root"
 MOCK_OWNER_UID=$(id -u)
 export MOCK_OWNER_UID
+export MOCK_OPS_DIR="$ops_dir"
 printf 'TG_RSA_KEY_FINGERPRINT=fixture-value-never-print\nFIXTURE_EMPTY=\n' > "$tmp/repo/.env"
 printf 'override fixture\n' > "$tmp/repo/docker-compose.override.yml"
 printf 'state fixture\n' > "$tmp/repo/.state/rollout-env"
@@ -36,6 +38,7 @@ export MOCK_REPORT_SCRIPT="$failure_report_script"
 export MOCK_EVIDENCE_SCRIPT="$evidence_script"
 export MOCK_INVITE_SCRIPT="$tmp/invite-web-signup-url.sh"
 export MOCK_RUN_TEMP_LOG="$tmp/run-temp.log" MOCK_RM_LOG="$tmp/rm.log"
+export MOCK_SHOW_LOG="$tmp/show.log"
 export MOCK_ROOT="$tmp/root"
 export MOCK_RETIRED_SCRIPT_MARKER="$tmp/retired-operation-ran"
 
@@ -60,15 +63,21 @@ case "$1" in
   cat-file)
     [[ "${2:-}" == -e ]] || exit 99
     case "${3:-}" in
-      "$OPS_SHA:deploy/teagram/ops/target-failure-report.sh"|\
-      "$OPS_SHA:deploy/teagram/ops/rollout-evidence.sh"|\
-      "$OPS_SHA:deploy/teagram/ops/invite-web-signup-url.sh"|\
+      "$OPS_SHA:deploy/teagram/ops/"*.sh)
+        [[ -f "$MOCK_OPS_DIR/${3##*/}" ]]
+        ;;
       "$OLD_MAIN_SHA:deploy/teagram/ops/preflight-replay.sh"|\
       "$OLD_MAIN_SHA:deploy/teagram/ops/replay-check.sh") ;;
       *) exit 1 ;;
     esac
     ;;
   show)
+    if [[ "${MOCK_STOP_AT_SHOW:-}" == true ]]; then
+      expected="$OPS_SHA:deploy/teagram/ops/$MOCK_ALLOWED_NAME.sh"
+      [[ "${2:-}" == "$expected" ]] || { echo "unexpected git show: $*" >&2; exit 99; }
+      printf '%s\n' "$2" >> "$MOCK_SHOW_LOG"
+      exit 67
+    fi
     case "${2:-}" in
       "$OPS_SHA:deploy/teagram/ops/target-failure-report.sh")
         sed -e "s|/root|$MOCK_ROOT|g" "$MOCK_REPORT_SCRIPT"
@@ -188,10 +197,24 @@ fingerprints=$(run_command fingerprints)
 for help in help -h --help; do
   help_output=$(run_command "$help" 2>&1)
   [[ "$help_output" == *'hostname'* && "$help_output" == *'env-names'* && "$help_output" == *'run'* ]]
-  [[ "$help_output" == *'target-failure-report|rollout-evidence|invite-web-signup-url'* ]]
+  [[ "$help_output" == *'target-failure-report|rollout-evidence|invite-web-signup-url|rollback-public-websocket|apply-user-invite-quota'* ]]
+  [[ "$help_output" == *'apply-user-invite-quota default and'* && \
+    "$help_output" == *'rollback-public-websocket mutate live state'* && \
+    "$help_output" == *'apply-user-invite-quota verify is read-only'* ]]
   [[ "$help_output" == *'invite-web-signup-url default (apply) and --rollback'* ]]
   [[ "$help_output" == *'mutate the live .env; --check is read-only'* ]]
 done
+
+active_operation_count=0
+for operation_path in "$ops_dir"/*.sh; do
+  operation_name=${operation_path##*/}
+  operation_name=${operation_name%.sh}
+  active_operation_count=$((active_operation_count + 1))
+  export MOCK_STOP_AT_SHOW=true MOCK_ALLOWED_NAME="$operation_name"
+  expect_status 67 "run $OPS_SHA $operation_name"
+  [[ "$(tail -n 1 "$MOCK_SHOW_LOG")" == "$OPS_SHA:deploy/teagram/ops/$operation_name.sh" ]]
+done
+unset MOCK_STOP_AT_SHOW MOCK_ALLOWED_NAME
 
 report_dir="$MOCK_ROOT/main1238-${REPORT_PREFIX}-20261027T124539Z.target"
 mkdir -m 700 "$report_dir"
@@ -297,7 +320,8 @@ expect_status 64 "run $OPS_SHA rollout-evidence extra"
 
 mapfile -t runner_temps < "$MOCK_RUN_TEMP_LOG"
 mapfile -t removed_temps < "$MOCK_RM_LOG"
-[[ "${#runner_temps[@]}" == 7 && "${#removed_temps[@]}" == "${#runner_temps[@]}" ]]
+expected_runner_temps=$((7 + active_operation_count))
+[[ "${#runner_temps[@]}" == "$expected_runner_temps" && "${#removed_temps[@]}" == "${#runner_temps[@]}" ]]
 for index in "${!runner_temps[@]}"; do
   runner_temp=${runner_temps[$index]}
   [[ "$runner_temp" == /tmp/teagram-ops.* && "${removed_temps[$index]}" == "$runner_temp" && ! -e "$runner_temp" ]]
