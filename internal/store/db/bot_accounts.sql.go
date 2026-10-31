@@ -7,7 +7,28 @@ package db
 
 import (
 	"context"
+
+	"github.com/jackc/pgx/v5/pgtype"
 )
+
+const activeBotPollGeneration = `-- name: ActiveBotPollGeneration :one
+SELECT token_hash, poll_generation
+FROM bot_tokens
+WHERE user_id = $1
+  AND revoked_at IS NULL
+`
+
+type ActiveBotPollGenerationRow struct {
+	TokenHash      []byte
+	PollGeneration int64
+}
+
+func (q *Queries) ActiveBotPollGeneration(ctx context.Context, userID int64) (ActiveBotPollGenerationRow, error) {
+	row := q.db.QueryRow(ctx, activeBotPollGeneration, userID)
+	var i ActiveBotPollGenerationRow
+	err := row.Scan(&i.TokenHash, &i.PollGeneration)
+	return i, err
+}
 
 const activeBotTokenHash = `-- name: ActiveBotTokenHash :one
 SELECT token_hash
@@ -23,6 +44,166 @@ func (q *Queries) ActiveBotTokenHash(ctx context.Context, userID int64) ([]byte,
 	return token_hash, err
 }
 
+const activeBotTokenState = `-- name: ActiveBotTokenState :one
+SELECT token_hash, update_offset
+FROM bot_tokens
+WHERE user_id = $1
+  AND revoked_at IS NULL
+`
+
+type ActiveBotTokenStateRow struct {
+	TokenHash    []byte
+	UpdateOffset int64
+}
+
+func (q *Queries) ActiveBotTokenState(ctx context.Context, userID int64) (ActiveBotTokenStateRow, error) {
+	row := q.db.QueryRow(ctx, activeBotTokenState, userID)
+	var i ActiveBotTokenStateRow
+	err := row.Scan(&i.TokenHash, &i.UpdateOffset)
+	return i, err
+}
+
+const botMessageEvents = `-- name: BotMessageEvents :many
+WITH event_window AS MATERIALIZED (
+    SELECT e.owner_id, e.pts, e.type, e.local_id
+    FROM message_events AS e
+    WHERE e.owner_id = $1
+      AND e.pts >= $2::bigint
+    ORDER BY e.pts
+    LIMIT $3::int
+), bounded_events AS (
+    SELECT e.owner_id,
+           e.pts,
+           e.type,
+           e.local_id,
+           (MAX(e.pts) OVER () + 1::bigint)::bigint AS next_offset
+    FROM event_window AS e
+)
+SELECT e.pts,
+       e.type,
+       e.local_id,
+       e.next_offset,
+       COALESCE(sender.id, 0) > 0 AS has_human_sender,
+       COALESCE(m.owner_id, 0)::bigint AS message_owner_id,
+       COALESCE(m.local_id, 0)::bigint AS message_local_id,
+       COALESCE(m.peer_type, 0)::smallint AS message_peer_type,
+       COALESCE(m.peer_id, 0)::bigint AS message_peer_id,
+       COALESCE(m.from_id, 0)::bigint AS message_from_id,
+       COALESCE(m.date, 'epoch'::timestamptz) AS message_date,
+       COALESCE(m.message, '')::text AS message_text,
+       COALESCE(m.out, false) AS message_out,
+       COALESCE(m.deleted, false) AS message_deleted,
+       COALESCE(m.action_type, 0)::smallint AS message_action_type,
+       COALESCE(m.file_id, 0)::bigint AS message_file_id,
+       m.sticker_document_id AS message_sticker_document_id,
+       COALESCE(sender.id, 0)::bigint AS sender_id,
+       COALESCE(sender.kind, 'human')::text AS sender_kind,
+       COALESCE(sender.first_name, '')::text AS sender_first_name,
+       COALESCE(sender.last_name, '')::text AS sender_last_name,
+       sender_username.handle AS sender_username
+FROM bounded_events AS e
+LEFT JOIN messages AS m
+  ON m.owner_id = e.owner_id
+ AND m.local_id = e.local_id
+ AND e.type = 1
+ AND m.peer_type = 1
+ AND m.peer_id = m.from_id
+ AND m.out = false
+ AND m.deleted = false
+ AND (m.expires_at IS NULL OR m.expires_at > statement_timestamp())
+ AND m.action_type = 0
+ AND m.message <> ''
+ AND m.file_id = 0
+ AND m.sticker_document_id IS NULL
+ AND NOT EXISTS (
+     SELECT 1 FROM poll_message_copies AS p
+     WHERE p.owner_id = m.owner_id AND p.local_id = m.local_id
+ )
+LEFT JOIN users AS sender
+  ON sender.id = m.from_id
+ AND sender.kind = 'human'
+LEFT JOIN usernames AS sender_username
+  ON sender_username.owner_type = 'user'
+ AND sender_username.owner_id = sender.id
+ORDER BY e.pts
+`
+
+type BotMessageEventsParams struct {
+	OwnerID int64
+	FromPts int64
+	Lim     int32
+}
+
+type BotMessageEventsRow struct {
+	Pts                      int64
+	Type                     int16
+	LocalID                  int64
+	NextOffset               int64
+	HasHumanSender           bool
+	MessageOwnerID           int64
+	MessageLocalID           int64
+	MessagePeerType          int16
+	MessagePeerID            int64
+	MessageFromID            int64
+	MessageDate              pgtype.Timestamptz
+	MessageText              string
+	MessageOut               bool
+	MessageDeleted           bool
+	MessageActionType        int16
+	MessageFileID            int64
+	MessageStickerDocumentID *int64
+	SenderID                 int64
+	SenderKind               string
+	SenderFirstName          string
+	SenderLastName           string
+	SenderUsername           *string
+}
+
+// BotMessageEvents returns a bounded event window, the retained incoming text
+// messages in that window, and the exclusive offset after the last scanned pts.
+func (q *Queries) BotMessageEvents(ctx context.Context, arg BotMessageEventsParams) ([]BotMessageEventsRow, error) {
+	rows, err := q.db.Query(ctx, botMessageEvents, arg.OwnerID, arg.FromPts, arg.Lim)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []BotMessageEventsRow
+	for rows.Next() {
+		var i BotMessageEventsRow
+		if err := rows.Scan(
+			&i.Pts,
+			&i.Type,
+			&i.LocalID,
+			&i.NextOffset,
+			&i.HasHumanSender,
+			&i.MessageOwnerID,
+			&i.MessageLocalID,
+			&i.MessagePeerType,
+			&i.MessagePeerID,
+			&i.MessageFromID,
+			&i.MessageDate,
+			&i.MessageText,
+			&i.MessageOut,
+			&i.MessageDeleted,
+			&i.MessageActionType,
+			&i.MessageFileID,
+			&i.MessageStickerDocumentID,
+			&i.SenderID,
+			&i.SenderKind,
+			&i.SenderFirstName,
+			&i.SenderLastName,
+			&i.SenderUsername,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const createBotUser = `-- name: CreateBotUser :one
 INSERT INTO users (phone, login_mode, first_name, last_name, kind)
 VALUES (NULL, 'username', $1, '', 'bot')
@@ -34,6 +215,35 @@ func (q *Queries) CreateBotUser(ctx context.Context, firstName string) (int64, e
 	var id int64
 	err := row.Scan(&id)
 	return id, err
+}
+
+const finishBotUpdatePoll = `-- name: FinishBotUpdatePoll :one
+UPDATE bot_tokens
+SET update_offset = GREATEST(update_offset, $1::bigint)
+WHERE user_id = $2
+  AND revoked_at IS NULL
+  AND token_hash = $3
+  AND poll_generation = $4::bigint
+RETURNING update_offset
+`
+
+type FinishBotUpdatePollParams struct {
+	NextOffset     int64
+	UserID         int64
+	TokenHash      []byte
+	PollGeneration int64
+}
+
+func (q *Queries) FinishBotUpdatePoll(ctx context.Context, arg FinishBotUpdatePollParams) (int64, error) {
+	row := q.db.QueryRow(ctx, finishBotUpdatePoll,
+		arg.NextOffset,
+		arg.UserID,
+		arg.TokenHash,
+		arg.PollGeneration,
+	)
+	var update_offset int64
+	err := row.Scan(&update_offset)
+	return update_offset, err
 }
 
 const insertBotToken = `-- name: InsertBotToken :exec
@@ -86,6 +296,42 @@ func (q *Queries) RotateBotToken(ctx context.Context, arg RotateBotTokenParams) 
 		return 0, err
 	}
 	return result.RowsAffected(), nil
+}
+
+const startBotUpdatePoll = `-- name: StartBotUpdatePoll :one
+WITH claimed AS (
+    UPDATE bot_tokens
+    SET poll_generation = poll_generation + 1
+    WHERE user_id = $1
+      AND revoked_at IS NULL
+      AND token_hash = $2
+    RETURNING user_id, update_offset, poll_generation
+), notified AS (
+    SELECT pg_notify('tg_updates', user_id::text)
+    FROM claimed
+)
+SELECT claimed.update_offset, claimed.poll_generation
+FROM claimed
+CROSS JOIN notified
+`
+
+type StartBotUpdatePollParams struct {
+	UserID    int64
+	TokenHash []byte
+}
+
+type StartBotUpdatePollRow struct {
+	UpdateOffset   int64
+	PollGeneration int64
+}
+
+// StartBotUpdatePoll atomically claims a new generation and wakes existing
+// polls on every replica through the same update notification channel.
+func (q *Queries) StartBotUpdatePoll(ctx context.Context, arg StartBotUpdatePollParams) (StartBotUpdatePollRow, error) {
+	row := q.db.QueryRow(ctx, startBotUpdatePoll, arg.UserID, arg.TokenHash)
+	var i StartBotUpdatePollRow
+	err := row.Scan(&i.UpdateOffset, &i.PollGeneration)
+	return i, err
 }
 
 const userKindByID = `-- name: UserKindByID :one
