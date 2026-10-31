@@ -263,9 +263,10 @@ class RealServerFixtureGateTests(unittest.TestCase):
         needed_lanes = re.findall(r"(?m)^      - ([A-Za-z0-9_-]+)$", needs.group("entries"))
         expected_dependencies = expected_lanes | {"ops-prioritize-main"}
         self.assertEqual(
-            needed_lanes[:5],
+            needed_lanes[:6],
             [
                 "ops-prioritize-main",
+                "check-security",
                 "test-go",
                 "check-sticker-license",
                 "test-photo-worker",
