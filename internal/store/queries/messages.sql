@@ -280,15 +280,36 @@ SELECT NOT EXISTS (
 );
 
 -- SearchMessagesByPostings reads only the ordered lexeme postings for one
--- ready dialog; the tsquery check preserves exact full-query semantics.
+-- ready dialog. The per-dialog posting counts choose the rarest query lexeme
+-- before the ordered walk; the tsquery check preserves full-query semantics.
 -- name: SearchMessagesByPostings :many
-WITH parsed_query AS (
+WITH parsed_query AS MATERIALIZED (
     SELECT plainto_tsquery('simple', sqlc.arg(query)::text) AS tsquery,
-           (tsvector_to_array(to_tsvector('simple', sqlc.arg(query)::text)))[1] AS lexeme
+           tsvector_to_array(to_tsvector('simple', sqlc.arg(query)::text)) AS lexemes
+),
+query_lexemes AS (
+    SELECT parsed.tsquery, term.lexeme
+    FROM parsed_query AS parsed
+    CROSS JOIN LATERAL unnest(parsed.lexemes) AS term(lexeme)
+),
+selected_query AS (
+    SELECT ql.tsquery, ql.lexeme
+    FROM query_lexemes AS ql
+    LEFT JOIN message_search_posting_counts AS counts
+      ON counts.owner_id = sqlc.arg(owner_id)::bigint
+     AND counts.peer_type = sqlc.arg(peer_type)::smallint
+     AND counts.peer_id = sqlc.arg(peer_id)::bigint
+     AND counts.lexeme = ql.lexeme
+    ORDER BY COALESCE(counts.posting_count, 0), ql.lexeme
+    LIMIT 1
 )
 SELECT m.*
-FROM parsed_query AS q
-JOIN message_search_postings AS p ON p.lexeme = q.lexeme
+FROM selected_query AS q
+JOIN message_search_postings AS p
+  ON p.owner_id = sqlc.arg(owner_id)::bigint
+ AND p.peer_type = sqlc.arg(peer_type)::smallint
+ AND p.peer_id = sqlc.arg(peer_id)::bigint
+ AND p.lexeme = q.lexeme
 JOIN messages AS m
   ON m.owner_id = p.owner_id
  AND m.local_id = p.local_id

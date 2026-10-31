@@ -605,6 +605,14 @@ type MessageSearchPosting struct {
 	Lexeme   string
 }
 
+type MessageSearchPostingCount struct {
+	OwnerID      int64
+	PeerType     int16
+	PeerID       int64
+	Lexeme       string
+	PostingCount int64
+}
+
 type MessageSearchUnreadyDialog struct {
 	OwnerID  int64
 	PeerType int16

@@ -1451,13 +1451,33 @@ func (q *Queries) SearchMessages(ctx context.Context, arg SearchMessagesParams) 
 }
 
 const searchMessagesByPostings = `-- name: SearchMessagesByPostings :many
-WITH parsed_query AS (
+WITH parsed_query AS MATERIALIZED (
     SELECT plainto_tsquery('simple', $6::text) AS tsquery,
-           (tsvector_to_array(to_tsvector('simple', $6::text)))[1] AS lexeme
+           tsvector_to_array(to_tsvector('simple', $6::text)) AS lexemes
+),
+query_lexemes AS (
+    SELECT parsed.tsquery, term.lexeme
+    FROM parsed_query AS parsed
+    CROSS JOIN LATERAL unnest(parsed.lexemes) AS term(lexeme)
+),
+selected_query AS (
+    SELECT ql.tsquery, ql.lexeme
+    FROM query_lexemes AS ql
+    LEFT JOIN message_search_posting_counts AS counts
+      ON counts.owner_id = $1::bigint
+     AND counts.peer_type = $2::smallint
+     AND counts.peer_id = $3::bigint
+     AND counts.lexeme = ql.lexeme
+    ORDER BY COALESCE(counts.posting_count, 0), ql.lexeme
+    LIMIT 1
 )
 SELECT m.owner_id, m.local_id, m.peer_id, m.from_id, m.date, m.message, m.out, m.edit_date, m.deleted, m.random_id, m.peer_local_id, m.peer_type, m.fanout_id, m.action_type, m.action_user_id, m.file_id, m.reply_to_msg_id, m.fwd_from_id, m.fwd_date, m.fwd_channel_id, m.fwd_channel_post, m.message_tsv, m.reply_to_trusted, m.grouped_id, m.fwd_post_author, m.ttl_period, m.expires_at, m.entities, m.sticker_document_id
-FROM parsed_query AS q
-JOIN message_search_postings AS p ON p.lexeme = q.lexeme
+FROM selected_query AS q
+JOIN message_search_postings AS p
+  ON p.owner_id = $1::bigint
+ AND p.peer_type = $2::smallint
+ AND p.peer_id = $3::bigint
+ AND p.lexeme = q.lexeme
 JOIN messages AS m
   ON m.owner_id = p.owner_id
  AND m.local_id = p.local_id
@@ -1484,7 +1504,8 @@ type SearchMessagesByPostingsParams struct {
 }
 
 // SearchMessagesByPostings reads only the ordered lexeme postings for one
-// ready dialog; the tsquery check preserves exact full-query semantics.
+// ready dialog. The per-dialog posting counts choose the rarest query lexeme
+// before the ordered walk; the tsquery check preserves full-query semantics.
 func (q *Queries) SearchMessagesByPostings(ctx context.Context, arg SearchMessagesByPostingsParams) ([]Message, error) {
 	rows, err := q.db.Query(ctx, searchMessagesByPostings,
 		arg.OwnerID,

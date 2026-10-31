@@ -43,6 +43,22 @@ func assertMessageSearchTerms(t *testing.T, s *store.Store, ownerID, localID int
 	}
 }
 
+func assertMessageSearchLexemeCount(t *testing.T, s *store.Store, ownerID int64, peerType store.PeerType, peerID int64, lexeme string, want int64) {
+	t.Helper()
+	var got int64
+	if err := store.StorePool(s).QueryRow(context.Background(), `
+		SELECT COALESCE((
+			SELECT posting_count
+			FROM message_search_posting_counts
+			WHERE owner_id = $1 AND peer_type = $2 AND peer_id = $3 AND lexeme = $4
+		), 0)`, ownerID, int16(peerType), peerID, lexeme).Scan(&got); err != nil {
+		t.Fatalf("read message search lexeme count for %q: %v", lexeme, err)
+	}
+	if got != want {
+		t.Fatalf("message search count for %d/%d/%d %q = %d, want %d", ownerID, peerType, peerID, lexeme, got, want)
+	}
+}
+
 func TestMessageSearchPostingsTrackMessageLifecycle(t *testing.T) {
 	t.Parallel()
 	s := open(t)
@@ -53,24 +69,31 @@ func TestMessageSearchPostingsTrackMessageLifecycle(t *testing.T) {
 	message := send(t, s, a, b, "amber old", 6001)
 	assertMessageSearchTerms(t, s, a.ID, message.LocalID, []string{"amber", "old"})
 	assertMessageSearchTerms(t, s, b.ID, message.PeerLocalID, []string{"amber", "old"})
+	assertMessageSearchLexemeCount(t, s, a.ID, store.PeerTypeUser, b.ID, "amber", 1)
+	assertMessageSearchLexemeCount(t, s, b.ID, store.PeerTypeUser, a.ID, "old", 1)
 
 	if _, _, err := s.EditMessage(ctx, a.ID, message.LocalID, "violet new"); err != nil {
 		t.Fatalf("edit message: %v", err)
 	}
 	assertMessageSearchTerms(t, s, a.ID, message.LocalID, []string{"new", "violet"})
 	assertMessageSearchTerms(t, s, b.ID, message.PeerLocalID, []string{"new", "violet"})
+	assertMessageSearchLexemeCount(t, s, a.ID, store.PeerTypeUser, b.ID, "amber", 0)
+	assertMessageSearchLexemeCount(t, s, b.ID, store.PeerTypeUser, a.ID, "violet", 1)
 
 	if _, err := s.DeleteMessages(ctx, a.ID, []int64{message.LocalID}, false); err != nil {
 		t.Fatalf("soft-delete owner copy: %v", err)
 	}
 	assertMessageSearchTerms(t, s, a.ID, message.LocalID, nil)
 	assertMessageSearchTerms(t, s, b.ID, message.PeerLocalID, []string{"new", "violet"})
+	assertMessageSearchLexemeCount(t, s, a.ID, store.PeerTypeUser, b.ID, "new", 0)
+	assertMessageSearchLexemeCount(t, s, b.ID, store.PeerTypeUser, a.ID, "new", 1)
 
 	if _, err := store.StorePool(s).Exec(ctx,
 		`DELETE FROM messages WHERE owner_id = $1 AND local_id = $2`, b.ID, message.PeerLocalID); err != nil {
 		t.Fatalf("hard-delete peer copy: %v", err)
 	}
 	assertMessageSearchTerms(t, s, b.ID, message.PeerLocalID, nil)
+	assertMessageSearchLexemeCount(t, s, b.ID, store.PeerTypeUser, a.ID, "new", 0)
 }
 
 type searchedMessage struct {
@@ -175,22 +198,37 @@ func TestSearchMessagesFallsBackForNotReadyDialog(t *testing.T) {
 	b := mustUser(t, s, "+15551260022")
 	emptyOwner := mustUser(t, s, "+15551260023")
 	emptyPeer := mustUser(t, s, "+15551260024")
+	newOwner := mustUser(t, s, "+15551260025")
+	newPeer := mustUser(t, s, "+15551260026")
 
 	message := send(t, s, a, b, "legacy amber", 6021)
 	if _, err := store.StorePool(s).Exec(ctx, `
-		DROP TRIGGER messages_search_postings_after_update ON messages;
-		DROP TRIGGER messages_search_postings_after_insert ON messages;
-		DROP FUNCTION public.sync_message_search_postings();
-		DROP TABLE public.message_search_unready_dialogs;
-		DROP TABLE public.message_search_postings;`); err != nil {
+		DROP TRIGGER IF EXISTS messages_search_postings_after_delete ON messages;
+		DROP TRIGGER IF EXISTS messages_search_postings_after_update ON messages;
+		DROP TRIGGER IF EXISTS messages_search_postings_after_insert ON messages;
+		DROP TRIGGER IF EXISTS message_search_posting_counts_after_delete ON message_search_postings;
+		DROP TRIGGER IF EXISTS message_search_posting_counts_after_insert ON message_search_postings;
+		DROP FUNCTION IF EXISTS public.track_message_search_posting_count();
+		DROP FUNCTION IF EXISTS public.sync_message_search_postings();
+		DROP TABLE IF EXISTS public.message_search_unready_dialogs;
+		DROP TABLE IF EXISTS public.message_search_posting_counts;
+		DROP TABLE IF EXISTS public.message_search_postings;`); err != nil {
 		t.Fatalf("restore pre-migration search schema: %v", err)
 	}
-	migration, err := os.ReadFile(filepath.Join("..", "..", "migrations", "20261031000002_message_search_postings.sql"))
+	setupMigration, err := os.ReadFile(filepath.Join("..", "..", "migrations", "20261031000002_message_search_postings.sql"))
 	if err != nil {
-		t.Fatalf("read message-search migration: %v", err)
+		t.Fatalf("read message-search setup migration: %v", err)
 	}
-	if _, err := store.StorePool(s).Exec(ctx, string(migration)); err != nil {
-		t.Fatalf("apply message-search migration to existing messages: %v", err)
+	if _, err := store.StorePool(s).Exec(ctx, string(setupMigration)); err != nil {
+		t.Fatalf("apply message-search setup migration to existing messages: %v", err)
+	}
+	newMessage := send(t, s, newOwner, newPeer, "fresh lavender", 6022)
+	readinessMigration, err := os.ReadFile(filepath.Join("..", "..", "migrations", "20261031000003_message_search_postings_readiness.sql"))
+	if err != nil {
+		t.Fatalf("read message-search readiness migration: %v", err)
+	}
+	if _, err := store.StorePool(s).Exec(ctx, string(readinessMigration)); err != nil {
+		t.Fatalf("apply message-search readiness migration: %v", err)
 	}
 	var existingUnready, emptyUnready bool
 	if err := store.StorePool(s).QueryRow(ctx, `
@@ -215,6 +253,8 @@ func TestSearchMessagesFallsBackForNotReadyDialog(t *testing.T) {
 	if postings != 0 {
 		t.Fatalf("migration created %d postings for existing message, want none", postings)
 	}
+	assertMessageSearchTerms(t, s, newOwner.ID, newMessage.LocalID, []string{"fresh", "lavender"})
+	assertMessageSearchLexemeCount(t, s, newOwner.ID, store.PeerTypeUser, newPeer.ID, "fresh", 1)
 
 	got, err := s.SearchMessages(ctx, a.ID, store.PeerTypeUser, b.ID, "amber", 0, 10)
 	if err != nil {

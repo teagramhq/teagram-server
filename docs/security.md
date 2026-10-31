@@ -163,15 +163,17 @@ password verification, session binding, or account admission semantics.
 
 ## Assets and boundaries
 
-`message_search_postings.lexeme` stores normalized plaintext terms derived from
-private message bodies, alongside owner, dialog, and message identifiers. It is
-not a hash or an anonymized representation: common and distinctive terms can
-reveal message content. Treat the postings table, its index, database backups,
-and database access as sensitive at least as the source `messages` rows. The
-`message_search_unready_dialogs` table contains owner and dialog identifiers,
-but no message text or lexemes. The search query itself is sensitive too:
-slow-statement diagnostics can retain bound search text under the existing
-[PostgreSQL diagnostic policy](#postgresql-query-diagnostics).
+`message_search_postings.lexeme` and
+`message_search_posting_counts.lexeme` store normalized plaintext terms derived
+from private message bodies, alongside owner, dialog, and message identifiers
+or per-dialog frequencies. They are not hashes or anonymized representations:
+common and distinctive terms can reveal message content, and counts reveal how
+often a term occurs in a dialog. Treat both tables, their indexes, database
+backups, and database access as sensitive at least as the source `messages`
+rows. The `message_search_unready_dialogs` table contains owner and dialog
+identifiers, but no message text or lexemes. The search query itself is
+sensitive too: slow-statement diagnostics can retain bound search text under
+the existing [PostgreSQL diagnostic policy](#postgresql-query-diagnostics).
 
 `messages.search` passes the authenticated MTProto owner ID to the store. Both
 search paths constrain the owner and dialog; the postings path joins back to
@@ -194,19 +196,21 @@ credential can read lexemes across owners, as it can read source messages.
 
 There is no separate posting lifetime. Live postings follow the corresponding
 message copy: edits replace them, soft deletion removes them, and hard deletion
-cascades to them. A soft-deleted message body remains in its tombstone row in
-`messages`; removing its postings is not full erasure of that source body.
-Expired copies are also soft-deleted by the periodic history sweep. The server
-does not set a general expiry for message history, so messages without a TTL
-remain until the existing message-delete path changes them. User deletions do
-not scrub already-created database backups; backup retention remains an
-operator control, as described in
+cascades to them. Per-dialog counts are updated in the same transaction and
+removed when a lexeme has no remaining posting in that dialog. A soft-deleted
+message body remains in its tombstone row in `messages`; removing its postings
+is not full erasure of that source body. Expired copies are also soft-deleted
+by the periodic history sweep. The server does not set a general expiry for
+message history, so messages without a TTL remain until the existing
+message-delete path changes them. User deletions do not scrub already-created
+database backups; backup retention remains an operator control, as described in
 [self-hosting](self-hosting.md#back-up-and-restore).
 
-An application-only rollback leaves the additive trigger active. Older code
-ignores the postings, but new message writes continue populating them and the
-rollback does not erase existing lexemes. Stopping that collection or erasing
-the live derived rows requires a separately planned schema operation; dropping
-the postings table does not erase source messages or backup copies. See the
+An application-only rollback leaves the additive triggers active. Older code
+ignores the postings and counts, but new message writes continue populating
+them and the rollback does not erase existing lexemes. Stopping that
+collection or erasing the live derived rows requires a separately planned
+schema operation; dropping the postings table does not erase source messages or
+backup copies. See the
 [migration behavior](migrations.md#ordered-message-search-postings) for the
 additive schema details.

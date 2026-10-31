@@ -69,14 +69,21 @@ later task.)
 
 ### Ordered message-search postings
 
-Migration `20261031000002_message_search_postings.sql` adds an ordered lexeme
-posting table and a marker table for dialogs whose existing history has not
-been initialized. Message inserts, text edits, soft deletes, and hard deletes
-keep the postings in sync transactionally. The migration does not copy
-historical lexemes into the postings table. Existing dialogs with messages
-remain on the original `messages.search` query until the separate history
-initializer runs; dialogs with no messages are ready immediately, and new
-dialogs use postings from their first message.
+Migrations `20261031000002_message_search_postings.sql` and
+`20261031000003_message_search_postings_readiness.sql` add an ordered lexeme
+posting table, per-dialog lexeme counts, and a marker table for dialogs whose
+existing history has not been initialized. The first migration installs and
+commits the message-write triggers; the second takes the readiness snapshot in
+a separate transaction so its full-table read does not extend the lock needed
+to install those triggers. Message inserts, text edits, soft deletes, and hard
+deletes keep postings and counts in sync transactionally. The migrations do
+not copy historical lexemes into the postings table. Existing dialogs with
+messages remain on the original `messages.search` query until the separate
+history initializer runs; dialogs with no messages are ready immediately, and
+new dialogs use postings from their first message. Ready-dialog searches use
+the per-dialog counts to walk postings for the least frequent query lexeme. The
+initializer must build counts from the same history before clearing a dialog's
+unready marker.
 
 Reverting the application leaves these additive tables, index, and triggers in
 place. The old search query ignores the postings, so its results remain
