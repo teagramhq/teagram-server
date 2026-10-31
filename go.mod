@@ -1,6 +1,6 @@
 module github.com/teagramhq/teagram-server
 
-go 1.27.1
+go 1.27.3
 
 require (
 	github.com/Oudwins/tailwind-merge-go v0.2.3
