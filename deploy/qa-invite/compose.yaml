@@ -1,0 +1,186 @@
+name: teagram-qa-invite
+
+x-logging: &logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
+x-image: &image ${TEAGRAM_QA_INVITE_IMAGE_REF:?set a digest-pinned main image}
+
+services:
+  postgres:
+    image: mirror.gcr.io/library/postgres:18-alpine@sha256:d8703cd7fba306b9fec9268ecedfa8a966846c053036a60e3635791957eb2f66
+    platform: linux/amd64
+    mem_limit: 256m
+    memswap_limit: 256m
+    cpus: "0.5"
+    pids_limit: 96
+    environment:
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in the private qa-invite env file}
+      POSTGRES_DB: teagram
+      PGDATA: /var/lib/postgresql/18/docker
+    command: ["postgres", "-c", "config_file=/etc/postgresql/postgresql.conf"]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d teagram"]
+      interval: 2s
+      timeout: 5s
+      retries: 20
+    volumes:
+      - pgdata:/var/lib/postgresql
+      - type: bind
+        source: ./postgresql.conf
+        target: /etc/postgresql/postgresql.conf
+        read_only: true
+    networks: [backend]
+    restart: unless-stopped
+    logging: *logging
+
+  migrate:
+    image: mirror.gcr.io/arigaio/atlas:1.2.0-alpine@sha256:5abea953e8e048d5b27b1b3e2fc83e17fdc1f7cd0d908a8432ed0c7e6394c58f
+    platform: linux/amd64
+    mem_limit: 192m
+    memswap_limit: 192m
+    cpus: "0.25"
+    pids_limit: 48
+    command:
+      - migrate
+      - apply
+      - --dir
+      - file:///migrations
+      - --url
+      - postgres://postgres:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in the private qa-invite env file}@postgres:5432/teagram?sslmode=disable
+    volumes:
+      - type: bind
+        source: ../../migrations
+        target: /migrations
+        read_only: true
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks: [backend]
+    logging: *logging
+
+  teagramd:
+    image: *image
+    mem_limit: 512m
+    memswap_limit: 512m
+    cpus: "1.0"
+    pids_limit: 192
+    stop_grace_period: 30s
+    environment:
+      TG_POSTGRES_DSN: postgres://postgres:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in the private qa-invite env file}@postgres:5432/teagram?sslmode=disable
+      TG_PUBLIC_LINK_PREFIX: https://teagram-demo.incus/
+      TG_LISTEN_ADDR: ":2443"
+      TG_ADVERTISE_ADDR: teagram-demo.incus:443
+      TG_WEBSOCKET_LISTEN_ADDR: ""
+      TG_WEBSOCKET_ALLOWED_ORIGINS: ""
+      TG_PUBLIC_WEBSOCKET_LISTEN_ADDR: ":2446"
+      TG_PUBLIC_WEBSOCKET_ADVERTISE_ADDR: teagram-demo.incus:443
+      TG_PUBLIC_WEBSOCKET_ALLOWED_ORIGINS: https://web.teagram.io
+      TG_REGISTRATION: invite
+      TG_USER_INVITE_QUOTA: "5"
+      TG_USER_INVITE_MIN_ACCOUNT_AGE: 0
+      TG_PUBLIC_REGISTRATION: invite
+      TG_TURNSTILE_SIGNIN_ENABLED: "false"
+      TG_LOG_LOGIN_CODES: "false"
+      TG_AUTHKEY_ENC_KEY: ${TG_AUTHKEY_ENC_KEY:?set TG_AUTHKEY_ENC_KEY in the private qa-invite env file}
+      TG_AUTHKEY_ENC_KEY_FILE: /var/lib/teagramd/enc_key.hex
+      TG_RSA_KEY_PATH: /var/lib/teagramd/server_key.pem
+      TG_STICKER_IMPORT: "off"
+      TG_UPLOADS_DISABLED: "true"
+      TG_BLOB_DIR: /var/lib/teagramd-blobs
+      TG_MAX_FILE_BYTES: "16777216"
+      TG_MAX_USER_STORAGE_BYTES: "268435456"
+      GOMAXPROCS: "1"
+      GOMEMLIMIT: 384MiB
+    read_only: true
+    volumes:
+      - tgkey:/var/lib/teagramd
+      - tgblobs:/var/lib/teagramd-blobs
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    networks: [backend]
+    restart: unless-stopped
+    logging: *logging
+
+  tls-edge:
+    image: mirror.gcr.io/library/nginx:1.28.0-alpine@sha256:09ab424a8c788f8d0fe3a64429f6d19dfa526885c8609b748d0943a75dcb9f8c
+    platform: linux/amd64
+    user: "101:101"
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    mem_limit: 64m
+    memswap_limit: 64m
+    cpus: "0.25"
+    pids_limit: 48
+    tmpfs:
+      - /tmp:size=8m,mode=1777
+      - /var/cache/nginx:size=16m,uid=101,gid=101,mode=0750
+    volumes:
+      - type: bind
+        source: ./nginx.conf
+        target: /etc/nginx/nginx.conf
+        read_only: true
+      - type: bind
+        source: ${TEAGRAM_QA_INVITE_STATE_DIR:?set TEAGRAM_QA_INVITE_STATE_DIR}/tls
+        target: /run/qa-invite/tls
+        read_only: true
+    healthcheck:
+      test: ["CMD-SHELL", "wget --no-check-certificate -q -O /dev/null https://127.0.0.1:8443/.well-known/teagramd/client"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+    depends_on:
+      teagramd:
+        condition: service_started
+    networks: [backend]
+    restart: unless-stopped
+    logging: *logging
+
+  haproxy:
+    image: mirror.gcr.io/library/haproxy:3.2-alpine@sha256:51f173c6825753d9e3a888b1004a1c2cb730936cc9178730a5c555246bd161a2
+    platform: linux/amd64
+    user: "584792:584792"
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    mem_limit: 64m
+    memswap_limit: 64m
+    cpus: "0.25"
+    pids_limit: 48
+    tmpfs:
+      - /tmp:size=8m,mode=1777
+    ports:
+      - "${TEAGRAM_QA_INVITE_BIND_ADDRESS:?set QA-only host bind}:443:8444/tcp"
+    volumes:
+      - type: bind
+        source: ./haproxy.cfg
+        target: /usr/local/etc/haproxy/haproxy.cfg
+        read_only: true
+    healthcheck:
+      test: ["CMD", "haproxy", "-c", "-f", "/usr/local/etc/haproxy/haproxy.cfg"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    depends_on:
+      tls-edge:
+        condition: service_healthy
+    networks: [backend]
+    restart: unless-stopped
+    logging: *logging
+
+volumes:
+  pgdata:
+    name: teagram-qa-invite-postgres
+  tgkey:
+    name: teagram-qa-invite-identity
+  tgblobs:
+    name: teagram-qa-invite-blobs
+
+networks:
+  backend:
+    internal: true
